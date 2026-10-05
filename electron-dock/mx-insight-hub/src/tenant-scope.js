@@ -26,6 +26,7 @@ export function showsOwnAccess(session) {
 // Platform admins keep the operator dashboard: they signed in to look at other
 // people's tenants, and their own access is not the question they came with.
 export function landingPathFor(session) {
+  if (!session?.platformAdmin && !session?.memberships?.length && session?.canOpenPersonalAccount) return '/payments'
   if (!session?.platformAdmin && !session?.capabilities?.includes('usage.read') && session?.capabilities?.includes('billing.read')) return '/payments'
   return !session?.platformAdmin && showsOwnAccess(session) && !session?.capabilities?.includes('usage.read') ? '/my' : '/dashboard'
 }

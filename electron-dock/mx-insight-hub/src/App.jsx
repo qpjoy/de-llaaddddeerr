@@ -1,5 +1,6 @@
 import { HubAccountEntry, HubAccountPage } from './account.jsx'
 import { hubLoginUrl, hubUiPath } from '../shared/account-navigation.mjs'
+import { restorePaymentReturn } from '../shared/payment-return.mjs'
 import { WechatOverview } from './wechat-product.jsx'
 import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
@@ -379,7 +380,7 @@ const ROUTES = [
   { path: '/team', label: '团队邀请', description: '邀请同事加入租户', icon: Users, group: '业务治理', component: TenantTeamPage, capability: 'membership.write' },
   { path: '/api-keys', label: 'API Keys', description: '签发、轮换与撤销', icon: Key, group: '业务治理', component: ApiKeysPage, capability: 'apikey.read' },
   { path: '/plans', label: '套餐与配额', description: '窗口、分页与额度', icon: Coins, group: '策略控制', component: PlansQuotasPage, capability: 'consumer.read' },
-  { path: '/payments', label: '充值与发票', description: '充值、核账与开票', icon: Coins, group: '策略控制', component: PaymentsPage, capability: 'billing.read' },
+  { path: '/payments', label: '充值与发票', description: '账户充值与开票申请', icon: Coins, group: '策略控制', component: PaymentsPage, capability: 'billing.read' },
   { path: '/platforms', label: '开放能力', description: '数据平台与通用 API', icon: Globe, group: '策略控制', component: PlatformsPage, capability: 'consumer.read' },
   { path: '/data-browser', label: '数据浏览中心', description: '账号、内容与热点线索', icon: MagnifyingGlass, group: '数据平面', component: DataBrowserPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },
@@ -445,7 +446,7 @@ function visibleRoutes(session) {
     (!route.platformAdmin || session.platformAdmin)
       && (!route.adminTokenOnly || session.kind === 'admin-token')
       && (!route.ownAccess || showsOwnAccess(session))
-      && (!route.capability || granted.has(route.capability))
+      && (!route.capability || granted.has(route.capability) || route.path === '/payments' && session.canOpenPersonalAccount)
   ))
 }
 
@@ -479,6 +480,7 @@ function themeClassName(theme) {
 }
 
 function readLocation({ canonicalize = false } = {}) {
+  restorePaymentReturn(window)
   // An empty hash means the visitor asked for nothing in particular, which is
   // not the same as asking for the dashboard: which page is the right landing
   // depends on who signed in, and that is not known yet when this first runs.
@@ -670,7 +672,7 @@ function SessionGate({ checking, message, onAuthenticate, theme, onToggleTheme }
   )
 }
 
-function Navigation({ activePath, onNavigate, routes = ROUTES }) {
+function Navigation({ activePath, onNavigate, routes = ROUTES, invoiceTasks }) {
   const groups = [...new Set(routes.map((route) => route.group))]
   const activeParent = routes.find((route) => route.path === activePath)?.navParent || null
   const activeSection = routes.find(route => route.path === activePath)?.navSection || null
@@ -710,6 +712,7 @@ function Navigation({ activePath, onNavigate, routes = ROUTES }) {
       >
         <Icon size={child ? 16 : 18} weight={active ? 'duotone' : 'regular'} aria-hidden="true" />
         <span><strong>{route.navLabel || route.label}</strong><small>{route.description}</small></span>
+        {route.path === '/payments' && invoiceTasks?.live > 0 ? <span className="mih-invoice-count" aria-label={`${invoiceTasks.live} 笔正式开票待处理`}>{invoiceTasks.live > 99 ? '99+' : invoiceTasks.live}</span> : null}
       </a>
     )
   }
@@ -785,6 +788,25 @@ export function App() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [toasts, setToasts] = useState([])
   const [session, setSession] = useState(null)
+  const [invoiceTasks, setInvoiceTasks] = useState(null)
+  const [invoiceRevision, setInvoiceRevision] = useState(0)
+  const onPaymentChanged = useCallback(() => setInvoiceRevision(value => value + 1), [])
+  const onSessionChanged = useCallback(async () => setSession(await adminApi.session(token)), [token])
+  useEffect(() => {
+    if (authState !== 'signed-in' || !session?.platformAdmin) { setInvoiceTasks(null); return }
+    let active = true, running = false
+    const refresh = async () => {
+      if (running || document.hidden) return
+      running = true
+      try { const data = await adminApi.paymentInvoiceTasks(token); if (active) setInvoiceTasks(data) }
+      catch { /* Do not turn a failed read into a false zero. */ }
+      finally { running = false }
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 30000)
+    window.addEventListener('focus', refresh)
+    return () => { active = false; clearInterval(timer); window.removeEventListener('focus', refresh) }
+  }, [token, authState, session?.platformAdmin, invoiceRevision])
   // One in-memory search round across the product and retained browser entry.
   // A console identity change discards it; demo credential renewal does not.
   const aggregateSession = useMemo(() => ({ current: null }), [token])
@@ -944,6 +966,9 @@ export function App() {
     setQuery,
     onUnauthorized: handleUnauthorized,
     notify,
+    onSessionChanged,
+    onPaymentChanged,
+    invoiceTasks,
   }
 
   return (
@@ -955,7 +980,7 @@ export function App() {
           <img src="assets/mx-insight-logo-mark.png" alt="" />
           <span><strong>MX Insight Hub</strong><small>Data gateway control plane</small></span>
         </a>
-        <Navigation activePath={route.path} onNavigate={() => setMenuOpen(false)} routes={routes.filter(item => item.path !== '/account').filter(item => session?.platformAdmin || !['/my', '/consumers', '/platforms'].includes(item.path)).map(item => !session?.platformAdmin && item.path === '/dashboard' ? { ...item, description: '调用、消费与余额' } : !session?.platformAdmin && item.path === '/plans' ? { ...item, label: '用量与账单', description: '余额、价格与消费' } : item)} />
+        <Navigation invoiceTasks={invoiceTasks} activePath={route.path} onNavigate={() => setMenuOpen(false)} routes={routes.filter(item => item.path !== '/account').filter(item => session?.platformAdmin || !['/my', '/consumers', '/platforms'].includes(item.path)).map(item => !session?.platformAdmin && item.path === '/dashboard' ? { ...item, description: '调用、消费与余额' } : !session?.platformAdmin && item.path === '/plans' ? { ...item, label: '用量与账单', description: '余额、价格与消费' } : item)} />
         <section className="mih-sidebar-session">
           <ShieldCheck size={20} weight="duotone" aria-hidden="true" />
           <span>
@@ -984,6 +1009,7 @@ export function App() {
             <strong>{route.label}</strong>
           </div>
           <div className="mih-topbar-actions">
+            {session?.platformAdmin && invoiceTasks?.live > 0 ? <a className="qp-button qp-button--ghost" href="#/payments?view=finance&invoiceStatus=requested&environment=live"><span className="mih-invoice-count">{invoiceTasks.live > 99 ? '99+' : invoiceTasks.live}</span>待开票</a> : null}
             <ThemeToggle theme={theme} onToggle={toggleTheme} />
             {token === SSO_SESSION && ssoSessionManagementUrl() ? <a className="qp-button qp-button--ghost qp-icon-button" href="#/account" aria-label="我的账号" title="我的账号"><ShieldCheck size={18} aria-hidden="true" /></a> : null}
             {token === SSO_SESSION ? <a className="qp-button qp-button--ghost" href={hubLoginUrl(window.location.pathname, { select: '1' })}>切换账号</a> : null}

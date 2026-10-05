@@ -1,6 +1,7 @@
 import { PaymentError, environment, requirePayment } from '@qpjoy/mx-pay'
 import { AppError } from '../core/errors.mjs'
 import { requirePlatformAdmin, requireTenantCapability } from '../identity/index.mjs'
+import { openPersonalAccount } from '../identity/personal-account.mjs'
 
 const uuid = value => {
   requirePayment(typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value), 'invalid_payment_id', '订单或租户编号不正确')
@@ -13,6 +14,26 @@ export async function paymentRoute({ payments, recharge, request, response, path
     const actor = principal.memberId || principal.kind || 'admin-token'
     const reply = (data, status = 200) => { sendJson(response, status, { data, requestId }, { 'cache-control': 'private, no-store' }); return true }
     const noQuery = () => requirePayment([...searchParams.keys()].length === 0, 'invalid_payment_query', '该操作不接受查询参数')
+    if (pathname === `${root}/personal-account` && request.method === 'POST') {
+      noQuery()
+      const body = await readJson(request, 1024)
+      requirePayment(body?.acknowledge === true && Object.keys(body).length === 1, 'invalid_account_request', '请确认开通自己的个人账户')
+      return reply(await openPersonalAccount(payments.store.pool, principal))
+    }
+    if (pathname === `${root}/invoice-tasks` && request.method === 'GET') {
+      requirePlatformAdmin(principal); noQuery()
+      return reply(await payments.store.invoiceTasks())
+    }
+    if (pathname === `${root}/return-order` && request.method === 'GET') {
+      requirePayment([...searchParams.keys()].length === 1 && searchParams.getAll('trade').length === 1 && /^MXP[0-9a-f]{32}$/i.test(searchParams.get('trade') || ''), 'invalid_payment_query', '支付返回订单编号不正确')
+      const tenantIds = principal.platformAdmin ? null : principal.memberships.filter(item => item.capabilities?.includes('billing.read')).map(item => item.tenantId)
+      const rows = recharge ? (await recharge.pool.query(`SELECT id,tenant_id FROM hub_recharge.orders WHERE payment #>> '{checkout,outTradeNo}'=$1
+        AND ($2::uuid[] IS NULL OR tenant_id=ANY($2)) LIMIT 2`, [searchParams.get('trade'), tenantIds])).rows : []
+      requirePayment(rows.length === 1, 'payment_not_found', '当前账号无法查看该充值订单，请切换付款时的账号，或从充值记录查找原订单。', 404)
+      requireTenantCapability(principal, rows[0].tenant_id, 'billing.read')
+      // Locator only. No query, settlement, inbox dispatch or wallet write.
+      return reply(await recharge.order(rows[0].id, rows[0].tenant_id))
+    }
     if (pathname === `${root}/integration` && request.method === 'GET') {
       requirePlatformAdmin(principal); noQuery()
       return reply(recharge ? await recharge.status() : { items: [], available: false })
@@ -45,7 +66,7 @@ export async function paymentRoute({ payments, recharge, request, response, path
       return reply(recharge ? await recharge.channels(channels) : channels)
     }
     if (pathname === `${root}/orders` && request.method === 'GET') {
-      requirePayment([...searchParams.keys()].every(key => ['tenantId','environment','status','invoiceStatus','orderId','page','pageSize'].includes(key)) && [...searchParams.keys()].every(key => searchParams.getAll(key).length === 1), 'invalid_payment_query', '不支持或重复的查询参数')
+      requirePayment([...searchParams.keys()].every(key => ['tenantId','environment','status','invoiceStatus','invoicesOnly','orderId','page','pageSize'].includes(key)) && [...searchParams.keys()].every(key => searchParams.getAll(key).length === 1), 'invalid_payment_query', '不支持或重复的查询参数')
       const tenantId = searchParams.get('tenantId') ? uuid(searchParams.get('tenantId')) : null
       if (tenantId) requireTenantCapability(principal, tenantId, 'billing.read')
       else requirePlatformAdmin(principal)
@@ -53,8 +74,9 @@ export async function paymentRoute({ payments, recharge, request, response, path
       const status = searchParams.get('status') || '', invoiceStatus = searchParams.get('invoiceStatus') || ''
       requirePayment(['','pending','submitted','paid','cancelled'].includes(status) && ['','requested','issued','rejected'].includes(invoiceStatus), 'invalid_payment_query', '订单状态不正确')
       const page = Number(searchParams.get('page') || 1), pageSize = Number(searchParams.get('pageSize') || 20)
+      requirePayment(!searchParams.has('invoicesOnly') || searchParams.get('invoicesOnly') === '1', 'invalid_payment_query', '开票筛选参数不正确')
       requirePayment(Number.isInteger(page) && page >= 1 && page <= 10000 && Number.isInteger(pageSize) && pageSize >= 1 && pageSize <= 100, 'invalid_payment_query', '分页参数不正确')
-      return reply(await payments.store.list({ tenantId, environment: env, status, invoiceStatus, orderId: searchParams.get('orderId') ? uuid(searchParams.get('orderId')) : '', page, pageSize }))
+      return reply(await payments.store.list({ tenantId, environment: env, status, invoiceStatus, invoicesOnly: searchParams.get('invoicesOnly') === '1', orderId: searchParams.get('orderId') ? uuid(searchParams.get('orderId')) : '', page, pageSize }))
     }
     const create = new RegExp(`^${root}/tenants/([^/]+)/orders$`, 'u').exec(pathname)
     if (create && request.method === 'POST') {

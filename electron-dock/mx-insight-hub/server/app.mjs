@@ -1,5 +1,6 @@
 import { XHS_DISCOVERY_ENDPOINTS } from './contracts/xiaohongshu-discovery.mjs'
 import { PaymentService } from './payments/service.mjs'
+import { canOpenPersonalAccount } from './identity/personal-account.mjs'
 import { paymentRoute } from './payments/routes.mjs'
 import { paymentReportingRoute } from './payments/reporting.mjs'
 import { sourceConnectionSnapshot } from './data/source-connections.mjs'
@@ -1566,6 +1567,7 @@ export function createApp({
             memberships: principal.memberships,
             identityProvider: identity?.enabled ? 'mx-launcher' : null,
             tenantInvitationsEnabled: Boolean(sso?.invitations),
+            canOpenPersonalAccount: canOpenPersonalAccount(principal, store.pool),
             // Deployment routing metadata, not a credential. Browser clients
             // still need their ordinary Hub Public API key for every public call.
             publicApiBaseUrl,

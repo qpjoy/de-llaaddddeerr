@@ -47,7 +47,7 @@ async function fixture(t) {
   await migrate(pay.url,log)
   // Apply unchanged production SQL for identities, the real wallet and payment
   // tables. Unrelated search/vector/ETL migrations are outside this fixture.
-  const selected=['001','002','005','007','018','051','052','054','056','122','123','126','127']
+  const selected=['001','002','005','007','018','051','052','054','056','122','123','126','127','128']
   const migrations=new URL('../../migrations/',import.meta.url)
   for(const file of (await readdir(migrations)).sort().filter(name=>selected.includes(name.slice(0,3)))) {
     const client=await hub.pool.connect()
@@ -91,11 +91,11 @@ async function fixture(t) {
   }
   const create = (environment='test',id=tenant,key=randomUUID())=>recharge.create(id,{environment,amountMinor:1200},key,member)
   const balance = async () => Number((await hub.pool.query('SELECT available_minor FROM billing.credit_accounts WHERE tenant_id=$1',[tenant])).rows[0]?.available_minor||0)
-  async function api(listenerMode='combined') {
+  async function api(listenerMode='combined', extraIdentity = async () => null) {
     const memberships=[{tenantId:tenant,role:'billing',status:'active',capabilities:capabilitiesForRole('billing')}]
     const principal={kind:'launcher',platformAdmin:false,memberId:member,tenantIds:[tenant],capabilities:capabilitiesForRole('billing'),memberships}
     return listen(createApp({store,service:new HubService({store,adapter:{},apiKeyPepper:'payment-delivery-fixture-pepper-at-least-32'}),adapter:{},recharge,
-      adminToken:'fixture-admin',listenerMode,logger:log,identity:{enabled:true,resolve:async token=>token==='billing'?principal:null}}))
+      adminToken:'fixture-admin',listenerMode,logger:log,identity:{enabled:true,resolve:async token=>token==='billing'?principal:extraIdentity(token)}}))
   }
   return {pay,hub,center,recharge,legacy,store,sources,tenant,other,member,source,activate,settle,create,balance,api,finance}
 }
@@ -413,4 +413,71 @@ test('one-yuan checkout, missing-trade feedback and exact-once credit keep the s
   assert.equal((await f.hub.pool.query('SELECT amount_minor::int AS amount FROM hub_recharge.test_credits')).rows[0].amount,100)
   // Lowering the amount cannot relax currency or immutable identity checks.
   await assert.rejects(f.hub.pool.query("UPDATE hub_recharge.orders SET intent=intent||'{\"currency\":\"USD\"}' WHERE id=$1",[order.id]))
+})
+
+test('return locator is tenant-scoped and read-only; invoice queue survives reload and excludes unrequested orders',check,async t=>{
+  const f=await fixture(t);await f.activate('live')
+  const order=await f.create('live'),foreign=await f.create('live',f.other)
+  const base=await f.api(),root=`${base}/internal/v1/admin/payments`
+  const get=async(path,token='billing')=>fetch(`${root}${path}`,{headers:{'x-mx-insight-admin-token':token}})
+  const trade=await f.finance('live').order(order.paymentId)
+  const otherTrade=await f.finance('live').order(foreign.paymentId)
+  let response=await get(`/return-order?trade=${trade.checkout.outTradeNo}`)
+  assert.equal(response.status,200)
+  assert.equal((await response.json()).data.id,order.id)
+  assert.equal(await f.balance(),0)
+  assert.equal((await get(`/return-order?trade=${otherTrade.checkout.outTradeNo}`)).status,404)
+  assert.equal((await get(`/return-order?trade=${trade.checkout.outTradeNo}&status=paid`)).status,400)
+  assert.equal((await get('/invoice-tasks')).status,403)
+  assert.equal((await get('/invoice-tasks','fixture-admin')).status,200)
+  await f.settle(order)
+  response=await get(`/return-order?trade=${trade.checkout.outTradeNo}`)
+  assert.equal((await response.json()).data.status,'pending','a signed payment return still does not deliver the inbox')
+  assert.equal(await f.balance(),0)
+  await f.recharge.sweep('live')
+  const paid=await f.recharge.order(order.id)
+  const invoice=await f.recharge.action(await f.recharge.row(order.id),'invoice-request',{expectedRevision:paid.revision,companyName:'Invoice fixture',taxNumber:'91310000TEST000001',email:'invoice@example.test'},randomUUID(),{actor:f.member})
+  response=await get('/invoice-tasks','fixture-admin')
+  assert.equal((await response.json()).data.live,1)
+  response=await get(`/orders?tenantId=${f.tenant}&environment=live&invoicesOnly=1`)
+  assert.deepEqual((await response.json()).data.items.map(item=>item.id),[order.id])
+  response=await fetch(`${root}/tenants/${f.tenant}/orders/${order.id}/invoice-resolve`,{method:'POST',headers:{'x-mx-insight-admin-token':'billing','content-type':'application/json','idempotency-key':randomUUID()},body:JSON.stringify({expectedRevision:invoice.revision,status:'issued',invoiceNumber:'TEST-INVOICE',reason:'Fixture delivery'})})
+  assert.equal(response.status,403)
+  await f.recharge.action(await f.recharge.row(order.id),'invoice-resolve',{expectedRevision:invoice.revision,status:'issued',invoiceNumber:'TEST-INVOICE',reason:'Fixture delivery'},randomUUID(),{actor:'admin',finance:true})
+  response=await get('/invoice-tasks','fixture-admin')
+  assert.equal((await response.json()).data.live,0)
+  response=await get(`/orders?tenantId=${f.tenant}&environment=live&invoicesOnly=1`)
+  assert.equal((await response.json()).data.items[0].invoice.status,'issued')
+  assert.equal(await f.balance(),1200)
+})
+
+test('explicit personal account is one per human, reuses original SSO tenant and never restores revoked access',check,async t=>{
+  const f=await fixture(t),id=randomUUID(),oldMember=randomUUID(),oldTenant=randomUUID()
+  await f.hub.pool.query('INSERT INTO iam.members(id,display_name) VALUES($1,NULL),($2,$3)',[id,oldMember,'Existing SSO'])
+  const principal={kind:'launcher-user',memberId:id,platformAdmin:false,memberships:[],capabilities:[],tenantIds:[]}
+  const base=await f.api('combined',async token=>token==='new'?principal:token==='old'?{...principal,memberId:oldMember}:null)
+  const post=async(token='new',body={acknowledge:true})=>fetch(`${base}/internal/v1/admin/payments/personal-account`,{method:'POST',headers:{'x-mx-insight-admin-token':token,'content-type':'application/json'},body:JSON.stringify(body)})
+  assert.equal((await post('fixture-admin')).status,403)
+  assert.equal((await post('new',{acknowledge:true,tenantId:f.other})).status,400)
+  const results=await Promise.all(Array.from({length:5},()=>post().then(async response=>{assert.equal(response.status,200);return (await response.json()).data})))
+  assert.equal(new Set(results.map(item=>item.tenantId)).size,1)
+  const own=results[0].tenantId
+  assert.notEqual(own,f.tenant);assert.notEqual(own,f.other)
+  assert.equal((await f.hub.pool.query('SELECT * FROM iam.tenant_memberships WHERE member_id=$1',[id])).rowCount,1)
+  assert.equal((await f.hub.pool.query('SELECT * FROM iam.platform_admins WHERE member_id=$1',[id])).rowCount,0)
+  assert.equal((await f.hub.pool.query('SELECT * FROM consumers WHERE tenant_id=$1',[own])).rowCount,0)
+  assert.equal((await f.hub.pool.query('SELECT * FROM billing.credit_ledger_entries WHERE tenant_id=$1',[own])).rowCount,0)
+  await f.hub.pool.query("UPDATE iam.tenant_memberships SET status='suspended' WHERE member_id=$1",[id])
+  assert.equal((await post()).status,403)
+  await f.hub.pool.query('DELETE FROM iam.tenant_memberships WHERE member_id=$1',[id])
+  assert.equal((await post()).status,403)
+  await f.hub.pool.query('INSERT INTO tenants(id,name) VALUES($1,$2)',[oldTenant,'Original wallet'])
+  await f.store.grantTenantMembership({memberId:oldMember,tenantId:oldTenant,role:'owner',grantedBy:'sso:personal-onboarding'})
+  await f.hub.pool.query("INSERT INTO iam.identity_events(member_id,event_type,detail) VALUES($1,'sso.personal-tenant-created',$2)",[oldMember,{tenantId:oldTenant}])
+  assert.equal((await (await post('old')).json()).data.tenantId,oldTenant)
+  await f.hub.pool.query("UPDATE tenants SET status='suspended' WHERE id=$1",[oldTenant])
+  assert.equal((await post('old')).status,403)
+  await f.hub.pool.query("UPDATE iam.members SET status='suspended' WHERE id=$1",[oldMember])
+  assert.equal((await post('old')).status,403)
+  assert.equal((await f.hub.pool.query('SELECT * FROM iam.personal_accounts')).rowCount,2)
 })

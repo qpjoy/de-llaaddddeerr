@@ -1,8 +1,9 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Coins, Receipt, Scan, SlidersHorizontal } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
 import { DropdownField, ErrorState, Field, LoadingState, Modal, PageHeading, useRemoteData } from './components.jsx'
 import { checkoutLocation, paymentQueryMessage, paymentActionError } from '../shared/payment-checkout.mjs'
+import { clearPaymentReturn } from '../shared/payment-return.mjs'
 import './payments.css'
 
 const money = (value, currency = 'CNY') => `${currency === 'CNY' ? '¥' : `${currency} `}${(Number(value || 0) / 100).toFixed(2)}`
@@ -15,40 +16,68 @@ const localTime = () => { const date = new Date(); return new Date(date.getTime(
 function Input({ label, ...props }) { return <Field label={label}><input className="qp-input" {...props} /></Field> }
 function Badge({ status }) { return <span className={`mih-pay-badge mih-pay-badge--${status}`}>{labels[status] || status}</span> }
 
-export function PaymentsPage({ token, session, query, setQuery, onUnauthorized, notify }) {
+export function PaymentsPage({ token, session, query, setQuery, onUnauthorized, notify, onSessionChanged, onPaymentChanged, invoiceTasks }) {
   const load = useCallback(() => adminApi.tenants(token), [token])
   const tenants = useRemoteData(load, onUnauthorized)
-  const [mode, setMode] = useState('recharge')
-  const [environment, setEnvironment] = useState('live')
+  const mode = query.get('view') === 'finance' && session.platformAdmin ? 'finance' : query.get('view') === 'invoices' ? 'invoices' : 'recharge'
+  const environment = query.get('environment') === 'test' ? 'test' : 'live'
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [channelRevision, setChannelRevision] = useState(0)
+  const [opening, setOpening] = useState(false), [accountError, setAccountError] = useState(null), [returnError, setReturnError] = useState(null)
+  const accountLock = useRef(false)
   const allowed = (tenants.data || []).filter(tenant => session.platformAdmin || session.memberships?.some(item => item.tenantId === tenant.id && ['owner', 'admin', 'billing'].includes(item.role)))
   const tenantId = allowed.some(item => item.id === query.get('tenantId')) ? query.get('tenantId') : allowed[0]?.id || ''
+  const returnedTrade = query.get('paymentReturn')
+  useEffect(() => {
+    if (!returnedTrade) return
+    let active = true
+    setReturnError(null)
+    adminApi.paymentReturnOrder(token, returnedTrade).then(order => {
+      if (!active) return
+      clearPaymentReturn(window)
+      setQuery({paymentReturn:null,tenantId:order.tenantId,environment:order.environment,orderId:order.id,view:'recharge'})
+    }).catch(error => { if (active) { setReturnError(error); if (error.status === 401) onUnauthorized?.(error) } })
+    return () => { active = false }
+  }, [token, returnedTrade, setQuery, onUnauthorized])
+  async function openAccount() {
+    if (accountLock.current) return
+    accountLock.current = true; setOpening(true); setAccountError(null)
+    try {
+      const account = await adminApi.openPersonalAccount(token)
+      await onSessionChanged()
+      tenants.refresh()
+      setQuery({tenantId:account.tenantId,view:'recharge',orderId:null})
+      notify?.('个人账户已就绪，可以自助充值。')
+    } catch (error) { setAccountError(error); if (error.status === 401) onUnauthorized?.(error) }
+    finally { accountLock.current = false; setOpening(false) }
+  }
   return <div className="mih-pay-page">
-    <PageHeading eyebrow="MX PAY" title={session.platformAdmin ? '充值与财务' : '充值与发票'} description="充值到当前租户钱包，供该租户下的服务共同使用。" onRefresh={tenants.refresh} loading={tenants.loading}>
+    <PageHeading eyebrow="MX PAY" title="充值与发票" description="充值到所选账户的钱包，供该账户下的服务共同使用；可自助申请发票并查询处理进度。" onRefresh={() => {tenants.refresh(); setChannelRevision(value => value + 1); onPaymentChanged?.()}} loading={tenants.loading}>
       {session.platformAdmin ? <button className={button} onClick={() => setSettingsOpen(true)}><SlidersHorizontal size={17} />收款设置</button> : null}
       {session.platformAdmin ? <a className={button} href="#/settings/payments">支付接入设置</a> : null}
     </PageHeading>
-    {tenants.error ? <ErrorState error={tenants.error} onRetry={tenants.refresh} /> : null}
-    <div className="mih-pay-toolbar qp-panel">
-      {session.platformAdmin ? <div className="mih-pay-tabs" role="group" aria-label="支付工作区">{[['recharge', '账户充值'], ['finance', '财务工作台']].map(([value, label]) => <button key={value} className={mode === value ? primary : button} onClick={() => setMode(value)}>{label}</button>)}</div> : null}
-      <DropdownField label="账务环境" value={environment} onChange={setEnvironment} options={[{ value: 'live', label: '正式收款' }, { value: 'test', label: '测试流程 · 不计入正式余额' }]} />
-      {mode === 'recharge' ? <DropdownField label="充值租户" value={tenantId} onChange={value => setQuery({ tenantId: value })} options={allowed.map(tenant => ({ value: tenant.id, label: tenant.name }))} /> : null}
-    </div>
-    {environment === 'test' ? <p className="mih-pay-notice">测试环境：只使用模拟订单或支付宝沙箱，不增加正式可消费余额；开票信息也只用于流程测试。</p> : null}
-    {mode === 'finance' || tenantId ? <PaymentWorkspace key={`${tenantId}:${environment}:${mode}:${channelRevision}`} {...{ token, session, tenantId, environment, mode, notify, onUnauthorized }} /> : tenants.loading ? <LoadingState /> : <p>暂无可管理账务的租户，请联系管理员分配账务员或租户管理角色。</p>}
+    {tenants.error || accountError ? <ErrorState error={accountError || tenants.error} onRetry={tenants.refresh} /> : null}
+    {returnedTrade ? returnError ? <><ErrorState error={returnError} /><button className={button} onClick={() => {clearPaymentReturn(window); setQuery({paymentReturn:null})}}>返回充值记录</button></> : <LoadingState label="正在查找原充值订单…" /> : <>
+      <div className="mih-pay-toolbar qp-panel">
+        <div className="mih-pay-tabs" role="group" aria-label="充值与发票工作区">{[['recharge', '账户充值'], ['invoices', '开票申请'], ...(session.platformAdmin ? [['finance', '收款与开票']] : [])].map(([value, label]) => <button key={value} className={mode === value ? primary : button} onClick={() => setQuery({view:value,invoiceStatus:null,orderId:null})}>{label}{value === 'finance' && invoiceTasks?.live > 0 ? <span className="mih-invoice-count">{invoiceTasks.live}</span> : null}</button>)}</div>
+        <DropdownField label="账务环境" value={environment} onChange={value => setQuery({environment:value,orderId:null})} options={[{ value: 'live', label: '正式收款' }, { value: 'test', label: '测试流程 · 不计入正式余额' }]} />
+        {mode !== 'finance' && allowed.length ? <DropdownField label="账务账户" value={tenantId} onChange={value => setQuery({tenantId:value,orderId:null})} options={allowed.map(tenant => ({ value: tenant.id, label: tenant.name }))} /> : null}
+      </div>
+      {environment === 'test' ? <p className="mih-pay-notice">测试环境：只使用模拟订单或支付宝沙箱，不增加正式可消费余额；开票信息也只用于流程测试。</p> : null}
+      {mode === 'finance' || tenantId ? <PaymentWorkspace key={`${tenantId}:${environment}:${mode}:${channelRevision}`} {...{ token, session, tenantId, environment, mode, notify, onUnauthorized, query, setQuery, onPaymentChanged }} /> : tenants.loading ? <LoadingState /> : <section className="qp-panel mih-pay-card"><h2>开通个人账户</h2><p>当前没有可充值的账户。开通后可自行充值、查看余额和申请发票。</p><p>若需为团队充值，请让团队负责人授予该团队的账务权限。个人账户的余额与团队账户分别管理。</p>{session.canOpenPersonalAccount ? <button className={primary} disabled={opening} onClick={openAccount}>{opening ? '正在开户…' : '开通我的个人账户'}</button> : <p>请联系账户负责人分配账务角色。</p>}</section>}
+    </>}
     {settingsOpen ? <PaymentSettings {...{ token, onUnauthorized }} onClose={() => setSettingsOpen(false)} onSaved={() => { setSettingsOpen(false); setChannelRevision(value => value + 1); notify?.('收款配置已保存') }} /> : null}
   </div>
 }
 
-function PaymentWorkspace({ token, session, tenantId, environment, mode, onUnauthorized, notify }) {
-  const [page, setPage] = useState(1), [status, setStatus] = useState(''), [invoiceStatus, setInvoiceStatus] = useState('')
+function PaymentWorkspace({ token, session, tenantId, environment, mode, onUnauthorized, notify, query, setQuery, onPaymentChanged }) {
+  const [page, setPage] = useState(1), [status, setStatus] = useState(''), [invoiceStatus, setInvoiceStatus] = useState(query.get('invoiceStatus') || '')
   const [search, setSearch] = useState(''), [orderId, setOrderId] = useState('')
   const [amount, setAmount] = useState('100'), [busy, setBusy] = useState(false), [error, setError] = useState(null), [detail, setDetail] = useState(null)
   const intent = useRef(null), lock = useRef(false)
   const load = useCallback(async () => {
     const [orders, channels, billing] = await Promise.all([
-      adminApi.paymentOrders(token, { tenantId: mode === 'finance' ? '' : tenantId, environment, page, status, invoiceStatus, orderId }),
+      adminApi.paymentOrders(token, { tenantId: mode === 'finance' ? '' : tenantId, environment, page, status, invoiceStatus, orderId, invoicesOnly: mode === 'invoices' ? '1' : '' }),
       mode === 'recharge' ? adminApi.paymentChannels(token, tenantId) : null,
       mode === 'recharge' ? adminApi.tenantBilling(token, tenantId) : null,
     ])
@@ -59,20 +88,28 @@ function PaymentWorkspace({ token, session, tenantId, environment, mode, onUnaut
   const amountMinor = parseAmount(amount), enabled = channels?.[environment]?.enabled
   const center = channels?.[environment]?.backend === 'center'
   const valid = amountMinor >= 100 && amountMinor <= 10_000_000
-  const refresh = () => state.refresh()
+  const refresh = () => { state.refresh(); onPaymentChanged?.() }
+  const selectedId = query.get('orderId')
+  useEffect(() => {
+    if (!selectedId || !tenantId) { setDetail(null); return }
+    let active = true
+    adminApi.paymentOrder(token, tenantId, selectedId).then(order => { if (active) setDetail(order) }).catch(error => { if (active) setError(error) })
+    return () => {active = false}
+  }, [token, tenantId, selectedId])
+  useEffect(() => {setInvoiceStatus(query.get('invoiceStatus') || ''); setPage(1)}, [query.get('invoiceStatus')])
   async function create(event) {
     event.preventDefault(); if (lock.current) return
     lock.current = true; setBusy(true); setError(null)
     const body = { environment, amountMinor }, signature = JSON.stringify(body)
     if (intent.current?.signature !== signature) intent.current = { signature, key: crypto.randomUUID() }
-    try { setDetail(await adminApi.createPaymentOrder(token, tenantId, body, intent.current.key)); intent.current = null; refresh() }
+    try { const order = await adminApi.createPaymentOrder(token, tenantId, body, intent.current.key); setDetail(order); setQuery({tenantId,orderId:order.id}); intent.current = null; refresh() }
     catch (err) { setError(err); if (err.status === 401) onUnauthorized?.(err) }
     finally { lock.current = false; setBusy(false) }
   }
   async function open(row) {
     if (lock.current) return
     lock.current = true; setBusy(true); setError(null)
-    try { setDetail(await adminApi.paymentOrder(token, row.tenantId, row.id)) } catch (err) { setError(err) }
+    try { setDetail(await adminApi.paymentOrder(token, row.tenantId, row.id)); setQuery({tenantId:row.tenantId,orderId:row.id}) } catch (err) { setError(err) }
     finally { lock.current = false; setBusy(false) }
   }
   function exportPage() {
@@ -99,18 +136,18 @@ function PaymentWorkspace({ token, session, tenantId, environment, mode, onUnaut
           <button className={primary} disabled={busy || state.loading || !enabled || !valid}>{busy ? '正在创建…' : '创建充值订单'}</button>
         </aside>
       </form>
-    </> : <section className="qp-panel mih-pay-card"><h2>人工核账与开票</h2><p>旧人工收款订单需核对真实账单后确认；独立支付订单由支付中心查证收款、Hub 自动入账。付款与入账状态分别记录。</p><p>本页已入账 {paid.length} 笔 / {money(paid.reduce((sum, row) => sum + row.amountMinor, 0))}，已知手续费 {money(paid.reduce((sum, row) => sum + (row.settlement.feeMinor || 0), 0))}，另有 {unknownFees} 笔手续费未知。仅统计当前页。</p></section>}
-    <section className="qp-panel mih-pay-card"><div className="mih-pay-record-heading"><h2><Receipt size={22} />{mode === 'finance' ? '收款与开票记录' : '充值记录'}</h2>{session.platformAdmin ? <button className={button} disabled={!rows.length || state.loading} onClick={exportPage}>导出当前页 CSV</button> : null}</div>
-      <div className="mih-pay-filters"><DropdownField label="订单状态" value={status} onChange={value => { setStatus(value); setPage(1) }} options={[{ value: '', label: '全部状态' }, ...['pending','submitted','paid','cancelled'].map(value => ({ value, label: labels[value] }))]} /><DropdownField label="开票状态" value={invoiceStatus} onChange={value => { setInvoiceStatus(value); setPage(1) }} options={[{ value: '', label: '全部开票状态' }, ...['requested','issued','rejected'].map(value => ({ value, label: labels[value] }))]} />
+    </> : mode === 'invoices' ? <section className="qp-panel mih-pay-card"><h2>开票申请</h2><p>这里保留所选账户已提交的申请。打开订单可查看抬头、收票邮箱、处理结果和发票号码；申请被退回后可补充信息再次提交。</p></section> : <section className="qp-panel mih-pay-card"><h2>收款与开票</h2><p>旧人工收款订单需核对真实账单后确认；独立支付订单由支付中心查证收款、Hub 自动入账。付款与入账状态分别记录。</p><p>本页已入账 {paid.length} 笔 / {money(paid.reduce((sum, row) => sum + row.amountMinor, 0))}，已知手续费 {money(paid.reduce((sum, row) => sum + (row.settlement.feeMinor || 0), 0))}，另有 {unknownFees} 笔手续费未知。仅统计当前页。</p></section>}
+    <section className="qp-panel mih-pay-card"><div className="mih-pay-record-heading"><h2><Receipt size={22} />{mode === 'finance' ? '收款与开票记录' : mode === 'invoices' ? '开票申请记录' : '充值记录'}</h2>{session.platformAdmin ? <button className={button} disabled={!rows.length || state.loading} onClick={exportPage}>导出当前页 CSV</button> : null}</div>
+      <div className="mih-pay-filters"><DropdownField label="订单状态" value={status} onChange={value => { setStatus(value); setPage(1) }} options={[{ value: '', label: '全部状态' }, ...['pending','submitted','paid','cancelled'].map(value => ({ value, label: labels[value] }))]} /><DropdownField label="开票状态" value={invoiceStatus} onChange={value => { setInvoiceStatus(value); setPage(1); setQuery({invoiceStatus:value}) }} options={[{ value: '', label: '全部开票状态' }, ...['requested','issued','rejected'].map(value => ({ value, label: labels[value] }))]} />
         <form onSubmit={event => { event.preventDefault(); setOrderId(search.trim()); setPage(1) }}><Input label="按完整订单号查询" value={search} onChange={event => setSearch(event.target.value)} placeholder="粘贴订单号" /><button className={button}>查询</button></form></div>
-      {state.loading ? <LoadingState /> : rows.length ? <div className="mih-pay-table"><table><thead><tr><th>时间 / 订单</th>{mode === 'finance' ? <th>租户</th> : null}<th>金额</th><th>状态</th><th>发票</th><th>操作</th></tr></thead><tbody>{rows.map(row => <tr key={row.id}><td>{stamp(row.createdAt)}<small>{row.id}</small></td>{mode === 'finance' ? <td><small>{row.tenantId}</small></td> : null}<td>{money(row.amountMinor)}</td><td><Badge status={row.deliveryStatus === 'awaiting_credit' ? 'awaiting_credit' : row.status} /></td><td>{row.invoice ? <Badge status={row.invoice.status} /> : '—'}</td><td><button className={button} disabled={busy} onClick={() => open(row)}>查看订单</button></td></tr>)}</tbody></table></div> : <p className="mih-pay-empty">暂无符合条件的充值记录。</p>}
+      {state.loading ? <LoadingState /> : rows.length ? <div className="mih-pay-table"><table><thead><tr><th>时间 / 订单</th>{mode === 'finance' ? <th>租户</th> : null}<th>金额</th><th>状态</th><th>发票</th><th>操作</th></tr></thead><tbody>{rows.map(row => <tr key={row.id}><td>{stamp(row.createdAt)}<small>{row.id}</small></td>{mode === 'finance' ? <td><small>{row.tenantId}</small></td> : null}<td>{money(row.amountMinor)}</td><td><Badge status={row.deliveryStatus === 'awaiting_credit' ? 'awaiting_credit' : row.status} /></td><td>{row.invoice ? <Badge status={row.invoice.status} /> : '—'}</td><td><button className={button} disabled={busy} onClick={() => open(row)}>查看订单</button></td></tr>)}</tbody></table></div> : <p className="mih-pay-empty">{mode === 'invoices' ? '暂无开票申请；请在已入账的充值订单中申请开票。' : '暂无符合条件的充值记录。'}</p>}
       <div className="mih-pay-pagination"><button className={button} disabled={page <= 1 || state.loading} onClick={() => setPage(value => value - 1)}>上一页</button><span>第 {page} 页 · 每页 20 条</span><button className={button} disabled={!state.data?.orders.hasMore || state.loading} onClick={() => setPage(value => value + 1)}>下一页</button></div>
     </section>
-    {detail ? <OrderDetail key={detail.id} order={detail} {...{ token, session, notify }} onClose={() => setDetail(null)} onChanged={refresh} /> : null}
+    {detail ? <OrderDetail key={detail.id} order={detail} {...{ token, session, notify }} onClose={() => {setDetail(null); setQuery({orderId:null})}} onChanged={refresh} onViewInvoices={() => {refresh(); setDetail(null); setQuery({view:'invoices',orderId:null,invoiceStatus:null,tenantId:detail.tenantId})}} /> : null}
   </>
 }
 
-function OrderDetail({ order: initial, token, session, onClose, onChanged, notify }) {
+function OrderDetail({ order: initial, token, session, onClose, onChanged, notify, onViewInvoices }) {
   const [order, setOrder] = useState(initial), [busy, setBusy] = useState(false), [error, setError] = useState(null)
   const [payerName, setPayerName] = useState(''), [tradeNo, setTradeNo] = useState(initial.submission?.tradeNo || '')
   const [received, setReceived] = useState(''), [fee, setFee] = useState(''), [paidAt, setPaidAt] = useState(localTime), [note, setNote] = useState('')
@@ -127,6 +164,7 @@ function OrderDetail({ order: initial, token, session, onClose, onChanged, notif
       setOrder(next); intent.current = null; onChanged()
       // Navigate in this tab after preparing the same order; async popup blockers do not apply.
       if (action === 'checkout') window.location.assign(checkoutLocation(next.paymentUrl, next.environment))
+      else if (action === 'invoice-request') { setInvoiceOpen(false); notify?.('开票申请已提交，可在“开票申请”中查看进度。') }
       else if (action !== 'refresh') notify?.('订单已更新')
     } catch (err) { setError(paymentActionError(err)) } finally { lock.current = false; setBusy(false) }
   }
@@ -160,8 +198,8 @@ function OrderDetail({ order: initial, token, session, onClose, onChanged, notif
         </form> : null}</> : null}
       {order.status === 'paid' ? <><p className="mih-pay-notice">{order.environment === 'test' ? '已记录测试入账，正式余额未增加。' : '充值已到账，可在用量与账单中查看余额。'}</p><dl className="mih-pay-facts"><div><dt>支付流水</dt><dd>{order.settlement.tradeNo}</dd></div><div><dt>核实时间</dt><dd>{stamp(order.settlement.confirmedAt)}</dd></div><div><dt>账本编号</dt><dd>{order.settlement.ledgerEntryId}</dd></div></dl>
         {!order.invoice || order.invoice.status === 'rejected' ? <button className={primary} disabled={busy} onClick={() => setInvoiceOpen(value => !value)}>提交公司信息，申请开票</button> : null}
-        {invoiceOpen && (!order.invoice || order.invoice.status === 'rejected') ? <form className="mih-pay-form" onSubmit={event => { event.preventDefault(); act('invoice-request', { companyName, taxNumber, email }) }}><h3>公司开票信息</h3><Input label="公司抬头" value={companyName} onChange={event => setCompany(event.target.value)} maxLength={200} required /><Input label="纳税人识别号" value={taxNumber} onChange={event => setTax(event.target.value.toUpperCase())} minLength={15} maxLength={20} required /><Input label="收票邮箱" type="email" value={email} onChange={event => setEmail(event.target.value)} required /><p>申请金额：{money(order.amountMinor)}。提交申请后，由工作人员核实开票内容并交付发票。</p><button className={primary} disabled={busy}>提交开票申请</button></form> : null}
-        {order.invoice ? <section className="mih-pay-invoice"><h3>开票申请 <Badge status={order.invoice.status} /></h3><p>{order.invoice.companyName} · {order.invoice.taxNumber}</p><p>{order.invoice.email}</p>{order.invoice.invoiceNumber ? <p>发票号码：{order.invoice.invoiceNumber}</p> : null}{order.invoice.reason ? <p>{order.invoice.reason}</p> : null}
+        {invoiceOpen && (!order.invoice || order.invoice.status === 'rejected') ? <form className="mih-pay-form" onSubmit={event => { event.preventDefault(); act('invoice-request', { companyName, taxNumber, email }) }}><h3>公司开票信息</h3><Input label="公司抬头" value={companyName} onChange={event => setCompany(event.target.value)} maxLength={200} required /><Input label="纳税人识别号" value={taxNumber} onChange={event => setTax(event.target.value.toUpperCase())} minLength={15} maxLength={20} pattern="[A-Z0-9]{15,20}" title="请输入 15–20 位大写字母或数字的纳税人识别号" required /><small>纳税人识别号需为 15–20 位大写字母或数字；提交成功后会显示“待开票”。</small><Input label="收票邮箱" type="email" value={email} onChange={event => setEmail(event.target.value)} required /><p>申请金额：{money(order.amountMinor)}。提交申请后，由工作人员核实开票内容并交付发票。</p><button className={primary} disabled={busy}>提交开票申请</button></form> : null}
+        {order.invoice ? <section className="mih-pay-invoice"><h3>开票申请 <Badge status={order.invoice.status} /></h3><p role="status">{order.invoice.status === 'requested' ? '申请已提交，等待工作人员处理。关闭窗口后可在“开票申请”中继续查看。' : '申请处理结果已保存。'}</p><button className={button} disabled={busy} onClick={onViewInvoices}>查看开票申请列表</button><p>{order.invoice.companyName} · {order.invoice.taxNumber}</p><p>{order.invoice.email}</p>{order.invoice.invoiceNumber ? <p>发票号码：{order.invoice.invoiceNumber}</p> : null}{order.invoice.reason ? <p>{order.invoice.reason}</p> : null}
           {session.platformAdmin && order.invoice.status === 'requested' ? <form className="mih-pay-form" onSubmit={event => { event.preventDefault(); act('invoice-resolve', { status: 'issued', invoiceNumber, reason: invoiceReason }) }}><Input label="已开具发票号码" value={invoiceNumber} onChange={event => setInvoiceNumber(event.target.value)} maxLength={80} required /><Input label="交付说明 / 退回原因" value={invoiceReason} onChange={event => setInvoiceReason(event.target.value)} maxLength={500} required /><p>本操作登记已人工开具并交付的发票，不会自动生成或发送发票。</p><div className="mih-pay-actions"><button className={primary} disabled={busy}>登记已开票</button><button className={button} type="button" disabled={busy || !invoiceReason.trim()} onClick={() => act('invoice-resolve', { status: 'rejected', reason: invoiceReason })}>退回开票申请</button></div></form> : null}
         </section> : null}</> : null}
       {session.platformAdmin && order.events?.length ? <details><summary>最近 {order.events.length} 条操作记录（最多 100 条）</summary>{order.events.map(event => <p key={event.id}>{stamp(event.at)} · {event.action} · {event.actor}</p>)}</details> : null}

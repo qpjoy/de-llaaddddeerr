@@ -13302,3 +13302,21 @@ button.mih-catalog-status {
   .mih-invitation-card { padding: 24px 20px; }
   .mih-invitation-card h1 { font-size: 23px; }
 }
+
+.mih-invoice-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.3rem;
+  min-height: 1.3rem;
+  margin-inline-start: .45rem;
+  padding: .05rem .35rem;
+  border-radius: 999px;
+  background: var(--qp-color-danger, #b82e48);
+  color: #fff;
+  font-size: .75rem;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.mih-nav__item > .mih-invoice-count { display: inline-flex; flex: 0 0 auto; width: auto; margin-inline-start: auto; }

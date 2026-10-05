@@ -98,10 +98,22 @@ export class PaymentStore {
       reason: 'mx-pay 充值订单核实到账', externalReference: `mx-pay:${order.id}`, idempotencyKey: `mx-pay:${order.id}`, actor, transactionClient: client })
     return credit.id
   }
-  async list({ tenantId = null, environment, status = '', invoiceStatus = '', orderId = '', page = 1, pageSize = 20 }) {
+  async invoiceTasks() {
+    let rows
+    if (this.pool) {
+      const source = this.includeRecharge ? `(SELECT environment,invoice_status FROM mx_pay.orders UNION ALL
+        SELECT environment,invoice->>'status' AS invoice_status FROM hub_recharge.orders) AS invoices` : 'mx_pay.orders'
+      rows = (await this.pool.query(`SELECT environment,count(*)::int AS count FROM ${source} WHERE invoice_status='requested' GROUP BY environment`)).rows
+    } else {
+      rows = ['live','test'].map(environment => ({environment, count: [...this.memory.orders.values()].filter(({document}) => document.environment === environment && document.invoice?.status === 'requested').length}))
+    }
+    return { live: rows.find(row => row.environment === 'live')?.count || 0, test: rows.find(row => row.environment === 'test')?.count || 0, checkedAt: new Date().toISOString() }
+  }
+  async list({ tenantId = null, environment, status = '', invoiceStatus = '', invoicesOnly = false, orderId = '', page = 1, pageSize = 20 }) {
     let rows
     if (this.pool) {
       const args = [environment], clauses = ['environment=$1']
+      if (invoicesOnly) clauses.push("invoice_status IN ('requested','issued','rejected')")
       for (const [column, value] of [['tenant_id', tenantId], ['status', status], ['invoice_status', invoiceStatus], ['id', orderId]]) {
         if (value) { args.push(value); clauses.push(`${column}=$${args.length}`) }
       }
@@ -111,7 +123,7 @@ export class PaymentStore {
       rows = (await this.pool.query(`SELECT document - 'checkout' AS document FROM ${source} WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC,id DESC LIMIT $${args.length - 1} OFFSET $${args.length}`, args)).rows.map(row => row.document)
     } else {
       rows = [...this.memory.orders.values()].map(row => copy(row.document))
-        .filter(row => row.environment === environment && (!tenantId || row.tenantId === tenantId) && (!status || row.status === status) && (!invoiceStatus || row.invoice?.status === invoiceStatus) && (!orderId || row.id === orderId))
+        .filter(row => row.environment === environment && (!tenantId || row.tenantId === tenantId) && (!status || row.status === status) && (!invoiceStatus || row.invoice?.status === invoiceStatus) && (!invoicesOnly || row.invoice) && (!orderId || row.id === orderId))
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id)).slice((page - 1) * pageSize, page * pageSize + 1)
       for (const row of rows) delete row.checkout
     }
