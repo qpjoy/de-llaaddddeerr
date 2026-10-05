@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID, createCipheriv, createDecipheriv } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { requirePayment, PaymentError, fields } from '../src/index.mjs'
-import { validateChannels } from './channel-config.mjs'
+import { validateChannels, channelValidationIssues } from './channel-config.mjs'
 import { ChannelPayments } from './channel-payments.mjs'
 
 // Unserializable provenance: callers cannot smuggle delegated grants through JSON.
@@ -139,14 +139,17 @@ export class PaymentManagement {
       requirePayment(typeof value[k] === 'string' && value[k].length <= (k.includes('Key') ? 10000 : 1000),'invalid_channel_draft','渠道字段格式无效')
     return value
   }
-  channelView(row) {
+  channelView(row, publishedChannels = []) {
     const ch = this.unseal(row.id,row.draft), {privateKey,alipayPublicKey,...safe} = ch
-    let valid = true
-    try { validateChannels([ch]) } catch { valid = false }
+    const validationIssues = channelValidationIssues(ch)
     const published = row.published ? this.unseal(row.id,row.published) : null
+    if (publishedChannels.some(other=>other.id!==ch.id && other.environment===ch.environment && other.appId===ch.appId))
+      validationIssues.push({field:'appId',message:'同一环境已有使用此 APPID 的已发布渠道，请编辑原渠道。'})
+    for (const field of ['provider','environment','appId','sellerId']) if (published && published[field]!==ch[field] && !validationIssues.some(issue=>issue.field===field))
+      validationIssues.push({field,message:'已发布渠道的商户身份和环境不能改绑；如需更换，请建立新渠道。'})
     return { ...safe, privateKeyConfigured: Boolean(privateKey), alipayPublicKeyConfigured: Boolean(alipayPublicKey),
       revision: row.revision, published: Boolean(published), publishedEnabled: published?.enabled || false,
-      pendingChanges: JSON.stringify(ch) !== JSON.stringify(published), valid, updatedAt: row.updated_at }
+      pendingChanges: JSON.stringify(ch) !== JSON.stringify(published), valid:validationIssues.length===0, validationIssues, updatedAt: row.updated_at }
   }
   async syncChannels(service, pauseCheckout = false) {
     if (this.syncing) return this.syncing
@@ -241,7 +244,12 @@ export class PaymentManagement {
       const rows=(await this.readPool.query('SELECT id,channel_id,order_id,app_id,environment,outcome,reason,created_at FROM pay.channel_observations ORDER BY created_at DESC,id DESC LIMIT 31 OFFSET $1',[(page-1)*30])).rows
       return {items:rows.slice(0,30),page,hasMore:rows.length>30}
     }
-    if (method==='GET' && path==='channels') { permit(p,'channels.read'); return {items:(await this.readPool.query('SELECT * FROM pay_control.channels ORDER BY id')).rows.map(r=>this.channelView(r))} }
+    if (method==='GET' && path==='channels') {
+      permit(p,'channels.read')
+      const rows=(await this.readPool.query('SELECT * FROM pay_control.channels ORDER BY id')).rows
+      const published=rows.filter(r=>r.published).map(r=>this.unseal(r.id,r.published))
+      return {items:rows.map(r=>this.channelView(r,published))}
+    }
     if (method==='GET' && path==='members') { permit(p,'members.read'); return {items:(await this.readPool.query('SELECT id,identity,grants,revision FROM pay_control.members ORDER BY created_at,id LIMIT 1000')).rows} }
     if (method==='GET' && path==='applications') {
       permit(p,'applications.read')
@@ -275,7 +283,10 @@ export class PaymentManagement {
       } else {
         requirePayment(row,'payment_channel_not_found','渠道不存在',404)
         const ch = this.unseal(id,row.draft), published = (await c.query('SELECT id,published FROM pay_control.channels WHERE published IS NOT NULL AND id<>$1',[id])).rows.map(r=>this.unseal(r.id,r.published))
-        try { validateChannels([...published,ch]) } catch { throw new PaymentError(400,'invalid_payment_channel','请补齐 APPID、商户 ID、RSA 密钥、HTTPS 回调和应用白名单；同一环境不能重复配置支付宝应用') }
+        try { validateChannels([...published,ch]) } catch {
+          const issues=this.channelView(row,published).validationIssues
+          throw new PaymentError(400,'invalid_payment_channel',issues.map(i=>i.message).join('；') || '渠道校验失败，请检查已发布的渠道配置。')
+        }
         const binding = (await c.query('SELECT identity FROM pay.channel_bindings WHERE id=$1',[id])).rows[0]?.identity
         const identity = {provider:ch.provider,environment:ch.environment,appId:ch.appId,sellerId:ch.sellerId}
         requirePayment(!binding || Object.keys(identity).every(k=>binding[k]===identity[k]),'payment_channel_identity_changed','已发布渠道的商户身份不能改变；请建立新渠道',409)
@@ -283,7 +294,8 @@ export class PaymentManagement {
         await c.query('UPDATE pay_control.channels SET published=draft,revision=revision+1,updated_at=now() WHERE id=$1',[id])
         await this.audit(c,p,'channel.publish',id,{enabled:ch.enabled,environment:ch.environment,allowedApps:ch.allowedApps})
       }
-      return this.channelView((await c.query('SELECT * FROM pay_control.channels WHERE id=$1',[id])).rows[0])
+      const published=(await c.query('SELECT id,published FROM pay_control.channels WHERE published IS NOT NULL')).rows.map(r=>this.unseal(r.id,r.published))
+      return this.channelView((await c.query('SELECT * FROM pay_control.channels WHERE id=$1',[id])).rows[0],published)
     })
     const member = /^members\/([a-f0-9]{64})$/.exec(path)
     if (method==='PUT' && member) return this.changeGrants(p,member[1],body)

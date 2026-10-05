@@ -1,15 +1,10 @@
-import { readFileSync } from 'node:fs'
+import { consoleAssets as assets } from './console-assets.mjs'
 import { createApplicationSso } from '@qpjoy/mx-common/identity/sso'
 import { PostgresSsoStore } from '@qpjoy/mx-common/identity/postgres'
 import { PaymentError, requirePayment } from '../src/index.mjs'
 import { json } from './app.mjs'
 import { consolePrincipal } from './console-config.mjs'
 
-const assets = new Map([
-  ['/', ['text/html; charset=utf-8', readFileSync(new URL('../console/index.html', import.meta.url))]],
-  ['/console.js', ['text/javascript; charset=utf-8', readFileSync(new URL('../console/console.js', import.meta.url))]],
-  ['/console.css', ['text/css; charset=utf-8', readFileSync(new URL('../console/console.css', import.meta.url))]],
-])
 const publicOrder = order => Object.fromEntries(['id','businessOrderId','appId','environment','amountMinor','currency','status','provider','createdAt','updatedAt']
   .map(key => [key, order[key]]))
 

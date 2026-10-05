@@ -1,12 +1,16 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MX Pay · 支付中心</title><link rel="stylesheet" href="/console.css"><script type="module" src="/console.js"></script></head>
-<body>
-<header><a class="brand" href="/"><span class="mark">MX</span><span>MX Pay<small>独立支付中心</small></span></a><nav aria-label="账号"><span id="account"></span><a id="login" href="/auth/sso/login">统一登录</a><a id="switch" href="/auth/sso/login?select=1" hidden>切换账号</a><a id="security" hidden>账号安全</a><button id="logout" hidden>退出</button></nav></header>
+<body class="qp-app qp-theme-neon-void qp-density--medium">
+<header class="app-header"><a class="brand" href="/"><span class="mark">MX</span><span>MX Pay<small>独立支付中心</small></span></a><nav aria-label="账号"><span id="account"></span><a id="login" href="/auth/sso/login">统一登录</a><a id="switch" href="/auth/sso/login?select=1" hidden>切换账号</a><a id="security" hidden>账号安全</a><button id="logout" class="qp-button qp-button--ghost" hidden>退出</button></nav></header>
 <div class="layout"><aside id="navigation" hidden><p class="eyebrow">PAYMENT CENTER</p><nav id="modules" aria-label="支付管理"></nav><p class="hint">统一账号 · 独立授权<br>应用数据按权限隔离</p></aside><main>
-<p class="eyebrow" id="category">MX PAY / OVERVIEW</p><h1 id="title">支付中心</h1><p class="intro" id="intro">统一管理支付渠道、应用接入与收款记录。</p>
+<p class="eyebrow" id="category">MX PAY / OVERVIEW</p><h1 id="title" tabindex="-1">支付中心</h1><p class="intro" id="intro">统一管理支付渠道、应用接入与收款记录。</p>
 <p id="message" role="status" aria-live="polite">正在检查登录状态…</p>
-<section id="invitation" hidden><h2>支付中心访问邀请</h2><p>接受后，将为当前统一账号授予邀请指定的支付权限。新账号需先完成 Launcher 邀请注册。</p><button id="accept-invitation" class="primary">接受支付邀请</button><button id="discard-invitation">忽略邀请</button></section>
-<section id="workspace" hidden><div id="actions"></div><div id="content"></div><div class="pagination" id="pagination" hidden><span id="page"></span><button id="previous">上一页</button><button id="next">下一页</button></div></section>
-</main></div><footer>MX Pay · 支付事实由支付中心记录，钱包入账与商品交付由业务应用完成。</footer>
-<dialog id="editor"><form id="edit-form"><h2 id="edit-title"></h2><p id="edit-hint" class="hint"></p><div id="edit-fields" class="field-grid"></div><p id="edit-error" role="alert"></p><div class="dialog-actions"><button type="button" id="close-editor">关闭</button><button class="primary" id="save-editor" type="submit">保存</button></div></form></dialog>
+<section id="invitation" class="qp-panel" hidden><h2>支付中心访问邀请</h2><p>接受后，将为当前统一账号授予邀请指定的支付权限。新账号需先完成 Launcher 邀请注册。</p><button id="accept-invitation" class="qp-button qp-button--primary">接受支付邀请</button><button id="discard-invitation" class="qp-button qp-button--ghost">忽略邀请</button></section>
+<section id="workspace" hidden><div id="actions"></div><div id="content"></div><div class="pagination" id="pagination" hidden><span id="page"></span><button id="previous" class="qp-button qp-button--outline">上一页</button><button id="next" class="qp-button qp-button--outline">下一页</button></div></section>
+</main></div><footer class="app-footer">MX Pay · 支付事实由支付中心记录，钱包入账与商品交付由业务应用完成。</footer>
+<dialog id="editor" class="qp-modal qp-modal--xlarge" aria-labelledby="edit-title" aria-describedby="edit-hint"><form id="edit-form">
+<div class="qp-modal__header"><div class="qp-modal__heading"><h2 id="edit-title"></h2><p id="edit-hint" class="qp-modal__description"></p></div></div>
+<div class="qp-modal__body"><div id="edit-validation" hidden></div><div id="edit-fields" class="field-grid"></div><p id="edit-error" role="alert"></p></div>
+<div class="qp-modal__footer"><button type="button" id="close-editor" class="qp-button qp-button--ghost">关闭</button><button class="qp-button qp-button--primary" id="save-editor" type="submit">保存</button></div>
+</form></dialog>
 </body></html>

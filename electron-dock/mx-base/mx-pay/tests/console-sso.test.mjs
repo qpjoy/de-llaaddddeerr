@@ -141,6 +141,10 @@ test('payment console: real Launcher OIDC, dedicated PG, scoped reads, durable s
   scopes=['mx:pay:admin']; restart()
 
   assert.equal((await request(`${origin}/console/v1/orders/${paymentOrder.id}/confirm`,{method:'POST',headers:{origin,'content-type':'application/json','x-mx-csrf':session.csrf},body:'{}'})).status,404,'console has no money mutation endpoint')
+  if(process.env.MX_SSO_BROWSER_MODULE){
+    const { verifyConsoleEntry } = await import('./console-entry.browser.mjs')
+    await verifyConsoleEntry({origin,setScopes:value=>{scopes=value;restart()}})
+  }
   blocked = true
   assert.equal(JSON.parse((await request(`${origin}/auth/sso/session`)).text).active, false)
   assert.equal((await payment.pool.query("SELECT to_regclass('public.tenants') AS tenants, to_regclass('public.mx_platform_records') AS launcher")).rows[0].tenants, null)

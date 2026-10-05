@@ -4,6 +4,7 @@ WORKDIR /app/mx-common
 COPY --from=mx_common package.json package-lock.json ./
 RUN npm ci --omit=dev --omit=optional --ignore-scripts && npm cache clean --force
 COPY --from=mx_common src ./src
+COPY --from=neon_void tokens.css styles.css select.css select.js /app/mx-launcher/ui-design/src/
 WORKDIR /app/mx-base/mx-pay
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --omit=optional --ignore-scripts && npm cache clean --force

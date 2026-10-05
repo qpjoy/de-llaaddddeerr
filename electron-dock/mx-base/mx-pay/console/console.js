@@ -6,7 +6,8 @@ const providerName=value=>({alipay:'支付宝收银台',manual_alipay:'支付宝
 const statuses={pending:'待付款',submitted:'待核实',paid:'已确认付款',cancelled:'已取消'}
 const money = amount => new Intl.NumberFormat('zh-CN',{style:'currency',currency:'CNY'}).format(Number(amount || 0)/100)
 const when = value => value ? new Date(value).toLocaleString('zh-CN') : '—'
-let csrf=null,me=null,current='orders',page=1,busy=false,editSubmit=null
+let csrf=null,me=null,current='orders',page=1,busy=false,editSubmit=null,editBusy=false,editInvoker=null
+const selects=installNeonSelects(document)
 const filters={appId:'',environment:'live',status:'',businessOrderId:'',customerRef:'',channelId:''}
 const modules=[
  ['orders','支付订单','orders.read','按来源应用、业务订单、客户和渠道查询。付款确认与业务交付分别显示。'],
@@ -21,14 +22,14 @@ const modules=[
 ]
 const allowed = (permission,center=false) => me?.grants.some(g=>(!center || g.scope==='center') && me.permissions.roles[g.role]?.includes(permission))
 async function api(path,method='GET',body) {
- const response=await fetch(path,{method,credentials:'same-origin',redirect:'error',headers:method==='GET'?{}:{'content-type':'application/json','x-mx-csrf':csrf},...(body===undefined?{}:{body:JSON.stringify(body)})})
+ const response=await fetch(path,{method,credentials:'same-origin',cache:'no-store',redirect:'error',headers:method==='GET'?{}:{'content-type':'application/json','x-mx-csrf':csrf},...(body===undefined?{}:{body:JSON.stringify(body)})})
  if(response.status===204)return null
  const result=await response.json()
  if(!response.ok)throw Error(result.error?.message || '请求失败，请稍后再试')
  return result.data ?? result
 }
 const call=(path,method,body)=>api(`/console/v1/${path}`,method,body)
-function button(text,action,cls) { const e=node('button',text,cls); e.type='button';e.addEventListener('click',()=>void action());return e }
+function button(text,action,cls) { const e=node('button',text,`qp-button ${cls==='primary'?'qp-button--primary':cls==='ghost'?'qp-button--ghost':'qp-button--outline'}`); e.type='button';e.addEventListener('click',()=>void action());return e }
 function table(headers,rows) {
  const wrap=node('div',undefined,'table-scroll'), t=node('table'),head=node('thead'),tr=node('tr'),body=node('tbody')
  for(const h of headers)tr.append(node('th',h));head.append(tr);t.append(head,body)
@@ -37,28 +38,38 @@ function table(headers,rows) {
  wrap.append(t);return wrap
 }
 function field(label,name,value='',options={}) {
- const wrap=node('label',label),input=node(options.choices?'select':options.multiline?'textarea':'input');input.name=name;input.id=`field-${name}`
+ const wrap=node('label',undefined,'qp-field'),input=node(options.choices?'select':options.multiline?'textarea':'input',undefined,options.choices?'qp-select':options.multiline?'qp-textarea':'qp-input');wrap.dataset.field=name;wrap.append(node('span',label,'qp-field__label'));input.name=name;input.id=`field-${name}`
  if(options.choices)for(const [v,l] of options.choices){const o=node('option',l);o.value=v;input.append(o)}
  else { if(input.tagName==='INPUT')input.type=options.secret?'password':'text';input.autocomplete='off';input.maxLength=options.multiline?10000:1000 }
  input.value=options.choices && !options.choices.some(([v])=>v===value) ? (options.choices[0]?.[0] || '') : value;input.required=!!options.required;input.disabled=!!options.disabled
- wrap.append(input);if(options.hint)wrap.append(node('small',options.hint));return wrap
+ if(options.placeholder)input.placeholder=options.placeholder
+ wrap.append(input);if(options.hint){const hint=node('small',options.hint,'qp-field__hint');hint.id=`hint-${name}`;input.setAttribute('aria-describedby',hint.id);wrap.append(hint)}return wrap
 }
-function editor(title,hint,fields,submit) {
- $('edit-title').textContent=title;$('edit-hint').textContent=hint;$('edit-error').textContent='';$('edit-fields').replaceChildren(...fields)
- $('save-editor').hidden=!submit;$('save-editor').disabled=false;editSubmit=submit;$('editor').showModal()
+function editor(title,hint,fields,submit,saveLabel='保存') {
+ if(!$('editor').open)editInvoker=document.activeElement
+ $('edit-title').textContent=title;$('edit-hint').textContent=hint;$('edit-error').textContent='';$('edit-validation').hidden=true;$('edit-validation').replaceChildren();$('edit-fields').replaceChildren(...fields)
+ $('save-editor').textContent=saveLabel;$('save-editor').hidden=!submit;$('save-editor').disabled=false;editSubmit=submit
+ if(!$('editor').open)$('editor').showModal()
+ selects.refresh()
 }
-$('close-editor').onclick=()=>$('editor').close()
+$('close-editor').onclick=()=>{if(!editBusy)$('editor').close()}
+$('editor').addEventListener('cancel',e=>{if(editBusy)e.preventDefault()})
 $('editor').addEventListener('close',()=>{
  // A queued close event may belong to the form replaced by the one-time result.
- if(!$('editor').open){$('edit-fields').replaceChildren();editSubmit=null}
+ if(!$('editor').open){$('edit-fields').replaceChildren();editSubmit=null;(editInvoker?.isConnected?editInvoker:$('title')).focus({preventScroll:true})}
 })
 $('edit-form').onsubmit=async e=>{
- e.preventDefault();if(!editSubmit)return;$('save-editor').disabled=true;$('edit-error').textContent=''
- try { const after=await editSubmit(new FormData(e.currentTarget));$('editor').close();await load();if(after)after() }
- catch(error){$('edit-error').textContent=error.message}finally{$('save-editor').disabled=false}
+ e.preventDefault();if(!editSubmit || editBusy)return;editBusy=true;$('save-editor').disabled=true;$('close-editor').disabled=true;$('editor').setAttribute('aria-busy','true');$('edit-error').textContent=''
+ try {
+  const after=await editSubmit(new FormData(e.currentTarget))
+  if(after?.keepOpen){await load();after.refresh();$('editor').querySelector('.qp-modal__body').scrollTop=0}
+  else{$('editor').close();await load();if(after)after()}
+ }
+ catch(error){$('edit-error').textContent=error.message;$('edit-error').scrollIntoView({block:'nearest'})}
+ finally{editBusy=false;$('save-editor').disabled=false;$('close-editor').disabled=false;$('editor').removeAttribute('aria-busy')}
 }
 function reveal(title,text) {
- const output=node('textarea');output.value=text;output.readOnly=true;output.rows=9;output.setAttribute('aria-label',title)
+ const output=node('textarea',undefined,'qp-textarea');output.value=text;output.readOnly=true;output.rows=9;output.setAttribute('aria-label',title)
  editor(title,'请立即保存到应用的私有配置。关闭后不会再次展示。',[output],null)
  // Nothing is placed in localStorage, URLs, audit events or console logs.
 }
@@ -72,22 +83,93 @@ function filterBar() {
   const options=key==='environment'?{choices:[['live','正式'],['test','测试'],['','全部授权环境']]}:key==='status'?{choices:[['','全部状态'],...Object.entries(statuses)]}:{}
   const f=field(label,key,filters[key],options);f.querySelector('input,select').onchange=e=>{filters[key]=e.target.value.trim()};form.append(f)
  }
- const submit=node('button','查询','primary');submit.type='submit';form.append(submit)
+ const submit=node('button','查询','qp-button qp-button--primary');submit.type='submit';form.append(submit)
  form.onsubmit=e=>{e.preventDefault();for(const [k,v] of new FormData(form))filters[k]=v.trim();page=1;void load()};return form
 }
 async function orderDetails(order) {
  try {const data=await call(`orders/${order.id}`),pre=node('pre',JSON.stringify(data,null,2));editor(`订单 ${order.businessOrderId}`,'包含支付状态、不可变业务引用、渠道核验及事件 ACK；不提供人工改付成功。',[pre],null)}catch(e){message(e.message)}
 }
-function channelEditor(ch={id:'',provider:'alipay',environment:'live',enabled:false,appId:'',sellerId:'',allowedApps:['mx-insight-hub'],keyType:'PKCS8',notifyUrl:'https://pay.minsight-ai.com/v1/notifications/alipay/',returnUrl:'https://hub.minsight-ai.com/admin/',revision:0}) {
- const fields=[field('渠道 ID','id',ch.id,{required:true,disabled:!!ch.revision}),field('环境','environment',ch.environment,{choices:[['live','正式'],['test','支付宝沙箱']]}),
- field('启用新订单','enabled',String(ch.enabled),{choices:[['false','停用'],['true','启用']]}),field('支付宝 APPID','appId',ch.appId),field('到账核验 Seller ID（2088 开头）','sellerId',ch.sellerId),
- field('允许的来源应用（逗号分隔）','allowedApps',ch.allowedApps.join(',')),field('私钥格式','keyType',ch.keyType,{choices:[['PKCS8','PKCS8'],['PKCS1','PKCS1']]}),
- field(ch.privateKeyConfigured?'应用私钥（已保存，留空保留）':'应用私钥（PEM）','privateKey','',{multiline:true}),field(ch.alipayPublicKeyConfigured?'支付宝公钥（已保存，留空保留）':'支付宝公钥（PEM）','alipayPublicKey','',{multiline:true}),
- field('通知地址','notifyUrl',ch.notifyUrl),field('付款后返回地址','returnUrl',ch.returnUrl)]
- editor(ch.revision?`编辑渠道 · ${ch.id}`:'新增支付宝渠道','下单不传 seller_id，由签约商户收款；此处 Seller ID 用于到账核验，发布前仍需填写。密钥留空保留已存值，草稿保存后需另行发布。',fields,async f=>{
-  const id=ch.id || f.get('id').trim(), channel={id,provider:'alipay',environment:f.get('environment'),enabled:f.get('enabled')==='true',appId:f.get('appId').trim(),sellerId:f.get('sellerId').trim(),allowedApps:f.get('allowedApps').split(',').map(s=>s.trim()).filter(Boolean),keyType:f.get('keyType'),privateKey:f.get('privateKey').trim(),alipayPublicKey:f.get('alipayPublicKey').trim(),notifyUrl:f.get('notifyUrl').trim(),returnUrl:f.get('returnUrl').trim()}
-  await call(`channels/${encodeURIComponent(id)}`,'PUT',{revision:ch.revision,channel})
+function channelIssues(ch){
+ return ch.validationIssues || (ch.valid?[]:[{field:'channel',message:'请检查 APPID、商户 ID、密钥格式与完整通知地址；更新服务后可查看逐项原因。'}])
+}
+function validationPanel(ch,focusFields=false){
+ const issues=channelIssues(ch),panel=node('div',undefined,`validation-summary${issues.length?'':' validation-ok'}`)
+ panel.append(node('strong',issues.length?`待修正 ${issues.length} 项，暂不能发布`:'配置校验通过'))
+ if(issues.length){
+  const list=node('ul')
+  for(const issue of issues){const li=node('li');li.append(focusFields?button(issue.message,()=>document.getElementById(`field-${issue.field}`)?.focus(),'ghost'):node('span',issue.message));list.append(li)}
+  panel.append(list)
+ }else panel.append(node('span','已通过配置格式校验；实际收款仍需验证支付宝签约与支付回调。'))
+ return panel
+}
+function channelEditor(ch={id:'',provider:'alipay',environment:'live',enabled:false,appId:'',sellerId:'',allowedApps:['mx-insight-hub'],keyType:'PKCS8',notifyUrl:new URL('/v1/notifications/alipay/',location.origin).href,returnUrl:'https://hub.minsight-ai.com/admin/',revision:0},saved=false){
+ const section=text=>node('h3',text,'form-section')
+ const idField=field('渠道 ID','id',ch.id,{required:true,disabled:!!ch.revision,placeholder:'例如 alipay-live',hint:'Pay 内部唯一名称；Hub 的渠道绑定使用同一个 ID。'})
+ const notifyField=field('支付宝通知地址','notifyUrl',ch.notifyUrl,{hint:'按渠道 ID 自动补全路径；自定义域名可直接修改。'})
+ const idInput=idField.querySelector('input'),notifyInput=notifyField.querySelector('input')
+ const notificationUrl=id=>{try{return new URL(`/v1/notifications/alipay/${id}`,notifyInput.value || location.origin).href}catch{return new URL(`/v1/notifications/alipay/${id}`,location.origin).href}}
+ let previousAuto=ch.notifyUrl
+ try{if(new URL(ch.notifyUrl).pathname==='/v1/notifications/alipay/' && ch.id)notifyInput.value=previousAuto=notificationUrl(ch.id)}catch{}
+ idInput.addEventListener('input',()=>{
+  if(!notifyInput.value || notifyInput.value===previousAuto){notifyInput.value=previousAuto=notificationUrl(idInput.value.trim())}
  })
+ const switchField=node('div',undefined,'switch-field wide'),switchLabel=node('label',undefined,'qp-switch'),enabled=node('input')
+ enabled.type='checkbox';enabled.name='enabled';enabled.checked=ch.enabled;enabled.id='field-enabled'
+ switchLabel.append(enabled,node('span',undefined,'qp-switch__track'),node('span','发布后接收新订单'))
+ switchField.append(switchLabel,node('p','保存仅更新草稿。校验通过并发布后，才会按此开关接收或停用新订单。'))
+ const fields=[section('基本信息'),idField,field('环境','environment',ch.environment,{choices:[['live','正式'],['test','支付宝沙箱']]}),
+ field('支付宝 APPID','appId',ch.appId,{placeholder:'支付宝应用的 16 位 APPID'}),field('到账核验 Seller ID','sellerId',ch.sellerId,{placeholder:'2088 开头的 16 位商户 ID'}),
+ field('允许的来源应用','allowedApps',ch.allowedApps.join(','),{hint:'多个应用用逗号分隔，例如 mx-insight-hub,luopan。'}),field('私钥格式','keyType',ch.keyType,{choices:[['PKCS8','PKCS8 · Java 常用'],['PKCS1','PKCS1 · RSA 私钥']]}),
+ section('支付密钥'),field(ch.privateKeyConfigured?'应用私钥（已保存）':'应用私钥','privateKey','',{multiline:true,placeholder:'-----BEGIN PRIVATE KEY-----',hint:ch.privateKeyConfigured?'留空保留已有密钥；原文不会回显。':'粘贴完整 PEM，包含 BEGIN / END；不要只粘贴一行 Base64。'}),
+ field(ch.alipayPublicKeyConfigured?'支付宝公钥（已保存）':'支付宝公钥','alipayPublicKey','',{multiline:true,placeholder:'-----BEGIN PUBLIC KEY-----',hint:ch.alipayPublicKeyConfigured?'留空保留已有公钥。':'填写支付宝提供的验签公钥，包含 PEM 首尾。'}),
+ section('通知与启用'),notifyField,field('付款后返回地址','returnUrl',ch.returnUrl,{hint:'用户支付后返回业务应用，不用于确认到账。'}),switchField]
+ editor(ch.revision?`编辑渠道 · ${ch.id}`:'新增支付宝渠道','填写并保存配置，再检查校验结果、发布生效。已保存的密钥不会回显。',fields,async f=>{
+  const id=ch.id || f.get('id').trim(),channel={id,provider:'alipay',environment:f.get('environment'),enabled:f.get('enabled')==='on',appId:f.get('appId').trim(),sellerId:f.get('sellerId').trim(),allowedApps:f.get('allowedApps').split(',').map(s=>s.trim()).filter(Boolean),keyType:f.get('keyType'),privateKey:f.get('privateKey').trim(),alipayPublicKey:f.get('alipayPublicKey').trim(),notifyUrl:f.get('notifyUrl').trim(),returnUrl:f.get('returnUrl').trim()}
+  const result=await call(`channels/${encodeURIComponent(id)}`,'PUT',{revision:ch.revision,channel})
+  if(!result.valid)return {keepOpen:true,refresh:()=>channelEditor(result,true)}
+  return ()=>message('草稿已保存并通过校验。请点击“发布并启用”或“发布并停用”，使配置正式生效。')
+ },'保存草稿')
+ if(ch.revision){
+  $('edit-validation').hidden=false
+  if(saved)$('edit-validation').append(node('p','草稿已保存，当前线上配置尚未改变。','muted'))
+  else $('edit-validation').append(node('p','以下为已保存草稿的校验结果；修改后保存即可重新校验。','muted'))
+  $('edit-validation').append(validationPanel(ch,true))
+  for(const issue of channelIssues(ch)){
+   const input=document.getElementById(`field-${issue.field}`),wrap=input?.closest('.qp-field')
+   if(!wrap)continue
+   const error=node('span',issue.message,'field-error');error.id=`error-${issue.field}`
+   input.setAttribute('aria-invalid','true');input.setAttribute('aria-describedby',`${input.getAttribute('aria-describedby') || ''} ${error.id}`.trim());wrap.append(error)
+   input.addEventListener('input',()=>{input.removeAttribute('aria-invalid');error.hidden=true},{once:true})
+  }
+  selects.refresh()
+ }
+}
+function renderChannels(data,content,actions){
+ const canWrite=allowed('channels.write',true)
+ if(canWrite)actions.append(button('新增渠道',()=>channelEditor(),'primary'))
+ actions.append(node('p','保存草稿 → 检查配置 → 发布生效','channel-workflow'))
+ if(!data.items.length){content.append(node('div','尚未配置支付渠道。新增支付宝渠道，保存并发布后即可供业务应用接入。','empty qp-panel'));return}
+ const list=node('div',undefined,'channel-list')
+ for(const ch of data.items){
+  const card=node('article',undefined,'channel-card qp-panel'),header=node('div',undefined,'channel-header'),heading=node('div',undefined,'channel-heading')
+  heading.append(node('h2',ch.id),node('span',ch.environment==='live'?'正式':'沙箱','qp-tag'))
+  header.append(heading,node('span',ch.published?(ch.publishedEnabled?'已启用':'已停用'):'未发布',`qp-tag ${ch.publishedEnabled?'qp-tag--success':'qp-tag--warning'}`))
+  const body=node('div',undefined,'channel-body'),facts=node('dl',undefined,'channel-facts')
+  for(const [label,value] of [['APPID',ch.appId || '待填写'],['商户 ID',ch.sellerId || '待填写'],['允许应用',ch.allowedApps.join('，') || '待填写'],['密钥状态',`应用私钥${ch.privateKeyConfigured?'已保存':'未填写'} · 支付宝公钥${ch.alipayPublicKeyConfigured?'已保存':'未填写'}`]])facts.append(node('dt',label),node('dd',value))
+  body.append(facts,validationPanel(ch))
+  const footer=node('div',undefined,'channel-footer'),controls=node('div',undefined,'row-actions')
+  footer.append(node('p',ch.pendingChanges?`有待发布修改 · 发布后${ch.enabled?'接收':'停用'}新订单`:'当前配置已发布，无待发布修改。'))
+  if(canWrite){
+   controls.append(button('编辑配置',()=>channelEditor(ch)))
+   const label=ch.pendingChanges?(ch.enabled?'发布并启用':'发布并停用'):'已发布'
+   const publish=button(label,()=>editor(`${label} · ${ch.id}`,ch.enabled?'确认发布后，允许的业务应用可使用该渠道创建新订单。':'确认发布后停止接收新订单，已有订单仍保留验签与查询。',[node('p',`应用：${ch.allowedApps.join('，')} · ${ch.environment==='live'?'正式':'沙箱'}`)],async()=>{await call(`channels/${ch.id}/publish`,'POST',{revision:ch.revision});return ()=>message(ch.enabled?'渠道已发布并启用。':'渠道已发布并停用。')},label),'primary')
+   publish.disabled=!ch.valid || !ch.pendingChanges
+   publish.title=!ch.valid?'请先按上方提示修正配置并保存':!ch.pendingChanges?'没有待发布的修改':''
+   controls.append(publish)
+  }
+  footer.append(controls);card.append(header,body,footer);list.append(card)
+ }
+ content.append(list)
 }
 async function load() {
  if(busy)return;busy=true;message('正在加载…');$('actions').replaceChildren();$('content').replaceChildren();$('pagination').hidden=true
@@ -108,18 +190,7 @@ async function load() {
   if(current==='logs')content.append(table(['业务订单','来源应用','环境','支付单','事件时间','业务应用 ACK'],data.items.map(o=>[o.businessOrderId,o.appId,o.environment,o.orderId,when(o.createdAt),o.acknowledgedAt?when(o.acknowledgedAt):'等待业务应用确认'])))
   if(current==='observations')content.append(table(['渠道','来源应用 / 环境','支付单','结果','原因','时间'],data.items.map(o=>[o.channel_id,`${o.app_id || '未匹配'} / ${o.environment}`,o.order_id,o.outcome,o.reason,when(o.created_at)])))
   if(current==='audit')content.append(table(['操作','操作者','目标','变更摘要','时间'],data.items.map(o=>[o.action,o.actor.subject || o.actor.credentialId,o.target,JSON.stringify(o.details),when(o.created_at)])))
-  if(current==='channels'){
-   if(allowed('channels.write',true))actions.append(button('新增渠道',()=>channelEditor(),'primary'))
-   content.append(table(['渠道 / 环境','商户身份','发布状态','草稿 / 密钥','允许应用','操作'],data.items.map(ch=>{
-    const controls=node('div',undefined,'row-actions')
-    if(allowed('channels.write',true)){
-     controls.append(button('编辑草稿',()=>channelEditor(ch)))
-     const publish=button('发布草稿',()=>editor(`发布渠道 · ${ch.id}`,`发布后：${ch.enabled?'允许创建新订单':'停用新订单'}。已有订单继续验签。`,[node('p',`范围：${ch.allowedApps.join(', ')} · ${ch.environment}`)],async()=>{await call(`channels/${ch.id}/publish`,'POST',{revision:ch.revision})}),'primary')
-     publish.disabled=!ch.valid || !ch.pendingChanges;controls.append(publish)
-    }
-    return [`${ch.id} / ${ch.environment}`,`${ch.appId || 'APPID 待填'} / ${ch.sellerId || '商户 ID 待填'}`,ch.published?(ch.publishedEnabled?'已启用':'已停用'):'未发布',`${ch.valid?'校验通过':'待补齐配置'} · 私钥${ch.privateKeyConfigured?'已保存':'未配置'}`,ch.allowedApps.join(', '),controls]
-   })))
-  }
+  if(current==='channels')renderChannels(data,content,actions)
   if(current==='applications'){
    if(allowed('applications.write',true)){
     actions.append(button('登记应用',()=>editor('登记来源应用','应用 ID 用于支付凭据、渠道白名单和订单来源归属。',[field('应用 ID','id','',{required:true}),field('显示名称','name','',{required:true})],async f=>{await call('applications','POST',Object.fromEntries(f))}),'primary'))
@@ -148,28 +219,60 @@ async function load() {
 }
 function buildNavigation(){
  $('modules').replaceChildren()
- for(const [id,label,permission] of modules)if(allowed(permission,['observations','audit'].includes(id))){const b=button(label,()=>{if(busy)return;current=id;page=1;void load()});b.dataset.module=id;$('modules').append(b)}
+ for(const [id,label,permission] of modules)if(allowed(permission,['observations','audit'].includes(id))){const b=button(label,()=>{if(busy)return;current=id;page=1;void load()},'ghost');b.dataset.module=id;$('modules').append(b)}
  $('navigation').hidden=!$('modules').children.length
 }
+// One automatic SSO attempt per tab; an explicit retry remains available.
+// This is navigation state only. Identity and permissions always come from the server.
+function loginState(value){
+ try{
+  if(value===undefined)return sessionStorage.getItem('mx-pay-login-state')
+  if(value===null)sessionStorage.removeItem('mx-pay-login-state')
+  else sessionStorage.setItem('mx-pay-login-state',value)
+  return value
+ }catch{return 'unavailable'}
+}
+function pendingInvitation(){try{return sessionStorage.getItem('mx-pay-invitation')}catch{return null}}
 async function initialize(){
  try{
   const session=await api('/auth/sso/session')
-  if(!session.active){message('请使用 Launcher 统一账号登录。注册成功后仍需支付角色授权。');return}
+  const query=new URLSearchParams(location.search)
+  if(session.active!==true){
+   if(session.active!==false)throw Error('暂时无法确认登录状态，请刷新后重试。')
+   if(query.has('signedOut') || loginState()==='signed-out'){
+    loginState('signed-out');message('你已退出支付中心。点击“统一登录”可重新进入。');return
+   }
+   if(query.has('sso')){message('登录状态未能保存，请确认浏览器允许本站 Cookie，再点击“统一登录”重试。');return}
+   if(loginState()==='attempted'){message('统一登录尚未完成，请点击“统一登录”重试。');return}
+   if(loginState('attempted')==='unavailable'){message('浏览器无法保存登录跳转状态，请点击“统一登录”继续。');return}
+   message('正在前往 Launcher 统一登录…');location.replace('/auth/sso/login');return
+  }
+  loginState(null)
+  if(query.has('sso') || query.has('signedOut')){
+   query.delete('sso');query.delete('signedOut')
+   history.replaceState(null,'',`${location.pathname}${query.size?`?${query}`:''}${location.hash}`)
+  }
   csrf=session.csrf;$('login').hidden=true;$('switch').hidden=false;$('logout').hidden=false;$('security').href=session.securityUrl;$('security').hidden=false
   me=await call('me');$('account').textContent=me.displayName
   if(!me.permissions){message('管理 API 尚未升级，请先部署当前 mx-pay 版本。');return}
-  $('invitation').hidden=!sessionStorage.getItem('mx-pay-invitation')
+  $('invitation').hidden=!pendingInvitation()
   if(!me.grants.length){message(`尚未获得支付权限。当前用户 ID：${me.subject}。请由管理员授权，或接受支付访问邀请。`);return}
   buildNavigation();current=$('modules').firstChild.dataset.module;$('workspace').hidden=false;await load()
  }catch(e){message(e.message)}
 }
 function captureInvitation(){
  const invitation=/^#invite=([A-Za-z0-9_-]{43})$/.exec(location.hash)
- if(invitation){sessionStorage.setItem('mx-pay-invitation',invitation[1]);history.replaceState(null,'',location.pathname);$('invitation').hidden=!csrf}
+ if(invitation){
+  try{sessionStorage.setItem('mx-pay-invitation',invitation[1])}
+  catch{message('浏览器无法暂存支付邀请，请允许本站存储后重新打开邀请链接。');return false}
+  history.replaceState(null,'',`${location.pathname}${location.search}`);$('invitation').hidden=!csrf
+ }
+ return true
 }
-window.addEventListener('hashchange',captureInvitation);captureInvitation()
+window.addEventListener('hashchange',captureInvitation)
 $('accept-invitation').onclick=async()=>{try{await call('invitations/accept','POST',{token:sessionStorage.getItem('mx-pay-invitation')});sessionStorage.removeItem('mx-pay-invitation');await initialize()}catch(e){message(e.message)}}
 $('discard-invitation').onclick=()=>{sessionStorage.removeItem('mx-pay-invitation');$('invitation').hidden=true}
 $('previous').onclick=()=>{if(!busy && page>1){page--;void load()}};$('next').onclick=()=>{if(!busy){page++;void load()}}
-$('logout').onclick=async()=>{try{await api('/auth/sso/logout','POST',{});location.assign('/')}catch(e){message(e.message)}}
-void initialize()
+$('login').onclick=$('switch').onclick=()=>{loginState('attempted')}
+$('logout').onclick=async()=>{try{await api('/auth/sso/logout','POST',{});loginState('signed-out');location.replace('/?signedOut=1')}catch(e){message(e.message)}}
+if(captureInvitation())void initialize()

@@ -183,14 +183,14 @@ if [ "${MX_PAY_BUILD:-1}" = 1 ]; then
     if [ "$MX_PAY_IMAGE_DELIVERY" = registry ]; then
       [ -n "$MX_PAY_IMAGE_REPOSITORY" ] || die 'Discovered registry has no imageRepository'
       platform="$(node "$ROOT/scripts/runtime.mjs" image-platforms "$ROOT")"
-      pay_buildx --platform "$platform" --build-context "mx_common=$ROOT/../../mx-common" --metadata-file "$TMP/build.json" \
+      pay_buildx --platform "$platform" --build-context "mx_common=$ROOT/../../mx-common" --build-context "neon_void=$ROOT/../../mx-launcher/ui-design/src" --metadata-file "$TMP/build.json" \
         --tag "$MX_PAY_IMAGE_REPOSITORY:$tag" --push "$ROOT"
       digest="$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1]))["containerimage.digest"];if(!/^sha256:[a-f0-9]{64}$/.test(d))process.exit(1);console.log(d)' "$TMP/build.json")"
       export MX_PAY_IMAGE="$MX_PAY_IMAGE_REPOSITORY@$digest"
     else
       say 'No registry configured; verifying existing local/trusted SSH containerd access to every selected node'
       platform="$(node "$ROOT/scripts/runtime.mjs" image-plan "$ROOT")"
-      pay_buildx --platform "$platform" --build-context "mx_common=$ROOT/../../mx-common" --tag "local.mx/mx-pay:$tag" --load "$ROOT"
+      pay_buildx --platform "$platform" --build-context "mx_common=$ROOT/../../mx-common" --build-context "neon_void=$ROOT/../../mx-launcher/ui-design/src" --tag "local.mx/mx-pay:$tag" --load "$ROOT"
       content_id="$(docker image inspect --format '{{.Id}}' "local.mx/mx-pay:$tag")"
       [[ "$content_id" =~ ^sha256:[a-f0-9]{64}$ ]] || die 'Invalid built image identity'
       export MX_PAY_IMAGE="local.mx/mx-pay:${content_id#sha256:}"
@@ -201,7 +201,7 @@ if [ "${MX_PAY_BUILD:-1}" = 1 ]; then
     fi
   else
     export MX_PAY_IMAGE="mx-pay:$tag"
-    pay_buildx --build-context "mx_common=$ROOT/../../mx-common" --tag "$MX_PAY_IMAGE" --load "$ROOT"
+    pay_buildx --build-context "mx_common=$ROOT/../../mx-common" --build-context "neon_void=$ROOT/../../mx-launcher/ui-design/src" --tag "$MX_PAY_IMAGE" --load "$ROOT"
   fi
 elif [ "${MX_PAY_BUILD:-1}" != 0 ]; then die 'MX_PAY_BUILD must be 0 or 1'; fi
 [ -n "${MX_PAY_IMAGE:-}" ] || die 'MX_PAY_IMAGE is required with MX_PAY_BUILD=0'
