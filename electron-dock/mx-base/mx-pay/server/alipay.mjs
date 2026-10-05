@@ -58,10 +58,13 @@ export class AlipayChannel {
     try {
       // Explicit response verification; a transport error or missing trade is never payment failure.
       const result = await this.sdk.exec('alipay.trade.query', { timestamp: chinaTime(Date.now()), bizContent: { out_trade_no: alipayOrderNo(order) } }, { validateSign: true })
+      // Only an authenticated, explicit missing-trade response is a normal query outcome.
+      // Opening page-pay is what creates the trade at Alipay; generating its URL does not.
+      if (result.code === '40004' && result.sub_code === 'ACQ.TRADE_NOT_EXIST') return { code: result.code, sub_code: result.sub_code }
       if (result.code !== '10000') throw Error('Query unresolved')
       // Direct merchant queries are authenticated by the configured app. These defaults
       // come from the immutable binding, not fields purportedly returned by Alipay.
       return { ...result, app_id: result.app_id ?? this.config.appId, seller_id: result.seller_id ?? this.config.sellerId, gmt_payment: result.send_pay_date }
-    } catch { throw new PaymentError(503, 'payment_channel_query_unknown', 'Channel query unavailable or trade not yet found; retain this order and query later') }
+    } catch { throw new PaymentError(503, 'payment_channel_query_unknown', 'Channel query could not be verified; retain this order and query later') }
   }
 }

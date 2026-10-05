@@ -55,7 +55,7 @@ export function settingsInput(body) {
 export function createOrder({ tenantId, input, settings, actor, now = new Date().toISOString() }) {
   fields(input, ['environment', 'amountMinor'])
   const env = environment(input.environment)
-  const amountMinor = minor(input.amountMinor, '充值金额', { min: 500 })
+  const amountMinor = minor(input.amountMinor, '充值金额', { min: 100 })
   requirePayment(env === 'test' || settings.enabled, 'payment_channel_disabled', '收款通道尚未开通，请联系管理员', 409)
   return {
     id: randomUUID(), tenantId, environment: env, provider: env === 'test' ? 'mock' : 'manual_alipay',

@@ -44,9 +44,9 @@ export class PaymentCenter {
     authorize(principal, 'orders.read')
     const settings = await this.settings()
     return { environment: principal.environment, provider: principal.environment === 'test' ? 'mock' : 'manual_alipay',
-      enabled: principal.environment === 'test' || settings.enabled, currency: 'CNY', minMinor: 500, maxMinor: 10_000_000,
+      enabled: principal.environment === 'test' || settings.enabled, currency: 'CNY', minMinor: 100, maxMinor: 10_000_000,
       items: [{ id: principal.environment === 'test' ? 'mock' : 'manual_alipay', provider: principal.environment === 'test' ? 'mock' : 'manual_alipay',
-        environment: principal.environment, enabled: principal.environment === 'test' || settings.enabled, mode: 'manual', currency: 'CNY', minMinor: 500, maxMinor: 10_000_000 }, ...this.channelPayments.available(principal)] }
+        environment: principal.environment, enabled: principal.environment === 'test' || settings.enabled, mode: 'manual', currency: 'CNY', minMinor: 100, maxMinor: 10_000_000 }, ...this.channelPayments.available(principal)] }
   }
   async configure(principal, body) {
     authorize(principal, 'settings.write')

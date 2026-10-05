@@ -137,7 +137,7 @@ Launcher 当前已有 local PV/磁盘身份与恢复凭据保护，mx-common 已
 | `GET /v1/reporting/snapshot` | 存量分页与初始增量水位；独立 `reports.read` |
 | `GET /v1/reporting/changes` | 可重放的已提交订单变更，独立于业务 ACK；`reports.read` |
 
-金额使用整数分；当前 CNY 500–10,000,000 分。重复下单需保持相同业务单、金额和幂等键。确认时严格校验订单版本、实收金额、真实流水与到账时间，同一收款账户的流水不能被多个应用重复使用。用户提交付款流水不会使订单变成已支付。
+金额使用整数分；当前 CNY 100–10,000,000 分（¥1–¥100,000，升级自动执行 `pay_007` 金额下限迁移）。重复下单需保持相同业务单、金额和幂等键。确认时严格校验订单版本、实收金额、真实流水与到账时间，同一收款账户的流水不能被多个应用重复使用。用户提交付款流水不会使订单变成已支付。
 
 服务端 SDK 导出 `@qpjoy/mx-pay/client` 的 `PaymentClient`：create/order/act/events/acknowledge/consumeBatch。超时的写请求返回 `payment_outcome_unknown`，不会自动换编号或重发新订单；应查原订单或以原编号重试。
 

@@ -47,7 +47,7 @@ async function fixture(t) {
   await migrate(pay.url,log)
   // Apply unchanged production SQL for identities, the real wallet and payment
   // tables. Unrelated search/vector/ETL migrations are outside this fixture.
-  const selected=['001','002','005','007','018','051','052','054','056','122','123','126']
+  const selected=['001','002','005','007','018','051','052','054','056','122','123','126','127']
   const migrations=new URL('../../migrations/',import.meta.url)
   for(const file of (await readdir(migrations)).sort().filter(name=>selected.includes(name.slice(0,3)))) {
     const client=await hub.pool.connect()
@@ -377,4 +377,40 @@ test('payment connection management is platform-admin only, unavailable publicly
   const denied=await request(base,'fixture-admin','connection');assert.equal(denied.status,400)
   const failure=await denied.text();assert.ok(!failure.includes('secret-token-must-not-leak'));assert.match(failure,/payment_unauthorized/)
   assert.equal((await f.recharge.connections.read('live')).revision,before)
+})
+
+
+test('one-yuan checkout, missing-trade feedback and exact-once credit keep the same payment',check,async t=>{
+  const f=await fixture(t)
+  const legacy=await f.legacy.create(f.tenant,{environment:'test',amountMinor:100},randomUUID(),f.member)
+  await f.legacy.act(f.tenant,legacy.id,'submit',{expectedRevision:0,payerName:'Test fixture',tradeNo:'ONE-YUAN-TEST'},randomUUID(),{actor:f.member})
+  await f.legacy.act(f.tenant,legacy.id,'confirm',{expectedRevision:1,tradeNo:'ONE-YUAN-TEST',receivedAmountMinor:100,feeMinor:null,paidAt:new Date().toISOString(),note:'Synthetic only'},randomUUID(),{actor:'test-finance',finance:true})
+  assert.equal((await f.hub.pool.query('SELECT amount_minor::int AS amount FROM mx_pay.test_credits')).rows[0].amount,100)
+  await f.activate('live');await f.activate('test')
+  for(const amountMinor of [0,99,10000001]) await assert.rejects(f.recharge.create(f.tenant,{environment:'live',amountMinor},randomUUID(),f.member))
+  const input={environment:'live',amountMinor:100},key=randomUUID()
+  const order=await f.recharge.create(f.tenant,input,key,f.member)
+  assert.equal(order.amountMinor,100)
+  assert.equal((await f.recharge.create(f.tenant,input,key,f.member)).paymentId,order.paymentId)
+  const row=await f.recharge.row(order.id),action=(name)=>f.recharge.action(row,name,{expectedRevision:order.revision},randomUUID(),{actor:f.member,finance:false})
+  const checkout=await action('checkout'),url=new URL(checkout.paymentUrl)
+  assert.equal(url.origin,'https://openapi.alipay.com')
+  assert.equal(JSON.parse(url.searchParams.get('biz_content')).total_amount,'1.00')
+  const adapter=f.center.channelPayments.adapter('alipay-live')
+  adapter.query=async()=>({code:'40004',sub_code:'ACQ.TRADE_NOT_EXIST'})
+  const pending=await action('refresh')
+  assert.equal(pending.paymentId,order.paymentId);assert.equal(pending.paymentStatus,'pending')
+  assert.deepEqual(pending.paymentQuery,{status:'not_found'})
+  assert.equal(await f.balance(),0)
+  assert.equal((await f.pay.pool.query('SELECT * FROM pay.outbox')).rowCount,0)
+  await f.settle(order)
+  await f.recharge.sweep('live');await f.recharge.sweep('live')
+  assert.equal(await f.balance(),100)
+  assert.equal((await f.hub.pool.query('SELECT * FROM billing.credit_ledger_entries')).rowCount,1)
+  const simulated=await f.recharge.create(f.tenant,{environment:'test',amountMinor:100},randomUUID(),f.member)
+  await f.settle(simulated);await f.recharge.sweep('test')
+  assert.equal(await f.balance(),100)
+  assert.equal((await f.hub.pool.query('SELECT amount_minor::int AS amount FROM hub_recharge.test_credits')).rows[0].amount,100)
+  // Lowering the amount cannot relax currency or immutable identity checks.
+  await assert.rejects(f.hub.pool.query("UPDATE hub_recharge.orders SET intent=intent||'{\"currency\":\"USD\"}' WHERE id=$1",[order.id]))
 })

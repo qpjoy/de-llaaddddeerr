@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { Coins, Receipt, Scan, SlidersHorizontal } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
 import { DropdownField, ErrorState, Field, LoadingState, Modal, PageHeading, useRemoteData } from './components.jsx'
+import { checkoutLocation, paymentQueryMessage, paymentActionError } from '../shared/payment-checkout.mjs'
 import './payments.css'
 
 const money = (value, currency = 'CNY') => `${currency === 'CNY' ? '¥' : `${currency} `}${(Number(value || 0) / 100).toFixed(2)}`
@@ -20,14 +21,13 @@ export function PaymentsPage({ token, session, query, setQuery, onUnauthorized, 
   const [mode, setMode] = useState('recharge')
   const [environment, setEnvironment] = useState('live')
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [integrationOpen, setIntegrationOpen] = useState(false)
   const [channelRevision, setChannelRevision] = useState(0)
   const allowed = (tenants.data || []).filter(tenant => session.platformAdmin || session.memberships?.some(item => item.tenantId === tenant.id && ['owner', 'admin', 'billing'].includes(item.role)))
   const tenantId = allowed.some(item => item.id === query.get('tenantId')) ? query.get('tenantId') : allowed[0]?.id || ''
   return <div className="mih-pay-page">
     <PageHeading eyebrow="MX PAY" title={session.platformAdmin ? '充值与财务' : '充值与发票'} description="充值到当前租户钱包，供该租户下的服务共同使用。" onRefresh={tenants.refresh} loading={tenants.loading}>
       {session.platformAdmin ? <button className={button} onClick={() => setSettingsOpen(true)}><SlidersHorizontal size={17} />收款设置</button> : null}
-      {session.platformAdmin ? <button className={button} onClick={() => setIntegrationOpen(true)}>支付服务接入</button> : null}
+      {session.platformAdmin ? <a className={button} href="#/settings/payments">支付接入设置</a> : null}
     </PageHeading>
     {tenants.error ? <ErrorState error={tenants.error} onRetry={tenants.refresh} /> : null}
     <div className="mih-pay-toolbar qp-panel">
@@ -38,7 +38,6 @@ export function PaymentsPage({ token, session, query, setQuery, onUnauthorized, 
     {environment === 'test' ? <p className="mih-pay-notice">测试环境：只使用模拟订单或支付宝沙箱，不增加正式可消费余额；开票信息也只用于流程测试。</p> : null}
     {mode === 'finance' || tenantId ? <PaymentWorkspace key={`${tenantId}:${environment}:${mode}:${channelRevision}`} {...{ token, session, tenantId, environment, mode, notify, onUnauthorized }} /> : tenants.loading ? <LoadingState /> : <p>暂无可管理账务的租户，请联系管理员分配账务员或租户管理角色。</p>}
     {settingsOpen ? <PaymentSettings {...{ token, onUnauthorized }} onClose={() => setSettingsOpen(false)} onSaved={() => { setSettingsOpen(false); setChannelRevision(value => value + 1); notify?.('收款配置已保存') }} /> : null}
-    {integrationOpen ? <PaymentIntegration {...{token,onUnauthorized}} onClose={()=>{setIntegrationOpen(false);setChannelRevision(value=>value+1)}} /> : null}
   </div>
 }
 
@@ -59,7 +58,7 @@ function PaymentWorkspace({ token, session, tenantId, environment, mode, onUnaut
   const rows = state.data?.orders.items || [], channels = state.data?.channels
   const amountMinor = parseAmount(amount), enabled = channels?.[environment]?.enabled
   const center = channels?.[environment]?.backend === 'center'
-  const valid = amountMinor >= 500 && amountMinor <= 10_000_000
+  const valid = amountMinor >= 100 && amountMinor <= 10_000_000
   const refresh = () => state.refresh()
   async function create(event) {
     event.preventDefault(); if (lock.current) return
@@ -90,9 +89,9 @@ function PaymentWorkspace({ token, session, tenantId, environment, mode, onUnaut
       <section className="qp-panel mih-pay-balance"><Coins size={26} /><div><span>正式可用余额</span><strong>{state.data?.billing?.account ? money(state.data.billing.account.availableMinor, state.data.billing.account.currency) : '尚未开户'}</strong></div><div><span>冻结金额</span><strong>{money(state.data?.billing?.account?.heldMinor, state.data?.billing?.account?.currency)}</strong></div>{session.platformAdmin || session.capabilities?.includes('consumer.read') ? <a className={button} href={`#/plans?tenantId=${encodeURIComponent(tenantId)}`}>用量与账单</a> : null}</section>
       <form className="mih-pay-checkout" onSubmit={create}>
         <section className="qp-panel mih-pay-card"><h2><Scan size={22} />账户充值</h2><p>{center ? channels?.[environment]?.provider === 'mock' ? '模拟支付流程' : environment === 'test' ? '支付宝沙箱收银台' : '支付宝收银台' : environment === 'test' ? '模拟支付' : '支付宝扫码付款 · 人工核实到账'}</p>
-          <div className="mih-pay-presets">{['50','100','500','1000'].map(value => <button key={value} type="button" className={amount === value ? primary : button} onClick={() => setAmount(value)}>{money(Number(value) * 100)}</button>)}</div>
+          <div className="mih-pay-presets">{['1','50','100','500','1000'].map(value => <button key={value} type="button" className={amount === value ? primary : button} onClick={() => setAmount(value)}>{money(Number(value) * 100)}</button>)}</div>
           <Input label="自定义金额（元）" value={amount} onChange={event => setAmount(event.target.value)} inputMode="decimal" maxLength={9} required />
-          <small>单笔 ¥5.00–¥100,000.00，最多两位小数。</small>
+          <small>单笔 ¥1.00–¥100,000.00，最多两位小数。</small>
         </section>
         <aside className="qp-panel mih-pay-card"><h2>订单摘要</h2><dl className="mih-pay-facts"><div><dt>支付方式</dt><dd>{environment === 'test' ? center && channels?.test?.provider === 'alipay' ? '支付宝沙箱' : '模拟测试' : '支付宝'}</dd></div><div><dt>收款人</dt><dd>{environment === 'test' ? '测试账户' : channels?.live.payeeName || '尚未配置'}</dd></div><div><dt>合计</dt><dd className="mih-pay-total">{money(valid ? amountMinor : 0)}</dd></div></dl>
           <p className="mih-pay-muted">{center ? '付款确认后自动处理余额入账。请保留原订单，勿重复付款。' : environment === 'test' ? '完整验证订单、核实和开票流程。' : '下单后扫码，按订单金额付款并提交流水号。核实到账后，余额即可使用。'}</p>
@@ -120,11 +119,16 @@ function OrderDetail({ order: initial, token, session, onClose, onChanged, notif
   const intent = useRef(null), lock = useRef(false)
   async function act(action, values = {}) {
     if (lock.current) return
-    lock.current = true; setBusy(true); setError(null)
+    lock.current = true; setBusy(action); setError(null)
     const body = { expectedRevision: order.revision, ...values }, signature = JSON.stringify([action, body])
     if (intent.current?.signature !== signature) intent.current = { signature, key: crypto.randomUUID() }
-    try { const next = await adminApi.paymentAction(token, order.tenantId, order.id, action, body, intent.current.key); setOrder(next); intent.current = null; onChanged(); notify?.('订单已更新') }
-    catch (err) { setError(err) } finally { lock.current = false; setBusy(false) }
+    try {
+      const next = await adminApi.paymentAction(token, order.tenantId, order.id, action, body, intent.current.key)
+      setOrder(next); intent.current = null; onChanged()
+      // Navigate in this tab after preparing the same order; async popup blockers do not apply.
+      if (action === 'checkout') window.location.assign(checkoutLocation(next.paymentUrl, next.environment))
+      else if (action !== 'refresh') notify?.('订单已更新')
+    } catch (err) { setError(paymentActionError(err)) } finally { lock.current = false; setBusy(false) }
   }
   async function refresh() {
     setError(null); setBusy(true)
@@ -135,11 +139,11 @@ function OrderDetail({ order: initial, token, session, onClose, onChanged, notif
       <dl className="mih-pay-facts"><div><dt>环境</dt><dd>{order.environment === 'test' ? '测试（不可消费）' : '正式'}</dd></div><div><dt>收款人</dt><dd>{order.checkout.payeeName || '请核对支付宝收银台'}</dd></div><div><dt>下单时间</dt><dd>{stamp(order.createdAt)}</dd></div></dl>
       {order.backend === 'center' && order.status !== 'paid' ? <section className="mih-pay-card">
         <p className="mih-pay-notice">{order.paymentStatus === 'paid' ? '付款已确认，余额入账处理中。请勿再次付款；如长时间未到账，请联系账务人员。' : !order.paymentId ? '充值意图已保存，支付订单尚待确认。请找回原订单，不要重复创建。' : order.provider === 'mock' ? '模拟订单无需真实付款。由支付中心确认测试付款后，这里会记录测试入账。' : '付款后可主动查证支付状态；余额到账以本页入账结果为准。'}</p>
+        {!error && paymentQueryMessage(order) ? <p className="mih-pay-notice" role="status">{paymentQueryMessage(order)}</p> : null}
         <p>支付订单：{order.paymentId || '待确认'}</p>
         {!order.paymentId ? <button className={primary} disabled={busy} onClick={()=>act('retry')}>找回原支付订单</button> : null}
-        {order.paymentId && order.provider === 'alipay' && order.paymentStatus === 'pending' ? <button className={primary} disabled={busy} onClick={()=>act('checkout')}>准备支付宝收银台</button> : null}
-        {order.paymentUrl && order.paymentStatus === 'pending' ? <p><a className={primary} href={order.paymentUrl} target="_blank" rel="noopener noreferrer">打开支付宝收银台</a></p> : null}
-        {order.paymentId ? <button className={button} disabled={busy} onClick={()=>act('refresh')}>查证付款状态</button> : null}
+        {order.paymentId && order.provider === 'alipay' && order.paymentStatus === 'pending' ? <button className={primary} disabled={busy} onClick={()=>act('checkout')}>{busy === 'checkout' ? '正在前往支付宝…' : '支付宝支付'}</button> : null}
+        {order.paymentId ? <button className={button} disabled={busy} onClick={()=>act('refresh')}>{busy === 'refresh' ? '正在查询…' : '查询付款状态'}</button> : null}
       </section> : null}
       {order.backend !== 'center' && order.status === 'pending' ? <>
         {order.checkout.qrImage ? <img className="mih-pay-qr" src={order.checkout.qrImage} alt={`支付宝收款码，收款人 ${order.checkout.payeeName}`} /> : null}
@@ -171,13 +175,6 @@ export function PaymentConnectionSettingsPage({ token, session, onUnauthorized }
     <PageHeading eyebrow="SYSTEM SETTINGS" title="系统设置 · 支付接入" description="连接独立支付中心，管理正式充值与测试流程。" />
     <PaymentConnectionsWorkspace {...{ token, onUnauthorized }} />
   </div>
-}
-
-function PaymentIntegration({ token, onClose, onUnauthorized }) {
-  const [busy, setBusy] = useState(false)
-  return <Modal title="支付服务接入" description="检查并保存连接后，再启用对应环境的收款。" size="large" busy={busy} onClose={onClose} closeOnBackdrop={false}>
-    <PaymentConnectionsWorkspace {...{ token, onUnauthorized }} onBusy={setBusy} />
-  </Modal>
 }
 
 function PaymentConnectionsWorkspace({ token, onUnauthorized, onBusy }) {

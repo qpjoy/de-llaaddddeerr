@@ -134,7 +134,7 @@ export class RechargeService {
   }
   async create(tenantId, body, key, actor) {
     fields(body, ['environment','amountMinor']); requestKey(key); environment(body.environment)
-    minor(body.amountMinor, 'amountMinor', { min: 500 })
+    minor(body.amountMinor, 'amountMinor', { min: 100 })
     const hash = fingerprint(body)
     const row = await this.atomic(async client => {
       const prior = (await client.query('SELECT * FROM hub_recharge.orders WHERE tenant_id=$1 AND environment=$2 AND request_key=$3', [tenantId, body.environment, key])).rows[0]
@@ -209,7 +209,12 @@ export class RechargeService {
           const checkout = await source.client.checkout(payment.id)
           return { ...await this.order(row.id, row.tenant_id), paymentUrl: checkout.payUrl }
         }
-        if (action === 'refresh' && payment.provider === 'alipay') await this.attach(row, (await source.client.refresh(payment.id)).order)
+        if (action === 'refresh' && payment.provider === 'alipay') {
+          const result = await source.client.refresh(payment.id)
+          await this.attach(row, result.order)
+          const status = result.query?.status === 'not_found' ? 'not_found' : result.observation?.outcome
+          return { ...await this.order(row.id, row.tenant_id), paymentQuery: { status: ['not_found','pending','paid','duplicate','review'].includes(status) ? status : 'unknown' } }
+        }
         return this.order(row.id, row.tenant_id)
       })
     }

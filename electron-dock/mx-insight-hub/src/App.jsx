@@ -39,6 +39,7 @@ import {
   ShieldCheck,
   SidebarSimple,
   SignOut,
+  SlidersHorizontal,
   Users,
   Stack,
   Storefront,
@@ -345,7 +346,9 @@ const THEME_KEY = 'mx-insight-hub.theme'
 const DATA_PRODUCTS_NAV_KEY = 'data-products'
 const DATA_CLEANING_NAV_KEY = 'data-cleaning'
 const AGENT_CENTER_NAV_KEY = 'agent-center'
+const SYSTEM_SETTINGS_NAV_KEY = 'system-settings'
 const NAV_PARENTS = {
+  [SYSTEM_SETTINGS_NAV_KEY]: { label: '系统设置', description: '平台配置与服务接入', icon: SlidersHorizontal },
   [DATA_PRODUCTS_NAV_KEY]: {
     label: '数据产品',
     description: '发现、数据服务与场景应用',
@@ -411,7 +414,7 @@ const ROUTES = [
   { path: '/agent/runtime', label: '原中心 Agent', description: '原有管线、断言与处理边界', icon: Pulse, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentRuntimeRoute, capability: 'membership.write', platformAdmin: true },
   { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage, capability: 'usage.read' },
   { path: '/notifications', label: '通知中心', description: '告警分类、处理与追溯', icon: Pulse, group: '可观测性', component: NotificationsPage, platformAdmin: true, adminTokenOnly: true },
-  { path: '/settings/payments', label: '系统设置', description: '支付中心连接与正式接入', icon: Coins, group: '平台管理', component: PaymentConnectionSettingsPage, platformAdmin: true },
+  { path: '/settings/payments', label: '支付接入', description: '支付中心连接与正式接入', icon: Coins, group: '平台管理', navParent: SYSTEM_SETTINGS_NAV_KEY, component: PaymentConnectionSettingsPage, platformAdmin: true },
   { path: '/runtime', label: '运行状态', description: '健康、依赖与恢复', icon: Pulse, group: '可观测性', component: RuntimePage, capability: 'usage.read', platformAdmin: true },
   { path: '/docs', label: '接口文档', description: '登录后查看接口说明', icon: Books, group: '接口与文档', component: DocsPage },
 ]

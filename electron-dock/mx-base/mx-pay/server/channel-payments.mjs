@@ -24,7 +24,7 @@ export class ChannelPayments {
   available(principal) {
     return [...this.adapters.values()].filter(({ config: c }) => c.environment === principal.environment && c.allowedApps.includes(principal.appId))
       .map(({ config: c }) => ({ id: c.id, provider: c.provider, environment: c.environment, enabled: c.enabled,
-        mode: 'page', currency: 'CNY', minMinor: 500, maxMinor: 10_000_000 }))
+        mode: 'page', currency: 'CNY', minMinor: 100, maxMinor: 10_000_000 }))
   }
   adapter(id) {
     const adapter = this.adapters.get(id)
@@ -44,7 +44,7 @@ export class ChannelPayments {
     requirePayment(c.enabled, 'payment_channel_disabled', 'Payment channel disabled', 409)
     const now = new Date().toISOString(), id = randomUUID()
     return { id, environment: principal.environment, provider: 'alipay', merchantAccountId: c.sellerId,
-      subject: alipaySubject(body.subject), amountMinor: minor(body.amountMinor, 'amountMinor', { min: 500 }), currency: 'CNY',
+      subject: alipaySubject(body.subject), amountMinor: minor(body.amountMinor, 'amountMinor', { min: 100 }), currency: 'CNY',
       status: 'pending', revision: 0, checkout: { type: 'alipay_page', channelId: c.id, alipayAppId: c.appId, sellerId: c.sellerId, outTradeNo: newAlipayOrderNo(id) },
       submission: null, settlement: null, rejection: null, createdBy: `credential:${principal.id}`, createdAt: now, updatedAt: now }
   }
@@ -74,6 +74,10 @@ export class ChannelPayments {
     requirePayment(acquired.rowCount === 1, 'payment_channel_query_busy', 'Query in progress or cooling down; read the order and retry later', 429)
     try {
       const result = await adapter.query(order)
+      if (result.code === '40004' && result.sub_code === 'ACQ.TRADE_NOT_EXIST') {
+        // Keep the original order; a concurrent notification may already have settled it.
+        return { order: await this.center.order(principal, id), query: { status: 'not_found' } }
+      }
       // A signed but unrelated response must never settle another application's order.
       requirePayment(result.out_trade_no === alipayOrderNo(order), 'payment_channel_query_identity', 'Query returned an unrelated order', 502)
       const observation = await this.observe(adapter, result, 'query')

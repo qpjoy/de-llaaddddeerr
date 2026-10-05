@@ -101,8 +101,11 @@ test('official SDK HTTP query verifies signed requests/responses; unknown outcom
   assert.ok(Math.abs(Date.parse(alipayTime(params.timestamp))-Date.now())<5000)
   const canonical=Object.keys(params).filter(k=>k!=='sign'&&params[k]!=='').sort().map(k=>`${k}=${params[k]}`).join('&')
   assert.ok(createVerify('RSA-SHA256').update(canonical).verify(merchant.publicKey,params.sign,'base64'))
-  for(const invalid of [envelope(query).replace('12.00','99.00'),JSON.stringify({alipay_trade_query_response:query}),
-    envelope({...query,code:'40004',sub_code:'ACQ.TRADE_NOT_EXIST'}),'{private credential must not appear']) {
+  const missing = {code:'40004',sub_code:'ACQ.TRADE_NOT_EXIST',msg:'Business Failed'}
+  response=envelope(missing)
+  assert.deepEqual(await adapter.query(order),{code:'40004',sub_code:'ACQ.TRADE_NOT_EXIST'})
+  for(const invalid of [JSON.stringify({alipay_trade_query_response:missing}),envelope(missing).replace('ACQ.TRADE_NOT_EXIST','ACQ.SYSTEM_ERROR'),envelope(query).replace('12.00','99.00'),JSON.stringify({alipay_trade_query_response:query}),
+    envelope({...query,code:'40004',sub_code:'ACQ.SYSTEM_ERROR'}),'{private credential must not appear']) {
     response=invalid
     await assert.rejects(adapter.query(order),e=>e.code==='payment_channel_query_unknown'&&!e.message.includes('credential'))
   }
@@ -252,6 +255,21 @@ test('Alipay HTTP and real PostgreSQL: notification atomicity, replay, isolation
     await service.act(live,manual.id,'confirm',{expectedRevision:1,tradeNo:notice.trade_no,receivedAmountMinor:1200,feeMinor:null,paidAt:new Date().toISOString(),note:'Synthetic receipt'},randomUUID())
     assert.equal((await service.channelPayments.notify(c.id,notice)).reason,'receipt_used_by_another_order')
     assert.equal((await service.order(live,automatic.id)).status,'pending')
+  })
+  await t.test('missing trade preserves original pending order and creates no payment evidence',async()=>{
+    const order=await create(),adapter=service.channelPayments.adapter(cfg.id),original=adapter.query
+    adapter.query=async()=>({code:'40004',sub_code:'ACQ.TRADE_NOT_EXIST'})
+    try {
+      const result=await client.refresh(order.id)
+      assert.equal(result.query.status,'not_found')
+      assert.deepEqual(result.order,order)
+      assert.deepEqual(await facts(order.id),{status:'pending',events:0,observations:0,reports:1})
+      // Notification races with a negative query. A paid order must never regress.
+      await post(paid(order))
+      await pool.query("UPDATE pay.channel_queries SET available_at=now()-interval '1 second' WHERE order_id=$1",[order.id])
+      assert.equal((await client.refresh(order.id)).order.status,'paid')
+      assert.equal((await facts(order.id)).events,1)
+    } finally {adapter.query=original}
   })
   await t.test('query timeout preserves pending; concurrent refresh throttled; query/notify convergence',async()=>{
     const order=await create(),adapter=service.channelPayments.adapter(cfg.id),original=adapter.query.bind(adapter)

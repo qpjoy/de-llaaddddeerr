@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createOrder, transitionOrder, fingerprint, defaultSettings, settingsInput } from '../src/index.mjs'
 
 test('amounts are integer minor units and live channels fail closed', () => {
-  for (const amountMinor of [0, 499, 10000001, 5.01, '500', NaN, Infinity]) assert.throws(() => createOrder({ tenantId: 't', input: { environment: 'test', amountMinor }, settings: defaultSettings(), actor: 'test' }))
+  for (const amountMinor of [0, 99, 10000001, 5.01, '500', NaN, Infinity]) assert.throws(() => createOrder({ tenantId: 't', input: { environment: 'test', amountMinor }, settings: defaultSettings(), actor: 'test' }))
   assert.throws(() => createOrder({ tenantId: 't', input: { environment: 'live', amountMinor: 500 }, settings: defaultSettings(), actor: 'test' }), { code: 'payment_channel_disabled' })
   assert.throws(() => createOrder({ tenantId: 't', input: { environment: 'test', amountMinor: 500, status: 'paid' }, settings: defaultSettings() }))
 })

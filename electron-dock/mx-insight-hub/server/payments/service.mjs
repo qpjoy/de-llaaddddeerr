@@ -5,7 +5,7 @@ export class PaymentService {
   constructor(hubStore) { this.hub = hubStore; this.store = new PaymentStore(hubStore) }
   async channels() {
     const settings = await this.store.settings()
-    return { storage: this.store.pool ? 'postgres' : 'memory', live: { provider: 'manual_alipay', enabled: settings.enabled, payeeName: settings.enabled ? settings.payeeName : null }, test: { provider: 'mock', enabled: true }, minMinor: 500, maxMinor: 10_000_000, currency: 'CNY' }
+    return { storage: this.store.pool ? 'postgres' : 'memory', live: { provider: 'manual_alipay', enabled: settings.enabled, payeeName: settings.enabled ? settings.payeeName : null }, test: { provider: 'mock', enabled: true }, minMinor: 100, maxMinor: 10_000_000, currency: 'CNY' }
   }
   async configure(body, actor) {
     const input = settingsInput(body)
