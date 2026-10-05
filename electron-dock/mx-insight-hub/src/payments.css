@@ -39,3 +39,10 @@
 .mih-pay-check input { margin-top:5px; }
 .mih-pay-invoice { margin-top:25px; padding-top:15px; border-top:1px solid var(--qp-line); overflow-wrap:anywhere; }
 @media(max-width:760px) { .mih-pay-checkout,.mih-pay-filters { grid-template-columns:1fr; } .mih-pay-card { padding:20px; } .mih-pay-toolbar { padding:16px; } .mih-pay-balance { gap:16px; } .mih-pay-facts > div { flex-wrap:wrap; gap:8px; } .mih-pay-facts dd { text-align:left; } }
+
+.mih-pay-connection { max-width: 1040px; }
+.mih-pay-connection-fields { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; }
+.mih-pay-connection .mih-pay-muted { margin:0; font-size:13px; }
+.mih-pay-connection-source { overflow-wrap:anywhere; }
+.mih-pay-connection .mih-pay-invoice .qp-button { margin-top:18px; }
+@media(max-width:760px) { .mih-pay-connection-fields { grid-template-columns:1fr; } }

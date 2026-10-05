@@ -449,6 +449,8 @@ export const adminApi = {
   createPaymentOrder: (token, tenantId, body, key) => request(token, `${ADMIN_ROOT}/payments/tenants/${encodeURIComponent(tenantId)}/orders`, { method: 'POST', body, headers: { 'idempotency-key': key } }),
   paymentAction: (token, tenantId, id, action, body, key) => request(token, `${ADMIN_ROOT}/payments/tenants/${encodeURIComponent(tenantId)}/orders/${encodeURIComponent(id)}/${encodeURIComponent(action)}`, { method: 'POST', body, headers: { 'idempotency-key': key } }),
   paymentIntegration: token => request(token, `${ADMIN_ROOT}/payments/integration`),
+  checkPaymentConnection: (token, environment, body) => request(token, `${ADMIN_ROOT}/payments/integration/${environment}/check`, {method:'POST',body}),
+  savePaymentConnection: (token, environment, body) => request(token, `${ADMIN_ROOT}/payments/integration/${environment}/connection`, {method:'PUT',body}),
   activatePaymentIntegration: (token, environment, sourceId) => request(token, `${ADMIN_ROOT}/payments/integration/${environment}/activate`, {method:'POST',body:{sourceId,acknowledge:true}}),
   tenantBilling: (token, tenantId, query = {}) => request(
     token,

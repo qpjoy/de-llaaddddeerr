@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { PaymentClient } from '@qpjoy/mx-pay/client'
 import { verifyPaymentSource, verifyPaymentOrder } from '@qpjoy/mx-pay/integration'
-import { fields, fingerprint, minor, environment, requestKey, requirePayment, transitionOrder } from '@qpjoy/mx-pay'
+import { PaymentError, fields, fingerprint, minor, environment, requestKey, requirePayment, transitionOrder } from '@qpjoy/mx-pay'
 import { withPgTransaction } from '../stores/postgres-store.mjs'
 import { parseRechargeSources } from './recharge-config.mjs'
+import { PaymentConnections, checkPaymentConnection, connectionFailure } from './connections.mjs'
 
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 const safeCode = error => /^(payment_|recharge_|credit_|wallet_|tenant_)[a-z_]+$/.test(error?.code || '') ? error.code : 'recharge_dependency_unavailable'
@@ -11,9 +12,11 @@ const safeCode = error => /^(payment_|recharge_|credit_|wallet_|tenant_)[a-z_]+$
 // Hub owns recharge intent, beneficiary and delivery. Remote payment facts never
 // become wallet credit merely by being read or shown in a browser/report.
 export class RechargeService {
-  constructor(hubStore, sources = [], { clientFactory = config => new PaymentClient({ ...config, timeoutMs: 5000 }), logger = console } = {}) {
+  constructor(hubStore, sources = [], { clientFactory = config => new PaymentClient({ ...config, timeoutMs: 5000 }), logger = console, pepper } = {}) {
     this.hub = hubStore; this.pool = hubStore.pool; this.logger = logger
     this.sources = new Map(sources.map(source => [source.environment, { ...source, client: clientFactory(source) }]))
+    this.clientFactory = clientFactory
+    this.connections = pepper ? new PaymentConnections(this.pool,pepper) : null
     this.cursors = new Map(); this.failures = new Map(); this.stopped = false; this.running = null; this.inFlight = 0
   }
   atomic(work) { return withPgTransaction(this.pool, async client => {
@@ -30,11 +33,15 @@ export class RechargeService {
     return (await client.query(`SELECT * FROM hub_recharge.routes WHERE environment=$1 ${lock}`, [env])).rows[0]
   }
   async owns(env) { return Boolean((await this.route(env))?.source_id) }
+  async configuredSource(env) {
+    const saved = await this.connections?.read(env)
+    return saved ? {...saved.source,configRevision:saved.revision,client:this.clientFactory(saved.source)} : this.sources.get(env)
+  }
   async remote(env, { allowUnbound = false } = {}) {
-    const source = this.sources.get(env)
+    const source = await this.configuredSource(env)
     requirePayment(source, 'recharge_unconfigured', '支付连接尚未配置，原订单会保留', 503)
     const identity = await source.client.identity()
-    verifyPaymentSource(identity, { appId: source.appId, environment: env, features: ['initiatorRef'],
+    verifyPaymentSource(identity, { appId: source.appId, environment: env, sourceId: source.sourceId, features: ['initiatorRef'],
       scopes: ['orders.read','orders.write','events.read','events.ack'] },
     { sourceCode: 'recharge_source_mismatch', scopeCode: 'recharge_credential_scope' })
     const route = await this.route(env)
@@ -49,10 +56,35 @@ export class RechargeService {
       const errors = (await this.pool.query('SELECT event_id AS "eventId",code,attempts,updated_at AS "updatedAt" FROM hub_recharge.delivery_errors WHERE environment=$1 ORDER BY updated_at DESC LIMIT 20', [env])).rows
       const base = { environment: env, active: Boolean(route.source_id), sourceId: route.source_id, legacyOrderCount: legacy, errors, workerError: this.failures.get(env)?.code || null }
       try {
+        base.connection = this.connections ? this.connections.view(await this.connections.current(env,this.sources.get(env))) : null
         const source = await this.remote(env, { allowUnbound: true })
-        return { ...base, configured: true, sourceId: source.identity.sourceId, appId: source.appId, channelId: source.channelId }
-      } catch (error) { return { ...base, configured: false, error: safeCode(error) } }
+        const checked = await checkPaymentConnection(source,source.client,route,source.identity)
+        return { ...base, ...checked, configured: true }
+      } catch (error) { const failure=connectionFailure(error);return { ...base, configured: false, error:failure.code,errorMessage:failure.message } }
     })) }
+  }
+  async configure(env, body, actor, {checkOnly=false} = {}) {
+    environment(env)
+    requirePayment(this.connections,'recharge_unavailable','界面配置需要保留的 Hub 加密密钥和支付连接迁移',503)
+    const candidate = await this.connections.candidate(env,body,this.sources.get(env))
+    let checked
+    try {
+      checked = await this.network(()=>this.route(env).then(route=>checkPaymentConnection(candidate.source,this.clientFactory(candidate.source),route)))
+    } catch(error) {
+      const failure=connectionFailure(error)
+      throw new PaymentError(400,failure.code,failure.message)
+    }
+    if(checkOnly)return checked
+    const connection = await this.atomic(async client=>{
+      // Same lock as activation: an in-flight probe cannot overwrite or bind a
+      // newer configuration, and an activated source can never be replaced.
+      const route=await this.route(env,client,'FOR UPDATE')
+      requirePayment(!route.source_id || route.source_id===checked.sourceId && route.app_id===checked.appId && route.channel_id===checked.channelId,
+        'recharge_source_mismatch','连接与已绑定支付源不一致，原配置保留',409)
+      return this.connections.save(client,env,candidate,checked,actor)
+    })
+    this.failures.delete(env)
+    return {...checked,connection}
   }
   async activate(env, body, actor) {
     fields(body, ['sourceId','acknowledge']); environment(env)
@@ -63,6 +95,7 @@ export class RechargeService {
     requirePayment(channel && (channel.provider === 'alipay' || env === 'test' && channel.provider === 'mock'), 'recharge_channel_unsupported', '当前接入支持支付宝收银台或 mock 测试', 409)
     return this.atomic(async client => {
       const route = await this.route(env, client, 'FOR UPDATE')
+      await this.connections?.assertRevision(client,env,source.configRevision || 0)
       if (route.source_id) {
         requirePayment(route.source_id === source.identity.sourceId && route.app_id === source.appId && route.channel_id === source.channelId,
           'recharge_source_mismatch', '支付接入已经变化，请重新核对', 409)
@@ -243,9 +276,9 @@ export class RechargeService {
     if (page.items.length <= 10 && !page.nextAfter) this.cursors.delete(env)
   }
   start() {
-    if (this.running || this.timer || !this.sources.size) return
+    if (this.running || this.timer || !this.connections && !this.sources.size) return
     const tick = async () => {
-      for (const env of this.sources.keys()) {
+      for (const env of this.connections ? ['test','live'] : this.sources.keys()) {
         if (this.stopped) return
         if ((this.failures.get(env)?.until || 0) > Date.now()) continue
         try { await this.sweep(env); this.failures.delete(env) }

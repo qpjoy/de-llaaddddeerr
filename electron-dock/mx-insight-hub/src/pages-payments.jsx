@@ -165,27 +165,90 @@ function OrderDetail({ order: initial, token, session, onClose, onChanged, notif
   </Modal>
 }
 
-function PaymentIntegration({token,onClose,onUnauthorized}) {
-  const load=useCallback(()=>adminApi.paymentIntegration(token),[token])
-  const state=useRemoteData(load,onUnauthorized),[busy,setBusy]=useState(false),[error,setError]=useState(null),[accepted,setAccepted]=useState(false)
-  async function activate(row) {
-    setBusy(true);setError(null)
-    try {await adminApi.activatePaymentIntegration(token,row.environment,row.sourceId);state.refresh();setAccepted(false)}
-    catch(err){setError(err)} finally{setBusy(false)}
-  }
-  return <Modal title="支付服务接入" description="仅控制后续新订单，保留原登录、租户和钱包。" size="large" busy={busy} onClose={onClose}>
-    {error||state.error?<ErrorState error={error||state.error} onRetry={state.refresh}/>:null}
-    {state.loading?<LoadingState/>:state.data?.items?.length?state.data.items.map(row=><section className="qp-panel mih-pay-card" key={row.environment}>
-      <h2>{row.environment==='test'?'测试流程':'正式充值'} · {row.active?'已切换':'沿用当前充值'}</h2>
-      <p>{row.configured?`已连接支付应用 ${row.appId}`:'支付服务未配置或暂不可达；请核对服务端配置。'}</p>
-      {row.sourceId?<p>支付源：{row.sourceId}</p>:null}
-      {row.legacyOrderCount>0&&!row.active?<p className="mih-pay-notice">已有 {row.legacyOrderCount} 笔正式历史订单，必须先完成存量交接，当前不能切换。</p>:null}
-      {row.workerError?<p className="mih-pay-notice">交付暂缓：{row.workerError}，系统将重试原事件。</p>:null}
-      {row.errors?.length?<details><summary>近期交付异常（最多 20 条），请核对原事件，勿直接补加余额</summary>{row.errors.map(error=><p key={error.eventId}>{error.eventId} · {error.code} · 已尝试 {error.attempts} 次</p>)}</details>:null}
-      {!row.active?<button className={primary} disabled={busy||!accepted||!row.configured||row.legacyOrderCount>0} onClick={()=>activate(row)}>启用{row.environment==='test'?'测试':'正式'}支付接入</button>:null}
-    </section>):<p>独立支付接入需要持久化数据库。</p>}
-    <label className="mih-pay-check"><input type="checkbox" checked={accepted} onChange={event=>setAccepted(event.target.checked)}/>已核对支付源与渠道；正式切换前已停用旧人工收款。启用后不会因支付服务不可达自动退回旧收款方式。</label>
+export function PaymentConnectionSettingsPage({ token, session, onUnauthorized }) {
+  if (!session?.platformAdmin) return <p>支付连接仅供 Hub 平台管理员管理。</p>
+  return <div className="mih-pay-page">
+    <PageHeading eyebrow="SYSTEM SETTINGS" title="系统设置 · 支付接入" description="连接独立支付中心，管理正式充值与测试流程。" />
+    <PaymentConnectionsWorkspace {...{ token, onUnauthorized }} />
+  </div>
+}
+
+function PaymentIntegration({ token, onClose, onUnauthorized }) {
+  const [busy, setBusy] = useState(false)
+  return <Modal title="支付服务接入" description="检查并保存连接后，再启用对应环境的收款。" size="large" busy={busy} onClose={onClose} closeOnBackdrop={false}>
+    <PaymentConnectionsWorkspace {...{ token, onUnauthorized }} onBusy={setBusy} />
   </Modal>
+}
+
+function PaymentConnectionsWorkspace({ token, onUnauthorized, onBusy }) {
+  const load = useCallback(() => adminApi.paymentIntegration(token), [token])
+  const state = useRemoteData(load, onUnauthorized)
+  const [environment, setEnvironment] = useState('live'), [busy, setBusy] = useState(false)
+  const row = state.data?.items?.find(item => item.environment === environment)
+  const setWorking = value => { setBusy(value); onBusy?.(value) }
+  return <div className="mih-pay-page">
+    <div className="mih-pay-record-heading">
+      <DropdownField label="接入环境" value={environment} disabled={busy} onChange={setEnvironment} options={[{ value: 'live', label: '正式充值' }, { value: 'test', label: '测试流程 · 不计入正式余额' }]} />
+      <button className={button} disabled={busy || state.loading} onClick={state.refresh}>重新读取配置</button>
+    </div>
+    {state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}
+    {state.loading ? <LoadingState /> : row ? <PaymentConnectionForm key={`${environment}:${row.connection?.revision}:${row.active}`} {...{ row, token, onUnauthorized }} onBusy={setWorking} onChanged={state.refresh} /> : !state.error ? <p>独立支付接入需要持久化数据库。</p> : null}
+  </div>
+}
+
+function PaymentConnectionForm({ row, token, onBusy, onChanged, onUnauthorized }) {
+  const initial = row.connection || { revision: 0, origin: 'none', baseUrl: '', appId: 'mx-insight-hub', channelId: '', tokenConfigured: false }
+  const [form, setForm] = useState(() => ({ revision: initial.revision, baseUrl: initial.baseUrl, appId: initial.appId, channelId: initial.channelId || (row.environment === 'live' ? 'alipay-live' : 'mock'), token: '' }))
+  const [busy, setBusy] = useState(''), [error, setError] = useState(null), [checked, setChecked] = useState(null), [accepted, setAccepted] = useState(false)
+  const lock = useRef(false)
+  const dirty = Boolean(form.token || ['baseUrl','appId','channelId'].some(key => form[key] !== initial[key]))
+  const valid = Boolean(form.baseUrl.trim() && form.appId.trim() && form.channelId.trim() && (form.token || initial.tokenConfigured))
+  const change = (key, value) => { setForm(current => ({ ...current, [key]: value })); setChecked(null); setError(null); setAccepted(false) }
+  async function act(action) {
+    if (lock.current) return
+    lock.current = true; setBusy(action); onBusy(true); setError(null)
+    try {
+      if (action === 'activate') {
+        await adminApi.activatePaymentIntegration(token, row.environment, row.sourceId)
+        onChanged()
+      } else {
+        const body = { ...form, baseUrl: form.baseUrl.trim(), appId: form.appId.trim(), channelId: form.channelId.trim() }
+        const result = await adminApi[action === 'check' ? 'checkPaymentConnection' : 'savePaymentConnection'](token, row.environment, body)
+        setChecked(result)
+        if (action === 'save') { setForm(current => ({ ...current, token: '' })); onChanged() }
+      }
+    } catch (err) { setError(err); if (err.status === 401) onUnauthorized?.(err) }
+    finally { lock.current = false; setBusy(''); onBusy(false) }
+  }
+  return <section className="qp-panel mih-pay-card mih-pay-connection">
+    <div className="mih-pay-record-heading"><h2>{row.environment === 'live' ? '正式充值' : '测试流程'}</h2><span className="mih-pay-badge">{row.active ? '已启用独立支付' : '尚未启用独立支付'}</span></div>
+    <p>{initial.origin === 'database' ? `由界面管理 · 配置版本 ${initial.revision} · ${stamp(initial.updatedAt)}` : initial.origin === 'environment' ? '正在使用服务器环境配置；可保留现有凭据，迁入界面管理。' : '填写 Hub 后端可达的 mx-pay API 地址和该应用的业务凭据。'}</p>
+    {error ? <ErrorState error={error} /> : null}
+    {row.errorMessage ? <p className="mih-pay-notice">当前连接：{row.errorMessage} <small>（{row.error}）</small></p> : null}
+    <form className="mih-pay-form" onSubmit={event => { event.preventDefault(); act('save') }}>
+      <Input label="内网 API 地址" type="url" value={form.baseUrl} onChange={event => change('baseUrl', event.target.value)} placeholder="http://mx-pay.mx-pay.svc.cluster.local:18230" maxLength={2048} disabled={Boolean(busy)} required />
+      <p className="mih-pay-muted">同一 Kubernetes 集群可使用 Service DNS，无需填写 ClusterIP。跨集群请填写已配置的私网 API 地址。</p>
+      <div className="mih-pay-connection-fields">
+        <Input label="业务应用 ID" value={form.appId} onChange={event => change('appId', event.target.value)} disabled={Boolean(busy) || row.active} maxLength={80} required />
+        <Input label="支付渠道 ID" value={form.channelId} onChange={event => change('channelId', event.target.value)} disabled={Boolean(busy) || row.active} maxLength={80} required />
+      </div>
+      <Input label={`业务凭据${initial.tokenConfigured ? '（已保存，留空保留）' : ''}`} type="password" value={form.token} onChange={event => change('token', event.target.value)} autoComplete="new-password" spellCheck={false} maxLength={4096} disabled={Boolean(busy)} placeholder={initial.tokenConfigured ? '更换地址或应用时需重新填写凭据' : row.environment === 'live' ? 'mx-pay 的 app-live secret' : 'mx-pay 的 app-test secret'} />
+      <p className="mih-pay-muted">使用 mx-pay 为此应用签发的对应环境凭据，需具备 orders.read、orders.write、events.read、events.ack。保存后不回显；此处不填写支付宝私钥或登录 Token。</p>
+      <div className="mih-pay-actions"><button className={button} type="button" disabled={Boolean(busy) || !valid} onClick={() => act('check')}>{busy === 'check' ? '检查中…' : '检查连接'}</button><button className={primary} disabled={Boolean(busy) || !valid}>{busy === 'save' ? '检查并保存中…' : initial.origin === 'environment' ? '检查并迁入界面管理' : '检查并保存连接'}</button></div>
+    </form>
+    {checked ? <p role="status" className="mih-pay-notice">检查通过 · {checked.appId} / {checked.channelId} · {checked.channelEnabled ? '渠道已启用' : '渠道已停用，请先在支付中心启用'}。本次检查未创建订单或修改收款方式。</p> : null}
+    {row.sourceId ? <p className="mih-pay-connection-source">支付源：{row.sourceId}</p> : null}
+    {row.configured && !dirty ? <p>连接正常 · {row.channelEnabled ? '渠道允许新订单' : '渠道已停用，无法创建新订单'}</p> : null}
+    {!row.active ? <div className="mih-pay-invoice">
+      <h3>启用支付接入</h3><p>保存连接后，再将此环境的新充值订单交给 mx-pay。付款成功后由 Hub 自动入账。</p>
+      {row.legacyOrderCount > 0 ? <p className="mih-pay-notice">已有 {row.legacyOrderCount} 笔正式历史订单，须完成存量交接，当前不能切换。</p> : null}
+      <label className="mih-pay-check"><input type="checkbox" checked={accepted} disabled={Boolean(busy) || dirty || !row.configured || !row.channelEnabled || row.legacyOrderCount > 0} onChange={event => setAccepted(event.target.checked)} />已核对支付源与渠道；正式启用前已停用旧人工收款。启用后不会因支付中心不可达退回旧收款方式。</label>
+      <button className={primary} disabled={Boolean(busy) || dirty || !accepted || !row.configured || !row.channelEnabled || row.legacyOrderCount > 0} onClick={() => act('activate')}>{busy === 'activate' ? '正在启用…' : `启用${row.environment === 'live' ? '正式' : '测试'}支付接入`}</button>
+      {dirty ? <p className="mih-pay-muted">请先保存并检查当前配置。</p> : null}
+    </div> : <p className="mih-pay-notice">此环境已绑定支付源、应用和渠道。可更新连接地址或凭据，保存时会再次核对原支付源身份。</p>}
+    {row.workerError ? <p className="mih-pay-notice">交付暂缓：{row.workerError}，系统将重试原事件。</p> : null}
+    {row.errors?.length ? <details><summary>近期交付异常（最多 20 条），请核对原事件</summary>{row.errors.map(item => <p key={item.eventId}>{item.eventId} · {item.code} · 已尝试 {item.attempts} 次</p>)}</details> : null}
+  </section>
 }
 
 function PaymentSettings({ token, onClose, onSaved, onUnauthorized }) {

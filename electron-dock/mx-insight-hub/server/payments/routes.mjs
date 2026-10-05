@@ -18,6 +18,12 @@ export async function paymentRoute({ payments, recharge, request, response, path
       return reply(recharge ? await recharge.status() : { items: [], available: false })
     }
     const activation = new RegExp(`^${root}/integration/(test|live)/activate$`).exec(pathname)
+    const connection = new RegExp(`^${root}/integration/(test|live)/(connection|check)$`).exec(pathname)
+    if (connection && (connection[2]==='connection' && request.method==='PUT' || connection[2]==='check' && request.method==='POST')) {
+      requirePlatformAdmin(principal); noQuery()
+      requirePayment(recharge,'recharge_unavailable','独立支付接入需要持久化数据库',503)
+      return reply(await recharge.configure(connection[1],await readJson(request,8192),actor,{checkOnly:connection[2]==='check'}))
+    }
     if (activation && request.method === 'POST') {
       requirePlatformAdmin(principal); noQuery()
       requirePayment(recharge, 'recharge_unavailable', '独立支付接入需要持久化数据库', 503)

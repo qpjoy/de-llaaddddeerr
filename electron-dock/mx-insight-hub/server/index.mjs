@@ -501,7 +501,7 @@ export async function createRuntime(config = loadConfig()) {
   // takes effect without restarting anything.
   const feishuAlerts = config.listenerMode === 'public' ? null : new FeishuAlertNotifier({ pool })
   const paymentReporting = config.listenerMode === 'public' ? null : createPaymentReporting(config.paymentReporting)
-  const recharge = config.listenerMode === 'public' ? null : createRechargeService(store, config.paymentDeliverySources, { logger: console })
+  const recharge = config.listenerMode === 'public' ? null : createRechargeService(store, config.paymentDeliverySources, { logger: console, pepper:config.apiKeyPepper })
   if (balanceMonitor) balanceMonitor.onScheduleChanged = () => { void feishuAlerts?.timer?.refresh() }
   const app = createApp({
     service,

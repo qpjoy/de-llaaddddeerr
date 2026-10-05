@@ -19,6 +19,7 @@ import { createApp } from '../../server/app.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { capabilitiesForRole } from '../../server/identity/index.mjs'
 
+const pepper = 'payment-delivery-fixture-retained-pepper'
 const log = { log(){}, error(){} }
 const keys = () => generateKeyPairSync('rsa', {modulusLength:2048, publicKeyEncoding:{type:'spki',format:'pem'}, privateKeyEncoding:{type:'pkcs8',format:'pem'}})
 const merchant = keys(), upstream = keys()
@@ -46,7 +47,7 @@ async function fixture(t) {
   await migrate(pay.url,log)
   // Apply unchanged production SQL for identities, the real wallet and payment
   // tables. Unrelated search/vector/ETL migrations are outside this fixture.
-  const selected=['001','002','005','007','018','051','052','054','056','122','123']
+  const selected=['001','002','005','007','018','051','052','054','056','122','123','126']
   const migrations=new URL('../../migrations/',import.meta.url)
   for(const file of (await readdir(migrations)).sort().filter(name=>selected.includes(name.slice(0,3)))) {
     const client=await hub.pool.connect()
@@ -63,7 +64,7 @@ async function fixture(t) {
   await center.channelPayments.bind()
   const base=await listen(paymentApp({service:center,credentials:readCredentials(file),logger:log}))
   const sources=['test','live'].map(environment=>({environment,appId:'hub',channelId:environment==='test'?'mock':channel.id,baseUrl:base,token:entries.find(e=>e.id===`hub-${environment}`).secret}))
-  const store=new PostgresStore(hub.pool),recharge=new RechargeService(store,sources,{logger:log}),legacy=new PaymentService(store)
+  const store=new PostgresStore(hub.pool),recharge=new RechargeService(store,sources,{logger:log,pepper}),legacy=new PaymentService(store)
   legacy.store.includeRecharge=true
   const tenant=randomUUID(),other=randomUUID(),member=randomUUID()
   await hub.pool.query("INSERT INTO tenants(id,name) VALUES($1,'Billing fixture'),($2,'Other tenant')",[tenant,other])
@@ -298,4 +299,82 @@ test('activation fences old replicas and refuses live history; tenant HTTP scope
   assert.equal(channels.data.test.enabled,false);assert.equal(channels.data.test.backend,'center');assert.doesNotMatch(JSON.stringify(channels),/secret/)
   const uncertain=await request(`/payments/tenants/${f.tenant}/orders`,{method:'POST',body:{environment:'test',amountMinor:1200}})
   assert.equal(uncertain.status,201);assert.equal((await uncertain.json()).data.paymentId,null)
+})
+
+
+const connectionBody = (source, revision = 0, token = source.token) => ({revision,baseUrl:source.baseUrl,appId:source.appId,channelId:source.channelId,token})
+
+test('connection UI migrates retained environment secrets encrypted, fences versions, and preserves activation boundary',check,async t=>{
+  const f=await fixture(t),source=f.sources.find(s=>s.environment==='live'),body=connectionBody(source,0,'')
+  let status=(await f.recharge.status()).items.find(row=>row.environment==='live')
+  assert.equal(status.connection.origin,'environment');assert.equal(status.configured,true)
+  const checked=await f.recharge.configure('live',body,'admin',{checkOnly:true})
+  assert.equal(checked.channelEnabled,true)
+  assert.equal((await f.hub.pool.query('SELECT * FROM hub_recharge.connections')).rowCount,0,'checking cannot persist')
+  assert.equal(await f.recharge.owns('live'),false)
+  const saved=await f.recharge.configure('live',body,'admin')
+  assert.equal(saved.connection.origin,'database');assert.equal(saved.connection.revision,1)
+  const row=(await f.hub.pool.query("SELECT * FROM hub_recharge.connections WHERE environment='live'")).rows[0]
+  assert.ok(row.sealed.startsWith('v1.'));assert.ok(!row.sealed.includes(source.token))
+  assert.equal(await f.recharge.owns('live'),false,'saving a connection is not payment activation')
+  status=(await f.recharge.status()).items.find(row=>row.environment==='live')
+  assert.equal(status.connection.tokenConfigured,true);assert.ok(!JSON.stringify(status).includes(source.token));assert.equal(status.connection.token,undefined)
+  const audit=(await f.hub.pool.query('SELECT * FROM hub_recharge.connection_audit')).rows
+  assert.equal(audit.length,1);assert.ok(!JSON.stringify(audit).includes(source.token))
+  await assert.rejects(f.hub.pool.query('DELETE FROM hub_recharge.connection_audit'),/append-only/)
+  await assert.rejects(f.recharge.configure('live',body,'stale-admin'),{code:'recharge_connection_conflict'})
+  await assert.rejects(f.recharge.configure('live',{...body,revision:1,baseUrl:'http://new-pay.invalid'},'admin'),{code:'recharge_token_required'})
+  const attempts=await Promise.allSettled([f.recharge.configure('live',{...body,revision:1},'first'),f.recharge.configure('live',{...body,revision:1},'second')])
+  assert.equal(attempts.filter(r=>r.status==='fulfilled').length,1)
+  assert.equal(attempts.find(r=>r.status==='rejected').reason.code,'recharge_connection_conflict')
+  await f.activate('live')
+  await assert.rejects(f.recharge.configure('live',{...body,revision:2,channelId:'other-channel'},'admin'),{code:'recharge_source_mismatch'})
+  await assert.rejects(f.recharge.configure('live',{...body,revision:2,token:f.sources[0].token},'admin'),{code:'recharge_source_mismatch'})
+  assert.equal((await f.recharge.connections.read('live')).revision,2)
+  const second=new RechargeService(f.store,[],{logger:log,pepper})
+  assert.equal((await second.remote('live')).identity.sourceId,checked.sourceId,'another replica reads saved source without env')
+  const staleEnv=new RechargeService(f.store,[{...source,token:randomUUID()}],{logger:log,pepper})
+  assert.equal((await staleEnv.remote('live')).identity.sourceId,checked.sourceId,'DB wins over old environment config')
+  const wrongKey=new RechargeService(f.store,f.sources,{logger:log,pepper:pepper+'wrong'})
+  await assert.rejects(wrongKey.remote('live'),{code:'recharge_connection_unavailable'})
+  assert.throws(()=>f.recharge.connections.open('test',row.sealed),{code:'recharge_connection_unavailable'})
+  const live=await f.create('live');await f.settle(live)
+  await Promise.all([f.recharge.sweep('live'),second.sweep('live')])
+  assert.equal(await f.balance(),1200)
+  assert.equal((await f.hub.pool.query('SELECT * FROM billing.credit_ledger_entries')).rowCount,1)
+})
+
+test('an initially unconfigured worker discovers UI settings and delivers exactly once without restart',check,async t=>{
+  const f=await fixture(t)
+  const running=new RechargeService(f.store,[],{logger:log,pepper})
+  running.start();await running.running
+  try {
+    const saved=await running.configure('live',connectionBody(f.sources[1]),'admin')
+    await running.activate('live',{sourceId:saved.sourceId,acknowledge:true},'admin')
+    const order=await running.create(f.tenant,{environment:'live',amountMinor:1200},randomUUID(),f.member)
+    await f.settle(order)
+    const deadline=Date.now()+8000
+    while(Date.now()<deadline && await f.balance()===0)await new Promise(resolve=>setTimeout(resolve,100))
+    assert.equal(await f.balance(),1200)
+    await running.sweep('live');assert.equal(await f.balance(),1200)
+  } finally {await running.close()}
+})
+
+test('payment connection management is platform-admin only, unavailable publicly, and redacts dependency errors',check,async t=>{
+  const f=await fixture(t),base=await f.api(),publicBase=await f.api('public'),body=connectionBody(f.sources[1])
+  const request=(origin,token,path,method='PUT')=>fetch(`${origin}/internal/v1/admin/payments/integration/live/${path}`,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify(body)})
+  for(const [path,method]of [['connection','PUT'],['check','POST']]){
+    assert.equal((await request(base,'billing',path,method)).status,403)
+    assert.equal((await request(publicBase,'fixture-admin',path,method)).status,404)
+  }
+  const checkResponse=await request(base,'fixture-admin','check','POST');assert.equal(checkResponse.status,200)
+  assert.equal((await f.hub.pool.query('SELECT * FROM hub_recharge.connections')).rowCount,0)
+  const save=await request(base,'fixture-admin','connection');assert.equal(save.status,200)
+  const data=await save.text();assert.ok(!data.includes(body.token));assert.ok(!data.includes('sealed'))
+  const before=(await f.recharge.connections.read('live')).revision
+  f.recharge.clientFactory=()=>({identity:async()=>{throw Object.assign(Error('secret-token-must-not-leak'),{status:401})}})
+  body.revision=before
+  const denied=await request(base,'fixture-admin','connection');assert.equal(denied.status,400)
+  const failure=await denied.text();assert.ok(!failure.includes('secret-token-must-not-leak'));assert.match(failure,/payment_unauthorized/)
+  assert.equal((await f.recharge.connections.read('live')).revision,before)
 })
