@@ -3477,6 +3477,7 @@ function createUserEditorDraft(mode = 'create', userId = '') {
     password: '',
     passwordConfirm: '',
     roleId: asArray(user?.roleIds)[0] || defaultUserRoleId(),
+    roleIds: user?.roleIds?.length ? [...user.roleIds] : [defaultUserRoleId()],
     title: profile.title || '',
     department: profile.department || '',
     location: profile.location || '',
@@ -3569,7 +3570,8 @@ function userEditorDraftFromForm(root) {
     displayName: userEditorValue(root, 'displayName') || '',
     password: userEditorValue(root, 'password') || '',
     passwordConfirm: userEditorValue(root, 'passwordConfirm') || '',
-    roleId: userEditorValue(root, 'roleId') || defaultUserRoleId(),
+    roleId: root.querySelector('[data-user-role]:checked')?.value || defaultUserRoleId(),
+    roleIds: [...root.querySelectorAll('[data-user-role]:checked')].map(input => input.value),
     title: userEditorValue(root, 'title') || '',
     department: userEditorValue(root, 'department') || '',
     location: userEditorValue(root, 'location') || '',
@@ -3597,6 +3599,10 @@ async function saveUserCenterUserFromEditor(root) {
   if (state.userCenter.busy) return;
   const draft = userEditorDraftFromForm(root);
   const createMode = state.userCenter.drawer?.mode !== 'edit';
+  if (!draft.roleIds.length) {
+    state.userCenter.feedback = { kind: 'error', message: '请至少保留一个基础或应用角色。' };
+    state.userCenter.drawer.draft = draft; renderUserEditorDrawer(); return;
+  }
   if (!draft.account || !draft.displayName) {
     state.userCenter.feedback = { kind: 'error', message: 'Account and display name are required' };
     if (state.userCenter.drawer) state.userCenter.drawer.draft = draft;
@@ -3641,7 +3647,7 @@ async function saveUserCenterUserFromEditor(root) {
         email: blankToNull(draft.email),
         displayName: draft.displayName,
         ...(createMode && draft.password ? { password: draft.password } : {}),
-        roleIds: draft.roleId ? [draft.roleId] : [],
+        roleIds: draft.roleIds,
         orgIds: ['org_default'],
         profile: {
           title: blankToNull(draft.title),
@@ -3674,6 +3680,7 @@ async function saveUserCenterUserFromEditor(root) {
         password: '',
         passwordConfirm: '',
         roleId: asArray(saved.roleIds)[0] || draft.roleId,
+        roleIds: asArray(saved.roleIds),
         title: saved.profile?.title || draft.title,
         department: saved.profile?.department || draft.department,
         location: saved.profile?.location || draft.location,
@@ -9503,7 +9510,7 @@ function absoluteReleaseArtifactUrl(value) {
 }
 
 function renderUserServiceSummary(user, draft) {
-  const effectiveUser = user || { roleIds: draft?.roleId ? [draft.roleId] : [] };
+  const effectiveUser = user || { roleIds: draft?.roleIds || (draft?.roleId ? [draft.roleId] : []) };
   return `
     <div class="user-drawer-summary">
       <article>
@@ -9979,8 +9986,9 @@ function renderUserEditorDrawer() {
   const user = editing ? userCenterUserById(drawer.userId) : null;
   const draft = drawer.draft || createUserEditorDraft(drawer.mode, drawer.userId);
   const roleOptions = userRoleDropdownOptions(false);
-  const draftRoleId = draft.roleId || defaultUserRoleId() || roleOptions[0]?.value || '';
-  if (!draft.roleId && draftRoleId) draft.roleId = draftRoleId;
+  const selectedRoleIds = draft.roleIds || user?.roleIds || [draft.roleId || defaultUserRoleId()];
+  // Preserve roles not present in a stale catalog until the operator explicitly removes them.
+  const editorRoles = [...roleOptions, ...selectedRoleIds.filter(id => !roleOptions.some(r => r.value === id)).map(id => ({ value: id, label: id }))];
   const title = editing ? `Edit ${user?.displayName || draft.displayName || draft.userId}` : 'New User';
   const feedback = state.userCenter.feedback;
   const protectedUser = editing && ['usr_demo_admin', 'usr_demo_user'].includes(drawer.userId);
@@ -10028,18 +10036,11 @@ function renderUserEditorDrawer() {
               <span>Confirm Password</span>
               <input type="password" data-user-editor-field="passwordConfirm" value="${escapeHtml(draft.passwordConfirm || '')}" placeholder="repeat the new password" autocomplete="new-password" />
             </label>
-            <label class="app-form-field">
-              <span>Role</span>
-              <input type="hidden" data-user-editor-field="roleId" value="${escapeHtml(draftRoleId)}" />
-              ${renderUserDropdown({
-                id: 'user-editor-role',
-                field: 'drawer:roleId',
-                value: draftRoleId,
-                options: roleOptions,
-                label: userDropdownLabel(roleOptions, draftRoleId, 'Bootstrap roles first'),
-                disabled: !roleOptions.length
-              })}
-            </label>
+            <fieldset class="app-form-field app-form-wide user-role-selector">
+              <legend>角色与应用授权（可多选）</legend>
+              <p class="muted">MX Admin 管理 Launcher；Hub、Pay 的管理权限分别勾选。邀请注册后也可在这里授权，保存后无需重新部署。明确禁止的应用仍不能登录。</p>
+              <div class="app-editor-grid">${editorRoles.map(role => `<label class="app-checkbox"><input type="checkbox" data-user-role data-user-editor-field="roles" value="${escapeHtml(role.value)}" ${selectedRoleIds.includes(role.value) ? 'checked' : ''} /><span>${escapeHtml(role.label)}</span></label>`).join('')}</div>
+            </fieldset>
           </div>
         </section>
 
@@ -10099,7 +10100,7 @@ function renderUserEditorDrawer() {
           </div>
           ${renderUserServiceSummary(user, draft)}
           <div class="user-scope-list">
-            ${renderChipList(scopesForRoleIds(draft.roleId ? [draft.roleId] : user?.roleIds).slice(0, 10), 'info')}
+            ${renderChipList(scopesForRoleIds(selectedRoleIds).slice(0, 10), 'info')}
           </div>
         </section>
 

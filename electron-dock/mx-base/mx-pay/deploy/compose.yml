@@ -13,11 +13,15 @@ services:
     image: ${MX_PAY_IMAGE:?MX_PAY_IMAGE required}
     env_file: ${MX_PAY_RUNTIME_ENV_FILE:?runtime env file required}
     environment:
+      MX_PAY_CONTROL_KEY_FILE: /run/secrets/control.key
       MX_PAY_HOST: 0.0.0.0
       MX_PAY_PORT: 18230
       MX_PAY_CREDENTIALS_FILE: /run/secrets/credentials.json
+      MX_PAY_CHANNEL_DRAFTS_FILE: /run/secrets/channel-drafts.json
       MX_PAY_CHANNELS_FILE: /run/secrets/channels.json
     volumes:
+      - ${MX_PAY_CHANNEL_DRAFTS_SOURCE:?drafts file required}:/run/secrets/channel-drafts.json:ro
+      - ${MX_PAY_CONTROL_KEY_SOURCE:?control key required}:/run/secrets/control.key:ro
       - ${MX_PAY_CREDENTIALS_SOURCE:?credentials required}:/run/secrets/credentials.json:ro
       - ${MX_PAY_CHANNELS_SOURCE:?channels file required}:/run/secrets/channels.json:ro
     ports:

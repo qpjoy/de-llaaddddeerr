@@ -1,3 +1,4 @@
+import { PaymentManagement } from './management.mjs'
 import { createServer } from 'node:http'
 import { createPool, createReportingPool } from './database.mjs'
 import { assertPaymentDatabase, assertSchema } from './migrate.mjs'
@@ -17,8 +18,10 @@ try {
   readPool = createReportingPool({ databaseUrl: process.env.MX_PAY_DATABASE_URL })
   for (const pool of [sessionPool, readPool]) pool.on('error', () => console.error('Payment console database unavailable'))
   await assertPaymentDatabase(sessionPool); await assertSchema(sessionPool)
+  const management = process.env.MX_PAY_CONTROL_KEY_FILE ? new PaymentManagement(sessionPool,process.env.MX_PAY_CONTROL_KEY_FILE,{readPool}) : null
+  if (management) await management.bootstrap({access:config.access})
   const server = createServer({ requestTimeout: 15000, headersTimeout: 10000, keepAliveTimeout: 3000 },
-    createPaymentConsole({ ...config, sessionPool, service: new PaymentCenter(readPool) }))
+    createPaymentConsole({ ...config, sessionPool, management, service: new PaymentCenter(readPool) }))
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, process.env.MX_PAY_CONSOLE_HOST || '0.0.0.0', resolve) })
   console.log(JSON.stringify({ service: 'mx-pay-console', port, status: 'listening' }))
   let stopping = false

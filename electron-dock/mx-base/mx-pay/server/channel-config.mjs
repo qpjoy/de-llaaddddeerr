@@ -9,8 +9,10 @@ const https = value => {
 }
 // Separate from SDK imports: deployment preflight needs only Node built-ins.
 export function readChannels(filename) {
+  return validateChannels(filename ? JSON.parse(readFileSync(filename, 'utf8')) : [])
+}
+export function validateChannels(entries) {
   try {
-    const entries = filename ? JSON.parse(readFileSync(filename, 'utf8')) : []
     if (!Array.isArray(entries) || entries.length > 32) throw Error('Invalid list')
     const ids = new Set(), accounts = new Set()
     for (const c of entries) {

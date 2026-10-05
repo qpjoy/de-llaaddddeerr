@@ -61,8 +61,9 @@ export class IdentityService {
    * brand-new user therefore signs in successfully and sees an empty console
    * until an owner grants them access — which is the correct, boring outcome.
    *
-   * The single exception is the platform-admin scope allowlist, which is an
-   * explicit operator configuration rather than something a token can assert.
+   * Platform administration uses the configured legacy scope allowlist or the
+   * explicit application role validated by the browser SSO adapter. Generic
+   * Launcher roles and signup do not grant it.
    */
   async resolve(token) {
     const introspection = await this.client.introspect(token)
@@ -72,7 +73,7 @@ export class IdentityService {
 
   // Internal only: caller must verify the configured OIDC issuer/client,
   // signed ID token and subject-bound UserInfo before entering this method.
-  async resolveVerified(introspection) {
+  async resolveVerified(introspection, { applicationAdmin = false } = {}) {
     const { issuer, subject, audience, principal } = introspection
     if (!issuer || !subject) {
       throw new AppError(502, 'launcher_invalid_response', 'Introspection is missing issuer or subject')
@@ -98,10 +99,10 @@ export class IdentityService {
       throw new AppError(403, 'member_suspended', 'This Hub membership is suspended')
     }
 
-    const grantsAdmin = principal.scopes.some((scope) => this.adminScopes.has(scope))
+    const grantsAdmin = applicationAdmin || principal.scopes.some((scope) => this.adminScopes.has(scope))
     const [platformAdmin, memberships] = await Promise.all([this.store.syncPlatformAdmin(member.id, {
       granted: grantsAdmin,
-      grantedVia: grantsAdmin
+      grantedVia: applicationAdmin ? 'launcher-application:mx-insight-hub' : grantsAdmin
         ? `launcher-scope:${principal.scopes.find((scope) => this.adminScopes.has(scope))}`
         : null,
     }), this.store.listTenantMemberships(member.id)])

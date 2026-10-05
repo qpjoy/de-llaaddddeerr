@@ -18,6 +18,10 @@ export function createSso({ settings, pool, identity, oidcConfiguration, adminTo
   const store = new SsoStore(pool, settings.sessionKey)
   const invitations = new TenantInvitations({pool,sessions:store,origin:settings.origin,adminToken})
   const invitationAttempts = new Map()
+  // Only the verified, audience-bound browser SSO identity can delegate this application role.
+  const resolveIdentity = canonical => identity.resolveVerified(canonical, {
+    applicationAdmin: canonical.audience === settings.audience && canonical.principal.scopes.includes('mx:hub:admin')
+  })
   const sso = createApplicationSso({
     settings: { ...settings, appId: 'mx-insight-hub', scope: 'openid mx:hub' }, store, oidcConfiguration,
     clientIp: request => String(request.headers['x-forwarded-for'] || request.socket.remoteAddress).split(',')[0].trim(),
@@ -27,7 +31,7 @@ export function createSso({ settings, pool, identity, oidcConfiguration, adminTo
     validateIdentity(value) {
       if (value.mxIdentity.issuer !== settings.legacyIssuer) throw new AppError(401, 'sso_identity_invalid', '统一身份验证不匹配。')
     },
-    resolvePrincipal: value => identity.resolveVerified(value.mxIdentity),
+    resolvePrincipal: value => resolveIdentity(value.mxIdentity),
     async prepareLogin({ request, url, transaction }) {
       let registrationHandle
       if (url.searchParams.get('invitation') === '1') {
@@ -88,7 +92,7 @@ export function createSso({ settings, pool, identity, oidcConfiguration, adminTo
         const session = await sessionFor(request)
         let principal = null
         if (session) {
-          try { principal = await identity.resolveVerified(await verified(session,true)) }
+          try { principal = await resolveIdentity(await verified(session,true)) }
           catch (error) { if (error.status!==401) throw error }
         }
         const invitation = await invitations.inspect(context.token,principal?.memberId)
@@ -101,7 +105,7 @@ export function createSso({ settings, pool, identity, oidcConfiguration, adminTo
         if (!equal(session.csrf,request.headers['x-mx-hub-csrf'])) throw new AppError(403,'sso_csrf','页面会话已变化，请刷新后重试。')
         const body=await readJson(request,4096)
         if (body?.invitationId!==context.invitationId) throw new AppError(409,'invitation_context_changed','另一个页面已切换邀请，请重新检查目标租户后确认。')
-        const principal = await identity.resolveVerified(await verified(session,true))
+        const principal = await resolveIdentity(await verified(session,true))
         const accepted = await invitations.accept(principal,context.token)
         identity.client?.invalidate?.()
         // Keep the short context for idempotent retry if the success response is lost.

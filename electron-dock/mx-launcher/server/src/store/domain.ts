@@ -282,6 +282,14 @@ export function builtinUserCenterRoles(now = new Date().toISOString()): UserCent
       scopes: ADMIN_SCOPES,
       createdAt: now
     },
+    // Application delegation is explicit; mx-admin alone never grants these scopes.
+    ...[
+      ['mx-hub-admin', 'Hub 管理员', 'mx:hub:admin'],
+      ['mx-pay-admin', 'Pay 管理员', 'mx:pay:admin'],
+      ['mx-pay-channel-manager', 'Pay 渠道管理员', 'mx:pay:channels'],
+      ['mx-pay-auditor', 'Pay 审计查看员', 'mx:pay:audit'],
+      ['mx-pay-finance-viewer', 'Pay 财务查看员', 'mx:pay:finance'],
+    ].map(([roleId, displayName, scope]) => ({ roleId, displayName, scopes: [scope], createdAt: now })),
     {
       roleId: 'mx-user',
       displayName: 'MX User',

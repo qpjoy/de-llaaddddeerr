@@ -6,9 +6,11 @@ services:
     command: [node, server/console-index.mjs]
     env_file: ${MX_PAY_RUNTIME_ENV_FILE:?runtime env file required}
     environment:
+      MX_PAY_CONTROL_KEY_FILE: /run/secrets/control.key
       MX_PAY_SSO_PROFILE: /run/mx-pay-console/profile.json
       MX_PAY_CONSOLE_ACCESS_FILE: /run/mx-pay-console/access.json
     volumes:
+      - ${MX_PAY_CONTROL_KEY_SOURCE:?control key required}:/run/secrets/control.key:ro
       - ${MX_PAY_SSO_SOURCE:?SSO profile required}:/run/mx-pay-console/profile.json:ro
       - ${MX_PAY_CONSOLE_ACCESS_SOURCE:?console access required}:/run/mx-pay-console/access.json:ro
     ports:

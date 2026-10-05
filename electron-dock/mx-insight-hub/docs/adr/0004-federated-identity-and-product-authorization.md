@@ -40,3 +40,8 @@ MX Launcher already owns organization login, human identity and the edge gateway
 - **Launcher-owned API keys and billing:** moves product semantics into a generic platform control plane and couples every data-module change to Launcher.
 
 See [Unified identity and platform module integration](../architecture/unified-identity-and-platform-modules.md) for the claim contract, responsibility matrix, platform module shape and offline acceptance criteria.
+
+
+## 2026-10-05 application administration delegation
+
+Verified browser SSO explicitly maps `mx:hub:admin` to Hub platform administration. Launcher assigns this only through the trusted user administration UI as `mx-hub-admin`; signup remains `mx-user`. Generic Launcher admin and Pay roles do not imply this permission. Existing opaque-token admin allowlists remain unchanged. Current SSO writes verify UserInfo freshly; reads retain the shared 30-second bound. Hub still enforces member suspension, local resource and sensitive-action guards, and reconciles revocations into its local admin projection. No service shares identity/permission databases.

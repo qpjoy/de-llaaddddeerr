@@ -37,7 +37,7 @@ test('Hub SSO: real HTTPS OIDC + PostgreSQL, reuse, concurrent onboarding, resta
   for (const id of ['existing','new-user']) await pool.query("INSERT INTO mx_platform_records VALUES('iam-user',$1,'test',$2)", [id,{userId:id,status:'active',displayName:id,appAccess:{deniedAppIds:[]}}])
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1', '-keyout', join(directory, 'key'), '-out', join(directory, 'cert')], { stdio: 'ignore' })
   const cert = readFileSync(join(directory, 'cert')), key = readFileSync(join(directory, 'key'))
-  let provider, sso, activeUser = 'existing', blocked = false
+  let provider, sso, activeUser = 'existing', blocked = false, scopes = []
   server = createServer({ cert, key }, async (req, res) => {
     try {
       if (req.url.startsWith('/identity/')) return await provider.handle(req, res)
@@ -48,7 +48,7 @@ test('Hub SSO: real HTTPS OIDC + PostgreSQL, reuse, concurrent onboarding, resta
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const origin = `https://127.0.0.1:${server.address().port}`, issuer = `${origin}/identity`
-  const canonical = id => ({ issuer: 'mx-user-center:test', subject: `user:${id}`, audience: 'mx-insight-hub', authProvider: 'oidc', principal: { userId: id, principalId: `user:${id}`, kind: 'user', displayName: '同名成员', organizationIds: [], launcherTenantId: null, scopes: [] } })
+  const canonical = id => ({ issuer: 'mx-user-center:test', subject: `user:${id}`, audience: 'mx-insight-hub', authProvider: 'oidc', principal: { userId: id, principalId: `user:${id}`, kind: 'user', displayName: '同名成员', organizationIds: [], launcherTenantId: null, scopes } })
   const account = id => ({ userId: id, displayName: id, status: 'active', appAccess: { deniedAppIds: blocked ? ['mx-insight-hub'] : [] } })
   const accounts = { webState: repository.webState, account: async id => account(id), authenticate: async (login, password) => password === 'pass1234' ? account(login) : undefined, allowAttempt: async () => true, hubIdentity: async user => canonical(user.userId),
     withBrowserRequest: repository.withBrowserRequest.bind(repository), browserSessions: repository.browserSessions.bind(repository), revokeBrowserSessions: repository.revokeBrowserSessions.bind(repository) }
@@ -108,6 +108,14 @@ test('Hub SSO: real HTTPS OIDC + PostgreSQL, reuse, concurrent onboarding, resta
   restart(); principal=JSON.parse((await request('/principal')).text); assert.equal(principal.memberId,original.id)
   assert.equal((await request('/principal',{method:'POST',headers:{origin}})).status,403)
   const session=JSON.parse((await request('/auth/sso/session')).text)
+  scopes=['mx:hub:admin']
+  let delegated=JSON.parse((await request('/principal',{method:'POST',headers:{origin,'x-mx-hub-csrf':session.csrf}})).text)
+  assert.equal(delegated.platformAdmin,true); assert.equal(delegated.tenantIds,null)
+  scopes=['mx:pay:admin','mx:admin']
+  delegated=JSON.parse((await request('/principal',{method:'POST',headers:{origin,'x-mx-hub-csrf':session.csrf}})).text)
+  assert.equal(delegated.platformAdmin,false,'central revocation checked on writes; another application role is not Hub administration')
+  assert.deepEqual(delegated.tenantIds,[tenant.id]); scopes=[]
+
   assert.equal((await request('/principal',{method:'POST',headers:{origin,'x-mx-hub-csrf':session.csrf}})).status,200)
   assert.equal((await request('/principal',{method:'POST',headers:{origin:'https://evil.invalid','x-mx-hub-csrf':session.csrf}})).status,403)
   activeUser='new-user';await login()

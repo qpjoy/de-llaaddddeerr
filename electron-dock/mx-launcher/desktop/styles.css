@@ -8219,3 +8219,8 @@ body.is-locked .shell { display: none !important; }
 .login-text-button { appearance:none; border:0; background:transparent; color:var(--mx-text-soft); padding:8px 4px; min-height:44px; font:inherit; font-size:13px; cursor:pointer; }
 .login-text-button:hover { color:var(--mx-primary); text-decoration:underline; }
 .login-text-button:focus-visible { outline:2px solid var(--mx-primary); outline-offset:2px; border-radius:4px; }
+
+/* User Center: preserve multiple roles and delegate each application explicitly. */
+.user-role-selector { border: 1px solid var(--mx-line); border-radius: 8px; padding: 12px; }
+.app-form-field .app-checkbox { display: flex; align-items: center; gap: 8px; min-height: 40px; font-size: 13px; }
+.app-form-field .app-checkbox input { width: 18px; height: 18px; min-height: 18px; margin: 0; padding: 0; flex: 0 0 auto; }

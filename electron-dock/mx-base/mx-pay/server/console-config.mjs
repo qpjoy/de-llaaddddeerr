@@ -10,10 +10,10 @@ export function validateConsoleAccess(entries) {
     if (issuer.protocol !== 'https:' || issuer.username || issuer.password || issuer.search || issuer.hash
       || typeof entry.subject !== 'string' || !entry.subject || entry.subject.length > 200
       || typeof entry.clientId !== 'string' || !entry.clientId
-      || !/^[A-Za-z0-9._-]{1,80}$/.test(entry.appId ?? '')
-      || !['test','live'].includes(entry.environment) || entry.role !== 'viewer'
-      || Object.keys(entry).some(key => !['issuer','subject','clientId','appId','environment','role'].includes(key))) {
-      throw new Error('Console access requires an exact identity, application, environment and viewer role')
+      || !(entry.scope === 'center' ? ['administrator','channel_manager','auditor','finance_viewer'].includes(entry.role) && !entry.appId && !entry.environment
+        : !entry.scope && /^[A-Za-z0-9._-]{1,80}$/.test(entry.appId ?? '') && ['test','live'].includes(entry.environment) && entry.role === 'viewer')
+      || Object.keys(entry).some(key => !['issuer','subject','clientId','appId','environment','role','scope'].includes(key))) {
+      throw new Error('Console access requires an exact identity, application, environment and explicit payment role')
     }
     const key = JSON.stringify([entry.issuer, entry.subject, entry.clientId, entry.appId, entry.environment])
     if (seen.has(key)) throw new Error('Duplicate payment console access')

@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { createApplicationSso } from '@qpjoy/mx-common/identity/sso'
 import { PostgresSsoStore } from '@qpjoy/mx-common/identity/postgres'
 import { PaymentError, requirePayment } from '../src/index.mjs'
+import { json } from './app.mjs'
 import { consolePrincipal } from './console-config.mjs'
 
 const assets = new Map([
@@ -12,10 +13,10 @@ const assets = new Map([
 const publicOrder = order => Object.fromEntries(['id','businessOrderId','appId','environment','amountMinor','currency','status','provider','createdAt','updatedAt']
   .map(key => [key, order[key]]))
 
-export function createPaymentConsole({ settings, access, sessionPool, service, sso: injectedSso, logger = console }) {
+export function createPaymentConsole({ settings, access, sessionPool, service, management, sso: injectedSso, logger = console }) {
   const sso = injectedSso ?? createApplicationSso({ settings,
     store: new PostgresSsoStore(sessionPool, settings.sessionKey), applicationName: 'MX Pay', ErrorClass: PaymentError,
-    resolvePrincipal: identity => consolePrincipal(identity, access),
+    resolvePrincipal: identity => management ? management.ssoPrincipal(identity, settings) : consolePrincipal(identity, access),
   })
   let inFlight = 0
   return async (request, response) => {
@@ -40,9 +41,14 @@ export function createPaymentConsole({ settings, access, sessionPool, service, s
       if (await sso.handle(request, response, url)) return
       // No machine credential fallback and no transaction endpoints on this listener.
       requirePayment(path.startsWith('/console/v1/'), 'payment_route_not_found', 'Route not found', 404)
-      requirePayment(request.method === 'GET', 'payment_console_read_only', '支付查询台仅支持查看', 405)
+      requirePayment(management || request.method === 'GET', 'payment_console_read_only', '支付查询台仅支持查看', 405)
       const principal = await sso.principal(request)
       requirePayment(principal, 'payment_console_login_required', '请先统一登录', 401)
+      if (management) {
+        const actor = await management.principal(principal)
+        const body = ['POST','PUT'].includes(request.method) ? await json(request,65536) : {}
+        return reply(200, { data: await management.route(actor,request.method,path.slice('/console/v1/'.length),url.searchParams,body) })
+      }
       if (path === '/console/v1/me' && !url.search) return reply(200, { data: principal })
       requirePayment(path === '/console/v1/orders', 'payment_route_not_found', 'Route not found', 404)
       const appId = url.searchParams.get('appId'), environment = url.searchParams.get('environment')

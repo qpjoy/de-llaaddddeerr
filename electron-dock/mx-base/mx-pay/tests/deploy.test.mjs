@@ -218,7 +218,7 @@ test('channel secrets are versioned, mounted, retained and restored; invalid con
   assert.notEqual(state()['deployment/mx-pay'].spec.template.spec.volumes[0].secret.secretName,first)
   assert.ok(state()[`secret/${first}`],'old replicas keep their immutable configuration')
   const applied=calls=>calls.flatMap((c,index)=>(c.document?.items||[]).filter(i=>i.kind==='Deployment').map(d=>({index,d})))
-  const channelEnabled=d=>JSON.parse(Buffer.from(state()[`secret/${d.spec.template.spec.volumes[0].secret.secretName}`].data['channels.json'],'base64').toString())[0].enabled
+  const channelEnabled=d=>d.spec.template.spec.containers[0].env.find(e=>e.name==='MX_PAY_CHECKOUT_PAUSED')?.value!=='1' && JSON.parse(Buffer.from(state()[`secret/${d.spec.template.spec.volumes[0].secret.secretName}`].data['channels.json'],'base64').toString())[0].enabled
   const upgrade=f.calls().slice(upgradeStart),stages=applied(upgrade)
   assert.deepEqual(stages.map(({d})=>channelEnabled(d)),[false,true])
   assert.ok(upgrade.slice(stages[0].index+1,stages[1].index).some(c=>c.args.includes('rollout')&&c.args.includes('status')),'all channel readers upgraded before enabling new identities')
@@ -454,4 +454,21 @@ test('deploy proxy overrides .env, supports explicit empty override and rejects 
   const failed=invalid.run('deploy');assert.notEqual(failed.status,0);assert.match(failed.stderr,/HTTP\(S\) proxy URL/)
   assert.doesNotMatch(failed.stderr+failed.stdout,/PRIVATE/)
   assert.ok(!invalid.calls().some(c=>c.document?.kind==='Job' || c.args.includes('buildx')))
+})
+
+test('control key and imported drafts survive redeploy and file loss; key replacement refuses rollout', t=>{
+  const f=fixture(t)
+  let r=f.run('deploy');assert.equal(r.status,0,r.stderr)
+  const filename=join(f.root,'secrets/control.key'),key=readFileSync(filename,'utf8')
+  assert.match(key.trim(),/^[a-f0-9]{64}$/)
+  const calls=f.calls(),api=calls.flatMap(c=>c.document?.items || []).find(d=>d.kind==='Deployment' && d.metadata.name==='mx-pay')
+  assert.ok(api.spec.template.spec.containers[0].env.some(e=>e.name==='MX_PAY_CONTROL_KEY_FILE'))
+  const migration=calls.find(c=>c.document?.kind==='Job').document
+  assert.doesNotMatch(JSON.stringify(migration),/control.key|MX_PAY_CONTROL_KEY_FILE/)
+  rmSync(filename)
+  r=f.run('deploy');assert.equal(r.status,0,r.stderr);assert.equal(readFileSync(filename,'utf8'),key)
+  writeFileSync(filename,'b'.repeat(64)+'\n')
+  const before=f.calls().length;r=f.run('deploy');assert.notEqual(r.status,0)
+  assert.match(r.stderr,/control key differs/)
+  assert.ok(!f.calls().slice(before).some(c=>c.document?.kind==='Job'))
 })

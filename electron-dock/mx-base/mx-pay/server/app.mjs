@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { PaymentError, requirePayment } from '../src/index.mjs'
 import { authenticate, authorize } from './config.mjs'
+import { permissionCatalog } from './management.mjs'
 import { assertSchema } from './migrate.mjs'
 
-async function json(request, maximum = 8192) {
+export async function json(request, maximum = 8192) {
   requirePayment(/^application\/json(?:;|$)/i.test(request.headers['content-type'] || ''), 'invalid_content_type', 'JSON required', 415)
   const chunks = []; let length = 0
   for await (const chunk of request) {
@@ -29,7 +30,7 @@ async function notificationForm(request) {
   }
   return body
 }
-export function createApp({ service, credentials, state = { draining: false }, logger = console }) {
+export function createApp({ service, credentials, management, state = { draining: false }, logger = console }) {
   let inFlight = 0
   let reportingInFlight = 0
   const reportingPage=async work=>{
@@ -53,6 +54,7 @@ export function createApp({ service, credentials, state = { draining: false }, l
         return reply(200, { status: 'ready', service: 'mx-pay' })
       }
       requirePayment(!state.draining && inFlight <= 128, 'payment_temporarily_unavailable', 'Retry with original request identity', 503)
+      if (management) await management.syncChannels(service,process.env.MX_PAY_CHECKOUT_PAUSED==='1')
       const notification = /^\/v1\/notifications\/alipay\/([a-zA-Z0-9._-]{1,80})$/.exec(path)
       if (notification && request.method === 'POST') {
         requirePayment(!url.search, 'invalid_payment_query', 'Unexpected query')
@@ -61,10 +63,22 @@ export function createApp({ service, credentials, state = { draining: false }, l
         response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
         return response.end('success')
       }
-      const principal = authenticate(request.headers.authorization, credentials)
+      const principal = management ? await management.authenticate(request.headers.authorization) : authenticate(request.headers.authorization, credentials)
       const noQuery = () => requirePayment(!url.search, 'invalid_payment_query', 'Unexpected query')
       let data
-      if (path === '/v1/identity' && request.method === 'GET') { noQuery(); data = await service.identity(principal) }
+      if (management && request.method==='GET' && ['/v1/permissions/catalog','/v1/permissions/members'].includes(path)) {
+        authorize(principal,'permissions.read')
+        requirePayment(principal.appId==='mx-launcher' && principal.environment==='live','payment_scope_required','Launcher permission credential required',403)
+        if (path.endsWith('/catalog')) { noQuery(); data=permissionCatalog }
+        else {
+          requirePayment([...url.searchParams.keys()].every(k=>k==='after') && url.searchParams.getAll('after').length<=1,'invalid_payment_query','Unknown or repeated query')
+          const after=url.searchParams.get('after') || ''
+          requirePayment(!after || /^[a-f0-9]{64}$/.test(after),'invalid_payment_query','Invalid cursor')
+          const rows=(await management.pool.query('SELECT id,identity,grants,revision FROM pay_control.members WHERE id>$1 ORDER BY id LIMIT 101',[after])).rows
+          data={items:rows.slice(0,100),hasMore:rows.length>100,nextAfter:rows.length>100?rows[99].id:null}
+        }
+      }
+      else if (path === '/v1/identity' && request.method === 'GET') { noQuery(); data = await service.identity(principal) }
       else if (path === '/v1/channels' && request.method === 'GET') { noQuery(); data = await service.channels(principal) }
       else if (path === '/v1/settings' && request.method === 'GET') {
         noQuery(); authorize(principal, 'settings.write')

@@ -47,6 +47,8 @@ fi
 export MX_PAY_MIGRATION_ENV_FILE="$(absolute "$MX_PAY_MIGRATION_ENV_FILE")"
 export MX_PAY_CREDENTIALS_SOURCE="$(absolute "${MX_PAY_CREDENTIALS_SOURCE:-secrets/credentials.json}")"
 export MX_PAY_CHANNELS_SOURCE="$(absolute "${MX_PAY_CHANNELS_SOURCE:-secrets/channels.json}")"
+export MX_PAY_CONTROL_KEY_SOURCE="$(absolute "${MX_PAY_CONTROL_KEY_SOURCE:-secrets/control.key}")"
+export MX_PAY_CHANNEL_DRAFTS_SOURCE="$(absolute "${MX_PAY_CHANNEL_DRAFTS_SOURCE:-secrets/channel-drafts.json}")"
 export MX_PAY_SSO_SOURCE_EXPLICIT="${MX_PAY_SSO_SOURCE:+1}"
 export MX_PAY_SSO_SOURCE="$(absolute "${MX_PAY_SSO_SOURCE:-secrets/console/profile.json}")"
 export MX_PAY_CONSOLE_ACCESS_SOURCE="$(absolute "${MX_PAY_CONSOLE_ACCESS_SOURCE:-secrets/console/access.json}")"

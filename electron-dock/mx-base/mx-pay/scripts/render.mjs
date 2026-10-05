@@ -30,13 +30,19 @@ export function render(env = process.env, { pauseCheckout = false } = {}) {
   if (runtime.identity !== migration.identity) throw new Error('Runtime and migration must target the same payment database')
   readCredentials(env.MX_PAY_CREDENTIALS_SOURCE)
   const credentialJson = readFileSync(env.MX_PAY_CREDENTIALS_SOURCE, 'utf8')
-  const channelJson = JSON.stringify(readChannels(env.MX_PAY_CHANNELS_SOURCE).map(channel => pauseCheckout ? { ...channel, enabled: false } : channel))
+  const channelJson = JSON.stringify(readChannels(env.MX_PAY_CHANNELS_SOURCE).map(channel => pauseCheckout && !env.MX_PAY_CONTROL_KEY_SOURCE ? { ...channel, enabled: false } : channel))
+  const control = env.MX_PAY_CONTROL_KEY_SOURCE ? { 'control.key': readFileSync(env.MX_PAY_CONTROL_KEY_SOURCE,'utf8'),
+    'channel-drafts.json': readFileSync(env.MX_PAY_CHANNEL_DRAFTS_SOURCE,'utf8') } : {}
+  if (control['control.key'] && !/^[a-f0-9]{64}$/.test(control['control.key'].trim())) throw new Error('Invalid payment control key')
+  const controlMounts = Object.keys(control).map(key=>({key,path:key}))
+  const controlEnv = control['control.key'] ? [{name:'MX_PAY_CONTROL_KEY_FILE',value:'/run/mx-pay/control.key'},
+    {name:'MX_PAY_CHANNEL_DRAFTS_FILE',value:'/run/mx-pay/channel-drafts.json'}, {name:'MX_PAY_CHECKOUT_PAUSED',value:pauseCheckout?'1':'0'}] : []
   const consoleConfig = readConsoleConfig(env.MX_PAY_SSO_SOURCE, env.MX_PAY_CONSOLE_ACCESS_SOURCE)
   const image = env.MX_PAY_IMAGE || '', replicas = Number(env.MX_PAY_REPLICAS || 2)
   const nodeLoaded=/^local\.mx\/mx-pay:[a-f0-9]{64}$/.test(image) && env.MX_PAY_IMAGE_DELIVERY==='nodes'
   if (!nodeLoaded && !/^[-a-zA-Z0-9.:/_]+@sha256:[a-f0-9]{64}$/.test(image)) throw new Error('Kubernetes requires an immutable image digest or a verified content-addressed node image')
   if (!Number.isInteger(replicas) || replicas < 2 || replicas > 20) throw new Error('MX_PAY_REPLICAS must be 2–20')
-  const runtimeName = `mx-pay-runtime-${hash(JSON.stringify(runtime.values) + credentialJson + channelJson).slice(0,16)}`
+  const runtimeName = `mx-pay-runtime-${hash(JSON.stringify(runtime.values) + credentialJson + channelJson + JSON.stringify(control)).slice(0,16)}`
   const migrationName = `mx-pay-migration-${hash(JSON.stringify(migration.values)).slice(0,16)}`
   const labels = { 'app.kubernetes.io/name': 'mx-pay', 'app.kubernetes.io/part-of': 'mx-pay' }
   const base = (kind, name, apiVersion = 'v1') => ({ apiVersion, kind, metadata: { name, namespace, labels } })
@@ -48,7 +54,7 @@ export function render(env = process.env, { pauseCheckout = false } = {}) {
   const pullSecrets = env.MX_PAY_IMAGE_PULL_SECRET ? [{ name: env.MX_PAY_IMAGE_PULL_SECRET }] : []
   if (pullSecrets.some(s => !/^[a-z0-9][-a-z0-9.]{0,251}[a-z0-9]$/.test(s.name))) throw new Error('Invalid image pull Secret')
   const secret = (name, values) => ({ ...base('Secret',name), immutable: true, type: 'Opaque', data: Object.fromEntries(Object.entries(values).map(([k,v]) => [k,Buffer.from(v).toString('base64')])) })
-  const secrets = { apiVersion: 'v1', kind: 'List', items: [secret(runtimeName, { ...runtime.values, 'credentials.json': credentialJson, 'channels.json': channelJson }), secret(migrationName,migration.values)] }
+  const secrets = { apiVersion: 'v1', kind: 'List', items: [secret(runtimeName, { ...runtime.values, 'credentials.json': credentialJson, 'channels.json': channelJson, ...control }), secret(migrationName,migration.values)] }
   const jobName = env.MX_PAY_JOB_NAME
   if (!/^mx-pay-migrate-[a-z0-9-]+$/.test(jobName || '')) throw new Error('Invalid migration Job name')
   const job = { ...base('Job',jobName,'batch/v1'), spec: { backoffLimit: 0, activeDeadlineSeconds: 240, ttlSecondsAfterFinished: 86400,
@@ -67,9 +73,9 @@ export function render(env = process.env, { pauseCheckout = false } = {}) {
         // Service links would inject MX_PAY_PORT=tcp://... and break numeric port parsing.
         enableServiceLinks: false, securityContext: podSecurity, ...placement, imagePullSecrets: pullSecrets,
         topologySpreadConstraints: [{ maxSkew: 1, topologyKey: 'kubernetes.io/hostname', whenUnsatisfiable: 'DoNotSchedule', labelSelector: { matchLabels: apiLabels } }],
-        volumes: [{ name: 'credentials', secret: { secretName: runtimeName, items: [{ key: 'credentials.json', path: 'credentials.json' }, { key: 'channels.json', path: 'channels.json' }], defaultMode: 292 } }],
+        volumes: [{ name: 'credentials', secret: { secretName: runtimeName, items: [{ key: 'credentials.json', path: 'credentials.json' }, { key: 'channels.json', path: 'channels.json' }, ...controlMounts], defaultMode: 292 } }],
         containers: [{ name: 'api', image, imagePullPolicy, ports: [{ name: 'http', containerPort: 18230 }],
-          env: Object.entries(runtime.values).map(([name]) => ({ name, valueFrom: { secretKeyRef: { name: runtimeName, key: name } } })).concat([{ name: 'MX_PAY_PORT', value: '18230' }, { name: 'MX_PAY_CREDENTIALS_FILE', value: '/run/mx-pay/credentials.json' }, { name: 'MX_PAY_CHANNELS_FILE', value: '/run/mx-pay/channels.json' }]),
+          env: Object.entries(runtime.values).map(([name]) => ({ name, valueFrom: { secretKeyRef: { name: runtimeName, key: name } } })).concat([{ name: 'MX_PAY_PORT', value: '18230' }, { name: 'MX_PAY_CREDENTIALS_FILE', value: '/run/mx-pay/credentials.json' }, { name: 'MX_PAY_CHANNELS_FILE', value: '/run/mx-pay/channels.json' }, ...controlEnv]),
           volumeMounts: [{ name: 'credentials', mountPath: '/run/mx-pay', readOnly: true }], securityContext: containerSecurity,
           resources: { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '1000m', memory: '384Mi' } },
           startupProbe: { httpGet: { path: '/health/ready', port: 'http' }, periodSeconds: 3, timeoutSeconds: 12, failureThreshold: 20 },
@@ -79,14 +85,14 @@ export function render(env = process.env, { pauseCheckout = false } = {}) {
       } },
     } },
   ] }
-  const installation = { ...base('ConfigMap','mx-pay-installation'), data: { databaseIdentity: runtime.identity, lastAttemptImage: image, contractVersion: '2',
+  const installation = { ...base('ConfigMap','mx-pay-installation'), data: { databaseIdentity: runtime.identity, lastAttemptImage: image, contractVersion: '3', controlEnabled:control['control.key']?'1':'0',
     runtimeSecret:runtimeName,migrationSecret:migrationName,imageRepository:env.MX_PAY_IMAGE_REPOSITORY || '',imageDelivery:nodeLoaded ? 'nodes' : 'registry',
     topologyMode:env.MX_PAY_TOPOLOGY || 'multi-node',topologyNode:env.MX_PAY_NODE || '',
     serviceURL:`http://mx-pay.${namespace}.svc.cluster.local:18230`,
   } }
   const consoleWorkload = { apiVersion: 'v1', kind: 'List', items: [] }
   if (consoleConfig) {
-    const values = { ...runtime.values, 'profile.json': JSON.stringify(consoleConfig.settings), 'access.json': JSON.stringify(consoleConfig.access) }
+    const values = { ...runtime.values, 'profile.json': JSON.stringify(consoleConfig.settings), 'access.json': JSON.stringify(consoleConfig.access), ...(control['control.key'] ? {'control.key':control['control.key']} : {}) }
     const name = `mx-pay-console-${hash(JSON.stringify(values)).slice(0,16)}`
     secrets.items.push(secret(name, values))
     installation.data.consoleSecret = name
@@ -97,10 +103,10 @@ export function render(env = process.env, { pauseCheckout = false } = {}) {
         strategy: { type: 'RollingUpdate', rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }, selector: { matchLabels: consoleLabels },
         template: { metadata: { labels: consoleLabels }, spec: { automountServiceAccountToken: false, terminationGracePeriodSeconds: 25,
           enableServiceLinks: false, securityContext: { ...podSecurity, fsGroup: 1000 }, ...placement, imagePullSecrets: pullSecrets,
-          volumes: [{ name: 'console', secret: { secretName: name, defaultMode: 288, items: [{ key: 'profile.json', path: 'profile.json' }, { key: 'access.json', path: 'access.json' }] } }],
+          volumes: [{ name: 'console', secret: { secretName: name, defaultMode: 288, items: [{ key: 'profile.json', path: 'profile.json' }, { key: 'access.json', path: 'access.json' }, ...(control['control.key'] ? [{key:'control.key',path:'control.key'}] : [])] } }],
           containers: [{ name: 'console', image, imagePullPolicy, command: ['node','server/console-index.mjs'], ports: [{ name: 'http', containerPort: 18231 }],
             env: [{ name: 'MX_PAY_DATABASE_URL', valueFrom: { secretKeyRef: { name, key: 'MX_PAY_DATABASE_URL' } } },
-              { name: 'MX_PAY_CONSOLE_PORT', value: '18231' }, { name: 'MX_PAY_SSO_PROFILE', value: '/run/mx-pay-console/profile.json' }, { name: 'MX_PAY_CONSOLE_ACCESS_FILE', value: '/run/mx-pay-console/access.json' }],
+              { name: 'MX_PAY_CONSOLE_PORT', value: '18231' }, { name: 'MX_PAY_SSO_PROFILE', value: '/run/mx-pay-console/profile.json' }, { name: 'MX_PAY_CONSOLE_ACCESS_FILE', value: '/run/mx-pay-console/access.json' }, ...(control['control.key'] ? [{name:'MX_PAY_CONTROL_KEY_FILE',value:'/run/mx-pay-console/control.key'}] : [])],
             volumeMounts: [{ name: 'console', mountPath: '/run/mx-pay-console', readOnly: true }], securityContext: containerSecurity,
             resources: { requests: { cpu: '50m', memory: '96Mi' }, limits: { cpu: '500m', memory: '256Mi' } },
             readinessProbe: { httpGet: { path: '/health/ready', port: 'http' }, periodSeconds: 5, timeoutSeconds: 12 },
@@ -129,7 +135,7 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
     } else if (mode === 'needs-checkout-drain') {
       const previous = readFileSync(0,'utf8').trim()
       if (previous && JSON.parse(previous).kind !== 'Deployment') throw new Error('Invalid previous payment deployment')
-      console.log(previous && readChannels(process.env.MX_PAY_CHANNELS_SOURCE).some(channel => channel.enabled) ? 'yes' : 'no')
+      console.log(previous && (process.env.MX_PAY_CONTROL_KEY_SOURCE || readChannels(process.env.MX_PAY_CHANNELS_SOURCE).some(channel => channel.enabled)) ? 'yes' : 'no')
     } else if (mode === 'check-installation') {
       const previous = readFileSync(0,'utf8').trim()
       if (previous && JSON.parse(previous).data.databaseIdentity !== databaseEnv(process.env.MX_PAY_RUNTIME_ENV_FILE).identity) throw new Error('Database identity differs from retained installation; ordinary deploy cannot move databases')

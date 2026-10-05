@@ -9,6 +9,7 @@ import { createServer, request as httpsRequest } from 'node:https'
 import pg from 'pg'
 import { createPaymentConsole } from '../server/console.mjs'
 import { createApp } from '../server/app.mjs'
+import { PaymentManagement } from '../server/management.mjs'
 import { PaymentCenter } from '../server/service.mjs'
 import { migrate } from '../server/migrate.mjs'
 import { PostgresSsoStore } from '@qpjoy/mx-common/identity/postgres'
@@ -21,7 +22,7 @@ test('payment console: real Launcher OIDC, dedicated PG, scoped reads, durable s
   const { IdentityRepository } = await import('../../../mx-launcher/server/src/identity/repository.ts')
   const admin = new pg.Pool({ connectionString }), names = [], pools = [], servers = []
   const dir = mkdtempSync(join(tmpdir(), 'pay-console-sso-'))
-  let repository, provider, handler, unavailable = false, blocked = false
+  let management, repository, provider, handler, unavailable = false, blocked = false, scopes = ['mx:admin']
   t.after(async () => {
     await Promise.all(servers.map(server => new Promise(resolve => { server.close(resolve); server.closeAllConnections() })))
     await repository?.close(); await Promise.all(pools.map(pool => pool.end()))
@@ -54,13 +55,13 @@ test('payment console: real Launcher OIDC, dedicated PG, scoped reads, durable s
   const settings = { appId: 'mx-pay', origin, issuer, clientId: 'mx-pay-web', clientSecret: randomBytes(32).toString('base64url'),
     audience: 'mx-pay', scope: 'openid mx:identity', sessionKey: randomBytes(32).toString('base64url'), caCert: cert.toString() }
   const access = [], service = new PaymentCenter(payment.pool), store = new PostgresSsoStore(payment.pool, settings.sessionKey)
-  const restart = () => { handler = createPaymentConsole({ settings, access, sessionPool: payment.pool, service, logger: { error() {} } }) }
+  const restart = () => { handler = createPaymentConsole({ settings, access, sessionPool: payment.pool, service, management, logger: { error() {} } }) }
   restart()
   const person = () => ({ userId: 'person', displayName: 'Payment viewer', status: 'active', appAccess: { deniedAppIds: blocked ? ['mx-pay'] : [] } })
   const accounts = { webState: repository.webState, account: async () => person(),
     authenticate: async (login,password) => login === 'person' && password === 'test-password' ? person() : undefined,
     allowAttempt: async () => true, hubIdentity: async (user,audience) => ({ issuer: 'mx-user-center:test', subject: `user:${user.userId}`, audience,
-      principal: { userId: user.userId, kind: 'user', displayName: user.displayName, scopes: ['mx:admin'], organizationIds: [] } }),
+      principal: { userId: user.userId, kind: 'user', displayName: user.displayName, scopes, organizationIds: [] } }),
     withBrowserRequest: repository.withBrowserRequest.bind(repository), browserSessions: repository.browserSessions.bind(repository), revokeBrowserSessions: repository.revokeBrowserSessions.bind(repository) }
   const pair = generateKeyPairSync('rsa', { modulusLength: 2048 })
   provider = createIdentityProvider({ origin: authOrigin, issuer, clientId: 'launcher', clientSecret: 'launcher-fixture', cookieKeys: ['fixture-cookie'],
@@ -119,6 +120,27 @@ test('payment console: real Launcher OIDC, dedicated PG, scoped reads, durable s
   assert.equal(session.active, true)
   assert.equal((await request(`${origin}/auth/sso/logout`, { method: 'POST', headers: { origin } })).status, 403)
   assert.equal((await request(`${origin}/auth/sso/logout`, { method: 'POST', headers: { origin: 'https://other.test', 'x-mx-csrf': session.csrf } })).status, 403)
+  management = new PaymentManagement(payment.pool,randomBytes(32))
+  await management.bootstrap()
+  scopes = ['mx:pay:admin'] // No local bootstrap administrator: Launcher delegates to this SSO user.
+  restart()
+  const body=JSON.stringify({id:'new-app',name:'New application'})
+  assert.equal((await request(`${origin}/console/v1/applications`,{method:'POST',headers:{origin,'content-type':'application/json'},body})).status,403,'management write requires CSRF')
+  assert.equal((await request(`${origin}/console/v1/applications`,{method:'POST',headers:{origin:'https://other.test','content-type':'application/json','x-mx-csrf':session.csrf},body})).status,403,'cross-origin write denied')
+  const created=await request(`${origin}/console/v1/applications`,{method:'POST',headers:{origin,'content-type':'application/json','x-mx-csrf':session.csrf},body})
+  assert.equal(created.status,200,created.text)
+  assert.equal((await payment.pool.query('SELECT count(*)::int AS n FROM pay_control.members')).rows[0].n,0,'delegation is not persisted as a local administrator')
+  const centralMe=JSON.parse((await request(`${origin}/console/v1/me`)).text).data
+  assert.deepEqual(centralMe.launcherGrants,[{role:'administrator',scope:'center'}])
+  scopes=['mx:hub:admin','mx:admin']
+  assert.equal((await request(`${origin}/console/v1/applications`,{method:'POST',headers:{origin,'content-type':'application/json','x-mx-csrf':session.csrf},body})).status,403,'revocation is checked fresh on writes; other app/admin roles cannot authorize Pay')
+  scopes=['mx:pay:finance']
+  restart()
+  assert.equal((await request(`${origin}/console/v1/finance`)).status,200)
+  assert.equal((await request(`${origin}/console/v1/channels`)).status,403,'finance role cannot access channels')
+  scopes=['mx:pay:admin']; restart()
+
+  assert.equal((await request(`${origin}/console/v1/orders/${paymentOrder.id}/confirm`,{method:'POST',headers:{origin,'content-type':'application/json','x-mx-csrf':session.csrf},body:'{}'})).status,404,'console has no money mutation endpoint')
   blocked = true
   assert.equal(JSON.parse((await request(`${origin}/auth/sso/session`)).text).active, false)
   assert.equal((await payment.pool.query("SELECT to_regclass('public.tenants') AS tenants, to_regclass('public.mx_platform_records') AS launcher")).rows[0].tenants, null)

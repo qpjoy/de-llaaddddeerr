@@ -4,6 +4,85 @@
 
 2026-10-03。已实现独立支付订单到原租户钱包的交付、账务权限及页面。默认继续使用原人工充值，部署不会自动切换正式收款。SSO 暂不改动，后续由 Hub 接入 Launcher SSO。
 
+## 首次正式收款：页面提示“未开通”时
+
+2026-10-05 核对当前源码：页面仍显示“支付宝扫码付款 · 人工核实到账”，表示该环境尚未绑定独立支付源；没有静态二维码并不是官方支付宝接口流程缺文件。Luopan 前端 `po-frontend/src/features/AgentToolbox/AgentToolboxPage.vue` 调用 Java 后端的 `/api/agent-toolbox/payments/alipay/page-pay`，取得 `pay_url` 后打开支付宝收银台。mx-pay 已实现相同类型的电脑网站支付，Hub 的新订单通过支付事件自动入账，不需要上传静态码。
+
+下列流程适用于用户确认的**无正式历史订单**的首次接入。支付服务 deploy、SSO 登记和 `pay` 域名证书都不会自动完成这次业务接入；是否已经配置、切换，以服务器和 Hub 接入页面为准。
+
+### 1. 在 mx-pay 配置支付宝渠道
+
+在内网服务器支付项目的 `secrets/channels.json` 中登记正式渠道；已有其他渠道必须保留，不能用示例覆盖整个文件。示例中的商户 ID、私钥和公钥必须替换为实际值：
+
+```json
+[
+  {
+    "id": "alipay-live",
+    "provider": "alipay",
+    "environment": "live",
+    "enabled": true,
+    "appId": "实际支付宝应用的16位APPID",
+    "sellerId": "实际支付宝收款账户的2088开头16位ID",
+    "allowedApps": ["mx-insight-hub"],
+    "keyType": "PKCS8",
+    "privateKey": "实际应用RSA私钥PEM（含头尾，JSON内用\\n表示换行）",
+    "alipayPublicKey": "实际支付宝公钥PEM，不是应用公钥",
+    "notifyUrl": "https://pay.minsight-ai.com/v1/notifications/alipay/alipay-live",
+    "returnUrl": "https://hub.minsight-ai.com/admin/"
+  }
+]
+```
+
+如决定沿用 Luopan 的支付宝应用，Java 配置对应关系为：`ALIPAY_APP_ID` → `appId`，`ALIPAY_SELLER_ID` → `sellerId`，`ALIPAY_MERCHANT_PRIVATE_KEY` → `privateKey`，`ALIPAY_PUBLIC_KEY` → `alipayPublicKey`。在服务器私有文件中配置，不将值贴入聊天、Git 或浏览器；不重新生成或替换 Luopan 的密钥。若旧值是没有头尾的 Base64，应按它原有的 PKCS8/PKCS1 类型包装为 PEM，不能任意声明类型。当前 mx-pay 支持普通公钥模式，不支持支付宝证书模式。
+
+mx-pay 下单携带自己的通知地址；不要照抄 Luopan 的回调，也不要为了 Hub 修改 Luopan 的通知处理或重放它的订单。需要确认支付宝应用的产品签约及新站点符合该应用实际配置。上面的 `returnUrl` 是现有 Hub 首页，支付后从导航回到充值记录；当前配置校验不接受 URL 的 query/hash，不能填写 `#/payments`，浏览器回跳也不作为到账依据。
+
+保存后在 `mx-base/mx-pay` 目录执行（无需手工指定端口）：
+
+```bash
+chmod 600 secrets/channels.json
+TMPDIR=/data/tmp MX_PAY_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh deploy
+```
+
+无需代理时省略 `MX_PAY_BUILD_PROXY`。公网应已完成 `de-mingxi` 的 `pay-install`，使精确的支付宝通知路径能直接进入 mx-pay，而不是进入 SSO 登录页。
+
+### 2. 把 Hub 连接到该支付应用
+
+mx-pay 首次 deploy 默认已为 `mx-insight-hub` 生成 `secrets/credentials.json`。其中 `app-live` 是正式业务凭据，包含 `orders.read`、`orders.write`、`events.read`、`events.ack`；以服务器保留的实际记录为准，检查其 appId/environment/scopes。Hub 使用这一条的 `secret`，不是 `receipt-operator-live`、`channel-operator`、支付宝私钥、SSO secret 或 Hub Admin Token。不需要重新运行初始化或轮换凭据。
+
+在 Hub 项目准备私有 `secrets/payment-delivery.env`，一行 JSON，不加 shell 引号；已有 test 配置时保留，追加 live 项，不覆盖已绑定支付源：
+
+```dotenv
+MX_INSIGHT_PAYMENT_DELIVERY_SOURCES=[{"environment":"live","appId":"mx-insight-hub","channelId":"alipay-live","baseUrl":"http://mx-pay.mx-pay.svc.cluster.local:18230","token":"替换为mx-pay现有app-live记录的secret"}]
+```
+
+这里的 `appId` 是业务应用标识，和支付宝数字 APPID 不同；`channelId` 必须与上一份文件的 `id` 一致。`baseUrl` 是 Hub 后端到 Pay **机器 API** 的内网地址，不是公开查询台 `https://pay.minsight-ai.com`。示例 DNS 仅适用于 Hub 与 Pay 同一 Kubernetes 集群、Pay namespace 为 `mx-pay` 的情况；可在 Pay 目录执行 `bash scripts/manage.sh discover` 查看 `serviceURL`，核对 Hub 的集群和实际可达性。不同集群应使用既有受限私网 API 入口，不能只复制另一集群的 DNS，也不要把公网 `/v1/orders` 放开来代替内网接入。
+
+在 Hub 目录执行：
+
+```bash
+chmod 600 secrets/payment-delivery.env
+node scripts/check-payment-delivery-config.mjs secrets/payment-delivery.env
+TMPDIR=/data/tmp MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh deploy
+```
+
+这是 Hub 的部署；不需要重新发布 Launcher。校验命令只验证文件权限和格式，不代表机器凭据、渠道或网络已经可用，后续接入页会执行支付源核对。
+
+### 3. 在 Hub 启用并验收
+
+以平台管理员进入「充值与发票/充值与财务」，滚到页面顶部，打开 **支付服务接入**。核对“正式充值”显示已连接 `mx-insight-hub`、支付源 UUID 正确、旧正式订单数为 0；保持旧 **收款设置** 的人工渠道关闭，确认后点击“启用正式支付接入”。如果没有这个按钮，先核对平台管理员会话与已部署 Hub 版本；租户 owner/admin 的充值权限不等于平台接入权限。
+
+关闭弹窗后，“正式收款”应显示 **支付宝收银台**，创建按钮可用。选择验收租户，按当前下限创建 **5 元**订单，再在订单内依次点击“准备支付宝收银台”与“打开支付宝收银台”。真实付款由操作者在支付宝完成。核对支付中心确认收款、Hub 订单显示“已入账”、该租户正式可用余额增加 5 元，并再次刷新同一订单确认不重复入账。`test`/mock/支付宝沙箱只验证测试账本，不会增加正式余额。
+
+| 现象 | 排查入口 |
+| --- | --- |
+| 仍显示“人工核实到账” | 正式环境尚未激活独立支付；只启用 test 不会改变 live |
+| 接入页未配置或不可达 | Hub 私有文件是否进入 Admin API；内网地址、业务 token、环境与 scopes 是否匹配 |
+| 接入页已连接，但启用提示渠道不支持 | Pay 是否已发布 `alipay-live`，其环境及 allowedApps 是否与 Hub 凭据匹配 |
+| 已切换到“支付宝收银台”但创建按钮不可用 | 渠道 enabled 是否为 true、Pay 是否可达；普通部署不会擅自启用渠道 |
+| 收银台能打开但付款后仍待付款 | 通知的 TLS、精确路径与验签；可在原订单点击“查证付款状态”，不要重建单或再付一次 |
+| 付款已确认但待入账 | 接入页交付异常、原租户钱包状态与 Hub 消费者；修复后自动重试原事件，不另行人工加余额 |
+
 ## 账户与业务边界
 
 - 人通过现有 Launcher 登录 Hub；原 Hub member、租户、membership、Key 和钱包身份保持不变。平台 Admin Token 仍可管理和排障。

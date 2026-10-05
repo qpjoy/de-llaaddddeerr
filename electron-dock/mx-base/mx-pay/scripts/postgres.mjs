@@ -237,12 +237,17 @@ export function backup(root) {
   assert(refs?.runtimeSecret && refs?.migrationSecret,'Current runtime/migration credential references missing; backup cannot be declared complete')
   clusterObjects.runtime=get('secret',refs.runtimeSecret); clusterObjects.migration=get('secret',refs.migrationSecret)
   assert(clusterObjects.runtime && clusterObjects.migration && clusterObjects.bootstrap,'Required recovery credentials missing')
+  if (refs.consoleSecret) {
+    clusterObjects.console=get('secret',refs.consoleSecret)
+    assert(clusterObjects.console,'Payment console identity Secret missing from backup')
+  }
+  if (refs.controlEnabled==='1') assert(clusterObjects.runtime.data?.['control.key'],'Payment channel encryption key missing from backup')
   // A failed rollout may leave replicas on the previous credential generation.
   // Keep all referenced active ReplicaSet generations, not just lastAttempt.
   const sets=JSON.parse(kube('get','replicasets','-l','app.kubernetes.io/part-of=mx-pay','-o','json')).items
   clusterObjects.activeRuntimeSecrets={}
   for (const set of sets.filter(s=>s.status?.replicas>0)) {
-    const ref=set.spec.template.spec.volumes?.find(v=>v.name==='credentials')?.secret?.secretName
+    const ref=set.spec.template.spec.volumes?.find(v=>['credentials','console'].includes(v.name))?.secret?.secretName
     assert(ref,'Active payment ReplicaSet credential reference missing')
     const secret=get('secret',ref);assert(secret,'Active payment runtime credential missing')
     clusterObjects.activeRuntimeSecrets[ref]=secret

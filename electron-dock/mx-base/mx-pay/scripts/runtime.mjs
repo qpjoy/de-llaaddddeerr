@@ -1,4 +1,5 @@
 // Deployment-host discovery. No npm dependencies, cluster switching or secret output.
+import { prepareControl } from './control-files.mjs'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -151,6 +152,7 @@ export function prepare(root) {
     }
   }
   prepareConsole(root,{configured:Boolean(consoleName)})
+  prepareControl(root,env,runtime || {},previous.controlEnabled==='1')
   if (env.MX_PAY_CHANNELS_SOURCE && !fs.existsSync(env.MX_PAY_CHANNELS_SOURCE)) {
     const required=deployment?.spec.template.spec.containers?.some(c=>c.env?.some(e=>e.name==='MX_PAY_CHANNELS_FILE'))
     assert(!required || runtime?.['channels.json'],'Deployed channel Secret is missing; explicit configuration recovery required, refusing empty channel configuration')
@@ -174,7 +176,7 @@ export function prepare(root) {
   if (!installation && !deployment && !clientBootstrap) create(resource('Secret','mx-pay-client-bootstrap',{immutable:true,type:'Opaque',data:{'credentials.json':Buffer.from(fs.readFileSync(env.MX_PAY_CREDENTIALS_SOURCE)).toString('base64')}}))
   if (!fs.existsSync(env.MX_PAY_RUNTIME_ENV_FILE) && runtime) {
     assert(runtime.MX_PAY_DATABASE_URL,'Retained runtime database connection missing')
-    writePrivate(env.MX_PAY_RUNTIME_ENV_FILE,Object.entries(runtime).filter(([k])=>!['credentials.json','channels.json'].includes(k)).map(([k,v])=>`${k}=${v}\n`).join(''),true)
+    writePrivate(env.MX_PAY_RUNTIME_ENV_FILE,Object.entries(runtime).filter(([k])=>['MX_PAY_DATABASE_URL','MX_PAY_DB_POOL_SIZE','MX_PAY_RUNTIME_ROLE'].includes(k)).map(([k,v])=>`${k}=${v}\n`).join(''),true)
   }
   if (!fs.existsSync(env.MX_PAY_MIGRATION_ENV_FILE) && previous.migrationSecret) {
     const migration=data(get('secret',previous.migrationSecret))
@@ -276,7 +278,7 @@ if (process.argv[1] && fs.realpathSync(process.argv[1])===fileURLToPath(import.m
       console.log(retained ? JSON.parse(retained.data.identity).image : process.env.MX_PAY_POSTGRES_IMAGE || 'postgres:16-bookworm')
     }
     else if (mode==='prepare') prepare(root)
-    else if (mode==='prepare-console') prepareConsole(root)
+    else if (mode==='prepare-console') { prepareConsole(root); prepareControl(root,process.env) }
     else if (mode==='image-plan') console.log(imagePlan(root))
     else if (mode==='image-platforms') console.log(imagePlatforms())
     else if (mode==='import-image') importImage(root,...args)
