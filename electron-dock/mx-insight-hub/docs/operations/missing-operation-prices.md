@@ -7,6 +7,7 @@
 ## 筛选与写入边界
 
 - 默认只读预览；`--apply` 才写入。`--all` 检查 Admin 目录中的所有供应商，也支持 `--provider NAME`。
+- `ipsearch`、Night-All、Night-All-A 没有该采购操作控制合同，明确报告 `provider_has_no_operation_pricing` 并跳过。Night-All-A 的 `operations` 是采集命令，不能当成采购策略。其他供应商缺失 `operations` 时仍停止并报告具体供应商，不静默漏掉待迁移项。
 - 必须有 `price_control_incomplete` 阻断，且至少一个必需 endpoint 单价为 null/缺失。已填的正价、明确的零价和免费接口不被覆盖；不补开未选用的可选 endpoint。
 - 停用项只有完整审计链证明来自 migration 初始化及原默认价格 seed，才恢复为 `active`。明确的人工禁用、暂停、shadow 和无法确认来源的停用保留。已为 active/canary、仅价格阻断的操作保留其原状态及灰度名单。
 - 缺凭据、合同未发布、技术配置错误、启信宝面议禁用等其他阻断跳过并列出。初始 legacy 环境合同开关可随已授权的数据库接管解除；不会修改环境变量或固定上游地址。
@@ -38,6 +39,8 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -- \
 ```
 
 `--apply` 会重新读取并筛选当时的状态，不把旧预览作为授权覆盖现状。执行不是整批事务：每个操作独立原子提交；写入冲突、HTTP 失败或保存后仍被阻断时立即停止，退出码为 1。报告区分 `results` 已确认写入、`errors` 失败/结果未确认，以及 `summary.unattempted` 尚未执行。网络失败可能发生在提交后，不可把它解读为回滚；不自动重试 PUT，重新预览将保留已完成的价格。
+
+若旧版本只输出 `Failed: Error`，先同步新版脚本再运行预览。已修复混合供应商目录触发的缺失 `operations` 错误。新版显示只读阶段 `audit_read`、`provider_inventory`、`operation_inventory`，并对 Admin 请求报告方法、内部路径、HTTP 状态和错误码；数据库/网络错误仅输出阶段和错误码，不打印连接串、Token 或原始响应。所有目录读取完成后才开始写入。
 
 需要查看具体剩余项时：
 

@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { adminClient, bootstrapOnly, migrate, parseArgs, planOperation } from '../../scripts/migrate-missing-operation-prices.mjs'
+import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { adminClient, bootstrapOnly, failureDiagnostic, migrate, parseArgs, planOperation } from '../../scripts/migrate-missing-operation-prices.mjs'
 import { MemoryExternalPlatformControlStore, normalizePriceBook } from '../../server/external-platforms/control-store.mjs'
+import { MultiExternalPlatformAdminService } from '../../server/external-platforms/admin.mjs'
+import { IpSearchAdminService } from '../../server/external-platforms/ipsearch-admin.mjs'
+import { NightAllPlatformAdminService } from '../../server/external-platforms/night-all-admin.mjs'
+import { NightAllAService } from '../../server/external-platforms/night-all-a.mjs'
 
 const operationKey = 'native.t.douyin_search_fetch_video_search_v1'
 const timestamp = '2026-10-06T12:00:00Z'
@@ -86,7 +92,7 @@ test('Admin transport permits only local HTTP or HTTPS and never follows redirec
     assert.equal(init.method, 'PUT')
     return { ok: false, status: 409, json: async () => ({ error: { code: 'revision_conflict' } }) }
   })
-  await assert.rejects(admin('/internal/test', {}), /revision_conflict/)
+  await assert.rejects(admin(`/internal/v1/admin/external-platforms/tikhub/operations/${operationKey}/policy`, {}), /revision_conflict/)
   assert.equal(calls, 1)
 })
 
@@ -182,4 +188,90 @@ test('a saved operation that becomes blocked is reported separately from success
   assert.equal(report.summary.errors, 1)
   assert.equal(report.errors[0].reason, 'saved_but_not_ready')
   assert.equal(report.summary.unattempted, 0)
+})
+
+test('real mixed provider registry skips non-pricing services and still migrates TikHub', async () => {
+  const ipsearch = new IpSearchAdminService({ analytics: async () => ({ totals: { hubRequests: 0,
+    idempotentReplay: 0, duplicateSuppressed: 0 } }) }, {
+    events: { summary: async () => ({}) }, capabilities: async () => ({ ready: false }),
+  })
+  const nightAll = new NightAllPlatformAdminService({ store: { nightAllAnalytics: async () => [] }, config: {} })
+  const nightAllA = new NightAllAService({ config: { enabled: false } })
+  // Reproduce the actual heterogeneous DTOs that the old script treated as errors.
+  assert.equal((await ipsearch.detail('ipsearch')).operations, undefined)
+  assert.equal((await nightAll.detail('night-all')).operations, undefined)
+  const collectorOperations = (await nightAllA.detail('night-all-a')).operations
+  assert.ok(collectorOperations.length > 0)
+  assert.ok(collectorOperations.every(row => !row.operationKey))
+  let writes = 0
+  const registry = new MultiExternalPlatformAdminService([ipsearch, nightAll, nightAllA, {
+    providerKey: 'tikhub',
+    overview: async () => ({ providers: [{ key: 'tikhub', metrics: {}, billing: {} }] }),
+    detail: async () => ({ operations: [operation()], provider: { billing: {} } }),
+    updateOperationPolicy: async (_provider, key) => {
+      assert.equal(key, operationKey)
+      writes++
+      return { effectiveState: 'active', revision: 2 }
+    },
+  }])
+  const detailReads = []
+  const admin = async (path, body) => {
+    const parts = path.split('?')[0].split('/').filter(Boolean)
+    if (body) return registry.updateOperationPolicy(parts[4], parts[6], body)
+    if (parts.length === 4) return registry.overview('24h')
+    detailReads.push(parts[4])
+    return registry.detail(parts[4], '24h')
+  }
+  const report = await migrate({ options: parseArgs(['--all', '--missing-budget-minor', '100000', '--apply']), admin, audit: [event()] })
+  assert.deepEqual(detailReads, ['tikhub'])
+  assert.equal(writes, 1)
+  assert.equal(report.summary.errors, 0)
+  assert.deepEqual(report.skipped.map(row => [row.provider, row.reason]), [
+    ['ipsearch', 'provider_has_no_operation_pricing'],
+    ['night-all', 'provider_has_no_operation_pricing'],
+    ['night-all-a', 'provider_has_no_operation_pricing'],
+  ])
+})
+
+test('a missing priced-provider inventory still stops before all writes and names the provider', async () => {
+  const admin = async (path, body) => {
+    assert.equal(body, undefined)
+    if (path.endsWith('external-platforms?range=24h')) return { providers: [{ key: 'tikhub' }, { key: 'justone' }] }
+    return path.includes('/tikhub?') ? { operations: [operation()] } : {}
+  }
+  await assert.rejects(migrate({ options: parseArgs(['--all', '--missing-budget-minor', '100000', '--apply']), admin, audit: [event()] }), error => {
+    assert.equal(failureDiagnostic(error), '[operation_inventory] Missing operation inventory: justone')
+    return true
+  })
+})
+
+test('safe diagnostics identify HTTP and transport failures without credential or response contents', async () => {
+  const path = '/internal/v1/admin/external-platforms?range=24h'
+  const cases = [
+    { run: async () => ({ ok: false, status: 401, json: async () => ({ error: { code: 'unauthorized', message: 'secret-token' } }) }), expected: /HTTP 401, code=unauthorized/ },
+    { run: async () => ({ ok: false, status: 502, json: async () => { throw new Error('secret-token HTML') } }), expected: /HTTP 502, code=unavailable/ },
+    { run: async () => { throw new Error('postgres://user:secret-token@host/db', { cause: { code: 'ECONNREFUSED' } }) }, expected: /transport failure \(ECONNREFUSED\)/ },
+  ]
+  for (const entry of cases) {
+    const admin = adminClient('http://127.0.0.1:18151', 'secret-token', entry.run)
+    await assert.rejects(admin(path), error => {
+      const diagnostic = failureDiagnostic(error)
+      assert.match(diagnostic, entry.expected)
+      assert.match(diagnostic, /\[admin_request\] GET \/internal\/v1\/admin\/external-platforms/)
+      assert.doesNotMatch(diagnostic, /secret-token|postgres:/)
+      return true
+    })
+  }
+  assert.doesNotMatch(failureDiagnostic(new Error('secret-token')), /secret-token/)
+})
+
+test('the exact stdin CLI mode prints the missing configuration instead of blanket Error', () => {
+  const result = spawnSync(process.execPath, ['--input-type=module', '-', '--all', '--missing-budget-minor', '100000'], {
+    input: readFileSync(new URL('../../scripts/migrate-missing-operation-prices.mjs', import.meta.url), 'utf8'), encoding: 'utf8',
+    env: { ...process.env, MX_INSIGHT_ADMIN_BASE_URL: 'http://127.0.0.1:18151', MX_INSIGHT_ADMIN_TOKEN: 'secret-token', DATABASE_URL: '' },
+  })
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /\[audit_read\] DATABASE_URL is required/)
+  assert.doesNotMatch(result.stderr, /secret-token|Failed: Error\./)
+  assert.equal(result.stdout, '')
 })

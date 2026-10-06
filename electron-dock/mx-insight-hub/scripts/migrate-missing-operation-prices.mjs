@@ -10,8 +10,23 @@ const PRICE_BLOCKERS = new Set(['price_control_incomplete', 'database_price_book
 // procurement-ledger currencies, not a claim about actual supplier settlement.
 // The running Pod does not contain seeds/. Never guess other providers' currency.
 const PROVIDER_SEED_CURRENCIES = { tikhub: 'USD', justone: 'CNY' }
+// These registry entries explicitly do not implement operation procurement
+// policies. Night-All-A has an unrelated collector "operations" array.
+const NON_PRICING_PROVIDERS = new Set(['ipsearch', 'night-all', 'night-all-a'])
 const nonnegative = value => Number.isSafeInteger(value) && value >= 0
 const currencyCode = value => typeof value === 'string' && /^[A-Z]{3}$/.test(value)
+
+class MigrationError extends Error {
+  constructor(stage, message) { super(message); this.stage = stage }
+}
+
+const diagnosticCode = value => typeof value === 'string' && /^[a-zA-Z0-9_]{1,80}$/.test(value) ? value : 'unavailable'
+export function failureDiagnostic(error) {
+  // Only messages authored here are safe to print. Driver/fetch messages may
+  // contain DSNs or headers; report their error codes without those messages.
+  if (error instanceof MigrationError) return `[${error.stage}] ${error.message}`
+  return `[unexpected] ${diagnosticCode(error?.cause?.code || error?.code || error?.name)}; error details withheld`
+}
 
 // Audit the entire chain: a price seed after a manual pause/disable is not consent
 // to undo that decision. CAS on the policy write fences changes after this read.
@@ -94,40 +109,51 @@ export function parseArgs(args) {
     else if (arg === '--all') options.all = true
     else if (arg === '--provider') {
       options.provider = args[++i]
-      if (!/^[a-z][a-z0-9_-]*$/.test(options.provider || '')) throw new Error('Invalid --provider')
+      if (!/^[a-z][a-z0-9_-]*$/.test(options.provider || '')) throw new MigrationError('arguments', 'Invalid --provider')
     } else if (arg === '--missing-budget-minor') {
       const value = args[++i]
-      if (!/^\d+$/.test(value || '') || !nonnegative(Number(value))) throw new Error('Invalid --missing-budget-minor')
+      if (!/^\d+$/.test(value || '') || !nonnegative(Number(value))) throw new MigrationError('arguments', 'Invalid --missing-budget-minor')
       options.missingBudgetMinor = Number(value)
-    } else throw new Error(`Unknown argument: ${arg}`)
+    } else throw new MigrationError('arguments', 'Unknown argument; use --help')
   }
-  if (options.all === Boolean(options.provider)) throw new Error('Choose --all or --provider NAME')
-  if (options.missingBudgetMinor == null) throw new Error('--missing-budget-minor is required (100000 = 100000 calls at 0.01)')
+  if (options.all === Boolean(options.provider)) throw new MigrationError('arguments', 'Choose --all or --provider NAME')
+  if (options.missingBudgetMinor == null) throw new MigrationError('arguments', '--missing-budget-minor is required (100000 = 100000 calls at 0.01)')
   return options
 }
 
 export function adminClient(base, token, fetchImpl = fetch) {
-  const url = new URL(base)
-  if (url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('Admin URL must be an origin')
+  let url
+  try { url = new URL(base) } catch { throw new MigrationError('configuration', 'Invalid Admin URL') }
+  if (url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new MigrationError('configuration', 'Admin URL must be an origin')
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname))) {
-    throw new Error('Admin URL must use HTTPS or loopback HTTP')
+    throw new MigrationError('configuration', 'Admin URL must use HTTPS or loopback HTTP')
   }
-  if (!token) throw new Error('MX_INSIGHT_ADMIN_TOKEN is required')
+  if (!token) throw new MigrationError('configuration', 'MX_INSIGHT_ADMIN_TOKEN is required')
   return async (path, body) => {
-    const response = await fetchImpl(`${url.origin}${path}`, {
-      method: body ? 'PUT' : 'GET', redirect: 'error', signal: AbortSignal.timeout(30000),
-      headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    })
-    const payload = await response.json()
-    if (!response.ok) throw new Error(`HTTP ${response.status}: ${payload?.error?.code || 'admin_request_failed'}`)
-    if (!payload?.data) throw new Error('Missing Admin response data')
+    // The script only constructs these credential-free, internal paths.
+    if (!/^\/internal\/v1\/admin\/external-platforms(?:\/[a-z][a-z0-9._-]{0,63}(?:\/operations\/[a-z][a-z0-9._-]{0,127}\/policy)?)?(?:\?range=24h)?$/.test(path)) {
+      throw new MigrationError('admin_request', 'Unsupported Admin request path')
+    }
+    const method = body ? 'PUT' : 'GET'
+    let response
+    try {
+      response = await fetchImpl(`${url.origin}${path}`, {
+        method, redirect: 'error', signal: AbortSignal.timeout(30000),
+        headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      })
+    } catch (error) {
+      throw new MigrationError('admin_request', `${method} ${path}: transport failure (${diagnosticCode(error?.cause?.code || error?.code || error?.name)})`)
+    }
+    const payload = await response.json().catch(() => null)
+    if (!response.ok) throw new MigrationError('admin_request', `${method} ${path}: HTTP ${response.status}, code=${diagnosticCode(payload?.error?.code)}`)
+    if (!payload?.data) throw new MigrationError('admin_request', `${method} ${path}: HTTP ${response.status}, missing JSON data`)
     return payload.data
   }
 }
 
 export async function readAudit(databaseUrl) {
-  if (!databaseUrl) throw new Error('DATABASE_URL is required for read-only policy audit')
+  if (!databaseUrl) throw new MigrationError('audit_read', 'DATABASE_URL is required for read-only policy audit')
   const { default: pg } = await import('pg')
   const client = new pg.Client({ connectionString: databaseUrl, connectionTimeoutMillis: 10000 })
   try {
@@ -141,15 +167,20 @@ export async function readAudit(databaseUrl) {
       ORDER BY provider_key, operation_key, revision`)
     await client.query('ROLLBACK')
     return rows
+  } catch (error) {
+    throw new MigrationError('audit_read', `Database audit read failed (${diagnosticCode(error?.code)}); check database access and policy event table`)
   } finally { await client.end() }
 }
 
 export async function migrate({ options, admin, audit, currencyFallback = provider => PROVIDER_SEED_CURRENCIES[provider],
   now = () => new Date().toISOString(), progress = () => {} }) {
+  progress('stage=provider_inventory (read-only)')
   const overview = await admin(`${ROOT}?range=24h`)
-  if (!Array.isArray(overview.providers)) throw new Error('Missing provider inventory')
+  if (!Array.isArray(overview.providers) || overview.providers.some(row => !/^[a-z][a-z0-9._-]{0,63}$/.test(row?.key || ''))) {
+    throw new MigrationError('provider_inventory', 'Missing or invalid provider inventory')
+  }
   const providers = overview.providers.filter(row => options.all || row.key === options.provider)
-  if (!providers.length) throw new Error('Provider not found')
+  if (!providers.length) throw new MigrationError('provider_inventory', 'Provider not found')
   const events = new Map()
   for (const row of audit) {
     const key = `${row.provider_key}/${row.operation_key}`
@@ -162,8 +193,13 @@ export async function migrate({ options, admin, audit, currencyFallback = provid
   // Finish all reads and planning before any write. A failed inventory is not a
   // license to apply an incomplete, unreviewable batch.
   for (const provider of providers) {
+    if (NON_PRICING_PROVIDERS.has(provider.key)) {
+      report.skipped.push({ provider: provider.key, action: 'skip', reason: 'provider_has_no_operation_pricing' })
+      continue
+    }
+    progress(`stage=operation_inventory provider=${provider.key} (read-only)`)
     const detail = await admin(`${ROOT}/${provider.key}?range=24h`)
-    if (!Array.isArray(detail.operations)) throw new Error(`Missing operation inventory: ${provider.key}`)
+    if (!Array.isArray(detail.operations)) throw new MigrationError('operation_inventory', `Missing operation inventory: ${provider.key}`)
     const configuredCurrency = detail.provider?.billing?.currency
     const defaultCurrency = configuredCurrency ?? await currencyFallback(provider.key)
     for (const operation of detail.operations) {
@@ -199,7 +235,7 @@ export async function migrate({ options, admin, audit, currencyFallback = provid
         // An HTTP failure can occur after COMMIT. Stop, report uncertainty and
         // never automatically repeat the PUT. Rerunning re-reads current state.
         report.errors.push({ provider: plan.provider, operationKey: plan.operationKey,
-          reason: 'write_not_confirmed', message: error.message })
+          reason: 'write_not_confirmed', message: failureDiagnostic(error) })
         break
       }
     }
@@ -218,6 +254,7 @@ export async function main(args = process.argv.slice(2)) {
     return 0
   }
   const admin = adminClient(process.env.MX_INSIGHT_ADMIN_BASE_URL || `http://127.0.0.1:${process.env.MX_INSIGHT_PORT || 18151}`, process.env.MX_INSIGHT_ADMIN_TOKEN)
+  process.stderr.write('[missing-prices] stage=audit_read (read-only)\n')
   const audit = await readAudit(process.env.DATABASE_URL)
   const report = await migrate({ options, admin, audit, progress: message => process.stderr.write(`[missing-prices] ${message}\n`) })
   console.log(JSON.stringify(report, null, 2))
@@ -227,7 +264,7 @@ export async function main(args = process.argv.slice(2)) {
 if (process.argv[1] === '-' || (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href)) {
   main().then(code => { process.exitCode = code }).catch(error => {
     // Do not print connection strings, headers, provider credentials or stacks.
-    console.error(`[missing-prices] Failed: ${error.code || error.name}. No automatic retry. Check configuration and rerun preview.`)
+    console.error(`[missing-prices] Failed: ${failureDiagnostic(error)}. No automatic retry. Rerun preview after resolving this error.`)
     process.exitCode = 1
   })
 }
