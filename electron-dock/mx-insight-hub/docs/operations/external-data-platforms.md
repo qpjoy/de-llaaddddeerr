@@ -171,6 +171,8 @@ gate/ceiling syntax, Secret apply failure, and other infrastructure errors still
 
 ### Runtime operation control and price recovery
 
+For the explicitly authorized one-off recovery of missing procurement prices at 0.01 in the original currency, use the [preview/apply runbook](missing-operation-prices.md). It preserves existing prices and manual stops; routine deployment does not run it.
+
 Migration 060 starts every existing operation at revision `0` with
 `controlSource=legacy_environment`. This is the sole transition exception: an already-enabled deployment keeps
 its previous environment gate/canary/price behavior after migration. The first successful Admin write changes
