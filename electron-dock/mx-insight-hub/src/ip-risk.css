@@ -5,10 +5,10 @@
 .mih-ip-page h3 { font-size: 15px; margin: 0; }
 .mih-ip-page p { font-size: 13px; line-height: 1.7; }
 .mih-ip-page code { overflow-wrap: anywhere; }
-.mih-ip-page a { color: var(--qp-primary); }
+.mih-ip-page a:not(.qp-button) { color: var(--qp-primary); }
 .mih-ip-page .mih-page-header p { margin: 8px 0 0; color: var(--ip-muted); }
-.mih-ip-page .mih-ip-tabs { padding: 0; gap: 24px; border: 0; border-bottom: 1px solid var(--qp-line); background: transparent; border-radius: 0; }
-.mih-ip-page .mih-ip-tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; padding: 12px 2px; box-shadow: none; }
+.mih-ip-page .mih-ip-tabs { padding: 0; gap: 4px; border: 0; border-bottom: 1px solid var(--qp-line); background: transparent; border-radius: 0; }
+.mih-ip-page .mih-ip-tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; padding: 12px 18px; box-shadow: none; }
 .mih-ip-page .mih-ip-tabs button[aria-pressed=true] { border-bottom-color: var(--qp-primary); color: var(--qp-primary); }
 .mih-ip-product, .mih-ip-results, .mih-ip-debug { display: grid; gap: 16px; min-width: 0; }
 .mih-ip-page .qp-panel { background: var(--qp-bg-3); border: 1px solid var(--qp-line); border-radius: 12px; }
@@ -134,7 +134,7 @@
   .mih-ip-batch-controls { grid-template-columns: 1fr 1fr; gap: 10px; }
   .mih-ip-batch-controls > :nth-child(2) { grid-column: 1 / -1; grid-row: 1; }
   .mih-ip-page h1 { font-size: 24px; }
-  .mih-ip-page .mih-ip-tabs { gap: 18px; overflow-x: auto; flex-wrap: nowrap; }
+  .mih-ip-page .mih-ip-tabs { gap: 4px; overflow-x: auto; flex-wrap: nowrap; }
   .mih-ip-tabs button { white-space: nowrap; }
   .mih-ip-report, .mih-ip-history, .mih-ip-channels, .mih-ip-composer { padding: 16px; }
   .mih-ip-composer-top > span { display: none; }
@@ -161,7 +161,7 @@
 .mih-content--ip-risk > .mih-demo-identity--compact > summary { font-size: 12px; color: var(--qp-text-3); }
 .mih-ip-results { scroll-margin-top: 80px; }
 
-.mih-ip-docs > .mih-page-actions { display: none; }
+.mih-ip-docs > .mih-page-actions { display: flex; justify-content: flex-end; }
 /* Compact workstation rhythm: keep the full portrait close to the search. */
 .mih-content--ip-risk { gap: 16px; }
 .mih-content--ip-risk > .mih-demo-identity--compact:not([open]) { display: block; }
