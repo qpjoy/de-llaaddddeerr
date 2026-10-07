@@ -1,3 +1,5 @@
+import { IpRiskProduct } from './external-platforms/ip-risk-product.mjs'
+import { CommerceService } from './commerce/service.mjs'
 import { BaiduIpRiskAdapter } from './adapters/baidu-ip-risk.mjs'
 import { BaiduIpAdminService } from './external-platforms/baidu-ip-admin.mjs'
 import { IpRiskChannels } from './external-platforms/ip-risk-channels.mjs'
@@ -279,6 +281,7 @@ export async function createRuntime(config = loadConfig()) {
     platformStore: createExternalPlatformStore({pool,usageStore:store,providerKey:'baidu-ip',authorizationPlatform:'ip_risk'}),
     adapter:baiduIpAdapter,enabled:true,providerKey:'baidu-ip',operation:'ip.risk.query.v2',version:'mx-insight-hub.ip-risk.v2',meterKey:'ip.risk.subscription.v2' })
   const ipRiskChannels = new IpRiskChannels(ipRiskGateway,ipRiskV2Gateway)
+  const ipRiskProduct = new IpRiskProduct(ipRiskChannels,new CommerceService(store))
   const nightAllA = new NightAllAService({ config: config.nightAllA, journal: new NightAllADispatchStore(pool) })
   const qixinCredentialStore = new StructuredExternalPlatformCredentialStore({ pool, providerKey: 'qixin',
     fields: QIXIN_CREDENTIAL_FIELDS, pepper: config.apiKeyPepper })
@@ -457,7 +460,7 @@ export async function createRuntime(config = loadConfig()) {
       } catch { /* Optional enterprise connector cannot block other capabilities. */ }
       const searchOperations = await webSearch.service.operationReadiness(options?.consumerId).catch(() => ({}))
       return { ...existing, operations: { ...existing.operations, ...socialOperations, ...searchOperations, ...(await ipRiskGateway.capabilities()).operations, ...(await ipRiskV2Gateway.capabilities().catch(()=>({operations:{'ip.risk.query.v2':{ready:false}}}))).operations,
-        'enterprise.query': { ready: enterpriseReady } } }
+        ...(await ipRiskProduct.capabilities().catch(()=>({operations:{'ip.risk.subscription.query':{ready:false}}}))).operations, 'enterprise.query': { ready: enterpriseReady } } }
     },
     externalPostCapabilities,
     externalSocialSearch: (context, input) => tikHubGateway.searchNotes(context, input),
@@ -547,6 +550,7 @@ export async function createRuntime(config = loadConfig()) {
     xiaohongshuHotNotesGateway,
     ipRiskGateway,
     ipRiskChannels,
+    ipRiskProduct,
     enterpriseGateway,
     socialAccountGateway,
     socialAccountTikHubGateway,

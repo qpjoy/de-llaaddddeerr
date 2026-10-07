@@ -8,6 +8,7 @@ export function useDemoApiKey() {
   const context = useContext(DemoContext)
   return [context?.secret || '', context?.setManual || (() => {})]
 }
+export function useDemoKeySelection() { return useContext(DemoContext)?.select }
 export function useDemoIdentity() {
   return useContext(DemoContext)?.identity || 'none'
 }

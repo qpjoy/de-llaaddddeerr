@@ -20,7 +20,7 @@ export const PRODUCT_ACCESS = {
   '/data-products/xiaohongshu-hot-notes': { platform: 'xiaohongshu', any: ['social.posts.hot_search'], docs: 'xiaohongshu-hot-notes' },
   '/data-products/xiaohongshu-inspiration': { platform: 'xiaohongshu', any: ['social.inspiration.list'], docs: 'xiaohongshu-inspiration' },
   '/data-products/enterprise': { platform: 'enterprise', any: ['enterprise.query'], docs: 'enterprise' },
-  '/data-products/ip-risk': { platform: 'ip_risk', any: ['ip.risk.query', 'ip.risk.query.v2'], docs: 'ip-risk' },
+  '/data-products/ip-risk': { platform: 'ip_risk', any: ['ip.risk.query', 'ip.risk.query.v2', 'ip.risk.subscription.query'], docs: 'ip-risk' },
   '/source-catalog': { platform: 'source_catalog', docs: 'source-catalog' },
   '/data-products/telegram': { platform: 'telegram', docs: 'telegram' },
   '/data-products/ecommerce-treasure-box': { platform: 'ecommerce', any: ['ecommerce.products.search', ...nativeServiceCapabilities.ecommerce], docs: 'ecommerce-treasure-box' },

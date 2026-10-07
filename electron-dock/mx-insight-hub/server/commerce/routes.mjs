@@ -2,7 +2,7 @@ import { PaymentError, requirePayment } from '@qpjoy/mx-pay'
 import { AppError } from '../core/errors.mjs'
 import { requireTenantCapability } from '../identity/index.mjs'
 
-export async function commerceRoute({ commerce, request, response, pathname, searchParams, principal, readJson, sendJson, requestId }) {
+export async function commerceRoute({ commerce, service, productGateway, request, response, pathname, searchParams, principal, readJson, sendJson, requestId }) {
   const root = '/internal/v1/admin/commerce'
   if (!pathname.startsWith(`${root}/`)) return false
   const reply = (data,status=200) => { sendJson(response,status,{data,requestId},{'cache-control':'private, no-store'}); return true }
@@ -10,6 +10,22 @@ export async function commerceRoute({ commerce, request, response, pathname, sea
     if (searchParams.size) throw new AppError(400,'commerce_invalid_query','商城接口不接受额外查询参数')
     const actor = principal.memberId || principal.kind
     if (pathname === `${root}/products` && request.method === 'GET') return reply(await commerce.catalog(principal.kind === 'admin-token'))
+    if(pathname===`${root}/delivery`) {
+      requirePayment(principal.kind==='admin-token','admin_token_required','服务配置需要 Admin Token',403)
+      if(request.method==='GET')return reply(productGateway?await productGateway.adminDelivery():await commerce.delivery())
+      if(request.method==='PUT')return reply(await commerce.saveDelivery(await readJson(request,2048),actor))
+    }
+    const access=new RegExp(`^${root}/tenants/([0-9a-f-]{36})/access$`).exec(pathname)
+    if(access && request.method==='POST') {
+      requireTenantCapability(principal,access[1],'apikey.write')
+      const body=await readJson(request,1024);requirePayment(!Object.keys(body).length,'commerce_invalid_request','请刷新后重试')
+      return reply(await commerce.prepareAccess(access[1],service))
+    }
+    const acceptance=new RegExp(`^${root}/tenants/([0-9a-f-]{36})/acceptance-orders$`).exec(pathname)
+    if(acceptance && request.method==='POST') {
+      requirePayment(principal.kind==='admin-token','admin_token_required','验收价订单需要 Admin Token',403)
+      return reply(await commerce.create(acceptance[1],await readJson(request,4096),request.headers['idempotency-key'],actor,{acceptance:true}),201)
+    }
     const edit = new RegExp(`^${root}/products/([a-z0-9-]+)$`).exec(pathname)
     if (edit && request.method === 'PUT') {
       requirePayment(principal.kind === 'admin-token','admin_token_required','商品管理需要 Admin Token',403)

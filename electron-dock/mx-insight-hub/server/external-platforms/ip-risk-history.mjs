@@ -1,3 +1,4 @@
+import { IP_PRODUCT_CAPABILITY, IP_PRODUCT_METER, IP_PRODUCT_VERSION } from '../contracts/ip-risk-product.mjs'
 import { AppError } from '../core/errors.mjs'
 import { IP_RISK_PLATFORM, IP_RISK_OPERATION, IP_RISK_VERSION } from '../contracts/ip-risk.mjs'
 
@@ -8,8 +9,8 @@ const invalid = () => new AppError(400, 'invalid_ip_history_query', 'Invalid his
 const missing = () => new AppError(404, 'ip_history_not_found', 'IP history record not found')
 const recordKey = row => `${row.kind}:${row.recordId}`
 const cursorFor = row => Buffer.from(JSON.stringify([row.createdAt, recordKey(row), row.index])).toString('base64url')
-const permittedSingle = (row, capabilities) => capabilities.includes(row.billingMeterKey === 'ip.risk.subscription.v2' ? 'ip.risk.query.v2' : IP_RISK_OPERATION)
-const permittedBatch = (row, capabilities) => !row.response || row.response.data.every(item => capabilities.includes(item.channel === 'baidu-v2' ? 'ip.risk.query.v2' : IP_RISK_OPERATION))
+const permittedSingle = (row, capabilities) => capabilities.includes(row.billingMeterKey === IP_PRODUCT_METER ? IP_PRODUCT_CAPABILITY : row.billingMeterKey === 'ip.risk.subscription.v2' ? 'ip.risk.query.v2' : IP_RISK_OPERATION)
+const permittedBatch = (row, capabilities) => !row.response || (row.response.contractVersion===IP_PRODUCT_VERSION ? capabilities.includes(IP_PRODUCT_CAPABILITY) : row.response.data.every(item => capabilities.includes(item.channel === 'baidu-v2' ? 'ip.risk.query.v2' : IP_RISK_OPERATION)))
 
 export function parseIpHistoryQuery(query = {}) {
   if (Object.keys(query).some(key => !['q', 'state', 'level', 'limit', 'cursor'].includes(key))) throw invalid()
@@ -57,7 +58,7 @@ export class IpRiskHistory {
       this.gateway.usageStore.listEffectiveGrants(context.consumer.id, context.apiKey.id),
       this.gateway.usageStore.listEffectiveCapabilityGrants(context.consumer.id, context.apiKey.id),
     ])
-    if (!platforms.includes(IP_RISK_PLATFORM) || !capabilities.includes(IP_RISK_OPERATION) && !capabilities.includes('ip.risk.query.v2')) throw new AppError(403, 'capability_not_granted', 'IP risk history is not granted')
+    if (!platforms.includes(IP_RISK_PLATFORM) || !capabilities.includes(IP_RISK_OPERATION) && !capabilities.includes('ip.risk.query.v2') && !capabilities.includes(IP_PRODUCT_CAPABILITY)) throw new AppError(403, 'capability_not_granted', 'IP risk history is not granted')
     if (context.apiKey.environment === 'test' || context.apiKey.prefix?.startsWith('mih_test_')) throw new AppError(403, 'test_key_not_supported', 'Use a Live Hub key')
     return capabilities
   }
@@ -92,8 +93,8 @@ export class IpRiskHistory {
         SELECT id, created_at, response FROM external_platform.ipsearch_batches
         WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3
           AND ($4::timestamptz IS NULL OR created_at <= $4)
-          AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(response->'data','[]'::jsonb)) entry
-            WHERE NOT CASE WHEN entry->>'channel'='baidu-v2' THEN $12::boolean ELSE $11::boolean END)
+          AND CASE WHEN response->>'contractVersion'='mx-insight-hub.ip-risk.subscription.v1' THEN $13::boolean ELSE NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(response->'data','[]'::jsonb)) entry
+            WHERE NOT CASE WHEN entry->>'channel'='baidu-v2' THEN $12::boolean ELSE $11::boolean END) END
       ), items AS (
         SELECT 'single'::text AS kind, r.id AS record_id, 0 AS item_index, r.created_at,
           COALESCE(r.response_body#>>'{data,ip}',r.acquisition_request#>>'{body,ip}') AS ip,
@@ -101,7 +102,7 @@ export class IpRiskHistory {
           r.response_status AS http_status, COALESCE(r.response_body#>>'{error,code}',r.error_code) AS error_code, true AS available
         FROM public.usage_requests r
         WHERE r.tenant_id=$1 AND r.consumer_id=$2 AND r.api_key_id=$3 AND r.platform='ip_risk'
-          AND CASE WHEN r.billing_meter_key='ip.risk.subscription.v2' THEN $12::boolean ELSE $11::boolean END
+          AND CASE WHEN r.billing_meter_key='ip.risk.subscription.product' THEN $13::boolean WHEN r.billing_meter_key='ip.risk.subscription.v2' THEN $12::boolean ELSE $11::boolean END
           AND ($4::timestamptz IS NULL OR r.created_at <= $4)
           AND NOT EXISTS (SELECT 1 FROM external_platform.ipsearch_batches b
             WHERE b.tenant_id=$1 AND b.consumer_id=$2 AND b.api_key_id=$3 AND b.response IS NOT NULL
@@ -134,7 +135,7 @@ export class IpRiskHistory {
         ORDER BY created_at DESC,record_key DESC,item_index ASC LIMIT $10`,
       [context.tenant.id, context.consumer.id, context.apiKey.id, cursor?.[0] || null, state, level,
         q ? `%${escaped}%` : '', cursor?.[1] || '', cursor?.[2] ?? -1, limit + 1,
-        capabilities.includes(IP_RISK_OPERATION), capabilities.includes('ip.risk.query.v2')])
+        capabilities.includes(IP_RISK_OPERATION), capabilities.includes('ip.risk.query.v2'), capabilities.includes(IP_PRODUCT_CAPABILITY)])
       rows = result.rows.map(summary)
     }
     const more = rows.length > limit, items = rows.slice(0, limit)

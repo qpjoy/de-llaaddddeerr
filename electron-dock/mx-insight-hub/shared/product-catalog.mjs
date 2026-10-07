@@ -23,6 +23,7 @@ export const PRODUCT_BUNDLES = Object.freeze([
     href: '/data-products/xiaohongshu-note', catalogKeys: ['source-catalog-0004'] },
   { key: 'ip-risk', version: 1, name: 'IP 风险画像', platforms: ['ip_risk'],
     capabilities: ['ip.risk.query'], optionalCapabilities: [], featureKey: 'ip-risk', href: '/data-products/ip-risk', catalogKeys: [] },
+  { key: 'ip-risk-subscription', version: 1, name: 'IP 风险画像 · 空间订阅', platforms: ['ip_risk'], capabilities: ['ip.risk.subscription.query'], optionalCapabilities: [], pricingMode: 'tenant_contract', featureKey: 'ip-risk', href: '/data-products/ip-risk', catalogKeys: [] },
   { key: 'ip-risk-baidu-v2', version: 2, name: 'IP 风险画像 · 百度 v2 订阅', platforms: ['ip_risk'],
     capabilities: ['ip.risk.query.v2'], optionalCapabilities: [], featureKey: null, pricingMode: 'tenant_contract',
     href: '/data-products/ip-risk', catalogKeys: [] },

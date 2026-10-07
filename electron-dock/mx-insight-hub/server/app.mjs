@@ -1,3 +1,4 @@
+import { IpRiskProduct } from './external-platforms/ip-risk-product.mjs'
 import { CommerceService } from './commerce/service.mjs'
 import { commerceRoute } from './commerce/routes.mjs'
 import { XHS_DISCOVERY_ENDPOINTS } from './contracts/xiaohongshu-discovery.mjs'
@@ -778,6 +779,7 @@ export function createApp({
   xiaohongshuHotNotesGateway = null,
   ipRiskGateway = null,
   ipRiskChannels = null,
+  ipRiskProduct = null,
   enterpriseGateway = null,
   socialAccountGateway = null,
   socialAccountTikHubGateway = null,
@@ -820,6 +822,7 @@ export function createApp({
   })
 
   const commerce = new CommerceService(store, recharge)
+  ipRiskProduct ??= ipRiskChannels ? new IpRiskProduct(ipRiskChannels,commerce) : null
   if (recharge) recharge.commerce = commerce
   const payments = new PaymentService(store)
   payments.store.includeRecharge = Boolean(recharge)
@@ -1541,7 +1544,7 @@ export function createApp({
         principal = await resolvePrincipal(request)
       }
 
-      if (await commerceRoute({ commerce, request, response, pathname, searchParams, principal, readJson, sendJson, requestId })) return
+      if (await commerceRoute({ commerce, service, productGateway:ipRiskProduct, request, response, pathname, searchParams, principal, readJson, sendJson, requestId })) return
       if (await paymentRoute({ payments, recharge, commerce, request, response, pathname, searchParams, principal, readJson, sendJson, requestId })) return
       if (await paymentReportingRoute({ reporting:paymentReporting, request, response, pathname, searchParams, principal, sendJson, requestId })) return
 
@@ -5629,6 +5632,13 @@ export function createApp({
           'x-mx-insight-source-mode': result.sourceMode,
         })
         return
+      }
+      if (request.method === 'POST' && ['/api/v1/data/ip/risk/service','/api/v1/data/ip/risk/service/batch'].includes(pathname)) {
+        if(!ipRiskProduct)throw new AppError(503,'ip_risk_unavailable','IP 风险画像服务暂不可用')
+        requireNoQuery(searchParams,'IP risk product')
+        const context=await requirePublic(request)
+        const result=await ipRiskProduct.query(context,{body:await readJson(request,16384),path:pathname,idempotencyKey:request.headers['idempotency-key']})
+        sendJson(response,result.status,result.body,{'cache-control':'private, no-store'});return
       }
       if (request.method === 'GET' && pathname === '/api/v1/data/ip/risk/subscription') {
         const context = await requirePublic(request)

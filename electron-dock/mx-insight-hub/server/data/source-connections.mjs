@@ -179,7 +179,7 @@ export function implementedRoutes(sources = []) {
     operation: 'ip.risk.query', path: '/api/v1/data/ip/risk',
     defaultRule: '按 IPv4 查询；私有风险结果不进入共享 canonical 检索。',
     evidence: 'server/contracts/ip-risk.mjs',
-  }), route('ip-risk-baidu-v2', {
+  }), route('ip-risk-subscription', { platform:'ip_risk', provider:null, product:'IP 风险画像 · 空间订阅', operation:'ip.risk.subscription.query', path:'/api/v1/data/ip/risk/service', defaultRule:'空间共享订阅；按产品服务版本交付，不自动切换上游。', evidence:'server/contracts/ip-risk-product-docs.mjs' }), route('ip-risk-baidu-v2', {
     platform: 'ip_risk', provider: 'baidu-ip', product: 'IP 风险画像 · 百度 v2 订阅',
     operation: 'ip.risk.query.v2', path: '/api/v1/data/ip/risk/v2',
     defaultRule: '有效订阅按 IP × 渠道逐项扣量；网页参考渠道，共享限流，无自动回退。',

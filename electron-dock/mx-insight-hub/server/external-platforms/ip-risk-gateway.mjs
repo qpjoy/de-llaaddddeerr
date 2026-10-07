@@ -106,7 +106,7 @@ export class IpRiskGateway {
       }
       const capturedAt = new Date()
       const responseBody = { contractVersion: this.version, data: { ip: input.ip, ...evidence.normalized },
-        meta: { capturedAt: capturedAt.toISOString(), sourceMode: 'live', pricingStatus: 'plan_based', chargeStatus: 'see_usage' }, requestId }
+        meta: { capturedAt: capturedAt.toISOString(), sourceMode: 'live', pricingStatus: this.meterKey === 'ip.risk.subscription.product' ? 'subscription' : 'plan_based', chargeStatus: this.meterKey === 'ip.risk.subscription.product' ? 'included' : 'see_usage' }, requestId }
       await this.platformStore.commitLiveDelivery({ ...common, responseBody, capturedAt, freshUntil: capturedAt, staleUntil: capturedAt,
         itemCount: evidence.normalized.status === 'no_data' ? 0 : 1, usageUnitsActual: 1 })
       terminal = true
