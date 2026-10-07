@@ -73,7 +73,7 @@ const RANGE_OPTIONS = [
   { value: '30d', label: '最近 30 天' },
 ]
 const VALID_RANGES = new Set(RANGE_OPTIONS.map((option) => option.value))
-const SUPPORTED_PROVIDERS = new Set([...WEB_SEARCH_PROVIDERS.map(p=>p.key),'qixin', 'justone', 'tikhub', 'rapidapi', 'night-all', 'night-all-a', 'ipsearch'])
+const SUPPORTED_PROVIDERS = new Set([...WEB_SEARCH_PROVIDERS.map(p=>p.key),'qixin', 'justone', 'tikhub', 'rapidapi', 'night-all', 'night-all-a', 'ipsearch', 'baidu-ip'])
 const UNKNOWN = '未知'
 
 // Jump to the control that fixes what you just read.
@@ -2216,6 +2216,7 @@ export function ExternalPlatformsPage({ token, query, setQuery, onUnauthorized, 
 
   if (unsupportedProvider) return <UnsupportedProvider range={range} />
   if (provider === 'night-all-a') return <IntegrationSlotFrame provider={provider}><NightAllAPanel token={token} onUnauthorized={onUnauthorized} /></IntegrationSlotFrame>
+  if (provider === 'baidu-ip') return <IntegrationSlotFrame provider={provider}><BaiduIpPlatformDetail {...{token,range,setQuery,onUnauthorized,notify}} /></IntegrationSlotFrame>
   if (provider === 'ipsearch') return <IntegrationSlotFrame provider={provider}><IpSearchPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} /></IntegrationSlotFrame>
   if (provider === 'night-all') return <IntegrationSlotFrame provider={provider}><NightAllPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} /></IntegrationSlotFrame>
   if (provider) {
@@ -2242,6 +2243,29 @@ function IpSearchPlatformDetail({ token, range, setQuery, onUnauthorized, notify
       <h3>HTTP 结果分布</h3><pre>{JSON.stringify(data.httpMetrics?.byStatus || [], null, 2)}</pre>
       <p>{data.notes.connection}</p><p>{data.notes.budget}</p>
       <button className="qp-button qp-button--outline" onClick={state.refresh}>刷新统计</button>
+    </section>}
+  </div>
+}
+
+function BaiduIpPlatformDetail({token,range,setQuery,onUnauthorized,notify}) {
+  const load=useCallback(()=>adminApi.externalPlatform(token,'baidu-ip',{range}),[token,range])
+  const state=useRemoteData(load,onUnauthorized)
+  const [form,setForm]=useState(null),[busy,setBusy]=useState(false),[error,setError]=useState(null)
+  useEffect(()=>{if(state.data?.policy)setForm(state.data.policy)},[state.data])
+  async function save(event){event.preventDefault();if(busy)return;setBusy(true);setError(null);try{
+    await adminApi.updateExternalPlatformOperationPolicy(token,'baidu-ip','ip.risk.query.v2',{revision:form.revision,enabled:form.enabled,dailyLimit:Number(form.daily_limit),spacingMs:Number(form.spacing_ms)})
+    state.refresh();notify?.('IP v2 渠道配置已保存')
+  }catch(e){setError(e)}finally{setBusy(false)}}
+  return <div className="mih-page"><button className="qp-button qp-button--outline" onClick={()=>setQuery({provider:null,range})}>返回平台总览</button><h1>百度 · IP 风险画像 v2</h1>
+    {state.error||error?<ErrorState error={error||state.error}/>:null}
+    {!form?<p>正在加载…</p>:<section className="qp-panel mih-panel"><h2>API 与运行策略</h2><p>{state.data.notes.connection}</p><p>{state.data.notes.budget}</p>
+      <form onSubmit={save}><label><input type="checkbox" checked={form.enabled} disabled={busy} onChange={e=>setForm({...form,enabled:e.target.checked})}/>启用 IP v2 查询和商品购买</label>
+      <Field label="每日上游请求上限（最高 1200）"><input className="qp-input" type="number" min="1" max="1200" value={form.daily_limit} onChange={e=>setForm({...form,daily_limit:e.target.value})}/></Field>
+      <Field label="相邻上游请求间隔（毫秒，至少 2000）"><input className="qp-input" type="number" min="2000" max="300000" value={form.spacing_ms} onChange={e=>setForm({...form,spacing_ms:e.target.value})}/></Field>
+      <button className="qp-button qp-button--primary" disabled={busy}>保存渠道设置</button></form>
+      <h3>固定接口</h3>{state.data.endpoints.map(e=><p key={e.endpoint}><strong>{e.endpoint}</strong> <code>{e.url}</code></p>)}
+      <p>今日预留上游请求：{form.calls}；最近状态：{form.last_status||'尚未观测'}；冷却至：{form.cooldown_until?new Date(form.cooldown_until).toLocaleString():'无'}</p>
+      <a className="qp-button qp-button--outline" href="#/store">管理商品与客户购买</a><p>供应商采购价格未知，不等于免费。网页接口未形成商业 SLA。</p>
     </section>}
   </div>
 }

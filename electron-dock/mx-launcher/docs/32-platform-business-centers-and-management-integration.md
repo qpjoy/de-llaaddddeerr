@@ -8,6 +8,8 @@
 
 ## 1. 建议：沿用现有入口，逐步形成独立运维产品
 
+2026-10-07 商业产品增量见 [Hub 商城、订阅权益与 IP 风险画像 v2](../../mx-insight-hub/docs/product/commerce-and-ip-risk-v2.md)：销售先作为 Hub 内独立 Commerce 模块与 schema，支付事实由 mx-pay 独立提供。到账事件在 Hub 事务中自动发放订阅；调用授权和年度次数由 Hub 执行。未来跨应用销售可抽离 mx-commerce，Launcher/Internal 仍只负责统一入口和账号，不参与支付、额度事务或供应商调用。此增量不修改 MX-H2I 登录与联网。
+
 保留 mx-launcher 的桌面运行时、SDK、登录、网络、AppCenter 和现有发版能力；以当前 Internal Admin 为起点，形成统一平台工作台。其中安装、发布、维护各中心的能力，逐步成为可独立发布的运维控制台，暂称 **MX Control**。名称是规划用语，本轮不创建 `mx-control` 工程。
 
 用户可以继续在熟悉的 Launcher 界面管理所有中心。实现上分开三件事：

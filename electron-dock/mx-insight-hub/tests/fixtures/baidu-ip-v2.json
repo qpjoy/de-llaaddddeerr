@@ -1,0 +1,123 @@
+{
+  "ip": "223.160.165.241",
+  "country": "",
+  "province": "",
+  "city": "",
+  "district": null,
+  "isp": "",
+  "longitude": null,
+  "latitude": null,
+  "ip_version": null,
+  "scene": "",
+  "is_idc": "",
+  "is_base_station": "",
+  "risk_level": "高",
+  "risk_criteria": [],
+  "risk_tags": {
+    "作弊风险": [],
+    "行为风险": [
+      {
+        "descs": [],
+        "label": "劫持代理IP",
+        "subItems": [
+          {
+            "name": "劫持代理IP",
+            "risk_level": "无",
+            "update_day": "2026-09-11"
+          }
+        ],
+        "update_day": "2026-09-11"
+      }
+    ],
+    "关联设备风险": [
+      {
+        "descs": [],
+        "label": "非正常设备IP",
+        "subItems": [
+          {
+            "name": "疑似黑ROM设备IP",
+            "risk_level": "高",
+            "update_day": "2026-09-30"
+          },
+          {
+            "name": "疑似模拟器IP",
+            "risk_level": "高",
+            "update_day": "2026-09-08"
+          }
+        ],
+        "update_day": "2026-09-30"
+      }
+    ],
+    "其他标签": [],
+    "恶意事件风险": [
+      {
+        "descs": [],
+        "label": "环境风险IP",
+        "subItems": [
+          {
+            "name": "疑似恶意软件IP",
+            "risk_level": "高",
+            "update_day": "2026-09-26"
+          }
+        ],
+        "update_day": "2026-09-26"
+      }
+    ]
+  },
+  "risk_tags_flat": [
+    {
+      "category": "行为风险",
+      "label": "劫持代理IP",
+      "risk_level": "",
+      "update_day": "2026-09-11",
+      "sub_items": [
+        {
+          "name": "劫持代理IP",
+          "risk_level": "无",
+          "update_day": "2026-09-11"
+        }
+      ]
+    },
+    {
+      "category": "关联设备风险",
+      "label": "非正常设备IP",
+      "risk_level": "",
+      "update_day": "2026-09-30",
+      "sub_items": [
+        {
+          "name": "疑似黑ROM设备IP",
+          "risk_level": "高",
+          "update_day": "2026-09-30"
+        },
+        {
+          "name": "疑似模拟器IP",
+          "risk_level": "高",
+          "update_day": "2026-09-08"
+        }
+      ]
+    },
+    {
+      "category": "恶意事件风险",
+      "label": "环境风险IP",
+      "risk_level": "",
+      "update_day": "2026-09-26",
+      "sub_items": [
+        {
+          "name": "疑似恶意软件IP",
+          "risk_level": "高",
+          "update_day": "2026-09-26"
+        }
+      ]
+    }
+  ],
+  "has_risk": true,
+  "data_available": true,
+  "data_date": "2026-09-30",
+  "precision_location": {
+    "radius": null,
+    "loc": null,
+    "others": []
+  },
+  "company": "",
+  "business": ""
+}

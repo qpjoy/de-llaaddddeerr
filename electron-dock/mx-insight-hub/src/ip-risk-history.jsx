@@ -33,7 +33,7 @@ export function IpRiskHistoryPanel({ apiKey, enabled, revision, active, busy, on
   const levels = [...new Set([level, ...rows.map(row => row.profile?.risk_level)].filter(Boolean))]
   const reload = () => { setCursors([null]); setPage(0); setRefresh(value => value + 1) }
   return <section className="qp-panel mih-ip-history" aria-label="历史查询记录">
-    <header><div><h2>历史查询记录</h2><p>按当前调用身份保存；刷新或重新登录后仍可回看。查看历史不会重新查询或计费。</p></div><div className="mih-ip-actions">
+    <header><div><h2>历史查询记录</h2><p>按当前调用身份保存；刷新或重新登录后仍可回看。查看历史不会重新查询，也不计入调用次数。</p></div><div className="mih-ip-actions">
       <button type="button" className="qp-button qp-button--outline qp-button--sm" disabled={loading || !enabled} onClick={reload}><ArrowClockwise size={16} aria-hidden="true" />刷新历史</button>
       <button type="button" className="qp-button qp-button--outline qp-button--sm" disabled={!rows.length} onClick={() => onExport(rows)}><DownloadSimple size={16} aria-hidden="true" />导出本页概要</button>
     </div></header>

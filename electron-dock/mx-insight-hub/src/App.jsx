@@ -81,6 +81,8 @@ const LazyPaymentConnectionSettingsPage = lazy(() => import('./pages-payments.js
 function PaymentConnectionSettingsPage(props) {
   return <Suspense fallback={<LoadingState label="正在加载支付设置" />}><LazyPaymentConnectionSettingsPage {...props} /></Suspense>
 }
+const LazyCommercePage = lazy(() => import('./pages-commerce.jsx').then(module => ({default:module.CommercePage})))
+function CommercePage(props) { return <Suspense fallback={<LoadingState label="正在加载商城"/>}><LazyCommercePage {...props}/></Suspense> }
 const LazyPaymentsPage = lazy(() => import('./pages-payments.jsx').then(module => ({ default: module.PaymentsPage })))
 function PaymentsPage(props) {
   return <Suspense fallback={<LoadingState label="正在加载充值与发票" />}><LazyPaymentsPage {...props} /></Suspense>
@@ -380,6 +382,7 @@ const ROUTES = [
   { path: '/team', label: '团队邀请', description: '邀请同事加入租户', icon: Users, group: '业务治理', component: TenantTeamPage, capability: 'membership.write' },
   { path: '/api-keys', label: 'API Keys', description: '签发、轮换与撤销', icon: Key, group: '业务治理', component: ApiKeysPage, capability: 'apikey.read' },
   { path: '/plans', label: '套餐与配额', description: '窗口、分页与额度', icon: Coins, group: '策略控制', component: PlansQuotasPage, capability: 'consumer.read' },
+  { path: '/store', label: '数据商城', description: '订阅、购买与服务权益', icon: Coins, group: '数据平面', component: CommercePage },
   { path: '/payments', label: '充值与发票', description: '账户充值与开票申请', icon: Coins, group: '策略控制', component: PaymentsPage, capability: 'billing.read' },
   { path: '/platforms', label: '开放能力', description: '数据平台与通用 API', icon: Globe, group: '策略控制', component: PlatformsPage, capability: 'consumer.read' },
   { path: '/data-browser', label: '数据浏览中心', description: '账号、内容与热点线索', icon: MagnifyingGlass, group: '数据平面', component: DataBrowserPage, platformAdmin: true, adminTokenOnly: true },

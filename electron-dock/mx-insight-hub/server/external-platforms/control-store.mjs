@@ -85,6 +85,8 @@ export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
   ...Object.fromEntries(WEB_SEARCH_PROVIDERS.map(p=>[p.key,[{operationKey:'web.search',label:'Web Search',legacyGate:'contractVerified',contractVersion:WEB_SEARCH_VERSION,endpointKeys:[p.endpointKey]}]])),
   rapidapi: Object.freeze(HUB_SOCIAL_OPERATIONS),
   qixin: Object.freeze(QIXIN_OPERATIONS),
+  'baidu-ip': Object.freeze([{ operationKey:'ip.risk.query.v2',label:'IP 风险画像 · 百度 v2',
+    contractVersion:'mx-insight-hub.ip-risk.v2',endpointKeys:['base','overall'] }]),
   justone: Object.freeze([
     Object.freeze({
       operationKey: JUSTONE_OPERATION,

@@ -266,7 +266,7 @@ const PUBLIC_CAPABILITIES = new Set([
   ...XHS_DISCOVERY_OPERATIONS,
   ...XHS_RESEARCH_OPERATIONS,
   'enterprise.query',
-  'ip.risk.query',
+  'ip.risk.query', 'ip.risk.query.v2',
   TOKENIZE_CAPABILITY,
   XIAOHONGSHU_SEARCH_OPERATION,
   XIAOHONGSHU_POST_OPERATION,
@@ -1420,6 +1420,10 @@ export class HubService {
         ...Object.values(HUB_SOCIAL_ENDPOINTS).map(row => ({ capability: row.operation, ready: providerOperationReady(ecommerceSearch, row.operation) })),
         ...XHS_DISCOVERY_OPERATIONS.map(capability => ({ capability, ready: providerOperationReady(capability === 'social.posts.hot_search' ? ecommerceSearch : xiaohongshuAcquisition, capability) })),
         { capability: 'enterprise.query', ready: providerOperationReady(ecommerceSearch, 'enterprise.query') },
+        {
+          capability: 'ip.risk.query.v2',
+          ready: providerOperationReady(ecommerceSearch, 'ip.risk.query.v2'),
+        },
         {
           capability: 'ip.risk.query',
           ready: providerOperationReady(ecommerceSearch, 'ip.risk.query'),

@@ -179,6 +179,11 @@ export function implementedRoutes(sources = []) {
     operation: 'ip.risk.query', path: '/api/v1/data/ip/risk',
     defaultRule: '按 IPv4 查询；私有风险结果不进入共享 canonical 检索。',
     evidence: 'server/contracts/ip-risk.mjs',
+  }), route('ip-risk-baidu-v2', {
+    platform: 'ip_risk', provider: 'baidu-ip', product: 'IP 风险画像 · 百度 v2 订阅',
+    operation: 'ip.risk.query.v2', path: '/api/v1/data/ip/risk/v2',
+    defaultRule: '有效订阅按 IP × 渠道逐项扣量；网页参考渠道，共享限流，无自动回退。',
+    evidence: 'server/contracts/ip-risk-v2-docs.mjs',
   }))
   rows.push(route('virtual-supermarket', {
     platform: 'virtual_supermarket', provider: null, product: '虚拟超市',

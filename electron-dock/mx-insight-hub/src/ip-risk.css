@@ -185,3 +185,7 @@
 .mih-ip-page .mih-ip-boundary { margin: 8px 0; }
 .mih-ip-page .qp-table-wrap { min-width: 0; max-width: 100%; overflow-x: auto; }
 .mih-ip-secondary > button { flex-shrink: 0; }
+
+.mih-ip-subscription{display:flex;align-items:center;flex-wrap:wrap;gap:16px;padding:20px}.mih-ip-subscription>div{flex:1;min-width:220px}.mih-ip-subscription p{margin:8px 0 0}.mih-ip-v2-facts{grid-column:span 3;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px 30px;align-content:center}.mih-ip-v2-facts div{display:flex;gap:20px}.mih-ip-v2-facts dt{opacity:.65;min-width:70px}.mih-ip-v2-facts dd{margin:0;overflow-wrap:anywhere}.mih-ip-risk-groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:24px}.mih-ip-risk-groups .mih-ip-tag-list{display:flex;flex-direction:column}.mih-ip-composer>.qp-field{max-width:430px;margin-bottom:16px}@media(max-width:650px){.mih-ip-v2-facts{grid-column:auto;grid-template-columns:1fr}}
+
+@media(max-width:650px){.mih-ip-overview.is-v2{grid-template-columns:minmax(0,1fr);gap:12px}.mih-ip-overview.is-v2 .mih-ip-risk-level{justify-self:center}.mih-ip-v2-facts{width:100%;gap:18px}.mih-ip-v2-facts div{display:grid;grid-template-columns:70px minmax(0,1fr);gap:18px}}

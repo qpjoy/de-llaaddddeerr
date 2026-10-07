@@ -46,12 +46,12 @@ export function demoAccessIssues(access, operation, compatibility = false) {
 }
 
 // Provider credentials do not authorize a consumer or expand an existing Key snapshot.
-export function ipRiskAccessIssues(access) {
+export function ipRiskAccessIssues(access, operation = 'ip.risk.query') {
   if (!access) return []
   const issues = []
   for (const [field, consumerField, scope, label] of [
     ['platforms', 'consumerPlatforms', 'ip_risk', 'IP 风险画像数据域'],
-    ['capabilities', 'consumerCapabilities', 'ip.risk.query', 'IP 风险查询能力'],
+    ['capabilities', 'consumerCapabilities', operation, 'IP 风险查询能力'],
   ]) {
     if (access[field]?.includes(scope)) continue
     issues.push({ kind: 'authorization', scope, message: access[consumerField]?.includes(scope)

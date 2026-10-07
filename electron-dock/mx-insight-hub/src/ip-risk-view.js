@@ -30,6 +30,8 @@ export function parseIpRiskInput(text, batch = false) {
 }
 
 export function ipRiskErrorState(status, code = '') {
+  if (['ip_channel_rate_limited','ip_channel_cooling','ip_channel_daily_limit','ip_channel_busy'].includes(code)) return 'limited'
+  if (code === 'ip_channel_paused') return 'unavailable'
   // A transport loss without HTTP evidence, 409, and uncertain paid outcomes
   // are never presented as safe-to-retry failures.
   if (code === 'batch_deadline_not_dispatched') return 'not_dispatched'
@@ -49,7 +51,7 @@ export function ipRiskRows(result) {
       ? envelope.data.status : !error && item.status === 200 ? 'unknown' : ipRiskErrorState(item.status, error?.code)
     return {
       id: `${result.localId}:${offset}`, index: item.index ?? offset, ip: item.ip,
-      submissionId: result.localId, batchSize: batch ? result.request?.ips?.length || items.length : null,
+      submissionId: result.localId, batchSize: batch ? items.length : null,
       status, httpStatus: item.status, profile: envelope?.data?.data || null,
       warnings: envelope?.data?.warnings || [], errorCode: error?.code || null,
       requestId: envelope?.requestId || item.requestId || (!batch ? result.evidence?.requestId : null),
@@ -90,7 +92,7 @@ export function ipRiskHistoryRows(detail) {
 
 export function riskTone(level) {
   // Scores have no published universal range/threshold; never derive a level.
-  return ({ '高风险': 'danger', '中风险': 'warning', '低风险': 'complete', high: 'danger', medium: 'warning', low: 'complete' })[String(level || '').toLowerCase()] || 'neutral'
+  return ({ '高': 'danger', '中': 'warning', '低': 'complete', '无': 'neutral', '高风险': 'danger', '中风险': 'warning', '低风险': 'complete', high: 'danger', medium: 'warning', low: 'complete' })[String(level || '').toLowerCase()] || 'neutral'
 }
 export const riskValue = value => value == null || value === '' ? '未提供' : String(value)
 export function riskTime(value) {

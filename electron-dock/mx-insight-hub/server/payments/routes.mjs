@@ -7,7 +7,7 @@ const uuid = value => {
   requirePayment(typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value), 'invalid_payment_id', '订单或租户编号不正确')
   return value.toLowerCase()
 }
-export async function paymentRoute({ payments, recharge, request, response, pathname, searchParams, principal, readJson, sendJson, requestId }) {
+export async function paymentRoute({ payments, recharge, commerce = null, request, response, pathname, searchParams, principal, readJson, sendJson, requestId }) {
   const root = '/internal/v1/admin/payments'
   if (!(pathname === root || pathname.startsWith(`${root}/`))) return false
   try {
@@ -29,6 +29,14 @@ export async function paymentRoute({ payments, recharge, request, response, path
       const tenantIds = principal.platformAdmin ? null : principal.memberships.filter(item => item.capabilities?.includes('billing.read')).map(item => item.tenantId)
       const rows = recharge ? (await recharge.pool.query(`SELECT id,tenant_id FROM hub_recharge.orders WHERE payment #>> '{checkout,outTradeNo}'=$1
         AND ($2::uuid[] IS NULL OR tenant_id=ANY($2)) LIMIT 2`, [searchParams.get('trade'), tenantIds])).rows : []
+      if (!rows.length && commerce?.pool) {
+        const purchase = (await commerce.pool.query(`SELECT id,tenant_id FROM hub_commerce.orders WHERE payment #>> '{checkout,outTradeNo}'=$1
+          AND ($2::uuid[] IS NULL OR tenant_id=ANY($2)) LIMIT 2`, [searchParams.get('trade'),tenantIds])).rows
+        if (purchase.length === 1) {
+          requireTenantCapability(principal,purchase[0].tenant_id,'billing.read')
+          return reply({id:purchase[0].id,tenantId:purchase[0].tenant_id,businessType:'purchase'})
+        }
+      }
       requirePayment(rows.length === 1, 'payment_not_found', '当前账号无法查看该充值订单，请切换付款时的账号，或从充值记录查找原订单。', 404)
       requireTenantCapability(principal, rows[0].tenant_id, 'billing.read')
       // Locator only. No query, settlement, inbox dispatch or wallet write.

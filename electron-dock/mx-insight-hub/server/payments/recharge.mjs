@@ -7,7 +7,7 @@ import { parseRechargeSources } from './recharge-config.mjs'
 import { PaymentConnections, checkPaymentConnection, connectionFailure } from './connections.mjs'
 
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
-const safeCode = error => /^(payment_|recharge_|credit_|wallet_|tenant_)[a-z_]+$/.test(error?.code || '') ? error.code : 'recharge_dependency_unavailable'
+const safeCode = error => /^(payment_|recharge_|credit_|wallet_|tenant_|commerce_)[a-z_]+$/.test(error?.code || '') ? error.code : 'recharge_dependency_unavailable'
 
 // Hub owns recharge intent, beneficiary and delivery. Remote payment facts never
 // become wallet credit merely by being read or shown in a browser/report.
@@ -268,7 +268,8 @@ export class RechargeService {
       requirePayment(uuid(event?.id) && uuid(event?.paymentId), 'recharge_event_mismatch', '付款事件编号不正确', 502)
       try {
         const payment = await source.client.order(event.paymentId)
-        const receipt = await this.commit(source, event, payment)
+        const receipt = event.businessOrderId?.startsWith('hub-purchase:') && this.commerce
+          ? await this.commerce.commit(source, event, payment) : await this.commit(source, event, payment)
         await source.client.acknowledge(event.id, receipt)
         await this.pool.query('DELETE FROM hub_recharge.delivery_errors WHERE environment=$1 AND event_id=$2', [env,event.id])
       } catch (error) {

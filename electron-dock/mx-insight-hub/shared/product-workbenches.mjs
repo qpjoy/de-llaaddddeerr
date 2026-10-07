@@ -21,7 +21,8 @@ export const PRODUCT_WORKBENCHES = [
   ].map(([key, label, docs]) => ({ path: `/data-products/${key}`, label, docs, native: true })),
 ]
 export const productForPath = path => PRODUCT_WORKBENCHES.find(product => product.path === path)
-export const productForDocs = path => PRODUCT_WORKBENCHES.find(product => path?.split('#')[0] === `/docs/${product.docs}` || path?.startsWith(`/docs/${product.docs}/`))
+export const productForDocs = path => PRODUCT_WORKBENCHES.find(product => path?.split('#')[0] === `/docs/${product.docs}` || path?.startsWith(`/docs/${product.docs}/`)
+  || product.docs === 'ip-risk' && path?.split('#')[0] === '/docs/ip-risk-v2')
 
 export function productEndpoints(document, product) {
   const labels = { '/data/aggregate/sources': '当前 Key 的搜索范围', '/data/aggregate/preview': '预览本批范围与费用', '/data/aggregate/search': '聚合数据搜索 · 实时 / 已收录' }

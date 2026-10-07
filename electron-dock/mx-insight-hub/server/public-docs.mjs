@@ -1,3 +1,4 @@
+import { ipRiskV2Paths, ipRiskV2Guide } from './contracts/ip-risk-v2-docs.mjs'
 import { webSearchPaths, webSearchGuide } from './web-search/docs.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
@@ -1309,6 +1310,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     '/xiaohongshu/pgy/get_blogger_notes_v2': { post: { ...xhsResearchPaths['/data/xiaohongshu/users/notes/analytics'].post, operationId: 'xiaohongshuUserNoteAnalyticsAlias', description: '与 /data/xiaohongshu/users/notes/analytics 相同的 JSON POST 合同、授权和幂等身份。' } },
     ...enterpriseOpenApiPaths(),
     ...ipRiskHistoryPaths,
+    ...ipRiskV2Paths,
     '/data/ip/risk': {
       post: {
         tags: ['IP 风险画像'], summary: '查询 IPv4 风险画像', operationId: 'queryIpRisk',
@@ -5349,6 +5351,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   { key:'social-content', path:'/docs/social-content', label:'社媒与内容数据', section:'数据服务' },
   ...NATIVE_DOC_ROUTES,
   ...ENTERPRISE_DOC_ROUTES,
+  { key: 'ip-risk-v2', path: '/docs/ip-risk-v2', label: 'IP 风险画像 v2', section: '数据产品' },
   { key: 'ip-risk', path: '/docs/ip-risk', label: 'IP 风险画像', section: '数据产品' },
   { key: 'start', path: '/docs', label: '开始调用', section: '基础' },
   { key: 'rules', path: '/docs/auth', label: '认证与调用规则', section: '基础' },
@@ -6491,6 +6494,7 @@ function normalizedDocsPath(pathname) {
 const TENANT_HIDDEN_DOCS = new Set(['search', 'night-all', 'tools', 'discovery'])
 export function tenantDocumentPathAllowed(path, scopes) {
   if (scopes == null) return true
+  if (path.startsWith('/data/ip/risk/history')) return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query') || s.capabilities.includes('ip.risk.query.v2')))
   if (path.startsWith('/data/web-search/')) return scopes.some(s=>s.platforms.includes('web_search') && s.capabilities.includes('web.search') && (path.endsWith('/baidu') ? s.capabilities.includes('web.search.provider.baidu') : WEB_SEARCH_PROVIDERS.some(p=>s.capabilities.includes(p.capability))))
   if (path === '/data/search') return scopes.some(scope => scope.platforms.includes('social') && scope.capabilities.includes('native.wechat.search.search'))
   if (path === '/data/services/pricing') return scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk','twitter','web_search','xiaohongshu'].includes(value)))
@@ -6522,6 +6526,7 @@ const TENANT_PRODUCT_PATHS = {
   'native-data': Object.keys(nativeForwardingPaths),
   ...Object.fromEntries(XHS_DISCOVERY_PRODUCTS.map(product => [product.key, [product.path.slice('/api/v1'.length)]])),
   'aggregate-search': ['/data/aggregate/sources', '/data/aggregate/preview', '/data/aggregate/search'],
+  'ip-risk-v2': Object.keys(ipRiskV2Paths),
   'ip-risk': ['/data/ip/risk', '/data/ip/risk/batch', ...Object.keys(ipRiskHistoryPaths)],
   'source-catalog': ['/data/source-catalog/services', '/data/source-catalog', '/data/source-catalog/metadata', '/data/source-catalog/{id}', '/data/source-catalog/{id}/items'],
   'xiaohongshu-note': ['/data/xiaohongshu/notes/detail', '/data/xiaohongshu/users/notes/analytics', '/data/xiaohongshu/notes/comments', '/data/post', '/xiaohongshu/app_v2/search_notes', '/xiaohongshu/app_v2/get_user_posted_notes'],
@@ -6582,6 +6587,7 @@ function tenantDocBody(route, scopes) {
   if (route.key === 'social-content') return hubSocialGuide(path=>tenantDocumentPathAllowed(path,scopes)) + nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
   if (route.key === 'news-discovery') return newsGuide()
   if (route.key.startsWith('enterprise')) return enterpriseDocumentationHtml(route.key, { tenant: true })
+  if (route.key === 'ip-risk-v2') return ipRiskV2Guide
   if (route.key === 'ip-risk') return ipRiskDocumentationHtml()
   const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))
   const resolve = value => value?.$ref ? value.$ref.slice(2).split('/').reduce((node, key) => node?.[key], PUBLIC_OPENAPI_DOCUMENT) : value
@@ -6644,6 +6650,7 @@ export function publicDocsHtmlForPath(pathname, { tenant = false, scopes, procur
   if (route.key.startsWith('enterprise')) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${enterpriseDocumentationHtml(route.key, { tenant, procurementEvidence })}</main>`)
   if (WECHAT_PRODUCTS.some(product => product.key === route.key)) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${nativeServiceGuide(route.key)}</main>`)
   if (route.nativeKey) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${nativeEndpointGuide(route.key)}</main>`)
+  if (route.key === 'ip-risk-v2') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${ipRiskV2Guide}</main>`)
   if (route.key === 'web-search') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${webSearchGuide}</main>`)
   if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${hubSocialGuide()}${nativeServiceGuide(route.key)}</main>`)
   if (route.key === 'ecommerce-treasure-box') html = html.replace('</main>', () => `${nativeServiceGuide(route.key)}</main>`)

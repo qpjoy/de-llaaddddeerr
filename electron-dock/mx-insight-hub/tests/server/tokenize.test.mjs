@@ -116,6 +116,7 @@ test('generic capability grants stay separate from platform grants and policies'
       { capability: 'social.posts.hot_search', ready: false },
       { capability: 'social.inspiration.list', ready: false },
       { capability: 'enterprise.query', ready: false },
+      { capability: 'ip.risk.query.v2', ready: false },
       { capability: 'ip.risk.query', ready: false },
       { capability: 'nlp.tokenize', ready: true },
       { capability: 'public_opinion.all_ingested.read', ready: false },

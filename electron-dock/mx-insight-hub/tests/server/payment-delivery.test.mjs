@@ -1,3 +1,4 @@
+import { INITIAL_PRODUCT } from '../../server/commerce/service.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { randomUUID, generateKeyPairSync, createSign } from 'node:crypto'
@@ -30,7 +31,7 @@ async function fixture(t) {
   t.after(async()=>{
     for (const server of servers) await new Promise(resolve=>server.close(resolve))
     for (const pool of pools) await pool.end()
-    for (const name of names) await admin.query(`DROP DATABASE ${name} WITH (FORCE)`)
+    for (const name of names) await admin.query(`DROP DATABASE ${name}`)
     await admin.end();await rm(dir,{recursive:true,force:true})
   })
   async function database(prefix) {
@@ -47,7 +48,7 @@ async function fixture(t) {
   await migrate(pay.url,log)
   // Apply unchanged production SQL for identities, the real wallet and payment
   // tables. Unrelated search/vector/ETL migrations are outside this fixture.
-  const selected=['001','002','005','007','018','051','052','054','056','122','123','126','127','128']
+  const selected=['001','002','005','007','018','051','052','054','056','122','123','126','127','128','129']
   const migrations=new URL('../../migrations/',import.meta.url)
   for(const file of (await readdir(migrations)).sort().filter(name=>selected.includes(name.slice(0,3)))) {
     const client=await hub.pool.connect()
@@ -480,4 +481,30 @@ test('explicit personal account is one per human, reuses original SSO tenant and
   await f.hub.pool.query("UPDATE iam.members SET status='suspended' WHERE id=$1",[oldMember])
   assert.equal((await post('old')).status,403)
   assert.equal((await f.hub.pool.query('SELECT * FROM iam.personal_accounts')).rowCount,2)
+})
+
+
+test('real Pay events deliver purchases independently of recharge and return to the owning account',check,async t=>{
+  const f=await fixture(t);await f.activate('live')
+  const consumer=randomUUID()
+  await f.hub.pool.query("INSERT INTO consumers(id,tenant_id,name,business_id) VALUES($1,$2,'IP customer','ip-commerce-customer')",[consumer,f.tenant])
+  const base=await f.api(),headers={'x-mx-insight-admin-token':'fixture-admin','content-type':'application/json','idempotency-key':randomUUID()}
+  const response=await fetch(`${base}/internal/v1/admin/commerce/tenants/${f.tenant}/orders`,{method:'POST',headers,body:JSON.stringify({sku:INITIAL_PRODUCT.sku,revision:1,consumerId:consumer,environment:'live'})})
+  assert.equal(response.status,201);const order=(await response.json()).data
+  await f.settle(order)
+  const payment=await f.finance('live').order(order.paymentId)
+  const originalAck=f.recharge.sources.get('live').client.acknowledge.bind(f.recharge.sources.get('live').client)
+  let fail=true
+  f.recharge.sources.get('live').client.acknowledge=async(...args)=>{if(fail){fail=false;throw Error('ACK response lost')}return originalAck(...args)}
+  await f.recharge.sweep('live');await f.recharge.sweep('live');await f.recharge.sweep('live')
+  assert.equal((await f.hub.pool.query('SELECT * FROM hub_commerce.subscriptions')).rowCount,1)
+  assert.equal((await f.hub.pool.query('SELECT * FROM hub_commerce.inbox')).rowCount,1)
+  assert.equal(await f.balance(),0)
+  assert.equal((await f.source('live')).client instanceof PaymentClient,true)
+  const returned=await fetch(`${base}/internal/v1/admin/payments/return-order?trade=${payment.checkout.outTradeNo}`,{headers:{'x-mx-insight-admin-token':'billing'}})
+  assert.equal(returned.status,200);assert.equal((await returned.json()).data.businessType,'purchase')
+  const denied=await fetch(`${base}/internal/v1/admin/commerce/tenants/${f.other}`,{headers:{'x-mx-insight-admin-token':'billing'}})
+  assert.equal(denied.status,403)
+  const noGrant=await fetch(`${base}/internal/v1/admin/commerce/tenants/${f.tenant}/orders`,{method:'POST',headers:{...headers,'x-mx-insight-admin-token':'billing'},body:JSON.stringify({sku:INITIAL_PRODUCT.sku,revision:1,consumerId:consumer,environment:'live'})})
+  assert.equal(noGrant.status,403)
 })

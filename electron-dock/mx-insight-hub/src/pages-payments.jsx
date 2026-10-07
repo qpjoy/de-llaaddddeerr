@@ -35,6 +35,7 @@ export function PaymentsPage({ token, session, query, setQuery, onUnauthorized, 
     adminApi.paymentReturnOrder(token, returnedTrade).then(order => {
       if (!active) return
       clearPaymentReturn(window)
+      if (order.businessType === 'purchase') { window.location.hash = `/store?view=purchases&tenantId=${order.tenantId}&orderId=${order.id}`; return }
       setQuery({paymentReturn:null,tenantId:order.tenantId,environment:order.environment,orderId:order.id,view:'recharge'})
     }).catch(error => { if (active) { setReturnError(error); if (error.status === 401) onUnauthorized?.(error) } })
     return () => { active = false }

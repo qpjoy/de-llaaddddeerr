@@ -1,3 +1,5 @@
+import { CommerceService } from './commerce/service.mjs'
+import { commerceRoute } from './commerce/routes.mjs'
 import { XHS_DISCOVERY_ENDPOINTS } from './contracts/xiaohongshu-discovery.mjs'
 import { PaymentService } from './payments/service.mjs'
 import { canOpenPersonalAccount } from './identity/personal-account.mjs'
@@ -775,6 +777,7 @@ export function createApp({
   webSearchService = null,
   xiaohongshuHotNotesGateway = null,
   ipRiskGateway = null,
+  ipRiskChannels = null,
   enterpriseGateway = null,
   socialAccountGateway = null,
   socialAccountTikHubGateway = null,
@@ -816,6 +819,8 @@ export function createApp({
     databasePuller,
   })
 
+  const commerce = new CommerceService(store, recharge)
+  if (recharge) recharge.commerce = commerce
   const payments = new PaymentService(store)
   payments.store.includeRecharge = Boolean(recharge)
 
@@ -1536,7 +1541,8 @@ export function createApp({
         principal = await resolvePrincipal(request)
       }
 
-      if (await paymentRoute({ payments, recharge, request, response, pathname, searchParams, principal, readJson, sendJson, requestId })) return
+      if (await commerceRoute({ commerce, request, response, pathname, searchParams, principal, readJson, sendJson, requestId })) return
+      if (await paymentRoute({ payments, recharge, commerce, request, response, pathname, searchParams, principal, readJson, sendJson, requestId })) return
       if (await paymentReportingRoute({ reporting:paymentReporting, request, response, pathname, searchParams, principal, sendJson, requestId })) return
 
       if (request.method === 'GET' && pathname === '/internal/v1/admin/documentation') {
@@ -5622,6 +5628,20 @@ export function createApp({
           'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
           'x-mx-insight-source-mode': result.sourceMode,
         })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/data/ip/risk/subscription') {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams,'IP subscription')
+        sendJson(response,200,{data:await commerce.subscription(context)},{'cache-control':'private, no-store'})
+        return
+      }
+      if (request.method === 'POST' && ['/api/v1/data/ip/risk/v2','/api/v1/data/ip/risk/v2/batch'].includes(pathname)) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'IP v2 query')
+        if (!ipRiskChannels) throw new AppError(503, 'ip_risk_unavailable', 'IP v2 is unavailable')
+        const result = await ipRiskChannels.query(context, {body:await readJson(request,8192),idempotencyKey:request.headers['idempotency-key'],path:pathname})
+        sendJson(response,result.status,result.body,{'cache-control':'private, no-store','idempotent-replay':String(result.replay),'x-mx-insight-batch-id':result.batchId})
         return
       }
       if (request.method === 'GET' && pathname === '/api/v1/data/ip/risk/history') {

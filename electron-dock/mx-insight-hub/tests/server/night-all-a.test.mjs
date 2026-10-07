@@ -115,7 +115,7 @@ test('admin HTTP routes reject anonymous access; catalog and health do not call 
   let calls = 0
   const nightAllA = new NightAllAService({ config, fetchImpl: async () => { calls++; return new Response('{"ok":true}') } })
   const service = new HubService({ store: new MemoryStore(), adapter: {}, apiKeyPepper: 'test-pepper-at-least-thirty-two-bytes' })
-  const server = createServer(createApp({ service, adminToken: 'test-admin', nightAllA, externalPlatformAdmin: new MultiExternalPlatformAdminService([nightAllA]) }))
+  const server = createServer(createApp({ service, store: service.store, adminToken: 'test-admin', nightAllA, externalPlatformAdmin: new MultiExternalPlatformAdminService([nightAllA]) }))
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const base = `http://127.0.0.1:${server.address().port}`
   try {

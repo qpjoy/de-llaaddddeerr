@@ -91,3 +91,8 @@ test('IP local filters/CSV preserve tags and zeroes, and neutralize spreadsheet 
   assert.match(csv, /highRiskDevice/)
   assert.match(csv, /2024-05-10 12:17:26/)
 })
+
+test('Baidu throttling and pause are definite service states, not unknown paid outcomes',()=>{
+  for(const code of ['ip_channel_rate_limited','ip_channel_cooling','ip_channel_daily_limit','ip_channel_busy'])assert.equal(ipRiskFailureRows({status:502,code},{ip:'1.1.1.1'},'fixture','')[0].status,'limited')
+  assert.equal(ipRiskFailureRows({status:502,code:'ip_channel_paused'},{ip:'1.1.1.1'},'fixture','')[0].status,'unavailable')
+})
