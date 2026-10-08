@@ -128,11 +128,18 @@ export function weiboRow(value, capturedAt) {
 
 export function projectWeiboSearch(result, request) {
   const parsed = result.publicBody?.data?.parsed_data
-  if (!Array.isArray(parsed?.results) || typeof parsed.pagination?.has_next_page !== 'boolean') throw new Error('invalid_weibo_search_shape')
+  const pagination = parsed?.pagination
+  // Verified TikHub responses can contain pagination={}. Like the historical
+  // page-based adapter, offer one continuation for a nonempty page; the supplier
+  // does not accept our pageSize, so a short page does not establish exhaustion.
+  const emptyPagination = pagination !== null && typeof pagination === 'object'
+    && !Array.isArray(pagination) && Object.keys(pagination).length === 0
+  if (!Array.isArray(parsed?.results) || parsed.parse_success === false
+    || (!emptyPagination && typeof pagination?.has_next_page !== 'boolean')) throw new Error('invalid_weibo_search_shape')
   const capturedAt = result.publicBody.meta.capturedAt
   const rows = parsed.results.map(value => weiboRow(value, capturedAt))
   if (rows.length > request.pageSize) throw new Error('weibo_page_exceeds_requested_count')
-  const hasMore = parsed.pagination.has_next_page && request.page < 15
+  const hasMore = (emptyPagination ? rows.length > 0 : pagination.has_next_page) && request.page < 15
   return { ...result, restrictedResponseArchive: result.restrictedResponseArchive, items: rows,
     publicBody: { contractVersion: RAW_SEARCH_VERSION, data: { platform: 'weibo', query: request.query,
       raw_info: '[]', raw_data: JSON.stringify(rows), page: { page: request.page, pageSize: request.pageSize,

@@ -17,6 +17,8 @@
 
 Hub 新分页使用绑定 consumer、Key、平台、查询与页大小的 `mxraw1` 游标，最多 15 页。下一页保持请求条件，提交顶层 `cursor`，每页使用新幂等键。新的 Hub 游标不会回退至 Night-All；已选择直连后，停用操作、凭据错误、限流、供应商异常或未知结果也不会改走旧通道。
 
+微博分页兼容已经验证的上游 `pagination={}`：非空页提供续页游标，空页停止，仍限制 15 页。供应商不接收 Hub 的 pageSize，不能因返回不足 pageSize 就停止。若供应商明确返回布尔 `has_next_page`，按其值处理。Hub 不自动请求下一页；其余未知分页形状仍明确失败。实际响应证据与冷启动修复见 [微博搜索诊断](weibo-search-diagnostics.md)。
+
 ## 微博全文
 
 搜索结果包含“展开c”“展开全文”等末尾标记或明确的长文标记时，Hub 调用已注册详情接口，固定 `is_get_long_text="true"`。只使用 ID、作者（搜索已提供时）和正文前缀一致、严格更长且不再带截断标记的全文，优先 `longText.content`，其次 `text_raw`。更新 `text/content/full_text`，普通帖子标题保持空，不再把正文复制为标题。保留搜索获得的指标、时间和媒体。
@@ -53,6 +55,6 @@ Hub 新分页使用绑定 consumer、Key、平台、查询与页大小的 `mxraw
 
 部署 Hub API 和 ingest worker 即可，Delta、Luopan、Night-All 不需要同步发布。按现有 migrate 流程顺序执行 migration 132、133：前者保护 raw 的 `night-all.compat.v1`，后者扩展到 data-search 的 `night-all.search.v1`。只保护带有 Hub 全文验证标记的微博，阻止后来的同前缀“展开”短文覆盖全文；保留原始证据和观察，允许真正的内容编辑与删除。不回填旧记录，不改 migration 131，也不更新下游数据库中已经保存的摘要。
 
-本次未改 Launcher/MX-H2I 登录、联网或支付服务，未新增真实付费请求。测试使用模拟供应商、原先已获授权保存的真实详情响应，以及独立 PGlite 数据库执行迁移。覆盖别名重放、旧响应重放、全文匹配、补取失败、采购成本、空标题、15 页与跨 Key 游标边界、原始证据和全文保护。
+本次未改 Launcher/MX-H2I 登录、联网或支付服务。最初的路由迁移未新增付费请求；后续空分页修复经用户授权新增一次微博搜索验证，其原始响应只用于离线重放。测试使用模拟供应商、原先已获授权保存的真实详情响应，以及独立 PGlite 数据库执行迁移。覆盖别名重放、旧响应重放、全文匹配、补取失败、采购成本、空标题、15 页与跨 Key 游标边界、原始证据和全文保护。
 
 入口：`tests/server/raw-search-routing.test.mjs`、`tests/server/weibo-long-text-migration.test.mjs`。SQL 测试通过 `MX_INSIGHT_TEST_PGLITE_MODULE` 指向本机 PGlite 模块；测试不连接生产。

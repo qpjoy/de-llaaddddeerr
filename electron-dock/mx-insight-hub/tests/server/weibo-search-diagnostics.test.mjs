@@ -51,6 +51,19 @@ test('legacy page size uses the original count before pageSize and limit', () =>
   assert.equal(result.pageSize, 30)
 })
 
+test('verified empty pagination accepts valid short pages and exposes bounded continuation without content', () => {
+  for (const count of [0, 8, 10]) {
+    const report = inspectWeiboArchive(archive({ parsed_data: { results: Array(count).fill(row),
+      result_count: count, pagination: {}, search_stats: {}, parse_success: true } }), snapshot)
+    assert.equal(report.state, 'current_projection_accepts')
+    assert.equal(report.returnedCount, count)
+    assert.equal(report.hasMore, count > 0)
+    assert.equal(report.shape.emptyPagination, true)
+    assert.equal(report.shape.hasNextPage, 'missing')
+    assert.doesNotMatch(JSON.stringify(report), /private-|5351726865449966/)
+  }
+})
+
 const pgliteModule = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
 test('read-only database diagnosis traces an endpoint-wide blocker instead of treating the 409 as a paid call', {
   skip: pgliteModule ? false : 'Set MX_INSIGHT_TEST_PGLITE_MODULE to a local @electric-sql/pglite module',

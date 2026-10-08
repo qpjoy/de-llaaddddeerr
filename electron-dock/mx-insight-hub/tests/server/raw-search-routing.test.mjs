@@ -51,7 +51,7 @@ function legacy() {
 }
 
 async function harness({ platform = 'weibo', detail = 'success', enabled = true, detailEnabled = true,
-  hasMore = false, malformed = false, searchFails = false, rows = [preview], instagramData } = {}) {
+  hasMore = false, malformed = false, searchFails = false, rows = [preview], instagramData, weiboData } = {}) {
   const store = new MemoryStore(), calls = [], historical = []
   const oldPayload = legacy()
   const oldDataPayload = oldDataSearch(platform)
@@ -101,7 +101,8 @@ async function harness({ platform = 'weibo', detail = 'success', enabled = true,
       } } } } }, ...(hasMore ? [{ entryId: 'cursor-bottom', content: { cursorType: 'Bottom', value: 'opaque-next' } }] : [])] }],
     } } } } })
     return Response.json({ code: 200, request_id: 'search-receipt', data: malformed ? { unexpected: [] }
-      : { parsed_data: { results: rows, result_count: rows.length, pagination: { has_next_page: hasMore } } } })
+      : (typeof weiboData === 'function' ? weiboData(Number(calls.at(-1).searchParams.get('page'))) : weiboData)
+        ?? { parsed_data: { results: rows, result_count: rows.length, pagination: { has_next_page: hasMore } } } })
   } })
   const platformStore = new MemoryExternalPlatformStore({ usageStore: store, providerKey, authorizationPlatform: platform })
   const gateway = new ExternalPlatformGateway({ usageStore: store, platformStore, adapter, config, providerKey,
@@ -260,6 +261,89 @@ test('Hub raw pagination binds query and Key, limits 15 pages, and never loses a
     await assert.rejects(h.invoke({ ...body, cursor: codec.encode({ ...state, page: 16 }) }, 'raw-fixture-too-far'), { code: 'invalid_cursor' })
     const otherCodec = createRawSearchCursorCodec(PEPPER, `${h.context.consumer.id}:different-key`)
     await assert.rejects(h.invoke({ ...body, cursor: otherCodec.encode(state) }, 'raw-fixture-wrong-key'), { code: 'invalid_cursor' })
+  }
+})
+
+// Anonymized shape of the authorized 2026-10-08 response: 8 results,
+// parse_success=true, pagination={} and search_stats={}; no post content retained.
+function weiboEmptyPagination(results) {
+  return { parsed_data: { results, result_count: results.length, pagination: {}, search_stats: {}, parse_success: true } }
+}
+
+test('Weibo empty pagination preserves short pages and bounded continuation on both Hub contracts', async () => {
+  const rows = Array.from({ length: 8 }, (_, i) => ({ ...preview, weibo_id: `53517268654499${66 + i}`, content: FULL }))
+  const source = weiboEmptyPagination(rows)
+  for (const route of ['raw', 'data']) {
+    const h = await harness({ weiboData: page => page === 2 ? weiboEmptyPagination([]) : source })
+    const invoke = route === 'raw' ? h.invoke : h.invokeData
+    const body = route === 'raw' ? BODY : { platform: 'weibo', query: '汽车', pageSize: 20 }
+    const first = await invoke(body)
+    if (route === 'data') assert.ok(isNightAllDataSearchV1Envelope(first.body))
+    const page = route === 'raw' ? first.body.data.page : first.body.data.pageInfo
+    const items = route === 'raw' ? JSON.parse(first.body.data.raw_data) : first.body.data.items
+    assert.equal(items.length, 8)
+    assert.ok(items.every(item => item.title === (route === 'raw' ? '' : null)))
+    assert.equal(page.returnedCount, 8)
+    assert.equal(page.hasMore, true)
+    assert.ok(page.nextCursor.startsWith(route === 'raw' ? 'mxraw1.' : 'mxds1.'))
+    assert.equal(h.calls.length, 1) // A next cursor never acquires another page itself.
+    assert.equal(h.platformStore.ingestJobs[0].payload.records.length, 8)
+    const receipt = [...h.platformStore.restrictedResponseArchives.values()][0]
+    assert.deepEqual(receipt.parsedPayload.data, source)
+    assert.equal([...h.platformStore.calls.values()][0].outcome, 'succeeded')
+    assert.deepEqual((await invoke(body)).body, first.body)
+    assert.equal(h.calls.length, 1)
+    const second = await invoke({ ...body, cursor: page.nextCursor }, `${route}-empty-page-two`)
+    const secondPage = route === 'raw' ? second.body.data.page : second.body.data.pageInfo
+    assert.equal(secondPage.returnedCount, 0)
+    assert.equal(secondPage.hasMore, false)
+    assert.equal(secondPage.nextCursor, null)
+    assert.equal(h.calls[1].searchParams.get('page'), '2')
+    assert.equal(h.calls.length, 2)
+    const codec = (route === 'raw' ? createRawSearchCursorCodec : createDataSearchCursorCodec)(PEPPER,
+      `${h.context.consumer.id}:${h.context.apiKey.id}`)
+    const lastCursor = codec.encode({ ...codec.decode(page.nextCursor), page: 15 })
+    const last = await invoke({ ...body, cursor: lastCursor }, `${route}-empty-pagination-last`)
+    const lastPage = route === 'raw' ? last.body.data.page : last.body.data.pageInfo
+    assert.equal(lastPage.returnedCount, 8)
+    assert.equal(lastPage.hasMore, false)
+    assert.equal(lastPage.nextCursor, null)
+    assert.equal(h.historical.length, 0)
+  }
+})
+
+test('Weibo empty pagination still runs the governed long-text enrichment', async () => {
+  const h = await harness({ weiboData: weiboEmptyPagination([preview]) })
+  const result = await h.invokeData()
+  assert.equal(result.body.data.items[0].text, FULL)
+  assert.equal(result.body.data.items[0].title, null)
+  assert.equal(result.body.data.pageInfo.hasMore, true)
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.calls[1].searchParams.get('is_get_long_text'), 'true')
+})
+
+test('Weibo contract failures preserve a bounded cause and still suppress a second paid dispatch', async () => {
+  for (const [options, code] of [
+    [{ malformed: true }, 'invalid_weibo_search_shape'],
+    ...[undefined, null, [], { has_next_page: 'false' }, { unexpected: true }].map(pagination =>
+      [{ weiboData: { parsed_data: { results: [preview], pagination } } }, 'invalid_weibo_search_shape']),
+    [{ weiboData: { parsed_data: { ...weiboEmptyPagination([preview]).parsed_data, parse_success: false } } },
+      'invalid_weibo_search_shape'],
+    [{ rows: [{ ...preview, weibo_id: 'invalid-private-value' }] }, 'invalid_weibo_identity'],
+    [{ rows: Array(21).fill({ ...preview, content: FULL }) }, 'weibo_page_exceeds_requested_count'],
+  ]) {
+    const h = await harness(options)
+    await assert.rejects(h.invokeData(), error => {
+      assert.equal(error.code, 'external_platform_response_unusable')
+      assert.equal(error.details.normalizationCode, code)
+      assert.doesNotMatch(JSON.stringify(error.details), /invalid-private-value/)
+      return true
+    })
+    assert.equal([...h.platformStore.calls.values()][0].errorCode, code)
+    await assert.rejects(h.invokeData({ platform: 'weibo', query: '另一关键词', pageSize: 20 }, 'another-query-idempotency'),
+      { status: 409, code: 'external_platform_response_unusable' })
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.historical.length, 0)
   }
 })
 

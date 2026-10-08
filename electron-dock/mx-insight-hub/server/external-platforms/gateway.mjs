@@ -577,10 +577,13 @@ export class ExternalPlatformGateway {
       finalize: async ({ result, delivery, credential, credentialRevision, deadlineAt }) => {
         if (native) {
           try { result = (platform === 'weibo' ? projectWeiboSearch : projectInstagramSearch)(result, request) }
-          catch {
+          catch (error) {
+            const normalizationCode = platform === 'weibo' && ['invalid_weibo_search_shape',
+              'invalid_weibo_identity', 'weibo_page_exceeds_requested_count'].includes(error.message)
+              ? error.message : `invalid_${platform}_search_contract`
             throw new TikHubUpstreamError('Social search response could not be normalized', {
               outcome: 'succeeded_unusable', billed: true, httpStatus: 200, businessCode: 200,
-              errorCode: `invalid_${platform}_search_contract`,
+              errorCode: normalizationCode,
             }, result)
           }
           if (platform === 'weibo') result = await enrichWeiboRawSearch({ gateway: this, context, request, result, delivery,

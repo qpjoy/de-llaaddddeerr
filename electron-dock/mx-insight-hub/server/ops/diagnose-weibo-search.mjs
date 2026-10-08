@@ -26,6 +26,8 @@ export function inspectWeiboArchive(archive, snapshot) {
     data: kind(payload?.data), parsedData: kind(parsed), results: kind(rows),
     resultCount: Array.isArray(rows) ? rows.length : null,
     pagination: kind(parsed?.pagination), hasNextPage: kind(parsed?.pagination?.has_next_page),
+    emptyPagination: kind(parsed?.pagination) === 'object' && Object.keys(parsed.pagination).length === 0,
+    parseSuccess: kind(parsed?.parse_success),
   }
   if (payload?.code !== 200) return { state: 'not_success_envelope', shape }
   const body = snapshot?.body
@@ -44,7 +46,8 @@ export function inspectWeiboArchive(archive, snapshot) {
   try {
     const result = projectWeiboSearch({ publicBody: { data: payload.data, meta: { capturedAt } } },
       { query: '', page: 1, pageSize, encodeNext: () => 'offline-not-a-cursor' })
-    return { state: 'current_projection_accepts', pageSize, shape, returnedCount: result.items.length }
+    return { state: 'current_projection_accepts', pageSize, shape, returnedCount: result.items.length,
+      hasMore: result.publicBody.data.page.hasMore }
   } catch (error) {
     return { state: 'current_projection_rejects', pageSize, shape, invalidRowIndexes,
       reason: REASONS.has(error.message) ? error.message : 'unexpected_projection_error' }
