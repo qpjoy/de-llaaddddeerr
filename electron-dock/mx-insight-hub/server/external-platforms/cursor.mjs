@@ -89,6 +89,22 @@ export function createNightAllCompatibilityCursorCodec(secret, consumerId) {
   })
 }
 
+export function createRawSearchCursorCodec(secret, identity) {
+  return createScopedCursorCodec(secret, identity, {
+    prefix: 'mxraw1',
+    aadLabel: 'hub-raw-search-cursor',
+    keyLabel: 'hub-raw-search-cursor-aes-gcm',
+  })
+}
+
+export function createDataSearchCursorCodec(secret, identity) {
+  return createScopedCursorCodec(secret, identity, {
+    prefix: 'mxds1',
+    aadLabel: 'hub-data-search-cursor',
+    keyLabel: 'hub-data-search-cursor-aes-gcm',
+  })
+}
+
 export function createAggregateCursorCodec(secret, identity) {
   return createScopedCursorCodec(secret, identity, {
     prefix: 'mxag1',

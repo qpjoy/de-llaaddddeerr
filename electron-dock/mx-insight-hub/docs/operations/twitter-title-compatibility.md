@@ -1,5 +1,7 @@
 # Twitter 空标题兼容修复
 
+2026-10-08：新 raw 交付的 Twitter/Facebook 空标题由 Hub 执行，Twitter 的兼容单关键词请求已可在 Hub 直连；见[当前路由范围](hub-raw-search-routing.md)。以下为历史实现记录。
+
 2026-09-23 更新：Facebook 内容现采用相同规则；下文“其他平台不变”指此次扩展前的
 2026-09-21 范围。最新范围及分页修复见 [搜索兼容修复](night-all-search-compatibility-2026-09-23.md)。
 

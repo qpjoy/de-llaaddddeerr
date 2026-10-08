@@ -89,13 +89,17 @@ async function main() {
         && [TIKHUB_XIAOHONGSHU_DATASET_ID, NIGHT_ALL_COMPAT_DATASET_ID, 'social.comments.v1']
           .includes(payload.datasetId)
         && payload.platform === 'xiaohongshu'
-      if ((!justOne && !tikHubXiaohongshu && !enterprise) || !Array.isArray(payload.records)) {
+      const hubRaw = (['night-all.search.v1', NIGHT_ALL_COMPAT_DATASET_ID].includes(payload.datasetId)
+        && payload.providerKey === 'tikhub' && ['weibo', 'instagram'].includes(payload.platform))
+        || (payload.datasetId === NIGHT_ALL_COMPAT_DATASET_ID && payload.providerKey === 'rapidapi' && payload.platform === 'twitter')
+      if ((!justOne && !tikHubXiaohongshu && !enterprise && !hubRaw) || !Array.isArray(payload.records)) {
         throw new Error('external-platform ingest payload does not match the pinned contract')
       }
       const records = justOne || enterprise
         ? rehydrateJustOneQueuedRecords(payload.records)
         : rehydrateTikHubXiaohongshuQueuedRecords(payload.records)
-      const connectorId = enterprise ? 'external-platform:qixin' : justOne ? 'external-platform:justone' : TIKHUB_XIAOHONGSHU_CONNECTOR_ID
+      const connectorId = hubRaw ? `external-platform:${payload.providerKey}`
+        : enterprise ? 'external-platform:qixin' : justOne ? 'external-platform:justone' : TIKHUB_XIAOHONGSHU_CONNECTOR_ID
       const result = await store.ingestExternalRecords({
         datasetId: payload.datasetId,
         platform: payload.platform,

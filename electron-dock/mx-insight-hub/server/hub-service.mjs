@@ -167,6 +167,9 @@ import {
 } from './data/night-all-compat.mjs'
 import { withNightAllLegacyCountWarning } from './contracts/night-all-count-audit.mjs'
 import { acquisitionRequestSnapshot } from './acquisitions/request-snapshot.mjs'
+import { canRouteRawSearch, rawSearchContentTitles } from './contracts/raw-search.mjs'
+import { canRouteDataSearch } from './contracts/hub-data-search.mjs'
+import { dataSearchContentTitles } from './contracts/social-content-title.mjs'
 import {
   capNightAllCompatibilityTraversal,
   capNightAllDataSearchTraversal,
@@ -569,6 +572,8 @@ export class HubService {
     externalNativeCapabilities = null,
     externalSocialSearch = null,
     externalWechatSearch = null,
+    externalRawSearch = null,
+    externalDataSearch = null,
     externalSocialSearchEnabled = false,
     externalSocialSearchCanaryConsumerIds = [],
     externalSocialUserActivity = null,
@@ -596,6 +601,8 @@ export class HubService {
     this.externalNativeCapabilities = externalNativeCapabilities
     this.externalSocialSearch = externalSocialSearch
     this.externalWechatSearch = externalWechatSearch
+    this.externalRawSearch = externalRawSearch
+    this.externalDataSearch = externalDataSearch
     this.externalSocialSearchEnabled = typeof externalSocialSearchEnabled === 'function'
       ? externalSocialSearchEnabled : externalSocialSearchEnabled === true
     this.externalSocialSearchCanaryConsumerIds = new Set(
@@ -4237,6 +4244,9 @@ export class HubService {
       maxPageSize: policy.maxPageSize,
       maxCrawlWork: storedPolicy?.maxCrawlWork ?? Math.min(policy.maxPageSize, 100),
     })
+    if (operation === 'raw' && this.externalRawSearch && canRouteRawSearch(normalized)) {
+      return this.externalRawSearch(context, { normalized, body, idempotencyKey })
+    }
     const directUserActivity = directXiaohongshuLegacyUserActivityRequest(operation, normalized)
     if (
       directUserActivity
@@ -4414,9 +4424,10 @@ export class HubService {
       })
       // Night-All declares page.returnedCount before its own raw_data
       // de-duplication, so a delivered envelope can contradict itself. Record
-      // the discrepancy on the response that gets archived; never rewrite the
-      // acquired rows or the upstream count fields themselves.
-      const responseBody = withNightAllLegacyCountWarning(traversedBody)
+      // the discrepancy without changing upstream count fields. Content title
+      // projection applies to new raw deliveries; provider evidence stays intact.
+      const responseBody = withNightAllLegacyCountWarning(operation === 'raw'
+        ? rawSearchContentTitles(traversedBody, normalized.platform) : traversedBody)
       const businessOutcome = nightAllCompatibilityBusinessOutcome(responseBody)
       const capturedAt = new Date()
       const staleUntil = new Date(capturedAt.getTime() + nightAllCompatibilityFallbackWindowMs(operation))
@@ -4689,6 +4700,10 @@ export class HubService {
       fingerprintQuery = { ...telegramQuery }
       delete fingerprintQuery.sourceScope
     }
+    if (path === '/api/v1/data/search' && this.externalDataSearch && canRouteDataSearch(upstreamBody)) {
+      return this.externalDataSearch(context, { body, normalized: upstreamBody, idempotencyKey,
+        dataSearch: { resultType, replayWindowMs: replayWindowFor(resultType) } })
+    }
     if (
       platform === 'xiaohongshu'
       && pageSize === DIRECT_XIAOHONGSHU_PAGE_SIZE
@@ -4805,7 +4820,7 @@ export class HubService {
       // The HTTP layer has always exposed the durable Hub request ID. Persist
       // that exact delivered JSON as the replay/history body too, instead of
       // appending requestId only after the usage commit.
-      const responseBody = { ...responsePayload, requestId: activeRequestId }
+      const responseBody = { ...dataSearchContentTitles(responsePayload, platform), requestId: activeRequestId }
       const itemCount = Array.isArray(responseBody?.data?.items) ? responseBody.data.items.length : 0
       const commit = {
         responseStatus: 200,

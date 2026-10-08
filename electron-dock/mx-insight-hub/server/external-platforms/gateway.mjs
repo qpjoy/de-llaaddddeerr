@@ -27,9 +27,13 @@ import {
 } from '../contracts/social-accounts.mjs'
 import { JustOneUpstreamError } from '../adapters/justone.mjs'
 import { AppError } from '../core/errors.mjs'
-import { createExternalPlatformCursorCodec } from './cursor.mjs'
+import { createExternalPlatformCursorCodec, createRawSearchCursorCodec, createDataSearchCursorCodec } from './cursor.mjs'
 import { describeDeliveryReason } from './delivery-reason.mjs'
 import { acquisitionRequestSnapshot } from '../acquisitions/request-snapshot.mjs'
+import { normalizeRawSearch, projectWeiboSearch, rawSearchRecords, RAW_SEARCH_DATASET, RAW_SEARCH_PATH, WEIBO_SEARCH_KEY } from '../contracts/raw-search.mjs'
+import { enrichWeiboRawSearch } from './raw-search-enrichment.mjs'
+import { INSTAGRAM_SEARCH_KEY, projectInstagramSearch } from '../contracts/instagram-search.mjs'
+import { normalizeHubDataSearch, projectDataSearch } from '../contracts/hub-data-search.mjs'
 
 const AUTHORIZATION_PLATFORM = 'ecommerce'
 const DEFAULT_POLICY = Object.freeze({ maxRequests: 100_000, windowSeconds: 3_600, maxPageSize: 100 })
@@ -550,6 +554,45 @@ export class ExternalPlatformGateway {
     })
   }
 
+  async searchRaw(context, { normalized, body, idempotencyKey, dataSearch = null }) {
+    const platform = normalized.platform
+    const nativeKey = platform === 'weibo' ? WEIBO_SEARCH_KEY : INSTAGRAM_SEARCH_KEY
+    const native = platform !== 'twitter'
+    if (!this.operationControlStore || !['weibo', 'twitter', 'instagram'].includes(platform)
+      || this.providerKey !== (native ? 'tikhub' : 'rapidapi')) {
+      throw new AppError(503, 'raw_search_unavailable', 'Hub raw search is unavailable')
+    }
+    const codec = (dataSearch ? createDataSearchCursorCodec : createRawSearchCursorCodec)(this.apiKeyPepper, `${context.consumer.id}:${context.apiKey.id}`)
+    let request
+    return this.#deliver(context, { body, idempotencyKey, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH }, {
+      operation: native ? `native.${nativeKey}` : 'social.content.search',
+      authorizationPlatform: platform, platformSearch: true, meterKey: dataSearch ? platform : 'raw',
+      datasetId: dataSearch ? 'night-all.search.v1' : RAW_SEARCH_DATASET, replayReleasedFailures: true,
+      replayWindowMs: dataSearch?.replayWindowMs,
+      dataSearch: Boolean(dataSearch), nativeForwarding: native, billingUnknown: !native,
+      normalize: () => (request = dataSearch ? normalizeHubDataSearch(normalized, codec, dataSearch.resultType) : normalizeRawSearch(normalized, codec)),
+      dispatch: ({ credential }) => native
+        ? this.adapter.forwardNative(nativeKey, { params: request.upstreamQuery }, credential)
+        : this.adapter.execute(request.providerRequest, { ...credential, encodeCursor: request.encodeNext }),
+      finalize: async ({ result, delivery, credential, credentialRevision, deadlineAt }) => {
+        if (native) {
+          try { result = (platform === 'weibo' ? projectWeiboSearch : projectInstagramSearch)(result, request) }
+          catch {
+            throw new TikHubUpstreamError('Social search response could not be normalized', {
+              outcome: 'succeeded_unusable', billed: true, httpStatus: 200, businessCode: 200,
+              errorCode: `invalid_${platform}_search_contract`,
+            }, result)
+          }
+          if (platform === 'weibo') result = await enrichWeiboRawSearch({ gateway: this, context, request, result, delivery,
+            credential, credentialRevision, providerCostControl, deadlineAt })
+        }
+        result.records = rawSearchRecords(result.publicBody, platform, this.providerKey)
+        if (dataSearch) result.publicBody = { ...projectDataSearch(result, request), meta: result.publicBody.meta }
+        return result
+      },
+    })
+  }
+
   async webSearch(context, { request, provider, body, idempotencyKey, path }) {
     if (!this.operationControlStore) throw new AppError(503, 'web_search_unavailable', 'Search controls are unavailable')
     let normalized
@@ -620,7 +663,7 @@ export class ExternalPlatformGateway {
     const capabilityGrants = typeof this.usageStore.listEffectiveCapabilityGrants === 'function'
       ? await this.usageStore.listEffectiveCapabilityGrants(context.consumer.id, context.apiKey.id)
       : await this.usageStore.listCapabilityGrants(context.consumer.id)
-    if (!capabilityGrants.includes(plan.capability || plan.operation)) {
+    if (!plan.platformSearch && !capabilityGrants.includes(plan.capability || plan.operation)) {
       throw new AppError(403, 'capability_not_granted', plan.capabilityMessage)
     }
     if ((plan.requiredCapabilities || []).some(scope => !capabilityGrants.includes(scope))) throw new AppError(403, 'web_search_provider_not_granted', 'Search supplier is not granted')
@@ -713,11 +756,11 @@ export class ExternalPlatformGateway {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       platform: authorizationPlatform,
-      meterKey: plan.operation,
+      meterKey: plan.meterKey || plan.operation,
       acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
       requiredAuthorizationScopes: [
         { type: 'platform', key: authorizationPlatform },
-        { type: 'capability', key: plan.capability || plan.operation },
+        ...(!plan.platformSearch ? [{ type: 'capability', key: plan.capability || plan.operation }] : []),
         ...(plan.requiredCapabilities || []).map(key => ({type:'capability',key})),
       ],
       unitsReserved: 1,
@@ -727,7 +770,7 @@ export class ExternalPlatformGateway {
       // A caller-supplied key names one immutable delivery attempt. An omitted
       // key means this HTTP call is a new billable intent; only explicit key
       // reuse is idempotent.
-      replayWindowMs: null,
+      replayWindowMs: plan.replayWindowMs ?? null,
       // A definitive enterprise rejection releases the wallet hold, but the
       // same caller intent must still replay its saved error without dispatch.
       replayReleasedFailures: this.providerKey === 'qixin' || plan.replayReleasedFailures === true,
@@ -1135,7 +1178,7 @@ export class ExternalPlatformGateway {
       }
       const startedAt = performance.now()
       try {
-        const result = await plan.dispatch({
+        let result = await plan.dispatch({
           body,
           policy,
           codec,
@@ -1157,8 +1200,31 @@ export class ExternalPlatformGateway {
           restrictedResponseArchive: persistedEvidence.restrictedResponseArchive,
           archiveObjects: result.archiveObjects,
         }
+        if (plan.platformSearch && this.providerKey === 'tikhub') {
+          // Persist the paid search before any optional paid detail calls.
+          await this.platformStore.stageProviderEvidence({
+            callId: call.id, delivery, ...lastDispatchEvidence,
+            httpStatus: persistedEvidence.responseArchive?.httpStatus ?? 200,
+            businessCode: persistedEvidence.responseArchive?.businessCode ?? 200,
+            itemCount: result.items?.length ?? 0,
+          })
+          // The primary call now carries its procurement cost. Release its
+          // workflow hold before independently admitting each detail step.
+          if (costReservation) {
+            await this.platformStore.releaseProviderCostWorkflow({
+              reservationId: costReservation.id, usageRequestId: activeRequestId,
+            })
+            costReservation = null
+          }
+        }
+        if (plan.finalize) result = await plan.finalize({
+          result, delivery,
+          credential: resolvedCredential.credential === undefined ? {} : { credential: resolvedCredential.credential },
+          credentialRevision: resolvedCredential.revision,
+          deadlineAt: new Date(reservation.request.leaseExpiresAt).getTime() || Date.now() + this.reservationLeaseMs,
+        })
         const capturedAt = acceptedCaptureTime(result)
-        const responseBody = deliveryBody(result.publicBody, {
+        const responseBody = plan.dataSearch ? { data: result.publicBody.data, requestId: activeRequestId } : deliveryBody(result.publicBody, {
           requestId: activeRequestId,
           sourceMode: 'live',
           capturedAt,
@@ -1174,7 +1240,9 @@ export class ExternalPlatformGateway {
           // A contract with no reviewed per-item identity extracts no items and
           // reports zero, rather than crashing the delivery on a missing field.
           itemCount: result.items?.length ?? 0,
+          ...(plan.platformSearch && !plan.dataSearch ? { usageUnitsActual: 1 } : {}),
           latencyMs,
+          ...(plan.platformSearch ? { usageLatencyMs: Math.max(0, Math.round(performance.now() - startedAt)) } : {}),
           // Official usage semantics count only code=0 as a successful billed
           // request. Monetary cost remains unknown unless a reviewed price book
           // is configured.

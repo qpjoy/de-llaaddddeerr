@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
 import { normalizeNativeForwardingRequest } from '../../server/contracts/native-forwarding.mjs'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
+import { mergeWeiboDetail, weiboRow, rawSearchRecords } from '../../server/contracts/raw-search.mjs'
 
 const migration = name => readFile(new URL(`../../migrations/${name}`, import.meta.url), 'utf8')
 const filename = '131_weibo_long_text_and_lcy_grants.sql'
@@ -39,6 +40,86 @@ test('migration embeds exactly the verified response; native detail defaults to 
 // A disposable PostgreSQL WASM instance executes the real migration, constraints,
 // triggers and rollback. No production connection or supplier call is possible.
 const pgliteModule = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
+test('Hub raw projection reuses the previously paid response offline and preserves its full body', () => {
+  const row = weiboRow({ weibo_id: response.data.idstr, user_id: response.data.user.idstr, content: short }, '2026-10-08T05:56:31.007Z')
+  assert.equal(mergeWeiboDetail(row, { publicBody: { data: response.data, meta: { capturedAt: '2026-10-08T05:56:31.007Z' } } }), true)
+  assert.equal(row.full_text, full)
+  assert.equal([...row.full_text].length, 411)
+})
+
+test('migration 132 protects only verified Hub raw full text during later preview upserts', {
+  skip: pgliteModule ? false : 'Set MX_INSIGHT_TEST_PGLITE_MODULE to a local @electric-sql/pglite module',
+}, async t => {
+  const { PGlite } = await import(pathToFileURL(pgliteModule).href)
+  const db = new PGlite()
+  t.after(() => db.close())
+  await db.exec(await migration('005_ingest_core_outbox.sql'))
+  await db.exec(sql.slice(0, sql.indexOf('-- Installed before')))
+  const guard = await migration('132_hub_raw_weibo_full_text_guard.sql')
+  await db.exec(`BEGIN; ${guard} COMMIT;`)
+  await db.exec(`BEGIN; ${guard} COMMIT;`)
+  const row = weiboRow({ ...response.data }, '2026-10-08T05:56:31.007Z')
+  row.body_completeness = 'full_text'
+  const record = rawSearchRecords({ data: { raw_info: '[]', raw_data: JSON.stringify([row]) } }, 'weibo', 'tikhub')[0]
+  const insert = async (id, dataset, platform, extensions = record.extensions) => db.query(`INSERT INTO core.canonical_records
+    (id,dataset_id,platform,object_type,external_id,schema_version,payload_sha256,body,title,author_external_id,extensions)
+    VALUES($1,$2,$3,'post',$4,'external.v1',$5,$6,$6,$7,$8)`, [id,dataset,platform,record.externalId,record.payloadSha256,full,record.authorExternalId,extensions])
+  await insert(recordId, 'night-all.compat.v1', 'weibo')
+  const update = async (id, body, extra = '') => (await db.query(`UPDATE core.canonical_records SET
+    body=$2,title=$2,payload_sha256=$3,current_revision=current_revision+1,projection_revision=projection_revision+1
+    ${extra} WHERE id=$1 RETURNING *`, [id, body, 'b'.repeat(64)])).rows[0]
+  const protectedRow = await update(recordId, short)
+  assert.equal(protectedRow.body, full)
+  assert.equal(protectedRow.payload_sha256, record.payloadSha256)
+  assert.equal(protectedRow.current_revision, 1)
+  assert.equal(Number(protectedRow.projection_revision), 1)
+  assert.equal((await update(recordId, '独立的编辑正文')).body, '独立的编辑正文')
+  for (const [index, dataset, platform, extensions] of [
+    [1, 'night-all.search.v1', 'weibo', record.extensions],
+    [2, 'night-all.compat.v1', 'twitter', record.extensions],
+    [3, 'night-all.compat.v1', 'weibo', {}],
+  ]) {
+    const id = `00000000-0000-4000-8000-00000000000${index}`
+    await db.query('DELETE FROM core.canonical_records WHERE id=$1', [recordId])
+    await insert(id, dataset, platform, extensions)
+    assert.equal((await update(id, short)).body, short)
+    await db.query('DELETE FROM core.canonical_records WHERE id=$1', [id])
+  }
+  await insert(recordId, 'night-all.compat.v1', 'weibo')
+  assert.equal((await update(recordId, short, ',deleted_at=now()')).body, short)
+})
+
+test('migration 133 extends verified full-text protection to data/search while allowing edits and keeping the empty title', {
+  skip: pgliteModule ? false : 'Set MX_INSIGHT_TEST_PGLITE_MODULE to a local @electric-sql/pglite module',
+}, async t => {
+  const { PGlite } = await import(pathToFileURL(pgliteModule).href)
+  const db = new PGlite()
+  t.after(() => db.close())
+  await db.exec(await migration('005_ingest_core_outbox.sql'))
+  await db.exec(sql.slice(0, sql.indexOf('-- Installed before')))
+  await db.exec(`BEGIN; ${await migration('132_hub_raw_weibo_full_text_guard.sql')} COMMIT;`)
+  const guard = await migration('133_hub_data_search_weibo_full_text_guard.sql')
+  await db.exec(`BEGIN; ${guard} COMMIT;`)
+  await db.exec(`BEGIN; ${guard} COMMIT;`)
+  for (const dataset of ['night-all.search.v1', 'night-all.compat.v1']) {
+    await db.query(`INSERT INTO core.canonical_records
+      (id,dataset_id,platform,object_type,external_id,schema_version,payload_sha256,body,title,author_external_id,extensions)
+      VALUES($1,$2,'weibo','post','5351726865449966','external.v1',$3,$4,NULL,'2471317784',$5)`,
+    [recordId, dataset, 'a'.repeat(64), full, { rawSearch: { version: 'mx-insight-hub.raw-search.v1', bodyCompleteness: 'full_text' } }])
+    const update = async (body, extra = '') => (await db.query(`UPDATE core.canonical_records SET
+      body=$2,title=$2,payload_sha256=$3,current_revision=current_revision+1 ${extra} WHERE id=$1 RETURNING *`,
+    [recordId, body, 'b'.repeat(64)])).rows[0]
+    const kept = await update(short)
+    assert.equal(kept.body, full)
+    assert.equal(kept.title, null)
+    assert.equal(kept.payload_sha256, 'a'.repeat(64))
+    assert.equal(kept.current_revision, 1)
+    assert.equal((await update('edited body')).body, 'edited body')
+    assert.equal((await update(short, ',deleted_at=now()')).body, short)
+    await db.query('DELETE FROM core.canonical_records WHERE id=$1', [recordId])
+  }
+})
+
 test('PostgreSQL migration repairs once, preserves sibling keys/history, protects against old workers and rolls back atomically', {
   skip: pgliteModule ? false : 'Set MX_INSIGHT_TEST_PGLITE_MODULE to a local @electric-sql/pglite module',
 }, async t => {

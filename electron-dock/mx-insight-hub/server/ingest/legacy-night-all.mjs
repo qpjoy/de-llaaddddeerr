@@ -1,5 +1,6 @@
 import { parseNightAllLegacyArray } from '../contracts/night-all-legacy.mjs'
 import { applyMapping, CHUNKER_VERSION, refreshMappedPayloadSha256 } from './external/mapping.mjs'
+import { hasNoContentTitle } from '../contracts/social-content-title.mjs'
 
 export const NIGHT_ALL_COMPAT_DATASET_ID = 'night-all.compat.v1'
 export const NIGHT_ALL_COMPAT_CONNECTOR_ID = 'night-all-legacy'
@@ -86,7 +87,7 @@ function decorate(record, raw, kind, { connectorId, parserVersion }) {
       ?? raw.avatarUrl
       ?? null
   }
-  if (kind === 'content' && ['twitter', 'facebook'].includes(record.platform)) {
+  if (kind === 'content' && hasNoContentTitle(record.platform, raw)) {
     record.title = null
     // The canonical digest must describe the corrected fields. Keep the raw
     // payload and its independent digest intact for historical evidence.
@@ -125,7 +126,8 @@ function mapItems(items, fieldMap, options) {
 export function normalizeNightAllLegacyPayload(payload, platform, _operation, options = {}) {
   const lineage = {
     connectorId: options.connectorId || NIGHT_ALL_COMPAT_CONNECTOR_ID,
-    parserVersion: options.parserVersion || (platform === 'facebook'
+    parserVersion: options.parserVersion || (['weibo', 'instagram'].includes(platform)
+      ? `${CHUNKER_VERSION}:night-all-legacy.v4` : platform === 'facebook'
       ? `${CHUNKER_VERSION}:night-all-legacy.v3`
       : NIGHT_ALL_COMPAT_PARSER_VERSION),
   }

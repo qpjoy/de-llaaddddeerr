@@ -351,6 +351,17 @@ export async function createRuntime(config = loadConfig()) {
     operationControlStore: externalPlatformControlStore,
     credentialStore: tikHubCredentialStore,
   })
+  const nativeSearchGateways = Object.fromEntries(['weibo', 'instagram'].map(platform => [platform, new ExternalPlatformGateway({
+    usageStore: store,
+    platformStore: createExternalPlatformStore({ pool, usageStore: store,
+      providerKey: 'tikhub', authorizationPlatform: platform,
+      circuitFailureThreshold: config.tikHub.circuitFailureThreshold,
+      circuitOpenMs: config.tikHub.circuitOpenMs,
+      uncertainCooldownMs: config.tikHub.unknownFingerprintCooldownMs }),
+    adapter: tikHubAdapter, config: config.tikHub, providerKey: 'tikhub',
+    apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: config.reservationLeaseMs,
+    operationControlStore: externalPlatformControlStore, credentialStore: tikHubCredentialStore,
+  })]))
   const tikHubGateway = new TikHubGateway({
     usageStore: store,
     platformStore: tikHubPlatformStore,
@@ -465,6 +476,8 @@ export async function createRuntime(config = loadConfig()) {
     externalPostCapabilities,
     externalSocialSearch: (context, input) => tikHubGateway.searchNotes(context, input),
     externalWechatSearch: (context, input) => socialAccountTikHubGateway.forwardNative(context, input),
+    externalRawSearch: (context, input) => (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
+    externalDataSearch: (context, input) => nativeSearchGateways[input.normalized.platform].searchRaw(context, input),
     // The gateway reads the audited operation policy on every dispatch; static
     // env flags must not prevent routing to a database-enabled operation.
     externalSocialSearchEnabled: (context) => useTikHubOperation(context, 'social.posts.search'),

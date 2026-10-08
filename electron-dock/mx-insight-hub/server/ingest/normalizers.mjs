@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
+import { hasNoContentTitle } from '../contracts/social-content-title.mjs'
 
 // Bump when the mapping below changes so revisions record which parser produced
 // them and historical rows can be recomputed selectively.
-export const PARSER_VERSION = 'mxih-normalizer.v3'
+export const PARSER_VERSION = 'mxih-normalizer.v4'
 export const SCHEMA_VERSION = 'content.v1'
 export const DATASET_ID = 'night-all.search.v1'
 export const CONNECTOR_ID = 'night-all'
@@ -102,7 +103,7 @@ function baseNormalizer(item, platform) {
     externalId,
     contentType: text(item?.contentType),
     url: text(item?.url),
-    title: text(item?.title),
+    title: hasNoContentTitle(platform, item) ? null : text(item?.title),
     body: text(item?.text),
     authorExternalId: text(author.id),
     authorName: text(author.name),
@@ -199,12 +200,13 @@ export function normalizeSearchPayload(payload, platform) {
     }
     record.rank = index + 1
     record.rawItem = item
-    // Re-observing an older Twitter/Facebook row must also revise/reindex its corrected
+    // Re-observing an older social post must also revise/reindex its corrected
     // title, even when the upstream payload itself has not changed.
     const content = contentPayload(item)
-    // Twitter's mapping is unchanged; keep its existing content identity.
-    const titleParserVersion = platform === 'twitter' ? 'mxih-normalizer.v2' : PARSER_VERSION
-    record.payloadSha256 = sha256(canonicalJson(['twitter', 'facebook'].includes(platform)
+    // Existing Twitter/Facebook mappings retain their content identities.
+    const titleParserVersion = platform === 'twitter' ? 'mxih-normalizer.v2'
+      : platform === 'facebook' ? 'mxih-normalizer.v3' : PARSER_VERSION
+    record.payloadSha256 = sha256(canonicalJson(['twitter', 'facebook', 'weibo', 'instagram'].includes(platform)
       ? { parserVersion: titleParserVersion, content }
       : content))
     records.push(record)

@@ -5665,7 +5665,7 @@ paths:
       summary: Search one explicitly selected platform
       x-mx-required-capabilities-by-platform:
         xiaohongshu: social.posts.search
-      description: 'WeChat platforms wechat_mp/wechat_search (aliases wechat/weixin) use /data/wechat/search/search
+      description: 'Weibo and Instagram (aliases ins/ig/insta) first-page searches with pageSize 20–100 use Hub-native acquisition and retain the night-all.data-search.v1 envelope, original platform pricing, item usage and fresh/stable replay windows. Ordinary posts have title=null and preserve their full text/caption. Weibo previews receive bounded long-text detail enrichment; unresolved previews return partial and WEIBO_FULL_TEXT_INCOMPLETE. Instagram preserves compound continuation state and excludes keyword recommendations from posts. New opaque mxds1 cursors bind Key, platform, query, pageSize and type for at most 15 pages. Smaller pages and old mxnc1 cursors stay on historical acquisition with Hub title normalization. Oversized or unrecognized provider pages fail with retained evidence; no truncation or automatic fallback. WeChat platforms wechat_mp/wechat_search (aliases wechat/weixin) use /data/wechat/search/search
         directly and return its native contractVersion/endpoint/data/meta/requestId envelope. Requires social + native.wechat.search.search;
         platform-only grants do not authorize live search. Optional params follow the native schema. type=fresh/stable
         both use permanent native idempotent replay; a new acquisition requires a new Idempotency-Key. Old mxnc1 cursors

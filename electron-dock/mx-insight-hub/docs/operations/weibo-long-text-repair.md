@@ -1,5 +1,7 @@
 # 微博全文修复与 LCY-delta 权限迁移
 
+后续增量：微博 raw 搜索与全文补取已在 Hub 实现，见[Hub raw 搜索的平台迁移](hub-raw-search-routing.md)。下文记录 migration 131 的原始单条修复范围；131 不修改，新增保护由 migration 132 执行。
+
 用户明确要求在下一次服务器 deploy 的 migrate 阶段完成。新增 `migrations/131_weibo_long_text_and_lcy_grants.sql`，由现有 `scripts/manage.sh deploy` 的 migrate-before-rollout 流程执行；不需要 SSH 配合、手工回写或再次付费。本文不代表生产已经部署。
 
 ## 问题与验证证据
