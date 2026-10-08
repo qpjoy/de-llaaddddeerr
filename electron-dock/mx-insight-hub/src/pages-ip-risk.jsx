@@ -78,9 +78,12 @@ function Portrait({ row, onCopy }) {
 }
 
 export function IpRiskPage({ token, session, onUnauthorized, theme }) {
-  const [tab, setTab] = useState('product'), [docsVisited, setDocsVisited] = useState(false)
+  const admin = session?.kind === 'admin-token'
+  const [selectedTab, setTab] = useState('product'), [docsVisited, setDocsVisited] = useState(false)
+  const tab = !admin && selectedTab === 'channels' ? 'product' : selectedTab
   const [key] = useDemoApiKey(), access = useDemoAccessSnapshot(), expiresAt = useDemoCredentialExpiry()
-  const [channelChoice,setChannelChoice] = useState('latest')
+  const [requestedChannel,setChannelChoice] = useState('latest')
+  const channelChoice = admin ? requestedChannel : 'latest'
   const defaultChannel = access && !access.capabilities?.includes('ip.risk.query.v2') && access.capabilities?.includes('ip.risk.query') ? 'legacy-v1' : 'baidu-v2'
   const selectedChannels = channelChoice === 'both' ? ['baidu-v2','legacy-v1'] : [channelChoice === 'latest' ? defaultChannel : channelChoice]
   const product = access?.capabilities?.includes('ip.risk.subscription.query') && channelChoice === 'latest'
@@ -89,7 +92,6 @@ export function IpRiskPage({ token, session, onUnauthorized, theme }) {
   const accessIssues = product ? ipRiskAccessIssues(access,'ip.risk.subscription.query') : [...new Map(selectedChannels.flatMap(channel => ipRiskAccessIssues(access,channel === 'baidu-v2' ? 'ip.risk.query.v2' : 'ip.risk.query')).map(issue=>[issue.scope,issue])).values()]
   const runtimeBlocked = product ? access?.operations?.['ip.risk.subscription.query']?.ready === false : selectedChannels.some(c => access?.operations?.[c === 'baidu-v2' ? 'ip.risk.query.v2' : 'ip.risk.query']?.ready === false)
   const allowed = !!key && !accessIssues.length && !runtimeBlocked
-  const admin = session?.kind === 'admin-token'
   const [batch, setBatch] = useState(false), [singleInput, setSingleInput] = useState(''), [batchInput, setBatchInput] = useState('')
   const [busy, setBusy] = useState(false), lock = useRef(false), portraitRef = useRef(null)
   const [result, setResult] = useState(null), [failure, setFailure] = useState(null)
@@ -153,7 +155,7 @@ export function IpRiskPage({ token, session, onUnauthorized, theme }) {
   const composer = debug => <form className={debug ? 'mih-ip-debug-form' : 'qp-panel mih-ip-composer'} onSubmit={send} aria-label={debug ? 'IP 风险接口参数' : 'IP 风险查询'}>
     <div className="mih-ip-composer-top"><div className="mih-ip-segment" aria-label="查询方式">{[[false, '单个查询'], [true, '批量查询']].map(([value, label]) => <button key={label} type="button" aria-pressed={batch === value} disabled={busy} onClick={() => switchMode(value)}>{label}</button>)}</div><span>{batch ? '每批 1–100 项 · 保留输入顺序' : 'IPv4 风险查询'}</span></div>
     {debug ? <label htmlFor="ip-debug-input" className="mih-ip-input-label"><code>{batch ? 'ips' : 'ip'}</code> · {batch ? 'string[]' : 'string'} · 必填</label> : null}
-    {!product || admin ? <DropdownField label="查询渠道" value={channelChoice} disabled={busy} options={[{value:'latest',label:access?.capabilities?.includes('ip.risk.subscription.query')?'产品默认渠道（管理员配置）':'最新已开通渠道（优先 v2）'},{value:'baidu-v2',label:'百度 v2 · 订阅服务'},{value:'legacy-v1',label:'原渠道 v1 · 原套餐计费'},{value:'both',label:'两渠道对照 · 分别计量'}]} onChange={setChannelChoice}/> : null}
+    {admin ? <DropdownField label="查询渠道" value={channelChoice} disabled={busy} options={[{value:'latest',label:access?.capabilities?.includes('ip.risk.subscription.query')?'产品默认渠道（管理员配置）':'最新已开通渠道（优先 v2）'},{value:'baidu-v2',label:'百度 v2 · 订阅服务'},{value:'legacy-v1',label:'原渠道 v1 · 原套餐计费'},{value:'both',label:'两渠道对照 · 分别计量'}]} onChange={setChannelChoice}/> : null}
     <div className={`mih-ip-input-row${batch ? ' is-batch' : ''}`}>
       {batch ? <textarea id={debug ? 'ip-debug-input' : 'ip-product-input'} aria-label="批量 IPv4 地址" aria-describedby={debug ? 'ip-debug-validation' : 'ip-product-validation'} aria-invalid={!!input.trim() && !parsed.valid} className="qp-input" placeholder={'每行一个 IPv4，也可使用空格或逗号分隔\n例如：1.1.1.1\n8.8.8.8'} rows={4} maxLength={10000} value={input} disabled={busy} onChange={event => setBatchInput(event.target.value)} />
         : <div className="mih-ip-search-input"><MagnifyingGlass size={21} aria-hidden="true" /><input id={debug ? 'ip-debug-input' : 'ip-product-input'} aria-label="单个 IPv4 地址" aria-describedby={debug ? 'ip-debug-validation' : 'ip-product-validation'} aria-invalid={!!input.trim() && !parsed.valid} placeholder="输入 IPv4 地址，例如 1.1.1.1" autoComplete="off" spellCheck={false} className="qp-input" maxLength={100} value={input} disabled={busy} onChange={event => setSingleInput(event.target.value)} /></div>}
@@ -163,13 +165,13 @@ export function IpRiskPage({ token, session, onUnauthorized, theme }) {
       {input.trim() && parsed.message ? <span className="is-warning">{parsed.message}</span> : batch && parsed.values.length ? <span>{parsed.values.length} 项有效 IPv4{parsed.duplicateCount ? ` · 含 ${parsed.duplicateCount} 个重复项，重复项会${subscribed?'独立计入调用次数':'独立查询与计费'}。` : ''}</span> : <span>支持单个与批量查询；不会自动补查或重试。</span>}
       {batch && parsed.duplicateCount ? <button type="button" disabled={busy} className="qp-button qp-button--ghost qp-button--sm" onClick={() => setBatchInput([...new Set(parsed.values)].join('\n'))}>去除重复项</button> : null}
     </div>
-    <p className="mih-ip-cost"><Info size={15} aria-hidden="true" />{product ? '本次查询包含在空间订阅内。' : v2 ? `百度 v2 已纳入年度订阅，本期成功调用计入年度上限。${selectedChannels.includes('legacy-v1') ? '本次选择的 v1 对照另按原套餐计费。' : ''}` : '按当前账户套餐计费 · 每次点击都是新查询 · 成功交付的 IP（含暂无数据）逐项计费'}</p>
-    {tooManyItems ? <p role="status">每批最多 100 个 IP × 渠道组合；双渠道对照最多输入 50 个 IP。</p> : null}
+    <p className="mih-ip-cost"><Info size={15} aria-hidden="true" />{product ? '本次查询包含在空间订阅内。' : v2 ? admin ? `百度 v2 已纳入年度订阅，本期成功调用计入年度上限。${selectedChannels.includes('legacy-v1') ? '本次选择的 v1 对照另按原套餐计费。' : ''}` : '本次查询包含在年度订阅内，本期成功调用计入年度上限。' : '按当前账户套餐计费 · 每次点击都是新查询 · 成功交付的 IP（含暂无数据）逐项计费'}</p>
+    {tooManyItems ? <p role="status">{admin ? '每批最多 100 个 IP × 渠道组合；双渠道对照最多输入 50 个 IP。' : '每批最多 100 个 IP。'}</p> : null}
     {blocked ? <p role="status" className="mih-ip-blocked">输入包含结果待核对的 IP。请先通过请求编号核对，避免重复提交。当前页面不会再次派发这些 IP。</p> : null}
   </form>
   return <div className="mih-page mih-product-workbench mih-ip-page">
     <header className="mih-page-header"><div><h1>IP 风险画像</h1><p>查看 IPv4 的归属地、应用场景和风险线索；用分类标签快速定位需要关注的信号。</p></div></header>
-    <nav className="mih-source-section-tabs mih-ip-tabs" aria-label="IP 风险画像视图">{[['product', '风险画像'], ['debug', '接口调用'], ['docs', '接口文档'], ['channels', '渠道与接入']].map(([id, label]) => <button key={id} type="button" aria-pressed={tab === id} onClick={() => { setTab(id); if (id === 'docs') setDocsVisited(true) }}>{label}</button>)}</nav>
+    <nav className="mih-source-section-tabs mih-ip-tabs" aria-label="IP 风险画像视图">{[['product', '风险画像'], ['debug', '接口调用'], ['docs', '接口文档'], ...(admin ? [['channels', '渠道与接入']] : [])].map(([id, label]) => <button key={id} type="button" aria-pressed={tab === id} onClick={() => { setTab(id); if (id === 'docs') setDocsVisited(true) }}>{label}</button>)}</nav>
     {!allowed && ['product', 'debug'].includes(tab) ? <div role="status" className="mih-inline-warning mih-ip-access"><div>{!key ? <p>请选择已授权的 Hub Live Key 后查询。</p> : null}{accessIssues.map(issue => <p key={issue.scope}>{issue.message}</p>)}{runtimeBlocked ? <p>查询服务尚未就绪。已开通权限无需重复授予；{admin ? <a href={`#/external-platforms?provider=${v2 ? 'baidu-ip' : 'ipsearch'}`}>检查服务运行配置 ↗</a> : '请联系管理员恢复服务。'}</p> : null}<DemoCredentialRecheck /></div></div> : null}
     <div hidden={tab !== 'product'} className="mih-ip-product">
       <section className="qp-panel mih-ip-subscription"><div><strong>IP 风险画像 · 订阅服务</strong><p>{subscription ? `本期已调用 ${subscription.used.toLocaleString()} / ${subscription.quota.toLocaleString()} 次 · 有效期还剩 ${Math.max(0,Math.ceil((new Date(subscription.endsAt).getTime()-Date.now())/86400000))} 天 · 到期 ${riskTime(subscription.endsAt)}` : offer ? `¥${(offer.amountMinor/100).toLocaleString()} / ${offer.months} 个月 · 最多 ${offer.quota.toLocaleString()} 次 · 年度订阅` : '前往商城查看在售套餐、价格与服务状态'}</p></div><a className="qp-button qp-button--primary" href="#/store?view=purchases">查看权益 / 续订</a><a className="qp-button qp-button--outline" href="#/store">前往商城</a></section>
@@ -190,12 +192,12 @@ export function IpRiskPage({ token, session, onUnauthorized, theme }) {
       <section aria-label="JSON 响应"><div className="mih-ip-section-caption"><h3>JSON 响应</h3>{result ? <button type="button" className="qp-button qp-button--ghost qp-button--sm" onClick={() => setTab('product')}>查看可视化画像 →</button> : null}</div>{failure ? <p role="alert">{IP_RISK_STATES[ipRiskFailureRows(failure.error, failure.request, 'error', '')[0].status].hint} <code>{failure.error.code || 'transport_error'}</code></p> : null}{result ? <><p>请求 {result.payload.requestId || result.payload.batchId}{result.historical ? ' · 已保存的历史响应，未重新查询' : <> · {result.elapsedMs} ms{result.fingerprint !== fingerprint ? ' · 当前参数已修改，以下为上一次提交的响应' : ''}</>}</p><pre className="mih-api-response">{JSON.stringify(result.payload, null, 2)}</pre></> : <p>主动发送后展示真实响应；批次返回 200 仍须逐项检查状态。</p>}</section>
     </div></section><AdminExecutionEvidence requestId={active?.requestId} /></div>
     <section hidden={tab !== 'docs'} className="mih-ip-docs" aria-label="IP 风险接口文档">{docsVisited ? <DocsPage embedded token={token} query={product ? new URLSearchParams({path:'/docs/ip-risk-subscription'}) : v2 ? new URLSearchParams({path:'/docs/ip-risk-v2'}) : DOC_QUERY} onUnauthorized={onUnauthorized} theme={theme} /> : null}</section>
-    <section hidden={tab !== 'channels'} className="qp-panel mih-ip-channels" aria-label="IP 风险渠道与接入"><header><h2>{admin ? '渠道与供应商' : '服务与接入'}</h2><p>一个产品入口，统一的 IPv4 画像字段与逐项查询状态。</p></header>
+    {admin ? <section hidden={tab !== 'channels'} className="qp-panel mih-ip-channels" aria-label="IP 风险渠道与接入"><header><h2>{admin ? '渠道与供应商' : '服务与接入'}</h2><p>一个产品入口，统一的 IPv4 画像字段与逐项查询状态。</p></header>
       <div className="mih-ip-channel-row"><div><strong>IP 风险画像 · 标准查询</strong><p>单个 / 批量（1–100 项） · IPv4 · 代理识别与风险标签</p></div><span className="mih-ip-badge is-neutral">{!key ? '未选择身份' : accessIssues.length ? '当前 Key 未授权' : runtimeBlocked ? '已授权 · 服务未就绪' : access ? '已授权 · 配置就绪' : '发送时校验权限'}</span></div>
       <p>配置就绪不代表实时连通性；查询是否成功以本次返回为准。无结果或失败不会自动改换渠道。</p>
       {admin ? <><IpRiskDeliverySettings token={token}/><div className="qp-table-wrap"><table className="qp-table mih-table"><thead><tr><th>供应商 / 渠道</th><th>接入状态</th><th>出口与代理</th><th>配置</th></tr></thead><tbody><tr><td><strong>ipsearch</strong><small>原渠道 v1 · 保留兼容</small></td><td>接口已实现，运行状态按当前配置</td><td>现有服务端 fetch 出口<br /><small>尚未接入独立 System Proxy 绑定</small></td><td><a href="#/external-platforms?provider=ipsearch">凭据与调用证据 ↗</a></td></tr><tr><td><strong>百度智能云</strong><small>IP 风险画像 v2 · 网页渠道</small></td><td>已接入 · 受共享限流和冷却状态约束</td><td>固定百度 HTTPS 目标<br /><small>服务端出口，未绑定独立代理</small></td><td><a href="#/external-platforms?provider=baidu-ip">开关、限流与调用证据 ↗</a></td></tr></tbody></table></div><p>启信宝（启信慧眼）属于企业数据产品，不是当前 IP 风险画像来源。百度 Web Search 与百度 IP 风险是不同服务渠道，凭据、接口、价格和出口不应互相套用。</p><div className="mih-ip-channel-design"><h3>渠道配置边界</h3><p>产品 → 渠道 → 版本化适配器；每个渠道独立管理凭据、运行开关、采购证据与代理出口。复用 System Proxy 的出口目录，绑定按渠道隔离；不调整全局路由或用户网络。</p><p>空间订阅使用上方保存的交付渠道；切换仅影响新查询。原始渠道调试仍需分别授权，空结果、失败或结果未知均不自动切换供应商。</p><a href="#/agent/proxies">查看 System Proxy ↗</a></div></> : null}
       <div className="mih-ip-channel-design"><h3>接入现有应用</h3><code>POST {product ? `${SINGLE_PATH}/service` : v2 ? `${SINGLE_PATH}/v2` : SINGLE_PATH}</code><p>批量使用相应路径的 <code>/batch</code>。{product?'使用空间内获授权的 Hub Live Key，网页与 API 共用本期调用次数。':'使用已授权 ip_risk 与对应渠道能力的 Hub Live Key。百度 v2 还需有效订阅且未达到调用上限。'}</p><p>每次提交都是新查询；结果待核对时请保留请求或批次编号。{product?'接口地址不随服务渠道调整而改变。':'计费、限额与授权沿用当前账户配置。'}</p><button type="button" className="qp-button qp-button--outline" onClick={() => { setDocsVisited(true); setTab('docs') }}>查看完整接口文档 →</button></div>
-    </section>
+    </section> : null}
     {notice ? <p className="mih-ip-notice" role="status">{notice}</p> : null}
   </div>
 }
