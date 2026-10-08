@@ -51,7 +51,7 @@ function legacy() {
 }
 
 async function harness({ platform = 'weibo', detail = 'success', enabled = true, detailEnabled = true,
-  hasMore = false, malformed = false, searchFails = false, rows = [preview], instagramData, weiboData } = {}) {
+  hasMore = false, malformed = false, searchFails = false, rows = [preview], instagramData, weiboData, weiboDetailData } = {}) {
   const store = new MemoryStore(), calls = [], historical = []
   const oldPayload = legacy()
   const oldDataPayload = oldDataSearch(platform)
@@ -84,7 +84,7 @@ async function harness({ platform = 'weibo', detail = 'success', enabled = true,
     if (calls.at(-1).pathname.endsWith('fetch_post_detail')) {
       if (detail === 'unknown') throw new Error('connection lost after dispatch')
       if (detail === 'rejected') return Response.json({ code: 400 }, { status: 400 })
-      return Response.json({ code: 200, request_id: 'detail-receipt', data: {
+      return Response.json({ code: 200, request_id: 'detail-receipt', data: weiboDetailData || {
         idstr: detail === 'wrong-id' ? '999999' : POST_ID,
         user: { idstr: AUTHOR, screen_name: '作者' }, isLongText: true,
         text: PREVIEW, text_raw: FULL, longText: { content: FULL } } })
@@ -320,6 +320,32 @@ test('Weibo empty pagination still runs the governed long-text enrichment', asyn
   assert.equal(result.body.data.pageInfo.hasMore, true)
   assert.equal(h.calls.length, 2)
   assert.equal(h.calls[1].searchParams.get('is_get_long_text'), 'true')
+})
+
+test('both search contracts deliver format-equivalent full text as ok and preserve evidence and replay', async () => {
+  const short = 'whzy超话这是正文开头，后续正文包含表情 展开c'
+  const full = '#whzy[超话]#这是正文开头，[笑cry]后续正文包含表情[打call]。这里是完整后文。'
+  const detail = { idstr: POST_ID, user: { idstr: AUTHOR }, isLongText: true,
+    text: 'whzy超话这是正文开头，后续正文包含表情。', text_raw: full, longText: { content: full } }
+  for (const route of ['raw', 'data']) {
+    const h = await harness({ rows: [{ ...preview, content: short }], weiboDetailData: detail })
+    const invoke = route === 'raw' ? h.invoke : h.invokeData
+    const result = await invoke()
+    assert.equal(result.body.data.status, 'ok')
+    assert.deepEqual(result.body.data.warnings || [], [])
+    const item = route === 'raw' ? JSON.parse(result.body.data.raw_data)[0] : result.body.data.items[0]
+    assert.equal(item.text, full)
+    assert.equal(item.title, route === 'raw' ? '' : null)
+    assert.equal(h.calls.length, 2)
+    assert.equal(h.historical.length, 0)
+    assert.equal(h.platformStore.ingestJobs[0].payload.records[0].body, full)
+    assert.equal(h.platformStore.ingestJobs[0].payload.records[0].extensions.rawSearch.bodyCompleteness, 'full_text')
+    const archives = [...h.platformStore.restrictedResponseArchives.values()]
+    assert.equal(archives[0].parsedPayload.data.parsed_data.results[0].content, short)
+    assert.deepEqual(archives[1].parsedPayload.data, detail)
+    assert.deepEqual((await invoke()).body, result.body)
+    assert.equal(h.calls.length, 2)
+  }
 })
 
 test('Weibo contract failures preserve a bounded cause and still suppress a second paid dispatch', async () => {

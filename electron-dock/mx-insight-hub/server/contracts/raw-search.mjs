@@ -89,6 +89,18 @@ export function weiboText(value) {
 }
 export const isWeiboPreview = value => /(?:展开(?:全文)?\s*[cＣ]?|…|\.{3})[\s\u200b\ufeff]*$/iu.test(weiboText(value))
 
+// Comparison only: never use this representation as delivered/stored body text.
+// Keep the observed emotion labels bounded; arbitrary bracketed prose is content.
+const comparableWeiboText = value => value.replace(/#([^#\[\]\r\n]+)\[超话\]#/gu, '$1超话')
+  .replace(/\ue627|\[(?:笑cry|打call)\]/gu, '').replace(/[\s\u200b\ufeff]/gu, '')
+export function weiboTextPrefixMatches(preview, full) {
+  const prefix = preview.replace(/(?:展开(?:全文)?\s*[cＣ]?|…|\.{3})[\s\u200b\ufeff]*$/iu, '').trim()
+  const strict = prefix.replace(/[\s\u200b\ufeff]/gu, '')
+  if (strict && full.replace(/[\s\u200b\ufeff]/gu, '').startsWith(strict)) return true
+  const comparablePrefix = comparableWeiboText(prefix)
+  return comparablePrefix.length > 0 && comparableWeiboText(full).startsWith(comparablePrefix)
+}
+
 function publishedAt(value, capturedAt) {
   if (!value) return null
   const now = new Date(capturedAt)
@@ -151,10 +163,9 @@ export function mergeWeiboDetail(row, result) {
   const raw = result.publicBody?.data
   const detail = weiboRow(raw, result.publicBody.meta.capturedAt)
   const full = weiboText(raw?.longText?.content || raw?.text_raw)
-  const prefix = row.text.replace(/(?:展开(?:全文)?\s*[cＣ]?|…|\.{3})[\s\u200b\ufeff]*$/iu, '').trim().replace(/[\s\u200b\ufeff]/gu, '')
   if (detail.content_id !== row.content_id || (row.author_id && detail.author_id !== row.author_id)
     || !full || full.length <= row.text.length || isWeiboPreview(full)
-    || !full.replace(/[\s\u200b\ufeff]/gu, '').startsWith(prefix)) return false
+    || !weiboTextPrefixMatches(row.text, full)) return false
   row.title = ''
   row.text = row.content = row.full_text = full
   row.body_completeness = 'full_text'

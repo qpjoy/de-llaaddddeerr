@@ -53,14 +53,15 @@ test('missing, oversized, corrupt, non-JSON and unsuccessful archives cannot pro
   assert.equal(inspectWeiboFullText(row, archive(null, 429)).state, 'not_success_envelope')
 })
 
-test('opt-in text diff distinguishes display markup from raw text without loosening merge rules', () => {
+test('opt-in text diff keeps the original mismatch visible while reporting the deployed comparison rule', () => {
   const preview = weiboRow({ ...post, content: '话题超话内容开头 展开c' }, capturedAt)
   const source = archive({ ...detail, longText: { content: '#话题[超话]#内容开头以及后续完整正文' },
     text: '<a href="https://example.test/private-token">话题超话</a>内容开头以及后续完整正文' })
   const ordinary = inspectWeiboFullText(preview, source)
   assert.equal(ordinary.textComparison, undefined)
   const comparison = inspectWeiboFullText(preview, source, { textDiff: true })
-  assert.ok(comparison.reasons.includes('prefix_mismatch'))
+  assert.equal(comparison.state, 'current_merge_accepts')
+  assert.deepEqual(comparison.prefixComparison, { policy: 'weibo_display_v1', matches: true })
   assert.equal(comparison.textComparison.fullText.prefixMatches, false)
   assert.equal(comparison.textComparison.fullText.previewCodePoint, 'U+E627')
   assert.equal(comparison.textComparison.fullText.detailCodePoint, 'U+0023')

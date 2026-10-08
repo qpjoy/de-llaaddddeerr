@@ -120,6 +120,47 @@ test('migration 133 extends verified full-text protection to data/search while a
   }
 })
 
+test('migration 134 preserves verified text against display-equivalent previews without blocking edits or deletions', {
+  skip: pgliteModule ? false : 'Set MX_INSIGHT_TEST_PGLITE_MODULE to a local @electric-sql/pglite module',
+}, async t => {
+  const { PGlite } = await import(pathToFileURL(pgliteModule).href)
+  const db = new PGlite()
+  t.after(() => db.close())
+  await db.exec(await migration('005_ingest_core_outbox.sql'))
+  await db.exec(sql.slice(0, sql.indexOf('-- Installed before')))
+  for (const name of ['132_hub_raw_weibo_full_text_guard.sql', '133_hub_data_search_weibo_full_text_guard.sql',
+    '134_weibo_display_full_text_guard.sql']) await db.exec(`BEGIN; ${await migration(name)} COMMIT;`)
+  await db.exec(`BEGIN; ${await migration('134_weibo_display_full_text_guard.sql')} COMMIT;`)
+  const preview = '测试超话' + '这是一段足够长的相同正文用于确认显示格式差异不能让已验证全文退回搜索摘要。'
+  const text = '#测试[超话]#[笑cry]' + preview.slice(5) + '[打call]这是完整后文。'
+  for (const dataset of ['night-all.search.v1', 'night-all.compat.v1']) {
+    await db.query(`INSERT INTO core.canonical_records
+      (id,dataset_id,platform,object_type,external_id,schema_version,payload_sha256,body,title,author_external_id,extensions)
+      VALUES($1,$2,'weibo','post','5350067051698112','external.v1',$3,$4,NULL,'2471317784',$5)`,
+    [recordId, dataset, 'a'.repeat(64), text, { rawSearch: { version: 'mx-insight-hub.raw-search.v1', bodyCompleteness: 'full_text' } }])
+    for (const marker of [' 展开c', '…']) {
+      const kept = (await db.query(`UPDATE core.canonical_records SET body=$2,payload_sha256=$3,
+        extensions=jsonb_set(extensions,'{rawSearch,bodyCompleteness}','"provider_preview"'),
+        current_revision=current_revision+1 WHERE id=$1 RETURNING *`, [recordId, preview + marker, 'b'.repeat(64)])).rows[0]
+      assert.equal(kept.body, text)
+      assert.equal(kept.current_revision, 1)
+      assert.equal(kept.payload_sha256, 'a'.repeat(64))
+      assert.equal(kept.extensions.rawSearch.bodyCompleteness, 'full_text')
+    }
+    const edited = (await db.query(`UPDATE core.canonical_records SET body='不同的编辑正文' WHERE id=$1 RETURNING body`, [recordId])).rows[0]
+    assert.equal(edited.body, '不同的编辑正文')
+    await db.query('UPDATE core.canonical_records SET body=$2 WHERE id=$1', [recordId, text])
+    const deleted = (await db.query(`UPDATE core.canonical_records SET body=$2,deleted_at=now(),
+      extensions=jsonb_set(extensions,'{rawSearch,bodyCompleteness}','"provider_preview"') WHERE id=$1 RETURNING body`, [recordId, preview + '…'])).rows[0]
+    assert.equal(deleted.body, preview + '…')
+    await db.query('DELETE FROM core.canonical_records WHERE id=$1', [recordId])
+  }
+  for (const [value, expected] of [['测试超话[笑cry]正文[打call]', '测试超话正文'],
+    ['#测试[超话]#[笑cry]正文', '测试超话正文'], ['[未知的实质内容]正文', '[未知的实质内容]正文']]) {
+    assert.equal((await db.query('SELECT core.weibo_display_comparison_text($1) AS text', [value])).rows[0].text, expected)
+  }
+})
+
 test('PostgreSQL migration repairs once, preserves sibling keys/history, protects against old workers and rolls back atomically', {
   skip: pgliteModule ? false : 'Set MX_INSIGHT_TEST_PGLITE_MODULE to a local @electric-sql/pglite module',
 }, async t => {

@@ -4,6 +4,7 @@ import pg from 'pg'
 import { weiboRow, weiboText, isWeiboPreview, mergeWeiboDetail,
   WEIBO_SEARCH_KEY, WEIBO_DETAIL_KEY } from '../contracts/raw-search.mjs'
 import { NATIVE_FORWARDING_VERSION } from '../contracts/native-forwarding.mjs'
+import * as weiboContracts from '../contracts/raw-search.mjs'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const SEARCH = `native.${WEIBO_SEARCH_KEY}`, DETAIL = `native.${WEIBO_DETAIL_KEY}`
@@ -62,6 +63,11 @@ export function inspectWeiboFullText(row, archive, { textDiff = false } = {}) {
   catch { return { state: 'current_merge_rejects', reasons: ['invalid_detail_identity'], ...facts } }
   const prefix = row.text.replace(/(?:展开(?:全文)?\s*[cＣ]?|…|\.{3})[\s\u200b\ufeff]*$/iu, '')
     .trim().replace(/[\s\u200b\ufeff]/gu, '')
+  // This script can also be piped into an older Pod before the API is deployed.
+  const prefixMatches = weiboContracts.weiboTextPrefixMatches
+    ? weiboContracts.weiboTextPrefixMatches(row.text, full)
+    : full.replace(/[\s\u200b\ufeff]/gu, '').startsWith(prefix)
+  facts.prefixComparison = { policy: weiboContracts.weiboTextPrefixMatches ? 'weibo_display_v1' : 'strict', matches: prefixMatches }
   if (textDiff) facts.textComparison = {
     fullText: compareText(prefix, raw?.longText?.content || raw?.text_raw),
     renderedText: compareText(prefix, raw?.text),
@@ -73,7 +79,7 @@ export function inspectWeiboFullText(row, archive, { textDiff = false } = {}) {
   else {
     if (full.length <= row.text.length) reasons.push('full_text_not_longer')
     if (isWeiboPreview(full)) reasons.push('full_text_still_preview')
-    if (!full.replace(/[\s\u200b\ufeff]/gu, '').startsWith(prefix)) reasons.push('prefix_mismatch')
+    if (!prefixMatches) reasons.push('prefix_mismatch')
   }
   const accepted = mergeWeiboDetail(structuredClone(row), { publicBody: { data: raw, meta: { capturedAt: decoded.capturedAt } } })
   return { state: accepted ? 'current_merge_accepts' : 'current_merge_rejects',

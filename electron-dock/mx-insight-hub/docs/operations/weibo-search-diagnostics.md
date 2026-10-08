@@ -177,7 +177,23 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin \
 上述请求的服务器报告已确认：两次详情 HTTP/业务码均为 200，ID 和作者校验通过，
 帖子 `5350067051698112` 从 154 字摘要取得 240 字正文，帖子 `5349641420013762`
 从 46 字摘要取得 88 字正文，均无末尾截断标记；两条唯一拒绝原因都是 `prefix_mismatch`。
-尚不能仅凭长度与字段类型确定格式差异或正文变化，也不据此解除前缀校验。
+随后 `--text-diff` 的归档报告确认：
+
+- 第一条搜索前缀为 `whzy超话`，全文为 `#whzy[超话]#`，详情展示文本为 `whzy超话`。
+- 第二条搜索省略了 `[笑cry]`、`[打call]` 表情标签；详情 `text` 的正文前缀与搜索一致，
+  `text_raw` 在相同正文中保留表情标签，触发了旧的逐字前缀比较。
+
+Hub 新比较规则保留严格匹配，并增加以上已验证表示的等价比较：超话标记统一为“名称超话”，
+忽略 U+E627 展示图标，以及 `[笑cry]` / `[打call]` 这两个已确认的表情标签。
+规则只用于比较，不用于改写正文。返回及入库仍保留原完整话题和表情。
+未知方括号内容不会被泛化删除；其他未验证差异仍可能保持 partial。
+帖子/作者匹配、更长全文、无末尾截断标记、非空比较前缀等检查继续生效，
+不能仅凭 `text` 展示字段相同就接受一份实质不同的 `text_raw`。
+
+migration 134 扩展已有 Hub 已验证全文触发器：带 `provider_preview` 标记、至少 40 个比较字符、
+正文相同但显示格式不同的短文（包括省略号摘要）也不能覆盖已验证全文。
+仍保留原严格保护分支及 dataset、作者、删除等边界；真正不同的编辑可以更新。
+没有自动历史回填、旧请求重写、供应商调用或账单变更。
 
 同步更新后的诊断脚本，在上述命令的请求 ID 后追加 `--text-diff`，即可只读比较已有归档。
 这是显式的正文片段输出选项：分别比较全文字段和详情 `text` 展示字段，每组最多输出不一致处前 16、
@@ -186,5 +202,19 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin \
 `textComparison.renderedText.prefixMatches=true` 表示当前摘要与详情展示文本相符，
 可据此调查纯文本格式转换的差异；它不会自动改变线上合并规则或修复历史数据。
 
+部署新 Hub 镜像并执行 migration 134 后，重跑同一只读命令验证归档：
+`prefixComparison.policy=weibo_display_v1` 表示已经加载新比较规则，
+`state=current_merge_accepts` 表示这份详情现在可被采用。
+`textComparison` 仍显示原始逐字差异；顶部 `responseStatus=partial` 是历史交付，保持不变。
+若在旧镜像中通过 stdin 运行新诊断脚本，则会显示 `policy=strict`，不要求新导出才能加载。
+
+```bash
+bash scripts/manage.sh ops internal-production deploy
+```
+
+诊断及测试均不新增付费请求。新实际采集使用新规则；原幂等键在有效重放期仍返回历史 partial。
+
 `tests/server/weibo-full-text-diagnostics.test.mjs` 覆盖校验拒绝原因、归档完整性与脱敏、
 stdin 模块加载、乱序详情的指纹关联，并在独立 PGlite 中验证只读查询。
+`tests/server/weibo-text-comparison.test.mjs` 使用报告中的前缀和明确标注的合成后文，
+验证格式等价、正文原样保留与反例；完整生产正文未获取，不把合成后文当作生产响应。

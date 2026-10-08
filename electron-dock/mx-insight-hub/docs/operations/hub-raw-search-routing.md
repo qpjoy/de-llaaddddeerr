@@ -23,6 +23,8 @@ Hub 新分页使用绑定 consumer、Key、平台、查询与页大小的 `mxraw
 
 搜索结果包含“展开c”“展开全文”等末尾标记或明确的长文标记时，Hub 调用已注册详情接口，固定 `is_get_long_text="true"`。只使用 ID、作者（搜索已提供时）和正文前缀一致、严格更长且不再带截断标记的全文，优先 `longText.content`，其次 `text_raw`。更新 `text/content/full_text`，普通帖子标题保持空，不再把正文复制为标题。保留搜索获得的指标、时间和媒体。
 
+正文比较兼容已从归档确认的显示差异：`名称超话` / `#名称[超话]#`，以及搜索省略的 `[笑cry]`、`[打call]` 标签。只在比较中统一，完整正文原样保留话题和表情。未知括号内容和实质正文差异仍拒绝；详情展示文本匹配本身不代替全文匹配。归档诊断显示 `prefixComparison.policy=weibo_display_v1` 时，使用的是这套规则。
+
 `includeDetails=true` 可请求详情；`disableAutoDetails=true` 保留原有禁止自动补取的语义。补取最多 `maxEnrichItems` 条，默认 20，同时受请求租约、供应商操作状态、限流和采购预算约束。每个详情请求都有独立采购成本与完整响应证据，但共用原搜索的一个客户用量/钱包身份。不会因为失败或响应未知而自动重试付费请求。
 
 未补齐的摘要原文保留，并返回 `body_completeness=provider_preview`、`data.status=partial`、`WEIBO_FULL_TEXT_INCOMPLETE` 和不完整数量，不把删除“展开”当成全文修复。
@@ -54,6 +56,8 @@ Hub 新分页使用绑定 consumer、Key、平台、查询与页大小的 `mxraw
 ## 部署与验证
 
 部署 Hub API 和 ingest worker 即可，Delta、Luopan、Night-All 不需要同步发布。按现有 migrate 流程顺序执行 migration 132、133：前者保护 raw 的 `night-all.compat.v1`，后者扩展到 data-search 的 `night-all.search.v1`。只保护带有 Hub 全文验证标记的微博，阻止后来的同前缀“展开”短文覆盖全文；保留原始证据和观察，允许真正的内容编辑与删除。不回填旧记录，不改 migration 131，也不更新下游数据库中已经保存的摘要。
+
+后续 migration 134 将这项保护扩展到带 `provider_preview` 标记且满足长度与同前缀条件的上述格式等价摘要及省略号摘要。仍只保护已由 Hub 验证的全文，无历史回填或旧幂等响应改写。需要正常 deploy 执行迁移并重建镜像；可用已保存响应离线验证新合并规则，无需再次付费。
 
 本次未改 Launcher/MX-H2I 登录、联网或支付服务。最初的路由迁移未新增付费请求；后续空分页修复经用户授权新增一次微博搜索验证，其原始响应只用于离线重放。测试使用模拟供应商、原先已获授权保存的真实详情响应，以及独立 PGlite 数据库执行迁移。覆盖别名重放、旧响应重放、全文匹配、补取失败、采购成本、空标题、15 页与跨 Key 游标边界、原始证据和全文保护。
 
