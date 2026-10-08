@@ -9,7 +9,9 @@ import tikPrices from '../data/tikhub-reference-prices.json' with { type: 'json'
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const native = new Map(NATIVE_FORWARDING_ENDPOINTS.map(row => [row.operation, row]))
 const routes = implementedRoutes()
-export const PROVISIONING_OPERATIONS = Object.entries(EXTERNAL_PLATFORM_OPERATION_CATALOG).flatMap(([provider, definitions]) => definitions.map(definition => {
+// Baidu IP v2 has its own subscription/channel policy, not per-call procurement
+// or generic grant/price provisioning. Keep it in the source/operation inventory.
+export const PROVISIONING_OPERATIONS = Object.entries(EXTERNAL_PLATFORM_OPERATION_CATALOG).filter(([provider]) => provider !== 'baidu-ip').flatMap(([provider, definitions]) => definitions.map(definition => {
   const operation = definition.operationKey
   const endpoint = native.get(operation)
   const matches = routes.filter(row => row.provider === provider && row.operation === operation)

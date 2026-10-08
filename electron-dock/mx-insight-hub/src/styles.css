@@ -12832,10 +12832,25 @@ button.mih-catalog-status {
 .mih-external-budget--spent { color: var(--qp-danger, #9c3a34); font-variant-numeric: tabular-nums; }
 
 /* Jump targets clear the sticky top bar rather than hiding their own heading. */
+.mih-qixin-egress-relay,
 #external-cost,
 #external-operations,
 #external-credential,
 .mih-external-operation-card { scroll-margin-top: 84px; }
+
+.mih-qixin-egress-summary {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--qp-line);
+  border-radius: var(--qp-radius-md);
+  background: var(--qp-bg-2);
+}
+.mih-qixin-egress-summary p { margin: 0; }
+.mih-qixin-egress-summary code { overflow-wrap: anywhere; }
+.mih-qixin-egress-summary button { justify-self: start; }
+.mih-qixin-egress-relay > summary { grid-template-columns: auto minmax(0, 1fr); }
 
 /* Why the state buttons are refusing, said next to them. */
 .mih-external-operation-precondition {

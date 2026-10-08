@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
 import { JustOneUpstreamError } from './justone.mjs'
+import { AppError } from '../core/errors.mjs'
+import { relayRequestUrl } from '../external-platforms/egress-relay.mjs'
 import { ENTERPRISE_VERSION, normalizeEnterpriseRequest, assertEnterpriseCallable } from '../contracts/enterprise.mjs'
 import { canonicalJson } from '../ingest/normalizers.mjs'
 import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
@@ -13,13 +15,6 @@ const accepted = new Set([200, 201, 202, 203, 206])
 // the Domestic edge and the upstream sees a fixed public egress IP. Qixin's
 // Auth 2.0 sign is md5(appkey + timestamp + secret_key) and binds neither Host
 // nor path, so relaying cannot invalidate it. See docs/operations/system-proxy.md.
-const relayUrl = (base, target) => {
-  const relay = new URL(base)
-  relay.pathname = `${relay.pathname.replace(/\/+$/, '')}${target.pathname}`
-  relay.search = target.search
-  return relay.toString()
-}
-
 export class QixinAdapter {
   // resolveEgressBase is awaited per query, not read once at construction, so
   // an operator's save in the admin console applies to the next request.
@@ -40,7 +35,7 @@ export class QixinAdapter {
     // egress setting must not be silently downgraded to a direct call that the
     // upstream then rejects on its allowlist.
     const egressBase = this.resolveEgressBase ? await this.resolveEgressBase() : ''
-    const requestUrl = egressBase ? relayUrl(egressBase, url) : url.toString()
+    const requestUrl = relayRequestUrl(egressBase, url)
     const timestamp = String(this.clock())
     const sign = createHash('md5').update(credential.appkey + timestamp + credential.secret_key).digest('hex')
     const redactors = [credential.appkey, credential.secret_key, sign].map(createCredentialEchoRedactor)
@@ -114,6 +109,12 @@ export class QixinAdapter {
         items: [record], records: [record], responseArchive, restrictedResponseArchive, archiveObjects: [] }
     } catch (error) {
       if (error instanceof JustOneUpstreamError) throw error
+      if (error instanceof AppError && ['proxy_route_unavailable', 'proxy_routes_unreachable'].includes(error.code)) {
+        throw new JustOneUpstreamError('EnterpriseUpstreamError', 'Enterprise egress is unavailable', {
+          outcome: 'rejected', errorCode: error.code, httpStatus: null, businessCode: null,
+          billed: false, affectsCircuit: false,
+        })
+      }
       // Fetch/database error strings may contain the signed URL or headers.
       throw fail('unknown', 'enterprise_outcome_unknown')
     }

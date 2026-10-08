@@ -1,9 +1,101 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createTikHubProxyFetch, createRapidApiProxyFetch, DEFAULT_PROXY_PROBE_POLICY, ExternalPlatformProxyStore, resolveProbePolicy } from '../../server/external-platforms/proxy.mjs'
+import { createTikHubProxyFetch, createRapidApiProxyFetch, createQixinProxyFetch, DEFAULT_PROXY_PROBE_POLICY, ExternalPlatformProxyStore, resolveProbePolicy } from '../../server/external-platforms/proxy.mjs'
+import { QixinAdapter } from '../../server/adapters/qixin.mjs'
 import { readFile } from 'node:fs/promises'
 const url = 'https://api.tikhub.io/api/v1/xiaohongshu/app_v2/search_notes?keyword=test'
 const options = { headers: { authorization: 'Bearer secret-sentinel' } }
+
+test('Qixin system egress preserves a hot-loaded relay and never probes with signed credentials', async () => {
+  const calls = []
+  let relay = 'http://10.88.0.1:8081/u/qixin'
+  const run = createQixinProxyFetch({ route: async () => ({ proxyUrls: [], directFallback: true }) }, {
+    resolveEgressBase: async () => relay,
+    fetchImpl: async (target, init) => { calls.push({ target, init }); return new Response('{}') },
+  })
+  const target = 'https://api.qixin.com/APIService/v2/search/advSearch?keyword=test'
+  await run(target, options)
+  assert.equal(calls[0].target, 'http://10.88.0.1:8081/u/qixin/APIService/v2/search/advSearch?keyword=test')
+  assert.equal(calls[0].init.dispatcher, undefined)
+  relay = ''
+  await run(target, options)
+  assert.equal(calls[1].target, target)
+  assert.equal(calls.length, 2)
+  await assert.rejects(run('https://untrusted.example/APIService', options), /Unexpected provider origin/)
+  assert.equal(calls.length, 2)
+})
+
+test('Qixin explicitly selected proxy uses official origin, sends once and preserves signed response evidence', async () => {
+  const calls = []
+  let relayReads = 0
+  const transport = createQixinProxyFetch({ route: async () => ({ proxyUrls: ['http://proxy:7788'], directFallback: true }) }, {
+    resolveEgressBase: async () => { relayReads++; return 'http://private-relay/u/qixin' },
+    makeAgent: () => ({ name: 'selected', close: async () => {} }),
+    fetchImpl: async (target, init) => {
+      calls.push({ target, init })
+      if (target === 'https://api.qixin.com/') { assert.equal(init.headers, undefined); return new Response('', { status: 401 }) }
+      assert.equal(new URL(target).origin, 'https://api.qixin.com')
+      assert.equal(init.headers.appkey, 'synthetic-qixin-appkey')
+      assert.equal(init.headers['Auth-Version'], '2.0')
+      assert.match(init.headers.sign, /^[a-f0-9]{32}$/)
+      return new Response(JSON.stringify({ status: '200', message: '成功', data: { name: '测试企业' } }))
+    },
+  })
+  const adapter = new QixinAdapter({ fetchImpl: transport })
+  const result = await adapter.query('1.31', { query: { keyword: '测试企业' } }, {
+    credential: { appkey: 'synthetic-qixin-appkey', secret_key: 'synthetic-qixin-secret' },
+  })
+  assert.equal(result.publicBody.data.data.name, '测试企业')
+  assert.ok(result.restrictedResponseArchive.bodyBytes.length)
+  assert.equal(calls.length, 2)
+  assert.equal(relayReads, 0)
+})
+
+test('Qixin opted-in system fallback probes the configured relay without signing and sends only once', async () => {
+  const calls = []
+  const transport = createQixinProxyFetch({ route: async () => ({ proxyUrls: ['http://proxy:7788'], directFallback: true }) }, {
+    resolveEgressBase: async () => 'http://private-relay/u/qixin',
+    makeAgent: () => ({ close: async () => {} }),
+    fetchImpl: async (target, init) => {
+      calls.push({ target, init })
+      if (init.dispatcher) { assert.equal(init.headers, undefined); return new Response('', { status: 502 }) }
+      assert.equal(new URL(target).origin, 'http://private-relay')
+      if (target === 'http://private-relay/u/qixin/') {
+        assert.equal(init.headers, undefined); return new Response('', { status: 401 })
+      }
+      assert.equal(init.headers.appkey, 'synthetic-appkey')
+      return new Response(JSON.stringify({ status: '200', data: [] }))
+    },
+  })
+  await new QixinAdapter({ fetchImpl: transport }).query('1.31', { query: { keyword: '测试' } }, {
+    credential: { appkey: 'synthetic-appkey', secret_key: 'synthetic-secret' },
+  })
+  assert.equal(calls.length, 4)
+  assert.equal(calls.filter(call => call.init.headers).length, 1)
+})
+
+test('Qixin exhausted probes are unbilled; sent timeouts remain unknown with no fallback', async () => {
+  for (const probeFails of [true, false]) {
+    let paid = 0
+    const transport = createQixinProxyFetch({ route: async () => ({ proxyUrls: ['http://a:7788', 'http://b:7788'], directFallback: false }) }, {
+      makeAgent: () => ({ close: async () => {} }),
+      fetchImpl: async (target, init) => {
+        if (target === 'https://api.qixin.com/') {
+          assert.equal(init.headers, undefined)
+          return new Response('', { status: probeFails ? 502 : 401 })
+        }
+        paid++; throw new Error('timeout after dispatch')
+      },
+    })
+    const error = await new QixinAdapter({ fetchImpl: transport }).query('1.31', { query: { keyword: '测试' } }, {
+      credential: { appkey: 'synthetic-appkey', secret_key: 'synthetic-secret' },
+    }).catch(error => error)
+    assert.equal(error.evidence.outcome, probeFails ? 'rejected' : 'unknown')
+    assert.equal(error.evidence.billed, probeFails ? false : null)
+    assert.equal(paid, probeFails ? 0 : 1)
+    if (probeFails) assert.equal(error.evidence.affectsCircuit, false)
+  }
+})
 function setup(fetchImpl, route = { proxyUrls: ['http://proxy-a:7788','http://proxy-b:7788'], directFallback: false }) {
   const closed = []
   return { closed, run: createTikHubProxyFetch({ route: async () => route }, {

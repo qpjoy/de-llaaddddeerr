@@ -3,6 +3,7 @@ import { WEB_SEARCH_PROVIDERS } from '../../shared/web-search.mjs'
 import { fetch as proxyFetch, ProxyAgent } from 'undici'
 import { AppError } from '../core/errors.mjs'
 import { resolveProviderProxyRoute } from '../agent/control-store.mjs'
+import { relayRequestUrl } from './egress-relay.mjs'
 
 // Probe policy defaults. A probe only has to prove that the egress reaches the
 // target origin, so its deadline must accommodate a healthy but high-latency
@@ -29,6 +30,7 @@ const PROVIDER_ROUTES = Object.freeze({
   ...Object.fromEntries(SEARCH_UPSTREAMS.map(p=>[p.key,{origin:new URL(p.url).origin,probeUrl:new URL('/',p.url).href}])),
   tikhub: { origin: 'https://api.tikhub.io', probeUrl: 'https://api.tikhub.io/api/v1/xiaohongshu/app_v2/search_notes' },
   rapidapi: { origin: 'https://twitter-aio.p.rapidapi.com', probeUrl: 'https://twitter-aio.p.rapidapi.com/' },
+  qixin: { origin: 'https://api.qixin.com', probeUrl: 'https://api.qixin.com/' },
 })
 function providerRoute(providerKey) {
   const route = Object.hasOwn(PROVIDER_ROUTES, providerKey) ? PROVIDER_ROUTES[providerKey] : null
@@ -265,9 +267,20 @@ export function createRapidApiProxyFetch(store, options = {}) {
   return createProviderProxyFetch(store, { ...options, providerKey: 'rapidapi' })
 }
 
+export function createQixinProxyFetch(store, { resolveEgressBase = async () => '', ...options } = {}) {
+  const directFetch = options.fetchImpl || proxyFetch
+  return createProviderProxyFetch(store, {
+    ...options, providerKey: 'qixin',
+    // System egress retains the existing fixed-IP relay. An explicitly selected
+    // forward proxy reaches the official origin; never proxy the private relay.
+    directFetchImpl: async (url, init) => directFetch(relayRequestUrl(await resolveEgressBase(), url), init),
+  })
+}
+
 function createProviderProxyFetch(store, {
   providerKey,
   fetchImpl = proxyFetch,
+  directFetchImpl = fetchImpl,
   makeAgent = url => new ProxyAgent(url),
   now = () => Date.now(),
 } = {}) {
@@ -294,7 +307,8 @@ function createProviderProxyFetch(store, {
           // the only throws that escape here are the caller's own deadline and
           // the paid request itself. Neither may fail over to another proxy.
           const verdict = await probeCandidate({
-            fetchImpl, dispatcher, candidate, policy, signal: options.signal, now, probeUrl,
+            fetchImpl: candidate ? fetchImpl : directFetchImpl,
+            dispatcher, candidate, policy, signal: options.signal, now, probeUrl,
           })
           attempts.push(...verdict.attempts)
           if (verdict.callerAborted) {
@@ -311,7 +325,7 @@ function createProviderProxyFetch(store, {
         if (policy.cacheTtlMs > 0) {
           selection.set(route.fingerprint, { proxyUrl: candidate, expiresAt: now() + policy.cacheTtlMs })
         }
-        return await fetchImpl(url, { ...options, dispatcher })
+        return await (candidate ? fetchImpl : directFetchImpl)(url, { ...options, dispatcher })
       } finally {
         // Graceful close waits for the returned paid response body to finish.
         if (dispatcher) void dispatcher.close().catch(() => {})

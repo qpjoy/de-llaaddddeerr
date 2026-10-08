@@ -6,7 +6,7 @@ import { Field, DropdownField, ErrorState } from './components.jsx'
 // for a dispatcher and the URL never changes. This one records where the request
 // is sent, and a reverse proxy on the public edge relays it, so the upstream
 // admits us by the edge's fixed public IP. See docs/operations/system-proxy.md.
-export function EgressRelayPanel({ token, provider, relay, onSaved, onUnauthorized, Panel, notify }) {
+export function EgressRelayPanel({ token, provider, relay, proxyMode, onSaved, onUnauthorized, Panel, notify }) {
   const [mode, setMode] = useState(relay.enabled ? 'relay' : 'direct')
   const [relayBase, setRelayBase] = useState(relay.relayBase || '')
   const [reason, setReason] = useState('')
@@ -36,19 +36,22 @@ export function EgressRelayPanel({ token, provider, relay, onSaved, onUnauthoriz
         expectedRevision: relay.revision,
         reason: reason.trim(),
       })
-      notify?.('出网方式已保存，下一次请求生效', 'success')
+      notify?.(provider === 'qixin' ? '中继设置已保存，使用系统网络的下一次请求生效' : '出网方式已保存，下一次请求生效', 'success')
       onSaved()
     } catch (error) { setError(error); if (error.status === 401) onUnauthorized?.(error) }
     finally { setBusy(false) }
   }
-  return <Panel title="出网方式" subtitle="保存后下一次请求生效，无须重启；仅影响本平台。">
-    <p>当前：{relay.enabled ? `经公网边缘中继 · ${relay.relayBase}` : '直连上游目录地址'} · 修订 {relay.revision}</p>
+  return <Panel title={provider === 'qixin' ? '固定出口中继设置' : '出网方式'} subtitle={provider === 'qixin' ? '保存后下一次使用系统网络时生效，无须重启；仅影响本平台。' : '保存后下一次请求生效，无须重启；仅影响本平台。'}>
+    {provider === 'qixin' ? <p>{proxyMode && proxyMode !== 'system-egress'
+      ? '主出口当前选择代理序列或继承全局。这里保存只修改系统网络分支，不会将主出口切回中继。'
+      : '此配置用于系统网络出口；切换到正向代理时，中继地址仍会保留。'}</p> : null}
+    <p>已保存：{relay.enabled ? `经公网边缘中继 · ${relay.relayBase}` : '直连上游目录地址'} · 修订 {relay.revision}</p>
     {!relay.migrated
       ? <p role="alert">尚未执行 migration 096，当前由环境变量决定：{relay.environmentFallback || '未设置（直连）'}。执行迁移后此处的保存才会生效。</p>
       : null}
     <form onSubmit={save}>
-      <DropdownField label="出网方式" value={mode} onChange={setMode} disabled={busy} options={[
-        { value: 'direct', label: '直连 · 出口是本机公网地址' },
+      <DropdownField label={provider === 'qixin' ? '系统网络路径' : '出网方式'} value={mode} onChange={setMode} disabled={busy} options={[
+        { value: 'direct', label: provider === 'qixin' ? '直连启信 · 不使用中继' : '直连 · 出口是本机公网地址' },
         { value: 'relay', label: '经公网边缘中继 · 固定出口 IP' },
       ]} />
       {wantsRelay
@@ -66,7 +69,7 @@ export function EgressRelayPanel({ token, provider, relay, onSaved, onUnauthoriz
       {invalidBase ? <p role="alert">中继 Base URL {invalidBase}。</p> : null}
       <button className="qp-button qp-button--primary"
         disabled={busy || !reason.trim() || Boolean(invalidBase) || (wantsRelay && !trimmed)}>
-        {busy ? '正在保存…' : '保存出网方式'}
+        {busy ? '正在保存…' : provider === 'qixin' ? '保存中继设置' : '保存出网方式'}
       </button>
     </form>
   </Panel>

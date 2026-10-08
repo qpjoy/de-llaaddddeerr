@@ -1,6 +1,8 @@
-# System Proxy 与 TikHub 出网
+# System Proxy 与供应商出网
 
-Agent 中的 LLM Proxy 改名为 System Proxy，保留原路由和代理表。当前接入范围是 Agent 与 TikHub；不改变 JustOne、Launcher、MX-H2I 登录、联网和 DNS。
+Agent 中的 LLM Proxy 改名为 System Proxy，保留原路由和代理表。当前接入范围包括 Agent、TikHub、RapidAPI、Web Search 供应商与启信；不改变 JustOne、Launcher、MX-H2I 登录、联网和 DNS。
+
+启信的独立绑定由迁移 `135_qixin_proxy.sql` 增加，默认系统网络、不继承全局代理；已配置的固定出口中继保持有效。选用正向代理后访问启信官方地址，仅在显式允许系统回退时再使用原中继。详见 [启信出网与余额检查](enterprise-qixin.md#出网代理与余额检查2026-10-09)。以下 TikHub 初始部署默认值不适用于启信。
 
 ## 部署与使用
 
@@ -59,4 +61,20 @@ System Proxy 解决的是「换一个出口」，本节解决的是「出口必�
 
 上线顺序：**边缘必须先于 Hub**。Hub 切到 egress base 时若 8081 尚未发布，企业数据全部连接失败。顺序是发布边缘并验证可达、上游侧加白名单、再部署 Hub、最后用一次真实查询验收。
 
-平台数量增长后，更好的归宿是把 `server/external-platforms/proxy.mjs` 的路由与探测泛化成按 provider 配置——它目前硬绑 `https://api.tikhub.io`。届时反代与 dispatcher 可以在同一套绑定界面里按服务选择，本节方案退化为其中一种出口类型。
+路由与探测现已在 `server/external-platforms/proxy.mjs` 按 provider 固定目标地址。启信先选择代理路由，再仅对系统网络分支应用中继重写；不会放宽目录地址校验或自动覆盖已有中继配置。
+
+## 同一云端出口：Nginx 中继与正向代理
+
+现有 `/u/qixin` 是 HTTP 反向代理路径，不能直接填成 Proxy Sequence 的正向代理地址。若在同一台云主机另行部署支持 HTTP CONNECT 的正向代理，可把它的代理端口配置成独立 Endpoint / Sequence；保留原 Nginx 中继，使用启信的主出口选择在二者之间切换。Hub 每次派发读取配置，已发送请求继续原路径，不中断、迁移或重复发送。
+
+只有两者最终使用同一公网 IP / NAT，且正向代理对 `api.qixin.com` 直接出网而不再串联海外节点时，启信看到的来源 IP 才相同。供应商记录才是出口证据；私网中继地址、代理监听地址和普通查 IP 服务返回值不能替代按目标验证。
+
+| 项目 | 现有 Nginx 中继 | HTTP CONNECT 正向代理 |
+| --- | --- | --- |
+| 维护与切换 | 复用现有 Nginx，每个供应商维护固定转发规则 | 需另行维护代理服务、访问控制，可统一用 Sequence 管理多个供应商 |
+| 请求内容 | Nginx 接收业务请求后重新向上游发起，能看到请求头和正文；现有内网段由 WireGuard 承载 | 不启用 TLS 解密时，Hub 与启信建立端到端 TLS，代理只转发隧道流量 |
+| 观测 | 可记录具体 HTTP 状态、路径和回源耗时，需避免记录签名/参数 | 主要观察 CONNECT、连接耗时和字节数；业务证据仍由 Hub 保存 |
+| 可用性 | 依赖原 Nginx 与隧道 | 依赖新代理服务与隧道；同机部署仍共享主机故障，不能当成独立容灾 |
+| 延迟与成本 | 经云端转发 | 同样经云端转发；多一层 CONNECT 不保证更快或更便宜，需实际测量 |
+
+原理依据：[Nginx 反向代理](https://docs.nginx.com/nginx/admin-guide/web-server/reverse-proxy/)与 [Squid HTTPS / CONNECT](https://wiki.squid-cache.org/Features/HTTPS)。建议先保留已运行的中继，再独立准备只对受信内网开放的正向代理并验证启信出口；确认后显式切换。当前改动没有创建或启用云端正向代理，也没有触发企业查询。

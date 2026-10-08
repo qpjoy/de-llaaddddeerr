@@ -2147,8 +2147,8 @@ function PlatformDetail({ token, range, provider, selectedOperation, setQuery, o
             onUnauthorized={onUnauthorized}
             notify={notify}
           /> : null}
-          {detail.proxy ? <ExternalProxyPanel provider={provider} notify={notify} Panel={Panel} key={`${provider}-${detail.proxy.revision}`} token={token} proxy={detail.proxy} onSaved={remote.refresh} onUnauthorized={onUnauthorized} /> : null}
-          {detail.egressRelay ? <EgressRelayPanel notify={notify} Panel={Panel} key={`egress-${detail.egressRelay.revision}`} token={token} provider={provider} relay={detail.egressRelay} onSaved={remote.refresh} onUnauthorized={onUnauthorized} /> : null}
+          {detail.proxy ? <ExternalProxyPanel provider={provider} notify={notify} Panel={Panel} key={`${provider}-${detail.proxy.revision}`} token={token} proxy={detail.proxy} relay={detail.egressRelay} onSaved={remote.refresh} onUnauthorized={onUnauthorized} /> : null}
+          {detail.egressRelay && !(provider === 'qixin' && detail.proxy) ? <EgressRelayPanel notify={notify} Panel={Panel} key={`egress-${detail.egressRelay.revision}`} token={token} provider={provider} relay={detail.egressRelay} onSaved={remote.refresh} onUnauthorized={onUnauthorized} /> : null}
           <ExternalPlatformOperationControlPanel
             token={token}
             provider={provider}

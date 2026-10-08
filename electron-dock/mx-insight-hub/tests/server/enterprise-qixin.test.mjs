@@ -299,14 +299,29 @@ test('PostgreSQL migration, price controls, archives, worker ingest and outbox p
   const { PostgresAcquisitionHistoryStore } = await import('../../server/acquisitions/history-store.mjs')
   const db = new PGlite({ extensions: { pg_trgm } })
   t.after(() => db.close())
+  const proxyState = async () => ({
+    bindings: (await db.query("SELECT * FROM control.external_platform_proxy_bindings WHERE provider_key <> 'qixin' ORDER BY provider_key")).rows,
+    relays: (await db.query('SELECT * FROM control.external_platform_egress_relays ORDER BY provider_key')).rows,
+    global: (await db.query('SELECT * FROM control.agent_proxy_settings')).rows,
+  })
+  let beforeQixinProxy
   for (const directory of [new URL('../../../mx-common/migrations/', import.meta.url), new URL('../../migrations/', import.meta.url)]) {
     for (const file of (await readdir(directory)).filter(file => file.endsWith('.sql')).sort()) {
       if (file === '092_qixin_official_prices.sql') {
         await db.exec("UPDATE control.external_platform_operation_policies SET desired_state='paused', control_source='database', revision=1, updated_by='existing-operator' WHERE provider_key='qixin' AND operation_key='enterprise.api.1.2'")
       }
+      if (file === '135_qixin_proxy.sql') beforeQixinProxy = await proxyState()
       await db.exec('BEGIN'); await db.exec(await readFile(new URL(file, directory), 'utf8')); await db.exec('COMMIT')
     }
   }
+  assert.deepEqual(await proxyState(), beforeQixinProxy, 'Qixin proxy migration preserves every existing route')
+  assert.equal((await db.query("SELECT egress_mode FROM control.external_platform_proxy_bindings WHERE provider_key='qixin'")).rows[0].egress_mode, 'system-egress')
+  await db.exec("UPDATE control.external_platform_proxy_bindings SET egress_mode='inherit', revision=revision+1 WHERE provider_key='qixin'")
+  await db.exec('BEGIN')
+  await db.exec(await readFile(new URL('../../migrations/135_qixin_proxy.sql', import.meta.url), 'utf8'))
+  await db.exec('COMMIT')
+  assert.equal((await db.query("SELECT egress_mode FROM control.external_platform_proxy_bindings WHERE provider_key='qixin'")).rows[0].egress_mode, 'inherit', 'rerunning migration cannot reset an operator choice')
+  assert.equal((await db.query("SELECT count(*)::int AS n FROM control.external_platform_proxy_events WHERE provider_key='qixin' AND actor='migration-135'")).rows[0].n, 1)
   const query = async (sql, values) => { const result = await db.query(sql, values); return { ...result, rowCount: result.rows.length || result.affectedRows } }
   const pool = { query, connect: async () => ({ query, release() {} }) }
   const store = new PostgresStore(pool)

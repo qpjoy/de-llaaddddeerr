@@ -6,6 +6,8 @@ import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { sourceConnectionSnapshot } from '../../server/data/source-connections.mjs'
 import { SOURCE_CATALOG_SEED } from '../../server/data/source-catalog-seed.mjs'
 import { PUBLIC_OPINION_DATASET_ID } from '../../server/data/public-opinion.mjs'
+import { createRuntime } from '../../server/index.mjs'
+import { loadConfig } from '../../server/config.mjs'
 
 test('inventory separates content, account, commerce and multi-source stored routes without changing catalog authority', () => {
   const entries = structuredClone(SOURCE_CATALOG_SEED)
@@ -81,4 +83,23 @@ test('connection inventory is Admin-token-only, local-read-only and independent 
   assert.equal((await fetch(base + path + '?provider=tikhub', { headers })).status, 400)
   assert.equal(upstreamCalls, 0)
   assert.deepEqual(await store.listSourceCatalogEntries({ includeArchived: true }), original)
+})
+
+test('production runtime wiring serves source connections and provisioning with the independent Baidu IP channel registered', async t => {
+  const runtime = await createRuntime(loadConfig({ MX_INSIGHT_STORE: 'memory',
+    MX_INSIGHT_ADMIN_TOKEN: 'inventory-runtime-test', MX_INSIGHT_API_KEY_PEPPER: 'inventory-runtime-test-pepper-at-least-32' }))
+  const server = createServer(runtime.app)
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const base = `http://127.0.0.1:${server.address().port}/internal/v1/admin`
+  const headers = { 'x-mx-insight-admin-token': 'inventory-runtime-test' }
+  const snapshot = await fetch(`${base}/source-connections`, { headers })
+  assert.equal(snapshot.status, 200)
+  const { data } = await snapshot.json()
+  assert.ok(data.routes.some(row => row.id === 'ip-risk-baidu-v2'), 'keep its implementation inventory')
+  const catalog = await fetch(`${base}/provisioning/catalog`, { headers })
+  assert.equal(catalog.status, 200)
+  const body = await catalog.json()
+  assert.ok(body.data.operations.some(row => row.provider === 'qixin' && row.current))
+  assert.ok(!body.data.operations.some(row => row.provider === 'baidu-ip'), 'subscription channel must not grant generic procurement scopes')
 })

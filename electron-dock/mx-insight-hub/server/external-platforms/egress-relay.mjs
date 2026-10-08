@@ -1,5 +1,14 @@
 import { AppError } from '../core/errors.mjs'
 
+export function relayRequestUrl(base, target) {
+  const url = new URL(target)
+  if (!base) return url.toString()
+  const relay = new URL(base)
+  relay.pathname = `${relay.pathname.replace(/\/+$/, '')}${url.pathname}`
+  relay.search = url.search
+  return relay.toString()
+}
+
 // A relay base is a place to send the request, not a proxy URL. The upstream
 // path and query string are appended to it verbatim, so it carries no query and
 // no fragment, and it never carries credentials.

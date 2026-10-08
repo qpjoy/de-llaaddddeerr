@@ -9,7 +9,7 @@ import { QixinAdapter } from './adapters/qixin.mjs'
 import { QixinAdminService, QIXIN_METADATA } from './external-platforms/qixin-admin.mjs'
 import { StructuredExternalPlatformCredentialStore, QIXIN_CREDENTIAL_FIELDS } from './external-platforms/structured-credentials.mjs'
 import { QIXIN_CONFIG } from './contracts/enterprise.mjs'
-import { ExternalPlatformProxyStore, createTikHubProxyFetch, createRapidApiProxyFetch } from './external-platforms/proxy.mjs'
+import { ExternalPlatformProxyStore, createTikHubProxyFetch, createRapidApiProxyFetch, createQixinProxyFetch } from './external-platforms/proxy.mjs'
 import { ExternalPlatformEgressRelayStore } from './external-platforms/egress-relay.mjs'
 import { NightAllPlatformAdminService } from './external-platforms/night-all-admin.mjs'
 import { NightAllAService, NightAllADispatchStore } from './external-platforms/night-all-a.mjs'
@@ -286,13 +286,16 @@ export async function createRuntime(config = loadConfig()) {
   const qixinCredentialStore = new StructuredExternalPlatformCredentialStore({ pool, providerKey: 'qixin',
     fields: QIXIN_CREDENTIAL_FIELDS, pepper: config.apiKeyPepper })
   const qixinPlatformStore = createExternalPlatformStore({ pool, usageStore: store, providerKey: 'qixin', authorizationPlatform: 'enterprise' })
+  const qixinProxyStore = pool ? new ExternalPlatformProxyStore(pool, config.deploymentEgress, { providerKey: 'qixin' }) : null
   const qixinEgressRelayStore = pool
     ? new ExternalPlatformEgressRelayStore(pool, { providerKey: 'qixin', environmentFallback: config.enterpriseEgressBase })
     : null
   const enterpriseGateway = new ExternalPlatformGateway({ usageStore: store, platformStore: qixinPlatformStore,
     adapter: config.listenerMode === 'admin' || !pool
       ? null
-      : new QixinAdapter({ resolveEgressBase: () => qixinEgressRelayStore.relayBase() }), config: QIXIN_CONFIG,
+      : new QixinAdapter({ fetchImpl: createQixinProxyFetch(qixinProxyStore, {
+        resolveEgressBase: () => qixinEgressRelayStore.relayBase(),
+      }) }), config: QIXIN_CONFIG,
     providerKey: 'qixin', credentialStore: qixinCredentialStore, operationControlStore: externalPlatformControlStore,
     apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: Math.max(60000, config.reservationLeaseMs) })
   const webSearch = createWebSearchRuntime({pool,store,controls:externalPlatformControlStore,config})
@@ -301,6 +304,7 @@ export async function createRuntime(config = loadConfig()) {
     new ExternalPlatformAdminService({ store: rapidApiStore, config: rapidConfig, credentialStore: rapidApiCredentialStore,
       proxyStore: rapidApiProxyStore, operationControlStore: externalPlatformControlStore, durable: !!pool, providerKey: 'rapidapi', metadata: RAPIDAPI_METADATA }),
     new QixinAdminService({ store: qixinPlatformStore, config: QIXIN_CONFIG, credentialStore: qixinCredentialStore,
+      proxyStore: qixinProxyStore,
       operationControlStore: externalPlatformControlStore, durable: !!pool, providerKey: 'qixin', metadata: QIXIN_METADATA,
       egressRelayStore: qixinEgressRelayStore }),
     new IpSearchAdminService(ipRiskGateway.platformStore, ipRiskGateway),
