@@ -129,3 +129,48 @@ Hub 冷却到期和下游策略解除阻塞是两件事；前者不证明解析�
 修复验证：上述测试连同 gateway、受限原始归档、游标、Night-All 兼容、native forwarding、
 微博全文迁移共 150 项，149 项通过、0 失败、1 项独立 PostgreSQL 预算迁移测试因未配置专用连接跳过。
 本次全文迁移与只读诊断 SQL 已在 PGlite 中执行通过。
+
+## 搜索成功但全文为 partial
+
+请求 `34bc80a6-a208-49f8-b260-6c7985b36139` 返回 8 条结果、`providerCalls=3` 和
+`WEIBO_FULL_TEXT_INCOMPLETE`（2 条）。这说明搜索已交付、记录了两次详情调用，
+不能仅凭 partial 确定详情是供应商失败还是 Hub 校验未通过。
+
+将 `server/ops/diagnose-weibo-full-text.mjs` 同步到服务器源码目录后，
+在 `mx-insight-hub` 目录执行以下命令。无需安装宿主机依赖或重新部署镜像：
+
+```bash
+sed \
+  -e "s|from 'pg'|from '/app/node_modules/pg/lib/index.js'|" \
+  -e "s|from '../contracts/|from '/app/server/contracts/|g" \
+  -e "s|import.meta.url === pathToFileURL(process.argv\[1\]).href|process.argv[1] === '-'|" \
+  server/ops/diagnose-weibo-full-text.mjs | \
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin \
+  -c admin -- node --input-type=module - \
+  34bc80a6-a208-49f8-b260-6c7985b36139
+```
+
+脚本在只读一致性事务中按请求 ID 读取已索引的调用记录（最多 101 条），
+逐份校验最大 8 MiB 归档的 SHA-256。仅输出受控状态、帖子 ID、类型与长度，
+不输出正文、账号、供应商错误原文、凭据或任意未知字段。
+详情通过已保存的 dispatch fingerprint 关联搜索帖子，不按调用次序推断；
+在副本上执行当前 Pod 的 `mergeWeiboDetail`，不触发上游、入库、重新计费或历史改写。
+
+报告中 `previews` 是原搜索被识别为摘要的行，不代表当前数据库的全文状态。
+`details` 给出每次详情的 outcome、HTTP/业务码以及离线校验结果：
+
+| 状态 / 原因 | 含义 |
+| --- | --- |
+| `detail_call_not_successful` | 调用未成功；结合 outcome、HTTP/业务码和受控 errorCode 判断 |
+| `full_text_missing` | `longText.content` / `text_raw` 未提供可用全文 |
+| `full_text_not_longer` | 详情正文未比搜索摘要更长 |
+| `full_text_still_preview` | 详情正文仍以展开或省略号结束 |
+| `prefix_mismatch` | 详情全文与搜索摘要的正文前缀不匹配 |
+| `post_id_mismatch` / `author_id_mismatch` | 帖子 / 作者身份不一致 |
+| `invalid_detail_identity` | 详情形状没有可用的帖子 ID |
+| `current_merge_accepts` | 当前部署代码可以采用这份详情，不等于当时已经采用或自动回填 |
+| `archive_*` / `search_row_not_correlated` | 原始证据缺失、超限、损坏或无法关联，不能据此推断供应商返回内容 |
+| `no_correlated_call_recorded` | 该摘要没有对应详情记录；可能未派发或证据不足，不据此猜测具体预算、权限或租约原因 |
+
+`tests/server/weibo-full-text-diagnostics.test.mjs` 覆盖校验拒绝原因、归档完整性与脱敏、
+stdin 模块加载、乱序详情的指纹关联，并在独立 PGlite 中验证只读查询。
