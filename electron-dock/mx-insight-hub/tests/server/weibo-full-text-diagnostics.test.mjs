@@ -53,6 +53,26 @@ test('missing, oversized, corrupt, non-JSON and unsuccessful archives cannot pro
   assert.equal(inspectWeiboFullText(row, archive(null, 429)).state, 'not_success_envelope')
 })
 
+test('opt-in text diff distinguishes display markup from raw text without loosening merge rules', () => {
+  const preview = weiboRow({ ...post, content: '话题超话内容开头 展开c' }, capturedAt)
+  const source = archive({ ...detail, longText: { content: '#话题[超话]#内容开头以及后续完整正文' },
+    text: '<a href="https://example.test/private-token">话题超话</a>内容开头以及后续完整正文' })
+  const ordinary = inspectWeiboFullText(preview, source)
+  assert.equal(ordinary.textComparison, undefined)
+  const comparison = inspectWeiboFullText(preview, source, { textDiff: true })
+  assert.ok(comparison.reasons.includes('prefix_mismatch'))
+  assert.equal(comparison.textComparison.fullText.prefixMatches, false)
+  assert.equal(comparison.textComparison.fullText.previewCodePoint, 'U+E627')
+  assert.equal(comparison.textComparison.fullText.detailCodePoint, 'U+0023')
+  assert.equal(comparison.textComparison.renderedText.prefixMatches, true)
+  assert.doesNotMatch(JSON.stringify(comparison), /private-token|https:|<a /)
+  const long = inspectWeiboFullText(weiboRow({ ...post, content: 'x'.repeat(300) + '…' }, capturedAt),
+    archive({ ...detail, longText: { content: 'x'.repeat(200) + 'y'.repeat(400) } }), { textDiff: true })
+  assert.equal(long.textComparison.fullText.commonPrefixCodePoints, 200)
+  assert.equal(long.textComparison.fullText.previewExcerpt.length, 64)
+  assert.equal(long.textComparison.fullText.detailExcerpt.length, 64)
+})
+
 test('stdin entry loads the existing runtime imports without requiring a new image', async () => {
   const source = (await readFile(new URL('../../server/ops/diagnose-weibo-full-text.mjs', import.meta.url), 'utf8'))
     .replace("from 'pg'", `from '${import.meta.resolve('pg')}'`)

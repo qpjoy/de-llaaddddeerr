@@ -16,6 +16,20 @@ const ERRORS = new Set(['upstream_rate_limited', 'upstream_authentication_failed
 const kind = value => value === undefined ? 'missing' : value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
 const detailFingerprint = id => createHash('sha256').update(JSON.stringify({ version: 'weibo-full-text.v1', id })).digest('hex')
 
+// Opt-in, bounded content comparison for an operator investigating a mismatch.
+// These are excerpts of two post fields, never arbitrary response keys or HTML.
+function compareText(prefix, value) {
+  const normalized = weiboText(value).replace(/[\s\u200b\ufeff]/gu, '')
+  const expected = Array.from(prefix), actual = Array.from(normalized)
+  let shared = 0
+  while (shared < expected.length && shared < actual.length && expected[shared] === actual[shared]) shared++
+  const start = Math.max(0, shared - 16), end = shared + 48
+  const codePoint = char => char ? `U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}` : null
+  return { prefixMatches: normalized.startsWith(prefix), commonPrefixCodePoints: shared,
+    previewCodePoint: codePoint(expected[shared]), detailCodePoint: codePoint(actual[shared]),
+    previewExcerpt: expected.slice(start, end).join(''), detailExcerpt: actual.slice(start, end).join('') }
+}
+
 function decodeArchive(archive) {
   if (!archive) return { state: 'archive_missing' }
   if (archive.body_size > 8388608) return { state: 'archive_too_large' }
@@ -27,9 +41,9 @@ function decodeArchive(archive) {
   return { state: 'verified', payload, capturedAt: new Date(archive.captured_at).toISOString() }
 }
 
-// Only fixed reason codes, numeric post IDs, types and lengths leave this function.
+// By default only fixed reason codes, numeric post IDs, types and lengths leave.
 // Run the deployed merge implementation on a clone; never mutate source evidence.
-export function inspectWeiboFullText(row, archive) {
+export function inspectWeiboFullText(row, archive, { textDiff = false } = {}) {
   const decoded = decodeArchive(archive)
   if (decoded.state !== 'verified') return { state: decoded.state }
   const raw = decoded.payload.data
@@ -48,6 +62,10 @@ export function inspectWeiboFullText(row, archive) {
   catch { return { state: 'current_merge_rejects', reasons: ['invalid_detail_identity'], ...facts } }
   const prefix = row.text.replace(/(?:展开(?:全文)?\s*[cＣ]?|…|\.{3})[\s\u200b\ufeff]*$/iu, '')
     .trim().replace(/[\s\u200b\ufeff]/gu, '')
+  if (textDiff) facts.textComparison = {
+    fullText: compareText(prefix, raw?.longText?.content || raw?.text_raw),
+    renderedText: compareText(prefix, raw?.text),
+  }
   const reasons = []
   if (detail.content_id !== row.content_id) reasons.push('post_id_mismatch')
   if (row.author_id && detail.author_id !== row.author_id) reasons.push('author_id_mismatch')
@@ -62,7 +80,7 @@ export function inspectWeiboFullText(row, archive) {
     reasons: accepted ? [] : reasons.length ? reasons : ['other_merge_rule'], returnedPostId: detail.content_id, ...facts }
 }
 
-export async function diagnoseWeiboFullText(pool, requestId) {
+export async function diagnoseWeiboFullText(pool, requestId, { textDiff = false } = {}) {
   if (!UUID.test(requestId)) throw new Error('invalid_request_id')
   const client = await pool.connect()
   try {
@@ -118,7 +136,7 @@ export async function diagnoseWeiboFullText(pool, requestId) {
       else {
         const archive = await readArchive(call.id)
         evidence.validation = matched.map(candidate => ({ rowIndex: candidate.rowIndex,
-          ...inspectWeiboFullText(candidate.row, archive) }))
+          ...inspectWeiboFullText(candidate.row, archive, { textDiff }) }))
       }
       details.push(evidence)
     }
@@ -142,11 +160,11 @@ export async function diagnoseWeiboFullText(pool, requestId) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   let pool
   try {
-    const [requestId, extra] = process.argv.slice(2)
-    if (!requestId || extra) throw new Error('invalid_arguments')
+    const [requestId, flag, extra] = process.argv.slice(2)
+    if (!requestId || (flag && flag !== '--text-diff') || extra) throw new Error('invalid_arguments')
     if (!process.env.DATABASE_URL) throw new Error('database_url_required')
     pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 })
-    console.log(JSON.stringify(await diagnoseWeiboFullText(pool, requestId), null, 2))
+    console.log(JSON.stringify(await diagnoseWeiboFullText(pool, requestId, { textDiff: flag === '--text-diff' }), null, 2))
   } catch (error) {
     const known = new Set(['invalid_arguments', 'invalid_request_id', 'database_url_required', 'weibo_request_not_found'])
     console.error(JSON.stringify({ error: known.has(error.message) ? error.message : 'diagnostic_read_failed' }))
