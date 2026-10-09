@@ -5,9 +5,3 @@ export function hasNoContentTitle(platform, item = {}) {
   const kind = String(item.objectType || item.contentType || item.content_type || item.type || '').toLowerCase()
   return !/(?:profile|user|account|location|place|hashtag|topic|article)/.test(kind)
 }
-
-export function dataSearchContentTitles(payload, platform) {
-  if (!Array.isArray(payload?.data?.items)) return payload
-  return { ...payload, data: { ...payload.data, items: payload.data.items.map(item =>
-    hasNoContentTitle(platform, item) ? { ...item, title: null } : item) } }
-}

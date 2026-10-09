@@ -3398,7 +3398,7 @@ export class PostgresStore {
              (record_id, revision, payload_sha256, normalized_payload, parser_version, ingest_run_id)
            VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (record_id, revision) DO NOTHING`,
-          [id, revision, record.payloadSha256, record.rawItem, PARSER_VERSION, runId],
+          [id, revision, record.payloadSha256, record.rawItem, record.parserVersion || PARSER_VERSION, runId],
         )
         if (revisionInsert.rowCount > 0) changed += 1
 

@@ -5,7 +5,7 @@ import { normalizeHubSocialRequest } from './hub-social.mjs'
 import { normalizeNightAllLegacyPayload, NIGHT_ALL_COMPAT_DATASET_ID } from '../ingest/legacy-night-all.mjs'
 import { refreshMappedPayloadSha256 } from '../ingest/external/mapping.mjs'
 import { INSTAGRAM_SEARCH_KEY } from './instagram-search.mjs'
-import { hasNoContentTitle } from './social-content-title.mjs'
+import { normalizeSearchContent } from './search-content.mjs'
 
 export const RAW_SEARCH_VERSION = 'mx-insight-hub.raw-search.v1'
 export const RAW_SEARCH_PATH = '/api/v1/night-all/search/raw'
@@ -228,17 +228,5 @@ export function rawSearchRecords(body, platform, provider) {
 // evidence remain immutable; account/profile names are not content titles.
 export function rawSearchContentTitles(payload, platform) {
   if (!['twitter', 'facebook', 'weibo', 'instagram'].includes(platform)) return payload
-  const body = structuredClone(payload)
-  const visit = data => {
-    if (!data || typeof data !== 'object') return
-    if (typeof data.raw_data === 'string') {
-      let rows
-      try { rows = JSON.parse(data.raw_data) } catch { /* Preserve unrecognized optional child data. */ }
-      if (Array.isArray(rows)) data.raw_data = JSON.stringify(rows.map(row => row && typeof row === 'object' && !Array.isArray(row) && hasNoContentTitle(platform, row) ? { ...row, title: '' } : row))
-    }
-    if (Array.isArray(data.items)) data.items = data.items.map(row => row && typeof row === 'object' && !Array.isArray(row) && hasNoContentTitle(platform, row) ? { ...row, title: '' } : row)
-    for (const child of Array.isArray(data.results) ? data.results : []) visit(child?.data || child)
-  }
-  visit(body.data)
-  return body
+  return normalizeSearchContent(payload, platform, { format: 'raw' })
 }

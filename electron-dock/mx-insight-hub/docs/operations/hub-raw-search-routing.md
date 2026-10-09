@@ -1,6 +1,56 @@
-# Hub 搜索的平台迁移与内容标题
+# Hub 搜索的平台迁移、内容标题与媒体
 
 2026-10-08。沿用 `POST /api/v1/search/raw`，保留 `POST /api/v1/night-all/search/raw` 为同一入口。没有新增 `/api/v1/data/search/raw`。Delta 无需修改 URL；以后可只把 URL 改为 `/api/v1/search/raw`，请求体、Key 和同次请求的幂等键不变。
+
+## 2026-10-09：统一搜索入口与抖音封面
+
+`/api/v1/data/search` 与两条旧 raw URL 现在统一进入 Hub 的 `search` 业务入口。内部选择 data/raw 输出分支，不通过 HTTP 再调用自身。旧 raw 的请求体、`raw_data` JSON 字符串、`raw_info`、分页、授权、raw meter 和幂等身份继续兼容，Delta 不需要改接口。现代入口保留严格的 `night-all.data-search.v1` 结构和原平台计费；data/raw 的游标与计费单位仍分别保持原约定，不能只替换成现代 URL 就混用两种请求结构。
+
+本轮统一的是 Hub 的交付与 canonical 内容规则。各平台已接通的上游分流继续使用；抖音仍经过现有 Night-All 采集链路，没有新增直连供应商调用。后续可以在统一入口内逐个平台替换采集实现。
+
+线上只读诊断抽取最近 3 次已交付抖音搜索，每次前 3 条，共 9 条：`kind="4"`，单张图片的 URL 哈希与封面完全相同，另外存在独立视频地址。对应新交付的修正规则为：
+
+- 视频保留原地址，封面保留在 `coverUrl` / `cover_url`；仅从图片附件移除与明确封面 URL 完全相同的项。
+- 保留其他真实图片、明确的图集/混合类型、未知数字类型及账号数据；没有明确封面或可播放视频时不推断。CDN 查询参数不同也不视为同一张图片。
+- 同时覆盖现代 `data.items[].media.images`、旧 raw 的 `image_urls/images/media.images` 和嵌套 raw 结果；JSON 字符串与数组类型保持原样。
+- `night-all.search.v1` 与 `night-all.compat.v1` 的 canonical 入库使用同一媒体规则。`douyin-video-cover.v1` 标记修订版本，下次正常入库更新旧记录一次；重复入库不反复生成修订，原始证据与历史修订保留。
+
+常规部署不改写已提交响应、旧幂等重放或 Delta 已保存的内容，也不自动启动回填。部署 Hub API 和 ingest worker 后，正常的新交付生效；若仍读取原请求的不可变快照，仍会看到原内容。用户随后明确要求修复历史抖音数据，使用下方手动迁移工具处理这一例外。本项没有新增 SQL migration，不需要发布 Delta、Night-All 或 MX-H2I。
+
+回归入口为 `tests/server/search-content.test.mjs`，包括两条 raw URL 的共用请求身份、单次采集/计费、现代严格结构、历史重放，以及独立 PostgreSQL 中两种入库路径的修订验证。数据库测试只在提供 `MX_INSIGHT_TEST_DATABASE_URL` 时运行，必须指向可丢弃的测试库；本轮未调用真实供应商。
+
+### 一次性修复历史抖音数据
+
+工具：`server/ops/repair-douyin-media.mjs`。这是用户于 2026-10-09 明确要求的历史修复，不挂接部署或自动 schema migration。默认仅预览 canonical；`--apply` 才写入，`--include-deliveries` 明确扩展到旧交付和兼容缓存。所有范围均只匹配抖音，并复用实时接口的精确封面去重规则。
+
+| 范围 | 修复行为 |
+| --- | --- |
+| canonical（默认） | 各数据集内未删除的抖音 post；只改 `stable_fields.media`，新增修订并通过 outbox 更新搜索投影，保留原采集时间、正文和原始证据 |
+| 历史交付（显式选项） | `usage_requests` 中已提交、HTTP 200 的抖音现代/raw 响应；之后同一幂等键重放修正后的媒体，账单、用量、时间和请求身份不变 |
+| 兼容缓存（显式选项） | `serving.compatibility_snapshots` 内抖音响应；只改重复封面，不延长有效期，也不更改已过期/已被替代状态 |
+| 原始供应商证据 / Delta 数据库 | 本工具不改。Delta 已持久化的副本需在其数据库另行迁移，不能通过 Hub 自动回写 |
+
+先同步并部署本轮 Hub API 与 ingest worker，确认滚动发布完成后再执行，避免旧 worker 重新写入旧格式。以下每条都是独立单行命令，无需 heredoc：
+
+只读预览全部 Hub 范围：
+
+```bash
+kubectl -n mx-insight-hub exec deploy/mx-insight-hub-public -c api -- node server/ops/repair-douyin-media.mjs --include-deliveries
+```
+
+执行同样范围的迁移：
+
+```bash
+kubectl -n mx-insight-hub exec deploy/mx-insight-hub-public -c api -- node server/ops/repair-douyin-media.mjs --include-deliveries --apply
+```
+
+再次执行预览，`matched` 应为 0。若只修复 canonical，去掉两条命令中的 `--include-deliveries`；旧响应重放将保持原样。输出只含模式、运行 ID 和每类的 `scanned/matched/updated` 数量，不打印正文、地址、凭据。canonical 的数据库修复立即生效，搜索索引等待现有 projector 消费 outbox；不需要全库重建或重新采集。
+
+默认每批 50 行，可用 `--batch-size 1..200` 调整。每批在同一短事务内备份、修改、写修订和 outbox；行锁最多等待 2 秒，单条语句上限 15 秒。不跳过被锁行而声称完成；异常停止时已完成批次保留，失败批次回滚，重新执行同一命令即可继续。运行捕获开始时间，不追逐之后新增的数据。不要同时启动多个 apply，工具会通过专用锁拒绝第二个运行。
+
+首次 apply 创建私有运维备份表 `control.douyin_media_repairs`，保存每条原始行、目标、运行 ID 和修复后摘要；历史 canonical 修订不改写。只读预览不创建表。对能核对原始修订的两类搜索数据，迁移哈希与现行入库一致，再正常入库不会仅因本次迁移增加版本；其他映射使用独立的人工修复摘要。不得直接降低 canonical 修订号或用备份覆盖迁移之后的新采集；备份用于审计及核对后的恢复。
+
+`tests/server/douyin-media-repair.test.mjs` 在临时 PostgreSQL 数据库执行完整迁移建表、预览、事务故障注入、行锁竞争、原值备份、计费字段不变及重复执行测试。测试要求 `MX_INSIGHT_TEST_DATABASE_URL` 指向允许创建/删除测试数据库的可丢弃实例，不连接生产，不调用供应商。
 
 ## 本次路由
 

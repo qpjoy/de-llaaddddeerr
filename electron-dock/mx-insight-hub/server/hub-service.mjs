@@ -167,9 +167,9 @@ import {
 } from './data/night-all-compat.mjs'
 import { withNightAllLegacyCountWarning } from './contracts/night-all-count-audit.mjs'
 import { acquisitionRequestSnapshot } from './acquisitions/request-snapshot.mjs'
-import { canRouteRawSearch, rawSearchContentTitles } from './contracts/raw-search.mjs'
+import { canRouteRawSearch } from './contracts/raw-search.mjs'
 import { canRouteDataSearch } from './contracts/hub-data-search.mjs'
-import { dataSearchContentTitles } from './contracts/social-content-title.mjs'
+import { normalizeSearchContent } from './contracts/search-content.mjs'
 import {
   capNightAllCompatibilityTraversal,
   capNightAllDataSearchTraversal,
@@ -4196,7 +4196,15 @@ export class HubService {
     }
   }
 
-  async nightAllCompatibilitySearch(context, { operation, body, idempotencyKey, path }) {
+  async nightAllCompatibilitySearch(context, input) {
+    // Old URLs are compatibility views of the same Hub search entry. Keep the
+    // raw contract/charge/continuation identity inside its own format branch;
+    // calling the public data endpoint over HTTP would reserve and bill twice.
+    if (input.operation === 'raw') return this.search(context, { ...input, responseFormat: 'raw' })
+    return this.#nightAllCompatibilitySearch(context, input)
+  }
+
+  async #nightAllCompatibilitySearch(context, { operation, body, idempotencyKey, path }) {
     assertWechatSearchNotRetired(operation, body)
     assert(NIGHT_ALL_LEGACY_OPERATIONS.has(operation), 404, 'not_found', 'Route not found')
     assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
@@ -4427,7 +4435,7 @@ export class HubService {
       // the discrepancy without changing upstream count fields. Content title
       // projection applies to new raw deliveries; provider evidence stays intact.
       const responseBody = withNightAllLegacyCountWarning(operation === 'raw'
-        ? rawSearchContentTitles(traversedBody, normalized.platform) : traversedBody)
+        ? normalizeSearchContent(traversedBody, normalized.platform, { format: 'raw' }) : traversedBody)
       const businessOutcome = nightAllCompatibilityBusinessOutcome(responseBody)
       const capturedAt = new Date()
       const staleUntil = new Date(capturedAt.getTime() + nightAllCompatibilityFallbackWindowMs(operation))
@@ -4616,7 +4624,8 @@ export class HubService {
     }
   }
 
-  async search(context, { body, idempotencyKey, path, liveOnly = false }) {
+  async search(context, { body, idempotencyKey, path, liveOnly = false, responseFormat = 'data' }) {
+    if (responseFormat === 'raw') return this.#nightAllCompatibilitySearch(context, { operation: 'raw', body, idempotencyKey, path })
     if (wechatSearchPlatform(body?.platform)) {
       const mapped = normalizeWechatDataSearch(body)
       assert(this.externalWechatSearch, 503, 'external_platform_unavailable', 'WeChat data service is unavailable')
@@ -4820,7 +4829,7 @@ export class HubService {
       // The HTTP layer has always exposed the durable Hub request ID. Persist
       // that exact delivered JSON as the replay/history body too, instead of
       // appending requestId only after the usage commit.
-      const responseBody = { ...dataSearchContentTitles(responsePayload, platform), requestId: activeRequestId }
+      const responseBody = { ...normalizeSearchContent(responsePayload, platform), requestId: activeRequestId }
       const itemCount = Array.isArray(responseBody?.data?.items) ? responseBody.data.items.length : 0
       const commit = {
         responseStatus: 200,

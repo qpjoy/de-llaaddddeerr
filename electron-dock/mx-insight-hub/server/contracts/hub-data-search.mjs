@@ -1,5 +1,6 @@
 import { normalizeRawSearch } from './raw-search.mjs'
 import { isNightAllDataSearchV1Envelope } from './night-all-data-search.mjs'
+import { normalizeSearchContent } from './search-content.mjs'
 
 export const isHubDataCursor = value => typeof value === 'string' && value.startsWith('mxds1.')
 export function canRouteDataSearch({ platform, pageSize, cursor }) {
@@ -37,6 +38,7 @@ export function projectDataSearch(result, request) {
       message: `${warning.count} Weibo post(s) still contain an incomplete preview; full text was not verified.` })),
     meta: { capability: 'search_posts', capabilityStatus: 'ready', paginationMode: request.platform === 'weibo' ? 'page' : 'compound',
       providerCalls: raw.meta.upstreamCallCount } } }
-  if (!isNightAllDataSearchV1Envelope(body)) throw new Error('invalid_hub_data_search_projection')
-  return body
+  const projected = normalizeSearchContent(body, request.platform)
+  if (!isNightAllDataSearchV1Envelope(projected)) throw new Error('invalid_hub_data_search_projection')
+  return projected
 }

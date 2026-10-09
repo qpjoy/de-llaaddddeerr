@@ -1,6 +1,7 @@
 import { parseNightAllLegacyArray } from '../contracts/night-all-legacy.mjs'
 import { applyMapping, CHUNKER_VERSION, refreshMappedPayloadSha256 } from './external/mapping.mjs'
 import { hasNoContentTitle } from '../contracts/social-content-title.mjs'
+import { normalizeSearchMedia, DOUYIN_MEDIA_POLICY } from '../contracts/search-content.mjs'
 
 export const NIGHT_ALL_COMPAT_DATASET_ID = 'night-all.compat.v1'
 export const NIGHT_ALL_COMPAT_CONNECTOR_ID = 'night-all-legacy'
@@ -69,14 +70,14 @@ function decorate(record, raw, kind, { connectorId, parserVersion }) {
   record.stableFields.connectorId = connectorId
 
   if (kind === 'content') {
-    const images = parsedStringArray(raw.image_urls ?? raw.images)
-    const videos = parsedStringArray(raw.video_urls ?? raw.videos)
-    record.stableFields.media = {
+    const images = parsedStringArray(raw.image_urls ?? raw.images ?? raw.media?.images)
+    const videos = parsedStringArray(raw.video_urls ?? raw.videos ?? raw.media?.videos)
+    record.stableFields.media = normalizeSearchMedia({
       ...(record.stableFields.media || {}),
       images,
       videos,
-      coverUrl: raw.cover_url ?? raw.coverUrl ?? null,
-    }
+      coverUrl: raw.cover_url ?? raw.coverUrl ?? raw.media?.coverUrl ?? null,
+    }, record.platform, raw)
     record.stableFields.author.avatarUrl = raw.author_avatar_url
       ?? raw.profile_image_url
       ?? raw.author_info?.profile_image_url
@@ -87,8 +88,9 @@ function decorate(record, raw, kind, { connectorId, parserVersion }) {
       ?? raw.avatarUrl
       ?? null
   }
-  if (kind === 'content' && hasNoContentTitle(record.platform, raw)) {
-    record.title = null
+  if (kind === 'content' && (hasNoContentTitle(record.platform, raw) || record.platform === 'douyin')) {
+    if (hasNoContentTitle(record.platform, raw)) record.title = null
+    if (record.platform === 'douyin') record.parserVersion = `${parserVersion}:${DOUYIN_MEDIA_POLICY}`
     // The canonical digest must describe the corrected fields. Keep the raw
     // payload and its independent digest intact for historical evidence.
     delete record.payloadSha256

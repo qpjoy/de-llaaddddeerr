@@ -3,10 +3,11 @@ import test from 'node:test'
 import { canonicalJson, normalizeSearchPayload, sha256 } from '../../server/ingest/normalizers.mjs'
 import { normalizeNightAllLegacyPayload } from '../../server/ingest/legacy-night-all.mjs'
 import { refreshMappedPayloadSha256 } from '../../server/ingest/external/mapping.mjs'
+import { DOUYIN_MEDIA_POLICY } from '../../server/contracts/search-content.mjs'
 
 const externalId = '2087779969447686278'
 const body = '原文第一行\n第二行 ' + '完整正文'.repeat(100)
-for (const platform of ['twitter', 'facebook']) {
+for (const platform of ['twitter', 'facebook', 'weibo', 'instagram']) {
   const generatedTitle = `${platform} ${body.replace(/\s+/g, ' ')}`.slice(0, 120)
 
   test(`${platform} data-search normalization clears legacy titles without mutating source evidence`, () => {
@@ -83,11 +84,12 @@ for (const platform of ['twitter', 'facebook']) {
 }
 
 test('other platforms retain existing title and name fallback behavior', () => {
-  for (const platform of ['xiaohongshu', 'douyin', 'weibo', 'reddit']) {
+  for (const platform of ['xiaohongshu', 'douyin', 'reddit']) {
     const row = { externalId: 'post-1', title: '原生标题', text: body }
     const search = normalizeSearchPayload({ data: { items: [row] } }, platform)
     assert.equal(search.records[0].title, '原生标题', platform)
-    assert.equal(search.records[0].payloadSha256, sha256(canonicalJson(row)), platform)
+    assert.equal(search.records[0].payloadSha256, sha256(canonicalJson(platform === 'douyin'
+      ? { mediaPolicy: DOUYIN_MEDIA_POLICY, content: row } : row)), platform)
     for (const title of ['', '原生标题']) {
       const payload = { data: { raw_info: '[]', raw_data: JSON.stringify([
         { content_id: 'post-1', title, name: 'existing name fallback', full_text: body }
