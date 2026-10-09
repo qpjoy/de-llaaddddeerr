@@ -128,7 +128,7 @@ export function DeviceControls({ device: d, onControl, onProbe, busy }) {
     </div>
   );
 }
-export function Connections({ state, onAdd }) {
+export function Connections({ state, onAdd, onConnectReal }) {
   return (
     <section className="panel settings">
       <div className="section-head">
@@ -138,6 +138,15 @@ export function Connections({ state, onAdd }) {
         </button>
       </div>
       <div className="panel-body">
+        <h3>服务器现有 mobile-agent</h3>
+        <p>
+          使用执行器宿主机的 http://127.0.0.1:18081。已适配 GET
+          /api/state、/api/search、/api/next 和
+          /api/note；浏览器不直接连接手机。
+          登记后保持暂停，检查明确空闲并确认独占后才启用。Worker
+          心跳正常不代表手机已就绪。
+        </p>
+        <button onClick={onConnectReal}>登记服务器真实手机</button>
         <h3>执行器</h3>
         <p className="muted">
           执行器心跳与手机可用性是两件事。页面刷新只读取本中心记录。

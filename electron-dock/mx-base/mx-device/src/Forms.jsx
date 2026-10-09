@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { X } from "@phosphor-icons/react";
+import { requestId } from "./request-id.mjs";
 export function Modal({ title, children, onClose }) {
   const ref = useRef(null);
   useEffect(() => {
@@ -47,6 +48,7 @@ export function DeviceForm({ mode, workers, onSubmit, busy }) {
             name="name"
             required
             maxLength={80}
+            defaultValue={mode === "real" ? "外设手机 01" : ""}
             placeholder={mode === "real" ? "外设手机 01" : "模拟手机 C"}
           />
         </label>
@@ -86,6 +88,7 @@ export function DeviceForm({ mode, workers, onSubmit, busy }) {
               账号资源标识
               <input
                 name="accountKey"
+                defaultValue="xhs-account-01"
                 placeholder="xhs-account-01（不是密码）"
                 required
               />
@@ -110,7 +113,9 @@ export function DeviceForm({ mode, workers, onSubmit, busy }) {
         <>
           <p className="notice">
             该地址由所选执行器所在宿主机访问，不是浏览器或 Hub 的
-            localhost。兼容端口范围 18081–18180；物理身份需人工核验。
+            localhost。当前服务器已有映射为 127.0.0.1:18081 →
+            mobile-agent:18082，填写宿主机的 18081，不改
+            Docker/ADB。兼容端口范围 18081–18180；物理身份需人工核验。
           </p>
           <label className="check">
             <input type="checkbox" name="approved" required />
@@ -126,38 +131,60 @@ export function DeviceForm({ mode, workers, onSubmit, busy }) {
     </form>
   );
 }
-export function JobForm({ mode, devices, onSubmit, busy }) {
+export function JobForm({
+  mode,
+  devices,
+  selectedDeviceId,
+  demo = false,
+  onSubmit,
+  busy,
+}) {
   const ref = useRef(null);
-  const requestKey = useRef(crypto.randomUUID());
+  const requestKey = useRef(null);
+  const [keyError, setKeyError] = useState("");
   return (
     <form
       className="form"
       onSubmit={(e) => {
         e.preventDefault();
         const b = Object.fromEntries(new FormData(e.currentTarget));
+        try {
+          requestKey.current ??= requestId();
+          setKeyError("");
+        } catch (error) {
+          setKeyError(error.message);
+          return;
+        }
         onSubmit({
           ...b,
           key: requestKey.current,
           confirmed: b.confirmed === "on",
+          followup: demo,
         });
       }}
     >
       <p className="muted">
-        搜索会话最多三页，执行中不抢占。详情任务请粘贴已有搜索结果中的完整链接。
+        {demo
+          ? "本次将提交两个真实任务：一页搜索 → 使用搜索首条笔记的 detailInput 抓取详情。详情沿用同一设备和账号，保留完整访问令牌；搜索失败或首条链接不可用时不会调用详情接口。"
+          : "搜索会话最多三页，执行中不抢占。详情任务请粘贴已有搜索结果中的完整链接。"}
       </p>
-      <label>
-        任务类型
-        <select
-          name="operation"
-          defaultValue="search"
-          onChange={(e) => {
-            ref.current.dataset.operation = e.target.value;
-          }}
-        >
-          <option value="search">搜索</option>
-          <option value="note">列表中的笔记详情</option>
-        </select>
-      </label>
+      {demo ? (
+        <input type="hidden" name="operation" value="search" />
+      ) : (
+        <label>
+          任务类型
+          <select
+            name="operation"
+            defaultValue="search"
+            onChange={(e) => {
+              ref.current.dataset.operation = e.target.value;
+            }}
+          >
+            <option value="search">搜索</option>
+            <option value="note">列表中的笔记详情</option>
+          </select>
+        </label>
+      )}
       <div ref={ref} data-operation="search" className="operation-fields">
         <div className="search-fields form-grid">
           <label>
@@ -166,10 +193,10 @@ export function JobForm({ mode, devices, onSubmit, busy }) {
           </label>
           <label>
             最多页数
-            <select name="pages">
+            <select name="pages" defaultValue="1">
               <option value="1">1 页</option>
-              <option value="2">2 页</option>
-              <option value="3">3 页</option>
+              {!demo && <option value="2">2 页</option>}
+              {!demo && <option value="3">3 页</option>}
             </select>
           </label>
         </div>
@@ -192,7 +219,11 @@ export function JobForm({ mode, devices, onSubmit, busy }) {
         </label>
         <label>
           设备
-          <select name="deviceId" required={mode === "real"}>
+          <select
+            name="deviceId"
+            required={mode === "real"}
+            defaultValue={mode === "real" ? selectedDeviceId : ""}
+          >
             {mode === "sim" && <option value="">任意可用模拟设备</option>}
             {devices
               .filter((d) => d.enabled && d.state !== "quarantined")
@@ -207,12 +238,21 @@ export function JobForm({ mode, devices, onSubmit, busy }) {
       {mode === "real" && (
         <label className="check">
           <input type="checkbox" name="confirmed" required />
-          确认会让真实手机执行授权范围内的操作。结果不明时不自动重试。
+          {demo
+            ? "确认让真实手机执行一次搜索和一次依赖详情，仅限授权范围；结果不明时不自动重试。"
+            : "确认会让真实手机执行授权范围内的操作。结果不明时不自动重试。"}
         </label>
+      )}
+      {keyError && (
+        <p role="alert" className="error">
+          {keyError}
+        </p>
       )}
       <div className="form-actions">
         <button className="primary" disabled={busy}>
-          提交{mode === "sim" ? "模拟" : "真实"}任务
+          {demo
+            ? "确认提交真机演示"
+            : `提交${mode === "sim" ? "模拟" : "真实"}任务`}
         </button>
       </div>
     </form>

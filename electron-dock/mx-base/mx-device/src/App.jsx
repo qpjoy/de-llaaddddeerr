@@ -15,6 +15,8 @@ import { Modal, DeviceForm, JobForm } from "./Forms.jsx";
 import { Devices, Connections } from "./Devices.jsx";
 import { Tasks, Events, JobDetail } from "./Tasks.jsx";
 import Projection from "./Projection.jsx";
+import { requestId } from "./request-id.mjs";
+import { submitJob } from "./submit-job.mjs";
 
 function Login({ onLogin }) {
   const [error, setError] = useState(""),
@@ -151,7 +153,7 @@ function Workspace({ onExpired }) {
   }
   const newScene = (kind) =>
     run(
-      () => api("scenarios", "sim", { kind, key: crypto.randomUUID() }),
+      () => api("scenarios", "sim", { kind, key: requestId() }),
       kind === "failover"
         ? "双机模拟已启动。选中 A，点击“模拟断线”，观察等待与接管。"
         : "演示已启动，不会调用真机。",
@@ -255,7 +257,17 @@ function Workspace({ onExpired }) {
             </div>
           )}
           {page === "settings" ? (
-            <Connections state={state} onAdd={() => setModal("device")} />
+            <Connections
+              state={state}
+              onAdd={() => setModal("device")}
+              onConnectReal={() => {
+                setMode("real");
+                setSelectedId(null);
+                setHistory(null);
+                setNotice("");
+                setModal("device");
+              }}
+            />
           ) : (
             <div className="work-grid">
               <section className="panel scheduling">
@@ -278,6 +290,19 @@ function Workspace({ onExpired }) {
                         </button>
                       </>
                     )}
+                    {mode === "real" && (
+                      <button
+                        disabled={
+                          busy ||
+                          !state.devices.some(
+                            (d) => d.enabled && d.state !== "quarantined",
+                          )
+                        }
+                        onClick={() => setModal("real-demo")}
+                      >
+                        真机搜索 → 详情演示
+                      </button>
+                    )}
                     <button
                       className="icon-button"
                       aria-label="刷新本中心记录"
@@ -288,6 +313,14 @@ function Workspace({ onExpired }) {
                   </div>
                 </div>
                 <div className="panel-body">
+                  {mode === "real" && (
+                    <p className="notice">
+                      接入顺序：添加现有 mobile-agent（宿主机 18081）→
+                      检查连接（只读）→ 确认空闲且无其他调用方后启用调度 →
+                      真机演示。演示会实际执行一页搜索和首条笔记详情；不会重启手机或清除
+                      busy。
+                    </p>
+                  )}
                   {loading ? (
                     <p className="muted">读取本中心记录…</p>
                   ) : (
@@ -371,7 +404,9 @@ function Workspace({ onExpired }) {
               ? "添加设备"
               : modal === "job"
                 ? `提交${mode === "sim" ? "模拟" : "真实"}任务`
-                : "执行证据"
+                : modal === "real-demo"
+                  ? "真机搜索 → 详情演示"
+                  : "执行证据"
           }
           onClose={() => setModal(null)}
         >
@@ -396,13 +431,22 @@ function Workspace({ onExpired }) {
                 }
               }}
             />
-          ) : modal === "job" ? (
+          ) : modal === "job" || modal === "real-demo" ? (
             <JobForm
               mode={mode}
+              demo={modal === "real-demo"}
               devices={state.devices}
+              selectedDeviceId={device?.id}
               busy={busy}
               onSubmit={async (b) => {
-                if (await run(() => api("jobs", mode, b), "任务已入池"))
+                if (
+                  await run(
+                    () => submitJob(api, mode, b),
+                    b.followup
+                      ? "真机搜索与依赖详情已入池；同一手机串行执行。"
+                      : "任务已入池",
+                  )
+                )
                   setModal(null);
               }}
             />

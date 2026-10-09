@@ -86,5 +86,5 @@ export const jobTitle = (j) =>
   j.operation === "search"
     ? `搜索 · ${j.input.keyword}`
     : j.sourceJobId
-      ? "详情 · 等待搜索结果"
+      ? "详情 · 搜索结果"
       : "笔记详情";
