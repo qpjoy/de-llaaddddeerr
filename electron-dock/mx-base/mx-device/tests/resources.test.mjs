@@ -68,7 +68,8 @@ test("rack and host limits compose across workers without preempting running wor
   finish(s, 1100, first.attempt, { result: {} });
   assert.equal(claim(s, 2000, "sim", "w1"), null);
   finish(s, 2100, second.attempt, { result: {} });
-  assert.equal(claim(s, 3000, "sim", "w1").device.name, "A");
+  // Within the released capacity, prefer the phone least recently assigned.
+  assert.equal(claim(s, 3000, "sim", "w1").device.name, "B");
 });
 
 test("drain preserves attempts and queued jobs, fences new members and does not enable on release", () => {

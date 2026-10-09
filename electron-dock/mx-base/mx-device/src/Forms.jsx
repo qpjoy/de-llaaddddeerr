@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { X } from "@phosphor-icons/react";
+import { defaultDurationMs } from "./data.js";
 import { requestId } from "./request-id.mjs";
 export function Modal({ title, children, onClose }) {
   const ref = useRef(null);
@@ -221,6 +222,9 @@ export function JobForm({
   const ref = useRef(null);
   const requestKey = useRef(null);
   const [keyError, setKeyError] = useState("");
+  const [appId, setAppId] = useState("xhs");
+  const [operation, setOperation] = useState("search");
+  const [pages, setPages] = useState(1);
   const [rack, setRack] = useState(""),
     [host, setHost] = useState("");
   return (
@@ -239,6 +243,13 @@ export function JobForm({
         onSubmit({
           ...b,
           key: requestKey.current,
+          ...(b.estimatedSeconds
+            ? {
+                estimatedDurationMs: Math.round(
+                  Number(b.estimatedSeconds) * 1000,
+                ),
+              }
+            : {}),
           confirmed: b.confirmed === "on",
           followup: demo,
         });
@@ -249,6 +260,21 @@ export function JobForm({
           ? "本次将提交两个真实任务：一页搜索 → 使用搜索首条笔记的 detailInput 抓取详情。详情沿用同一设备和账号，保留完整访问令牌；搜索失败或首条链接不可用时不会调用详情接口。"
           : "搜索会话最多三页，执行中不抢占。详情任务请粘贴已有搜索结果中的完整链接。"}
       </p>
+      {mode === "sim" ? (
+        <label>
+          任务 App
+          <select
+            name="appId"
+            value={appId}
+            onChange={(e) => setAppId(e.target.value)}
+          >
+            <option value="xhs">小红书 · 模拟</option>
+            <option value="weibo">微博 · 模拟</option>
+          </select>
+        </label>
+      ) : (
+        <p className="small muted">当前真实执行适配器仅支持小红书。</p>
+      )}
       {demo ? (
         <input type="hidden" name="operation" value="search" />
       ) : (
@@ -259,6 +285,7 @@ export function JobForm({
             defaultValue="search"
             onChange={(e) => {
               ref.current.dataset.operation = e.target.value;
+              setOperation(e.target.value);
             }}
           >
             <option value="search">搜索</option>
@@ -274,7 +301,11 @@ export function JobForm({
           </label>
           <label>
             最多页数
-            <select name="pages" defaultValue="1">
+            <select
+              name="pages"
+              value={pages}
+              onChange={(e) => setPages(Number(e.target.value))}
+            >
               <option value="1">1 页</option>
               {!demo && <option value="2">2 页</option>}
               {!demo && <option value="3">3 页</option>}
@@ -285,10 +316,31 @@ export function JobForm({
           详情链接
           <input
             name="input"
-            placeholder="https://www.xiaohongshu.com/explore/…?xsec_token=…"
+            placeholder={
+              appId === "weibo"
+                ? "https://weibo.com/1000000000/demo11"
+                : "https://www.xiaohongshu.com/explore/…?xsec_token=…"
+            }
           />
         </label>
       </div>
+      {!demo && (
+        <label>
+          预计执行耗时（秒，可选）
+          <input
+            name="estimatedSeconds"
+            type="number"
+            min="1"
+            max="180"
+            step="0.001"
+            placeholder={`默认 ${defaultDurationMs(operation, pages) / 1000} 秒`}
+          />
+          <span className="small muted">
+            用于同优先级短任务排序，不是超时设置。会话执行中不抢占；等待满 30
+            秒后，同有效优先级按入池顺序。
+          </span>
+        </label>
+      )}
       {mode === "sim" && (
         <div className="form-grid">
           <label>

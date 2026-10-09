@@ -101,13 +101,13 @@ export function validateResult(op, input, body, page) {
     throw Error("Search identity/page/count mismatch");
   return body;
 }
-export function simulatedResult(op, input, page = 1) {
+export function simulatedResult(op, input, page = 1, appId = "xhs") {
   if (op === "note")
     return {
       ok: true,
       detail: {
         id: new URL(input.input).pathname.split("/")[2],
-        title: "模拟笔记详情",
+        title: appId === "weibo" ? "模拟微博正文" : "模拟笔记详情",
         content: "这是调度演练生成的合成数据，不来自真实手机。",
       },
     };
@@ -124,7 +124,10 @@ export function simulatedResult(op, input, page = 1) {
       id: `demo${page}${n}`,
       title: `${input.keyword} · 模拟结果 ${page}-${n}`,
       authorName: "演示账号",
-      detailInput: `https://www.xiaohongshu.com/explore/demo${page}${n}`,
+      detailInput:
+        appId === "weibo"
+          ? `https://weibo.com/1000000000/demo${page}${n}`
+          : `https://www.xiaohongshu.com/explore/demo${page}${n}`,
     })),
   };
 }

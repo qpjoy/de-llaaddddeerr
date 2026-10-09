@@ -7,6 +7,23 @@ import {
   matchesJob,
 } from "./scheduling.mjs";
 
+import {
+  APP_NAMES,
+  jobApp,
+  appName,
+  ensureApps,
+  appBlockers,
+  recordAppDispatch,
+  recordAppFinish,
+  deviceInterval,
+} from "./apps.mjs";
+
+import {
+  defaultDurationMs,
+  estimatedDuration,
+  EXECUTION_MODEL,
+} from "./task-contract.mjs";
+
 export class Fault extends Error {
   constructor(message, status = 409) {
     super(message);
@@ -91,7 +108,7 @@ export function publicDevice(d) {
   const { tokenHash, ...session } = d.session || {};
   return { ...d, session: d.session ? session : null };
 }
-export function noteLink(value) {
+export function noteLink(value, appId = "xhs") {
   const text = str(value, "详情链接", 8192);
   let u;
   try {
@@ -101,12 +118,15 @@ export function noteLink(value) {
   }
   requireThat(
     u.protocol === "https:" &&
-      u.hostname === "www.xiaohongshu.com" &&
-      /^\/explore\/[a-zA-Z0-9]+\/?$/.test(u.pathname) &&
+      (appId === "weibo"
+        ? u.hostname === "weibo.com" &&
+          /^\/[0-9]+\/[a-zA-Z0-9]+\/?$/.test(u.pathname)
+        : u.hostname === "www.xiaohongshu.com" &&
+          /^\/explore\/[a-zA-Z0-9]+\/?$/.test(u.pathname)) &&
       !u.username &&
       !u.password &&
       !u.hash,
-    "请使用搜索结果中的小红书 HTTPS explore 链接",
+    `请使用搜索结果中的${appName(appId)} HTTPS 详情链接`,
     400,
   );
   return text;
@@ -196,6 +216,7 @@ export function register(s, now, mode, body) {
   };
   if (policiesFor(s, d).some((p) => p.draining)) d.enabled = false;
   s.devices.push(d);
+  ensureApps(s, d);
   event(
     s,
     mode,
@@ -209,6 +230,17 @@ export function register(s, now, mode, body) {
 export function addJob(s, now, mode, body) {
   const key = str(body.key, "幂等键"),
     operation = body.operation;
+  const appId = body.appId ?? "xhs";
+  requireThat(
+    typeof appId === "string" && Object.hasOwn(APP_NAMES, appId),
+    "不支持的 App",
+    400,
+  );
+  requireThat(
+    mode === "sim" || appId === "xhs",
+    "真实适配器尚不支持微博执行",
+    400,
+  );
   requireThat(
     ["search", "note"].includes(operation),
     "只支持有界搜索和详情任务",
@@ -220,7 +252,7 @@ export function addJob(s, now, mode, body) {
           keyword: str(body.keyword, "关键词", 200),
           pages: Number(body.pages ?? 1),
         }
-      : { input: body.sourceJobId ? null : noteLink(body.input) };
+      : { input: body.sourceJobId ? null : noteLink(body.input, appId) };
   if (operation === "search")
     requireThat(
       Number.isInteger(input.pages) && input.pages >= 1 && input.pages <= 3,
@@ -241,6 +273,8 @@ export function addJob(s, now, mode, body) {
     400,
   );
   const spec = { operation, input, deviceId, sourceJobId, priority };
+  // Keep pre-App and explicit xhs requests fingerprint-compatible.
+  if (appId !== "xhs") spec.appId = appId;
   requireThat(!body.host || body.rack, "选择宿主机时必须指定机架", 400);
   if (body.rack) {
     requireThat(mode === "sim", "真实兼容任务仍须逐台绑定设备和账号", 400);
@@ -249,6 +283,15 @@ export function addJob(s, now, mode, body) {
       host: body.host ? str(body.host, "宿主机") : null,
     };
   }
+  const defaultMs = defaultDurationMs(operation, input.pages);
+  const duration = body.estimatedDurationMs ?? defaultMs;
+  requireThat(
+    Number.isInteger(duration) && duration >= 1000 && duration <= 180000,
+    "预计执行耗时须为 1000–180000 毫秒；它不是超时或中断设置",
+    400,
+  );
+  // An explicit default is equivalent to omission, preserving historical keys.
+  if (duration !== defaultMs) spec.estimatedDurationMs = duration;
   const fingerprint = createHash("sha256")
     .update(JSON.stringify(spec))
     .digest("hex");
@@ -293,6 +336,7 @@ export function addJob(s, now, mode, body) {
   if (sourceJobId) {
     const src = s.jobs.find((j) => j.id === sourceJobId && j.mode === mode);
     requireThat(src?.operation === "search", "依赖的搜索任务不存在", 400);
+    requireThat(jobApp(src) === appId, "详情任务必须沿用来源 App", 400);
     if (mode === "real")
       requireThat(src.deviceId === deviceId, "真实详情需沿用来源设备和账号");
   }
@@ -302,6 +346,9 @@ export function addJob(s, now, mode, body) {
     key,
     fingerprint,
     ...spec,
+    appId,
+    estimatedDurationMs: duration,
+    executionModel: EXECUTION_MODEL,
     status: "queued",
     createdAt: now,
     notBefore: now,
@@ -316,7 +363,7 @@ export function addJob(s, now, mode, body) {
     mode,
     now,
     "queued",
-    `${operation === "search" ? `搜索「${input.keyword}」` : "详情任务"} 已进入任务池`,
+    `${appName(appId)}：${operation === "search" ? `搜索「${input.keyword}」` : "详情任务"} 已进入任务池`,
     { jobId: j.id },
   );
   return j;
@@ -377,7 +424,17 @@ export function control(s, now, mode, id, body) {
     d.state = "idle";
     d.enabled = false;
     d.epoch++;
-    d.cooldownUntil = now + 2000;
+    d.cooldownUntil = Math.max(
+      d.cooldownUntil || 0,
+      now + Math.max(2000, deviceInterval(d)),
+    );
+    d.lastVerifiedStoppedAt = now;
+    for (const app of ensureApps(s, d).filter(
+      (a) => a.lastDispatchedAt != null,
+    )) {
+      app.cooldownUntil = Math.max(app.cooldownUntil, now + app.cooldownMs);
+      app.lastVerifiedStoppedAt = now;
+    }
   } else if (body.action === "disconnect") {
     requireThat(mode === "sim", "断线注入只允许模拟设备", 400);
     d.connected = "offline";
@@ -488,7 +545,10 @@ export function claim(s, now, mode, workerId) {
       (mode === "sim" || d.workerId === workerId),
   );
   devices.sort(
-    (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
+    (a, b) =>
+      (a.lastClaimedAt || 0) - (b.lastClaimedAt || 0) ||
+      a.name.localeCompare(b.name) ||
+      a.id.localeCompare(b.id),
   );
   const pending = s.jobs.filter(
     (j) => j.mode === mode && j.status === "queued" && j.notBefore <= now,
@@ -512,7 +572,7 @@ export function claim(s, now, mode, workerId) {
         continue;
       }
       try {
-        j.input.input = noteLink(link);
+        j.input.input = noteLink(link, jobApp(j));
       } catch {
         j.status = "blocked";
         j.reason = "来源详情链接未通过校验";
@@ -520,11 +580,18 @@ export function claim(s, now, mode, workerId) {
         continue;
       }
     }
-    const d = devices.find((d) => matchesJob(d, j));
+    const d = devices.find(
+      (d) => matchesJob(d, j) && !appBlockers(s, now, d, j).length,
+    );
     if (!d) continue;
+    const app = ensureApps(s, d).find((a) => a.appId === jobApp(j));
     const a = {
       id: randomUUID(),
       jobId: j.id,
+      appId: app.appId,
+      accountKey: app.accountKey,
+      estimatedDurationMs: estimatedDuration(j),
+      executionModel: j.executionModel || EXECUTION_MODEL,
       mode,
       deviceId: d.id,
       workerId,
@@ -539,9 +606,11 @@ export function claim(s, now, mode, workerId) {
     j.status = "running";
     j.attemptCount++;
     j.lastDeviceId = d.id;
-    j.reason = `优先级 ${j.priority}，等待提升后 ${effectivePriority(j, now)}；设备空闲且依赖满足`;
+    j.reason = `优先级 ${j.priority}，等待提升后 ${effectivePriority(j, now)}；预计 ${estimatedDuration(j) / 1000} 秒；整段会话独占执行`;
     j.startedAt = now;
     d.state = "running";
+    d.lastClaimedAt = now;
+    app.lastClaimedAt = now;
     bump(d);
     event(s, mode, now, "claimed", `${d.name} 领取任务；${j.reason}`, {
       jobId: j.id,
@@ -566,6 +635,12 @@ export function markDispatch(s, now, a) {
   if (!owned(s, now, a)) return false;
   const row = s.attempts.find((x) => x.id === a.id);
   row.dispatchedAt ??= now;
+  recordAppDispatch(
+    s,
+    now,
+    s.devices.find((d) => d.id === a.deviceId),
+    row,
+  );
   return true;
 }
 export function checkpoint(s, now, a, result) {
@@ -574,6 +649,7 @@ export function checkpoint(s, now, a, result) {
   const d = s.devices.find((d) => d.id === a.deviceId);
   d.projection = {
     source: a.mode === "sim" ? "sim" : "real",
+    appId: jobApp(a),
     observedAt: now,
     progressAt: now,
     type: result.detail ? "note" : "search",
@@ -622,7 +698,7 @@ export function finish(s, now, a, outcome) {
   row.completedAt = now;
   row.result = outcome.result;
   row.error = outcome.error;
-  if (outcome.blockedBeforeDispatch && !row.dispatchedAt) {
+  if (outcome.blockedBeforeDispatch && row.dispatchedAt == null) {
     row.status = "blocked";
     j.status = "queued";
     j.reason = "手机未报告空闲，已暂停设备；任务保留";
@@ -643,7 +719,7 @@ export function finish(s, now, a, outcome) {
     j.completedAt = now;
     j.reason = "全部已确认步骤完成";
     d.state = "idle";
-    d.cooldownUntil = now + (a.mode === "real" ? 2000 : 300);
+    recordAppFinish(s, now, d, row);
   }
   bump(d);
   event(s, a.mode, now, row.status, `${d.name}：${j.reason}`, {
@@ -671,7 +747,7 @@ export function scenario(s, now, kind, key) {
     "请先释放模拟控制会话",
   );
   requireThat(
-    ["five", "failover", "priority"].includes(kind),
+    ["five", "failover", "priority", "multiapp"].includes(kind),
     "未知演示场景",
     400,
   );
@@ -699,11 +775,24 @@ export function scenario(s, now, kind, key) {
       .some((d) => policiesFor(s, d).some((p) => p.draining)),
     "演示设备所属资源已排空，请先解除排空",
   );
+  if (kind === "multiapp") {
+    const d = devices[0];
+    const apps = ensureApps(s, d);
+    requireThat(
+      d.cooldownUntil <= now && apps.every((a) => a.cooldownUntil <= now),
+      "演示设备仍在冷却，请稍后再试",
+    );
+    d.taskIntervalMs = 300;
+    for (const a of apps) {
+      a.cooldownMs = a.appId === "xhs" ? 12000 : 6000;
+      a.revision++;
+      a.updatedAt = now;
+    }
+  }
   for (const [i, d] of devices.entries()) {
     d.enabled = i === 0 || (kind === "failover" && i === 1);
     d.connected = "online";
     d.state = "idle";
-    d.cooldownUntil = 0;
     d.epoch++;
     bump(d);
   }
@@ -714,6 +803,42 @@ export function scenario(s, now, kind, key) {
       priority: 5,
       ...b,
     });
+  if (kind === "multiapp") {
+    const deviceId = devices[0].id;
+    put(1, {
+      operation: "search",
+      appId: "xhs",
+      keyword: "小红书 · 首次搜索",
+      pages: 1,
+      priority: 2,
+      deviceId,
+    });
+    put(2, {
+      operation: "search",
+      appId: "xhs",
+      keyword: "小红书 · 冷却后搜索",
+      pages: 1,
+      priority: 2,
+      deviceId,
+    });
+    put(3, {
+      operation: "search",
+      appId: "weibo",
+      keyword: "微博 · 利用空闲执行槽",
+      pages: 1,
+      priority: 5,
+      deviceId,
+    });
+    event(
+      s,
+      "sim",
+      now,
+      "scenario",
+      `${devices[0].name} 一机双 App 演示：小红书冷却 12 秒、微博 6 秒、整机间隔 0.3 秒；策略保留，全部为模拟`,
+      { runId: key, deviceId },
+    );
+    return { runId: key };
+  }
   const a = put(1, {
     operation: "search",
     keyword: "美食",

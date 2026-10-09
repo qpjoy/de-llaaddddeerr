@@ -1,13 +1,28 @@
+import {
+  AGING_INTERVAL_MS,
+  estimatedDuration,
+  taskLane,
+} from "./task-contract.mjs";
+import { deviceApps, appBlockers, deviceInterval, jobApp } from "./apps.mjs";
 // Pure scheduling rules shared by claims and read-only explanations.
 export const effectivePriority = (job, now) =>
   Math.max(
     1,
-    job.priority - Math.floor(Math.max(0, now - job.createdAt) / 30000),
+    job.priority -
+      Math.floor(Math.max(0, now - job.createdAt) / AGING_INTERVAL_MS),
   );
-export const compareJobs = (now) => (a, b) =>
-  effectivePriority(a, now) - effectivePriority(b, now) ||
-  a.createdAt - b.createdAt ||
-  a.id.localeCompare(b.id);
+export const compareJobs = (now) => (a, b) => {
+  const priority = effectivePriority(a, now) - effectivePriority(b, now);
+  if (priority) return priority;
+  // Old jobs outrank fresh short jobs at equal effective priority. Among old jobs use FIFO.
+  if (Math.max(now - a.createdAt, now - b.createdAt) >= AGING_INTERVAL_MS)
+    return a.createdAt - b.createdAt || a.id.localeCompare(b.id);
+  return (
+    estimatedDuration(a) - estimatedDuration(b) ||
+    a.createdAt - b.createdAt ||
+    a.id.localeCompare(b.id)
+  );
+};
 export const matchesJob = (device, job) =>
   device.mode === job.mode &&
   (!job.deviceId || device.id === job.deviceId) &&
@@ -98,13 +113,36 @@ export function schedulingSnapshot(state, now, mode) {
   const queue = jobs
     .filter((j) => j.status === "queued")
     .sort(compareJobs(now));
-  const availability = devices.map((d) => ({
-    deviceId: d.id,
-    blockers: [
+  const availability = devices.map((d) => {
+    const common = [
       ...deviceBlockers(state, now, d),
       ...workerBlockers(state, now, d),
-    ],
-  }));
+    ];
+    const running = state.attempts?.find(
+      (a) => a.deviceId === d.id && a.status === "running",
+    );
+    const apps = deviceApps(state, d).map((app) => ({
+      ...app,
+      active: !!running && jobApp(running) === app.appId,
+      nextAllowedAt: Math.max(d.cooldownUntil || 0, app.cooldownUntil),
+      blockers: [...common, ...appBlockers(state, now, d, app)],
+    }));
+    return {
+      deviceId: d.id,
+      deviceIntervalMs: deviceInterval(d),
+      apps,
+      commonBlockers: common,
+      blockers:
+        !common.length && apps.length && apps.every((a) => a.blockers.length)
+          ? [
+              {
+                code: "all-apps-cooling",
+                message: "此设备所有 App 均在冷却，等待各自截止时间",
+              },
+            ]
+          : common,
+    };
+  });
   const byDevice = new Map(availability.map((d) => [d.deviceId, d]));
   const byJob = new Map(jobs.map((j) => [j.id, j]));
   const waiting = queue.map((j, i) => {
@@ -126,14 +164,19 @@ export function schedulingSnapshot(state, now, mode) {
     }
     const candidates = devices.filter((d) => matchesJob(d, j));
     const ready = candidates.filter(
-      (d) => byDevice.get(d.id).blockers.length === 0,
+      (d) =>
+        byDevice.get(d.id).commonBlockers.length === 0 &&
+        !appBlockers(state, now, d, j).length,
     );
     if (!candidates.length)
       reasons.push({ code: "no-device", message: "没有匹配的已登记设备" });
     else if (!ready.length) {
       const codes = new Set();
       for (const d of candidates)
-        for (const r of byDevice.get(d.id).blockers) {
+        for (const r of [
+          ...byDevice.get(d.id).commonBlockers,
+          ...appBlockers(state, now, d, j),
+        ]) {
           if (!codes.has(r.code)) {
             reasons.push(r);
             codes.add(r.code);
@@ -144,6 +187,8 @@ export function schedulingSnapshot(state, now, mode) {
       jobId: j.id,
       order: i + 1,
       effectivePriority: effectivePriority(j, now),
+      estimatedDurationMs: estimatedDuration(j),
+      lane: taskLane(j),
       waitMs: Math.max(0, now - j.createdAt),
       candidateDeviceIds: ready.map((d) => d.id),
       status: reasons.length ? "waiting" : "candidate",

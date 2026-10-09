@@ -40,7 +40,7 @@ async function until(check, timeout = 55000) {
   }
   throw Error("Timed out waiting for simulation evidence");
 }
-for (const kind of ["five", "priority", "failover"]) {
+for (const kind of ["five", "priority", "failover", "multiapp"]) {
   const key = `acceptance-${kind}-${crypto.randomUUID()}`;
   await call("scenarios?mode=sim", { kind, key });
   let interruptedJob = null,
@@ -66,7 +66,7 @@ for (const kind of ["five", "priority", "failover"]) {
   const jobs = await until((s) => {
     const jobs = s.jobs.filter((j) => j.runId === key);
     return (
-      jobs.length === (kind === "priority" ? 3 : 5) &&
+      jobs.length === (["priority", "multiapp"].includes(kind) ? 3 : 5) &&
       jobs.every((j) => j.status === "succeeded") &&
       jobs
     );
@@ -105,6 +105,24 @@ for (const kind of ["five", "priority", "failover"]) {
       "Respect simulated takeover timeout",
     );
   }
+  if (kind === "multiapp") {
+    const order = [...jobs].sort((a, b) => a.startedAt - b.startedAt);
+    assert.deepEqual(
+      order.map((j) => j.appId),
+      ["xhs", "weibo", "xhs"],
+    );
+    assert.equal(new Set(order.map((j) => j.lastDeviceId)).size, 1);
+    assert(order[1].startedAt >= order[0].completedAt + 300);
+    assert(
+      order[1].startedAt < order[0].completedAt + 12000,
+      "Weibo uses the XHS cooldown window",
+    );
+    assert(
+      order[2].startedAt >= order[0].completedAt + 12000,
+      "XHS respects its own deadline",
+    );
+    assert(order[2].startedAt >= order[1].completedAt + 300);
+  }
   report.cases.push({
     id: `MXD-${kind.toUpperCase()}`,
     status: "passed",
@@ -123,5 +141,5 @@ if (process.argv[3])
     mode: 0o600,
   });
 console.log(
-  "3 simulated acceptance scenarios passed; real devices were never addressed.",
+  "4 simulated acceptance scenarios passed; real devices were never addressed.",
 );

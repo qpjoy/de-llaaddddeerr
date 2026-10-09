@@ -1,6 +1,13 @@
 import { FileText, Clock, ArrowSquareOut } from "@phosphor-icons/react";
 import { useState } from "react";
-import { labels, time, jobTitle } from "./data.js";
+import {
+  labels,
+  time,
+  jobTitle,
+  appName,
+  estimatedDuration,
+  taskLane,
+} from "./data.js";
 import { Capacity } from "./Racks.jsx";
 export function Tasks({ jobs, devices, scheduling, onInspect, onCancel }) {
   const queue = new Map((scheduling?.queue || []).map((q) => [q.jobId, q]));
@@ -20,7 +27,7 @@ export function Tasks({ jobs, devices, scheduling, onInspect, onCancel }) {
         <thead>
           <tr>
             <th>任务</th>
-            <th>优先级</th>
+            <th>优先级 / 耗时</th>
             <th>状态</th>
             <th>设备</th>
             <th>
@@ -56,6 +63,10 @@ export function Tasks({ jobs, devices, scheduling, onInspect, onCancel }) {
               <td>
                 {j.priority} ·{" "}
                 {j.priority < 3 ? "高" : j.priority > 6 ? "后台" : "普通"}
+                <small className="task-reason">
+                  预计 {estimatedDuration(j) / 1000} 秒 ·{" "}
+                  {taskLane(j) === "short" ? "短任务" : "长任务"}
+                </small>
                 {queue.has(j.id) && (
                   <small className="task-reason">
                     当前有效 {queue.get(j.id).effectivePriority}
@@ -145,11 +156,17 @@ export function Scheduler({
           <div className="scheduler-rules">
             <p>
               <strong>1–9 优先级</strong>
-              <span>1 最高，每等待 30 秒提升一级，同级按入池顺序。</span>
+              <span>
+                1 最高，每等待 30 秒提升一级。新任务同级短任务优先；等待满 30
+                秒后同有效优先级按入池顺序。
+              </span>
             </p>
             <p>
-              <strong>完整会话串行</strong>
-              <span>高优先级只影响下一次领取，不抢占正在搜索的手机。</span>
+              <strong>两层任务循环</strong>
+              <span>
+                外层选任务与
+                App；内层执行步骤、验收回执。整段会话独占手机，耗时估计不触发中断。
+              </span>
             </p>
             <p>
               <strong>故障保留证据</strong>
@@ -206,10 +223,18 @@ export function Scheduler({
           </div>
           <div className="panel-body">
             <p className="muted">
-              演练会重新准备模拟设备；资源并发策略继续生效。双机接管时，在工作台对正在执行的
+              一机双 App 会设置首台设备：小红书冷却 12 秒、微博 6 秒、整机间隔
+              0.3
+              秒，策略在演示后保留。演练会重新准备模拟设备；已有冷却与资源并发策略继续生效。双机接管时，在工作台对正在执行的
               A 注入模拟断线。
             </p>
             <div className="button-row">
+              <button
+                disabled={busy || active}
+                onClick={() => onScene("multiapp")}
+              >
+                一机双 App 冷却
+              </button>
               <button disabled={busy || active} onClick={() => onScene("five")}>
                 五任务串行
               </button>
@@ -278,6 +303,10 @@ export function JobDetail({ detail }) {
         {labels[detail.job.status]} · {detail.job.reason}
       </p>
       <p className="small muted">任务 ID：{detail.job.id}</p>
+      <p className="small muted">
+        预计 {estimatedDuration(detail.job) / 1000} 秒 ·
+        整段会话独占执行。预计耗时不含排队和冷却，不承诺开始或完成时间。
+      </p>
       <div className="table-scroll">
         <table>
           <thead>
@@ -291,7 +320,10 @@ export function JobDetail({ detail }) {
           <tbody>
             {detail.attempts.map((a, i) => (
               <tr key={a.id}>
-                <td>#{i + 1}</td>
+                <td>
+                  #{i + 1}
+                  <small className="task-reason">{appName(a.appId)}</small>
+                </td>
                 <td>
                   {labels[a.status] || a.status}
                   {a.lateEvidence ? " · 有迟到证据" : ""}

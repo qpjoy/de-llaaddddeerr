@@ -135,6 +135,10 @@ f954b26d6cf601396ae1a6a7c09c2a177c3385f6e6bc3c74e9cea25c8053c319
 
 多设备支持的证据：ADBController 命令支持 `-s serial`，runner 按 serial 分开，设备库按 serial 存储。故同一宿主机增加第二台手机优先复用同一个 8787、传不同 serial，**不是每台必增公开端口**。这不保证所有未导出业务脚本已严格按 serial 隔离；真实并发必须逐链验收。旧 PoC 全局入口则需逐手机隔离的映射/路由，不能仅改注册表 serial。
 
+补充的任务机制逐函数复核见 [调度中心优先方案第 3 节](scheduler-first-plan-2026-10-10.md#3-mobile-agent-能否直接承担完整调度)：已确认逐设备队列、once/daily、批次激活、完成接力与 `last_run_at`；在审阅的派发路径未见基于该时间的冷却预算，执行框架以退出码标成功。它可提供设计参考，不能据不完整导出认定已经满足资源池调度和复合任务完成契约。
+
+后续完成语义复核见 [执行完成与收尾契约](execution-completion-contract-2026-10-10.md)：旧脚本确有自身完成判断；`on_finished` 为进程内回调，HTTP 有 task/collected 查询但数据可能跨 run，不能把旧总量当本次成功。SQLite 已启用 WAL/busy timeout，逐设备可并发，不宜将其笼统描述为“不支持并发”；高并发容量、HA 和统一业务验收仍无足够证据。
+
 ## 7. 公开项目调查与建议
 
 公开资料核查日 2026-10-10。按本地项目标题“侵权中台”和 `start_ip_rights_sidecar` 等特征检索，未定位能确认匹配的公开仓库。没有 `.git`/remote/版权证据，**不能把服务器项目认定为 X-PLUG/MobileAgent 的原版或已证明的 fork**。下列是候选技术来源，不是来源鉴定。

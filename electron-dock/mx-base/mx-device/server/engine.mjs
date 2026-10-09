@@ -111,7 +111,7 @@ export class Engine {
         let result;
         if (job.mode === "sim") {
           await sleep(this.simDelay);
-          result = simulatedResult(op, job.input, p);
+          result = simulatedResult(op, job.input, p, job.appId);
         } else
           result = validateResult(
             op,

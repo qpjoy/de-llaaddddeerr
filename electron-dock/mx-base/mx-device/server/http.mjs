@@ -19,6 +19,7 @@ import {
   requestInspection,
   setPoCChannel,
 } from "./model.mjs";
+import { configurePacing } from "./pacing.mjs";
 import { controlResource, updatePlacement } from "./resources.mjs";
 import { schedulingSnapshot } from "./scheduling.mjs";
 
@@ -155,6 +156,18 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
             res,
             200,
             await store.atomic((s, n) => controlResource(s, n, mode, b), {
+              mode,
+            }),
+          );
+        }
+        const pacing = path.match(/^\/api\/devices\/([^/]+)\/pacing$/);
+        if (pacing && req.method === "POST") {
+          const id = uuid(pacing[1]),
+            b = await body(req);
+          return json(
+            res,
+            200,
+            await store.atomic((s, n) => configurePacing(s, n, mode, id, b), {
               mode,
             }),
           );

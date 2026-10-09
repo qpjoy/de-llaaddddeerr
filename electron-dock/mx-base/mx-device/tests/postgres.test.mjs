@@ -54,7 +54,7 @@ test(
       const versions = await a.pool.query(
         "SELECT name,checksum FROM mx_device.schema_migrations ORDER BY name",
       );
-      assert.equal(versions.rowCount, 3);
+      assert.equal(versions.rowCount, 4);
       assert.equal(versions.rows[0].name, "001_device_center.sql");
       assert.match(versions.rows[0].checksum, /^[a-f0-9]{64}$/);
       const camera = await a.atomic(
@@ -338,7 +338,8 @@ test(
         mode: "sim",
         key: "transfer:1",
       });
-      const w = await a.atomic((s, n) => claim(s, n + 10, "sim", "w"));
+      // Scenario setup preserves the previous physical cooldown. Advance test time past it.
+      const w = await a.atomic((s, n) => claim(s, n + 1000, "sim", "w"));
       await a.atomic((s, n) => {
         const d = s.devices.find((d) => d.id === w.device.id);
         control(s, n, "sim", d.id, {

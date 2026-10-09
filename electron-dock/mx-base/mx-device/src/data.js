@@ -24,6 +24,7 @@ const empty = {
   events: [],
   workers: [],
   resources: [],
+  apps: [],
 };
 export function useSnapshot(mode, onExpired) {
   const [state, setState] = useState(empty),
@@ -89,9 +90,19 @@ export const labels = {
 };
 export const time = (value) =>
   value ? new Date(value).toLocaleTimeString("zh-CN", { hour12: false }) : "—";
-export const jobTitle = (j) =>
+export const appName = (appId = "xhs") =>
+  ({ xhs: "小红书", weibo: "微博" })[appId] || appId;
+const operationTitle = (j) =>
   j.operation === "search"
     ? `搜索 · ${j.input.keyword}`
     : j.sourceJobId
       ? "详情 · 搜索结果"
       : "笔记详情";
+
+export const jobTitle = (j) => `${appName(j.appId)} · ${operationTitle(j)}`;
+
+export {
+  defaultDurationMs,
+  estimatedDuration,
+  taskLane,
+} from "../server/task-contract.mjs";

@@ -12,6 +12,7 @@
 | POST /api/devices?mode=real | 登记设备；真实设备默认暂停 |
 | POST /api/resources/control?mode=sim | `{scope:rack\|host,rack,host?,revision,action:drain\|release\|limit,maxConcurrent?}`；持久资源策略 |
 | POST /api/devices/:id/placement?mode=sim | `{revision,name,rack,host}`；仅暂停空闲且无预留时修改中心归属 |
+| POST /api/devices/:id/pacing?mode=sim | `{revision,deviceIntervalMs,apps:[{appId,cooldownMs}]}`；暂停空闲且无预留时配置间隔 |
 | POST /api/devices/:id/probe?mode=real | `{revision}`；指定 Worker 异步执行一次只读状态查询 |
 | POST /api/devices/:id/control?mode=sim | `{revision,action}`；乐观版本校验 |
 | POST /api/devices/:id/observer?mode=real | `{revision,origin,serial,approved:true}`；附加只读画面配置，保存不连接手机 |
@@ -22,7 +23,7 @@
 | POST /api/devices/:id/poc-channel?mode=real | `{revision,enabled:boolean,confirmed:true}`；只开关本中心的旧 PoC 调用，保持暂停、保留历史 |
 | POST /api/jobs?mode=sim | 幂等提交搜索 / 详情任务 |
 | POST /api/jobs/:id/cancel?mode=sim | 仅取消 queued，不取消在途执行 |
-| POST /api/scenarios?mode=sim | `{kind:five|priority|failover,key}`；当前演示无活动任务时创建新场景 |
+| POST /api/scenarios?mode=sim | `{kind:five\|priority\|failover\|multiapp,key}`；当前演示无活动任务时创建新场景 |
 | GET /health/live | API 进程存活，不检查外部设备 |
 | GET /health/ready | 本中心数据库可用，不检查 Hub、手机或 mx-rig |
 
@@ -48,6 +49,18 @@ GET state 增加 `resources`、数据库时间 `now` 与只读 `scheduling`：�
 
 停用旧通道前须无待处理采集任务、在途尝试和未完成 probe，设备暂停且状态可核验；不会中断现有物理工作。`pocDisabled:true` 时 probe、enable、采集提交及调度领取均被禁止。恢复通道后仍暂停，启用必须有晚于 `pocChangedAt` 的新鲜空闲证据。开关不影响 8787 的截图或状态读取，不停止手机 PoC/VPN。
 
+## App / 账号节奏与预计耗时
+
+任务可选 `appId: xhs|weibo`，默认 xhs；weibo 仅模拟，真实提交返回 400。详情依赖必须属于同一 App；模拟微博链接为 `https://weibo.com/<数字用户>/<字母数字ID>`。绑定账号由设备登记/迁移确定，提交方不能改账号来清冷却。
+
+可选 `estimatedDurationMs` 为 1000–180000 整数毫秒，搜索 1/2/3 页默认 15000/25000/35000，详情 20000。省略与显式默认同义，兼容历史幂等指纹；更改自定义估计或 App 会冲突。新 Job/Attempt 保存 `executionModel:exclusive-session.v1`。估计是排序提示，不是实际停止时间。排序规则见 [实施说明](app-pacing-2026-10-10.md)。
+
+pacing 接口的整机间隔为模拟 0–86400000、真机 2000–86400000 整数毫秒。`apps` 必须恰好包含当前适配器支持的全部 App，每个 cooldownMs 为 0–86400000。版本冲突、非暂停空闲、控制会话未释放返回 409；观察设备不开放配置。已有冷却只延长不缩短；新登记/升级的 App 额外间隔初始为 0。
+
+快照增加 `apps` 持久记录；`scheduling.devices[]` 增加 `deviceIntervalMs/commonBlockers/apps`，App 含账号资源、cooldownMs/Until、lastClaimedAt/DispatchedAt/FinishedAt/SucceededAt、active、nextAllowedAt 与阻塞原因。App 的 nextAllowedAt 是整机/自身截止的最大值，只代表时间条件下界。`scheduling.queue[]` 增加 `estimatedDurationMs/lane`；lane 为 short/long，15 秒及以内 short。每个 App 没有独立物理执行槽。
+
+`multiapp` 场景会保留新的 12 秒/6 秒/0.3 秒策略；所有场景不清除现有冷却。不得用清空 Redis key、重建账号别名或重启服务代替该接口。
+
 ## mx-rig
 
 当前不需要部署 mx-rig，也未修改其目录。可复用 `tests/acceptance.mjs` 作为独立 HTTP 验收入口，不假称已经注册成 Rig 的内置验收包。
@@ -61,7 +74,7 @@ GET state 增加 `resources`、数据库时间 `now` 与只读 `scheduling`：�
 }
 ```
 
-命令：`node tests/acceptance.mjs /protected/device-test.json /artifacts/device-report.json`。脚本先检查角色必须是 test，然后执行三个有写入的模拟场景。Rig 套件应声明 `writesData:true`、仅模拟目标、单次重试上限 1、专属实例，完成后读取报告并保留失败证据；不要并发运行两个整套场景。
+命令：`node tests/acceptance.mjs /protected/device-test.json /artifacts/device-report.json`。脚本先检查角色必须是 test，然后执行四个有写入的模拟场景。Rig 套件应声明 `writesData:true`、仅模拟目标、单次重试上限 1、专属实例，完成后读取报告并保留失败证据；不要并发运行两个整套场景。
 
 此脚本采用独立报告格式，不是已验证的 Rig ingest schema；正式注册需要跟随届时 Rig 契约、用例目录、凭证注入与产物规范，不能直接把此 JSON 当作 Rig 标准报告导入。
 

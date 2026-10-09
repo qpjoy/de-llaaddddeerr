@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { HardDrives, DeviceMobile, ArrowRight } from "@phosphor-icons/react";
+import { AppPacing } from "./AppPacing.jsx";
 import { time } from "./data.js";
 
 export function Capacity({ counts = {} }) {
@@ -53,6 +54,7 @@ export function Racks({
   onOpenDevice,
   onPolicy,
   onPlacement,
+  onPacing,
   onAdd,
 }) {
   const [rackFilter, setRackFilter] = useState(""),
@@ -225,6 +227,13 @@ export function Racks({
                                   : blockers[0]?.message ||
                                     "候选条件满足，等待执行器领取"}
                               </p>
+                              <AppPacing
+                                device={d}
+                                availability={availability.get(d.id)}
+                                now={scheduling.at}
+                                busy={busy}
+                                onConfigure={onPacing}
+                              />
                               <div className="rack-device-actions">
                                 <span className="small muted">
                                   {d.adapter === "mobile-agent"

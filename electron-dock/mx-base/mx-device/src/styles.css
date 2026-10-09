@@ -1635,3 +1635,34 @@ summary {
     flex-wrap: wrap;
   }
 }
+
+.app-pacing {
+  border-top: 1px solid var(--line);
+  margin-top: 14px;
+  padding-top: 10px;
+}
+.app-pacing-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.app-pacing-heading strong {
+  font-size: 13px;
+}
+.app-pacing-heading span {
+  font-size: 12px;
+}
+.app-pacing p {
+  margin: 6px 0;
+}
+.app-pacing-row {
+  background: #f2f6fa;
+  border-radius: 8px;
+  margin: 8px 0;
+  padding: 10px 12px;
+}
+.app-account {
+  overflow-wrap: anywhere;
+}

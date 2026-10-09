@@ -1,5 +1,6 @@
 import { DeviceMobile, ArrowCounterClockwise } from "@phosphor-icons/react";
-import { time } from "./data.js";
+import { AppPacing } from "./AppPacing.jsx";
+import { time, appName } from "./data.js";
 import { DeviceControls } from "./Devices.jsx";
 import { useState } from "react";
 import { LiveScreen, ControlSession } from "./PhoneConsole.jsx";
@@ -10,6 +11,9 @@ export default function Projection({
   onLive,
   onConfigure,
   onRefresh,
+  availability,
+  now,
+  onPacing,
   ...controls
 }) {
   const [tab, setTab] = useState("screen");
@@ -60,7 +64,7 @@ export default function Projection({
                 <>
                   <p className="phone-caption">
                     {p.source === "sim" ? "模拟结果" : "接口返回"} ·{" "}
-                    {time(p.observedAt)}
+                    {appName(p.appId)} · {time(p.observedAt)}
                   </p>
                   <h4>{p.detail ? "笔记详情" : p.keyword || "当前状态"}</h4>
                   <p className="phone-status">
@@ -116,6 +120,15 @@ export default function Projection({
         </>
       )}
       <DeviceControls device={device} {...controls} />
+      {device && (
+        <AppPacing
+          device={device}
+          availability={availability}
+          now={now}
+          busy={controls.busy}
+          onConfigure={onPacing}
+        />
+      )}
       {device?.mode === "real" && (
         <MobileStatus device={device} onRefresh={onRefresh} />
       )}

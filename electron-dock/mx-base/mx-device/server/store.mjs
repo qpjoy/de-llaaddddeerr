@@ -12,6 +12,7 @@ export class MemoryStore {
       attempts: [],
       events: [],
       resources: [],
+      apps: [],
     };
     this.tail = Promise.resolve();
     this.workers = [];
@@ -216,9 +217,15 @@ export class PgStore {
           [mode],
         )
       ).rows.map((r) => r.document);
-      const state = { devices, jobs, attempts, resources, events: [] },
+      const apps = (
+        await c.query(
+          "SELECT document FROM mx_device.device_apps WHERE mode=$1",
+          [mode],
+        )
+      ).rows.map((r) => r.document);
+      const state = { devices, jobs, attempts, resources, apps, events: [] },
         before = new Map(
-          [...devices, ...jobs, ...attempts, ...resources].map((r) => [
+          [...devices, ...jobs, ...attempts, ...resources, ...apps].map((r) => [
             r.id,
             JSON.stringify(r),
           ]),
@@ -237,6 +244,12 @@ export class PgStore {
           await c.query(
             "INSERT INTO mx_device.devices VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET document=excluded.document,resource_key=excluded.resource_key,account_key=excluded.account_key",
             [d.id, d.mode, d.resourceKey, d.accountKey, d],
+          );
+      for (const a of state.apps)
+        if (before.get(a.id) !== JSON.stringify(a))
+          await c.query(
+            "INSERT INTO mx_device.device_apps VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO UPDATE SET document=excluded.document",
+            [a.id, a.mode, a.deviceId, a.appId, a.accountKey, a],
           );
       for (const j of state.jobs)
         if (before.get(j.id) !== JSON.stringify(j))
@@ -275,7 +288,7 @@ export class PgStore {
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       await client.query("SET LOCAL statement_timeout='5s'");
-      const [d, j, e, w, a, r, clock] = [
+      const [d, j, e, w, a, r, apps, clock] = [
         await client.query(
           "SELECT document FROM mx_device.devices WHERE mode=$1 ORDER BY id",
           [mode],
@@ -303,6 +316,10 @@ export class PgStore {
           [mode],
         ),
         await client.query(
+          "SELECT document FROM mx_device.device_apps WHERE mode=$1",
+          [mode],
+        ),
+        await client.query(
           "SELECT (extract(epoch FROM clock_timestamp())*1000)::bigint AS now",
         ),
       ];
@@ -313,6 +330,7 @@ export class PgStore {
         attempts: a.rows.map((r) => r.document),
         events: e.rows.reverse().map((r) => ({ ...r.document, seq: r.seq })),
         resources: r.rows.map((r) => r.document),
+        apps: apps.rows.map((r) => r.document),
         now: Number(clock.rows[0].now),
         workers: w.rows.map((r) => ({
           ...r.document,

@@ -16,6 +16,7 @@ import { Modal, DeviceForm, JobForm, ObserverForm } from "./Forms.jsx";
 import { Devices, Connections } from "./Devices.jsx";
 import { Tasks, Events, JobDetail, Scheduler } from "./Tasks.jsx";
 import { Racks, ResourceForm, PlacementForm } from "./Racks.jsx";
+import { PacingForm } from "./AppPacing.jsx";
 import Projection from "./Projection.jsx";
 import { requestId } from "./request-id.mjs";
 import { submitJob } from "./submit-job.mjs";
@@ -103,7 +104,8 @@ function Workspace({ onExpired }) {
     [failure, setFailure] = useState(false),
     [detail, setDetail] = useState(null),
     [resource, setResource] = useState(null),
-    [placement, setPlacement] = useState(null);
+    [placement, setPlacement] = useState(null),
+    [pacing, setPacing] = useState(null);
   const { state, error, loading, refresh } = useSnapshot(mode, onExpired);
   useEffect(() => {
     window.scrollTo(0, 0);
@@ -170,6 +172,13 @@ function Workspace({ onExpired }) {
     setModal("detail");
     const d = await run(() => api(`jobs/${j.id}`, mode), "已读取任务证据");
     setDetail(d);
+  };
+  const openPacing = (d) => {
+    setPacing({
+      device: d,
+      availability: state.scheduling?.devices.find((a) => a.deviceId === d.id),
+    });
+    setModal("pacing");
   };
   const nav = [
     ["racks", "机架总览", HardDrives],
@@ -276,6 +285,7 @@ function Workspace({ onExpired }) {
               state={state}
               mode={mode}
               busy={busy}
+              onPacing={openPacing}
               onAdd={() => setModal("device")}
               onOpenDevice={(id) => {
                 setSelectedId(id);
@@ -432,6 +442,11 @@ function Workspace({ onExpired }) {
                 key={`${mode}:${device?.id}`}
                 device={device}
                 history={history}
+                availability={state.scheduling?.devices.find(
+                  (a) => a.deviceId === device?.id,
+                )}
+                now={state.scheduling?.at}
+                onPacing={openPacing}
                 onLive={() => setHistory(null)}
                 busy={busy}
                 onControl={control}
@@ -454,19 +469,21 @@ function Workspace({ onExpired }) {
       {modal && (
         <Modal
           title={
-            modal === "resource"
-              ? `${resource.scope === "rack" ? "机架" : "宿主机"}调度策略`
-              : modal === "placement"
-                ? "编辑设备归属"
-                : modal === "device"
-                  ? "添加设备"
-                  : modal === "observer"
-                    ? "配置真实画面"
-                    : modal === "job"
-                      ? `提交${mode === "sim" ? "模拟" : "真实"}任务`
-                      : modal === "real-demo"
-                        ? "真机搜索 → 详情演示"
-                        : "执行证据"
+            modal === "pacing"
+              ? "App 与整机冷却策略"
+              : modal === "resource"
+                ? `${resource.scope === "rack" ? "机架" : "宿主机"}调度策略`
+                : modal === "placement"
+                  ? "编辑设备归属"
+                  : modal === "device"
+                    ? "添加设备"
+                    : modal === "observer"
+                      ? "配置真实画面"
+                      : modal === "job"
+                        ? `提交${mode === "sim" ? "模拟" : "真实"}任务`
+                        : modal === "real-demo"
+                          ? "真机搜索 → 详情演示"
+                          : "执行证据"
           }
           onClose={() => setModal(null)}
         >
@@ -475,7 +492,20 @@ function Workspace({ onExpired }) {
               {notice}
             </p>
           )}
-          {modal === "resource" ? (
+          {modal === "pacing" ? (
+            <PacingForm
+              device={pacing.device}
+              availability={pacing.availability}
+              busy={busy}
+              onSubmit={async (body) => {
+                const r = await run(
+                  () => api(`devices/${pacing.device.id}/pacing`, mode, body),
+                  "冷却策略已保存，设备仍暂停",
+                );
+                if (r) setModal(null);
+              }}
+            />
+          ) : modal === "resource" ? (
             <ResourceForm
               group={resource}
               busy={busy}
