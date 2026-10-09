@@ -108,7 +108,7 @@ Hub 新分页使用绑定 consumer、Key、平台、查询与页大小的 `mxraw
 
 返回原 `night-all.data-search.v1` 严格结构：`data.items`、`data.pageInfo`、`status/warnings/meta`。普通微博/Instagram 帖子 `title=null`，正文仍在 `text`。微博默认进行上述受控全文补取；未验证全文时保留短文，返回 partial 与 warning。字段类型、内容 ID、平台授权、原平台客户计费 meter 和按结果条数记录的 usage 不变；补详情共用一个客户请求。raw 路径继续使用 raw meter 和一个 usage 单位，两套路径不是计费别名。
 
-新 data-search 游标为 `mxds1`，绑定 consumer、Key、平台、查询、pageSize 和 type。最多 15 页，与 raw 的 `mxraw1` 不可互换。Instagram 同时保存 `next_max_id` 与 `rank_token`，只解析已知媒体网格/items；推荐词不当作帖子。重复游标停止续页。上游超出请求页大小、未知结构或缺少必要续页字段时，保留完整证据并明确失败，不截断结果、不重试或回退第二次付费调用。页大小小于 20 和旧 `mxnc1` 游标暂保持原采集链路。
+新 data-search 游标为 `mxds1`，绑定 consumer、Key、平台、查询、pageSize 和 type。最多 15 页，与 raw 的 `mxraw1` 不可互换。Instagram 同时保存 `next_max_id` 与 `rank_token`，解析已知媒体网格/items；2026-10-09 增加 `status=ok` 的 list 分支，明确的 `list[].user` 账号结果和推荐词不当作帖子，list 中的明确媒体继续沿用帖子校验。只有账号的一页仍保留有效后续游标；未知或损坏项不静默丢弃。重复游标停止续页。上游超出请求页大小、未知结构或缺少必要续页字段时，保留完整证据并明确失败，不截断结果、不重试或回退第二次付费调用。页大小小于 20 和旧 `mxnc1` 游标暂保持原采集链路。归档诊断与上线验证见 [Instagram 搜索冷却诊断](instagram-search-diagnostics.md)。
 
 保留 `type=fresh` 默认 120 秒重放窗口，以及 `type=stable` 永久重放语义。部署验收使用新幂等键，避免把旧交付当作新实现；保留旧键则按原规则重放。原请求 fingerprint 不因迁移改变。
 

@@ -18,6 +18,8 @@ const continuation = value => ({ type: kind(value), length: typeof value === 'st
 const pagination = value => ({ nextMaxId: continuation(value?.next_max_id), rankToken: continuation(value?.rank_token),
   moreAvailable: paginationFlag(value?.more_available), hasMore: paginationFlag(value?.has_more),
   hasNextPage: paginationFlag(value?.has_next_page) })
+const listFields = value => Object.fromEntries(['position', 'id', 'pk', 'code', 'shortcode', 'user',
+  'username', 'full_name', 'media', 'caption', 'media_type', 'hashtag', 'place'].map(key => [key, kind(value?.[key])]))
 
 // Only fixed field names, types and counts leave restricted storage. Never emit
 // query/body/cursor values, arbitrary upstream keys or exception messages.
@@ -46,6 +48,9 @@ export function inspectInstagramArchive(archive, snapshot) {
     sectionsTruncated: Array.isArray(sections) && sections.length > 20,
     items: kind(data?.items), itemCount: count(data?.items),
     list: kind(data?.list), listCount: count(data?.list), users: kind(data?.users),
+    listEntries: Array.isArray(data?.list) ? data.list.slice(0, 20).map((entry, index) => ({ index,
+      fields: listFields(entry), user: listFields(entry?.user), media: listFields(entry?.media) })) : [],
+    listEntriesTruncated: Array.isArray(data?.list) && data.list.length > 20,
     hashtags: kind(data?.hashtags), places: kind(data?.places),
     keywords: kind(data?.other_results?.keyword_recommendations?.keywords),
     keywordCount: count(data?.other_results?.keyword_recommendations?.keywords),
@@ -68,7 +73,9 @@ export function inspectInstagramArchive(archive, snapshot) {
     const layout = section?.layout_content || section?.layoutContent
     const entries = layout?.medias || layout?.media || []
     return Array.isArray(entries) ? entries.map(entry => entry?.media || entry) : []
-  }) : Array.isArray(data?.items) ? data.items.map(entry => entry?.media || entry) : []
+  }) : Array.isArray(data?.items) ? data.items.map(entry => entry?.media || entry)
+    : grid == null && data?.items == null && Array.isArray(data?.list) ? data.list.flatMap(entry =>
+      object(entry?.media) ? [entry.media] : entry?.code || entry?.shortcode ? [entry] : []) : []
   const invalidRows = [], identities = new Set()
   let invalidRowCount = 0
   for (const [index, value] of values.entries()) {

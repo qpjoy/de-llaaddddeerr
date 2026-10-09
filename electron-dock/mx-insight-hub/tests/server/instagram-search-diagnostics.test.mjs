@@ -74,6 +74,32 @@ test('diagnostic output bounds section and row evidence and protects saved reque
   assert.equal(raw.pageSize, 30)
 })
 
+test('list-only evidence shows bounded field types and replays accounts without exposing identity or rank tokens', () => {
+  const data = { status: 'ok', list: [{ position: 0,
+    user: { id: '12345', pk: '12345', username: 'private-name', full_name: 'private-full-name' } }],
+    has_more: false, rank_token: 'r'.repeat(78) }
+  const report = inspectInstagramArchive(archive(data), snapshot)
+  assert.equal(report.state, 'current_projection_accepts')
+  assert.equal(report.returnedCount, 0)
+  assert.equal(report.hasMore, false)
+  assert.equal(report.shape.listCount, 1)
+  assert.equal(report.shape.listEntries[0].fields.user, 'object')
+  assert.equal(report.shape.listEntries[0].user.pk, 'string')
+  assert.equal(report.shape.pagination.rankToken.length, 78)
+  assert.doesNotMatch(JSON.stringify(report), /private-|12345|rrrr/)
+  data.list = Array(25).fill(data.list[0])
+  const bounded = inspectInstagramArchive(archive(data), snapshot)
+  assert.equal(bounded.shape.listEntries.length, 20)
+  assert.equal(bounded.shape.listEntriesTruncated, true)
+  data.list = [{ name: 'private-unknown-kind' }]
+  assert.equal(inspectInstagramArchive(archive(data), snapshot).state, 'current_projection_rejects')
+  data.list = [{ media: row }, row]
+  const posts = inspectInstagramArchive(archive(data), snapshot)
+  assert.equal(posts.resultCount, 2)
+  assert.equal(posts.uniqueValidIdentityCount, 1)
+  assert.equal(posts.returnedCount, 1)
+})
+
 test('missing, corrupt, invalid JSON and non-success archives cannot imply parser compatibility', () => {
   assert.equal(inspectInstagramArchive(null, snapshot).state, 'archive_missing')
   const corrupt = archive({})

@@ -5,6 +5,21 @@ const id = value => typeof value === 'string' && /^\d{1,40}(?:_\d{1,30})?$/.test
   : Number.isSafeInteger(value) && value > 0 ? String(value) : null
 const metric = value => value != null && value !== '' && Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null
 const token = value => typeof value === 'string' && value.length <= 2048 ? value : null
+const POST_FIELDS = ['id', 'pk', 'code', 'shortcode', 'media', 'caption', 'caption_text',
+  'media_type', 'taken_at', 'image_versions2', 'video_versions', 'carousel_media']
+
+function listMedia(entries) {
+  return entries.flatMap(entry => {
+    if (!object(entry)) throw new Error('invalid_instagram_search_shape')
+    // A general-search list may mix media with account results. Never turn a
+    // nested user into a post, or discard a malformed post just because it has an author.
+    if (object(entry.media)) return [entry.media]
+    if (entry.code || entry.shortcode) return [entry]
+    if (!POST_FIELDS.some(field => Object.hasOwn(entry, field)) && object(entry.user)
+      && (id(entry.user.id) || id(entry.user.pk)) && text(entry.user.username).trim()) return []
+    throw new Error('invalid_instagram_search_shape')
+  })
+}
 
 function rendition(values) {
   return (Array.isArray(values) ? values : []).filter(value => typeof value?.url === 'string')
@@ -42,6 +57,7 @@ export function projectInstagramSearch(result, request) {
   if (!object(data) || (data.status && data.status !== 'ok')) throw new Error('invalid_instagram_search_shape')
   const grid = data.media_grid || data.mediaGrid
   let values
+  let listPage = false
   if (Array.isArray(grid?.sections)) {
     values = grid.sections.flatMap(section => {
       const layout = section.layout_content || section.layoutContent
@@ -51,6 +67,10 @@ export function projectInstagramSearch(result, request) {
       return media.map(entry => entry.media || entry)
     })
   } else if (Array.isArray(data.items)) values = data.items.map(entry => entry.media || entry)
+  else if (grid == null && data.items == null && data.status === 'ok' && Array.isArray(data.list)) {
+    values = listMedia(data.list)
+    listPage = true
+  }
   else if (Array.isArray(data.other_results?.keyword_recommendations?.keywords)) values = []
   else throw new Error('invalid_instagram_search_shape')
   const capturedAt = result.publicBody.meta.capturedAt
@@ -70,7 +90,8 @@ export function projectInstagramSearch(result, request) {
   if (more != null && ![true, false, 0, 1, '0', '1', 'true', 'false'].includes(more)) throw new Error('invalid_instagram_pagination')
   const expectsMore = [true, 1, '1', 'true'].includes(more)
   if (expectsMore && !next) throw new Error('missing_instagram_continuation')
-  const hasMore = rows.length > 0 && request.page < 15 && !!next
+  // An account-only page can still have a valid continuation to later media.
+  const hasMore = (rows.length > 0 || listPage) && request.page < 15 && !!next
     && ![false, 0, '0', 'false'].includes(more) && next !== request.providerCursor?.next_max_id
   const nextCursor = hasMore ? request.encodeNext({ page: request.page + 1,
     providerCursor: { next_max_id: next, ...(rank ? { rank_token: rank } : {}) } }) : null

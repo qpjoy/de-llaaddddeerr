@@ -698,6 +698,61 @@ test('historical small pages and old continuations clean titles in Hub while pre
   assert.equal((await h.invokeData({ ...body, pageSize: 10 }, 'data-profile-preserved')).body.data.items[0].title, 'account name')
 })
 
+test('Instagram list-only account results deliver zero posts without quarantining later searches or losing the paid receipt', async () => {
+  // Reconstructed from the operator's field-type report; contains no production account values.
+  const account = { id: '12345', pk: '12345', username: 'account-result', full_name: 'Account result' }
+  const upstream = { status: 'ok', list: [{ position: 0, user: account }],
+    has_more: false, rank_token: 'rank'.repeat(19) + 'xx' }
+  for (const route of ['data', 'raw']) {
+    const h = await harness({ platform: 'instagram', instagramData: upstream })
+    const invoke = route === 'data' ? h.invokeData : h.invoke
+    const body = route === 'data' ? { platform: 'instagram', query: 'fixture', pageSize: 20 }
+      : { platform: 'instagram', query: 'fixture', count: 20 }
+    const response = await invoke(body, 'instagram-account-list')
+    assert.equal(response.body.data.status, 'ok')
+    assert.deepEqual(route === 'data' ? response.body.data.items : JSON.parse(response.body.data.raw_data), [])
+    const page = route === 'data' ? response.body.data.pageInfo : response.body.data.page
+    assert.equal(page.returnedCount, 0)
+    assert.equal(page.hasMore, false)
+    assert.equal(page.nextCursor, null)
+    if (route === 'data') assert.equal(isNightAllDataSearchV1Envelope(response.body), true)
+    assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+    const call = [...h.platformStore.calls.values()][0]
+    assert.equal(call.outcome, 'succeeded')
+    assert.equal(call.billed, true)
+    assert.equal(call.errorCode, null)
+    assert.deepEqual((await invoke(body, 'instagram-account-list')).body, response.body)
+    assert.equal(h.calls.length, 1)
+    // A distinct keyword can dispatch; the account-only result did not open quarantine.
+    await invoke({ ...body, query: 'next fixture' }, 'instagram-account-next')
+    assert.equal(h.calls.length, 2)
+    assert.equal(h.historical.length, 0)
+    assert.deepEqual(upstream.list[0].user, account)
+  }
+})
+
+test('Instagram list media retain captions and IDs while an account-only page retains a bound continuation', async () => {
+  const instagramData = { status: 'ok', list: [{ user: { id: '123', username: 'account-result' } }],
+    has_more: true, next_max_id: 'list-next', rank_token: 'list-rank' }
+  const h = await harness({ platform: 'instagram', instagramData })
+  const body = { platform: 'instagram', query: 'fixture', pageSize: 20 }
+  const first = await h.invokeData(body, 'instagram-list-page1')
+  assert.deepEqual(first.body.data.items, [])
+  assert.equal(first.body.data.pageInfo.hasMore, true)
+  assert.equal(isNightAllDataSearchV1Envelope(first.body), true)
+  instagramData.list.push({ media: instagramPost }, instagramPost)
+  instagramData.has_more = false
+  const second = await h.invokeData({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'instagram-list-page2')
+  assert.equal(second.body.data.items.length, 1)
+  assert.equal(second.body.data.items[0].externalId, instagramPost.pk)
+  assert.equal(second.body.data.items[0].title, null)
+  assert.equal(second.body.data.items[0].text, instagramPost.caption.text)
+  assert.equal(second.body.data.pageInfo.hasMore, false)
+  assert.equal(h.calls[1].searchParams.get('next_max_id'), 'list-next')
+  assert.equal(h.calls[1].searchParams.get('rank_token'), 'list-rank')
+  assert.equal(h.calls.length, 2)
+})
+
 test('Instagram empty keyword suggestions remain empty; malformed, oversize and incomplete continuation shapes fail without fallback or retry', async () => {
   const empty = await harness({ platform: 'instagram', instagramData: { status: 'ok',
     other_results: { keyword_recommendations: { keywords: [{ id: '123', name: 'popular term' }] } } } })
@@ -710,6 +765,16 @@ test('Instagram empty keyword suggestions remain empty; malformed, oversize and 
     [{ items: [{ ...instagramPost, pk: 9007199254740992 }] }, 'invalid_instagram_post_identity'],
     [{ media_grid: { sections: [{ layout_content: { medias: {} } }] } }, 'invalid_instagram_media_grid'],
     [{ items: [null] }, 'invalid_instagram_search_contract'],
+    [{ status: 'ok', list: [{ user: { pk: '123', username: 'name' }, caption: 'malformed post' }], has_more: false }, 'invalid_instagram_search_shape'],
+    [{ status: 'ok', list: [{ user: { pk: '123', username: 'name' }, media: null }], has_more: false }, 'invalid_instagram_search_shape'],
+    [{ status: 'ok', list: [{ name: 'unrecognized result' }], has_more: false }, 'invalid_instagram_search_shape'],
+    [{ status: 'ok', list: [null], has_more: false }, 'invalid_instagram_search_shape'],
+    [{ status: 'ok', list: [{ user: { pk: '123', username: 'name' } }], has_more: true }, 'missing_instagram_continuation'],
+    [{ status: 'ok', list: [], items: {} }, 'invalid_instagram_search_shape'],
+    [{ status: 'ok', list: [], media_grid: {} }, 'invalid_instagram_search_shape'],
+    [{ status: 'fail', list: [] }, 'invalid_instagram_search_shape'],
+    [{ list: [] }, 'invalid_instagram_search_shape'],
+    [{ status: 'ok', list: Array.from({ length: 21 }, (_, i) => ({ media: { ...instagramPost, pk: String(i + 1) } })) }, 'instagram_page_exceeds_requested_count'],
   ]) {
     const h = await harness({ platform: 'instagram', instagramData: data })
     await assert.rejects(h.invokeData())
