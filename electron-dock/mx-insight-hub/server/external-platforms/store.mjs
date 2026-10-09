@@ -1,3 +1,4 @@
+import { quarantineRecoverySql } from '../core/admission-recovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { AppError } from '../core/errors.mjs'
@@ -2078,6 +2079,7 @@ export class PostgresExternalPlatformStore {
                      AND call.contract_version = $9
                      AND call.outcome = 'succeeded_unusable'
                      AND call.error_code IS DISTINCT FROM 'upstream_note_unavailable'
+                     ${quarantineRecoverySql('call')}
                    )
                    OR (
                      call.consumer_id = $1
@@ -2116,7 +2118,7 @@ export class PostgresExternalPlatformStore {
                 WHEN outcome = 'pending' THEN NULL
                 ELSE completed_at + make_interval(secs => $4)
               END AS blocked_until
-         FROM external_platform.provider_calls
+         FROM external_platform.provider_calls call
         WHERE provider_key = $8
           AND operation = $2
           AND (
@@ -2144,6 +2146,7 @@ export class PostgresExternalPlatformStore {
                   AND contract_version = $7
                   AND outcome = 'succeeded_unusable'
                   AND error_code IS DISTINCT FROM 'upstream_note_unavailable'
+                  ${quarantineRecoverySql('call')}
                 )
                 OR (
                   consumer_id = $1

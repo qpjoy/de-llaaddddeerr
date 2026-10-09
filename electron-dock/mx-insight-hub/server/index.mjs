@@ -28,6 +28,7 @@ import { RapidApiAdapter } from './adapters/rapidapi.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { RAPIDAPI_METADATA, rapidApiConfig } from './external-platforms/rapidapi-config.mjs'
 import { createApp } from './app.mjs'
+import { AdmissionRecoveryService } from './operations/admission-recovery.mjs'
 import { createSso, readSsoProfile } from './identity/sso.mjs'
 import { loadConfig } from './config.mjs'
 import { AppError } from './core/errors.mjs'
@@ -536,6 +537,10 @@ export async function createRuntime(config = loadConfig()) {
   const recharge = config.listenerMode === 'public' ? null : createRechargeService(store, config.paymentDeliverySources, { logger: console, pepper:config.apiKeyPepper })
   if (balanceMonitor) balanceMonitor.onScheduleChanged = () => { void feishuAlerts?.timer?.refresh() }
   const app = createApp({
+    admissionRecovery: pool ? new AdmissionRecoveryService({ pool, usageStore: store,
+      providers: Object.fromEntries([externalPlatformStore, tikHubPlatformStore, rapidApiStore, qixinPlatformStore,
+        ipRiskGateway.platformStore, ipRiskV2Gateway.platformStore, ...[...webSearch.gateways.values()].map(g => g.platformStore)]
+        .map(s => [s.providerKey, { cooldownMs: s.uncertainCooldownMs, burst: s.rateLimitBurst }])) }) : null,
     service,
     store,
     adapter,

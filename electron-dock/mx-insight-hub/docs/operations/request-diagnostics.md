@@ -4,6 +4,10 @@
 Launcher 用户（包括 Launcher 平台管理员）和 Public listener 均不可访问。
 不修改 MX-H2I 登录、联网、采集分发、客户结算或交付复现。
 
+需要查看当前冷却、Key 配额与恢复倒计时时，使用并列的“限制与恢复”tab，
+或点击诊断结果中的同名跳转入口。它展示当前状态，历史诊断结果保持不变。
+具体恢复范围、审计与 migration 138 部署要求见 [限制与恢复](admission-recovery.md)。
+
 ## 查询行为
 
 `GET /internal/v1/admin/request-diagnostics/:identifier` 显式只读查询。

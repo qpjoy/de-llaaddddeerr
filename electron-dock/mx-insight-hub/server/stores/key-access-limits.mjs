@@ -1,3 +1,4 @@
+import { quotaRecoverySql } from '../core/admission-recovery.mjs'
 import { AppError } from '../core/errors.mjs'
 const identity = (id, type, key) => JSON.stringify([id, type, key])
 function normalize(input) {
@@ -55,7 +56,7 @@ export async function assertPostgresKeyAccessLimits(client,apiKeyId,scopes) {
  for (const limit of limits) {
   if (!scopes.some(scope=>scope.type===limit.scopeType && scope.key===limit.scopeKey) || (limit.totalLimit==null && limit.rateLimit==null)) continue
   const {rows}=await client.query(`SELECT count(*) FILTER (WHERE status IN ('reserved','committed','unknown'))::bigint AS total,
-   count(*) FILTER (WHERE reserved_at >= now()-$4*interval '1 second')::bigint AS recent
+   count(*) FILTER (WHERE reserved_at >= now()-$4*interval '1 second' ${quotaRecoverySql('key_rate', '$1', '$2', '$3')})::bigint AS recent
    FROM usage_requests request WHERE api_key_id=$1 AND (
     EXISTS (SELECT 1 FROM usage_request_authorization_scopes scope WHERE scope.usage_request_id=request.id AND scope.scope_type=$2 AND scope.scope_key=$3)
     OR (NOT EXISTS (SELECT 1 FROM usage_request_authorization_scopes scope WHERE scope.usage_request_id=request.id)

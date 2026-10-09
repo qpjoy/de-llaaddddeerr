@@ -785,6 +785,7 @@ export function createApp({
   socialAccountTikHubGateway = null,
   tikHubGateway = null,
   acquisitionHistory = null,
+  admissionRecovery = null,
   segmenterConfig = null,
   launcherAudience = 'mx-insight-hub',
   listenerMode = 'combined',
@@ -1735,6 +1736,18 @@ export function createApp({
           data: presentation === 'safe' ? dataCenterVisibleProjection(data) : data,
           requestId,
         })
+        return
+      }
+      if (pathname === '/internal/v1/admin/admission-limits' && ['GET','POST'].includes(request.method)) {
+        requireSourceAdmin(principal)
+        if (!admissionRecovery) throw new AppError(503, 'admission_recovery_unavailable', '限制与恢复需要 PostgreSQL')
+        let data
+        if (request.method === 'GET') data = await admissionRecovery.snapshot(Object.fromEntries(searchParams))
+        else {
+          requireNoQuery(searchParams, 'admission recovery')
+          data = await admissionRecovery.recover(await readJson(request, 4096), { actor: principal.kind, requestId })
+        }
+        sendJson(response, 200, { data, requestId }, { 'cache-control': 'private, no-store' })
         return
       }
       let params = routeMatch(pathname, '/internal/v1/admin/aggregate/requests/:requestId')

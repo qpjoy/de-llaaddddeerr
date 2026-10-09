@@ -6,10 +6,11 @@ import { DropdownField, EmptyState, ErrorState, LoadingState, PageHeading, forma
 import { AccountAnalysis, AccountCards, AccountHero, ContentDetail, ContentTable, downloadBrowserFile, formatNumber, platformName } from './data-browser-parts.jsx'
 import './data-browser.css'
 
+const AdmissionLimits = lazy(() => import('./admission-limits.jsx'))
 const RequestDiagnostics = lazy(() => import('./request-diagnostics.jsx'))
 const AdvancedSearchPanel = lazy(() => import('./advanced-search.jsx'))
 const AggregateSearchPanel = lazy(() => import('./aggregate-search.jsx'))
-const views = [['accounts', '账号大盘'], ['contents', '内容大盘'], ['hotspots', '热点线索'], ['advanced', '高级搜索'], ['aggregate', '聚合数据搜索'], ['diagnostics', '请求诊断']]
+const views = [['accounts', '账号大盘'], ['contents', '内容大盘'], ['hotspots', '热点线索'], ['advanced', '高级搜索'], ['aggregate', '聚合数据搜索'], ['diagnostics', '请求诊断'], ['limits', '限制与恢复']]
 const emptySearch = { q: '', platform: '', objectType: '', contentType: '', from: '', to: '', tag: '', sort: 'newest' }
 const platforms = [['', '全部平台'], ...['xiaohongshu', 'douyin', 'kuaishou', 'bilibili', 'weibo', 'telegram', 'twitter', 'taobao', 'jd', 'mobile_commerce'].map((key) => [key, platformName(key)])]
 const objectTypes = [['', '全部对象'], ['post', '帖子 / 笔记'], ['product', '商品'], ['comment', '评论'], ['message', '消息'], ['article', '文章'], ['user', '用户资料'], ['account', '账号'], ['profile', '画像资料'], ['chat', '会话']]
@@ -64,10 +65,13 @@ export function DataBrowserPage({ token, query, onUnauthorized, aggregateSession
     return () => observer.disconnect()
   }, [aggregate])
   const [advanced,setAdvanced] = useState(false)
+  const [limits, setLimits] = useState(() => new URLSearchParams(window.location.hash.split('?')[1]).get('view') === 'limits')
   const [diagnostics, setDiagnostics] = useState(() => new URLSearchParams(window.location.hash.split('?')[1]).get('view') === 'diagnostics')
   const [diagnosticSession, setDiagnosticSession] = useState(() => ({ token, identifier: new URLSearchParams(window.location.hash.split('?')[1]).get('requestId') || '', data: null, error: null }))
   useEffect(() => {
-    if (query?.get('view') === 'diagnostics') {
+    setLimits(query?.get('view') === 'limits')
+    if (query?.get('view') === 'limits') { setAggregate(false); setAdvanced(false); setDiagnostics(false) }
+    else if (query?.get('view') === 'diagnostics') {
       setAggregate(false); setAdvanced(false); setDiagnostics(true)
       if (query.get('requestId')) setDiagnosticSession({ token, identifier: query.get('requestId'), data: null, error: null })
     } else if (query?.get('view') === 'aggregate') { setAggregate(true); setAdvanced(false); setDiagnostics(false) }
@@ -83,7 +87,7 @@ export function DataBrowserPage({ token, query, onUnauthorized, aggregateSession
   const [exportState, setExportState] = useState({ busy: false, error: null, message: '' })
   useEffect(() => { document.getElementById('mih-main-content')?.scrollIntoView({ block: 'start' }) }, [filters.view, filters.account, selected?.id])
   const filterKey = JSON.stringify(filters)
-  const load = useCallback(async () => ({ ...(advanced || diagnostics || aggregate || filters.account && accountTab !== 'contents' ? { items: [] } : await adminApi.dataBrowser(token, filters)), filterKey }), [token, filters, filterKey, accountTab, advanced, diagnostics, aggregate])
+  const load = useCallback(async () => ({ ...(advanced || diagnostics || aggregate || limits || filters.account && accountTab !== 'contents' ? { items: [] } : await adminApi.dataBrowser(token, filters)), filterKey }), [token, filters, filterKey, accountTab, advanced, diagnostics, aggregate, limits])
   const state = useRemoteData(load, onUnauthorized)
   const data = state.data
   const loading = state.loading || (!state.error && data?.filterKey !== filterKey)
@@ -93,10 +97,10 @@ export function DataBrowserPage({ token, query, onUnauthorized, aggregateSession
   const scopeKey = JSON.stringify(Object.fromEntries(Object.entries(filters).filter(([k]) => !['page', 'pageSize', 'sort'].includes(k))))
   const [readyScope, setReadyScope] = useState('')
   useEffect(() => { if (!loading && !state.error) setReadyScope(scopeKey) }, [loading, state.error, scopeKey])
-  const total = useBrowserTotal(token, filters, !advanced && !diagnostics && !aggregate && readyScope === scopeKey, onUnauthorized)
+  const total = useBrowserTotal(token, filters, !advanced && !diagnostics && !aggregate && !limits && readyScope === scopeKey, onUnauthorized)
   const updateDraft = (key, value) => setDraft((v) => ({ ...v, [key]: value }))
   const patch = (values) => { setSelected(null); setExportState((v) => ({ ...v, error: null, message: '' })); setFilters((v) => ({ ...v, ...values, page: 1 })) }
-  const navigate = (view, values = {}) => { setAggregate(view === 'aggregate'); if (view === 'aggregate') { setAdvanced(false); setDiagnostics(false); return } setDiagnostics(view === 'diagnostics'); if(view==='diagnostics'){setAdvanced(false);return}if(view==='advanced'){setAdvanced(true);return}setAdvanced(false); const search = { ...emptySearch, ...values }; setDraft(search); patch({ ...search, view, account: '', ...values }); setAccountRow(null) }
+  const navigate = (view, values = {}) => { setLimits(view === 'limits'); if(view === 'limits'){setAggregate(false);setAdvanced(false);setDiagnostics(false);return} setAggregate(view === 'aggregate'); if (view === 'aggregate') { setAdvanced(false); setDiagnostics(false); return } setDiagnostics(view === 'diagnostics'); if(view==='diagnostics'){setAdvanced(false);return}if(view==='advanced'){setAdvanced(true);return}setAdvanced(false); const search = { ...emptySearch, ...values }; setDraft(search); patch({ ...search, view, account: '', ...values }); setAccountRow(null) }
   const selectAccount = (row, tab = 'overview') => { navigate('contents', { platform: row.platform, account: row.account_id }); setAccountRow(row); setAccountTab(tab) }
   const selectTag = (tag) => navigate('contents', { tag })
   const quick = (key, value) => { updateDraft(key, value); patch({ [key]: value }) }
@@ -110,6 +114,7 @@ export function DataBrowserPage({ token, query, onUnauthorized, aggregateSession
       setExportState({ busy: false, error: null, message: `已导出 ${result.exportedRows} 条${result.truncated ? '；仍有更多匹配记录，本文件不是全量导出，请缩小筛选范围。' : '；已覆盖本次筛选的全部匹配记录。'}` })
     } catch (error) { if (error.status === 401) onUnauthorized?.(error); setExportState({ busy: false, error, message: '' }) }
   }
+  if (limits) return <div className="mih-data-browser"><PageHeading title="数据浏览中心"/><nav className="mih-browser-tabs" aria-label="浏览类型">{views.map(([key,label])=><button key={key} aria-pressed={key==='limits'} onClick={()=>navigate(key)}>{label}</button>)}</nav><Suspense fallback={<LoadingState/>}><AdmissionLimits key={token} token={token} onUnauthorized={onUnauthorized} requestId={query?.get('requestId') || ''}/></Suspense></div>
   if (aggregate) return <div className="mih-data-browser is-aggregate"><PageHeading title="数据浏览中心" description="搜索最新与已存数据，查看各来源交付情况。"/><nav className="mih-browser-tabs" aria-label="浏览类型">{views.map(([key,label])=><button key={key} aria-pressed={key==='aggregate'} onClick={()=>navigate(key)}>{label}</button>)}</nav><Suspense fallback={<LoadingState/>}><DemoProductPage Page={AggregateSearchPanel} pageProps={{session: aggregateSession}} enabled admin compact /></Suspense></div>
   if (diagnostics) return <div className="mih-data-browser"><PageHeading title="数据浏览中心" description="发现账号、检索内容，理解已入库的数据。"/><nav className="mih-browser-tabs" aria-label="浏览类型">{views.map(([key,label])=><button key={key} aria-pressed={key==='diagnostics'} onClick={()=>navigate(key)}>{label}</button>)}</nav><Suspense fallback={<LoadingState/>}><RequestDiagnostics key={token} token={token} onUnauthorized={onUnauthorized} session={diagnosticSession} setSession={setDiagnosticSession}/></Suspense></div>
   if (advanced) return <div className="mih-data-browser"><PageHeading title="数据浏览中心" description="发现账号、检索内容，理解已入库的数据。"/><nav className="mih-browser-tabs" aria-label="浏览类型">{views.map(([key,label])=><button key={key} aria-pressed={key==='advanced'} onClick={()=>navigate(key)}>{label}</button>)}</nav><Suspense fallback={<LoadingState/>}><AdvancedSearchPanel token={token} onUnauthorized={onUnauthorized} onAccount={selectAccount} onTag={selectTag}/></Suspense></div>

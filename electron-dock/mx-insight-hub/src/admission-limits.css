@@ -1,0 +1,56 @@
+.mih-admission { display:grid; gap:20px; min-width:0; }
+.mih-admission-heading,.mih-admission-row-top,.mih-admission-context,.mih-admission-row footer { display:flex; align-items:center; justify-content:space-between; gap:20px; }
+.mih-admission h2,.mih-admission h3,.mih-admission p { margin:0; }
+.mih-admission-heading p,.mih-admission-row p,.mih-admission-time,.mih-admission-context { color:var(--qp-text-3); line-height:1.7; }
+.mih-admission-heading p { margin-top:8px; }
+.mih-admission-controls,.mih-admission-row,.mih-admission-history { padding:24px; }
+.mih-admission-controls form { display:flex; align-items:end; gap:12px; }
+.mih-admission-controls .qp-field { flex:1; min-width:0; }
+.mih-admission-context { margin-top:16px; flex-wrap:wrap; font-size:13px; }
+.mih-admission-context span,.mih-admission-controls p { overflow-wrap:anywhere; }
+.mih-admission-stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
+.mih-admission-stats>div { display:flex; align-items:center; gap:16px; padding:20px 24px; }
+.mih-admission-stats svg { width:28px; height:28px; color:var(--qp-primary,#008577); }
+.mih-admission-stats strong { display:block; font-size:28px; margin-top:4px; }
+.mih-admission-stats span { font-size:13px; color:var(--qp-text-3); }
+.mih-admission-filters { display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+.mih-admission-filters .qp-input { width:auto; flex:1; min-width:180px; }
+.mih-admission-time { font-size:12px; }
+.mih-admission-list { display:grid; gap:16px; }
+.mih-admission-badge { display:inline-block; border-radius:20px; padding:3px 10px; background:#07816a12; color:#148572; font-size:12px; margin-bottom:8px; }
+.mih-admission-badge.is-active { background:#c6801014; color:#9f650a; }
+.mih-admission-row-top { align-items:flex-start; }
+.mih-admission-row h3 { font-size:17px; margin-bottom:6px; }
+.mih-admission-countdown { text-align:right; display:grid; justify-items:end; gap:4px; flex-shrink:0; }
+.mih-admission-countdown svg { color:var(--qp-text-3); }
+.mih-admission-countdown small { color:var(--qp-text-3); }
+.mih-admission progress { width:100%; height:6px; border:0; border-radius:6px; overflow:hidden; accent-color:var(--qp-primary,#008577); margin-top:14px; }
+.mih-admission progress::-webkit-progress-bar { background:var(--qp-bg-2,#edf2f6); }
+.mih-admission progress::-webkit-progress-value { background:var(--qp-primary,#008577); }
+.mih-admission progress::-moz-progress-bar { background:var(--qp-primary,#008577); }
+.mih-admission a { color:var(--qp-primary,#008577); text-underline-offset:3px; }
+.mih-admission-usage { margin-top:16px; font-size:13px; }
+.mih-admission-row dl { display:grid; grid-template-columns:80px minmax(0,1fr); gap:8px 16px; font-size:13px; margin:20px 0; }
+.mih-admission-row dt { color:var(--qp-text-3); }
+.mih-admission-row dd { margin:0; overflow-wrap:anywhere; }
+.mih-admission-row footer { border-top:1px solid var(--qp-border,#dde4eb); padding-top:16px; font-size:13px; }
+.mih-admission-row footer button,.mih-admission-row footer a { flex-shrink:0; }
+.mih-admission-notice { display:flex; align-items:center; gap:8px; padding:16px; background:#0085770d; border-radius:10px; line-height:1.7; }
+.mih-admission-empty { text-align:center; padding:40px 20px; display:grid; gap:12px; justify-items:center; }
+.mih-admission-history summary { cursor:pointer; font-weight:600; }
+.mih-admission-history>div { margin-top:16px; border-top:1px solid var(--qp-border,#dde4eb); padding-top:16px; overflow-wrap:anywhere; }
+.mih-admission-history p { margin:6px 0; }
+.mih-admission-history small { color:var(--qp-text-3); }
+.mih-admission-confirm { display:flex; justify-content:flex-end; gap:12px; margin-top:20px; }
+@media(max-width:700px) {
+  .mih-admission-heading,.mih-admission-row-top,.mih-admission-row footer { align-items:stretch; flex-direction:column; gap:14px; }
+  .mih-admission-controls,.mih-admission-row,.mih-admission-history { padding:16px; }
+  .mih-admission-controls form { flex-wrap:wrap; }
+  .mih-admission-controls .qp-field { flex-basis:100%; }
+  .mih-admission-stats { gap:8px; }
+  .mih-admission-stats>div { padding:14px 10px; gap:5px; }
+  .mih-admission-stats svg { display:none; }
+  .mih-admission-stats span { font-size:11px; }
+  .mih-admission-countdown { text-align:left; justify-items:start; }
+  .mih-admission-countdown svg { display:none; }
+}

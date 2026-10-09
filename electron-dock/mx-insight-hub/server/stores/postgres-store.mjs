@@ -1,3 +1,4 @@
+import { quotaRecoverySql } from '../core/admission-recovery.mjs'
 import { createInternalTrafficPolicy } from '../core/internal-traffic-policy.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { ensurePostgresAdminExecution } from './admin-execution.mjs'
@@ -2416,6 +2417,8 @@ export class PostgresStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
+      // Recovery shares this lock. Inserts use wall-clock reservation time below,
+      // so a transaction queued before recovery still counts in the new window.
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
         `${input.tenantId}:${input.consumerId}:plan-month`,
       ])
@@ -2473,8 +2476,8 @@ export class PostgresStore {
             `INSERT INTO usage_requests
                (id, tenant_id, consumer_id, api_key_id, idempotency_key, fingerprint,
                 platform, capability, billing_meter_key, authorization_scopes,
-                status, units_reserved, lease_expires_at, acquisition_request)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'reserved', $11, $12, $13::jsonb)
+                status, units_reserved, lease_expires_at, acquisition_request, reserved_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'reserved', $11, $12, $13::jsonb, clock_timestamp())
              RETURNING *`,
             [
               input.requestId,
@@ -2510,8 +2513,8 @@ export class PostgresStore {
         `INSERT INTO usage_requests
            (id, tenant_id, consumer_id, api_key_id, idempotency_key, fingerprint,
             platform, capability, billing_meter_key, authorization_scopes,
-            status, units_reserved, lease_expires_at, acquisition_request)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'reserved', $11, $12, $13::jsonb)
+            status, units_reserved, lease_expires_at, acquisition_request, reserved_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, 'reserved', $11, $12, $13::jsonb, clock_timestamp())
          RETURNING *`,
         [
           input.requestId,
@@ -2618,6 +2621,7 @@ export class PostgresStore {
              FROM usage_requests request
             WHERE request.tenant_id = $1 AND request.consumer_id = $2
               ${countsAgainstScopeSql('$3', '$4')}
+              ${quotaRecoverySql('consumer_window', '$2', '$3', '$4')}
               AND request.reserved_at >= now() - ($5::integer * interval '1 second')`,
           [tenantId, consumerId, scope.type, scope.key, consumerWindowSeconds],
         ),
@@ -2626,6 +2630,7 @@ export class PostgresStore {
              FROM usage_requests request
             WHERE request.api_key_id = $1
               ${countsAgainstScopeSql('$2', '$3')}
+              ${quotaRecoverySql('key_window', '$1', '$2', '$3')}
               AND request.reserved_at >= now() - ($4::integer * interval '1 second')`,
           [apiKeyId, scope.type, scope.key, keyWindowSeconds],
         ),
@@ -2693,6 +2698,7 @@ export class PostgresStore {
            FROM usage_requests request
           WHERE request.tenant_id = $1 AND request.consumer_id = $2
             ${countsAgainstScopeSql('$3', '$4')}
+            ${quotaRecoverySql('consumer_window', '$2', '$3', '$4')}
             AND request.reserved_at >= now() - ($5::integer * interval '1 second')`,
         [tenantId, consumerId, scope.type, scope.key, windowSeconds],
       )
@@ -2734,6 +2740,7 @@ export class PostgresStore {
            FROM usage_requests request
           WHERE request.tenant_id = $1 AND request.consumer_id = $2
             ${countsAgainstScopeSql('$3', '$4')}
+            ${quotaRecoverySql('consumer_window', '$2', '$3', '$4')}
             AND request.reserved_at >= CASE
                   WHEN $5::timestamptz IS NULL
                     THEN now() - ($6::integer * interval '1 second')
@@ -2763,6 +2770,7 @@ export class PostgresStore {
            FROM usage_requests request
           WHERE request.api_key_id = $1
             ${countsAgainstScopeSql('$2', '$3')}
+            ${quotaRecoverySql('key_window', '$1', '$2', '$3')}
             AND request.reserved_at >= now() - ($4::integer * interval '1 second')`,
         [input.apiKeyId, scope.type, scope.key, keyWindowSeconds],
       )
@@ -2806,9 +2814,10 @@ export class PostgresStore {
       && Number.isInteger(planWindowSeconds) && planWindowSeconds > 0) {
       const planWindowUsage = await client.query(
         `SELECT count(*)::integer AS count
-           FROM usage_requests
+           FROM usage_requests request
           WHERE consumer_id = $1
             AND status IN ('reserved', 'committed', 'unknown')
+            ${quotaRecoverySql('plan_window', '$1')}
             AND reserved_at >= greatest(
               $2::timestamptz,
               now() - ($3::integer * interval '1 second')
@@ -2828,7 +2837,7 @@ export class PostgresStore {
     if (Number.isInteger(monthlyRequests) && monthlyRequests > 0) {
       const monthlyUsage = await client.query(
         `SELECT count(*)::integer AS count
-           FROM usage_requests
+           FROM usage_requests request
           WHERE consumer_id = $1
             AND status IN ('reserved', 'committed', 'unknown')
             AND reserved_at >= $2`,
@@ -2847,9 +2856,10 @@ export class PostgresStore {
     if (Number.isInteger(burstRps) && burstRps > 0) {
       const burstUsage = await client.query(
         `SELECT count(*)::integer AS count
-           FROM usage_requests
+           FROM usage_requests request
           WHERE consumer_id = $1
             AND status IN ('reserved', 'committed', 'unknown')
+            ${quotaRecoverySql('plan_burst', '$1')}
             AND reserved_at >= now() - interval '1 second'`,
         [input.consumerId],
       )

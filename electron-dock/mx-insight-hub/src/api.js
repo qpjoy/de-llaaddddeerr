@@ -561,6 +561,8 @@ export const adminApi = {
   dataBrowserStatistics: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-browser/statistics`, { query }),
   dataBrowserExport: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-browser/export`, { query }),
   requestDiagnostics: (token, identifier, { signal } = {}) => request(token, `${ADMIN_ROOT}/request-diagnostics/${encodeURIComponent(identifier)}`, { signal }),
+  admissionLimits: (token, filters = {}, { signal } = {}) => request(token, `${ADMIN_ROOT}/admission-limits?${new URLSearchParams(Object.entries(filters).filter(([, value]) => value))}`, { signal }),
+  recoverAdmission: (token, body) => request(token, `${ADMIN_ROOT}/admission-limits`, { method: 'POST', body }),
   dataBrowser: (token, query = {}) => request(token, `${ADMIN_ROOT}/data-browser`, { query }),
   dataCenter: (token, query = {}) => visibleDataCenterResponse(request(
     token,

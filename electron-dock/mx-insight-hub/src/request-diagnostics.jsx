@@ -87,6 +87,7 @@ export default function RequestDiagnostics({ token, onUnauthorized, session, set
         {current.data.truncated ? <p role="status">关联请求超过 20 条，仅显示前 20 条；请使用具体 Hub requestId 查询。</p> : null}
         {current.data.runs.map(run => <article className="mih-diagnostic-run" key={run.requestId}>
           <h3>Hub 请求 <code>{run.requestId}</code></h3>
+          <p><a href={`#/data-browser?view=limits&requestId=${run.requestId}`}>查看当前限制与恢复倒计时 →</a></p>
           <Facts entries={[
             ['平台', run.platform], ['Hub 状态', stateName(run.status)], ['响应 HTTP', run.responseStatus],
             ['Hub 错误码', run.errorCode], ['交付来源', run.sourceMode],
