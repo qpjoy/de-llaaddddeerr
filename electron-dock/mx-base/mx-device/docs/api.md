@@ -16,6 +16,8 @@
 | POST /api/devices/:id/capture?mode=real | `{}`；提交或合并一次取帧请求，指定 Worker 执行，返回 202 |
 | GET /api/devices/:id/frame?mode=real&captureId=UUID | 只读取最新已保存 PNG；需管理认证，no-store，不连接手机 |
 | POST /api/devices/:id/session?mode=sim | `acquire/renew/release/takeover/reset`；见下方边界 |
+| POST /api/devices/:id/mobile-status?mode=real | `{}`；显式读取 Mobile-Agent 既有设备/运行器报告，202，5 秒冷却、20 秒到期 |
+| POST /api/devices/:id/poc-channel?mode=real | `{revision,enabled:boolean,confirmed:true}`；只开关本中心的旧 PoC 调用，保持暂停、保留历史 |
 | POST /api/jobs?mode=sim | 幂等提交搜索 / 详情任务 |
 | POST /api/jobs/:id/cancel?mode=sim | 仅取消 queued，不取消在途执行 |
 | POST /api/scenarios?mode=sim | `{kind:five|priority|failover,key}`；当前演示无活动任务时创建新场景 |
@@ -33,6 +35,10 @@
 任务提交：搜索为 `{key,operation:'search',keyword,pages:1..3,priority:1..9,deviceId?}`；详情为 `{key,operation:'note',input:'完整 HTTPS explore 链接',priority,deviceId?}`，也可用 `sourceJobId` 替代 input 来消费已成功搜索的首条链接。真机必须指定 `deviceId` 且 `confirmed:true`。相同 key 与相同规范化参数返回原任务；参数变更返回冲突。
 
 控制动作：`pause` 停止新领取；`enable` 启用（真实需近期 idle probe 与 `confirmedExclusive:true`）；`recover` 隔离恢复（等待旧租约结束、重新取得 idle、`confirmedStopped:true` 与核验说明，恢复后仍暂停）；`disconnect/reconnect` 仅模拟。
+
+状态报告保存在设备 `mobileStatus`，与旧 `probe`、`projection` 分离；`occupancy` 仅为 `reported-busy` / `not-reported` / `unknown`，`not-reported` 不是物理空闲或独占证明。数据库快照 GET 不触发读取。上游日志/配置不出现在报告，未匹配序列号或格式错误视作未知。
+
+停用旧通道前须无待处理采集任务、在途尝试和未完成 probe，设备暂停且状态可核验；不会中断现有物理工作。`pocDisabled:true` 时 probe、enable、采集提交及调度领取均被禁止。恢复通道后仍暂停，启用必须有晚于 `pocChangedAt` 的新鲜空闲证据。开关不影响 8787 的截图或状态读取，不停止手机 PoC/VPN。
 
 ## mx-rig
 

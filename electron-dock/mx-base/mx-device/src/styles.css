@@ -1299,6 +1299,35 @@ summary {
 .control-session h3 {
   font-size: 15px;
 }
+.mobile-status {
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+  margin-top: 18px;
+}
+.mobile-status h3 {
+  font-size: 15px;
+}
+.mobile-status button {
+  font-size: 12px;
+  padding: 8px 10px;
+}
+.mobile-status p {
+  margin: 10px 0;
+}
+.mobile-facts {
+  margin: 14px 0;
+  font-size: 12px;
+}
+.mobile-facts div {
+  margin: 9px 0;
+}
+.mobile-facts dt {
+  color: var(--muted);
+}
+.mobile-facts dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+}
 .control-session > .small:last-child {
   margin: 12px 0 0;
 }

@@ -59,13 +59,21 @@ export function DeviceControls({ device: d, onControl, onProbe, busy }) {
     <div className="device-controls">
       <dl>
         <div>
-          <dt>连接</dt>
+          <dt>
+            {d.mode === "real" && d.adapter !== "mobile-agent"
+              ? "旧 PoC 连接"
+              : "连接"}
+          </dt>
           <dd>
-            {d.connected === "unknown"
-              ? "未知"
-              : d.mode === "sim" && d.connected === "online"
-                ? "模拟在线"
-                : labels[d.connected] || d.connected}
+            {d.pocDisabled
+              ? "已停用"
+              : d.mode === "real" && d.adapter === "mobile-agent"
+                ? "见下方状态报告"
+                : d.connected === "unknown"
+                  ? "未知"
+                  : d.mode === "sim" && d.connected === "online"
+                    ? "模拟在线"
+                    : labels[d.connected] || d.connected}
           </dd>
         </div>
         <div>
@@ -75,8 +83,18 @@ export function DeviceControls({ device: d, onControl, onProbe, busy }) {
           </dd>
         </div>
         <div>
-          <dt>最近检查</dt>
-          <dd>{time(d.probe?.at)}</dd>
+          <dt>
+            {d.mode === "real" && d.adapter !== "mobile-agent"
+              ? "PoC 检查时间"
+              : "最近检查"}
+          </dt>
+          <dd>
+            {time(
+              d.adapter === "mobile-agent"
+                ? d.mobileStatus?.receivedAt
+                : d.probe?.at,
+            )}
+          </dd>
         </div>
       </dl>
       {d.mode === "real" && (
@@ -88,15 +106,17 @@ export function DeviceControls({ device: d, onControl, onProbe, busy }) {
         </p>
       )}
       <div className="button-row">
-        {d.mode === "real" && d.adapter !== "mobile-agent" && (
-          <button
-            disabled={busy || d.state === "running"}
-            onClick={() => onProbe(d)}
-          >
-            <PlugsConnected size={17} />
-            检查连接（只读）
-          </button>
-        )}
+        {d.mode === "real" &&
+          d.adapter !== "mobile-agent" &&
+          !d.pocDisabled && (
+            <button
+              disabled={busy || d.state === "running"}
+              onClick={() => onProbe(d)}
+            >
+              <PlugsConnected size={17} />
+              检查连接（只读）
+            </button>
+          )}
         {d.state === "quarantined" ? (
           <button disabled={busy} onClick={() => onControl(d, "recover")}>
             <WarningCircle size={17} />
@@ -107,16 +127,19 @@ export function DeviceControls({ device: d, onControl, onProbe, busy }) {
             disabled={
               busy ||
               d.adapter === "mobile-agent" ||
+              d.pocDisabled === true ||
               ["waiting", "held"].includes(d.session?.status) ||
               (!d.enabled && d.state === "running")
             }
             onClick={() => onControl(d, d.enabled ? "pause" : "enable")}
           >
-            {d.adapter === "mobile-agent"
-              ? "仅观察 · 不派发任务"
-              : d.enabled
-                ? "暂停领取"
-                : "启用调度"}
+            {d.pocDisabled
+              ? "旧 PoC 已停用"
+              : d.adapter === "mobile-agent"
+                ? "仅观察 · 不派发任务"
+                : d.enabled
+                  ? "暂停领取"
+                  : "启用调度"}
           </button>
         )}
         {d.mode === "sim" && (
@@ -192,11 +215,14 @@ export function Connections({ state, onAdd, onConnectReal }) {
         <h3>兼容接入边界</h3>
         <p>
           Mobile-Agent
-          适配器只调用指定序列号的单帧截图，不启动视频、不执行动作或写旧配置。每台主机分配独立执行器标识；跨主机的
+          是设备中心的主要适配入口。按序列号读取截图、既有设备记录与运行器占用报告，不启动视频、不执行动作或写旧配置。每台主机分配独立执行器标识；跨主机的
           127.0.0.1 由各自主机执行器解析。Worker 心跳正常不代表手机就绪。
         </p>
         <p>
-          真机初次启用前，请先停止旧 Hub
+          PoC
+          是可选的采集兼容通道，不是设备中心运行依赖。旧登记设备可以在工作台停用本中心的
+          PoC 调用，不会关闭手机 PoC/VPN。 若继续使用 PoC
+          采集，真机初次启用前，请先停止旧 Hub
           外设调度和其他调用方，等待在途任务结束。现有 mobile-agent 容器、18081
           映射、ADB 和手机应用均保持原样。
         </p>

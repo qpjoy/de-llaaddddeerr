@@ -257,6 +257,11 @@ export function addJob(s, now, mode, body) {
       400,
     );
     requireThat(
+      d.pocDisabled !== true,
+      "旧 PoC 通道已停用，不派发采集任务",
+      400,
+    );
+    requireThat(
       d.enabled && d.state !== "quarantined",
       "目标设备尚未启用或待核验",
     );
@@ -302,6 +307,7 @@ export function control(s, now, mode, id, body) {
   );
   if (body.action === "pause") d.enabled = false;
   else if (body.action === "enable") {
+    requireThat(d.pocDisabled !== true, "旧 PoC 通道已停用", 403);
     requireThat(
       d.adapter !== "mobile-agent",
       "Mobile-Agent 观察适配器尚不允许真实控制",
@@ -314,7 +320,9 @@ export function control(s, now, mode, id, body) {
     requireThat(!current && d.state === "idle", "设备执行中或待核验");
     if (mode === "real") {
       requireThat(
-        d.probe?.idle === true && now - d.probe.at < 60000,
+        d.probe?.idle === true &&
+          now - d.probe.at < 60000 &&
+          d.probe.at > (d.pocChangedAt || 0),
         "请先检查连接，并取得 60 秒内的空闲证据",
       );
       requireThat(
@@ -335,7 +343,9 @@ export function control(s, now, mode, id, body) {
     );
     if (mode === "real")
       requireThat(
-        d.probe?.idle && now - d.probe.at < 60000,
+        d.probe?.idle &&
+          now - d.probe.at < 60000 &&
+          d.probe.at > (d.pocChangedAt || 0),
         "须重新取得空闲证据",
       );
     d.state = "idle";
@@ -446,6 +456,7 @@ export function claim(s, now, mode, workerId) {
       d.mode === mode &&
       d.enabled &&
       d.adapter !== "mobile-agent" &&
+      d.pocDisabled !== true &&
       !["waiting", "held"].includes(d.session?.status) &&
       d.state === "idle" &&
       d.connected !== "offline" &&
@@ -752,6 +763,8 @@ export function configureObserver(s, now, id, body) {
   d.observer = { origin: endpoint, serial, version: randomUUID() };
   d.capture = null;
   d.frame = null;
+  d.inspection = null;
+  d.mobileStatus = null;
   bump(d);
   event(
     s,
@@ -762,6 +775,108 @@ export function configureObserver(s, now, id, body) {
     { deviceId: id },
   );
   return publicDevice(d);
+}
+
+// Disabling the compatibility channel changes only mx-device policy, not the
+// existing PoC/VPN process. Do not strand active or queued collection work.
+export function setPoCChannel(s, now, id, body) {
+  const d = findDevice(s, "real", id);
+  requireThat(
+    d.adapter !== "mobile-agent",
+    "纯 Mobile-Agent 设备没有旧 PoC 通道",
+    400,
+  );
+  requireThat(body.revision === d.revision, "设备状态已更新，请重试");
+  requireThat(
+    typeof body.enabled === "boolean" && body.confirmed === true,
+    "需确认仅改变本中心兼容通道",
+    400,
+  );
+  requireThat(
+    !d.enabled && d.state === "idle",
+    "请先暂停领取，等待在途任务完成并核验未知任务",
+  );
+  requireThat(
+    !s.jobs.some((j) => j.mode === "real" && j.deviceId === id && active(j)),
+    "请先完成或取消该设备的待处理采集任务",
+  );
+  requireThat(
+    !s.attempts.some((a) => a.deviceId === id && a.status === "running"),
+    "设备仍有在途操作",
+  );
+  requireThat(
+    !d.probeRequestedAt ||
+      d.probeRequestedAt <= (d.probe?.at || 0) ||
+      now - d.probeRequestedAt > 30000,
+    "请等待当前 PoC 检查结束",
+  );
+  d.pocDisabled = !body.enabled;
+  d.pocChangedAt = now;
+  d.probeRequestedAt = 0;
+  d.probeTakenAt = 0;
+  bump(d);
+  event(
+    s,
+    "real",
+    now,
+    "poc-channel",
+    `${d.name}：${body.enabled ? "恢复旧 PoC 兼容通道，仍暂停，须重新检查空闲" : "停用旧 PoC 调用，画面和历史保留；未停止手机 PoC/VPN"}`,
+    { deviceId: id },
+  );
+  return publicDevice(d);
+}
+
+export function requestInspection(s, now, id) {
+  const d = findDevice(s, "real", id);
+  requireThat(d.observer, "请先配置 Mobile-Agent 连接", 400);
+  if (
+    ["queued", "running"].includes(d.inspection?.status) &&
+    d.inspection.expiresAt > now
+  )
+    return d.inspection;
+  if (d.inspection?.finishedAt > now - 5000) return d.inspection;
+  d.inspection = {
+    id: randomUUID(),
+    version: d.observer.version,
+    status: "queued",
+    requestedAt: now,
+    expiresAt: now + 20000,
+  };
+  return d.inspection;
+}
+export function claimInspection(s, now, workerId) {
+  const devices = s.devices.filter(
+    (d) => d.mode === "real" && d.workerId === workerId,
+  );
+  for (const d of devices) {
+    if (
+      ["queued", "running"].includes(d.inspection?.status) &&
+      d.inspection.expiresAt <= now
+    ) {
+      d.inspection.status = "failed";
+      d.inspection.error = "状态读取超时；请检查执行器心跳";
+      d.inspection.finishedAt = now;
+    }
+  }
+  const d = devices.find((d) => d.inspection?.status === "queued");
+  if (!d) return null;
+  d.inspection.status = "running";
+  return d;
+}
+export function completeInspection(s, now, device, report) {
+  const d = findDevice(s, "real", device.id);
+  if (
+    d.inspection?.id !== device.inspection.id ||
+    d.observer?.version !== device.observer.version ||
+    d.inspection.status !== "running" ||
+    d.inspection.expiresAt <= now
+  )
+    return false;
+  d.inspection.finishedAt = now;
+  d.inspection.status = report ? "succeeded" : "failed";
+  if (report) d.mobileStatus = { ...report, receivedAt: now };
+  else d.inspection.error = "Mobile-Agent 状态读取失败；旧报告不可作为当前状态";
+  return true;
 }
 export function requestCapture(s, now, id) {
   const d = findDevice(s, "real", id);

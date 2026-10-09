@@ -19,6 +19,10 @@ import {
   claimCapture,
   completeCapture,
   sessionAction,
+  requestInspection,
+  claimInspection,
+  completeInspection,
+  setPoCChannel,
 } from "../server/model.mjs";
 const url = process.env.MX_DEVICE_TEST_DATABASE_URL;
 test(
@@ -128,6 +132,51 @@ test(
           }),
         { mode: "real" },
       );
+      const inspection = await a.atomic(
+        (s, n) => requestInspection(s, n, camera.id),
+        { mode: "real" },
+      );
+      const inspections = await Promise.all(
+        [a, b].map((store) =>
+          store.atomic((s, n) => claimInspection(s, n, "capture-worker"), {
+            mode: "real",
+          }),
+        ),
+      );
+      assert.equal(inspections.filter(Boolean).length, 1);
+      await b.atomic(
+        (s, n) =>
+          completeInspection(s, n, inspections.find(Boolean), {
+            occupancy: "unknown",
+            controlAuthority: "unverified",
+          }),
+        { mode: "real" },
+      );
+      assert.equal(
+        (await a.snapshot("real")).devices.find((d) => d.id === camera.id)
+          .inspection.id,
+        inspection.id,
+      );
+      const legacy = await a.atomic(
+        (s, n) =>
+          register(s, n, "real", {
+            name: "optional legacy",
+            workerId: "capture-worker",
+            origin: "http://127.0.0.1:18081",
+            accountKey: "optional-legacy",
+            approved: true,
+          }),
+        { mode: "real" },
+      );
+      await b.atomic(
+        (s, n) =>
+          setPoCChannel(s, n, legacy.id, {
+            revision: legacy.revision,
+            enabled: false,
+            confirmed: true,
+          }),
+        { mode: "real" },
+      );
       const healthDir = await mkdtemp(
         join(tmpdir(), "mx-device-worker-health-"),
       );
@@ -229,6 +278,15 @@ test(
       );
       await a.close();
       a = new PgStore(target.href);
+      const realAfterRestart = (await a.snapshot("real")).devices;
+      assert.equal(
+        realAfterRestart.find((d) => d.id === camera.id).mobileStatus.occupancy,
+        "unknown",
+      );
+      assert.equal(
+        realAfterRestart.find((d) => d.id === legacy.id).pocDisabled,
+        true,
+      );
       assert.equal(
         (await a.detail("sim", first.job.id)).job.status,
         "succeeded",

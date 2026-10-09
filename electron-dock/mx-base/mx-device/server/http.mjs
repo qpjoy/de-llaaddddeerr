@@ -16,6 +16,8 @@ import {
   configureObserver,
   requestCapture,
   sessionAction,
+  requestInspection,
+  setPoCChannel,
 } from "./model.mjs";
 
 const equal = (a, b) =>
@@ -141,7 +143,7 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
         if (path === "/api/state" && req.method === "GET")
           return json(res, 200, summarize(await store.snapshot(mode)));
         const peripheral = path.match(
-          /^\/api\/devices\/([^/]+)\/(observer|capture|frame|session)$/,
+          /^\/api\/devices\/([^/]+)\/(observer|capture|frame|session|mobile-status|poc-channel)$/,
         );
         if (peripheral) {
           const id = uuid(peripheral[1]),
@@ -166,14 +168,18 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
           const b = await body(req);
           return json(
             res,
-            action === "capture" ? 202 : 200,
+            ["capture", "mobile-status"].includes(action) ? 202 : 200,
             await store.atomic(
               (s, n) =>
-                action === "observer"
-                  ? configureObserver(s, n, id, b)
-                  : action === "capture"
-                    ? requestCapture(s, n, id)
-                    : sessionAction(s, n, mode, id, b),
+                action === "mobile-status"
+                  ? requestInspection(s, n, id)
+                  : action === "poc-channel"
+                    ? setPoCChannel(s, n, id, b)
+                    : action === "observer"
+                      ? configureObserver(s, n, id, b)
+                      : action === "capture"
+                        ? requestCapture(s, n, id)
+                        : sessionAction(s, n, mode, id, b),
               { mode },
             ),
           );
@@ -243,6 +249,7 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
             (d) => d.id === id,
           );
           if (!d) throw new Fault("设备不存在", 404);
+          if (d.pocDisabled) throw new Fault("旧 PoC 通道已停用", 403);
           if (d.adapter === "mobile-agent")
             throw new Fault(
               "此设备通过开始观看检查画面，不调用 PoC 状态接口",
@@ -257,6 +264,7 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
             await store.atomic(
               (s, n) => {
                 const row = s.devices.find((x) => x.id === id);
+                if (row.pocDisabled) throw new Fault("旧 PoC 通道已停用", 403);
                 if (row.revision !== b.revision)
                   throw new Fault("设备状态已变化");
                 row.probeRequestedAt = n;

@@ -8,8 +8,11 @@ import {
   recordProbe,
   claimCapture,
   completeCapture,
+  claimInspection,
+  completeInspection,
 } from "./model.mjs";
 import { captureMobile } from "./mobile-agent.mjs";
+import { inspectMobile } from "./mobile-status.mjs";
 import {
   callPoC,
   observation,
@@ -27,6 +30,7 @@ export class Engine {
       simDelay = 2200,
       realDelay = 2000,
       capture = captureMobile,
+      inspect = inspectMobile,
     } = {},
   ) {
     this.store = store;
@@ -36,12 +40,18 @@ export class Engine {
     this.simDelay = simDelay;
     this.realDelay = realDelay;
     this.capture = capture;
+    this.inspect = inspect;
     this.inflight = new Map();
     this.stopped = false;
     this.lastError = null;
   }
   async probe(device) {
-    if (device.mode !== "real") return;
+    if (
+      device.mode !== "real" ||
+      device.pocDisabled ||
+      device.adapter === "mobile-agent"
+    )
+      return;
     let obs;
     try {
       obs = observation(await this.call(device, "state"));
@@ -134,6 +144,18 @@ export class Engine {
       );
     }
   }
+  async inspectDevice(device) {
+    let report = null;
+    try {
+      report = await this.inspect(device);
+    } catch {
+      /* Keep upstream errors/private config out of state. */
+    }
+    return this.store.atomic(
+      (s, n) => completeInspection(s, n, device, report),
+      { mode: "real" },
+    );
+  }
   async tick() {
     if (this.stopped || this.ticking) return;
     this.ticking = true;
@@ -151,6 +173,7 @@ export class Engine {
               (d) =>
                 d.mode === "real" &&
                 d.adapter !== "mobile-agent" &&
+                d.pocDisabled !== true &&
                 d.workerId === this.workerId &&
                 !this.inflight.has(`probe:${d.id}`) &&
                 d.state !== "running" &&
@@ -186,6 +209,19 @@ export class Engine {
             this.observe(device)
               .catch(() => {})
               .finally(() => this.inflight.delete("observation")),
+          );
+      }
+      if (this.inflight.size < 4 && !this.inflight.has("inspection")) {
+        const device = await this.store.atomic(
+          (s, n) => claimInspection(s, n, this.workerId),
+          { mode: "real" },
+        );
+        if (device)
+          this.inflight.set(
+            "inspection",
+            this.inspectDevice(device)
+              .catch(() => {})
+              .finally(() => this.inflight.delete("inspection")),
           );
       }
       for (const mode of ["sim", "real"]) {

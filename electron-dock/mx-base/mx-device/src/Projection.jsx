@@ -3,6 +3,7 @@ import { time } from "./data.js";
 import { DeviceControls } from "./Devices.jsx";
 import { useState } from "react";
 import { LiveScreen, ControlSession } from "./PhoneConsole.jsx";
+import MobileStatus from "./MobileStatus.jsx";
 export default function Projection({
   device,
   history,
@@ -115,6 +116,9 @@ export default function Projection({
         </>
       )}
       <DeviceControls device={device} {...controls} />
+      {device?.mode === "real" && (
+        <MobileStatus device={device} onRefresh={onRefresh} />
+      )}
       {device && (
         <ControlSession key={device.id} device={device} onRefresh={onRefresh} />
       )}
