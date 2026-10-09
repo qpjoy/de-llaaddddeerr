@@ -1,3 +1,4 @@
+import { createInternalTrafficPolicy } from '../core/internal-traffic-policy.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { assertMemoryKeyAccessLimits } from './key-access-limits.mjs'
 import { matchesStoredEcommerceFilters } from '../contracts/ecommerce-stored.mjs'
@@ -365,7 +366,8 @@ function assertTransientFallback({ failureKind, httpStatus }) {
 }
 
 export class MemoryStore {
-  constructor() {
+  constructor({ internalTraffic } = {}) {
+    this.internalTrafficPolicy = createInternalTrafficPolicy(internalTraffic)
     this.tenantServiceAccess = new Map()
     this.tenantServiceAccessEvents = []
     this.tenants = new Map()
@@ -1674,6 +1676,9 @@ export class MemoryStore {
         { limitScope: 'consumer', limit: consumerMax, used: consumerUsed, windowSeconds: consumerWindowSeconds },
         { limitScope: 'api_key', limit: keyMax, used: keyUsed, windowSeconds: keyWindowSeconds },
       ].map((layer) => ({ ...layer, remaining: Math.max(0, layer.limit - layer.used) }))
+      if (this.internalTrafficPolicy.matches({ tenantId, apiKeyId })) {
+        for (const layer of layers) Object.assign(layer, { exempt: true, limit: null, remaining: null })
+      }
       const binding = layers.reduce((tightest, layer) => (
         layer.remaining < tightest.remaining ? layer : tightest
       ))
@@ -1727,9 +1732,10 @@ export class MemoryStore {
     tenantId, consumerId, apiKeyId, platform, capability,
     windowStart, maxRequests, authorizationScopes, scopeEntitlements, legacySingleScope,
   }) {
-    assertMemoryKeyAccessLimits(this, apiKeyId, authorizationScopes)
+    const internal = this.internalTrafficPolicy.matches({ tenantId, apiKeyId })
+    if (!internal) assertMemoryKeyAccessLimits(this, apiKeyId, authorizationScopes)
     const records = [...this.requests.values()]
-    for (const scope of authorizationScopes) {
+    for (const scope of internal ? [] : authorizationScopes) {
       const entitlement = scopeEntitlements.get(authorizationScopeKey(scope))
       const consumerMaxRequests = legacySingleScope
         ? maxRequests
@@ -1776,6 +1782,7 @@ export class MemoryStore {
         'An active plan assignment is required before usage can be reserved',
       )
     }
+    if (internal) return
     const planMaxRequests = plan?.limits?.maxRequests
     const planWindowSeconds = plan?.limits?.windowSeconds
     if (Number.isInteger(planMaxRequests) && planMaxRequests > 0

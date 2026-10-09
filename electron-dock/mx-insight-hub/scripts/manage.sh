@@ -1385,6 +1385,8 @@ create_runtime_config() {
   kubectl -n "$namespace" create configmap mx-insight-hub-config \
     --from-literal=MX_INSIGHT_HOST=0.0.0.0 \
     --from-literal=MX_INSIGHT_STORE=postgres \
+    --from-literal=MX_INSIGHT_INTERNAL_KEY_IDS="${MX_INSIGHT_INTERNAL_KEY_IDS:-}" \
+    --from-literal=MX_INSIGHT_INTERNAL_TENANT_IDS="${MX_INSIGHT_INTERNAL_TENANT_IDS:-}" \
     --from-literal=NIGHT_ALL_BASE_URL="$NIGHT_ALL_BASE_URL" \
     --from-literal=NIGHT_ALL_TIMEOUT_MS="${NIGHT_ALL_TIMEOUT_MS:-60000}" \
     --from-literal=NIGHT_ALL_READY_MODE="${NIGHT_ALL_READY_MODE:-ready_only}" \
@@ -1424,6 +1426,7 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_TIKHUB_MAX_CONCURRENCY="${MX_INSIGHT_TIKHUB_MAX_CONCURRENCY:-8}" \
     --from-literal=MX_INSIGHT_TIKHUB_MAX_CONSUMER_CONCURRENCY="${MX_INSIGHT_TIKHUB_MAX_CONSUMER_CONCURRENCY:-8}" \
     --from-literal=MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE:-50}" \
+    --from-literal=MX_INSIGHT_TIKHUB_RATE_LIMIT_BURST="${MX_INSIGHT_TIKHUB_RATE_LIMIT_BURST:-1}" \
     --from-literal=MX_INSIGHT_TIKHUB_CIRCUIT_FAILURES="${MX_INSIGHT_TIKHUB_CIRCUIT_FAILURES:-3}" \
     --from-literal=MX_INSIGHT_TIKHUB_CIRCUIT_OPEN_MS="${MX_INSIGHT_TIKHUB_CIRCUIT_OPEN_MS:-60000}" \
     --from-literal=MX_INSIGHT_TIKHUB_BILLING_JSON="$tikhub_billing_json" \

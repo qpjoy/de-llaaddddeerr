@@ -42,6 +42,21 @@ async function closeRuntime(runtime) {
   await runtime.pool?.end()
 }
 
+test('deployment-owned internal IDs reach the usage store and are disabled by default', async () => {
+  const apiKeyId = 'fd2f8cc9-0ff1-4052-a538-8cc8150bde83'
+  const tenantId = '277bf8a4-5ed5-414d-b429-d72fcd7d36b6'
+  const ordinary = await runtimeFor(BASE)
+  const internal = await runtimeFor({ ...BASE, MX_INSIGHT_INTERNAL_KEY_IDS: apiKeyId })
+  try {
+    assert.equal(ordinary.store.internalTrafficPolicy.matches({ apiKeyId, tenantId }), false)
+    assert.equal(internal.store.internalTrafficPolicy.matches({ apiKeyId, tenantId }), true)
+    assert.equal(internal.store.internalTrafficPolicy.matches({ apiKeyId: tenantId, tenantId }), false)
+  } finally {
+    await closeRuntime(ordinary)
+    await closeRuntime(internal)
+  }
+})
+
 test('public memory runtime fails closed when a valid paid provider contract is active', async () => {
   const awaiting = await runtimeFor(BASE)
   try {
@@ -541,12 +556,32 @@ test('provider request budgets reject values outside the PostgreSQL integer cont
   for (const [name, preflight] of [
     ['MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE', preflightJustOneConfig],
     ['MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE', preflightTikHubConfig],
+    ['MX_INSIGHT_TIKHUB_RATE_LIMIT_BURST', preflightTikHubConfig],
   ]) {
     assert.throws(
       () => preflight({ ...BASE, [name]: '2147483648' }),
       (error) => error?.code === 'invalid_configuration' && /must not exceed 2147483647/u.test(error.message),
     )
   }
+})
+
+test('TikHub burst policy defaults to one while preserving explicit operator overrides', () => {
+  assert.equal(loadConfig(BASE).tikHub.rateLimitBurst, 1)
+  assert.equal(loadConfig({ ...BASE, MX_INSIGHT_TIKHUB_RATE_LIMIT_BURST: '3' }).tikHub.rateLimitBurst, 3)
+  assert.throws(() => preflightTikHubConfig({ ...BASE, MX_INSIGHT_TIKHUB_RATE_LIMIT_BURST: '0' }),
+    error => error.code === 'invalid_configuration')
+})
+
+test('runtime wires the TikHub burst cap into shared search and user-info admission', async () => {
+  const runtime = await runtimeFor(BASE)
+  try {
+    assert.equal(runtime.tikHubGateway.platformStore, runtime.tikHubUserInfoGateway.platformStore)
+    const at = new Date('2026-10-09T00:00:00Z')
+    const results = await Promise.all(Array.from({ length: 4 }, () =>
+      runtime.tikHubPlatformStore.acquireProviderRateLimit({ limit: 50, at })))
+    assert.equal(results.filter(row => row.allowed).length, 1)
+    assert.ok(results.filter(row => !row.allowed).every(row => row.retryAfterMs === 1200))
+  } finally { await closeRuntime(runtime) }
 })
 
 test('JustOne rejects a per-consumer concurrency budget above the global budget', () => {

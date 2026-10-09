@@ -296,6 +296,69 @@ test('memory provider token bucket admits a multi-call workflow atomically', asy
   })).allowed, true, 'a rejected multi-token admission must not consume the remaining token')
 })
 
+test('bounded provider bursts smooth idle and legacy full buckets without changing refill rate', async () => {
+  const store = new MemoryExternalPlatformStore({ rateLimitBurst: 1 })
+  const start = Date.parse('2026-10-08T21:18:41Z')
+  const admit = (offset, tokens = 1) => store.acquireProviderRateLimit({
+    limit: 50, tokens, windowMs: 60_000, at: new Date(start + offset),
+  })
+  assert.equal((await admit(0)).allowed, true)
+  assert.deepEqual(await admit(0), { allowed: false, remaining: 0, retryAfterMs: 1200 })
+  assert.equal((await admit(1199)).allowed, false)
+  assert.equal((await admit(1200)).allowed, true)
+  // A long idle period must not hand enrichment 50 immediately usable tokens.
+  assert.equal((await admit(120_000)).allowed, true)
+  assert.equal((await admit(120_000)).allowed, false)
+  // Existing persisted buckets are clamped at the next admission, no reset/migration.
+  store.rateBuckets.get('justone').tokens = 49
+  assert.equal((await admit(120_001)).allowed, true)
+  assert.equal((await admit(120_001)).allowed, false)
+  // Existing user-info workflows reserve three paid calls atomically.
+  assert.equal((await admit(121_201, 3)).allowed, false)
+  assert.equal((await admit(123_601, 3)).allowed, true)
+  assert.equal((await admit(123_601)).allowed, false)
+})
+
+for (const settle of ['commitLiveDelivery', 'finishProviderStep']) {
+  test(`${settle}: old success preserves a newer circuit; a fresh success recovers it`, async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T21:18:41Z') })
+    const usageStore = { requests: new Map(), async commitRequest() {} }
+    const store = new MemoryExternalPlatformStore({ usageStore, circuitFailureThreshold: 3 })
+    async function begin() {
+      const input = callInput()
+      usageStore.requests.set(input.usageRequestId, reservedUsage(input))
+      return { input, call: await store.beginProviderCall(input) }
+    }
+    const old = await begin()
+    for (let i = 0; i < 3; i += 1) {
+      t.mock.timers.tick(1000)
+      const failed = await begin()
+      await store.finishProviderStep({ callId: failed.call.id, delivery: failed.input,
+        outcome: 'rejected', httpStatus: 429, errorCode: 'upstream_rate_limited' })
+    }
+    const circuit = await store.providerState()
+    assert.ok(circuit.circuitOpenUntil)
+    async function succeed({ input, call }) {
+      await store[settle]({ callId: call.id, delivery: input, outcome: 'succeeded',
+        httpStatus: 200, businessCode: 200, billed: true, itemCount: 1,
+        responseBody: { data: [] }, capturedAt: new Date(),
+        freshUntil: new Date(Date.now() + 60_000), staleUntil: new Date(Date.now() + 120_000) })
+    }
+    t.mock.timers.tick(1000)
+    await succeed(old)
+    const preserved = await store.providerState()
+    assert.equal(preserved.circuitOpenUntil, circuit.circuitOpenUntil)
+    assert.equal(preserved.consecutiveFailures, 3)
+    assert.equal(preserved.lastErrorCode, 'upstream_rate_limited')
+    assert.ok(preserved.lastSuccessAt, 'successful business delivery is still recorded')
+    t.mock.timers.tick(60_000)
+    await succeed(await begin())
+    const recovered = await store.providerState()
+    assert.equal(recovered.circuitOpenUntil, null)
+    assert.equal(recovered.consecutiveFailures, 0)
+  })
+}
+
 test('Postgres provider token bucket is one atomic PostgreSQL-clock-driven admission', async () => {
   let statement
   const store = new PostgresExternalPlatformStore({
@@ -312,7 +375,7 @@ test('Postgres provider token bucket is one atomic PostgreSQL-clock-driven admis
     remaining: 0,
     retryAfterMs: 1234,
   })
-  assert.deepEqual(statement.values, ['justone', 90, 60_000, 1])
+  assert.deepEqual(statement.values, ['justone', 90, 60_000, 1, 90])
   assert.match(statement.sql, /SELECT clock_timestamp\(\) AS observed_at/u)
   assert.match(statement.sql, /INSERT INTO external_platform\.provider_rate_buckets/u)
   assert.match(statement.sql, /ON CONFLICT \(provider_key\) DO UPDATE/u)

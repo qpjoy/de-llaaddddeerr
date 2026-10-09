@@ -1,3 +1,5 @@
+import { isInternalTraffic, internalCircuitState, acquireTikHubRateLimit } from '../core/internal-traffic-policy.mjs'
+import { circuitOpenError, upstreamCapacityError } from './availability-errors.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
@@ -93,7 +95,7 @@ function publicFailure(error) {
     return new AppError(404, 'user_not_found', 'The Xiaohongshu user could not be resolved')
   }
   if (evidence.httpStatus === 429 || evidence.errorCode === 'upstream_rate_limited') {
-    return new AppError(429, 'external_platform_capacity_exceeded', 'External data capacity is temporarily exhausted')
+    return upstreamCapacityError(evidence)
   }
   if (evidence.errorCode === 'upstream_auth_or_balance_unavailable') {
     return new AppError(503, 'external_platform_capacity_unavailable', 'External data capacity is unavailable')
@@ -157,9 +159,10 @@ export class TikHubUserInfoGateway {
     this.activeByConsumer = new Map()
   }
 
-  #enter(consumerId) {
+  #enter(context) {
+    const consumerId = context.consumer.id
     const consumerActive = this.activeByConsumer.get(consumerId) || 0
-    if (this.active >= this.config.maxConcurrency || consumerActive >= this.config.maxConsumerConcurrency) {
+    if (this.active >= this.config.maxConcurrency || (!isInternalTraffic(this.usageStore, context) && consumerActive >= this.config.maxConsumerConcurrency)) {
       return false
     }
     this.active += 1
@@ -414,7 +417,7 @@ export class TikHubUserInfoGateway {
         return response(responseBody, activeRequestId, false, 'fresh_cache', snapshot.capturedAt)
       }
 
-      const state = await this.platformStore.providerState(TIKHUB_PROVIDER_KEY)
+      const state = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
       const circuitOpen = state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now
       const resolvedCredential = circuitOpen
         ? { ready: false, value: null, revision: null }
@@ -462,6 +465,7 @@ export class TikHubUserInfoGateway {
         })
         ownsReservation = false
         if (operationControlError) throw operationControlError
+        if (circuitOpen) throw circuitOpenError(state, this.config, 'External Xiaohongshu user data is unavailable')
         throw new AppError(503, code, 'External Xiaohongshu user data is unavailable')
       }
 
@@ -505,7 +509,7 @@ export class TikHubUserInfoGateway {
           ownsReservation = false
           throw new AppError(409, 'request_in_progress', 'An equal provider dispatch is already in progress')
         }
-        if (!this.#enter(context.consumer.id)) {
+        if (!this.#enter(context)) {
           if (snapshot) {
             const fallback = fallbackResponse(snapshot, activeRequestId)
             await this.platformStore.commitSnapshotDelivery({
@@ -562,13 +566,11 @@ export class TikHubUserInfoGateway {
         // Cost reservations are releasable; rate-limit tokens are not. Reserve
         // the complete workflow cost first so budget-rejected requests cannot
         // consume provider capacity without making a call.
-        const admission = typeof this.platformStore.acquireProviderRateLimit === 'function'
-          ? await this.platformStore.acquireProviderRateLimit({
+        const admission = await acquireTikHubRateLimit(this.usageStore, context, this.platformStore, {
               limit: this.config.maxRequestsPerMinute ?? 120,
               tokens: expectedProviderCalls,
               windowMs: 60_000,
             })
-          : { allowed: true, retryAfterMs: 0 }
         if (!admission.allowed) {
           if (snapshot) {
             const fallback = fallbackResponse(snapshot, activeRequestId)

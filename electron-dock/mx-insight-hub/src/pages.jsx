@@ -1933,8 +1933,8 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                           <small>{entry.scope}</small>
                         </td>
                         <td>{entry.binding.limitScope === 'api_key' ? '这把 Key' : '调用者'}</td>
-                        <td>{formatNumber(entry.binding.used)} / {formatNumber(entry.binding.limit)}</td>
-                        <td className={entry.binding.remaining === 0 ? 'mih-key-health__spent' : ''}>{formatNumber(entry.binding.remaining)}</td>
+                        <td>{formatNumber(entry.binding.used)} / {entry.binding.exempt ? '不限' : formatNumber(entry.binding.limit)}</td>
+                        <td className={entry.binding.remaining === 0 ? 'mih-key-health__spent' : ''}>{entry.binding.exempt ? '不限' : formatNumber(entry.binding.remaining)}</td>
                         <td>{formatNumber(entry.binding.windowSeconds)} 秒</td>
                       </tr>
                     ))}

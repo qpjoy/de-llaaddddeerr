@@ -11,9 +11,34 @@ import {
   socialAccountPlatform,
 } from '../../server/contracts/social-accounts.mjs'
 import { EXTERNAL_PLATFORM_OPERATION_CATALOG } from '../../server/external-platforms/control-store.mjs'
+import { createInternalTrafficPolicy } from '../../server/core/internal-traffic-policy.mjs'
 
 const PEPPER = 'social-accounts-test-pepper-with-entropy'
 const PATH = '/api/v1/data/social/accounts/search'
+
+test('internal tenant traffic gets the shorter TikHub protection without bypassing other suppliers', async () => {
+  const state = await fixture()
+  state.usageStore.internalTrafficPolicy = createInternalTrafficPolicy({ tenantIds: [state.context.tenant.id] })
+  let dispatches = 0
+  for (const providerKey of ['tikhub', 'justone']) {
+    const platformStore = new MemoryExternalPlatformStore({ usageStore: state.usageStore, providerKey,
+      authorizationPlatform: SOCIAL_ACCOUNT_AUTHORIZATION_PLATFORM })
+    const failedAt = Date.now() - 11000
+    platformStore.providerState = async () => ({ lastErrorCode: 'upstream_rate_limited',
+      lastFailureAt: new Date(failedAt).toISOString(), circuitOpenUntil: new Date(failedAt + 60000).toISOString() })
+    platformStore.acquireProviderRateLimit = async () => ({ allowed: false, retryAfterMs: 60000 })
+    const gateway = new ExternalPlatformGateway({ usageStore: state.usageStore, platformStore,
+      adapter: { async searchAccounts(body) { dispatches++; return accountResult(body) } },
+      config: config(), providerKey, apiKeyPepper: PEPPER, reservationLeaseMs: 150000, logger: { warn() {} } })
+    gateway.activeByConsumer.set(state.context.consumer.id, 8)
+    const dispatch = () => gateway.searchAccounts(state.context, {
+      body: { platform: providerKey === 'tikhub' ? 'xiaohongshu' : 'douyin', keyword: '内部测试' },
+      idempotencyKey: `internal-${providerKey}`, path: PATH })
+    if (providerKey === 'tikhub') assert.equal((await dispatch()).sourceMode, 'live')
+    else await assert.rejects(dispatch, error => error.code === 'external_platform_circuit_open')
+  }
+  assert.equal(dispatches, 1)
+})
 
 function config() {
   return {

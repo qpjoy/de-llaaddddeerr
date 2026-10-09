@@ -1,3 +1,5 @@
+import { isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { circuitOpenError } from './availability-errors.mjs'
 import { WebSearchUpstreamError } from '../adapters/web-search.mjs'
 import { gatewayWebSearchRequest } from '../web-search/contract.mjs'
 import { assertEnterpriseCallable, normalizeEnterpriseRequest, enterpriseOperation, ENTERPRISE_DATASET, ENTERPRISE_CAPABILITY } from '../contracts/enterprise.mjs'
@@ -304,11 +306,12 @@ export class ExternalPlatformGateway {
     this.activeByConsumer = new Map()
   }
 
-  #enter(consumerId) {
+  #enter(context) {
+    const consumerId = context.consumer.id
     const consumerActive = this.activeByConsumer.get(consumerId) || 0
     if (
       this.active >= this.config.maxConcurrency
-      || consumerActive >= this.config.maxConsumerConcurrency
+      || (!(this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context)) && consumerActive >= this.config.maxConsumerConcurrency)
     ) return false
     this.active += 1
     this.activeByConsumer.set(consumerId, consumerActive + 1)
@@ -892,7 +895,8 @@ export class ExternalPlatformGateway {
       throw new AppError(404, 'stored_snapshot_not_found', 'No stored result matches this request')
     }
 
-    const state = await this.platformStore.providerState(this.providerKey)
+    const sharedState = await this.platformStore.providerState(this.providerKey)
+    const state = this.providerKey === 'tikhub' ? internalCircuitState(this.usageStore, context, sharedState) : sharedState
     // Two breakers: the provider-wide one for upstream faults, and this
     // marketplace's own for responses the Hub could not normalize. A gap in our
     // contract for one marketplace must not suspend live dispatch for the rest.
@@ -966,6 +970,10 @@ export class ExternalPlatformGateway {
         errorCode,
       })
       if (operationControlError) throw operationControlError
+      if (this.providerKey === 'tikhub' && circuitOpen
+        && !(contractCircuit?.circuitOpenUntil && new Date(contractCircuit.circuitOpenUntil) > now)) {
+        throw circuitOpenError(state, this.config, 'External data is temporarily unavailable')
+      }
       throw new AppError(503, errorCode, 'External product search is unavailable')
     }
 
@@ -1068,7 +1076,7 @@ export class ExternalPlatformGateway {
       // Only a dispatch-lease owner consumes scarce provider concurrency.
       // Equal requests suppressed by the shared lease must not crowd out a
       // different customer query before they return their 409/cache result.
-      if (!this.#enter(context.consumer.id)) {
+      if (!this.#enter(context)) {
         if (allowStoredFallback && snapshot) {
           const responseBody = deliveryBody(snapshot.responseBody, {
             requestId: activeRequestId,
@@ -1121,7 +1129,9 @@ export class ExternalPlatformGateway {
         costControls: [costControl],
       })
 
-      const rateLimit = typeof this.platformStore.acquireProviderRateLimit === 'function'
+      const rateLimit = this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context)
+        ? { allowed: true, retryAfterMs: 0 }
+        : typeof this.platformStore.acquireProviderRateLimit === 'function'
         ? await this.platformStore.acquireProviderRateLimit({
             limit: this.config.maxRequestsPerMinute ?? 90,
             windowMs: 60_000,

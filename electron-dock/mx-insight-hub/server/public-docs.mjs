@@ -6055,10 +6055,12 @@ curl -fsS -G "$HUB_URL/api/v1/data/posts/media" \
       <tr><td><code>429 plan_window_quota_exceeded</code></td><td>套餐的滑动窗口额度用完；等窗口恢复。</td></tr>
       <tr><td><code>429 plan_month_quota_exceeded</code></td><td>套餐的<strong>月度</strong>额度用完。<strong>等窗口没有用</strong>——要到下个计费周期，或升级套餐。</td></tr>
       <tr><td><code>429 plan_burst_exceeded</code></td><td>瞬时并发/突发速率超限。降低发起速率即可，额度本身没有用完。</td></tr>
-      <tr><td><code>429 external_platform_busy / external_platform_capacity_exceeded</code></td><td>Hub 或供应方的限流与并发保护；paid-ready 请求也仍受这些技术保护，按响应退避，不能换 Key 绕过。</td></tr>
+      <tr><td><code>429 external_platform_busy / external_platform_rate_limited</code></td><td>Hub 的并发或共享调用频率保护；按 retryAfterMs / Retry-After 退避，不能换 Key 绕过。</td></tr>
+      <tr><td><code>429 external_platform_capacity_exceeded</code></td><td>上游返回限流；小红书错误详情中 upstreamDispatched=true。limit=null 表示上游阈值未知，不能当作 Hub 的每分钟限额。保留原 requestId 和幂等键核对结果，不自动重复付费调用。</td></tr>
       <tr><td><code>429 external_platform_cost_budget_exhausted / external_platform_subsidy_budget_exhausted</code></td><td>仅可能用于本次请求未形成正价 enforced 按次计费 wallet hold 的 subsidized 流量；已成功预留该 hold 的 paid-ready 请求不会因 Hub 月度采购或补贴上限被拒。</td></tr>
       <tr><td><code>502 response_unusable / outcome_unknown</code></td><td>保留 requestId 和原 key，停止自动重试；相同 key 只重放已提交结论。</td></tr>
-      <tr><td><code>503 not_configured / contract_unverified / circuit_open / capacity_unavailable / cost_control_unavailable / cost_evidence_incomplete</code></td><td>由 operator 检查发布门禁和当前 endpoint/当前请求的成本证据；paid-ready 只绕过月度财务线，不绕过这些完整性检查。无关历史成本异常不会阻断该请求。</td></tr>
+      <tr><td><code>503 external_platform_circuit_open</code></td><td>小红书的新拒绝响应提供共享上游保护范围、原因、failureThreshold、circuitOpenUntil 和 Retry-After；upstreamDispatched=false。期限表示允许重新检查准入的时间，不保证上游已经恢复。历史响应保持原样。</td></tr>
+      <tr><td><code>503 not_configured / contract_unverified / capacity_unavailable / cost_control_unavailable / cost_evidence_incomplete</code></td><td>由 operator 检查发布门禁和当前 endpoint/当前请求的成本证据；paid-ready 只绕过月度财务线，不绕过这些完整性检查。无关历史成本异常不会阻断该请求。</td></tr>
     </tbody></table>
     </section>
 

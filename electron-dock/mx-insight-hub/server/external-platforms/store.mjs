@@ -476,6 +476,7 @@ export class MemoryExternalPlatformStore {
     authorizationPlatform = 'ecommerce',
     circuitFailureThreshold = 3,
     circuitOpenMs = 60_000,
+    rateLimitBurst = null,
     uncertainCooldownMs = 15 * 60_000,
   } = {}) {
     this.usageStore = usageStore
@@ -483,6 +484,7 @@ export class MemoryExternalPlatformStore {
     this.authorizationPlatform = authorizationPlatform
     this.circuitFailureThreshold = circuitFailureThreshold
     this.circuitOpenMs = circuitOpenMs
+    this.rateLimitBurst = rateLimitBurst == null ? null : boundedRateLimit(rateLimitBurst, 'rateLimitBurst')
     this.uncertainCooldownMs = uncertainCooldownMs
     this.calls = new Map()
     this.costReservations = new Map()
@@ -627,14 +629,17 @@ export class MemoryExternalPlatformStore {
     const maximum = boundedRateLimit(limit, 'limit')
     const requested = boundedRateLimit(tokens, 'tokens')
     if (requested > maximum) throw new TypeError('tokens must not exceed limit')
+    // Preserve atomic multi-call admission, but do not accumulate a whole
+    // minute of idle capacity into one burst of single-call/enrichment work.
+    const burst = Math.min(maximum, Math.max(requested, this.rateLimitBurst ?? maximum))
     const moment = rateMoment({ at, windowMs })
     const current = this.rateBuckets.get(this.providerKey)
     const elapsedMs = current
       ? Math.max(0, moment.timestamp - current.refilledAtMs)
       : 0
     const available = current
-      ? Math.min(maximum, current.tokens + (elapsedMs * maximum / moment.windowMs))
-      : maximum
+      ? Math.min(burst, current.tokens + (elapsedMs * maximum / moment.windowMs))
+      : burst
     const refilledAtMs = current
       ? Math.max(current.refilledAtMs, moment.timestamp)
       : moment.timestamp
@@ -1271,12 +1276,7 @@ export class MemoryExternalPlatformStore {
         }))
       }
     }
-    Object.assign(this.state, {
-      consecutiveFailures: 0,
-      circuitOpenUntil: null,
-      lastSuccessAt: call.completedAt,
-      lastErrorCode: null,
-    })
+    this.#recordSuccess(call)
     return { snapshot: clone(snapshot) }
   }
 
@@ -1365,14 +1365,12 @@ export class MemoryExternalPlatformStore {
       }
     }
     if (outcome === 'succeeded') {
-      Object.assign(this.state, {
-        consecutiveFailures: 0,
-        circuitOpenUntil: null,
-        lastSuccessAt: call.completedAt,
-        lastErrorCode: null,
-      })
+      this.#recordSuccess(call)
       // A marketplace that parses again is no longer the one that was broken.
-      if (call.marketplace) this.contractCircuits.delete(call.marketplace)
+      const scoped = this.contractCircuits.get(call.marketplace)
+      if (scoped && new Date(scoped.lastFailureAt) <= new Date(call.startedAt)) {
+        this.contractCircuits.delete(call.marketplace)
+      }
     } else if (affectsCircuit) {
       this.#recordFailure(errorCode, { circuitCategory, scope: call.marketplace ?? null })
     }
@@ -1410,6 +1408,15 @@ export class MemoryExternalPlatformStore {
       responseStatus: 200,
       snapshotId: current.id,
     }))
+  }
+
+  #recordSuccess(call) {
+    this.state.lastSuccessAt = call.completedAt
+    // A search settles after its enrichment children. Its earlier success
+    // cannot prove recovery from a failure observed since that call started.
+    if (!this.state.lastFailureAt || new Date(this.state.lastFailureAt) <= new Date(call.startedAt)) {
+      Object.assign(this.state, { consecutiveFailures: 0, circuitOpenUntil: null, lastErrorCode: null })
+    }
   }
 
   #recordFailure(errorCode, { circuitCategory = null, scope = null } = {}) {
@@ -1973,6 +1980,7 @@ export class PostgresExternalPlatformStore {
     queueName = 'mx-insight-hub:ingest',
     circuitFailureThreshold = 3,
     circuitOpenMs = 60_000,
+    rateLimitBurst = null,
     uncertainCooldownMs = 15 * 60_000,
   }) {
     this.pool = pool
@@ -1981,6 +1989,7 @@ export class PostgresExternalPlatformStore {
     this.queueName = queueName
     this.circuitFailureThreshold = circuitFailureThreshold
     this.circuitOpenMs = circuitOpenMs
+    this.rateLimitBurst = rateLimitBurst == null ? null : boundedRateLimit(rateLimitBurst, 'rateLimitBurst')
     this.uncertainCooldownMs = uncertainCooldownMs
   }
 
@@ -2230,12 +2239,13 @@ export class PostgresExternalPlatformStore {
     )
   }
 
-  async #clearContractCircuit(client, scope) {
+  async #clearContractCircuit(client, scope, callId) {
     if (!scope) return
     await client.query(
       `DELETE FROM external_platform.provider_contract_circuits
-        WHERE provider_key = $1 AND scope = $2`,
-      [this.providerKey, scope],
+        WHERE provider_key = $1 AND scope = $2
+          AND last_failure_at <= (SELECT started_at FROM external_platform.provider_calls WHERE id = $3)`,
+      [this.providerKey, scope, callId],
     )
   }
 
@@ -2263,6 +2273,7 @@ export class PostgresExternalPlatformStore {
     const maximum = boundedRateLimit(limit, 'limit')
     const requested = boundedRateLimit(tokens, 'tokens')
     if (requested > maximum) throw new TypeError('tokens must not exceed limit')
+    const burst = Math.min(maximum, Math.max(requested, this.rateLimitBurst ?? maximum))
     const duration = boundedRateLimit(windowMs, 'windowMs')
     if (duration < 1_000 || duration > 3_600_000) {
       throw new TypeError('windowMs must be between 1000 and 3600000')
@@ -2273,14 +2284,9 @@ export class PostgresExternalPlatformStore {
        )
        INSERT INTO external_platform.provider_rate_buckets AS bucket
          (provider_key, capacity, window_ms, tokens, last_admitted, refilled_at, updated_at)
-       -- Both operands are cast, and each parameter is cast to exactly one
-       -- type everywhere it appears. In an INSERT ... SELECT the parameters
-       -- carry no column context, so a bare "$2 - $4" leaves PostgreSQL with
-       -- unknown on both sides and it refuses the expression (42725); casting
-       -- $2 to double precision instead collides with the integer capacity
-       -- column it also feeds (42P08). So capacity stays integer and only the
-       -- subtraction's result becomes double precision.
-       SELECT $1, $2, $3, ($2::integer - $4::double precision), true,
+       -- Capacity remains the refill rate. $5 bounds accumulated burst tokens;
+       -- explicit operand types avoid ambiguous INSERT ... SELECT parameters.
+       SELECT $1, $2, $3, ($5::double precision - $4::double precision), true,
               db_clock.observed_at, db_clock.observed_at
          FROM db_clock
        ON CONFLICT (provider_key) DO UPDATE SET
@@ -2288,7 +2294,7 @@ export class PostgresExternalPlatformStore {
          window_ms = EXCLUDED.window_ms,
          tokens = CASE
            WHEN least(
-             EXCLUDED.capacity::double precision,
+             $5::double precision,
              bucket.tokens + greatest(
                0::double precision,
                extract(epoch FROM (EXCLUDED.refilled_at - bucket.refilled_at))::double precision
@@ -2298,7 +2304,7 @@ export class PostgresExternalPlatformStore {
              )
            ) >= $4::double precision
              THEN least(
-               EXCLUDED.capacity::double precision,
+               $5::double precision,
                bucket.tokens + greatest(
                  0::double precision,
                  extract(epoch FROM (EXCLUDED.refilled_at - bucket.refilled_at))::double precision
@@ -2308,7 +2314,7 @@ export class PostgresExternalPlatformStore {
                )
              ) - $4::double precision
            ELSE least(
-             EXCLUDED.capacity::double precision,
+             $5::double precision,
              bucket.tokens + greatest(
                0::double precision,
                extract(epoch FROM (EXCLUDED.refilled_at - bucket.refilled_at))::double precision
@@ -2319,7 +2325,7 @@ export class PostgresExternalPlatformStore {
            )
          END,
          last_admitted = least(
-           EXCLUDED.capacity::double precision,
+           $5::double precision,
            bucket.tokens + greatest(
              0::double precision,
              extract(epoch FROM (EXCLUDED.refilled_at - bucket.refilled_at))::double precision
@@ -2328,8 +2334,8 @@ export class PostgresExternalPlatformStore {
                / EXCLUDED.window_ms::double precision
            )
          ) >= $4::double precision,
-         refilled_at = EXCLUDED.refilled_at,
-         updated_at = EXCLUDED.refilled_at
+         refilled_at = greatest(bucket.refilled_at, EXCLUDED.refilled_at),
+         updated_at = greatest(bucket.updated_at, EXCLUDED.refilled_at)
        RETURNING last_admitted AS allowed,
          floor(tokens)::bigint AS remaining,
          CASE WHEN last_admitted THEN 0::bigint ELSE greatest(
@@ -2337,7 +2343,7 @@ export class PostgresExternalPlatformStore {
            ceil(($4::double precision - tokens) * window_ms::double precision
              / capacity::double precision)::bigint
          ) END AS retry_after_ms`,
-      [this.providerKey, maximum, duration, requested],
+      [this.providerKey, maximum, duration, requested, burst],
     )
     if (!rows[0]) throw new Error('Provider rate bucket returned no state')
     return {
@@ -3228,13 +3234,7 @@ export class PostgresExternalPlatformStore {
         providerCallId: callId,
         snapshotId: snapshot.id,
       })
-      await client.query(
-        `UPDATE external_platform.provider_state SET
-           consecutive_failures = 0, circuit_open_until = NULL,
-           last_success_at = now(), last_error_code = NULL, updated_at = now()
-         WHERE provider_key = $1`,
-        [this.providerKey],
-      )
+      await this.#recordProviderSuccess(client, callId)
       await this.#insertIngestJob(client, ingestJob)
       return { snapshot }
     })
@@ -3361,15 +3361,9 @@ export class PostgresExternalPlatformStore {
       }
 
       if (outcome === 'succeeded') {
-        await client.query(
-          `UPDATE external_platform.provider_state SET
-             consecutive_failures = 0, circuit_open_until = NULL,
-             last_success_at = now(), last_error_code = NULL, updated_at = now()
-           WHERE provider_key = $1`,
-          [this.providerKey],
-        )
+        await this.#recordProviderSuccess(client, callId)
         // A marketplace that parses again is no longer the broken one.
-        await this.#clearContractCircuit(client, delivery?.marketplace ?? null)
+        await this.#clearContractCircuit(client, delivery?.marketplace ?? null, callId)
       } else if (affectsCircuit) {
         await this.#advanceFailureState(client, errorCode, {
           circuitCategory,
@@ -3467,6 +3461,22 @@ export class PostgresExternalPlatformStore {
         snapshotId: current.id,
       })
     })
+  }
+
+  async #recordProviderSuccess(client, callId) {
+    // Settlement can lag acquisition (notably while search enriches its rows).
+    // Only a call started after the latest failure is evidence of recovery.
+    await client.query(
+      `UPDATE external_platform.provider_state SET
+         consecutive_failures = CASE WHEN last_failure_at > call.started_at THEN consecutive_failures ELSE 0 END,
+         circuit_open_until = CASE WHEN last_failure_at > call.started_at THEN circuit_open_until ELSE NULL END,
+         last_error_code = CASE WHEN last_failure_at > call.started_at THEN last_error_code ELSE NULL END,
+         last_success_at = now(), updated_at = now()
+       FROM external_platform.provider_calls AS call
+       WHERE provider_state.provider_key = $1 AND call.id = $2
+         AND call.provider_key = provider_state.provider_key`,
+      [this.providerKey, callId],
+    )
   }
 
   async #advanceFailureState(client, errorCode, { circuitCategory = null, scope = null } = {}) {

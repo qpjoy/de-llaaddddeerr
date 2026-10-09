@@ -1,3 +1,4 @@
+import { createInternalTrafficPolicy } from '../core/internal-traffic-policy.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { ensurePostgresAdminExecution } from './admin-execution.mjs'
 import { assertPostgresKeyAccessLimits } from './key-access-limits.mjs'
@@ -1080,7 +1081,8 @@ function countsAgainstScopeSql(scopeTypeParam, scopeKeyParam) {
 }
 
 export class PostgresStore {
-  constructor(pool) {
+  constructor(pool, { internalTraffic } = {}) {
+    this.internalTrafficPolicy = createInternalTrafficPolicy(internalTraffic)
     this.pool = pool
   }
 
@@ -2644,6 +2646,9 @@ export class PostgresStore {
           windowSeconds: keyWindowSeconds,
         },
       ].map((layer) => ({ ...layer, remaining: Math.max(0, layer.limit - layer.used) }))
+      if (this.internalTrafficPolicy.matches({ tenantId, apiKeyId })) {
+        for (const layer of layers) Object.assign(layer, { exempt: true, limit: null, remaining: null })
+      }
       const binding = layers.reduce((tightest, layer) => (
         layer.remaining < tightest.remaining ? layer : tightest
       ))
@@ -2705,8 +2710,9 @@ export class PostgresStore {
   }
 
   async #assertQuota(client, input) {
-    await assertPostgresKeyAccessLimits(client, input.apiKeyId, input.authorizationScopes)
-    for (const scope of input.authorizationScopes) {
+    const internal = this.internalTrafficPolicy.matches(input)
+    if (!internal) await assertPostgresKeyAccessLimits(client, input.apiKeyId, input.authorizationScopes)
+    for (const scope of internal ? [] : input.authorizationScopes) {
       const keyEntitlement = input.scopeEntitlements.get(authorizationScopeKey(scope))
       const consumerMaxRequests = input.legacySingleScope
         ? input.maxRequests
@@ -2792,6 +2798,7 @@ export class PostgresStore {
         'An active published plan assignment is required before usage can be reserved',
       )
     }
+    if (internal) return
     const planMaxRequests = planResult.rows[0]?.limits?.maxRequests
     const planWindowSeconds = planResult.rows[0]?.limits?.windowSeconds
     if (Number.isInteger(planMaxRequests) && planMaxRequests > 0
@@ -9543,7 +9550,7 @@ function summarizeRequestMetering(rows) {
   return { byMeter }
 }
 
-export async function createPostgresStore(options) {
+export async function createPostgresStore({ internalTraffic, ...options }) {
   const { Pool } = await import('pg')
-  return new PostgresStore(new Pool(options))
+  return new PostgresStore(new Pool(options), { internalTraffic })
 }

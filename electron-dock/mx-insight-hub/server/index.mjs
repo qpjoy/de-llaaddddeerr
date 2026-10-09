@@ -91,8 +91,8 @@ function assertDurablePaidProviderRuntime(config) {
 export async function createRuntime(config = loadConfig()) {
   assertDurablePaidProviderRuntime(config)
   const store = config.storeDriver === 'postgres'
-    ? await createPostgresStore({ connectionString: config.databaseUrl })
-    : new MemoryStore()
+    ? await createPostgresStore({ connectionString: config.databaseUrl, internalTraffic: config.internalTraffic })
+    : new MemoryStore({ internalTraffic: config.internalTraffic })
   const adapter = new NightAllAdapter(config.nightAll)
   // The queue is only reachable with a real database. Without one the admin
   // backfill routes report unavailable rather than pretending to schedule work.
@@ -187,6 +187,7 @@ export async function createRuntime(config = loadConfig()) {
     usageStore: store,
     providerKey: 'tikhub',
     authorizationPlatform: 'xiaohongshu',
+    rateLimitBurst: config.tikHub.rateLimitBurst,
     circuitFailureThreshold: config.tikHub.circuitFailureThreshold,
     circuitOpenMs: config.tikHub.circuitOpenMs,
     uncertainCooldownMs: config.tikHub.unknownFingerprintCooldownMs,
@@ -199,6 +200,7 @@ export async function createRuntime(config = loadConfig()) {
     usageStore: store,
     providerKey: 'tikhub',
     authorizationPlatform: 'social',
+    rateLimitBurst: config.tikHub.rateLimitBurst,
     circuitFailureThreshold: config.tikHub.circuitFailureThreshold,
     circuitOpenMs: config.tikHub.circuitOpenMs,
     uncertainCooldownMs: config.tikHub.unknownFingerprintCooldownMs,
@@ -359,6 +361,7 @@ export async function createRuntime(config = loadConfig()) {
     usageStore: store,
     platformStore: createExternalPlatformStore({ pool, usageStore: store,
       providerKey: 'tikhub', authorizationPlatform: platform,
+      rateLimitBurst: config.tikHub.rateLimitBurst,
       circuitFailureThreshold: config.tikHub.circuitFailureThreshold,
       circuitOpenMs: config.tikHub.circuitOpenMs,
       uncertainCooldownMs: config.tikHub.unknownFingerprintCooldownMs }),

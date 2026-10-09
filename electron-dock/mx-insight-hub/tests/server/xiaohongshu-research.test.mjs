@@ -47,6 +47,38 @@ async function fixture(fetchImpl = async () => response(detail()), { capabilitie
   return { store, service, tenant, consumer, key, context, adapter, platformStore, config, gateway, call }
 }
 
+test('detail and comments share circuit evidence and HTTP Retry-After while fresh cache remains readable', async t => {
+  let dispatched = 0
+  const state = await fixture(async () => { dispatched += 1; return response(detail()) })
+  await state.call()
+  state.config.circuitFailureThreshold = 3
+  const until = new Date(Date.now() + 60_000).toISOString()
+  Object.assign(state.platformStore.state, { consecutiveFailures: 3,
+    circuitOpenUntil: until, lastErrorCode: 'upstream_rate_limited' })
+  const cached = await state.call('note_detail', { note_id: ID }, 'cached-during-circuit')
+  assert.equal(cached.sourceMode, 'fresh_cache')
+  const server = createServer(createApp({ service: state.service, store: state.store,
+    adapter: {}, tikHubGateway: state.gateway, listenerMode: 'public', logger: { error() {} } }))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  for (const name of ['note_detail', 'note_comments']) {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}${endpoints[name].path}`, {
+      method: 'POST', headers: { authorization: `Bearer ${state.key.secret}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ note_id: OTHER }),
+    })
+    assert.equal(res.status, 503)
+    assert.ok(Number(res.headers.get('retry-after')) > 0)
+    const body = await res.json()
+    assert.equal(body.error.code, 'external_platform_circuit_open')
+    assert.equal(body.error.details.circuitOpenUntil, until)
+    assert.equal(body.error.details.failureThreshold, 3)
+    assert.equal(body.error.details.upstreamDispatched, false)
+    assert.equal(body.error.details.reason, 'upstream_rate_limited')
+    assert.doesNotMatch(JSON.stringify(body), /tikhub|provider-secret|api\.tikhub/)
+  }
+  assert.equal(dispatched, 1)
+})
+
 test('user analytics validates numeric v2 filters and maps a page without inventing unavailable metrics', () => {
   const request = normalizeBloggerNotesRequest({ user_id: AUTHOR.toUpperCase(), page_number: 20, page_size: 2, note_type: 0, order_type: 3 })
   assert.deepEqual(request.providerQuery, { user_id: AUTHOR, page_number: 20, page_size: 2, note_type: 0, order_type: 3 })

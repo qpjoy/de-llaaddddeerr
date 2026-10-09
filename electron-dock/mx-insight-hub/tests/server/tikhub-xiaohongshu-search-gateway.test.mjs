@@ -3,6 +3,7 @@ import { test } from 'node:test'
 
 import { TikHubUpstreamError } from '../../server/adapters/tikhub.mjs'
 import { AppError } from '../../server/core/errors.mjs'
+import { createInternalTrafficPolicy } from '../../server/core/internal-traffic-policy.mjs'
 import { isNightAllDataSearchV1Envelope } from '../../server/contracts/night-all-data-search.mjs'
 import { isNightAllLegacyEnvelope } from '../../server/contracts/night-all-legacy.mjs'
 import {
@@ -14,6 +15,7 @@ import {
 import { TIKHUB_XIAOHONGSHU_ENDPOINT_KEY } from '../../server/contracts/tikhub-xiaohongshu.mjs'
 import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
 import { TikHubGateway } from '../../server/external-platforms/tikhub-gateway.mjs'
+import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 
 const FIRST_NOTE_ID = '675d277d000000000600e655'
 const SECOND_NOTE_ID = '675d277d000000000600e658'
@@ -371,6 +373,101 @@ function request(overrides = {}) {
     ...overrides,
   }
 }
+
+test('internal search and enrichment bypass local RPM and consumer concurrency after a 10-second cooldown', async () => {
+  const adapter = adapterFor({ notes: [note(FIRST_NOTE_ID, '预'.repeat(60))], detailById: new Map([[FIRST_NOTE_ID, detailResult(FIRST_NOTE_ID, '完整正文'.repeat(60))]]) })
+  const state = fixture(adapter)
+  state.usageStore.internalTrafficPolicy = createInternalTrafficPolicy({ keyIds: [state.context.apiKey.id] })
+  state.gateway.activeByConsumer.set(state.context.consumer.id, 4)
+  const failedAt = Date.now() - 11_000
+  state.platformStore.providerState = async () => ({ lastErrorCode: 'upstream_rate_limited',
+    lastFailureAt: new Date(failedAt).toISOString(), circuitOpenUntil: new Date(failedAt + 60_000).toISOString() })
+  state.platformStore.acquireProviderRateLimit = async () => { assert.fail('internal traffic must not consume ordinary RPM tokens') }
+  await state.gateway.searchNotes(state.context, request())
+  assert.equal(adapter.calls.normalizedSearch.length, 1)
+  assert.equal(adapter.calls.detail.length, 1)
+  assert.equal(state.platformStore.liveCommits.length, 1)
+  assert.equal(state.platformStore.providerSteps.length, 1)
+  assert.equal(state.gateway.activeByConsumer.get(state.context.consumer.id), 4)
+})
+
+test('internal search still waits during its first 10 seconds and retains global concurrency protection', async () => {
+  const state = fixture(adapterFor({ notes: [] }))
+  state.usageStore.internalTrafficPolicy = createInternalTrafficPolicy({ keyIds: [state.context.apiKey.id] })
+  const failedAt = Date.now() - 1_000
+  state.platformStore.providerState = async () => ({ lastErrorCode: 'upstream_rate_limited',
+    lastFailureAt: new Date(failedAt).toISOString(), circuitOpenUntil: new Date(failedAt + 60_000).toISOString() })
+  await assert.rejects(() => state.gateway.searchNotes(state.context, request()), error => {
+    assert.equal(error.code, 'external_platform_circuit_open')
+    assert.ok(error.details.retryAfterMs > 0 && error.details.retryAfterMs <= 9_000)
+    assert.equal(error.details.scope, 'internal_caller')
+    return true
+  })
+  assert.equal(state.adapter.calls.normalizedSearch.length, 0)
+  state.platformStore.providerState = async () => ({})
+  state.gateway.active = state.gateway.config.maxConcurrency
+  await assert.rejects(() => state.gateway.searchNotes(state.context, request({ idempotencyKey: 'global-busy' })), error => error.code === 'external_platform_busy')
+  assert.equal(state.adapter.calls.normalizedSearch.length, 0)
+})
+
+test('search circuit errors explain the shared cooldown without dispatch or credential access', async () => {
+  const adapter = adapterFor({ notes: [] })
+  const state = fixture(adapter, { circuitFailureThreshold: 3 })
+  const until = new Date(Date.now() + 60_000).toISOString()
+  state.platformStore.providerState = async () => ({
+    circuitOpenUntil: until, lastErrorCode: 'upstream_rate_limited', consecutiveFailures: 4,
+  })
+  await assert.rejects(() => state.gateway.searchNotes(state.context, request()), error => {
+    assert.equal(error.code, 'external_platform_circuit_open')
+    assert.equal(error.details.upstreamDispatched, false)
+    assert.equal(error.details.reason, 'upstream_rate_limited')
+    assert.equal(error.details.scope, 'shared_upstream')
+    assert.equal(error.details.failureThreshold, 3)
+    assert.equal(error.details.circuitOpenUntil, until)
+    assert.ok(error.details.retryAfterMs > 0 && error.details.retryAfterMs <= 60_000)
+    return true
+  })
+  assert.equal(adapter.calls.credential, 0)
+  assert.equal(adapter.calls.search.length, 0)
+  assert.equal(state.platformStore.providerCalls.length, 0)
+})
+
+test('upstream 429 is distinguished from local admission and retains unknown billing', async () => {
+  const adapter = adapterFor({ notes: [], searchError: new TikHubUpstreamError('private message', {
+    outcome: 'rejected', httpStatus: 429, businessCode: null, billed: null,
+    errorCode: 'upstream_rate_limited', affectsCircuit: true,
+  }) })
+  const state = fixture(adapter)
+  await assert.rejects(() => state.gateway.searchNotes(state.context, request()), error => {
+    assert.equal(error.code, 'external_platform_capacity_exceeded')
+    assert.equal(error.details.upstreamDispatched, true)
+    assert.equal(error.details.upstreamStatus, 429)
+    assert.equal(error.details.limit, null)
+    assert.equal(error.details.retryable, false)
+    assert.doesNotMatch(JSON.stringify(error.details), /private message|provider-key/)
+    return true
+  })
+  assert.equal(adapter.calls.search.length, 1)
+  assert.equal(state.platformStore.providerFailures[0].billed, null)
+  assert.equal(state.platformStore.providerFailures[0].failureResponseBody.error.details.upstreamDispatched, true)
+})
+
+test('burst-limited enrichment preserves paid search rows and marks their text partial', async () => {
+  const snippet = '预'.repeat(60)
+  const adapter = adapterFor({ notes: [note(FIRST_NOTE_ID, snippet)] })
+  const state = fixture(adapter, { maxRequestsPerMinute: 50 })
+  const limiter = new MemoryExternalPlatformStore({ rateLimitBurst: 1 })
+  const at = new Date()
+  state.platformStore.acquireProviderRateLimit = input => limiter.acquireProviderRateLimit({ ...input, at })
+  const response = await state.gateway.searchNotes(state.context, request())
+  assert.equal(response.status, 200)
+  assert.equal(response.body.data.status, 'partial')
+  assert.equal(response.body.data.items[0].text, snippet)
+  assert.equal(adapter.calls.search.length, 1)
+  assert.equal(adapter.calls.detail.length, 0)
+  assert.equal(state.platformStore.providerCalls.length, 1)
+  assert.equal(state.platformStore.liveCommits.length, 1)
+})
 
 test('direct XHS search requires its operation grant before any paid work', async () => {
   const adapter = adapterFor({ notes: [note(FIRST_NOTE_ID, '不会派发')] })

@@ -6373,7 +6373,7 @@ export function createApp({
         ? error
         : new AppError(500, 'internal_error', 'Internal server error')
       if (!(error instanceof AppError)) logger.error?.({ requestId, error }, 'request failed')
-      if (appError.status === 429 && Number.isFinite(appError.details?.retryAfterMs)) {
+      if ([429, 503].includes(appError.status) && Number.isFinite(appError.details?.retryAfterMs)) {
         response.setHeader('retry-after', String(Math.max(1, Math.ceil(appError.details.retryAfterMs / 1000))))
       }
       const detailRequestId = appError.details?.requestId

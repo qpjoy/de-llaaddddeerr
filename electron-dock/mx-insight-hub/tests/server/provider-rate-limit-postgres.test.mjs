@@ -19,6 +19,33 @@ import { PostgresExternalPlatformStore } from '../../server/external-platforms/s
 
 const connectionString = process.env.MX_INSIGHT_TEST_DATABASE_URL || ''
 
+test('PostgreSQL smooths a shared burst across store instances and clamps old full buckets', {
+  skip: connectionString ? false : 'MX_INSIGHT_TEST_DATABASE_URL is not configured',
+}, async () => {
+  const pool = new pg.Pool({ connectionString, max: 8, statement_timeout: 5_000 })
+  const providerKey = `burst-${randomUUID().slice(0, 8)}`
+  const stores = Array.from({ length: 8 }, () => new PostgresExternalPlatformStore({ pool, providerKey, rateLimitBurst: 1 }))
+  try {
+    // Emulate the incident's persisted full minute bucket before the upgrade.
+    await pool.query(`INSERT INTO external_platform.provider_rate_buckets
+      (provider_key, capacity, window_ms, tokens, last_admitted, refilled_at)
+      VALUES ($1, 50, 60000, 49, true, clock_timestamp())`, [providerKey])
+    const results = await Promise.all(stores.map(store => store.acquireProviderRateLimit({ limit: 50 })))
+    assert.equal(results.filter(row => row.allowed).length, 1, 'only one replica gets the idle burst')
+    assert.ok(results.filter(row => !row.allowed).every(row => row.retryAfterMs > 0 && row.retryAfterMs <= 1200))
+    await pool.query("UPDATE external_platform.provider_rate_buckets SET refilled_at = clock_timestamp() - interval '10 minutes' WHERE provider_key = $1", [providerKey])
+    assert.equal((await stores[0].acquireProviderRateLimit({ limit: 50 })).remaining, 0)
+    assert.equal((await stores[1].acquireProviderRateLimit({ limit: 50 })).allowed, false)
+    // Multi-call workflows still reserve all three tokens in one admission.
+    await pool.query("UPDATE external_platform.provider_rate_buckets SET refilled_at = clock_timestamp() - interval '4 seconds' WHERE provider_key = $1", [providerKey])
+    assert.equal((await stores[0].acquireProviderRateLimit({ limit: 50, tokens: 3 })).allowed, true)
+    assert.equal((await stores[1].acquireProviderRateLimit({ limit: 50 })).allowed, false)
+  } finally {
+    await pool.query('DELETE FROM external_platform.provider_rate_buckets WHERE provider_key = $1', [providerKey])
+    await pool.end()
+  }
+})
+
 test('PostgreSQL admits, exhausts and refills the shared provider bucket', {
   skip: connectionString ? false : 'MX_INSIGHT_TEST_DATABASE_URL is not configured',
 }, async () => {

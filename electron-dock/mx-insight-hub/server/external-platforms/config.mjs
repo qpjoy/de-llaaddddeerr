@@ -644,6 +644,11 @@ export function parseTikHubConfig(environment = process.env, {
       'MX_INSIGHT_TIKHUB_MAX_CONSUMER_CONCURRENCY',
     ),
     maxRequestsPerMinute,
+    rateLimitBurst: positiveInt32(
+      environment.MX_INSIGHT_TIKHUB_RATE_LIMIT_BURST,
+      1,
+      'MX_INSIGHT_TIKHUB_RATE_LIMIT_BURST',
+    ),
     circuitFailureThreshold: positiveInteger(
       environment.MX_INSIGHT_TIKHUB_CIRCUIT_FAILURES,
       3,
@@ -690,6 +695,7 @@ export function disabledTikHubConfig(environment, error) {
     maxConcurrency: 8,
     maxConsumerConcurrency: 8,
     maxRequestsPerMinute: 50,
+    rateLimitBurst: 1,
     circuitFailureThreshold: 3,
     circuitOpenMs: 60_000,
     billing: unknownTikHubBilling(),
