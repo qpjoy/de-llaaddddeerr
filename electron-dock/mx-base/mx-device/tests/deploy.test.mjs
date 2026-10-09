@@ -43,7 +43,11 @@ if (a[0] === 'volume') console.log(env.VOLUMES || '');
 if (a[0] === 'inspect') console.log(env.WORKER_EXIT || '0');
 if (a[0] === 'compose' && a.includes('--help')) { console.log('--wait --wait-timeout'); process.exit(0); }
 if (a[0] === 'compose' && a.includes('--quiet') && a.includes('worker')) console.log(env.WORKER_ID || '');
-if (a[0] === 'buildx' && a[1] === 'inspect') console.log('docker');
+if (a[0] === 'buildx' && a[1] === 'inspect') {
+  if (a.includes('--format')) { console.error('unknown flag: --format'); process.exit(125); }
+  if (env.FAIL_INSPECT === '1') { console.error('cannot inspect builder'); process.exit(1); }
+  console.log(env.BUILDER_INFO ?? 'Name:          default\\nDriver:        docker\\n\\nNodes:\\nName:          default\\nEndpoint:      default\\nStatus:        running');
+}
 let phase;
 if (a[0] === 'buildx' && a[1] === 'build') {
   phase = 'build';
@@ -91,6 +95,50 @@ const isBuild = (c) => c.args[0] === "buildx" && c.args[1] === "build";
 const isStop = (c) => c.args.includes("stop");
 const isMigrate = (c) => c.args.at(-1) === "migrate";
 const isRollout = (c) => c.args.includes("--force-recreate");
+
+test("buildx inspect without --format retains the driver check and reaches build", (t) => {
+  const f = fixture(t);
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  const inspection = f
+    .calls()
+    .find((c) => c.args[0] === "buildx" && c.args[1] === "inspect");
+  assert.deepEqual(inspection.args, ["buildx", "inspect", "default"]);
+  assert(f.calls().some(isBuild));
+});
+
+test("buildx driver parsing tolerates tabs and CRLF", (t) => {
+  const f = fixture(t);
+  const result = f.run(["deploy"], {
+    BUILDER_INFO: "Name:\tdefault\r\nDriver:\tdocker\r\nNodes:\r\n",
+  });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+for (const builderInfo of [
+  "Name: default\nDriver: docker-container\n",
+  "Name: default\nDriver: remote\n",
+  "Name: default\nDriver Options: docker\n",
+  "",
+]) {
+  test(`unsupported/missing buildx driver blocks deployment: ${JSON.stringify(builderInfo)}`, (t) => {
+    const f = fixture(t);
+    const result = f.run(["deploy"], { BUILDER_INFO: builderInfo });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /仅使用本机 default Docker builder/);
+    assert(!f.calls().some(isBuild));
+    assert(!f.calls().some(isStop));
+  });
+}
+
+test("buildx inspect failure is distinct from an unsupported driver", (t) => {
+  const f = fixture(t);
+  const result = f.run(["deploy"], { FAIL_INSPECT: "1" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /无法读取本机 default builder/);
+  assert(!f.calls().some(isBuild));
+  assert(!f.calls().some(isStop));
+});
 
 test("deploy: one command, proxy only during build, TMPDIR, migration before rollout, repeat retains credentials", (t) => {
   const f = fixture(t),

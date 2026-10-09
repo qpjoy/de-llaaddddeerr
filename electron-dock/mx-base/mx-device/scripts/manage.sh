@@ -61,7 +61,17 @@ if [[ "$ACTION" == init ]]; then bootstrap node:22-alpine; exit; fi
 up_help="$(docker compose up --help)"
 [[ "$up_help" == *--wait-timeout* ]] || die 'Compose 版本过旧：需要支持 up --wait-timeout'
 docker buildx version >/dev/null || die '需要现有 Docker Buildx 插件'
-[[ "$(docker buildx inspect default --format '{{.Driver}}')" == docker ]] || die '仅使用本机 default Docker builder，不创建/改动 builder'
+# Unlike docker inspect, buildx inspect does not have a portable --format flag.
+# Read its standard Driver field without bootstrapping or changing the builder.
+builder_info="$(LC_ALL=C docker buildx inspect default)" || die '无法读取本机 default builder；未开始构建或停止服务'
+builder_driver=''
+while IFS= read -r line; do
+  if [[ "$line" =~ ^Driver:[[:space:]]+([^[:space:]]+)[[:space:]]*$ ]]; then
+    builder_driver="${BASH_REMATCH[1]}"
+    break
+  fi
+done <<< "$builder_info"
+[[ "$builder_driver" == docker ]] || die '仅使用本机 default Docker builder，不创建/改动 builder'
 proxy="${MX_DEVICE_BUILD_PROXY:-}"
 [[ -z "$proxy" || "$proxy" =~ ^https?://[^[:space:]]+$ ]] || die 'MX_DEVICE_BUILD_PROXY 必须为 HTTP(S) 代理地址（不会输出其内容）'
 mkdir -p "${TMPDIR:-/tmp}"
