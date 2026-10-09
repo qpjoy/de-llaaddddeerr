@@ -92,6 +92,12 @@ Hub 新分页使用绑定 consumer、Key、平台、查询与页大小的 `mxraw
 
 未补齐的摘要原文保留，并返回 `body_completeness=provider_preview`、`data.status=partial`、`WEIBO_FULL_TEXT_INCOMPLETE` 和不完整数量，不把删除“展开”当成全文修复。
 
+2026-10-09 补取准入修复：微博详情子调用现在复用主搜索的内部调用者策略。只有部署 UUID 白名单命中的 Key/租户跳过 Hub 本地共享 RPM；仅 `upstream_rate_limited` 熔断按原内部策略缩短至最后失败后 10 秒。普通 Key 的限额、其他熔断、操作开关、采购预算、请求截止时间和重复派发保护不变。此前微博补取遗漏了这两项内部策略，可能导致搜索成功而详情未派发。无新 migration。
+
+用户随后要求尽量补齐：本地 RPM 暂时不足时，按令牌桶返回的恢复时间等待，仍逐条获取详情；速率熔断能在时限内结束时也等待。一次搜索累计等待最多 60 秒，每次最多等 5 秒后重新检查，且必须预留一个详情 timeout 加 5 秒收尾。等待前释放本条的采购预留和派发锁，恢复时重新核对策略、预算和派发保护；父请求的并发名额和原租约仍生效。不会提高上游或 Hub 限额，也不重发已经派发的失败/未知请求。代价是搜索可能等待更久；超过时限、预算不足、人工暂停或上游没有有效全文时仍返回 partial。
+
+新的 partial 请求会记录单行 `weibo_full_text_incomplete` 日志，包含 requestId、详情调用数、`admissionWaitMs` 等待时间和最多一页候选的跳过原因，不包含正文、检索词或凭据。`skipped` 为空且有详情调用时，继续按原诊断脚本检查已归档的失败/合并结果。详见 [5352046656226431 的准入排查](weibo-search-diagnostics.md#2026-10-09-详情未派发5352046656226431)。
+
 ## `/api/v1/data/search`
 
 2026-10-08 后续修复：微博、Instagram 的普通查询（`pageSize=20–100`，仍受原 Key/套餐上限约束）首屏由 Hub 直接请求上游，不经过 Night-All。`platform=ins/ig/insta` 统一为 `instagram`。用户原来的 curl 请求体无需变化：

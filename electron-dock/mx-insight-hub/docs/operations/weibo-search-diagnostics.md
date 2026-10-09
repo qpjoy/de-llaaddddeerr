@@ -1,5 +1,70 @@
 # 微博搜索 409：读取旧响应定位解析失败
 
+## 2026-10-09 详情未派发：5352046656226431
+
+操作者返回的证据确认：请求 `1e740d1b-7ded-49f9-a242-84808bfa1849` 搜索解析成功，
+这条帖子已按 `weibo-body.v1` 存为 146 字摘要，`provider_preview`、`fullText=null`，
+没有关联详情调用。此次没有进入合并校验；不能归因于前缀/表情差异，也没有详情归档可用于离线补回全文。
+旧请求没有保留跳过原因，不能单凭空的 `details` 断言当时是限流、熔断或预算。
+
+代码核查与离线回归确认：主搜索已使用内部 Key 策略，`enrichWeiboRawSearch` 却仍直接检查普通 RPM 和共享熔断。
+修复为复用 `acquireTikHubRateLimit` / `internalCircuitState`，覆盖标准搜索与两个 raw URL。
+没有扩大内部白名单，没有取消普通调用者的保护，也没有修改数据库或重发生产付费请求。
+部署所有 public API 副本的新镜像即可，无新 migration。已保存的 partial 和旧幂等响应保持原样；
+这条没有全文的记录需要后续实际采集，成功取得详情并入库后才能更新，下游已保存副本也需再次同步。
+
+随后按用户“尽量不要跳过详情”的要求增加有界等待：本地令牌不足、或已有速率熔断可在时限内恢复时，
+等待后重新申请派发。每次搜索累计最多等待 60 秒，并为详情 timeout 与 5 秒收尾保留原租约时间；
+不会延长请求租约、提高限额或重试已经发出的付费请求。比如共享 RPM=50、burst=1 时，
+搜索刚消耗唯一令牌，约需 1200ms 才补回一个；旧代码此时直接放弃详情，新代码会等名额。
+这解释了一种确定可复现的跳过机制，不等于已经确认旧请求当时的具体限流状态。
+等待期间不持有详情采购预留/派发锁；醒来重新检查操作策略、预算、熔断和去重保护。
+操作暂停、非速率故障、预算不足、未知调用结果和无法在时限内恢复的限流仍保留 partial。
+
+可在处理请求的 public Pod 中只读核对该请求的 Key 是否命中**当前**内部白名单：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module <<'NODE'
+import pg from 'pg'
+import { loadConfig } from './server/config.mjs'
+import { createInternalTrafficPolicy } from './server/core/internal-traffic-policy.mjs'
+const requestId = '1e740d1b-7ded-49f9-a242-84808bfa1849'
+const config = loadConfig()
+const client = new pg.Client({ connectionString: process.env.DATABASE_URL,
+  connectionTimeoutMillis: 5000, statement_timeout: 5000 })
+try {
+  await client.connect()
+  const { rows: [request] } = await client.query(
+    'SELECT api_key_id, tenant_id FROM usage_requests WHERE id=$1 AND platform=$2', [requestId, 'weibo'])
+  if (!request) throw new Error('weibo_request_not_found')
+  console.log(JSON.stringify({ requestId, policyTime: 'current_runtime_not_historical',
+    internalSelectedNow: createInternalTrafficPolicy(config.internalTraffic).matches({
+      apiKeyId: request.api_key_id, tenantId: request.tenant_id }),
+    timeoutMs: config.tikHub.timeoutMs, reservationLeaseMs: config.reservationLeaseMs,
+    sharedRpm: config.tikHub.maxRequestsPerMinute, burst: config.tikHub.rateLimitBurst }, null, 2))
+} finally { await client.end() }
+NODE
+```
+
+`internalSelectedNow=true` 表示当前会应用内部策略，不能反推旧请求执行时的配置。
+为 false 时仍执行普通限流，不应通过关闭限流验证；核对部署原来已经授权的 UUID 配置即可。
+部署后的新 partial，可查询所有 public 副本的日志（旧请求不会补写此日志）：
+
+```bash
+kubectl -n mx-insight-hub logs -l app.kubernetes.io/name=mx-insight-hub-public \
+  -c api --since=1h --tail=-1 --prefix=true | grep 'weibo_full_text_incomplete'
+```
+
+按新 requestId 找对应事件；`skipped[].reason` 区分 `provider_rate_limited`、`provider_circuit_open`、
+`deadline`、`operation_unavailable`、`cost_unavailable`、`subsidy_budget_exhausted`、
+`dispatch_lease_unavailable`、`disabled`、`max_items` 和 `previous_detail_unknown`。
+`admissionWaitMs` 是本次请求已经用于准入等待的毫秒数；限流/速率熔断仍出现在 skipped 中时，
+表示无法在剩余请求时间/60 秒等待额度内继续（或未返回有效恢复时间），不是刚遇到一次限流就放弃。
+这些原因都是未派发项；已经派发但返回失败、全文缺失或合并拒绝，仍用下文的全文诊断读取供应商归档。
+验证应使用正常新采集的 requestId：目标帖有详情调用且 `current_merge_accepts`，采集入库后有非空全文；
+同页其他帖子仍可能导致整页 partial，不能仅靠整页状态判断目标帖是否已修好。
+
 ## 2026-10-08 冷启动告警
 
 策略 `a31b7976-c0e6-4b1f-85cd-812d0b3b582d`，关键词“CN光头”，

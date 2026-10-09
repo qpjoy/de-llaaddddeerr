@@ -12,6 +12,8 @@ import { RapidApiAdapter } from '../../server/adapters/rapidapi.mjs'
 import { nativeForwardingEndpoint } from '../../server/contracts/native-forwarding.mjs'
 import { createApp } from '../../server/app.mjs'
 import { requestFingerprint } from '../../server/core/crypto.mjs'
+import { AppError } from '../../server/core/errors.mjs'
+import { createInternalTrafficPolicy } from '../../server/core/internal-traffic-policy.mjs'
 import { createRawSearchCursorCodec, createDataSearchCursorCodec, createNightAllCompatibilityCursorCodec } from '../../server/external-platforms/cursor.mjs'
 import { INSTAGRAM_SEARCH_KEY } from '../../server/contracts/instagram-search.mjs'
 import { isNightAllDataSearchV1Envelope } from '../../server/contracts/night-all-data-search.mjs'
@@ -52,7 +54,7 @@ function legacy() {
 
 async function harness({ platform = 'weibo', detail = 'success', enabled = true, detailEnabled = true,
   hasMore = false, malformed = false, searchFails = false, rows = [preview], instagramData, weiboData, weiboDetailData } = {}) {
-  const store = new MemoryStore(), calls = [], historical = []
+  const store = new MemoryStore(), calls = [], historical = [], logs = []
   const oldPayload = legacy()
   const oldDataPayload = oldDataSearch(platform)
   const service = new HubService({ store, apiKeyPepper: PEPPER,
@@ -106,15 +108,126 @@ async function harness({ platform = 'weibo', detail = 'success', enabled = true,
   } })
   const platformStore = new MemoryExternalPlatformStore({ usageStore: store, providerKey, authorizationPlatform: platform })
   const gateway = new ExternalPlatformGateway({ usageStore: store, platformStore, adapter, config, providerKey,
-    apiKeyPepper: PEPPER, reservationLeaseMs: 120000, operationControlStore: controls, logger: { warn() {} } })
+    apiKeyPepper: PEPPER, reservationLeaseMs: 120000, operationControlStore: controls, logger: { warn(...args) { logs.push(args) } } })
   service.externalRawSearch = (context, input) => gateway.searchRaw(context, input)
   service.externalDataSearch = (context, input) => gateway.searchRaw(context, input)
   const invoke = (body = { ...BODY, platform }, idempotencyKey = 'raw-fixture-first') => service.nightAllCompatibilitySearch(context,
     { operation: 'raw', body, idempotencyKey, path: RAW_SEARCH_PATH })
   const invokeData = (body = { platform, query: '汽车', pageSize: 20 }, idempotencyKey = 'data-fixture-first') => service.search(context,
     { body, idempotencyKey, path: '/api/v1/data/search' })
-  return { store, service, gateway, platformStore, controls, config, context, key, calls, historical, oldPayload, oldDataPayload, invoke, invokeData }
+  return { store, service, gateway, platformStore, controls, config, context, key, calls, historical, logs, oldPayload, oldDataPayload, invoke, invokeData }
 }
+
+test('allowlisted Weibo callers keep the same local RPM exemption for search and full text on both routes', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    const h = await harness()
+    h.store.internalTrafficPolicy = createInternalTrafficPolicy({ keyIds: [h.key.id] })
+    let rateChecks = 0
+    h.platformStore.acquireProviderRateLimit = async () => { rateChecks++; return { allowed: false, retryAfterMs: 1200 } }
+    const first = await h[route]()
+    assert.equal(first.body.data.status, 'ok')
+    assert.equal(h.calls.length, 2)
+    assert.equal(rateChecks, 0)
+    assert.equal(h.platformStore.ingestJobs[0].payload.records[0].body, FULL)
+    assert.ok([...h.platformStore.calls.values()].every(call => call.billed === true))
+    assert.ok([...h.platformStore.costReservations.values()].every(hold => hold.status !== 'active'))
+    assert.deepEqual((await h[route]()).body, first.body)
+    assert.equal(h.calls.length, 2)
+  }
+})
+
+test('Weibo full-text admission applies internal rate-circuit grace without clearing shared state', async () => {
+  for (const [internal, errorCode, age, expectedCalls] of [
+    [true, 'upstream_rate_limited', 11000, 2],
+    [true, 'upstream_rate_limited', 1000, 1],
+    [true, 'upstream_authentication_failed', 11000, 1],
+    [false, 'upstream_rate_limited', 11000, 1],
+  ]) {
+    const h = await harness()
+    if (internal) h.store.internalTrafficPolicy = createInternalTrafficPolicy({ keyIds: [h.key.id] })
+    // Leave less time than the still-active cooldown needs; waiting is tested
+    // separately with a virtual clock rather than real 9/49-second sleeps.
+    if (expectedCalls === 1) h.config.timeoutMs = 110000
+    const failedAt = Date.now() - age
+    const state = Object.freeze({ lastErrorCode: errorCode, lastFailureAt: new Date(failedAt).toISOString(),
+      circuitOpenUntil: new Date(failedAt + 60000).toISOString() })
+    // Another request opens a shared circuit while this search is in flight.
+    h.platformStore.providerState = async () => h.calls.length ? state : null
+    const first = await h.invokeData()
+    assert.equal(h.calls.length, expectedCalls)
+    assert.equal(first.body.data.status, expectedCalls === 2 ? 'ok' : 'partial')
+    if (expectedCalls === 1) assert.deepEqual(JSON.parse(h.logs[0][0]).skipped,
+      [{ postId: POST_ID, reason: 'provider_circuit_open' }])
+    assert.equal(Date.parse(state.circuitOpenUntil), failedAt + 60000)
+  }
+})
+
+test('ordinary Weibo search waits for local admission then commits full text and immutable replay on both routes', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    const h = await harness()
+    let checks = 0
+    h.platformStore.acquireProviderRateLimit = async () => ({ allowed: ++checks !== 2, retryAfterMs: 1 })
+    const first = await h[route]()
+    assert.equal(first.body.data.status, 'ok')
+    assert.equal(checks, 3)
+    assert.equal(h.calls.length, 2)
+    assert.equal(h.platformStore.ingestJobs[0].payload.records[0].body, FULL)
+    assert.equal(h.platformStore.restrictedResponseArchives.size, 2)
+    assert.ok([...h.platformStore.costReservations.values()].every(hold => hold.status !== 'active'))
+    assert.deepEqual((await h[route]()).body, first.body)
+    assert.equal(checks, 3)
+    assert.equal(h.calls.length, 2)
+  }
+})
+
+test('ordinary Weibo callers still obey the shared RPM and record the undispatched detail reason when waiting cannot fit', async () => {
+  const h = await harness()
+  // A sibling allowlist and a user-supplied flag cannot confer the exemption.
+  h.store.internalTrafficPolicy = createInternalTrafficPolicy({ keyIds: [randomUUID()] })
+  let checks = 0
+  h.platformStore.acquireProviderRateLimit = async () => ({ allowed: ++checks === 1, retryAfterMs: 120000 })
+  await assert.rejects(h.invoke({ ...BODY, internal: true }), { code: 'unsupported_fields' })
+  assert.equal(checks, 0)
+  const first = await h.invoke()
+  assert.equal(first.body.data.status, 'partial')
+  assert.equal(h.calls.length, 1)
+  assert.equal(checks, 2)
+  const event = JSON.parse(h.logs[0][0])
+  assert.deepEqual(event, { event: 'weibo_full_text_incomplete', requestId: first.body.requestId,
+    detailUpstreamCalls: 0, incompleteItems: 1, admissionWaitMs: 0,
+    skipped: [{ postId: POST_ID, reason: 'provider_rate_limited' }] })
+  assert.equal(h.platformStore.calls.size, 1)
+  assert.ok([...h.platformStore.costReservations.values()].every(hold => hold.status !== 'active'))
+  assert.deepEqual((await h.invoke()).body, first.body)
+  assert.equal(checks, 2)
+  assert.equal(h.logs.length, 1)
+})
+
+test('internal Weibo full text still respects deadline, operation, cost and dispatch-lease gates', async () => {
+  for (const gate of ['deadline', 'operation_unavailable', 'cost_unavailable', 'dispatch_lease_unavailable']) {
+    const h = await harness({ detailEnabled: gate !== 'operation_unavailable' })
+    h.store.internalTrafficPolicy = createInternalTrafficPolicy({ keyIds: [h.key.id] })
+    if (gate === 'deadline') h.config.timeoutMs = 120000
+    if (gate === 'cost_unavailable') {
+      const reserve = h.platformStore.reserveProviderCostWorkflow.bind(h.platformStore)
+      h.platformStore.reserveProviderCostWorkflow = input => h.calls.length
+        ? Promise.reject(new AppError(503, 'external_platform_cost_budget_exhausted', 'private-cost-message')) : reserve(input)
+    }
+    if (gate === 'dispatch_lease_unavailable') {
+      const acquire = h.platformStore.acquireDispatchLease.bind(h.platformStore)
+      h.platformStore.acquireDispatchLease = input => input.operation === `native.${WEIBO_DETAIL_KEY}`
+        ? { kind: 'blocked', reason: 'unknown' } : acquire(input)
+    }
+    const first = await h.invokeData()
+    assert.equal(first.body.data.status, 'partial', gate)
+    assert.equal(h.calls.length, 1, gate)
+    const event = JSON.parse(h.logs[0][0])
+    assert.deepEqual(event.skipped, [{ postId: POST_ID, reason: gate }])
+    assert.doesNotMatch(JSON.stringify(event), /private-cost-message|fixture-secret|汽车|展开/)
+    assert.ok(isNightAllDataSearchV1Envelope(first.body))
+    assert.ok([...h.platformStore.costReservations.values()].every(hold => hold.status !== 'active'))
+  }
+})
 
 test('raw search fills a Weibo preview through governed detail, archives both receipts and keeps one raw charge', async () => {
   const h = await harness()
