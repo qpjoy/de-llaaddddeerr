@@ -26,6 +26,8 @@
 
 ## Linux 服务器独立部署
 
+当前使用 **Docker Compose，不是 Kubernetes**。`deploy` 自动发布固定管理端口 `0.0.0.0:18891`，浏览器使用 `http://<服务器IP>:18891`，不需要额外传入监听地址 env。已有 loopback 部署在同步新版配置后，再运行同一个 `deploy` 即会更新端口映射；数据库、凭证和任务记录保留。
+
 需要已安装并运行的本机 Docker Engine、Buildx、支持 `up --wait-timeout` 的 Compose v2，以及 Linux `flock`（util-linux）。不需要宿主机安装 Node/npm。**这里只部署新中心，不迁移旧容器、不安装或重启 Docker。** 首次部署前检查本机 `18891`、`18894` 未占用，确认资源余量、磁盘监控与独立卷备份。不要运行仓库根目录或其他项目的整体重启命令。
 
 在本目录执行：
@@ -67,20 +69,24 @@ Compose 服务：
 
 | 服务 | 网络与职责 |
 | --- | --- |
-| api | 独立 bridge 网络，宿主机仅 `127.0.0.1:18891`；处理管理界面与本中心数据库 |
+| api | 独立 bridge 网络，发布固定 `0.0.0.0:18891`；处理管理界面与本中心数据库，仍需登录 |
 | postgres | 独立命名卷、数据库与账号；宿主机仅 `127.0.0.1:18894`，供本机 Worker 连接 |
 | worker | Linux host network，无监听端口；访问当前宿主机 18081 与本中心数据库 |
 | migrate | `ops` profile 的一次性数据库迁移容器；发布前执行，不连接手机 |
 
 Worker 没有 Docker socket、USB 挂载、特权权限或 ADB。容器设内存 / CPU 上限，API 与 Worker 使用非 root 用户、只读根文件系统。首次构建可能占用较多资源，应选维护窗口；运行上限不能约束镜像构建开销。
 
-默认不公开管理端口。在自己的电脑上通过现有 SSH 通道打开：
+部署完成后，直接访问 `http://<服务器IP>:18891`，使用 `bash scripts/manage.sh token` 的输出登录。Compose 只负责发布端口，脚本不调整现有防火墙、云安全组或路由；如果外部仍不可达，核对云安全组及适用于 Docker 发布端口的防火墙规则是否允许可信来源访问 TCP 18891。
+
+**发布到 `0.0.0.0` 会让网络可达的主机访问登录页，并不提供 TLS 加密。** 内网演示请限制访问来源；公网使用 HTTPS 反代和访问控制，并配置 `secureCookies`，不要通过不可信网络直接发送 HTTP 管理凭证。端口发布行为见 [Docker 官方说明](https://docs.docker.com/engine/network/port-publishing/)。不要开放数据库 `18894` 或手机接口 `18081`，也不要为了本中心重启 Docker。
+
+SSH 隧道仍可作为可选访问方式（本地用 18892 避免与开发预览冲突）：
 
 ```bash
-ssh -N -L 18891:127.0.0.1:18891 root@mx-internal-server
+ssh -N -L 127.0.0.1:18892:127.0.0.1:18891 root@mx-internal-server
 ```
 
-然后访问 `http://127.0.0.1:18891`，使用 `bash scripts/manage.sh token` 的输出登录。若本机此端口已用于开发，换一个本地转发端口即可。正式反代部署另行配置 HTTPS、访问控制与 `secureCookies`；不要直接绑定公网 HTTP。
+隧道模式下访问 `http://127.0.0.1:18892`。本地 `npm start` / `npm run dev` 仍保持 loopback；这次仅改变服务器 Compose 的管理端口发布地址。
 
 暂停整个实验中心：`bash scripts/manage.sh stop`。只停止这个 Compose 项目，保留数据卷。Worker 正常停止会等待当前执行结束（最长 140 秒）；强制杀进程可能产生未知任务，不应马上重新发送。恢复使用同一个 `deploy` 命令。
 

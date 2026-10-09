@@ -96,6 +96,21 @@ const isStop = (c) => c.args.includes("stop");
 const isMigrate = (c) => c.args.at(-1) === "migrate";
 const isRollout = (c) => c.args.includes("--force-recreate");
 
+test("Compose publishes only the fixed management port externally", () => {
+  const source = readFileSync(join(project, "compose.yaml"), "utf8");
+  const services = Object.fromEntries(
+    [
+      ...source.matchAll(/^  ([a-z]+):\n([\s\S]*?)(?=^  [a-z]+:|^volumes:)/gm),
+    ].map((match) => [match[1], match[2]]),
+  );
+  assert.match(services.api, /ports: \["0\.0\.0\.0:18891:18891"\]/);
+  assert.match(services.postgres, /ports: \["127\.0\.0\.1:18894:5432"\]/);
+  assert.doesNotMatch(services.worker, /^\s+ports:/m);
+  assert.doesNotMatch(services.migrate, /^\s+ports:/m);
+  assert.match(services.worker, /network_mode: host/);
+  assert.equal([...source.matchAll(/^\s+ports:/gm)].length, 2);
+});
+
 test("buildx inspect without --format retains the driver check and reaches build", (t) => {
   const f = fixture(t);
   const result = f.run();
@@ -145,6 +160,10 @@ test("deploy: one command, proxy only during build, TMPDIR, migration before rol
     proxy = "http://127.0.0.1:7789";
   const first = f.run(["deploy"], { MX_DEVICE_BUILD_PROXY: proxy });
   assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /Docker Compose/);
+  assert.match(first.stdout, /0\.0\.0\.0:18891/);
+  assert.match(first.stdout, /http:\/\/<服务器IP>:18891/);
+  assert.match(first.stdout, /不修改防火墙或安全组/);
   const calls = f.calls(),
     build = calls.find(isBuild);
   assert.equal(build.proxy, proxy);
@@ -175,6 +194,20 @@ test("deploy: one command, proxy only during build, TMPDIR, migration before rol
   const names = ["config.json", "api.json", "worker.json", "postgres-password"];
   const before = names.map((name) =>
     readFileSync(join(f.root, ".runtime", name), "utf8"),
+  );
+  assert.equal(
+    JSON.parse(before[0]).host,
+    "127.0.0.1",
+    "native development remains local-only",
+  );
+  assert.equal(
+    JSON.parse(before[1]).host,
+    "0.0.0.0",
+    "container API accepts published traffic",
+  );
+  assert.equal(
+    new URL(JSON.parse(before[2]).databaseUrl).host,
+    "127.0.0.1:18894",
   );
   const again = f.run(["up"], {
     VOLUMES: "mx-device_data",

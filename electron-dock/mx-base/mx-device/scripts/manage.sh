@@ -127,9 +127,11 @@ say '5/6 执行版本化数据库迁移（失败不启动新版服务）'
 compose run --rm --no-deps -T migrate
 PHASE=rollout
 say '6/6 更新 API / Worker，等待 API 就绪与本次 Worker 心跳'
+say '管理入口将发布到 0.0.0.0:18891；请限制安全组访问来源。脚本不修改防火墙或安全组。'
 # Deliberately exclude Postgres from recreation and never use down/-v/restart Docker.
 compose up -d --no-build --no-deps --force-recreate --wait --wait-timeout 120 api worker
 PHASE=complete
 compose ps
-say '部署完成：http://127.0.0.1:18891；凭证：bash scripts/manage.sh token'
+say '部署完成（Docker Compose）：管理入口 0.0.0.0:18891，浏览器访问 http://<服务器IP>:18891'
+say '凭证：bash scripts/manage.sh token；数据库 18894 / 手机接口 18081 仍仅本机可用。'
 say '重复 deploy 保留数据与配置。此次为单机更新，有短暂不可用窗口，不是零停机滚动发布。'

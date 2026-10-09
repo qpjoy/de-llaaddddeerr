@@ -24,7 +24,8 @@ services:
     pull_policy: never
     environment:
       MX_DEVICE_SKIP_STARTUP_MIGRATION: "1"
-    ports: ["127.0.0.1:18891:18891"]
+    # Fixed server-facing management port; database and PoC remain loopback-only.
+    ports: ["0.0.0.0:18891:18891"]
     volumes: ["./.runtime/api.json:/run/mx-device.json:ro"]
     depends_on:
       postgres: { condition: service_healthy }
