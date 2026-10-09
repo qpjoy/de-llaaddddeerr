@@ -15,6 +15,10 @@ import {
   finish,
   scenario,
   control,
+  requestCapture,
+  claimCapture,
+  completeCapture,
+  sessionAction,
 } from "../server/model.mjs";
 const url = process.env.MX_DEVICE_TEST_DATABASE_URL;
 test(
@@ -44,11 +48,86 @@ test(
       await Promise.all([a.migrate(), b.migrate()]);
       await a.migrate();
       const versions = await a.pool.query(
-        "SELECT name,checksum FROM mx_device.schema_migrations",
+        "SELECT name,checksum FROM mx_device.schema_migrations ORDER BY name",
       );
-      assert.equal(versions.rowCount, 1);
+      assert.equal(versions.rowCount, 2);
       assert.equal(versions.rows[0].name, "001_device_center.sql");
       assert.match(versions.rows[0].checksum, /^[a-f0-9]{64}$/);
+      const camera = await a.atomic(
+        (s, n) =>
+          register(s, n, "real", {
+            name: "disposable observer",
+            adapter: "mobile-agent",
+            serial: "test-serial",
+            workerId: "capture-worker",
+            origin: "http://127.0.0.1:8787",
+            accountKey: "test-account",
+            approved: true,
+          }),
+        { mode: "real" },
+      );
+      const captureRequest = await a.atomic(
+        (s, n) => requestCapture(s, n, camera.id),
+        { mode: "real" },
+      );
+      const captures = await Promise.all(
+        [a, b].map((store) =>
+          store.atomic((s, n) => claimCapture(s, n, "capture-worker"), {
+            mode: "real",
+          }),
+        ),
+      );
+      assert.equal(captures.filter(Boolean).length, 1);
+      const captured = captures.find(Boolean),
+        png = Buffer.from("test-bounded-bytea");
+      await b.atomic(
+        (s, n) => completeCapture(s, n, captured, { width: 1, height: 1 }),
+        {
+          mode: "real",
+          frame: {
+            deviceId: camera.id,
+            captureId: captureRequest.id,
+            version: camera.observer.version,
+            png,
+          },
+        },
+      );
+      assert.deepEqual(await a.frame(camera.id, captureRequest.id), png);
+      assert.equal(await a.frame(camera.id, camera.id), null);
+      assert.equal(
+        JSON.stringify(await a.snapshot("real")).includes("test-bounded-bytea"),
+        false,
+      );
+      const session = await a.atomic(
+        (s, n) =>
+          sessionAction(s, n, "real", camera.id, {
+            action: "acquire",
+            revision: camera.revision,
+            confirmed: true,
+          }),
+        { mode: "real" },
+      );
+      const fresh = (await b.snapshot("real")).devices[0];
+      await assert.rejects(
+        b.atomic(
+          (s, n) =>
+            sessionAction(s, n, "real", camera.id, {
+              action: "acquire",
+              revision: fresh.revision,
+              confirmed: true,
+            }),
+          { mode: "real" },
+        ),
+        /其他会话/,
+      );
+      await b.atomic(
+        (s, n) =>
+          sessionAction(s, n, "real", camera.id, {
+            action: "release",
+            token: session.token,
+          }),
+        { mode: "real" },
+      );
       const healthDir = await mkdtemp(
         join(tmpdir(), "mx-device-worker-health-"),
       );
@@ -239,9 +318,11 @@ test(
         (await a.detail("sim", first.job.id)).job.status,
         "succeeded",
       );
-      await a.pool.query("UPDATE mx_device.schema_migrations SET checksum=$1", [
-        versions.rows[0].checksum,
-      ]);
+      for (const version of versions.rows)
+        await a.pool.query(
+          "UPDATE mx_device.schema_migrations SET checksum=$1 WHERE name=$2",
+          [version.checksum, version.name],
+        );
       await a.pool.query(
         "INSERT INTO mx_device.schema_migrations(name,checksum) VALUES('999_future.sql','future')",
       );

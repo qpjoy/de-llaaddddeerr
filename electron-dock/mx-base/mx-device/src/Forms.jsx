@@ -27,6 +27,7 @@ export function Modal({ title, children, onClose }) {
   );
 }
 export function DeviceForm({ mode, workers, onSubmit, busy }) {
+  const [adapter, setAdapter] = useState("mobile-agent");
   return (
     <form
       className="form"
@@ -42,6 +43,23 @@ export function DeviceForm({ mode, workers, onSubmit, busy }) {
           : "保存为暂停状态。先登记接口，再显式检查；不会自动抢占现有手机。"}
       </p>
       <div className="form-grid">
+        {mode === "real" && (
+          <label className="span-two">
+            接入方式
+            <select
+              name="adapter"
+              value={adapter}
+              onChange={(e) => setAdapter(e.target.value)}
+            >
+              <option value="mobile-agent">
+                Mobile-Agent · 真实画面 / 多设备观察
+              </option>
+              <option value="legacy-poc">
+                旧 PoC · 搜索 / 详情（需确认空闲）
+              </option>
+            </select>
+          </label>
+        )}
         <label>
           设备名称
           <input
@@ -94,15 +112,25 @@ export function DeviceForm({ mode, workers, onSubmit, busy }) {
               />
             </label>
             <label>
-              ADB 序列号（可暂不填写）
-              <input name="serial" placeholder="仅登记，不调用 ADB" />
+              ADB 序列号
+              {adapter === "mobile-agent" ? "（必填）" : "（可暂不填写）"}
+              <input
+                name="serial"
+                required={adapter === "mobile-agent"}
+                placeholder="例如 8ad5ef10；每台手机唯一"
+              />
             </label>
             <label className="span-two">
               宿主机服务入口
               <input
                 type="url"
                 name="origin"
-                defaultValue="http://127.0.0.1:18081"
+                key={adapter}
+                defaultValue={
+                  adapter === "mobile-agent"
+                    ? "http://127.0.0.1:8787"
+                    : "http://127.0.0.1:18081"
+                }
                 required
               />
             </label>
@@ -112,10 +140,10 @@ export function DeviceForm({ mode, workers, onSubmit, busy }) {
       {mode === "real" && (
         <>
           <p className="notice">
-            该地址由所选执行器所在宿主机访问，不是浏览器或 Hub 的
-            localhost。当前服务器已有映射为 127.0.0.1:18081 →
-            mobile-agent:18082，填写宿主机的 18081，不改
-            Docker/ADB。兼容端口范围 18081–18180；物理身份需人工核验。
+            {adapter === "mobile-agent"
+              ? "同一宿主机的多台手机共用 8787，以 ADB 序列号区分，不需要每台新增端口。此适配器仅观察，不执行点击或采集。已有 PoC 设备请在原设备上配置画面，勿重复登记。"
+              : "旧 PoC 使用宿主机 18081–18180，只支持独立入口，不会根据序列号切换手机。"}
+            地址由所选执行器访问，不是浏览器的 localhost；不修改 Docker/ADB。
           </p>
           <label className="check">
             <input type="checkbox" name="approved" required />
@@ -128,6 +156,57 @@ export function DeviceForm({ mode, workers, onSubmit, busy }) {
           {mode === "real" ? "保存为暂停状态" : "添加模拟设备"}
         </button>
       </div>
+    </form>
+  );
+}
+export function ObserverForm({ device, busy, onSubmit }) {
+  return (
+    <form
+      className="form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const b = Object.fromEntries(new FormData(e.currentTarget));
+        onSubmit({
+          ...b,
+          approved: b.approved === "on",
+          revision: device.revision,
+        });
+      }}
+    >
+      <p>
+        给「{device.name}」附加只读画面，不替换原 PoC 接口、不改变其 busy
+        或任务。
+      </p>
+      <label>
+        Mobile-Agent 服务地址
+        <input
+          name="origin"
+          type="url"
+          required
+          defaultValue={device.observer?.origin || "http://127.0.0.1:8787"}
+        />
+      </label>
+      <label>
+        ADB 序列号
+        <input
+          name="serial"
+          required
+          defaultValue={device.serial || ""}
+          readOnly={!!device.serial}
+          placeholder="例如 8ad5ef10"
+        />
+      </label>
+      <p className="notice">
+        允许执行器本机
+        8787–8797。同一服务可连接多台手机，必须明确指定序列号。保存不会连接手机。
+      </p>
+      <label className="check">
+        <input name="approved" type="checkbox" required />
+        批准该只读目标；不修改 mobile-agent、VPN 或手机应用。
+      </label>
+      <button className="primary" disabled={busy}>
+        保存画面连接
+      </button>
     </form>
   );
 }

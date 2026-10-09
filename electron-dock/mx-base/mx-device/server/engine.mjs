@@ -6,7 +6,10 @@ import {
   checkpoint,
   finish,
   recordProbe,
+  claimCapture,
+  completeCapture,
 } from "./model.mjs";
+import { captureMobile } from "./mobile-agent.mjs";
 import {
   callPoC,
   observation,
@@ -23,6 +26,7 @@ export class Engine {
       call = callPoC,
       simDelay = 2200,
       realDelay = 2000,
+      capture = captureMobile,
     } = {},
   ) {
     this.store = store;
@@ -31,6 +35,7 @@ export class Engine {
     this.call = call;
     this.simDelay = simDelay;
     this.realDelay = realDelay;
+    this.capture = capture;
     this.inflight = new Map();
     this.stopped = false;
     this.lastError = null;
@@ -51,6 +56,25 @@ export class Engine {
       (s, now) => recordProbe(s, now, "real", device.id, device.revision, obs),
       { mode: "real" },
     );
+  }
+  async observe(device) {
+    try {
+      const frame = await this.capture(device);
+      await this.store.atomic((s, n) => completeCapture(s, n, device, frame), {
+        mode: "real",
+        frame: {
+          ...frame,
+          deviceId: device.id,
+          captureId: device.capture.id,
+          version: device.observer.version,
+        },
+      });
+    } catch {
+      await this.store.atomic(
+        (s, n) => completeCapture(s, n, device, null, true),
+        { mode: "real" },
+      );
+    }
   }
   async execute({ device, job, attempt: a }) {
     const options = { mode: job.mode, jobId: job.id, attemptId: a.id };
@@ -126,6 +150,7 @@ export class Engine {
             const d = s.devices.find(
               (d) =>
                 d.mode === "real" &&
+                d.adapter !== "mobile-agent" &&
                 d.workerId === this.workerId &&
                 !this.inflight.has(`probe:${d.id}`) &&
                 d.state !== "running" &&
@@ -148,6 +173,20 @@ export class Engine {
               .finally(() => this.inflight.delete(key)),
           );
         }
+      }
+      // At most one observation per worker, leaving capacity for normal tasks.
+      if (this.inflight.size < 4 && !this.inflight.has("observation")) {
+        const device = await this.store.atomic(
+          (s, n) => claimCapture(s, n, this.workerId),
+          { mode: "real" },
+        );
+        if (device)
+          this.inflight.set(
+            "observation",
+            this.observe(device)
+              .catch(() => {})
+              .finally(() => this.inflight.delete("observation")),
+          );
       }
       for (const mode of ["sim", "real"]) {
         await this.store.atomic((s, n) => sweep(s, n, mode), { mode });

@@ -1229,3 +1229,91 @@ summary {
 .section-head button {
   font-size: 14px;
 }
+.console-projection {
+  display: block;
+}
+.screen-tabs {
+  display: flex;
+  gap: 8px;
+  margin: 18px 0;
+}
+.screen-tabs button {
+  flex: 1;
+  padding: 9px 6px;
+  font-size: 13px;
+}
+.screen-tabs button[aria-pressed="true"] {
+  background: #e3f2f2;
+}
+.real-phone {
+  width: min(100%, 280px);
+  margin: 18px auto;
+  border: 6px solid #414b58;
+  border-radius: 26px;
+  overflow: hidden;
+  background: #101721;
+  box-shadow: 0 0 0 2px #d4d9e0;
+}
+.real-phone img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.real-phone.stale {
+  border-color: #8a8170;
+}
+.screen-placeholder {
+  min-height: 460px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 18px;
+  color: #aab9c8;
+  padding: 16px;
+  text-align: center;
+}
+.screen-placeholder span {
+  font-size: 12px;
+}
+.frame-status {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.live-screen .button-row {
+  justify-content: center;
+}
+.live-screen button,
+.control-session button {
+  font-size: 12px;
+  padding: 8px 10px;
+}
+.live-screen > .small.muted:last-child {
+  margin-top: 14px;
+}
+.control-session {
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+  margin-top: 18px;
+}
+.control-session h3 {
+  font-size: 15px;
+}
+.control-session > .small:last-child {
+  margin: 12px 0 0;
+}
+.screen-large {
+  padding: 16px;
+  text-align: center;
+}
+.screen-large p {
+  color: var(--muted);
+  font-size: 12px;
+}
+.screen-large img {
+  display: block;
+  max-width: 100%;
+  max-height: 78vh;
+  width: auto;
+  margin: auto;
+}

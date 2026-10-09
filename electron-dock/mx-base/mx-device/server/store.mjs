@@ -9,8 +9,9 @@ export class MemoryStore {
     this.state = { devices: [], jobs: [], attempts: [], events: [] };
     this.tail = Promise.resolve();
     this.workers = [];
+    this.frames = new Map();
   }
-  async atomic(fn) {
+  async atomic(fn, { frame } = {}) {
     const prev = this.tail;
     let release;
     this.tail = new Promise((r) => {
@@ -20,7 +21,11 @@ export class MemoryStore {
     try {
       const state = clone(this.state);
       const result = fn(state, this.clock());
+      if (result?.then)
+        throw Error("Async work inside transaction is forbidden");
       this.state = state;
+      if (frame && result === true)
+        this.frames.set(frame.deviceId, clone(frame));
       return clone(result);
     } finally {
       release();
@@ -55,6 +60,18 @@ export class MemoryStore {
     return true;
   }
   async close() {}
+  async frame(deviceId, captureId) {
+    const d = this.state.devices.find(
+      (d) => d.id === deviceId && d.mode === "real",
+    );
+    const frame = this.frames.get(deviceId);
+    return frame &&
+      d?.observer?.version === frame.version &&
+      d.frame?.id === frame.captureId &&
+      frame.captureId === captureId
+      ? Buffer.from(frame.png)
+      : null;
+  }
 }
 
 export class PgStore {
@@ -138,7 +155,13 @@ export class PgStore {
   }
   async atomic(
     fn,
-    { mode = "sim", jobId = null, attemptId = null, key = null } = {},
+    {
+      mode = "sim",
+      jobId = null,
+      attemptId = null,
+      key = null,
+      frame = null,
+    } = {},
   ) {
     const c = await this.pool.connect();
     try {
@@ -213,6 +236,12 @@ export class PgStore {
           "INSERT INTO mx_device.events(mode,at,document) VALUES($1,$2,$3)",
           [mode, e.at, e],
         );
+      if (frame && result === true) {
+        await c.query(
+          "INSERT INTO mx_device.latest_frames(device_id,capture_id,config_version,received_at,png) VALUES($1,$2,$3,$4,$5) ON CONFLICT(device_id) DO UPDATE SET capture_id=excluded.capture_id,config_version=excluded.config_version,received_at=excluded.received_at,png=excluded.png",
+          [frame.deviceId, frame.captureId, frame.version, now, frame.png],
+        );
+      }
       await c.query("COMMIT");
       return clone(result);
     } catch (e) {
@@ -255,6 +284,13 @@ export class PgStore {
         at: Number(r.at),
       })),
     };
+  }
+  async frame(deviceId, captureId) {
+    const { rows } = await this.pool.query(
+      "SELECT f.png FROM mx_device.latest_frames f JOIN mx_device.devices d ON d.id=f.device_id WHERE d.mode='real' AND f.device_id=$1 AND f.capture_id=$2 AND f.config_version::text=d.document->'observer'->>'version' AND f.capture_id::text=d.document->'frame'->>'id'",
+      [deviceId, captureId],
+    );
+    return rows[0]?.png || null;
   }
   async detail(mode, id) {
     const j = await this.pool.query(

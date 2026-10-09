@@ -81,14 +81,14 @@ export function DeviceControls({ device: d, onControl, onProbe, busy }) {
       </dl>
       {d.mode === "real" && (
         <p className="small muted">
-          物理身份未自动核验 · 开机、登录状态未知。
+          物理身份及控制权未自动核验；截图不证明独占。
           {d.probe?.projection?.isBusy === true
             ? "手机报告忙碌，不能启用。"
             : ""}
         </p>
       )}
       <div className="button-row">
-        {d.mode === "real" && (
+        {d.mode === "real" && d.adapter !== "mobile-agent" && (
           <button
             disabled={busy || d.state === "running"}
             onClick={() => onProbe(d)}
@@ -104,10 +104,19 @@ export function DeviceControls({ device: d, onControl, onProbe, busy }) {
           </button>
         ) : (
           <button
-            disabled={busy || (!d.enabled && d.state === "running")}
+            disabled={
+              busy ||
+              d.adapter === "mobile-agent" ||
+              ["waiting", "held"].includes(d.session?.status) ||
+              (!d.enabled && d.state === "running")
+            }
             onClick={() => onControl(d, d.enabled ? "pause" : "enable")}
           >
-            {d.enabled ? "暂停领取" : "启用调度"}
+            {d.adapter === "mobile-agent"
+              ? "仅观察 · 不派发任务"
+              : d.enabled
+                ? "暂停领取"
+                : "启用调度"}
           </button>
         )}
         {d.mode === "sim" && (
@@ -140,11 +149,11 @@ export function Connections({ state, onAdd, onConnectReal }) {
       <div className="panel-body">
         <h3>服务器现有 mobile-agent</h3>
         <p>
-          使用执行器宿主机的 http://127.0.0.1:18081。已适配 GET
-          /api/state、/api/search、/api/next 和
-          /api/note；浏览器不直接连接手机。
-          登记后保持暂停，检查明确空闲并确认独占后才启用。Worker
-          心跳正常不代表手机已就绪。
+          真实画面使用 http://127.0.0.1:8787 + ADB
+          序列号。同一宿主机可共用一个服务端口连接多台手机，不需要新增容器或端口。
+          旧 PoC 搜索/详情仍使用 18081–18180
+          的独立入口，不能把不同序列号填进同一个 PoC 入口当成不同手机。
+          已有设备请在工作台「配置画面连接」补接截图，浏览器不会直接连接手机。
         </p>
         <button onClick={onConnectReal}>登记服务器真实手机</button>
         <h3>执行器</h3>
@@ -182,7 +191,9 @@ export function Connections({ state, onAdd, onConnectReal }) {
         )}
         <h3>兼容接入边界</h3>
         <p>
-          当前适配器使用执行器宿主机的回环地址，只调用状态、搜索、翻页与详情四个接口。序列号可以后补核验，不能凭接口可达声称手机已开机或登录。
+          Mobile-Agent
+          适配器只调用指定序列号的单帧截图，不启动视频、不执行动作或写旧配置。每台主机分配独立执行器标识；跨主机的
+          127.0.0.1 由各自主机执行器解析。Worker 心跳正常不代表手机就绪。
         </p>
         <p>
           真机初次启用前，请先停止旧 Hub

@@ -52,6 +52,38 @@ export function origin(value) {
   );
   return u.origin;
 }
+export function mobileOrigin(value) {
+  let u;
+  try {
+    u = new URL(value);
+  } catch {
+    throw new Fault("Mobile-Agent 地址无效", 400);
+  }
+  requireThat(
+    u.protocol === "http:" &&
+      u.hostname === "127.0.0.1" &&
+      Number(u.port) >= 8787 &&
+      Number(u.port) <= 8797 &&
+      u.pathname === "/" &&
+      !u.username &&
+      !u.password &&
+      !u.search &&
+      !u.hash,
+    "观察接口仅允许执行器宿主机 http://127.0.0.1:8787–8797，不接受路径或凭证",
+    400,
+  );
+  return u.origin;
+}
+export function serialNumber(value) {
+  const serial = str(value, "ADB 序列号");
+  requireThat(/^[a-zA-Z0-9._:-]+$/.test(serial), "序列号格式无效", 400);
+  return serial;
+}
+export function publicDevice(d) {
+  if (!d) return d;
+  const { tokenHash, ...session } = d.session || {};
+  return { ...d, session: d.session ? session : null };
+}
 export function noteLink(value) {
   const text = str(value, "详情链接", 8192);
   let u;
@@ -88,11 +120,27 @@ export function register(s, now, mode, body) {
     s.devices.filter((d) => d.mode === mode).length < 64,
     "首版每个模式最多 64 台设备",
   );
-  const endpoint = mode === "real" ? origin(body.origin) : null;
+  const adapter = mode === "sim" ? "simulator" : body.adapter || "legacy-poc";
+  requireThat(
+    mode === "sim" || ["legacy-poc", "mobile-agent"].includes(adapter),
+    "未知适配器",
+    400,
+  );
+  const serial = body.serial ? serialNumber(body.serial) : null;
+  if (adapter === "mobile-agent")
+    requireThat(serial, "Mobile-Agent 必须指定真实 ADB 序列号", 400);
+  const endpoint =
+    mode === "real"
+      ? adapter === "mobile-agent"
+        ? mobileOrigin(body.origin)
+        : origin(body.origin)
+      : null;
   const workerId =
     mode === "real" ? str(body.workerId, "执行器") : "simulation";
   const resourceKey =
-    mode === "real" ? `${workerId}:${endpoint}` : randomUUID();
+    mode === "real"
+      ? `${workerId}:${endpoint}${adapter === "mobile-agent" ? `:${serial}` : ""}`
+      : randomUUID();
   const accountKey =
     mode === "real" ? str(body.accountKey, "账号资源标识") : resourceKey;
   requireThat(
@@ -115,6 +163,7 @@ export function register(s, now, mode, body) {
   const d = {
     id: randomUUID(),
     mode,
+    adapter,
     name: str(body.name, "设备名称", 80),
     rack: str(body.rack || "未分配机架", "机架"),
     host: str(body.host || "未命名宿主机", "宿主机"),
@@ -122,8 +171,12 @@ export function register(s, now, mode, body) {
     origin: endpoint,
     resourceKey,
     accountKey,
-    identity: mode === "real" ? "legacy-endpoint-unverified" : "simulated",
-    serial: body.serial ? str(body.serial, "序列号") : null,
+    identity: mode === "real" ? "operator-declared-unverified" : "simulated",
+    serial,
+    observer:
+      adapter === "mobile-agent"
+        ? { origin: endpoint, serial, version: randomUUID() }
+        : null,
     enabled: mode === "sim",
     state: "idle",
     connected: mode === "sim" ? "online" : "unknown",
@@ -199,6 +252,11 @@ export function addJob(s, now, mode, body) {
   if (deviceId) {
     const d = findDevice(s, mode, deviceId);
     requireThat(
+      d.adapter !== "mobile-agent",
+      "此适配器目前仅观察，不支持搜索/详情派发",
+      400,
+    );
+    requireThat(
       d.enabled && d.state !== "quarantined",
       "目标设备尚未启用或待核验",
     );
@@ -244,6 +302,15 @@ export function control(s, now, mode, id, body) {
   );
   if (body.action === "pause") d.enabled = false;
   else if (body.action === "enable") {
+    requireThat(
+      d.adapter !== "mobile-agent",
+      "Mobile-Agent 观察适配器尚不允许真实控制",
+      403,
+    );
+    requireThat(
+      !["waiting", "held"].includes(d.session?.status),
+      "请先释放本中心控制会话",
+    );
     requireThat(!current && d.state === "idle", "设备执行中或待核验");
     if (mode === "real") {
       requireThat(
@@ -301,6 +368,10 @@ export function control(s, now, mode, id, body) {
   } else if (body.action === "reconnect") {
     requireThat(mode === "sim", "仅模拟模式可直接恢复连接", 400);
     requireThat(!current, "设备仍在执行");
+    requireThat(
+      !["waiting", "held"].includes(d.session?.status),
+      "请先解除控制会话",
+    );
     d.connected = "online";
     d.state = "idle";
     d.enabled = true;
@@ -366,6 +437,7 @@ export function sweep(s, now, mode) {
       { jobId: a.jobId, deviceId: d.id },
     );
   }
+  sweepSessions(s, now, mode);
 }
 export function claim(s, now, mode, workerId) {
   sweep(s, now, mode);
@@ -373,6 +445,8 @@ export function claim(s, now, mode, workerId) {
     (d) =>
       d.mode === mode &&
       d.enabled &&
+      d.adapter !== "mobile-agent" &&
+      !["waiting", "held"].includes(d.session?.status) &&
       d.state === "idle" &&
       d.connected !== "offline" &&
       d.cooldownUntil <= now &&
@@ -560,6 +634,14 @@ export function cancel(s, now, mode, id) {
   return j;
 }
 export function scenario(s, now, kind, key) {
+  sweepSessions(s, now, "sim");
+  requireThat(
+    !s.devices.some(
+      (d) =>
+        d.mode === "sim" && ["waiting", "held"].includes(d.session?.status),
+    ),
+    "请先释放模拟控制会话",
+  );
   requireThat(
     ["five", "failover", "priority"].includes(kind),
     "未知演示场景",
@@ -638,4 +720,254 @@ export function scenario(s, now, kind, key) {
     { runId: key },
   );
   return { runId: key };
+}
+
+// Observation is explicitly requested; snapshots and cached-frame reads never perform phone I/O.
+export function configureObserver(s, now, id, body) {
+  const d = findDevice(s, "real", id);
+  requireThat(d.revision === body.revision, "设备状态已更新，请重试");
+  requireThat(body.approved === true, "需批准只读观察连接", 400);
+  const serial = serialNumber(body.serial),
+    endpoint = mobileOrigin(body.origin);
+  requireThat(
+    !d.serial || d.serial === serial,
+    "不能更换已登记手机的物理序列号",
+  );
+  requireThat(
+    !s.devices.some(
+      (x) => x.mode === "real" && x.id !== id && x.serial === serial,
+    ),
+    "该序列号已登记，请在原设备上配置画面",
+  );
+  requireThat(
+    d.adapter !== "mobile-agent" || d.origin === endpoint,
+    "观察设备的服务入口不能在此更换",
+  );
+  requireThat(
+    !["queued", "running"].includes(d.capture?.status) ||
+      d.capture.expiresAt <= now,
+    "请等待当前截图请求结束",
+  );
+  d.serial = serial;
+  d.observer = { origin: endpoint, serial, version: randomUUID() };
+  d.capture = null;
+  d.frame = null;
+  bump(d);
+  event(
+    s,
+    "real",
+    now,
+    "observer-configured",
+    `${d.name} 已配置只读画面；未连接手机`,
+    { deviceId: id },
+  );
+  return publicDevice(d);
+}
+export function requestCapture(s, now, id) {
+  const d = findDevice(s, "real", id);
+  requireThat(d.observer, "请先配置 Mobile-Agent 画面连接", 400);
+  if (
+    ["queued", "running"].includes(d.capture?.status) &&
+    d.capture.expiresAt > now
+  )
+    return d.capture;
+  if (d.capture?.finishedAt > now - 2000) return d.capture;
+  d.capture = {
+    id: randomUUID(),
+    version: d.observer.version,
+    status: "queued",
+    requestedAt: now,
+    expiresAt: now + 20000,
+  };
+  return d.capture;
+}
+export function claimCapture(s, now, workerId) {
+  for (const d of s.devices.filter(
+    (d) => d.mode === "real" && d.workerId === workerId,
+  )) {
+    if (
+      ["queued", "running"].includes(d.capture?.status) &&
+      d.capture.expiresAt <= now
+    ) {
+      d.capture.status = "failed";
+      d.capture.error = "截图请求超时；请检查执行器心跳";
+      d.capture.finishedAt = now;
+    }
+  }
+  const d = s.devices.find(
+    (d) =>
+      d.mode === "real" &&
+      d.workerId === workerId &&
+      d.capture?.status === "queued",
+  );
+  if (!d) return null;
+  d.capture.status = "running";
+  return d;
+}
+export function completeCapture(s, now, device, frame, error) {
+  const d = findDevice(s, "real", device.id);
+  if (
+    d.capture?.id !== device.capture.id ||
+    d.observer?.version !== device.observer.version ||
+    d.capture.status !== "running" ||
+    d.capture.expiresAt <= now
+  )
+    return false;
+  d.capture.status = error ? "failed" : "succeeded";
+  d.capture.finishedAt = now;
+  if (error) d.capture.error = "画面获取失败；旧画面不代表当前状态";
+  else
+    d.frame = {
+      id: device.capture.id,
+      version: d.observer.version,
+      receivedAt: now,
+      width: frame.width,
+      height: frame.height,
+    };
+  return !error;
+}
+
+function sweepSessions(s, now, mode) {
+  for (const d of s.devices.filter(
+    (d) => d.mode === mode && ["waiting", "held"].includes(d.session?.status),
+  )) {
+    if (d.session.expiresAt <= now) {
+      d.session.status = "expired";
+      delete d.session.tokenHash;
+      // Never infer physical idleness or restart old queues from a browser/lease timeout.
+      d.enabled = false;
+      bump(d);
+      event(
+        s,
+        mode,
+        now,
+        "session-expired",
+        `${d.name} 会话过期；保持停止领取`,
+        { deviceId: d.id },
+      );
+    } else if (
+      d.session.status === "waiting" &&
+      !s.attempts.some((a) => a.deviceId === d.id && a.status === "running")
+    ) {
+      d.session.status = d.state === "quarantined" ? "blocked" : "held";
+      if (d.session.status === "blocked") delete d.session.tokenHash;
+      bump(d);
+      event(
+        s,
+        mode,
+        now,
+        "session-ready",
+        `${d.name}：${d.session.status === "held" ? "本中心执行槽已预留" : "结果不明，不能接管"}`,
+        { deviceId: d.id },
+      );
+    }
+  }
+}
+export function sessionAction(s, now, mode, id, body) {
+  const d = findDevice(s, mode, id),
+    action = body.action;
+  requireThat(
+    ["acquire", "renew", "release", "takeover", "reset"].includes(action),
+    "未知会话操作",
+    400,
+  );
+  if (["takeover", "reset"].includes(action))
+    requireThat(
+      mode === "sim",
+      "旧执行端不能拒绝外部命令；真实抢占/复位禁止，仅可模拟演示",
+      403,
+    );
+  if (["acquire", "takeover"].includes(action))
+    requireThat(body.revision === d.revision, "设备状态已更新，请重试");
+  sweepSessions(s, now, mode);
+  const held = ["waiting", "held"].includes(d.session?.status);
+  if (["acquire", "takeover"].includes(action)) {
+    requireThat(
+      d.state !== "quarantined" && d.connected !== "offline",
+      "设备已隔离或离线，不能预留",
+    );
+    requireThat(!held || action === "takeover", "已被其他会话占用");
+    requireThat(
+      body.confirmed === true,
+      "需确认只预留本中心执行槽，不阻止外部控制端",
+      400,
+    );
+    if (action === "takeover") {
+      const a = s.attempts.find(
+        (a) => a.deviceId === id && a.status === "running",
+      );
+      if (a) {
+        a.status = "interrupted";
+        a.completedAt = now;
+        const j = s.jobs.find((j) => j.id === a.jobId);
+        j.status = "queued";
+        j.notBefore = now + 6000;
+        j.reason = "模拟抢占：任务保留，6 秒后可重新调度";
+      }
+      d.epoch++;
+      d.state = "idle";
+    }
+    const token = randomUUID();
+    d.session = {
+      id: randomUUID(),
+      tokenHash: createHash("sha256").update(token).digest("hex"),
+      status: s.attempts.some(
+        (a) => a.deviceId === id && a.status === "running",
+      )
+        ? "waiting"
+        : "held",
+      scope: "center-only",
+      createdAt: now,
+      expiresAt: now + 60000,
+    };
+    d.enabled = false;
+    bump(d);
+    event(
+      s,
+      mode,
+      now,
+      `session-${action}`,
+      `${d.name}：${mode === "sim" ? "模拟控制会话" : "仅预留本中心执行槽，未接管外部控制"}`,
+      { deviceId: id },
+    );
+    return { device: publicDevice(d), token };
+  }
+  requireThat(
+    held &&
+      typeof body.token === "string" &&
+      createHash("sha256").update(body.token).digest("hex") ===
+        d.session.tokenHash,
+    "会话已失效或属于其他控制端",
+    403,
+  );
+  if (action === "renew") d.session.expiresAt = now + 60000;
+  if (action === "release") {
+    d.session.status = "released";
+    delete d.session.tokenHash;
+  }
+  if (action === "reset") {
+    requireThat(
+      d.session.status === "held" && d.state === "idle",
+      "请等待当前模拟任务结束",
+    );
+    d.projection = {
+      source: "sim",
+      observedAt: now,
+      progressAt: now,
+      status: "模拟恢复工作起点",
+      items: [],
+    };
+  }
+  if (action !== "renew") {
+    bump(d);
+    event(
+      s,
+      mode,
+      now,
+      `session-${action}`,
+      `${d.name}：${action === "release" ? "会话已释放，仍暂停领取；任务池保留" : "模拟复位，不清任务历史"}`,
+      { deviceId: id },
+    );
+  }
+  return { device: publicDevice(d) };
 }

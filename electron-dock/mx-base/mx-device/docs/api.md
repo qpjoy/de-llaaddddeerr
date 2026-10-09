@@ -12,6 +12,10 @@
 | POST /api/devices?mode=real | 登记设备；真实设备默认暂停 |
 | POST /api/devices/:id/probe?mode=real | `{revision}`；指定 Worker 异步执行一次只读状态查询 |
 | POST /api/devices/:id/control?mode=sim | `{revision,action}`；乐观版本校验 |
+| POST /api/devices/:id/observer?mode=real | `{revision,origin,serial,approved:true}`；附加只读画面配置，保存不连接手机 |
+| POST /api/devices/:id/capture?mode=real | `{}`；提交或合并一次取帧请求，指定 Worker 执行，返回 202 |
+| GET /api/devices/:id/frame?mode=real&captureId=UUID | 只读取最新已保存 PNG；需管理认证，no-store，不连接手机 |
+| POST /api/devices/:id/session?mode=sim | `acquire/renew/release/takeover/reset`；见下方边界 |
 | POST /api/jobs?mode=sim | 幂等提交搜索 / 详情任务 |
 | POST /api/jobs/:id/cancel?mode=sim | 仅取消 queued，不取消在途执行 |
 | POST /api/scenarios?mode=sim | `{kind:five|priority|failover,key}`；当前演示无活动任务时创建新场景 |
@@ -20,7 +24,11 @@
 
 以上 mode 可按权限使用 sim / real，但场景只能 sim，probe 只能 real。没有任意 URL 转发或命令执行 API。
 
-真实设备登记字段：`name, rack, host, workerId, origin, accountKey, serial?，approved:true`。`origin` 仅允许 `http://127.0.0.1:18081–18180`，不接受路径、凭证、查询、片段或重定向；由指定 Worker 宿主机解释 localhost。每个 `(workerId, origin)`、账号资源标识，以及非空真实序列号必须唯一。序列号未提供则身份仍为 `legacy-endpoint-unverified`。
+真实设备登记字段：`name, rack, host, workerId, adapter, origin, accountKey, serial, approved:true`。省略 adapter 兼容旧 `legacy-poc`：入口仅允许 `http://127.0.0.1:18081–18180`，serial 可暂缺，每个 `(workerId, origin)` 唯一。`adapter:mobile-agent` 为只读观察：入口仅允许 `http://127.0.0.1:8787–8797`，serial 必填，每个 `(workerId, origin, serial)` 唯一。同一原设备可通过 observer 增加画面配置；不能为同一真实序列号重复建两个适配器设备。账号标识、非空真实序列号跨真实设备唯一。入口不接受路径、凭证、查询、片段或重定向，由指定 Worker 解释 localhost；没有任意网络代理。
+
+画面请求仅调用既有服务 `GET /api/screen.png?device=<serial>`；10 秒超时、6 MiB 上限、PNG 格式/尺寸校验。相同设备的未完成请求合并，完成后至少 2 秒才允许下一请求；20 秒过期的回执不再写入。`captureId` 不是访问凭证。GET frame 只有最新帧，同一帧被替换后返回 404，客户端刷新本中心记录即可。完整 PNG 不进入快照或事件。
+
+控制会话：`acquire` 要求 `{action,revision,confirmed:true}`，暂停后续领取、等待已有任务结束，返回 `{device,token}`；token 仅返回给申请者，在内存保管。`renew/release` 必须携带 token。60 秒未续期保持暂停、不自动重发任务。快照不含 token 或其哈希。`takeover`（revision + confirmed）和 `reset`（token）**只能 sim**，real 服务端返回 403。真实 acquire 只是 `center-only` 预留，并不检查或撤销旧 Mobile-Agent/PoC/ADB 控制权。Mobile-Agent 观察设备禁止 enable、probe 和采集任务。
 
 任务提交：搜索为 `{key,operation:'search',keyword,pages:1..3,priority:1..9,deviceId?}`；详情为 `{key,operation:'note',input:'完整 HTTPS explore 链接',priority,deviceId?}`，也可用 `sourceJobId` 替代 input 来消费已成功搜索的首条链接。真机必须指定 `deviceId` 且 `confirmed:true`。相同 key 与相同规范化参数返回原任务；参数变更返回冲突。
 

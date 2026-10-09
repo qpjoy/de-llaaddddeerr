@@ -12,6 +12,10 @@ import {
   addJob,
   cancel,
   scenario,
+  publicDevice,
+  configureObserver,
+  requestCapture,
+  sessionAction,
 } from "./model.mjs";
 
 const equal = (a, b) =>
@@ -42,6 +46,7 @@ async function body(req) {
 }
 const summarize = (s) => ({
   ...s,
+  devices: s.devices.map(publicDevice),
   jobs: s.jobs.map(({ result, ...j }) => j),
   attempts: s.attempts.map(({ result, lateEvidence, checkpoints, ...a }) => a),
 });
@@ -135,6 +140,44 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
           throw new Fault("测试凭证仅允许模拟模式", 403);
         if (path === "/api/state" && req.method === "GET")
           return json(res, 200, summarize(await store.snapshot(mode)));
+        const peripheral = path.match(
+          /^\/api\/devices\/([^/]+)\/(observer|capture|frame|session)$/,
+        );
+        if (peripheral) {
+          const id = uuid(peripheral[1]),
+            action = peripheral[2];
+          if (action !== "session" && mode !== "real")
+            throw new Fault("模拟设备不能连接真实画面", 403);
+          if (action === "frame" && req.method === "GET") {
+            const png = await store.frame(
+              id,
+              uuid(url.searchParams.get("captureId")),
+            );
+            if (!png) throw new Fault("画面不存在或已更新，请刷新记录", 404);
+            res.writeHead(200, {
+              "Content-Type": "image/png",
+              "Content-Length": png.length,
+              "Cache-Control": "no-store",
+            });
+            return res.end(png);
+          }
+          if (req.method !== "POST" || action === "frame")
+            throw new Fault("不支持的方法", 405);
+          const b = await body(req);
+          return json(
+            res,
+            action === "capture" ? 202 : 200,
+            await store.atomic(
+              (s, n) =>
+                action === "observer"
+                  ? configureObserver(s, n, id, b)
+                  : action === "capture"
+                    ? requestCapture(s, n, id)
+                    : sessionAction(s, n, mode, id, b),
+              { mode },
+            ),
+          );
+        }
         if (path.startsWith("/api/jobs/") && req.method === "GET") {
           const detail = await store.detail(mode, uuid(path.split("/")[3]));
           if (!detail) throw new Fault("任务不存在", 404);
@@ -186,9 +229,12 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
             return json(
               res,
               200,
-              await store.atomic((s, n) => control(s, n, mode, id, b), {
-                mode,
-              }),
+              await store.atomic(
+                (s, n) => publicDevice(control(s, n, mode, id, b)),
+                {
+                  mode,
+                },
+              ),
             );
           if (mode !== "real")
             throw new Fault("模拟设备不调用手机状态接口", 400);
@@ -197,6 +243,11 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
             (d) => d.id === id,
           );
           if (!d) throw new Fault("设备不存在", 404);
+          if (d.adapter === "mobile-agent")
+            throw new Fault(
+              "此设备通过开始观看检查画面，不调用 PoC 状态接口",
+              400,
+            );
           if (probeRequests.get(id) > Date.now() - 3000)
             throw new Fault("请等待当前检查完成", 429);
           probeRequests.set(id, Date.now());
@@ -210,7 +261,7 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
                   throw new Fault("设备状态已变化");
                 row.probeRequestedAt = n;
                 row.revision++;
-                return row;
+                return publicDevice(row);
               },
               { mode },
             ),

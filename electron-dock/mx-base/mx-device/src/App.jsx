@@ -11,7 +11,7 @@ import {
   ArrowsClockwise,
 } from "@phosphor-icons/react";
 import { api, useSnapshot } from "./data.js";
-import { Modal, DeviceForm, JobForm } from "./Forms.jsx";
+import { Modal, DeviceForm, JobForm, ObserverForm } from "./Forms.jsx";
 import { Devices, Connections } from "./Devices.jsx";
 import { Tasks, Events, JobDetail } from "./Tasks.jsx";
 import Projection from "./Projection.jsx";
@@ -315,10 +315,10 @@ function Workspace({ onExpired }) {
                 <div className="panel-body">
                   {mode === "real" && (
                     <p className="notice">
-                      接入顺序：添加现有 mobile-agent（宿主机 18081）→
-                      检查连接（只读）→ 确认空闲且无其他调用方后启用调度 →
-                      真机演示。演示会实际执行一页搜索和首条笔记详情；不会重启手机或清除
-                      busy。
+                      看画面：Mobile-Agent 8787 + 手机序列号 → 开始观看。已有
+                      PoC 手机直接配置画面连接，不重复登记。 旧 18081
+                      搜索/详情仍需明确空闲和独占交接；观察不会清
+                      busy、点击手机或重启 VPN。
                     </p>
                   )}
                   {loading ? (
@@ -378,11 +378,14 @@ function Workspace({ onExpired }) {
                 </div>
               </section>
               <Projection
+                key={`${mode}:${device?.id}`}
                 device={device}
                 history={history}
                 onLive={() => setHistory(null)}
                 busy={busy}
                 onControl={control}
+                onRefresh={refresh}
+                onConfigure={() => setModal("observer")}
                 onProbe={(d) =>
                   run(
                     () =>
@@ -402,11 +405,13 @@ function Workspace({ onExpired }) {
           title={
             modal === "device"
               ? "添加设备"
-              : modal === "job"
-                ? `提交${mode === "sim" ? "模拟" : "真实"}任务`
-                : modal === "real-demo"
-                  ? "真机搜索 → 详情演示"
-                  : "执行证据"
+              : modal === "observer"
+                ? "配置真实画面"
+                : modal === "job"
+                  ? `提交${mode === "sim" ? "模拟" : "真实"}任务`
+                  : modal === "real-demo"
+                    ? "真机搜索 → 详情演示"
+                    : "执行证据"
           }
           onClose={() => setModal(null)}
         >
@@ -415,7 +420,19 @@ function Workspace({ onExpired }) {
               {notice}
             </p>
           )}
-          {modal === "device" ? (
+          {modal === "observer" ? (
+            <ObserverForm
+              device={device}
+              busy={busy}
+              onSubmit={async (b) => {
+                const r = await run(
+                  () => api(`devices/${device.id}/observer`, "real", b),
+                  "画面连接已保存，点击开始观看才访问手机",
+                );
+                if (r) setModal(null);
+              }}
+            />
+          ) : modal === "device" ? (
             <DeviceForm
               mode={mode}
               workers={state.workers}
