@@ -67,7 +67,13 @@ export function inspectWeiboFullText(row, archive, { textDiff = false } = {}) {
   const prefixMatches = weiboContracts.weiboTextPrefixMatches
     ? weiboContracts.weiboTextPrefixMatches(row.text, full)
     : full.replace(/[\s\u200b\ufeff]/gu, '').startsWith(prefix)
-  facts.prefixComparison = { policy: weiboContracts.weiboTextPrefixMatches ? 'weibo_display_v1' : 'strict', matches: prefixMatches }
+  facts.prefixComparison = { policy: weiboContracts.weiboTextPrefixMatches
+    ? weiboContracts.WEIBO_TEXT_COMPARISON_POLICY || 'weibo_display_v1' : 'strict', matches: prefixMatches }
+  if (weiboContracts.validateWeiboDetail) {
+    facts.mergePolicy = weiboContracts.WEIBO_DETAIL_POLICY
+    facts.prefixComparison.blocking = false
+    facts.fullTextLonger = full.length > row.text.length
+  }
   if (textDiff) facts.textComparison = {
     fullText: compareText(prefix, raw?.longText?.content || raw?.text_raw),
     renderedText: compareText(prefix, raw?.text),
@@ -82,8 +88,11 @@ export function inspectWeiboFullText(row, archive, { textDiff = false } = {}) {
     if (!prefixMatches) reasons.push('prefix_mismatch')
   }
   const accepted = mergeWeiboDetail(structuredClone(row), { publicBody: { data: raw, meta: { capturedAt: decoded.capturedAt } } })
+  const currentReasons = weiboContracts.validateWeiboDetail?.(row,
+    { publicBody: { data: raw, meta: { capturedAt: decoded.capturedAt } } }).reasons || reasons
+  if (weiboContracts.validateWeiboDetail) facts.fullTextStillPreview = currentReasons.includes('full_text_still_preview')
   return { state: accepted ? 'current_merge_accepts' : 'current_merge_rejects',
-    reasons: accepted ? [] : reasons.length ? reasons : ['other_merge_rule'], returnedPostId: detail.content_id, ...facts }
+    reasons: accepted ? [] : currentReasons.length ? currentReasons : ['other_merge_rule'], returnedPostId: detail.content_id, ...facts }
 }
 
 export async function diagnoseWeiboFullText(pool, requestId, { textDiff = false } = {}) {

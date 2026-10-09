@@ -121,6 +121,7 @@ test('raw search fills a Weibo preview through governed detail, archives both re
   const first = await h.invoke()
   const row = JSON.parse(first.body.data.raw_data)[0]
   assert.equal(row.full_text, FULL)
+  assert.equal(row.summary, PREVIEW)
   assert.equal(row.title, '')
   assert.equal(row.body_completeness, 'full_text')
   assert.equal(row.like_count, 7)
@@ -221,7 +222,8 @@ test('detail rejection, unknown outcome, mismatched identity and paused detail k
   for (const options of [{ detail: 'rejected' }, { detail: 'unknown' }, { detail: 'wrong-id' }, { detailEnabled: false }]) {
     const h = await harness(options)
     const result = await h.invoke()
-    assert.equal(JSON.parse(result.body.data.raw_data)[0].full_text, PREVIEW)
+    assert.equal(JSON.parse(result.body.data.raw_data)[0].full_text, null)
+    assert.equal(JSON.parse(result.body.data.raw_data)[0].summary, PREVIEW)
     assert.equal(result.body.data.status, 'partial')
     assert.equal(result.body.data.warnings[0].code, 'WEIBO_FULL_TEXT_INCOMPLETE')
     assert.deepEqual((await h.invoke()).body, result.body)
@@ -322,9 +324,9 @@ test('Weibo empty pagination still runs the governed long-text enrichment', asyn
   assert.equal(h.calls[1].searchParams.get('is_get_long_text'), 'true')
 })
 
-test('both search contracts deliver format-equivalent full text as ok and preserve evidence and replay', async () => {
+test('both search contracts deliver independently verified edited full text as ok and preserve evidence and replay', async () => {
   const short = 'whzy超话这是正文开头，后续正文包含表情 展开c'
-  const full = '#whzy[超话]#这是正文开头，[笑cry]后续正文包含表情[打call]。这里是完整后文。'
+  const full = '#whzy[超话]#作者编辑后的短文[新表情]。'
   const detail = { idstr: POST_ID, user: { idstr: AUTHOR }, isLongText: true,
     text: 'whzy超话这是正文开头，后续正文包含表情。', text_raw: full, longText: { content: full } }
   for (const route of ['raw', 'data']) {
@@ -339,6 +341,8 @@ test('both search contracts deliver format-equivalent full text as ok and preser
     assert.equal(h.calls.length, 2)
     assert.equal(h.historical.length, 0)
     assert.equal(h.platformStore.ingestJobs[0].payload.records[0].body, full)
+    assert.equal(h.platformStore.ingestJobs[0].payload.records[0].extensions.weiboBody.summary, short)
+    assert.equal(h.platformStore.ingestJobs[0].payload.records[0].extensions.weiboBody.fullText, full)
     assert.equal(h.platformStore.ingestJobs[0].payload.records[0].extensions.rawSearch.bodyCompleteness, 'full_text')
     const archives = [...h.platformStore.restrictedResponseArchives.values()]
     assert.equal(archives[0].parsedPayload.data.parsed_data.results[0].content, short)

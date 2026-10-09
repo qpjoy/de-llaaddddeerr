@@ -23,9 +23,9 @@ test('full-text diagnostics identify merge rejection branches without exposing b
   assert.equal(inspectWeiboFullText(row, archive(detail)).state, 'current_merge_accepts')
   for (const [data, expected] of [
     [{ ...detail, longText: null, text_raw: null }, 'full_text_missing'],
-    [{ ...detail, longText: { content: post.content } }, 'full_text_not_longer'],
+    [{ ...detail, longText: { content: post.content } }, 'full_text_still_preview'],
     [{ ...detail, longText: { content: full + ' 展开c' } }, 'full_text_still_preview'],
-    [{ ...detail, longText: { content: 'different-prefix ' + full } }, 'prefix_mismatch'],
+    [{ ...detail, longText: null, isLongText: true }, 'long_text_missing'],
     [{ ...detail, idstr: '999' }, 'post_id_mismatch'],
     [{ ...detail, user: { idstr: '999' } }, 'author_id_mismatch'],
     [{ nested: detail }, 'invalid_detail_identity'],
@@ -61,7 +61,8 @@ test('opt-in text diff keeps the original mismatch visible while reporting the d
   assert.equal(ordinary.textComparison, undefined)
   const comparison = inspectWeiboFullText(preview, source, { textDiff: true })
   assert.equal(comparison.state, 'current_merge_accepts')
-  assert.deepEqual(comparison.prefixComparison, { policy: 'weibo_display_v1', matches: true })
+  assert.equal(comparison.mergePolicy, 'weibo-detail-identity.v1')
+  assert.deepEqual(comparison.prefixComparison, { policy: 'weibo_display_v2', matches: true, blocking: false })
   assert.equal(comparison.textComparison.fullText.prefixMatches, false)
   assert.equal(comparison.textComparison.fullText.previewCodePoint, 'U+E627')
   assert.equal(comparison.textComparison.fullText.detailCodePoint, 'U+0023')

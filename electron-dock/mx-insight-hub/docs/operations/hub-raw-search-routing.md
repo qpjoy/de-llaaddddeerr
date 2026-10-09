@@ -21,9 +21,22 @@ Hub 新分页使用绑定 consumer、Key、平台、查询与页大小的 `mxraw
 
 ## 微博全文
 
-搜索结果包含“展开c”“展开全文”等末尾标记或明确的长文标记时，Hub 调用已注册详情接口，固定 `is_get_long_text="true"`。只使用 ID、作者（搜索已提供时）和正文前缀一致、严格更长且不再带截断标记的全文，优先 `longText.content`，其次 `text_raw`。更新 `text/content/full_text`，普通帖子标题保持空，不再把正文复制为标题。保留搜索获得的指标、时间和媒体。
+2026-10-09 起，Hub 将搜索摘要与详情全文分开保存。搜索结果包含“展开c”“展开全文”、末尾省略号或明确的长文标记时，仍通过原受控详情接口请求 `is_get_long_text="true"`；调用次数、费用和限流不变。
 
-正文比较兼容已从归档确认的显示差异：`名称超话` / `#名称[超话]#`，以及搜索省略的 `[笑cry]`、`[打call]` 标签。只在比较中统一，完整正文原样保留话题和表情。未知括号内容和实质正文差异仍拒绝；详情展示文本匹配本身不代替全文匹配。归档诊断显示 `prefixComparison.policy=weibo_display_v1` 时，使用的是这套规则。
+新合并策略 `weibo-detail-identity.v1` 核对帖子 ID 与详情作者；搜索有作者时必须相同。正文优先采用非空 `longText.content`；没有该字段时，仅在 `isLongText=false` 明确表示非长文的详情中采用 `text_raw`。缺失长文、未知完整性、删除状态、空正文或仍含末尾“展开”控件都拒绝。已明确完整的正文允许以作者实际书写的省略号结尾。
+
+摘要前缀不同、表情/超话/链接展示不同、详情更短或正文已经编辑，都不再单独阻止采用有效详情。原有 `weibo_display_v2` 比较仅用于诊断，`prefixComparison.blocking=false`；全文保留表情和话题原文，不依赖不断增加表情白名单。搜索指标、发布时间和媒体保持原映射。
+
+| 字段 / 存储位置 | 含义 |
+| --- | --- |
+| raw 行 `summary` | 原搜索摘要，补详情时不改写 |
+| raw 行 `full_text` | 明确完整的正文；未取得时为 null，不再把摘要标为全文 |
+| raw 行 `text/content` | 有全文返回全文，否则返回摘要，供现有下游继续使用 |
+| raw 行 `body_provenance` | 摘要与全文各自的来源、采集时间、详情字段与身份，以及非阻塞比较结果 |
+| canonical `body` | 同样优先全文，现有数据库列表与索引继续读取该字段 |
+| canonical `extensions.weiboBody` | 分别保存摘要、全文及各自来源/时间，便于审计与后续升级 |
+
+`/api/v1/data/search` 保留严格 v1 结构，列表的 `items[].text` 优先返回全文，无需下游更换 URL 或解析字段。该严格接口不新增 summary 属性；摘要可在 raw 或 Hub 管理端 canonical 扩展中查看。上游本次没有交付完整详情时，实时接口仍如实返回摘要/partial，不把数据库旧全文伪装成新采集结果。
 
 `includeDetails=true` 可请求详情；`disableAutoDetails=true` 保留原有禁止自动补取的语义。补取最多 `maxEnrichItems` 条，默认 20，同时受请求租约、供应商操作状态、限流和采购预算约束。每个详情请求都有独立采购成本与完整响应证据，但共用原搜索的一个客户用量/钱包身份。不会因为失败或响应未知而自动重试付费请求。
 
@@ -55,10 +68,16 @@ Hub 新分页使用绑定 consumer、Key、平台、查询与页大小的 `mxraw
 
 ## 部署与验证
 
-部署 Hub API 和 ingest worker 即可，Delta、Luopan、Night-All 不需要同步发布。按现有 migrate 流程顺序执行 migration 132、133：前者保护 raw 的 `night-all.compat.v1`，后者扩展到 data-search 的 `night-all.search.v1`。只保护带有 Hub 全文验证标记的微博，阻止后来的同前缀“展开”短文覆盖全文；保留原始证据和观察，允许真正的内容编辑与删除。不回填旧记录，不改 migration 131，也不更新下游数据库中已经保存的摘要。
+部署 Hub API 和 ingest worker，Delta、Luopan、Night-All 无需同步发布。按正常 migrate 流程执行新增 migration 137，再滚动更新镜像：
 
-后续 migration 134 将这项保护扩展到带 `provider_preview` 标记且满足长度与同前缀条件的上述格式等价摘要及省略号摘要。仍只保护已由 Hub 验证的全文，无历史回填或旧幂等响应改写。需要正常 deploy 执行迁移并重建镜像；可用已保存响应离线验证新合并规则，无需再次付费。
+```bash
+bash scripts/manage.sh ops internal-production deploy
+```
+
+137 只更新既有微博全文保护函数，不扫描全库、不新增付费请求、不修改旧迁移。新 worker 按帖子身份加锁，将摘要与全文分别按采集时间选择，再计算 canonical hash、修订和投影事件。新摘要可更新自身和指标，但不能覆盖已确认全文；迟到的旧详情不能覆盖较新的详情；新详情允许正文变短。原始采集记录不改写，新的 canonical 修订记录选取后的正文。采集时间单独推进不会触发内容修订或重复向量化；时间证据保存在当前扩展与不可变采集记录中。旧记录的已验证全文在下一次正常采集入库时保留并转换到新结构；尚无可验证全文的旧记录不会凭空补全。
+
+迁移也保护滚动发布期间的新结构记录，旧 worker 的摘要/旧格式不能降级它；旧采集原始证据仍保留。作者或删除状态变化不沿用前一作者/状态的全文。136 继续只针对原请求已归档的两条未变更短文做有证据的修复，见 [微博搜索诊断](weibo-search-diagnostics.md)。历史 API 响应、旧幂等重放、已保存到下游的记录不会自动改写。
 
 本次未改 Launcher/MX-H2I 登录、联网或支付服务。最初的路由迁移未新增付费请求；后续空分页修复经用户授权新增一次微博搜索验证，其原始响应只用于离线重放。测试使用模拟供应商、原先已获授权保存的真实详情响应，以及独立 PGlite 数据库执行迁移。覆盖别名重放、旧响应重放、全文匹配、补取失败、采购成本、空标题、15 页与跨 Key 游标边界、原始证据和全文保护。
 
-入口：`tests/server/raw-search-routing.test.mjs`、`tests/server/weibo-long-text-migration.test.mjs`。SQL 测试通过 `MX_INSIGHT_TEST_PGLITE_MODULE` 指向本机 PGlite 模块；测试不连接生产。
+入口：`tests/server/raw-search-routing.test.mjs`、`tests/server/weibo-long-text-migration.test.mjs`、`tests/server/weibo-separated-body.test.mjs`。SQL 测试通过 `MX_INSIGHT_TEST_PGLITE_MODULE` 指向本机 PGlite 模块；测试不连接生产。

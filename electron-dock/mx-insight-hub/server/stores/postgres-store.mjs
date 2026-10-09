@@ -25,6 +25,7 @@ import {
   streamId,
 } from '../ingest/normalizers.mjs'
 import { CRAWLER_FIELD_MAP } from '../ingest/crawler/source-contract.mjs'
+import { isSeparatedWeiboBody, retainWeiboFullText } from '../ingest/weibo-body.mjs'
 
 
 function iso(value) {
@@ -3657,12 +3658,11 @@ export class PostgresStore {
 
       const sourceRunColumn = apiLineage ? 'ingest_run_id' : 'external_import_run_id'
       const sourceRunId = apiLineage ? ingestRunId : importRunId
-      if (externalPlatformCall && platform === 'xiaohongshu') {
-        // Search previews and their paid detail repairs are separate queue jobs.
-        // Lock every overlapping identity in a stable order so concurrent
-        // workers cannot let a later 60-character preview win after a longer
-        // detail record has committed. Sorting also avoids cross-batch lock
-        // inversions when two search pages contain the same notes.
+      if ((externalPlatformCall && platform === 'xiaohongshu')
+        || records.some(record => isSeparatedWeiboBody(datasetId, platform, record))) {
+        // Lock overlapping identities in a stable order. Search observations
+        // and detail repairs may arrive out of order, including first inserts;
+        // neither preview length nor worker arrival order establishes freshness.
         const identityLocks = [...new Set(records.map((record) => JSON.stringify([
           datasetId,
           platform,
@@ -3741,6 +3741,15 @@ export class PostgresStore {
         )
 
         const sourceStage = publicOpinionSourceStage(datasetId, record.rawItem)
+        let canonicalPayload = record.rawItem
+        if (isSeparatedWeiboBody(datasetId, platform, record)) {
+          const current = await client.query(`SELECT body, extensions, author_external_id, collected_at, deleted_at,
+              current_revision, payload_sha256
+            FROM core.canonical_records WHERE dataset_id=$1 AND platform=$2
+              AND object_type=$3 AND external_id=$4 FOR UPDATE`,
+          [datasetId, platform, record.objectType, record.externalId])
+          canonicalPayload = retainWeiboFullText(record, current.rows[0])
+        }
         // Candidate public-opinion records and real-time external-platform
         // records use collection time when no upstream event time exists.
         // Re-project only those bounded cases when a newer observation moves
@@ -3848,7 +3857,7 @@ export class PostgresStore {
                (record_id, revision, payload_sha256, normalized_payload, parser_version, ${sourceRunColumn})
              VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT (record_id, revision) DO NOTHING`,
-            [id, revision, record.payloadSha256, record.rawItem, record.parserVersion, sourceRunId],
+            [id, revision, record.payloadSha256, canonicalPayload, record.parserVersion, sourceRunId],
           )
           if (revisionInsert.rowCount > 0) changed += 1
         }

@@ -23,7 +23,7 @@ export function projectDataSearch(result, request) {
   const items = result.items.map(row => ({
     id: row.content_id, externalId: row.content_id, platform: request.platform,
     contentType: row.content_type || 'post', url: nullable(row.url), title: null,
-    text: nullable(row.full_text), publishedAt: row.created_at || null, collectedAt: row.collected_at || null,
+    text: nullable(row.full_text || row.text), publishedAt: row.created_at || null, collectedAt: row.collected_at || null,
     author: { id: row.author_id || null, name: nullable(row.author_name), avatarUrl: nullable(row.author_avatar_url) },
     metrics: { likes: metric(row.like_count), comments: metric(row.comment_count), shares: metric(row.forward_count),
       views: metric(row.view_count), bookmarks: metric(row.bookmark_count) },

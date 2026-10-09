@@ -163,9 +163,11 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin \
 | --- | --- |
 | `detail_call_not_successful` | 调用未成功；结合 outcome、HTTP/业务码和受控 errorCode 判断 |
 | `full_text_missing` | `longText.content` / `text_raw` 未提供可用全文 |
-| `full_text_not_longer` | 详情正文未比搜索摘要更长 |
-| `full_text_still_preview` | 详情正文仍以展开或省略号结束 |
-| `prefix_mismatch` | 详情全文与搜索摘要的正文前缀不匹配 |
+| `full_text_not_longer` | 仅旧策略的拒绝原因；新策略只记长度比较，不阻止合并 |
+| `full_text_still_preview` | 新策略表示末尾仍有“展开”控件；明确完整字段中的自然省略号允许保留 |
+| `prefix_mismatch` | 仅旧策略的拒绝原因；新策略只记前缀比较，不阻止合并 |
+| `long_text_missing` / `detail_completeness_unknown` | 长文标记未取得 longText，或 text_raw 缺少明确的非长文标记 |
+| `detail_unavailable` / `detail_timestamp_missing` | 删除状态或详情采集时间不可验证 |
 | `post_id_mismatch` / `author_id_mismatch` | 帖子 / 作者身份不一致 |
 | `invalid_detail_identity` | 详情形状没有可用的帖子 ID |
 | `current_merge_accepts` | 当前部署代码可以采用这份详情，不等于当时已经采用或自动回填 |
@@ -218,3 +220,84 @@ bash scripts/manage.sh ops internal-production deploy
 stdin 模块加载、乱序详情的指纹关联，并在独立 PGlite 中验证只读查询。
 `tests/server/weibo-text-comparison.test.mjs` 使用报告中的前缀和明确标注的合成后文，
 验证格式等价、正文原样保留与反例；完整生产正文未获取，不把合成后文当作生产响应。
+
+## 2026-10-09：[兔子]、[哈哈] 导致全文拒绝
+
+原请求 `7316edc1-9479-4c17-b8ae-7cf0796493af` 是 LCY-delta 的
+`POST /api/v1/data/search`，检索“无畏契约上海冠军赛”第 2 页。
+Hub 直连 TikHub，1 次搜索 + 3 次详情；10 条交付中仍有 2 条 preview。
+用户提供的归档诊断证明：
+
+| 微博 ID | 搜索 / 全文字段长度（JS） | 唯一拒绝原因 | 已确认的显示差异 |
+| --- | --- | --- | --- |
+| `5351931117044493` | 139 / 197 | `prefix_mismatch` | `Leaf：持续递东西Jawgemo` / `Leaf：持续递东西[兔子]Jawgemo` |
+| `5351932359082259` | 140 / 181 | `prefix_mismatch` | `自己的语言回答我们看到` / `自己的语言回答[哈哈]我们看到` |
+
+两次详情的 HTTP / code 均为 200，帖子与作者身份校验通过，全文均没有末尾截断标记；
+详情展示文本也都匹配摘要。第三条 `5351909156193662` 的超话差异已被 v1 接受。
+新规则只补充这两个观察到的表情，不泛化删除方括号；全文保留原表情。
+
+`136_weibo_emotion_full_text_repair.sql` 随正常 deploy 自动执行：
+
+- 更新数据库等价比较，保护两种已观察到的 preview 标记（`rawSearch.bodyCompleteness` 和旧顶层 `body_completeness`）。保护仍只作用于原两个数据集内已验证的微博全文，保留作者、身份、编辑和删除边界。
+- 仅尝试修复上述两个 `night-all.search.v1` 记录的 revision 1。逐条锁定，检查作者 `7851053384`、原搜索请求/调用关联，再按已知详情 call ID、请求 ID、上游 ID、操作契约与派发指纹定位受限归档。
+- 校验原始字节大小和 SHA-256，从原 `longText.content` 读取完整正文。此定向 SQL 修复仅接受纯文本；HTML/需解码实体、身份不符、前缀不符、仍截断、正文已编辑/删除或证据缺失时明确 NOTICE 跳过，绝不推测后文。哈希/修订历史异常则整批回滚。
+- 成功时增加 canonical revision/outbox，并记录手动修复 run、观察及原归档引用。旧 revision、原请求成员关系、响应、用量、账单和受限字节保持不变，不将任意受限响应复制到普通可见存储。
+- 无目标的环境仅更新比较规则；重复运行不重复修复。没有新的供应商请求、权限、价格或 MX-H2I 登录/联网变更。
+
+服务器源码更新后正常部署：
+
+```bash
+bash scripts/manage.sh ops internal-production deploy
+```
+
+SQL 会产生 `Weibo emotion repair applied <微博ID>` 或 `skipped` 的 NOTICE，
+但现有 Node 迁移入口不转印 NOTICE，因此不能仅凭 `applied 136_...sql` 认定两条内容已修好。
+部署后以下只读查询才是当前内容的核验依据，不产生费用：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - <<'NODE'
+import pg from '/app/node_modules/pg/lib/index.js'
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1 })
+try {
+  const { rows } = await pool.query(`SELECT external_id, char_length(body) AS body_length,
+    current_revision, extensions #>> '{rawSearch,bodyCompleteness}' AS completeness,
+    extensions #>> '{weiboLongTextRepair,comparisonPolicy}' AS repair_policy,
+    right(body, 60) AS body_tail
+    FROM core.canonical_records WHERE dataset_id='night-all.search.v1' AND platform='weibo'
+    AND object_type='post' AND external_id IN ('5351931117044493','5351932359082259')
+    ORDER BY external_id`)
+  console.log(JSON.stringify(rows, null, 2))
+} finally { await pool.end() }
+NODE
+```
+
+未被其他写入改变的目标应成为 revision 2、`completeness=full_text`、
+`repair_policy=weibo_display_v2`，正文末尾无展开标记。索引由已有 projector 消费 outbox 更新。
+原诊断命令替换为本次请求 ID，追加 `--text-diff`，应显示新的 `weibo_display_v2` 和
+`current_merge_accepts`；顶部 `responseStatus=partial` 仍是历史交付，不改写。
+下游已经保存的短文需要同步新 canonical 正文；刷新旧请求或原幂等键不会改写下游库。
+
+离线测试使用实际 PostgreSQL WASM 执行迁移与观察修订触发器，覆盖两条定向修复、回滚、
+缺失/错误证据、已编辑/删除记录、重复执行和新旧 preview 标记保护；端到端 mock 验证
+raw/data 两种合约及不可变重放。只有用户提供的差异片段是真实证据，测试后文均为合成。
+
+## 2026-10-09：摘要与全文分离后的验证
+
+新增 migration 137 与新 API/worker 镜像部署后，使用同一份已付费的原请求归档验证即可。以下命令在服务器 Hub 源码目录执行，不会请求上游，也不会覆盖历史交付：
+
+```bash
+sed \
+  -e "s|from 'pg'|from '/app/node_modules/pg/lib/index.js'|" \
+  -e "s|from '../contracts/|from '/app/server/contracts/|g" \
+  -e "s|import.meta.url === pathToFileURL(process.argv\[1\]).href|process.argv[1] === '-'|" \
+  server/ops/diagnose-weibo-full-text.mjs | \
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin \
+  -c admin -- node --input-type=module - \
+  7316edc1-9479-4c17-b8ae-7cf0796493af
+```
+
+检查本次两条帖子的 `validation.state=current_merge_accepts`、`mergePolicy=weibo-detail-identity.v1` 和 `prefixComparison.blocking=false`。前缀 matches=false 也可接受；帖子/作者身份或字段完整性不满足时仍必须拒绝。
+
+旧请求 `responseStatus=partial` 仍是原交付事实，不会因部署变成 ok。136 是否完成两条定向数据修复，按上一节 canonical 查询检查。137 不回填全库；新采集入库后可在管理端记录扩展 `weiboBody` 查看分别保存的 summary/fullText 和 provenance。canonical `body` 与实时列表的 `text` 优先使用各自可用全文；详情确实未取得时仍保留 partial，禁止把移除“展开”当作修复。

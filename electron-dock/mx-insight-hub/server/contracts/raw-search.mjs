@@ -91,8 +91,10 @@ export const isWeiboPreview = value => /(?:展开(?:全文)?\s*[cＣ]?|…|\.{3}
 
 // Comparison only: never use this representation as delivered/stored body text.
 // Keep the observed emotion labels bounded; arbitrary bracketed prose is content.
+export const WEIBO_TEXT_COMPARISON_POLICY = 'weibo_display_v2'
+export const WEIBO_DETAIL_POLICY = 'weibo-detail-identity.v1'
 const comparableWeiboText = value => value.replace(/#([^#\[\]\r\n]+)\[超话\]#/gu, '$1超话')
-  .replace(/\ue627|\[(?:笑cry|打call)\]/gu, '').replace(/[\s\u200b\ufeff]/gu, '')
+  .replace(/\ue627|\[(?:笑cry|打call|兔子|哈哈)\]/gu, '').replace(/[\s\u200b\ufeff]/gu, '')
 export function weiboTextPrefixMatches(preview, full) {
   const prefix = preview.replace(/(?:展开(?:全文)?\s*[cＣ]?|…|\.{3})[\s\u200b\ufeff]*$/iu, '').trim()
   const strict = prefix.replace(/[\s\u200b\ufeff]/gu, '')
@@ -123,11 +125,14 @@ export function weiboRow(value, capturedAt) {
   if (!contentId) throw new Error('invalid_weibo_identity')
   const user = value.user || {}
   const authorId = id(user.idstr ?? user.id ?? value.user_id) || string(value.user_url).match(/\/(?:u\/)?(\d+)(?:[/?#]|$)/)?.[1] || null
-  const text = weiboText(value.longText?.content || value.text_raw || value.content || value.text)
+  const summary = weiboText(value.content || value.text || value.text_raw || value.longText?.content)
+  const longText = weiboText(value.longText?.content)
+  const full = longText && !hasExpandControl(longText) ? longText : null
+  const text = full || summary
   const images = value.media?.images || value.pic_ids?.map(pic => value.pic_infos?.[pic]?.original?.url).filter(Boolean) || []
   const videos = value.media?.videos || []
   return { content_id: contentId, platform_name: 'weibo', title: '',
-    text, content: text, full_text: text, url: value.post_url || value.url || (authorId ? `https://weibo.com/${authorId}/${value.mblogid || contentId}` : null),
+    summary, text, content: text, full_text: full, url: value.post_url || value.url || (authorId ? `https://weibo.com/${authorId}/${value.mblogid || contentId}` : null),
     author_id: authorId, author_name: user.screen_name || value.user_name || '',
     author_avatar_url: user.profile_image_url || value.user_avatar || null,
     created_at: publishedAt(value.created_at || value.publish_time, capturedAt), collected_at: capturedAt,
@@ -135,7 +140,9 @@ export function weiboRow(value, capturedAt) {
     comment_count: metric(value.comments_count ?? value.interaction?.comment_count ?? value.interaction?.comments),
     forward_count: metric(value.reposts_count ?? value.interaction?.repost_count ?? value.interaction?.reposts),
     image_urls: JSON.stringify(images), video_urls: JSON.stringify(videos),
-    body_completeness: value.isLongText === true && !value.longText?.content || isWeiboPreview(text) ? 'provider_preview' : 'unverified_complete' }
+    body_provenance: { policy: WEIBO_DETAIL_POLICY, summary: { source: 'search', capturedAt },
+      fullText: full ? { source: 'search', field: 'longText.content', capturedAt, postId: contentId, authorId } : null },
+    body_completeness: full ? 'full_text' : value.isLongText === true || isWeiboPreview(text) ? 'provider_preview' : 'unverified_complete' }
 }
 
 export function projectWeiboSearch(result, request) {
@@ -159,15 +166,44 @@ export function projectWeiboSearch(result, request) {
       status: 'ok', meta: { implementation: 'hub', resultCount: rows.length, upstreamCallCount: 1 } }, meta: { capturedAt } } }
 }
 
-export function mergeWeiboDetail(row, result) {
+const hasExpandControl = text => /展开(?:全文)?\s*[cＣ]?[\s\u200b\ufeff]*$/iu.test(text)
+
+// Search is a summary observation. An identity-verified detail is independently
+// authoritative, including edits that are shorter or use different formatting.
+export function validateWeiboDetail(row, result) {
   const raw = result.publicBody?.data
-  const detail = weiboRow(raw, result.publicBody.meta.capturedAt)
-  const full = weiboText(raw?.longText?.content || raw?.text_raw)
-  if (detail.content_id !== row.content_id || (row.author_id && detail.author_id !== row.author_id)
-    || !full || full.length <= row.text.length || isWeiboPreview(full)
-    || !weiboTextPrefixMatches(row.text, full)) return false
+  const capturedAt = result.publicBody?.meta?.capturedAt
+  let detail
+  try { detail = weiboRow(raw, capturedAt) } catch { return { reasons: ['invalid_detail_identity'] } }
+  const longText = weiboText(raw?.longText?.content)
+  const full = longText || weiboText(raw?.text_raw)
+  const reasons = []
+  if (detail.content_id !== row.content_id) reasons.push('post_id_mismatch')
+  if (!detail.author_id || (row.author_id && detail.author_id !== row.author_id)) reasons.push('author_id_mismatch')
+  if (raw?.deleted === true || raw?.deleted === 1 || raw?.deleted_at) reasons.push('detail_unavailable')
+  if (!Number.isFinite(Date.parse(capturedAt))) reasons.push('detail_timestamp_missing')
+  if (!full) reasons.push('full_text_missing')
+  else if (hasExpandControl(full)) reasons.push('full_text_still_preview')
+  if (full && !longText && raw?.isLongText !== false) {
+    reasons.push(raw?.isLongText === true ? 'long_text_missing' : 'detail_completeness_unknown')
+  }
+  return { reasons, full, detail, provenance: { source: 'detail',
+    field: longText ? 'longText.content' : 'text_raw', capturedAt,
+    postId: detail.content_id, authorId: detail.author_id },
+    comparison: { prefixMatches: weiboTextPrefixMatches(row.summary ?? row.text, full),
+      fullTextLonger: full.length > (row.summary ?? row.text).length } }
+}
+
+export function mergeWeiboDetail(row, result) {
+  const checked = validateWeiboDetail(row, result)
+  if (checked.reasons.length) return false
+  const { full, detail, provenance, comparison } = checked
+  row.summary ??= row.text
   row.title = ''
   row.text = row.content = row.full_text = full
+  row.author_id ||= detail.author_id
+  row.body_provenance = { ...row.body_provenance, policy: WEIBO_DETAIL_POLICY,
+    fullText: provenance, comparison }
   row.body_completeness = 'full_text'
   return true
 }
@@ -179,6 +215,10 @@ export function rawSearchRecords(body, platform, provider) {
   if (platform === 'weibo') for (const record of records) {
     record.extensions.rawSearch = { version: RAW_SEARCH_VERSION,
       bodyCompleteness: record.rawItem.body_completeness }
+    record.extensions.weiboBody = { version: 'weibo-body.v1', summary: record.rawItem.summary,
+      fullText: record.rawItem.full_text, provenance: structuredClone(record.rawItem.body_provenance) }
+    delete record.extensions.summary
+    delete record.extensions.body_provenance
     refreshMappedPayloadSha256(record)
   }
   return records
