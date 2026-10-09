@@ -6,6 +6,7 @@ import { PaymentService } from './payments/service.mjs'
 import { canOpenPersonalAccount } from './identity/personal-account.mjs'
 import { paymentRoute } from './payments/routes.mjs'
 import { paymentReportingRoute } from './payments/reporting.mjs'
+import { peripheralRoute } from './peripherals/routes.mjs'
 import { sourceConnectionSnapshot } from './data/source-connections.mjs'
 import { nativeForwardingByPath } from './contracts/native-forwarding.mjs'
 import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSearchAlias } from './contracts/wechat-search-alias.mjs'
@@ -771,6 +772,7 @@ export function createApp({
   notifications = null,
   balanceMonitor = null,
   paymentReporting = null,
+  peripherals = null,
   recharge = null,
   nightAllA = null,
   externalPlatformGateway = null,
@@ -1544,6 +1546,8 @@ export function createApp({
       if (isAdminPath) {
         principal = await resolvePrincipal(request)
       }
+
+      if (await peripheralRoute({ service: peripherals, request, response, pathname, searchParams, principal, requestId })) return
 
       if (await commerceRoute({ commerce, service, productGateway:ipRiskProduct, request, response, pathname, searchParams, principal, readJson, sendJson, requestId })) return
       if (await paymentRoute({ payments, recharge, commerce, request, response, pathname, searchParams, principal, readJson, sendJson, requestId })) return

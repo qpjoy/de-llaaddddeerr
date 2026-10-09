@@ -21,6 +21,7 @@ import {
   CaretDown,
   ChatsCircle,
   Database,
+  DeviceMobile,
   DownloadSimple,
   MagnifyingGlass,
   NewspaperClipping,
@@ -78,6 +79,10 @@ const LazyAgentMarketPage = lazy(() => import('./pages-agent-market.tsx').then((
   default: module.AgentMarketPage,
 })))
 const LazyPaymentConnectionSettingsPage = lazy(() => import('./pages-payments.jsx').then(module => ({ default: module.PaymentConnectionSettingsPage })))
+const LazyPeripheralSettingsPage = lazy(() => import('./pages-peripherals.jsx'))
+function PeripheralSettingsPage(props) {
+  return <Suspense fallback={<LoadingState label="正在加载外设设置" />}><LazyPeripheralSettingsPage {...props} /></Suspense>
+}
 function PaymentConnectionSettingsPage(props) {
   return <Suspense fallback={<LoadingState label="正在加载支付设置" />}><LazyPaymentConnectionSettingsPage {...props} /></Suspense>
 }
@@ -419,6 +424,7 @@ const ROUTES = [
   { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage, capability: 'usage.read' },
   { path: '/notifications', label: '通知中心', description: '告警分类、处理与追溯', icon: Pulse, group: '可观测性', component: NotificationsPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/settings/payments', label: '支付接入', description: '支付中心连接与正式接入', icon: Coins, group: '平台管理', navParent: SYSTEM_SETTINGS_NAV_KEY, component: PaymentConnectionSettingsPage, platformAdmin: true },
+  { path: '/settings/peripherals', label: '外设', description: '手机接入、任务与安全调度', icon: DeviceMobile, group: '平台管理', navParent: SYSTEM_SETTINGS_NAV_KEY, component: PeripheralSettingsPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/runtime', label: '运行状态', description: '健康、依赖与恢复', icon: Pulse, group: '可观测性', component: RuntimePage, capability: 'usage.read', platformAdmin: true },
   { path: '/docs', label: '接口文档', description: '登录后查看接口说明', icon: Books, group: '接口与文档', component: DocsPage },
 ]

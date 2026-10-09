@@ -867,6 +867,7 @@ export function createJustOneCallArchiveObject(raw, request, {
   bodySize = null,
   contentType = null,
   contractState = null,
+  transportFailure = null,
   secret = null,
 } = {}) {
   // Provider-call evidence is contract-agnostic: search and the platform-shaped
@@ -905,6 +906,7 @@ export function createJustOneCallArchiveObject(raw, request, {
         : null,
       contentType: scalarText(contentType, 256),
       contractState: scalarText(contractState, 128),
+      ...(transportFailure ? { transportFailure } : {}),
       envelope,
     },
   }

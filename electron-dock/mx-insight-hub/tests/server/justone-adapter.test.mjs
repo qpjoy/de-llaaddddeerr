@@ -508,6 +508,69 @@ test('transport failure is ambiguous and is never retried', async () => {
   assert.equal(calls, 1)
 })
 
+test('all ecommerce marketplaces retain safe connection causes without changing the unknown outcome', async () => {
+  for (const marketplace of ['taobao', 'tmall', 'jd', 'xianyu']) {
+    let calls = 0
+    const logs = []
+    const secret = 'private-transport-token'
+    const adapter = new JustOneAdapter({
+      token: secret,
+      timeoutMs: 120_000,
+      logger: { warn: line => logs.push(line) },
+      fetchImpl: async () => {
+        calls += 1
+        throw new TypeError(`failed https://api.justoneapi.com/?token=${secret}`, {
+          cause: Object.assign(new Error(secret), { code: 'UND_ERR_CONNECT_TIMEOUT' }),
+        })
+      },
+    })
+    await assert.rejects(() => adapter.searchProducts({ marketplace, query: '苹果手机' }), error => {
+      assert.ok(error instanceof JustOneAmbiguousError)
+      assert.equal(error.evidence.errorCode, 'upstream_transport_error')
+      assert.equal(error.evidence.billed, null)
+      assert.equal(error.evidence.retryable, false)
+      const archive = error.archiveObjects[0]
+      assert.equal(archive.contractState, 'transport_unavailable')
+      const detail = archive.rawPayload.response.transportFailure
+      assert.deepEqual(detail.codes, ['UND_ERR_CONNECT_TIMEOUT'])
+      assert.equal(detail.phase, 'request')
+      assert.equal(detail.deadlineExceeded, false)
+      assert.equal(detail.timeoutMs, 120_000)
+      assert.ok(Number.isSafeInteger(detail.elapsedMs) && detail.elapsedMs >= 0)
+      assert.equal(error.restrictedResponseArchive, null)
+      assert.equal(Object.hasOwn(error.evidence, 'transportFailure'), false)
+      assert.doesNotMatch(JSON.stringify([error, archive, logs]), /private-transport-token|苹果手机|https:\/\//u)
+      assert.match(logs[0], /UND_ERR_CONNECT_TIMEOUT/u)
+      return true
+    })
+    assert.equal(calls, 1)
+    assert.equal(logs.length, 1)
+  }
+})
+
+test('aggregate connection errors are bounded and allowlisted even if logging fails', async () => {
+  const error = new AggregateError([
+    Object.assign(new Error('private-token'), { code: 'ECONNRESET' }),
+    { code: 'PRIVATE_TOKEN', message: 'private-token' },
+    { code: 'ENETUNREACH' },
+    { code: 'ECONNRESET' },
+    { code: 'EAI_AGAIN' }, // Beyond the bounded aggregate sample.
+  ], 'private-token')
+  error.cause = error
+  const adapter = new JustOneAdapter({
+    token: 'private-token',
+    fetchImpl: async () => { throw new TypeError('fetch failed', { cause: error }) },
+    logger: { warn() { throw new Error('logger unavailable') } },
+  })
+  await assert.rejects(() => adapter.searchProducts({ marketplace: 'jd', query: '手机' }), failure => {
+    assert.ok(failure instanceof JustOneAmbiguousError)
+    assert.deepEqual(failure.archiveObjects[0].rawPayload.response.transportFailure.codes,
+      ['ECONNRESET', 'ENETUNREACH'])
+    assert.doesNotMatch(JSON.stringify(failure.archiveObjects), /private-token|PRIVATE_TOKEN/u)
+    return true
+  })
+})
+
 test('deadline covers a response body that stalls after headers', async () => {
   let calls = 0
   const adapter = new JustOneAdapter({
@@ -527,8 +590,17 @@ test('deadline covers a response body that stalls after headers', async () => {
   })
   await assert.rejects(
     () => adapter.searchProducts({ marketplace: 'jd', query: '手机' }),
-    (error) => error instanceof JustOneAmbiguousError
-      && error.evidence.errorCode === 'upstream_deadline_exceeded',
+    (error) => {
+      assert.ok(error instanceof JustOneAmbiguousError)
+      assert.equal(error.evidence.errorCode, 'upstream_deadline_exceeded')
+      const detail = error.archiveObjects[0].rawPayload.response.transportFailure
+      assert.equal(detail.phase, 'body')
+      assert.equal(detail.deadlineExceeded, true)
+      assert.equal(detail.timeoutMs, 10)
+      assert.equal(error.evidence.httpStatus, 200)
+      assert.equal(error.evidence.billed, null)
+      return true
+    },
   )
   assert.equal(calls, 1)
 })

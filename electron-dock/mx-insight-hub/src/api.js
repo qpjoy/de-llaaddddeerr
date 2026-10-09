@@ -377,6 +377,12 @@ export async function signInWithLauncher({ username, password }) {
 }
 
 export const adminApi = {
+  peripherals: (token, options) => request(token, `${ADMIN_ROOT}/peripherals`, options),
+  peripheral: (token, id, options) => request(token, `${ADMIN_ROOT}/peripherals/${encodeURIComponent(id)}`, options),
+  peripheralProbe: (token, id) => request(token, `${ADMIN_ROOT}/peripherals/${encodeURIComponent(id)}/probe`, { method: 'POST' }),
+  peripheralControl: (token, id, body) => request(token, `${ADMIN_ROOT}/peripherals/${encodeURIComponent(id)}/control`, { method: 'POST', body }),
+  peripheralSubmit: (token, id, body) => request(token, `${ADMIN_ROOT}/peripherals/${encodeURIComponent(id)}/jobs`, { method: 'POST', body }),
+  peripheralJob: (token, id, jobId) => request(token, `${ADMIN_ROOT}/peripherals/${encodeURIComponent(id)}/jobs/${encodeURIComponent(jobId)}`),
   provisioningCatalog: token => request(token, `${ADMIN_ROOT}/provisioning/catalog`),
   provisioningDrafts: token => request(token, `${ADMIN_ROOT}/provisioning/price-drafts`),
   provisioningSaveDraft: (token, body) => request(token, `${ADMIN_ROOT}/provisioning/price-drafts`, { method: 'POST', body }),

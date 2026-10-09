@@ -698,6 +698,18 @@ validate_existing_runtime_secret() {
 
 }
 
+preserve_existing_peripheral_runtime_config() {
+  # Explicit empty revokes the allowlist. Omitted config preserves it across deploys.
+  if [ "${MX_INSIGHT_PERIPHERAL_ORIGINS+x}" = x ]; then return; fi
+  local namespace="mx-insight-hub" existing=""
+  if ! existing="$(kubectl -n "$namespace" get configmap mx-insight-hub-config --ignore-not-found \
+    -o "jsonpath={.data['MX_INSIGHT_PERIPHERAL_ORIGINS']}" 2>/dev/null)"; then
+    die "could not inspect retained peripheral origin allowlist; refusing to replace the runtime ConfigMap"
+  fi
+  MX_INSIGHT_PERIPHERAL_ORIGINS="$existing"
+  export MX_INSIGHT_PERIPHERAL_ORIGINS
+}
+
 # Keep optional paid-connector state stable across ordinary deployments. The
 # runtime Secret and ConfigMap are reconciled from scratch below, so treating an
 # omitted value as an empty/default value would silently clear a working
@@ -1443,6 +1455,7 @@ create_runtime_config() {
     --from-literal=MX_COMMON_SEGMENTER="${MX_COMMON_SEGMENTER:-}" \
     --from-literal=MX_COMMON_QUEUE_DRIVER="${MX_COMMON_QUEUE_DRIVER:-postgres}" \
     --from-literal=MX_INSIGHT_SERVER_FILE_ROOTS="$server_file_roots" \
+    --from-literal=MX_INSIGHT_PERIPHERAL_ORIGINS="${MX_INSIGHT_PERIPHERAL_ORIGINS:-}" \
     --from-literal=MX_INSIGHT_EMBEDDING_MODEL="${MX_INSIGHT_EMBEDDING_MODEL:-}" \
     --from-literal=MX_INSIGHT_EMBEDDING_DIMENSIONS="${MX_INSIGHT_EMBEDDING_DIMENSIONS:-}" \
     --from-literal=MX_INSIGHT_LAUNCHER_URL="${MX_INSIGHT_LAUNCHER_URL:-}" \
@@ -2148,6 +2161,7 @@ apply_k8s() {
   validate_existing_runtime_secret
   preserve_existing_justone_runtime_config
   preserve_existing_tikhub_runtime_config
+  preserve_existing_peripheral_runtime_config
   discover_hanlp_url
   create_runtime_config
   create_model_key_secret

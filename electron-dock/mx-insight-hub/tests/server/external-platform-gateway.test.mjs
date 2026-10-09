@@ -1212,7 +1212,9 @@ test('an ambiguous dispatch quarantines its exact fingerprint without spending a
     token: 'secret-token',
     fetchImpl: async () => {
       calls += 1
-      throw new Error('connection ended without a response')
+      throw new TypeError('fetch failed', {
+        cause: Object.assign(new Error('connect timed out'), { code: 'UND_ERR_CONNECT_TIMEOUT' }),
+      })
     },
   })
   const state = await fixture({ adapter })
@@ -1237,6 +1239,10 @@ test('an ambiguous dispatch quarantines its exact fingerprint without spending a
       && typeof error.details?.requestId === 'string',
   )
   assert.equal(calls, 1)
+  const archives = [...state.platformStore.responseArchives.values()]
+  assert.equal(archives.length, 1)
+  assert.deepEqual(archives[0].rawPayload.response.transportFailure.codes, ['UND_ERR_CONNECT_TIMEOUT'])
+  assert.equal([...state.platformStore.calls.values()][0].billed, null)
 })
 
 test('an explicitly referenced unknown request permits one fresh idempotent dispatch and records its lineage', async () => {

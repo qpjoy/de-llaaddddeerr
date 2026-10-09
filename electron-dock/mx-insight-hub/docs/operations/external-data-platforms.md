@@ -590,6 +590,10 @@ estimated recharge amount.
 
 ## 4. Intentional public smoke
 
+For the 2026-10-09 Delta ecommerce transport incident, the production evidence,
+credential-free probe results and new bounded transport diagnostics are recorded in
+[Ecommerce transport diagnosis](ecommerce-transport-2026-10-09.md).
+
 Use a dedicated smoke consumer with an `ecommerce` grant, a low quota, an active `mih_live_` Hub Public API Key
 and an approved non-production query.
 Read the Hub API key without writing it to shell history. The first call below intentionally permits exactly

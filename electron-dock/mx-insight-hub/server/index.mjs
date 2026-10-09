@@ -28,6 +28,7 @@ import { RapidApiAdapter } from './adapters/rapidapi.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { RAPIDAPI_METADATA, rapidApiConfig } from './external-platforms/rapidapi-config.mjs'
 import { createApp } from './app.mjs'
+import { createPeripheralRuntime } from './peripherals/runtime.mjs'
 import { AdmissionRecoveryService } from './operations/admission-recovery.mjs'
 import { createSso, readSsoProfile } from './identity/sso.mjs'
 import { loadConfig } from './config.mjs'
@@ -536,7 +537,9 @@ export async function createRuntime(config = loadConfig()) {
   const paymentReporting = config.listenerMode === 'public' ? null : createPaymentReporting(config.paymentReporting)
   const recharge = config.listenerMode === 'public' ? null : createRechargeService(store, config.paymentDeliverySources, { logger: console, pepper:config.apiKeyPepper })
   if (balanceMonitor) balanceMonitor.onScheduleChanged = () => { void feishuAlerts?.timer?.refresh() }
+  const peripherals = createPeripheralRuntime(config)
   const app = createApp({
+    peripherals,
     admissionRecovery: pool ? new AdmissionRecoveryService({ pool, usageStore: store,
       providers: Object.fromEntries([externalPlatformStore, tikHubPlatformStore, rapidApiStore, qixinPlatformStore,
         ipRiskGateway.platformStore, ipRiskV2Gateway.platformStore, ...[...webSearch.gateways.values()].map(g => g.platformStore)]
@@ -591,7 +594,7 @@ export async function createRuntime(config = loadConfig()) {
   })
   return {
     app, store, adapter, service, identity, queue, pool, importer, serverFileReader,
-    notifications, balanceMonitor, feishuAlerts, paymentReporting, recharge,
+    notifications, balanceMonitor, feishuAlerts, paymentReporting, recharge, peripherals,
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
     agentPipelines, agentMarket, agentStudio,
     search, searchReindex, embedding, externalPlatformStore, retrievalPool,
@@ -616,7 +619,9 @@ export async function start(config = loadConfig()) {
   runtime.feishuAlerts?.start()
   runtime.paymentReporting?.start?.()
   runtime.recharge?.start?.()
+  runtime.peripherals?.start()
   const close = async () => {
+    await runtime.peripherals?.close()
     await runtime.paymentReporting?.close?.()
     await runtime.recharge?.close?.()
     await runtime.feishuAlerts?.close()

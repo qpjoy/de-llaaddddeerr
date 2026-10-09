@@ -65,6 +65,45 @@ const TRANSPORT_ERROR_CODES = new Set([
   'upstream_transport_error',
 ])
 
+// fetch hides useful DNS/TCP/TLS errors in cause (sometimes an AggregateError).
+// Copy only known codes: messages, stacks and URLs may contain the query token.
+const SAFE_TRANSPORT_CODES = new Set([
+  'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT',
+  'ENETUNREACH', 'EHOSTUNREACH', 'EPIPE', 'ERR_TLS_CERT_ALTNAME_INVALID',
+  'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_SOCKET', 'UND_ERR_ABORTED', 'ABORT_ERR',
+])
+
+function transportFailure(error, phase, context) {
+  const pending = [error]
+  const seen = new Set()
+  const codes = new Set()
+  for (let index = 0; index < pending.length && index < 12; index += 1) {
+    const entry = pending[index]
+    if (!entry || typeof entry !== 'object' || seen.has(entry)) continue
+    seen.add(entry)
+    if (SAFE_TRANSPORT_CODES.has(entry.code)) codes.add(entry.code)
+    pending.push(entry.cause)
+    if (Array.isArray(entry.errors)) pending.push(...entry.errors.slice(0, 4))
+  }
+  const detail = Object.freeze({
+    phase,
+    codes: Object.freeze([...codes]),
+    deadlineExceeded: context.signal.aborted,
+    elapsedMs: Math.max(0, Math.round(performance.now() - context.startedAt)),
+    timeoutMs: context.timeoutMs,
+  })
+  try {
+    context.logger?.warn?.('[external-platform] justone transport failure ' + JSON.stringify({
+      endpointKey: context.endpointKey,
+      ...detail,
+    }))
+  } catch { /* Diagnostics must not replace the original unknown outcome. */ }
+  return detail
+}
+
 function evidence({
   outcome,
   httpStatus = null,
@@ -244,6 +283,7 @@ function archiveObjects({
   bodySize = null,
   contentType = null,
   contractState,
+  transportFailure = null,
   secret,
 }) {
   const archive = createJustOneCallArchiveObject(raw, request, {
@@ -257,6 +297,7 @@ function archiveObjects({
     bodySize,
     contentType,
     contractState,
+    transportFailure,
     secret,
   })
   // Native social payloads have no reviewed product identity. Keep call
@@ -339,7 +380,7 @@ export class JustOneAdapter {
     fetchImpl = globalThis.fetch,
     timeoutMs = JUSTONE_DEFAULT_TIMEOUT_MS,
     maxResponseBytes = JUSTONE_DEFAULT_MAX_RESPONSE_BYTES,
-    // Used only to report a response shape the contract does not accept yet.
+    // Reports bounded transport evidence and unaccepted response shapes.
     // Optional so every existing construction keeps working unchanged.
     logger = null,
   } = {}) {
@@ -541,6 +582,8 @@ export class JustOneAdapter {
     // passed the acceptance checks below.
     const attemptCapturedAt = capturedAt ?? new Date()
     const baseArchiveContext = { request, capturedAt: attemptCapturedAt, secret: credential }
+    const transportContext = { startedAt: performance.now(), timeoutMs: this.timeoutMs,
+      signal: controller.signal, endpointKey: request.endpointKey, logger: this.logger }
     let response
     try {
       try {
@@ -551,11 +594,12 @@ export class JustOneAdapter {
           cache: 'no-store',
           signal: controller.signal,
         })
-      } catch {
+      } catch (error) {
         throw ambiguous(
           null,
           controller.signal.aborted ? 'upstream_deadline_exceeded' : 'upstream_transport_error',
-          { ...baseArchiveContext, contractState: 'transport_unavailable' },
+          { ...baseArchiveContext, contractState: 'transport_unavailable',
+            transportFailure: transportFailure(error, 'request', transportContext) },
         )
       }
 
@@ -588,7 +632,7 @@ export class JustOneAdapter {
         throw ambiguous(
           httpStatus,
           controller.signal.aborted ? 'upstream_deadline_exceeded' : 'upstream_body_read_failed',
-          context,
+          { ...context, transportFailure: transportFailure(error, 'body', transportContext) },
         )
       }
       const { bytes, bodySize } = bodyResult
