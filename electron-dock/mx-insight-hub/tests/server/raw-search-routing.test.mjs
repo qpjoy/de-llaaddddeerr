@@ -702,10 +702,14 @@ test('Instagram empty keyword suggestions remain empty; malformed, oversize and 
   const empty = await harness({ platform: 'instagram', instagramData: { status: 'ok',
     other_results: { keyword_recommendations: { keywords: [{ id: '123', name: 'popular term' }] } } } })
   assert.deepEqual((await empty.invokeData()).body.data.items, [])
-  for (const data of [{ unexpected: true },
-    { items: Array.from({ length: 21 }, (_, i) => ({ ...instagramPost, pk: String(i + 1) })) },
-    { items: [instagramPost], has_more: true },
-    { items: [instagramPost], next_max_id: 'valid', rank_token: { unexpected: 'shape' } },
+  for (const [data, reason] of [[{ unexpected: true }, 'invalid_instagram_search_shape'],
+    [{ items: Array.from({ length: 21 }, (_, i) => ({ ...instagramPost, pk: String(i + 1) })) }, 'instagram_page_exceeds_requested_count'],
+    [{ items: [instagramPost], has_more: true }, 'missing_instagram_continuation'],
+    [{ items: [instagramPost], next_max_id: 'valid', rank_token: { unexpected: 'shape' } }, 'invalid_instagram_continuation'],
+    [{ items: [instagramPost], has_more: 'unexpected-value' }, 'invalid_instagram_pagination'],
+    [{ items: [{ ...instagramPost, pk: 9007199254740992 }] }, 'invalid_instagram_post_identity'],
+    [{ media_grid: { sections: [{ layout_content: { medias: {} } }] } }, 'invalid_instagram_media_grid'],
+    [{ items: [null] }, 'invalid_instagram_search_contract'],
   ]) {
     const h = await harness({ platform: 'instagram', instagramData: data })
     await assert.rejects(h.invokeData())
@@ -714,6 +718,7 @@ test('Instagram empty keyword suggestions remain empty; malformed, oversize and 
     assert.equal(h.historical.length, 0)
     assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
     assert.equal([...h.platformStore.calls.values()][0].outcome, 'succeeded_unusable')
+    assert.equal([...h.platformStore.calls.values()][0].errorCode, reason)
   }
 })
 

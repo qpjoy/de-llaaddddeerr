@@ -581,8 +581,14 @@ export class ExternalPlatformGateway {
         if (native) {
           try { result = (platform === 'weibo' ? projectWeiboSearch : projectInstagramSearch)(result, request) }
           catch (error) {
-            const normalizationCode = platform === 'weibo' && ['invalid_weibo_search_shape',
-              'invalid_weibo_identity', 'weibo_page_exceeds_requested_count'].includes(error.message)
+            const reasons = platform === 'weibo' ? ['invalid_weibo_search_shape',
+              'invalid_weibo_identity', 'weibo_page_exceeds_requested_count'] : [
+              'invalid_instagram_search_shape', 'invalid_instagram_media_grid', 'invalid_instagram_post_identity',
+              'instagram_page_exceeds_requested_count', 'invalid_instagram_continuation',
+              'invalid_instagram_pagination', 'missing_instagram_continuation',
+            ]
+            // Retain only known contract reasons, never arbitrary provider values or exception text.
+            const normalizationCode = reasons.includes(error.message)
               ? error.message : `invalid_${platform}_search_contract`
             throw new TikHubUpstreamError('Social search response could not be normalized', {
               outcome: 'succeeded_unusable', billed: true, httpStatus: 200, businessCode: 200,
