@@ -19,6 +19,8 @@ import {
   requestInspection,
   setPoCChannel,
 } from "./model.mjs";
+import { controlResource, updatePlacement } from "./resources.mjs";
+import { schedulingSnapshot } from "./scheduling.mjs";
 
 const equal = (a, b) =>
   typeof a === "string" &&
@@ -140,8 +142,35 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
         const mode = realm(url.searchParams.get("mode") || "sim");
         if (who === "test" && mode !== "sim")
           throw new Fault("测试凭证仅允许模拟模式", 403);
-        if (path === "/api/state" && req.method === "GET")
-          return json(res, 200, summarize(await store.snapshot(mode)));
+        if (path === "/api/state" && req.method === "GET") {
+          const state = await store.snapshot(mode);
+          return json(res, 200, {
+            ...summarize(state),
+            scheduling: schedulingSnapshot(state, state.now, mode),
+          });
+        }
+        if (path === "/api/resources/control" && req.method === "POST") {
+          const b = await body(req);
+          return json(
+            res,
+            200,
+            await store.atomic((s, n) => controlResource(s, n, mode, b), {
+              mode,
+            }),
+          );
+        }
+        const placement = path.match(/^\/api\/devices\/([^/]+)\/placement$/);
+        if (placement && req.method === "POST") {
+          const id = uuid(placement[1]),
+            b = await body(req);
+          return json(
+            res,
+            200,
+            await store.atomic((s, n) => updatePlacement(s, n, mode, id, b), {
+              mode,
+            }),
+          );
+        }
         const peripheral = path.match(
           /^\/api\/devices\/([^/]+)\/(observer|capture|frame|session|mobile-status|poc-channel)$/,
         );

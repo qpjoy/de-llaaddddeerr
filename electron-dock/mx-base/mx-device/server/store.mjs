@@ -6,7 +6,13 @@ const clone = (value) => structuredClone(value);
 export class MemoryStore {
   constructor(clock = Date.now) {
     this.clock = clock;
-    this.state = { devices: [], jobs: [], attempts: [], events: [] };
+    this.state = {
+      devices: [],
+      jobs: [],
+      attempts: [],
+      events: [],
+      resources: [],
+    };
     this.tail = Promise.resolve();
     this.workers = [];
     this.frames = new Map();
@@ -40,6 +46,7 @@ export class MemoryStore {
         ]),
       ),
       workers: clone(this.workers),
+      now: this.clock(),
     };
   }
   async detail(mode, id) {
@@ -203,9 +210,15 @@ export class PgStore {
           [mode, attemptId],
         )
       ).rows.map((r) => r.document);
-      const state = { devices, jobs, attempts, events: [] },
+      const resources = (
+        await c.query(
+          "SELECT document FROM mx_device.resource_policies WHERE mode=$1",
+          [mode],
+        )
+      ).rows.map((r) => r.document);
+      const state = { devices, jobs, attempts, resources, events: [] },
         before = new Map(
-          [...devices, ...jobs, ...attempts].map((r) => [
+          [...devices, ...jobs, ...attempts, ...resources].map((r) => [
             r.id,
             JSON.stringify(r),
           ]),
@@ -213,6 +226,12 @@ export class PgStore {
       const result = fn(state, now);
       if (result?.then)
         throw new Error("Async work inside transaction is forbidden");
+      for (const r of state.resources)
+        if (before.get(r.id) !== JSON.stringify(r))
+          await c.query(
+            "INSERT INTO mx_device.resource_policies VALUES($1,$2,$3,$4) ON CONFLICT(id) DO UPDATE SET document=excluded.document",
+            [r.id, r.mode, r.resourceKey, r],
+          );
       for (const d of state.devices)
         if (before.get(d.id) !== JSON.stringify(d))
           await c.query(
@@ -252,38 +271,61 @@ export class PgStore {
     }
   }
   async snapshot(mode) {
-    const [d, j, e, w, a] = await Promise.all([
-      this.pool.query(
-        "SELECT document FROM mx_device.devices WHERE mode=$1 ORDER BY id",
-        [mode],
-      ),
-      this.pool.query(
-        "SELECT document - 'result' AS document FROM mx_device.jobs WHERE mode=$1 AND status IN ('queued','running') UNION ALL (SELECT document - 'result' FROM mx_device.jobs WHERE mode=$1 AND status NOT IN ('queued','running') ORDER BY created_at DESC,id DESC LIMIT 100)",
-        [mode],
-      ),
-      this.pool.query(
-        "SELECT seq,document FROM mx_device.events WHERE mode=$1 ORDER BY seq DESC LIMIT 100",
-        [mode],
-      ),
-      this.pool.query(
-        "SELECT id,at,document FROM mx_device.workers ORDER BY id",
-      ),
-      this.pool.query(
-        "SELECT document - 'result' - 'lateEvidence' - 'checkpoints' AS document FROM mx_device.attempts WHERE mode=$1 ORDER BY created_at DESC LIMIT 100",
-        [mode],
-      ),
-    ]);
-    return {
-      devices: d.rows.map((r) => r.document),
-      jobs: j.rows.map((r) => r.document),
-      attempts: a.rows.map((r) => r.document),
-      events: e.rows.reverse().map((r) => ({ ...r.document, seq: r.seq })),
-      workers: w.rows.map((r) => ({
-        ...r.document,
-        id: r.id,
-        at: Number(r.at),
-      })),
-    };
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await client.query("SET LOCAL statement_timeout='5s'");
+      const [d, j, e, w, a, r, clock] = [
+        await client.query(
+          "SELECT document FROM mx_device.devices WHERE mode=$1 ORDER BY id",
+          [mode],
+        ),
+        await client.query(
+          `SELECT document - 'result' AS document FROM mx_device.jobs WHERE mode=$1 AND (
+          status IN ('queued','running') OR
+          id IN (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status NOT IN ('queued','running') ORDER BY created_at DESC,id DESC LIMIT 100) OR
+          id::text IN (SELECT document->>'sourceJobId' FROM mx_device.jobs WHERE mode=$1 AND status='queued'))`,
+          [mode],
+        ),
+        await client.query(
+          "SELECT seq,document FROM mx_device.events WHERE mode=$1 ORDER BY seq DESC LIMIT 100",
+          [mode],
+        ),
+        await client.query(
+          "SELECT id,at,document FROM mx_device.workers ORDER BY id",
+        ),
+        await client.query(
+          "SELECT document - 'result' - 'lateEvidence' - 'checkpoints' AS document FROM mx_device.attempts WHERE mode=$1 AND status='running' UNION ALL (SELECT document - 'result' - 'lateEvidence' - 'checkpoints' FROM mx_device.attempts WHERE mode=$1 AND status<>'running' ORDER BY created_at DESC LIMIT 100)",
+          [mode],
+        ),
+        await client.query(
+          "SELECT document FROM mx_device.resource_policies WHERE mode=$1",
+          [mode],
+        ),
+        await client.query(
+          "SELECT (extract(epoch FROM clock_timestamp())*1000)::bigint AS now",
+        ),
+      ];
+      await client.query("COMMIT");
+      return {
+        devices: d.rows.map((r) => r.document),
+        jobs: j.rows.map((r) => r.document),
+        attempts: a.rows.map((r) => r.document),
+        events: e.rows.reverse().map((r) => ({ ...r.document, seq: r.seq })),
+        resources: r.rows.map((r) => r.document),
+        now: Number(clock.rows[0].now),
+        workers: w.rows.map((r) => ({
+          ...r.document,
+          id: r.id,
+          at: Number(r.at),
+        })),
+      };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
   async frame(deviceId, captureId) {
     const { rows } = await this.pool.query(

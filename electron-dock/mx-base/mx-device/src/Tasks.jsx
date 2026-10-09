@@ -1,8 +1,19 @@
 import { FileText, Clock, ArrowSquareOut } from "@phosphor-icons/react";
+import { useState } from "react";
 import { labels, time, jobTitle } from "./data.js";
-export function Tasks({ jobs, devices, onInspect, onCancel }) {
+import { Capacity } from "./Racks.jsx";
+export function Tasks({ jobs, devices, scheduling, onInspect, onCancel }) {
+  const queue = new Map((scheduling?.queue || []).map((q) => [q.jobId, q]));
   const names = new Map(devices.map((d) => [d.id, d.name])),
-    rows = [...jobs].sort((a, b) => a.createdAt - b.createdAt);
+    rows = [...jobs].sort((a, b) => {
+      const order = { running: 0, queued: 1 };
+      return (
+        (order[a.status] ?? 2) - (order[b.status] ?? 2) ||
+        (a.status === "queued" && b.status === "queued"
+          ? (queue.get(a.id)?.order || 0) - (queue.get(b.id)?.order || 0)
+          : b.createdAt - a.createdAt)
+      );
+    });
   return (
     <div className="table-scroll task-table">
       <table>
@@ -29,16 +40,42 @@ export function Tasks({ jobs, devices, onInspect, onCancel }) {
                   {jobTitle(j)}
                   <ArrowSquareOut size={13} />
                 </button>
-                <small className="task-reason">{j.reason}</small>
+                <small className="task-reason">
+                  {queue
+                    .get(j.id)
+                    ?.reasons.map((r) => r.message)
+                    .join("；") || j.reason}
+                </small>
+                {queue.has(j.id) && (
+                  <small className="task-reason">
+                    排序 #{queue.get(j.id).order} · 已等待{" "}
+                    {Math.floor(queue.get(j.id).waitMs / 1000)} 秒
+                  </small>
+                )}
               </td>
               <td>
                 {j.priority} ·{" "}
                 {j.priority < 3 ? "高" : j.priority > 6 ? "后台" : "普通"}
+                {queue.has(j.id) && (
+                  <small className="task-reason">
+                    当前有效 {queue.get(j.id).effectivePriority}
+                  </small>
+                )}
               </td>
               <td>
                 <span className={`status ${j.status}`}>{labels[j.status]}</span>
               </td>
-              <td>{names.get(j.lastDeviceId || j.deviceId) || "待分配"}</td>
+              <td>
+                {names.get(j.lastDeviceId || j.deviceId) || "待分配"}
+                {j.placement && (
+                  <small className="task-reason">
+                    {j.placement.rack}
+                    {j.placement.host
+                      ? ` / ${j.placement.host}`
+                      : " / 任意主机"}
+                  </small>
+                )}
+              </td>
               <td>
                 {j.status === "queued" && (
                   <button
@@ -59,6 +96,147 @@ export function Tasks({ jobs, devices, onInspect, onCancel }) {
           <p>选择一个演示场景，查看任务如何排队与执行。</p>
         </div>
       )}
+    </div>
+  );
+}
+export function Scheduler({
+  state,
+  busy,
+  onInspect,
+  onCancel,
+  onSubmit,
+  onScene,
+  onReplay,
+}) {
+  const [status, setStatus] = useState("active"),
+    [rack, setRack] = useState("");
+  const active = state.jobs.some((j) =>
+    ["queued", "running"].includes(j.status),
+  );
+  const devices = new Map(state.devices.map((d) => [d.id, d]));
+  const jobs = state.jobs.filter(
+    (j) =>
+      (!rack ||
+        j.placement?.rack === rack ||
+        devices.get(j.deviceId || j.lastDeviceId)?.rack === rack) &&
+      (status === "all" ||
+        (status === "active"
+          ? ["queued", "running"].includes(j.status)
+          : status === "finished"
+            ? !["queued", "running", "unknown"].includes(j.status)
+            : j.status === status)),
+  );
+  return (
+    <div className="scheduler-page">
+      <Capacity counts={state.scheduling?.counts} />
+      <section className="panel">
+        <div className="section-head">
+          <div>
+            <h2>任务池与调度</h2>
+            <p className="small muted">
+              排队 → 条件匹配 → 独占执行槽 → 保存回执
+            </p>
+          </div>
+          <button className="primary" onClick={onSubmit}>
+            提交任务
+          </button>
+        </div>
+        <div className="panel-body">
+          <div className="scheduler-rules">
+            <p>
+              <strong>1–9 优先级</strong>
+              <span>1 最高，每等待 30 秒提升一级，同级按入池顺序。</span>
+            </p>
+            <p>
+              <strong>完整会话串行</strong>
+              <span>高优先级只影响下一次领取，不抢占正在搜索的手机。</span>
+            </p>
+            <p>
+              <strong>故障保留证据</strong>
+              <span>
+                真机结果未知即隔离，不自动跨机重试。未派发任务留在池中。
+              </span>
+            </p>
+          </div>
+          <div className="resource-filters task-filters">
+            <label>
+              任务状态
+              <select
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+              >
+                <option value="active">进行中与排队</option>
+                <option value="queued">排队中</option>
+                <option value="running">执行中</option>
+                <option value="unknown">结果待核验</option>
+                <option value="finished">已结束</option>
+                <option value="all">全部记录</option>
+              </select>
+            </label>
+            <label>
+              任务机架
+              <select value={rack} onChange={(e) => setRack(e.target.value)}>
+                <option value="">全部（含未绑定）</option>
+                {[...new Set(state.devices.map((d) => d.rack))].map((r) => (
+                  <option key={r}>{r}</option>
+                ))}
+              </select>
+            </label>
+            <span className="small muted">
+              {jobs.length} 个任务 · 快照 {time(state.scheduling?.at)}
+            </span>
+          </div>
+          <Tasks
+            jobs={jobs}
+            devices={state.devices}
+            scheduling={state.scheduling}
+            onInspect={onInspect}
+            onCancel={onCancel}
+          />
+          <p className="small muted">
+            排序号是当前优先级顺序。依赖或设备不匹配时可跳过等待项；候选条件满足后仍需领取核验，不承诺开始时间。展示全部活动任务及最近
+            100 条结束记录（另含活动依赖）。
+          </p>
+        </div>
+      </section>
+      {onScene && (
+        <section className="panel">
+          <div className="section-head">
+            <h2>模拟调度演练</h2>
+          </div>
+          <div className="panel-body">
+            <p className="muted">
+              演练会重新准备模拟设备；资源并发策略继续生效。双机接管时，在工作台对正在执行的
+              A 注入模拟断线。
+            </p>
+            <div className="button-row">
+              <button disabled={busy || active} onClick={() => onScene("five")}>
+                五任务串行
+              </button>
+              <button
+                disabled={busy || active}
+                onClick={() => onScene("priority")}
+              >
+                迟到高优先级
+              </button>
+              <button
+                disabled={busy || active}
+                onClick={() => onScene("failover")}
+              >
+                双机断线接管
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+      <section className="panel">
+        <div className="section-head">
+          <h2>调度事件</h2>
+        </div>
+        <div className="panel-body">
+          <Events events={state.events} onReplay={onReplay} />
+        </div>
+      </section>
     </div>
   );
 }

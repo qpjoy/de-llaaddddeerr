@@ -10,6 +10,8 @@
 | GET /api/state?mode=sim | 本中心快照；不调用设备 |
 | GET /api/jobs/:id?mode=sim | Job、Attempt、检查点、完整结果与迟到证据 |
 | POST /api/devices?mode=real | 登记设备；真实设备默认暂停 |
+| POST /api/resources/control?mode=sim | `{scope:rack\|host,rack,host?,revision,action:drain\|release\|limit,maxConcurrent?}`；持久资源策略 |
+| POST /api/devices/:id/placement?mode=sim | `{revision,name,rack,host}`；仅暂停空闲且无预留时修改中心归属 |
 | POST /api/devices/:id/probe?mode=real | `{revision}`；指定 Worker 异步执行一次只读状态查询 |
 | POST /api/devices/:id/control?mode=sim | `{revision,action}`；乐观版本校验 |
 | POST /api/devices/:id/observer?mode=real | `{revision,origin,serial,approved:true}`；附加只读画面配置，保存不连接手机 |
@@ -25,6 +27,12 @@
 | GET /health/ready | 本中心数据库可用，不检查 Hub、手机或 mx-rig |
 
 以上 mode 可按权限使用 sim / real，但场景只能 sim，probe 只能 real。没有任意 URL 转发或命令执行 API。
+
+资源策略：不存在持久策略时 `revision:0`，之后使用快照中的版本；陈旧版本返回 409。`limit` 的 `maxConcurrent` 为 1–64 整数或 null（不另设上限）。`drain` 暂停全部成员并阻止后来成员新领取，不中断在途；`release` 只解除本级排空，设备仍暂停，上级排空仍有效。资源分组必须已有设备；每模式最多 512 条策略。归属编辑不能更改 Worker、serial、入口或账号，不调用外部服务。
+
+GET state 增加 `resources`、数据库时间 `now` 与只读 `scheduling`：含 `at/counts/groups/devices/queue`。设备诊断是 `blockers[{code,message}]`；队列诊断含 `jobId/order/effectivePriority/waitMs/candidateDeviceIds/status/reasons`。候选并非领取承诺，Worker 心跳/工作槽只是最近报告，实际额度在事务内再判断。快照保留全部活动任务、最近 100 个终态及活动依赖，以及全部 running Attempt 和最近 100 个结束尝试，不返回完整 result/lateEvidence/checkpoints。
+
+模拟任务可选 `rack`，并可进一步指定 `host`；host 必须伴随 rack，选择具体 deviceId 时也须符合范围。范围参与幂等指纹；真实旧 PoC 任务拒绝 rack/host 池化范围，仍明确指定设备。资源筛选不支持跨模式匹配。
 
 真实设备登记字段：`name, rack, host, workerId, adapter, origin, accountKey, serial, approved:true`。省略 adapter 兼容旧 `legacy-poc`：入口仅允许 `http://127.0.0.1:18081–18180`，serial 可暂缺，每个 `(workerId, origin)` 唯一。`adapter:mobile-agent` 为只读观察：入口仅允许 `http://127.0.0.1:8787–8797`，serial 必填，每个 `(workerId, origin, serial)` 唯一。同一原设备可通过 observer 增加画面配置；不能为同一真实序列号重复建两个适配器设备。账号标识、非空真实序列号跨真实设备唯一。入口不接受路径、凭证、查询、片段或重定向，由指定 Worker 解释 localhost；没有任意网络代理。
 

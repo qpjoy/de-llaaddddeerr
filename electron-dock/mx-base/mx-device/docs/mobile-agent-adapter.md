@@ -1,10 +1,12 @@
 # Mobile-Agent 适配：观察先行，控制分层
 
+新会话先读 [交接入口](README.md)。端口/进程证据、源码绝对路径与开源来源核实见 [源码审阅](mobile-agent-source-review.md)，后续统一控制端规划见 [产品路线](product-roadmap.md)。本文描述当前适配边界，不表示已取得手机全局控制权。
+
 本轮只更改 mx-device，不修改或重启现有 mobile-agent、手机、VPN、ADB、Hub、Launcher 或 mx-rig。源码审阅基于用户导出的 `mobile-agent-review.Tc1Yq5/web_server.py` 及 `mobile-agent-core.nweAZc/mobile-agent-core.tar.gz`；服务器是否与这份导出完全一致，仍需部署后只读验收。
 
 ## 谁负责什么：PoC 不是设备中心的核心
 
-用户提供的《XHS PoC 使用文档》说明 `com.example.xhspoc` 是手机上的旧控制 App，提供 18081 API 和初始化用的 VPN。结合已提供的 Docker 映射及 ADB 转发，当前数据通道是：宿主机 18081 → mobile-agent 容器 18082 转接 → 容器 ADB 转发 18081 → 手机 PoC。18081 是通道端口，不是 mx-device 启动的另一套平台。没有作者或 Git 元数据证据，不能确认由谁开发。
+用户提供的《XHS PoC 使用文档》说明 `com.example.xhspoc` 是手机上的旧控制 App，提供 18081 API 和初始化用的 VPN。结合已提供的 Docker 映射及 ADB 转发，目前重建的数据通道是：宿主机 18081 → mobile-agent 容器 18082 转接 → 容器 ADB 转发 18081 → 手机 PoC；18082 的具体转接程序仍缺 entrypoint 证据。18081 是通道端口，不是 mx-device 启动的另一套平台。没有作者或 Git 元数据证据，不能确认由谁开发。8765 则是源码明确组合启动的 `ip_rights_module` 业务子服务，不是本中心所需的手机控制底座。
 
 Mobile-Agent 的 8787 是另一条服务入口：多设备记录、截图和动作以及自己的任务 runner。它与手机 PoC 可能共用同一手机，但不是同一个任务状态机；PoC busy 不等于 Mobile-Agent runner busy，二者也都不能代表所有 ADB/脚本是否占用。
 

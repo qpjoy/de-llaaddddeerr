@@ -1,4 +1,11 @@
 import { randomUUID, createHash } from "node:crypto";
+import {
+  deviceBlockers,
+  effectivePriority,
+  compareJobs,
+  policiesFor,
+  matchesJob,
+} from "./scheduling.mjs";
 
 export class Fault extends Error {
   constructor(message, status = 409) {
@@ -187,6 +194,7 @@ export function register(s, now, mode, body) {
     projection: null,
     createdAt: now,
   };
+  if (policiesFor(s, d).some((p) => p.draining)) d.enabled = false;
   s.devices.push(d);
   event(
     s,
@@ -233,6 +241,14 @@ export function addJob(s, now, mode, body) {
     400,
   );
   const spec = { operation, input, deviceId, sourceJobId, priority };
+  requireThat(!body.host || body.rack, "选择宿主机时必须指定机架", 400);
+  if (body.rack) {
+    requireThat(mode === "sim", "真实兼容任务仍须逐台绑定设备和账号", 400);
+    spec.placement = {
+      rack: str(body.rack, "机架"),
+      host: body.host ? str(body.host, "宿主机") : null,
+    };
+  }
   const fingerprint = createHash("sha256")
     .update(JSON.stringify(spec))
     .digest("hex");
@@ -244,6 +260,12 @@ export function addJob(s, now, mode, body) {
     );
     return previous;
   }
+  if (spec.placement)
+    requireThat(
+      s.devices.some((d) => matchesJob(d, { ...spec, mode })),
+      "没有符合调度范围的设备",
+      400,
+    );
   requireThat(
     s.jobs.filter((j) => j.mode === mode && active(j)).length < 200,
     "任务池已满（200）",
@@ -307,6 +329,10 @@ export function control(s, now, mode, id, body) {
   );
   if (body.action === "pause") d.enabled = false;
   else if (body.action === "enable") {
+    requireThat(
+      !policiesFor(s, d).some((p) => p.draining),
+      "请先解除所属机架/宿主机排空",
+    );
     requireThat(d.pocDisabled !== true, "旧 PoC 通道已停用", 403);
     requireThat(
       d.adapter !== "mobile-agent",
@@ -377,6 +403,10 @@ export function control(s, now, mode, id, body) {
     }
   } else if (body.action === "reconnect") {
     requireThat(mode === "sim", "仅模拟模式可直接恢复连接", 400);
+    requireThat(
+      !policiesFor(s, d).some((p) => p.draining),
+      "请先解除所属机架/宿主机排空",
+    );
     requireThat(!current, "设备仍在执行");
     requireThat(
       !["waiting", "held"].includes(d.session?.status),
@@ -454,13 +484,7 @@ export function claim(s, now, mode, workerId) {
   const devices = s.devices.filter(
     (d) =>
       d.mode === mode &&
-      d.enabled &&
-      d.adapter !== "mobile-agent" &&
-      d.pocDisabled !== true &&
-      !["waiting", "held"].includes(d.session?.status) &&
-      d.state === "idle" &&
-      d.connected !== "offline" &&
-      d.cooldownUntil <= now &&
+      deviceBlockers(s, now, d).length === 0 &&
       (mode === "sim" || d.workerId === workerId),
   );
   devices.sort(
@@ -469,14 +493,7 @@ export function claim(s, now, mode, workerId) {
   const pending = s.jobs.filter(
     (j) => j.mode === mode && j.status === "queued" && j.notBefore <= now,
   );
-  const score = (j) =>
-    Math.max(1, j.priority - Math.floor((now - j.createdAt) / 30000));
-  pending.sort(
-    (a, b) =>
-      score(a) - score(b) ||
-      a.createdAt - b.createdAt ||
-      a.id.localeCompare(b.id),
-  );
+  pending.sort(compareJobs(now));
   for (const j of pending) {
     if (j.sourceJobId) {
       const src = s.jobs.find((x) => x.id === j.sourceJobId);
@@ -503,7 +520,7 @@ export function claim(s, now, mode, workerId) {
         continue;
       }
     }
-    const d = devices.find((d) => !j.deviceId || d.id === j.deviceId);
+    const d = devices.find((d) => matchesJob(d, j));
     if (!d) continue;
     const a = {
       id: randomUUID(),
@@ -522,7 +539,7 @@ export function claim(s, now, mode, workerId) {
     j.status = "running";
     j.attemptCount++;
     j.lastDeviceId = d.id;
-    j.reason = `优先级 ${j.priority}，等待提升后 ${score(j)}；设备空闲且依赖满足`;
+    j.reason = `优先级 ${j.priority}，等待提升后 ${effectivePriority(j, now)}；设备空闲且依赖满足`;
     j.startedAt = now;
     d.state = "running";
     bump(d);
@@ -675,6 +692,12 @@ export function scenario(s, now, kind, key) {
   }
   devices.sort(
     (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
+  );
+  requireThat(
+    !devices
+      .slice(0, kind === "failover" ? 2 : 1)
+      .some((d) => policiesFor(s, d).some((p) => p.draining)),
+    "演示设备所属资源已排空，请先解除排空",
   );
   for (const [i, d] of devices.entries()) {
     d.enabled = i === 0 || (kind === "failover" && i === 1);

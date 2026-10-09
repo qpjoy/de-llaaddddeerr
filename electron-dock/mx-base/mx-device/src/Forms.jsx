@@ -221,6 +221,8 @@ export function JobForm({
   const ref = useRef(null);
   const requestKey = useRef(null);
   const [keyError, setKeyError] = useState("");
+  const [rack, setRack] = useState(""),
+    [host, setHost] = useState("");
   return (
     <form
       className="form"
@@ -287,6 +289,44 @@ export function JobForm({
           />
         </label>
       </div>
+      {mode === "sim" && (
+        <div className="form-grid">
+          <label>
+            调度机架
+            <select
+              name="rack"
+              value={rack}
+              onChange={(e) => {
+                setRack(e.target.value);
+                setHost("");
+              }}
+            >
+              <option value="">任意机架</option>
+              {[...new Set(devices.map((d) => d.rack))].map((r) => (
+                <option key={r}>{r}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            调度宿主机
+            <select
+              name="host"
+              value={host}
+              disabled={!rack}
+              onChange={(e) => setHost(e.target.value)}
+            >
+              <option value="">任意宿主机</option>
+              {[
+                ...new Set(
+                  devices.filter((d) => d.rack === rack).map((d) => d.host),
+                ),
+              ].map((h) => (
+                <option key={h}>{h}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
       <div className="form-grid">
         <label>
           调度优先级
@@ -299,13 +339,20 @@ export function JobForm({
         <label>
           设备
           <select
+            key={`${rack}:${host}`}
             name="deviceId"
             required={mode === "real"}
             defaultValue={mode === "real" ? selectedDeviceId : ""}
           >
             {mode === "sim" && <option value="">任意可用模拟设备</option>}
             {devices
-              .filter((d) => d.enabled && d.state !== "quarantined")
+              .filter(
+                (d) =>
+                  d.enabled &&
+                  d.state !== "quarantined" &&
+                  (!rack || d.rack === rack) &&
+                  (!host || d.host === host),
+              )
               .map((d) => (
                 <option value={d.id} key={d.id}>
                   {d.name}

@@ -17,7 +17,14 @@ export async function api(path, mode, body, signal) {
   }
   return value;
 }
-const empty = { devices: [], jobs: [], attempts: [], events: [], workers: [] };
+const empty = {
+  devices: [],
+  jobs: [],
+  attempts: [],
+  events: [],
+  workers: [],
+  resources: [],
+};
 export function useSnapshot(mode, onExpired) {
   const [state, setState] = useState(empty),
     [error, setError] = useState(""),

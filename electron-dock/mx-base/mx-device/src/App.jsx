@@ -9,11 +9,13 @@ import {
   Info,
   Plus,
   ArrowsClockwise,
+  HardDrives,
 } from "@phosphor-icons/react";
 import { api, useSnapshot } from "./data.js";
 import { Modal, DeviceForm, JobForm, ObserverForm } from "./Forms.jsx";
 import { Devices, Connections } from "./Devices.jsx";
-import { Tasks, Events, JobDetail } from "./Tasks.jsx";
+import { Tasks, Events, JobDetail, Scheduler } from "./Tasks.jsx";
+import { Racks, ResourceForm, PlacementForm } from "./Racks.jsx";
 import Projection from "./Projection.jsx";
 import { requestId } from "./request-id.mjs";
 import { submitJob } from "./submit-job.mjs";
@@ -92,15 +94,20 @@ export default function App() {
 }
 function Workspace({ onExpired }) {
   const [mode, setMode] = useState("sim"),
-    [page, setPage] = useState("workbench"),
+    [page, setPage] = useState("racks"),
     [selectedId, setSelectedId] = useState(null),
     [history, setHistory] = useState(null),
     [modal, setModal] = useState(null),
     [busy, setBusy] = useState(false),
     [notice, setNotice] = useState(""),
     [failure, setFailure] = useState(false),
-    [detail, setDetail] = useState(null);
+    [detail, setDetail] = useState(null),
+    [resource, setResource] = useState(null),
+    [placement, setPlacement] = useState(null);
   const { state, error, loading, refresh } = useSnapshot(mode, onExpired);
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [page, mode]);
   const device =
     state.devices.find((d) => d.id === selectedId) || state.devices[0];
   const active = state.jobs.some((j) =>
@@ -165,8 +172,9 @@ function Workspace({ onExpired }) {
     setDetail(d);
   };
   const nav = [
+    ["racks", "机架总览", HardDrives],
     ["workbench", "设备工作台", Desktop],
-    ["jobs", "任务池", FileText],
+    ["jobs", "任务池与调度", FileText],
     ["settings", "连接设置", Gear],
   ];
   return (
@@ -232,7 +240,13 @@ function Workspace({ onExpired }) {
         <main>
           <div className="page-heading">
             <div>
-              <h1>让每一次执行都有据可查</h1>
+              <h1>
+                {page === "racks"
+                  ? "机架与设备资源"
+                  : page === "jobs"
+                    ? "让任务有序流向设备"
+                    : "让每一次执行都有据可查"}
+              </h1>
               <p>单机串行，多机协作。真实执行与模拟演练严格分离。</p>
             </div>
             <button className="primary" onClick={() => setModal("device")}>
@@ -256,7 +270,43 @@ function Workspace({ onExpired }) {
               {error || notice}
             </div>
           )}
-          {page === "settings" ? (
+          {page === "racks" ? (
+            <Racks
+              key={mode}
+              state={state}
+              mode={mode}
+              busy={busy}
+              onAdd={() => setModal("device")}
+              onOpenDevice={(id) => {
+                setSelectedId(id);
+                setHistory(null);
+                setPage("workbench");
+              }}
+              onPolicy={(group) => {
+                setResource(group);
+                setModal("resource");
+              }}
+              onPlacement={(d) => {
+                setPlacement(d);
+                setModal("placement");
+              }}
+            />
+          ) : page === "jobs" ? (
+            <Scheduler
+              key={mode}
+              state={state}
+              busy={busy}
+              onInspect={inspect}
+              onCancel={(j) => run(() => api(`jobs/${j.id}/cancel`, mode, {}))}
+              onSubmit={() => setModal("job")}
+              onScene={mode === "sim" ? newScene : null}
+              onReplay={(e) => {
+                setSelectedId(e.deviceId);
+                setHistory(e);
+                setPage("workbench");
+              }}
+            />
+          ) : page === "settings" ? (
             <Connections
               state={state}
               onAdd={() => setModal("device")}
@@ -356,6 +406,7 @@ function Workspace({ onExpired }) {
                   <Tasks
                     jobs={visibleJobs}
                     devices={state.devices}
+                    scheduling={state.scheduling}
                     onInspect={inspect}
                     onCancel={(j) =>
                       run(() => api(`jobs/${j.id}/cancel`, mode, {}))
@@ -403,15 +454,19 @@ function Workspace({ onExpired }) {
       {modal && (
         <Modal
           title={
-            modal === "device"
-              ? "添加设备"
-              : modal === "observer"
-                ? "配置真实画面"
-                : modal === "job"
-                  ? `提交${mode === "sim" ? "模拟" : "真实"}任务`
-                  : modal === "real-demo"
-                    ? "真机搜索 → 详情演示"
-                    : "执行证据"
+            modal === "resource"
+              ? `${resource.scope === "rack" ? "机架" : "宿主机"}调度策略`
+              : modal === "placement"
+                ? "编辑设备归属"
+                : modal === "device"
+                  ? "添加设备"
+                  : modal === "observer"
+                    ? "配置真实画面"
+                    : modal === "job"
+                      ? `提交${mode === "sim" ? "模拟" : "真实"}任务`
+                      : modal === "real-demo"
+                        ? "真机搜索 → 详情演示"
+                        : "执行证据"
           }
           onClose={() => setModal(null)}
         >
@@ -420,7 +475,39 @@ function Workspace({ onExpired }) {
               {notice}
             </p>
           )}
-          {modal === "observer" ? (
+          {modal === "resource" ? (
+            <ResourceForm
+              group={resource}
+              busy={busy}
+              onSubmit={async (body) => {
+                const r = await run(
+                  () =>
+                    api("resources/control", mode, {
+                      scope: resource.scope,
+                      rack: resource.rack,
+                      host: resource.host,
+                      revision: resource.revision,
+                      ...body,
+                    }),
+                  "资源策略已保存",
+                );
+                if (r) setModal(null);
+              }}
+            />
+          ) : modal === "placement" ? (
+            <PlacementForm
+              device={placement}
+              devices={state.devices}
+              busy={busy}
+              onSubmit={async (body) => {
+                const r = await run(
+                  () => api(`devices/${placement.id}/placement`, mode, body),
+                  "归属已保存，设备仍暂停",
+                );
+                if (r) setModal(null);
+              }}
+            />
+          ) : modal === "observer" ? (
             <ObserverForm
               device={device}
               busy={busy}

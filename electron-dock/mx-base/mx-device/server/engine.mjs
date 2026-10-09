@@ -165,6 +165,8 @@ export class Engine {
         instanceId: this.instanceId,
         real: true,
         lastError: this.lastError,
+        inflight: this.inflight.size,
+        maxInflight: 4,
       });
       if (this.inflight.size < 4) {
         const device = await this.store.atomic(

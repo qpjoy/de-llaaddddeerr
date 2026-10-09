@@ -1346,3 +1346,292 @@ summary {
   width: auto;
   margin: auto;
 }
+
+/* Rack resources and scheduling share the existing MX visual language. */
+.rack-overview,
+.scheduler-page {
+  display: grid;
+  gap: 18px;
+}
+.capacity-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+.capacity-item {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 18px 20px;
+}
+.capacity-item span {
+  display: block;
+  color: #5d7088;
+  font-size: 13px;
+}
+.capacity-item strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 30px;
+  font-weight: 650;
+  letter-spacing: -1px;
+}
+.capacity-item:nth-child(2) strong {
+  color: var(--accent);
+}
+.resource-intro {
+  padding: 22px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+}
+.resource-intro p {
+  margin: 8px 0 0;
+  font-size: 13px;
+  max-width: 580px;
+}
+.resource-filters {
+  display: flex;
+  align-items: end;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.resource-filters label {
+  display: grid;
+  gap: 7px;
+  font-size: 12px;
+  color: #5d7088;
+  min-width: 130px;
+}
+.resource-filters select {
+  background: white;
+  padding: 9px 28px 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 13px;
+  color: #243249;
+  min-height: 40px;
+  max-width: 240px;
+}
+.rack-heading {
+  padding: 22px;
+  background: #fcfdff;
+}
+.rack-heading h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 21px;
+  overflow-wrap: anywhere;
+}
+.rack-heading p {
+  margin: 7px 0;
+}
+.resource-state {
+  display: block;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #537078;
+}
+.host-grid {
+  padding: 20px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+  gap: 18px;
+}
+.host-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  overflow: hidden;
+}
+.host-heading {
+  padding: 17px;
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 14px;
+}
+.host-heading h3 {
+  margin: 0 0 5px;
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+.host-heading button,
+.rack-heading > button {
+  flex-shrink: 0;
+}
+.worker-evidence {
+  border-top: 1px solid #e7edf3;
+  padding: 10px 17px;
+  color: #657991;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.worker-evidence p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  justify-content: space-between;
+  margin: 0;
+}
+.worker-evidence strong {
+  font-weight: 500;
+}
+.rack-device-list {
+  display: grid;
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+.rack-device {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 14px;
+  min-width: 0;
+}
+.rack-device-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.rack-device-heading > svg {
+  color: #6f8299;
+  flex-shrink: 0;
+}
+.rack-device-heading .device-link {
+  font-size: 14px;
+  color: #243249;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.rack-device-heading .status {
+  margin-left: auto;
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+.device-identity {
+  color: #75869a;
+  margin: 5px 0 8px;
+  overflow-wrap: anywhere;
+}
+.device-blocker {
+  font-size: 13px;
+  color: #5a6f85;
+  margin: 0 0 9px;
+}
+.rack-device-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid #eff3f7;
+  padding-top: 8px;
+}
+.resource-drain {
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+.resource-drain p {
+  font-size: 14px;
+  color: #607289;
+}
+.scheduler-page .section-head p {
+  margin: 6px 0 0;
+}
+.scheduler-rules {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+  padding: 2px 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+.scheduler-rules p {
+  margin: 0;
+  font-size: 13px;
+}
+.scheduler-rules strong {
+  display: block;
+  color: #28465d;
+  margin-bottom: 6px;
+  font-size: 14px;
+}
+.scheduler-rules span {
+  color: #687c94;
+}
+.task-filters {
+  margin: 20px 0 16px;
+}
+.task-filters > span {
+  margin: 0 0 9px auto;
+}
+.scheduler-page .task-table {
+  margin-bottom: 15px;
+}
+.scheduler-page .task-reason {
+  max-width: 500px;
+}
+@media (max-width: 1200px) {
+  .resource-intro {
+    align-items: start;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .capacity-item {
+    padding: 16px;
+  }
+}
+@media (max-width: 700px) {
+  .capacity-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .capacity-item {
+    padding: 12px 15px;
+  }
+  .capacity-item strong {
+    font-size: 25px;
+  }
+  .capacity-item:last-child {
+    grid-column: span 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .capacity-item:last-child strong {
+    margin: 0;
+  }
+  .resource-intro,
+  .rack-heading {
+    padding: 17px;
+  }
+  .host-grid {
+    padding: 12px;
+  }
+  .scheduler-rules {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .resource-filters {
+    width: 100%;
+    align-items: stretch;
+  }
+  .resource-filters label {
+    flex: 1;
+    min-width: 120px;
+  }
+  .resource-filters select {
+    max-width: 100%;
+    width: 100%;
+  }
+  .task-filters > span {
+    margin: 0;
+    width: 100%;
+  }
+  .rack-device-heading {
+    flex-wrap: wrap;
+  }
+}
