@@ -33,7 +33,7 @@ Harbor 注册当前仅支持关闭或邀请码两种模式；现有其他应用�
    该命令在 `mx-launcher` 运行，只登记配置。发布 Auth 仍走原流程；Harbor 日常 deploy 不自动执行它。Launcher App Center 也应登记 Harbor 展示条目，方便管理员从用户中心选择应用授权。
 
 2. Harbor 的 `secrets/identity/profile.json` 保留原 clientSecret/sessionKey，权限 0600。新建独立 `secrets/gateway-token`，至少 32 字符，权限 0600；不要复用 Hub Admin Token。
-3. 复制 `deploy/operations.example.json` 为 `secrets/operations.json`，明确 Kubernetes context、`kube-system` namespace UID、Internal 节点 hostname 和 Hub Admin Service origin。默认示例使用 `http://mx-insight-hub-admin.mx-insight-hub.svc.cluster.local:18151`；普通 Pod 中的 `127.0.0.1` 不是宿主机。
+3. 无需手工创建 `secrets/operations.json`。首次 `deploy` 从当前 kubeconfig 发现 context、`kube-system` namespace UID，并通过 `kubernetes.io/hostname` 标签唯一匹配本机节点；确认 Hub Admin Service 存在且提供 18151 端口后，使用 `http://mx-insight-hub-admin.mx-insight-hub.svc.cluster.local:18151`。校验通过后将配置以 0600 权限保存，后续不随当前 context 变化重新选择目标。如已安装 Harbor，则恢复 runtime Secret 中保留的 Hub 上游，并检查原 Deployment 的节点匹配本机。
 4. 已有 mx-common PostgreSQL 必须健康。Harbor 首次 deploy 仅调用 `mx-common provision mx-harbor`，捕获 DSN 写入 Harbor Secret，不输出密码、不部署整套共享服务。已有角色但遗失 Secret 时，沿用 mx-common 的拒绝自动换密码保护。
 5. 在 Hub 的 namespace 创建 `mx-harbor-portal` Secret，包含同一 `profile.json` 与 `gateway-token`。Hub 需要能够验证这个独立 OIDC client；它不会签发 Harbor 浏览器会话。保留 Hub 原 SSO profile 及其 canonical audience。
 6. 对兼容版本的 Hub Admin 进行一次性接入发布：使用 `deploy/k8s/hub-portal-enrollment.patch.yaml` 的环境变量/挂载，以及 `hub-portal-ingress.yaml` 的精确 namespace + Pod 标签入站规则。将补丁纳入 Hub 实际部署配置，避免后续 Hub 发布丢失接入。Harbor deploy 不替用户执行这次 Hub 发布。
@@ -41,6 +41,10 @@ Harbor 注册当前仅支持关闭或邀请码两种模式；现有其他应用�
 8. 完成受控部署验收后，管理员在 Internal 单独打开 Harbor 邀请，保持 Hub 原开放注册设置。旧账号也必须获得 Harbor 邀请或直接授权。
 
 初次依赖接入与日常部署是不同操作。Hub、Auth 的新能力必须先完成各自兼容发布；仅运行 Harbor deploy 不会使尚未发布的后端能力自动生效。
+
+首次发现可用 `MX_HARBOR_KUBE_CONTEXT`、`MX_HARBOR_NODE` 和 `MX_HARBOR_HUB_ADMIN_ORIGIN` 指定目标；节点仍须匹配本机 hostname。也可按 `deploy/operations.example.json` 手工填写配置，其中 `node` 是 Kubernetes 节点名称。普通 Pod 中的 `127.0.0.1` 不是宿主机，不能作为 Hub 上游。已有操作配置无效、与显式环境变量冲突或原部署位于其他节点时，脚本停止，不覆盖配置或迁移目标。
+
+首次部署会在任何集群写入、数据库创建和应用重启前，一次检查 `secrets/identity/profile.json` 与 `secrets/gateway-token` 的存在、内容和私密权限。缺失时输出完整清单；不会自行生成未在 Auth 登记的 SSO client，也不会替换 Hub 已使用的网关凭据。此时自动生成的操作配置可供修复后直接重跑同一命令。
 
 ## K8s 管理合同
 
@@ -50,8 +54,8 @@ Harbor 注册当前仅支持关闭或邀请码两种模式；现有其他应用�
 
 | 命令                  | 行为                                                                                                                         |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `plan`                | 读取本地非敏感操作配置，输出工作负载计划；不调用集群、不生成秘密                                                             |
-| `status` / `logs`     | 校验 cluster UID 后只读                                                                                                      |
+| `plan`                | 读取本地非敏感操作配置，输出工作负载计划；配置缺失时提示先完成首次发现，始终不连接集群                                       |
+| `status` / `logs`     | 校验 cluster UID 后只读；缺少本地操作配置时只读发现，不保存文件                                                              |
 | `deploy`              | 持有 Harbor 专用锁，校验保留配置、构建/导入唯一镜像、幂等迁移、更新 Deployment/Service 并自动重启，等待 rollout 和 readiness |
 | `migrate` / `restart` | 兼容旧命令，均执行完整 `deploy` 流程，不再只迁移或只重启                                                                     |
 
@@ -77,7 +81,7 @@ Harbor 采用一个副本、固定节点、`Recreate`，不是高可用/零停�
 - 兼容性：SDK Auth、Launcher 网络准入、身份管理台测试无失败。有测试环境条件的浏览器/独立网络数据库用例仍可能跳过，不能计作生产回归。
 - 浏览器：桌面双栏邀请注册弹窗及窄屏滚动布局已检查。设计预览不创建账号，不调用供应商。
 
-首批核心回归结果：Harbor 8 项通过；Launcher Auth/注册 15 项通过、1 项条件跳过；Hub Portal/原 SSO/身份 27 项通过。后续一键部署调整的 6 项操作回归均通过，覆盖首次安装、连续部署保留凭据、兼容入口、迁移失败、rollout/readiness 失败和部署锁清理；使用命令替身与本地测试数据，未操作真实集群。
+首批核心回归结果：Harbor 8 项通过；Launcher Auth/注册 15 项通过、1 项条件跳过；Hub Portal/原 SSO/身份 27 项通过。后续一键部署调整的 12 项操作回归均通过，覆盖首次安装、自动发现与保存操作配置、配置丢失后的恢复和节点保护、缺失凭据汇总、连续部署保留凭据、兼容入口、迁移失败、rollout/readiness 失败和部署锁清理；使用命令替身与本地测试数据，未操作真实集群。
 
 Docker daemon 在本机不可用，因此没有构建容器镜像或执行真实 K8s 发布。未连接生产数据库，未进行生产 DNS/TLS/回调验收，没有创建生产账号、订单或付款。
 

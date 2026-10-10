@@ -1,16 +1,15 @@
 import { spawnSync } from "node:child_process";
-import {
-  readFileSync,
-  writeFileSync,
-  mkdtempSync,
-  rmSync,
-  statSync,
-} from "node:fs";
+import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { workload } from "../deploy/k8s/render.mjs";
 import { readConfig } from "../apps/server/config.mjs";
+import {
+  operationSettings,
+  saveOperationSettings,
+  firstInstallInputs,
+} from "./bootstrap.mjs";
 // Host deployment runs before npm ci in the image. This shared source uses only Node built-ins.
 import { readApplicationSsoProfile } from "../../mx-common/src/identity/profile.mjs";
 const requestedAction = process.argv[2] || "help",
@@ -19,7 +18,7 @@ const requestedAction = process.argv[2] || "help",
     : requestedAction,
   namespace = "mx-harbor";
 const help =
-  "Usage: bash scripts/manage.sh ops internal-production deploy|status|logs|plan\nDeploy includes migration, application restart and readiness verification. migrate/restart are compatibility aliases for deploy.\nRequired: secrets/operations.json (context, node, clusterUid, hubAdminOrigin) and secrets/identity/profile.json; retained Kubernetes Secret takes precedence.";
+  "Usage: bash scripts/manage.sh ops internal-production deploy|status|logs|plan\nDeploy includes migration, application restart and readiness verification. migrate/restart are compatibility aliases for deploy.\nFirst deploy discovers and saves secrets/operations.json from the current Kubernetes context and local node. SSO profile and gateway credential are required for first enrollment; retained Kubernetes Secret takes precedence.";
 if (action === "help") {
   console.log(help);
   process.exit(0);
@@ -27,14 +26,6 @@ if (action === "help") {
 if (!["deploy", "status", "logs", "plan"].includes(action)) throw Error(help);
 if (requestedAction !== action)
   console.log(`Harbor ${requestedAction} now runs the full deploy workflow`);
-const settings = JSON.parse(readFileSync("secrets/operations.json", "utf8"));
-if (
-  !settings.context ||
-  !settings.node ||
-  !settings.clusterUid ||
-  !settings.hubAdminOrigin
-)
-  throw Error("Incomplete operations configuration");
 const run = (
   cmd,
   args,
@@ -53,6 +44,13 @@ const run = (
     );
   return result;
 };
+let settings, discovered;
+try {
+  ({ settings, discovered } = operationSettings({ run, action }));
+} catch (error) {
+  console.error(`Harbor: ${error.message}`);
+  process.exit(1);
+}
 const kube = (args, options) =>
   run(
     "kubectl",
@@ -125,6 +123,33 @@ if (
   )
 )
   throw Error("Node has an unsupported scheduling taint");
+try {
+  if (discovered) {
+    saveOperationSettings(settings);
+    console.log(
+      "Harbor: 已生成 secrets/operations.json，固定当前集群、本机节点和 Hub 上游。",
+    );
+  }
+  // Check all first-install files before any namespace, database or workload mutation.
+  const retained = read([
+    "get",
+    "secret",
+    "mx-harbor-runtime",
+    "--ignore-not-found",
+  ]);
+  if (!retained?.data) {
+    if (
+      read(["get", "deployment", "mx-harbor", "--ignore-not-found"])?.metadata
+    )
+      throw Error(
+        "Installed Harbor runtime Secret is missing; restore it before deploying",
+      );
+    firstInstallInputs();
+  }
+} catch (error) {
+  console.error(`Harbor: ${error.message}`);
+  process.exit(1);
+}
 const ns = read(["get", "namespace", namespace, "--ignore-not-found"]);
 if (!ns) {
   kube(["create", "namespace", namespace]);
@@ -174,13 +199,7 @@ try {
       throw Error(
         "Installed Harbor runtime Secret is missing; restore it before deploying",
       );
-    const file = "secrets/identity/profile.json";
-    if (statSync(file).mode & 0o077)
-      throw Error("Identity profile must be 0600");
-    const profile = readFileSync(file, "utf8"),
-      gatewayFile = "secrets/gateway-token";
-    if (statSync(gatewayFile).mode & 0o077)
-      throw Error("Gateway credential must be 0600");
+    const { profile, gatewayToken } = firstInstallInputs();
     // This provisions only mx_harbor and preserves the mx-common product Secret on repeats.
     const kubeconfigPath = join(temp, "kubeconfig");
     writeFileSync(
@@ -203,7 +222,7 @@ try {
     data = {
       "profile.json": profile,
       MX_HARBOR_DATABASE_URL: db,
-      MX_HARBOR_GATEWAY_TOKEN: readFileSync(gatewayFile, "utf8").trim(),
+      MX_HARBOR_GATEWAY_TOKEN: gatewayToken,
       MX_HARBOR_HUB_ADMIN_ORIGIN: settings.hubAdminOrigin,
       MX_HARBOR_SSO_PROFILE: "/run/harbor/profile.json",
       MX_HARBOR_PORT: "18220",

@@ -28,13 +28,15 @@ MX_HARBOR_PREVIEW=1 npm start
 
 ## 管理命令
 
-首次配置和适用范围见 [部署说明](docs/implementation-and-operations.md)。在已经固定的 Internal 节点执行：
+首次配置和适用范围见 [部署说明](docs/implementation-and-operations.md)。在 Internal 节点执行：
 
 ```bash
 MX_HARBOR_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh ops internal-production deploy
 ```
 
 `deploy` 一次完成配置保留与校验、镜像构建/导入、幂等迁移、应用更新与自动重启、rollout 和健康检查。每次部署使用新镜像触发一次 Pod 替换，无需另行运行 `migrate` 或 `restart`。
+
+首次缺少 `secrets/operations.json` 时，自动发现当前 Kubernetes context、集群 UID、本机节点和 Hub Admin Service，将配置以 0600 权限保存。已有配置始终保留；后续不会因当前 context 变化而切换部署目标。首次接入的 SSO profile 和与 Hub 共享的独立网关凭据仍需准备，脚本会在创建数据库或更新应用前一次列出所有缺失或无效项。
 
 部署宿主机无需先运行 `npm ci`。管理脚本仅使用 Node 标准库与相邻 `mx-common` 的配置校验源码；应用依赖由 Docker 构建阶段按 lockfile 安装。拉取项目时需保留相邻的 `electron-dock/mx-common` 目录。
 

@@ -8,6 +8,7 @@ import {
   rmSync,
   existsSync,
   copyFileSync,
+  statSync,
 } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join, dirname } from "node:path";
@@ -21,6 +22,7 @@ function fixture(t, { fresh = false } = {}) {
   for (const path of [
     "scripts/manage.sh",
     "scripts/operations.mjs",
+    "scripts/bootstrap.mjs",
     "deploy/k8s/render.mjs",
     "apps/server/config.mjs",
   ]) {
@@ -79,14 +81,21 @@ globalThis.fetch = async url => {
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),cmd=path.basename(process.argv[1]),args=process.argv.slice(2),dir=process.env.HARBOR_TEST_DIR;
 const stdin=fs.readFileSync(0,'utf8');fs.appendFileSync(dir+'/calls',JSON.stringify({cmd,args,stdin})+'\\n');
 if(cmd==='kubectl'){
+ if(args[0]==='config'&&args[1]==='current-context'){process.stdout.write(process.env.HARBOR_TEST_CONTEXT||'test-context');process.exit(0)}
  if(args.includes('config')&&args.includes('view')){process.stdout.write('test-only-kubeconfig');process.exit(0)}
  const a=args.slice(4),key=a.slice(0,3).join(' '),out=x=>process.stdout.write(JSON.stringify(x));
  if(key==='get namespace kube-system')out({metadata:{uid:process.env.HARBOR_TEST_DRIFT?'wrong':'fixture-cluster'}});
+ else if(a[0]==='get'&&a[1]==='nodes'){
+  const node={metadata:{name:'configured-node-name',labels:{'kubernetes.io/hostname':process.env.HARBOR_TEST_REMOTE_NODE?'another-host':os.hostname()}},spec:{},status:{conditions:[{type:'Ready',status:'True'}]}};
+  out({items:process.env.HARBOR_TEST_AMBIGUOUS_NODE?[node,node]:[node]});
+ }
+ else if(key==='get service mx-insight-hub-admin'){if(!process.env.HARBOR_TEST_NO_HUB)out({spec:{ports:[{port:18151}]}})}
  else if(a[0]==='get'&&a[1]==='node')out({metadata:{labels:{'kubernetes.io/hostname':os.hostname()}},spec:{},status:{conditions:[{type:'Ready',status:'True'}]}});
  else if(key==='get namespace mx-harbor'){if(!process.env.HARBOR_TEST_FRESH||fs.existsSync(dir+'/namespace'))out({metadata:{name:'mx-harbor'}})}
  else if(key==='create namespace mx-harbor')fs.writeFileSync(dir+'/namespace','created');
  else if(key==='create configmap mx-harbor-deploy-lock'){fs.writeFileSync(dir+'/lock','fixture-lock-uid',{flag:'wx'});out({metadata:{uid:'fixture-lock-uid'}});}
  else if(key==='get secret mx-harbor-runtime'){
+  if(process.env.HARBOR_TEST_SECRET_DENIED)process.exit(1);
   if(fs.existsSync(dir+'/runtime.json')){out(JSON.parse(fs.readFileSync(dir+'/runtime.json')));process.exit(0)}
   if(process.env.HARBOR_TEST_FRESH)process.exit(0);
   const profile={origin:'https://harbor.example.test',issuer:'https://auth.example.test/identity',appId:'mx-harbor',clientId:'harbor',clientSecret:'s'.repeat(43),audience:'mx-harbor',scope:'openid mx:identity',sessionKey:'k'.repeat(43)};
@@ -119,6 +128,9 @@ else if(cmd==='ctr'&&args.includes('ls'))process.stdout.write('docker.io/library
           HARBOR_TEST_FRESH: fresh ? "1" : "",
           MX_HARBOR_BUILD_PROXY: "",
           MX_INSIGHT_BUILD_PROXY: "",
+          MX_HARBOR_KUBE_CONTEXT: "",
+          MX_HARBOR_NODE: "",
+          MX_HARBOR_HUB_ADMIN_ORIGIN: "",
           ...extra,
         },
       },
@@ -309,4 +321,151 @@ test("unlock failure still removes temporary private configuration", (t) => {
   const unlock = f.calls().find((c) => c.args.includes("--raw"));
   assert.ok(unlock, result.stderr);
   assert.equal(existsSync(dirname(unlock.args.at(-1))), false);
+});
+
+function assertReadOnly(calls) {
+  assert.ok(
+    calls.every(
+      (c) =>
+        c.cmd === "kubectl" &&
+        (c.args.includes("get") ||
+          c.args.join(" ") === "config current-context"),
+    ),
+  );
+}
+
+test("missing operations config is discovered once and pinned across deployments", (t) => {
+  const f = fixture(t, { fresh: true });
+  const path = join(f.dir, "secrets/operations.json");
+  rmSync(path);
+  const first = f.run("deploy");
+  assert.equal(first.status, 0, first.stderr);
+  assertFullDeploy(f.calls());
+  const saved = readFileSync(path, "utf8");
+  assert.deepEqual(JSON.parse(saved), {
+    context: "test-context",
+    clusterUid: "fixture-cluster",
+    node: "configured-node-name",
+    hubAdminOrigin:
+      "http://mx-insight-hub-admin.mx-insight-hub.svc.cluster.local:18151",
+  });
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+  rmSync(join(f.dir, "secrets/identity/profile.json"));
+  rmSync(join(f.dir, "secrets/gateway-token"));
+  const credentials = readFileSync(join(f.dir, "runtime.json"), "utf8");
+  const count = f.calls().length;
+  const second = f.run("deploy", {
+    HARBOR_TEST_CONTEXT: "different-current-context",
+  });
+  assert.equal(second.status, 0, second.stderr);
+  assertFullDeploy(f.calls().slice(count));
+  assert.equal(readFileSync(path, "utf8"), saved);
+  assert.equal(readFileSync(join(f.dir, "runtime.json"), "utf8"), credentials);
+  assert.equal(
+    f.calls().filter((c) => c.args.includes("current-context")).length,
+    1,
+  );
+  const beforeDrift = f.calls().length;
+  assert.notEqual(f.run("deploy", { HARBOR_TEST_DRIFT: "1" }).status, 0);
+  assertReadOnly(f.calls().slice(beforeDrift));
+});
+
+test("plan stays offline and status discovery never writes missing configuration", (t) => {
+  const f = fixture(t, { fresh: true });
+  const path = join(f.dir, "secrets/operations.json");
+  rmSync(path);
+  const plan = f.run("plan");
+  assert.notEqual(plan.status, 0);
+  assert.match(plan.stderr, /plan 保持离线/);
+  assert.equal(f.calls().length, 0);
+  const status = f.run("status");
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(existsSync(path), false);
+  assertReadOnly(f.calls());
+});
+
+test("first deploy reports all missing credentials before any cluster mutation", (t) => {
+  const f = fixture(t, { fresh: true });
+  for (const path of [
+    "operations.json",
+    "identity/profile.json",
+    "gateway-token",
+  ])
+    rmSync(join(f.dir, "secrets", path));
+  const result = f.run("deploy");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /secrets\/identity\/profile.json 缺失/);
+  assert.match(result.stderr, /secrets\/gateway-token 缺失/);
+  assert.doesNotMatch(result.stderr, /ENOENT|at file:/);
+  assert.equal(existsSync(join(f.dir, "secrets/operations.json")), true);
+  assertReadOnly(f.calls());
+});
+
+test("discovery refuses unknown targets or denied Secret access without saving settings", (t) => {
+  for (const flag of [
+    "HARBOR_TEST_REMOTE_NODE",
+    "HARBOR_TEST_AMBIGUOUS_NODE",
+    "HARBOR_TEST_NO_HUB",
+    "HARBOR_TEST_SECRET_DENIED",
+  ]) {
+    const f = fixture(t, { fresh: true });
+    const path = join(f.dir, "secrets/operations.json");
+    rmSync(path);
+    const result = f.run("deploy", { [flag]: "1" });
+    assert.notEqual(result.status, 0, flag);
+    assert.equal(existsSync(path), false, flag);
+    assertReadOnly(f.calls());
+  }
+});
+
+test("existing operations config is never overwritten or overridden by environment drift", (t) => {
+  const f = fixture(t);
+  const path = join(f.dir, "secrets/operations.json");
+  const saved = readFileSync(path, "utf8");
+  const drift = f.run("deploy", {
+    MX_HARBOR_KUBE_CONTEXT: "different-context",
+  });
+  assert.notEqual(drift.status, 0);
+  assert.match(drift.stderr, /与已固定部署配置不一致/);
+  assert.equal(readFileSync(path, "utf8"), saved);
+  assert.equal(f.calls().length, 0);
+  writeFileSync(path, "{broken");
+  const invalid = f.run("deploy");
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /脚本不会覆盖已有文件/);
+  assert.equal(readFileSync(path, "utf8"), "{broken");
+  assert.equal(f.calls().length, 0);
+});
+
+test("recovering missing operations preserves the retained upstream and refuses moving an installed deployment", (t) => {
+  const f = fixture(t);
+  const path = join(f.dir, "secrets/operations.json");
+  rmSync(path);
+  // Simulate losing local settings while a same-node installation still exists.
+  const deployment = {
+    metadata: { name: "mx-harbor" },
+    spec: {
+      template: {
+        spec: { nodeSelector: { "kubernetes.io/hostname": hostname() } },
+      },
+    },
+  };
+  writeFileSync(join(f.dir, "deployment.json"), JSON.stringify(deployment));
+  const result = f.run("deploy", { HARBOR_TEST_NO_HUB: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(
+    JSON.parse(readFileSync(path, "utf8")).hubAdminOrigin,
+    "http://hub.internal:18151",
+  );
+  assert.ok(!f.calls().some((c) => c.args.includes("mx-insight-hub-admin")));
+  rmSync(path);
+  deployment.spec.template.spec.nodeSelector["kubernetes.io/hostname"] =
+    "another-host";
+  writeFileSync(join(f.dir, "deployment.json"), JSON.stringify(deployment));
+  const count = f.calls().length;
+  const moved = f.run("deploy");
+  assert.notEqual(moved.status, 0);
+  assert.match(moved.stderr, /不自动迁移节点/);
+  assert.equal(existsSync(path), false);
+  assertReadOnly(f.calls().slice(count));
 });
