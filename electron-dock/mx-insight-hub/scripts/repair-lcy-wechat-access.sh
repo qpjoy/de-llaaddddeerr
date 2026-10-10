@@ -31,23 +31,39 @@ echo '[wechat-access] Missing procurement price preview (read-only, only the 12 
 "${pod[@]}" node --input-type=module - "${price_args[@]}" < scripts/migrate-missing-operation-prices.mjs
 if [ "$mode" = --preview ]; then exit 0; fi
 
-echo '[wechat-access] Apply only migration 140 through the existing checksum/advisory-lock migrator'
+echo '[wechat-access] Apply only migration 140 from stdin with the existing migration lock and checksum ledger'
 "${pod[@]}" node --input-type=module -e '
-  import { mkdtemp, writeFile, rm } from "node:fs/promises";
-  import { tmpdir } from "node:os";
-  import { join } from "node:path";
-  import { runMigrations } from "./server/migrate.mjs";
-  const directory = await mkdtemp(join(tmpdir(), "lcy-wechat-140-"));
+  import { createHash } from "node:crypto";
+  import pg from "pg";
+  import { acquireMigrationLock } from "./server/migrate.mjs";
+  const filename = "140_lcy_wechat_mp_grants.sql";
+  const client = new pg.Client({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 10000 });
+  let transaction = false;
   try {
     let sql = "";
     for await (const chunk of process.stdin) sql += chunk;
-    await writeFile(join(directory, "140_lcy_wechat_mp_grants.sql"), sql, { mode: 0o600 });
-    await runMigrations({ connectionString: process.env.DATABASE_URL, migrationsDir: directory });
+    if (!sql.trim()) throw new Error("LCY WeChat grants refused: empty migration input");
+    if (!process.env.DATABASE_URL) throw new Error("LCY WeChat grants refused: DATABASE_URL missing");
+    const checksum = createHash("sha256").update(sql).digest("hex");
+    await client.connect();
+    await acquireMigrationLock(client);
+    await client.query("BEGIN");
+    transaction = true;
+    const applied = await client.query("SELECT checksum FROM schema_migrations WHERE filename=$1", [filename]);
+    if (applied.rows[0] && applied.rows[0].checksum !== checksum) throw new Error(`Applied migration changed: ${filename}`);
+    if (!applied.rows[0]) {
+      await client.query(sql);
+      await client.query("INSERT INTO schema_migrations(filename,checksum) VALUES($1,$2)", [filename, checksum]);
+    }
+    await client.query("COMMIT");
+    transaction = false;
+    console.log(`${applied.rows[0] ? "already applied" : "applied"} ${filename}`);
   } catch (error) {
+    if (transaction) await client.query("ROLLBACK").catch(() => {});
     const safe = /^(LCY WeChat grants|Another MX Insight Hub migration|Applied migration changed:)/.test(error.message);
     console.error(safe ? error.message : "WeChat migration failed; database details withheld");
     process.exitCode = 1;
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await client.end(); }
 ' < migrations/140_lcy_wechat_mp_grants.sql
 
 echo '[wechat-access] Fill missing procurement prices at 0.01 in the original currency; preserve existing prices'

@@ -170,3 +170,17 @@ kubectl -n mx-insight-hub exec deploy/mx-insight-hub-public -c api -- node --inp
 
 默认预期 `connectTimeoutMs=30000`、`timeoutMs=120000`、当前环境
 `leaseMs=180000`、`configurationError=null`。这只验证代码/配置加载，不验证采集恢复。
+
+运维实际回传 `connectTimeoutMs=null`（其他三项符合上述预期），说明当前 Pod 的
+配置代码尚未包含新增字段，不能视为连接超时修复已上线。Internal Public 部署使用
+`imagePullPolicy: Never`；需将修复代码同步到服务器，再通过 Hub 部署脚本重新构建、
+导入本地镜像并更新工作负载。仅设置环境变量不能让旧代码支持新参数。
+
+在服务器 Hub 目录执行下面的源码检查及部署命令；检查不通过时不会开始部署。
+显式关闭 Launcher 同步，保持本次操作在 Hub 部署流程内：
+
+```bash
+node --input-type=module -e 'import{parseJustOneConfig}from"./server/external-platforms/config.mjs";if(parseJustOneConfig({}).connectTimeoutMs!==30000)throw new Error("Server source is outdated; sync the JustOne connection-timeout fix first");console.log("source_ready: connectTimeoutMs=30000");' && MX_INSIGHT_SYNC_LAUNCHER=0 bash scripts/manage.sh deploy
+```
+
+等待部署成功后重新执行上面的 Pod 配置查询；新配置生效仍不等同于供应商业务恢复。

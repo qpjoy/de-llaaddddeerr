@@ -39,14 +39,25 @@ bash scripts/repair-lcy-wechat-access.sh --apply
 
 脚本只使用 `kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin`。
 源文件通过 stdin 运行，复用现有 Pod 的 DB 连接与 Admin Token；不在命令行或输出里打印密钥。
-权限 SQL 通过现有迁移器的 advisory lock、事务和 checksum 记录执行，临时目录只含迁移 140，
-不会顺带应用其他尚未部署的迁移。之后正常部署会识别该校验和并跳过已完成迁移。
+权限 SQL 直接从 stdin 读入内存，复用现有迁移锁，并在同一数据库事务内执行 SQL 和写入
+`schema_migrations` 校验和；不创建临时文件，兼容 Admin 容器的 `readOnlyRootFilesystem`。
+只执行迁移 140，不会顺带应用其他尚未部署的迁移。之后正常部署会识别该校验和并跳过已完成迁移。
 不重启 Pod、不更换 Key、不调用供应商，也不改 MX-H2I 登录、联网、DNS 或 VPN。
 
 两个阶段不是一个跨服务事务：权限先提交，价格按操作经现有 CAS Admin API 提交。
 价格步骤失败时保留已完成状态并停止，不自动重试未知写入；重新运行 `--preview` 核对。
 本次本地已完成真实 PostgreSQL 事务、回滚、幂等、身份/兄弟 Key/原配额保护与微信网关回归测试；
 **线上执行和真实采集仍待服务器结果，不以本地测试代替验收。**
+
+### 首次执行的只读文件系统错误
+
+用户提供的服务器输出在 `mkdtemp /tmp/lcy-wechat-140-…` 返回 `EROFS`。
+原脚本错误地假设 Pod 的 `/tmp` 可写，失败发生在数据库连接和权限迁移之前；前面的价格步骤
+也是只读预览，不能将其 `skipped: 12` 解读为权限修复成功或价格必然齐全。
+当前脚本已移除容器文件写入，不需要改变安全设置、增加挂载或重启 Pod。
+同步更新后的 `scripts/repair-lcy-wechat-access.sh`，再次执行相同 `--apply` 命令即可。
+新增测试实际执行脚本中的 Node 迁移段，在禁止所有文件写入的子进程内连接临时 PostgreSQL，
+验证首次执行、相同 SQL 跳过、校验和冲突、SQL 失败整笔回滚及并发迁移锁拒绝。
 
 单独查看最终状态的 K8s 命令：
 

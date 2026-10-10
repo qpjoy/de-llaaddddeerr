@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { createHash, randomUUID } from 'node:crypto'
+import pg from 'pg'
+import { acquireMigrationLock } from '../../server/migrate.mjs'
 import services from '../../shared/wechat-services.json' with { type: 'json' }
 
 test('K8s repair previews without mutation, sends only migration 140 and stops at a failed step', async t => {
@@ -40,7 +43,7 @@ if (process.env.WECHAT_TEST_FAIL === 'migration' && args.includes('-e')) process
   assert.deepEqual(applied.calls.map(call => call.args.includes('-e') ? 'migration' : call.args.includes('--provider') ? 'prices' : 'read'),
     ['read', 'prices', 'migration', 'prices', 'read'])
   assert.equal(applied.calls[2].body, await readFile(new URL('../../migrations/140_lcy_wechat_mp_grants.sql', import.meta.url), 'utf8'))
-  assert.match(applied.calls[2].args.at(-1), /runMigrations/)
+  assert.match(applied.calls[2].args.at(-1), /acquireMigrationLock/)
   const expected = services.filter(row => row.key.startsWith('wechat.mp.') || row.key === 'wechat.search.search').map(row => row.operation).sort()
   for (const call of [applied.calls[1], applied.calls[3]]) {
     assert.deepEqual(call.args.filter((_value, i) => call.args[i - 1] === '--operation').sort(), expected)
@@ -53,4 +56,56 @@ if (process.env.WECHAT_TEST_FAIL === 'migration' && args.includes('-e')) process
   const migrationFailure = await run('--apply', 'migration')
   assert.equal(migrationFailure.status, 8)
   assert.equal(migrationFailure.calls.length, 3)
+})
+
+test('stdin runner works with filesystem writes denied and preserves migration transactions, checksums and locking', {
+  skip: process.env.MX_INSIGHT_TEST_DATABASE_URL ? false : 'Requires a disposable MX_INSIGHT_TEST_DATABASE_URL',
+}, async t => {
+  const script = await readFile(new URL('../../scripts/repair-lcy-wechat-access.sh', import.meta.url), 'utf8')
+  const code = script.match(/node --input-type=module -e '\n([\s\S]*?)\n' < migrations\/140_lcy_wechat_mp_grants\.sql/)[1]
+  const schema = `wechat_runner_${randomUUID().replaceAll('-', '')}`
+  const db = new pg.Client({ connectionString: process.env.MX_INSIGHT_TEST_DATABASE_URL })
+  await db.connect()
+  t.after(async () => { await db.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await db.end() })
+  await db.query(`CREATE SCHEMA ${schema}; SET search_path TO ${schema};
+    CREATE TABLE schema_migrations(filename text PRIMARY KEY, checksum char(64) NOT NULL);
+    CREATE TABLE receipt(id integer PRIMARY KEY)`)
+  const url = new URL(process.env.MX_INSIGHT_TEST_DATABASE_URL)
+  url.searchParams.set('options', `-csearch_path=${schema}`)
+  const run = input => spawnSync(process.execPath,
+    ['--permission', '--allow-fs-read=*', '--input-type=module', '-e', code], {
+      cwd: fileURLToPath(new URL('../../', import.meta.url)), input, encoding: 'utf8', timeout: 15000,
+      env: { ...process.env, DATABASE_URL: url.href },
+    })
+  const sql = 'INSERT INTO receipt(id) VALUES(1);'
+  const first = run(sql)
+  assert.equal(first.status, 0, first.stderr)
+  assert.match(first.stdout, /^applied 140_lcy_wechat_mp_grants.sql/m)
+  assert.deepEqual((await db.query('SELECT * FROM schema_migrations')).rows, [{
+    filename: '140_lcy_wechat_mp_grants.sql', checksum: createHash('sha256').update(sql).digest('hex'),
+  }])
+  const replay = run(sql)
+  assert.equal(replay.status, 0, replay.stderr)
+  assert.match(replay.stdout, /^already applied/m)
+  const changed = run(`${sql}\n`)
+  assert.equal(changed.status, 1)
+  assert.match(changed.stderr, /Applied migration changed/)
+  assert.deepEqual((await db.query('SELECT * FROM receipt')).rows, [{ id: 1 }])
+
+  await db.query('TRUNCATE schema_migrations, receipt')
+  const failure = run(`${sql} SELECT 1/0;`)
+  assert.equal(failure.status, 1)
+  assert.equal((await db.query('SELECT * FROM receipt')).rows.length, 0)
+  assert.equal((await db.query('SELECT * FROM schema_migrations')).rows.length, 0)
+  assert.equal(run('').status, 1)
+  await acquireMigrationLock(db)
+  try {
+    const locked = run(sql)
+    assert.equal(locked.status, 1)
+    assert.match(locked.stderr, /Another MX Insight Hub migration/)
+    assert.equal((await db.query('SELECT * FROM schema_migrations')).rows.length, 0)
+  } finally { await db.query('SELECT pg_advisory_unlock_all()') }
+  // Failure/connection cleanup must release the lock for a subsequent attempt.
+  const retried = run(sql)
+  assert.equal(retried.status, 0, retried.stderr)
 })
