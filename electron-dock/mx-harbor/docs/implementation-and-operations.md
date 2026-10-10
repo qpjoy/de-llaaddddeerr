@@ -97,6 +97,27 @@ bash scripts/manage.sh ops internal-production enroll
 - 同步 Secret `Conflict`：等待其他修改任务完成后重试，仍复用现有凭据。
 - 同时出现原始错误和“解锁未确认”：两条都保留；先检查锁状态，不能把 Secret 同步成功当作整个 enroll 成功。
 
+如果不确定是否还有任务在执行，先在同目录运行默认只读的检查命令：
+
+```bash
+bash scripts/manage.sh ops internal-production recover-lock
+```
+
+它核对原 cluster UID 与本机节点，显示锁的 action、创建时间、主机/PID，以及相关本机进程和迁移 Job/Pod 状态；不会输出进程完整命令行或读取 Secret。老锁没有持有进程记录，会显示 `legacy-unknown`，不能仅按存在时长判断过期。新 deploy/enroll 会在锁内写入 ownerHost/ownerPid；仍存活的 PID（包括 PID 被复用的情况）、异地主机、无法确认归属的进程、未结束的迁移都阻止恢复。
+
+只有确认所有 Harbor deploy/migrate/enroll 已退出后，才执行：
+
+```bash
+bash scripts/manage.sh ops internal-production recover-lock --confirm-idle
+bash scripts/manage.sh ops internal-production enroll
+```
+
+恢复会重新做检查，并以检查到的 UID **和 resourceVersion** 为删除前提；锁被其他任务修改或重建时拒绝删除，没有强制删除回退。确认参数不能绕过活跃进程/Job/Pod 检查。不会停止迁移、重启应用或改变身份数据。普通 deploy/enroll 遇到已有锁仍停止，不自动夺锁。
+
+原 deploy 在解锁前打印 `completed`，容易让解锁失败看起来像完整成功；现在仅在解锁完成后打印成功。意外终止进程、Kubernetes 连接中断等仍可能留下锁，应使用上述检查流程。
+
+锁恢复增量回归：恢复策略、CLI、接入核心和部署共 33 项通过；另用真实 kubectl 1.32.2 与本地隔离 HTTP 服务确认 DELETE 请求携带 UID/resourceVersion 前提。未连接生产集群或清理生产锁。
+
 仅当报部署锁已存在时，可用以下只读命令检查锁和迁移 Job，不读取 Secret 内容：
 
 ```bash
@@ -125,6 +146,7 @@ Hub 固定地址由 `MX_HARBOR_HUB_ADMIN_ORIGIN` 指定，默认集群 DNS；请
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `plan`                | 读取本地非敏感操作配置，输出工作负载计划；配置缺失时提示先完成首次发现，始终不连接集群                                       |
 | `enroll`             | 复用 Launcher 登记正式域名与独立 client，同步 Harbor/Hub 接入 Secret；不发布其他应用 |
+| `recover-lock`       | 默认只读检查部署锁、相关进程及迁移任务；确认空闲后用 `--confirm-idle` 尝试受 UID/resourceVersion 保护的恢复 |
 | `status` / `logs`     | 校验 cluster UID 后只读；缺少本地操作配置时只读发现，不保存文件                                                              |
 | `deploy`              | 持有 Harbor 专用锁，校验保留配置、构建/导入唯一镜像、幂等迁移、更新 Deployment/Service 并自动重启，等待 rollout 和 readiness |
 | `migrate` / `restart` | 兼容旧命令，均执行完整 `deploy` 流程，不再只迁移或只重启                                                                     |

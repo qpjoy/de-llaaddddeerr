@@ -156,7 +156,7 @@ test("plan is offline and status remains read only; cluster drift prevents mutat
   );
   const help = f.run("help");
   assert.equal(help.status, 0, help.stderr);
-  assert.match(help.stdout, /deploy\|enroll\|status/);
+  assert.match(help.stdout, /deploy\|enroll\|recover-lock\|status/);
   assert.equal(f.run("plan").status, 0);
   assert.equal(f.calls().length, 0);
   assert.equal(f.run("status").status, 0);
@@ -314,12 +314,12 @@ test("failed migration never deploys; unconfirmed termination retains the deploy
 test("unlock failure still removes temporary private configuration", (t) => {
   const f = fixture(t),
     result = f.run("deploy", {
-      HARBOR_TEST_MIGRATION_FAILURE: "1",
       HARBOR_TEST_UNLOCK_FAILURE: "1",
     });
   assert.notEqual(result.status, 0);
   const unlock = f.calls().find((c) => c.args.includes("--raw"));
   assert.ok(unlock, result.stderr);
+  assert.ok(!result.stdout.includes("deploy completed"), result.stdout);
   assert.equal(existsSync(dirname(unlock.args.at(-1))), false);
 });
 

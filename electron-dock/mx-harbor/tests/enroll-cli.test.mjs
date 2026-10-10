@@ -60,6 +60,7 @@ function fixture(t) {
   for (const file of [
     "scripts/manage.sh",
     "scripts/enroll.mjs",
+    "scripts/recover-lock.mjs",
     "scripts/bootstrap.mjs",
     "apps/server/config.mjs",
     "../mx-common/src/identity/profile.mjs",
@@ -91,6 +92,8 @@ if (key === 'get namespace kube-system') {
   if(process.env.HARBOR_ENROLL_TEST_FAILURE === 'cluster') fail('error: context "retained-context" does not exist');
   out({metadata:{uid:'retained-cluster'}});
 } else if (key === 'get node retained-node') out({metadata:{labels:{'kubernetes.io/hostname':os.hostname()}}});
+else if (key === 'get configmap mx-harbor-deploy-lock') { if(!fs.existsSync(dir+'/removed')) out({metadata:{uid:'our-lock-uid',resourceVersion:'42'},data:{action:'deploy'}}); }
+else if (a[0] === 'get' && ['jobs','pods'].includes(a[1])) out({items:[]});
 else if (key === 'create configmap mx-harbor-deploy-lock') {
   if(process.env.HARBOR_ENROLL_TEST_FAILURE === 'lock') fail('error: failed to create configmap: configmaps "mx-harbor-deploy-lock" already exists');
   out({metadata:{uid:'our-lock-uid'}});
@@ -104,20 +107,26 @@ else if (key === 'get secret mx-insight-hub-browser-sso') {
   fs.writeFileSync(dir+'/unlock', fs.readFileSync(file));
   fs.writeFileSync(dir+'/temp-path', require('node:path').dirname(file));
   if(process.env.HARBOR_ENROLL_TEST_UNLOCK_FAILURE) fail('Error from server (Conflict): UID precondition failed');
+  fs.writeFileSync(dir+'/removed','true');
 } else fail('unexpected command');
 `,
     { mode: 0o755 },
   );
+  writeFileSync(
+    join(dir, "bin/ps"),
+    `#!${process.execPath}\nprocess.exit(0);\n`,
+    { mode: 0o755 },
+  );
   return {
     dir,
-    run: (failure, unlockFailure = false) =>
+    run: (failure, unlockFailure = false, actionArgs = ["enroll"]) =>
       spawnSync(
         "/bin/bash",
         [
           join(dir, "scripts/manage.sh"),
           "ops",
           "internal-production",
-          "enroll",
+          ...actionArgs,
         ],
         {
           // manage.sh must work even when launched outside the application directory.
@@ -159,6 +168,42 @@ test("enroll identifies an existing deployment lock and never deletes another ta
   const f = fixture(t);
   assertSafeFailure(f.run("lock"), /获取 Harbor 部署锁.*AlreadyExists/);
   assert.equal(f.calls().length, 3);
+  assert.ok(
+    f.calls()[2].some((arg) => arg.startsWith("--from-literal=ownerHost=")),
+  );
+  assert.ok(
+    f.calls()[2].some((arg) => /^--from-literal=ownerPid=\d+$/.test(arg)),
+  );
+  assert.equal(existsSync(join(f.dir, "unlock")), false);
+});
+
+test("recover-lock CLI defaults to inspection and only explicit recovery removes the checked lock", (t) => {
+  const f = fixture(t);
+  const check = f.run("recovery", false, ["recover-lock"]);
+  assert.equal(check.status, 0, check.stderr);
+  assert.match(check.stdout, /只读检查通过/);
+  assert.ok(f.calls().every((args) => args[4] === "get"));
+  assert.equal(existsSync(join(f.dir, "unlock")), false);
+  const recovered = f.run("recovery", false, [
+    "recover-lock",
+    "--confirm-idle",
+  ]);
+  assert.equal(recovered.status, 0, recovered.stderr);
+  assert.match(recovered.stdout, /遗留部署锁已释放/);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(f.dir, "unlock"))).preconditions,
+    { uid: "our-lock-uid", resourceVersion: "42" },
+  );
+  assert.equal(
+    existsSync(readFileSync(join(f.dir, "temp-path"), "utf8")),
+    false,
+  );
+});
+test("recover-lock CLI does not mutate a cluster it cannot verify", (t) => {
+  const f = fixture(t);
+  const result = f.run("cluster", false, ["recover-lock", "--confirm-idle"]);
+  assertSafeFailure(result, /kubeconfig/);
+  assert.equal(f.calls().length, 1);
   assert.equal(existsSync(join(f.dir, "unlock")), false);
 });
 test("enroll names the denied Hub Secret and releases only its own lock", (t) => {

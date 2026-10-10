@@ -16,7 +16,7 @@ const requestedAction = process.argv[2] || "help",
     : requestedAction,
   namespace = "mx-harbor";
 const help =
-  "Usage: bash scripts/manage.sh ops internal-production deploy|enroll|status|logs|plan\nEnroll registers https://harbor.minsight-ai.com with existing Launcher/Auth and synchronizes the optional Hub Portal credentials; it does not deploy Launcher/Hub.\nDeploy includes migration, application restart and readiness verification. migrate/restart are compatibility aliases for deploy.\nFirst deploy discovers and saves secrets/operations.json from the current Kubernetes context and local node. Missing SSO/Hub enrollment does not block deployment or migrations; integrations are resolved at runtime. Retained Kubernetes Secret takes precedence.";
+  "Usage: bash scripts/manage.sh ops internal-production deploy|enroll|recover-lock|status|logs|plan\nrecover-lock is read-only by default; --confirm-idle attempts guarded stale-lock recovery after all operations have exited.\nEnroll registers https://harbor.minsight-ai.com with existing Launcher/Auth and synchronizes the optional Hub Portal credentials; it does not deploy Launcher/Hub.\nDeploy includes migration, application restart and readiness verification. migrate/restart are compatibility aliases for deploy.\nFirst deploy discovers and saves secrets/operations.json from the current Kubernetes context and local node. Missing SSO/Hub enrollment does not block deployment or migrations; integrations are resolved at runtime. Retained Kubernetes Secret takes precedence.";
 if (action === "help") {
   console.log(help);
   process.exit(0);
@@ -158,6 +158,8 @@ const lock = JSON.parse(
       "configmap",
       "mx-harbor-deploy-lock",
       `--from-literal=action=${action}`,
+      `--from-literal=ownerHost=${hostname()}`,
+      `--from-literal=ownerPid=${process.pid}`,
       "-o",
       "json",
     ]).stdout,
@@ -355,7 +357,6 @@ try {
     signal: AbortSignal.timeout(5000),
   });
   if (!health.ok) throw Error("Harbor readiness failed");
-  console.log(`Harbor ${action} completed`);
 } catch (error) {
   if (job) {
     const stopped = kube(
@@ -400,3 +401,4 @@ try {
     rmSync(temp, { recursive: true, force: true });
   }
 }
+console.log(`Harbor ${action} completed`);

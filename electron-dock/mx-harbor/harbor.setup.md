@@ -42,3 +42,11 @@
 6. 管理员保持 Hub 开放注册，单独开启 Harbor 邀请；用专用账号检查原型登录/注册、邀请码准入、共享空间与权限。`/status` 的 configured 仅表示配置有效，不表示远端验证成功。日常 Harbor 更新只运行步骤 1；没有新增 Auth client 或 Hub 代码时无需反复发布 Launcher/Hub。
 
 ¥1 管理员验收购买、Pay 返回 Harbor、完整 IP 查询闭环仍待实现，本阶段不要开放正式销售。详见 [实施说明](docs/implementation-and-operations.md)。
+
+如 deploy/enroll 提示 `mx-harbor-deploy-lock AlreadyExists`，在 `electron-dock/mx-harbor` 先运行只读检查：
+
+```bash
+bash scripts/manage.sh ops internal-production recover-lock
+```
+
+检查锁、操作进程和迁移状态；只有确认其他 Harbor 操作都已结束，才加 `--confirm-idle` 恢复遗留锁，再重试原命令。它不会绕过活跃进程/迁移检查，也不会自动停止任务。详见实施说明的“enroll 失败定位”。

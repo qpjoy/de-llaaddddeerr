@@ -261,6 +261,8 @@ if (
         "configmap",
         "mx-harbor-deploy-lock",
         "--from-literal=action=enroll",
+        `--from-literal=ownerHost=${hostname()}`,
+        `--from-literal=ownerPid=${process.pid}`,
         "-o",
         "json",
       ]).stdout,
