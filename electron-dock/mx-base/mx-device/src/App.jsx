@@ -1,3 +1,5 @@
+import AdapterBench from "./AdapterBench.jsx";
+import DefinitionForm from "./DefinitionForm.jsx";
 import SchedulerLab from "./SchedulerLab.jsx";
 import { useState, useCallback, useEffect } from "react";
 import {
@@ -106,7 +108,8 @@ function Workspace({ onExpired }) {
     [detail, setDetail] = useState(null),
     [resource, setResource] = useState(null),
     [placement, setPlacement] = useState(null),
-    [pacing, setPacing] = useState(null);
+    [pacing, setPacing] = useState(null),
+    [definitionSeed, setDefinitionSeed] = useState(null);
   const { state, error, loading, refresh } = useSnapshot(mode, onExpired);
   useEffect(() => {
     window.scrollTo(0, 0);
@@ -285,6 +288,7 @@ function Workspace({ onExpired }) {
           )}
           {page === "lab" ? (
             <SchedulerLab
+              key={mode}
               state={state}
               mode={mode}
               busy={busy}
@@ -293,6 +297,11 @@ function Workspace({ onExpired }) {
               failure={failure}
               notice={notice}
               onDevices={() => setPage("racks")}
+              onWorkbench={(id) => {
+                setSelectedId(id);
+                setHistory(null);
+                setPage("workbench");
+              }}
             />
           ) : page === "racks" ? (
             <Racks
@@ -408,6 +417,21 @@ function Workspace({ onExpired }) {
                       }}
                     />
                   )}
+                  {device && (
+                    <AdapterBench
+                      key={`${mode}:${device.id}`}
+                      device={device}
+                      state={state}
+                      busy={busy}
+                      run={run}
+                      onInspect={inspect}
+                      onDefine={(seed) => {
+                        setDefinitionSeed(seed);
+                        setModal("definition");
+                      }}
+                      onConfigure={() => setModal("observer")}
+                    />
+                  )}
                   <div className="sub-head">
                     <h3>任务池</h3>
                     <div className="button-row">
@@ -484,21 +508,23 @@ function Workspace({ onExpired }) {
       {modal && (
         <Modal
           title={
-            modal === "pacing"
-              ? "App 与整机冷却策略"
-              : modal === "resource"
-                ? `${resource.scope === "rack" ? "机架" : "宿主机"}调度策略`
-                : modal === "placement"
-                  ? "编辑设备归属"
-                  : modal === "device"
-                    ? "添加设备"
-                    : modal === "observer"
-                      ? "配置真实画面"
-                      : modal === "job"
-                        ? `提交${mode === "sim" ? "模拟" : "真实"}任务`
-                        : modal === "real-demo"
-                          ? "真机搜索 → 详情演示"
-                          : "执行证据"
+            modal === "definition"
+              ? "从调试步骤创建任务定义"
+              : modal === "pacing"
+                ? "App 与整机冷却策略"
+                : modal === "resource"
+                  ? `${resource.scope === "rack" ? "机架" : "宿主机"}调度策略`
+                  : modal === "placement"
+                    ? "编辑设备归属"
+                    : modal === "device"
+                      ? "添加设备"
+                      : modal === "observer"
+                        ? "配置真实画面"
+                        : modal === "job"
+                          ? `提交${mode === "sim" ? "模拟" : "真实"}任务`
+                          : modal === "real-demo"
+                            ? "真机搜索 → 详情演示"
+                            : "执行证据"
           }
           onClose={() => setModal(null)}
         >
@@ -507,7 +533,20 @@ function Workspace({ onExpired }) {
               {notice}
             </p>
           )}
-          {modal === "pacing" ? (
+          {modal === "definition" ? (
+            <DefinitionForm
+              definitions={state.definitions || []}
+              initialDefinition={definitionSeed}
+              busy={busy}
+              onSubmit={async (body) => {
+                const result = await run(
+                  () => api("task-definitions", mode, body),
+                  "任务定义新版本已保存，可在调度实验室提交",
+                );
+                if (result) setModal(null);
+              }}
+            />
+          ) : modal === "pacing" ? (
             <PacingForm
               device={pacing.device}
               availability={pacing.availability}

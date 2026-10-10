@@ -1,6 +1,7 @@
-import { DeviceMobile, ArrowCounterClockwise } from "@phosphor-icons/react";
+import PhoneProjection from "./PhoneProjection.jsx";
+import { ArrowCounterClockwise } from "@phosphor-icons/react";
 import { AppPacing } from "./AppPacing.jsx";
-import { time, appName } from "./data.js";
+import { time } from "./data.js";
 import { DeviceControls } from "./Devices.jsx";
 import { useState } from "react";
 import { LiveScreen, ControlSession } from "./PhoneConsole.jsx";
@@ -56,58 +57,7 @@ export default function Projection({
         />
       ) : (
         <>
-          <div className="phone">
-            <div className="notch" />
-            <div className="phone-content">
-              <h3>{device?.name || "未选择设备"}</h3>
-              {p ? (
-                <>
-                  <p className="phone-caption">
-                    {p.source === "sim" ? "模拟结果" : "接口返回"} ·{" "}
-                    {appName(p.appId)} · {time(p.observedAt)}
-                  </p>
-                  <h4>{p.detail ? "笔记详情" : p.keyword || "当前状态"}</h4>
-                  <p className="phone-status">
-                    {p.status}
-                    {p.isBusy === true ? " · 忙碌" : ""}
-                  </p>
-                  {p.page && (
-                    <div className="page-marker">
-                      {p.source === "sim" ? "模拟" : "接口报告"}第 {p.page} 页 ·{" "}
-                      {p.count ?? 0} 条
-                    </div>
-                  )}
-                  {p.detail ? (
-                    <article className="phone-note">
-                      <strong>{p.detail.title}</strong>
-                      <p>{p.detail.content}</p>
-                    </article>
-                  ) : (
-                    <div className="phone-results">
-                      {(p.items || []).map((item, i) => (
-                        <article key={`${item.id}-${i}`}>
-                          <span>{String(i + 1).padStart(2, "0")}</span>
-                          <div>
-                            <strong>{item.title || item.id}</strong>
-                            <small>{item.authorName || "作者未返回"}</small>
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  )}
-                  {!p.items?.length && !p.detail && (
-                    <p className="muted">尚无列表结果</p>
-                  )}
-                </>
-              ) : (
-                <div className="phone-empty">
-                  <DeviceMobile size={77} weight="light" />
-                  <h4>等待任务</h4>
-                  <p>尚无已确认结果</p>
-                </div>
-              )}
-            </div>
-          </div>
+          <PhoneProjection device={device} projection={p} />
           <p className="projection-foot">
             连接状态不等于开机状态
             {p?.progressAt && (

@@ -1,4 +1,9 @@
-import { definitions, saveDefinition, rackScenario } from "./workflows.mjs";
+import {
+  definitions,
+  saveDefinition,
+  rackScenario,
+  testAdapterCommand,
+} from "./workflows.mjs";
 import { COMMANDS } from "./workflow-catalog.mjs";
 import { configureLoops } from "./loop-policy.mjs";
 import { createServer } from "node:http";
@@ -193,6 +198,22 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
             await store.atomic((s, n) => controlResource(s, n, mode, b), {
               mode,
             }),
+          );
+        }
+        const adapterTest = path.match(
+          /^\/api\/devices\/([^/]+)\/adapter-test$/,
+        );
+        if (adapterTest && req.method === "POST") {
+          const id = uuid(adapterTest[1]),
+            b = await body(req);
+          b.key = str(b.key, "幂等键");
+          return json(
+            res,
+            202,
+            await store.atomic(
+              (s, n) => testAdapterCommand(s, n, mode, id, b),
+              { mode, key: b.key },
+            ),
           );
         }
         const pacing = path.match(/^\/api\/devices\/([^/]+)\/pacing$/);

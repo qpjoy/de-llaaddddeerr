@@ -49,6 +49,29 @@ test('upstream identifiers use exact parameterized lookup and may match several 
   assert.doesNotMatch(lookup.sql, /ILIKE|response_body|::text/)
 })
 
+test('confirmed JustOne 301 explains collection failure without exposing upstream text or assuming customer billing', async () => {
+  const providers = [{ id: 'call', provider_key: 'justone', outcome: 'rejected',
+    http_status: 200, business_code: 301, error_code: 'upstream_collection_failed',
+    billed: false, reviewed_message: 'private-token upstream text', has_restricted_archive: true }]
+  const { runs: [run] } = await lookupRequestDiagnostics(fixture({ status: 'committed', providers }).pool, id)
+  assert.match(run.guidance, /301（采集失败）/u)
+  assert.match(run.guidance, /不会重新采集/u)
+  assert.match(run.guidance, /客户扣费分别查看/u)
+  assert.equal(run.providerCalls[0].billed, false)
+  assert.equal(run.providerCalls[0].message, null)
+  assert.doesNotMatch(JSON.stringify(run), /private-token|upstream text/u)
+  for (const mismatched of [
+    { ...providers[0], provider_key: 'another-provider' },
+    { ...providers[0], business_code: 500 },
+    { ...providers[0], error_code: 'upstream_internal_error' },
+  ]) {
+    const result = await lookupRequestDiagnostics(fixture({ providers: [mismatched] }).pool, id)
+    assert.doesNotMatch(result.runs[0].guidance, /301（采集失败）/u)
+  }
+  const unknown = await lookupRequestDiagnostics(fixture({ status: 'unknown', providers }).pool, id)
+  assert.match(unknown.runs[0].guidance, /未知调用结果/u)
+})
+
 test('arbitrary archive messages never cross the diagnostic boundary; unknown outcomes remain unknown', async () => {
   const f = fixture({ status: 'unknown', providers: [{ id: 'call', provider_key: 'qixin', outcome: 'unknown', reviewed_message: 'appkey=SECRET https://private.test', has_restricted_archive: true }] })
   const run = (await lookupRequestDiagnostics(f.pool, id)).runs[0]

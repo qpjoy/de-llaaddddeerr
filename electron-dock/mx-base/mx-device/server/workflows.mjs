@@ -11,6 +11,7 @@ import {
 } from "./model.mjs";
 import {
   commandByCode,
+  adapterTestDefinition,
   BUILTIN_DEFINITIONS,
   DEMO_RACK,
 } from "./workflow-catalog.mjs";
@@ -134,6 +135,9 @@ export function addWorkflow(s, now, mode, body) {
     (d) => d.mode === mode && d.id === body.definitionId,
   );
   requireThat(def, "任务定义版本不存在", 400);
+  return enqueueWorkflow(s, now, mode, body, def);
+}
+function enqueueWorkflow(s, now, mode, body, def) {
   const params = {
     keyword: str(body.keyword || "演示关键词", "关键词", 200),
     target: str(body.target || "demo-note-1", "目标标识", 200),
@@ -237,6 +241,32 @@ export function addWorkflow(s, now, mode, body) {
     { jobId: j.id },
   );
   return j;
+}
+export function testAdapterCommand(s, now, mode, deviceId, body) {
+  requireThat(
+    mode === "sim",
+    "控制指令试运行仅模拟；真实控制 adapter 尚未启用",
+    403,
+  );
+  const device = s.devices.find((d) => d.id === deviceId && d.mode === mode);
+  requireThat(device, "设备不存在", 404);
+  const def = adapterTestDefinition(body.code, body.appId);
+  requireThat(def, "指令未登记、仅供内部使用或不属于此 App", 400);
+  const job = enqueueWorkflow(
+    s,
+    now,
+    mode,
+    {
+      key: body.key,
+      deviceId,
+      keyword: body.keyword,
+      target: body.target,
+      priority: 5,
+    },
+    def,
+  );
+  job.adapterTest = { code: body.code, appId: body.appId };
+  return job;
 }
 export function startWorkflow(s, now, device, job, attempt) {
   if (!job.workflow) return;
@@ -415,6 +445,8 @@ export function simulateCommand(c) {
   if (c.code === "app.open")
     return { ...receipt, result: { foregroundAppId: c.appId } };
   if (c.code === "session.home") return { ...receipt, result: { home: true } };
+  if (c.code === "session.back")
+    return { ...receipt, result: { backed: true } };
   if (c.code === "weibo.like")
     return { ...receipt, result: { target: c.params.target, liked: true } };
   if (c.code.includes("detail") || c.code.endsWith("ocr"))
@@ -459,6 +491,7 @@ export function validReceipt(c, r) {
     return x?.restoredStep === c.stepIndex && x?.appId === c.appId;
   if (c.code === "app.open") return x?.foregroundAppId === c.appId;
   if (c.code === "session.home") return x?.home === true;
+  if (c.code === "session.back") return x?.backed === true;
   if (c.code === "weibo.like")
     return x?.target === c.params.target && x?.liked === true;
   if (c.code.includes("detail") || c.code.endsWith("ocr"))
@@ -521,6 +554,11 @@ export function completeCommand(s, now, a, c, r) {
   }
   checkpoint(s, now, a, {
     status: `${commandByCode(row.code).name} · ${w.nextStep}/${w.plan.length}`,
+    commandId: row.id,
+    commandCode: row.code,
+    detail: r.result.fullText
+      ? { id: r.result.target, title: "模拟正文", content: r.result.fullText }
+      : undefined,
     page: row.page,
     count: r.result.items?.length,
     items: r.result.items || [],

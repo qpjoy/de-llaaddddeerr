@@ -81,6 +81,14 @@ export const COMMANDS = [
     mapping: "Mobile-Agent 有 home；收尾验证待适配",
   },
   {
+    code: "session.back",
+    name: "返回上一层",
+    appId: null,
+    estimateMs: 800,
+    effect: "navigation",
+    mapping: "Mobile-Agent 有 back；页面状态核验待适配",
+  },
+  {
     code: "session.restore",
     name: "恢复大任务上下文",
     appId: null,
@@ -156,3 +164,30 @@ export const BUILTIN_DEFINITIONS = [
   ),
 ];
 export const DEMO_RACK = "调度实验机架";
+
+// A preview and its test job share the same bounded preparation sequence.
+export function adapterTestDefinition(code, appId) {
+  const command = commandByCode(code);
+  if (
+    !["xhs", "weibo"].includes(appId) ||
+    !command ||
+    command.internal ||
+    (command.appId && command.appId !== appId)
+  )
+    return null;
+  const steps = [{ code: "app.open", repeat: 1 }];
+  if (code === "xhs.search.next") steps.push({ code: "xhs.search", repeat: 1 });
+  if (code !== "app.open") steps.push({ code, repeat: 1 });
+  return {
+    id: `adapter-test:${appId}:${code}:1`,
+    mode: "sim",
+    code: `adapter.${appId}.${code}`,
+    name: `调试 · ${command.name}`,
+    appId,
+    loop: "small",
+    steps,
+    version: 1,
+    resumable: false,
+    executionModel: "checkpoint-session.v1",
+  };
+}

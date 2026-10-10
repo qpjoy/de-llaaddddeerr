@@ -781,6 +781,64 @@ test('a definite request rejection is durably replayed and never advances the pr
   assert.equal(replayEvent.responseStatus, 502)
 })
 
+test('JustOne collection failure exposes a neutral reason and preserves exact replay without another dispatch', async () => {
+  let calls = 0
+  const adapter = new JustOneAdapter({
+    token: 'private-collection-token',
+    fetchImpl: async () => {
+      calls += 1
+      return new Response(JSON.stringify({
+        code: 301, data: null, message: 'JustOne private-collection-token internal collection details',
+        recordTime: '2026-10-10T00:00:00Z',
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  })
+  const state = await fixture({ adapter })
+  const request = () => state.gateway.search(state.context, {
+    body: { marketplace: 'taobao', query: '华为笔记本', deliveryMode: 'live_only' },
+    idempotencyKey: 'collection-rejection-01',
+    path: '/api/v1/data/ecommerce/products/search',
+  })
+  let first
+  await assert.rejects(request, error => {
+    first = error
+    assert.equal(error.status, 502)
+    assert.equal(error.code, 'external_platform_rejected')
+    assert.equal(error.details.reasonCode, 'upstream_collection_failed')
+    assert.equal(error.details.outcome, 'rejected')
+    assert.equal(error.details.retryable, false)
+    assert.doesNotMatch(JSON.stringify([error.message, error.details]), /JustOne|301|private-collection-token|internal collection|billed/u)
+    return true
+  })
+  await assert.rejects(request, error => {
+    assert.equal(error.message, first.message)
+    assert.deepEqual(error.details, first.details)
+    return true
+  })
+  assert.equal(calls, 1)
+  const call = [...state.platformStore.calls.values()][0]
+  assert.equal(call.businessCode, 301)
+  assert.equal(call.outcome, 'rejected')
+  assert.equal(call.billed, false)
+  assert.equal(state.platformStore.state.consecutiveFailures, 1)
+  const usage = state.usageStore.requests.get(first.details.requestId)
+  assert.equal(usage.unitsActual, 0)
+  assert.equal(usage.responseBody.error.details.reasonCode, 'upstream_collection_failed')
+
+  // A pre-patch committed response remains exactly as delivered. An upgrade
+  // must not rewrite its generic message or attach the new reason retroactively.
+  usage.responseBody.error.message = 'External data platform rejected the request'
+  delete usage.responseBody.error.details.reasonCode
+  delete usage.responseBody.error.details.outcome
+  delete usage.responseBody.error.details.retryable
+  await assert.rejects(request, error => {
+    assert.equal(error.message, 'External data platform rejected the request')
+    assert.equal(error.details.reasonCode, undefined)
+    return true
+  })
+  assert.equal(calls, 1)
+})
+
 test('authentication failures advance the global circuit and retain a durable request id', async () => {
   const state = await fixture({
     adapter: {

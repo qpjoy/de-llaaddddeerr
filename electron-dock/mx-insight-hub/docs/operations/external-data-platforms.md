@@ -593,6 +593,10 @@ estimated recharge amount.
 For the 2026-10-09 Delta ecommerce transport incident, the production evidence,
 credential-free probe results and new bounded transport diagnostics are recorded in
 [Ecommerce transport diagnosis](ecommerce-transport-2026-10-09.md).
+The separate [2026-10-10 Taobao collection failure](ecommerce-collection-failure-2026-10-10.md)
+was confirmed by offline replay as JustOne business code 301. New occurrences retain
+`502 external_platform_rejected` and add `error.details.reasonCode=upstream_collection_failed`;
+historical replay bodies stay unchanged and this does not enable automatic retries.
 
 Use a dedicated smoke consumer with an `ecommerce` grant, a low quota, an active `mih_live_` Hub Public API Key
 and an approved non-production query.

@@ -248,6 +248,20 @@ function publicFailure(error) {
       'External data call outcome is unknown; do not retry automatically',
     )
   }
+  if (error instanceof JustOneUpstreamError
+    && evidence.outcome === 'rejected'
+    && evidence.businessCode === 301
+    && evidence.errorCode === 'upstream_collection_failed') {
+    // Keep the existing public status/code and immutable replay contract. A
+    // reviewed collection failure has a useful neutral reason; raw provider
+    // messages and procurement billing do not belong in the public response.
+    return new AppError(
+      502,
+      'external_platform_rejected',
+      'The data source reported a collection failure',
+      { reasonCode: 'upstream_collection_failed', outcome: 'rejected', retryable: false },
+    )
+  }
   return new AppError(502, 'external_platform_rejected', 'External data platform rejected the request')
 }
 

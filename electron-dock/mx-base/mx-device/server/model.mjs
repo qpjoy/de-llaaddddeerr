@@ -677,6 +677,9 @@ export function checkpoint(s, now, a, result) {
     observedAt: now,
     progressAt: now,
     type: result.detail ? "note" : "search",
+    jobId: a.jobId,
+    commandId: result.commandId || null,
+    commandCode: result.commandCode || null,
     page: result.page || null,
     count: result.count ?? null,
     keyword: result.keyword || null,
@@ -699,9 +702,11 @@ export function checkpoint(s, now, a, result) {
     a.mode,
     now,
     "checkpoint",
-    result.detail
-      ? "详情证据已保存"
-      : `已确认第 ${result.page} 页，${result.count} 条`,
+    result.commandCode
+      ? `${result.commandCode} 回执已确认`
+      : result.detail
+        ? "详情证据已保存"
+        : `已确认第 ${result.page} 页，${result.count} 条`,
     { jobId: a.jobId, deviceId: a.deviceId, projection: d.projection },
   );
   return true;

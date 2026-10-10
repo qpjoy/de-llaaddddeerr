@@ -19,6 +19,10 @@ function advice(request, providers, connectors) {
   if (qixin?.business_code === 105) return '启信宝拒绝接口授权。核对当次 AppKey 所属应用的接口开通与授权有效期；不能据此判断未开通、过期或应用不匹配。'
   if (qixin?.business_code === 104) return '启信宝返回白名单拒绝。核对该应用访问供应商时的实际出口 IP。'
   if (request.status === 'unknown' || providers.some(p => p.outcome === 'unknown')) return '存在未知调用结果。保留原请求身份，先核对上游记录与结算，不自动重发。'
+  if (providers.some(p => p.provider_key === 'justone' && p.outcome === 'rejected'
+    && p.business_code === 301 && p.error_code === 'upstream_collection_failed')) {
+    return 'JustOne 已返回业务码 301（采集失败），具体采集原因需结合供应商记录排查。供应商 billed 与客户扣费分别查看各自账本；HTTP 200 仅表示收到了上游响应。同一幂等标识会保留原交付结果，不会重新采集；若已交付存量回退，请结合交付来源和响应状态判断。'
+  }
   if (connectors.some(c => c.failure_evidence)) return '已保留 Night-All 结构化错误链。查看候选端点和内层错误码；缺失的字段不推测，多个端点失败不等同于已确认唯一根因。'
   if (connectors.some(c => c.error_code)) return '已保存连接器错误码和上游关联 ID；完整上游错误正文未接入本诊断，请按该 ID 和调用时间核对上游日志。'
   if (request.status === 'committed') return 'Hub 已提交响应。上游失败可能已由存量结果回退；请结合交付来源和响应 HTTP 状态判断。下游入库校验结果不在本诊断范围。'

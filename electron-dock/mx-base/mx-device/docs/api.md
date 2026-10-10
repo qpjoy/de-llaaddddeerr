@@ -13,6 +13,7 @@
 | POST /api/resources/control?mode=sim | `{scope:rack\|host,rack,host?,revision,action:drain\|release\|limit,maxConcurrent?}`；持久资源策略 |
 | POST /api/devices/:id/placement?mode=sim | `{revision,name,rack,host}`；仅暂停空闲且无预留时修改中心归属 |
 | POST /api/devices/:id/pacing?mode=sim | `{revision,deviceIntervalMs,apps:[{appId,cooldownMs}]}`；暂停空闲且无预留时配置间隔 |
+| POST /api/devices/:id/adapter-test?mode=sim | `{key,appId,code,keyword?,target?}`；在指定模拟设备排队试运行白名单指令，返回 202 Job |
 | POST /api/devices/:id/probe?mode=real | `{revision}`；指定 Worker 异步执行一次只读状态查询 |
 | POST /api/devices/:id/control?mode=sim | `{revision,action}`；乐观版本校验 |
 | POST /api/devices/:id/observer?mode=real | `{revision,origin,serial,approved:true}`；附加只读画面配置，保存不连接手机 |
@@ -28,6 +29,8 @@
 | GET /health/ready | 本中心数据库可用，不检查 Hub、手机或 mx-rig |
 
 以上 mode 可按权限使用 sim / real，但场景只能 sim，probe 只能 real。没有任意 URL 转发或命令执行 API。
+
+Adapter 试运行仅 `sim`，`real` 返回 403。App 为 `xhs|weibo`；指令须在目录内且匹配 App，不接受内部 `session.restore`。服务端生成准备步骤：`app.open` 自身一条，其余先打开 App，`xhs.search.next` 还会先搜索。忽略调用方自传 plan/priority，固定为优先级 5 的小循环，仍遵守物理单槽、App 冷却、机架限额、暂停与检查点插入预算。新任务要求设备已启用且非隔离；相同 key/参数返回原 Job，更改命令、App、目标或关键词返回 409。Job 保存 `adapterTest:{code,appId}` 及冻结的 workflow plan，不自动新增任务定义；保存定义仍显式使用 `POST /api/task-definitions?mode=sim`。真实截图/状态/连接检查复用上表原有接口。
 
 资源策略：不存在持久策略时 `revision:0`，之后使用快照中的版本；陈旧版本返回 409。`limit` 的 `maxConcurrent` 为 1–64 整数或 null（不另设上限）。`drain` 暂停全部成员并阻止后来成员新领取，不中断在途；`release` 只解除本级排空，设备仍暂停，上级排空仍有效。资源分组必须已有设备；每模式最多 512 条策略。归属编辑不能更改 Worker、serial、入口或账号，不调用外部服务。
 

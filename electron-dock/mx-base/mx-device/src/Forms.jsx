@@ -1,24 +1,31 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useId } from "react";
 import { X } from "@phosphor-icons/react";
 import { defaultDurationMs } from "./data.js";
 import { requestId } from "./request-id.mjs";
-export function Modal({ title, children, onClose }) {
+export function Modal({ title, children, onClose, className }) {
+  const titleId = useId();
   const ref = useRef(null);
   useEffect(() => {
-    ref.current.showModal();
-    return () => ref.current?.close();
+    const dialog = ref.current;
+    const opener = document.activeElement;
+    dialog.showModal();
+    return () => {
+      dialog.close();
+      if (opener?.isConnected) opener.focus();
+    };
   }, []);
   return (
     <dialog
       ref={ref}
+      className={className}
       onCancel={(e) => {
         e.preventDefault();
         onClose();
       }}
-      aria-labelledby="dialog-title"
+      aria-labelledby={titleId}
     >
       <div className="modal-head">
-        <h2 id="dialog-title">{title}</h2>
+        <h2 id={titleId}>{title}</h2>
         <button className="icon-button" aria-label="关闭弹窗" onClick={onClose}>
           <X size={22} />
         </button>
