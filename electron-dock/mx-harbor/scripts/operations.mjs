@@ -8,17 +8,15 @@ import { readConfig } from "../apps/server/config.mjs";
 import {
   operationSettings,
   saveOperationSettings,
-  firstInstallInputs,
+  enrollmentInputs,
 } from "./bootstrap.mjs";
-// Host deployment runs before npm ci in the image. This shared source uses only Node built-ins.
-import { readApplicationSsoProfile } from "../../mx-common/src/identity/profile.mjs";
 const requestedAction = process.argv[2] || "help",
   action = ["migrate", "restart"].includes(requestedAction)
     ? "deploy"
     : requestedAction,
   namespace = "mx-harbor";
 const help =
-  "Usage: bash scripts/manage.sh ops internal-production deploy|status|logs|plan\nDeploy includes migration, application restart and readiness verification. migrate/restart are compatibility aliases for deploy.\nFirst deploy discovers and saves secrets/operations.json from the current Kubernetes context and local node. SSO profile and gateway credential are required for first enrollment; retained Kubernetes Secret takes precedence.";
+  "Usage: bash scripts/manage.sh ops internal-production deploy|status|logs|plan\nDeploy includes migration, application restart and readiness verification. migrate/restart are compatibility aliases for deploy.\nFirst deploy discovers and saves secrets/operations.json from the current Kubernetes context and local node. Missing SSO/Hub enrollment does not block deployment or migrations; integrations are resolved at runtime. Retained Kubernetes Secret takes precedence.";
 if (action === "help") {
   console.log(help);
   process.exit(0);
@@ -130,7 +128,7 @@ try {
       "Harbor: 已生成 secrets/operations.json，固定当前集群、本机节点和 Hub 上游。",
     );
   }
-  // Check all first-install files before any namespace, database or workload mutation.
+  // Validate supplied enrollment files; missing external integration is allowed.
   const retained = read([
     "get",
     "secret",
@@ -144,7 +142,7 @@ try {
       throw Error(
         "Installed Harbor runtime Secret is missing; restore it before deploying",
       );
-    firstInstallInputs();
+    enrollmentInputs();
   }
 } catch (error) {
   console.error(`Harbor: ${error.message}`);
@@ -199,7 +197,6 @@ try {
       throw Error(
         "Installed Harbor runtime Secret is missing; restore it before deploying",
       );
-    const { profile, gatewayToken } = firstInstallInputs();
     // This provisions only mx_harbor and preserves the mx-common product Secret on repeats.
     const kubeconfigPath = join(temp, "kubeconfig");
     writeFileSync(
@@ -220,20 +217,22 @@ try {
       { env: { ...process.env, KUBECONFIG: kubeconfigPath } },
     ).stdout.trim();
     data = {
-      "profile.json": profile,
       MX_HARBOR_DATABASE_URL: db,
-      MX_HARBOR_GATEWAY_TOKEN: gatewayToken,
       MX_HARBOR_HUB_ADMIN_ORIGIN: settings.hubAdminOrigin,
       MX_HARBOR_SSO_PROFILE: "/run/harbor/profile.json",
       MX_HARBOR_PORT: "18220",
     };
   }
-  const profilePath = join(temp, "profile.json");
-  writeFileSync(profilePath, data["profile.json"], { mode: 0o600 });
-  readConfig(
-    { ...data, MX_HARBOR_SSO_PROFILE: profilePath },
-    readApplicationSsoProfile,
-  );
+  // Fill previously missing enrollment only; never rotate retained credentials.
+  const enrollment = enrollmentInputs(data);
+  if (enrollment.profile) data["profile.json"] = enrollment.profile;
+  if (enrollment.gatewayToken)
+    data.MX_HARBOR_GATEWAY_TOKEN = enrollment.gatewayToken;
+  readConfig(data);
+  if (!data["profile.json"] || !data.MX_HARBOR_GATEWAY_TOKEN)
+    console.log(
+      "Harbor: 外部接入待配置，继续数据库迁移和发布；运行时相关接口暂不可用。",
+    );
   if (data.MX_HARBOR_HUB_ADMIN_ORIGIN !== settings.hubAdminOrigin)
     throw Error("Retained upstream differs; explicit migration required");
   apply({

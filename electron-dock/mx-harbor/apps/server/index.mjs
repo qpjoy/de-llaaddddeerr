@@ -1,9 +1,9 @@
 import { createServer } from "node:http";
 import pg from "pg";
 import { readApplicationSsoProfile } from "@qpjoy/mx-common/identity/profile";
-import { readConfig } from "./config.mjs";
+import { readConfig, readDependencies } from "./config.mjs";
 import { createHarborApp } from "./app.mjs";
-const config = readConfig(process.env, readApplicationSsoProfile),
+const config = readConfig(process.env),
   pool = config.preview
     ? null
     : new pg.Pool({
@@ -14,7 +14,14 @@ const config = readConfig(process.env, readApplicationSsoProfile),
       });
 if (pool)
   await pool.query("SELECT 1 FROM app_auth.browser_sso_records LIMIT 0");
-const server = createServer(createHarborApp({ config, pool }));
+const server = createServer(
+  createHarborApp({
+    config,
+    pool,
+    resolveDependencies: () =>
+      readDependencies(process.env, readApplicationSsoProfile),
+  }),
+);
 server.requestTimeout = 30000;
 server.headersTimeout = 10000;
 server.listen(config.port, config.host, () =>

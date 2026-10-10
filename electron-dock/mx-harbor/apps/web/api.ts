@@ -13,8 +13,11 @@ export async function request<T = any>(
   });
   const result = await response.json();
   if (!response.ok)
-    throw new Error(
-      result.message || result.error?.message || "服务暂不可用，请稍后重试",
+    throw Object.assign(
+      new Error(
+        result.message || result.error?.message || "服务暂不可用，请稍后重试",
+      ),
+      { status: response.status },
     );
   return result;
 }

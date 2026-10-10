@@ -36,15 +36,20 @@ export function workload({
           },
         ]
       : [
-          "MX_HARBOR_DATABASE_URL",
-          "MX_HARBOR_GATEWAY_TOKEN",
-          "MX_HARBOR_HUB_ADMIN_ORIGIN",
-          "MX_HARBOR_SSO_PROFILE",
-          "MX_HARBOR_PORT",
-        ].map((name) => ({
-          name,
-          valueFrom: { secretKeyRef: { name: secret, key: name } },
-        })),
+          { name: "MX_HARBOR_SSO_PROFILE", value: "/run/harbor/profile.json" },
+          {
+            name: "MX_HARBOR_GATEWAY_TOKEN_FILE",
+            value: "/run/harbor/gateway-token",
+          },
+          ...[
+            "MX_HARBOR_DATABASE_URL",
+            "MX_HARBOR_HUB_ADMIN_ORIGIN",
+            "MX_HARBOR_PORT",
+          ].map((name) => ({
+            name,
+            valueFrom: { secretKeyRef: { name: secret, key: name } },
+          })),
+        ],
     volumeMounts: job
       ? undefined
       : [{ name: "identity", mountPath: "/run/harbor", readOnly: true }],
@@ -97,8 +102,12 @@ export function workload({
             name: "identity",
             secret: {
               secretName: secret,
+              optional: true,
               defaultMode: 288,
-              items: [{ key: "profile.json", path: "profile.json" }],
+              items: [
+                { key: "profile.json", path: "profile.json" },
+                { key: "MX_HARBOR_GATEWAY_TOKEN", path: "gateway-token" },
+              ],
             },
           },
         ],

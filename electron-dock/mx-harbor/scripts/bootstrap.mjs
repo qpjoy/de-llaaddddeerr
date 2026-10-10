@@ -12,6 +12,8 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { readApplicationSsoProfile } from "../../mx-common/src/identity/profile.mjs";
 
+import { DEFAULT_HUB_ORIGIN } from "../apps/server/config.mjs";
+
 const file = "secrets/operations.json";
 function validate(settings) {
   if (
@@ -137,20 +139,8 @@ export function operationSettings({ run, action, env = process.env }) {
     throw Error(
       "保留的 Hub 上游与 MX_HARBOR_HUB_ADMIN_ORIGIN 不一致，停止自动发现。",
     );
-  if (!hubAdminOrigin) {
-    const service = get("mx-insight-hub", [
-      "get",
-      "service",
-      "mx-insight-hub-admin",
-      "--ignore-not-found",
-    ]);
-    if (!service?.spec?.ports?.some((port) => port.port === 18151))
-      throw Error(
-        "未发现 Hub Admin Service 的 18151 端口；先完成 Hub 部署，或显式设置 MX_HARBOR_HUB_ADMIN_ORIGIN。",
-      );
-    hubAdminOrigin =
-      "http://mx-insight-hub-admin.mx-insight-hub.svc.cluster.local:18151";
-  }
+  // DNS is resolved by the running BFF; Hub need not be installed during deploy.
+  hubAdminOrigin ||= DEFAULT_HUB_ORIGIN;
   const settings = validate({
     context,
     clusterUid: cluster?.metadata?.uid,
@@ -174,7 +164,7 @@ export function saveOperationSettings(settings) {
   }
 }
 
-export function firstInstallInputs() {
+export function enrollmentInputs(retained = {}) {
   const issues = [];
   let profile, gatewayToken;
   for (const [path, description] of [
@@ -187,10 +177,10 @@ export function firstInstallInputs() {
       "需至少 32 字符的独立网关凭据，并与 Hub Portal 使用同一份",
     ],
   ]) {
-    if (!existsSync(path)) {
-      issues.push(`${path} 缺失：${description}`);
-      continue;
-    }
+    const key = path.endsWith(".json")
+      ? "profile.json"
+      : "MX_HARBOR_GATEWAY_TOKEN";
+    if (retained[key] || !existsSync(path)) continue;
     try {
       if (!statSync(path).isFile() || statSync(path).mode & 0o077)
         throw Error();
@@ -210,7 +200,7 @@ export function firstInstallInputs() {
   }
   if (issues.length)
     throw Error(
-      `首次部署配置未完成：\n- ${issues.join("\n- ")}\n尚未创建数据库、运行迁移或重启应用。详见 docs/implementation-and-operations.md。`,
+      `接入配置无效：\n- ${issues.join("\n- ")}\n请修复已有文件；缺少接入文件不阻止部署。`,
     );
   return { profile, gatewayToken };
 }

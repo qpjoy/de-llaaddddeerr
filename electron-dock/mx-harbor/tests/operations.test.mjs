@@ -384,28 +384,58 @@ test("plan stays offline and status discovery never writes missing configuration
   assertReadOnly(f.calls());
 });
 
-test("first deploy reports all missing credentials before any cluster mutation", (t) => {
+test("deploy migrates without enrollment or Hub and later imports missing enrollment without rotating the database", (t) => {
   const f = fixture(t, { fresh: true });
+  const profile = readFileSync(
+    join(f.dir, "secrets/identity/profile.json"),
+    "utf8",
+  );
   for (const path of [
     "operations.json",
     "identity/profile.json",
     "gateway-token",
   ])
     rmSync(join(f.dir, "secrets", path));
-  const result = f.run("deploy");
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /secrets\/identity\/profile.json 缺失/);
-  assert.match(result.stderr, /secrets\/gateway-token 缺失/);
-  assert.doesNotMatch(result.stderr, /ENOENT|at file:/);
-  assert.equal(existsSync(join(f.dir, "secrets/operations.json")), true);
-  assertReadOnly(f.calls());
+  const result = f.run("deploy", { HARBOR_TEST_NO_HUB: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /外部接入待配置/);
+  assertFullDeploy(f.calls());
+  assert.ok(!f.calls().some((c) => c.args.includes("mx-insight-hub-admin")));
+  const old = JSON.parse(
+    readFileSync(join(f.dir, "runtime.json"), "utf8"),
+  ).data;
+  assert.equal(old["profile.json"], undefined);
+  assert.equal(old.MX_HARBOR_GATEWAY_TOKEN, undefined);
+  const count = f.calls().length;
+  assert.equal(f.run("deploy").status, 0);
+  assertFullDeploy(f.calls().slice(count));
+  writeFileSync(join(f.dir, "secrets/identity/profile.json"), profile, {
+    mode: 0o600,
+  });
+  writeFileSync(join(f.dir, "secrets/gateway-token"), "g".repeat(43), {
+    mode: 0o600,
+  });
+  const enrolled = f.run("deploy");
+  assert.equal(enrolled.status, 0, enrolled.stderr);
+  const current = JSON.parse(
+    readFileSync(join(f.dir, "runtime.json"), "utf8"),
+  ).data;
+  assert.equal(current.MX_HARBOR_DATABASE_URL, old.MX_HARBOR_DATABASE_URL);
+  assert.equal(
+    Buffer.from(current["profile.json"], "base64").toString(),
+    profile,
+  );
+  assert.equal(
+    Buffer.from(current.MX_HARBOR_GATEWAY_TOKEN, "base64").toString(),
+    "g".repeat(43),
+  );
+  assert.equal(f.calls().filter((c) => c.cmd === "bash").length, 1);
 });
 
 test("discovery refuses unknown targets or denied Secret access without saving settings", (t) => {
   for (const flag of [
     "HARBOR_TEST_REMOTE_NODE",
     "HARBOR_TEST_AMBIGUOUS_NODE",
-    "HARBOR_TEST_NO_HUB",
     "HARBOR_TEST_SECRET_DENIED",
   ]) {
     const f = fixture(t, { fresh: true });

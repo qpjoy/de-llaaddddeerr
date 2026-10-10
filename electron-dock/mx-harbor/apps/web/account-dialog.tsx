@@ -44,27 +44,47 @@ export function AccountDialog({
   const [options, setOptions] = useState<AccountOptions | null>(null),
     [register, setRegister] = useState(false),
     [error, setError] = useState(""),
+    [unavailable, setUnavailable] = useState(false),
+    [retry, setRetry] = useState(0),
+    [checking, setChecking] = useState(false),
     [busy, setBusy] = useState(false),
     [show, setShow] = useState(false);
   useEffect(() => {
     if (!open || preview) return;
     let active = true;
+    setChecking(true);
+    setError("");
     request<AccountOptions>("/auth/sso/form")
       .then((value) => {
         if (active) {
           setOptions(value);
+          setUnavailable(false);
           setRegister(value.view === "register");
         }
       })
-      .catch(() => {
-        if (active) setOptions(null);
+      .catch((error) => {
+        if (active) {
+          setOptions(null);
+          const unavailable = !error.status || error.status >= 500;
+          setUnavailable(unavailable);
+          if (unavailable)
+            setError(error.message || "账号服务暂不可用，请稍后重试。");
+        }
+      })
+      .finally(() => {
+        if (active) setChecking(false);
       });
     return () => {
       active = false;
     };
-  }, [open, preview]);
+  }, [open, preview, retry]);
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (checking) return;
+    if (unavailable) {
+      setRetry((value) => value + 1);
+      return;
+    }
     if (preview) {
       setError("组件预览不创建账号或提交登录。");
       return;
@@ -163,7 +183,7 @@ export function AccountDialog({
               邀请码注册
             </Button>
           </div>
-          <form onSubmit={submit} aria-busy={busy}>
+          <form onSubmit={submit} aria-busy={busy || checking}>
             <FieldGroup>
               {(options || preview) && (
                 <>
@@ -263,17 +283,22 @@ export function AccountDialog({
                 className="auth-submit"
                 disabled={
                   busy ||
+                  checking ||
                   (register &&
                     !!options &&
                     options.policy?.mode !== "invite_code")
                 }
               >
-                {busy ? <Spinner /> : null}
-                {!options && !preview
-                  ? "继续安全登录"
-                  : register
-                    ? "注册并进入数港"
-                    : "登录"}
+                {busy || checking ? <Spinner /> : null}
+                {checking
+                  ? "连接中"
+                  : unavailable
+                    ? "重试连接"
+                    : !options && !preview
+                      ? "继续安全登录"
+                      : register
+                        ? "注册并进入数港"
+                        : "登录"}
                 <ArrowRight />
               </Button>
             </FieldGroup>
@@ -281,9 +306,14 @@ export function AccountDialog({
           <p className="auth-register-hint">
             忘记密码或缺少邀请，请联系管理员。已开通账号无需再次填写邀请码。
           </p>
-          <a className="harbor-account-switch" href="/auth/sso/login?select=1">
-            选择其他已登录账号
-          </a>
+          {!unavailable && !checking && (
+            <a
+              className="harbor-account-switch"
+              href="/auth/sso/login?select=1"
+            >
+              选择其他已登录账号
+            </a>
+          )}
           <DialogClose
             className="auth-close"
             aria-label="关闭登录"

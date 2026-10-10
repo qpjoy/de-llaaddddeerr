@@ -16,7 +16,7 @@ MX_HARBOR_PREVIEW=1 npm start
 
 另一个终端执行 `npm run dev`，打开 `http://127.0.0.1:4278/`；设计对照入口为 `http://127.0.0.1:4278/demos/ui-design-harbor/`。也可使用 `npm run dev:gallery` 在 4279 单独启动设计对照。
 
-预览模式不连接真实账号、数据库或支付；gallery 表单不会创建账号。生产模式必须提供 SSO 和后端配置，缺失时启动失败，不会回退到演示用户。生产服务不开放 `/demos/`。
+预览模式不连接真实账号、数据库或支付；gallery 表单不会创建账号。生产模式需要 Harbor 自有数据库及已完成的迁移；SSO、Hub 尚未接入时仍可启动并展示首页，相关接口返回 503，不会回退到演示用户。生产服务不开放 `/demos/`。
 
 ## 当前目录
 
@@ -36,13 +36,13 @@ MX_HARBOR_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh ops internal-
 
 `deploy` 一次完成配置保留与校验、镜像构建/导入、幂等迁移、应用更新与自动重启、rollout 和健康检查。每次部署使用新镜像触发一次 Pod 替换，无需另行运行 `migrate` 或 `restart`。
 
-首次缺少 `secrets/operations.json` 时，自动发现当前 Kubernetes context、集群 UID、本机节点和 Hub Admin Service，将配置以 0600 权限保存。已有配置始终保留；后续不会因当前 context 变化而切换部署目标。首次接入的 SSO profile 和与 Hub 共享的独立网关凭据仍需准备，脚本会在创建数据库或更新应用前一次列出所有缺失或无效项。
+首次缺少 `secrets/operations.json` 时，自动发现当前 Kubernetes context、集群 UID 和本机节点，将配置以 0600 权限保存。Hub 默认使用固定的集群 Service DNS，部署时不要求 Hub 在线。已有配置始终保留；后续不会因当前 context 变化而切换部署目标。SSO profile、网关凭据缺失不阻止建库、迁移或发布。以后补齐本地接入文件再运行同一 deploy，会只补充 Secret 中缺失的配置，保留数据库和既有密钥。运行中的 Harbor 按请求读取挂载的接入文件，Secret 投影更新后即可发现，无需为接入配置单独重启。
 
 部署宿主机无需先运行 `npm ci`。管理脚本仅使用 Node 标准库与相邻 `mx-common` 的配置校验源码；应用依赖由 Docker 构建阶段按 lockfile 安装。拉取项目时需保留相邻的 `electron-dock/mx-common` 目录。
 
 重复执行保留数据库、SSO 密钥和网关凭据；已应用迁移校验通过后跳过。迁移失败不更新应用，发布或健康检查失败返回非零。旧 `migrate`、`restart` 命令兼容为完整 `deploy` 的别名，不再提供分步部署。
 
-只查看状态可运行 `bash scripts/manage.sh ops internal-production status`。
+只查看 K8s 状态可运行 `bash scripts/manage.sh ops internal-production status`。`/ready` 检查 Harbor 数据库和会话表，`/status` 返回外部接入配置状态（`pending` / `configured` / `invalid`），不返回地址或凭据；`configured` 不代表远端服务当前可用。
 
 兼容 `MX_INSIGHT_BUILD_PROXY` 作为构建代理的备用变量。命令只管理 Harbor，不自动发布 Launcher、不运行 Hub 迁移、不重启 Hub/Pay、不 `ensure` 全部 mx-common。
 

@@ -24,19 +24,27 @@ export function createHarborApp({
   config,
   pool,
   sso: injectedSso,
+  resolveDependencies = () => config,
   fetch: fetcher = fetch,
   staticRoot = resolve("dist/web"),
 }) {
-  const sso =
-    injectedSso ||
-    (config.preview
-      ? null
-      : createApplicationSso({
-          settings: config.sso,
-          store: new PostgresSsoStore(pool, config.sso.sessionKey),
-          applicationName: "数港",
-          navigation: { mounts: ["/"] },
-        }));
+  let cachedSso, cachedProfile;
+  function ssoFor(integration) {
+    if (config.preview) return null;
+    if (injectedSso) return injectedSso;
+    if (!integration.sso) return null;
+    const profile = JSON.stringify(integration.sso);
+    if (profile !== cachedProfile) {
+      cachedSso = createApplicationSso({
+        settings: integration.sso,
+        store: new PostgresSsoStore(pool, integration.sso.sessionKey),
+        applicationName: "数港",
+        navigation: { mounts: ["/"] },
+      });
+      cachedProfile = profile;
+    }
+    return cachedSso;
+  }
   return async (req, res) => {
     const id = randomUUID();
     res.setHeader("x-request-id", id);
@@ -57,12 +65,21 @@ export function createHarborApp({
           mode: config.preview ? "preview" : "production",
         });
       if (url.pathname === "/ready" && req.method === "GET") {
-        if (!config.preview) await pool.query("SELECT 1");
+        if (!config.preview)
+          await pool.query(
+            "SELECT 1 FROM app_auth.browser_sso_records LIMIT 0",
+          );
         return json(config.preview ? 503 : 200, { ready: !config.preview });
       }
+      if (url.pathname === "/status" && req.method === "GET")
+        return json(200, {
+          service: "mx-harbor",
+          dependencies: resolveDependencies().dependencies,
+        });
       if (config.preview && url.pathname === "/auth/sso/session")
         return json(200, { active: false, preview: true });
       if (url.pathname.startsWith("/auth/sso/")) {
+        const sso = ssoFor(resolveDependencies());
         if (!sso)
           throw new SsoError(503, "auth_unavailable", "账号服务尚未配置。");
         if (await sso.handle(req, res, url)) return;
@@ -72,20 +89,28 @@ export function createHarborApp({
         const path = url.pathname.slice("/bff/v1".length);
         if (!permittedCustomerRoute(req.method, path))
           throw new SsoError(404, "not_found", "此客户功能尚未开放。");
+        const integration = resolveDependencies(),
+          sso = ssoFor(integration);
         if (!sso)
           throw new SsoError(503, "service_unavailable", "客户服务尚未配置。");
         const session = await sso.sessionFor(req);
         if (!session) throw new SsoError(401, "login_required", "请先登录。");
         await sso.verifySession(session, true);
+        if (!integration.upstream || !integration.gatewayToken)
+          throw new SsoError(
+            503,
+            "customer_service_unavailable",
+            "客户服务尚未接入，请稍后重试。",
+          );
         const upstream = await fetcher(
-          `${config.upstream}/internal/v1/portal${path}${url.search}`,
+          `${integration.upstream}/internal/v1/portal${path}${url.search}`,
           {
             redirect: "error",
             signal: AbortSignal.timeout(15000),
             headers: {
               authorization: `Bearer ${session.accessToken}`,
               "x-mx-harbor-subject": session.subject,
-              "x-mx-harbor-gateway": config.gatewayToken,
+              "x-mx-harbor-gateway": integration.gatewayToken,
               "x-request-id": id,
             },
           },
@@ -105,7 +130,7 @@ export function createHarborApp({
           payload.data.schema = {
             ...payload.data.schema,
             info: { ...payload.data.schema.info, title: "Data Harbor API" },
-            servers: [{ url: config.sso.origin + "/api/v1" }],
+            servers: [{ url: integration.sso.origin + "/api/v1" }],
           };
           payload.data.html = null;
         }

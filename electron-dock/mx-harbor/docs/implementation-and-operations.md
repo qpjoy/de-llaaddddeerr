@@ -20,9 +20,9 @@
 
 Harbor 注册当前仅支持关闭或邀请码两种模式；现有其他应用的开放注册保留。飞书注册和直接飞书登录动作在 Harbor 服务端拒绝，既有统一账号的历史绑定不被删除。忘记密码仍由管理员处理；“验证旧密码后改密”不是自助密码找回。
 
-## 首次接入配置
+## 外部应用接入配置（可在部署后完成）
 
-正式域名尚待确定。示例中的 `harbor.example.com` 必须统一替换；不能直接使用示例域名部署。
+Harbor 可以先完成建库、迁移和发布，随后接入 Auth、Hub。下面是启用登录和客户业务接口的配置，不是迁移前置条件。正式域名尚待确定。示例中的 `harbor.example.com` 必须统一替换；不能直接使用示例域名部署。
 
 1. 使用 Launcher 已有接入应用流程登记 `mx-harbor`，origin 为正式 HTTPS 域名，audience 为 `mx-harbor`，选择 public entry。原 CLI 为：
 
@@ -33,18 +33,22 @@ Harbor 注册当前仅支持关闭或邀请码两种模式；现有其他应用�
    该命令在 `mx-launcher` 运行，只登记配置。发布 Auth 仍走原流程；Harbor 日常 deploy 不自动执行它。Launcher App Center 也应登记 Harbor 展示条目，方便管理员从用户中心选择应用授权。
 
 2. Harbor 的 `secrets/identity/profile.json` 保留原 clientSecret/sessionKey，权限 0600。新建独立 `secrets/gateway-token`，至少 32 字符，权限 0600；不要复用 Hub Admin Token。
-3. 无需手工创建 `secrets/operations.json`。首次 `deploy` 从当前 kubeconfig 发现 context、`kube-system` namespace UID，并通过 `kubernetes.io/hostname` 标签唯一匹配本机节点；确认 Hub Admin Service 存在且提供 18151 端口后，使用 `http://mx-insight-hub-admin.mx-insight-hub.svc.cluster.local:18151`。校验通过后将配置以 0600 权限保存，后续不随当前 context 变化重新选择目标。如已安装 Harbor，则恢复 runtime Secret 中保留的 Hub 上游，并检查原 Deployment 的节点匹配本机。
+3. 无需手工创建 `secrets/operations.json`。首次 `deploy` 从当前 kubeconfig 发现 context、`kube-system` namespace UID，并通过 `kubernetes.io/hostname` 标签唯一匹配本机节点；Hub 上游默认使用 `http://mx-insight-hub-admin.mx-insight-hub.svc.cluster.local:18151`，由运行中的 BFF 通过集群 DNS 解析，不在部署阶段查询或等待 Hub Service。校验通过后将配置以 0600 权限保存，后续不随当前 context 变化重新选择目标。如已安装 Harbor，则恢复 runtime Secret 中保留的 Hub 上游，并检查原 Deployment 的节点匹配本机。
 4. 已有 mx-common PostgreSQL 必须健康。Harbor 首次 deploy 仅调用 `mx-common provision mx-harbor`，捕获 DSN 写入 Harbor Secret，不输出密码、不部署整套共享服务。已有角色但遗失 Secret 时，沿用 mx-common 的拒绝自动换密码保护。
 5. 在 Hub 的 namespace 创建 `mx-harbor-portal` Secret，包含同一 `profile.json` 与 `gateway-token`。Hub 需要能够验证这个独立 OIDC client；它不会签发 Harbor 浏览器会话。保留 Hub 原 SSO profile 及其 canonical audience。
 6. 对兼容版本的 Hub Admin 进行一次性接入发布：使用 `deploy/k8s/hub-portal-enrollment.patch.yaml` 的环境变量/挂载，以及 `hub-portal-ingress.yaml` 的精确 namespace + Pod 标签入站规则。将补丁纳入 Hub 实际部署配置，避免后续 Hub 发布丢失接入。Harbor deploy 不替用户执行这次 Hub 发布。
 7. 使用独立 Domestic/Internal vhost 模板配置正式域名。参考部署文件为用户指定的 `de-mingxi/compass/deploy/nginx/conf.d/40-hub.conf`；本批没有修改它。Harbor 新配置拒绝 `/internal/` 与 `/demos/`，SSO cookie 留在 Harbor 域名。机器 `/api/v1/` 保留原 Hub API 合同，Cookie 不转发，不重复计费。
 8. 完成受控部署验收后，管理员在 Internal 单独打开 Harbor 邀请，保持 Hub 原开放注册设置。旧账号也必须获得 Harbor 邀请或直接授权。
 
-初次依赖接入与日常部署是不同操作。Hub、Auth 的新能力必须先完成各自兼容发布；仅运行 Harbor deploy 不会使尚未发布的后端能力自动生效。
+Harbor 自身发布不要求先发布 Launcher/Hub。启用真实登录和客户服务前，Hub、Auth 的新能力仍须完成各自兼容发布；仅运行 Harbor deploy 不会登记新的 Auth client 或启用 Hub Portal。
 
 首次发现可用 `MX_HARBOR_KUBE_CONTEXT`、`MX_HARBOR_NODE` 和 `MX_HARBOR_HUB_ADMIN_ORIGIN` 指定目标；节点仍须匹配本机 hostname。也可按 `deploy/operations.example.json` 手工填写配置，其中 `node` 是 Kubernetes 节点名称。普通 Pod 中的 `127.0.0.1` 不是宿主机，不能作为 Hub 上游。已有操作配置无效、与显式环境变量冲突或原部署位于其他节点时，脚本停止，不覆盖配置或迁移目标。
 
-首次部署会在任何集群写入、数据库创建和应用重启前，一次检查 `secrets/identity/profile.json` 与 `secrets/gateway-token` 的存在、内容和私密权限。缺失时输出完整清单；不会自行生成未在 Auth 登记的 SSO client，也不会替换 Hub 已使用的网关凭据。此时自动生成的操作配置可供修复后直接重跑同一命令。
+首次缺少 `secrets/identity/profile.json` 或 `secrets/gateway-token` 时只提示外部接入待配置，继续建库、迁移和发布。已有但无效的本地文件仍需修复。后续补齐文件后执行同一 `deploy`，仅填充 runtime Secret 中缺失的接入字段，保留已有数据库、clientSecret/sessionKey 和网关凭据；不会自行生成未在 Auth 登记的 SSO client，也不会覆盖 Hub 正在使用的凭据。
+
+Harbor Pod 将 runtime Secret 的 `profile.json` 与 `MX_HARBOR_GATEWAY_TOKEN` 作为可选文件投影到 `/run/harbor/profile.json`、`/run/harbor/gateway-token`，不使用 subPath。每次 Auth/BFF 请求重新读取，Kubernetes 发布 Secret 更新后会自动发现；投影更新可能有延迟。受信任管理员也可通过现有 Secret 管理流程补齐这两个字段，无需重启 Harbor。未挂载文件的本地服务可使用 `MX_HARBOR_SSO_PROFILE`、`MX_HARBOR_GATEWAY_TOKEN_FILE`，旧的 `MX_HARBOR_GATEWAY_TOKEN` 环境变量仍兼容。
+
+Hub 固定地址由 `MX_HARBOR_HUB_ADMIN_ORIGIN` 指定，默认集群 DNS；请求失败返回 503，下次授权请求重新连接。Auth 使用可信 profile 中的 issuer 执行 OIDC 发现。没有跨 namespace 读取 Secret 的 Pod 权限，没有匿名业务数据或假登录。登录弹窗会显示不可用信息并支持重试。
 
 ## K8s 管理合同
 
@@ -59,7 +63,7 @@ Harbor 注册当前仅支持关闭或邀请码两种模式；现有其他应用�
 | `deploy`              | 持有 Harbor 专用锁，校验保留配置、构建/导入唯一镜像、幂等迁移、更新 Deployment/Service 并自动重启，等待 rollout 和 readiness |
 | `migrate` / `restart` | 兼容旧命令，均执行完整 `deploy` 流程，不再只迁移或只重启                                                                     |
 
-首次配置完成后，日常部署只需一个命令：
+首次安装和后续更新使用同一个命令（需要已有 mx-common PostgreSQL 健康）：
 
 ```bash
 MX_HARBOR_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh ops internal-production deploy
@@ -71,7 +75,9 @@ Harbor 采用一个副本、固定节点、`Recreate`，不是高可用/零停�
 
 迁移只取得 DB Secret，不挂载 SSO/网关凭据。独立迁移记录保存 SHA256；已应用文件发生漂移会失败。即使释放锁失败也清理临时私密配置。迁移失败不替换运行中的应用；Job 终止未确认时保留锁，需先排查，不能盲目删除锁重试。锁释放使用原 ConfigMap UID precondition。
 
-`mx-harbor-runtime` Secret 优先于本地文件。丢失本地 identity profile 不自动轮换会话密钥；已经安装但 runtime Secret 丢失时拒绝继续。首次初始化需要本地配置，后续配置变更需明确操作，不通过普通 deploy 暗中替换 identity/source。
+`mx-harbor-runtime` Secret 优先于本地文件。丢失本地 identity profile 不自动轮换会话密钥；已经安装但 runtime Secret 丢失时拒绝继续。缺少外部接入文件允许首次初始化；后续普通 deploy 只补充缺失字段，不替换已经登记的 identity/source。
+
+`/health` 表示进程存活；`/ready` 校验 Harbor 数据库及迁移后的会话表，不等待 Auth/Hub。`/status` 仅返回外部接入配置状态：`pending`（尚未提供）、`configured`（本地配置有效）、`invalid`（配置无效），不泄露域名或密钥。该状态不宣称远端服务在线；真实接口仍执行认证、权限检查和网络调用。
 
 ## 本批验证证据
 
@@ -81,7 +87,9 @@ Harbor 采用一个副本、固定节点、`Recreate`，不是高可用/零停�
 - 兼容性：SDK Auth、Launcher 网络准入、身份管理台测试无失败。有测试环境条件的浏览器/独立网络数据库用例仍可能跳过，不能计作生产回归。
 - 浏览器：桌面双栏邀请注册弹窗及窄屏滚动布局已检查。设计预览不创建账号，不调用供应商。
 
-首批核心回归结果：Harbor 8 项通过；Launcher Auth/注册 15 项通过、1 项条件跳过；Hub Portal/原 SSO/身份 27 项通过。后续一键部署调整的 12 项操作回归均通过，覆盖首次安装、自动发现与保存操作配置、配置丢失后的恢复和节点保护、缺失凭据汇总、连续部署保留凭据、兼容入口、迁移失败、rollout/readiness 失败和部署锁清理；使用命令替身与本地测试数据，未操作真实集群。
+首批核心回归结果：Harbor 8 项通过；Launcher Auth/注册 15 项通过、1 项条件跳过；Hub Portal/原 SSO/身份 27 项通过。后续一键部署调整的 12 项操作回归均通过，覆盖首次安装、自动发现与保存操作配置、配置丢失后的恢复和节点保护、无接入配置时完成部署与后续补齐、连续部署保留凭据、兼容入口、迁移失败、rollout/readiness 失败和部署锁清理；使用命令替身与本地测试数据，未操作真实集群。
+
+本次解耦外部依赖验证：12 项部署回归与 7 项服务回归通过；真实 PostgreSQL 迁移用例因未配置临时数据库跳过，生产构建通过。服务回归覆盖缺少接入配置时首页/就绪可用、受保护接口拒绝访问、运行中配置加入/移除/损坏及 Hub 连接失败后恢复。
 
 Docker daemon 在本机不可用，因此没有构建容器镜像或执行真实 K8s 发布。未连接生产数据库，未进行生产 DNS/TLS/回调验收，没有创建生产账号、订单或付款。
 
