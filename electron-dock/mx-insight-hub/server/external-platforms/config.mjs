@@ -225,6 +225,18 @@ export function parseJustOneConfig(environment = process.env, {
       'MX_INSIGHT_JUSTONE_TIMEOUT_MS must not exceed 120000',
     )
   }
+  const connectTimeoutMs = positiveInteger(
+    environment.MX_INSIGHT_JUSTONE_CONNECT_TIMEOUT_MS,
+    Math.min(30_000, timeoutMs),
+    'MX_INSIGHT_JUSTONE_CONNECT_TIMEOUT_MS',
+  )
+  if (connectTimeoutMs > timeoutMs) {
+    throw new AppError(
+      500,
+      'invalid_configuration',
+      'MX_INSIGHT_JUSTONE_CONNECT_TIMEOUT_MS must not exceed MX_INSIGHT_JUSTONE_TIMEOUT_MS',
+    )
+  }
   const freshTtlMs = positiveInteger(
     environment.MX_INSIGHT_JUSTONE_FRESH_TTL_MS,
     60_000,
@@ -290,6 +302,7 @@ export function parseJustOneConfig(environment = process.env, {
     configurationError: null,
     costControlError,
     timeoutMs,
+    connectTimeoutMs,
     reservationLeaseMs,
     freshTtlMs,
     staleTtlMs,
@@ -341,6 +354,7 @@ export function disabledJustOneConfig(environment, error) {
     configurationError: safeJustOneConfigurationError(error),
     costControlError: null,
     timeoutMs: 120_000,
+    connectTimeoutMs: 30_000,
     freshTtlMs: 60_000,
     staleTtlMs: 7 * 86_400_000,
     unknownFingerprintCooldownMs: 15 * 60_000,

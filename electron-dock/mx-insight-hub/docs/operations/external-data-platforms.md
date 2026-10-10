@@ -125,6 +125,7 @@ cost requires an explicit operator decision.
    | Setting | Default | Purpose |
    | --- | ---: | --- |
    | `MX_INSIGHT_JUSTONE_TIMEOUT_MS` | 120000 | One dispatch deadline; maximum 120000 ms. |
+   | `MX_INSIGHT_JUSTONE_CONNECT_TIMEOUT_MS` | min(30000, total deadline) | JustOne-only TCP/TLS connection deadline. Must be positive and no greater than the total deadline; unset/blank uses the default. Does not add retries. |
    | `MX_INSIGHT_JUSTONE_FRESH_TTL_MS` | 60000 | Exact successful snapshot can avoid another call. |
    | `MX_INSIGHT_JUSTONE_STALE_TTL_MS` | 604800000 | Exact last-good fallback deadline. Keep at least the fresh TTL. |
    | `MX_INSIGHT_JUSTONE_MAX_CONCURRENCY` | 32 | Global in-process **live provider dispatch** ceiling. This is not a Hub cache-read QPS limit. |

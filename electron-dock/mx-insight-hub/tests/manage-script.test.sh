@@ -2316,6 +2316,8 @@ rm -f -- "$whitespace_marker"
 # fail-soft so an out-of-band bad value cannot take down admin/login/workers.
 for invalid_justone_assignment in \
   'MX_INSIGHT_JUSTONE_TIMEOUT_MS=120001' \
+  'MX_INSIGHT_JUSTONE_CONNECT_TIMEOUT_MS=120001' \
+  'MX_INSIGHT_JUSTONE_CONNECT_TIMEOUT_MS=0' \
   'MX_INSIGHT_JUSTONE_STALE_TTL_MS=59999' \
   'MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS=invalid' \
   'MX_INSIGHT_JUSTONE_BILLING_JSON={'

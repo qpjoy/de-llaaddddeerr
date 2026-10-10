@@ -334,6 +334,24 @@ test('JustOne activation is fail-closed and strict preflight validates TTL and p
   }
 })
 
+test('JustOne connection timeout is bounded and invalid settings isolate only the optional provider', () => {
+  const base = { MX_INSIGHT_LISTENER_MODE: 'public', MX_INSIGHT_STORE: 'memory', MX_INSIGHT_API_KEY_PEPPER: PEPPER }
+  assert.equal(loadConfig(base).justOne.connectTimeoutMs, 30_000)
+  assert.equal(loadConfig({ ...base, MX_INSIGHT_JUSTONE_TIMEOUT_MS: '5000' }).justOne.connectTimeoutMs, 5_000)
+  assert.equal(loadConfig({ ...base, MX_INSIGHT_JUSTONE_CONNECT_TIMEOUT_MS: '' }).justOne.connectTimeoutMs, 30_000)
+  assert.equal(loadConfig({ ...base, MX_INSIGHT_JUSTONE_CONNECT_TIMEOUT_MS: '15000' }).justOne.connectTimeoutMs, 15_000)
+  for (const value of ['0', '-1', '1.5', 'invalid', '120001']) {
+    const environment = { ...base, MX_INSIGHT_JUSTONE_CONNECT_TIMEOUT_MS: value }
+    assert.throws(() => preflightJustOneConfig(environment), /MX_INSIGHT_JUSTONE_CONNECT_TIMEOUT_MS/u)
+    const config = loadConfig(environment)
+    assert.equal(config.justOne.dispatchEnabled, false)
+    assert.equal(config.justOne.configurationError.code, 'invalid_configuration')
+    assert.equal(config.listenerMode, 'public')
+  }
+  assert.throws(() => preflightJustOneConfig({ ...base, MX_INSIGHT_JUSTONE_TIMEOUT_MS: '5000',
+    MX_INSIGHT_JUSTONE_CONNECT_TIMEOUT_MS: '5001' }), /must not exceed MX_INSIGHT_JUSTONE_TIMEOUT_MS/u)
+})
+
 test('explicit Elasticsearch URL wins over the Kubernetes service fallback', () => {
   const config = loadConfig({
     MX_INSIGHT_LISTENER_MODE: 'public',

@@ -1,6 +1,7 @@
 import { normalizeXhsDiscoveryRequest, projectXhsDiscovery } from '../contracts/xiaohongshu-discovery.mjs'
 import { nativeForwardingEndpoint, normalizeNativeForwardingRequest, nativeForwardingPayload } from '../contracts/native-forwarding.mjs'
 import { createHash } from 'node:crypto'
+import { Agent } from 'undici'
 import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
 import { HUB_USER_AGENT } from '../core/outbound-identity.mjs'
 import {
@@ -28,6 +29,7 @@ import {
 export const JUSTONE_BASE_URL = 'https://api.justoneapi.com'
 export const JUSTONE_DEFAULT_TIMEOUT_MS = 60_000
 export const JUSTONE_MAX_TIMEOUT_MS = 120_000
+export const JUSTONE_DEFAULT_CONNECT_TIMEOUT_MS = 30_000
 export const JUSTONE_DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 export const JUSTONE_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
@@ -94,6 +96,7 @@ function transportFailure(error, phase, context) {
     deadlineExceeded: context.signal.aborted,
     elapsedMs: Math.max(0, Math.round(performance.now() - context.startedAt)),
     timeoutMs: context.timeoutMs,
+    connectTimeoutMs: context.connectTimeoutMs,
   })
   try {
     context.logger?.warn?.('[external-platform] justone transport failure ' + JSON.stringify({
@@ -373,12 +376,14 @@ function succeededUnusable(httpStatus, errorCode, context) {
 export class JustOneAdapter {
   #fallbackToken
   #credentialResolver
+  #dispatcher
 
   constructor({
     token = null,
     credentialResolver = null,
     fetchImpl = globalThis.fetch,
     timeoutMs = JUSTONE_DEFAULT_TIMEOUT_MS,
+    connectTimeoutMs,
     maxResponseBytes = JUSTONE_DEFAULT_MAX_RESPONSE_BYTES,
     // Reports bounded transport evidence and unaccepted response shapes.
     // Optional so every existing construction keeps working unchanged.
@@ -402,12 +407,25 @@ export class JustOneAdapter {
       min: 1,
       max: JUSTONE_MAX_TIMEOUT_MS,
     })
+    this.connectTimeoutMs = boundedInteger(connectTimeoutMs, {
+      name: 'connectTimeoutMs',
+      fallback: Math.min(JUSTONE_DEFAULT_CONNECT_TIMEOUT_MS, this.timeoutMs),
+      min: 1,
+      max: this.timeoutMs,
+    })
     this.maxResponseBytes = boundedInteger(maxResponseBytes, {
       name: 'maxResponseBytes',
       fallback: JUSTONE_DEFAULT_MAX_RESPONSE_BYTES,
       min: 1_024,
       max: JUSTONE_MAX_RESPONSE_BYTES,
     })
+    // A fetch AbortSignal does not override undici's separate 10-second
+    // connection deadline. Scope this pool to JustOne, never the global agent.
+    this.#dispatcher = new Agent({ connect: { timeout: this.connectTimeoutMs } })
+  }
+
+  async close() {
+    await this.#dispatcher.close()
   }
 
   async resolveCredential() {
@@ -583,6 +601,7 @@ export class JustOneAdapter {
     const attemptCapturedAt = capturedAt ?? new Date()
     const baseArchiveContext = { request, capturedAt: attemptCapturedAt, secret: credential }
     const transportContext = { startedAt: performance.now(), timeoutMs: this.timeoutMs,
+      connectTimeoutMs: this.connectTimeoutMs,
       signal: controller.signal, endpointKey: request.endpointKey, logger: this.logger }
     let response
     try {
@@ -593,6 +612,7 @@ export class JustOneAdapter {
           redirect: 'error',
           cache: 'no-store',
           signal: controller.signal,
+          dispatcher: this.#dispatcher,
         })
       } catch (error) {
         throw ambiguous(

@@ -239,6 +239,7 @@ export async function createRuntime(config = loadConfig()) {
         token: config.justOne.token,
         credentialResolver: () => externalPlatformCredentialStore.readCredential('justone'),
         timeoutMs: config.justOne.timeoutMs,
+        connectTimeoutMs: config.justOne.connectTimeoutMs,
         // Same default the HTTP app uses, so an unaccepted upstream shape is
         // reported in the ordinary process log.
         logger: console,
@@ -629,6 +630,7 @@ export async function start(config = loadConfig()) {
     await runtime.notifications?.close()
     await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()))
     runtime.agent.close()
+    await runtime.justOneAdapter?.close()
     await runtime.store.close()
     await runtime.retrievalPool?.end()
     await runtime.pool?.end()

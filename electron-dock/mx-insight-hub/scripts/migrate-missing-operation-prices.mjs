@@ -101,7 +101,7 @@ export function planOperation(operation, { provider, events = [], defaultCurrenc
 }
 
 export function parseArgs(args) {
-  const options = { apply: false, all: false, provider: null, missingBudgetMinor: null }
+  const options = { apply: false, all: false, provider: null, missingBudgetMinor: null, operations: [] }
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
     if (arg === '--help') return { help: true }
@@ -110,6 +110,10 @@ export function parseArgs(args) {
     else if (arg === '--provider') {
       options.provider = args[++i]
       if (!/^[a-z][a-z0-9_-]*$/.test(options.provider || '')) throw new MigrationError('arguments', 'Invalid --provider')
+    } else if (arg === '--operation') {
+      const operation = args[++i]
+      if (!/^[a-z][a-z0-9._-]{0,127}$/.test(operation || '')) throw new MigrationError('arguments', 'Invalid --operation')
+      if (!options.operations.includes(operation)) options.operations.push(operation)
     } else if (arg === '--missing-budget-minor') {
       const value = args[++i]
       if (!/^\d+$/.test(value || '') || !nonnegative(Number(value))) throw new MigrationError('arguments', 'Invalid --missing-budget-minor')
@@ -117,6 +121,7 @@ export function parseArgs(args) {
     } else throw new MigrationError('arguments', 'Unknown argument; use --help')
   }
   if (options.all === Boolean(options.provider)) throw new MigrationError('arguments', 'Choose --all or --provider NAME')
+  if (options.operations.length && !options.provider) throw new MigrationError('arguments', '--operation requires --provider')
   if (options.missingBudgetMinor == null) throw new MigrationError('arguments', '--missing-budget-minor is required (100000 = 100000 calls at 0.01)')
   return options
 }
@@ -190,6 +195,8 @@ export async function migrate({ options, admin, audit, currencyFallback = provid
   const report = { mode: options.apply ? 'apply' : 'preview', generatedAt: now(),
     unitPrice: '0.01', missingBudgetMinor: options.missingBudgetMinor,
     plans: [], skipped: [], results: [], errors: [] }
+  const selected = new Set(options.operations || [])
+  const found = new Set()
   // Finish all reads and planning before any write. A failed inventory is not a
   // license to apply an incomplete, unreviewable batch.
   for (const provider of providers) {
@@ -203,6 +210,8 @@ export async function migrate({ options, admin, audit, currencyFallback = provid
     const configuredCurrency = detail.provider?.billing?.currency
     const defaultCurrency = configuredCurrency ?? await currencyFallback(provider.key)
     for (const operation of detail.operations) {
+      if (selected.size && !selected.has(operation.operationKey)) continue
+      found.add(operation.operationKey)
       const plan = planOperation(operation, {
         provider: provider.key, events: events.get(`${provider.key}/${operation.operationKey}`) || [],
         defaultCurrency, defaultCurrencySource: configuredCurrency ? 'provider_configuration' : 'provider_seed',
@@ -210,6 +219,9 @@ export async function migrate({ options, admin, audit, currencyFallback = provid
       })
       report[plan.action === 'apply' ? 'plans' : 'skipped'].push({ provider: provider.key, ...plan })
     }
+  }
+  if ([...selected].some(key => !found.has(key))) {
+    throw new MigrationError('operation_inventory', 'Selected operation not found; no writes attempted')
   }
   progress(`planned=${report.plans.length} skipped=${report.skipped.length} mode=${report.mode}`)
   const skippedCounts = new Map()
@@ -250,7 +262,7 @@ export async function migrate({ options, admin, audit, currencyFallback = provid
 export async function main(args = process.argv.slice(2)) {
   const options = parseArgs(args)
   if (options.help) {
-    console.log('Usage: node scripts/migrate-missing-operation-prices.mjs (--all | --provider NAME) --missing-budget-minor 100000 [--apply]\nDefault: read-only preview. Price: 0.01 in existing operation/provider currency. Existing prices and budgets are preserved. JSON report on stdout; progress on stderr.')
+    console.log('Usage: node scripts/migrate-missing-operation-prices.mjs (--all | --provider NAME) [--operation KEY ...] --missing-budget-minor 100000 [--apply]\nDefault: read-only preview. --operation limits one provider to exact operation keys. Price: 0.01 in existing operation/provider currency. Existing prices and budgets are preserved. JSON report on stdout; progress on stderr.')
     return 0
   }
   const admin = adminClient(process.env.MX_INSIGHT_ADMIN_BASE_URL || `http://127.0.0.1:${process.env.MX_INSIGHT_PORT || 18151}`, process.env.MX_INSIGHT_ADMIN_TOKEN)

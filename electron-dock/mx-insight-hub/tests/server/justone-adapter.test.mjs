@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { test } from 'node:test'
+import { getGlobalDispatcher } from 'undici'
 import {
   JUSTONE_BASE_URL,
   JustOneAdapter,
@@ -508,6 +510,69 @@ test('transport failure is ambiguous and is never retried', async () => {
   assert.equal(calls, 1)
 })
 
+test('connection timeout bounds a real stalled TLS handshake without a retry or a global dispatcher change', async t => {
+  const sockets = new Set()
+  let connections = 0
+  // Accept TCP but never answer the TLS ClientHello. No external host or
+  // supplier credential is used; this exercises undici's actual connector.
+  const server = createServer(socket => {
+    connections += 1
+    sockets.add(socket)
+    socket.on('error', () => {})
+    socket.on('data', () => {})
+    socket.on('close', () => sockets.delete(socket))
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const globalDispatcher = getGlobalDispatcher()
+  let dispatches = 0
+  const adapter = new JustOneAdapter({
+    token: 'synthetic-test-token',
+    timeoutMs: 5_000,
+    connectTimeoutMs: 100,
+    fetchImpl: (_url, options) => {
+      dispatches += 1
+      return fetch(`https://127.0.0.1:${server.address().port}/`, options)
+    },
+  })
+  t.after(async () => {
+    for (const socket of sockets) socket.destroy()
+    await adapter.close()
+    await new Promise(resolve => server.close(resolve))
+  })
+  await assert.rejects(() => adapter.searchProducts({ marketplace: 'taobao', query: 'fixture' }), error => {
+    assert.ok(error instanceof JustOneAmbiguousError)
+    assert.equal(error.evidence.errorCode, 'upstream_transport_error')
+    assert.equal(error.evidence.billed, null)
+    assert.equal(error.evidence.retryable, false)
+    const detail = error.archiveObjects[0].rawPayload.response.transportFailure
+    assert.deepEqual(detail.codes, ['UND_ERR_CONNECT_TIMEOUT'])
+    assert.equal(detail.deadlineExceeded, false)
+    assert.equal(detail.connectTimeoutMs, 100)
+    assert.equal(detail.timeoutMs, 5_000)
+    return true
+  })
+  assert.equal(dispatches, 1)
+  assert.equal(connections, 1)
+  assert.equal(getGlobalDispatcher(), globalDispatcher)
+})
+
+test('JustOne connection deadline stays within the total request deadline', async t => {
+  const adapters = []
+  t.after(async () => { await Promise.all(adapters.map(adapter => adapter.close())) })
+  for (const [timeoutMs, expected] of [[120_000, 30_000], [5_000, 5_000]]) {
+    const adapter = new JustOneAdapter({ token: 'fixture', timeoutMs })
+    adapters.push(adapter)
+    assert.equal(adapter.connectTimeoutMs, expected)
+  }
+  for (const connectTimeoutMs of [0, -1, 1.5, 5_001]) {
+    assert.throws(() => new JustOneAdapter({ token: 'fixture', timeoutMs: 5_000, connectTimeoutMs }),
+      /connectTimeoutMs/u)
+  }
+})
+
 test('all ecommerce marketplaces retain safe connection causes without changing the unknown outcome', async () => {
   for (const marketplace of ['taobao', 'tmall', 'jd', 'xianyu']) {
     let calls = 0
@@ -536,6 +601,7 @@ test('all ecommerce marketplaces retain safe connection causes without changing 
       assert.equal(detail.phase, 'request')
       assert.equal(detail.deadlineExceeded, false)
       assert.equal(detail.timeoutMs, 120_000)
+      assert.equal(detail.connectTimeoutMs, 30_000)
       assert.ok(Number.isSafeInteger(detail.elapsedMs) && detail.elapsedMs >= 0)
       assert.equal(error.restrictedResponseArchive, null)
       assert.equal(Object.hasOwn(error.evidence, 'transportFailure'), false)

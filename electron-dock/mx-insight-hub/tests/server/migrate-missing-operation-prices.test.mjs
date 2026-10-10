@@ -11,6 +11,36 @@ import { NightAllAService } from '../../server/external-platforms/night-all-a.mj
 
 const operationKey = 'native.t.douyin_search_fetch_video_search_v1'
 const timestamp = '2026-10-06T12:00:00Z'
+
+test('targeted price repair selects exact operations and rejects missing inventory before writes', async () => {
+  const search = 'native.wechat.search.search'
+  const detail = 'native.wechat.mp.article-detail'
+  const videos = 'native.wechat.search.search-videos'
+  const keys = [search, detail, videos, operationKey]
+  const writes = []
+  const admin = async (path, body) => {
+    if (body) { writes.push(path); return { effectiveState: 'active', revision: 2 } }
+    if (path.endsWith('external-platforms?range=24h')) return { providers: [{ key: 'tikhub' }] }
+    return { operations: keys.map(key => operation({ operationKey: key,
+      release: { status: 'released', endpointKeys: [key] },
+      priceBook: { endpointPrices: { [key]: null } } })), provider: { billing: {} } }
+  }
+  const options = parseArgs(['--provider', 'tikhub', '--operation', search, '--operation', detail,
+    '--operation', search, '--missing-budget-minor', '100000', '--apply'])
+  assert.deepEqual(options.operations, [search, detail])
+  const audit = keys.map(key => event({ operation_key: key }))
+  const result = await migrate({ options, admin, audit })
+  assert.equal(result.summary.confirmedWrites, 2)
+  assert.deepEqual(result.plans.map(row => row.operationKey), [search, detail])
+  assert.ok(writes.every(path => [search, detail].some(key => path.endsWith(`/${key}/policy`))))
+  writes.length = 0
+  await assert.rejects(migrate({ options: { ...options, operations: [search, 'native.wechat.missing'] }, admin, audit }),
+    /Selected operation not found; no writes attempted/)
+  assert.equal(writes.length, 0)
+  assert.throws(() => parseArgs(['--all', '--operation', search, '--missing-budget-minor', '100000']), /requires --provider/)
+  assert.throws(() => parseArgs(['--provider', 'tikhub', '--operation', 'native.wechat.*', '--missing-budget-minor', '100000']), /Invalid --operation/)
+})
+
 function event(overrides = {}) {
   return { provider_key: 'tikhub', operation_key: operationKey, revision: 1, previous_revision: null,
     desired_state: 'disabled', actor: 'migration-112', reason: 'Review procurement price and activate explicitly', ...overrides }
