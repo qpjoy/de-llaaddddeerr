@@ -8,7 +8,7 @@
 | POST /api/logout | 清除当前浏览器会话 cookie |
 | GET /api/session | 当前 `admin` / `test` 角色 |
 | GET /api/state?mode=sim | 本中心快照；不调用设备 |
-| GET /api/jobs/:id?mode=sim | Job、Attempt、检查点、完整结果与迟到证据 |
+| GET /api/jobs/:id?mode=sim | Job、Attempt、Command、检查点、完整结果与迟到证据 |
 | POST /api/devices?mode=real | 登记设备；真实设备默认暂停 |
 | POST /api/resources/control?mode=sim | `{scope:rack\|host,rack,host?,revision,action:drain\|release\|limit,maxConcurrent?}`；持久资源策略 |
 | POST /api/devices/:id/placement?mode=sim | `{revision,name,rack,host}`；仅暂停空闲且无预留时修改中心归属 |
@@ -21,9 +21,9 @@
 | POST /api/devices/:id/session?mode=sim | `acquire/renew/release/takeover/reset`；见下方边界 |
 | POST /api/devices/:id/mobile-status?mode=real | `{}`；显式读取 Mobile-Agent 既有设备/运行器报告，202，5 秒冷却、20 秒到期 |
 | POST /api/devices/:id/poc-channel?mode=real | `{revision,enabled:boolean,confirmed:true}`；只开关本中心的旧 PoC 调用，保持暂停、保留历史 |
-| POST /api/jobs?mode=sim | 幂等提交搜索 / 详情任务 |
+| POST /api/jobs?mode=sim | 幂等提交搜索 / 详情 / 定义任务 |
 | POST /api/jobs/:id/cancel?mode=sim | 仅取消 queued，不取消在途执行 |
-| POST /api/scenarios?mode=sim | `{kind:five\|priority\|failover\|multiapp,key}`；当前演示无活动任务时创建新场景 |
+| POST /api/scenarios?mode=sim | `{kind:five\|priority\|failover\|multiapp\|rack20,key}`；当前演示无活动任务时创建新场景 |
 | GET /health/live | API 进程存活，不检查外部设备 |
 | GET /health/ready | 本中心数据库可用，不检查 Hub、手机或 mx-rig |
 
@@ -31,7 +31,7 @@
 
 资源策略：不存在持久策略时 `revision:0`，之后使用快照中的版本；陈旧版本返回 409。`limit` 的 `maxConcurrent` 为 1–64 整数或 null（不另设上限）。`drain` 暂停全部成员并阻止后来成员新领取，不中断在途；`release` 只解除本级排空，设备仍暂停，上级排空仍有效。资源分组必须已有设备；每模式最多 512 条策略。归属编辑不能更改 Worker、serial、入口或账号，不调用外部服务。
 
-GET state 增加 `resources`、数据库时间 `now` 与只读 `scheduling`：含 `at/counts/groups/devices/queue`。设备诊断是 `blockers[{code,message}]`；队列诊断含 `jobId/order/effectivePriority/waitMs/candidateDeviceIds/status/reasons`。候选并非领取承诺，Worker 心跳/工作槽只是最近报告，实际额度在事务内再判断。快照保留全部活动任务、最近 100 个终态及活动依赖，以及全部 running Attempt 和最近 100 个结束尝试，不返回完整 result/lateEvidence/checkpoints。
+GET state 增加 `resources`、数据库时间 `now` 与只读 `scheduling`：含 `at/counts/groups/devices/queue`。设备诊断是 `blockers[{code,message}]`；队列诊断含 `jobId/order/effectivePriority/waitMs/candidateDeviceIds/status/reasons`。候选并非领取承诺，Worker 心跳/工作槽只是最近报告，实际额度在事务内再判断。快照保留全部活动任务、最近 100 个终态及活动依赖，以及全部 running/yielded Attempt 和最近 100 个结束尝试，不返回完整 result/lateEvidence/checkpoints。
 
 模拟任务可选 `rack`，并可进一步指定 `host`；host 必须伴随 rack，选择具体 deviceId 时也须符合范围。范围参与幂等指纹；真实旧 PoC 任务拒绝 rack/host 池化范围，仍明确指定设备。资源筛选不支持跨模式匹配。
 
@@ -85,3 +85,16 @@ pacing 接口的整机间隔为模拟 0–86400000、真机 2000–86400000 整�
 - 已保存完整结果可能包含 xsec token，默认管理列表与事件投影不带这些字段，证据详情只向相应模式授权角色提供。对数据库备份与完整证据按敏感数据保护。
 - 当前不提供自动清历史。配置独立卷监控与备份，设置合理磁盘水位，后续增加可审计保留策略。
 - 执行器心跳过期会显示异常；手机不可达只依据显式 probe 或执行结果，不凭心跳推断手机在线。
+
+
+## 十槽实验室接口（仅 sim）
+
+- `GET /api/task-definitions?mode=sim`：版本化定义及逻辑指令目录，`realEnabled:false` 明确当前边界。
+- `POST /api/task-definitions?mode=sim`：`{code,name,appId,loop:"small"|"large",resumable?,expectedVersion,steps:[{code,repeat}]}`，返回 201。新代码 expectedVersion=0，后续等于现有最高版本；冲突 409。不修改旧版本。
+- `POST /api/jobs?mode=sim`：`{key,definitionId,keyword?,target?,priority?,deviceId?,rack?}`。提交时冻结版本/指令，未绑定设备则由中心匹配；不支持 host 条件。相同 key/规范化参数重放，变更参数 409，活动队列 200 条后 429（精确重放仍可返回原任务）。
+- `POST /api/loop-policy?mode=sim`：`{rack,revision,maxInsertions,maxDetourMs,windowMs,smallLimit,largeLimit,cooldownMinMs,cooldownMaxMs,commandDelayMs}`，全部时间为整数毫秒。默认值及边界见 [实验室说明](rack-lab-2026-10-10.md)。
+- `POST /api/scenarios?mode=sim`：`{kind:"rack20",key}`，202。没有活动模拟任务/控制会话且十槽都空闲、未隔离、未排空、冷却到期才能开始；同 key 返回原 runId。保留历史、限额与循环配置。
+
+这些写入在 real 模式拒绝；真实 Job 接口仍先执行原来的 confirmed 检查，未确认时可先返回 400。没有新增任意手机操作/ADB 转发接口。指令完成接口目前只在 worker 内部调用，不暴露无需执行身份的通用 webhook。
+
+`GET state` 新增 definitions、loopPolicies、commands。PG 快照返回所有活动任务指令及另外最近 400 条终态指令，省略 receipt/lateEvidence；`GET jobs/:id` 返回该任务完整 Command/Receipt。`yielded` 父 Attempt 会完整返回，仍占用原设备。waiting 的检查点/次数/预算原因与实际领取使用同一规则。规则中“候选”仍需 worker 在事务中再核验。

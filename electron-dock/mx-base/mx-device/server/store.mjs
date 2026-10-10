@@ -1,3 +1,4 @@
+import { BUILTIN_DEFINITIONS } from "./workflow-catalog.mjs";
 import pg from "pg";
 import { readFile, readdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
@@ -13,6 +14,9 @@ export class MemoryStore {
       events: [],
       resources: [],
       apps: [],
+      definitions: structuredClone(BUILTIN_DEFINITIONS),
+      commands: [],
+      loopPolicies: [],
     };
     this.tail = Promise.resolve();
     this.workers = [];
@@ -57,6 +61,7 @@ export class MemoryStore {
       clone({
         job,
         attempts: this.state.attempts.filter((a) => a.jobId === id),
+        commands: (this.state.commands || []).filter((c) => c.jobId === id),
       })
     );
   }
@@ -207,7 +212,7 @@ export class PgStore {
       ).rows.map((r) => r.document);
       const attempts = (
         await c.query(
-          "SELECT document FROM mx_device.attempts WHERE mode=$1 AND (status='running' OR id=$2)",
+          "SELECT document FROM mx_device.attempts WHERE mode=$1 AND (status IN ('running','yielded') OR id=$2)",
           [mode, attemptId],
         )
       ).rows.map((r) => r.document);
@@ -223,16 +228,62 @@ export class PgStore {
           [mode],
         )
       ).rows.map((r) => r.document);
-      const state = { devices, jobs, attempts, resources, apps, events: [] },
+      const definitions = (
+        await c.query(
+          "SELECT document FROM mx_device.task_definitions WHERE mode=$1",
+          [mode],
+        )
+      ).rows.map((r) => r.document);
+      const loopPolicies = (
+        await c.query(
+          "SELECT document FROM mx_device.loop_policies WHERE mode=$1",
+          [mode],
+        )
+      ).rows.map((r) => r.document);
+      const commands = (
+        await c.query(
+          "SELECT document FROM mx_device.execution_commands WHERE mode=$1 AND (status='running' OR job_id=$2 OR attempt_id=$3 OR job_id IN (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status='running'))",
+          [mode, jobId, attemptId],
+        )
+      ).rows.map((r) => r.document);
+      const state = {
+          devices,
+          jobs,
+          attempts,
+          resources,
+          apps,
+          definitions,
+          loopPolicies,
+          commands,
+          events: [],
+        },
         before = new Map(
-          [...devices, ...jobs, ...attempts, ...resources, ...apps].map((r) => [
-            r.id,
-            JSON.stringify(r),
-          ]),
+          [
+            ...devices,
+            ...jobs,
+            ...attempts,
+            ...resources,
+            ...apps,
+            ...definitions,
+            ...loopPolicies,
+            ...commands,
+          ].map((r) => [r.id, JSON.stringify(r)]),
         );
       const result = fn(state, now);
       if (result?.then)
         throw new Error("Async work inside transaction is forbidden");
+      for (const d of state.definitions)
+        if (before.get(d.id) !== JSON.stringify(d))
+          await c.query(
+            "INSERT INTO mx_device.task_definitions VALUES($1,$2,$3,$4,$5)",
+            [d.id, d.mode, d.code, d.version, d],
+          );
+      for (const p of state.loopPolicies)
+        if (before.get(p.id) !== JSON.stringify(p))
+          await c.query(
+            "INSERT INTO mx_device.loop_policies VALUES($1,$2,$3,$4) ON CONFLICT(id) DO UPDATE SET document=excluded.document",
+            [p.id, p.mode, p.rack, p],
+          );
       for (const r of state.resources)
         if (before.get(r.id) !== JSON.stringify(r))
           await c.query(
@@ -263,6 +314,21 @@ export class PgStore {
             "INSERT INTO mx_device.attempts VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO UPDATE SET status=excluded.status,document=excluded.document",
             [a.id, a.mode, a.jobId, a.deviceId, a.status, a.createdAt, a],
           );
+      for (const cdoc of state.commands)
+        if (before.get(cdoc.id) !== JSON.stringify(cdoc))
+          await c.query(
+            "INSERT INTO mx_device.execution_commands VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO UPDATE SET status=excluded.status,document=excluded.document",
+            [
+              cdoc.id,
+              cdoc.mode,
+              cdoc.jobId,
+              cdoc.attemptId,
+              cdoc.deviceId,
+              cdoc.status,
+              cdoc.createdAt,
+              cdoc,
+            ],
+          );
       for (const e of state.events)
         await c.query(
           "INSERT INTO mx_device.events(mode,at,document) VALUES($1,$2,$3)",
@@ -288,7 +354,19 @@ export class PgStore {
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       await client.query("SET LOCAL statement_timeout='5s'");
-      const [d, j, e, w, a, r, apps, clock] = [
+      const [
+        d,
+        j,
+        e,
+        w,
+        a,
+        r,
+        apps,
+        definitions,
+        loopPolicies,
+        commands,
+        clock,
+      ] = [
         await client.query(
           "SELECT document FROM mx_device.devices WHERE mode=$1 ORDER BY id",
           [mode],
@@ -308,7 +386,7 @@ export class PgStore {
           "SELECT id,at,document FROM mx_device.workers ORDER BY id",
         ),
         await client.query(
-          "SELECT document - 'result' - 'lateEvidence' - 'checkpoints' AS document FROM mx_device.attempts WHERE mode=$1 AND status='running' UNION ALL (SELECT document - 'result' - 'lateEvidence' - 'checkpoints' FROM mx_device.attempts WHERE mode=$1 AND status<>'running' ORDER BY created_at DESC LIMIT 100)",
+          "SELECT document - 'result' - 'lateEvidence' - 'checkpoints' AS document FROM mx_device.attempts WHERE mode=$1 AND status IN ('running','yielded') UNION ALL (SELECT document - 'result' - 'lateEvidence' - 'checkpoints' FROM mx_device.attempts WHERE mode=$1 AND status NOT IN ('running','yielded') ORDER BY created_at DESC LIMIT 100)",
           [mode],
         ),
         await client.query(
@@ -317,6 +395,18 @@ export class PgStore {
         ),
         await client.query(
           "SELECT document FROM mx_device.device_apps WHERE mode=$1",
+          [mode],
+        ),
+        await client.query(
+          "SELECT document FROM mx_device.task_definitions WHERE mode=$1",
+          [mode],
+        ),
+        await client.query(
+          "SELECT document FROM mx_device.loop_policies WHERE mode=$1",
+          [mode],
+        ),
+        await client.query(
+          "SELECT document - 'receipt' - 'lateEvidence' AS document FROM mx_device.execution_commands WHERE mode=$1 AND (status='running' OR job_id IN (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status='running')) UNION ALL (SELECT document - 'receipt' - 'lateEvidence' FROM mx_device.execution_commands WHERE mode=$1 AND status<>'running' AND job_id NOT IN (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status='running') ORDER BY created_at DESC LIMIT 400)",
           [mode],
         ),
         await client.query(
@@ -331,6 +421,9 @@ export class PgStore {
         events: e.rows.reverse().map((r) => ({ ...r.document, seq: r.seq })),
         resources: r.rows.map((r) => r.document),
         apps: apps.rows.map((r) => r.document),
+        definitions: definitions.rows.map((r) => r.document),
+        loopPolicies: loopPolicies.rows.map((r) => r.document),
+        commands: commands.rows.map((r) => r.document),
         now: Number(clock.rows[0].now),
         workers: w.rows.map((r) => ({
           ...r.document,
@@ -360,6 +453,12 @@ export class PgStore {
     if (!j.rowCount) return null;
     return {
       job: j.rows[0].document,
+      commands: (
+        await this.pool.query(
+          "SELECT document FROM mx_device.execution_commands WHERE job_id=$1 ORDER BY created_at,id",
+          [id],
+        )
+      ).rows.map((r) => r.document),
       attempts: (
         await this.pool.query(
           "SELECT document FROM mx_device.attempts WHERE job_id=$1 ORDER BY created_at",

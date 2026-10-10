@@ -1,0 +1,158 @@
+// Logical command codes; only the simulator executes this catalog today.
+export const COMMANDS = [
+  {
+    code: "app.open",
+    name: "打开目标 App",
+    appId: null,
+    estimateMs: 1000,
+    effect: "navigation",
+    mapping: "Mobile-Agent action: open_app（待独占/回执适配）",
+  },
+  {
+    code: "weibo.list",
+    name: "微博列表",
+    appId: "weibo",
+    estimateMs: 1800,
+    effect: "read",
+    mapping: "待 adapter：列表识别与结构化结果",
+  },
+  {
+    code: "weibo.search",
+    name: "微博搜索",
+    appId: "weibo",
+    estimateMs: 2200,
+    effect: "read",
+    mapping: "待 adapter：输入、搜索与结果验证",
+  },
+  {
+    code: "weibo.like",
+    name: "微博点赞",
+    appId: "weibo",
+    estimateMs: 1200,
+    effect: "write",
+    mapping: "Mobile-Agent 有 like 动作；目标/结果核验待适配",
+  },
+  {
+    code: "xhs.list",
+    name: "小红书列表",
+    appId: "xhs",
+    estimateMs: 1800,
+    effect: "read",
+    mapping: "待 adapter：列表与页码证据",
+  },
+  {
+    code: "xhs.search",
+    name: "小红书搜索",
+    appId: "xhs",
+    estimateMs: 2200,
+    effect: "read",
+    mapping: "旧 PoC /api/search；组合执行尚未接入",
+  },
+  {
+    code: "xhs.search.next",
+    name: "小红书下一页",
+    appId: "xhs",
+    estimateMs: 1600,
+    effect: "read",
+    mapping: "旧 PoC /api/next；无可恢复游标",
+  },
+  {
+    code: "xhs.note.detail",
+    name: "小红书详情",
+    appId: "xhs",
+    estimateMs: 2000,
+    effect: "read",
+    mapping: "旧 PoC /api/note；组合执行尚未接入",
+  },
+  {
+    code: "xhs.get_note_detail.ocr",
+    name: "正文 OCR",
+    appId: "xhs",
+    estimateMs: 2600,
+    effect: "read",
+    mapping: "已有 screen.png 只读截图；OCR/完整正文验证待实现",
+  },
+  {
+    code: "session.home",
+    name: "回到工作起点",
+    appId: null,
+    estimateMs: 800,
+    effect: "navigation",
+    mapping: "Mobile-Agent 有 home；收尾验证待适配",
+  },
+  {
+    code: "session.restore",
+    name: "恢复大任务上下文",
+    appId: null,
+    estimateMs: 1000,
+    effect: "navigation",
+    mapping: "仅模拟器具备检查点恢复；真实 adapter 未声明该能力",
+    internal: true,
+  },
+];
+export const commandByCode = (code) => COMMANDS.find((c) => c.code === code);
+const def = (code, name, appId, loop, steps, resumable = false) => ({
+  id: `sim:${code}:1`,
+  mode: "sim",
+  code,
+  name,
+  appId,
+  loop,
+  steps,
+  resumable,
+  version: 1,
+  createdAt: 0,
+  executionModel: "checkpoint-session.v1",
+});
+export const BUILTIN_DEFINITIONS = [
+  def("weibo.list", "微博 · 浏览列表", "weibo", "small", [
+    { code: "app.open", repeat: 1 },
+    { code: "weibo.list", repeat: 1 },
+  ]),
+  def("weibo.search", "微博 · 搜索", "weibo", "small", [
+    { code: "app.open", repeat: 1 },
+    { code: "weibo.search", repeat: 1 },
+  ]),
+  def("weibo.like", "微博 · 点赞（模拟）", "weibo", "small", [
+    { code: "app.open", repeat: 1 },
+    { code: "weibo.like", repeat: 1 },
+  ]),
+  def("xhs.list", "小红书 · 浏览列表", "xhs", "small", [
+    { code: "app.open", repeat: 1 },
+    { code: "xhs.list", repeat: 1 },
+  ]),
+  def("xhs.detail", "小红书 · 详情", "xhs", "small", [
+    { code: "app.open", repeat: 1 },
+    { code: "xhs.note.detail", repeat: 1 },
+  ]),
+  def("xhs.ocr", "小红书 · get_note_detail（OCR）", "xhs", "small", [
+    { code: "app.open", repeat: 1 },
+    { code: "xhs.get_note_detail.ocr", repeat: 1 },
+  ]),
+  def(
+    "xhs.search10",
+    "小红书 · 搜索第 1–10 页",
+    "xhs",
+    "large",
+    [
+      { code: "app.open", repeat: 1 },
+      { code: "xhs.search", repeat: 1 },
+      { code: "xhs.search.next", repeat: 9 },
+      { code: "session.home", repeat: 1 },
+    ],
+    true,
+  ),
+  def(
+    "weibo.search_batch",
+    "微博 · 连续搜索 5 次",
+    "weibo",
+    "large",
+    [
+      { code: "app.open", repeat: 1 },
+      { code: "weibo.search", repeat: 5 },
+      { code: "session.home", repeat: 1 },
+    ],
+    true,
+  ),
+];
+export const DEMO_RACK = "调度实验机架";

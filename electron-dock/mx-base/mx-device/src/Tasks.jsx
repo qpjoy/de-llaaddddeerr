@@ -165,7 +165,7 @@ export function Scheduler({
               <strong>两层任务循环</strong>
               <span>
                 外层选任务与
-                App；内层执行步骤、验收回执。整段会话独占手机，耗时估计不触发中断。
+                App；内层执行步骤、验收回执。模拟组合可在安全检查点按预算插入小任务，真实会话保持独占。
               </span>
             </p>
             <p>
@@ -305,7 +305,10 @@ export function JobDetail({ detail }) {
       <p className="small muted">任务 ID：{detail.job.id}</p>
       <p className="small muted">
         预计 {estimatedDuration(detail.job) / 1000} 秒 ·
-        整段会话独占执行。预计耗时不含排队和冷却，不承诺开始或完成时间。
+        {detail.job.workflow?.resumable
+          ? "保留原插槽，安全检查点允许有限插入。"
+          : "同一插槽按序完成会话。"}
+        预计耗时不含排队和冷却，不承诺开始或完成时间。
       </p>
       <div className="table-scroll">
         <table>
@@ -337,6 +340,46 @@ export function JobDetail({ detail }) {
           </tbody>
         </table>
       </div>
+      {!!detail.commands?.length && (
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>指令码</th>
+                <th>开始 / 结束</th>
+                <th>耗时</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              {detail.commands.map((c) => (
+                <tr key={c.id}>
+                  <td>
+                    <code>{c.code}</code>
+                    <small className="task-reason">
+                      步骤 {c.stepIndex + 1} ·{" "}
+                      {c.restoring
+                        ? "恢复上下文"
+                        : c.loop === "large"
+                          ? "大循环"
+                          : "小循环"}
+                    </small>
+                  </td>
+                  <td>
+                    {time(c.createdAt)} / {time(c.completedAt)}
+                  </td>
+                  <td>
+                    {c.completedAt
+                      ? `${((c.completedAt - c.createdAt) / 1000).toFixed(1)}s`
+                      : "执行中"}
+                  </td>
+                  <td>{labels[c.status] || c.status}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       <details>
         <summary>查看已保存的完整结果与尝试证据（可能包含访问令牌）</summary>
         <pre>{JSON.stringify(detail, null, 2)}</pre>

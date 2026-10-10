@@ -1,3 +1,4 @@
+import { recordLoopUsage } from "./loop-policy.mjs";
 // Scheduling metadata only. An App entry never creates another physical slot.
 export const APP_NAMES = { xhs: "小红书", weibo: "微博" };
 export const appName = (id = "xhs") => APP_NAMES[id] || id;
@@ -91,6 +92,7 @@ export function recordAppFinish(state, now, device, attempt) {
   if (!app) return;
   app.lastFinishedAt = now;
   app.lastSucceededAt = now;
+  recordLoopUsage(state, now, device, app, attempt);
   app.lastAttemptId = attempt.id;
   app.cooldownUntil = Math.max(app.cooldownUntil, now + app.cooldownMs);
   device.lastFinishedAt = now;

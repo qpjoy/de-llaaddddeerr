@@ -54,7 +54,7 @@ test(
       const versions = await a.pool.query(
         "SELECT name,checksum FROM mx_device.schema_migrations ORDER BY name",
       );
-      assert.equal(versions.rowCount, 4);
+      assert.equal(versions.rowCount, 5);
       assert.equal(versions.rows[0].name, "001_device_center.sql");
       assert.match(versions.rows[0].checksum, /^[a-f0-9]{64}$/);
       const camera = await a.atomic(

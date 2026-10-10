@@ -87,6 +87,11 @@ export function updatePlacement(s, now, mode, id, body) {
       !["waiting", "held"].includes(d.session?.status),
     "先暂停设备并等待执行/预留结束，再修改归属",
   );
+  requireThat(
+    !d.slot || (body.rack === d.rack && body.host === d.host),
+    "演示插槽归属固定，不能通过归属编辑移动插槽",
+    400,
+  );
   const before = `${d.rack} / ${d.host}`;
   d.name = str(body.name, "设备名称", 80);
   d.rack = str(body.rack, "机架");

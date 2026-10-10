@@ -25,6 +25,9 @@ const empty = {
   workers: [],
   resources: [],
   apps: [],
+  definitions: [],
+  commands: [],
+  loopPolicies: [],
 };
 export function useSnapshot(mode, onExpired) {
   const [state, setState] = useState(empty),
@@ -77,6 +80,7 @@ export function useSnapshot(mode, onExpired) {
 export const labels = {
   queued: "排队中",
   running: "执行中",
+  yielded: "检查点等待",
   succeeded: "已完成",
   unknown: "结果待核验",
   blocked: "依赖阻塞",
@@ -99,7 +103,8 @@ const operationTitle = (j) =>
       ? "详情 · 搜索结果"
       : "笔记详情";
 
-export const jobTitle = (j) => `${appName(j.appId)} · ${operationTitle(j)}`;
+export const jobTitle = (j) =>
+  j.workflow ? j.workflow.name : `${appName(j.appId)} · ${operationTitle(j)}`;
 
 export {
   defaultDurationMs,

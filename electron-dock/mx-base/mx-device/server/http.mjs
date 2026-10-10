@@ -1,3 +1,6 @@
+import { definitions, saveDefinition, rackScenario } from "./workflows.mjs";
+import { COMMANDS } from "./workflow-catalog.mjs";
+import { configureLoops } from "./loop-policy.mjs";
 import { createServer } from "node:http";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -54,6 +57,7 @@ const summarize = (s) => ({
   devices: s.devices.map(publicDevice),
   jobs: s.jobs.map(({ result, ...j }) => j),
   attempts: s.attempts.map(({ result, lateEvidence, checkpoints, ...a }) => a),
+  commands: (s.commands || []).map(({ receipt, lateEvidence, ...c }) => c),
 });
 
 export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
@@ -150,6 +154,37 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
             scheduling: schedulingSnapshot(state, state.now, mode),
           });
         }
+        if (path === "/api/task-definitions" && req.method === "GET") {
+          const state = await store.snapshot(mode);
+          return json(res, 200, {
+            definitions: definitions(state).filter((d) => d.mode === mode),
+            commands: COMMANDS.map((c) => ({
+              ...c,
+              realEnabled: false,
+              simulated: true,
+            })),
+          });
+        }
+        if (path === "/api/task-definitions" && req.method === "POST") {
+          const b = await body(req);
+          return json(
+            res,
+            201,
+            await store.atomic((s, n) => saveDefinition(s, n, mode, b), {
+              mode,
+            }),
+          );
+        }
+        if (path === "/api/loop-policy" && req.method === "POST") {
+          const b = await body(req);
+          return json(
+            res,
+            200,
+            await store.atomic((s, n) => configureLoops(s, n, mode, b), {
+              mode,
+            }),
+          );
+        }
         if (path === "/api/resources/control" && req.method === "POST") {
           const b = await body(req);
           return json(
@@ -238,10 +273,16 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
           return json(
             res,
             202,
-            await store.atomic((s, n) => scenario(s, n, b.kind, b.key), {
-              mode,
-              key: `${b.key}:1`,
-            }),
+            await store.atomic(
+              (s, n) =>
+                b.kind === "rack20"
+                  ? rackScenario(s, n, b.key)
+                  : scenario(s, n, b.kind, b.key),
+              {
+                mode,
+                key: `${b.key}:1`,
+              },
+            ),
           );
         }
         if (path === "/api/devices" && req.method === "POST") {

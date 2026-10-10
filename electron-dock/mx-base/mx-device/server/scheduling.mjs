@@ -3,6 +3,7 @@ import {
   estimatedDuration,
   taskLane,
 } from "./task-contract.mjs";
+import { DEFAULT_LOOP_POLICY, loopPolicyFor } from "./loop-policy.mjs";
 import { deviceApps, appBlockers, deviceInterval, jobApp } from "./apps.mjs";
 // Pure scheduling rules shared by claims and read-only explanations.
 export const effectivePriority = (job, now) =>
@@ -71,7 +72,13 @@ export function deviceBlockers(state, now, d) {
   if (["waiting", "held"].includes(d.session?.status))
     add("reserved", "执行槽被本中心会话预留");
   if (!d.enabled) add("paused", "设备已暂停领取");
-  if (d.state === "running") add("running", "设备正在执行，完整会话不抢占");
+  if (d.state === "running")
+    add(
+      "running",
+      d.workflowAttemptId
+        ? "大循环保留插槽，检查点可按预算插入小任务"
+        : "设备正在执行，完整会话不抢占",
+    );
   else if (!["idle", "quarantined"].includes(d.state))
     add("unknown-state", "执行槽状态未知");
   if (d.connected === "offline") add("offline", "模拟设备离线");
@@ -99,12 +106,72 @@ function workerBlockers(state, now, device) {
       { code: "worker-unavailable", message: "执行器无新鲜健康心跳，等待恢复" },
     ];
   if (
-    healthy.every(
-      (w) => Number.isInteger(w.inflight) && w.inflight >= (w.maxInflight || 4),
-    )
+    healthy.every((w) => {
+      const used =
+        device.mode === "sim"
+          ? (w.simulationInflight ?? w.inflight)
+          : (w.realInflight ?? w.inflight);
+      const limit =
+        device.mode === "sim"
+          ? (w.maxSimulationInflight ?? w.maxInflight ?? 4)
+          : (w.maxRealInflight ?? w.maxInflight ?? 4);
+      return Number.isInteger(used) && used >= limit;
+    })
   )
     return [{ code: "worker-capacity", message: "执行器工作槽已满，等待领取" }];
   return [];
+}
+
+// Same admission rule for claims and queue explanations. A parent already owns
+// the physical slot, so its child does not consume another rack capacity unit.
+export function insertionCost(state, device, child) {
+  const p = loopPolicyFor(state, device) || DEFAULT_LOOP_POLICY;
+  return Math.max(
+    child.estimatedDurationMs,
+    child.workflow.plan.length * p.commandDelayMs,
+  );
+}
+export function insertionBlockers(state, now, device, child) {
+  const a = state.attempts.find((a) => a.id === device.workflowAttemptId);
+  const parent = state.jobs.find((j) => j.id === a?.jobId);
+  const w = parent?.workflow;
+  const reasons = [];
+  const add = (code, message) => reasons.push({ code, message });
+  if (!w || child.workflow?.loop !== "small") {
+    add("session-reserved", "此插槽保留给大循环，仅允许插入小任务");
+    return reasons;
+  }
+  if (
+    a.status !== "yielded" ||
+    !w.safePoint ||
+    state.attempts.some(
+      (x) => x.deviceId === device.id && x.status === "running",
+    )
+  )
+    add("checkpoint-wait", "等待大循环的安全检查点与在途指令结束");
+  if (!w.resumable) add("not-resumable", "此定义不允许中途插入");
+  if (
+    state.devices.some(
+      (other) =>
+        other.id !== device.id &&
+        matchesJob(other, child) &&
+        !deviceBlockers(state, now, other).length &&
+        !appBlockers(state, now, other, child).length,
+    )
+  )
+    add("idle-preferred", "另有匹配的空闲插槽，优先直接分配");
+  if (w.insertions >= w.policySnapshot.maxInsertions)
+    add("insertion-limit", "已达插入次数上限，等待大循环完成");
+  const elapsed =
+    w.detourMs + (w.detourStartedAt != null ? now - w.detourStartedAt : 0);
+  if (
+    Math.max(elapsed, w.insertedEstimateMs) +
+      insertionCost(state, device, child) +
+      w.policySnapshot.commandDelayMs >
+    w.policySnapshot.maxDetourMs
+  )
+    add("insertion-budget", "插入及恢复的预计耗时超出剩余预算，等待大循环完成");
+  return reasons;
 }
 
 export function schedulingSnapshot(state, now, mode) {
@@ -163,20 +230,24 @@ export function schedulingSnapshot(state, now, mode) {
         });
     }
     const candidates = devices.filter((d) => matchesJob(d, j));
-    const ready = candidates.filter(
-      (d) =>
-        byDevice.get(d.id).commonBlockers.length === 0 &&
-        !appBlockers(state, now, d, j).length,
-    );
+    const candidateReasons = (d) => [
+      ...byDevice
+        .get(d.id)
+        .commonBlockers.filter(
+          (r) =>
+            !d.workflowAttemptId ||
+            !["running", "rack-capacity", "host-capacity"].includes(r.code),
+        ),
+      ...(d.workflowAttemptId ? insertionBlockers(state, now, d, j) : []),
+      ...appBlockers(state, now, d, j),
+    ];
+    const ready = candidates.filter((d) => candidateReasons(d).length === 0);
     if (!candidates.length)
       reasons.push({ code: "no-device", message: "没有匹配的已登记设备" });
     else if (!ready.length) {
       const codes = new Set();
       for (const d of candidates)
-        for (const r of [
-          ...byDevice.get(d.id).commonBlockers,
-          ...appBlockers(state, now, d, j),
-        ]) {
+        for (const r of candidateReasons(d)) {
           if (!codes.has(r.code)) {
             reasons.push(r);
             codes.add(r.code);

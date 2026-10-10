@@ -1,3 +1,4 @@
+import SchedulerLab from "./SchedulerLab.jsx";
 import { useState, useCallback, useEffect } from "react";
 import {
   Desktop,
@@ -95,7 +96,7 @@ export default function App() {
 }
 function Workspace({ onExpired }) {
   const [mode, setMode] = useState("sim"),
-    [page, setPage] = useState("racks"),
+    [page, setPage] = useState("lab"),
     [selectedId, setSelectedId] = useState(null),
     [history, setHistory] = useState(null),
     [modal, setModal] = useState(null),
@@ -181,6 +182,7 @@ function Workspace({ onExpired }) {
     setModal("pacing");
   };
   const nav = [
+    ["lab", "调度实验室", PlayCircle],
     ["racks", "机架总览", HardDrives],
     ["workbench", "设备工作台", Desktop],
     ["jobs", "任务池与调度", FileText],
@@ -250,11 +252,13 @@ function Workspace({ onExpired }) {
           <div className="page-heading">
             <div>
               <h1>
-                {page === "racks"
-                  ? "机架与设备资源"
-                  : page === "jobs"
-                    ? "让任务有序流向设备"
-                    : "让每一次执行都有据可查"}
+                {page === "lab"
+                  ? "让调度过程可观测、可控制"
+                  : page === "racks"
+                    ? "机架与设备资源"
+                    : page === "jobs"
+                      ? "让任务有序流向设备"
+                      : "让每一次执行都有据可查"}
               </h1>
               <p>单机串行，多机协作。真实执行与模拟演练严格分离。</p>
             </div>
@@ -279,7 +283,18 @@ function Workspace({ onExpired }) {
               {error || notice}
             </div>
           )}
-          {page === "racks" ? (
+          {page === "lab" ? (
+            <SchedulerLab
+              state={state}
+              mode={mode}
+              busy={busy}
+              run={run}
+              onInspect={inspect}
+              failure={failure}
+              notice={notice}
+              onDevices={() => setPage("racks")}
+            />
+          ) : page === "racks" ? (
             <Racks
               key={mode}
               state={state}

@@ -24,6 +24,13 @@ import {
   EXECUTION_MODEL,
 } from "./task-contract.mjs";
 
+import {
+  addWorkflow,
+  startWorkflow,
+  claimContinuation,
+  cleanWorkflowFaults,
+} from "./workflows.mjs";
+
 export class Fault extends Error {
   constructor(message, status = 409) {
     super(message);
@@ -228,6 +235,8 @@ export function register(s, now, mode, body) {
   return d;
 }
 export function addJob(s, now, mode, body) {
+  if (body.definitionId || body.operation === "workflow")
+    return addWorkflow(s, now, mode, body);
   const key = str(body.key, "幂等键"),
     operation = body.operation;
   const appId = body.appId ?? "xhs";
@@ -374,6 +383,13 @@ export function control(s, now, mode, id, body) {
   const current = s.attempts.find(
     (a) => a.deviceId === id && a.status === "running",
   );
+  if (["disconnect", "reconnect"].includes(body.action))
+    requireThat(
+      !s.jobs.some(
+        (j) => j.lastDeviceId === id && j.workflow && j.status === "running",
+      ),
+      "组合会话运行中，请使用暂停领取并等待收尾；不注入旧版跨机接管",
+    );
   if (body.action === "pause") d.enabled = false;
   else if (body.action === "enable") {
     requireThat(
@@ -534,10 +550,13 @@ export function sweep(s, now, mode) {
       { jobId: a.jobId, deviceId: d.id },
     );
   }
+  cleanWorkflowFaults(s, now);
   sweepSessions(s, now, mode);
 }
 export function claim(s, now, mode, workerId) {
   sweep(s, now, mode);
+  const continued = claimContinuation(s, now, mode, workerId);
+  if (continued) return continued;
   const devices = s.devices.filter(
     (d) =>
       d.mode === mode &&
@@ -592,6 +611,9 @@ export function claim(s, now, mode, workerId) {
       accountKey: app.accountKey,
       estimatedDurationMs: estimatedDuration(j),
       executionModel: j.executionModel || EXECUTION_MODEL,
+      loop:
+        j.workflow?.loop ||
+        (j.operation === "search" && j.input.pages > 1 ? "large" : "small"),
       mode,
       deviceId: d.id,
       workerId,
@@ -611,6 +633,7 @@ export function claim(s, now, mode, workerId) {
     d.state = "running";
     d.lastClaimedAt = now;
     app.lastClaimedAt = now;
+    startWorkflow(s, now, d, j, a);
     bump(d);
     event(s, mode, now, "claimed", `${d.name} 领取任务；${j.reason}`, {
       jobId: j.id,
@@ -627,6 +650,7 @@ export function owned(s, now, a) {
   return (
     current?.status === "running" &&
     current.epoch === a.epoch &&
+    current.executionGeneration === a.executionGeneration &&
     current.leaseUntil > now &&
     d?.epoch === a.epoch
   );
@@ -1110,7 +1134,9 @@ function sweepSessions(s, now, mode) {
       );
     } else if (
       d.session.status === "waiting" &&
-      !s.attempts.some((a) => a.deviceId === d.id && a.status === "running")
+      !s.attempts.some(
+        (a) => a.deviceId === d.id && ["running", "yielded"].includes(a.status),
+      )
     ) {
       d.session.status = d.state === "quarantined" ? "blocked" : "held";
       if (d.session.status === "blocked") delete d.session.tokenHash;
@@ -1156,8 +1182,14 @@ export function sessionAction(s, now, mode, id, body) {
       400,
     );
     if (action === "takeover") {
+      requireThat(
+        !s.jobs.some(
+          (j) => j.lastDeviceId === id && j.workflow && j.status === "running",
+        ),
+        "组合会话不能用旧版模拟强制接管中断",
+      );
       const a = s.attempts.find(
-        (a) => a.deviceId === id && a.status === "running",
+        (a) => a.deviceId === id && ["running", "yielded"].includes(a.status),
       );
       if (a) {
         a.status = "interrupted";
@@ -1175,7 +1207,7 @@ export function sessionAction(s, now, mode, id, body) {
       id: randomUUID(),
       tokenHash: createHash("sha256").update(token).digest("hex"),
       status: s.attempts.some(
-        (a) => a.deviceId === id && a.status === "running",
+        (a) => a.deviceId === id && ["running", "yielded"].includes(a.status),
       )
         ? "waiting"
         : "held",

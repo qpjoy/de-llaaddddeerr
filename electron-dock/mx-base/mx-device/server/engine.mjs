@@ -1,3 +1,9 @@
+import {
+  beginCommand,
+  completeCommand,
+  simulateCommand,
+  cleanWorkflowFaults,
+} from "./workflows.mjs";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   claim,
@@ -42,6 +48,7 @@ export class Engine {
     this.capture = capture;
     this.inspect = inspect;
     this.inflight = new Map();
+    this.simulationInflight = new Set();
     this.stopped = false;
     this.lastError = null;
   }
@@ -86,7 +93,33 @@ export class Engine {
       );
     }
   }
+  async executeWorkflow({ job, attempt: a }) {
+    const options = { mode: job.mode, jobId: job.id, attemptId: a.id };
+    const atomic = (fn) => this.store.atomic(fn, options);
+    try {
+      while (true) {
+        const command = await atomic((s, n) => beginCommand(s, n, a));
+        if (!command) return;
+        await sleep(command.simulationDurationMs);
+        const ok = await atomic((s, n) =>
+          completeCommand(s, n, a, command, simulateCommand(command)),
+        );
+        if (
+          !ok ||
+          job.workflow.loop === "large" ||
+          command.stepIndex + 1 >= job.workflow.plan.length
+        )
+          return;
+      }
+    } catch {
+      await atomic((s, n) => {
+        finish(s, n, a, { error: "组合指令执行或回执异常，隔离设备" });
+        cleanWorkflowFaults(s, n);
+      });
+    }
+  }
   async execute({ device, job, attempt: a }) {
+    if (job.workflow) return this.executeWorkflow({ device, job, attempt: a });
     const options = { mode: job.mode, jobId: job.id, attemptId: a.id };
     const atomic = (fn) => this.store.atomic(fn, options);
     try {
@@ -166,9 +199,13 @@ export class Engine {
         real: true,
         lastError: this.lastError,
         inflight: this.inflight.size,
-        maxInflight: 4,
+        maxInflight: 14,
+        simulationInflight: this.simulationInflight.size,
+        maxSimulationInflight: 10,
+        realInflight: this.inflight.size - this.simulationInflight.size,
+        maxRealInflight: 4,
       });
-      if (this.inflight.size < 4) {
+      if (this.inflight.size - this.simulationInflight.size < 4) {
         const device = await this.store.atomic(
           (s, n) => {
             const d = s.devices.find(
@@ -200,7 +237,10 @@ export class Engine {
         }
       }
       // At most one observation per worker, leaving capacity for normal tasks.
-      if (this.inflight.size < 4 && !this.inflight.has("observation")) {
+      if (
+        this.inflight.size - this.simulationInflight.size < 4 &&
+        !this.inflight.has("observation")
+      ) {
         const device = await this.store.atomic(
           (s, n) => claimCapture(s, n, this.workerId),
           { mode: "real" },
@@ -213,7 +253,10 @@ export class Engine {
               .finally(() => this.inflight.delete("observation")),
           );
       }
-      if (this.inflight.size < 4 && !this.inflight.has("inspection")) {
+      if (
+        this.inflight.size - this.simulationInflight.size < 4 &&
+        !this.inflight.has("inspection")
+      ) {
         const device = await this.store.atomic(
           (s, n) => claimInspection(s, n, this.workerId),
           { mode: "real" },
@@ -228,7 +271,12 @@ export class Engine {
       }
       for (const mode of ["sim", "real"]) {
         await this.store.atomic((s, n) => sweep(s, n, mode), { mode });
-        while (this.inflight.size < 4 && !this.stopped) {
+        while (
+          (mode === "sim"
+            ? this.simulationInflight.size < 10
+            : this.inflight.size - this.simulationInflight.size < 4) &&
+          !this.stopped
+        ) {
           const work = await this.store.atomic(
             (s, n) => claim(s, n, mode, this.workerId),
             { mode },
@@ -238,8 +286,14 @@ export class Engine {
             .catch(() => {
               this.lastError = "执行结果保存失败，等待租约核对";
             })
-            .finally(() => this.inflight.delete(work.attempt.id));
+            .finally(() => {
+              if (this.inflight.get(work.attempt.id) === task) {
+                this.inflight.delete(work.attempt.id);
+                this.simulationInflight.delete(work.attempt.id);
+              }
+            });
           this.inflight.set(work.attempt.id, task);
+          if (mode === "sim") this.simulationInflight.add(work.attempt.id);
         }
       }
       this.lastError = null;
