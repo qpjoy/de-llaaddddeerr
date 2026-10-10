@@ -22,6 +22,7 @@ import {
   Field,
   FieldGroup,
   FieldLabel,
+  FieldDescription,
   FieldError,
 } from "@/components/ui/field";
 import {
@@ -270,9 +271,7 @@ export function AccountDialog({
               )}
               <Field>
                 <FieldLabel htmlFor="auth-invite">
-                  {register
-                    ? "Harbor 邀请码"
-                    : "Harbor 邀请码（首次进入时填写）"}
+                  {register ? "Harbor 邀请码" : "Harbor 邀请码（选填）"}
                 </FieldLabel>
                 <InputGroup>
                   <InputGroupInput
@@ -281,10 +280,18 @@ export function AccountDialog({
                     required={register}
                     maxLength={128}
                     autoComplete="off"
+                    aria-describedby={
+                      !register ? "auth-invite-help" : undefined
+                    }
                     placeholder="输入邀请人提供的邀请码"
                     disabled={busy || (!options && !preview)}
                   />
                 </InputGroup>
+                {!register && (
+                  <FieldDescription id="auth-invite-help">
+                    仅尚未开通数港的账号首次进入时填写。已开通或由管理员授权的账号可留空。
+                  </FieldDescription>
+                )}
               </Field>
               {register &&
               options &&
@@ -325,29 +332,10 @@ export function AccountDialog({
             </FieldGroup>
           </form>
           <p className="auth-register-hint">
-            忘记密码或缺少邀请，请联系管理员。已开通账号无需再次填写邀请码。
+            {register
+              ? "使用 Harbor 专用邀请码创建 MX 账号并开通数港。已有 MX 账号请在登录页使用邀请码开通。"
+              : "可直接填写其他 MX 账号登录。忘记密码或需要开通数港，请联系管理员。"}
           </p>
-          {!unavailable && !checking && (
-            <button
-              type="button"
-              className="harbor-account-switch"
-              disabled={busy}
-              onClick={async () => {
-                if (preview) return;
-                setChecking(true);
-                try {
-                  const result = await startAccountSession(false, true);
-                  location.assign(result.redirect);
-                } catch (error) {
-                  setError((error as Error).message);
-                  setUnavailable(true);
-                  setChecking(false);
-                }
-              }}
-            >
-              选择其他已登录账号
-            </button>
-          )}
           <DialogClose
             className="auth-close"
             aria-label="关闭登录"

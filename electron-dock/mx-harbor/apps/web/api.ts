@@ -29,8 +29,8 @@ export type AccountOptions = {
   admissionRequired?: boolean;
   loginHint?: string;
 };
-export const startAccountSession = (register = false, select = false) =>
+export const startAccountSession = (register = false) =>
   request<{ redirect: string }>(
-    `/auth/sso/start?view=${register ? "register" : "login"}${select ? "&select=1" : ""}`,
+    `/auth/sso/start?view=${register ? "register" : "login"}`,
     { method: "POST", body: "{}" },
   );

@@ -278,7 +278,7 @@ function AccountSecurity() {
                 variant="link"
                 onClick={async () => {
                   try {
-                    const result = await startAccountSession(false, true);
+                    const result = await startAccountSession();
                     location.assign(result.redirect);
                   } catch (e) {
                     setError((e as Error).message);

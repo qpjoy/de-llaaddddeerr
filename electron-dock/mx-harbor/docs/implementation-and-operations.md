@@ -7,7 +7,7 @@
 | 范围          | 实际行为                                                                                                                                                        |
 | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | DataPort 设计 | 保留原 CSS、基础交互组件、首页 IP 搜索布局和双栏登录弹窗；gallery 与业务入口独立。来源见 `ui-design/source-manifest.json`                                       |
-| 统一账号      | 原生登录/邀请注册、托管账号选择、资料修改、改密、撤销会话使用 mx-common。没有迁入原型的自有账号库                                                               |
+| 统一账号      | 原生登录/邀请注册、切换账号、资料修改、改密、撤销会话使用 mx-common。没有迁入原型的自有账号库                                                               |
 | Harbor 准入   | 所有账号要求明确 `allowedAppIds` 包含 `mx-harbor`，显式 deny 优先。新账号通过专用邀请创建；旧账号在可信登录 interaction 中认证后兑换                            |
 | 注册设置      | Internal 注册与邀请增加 Harbor 的关闭/邀请码模式；旧管理客户端省略新设置时保留它；Hub 原 `hubMode` 和全局关闭优先级保留                                         |
 | 邀请隔离      | 新 `admissionAppId: mx-harbor` 区别于旧 `appGrant`。专用邀请仅开通 Harbor，不能用于其他应用。旧通用邀请不能开通 Harbor；通用“全部应用”排除 Harbor，其余应用照常 |
@@ -24,9 +24,11 @@ Harbor 注册当前仅支持关闭或邀请码两种模式；现有其他应用�
 
 首页和独立 gallery 均恢复原型的 `public-query-main` 居中容器。登录/邀请码注册字段不再依赖已有 flow 才渲染；连接时暂时禁用，失败时在原弹窗重试。只有读到真实关闭策略才显示“暂未开放邀请注册”，网络/配置错误不能伪装为关闭注册。
 
-Harbor 显式启用 mx-common `navigation.applicationForm`：同源 `POST /auth/sso/start` 先经服务端凭据校验 Auth `capabilities`（appId/origin/audience/nativeForm），再创建 PKCE/state/nonce 和 host-only 登录 cookie。浏览器短暂经过 Auth 建立 issuer cookie，自动返回数港填写账号密码/邀请码；密码仍交给原 Auth 校验，没有新增密码库。返回的 flow 失效时停止自动往返，用户点击重试才重建；表单 409/410 也可重试。账号选择仍使用带数港名称的 Auth 账号选择页，选定后的密码/邀请表单返回 Harbor。已有消费者未开启该选项的流程保持不变。
+Harbor 显式启用 mx-common `navigation.applicationForm`：同源 `POST /auth/sso/start` 先经服务端凭据校验 Auth `capabilities`（appId/origin/audience/nativeForm），再创建 PKCE/state/nonce 和 host-only 登录 cookie。浏览器短暂经过 Auth 建立 issuer cookie，自动返回数港填写账号密码/邀请码；密码仍交给原 Auth 校验，没有新增密码库。返回的 flow 失效时停止自动往返，用户点击重试才重建；表单 409/410 也可重试。Harbor 登录弹窗不展示 Auth 托管账号列表；可直接输入另一 MX 账号。账号页的“切换账号”重新发起原生登录，短暂 SSO 往返后回到 Harbor 表单。登录页的邀请码明确标为选填，已开通或管理员授权的账号无需填写；新账号注册仍必填。已有消费者未开启该选项的流程保持不变。
 
 Auth 的 Harbor 错误页仅给出数港返回入口，不列其他应用；无法验证来源的错误页也不列出内部应用。返回目标只来自已登记应用或签名恢复上下文，不信任任意 return 参数。
+
+后续界面调整（去掉托管账号列表入口、账号页改走原生登录、标明登录邀请码选填）只需重发 Harbor，不要求重发 Launcher/Hub。`npm run build` 通过；本地浏览器核对登录邀请码无 required、注册邀请码仍 required，账号页切换请求为 `POST /auth/sso/start?view=login` 并返回 Harbor 表单。该 UI 验证使用隔离接口替身，没有修改生产注册设置。
 
 本次只读线上检查：匿名 Harbor `/auth/sso/form` 为 410（尚无 flow）；Harbor 发起 `mx-harbor-web` 原生授权后，Auth 授权入口直接返回 400、尚未建立 interaction。需要核对 Auth 已发布的客户端登记，不能把这个 400 当成密码错误或邀请码关闭。以下在 **Internal 主机，项目仓库根目录**执行，保留原环境参数：
 
