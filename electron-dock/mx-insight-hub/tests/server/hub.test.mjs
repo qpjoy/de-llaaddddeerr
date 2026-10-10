@@ -142,7 +142,7 @@ before(async () => {
     upstreamBodies.push(body)
     upstreamCalls.set(body.platform, (upstreamCalls.get(body.platform) || 0) + 1)
     if (body.platform === 'twitter') throw new TypeError('connection reset')
-    if (body.platform === 'facebook') return jsonResponse({ error: { code: 'unavailable' } }, 503)
+    if (body.platform === 'reddit') return jsonResponse({ error: { code: 'unavailable' } }, 503)
     return jsonResponse(nightAllSearchEnvelope(body))
   }
   adapter = new NightAllAdapter({ baseUrl: 'http://night-all.invalid', fetchImpl })
@@ -1150,7 +1150,7 @@ test('ambiguous POST is called once and held in unknown state', async () => {
 test('known upstream rejection releases reservation so explicit retry is possible', async () => {
   const tenant = (await store.listTenants())[0]
   const consumer = (await store.listConsumers(tenant.id))[0]
-  await call('/internal/v1/admin/platforms/facebook', {
+  await call('/internal/v1/admin/platforms/reddit', {
     method: 'PUT',
     headers: adminHeaders,
     body: { tenantId: tenant.id, consumerId: consumer.id, enabled: true },
@@ -1158,10 +1158,10 @@ test('known upstream rejection releases reservation so explicit retry is possibl
   const issued = await call('/internal/v1/admin/api-keys', {
     method: 'POST',
     headers: adminHeaders,
-    body: { consumerId: consumer.id, name: 'Release test key', platforms: ['facebook'] },
+    body: { consumerId: consumer.id, name: 'Release test key', platforms: ['reddit'] },
   })
   const headers = { authorization: `Bearer ${issued.payload.data.secret}`, 'idempotency-key': 'released-one' }
-  const body = { platform: 'facebook', query: 'AI' }
+  const body = { platform: 'reddit', query: 'AI' }
   const first = await call('/api/v1/data/search', { method: 'POST', headers, body })
   const second = await call('/api/v1/data/search', { method: 'POST', headers, body })
   assert.equal(first.payload.error.code, 'night_all_rejected')
@@ -1177,20 +1177,20 @@ test('known upstream rejection releases reservation so explicit retry is possibl
     assert.equal(result.response.headers.get('x-mx-insight-request-id'), result.payload.requestId)
     assert.equal(store.requests.get(result.payload.requestId).status, 'released')
   }
-  assert.equal(upstreamCalls.get('facebook'), 2)
+  assert.equal(upstreamCalls.get('reddit'), 2)
 })
 
 test('all legacy HTTP aliases include the Night-All code without exposing nested diagnostics', async () => {
   const tenant = await store.createTenant({ name: 'Rejection tenant' })
   const consumer = await store.createConsumer({ tenantId: tenant.id, name: 'Rejection consumer', businessId: 'rejection-test' })
-  await store.replaceGrants(consumer.id, ['facebook'])
-  const issued = await service.createApiKey({ consumerId: consumer.id, name: 'Rejection key', platforms: ['facebook'] })
+  await store.replaceGrants(consumer.id, ['douyin'])
+  const issued = await service.createApiKey({ consumerId: consumer.id, name: 'Rejection key', platforms: ['douyin'] })
   for (const prefix of ['/api/v1/search', '/api/v1/night-all/search']) {
     for (const operation of ['raw', 'crawl', 'user-info']) {
       const result = await call(`${prefix}/${operation}`, {
         method: 'POST',
         headers: { authorization: `Bearer ${issued.secret}`, 'idempotency-key': `rejection-${prefix.includes('night-all')}-${operation}` },
-        body: { platform: 'facebook', [operation === 'raw' ? 'keyword' : 'username']: 'compat-rejected', count: 1 },
+        body: { platform: 'douyin', [operation === 'raw' ? 'keyword' : 'username']: 'compat-rejected', count: 1 },
       })
       assert.equal(result.response.status, 502)
       assert.equal(result.payload.error.code, 'night_all_rejected')

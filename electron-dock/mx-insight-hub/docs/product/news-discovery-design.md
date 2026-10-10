@@ -244,7 +244,7 @@ duplicateGroupId（有确定性分组时）
 
 1. 长尾来源可用 sourceCodes 查询；需在目录管理补充条目/别名，再执行归类。工作台覆盖全部 canonical 数据，但首版不是全库自动 LLM 任务。
 2. 尚无跨来源转载合并或事件聚类。统计仅取最新最多 5,000 条匹配记录，明确 `countBasis=records`、`sampledRecords/truncated/asOf`；分来源不等于文章去重或事件计数。
-3. PG 字面子串支持中文匹配，但无分词相关性/语义检索。主题、栏目、正文程度可展示，尚无独立过滤。读取超时为 5 秒，大范围查询可能需要收窄条件。
+3. PG 字面子串支持中文匹配，但无分词相关性/语义检索。主题、栏目、正文程度可展示，尚无独立过滤。新闻 SQL 读取超时默认 15 秒，可通过 `MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS` 配置为 1000–60000 毫秒；大范围查询仍可能需要收窄条件。
 4. 未知 record_type 不能自动当新闻；其他数据仍在 canonical 和归类工作台可见。新增科研全文/引用类型须审核后纳入。
 5. 公共目录 `/source-catalog/{id}/items` 原有商品合同没有扩成新闻接口。下游新闻使用新 API 的 catalogEntryIds。Admin 关联数据是治理证据，可能含采集器/原始结构化关联，不等于新闻产品的当前来源筛选。
 6. 未执行生产迁移、全库回填、ES 重建、真实 LLM 调用或线上来源覆盖审计；未改现有登录、联网、租约和网关。
@@ -253,7 +253,9 @@ duplicateGroupId（有确定性分组时）
 
 按既有 Hub 独立发布流程，先应用 migration 110 再发布 Hub，保持 `MX_INSIGHT_SYNC_LAUNCHER=0`，不发布 Launcher/MX-H2I。迁移不会启动分类/采集或修改价格、grants、Keys、checkpoints。
 
-大库存先检查查询计划，再评估可选 `scripts/news-discovery-serving-indexes.sql`，仅在 Hub DB 显式运行在线索引，不在迁移事务中执行。同名存在不证明定义/有效性正确，检查脚本末尾结果；当前没有真实数据量的压测结论。
+Internal deploy 在迁移完成、API 发布前自动执行 `scripts/news-discovery-serving-indexes.sql`，仅操作 Hub DB，位于迁移事务之外。按入库时间和发布时间的两条索引均核对定义、排序方向与有效状态；有效时复用，缺失时并发创建，定义匹配但构建无效时并发修复，同名定义冲突则停止部署。仅创建/修复后更新统计信息。部署省略 `MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS` 时保留已部署值，首次默认 15000；显式空值恢复默认。超时仅在新闻只读事务内生效，连接归还后不改变其他查询的设置。
+
+2026-10-10 操作者反馈的候选账本请求 `1b781623-122e-405d-a18a-c67a83af7a0f`，使用历史请求指纹验证条件和 13 个类别范围后，SQL 返回 15 条，耗时 2732 ms；补发布时间索引并 `ANALYZE` 后，同一 SQL 哈希与请求指纹下仍返回 15 条，耗时 506 ms，计划已采用新索引。这是一次同条件复测，不是负载压测或所有新闻查询的延迟保证。错误响应 ID `ec653637-8ce7-482c-b66c-b919cf134f8a` 与该账本记录的关联仍未证实。15 秒配置与自动索引部署逻辑需发布本版镜像和脚本后生效。
 
 验证包括构建、TypeScript、新闻/目录/文档回归，以及隔离 PGlite 中的真实 SQL、迁移、历史字段投影、版本冲突、权限/幂等、默认 Sequence 选择、模型失败不重复调用。集成测试用 `MX_NEWS_TEST_PGLITE_MODULE` 指定现有模块，默认跳过，永不读取生产 DATABASE_URL。
 
@@ -267,7 +269,7 @@ duplicateGroupId（有确定性分组时）
 
 新增 `GET /api/v1/data/news/source-options`，供下游和新闻发现的来源下拉使用。返回 `items:[{key:目录UUID,value:当前目录名称}]`，以及 `scope=authorized_news_catalog_sources`、`countBasis=catalog_entries`、`total`。UUID 不随名称修改而改变；同名目录不合并。现有 `/news/sources` 继续提供通用目录元数据与授权类别，保持兼容。
 
-选项来自当前 Key 授权类别中至少存在一条可读新闻的有效目录绑定，排除归档目录和 provider。查询沿用入库来源、历史 marketplace 和当前版本审核绑定，审核优先；失效审核回退到原始结构化绑定。按索引候选检查存在性，不受最近 5,000 条来源统计上限影响。仅包含旧新闻的来源也可选；`total` 表示目录选项数，不是新闻条数。保留只读事务和 5 秒查询超时；大库需检查既有 `night-all-saved-records-hub-indexes.sql` 的两个目录绑定索引与 migration 110 的审核绑定索引。
+选项来自当前 Key 授权类别中至少存在一条可读新闻的有效目录绑定，排除归档目录和 provider。查询沿用入库来源、历史 marketplace 和当前版本审核绑定，审核优先；失效审核回退到原始结构化绑定。按索引候选检查存在性，不受最近 5,000 条来源统计上限影响。仅包含旧新闻的来源也可选；`total` 表示目录选项数，不是新闻条数。保留只读事务，使用同一新闻查询超时配置（默认 15 秒）；大库需检查既有 `night-all-saved-records-hub-indexes.sql` 的两个目录绑定索引与 migration 110 的审核绑定索引。
 
 页面首次展开时读取选项，同一凭据下复用成功结果，支持显式刷新、名称/ID 搜索、最多 50 项勾选、逐项移除和清空。多选后将 key 数组原样用于 `catalogEntryIds`；数组内部取 OR，与关键词、类别等维度取交集。界面展示名称，接口调试同时展示 ID/名称映射。展开、勾选、切换 tab 不查询文章或计量，点击查询才检索；分页沿用已提交条件。
 

@@ -614,6 +614,8 @@ export const adminApi = {
   capabilityCatalog: token => request(token, `${ADMIN_ROOT}/capability-catalog`),
   pricingTemplate: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/pricing-template`, body ? { method: 'POST', body } : {}),
   sourceConnections: token => request(token, `${ADMIN_ROOT}/source-connections`),
+  platformSearchPolicies: token => request(token, `${ADMIN_ROOT}/platform-search-policies`),
+  updatePlatformSearchPolicy: (token, platform, body) => request(token, `${ADMIN_ROOT}/platform-search-policies/${encodeURIComponent(platform)}`, { method: 'PUT', body }),
   sourceCatalog: (token, { includeArchived = false } = {}) => visibleSourceCatalogResponse(request(
     token,
     `${ADMIN_ROOT}/source-catalog`,

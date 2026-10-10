@@ -25,11 +25,12 @@ const TKEY = 't.douyin_search_fetch_video_search_v1'
 const body = { params: { keyword: '自行车', page: 1, sortType: '_2' } }
 const DATA = { rows: [{ id: 'one', title: '', body: '完整正文\n#话题', unknown: { nested: [false, 0, null] } }], nextCursor: 'opaque-vendor-cursor' }
 
-test('source inventory is bounded and does not claim a legacy cutover or supplier health', () => {
+test('source inventory records the Facebook search cutover without inventing supplier health', () => {
   const snapshot = providerMigrationSnapshot()
   assert.equal(snapshot.summary.sourceEndpoints, 51)
   assert.equal(snapshot.summary.nativeContracts, 50)
-  assert.equal(snapshot.summary.legacyCutovers, 0)
+  assert.equal(snapshot.summary.legacyCutovers, 2)
+  assert.ok(snapshot.rows.filter(row => row.legacyStatus === 'hub_search_cutover').every(row => row.platform === 'facebook'))
   assert.equal(snapshot.incompleteInventory, true)
   assert.equal(NATIVE_FORWARDING_ENDPOINTS.filter(r => r.provider === 'justone' && !r.schemaVersion).length, 11)
   assert.equal(NATIVE_FORWARDING_ENDPOINTS.filter(r => r.provider === 'tikhub' && !r.schemaVersion).length, 39)

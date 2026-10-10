@@ -4,6 +4,8 @@ import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
 import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
 import { HUB_USER_AGENT } from '../core/outbound-identity.mjs'
 import { AppError } from '../core/errors.mjs'
+import { FACEBOOK_HOST, FACEBOOK_ENDPOINT, projectFacebookSearch } from '../contracts/facebook-search.mjs'
+import { rapidQuotaObservation } from '../external-platforms/platform-search-policy.mjs'
 
 export const TWITTER_AIO_HOST = 'twitter-aio.p.rapidapi.com'
 const MAX_BYTES = 4 * 1024 * 1024
@@ -49,7 +51,10 @@ export class RapidApiAdapter {
   async execute(request, { credential, encodeCursor } = {}) {
     const key = credential === undefined ? await this.resolveCredential() : credential
     if (typeof key !== 'string' || !key) throw new Error('External credential is unavailable')
-    const url = new URL(request.endpointPath, `https://${TWITTER_AIO_HOST}`)
+    const facebook = request.endpointKey === FACEBOOK_ENDPOINT
+    const host = facebook ? FACEBOOK_HOST : TWITTER_AIO_HOST
+    const url = new URL(request.endpointPath, `https://${host}`)
+    if (url.origin !== `https://${host}`) throw new Error('Unexpected provider origin')
     for (const [name, value] of Object.entries(request.upstreamQuery)) url.searchParams.set(name, String(value))
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
@@ -75,7 +80,7 @@ export class RapidApiAdapter {
     })
     try {
       response = await this.fetch(url, { method: 'GET', redirect: 'error', signal: controller.signal,
-        headers: { 'x-rapidapi-host': TWITTER_AIO_HOST, 'x-rapidapi-key': key, 'user-agent': HUB_USER_AGENT } })
+        headers: { 'x-rapidapi-host': host, 'x-rapidapi-key': key, 'user-agent': HUB_USER_AGENT } })
       bytes = await readBody(response, controller)
       bodyText = new TextDecoder('utf-8', {fatal:true, ignoreBOM:true}).decode(bytes)
       try { raw = JSON.parse(bodyText.replace(/^\uFEFF/, '')); parsed = true } catch { /* preserved exact bytes below */ }
@@ -85,13 +90,17 @@ export class RapidApiAdapter {
         throw new RapidApiUpstreamError({ outcome: response.status < 500 ? 'rejected' : 'unknown', billed: null,
           httpStatus: response.status, businessCode: Number.isFinite(businessCode) || (typeof businessCode === 'string' && /^[A-Za-z0-9_.:-]{1,100}$/.test(businessCode)) ? businessCode : null,
           errorCode: 'social_upstream_rejected', affectsCircuit: response.status >= 500,
+          ...(facebook ? { quota: { ...rapidQuotaObservation(response), monthlyExhausted: response.status === 429
+            && /(?:monthly|month)[\s\S]{0,80}(?:quota|limit)|(?:quota|limit)[\s\S]{0,80}(?:monthly|month)/i.test(String(raw?.message || raw?.error?.message || '').slice(0,500)) } } : {}),
         }, persistence('rejected'))
       }
       if (!parsed || !isPostgresSafeJsonValue(raw)) throw new Error('invalid_response_json')
       let publicBody
-      try { publicBody = normalizeTwitterResponse(safe(raw), request, { encodeCursor, capturedAt }) }
+      try { publicBody = facebook ? projectFacebookSearch(safe(raw), request, 'rapidapi', capturedAt).publicBody
+        : normalizeTwitterResponse(safe(raw), request, { encodeCursor, capturedAt }) }
       catch { throw new Error('invalid_social_response') }
-      const result = { publicBody, items: publicBody.data.items, records: [], archiveObjects: [], ...persistence('accepted') }
+      const result = { publicBody, items: publicBody.data.items, records: [], archiveObjects: [], ...persistence('accepted'),
+        ...(facebook ? { quota: rapidQuotaObservation(response) } : {}) }
       Object.defineProperty(result, 'restrictedResponseArchive', { value: result.restrictedResponseArchive, enumerable: false })
       return result
     } catch (error) {
@@ -102,6 +111,7 @@ export class RapidApiAdapter {
       }
       throw new RapidApiUpstreamError({ outcome: response?.ok ? 'succeeded_unusable' : 'unknown', billed: null,
         httpStatus: response?.status ?? null, businessCode: null, errorCode: controller.signal.aborted ? 'social_upstream_timeout_or_size_limit' : 'social_upstream_response_unusable',
+        ...(facebook && response ? { quota: rapidQuotaObservation(response) } : {}),
       }, persistence(response?.ok ? 'succeeded_unusable' : 'unknown'))
     } finally { clearTimeout(timer) }
   }

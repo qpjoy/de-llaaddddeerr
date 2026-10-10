@@ -14,6 +14,7 @@ import { ExternalPlatformEgressRelayStore } from './external-platforms/egress-re
 import { NightAllPlatformAdminService } from './external-platforms/night-all-admin.mjs'
 import { NightAllAService, NightAllADispatchStore } from './external-platforms/night-all-a.mjs'
 import { createServer } from 'node:http'
+import { PlatformSearchPolicyStore } from './external-platforms/platform-search-policy.mjs'
 import { createPool, createQueue } from '@qpjoy/mx-common'
 import { createSegmenter } from '@qpjoy/mx-common/segmenter'
 import { dirname, resolve } from 'node:path'
@@ -103,7 +104,7 @@ export async function createRuntime(config = loadConfig()) {
     : null
   const acquisitionHistory = pool ? new PostgresAcquisitionHistoryStore(pool) : null
   const topicReports = pool ? new TopicReportStore(pool) : null
-  const newsDiscovery = pool ? new NewsDiscoveryStore(pool) : null
+  const newsDiscovery = pool ? new NewsDiscoveryStore(pool, { queryTimeoutMs: config.newsQueryTimeoutMs }) : null
   const queue = pool ? createQueue({ ...config.common.queue, driver: 'postgres' }, { pool }) : null
   // Constructed unconditionally; it reports `enabled: false` when no Launcher
   // URL is configured, so the admin-token path is unaffected either way.
@@ -246,6 +247,20 @@ export async function createRuntime(config = loadConfig()) {
       })
     : null
   const tikHubProxyStore = pool ? new ExternalPlatformProxyStore(pool, config.deploymentEgress) : null
+  const platformSearchPolicyStore = new PlatformSearchPolicyStore(pool)
+  const facebookGateways = Object.fromEntries([
+    ['rapidapi', rapidApiAdapter, rapidConfig, rapidApiCredentialStore],
+    ['justone', justOneAdapter, config.justOne, externalPlatformCredentialStore],
+  ].map(([providerKey, adapter, providerConfig, credentialStore]) => [providerKey, new ExternalPlatformGateway({
+    usageStore: store, platformStore: createExternalPlatformStore({ pool, usageStore: store, providerKey,
+      authorizationPlatform: 'facebook', circuitFailureThreshold: providerConfig.circuitFailureThreshold,
+      circuitOpenMs: providerConfig.circuitOpenMs, uncertainCooldownMs: providerConfig.unknownFingerprintCooldownMs }),
+    adapter, config: providerConfig, providerKey, credentialStore, operationControlStore: externalPlatformControlStore,
+    apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: Math.max(120000, config.reservationLeaseMs),
+  })]))
+  const facebookSearch = (context, input) => facebookGateways.rapidapi.searchFacebook(context, input, {
+    policyStore: platformSearchPolicyStore, fallbackGateway: facebookGateways.justone,
+  })
   const tikHubAdapter = config.storeDriver === 'postgres'
     && !config.tikHub.configurationError
     && config.listenerMode !== 'admin'
@@ -484,10 +499,27 @@ export async function createRuntime(config = loadConfig()) {
         ...(await ipRiskProduct.capabilities().catch(()=>({operations:{'ip.risk.subscription.query':{ready:false}}}))).operations, 'enterprise.query': { ready: enterpriseReady } } }
     },
     externalPostCapabilities,
+    externalFacebookCapabilities: async options => {
+      const policy = await platformSearchPolicyStore.facebook()
+      if (policy.mode === 'paused') return { ready: false }
+      const operationKeys = ['social.facebook.search', 'native.j.facebook_post_search_v1']
+      const states = await Promise.allSettled(Object.entries(facebookGateways).map(async ([provider, gateway]) => {
+        const credential = await (provider === 'rapidapi' ? rapidApiCredentialStore : externalPlatformCredentialStore).describeCredential(provider)
+        const readiness = await gateway.nativeReadiness({ ...options, operationKeys, credentialConfigured: credential.credentialConfigured })
+        return [provider, Object.values(readiness).some(Boolean)]
+      }))
+      const ready = Object.fromEntries(states.filter(row => row.status === 'fulfilled').map(row => row.value))
+      const resetDue = policy.reset_at && new Date(policy.reset_at).getTime() <= Date.now()
+      const blocked = !resetDue && ((policy.blocked_until && new Date(policy.blocked_until).getTime() > Date.now())
+        || (!policy.blocked_until && (policy.used >= policy.monthly_limit || policy.remaining === 0)))
+      return { ready: Boolean((policy.mode !== 'justone' && ready.rapidapi && !blocked) || (policy.mode !== 'rapidapi' && ready.justone)) }
+    },
     externalSocialSearch: (context, input) => tikHubGateway.searchNotes(context, input),
     externalWechatSearch: (context, input) => socialAccountTikHubGateway.forwardNative(context, input),
-    externalRawSearch: (context, input) => (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
-    externalDataSearch: (context, input) => nativeSearchGateways[input.normalized.platform].searchRaw(context, input),
+    externalRawSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
+      : (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
+    externalDataSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
+      : nativeSearchGateways[input.normalized.platform].searchRaw(context, input),
     // The gateway reads the audited operation policy on every dispatch; static
     // env flags must not prevent routing to a database-enabled operation.
     externalSocialSearchEnabled: (context) => useTikHubOperation(context, 'social.posts.search'),
@@ -540,6 +572,7 @@ export async function createRuntime(config = loadConfig()) {
   if (balanceMonitor) balanceMonitor.onScheduleChanged = () => { void feishuAlerts?.timer?.refresh() }
   const peripherals = createPeripheralRuntime(config)
   const app = createApp({
+    platformSearchPolicyStore,
     peripherals,
     admissionRecovery: pool ? new AdmissionRecoveryService({ pool, usageStore: store,
       providers: Object.fromEntries([externalPlatformStore, tikHubPlatformStore, rapidApiStore, qixinPlatformStore,

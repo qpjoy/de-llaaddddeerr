@@ -4,6 +4,8 @@
 
 可选的浏览器 SSO 接入见 [Hub SSO 部署与恢复](../mx-launcher/docs/40-hub-sso-and-feishu-web.md)：先在 Launcher 集中登记 Hub HTTPS origin，再依次运行两个系统原 deploy。之后无需重复设置开关；未登记的部署保留原登录。
 
+Facebook 搜索迁移、自动选路及部署时导入供应商凭据见 [Facebook 搜索由 Hub 管理](docs/product/facebook-search-routing.md)。部署会自动从本机 Night-All 工作区发现配置；只有非标准目录才需要 `NIGHT_ALL_CONFIG_PATH`。重复 deploy 保留已有密钥、人工暂停和额度状态。
+
 ## 固定依赖和责任边界
 
 **Hub 的持久业务数据来自兄弟项目 `../mx-common`，不是 Hub 容器文件层或 Hub 自己的 PostgreSQL。** Hub 与 mx-common 都要同步代码；仅拉取/复制 Hub 子目录不能获得共享部署脚本的修复。
@@ -65,7 +67,11 @@ MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 \
 3. `provision mx-insight-hub` 使用保留的产品凭据。已有凭据但数据库或角色不存在时停止，绝不把“重建空数据库”当成恢复。只有角色、库和凭据均不存在的首次产品安装才允许初始化。
 4. 关闭 projector 的重启全量索引入口，再构建 Hub 镜像并导入 containerd。
 5. 保留运行配置，冻结 Hub Admin 写入，终止并确认前次迁移 Job/Pod 已退出，再执行本版迁移；迁移失败不会无限自动重试。
-6. 启动 Public/Admin，再恢复四种后台 worker 到清单副本数；完成依赖、工作负载、API 检查后才报告完整成功。
+6. 迁移成功后核对 Hub 查询索引，包括新闻按入库时间与发布时间的两条索引；缺失时并发创建，定义匹配但无效时并发修复。已有有效索引复用；同名定义冲突会停止部署并提示检查。索引校验通过后启动 Public/Admin，再恢复四种后台 worker 到清单副本数；完成依赖、工作负载、API 检查后才报告完整成功。
+
+新闻查询的 PostgreSQL `statement_timeout` 默认 15 秒，可在 `.env.internal` 设置 `MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS=30000` 改为 30 秒（范围 1000–60000 毫秒）。未配置时沿用已部署值；首次部署默认 15000，显式空值恢复默认。deploy 在发布 ConfigMap 前校验该值，应用通过事务内 `set_config(..., true)` 设置，仅作用于新闻 SQL，不改变共享 PostgreSQL 全局配置或 MX-H2I 登录/联网。更新超时需要本版 Hub 镜像和正常 deploy。
+
+新闻索引由 `scripts/news-discovery-serving-indexes.sql` 在 Hub 库单独执行，位于迁移事务之外。仅新建或修复后执行 `ANALYZE`；重复部署不重建有效索引，也不重复全表统计。首次补索引会增加数据库 I/O；失败时停止 API 发布，可在解决原因后重跑 deploy。
 
 后台队列会按数据库里原有启停、预算、并发和检查点继续处理；正常部署不创建全量索引、向量初始化或重新采集任务。应用版本有新迁移时仍执行正常 schema 升级，这不是逐字节不变的备份恢复。
 

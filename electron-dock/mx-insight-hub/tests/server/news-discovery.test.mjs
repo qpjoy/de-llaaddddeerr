@@ -7,6 +7,7 @@ import { classificationEvidence, classifyCatalogByRule, validateCatalogSuggestio
 import { createApp } from '../../server/app.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
+import { loadConfig } from '../../server/config.mjs'
 
 const NEWS = 'data_center_saved_records_news', FINANCE = 'data_center_saved_records_finance'
 const id = n => `10000000-0000-4000-8000-${String(n).padStart(12, '0')}`
@@ -14,6 +15,45 @@ const entry = { id: id(90), sourceKey: 'source-catalog-0022', canonicalName: '�
 const options = { platforms: [NEWS, FINANCE], identity: ['consumer', 'key'], secret: 'test-news-cursor-pepper' }
 const record = { id: id(1), platform: NEWS, current_revision: 1, title: '新闻测试', body: '完整正文', url: 'https://example.test/news?token=private&lang=zh',
   event_time: null, collected_at: '2026-09-23T00:00:00Z', stable_fields: { crawler: { lineage: { publisher: { code: 'sina', name: '新浪' } } } } }
+
+test('news SQL timeout defaults to 15 seconds and accepts only bounded operator configuration', () => {
+  const env = { MX_INSIGHT_LISTENER_MODE: 'public', MX_INSIGHT_STORE: 'memory',
+    MX_INSIGHT_API_KEY_PEPPER: 'news-timeout-test-pepper-at-least-32-bytes' }
+  assert.equal(loadConfig(env).newsQueryTimeoutMs, 15_000)
+  for (const value of ['1000', '30000', '60000']) {
+    const config = loadConfig({ ...env, MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS: value })
+    assert.equal(new NewsDiscoveryStore(null, { queryTimeoutMs: config.newsQueryTimeoutMs }).queryTimeoutMs, Number(value))
+  }
+  for (const value of ['0', '-1', '999', '60001', '15000.5', '15s', 'NaN', 'Infinity']) {
+    assert.throws(() => loadConfig({ ...env, MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS: value }), { code: 'invalid_configuration' })
+    assert.throws(() => new NewsDiscoveryStore(null, { queryTimeoutMs: value }), { code: 'invalid_configuration' })
+  }
+})
+
+test('news reads apply transaction-local timeout and release pooled connections on success or error', async () => {
+  for (const code of [null, '57014', 'XX000']) {
+    const calls = []
+    let released = 0
+    const failure = Object.assign(new Error('query failed'), { code })
+    const client = { async query(sql, values) {
+      calls.push({ sql, values })
+      if (sql === 'SELECT news_fixture') {
+        if (code) throw failure
+        return { rows: [{ id: 'fixture' }] }
+      }
+      return { rows: [] }
+    }, release() { released++ } }
+    const news = new NewsDiscoveryStore({ connect: async () => client }, { queryTimeoutMs: 30_000 })
+    const result = news.bounded('SELECT news_fixture', [])
+    if (code === '57014') await assert.rejects(result, { status: 503, code: 'news_query_timeout' })
+    else if (code) await assert.rejects(result, error => error === failure)
+    else assert.deepEqual((await result).rows, [{ id: 'fixture' }])
+    assert.equal(calls[0].sql, 'BEGIN READ ONLY')
+    assert.deepEqual(calls[1], { sql: "SELECT set_config('statement_timeout', $1, true)", values: ['30000ms'] })
+    assert.equal(calls.at(-1).sql, code ? 'ROLLBACK' : 'COMMIT')
+    assert.equal(released, 1)
+  }
+})
 
 test('news filters reject scope widening, calendar mistakes and changed cursor identity', () => {
   for (const input of [{ platforms: [NEWS] }, { pageSize: 0 }, { sourceCodes: ['a,b'] }, { catalogEntryIds: ['sina'] }, { from: '2026-02-30T00:00:00Z' }, { from: '2026-01-01T24:00:00Z' }]) {

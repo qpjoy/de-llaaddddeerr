@@ -768,6 +768,7 @@ export function createApp({
   retrievalControl = null,
   embedding = null,
   externalPlatformAdmin = null,
+  platformSearchPolicyStore = null,
   provisioning = null,
   notifications = null,
   balanceMonitor = null,
@@ -2907,6 +2908,20 @@ export function createApp({
         requireNoQuery(searchParams, 'notification action')
         if (!notifications) throw new AppError(503, 'notifications_unavailable', 'Notifications are unavailable')
         sendJson(response, 200, { data: await notifications.act(params.id, await readJson(request, 8192)), requestId })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/platform-search-policies') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'platform search strategies')
+        sendJson(response, 200, { data: { items: await platformSearchPolicyStore?.list() || [] }, requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/platform-search-policies/:platform')
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'platform search strategy update')
+        if (!platformSearchPolicyStore) throw new AppError(503, 'platform_search_policy_unavailable', 'Search strategy is unavailable')
+        sendJson(response, 200, { data: await platformSearchPolicyStore.update(params.platform, await readJson(request, 4096)), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/external-platforms') {

@@ -698,6 +698,18 @@ validate_existing_runtime_secret() {
 
 }
 
+preserve_existing_news_runtime_config() {
+  # An explicit value wins; an omitted one preserves the operator's deployed limit.
+  if [ "${MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS+x}" = x ]; then return; fi
+  local existing=""
+  if ! existing="$(kubectl -n mx-insight-hub get configmap mx-insight-hub-config --ignore-not-found \
+    -o "jsonpath={.data['MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS']}" 2>/dev/null)"; then
+    die "could not inspect retained news query timeout; refusing to replace the runtime ConfigMap"
+  fi
+  MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS="$existing"
+  export MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS
+}
+
 preserve_existing_peripheral_runtime_config() {
   # Explicit empty revokes the allowlist. Omitted config preserves it across deploys.
   if [ "${MX_INSIGHT_PERIPHERAL_ORIGINS+x}" = x ]; then return; fi
@@ -1208,6 +1220,18 @@ create_runtime_config() {
   local tikhub_search_canary_consumer_ids="${MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS:-}"
   local tikhub_billing_json="${MX_INSIGHT_TIKHUB_BILLING_JSON:-}"
   local reservation_lease_ms="${MX_INSIGHT_RESERVATION_LEASE_MS:-180000}"
+  local news_query_timeout_ms
+  if ! news_query_timeout_ms="$(node --input-type=module -e '
+    try {
+      const { parseNewsQueryTimeoutMs } = await import(process.argv[1])
+      process.stdout.write(String(parseNewsQueryTimeoutMs(process.argv[2])))
+    } catch (error) {
+      process.stderr.write(error.message + "\n")
+      process.exit(1)
+    }
+  ' "${ROOT_DIR}/server/data/news-config.mjs" "${MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS:-}")"; then
+    die "news query timeout configuration is invalid"
+  fi
   local public_url="${MX_INSIGHT_PUBLIC_URL:-http://${MX_INSIGHT_HOST_IP:-10.88.88.88}:18150}"
   if ! public_url="$(
     MX_INSIGHT_PUBLIC_URL_VALUE="$public_url" node -e '
@@ -1403,6 +1427,7 @@ create_runtime_config() {
     --from-literal=NIGHT_ALL_TIMEOUT_MS="${NIGHT_ALL_TIMEOUT_MS:-60000}" \
     --from-literal=NIGHT_ALL_READY_MODE="${NIGHT_ALL_READY_MODE:-ready_only}" \
     --from-literal=MX_INSIGHT_RESERVATION_LEASE_MS="$reservation_lease_ms" \
+    --from-literal=MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS="$news_query_timeout_ms" \
     --from-literal=MX_INSIGHT_PUBLIC_URL="$public_url" \
     --from-literal=MX_INSIGHT_JUSTONE_CONFIGURED="$justone_configured" \
     --from-literal=MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED="$justone_contract_verified" \
@@ -2059,6 +2084,17 @@ ensure_night_all_saved_records_hub_indexes() {
   fi
 }
 
+# Reconcile both news time-field indexes online, outside migration transactions.
+ensure_news_discovery_serving_indexes() {
+  local sql_file="${ROOT_DIR}/scripts/news-discovery-serving-indexes.sql"
+  [ -r "$sql_file" ] || die "news discovery serving-index SQL is missing: ${sql_file}"
+  say "reconciling news discovery serving indexes"
+  if ! kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
+    psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1 <"$sql_file"; then
+    die "news discovery serving indexes could not be reconciled"
+  fi
+}
+
 # Build the Admin account directory and recent-event indexes online.
 ensure_data_browser_serving_indexes() {
   local sql_file="${ROOT_DIR}/scripts/data-browser-serving-indexes.sql"
@@ -2163,6 +2199,7 @@ apply_k8s() {
   preserve_existing_justone_runtime_config
   preserve_existing_tikhub_runtime_config
   preserve_existing_peripheral_runtime_config
+  preserve_existing_news_runtime_config
   discover_hanlp_url
   create_runtime_config
   create_model_key_secret
@@ -2209,6 +2246,7 @@ apply_k8s() {
   ensure_night_all_saved_records_hub_indexes
   ensure_province_opinion_serving_indexes
   ensure_canonical_context_serving_indexes
+  ensure_news_discovery_serving_indexes
   ensure_data_browser_serving_indexes
   ensure_api_key_quota_indexes
 
@@ -2529,6 +2567,17 @@ seed_default_price_books() {
   kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -- \
     node --input-type=module - --all --defaults --missing-budget-minor 100000 --apply \
     < "${ROOT_DIR}/scripts/migrate-missing-operation-prices.mjs"
+}
+
+# Only missing Facebook supplier credentials are imported. Never print keys,
+# overwrite a configured Hub supplier, or make this optional source a login gate.
+ensure_facebook_supplier_credentials() {
+  need node
+  [ -n "${MX_INSIGHT_ADMIN_TOKEN:-}" ] || return 0
+  MX_INSIGHT_ADMIN_TOKEN="$MX_INSIGHT_ADMIN_TOKEN" \
+    MX_INSIGHT_ADMIN_BASE_URL="http://127.0.0.1:18151" \
+    node "${ROOT_DIR}/scripts/migrate-facebook-credentials.mjs" \
+    || say "WARNING: Facebook supplier import incomplete; inspect supplier credentials in Hub Admin."
 }
 
 # Idempotently guarantee a usable public API key after deploy. The plaintext key
@@ -3028,6 +3077,7 @@ ops_action() {
       apply_k8s
       k8s_smoke
       ensure_default_api_key
+      ensure_facebook_supplier_credentials
       seed_default_price_books
       print_deploy_summary
       if [ "${MX_INSIGHT_REQUIRE_SEARCH:-1}" = 1 ]; then
@@ -3051,6 +3101,7 @@ ops_action() {
       apply_k8s
       k8s_smoke
       ensure_default_api_key
+      ensure_facebook_supplier_credentials
       seed_default_price_books
       print_deploy_summary
       ;;

@@ -17,6 +17,7 @@ export const isHubRawCursor = value => typeof value === 'string' && value.starts
 // Only verified request shapes move. Existing Night-All continuations remain
 // pinned there; a Hub continuation must never fall back to the old provider.
 export function canRouteRawSearch({ platform, upstreamBody: body, pageSize }) {
+  if (platform === 'facebook') return true // Every shape stays in Hub; unsupported shapes fail before dispatch.
   if (!['weibo', 'twitter', 'instagram'].includes(platform)) return false
   if (isHubRawCursor(body.cursor)) return true
   if (body.cursor || body.params?.cursor || body.page > 1) return false

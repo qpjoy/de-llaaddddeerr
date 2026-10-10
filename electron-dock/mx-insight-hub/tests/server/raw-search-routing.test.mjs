@@ -500,17 +500,15 @@ test('Twitter uses existing direct adapter with empty raw title and null canonic
   assert.equal(h.calls.length, 1)
 })
 
-test('Facebook new raw delivery removes only content titles, preserving archived payload and account names', async () => {
+test('Facebook cutover cannot fall back through the old raw gateway', async () => {
   const h = await harness({ platform: 'facebook' })
-  const before = structuredClone(h.oldPayload)
-  const result = await h.invoke()
-  assert.equal(h.historical.length, 1)
+  await assert.rejects(h.invoke(), { code: 'raw_search_unavailable' })
+  assert.equal(h.historical.length, 0)
   assert.equal(h.calls.length, 0)
-  assert.equal(JSON.parse(result.body.data.raw_data)[0].title, '')
-  assert.equal(result.body.data.raw_info, before.data.raw_info)
-  assert.deepEqual(h.oldPayload, before)
+  const before = structuredClone(h.oldPayload)
   assert.deepEqual(rawSearchContentTitles(before, 'xiaohongshu'), before)
-  assert.deepEqual((await h.invoke()).body, result.body)
+  assert.equal(JSON.parse(rawSearchContentTitles(before, 'facebook').data.raw_data)[0].title, '')
+  assert.deepEqual(h.oldPayload, before)
 })
 
 test('unsupported batches and existing Night-All shapes stay historical; explicit detail opt-out does not spend', async () => {
@@ -673,7 +671,7 @@ test('existing data-search requests replay original responses across cutover; fr
 })
 
 test('historical small pages and old continuations clean titles in Hub while preserving source payloads and profile names', async () => {
-  for (const platform of ['weibo', 'instagram', 'facebook', 'twitter']) {
+  for (const platform of ['weibo', 'instagram', 'twitter']) {
     const h = await harness({ platform })
     const before = structuredClone(h.oldDataPayload)
     const result = await h.invokeData({ platform, query: '汽车', pageSize: 10 })

@@ -14,6 +14,7 @@ import {
 import { parseServerFileRoots } from './ingest/external/server-files.mjs'
 import { parseExternalMediaConfig } from './external-media-config.mjs'
 import { reportingConfig } from './payments/reporting.mjs'
+import { parseNewsQueryTimeoutMs } from './data/news-config.mjs'
 
 export {
   parseExternalMediaConfig,
@@ -349,6 +350,7 @@ export function loadConfig(environment = process.env) {
       : required(environment, 'MX_INSIGHT_ADMIN_TOKEN'),
     apiKeyPepper: required(environment, 'MX_INSIGHT_API_KEY_PEPPER'),
     reservationLeaseMs,
+    newsQueryTimeoutMs: parseNewsQueryTimeoutMs(environment.MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS),
     storeDriver,
     databaseUrl,
     paymentReporting: listenerMode==='public' ? null : reportingConfig(environment),

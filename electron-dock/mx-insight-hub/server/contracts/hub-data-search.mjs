@@ -4,6 +4,7 @@ import { normalizeSearchContent } from './search-content.mjs'
 
 export const isHubDataCursor = value => typeof value === 'string' && value.startsWith('mxds1.')
 export function canRouteDataSearch({ platform, pageSize, cursor }) {
+  if (platform === 'facebook') return true
   return ['weibo', 'instagram'].includes(platform) && (isHubDataCursor(cursor) || (!cursor && pageSize >= 20))
 }
 

@@ -284,16 +284,18 @@ function createProviderProxyFetch(store, {
   makeAgent = url => new ProxyAgent(url),
   now = () => Date.now(),
 } = {}) {
-  const { origin, probeUrl } = providerRoute(providerKey)
+  const { origin, probeUrl: defaultProbeUrl } = providerRoute(providerKey)
   const selection = new Map()
   return async (url, options = {}) => {
     const target = new URL(url)
-    if (target.origin !== origin || target.username || target.password) throw new Error('Unexpected provider origin')
+    const facebook = providerKey === 'rapidapi' && target.origin === 'https://facebook-scraper3.p.rapidapi.com'
+    if ((!facebook && target.origin !== origin) || target.username || target.password) throw new Error('Unexpected provider origin')
+    const probeUrl = facebook ? 'https://facebook-scraper3.p.rapidapi.com/' : defaultProbeUrl
     const route = await store.route()
     const policy = resolveProbePolicy(route.probePolicy)
     const candidates = [...route.proxyUrls, ...(route.directFallback ? [null] : [])]
     if (!candidates.length) throw new AppError(503, 'proxy_route_unavailable', 'No enabled System Proxy route')
-    const cached = policy.cacheTtlMs > 0 ? selection.get(route.fingerprint) : null
+    const cached = policy.cacheTtlMs > 0 ? selection.get(`${target.origin}:${route.fingerprint}`) : null
     const trusted = cached && cached.expiresAt > now() && candidates.includes(cached.proxyUrl)
       ? cached.proxyUrl
       : undefined
@@ -323,7 +325,7 @@ function createProviderProxyFetch(store, {
           if (!verdict.reachable) continue
         }
         if (policy.cacheTtlMs > 0) {
-          selection.set(route.fingerprint, { proxyUrl: candidate, expiresAt: now() + policy.cacheTtlMs })
+          selection.set(`${target.origin}:${route.fingerprint}`, { proxyUrl: candidate, expiresAt: now() + policy.cacheTtlMs })
         }
         return await (candidate ? fetchImpl : directFetchImpl)(url, { ...options, dispatcher })
       } finally {

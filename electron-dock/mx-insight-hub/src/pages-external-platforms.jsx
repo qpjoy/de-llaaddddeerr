@@ -882,7 +882,7 @@ function RangeControl({ range, setQuery }) {
 
 function OverviewMetricRail({ overview }) {
   return (
-    <section className="mih-external-kpis" aria-label="外部数据平台汇总">
+    <section className="mih-external-kpis" aria-label="上游供应商汇总">
       <MetricCard icon={Globe} label="已登记平台" value={formatNumber(overview.items.length)} hint="当前管理响应" tone="primary" />
       <MetricCard icon={Pulse} label="Hub 请求" value={formatOptionalNumber(overview.summary.hubRequests)} hint="当前统计窗口" tone="info" />
       <MetricCard icon={FlowArrow} label="上游调用" value={formatOptionalNumber(overview.summary.upstreamCalls)} hint="真实付费边界" tone="archetype" />
@@ -955,7 +955,7 @@ function PlatformsOverview({ token, range, setQuery, onUnauthorized }) {
       <PageHeading
         className="mih-command-heading"
         eyebrow="DATA CLEANING CENTER / EXTERNAL PLATFORMS"
-        title="外部数据平台"
+        title="上游供应商"
         description="管理实时上游接口的调用、稳定性、成本与 Hub 数据沉淀；它与定时清洗任务分开观测。"
         loading={remote.loading}
         onRefresh={remote.refresh}
@@ -965,7 +965,7 @@ function PlatformsOverview({ token, range, setQuery, onUnauthorized }) {
       </PageHeading>
 
       {connections.error ? <ErrorState error={connections.error} onRetry={connections.refresh} /> : null}
-      {remote.loading && !remote.data ? <LoadingState label="正在读取外部数据平台" /> : null}
+      {remote.loading && !remote.data ? <LoadingState label="正在读取上游供应商" /> : null}
       {remote.error ? <ErrorState error={remote.error} onRetry={remote.refresh} /> : null}
       {remote.data !== null || (!remote.loading && !remote.error) ? (
         <>
@@ -974,7 +974,7 @@ function PlatformsOverview({ token, range, setQuery, onUnauthorized }) {
           {balances.data?.available === false ? <p>余额监控需要 PostgreSQL 持久化存储。</p> : null}
           {overview.items.map((item) => <ProviderAlerts key={item.key} item={item} />)}
           <Panel
-            title="平台总览"
+            title="供应商总览"
             subtitle="同一统计口径横向比较；详情仅在管理后端提供真实证据后展示。"
             className="mih-external-provider-panel"
             action={<span className="mih-external-observed">数据观测：{displayDate(overview.lastObservedAt)}</span>}
@@ -988,7 +988,7 @@ function PlatformsOverview({ token, range, setQuery, onUnauthorized }) {
             ) : (
               <EmptyState
                 icon={Globe}
-                title="尚无已登记外部数据平台"
+                title="尚无已登记上游供应商"
                 description="管理接口返回了空集合；这里不会用示例平台或推测指标填充。"
               />
             )}
@@ -2070,7 +2070,7 @@ function NightAllPlatformDetail({ token, range, setQuery, onUnauthorized }) {
   const data = remote.data
   return <>
     <PageHeading title="Night-All · 数据接口与客户计费" description="内部数据服务也纳入平台治理；服务转移价、客户售价与采集工作预算分别管理。" loading={remote.loading} onRefresh={remote.refresh}>
-      <a className="qp-button qp-button--ghost" href="#/external-platforms">返回平台总览</a><RangeControl range={range} setQuery={setQuery} />
+      <a className="qp-button qp-button--ghost" href="#/external-platforms">返回供应商总览</a><RangeControl range={range} setQuery={setQuery} />
     </PageHeading>
     {remote.error ? <ErrorState error={remote.error} onRetry={remote.refresh} /> : null}
     {!data && remote.loading ? <LoadingState label="读取 Night-All 调用证据" /> : null}
@@ -2110,7 +2110,7 @@ function PlatformDetail({ token, range, provider, selectedOperation, setQuery, o
         loading={remote.loading}
         onRefresh={remote.refresh}
       >
-        <a className="qp-button qp-button--ghost" href={`#/external-platforms?range=${encodeURIComponent(range)}`}><ArrowLeft size={15} aria-hidden="true" />平台总览</a>
+        <a className="qp-button qp-button--ghost" href={`#/external-platforms?range=${encodeURIComponent(range)}`}><ArrowLeft size={15} aria-hidden="true" />供应商总览</a>
         {provider === 'qixin' ? <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/enterprise')}>企业接口文档 · 272 项</a> : null}
         {provider === 'tikhub' ? <><a className="qp-button qp-button--outline" href={publicDocsHref('/docs/tikhub/get_image_note_detail')}>小红书接口文档</a><a className="qp-button qp-button--outline" href="#/data-products/xiaohongshu-note">小红书笔记画卷</a></> : null}
         <a className="qp-button qp-button--outline" href={`#/provisioning${typeof provider === 'string' ? `?provider=${encodeURIComponent(provider)}` : ''}`}>批量开通与逐端点价格</a>
@@ -2179,7 +2179,7 @@ function PlatformDetail({ token, range, provider, selectedOperation, setQuery, o
           icon={Globe}
           title={`${providerDisplayName(provider)} 详情响应为空`}
           description="管理接口没有返回可展示的运行证据；页面不会用默认指标代替。"
-          action={<a className="qp-button qp-button--outline" href={`#/external-platforms?range=${encodeURIComponent(range)}`}><ArrowLeft size={15} aria-hidden="true" />返回平台总览</a>}
+          action={<a className="qp-button qp-button--outline" href={`#/external-platforms?range=${encodeURIComponent(range)}`}><ArrowLeft size={15} aria-hidden="true" />返回供应商总览</a>}
         />
       ) : null}
     </>
@@ -2191,14 +2191,14 @@ function UnsupportedProvider({ range }) {
     <>
       <PageHeading
         eyebrow="DATA CLEANING CENTER / EXTERNAL PLATFORMS"
-        title="外部数据平台"
-        description="当前详情路由只接受已登记的外部数据平台。"
+        title="上游供应商"
+        description="当前详情路由只接受已登记的上游供应商。"
       />
       <EmptyState
         icon={WarningCircle}
         title="无法识别外部平台"
         description="该平台不在可见的管理目录中。"
-        action={<a className="qp-button qp-button--outline" href={`#/external-platforms?range=${encodeURIComponent(range)}`}><ArrowLeft size={15} aria-hidden="true" />返回平台总览</a>}
+        action={<a className="qp-button qp-button--outline" href={`#/external-platforms?range=${encodeURIComponent(range)}`}><ArrowLeft size={15} aria-hidden="true" />返回供应商总览</a>}
       />
     </>
   )
@@ -2229,7 +2229,7 @@ function IpSearchPlatformDetail({ token, range, setQuery, onUnauthorized, notify
   const load = useCallback(() => adminApi.externalPlatform(token, 'ipsearch', { range }), [token, range])
   const state = useRemoteData(load)
   const data = state.data
-  return <div className="mih-page"><button className="qp-button qp-button--outline" onClick={() => setQuery({ provider: null, range })}>返回平台总览</button>
+  return <div className="mih-page"><button className="qp-button qp-button--outline" onClick={() => setQuery({ provider: null, range })}>返回供应商总览</button>
     <h1>ipsearch · IP 风险画像</h1>
     {data?.credential ? <ExternalPlatformCredentialPanel token={token} provider="ipsearch" credential={data.credential} onSaved={state.refresh} onUnauthorized={onUnauthorized} notify={notify} /> : null}
     {state.error ? <ErrorState error={state.error} /> : null}
@@ -2256,7 +2256,7 @@ function BaiduIpPlatformDetail({token,range,setQuery,onUnauthorized,notify}) {
     await adminApi.updateExternalPlatformOperationPolicy(token,'baidu-ip','ip.risk.query.v2',{revision:form.revision,enabled:form.enabled,dailyLimit:Number(form.daily_limit),spacingMs:Number(form.spacing_ms)})
     state.refresh();notify?.('IP v2 渠道配置已保存')
   }catch(e){setError(e)}finally{setBusy(false)}}
-  return <div className="mih-page"><button className="qp-button qp-button--outline" onClick={()=>setQuery({provider:null,range})}>返回平台总览</button><h1>百度 · IP 风险画像 v2</h1>
+  return <div className="mih-page"><button className="qp-button qp-button--outline" onClick={()=>setQuery({provider:null,range})}>返回供应商总览</button><h1>百度 · IP 风险画像 v2</h1>
     {state.error||error?<ErrorState error={error||state.error}/>:null}
     {!form?<p>正在加载…</p>:<section className="qp-panel mih-panel"><h2>API 与运行策略</h2><p>{state.data.notes.connection}</p><p>{state.data.notes.budget}</p>
       <form onSubmit={save}><label><input type="checkbox" checked={form.enabled} disabled={busy} onChange={e=>setForm({...form,enabled:e.target.checked})}/>启用 IP v2 查询和商品购买</label>

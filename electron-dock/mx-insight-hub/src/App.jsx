@@ -72,6 +72,7 @@ import {
 import { VirtualSupermarketPage } from './pages-virtual-supermarket.jsx'
 import { SourceCatalogPage } from './pages-source-catalog.jsx'
 import { ExternalPlatformsPage } from './pages-external-platforms.jsx'
+import { DataPlatformsPage } from './platform-search-policy.jsx'
 import { NotificationsPage } from './pages-notifications.jsx'
 import { AgentProxyPage, AgentSequencePage } from './pages-agent-center.tsx'
 
@@ -364,7 +365,7 @@ const NAV_PARENTS = {
   },
   [DATA_CLEANING_NAV_KEY]: {
     label: '数据接入与治理',
-    description: '连接、清洗与上游平台',
+    description: '连接、清洗、数据平台与供应商',
     icon: Database,
   },
   [AGENT_CENTER_NAV_KEY]: {
@@ -412,6 +413,7 @@ const ROUTES = [
   { path: '/sources', label: '清洗任务计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/provisioning', label: '批量开通', description: '价格草稿、授权与启用', icon: Globe, group: '策略控制', component: ProvisioningPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/external-platforms', label: '上游供应商', description: '实时接口、成本与调用保障', icon: Globe, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: ExternalPlatformsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-platforms', label: '数据平台', description: '平台服务、上游选择与额度策略', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DataPlatformsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },
   { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read', platformAdmin: true },
   { path: '/agent/providers', label: 'LLM Provider', description: '模型账号、协议与密钥', icon: Key, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentProvidersRoute, capability: 'membership.write', platformAdmin: true },

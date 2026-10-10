@@ -1125,6 +1125,7 @@ migration_complete_line="$(grep -n -- '--for=condition=complete job/mx-insight-h
 night_all_hub_indexes_line="$(grep -n '^  ensure_night_all_saved_records_hub_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
 province_indexes_line="$(grep -n '^  ensure_province_opinion_serving_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
 context_indexes_line="$(grep -n '^  ensure_canonical_context_serving_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
+news_indexes_line="$(grep -n '^  ensure_news_discovery_serving_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
 first_api_apply_line="$(grep -n '30-public-api.yaml' <<<"$apply_k8s_body" | cut -d: -f1)"
 night_all_source_indexes_line="$(grep -n '^  ensure_night_all_saved_records_source_indexes$' <<<"$apply_k8s_body" | cut -d: -f1)"
 admin_ready_line="$(grep -n 'deployment/mx-insight-hub-admin --timeout=300s' <<<"$apply_k8s_body" | cut -d: -f1)"
@@ -1136,6 +1137,8 @@ if ! [ "$acquisition_indexes_line" -lt "$migration_job_apply_line" ] \
   || ! [ "$migration_complete_line" -lt "$province_indexes_line" ] \
   || ! [ "$province_indexes_line" -lt "$context_indexes_line" ] \
   || ! [ "$context_indexes_line" -lt "$first_api_apply_line" ] \
+  || ! [ "$migration_complete_line" -lt "$news_indexes_line" ] \
+  || ! [ "$news_indexes_line" -lt "$first_api_apply_line" ] \
   || ! [ "$admin_ready_line" -lt "$night_all_source_indexes_line" ] \
   || ! [ "$night_all_source_indexes_line" -lt "$ingest_manifest_line" ]; then
   printf 'not ok - online index preparation is not ordered around migration and API rollout\n' >&2
@@ -1522,6 +1525,68 @@ fi
 grep -q 'canonical context serving indexes could not be reconciled' "$context_index_error"
 rm -f -- "$context_index_stdin" "$context_index_argv" "$context_index_error"
 printf 'ok - canonical context serving-index reconciliation is exact and fail-closed\n'
+
+news_index_stdin="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-news-index-stdin.XXXXXX")"
+news_index_argv="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-news-index-argv.XXXXXX")"
+(
+  kubectl() { printf '%s\n' "$*" >"$news_index_argv"; cat >"$news_index_stdin"; }
+  ensure_news_discovery_serving_indexes
+)
+assert_eq \
+  '-n mx-common exec -i statefulset/mx-common-postgres -- psql -X -U mx_common -d mx_insight_hub -v ON_ERROR_STOP=1' \
+  "$(cat "$news_index_argv")" 'news indexes only target the shared Hub database'
+cmp -s "$ROOT_DIR/scripts/news-discovery-serving-indexes.sql" "$news_index_stdin" \
+  || { printf 'not ok - news index SQL was not streamed intact\n' >&2; exit 1; }
+if (kubectl() { cat >/dev/null; return 1; }; ensure_news_discovery_serving_indexes) >/dev/null 2>&1; then
+  printf 'not ok - news index failure did not stop deploy\n' >&2
+  exit 1
+fi
+rm -f -- "$news_index_stdin" "$news_index_argv"
+
+for news_mode in retained explicit default; do
+  news_value="$(
+    unset MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS
+    if [ "$news_mode" = retained ]; then
+      kubectl() { printf '30000'; }
+    elif [ "$news_mode" = explicit ]; then
+      export MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS=20000
+      kubectl() { return 1; }
+    else
+      export MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS=
+      kubectl() { return 1; }
+    fi
+    preserve_existing_news_runtime_config
+    printf '%s' "$MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS"
+  )"
+  case "$news_mode" in retained) expected_news_value=30000;; explicit) expected_news_value=20000;; default) expected_news_value=;; esac
+  assert_eq "$expected_news_value" "$news_value" "news timeout preserves ${news_mode} configuration"
+done
+if (unset MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS; kubectl() { return 1; }; preserve_existing_news_runtime_config) >/dev/null 2>&1; then
+  printf 'not ok - failed news config lookup was silently replaced\n' >&2
+  exit 1
+fi
+news_preserve_line="$(grep -n '^  preserve_existing_news_runtime_config$' <<<"$apply_k8s_body" | cut -d: -f1)"
+[ "$news_preserve_line" -lt "$config_line" ]
+printf 'ok - news timeout is preserved before ConfigMap replacement\n'
+
+for invalid_news_timeout in 0 999 60001 invalid; do
+  news_config_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-news-config.XXXXXX")"
+  rm -f -- "$news_config_marker"
+  if (
+    export MX_INSIGHT_DATABASE_URL='postgres://test:test@localhost/disposable'
+    export MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS="$invalid_news_timeout"
+    kubectl() { : >"$news_config_marker"; }
+    create_runtime_config
+  ) >/dev/null 2>&1; then
+    printf 'not ok - invalid news timeout was accepted\n' >&2
+    exit 1
+  fi
+  if [ -e "$news_config_marker" ]; then
+    printf 'not ok - invalid news timeout reached a ConfigMap or Secret write\n' >&2
+    exit 1
+  fi
+done
+printf 'ok - invalid news timeout fails before runtime configuration mutation\n'
 
 run_hanlp_hub_smoke() (
   export MX_COMMON_HANLP_URL=http://hanlp.test
@@ -2156,6 +2221,7 @@ RUNTIME_SECRET_MARKER="$runtime_secret_marker" \
 RUNTIME_SECRET_ARGV="$runtime_secret_argv" \
 RUNTIME_SECRET_PATHS="$runtime_secret_paths" \
 RUNTIME_CONFIG_ORDER="$runtime_config_order" \
+MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS=30000 \
 MX_INSIGHT_JUSTONE_TOKEN="$runtime_secret_value" \
 MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
 MX_INSIGHT_JUSTONE_BILLING_JSON="$VALID_JUSTONE_BILLING_JSON" \
@@ -2190,6 +2256,7 @@ bash -c '
         ;;
       *" create configmap mx-insight-hub-config "*)
         printf "config\n" >>"$RUNTIME_CONFIG_ORDER"
+        printf "%s\n" "$@" >>"$RUNTIME_SECRET_ARGV"
         printf "apiVersion: v1\nkind: ConfigMap\n"
         ;;
       *" apply -f - "*) while IFS= read -r _line; do :; done ;;
@@ -2202,6 +2269,8 @@ assert_eq "$runtime_secret_value" "$(cat "$runtime_secret_marker")" \
   'protected runtime Secret file preserves the JustOne token exactly'
 assert_eq $'secret\nconfig' "$(cat "$runtime_config_order")" \
   'runtime Secret is accepted before an enabled JustOne ConfigMap'
+grep -Fxq -- '--from-literal=MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS=30000' "$runtime_secret_argv"
+printf 'ok - configured news timeout is rendered into the runtime ConfigMap\n'
 if grep -Fq "$runtime_secret_value" "$runtime_secret_argv"; then
   printf 'not ok - runtime Secret value entered kubectl argv\n' >&2
   exit 1

@@ -108,7 +108,7 @@ function ProviderMigrationPanel({ inventory }) {
   const current = Math.min(page, pages)
   return <details className="qp-panel mih-source-connection-list mih-provider-migration">
     <summary><strong>Night-All → Hub 迁移进度</strong> · {inventory.summary.nativeContracts} 个单接口合同 · 本批旧接口切换 {inventory.summary.legacyCutovers} 个</summary>
-    <p>单接口转发已实现，默认禁用；逐接口完成价格审核、授权和启用后执行。raw / crawl / user-info 继续原有行为，原生返回不替代旧搜索投影。</p>
+    <p>单接口按审核价格、授权与运行策略执行。Facebook raw 与 data/search 已由 Hub 平台策略选路；其他平台和操作的迁移范围见各行说明。</p>
     {inventory.incompleteInventory ? <p>当前清单来自源码。动态供应商目录文件缺失，生产数据库端点未读取，因此不是供应商全量目录。</p> : null}
     <div className="mih-connection-controls">
       <label className="qp-field"><span className="qp-field__label">搜索迁移平台或接口</span><input className="qp-input" value={query} onChange={e => { setQuery(e.target.value); setPage(1) }} placeholder="JustOne / facebook / search" /></label>

@@ -2,6 +2,7 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { newsFields } from './news-record.mjs'
 import { publicSourceCatalogItem } from './public-source-catalog.mjs'
+import { parseNewsQueryTimeoutMs } from './news-config.mjs'
 
 export const NEWS_CONTRACT = 'mx-insight-hub.news-discovery.v1'
 export const NEWS_METER = 'data.canonical-search'
@@ -137,7 +138,10 @@ export function newsWhere(query, { cursor = true } = {}) {
 }
 
 export class NewsDiscoveryStore {
-  constructor(pool) { this.pool = pool }
+  constructor(pool, { queryTimeoutMs } = {}) {
+    this.pool = pool
+    this.queryTimeoutMs = parseNewsQueryTimeoutMs(queryTimeoutMs)
+  }
   async sourceOptions(platforms) {
     // An option must have a visible, readable news record. Use the indexed
     // binding paths as candidates, then recheck the effective current binding.
@@ -165,7 +169,7 @@ export class NewsDiscoveryStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN READ ONLY')
-      await client.query("SET LOCAL statement_timeout = '5s'")
+      await client.query("SELECT set_config('statement_timeout', $1, true)", [`${this.queryTimeoutMs}ms`])
       const result = await client.query(sql, values)
       await client.query('COMMIT')
       return result

@@ -6,6 +6,7 @@ import { XHS_DISCOVERY_ENDPOINTS, XHS_DISCOVERY_VERSION } from '../contracts/xia
 import { QIXIN_OPERATIONS } from '../contracts/enterprise.mjs'
 import { randomUUID } from 'node:crypto'
 import { HUB_SOCIAL_OPERATIONS } from '../contracts/hub-social.mjs'
+import { FACEBOOK_OPERATION } from '../contracts/facebook-search.mjs'
 
 import { AppError } from '../core/errors.mjs'
 import {
@@ -83,7 +84,7 @@ function justoneResourceOperationEntries() {
 
 export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
   ...Object.fromEntries(WEB_SEARCH_PROVIDERS.map(p=>[p.key,[{operationKey:'web.search',label:'Web Search',legacyGate:'contractVerified',contractVersion:WEB_SEARCH_VERSION,endpointKeys:[p.endpointKey]}]])),
-  rapidapi: Object.freeze(HUB_SOCIAL_OPERATIONS),
+  rapidapi: Object.freeze([...HUB_SOCIAL_OPERATIONS, FACEBOOK_OPERATION]),
   qixin: Object.freeze(QIXIN_OPERATIONS),
   'baidu-ip': Object.freeze([{ operationKey:'ip.risk.query.v2',label:'IP 风险画像 · 百度 v2',
     contractVersion:'mx-insight-hub.ip-risk.v2',endpointKeys:['base','overall'] }]),

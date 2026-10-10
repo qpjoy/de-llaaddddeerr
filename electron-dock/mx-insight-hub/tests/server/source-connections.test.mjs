@@ -31,6 +31,10 @@ test('inventory separates content, account, commerce and multi-source stored rou
   assert.equal(snapshot.routes.find(row => row.id === 'ip-risk').keywordSearch, false)
   assert.equal(snapshot.routes.find(row => row.id === 'enterprise').keywordSearch, false)
   assert.ok(snapshot.routes.every(row => row.runtimeStatus === 'not_checked'))
+  const facebook = snapshot.routes.filter(row => row.platform === 'facebook' && row.keywordSearch)
+  assert.equal(facebook.length, 4)
+  assert.deepEqual([...new Set(facebook.map(row => row.sourceProviderLabel))].sort(), ['JustOne', 'RapidAPI'])
+  assert.ok(facebook.every(row => row.catalogKeys.includes('source-catalog-0088')))
 })
 
 test('runtime inputs include new saved-record categories but never connection credentials or invented health', () => {

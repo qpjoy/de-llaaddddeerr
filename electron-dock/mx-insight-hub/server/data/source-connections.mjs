@@ -45,7 +45,8 @@ export function implementedRoutes(sources = []) {
     platform: endpoint.platform, catalogKeys: providerCatalogKeys(endpoint.platform),
     provider: endpoint.provider, product: endpoint.key.startsWith('wechat.') ? (endpoint.platform === 'wechat_mp' ? '微信公众号' : endpoint.platformLabel) : endpoint.authorizationPlatform === 'ecommerce' ? '电商数据' : '社媒与内容数据', operation: endpoint.operation, path: endpoint.hubPath,
     keywordSearch: ['wechat.search.search', 'wechat.search.search-videos', 'wechat.channels.search-channel-videos'].includes(endpoint.key),
-    defaultRule: endpoint.key.startsWith('wechat.') ? 'Hub 微信直连合同；逐接口审核价格、授权与启用；旧微信搜索不再转发，旧游标不可复用，无自动补查或重试。' : '固定单接口转发；默认禁用，逐接口审核价格、授权与启用。旧搜索接口和游标不切换，无自动补查或重试。',
+    defaultRule: endpoint.key === 'j.facebook_post_search_v1' ? 'JustOne 原生 Facebook 搜索合同；按已有授权、审核价格和启停执行。Facebook raw/data 搜索另由 Hub 平台策略选路，旧游标须重新开始。'
+      : endpoint.key.startsWith('wechat.') ? 'Hub 微信直连合同；逐接口审核价格、授权与启用；旧微信搜索不再转发，旧游标不可复用，无自动补查或重试。' : '固定单接口转发；默认禁用，逐接口审核价格、授权与启用。旧搜索接口和游标不切换，无自动补查或重试。',
     evidence: 'server/contracts/native-forwarding.mjs',
   }))
   for (const endpoint of Object.values(XHS_DISCOVERY_ENDPOINTS)) rows.push(route(endpoint.key, {
@@ -70,7 +71,7 @@ export function implementedRoutes(sources = []) {
     }))
   }
   for (const [operation, platforms] of Object.entries(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS)) {
-    for (const platform of platforms) rows.push(route(`legacy-${platform}-${operation}`, {
+    for (const platform of platforms.filter(platform => platform !== 'facebook' || operation !== 'raw')) rows.push(route(`legacy-${platform}-${operation}`, {
       platform, catalogKeys: [catalogKey(platform)].filter(Boolean), provider: 'night-all',
       product: '社交内容与账号', operation, mode: 'compatibility',
       path: `/api/v1/search/${operation}`, keywordSearch: operation === 'raw',
@@ -80,6 +81,15 @@ export function implementedRoutes(sources = []) {
       evidence: 'server/contracts/night-all-legacy.mjs',
     }))
   }
+  for (const provider of ['rapidapi', 'justone']) for (const [kind, path] of [
+    ['raw', '/api/v1/night-all/search/raw'], ['data', '/api/v1/data/search'],
+  ]) rows.push(route(`facebook-${provider}-${kind}`, {
+    platform: 'facebook', catalogKeys: [catalogKey('facebook')], provider, providerLabel: PROVIDER_LABELS[provider],
+    product: 'Facebook 内容搜索', operation: provider === 'rapidapi' ? 'social.facebook.search' : 'native.j.facebook_post_search_v1',
+    path, keywordSearch: true, datasets: ['social.posts.v1'],
+    defaultRule: '管理员管理平台策略，业务自动选路；默认 RapidAPI 周期额度优先、JustOne 接续。raw 别名共用幂等；分页固定渠道，不转发 Night-All。结果异步写入 canonical。',
+    evidence: 'server/contracts/facebook-search.mjs',
+  }))
   rows.push(route('xiaohongshu-posts', {
     platform: 'xiaohongshu', catalogKeys: [catalogKey('xiaohongshu')], provider: 'tikhub',
     product: '小红书笔记画卷', operation: 'social.posts.search', path: '/api/v1/data/search',

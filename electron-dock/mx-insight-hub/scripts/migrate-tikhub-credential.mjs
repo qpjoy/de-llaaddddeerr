@@ -35,7 +35,7 @@ export function normalizeAdminBase(value) {
   return parsed.origin
 }
 
-async function readPrivateJson(configPath, { optional = false } = {}) {
+async function readPrivateJson(configPath, { optional = false, allowReadableConfig = false } = {}) {
   const pathInfo = await lstat(configPath).catch(error => {
     if (optional && error.code === 'ENOENT') return null
     throw migrationError('Night-All config could not be inspected')
@@ -61,7 +61,10 @@ async function readPrivateJson(configPath, { optional = false } = {}) {
     if (!info.isFile() || info.dev !== pathInfo.dev || info.ino !== pathInfo.ino) {
       throw migrationError('Night-All config changed during security validation')
     }
-    if ((info.mode & 0o077) !== 0) {
+    // A caller explicitly migrating its existing local config may read an
+    // owner-controlled 0644 source without chmod or copying secrets. Other
+    // callers retain the private-file requirement; shared writes stay forbidden.
+    if ((info.mode & (allowReadableConfig ? 0o022 : 0o077)) !== 0) {
       throw migrationError('Night-All config permissions must exclude group and other access (for example chmod 600)')
     }
     if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
@@ -97,20 +100,21 @@ function readProviderApiKey(parsed, { configKey }) {
 export async function readNightAllExternalPlatformCredentials(configPath, {
   providers = PROVIDERS.map(({ provider }) => provider),
   environment = {},
+  allowReadableConfig = false,
 } = {}) {
   const requested = providers.map((provider) => {
     const definition = provider === 'rapidapi' ? { provider, configKey: 'rapidapi' } : PROVIDERS.find((candidate) => candidate.provider === provider)
     if (!definition) throw migrationError(`Unsupported external-platform credential ${provider}`)
     return definition
   })
-  const parsed = await readPrivateJson(configPath, { optional: providers.length === 1 && providers[0] === 'rapidapi' })
+  const parsed = await readPrivateJson(configPath, { optional: providers.length === 1 && providers[0] === 'rapidapi', allowReadableConfig })
   if (providers.includes('rapidapi') && !String(parsed?.crawlerProviders?.rapidapi?.apiKey || '').trim()) {
     // Match Night-All's precedence: config.json, runtime environment, legacy
     // twitterDaily. Read data only; never import/execute the Night-All project.
     let apiKey = [environment.RAPIDAPI_KEY, environment.RAPID_API_KEY, environment.TWITTER_RAPIDAPI_KEY]
       .find(value => typeof value === 'string' && value.trim())
     if (!apiKey) {
-      const legacy = await readPrivateJson(environment.NIGHT_ALL_NEWS_CONFIG_PATH || join(dirname(configPath), 'data', 'news-config.json'), { optional: true })
+      const legacy = await readPrivateJson(environment.NIGHT_ALL_NEWS_CONFIG_PATH || join(dirname(configPath), 'data', 'news-config.json'), { optional: true, allowReadableConfig })
       apiKey = legacy?.twitterDaily?.apiKey
     }
     parsed.crawlerProviders ??= {}

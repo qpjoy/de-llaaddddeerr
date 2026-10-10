@@ -36,6 +36,7 @@ import { normalizeRawSearch, projectWeiboSearch, rawSearchRecords, RAW_SEARCH_DA
 import { enrichWeiboRawSearch } from './raw-search-enrichment.mjs'
 import { INSTAGRAM_SEARCH_KEY, projectInstagramSearch } from '../contracts/instagram-search.mjs'
 import { normalizeHubDataSearch, projectDataSearch } from '../contracts/hub-data-search.mjs'
+import { normalizeFacebookSearch, projectFacebookSearch, facebookJustOneArchives, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY } from '../contracts/facebook-search.mjs'
 
 const AUTHORIZATION_PLATFORM = 'ecommerce'
 const DEFAULT_POLICY = Object.freeze({ maxRequests: 100_000, windowSeconds: 3_600, maxPageSize: 100 })
@@ -619,6 +620,87 @@ export class ExternalPlatformGateway {
     })
   }
 
+  async searchFacebook(context, input, { policyStore, fallbackGateway, reservation = null, request: previousRequest = null, attempt = 0, providerCalls = 0 } = {}) {
+    const { normalized, body, idempotencyKey, dataSearch = null } = input
+    const codec = (dataSearch ? createDataSearchCursorCodec : createRawSearchCursorCodec)(this.apiKeyPepper, `${context.consumer.id}:${context.apiKey.id}`)
+    const request = previousRequest || normalizeFacebookSearch(normalized, codec, dataSearch)
+    const rapid = this.providerKey === 'rapidapi'
+    const providerRequest = request.forProvider(this.providerKey)
+    let admission = null
+    const next = async (reserved, previousCalls = 0) => {
+      if (!rapid || !fallbackGateway) throw new AppError(503, 'facebook_search_unavailable', 'Facebook search is unavailable')
+      if (request.provider) throw new AppError(409, 'search_restart_required', 'This search continuation is temporarily unavailable; restart from page 1 with a new Idempotency-Key')
+      return fallbackGateway.searchFacebook(context, input, { policyStore, reservation: reserved, request, attempt: attempt + 1, providerCalls: previousCalls })
+    }
+    return this.#deliver(context, { body, idempotencyKey, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH }, {
+      operation: rapid ? FACEBOOK_OPERATION.operationKey : `native.${FACEBOOK_JUSTONE_KEY}`,
+      authorizationPlatform: 'facebook', platformSearch: true, meterKey: dataSearch ? 'facebook' : 'raw',
+      datasetId: dataSearch ? 'night-all.search.v1' : RAW_SEARCH_DATASET, replayReleasedFailures: true,
+      replayWindowMs: dataSearch?.replayWindowMs, dataSearch: Boolean(dataSearch), billingUnknown: rapid, allowZeroCost: rapid,
+      reservation, callOrdinal: attempt,
+      normalize: ({ policy }) => {
+        if (request.pageSize > policy.maxPageSize) throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
+        return { ...providerRequest, ...request }
+      },
+      // Called only after idempotent replay and authorization, never on a replay.
+      route: async reserved => {
+        const policy = await policyStore.facebook()
+        if (policy.mode === 'paused') throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
+        if (rapid && (request.provider === 'justone' || (!request.provider && policy.mode === 'justone'))) {
+          return { result: await fallbackGateway.searchFacebook(context, input, { policyStore, reservation: reserved, request, attempt }) }
+        }
+        return null
+      },
+      unavailable: rapid ? async reserved => {
+        const policy = await policyStore.facebook()
+        return policy.mode === 'auto' && !request.provider ? { result: await next(reserved) } : null
+      } : null,
+      admit: rapid ? async reserved => {
+        admission = await policyStore.admitRapid()
+        if (admission.allowed) return null
+        const policy = await policyStore.facebook()
+        if (policy.mode === 'auto') return { result: await next(reserved) }
+        throw new AppError(503, 'facebook_search_capacity_unavailable', 'Search capacity is temporarily unavailable')
+      } : null,
+      dispatch: async ({ credential }) => {
+        try {
+          let result = rapid ? await this.adapter.execute({ ...request, ...providerRequest }, credential)
+            : await this.adapter.forwardNative(FACEBOOK_JUSTONE_KEY, { params: providerRequest.upstreamQuery }, credential)
+          if (rapid) await policyStore.observeRapid(admission, result.quota)
+          else {
+            try { result = { ...result, restrictedResponseArchive: result.restrictedResponseArchive,
+              archiveObjects: facebookJustOneArchives(result.archiveObjects, providerRequest.endpointVersion),
+              ...projectFacebookSearch(result.publicBody.data, request, 'justone', result.publicBody.meta.capturedAt) } }
+            catch { throw new JustOneUpstreamError('JustOneSucceededUnusableError', 'Facebook response could not be normalized', {
+              outcome: 'succeeded_unusable', billed: true, httpStatus: 200, businessCode: 0, errorCode: 'invalid_facebook_response',
+            }, result.archiveObjects, result.restrictedResponseArchive) }
+          }
+          return result
+        } catch (error) {
+          if (rapid) await policyStore.observeRapid(admission, error.evidence?.quota)
+          else if (error instanceof JustOneUpstreamError) throw new JustOneUpstreamError(error.name, error.message,
+            error.evidence, facebookJustOneArchives(error.archiveObjects, providerRequest.endpointVersion), error.restrictedResponseArchive)
+          throw error
+        }
+      },
+      retryRejected: rapid ? async ({ error, reserved, settle }) => {
+        if (error.evidence?.httpStatus !== 429 || error.evidence?.outcome !== 'rejected') return null
+        const policy = await policyStore.facebook()
+        if (policy.mode !== 'auto' || request.provider) return null
+        await settle()
+        return { result: await next(reserved, 1) }
+      } : null,
+      cleanup: rapid ? () => policyStore.observeRapid(admission) : null,
+      costUnknown: () => admission?.probe === true,
+      finalize: ({ result }) => {
+        result.publicBody.data.meta.upstreamCallCount = providerCalls + 1
+        result.records = rawSearchRecords(result.publicBody, 'facebook', this.providerKey)
+        if (dataSearch) result.publicBody = { ...projectDataSearch(result, request), meta: result.publicBody.meta }
+        return result
+      },
+    })
+  }
+
   async webSearch(context, { request, provider, body, idempotencyKey, path }) {
     if (!this.operationControlStore) throw new AppError(503, 'web_search_unavailable', 'Search controls are unavailable')
     let normalized
@@ -774,7 +856,7 @@ export class ExternalPlatformGateway {
       ? idempotencyKey
       : `auto:${context.apiKey.id}:${requestId}`
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    const reservation = await this.usageStore.reserve({
+    const reservation = plan.reservation || await this.usageStore.reserve({
       requestId,
       idempotencyKey: effectiveKey,
       fingerprint: requestFingerprint,
@@ -867,6 +949,10 @@ export class ExternalPlatformGateway {
     }
 
     const activeRequestId = reservation.request.id
+    if (plan.route) {
+      const routed = await plan.route(reservation)
+      if (routed) { ownsReservation = false; return routed.result }
+    }
     const now = new Date()
     let snapshot = await this.platformStore.snapshotFor({
       consumerId: context.consumer.id,
@@ -952,6 +1038,10 @@ export class ExternalPlatformGateway {
       }
     }
     if (!resolvedCredential.ready || circuitOpen || operationControlError) {
+      if (plan.unavailable) {
+        const routed = await plan.unavailable(reservation)
+        if (routed) { ownsReservation = false; return routed.result }
+      }
       if (allowStoredFallback && snapshot) {
         const reason = operationControlError?.code
           || (!resolvedCredential.ready ? 'provider_not_configured' : 'provider_circuit_open')
@@ -1187,6 +1277,10 @@ export class ExternalPlatformGateway {
         )
       }
 
+      if (plan.admit) {
+        const routed = await plan.admit(reservation)
+        if (routed) { ownsReservation = false; return routed.result }
+      }
       call = await this.platformStore.beginProviderCall({
         tenantId: context.tenant.id,
         consumerId: context.consumer.id,
@@ -1199,6 +1293,7 @@ export class ExternalPlatformGateway {
         marketplace: normalized.marketplace,
         fingerprint: requestFingerprint,
         retryOfRequestId: validatedRetryOfRequestId,
+        ...(plan.callOrdinal != null ? { callOrdinal: plan.callOrdinal, callRole: plan.callOrdinal ? 'retry' : 'primary' } : {}),
         costControl: costControl.costMinor === 0 ? null : costControl,
         costReservationId: costReservation?.id ?? null,
         ...(operationControl ? { operationControl } : {}),
@@ -1221,7 +1316,7 @@ export class ExternalPlatformGateway {
         })
         const persistedEvidence = persistedCallEvidence(result)
         const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
-        const unitCost = costControl.costMinor
+        const unitCost = plan.costUnknown?.() ? null : costControl.costMinor
         lastDispatchEvidence = {
           billed: plan.billingFree ? false : plan.billingUnknown ? null : true,
           costMinor: unitCost,
@@ -1319,7 +1414,7 @@ export class ExternalPlatformGateway {
         const mappedError = publicFailure(error)
         const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
         const billed = plan.billingFree ? false : evidence.billed ?? null
-        const unitCost = costControl.costMinor
+        const unitCost = plan.costUnknown?.() ? null : costControl.costMinor
         lastDispatchEvidence = {
           billed,
           costMinor: unitCost,
@@ -1335,6 +1430,16 @@ export class ExternalPlatformGateway {
         // evidence must record the error too. Recording a fallback the caller
         // never saw would make a later idempotent replay contradict the
         // original response.
+        if (plan.retryRejected) {
+          const routed = await plan.retryRejected({ error, reserved: reservation, settle: async () => {
+            await this.platformStore.finishProviderStep({ callId: call.id, delivery, outcome: 'rejected',
+              httpStatus: evidence.httpStatus, businessCode: evidence.businessCode, ...lastDispatchEvidence,
+              errorCode: evidence.errorCode, affectsCircuit: false })
+            callSettled = true
+            ownsReservation = false
+          } })
+          if (routed) return routed.result
+        }
         const deliverableSnapshot = allowStoredFallback ? snapshot : null
         const fallbackBody = deliverableSnapshot
           ? deliveryBody(deliverableSnapshot.responseBody, {
@@ -1410,6 +1515,7 @@ export class ExternalPlatformGateway {
       }
       throw error
     } finally {
+      if (plan.cleanup) await plan.cleanup().catch(() => {})
       if (costReservation) {
         await this.platformStore.releaseProviderCostWorkflow({
           reservationId: costReservation.id,

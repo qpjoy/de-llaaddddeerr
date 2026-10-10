@@ -580,6 +580,7 @@ export class HubService {
     segmenter = null,
     externalPlatformCapabilities = null,
     externalPostCapabilities = null,
+    externalFacebookCapabilities = null,
     externalNativeCapabilities = null,
     externalSocialSearch = null,
     externalWechatSearch = null,
@@ -609,6 +610,7 @@ export class HubService {
     this.segmenter = segmenter
     this.externalPlatformCapabilities = externalPlatformCapabilities
     this.externalPostCapabilities = externalPostCapabilities
+    this.externalFacebookCapabilities = externalFacebookCapabilities
     this.externalNativeCapabilities = externalNativeCapabilities
     this.externalSocialSearch = externalSocialSearch
     this.externalWechatSearch = externalWechatSearch
@@ -1587,6 +1589,13 @@ export class HubService {
           .map((platform) => ({ platform, ready: false })),
         legacySearch: legacyPlatforms.size > 0 ? legacySearch : null,
       },
+    }
+    if (canonicalGrants.includes('facebook') && this.externalFacebookCapabilities) {
+      let ready = false
+      try { ready = !isTestApiKey(context.apiKey) && (await this.externalFacebookCapabilities({ consumerId: context.consumer.id }))?.ready === true }
+      catch { this.logger?.warn?.('[facebook] Search capability state is unavailable') }
+      const row = payload.data.platforms.find(row => row.platform === 'facebook')
+      if (row) row.search = { ready, source: 'hub', servingMode: 'live_only', contractVersion: 'night-all.data-search.v1' }
     }
     for (const platform of canonicalGrants.filter(value => wechatSearchPlatform(value))) {
       payload.data.platforms.push({ platform, ready: Boolean(this.searchQueries?.searchContent),
@@ -4263,6 +4272,9 @@ export class HubService {
       maxPageSize: policy.maxPageSize,
       maxCrawlWork: storedPolicy?.maxCrawlWork ?? Math.min(policy.maxPageSize, 100),
     })
+    if (operation === 'raw' && normalized.platform === 'facebook' && !this.externalRawSearch) {
+      throw new AppError(503, 'facebook_search_unavailable', 'Facebook search is unavailable')
+    }
     if (operation === 'raw' && this.externalRawSearch && canRouteRawSearch(normalized)) {
       return this.externalRawSearch(context, { normalized, body, idempotencyKey })
     }
@@ -4651,9 +4663,10 @@ export class HubService {
     )
     assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
     const dedicatedTelegramSearch = path === '/api/v1/data/telegram/search'
+    const facebookSearch = canonicalPlatform(body.platform) === 'facebook'
     const unsupportedFields = dedicatedTelegramSearch
       ? []
-      : Object.keys(body).filter((field) => !PUBLIC_SEARCH_FIELDS.has(field))
+      : Object.keys(body).filter((field) => !PUBLIC_SEARCH_FIELDS.has(field) && !(facebookSearch && field === 'params'))
     assert(unsupportedFields.length === 0, 400, 'unsupported_fields', `Unsupported public fields: ${unsupportedFields.join(', ')}`)
     const platform = dedicatedTelegramSearch ? 'telegram' : canonicalPlatform(body.platform)
     assert(!RESERVED_PLATFORM_NAMES.has(platform), 400, 'invalid_platform', 'A single explicit platform is required')
@@ -4710,6 +4723,7 @@ export class HubService {
       query,
       pageSize,
       ...(cursor ? { cursor } : {}),
+      ...(facebookSearch && body.params !== undefined ? { params: body.params } : {}),
     }
     const resultType = resolveResultType(body)
     let fingerprintQuery = telegramQuery ?? upstreamBody
@@ -4720,6 +4734,7 @@ export class HubService {
       fingerprintQuery = { ...telegramQuery }
       delete fingerprintQuery.sourceScope
     }
+    if (platform === 'facebook' && !this.externalDataSearch) throw new AppError(503, 'facebook_search_unavailable', 'Facebook search is unavailable')
     if (path === '/api/v1/data/search' && this.externalDataSearch && canRouteDataSearch(upstreamBody)) {
       return this.externalDataSearch(context, { body, normalized: upstreamBody, idempotencyKey,
         dataSearch: { resultType, replayWindowMs: replayWindowFor(resultType) } })
