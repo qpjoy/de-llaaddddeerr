@@ -156,7 +156,7 @@ test("plan is offline and status remains read only; cluster drift prevents mutat
   );
   const help = f.run("help");
   assert.equal(help.status, 0, help.stderr);
-  assert.match(help.stdout, /deploy\|status/);
+  assert.match(help.stdout, /deploy\|enroll\|status/);
   assert.equal(f.run("plan").status, 0);
   assert.equal(f.calls().length, 0);
   assert.equal(f.run("status").status, 0);

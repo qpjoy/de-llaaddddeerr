@@ -50,6 +50,8 @@ export function createAppAccount(provider: Provider, settings: IdentitySettings,
         let raw = ''; for await (const chunk of req) { raw += chunk; if (Buffer.byteLength(raw) > 16384) fail(413, '请求过大。'); }
         const { action, input = {} } = JSON.parse(raw);
         if (typeof action !== 'string' || !input || typeof input !== 'object') fail(400, '请求无效。');
+        // Authenticated BFF preflight: no user data, grants or registration changes.
+        if (action === 'capabilities') return json(200, { nativeForm: true, appId: app!.appId, origin: app!.origin, audience: app!.audience });
         if (['account', 'profile', 'password', 'unlink-feishu', 'sessions', 'revoke'].includes(action)) {
           const token = typeof input.accessToken === 'string' ? await provider.AccessToken.find(input.accessToken) : undefined;
           if (!token || token.clientId !== clientId || !token.accountId) fail(401, '登录已过期，请重新登录。');

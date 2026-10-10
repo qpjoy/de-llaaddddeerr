@@ -39,7 +39,7 @@ export function createHarborApp({
         settings: integration.sso,
         store: new PostgresSsoStore(pool, integration.sso.sessionKey),
         applicationName: "数港",
-        navigation: { mounts: ["/"] },
+        navigation: { mounts: ["/"], applicationForm: true },
       });
       cachedProfile = profile;
     }

@@ -126,8 +126,20 @@ export function createApplicationSso({ settings, store, oidcConfiguration,
       const path = url.pathname
       const redirect = location => { response.writeHead(303, { location }); response.end() }
       const json = value => { response.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(value)); return true }
-      if (path === '/auth/sso/login' && request.method === 'GET') {
+      const nativeStart = navigation.applicationForm === true && path === '/auth/sso/start' && request.method === 'POST'
+      if (nativeStart || (path === '/auth/sso/login' && request.method === 'GET')) {
+        if (nativeStart) checkOrigin(request)
         if (request.headers['sec-fetch-site'] === 'cross-site') throw new AppError(403, 'sso_csrf', `请从${applicationName}发起登录。`)
+        if (navigation.applicationForm === true) {
+          // Check the running Auth client, not merely the locally mounted profile.
+          // Opt-in only: existing consumers retain their original login behavior.
+          let capabilities
+          try { capabilities = await accountClient()('capabilities') } catch {
+            throw new AppError(503, 'sso_application_unavailable', `账号服务尚未完成${applicationName}接入或暂不可用，请联系管理员。`)
+          }
+          if (capabilities.nativeForm !== true || capabilities.appId !== settings.appId || capabilities.origin !== settings.origin || capabilities.audience !== settings.audience)
+            throw new AppError(503, 'sso_application_mismatch', `${applicationName}账号接入配置不一致，请联系管理员。`)
+        }
         const old = cookies(request)[TX]; if (old) await store.remove('login', old)
         const id = random(), transaction = { state: random(), nonce: random(), verifier: random(), formCsrf: random(), view: url.searchParams.get('view') === 'register' ? 'register' : 'login', returnTo: url.searchParams.get('return') === 'account' ? 'account' : null }
         transaction.uiPath = uiPath(url.searchParams.get('ui'))
@@ -137,11 +149,14 @@ export function createApplicationSso({ settings, store, oidcConfiguration,
           ...extraParameters,
           redirect_uri: `${settings.origin}/auth/sso/callback`, response_type: 'code', response_mode: 'query', scope: settings.scope ?? 'openid mx:identity',
           state: transaction.state, nonce: transaction.nonce, code_challenge: await oidc.calculatePKCECodeChallenge(transaction.verifier), code_challenge_method: 'S256',
-          ...(url.searchParams.get('surface') === 'application' ? { mx_surface: 'application' } : {}),
-          ...(url.searchParams.get('switch') === '1' ? { prompt: 'login', max_age: '0' } : url.searchParams.get('select') === '1' ? { prompt: 'select_account' } : {})
+          ...(navigation.applicationForm === true || url.searchParams.get('surface') === 'application' ? { mx_surface: 'application' } : {}),
+          ...(url.searchParams.get('select') === '1' && navigation.applicationForm === true ? { prompt: 'select_account' }
+            : nativeStart || url.searchParams.get('switch') === '1' ? { prompt: 'login', max_age: '0' } : url.searchParams.get('select') === '1' ? { prompt: 'select_account' } : {})
         })
         await store.put('login', id, transaction, 300)
-        response.setHeader('Set-Cookie', cookie(TX, id, 300)); redirect(target.toString()); return true
+        response.setHeader('Set-Cookie', cookie(TX, id, 300))
+        if (nativeStart) return json({ redirect: target.toString() })
+        redirect(target.toString()); return true
       }
       if (path === '/auth/sso/interaction' && request.method === 'GET') {
         const id = cookies(request)[TX], transaction = await store.get('login', id)

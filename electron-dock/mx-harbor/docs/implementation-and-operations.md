@@ -20,6 +20,28 @@
 
 Harbor 注册当前仅支持关闭或邀请码两种模式；现有其他应用的开放注册保留。飞书注册和直接飞书登录动作在 Harbor 服务端拒绝，既有统一账号的历史绑定不被删除。忘记密码仍由管理员处理；“验证旧密码后改密”不是自助密码找回。
 
+## 2026-10-11 登录界面修复发布
+
+首页和独立 gallery 均恢复原型的 `public-query-main` 居中容器。登录/邀请码注册字段不再依赖已有 flow 才渲染；连接时暂时禁用，失败时在原弹窗重试。只有读到真实关闭策略才显示“暂未开放邀请注册”，网络/配置错误不能伪装为关闭注册。
+
+Harbor 显式启用 mx-common `navigation.applicationForm`：同源 `POST /auth/sso/start` 先经服务端凭据校验 Auth `capabilities`（appId/origin/audience/nativeForm），再创建 PKCE/state/nonce 和 host-only 登录 cookie。浏览器短暂经过 Auth 建立 issuer cookie，自动返回数港填写账号密码/邀请码；密码仍交给原 Auth 校验，没有新增密码库。返回的 flow 失效时停止自动往返，用户点击重试才重建；表单 409/410 也可重试。账号选择仍使用带数港名称的 Auth 账号选择页，选定后的密码/邀请表单返回 Harbor。已有消费者未开启该选项的流程保持不变。
+
+Auth 的 Harbor 错误页仅给出数港返回入口，不列其他应用；无法验证来源的错误页也不列出内部应用。返回目标只来自已登记应用或签名恢复上下文，不信任任意 return 参数。
+
+本次只读线上检查：匿名 Harbor `/auth/sso/form` 为 410（尚无 flow）；Harbor 发起 `mx-harbor-web` 原生授权后，Auth 授权入口直接返回 400、尚未建立 interaction。需要核对 Auth 已发布的客户端登记，不能把这个 400 当成密码错误或邀请码关闭。以下在 **Internal 主机，项目仓库根目录**执行，保留原环境参数：
+
+```bash
+bash electron-dock/mx-harbor/scripts/manage.sh ops internal-production enroll
+MX_LAUNCHER_BUILD_PROXY=http://127.0.0.1:7789 MX_INSIGHT_HUB_DEPLOY=0 bash electron-dock/mx-launcher/scripts/manage.sh ops internal-production deploy
+MX_HARBOR_BUILD_PROXY=http://127.0.0.1:7789 bash electron-dock/mx-harbor/scripts/manage.sh ops internal-production deploy
+```
+
+本次修改需要先发布 Launcher/Auth，再发布 Harbor（镜像自动带上新版 mx-common），否则 capability 预检会留在数港报接入未完成。Hub 已有 Portal 版本时无需因此重发；若尚未接入，按下节完成 Hub 首次发布。无需重新运行证书签发或 Domestic 安装。不要重建 identity profile 或轮换现有密钥来处理未加载的客户端。
+
+本次本地回归 43 项通过、0 跳过（Harbor 26、mx-common SSO 4、Launcher 身份/邀请/应用隔离 9、Hub Portal 4），生产构建和 Launcher 类型检查通过。浏览器验收覆盖首页 1280px 中心对齐、390px 无横向溢出、登录/确认密码/邀请码字段、注册关闭及接入失败重试；UI 使用本地接口替身，完整认证协议另用临时库和真实 HTTPS 测试。
+
+实际邀请码与共享权限操作见 [当前可执行验收](acceptance.md#当前可执行邀请码准入与共享权限)。本地真实 PostgreSQL/HTTPS 回归覆盖 PKCE、同源/CSRF、旧登录兼容、邀请码准入与撤权、共享 member/space；生产账号、真实付款和实际 H2I 联网仍由管理员受控验收。
+
 ## 外部应用接入配置（可在部署后完成）
 
 正式入口为 **https://harbor.minsight-ai.com**。Harbor 可先建库、迁移和发布，随后接入 Auth、Hub；外部依赖不是迁移前置条件。
@@ -48,7 +70,7 @@ Harbor 注册当前仅支持关闭或邀请码两种模式；现有其他应用�
    ```bash
    # Internal 的 de-mingxi：仅校验本机 Harbor 的 health/ready，再安装独立 vhost
    bash scripts/manage.sh internal-harbor-install
-   # Domestic 公网机的 de-mingxi：首签或按需续期、内网就绪检查、HTTPS、自动续期验证
+   # Domestic 公网机的 de-mingxi：首签或按需续期、内网就绪检查、HTTPS、仅 Harbor 续期预演
    bash scripts/manage.sh harbor-install
    ```
 

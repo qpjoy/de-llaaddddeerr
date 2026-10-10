@@ -116,10 +116,11 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
   const recovery = interactionRecovery(settings.cookieKeys, settings.issuer);
   const recoveryApps = new Map<string, RecoveryApplication>([
     [settings.clientId, { name: 'MX Launcher', url: `${settings.adminOrigin ?? settings.origin}/admin/`, loginUrl: `${settings.adminOrigin ?? settings.origin}/auth/admin/login?select=1` }],
-    ...[...applications.values()].map(app => [app.clientId, { name: app.appId === 'mx-insight-hub' ? 'Insight Hub' : app.appId, url: app.origin, loginUrl: app.origin }] as [string, RecoveryApplication])
+    ...[...applications.values()].map(app => [app.clientId, { name: app.appId === 'mx-insight-hub' ? 'Insight Hub' : app.appId === 'mx-harbor' ? '数港 DataPort' : app.appId, url: app.origin, loginUrl: app.appId === 'mx-harbor' ? `${app.origin}/?account=1&accountError=expired` : app.origin }] as [string, RecoveryApplication])
   ]);
   const errorPage = (clientId?: string, copy: { title?: string; description?: string; account?: { name: string; login?: string } } = {}) => identityErrorPage({
-    application: clientId ? recoveryApps.get(clientId) : undefined, applications: [...recoveryApps.values()], ...copy
+    application: clientId ? recoveryApps.get(clientId) : undefined,
+    applications: clientId && recoveryApps.has(clientId) && applications.get(clientId)?.appId !== 'mx-harbor' ? [...recoveryApps.values()] : [], ...copy
   });
   const failPage = (res: ServerResponse, status: number, clientId?: string, copy?: Parameters<typeof errorPage>[1]) => {
     res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' }).end(errorPage(clientId, copy));
@@ -270,7 +271,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         const invitationHandle = typeof interaction.params.mx_invitation === 'string' ? interaction.params.mx_invitation : '';
         const invitationApp = applications.get(clientId);
         const source: RegistrationSource = { issuer: settings.issuer, clientId, appId: invitationApp?.appId ?? 'mx-launcher', appOrigin: invitationApp?.origin ?? settings.adminOrigin ?? settings.origin };
-        const appName = invitationApp ? (invitationApp.appId === 'mx-insight-hub' ? 'Insight Hub' : invitationApp.appId) : 'Launcher';
+        const appName = invitationApp ? (invitationApp.appId === 'mx-insight-hub' ? 'Insight Hub' : invitationApp.appId === 'mx-harbor' ? '数港 DataPort' : invitationApp.appId) : 'Launcher';
         const returnUrl = invitationHandle && invitationApp ? `${invitationApp.origin}/#/join` : invitationApp?.origin ?? `${settings.adminOrigin ?? settings.origin}/admin/`;
         // A remembered name is never a credential. Only the live, revalidated
         // provider session can continue without authentication, at its original age.

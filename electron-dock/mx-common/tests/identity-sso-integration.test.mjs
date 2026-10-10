@@ -58,7 +58,7 @@ test('two ordinary applications share real Auth, with separate durable sessions 
     })
     app.settings={...app,issuer,scope:'openid mx:identity',sessionKey:randomBytes(32).toString('base64url'),caCert:cert.toString()}
     app.store=new PostgresSsoStore(pool,app.settings.sessionKey,{table})
-    app.restart=()=>{app.sso=createApplicationSso({settings:app.settings,store:app.store,resolvePrincipal:identity=>({issuer:identity.issuer,subject:identity.subject,displayName:identity.displayName,permissions:app.grants})})}
+    app.restart=()=>{app.sso=createApplicationSso({settings:app.settings,store:app.store,navigation:app.navigation,resolvePrincipal:identity=>({issuer:identity.issuer,subject:identity.subject,displayName:identity.displayName,permissions:app.grants})})}
     app.restart();applications.push(app)
   }
   const account=()=>({userId:'person',displayName:'Shared person',status:'active',appAccess:{deniedAppIds:blocked?['mx-example','mx-other']:[]}})
@@ -139,6 +139,39 @@ test('two ordinary applications share real Auth, with separate durable sessions 
   assert.equal(await a.store.get('login',expired),null)
   assert.equal((await request(`${a.origin}/auth/sso/logout`,{method:'POST',headers:{origin:a.origin,'x-mx-csrf':status.csrf}})).status,204)
   assert.equal(JSON.parse((await request(`${b.origin}/auth/sso/session`)).text).active,true,'local logout does not clear other applications')
+  // Opt-in native UI starts with a checked backchannel and a browser OIDC round trip.
+  assert.equal((await request(`${b.origin}/auth/sso/start`,{method:'POST',headers:{origin:b.origin}})).status,404,'legacy consumers do not expose the new endpoint')
+  a.navigation={applicationForm:true};a.restart()
+  const start=()=>request(`${a.origin}/auth/sso/start`,{method:'POST',headers:{origin:a.origin,'content-type':'application/json'},body:'{}'})
+  assert.equal((await request(`${a.origin}/auth/sso/start`,{method:'POST',headers:{origin:b.origin}})).status,403)
+  a.settings.clientSecret='not-the-registered-secret';a.restart()
+  const mismatch=await start();assert.equal(mismatch.status,503);assert.equal(mismatch.location,undefined)
+  assert.equal(JSON.parse(mismatch.text).code,'sso_application_unavailable')
+  a.settings.clientSecret=a.clientSecret;a.restart()
+  let step=await start();assert.equal(step.status,200,step.text)
+  const authorization=new URL(JSON.parse(step.text).redirect)
+  assert.equal(authorization.searchParams.get('mx_surface'),'application');assert.equal(authorization.searchParams.get('prompt'),'login')
+  step=await request(authorization);assert.equal(step.status,303,step.text)
+  step=await request(new URL(step.location,issuer));assert.equal(step.status,303,step.text)
+  assert.equal(new URL(step.location).origin,a.origin,'native form returns to application instead of hosted password UI')
+  const interaction=new URL(step.location);interaction.searchParams.set('state','wrong')
+  assert.equal((await request(interaction)).status,400,'browser state binds the native flow')
+  step=await request(step.location);assert.equal(step.location,'/?account=1#/account')
+  const form=JSON.parse((await request(`${a.origin}/auth/sso/form`)).text)
+  assert.ok(form.csrf&&form.formId);assert.equal(form.view,'login')
+  const submit=(csrf,formId=form.formId,password='test-password')=>request(`${a.origin}/auth/sso/form`,{method:'POST',headers:{origin:a.origin,'x-mx-csrf':csrf,'content-type':'application/json'},body:JSON.stringify({action:'login',formId,login:'person',password})})
+  assert.equal((await submit('wrong')).status,409)
+  assert.equal((await submit(form.csrf,'another-form')).status,409)
+  assert.equal((await submit(form.csrf,form.formId,'wrong')).status,401)
+  step=await submit(form.csrf);assert.equal(step.status,200,step.text)
+  step=await request(JSON.parse(step.text).redirect)
+  for(let i=0;i<12&&step.location;i++) {
+    const next=new URL(step.location,issuer)
+    step=await request(next)
+    if(next.pathname==='/auth/sso/callback')break
+  }
+  assert.equal(step.status,303,step.text);assert.equal(step.location,'/?sso=ready')
+  assert.equal(JSON.parse((await request(`${a.origin}/auth/sso/session`)).text).active,true)
   blocked=true
   assert.equal(JSON.parse((await request(`${b.origin}/auth/sso/session`)).text).active,false,'upstream application ban invalidates the session')
   assert.equal((await pool.query("SELECT to_regclass('iam.members') AS members,to_regclass('public.tenants') AS tenants")).rows[0].members,null)

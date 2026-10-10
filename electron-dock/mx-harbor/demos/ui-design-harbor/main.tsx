@@ -38,7 +38,9 @@ function Gallery() {
       ) : (
         <div className="public-site query-backdrop">
           <PublicHeader />
-          <PublicIpSearch />
+          <main className="public-query-main">
+            <PublicIpSearch />
+          </main>
         </div>
       )}
       <AccountDialog open={login} onOpenChange={setLogin} preview />

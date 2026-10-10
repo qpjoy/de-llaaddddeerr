@@ -21,6 +21,14 @@ test('Harbor hosted and native OIDC: existing accounts need invites and revocati
  const call=(path:string,options:{method?:string;headers?:Record<string,string>;body?:string}={})=>new Promise<{status:number;text:string;location:string}>((resolve,reject)=>{const url=new URL(path,origin),req=request({hostname:'127.0.0.1',port:(server.address() as {port:number}).port,path:url.pathname+url.search,method:options.method||'GET',headers:{host:'auth.example.test',cookie:[...jar].map(([k,v])=>`${k}=${v}`).join('; '),...options.headers}},res=>{for(const raw of res.headers['set-cookie']||[]){const [k,v]=raw.split(';')[0].split('=');jar.set(k,v)}let text='';res.on('data',c=>text+=c);res.on('end',()=>resolve({status:res.statusCode!,text,location:res.headers.location||''}))});req.on('error',reject);req.end(options.body)});
  const basic=`Basic ${Buffer.from(`${app.clientId}:${app.clientSecret}`).toString('base64')}`,verifier='v'.repeat(43);
  const auth=(native:boolean)=>'/identity/auth?'+new URLSearchParams({client_id:app.clientId,redirect_uri:app.origin+'/auth/sso/callback',response_type:'code',scope:'openid mx:identity',prompt:'login',state:randomUUID(),nonce:randomUUID(),code_challenge_method:'S256',code_challenge:createHash('sha256').update(verifier).digest('base64url'),...(native?{mx_surface:'application'}:{})});
+ const capability=await call('/identity/app-account',{method:'POST',headers:{authorization:basic,'content-type':'application/json'},body:JSON.stringify({action:'capabilities'})});
+ assert.equal(capability.status,200);assert.deepEqual(JSON.parse(capability.text),{nativeForm:true,appId:app.appId,origin:app.origin,audience:app.audience});
+ const expiring=await call(auth(true));await call(expiring.location);
+ await accounts.adapter('Interaction').destroy(expiring.location.split('/').at(-1)!);
+ const expired=await call(expiring.location);assert.equal(expired.status,400);assert.match(expired.text,/数港 DataPort/);assert.ok(expired.text.includes(app.origin));
+ assert.doesNotMatch(expired.text,/MX Launcher|Insight Hub|mx-pay|前往其他应用/);
+ const unknown=await call(auth(true).replace('client_id=harbor','client_id=unknown'));
+ assert.equal(unknown.status,400);assert.doesNotMatch(unknown.text,/MX Launcher|Insight Hub|mx-pay|应用入口|前往其他应用/);
  for(const [index,native] of [false,true].entries()){
   jar.clear();const invite=await registration.createInvitation({label:'Harbor',days:1,maxUses:1,admissionAppId:'mx-harbor'});
   let step=await call(auth(native));assert.equal(step.status,303,step.text);const interaction=step.location;step=await call(interaction);const login=index?'NativeUser':'HostedUser';

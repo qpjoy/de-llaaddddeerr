@@ -18,6 +18,6 @@ export function identityErrorPage({ title = '登录请求已失效', description
   ${account ? `<div class="account"><span>当前账号</span><strong>${escape(account.name)}</strong>${account.login ? `<span>@${escape(account.login)}</span>` : ''}</div>` : ''}
   <p>${escape(description)}</p>
   ${application ? `<a class="action primary" href="${escape(application.loginUrl)}">${application.loginUrl === application.url ? `返回 ${escape(application.name)}` : '重新登录'}</a>${application.loginUrl !== application.url ? `<a class="back" href="${escape(application.url)}">返回 ${escape(application.name)}</a>` : ''}` : ''}
-  ${application ? '<details><summary>前往其他应用</summary>' : '<div aria-label="应用入口">'}${applications.filter(app => app.name !== application?.name).map(app => `<a class="action" href="${escape(app.url)}"><span>${escape(app.name)}</span><span aria-hidden="true">→</span></a>`).join('')}${application ? '</details>' : '</div>'}
+  ${applications.some(app => app.name !== application?.name) ? `${application ? '<details><summary>前往其他应用</summary>' : '<div aria-label="应用入口">'}${applications.filter(app => app.name !== application?.name).map(app => `<a class="action" href="${escape(app.url)}"><span>${escape(app.name)}</span><span aria-hidden="true">→</span></a>`).join('')}${application ? '</details>' : '</div>'}` : ''}
   <footer>MX 账号 · 安全登录</footer></main></body></html>`;
 }

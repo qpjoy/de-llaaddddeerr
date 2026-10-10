@@ -32,7 +32,7 @@
    bash scripts/manage.sh harbor-install
    ```
 
-   包含首签/已有证书按需续期、内网 health/ready、Nginx 检查与 reload、续期 dry-run 和 timer。之后可单独检查或续期：
+   包含首签/已有证书按需续期、内网 health/ready、Nginx 检查与 reload、仅 Harbor 的续期 dry-run，以及统一 timer 的安装/复用。其他域名的网络验证失败不会触发或阻塞本次 Harbor 安装；统一定时续期范围保留。之后可单独检查或续期：
 
    ```bash
    bash scripts/manage.sh cert test-renew harbor.minsight-ai.com

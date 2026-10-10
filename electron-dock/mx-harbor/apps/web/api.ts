@@ -17,7 +17,7 @@ export async function request<T = any>(
       new Error(
         result.message || result.error?.message || "服务暂不可用，请稍后重试",
       ),
-      { status: response.status },
+      { status: response.status, code: result.code },
     );
   return result;
 }
@@ -29,5 +29,8 @@ export type AccountOptions = {
   admissionRequired?: boolean;
   loginHint?: string;
 };
-export const loginUrl = (register = false) =>
-  `/auth/sso/login?surface=application&switch=1${register ? "&view=register" : ""}`;
+export const startAccountSession = (register = false, select = false) =>
+  request<{ redirect: string }>(
+    `/auth/sso/start?view=${register ? "register" : "login"}${select ? "&select=1" : ""}`,
+    { method: "POST", body: "{}" },
+  );

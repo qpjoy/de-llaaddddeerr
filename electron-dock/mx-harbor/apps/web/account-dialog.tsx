@@ -31,7 +31,7 @@ import {
   InputGroupButton,
 } from "@/components/ui/input-group";
 import { Spinner } from "@/components/ui/spinner";
-import { request, loginUrl, type AccountOptions } from "./api";
+import { request, startAccountSession, type AccountOptions } from "./api";
 export function AccountDialog({
   open,
   onOpenChange,
@@ -53,6 +53,8 @@ export function AccountDialog({
     if (!open || preview) return;
     let active = true;
     setChecking(true);
+    setOptions(null);
+    setUnavailable(false);
     setError("");
     request<AccountOptions>("/auth/sso/form")
       .then((value) => {
@@ -62,13 +64,26 @@ export function AccountDialog({
           setRegister(value.view === "register");
         }
       })
-      .catch((error) => {
+      .catch(async (error) => {
+        if (!active) return;
+        // Establish issuer cookies through a top-level OIDC round trip, then
+        // return to this form. Never loop when the returned flow is invalid.
+        if (
+          error.code === "account_flow_expired" &&
+          (!new URLSearchParams(location.search).has("account") || retry > 0)
+        ) {
+          try {
+            const result = await startAccountSession(register);
+            if (active) location.replace(result.redirect);
+            return;
+          } catch (startError) {
+            error = startError;
+          }
+        }
         if (active) {
           setOptions(null);
-          const unavailable = !error.status || error.status >= 500;
-          setUnavailable(unavailable);
-          if (unavailable)
-            setError(error.message || "账号服务暂不可用，请稍后重试。");
+          setUnavailable(true);
+          setError(error.message || "账号服务暂不可用，请稍后重试。");
         }
       })
       .finally(() => {
@@ -89,10 +104,7 @@ export function AccountDialog({
       setError("组件预览不创建账号或提交登录。");
       return;
     }
-    if (!options) {
-      location.assign(loginUrl(register));
-      return;
-    }
+    if (!options) return;
     const data = new FormData(event.currentTarget);
     setBusy(true);
     setError("");
@@ -110,6 +122,10 @@ export function AccountDialog({
       location.assign(result.redirect);
     } catch (e) {
       setError((e as Error).message);
+      if ([409, 410].includes((e as { status?: number }).status ?? 0)) {
+        setOptions(null);
+        setUnavailable(true);
+      }
       setBusy(false);
     }
   }
@@ -165,9 +181,10 @@ export function AccountDialog({
             <Button
               type="button"
               variant={!register ? "secondary" : "ghost"}
+              disabled={busy || checking}
               onClick={() => {
                 setRegister(false);
-                setError("");
+                if (!unavailable) setError("");
               }}
             >
               登录
@@ -175,9 +192,10 @@ export function AccountDialog({
             <Button
               type="button"
               variant={register ? "secondary" : "ghost"}
+              disabled={busy || checking}
               onClick={() => {
                 setRegister(true);
-                setError("");
+                if (!unavailable) setError("");
               }}
             >
               邀请码注册
@@ -185,107 +203,112 @@ export function AccountDialog({
           </div>
           <form onSubmit={submit} aria-busy={busy || checking}>
             <FieldGroup>
-              {(options || preview) && (
-                <>
-                  <Field>
-                    <FieldLabel htmlFor="auth-login">MX 账号</FieldLabel>
-                    <InputGroup>
-                      <InputGroupInput
-                        id="auth-login"
-                        name="login"
-                        required
-                        maxLength={64}
-                        autoComplete="username"
-                        defaultValue={options?.loginHint || ""}
-                        placeholder="输入你的 MX 账号"
-                        disabled={busy}
-                      />
-                      <InputGroupAddon>
-                        <Mail />
-                      </InputGroupAddon>
-                    </InputGroup>
-                  </Field>
-                  <Field>
-                    <FieldLabel htmlFor="auth-password">密码</FieldLabel>
-                    <InputGroup>
-                      <InputGroupInput
-                        id="auth-password"
-                        name="password"
-                        type={show ? "text" : "password"}
-                        required
-                        minLength={register ? 8 : undefined}
-                        maxLength={128}
-                        autoComplete={
-                          register ? "new-password" : "current-password"
-                        }
-                        placeholder="输入密码"
-                        disabled={busy}
-                      />
-                      <InputGroupAddon>
-                        <LockKeyhole />
-                      </InputGroupAddon>
-                      <InputGroupAddon align="inline-end">
-                        <InputGroupButton
-                          type="button"
-                          aria-label={show ? "隐藏密码" : "显示密码"}
-                          onClick={() => setShow(!show)}
-                        >
-                          {show ? <EyeOff /> : <Eye />}
-                        </InputGroupButton>
-                      </InputGroupAddon>
-                    </InputGroup>
-                  </Field>
-                  {register && (
-                    <Field>
-                      <FieldLabel htmlFor="auth-confirm">确认密码</FieldLabel>
-                      <InputGroup>
-                        <InputGroupInput
-                          id="auth-confirm"
-                          name="passwordConfirm"
-                          type="password"
-                          required
-                          minLength={8}
-                          maxLength={128}
-                          autoComplete="new-password"
-                          disabled={busy}
-                        />
-                      </InputGroup>
-                    </Field>
-                  )}
-                  <Field>
-                    <FieldLabel htmlFor="auth-invite">
-                      {register
-                        ? "Harbor 邀请码"
-                        : "Harbor 邀请码（首次进入时填写）"}
-                    </FieldLabel>
-                    <InputGroup>
-                      <InputGroupInput
-                        id="auth-invite"
-                        name="inviteCode"
-                        required={register}
-                        maxLength={128}
-                        autoComplete="off"
-                        placeholder="输入邀请人提供的邀请码"
-                        disabled={busy}
-                      />
-                    </InputGroup>
-                  </Field>
-                </>
+              <Field>
+                <FieldLabel htmlFor="auth-login">MX 账号</FieldLabel>
+                <InputGroup>
+                  <InputGroupInput
+                    id="auth-login"
+                    name="login"
+                    required
+                    maxLength={64}
+                    autoComplete="username"
+                    defaultValue={options?.loginHint || ""}
+                    placeholder="输入你的 MX 账号"
+                    disabled={busy || (!options && !preview)}
+                  />
+                  <InputGroupAddon>
+                    <Mail />
+                  </InputGroupAddon>
+                </InputGroup>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="auth-password">密码</FieldLabel>
+                <InputGroup>
+                  <InputGroupInput
+                    id="auth-password"
+                    name="password"
+                    type={show ? "text" : "password"}
+                    required
+                    minLength={register ? 8 : undefined}
+                    maxLength={128}
+                    autoComplete={
+                      register ? "new-password" : "current-password"
+                    }
+                    placeholder="输入密码"
+                    disabled={busy || (!options && !preview)}
+                  />
+                  <InputGroupAddon>
+                    <LockKeyhole />
+                  </InputGroupAddon>
+                  <InputGroupAddon align="inline-end">
+                    <InputGroupButton
+                      type="button"
+                      aria-label={show ? "隐藏密码" : "显示密码"}
+                      onClick={() => setShow(!show)}
+                    >
+                      {show ? <EyeOff /> : <Eye />}
+                    </InputGroupButton>
+                  </InputGroupAddon>
+                </InputGroup>
+              </Field>
+              {register && (
+                <Field>
+                  <FieldLabel htmlFor="auth-confirm">确认密码</FieldLabel>
+                  <InputGroup>
+                    <InputGroupInput
+                      id="auth-confirm"
+                      name="passwordConfirm"
+                      type="password"
+                      required
+                      minLength={8}
+                      maxLength={128}
+                      autoComplete="new-password"
+                      disabled={busy || (!options && !preview)}
+                    />
+                  </InputGroup>
+                </Field>
               )}
+              <Field>
+                <FieldLabel htmlFor="auth-invite">
+                  {register
+                    ? "Harbor 邀请码"
+                    : "Harbor 邀请码（首次进入时填写）"}
+                </FieldLabel>
+                <InputGroup>
+                  <InputGroupInput
+                    id="auth-invite"
+                    name="inviteCode"
+                    required={register}
+                    maxLength={128}
+                    autoComplete="off"
+                    placeholder="输入邀请人提供的邀请码"
+                    disabled={busy || (!options && !preview)}
+                  />
+                </InputGroup>
+              </Field>
               {register &&
+              options &&
               options?.policy?.mode !== "invite_code" &&
               !preview ? (
-                <FieldError>暂未开放邀请注册，请联系管理员。</FieldError>
+                <FieldError>
+                  {options.policy?.mode === "closed"
+                    ? "暂未开放邀请注册，请联系管理员。"
+                    : "邀请注册设置暂不可用，请稍后重新打开登录窗口。"}
+                </FieldError>
               ) : null}
               {error && <FieldError role="alert">{error}</FieldError>}
               <Button
-                type="submit"
+                type={unavailable ? "button" : "submit"}
+                onClick={
+                  unavailable ? () => setRetry((value) => value + 1) : undefined
+                }
                 className="auth-submit"
                 disabled={
                   busy ||
                   checking ||
                   (register &&
                     !!options &&
+                    !unavailable &&
                     options.policy?.mode !== "invite_code")
                 }
               >
@@ -294,11 +317,9 @@ export function AccountDialog({
                   ? "连接中"
                   : unavailable
                     ? "重试连接"
-                    : !options && !preview
-                      ? "继续安全登录"
-                      : register
-                        ? "注册并进入数港"
-                        : "登录"}
+                    : register
+                      ? "注册并进入数港"
+                      : "登录"}
                 <ArrowRight />
               </Button>
             </FieldGroup>
@@ -307,12 +328,25 @@ export function AccountDialog({
             忘记密码或缺少邀请，请联系管理员。已开通账号无需再次填写邀请码。
           </p>
           {!unavailable && !checking && (
-            <a
+            <button
+              type="button"
               className="harbor-account-switch"
-              href="/auth/sso/login?select=1"
+              disabled={busy}
+              onClick={async () => {
+                if (preview) return;
+                setChecking(true);
+                try {
+                  const result = await startAccountSession(false, true);
+                  location.assign(result.redirect);
+                } catch (error) {
+                  setError((error as Error).message);
+                  setUnavailable(true);
+                  setChecking(false);
+                }
+              }}
             >
               选择其他已登录账号
-            </a>
+            </button>
           )}
           <DialogClose
             className="auth-close"

@@ -45,7 +45,7 @@ import { PublicHeader } from "./public-header";
 import { PublicIpSearch } from "./public-ip-search";
 import { AccessContext } from "./public-access";
 import { AccountDialog } from "./account-dialog";
-import { request } from "./api";
+import { request, startAccountSession } from "./api";
 import "@/styles/dataport.css";
 import "./harbor.css";
 const pages = [
@@ -274,7 +274,19 @@ function AccountSecurity() {
                   撤销全部会话
                 </Button>
               </form>
-              <a href="/auth/sso/login?select=1">切换账号</a>
+              <Button
+                variant="link"
+                onClick={async () => {
+                  try {
+                    const result = await startAccountSession(false, true);
+                    location.assign(result.redirect);
+                  } catch (e) {
+                    setError((e as Error).message);
+                  }
+                }}
+              >
+                切换账号
+              </Button>
             </CardContent>
           </Card>
         </div>
@@ -528,7 +540,12 @@ function App() {
           <PublicHeader
             current={location.pathname === "/pricing" ? "pricing" : "home"}
           />
-          <main id="main-content">
+          <main
+            id="main-content"
+            className={
+              location.pathname === "/pricing" ? undefined : "public-query-main"
+            }
+          >
             {location.pathname === "/pricing" ? (
               <section className="ip-pricing-section">
                 <div className="public-container">
