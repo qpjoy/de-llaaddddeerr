@@ -1,3 +1,4 @@
+import {portalPrincipal, harborRoute} from './portal/harbor.mjs'
 import { IpRiskProduct } from './external-platforms/ip-risk-product.mjs'
 import { CommerceService } from './commerce/service.mjs'
 import { commerceRoute } from './commerce/routes.mjs'
@@ -750,6 +751,7 @@ export function createApp({
   adminToken,
   identity = null,
   sso = null,
+  harborPortal = null,
   queue = null,
   backfillPlatforms = [],
   importer = null,
@@ -841,6 +843,7 @@ export function createApp({
    * gets in whether or not the identity provider is reachable.
    */
   async function resolvePrincipal(request) {
+    if (request[portalPrincipal]) return request[portalPrincipal]
     const credential = adminCredential(request)
     if (!credential) {
       if (typeof request.headers['x-api-key'] === 'string' && request.headers['x-api-key'].trim()) {
@@ -1379,6 +1382,12 @@ export function createApp({
     response.setHeader('x-request-id', requestId)
     try {
       const url = new URL(request.url, 'http://localhost')
+      if (url.pathname.startsWith('/internal/v1/portal/')) {
+        if (listenerMode === 'public' || !harborPortal) throw new AppError(404, 'not_found', 'Route not found')
+        const target = harborRoute(request.method, url.pathname.slice('/internal/v1/portal'.length), url.searchParams)
+        request[portalPrincipal] = await harborPortal.resolve(request)
+        url.pathname = target
+      }
       const { pathname, searchParams } = url
       const isAdminPath = pathname.startsWith('/internal/v1/admin/') || pathname.startsWith('/internal/v1/ops/') || pathname.startsWith('/auth/sso/')
       const isPublicPath = pathname.startsWith('/api/v1/')
@@ -1581,11 +1590,11 @@ export function createApp({
             productScopes: await documentationScopes(principal),
             memberships: principal.memberships,
             identityProvider: identity?.enabled ? 'mx-launcher' : null,
-            tenantInvitationsEnabled: Boolean(sso?.invitations),
+            tenantInvitationsEnabled: !principal.portalOrigin && Boolean(sso?.invitations),
             canOpenPersonalAccount: canOpenPersonalAccount(principal, store.pool),
             // Deployment routing metadata, not a credential. Browser clients
             // still need their ordinary Hub Public API key for every public call.
-            publicApiBaseUrl,
+            publicApiBaseUrl: principal.portalOrigin || publicApiBaseUrl,
             // Diagnostic pair for federated sessions: what the provider said,
             // and what would have granted platform admin.
             ...(principal.launcherScopes

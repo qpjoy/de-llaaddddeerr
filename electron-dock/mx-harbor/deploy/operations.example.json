@@ -1,0 +1,6 @@
+{
+  "context": "REPLACE_WITH_INTERNAL_CONTEXT",
+  "clusterUid": "REPLACE_WITH_KUBE_SYSTEM_NAMESPACE_UID",
+  "node": "REPLACE_WITH_INTERNAL_HOSTNAME",
+  "hubAdminOrigin": "http://mx-insight-hub-admin.mx-insight-hub.svc.cluster.local:18151"
+}

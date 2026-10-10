@@ -1,0 +1,27 @@
+# One-time strategic merge patch, after creating mx-harbor-portal in the Hub namespace.
+# Normal Harbor deploy never applies this patch or restarts Hub.
+spec:
+  template:
+    spec:
+      containers:
+        - name: admin
+          env:
+            - name: MX_INSIGHT_HARBOR_SSO_PROFILE
+              value: /run/harbor-portal/profile.json
+            - name: MX_INSIGHT_HARBOR_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mx-harbor-portal
+                  key: gateway-token
+          volumeMounts:
+            - name: harbor-portal
+              mountPath: /run/harbor-portal
+              readOnly: true
+      volumes:
+        - name: harbor-portal
+          secret:
+            secretName: mx-harbor-portal
+            defaultMode: 288
+            items:
+              - key: profile.json
+                path: profile.json

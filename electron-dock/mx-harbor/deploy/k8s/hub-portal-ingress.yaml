@@ -1,0 +1,22 @@
+# Apply once with the Hub portal enrollment, not on every Harbor deploy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mx-insight-hub-harbor-portal-ingress
+  namespace: mx-insight-hub
+spec:
+  podSelector:
+    matchLabels:
+      mx-insight-hub.io/plane: admin
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mx-harbor
+          podSelector:
+            matchLabels:
+              app: mx-harbor
+      ports:
+        - protocol: TCP
+          port: 18151

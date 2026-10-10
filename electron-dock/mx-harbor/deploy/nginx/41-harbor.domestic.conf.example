@@ -1,0 +1,26 @@
+# New Domestic vhost. Replace harbor.example.com with the purchased domain.
+# Keep compass/deploy/nginx/conf.d/40-hub.conf unchanged.
+upstream harbor_internal { server 10.88.88.88:80; keepalive 32; }
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name harbor.example.com;
+    ssl_certificate /etc/letsencrypt/live/harbor.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/harbor.example.com/privkey.pem;
+    include /etc/nginx/snippets/tls-common.conf;
+    client_max_body_size 10m;
+    location = /gateway-health { return 200 "ok\n"; }
+    location ^~ /internal/ { return 404; }
+    location ^~ /demos/ { return 404; }
+    location ^~ /auth/sso/ {
+        proxy_pass http://harbor_internal;
+        include /etc/nginx/snippets/proxy-common.conf;
+        proxy_set_header Host $host;
+        access_log off;
+    }
+    location / {
+        proxy_pass http://harbor_internal;
+        include /etc/nginx/snippets/proxy-common.conf;
+        proxy_set_header Host $host;
+    }
+}

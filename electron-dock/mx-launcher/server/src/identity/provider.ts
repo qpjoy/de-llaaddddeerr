@@ -1,3 +1,4 @@
+import { canAccessIdentityApplication } from './application-access.js';
 import { USER_SESSION_TTL_SECONDS } from '../lib/session-lifetime.js';
 import { createHmac, timingSafeEqual, randomBytes, createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -29,7 +30,7 @@ export interface IdentitySettings {
 }
 const sourceIp = (req: IncomingMessage, settings: IdentitySettings) => settings.adminOrigin ? String(req.headers['x-mx-client-ip'] ?? req.socket.remoteAddress ?? 'unknown') : req.socket.remoteAddress ?? 'unknown';
 const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-function page(action: string, csrf: string, message = '', policy?: RegistrationPolicy, registering = false, web: { enabled?: boolean; pending?: boolean; appName?: string; returnUrl?: string; enterprise?: boolean; loginHint?: string; choosing?: boolean } = {}) {
+function page(action: string, csrf: string, message = '', policy?: RegistrationPolicy, registering = false, web: { enabled?: boolean; pending?: boolean; appName?: string; returnUrl?: string; enterprise?: boolean; loginHint?: string; choosing?: boolean; admissionRequired?: boolean } = {}) {
   const registrationAllowed = policy && policy.mode !== 'closed';
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${registering ? '注册' : '登录'} · MX</title>
   <style>
@@ -90,6 +91,7 @@ function page(action: string, csrf: string, message = '', policy?: RegistrationP
       <label for="inviteCode">邀请码</label>
       <input id="inviteCode" name="inviteCode" autocomplete="off" maxlength="128" required>
     </div>` : ''}` : ''}
+    ${!registering && web.admissionRequired ? '<div class="field"><label for="inviteCode">Harbor 邀请码（首次进入时填写）</label><input id="inviteCode" name="inviteCode" autocomplete="off" maxlength="128"></div>' : ''}
     <button type="submit">${registering ? (web.pending ? '注册并绑定飞书' : '注册并继续') : (web.pending ? '验证账号并绑定' : '登录并继续')}</button>
     ${web.enabled && !web.pending && !registering ? '<button class="secondary" type="submit" name="intent" value="feishu" formnovalidate>使用飞书登录</button><details><summary>绑定已有账号</summary><button class="link-button" type="submit" name="intent" value="feishu-link" formnovalidate>绑定飞书到已有 MX 账号</button></details>' : ''}
   </form>
@@ -122,7 +124,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
   const failPage = (res: ServerResponse, status: number, clientId?: string, copy?: Parameters<typeof errorPage>[1]) => {
     res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' }).end(errorPage(clientId, copy));
   };
-  const allowed = (user: Awaited<ReturnType<IdentityAccounts['account']>>, clientId: string) => user && !user.appAccess?.deniedAppIds?.includes(applications.get(clientId)?.appId ?? 'mx-launcher');
+  const allowed = (user: Awaited<ReturnType<IdentityAccounts['account']>>, clientId: string) => canAccessIdentityApplication(user, applications.get(clientId)?.appId ?? 'mx-launcher');
   const hints = rememberedAccounts(settings.cookieKeys, settings.issuer);
   const policy = interactionPolicy.base();
   policy.add(new interactionPolicy.Prompt({ name: 'select_account', requestable: true }), 0);
@@ -158,6 +160,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
     async loadExistingGrant(ctx) {
       const clientId = ctx.oidc.client?.clientId;
       if (!clientId || (clientId !== settings.clientId && !applications.has(clientId))) return undefined;
+      if (applications.get(clientId)?.appId === 'mx-harbor' && (!ctx.oidc.session?.accountId || !allowed(await accounts.account(ctx.oidc.session.accountId), clientId))) return undefined;
       const id = ctx.oidc.result?.consent?.grantId ?? ctx.oidc.session?.grantIdFor(clientId);
       if (id) {
         const grant = await provider.Grant.find(id);
@@ -279,10 +282,12 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         for (const entry of choosing ? entries.slice(0, 8) : []) {
           const user = await accounts.account(entry.id);
           if (user) choices.push({ reference: hints.reference(user.userId), account: user.account, name: user.displayName,
-            current: current?.userId === user.userId, available: Boolean(allowed(user, clientId)) });
+            current: current?.userId === user.userId, available: Boolean(allowed(user, clientId)),
+            ...(source.appId === 'mx-harbor' && user.status === 'active' && !user.appAccess?.deniedAppIds?.includes('mx-harbor') && !allowed(user, clientId) ? {admissionRequired:true} : {}) });
         }
         const selected = choices.find(entry => entry.reference === query.get('account'));
         const finish = async (id: string, ts: number) => {
+          if (!allowed(await accounts.account(id), clientId)) throw new RegistrationClientError(403, '此账号没有应用访问权限。');
           hints.write(res, [{ id, seen: Date.now() / 1000 }, ...entries.filter(entry => entry.id !== id)]);
           return provider.interactionFinished(req, res, { ...(choosing ? { select_account: {} } : {}), login: { accountId: id, ts } }, { mergeWithLastSubmission: false });
         };
@@ -293,6 +298,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         let enterprise: Awaited<ReturnType<typeof resolveHubInvitation>> | undefined;
         let policy: RegistrationPolicy | undefined;
         const proof = await accounts.webState?.read('proof', interaction.uid);
+        if (source.appId === 'mx-harbor' && proof) throw new RegistrationClientError(403, 'Harbor 未开放飞书登录。');
         if (req.method === 'GET' && proof?.userId && !proof.link) {
           const linked = await accounts.account(String(proof.userId));
           if (!allowed(linked, clientId) || linked?.profile.externalIds.feishuSubject !== proof.subject) {
@@ -320,7 +326,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
             registration?.policy(source), accounts.webState ? registration?.feishu?.('info', {}) : undefined
           ]);
           if (policyResult.status === 'fulfilled') policy = policyResult.value;
-          if (feishuResult.status === 'fulfilled') feishuEnabled = feishuResult.value?.enabled === true;
+          if (feishuResult.status === 'fulfilled') feishuEnabled = source.appId !== 'mx-harbor' && feishuResult.value?.enabled === true;
         }
         const render = (message = '', status = 200) => {
           res.statusCode = status;
@@ -328,7 +334,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
           // Preserve same-origin provenance without allowing cross-site refs.
           res.setHeader('Referrer-Policy', 'same-origin');
           res.setHeader('Content-Type', 'text/html; charset=utf-8');
-          res.end(page(path, csrfFor(interaction.uid), message, policy, registering && Boolean(policy && policy.mode !== 'closed'), { enabled: feishuEnabled, pending: Boolean(proof), enterprise: Boolean(enterprise), appName, returnUrl, loginHint: selected?.account, choosing }));
+          res.end(page(path, csrfFor(interaction.uid), message, policy, registering && Boolean(policy && policy.mode !== 'closed'), { admissionRequired: source.appId === 'mx-harbor', enabled: feishuEnabled, pending: Boolean(proof), enterprise: Boolean(enterprise), appName, returnUrl, loginHint: selected?.account, choosing }));
         };
         if (req.method === 'GET') {
           if (invitationHandle && invitationApp && policy?.mode !== 'closed') {
@@ -352,7 +358,10 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
             hints.write(res, entries.filter(entry => hints.reference(entry.id) !== choice.reference));
             res.writeHead(303, { location: path }).end(); return;
           }
-          if (!choice.available) return renderChoices('此账号无法访问该应用。');
+          if (!choice.available) {
+            if (source.appId === 'mx-harbor') { res.writeHead(303, {location: `${path}?view=login&account=${encodeURIComponent(choice.reference)}`}).end(); return; }
+            return renderChoices('此账号无法访问该应用。');
+          }
           const maxAge = Number(interaction.params.max_age ?? USER_SESSION_TTL_SECONDS);
           if (choice.current && session && typeof session.loginTs === 'number'
             && !String(interaction.params.prompt ?? '').split(' ').includes('login')
@@ -360,6 +369,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
           res.writeHead(303, { location: `${path}?view=login&account=${encodeURIComponent(choice.reference)}` }).end(); return;
         }
         if (['feishu', 'feishu-link'].includes(body.get('intent') ?? '')) {
+          if (source.appId === 'mx-harbor') return render('Harbor 未开放飞书登录。', 403);
           if (!accounts.webState || !registration?.feishu) return render('飞书 Web 登录尚未配置。', 503);
           return startFeishu(req, res, interaction.uid, body.get('intent') === 'feishu-link');
         }
@@ -394,9 +404,16 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
             return finish(String(bound.userId), authenticationStartedAt);
           } catch (error) { return render(error instanceof RegistrationClientError ? error.message : '绑定暂不可用，请稍后重试。', error instanceof RegistrationClientError ? error.status : 503); }
         }
-        const user = await accounts.authenticate(login, password);
+        let user = await accounts.authenticate(login, password);
         if (!user) return render('账号或密码不正确，或账号不可用。', 401);
-        if (!allowed(user, clientId)) return render('此账号已被禁止访问该应用，请联系管理员。', 403);
+        if (source.appId === 'mx-harbor' && !allowed(user, clientId)) {
+          try {
+            if (!registration?.redeemAdmission) return render('Harbor 邀请服务需要更新。', 503);
+            await registration.redeemAdmission({userId: user.userId, source, inviteCode: body.get('inviteCode') ?? ''});
+            user = await accounts.account(user.userId);
+          } catch (error) { return render(error instanceof RegistrationClientError ? error.message : '邀请暂不可用。', error instanceof RegistrationClientError ? error.status : 503); }
+        }
+        if (!user || !allowed(user, clientId)) return render('此账号已被禁止访问该应用，请联系管理员。', 403);
         console.info(JSON.stringify({ event: 'identity.password-login', userId: user.userId }));
         return finish(user.userId, authenticationStartedAt);
       } catch (error) {

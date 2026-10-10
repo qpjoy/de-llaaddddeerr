@@ -10,8 +10,8 @@ export class SsoStore extends PostgresSsoStore {
 
   // Only called after OIDC plus UserInfo verification. Two identities from the
   // same configured authority are prebound before any just-in-time creation.
-  async provision({ issuer, subject, clientId, canonical, personalTenant }) {
-    const legacy = [canonical.issuer, canonical.subject, canonical.audience]
+  async provision({ issuer, subject, clientId, canonical, personalTenant, sharedAudience }) {
+    const legacy = [canonical.issuer, canonical.subject, sharedAudience ?? canonical.audience]
     return withPgTransaction(this.pool, async client => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [identityLock(...legacy)])
       const select = async tuple => (await client.query(`SELECT b.member_id,m.status FROM iam.external_identity_bindings b

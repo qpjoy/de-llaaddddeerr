@@ -4,7 +4,7 @@ import { createUserCenterUser, createUserCenterUserCredential, resolveUserCenter
 import type { AppCenterApp, UserCenterUser, UserCenterUserCredential } from '../types.js';
 
 export type RegistrationMode = 'closed' | 'invite_code' | 'open';
-export interface RegistrationPolicy { mode: RegistrationMode; version: number; hubMode?: RegistrationMode | 'inherit' }
+export interface RegistrationPolicy { mode: RegistrationMode; version: number; hubMode?: RegistrationMode | 'inherit'; applicationModes?: Record<string, RegistrationMode> }
 export type RegistrationSource = NonNullable<UserCenterUser['registration']>['source'];
 export function validateRegistrationSource(source: RegistrationSource | undefined): void {
   if (source === undefined) return; // Old Auth replicas retain the default policy, without invented provenance.
@@ -16,7 +16,7 @@ export function validateRegistrationSource(source: RegistrationSource | undefine
   } catch { fail(400,'invalid_registration_source','注册来源无效，请从应用重新发起。'); }
 }
 function effectivePolicy(policy: RegistrationPolicy, source?: RegistrationSource): RegistrationPolicy {
-  return { ...policy, mode: policy.mode === 'closed' ? 'closed' : source?.appId === 'mx-insight-hub' && policy.hubMode && policy.hubMode !== 'inherit' ? policy.hubMode : policy.mode };
+  return { ...policy, mode: policy.mode === 'closed' ? 'closed' : source?.appId === 'mx-harbor' ? (policy.applicationModes?.['mx-harbor'] ?? 'closed') : source?.appId === 'mx-insight-hub' && policy.hubMode && policy.hubMode !== 'inherit' ? policy.hubMode : policy.mode };
 }
 export interface EnterpriseInvitation { issuer: string; clientId: string; invitationId: string; expiresAt: string }
 export interface RegistrationInput { transactionId: string; clientId: string; policyVersion: number; account: string; password: string; inviteCode?: string; verifiedFeishuSubject?: string; enterpriseInvitation?: EnterpriseInvitation; source?: RegistrationSource }
@@ -28,8 +28,8 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 export const accountWriteLock = (manager: EntityManager, environment: string) =>
   manager.query('SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))', [environment, 'mx-account-creation']);
 export interface InvitationAppGrant { mode: 'policy' | 'selected' | 'all_current'; appIds: string[] }
-export interface CreateInvitationInput { label: string; maxUses: number; days: number; appGrant?: InvitationAppGrant }
-interface Invitation { id: string; label: string; clientId: string; codeHash: string; maxUses: number; uses: number; startsAt: string; expiresAt: string; revoked: boolean; createdAt: string; appGrant?: InvitationAppGrant }
+export interface CreateInvitationInput { label: string; maxUses: number; days: number; appGrant?: InvitationAppGrant; admissionAppId?: 'mx-harbor' }
+interface Invitation { id: string; label: string; clientId: string; codeHash: string; maxUses: number; uses: number; startsAt: string; expiresAt: string; revoked: boolean; createdAt: string; appGrant?: InvitationAppGrant; admissionAppId?: 'mx-harbor' }
 
 /** Runs only in Internal API, the account writer. Identity calls it through a
  * narrow authenticated backchannel. Records share the existing durable backup. */
@@ -99,13 +99,14 @@ export class RegistrationRepository {
   async updatePolicy(input: RegistrationPolicy) {
     if (!['closed', 'invite_code', 'open'].includes(input.mode) || !Number.isSafeInteger(input.version)) fail(400, 'invalid_policy', '注册策略无效。');
     if (input.hubMode !== undefined && !['inherit','closed','invite_code','open'].includes(input.hubMode)) fail(400,'invalid_policy','Hub 注册方式无效。');
+    if (input.applicationModes !== undefined && (!input.applicationModes || Array.isArray(input.applicationModes) || Object.entries(input.applicationModes).some(([app, mode]) => app !== 'mx-harbor' || !['closed','invite_code'].includes(mode)))) fail(400, 'invalid_policy', 'Harbor 当前仅支持关闭或邀请码注册。');
     await this.ready();
     return this.db.transaction(async manager => {
       await this.lock(manager);
       const old = await this.policyFor(manager);
       if (input.version !== old.version) fail(409, 'policy_changed', '注册策略已更新，请刷新后重试。');
       const hubMode = input.hubMode ?? old.hubMode;
-      const policy: RegistrationPolicy = { mode: input.mode, version: old.version + 1, ...(hubMode !== undefined ? {hubMode} : {}) };
+      const policy: RegistrationPolicy = { mode: input.mode, version: old.version + 1, ...(hubMode !== undefined ? {hubMode} : {}), ...((input.applicationModes ?? old.applicationModes) ? {applicationModes: {...old.applicationModes, ...input.applicationModes}} : {}) };
       await this.write(manager, 'registration-policy', 'platform', policy);
       await this.audit(manager, 'identity.registration-policy.updated', { ...policy });
       return policy;
@@ -161,7 +162,7 @@ export class RegistrationRepository {
     if (input.mode !== 'selected' && input.appIds.length) fail(400, 'invalid_app_grant', '此模式由系统确定应用范围，请勿额外提交应用。');
     if (input.mode === 'policy') return { mode: 'policy', appIds: [] };
     const enabled = (await this.appsFor(manager)).filter(app => app.enabled).map(app => app.appId);
-    const appIds = input.mode === 'all_current' ? enabled : [...new Set(input.appIds)];
+    const appIds = input.mode === 'all_current' ? enabled.filter(id => id !== 'mx-harbor') : [...new Set(input.appIds)];
     if (!appIds.length || appIds.some(id => !enabled.includes(id))) fail(400, 'invalid_app_grant', '请选择至少一个已登记且启用的应用，或选择遵循应用策略。');
     return { mode: input.mode, appIds };
   }
@@ -169,14 +170,16 @@ export class RegistrationRepository {
     const label = typeof input.label === 'string' ? input.label.trim() : '';
     if (!label || label.length > 80 || !Number.isInteger(input.maxUses) || input.maxUses < 1 || input.maxUses > 1000
       || !Number.isInteger(input.days) || input.days < 1 || input.days > 90) fail(400, 'invalid_invitation', '请填写名称、1–1000 个名额和 1–90 天有效期。');
+    if (input.admissionAppId !== undefined && input.admissionAppId !== 'mx-harbor') fail(400, 'invalid_app_grant', '邀请应用无效。');
     const code = `mxi_${randomBytes(24).toString('base64url')}`;
     const now = new Date();
     const invitation: Invitation = { id: randomUUID(), label, clientId: this.clientId, codeHash: hash(code), maxUses: input.maxUses,
-      uses: 0, startsAt: now.toISOString(), expiresAt: new Date(now.getTime() + input.days * 86400000).toISOString(), revoked: false, createdAt: now.toISOString() };
+      uses: 0, startsAt: now.toISOString(), expiresAt: new Date(now.getTime() + input.days * 86400000).toISOString(), revoked: false, createdAt: now.toISOString(), ...(input.admissionAppId ? {admissionAppId: input.admissionAppId} : {}) };
     await this.ready();
     await this.db.transaction(async manager => {
       await this.lock(manager);
-      invitation.appGrant = await this.invitationGrant(manager, input.appGrant);
+      invitation.appGrant = input.admissionAppId === 'mx-harbor' ? {mode: 'selected', appIds: ['mx-harbor']} : await this.invitationGrant(manager, input.appGrant);
+      if (!input.admissionAppId && invitation.appGrant.appIds.includes('mx-harbor')) fail(400, 'invalid_app_grant', '请创建 Harbor 专用邀请。');
       await this.write(manager, 'registration-invite', invitation.id, invitation);
       await this.audit(manager, 'identity.invitation.created', { invitationId: invitation.id, clientId: this.clientId, maxUses: input.maxUses, appGrant: invitation.appGrant });
     });
@@ -194,8 +197,31 @@ export class RegistrationRepository {
       await this.audit(manager, 'identity.invitation.revoked', { invitationId: id });
     });
   }
+  /** Called only after Auth password verification on a registered Harbor interaction. */
+  async redeemAdmission(input: {userId: string; inviteCode: string; source: RegistrationSource}) {
+    validateRegistrationSource(input.source);
+    if (input.source?.appId !== 'mx-harbor') fail(400, 'invalid_registration_source', '邀请应用不匹配。');
+    await this.ready();
+    return this.db.transaction(async manager => {
+      await accountWriteLock(manager, this.environment); await this.lock(manager);
+      const user = await this.read<UserCenterUser>(manager, 'iam-user', input.userId);
+      if (!user || user.status !== 'active' || user.appAccess.deniedAppIds.includes('mx-harbor')) fail(403, 'admission_denied', '此账号不可访问 Harbor，请联系管理员。');
+      // Retrying a successful redemption never consumes another seat or changes other app grants.
+      if (user!.appAccess.allowedAppIds.includes('mx-harbor')) return {userId: user!.userId};
+      const policy = effectivePolicy(await this.policyFor(manager), input.source);
+      if (policy.mode !== 'invite_code') fail(403, 'registration_closed', 'Harbor 暂未开放邀请，请联系管理员开通。');
+      const rows = await manager.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='registration-invite' AND data->>'codeHash'=$2", [this.environment, hash(typeof input.inviteCode === 'string' ? input.inviteCode.trim() : '')]);
+      const invite: Invitation | undefined = rows[0]?.data;
+      if (!invite || invite.clientId !== this.clientId || invite.admissionAppId !== 'mx-harbor' || invite.revoked || invite.uses >= invite.maxUses || Date.parse(invite.startsAt) > Date.now() || Date.parse(invite.expiresAt) <= Date.now()) fail(400, 'invitation_unavailable', 'Harbor 邀请码无效、已到期或名额已用完。');
+      await this.write(manager, 'iam-user', user!.userId, {...user, updatedAt: new Date().toISOString(), appAccess: {...user!.appAccess, allowedAppIds: [...user!.appAccess.allowedAppIds, 'mx-harbor']}});
+      await this.write(manager, 'registration-invite', invite!.id, {...invite, uses: invite!.uses + 1});
+      await this.audit(manager, 'identity.application.admitted', {appId: 'mx-harbor', invitationId: invite!.id, source: input.source}, user!.userId);
+      return {userId: user!.userId};
+    });
+  }
   async register(input: RegistrationInput) {
     validateRegistrationSource(input.source);
+    if (input.source?.appId === 'mx-harbor' && (input.verifiedFeishuSubject || input.enterpriseInvitation)) fail(403, 'invalid_registration_source', 'Harbor 仅支持专用邀请码注册。');
     const account = typeof input.account === 'string' ? input.account.trim() : '';
     if (input.clientId !== this.clientId || !/^[A-Za-z0-9_-]{16,128}$/.test(input.transactionId ?? '')
       || !Number.isSafeInteger(input.policyVersion)) fail(400, 'invalid_transaction', '注册请求已失效，请重新打开登录页。');
@@ -246,7 +272,7 @@ export class RegistrationRepository {
         const codeHash = hash(typeof input.inviteCode === 'string' ? input.inviteCode.trim() : '');
         const rows = await manager.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='registration-invite' AND data->>'codeHash'=$2", [this.environment, codeHash]);
         invitation = rows[0]?.data;
-        if (!invitation || invitation.clientId !== input.clientId || invitation.revoked || invitation.uses >= invitation.maxUses
+        if (!invitation || (input.source?.appId === 'mx-harbor' ? invitation.admissionAppId !== 'mx-harbor' : Boolean(invitation.admissionAppId)) || invitation.clientId !== input.clientId || invitation.revoked || invitation.uses >= invitation.maxUses
           || Date.parse(invitation.startsAt) > Date.now() || Date.parse(invitation.expiresAt) <= Date.now()) fail(400, 'invitation_unavailable', '邀请码无效、已停用、已到期或名额已用完。');
       }
       const rows = await manager.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='iam-user'", [this.environment]);
@@ -259,9 +285,9 @@ export class RegistrationRepository {
       // client-supplied role is inherited from ordinary identity registration.
       // This is an immutable, server-owned snapshot. Empty and legacy invites
       // inherit application policies; they do not mean an all-app wildcard.
-      const allowedAppIds = invitation?.appGrant?.appIds ?? [];
+      const allowedAppIds = (invitation?.appGrant?.appIds ?? []).filter(id => id !== 'mx-harbor' || invitation?.admissionAppId === 'mx-harbor');
       const user = createUserCenterUser({ userId, account, displayName: account, roleIds: ['mx-user'], registeredByAppId: 'mx-identity', allowedAppIds,
-        ...(input.source?.appId === 'mx-insight-hub' ? { deniedAppIds: ['mx-h2i','luopan'] } : {}),
+        ...(['mx-insight-hub','mx-harbor'].includes(input.source?.appId ?? '') ? { deniedAppIds: ['mx-h2i','luopan'] } : {}),
         ...(input.verifiedFeishuSubject ? { externalIds: { feishuSubject: input.verifiedFeishuSubject } } : {}) }, null, userCredentialSummary(credential));
       if (input.source) user.registration = { source: input.source, method: input.verifiedFeishuSubject ? 'feishu' : 'password', policyVersion: policy.version, registeredAt: user.createdAt };
       await this.write(manager, 'iam-user', userId, user);

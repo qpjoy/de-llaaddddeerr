@@ -1,3 +1,4 @@
+import {createHarborPortal} from './portal/harbor.mjs'
 import { IpRiskProduct } from './external-platforms/ip-risk-product.mjs'
 import { CommerceService } from './commerce/service.mjs'
 import { BaiduIpRiskAdapter } from './adapters/baidu-ip-risk.mjs'
@@ -571,7 +572,9 @@ export async function createRuntime(config = loadConfig()) {
   const recharge = config.listenerMode === 'public' ? null : createRechargeService(store, config.paymentDeliverySources, { logger: console, pepper:config.apiKeyPepper })
   if (balanceMonitor) balanceMonitor.onScheduleChanged = () => { void feishuAlerts?.timer?.refresh() }
   const peripherals = createPeripheralRuntime(config)
+  const harborPortal = config.listenerMode === 'public' ? null : createHarborPortal({pool,store,profileFile:process.env.MX_INSIGHT_HARBOR_SSO_PROFILE,token:process.env.MX_INSIGHT_HARBOR_GATEWAY_TOKEN,hubSettings:readSsoProfile(process.env.MX_INSIGHT_SSO_PROFILE)})
   const app = createApp({
+    harborPortal,
     platformSearchPolicyStore,
     peripherals,
     admissionRecovery: pool ? new AdmissionRecoveryService({ pool, usageStore: store,

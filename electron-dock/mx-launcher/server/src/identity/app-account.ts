@@ -1,3 +1,4 @@
+import { canAccessIdentityApplication } from './application-access.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
@@ -16,7 +17,7 @@ export function createAppAccount(provider: Provider, settings: IdentitySettings,
   const state = accounts.webState;
   const allowed = async (id: string, appId: string) => {
     const user = await accounts.account(id);
-    if (!user || user.status !== 'active' || user.appAccess?.deniedAppIds?.includes(appId)) fail(403, '此账号不可用或没有该应用的访问权限。');
+    if (!canAccessIdentityApplication(user, appId)) fail(403, '此账号不可用或没有该应用的访问权限。');
     return user!;
   };
   return {
@@ -87,12 +88,13 @@ export function createAppAccount(provider: Provider, settings: IdentitySettings,
           let enterprise = false, invitationError = '';
           if (invitationHandle) { try { enterprise = Boolean(await enterpriseProof()); } catch { invitationError = '邀请已失效，请返回原邀请链接重新开始。'; } }
           return json(200, { policy: policy.status === 'fulfilled' ? policy.value : null,
-            feishu: feishu.status === 'fulfilled' && feishu.value?.enabled === true, pending: Boolean(proof), enterprise, invitationError, loginHint: flow!.loginHint ?? '' });
+            admissionRequired: app!.appId === 'mx-harbor', feishu: app!.appId !== 'mx-harbor' && feishu.status === 'fulfilled' && feishu.value?.enabled === true, pending: Boolean(proof), enterprise, invitationError, loginHint: flow!.loginHint ?? '' });
         }
         if (!['login', 'register', 'feishu', 'feishu-link'].includes(action)) fail(400, '不支持的账号操作。');
         const completed = await state!.read('app-result', input.flow);
         if (completed) fail(409, '登录请求已提交，请重新开始。');
         const returnUrl = `${settings.origin}/identity/interaction/${uid}?app_complete=${input.flow}`;
+        if (app!.appId === 'mx-harbor' && (proof || action === 'feishu' || action === 'feishu-link')) fail(403, 'Harbor 仅支持账号密码登录与邀请码注册。');
         if (action === 'feishu' || action === 'feishu-link') {
           // Issuer browser visit sets the Feishu state cookie; the application cannot set it.
           if (!await state!.read('app-completion-lock', input.flow, true)) fail(409, '登录请求已提交。');
@@ -129,6 +131,10 @@ export function createAppAccount(provider: Provider, settings: IdentitySettings,
             if (!user) fail(401, '账号或密码不正确，或账号不可用。');
             userId = user!.userId;
           }
+        }
+        if (app!.appId === 'mx-harbor' && !canAccessIdentityApplication(await accounts.account(userId), app!.appId)) {
+          if (!registration?.redeemAdmission) fail(503, 'Harbor 邀请服务需要更新。');
+          await registration!.redeemAdmission!({userId, source, inviteCode: typeof input.inviteCode === 'string' ? input.inviteCode : ''});
         }
         await allowed(userId, app!.appId);
         if (!await state!.read('app-completion-lock', input.flow, true)) fail(409, '登录请求已提交，请重新开始。');

@@ -1,5 +1,5 @@
 const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-export interface AccountChoice { reference: string; account: string; name: string; current: boolean; available: boolean }
+export interface AccountChoice { reference: string; account: string; name: string; current: boolean; available: boolean; admissionRequired?: boolean }
 export function accountsPage(input: { action: string; csrf: string; appName: string; returnUrl: string; entries: AccountChoice[]; message?: string }) {
   const action = escape(input.action);
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>选择账号 · ${escape(input.appName)}</title><style>
@@ -11,7 +11,7 @@ export function accountsPage(input: { action: string; csrf: string; appName: str
   </style></head><body><main><div class="brand"><span class="mark" aria-hidden="true">MX</span><span>${escape(input.appName)}</span></div><h1>选择账号</h1><p class="intro">继续进入 ${escape(input.appName)}</p>
   ${input.message ? `<p role="status" class="message">${escape(input.message)}</p>` : ''}
   ${input.entries.length ? `<ul>${input.entries.map(entry => `<li>
-    <form class="account" method="post" action="${action}"><input type="hidden" name="csrf" value="${escape(input.csrf)}"><input type="hidden" name="account" value="${escape(entry.reference)}"><button class="choice" name="intent" value="choose" ${entry.available ? '' : 'disabled'}><span class="avatar" aria-hidden="true">${escape(Array.from(entry.name || entry.account)[0] || 'M')}</span><span class="identity"><strong>${escape(entry.name || entry.account)}</strong><small>${escape(entry.account)}</small></span><span class="state">${!entry.available ? '不可用' : entry.current ? '已登录 · 继续' : '重新登录'}</span></button></form>
+    <form class="account" method="post" action="${action}"><input type="hidden" name="csrf" value="${escape(input.csrf)}"><input type="hidden" name="account" value="${escape(entry.reference)}"><button class="choice" name="intent" value="choose" ${entry.available || entry.admissionRequired ? '' : 'disabled'}><span class="avatar" aria-hidden="true">${escape(Array.from(entry.name || entry.account)[0] || 'M')}</span><span class="identity"><strong>${escape(entry.name || entry.account)}</strong><small>${escape(entry.account)}</small></span><span class="state">${entry.admissionRequired ? '填写邀请' : !entry.available ? '不可用' : entry.current ? '已登录 · 继续' : '重新登录'}</span></button></form>
     ${!entry.current ? `<form method="post" action="${action}"><input type="hidden" name="csrf" value="${escape(input.csrf)}"><input type="hidden" name="account" value="${escape(entry.reference)}"><button name="intent" value="remove" aria-label="移除 ${escape(entry.account)}">移除</button></form>` : ''}</li>`).join('')}</ul>` : '<p class="message">这个浏览器还没有记住的账号。</p>'}
   <a class="choice add" href="${action}?view=login"><span class="avatar" aria-hidden="true">＋</span>使用其他账号</a>
   <footer><span>仅记住此浏览器使用过的账号</span><a href="${escape(input.returnUrl)}">返回应用</a></footer></main></body></html>`;

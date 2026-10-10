@@ -63,7 +63,8 @@ export class RegistrationController implements OnModuleDestroy {
     const sso = body?.clientId === publicSso?.clientId ? publicSso : privateSso;
     if (!sso || !body || !verifyRegistrationSignature(sso.clientSecret, body, signature) || body.clientId !== sso.clientId) throw new UnauthorizedException();
     return this.perform(async () => {
-      if (['policy','register'].includes(body.action) && body.input?.source && body.input.source.issuer !== sso.issuer) throw new UnauthorizedException('Registration source issuer mismatch');
+      if (['policy','register','redeem-admission'].includes(body.action) && body.input?.source && body.input.source.issuer !== sso.issuer) throw new UnauthorizedException('Registration source issuer mismatch');
+      if (body.action === 'redeem-admission') return this.store().redeemAdmission({userId: String(body.input.userId), inviteCode: String(body.input.inviteCode ?? ''), source: body.input.source!});
       if (body.action === 'policy') return this.store().policy(body.input?.source);
       if (['account-profile', 'account-password', 'account-unlink-feishu'].includes(body.action))
         return this.store().updateAccount(body.action.slice(8), body.input);

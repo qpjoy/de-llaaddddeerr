@@ -52,7 +52,7 @@ Hub 已读取该字段，但 HTTP/HTTPS URL 校验拒绝 App URI，所以交付 
 
 京东 301 保持 502 和 `upstream_collection_failed`，保留原幂等响应、计费与熔断，
 不自动重试，也不伪造空成功。修改 Hub URL 投影无法恢复供应商本次采集；
-供应商当前可用性仍需其修复或一次独立受控实时验收确认。
+后续独立实时验收已成功，见文末；不能将上游恢复归因于 URL 投影修改。
 本次只改 Hub 商品投影、文档、测试和只读诊断，不改 Launcher/MX-H2I 登录、权限、联网，
 也不改 Night-All、供应商网络配置或支付服务。
 
@@ -63,8 +63,8 @@ Hub 已读取该字段，但 HTTP/HTTPS URL 校验拒绝 App URI，所以交付 
 HTTP/适配器/归档、公开文档和只读诊断。附件中的 30 个已交付 ID 全部通过本地链接生成，
 这不是原始响应的服务器重放或网页可达性验证。
 
-需要同步源码并重新构建部署 Hub API/worker；此文记录本地修复，不代表已经上线。
-按现有 Hub 发布流程操作，如使用 manage.sh，显式设置 `MX_INSIGHT_SYNC_LAUNCHER=0`。
+运维已报告部署完成，随后回传以下命令的完整输出，确认所执行的 Public Pod 已包含新投影。
+后续发布仍按现有 Hub 流程操作，如使用 manage.sh，显式设置 `MX_INSIGHT_SYNC_LAUNCHER=0`。
 本次无新增数据库迁移。旧缓存/历史幂等请求仍可能返回 null；新成功采集才生成新交付。
 
 部署后在有 kubectl 的终端执行以下单行命令。它只读原归档，在 Pod 内运行当前链接投影，
@@ -78,3 +78,42 @@ kubectl -n mx-insight-hub exec deploy/mx-insight-hub-public -c api -- node serve
 京东预期 `state=upstream_rejected`、`businessCode=301`，这是历史证据原样校验。
 `archive_integrity_failed`、`archive_missing_or_oversized` 或 `unsupported_marketplace` 等状态
 不是验收通过，应先核对部署代码/归档/原请求信息，不通过付费重采集补证据。
+
+## 部署后复验结果
+
+运维回传 `mode=offline_read_only`，四个 Request ID / call ID 均与原记录一致：
+
+| 平台 | 投影结果 | 商品数 | URL 数 | 原始网页链接 | 按 ID 生成 | 缺失 / 丢弃 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 淘宝 | projected | 10 | 10 | 0 | 10 | 0 / 0 |
+| 天猫 | projected | 10 | 10 | 0 | 10 | 0 / 0 |
+| 闲鱼 | projected | 10 | 10 | 0 | 10 | 0 / 0 |
+| 京东 | upstream_rejected / 301 | 无商品列表 | — | — | — | — |
+
+已部署的商品 URL 投影在三份精确归档上复验通过，30 件商品均生成带来源标记的网页地址。
+此次没有供应商调用或历史写回；输出中的 `billed=true/false` 和 `latencyMs` 均来自原调用，
+不代表本次诊断产生费用或发生新的实时搜索。
+旧缓存和原 Idempotency-Key 的响应保持原样，因此仍可能看到 null 或旧 301。
+这一轮只读检查未验证新的 Public HTTP 采集、所有副本/worker 的镜像一致性、网页可达性或京东恢复。
+后续京东实时验收结果如下；不能通过重新运行只读命令获得当前供应商可用性结论。
+
+## 京东实时验收通过
+
+用户要求直接在对话提供步骤，随后执行一次正常 Hub Public API 请求：
+`marketplace=jd`、`query=联想笔记本`、`page=1`、`deliveryMode=live_only`。
+命令从隐藏交互输入接收原 Hub Public API Key，经 stdin 传入 Pod，单次发送，无自动重试。
+
+| 字段 | 结果 |
+| --- | --- |
+| 幂等标识 | `lcy-ecom-jd-lenovo-20261011-01` |
+| Hub Request ID | `0ee7b26c-6ebf-4ce1-aa66-23cbdf7c44a2` |
+| HTTP status | 200 |
+| sourceMode / replay | live / false |
+| 商品数 / 有 URL 商品数 | 48 / 48 |
+| 返回的两件样例 ID | `10206948797971`、`100309245563` |
+| 两件样例的 urlSource | derived_from_id |
+
+本次真实查询与 URL 交付通过，不是缓存或幂等重放；无需继续重复付费验收。
+淘宝/天猫/闲鱼已完成原归档在部署代码上的投影验证，京东已完成此次新实时查询验证。
+旧 301 请求仍保留原状。新成功不能解释旧采集失败的供应商内部原因，也不能证明未来稳定性、
+商品网页可达性或其他客户端展示链路。此次输出未包含实际采购/客户扣费证据，不能补写费用结论。
