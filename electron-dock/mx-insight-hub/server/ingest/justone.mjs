@@ -9,7 +9,7 @@ import { canonicalJson, sha256 } from './normalizers.mjs'
 
 export const JUSTONE_DATASET_ID = 'ecommerce.products.v1'
 export const JUSTONE_CONNECTOR_ID = 'external-platform:justone'
-export const JUSTONE_PARSER_VERSION = 'mxih-justone-product-search.v2'
+export const JUSTONE_PARSER_VERSION = 'mxih-justone-product-search.v3'
 
 const QUEUED_RECORD_TIME_FIELDS = Object.freeze([
   'eventTime',
@@ -199,6 +199,7 @@ function canonicalRecord(archiveObject, request, capturedAt, secret) {
         goodsId: item.id,
         title: item.title,
         url: item.url,
+        urlSource: item.urlSource ?? null,
         pricing: { ...item.pricing },
         brand: item.attributes.brand,
         category: item.attributes.category,

@@ -2817,7 +2817,10 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             enum: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
           },
           title: { type: ['string', 'null'], maxLength: 4096 },
-          url: { type: ['string', 'null'], format: 'uri', maxLength: 2048 },
+          url: { type: ['string', 'null'], format: 'uri', maxLength: 2048,
+            description: 'Product web URL. An upstream HTTP(S) URL takes priority; supported marketplaces may derive a web URL from an exact numeric product ID. See urlSource; availability is not verified.' },
+          urlSource: { type: ['string', 'null'], enum: ['upstream', 'derived_from_id', null],
+            description: 'upstream: source supplied the web URL; derived_from_id: Hub generated it from the product ID. null: no usable URL. May be absent on historical responses; absence does not establish provenance.' },
           pricing: {
             type: 'object',
             additionalProperties: false,
@@ -5728,6 +5731,7 @@ curl -sS -D /tmp/mx-ecommerce.headers -X POST \
       "marketplace": "jd",
       "title": "便携相机",
       "url": "https://example.invalid/product",
+      "urlSource": "upstream",
       "pricing": { "current": "899.00", "original": null, "currency": "CNY" },
       "shop": { "id": "shop-id", "name": "店铺名称" },
       "images": [],
@@ -5744,7 +5748,8 @@ curl -sS -D /tmp/mx-ecommerce.headers -X POST \
   },
   "requestId": "00000000-0000-4000-8000-000000000006"
 }</code></pre>
-    <p>字段没有可靠来源时为 null 或空数组，不由 Hub 猜值。调用方用 <code>contractVersion</code> 选择解析器，用 <code>capturedAt / servedAt / ageSeconds</code> 判断时效，用 <code>sourceMode</code> 判断本次交付路径；不要从响应速度推断是否调用上游。</p>
+    <p>字段没有可靠来源时为 null 或空数组。<code>url</code> 优先使用来源提供的 HTTP/HTTPS 商品链接，<code>urlSource=upstream</code>；淘宝、天猫、京东、闲鱼缺少网页链接时，可根据准确的数字商品 ID 生成网页地址，标记为 <code>derived_from_id</code>。生成地址不是上游实际返回的链接，也不表示已验证商品在售或页面可访问；无可用链接时两者为 null。历史响应可能没有 urlSource，不能据此推断来源，缓存及幂等重放保持原交付内容。</p>
+    <p>调用方用 <code>contractVersion</code> 选择解析器，用 <code>capturedAt / servedAt / ageSeconds</code> 判断时效，用 <code>sourceMode</code> 判断本次交付路径；不要从响应速度推断是否调用上游。HTTP 非 2xx 是请求失败，不是成功的零商品结果；<code>upstream_collection_failed</code> 表示数据源采集失败，应保留 requestId 供排查，不要自动重试。</p>
 
     <h3>4. 安全读取商品图片</h3>
     <p>搜索响应的 <code>images[]</code> 是归档引用，浏览器不应直接把任意外部 URL 放入 <code>img src</code>。管理端使用同一把 Hub Public API Key、搜索响应的 <code>requestId</code>、商品 <code>id</code> 和图片序号，从 Hub 受控媒体读取接口获得 Blob；接口不接受 URL 参数。</p>

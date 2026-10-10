@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react'
 import { adminApi } from './api.js'
-import { ErrorState, Field, PageHeading, formatDate, useRemoteData } from './components.jsx'
+import { DropdownField, ErrorState, Field, PageHeading, formatDate, useRemoteData } from './components.jsx'
 
 const MODES = { auto: '自动：RapidAPI → JustOne', rapidapi: '仅 RapidAPI', justone: '仅 JustOne', paused: '暂停搜索', existing: '沿用现有路由' }
 const REASONS = { quota_exhausted: '额度已用尽', rate_limited: '短时限流', recovery_probe: '等待恢复确认' }
@@ -28,9 +28,8 @@ function FacebookForm({ token, row, onSaved, notify }) {
   return <form onSubmit={save} className="mih-page">
     <h3>Raw Search · 上游选路</h3>
     <div className="mih-external-two-column">
-      <Field label="上游供应商"><select aria-label="上游供应商" className="qp-input" value={mode} disabled={busy} onChange={e => setMode(e.target.value)}>
-        {Object.entries(MODES).filter(([key]) => key !== 'existing').map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-      </select></Field>
+      <DropdownField label="上游供应商" value={mode} disabled={busy} onChange={setMode}
+        options={Object.entries(MODES).filter(([key]) => key !== 'existing').map(([value, label]) => ({ value, label }))} />
       <Field label="RapidAPI 每周期调用上限"><input className="qp-input" type="number" min="1" max="1000000" required value={limit} disabled={busy} onChange={e => setLimit(e.target.value)} /></Field>
       <Field label="重置时间未知时，恢复探测间隔（小时）"><input className="qp-input" type="number" min="24" max="744" required value={interval} disabled={busy} onChange={e => setInterval(e.target.value)} /></Field>
       <Field label="修改原因"><input className="qp-input" required maxLength={1000} value={reason} disabled={busy} onChange={e => setReason(e.target.value)} placeholder="记录此次调整的原因" /></Field>
@@ -54,9 +53,8 @@ export function DataPlatformsPage({ token, query, setQuery, onUnauthorized, noti
       <div style={{ padding: 16 }}>
         {remote.error ? <ErrorState error={remote.error} /> : null}
         {!remote.data && !remote.error ? <p>加载策略…</p> : null}
-        {remote.data?.items?.length ? <Field label="数据平台"><select aria-label="数据平台" className="qp-input" value={selected} onChange={e => setQuery({ platform: e.target.value })}>
-          {remote.data.items.map(item => <option key={item.platform} value={item.platform}>{PLATFORM_LABELS[item.platform] || item.platform}</option>)}
-        </select></Field> : null}
+        {remote.data?.items?.length ? <DropdownField label="数据平台" value={selected} onChange={value => setQuery({ platform: value })}
+          options={remote.data.items.map(item => ({ value: item.platform, label: PLATFORM_LABELS[item.platform] || item.platform }))} /> : null}
         {row ? <>
           <h2>{PLATFORM_LABELS[row.platform] || row.platform}</h2>
           <p>目录编号：{row.catalog_key}</p>

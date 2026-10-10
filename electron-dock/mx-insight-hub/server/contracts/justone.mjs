@@ -669,6 +669,27 @@ const PRODUCT_ID_FIELDS = Object.freeze({
   xianyu: ['itemId', 'item_id', 'productId', 'product_id', 'goodsId', 'goods_id', 'id'],
 })
 
+const PRODUCT_WEB_URLS = Object.freeze({
+  taobao: (id) => `https://item.taobao.com/item.htm?id=${id}`,
+  tmall: (id) => `https://detail.tmall.com/item.htm?id=${id}`,
+  jd: (id) => `https://item.jd.com/${id}.html`,
+  xianyu: (id) => `https://www.goofish.com/item?id=${id}`,
+})
+
+function productLink(item, marketplace, rawId, id, secret) {
+  const upstream = firstUrl(item,
+    ['url', 'itemUrl', 'item_url', 'detailUrl', 'detail_url', 'auctionUrl'], secret)
+  if (upstream) return { url: upstream, urlSource: 'upstream' }
+  // Some search responses have no URL; Xianyu may only provide an app URI.
+  // Derive from the selected product identity, never from a deep-link payload.
+  // Do not turn lossy numbers, normalized text or arbitrary IDs into a link.
+  const exactId = (typeof rawId === 'string' || Number.isSafeInteger(rawId))
+    && String(rawId) === id && /^[1-9]\d{0,31}$/u.test(id)
+  const derived = exactId && PRODUCT_WEB_URLS[marketplace]
+    ? safeUrl(PRODUCT_WEB_URLS[marketplace](id), secret) : null
+  return { url: derived, urlSource: derived ? 'derived_from_id' : null }
+}
+
 export function normalizeJustOneProductItem(rawItem, marketplace, { secret = null } = {}) {
   const descriptor = JUSTONE_ENDPOINTS[marketplace]
   if (!plainObject(rawItem) || !descriptor) return null
@@ -677,7 +698,9 @@ export function normalizeJustOneProductItem(rawItem, marketplace, { secret = nul
   // product is projected.
   const item = descriptor.projectItem ? descriptor.projectItem(rawItem) : rawItem
   if (!plainObject(item)) return null
-  const id = firstScalar(item, PRODUCT_ID_FIELDS[marketplace], 256)
+  const idField = PRODUCT_ID_FIELDS[marketplace].find((key) => own(item, key) && scalarText(item[key], 256) !== null)
+  const rawId = idField === undefined ? null : item[idField]
+  const id = scalarText(rawId, 256)
   if (!id) return null
   const shopObject = firstObject(item, ['shop', 'seller', 'merchant'])
   const priceObject = firstObject(item, ['priceInfo', 'price_info', 'pricing'])
@@ -696,11 +719,7 @@ export function normalizeJustOneProductItem(rawItem, marketplace, { secret = nul
     id,
     marketplace,
     title: firstScalar(item, ['itemName', 'item_name', 'title', 'name', 'productName'], 4_096),
-    url: firstUrl(
-      item,
-      ['url', 'itemUrl', 'item_url', 'detailUrl', 'detail_url', 'auctionUrl'],
-      secret,
-    ),
+    ...productLink(item, marketplace, rawId, id, secret),
     pricing: Object.freeze({
       current: currentPrice,
       original: originalPrice,

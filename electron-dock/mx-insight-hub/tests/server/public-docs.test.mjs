@@ -322,8 +322,10 @@ function assertExternalCommerceContract(document) {
   const product = document.components.schemas.ExternalCommerceProduct
   assert.equal(product.additionalProperties, false)
   assert.deepEqual(Object.keys(product.properties), [
-    'id', 'marketplace', 'title', 'url', 'pricing', 'shop', 'images', 'signals', 'attributes',
+    'id', 'marketplace', 'title', 'url', 'urlSource', 'pricing', 'shop', 'images', 'signals', 'attributes',
   ])
+  assert.deepEqual(product.properties.urlSource.enum, ['upstream', 'derived_from_id', null])
+  assert.equal(product.required.includes('urlSource'), false, 'historical deliveries remain valid')
   assert.deepEqual(product.properties.pricing.required, ['current', 'original', 'currency'])
   assert.deepEqual(product.properties.shop.required, ['id', 'name'])
   assert.equal(product.properties.images.maxItems, 20)

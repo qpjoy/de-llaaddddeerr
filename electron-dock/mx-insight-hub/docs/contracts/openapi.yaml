@@ -11244,7 +11244,15 @@ components:
         id: { type: string, minLength: 1, maxLength: 256 }
         marketplace: { type: string, enum: [taobao, tmall, jd, xiaohongshu_ec, xianyu] }
         title: { type: [string, "null"], maxLength: 4096 }
-        url: { type: [string, "null"], format: uri, maxLength: 2048 }
+        url:
+          type: [string, "null"]
+          format: uri
+          maxLength: 2048
+          description: Product web URL. An upstream HTTP(S) URL takes priority; supported marketplaces may derive a web URL from an exact numeric product ID. See urlSource; availability is not verified.
+        urlSource:
+          type: [string, "null"]
+          enum: [upstream, derived_from_id, null]
+          description: 'upstream: source supplied the web URL; derived_from_id: Hub generated it from the product ID. null: no usable URL. May be absent on historical responses; absence does not establish provenance.'
         pricing:
           type: object
           additionalProperties: false

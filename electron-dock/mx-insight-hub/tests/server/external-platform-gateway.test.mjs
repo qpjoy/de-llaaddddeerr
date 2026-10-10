@@ -781,7 +781,7 @@ test('a definite request rejection is durably replayed and never advances the pr
   assert.equal(replayEvent.responseStatus, 502)
 })
 
-test('JustOne collection failure exposes a neutral reason and preserves exact replay without another dispatch', async () => {
+for (const marketplace of ['taobao', 'jd']) test(`${marketplace} collection failure exposes a neutral reason and preserves exact replay without another dispatch`, async () => {
   let calls = 0
   const adapter = new JustOneAdapter({
     token: 'private-collection-token',
@@ -795,7 +795,7 @@ test('JustOne collection failure exposes a neutral reason and preserves exact re
   })
   const state = await fixture({ adapter })
   const request = () => state.gateway.search(state.context, {
-    body: { marketplace: 'taobao', query: '华为笔记本', deliveryMode: 'live_only' },
+    body: { marketplace, query: marketplace === 'jd' ? '联想笔记本' : '华为笔记本', deliveryMode: 'refresh' },
     idempotencyKey: 'collection-rejection-01',
     path: '/api/v1/data/ecommerce/products/search',
   })
@@ -837,6 +837,48 @@ test('JustOne collection failure exposes a neutral reason and preserves exact re
     return true
   })
   assert.equal(calls, 1)
+})
+
+test('product link provenance survives live delivery, cache and replay without rewriting historical deliveries', async () => {
+  for (const marketplace of ['taobao', 'tmall', 'xianyu', 'jd']) {
+    let calls = 0
+    const item = { itemId: '880001', title: 'Synthetic product' }
+    const data = marketplace === 'xianyu'
+      ? { resultList: [{ data: { item: { main: {
+        exContent: item, targetUrl: 'fleamarket://item_detail?itemId=880001',
+      } } } }] }
+      : { items: [item] }
+    const adapter = new JustOneAdapter({ token: 'synthetic-secret', fetchImpl: async () => {
+      calls += 1
+      return new Response(JSON.stringify({ code: 0, message: null, recordTime: null, data }),
+        { headers: { 'content-type': 'application/json' } })
+    } })
+    const state = await fixture({ adapter })
+    const input = { body: { marketplace, query: 'test', deliveryMode: 'refresh' },
+      idempotencyKey: 'product-link-live-01', path: '/api/v1/data/ecommerce/products/search' }
+    const live = await state.gateway.search(state.context, input)
+    assert.equal(live.sourceMode, 'live')
+    assert.equal(live.body.data.items[0].urlSource, 'derived_from_id')
+    assert.match(live.body.data.items[0].url, /^https:\/\//u)
+    const replay = await state.gateway.search(state.context, input)
+    assert.equal(replay.sourceMode, 'idempotent_replay')
+    assert.deepEqual(replay.body.data, live.body.data)
+    const cached = await state.gateway.search(state.context, { ...input,
+      body: { ...input.body, deliveryMode: 'cache_first' }, idempotencyKey: 'product-link-cache-01' })
+    assert.equal(cached.sourceMode, 'fresh_cache')
+    assert.deepEqual(cached.body.data, live.body.data)
+
+    // Model a committed pre-fix response: replay must not silently derive links
+    // or change its recorded provenance under the original request identity.
+    const usage = state.usageStore.requests.get(live.requestId)
+    usage.responseBody.data.items[0].url = null
+    delete usage.responseBody.data.items[0].urlSource
+    const oldReplay = await state.gateway.search(state.context, input)
+    assert.equal(oldReplay.body.data.items[0].url, null)
+    assert.equal(Object.hasOwn(oldReplay.body.data.items[0], 'urlSource'), false)
+    assert.equal(calls, 1)
+    assert.equal(state.platformStore.calls.size, 1)
+  }
 })
 
 test('authentication failures advance the global circuit and retain a durable request id', async () => {
