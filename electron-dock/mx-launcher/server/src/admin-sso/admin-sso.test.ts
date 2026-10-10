@@ -249,6 +249,40 @@ test('write operations require recent authentication; 30-day sessions survive id
   } finally { await f.close(); }
 });
 
+test('registration writes require reauthentication and a fresh CSRF token before an explicit resubmission', async () => {
+  const f = await fixture(true);
+  try {
+    f.setClaims({ sub: 'existing-admin' });
+    const original = await f.login();
+    const session = await (await f.request('/auth/admin/session', original)).json();
+    const record = f.repository.records.get(`admin-sso-session:${digest(original.split('=')[1])}`)!;
+    record.data.authTime = Math.floor(Date.now() / 1000) - 301;
+    const base = '/admin-api/internal/v1/user-center/registration';
+    const writes = [
+      ['/policy', { mode: 'invite_code', hubMode: 'open', applicationModes: { 'mx-harbor': 'invite_code' } }],
+      ['/invitations', { label: 'Harbor fixture', admissionAppId: 'mx-harbor', maxUses: 1, days: 7 }],
+      ['/invitations/revoke', { id: 'fixture-invitation' }]
+    ] as const;
+    assert.equal((await f.request(base, original, undefined, session.csrf)).status, 200);
+    for (const [path, body] of writes) {
+      const response = await f.request(`${base}${path}`, original, body, session.csrf);
+      assert.equal(response.status, 401);
+      assert.equal((await response.json() as unknown as { code: string }).code, 'reauth_required');
+    }
+    const renewed = await f.login(original);
+    const fresh = await (await f.request('/auth/admin/session', renewed)).json();
+    assert.equal(fresh.user.userId, session.user.userId);
+    assert.notEqual(fresh.csrf, session.csrf);
+    assert.equal((await f.request(`${base}/policy`, renewed, writes[0][1], session.csrf)).status, 403);
+    assert.equal((await f.request(`${base}/policy`, original, writes[0][1], session.csrf)).status, 401);
+    for (const [path, body] of writes) {
+      const response = await f.request(`${base}${path}`, renewed, body, fresh.csrf);
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).actor, 'existing-admin');
+    }
+  } finally { await f.close(); }
+});
+
 test('reauthentication pins the current account; logout removes the pin so another existing account can log in', async () => {
   const f = await fixture(true);
   try {

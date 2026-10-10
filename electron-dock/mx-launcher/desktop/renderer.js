@@ -467,7 +467,7 @@ function hasAdminOpsToken(target) {
   // explicitly selected emergency connection rather than the personal BFF.
   return Boolean(opsTokenForRequest(new URL('/internal/v1/user-center/roles', target), 'GET'));
 }
-const registrationUi = createRegistrationUi({ request: fetchJson });
+const registrationUi = createRegistrationUi({ request: fetchJson, reauthenticate: () => document.getElementById('admin-account-login').click() });
 
 const overseaTerminalTemplates = {
   inspect: [

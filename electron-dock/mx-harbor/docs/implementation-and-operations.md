@@ -44,6 +44,21 @@ MX_HARBOR_BUILD_PROXY=http://127.0.0.1:7789 bash electron-dock/mx-harbor/scripts
 
 实际邀请码与共享权限操作见 [当前可执行验收](acceptance.md#当前可执行邀请码准入与共享权限)。本地真实 PostgreSQL/HTTPS 回归覆盖 PKCE、同源/CSRF、旧登录兼容、邀请码准入与撤权、共享 member/space；生产账号、真实付款和实际 H2I 联网仍由管理员受控验收。
 
+## 注册完成后客户会话返回 404
+
+Harbor 的认证与客户空间分两步加载：`/auth/sso/session` 验证本站 SSO，`/bff/v1/session` 再调用 Hub Admin 的 `/internal/v1/portal/session`，读取同一用户的空间和权限。前者成功、后者 404 时，先核对 Hub 运行镜像和部署模板已包含可选 Portal 挂载；Harbor 上游默认是 `http://mx-insight-hub-admin.mx-insight-hub.svc.cluster.local:18151`，不能指到 Public 18150 或 Hub 网页域名。
+
+已成功 enroll 的环境，在 Internal 的 `electron-dock/mx-harbor` 目录先发布 Hub，再发布 Harbor：
+
+```bash
+MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7789 bash ../mx-insight-hub/scripts/manage.sh ops internal-production deploy
+MX_HARBOR_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh ops internal-production deploy
+```
+
+此故障不要求重新登记 client、生成密钥或重建账号。Hub 部署会应用 Portal 环境变量、Secret 挂载和网络策略；缺失/无效配置应返回 503，缺少调用凭据返回 401，未部署路由或错误 listener 返回 404。不要通过开放管理路由或绕过网关凭据修复。更新后在原浏览器刷新或点击“重试连接”，确认 SSO active 且客户会话 200，核对 member、空间和权限。
+
+Harbor 将固定客户会话上游的 404 转为 `503 / customer_session_unavailable` 并附本站 `requestId`；空间服务失败不再清掉页面的已验证身份，也不合成业务权限。网页区分身份未知、未登录、已登录但客户服务失败及完整就绪四种情况。原 SSO Cookie 与服务端权限检查不变。本地回归覆盖客户接口缺失、恢复、明确撤销、网关错误、非 JSON 响应；浏览器隔离验证证明重试只读取会话与空间，不触发新的注册或邀请码兑换。
+
 ## 外部应用接入配置（可在部署后完成）
 
 正式入口为 **https://harbor.minsight-ai.com**。Harbor 可先建库、迁移和发布，随后接入 Auth、Hub；外部依赖不是迁移前置条件。

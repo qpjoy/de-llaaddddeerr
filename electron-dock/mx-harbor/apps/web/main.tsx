@@ -42,6 +42,7 @@ import {
 } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import { PublicHeader } from "./public-header";
+import { emptySession, loadHarborSession } from "./session";
 import { PublicIpSearch } from "./public-ip-search";
 import { AccessContext } from "./public-access";
 import { AccountDialog } from "./account-dialog";
@@ -456,11 +457,13 @@ function RemotePanel({
 }
 function App() {
   const [auth, setAuth] = useState(false),
-    [session, setSession] = useState<any>(null),
-    [csrf, setCsrf] = useState(""),
+    [boot, setBoot] = useState(emptySession),
+    [checking, setChecking] = useState(true),
+    [retry, setRetry] = useState(0),
     [tenant, setTenant] = useState(""),
     [page, setPage] = useState(location.hash.slice(2) || "intelligence"),
     [bootError, setBootError] = useState("");
+  const { active: signedIn, customer: session, csrf, issue } = boot;
   const go = (p: string) => {
     location.hash = `/${p}`;
     setPage(p);
@@ -468,42 +471,89 @@ function App() {
   useEffect(() => {
     const listener = () => setPage(location.hash.slice(2) || "intelligence");
     addEventListener("hashchange", listener);
-    request("/auth/sso/session")
-      .then(async (s) => {
-        setCsrf(s.csrf || "");
-        if (s.active) {
-          const user = await request("/bff/v1/session");
-          setSession(user.data);
-          setTenant(user.data.tenantIds?.[0] || "");
+    if (new URLSearchParams(location.search).has("account")) setAuth(true);
+    return () => removeEventListener("hashchange", listener);
+  }, []);
+  useEffect(() => {
+    let current = true;
+    setChecking(true);
+    setBoot(emptySession);
+    setBootError("");
+    loadHarborSession(request)
+      .then((value) => {
+        if (!current) return;
+        setBoot(value);
+        if (value.customer) {
+          setTenant(value.customer.tenantIds?.[0] || "");
           const destination = sessionStorage.getItem("harbor:return");
           if (pages.some((p) => p[0] === destination)) {
             go(destination!);
             sessionStorage.removeItem("harbor:return");
           }
-        }
+        } else setTenant("");
       })
-      .catch((e) => setBootError(e.message));
-    if (new URLSearchParams(location.search).has("account")) setAuth(true);
-    return () => removeEventListener("hashchange", listener);
-  }, []);
+      .finally(() => {
+        if (current) setChecking(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [retry]);
+  const retrySession = () => setRetry((value) => value + 1);
   const access = {
-    signedIn: !!session,
+    signedIn: signedIn === true,
     enter: (dest: string) => {
-      if (session) go(dest);
+      if (checking) return;
+      if (signedIn) go(dest);
       else {
         sessionStorage.setItem("harbor:return", dest);
-        setAuth(true);
+        if (signedIn === null) retrySession();
+        else setAuth(true);
       }
     },
-    account: () => (session ? go("account") : setAuth(true)),
+    account: () => {
+      if (checking) return;
+      if (signedIn) go("account");
+      else if (signedIn === null) retrySession();
+      else setAuth(true);
+    },
   };
+  const sessionNotice = issue && (
+    <section className="harbor-session-notice" role="alert">
+      <h2>
+        {signedIn
+          ? "已登录，客户服务暂不可用"
+          : signedIn === false
+            ? "请重新登录"
+            : "暂时无法确认登录状态"}
+      </h2>
+      <p>{issue.message}</p>
+      {signedIn && (
+        <p>
+          无需重新注册或再次兑换邀请码。服务恢复后，点击重试即可读取空间与权限。
+        </p>
+      )}
+      {(issue.code || issue.requestId) && (
+        <p className="harbor-session-reference">
+          {issue.code}
+          {issue.requestId ? ` · 请求编号：${issue.requestId}` : ""}
+        </p>
+      )}
+      <Button
+        variant="outline"
+        onClick={signedIn === false ? () => setAuth(true) : retrySession}
+      >
+        {signedIn === false ? "重新登录" : "重试连接"}
+      </Button>
+    </section>
+  );
   return (
     <AccessContext.Provider value={access}>
-      {session ? (
+      {signedIn ? (
         <ConsoleShell
           page={page}
           go={go}
-          name={session.displayName}
+          name={session?.displayName || "已登录"}
           onLogout={async () => {
             try {
               await request("/auth/sso/logout", {
@@ -517,7 +567,7 @@ function App() {
             }
           }}
         >
-          {session.memberships?.length > 1 && (
+          {session?.memberships?.length > 1 && (
             <label className="harbor-space">
               使用空间
               <select
@@ -533,13 +583,27 @@ function App() {
             </label>
           )}
           {bootError && <p role="alert">{bootError}</p>}
-          <RemotePanel page={page} session={session} tenant={tenant} />
+          {sessionNotice}
+          {session ? (
+            <RemotePanel page={page} session={session} tenant={tenant} />
+          ) : page === "account" ? (
+            <AccountSecurity />
+          ) : null}
         </ConsoleShell>
       ) : (
         <div className="public-site query-backdrop">
           <PublicHeader
             current={location.pathname === "/pricing" ? "pricing" : "home"}
+            accountPending={checking}
+            accountLabel={
+              checking
+                ? "正在确认…"
+                : signedIn === null
+                  ? "重试连接"
+                  : undefined
+            }
           />
+          {sessionNotice}
           <main
             id="main-content"
             className={
@@ -560,11 +624,6 @@ function App() {
               <PublicIpSearch />
             )}
           </main>
-          {bootError && (
-            <p className="harbor-note" role="status">
-              账号服务暂未就绪，可先浏览产品介绍。
-            </p>
-          )}
           <footer className="harbor-footer">数港 DataPort · Data Harbor</footer>
         </div>
       )}

@@ -115,16 +115,35 @@ export function createHarborApp({
             },
           },
         );
-        const payload = await upstream.json();
+        // A missing fixed session route means the Portal is not deployed (or
+        // points at the wrong listener), not that the browser is anonymous.
+        if (path === "/session" && upstream.status === 404)
+          return json(503, {
+            code: "customer_session_unavailable",
+            message: "客户空间服务尚未就绪，请联系管理员完成服务接入。",
+            requestId: id,
+          });
+        let payload;
+        try {
+          payload = await upstream.json();
+        } catch {
+          throw new SsoError(
+            503,
+            "customer_service_invalid_response",
+            "客户服务响应异常，请稍后重试。",
+          );
+        }
         if (!upstream.ok)
           return json(upstream.status, {
-            code: payload.error?.code || "customer_service_error",
+            code:
+              payload.error?.code || payload.code || "customer_service_error",
             message:
               upstream.status >= 500
                 ? "客户服务暂不可用，请稍后重试。"
                 : payload.error?.message ||
                   payload.message ||
                   "无权访问此服务。",
+            requestId: id,
           });
         if (path === "/documentation" && payload.data?.schema) {
           payload.data.schema = {

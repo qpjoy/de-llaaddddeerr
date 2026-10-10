@@ -11,13 +11,26 @@ export async function request<T = any>(
     credentials: "same-origin",
     headers: { "Content-Type": "application/json", ...options.headers },
   });
-  const result = await response.json();
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    throw Object.assign(new Error("服务响应异常，请稍后重试。"), {
+      status: response.status,
+      code: "invalid_response",
+      requestId: response.headers.get("x-request-id"),
+    });
+  }
   if (!response.ok)
     throw Object.assign(
       new Error(
         result.message || result.error?.message || "服务暂不可用，请稍后重试",
       ),
-      { status: response.status, code: result.code },
+      {
+        status: response.status,
+        code: result.code || result.error?.code,
+        requestId: result.requestId || response.headers.get("x-request-id"),
+      },
     );
   return result;
 }

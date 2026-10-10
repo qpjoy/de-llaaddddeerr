@@ -3,8 +3,12 @@ import { AccessButton } from "./public-access";
 
 export function PublicHeader({
   current = "home",
+  accountLabel,
+  accountPending = false,
 }: {
   current?: "home" | "pricing";
+  accountLabel?: string;
+  accountPending?: boolean;
 }) {
   return (
     <>
@@ -32,7 +36,9 @@ export function PublicHeader({
             <AccessButton destination="docs-ip" variant="ghost">
               接口文档
             </AccessButton>
-            <AccessButton account />
+            <AccessButton account disabled={accountPending}>
+              {accountLabel}
+            </AccessButton>
           </nav>
         </div>
       </header>

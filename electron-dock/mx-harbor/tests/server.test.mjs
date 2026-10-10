@@ -298,6 +298,62 @@ test("Hub network failure is retried on the next authorized request without rest
   assert.equal(calls, 2);
 });
 
+test("missing Portal session is a customer dependency failure and keeps diagnostics without leaking upstream content", async (t) => {
+  let response = new Response("<h1>private-hub-host</h1>", { status: 404 });
+  let verified = 0;
+  const base = await fixture(t, {
+    config: {
+      upstream: "http://hub.internal:18151",
+      gatewayToken: "fixture-gateway",
+    },
+    sso: {
+      sessionFor: async () => ({
+        subject: "registered-user",
+        accessToken: "private-token",
+      }),
+      verifySession: async () => {
+        verified++;
+      },
+    },
+    fetch: async () => response,
+  });
+  const missing = await fetch(base + "/bff/v1/session");
+  const payload = await missing.json();
+  assert.equal(missing.status, 503);
+  assert.equal(payload.code, "customer_session_unavailable");
+  assert.equal(payload.requestId, missing.headers.get("x-request-id"));
+  assert.doesNotMatch(JSON.stringify(payload), /private|hub\.internal|token/);
+  response = new Response(
+    JSON.stringify({
+      error: { code: "member_suspended", message: "账号已停用" },
+    }),
+    { status: 403 },
+  );
+  const forbidden = await fetch(base + "/bff/v1/session");
+  assert.equal(
+    forbidden.status,
+    403,
+    "permission failures are not softened into successful customer sessions",
+  );
+  assert.equal((await forbidden.json()).code, "member_suspended");
+  response = new Response("<h1>private-gateway-detail</h1>", { status: 502 });
+  const invalid = await fetch(base + "/bff/v1/session");
+  assert.equal(invalid.status, 503);
+  assert.equal(
+    (await invalid.json()).code,
+    "customer_service_invalid_response",
+  );
+  response = new Response(
+    JSON.stringify({ data: { memberId: "member-fixture" } }),
+  );
+  assert.equal(
+    (await fetch(base + "/bff/v1/session")).status,
+    200,
+    "the next request recovers without a new login",
+  );
+  assert.equal(verified, 4);
+});
+
 test("invalid core configuration still prevents startup", () => {
   for (const env of [
     {},
