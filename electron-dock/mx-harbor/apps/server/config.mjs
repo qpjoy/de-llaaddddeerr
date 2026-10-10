@@ -1,11 +1,11 @@
-import { readApplicationSsoProfile } from "@qpjoy/mx-common/identity/profile";
-function parseConfig(env) {
+// Both the installed service and the dependency-free deploy CLI use this validation.
+function parseConfig(env, readProfile) {
   const preview = env.MX_HARBOR_PREVIEW === "1",
     port = Number(env.MX_HARBOR_PORT || 18220);
   if (!Number.isInteger(port) || port < 1024 || port > 65535)
     throw Error("MX_HARBOR_PORT must be a port number");
   if (preview) return { preview, port, host: "127.0.0.1" };
-  const sso = readApplicationSsoProfile(env.MX_HARBOR_SSO_PROFILE);
+  const sso = readProfile(env.MX_HARBOR_SSO_PROFILE);
   if (sso?.appId !== "mx-harbor") throw Error("Harbor SSO profile is required");
   const databaseUrl = env.MX_HARBOR_DATABASE_URL,
     db = new URL(databaseUrl);
@@ -36,9 +36,9 @@ function parseConfig(env) {
   };
 }
 
-export function readConfig(env = process.env) {
+export function readConfig(env = process.env, readProfile) {
   try {
-    return parseConfig(env);
+    return parseConfig(env, readProfile);
   } catch {
     throw new Error(
       "Invalid Harbor configuration; check the private SSO profile, dedicated database, fixed Hub origin, gateway credential and numeric port (values hidden)",

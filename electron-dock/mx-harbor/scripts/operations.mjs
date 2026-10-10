@@ -11,6 +11,8 @@ import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { workload } from "../deploy/k8s/render.mjs";
 import { readConfig } from "../apps/server/config.mjs";
+// Host deployment runs before npm ci in the image. This shared source uses only Node built-ins.
+import { readApplicationSsoProfile } from "../../mx-common/src/identity/profile.mjs";
 const requestedAction = process.argv[2] || "help",
   action = ["migrate", "restart"].includes(requestedAction)
     ? "deploy"
@@ -209,7 +211,10 @@ try {
   }
   const profilePath = join(temp, "profile.json");
   writeFileSync(profilePath, data["profile.json"], { mode: 0o600 });
-  readConfig({ ...data, MX_HARBOR_SSO_PROFILE: profilePath });
+  readConfig(
+    { ...data, MX_HARBOR_SSO_PROFILE: profilePath },
+    readApplicationSsoProfile,
+  );
   if (data.MX_HARBOR_HUB_ADMIN_ORIGIN !== settings.hubAdminOrigin)
     throw Error("Retained upstream differs; explicit migration required");
   apply({

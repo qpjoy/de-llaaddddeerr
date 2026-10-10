@@ -36,6 +36,8 @@ MX_HARBOR_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh ops internal-
 
 `deploy` 一次完成配置保留与校验、镜像构建/导入、幂等迁移、应用更新与自动重启、rollout 和健康检查。每次部署使用新镜像触发一次 Pod 替换，无需另行运行 `migrate` 或 `restart`。
 
+部署宿主机无需先运行 `npm ci`。管理脚本仅使用 Node 标准库与相邻 `mx-common` 的配置校验源码；应用依赖由 Docker 构建阶段按 lockfile 安装。拉取项目时需保留相邻的 `electron-dock/mx-common` 目录。
+
 重复执行保留数据库、SSO 密钥和网关凭据；已应用迁移校验通过后跳过。迁移失败不更新应用，发布或健康检查失败返回非零。旧 `migrate`、`restart` 命令兼容为完整 `deploy` 的别名，不再提供分步部署。
 
 只查看状态可运行 `bash scripts/manage.sh ops internal-production status`。

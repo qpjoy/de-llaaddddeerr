@@ -1,8 +1,9 @@
 import { createServer } from "node:http";
 import pg from "pg";
+import { readApplicationSsoProfile } from "@qpjoy/mx-common/identity/profile";
 import { readConfig } from "./config.mjs";
 import { createHarborApp } from "./app.mjs";
-const config = readConfig(),
+const config = readConfig(process.env, readApplicationSsoProfile),
   pool = config.preview
     ? null
     : new pg.Pool({

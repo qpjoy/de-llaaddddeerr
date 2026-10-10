@@ -7,14 +7,33 @@ import {
   readFileSync,
   rmSync,
   existsSync,
+  copyFileSync,
 } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
-const script = new URL("../scripts/operations.mjs", import.meta.url).pathname;
+import { pathToFileURL } from "node:url";
 function fixture(t, { fresh = false } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "harbor-ops-test-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const root = mkdtempSync(join(tmpdir(), "harbor-ops-test-")),
+    dir = join(root, "mx-harbor");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  // Execute copied sources, not the repository script: a fresh checkout has no node_modules.
+  for (const path of [
+    "scripts/manage.sh",
+    "scripts/operations.mjs",
+    "deploy/k8s/render.mjs",
+    "apps/server/config.mjs",
+  ]) {
+    const target = join(dir, path);
+    mkdirSync(dirname(target), { recursive: true });
+    copyFileSync(new URL(`../${path}`, import.meta.url), target);
+  }
+  const sharedProfile = join(root, "mx-common/src/identity/profile.mjs");
+  mkdirSync(dirname(sharedProfile), { recursive: true });
+  copyFileSync(
+    new URL("../../mx-common/src/identity/profile.mjs", import.meta.url),
+    sharedProfile,
+  );
   mkdirSync(join(dir, "secrets"));
   mkdirSync(join(dir, "bin"));
   writeFileSync(
@@ -87,14 +106,15 @@ else if(cmd==='ctr'&&args.includes('ls'))process.stdout.write('docker.io/library
     writeFileSync(join(dir, "bin", cmd), stub, { mode: 0o755 });
   const run = (action, extra = {}) =>
     spawnSync(
-      process.execPath,
-      ["--import", join(dir, "network.mjs"), script, action],
+      "/bin/bash",
+      [join(dir, "scripts/manage.sh"), "ops", "internal-production", action],
       {
         cwd: dir,
         encoding: "utf8",
         env: {
           ...process.env,
           PATH: join(dir, "bin") + ":" + process.env.PATH,
+          NODE_OPTIONS: `--import=${pathToFileURL(join(dir, "network.mjs")).href}`,
           HARBOR_TEST_DIR: dir,
           HARBOR_TEST_FRESH: fresh ? "1" : "",
           MX_HARBOR_BUILD_PROXY: "",
@@ -117,6 +137,14 @@ else if(cmd==='ctr'&&args.includes('ls'))process.stdout.write('docker.io/library
 }
 test("plan is offline and status remains read only; cluster drift prevents mutation", (t) => {
   const f = fixture(t);
+  assert.equal(existsSync(join(f.dir, "node_modules")), false);
+  assert.equal(
+    existsSync(join(dirname(f.dir), "mx-common/node_modules")),
+    false,
+  );
+  const help = f.run("help");
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /deploy\|status/);
   assert.equal(f.run("plan").status, 0);
   assert.equal(f.calls().length, 0);
   assert.equal(f.run("status").status, 0);
