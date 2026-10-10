@@ -1,5 +1,14 @@
 # 淘宝“华为笔记本”采集失败（2026-10-10）
 
+## 当前结论
+
+连接超时配置已上线，部署后的单次受控真实验收通过：请求
+`d9236956-bf5e-46c0-b46c-7b311003ec1d` 返回 10 件商品，HTTP 200、
+sourceMode=live、replay=false；供应商业务码 0、outcome=succeeded，耗时 1357 ms。
+这证明此次淘宝“华为笔记本”采集和 Hub 交付成功。未经过 Delta Agent 前端。
+本次耗时低于旧 10 秒连接阈值，不能把此次恢复直接归因于放宽连接超时，
+也不能由一次成功排除间歇性网络问题。原未知请求的账本和计费状态保持不变。
+
 ## 已确认的结果
 
 Hub Request ID：`3cd1a613-fd60-4bd2-9c30-e60c11c224d9`。
@@ -126,10 +135,10 @@ idempotency key 查询，不依赖客户端收到 Request ID。继续沿用
 120 秒总截止时间触发；尚不能据此定位具体 IP、TCP/TLS 阶段或机房链路责任。
 保留此次 unknown 记录和原幂等标识，不自动重试、换标识或清除隔离。
 
-供应商恢复验收未通过。若后续明确收到 301，保存对应 Hub/供应商请求关联 ID
+该轮供应商恢复验收未通过。若后续明确收到 301，保存对应 Hub/供应商请求关联 ID
 和调用时间，由供应商排查采集链路，不通过换平台或返回空成功掩盖失败。
 
-## 连接超时修复（待部署）
+## 连接超时修复（已部署并通过本次业务验收）
 
 此前适配器只传入 120 秒 AbortSignal，未覆盖连接器独立的 10 秒默认值。
 [Undici 连接器文档](https://raw.githubusercontent.com/nodejs/undici/v7.29.0/docs/docs/api/Connector.md)
@@ -156,7 +165,7 @@ idempotency key 查询，不依赖客户端收到 Request ID。继续沿用
 
 两个节点在此次探测时均可达且通过 TLS 校验，没有发现持续不可达的单个节点。
 这不反证之前归档中的连接超时，也不证明商品采集恢复；具体故障节点、TCP/TLS
-阶段和链路责任仍未确定。30 秒连接配置的部署及后续业务验收仍待确认。
+阶段和链路责任仍未确定；后续业务验收结果见文末。
 
 本地 212 项相关回归全部通过，部署脚本测试通过。新增真实回环网络测试接受 TCP 后
 故意不回应 TLS 握手，验证独立连接超时会产生正确错误码、仍只分发一次、保持计费未知，
@@ -171,7 +180,7 @@ kubectl -n mx-insight-hub exec deploy/mx-insight-hub-public -c api -- node --inp
 默认预期 `connectTimeoutMs=30000`、`timeoutMs=120000`、当前环境
 `leaseMs=180000`、`configurationError=null`。这只验证代码/配置加载，不验证采集恢复。
 
-运维实际回传 `connectTimeoutMs=null`（其他三项符合上述预期），说明当前 Pod 的
+运维首次回传 `connectTimeoutMs=null`（其他三项符合上述预期），说明当时 Pod 的
 配置代码尚未包含新增字段，不能视为连接超时修复已上线。Internal Public 部署使用
 `imagePullPolicy: Never`；需将修复代码同步到服务器，再通过 Hub 部署脚本重新构建、
 导入本地镜像并更新工作负载。仅设置环境变量不能让旧代码支持新参数。
@@ -184,3 +193,44 @@ node --input-type=module -e 'import{parseJustOneConfig}from"./server/external-pl
 ```
 
 等待部署成功后重新执行上面的 Pod 配置查询；新配置生效仍不等同于供应商业务恢复。
+
+随后运维回传：
+
+```json
+{"connectTimeoutMs":30000,"timeoutMs":120000,"leaseMs":180000,"configurationError":null}
+```
+
+该结果确认 Public Pod 内新版连接超时配置已上线，未证明商品采集恢复。
+后续提供人工执行的单次受控验收命令（执行会新增一次可能计费的调用）：先通过
+GET 查询原请求 `e8961473-6b7c-4da9-9680-92ccb3096706`，只在状态仍为 unknown
+时使用 `X-MX-Insight-Retry-Of` 关联它，以 `deliveryMode=refresh` 和独立固定幂等标识
+`lcy-ecom-huawei-20261010-03` 发起一次原查询。网关继续校验 consumer、请求指纹、
+旧状态和单次重试关联，不删除或更改旧 unknown 计费证据。
+仅 HTTP 200、sourceMode=live、replay=false、商品数大于零算本次业务验收通过；
+refresh 的 stored_fallback 不能当作恢复。新调用结果及失败归档会按新幂等标识输出，
+命令无自动重试。
+
+## 部署后真实验收结果
+
+运维执行上述单次命令，先确认原请求仍为 unknown，随后得到：
+
+| 字段 | 结果 |
+| --- | --- |
+| 幂等标识 | `lcy-ecom-huawei-20261010-03` |
+| Hub Request ID | `d9236956-bf5e-46c0-b46c-7b311003ec1d` |
+| HTTP / sourceMode / replay | 200 / live / false |
+| 商品数 / liveSuccess | 10 / true |
+| 脚本总耗时（含前置状态查询） | 1504 ms |
+| usage 状态 | committed |
+| 供应商 outcome / HTTP / 业务码 | succeeded / 200 / 0 |
+| 供应商调用耗时 | 1357 ms |
+| 供应商 Request ID | `43d679a543f74747ae468499cd683746` |
+| 供应商 billed | true |
+| error_code / transport_failure | null / null |
+| retry_of_usage_request_id | `e8961473-6b7c-4da9-9680-92ccb3096706` |
+
+此次为新实时调用，无缓存或幂等重放，验收通过。旧 unknown 请求仍保留原状，
+新请求的 succeeded/billed=true 不会追溯改变旧请求是否计费的未知事实。
+供应商 billed 字段只说明采购侧结果，客户费用须独立以客户账本为准。
+无需继续重复验收；后续若复发，应根据新的 Request ID 和 transportFailure 定位，
+不能以本次成功证明所有平台、所有关键词或未来连接均稳定。

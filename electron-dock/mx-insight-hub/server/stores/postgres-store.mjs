@@ -764,6 +764,7 @@ function apiKey(row) {
     lastFour: row.last_four,
     environment: row.environment,
     scopeMode: row.scope_mode || 'legacy_dynamic',
+    accessProfile: row.access_profile || 'standard',
     webSearchOrder: row.web_search_order || [],
     status: row.status,
     effectiveStatus: expired ? 'expired' : row.status,
@@ -833,7 +834,7 @@ function billingProfileRecord(row, tenantId = null) {
     tenantId: row.tenant_id,
     mode: row.mode,
     multiplierPpm: row.multiplier_ppm == null ? null : Number(row.multiplier_ppm),
-    defaultUnitPriceMinor: Number(row.default_unit_price_minor ?? 0),
+    defaultUnitPriceMinor: Number(row.default_unit_price_minor ?? 1),
     defaultCurrency: row.default_currency || 'CNY',
     revision: Number(row.revision),
     updatedBy: row.updated_by,
@@ -842,7 +843,7 @@ function billingProfileRecord(row, tenantId = null) {
     tenantId,
     mode: 'disabled',
     multiplierPpm: null,
-    defaultUnitPriceMinor: 0,
+    defaultUnitPriceMinor: 1,
     defaultCurrency: 'CNY',
     revision: 0,
     updatedBy: null,
@@ -1882,7 +1883,7 @@ export class PostgresStore {
             currentRevision,
           })
         }
-        const defaultPrice = defaultUnitPriceMinor ?? Number(current.rows[0]?.default_unit_price_minor ?? 0)
+        const defaultPrice = defaultUnitPriceMinor ?? Number(current.rows[0]?.default_unit_price_minor ?? 1)
         const currency = defaultCurrency ?? current.rows[0]?.default_currency ?? 'CNY'
         const account = await client.query('SELECT currency FROM billing.credit_accounts WHERE tenant_id = $1', [tenantId])
         if (defaultPrice > 0 && account.rows[0] && account.rows[0].currency !== currency) {
@@ -2430,7 +2431,7 @@ export class PostgresStore {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
         `${input.consumerId}:idempotency:${input.idempotencyKey}`,
       ])
-      await this.#assertApiKeyOwner(client, input)
+      const owner = await this.#assertApiKeyOwner(client, input)
       const scopeEntitlements = new Map()
       for (const scope of authorizationScopes) {
         const entitlement = await this.#apiKeyEntitlement(client, {
@@ -2444,6 +2445,7 @@ export class PostgresStore {
       }
       const quotaInput = {
         ...input,
+        managedQuotaExempt: owner.access_profile === 'managed_full',
         authorizationScopes,
         scopeEntitlements,
         legacySingleScope,
@@ -2572,7 +2574,7 @@ export class PostgresStore {
     // The snapshot is only meaningful for a key that belongs to the consumer
     // whose ceiling it reports, so the pairing is verified rather than assumed.
     const owner = await this.pool.query(
-      `SELECT 1 FROM api_keys WHERE id = $1 AND consumer_id = $2 AND tenant_id = $3`,
+      `SELECT to_jsonb(api_keys)->>'access_profile' AS access_profile FROM api_keys WHERE id = $1 AND consumer_id = $2 AND tenant_id = $3`,
       [apiKeyId, consumerId, tenantId],
     )
     if (owner.rowCount === 0) return []
@@ -2652,7 +2654,7 @@ export class PostgresStore {
           windowSeconds: keyWindowSeconds,
         },
       ].map((layer) => ({ ...layer, remaining: Math.max(0, layer.limit - layer.used) }))
-      if (this.internalTrafficPolicy.matches({ tenantId, apiKeyId })) {
+      if (owner.rows[0].access_profile === 'managed_full' || this.internalTrafficPolicy.matches({ tenantId, apiKeyId })) {
         for (const layer of layers) Object.assign(layer, { exempt: true, limit: null, remaining: null })
       }
       const binding = layers.reduce((tightest, layer) => (
@@ -2717,7 +2719,7 @@ export class PostgresStore {
   }
 
   async #assertQuota(client, input) {
-    const internal = this.internalTrafficPolicy.matches(input)
+    const internal = input.managedQuotaExempt || this.internalTrafficPolicy.matches(input)
     if (!internal) await assertPostgresKeyAccessLimits(client, input.apiKeyId, input.authorizationScopes)
     for (const scope of internal ? [] : input.authorizationScopes) {
       const keyEntitlement = input.scopeEntitlements.get(authorizationScopeKey(scope))
@@ -2876,7 +2878,7 @@ export class PostgresStore {
 
   async #assertApiKeyOwner(client, input) {
     const result = await client.query(
-      `SELECT id
+      `SELECT id, to_jsonb(api_keys)->>'access_profile' AS access_profile
          FROM api_keys
         WHERE id = $1
           AND consumer_id = $2
@@ -2889,6 +2891,7 @@ export class PostgresStore {
     if (result.rowCount !== 1) {
       throw new AppError(403, 'api_key_scope_not_granted', 'API key does not belong to the requested usage scope')
     }
+    return result.rows[0]
   }
 
   async #apiKeyEntitlement(client, input) {

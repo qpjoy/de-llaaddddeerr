@@ -1,5 +1,8 @@
 # LCY-delta 微信公众号授权修复
 
+后续用户已扩大为全业务权限、免请求配额及自动默认价；当前执行步骤见
+[LCY-delta 全业务权限与接口默认价](lcy-managed-access-and-default-prices.md)。下文保留首次定向修复与只读文件系统故障记录。
+
 用户报告 `POST /api/v1/data/wechat/search/search` 返回 `403 capability_not_granted`，
 关联 requestId 为 `f044f52c-67ce-47f5-a135-4cf6de23224e`。这个错误来自授权检查，
 发生在价格预留、供应商调用之前，不代表搜索零命中，也不能由修改价格解除。

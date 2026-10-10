@@ -285,6 +285,17 @@ const PUBLIC_CAPABILITIES = new Set([
   PUBLIC_OPINION_ALL_INGESTED_CAPABILITY,
   PUBLIC_OPINION_DIAGNOSTICS_CAPABILITY,
 ])
+// Shared by explicit Admin credentials and the deployment-managed full-access
+// profile. This contains business API scopes, never control-plane privileges.
+export function businessApiScopes(crawlerPlatforms = []) {
+  return {
+    platforms: [...new Set([...Object.values(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS).flat(), ...WECHAT_LEGACY_SEARCH_PLATFORMS,
+      ...NATIVE_FORWARDING_ENDPOINTS.map(row => row.platform),
+      'telegram', 'ecommerce', 'social', 'mobile_commerce', 'source_catalog', 'virtual_supermarket', 'public_opinion', 'topic_reports', 'enterprise', 'ip_risk', 'web_search',
+      ...crawlerPlatforms].filter(Boolean))].sort(),
+    capabilities: [...PUBLIC_CAPABILITIES].filter(value => !value.includes('ingest')).sort(),
+  }
+}
 const NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES = Object.freeze({
   raw: XIAOHONGSHU_SEARCH_OPERATION,
   crawl: XIAOHONGSHU_CRAWL_OPERATION,

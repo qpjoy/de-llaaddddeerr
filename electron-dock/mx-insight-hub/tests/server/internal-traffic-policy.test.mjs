@@ -45,8 +45,8 @@ test('only rate-limit circuits get a 10-second internal deadline; shared state i
 })
 
 const connectionString = process.env.MX_INSIGHT_TEST_DATABASE_URL || ''
-for (const driver of ['memory', 'postgres']) {
-  test(`${driver}: internal quota exemption preserves scopes, plan validity, billing, replay and sibling limits`, {
+for (const driver of ['memory', 'postgres']) for (const profile of ['environment', 'managed_full']) {
+  test(`${driver}/${profile}: internal quota exemption preserves scopes, plan validity, billing, replay and sibling limits`, {
     skip: driver === 'postgres' && !connectionString ? 'Requires disposable migrated PostgreSQL' : false,
   }, async () => {
     const pool = driver === 'postgres' ? new pg.Pool({ connectionString, statement_timeout: 5000 }) : null
@@ -71,8 +71,15 @@ for (const driver of ['memory', 'postgres']) {
         unitsReserved: 1, leaseExpiresAt: new Date(Date.now() + 60000), maxRequests: 1, windowStart: new Date(Date.now() - 3600000), ...extra })
       const first = input()
       await store.reserve(first)
-      await assert.rejects(() => store.reserve(input({ internal: true })), error => error.code === 'api_key_total_limit_exceeded')
-      store.internalTrafficPolicy = createInternalTrafficPolicy({ keyIds: [key.id] })
+      await assert.rejects(() => store.reserve(input({ internal: true, managedQuotaExempt: true, accessProfile: 'managed_full' })), error => error.code === 'api_key_total_limit_exceeded')
+      const setProfile = async enabled => {
+        if (profile === 'environment') store.internalTrafficPolicy = createInternalTrafficPolicy({ keyIds: enabled ? [key.id] : [] })
+        else if (pool) await pool.query('UPDATE api_keys SET access_profile=$2 WHERE id=$1', [key.id, enabled ? 'managed_full' : 'standard'])
+        else store.apiKeys.get(key.id).accessProfile = enabled ? 'managed_full' : 'standard'
+      }
+      await setProfile(true)
+      if (profile === 'managed_full') assert.equal((await service.authenticate(key.secret)).apiKey.accessProfile, 'managed_full')
+      await assert.rejects(service.createApiKey({ consumerId: consumer.id, name: 'Spoofed profile', accessProfile: 'managed_full' }), { code: 'unsupported_fields' })
       assert.equal((await store.reserve(input())).kind, 'reserved')
       assert.equal((await store.reserve(input())).kind, 'reserved')
       assert.equal((await store.reserve(first)).kind, 'in_progress')
@@ -88,7 +95,7 @@ for (const driver of ['memory', 'postgres']) {
       await service.setTenantBillingProfile(tenant.id, { mode: 'enforced', multiplierPpm: 1000000 }, 'test-admin')
       await assert.rejects(() => store.reserve(input()), error => error.code === 'insufficient_credit')
       // Removing the operator allowlist restores the retained limits immediately.
-      store.internalTrafficPolicy = createInternalTrafficPolicy()
+      await setProfile(false)
       await assert.rejects(() => store.reserve(input()), error => error.code === 'api_key_total_limit_exceeded')
     } finally { await pool?.end() }
   })

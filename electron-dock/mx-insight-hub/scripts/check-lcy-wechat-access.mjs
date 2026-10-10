@@ -17,7 +17,8 @@ export async function checkAccess() {
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 10000, statement_timeout: 15000 })
   try {
     const { tenantId, consumerId, apiKeyId } = LCY_WECHAT_IDENTITY
-    const key = (await pool.query(`SELECT id,status,environment,scope_mode,expires_at FROM api_keys
+    const key = (await pool.query(`SELECT id,status,environment,scope_mode,expires_at,
+      to_jsonb(api_keys)->>'access_profile' AS access_profile FROM api_keys
       WHERE id=$1 AND tenant_id=$2 AND consumer_id=$3`, [apiKeyId, tenantId, consumerId])).rows[0]
     if (!key) throw new Error('original_key_missing')
     const store = new PostgresStore(pool)
@@ -40,9 +41,22 @@ export async function checkAccess() {
     if (operations.length !== 12) throw new Error('wechat_contract_inventory_changed')
     const identityUsable = tenant?.status === 'active' && consumer?.status === 'active'
       && key.status === 'active' && key.environment === 'live' && Date.parse(key.expires_at) > Date.now()
+    let fullScopeCheck = null
+    if (key.access_profile === 'managed_full') {
+      const { businessApiScopes } = await import(pathToFileURL(resolve('server/hub-service.mjs')).href)
+      const { listCrawlerSpecs } = await import(pathToFileURL(resolve('server/ingest/crawler/source-contract.mjs')).href)
+      const expected = businessApiScopes((await listCrawlerSpecs(store)).map(row => row.platform))
+      fullScopeCheck = {
+        platformCount: platforms.length, capabilityCount: capabilities.length,
+        missingPlatforms: expected.platforms.filter(value => !platforms.includes(value)),
+        missingCapabilities: expected.capabilities.filter(value => !capabilities.includes(value)),
+      }
+    }
     return {
       ...LCY_WECHAT_IDENTITY, identityUsable, scopeMode: key.scope_mode, effectiveSocial: platforms.includes('social'),
+      accessProfile: key.access_profile || 'standard', requestQuotaExempt: key.access_profile === 'managed_full', fullScopeCheck,
       billingMode: billing.profile?.mode, planStatus: plan?.status, planVersionStatus: plan?.versionStatus,
+      customerDefaultPrice: { currency: billing.profile?.defaultCurrency, unitPriceMinor: billing.profile?.defaultUnitPriceMinor },
       wallet: billing.account ? { currency: billing.account.currency, availableMinor: billing.account.availableMinor } : null,
       operations: operations.map(row => ({
         operation: row.operationKey, granted: platforms.includes('social') && capabilities.includes(row.operationKey),

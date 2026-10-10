@@ -661,8 +661,9 @@ test('a private 0.10 plan assignment leaves other tenant plans, wallets and admi
 })
 
 
-test('unpriced operations stay metered and free while priced operations retain wallet enforcement', async () => {
+test('an explicit zero fallback keeps unlisted operations free while priced operations retain wallet enforcement', async () => {
   const { store, service, tenant, consumer } = await fixture({ unitPriceMinor: 10, multiplierPpm: 1_000_000 })
+  await service.setTenantBillingProfile(tenant.id, { mode: 'enforced', defaultUnitPriceMinor: 0 }, 'test-admin')
   await service.putPlatformConfiguration('source_catalog', {
     tenantId: tenant.id, consumerId: consumer.id, enabled: true,
     maxRequests: 1_000, windowSeconds: 3_600, maxPageSize: 100,

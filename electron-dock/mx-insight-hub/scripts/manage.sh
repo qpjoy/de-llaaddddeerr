@@ -2514,23 +2514,21 @@ reconcile_reused_bootstrap_configuration() {
   return "$failed"
 }
 
-# Seed each paid provider operation's reviewed default price book on first
-# deploy, so a fresh cluster is not silently blocked on missing cost evidence.
-# The seed is one-directional: an operation whose price book already comes from
-# the database (seeded earlier, or published from Admin) is left untouched, so a
-# redeploy can never walk back a price somebody set in the UI. Best-effort by
-# design; a pricing gap must not fail an otherwise good deploy.
+# Fill missing endpoint prices on every deploy. Existing prices/budgets and
+# manual operation states win; only audited bootstrap disables may be activated.
+# A failed/uncertain write is reported and stops the batch instead of claiming
+# that deployment supplied usable defaults.
 seed_default_price_books() {
-  local admin_base="http://127.0.0.1:18151"
   need node
   if [ -z "${MX_INSIGHT_ADMIN_TOKEN:-}" ]; then
     say "WARNING: MX_INSIGHT_ADMIN_TOKEN is unset; skipping price-book seeding" >&2
     return 0
   fi
-  MX_INSIGHT_ADMIN_BASE_URL="$admin_base" \
-  MX_INSIGHT_ADMIN_TOKEN="$MX_INSIGHT_ADMIN_TOKEN" \
-    node "${ROOT_DIR}/scripts/provision-price-books.mjs" \
-    || say "WARNING: price-book seeding did not complete; operations may stay blocked" >&2
+  # Run inside Admin for its database audit and localhost credentials. stdin
+  # avoids writes to the Pod's read-only root filesystem, including /tmp.
+  kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -- \
+    node --input-type=module - --all --defaults --missing-budget-minor 100000 --apply \
+    < "${ROOT_DIR}/scripts/migrate-missing-operation-prices.mjs"
 }
 
 # Idempotently guarantee a usable public API key after deploy. The plaintext key

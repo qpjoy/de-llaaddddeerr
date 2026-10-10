@@ -2010,7 +2010,7 @@ function TenantBillingSummary({ data, billing, rates, currentPlan, usage, state,
       <MetricCard icon={Timer} label="待结算金额" value={account ? formatMoneyMinor(account.heldMinor, currency) : '—'} hint="结算完成后更新余额" />
     </section>
     <Panel title="我的服务价格" subtitle={billing.profile?.mode === 'enforced' ? '成功调用按套餐接口价格优先结算；未单独定价的已授权接口使用账户默认单价。' : '自动扣费尚未开通，请联系服务方确认。'}>
-      <p>账户默认单价：{formatMoneyMinor(billing.profile?.defaultUnitPriceMinor ?? 0, billing.profile?.defaultCurrency || 'CNY')} / 次。下表接口价格优先，0 元表示免费。</p>
+      <p>账户默认单价：{formatMoneyMinor(billing.profile?.defaultUnitPriceMinor ?? 1, billing.profile?.defaultCurrency || 'CNY')} / 次。下表接口价格优先，0 元表示免费。</p>
       {rates.length ? <PagedItems items={rates} text={entry => `${entry.meterKey} ${billingMeterLabel(entry.meterKey)}`} label="服务价格">{visible => <Table label="我的服务价格">
         <thead><tr><th>服务</th><th>单次价格</th><th>预计可用次数</th></tr></thead>
         <tbody>{visible.map(({entry: rate}) => <tr key={rate.meterKey}>
@@ -2275,7 +2275,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
     setBillingError(null)
     setProfileForm({
       mode: billing.profile?.mode || 'disabled',
-      defaultPrice: ((billing.profile?.defaultUnitPriceMinor ?? 0) / 100).toFixed(2),
+      defaultPrice: ((billing.profile?.defaultUnitPriceMinor ?? 1) / 100).toFixed(2),
       defaultCurrency: billing.account?.currency || billing.profile?.defaultCurrency || 'CNY',
       multiplier: billing.profile?.multiplierPpm == null
         ? ''
@@ -2450,7 +2450,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       {session?.platformAdmin ? <Panel title="自动按次计费" subtitle="余额、合同价格和运行授权分别生效；充值本身不会启用扣费。">
         <p>当前：{account ? '已有余额账户' : '尚未充值'} → {effectiveRates.length ? '已绑定接口覆盖价格' : '使用租户默认单价'} → {billing.profile?.mode === 'enforced' ? '已启用自动扣费' : '尚未启用自动扣费'}。</p>
         <p>标准套餐可分配给多个客户；只有价格或额度不同时才创建差异版本。同一套餐可配置多个业务的接口价格。套餐接口价格优先于租户默认单价，接口填 0 表示明确免费；未列出的已授权接口使用租户默认单价。调用用量和额度仍正常计算。调价时发布新版本，再显式分配；月调用上限会按月统计，钱包余额不按月重置。</p>
-        <p><strong>租户默认单价：{formatMoneyMinor(billing.profile?.defaultUnitPriceMinor ?? 0, billing.profile?.defaultCurrency || 'CNY')} / 次</strong> · 适用于本租户所有调用者及 Key 下没有套餐接口覆盖价的业务请求；初始为 0 元，无需逐项添加价格。</p>
+        <p><strong>租户默认单价：{formatMoneyMinor(billing.profile?.defaultUnitPriceMinor ?? 1, billing.profile?.defaultCurrency || 'CNY')} / 次</strong> · 适用于本租户所有调用者及 Key 下没有套餐接口覆盖价的业务请求；初始为 0.01 元/次，无需逐项添加价格。</p>
         <button className="qp-button qp-button--outline" type="button" disabled={!data.tenantId} onClick={openProfile}>设置租户默认单价</button>
         <div className="mih-page-actions">
           <button className="qp-button qp-button--outline" disabled={!canAssignPlan || !account || (currentPlan?.priceBook && currentPlan.priceBook.currency !== 'CNY')} onClick={() => openFeaturePlan('qixin')}>追加启信宝费率 · 官网原价 / 统一调价</button>

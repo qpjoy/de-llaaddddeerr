@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import pg from 'pg'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
@@ -42,7 +43,7 @@ async function overridePlan(f, caller, price) {
 }
 async function exercise(f) {
   const before = await f.service.getConsumerPlan(f.first.consumer.id)
-  assert.equal((await f.service.getTenantBilling(f.tenant.id)).profile.defaultUnitPriceMinor, 0)
+  assert.equal((await f.service.getTenantBilling(f.tenant.id)).profile.defaultUnitPriceMinor, 1)
   await f.setPrice(0)
   const free = request(f.first)
   await f.store.reserve(free); await commit(f.store, free)
@@ -86,6 +87,45 @@ async function exercise(f) {
 }
 
 test('tenant default and exact zero/paid overrides preserve legacy keys, accounting and retries', async () => exercise(await fixture()))
+
+for (const driver of ['memory', 'postgres']) test(`${driver}: new APIs default to one cent without manual prices and still require credit`, {
+  skip: driver === 'postgres' && !process.env.MX_INSIGHT_TEST_DATABASE_URL,
+}, async () => {
+  const pool = driver === 'postgres' ? new pg.Pool({ connectionString: process.env.MX_INSIGHT_TEST_DATABASE_URL }) : null
+  try {
+    const f = await fixture(pool ? new PostgresStore(pool) : new MemoryStore())
+    await f.service.setTenantBillingProfile(f.tenant.id, { mode: 'enforced' }, 'test')
+    await assert.rejects(f.store.reserve(request(f.first, 'future.new.api')), { code: 'insufficient_credit' })
+    await f.credit(1)
+    const input = request(f.first, 'future.new.api')
+    await f.store.reserve(input); await commit(f.store, input)
+    assert.equal((await f.service.getTenantBilling(f.tenant.id)).account.availableMinor, 0)
+    assert.equal((await f.store.reserve(input)).kind, 'replay')
+    await assert.rejects(f.store.reserve(request(f.first, 'future.other.api')), { code: 'insufficient_credit' })
+  } finally { await pool?.end() }
+})
+
+test('customer default migration updates old zero fallbacks once and preserves explicit positive defaults and modes', {
+  skip: !process.env.MX_INSIGHT_TEST_DATABASE_URL,
+}, async () => {
+  const db = new pg.Client({ connectionString: process.env.MX_INSIGHT_TEST_DATABASE_URL })
+  await db.connect(); await db.query('BEGIN')
+  try {
+    const ids = [randomUUID(), randomUUID()]
+    for (const [index, id] of ids.entries()) {
+      await db.query("INSERT INTO tenants(id,name) VALUES($1,'Default migration fixture')", [id])
+      await db.query("INSERT INTO billing.tenant_billing_profiles(tenant_id,mode,default_unit_price_minor,revision,updated_by) VALUES($1,'enforced',$2,1,'test')", [id, index ? 12 : 0])
+    }
+    const sql = await readFile(new URL('../../migrations/142_default_customer_request_price.sql', import.meta.url), 'utf8')
+    await db.query(sql); await db.query(sql)
+    const rows = (await db.query('SELECT tenant_id,mode,default_unit_price_minor,revision FROM billing.tenant_billing_profiles WHERE tenant_id=ANY($1::uuid[])', [ids])).rows
+    assert.equal(Number(rows.find(row => row.tenant_id === ids[0]).default_unit_price_minor), 1)
+    assert.equal(rows.find(row => row.tenant_id === ids[0]).revision, 2)
+    assert.equal(Number(rows.find(row => row.tenant_id === ids[1]).default_unit_price_minor), 12)
+    assert.equal(rows.find(row => row.tenant_id === ids[1]).revision, 1)
+    assert.ok(rows.every(row => row.mode === 'enforced'))
+  } finally { await db.query('ROLLBACK'); await db.end() }
+})
 
 test('shadow/default disabled, preview and revision/currency validation', async () => {
   const f = await fixture()

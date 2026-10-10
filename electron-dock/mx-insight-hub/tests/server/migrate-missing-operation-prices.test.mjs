@@ -3,7 +3,8 @@ import { test } from 'node:test'
 import { readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { adminClient, bootstrapOnly, failureDiagnostic, migrate, parseArgs, planOperation } from '../../scripts/migrate-missing-operation-prices.mjs'
-import { MemoryExternalPlatformControlStore, normalizePriceBook } from '../../server/external-platforms/control-store.mjs'
+import { EXTERNAL_PLATFORM_OPERATION_CATALOG, MemoryExternalPlatformControlStore, normalizePriceBook } from '../../server/external-platforms/control-store.mjs'
+import { BaiduIpAdminService } from '../../server/external-platforms/baidu-ip-admin.mjs'
 import { MultiExternalPlatformAdminService } from '../../server/external-platforms/admin.mjs'
 import { IpSearchAdminService } from '../../server/external-platforms/ipsearch-admin.mjs'
 import { NightAllPlatformAdminService } from '../../server/external-platforms/night-all-admin.mjs'
@@ -55,6 +56,46 @@ function plan(op = operation(), overrides = {}) {
   return planOperation(op, { provider: 'tikhub', events: [event()], defaultCurrency: 'USD',
     defaultCurrencySource: 'provider_seed', missingBudgetMinor: 100000, pricingAsOf: timestamp, ...overrides })
 }
+
+test('automatic defaults fill unavailable and paused operations but preserve manual states and prices', () => {
+  for (const state of ['paused', 'disabled', 'canary', 'shadow', 'active']) {
+    const op = operation({ desiredState: state, canaryConsumerIds: ['existing-consumer'],
+      release: { status: 'released', endpointKeys: ['paid', 'missing'] },
+      priceBook: { currency: 'USD', endpointPrices: { paid: 17, missing: null }, monthlyBudgetMinor: 0 },
+      blockers: [{ code: 'credential_missing' }] })
+    const result = plan(op, { defaults: true, events: [event({ actor: 'operator', desired_state: state })] })
+    assert.equal(result.body.desiredState, state)
+    assert.deepEqual(result.body.priceBook.unitCostMinorByEndpoint, { paid: 17, missing: 1 })
+    assert.equal(result.body.priceBook.monthlyBudgetMinor, 0)
+    if (state === 'canary') assert.deepEqual(result.body.canaryConsumerIds, ['existing-consumer'])
+  }
+})
+
+test('automatic defaults activate already priced bootstrap operations, then become a no-op', () => {
+  const op = operation({ priceBook: { currency: 'USD', ready: true, endpointPrices: { [operationKey]: 5 } } })
+  const result = plan(op, { defaults: true })
+  assert.equal(result.body.desiredState, 'active')
+  assert.equal(result.body.priceBook.unitCostMinorByEndpoint[operationKey], 5)
+  assert.equal(plan({ ...op, desiredState: 'active' }, { defaults: true }).action, 'skip')
+  assert.equal(plan(op, { defaults: true, events: [event({ actor: 'operator' })] }).action, 'skip')
+})
+
+test('automatic defaults validate against every priced provider contract, including future optional endpoints', async () => {
+  const controls = new MemoryExternalPlatformControlStore()
+  let validated = 0
+  for (const [provider, definitions] of Object.entries(EXTERNAL_PLATFORM_OPERATION_CATALOG)) {
+    if (provider === 'baidu-ip') continue // independent subscription channel, not operation pricing
+    for (const op of await controls.describeProvider(provider)) {
+      const result = planOperation(op, { provider, defaults: true, defaultCurrency: 'CNY',
+        missingBudgetMinor: 100000, pricingAsOf: timestamp })
+      if (result.action !== 'apply') continue
+      const definition = definitions.find(row => row.operationKey === op.operationKey)
+      normalizePriceBook(result.body.priceBook, definition)
+      validated++
+    }
+  }
+  assert.ok(validated > 1000)
+})
 
 test('recovers bootstrap-disabled missing prices using one cent and explicit missing budgets', () => {
   const result = plan()
@@ -227,14 +268,16 @@ test('real mixed provider registry skips non-pricing services and still migrates
   })
   const nightAll = new NightAllPlatformAdminService({ store: { nightAllAnalytics: async () => [] }, config: {} })
   const nightAllA = new NightAllAService({ config: { enabled: false } })
+  const baiduIp = new BaiduIpAdminService({ policy: async () => ({ enabled: true }) }, { analytics: async () => ({ totals: {} }) })
   // Reproduce the actual heterogeneous DTOs that the old script treated as errors.
   assert.equal((await ipsearch.detail('ipsearch')).operations, undefined)
   assert.equal((await nightAll.detail('night-all')).operations, undefined)
+  assert.equal((await baiduIp.detail('baidu-ip')).operations, undefined)
   const collectorOperations = (await nightAllA.detail('night-all-a')).operations
   assert.ok(collectorOperations.length > 0)
   assert.ok(collectorOperations.every(row => !row.operationKey))
   let writes = 0
-  const registry = new MultiExternalPlatformAdminService([ipsearch, nightAll, nightAllA, {
+  const registry = new MultiExternalPlatformAdminService([ipsearch, baiduIp, nightAll, nightAllA, {
     providerKey: 'tikhub',
     overview: async () => ({ providers: [{ key: 'tikhub', metrics: {}, billing: {} }] }),
     detail: async () => ({ operations: [operation()], provider: { billing: {} } }),
@@ -258,6 +301,7 @@ test('real mixed provider registry skips non-pricing services and still migrates
   assert.equal(report.summary.errors, 0)
   assert.deepEqual(report.skipped.map(row => [row.provider, row.reason]), [
     ['ipsearch', 'provider_has_no_operation_pricing'],
+    ['baidu-ip', 'provider_has_no_operation_pricing'],
     ['night-all', 'provider_has_no_operation_pricing'],
     ['night-all-a', 'provider_has_no_operation_pricing'],
   ])

@@ -27,7 +27,8 @@ export function createInternalTrafficPolicy({ keyIds = [], tenantIds = [] } = {}
 }
 
 export function isInternalTraffic(store, context) {
-  return store.internalTrafficPolicy?.matches({
+  // accessProfile comes only from the authenticated store record, never a body.
+  return context?.apiKey?.accessProfile === 'managed_full' || store.internalTrafficPolicy?.matches({
     apiKeyId: context?.apiKey?.id,
     tenantId: context?.tenant?.id,
   }) === true

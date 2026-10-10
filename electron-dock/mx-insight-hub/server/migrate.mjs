@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import pg from 'pg'
 import { syncCapabilityCatalog } from './data/capability-catalog.mjs'
+import { syncManagedApiAccess } from './stores/managed-api-access.mjs'
 import { migratePaymentReporting, reportingConfig } from './payments/reporting.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -66,6 +67,14 @@ export async function runMigrations({ connectionString, migrationsDir = resolve(
         throw error
       }
       console.log(`applied ${filename}`)
+    }
+    if (filenames.includes('141_lcy_managed_full_access.sql')) {
+      await client.query('BEGIN')
+      try {
+        const access = await syncManagedApiAccess(client)
+        await client.query('COMMIT')
+        console.log(`managed business API access: ${access.changed}/${access.keys} keys synchronized`)
+      } catch (error) { await client.query('ROLLBACK'); throw error }
     }
     if (filenames.includes('104_capability_commercial_governance.sql')) {
       await client.query('BEGIN')

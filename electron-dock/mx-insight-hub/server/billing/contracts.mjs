@@ -194,7 +194,7 @@ export function customerRequestPrice(priceBook, profile, meterKey) {
   if (!meterKey) return null
   const entry = priceBook?.entries.find(row => row.meterKey === meterKey)
   const multiplierPpm = entry ? profile?.multiplierPpm ?? priceBook.defaultMultiplierPpm : 1_000_000
-  const unitPriceMinor = entry ? entry.unitPriceMinor : profile?.defaultUnitPriceMinor ?? 0
+  const unitPriceMinor = entry ? entry.unitPriceMinor : profile?.defaultUnitPriceMinor ?? 1
   return {
     priceSource: entry ? 'plan_entry' : 'tenant_default',
     billingUnit: entry?.billingUnit || 'request',

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Explicit one-off operation recovery. Never invoked by deploy or schema migration.
+// Explicit recovery or deployment-managed defaults. All writes use revision CAS.
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -10,9 +10,10 @@ const PRICE_BLOCKERS = new Set(['price_control_incomplete', 'database_price_book
 // procurement-ledger currencies, not a claim about actual supplier settlement.
 // The running Pod does not contain seeds/. Never guess other providers' currency.
 const PROVIDER_SEED_CURRENCIES = { tikhub: 'USD', justone: 'CNY' }
+const DEFAULT_PRICE_REASON = 'Automatic default procurement estimate: missing endpoint prices 0.01 in ledger currency; preserve explicit prices, budgets and operator states'
 // These registry entries explicitly do not implement operation procurement
 // policies. Night-All-A has an unrelated collector "operations" array.
-const NON_PRICING_PROVIDERS = new Set(['ipsearch', 'night-all', 'night-all-a'])
+const NON_PRICING_PROVIDERS = new Set(['ipsearch', 'baidu-ip', 'night-all', 'night-all-a'])
 const nonnegative = value => Number.isSafeInteger(value) && value >= 0
 const currencyCode = value => typeof value === 'string' && /^[A-Z]{3}$/.test(value)
 
@@ -38,7 +39,8 @@ export function bootstrapOnly(operation, events, provider) {
     if (previous === null && event.previous_revision !== null) return false
     const migration = /^migration-\d+$/.test(event.actor) && event.previous_revision === null
     const priceSeed = event.actor === 'admin-token'
-      && event.reason === `Seeded reviewed default price book from seeds/pricebooks/${provider}.json`
+      && (event.reason === `Seeded reviewed default price book from seeds/pricebooks/${provider}.json`
+        || event.reason === DEFAULT_PRICE_REASON)
     if (!migration && !priceSeed) return false
     if (['paused', 'shadow', 'canary'].includes(event.desired_state)) return false
     previous = Number(event.revision)
@@ -48,25 +50,28 @@ export function bootstrapOnly(operation, events, provider) {
 }
 
 export function planOperation(operation, { provider, events = [], defaultCurrency, defaultCurrencySource,
-  missingBudgetMinor, pricingAsOf }) {
-  const skip = reason => ({ operationKey: operation.operationKey, action: 'skip', reason })
+  missingBudgetMinor, pricingAsOf, defaults = false }) {
+  const skip = reason => ({ operationKey: operation.operationKey, action: 'skip', reason,
+    ...(defaults ? { effectiveState: operation.effectiveState, blockers: (operation.blockers || []).map(row => row.code) } : {}) })
   const book = operation.priceBook || {}
-  if (!['disabled', 'active', 'canary'].includes(operation.desiredState)) return skip('operator_state_preserved')
+  if (!(defaults ? ['disabled', 'active', 'canary', 'paused', 'shadow'] : ['disabled', 'active', 'canary']).includes(operation.desiredState)) return skip('operator_state_preserved')
   if (operation.migrationRequired || operation.release?.status !== 'released') return skip('release_unavailable')
-  const required = [...new Set(operation.release.endpointKeys || [])]
+  const required = [...new Set([...(operation.release.endpointKeys || []), ...(defaults ? operation.release.optionalEndpointKeys || [] : [])])]
   if (!required.length) return skip('no_endpoints')
   // Existing zero prices (including free demos) are decisions, never "missing".
   const prices = book.endpointPrices || {}
   const missing = required.filter(key => prices[key] == null)
-  if (!missing.length) return skip('existing_prices_preserved')
+  const bootstrap = bootstrapOnly(operation, events, provider)
+  const activate = operation.desiredState === 'disabled' && bootstrap
+  if (!missing.length && !(defaults && activate && book.ready)) return skip('existing_prices_preserved')
   if (required.some(key => prices[key] != null && !nonnegative(prices[key]))) return skip('invalid_existing_price')
   if (!operation.allowZeroCost && required.some(key => prices[key] === 0)) return skip('explicit_zero_price_preserved')
   if (book.status === 'retired') return skip('retired_price_book')
-  if (!Array.isArray(operation.blockers)
-    || !operation.blockers.some(row => row.code === 'price_control_incomplete')) return skip('no_price_blocker')
-  const otherBlockers = operation.blockers.filter(row => !PRICE_BLOCKERS.has(row.code))
-  if (otherBlockers.length) return skip(`other_blockers:${otherBlockers.map(row => row.code).join(',')}`)
-  if (operation.desiredState === 'disabled' && !bootstrapOnly(operation, events, provider)) return skip('manual_or_unproven_disable')
+  if (!defaults && (!Array.isArray(operation.blockers)
+    || !operation.blockers.some(row => row.code === 'price_control_incomplete'))) return skip('no_price_blocker')
+  const otherBlockers = (operation.blockers || []).filter(row => !PRICE_BLOCKERS.has(row.code))
+  if (!defaults && otherBlockers.length) return skip(`other_blockers:${otherBlockers.map(row => row.code).join(',')}`)
+  if (!defaults && operation.desiredState === 'disabled' && !bootstrap) return skip('manual_or_unproven_disable')
   if (!book.currency && Object.values(prices).some(nonnegative)) return skip('currency_unknown_for_existing_prices')
   const currency = book.currency ?? defaultCurrency
   if (!currencyCode(currency)) return skip('currency_unknown')
@@ -88,9 +93,9 @@ export function planOperation(operation, { provider, events = [], defaultCurrenc
     filledBudgetFields: MONEY_FIELDS.filter(field => book[field] == null),
     body: {
       expectedRevision: operation.revision,
-      desiredState: operation.desiredState === 'disabled' ? 'active' : operation.desiredState,
+      desiredState: activate ? 'active' : operation.desiredState,
       ...(operation.desiredState === 'canary' ? { canaryConsumerIds: operation.canaryConsumerIds } : {}),
-      reason: 'User-authorized missing-price recovery: provisional procurement estimate 0.01 in original currency; preserve existing prices/budgets; no customer pricing or grants changed',
+      reason: defaults ? DEFAULT_PRICE_REASON : 'User-authorized missing-price recovery: provisional procurement estimate 0.01 in original currency; preserve existing prices/budgets; no customer pricing or grants changed',
       priceBook: {
         currency, pricingAsOf,
         ...Object.fromEntries(MONEY_FIELDS.map(field => [field, book[field] ?? missingBudgetMinor])),
@@ -106,6 +111,7 @@ export function parseArgs(args) {
     const arg = args[i]
     if (arg === '--help') return { help: true }
     if (arg === '--apply') options.apply = true
+    else if (arg === '--defaults') options.defaults = true
     else if (arg === '--all') options.all = true
     else if (arg === '--provider') {
       options.provider = args[++i]
@@ -208,14 +214,16 @@ export async function migrate({ options, admin, audit, currencyFallback = provid
     const detail = await admin(`${ROOT}/${provider.key}?range=24h`)
     if (!Array.isArray(detail.operations)) throw new MigrationError('operation_inventory', `Missing operation inventory: ${provider.key}`)
     const configuredCurrency = detail.provider?.billing?.currency
-    const defaultCurrency = configuredCurrency ?? await currencyFallback(provider.key)
+    const seedCurrency = await currencyFallback(provider.key)
+    const defaultCurrency = configuredCurrency ?? seedCurrency ?? (options.defaults ? 'CNY' : undefined)
     for (const operation of detail.operations) {
       if (selected.size && !selected.has(operation.operationKey)) continue
       found.add(operation.operationKey)
       const plan = planOperation(operation, {
         provider: provider.key, events: events.get(`${provider.key}/${operation.operationKey}`) || [],
-        defaultCurrency, defaultCurrencySource: configuredCurrency ? 'provider_configuration' : 'provider_seed',
-        missingBudgetMinor: options.missingBudgetMinor, pricingAsOf: report.generatedAt,
+        defaultCurrency, defaultCurrencySource: configuredCurrency ? 'provider_configuration'
+          : seedCurrency ? 'provider_seed' : 'default_estimate_CNY',
+        missingBudgetMinor: options.missingBudgetMinor, pricingAsOf: report.generatedAt, defaults: options.defaults,
       })
       report[plan.action === 'apply' ? 'plans' : 'skipped'].push({ provider: provider.key, ...plan })
     }
@@ -239,7 +247,7 @@ export async function migrate({ options, admin, audit, currencyFallback = provid
           blockers: updated.blockers }
         report.results.push(result)
         if (report.results.length % 25 === 0) progress(`confirmed=${report.results.length}/${report.plans.length}`)
-        if (!['active', 'canary'].includes(updated.effectiveState)) {
+        if (!options.defaults && !['active', 'canary'].includes(updated.effectiveState)) {
           report.errors.push({ ...result, reason: 'saved_but_not_ready' })
           break
         }
@@ -262,7 +270,7 @@ export async function migrate({ options, admin, audit, currencyFallback = provid
 export async function main(args = process.argv.slice(2)) {
   const options = parseArgs(args)
   if (options.help) {
-    console.log('Usage: node scripts/migrate-missing-operation-prices.mjs (--all | --provider NAME) [--operation KEY ...] --missing-budget-minor 100000 [--apply]\nDefault: read-only preview. --operation limits one provider to exact operation keys. Price: 0.01 in existing operation/provider currency. Existing prices and budgets are preserved. JSON report on stdout; progress on stderr.')
+    console.log('Usage: node scripts/migrate-missing-operation-prices.mjs (--all | --provider NAME) [--operation KEY ...] --missing-budget-minor 100000 [--defaults] [--apply]\nDefault: read-only preview. --defaults fills missing prices even for unavailable/paused operations, preserves operator states, activates only audited bootstrap disables, and uses CNY when no ledger currency exists. JSON report on stdout; progress on stderr.')
     return 0
   }
   const admin = adminClient(process.env.MX_INSIGHT_ADMIN_BASE_URL || `http://127.0.0.1:${process.env.MX_INSIGHT_PORT || 18151}`, process.env.MX_INSIGHT_ADMIN_TOKEN)

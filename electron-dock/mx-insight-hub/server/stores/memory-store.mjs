@@ -998,7 +998,7 @@ export class MemoryStore {
       tenantId,
       mode: 'disabled',
       multiplierPpm: null,
-      defaultUnitPriceMinor: 0,
+      defaultUnitPriceMinor: 1,
       defaultCurrency: 'CNY',
       revision: 0,
       updatedBy: null,
@@ -1033,7 +1033,7 @@ export class MemoryStore {
       })
     }
     const updatedAt = nowIso()
-    const defaultPrice = defaultUnitPriceMinor ?? current?.defaultUnitPriceMinor ?? 0
+    const defaultPrice = defaultUnitPriceMinor ?? current?.defaultUnitPriceMinor ?? 1
     const currency = defaultCurrency ?? current?.defaultCurrency ?? 'CNY'
     const account = this.creditAccounts.get(tenantId)
     if (defaultPrice > 0 && account && account.currency !== currency) {
@@ -1676,7 +1676,7 @@ export class MemoryStore {
         { limitScope: 'consumer', limit: consumerMax, used: consumerUsed, windowSeconds: consumerWindowSeconds },
         { limitScope: 'api_key', limit: keyMax, used: keyUsed, windowSeconds: keyWindowSeconds },
       ].map((layer) => ({ ...layer, remaining: Math.max(0, layer.limit - layer.used) }))
-      if (this.internalTrafficPolicy.matches({ tenantId, apiKeyId })) {
+      if (key.accessProfile === 'managed_full' || this.internalTrafficPolicy.matches({ tenantId, apiKeyId })) {
         for (const layer of layers) Object.assign(layer, { exempt: true, limit: null, remaining: null })
       }
       const binding = layers.reduce((tightest, layer) => (
@@ -1732,7 +1732,7 @@ export class MemoryStore {
     tenantId, consumerId, apiKeyId, platform, capability,
     windowStart, maxRequests, authorizationScopes, scopeEntitlements, legacySingleScope,
   }) {
-    const internal = this.internalTrafficPolicy.matches({ tenantId, apiKeyId })
+    const internal = this.apiKeys.get(apiKeyId)?.accessProfile === 'managed_full' || this.internalTrafficPolicy.matches({ tenantId, apiKeyId })
     if (!internal) assertMemoryKeyAccessLimits(this, apiKeyId, authorizationScopes)
     const records = [...this.requests.values()]
     for (const scope of internal ? [] : authorizationScopes) {

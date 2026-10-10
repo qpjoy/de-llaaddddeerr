@@ -11,28 +11,15 @@
 // This reports; it does not gate. A pricing gap must never stop an operator
 // from shipping an unrelated change.
 
-import { readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
 import { EXTERNAL_PLATFORM_OPERATION_CATALOG } from '../server/external-platforms/control-store.mjs'
 
-const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-
-// This check runs before the app is deployed, so it cannot read the control
-// plane. It must therefore account for the seed that runs later in the same
-// deploy: an endpoint priced in seeds/pricebooks/<provider>.json will be
-// priced by the time anyone can call it, and warning about it here would be a
-// false alarm -- the kind that teaches operators to ignore this output.
+// Preflight predicts the automatic missing-price step. Its later write report
+// remains the authority on what actually committed; credentials are separate.
 function seededPrices(providerKey) {
-  try {
-    const file = JSON.parse(
-      readFileSync(join(projectRoot, 'seeds', 'pricebooks', `${providerKey}.json`), 'utf8'),
-    )
-    return file.unitCostMinorByEndpoint || {}
-  } catch {
-    return {}
-  }
+  // Deployment now fills every missing endpoint at one minor unit, independently
+  // from legacy seed files. Existing database/operator prices remain authoritative.
+  return Object.fromEntries((EXTERNAL_PLATFORM_OPERATION_CATALOG[providerKey] || [])
+    .flatMap(operation => operation.endpointKeys.map(key => [key, 1])))
 }
 
 const PROVIDERS = Object.freeze({
