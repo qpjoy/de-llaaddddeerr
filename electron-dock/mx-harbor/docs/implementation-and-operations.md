@@ -79,6 +79,34 @@ MX_HARBOR_BUILD_PROXY=http://127.0.0.1:7789 bash electron-dock/mx-harbor/scripts
 
 Harbor 自身发布不要求先发布 Launcher/Hub。启用真实登录和客户服务前，Hub、Auth 的新能力仍须完成各自兼容发布；仅运行 Harbor deploy 不会登记新的 Auth client 或启用 Hub Portal。
 
+### enroll 失败定位
+
+旧提示 `kubectl 执行失败；未输出可能包含凭据的子进程内容` 无法判断线上根因。当前脚本输出 `[具体步骤/资源] + 退出码 + 已识别的错误类型`，例如读取 Hub SSO Secret 时的 `Forbidden`，或获取部署锁时的 `AlreadyExists`。不回显可能包含 Secret 的 stdout/stderr。所有 Kubernetes 请求限制为 15 秒；解锁失败单独报告，不覆盖最初错误，也不再提前显示接入成功。
+
+在 **Internal 的 `electron-dock/mx-harbor` 目录**同步代码后，直接重试：
+
+```bash
+bash scripts/manage.sh ops internal-production enroll
+```
+
+此目录下无需再加 `electron-dock/mx-harbor/` 前缀。本次仅更新宿主脚本，无需为获取诊断重建镜像、重发应用或续签证书。
+
+- `context/kubeconfig`：恢复上次 deploy 使用的 `KUBECONFIG`；不要修改已固定的 context/cluster UID 来绕过检查。
+- `Forbidden/Unauthorized`：检查当前 Kubernetes 身份对报错 namespace/资源的权限或凭据。脚本不会扩大 RBAC。
+- 部署锁 `AlreadyExists`：先检查正在运行的 deploy、迁移 Job、enroll；不自动删除锁。迁移终止未确认时，旧 deploy 也会有意保留此锁。
+- 同步 Secret `Conflict`：等待其他修改任务完成后重试，仍复用现有凭据。
+- 同时出现原始错误和“解锁未确认”：两条都保留；先检查锁状态，不能把 Secret 同步成功当作整个 enroll 成功。
+
+仅当报部署锁已存在时，可用以下只读命令检查锁和迁移 Job，不读取 Secret 内容：
+
+```bash
+harbor_context="$(node -p 'JSON.parse(require("node:fs").readFileSync("secrets/operations.json", "utf8")).context')"
+kubectl --context "$harbor_context" --request-timeout=15s -n mx-harbor get configmap mx-harbor-deploy-lock -o 'custom-columns=NAME:.metadata.name,ACTION:.data.action,CREATED:.metadata.creationTimestamp'
+kubectl --context "$harbor_context" --request-timeout=15s -n mx-harbor get jobs
+```
+
+本次回归：接入核心 6 项、CLI 错误与清理 6 项、部署 12 项，共 24 项通过。CLI 使用隔离 kubectl 替身，验证报错步骤、敏感输出隐藏、原锁 UID 保护及临时文件清理；没有据此宣称生产 enroll 已成功。
+
 首次发现可用 `MX_HARBOR_KUBE_CONTEXT`、`MX_HARBOR_NODE` 和 `MX_HARBOR_HUB_ADMIN_ORIGIN` 指定目标；节点仍须匹配本机 hostname。也可按 `deploy/operations.example.json` 手工填写配置，其中 `node` 是 Kubernetes 节点名称。普通 Pod 中的 `127.0.0.1` 不是宿主机，不能作为 Hub 上游。已有操作配置无效、与显式环境变量冲突或原部署位于其他节点时，脚本停止，不覆盖配置或迁移目标。
 
 首次缺少 `secrets/identity/profile.json` 或 `secrets/gateway-token` 时只提示外部接入待配置，继续建库、迁移和发布。已有但无效的本地文件仍需修复。后续补齐文件后执行同一 `deploy`，仅填充 runtime Secret 中缺失的接入字段，保留已有数据库、clientSecret/sessionKey 和网关凭据；不会自行生成未在 Auth 登记的 SSO client，也不会覆盖 Hub 正在使用的凭据。
