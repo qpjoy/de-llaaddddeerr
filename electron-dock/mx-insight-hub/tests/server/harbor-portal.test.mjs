@@ -40,3 +40,25 @@ test('Shared identity binding reuses Hub member and tenant, preserves platform a
  const [hub,harbor]=await Promise.all([sessions.provision(fresh),sessions.provision({...fresh,clientId:'harbor',canonical:{...fresh.canonical,audience:'mx-harbor'},sharedAudience:'mx-insight-hub'})]);assert.equal(hub,harbor);assert.equal((await pool.query('SELECT * FROM iam.tenant_memberships WHERE member_id=$1',[hub])).rowCount,1)
  await pool.query("UPDATE iam.members SET status='suspended' WHERE id=$1",[original]);await assert.rejects(sessions.provision({...args,clientId:'harbor',sharedAudience:'mx-insight-hub'}),{status:403})
 })
+
+test('optional Portal config is loaded at request time and missing/corrupt enrollment cannot break Hub startup',async t=>{
+ const {mkdtempSync,writeFileSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path')
+ const {createHarborPortal}=await import('../../server/portal/harbor.mjs')
+ const root=mkdtempSync(join(tmpdir(),'hub-harbor-config-'));t.after(()=>rmSync(root,{recursive:true,force:true}))
+ const profileFile=join(root,'profile.json'),tokenFile=join(root,'gateway-token')
+ const hubSettings={issuer:'https://auth.example.test/identity',audience:'mx-insight-hub',legacyIssuer:'mx-user-center:test'}
+ const portal=createHarborPortal({pool:{},store:{},profileFile,tokenFile,hubSettings})
+ await assert.rejects(portal.resolve({headers:{}}),{status:503,code:'portal_unavailable'})
+ const profile={appId:'mx-harbor',origin:'https://harbor.minsight-ai.com',issuer:hubSettings.issuer,audience:'mx-harbor',clientId:'mx-harbor-web',clientSecret:'s'.repeat(43),sessionKey:'k'.repeat(43)}
+ writeFileSync(profileFile,JSON.stringify(profile),{mode:0o600});writeFileSync(tokenFile,'g'.repeat(43),{mode:0o600})
+ await assert.rejects(portal.resolve({headers:{'x-mx-harbor-gateway':'wrong'}}),{status:401,code:'portal_auth_required'})
+ await assert.rejects(portal.resolve({headers:{'x-mx-harbor-gateway':'g'.repeat(43)}}),{status:401,code:'portal_session_required'})
+ writeFileSync(tokenFile,'n'.repeat(43))
+ await assert.rejects(portal.resolve({headers:{'x-mx-harbor-gateway':'g'.repeat(43)}}),{status:401,code:'portal_auth_required'})
+ writeFileSync(profileFile,JSON.stringify({...profile,audience:hubSettings.audience}))
+ await assert.rejects(portal.resolve({headers:{}}),{status:503,code:'portal_unavailable'})
+ writeFileSync(profileFile,'{"private":"broken-sensitive')
+ await assert.rejects(portal.resolve({headers:{}}),error=>error.status===503&&!error.message.includes('sensitive'))
+ rmSync(profileFile);rmSync(tokenFile)
+ await assert.rejects(portal.resolve({headers:{}}),{status:503,code:'portal_unavailable'})
+})

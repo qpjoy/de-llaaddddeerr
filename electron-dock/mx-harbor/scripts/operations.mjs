@@ -16,7 +16,7 @@ const requestedAction = process.argv[2] || "help",
     : requestedAction,
   namespace = "mx-harbor";
 const help =
-  "Usage: bash scripts/manage.sh ops internal-production deploy|status|logs|plan\nDeploy includes migration, application restart and readiness verification. migrate/restart are compatibility aliases for deploy.\nFirst deploy discovers and saves secrets/operations.json from the current Kubernetes context and local node. Missing SSO/Hub enrollment does not block deployment or migrations; integrations are resolved at runtime. Retained Kubernetes Secret takes precedence.";
+  "Usage: bash scripts/manage.sh ops internal-production deploy|enroll|status|logs|plan\nEnroll registers https://harbor.minsight-ai.com with existing Launcher/Auth and synchronizes the optional Hub Portal credentials; it does not deploy Launcher/Hub.\nDeploy includes migration, application restart and readiness verification. migrate/restart are compatibility aliases for deploy.\nFirst deploy discovers and saves secrets/operations.json from the current Kubernetes context and local node. Missing SSO/Hub enrollment does not block deployment or migrations; integrations are resolved at runtime. Retained Kubernetes Secret takes precedence.";
 if (action === "help") {
   console.log(help);
   process.exit(0);

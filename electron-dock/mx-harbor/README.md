@@ -2,7 +2,7 @@
 
 Harbor（Data Harbor / DataPort）是独立部署的客户入口。视觉组件来自 `/tmp/dataport`，账号由 Launcher/Auth 管理，业务权限与数据由 Hub 管理。
 
-**当前完成第一批实现：独立 UI、邀请准入、统一 SSO、受限客户读取接口和 K8s 部署工具。尚未完成购买、¥1 管理员验收、付款返回及 IP 查询闭环，不具备商业上线条件。没有部署到生产。**
+**当前完成第一批实现：独立 UI、邀请准入、统一 SSO、受限客户读取接口和 K8s 部署工具。尚未完成购买、¥1 管理员验收、付款返回及 IP 查询闭环，不具备商业上线条件。用户已提供 Harbor 迁移与发布成功输出；域名、SSO 与商业闭环尚待服务器验收。**
 
 ## 本地运行
 
@@ -18,13 +18,15 @@ MX_HARBOR_PREVIEW=1 npm start
 
 预览模式不连接真实账号、数据库或支付；gallery 表单不会创建账号。生产模式需要 Harbor 自有数据库及已完成的迁移；SSO、Hub 尚未接入时仍可启动并展示首页，相关接口返回 503，不会回退到演示用户。生产服务不开放 `/demos/`。
 
+正式域名：`https://harbor.minsight-ai.com`。首次应用发布后可运行 `bash scripts/manage.sh ops internal-production enroll` 自动登记独立 Auth client 并同步 Hub Portal 凭据；Auth/Hub 首次启用仍分别走原发布流程。两端网关和证书使用 de-mingxi 的 `internal-harbor-install` / `harbor-install`，详细顺序见 [操作清单](harbor.setup.md)。
+
 ## 当前目录
 
 - `ui-design/`：原 DataPort CSS、基础组件和来源 SHA256 清单。独立命名为 `@qpjoy/ui-design-harbor`，未修改 Hub/Neon Void 样式。
 - `apps/web/`：React 19 + TypeScript + Vite 页面，保留原登录弹窗布局，加入邀请码注册。
 - `apps/server/`：独立 BFF、mx-common SSO、加密会话；每次客户接口调用重新校验 Auth。
 - `migrations/`：Harbor 自有会话库迁移，无 Hub 业务表、密码或支付账本。
-- `deploy/`、`scripts/`：单节点 K8s 构建/迁移/发布、网关模板和一次性 Hub 接入补丁。
+- `deploy/`、`scripts/`：单节点 K8s 构建/迁移/发布、网关模板、幂等接入工具和兼容接入补丁。
 
 ## 管理命令
 

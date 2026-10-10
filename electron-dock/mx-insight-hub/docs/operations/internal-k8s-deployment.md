@@ -50,6 +50,30 @@ on Hub's authoritative store. Night-All and direct external providers are
 optional capability-scoped dependencies whose health is reported separately;
 their failure must not remove login or Hub-native traffic from service.
 
+## Optional Harbor Portal
+
+The Admin manifest includes a read-only optional `mx-harbor-portal` Secret with
+`profile.json` and `gateway-token`, mounted at `/run/harbor-portal`. On Internal,
+run `bash scripts/manage.sh ops internal-production enroll` from the neighboring
+`mx-harbor` project after its initial deploy. This registers the independent
+`https://harbor.minsight-ai.com` client through Launcher's existing locked CLI
+and synchronizes retained enrollment credentials to both applications. Publish
+Auth and this compatible Hub version using their normal deployment commands.
+
+Portal reads the projected files on requests, so subsequent enrollment changes
+do not require another Hub restart. Missing, corrupt or mismatched enrollment
+returns a scoped 503; it does not block Hub startup or change Hub's own SSO.
+The Public listener never serves Portal. Requests require both the dedicated
+gateway credential and fresh, audience-bound Auth verification, then reuse the
+canonical Hub member and active tenant memberships without platform-admin scope.
+The namespace/Pod ingress rule supplements these checks; hostNetwork policy
+enforcement must be verified with the actual CNI.
+
+These mounts survive future normal deploys. No manual Deployment patch, shared
+admin token, identity reset or account/product grant is needed. See
+[Harbor operation steps](../../../mx-harbor/harbor.setup.md). Payment and purchase
+flows remain outside this read-only Portal stage.
+
 ## Secret preparation
 
 Create `.env.internal` with mode `0600`:

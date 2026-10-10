@@ -1,26 +1,36 @@
-# New Domestic vhost. Replace harbor.example.com with the purchased domain.
-# Keep compass/deploy/nginx/conf.d/40-hub.conf unchanged.
-upstream harbor_internal { server 10.88.88.88:80; keepalive 32; }
+# Independent Harbor TLS entry. Activate via scripts/manage.sh harbor-install.
+# Kept outside conf.d until its certificate and Internal route are ready.
+upstream harbor_internal {
+    server 10.88.88.88:80;
+    keepalive 32;
+}
 server {
     listen 443 ssl;
+    listen [::]:443 ssl;
     http2 on;
-    server_name harbor.example.com;
-    ssl_certificate /etc/letsencrypt/live/harbor.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/harbor.example.com/privkey.pem;
+    server_name harbor.minsight-ai.com;
+    ssl_certificate /etc/letsencrypt/live/harbor.minsight-ai.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/harbor.minsight-ai.com/privkey.pem;
     include /etc/nginx/snippets/tls-common.conf;
+    include /etc/nginx/snippets/proxy-common.conf;
+    proxy_set_header Host $host;
+    proxy_next_upstream off;
+    proxy_redirect off;
     client_max_body_size 10m;
-    location = /gateway-health { return 200 "ok\n"; }
-    location ^~ /internal/ { return 404; }
-    location ^~ /demos/ { return 404; }
-    location ^~ /auth/sso/ {
+    access_log off;
+
+    location = /gateway-health { default_type text/plain; return 200 "ok\n"; }
+    location ~ ^/(internal|demos|admin)(/|$) { return 404; }
+    # API keys retain Hub's public API contract; browser sessions never enter it.
+    location ^~ /api/v1/ {
         proxy_pass http://harbor_internal;
         include /etc/nginx/snippets/proxy-common.conf;
         proxy_set_header Host $host;
-        access_log off;
+        proxy_set_header Cookie "";
+        proxy_set_header X-Mx-Insight-Admin-Token "";
+        proxy_set_header X-Mx-Harbor-Gateway "";
+        proxy_hide_header Set-Cookie;
+        proxy_buffering off;
     }
-    location / {
-        proxy_pass http://harbor_internal;
-        include /etc/nginx/snippets/proxy-common.conf;
-        proxy_set_header Host $host;
-    }
+    location / { proxy_pass http://harbor_internal; }
 }

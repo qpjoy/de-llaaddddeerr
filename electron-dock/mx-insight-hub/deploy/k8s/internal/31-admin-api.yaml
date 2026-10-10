@@ -88,6 +88,11 @@ spec:
                 name: mx-insight-hub-model-keys
                 optional: true
           env:
+            # Optional Harbor enrollment is discovered from projected files at runtime.
+            - name: MX_INSIGHT_HARBOR_SSO_PROFILE
+              value: /run/harbor-portal/profile.json
+            - name: MX_INSIGHT_HARBOR_GATEWAY_TOKEN_FILE
+              value: /run/harbor-portal/gateway-token
             - name: MX_INSIGHT_SSO_PROFILE
               valueFrom:
                 secretKeyRef:
@@ -158,6 +163,9 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            - name: harbor-portal
+              mountPath: /run/harbor-portal
+              readOnly: true
             - name: browser-sso
               mountPath: /run/mx-hub-sso
               readOnly: true
@@ -167,6 +175,16 @@ spec:
               mountPath: /shared_dir
               readOnly: true
       volumes:
+        - name: harbor-portal
+          secret:
+            secretName: mx-harbor-portal
+            optional: true
+            defaultMode: 288
+            items:
+              - key: profile.json
+                path: profile.json
+              - key: gateway-token
+                path: gateway-token
         - name: browser-sso
           secret:
             secretName: mx-insight-hub-browser-sso

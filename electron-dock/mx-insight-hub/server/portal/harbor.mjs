@@ -4,6 +4,7 @@ import {SsoStore} from '../identity/sso-store.mjs'
 import {capabilitiesForRole} from '../identity/index.mjs'
 import {AppError} from '../core/errors.mjs'
 import {secureEqual} from '../core/crypto.mjs'
+import {readFileSync} from 'node:fs'
 // This Symbol is never derived from headers, cookies, query parameters or JSON.
 export const portalPrincipal = Symbol('verified-harbor-principal')
 const reads = new Set(['/session','/me/overview','/api-keys','/tenants','/consumers','/usage','/documentation','/commerce/products'])
@@ -14,10 +15,9 @@ export function harborRoute(method,path,searchParams) {
 }
 /** Disabled unless explicitly configured. Verifies both the BFF credential and a fresh,
  * subject/audience-bound Auth UserInfo response; never trusts asserted roles. */
-export function createHarborPortal({pool,store,profileFile,token,hubSettings,oidcConfiguration}) {
-  if(!profileFile&&!token)return null
+function configuredPortal({pool,store,settings,token,hubSettings,oidcConfiguration}) {
   if(!pool||!hubSettings||typeof token!=='string'||token.length<32)throw new Error('Harbor portal requires database, retained Hub identity settings and a dedicated gateway credential')
-  const settings=readApplicationSsoProfile(profileFile)
+  if(!settings)throw new Error('Harbor profile required')
   if(settings.appId!=='mx-harbor'||settings.audience===hubSettings.audience||settings.issuer!==hubSettings.issuer)throw new Error('Harbor portal identity does not match the configured shared authority')
   const sessions=new SsoStore(pool,settings.sessionKey)
   const verifier=createApplicationSso({settings,store:sessions,oidcConfiguration,ErrorClass:AppError,validateIdentity(value){if(value.mxIdentity.issuer!==hubSettings.legacyIssuer)throw new AppError(401,'invalid_identity','统一身份来源不匹配。')}})
@@ -30,6 +30,31 @@ export function createHarborPortal({pool,store,profileFile,token,hubSettings,oid
       const memberId=await sessions.provision({issuer:settings.issuer,subject,clientId:settings.clientId,canonical:verified.mxIdentity,sharedAudience:hubSettings.audience,personalTenant:hubSettings.personalTenant===true})
       const memberships=(await store.listTenantMemberships(memberId)).filter(m=>m.status==='active').map(m=>({...m,capabilities:capabilitiesForRole(m.role)}))
       return {kind:'launcher-user',memberId,displayName:verified.displayName,subject:verified.mxIdentity.subject,issuer:verified.mxIdentity.issuer,platformAdmin:false,tenantIds:memberships.map(m=>m.tenantId),memberships,capabilities:[...new Set(memberships.flatMap(m=>m.capabilities))],portalOrigin:settings.origin}
+    }
+  }
+}
+
+// Optional enrollment must never block Hub startup or its own browser SSO.
+// Secret volumes can appear/change after deployment; revalidate on each Portal request.
+export function createHarborPortal({profileFile,token,tokenFile,...options}) {
+  if(!profileFile&&!token&&!tokenFile)return null
+  let cached,revision
+  return {
+    async resolve(request) {
+      let portal
+      try {
+        const settings=readApplicationSsoProfile(profileFile)
+        const credential=tokenFile?readFileSync(tokenFile,'utf8').trim():token
+        const next=JSON.stringify([settings,credential])
+        if(!cached||next!==revision){
+          cached=configuredPortal({...options,settings,token:credential})
+          revision=next
+        }
+        portal=cached
+      } catch {
+        throw new AppError(503,'portal_unavailable','数港客户服务尚未接入或配置无效。')
+      }
+      return portal.resolve(request)
     }
   }
 }

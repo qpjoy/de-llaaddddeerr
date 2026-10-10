@@ -1,4 +1,4 @@
-# One-time strategic merge patch, after creating mx-harbor-portal in the Hub namespace.
+# Compatibility patch only; current Hub deployment already includes these optional mounts.
 # Normal Harbor deploy never applies this patch or restarts Hub.
 spec:
   template:
@@ -8,11 +8,8 @@ spec:
           env:
             - name: MX_INSIGHT_HARBOR_SSO_PROFILE
               value: /run/harbor-portal/profile.json
-            - name: MX_INSIGHT_HARBOR_GATEWAY_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: mx-harbor-portal
-                  key: gateway-token
+            - name: MX_INSIGHT_HARBOR_GATEWAY_TOKEN_FILE
+              value: /run/harbor-portal/gateway-token
           volumeMounts:
             - name: harbor-portal
               mountPath: /run/harbor-portal
@@ -21,7 +18,10 @@ spec:
         - name: harbor-portal
           secret:
             secretName: mx-harbor-portal
+            optional: true
             defaultMode: 288
             items:
               - key: profile.json
                 path: profile.json
+              - key: gateway-token
+                path: gateway-token
