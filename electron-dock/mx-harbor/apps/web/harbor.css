@@ -1,90 +1,90 @@
 .harbor-auth-tabs {
   display: flex;
-  gap: 8px;
-  margin: 20px 0;
+  gap: 0.5rem;
+  margin: 1.25rem 0;
 }
 .harbor-form {
   display: grid;
-  gap: 16px;
+  gap: 1rem;
 }
 .harbor-form label {
   display: grid;
-  gap: 8px;
+  gap: 0.5rem;
 }
 .harbor-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 17.5rem), 1fr));
+  gap: 1.25rem;
 }
 .harbor-empty {
-  padding: 48px 24px;
+  padding: 3rem 1.5rem;
   text-align: center;
   color: var(--muted-foreground);
 }
 .harbor-note {
-  max-width: 680px;
-  margin: 20px auto;
+  max-width: 42.5rem;
+  margin: 1.25rem auto;
   text-align: center;
   color: var(--muted-foreground);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .harbor-session-notice {
-  max-width: 760px;
-  margin: 24px auto;
-  padding: 24px;
+  max-width: 47.5rem;
+  margin: 1.5rem auto;
+  padding: 1.5rem;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 0.75rem;
   background: var(--card);
 }
 .harbor-session-notice h2 {
-  font-size: 20px;
+  font-size: 1.25rem;
   font-weight: 600;
 }
 .harbor-session-notice p {
-  margin: 12px 0;
+  margin: 0.75rem 0;
 }
 .harbor-session-reference {
   color: var(--muted-foreground);
-  font-size: 12px;
+  font-size: 0.75rem;
   overflow-wrap: anywhere;
 }
 .harbor-footer {
   color: var(--muted-foreground);
-  font-size: 12px;
+  font-size: 0.75rem;
   text-align: center;
-  padding: 32px 16px;
+  padding: 2rem 1rem;
 }
 .harbor-page-heading {
-  margin-bottom: 24px;
+  margin-bottom: 1.5rem;
 }
 .harbor-page-heading h1 {
-  font-size: 24px;
+  font-size: 1.5rem;
   font-weight: 600;
 }
 .harbor-space {
   display: flex;
-  gap: 12px;
+  gap: 0.75rem;
   justify-content: flex-end;
-  margin-bottom: 24px;
+  margin-bottom: 1.5rem;
 }
 .harbor-space select {
-  max-width: 260px;
-  padding: 8px;
+  max-width: 16.25rem;
+  padding: 0.5rem;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 0.375rem;
 }
 .harbor-endpoint {
-  padding: 16px 0;
+  padding: 1rem 0;
   border-bottom: 1px solid var(--border);
   overflow-wrap: anywhere;
 }
 .auth-register-hint {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--muted-foreground);
-  margin-top: 16px;
+  margin-top: 1rem;
 }
 .harbor-gallery-banner {
-  padding: 12px;
+  padding: 0.75rem;
   background: #fff6db;
   border-bottom: 1px solid #efd89a;
   text-align: center;
@@ -111,8 +111,8 @@
 }
 .auth-close {
   position: absolute;
-  top: 16px;
-  right: 16px;
+  top: 1rem;
+  right: 1rem;
   color: var(--muted-foreground);
 }
 
@@ -125,11 +125,11 @@
   border: 1px solid var(--line-soft);
   border-radius: var(--panel-radius);
   background: #fff;
-  box-shadow: 0 2px 4px #172b4d02;
-  gap: 20px;
+  box-shadow: 0 0.125rem 0.25rem #172b4d02;
+  gap: 1.25rem;
 }
 .harbor-console [data-slot="card-title"] {
-  font-size: 18px;
+  font-size: 1.125rem;
   line-height: 1.5;
   font-weight: 600;
 }
@@ -139,17 +139,17 @@
   overflow-wrap: anywhere;
 }
 .harbor-console [data-slot="card-content"] {
-  font-size: 14px;
+  font-size: 0.875rem;
   line-height: 1.8;
 }
 .harbor-console [data-slot="input"] {
-  height: 42px;
+  height: 2.625rem;
   border-color: #cbd4e1;
   border-radius: var(--control-radius);
   box-shadow: none;
 }
 .harbor-console .harbor-table-panel {
-  padding: 24px;
+  padding: 1.5rem;
   gap: 0;
 }
 .harbor-console [data-slot="table-row"] {
@@ -166,14 +166,14 @@
   border-radius: var(--panel-radius);
 }
 .harbor-form {
-  margin-top: 12px;
+  margin-top: 0.75rem;
 }
 .harbor-form label {
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-secondary);
 }
 .harbor-form [data-slot="button"] {
-  min-height: 40px;
+  min-height: 2.5rem;
   border-radius: var(--control-radius);
 }
 .harbor-console [data-slot="button"][data-variant="outline"] {
@@ -184,7 +184,7 @@
 .harbor-space {
   align-items: center;
   flex-wrap: wrap;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--text-secondary);
 }
 .harbor-space select {
@@ -196,11 +196,11 @@
   border-bottom: 0;
 }
 .harbor-endpoint code {
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: #345c99;
 }
 .harbor-endpoint p {
-  margin-top: 8px;
+  margin-top: 0.5rem;
   color: var(--text-secondary);
 }
 .harbor-pricing {
@@ -212,190 +212,7 @@
   flex: 1;
 }
 .harbor-pricing .ip-pricing-heading > [data-slot="button"] {
-  margin-top: 24px;
-}
-
-/* The console uses the compact proportions approved for the public entry.
-   Keep real layout dimensions so fixed navigation and portalled menus align. */
-@media (min-width: 768px) {
-  .harbor-shell {
-    font-size: 12px;
-  }
-  .harbor-shell .brand {
-    gap: 8px;
-    padding: 16px 10px 20px;
-  }
-  .harbor-shell .brand-symbol {
-    width: 28px;
-    height: 28px;
-    border-radius: 7px;
-  }
-  .harbor-shell .brand-symbol svg {
-    width: 20px;
-    height: 20px;
-  }
-  .harbor-shell .brand strong {
-    font-size: 17px;
-  }
-  .harbor-shell .brand strong span {
-    font-size: 11px;
-    margin-left: 5px;
-  }
-  .harbor-shell .nav-button {
-    height: 36px !important;
-    padding-inline: 12px !important;
-    font-size: 12px !important;
-  }
-  .harbor-shell .nav-button svg {
-    width: 15px !important;
-    height: 15px !important;
-    margin-right: 3px !important;
-  }
-  .harbor-shell .nav-divider {
-    margin-top: 16px;
-    padding-top: 15px;
-  }
-  .harbor-shell .console-sidebar-footer {
-    padding: 10px;
-  }
-  .harbor-shell .sidebar-account-trigger {
-    height: 42px;
-    gap: 8px;
-    padding: 6px;
-    font-size: 12px;
-  }
-  .harbor-shell .sidebar-account-trigger [data-slot="avatar"] {
-    width: 26px;
-    height: 26px;
-  }
-  .harbor-shell .sidebar-account-trigger [data-slot="avatar-fallback"] {
-    font-size: 12px;
-  }
-  .sidebar-account-menu {
-    padding: 5px;
-  }
-  .sidebar-account-label {
-    padding: 8px;
-  }
-  .sidebar-account-label strong,
-  .sidebar-account-menu [data-slot="dropdown-menu-item"] {
-    font-size: 12px;
-  }
-  .sidebar-account-menu [data-slot="dropdown-menu-item"] {
-    min-height: 34px;
-    gap: 8px;
-    padding-inline: 8px;
-  }
-  .sidebar-account-menu [data-slot="dropdown-menu-item"] svg {
-    width: 14px;
-    height: 14px;
-  }
-  .harbor-console {
-    max-width: 1152px;
-    padding: 26px 26px 8px;
-  }
-  .query-backdrop > .harbor-console {
-    padding-top: clamp(64px, 10vh, 88px);
-  }
-  .harbor-console > .public-query {
-    max-width: 768px;
-  }
-  .harbor-console .public-query h1 {
-    font-size: 38px;
-  }
-  .harbor-console .public-query > p {
-    margin-top: 14px;
-    font-size: 13px;
-  }
-  .harbor-console .public-query form {
-    max-width: 672px;
-    margin-top: 26px;
-  }
-  .harbor-console .intelligence-input[data-slot="input-group"] {
-    height: 54px;
-    padding-right: 5px;
-    border-radius: 11px;
-  }
-  .harbor-console .intelligence-input [data-slot="input-group-control"] {
-    padding-left: 11px;
-    font-size: 14px;
-  }
-  .harbor-console .intelligence-input [data-align="inline-start"] {
-    padding-left: 18px;
-  }
-  .harbor-console .intelligence-input [data-align="inline-start"] > svg {
-    width: 17px;
-    height: 17px;
-  }
-  .harbor-console .intelligence-submit[data-slot="button"] {
-    height: 42px;
-    min-width: 84px;
-    padding-inline: 22px;
-    border-radius: 7px;
-    font-size: 13px;
-  }
-  .harbor-console .public-query > .public-query-hint {
-    font-size: 12px;
-  }
-  .harbor-console .public-query-intro {
-    max-width: 672px;
-    gap: 26px;
-    margin-top: 58px;
-  }
-  .harbor-console .public-query-feature-heading {
-    gap: 10px;
-  }
-  .harbor-console .public-query-feature-heading > svg {
-    width: 20px;
-    height: 20px;
-  }
-  .harbor-console .public-query-intro h2 {
-    font-size: 15px;
-  }
-  .harbor-console .public-query-intro p {
-    margin-top: 11px;
-    font-size: 12px;
-  }
-  .harbor-console .page-heading {
-    margin-bottom: 21px;
-  }
-  .harbor-console .page-heading h1 {
-    font-size: 23px;
-  }
-  .harbor-console .harbor-grid {
-    gap: 16px;
-  }
-  .harbor-console [data-slot="card"] {
-    gap: 16px;
-    padding-block: 20px;
-  }
-  .harbor-console [data-slot="card-header"],
-  .harbor-console [data-slot="card-content"] {
-    padding-inline: 20px;
-  }
-  .harbor-console [data-slot="card-title"] {
-    font-size: 16px;
-  }
-  .harbor-console [data-slot="card-description"],
-  .harbor-console [data-slot="card-content"],
-  .harbor-console [data-slot="table"] {
-    font-size: 13px;
-  }
-  .harbor-console .harbor-form {
-    gap: 13px;
-  }
-  .harbor-console .harbor-form [data-slot="input"] {
-    height: 36px;
-    font-size: 13px;
-  }
-  .harbor-console .harbor-form [data-slot="button"] {
-    min-height: 34px;
-    font-size: 13px;
-  }
-  .harbor-console > .harbor-footer {
-    padding-block: 26px;
-    font-size: 11px;
-  }
+  margin-top: 1.5rem;
 }
 
 /* Scroll the form, not a vertically centered overflowing grid row. The close
@@ -409,30 +226,30 @@
 }
 .auth-dialog .auth-form-panel {
   min-height: 0;
-  max-height: calc(100dvh - 40px);
+  max-height: calc(100dvh - 2.5rem);
   overflow-y: auto;
   overscroll-behavior: contain;
   justify-content: flex-start;
-  padding: 40px 40px 30px;
+  padding: 2.5rem 2.5rem 1.875rem;
   scrollbar-gutter: stable;
 }
 .auth-dialog .auth-form-panel > * {
   flex-shrink: 0;
 }
 .auth-dialog .auth-form-panel [data-slot="dialog-header"] {
-  margin-bottom: 20px;
+  margin-bottom: 1.25rem;
 }
 .harbor-auth-tabs {
-  margin: 0 0 24px;
+  margin: 0 0 1.5rem;
 }
 .auth-dialog .auth-form-panel [data-slot="field-group"] {
-  gap: 20px;
+  gap: 1.25rem;
 }
 .auth-dialog .auth-close {
   z-index: 1;
   display: grid;
   place-items: center;
-  border-radius: 8px;
+  border-radius: 0.5rem;
   background: #fff;
 }
 .auth-dialog .auth-close:hover {
@@ -446,15 +263,15 @@
 }
 @media (max-width: 767px) {
   .harbor-console .harbor-table-panel {
-    padding: 16px;
+    padding: 1rem;
   }
 }
 @media (max-width: 680px) {
   .auth-dialog[data-slot="dialog-content"] {
-    max-height: calc(100dvh - 24px);
+    max-height: calc(100dvh - 1.5rem);
   }
   .auth-dialog .auth-form-panel {
-    max-height: calc(100dvh - 24px);
-    padding: 32px 24px 24px;
+    max-height: calc(100dvh - 1.5rem);
+    padding: 2rem 1.5rem 1.5rem;
   }
 }

@@ -49,6 +49,7 @@ import { AccountDialog } from "./account-dialog";
 import { SidebarAccountMenu } from "./sidebar-account-menu";
 import { request, startAccountSession } from "./api";
 import "@/styles/harbor.css";
+import "./design-scale.css";
 import "./harbor.css";
 const pages = [
   ["intelligence", "新建查询", SquarePen],
@@ -110,7 +111,7 @@ export function ConsoleShell({
   return (
     <SidebarProvider
       className="harbor-shell"
-      style={{ "--sidebar-width": "180px" } as React.CSSProperties}
+      style={{ "--sidebar-width": "14rem" } as React.CSSProperties}
     >
       <Sidebar className="app-sidebar">
         <SidebarHeader>
