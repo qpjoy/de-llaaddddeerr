@@ -81,7 +81,11 @@ export function paymentReturnTrade(search: string) {
     : null;
 }
 // Same fixed checkout destinations as Hub; a service response is not an arbitrary link.
-export function checkoutLocation(value: string, environment: string) {
+export function checkoutLocation(
+  value: string,
+  environment: string,
+  returnUrl?: string,
+) {
   let url: URL | undefined;
   try {
     url = new URL(value);
@@ -103,8 +107,13 @@ export function checkoutLocation(value: string, environment: string) {
     url.username ||
     url.password ||
     url.pathname !== "/gateway.do" ||
-    url.hash
+    url.hash ||
+    (returnUrl !== undefined &&
+      (url.searchParams.getAll("return_url").length !== 1 ||
+        url.searchParams.get("return_url") !== returnUrl))
   )
-    throw Error("支付宝收银台地址无效，原订单已保留，请联系管理员。");
+    throw Error(
+      "收银台或数港返回地址不匹配，原订单已保留，请联系管理员检查支付接入。",
+    );
   return url.href;
 }

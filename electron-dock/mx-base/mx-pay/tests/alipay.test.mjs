@@ -129,7 +129,9 @@ test('Alipay HTTP and real PostgreSQL: notification atomicity, replay, isolation
   t.after(()=>rmSync(oldMigrations,{recursive:true,force:true}))
   for(const file of ['pay_001_transactions.sql','pay_002_reporting.sql','pay_003_channels.sql'])copyFileSync(new URL(`../migrations/${file}`,import.meta.url),join(oldMigrations,file))
   await runMigrations({connectionString:url.href,migrationsDir:oldMigrations,logger:{log(){}}})
-  const configs=[cfg,{...cfg,id:'alipay-live',environment:'live',appId:'2021000000000002',sellerId:'2088000000000002',notifyUrl:'https://pay.example.test/v1/notifications/alipay/alipay-live'}]
+  const harborReturn='https://harbor.example.test/payment/return', otherReturn='https://other.example.test/payment/return'
+  const configs=[{...cfg,allowedApps:[...cfg.allowedApps,'second-fixture'],returnTargets:[{appId:principal.appId,url:harborReturn},{appId:'second-fixture',url:otherReturn}]},
+    {...cfg,id:'alipay-live',environment:'live',appId:'2021000000000002',sellerId:'2088000000000002',notifyUrl:'https://pay.example.test/v1/notifications/alipay/alipay-live'}]
   const service=new PaymentCenter(pool,{channels:configs});await service.channelPayments.bind()
   const originalCreate=service.channelPayments.create.bind(service.channelPayments)
   service.channelPayments.create=(...args)=>{const order=originalCreate(...args);delete order.checkout.outTradeNo;return order}
@@ -146,6 +148,37 @@ test('Alipay HTTP and real PostgreSQL: notification atomicity, replay, isolation
   const facts=async id=>(await pool.query(`SELECT status,(SELECT count(*)::int FROM pay.outbox WHERE order_id=o.id) AS events,
     (SELECT count(*)::int FROM pay.channel_observations WHERE order_id=o.id) AS observations,
     (SELECT count(*)::int FROM pay.reporting_changes WHERE order_id=o.id) AS reports FROM pay.orders o WHERE id=$1`,[id])).rows[0]
+
+  await t.test('Harbor return is locally signed per checkout; Hub default and original payment facts stay unchanged',async()=>{
+    const order=await create(), before=await facts(order.id)
+    assert.ok((await client.identity()).features.includes('checkoutReturnUrl'))
+    const parse=checkout=>Object.fromEntries(new URL(checkout.payUrl).searchParams)
+    const hub=parse(await client.checkout(order.id)), harbor=parse(await client.checkout(order.id,{returnUrl:harborReturn}))
+    assert.equal(hub.return_url,cfg.returnUrl);assert.equal(harbor.return_url,harborReturn)
+    assert.equal(parse(await client.checkout(order.id)).return_url,cfg.returnUrl,'Harbor checkout must not change later Hub checkout')
+    for(const params of [hub,harbor]) {
+      assert.equal(params.notify_url,cfg.notifyUrl)
+      const payload=Object.keys(params).filter(k=>k!=='sign'&&params[k]!=='').sort().map(k=>`${k}=${params[k]}`).join('&')
+      assert.ok(createVerify('RSA-SHA256').update(payload).verify(merchant.publicKey,params.sign,'base64'))
+      assert.equal(JSON.parse(params.biz_content).out_trade_no,order.checkout.outTradeNo)
+    }
+    assert.equal(hub.biz_content,harbor.biz_content)
+    assert.deepEqual(await client.order(order.id),order)
+    assert.deepEqual(await facts(order.id),before,'checkout never settles, adds outbox events or mutates reporting facts')
+    for(const returnUrl of [null,'',otherReturn,harborReturn+'?next=evil',harborReturn+'#x','https://evil.test/', 'http://harbor.example.test/payment/return'])
+      await assert.rejects(client.checkout(order.id,{returnUrl}),{code:'payment_return_not_allowed'})
+    await assert.rejects(client.checkout(order.id,{returnUrl:harborReturn,notifyUrl:'https://evil.test'}),{code:'unsupported_payment_fields'})
+    const otherOrder=await service.create({...principal,appId:'second-fixture'},body(),randomUUID())
+    await assert.rejects(client.checkout(otherOrder.id,{returnUrl:harborReturn}),{status:404})
+    const originalTargets=service.channelPayments.adapter(cfg.id).config.returnTargets
+    delete service.channelPayments.adapter(cfg.id).config.returnTargets
+    await assert.rejects(client.checkout(order.id,{returnUrl:harborReturn}),{code:'payment_return_not_allowed'})
+    assert.equal(parse(await client.checkout(order.id)).return_url,cfg.returnUrl,'old configuration remains valid for Hub')
+    service.channelPayments.adapter(cfg.id).config.returnTargets=originalTargets
+    const notice=paid(order)
+    assert.equal((await post(notice)).status,200);assert.equal((await post(notice)).status,200)
+    assert.deepEqual(await facts(order.id),{status:'paid',events:1,observations:1,reports:2})
+  })
 
   await t.test('channel discovery, explicit app/environment scope, stable order and bound merchant',async()=>{
     await service.create(principal,body(),randomUUID())

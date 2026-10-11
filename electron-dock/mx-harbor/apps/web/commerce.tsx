@@ -164,6 +164,7 @@ export function Commerce({
           [order.id]: checkoutLocation(
             result.data.paymentUrl,
             order.environment,
+            new URL("/payment/return", location.origin).href,
           ),
         }));
       await refresh();
@@ -439,8 +440,8 @@ export function Commerce({
                         <Button onClick={() => go("services")}>查看订阅</Button>
                       )}
                     </div>
-                    {links[order.id] && (
-                      <p>在新页面完成付款后，回到这里查询原订单状态。</p>
+                    {!order.deliveredAt && links[order.id] && (
+                      <p>付款后将返回数港，可在这里查询原订单状态。</p>
                     )}
                   </CardContent>
                 </Card>

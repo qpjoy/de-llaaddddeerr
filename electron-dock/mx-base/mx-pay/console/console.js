@@ -122,9 +122,11 @@ function channelEditor(ch={id:'',provider:'alipay',environment:'live',enabled:fa
  field('允许的来源应用','allowedApps',ch.allowedApps.join(','),{hint:'多个应用用逗号分隔，例如 mx-insight-hub,luopan。'}),field('私钥格式','keyType',ch.keyType,{choices:[['PKCS8','PKCS8 · Java 常用'],['PKCS1','PKCS1 · RSA 私钥']]}),
  section('支付密钥'),field(ch.privateKeyConfigured?'应用私钥（已保存）':'应用私钥','privateKey','',{multiline:true,placeholder:'-----BEGIN PRIVATE KEY-----',hint:ch.privateKeyConfigured?'留空保留已有密钥；原文不会回显。':'粘贴完整 PEM，包含 BEGIN / END；不要只粘贴一行 Base64。'}),
  field(ch.alipayPublicKeyConfigured?'支付宝公钥（已保存）':'支付宝公钥','alipayPublicKey','',{multiline:true,placeholder:'-----BEGIN PUBLIC KEY-----',hint:ch.alipayPublicKeyConfigured?'留空保留已有公钥。':'填写支付宝提供的验签公钥，包含 PEM 首尾。'}),
- section('通知与启用'),notifyField,field('付款后返回地址','returnUrl',ch.returnUrl,{hint:'用户支付后返回业务应用，不用于确认到账。'}),switchField]
+ section('通知与启用'),notifyField,field('付款后返回地址','returnUrl',ch.returnUrl,{hint:'原有默认返回地址；保留它可让原应用付款流程保持不变。不用于确认到账。'}),
+ field('额外付款返回地址','returnTargets',(ch.returnTargets || []).map(t=>`${t.appId} ${t.url}`).join('\n'),{multiline:true,placeholder:'mx-insight-hub https://harbor.minsight-ai.com/payment/return',hint:'每行一个来源应用 ID、空格、完整 HTTPS 返回地址。应用须在上方允许列表中；仅该应用明确选择时使用，不改变默认地址。'}),switchField]
  editor(ch.revision?`编辑渠道 · ${ch.id}`:'新增支付宝渠道','填写并保存配置，再检查校验结果、发布生效。已保存的密钥不会回显。',fields,async f=>{
   const id=ch.id || f.get('id').trim(),channel={id,provider:'alipay',environment:f.get('environment'),enabled:f.get('enabled')==='on',appId:f.get('appId').trim(),sellerId:f.get('sellerId').trim(),allowedApps:f.get('allowedApps').split(',').map(s=>s.trim()).filter(Boolean),keyType:f.get('keyType'),privateKey:f.get('privateKey').trim(),alipayPublicKey:f.get('alipayPublicKey').trim(),notifyUrl:f.get('notifyUrl').trim(),returnUrl:f.get('returnUrl').trim()}
+  channel.returnTargets=f.get('returnTargets').split('\n').map(s=>s.trim()).filter(Boolean).map(line=>{const [appId,...url]=line.split(/\s+/);return {appId,url:url.join(' ')}})
   const result=await call(`channels/${encodeURIComponent(id)}`,'PUT',{revision:ch.revision,channel})
   if(!result.valid)return {keepOpen:true,refresh:()=>channelEditor(result,true)}
   return ()=>message('草稿已保存并通过校验。请点击“发布并启用”或“发布并停用”，使配置正式生效。')

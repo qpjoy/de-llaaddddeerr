@@ -38,7 +38,20 @@ export function channelValidationIssues(c) {
     if (https(c.notifyUrl).pathname !== `/v1/notifications/alipay/${c.id}`) throw Error()
   } catch { issue('notifyUrl', '通知地址需为 HTTPS，路径必须是 /v1/notifications/alipay/渠道ID，不能带查询参数、片段或末尾斜杠。') }
   try { https(c.returnUrl) } catch { issue('returnUrl', '付款后返回地址需为 HTTPS，不能带查询参数、片段或账号密码。') }
-  if (Object.keys(c).some(k => !['id','provider','environment','enabled','appId','sellerId','allowedApps','keyType','privateKey','alipayPublicKey','notifyUrl','returnUrl'].includes(k))) issue('channel', '渠道包含不支持的配置字段。')
+  if (c.returnTargets !== undefined) {
+    try {
+      if (!Array.isArray(c.returnTargets) || c.returnTargets.length > 32) throw Error()
+      const seen = new Set()
+      for (const target of c.returnTargets) {
+        if (!target || Object.keys(target).some(k=>!['appId','url'].includes(k)) || !id(target.appId)
+          || !c.allowedApps?.includes(target.appId) || typeof target.url !== 'string' || target.url.length > 1000) throw Error()
+        const url = https(target.url)
+        if (url.href !== target.url || url.port || seen.has(`${target.appId}:${target.url}`)) throw Error()
+        seen.add(`${target.appId}:${target.url}`)
+      }
+    } catch { issue('returnTargets', '额外返回地址每行需填写允许的来源应用 ID 和完整 HTTPS 地址；不能重复、带端口、查询参数、片段或账号密码。') }
+  }
+  if (Object.keys(c).some(k => !['id','provider','environment','enabled','appId','sellerId','allowedApps','keyType','privateKey','alipayPublicKey','notifyUrl','returnUrl','returnTargets'].includes(k))) issue('channel', '渠道包含不支持的配置字段。')
   return issues
 }
 export function validateChannels(entries) {

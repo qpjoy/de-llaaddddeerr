@@ -66,6 +66,18 @@ test('management encrypts channels, scopes roles, consumes invitations and retai
  await management.syncChannels(service,true);assert.equal(service.channelPayments.available(credential)[0].enabled,false)
  assert.equal(service.channelPayments.queriesInFlight,3,'configuration reload preserves the query concurrency budget');service.channelPayments.queriesInFlight=0
  await management.syncChannels(service,false)
+ const returnTargets=[{appId:'hub',url:'https://harbor.example/payment/return'}]
+ for(const invalid of [[null],[{appId:'hub',url:1}],[{appId:'hub',url:'https://harbor.example/',extra:true}]])
+  await assert.rejects(route('channels/alipay-test','PUT',{revision:ch.revision,channel:{...channel,returnTargets:invalid}}))
+ ch=await route('channels/alipay-test','PUT',{revision:ch.revision,channel:{...channel,sellerId:'2088000000000001',enabled:true,privateKey:'',alipayPublicKey:'',returnTargets}})
+ assert.deepEqual(ch.returnTargets,returnTargets)
+ ch=await route('channels/alipay-test/publish','POST',{revision:ch.revision})
+ await management.syncChannels(service)
+ assert.deepEqual(service.channelPayments.adapter(ch.id).config.returnTargets,returnTargets)
+ assert.equal(service.channelPayments.adapter(ch.id).config.returnUrl,channel.returnUrl)
+ ch=await route('channels/alipay-test','PUT',{revision:ch.revision,channel:{...channel,sellerId:'2088000000000001',enabled:true,privateKey:'',alipayPublicKey:''}})
+ assert.deepEqual(ch.returnTargets,returnTargets,'older editors that omit the optional field preserve its saved value')
+ ch=await route('channels/alipay-test/publish','POST',{revision:ch.revision})
  assert.ok(!JSON.stringify((await pool.query('SELECT draft,published FROM pay_control.channels')).rows).includes('PRIVATE KEY'))
  assert.ok(!JSON.stringify(await route('channels')).includes(channel.privateKey))
  await assert.rejects(route('channels/alipay-test','PUT',{revision:0,channel}),{code:'payment_revision_conflict'})

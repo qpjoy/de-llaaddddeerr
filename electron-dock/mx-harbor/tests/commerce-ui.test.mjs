@@ -97,6 +97,17 @@ test("uncertain purchase retries keep one identity across page reloads and separ
   assert.notEqual(purchaseIntent(storage, "a:product:1").key, a.key);
 });
 test("payment links stay on the environment's exact HTTPS checkout; returns are locators only", () => {
+  const harborReturn = "https://harbor.example.test/payment/return";
+  const signedUrl =
+    "https://openapi.alipay.com/gateway.do?return_url=" +
+    encodeURIComponent(harborReturn);
+  assert.equal(checkoutLocation(signedUrl, "live", harborReturn), signedUrl);
+  for (const value of [
+    "https://openapi.alipay.com/gateway.do?fixture=1",
+    signedUrl.replace("harbor.example.test", "hub.example.test"),
+    signedUrl + "&return_url=" + encodeURIComponent(harborReturn),
+  ])
+    assert.throws(() => checkoutLocation(value, "live", harborReturn));
   assert.equal(
     checkoutLocation("https://openapi.alipay.com/gateway.do?fixture=1", "live"),
     "https://openapi.alipay.com/gateway.do?fixture=1",

@@ -34,7 +34,7 @@ export class AlipayChannel {
       alipayPublicKey: config.alipayPublicKey, signType: 'RSA2', camelcase: false, timeout: 5000,
       gateway: config.environment === 'live' ? 'https://openapi.alipay.com/gateway.do' : 'https://openapi-sandbox.dl.alipaydev.com/gateway.do' })
   }
-  checkout(order) {
+  checkout(order, returnUrl = this.config.returnUrl) {
     const now = Date.now(), expires = Math.floor((Date.parse(order.createdAt) + 30 * 60000) / 1000) * 1000
     requirePayment(expires - now >= 60000, 'payment_checkout_expired', 'Checkout requires at least one minute remaining; retain and query this order', 409)
     const outTradeNo = alipayOrderNo(order)
@@ -42,7 +42,7 @@ export class AlipayChannel {
     const subject = alipaySubject(order.subject)
     const amount = `${Math.floor(order.amountMinor / 100)}.${String(order.amountMinor % 100).padStart(2,'0')}`
     // pageExecute signs locally. It neither creates a remote charge nor retries it.
-    const payUrl = this.sdk.pageExecute('alipay.trade.page.pay', 'GET', { timestamp: chinaTime(now), notifyUrl: this.config.notifyUrl, returnUrl: this.config.returnUrl,
+    const payUrl = this.sdk.pageExecute('alipay.trade.page.pay', 'GET', { timestamp: chinaTime(now), notifyUrl: this.config.notifyUrl, returnUrl,
       bizContent: { out_trade_no: outTradeNo, total_amount: amount, subject, product_code: 'FAST_INSTANT_TRADE_PAY', time_expire: chinaTime(expires) } })
     return { paymentId: order.id, provider: 'alipay', payUrl, expiresAt: new Date(expires).toISOString() }
   }

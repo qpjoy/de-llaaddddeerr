@@ -171,7 +171,7 @@ OIDC 回调、issuer、audience 与 subject 要按协议校验；不能把其他
 
 新订单额外记可信入口来源 `salesChannel=harbor` 用于品牌、支付路由、审计与报表；它不构成新的 tenant，不成为授予数据权限的依据。
 
-同一空间下跨入口的订单可按当前角色读取，但支付动作仍服从订单原应用/返回快照。Harbor 新建订单在 Harbor 完成付款闭环；已有 Hub 未完成订单在 Harbor 首期只读，继续由原入口处理，不为切换展示域名重写它的支付身份或返回地址。已付款权益在两个入口按相同授权使用。
+同一空间下跨入口的订单按当前角色读取，支付动作始终服从原订单应用、环境及渠道。2026-10-11 根据用户已从 Harbor 支付 Hub 验收订单的实际链路，首期调整为：Harbor 可继续原未付订单，由已验证 Portal 选择 Pay 登记的 Harbor 返回目标。只改变本次收银台签名中的展示导航，不重写支付身份、金额或订单文档；同一订单从 Hub 打开仍返回 Hub。已付款权益在两个入口按相同授权使用。
 
 ## 7. 客户接口、权限和功能范围
 
@@ -251,7 +251,7 @@ Nginx 可以承担域名与路径分发；它不能替代应用的 SSO 回调、
 
 mx-pay 同一环境的同一个支付宝 APPID 不能重复建渠道，不能为 Harbor 复制同商户渠道后硬改 returnUrl。保留现有渠道、商户身份、notifyUrl 与旧 returnUrl，增加受信任应用返回目标配置。
 
-新订单选择服务器登记的 returnTargetId，服务端据 appId/environment 校验，将 Harbor HTTPS 返回地址作为不可变快照，再用于支付宝签名请求。浏览器不能传任意 returnUrl。旧订单继续原返回规则；新 Hub 订单维持 Hub 返回；新 Harbor 订单返回 Harbor。
+2026-10-11 实际交付采用渠道可选 `returnTargets: [{appId,url}]` 和 checkout 可选 `returnUrl`。Hub 从已验证 Portal principal 的登记 origin 生成固定 `/payment/return`，Pay 据原订单渠道/环境和机器 app 校验精确目标，再用于支付宝签名。浏览器不能传任意地址，Hub 普通 checkout 不传覆盖值。此选择不写入或改写订单资金快照，适用于原有效期内的已有订单；旧已签发链接保持原内容。该决定替代原“仅新订单写入返回快照、旧 Hub 单在 Harbor 只读”的首期方案，独立业务应用/worker 仍属后续范围。
 
 渠道通知仍发给 Pay 的固定 HTTPS 验签入口，不经过 Harbor 业务前端。用户可以经过统一 Auth 和支付宝域名；“不暴露 Hub”指客户交互、接口、文档、支付返回无需 Hub 域名，不表示隐藏支付商户真实信息或重写 Auth issuer。
 

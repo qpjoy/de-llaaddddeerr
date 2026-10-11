@@ -155,14 +155,16 @@ export class CommerceService {
     const payment = row.payment_id ? await source.client.order(row.payment_id) : await source.client.create(this.input(row),`hub-purchase:${row.id}`)
     await this.attach(row,payment); return {source,payment}
   }
-  async action(tenantId,id,action) {
+  async action(tenantId,id,action,checkoutOptions) {
     const row = await this.row(id,tenantId)
     requirePayment(row,'commerce_not_found','购买订单不存在',404)
     requirePayment(['checkout','refresh','retry'].includes(action),'commerce_invalid_action','不支持该订单操作')
     return this.recharge.network(async () => {
       const {source,payment} = await this.prepare(row)
       if (action === 'checkout') {
-        const checkout = await source.client.checkout(payment.id)
+        requirePayment(!checkoutOptions?.returnUrl || source.identity.features?.includes('checkoutReturnUrl'),
+          'commerce_checkout_return_unavailable','支付中心尚未支持数港返回，请先更新支付中心；原订单已保留。',503)
+        const checkout = await source.client.checkout(payment.id,checkoutOptions)
         return {...view(await this.row(id,tenantId)),paymentUrl:checkout.payUrl}
       }
       if (action === 'refresh' && payment.provider === 'alipay') {

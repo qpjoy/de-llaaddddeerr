@@ -49,11 +49,16 @@ export class ChannelPayments {
       submission: null, settlement: null, rejection: null, createdBy: `credential:${principal.id}`, createdAt: now, updatedAt: now }
   }
   async checkout(principal, id, body) {
-    authorize(principal, 'orders.write'); fields(body, [])
+    authorize(principal, 'orders.write'); fields(body, ['returnUrl'])
     const order = await this.center.order(principal, id), adapter = this.forOrder(order)
     requirePayment(adapter.config.enabled && adapter.config.allowedApps.includes(principal.appId), 'payment_channel_disabled', 'Checkout disabled', 409)
     requirePayment(order.status === 'pending', 'payment_state_conflict', 'Order is not awaiting payment', 409)
-    return adapter.checkout(order)
+    // A checkout may select an approved presentation destination without changing
+    // the order, merchant, notification endpoint or channel's existing default.
+    if (body.returnUrl !== undefined) requirePayment(typeof body.returnUrl === 'string'
+      && adapter.config.returnTargets?.some(target=>target.appId===principal.appId && target.url===body.returnUrl),
+      'payment_return_not_allowed', '此应用的付款返回地址尚未登记，请在支付中心发布对应渠道的额外返回地址。', 409)
+    return adapter.checkout(order, body.returnUrl)
   }
   async notify(channelId, body) {
     const adapter = this.adapter(channelId)

@@ -38,7 +38,7 @@ export class PaymentCenter {
     authorize(principal, 'orders.read')
     const { rows } = await this.pool.query('SELECT id FROM pay.reporting_source WHERE singleton=true')
     requirePayment(rows.length === 1, 'payment_source_unavailable', 'Payment source identity unavailable', 503)
-    return { sourceId: rows[0].id, appId: principal.appId, environment: principal.environment, features: ['initiatorRef'], scopes: principal.scopes }
+    return { sourceId: rows[0].id, appId: principal.appId, environment: principal.environment, features: ['initiatorRef','checkoutReturnUrl'], scopes: principal.scopes }
   }
   async channels(principal) {
     authorize(principal, 'orders.read')

@@ -38,7 +38,7 @@ mx-pay 采用同样的收银台流程，服务端使用[支付宝官方 Node.js 
 
 1. 私钥至少 RSA 2048；支持普通公钥模式、PKCS8/PKCS1，暂不支持支付宝证书模式。`keyType` 必须匹配 PEM。沙箱需使用沙箱应用、卖家与买家账号。配置为 test 时只能使用沙箱网关；live 只能使用正式网关，调用方不能传入任意 gateway。
 2. `appId` 是支付宝应用 ID；`allowedApps` 是 mx-pay 机器凭据的应用 ID，两者不同。只允许明确列出的应用，不支持 `*`。
-3. `notifyUrl` 必须为公网可达 HTTPS、精确路径 `/v1/notifications/alipay/<id>`；`returnUrl` 是固定展示页，不能由下单方随意提供。入口代理只需将通知路径送往 mx-pay，并保留表单内容；不能加 Launcher 登录重定向。业务 `/v1/orders` 等仍要求机器凭据。当前 deploy 不自动申请域名、TLS 或创建公网 Ingress。
+3. `notifyUrl` 必须为公网可达 HTTPS、精确路径 `/v1/notifications/alipay/<id>`；`returnUrl` 是默认展示页。可选 `returnTargets` 登记按来源应用限定的额外地址，调用方只能选择已发布的精确地址，不能传入任意地址。入口代理只需将通知路径送往 mx-pay，并保留表单内容；不能加 Launcher 登录重定向。业务 `/v1/orders` 等仍要求机器凭据。当前 deploy 不自动申请域名、TLS 或创建公网 Ingress。
 4. 保存为 `0600` 的 `secrets/channels.json`，再执行 `bash scripts/manage.sh deploy`。脚本校验配置、写入不可变版本 Secret、执行全部新增迁移（包括 `pay_003`、`pay_004`）、滚动发布；密钥只挂载到 API，不进入迁移 Pod、镜像、报告或浏览器。备份中的私密运行 Secret 会包含此配置，须按密钥级别保护。
 5. 新增官方渠道建议先 `enabled:false` 完成所有副本和报表消费者升级，再启用沙箱验收。正式应用产品签约、资质、密钥和回调可达性需在支付宝控制台核实；不能用个人静态收款码代替开放平台应用配置。
 
@@ -62,12 +62,15 @@ const order = await pay.create({
   subject: '账户充值'
 }, 'recharge-stable-request-key')
 const checkout = await pay.checkout(order.id) // POST /v1/orders/:id/checkout
+// 可选：仅在原渠道已为该机器应用登记精确返回地址后使用。
+// const checkout = await pay.checkout(order.id, { returnUrl: 'https://harbor.minsight-ai.com/payment/return' })
 // 业务前端打开 checkout.payUrl；打开失败时重新打开同一订单，不重建单。
 const local = await pay.order(order.id)
 const checked = await pay.refresh(order.id) // POST /v1/orders/:id/refresh
 ```
 
 - 不传 `channelId` 保持旧行为：test 为 mock，live 为人工收款。`GET /v1/channels` 保留原顶层字段并新增 `items`。
+- `GET /v1/identity` 的 `checkoutReturnUrl` feature 表示支持按次选择返回地址。未传 `returnUrl` 的 checkout 仍使用渠道原默认值；传入时必须匹配原订单渠道/环境内 `returnTargets` 中当前机器应用的地址，否则返回 `payment_return_not_allowed`，不会降级到默认地址。
 - 新渠道下单必须提供 `subject`（最多 128 字符；不接受 `/`、`=`、`&` 和控制/格式字符）。渠道、金额、标题与业务单一起参与请求指纹；更换渠道不能复用原请求键覆盖订单。
 - 先提交本地订单，再取得签名链接；此过程没有服务器向支付宝创建扣款的网络调用。内部 ID 仍是 UUID，新支付宝单的 `checkout.outTradeNo` 为 `MXP` 加去掉连字符的 UUID；签名、查单和回调必须使用同一渠道编号。历史无此字段的订单仍以原 UUID 查单/收通知，不更名，也不再签发新链接；未查清前不能因此重新付款。
 - 链接绝对付款窗口为下单后 30 分钟，按秒固定，重新打开不会延长；剩余不足一分钟时停止生成链接，但订单不被自动判失败或取消，仍可收通知和查单。
@@ -100,6 +103,22 @@ const checked = await pay.refresh(order.id) // POST /v1/orders/:id/refresh
 异常记录包含核验所需字段和报文哈希，过滤买家姓名、账号等 PII；并非完整原始签名报文归档。`success` 对 review 只表示已持久接收，**不表示已完成入账或异常处理**。人工应查询支付宝账单及原业务单，记录证据，按正式财务流程退款/补账；不能直接改订单金额、状态或数据库余额。自动案件分派/告警、异常解决 API、原始证据归档、日账单对账和后台定时补单尚未实现；仅靠此 API 不能宣称财务闭环完成。
 
 ## 验证与升级
+
+### 2026-10-11 Harbor 付款返回修复
+
+保留原支付宝渠道的默认 `returnUrl`、商户和通知入口。在支付中心「支付渠道 → 编辑配置 → 额外付款返回地址」增加一行（第一项须与 Hub 支付接入的真实机器应用 ID 相同）：
+
+```text
+mx-insight-hub https://harbor.minsight-ai.com/payment/return
+```
+
+保存草稿、校验并发布。该可选字段的配置形式为 `returnTargets: [{appId: 'mx-insight-hub', url: 'https://harbor.minsight-ai.com/payment/return'}]`；最多 32 项，HTTPS 精确匹配，无自定义端口、查询、片段或账号密码，应用必须位于渠道 `allowedApps`。已有控制台管理环境应修改并发布原渠道，文件种子不会覆盖已保存配置；旧编辑器省略该字段时保留已存值，显式空数组才清空。
+
+Hub 仅从已验证 Portal principal 的登记 `portalOrigin` 生成固定 `/payment/return`，浏览器 JSON、Host、Referer 不参与选择；普通 Hub checkout 不传覆盖值。Pay 使用 SDK 把所选地址纳入签名。此地址只影响当前 checkout 的展示导航，不改订单应用、金额、`outTradeNo`、付款窗口、资金事实或交付。Hub 中创建的 ¥1 原订单在 Harbor 继续付款时同样适用；已签发链接不被改写，须在原有效窗口内重新打开原订单收银台。
+
+部署顺序：Pay 全副本升级 → 发布原渠道额外地址 → Hub → Harbor。旧 Pay 或缺少目标配置时 Harbor 停止跳转并保留原订单；Hub 默认付款仍可用。Harbor 前端也校验签名 URL 中唯一的 `return_url`，混合旧 Hub 版本不能静默跳往 Hub。返回参数仅用于有权限的原订单定位，到账和权益仍由原通知/查单及 Hub 事务确认。
+
+独立临时 PostgreSQL 验证：Pay 相关 37 项通过、零跳过；新增管理输入结构检查后管理用例再次通过。包含官方 SDK 返回地址签名、原 Hub 默认值、跨应用/任意地址拒绝、缺配置保留原单、重复通知只保留一份付款及 outbox。没有真实付款或正式配置变更。
 
 `tests/alipay.test.mjs` 使用临时 RSA 密钥、官方 SDK 验签、真实临时 PostgreSQL/HTTP，覆盖签名篡改、重复字段、商户与应用隔离、重复/乱序通知、差额、流水竞争、提交失败/提交应答丢失、查询失败、停用后收通知、最小权限和独立报表库。部署测试覆盖渠道 Secret 的版本化、恢复和配置失败阻止 rollout。
 

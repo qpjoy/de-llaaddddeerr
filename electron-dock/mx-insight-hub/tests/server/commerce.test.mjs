@@ -50,13 +50,28 @@ test('space product docs expose only the purchased product interface',()=>{
 })
 
 const connectionString=process.env.MX_PAY_TEST_DATABASE_URL
+
+test('checkout return comes only from the verified Portal principal, never customer JSON or request headers',async()=>{
+ const tenant=randomUUID(),order=randomUUID(),calls=[]
+ const principal={kind:'launcher-user',memberId:randomUUID(),platformAdmin:false,tenantIds:[tenant],memberships:[{tenantId:tenant,capabilities:['billing.read','recharge.create']}]}
+ const invoke=(p,body={})=>commerceRoute({commerce:{action:async(...args)=>{calls.push(args);return {id:order}}},request:{method:'POST',headers:{host:'evil.test',referer:'https://evil.test'}},response:{},
+  pathname:`/internal/v1/admin/commerce/tenants/${tenant}/orders/${order}/checkout`,searchParams:new URLSearchParams(),principal:p,readJson:async()=>body,sendJson(){},requestId:'fixture'})
+ await invoke(principal)
+ assert.deepEqual(calls.pop(),[tenant,order,'checkout',undefined])
+ await invoke({...principal,portalOrigin:'https://harbor.example.test'})
+ assert.deepEqual(calls.pop(),[tenant,order,'checkout',{returnUrl:'https://harbor.example.test/payment/return'}])
+ await assert.rejects(invoke(principal,{returnUrl:'https://harbor.example.test/payment/return'}),{code:'unsupported_payment_fields'})
+ await assert.rejects(invoke({...principal,portalOrigin:'https://harbor.example.test'},{returnUrl:'https://evil.test/'}),{code:'unsupported_payment_fields'})
+ await assert.rejects(invoke({...principal,memberships:[]}),{status:403})
+ assert.deepEqual(calls,[])
+})
 async function fixture(t,{space=false}={}){
   const admin=new pg.Pool({connectionString,max:1}),name=`commerce_${randomUUID().replaceAll('-','')}`
   await admin.query(`CREATE DATABASE ${name}`)
   const url=new URL(connectionString);url.pathname=`/${name}`
   const pool=new pg.Pool({connectionString:url.href,max:8}),migrationDir=await mkdtemp(join(tmpdir(),'hub-commerce-migration-'))
   t.after(async()=>{await pool.end();await admin.query(`DROP DATABASE ${name}`);await admin.end();await rm(migrationDir,{recursive:true,force:true})})
-  const selected=['001','002','003','004','005','007','016','018','031','041','051','052','053','054','055','056','057','058','060','063','065','075','076','077','078','081','082','083','094','113','119','122','123','126','127','128','129'],dir=new URL('../../migrations/',import.meta.url)
+  const selected=['001','002','003','004','005','007','016','018','031','041','051','052','053','054','055','056','057','058','060','063','065','075','076','077','078','081','082','083','094','113','119','122','123','126','127','128','129','138'],dir=new URL('../../migrations/',import.meta.url)
   if(space)selected.push('130')
   for(const file of (await readdir(dir)).sort().filter(f=>selected.includes(f.slice(0,3)))){
     if(['129','130'].includes(file.slice(0,3))){await writeFile(join(migrationDir,file),await readFile(new URL(file,dir)));continue}
@@ -86,6 +101,22 @@ async function fixture(t,{space=false}={}){
     rerunMigrations:()=>runMigrations({connectionString:url.href,migrationsDir:migrationDir})}
 }
 const database={skip:!connectionString}
+test('existing purchase checkout accepts trusted Harbor presentation without replacing order or payment identity',database,async t=>{
+ const f=await fixture(t,{space:true}),order=await f.create(),row=await f.service.row(order.id,f.tenant),calls=[]
+ f.source.client.checkout=async(id,options)=>{calls.push([id,options]);return {payUrl:'https://openapi.alipay.com/gateway.do?fixture=1'}}
+ await f.service.action(f.tenant,order.id,'checkout')
+ assert.deepEqual(calls.pop(),[row.payment_id,undefined])
+ await assert.rejects(f.service.action(f.tenant,order.id,'checkout',{returnUrl:'https://harbor.example/payment/return'}),{code:'commerce_checkout_return_unavailable'})
+ assert.deepEqual(calls,[],'old Pay fails closed only for the Harbor path')
+ f.source.identity.features=['initiatorRef','checkoutReturnUrl']
+ await f.service.action(f.tenant,order.id,'checkout',{returnUrl:'https://harbor.example/payment/return'})
+ assert.deepEqual(calls.pop(),[row.payment_id,{returnUrl:'https://harbor.example/payment/return'}])
+ assert.deepEqual(await f.service.row(order.id,f.tenant),row)
+ const {event,payment,source}=await f.eventFor(order)
+ const receipt=await f.service.commit(source,event,payment)
+ assert.equal(await f.service.commit(source,event,payment),receipt)
+ assert.equal((await f.service.list(f.tenant)).subscriptions.length,1)
+})
 test('space upgrade preserves ordinary order retries and the original consumer entitlement',database,async t=>{
   const f=await fixture(t),key=randomUUID(),body={sku:INITIAL_PRODUCT.sku,revision:1,consumerId:f.consumer,environment:'live'}
   const order=await f.service.create(f.tenant,body,key,'fixture-owner')

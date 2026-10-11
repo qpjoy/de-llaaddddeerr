@@ -130,13 +130,20 @@ export class PaymentManagement {
     })
   }
   draft(value) {
-    fields(value,['id','provider','environment','enabled','appId','sellerId','allowedApps','keyType','privateKey','alipayPublicKey','notifyUrl','returnUrl'])
+    fields(value,['id','provider','environment','enabled','appId','sellerId','allowedApps','keyType','privateKey','alipayPublicKey','notifyUrl','returnUrl','returnTargets'])
     requirePayment(validId(value.id) && !['mock','manual_alipay'].includes(value.id) && value.provider === 'alipay'
       && ['live','test'].includes(value.environment) && typeof value.enabled === 'boolean'
       && Array.isArray(value.allowedApps) && value.allowedApps.length <= 100 && value.allowedApps.every(validId)
       && ['PKCS8','PKCS1'].includes(value.keyType), 'invalid_channel_draft','渠道草稿格式无效')
     for (const k of ['appId','sellerId','privateKey','alipayPublicKey','notifyUrl','returnUrl'])
       requirePayment(typeof value[k] === 'string' && value[k].length <= (k.includes('Key') ? 10000 : 1000),'invalid_channel_draft','渠道字段格式无效')
+    requirePayment(value.returnTargets === undefined || Array.isArray(value.returnTargets) && value.returnTargets.length <= 32,
+      'invalid_channel_draft','额外返回地址最多填写 32 项')
+    for (const target of value.returnTargets || []) {
+      fields(target,['appId','url'])
+      requirePayment(typeof target.appId === 'string' && target.appId.length <= 80 && typeof target.url === 'string' && target.url.length <= 1000,
+        'invalid_channel_draft','额外返回地址须包含应用 ID 和完整地址')
+    }
     return value
   }
   channelView(row, publishedChannels = []) {
@@ -275,7 +282,9 @@ export class PaymentManagement {
       if (!channel[2]) {
         const old = row ? this.unseal(id,row.draft) : {}
         requirePayment(body.channel && body.channel.id===id,'invalid_channel_draft','渠道 ID 不匹配')
-        const ch = this.draft({...body.channel,privateKey:body.channel.privateKey || old.privateKey || '',alipayPublicKey:body.channel.alipayPublicKey || old.alipayPublicKey || ''})
+        const ch = this.draft({...body.channel,
+          ...(body.channel.returnTargets === undefined && old.returnTargets !== undefined ? {returnTargets:old.returnTargets} : {}),
+          privateKey:body.channel.privateKey || old.privateKey || '',alipayPublicKey:body.channel.alipayPublicKey || old.alipayPublicKey || ''})
         requirePayment(row || Number((await c.query('SELECT count(*) FROM pay_control.channels')).rows[0].count)<32,'payment_channel_limit','渠道数量已达上限',409)
         await c.query(`INSERT INTO pay_control.channels(id,draft) VALUES($1,$2) ON CONFLICT(id) DO UPDATE
           SET draft=excluded.draft,revision=pay_control.channels.revision+1,updated_at=now()`,[id,this.seal(id,ch)])

@@ -1,4 +1,4 @@
-import { PaymentError, requirePayment } from '@qpjoy/mx-pay'
+import { PaymentError, requirePayment, fields } from '@qpjoy/mx-pay'
 import { AppError } from '../core/errors.mjs'
 import { requireTenantCapability } from '../identity/index.mjs'
 
@@ -38,7 +38,13 @@ export async function commerceRoute({ commerce, service, productGateway, request
       if (request.method === 'GET' && !id) return reply(await commerce.list(tenantId))
       if (request.method === 'POST') {
         requireTenantCapability(principal,tenantId,'recharge.create')
-        if (action) { await readJson(request,1024); return reply(await commerce.action(tenantId,id,action)) }
+        if (action) {
+          fields(await readJson(request,1024),[])
+          // portalOrigin comes only from the verified Portal principal, never Host/body/Referer.
+          const checkout = action==='checkout' && principal.portalOrigin
+            ? {returnUrl:new URL('/payment/return',principal.portalOrigin).href} : undefined
+          return reply(await commerce.action(tenantId,id,action,checkout))
+        }
         requireTenantCapability(principal,tenantId,'apikey.write')
         return reply(await commerce.create(tenantId,await readJson(request,4096),request.headers['idempotency-key'],actor),201)
       }

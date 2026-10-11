@@ -26,7 +26,7 @@ export class PaymentClient {
   create(body, key) { return this.request('/v1/orders', { method: 'POST', body, key }) }
   identity() { return this.request('/v1/identity') }
   channels() { return this.request('/v1/channels') }
-  checkout(id) { return this.request(`/v1/orders/${encodeURIComponent(id)}/checkout`, { method: 'POST', body: {} }) }
+  checkout(id, options = {}) { return this.request(`/v1/orders/${encodeURIComponent(id)}/checkout`, { method: 'POST', body: options }) }
   refresh(id) { return this.request(`/v1/orders/${encodeURIComponent(id)}/refresh`, { method: 'POST', body: {} }) }
   channelReviews(page=1) { return this.request(`/v1/channel-reviews?page=${encodeURIComponent(page)}`) }
   order(id) { return this.request(`/v1/orders/${encodeURIComponent(id)}`) }

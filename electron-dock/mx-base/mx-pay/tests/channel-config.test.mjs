@@ -39,3 +39,15 @@ test('Pay serves canonical design components through existing gateway asset path
  assert.match(js,/export function installNeonSelects/)
  assert.match(consoleAssets.get('/')[1],/qp-modal__footer/)
 })
+
+test('additional checkout returns are explicit HTTPS destinations scoped to an allowed application',()=>{
+ const target={appId:'mx-insight-hub',url:'https://harbor.example/payment/return'}
+ assert.deepEqual(channelValidationIssues({...valid,returnTargets:[target]}),[])
+ assert.equal(validateChannels([{...valid,returnTargets:[target]}])[0].returnUrl,valid.returnUrl)
+ for(const returnTargets of [null,{},[target,target],[{...target,appId:'unrelated'}],[{...target,url:'http://harbor.example/payment/return'}],
+  [{...target,url:target.url+'?next=https://evil.test'}],[{...target,url:target.url+'#done'}],[{...target,url:'https://u:p@harbor.example/payment/return'}],
+  [{...target,url:'https://harbor.example:444/payment/return'}],[{...target,extra:'ignored?'}]]) {
+  assert.ok(channelValidationIssues({...valid,returnTargets}).some(issue=>issue.field==='returnTargets'))
+  assert.throws(()=>validateChannels([{...valid,returnTargets}]))
+ }
+})
