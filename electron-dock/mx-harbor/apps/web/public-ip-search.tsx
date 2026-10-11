@@ -42,9 +42,21 @@ const queryFeatures = [
 export function PublicIpSearch({
   initialIp = "",
   available = true,
+  busy = false,
+  actionLabel,
+  hint,
+  onQuery,
+  showIntro = true,
+  validateInput = true,
 }: {
   initialIp?: string;
   available?: boolean;
+  busy?: boolean;
+  actionLabel?: string;
+  hint?: string;
+  onQuery?: (ip: string) => void;
+  showIntro?: boolean;
+  validateInput?: boolean;
 }) {
   const { signedIn, enter } = usePublicAccess();
   const [ip, setIp] = useState(initialIp);
@@ -56,13 +68,14 @@ export function PublicIpSearch({
     setIp(value);
     // All guest submissions go through authentication before querying.
     if (!available) return;
-    if (signedIn && !validIpv4(value)) {
+    if (signedIn && validateInput && !validIpv4(value)) {
       setError("请输入有效的 IPv4 地址，例如 192.0.2.1");
       inputRef.current?.focus();
       return;
     }
     setError("");
-    enter("intelligence", validIpv4(value) ? value : "");
+    if (onQuery) onQuery(value);
+    else enter("intelligence", validIpv4(value) ? value : "");
   }
   return (
     <section
@@ -121,11 +134,19 @@ export function PublicIpSearch({
                 )}
                 <Button
                   type="submit"
-                  disabled={!available}
+                  disabled={!available || busy}
                   className="intelligence-submit"
-                  aria-label="查询 IP 画像"
+                  aria-label={
+                    actionLabel && actionLabel !== "查询"
+                      ? actionLabel
+                      : "查询 IP 画像"
+                  }
                 >
-                  <span>{available ? "查询" : "准备中"}</span>
+                  <span>
+                    {busy
+                      ? "正在查询…"
+                      : actionLabel || (available ? "查询" : "暂不可用")}
+                  </span>
                 </Button>
               </InputGroupAddon>
             </InputGroup>
@@ -134,26 +155,29 @@ export function PublicIpSearch({
         </FieldGroup>
       </form>
       <p id="public-query-hint" className="public-query-hint">
-        {signedIn
-          ? available
-            ? "输入 IP 后进入控制台查询"
-            : "数据查询尚未开放"
-          : "受邀加入数港，已有 MX 账号也需首次开通"}
+        {hint ||
+          (signedIn
+            ? available
+              ? "输入 IP 后进入控制台查询"
+              : "数据查询尚未开放"
+            : "受邀加入数港，已有 MX 账号也需首次开通")}
       </p>
-      <ul className="public-query-intro" aria-label="查询功能介绍">
-        {queryFeatures.map(({ title, description, detail, Icon }) => (
-          <li key={title}>
-            <div className="public-query-feature-heading">
-              <Icon aria-hidden="true" />
-              <h2>{title}</h2>
-            </div>
-            <p>
-              <span>{description}</span>
-              <span>{detail}</span>
-            </p>
-          </li>
-        ))}
-      </ul>
+      {showIntro && (
+        <ul className="public-query-intro" aria-label="查询功能介绍">
+          {queryFeatures.map(({ title, description, detail, Icon }) => (
+            <li key={title}>
+              <div className="public-query-feature-heading">
+                <Icon aria-hidden="true" />
+                <h2>{title}</h2>
+              </div>
+              <p>
+                <span>{description}</span>
+                <span>{detail}</span>
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

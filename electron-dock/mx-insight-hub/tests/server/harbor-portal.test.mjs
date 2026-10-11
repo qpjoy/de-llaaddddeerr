@@ -9,11 +9,29 @@ import {SsoStore} from '../../server/identity/sso-store.mjs'
 import {createApp} from '../../server/app.mjs'
 import {HubService} from '../../server/hub-service.mjs'
 import {MemoryStore} from '../../server/stores/memory-store.mjs'
-test('Portal allowlist rejects admin, supplier, money and document bypass paths',()=>{
+test('Portal allowlist rejects administrative, supplier and document bypass paths',()=>{
  for(const path of ['/runtime','/commerce/delivery','/commerce/tenants/abc/acceptance-orders','/../admin/session','/api-keys/abc/reveal'])assert.throws(()=>harborRoute('GET',path,new URLSearchParams()),{status:404})
  assert.throws(()=>harborRoute('POST','/commerce/products',new URLSearchParams()),{status:404})
  assert.throws(()=>harborRoute('GET','/documentation',new URLSearchParams('path=/docs/procurement')),{status:404})
  assert.equal(harborRoute('GET','/documentation',new URLSearchParams('path=/docs/openapi.json')),'/internal/v1/admin/documentation')
+})
+test('Portal purchase and access writes are narrow and retain tenant authorization',async t=>{
+ const tenant=randomUUID(),other=randomUUID()
+ for(const path of [`/commerce/tenants/${tenant}/orders`,`/commerce/tenants/${tenant}/access`,`/commerce/tenants/${tenant}/orders/${randomUUID()}/checkout`,`/commerce/tenants/${tenant}/orders/${randomUUID()}/refresh`,'/demo-credentials','/payments/personal-account']) {
+  assert.equal(harborRoute('POST',path,new URLSearchParams()),`/internal/v1/admin${path}`)
+  assert.throws(()=>harborRoute('POST',path,new URLSearchParams('admin=1')),{status:400})
+ }
+ for(const path of [`/commerce/tenants/${tenant}/acceptance-orders`,'/commerce/delivery','/commerce/products/annual','/payments/integration/live/activate','/admin-execution-credential'])assert.throws(()=>harborRoute('POST',path,new URLSearchParams()),{status:404})
+ const store=new MemoryStore(),service=new HubService({store,adapter:{},apiKeyPepper:'fixture-long-pepper-for-harbor'})
+ let caps=['tenant.read'],resolutions=0
+ const portal={resolve:async()=>{resolutions++;return {kind:'launcher-user',memberId:randomUUID(),platformAdmin:false,tenantIds:[tenant],memberships:[{tenantId:tenant,status:'active',capabilities:caps}],capabilities:caps}}}
+ const server=createServer(createApp({store,service,adapter:{},listenerMode:'admin',harborPortal:portal}));await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.close(r);server.closeAllConnections()}));const base=`http://127.0.0.1:${server.address().port}`
+ const post=path=>fetch(`${base}/internal/v1/portal${path}`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'})
+ for(const path of [`/commerce/tenants/${tenant}/orders`,`/commerce/tenants/${tenant}/access`,'/demo-credentials'])assert.equal((await post(path)).status,403)
+ caps=['billing.read','recharge.create','apikey.write']
+ for(const path of [`/commerce/tenants/${other}/orders`,`/commerce/tenants/${other}/access`,`/commerce/tenants/${other}/orders/${randomUUID()}/checkout`])assert.equal((await post(path)).status,403)
+ assert.equal((await post(`/commerce/tenants/${tenant}/access`)).status,503,'authorized access still needs persisted paid subscription; no in-memory free grant')
+ assert.equal(resolutions,7)
 })
 test('Public listener never opens portal; admin listener uses only verified customer scope',async t=>{
  const store=new MemoryStore(),service=new HubService({store,adapter:{},apiKeyPepper:'fixture-long-pepper-for-harbor'})

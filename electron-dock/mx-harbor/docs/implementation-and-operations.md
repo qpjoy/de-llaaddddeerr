@@ -1,6 +1,6 @@
 # Harbor 第一批实现与部署说明
 
-2026-10-11。当前可验证的是界面、账号准入和客户权限读取。支付与查询写路径尚未开放；本批不能用于真实 ¥1 付款验收或对外销售。
+2026-10-11。已实现界面、账号准入、客户权限读取，以及复用 Hub 的商城、订阅、订单操作、IP 网页查询和历史记录。新增商业界面已通过隔离样例验收，尚未发布生产或进行真实付款、数据库交付与供应商调用验收；不能据此认定已具备对外销售条件。
 
 ## 已实现
 
@@ -13,7 +13,7 @@
 | 邀请隔离      | 新 `admissionAppId: mx-harbor` 区别于旧 `appGrant`。专用邀请仅开通 Harbor，不能用于其他应用。旧通用邀请不能开通 Harbor；通用“全部应用”排除 Harbor，其余应用照常 |
 | 历史兼容      | 不改旧账号密码、SDK、网络租约；只有新 Hub/Harbor 账号创建时使用已有 H2I/Luopan 默认拒绝策略                                                                     |
 | 客户权限      | Hub Portal 双重校验 BFF 凭据和 Auth UserInfo。以可信 canonical issuer/subject 关联原 Hub member，返回实际 membership，始终为客户视角                            |
-| 读取功能      | 空间概览、空间权限、Key 列表、已有订阅/订单和权限过滤后的 OpenAPI；不开放供应商、排障、商品管理、付款写接口                                                     |
+| 客户功能      | 空间概览、空间权限、Key 列表、权限过滤的 OpenAPI、商城、订阅、订单创建/付款/刷新、网页查询与历史；供应商、排障、商品管理仍不开放                              |
 | 独立发布      | Harbor 独立库、迁移 Job、固定节点镜像导入、部署锁、重启/状态/日志/离线计划；保留已有 Secret                                                                     |
 
 邀请不授予 Hub 租户角色或商品权益，也不授予 Pay 管理权限。关闭注册不会封禁已经开通的账号。撤销 Harbor 访问不修改其 Hub/H2I 权限。
@@ -213,12 +213,39 @@ Harbor 采用一个副本、固定节点、`Recreate`，不是高可用/零停�
 
 本地验证：Harbor 51 项测试通过、1 项依赖临时 PostgreSQL 的迁移测试跳过；生产构建通过。浏览器使用本地替身验证 issuer 410 → 重试 → 新表单、输入可编辑及响应式布局，不代表生产账号/付款验收。
 
+## 2026-10-11 商城、已购查询与账户安全
+
+原“准备中”是 Harbor 前端固定关闭查询、BFF/Portal 仅允许读取造成的，不是 IP 查询正在执行。现在根据当前空间的真实订阅、角色、Key 授权和产品可用状态显示“去选购 / 启用网页查询 / 查询 / 暂不可用”，失败提供重新检查；加载、切路由和刷新权限不会自动查询供应商。
+
+路由：`/#/market` 为数据商城，`/#/services` 为我的订阅，`/#/orders` 为支付订单，`/#/intelligence` 为新查询和历史，`/#/account` 为账户安全。公开定价入口登录后进入商城。商品价格、修订、期限和次数来自 Hub 目录，不采用原型旧价格；普通客户不能指定金额或创建验收价订单。
+
+使用步骤：进入有相应权限的空间 → 商城确认商品并创建订单 → 在新页面打开收银台 → 回到 Harbor 查询原订单状态 → Hub 收到并提交真实付款事件后发放权益 → 我的订阅 → 开始使用 → 首次显式启用网页查询 → 输入 IPv4 并查询。创建订单和浏览器回跳均不视为付款成功。新空间复用 Hub 已有个人空间开通接口，开通空间不会赠送商品。
+
+购买沿用当前空间的 `billing.read`、`recharge.create`、`apikey.write`；网页查询使用已获产品授权的 Live Key，由 Hub 签发绑定成员的短期凭据，凭据仅驻留页面内存。Hub Public API 继续检查成员、租户、调用者、Key、订阅、额度和服务状态。已过期或用尽的订阅不允许新查询，历史只读原 Key 保存的结果。缺失风险字段显示“未提供”，空标签不等于安全。
+
+查询和订单都有幂等请求编号。订单创建响应不确定时保留编号；同一空间/Key/IP 在当前浏览器标签页重新加载后仍复用原查询编号，只有已确认结果上的“重新查询此 IP（计入本期次数）”才创建新查询。编号及必要的输入定位保存在 sessionStorage，凭据和画像不持久化。未知结果显示待核对，不自动重试；历史列表/详情是 GET，不重放供应商请求。
+
+BFF 与 Hub Portal 仅增量允许：`POST /demo-credentials`、`POST /payments/personal-account`、`POST /commerce/tenants/:id/access`、`POST /commerce/tenants/:id/orders`、`POST /commerce/tenants/:id/orders/:orderId/{checkout,refresh}`；增加 `GET /payments/return-order` 定位原订单。BFF 写请求重新验证 SSO、同源和 CSRF，限制 JSON 大小；Hub 再检查服务凭据、真实成员和目标空间权限，始终没有平台管理身份。没有开放任意 Admin 代理、Key 明文读取、验收价或商品编辑。
+
+**支付边界：本批沿用 Hub 已有支付来源及 worker。** 没有新建 Harbor 支付应用或覆盖旧订单返回快照；收银台在新标签打开，用户保留 Harbor 原订单页，回跳目的地仍由现有支付配置决定。Harbor 已能只凭合法交易定位参数读取有权限的原订单，但独立 Harbor 支付来源与自动回跳仍属于下节目标，不能把当前实现称为已完成支付来源隔离。购买权益由原 Hub Commerce 事务发放，不新增支付账本，也不修改 mx-pay。
+
+账户安全原三列大卡片并非原型现有页面。现在使用与原型比例一致的账号摘要和资料、密码、会话三个折叠分组；改密增加前端确认密码，服务端仍只接收原合同。资料修改、密码验证、会话撤销、切换账号继续走 mx-common，不改 SSO / MX-H2I 登录和联网逻辑。
+
+已 enroll 且现有登录正常的环境，需要先更新 Hub 的 Portal 白名单，再更新 Harbor。在 Internal 的 `electron-dock/mx-harbor` 目录执行：
+
+```bash
+MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7789 bash ../mx-insight-hub/scripts/manage.sh ops internal-production deploy
+MX_HARBOR_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh ops internal-production deploy
+```
+
+本批不要求重发 Launcher/Auth 或 mx-pay。发布代码本身不会配置支付渠道、授予权益或产生查询；上线前仍需核对 Hub 已发布商品、Live 支付接入、产品可用性和受控商业验收。测试记录与视觉范围见 [验收文档](acceptance.md) 和 [界面验证](visual-verification.md)。
+
 ## 后续业务功能
 
 1. Hub 多业务应用支付来源与 worker 隔离，按订单不可变来源恢复；保留原 Hub 路由、密文、fingerprint 和所有旧订单。
 2. mx-pay 同渠道按业务 app 配置返回目标，写入新订单快照，Harbor 未配置独立返回地址时禁止激活。
-3. Internal 的 Harbor ¥1 管理员验收入口、Harbor 订单付款/刷新/返回恢复、事件提交与权益发放的故障边界回归。
-4. Harbor IP 网页查询、历史记录、真实定价卡/购买流程、Key 管理写入、团队邀请和其余客户功能；逐项复用 Hub 授权与计量。
+3. Internal 的 Harbor 独立来源 ¥1 管理员验收入口、真实付款/回跳/事件提交与权益发放的故障边界回归。当前普通订单/刷新及查询界面已接入，尚未做真实付款验收。
+4. Key 管理写入、团队邀请和其余客户功能；逐项复用 Hub 授权与计量。
 5. 实际域名、集群、网关及受控上线验收，确认全流程不依赖 Hub 公网域名后再开放销售。
 
 这一清单仍是项目未完成部分，不因本批构建或认证测试通过而自动视为完成。

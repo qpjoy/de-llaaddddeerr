@@ -8,7 +8,7 @@ export async function request<T = any>(
   const response = await fetch(path, {
     ...options,
     redirect: "error",
-    credentials: "same-origin",
+    credentials: options.credentials ?? "same-origin",
     headers: { "Content-Type": "application/json", ...options.headers },
   });
   let result;

@@ -10,6 +10,7 @@ import {
   Plug,
   Users,
   UserRound,
+  ShoppingBag,
 } from "lucide-react";
 import {
   SidebarProvider,
@@ -47,7 +48,11 @@ import { PublicIpSearch } from "./public-ip-search";
 import { AccessContext } from "./public-access";
 import { AccountDialog } from "./account-dialog";
 import { SidebarAccountMenu } from "./sidebar-account-menu";
-import { request, startAccountSession } from "./api";
+import { request } from "./api";
+import { AccountSecurity } from "./account-security";
+import { Commerce } from "./commerce";
+import { IpQuery } from "./ip-query";
+import { paymentReturnTrade } from "./commerce-state";
 import "@/styles/harbor.css";
 import "./design-scale.css";
 import "./harbor.css";
@@ -56,7 +61,8 @@ const pages = [
   ["overview", "用量概览", ChartNoAxesCombined],
   ["team", "空间权限", Users],
   ["keys", "API Keys", KeyRound],
-  ["services", "我的接入", Plug],
+  ["market", "数据商城", ShoppingBag],
+  ["services", "我的订阅", Plug],
   ["orders", "支付订单", Wallet],
   ["docs-ip", "接口文档", BookOpen],
   ["account", "账户安全", UserRound],
@@ -76,7 +82,7 @@ function Navigation({
         .map(([id, title, Icon]) => (
           <SidebarMenuItem
             key={id}
-            className={id === "services" ? "nav-divider" : ""}
+            className={id === "market" ? "nav-divider" : ""}
           >
             <SidebarMenuButton
               className="nav-button"
@@ -153,159 +159,19 @@ export function ConsoleShell({
     </SidebarProvider>
   );
 }
-function AccountSecurity() {
-  const [data, setData] = useState<any>(null),
-    [error, setError] = useState(""),
-    [busy, setBusy] = useState(false);
-  const load = () =>
-    request("/auth/sso/account")
-      .then(setData)
-      .catch((e) => setError(e.message));
-  useEffect(() => {
-    void load();
-  }, []);
-  async function submit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = event.currentTarget,
-      body = Object.fromEntries(new FormData(form));
-    setBusy(true);
-    setError("");
-    try {
-      const result = await request("/auth/sso/account", {
-        method: "POST",
-        headers: { "x-mx-csrf": data.csrf },
-        body: JSON.stringify(body),
-      });
-      form.reset();
-      if (result.signedOut || body.action === "password") {
-        location.assign("/");
-        return;
-      }
-      await load();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <>
-      <div className="page-heading">
-        <h1>账户安全</h1>
-      </div>
-      {error && <p role="alert">{error}</p>}
-      {!data ? (
-        <p>正在读取账户…</p>
-      ) : (
-        <div className="harbor-grid">
-          <Card>
-            <CardHeader>
-              <CardTitle>个人资料</CardTitle>
-              <CardDescription>{data.account}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form onSubmit={submit} className="harbor-form">
-                <input type="hidden" name="action" value="profile" />
-                <label>
-                  显示名称
-                  <Input
-                    name="displayName"
-                    defaultValue={data.displayName}
-                    required
-                    maxLength={80}
-                  />
-                </label>
-                <label>
-                  当前密码
-                  <Input
-                    name="currentPassword"
-                    type="password"
-                    autoComplete="current-password"
-                    required
-                  />
-                </label>
-                <Button disabled={busy}>保存资料</Button>
-              </form>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>修改密码</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <form onSubmit={submit} className="harbor-form">
-                <input type="hidden" name="action" value="password" />
-                <label>
-                  当前密码
-                  <Input
-                    name="currentPassword"
-                    type="password"
-                    autoComplete="current-password"
-                    required
-                  />
-                </label>
-                <label>
-                  新密码
-                  <Input
-                    name="password"
-                    type="password"
-                    autoComplete="new-password"
-                    minLength={8}
-                    maxLength={128}
-                    required
-                  />
-                </label>
-                <Button disabled={busy}>保存并重新登录</Button>
-              </form>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>登录设备</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p>{data.sessions?.length ?? 0} 个登录会话</p>
-              <form className="harbor-form" onSubmit={submit}>
-                <input type="hidden" name="action" value="revoke" />
-                <input type="hidden" name="target" value="all" />
-                <label>
-                  验证密码
-                  <Input
-                    name="currentPassword"
-                    type="password"
-                    required
-                    autoComplete="current-password"
-                  />
-                </label>
-                <Button variant="outline" disabled={busy}>
-                  撤销全部会话
-                </Button>
-              </form>
-              <Button
-                variant="link"
-                onClick={async () => {
-                  try {
-                    const result = await startAccountSession();
-                    location.assign(result.redirect);
-                  } catch (e) {
-                    setError((e as Error).message);
-                  }
-                }}
-              >
-                切换账号
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
-      )}
-    </>
-  );
-}
 function RemotePanel({
   page,
   session,
   tenant,
+  csrf,
+  go,
+  reloadSession,
+  initialIp,
 }: {
+  csrf: string;
+  go: (page: string) => void;
+  reloadSession: () => void;
+  initialIp: string;
   page: string;
   session: any;
   tenant: string;
@@ -316,8 +182,6 @@ function RemotePanel({
     overview: `/me/overview${tenant ? "?tenantId=" + tenant : ""}`,
     keys: "/api-keys",
     team: "/session",
-    services: `/commerce/tenants/${tenant}`,
-    orders: `/commerce/tenants/${tenant}`,
     "docs-ip": "/documentation?path=%2Fdocs%2Fopenapi.json",
   };
   useEffect(() => {
@@ -338,7 +202,27 @@ function RemotePanel({
     };
   }, [page, tenant]);
   if (page === "account") return <AccountSecurity />;
-  if (page === "intelligence") return <PublicIpSearch available={false} />;
+  if (page === "intelligence")
+    return (
+      <IpQuery
+        tenant={tenant}
+        session={session}
+        csrf={csrf}
+        go={go}
+        initialIp={initialIp}
+      />
+    );
+  if (["market", "services", "orders"].includes(page))
+    return (
+      <Commerce
+        page={page}
+        tenant={tenant}
+        session={session}
+        csrf={csrf}
+        go={go}
+        reloadSession={reloadSession}
+      />
+    );
   const title = pages.find((p) => p[0] === page)?.[1] || "服务";
   return (
     <>
@@ -401,35 +285,6 @@ function RemotePanel({
             )}
           </CardContent>
         </Card>
-      ) : ["services", "orders"].includes(page) ? (
-        <div className="harbor-grid">
-          {(page === "services" ? data.subscriptions : data.orders).map(
-            (item: any) => (
-              <Card key={item.id}>
-                <CardHeader>
-                  <CardTitle>{item.product?.name || "IP 风险画像"}</CardTitle>
-                  <CardDescription>{item.id}</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <p>
-                    {item.status || `已使用 ${item.used} / ${item.quota} 次`}
-                  </p>
-                  <p>
-                    {item.endsAt
-                      ? `有效期至 ${new Date(item.endsAt).toLocaleDateString()}`
-                      : ""}
-                  </p>
-                  {item.product && (
-                    <p>¥{(item.product.amountMinor / 100).toFixed(2)}</p>
-                  )}
-                </CardContent>
-              </Card>
-            ),
-          )}
-          {!(page === "services" ? data.subscriptions : data.orders).length && (
-            <div className="harbor-empty">暂无记录</div>
-          )}
-        </div>
       ) : page === "overview" ? (
         <div className="harbor-grid">
           {data.tenants?.map((space: any) => (
@@ -465,6 +320,10 @@ function RemotePanel({
   );
 }
 function App() {
+  const [queryIp, setQueryIp] = useState(
+    sessionStorage.getItem("harbor:query-ip") || "",
+  );
+  const [queryRevision, setQueryRevision] = useState(0);
   const [auth, setAuth] = useState(false),
     [boot, setBoot] = useState(emptySession),
     [checking, setChecking] = useState(true),
@@ -481,6 +340,21 @@ function App() {
     const listener = () => setPage(location.hash.slice(2) || "intelligence");
     addEventListener("hashchange", listener);
     if (new URLSearchParams(location.search).has("account")) setAuth(true);
+    if (
+      location.pathname === "/payment/return" ||
+      new URLSearchParams(location.search).get("method") ===
+        "alipay.trade.page.pay.return"
+    ) {
+      const trade = paymentReturnTrade(location.search);
+      if (trade)
+        sessionStorage.setItem(
+          "harbor:payment-return",
+          JSON.stringify({ trade, expires: Date.now() + 30 * 60_000 }),
+        );
+      history.replaceState(null, "", "/#/orders");
+      setPage("orders");
+      sessionStorage.setItem("harbor:return", "orders");
+    }
     return () => removeEventListener("hashchange", listener);
   }, []);
   useEffect(() => {
@@ -499,6 +373,35 @@ function App() {
             go(destination!);
             sessionStorage.removeItem("harbor:return");
           }
+          let returned;
+          try {
+            returned = JSON.parse(
+              sessionStorage.getItem("harbor:payment-return") || "null",
+            );
+          } catch {
+            /* Ignore a damaged locator; never infer payment state. */
+          }
+          sessionStorage.removeItem("harbor:payment-return");
+          if (
+            returned?.expires > Date.now() &&
+            /^MXP[0-9a-f]{32}$/i.test(returned.trade)
+          ) {
+            void request(
+              `/bff/v1/payments/return-order?trade=${encodeURIComponent(returned.trade)}`,
+            )
+              .then(({ data }) => {
+                if (!current) return;
+                if (data.businessType !== "purchase")
+                  throw Error(
+                    "该返回记录不是数据订阅订单，请到原购买应用查看。",
+                  );
+                setTenant(data.tenantId);
+                go("orders");
+              })
+              .catch((error) => {
+                if (current) setBootError(error.message);
+              });
+          }
         } else setTenant("");
       })
       .finally(() => {
@@ -511,7 +414,11 @@ function App() {
   const retrySession = () => setRetry((value) => value + 1);
   const access = {
     signedIn: signedIn === true,
-    enter: (dest: string) => {
+    enter: (dest: string, ip?: string) => {
+      if (ip) {
+        setQueryIp(ip);
+        sessionStorage.setItem("harbor:query-ip", ip);
+      }
       if (checking) return;
       if (signedIn) go(dest);
       else {
@@ -561,7 +468,14 @@ function App() {
       {signedIn ? (
         <ConsoleShell
           page={page}
-          go={go}
+          go={(destination) => {
+            if (destination === "intelligence" && page === "intelligence") {
+              setQueryIp("");
+              sessionStorage.removeItem("harbor:query-ip");
+              setQueryRevision((value) => value + 1);
+            }
+            go(destination);
+          }}
           name={session?.displayName || "已登录"}
           onLogout={async () => {
             try {
@@ -595,10 +509,14 @@ function App() {
           {sessionNotice}
           {session ? (
             <RemotePanel
-              key={`${page}:${tenant}`}
+              key={`${page}:${tenant}:${queryRevision}`}
               page={page}
               session={session}
               tenant={tenant}
+              csrf={csrf}
+              go={go}
+              reloadSession={retrySession}
+              initialIp={queryIp}
             />
           ) : page === "account" ? (
             <AccountSecurity />
@@ -632,7 +550,9 @@ function App() {
                   <div className="ip-pricing-heading">
                     <h1>IP 风险画像 · 年度服务</h1>
                     <p>登录后查看你的空间服务与可购买商品。</p>
-                    <Button onClick={() => setAuth(true)}>受邀进入数港</Button>
+                    <Button onClick={() => access.enter("market")}>
+                      登录查看数据商城
+                    </Button>
                   </div>
                 </div>
               </section>

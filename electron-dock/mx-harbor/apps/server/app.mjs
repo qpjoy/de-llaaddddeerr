@@ -3,7 +3,7 @@ import { resolve, extname, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createApplicationSso } from "@qpjoy/mx-common/identity/sso";
 import { PostgresSsoStore } from "@qpjoy/mx-common/identity/postgres";
-import { SsoError } from "@qpjoy/mx-common/identity/http";
+import { SsoError, equal, readSsoJson } from "@qpjoy/mx-common/identity/http";
 const reads = new Set([
   "/session",
   "/me/overview",
@@ -13,11 +13,17 @@ const reads = new Set([
   "/usage",
   "/documentation",
   "/commerce/products",
+  "/payments/return-order",
 ]);
 export function permittedCustomerRoute(method, path) {
   return (
-    method === "GET" &&
-    (reads.has(path) || /^\/commerce\/tenants\/[0-9a-f-]{36}$/.test(path))
+    (method === "GET" &&
+      (reads.has(path) || /^\/commerce\/tenants\/[0-9a-f-]{36}$/.test(path))) ||
+    (method === "POST" &&
+      (["/demo-credentials", "/payments/personal-account"].includes(path) ||
+        /^\/commerce\/tenants\/[0-9a-f-]{36}\/(?:access|orders(?:\/[0-9a-f-]{36}\/(?:checkout|refresh))?)$/.test(
+          path,
+        )))
   );
 }
 export function createHarborApp({
@@ -96,6 +102,27 @@ export function createHarborApp({
         const session = await sso.sessionFor(req);
         if (!session) throw new SsoError(401, "login_required", "请先登录。");
         await sso.verifySession(session, true);
+        let body;
+        if (req.method === "POST") {
+          sso.checkOrigin(req);
+          if (!session.csrf || !equal(session.csrf, req.headers["x-mx-csrf"]))
+            throw new SsoError(
+              403,
+              "sso_csrf",
+              "页面会话已变化，请刷新后重试。",
+            );
+          if (
+            !/^application\/json(?:\s*;|$)/i.test(
+              req.headers["content-type"] || "",
+            )
+          )
+            throw new SsoError(
+              415,
+              "invalid_content_type",
+              "请使用 JSON 请求。",
+            );
+          body = JSON.stringify(await readSsoJson(req, 8192));
+        }
         if (!integration.upstream || !integration.gatewayToken)
           throw new SsoError(
             503,
@@ -105,6 +132,8 @@ export function createHarborApp({
         const upstream = await fetcher(
           `${integration.upstream}/internal/v1/portal${path}${url.search}`,
           {
+            method: req.method,
+            body,
             redirect: "error",
             signal: AbortSignal.timeout(15000),
             headers: {
@@ -112,6 +141,10 @@ export function createHarborApp({
               "x-mx-harbor-subject": session.subject,
               "x-mx-harbor-gateway": integration.gatewayToken,
               "x-request-id": id,
+              ...(body ? { "content-type": "application/json" } : {}),
+              ...(req.headers["idempotency-key"]
+                ? { "idempotency-key": String(req.headers["idempotency-key"]) }
+                : {}),
             },
           },
         );
@@ -153,7 +186,7 @@ export function createHarborApp({
           };
           payload.data.html = null;
         }
-        return json(200, payload);
+        return json(upstream.status, payload);
       }
       // API forwarding is enabled only by the dedicated nginx compatibility route; never proxy Admin paths here.
       if (

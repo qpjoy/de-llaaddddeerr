@@ -1,0 +1,110 @@
+export const PRODUCT_CAPABILITY = "ip.risk.subscription.query";
+export type Subscription = {
+  id: string;
+  channel: string;
+  startsAt: string;
+  endsAt: string;
+  quota: number;
+  used: number;
+  held: number;
+};
+export function subscriptionState(value: Subscription, now = Date.now()) {
+  if (Date.parse(value.startsAt) > now) return "future";
+  if (!(Date.parse(value.endsAt) > now)) return "expired";
+  return value.quota - value.used - value.held > 0 ? "active" : "exhausted";
+}
+export function currentSubscription(values: Subscription[], now = Date.now()) {
+  return values.find(
+    (value) =>
+      value.channel === "product" &&
+      Date.parse(value.startsAt) <= now &&
+      Date.parse(value.endsAt) > now,
+  );
+}
+export function hasCapability(
+  session: any,
+  tenant: string,
+  capability: string,
+) {
+  return !!session?.memberships?.some(
+    (member: any) =>
+      member.tenantId === tenant && member.capabilities?.includes(capability),
+  );
+}
+export const money = (amount: number) =>
+  new Intl.NumberFormat("zh-CN", {
+    style: "currency",
+    currency: "CNY",
+    maximumFractionDigits: 2,
+  }).format(amount / 100);
+export const dateTime = (value?: string) =>
+  value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
+export function purchaseIntent(
+  storage: Pick<Storage, "getItem" | "setItem">,
+  signature: string,
+) {
+  return storedIntent(storage, `harbor:purchase:${signature}`);
+}
+export function queryIntent(
+  storage: Pick<Storage, "getItem" | "setItem">,
+  signature: string,
+) {
+  return storedIntent(storage, `harbor:query:${signature}`);
+}
+function storedIntent(
+  storage: Pick<Storage, "getItem" | "setItem">,
+  name: string,
+) {
+  let key = storage.getItem(name);
+  if (!key || !/^[0-9a-f-]{36}$/.test(key)) {
+    key = crypto.randomUUID();
+    storage.setItem(name, key);
+  }
+  return { key, name };
+}
+export function portraitState(result: any) {
+  const state = result?.response?.data?.status;
+  if (["success", "partial", "no_data"].includes(state)) return state;
+  const code = result?.error?.code || result?.response?.error?.code || "";
+  return result?.status === 409 ||
+    /unknown|pending|in_progress|ip_response_(unusable|too_large)/.test(code)
+    ? "unknown"
+    : "error";
+}
+export function paymentReturnTrade(search: string) {
+  const query = new URLSearchParams(search);
+  const trade = query.get("out_trade_no");
+  return query.get("method") === "alipay.trade.page.pay.return" &&
+    query.getAll("out_trade_no").length === 1 &&
+    /^MXP[0-9a-f]{32}$/i.test(trade || "")
+    ? trade
+    : null;
+}
+// Same fixed checkout destinations as Hub; a service response is not an arbitrary link.
+export function checkoutLocation(value: string, environment: string) {
+  let url: URL | undefined;
+  try {
+    url = new URL(value);
+  } catch {
+    /* Rejected below. */
+  }
+  const host = (
+    {
+      live: "openapi.alipay.com",
+      test: "openapi-sandbox.dl.alipaydev.com",
+    } as Record<string, string>
+  )[environment];
+  if (
+    !url ||
+    !host ||
+    url.protocol !== "https:" ||
+    url.hostname !== host ||
+    url.port ||
+    url.username ||
+    url.password ||
+    url.pathname !== "/gateway.do" ||
+    url.hash
+  )
+    throw Error("支付宝收银台地址无效，原订单已保留，请联系管理员。");
+  return url.href;
+}

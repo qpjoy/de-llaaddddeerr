@@ -27,7 +27,7 @@ const fixture = async (t, options) => {
   );
   return `http://127.0.0.1:${server.address().port}`;
 };
-test("BFF fails closed without identity and does not expose administration or payment mutations", async (t) => {
+test("BFF fails closed without identity and does not expose administration", async (t) => {
   let calls = 0;
   const base = await fixture(t, {
     config: { preview: true },
@@ -60,6 +60,101 @@ test("BFF fails closed without identity and does not expose administration or pa
     (await (await fetch(base + "/auth/sso/session")).json()).active,
     false,
   );
+});
+test("customer writes require a fresh session, exact origin and CSRF and preserve purchase identity", async (t) => {
+  const tenant = "11111111-1111-4111-8111-111111111111",
+    origin = "https://harbor.example.test";
+  const calls = [];
+  let active = true,
+    verified = 0;
+  const base = await fixture(t, {
+    config: {
+      upstream: "http://hub.internal:18151",
+      gatewayToken: "server-only",
+      sso: { origin },
+    },
+    sso: {
+      sessionFor: async () =>
+        active
+          ? {
+              csrf: "csrf-fixture",
+              accessToken: "server-token",
+              subject: "member",
+            }
+          : null,
+      verifySession: async () => {
+        verified++;
+      },
+      checkOrigin: (req) => {
+        if (
+          req.headers.origin !== origin ||
+          req.headers["sec-fetch-site"] === "cross-site"
+        )
+          throw Object.assign(Error("origin"), { status: 403 });
+      },
+    },
+    fetch: async (url, options) => {
+      calls.push({ url, options });
+      return new Response(JSON.stringify({ data: { id: "existing-order" } }), {
+        status: 201,
+      });
+    },
+  });
+  const headers = {
+    origin,
+    "content-type": "application/json",
+    "x-mx-csrf": "csrf-fixture",
+    "idempotency-key": "original-intent",
+  };
+  const path = `/bff/v1/commerce/tenants/${tenant}/orders`;
+  const body = JSON.stringify({
+    sku: "annual",
+    revision: 1,
+    environment: "live",
+  });
+  for (const override of [
+    { origin: "https://other.test" },
+    { "x-mx-csrf": "" },
+    { "sec-fetch-site": "cross-site" },
+  ])
+    assert.equal(
+      (
+        await fetch(base + path, {
+          method: "POST",
+          headers: { ...headers, ...override },
+          body,
+        })
+      ).status,
+      403,
+    );
+  assert.equal(calls.length, 0);
+  assert.equal(
+    (await fetch(base + path, { method: "POST", headers, body: "[]" })).status,
+    400,
+  );
+  const response = await fetch(base + path, { method: "POST", headers, body });
+  assert.equal(response.status, 201);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.body, body);
+  assert.equal(calls[0].options.method, "POST");
+  assert.equal(calls[0].options.headers["idempotency-key"], "original-intent");
+  assert.equal(calls[0].options.headers.authorization, "Bearer server-token");
+  assert.equal(calls[0].options.headers["x-mx-csrf"], undefined);
+  assert.doesNotMatch(await response.text(), /server-token|server-only/);
+  active = false;
+  assert.equal(
+    (await fetch(base + path, { method: "POST", headers, body })).status,
+    401,
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(verified, 5);
+  for (const forbidden of [
+    "/commerce/delivery",
+    `/commerce/tenants/${tenant}/acceptance-orders`,
+    "/payments/integration/live/activate",
+    "/api-keys/anything/reveal",
+  ])
+    assert.equal(permittedCustomerRoute("POST", forbidden), false);
 });
 test("BFF fresh verification, fixed upstream credential, no browser secret and branded OpenAPI", async (t) => {
   let verified = 0,

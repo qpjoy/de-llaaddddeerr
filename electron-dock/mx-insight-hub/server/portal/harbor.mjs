@@ -7,9 +7,14 @@ import {secureEqual} from '../core/crypto.mjs'
 import {readFileSync} from 'node:fs'
 // This Symbol is never derived from headers, cookies, query parameters or JSON.
 export const portalPrincipal = Symbol('verified-harbor-principal')
-const reads = new Set(['/session','/me/overview','/api-keys','/tenants','/consumers','/usage','/documentation','/commerce/products'])
+const reads = new Set(['/session','/me/overview','/api-keys','/tenants','/consumers','/usage','/documentation','/commerce/products','/payments/return-order'])
 export function harborRoute(method,path,searchParams) {
-  if(method!=='GET'||(!reads.has(path)&&!/^\/commerce\/tenants\/[0-9a-f-]{36}$/.test(path)))throw new AppError(404,'portal_route_unavailable','此客户功能尚未开放。')
+  const read=method==='GET'&&(reads.has(path)||/^\/commerce\/tenants\/[0-9a-f-]{36}$/.test(path))
+  // Existing handlers still enforce tenant capabilities, prices and paid delivery.
+  // No product editing, acceptance pricing, supplier controls or key reveal.
+  const write=method==='POST'&&(['/demo-credentials','/payments/personal-account'].includes(path)||/^\/commerce\/tenants\/[0-9a-f-]{36}\/(?:access|orders(?:\/[0-9a-f-]{36}\/(?:checkout|refresh))?)$/.test(path))
+  if(!read&&!write)throw new AppError(404,'portal_route_unavailable','此客户功能尚未开放。')
+  if(write&&searchParams.size)throw new AppError(400,'invalid_query','此操作不接受查询参数。')
   if(path==='/documentation'&&(searchParams.size!==1||searchParams.get('path')!=='/docs/openapi.json'))throw new AppError(404,'not_found','请使用数港接口文档。')
   return `/internal/v1/admin${path}`
 }
