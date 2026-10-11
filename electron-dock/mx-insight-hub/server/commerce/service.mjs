@@ -5,6 +5,7 @@ import { verifyPaymentOrder } from '@qpjoy/mx-pay/integration'
 import { withPgTransaction } from '../stores/postgres-store.mjs'
 import { readTenantAccess } from '../stores/tenant-service-access.mjs'
 import { authorizationScopeLockKey } from '../stores/usage-authorization.mjs'
+import { CustomerMessages } from './messages.mjs'
 
 import { IP_PRODUCT_CAPABILITY, IP_PRODUCT_METER } from '../contracts/ip-risk-product.mjs'
 export { IP_PRODUCT_CAPABILITY, IP_PRODUCT_METER }
@@ -26,7 +27,7 @@ export function addCalendarMonths(value, months) {
 }
 
 export class CommerceService {
-  constructor(store = {}, recharge) { this.store = store; this.pool = store.pool; this.recharge = recharge }
+  constructor(store = {}, recharge) { this.store = store; this.pool = store.pool; this.recharge = recharge; this.messages = new CustomerMessages(this.pool) }
   atomic(work) { requirePayment(this.pool, 'commerce_storage_required', '购买需要持久化数据库', 503); return withPgTransaction(this.pool, work, { outcomeUnknownCode: 'commerce_outcome_unknown' }) }
   async catalog(admin = false) {
     if (!this.pool) return { items: [{ ...INITIAL_PRODUCT, revision: 1 }], purchaseAvailable: false }

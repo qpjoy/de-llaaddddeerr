@@ -896,3 +896,51 @@
     padding: 2rem 1.5rem 1.5rem;
   }
 }
+.harbor-unread {
+  margin-left: auto;
+  min-width: 1.25rem;
+  padding: 0 .35rem;
+  border-radius: 1rem;
+  background: #165dff;
+  color: #fff;
+  font-size: .75rem;
+  text-align: center;
+}
+.harbor-subscription-notice {
+  border: 1px solid #c9ddff;
+  background: #f0f6ff;
+  border-radius: .625rem;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+  color: #334866;
+  line-height: 1.7;
+}
+.harbor-subscription-notice strong { color: #1d3c72; }
+.harbor-subscription-notice [data-slot="button"] { padding-left: 0; }
+.harbor-expiry-warning { color: #915800; font-weight: 600; }
+.harbor-message {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.5rem;
+  margin-bottom: 1rem;
+}
+.harbor-message[data-unread="true"] { border-color: #bad2ff; }
+.harbor-message-icon {
+  flex-shrink: 0;
+  padding: .625rem;
+  border-radius: .625rem;
+  background: #edf4ff;
+  color: #165dff;
+}
+.harbor-message-copy { min-width: 0; flex: 1; line-height: 1.8; }
+.harbor-message-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: .75rem; }
+.harbor-message-heading h2 { font-size: 1rem; font-weight: 600; color: #202b3c; }
+.harbor-message-heading span, .harbor-message time { font-size: .8125rem; color: #58677d; }
+.harbor-message p { overflow-wrap: anywhere; color: #46556c; }
+.harbor-message .harbor-actions { margin-top: .5rem; }
+@media (max-width: 600px) {
+  .harbor-message { gap: .625rem; padding: 1rem; }
+  .harbor-message-icon { padding: .375rem; }
+}

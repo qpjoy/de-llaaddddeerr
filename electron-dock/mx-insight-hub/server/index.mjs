@@ -1,6 +1,7 @@
 import {createHarborPortal} from './portal/harbor.mjs'
 import { IpRiskProduct } from './external-platforms/ip-risk-product.mjs'
 import { CommerceService } from './commerce/service.mjs'
+import { CustomerMessages } from './commerce/messages.mjs'
 import { BaiduIpRiskAdapter } from './adapters/baidu-ip-risk.mjs'
 import { BaiduIpAdminService } from './external-platforms/baidu-ip-admin.mjs'
 import { IpRiskChannels } from './external-platforms/ip-risk-channels.mjs'
@@ -555,6 +556,7 @@ export async function createRuntime(config = loadConfig()) {
       })
     : null
   const notifications = config.listenerMode === 'public' ? null : new NotificationService(pool)
+  const customerMessages = config.listenerMode === 'public' ? null : new CustomerMessages(pool)
   const balanceMonitor = config.listenerMode === 'public' ? null : new SupplierBalanceMonitor({
     pool,
     credentials: {
@@ -631,7 +633,7 @@ export async function createRuntime(config = loadConfig()) {
   })
   return {
     app, store, adapter, service, identity, queue, pool, importer, serverFileReader,
-    notifications, balanceMonitor, feishuAlerts, paymentReporting, recharge, peripherals,
+    notifications, customerMessages, balanceMonitor, feishuAlerts, paymentReporting, recharge, peripherals,
     databasePuller, sqliteApiPuller, telegramSourcePreparer, agent, agentSettings,
     agentPipelines, agentMarket, agentStudio,
     search, searchReindex, embedding, externalPlatformStore, retrievalPool,
@@ -652,6 +654,7 @@ export async function start(config = loadConfig()) {
     server.listen(config.port, config.host, resolveListen)
   })
   runtime.notifications?.start()
+  runtime.customerMessages?.start()
   runtime.balanceMonitor?.start()
   runtime.feishuAlerts?.start()
   runtime.paymentReporting?.start?.()
@@ -664,6 +667,7 @@ export async function start(config = loadConfig()) {
     await runtime.feishuAlerts?.close()
     await runtime.balanceMonitor?.close()
     await runtime.notifications?.close()
+    await runtime.customerMessages?.close()
     await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()))
     runtime.agent.close()
     await runtime.justOneAdapter?.close()

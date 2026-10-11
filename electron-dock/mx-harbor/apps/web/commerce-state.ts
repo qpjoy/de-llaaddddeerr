@@ -21,6 +21,15 @@ export function currentSubscription(values: Subscription[], now = Date.now()) {
       Date.parse(value.endsAt) > now,
   );
 }
+export function subscriptionNotice(values: Subscription[], now = Date.now()) {
+  const valid = values.filter(value => value.channel === "product" && Date.parse(value.endsAt) > now);
+  const current = valid.filter(value => Date.parse(value.startsAt) <= now);
+  const future = valid.filter(value => Date.parse(value.startsAt) > now);
+  const latestEnd = valid.reduce<string | undefined>((end, value) =>
+    !end || Date.parse(value.endsAt) > Date.parse(end) ? value.endsAt : end, undefined);
+  const expiring = current.filter(value => Date.parse(value.endsAt) - now <= 7 * 86400_000);
+  return { current, future, latestEnd, expiring };
+}
 export function hasCapability(
   session: any,
   tenant: string,

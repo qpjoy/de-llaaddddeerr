@@ -44,6 +44,25 @@ test('Public listener never opens portal; admin listener uses only verified cust
   for(const path of ['/internal/v1/portal/runtime','/internal/v1/portal/commerce/delivery','/internal/v1/admin/session'])assert.notEqual((await fetch(base+path,{headers:{'x-mx-harbor-subject':'root'}})).status,200,path)
  }assert.equal(resolutions,1)
 })
+
+test('customer messages require current tenant billing access and never expose supplier notifications',async t=>{
+ const tenant=randomUUID(),other=randomUUID(),member=randomUUID()
+ const store=new MemoryStore(),service=new HubService({store,adapter:{},apiKeyPepper:'fixture-long-pepper-for-harbor'})
+ let capabilities=['billing.read']
+ const portal={resolve:async()=>({kind:'launcher-user',memberId:member,platformAdmin:false,tenantIds:[tenant],memberships:[{tenantId:tenant,capabilities}]})}
+ const server=createServer(createApp({store,service,adapter:{},listenerMode:'admin',harborPortal:portal}))
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.close(r);server.closeAllConnections()}))
+ const base=`http://127.0.0.1:${server.address().port}/internal/v1/portal`
+ const read=path=>fetch(base+path),mark=path=>fetch(base+path,{method:'POST',headers:{'content-type':'application/json'},body:'{}'})
+ assert.equal((await read(`/commerce/tenants/${tenant}/messages`)).status,503,'authorized read still needs message storage')
+ assert.equal((await read(`/commerce/tenants/${other}/messages`)).status,403)
+ assert.equal((await mark(`/commerce/tenants/${other}/messages/1/read`)).status,403)
+ assert.equal((await read('/notifications')).status,404)
+ assert.equal((await read(`/commerce/tenants/${tenant}/messages?status=all&status=unread`)).status,400)
+ capabilities=[]
+ assert.equal((await read(`/commerce/tenants/${tenant}/messages`)).status,403)
+ assert.equal((await mark(`/commerce/tenants/${tenant}/messages/1/read`)).status,403)
+})
 const connectionString=process.env.MX_SSO_TEST_DATABASE_URL
 test('Shared identity binding reuses Hub member and tenant, preserves platform admin and serializes simultaneous onboarding',{skip:!connectionString},async t=>{
  const target=new URL(connectionString);assert.ok(['127.0.0.1','localhost'].includes(target.hostname)&&target.pathname.includes('sso_test'))

@@ -25,6 +25,7 @@ import {
   money,
   purchaseIntent,
   subscriptionState,
+  subscriptionNotice,
   type Subscription,
 } from "./commerce-state";
 
@@ -74,6 +75,7 @@ export function Commerce({
   const canRead = hasCapability(session, tenant, "billing.read");
   const canPay = hasCapability(session, tenant, "recharge.create");
   const canBuy = canPay && hasCapability(session, tenant, "apikey.write");
+  const notice = subscriptionNotice(purchases.subscriptions);
   const post = (path: string, body = {}, key?: string) =>
     request(`/bff/v1${path}`, {
       method: "POST",
@@ -325,6 +327,11 @@ export function Commerce({
         <p role="status">正在读取服务…</p>
       ) : loadFailed ? null : page === "market" ? (
         <>
+          {notice.latestEnd && <div className="harbor-subscription-notice" role="status">
+            <strong>{notice.current.length ? "你已在订阅期内" : "你已有待生效的订阅"}</strong>
+            <p>已购有效期至 {dateTime(notice.latestEnd)}{notice.future.length ? `，其中 ${notice.future.length} 份续订待生效` : ""}。可以继续订阅，新一期从已购期限结束后生效。</p>
+            <Button variant="link" onClick={() => go("services")}>查看我的订阅 <ArrowRight /></Button>
+          </div>}
           {catalog?.items
             .filter((item) => item.status === "published")
             .map((item) => (
@@ -366,7 +373,7 @@ export function Commerce({
                       disabled={!canBuy || busy}
                       onClick={() => setSelected(item)}
                     >
-                      立即订阅 <ArrowRight />
+                      {notice.latestEnd ? "继续订阅" : "立即订阅"} <ArrowRight />
                     </Button>
                     <Button
                       variant="outline"
@@ -408,6 +415,7 @@ export function Commerce({
             <div className="harbor-grid">
               {purchases.subscriptions.map((subscription) => {
                 const state = subscriptionState(subscription);
+                const expiring = notice.expiring.some(value => value.id === subscription.id);
                 return (
                   <Card key={subscription.id}>
                     <CardHeader>
@@ -422,6 +430,7 @@ export function Commerce({
                           }[state]
                         }
                       </span>
+                      {expiring && <span className="harbor-expiry-warning">{Date.parse(subscription.endsAt) - Date.now() <= 86400_000 ? "24 小时内到期" : "7 天内到期"}</span>}
                     </CardHeader>
                     <CardContent>
                       <p className="harbor-price">
@@ -440,6 +449,7 @@ export function Commerce({
                       {subscription.held > 0 && (
                         <p>{subscription.held} 次请求处理中</p>
                       )}
+                      {expiring && <p>当前订阅即将到期{notice.future.length ? "，已购续订将在约定时间生效。" : "，可提前续订保持服务连续。"}</p>}
                       <div className="harbor-actions">
                         <Button
                           disabled={state !== "active"}
@@ -628,6 +638,14 @@ export function Commerce({
               </p>
               <div className="harbor-price">{money(selected.amountMinor)}</div>
               <p>付款确认后开通，续订从原到期日顺延。不自动续费。</p>
+              {notice.latestEnd && <div className="harbor-subscription-notice" role="status">
+                <strong>你已订阅此服务，仍可继续购买</strong>
+                <p>已购有效期至 {dateTime(notice.latestEnd)}。本次购买顺延生效，当前剩余次数与原有效期不变；每期次数独立，不结转。最终生效时间以付款交付时为准。</p>
+              </div>}
+              {purchases.orders.some(order => order.product.sku === selected.sku && !order.deliveredAt && order.paymentStatus !== "paid") && <div className="harbor-subscription-notice">
+                <p>你已有此服务的未完成订单，可以先查看原订单，也可以另购一份。</p>
+                <Button variant="link" disabled={busy} onClick={() => { setSelected(null); go("orders"); }}>查看原订单</Button>
+              </div>}
               {!catalog?.purchaseAvailable && (
                 <p role="status">付款服务尚未就绪，请稍后重试。</p>
               )}

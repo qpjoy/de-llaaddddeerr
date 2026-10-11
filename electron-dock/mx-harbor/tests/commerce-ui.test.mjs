@@ -4,12 +4,25 @@ import {
   checkoutLocation,
   currentSubscription,
   subscriptionState,
+  subscriptionNotice,
   hasCapability,
   purchaseIntent,
   paymentReturnTrade,
   queryIntent,
   portraitState,
 } from "../apps/web/commerce-state.ts";
+
+test("renewal hints distinguish current, expiring and already purchased future terms", () => {
+  const now = Date.parse("2026-10-11T00:00:00Z");
+  const base = { id: "current", channel: "product", startsAt: "2026-01-01", endsAt: "2026-10-17", quota: 100, used: 30, held: 2 };
+  const future = { ...base, id: "future", startsAt: base.endsAt, endsAt: "2027-10-17" };
+  const result = subscriptionNotice([future, base, { ...base, channel: "baidu-v2", endsAt: "2028-01-01" }, { ...base, endsAt: "2026-10-11" }], now);
+  assert.deepEqual(result.current, [base]);
+  assert.deepEqual(result.future, [future]);
+  assert.deepEqual(result.expiring, [base]);
+  assert.equal(result.latestEnd, future.endsAt);
+  assert.equal(subscriptionNotice([], now).latestEnd, undefined);
+});
 
 test("only current paid product subscriptions unlock; held calls consume availability", () => {
   const now = Date.parse("2026-10-11T00:00:00Z");

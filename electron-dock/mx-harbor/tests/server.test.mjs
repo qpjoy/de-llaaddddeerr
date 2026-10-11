@@ -141,18 +141,25 @@ test("customer writes require a fresh session, exact origin and CSRF and preserv
   assert.equal(calls[0].options.headers.authorization, "Bearer server-token");
   assert.equal(calls[0].options.headers["x-mx-csrf"], undefined);
   assert.doesNotMatch(await response.text(), /server-token|server-only/);
+  const messagePath = `/bff/v1/commerce/tenants/${tenant}/messages/1/read`;
+  assert.equal((await fetch(base + messagePath, {method: "POST", headers: {...headers, "x-mx-csrf": ""}, body: "{}"})).status, 403);
+  assert.equal((await fetch(base + messagePath, {method: "POST", headers, body: "{}"})).status, 201);
+  assert.equal(calls[1].url, `http://hub.internal:18151/internal/v1/portal/commerce/tenants/${tenant}/messages/1/read`);
   active = false;
   assert.equal(
     (await fetch(base + path, { method: "POST", headers, body })).status,
     401,
   );
-  assert.equal(calls.length, 1);
-  assert.equal(verified, 5);
+  assert.equal(calls.length, 2);
+  assert.equal(verified, 7);
   for (const forbidden of [
     "/commerce/delivery",
     `/commerce/tenants/${tenant}/acceptance-orders`,
     "/payments/integration/live/activate",
     "/api-keys/anything/reveal",
+    "/notifications",
+    `/commerce/tenants/${tenant}/messages`,
+    `/commerce/tenants/${tenant}/messages/1/delete`,
   ])
     assert.equal(permittedCustomerRoute("POST", forbidden), false);
 });

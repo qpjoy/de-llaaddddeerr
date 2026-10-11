@@ -18,10 +18,10 @@ const reads = new Set([
 export function permittedCustomerRoute(method, path) {
   return (
     (method === "GET" &&
-      (reads.has(path) || /^\/commerce\/tenants\/[0-9a-f-]{36}$/.test(path))) ||
+      (reads.has(path) || /^\/commerce\/tenants\/[0-9a-f-]{36}(?:\/messages)?$/.test(path))) ||
     (method === "POST" &&
       (["/demo-credentials", "/payments/personal-account"].includes(path) ||
-        /^\/commerce\/tenants\/[0-9a-f-]{36}\/(?:access|orders(?:\/[0-9a-f-]{36}\/(?:checkout|refresh))?)$/.test(
+        /^\/commerce\/tenants\/[0-9a-f-]{36}\/(?:messages\/[1-9][0-9]{0,17}\/read|access|orders(?:\/[0-9a-f-]{36}\/(?:checkout|refresh))?)$/.test(
           path,
         )))
   );

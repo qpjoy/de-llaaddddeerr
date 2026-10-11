@@ -11,6 +11,7 @@ import {join} from 'node:path'
 import {fingerprint} from '@qpjoy/mx-pay'
 import {runMigrations} from '../../server/migrate.mjs'
 import {CommerceService,INITIAL_PRODUCT,addCalendarMonths,IP_V2_METER,IP_PRODUCT_METER,IP_PRODUCT_CAPABILITY} from '../../server/commerce/service.mjs'
+import { CustomerMessages } from '../../server/commerce/messages.mjs'
 import {IpRiskGateway} from '../../server/external-platforms/ip-risk-gateway.mjs'
 import {IpRiskChannels} from '../../server/external-platforms/ip-risk-channels.mjs'
 import {PostgresExternalPlatformStore} from '../../server/external-platforms/store.mjs'
@@ -71,10 +72,10 @@ async function fixture(t,{space=false}={}){
   const url=new URL(connectionString);url.pathname=`/${name}`
   const pool=new pg.Pool({connectionString:url.href,max:8}),migrationDir=await mkdtemp(join(tmpdir(),'hub-commerce-migration-'))
   t.after(async()=>{await pool.end();await admin.query(`DROP DATABASE ${name}`);await admin.end();await rm(migrationDir,{recursive:true,force:true})})
-  const selected=['001','002','003','004','005','007','016','018','031','041','051','052','053','054','055','056','057','058','060','063','065','075','076','077','078','081','082','083','094','113','119','122','123','126','127','128','129','138'],dir=new URL('../../migrations/',import.meta.url)
+  const selected=['001','002','003','004','005','007','016','018','031','041','051','052','053','054','055','056','057','058','060','063','065','075','076','077','078','081','082','083','094','113','119','122','123','126','127','128','129','138','144'],dir=new URL('../../migrations/',import.meta.url)
   if(space)selected.push('130')
   for(const file of (await readdir(dir)).sort().filter(f=>selected.includes(f.slice(0,3)))){
-    if(['129','130'].includes(file.slice(0,3))){await writeFile(join(migrationDir,file),await readFile(new URL(file,dir)));continue}
+    if(['129','130','144'].includes(file.slice(0,3))){await writeFile(join(migrationDir,file),await readFile(new URL(file,dir)));continue}
     const client=await pool.connect();try{await client.query('BEGIN');await client.query(await readFile(new URL(file,dir),'utf8'));await client.query('COMMIT')}catch(e){await client.query('ROLLBACK');e.message=`${file}: ${e.message}`;throw e}finally{client.release()}
   }
   await runMigrations({connectionString:url.href,migrationsDir:migrationDir})
@@ -101,6 +102,71 @@ async function fixture(t,{space=false}={}){
     rerunMigrations:()=>runMigrations({connectionString:url.href,migrationsDir:migrationDir})}
 }
 const database={skip:!connectionString}
+test('customer messages persist once per lifecycle, isolate readers and spaces, and never settle money',database,async t=>{
+  const f=await fixture(t,{space:true}),messages=f.service.messages,member=randomUUID(),otherMember=randomUUID(),otherTenant=randomUUID()
+  await f.pool.query('INSERT INTO iam.members(id) VALUES($1),($2)',[member,otherMember])
+  await f.pool.query("INSERT INTO tenants(id,name) VALUES($1,'other')",[otherTenant])
+  await f.create() // unpaid is never a subscription message
+  const mock=await f.create('test'),mockEvent=await f.eventFor(mock)
+  await f.service.commit(mockEvent.source,mockEvent.event,mockEvent.payment)
+  assert.equal(await messages.collectBatch(),0)
+  const order=await f.create(),paid=await f.eventFor(order)
+  await f.service.commit(paid.source,paid.event,paid.payment)
+  const saved=(await f.service.list(f.tenant)).subscriptions
+  await Promise.all([messages.collectBatch(),new CustomerMessages(f.pool).collectBatch()])
+  let list=await messages.list(f.tenant,member)
+  assert.equal(list.unread,1);assert.equal(list.items[0].kind,'active')
+  assert.equal(list.items[0].document.scope,'tenant');assert.equal(list.items[0].document.orderId,order.id)
+  assert.deepEqual(Object.keys(list.items[0].document).sort(),['endsAt','orderId','productName','quota','scope','startsAt'])
+  assert.deepEqual(await messages.list(otherTenant,member),{items:[],unread:0,nextBefore:null})
+  await assert.rejects(messages.read(otherTenant,member,list.items[0].id),{status:404})
+  const read=await messages.read(f.tenant,member,list.items[0].id)
+  assert.deepEqual(await messages.read(f.tenant,member,list.items[0].id),read)
+  assert.equal((await messages.list(f.tenant,member,{status:'unread'})).items.length,0)
+  assert.equal((await messages.list(f.tenant,otherMember)).unread,1)
+  for(const query of [{status:'admin'},{before:'-1'},{before:'1 OR 1=1'},{tenantId:otherTenant}])await assert.rejects(messages.list(f.tenant,member,query),{status:400})
+  assert.deepEqual((await f.service.list(f.tenant)).subscriptions,saved,'message work never changes term or quota')
+  assert.equal((await f.pool.query('SELECT * FROM billing.credit_ledger_entries')).rowCount,0)
+  await f.rerunMigrations();assert.equal(await messages.collectBatch(),0)
+  await assert.rejects(f.pool.query('DELETE FROM hub_commerce.messages'),/commerce_evidence_immutable/)
+  // Move the isolated fixture clock boundaries; production entitlements are never edited.
+  for(const [remaining,kind] of [['6 days','expiring_7d'],['12 hours','expiring_1d'],['-1 hour','expired']]){
+    await f.pool.query("UPDATE hub_commerce.subscriptions SET starts_at=now()-interval '30 days',ends_at=now()+$1::interval",[remaining])
+    assert.equal(await messages.collectBatch(),1)
+    assert.equal(await messages.collectBatch(),0)
+    list=await messages.list(f.tenant,member);assert.equal(list.items[0].kind,kind)
+  }
+  const next=await f.create(),nextPaid=await f.eventFor(next)
+  await f.service.commit(nextPaid.source,nextPaid.event,nextPaid.payment)
+  await f.pool.query("UPDATE hub_commerce.subscriptions SET starts_at=now()+interval '2 days',ends_at=now()+interval '1 year' WHERE order_id=$1",[next.id])
+  assert.equal(await messages.collectBatch(),1)
+  assert.equal((await messages.list(f.tenant,member)).items[0].kind,'scheduled')
+  await f.pool.query("UPDATE hub_commerce.subscriptions SET starts_at=now()-interval '1 day' WHERE order_id=$1",[next.id])
+  assert.equal(await messages.collectBatch(),1)
+  assert.equal((await messages.list(f.tenant,member)).items[0].kind,'active')
+})
+test('customer reminders skip missed warnings and paginate without marking unseen messages read',database,async t=>{
+  const f=await fixture(t,{space:true}),messages=f.service.messages,member=randomUUID()
+  await f.pool.query('INSERT INTO iam.members(id) VALUES($1)',[member])
+  for(let i=0;i<5;i++){
+    const order=await f.create(),paid=await f.eventFor(order)
+    await f.service.commit(paid.source,paid.event,paid.payment)
+  }
+  for(const [start,end] of [['1 day','1 year'],['-1 day','1 year'],['-1 day','6 days'],['-1 day','12 hours'],['-2 days','-1 day']]){
+    await f.pool.query('UPDATE hub_commerce.subscriptions SET starts_at=now()+$1::interval,ends_at=now()+$2::interval',[start,end])
+    assert.equal(await messages.collectBatch(),5)
+  }
+  const first=await messages.list(f.tenant,member),second=await messages.list(f.tenant,member,{before:first.nextBefore})
+  assert.equal(first.items.length,20);assert.equal(second.items.length,5);assert.equal(second.nextBefore,null)
+  assert.equal(new Set([...first.items,...second.items].map(m=>m.id)).size,25)
+  assert.equal(first.unread,25);assert.equal(second.unread,25)
+  const late=await f.create(),paid=await f.eventFor(late)
+  await f.service.commit(paid.source,paid.event,paid.payment)
+  await f.pool.query("UPDATE hub_commerce.subscriptions SET starts_at=now()-interval '1 year',ends_at=now()-interval '1 day' WHERE order_id=$1",[late.id])
+  assert.equal(await messages.collectBatch(),1)
+  const events=(await f.pool.query("SELECT kind FROM hub_commerce.messages WHERE document->>'orderId'=$1",[late.id])).rows
+  assert.deepEqual(events,[{kind:'expired'}],'restart does not emit stale 7-day/1-day messages')
+})
 test('existing purchase checkout accepts trusted Harbor presentation without replacing order or payment identity',database,async t=>{
  const f=await fixture(t,{space:true}),order=await f.create(),row=await f.service.row(order.id,f.tenant),calls=[]
  f.source.client.checkout=async(id,options)=>{calls.push([id,options]);return {payUrl:'https://openapi.alipay.com/gateway.do?fixture=1'}}

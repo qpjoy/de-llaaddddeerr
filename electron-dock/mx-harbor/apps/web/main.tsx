@@ -11,6 +11,7 @@ import {
   Users,
   UserRound,
   ShoppingBag,
+  Bell,
 } from "lucide-react";
 import {
   SidebarProvider,
@@ -52,7 +53,8 @@ import { request } from "./api";
 import { AccountSecurity } from "./account-security";
 import { Commerce } from "./commerce";
 import { IpQuery } from "./ip-query";
-import { paymentReturnTrade } from "./commerce-state";
+import { hasCapability, paymentReturnTrade } from "./commerce-state";
+import { Messages, useMessageInbox } from "./messages";
 import "@/styles/harbor.css";
 import "./design-scale.css";
 import "./harbor.css";
@@ -64,15 +66,18 @@ const pages = [
   ["market", "数据商城", ShoppingBag],
   ["services", "我的订阅", Plug],
   ["orders", "支付订单", Wallet],
+  ["messages", "消息中心", Bell],
   ["docs-ip", "接口文档", BookOpen],
   ["account", "账户安全", UserRound],
 ] as const;
 function Navigation({
   page,
   go,
+  unread,
 }: {
   page: string;
   go: (page: string) => void;
+  unread?: number;
 }) {
   const sidebar = useSidebar();
   return (
@@ -95,6 +100,7 @@ function Navigation({
             >
               <Icon size={18} />
               <span>{title}</span>
+              {id === "messages" && !!unread && <span className="harbor-unread" aria-label={`${unread} 条未读消息`}>{unread > 99 ? "99+" : unread}</span>}
             </SidebarMenuButton>
           </SidebarMenuItem>
         ))}
@@ -107,12 +113,14 @@ export function ConsoleShell({
   name,
   children,
   onLogout,
+  unread,
 }: {
   page: string;
   go: (page: string) => void;
   name: string;
   children: React.ReactNode;
   onLogout: () => void;
+  unread?: number;
 }) {
   return (
     <SidebarProvider
@@ -132,7 +140,7 @@ export function ConsoleShell({
         </SidebarHeader>
         <SidebarContent>
           <SidebarGroup>
-            <Navigation page={page} go={go} />
+            <Navigation page={page} go={go} unread={unread} />
           </SidebarGroup>
         </SidebarContent>
         <SidebarFooter className="console-sidebar-footer">
@@ -167,6 +175,7 @@ function RemotePanel({
   go,
   reloadSession,
   initialIp,
+  messages,
 }: {
   csrf: string;
   go: (page: string) => void;
@@ -175,6 +184,7 @@ function RemotePanel({
   page: string;
   session: any;
   tenant: string;
+  messages: ReturnType<typeof useMessageInbox>;
 }) {
   const [data, setData] = useState<any>(null),
     [error, setError] = useState("");
@@ -202,6 +212,7 @@ function RemotePanel({
     };
   }, [page, tenant]);
   if (page === "account") return <AccountSecurity />;
+  if (page === "messages") return <Messages tenant={tenant} csrf={csrf} enabled={hasCapability(session, tenant, "billing.read")} state={messages} go={go} />;
   if (page === "intelligence")
     return (
       <IpQuery
@@ -332,6 +343,7 @@ function App() {
     [page, setPage] = useState(location.hash.slice(2) || "intelligence"),
     [bootError, setBootError] = useState("");
   const { active: signedIn, customer: session, csrf, issue } = boot;
+  const messages = useMessageInbox(tenant, signedIn === true && hasCapability(session, tenant, "billing.read"));
   const go = (p: string) => {
     location.hash = `/${p}`;
     setPage(p);
@@ -477,6 +489,7 @@ function App() {
             go(destination);
           }}
           name={session?.displayName || "已登录"}
+          unread={messages.inbox?.unread}
           onLogout={async () => {
             try {
               await request("/auth/sso/logout", {
@@ -517,6 +530,7 @@ function App() {
               go={go}
               reloadSession={retrySession}
               initialIp={queryIp}
+              messages={messages}
             />
           ) : page === "account" ? (
             <AccountSecurity />
