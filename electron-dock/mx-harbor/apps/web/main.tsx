@@ -109,7 +109,8 @@ export function ConsoleShell({
 }) {
   return (
     <SidebarProvider
-      style={{ "--sidebar-width": "224px" } as React.CSSProperties}
+      className="harbor-shell"
+      style={{ "--sidebar-width": "180px" } as React.CSSProperties}
     >
       <Sidebar className="app-sidebar">
         <SidebarHeader>

@@ -89,6 +89,26 @@
   border-bottom: 1px solid #efd89a;
   text-align: center;
 }
+.harbor-gallery {
+  display: flex;
+  min-height: 100svh;
+  flex-direction: column;
+}
+.harbor-gallery > .harbor-shell {
+  flex: 1;
+  min-height: 0;
+}
+.harbor-gallery > .harbor-shell > .app-main {
+  min-height: 0;
+}
+.harbor-shell > .app-main,
+.harbor-console {
+  display: flex;
+  flex-direction: column;
+}
+.harbor-console > .harbor-footer {
+  margin-top: auto;
+}
 .auth-close {
   position: absolute;
   top: 16px;
@@ -193,6 +213,189 @@
 }
 .harbor-pricing .ip-pricing-heading > [data-slot="button"] {
   margin-top: 24px;
+}
+
+/* The console uses the compact proportions approved for the public entry.
+   Keep real layout dimensions so fixed navigation and portalled menus align. */
+@media (min-width: 768px) {
+  .harbor-shell {
+    font-size: 12px;
+  }
+  .harbor-shell .brand {
+    gap: 8px;
+    padding: 16px 10px 20px;
+  }
+  .harbor-shell .brand-symbol {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+  }
+  .harbor-shell .brand-symbol svg {
+    width: 20px;
+    height: 20px;
+  }
+  .harbor-shell .brand strong {
+    font-size: 17px;
+  }
+  .harbor-shell .brand strong span {
+    font-size: 11px;
+    margin-left: 5px;
+  }
+  .harbor-shell .nav-button {
+    height: 36px !important;
+    padding-inline: 12px !important;
+    font-size: 12px !important;
+  }
+  .harbor-shell .nav-button svg {
+    width: 15px !important;
+    height: 15px !important;
+    margin-right: 3px !important;
+  }
+  .harbor-shell .nav-divider {
+    margin-top: 16px;
+    padding-top: 15px;
+  }
+  .harbor-shell .console-sidebar-footer {
+    padding: 10px;
+  }
+  .harbor-shell .sidebar-account-trigger {
+    height: 42px;
+    gap: 8px;
+    padding: 6px;
+    font-size: 12px;
+  }
+  .harbor-shell .sidebar-account-trigger [data-slot="avatar"] {
+    width: 26px;
+    height: 26px;
+  }
+  .harbor-shell .sidebar-account-trigger [data-slot="avatar-fallback"] {
+    font-size: 12px;
+  }
+  .sidebar-account-menu {
+    padding: 5px;
+  }
+  .sidebar-account-label {
+    padding: 8px;
+  }
+  .sidebar-account-label strong,
+  .sidebar-account-menu [data-slot="dropdown-menu-item"] {
+    font-size: 12px;
+  }
+  .sidebar-account-menu [data-slot="dropdown-menu-item"] {
+    min-height: 34px;
+    gap: 8px;
+    padding-inline: 8px;
+  }
+  .sidebar-account-menu [data-slot="dropdown-menu-item"] svg {
+    width: 14px;
+    height: 14px;
+  }
+  .harbor-console {
+    max-width: 1152px;
+    padding: 26px 26px 8px;
+  }
+  .query-backdrop > .harbor-console {
+    padding-top: clamp(64px, 10vh, 88px);
+  }
+  .harbor-console > .public-query {
+    max-width: 768px;
+  }
+  .harbor-console .public-query h1 {
+    font-size: 38px;
+  }
+  .harbor-console .public-query > p {
+    margin-top: 14px;
+    font-size: 13px;
+  }
+  .harbor-console .public-query form {
+    max-width: 672px;
+    margin-top: 26px;
+  }
+  .harbor-console .intelligence-input[data-slot="input-group"] {
+    height: 54px;
+    padding-right: 5px;
+    border-radius: 11px;
+  }
+  .harbor-console .intelligence-input [data-slot="input-group-control"] {
+    padding-left: 11px;
+    font-size: 14px;
+  }
+  .harbor-console .intelligence-input [data-align="inline-start"] {
+    padding-left: 18px;
+  }
+  .harbor-console .intelligence-input [data-align="inline-start"] > svg {
+    width: 17px;
+    height: 17px;
+  }
+  .harbor-console .intelligence-submit[data-slot="button"] {
+    height: 42px;
+    min-width: 84px;
+    padding-inline: 22px;
+    border-radius: 7px;
+    font-size: 13px;
+  }
+  .harbor-console .public-query > .public-query-hint {
+    font-size: 12px;
+  }
+  .harbor-console .public-query-intro {
+    max-width: 672px;
+    gap: 26px;
+    margin-top: 58px;
+  }
+  .harbor-console .public-query-feature-heading {
+    gap: 10px;
+  }
+  .harbor-console .public-query-feature-heading > svg {
+    width: 20px;
+    height: 20px;
+  }
+  .harbor-console .public-query-intro h2 {
+    font-size: 15px;
+  }
+  .harbor-console .public-query-intro p {
+    margin-top: 11px;
+    font-size: 12px;
+  }
+  .harbor-console .page-heading {
+    margin-bottom: 21px;
+  }
+  .harbor-console .page-heading h1 {
+    font-size: 23px;
+  }
+  .harbor-console .harbor-grid {
+    gap: 16px;
+  }
+  .harbor-console [data-slot="card"] {
+    gap: 16px;
+    padding-block: 20px;
+  }
+  .harbor-console [data-slot="card-header"],
+  .harbor-console [data-slot="card-content"] {
+    padding-inline: 20px;
+  }
+  .harbor-console [data-slot="card-title"] {
+    font-size: 16px;
+  }
+  .harbor-console [data-slot="card-description"],
+  .harbor-console [data-slot="card-content"],
+  .harbor-console [data-slot="table"] {
+    font-size: 13px;
+  }
+  .harbor-console .harbor-form {
+    gap: 13px;
+  }
+  .harbor-console .harbor-form [data-slot="input"] {
+    height: 36px;
+    font-size: 13px;
+  }
+  .harbor-console .harbor-form [data-slot="button"] {
+    min-height: 34px;
+    font-size: 13px;
+  }
+  .harbor-console > .harbor-footer {
+    padding-block: 26px;
+    font-size: 11px;
+  }
 }
 
 /* Scroll the form, not a vertically centered overflowing grid row. The close

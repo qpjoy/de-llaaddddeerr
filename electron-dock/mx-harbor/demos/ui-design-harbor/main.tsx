@@ -12,37 +12,39 @@ function Gallery() {
   return (
     <AccessContext.Provider
       value={{
-        signedIn: false,
+        signedIn: consoleView,
         enter: () => setLogin(true),
         account: () => setLogin(true),
       }}
     >
-      <div className="harbor-gallery-banner">
-        设计组件预览 · 无真实账号、订单或查询{" "}
-        <Button variant="ghost" onClick={() => setConsole(!consoleView)}>
-          {consoleView ? "查看首页" : "查看控制台"}
-        </Button>
-        <Button variant="ghost" onClick={() => setLogin(true)}>
-          登录 / 邀请注册
-        </Button>
-      </div>
-      {consoleView ? (
-        <ConsoleShell
-          page="intelligence"
-          go={() => {}}
-          name="预览账号"
-          onLogout={() => setConsole(false)}
-        >
-          <PublicIpSearch />
-        </ConsoleShell>
-      ) : (
-        <div className="public-site query-backdrop">
-          <PublicHeader />
-          <main className="public-query-main">
-            <PublicIpSearch />
-          </main>
+      <div className="harbor-gallery">
+        <div className="harbor-gallery-banner">
+          设计组件预览 · 无真实账号、订单或查询{" "}
+          <Button variant="ghost" onClick={() => setConsole(!consoleView)}>
+            {consoleView ? "查看首页" : "查看控制台"}
+          </Button>
+          <Button variant="ghost" onClick={() => setLogin(true)}>
+            登录 / 邀请注册
+          </Button>
         </div>
-      )}
+        {consoleView ? (
+          <ConsoleShell
+            page="intelligence"
+            go={() => {}}
+            name="预览账号"
+            onLogout={() => setConsole(false)}
+          >
+            <PublicIpSearch available={false} />
+          </ConsoleShell>
+        ) : (
+          <div className="public-site query-backdrop">
+            <PublicHeader />
+            <main className="public-query-main">
+              <PublicIpSearch />
+            </main>
+          </div>
+        )}
+      </div>
       <AccountDialog open={login} onOpenChange={setLogin} preview />
     </AccessContext.Provider>
   );
