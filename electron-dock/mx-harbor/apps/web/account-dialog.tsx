@@ -32,7 +32,7 @@ import {
   InputGroupButton,
 } from "@/components/ui/input-group";
 import { Spinner } from "@/components/ui/spinner";
-import { request, startAccountSession, type AccountOptions } from "./api";
+import { request, loadAccountForm, type AccountOptions } from "./api";
 export function AccountDialog({
   open,
   onOpenChange,
@@ -57,34 +57,33 @@ export function AccountDialog({
     setOptions(null);
     setUnavailable(false);
     setError("");
-    request<AccountOptions>("/auth/sso/form")
+    loadAccountForm({
+      register,
+      canRestart:
+        !new URLSearchParams(location.search).has("account") || retry > 0,
+      current: () => active,
+    })
       .then((value) => {
         if (active) {
-          setOptions(value);
+          if ("redirect" in value) {
+            location.replace(value.redirect);
+            return;
+          }
+          setOptions(value.options);
           setUnavailable(false);
-          setRegister(value.view === "register");
+          if (!retry) setRegister(value.options.view === "register");
         }
       })
-      .catch(async (error) => {
+      .catch((error) => {
         if (!active) return;
-        // Establish issuer cookies through a top-level OIDC round trip, then
-        // return to this form. Never loop when the returned flow is invalid.
-        if (
-          error.code === "account_flow_expired" &&
-          (!new URLSearchParams(location.search).has("account") || retry > 0)
-        ) {
-          try {
-            const result = await startAccountSession(register);
-            if (active) location.replace(result.redirect);
-            return;
-          } catch (startError) {
-            error = startError;
-          }
-        }
         if (active) {
           setOptions(null);
           setUnavailable(true);
-          setError(error.message || "账号服务暂不可用，请稍后重试。");
+          setError(
+            error.name === "TimeoutError"
+              ? "连接超时，请重试。"
+              : error.message || "账号服务暂不可用，请稍后重试。",
+          );
         }
       })
       .finally(() => {
@@ -112,6 +111,7 @@ export function AccountDialog({
     try {
       const result = await request<{ redirect: string }>("/auth/sso/form", {
         method: "POST",
+        signal: AbortSignal.timeout(15000),
         headers: { "x-mx-csrf": options.csrf },
         body: JSON.stringify({
           action: register ? "register" : "login",
@@ -122,7 +122,11 @@ export function AccountDialog({
       });
       location.assign(result.redirect);
     } catch (e) {
-      setError((e as Error).message);
+      setError(
+        (e as Error).name === "TimeoutError"
+          ? "提交结果尚未确认，请先尝试登录；注册请求请勿重复提交。"
+          : (e as Error).message,
+      );
       if ([409, 410].includes((e as { status?: number }).status ?? 0)) {
         setOptions(null);
         setUnavailable(true);
@@ -215,7 +219,7 @@ export function AccountDialog({
                     autoComplete="username"
                     defaultValue={options?.loginHint || ""}
                     placeholder="输入你的 MX 账号"
-                    disabled={busy || (!options && !preview)}
+                    disabled={busy}
                   />
                   <InputGroupAddon>
                     <Mail />
@@ -236,7 +240,7 @@ export function AccountDialog({
                       register ? "new-password" : "current-password"
                     }
                     placeholder="输入密码"
-                    disabled={busy || (!options && !preview)}
+                    disabled={busy}
                   />
                   <InputGroupAddon>
                     <LockKeyhole />
@@ -264,7 +268,7 @@ export function AccountDialog({
                       minLength={8}
                       maxLength={128}
                       autoComplete="new-password"
-                      disabled={busy || (!options && !preview)}
+                      disabled={busy}
                     />
                   </InputGroup>
                 </Field>
@@ -284,7 +288,7 @@ export function AccountDialog({
                       !register ? "auth-invite-help" : undefined
                     }
                     placeholder="输入邀请人提供的邀请码"
-                    disabled={busy || (!options && !preview)}
+                    disabled={busy}
                   />
                 </InputGroup>
                 {!register && (

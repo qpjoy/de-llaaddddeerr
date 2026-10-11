@@ -45,5 +45,30 @@ export type AccountOptions = {
 export const startAccountSession = (register = false) =>
   request<{ redirect: string }>(
     `/auth/sso/start?view=${register ? "register" : "login"}`,
-    { method: "POST", body: "{}" },
+    { method: "POST", body: "{}", signal: AbortSignal.timeout(15000) },
   );
+
+// A 410 can come from either the local transaction or the issuer's interaction.
+// They have different error codes but both require a NEW OIDC round trip.
+export async function loadAccountForm({
+  register = false,
+  canRestart = false,
+  current = (): boolean => true,
+  read = () =>
+    request<AccountOptions>("/auth/sso/form", {
+      signal: AbortSignal.timeout(15000),
+    }),
+  start = startAccountSession,
+} = {}): Promise<{ options: AccountOptions } | { redirect: string }> {
+  try {
+    return { options: await read() };
+  } catch (error) {
+    if (
+      (error as { status?: number }).status === 410 &&
+      canRestart &&
+      current()
+    )
+      return start(register);
+    throw error;
+  }
+}

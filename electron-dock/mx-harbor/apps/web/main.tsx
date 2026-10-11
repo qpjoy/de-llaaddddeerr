@@ -9,7 +9,6 @@ import {
   Wallet,
   Plug,
   Users,
-  LogOut,
   UserRound,
 } from "lucide-react";
 import {
@@ -20,6 +19,7 @@ import {
   SidebarGroup,
   SidebarMenu,
   SidebarMenuItem,
+  SidebarMenuButton,
   SidebarFooter,
   SidebarTrigger,
   useSidebar,
@@ -46,6 +46,7 @@ import { emptySession, loadHarborSession } from "./session";
 import { PublicIpSearch } from "./public-ip-search";
 import { AccessContext } from "./public-access";
 import { AccountDialog } from "./account-dialog";
+import { SidebarAccountMenu } from "./sidebar-account-menu";
 import { request, startAccountSession } from "./api";
 import "@/styles/dataport.css";
 import "./harbor.css";
@@ -69,24 +70,27 @@ function Navigation({
   const sidebar = useSidebar();
   return (
     <SidebarMenu>
-      {pages.map(([id, title, Icon]) => (
-        <SidebarMenuItem
-          key={id}
-          className={id === "services" ? "nav-divider" : ""}
-        >
-          <button
-            className={`nav-button ${page === id ? "active" : ""}`}
-            aria-current={page === id ? "page" : undefined}
-            onClick={() => {
-              go(id);
-              if (sidebar.isMobile) sidebar.setOpenMobile(false);
-            }}
+      {pages
+        .filter(([id]) => id !== "account" && id !== "orders")
+        .map(([id, title, Icon]) => (
+          <SidebarMenuItem
+            key={id}
+            className={id === "services" ? "nav-divider" : ""}
           >
-            <Icon size={18} />
-            <span>{title}</span>
-          </button>
-        </SidebarMenuItem>
-      ))}
+            <SidebarMenuButton
+              className="nav-button"
+              isActive={page === id}
+              aria-current={page === id ? "page" : undefined}
+              onClick={() => {
+                go(id);
+                if (sidebar.isMobile) sidebar.setOpenMobile(false);
+              }}
+            >
+              <Icon size={18} />
+              <span>{title}</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        ))}
     </SidebarMenu>
   );
 }
@@ -124,20 +128,18 @@ export function ConsoleShell({
           </SidebarGroup>
         </SidebarContent>
         <SidebarFooter className="console-sidebar-footer">
-          <button className="nav-button" onClick={() => go("account")}>
-            <UserRound size={18} />
-            <span>{name}</span>
-          </button>
-          <button className="nav-button" onClick={onLogout}>
-            <LogOut size={18} />
-            <span>退出登录</span>
-          </button>
+          <SidebarAccountMenu
+            name={name}
+            page={page}
+            navigate={go}
+            onLogout={onLogout}
+          />
         </SidebarFooter>
       </Sidebar>
       <div
         className={`app-main ${page === "intelligence" ? "query-backdrop" : ""}`}
       >
-        <main className="content">
+        <main className="content harbor-console">
           <SidebarTrigger
             className="console-mobile-trigger"
             aria-label="展开导航"
@@ -186,7 +188,9 @@ function AccountSecurity() {
   }
   return (
     <>
-      <h1>账户安全</h1>
+      <div className="page-heading">
+        <h1>账户安全</h1>
+      </div>
       {error && <p role="alert">{error}</p>}
       {!data ? (
         <p>正在读取账户…</p>
@@ -336,7 +340,7 @@ function RemotePanel({
   const title = pages.find((p) => p[0] === page)?.[1] || "服务";
   return (
     <>
-      <div className="harbor-page-heading">
+      <div className="page-heading">
         <h1>{title}</h1>
       </div>
       {error ? (
@@ -348,7 +352,7 @@ function RemotePanel({
           {!tenant ? "当前账号尚无可用空间，请联系空间管理员。" : "正在读取…"}
         </div>
       ) : page === "keys" ? (
-        <Card>
+        <Card className="harbor-table-panel">
           <Table>
             <TableHeader>
               <TableRow>
@@ -376,6 +380,9 @@ function RemotePanel({
             <CardDescription>仅包含当前空间已授权的数据服务。</CardDescription>
           </CardHeader>
           <CardContent>
+            {!Object.keys(data.schema?.paths || {}).length && (
+              <p className="harbor-empty">当前空间暂无已授权的接口文档。</p>
+            )}
             {Object.entries(data.schema?.paths || {}).map(
               ([path, methods]: any) => (
                 <div className="harbor-endpoint" key={path}>
@@ -585,13 +592,20 @@ function App() {
           {bootError && <p role="alert">{bootError}</p>}
           {sessionNotice}
           {session ? (
-            <RemotePanel page={page} session={session} tenant={tenant} />
+            <RemotePanel
+              key={`${page}:${tenant}`}
+              page={page}
+              session={session}
+              tenant={tenant}
+            />
           ) : page === "account" ? (
             <AccountSecurity />
           ) : null}
         </ConsoleShell>
       ) : (
-        <div className="public-site query-backdrop">
+        <div
+          className={`public-site ${location.pathname === "/pricing" ? "harbor-pricing" : "query-backdrop"}`}
+        >
           <PublicHeader
             current={location.pathname === "/pricing" ? "pricing" : "home"}
             accountPending={checking}

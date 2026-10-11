@@ -13,7 +13,7 @@
 }
 .harbor-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
   gap: 20px;
 }
 .harbor-empty {
@@ -94,4 +94,164 @@
   top: 16px;
   right: 16px;
   color: var(--muted-foreground);
+}
+
+/* Match DataPort's workspace panels, including business views with no records. */
+.harbor-console > .public-query {
+  margin-inline: auto;
+}
+.harbor-console [data-slot="card"] {
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--panel-radius);
+  background: #fff;
+  box-shadow: 0 2px 4px #172b4d02;
+  gap: 20px;
+}
+.harbor-console [data-slot="card-title"] {
+  font-size: 18px;
+  line-height: 1.5;
+  font-weight: 600;
+}
+.harbor-console [data-slot="card-description"] {
+  color: var(--text-secondary);
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+.harbor-console [data-slot="card-content"] {
+  font-size: 14px;
+  line-height: 1.8;
+}
+.harbor-console [data-slot="input"] {
+  height: 42px;
+  border-color: #cbd4e1;
+  border-radius: var(--control-radius);
+  box-shadow: none;
+}
+.harbor-console .harbor-table-panel {
+  padding: 24px;
+  gap: 0;
+}
+.harbor-console [data-slot="table-row"] {
+  border-color: var(--line-soft);
+}
+.harbor-console .harbor-empty {
+  width: 100%;
+  grid-column: 1 / -1;
+  line-height: 1.8;
+}
+.harbor-grid > .harbor-empty {
+  background: #fff;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--panel-radius);
+}
+.harbor-form {
+  margin-top: 12px;
+}
+.harbor-form label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.harbor-form [data-slot="button"] {
+  min-height: 40px;
+  border-radius: var(--control-radius);
+}
+.harbor-console [data-slot="button"][data-variant="outline"] {
+  border-color: #dfe3eb;
+  color: var(--text-secondary);
+  box-shadow: none;
+}
+.harbor-space {
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.harbor-space select {
+  background: #fff;
+  border-color: var(--line-soft);
+  max-width: 100%;
+}
+.harbor-endpoint:last-child {
+  border-bottom: 0;
+}
+.harbor-endpoint code {
+  font-size: 13px;
+  color: #345c99;
+}
+.harbor-endpoint p {
+  margin-top: 8px;
+  color: var(--text-secondary);
+}
+.harbor-pricing {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-soft);
+}
+.harbor-pricing main {
+  flex: 1;
+}
+.harbor-pricing .ip-pricing-heading > [data-slot="button"] {
+  margin-top: 24px;
+}
+
+/* Scroll the form, not a vertically centered overflowing grid row. The close
+   control and wordmark remain reachable at short heights and with zoom. */
+.auth-dialog[data-slot="dialog-content"] {
+  overflow: hidden;
+  grid-template-rows: minmax(0, 1fr);
+}
+.auth-dialog .auth-brand-panel {
+  min-height: 0;
+}
+.auth-dialog .auth-form-panel {
+  min-height: 0;
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  justify-content: flex-start;
+  padding: 40px 40px 30px;
+  scrollbar-gutter: stable;
+}
+.auth-dialog .auth-form-panel > * {
+  flex-shrink: 0;
+}
+.auth-dialog .auth-form-panel [data-slot="dialog-header"] {
+  margin-bottom: 20px;
+}
+.harbor-auth-tabs {
+  margin: 0 0 24px;
+}
+.auth-dialog .auth-form-panel [data-slot="field-group"] {
+  gap: 20px;
+}
+.auth-dialog .auth-close {
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #fff;
+}
+.auth-dialog .auth-close:hover {
+  background: #f3f6fa;
+}
+.auth-dialog
+  .auth-form-panel
+  [data-slot="input-group-button"]:focus:not(:focus-visible) {
+  outline: none;
+  box-shadow: none;
+}
+@media (max-width: 767px) {
+  .harbor-console .harbor-table-panel {
+    padding: 16px;
+  }
+}
+@media (max-width: 680px) {
+  .auth-dialog[data-slot="dialog-content"] {
+    max-height: calc(100dvh - 24px);
+  }
+  .auth-dialog .auth-form-panel {
+    max-height: calc(100dvh - 24px);
+    padding: 32px 24px 24px;
+  }
 }
