@@ -1,6 +1,6 @@
 # MX Harbor 数港
 
-Harbor（Data Harbor / DataPort）是独立部署的客户入口。视觉组件来自 `/tmp/dataport`，账号由 Launcher/Auth 管理，业务权限与数据由 Hub 管理。
+Harbor（数港）是独立部署的客户入口。视觉组件来自用户提供的外部数港设计原型，账号由 Launcher/Auth 管理，业务权限与数据由 Hub 管理。
 
 **当前完成第一批实现：独立 UI、邀请准入、统一 SSO、受限客户读取接口和 K8s 部署工具。尚未完成购买、¥1 管理员验收、付款返回及 IP 查询闭环，不具备商业上线条件。用户已提供 Harbor 迁移与发布成功输出；域名、SSO 与商业闭环尚待服务器验收。**
 
@@ -22,7 +22,7 @@ MX_HARBOR_PREVIEW=1 npm start
 
 ## 当前目录
 
-- `ui-design/`：原 DataPort CSS、基础组件和来源 SHA256 清单。独立命名为 `@qpjoy/ui-design-harbor`，未修改 Hub/Neon Void 样式。
+- `ui-design/`：Harbor CSS、基础组件和原始设计来源 SHA256 清单。独立命名为 `@qpjoy/ui-design-harbor`，未修改 Hub/Neon Void 样式。
 - `apps/web/`：React 19 + TypeScript + Vite 页面，保留原登录弹窗布局，加入邀请码注册。
 - `apps/server/`：独立 BFF、mx-common SSO、加密会话；每次客户接口调用重新校验 Auth。
 - `migrations/`：Harbor 自有会话库迁移，无 Hub 业务表、密码或支付账本。

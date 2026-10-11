@@ -17,10 +17,10 @@ export function PublicHeader({
       </a>
       <header className="public-header query-header">
         <div className="public-container public-nav">
-          <a className="public-brand" href="/" aria-label="数港 DataPort 首页">
+          <a className="public-brand" href="/" aria-label="数港 Harbor 首页">
             <Layers3 aria-hidden="true" />
             <strong>
-              数港 <span>DataPort</span>
+              数港 <span>Harbor</span>
             </strong>
           </a>
           <nav aria-label="网站导航">

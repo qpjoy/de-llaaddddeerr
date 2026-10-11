@@ -96,7 +96,7 @@
   color: var(--muted-foreground);
 }
 
-/* Match DataPort's workspace panels, including business views with no records. */
+/* Match Harbor's workspace panels, including business views with no records. */
 .harbor-console > .public-query {
   margin-inline: auto;
 }

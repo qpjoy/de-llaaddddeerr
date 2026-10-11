@@ -17,7 +17,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 
-// Keep the original DataPort account menu layout; actions use Harbor's SSO/BFF.
+// Keep the original Harbor account menu layout; actions use Harbor's SSO/BFF.
 export function SidebarAccountMenu({
   name,
   page,

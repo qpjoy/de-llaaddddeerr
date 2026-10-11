@@ -48,7 +48,7 @@ import { AccessContext } from "./public-access";
 import { AccountDialog } from "./account-dialog";
 import { SidebarAccountMenu } from "./sidebar-account-menu";
 import { request, startAccountSession } from "./api";
-import "@/styles/dataport.css";
+import "@/styles/harbor.css";
 import "./harbor.css";
 const pages = [
   ["intelligence", "新建查询", SquarePen],
@@ -118,7 +118,7 @@ export function ConsoleShell({
               <Layers3 size={24} />
             </span>
             <strong>
-              数港<span>DataPort</span>
+              数港<span>Harbor</span>
             </strong>
           </a>
         </SidebarHeader>
@@ -145,7 +145,7 @@ export function ConsoleShell({
             aria-label="展开导航"
           />
           {children}
-          <footer className="harbor-footer">数港 DataPort · Data Harbor</footer>
+          <footer className="harbor-footer">数港 Harbor</footer>
         </main>
       </div>
     </SidebarProvider>
@@ -638,7 +638,7 @@ function App() {
               <PublicIpSearch />
             )}
           </main>
-          <footer className="harbor-footer">数港 DataPort · Data Harbor</footer>
+          <footer className="harbor-footer">数港 Harbor</footer>
         </div>
       )}
       <AccountDialog open={auth} onOpenChange={setAuth} />

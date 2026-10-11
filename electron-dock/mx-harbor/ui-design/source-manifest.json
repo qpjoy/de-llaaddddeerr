@@ -1,5 +1,5 @@
 {
-  "reference": "/tmp/dataport",
+  "reference": "External Harbor design prototype supplied by the user",
   "files": [
     {
       "source": "app/globals.css",

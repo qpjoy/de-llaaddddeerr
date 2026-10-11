@@ -4,13 +4,13 @@
 
 ## 1. 产品定位与决定
 
-建议项目名 `mx-harbor`，放在 `electron-dock/mx-harbor`；对外品牌为「数港 Data Harbor」，DataPort 作为当前设计原型的名称。最终展示名和域名可通过 Harbor 自己的发布配置确定，不用改业务 ID。
+项目名为 `mx-harbor`，位于 `electron-dock/mx-harbor`；对外品牌统一为「数港 Harbor」。外部数港设计原型仅作为视觉与交互基线，保留原始文件哈希用于追溯，不沿用其旧品牌。品牌调整不改变业务 ID。
 
 Harbor 是 Hub 面向客户的独立产品入口：独立页面、域名、发布和回滚，使用同一套业务数据与权限。Hub 保留自己的界面和管理能力。首期不复制 Hub 后端、不把 Harbor 当 Launcher demo、不建立第二套账号或支付账本。
 
 核心决定：
 
-1. 从 `/tmp/dataport` 抽取 Harbor 设计组件与页面布局，再接真实业务。类似 Neon Void 的「组件库 + 独立演示页」，但不修改 Neon Void 本身。
+1. 从用户提供的外部数港设计原型抽取 Harbor 设计组件与页面布局，再接真实业务。类似 Neon Void 的「组件库 + 独立演示页」，但不修改 Neon Void 本身。
 2. 前端采用 Hub 已使用的 React + Vite，后端采用现有 Node.js ESM 与 mx-common；保留原型需要的 Tailwind/无样式交互组件。Luopan 的 Quasar 和 H2I 的 Electron 不是 Harbor 的运行依赖。
 3. Harbor 用独立 Auth client、audience、会话 Cookie 和会话库。密码、账号创建和账户安全仍归 Launcher User Center。
 4. Hub 新增受限的第一方客户接口，服务 Harbor BFF（浏览器后端），复用 Hub 的成员、租户、文档过滤、商品、权限、计量和交付事务。
@@ -27,7 +27,7 @@ Harbor 是 Hub 面向客户的独立产品入口：独立页面、域名、发�
 
 | 部分 | 源码/当前文档证据 | 对 Harbor 的影响 |
 | --- | --- | --- |
-| 原型 | `/tmp/dataport` 是 Next.js App Router + React + Tailwind，含自有 PostgreSQL 账号/订单；README 明确真实支付、数据源未接通 | 复用视觉与交互，不迁入原型账号、模拟数据或 pending_config 支付实现 |
+| 原型 | 用户提供的外部数港设计原型是 Next.js App Router + React + Tailwind，含自有 PostgreSQL 账号/订单；README 明确真实支付、数据源未接通 | 复用视觉与交互，不迁入原型账号、模拟数据或 pending_config 支付实现 |
 | 原型实际页面 | 首页 IP 输入、`/pricing`、控制台新建查询、侧栏账户上拉菜单；最新原型已隐藏数据商城入口 | 首批保留这些已确认页面；新增 Hub 能力沿用该设计语言，不能声称原型已有对应页面 |
 | Hub 技术栈 | `mx-insight-hub/package.json`：React 19、Vite、Node >=22.18、pg、mx-common、mx-pay | 无需因视觉原型重建 Next.js 业务后台，也无需迁为 Quasar |
 | 设计库模式 | Neon Void 源码在 `mx-launcher/ui-design`，`demos/ui-design-neon-void` 是展示入口 | Harbor 建独立设计包和 gallery，避免给 Hub 注入蓝色主题/CSS |
@@ -98,14 +98,14 @@ electron-dock/mx-harbor/
 
 抽取顺序：
 
-1. 固定 `/tmp/dataport` 文件哈希、页面截图、视口、字体和素材清单，作为设计基线；其历史技术约束与旧计价是参考材料，不覆盖本轮用户要求。
+1. 固定用户提供的外部数港设计原型的文件哈希、页面截图、视口、字体和素材清单，作为设计基线；其历史技术约束与旧计价是参考材料，不覆盖本轮用户要求。
 2. 提取颜色、字体、间距、圆角、阴影、表格密度、浅蓝渐变和网格。保留主色 `#165DFF`；Harbor 样式限定在独立应用/根容器，不改 Neon Void token。
 3. 抽取 Button/Input/Dialog/Tabs/Table/Pagination/Badge，以及 PublicHeader、Sidebar、SidebarAccountMenu、IP 查询框、风险资料/标签、订阅卡、订单摘要、Cookie 卡片等实际用到的组件。无需先搬全部 UI 文件。
 4. 把组件中的请求、登录状态、金额计算、付费动作移出，改为 props/events。路由/图片等 Next 专属依赖由 Harbor 路由和静态资源适配，不能把原型 route handler 带入生产。
 5. 将授权、租户切换、请求幂等、错误状态放在业务层。长久可共享的是业务合同和无主题逻辑，不复制 Hub 的大页面，也不强迫 Hub 改成 Harbor 组件。
 6. 受保护文档从 Hub 同一合同源生成 Harbor 主题的内容模型和示例；过滤先在 Hub 完成。避免直接嵌入带 Hub 导航/域名/CSS 的完整 HTML，也不手工维护第二份接口正文。
 
-三份对照可同时运行：原版 DataPort（其既有开发端口 4277）、Harbor UI gallery、真实合同驱动的 Harbor 测试实例。后两者在实施时分配空闲端口。原版若需登录则使用隔离数据库/演示配置，不接生产；如果原版无法启动，以固定截图加纯 UI fixture 对照，不伪称已启动。
+三份对照可同时运行：外部数港设计原型（其既有开发端口 4277）、Harbor UI gallery、真实合同驱动的 Harbor 测试实例。后两者在实施时分配空闲端口。原版若需登录则使用隔离数据库/演示配置，不接生产；如果原版无法启动，以固定截图加纯 UI fixture 对照，不伪称已启动。
 
 视觉验收至少覆盖桌面 1440×1000、短屏 1100×650、手机 390×844，以及空数据、长文本、加载、无权限、查询失败、支付未完成、菜单上拉与移动侧栏。已有页面比较几何布局/字体/颜色/交互；新增功能用同一组件语言设计，商品价格与状态以 Hub 真实合同为准。
 
@@ -237,7 +237,7 @@ Nginx 可以承担域名与路径分发；它不能替代应用的 SSO 回调、
 
 这会产生真实、完整的年度权益，应选择专用验收空间并记录原价格与管理员。已有有效订阅时沿用现有顺延规则，不能为了显示立即可用而重置当前次数或到期时间。首轮用没有既有订阅的验收空间，更容易验证从零开通。
 
-不新增试用次数、按天有效期、试用限购或转正式计算。正式商品和历史订单价格不变；DataPort 原型中的三档套餐只是视觉示例，未经另行发布不能作为真实商品。超时和重复操作保留原验收订单；退款、迟到、多付仍按 Pay/Hub 已有证据与人工处理边界执行，不声称已有自动退款。
+不新增试用次数、按天有效期、试用限购或转正式计算。正式商品和历史订单价格不变；外部设计原型中的三档套餐只是视觉示例，未经另行发布不能作为真实商品。超时和重复操作保留原验收订单；退款、迟到、多付仍按 Pay/Hub 已有证据与人工处理边界执行，不声称已有自动退款。
 
 ### 9.2 支付应用与来源扩展
 
@@ -349,6 +349,6 @@ P0 可以先做；P1 的身份映射与 P2 的支付返回/事件隔离是上线
 - [Hub 支付来源](../../mx-insight-hub/server/payments/recharge.mjs)、[来源解析](../../mx-insight-hub/server/payments/recharge-config.mjs)、[原支付路由迁移](../../mx-insight-hub/migrations/123_payment_delivery.sql)
 - [Pay 渠道及 URL 约束](../../mx-base/mx-pay/server/channel-config.mjs)、[支付宝 checkout](../../mx-base/mx-pay/server/alipay.mjs)、[Pay 边界](../../mx-base/mx-pay/AGENTS.md)
 - [Neon Void 组件库](../../mx-launcher/ui-design/README.md)、[Night-All 迁移评估与后续链接](../../mx-insight-hub/docs/architecture/night-all-search-replacement-assessment-2026-09-28.md)
-- 本地设计源：`/tmp/dataport/README.md`、`app/globals.css`、`app/platform.tsx`、`app/public-access.tsx`、`app/intelligence-overview.tsx`、`app/ip-checkout.tsx`、`app/sidebar-account-menu.tsx`、`components/ui/`。
+- 本地设计源：外部数港设计原型的 `README.md`、`app/globals.css`、`app/platform.tsx`、`app/public-access.tsx`、`app/intelligence-overview.tsx`、`app/ip-checkout.tsx`、`app/sidebar-account-menu.tsx`、`components/ui/`。
 
 本轮只读上述项目并新增规划文档；未用历史文档中的部署步骤执行生产变更，也没有把原型自己的 AGENTS 技术选型当作 Harbor 的最终要求。

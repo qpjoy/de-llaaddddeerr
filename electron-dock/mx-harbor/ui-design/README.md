@@ -1,6 +1,6 @@
 # Harbor 设计组件
 
-样式基线为 `/tmp/dataport`。`styles/dataport.css` 与组件源码初次抽取保持原样；`source-manifest.json` 记录来源文件和 SHA256，方便对照后续变化。
+样式基线为用户提供的外部数港设计原型。`styles/harbor.css` 与组件源码初次抽取保持原样；当前品牌、资源文件名与浏览器偏好存储键已统一为 Harbor。`source-manifest.json` 保留初次抽取的来源文件和 SHA256，用于追溯原始设计，不代表适配后文件的校验值。
 
 React 组件依赖由 Harbor 根 package-lock 固定；`@/` 映射到本目录。此包不包含 Next.js 服务端、自有账号、演示订单或支付模拟器。业务适配与 Harbor 少量补充样式放在 `apps/web/`。
 

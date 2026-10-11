@@ -64,7 +64,7 @@ body{font-size:14px}
 .form-error{color:#bd2525;font-size:13px;line-height:1.8;margin-bottom:16px}
 @media(max-width:767px){.content{padding-top:25px}.product-card{padding:24px}.product-desc{font-size:13px}.price-section small{font-size:12px}.notice{font-size:12px}.checkout-dialog{max-width:calc(100% - 24px)!important}.page-footer{margin-top:24px}}
 
-/* shadcn/ui login-04 split card, adapted to DataPort's Arco palette. */
+/* shadcn/ui login-04 split card, adapted to Harbor's Arco palette. */
 .auth-dialog[data-slot=dialog-content]{display:grid;grid-template-columns:300px minmax(0,1fr);width:780px;max-width:calc(100vw - 40px);gap:0;padding:0;border:0;border-radius:16px!important;box-shadow:0 24px 100px #0b173c33;overflow-x:hidden;max-height:calc(100dvh - 40px)}
 .auth-brand-panel{position:relative;isolation:isolate;display:flex;flex-direction:column;justify-content:space-between;min-height:480px;padding:32px;overflow:hidden;color:#fff;background:linear-gradient(155deg,#164fc6 0%,#1246b3 48%,#0e327c 100%)}
 .auth-wordmark{display:flex;align-items:center;gap:11px;position:relative;z-index:1}
@@ -518,7 +518,7 @@ a { text-underline-offset: 4px; }
   .auth-form-panel { padding-inline: 20px; }
 }
 
-/* Risk intelligence: shared with the existing DataPort control system. */
+/* Risk intelligence: shared with the existing Harbor control system. */
 :root { --risk-high: #d55248; --risk-high-bg: #fff0ed; --risk-medium: #a86d16; --risk-medium-bg: #fff6e6; --risk-low: #218567; --risk-low-bg: #eaf7f1; }
 .risk-badge[data-slot=badge] { border: 0; border-radius: 5px; font-size: 12px; line-height: 1.6; padding: 3px 9px; }
 .risk-badge[data-risk=high] { color: var(--risk-high); background: var(--risk-high-bg); }

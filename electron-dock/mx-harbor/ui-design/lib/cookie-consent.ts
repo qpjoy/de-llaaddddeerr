@@ -1,4 +1,4 @@
-export const CONSENT_STORAGE_KEY = "dataport_cookie_consent";
+export const CONSENT_STORAGE_KEY = "harbor_cookie_consent";
 export const CONSENT_VERSION = "2026-10-08";
 export const CONSENT_MAX_AGE_MS = 180 * 24 * 60 * 60 * 1000;
 export const PREFERENCE_COOKIE = "sidebar_state";

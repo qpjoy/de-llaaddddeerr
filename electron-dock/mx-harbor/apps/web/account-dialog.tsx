@@ -153,7 +153,7 @@ export function AccountDialog({
           <div className="auth-wordmark">
             <Layers3 />
             <strong>
-              数港<span>DataPort</span>
+              数港<span>Harbor</span>
             </strong>
           </div>
           <div className="risk-auth-message">
@@ -170,7 +170,7 @@ export function AccountDialog({
         <div className="auth-form-panel">
           <div className="auth-mobile-brand" aria-hidden="true">
             <Layers3 />
-            数港 DataPort
+            数港 Harbor
           </div>
           <DialogHeader>
             <DialogTitle>{register ? "受邀加入数港" : "登录数港"}</DialogTitle>
