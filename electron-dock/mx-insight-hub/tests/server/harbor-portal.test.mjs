@@ -13,7 +13,7 @@ test('Portal allowlist rejects administrative, supplier and document bypass path
  for(const path of ['/runtime','/commerce/delivery','/commerce/tenants/abc/acceptance-orders','/../admin/session','/api-keys/abc/reveal'])assert.throws(()=>harborRoute('GET',path,new URLSearchParams()),{status:404})
  assert.throws(()=>harborRoute('POST','/commerce/products',new URLSearchParams()),{status:404})
  assert.throws(()=>harborRoute('GET','/documentation',new URLSearchParams('path=/docs/procurement')),{status:404})
- assert.equal(harborRoute('GET','/documentation',new URLSearchParams('path=/docs/openapi.json')),'/internal/v1/admin/documentation')
+ assert.equal(harborRoute('GET','/documentation',new URLSearchParams('path=/docs/openapi.json&tenantId='+randomUUID())),'/internal/v1/admin/documentation')
 })
 test('Portal purchase and access writes are narrow and retain tenant authorization',async t=>{
  const tenant=randomUUID(),other=randomUUID()

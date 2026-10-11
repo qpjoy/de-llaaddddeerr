@@ -6281,6 +6281,14 @@ export class PostgresStore {
     return media?.type === 'image' && typeof media.url === 'string' && media.url ? media.url : null
   }
 
+  async usageDaily({ tenantId, from, to }) {
+    const { rows } = await this.pool.query(`SELECT to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD') AS day,
+      count(*)::integer AS requests, count(*) FILTER (WHERE status='committed')::integer AS committed
+      FROM usage_requests WHERE tenant_id=$1 AND created_at >= $2 AND created_at < $3
+      GROUP BY 1 ORDER BY 1`, [tenantId, from, to])
+    return rows
+  }
+
   async usage(filters = {}) {
     const values = []
     const clauses = []
@@ -8590,6 +8598,13 @@ export class PostgresStore {
       role: row.role,
       status: row.status,
     }))
+  }
+
+  async listTenantMembers(tenantId) {
+    const { rows } = await this.pool.query(`SELECT m.id, m.display_name AS "displayName", tm.role, tm.status,
+      m.status AS "memberStatus" FROM iam.tenant_memberships tm JOIN iam.members m ON m.id=tm.member_id
+      WHERE tm.tenant_id=$1 AND tm.status='active' ORDER BY m.display_name, m.id`, [tenantId])
+    return rows
   }
 
   async listMembers() {

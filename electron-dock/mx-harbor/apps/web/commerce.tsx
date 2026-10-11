@@ -1,3 +1,5 @@
+import { Input } from "@/components/ui/input";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, Check, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -71,6 +73,8 @@ export function Commerce({
   const [orderDetail, setOrderDetail] = useState<string | null>(null);
   const [loadVersion, setLoadVersion] = useState(0),
     [loadFailed, setLoadFailed] = useState(false);
+  const [productSearch, setProductSearch] = useState(""), [productSort, setProductSort] = useState("default");
+  const products = (catalog?.items || []).filter(item => item.status === "published" && `${item.name} ${item.description}`.toLowerCase().includes(productSearch.toLowerCase())).sort((a,b) => productSort === "price" ? a.amountMinor - b.amountMinor : productSort === "quota" ? b.quota - a.quota : a.sku.localeCompare(b.sku));
   const lock = useRef(false);
   const canRead = hasCapability(session, tenant, "billing.read");
   const canPay = hasCapability(session, tenant, "recharge.create");
@@ -332,9 +336,9 @@ export function Commerce({
             <p>已购有效期至 {dateTime(notice.latestEnd)}{notice.future.length ? `，其中 ${notice.future.length} 份续订待生效` : ""}。可以继续订阅，新一期从已购期限结束后生效。</p>
             <Button variant="link" onClick={() => go("services")}>查看我的订阅 <ArrowRight /></Button>
           </div>}
-          {catalog?.items
-            .filter((item) => item.status === "published")
-            .map((item) => (
+          <div className="harbor-market-toolbar"><Input aria-label="搜索数据服务" placeholder="搜索数据服务或套餐" value={productSearch} onChange={e => setProductSearch(e.target.value)} /><Select value={productSort} onValueChange={setProductSort}><SelectTrigger aria-label="商品排序"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="default">默认排序</SelectItem><SelectItem value="price">价格从低到高</SelectItem><SelectItem value="quota">调用次数从多到少</SelectItem></SelectContent></Select><span>{products.length} 款服务</span></div>
+          <div className={`harbor-market-products ${(catalog?.items.length || 0) > 1 ? "has-multiple" : ""}`}>
+          {products.map((item) => (
               <article className="harbor-offer" key={item.sku}>
                 <div className="harbor-offer-art" aria-hidden="true">
                   <ShieldCheck />
@@ -403,9 +407,8 @@ export function Commerce({
                 </div>
               </article>
             ))}
-          {catalog && !catalog.items.length && (
-            <p className="harbor-empty">暂时没有可购买的服务。</p>
-          )}
+          </div>
+          {catalog && !products.length && <p className="harbor-empty">{catalog.items.length ? "没有匹配的服务，请尝试其他关键词。" : "暂时没有可购买的服务。"}</p>}
         </>
       ) : !canRead ? (
         <p className="harbor-empty">请使用有当前空间账单查看权限的账号。</p>

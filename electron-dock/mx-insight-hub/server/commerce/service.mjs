@@ -29,24 +29,25 @@ export function addCalendarMonths(value, months) {
 export class CommerceService {
   constructor(store = {}, recharge) { this.store = store; this.pool = store.pool; this.recharge = recharge; this.messages = new CustomerMessages(this.pool) }
   atomic(work) { requirePayment(this.pool, 'commerce_storage_required', '购买需要持久化数据库', 503); return withPgTransaction(this.pool, work, { outcomeUnknownCode: 'commerce_outcome_unknown' }) }
-  async catalog(admin = false) {
+  async catalog(admin = false, { harbor = false } = {}) {
     if (!this.pool) return { items: [{ ...INITIAL_PRODUCT, revision: 1 }], purchaseAvailable: false }
-    const rows = (await this.pool.query("SELECT * FROM hub_commerce.products WHERE ($1 OR document->>'status'='published') ORDER BY sku", [admin])).rows
+    const rows = (await this.pool.query("SELECT * FROM hub_commerce.products WHERE ($1 OR document->>'status'='published') AND (NOT $2 OR coalesce((document->>'harborListed')::boolean,true)) ORDER BY sku", [admin, harbor])).rows
     return { items: rows.map(row => { const item=product(row); if (!admin) delete item.channel; return item }), purchaseAvailable: !!this.recharge }
   }
   async save(sku, body, actor) {
-    fields(body, ['revision','name','description','status','amountMinor','months','quota'])
+    fields(body, ['revision','name','description','status','amountMinor','months','quota','harborListed'])
     requirePayment(/^[a-z][a-z0-9-]{2,79}$/.test(sku) && typeof body.name === 'string' && body.name.trim().length > 0 && body.name.length <= 100
       && typeof body.description === 'string' && body.description.length <= 2000 && ['draft','published','retired'].includes(body.status)
       && Number.isSafeInteger(body.amountMinor) && body.amountMinor >= 100 && body.amountMinor <= 100000000
       && Number.isInteger(body.months) && body.months >= 1 && body.months <= 36 && Number.isInteger(body.quota) && body.quota >= 1 && body.quota <= 10000000
+      && (body.harborListed === undefined || typeof body.harborListed === 'boolean')
       && Number.isInteger(body.revision) && body.revision >= 0, 'commerce_invalid_product', '商品名称、价格、期限、额度或修订不正确')
     return this.atomic(async client => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`commerce-product:${sku}`])
       const old = (await client.query('SELECT * FROM hub_commerce.products WHERE sku=$1 FOR UPDATE', [sku])).rows[0]
       requirePayment((old?.revision || 0) === body.revision, 'commerce_revision_conflict', '商品已变化，请重新加载', 409)
       const { revision, ...values } = body
-      const document = { ...INITIAL_PRODUCT, ...values, sku }
+      const document = { ...INITIAL_PRODUCT, ...values, sku, harborListed: values.harborListed ?? (old ? old.document.harborListed ?? true : false) }
       const row = (await client.query(`INSERT INTO hub_commerce.products(sku,revision,document) VALUES($1,1,$2)
         ON CONFLICT(sku) DO UPDATE SET revision=hub_commerce.products.revision+1,document=excluded.document,updated_at=now() RETURNING *`, [sku,document])).rows[0]
       await client.query('INSERT INTO hub_commerce.audit(actor,action,document) VALUES($1,$2,$3)', [actor,'product.saved',{sku,revision:row.revision,before:old?.document || null,after:document}])
@@ -108,7 +109,7 @@ export class CommerceService {
       ORDER BY CASE WHEN channel='product' THEN 0 ELSE 1 END,starts_at LIMIT 1`,[context.tenant.id,context.consumer.id,capabilities.includes(IP_PRODUCT_CAPABILITY),capabilities.includes(IP_V2_CAPABILITY)])).rows[0]
     return {subscription:row||null}
   }
-  async create(tenantId, body, key, actor, { acceptance = false } = {}) {
+  async create(tenantId, body, key, actor, { acceptance = false, harbor = false } = {}) {
     fields(body, ['sku','revision','consumerId','environment']); requestKey(key)
     requirePayment(uuid(tenantId) && (body.consumerId == null || uuid(body.consumerId)) && ['live','test'].includes(body.environment) && Number.isInteger(body.revision), 'commerce_invalid_purchase', '请选择使用空间和商品版本')
     requirePayment(this.recharge, 'commerce_payment_unavailable', '支付接入尚未就绪', 503)
@@ -119,7 +120,7 @@ export class CommerceService {
       const prior = (await client.query('SELECT * FROM hub_commerce.orders WHERE tenant_id=$1 AND environment=$2 AND request_key=$3', [tenantId,body.environment,key])).rows[0]
       if (prior) { requirePayment(prior.fingerprint === hash, 'commerce_idempotency_conflict', '请求已用于其他购买', 409); return prior }
       const sku = (await client.query('SELECT * FROM hub_commerce.products WHERE sku=$1 FOR SHARE', [body.sku])).rows[0]
-      requirePayment(sku?.document.status === 'published' && sku.revision === body.revision, 'commerce_product_changed', '商品已变更或下架，请重新确认', 409)
+      requirePayment(sku?.document.status === 'published' && sku.revision === body.revision && (!harbor || sku.document.harborListed !== false), 'commerce_product_changed', '商品已变更或下架，请重新确认', 409)
       const space = sku.document.entitlementScope === 'tenant'
       requirePayment(!space || body.consumerId == null, 'commerce_space_purchase', '此商品为空间订阅，请刷新后选择使用空间')
       const beneficiary = (await client.query(space ? `SELECT id FROM tenants WHERE id=$2 AND status='active' AND $1::uuid IS NULL FOR SHARE` : `SELECT c.id FROM consumers c JOIN tenants t ON t.id=c.tenant_id

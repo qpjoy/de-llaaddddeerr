@@ -1833,6 +1833,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/ip/risk/history',
       '/data/ip/risk/history/{kind}/{id}',
       '/data/ip/risk/service',
+    '/data/ip/risk/subscription',
     '/data/ip/risk/v2',
       '/data/mobile-commerce/items',
       '/data/news/sources',

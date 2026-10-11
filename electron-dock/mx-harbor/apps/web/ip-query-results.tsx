@@ -1,3 +1,4 @@
+import { IpLocationMap } from "./ip-location-map";
 import { ArrowRight, Clock3, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
@@ -103,6 +104,7 @@ export function QueryResult({
                 ))}
               </dl>
             </div>
+            <IpLocationMap key={`${result.ip}:${result.response?.meta?.capturedAt}`} profile={profile} />
             <section className="harbor-tag-section" aria-label="风险标签">
               <h3>风险标签</h3>
               {Object.keys(tags).length ? (

@@ -23,7 +23,7 @@ export async function commerceRoute({ commerce, service, productGateway, request
     }
     if (searchParams.size) throw new AppError(400,'commerce_invalid_query','商城接口不接受额外查询参数')
     const actor = principal.memberId || principal.kind
-    if (pathname === `${root}/products` && request.method === 'GET') return reply(await commerce.catalog(principal.kind === 'admin-token'))
+    if (pathname === `${root}/products` && request.method === 'GET') return reply(await commerce.catalog(principal.kind === 'admin-token', {harbor: Boolean(principal.portalOrigin)}))
     if(pathname===`${root}/delivery`) {
       requirePayment(principal.kind==='admin-token','admin_token_required','服务配置需要 Admin Token',403)
       if(request.method==='GET')return reply(productGateway?await productGateway.adminDelivery():await commerce.delivery())
@@ -60,7 +60,7 @@ export async function commerceRoute({ commerce, service, productGateway, request
           return reply(await commerce.action(tenantId,id,action,checkout))
         }
         requireTenantCapability(principal,tenantId,'apikey.write')
-        return reply(await commerce.create(tenantId,await readJson(request,4096),request.headers['idempotency-key'],actor),201)
+        return reply(await commerce.create(tenantId,await readJson(request,4096),request.headers['idempotency-key'],actor,{harbor: Boolean(principal.portalOrigin)}),201)
       }
     }
     throw new AppError(404,'not_found','商城接口不存在')

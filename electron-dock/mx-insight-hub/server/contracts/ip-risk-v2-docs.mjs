@@ -1,8 +1,9 @@
 export const ipRiskV2Paths = {
   '/data/ip/risk/v2': {post:{operationId:'queryIpRiskV2',summary:'IP 风险画像 v2 · 单个、批量与渠道对照',tags:['IP 风险画像'],
     'x-mx-required-platform':'ip_risk','x-mx-required-capabilities':['ip.risk.query.v2'],security:[{ApiKeyAuth:[]}],
+    parameters:[{name:'Idempotency-Key',in:'header',required:false,description:'建议显式提供。省略时每次请求独立查询；重试同一请求必须保留原值与参数，新查询使用新标识。',schema:{type:'string',minLength:8,maxLength:128,pattern:'^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$'}}],
     requestBody:{required:true,content:{'application/json':{schema:{type:'object',additionalProperties:false,properties:{ip:{type:'string',format:'ipv4'},ips:{type:'array',minItems:1,maxItems:100,items:{type:'string',format:'ipv4'}},channels:{type:'array',minItems:1,maxItems:2,uniqueItems:true,default:['baidu-v2'],items:{type:'string',enum:['baidu-v2','legacy-v1']}}},oneOf:[{required:['ip'],not:{required:['ips']}},{required:['ips'],not:{required:['ip']}}]}}}},
-    responses:{200:{description:'逐 IP × 渠道结果；批次 HTTP 200 不代表所有子项成功',content:{'application/json':{schema:{type:'object',required:['contractVersion','batchId','data'],properties:{contractVersion:{const:'mx-insight-hub.ip-risk.v2'},batchId:{type:'string',format:'uuid'},data:{type:'array',items:{type:'object',properties:{index:{type:'integer'},ip:{type:'string'},channel:{type:'string'},status:{type:'integer'},response:{type:'object',description:'成功响应 data 包含 status、data（风险字段）与 warnings；meta.capturedAt 为查询时间'},error:{type:'object'}}}}}}}}},403:{description:'渠道未授权、没有有效订阅或订阅已过期'},409:{description:'原请求处理中/结果未知或幂等冲突'},429:{description:'年度调用达到上限或上游限流'},503:{description:'服务暂不可用'}}}},
+    responses:{200:{description:'逐 IP × 渠道结果；批次 HTTP 200 不代表所有子项成功',content:{'application/json':{schema:{type:'object',required:['contractVersion','batchId','data'],properties:{contractVersion:{const:'mx-insight-hub.ip-risk.v2'},batchId:{type:'string',format:'uuid'},data:{type:'array',items:{type:'object',properties:{index:{type:'integer'},ip:{type:'string'},channel:{type:'string'},status:{type:'integer'},response:{type:'object',description:'成功响应 data 包含 status、data（风险字段）与 warnings；meta.capturedAt 为查询时间'},error:{type:'object'}}}}}}}}},403:{description:'渠道未授权、没有有效订阅或订阅已过期'},409:{description:'原请求处理中/结果未知或幂等冲突'},429:{description:'调用额度已用尽或服务限流'},503:{description:'服务暂不可用'}}}},
 }
 export const ipRiskV2Guide = `<section class="doc-page" data-doc-page="ip-risk-v2"><h2>IP 风险画像 v2</h2>
 <p>POST /api/v1/data/ip/risk/v2，使用已授权的 Live Hub Key。要求 ip_risk 和 ip.risk.query.v2，以及当前调用者的有效订阅。普通请求无需 Idempotency-Key；可显式提供 8–128 位安全字符，在结果不确定时保持原值和原参数。</p>
@@ -16,3 +17,9 @@ Content-Type: application/json
 <h3>字段</h3><p>成功项 response.data 包含 ip、status、data、warnings。data 的 risk_level 保留上游等级，risk_score 等缺失量为 null。country/province/city/district、isp、scene、longitude/latitude 为实际返回的归属地、运营商、场景和坐标；data_date 是数据更新时间。risk_tags 每项含 category、name、parent、risk_level、last_seen。空标签、缺失字段和未评级不等于安全。</p>
 <h3>计量与期限</h3><p>百度 v2 为定期订阅，每个 IP 成功交付（包括有效无数据）计入本期调用次数。失败不计次，结果未知的请求保留待核对状态。所选调用者的所有 Keys 共用年度调用上限；到期或达到上限停止，续订从下一周期开始统计。v1 对照另按旧套餐计费。</p>
 <h3>历史与错误</h3><p>批次有 batchId，子项有独立 requestId。GET /api/v1/data/ip/risk/history 与 /history/batch/{batchId} 读取原交付，不调用上游，也不计入本期调用次数。401 表示凭据失效，403 为授权或订阅问题，429 为额度或限流；batch_deadline_not_dispatched 是未派发。结果不确定时保留原请求身份，先核对用量，不以新标识反复提交。</p></section>`
+
+export const ipRiskSubscriptionPaths = {
+  '/data/ip/risk/subscription': {get:{operationId:'readIpRiskSubscription',summary:'读取当前 Key 可用的 IP 订阅额度',tags:['IP 风险画像'],security:[{ApiKeyAuth:[]}],
+    description:'读取当前有效订阅的期限、调用上限、已用和待确认次数。空间订阅按空间共享，原调用者订阅按原调用者隔离。没有生效中的订阅时 subscription 为 null；此读取不发起查询、不消耗次数。',
+    responses:{200:{description:'当前有效订阅或 null',content:{'application/json':{schema:{type:'object',properties:{data:{type:'object',required:['subscription'],properties:{subscription:{oneOf:[{type:'null'},{type:'object',required:['startsAt','endsAt','quota','used','held'],properties:{startsAt:{type:'string',format:'date-time'},endsAt:{type:'string',format:'date-time'},quota:{type:'integer',minimum:0},used:{type:'integer',minimum:0},held:{type:'integer',minimum:0}}}]}}}}}}}},403:{description:'当前 Key 未获订阅查询授权'}}}},
+}

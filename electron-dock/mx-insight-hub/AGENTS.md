@@ -1,3 +1,5 @@
+- 2026-10-11 Harbor 工作台与文档跟进：Hub 商品管理新增独立 harborListed，缺省旧商品保留、新商品关闭，旧客户端保存不能重新上架；可信 Portal 对展示和新购买执行此门禁，原订单恢复/付款与已购权益不受影响，无业务迁移。客户文档必须显式选中活跃空间，同一 consumer 授权交集与 schema 引用裁剪保持；补齐 IP 可选幂等头和订阅读取合同，不改变真实调用。新增 workspace/usage 仅为经权限校验的当前空间只读投影，不开放平台成员管理。见 ../mx-harbor/docs/architecture-and-rollout.md 最新小节。不得改变 MX-H2I 登录或联网。
+
 # Prototype Instructions
 
 - 2026-10-11 Harbor subscription messages: migration 144 adds only tenant-scoped immutable customer messages and member-scoped read receipts. An Admin-process worker collects current paid subscription milestones locally every minute with unique subscription/kind deduplication; reads do not collect, supplier incidents stay Admin-only, no external notifications or payment/usage mutations. BFF/Portal message reads/actions require current billing.read plus a human member. Harbor is the public product surface; Hub owns commercial facts, mx-pay stays independent. The suggested newest-purchase-first policy is not yet selected: preserve existing sequential renewal and historical terms. See ../mx-harbor/docs/implementation-and-operations.md. Preserve MX-H2I login/networking.

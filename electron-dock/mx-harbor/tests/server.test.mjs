@@ -203,7 +203,7 @@ test("BFF fresh verification, fixed upstream credential, no browser secret and b
     },
   });
   const response = await fetch(
-      base + "/bff/v1/documentation?path=%2Fdocs%2Fopenapi.json",
+      base + "/bff/v1/documentation?path=%2Fdocs%2Fopenapi.json&tenantId=11111111-1111-4111-8111-111111111111",
       {
         headers: {
           "x-mx-harbor-subject": "attacker",
@@ -222,6 +222,7 @@ test("BFF fresh verification, fixed upstream credential, no browser secret and b
   );
   assert.equal(requests[0].options.redirect, "error");
   assert.equal(new URL(requests[0].url).origin, config.upstream);
+  assert.equal(new URL(requests[0].url).searchParams.get("tenantId"), "11111111-1111-4111-8111-111111111111");
   assert.doesNotMatch(body, /server-only|hub.invalid|MX Insight Hub/);
   assert.deepEqual(JSON.parse(body).data.schema.servers, [
     { url: "https://harbor.example.test/api/v1" },

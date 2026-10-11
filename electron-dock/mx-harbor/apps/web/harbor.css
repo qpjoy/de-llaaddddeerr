@@ -944,3 +944,87 @@
   .harbor-message { gap: .625rem; padding: 1rem; }
   .harbor-message-icon { padding: .375rem; }
 }
+
+.harbor-stats { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+.harbor-stat { padding: 1.4rem; gap: .75rem; }
+.harbor-stat > span { display: flex; align-items: center; justify-content: space-between; gap: .5rem; font-size: .875rem; color: #637086; }
+.harbor-stat > span svg { color: #165dff; }
+.harbor-stat strong { font-size: 2rem; letter-spacing: -.06rem; line-height: 1.25; }
+.harbor-stat small { font-size: .8125rem; font-weight: 400; color: #64748b; letter-spacing: 0; }
+.harbor-stat p, .harbor-hint { color: #657188; font-size: .8125rem; line-height: 1.8; }
+.harbor-workspace-panel { margin: 1.5rem 0; }
+.harbor-dashboard-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1.5rem; }
+.harbor-chart-scroll { overflow-x: auto; }
+.harbor-usage-chart { display: flex; align-items: flex-end; gap: clamp(.4rem,2vw,1.5rem); height: 14rem; padding: 1rem .5rem .25rem; }
+.harbor-chart-column { display: flex; flex: 1; flex-direction: column; align-items: center; gap: .5rem; height: 100%; min-width: 0; color: #637086; font-size: .75rem; }
+.harbor-chart-track { flex: 1; display: flex; align-items: flex-end; width: 100%; border-bottom: 1px solid #dce5f4; background: repeating-linear-gradient(to top,transparent 0,transparent calc(33.333% - 1px),#eef2f8 calc(33.333% - 1px),#eef2f8 33.333%); }
+.harbor-chart-track > div { background: linear-gradient(#78a3ff,#165dff); max-width: 3rem; width: 65%; margin: 0 auto; border-radius: .35rem .35rem 0 0; min-height: 0; }
+.harbor-quota { line-height: 1.9; margin-bottom: 1rem; }
+.harbor-quota b { color: #165dff; font-size: 1.5rem; }
+.harbor-quota progress { height: .5rem; width: 100%; accent-color: #165dff; }
+.harbor-quota p { font-size: .875rem; color: #637086; }
+.harbor-role-summary { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+.harbor-role-summary > svg { color: #165dff; }
+.harbor-role-summary p { font-size: .875rem; color: #657188; margin-top: .35rem; }
+.harbor-permission-tags { display: flex; flex-wrap: wrap; gap: .625rem; }
+.harbor-permission-tags > span { display: flex; gap: .4rem; align-items: center; background: #f1f6ff; color: #345381; border-radius: .35rem; padding: .4rem .625rem; font-size: .8125rem; }
+.harbor-allowed { color: #16866e; }
+.harbor-member { display: inline-flex; align-items: center; gap: .625rem; }
+.harbor-member small { padding: .1rem .4rem; background: #edf3ff; color: #165dff; border-radius: .25rem; }
+.harbor-market-toolbar { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
+.harbor-market-toolbar > input { max-width: 26rem; background: white; }
+.harbor-market-toolbar > span { margin-left: auto; color: #64748b; font-size: .875rem; white-space: nowrap; }
+.harbor-market-products.has-multiple { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,20rem),1fr)); gap: 1.5rem; }
+.harbor-market-products.has-multiple .harbor-offer { display: flex; flex-direction: column; margin: 0; }
+.harbor-market-products.has-multiple .harbor-offer-art { min-height: 10rem; padding: 1.5rem; gap: .625rem; }
+.harbor-market-products.has-multiple .harbor-offer-art > svg { width: 3.5rem; height: 3.5rem; }
+.harbor-market-products.has-multiple .harbor-offer-copy { padding: 1.5rem; display: flex; flex-direction: column; flex: 1; }
+.harbor-market-products.has-multiple .harbor-offer-copy > h2 { font-size: 1.25rem; }
+.harbor-market-products.has-multiple .harbor-benefits { gap: .5rem 1rem; font-size: .8125rem; }
+.harbor-market-products.has-multiple .harbor-price { font-size: 1.875rem; margin-top: auto; padding-top: 1.5rem; }
+.harbor-location { background: #f7faff; border: 1px solid #e0e9f7; border-radius: .75rem; padding: 1.25rem; margin: 1.5rem 0; }
+.harbor-location-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.harbor-location-heading h3 { display: flex; align-items: center; gap: .5rem; font-weight: 600; }
+.harbor-location-heading p { color: #52617a; margin: .5rem 0; }
+.harbor-location-map { width: 100%; height: 20rem; border: 0; border-radius: .5rem; margin: 1rem 0; background: #e4ebf2; }
+.harbor-map-credit { font-size: .75rem; color: #6b778a; margin-top: .5rem; }
+.harbor-map-credit a { text-decoration: underline; }
+.harbor-doc-search { display: flex; align-items: center; gap: .75rem; background: #fff; border: 1px solid #dee6f2; border-radius: .6rem; padding: .4rem 1rem; }
+.harbor-doc-search > input { box-shadow: none; border: 0; }
+.harbor-doc-search > span { white-space: nowrap; color: #6b778a; font-size: .8125rem; }
+.harbor-doc-filters { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0 1.5rem; }
+.harbor-doc-filters button { padding: .45rem .8rem; border-radius: .4rem; color: #64748b; font-size: .8125rem; }
+.harbor-doc-filters [aria-pressed="true"] { background: #eaf1ff; color: #165dff; }
+.harbor-doc-layout { display: grid; grid-template-columns: minmax(14rem,18rem) minmax(0,1fr); gap: 1.5rem; align-items: start; }
+.harbor-doc-nav { background: #fff; border: 1px solid #e0e8f4; border-radius: .75rem; padding: .5rem; max-height: 75vh; overflow: auto; }
+.harbor-doc-nav button { text-align: left; display: block; width: 100%; border-radius: .45rem; padding: .9rem; }
+.harbor-doc-nav button + button { margin-top: .25rem; }
+.harbor-doc-nav [aria-current="page"] { background: #edf3ff; }
+.harbor-doc-nav strong { display: block; font-size: .8125rem; font-weight: 500; color: #36455f; margin: .4rem 0; }
+.harbor-doc-nav code { font-size: .6875rem; overflow-wrap: anywhere; color: #738199; }
+.harbor-method { font-size: .6875rem; color: #13826c; font-weight: 700; }
+.harbor-method[data-method="post"] { color: #165dff; }
+.harbor-doc-detail { min-width: 0; }
+.harbor-doc-detail [data-slot="card-title"] { display: flex; gap: .5rem; align-items: flex-start; line-height: 1.6; }
+.harbor-doc-url { overflow-wrap: anywhere; color: #345c99; font-size: .8125rem; margin-top: .5rem; }
+.harbor-doc-description { white-space: pre-wrap; font-size: .875rem; color: #52617a; line-height: 1.8; overflow-wrap: anywhere; }
+.harbor-doc-detail h3 { font-weight: 600; font-size: .9375rem; margin: 1.5rem 0 .75rem; }
+.harbor-doc-detail p { line-height: 1.8; font-size: .8125rem; }
+.harbor-doc-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f7fb; padding: 1rem; border: 1px solid #e5eaf3; border-radius: .4rem; font-size: .75rem; max-height: 28rem; overflow: auto; line-height: 1.8; }
+.harbor-doc-detail td { white-space: normal; max-width: 22rem; overflow-wrap: anywhere; }
+.harbor-doc-detail td small { display: block; color: #6b778a; }
+.harbor-doc-section { display: flex; justify-content: space-between; align-items: baseline; }
+.harbor-response { margin: .75rem 0; }
+.harbor-response summary { cursor: pointer; color: #52617a; font-size: .875rem; padding: .5rem 0; }
+@media (max-width: 1100px) { .harbor-stats { grid-template-columns: repeat(2,minmax(0,1fr)); } .harbor-doc-layout { grid-template-columns: minmax(11rem,14rem) minmax(0,1fr); gap: 1rem; } }
+@media (max-width: 767px) { .harbor-dashboard-grid, .harbor-doc-layout { grid-template-columns: 1fr; } .harbor-doc-nav { max-height: 16rem; } .harbor-market-toolbar { flex-wrap: wrap; } .harbor-market-toolbar > input { max-width: none; } .harbor-location { padding: 1rem; } }
+@media (max-width: 420px) { .harbor-stat { padding: 1rem; } .harbor-stat strong { font-size: 1.65rem; } .harbor-stats { gap: .75rem; } }
+.harbor-quota progress { appearance: none; border: none; border-radius: 1rem; overflow: hidden; background: #e7eefb; }
+.harbor-quota progress::-webkit-progress-bar { background: #e7eefb; border-radius: 1rem; }
+.harbor-quota progress::-webkit-progress-value { background: #165dff; border-radius: 1rem; }
+.harbor-quota progress::-moz-progress-bar { background: #165dff; border-radius: 1rem; }
+@media (max-width: 767px) {
+  .harbor-market-products.has-multiple .harbor-offer-copy > p { margin: .625rem 0; }
+  .harbor-market-products.has-multiple .harbor-benefits { margin: .75rem 0; }
+  .harbor-market-products.has-multiple .harbor-price { padding-top: .75rem; margin-bottom: .5rem; }
+}

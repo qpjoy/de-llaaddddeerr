@@ -1,5 +1,5 @@
 import { ipRiskProductPaths, ipRiskProductGuide } from './contracts/ip-risk-product-docs.mjs'
-import { ipRiskV2Paths, ipRiskV2Guide } from './contracts/ip-risk-v2-docs.mjs'
+import { ipRiskV2Paths, ipRiskV2Guide, ipRiskSubscriptionPaths } from './contracts/ip-risk-v2-docs.mjs'
 import { webSearchPaths, webSearchGuide } from './web-search/docs.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
@@ -1311,7 +1311,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     '/xiaohongshu/pgy/get_blogger_notes_v2': { post: { ...xhsResearchPaths['/data/xiaohongshu/users/notes/analytics'].post, operationId: 'xiaohongshuUserNoteAnalyticsAlias', description: '与 /data/xiaohongshu/users/notes/analytics 相同的 JSON POST 合同、授权和幂等身份。' } },
     ...enterpriseOpenApiPaths(),
     ...ipRiskHistoryPaths,
-    ...ipRiskV2Paths, ...ipRiskProductPaths,
+    ...ipRiskV2Paths, ...ipRiskProductPaths, ...ipRiskSubscriptionPaths,
     '/data/ip/risk': {
       post: {
         tags: ['IP 风险画像'], summary: '查询 IPv4 风险画像', operationId: 'queryIpRisk',
@@ -6508,6 +6508,7 @@ function normalizedDocsPath(pathname) {
 const TENANT_HIDDEN_DOCS = new Set(['search', 'night-all', 'tools', 'discovery'])
 export function tenantDocumentPathAllowed(path, scopes) {
   if (scopes == null) return true
+  if (path === '/data/ip/risk/subscription') return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query.v2') || s.capabilities.includes('ip.risk.subscription.query')))
   if (path.startsWith('/data/ip/risk/history')) return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query') || s.capabilities.includes('ip.risk.query.v2') || s.capabilities.includes('ip.risk.subscription.query')))
   if (path.startsWith('/data/web-search/')) return scopes.some(s=>s.platforms.includes('web_search') && s.capabilities.includes('web.search') && (path.endsWith('/baidu') ? s.capabilities.includes('web.search.provider.baidu') : WEB_SEARCH_PROVIDERS.some(p=>s.capabilities.includes(p.capability))))
   if (path === '/data/search') return scopes.some(scope => scope.platforms.includes('social') && scope.capabilities.includes('native.wechat.search.search'))

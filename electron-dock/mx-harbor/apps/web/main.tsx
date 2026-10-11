@@ -1,3 +1,5 @@
+import { UsageOverview, SpacePermissions } from "./workspace";
+import { Documentation } from "./documentation";
 import React, { useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -161,7 +163,6 @@ export function ConsoleShell({
             aria-label="展开导航"
           />
           {children}
-          <footer className="harbor-footer">数港 Harbor</footer>
         </main>
       </div>
     </SidebarProvider>
@@ -189,10 +190,7 @@ function RemotePanel({
   const [data, setData] = useState<any>(null),
     [error, setError] = useState("");
   const endpoints: Record<string, string> = {
-    overview: `/me/overview${tenant ? "?tenantId=" + tenant : ""}`,
     keys: "/api-keys",
-    team: "/session",
-    "docs-ip": "/documentation?path=%2Fdocs%2Fopenapi.json",
   };
   useEffect(() => {
     setData(null);
@@ -211,6 +209,9 @@ function RemotePanel({
       active = false;
     };
   }, [page, tenant]);
+  if (page === "overview") return <UsageOverview tenant={tenant} session={session} go={go} />;
+  if (page === "team") return <SpacePermissions tenant={tenant} session={session} />;
+  if (page === "docs-ip") return <Documentation tenant={tenant} session={session} />;
   if (page === "account") return <AccountSecurity />;
   if (page === "messages") return <Messages tenant={tenant} csrf={csrf} enabled={hasCapability(session, tenant, "billing.read")} state={messages} go={go} />;
   if (page === "intelligence")
@@ -259,7 +260,7 @@ function RemotePanel({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.map((key: any) => (
+              {data.filter((key: any) => key.tenantId === tenant).map((key: any) => (
                 <TableRow key={key.id}>
                   <TableCell>{key.name}</TableCell>
                   <TableCell>{key.prefix || key.id}</TableCell>
@@ -268,65 +269,10 @@ function RemotePanel({
               ))}
             </TableBody>
           </Table>
-          {!data.length && <p className="harbor-empty">尚无 API Key</p>}
+          {!data.some((key: any) => key.tenantId === tenant) && <p className="harbor-empty">尚无 API Key</p>}
         </Card>
-      ) : page === "docs-ip" ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>接口文档</CardTitle>
-            <CardDescription>仅包含当前空间已授权的数据服务。</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {!Object.keys(data.schema?.paths || {}).length && (
-              <p className="harbor-empty">当前空间暂无已授权的接口文档。</p>
-            )}
-            {Object.entries(data.schema?.paths || {}).map(
-              ([path, methods]: any) => (
-                <div className="harbor-endpoint" key={path}>
-                  <code>
-                    {location.origin}/api/v1{path}
-                  </code>
-                  {Object.entries(methods).map(([method, value]: any) => (
-                    <p key={method}>
-                      {method.toUpperCase()} · {value.summary}
-                    </p>
-                  ))}
-                </div>
-              ),
-            )}
-          </CardContent>
-        </Card>
-      ) : page === "overview" ? (
-        <div className="harbor-grid">
-          {data.tenants?.map((space: any) => (
-            <Card key={space.id}>
-              <CardHeader>
-                <CardTitle>{space.name}</CardTitle>
-                <CardDescription>{space.status}</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <p>{space.consumers?.length || 0} 个服务身份</p>
-              </CardContent>
-            </Card>
-          ))}
-          {!data.tenants?.length && (
-            <p className="harbor-empty">暂无已授权服务</p>
-          )}
-        </div>
-      ) : (
-        <Card>
-          <CardHeader>
-            <CardTitle>{session.displayName} 的空间</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {session.memberships?.map((m: any) => (
-              <p key={m.tenantId}>
-                {m.tenantName || m.tenantId} · {m.role}
-              </p>
-            ))}
-          </CardContent>
-        </Card>
-      )}
+      ) : null}
+
     </>
   );
 }
@@ -574,7 +520,6 @@ function App() {
               <PublicIpSearch />
             )}
           </main>
-          <footer className="harbor-footer">数港 Harbor</footer>
         </div>
       )}
       <AccountDialog open={auth} onOpenChange={setAuth} />

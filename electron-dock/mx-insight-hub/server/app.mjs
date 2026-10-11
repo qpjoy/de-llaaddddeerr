@@ -1,3 +1,4 @@
+import { workspaceRoute } from './portal/workspace.mjs'
 import {portalPrincipal, harborRoute} from './portal/harbor.mjs'
 import { IpRiskProduct } from './external-platforms/ip-risk-product.mjs'
 import { CommerceService } from './commerce/service.mjs'
@@ -891,8 +892,14 @@ export function createApp({
     return mergeUsageSummaries(results)
   }
 
-  async function documentationScopes(principal) {
-    if (principal.platformAdmin) return undefined
+  async function documentationScopes(principal, tenantId) {
+    if (tenantId) {
+      requireTenantCapability(principal, tenantId, 'tenant.read')
+      const tenant = await store.getTenant(tenantId)
+      if (!tenant || tenant.status !== 'active') throw new AppError(403, 'tenant_unavailable', '当前空间不可用')
+    }
+    if (principal.platformAdmin && !tenantId) return undefined
+    if (tenantId) principal = { ...principal, tenantIds: [tenantId] }
     if (typeof store.listProductScopes === 'function') return store.listProductScopes(principal.tenantIds || [])
     const tenants = new Set(principal.tenantIds || [])
     const consumers = (await service.listConsumers()).filter(item => tenants.has(item.tenantId) && item.status !== 'suspended')
@@ -1559,12 +1566,14 @@ export function createApp({
 
       if (await peripheralRoute({ service: peripherals, request, response, pathname, searchParams, principal, requestId })) return
 
+      if (await workspaceRoute({ request, response, pathname, searchParams, principal, store, commerce, sendJson, requestId })) return
+
       if (await commerceRoute({ commerce, service, productGateway:ipRiskProduct, request, response, pathname, searchParams, principal, readJson, sendJson, requestId })) return
       if (await paymentRoute({ payments, recharge, commerce, request, response, pathname, searchParams, principal, readJson, sendJson, requestId })) return
       if (await paymentReportingRoute({ reporting:paymentReporting, request, response, pathname, searchParams, principal, sendJson, requestId })) return
 
       if (request.method === 'GET' && pathname === '/internal/v1/admin/documentation') {
-        const scopes = await documentationScopes(principal)
+        const scopes = await documentationScopes(principal, searchParams.get('tenantId'))
         const target = url.searchParams.get('path') || '/docs'
         const page = target.split('#')[0]
         const redirect = publicDocsRedirectForPath(page)

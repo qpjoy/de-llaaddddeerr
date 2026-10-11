@@ -2322,6 +2322,18 @@ export class MemoryStore {
     return media?.type === 'image' && typeof media.url === 'string' && media.url ? media.url : null
   }
 
+  async usageDaily({ tenantId, from, to }) {
+    const days = new Map()
+    for (const record of this.requests.values()) {
+      if (record.tenantId !== tenantId || new Date(record.createdAt) < new Date(from) || new Date(record.createdAt) >= new Date(to)) continue
+      const day = new Date(record.createdAt).toISOString().slice(0, 10)
+      const row = days.get(day) || { day, requests: 0, committed: 0 }
+      row.requests++; if (record.status === 'committed') row.committed++
+      days.set(day, row)
+    }
+    return [...days.values()].sort((a,b) => a.day.localeCompare(b.day))
+  }
+
   async usage({ tenantId, consumerId, apiKeyId, from, to } = {}) {
     const fromDate = from ? new Date(from) : null
     const toDate = to ? new Date(to) : null
@@ -3594,6 +3606,14 @@ export class MemoryStore {
       ...membership,
       tenantName: this.tenants.get(membership.tenantId)?.name ?? null,
     }))
+  }
+
+  async listTenantMembers(tenantId) {
+    return [...this.#members.values()].flatMap(member => {
+      const membership = this.#memberships.get(member.id)?.get(tenantId)
+      return membership?.status === 'active' ? [{ id: member.id, displayName: member.displayName,
+        role: membership.role, status: membership.status, memberStatus: member.status }] : []
+    })
   }
 
   async listMembers() {

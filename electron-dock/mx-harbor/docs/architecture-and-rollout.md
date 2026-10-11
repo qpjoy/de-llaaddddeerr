@@ -370,3 +370,19 @@ P0 可以先做；P1 的身份映射与 P2 的支付返回/事件隔离是上线
 本期已落地客户站内消息。权威位于 Hub Commerce，Harbor 只负责呈现；不同空间、不同成员已读隔离，原供应商消息保持 Admin-only。提醒来自本地已交付订阅，不是支付确认、不派发外部通知、不参与额度或订单提交事务。具体迁移、阶段规则、发布和验证见 implementation-and-operations.md 同日小节。
 
 Harbor 对外、Hub 对内的边界不等于将 Hub 所有 Admin 产品直接公开。API Keys 完整自助管理、空间邀请、充值发票及其他已发布客户数据产品仍按第 7 节逐项接入；RAG/Agent 的 Admin-only 能力需要独立客户权限和计费契约。Night-All 迁移沿用 Hub 各产品既定接口计划，Harbor 不新增直接依赖。mx-static、OCR、Embedding、Rig 均不成为 Harbor 登录或订阅消息依赖。
+
+## 2026-10-11：GIS、空间工作台、销售范围与租户文档
+
+本轮基于 `/tmp/dataport/app/customer-console.tsx` 的统计卡片和 `screens.tsx` 的用量趋势设计实现，数据来自 Hub，未引入原型的合成用量、独立账号或假订单。移除控制台及公开查询页底部重复品牌，侧栏品牌保留。
+
+- `/#/overview`：当前空间近 7/30 个 UTC 自然日的请求、完成、释放、处理中/待确认、每日趋势、服务汇总及本期订阅。按 `usage_requests` 全量聚合，不能把最近 50 条记录当作总量。请求统计与订阅 `quota/used/held` 分开；无 `billing.read` 不请求订阅数据，无 `usage.read` 不请求用量。零调用、加载失败、无权限分别展示。
+- `/#/team`：读取当前空间实际成员、账号状态、自己的角色及服务端角色权限矩阵。这里提供权限查看；邀请、变更角色仍使用已有后台管理流程，未把平台级 `/members`、授权写接口或 Hub 邀请链接转发至 Harbor。完整客户自助成员管理仍需独立实现邀请接受和变更审计，不以演示按钮冒充上线能力。
+- GIS：从已交付画像的 `longitude/latitude` 生成 OpenStreetMap 区域视图，点击“加载地图”才访问底图，不重新查询 IP、不消耗次数，不发送 IP、Key 或请求编号。零坐标合法；缺失、字符串、越界坐标不生成地图。不猜测城市中心、不补造坐标系。来源未标注 CRS 时仅展示宽范围、不落精确点；明确 WGS84/EPSG:4326 才落点，其他已声明坐标系或超出底图纬度范围只展示原字段。IP 归属地不代表使用者实时位置。当前 Baidu 适配器未确认 CRS，因此使用区域参考模式。底图嵌入依据 [OpenStreetMap 官方说明](https://wiki.openstreetmap.org/wiki/Export)，CSP 仅放行该地图域名的 frame；地图可用性依赖浏览器外网连接，原画像读取独立。
+- Hub 商城 `商品管理 → 编辑商品 → 数港销售` 控制 `harborListed`。必须同时满足 `status=published` 和 `harborListed!=false` 才对 Harbor 展示并允许新购买；可信 Portal principal 决定销售入口，客户 body/header 不能伪造。修改沿用商品 revision CAS 与审计。旧商品缺省保持已上架，新商品缺省不在数港上架；旧管理客户端遗漏该字段时保留原值。商品仍写原 JSONB，无新迁移、不改订单快照。原请求幂等回放、已创建订单付款和已购订阅不受数港下架影响。当前创建商品仍是 IP 产品的不同套餐，不能用商品文案冒充未接入的产品交付能力。
+- Harbor 商城：一个商品沿用大卡片，多个商品切换响应式网格，提供名称/描述搜索、价格和调用次数排序。订阅提示仍沿用顺延续期语义。
+- 文档：Portal `/documentation` 强制唯一 `tenantId` 和 `/docs/openapi.json`，使用当前空间活跃成员权限和同一 consumer 的 platform/capability 交集；禁止跨空间拼接授权，停用空间拒绝读取。Hub 原有未指定空间的文档入口保持原语义。引用 schema 继续按可见 paths 的引用闭包裁剪。保留已授权产品所需的定价、历史、请求状态与用量通用合同，实际请求仍受 Key 权限、有效订阅及额度约束。界面加入目录、搜索分类、参数、JSON 合同、cURL 示例和当前过滤结果的 OpenAPI 下载。
+- 补齐现有 IP 合同：`Idempotency-Key` 可选但建议显式使用，同一重试保留原值；加入已存在的 `GET /data/ip/risk/subscription` 文档，严格匹配 product/v2 授权，v1 不继承此权限。未改实际查询或计费逻辑。
+
+服务端只新增受限客户读取 `/me/workspace?tenantId=…`、`/me/usage?tenantId=…&days=7|30`，沿用独立 BFF 会话和每次请求的 Auth 校验。无 Launcher/MX-H2I、mx-pay 核心、网络或生产数据库变更。发布先 Hub 后 Harbor；无需新增迁移或重新登记 SSO。
+
+验证：Harbor 类型与生产构建、Hub 类型与生产构建；本机临时 PostgreSQL 下的 commerce、Portal、工作台、Harbor 会话与部署工具测试；既有公开文档/租户文档回归；1440px/390px 样例浏览器下的用量、权限、商城、文档、历史 GIS、切换空间和零授权状态。所有样例仅用于验证，不代表生产已发布或进行过真实付费查询。
