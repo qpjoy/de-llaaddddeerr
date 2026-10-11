@@ -51,3 +51,24 @@
 | 手机 | 商城、确认、账户安全、画像及历史无页面级横向溢出（390px） |
 
 截图保存在 `/tmp/harbor-preview/commerce/`，包括 `market-desktop.jpg`、`market-mobile.jpg`、`checkout-mobile.jpg`、`account-desktop.jpg`、`account-mobile.jpg`、`query-desktop.jpg`、`query-mobile.jpg`。生产构建和相关测试通过；真实数据库交付、支付和供应商调用未验收，详见 [验收范围](acceptance.md)。
+
+## 查询工作区与订单体验检查（2026-10-11）
+
+按 `/tmp/dataport/app/intelligence-overview.tsx` 和 `app/screens.tsx` 的具体界面结构调整；该检查替代前文中查询页功能介绍、订单大卡片的旧布局记录。桌面为 1280×720，手机为 390×844。浏览器打开实际生产构建，连接本机隔离 BFF 与上游样例，页面标注“本地交互样例 · 无真实付款或数据查询”。
+
+| 状态 | 本地观察 |
+| --- | --- |
+| 已购查询首页 | 仅搜索、用量提示及最近查询；无三栏介绍和常驻恢复操作条 |
+| 查询结果 / 历史回看 | 真实字段分区、标签按返回类别归组、缺失评分不显示；历史回看同步 IP 并定位结果 |
+| 未购买 / 首次启用 | 主按钮分别为去选购 / 启用查询；选购不要求先填 IP，启用不触发供应商查询 |
+| 连接失败 / 服务未就绪 | 主查询不可用，局部提供重新连接；连接恢复后入口消失 |
+| 历史加载失败 | 主查询仍可用，仅历史区显示重载；恢复后显示表格 |
+| 订单初次读取失败 | 显示局部错误和重载，无误导的空订单；恢复后重载入口消失 |
+| 订单列表 / 详情 | 表格展示原订单；付款、付款状态查询和订阅入口收进详情 |
+| 手机 | 画像分区改为单列，订单弹窗关闭和操作可达，长订单号换行；宽表在自身容器横向滚动 |
+
+隔离样例中仅显式提交的一次 IP 查询产生 1 次 dispatch。历史回看、初次启用、连接恢复、历史重载和订单重载均未增加 dispatch 或订单数。未打开真实收银台、付款或调用生产供应商。
+
+`npm run build` 通过；`node --test tests/commerce-ui.test.mjs tests/account-form.test.mjs tests/session.test.mjs` 共 15 项通过、无跳过。以上不替代生产支付、真实账号和真实数据库交付验收。
+
+本机样例入口为 `http://127.0.0.1:4288/#/intelligence`，临时截图为 `/tmp/harbor-query-home.png`、`/tmp/harbor-query-result.png`、`/tmp/harbor-query-mobile.png` 和 `/tmp/harbor-order-mobile.png`。这些预览与截图不进入部署包，未发布生产环境。

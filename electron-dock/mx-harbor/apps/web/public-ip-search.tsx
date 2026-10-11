@@ -43,6 +43,7 @@ export function PublicIpSearch({
   initialIp = "",
   available = true,
   busy = false,
+  busyLabel = "正在查询…",
   actionLabel,
   hint,
   onQuery,
@@ -52,8 +53,9 @@ export function PublicIpSearch({
   initialIp?: string;
   available?: boolean;
   busy?: boolean;
+  busyLabel?: string;
   actionLabel?: string;
-  hint?: string;
+  hint?: React.ReactNode;
   onQuery?: (ip: string) => void;
   showIntro?: boolean;
   validateInput?: boolean;
@@ -144,7 +146,7 @@ export function PublicIpSearch({
                 >
                   <span>
                     {busy
-                      ? "正在查询…"
+                      ? busyLabel
                       : actionLabel || (available ? "查询" : "暂不可用")}
                   </span>
                 </Button>

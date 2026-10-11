@@ -246,64 +246,341 @@
 .harbor-setting-body .harbor-form {
   max-width: 28rem;
 }
+.harbor-query-page {
+  width: 100%;
+  margin-bottom: 2rem;
+}
+.harbor-query-page > .public-query {
+  max-width: 52.5rem;
+  margin-inline: auto;
+  padding: 1rem 0 2rem;
+}
+.harbor-query-page .public-query h1 {
+  font-size: 2.25rem;
+}
+.harbor-query-page[data-result="true"] .public-query h1 {
+  font-size: 1.75rem;
+}
+.harbor-query-page[data-result="true"] .public-query form {
+  margin-top: 1.25rem;
+}
 .harbor-query-workspace {
   width: 100%;
-  max-width: 52.5rem;
-  margin: 0 auto 2rem;
+  max-width: 60rem;
+  margin: 0 auto;
 }
-.harbor-query-workspace > .harbor-actions {
-  justify-content: center;
-  margin-bottom: 1.5rem;
-}
-.harbor-portrait,
-.harbor-history {
-  margin-top: 1.5rem;
-}
-.harbor-portrait [data-slot="card-title"] span {
-  font-weight: 400;
-  color: var(--muted-foreground);
+.harbor-inline-issue {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
   font-size: 0.8125rem;
-  margin-left: 1rem;
+  color: var(--text-secondary);
+}
+.harbor-access-issue {
+  display: inline-flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.harbor-result-focus:focus {
+  outline: none;
+}
+.harbor-result-focus:focus-visible {
+  outline: 2px solid #165dff;
+  outline-offset: 4px;
+  border-radius: 0.75rem;
+}
+.harbor-portrait + .harbor-history,
+.harbor-result-focus + .harbor-history {
+  margin-top: 1.25rem;
+}
+.harbor-console .harbor-portrait[data-slot="card"] {
+  padding-top: 0;
+  gap: 0;
+  overflow: hidden;
+}
+.harbor-report-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding-block: 1.25rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+.harbor-report-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.harbor-report-heading h2 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.harbor-report-heading time,
+.harbor-history time,
+.harbor-orders time {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.harbor-result-state {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.harbor-result-state::before {
+  content: "";
+  display: inline-block;
+  width: 0.375rem;
+  height: 0.375rem;
+  margin-right: 0.375rem;
+  border-radius: 50%;
+  background: #8996aa;
+  vertical-align: middle;
+}
+.harbor-result-state[data-state="success"]::before {
+  background: #14886c;
+}
+.harbor-result-state[data-state="partial"]::before,
+.harbor-result-state[data-state="unknown"]::before {
+  background: #d99524;
+}
+.harbor-result-state[data-state="error"]::before {
+  background: #d65454;
+}
+.harbor-profile-overview {
+  display: grid;
+  grid-template-columns: 10rem minmax(0, 1fr);
+  gap: 2rem;
+  align-items: center;
+  padding: 1.75rem 0;
+}
+.harbor-risk-summary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+.harbor-risk-summary > svg {
+  width: 2rem;
+  height: 2rem;
+  stroke-width: 1.5;
+  color: #7294ce;
+  margin-bottom: 0.25rem;
+}
+.harbor-risk-summary > .harbor-risk-level {
+  font-size: 1.5rem;
+  font-weight: 600;
+  padding: 0.125rem 0.875rem;
+}
+.harbor-risk-summary small {
+  margin-top: 0.25rem;
+}
+.harbor-risk-level {
+  display: inline-block;
+  padding: 0.1875rem 0.625rem;
+  border-radius: 0.3125rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: #53627a;
+  background: #f1f4f8;
+}
+.harbor-risk-level[data-level="高"],
+.harbor-risk-level[data-level="高风险"] {
+  color: #b43838;
+  background: #fff0ef;
+}
+.harbor-risk-level[data-level="中"],
+.harbor-risk-level[data-level="中风险"] {
+  color: #94620f;
+  background: #fff7e6;
+}
+.harbor-risk-level[data-level="低"],
+.harbor-risk-level[data-level="低风险"] {
+  color: #26775e;
+  background: #eaf7f1;
 }
 .harbor-profile-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1.25rem;
-  margin-bottom: 1.5rem;
+  gap: 1.5rem 2rem;
+}
+.harbor-profile-fields > div {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr);
+  gap: 0.75rem;
+  font-size: 0.8125rem;
 }
 .harbor-profile-fields dt {
-  color: var(--muted-foreground);
-  font-size: 0.8125rem;
-  margin-bottom: 0.375rem;
+  color: var(--text-secondary);
 }
 .harbor-profile-fields dd {
   overflow-wrap: anywhere;
+}
+.harbor-tag-section {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 1.25rem;
+}
+.harbor-tag-section h3 {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+}
+.harbor-tag-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem 2rem;
+}
+.harbor-tag-groups h4 {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text-secondary);
 }
 .harbor-risk-tags {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  margin: 0.75rem 0 1.5rem;
+  margin-top: 0.625rem;
 }
 .harbor-risk-tags > span {
   background: #eef3ff;
   border: 1px solid #dce6ff;
   border-radius: 0.375rem;
-  padding: 0.375rem 0.625rem;
+  padding: 0.1875rem 0.625rem;
   color: #355899;
   font-size: 0.8125rem;
 }
-.harbor-history-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1.5fr auto;
+.harbor-muted {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+.harbor-record-details {
+  margin-top: 1.5rem;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 1rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.harbor-record-details summary {
+  cursor: pointer;
+  width: fit-content;
+}
+.harbor-record-details[open] summary {
+  margin-bottom: 0.75rem;
+}
+.harbor-query-repeat {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 1rem;
+}
+.harbor-result-message {
+  padding: 1.5rem 0;
+}
+.harbor-result-message h3 {
+  font-size: 1rem;
+  margin-bottom: 0.5rem;
+}
+.harbor-history-heading {
+  display: flex;
+  justify-content: space-between;
   align-items: center;
   gap: 0.75rem;
-  padding: 0.875rem 0;
-  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.harbor-history-heading > span {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+.harbor-history-table th {
+  background: #f7f9fc;
+  font-size: 0.75rem;
+  height: 2.5rem;
+}
+.harbor-history-table td {
+  height: 3.375rem;
   font-size: 0.8125rem;
 }
-.harbor-history-row time {
-  color: var(--muted-foreground);
+.harbor-history-ip {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.harbor-history-empty {
+  display: grid;
+  justify-items: center;
+  padding: 1.5rem;
+  gap: 0.5rem;
+  text-align: center;
+}
+.harbor-history-empty > svg {
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0.625rem;
+  background: #f3f6fc;
+  border-radius: 50%;
+  color: #8195b7;
+  margin-bottom: 0.25rem;
+}
+.harbor-history-empty h3 {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+.harbor-history-empty p {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+.harbor-history-more {
+  text-align: center;
+  margin-top: 1rem;
+}
+.harbor-orders-table strong {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+.harbor-orders-table small {
+  display: block;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  margin-top: 0.375rem;
+}
+.harbor-order-amount {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.harbor-order-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.harbor-order-facts {
+  display: grid;
+  gap: 1rem;
+}
+.harbor-order-facts > div {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr);
+  gap: 0.75rem;
+  font-size: 0.8125rem;
+}
+.harbor-order-facts dt {
+  color: var(--text-secondary);
+}
+.harbor-order-facts dd {
+  overflow-wrap: anywhere;
+}
+.harbor-empty > button {
+  margin-top: 1rem;
 }
 @media (max-width: 767px) {
   .harbor-offer {
@@ -330,8 +607,28 @@
   .harbor-setting-body {
     padding: 0 1.25rem 1.25rem;
   }
-  .harbor-history-row {
-    grid-template-columns: 1fr auto;
+  .harbor-query-page .public-query h1 {
+    font-size: 1.75rem;
+  }
+  .harbor-profile-overview {
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+  }
+  .harbor-profile-fields {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+  .harbor-tag-groups {
+    grid-template-columns: 1fr;
+  }
+  .harbor-query-page .public-query {
+    padding-top: 0.5rem;
+  }
+  .harbor-history-table {
+    min-width: 36rem;
+  }
+  .harbor-orders-table {
+    min-width: 40rem;
   }
 }
 .harbor-grid {
@@ -499,7 +796,8 @@
   min-height: 2.5rem;
   border-radius: var(--control-radius);
 }
-.harbor-console [data-slot="button"][data-variant="outline"] {
+.harbor-console [data-slot="button"][data-variant="outline"],
+.harbor-checkout [data-slot="button"][data-variant="outline"] {
   border-color: #dfe3eb;
   color: var(--text-secondary);
   box-shadow: none;

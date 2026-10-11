@@ -3,6 +3,14 @@ import { ArrowRight, Check, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
+  Table,
+  TableHeader,
+  TableHead,
+  TableBody,
+  TableRow,
+  TableCell,
+} from "@/components/ui/table";
+import {
   Dialog,
   DialogContent,
   DialogHeader,
@@ -59,6 +67,9 @@ export function Commerce({
   const [selected, setSelected] = useState<Product | null>(null),
     [detail, setDetail] = useState<string | null>(null),
     [links, setLinks] = useState<Record<string, string>>({});
+  const [orderDetail, setOrderDetail] = useState<string | null>(null);
+  const [loadVersion, setLoadVersion] = useState(0),
+    [loadFailed, setLoadFailed] = useState(false);
   const lock = useRef(false);
   const canRead = hasCapability(session, tenant, "billing.read");
   const canPay = hasCapability(session, tenant, "recharge.create");
@@ -78,6 +89,9 @@ export function Commerce({
   }
   useEffect(() => {
     let active = true;
+    setLoading(true);
+    setLoadFailed(false);
+    setError("");
     Promise.all([
       request("/bff/v1/commerce/products"),
       canRead
@@ -91,7 +105,10 @@ export function Commerce({
         }
       })
       .catch((e) => {
-        if (active) setError(e.message);
+        if (active) {
+          setError(e.message);
+          setLoadFailed(true);
+        }
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -99,7 +116,7 @@ export function Commerce({
     return () => {
       active = false;
     };
-  }, [tenant, canRead]);
+  }, [tenant, canRead, loadVersion]);
   // Read existing orders only. Polling never prepares a payment or starts a query.
   useEffect(() => {
     if (!canRead || !purchases.orders.some((order) => !order.deliveredAt))
@@ -113,7 +130,7 @@ export function Commerce({
         const result = await request(`/bff/v1/commerce/tenants/${tenant}`);
         if (active) setPurchases(result.data);
       } catch {
-        /* Explicit refresh reports failures. */
+        /* Retain the last confirmed state; order actions report failures. */
       } finally {
         running = false;
       }
@@ -176,12 +193,70 @@ export function Commerce({
       : page === "orders"
         ? "支付订单"
         : "我的订阅";
+  const detailOrder = purchases.orders.find(
+    (order) => order.id === orderDetail,
+  );
+  const orderStatus = (order: any) =>
+    (
+      ({
+        active: "已开通",
+        delivering: "正在开通",
+        pending: "待付款",
+        test_delivered: "测试订单",
+      }) as Record<string, string>
+    )[order.status] || "待确认";
+  const paymentActions = (order: any) => (
+    <div className="harbor-actions">
+      {!order.deliveredAt && canPay && (
+        <>
+          {order.paymentStatus !== "paid" &&
+            (links[order.id] ? (
+              <a
+                className="harbor-payment-link"
+                href={links[order.id]}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                打开支付宝收银台 ↗
+              </a>
+            ) : (
+              <Button disabled={busy} onClick={() => action(order, "checkout")}>
+                继续付款
+              </Button>
+            ))}
+          <Button
+            variant="outline"
+            disabled={busy}
+            onClick={() => action(order, "refresh")}
+          >
+            查询付款状态
+          </Button>
+        </>
+      )}
+      {order.deliveredAt && order.environment === "live" && (
+        <Button
+          onClick={() => {
+            setOrderDetail(null);
+            go("services");
+          }}
+        >
+          查看订阅
+        </Button>
+      )}
+    </div>
+  );
   return (
     <div className="harbor-commerce">
       <div className="page-heading harbor-heading-actions">
         <div>
           <h1>{heading}</h1>
-          <p>购买数据服务，按空间共享订阅与调用次数。</p>
+          <p>
+            {page === "market"
+              ? "按需选择数据服务，与空间成员共享使用。"
+              : page === "services"
+                ? "查看已开通的服务、可用次数与有效期。"
+                : "查看购买记录与开通状态。"}
+          </p>
         </div>
         <div className="harbor-actions">
           <Button
@@ -205,9 +280,19 @@ export function Commerce({
         </div>
       </div>
       {error && (
-        <p role="alert" className="harbor-error">
+        <div role="alert" className="harbor-error harbor-inline-issue">
           {error}
-        </p>
+          {loadFailed && (
+            <Button
+              variant="link"
+              size="sm"
+              disabled={loading}
+              onClick={() => setLoadVersion((value) => value + 1)}
+            >
+              重新加载
+            </Button>
+          )}
+        </div>
       )}
       {!tenant && (
         <Card>
@@ -238,7 +323,7 @@ export function Commerce({
       )}
       {loading ? (
         <p role="status">正在读取服务…</p>
-      ) : page === "market" ? (
+      ) : loadFailed ? null : page === "market" ? (
         <>
           {catalog?.items
             .filter((item) => item.status === "published")
@@ -319,18 +404,6 @@ export function Commerce({
         <p className="harbor-empty">请使用有当前空间账单查看权限的账号。</p>
       ) : (
         <>
-          <div className="harbor-actions">
-            <Button
-              variant="outline"
-              disabled={busy}
-              onClick={() => perform(refresh)}
-            >
-              刷新状态
-            </Button>
-            <Button variant="outline" onClick={() => go("market")}>
-              选购 / 续订
-            </Button>
-          </div>
           {page === "services" ? (
             <div className="harbor-grid">
               {purchases.subscriptions.map((subscription) => {
@@ -367,92 +440,168 @@ export function Commerce({
                       {subscription.held > 0 && (
                         <p>{subscription.held} 次请求处理中</p>
                       )}
-                      <Button
-                        disabled={state !== "active"}
-                        onClick={() => go("intelligence")}
-                      >
-                        开始使用 <ArrowRight />
-                      </Button>
+                      <div className="harbor-actions">
+                        <Button
+                          disabled={state !== "active"}
+                          onClick={() => go("intelligence")}
+                        >
+                          开始使用 <ArrowRight />
+                        </Button>
+                        {canBuy && (
+                          <Button
+                            variant="outline"
+                            onClick={() => go("market")}
+                          >
+                            续订
+                          </Button>
+                        )}
+                      </div>
                     </CardContent>
                   </Card>
                 );
               })}
               {!purchases.subscriptions.length && (
                 <div className="harbor-empty">
-                  尚未开通服务，购买并完成付款后即可使用。
+                  <p>尚未开通服务，购买并完成付款后即可使用。</p>
+                  {canBuy && (
+                    <Button onClick={() => go("market")}>选购数据服务</Button>
+                  )}
                 </div>
               )}
             </div>
           ) : (
-            <div className="harbor-orders">
-              {purchases.orders.map((order) => (
-                <Card key={order.id}>
-                  <CardHeader>
-                    <CardTitle>{order.product.name}</CardTitle>
-                    <span>
-                      {(
-                        {
-                          active: "已开通",
-                          delivering: "付款已确认，正在开通",
-                          pending: "待付款",
-                          test_delivered: "测试订单（不含正式权益）",
-                        } as Record<string, string>
-                      )[order.status] || order.status}
-                    </span>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="harbor-price">
-                      {money(order.product.amountMinor)}
-                    </p>
-                    <p>创建时间：{dateTime(order.createdAt)}</p>
-                    <p className="harbor-order-id">订单编号：{order.id}</p>
-                    <div className="harbor-actions">
-                      {!order.deliveredAt && canPay && (
-                        <>
-                          <Button
-                            variant="outline"
-                            disabled={busy}
-                            onClick={() => action(order, "refresh")}
-                          >
-                            查询付款状态
-                          </Button>
-                          {order.paymentStatus !== "paid" &&
-                            (links[order.id] ? (
-                              <a
-                                className="harbor-payment-link"
-                                href={links[order.id]}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                              >
-                                打开支付宝收银台 ↗
-                              </a>
-                            ) : (
-                              <Button
-                                disabled={busy}
-                                onClick={() => action(order, "checkout")}
-                              >
-                                继续付款
-                              </Button>
-                            ))}
-                        </>
-                      )}
-                      {order.deliveredAt && order.environment === "live" && (
-                        <Button onClick={() => go("services")}>查看订阅</Button>
-                      )}
-                    </div>
-                    {!order.deliveredAt && links[order.id] && (
-                      <p>付款后将返回数港，可在这里查询原订单状态。</p>
-                    )}
-                  </CardContent>
-                </Card>
-              ))}
+            <Card className="harbor-table-panel harbor-orders">
+              <Table className="harbor-orders-table">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>订单 / 产品</TableHead>
+                    <TableHead>金额</TableHead>
+                    <TableHead>创建时间</TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead>
+                      <span className="sr-only">操作</span>
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {purchases.orders.map((order) => (
+                    <TableRow key={order.id}>
+                      <TableCell>
+                        <strong>{order.product.name}</strong>
+                        <small>
+                          {order.product.months} 个月 ·{" "}
+                          {order.product.quota.toLocaleString()} 次调用
+                        </small>
+                      </TableCell>
+                      <TableCell className="harbor-order-amount">
+                        {money(order.product.amountMinor)}
+                      </TableCell>
+                      <TableCell>
+                        <time>{dateTime(order.createdAt)}</time>
+                      </TableCell>
+                      <TableCell>
+                        <span
+                          className="harbor-result-state"
+                          data-state={
+                            order.status === "active" ? "success" : "unknown"
+                          }
+                        >
+                          {orderStatus(order)}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          variant="link"
+                          size="sm"
+                          onClick={() => setOrderDetail(order.id)}
+                        >
+                          {!order.deliveredAt &&
+                          order.paymentStatus !== "paid" &&
+                          canPay
+                            ? "去付款"
+                            : "查看详情"}
+                          <ArrowRight aria-hidden="true" />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
               {!purchases.orders.length && (
-                <p className="harbor-empty">暂无订单</p>
+                <div className="harbor-empty">
+                  <p>暂无订单</p>
+                  <Button variant="link" onClick={() => go("market")}>
+                    浏览数据服务
+                  </Button>
+                </div>
               )}
-            </div>
+            </Card>
           )}
         </>
       )}
+      <Dialog
+        open={!!detailOrder}
+        onOpenChange={(open) => {
+          if (!open && !busy) setOrderDetail(null);
+        }}
+      >
+        <DialogContent className="harbor-checkout">
+          <DialogHeader>
+            <DialogTitle>订单详情</DialogTitle>
+            <DialogDescription>{detailOrder?.product.name}</DialogDescription>
+          </DialogHeader>
+          {detailOrder && (
+            <>
+              <div className="harbor-order-summary">
+                <strong className="harbor-price">
+                  {money(detailOrder.product.amountMinor)}
+                </strong>
+                <span
+                  className="harbor-result-state"
+                  data-state={
+                    detailOrder.status === "active" ? "success" : "unknown"
+                  }
+                >
+                  {orderStatus(detailOrder)}
+                </span>
+              </div>
+              <dl className="harbor-order-facts">
+                <div>
+                  <dt>订阅权益</dt>
+                  <dd>
+                    {detailOrder.product.months} 个月 ·{" "}
+                    {detailOrder.product.quota.toLocaleString()} 次调用
+                  </dd>
+                </div>
+                <div>
+                  <dt>创建时间</dt>
+                  <dd>{dateTime(detailOrder.createdAt)}</dd>
+                </div>
+                <div>
+                  <dt>订单编号</dt>
+                  <dd>{detailOrder.id}</dd>
+                </div>
+              </dl>
+              {detailOrder.environment === "test" && (
+                <p>测试订单，不包含正式查询权益。</p>
+              )}
+              {detailOrder.paymentStatus === "paid" &&
+                !detailOrder.deliveredAt && (
+                  <p role="status">付款已确认，正在为你的空间开通服务。</p>
+                )}
+              {error && (
+                <p className="harbor-error" role="alert">
+                  {error}
+                </p>
+              )}
+              {paymentActions(detailOrder)}
+              {!detailOrder.deliveredAt && links[detailOrder.id] && (
+                <p>付款后将返回数港，订单状态会自动更新。</p>
+              )}
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={!!selected}
         onOpenChange={(open) => {
@@ -463,7 +612,7 @@ export function Commerce({
           <DialogHeader>
             <DialogTitle>确认订阅</DialogTitle>
             <DialogDescription>
-              为当前空间购买，金额与权益由服务端确认。
+              为当前空间开通，成员共享订阅次数。
             </DialogDescription>
           </DialogHeader>
           {selected && (
