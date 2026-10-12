@@ -1045,3 +1045,7 @@
 @media (min-width: 681px) {
   .ip-pricing-grid[data-offers="4"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+/* Session discovery must not briefly render the anonymous homepage. */
+.harbor-session-pending { min-height: 100svh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1.5rem; padding: 2rem; }
+.harbor-session-pending .brand { width: auto; }
+.harbor-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem; color: var(--muted-foreground); }

@@ -228,13 +228,17 @@ test("BFF fresh verification, fixed upstream credential, no browser secret and b
     { url: "https://harbor.example.test/api/v1" },
   ]);
   assert.equal(JSON.parse(body).data.html, null);
+  const listPath = "/bff/v1/commerce/tenants/11111111-1111-4111-8111-111111111111?ordersPage=6&subscriptionsPage=2&pageSize=20";
+  assert.equal((await fetch(base + listPath)).status, 200);
+  assert.equal(requests[1].url, config.upstream + listPath.replace("/bff/v1/", "/internal/v1/portal/"));
+  assert.equal(verified, 2);
   active = false;
   assert.equal((await fetch(base + "/bff/v1/session")).status, 401);
-  assert.equal(requests.length, 1);
+  assert.equal(requests.length, 2);
   active = true;
   revoked = true;
   assert.equal((await fetch(base + "/bff/v1/session")).status, 401);
-  assert.equal(requests.length, 1);
+  assert.equal(requests.length, 2);
 });
 test("migration job has only database credentials, immutable image and no service links or token mount", () => {
   const job = workload({

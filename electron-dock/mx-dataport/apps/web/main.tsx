@@ -58,6 +58,7 @@ import { Commerce } from "./commerce";
 import { IpQuery } from "./ip-query";
 import { hasCapability, paymentReturnTrade } from "./commerce-state";
 import { Messages, useMessageInbox } from "./messages";
+import { Pagination, useLocalPage } from "./pagination";
 import "@/styles/dataport.css";
 import "./design-scale.css";
 import "./dataport.css";
@@ -110,6 +111,18 @@ function Navigation({
     </SidebarMenu>
   );
 }
+function ConsoleBrand({ go }: { go: (page: string) => void }) {
+  const sidebar = useSidebar();
+  return <a className="brand" href="/#/intelligence" onClick={event => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    go("intelligence");
+    if (sidebar.isMobile) sidebar.setOpenMobile(false);
+  }}>
+    <span className="brand-symbol"><Layers3 size={24} /></span>
+    <strong>数港<span>DataPort</span></strong>
+  </a>;
+}
 export function ConsoleShell({
   page,
   go,
@@ -132,14 +145,7 @@ export function ConsoleShell({
     >
       <Sidebar className="app-sidebar">
         <SidebarHeader>
-          <a className="brand" href="/">
-            <span className="brand-symbol">
-              <Layers3 size={24} />
-            </span>
-            <strong>
-              数港<span>DataPort</span>
-            </strong>
-          </a>
+          <ConsoleBrand go={go} />
         </SidebarHeader>
         <SidebarContent>
           <SidebarGroup>
@@ -190,6 +196,7 @@ function RemotePanel({
 }) {
   const [data, setData] = useState<any>(null),
     [error, setError] = useState("");
+  const keys = useLocalPage<any>((Array.isArray(data) ? data : []).filter(key => key.tenantId === tenant), 20);
   const endpoints: Record<string, string> = {
     keys: "/api-keys",
   };
@@ -261,7 +268,7 @@ function RemotePanel({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.filter((key: any) => key.tenantId === tenant).map((key: any) => (
+              {keys.items.map((key: any) => (
                 <TableRow key={key.id}>
                   <TableCell>{key.name}</TableCell>
                   <TableCell>{key.prefix || key.id}</TableCell>
@@ -270,6 +277,7 @@ function RemotePanel({
               ))}
             </TableBody>
           </Table>
+          <Pagination label="API Keys" {...keys.pagination} onChange={keys.setPage} />
           {!data.some((key: any) => key.tenantId === tenant) && <p className="harbor-empty">尚无 API Key</p>}
         </Card>
       ) : null}
@@ -323,14 +331,13 @@ function App() {
   useEffect(() => {
     let current = true;
     setChecking(true);
-    setBoot(emptySession);
     setBootError("");
     loadHarborSession(request)
       .then((value) => {
         if (!current) return;
         setBoot(value);
         if (value.customer) {
-          setTenant(value.customer.tenantIds?.[0] || "");
+          setTenant(previous => value.customer.tenantIds?.includes(previous) ? previous : value.customer.tenantIds?.[0] || "");
           const destination = sessionStorage.getItem("harbor:return");
           if (pages.some((p) => p[0] === destination)) {
             go(destination!);
@@ -489,6 +496,11 @@ function App() {
             <AccountSecurity />
           ) : null}
         </ConsoleShell>
+      ) : signedIn === null ? (
+        <main className="harbor-session-pending query-backdrop">
+          <div className="brand"><span className="brand-symbol"><Layers3 size={24} /></span><strong>数港<span>DataPort</span></strong></div>
+          {checking ? <p role="status">正在确认登录状态…</p> : sessionNotice}
+        </main>
       ) : (
         <div
           className={`public-site ${location.pathname === "/pricing" ? "harbor-pricing" : "query-backdrop"}`}

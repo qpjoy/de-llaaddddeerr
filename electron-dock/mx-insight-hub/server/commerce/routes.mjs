@@ -21,6 +21,17 @@ export async function commerceRoute({ commerce, service, productGateway, request
       }
       throw new AppError(400,'invalid_message_request','消息请求不正确')
     }
+    const listing = new RegExp(`^${root}/tenants/([0-9a-f-]{36})$`).exec(pathname)
+    if (listing && request.method === 'GET') {
+      requireTenantCapability(principal,listing[1],'billing.read')
+      const options = {}
+      for (const [key,value] of searchParams) {
+        if (!['ordersPage','subscriptionsPage','pageSize'].includes(key) || searchParams.getAll(key).length !== 1 || !/^[1-9][0-9]*$/.test(value))
+          throw new AppError(400,'commerce_invalid_query','分页参数不正确')
+        options[key] = Number(value)
+      }
+      return reply(await commerce.list(listing[1],options))
+    }
     if (searchParams.size) throw new AppError(400,'commerce_invalid_query','商城接口不接受额外查询参数')
     const actor = principal.memberId || principal.kind
     const selection = new RegExp(`^${root}/tenants/([0-9a-f-]{36})/subscription-selection$`).exec(pathname)

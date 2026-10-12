@@ -107,10 +107,31 @@ export class CommerceService {
     requirePayment(uuid(id) && (!tenantId || uuid(tenantId)), 'commerce_invalid_id', '订单编号不正确')
     return (await client.query(`SELECT * FROM hub_commerce.orders WHERE id=$1 AND ($2::uuid IS NULL OR tenant_id=$2) ${lock}`, [id,tenantId])).rows[0]
   }
-  async list(tenantId) {
+  async list(tenantId, options = {}) {
+    fields(options, ['ordersPage', 'subscriptionsPage', 'pageSize'])
+    const { ordersPage = 1, subscriptionsPage = 1, pageSize = 100 } = options
+    requirePayment([ordersPage, subscriptionsPage].every(value => Number.isSafeInteger(value) && value >= 1 && value <= 1000000)
+      && Number.isInteger(pageSize) && pageSize >= 1 && pageSize <= 100, 'commerce_invalid_query', '分页参数不正确')
     if (!this.pool) return { orders: [], subscriptions: [] }
+    // Summaries cover the whole tenant, never just the currently displayed page.
+    const summary = (await this.pool.query(`SELECT
+      (SELECT count(*)::int FROM hub_commerce.orders WHERE tenant_id=$1) AS "orderCount",
+      EXISTS(SELECT 1 FROM hub_commerce.orders WHERE tenant_id=$1 AND intent->>'purpose'='trial') AS "trialClaimed",
+      (SELECT coalesce(jsonb_agg(DISTINCT intent->'product'->>'sku'),'[]'::jsonb) FROM hub_commerce.orders
+        WHERE tenant_id=$1 AND delivered_at IS NULL AND coalesce(payment->>'status','pending')<>'paid') AS "pendingSkus",
+      count(*)::int AS "subscriptionCount",
+      count(*) FILTER(WHERE starts_at<=now() AND ends_at>now())::int AS "activeSubscriptionCount",
+      count(*) FILTER(WHERE channel='product' AND starts_at<=now() AND ends_at>now())::int AS "currentCount",
+      count(*) FILTER(WHERE channel='product' AND starts_at>now() AND ends_at>now())::int AS "futureCount",
+      max(ends_at) FILTER(WHERE channel='product' AND ends_at>now()) AS "latestEnd"
+      FROM hub_commerce.subscriptions WHERE tenant_id=$1`, [tenantId])).rows[0]
+    const pagination = {
+      orders: { page: Math.min(ordersPage, Math.max(1, Math.ceil(summary.orderCount / pageSize))), pageSize, total: summary.orderCount },
+      subscriptions: { page: Math.min(subscriptionsPage, Math.max(1, Math.ceil(summary.subscriptionCount / pageSize))), pageSize, total: summary.subscriptionCount },
+    }
     const [orders, subscriptions] = await Promise.all([
-      this.pool.query('SELECT * FROM hub_commerce.orders WHERE tenant_id=$1 ORDER BY created_at DESC,id LIMIT 100', [tenantId]),
+      this.pool.query('SELECT * FROM hub_commerce.orders WHERE tenant_id=$1 ORDER BY created_at DESC,id LIMIT $2 OFFSET $3',
+        [tenantId, pageSize, (pagination.orders.page - 1) * pageSize]),
       this.pool.query(`WITH scopes AS (
           SELECT DISTINCT consumer_id,channel FROM hub_commerce.subscriptions WHERE tenant_id=$1
         ), candidates AS MATERIALIZED (
@@ -124,9 +145,10 @@ export class CommerceService {
         coalesce(s.id=(SELECT id FROM selected),false) AS selected
         FROM hub_commerce.subscriptions s JOIN hub_commerce.orders o ON o.id=s.order_id
         LEFT JOIN candidates c ON c.id=s.id
-        WHERE s.tenant_id=$1 ORDER BY selected DESC,available DESC,s.starts_at DESC,s.id LIMIT 100`, [tenantId]),
+        WHERE s.tenant_id=$1 ORDER BY selected DESC,available DESC,s.starts_at DESC,s.id LIMIT $2 OFFSET $3`,
+        [tenantId, pageSize, (pagination.subscriptions.page - 1) * pageSize]),
     ])
-    return { orders: orders.rows.map(view), subscriptions: subscriptions.rows, limit: 100 }
+    return { orders: orders.rows.map(view), subscriptions: subscriptions.rows, limit: pageSize, pagination, summary }
   }
   async selectSubscription(tenantId, body, actor) {
     fields(body,['subscriptionId'])

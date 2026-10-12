@@ -20,6 +20,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { request } from "./api";
+import { Pagination, useLocalPage, type PageInfo } from "./pagination";
 import {
   checkoutLocation,
   dateTime,
@@ -68,6 +69,8 @@ export function Commerce({
   const [purchases, setPurchases] = useState<{
     orders: any[];
     subscriptions: Subscription[];
+    pagination?: { orders: PageInfo; subscriptions: PageInfo };
+    summary?: { trialClaimed: boolean; currentCount: number; futureCount: number; latestEnd?: string; pendingSkus: string[] };
   }>({ orders: [], subscriptions: [] });
   const [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
@@ -81,11 +84,17 @@ export function Commerce({
     [loadFailed, setLoadFailed] = useState(false);
   const [productSearch, setProductSearch] = useState(""), [productSort, setProductSort] = useState("price");
   const products = (catalog?.items || []).filter(item => item.status === "published" && `${item.name} ${item.description}`.toLowerCase().includes(productSearch.toLowerCase())).sort((a,b) => productSort === "quota" ? b.quota - a.quota : a.amountMinor - b.amountMinor);
+  const market = useLocalPage(products, 12);
+  const [ordersPage, setOrdersPage] = useState(1), [subscriptionsPage, setSubscriptionsPage] = useState(1);
+  const listUrl = `/bff/v1/commerce/tenants/${tenant}?ordersPage=${ordersPage}&subscriptionsPage=${subscriptionsPage}&pageSize=${page === "services" ? 6 : 20}`;
   const lock = useRef(false);
   const canRead = hasCapability(session, tenant, "billing.read");
   const canPay = hasCapability(session, tenant, "recharge.create");
   const canBuy = canPay && hasCapability(session, tenant, "apikey.write");
   const notice = subscriptionNotice(purchases.subscriptions);
+  const latestEnd = purchases.summary?.latestEnd ?? notice.latestEnd;
+  const currentCount = purchases.summary?.currentCount ?? notice.current.length;
+  const futureCount = purchases.summary?.futureCount ?? notice.future.length;
   const post = (path: string, body = {}, key?: string) =>
     request(`/bff/v1${path}`, {
       method: "POST",
@@ -96,7 +105,7 @@ export function Commerce({
       body: JSON.stringify(body),
     });
   async function refresh() {
-    const result = await request(`/bff/v1/commerce/tenants/${tenant}`);
+    const result = await request(listUrl);
     setPurchases(result.data);
   }
   useEffect(() => {
@@ -107,7 +116,7 @@ export function Commerce({
     Promise.all([
       request("/bff/v1/commerce/products"),
       canRead
-        ? request(`/bff/v1/commerce/tenants/${tenant}`)
+        ? request(listUrl)
         : Promise.resolve(null),
     ])
       .then(([products, records]) => {
@@ -128,7 +137,7 @@ export function Commerce({
     return () => {
       active = false;
     };
-  }, [tenant, canRead, loadVersion]);
+  }, [listUrl, canRead, loadVersion]);
   // Read existing orders only. Polling never prepares a payment or starts a query.
   useEffect(() => {
     if (!canRead || !purchases.orders.some((order) => !order.deliveredAt))
@@ -139,7 +148,7 @@ export function Commerce({
       if (running || document.hidden) return;
       running = true;
       try {
-        const result = await request(`/bff/v1/commerce/tenants/${tenant}`);
+        const result = await request(listUrl);
         if (active) setPurchases(result.data);
       } catch {
         /* Retain the last confirmed state; order actions report failures. */
@@ -151,7 +160,7 @@ export function Commerce({
       active = false;
       clearInterval(timer);
     };
-  }, [tenant, canRead, purchases.orders.some((order) => !order.deliveredAt)]);
+  }, [listUrl, canRead, purchases.orders.some((order) => !order.deliveredAt)]);
   async function perform(work: () => Promise<void>) {
     if (lock.current) return;
     lock.current = true;
@@ -220,7 +229,7 @@ export function Commerce({
         test_delivered: "测试订单",
       }) as Record<string, string>
     )[order.status] || "待确认";
-  const trialClaimed = purchases.orders.some(order => order.product.kind === "trial");
+  const trialClaimed = purchases.summary?.trialClaimed ?? purchases.orders.some(order => order.product.kind === "trial");
   const paymentActions = (order: any) => (
     <div className="harbor-actions">
       {!order.deliveredAt && canPay && (
@@ -341,14 +350,14 @@ export function Commerce({
         <p role="status">正在读取服务…</p>
       ) : loadFailed ? null : page === "market" ? (
         <>
-          {notice.latestEnd && <div className="harbor-subscription-notice" role="status">
-            <strong>{notice.current.length ? "你已在订阅期内" : "你已有待生效的订阅"}</strong>
-            <p>已购有效期至 {dateTime(notice.latestEnd)}{notice.future.length ? `，其中 ${notice.future.length} 份续订待生效` : ""}。可以继续订阅，生效方式以所选套餐为准，各订阅独立计次。</p>
+          {latestEnd && <div className="harbor-subscription-notice" role="status">
+            <strong>{currentCount ? "你已在订阅期内" : "你已有待生效的订阅"}</strong>
+            <p>已购有效期至 {dateTime(latestEnd)}{futureCount ? `，其中 ${futureCount} 份续订待生效` : ""}。可以继续订阅，生效方式以所选套餐为准，各订阅独立计次。</p>
             <Button variant="link" onClick={() => go("services")}>查看我的订阅 <ArrowRight /></Button>
           </div>}
-          <div className="harbor-market-toolbar"><Input aria-label="搜索数据服务" placeholder="搜索数据服务或套餐" value={productSearch} onChange={e => setProductSearch(e.target.value)} /><Select value={productSort} onValueChange={setProductSort}><SelectTrigger aria-label="商品排序"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="price">价格从低到高</SelectItem><SelectItem value="quota">调用次数从多到少</SelectItem></SelectContent></Select><span>{products.length} 款服务</span></div>
+          <div className="harbor-market-toolbar"><Input aria-label="搜索数据服务" placeholder="搜索数据服务或套餐" value={productSearch} onChange={e => { setProductSearch(e.target.value); market.setPage(1); }} /><Select value={productSort} onValueChange={value => { setProductSort(value); market.setPage(1); }}><SelectTrigger aria-label="商品排序"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="price">价格从低到高</SelectItem><SelectItem value="quota">调用次数从多到少</SelectItem></SelectContent></Select><span>{products.length} 款服务</span></div>
           <div className={`harbor-market-products ${(catalog?.items.length || 0) > 1 ? "has-multiple" : ""}`}>
-          {products.map((item) => (
+          {market.items.map((item) => (
               <article className="harbor-offer" key={item.sku}>
                 <div className="harbor-offer-art" aria-hidden="true">
                   <ShieldCheck />
@@ -387,7 +396,7 @@ export function Commerce({
                       disabled={!canBuy || busy || (item.kind === "trial" && trialClaimed)}
                       onClick={() => { setUpgradeFrom(null); setSelected(item); }}
                     >
-                      {item.kind === "trial" ? trialClaimed ? "已领取试用" : "免费领取" : notice.latestEnd ? "继续订阅" : "立即订阅"} <ArrowRight />
+                      {item.kind === "trial" ? trialClaimed ? "已领取试用" : "免费领取" : latestEnd ? "继续订阅" : "立即订阅"} <ArrowRight />
                     </Button>
                     <Button
                       variant="outline"
@@ -418,6 +427,7 @@ export function Commerce({
               </article>
             ))}
           </div>
+          <Pagination label="数据服务" {...market.pagination} onChange={market.setPage} />
           {catalog && !products.length && <p className="harbor-empty">{catalog.items.length ? "没有匹配的服务，请尝试其他关键词。" : "暂时没有可购买的服务。"}</p>}
         </>
       ) : !canRead ? (
@@ -425,7 +435,7 @@ export function Commerce({
       ) : (
         <>
           {page === "services" ? (
-            <><div className="harbor-subscription-notice"><p>默认优先消费最早到期的可用订阅。可手动设置优先订阅；额度不足时自动选择其他可用订阅，处理中请求仍结算到原订阅。</p><Button variant="outline" disabled={busy || !hasCapability(session, tenant, "apikey.write")} onClick={() => perform(async () => { const result = await post(`/commerce/tenants/${tenant}/subscription-selection`, { subscriptionId: null }); setPurchases(result.data); })}>恢复自动选择</Button></div><div className="harbor-grid">
+            <><div className="harbor-subscription-notice"><p>默认优先消费最早到期的可用订阅。可手动设置优先订阅；额度不足时自动选择其他可用订阅，处理中请求仍结算到原订阅。</p><Button variant="outline" disabled={busy || !hasCapability(session, tenant, "apikey.write")} onClick={() => perform(async () => { await post(`/commerce/tenants/${tenant}/subscription-selection`, { subscriptionId: null }); await refresh(); })}>恢复自动选择</Button></div><div className="harbor-grid">
               {purchases.subscriptions.map((subscription) => {
                 const state = subscriptionState(subscription);
                 const expiring = notice.expiring.some(value => value.id === subscription.id);
@@ -464,7 +474,7 @@ export function Commerce({
                       {subscription.held > 0 && (
                         <p>{subscription.held} 次请求处理中</p>
                       )}
-                      {expiring && <p>当前订阅即将到期{notice.future.length ? "，已购续订将在约定时间生效。" : "，可提前续订保持服务连续。"}</p>}
+                      {expiring && <p>当前订阅即将到期{futureCount ? "，已购续订将在约定时间生效。" : "，可提前续订保持服务连续。"}</p>}
                       <div className="harbor-actions">
                         <Button
                           disabled={state !== "active"}
@@ -472,7 +482,7 @@ export function Commerce({
                         >
                           开始使用 <ArrowRight />
                         </Button>
-                        {hasCapability(session, tenant, "apikey.write") && subscription.channel === "product" && <Button variant="outline" disabled={busy || state !== "active" || subscription.preferred} onClick={() => perform(async () => { const result = await post(`/commerce/tenants/${tenant}/subscription-selection`, { subscriptionId: subscription.id }); setPurchases(result.data); })}>{subscription.preferred ? "优先消费" : "设为优先"}</Button>}
+                        {hasCapability(session, tenant, "apikey.write") && subscription.channel === "product" && <Button variant="outline" disabled={busy || state !== "active" || subscription.preferred} onClick={() => perform(async () => { await post(`/commerce/tenants/${tenant}/subscription-selection`, { subscriptionId: subscription.id }); await refresh(); })}>{subscription.preferred ? "优先消费" : "设为优先"}</Button>}
                         {canBuy && (
                           <Button
                             variant="outline"
@@ -495,7 +505,7 @@ export function Commerce({
                   )}
                 </div>
               )}
-            </div></>
+            </div>{purchases.pagination && <Pagination label="订阅" {...purchases.pagination.subscriptions} busy={busy || loading} onChange={setSubscriptionsPage} />}</>
           ) : (
             <Card className="harbor-table-panel harbor-orders">
               <Table className="harbor-orders-table">
@@ -554,6 +564,7 @@ export function Commerce({
                   ))}
                 </TableBody>
               </Table>
+              {purchases.pagination && <Pagination label="订单" {...purchases.pagination.orders} busy={busy || loading} onChange={setOrdersPage} />}
               {!purchases.orders.length && (
                 <div className="harbor-empty">
                   <p>暂无订单</p>
@@ -655,11 +666,11 @@ export function Commerce({
               </p>
               <div className="harbor-price">{money(selected.amountMinor)}</div>
               <p>{selected.kind === "trial" ? "免费领取后立即生效，每个空间限领一次，无需付款。不自动续费。" : upgradeFrom ? "升级按新套餐全价购买，付款后立即生效并设为优先；旧订阅保留原到期日与剩余次数，不折抵、不退款。" : selected.activationMode === "immediate" ? "付款确认后立即生效，各订阅独立计时。不自动续费。" : "付款确认后开通，续订从已购期限结束后顺延。不自动续费。"}</p><p>{selected.dailyLimit ? `每日最多 ${selected.dailyLimit} 次，北京时间 00:00 重置` : "不单设每日上限"}</p>
-              {selected.kind !== "trial" && notice.latestEnd && <div className="harbor-subscription-notice" role="status">
+              {selected.kind !== "trial" && latestEnd && <div className="harbor-subscription-notice" role="status">
                 <strong>你已订阅此服务，仍可继续购买</strong>
-                <p>已购有效期至 {dateTime(notice.latestEnd)}。当前剩余次数与原有效期不变；每份订阅次数独立，不结转。最终生效时间以付款交付时为准。</p>
+                <p>已购有效期至 {dateTime(latestEnd)}。当前剩余次数与原有效期不变；每份订阅次数独立，不结转。最终生效时间以付款交付时为准。</p>
               </div>}
-              {purchases.orders.some(order => order.product.sku === selected.sku && !order.deliveredAt && order.paymentStatus !== "paid") && <div className="harbor-subscription-notice">
+              {(purchases.summary?.pendingSkus.includes(selected.sku) ?? purchases.orders.some(order => order.product.sku === selected.sku && !order.deliveredAt && order.paymentStatus !== "paid")) && <div className="harbor-subscription-notice">
                 <p>你已有此服务的未完成订单，可以先查看原订单，也可以另购一份。</p>
                 <Button variant="link" disabled={busy} onClick={() => { setSelected(null); go("orders"); }}>查看原订单</Button>
               </div>}

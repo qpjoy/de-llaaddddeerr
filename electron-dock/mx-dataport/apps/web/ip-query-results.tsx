@@ -268,6 +268,7 @@ export function QueryHistory({
             </div>
           )
         )}
+        {!!history.length && <p className="harbor-hint" aria-live="polite">已显示 {history.length} 条{more ? "，可继续加载更早记录。" : "，已显示全部记录。"}</p>}
         {more && (
           <div className="harbor-history-more">
             <Button variant="ghost" disabled={busy || loading} onClick={onMore}>

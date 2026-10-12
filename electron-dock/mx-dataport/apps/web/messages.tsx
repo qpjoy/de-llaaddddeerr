@@ -52,11 +52,14 @@ export function Messages({ tenant, csrf, enabled, state, go }: {
   state: ReturnType<typeof useMessageInbox>; go: (page: string) => void;
 }) {
   const { inbox, error, reload } = state;
+  // Keep the displayed first page stable while browsing older pages. Background
+  // inbox refreshes must not push unread records out between the loaded pages.
+  const [firstPage, setFirstPage] = useState<Message[] | null>(null);
   const [older, setOlder] = useState<Message[]>([]);
   const [next, setNext] = useState<string | null | undefined>();
   const [busy, setBusy] = useState(false), [actionError, setActionError] = useState("");
   const lock = useRef(false);
-  const items = [...(inbox?.items || []), ...older].filter((item, i, all) => all.findIndex(value => value.id === item.id) === i);
+  const items = [...(firstPage || inbox?.items || []), ...older].filter((item, i, all) => all.findIndex(value => value.id === item.id) === i);
   const cursor = next === undefined ? inbox?.nextBefore : next;
   async function act(work: () => Promise<void>) {
     if (lock.current) return;
@@ -67,10 +70,11 @@ export function Messages({ tenant, csrf, enabled, state, go }: {
   return <div className="harbor-messages">
     <div className="page-heading harbor-heading-actions">
       <div><h1>消息中心</h1><p>订阅动态与到期提醒{inbox ? ` · ${inbox.unread} 条未读` : ""}</p></div>
-      {enabled && <Button variant="outline" disabled={busy} onClick={() => act(async () => { setOlder([]); setNext(undefined); await reload(); })}>刷新</Button>}
+      {enabled && <Button variant="outline" disabled={busy} onClick={() => act(async () => { setFirstPage(null); setOlder([]); setNext(undefined); await reload(); })}>刷新</Button>}
     </div>
     {!enabled ? <p className="harbor-empty">请使用有当前空间账单查看权限的账号。</p> : <>
       {(error || actionError) && <p className="harbor-error" role="alert">{actionError || error}</p>}
+      {firstPage && inbox?.items[0]?.id !== firstPage[0]?.id && <p className="harbor-hint">有新消息，点击刷新查看。</p>}
       {!inbox && !error && <p role="status">正在读取消息…</p>}
       {inbox && !items.length && <Card className="harbor-empty"><Bell aria-hidden="true" /><h2>暂无消息</h2><p>订阅开通及到期提醒会显示在这里。</p></Card>}
       {items.map(message => <Card key={message.id} className="harbor-message" data-unread={!message.readAt}>
@@ -90,13 +94,16 @@ export function Messages({ tenant, csrf, enabled, state, go }: {
                 method: "POST", headers: { "x-mx-csrf": csrf }, body: "{}",
               });
               setOlder(values => values.map(value => value.id === message.id ? { ...value, readAt: result.data.readAt } : value));
+              setFirstPage(values => values?.map(value => value.id === message.id ? { ...value, readAt: result.data.readAt } : value) || null);
               await reload();
             })}><Check /> 标为已读</Button>}
           </div>
         </div>
       </Card>)}
+      {!!items.length && <p className="harbor-hint" aria-live="polite">已显示 {items.length} 条{cursor ? "，可继续加载更早消息。" : "，已显示全部消息。"}</p>}
       {cursor && <Button variant="outline" disabled={busy} onClick={() => act(async () => {
         const result = await request(`/bff/v1/commerce/tenants/${tenant}/messages?before=${cursor}`);
+        setFirstPage(values => values || inbox?.items || []);
         setOlder(values => [...values, ...result.data.items]); setNext(result.data.nextBefore);
       })}>更早消息</Button>}
     </>}

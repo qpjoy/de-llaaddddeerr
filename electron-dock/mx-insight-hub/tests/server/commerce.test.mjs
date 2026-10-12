@@ -104,6 +104,50 @@ async function fixture(t,{space=false,offers=false}={}){
     rerunMigrations:()=>runMigrations({connectionString:url.href,migrationsDir:migrationDir})}
 }
 const database={skip:!connectionString}
+test('commerce list pages are validated and require the current tenant billing permission', async () => {
+  const tenant=randomUUID(), calls=[]
+  const principal={kind:'launcher-user',memberId:randomUUID(),tenantIds:[tenant],memberships:[{tenantId:tenant,capabilities:['billing.read']}]}
+  const invoke=(query,p=principal)=>commerceRoute({commerce:{list:async(...args)=>{calls.push(args);return {}}},request:{method:'GET'},response:{},
+    pathname:`/internal/v1/admin/commerce/tenants/${tenant}`,searchParams:new URLSearchParams(query),principal:p,sendJson(){}})
+  await invoke('ordersPage=6&subscriptionsPage=2&pageSize=20')
+  assert.deepEqual(calls.pop(),[tenant,{ordersPage:6,subscriptionsPage:2,pageSize:20}])
+  for (const query of ['pageSize=0','pageSize=-1','pageSize=1.5','ordersPage=1&ordersPage=2','tenantId=other','pageSize='])
+    await assert.rejects(invoke(query),{status:400})
+  await assert.rejects(invoke('ordersPage=2',{...principal,memberships:[]}),{status:403})
+  assert.deepEqual(calls,[])
+})
+test('commerce pagination reaches records beyond 100, retains global trial and term facts, and isolates tenants', database, async t => {
+  const f=await fixture(t,{space:true,offers:true})
+  const trial=await f.service.create(f.tenant,{sku:'ip-risk-trial-10',revision:1,environment:'live'},randomUUID(),'fixture',{harbor:true})
+  const order=await f.create(),paid=await f.eventFor(order)
+  await f.service.commit(paid.source,paid.event,paid.payment)
+  // Synthetic historical records in this disposable database only; no remote Pay or supplier calls.
+  await f.pool.query(`WITH orders AS (
+    INSERT INTO hub_commerce.orders(id,tenant_id,consumer_id,environment,request_key,fingerprint,source_id,app_id,intent,delivered_at,created_at)
+    SELECT gen_random_uuid(),tenant_id,consumer_id,environment,gen_random_uuid()::text,fingerprint,source_id,app_id,intent,now(),now()+i*interval '1 second'
+    FROM hub_commerce.orders CROSS JOIN generate_series(1,125) i WHERE id=$1 RETURNING id,tenant_id,consumer_id
+  ) INSERT INTO hub_commerce.subscriptions(id,order_id,tenant_id,consumer_id,channel,starts_at,ends_at,quota)
+    SELECT gen_random_uuid(),id,tenant_id,consumer_id,'product',now()-interval '1 day',now()+interval '1 year',100 FROM orders`,[order.id])
+  const orderIds=[],subscriptionIds=[]
+  let summary
+  for(let page=1;page<=7;page++) {
+    const result=await f.service.list(f.tenant,{ordersPage:page,subscriptionsPage:page,pageSize:20})
+    assert.equal(result.pagination.orders.total,127);assert.equal(result.pagination.subscriptions.total,127)
+    assert.equal(result.orders.length,page===7?7:20);assert.equal(result.subscriptions.length,page===7?7:20)
+    orderIds.push(...result.orders.map(o=>o.id));subscriptionIds.push(...result.subscriptions.map(s=>s.id))
+    assert.equal(result.summary.trialClaimed,true)
+    if(summary)assert.deepEqual(result.summary,summary);else summary=result.summary
+    if(page===1)assert.equal(result.orders.some(o=>o.id===trial.id),false,'trial is older than the displayed orders')
+  }
+  assert.equal(new Set(orderIds).size,127);assert.equal(new Set(subscriptionIds).size,127);assert.ok(orderIds.includes(trial.id))
+  assert.equal((await f.service.list(f.tenant,{ordersPage:999,pageSize:20})).pagination.orders.page,7)
+  const empty=await f.service.list(randomUUID(),{ordersPage:2,pageSize:20})
+  assert.equal(empty.pagination.orders.total,0);assert.equal(empty.pagination.orders.page,1)
+  assert.equal(empty.summary.trialClaimed,false);assert.equal(empty.summary.latestEnd,null)
+  for(const options of [{pageSize:101},{ordersPage:0},{subscriptionsPage:1.5},{ordersPage:1000001}])
+    await assert.rejects(f.service.list(f.tenant,options),{status:400})
+  assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM usage_requests')).rows[0].n,0,'list reads never dispatch or consume quota')
+})
 test('customer messages persist once per lifecycle, isolate readers and spaces, and never settle money',database,async t=>{
   const f=await fixture(t,{space:true}),messages=f.service.messages,member=randomUUID(),otherMember=randomUUID(),otherTenant=randomUUID()
   await f.pool.query('INSERT INTO iam.members(id) VALUES($1),($2)',[member,otherMember])
@@ -546,7 +590,9 @@ test('trial publication and product validation stay authoritative; failed delive
     BEGIN IF NEW.action='trial.claimed' THEN RAISE EXCEPTION 'fixture_delivery_failure'; END IF; RETURN NEW; END $$;
     CREATE TRIGGER reject_trial_audit BEFORE INSERT ON hub_commerce.audit FOR EACH ROW EXECUTE FUNCTION public.reject_trial_audit()`)
   await assert.rejects(free.create(f.tenant,body,key,'owner'),/fixture_delivery_failure/)
-  assert.deepEqual(await free.list(f.tenant),{orders:[],subscriptions:[],limit:100})
+  const rolledBack=await free.list(f.tenant)
+  assert.deepEqual(rolledBack.orders,[]);assert.deepEqual(rolledBack.subscriptions,[])
+  assert.equal(rolledBack.pagination.orders.total,0);assert.equal(rolledBack.summary.trialClaimed,false)
   assert.equal((await f.pool.query('SELECT * FROM tenant_service_access WHERE tenant_id=$1',[f.tenant])).rowCount,0)
   assert.equal((await f.pool.query('SELECT * FROM capability_grants WHERE consumer_id=$1',[f.consumer])).rowCount,0)
   await f.pool.query('DROP TRIGGER reject_trial_audit ON hub_commerce.audit')
