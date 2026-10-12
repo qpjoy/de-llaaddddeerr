@@ -170,6 +170,7 @@ export async function createRuntime(config = loadConfig()) {
     circuitFailureThreshold: config.justOne.circuitFailureThreshold,
     circuitOpenMs: config.justOne.circuitOpenMs,
     uncertainCooldownMs: config.justOne.unknownFingerprintCooldownMs,
+    responseQuarantineCooldownMs: config.justOne.responseQuarantineCooldownMs,
   })
   const externalPlatformCredentialStore = createExternalPlatformCredentialStore({
     pool,
@@ -186,6 +187,7 @@ export async function createRuntime(config = loadConfig()) {
     circuitFailureThreshold: config.justOne.circuitFailureThreshold,
     circuitOpenMs: config.justOne.circuitOpenMs,
     uncertainCooldownMs: config.justOne.unknownFingerprintCooldownMs,
+    responseQuarantineCooldownMs: config.justOne.responseQuarantineCooldownMs,
   })
   const tikHubPlatformStore = createExternalPlatformStore({
     pool,
@@ -196,6 +198,7 @@ export async function createRuntime(config = loadConfig()) {
     circuitFailureThreshold: config.tikHub.circuitFailureThreshold,
     circuitOpenMs: config.tikHub.circuitOpenMs,
     uncertainCooldownMs: config.tikHub.unknownFingerprintCooldownMs,
+    responseQuarantineCooldownMs: config.tikHub.responseQuarantineCooldownMs,
   })
   // The other half of the account-search platforms is served by this vendor.
   // Same authorization domain, same contract and dataset; a separate store only
@@ -209,6 +212,7 @@ export async function createRuntime(config = loadConfig()) {
     circuitFailureThreshold: config.tikHub.circuitFailureThreshold,
     circuitOpenMs: config.tikHub.circuitOpenMs,
     uncertainCooldownMs: config.tikHub.unknownFingerprintCooldownMs,
+    responseQuarantineCooldownMs: config.tikHub.responseQuarantineCooldownMs,
   })
   const tikHubCredentialStore = createExternalPlatformCredentialStore({
     pool,
@@ -350,6 +354,7 @@ export async function createRuntime(config = loadConfig()) {
     pool, usageStore: store, providerKey: 'justone', authorizationPlatform: 'xiaohongshu',
     circuitFailureThreshold: config.justOne.circuitFailureThreshold, circuitOpenMs: config.justOne.circuitOpenMs,
     uncertainCooldownMs: config.justOne.unknownFingerprintCooldownMs,
+    responseQuarantineCooldownMs: config.justOne.responseQuarantineCooldownMs,
   })
   const xiaohongshuHotNotesGateway = new ExternalPlatformGateway({
     usageStore: store, platformStore: xiaohongshuHotNotesStore, adapter: justOneAdapter, config: config.justOne,
@@ -384,7 +389,8 @@ export async function createRuntime(config = loadConfig()) {
       rateLimitBurst: config.tikHub.rateLimitBurst,
       circuitFailureThreshold: config.tikHub.circuitFailureThreshold,
       circuitOpenMs: config.tikHub.circuitOpenMs,
-      uncertainCooldownMs: config.tikHub.unknownFingerprintCooldownMs }),
+      uncertainCooldownMs: config.tikHub.unknownFingerprintCooldownMs,
+      responseQuarantineCooldownMs: config.tikHub.responseQuarantineCooldownMs }),
     adapter: tikHubAdapter, config: config.tikHub, providerKey: 'tikhub',
     apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: config.reservationLeaseMs,
     operationControlStore: externalPlatformControlStore, credentialStore: tikHubCredentialStore,
@@ -582,7 +588,7 @@ export async function createRuntime(config = loadConfig()) {
     admissionRecovery: pool ? new AdmissionRecoveryService({ pool, usageStore: store,
       providers: Object.fromEntries([externalPlatformStore, tikHubPlatformStore, rapidApiStore, qixinPlatformStore,
         ipRiskGateway.platformStore, ipRiskV2Gateway.platformStore, ...[...webSearch.gateways.values()].map(g => g.platformStore)]
-        .map(s => [s.providerKey, { cooldownMs: s.uncertainCooldownMs, burst: s.rateLimitBurst }])) }) : null,
+        .map(s => [s.providerKey, { cooldownMs: s.uncertainCooldownMs, responseQuarantineCooldownMs: s.responseQuarantineCooldownMs, burst: s.rateLimitBurst }])) }) : null,
     service,
     store,
     adapter,

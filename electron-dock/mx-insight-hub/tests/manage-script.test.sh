@@ -2481,6 +2481,7 @@ for invalid_justone_assignment in \
   'MX_INSIGHT_JUSTONE_CONNECT_TIMEOUT_MS=0' \
   'MX_INSIGHT_JUSTONE_STALE_TTL_MS=59999' \
   'MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS=invalid' \
+  'MX_INSIGHT_JUSTONE_RESPONSE_QUARANTINE_COOLDOWN_MS=invalid' \
   'MX_INSIGHT_JUSTONE_BILLING_JSON={'
 do
   invalid_justone_kubectl_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-justone.XXXXXX")"
@@ -2591,8 +2592,13 @@ printf 'ok - paid dispatch lease is preflighted without exposing the token\n'
 
 grep -q 'MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED.*0' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS.*900000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_JUSTONE_RESPONSE_QUARANTINE_COOLDOWN_MS.*300000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS.*300000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE.*50' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE.*50' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_TIKHUB_MAX_CONCURRENCY.*16' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS.*10000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING.*32' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED.*0' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED.*0' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS.*:-}' "$ROOT_DIR/deploy/compose/docker-compose.yml"
@@ -2600,8 +2606,13 @@ grep -q 'MX_INSIGHT_TIKHUB_SEARCH_MAX_ENRICH_ITEMS.*20' "$ROOT_DIR/deploy/compos
 grep -q 'MX_INSIGHT_TIKHUB_SEARCH_ENRICH_CONCURRENCY.*2' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS=' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_RESPONSE_QUARANTINE_COOLDOWN_MS="${MX_INSIGHT_JUSTONE_RESPONSE_QUARANTINE_COOLDOWN_MS:-300000}"' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS="${MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS:-300000}"' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE:-50}"' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE:-50}"' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_MAX_CONCURRENCY="${MX_INSIGHT_TIKHUB_MAX_CONCURRENCY:-16}"' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS="${MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS:-10000}"' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING="${MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING:-32}"' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS=' "$ROOT_DIR/scripts/manage.sh"

@@ -137,6 +137,15 @@ const PUBLIC_DOCS_SCRIPT_HASH = createHash('sha256')
   .update(PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT)
   .digest('base64')
 
+async function withAdmissionSignal(response, run) {
+  const controller = new AbortController()
+  const cancel = () => controller.abort()
+  response.once('close', cancel)
+  if (response.destroyed) cancel()
+  try { return await run(controller.signal) }
+  finally { response.off('close', cancel) }
+}
+
 function queryFilters(searchParams) {
   return {
     tenantId: searchParams.get('tenantId') || undefined,
@@ -5626,7 +5635,8 @@ export function createApp({
             ? { ...rawBody, platform: rawBody?.platform || 'xiaohongshu' }
             : rawBody
         }
-        const result = await tikHubGateway.getPost(context, {
+        const result = await withAdmissionSignal(response, signal => tikHubGateway.getPost(context, {
+          signal,
           body,
           idempotencyKey: request.headers['idempotency-key'],
           retryOfRequestId: request.headers['x-mx-insight-retry-of'],
@@ -5634,7 +5644,7 @@ export function createApp({
           // fingerprint path prevents duplicate external charges across route,
           // method and note_id-versus-link aliases.
           path: '/api/v1/data/post',
-        })
+        }))
         sendJson(response, result.status, result.body, {
           'idempotent-replay': String(result.replay),
           'x-mx-insight-request-id': result.requestId,
@@ -5971,7 +5981,8 @@ export function createApp({
           })
           return
         }
-        const result = await service.nightAllCompatibilitySearch(context, {
+        const result = await withAdmissionSignal(response, signal => service.nightAllCompatibilitySearch(context, {
+          signal,
           operation: params.operation,
           body,
           idempotencyKey: request.headers['idempotency-key'],
@@ -5979,7 +5990,7 @@ export function createApp({
           // canonical fingerprint path prevents a caller from purchasing the
           // same upstream work twice by switching between route aliases.
           path: `/api/v1/night-all/search/${params.operation}`,
-        })
+        }))
         // Night-All-owned responses retain their original compatibility body.
         // A Hub-direct projection uses the durable Hub ID in both the legacy
         // field and transport header; provider correlation stays private.
@@ -6337,11 +6348,12 @@ export function createApp({
         const context = await requirePublic(request)
         const body = await readJson(request)
         if (wechatSearchPlatform(body?.platform)) requireNoQuery(searchParams, 'WeChat search')
-        const result = await service.search(context, {
+        const result = await withAdmissionSignal(response, signal => service.search(context, {
+          signal,
           body,
           idempotencyKey: request.headers['idempotency-key'],
           path: pathname,
-        })
+        }))
         sendJson(response, result.status, { ...result.body, requestId: result.requestId }, {
           'idempotent-replay': String(result.replay),
           'x-mx-insight-request-id': result.requestId,

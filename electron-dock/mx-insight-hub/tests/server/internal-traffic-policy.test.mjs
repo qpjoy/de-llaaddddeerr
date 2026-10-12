@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { randomUUID } from 'node:crypto'
 import pg from 'pg'
-import { parseInternalTrafficPolicy, createInternalTrafficPolicy, internalCircuitState, acquireTikHubRateLimit } from '../../server/core/internal-traffic-policy.mjs'
+import { parseInternalTrafficPolicy, createInternalTrafficPolicy, internalCircuitState, acquireTikHubRateLimit, isLcyRateCircuitExempt } from '../../server/core/internal-traffic-policy.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 import { HubService } from '../../server/hub-service.mjs'
@@ -18,6 +18,30 @@ test('internal policy is opt-in by immutable ID; names and request flags do not 
   assert.equal(createInternalTrafficPolicy(parsed).matches({ apiKeyId: randomUUID(), tenantId, name: 'LCY-delta', internal: true }), false)
   assert.equal(createInternalTrafficPolicy({ tenantIds: [tenantId] }).matches({ apiKeyId, tenantId }), true)
   assert.equal(createInternalTrafficPolicy({ tenantIds: [tenantId] }).matches({ apiKeyId, tenantId: randomUUID() }), false)
+})
+
+test('only the original managed LCY identity bypasses shared 429, without mutating evidence or bypassing other faults', () => {
+  const context={apiKey:{id:'fd2f8cc9-0ff1-4052-a538-8cc8150bde83',accessProfile:'managed_full'},
+    tenant:{id:'277bf8a4-5ed5-414d-b429-d72fcd7d36b6'},consumer:{id:'be7d07fe-3d98-4db3-b00d-e5cbe5a76190'}}
+  const state=Object.freeze({lastErrorCode:'upstream_rate_limited',lastFailureAt:new Date().toISOString(),
+    circuitOpenUntil:new Date(Date.now()+60000).toISOString(),consecutiveFailures:12})
+  const projected=internalCircuitState({},context,state)
+  assert.equal(projected.circuitOpenUntil,null)
+  assert.equal(projected.rateCircuitExempt,true)
+  assert.equal(projected.consecutiveFailures,12)
+  assert.ok(state.circuitOpenUntil)
+  for(const changed of [
+    {...context,apiKey:{...context.apiKey,id:randomUUID(),name:'LCY-delta'}},
+    {...context,apiKey:{...context.apiKey,accessProfile:'standard'}},
+    {...context,tenant:{id:randomUUID()}}, {...context,consumer:{id:randomUUID()}},
+  ]) {
+    assert.equal(isLcyRateCircuitExempt(changed),false)
+    assert.ok(internalCircuitState({},changed,state).circuitOpenUntil)
+  }
+  for(const lastErrorCode of ['upstream_auth_or_balance_unavailable','upstream_http_error','upstream_transport_error','invalid_upstream_contract']) {
+    const failure={...state,lastErrorCode}
+    assert.equal(internalCircuitState({},context,failure),failure)
+  }
 })
 
 test('only rate-limit circuits get a 10-second internal deadline; shared state is unchanged', async () => {

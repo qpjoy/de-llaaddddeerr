@@ -211,7 +211,7 @@ class UsageStoreMock {
 
   async reserve(input) {
     this.reservations.push(input)
-    return { kind: 'reserved', request: { id: input.requestId } }
+    return { kind: 'reserved', request: { id: input.requestId, leaseExpiresAt: input.leaseExpiresAt } }
   }
 
   async releaseRequest(requestId, reason) { this.released.push({ requestId, reason }) }
@@ -360,8 +360,10 @@ function fixture(adapter, overrides = {}) {
   const context = {
     tenant: { id: 'tenant-1', name: 'Tenant One' },
     consumer: { id: 'consumer-1', name: 'Consumer One' },
-    apiKey: { id: 'api-key-1', environment: 'live', prefix: 'mih_live_' },
+    apiKey: { id: 'api-key-1', environment: 'live', prefix: 'mih_live_', status: 'active' },
   }
+  usageStore.findApiKeyById = async () => structuredClone(context)
+  usageStore.getConsumerPlan = async () => ({ status: 'active', versionStatus: 'published' })
   return { gateway, usageStore, platformStore, adapter, context }
 }
 
@@ -373,6 +375,97 @@ function request(overrides = {}) {
     ...overrides,
   }
 }
+
+test('search at capacity waits then dispatches exactly once with its original request identity', async () => {
+  const adapter = adapterFor({ notes: [] })
+  const original = adapter.searchXiaohongshuNotes.bind(adapter)
+  let release, started
+  const firstStarted = new Promise(resolve => { started = resolve })
+  let calls = 0
+  adapter.searchXiaohongshuNotes = async (...args) => {
+    if (++calls === 1) { started(); await new Promise(resolve => { release = resolve }) }
+    return original(...args)
+  }
+  const state = fixture(adapter, { maxConcurrency: 1, concurrencyQueue: { maxWaitMs: 1000, maxPending: 4 } })
+  const first = state.gateway.searchNotes(state.context, request())
+  await firstStarted
+  const second = state.gateway.searchNotes(state.context, request({ body: { platform: 'xiaohongshu', query: '另一条检索', pageSize: 1 }, idempotencyKey: 'queued-search-second' }))
+  for (let i = 0; i < 100 && !state.gateway.concurrencyQueue.entries.length; i++) await new Promise(resolve => setTimeout(resolve, 2))
+  assert.equal(state.gateway.concurrencyQueue.entries.length, 1)
+  assert.equal(state.platformStore.providerCalls.length, 1)
+  release()
+  const results = await Promise.all([first, second])
+  assert.equal(calls, 2)
+  assert.equal(state.gateway.active, 0)
+  assert.equal(state.platformStore.liveCommits.length, 2)
+  assert.deepEqual(results.map(row => row.requestId), state.usageStore.reservations.map(row => row.requestId))
+})
+
+test('search enrichment leaves foreground slots available and cleans its own counters', async () => {
+  const releases = []
+  let started
+  const detailsStarted = new Promise(resolve => { started = resolve })
+  const adapter = adapterFor({ notes: [note(FIRST_NOTE_ID, '预览'), note(SECOND_NOTE_ID, '预览')],
+    detailById: new Map([FIRST_NOTE_ID, SECOND_NOTE_ID].map(id => [id, detailResult(id, '完整正文')])),
+    beforeDetail: () => new Promise(resolve => { releases.push(resolve); if (releases.length === 2) started() }),
+  })
+  const state = fixture(adapter, { maxConcurrency: 6, maxConsumerConcurrency: 6 })
+  const first = state.gateway.searchNotes(state.context, request({ body: { platform: 'xiaohongshu', query: '补全', pageSize: 2 }, enrichment: { includeDetails: true } }))
+  await detailsStarted
+  assert.equal(state.gateway.activeEnrichment, 2)
+  const second = await state.gateway.searchNotes(state.context, request({ body: { platform: 'xiaohongshu', query: '新搜索', pageSize: 2 }, idempotencyKey: 'foreground-during-enrichment', enrichment: { includeDetails: true } }))
+  assert.equal(second.status, 200)
+  assert.equal(adapter.calls.search.length, 2)
+  assert.equal(adapter.calls.detail.length, 2, 'optional enrichment cannot consume reserved foreground slots')
+  releases.forEach(resolve => resolve()); await first
+  assert.equal(state.gateway.active, 0)
+  assert.equal(state.gateway.activeEnrichment, 0)
+})
+
+test('a fresh search snapshot published while waiting avoids another provider purchase', async () => {
+  const adapter = adapterFor({ notes: [] })
+  const original = adapter.searchXiaohongshuNotes.bind(adapter)
+  let release, started
+  const firstStarted = new Promise(resolve => { started = resolve })
+  adapter.searchXiaohongshuNotes = async (...args) => {
+    started(); await new Promise(resolve => { release = resolve })
+    return original(...args)
+  }
+  const state = fixture(adapter, { maxConcurrency: 1, concurrencyQueue: { maxWaitMs: 1000, maxPending: 4 } })
+  // This fixture permits both initial lease claims, representing a snapshot
+  // publisher completing after the queued caller's initial cache read.
+  const first = state.gateway.searchNotes(state.context, request())
+  await firstStarted
+  const second = state.gateway.searchNotes(state.context, request({ idempotencyKey: 'snapshot-arrives-while-queued' }))
+  for (let i = 0; i < 100 && !state.gateway.concurrencyQueue.entries.length; i++) await new Promise(resolve => setTimeout(resolve, 2))
+  assert.equal(state.gateway.concurrencyQueue.entries.length, 1)
+  release()
+  await first
+  const response = await second
+  assert.equal(response.status, 200)
+  assert.equal(adapter.calls.search.length, 1)
+  assert.equal(state.platformStore.cacheCommits.length, 1)
+  assert.equal(state.platformStore.cacheCommits[0].sourceMode, 'fresh_cache')
+  assert.equal(state.platformStore.costReservations.length, 1)
+  assert.equal(state.gateway.active, 0)
+})
+
+test('a reservation without enough upstream time cannot enter the concurrency queue', async () => {
+  const adapter = adapterFor({ notes: [] })
+  const state = fixture(adapter, { maxConcurrency: 1 })
+  state.gateway.reservationLeaseMs = 1000
+  state.gateway.active = 1
+  await assert.rejects(state.gateway.searchNotes(state.context, request()), error => {
+    assert.equal(error.code, 'external_platform_busy')
+    assert.equal(error.details.reason, 'concurrency_queue_timeout')
+    assert.equal(error.details.upstreamDispatched, false)
+    return true
+  })
+  assert.equal(state.gateway.concurrencyQueue.entries.length, 0)
+  assert.equal(adapter.calls.search.length, 0)
+  assert.equal(state.platformStore.costReservations.length, 0)
+  assert.equal(state.usageStore.released.length, 1)
+})
 
 test('internal search and enrichment bypass local RPM and consumer concurrency after a 10-second cooldown', async () => {
   const adapter = adapterFor({ notes: [note(FIRST_NOTE_ID, '预'.repeat(60))], detailById: new Map([[FIRST_NOTE_ID, detailResult(FIRST_NOTE_ID, '完整正文'.repeat(60))]]) })
@@ -391,6 +484,32 @@ test('internal search and enrichment bypass local RPM and consumer concurrency a
   assert.equal(state.gateway.activeByConsumer.get(state.context.consumer.id), 4)
 })
 
+test('original LCY search and enrichment pass a fresh shared 429 while an actual upstream rejection is retained without retry', async () => {
+  for(const reject of [false,true]) {
+    const adapter=adapterFor({notes:[note(FIRST_NOTE_ID,'预'.repeat(60))],
+      detailById:new Map([[FIRST_NOTE_ID,detailResult(FIRST_NOTE_ID,'完整正文'.repeat(60))]]),
+      searchError:reject?new TikHubUpstreamError('rate rejected',{outcome:'rejected',httpStatus:429,billed:null,errorCode:'upstream_rate_limited'}):null})
+    const state=fixture(adapter)
+    Object.assign(state.context.apiKey,{id:'fd2f8cc9-0ff1-4052-a538-8cc8150bde83',accessProfile:'managed_full'})
+    state.context.tenant.id='277bf8a4-5ed5-414d-b429-d72fcd7d36b6'
+    state.context.consumer.id='be7d07fe-3d98-4db3-b00d-e5cbe5a76190'
+    const shared=Object.freeze({lastErrorCode:'upstream_rate_limited',lastFailureAt:new Date().toISOString(),
+      circuitOpenUntil:new Date(Date.now()+60000).toISOString()})
+    state.platformStore.providerState=async()=>shared
+    state.platformStore.acquireProviderRateLimit=()=>assert.fail('LCY retains local RPM exemption')
+    if(reject) {
+      await assert.rejects(()=>state.gateway.searchNotes(state.context,request()),{code:'external_platform_capacity_exceeded'})
+      assert.equal(state.platformStore.providerFailures.length,1)
+      assert.equal(state.platformStore.providerFailures[0].billed,null)
+    } else {
+      await state.gateway.searchNotes(state.context,request())
+      assert.equal(adapter.calls.detail.length,1)
+    }
+    assert.equal(adapter.calls.search.length,1)
+    assert.ok(shared.circuitOpenUntil)
+  }
+})
+
 test('internal search still waits during its first 10 seconds and retains global concurrency protection', async () => {
   const state = fixture(adapterFor({ notes: [] }))
   state.usageStore.internalTrafficPolicy = createInternalTrafficPolicy({ keyIds: [state.context.apiKey.id] })
@@ -406,6 +525,7 @@ test('internal search still waits during its first 10 seconds and retains global
   assert.equal(state.adapter.calls.normalizedSearch.length, 0)
   state.platformStore.providerState = async () => ({})
   state.gateway.active = state.gateway.config.maxConcurrency
+  state.gateway.config.concurrencyQueue = { maxWaitMs: 10, maxPending: 32 }
   await assert.rejects(() => state.gateway.searchNotes(state.context, request({ idempotencyKey: 'global-busy' })), error => error.code === 'external_platform_busy')
   assert.equal(state.adapter.calls.normalizedSearch.length, 0)
 })

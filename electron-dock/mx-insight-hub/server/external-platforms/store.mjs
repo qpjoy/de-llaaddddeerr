@@ -479,6 +479,7 @@ export class MemoryExternalPlatformStore {
     circuitOpenMs = 60_000,
     rateLimitBurst = null,
     uncertainCooldownMs = 15 * 60_000,
+    responseQuarantineCooldownMs = Math.min(uncertainCooldownMs, 5 * 60_000),
   } = {}) {
     this.usageStore = usageStore
     this.providerKey = providerKey
@@ -487,6 +488,7 @@ export class MemoryExternalPlatformStore {
     this.circuitOpenMs = circuitOpenMs
     this.rateLimitBurst = rateLimitBurst == null ? null : boundedRateLimit(rateLimitBurst, 'rateLimitBurst')
     this.uncertainCooldownMs = uncertainCooldownMs
+    this.responseQuarantineCooldownMs = responseQuarantineCooldownMs
     this.calls = new Map()
     this.costReservations = new Map()
     this.responseArchives = new Map()
@@ -578,7 +580,8 @@ export class MemoryExternalPlatformStore {
                 && call.errorCode === 'upstream_note_unavailable'
               )
             )
-            && new Date(call.completedAt).getTime() + this.uncertainCooldownMs > now
+            && new Date(call.completedAt).getTime() + (call.outcome === 'succeeded_unusable'
+              && call.errorCode !== 'upstream_note_unavailable' ? this.responseQuarantineCooldownMs : this.uncertainCooldownMs) > now
           )
         )
       ))
@@ -591,7 +594,8 @@ export class MemoryExternalPlatformStore {
           : blocker.outcome,
         blockedUntil: blocker.outcome === 'pending'
           ? null
-          : iso(new Date(blocker.completedAt).getTime() + this.uncertainCooldownMs),
+          : iso(new Date(blocker.completedAt).getTime() + (blocker.outcome === 'succeeded_unusable'
+            && blocker.errorCode !== 'upstream_note_unavailable' ? this.responseQuarantineCooldownMs : this.uncertainCooldownMs)),
       }
     }
     const key = snapshotKey({ consumerId, operation, fingerprint })
@@ -1983,6 +1987,7 @@ export class PostgresExternalPlatformStore {
     circuitOpenMs = 60_000,
     rateLimitBurst = null,
     uncertainCooldownMs = 15 * 60_000,
+    responseQuarantineCooldownMs = Math.min(uncertainCooldownMs, 5 * 60_000),
   }) {
     this.pool = pool
     this.providerKey = providerKey
@@ -1992,6 +1997,7 @@ export class PostgresExternalPlatformStore {
     this.circuitOpenMs = circuitOpenMs
     this.rateLimitBurst = rateLimitBurst == null ? null : boundedRateLimit(rateLimitBurst, 'rateLimitBurst')
     this.uncertainCooldownMs = uncertainCooldownMs
+    this.responseQuarantineCooldownMs = responseQuarantineCooldownMs
   }
 
   async snapshotFor(delivery, at = new Date()) {
@@ -2091,7 +2097,9 @@ export class PostgresExternalPlatformStore {
                      AND call.error_code = 'upstream_note_unavailable'
                    )
                  )
-                 AND call.completed_at > now() - make_interval(secs => $6)
+                 AND call.completed_at > now() - make_interval(secs => CASE
+                   WHEN call.outcome='succeeded_unusable' AND call.error_code IS DISTINCT FROM 'upstream_note_unavailable'
+                     THEN $11::double precision ELSE $6::double precision END)
                )
              )
         )
@@ -2108,6 +2116,7 @@ export class PostgresExternalPlatformStore {
         retryOfRequestId,
         contractVersion,
         this.providerKey,
+        Math.ceil(this.responseQuarantineCooldownMs / 1_000),
       ],
     )
     if (rows[0]?.owner_request_id === ownerRequestId) return { kind: 'acquired' }
@@ -2116,7 +2125,9 @@ export class PostgresExternalPlatformStore {
       `SELECT outcome, error_code, completed_at,
               CASE
                 WHEN outcome = 'pending' THEN NULL
-                ELSE completed_at + make_interval(secs => $4)
+                ELSE completed_at + make_interval(secs => CASE
+                  WHEN outcome='succeeded_unusable' AND error_code IS DISTINCT FROM 'upstream_note_unavailable'
+                    THEN $9::double precision ELSE $4::double precision END)
               END AS blocked_until
          FROM external_platform.provider_calls call
         WHERE provider_key = $8
@@ -2158,7 +2169,9 @@ export class PostgresExternalPlatformStore {
                   AND error_code = 'upstream_note_unavailable'
                 )
               )
-              AND completed_at > now() - make_interval(secs => $4)
+              AND completed_at > now() - make_interval(secs => CASE
+                WHEN outcome='succeeded_unusable' AND error_code IS DISTINCT FROM 'upstream_note_unavailable'
+                  THEN $9::double precision ELSE $4::double precision END)
             )
           )
         ORDER BY started_at DESC
@@ -2168,6 +2181,7 @@ export class PostgresExternalPlatformStore {
         Math.ceil(this.uncertainCooldownMs / 1_000), endpointKey, retryOfRequestId,
         contractVersion,
         this.providerKey,
+        Math.ceil(this.responseQuarantineCooldownMs / 1_000),
       ],
     )
     if (blocker.rows[0]) {

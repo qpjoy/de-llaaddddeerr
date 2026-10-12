@@ -4224,7 +4224,7 @@ export class HubService {
     return this.#nightAllCompatibilitySearch(context, input)
   }
 
-  async #nightAllCompatibilitySearch(context, { operation, body, idempotencyKey, path }) {
+  async #nightAllCompatibilitySearch(context, { operation, body, idempotencyKey, path, signal }) {
     assertWechatSearchNotRetired(operation, body)
     assert(NIGHT_ALL_LEGACY_OPERATIONS.has(operation), 404, 'not_found', 'Route not found')
     assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
@@ -4310,6 +4310,7 @@ export class HubService {
     ) {
       return this.externalSocialSearch(context, {
         ...direct,
+        ...(signal ? { signal } : {}),
         idempotencyKey,
         path,
         responseMode: 'legacy',
@@ -4647,8 +4648,8 @@ export class HubService {
     }
   }
 
-  async search(context, { body, idempotencyKey, path, liveOnly = false, responseFormat = 'data' }) {
-    if (responseFormat === 'raw') return this.#nightAllCompatibilitySearch(context, { operation: 'raw', body, idempotencyKey, path })
+  async search(context, { body, idempotencyKey, path, liveOnly = false, responseFormat = 'data', signal }) {
+    if (responseFormat === 'raw') return this.#nightAllCompatibilitySearch(context, { operation: 'raw', body, idempotencyKey, path, signal })
     if (wechatSearchPlatform(body?.platform)) {
       const mapped = normalizeWechatDataSearch(body)
       assert(this.externalWechatSearch, 503, 'external_platform_unavailable', 'WeChat data service is unavailable')
@@ -4751,6 +4752,7 @@ export class HubService {
     ) {
       return this.externalSocialSearch(context, {
         body: upstreamBody,
+        ...(signal ? { signal } : {}),
         idempotencyKey,
         path,
         responseMode: 'modern',

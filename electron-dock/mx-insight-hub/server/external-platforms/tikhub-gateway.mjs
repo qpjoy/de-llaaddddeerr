@@ -1,6 +1,7 @@
 import { isInternalTraffic, internalCircuitState, acquireTikHubRateLimit } from '../core/internal-traffic-policy.mjs'
 import { circuitOpenError, upstreamCapacityError } from './availability-errors.mjs'
 import { DispatchQueue, DEFAULT_DETAIL_QUEUE, canRetryDetail } from './dispatch-queue.mjs'
+import { ConcurrencyAdmissionQueue, DEFAULT_CONCURRENCY_QUEUE, concurrencyBusy } from './concurrency-admission.mjs'
 import { XHS_RESEARCH_ENDPOINTS, XHS_RESEARCH_OPERATIONS, projectXhsResearch, xhsResearchRecords } from '../contracts/xiaohongshu-research.mjs'
 import { projectBloggerNotesPage } from '../contracts/xiaohongshu-blogger-notes.mjs'
 import { XHS_DISCOVERY_ENDPOINTS, projectXhsDiscovery } from '../contracts/xiaohongshu-discovery.mjs'
@@ -59,6 +60,7 @@ import {
   normalizeNightAllLegacyPayload,
 } from '../ingest/legacy-night-all.mjs'
 import { acquisitionRequestSnapshot } from '../acquisitions/request-snapshot.mjs'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 const DEFAULT_POLICY = Object.freeze({ maxRequests: 100_000, windowSeconds: 3_600, maxPageSize: 100 })
 const IDEMPOTENCY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u
@@ -556,6 +558,7 @@ export class TikHubGateway {
     credentialStore = null,
     defaultPolicy = DEFAULT_POLICY,
     logger = console,
+    admissionRuntime = {},
   }) {
     this.usageStore = usageStore
     this.platformStore = platformStore
@@ -567,27 +570,96 @@ export class TikHubGateway {
     this.credentialStore = credentialStore
     this.defaultPolicy = defaultPolicy
     this.logger = logger
+    this.admissionClock = admissionRuntime.clock || Date.now
+    this.admissionWait = admissionRuntime.wait || sleep
     this.detailQueue = platformStore.detailQueue ||= new DispatchQueue({ pool: platformStore.pool })
     this.active = 0
     this.activeByConsumer = new Map()
+    this.activeEnrichment = 0
+    this.concurrencyQueue = new ConcurrencyAdmissionQueue({ clock: this.admissionClock })
   }
 
-  #enter(context) {
+  #enter(context, enrichment = false) {
     const consumerId = context.consumer.id
     const consumerActive = this.activeByConsumer.get(consumerId) || 0
     if (this.active >= this.config.maxConcurrency || (!isInternalTraffic(this.usageStore, context) && consumerActive >= this.config.maxConsumerConcurrency)) {
       return false
     }
+    const reserved = Math.min(this.config.maxConcurrency - 1, DEFAULT_CONCURRENCY_QUEUE.reservedForeground)
+    if (enrichment && (this.concurrencyQueue.entries.length || this.activeEnrichment >= this.config.maxConcurrency - reserved)) return false
     this.active += 1
+    if (enrichment) this.activeEnrichment += 1
     this.activeByConsumer.set(consumerId, consumerActive + 1)
     return true
   }
 
-  #leave(consumerId) {
+  #leave(consumerId, enrichment = false) {
     this.active = Math.max(0, this.active - 1)
+    if (enrichment) this.activeEnrichment = Math.max(0, this.activeEnrichment - 1)
     const next = Math.max(0, (this.activeByConsumer.get(consumerId) || 1) - 1)
     if (next === 0) this.activeByConsumer.delete(consumerId)
     else this.activeByConsumer.set(consumerId, next)
+    this.concurrencyQueue.drain()
+  }
+
+  async #revalidateWaitingIdentity(context, capabilities) {
+    const current = await this.usageStore.findApiKeyById(context.apiKey.id)
+    if (!current || current.apiKey.status !== 'active' || current.consumer.id !== context.consumer.id
+      || current.tenant.id !== context.tenant.id) throw new AppError(403, 'capability_not_granted', 'Access changed while waiting')
+    const grants = await this.usageStore.listEffectiveGrants(current.consumer.id, current.apiKey.id)
+    const available = await this.usageStore.listEffectiveCapabilityGrants(current.consumer.id, current.apiKey.id)
+    if (!grants.includes(XIAOHONGSHU_PLATFORM) || capabilities.some(key => !available.includes(key))) {
+      throw new AppError(403, 'capability_not_granted', 'Access changed while waiting')
+    }
+    const plan = await this.usageStore.getConsumerPlan(current.consumer.id)
+    if (!plan || plan.status !== 'active' || plan.versionStatus !== 'published') throw new AppError(503,
+      'plan_assignment_unavailable', 'An active published plan assignment is required')
+    return { ...context, ...current }
+  }
+
+  async #enterOrQueue(context, { lease, delivery, expiresAt, signal, canWait = true, revalidate }) {
+    if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+    if (!this.concurrencyQueue.entries.length && this.#enter(context)) return true
+    if (!canWait) return false // An already permitted stored fallback is immediate.
+    const policy = { ...DEFAULT_CONCURRENCY_QUEUE, ...this.config.concurrencyQueue }
+    const deadline = Math.min(this.admissionClock() + policy.maxWaitMs,
+      new Date(expiresAt).getTime() - (this.config.timeoutMs || 30000) - 5000)
+    let entered = false
+    try {
+      // Reacquire below so failures/unknown evidence arriving during the wait
+      // remain authoritative. No dispatch lock or provider budget is held here.
+      await this.platformStore.releaseDispatchLease(lease)
+      await this.concurrencyQueue.enter({ tryEnter: () => this.#enter(context), deadline,
+        maxPending: policy.maxPending, signal })
+      entered = true
+      context = await revalidate() || context
+      if (!isInternalTraffic(this.usageStore, context)
+        && (this.activeByConsumer.get(context.consumer.id) || 0) > this.config.maxConsumerConcurrency) {
+        throw concurrencyBusy('consumer_concurrency_changed')
+      }
+      if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+      if (this.admissionClock() >= deadline) throw concurrencyBusy('concurrency_queue_timeout')
+      const claim = await this.platformStore.acquireDispatchLease(lease)
+      if (claim !== true && claim?.kind !== 'acquired') {
+        const code = claim?.reason === 'unknown' ? 'request_outcome_unknown'
+          : claim?.reason === 'succeeded_unusable' ? 'external_platform_response_unusable'
+            : claim?.reason === 'upstream_note_unavailable' ? 'post_not_found' : 'request_in_progress'
+        throw new AppError(code === 'post_not_found' ? 404 : 409, code, 'Dispatch protection changed while waiting', {
+          upstreamDispatched: false, ...(claim?.blockedUntil ? { blockedUntil: claim.blockedUntil } : {}),
+        })
+      }
+      if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+      if (this.admissionClock() >= deadline) throw concurrencyBusy('concurrency_queue_timeout')
+      return true
+    } catch (error) {
+      if (entered) this.#leave(context.consumer.id)
+      if (error.code === 'external_platform_busy') error.details = { ...error.details,
+        activeConcurrency: this.active, maxConcurrency: this.config.maxConcurrency,
+        queueDepth: this.concurrencyQueue.entries.length, maxPending: policy.maxPending }
+      await this.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable',
+        status: error.status || 503, errorCode: error.code || 'external_platform_unavailable' })
+      throw error
+    }
   }
 
   async #credential() {
@@ -939,10 +1011,53 @@ export class TikHubGateway {
         ownsReservation = false
         return officialResult(snapshot.responseBody, activeRequestId, false, 'fresh_cache', snapshot.capturedAt)
       }
-      const providerState = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
+      const revalidateIdentity = async () => {
+        const currentGrants = await this.usageStore.listEffectiveGrants(context.consumer.id, context.apiKey.id)
+        const currentCapabilities = await this.usageStore.listEffectiveCapabilityGrants(context.consumer.id, context.apiKey.id)
+        const currentKey = await this.usageStore.findApiKeyById(context.apiKey.id)
+        if (!currentGrants.includes(XIAOHONGSHU_PLATFORM) || requiredCapabilities.some(key => !currentCapabilities.includes(key))
+          || !currentKey || currentKey.apiKey?.status !== 'active') throw new AppError(403, 'capability_not_granted', 'Access changed while waiting')
+        context = { ...context, ...currentKey }
+        if (endpointName === 'note_comments') {
+          const plan = await this.usageStore.getConsumerPlan(context.consumer.id)
+          if (!plan || plan.status !== 'active' || plan.versionStatus !== 'published') throw new AppError(503,
+            'plan_assignment_unavailable', 'An active published plan assignment is required')
+        }
+      }
+      let providerState = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
+      let waitedForCircuit = false
+      if (endpointName === 'note_comments' && !(allowStoredFallback && snapshot)) {
+        // Wait only before the first dispatch, without a provider-cost hold,
+        // dispatch lease or concurrency slot. Never retry a sent paid request.
+        const dispatchReserveMs = (this.config.timeoutMs || 30000) + 5000
+        const deadline = Math.min(this.admissionClock() + 60000,
+          new Date(reservation.request.leaseExpiresAt).getTime() - dispatchReserveMs)
+        while (providerState?.lastErrorCode === 'upstream_rate_limited'
+          && Date.parse(providerState.circuitOpenUntil) > this.admissionClock()
+          && Date.parse(providerState.circuitOpenUntil) <= deadline && this.admissionClock() < deadline) {
+          if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+          await revalidateIdentity()
+          const waitingCredential = await this.#credential()
+          if (!waitingCredential.ready) throw new AppError(503, 'external_platform_not_configured', 'Upstream configuration changed while waiting')
+          await this.#authorizeOperation(context, endpoint.operation, endpoint.gate, waitingCredential)
+          const waitMs = Math.min(5000, Date.parse(providerState.circuitOpenUntil) - this.admissionClock(), deadline - this.admissionClock())
+          if (waitMs <= 0) break
+          try { await this.admissionWait(waitMs, undefined, { signal }) }
+          catch (error) {
+            if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+            throw error
+          }
+          waitedForCircuit = true
+          await revalidateIdentity()
+          providerState = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
+        }
+        if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+        if (waitedForCircuit && this.admissionClock() > deadline) throw new AppError(503, 'external_platform_unavailable',
+          'Insufficient time remains to dispatch safely', { upstreamDispatched: false })
+      }
       const circuitOpen = providerState?.circuitOpenUntil
-        && new Date(providerState.circuitOpenUntil) > now
-      const resolved = circuitOpen
+        && Date.parse(providerState.circuitOpenUntil) > this.admissionClock()
+      let resolved = circuitOpen
         ? { ready: Boolean(this.adapter), value: null, revision: null }
         : queueCredential || await this.#credential()
       let operationControl = null
@@ -988,24 +1103,23 @@ export class TikHubGateway {
 
       let ownsLease = false
       let entered = false
+      let waitedForCapacity = false
       let call = null
       let callSettled = false
       let callDispatched = false
       let dispatchEvidence = null
       let costReservation = null
       const revalidateQueuedAccess = async () => {
+        await revalidateIdentity()
         operationControl = await this.#authorizeOperation(context, endpoint.operation, endpoint.gate, resolved)
-        const currentGrants = await this.usageStore.listEffectiveGrants(context.consumer.id, context.apiKey.id)
-        const currentCapabilities = await this.usageStore.listEffectiveCapabilityGrants(context.consumer.id, context.apiKey.id)
-        const currentKey = await this.usageStore.findApiKeyById(context.apiKey.id)
-        if (!currentGrants.includes(XIAOHONGSHU_PLATFORM) || !currentCapabilities.includes(endpoint.operation)
-          || !currentKey || currentKey.apiKey?.status !== 'active') throw new AppError(403, 'capability_not_granted', 'Access changed while waiting')
         const latestCredential = await this.#credential()
         if (!latestCredential.ready || latestCredential.value !== resolved.value) throw new AppError(503, 'external_platform_configuration_changed', 'Upstream configuration changed while waiting')
         const latestState = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
-        if (latestState?.circuitOpenUntil && new Date(latestState.circuitOpenUntil) > new Date()) throw circuitOpenError(latestState, this.config, 'Upstream temporarily unavailable')
+        if (latestState?.circuitOpenUntil && Date.parse(latestState.circuitOpenUntil) > this.admissionClock()) throw circuitOpenError(latestState, this.config, 'Upstream temporarily unavailable')
+        return context
       }
       try {
+        if (waitedForCircuit) await revalidateQueuedAccess()
         if (queuePolicy) {
           try {
             queueTicket = await this.detailQueue.enter({ scope: queueScope, id: activeRequestId, fingerprint: dispatchFingerprint,
@@ -1034,7 +1148,7 @@ export class TikHubGateway {
             return officialResult(refreshedSnapshot.responseBody, activeRequestId, false, 'fresh_cache', refreshedSnapshot.capturedAt)
           }
         }
-        const lease = await this.platformStore.acquireDispatchLease({
+        const dispatchLease = {
           consumerId: context.consumer.id,
           operation: endpoint.operation,
           fingerprint: dispatchFingerprint,
@@ -1042,7 +1156,8 @@ export class TikHubGateway {
           contractVersion: normalized.contractVersion,
           ownerRequestId: activeRequestId,
           expiresAt: new Date(Date.now() + leaseMs),
-        })
+        }
+        const lease = await this.platformStore.acquireDispatchLease(dispatchLease)
         ownsLease = lease === true || lease?.kind === 'acquired'
         if (!ownsLease) {
           snapshot = endpoint.liveOnly ? null : await this.platformStore.snapshotFor({
@@ -1076,10 +1191,18 @@ export class TikHubGateway {
           ownsReservation = false
           throw new AppError(409, code, 'An equal provider dispatch cannot be repeated safely')
         }
-        if (!this.#enter(context)) {
+        if (!await this.#enterOrQueue(context, { lease: dispatchLease, delivery,
+          expiresAt: reservation.request.leaseExpiresAt, signal, canWait: !(allowStoredFallback && snapshot),
+          revalidate: async () => {
+            waitedForCapacity = true
+            context = await this.#revalidateWaitingIdentity(context, requiredCapabilities)
+            await revalidateQueuedAccess()
+            return context
+          },
+        })) {
           if (allowStoredFallback && snapshot) {
             await this.platformStore.commitSnapshotDelivery({
-            shared: Boolean(queuePolicy),
+              shared: Boolean(queuePolicy),
               delivery,
               snapshot,
               sourceMode: 'stored_fallback',
@@ -1099,6 +1222,17 @@ export class TikHubGateway {
           throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: queuePolicy?.intervalMs || 5000 })
         }
         entered = true
+        if (waitedForCapacity && !endpoint.liveOnly && (!queuePolicy || normalized.deliveryMode === 'cache_first')) {
+          const fresh = queuePolicy ? await this.platformStore.sharedDetailSnapshotFor(dispatchFingerprint)
+            : await this.platformStore.snapshotFor({ consumerId: context.consumer.id,
+              operation: endpoint.operation, fingerprint: dispatchFingerprint }, new Date())
+          if (fresh && new Date(fresh.freshUntil) >= new Date()) {
+            await this.platformStore.commitSnapshotDelivery({ delivery, snapshot: fresh, shared: Boolean(queuePolicy),
+              sourceMode: 'fresh_cache', responseBody: publicXiaohongshuEnvelope(fresh.responseBody), usageUnitsActual: 1 })
+            ownsReservation = false; queueOutcome = 'succeeded'
+            return officialResult(fresh.responseBody, activeRequestId, false, 'fresh_cache', fresh.capturedAt)
+          }
+        }
         if (endpointName === 'user_notes_analytics') {
           const price = (operationControl?.billing || this.config.billing)?.unitCostMinorByEndpoint?.[endpoint.endpointKey]
           if (!Number.isSafeInteger(price) || price <= 0) throw new AppError(503,
@@ -1151,6 +1285,12 @@ export class TikHubGateway {
           costReservationId: costReservation.id,
           ...(operationControl ? { operationControl } : {}),
         })
+        if (endpointName === 'note_comments') {
+          if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+          if (waitedForCircuit && this.admissionClock() + (this.config.timeoutMs || 30000) + 5000
+            > new Date(reservation.request.leaseExpiresAt).getTime()) throw new AppError(503,
+            'external_platform_unavailable', 'Insufficient time remains to dispatch safely')
+        }
         call = await beginCall(0)
         dispatchEvidence = {
           billed: null,
@@ -1163,8 +1303,8 @@ export class TikHubGateway {
         try {
           for (let attempt = 0; ; attempt++) {
             try {
+              if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
               if (queuePolicy) {
-                if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
                 const permit = await this.detailQueue.transition(queueScope, { ...queueTicket, type: 'dispatch',
                   leaseMs: detailDispatchLeaseMs, jitterMs: Math.floor(Math.random() * queuePolicy.jitterMs) })
                 if (permit.kind !== 'acquired') throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: queuePolicy.intervalMs })
@@ -1195,7 +1335,8 @@ export class TikHubGateway {
                 policy: queuePolicy, deadline: queueDeadline, leaseMs: detailDispatchLeaseMs, signal })
               await revalidateQueuedAccess()
               costControl = providerCostControl(operationControl?.billing ? { billing: operationControl.billing } : this.config, endpoint.endpointKey)
-              if (!this.#enter(context)) throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: queuePolicy.intervalMs })
+              await this.#enterOrQueue(context, { lease: dispatchLease, delivery,
+                expiresAt: reservation.request.leaseExpiresAt, signal, revalidate: revalidateQueuedAccess })
               entered = true
               costReservation = await this.platformStore.reserveProviderCostWorkflow({ tenantId: context.tenant.id, consumerId: context.consumer.id,
                 apiKeyId: context.apiKey.id, usageRequestId: activeRequestId, fingerprint: requestFingerprint, costControls: [costControl] })
@@ -1288,7 +1429,7 @@ export class TikHubGateway {
           return officialResult(responseBody, activeRequestId, false, 'live', capturedAt)
         } catch (error) {
           const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
-          if (queuePolicy && call && !callDispatched) {
+          if (call && !callDispatched) {
             // A cancellation/lost permit before the adapter call is known
             // unbilled, even if the durable attempt row was already created.
             await this.platformStore.finishProviderStep({
@@ -1433,6 +1574,7 @@ export class TikHubGateway {
     enrichment = {},
     replayWindowMs = null,
     liveOnly = false,
+    signal,
   }) {
     let durableRequestId = null
     let ownsReservation = false
@@ -1660,7 +1802,7 @@ export class TikHubGateway {
 
       const state = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
       const circuitOpen = state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now
-      const resolved = circuitOpen
+      let resolved = circuitOpen
         ? { ready: Boolean(this.adapter), value: null, revision: null }
         : await this.#credential()
       let operationControl = null
@@ -1699,12 +1841,14 @@ export class TikHubGateway {
 
       let ownsLease = false
       let entered = false
+      let waitedForCapacity = false
       let call = null
       let callSettled = false
+      let callDispatched = false
       let dispatchEvidence = null
       let primaryCostReservation = null
       try {
-        const lease = await this.platformStore.acquireDispatchLease({
+        const dispatchLease = {
           consumerId: context.consumer.id,
           operation: XIAOHONGSHU_SEARCH_OPERATION,
           fingerprint: dispatchFingerprint,
@@ -1712,7 +1856,8 @@ export class TikHubGateway {
           contractVersion: XIAOHONGSHU_SEARCH_CONTRACT_VERSION,
           ownerRequestId: activeRequestId,
           expiresAt: new Date(Date.now() + this.reservationLeaseMs),
-        })
+        }
+        const lease = await this.platformStore.acquireDispatchLease(dispatchLease)
         ownsLease = lease === true || lease?.kind === 'acquired'
         if (!ownsLease) {
           snapshot = await this.platformStore.snapshotFor({
@@ -1741,7 +1886,19 @@ export class TikHubGateway {
             ...(lease?.blockedUntil ? { blockedUntil: lease.blockedUntil } : {}),
           })
         }
-        if (!this.#enter(context)) {
+        if (!await this.#enterOrQueue(context, { lease: dispatchLease, delivery,
+          expiresAt: reservation.request.leaseExpiresAt, signal, canWait: !(snapshot && selectSnapshot(snapshot)),
+          revalidate: async () => {
+            waitedForCapacity = true
+            context = await this.#revalidateWaitingIdentity(context, [XIAOHONGSHU_SEARCH_OPERATION])
+            const latest = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
+            if (latest?.circuitOpenUntil && Date.parse(latest.circuitOpenUntil) > this.admissionClock()) throw circuitOpenError(latest, this.config, 'Upstream temporarily unavailable')
+            resolved = await this.#credential()
+            if (!resolved.ready) throw new AppError(503, 'external_platform_not_configured', 'Upstream configuration changed while waiting')
+            operationControl = await this.#authorizeOperation(context, XIAOHONGSHU_SEARCH_OPERATION, 'searchContractVerified', resolved)
+            return context
+          },
+        })) {
           const fallbackBody = snapshot ? selectSnapshot(snapshot) : null
           if (fallbackBody) {
             await this.platformStore.commitSnapshotDelivery({
@@ -1757,6 +1914,16 @@ export class TikHubGateway {
           throw new AppError(429, 'external_platform_busy', 'External Xiaohongshu concurrency is exhausted')
         }
         entered = true
+        if (waitedForCapacity && !liveOnly) {
+          const fresh = await this.platformStore.snapshotFor({ consumerId: context.consumer.id,
+            operation: XIAOHONGSHU_SEARCH_OPERATION, fingerprint: dispatchFingerprint }, new Date())
+          const projected = fresh && new Date(fresh.freshUntil) >= new Date() ? selectSnapshot(fresh) : null
+          if (projected) {
+            await this.platformStore.commitSnapshotDelivery({ delivery, snapshot: fresh, sourceMode: 'fresh_cache', responseBody: projected })
+            ownsReservation = false
+            return searchResult(projected, activeRequestId, false, 'fresh_cache', fresh.capturedAt)
+          }
+        }
         const costControl = providerCostControl(
           operationControl?.billing ? { billing: operationControl.billing } : this.config,
           TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_KEY,
@@ -1798,6 +1965,7 @@ export class TikHubGateway {
               retryAfterMs: rateLimit.retryAfterMs,
             })
           }
+          if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           call = await this.platformStore.beginProviderCall({
             tenantId: context.tenant.id,
             consumerId: context.consumer.id,
@@ -1834,6 +2002,8 @@ export class TikHubGateway {
         }
         const searchStartedAt = performance.now()
         try {
+          if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+          callDispatched = true
           const upstream = await this.adapter.searchXiaohongshuNotes(body, {
             credential: resolved.value,
             decodeCursor: codec.decode,
@@ -1931,6 +2101,13 @@ export class TikHubGateway {
           ownsReservation = false
           return searchResult(responseBody, activeRequestId, false, 'live', capturedAt)
         } catch (error) {
+          if (!callDispatched) {
+            await this.platformStore.finishProviderStep({ callId: call.id, delivery, outcome: 'rejected', billed: false,
+              costMinor: costControl.costMinor, costKind: costControl.costKind, currency: costControl.currency,
+              errorCode: error.code || 'external_platform_pre_dispatch_failed', affectsCircuit: false })
+            callSettled = true
+            throw error
+          }
           if (!(error instanceof TikHubUpstreamError)) throw error
           if (entered) {
             this.#leave(context.consumer.id)
@@ -2269,7 +2446,7 @@ export class TikHubGateway {
           results.push({ publicBody: snapshot.responseBody })
           return
         }
-        if (!this.#enter(context)) {
+        if (!this.#enter(context, true)) {
           failureCount += 1
           return
         }
@@ -2445,7 +2622,7 @@ export class TikHubGateway {
             ownerRequestId: delivery.usageRequestId,
           }).catch(() => {})
         }
-        if (entered) this.#leave(context.consumer.id)
+        if (entered) this.#leave(context.consumer.id, true)
       }
     }
     try {
@@ -2473,7 +2650,7 @@ export class TikHubGateway {
     }
   }
 
-  async getPost(context, { body, idempotencyKey, retryOfRequestId, path }) {
+  async getPost(context, { body, idempotencyKey, retryOfRequestId, path, signal }) {
     let durableRequestId = null
     let ownsReservation = false
     try {
@@ -2667,7 +2844,7 @@ export class TikHubGateway {
 
       const state = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
       const circuitOpen = state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now
-      const resolved = circuitOpen
+      let resolved = circuitOpen
         ? { ready: Boolean(this.adapter), value: null, revision: null }
         : await this.#credential()
       let operationControl = null
@@ -2710,12 +2887,14 @@ export class TikHubGateway {
 
       let ownsLease = false
       let entered = false
+      let waitedForCapacity = false
       let call = null
       let callSettled = false
+      let callDispatched = false
       let dispatchEvidence = null
       let costReservation = null
       try {
-        const lease = await this.platformStore.acquireDispatchLease({
+        const dispatchLease = {
           consumerId: context.consumer.id,
           operation: XIAOHONGSHU_POST_OPERATION,
           fingerprint: noteFingerprint,
@@ -2724,7 +2903,8 @@ export class TikHubGateway {
           ownerRequestId: activeRequestId,
           expiresAt: new Date(Date.now() + this.reservationLeaseMs),
           retryOfRequestId: validatedRetryId,
-        })
+        }
+        const lease = await this.platformStore.acquireDispatchLease(dispatchLease)
         ownsLease = lease === true || lease?.kind === 'acquired'
         if (!ownsLease) {
           snapshot = await this.platformStore.snapshotFor({
@@ -2786,7 +2966,19 @@ export class TikHubGateway {
         // A request suppressed by the shared dispatch lease never consumes a
         // local provider slot. This keeps duplicate note lookups from starving
         // unrelated customer acquisitions.
-        if (!this.#enter(context)) {
+        if (!await this.#enterOrQueue(context, { lease: dispatchLease, delivery,
+          expiresAt: reservation.request.leaseExpiresAt, signal, canWait: !(allowStoredFallback && snapshot),
+          revalidate: async () => {
+            waitedForCapacity = true
+            context = await this.#revalidateWaitingIdentity(context, [XIAOHONGSHU_POST_OPERATION])
+            const latest = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
+            if (latest?.circuitOpenUntil && Date.parse(latest.circuitOpenUntil) > this.admissionClock()) throw circuitOpenError(latest, this.config, 'Upstream temporarily unavailable')
+            resolved = await this.#credential()
+            if (!resolved.ready) throw new AppError(503, 'external_platform_not_configured', 'Upstream configuration changed while waiting')
+            operationControl = await this.#authorizeOperation(context, XIAOHONGSHU_POST_OPERATION, 'contractVerified', resolved)
+            return context
+          },
+        })) {
           if (allowStoredFallback && snapshot) {
             const responseBody = deliveryBody(snapshot.responseBody, {
               requestId: activeRequestId, sourceMode: 'stored_fallback',
@@ -2802,6 +2994,17 @@ export class TikHubGateway {
           throw new AppError(429, 'external_platform_busy', 'External Xiaohongshu concurrency is exhausted')
         }
         entered = true
+        if (waitedForCapacity && normalized.deliveryMode === 'cache_first') {
+          const fresh = await this.platformStore.snapshotFor({ consumerId: context.consumer.id,
+            operation: XIAOHONGSHU_POST_OPERATION, fingerprint: noteFingerprint }, new Date())
+          if (fresh && new Date(fresh.freshUntil) >= new Date()) {
+            const responseBody = deliveryBody(fresh.responseBody, { requestId: activeRequestId,
+              sourceMode: 'fresh_cache', capturedAt: fresh.capturedAt })
+            await this.platformStore.commitSnapshotDelivery({ delivery, snapshot: fresh, sourceMode: 'fresh_cache', responseBody })
+            ownsReservation = false
+            return result(responseBody, activeRequestId, false, 'fresh_cache', fresh.capturedAt)
+          }
+        }
 
         const costControl = providerCostControl(
           operationControl?.billing ? { billing: operationControl.billing } : this.config,
@@ -2851,6 +3054,7 @@ export class TikHubGateway {
           )
         }
 
+        if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
         call = await this.platformStore.beginProviderCall({
           tenantId: context.tenant.id,
           consumerId: context.consumer.id,
@@ -2876,6 +3080,8 @@ export class TikHubGateway {
         }
         const startedAt = performance.now()
         try {
+          if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+          callDispatched = true
           const upstream = await this.adapter.getXiaohongshuPost(body, { credential: resolved.value })
           const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
           const capturedAt = date(upstream.publicBody?.meta?.capturedAt)
@@ -2924,6 +3130,13 @@ export class TikHubGateway {
           ownsReservation = false
           return result(responseBody, activeRequestId, false, 'live', capturedAt)
         } catch (error) {
+          if (!callDispatched) {
+            await this.platformStore.finishProviderStep({ callId: call.id, delivery, outcome: 'rejected', billed: false,
+              costMinor: costControl.costMinor, costKind: costControl.costKind, currency: costControl.currency,
+              errorCode: error.code || 'external_platform_pre_dispatch_failed', affectsCircuit: false })
+            callSettled = true
+            throw error
+          }
           if (!(error instanceof TikHubUpstreamError)) throw error
           const mapped = publicFailure(error)
           const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))

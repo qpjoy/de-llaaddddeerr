@@ -34,10 +34,21 @@ export function isInternalTraffic(store, context) {
   }) === true
 }
 
-// Retain the stored shared circuit. Only the explicitly allowed caller sees a
-// shorter admission deadline, and only for an observed upstream rate rejection.
+// User-authorized exception for the original store-authenticated LCY identity.
+// A mutable name, another managed Key or a request-supplied flag cannot opt in.
+export function isLcyRateCircuitExempt(context) {
+  return context?.apiKey?.id === 'fd2f8cc9-0ff1-4052-a538-8cc8150bde83'
+    && context.apiKey.accessProfile === 'managed_full'
+    && context?.tenant?.id === '277bf8a4-5ed5-414d-b429-d72fcd7d36b6'
+    && context?.consumer?.id === 'be7d07fe-3d98-4db3-b00d-e5cbe5a76190'
+}
+
+// Retain the stored shared circuit and all non-rate failures. LCY bypasses its
+// rate deadline; other internal callers retain the ten-second rate cooldown.
 export function internalCircuitState(store, context, state) {
-  if (!isInternalTraffic(store, context) || state?.lastErrorCode !== 'upstream_rate_limited') return state
+  if (state?.lastErrorCode !== 'upstream_rate_limited') return state
+  if (isLcyRateCircuitExempt(context)) return { ...state, rateCircuitExempt: true, circuitOpenUntil: null }
+  if (!isInternalTraffic(store, context)) return state
   const failedAt = Date.parse(state.lastFailureAt)
   const until = Date.parse(state.circuitOpenUntil)
   if (!Number.isFinite(failedAt) || !Number.isFinite(until)) return state

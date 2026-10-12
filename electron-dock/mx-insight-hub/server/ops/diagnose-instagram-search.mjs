@@ -108,7 +108,7 @@ export function inspectInstagramArchive(archive, snapshot) {
   }
 }
 
-export async function diagnoseInstagramSearch(pool, requestId, { blockedUntil = null, cooldownMs = 15 * 60_000 } = {}) {
+export async function diagnoseInstagramSearch(pool, requestId, { blockedUntil = null, cooldownMs = 5 * 60_000 } = {}) {
   if (!UUID.test(requestId)) throw new Error('invalid_request_id')
   if (!Number.isSafeInteger(cooldownMs) || cooldownMs <= 0) throw new Error('invalid_cooldown')
   if (blockedUntil !== null && !Number.isFinite(Date.parse(blockedUntil))) throw new Error('invalid_blocked_until')
@@ -170,7 +170,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (!process.env.DATABASE_URL) throw new Error('database_url_required')
     pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 })
     const report = await diagnoseInstagramSearch(pool, requestId, { blockedUntil: blockedUntil || null,
-      cooldownMs: Number(process.env.MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS || 900000) })
+      cooldownMs: Number(process.env.MX_INSIGHT_DIAGNOSTIC_COOLDOWN_MS
+        || process.env.MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS
+        || Math.min(Number(process.env.MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS || 900000), 300000)) })
     console.log(JSON.stringify(report, null, 2))
   } catch (error) {
     // Never echo connection strings, SQL, provider values or stacks in failures.

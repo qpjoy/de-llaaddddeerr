@@ -330,7 +330,29 @@ test('JustOne defaults admit current consumer bursts while preserving a bounded 
   assert.equal(config.tikHub.searchStaleTtlMs, 86_400_000)
   assert.equal(config.tikHub.searchMaxEnrichItems, 20)
   assert.equal(config.tikHub.searchEnrichConcurrency, 2)
+  assert.equal(config.tikHub.maxConcurrency, 16)
+  assert.deepEqual(config.tikHub.concurrencyQueue, { maxWaitMs: 10000, maxPending: 32 })
   assert.deepEqual(config.tikHub.searchCanaryConsumerIds, [])
+})
+
+test('concurrency queue settings are bounded and bad values disable only the optional provider', async () => {
+  const configured = loadConfig({ ...BASE, MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS: '5000',
+    MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING: '64' })
+  assert.deepEqual(configured.tikHub.concurrencyQueue, { maxWaitMs: 5000, maxPending: 64 })
+  for (const [name, value] of [
+    ['MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS', '60001'],
+    ['MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS', '0'],
+    ['MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING', '257'],
+    ['MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING', 'invalid'],
+  ]) {
+    const env = { ...BASE, [name]: value }
+    assert.throws(() => preflightTikHubConfig(env), { code: 'invalid_configuration' })
+    const config = loadConfig(env)
+    assert.equal(config.tikHub.dispatchEnabled, false)
+    const runtime = await createRuntime(config)
+    try { assert.ok(runtime.identity); assert.ok(runtime.service) }
+    finally { await closeRuntime(runtime) }
+  }
 })
 
 test('TikHub search canary consumer IDs are normalized, deduplicated and fail closed', () => {
@@ -582,6 +604,38 @@ test('runtime wires the TikHub burst cap into shared search and user-info admiss
     assert.equal(results.filter(row => row.allowed).length, 1)
     assert.ok(results.filter(row => !row.allowed).every(row => row.retryAfterMs === 1200))
   } finally { await closeRuntime(runtime) }
+})
+
+test('runtime separates configured response quarantine from unknown protection across paid stores', async () => {
+  const runtime = await runtimeFor({ ...BASE,
+    MX_INSIGHT_JUSTONE_RESPONSE_QUARANTINE_COOLDOWN_MS: '120000',
+    MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS: '180000',
+  })
+  try {
+    for (const platform of [runtime.externalPlatformGateway.platformStore, runtime.xiaohongshuHotNotesStore]) {
+      assert.equal(platform.responseQuarantineCooldownMs, 120000)
+      assert.equal(platform.uncertainCooldownMs, 900000)
+    }
+    assert.equal(runtime.tikHubPlatformStore.responseQuarantineCooldownMs, 180000)
+    assert.equal(runtime.tikHubUserInfoGateway.platformStore.responseQuarantineCooldownMs, 180000)
+    assert.equal(runtime.tikHubPlatformStore.uncertainCooldownMs, 900000)
+  } finally { await closeRuntime(runtime) }
+})
+
+test('invalid quarantine settings fail deploy preflight without taking down identity services', async () => {
+  for (const [prefix, field, preflight] of [
+    ['JUSTONE', 'justOne', preflightJustOneConfig], ['TIKHUB', 'tikHub', preflightTikHubConfig],
+  ]) {
+    const environment = { ...BASE, [`MX_INSIGHT_${prefix}_RESPONSE_QUARANTINE_COOLDOWN_MS`]: 'invalid' }
+    assert.throws(() => preflight(environment), error => error.code === 'invalid_configuration')
+    const config = loadConfig(environment)
+    assert.equal(config[field].dispatchEnabled, false)
+    const runtime = await createRuntime(config)
+    try {
+      assert.ok(runtime.service)
+      assert.ok(runtime.identity)
+    } finally { await closeRuntime(runtime) }
+  }
 })
 
 test('JustOne rejects a per-consumer concurrency budget above the global budget', () => {

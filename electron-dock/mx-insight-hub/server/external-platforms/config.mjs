@@ -289,6 +289,8 @@ export function parseJustOneConfig(environment = process.env, {
       'MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY must not exceed MX_INSIGHT_JUSTONE_MAX_CONCURRENCY',
     )
   }
+  const unknownFingerprintCooldownMs = positiveInteger(environment.MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS,
+    15 * 60_000, 'MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS')
   return {
     // The provider host and endpoint paths are compiled into the adapter.
     // Keeping them out of env prevents this paid connector from becoming an
@@ -306,11 +308,9 @@ export function parseJustOneConfig(environment = process.env, {
     reservationLeaseMs,
     freshTtlMs,
     staleTtlMs,
-    unknownFingerprintCooldownMs: positiveInteger(
-      environment.MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS,
-      15 * 60_000,
-      'MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS',
-    ),
+    unknownFingerprintCooldownMs,
+    responseQuarantineCooldownMs: positiveInteger(environment.MX_INSIGHT_JUSTONE_RESPONSE_QUARANTINE_COOLDOWN_MS,
+      Math.min(unknownFingerprintCooldownMs, 5 * 60_000), 'MX_INSIGHT_JUSTONE_RESPONSE_QUARANTINE_COOLDOWN_MS'),
     maxConcurrency,
     maxConsumerConcurrency,
     // Observed-safe spacing for these providers is >=1.2s between calls
@@ -358,6 +358,7 @@ export function disabledJustOneConfig(environment, error) {
     freshTtlMs: 60_000,
     staleTtlMs: 7 * 86_400_000,
     unknownFingerprintCooldownMs: 15 * 60_000,
+    responseQuarantineCooldownMs: 5 * 60_000,
     maxConcurrency: 32,
     maxConsumerConcurrency: 8,
     maxRequestsPerMinute: 50,
@@ -622,9 +623,18 @@ export function parseTikHubConfig(environment = process.env, {
   }
   if (detailQueue.maxWaitMs > 60000 || detailQueue.maxPending > 100 || detailQueue.intervalMs > 60000
     || detailQueue.staleTtlMs < detailQueue.freshTtlMs) throw new AppError(500, 'invalid_configuration', 'Invalid TikHub detail queue bounds')
+  const unknownFingerprintCooldownMs = positiveInteger(environment.MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS,
+    15 * 60_000, 'MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS')
+  const concurrencyQueue = {
+    maxWaitMs: positiveInteger(environment.MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS, 10000, 'MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS'),
+    maxPending: positiveInteger(environment.MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING, 32, 'MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING'),
+  }
+  if (concurrencyQueue.maxWaitMs > 60000 || concurrencyQueue.maxPending > 256) throw new AppError(500,
+    'invalid_configuration', 'TikHub concurrency queue bounds must not exceed 60000 ms / 256 pending requests')
   return {
     baseUrl,
     detailQueue,
+    concurrencyQueue,
     apiKey,
     configured,
     contractVerified,
@@ -642,14 +652,12 @@ export function parseTikHubConfig(environment = process.env, {
     searchStaleTtlMs,
     searchMaxEnrichItems,
     searchEnrichConcurrency,
-    unknownFingerprintCooldownMs: positiveInteger(
-      environment.MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS,
-      15 * 60_000,
-      'MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS',
-    ),
+    unknownFingerprintCooldownMs,
+    responseQuarantineCooldownMs: positiveInteger(environment.MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS,
+      Math.min(unknownFingerprintCooldownMs, 5 * 60_000), 'MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS'),
     maxConcurrency: positiveInteger(
       environment.MX_INSIGHT_TIKHUB_MAX_CONCURRENCY,
-      8,
+      16,
       'MX_INSIGHT_TIKHUB_MAX_CONCURRENCY',
     ),
     maxConsumerConcurrency: positiveInteger(
@@ -706,7 +714,9 @@ export function disabledTikHubConfig(environment, error) {
     searchMaxEnrichItems: 20,
     searchEnrichConcurrency: 2,
     unknownFingerprintCooldownMs: 15 * 60_000,
-    maxConcurrency: 8,
+    responseQuarantineCooldownMs: 5 * 60_000,
+    maxConcurrency: 16,
+    concurrencyQueue: { maxWaitMs: 10000, maxPending: 32 },
     maxConsumerConcurrency: 8,
     maxRequestsPerMinute: 50,
     rateLimitBurst: 1,

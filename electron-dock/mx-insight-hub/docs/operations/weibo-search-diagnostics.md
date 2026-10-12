@@ -81,7 +81,10 @@ Hub 请求 `06f6157d-abc9-4341-ade8-fd08d9d7b142`。
 先前 `succeeded_unusable` 会在相同 provider、operation、endpoint、contract version
 范围内阻止新调用，**不限定同一检索词或调用者**。所以告警中的“同平台其他检索式继续运行”
 只描述下游调度隔离，不能保证这些检索式在 Hub 中都可以成功。
-默认冷却为 15 分钟，可由 `MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS` 覆盖。
+当时默认冷却为 15 分钟，使用 `MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS`。
+2026-10-12 可用性调整后，解析冷却独立为 `MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS`，
+默认 5 分钟；未知结果保护仍默认 15 分钟。新诊断脚本追查本节旧事故时，应在诊断命令上设置
+`MX_INSIGHT_DIAGNOSTIC_COOLDOWN_MS=900000` 以匹配历史期限，此变量不会修改运行时规则。
 服务器只读报告已确认生产冷却配置为 `900000ms`，找到一条截止时间完全匹配的候选：
 
 - 原 Hub 请求 `21ab2d17-4fbb-4bcf-9834-8675711a688d`，调用 ID `b20680d8-9004-48bd-acd6-67fbc73eaa56`。

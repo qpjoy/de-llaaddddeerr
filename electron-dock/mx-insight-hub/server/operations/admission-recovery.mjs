@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { quarantineRecoverySql } from '../core/admission-recovery.mjs'
+import { isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const iso = value => value == null ? null : new Date(value).toISOString()
@@ -20,6 +21,11 @@ function validateFilter(filter) {
   for (const key of Object.keys(filter)) if (!['apiKeyId', 'requestId'].includes(key)) throw new AppError(400, 'invalid_recovery_filter', 'Unknown filter')
   for (const value of Object.values(filter)) if (value && !UUID.test(value)) throw new AppError(400, 'invalid_recovery_filter', 'Use a complete UUID')
 }
+
+const keyContext = key => ({
+  apiKey: { id: key.id, accessProfile: key.access_profile }, tenant: { id: key.tenant_id }, consumer: { id: key.consumer_id },
+})
+const internalKey = (store, key) => isInternalTraffic(store, keyContext(key))
 
 // Admin-only. No adapters, credential readers, replay or dispatch methods exist here.
 export class AdmissionRecoveryService {
@@ -54,17 +60,21 @@ export class AdmissionRecoveryService {
     // Runtime values are supplied by the same deployment configuration as admission.
     const providerKeys = Object.keys(this.providers)
     const cooldowns = providerKeys.map(key => Math.ceil(this.providers[key].cooldownMs / 1000) * 1000)
+    const responseCooldowns = providerKeys.map(key => Math.ceil((this.providers[key].responseQuarantineCooldownMs
+      ?? Math.min(this.providers[key].cooldownMs, 300000)) / 1000) * 1000)
+    const callCooldown = `CASE WHEN call.outcome='succeeded_unusable' AND call.error_code IS DISTINCT FROM 'upstream_note_unavailable'
+      THEN cfg.response_ms ELSE cfg.ms END`
     const calls = (await client.query(`SELECT call.id, call.provider_key, call.operation, call.endpoint_key,
       call.contract_version, call.outcome, call.error_code, call.started_at, call.completed_at,
       call.usage_request_id, call.consumer_id, u.api_key_id, u.platform, u.lease_expires_at,
-      call.completed_at + cfg.ms * interval '1 millisecond' AS until
+      call.completed_at + (${callCooldown}) * interval '1 millisecond' AS until
       FROM external_platform.provider_calls call
-      JOIN unnest($1::text[], $2::int[]) cfg(provider,ms) ON cfg.provider=call.provider_key
+      JOIN unnest($1::text[], $2::int[], $3::int[]) cfg(provider,ms,response_ms) ON cfg.provider=call.provider_key
       JOIN usage_requests u ON u.id=call.usage_request_id
       WHERE call.outcome='pending' OR (call.outcome IN ('unknown','succeeded_unusable')
-        AND call.completed_at + cfg.ms * interval '1 millisecond' > now()
+        AND call.completed_at + (${callCooldown}) * interval '1 millisecond' > now()
         ${quarantineRecoverySql('call')})
-      ORDER BY call.started_at DESC LIMIT 201`, [providerKeys, cooldowns])).rows
+      ORDER BY call.started_at DESC LIMIT 201`, [providerKeys, cooldowns, responseCooldowns])).rows
     for (const row of calls.slice(0, 200)) {
       const kind = row.outcome === 'succeeded_unusable'
         ? row.error_code === 'upstream_note_unavailable' ? 'unavailable' : 'response_quarantine' : row.outcome
@@ -93,16 +103,25 @@ export class AdmissionRecoveryService {
     }
     let key = null
     if (apiKeyId) {
-      key = (await client.query('SELECT id, tenant_id, consumer_id, name, status, scope_mode FROM api_keys WHERE id=$1', [apiKeyId])).rows[0]
+      key = (await client.query(`SELECT id, tenant_id, consumer_id, name, status, scope_mode,
+        to_jsonb(api_keys)->>'access_profile' AS access_profile FROM api_keys WHERE id=$1`, [apiKeyId])).rows[0]
       if (!key) throw new AppError(404, 'api_key_not_found', 'Key not found')
       items.push(...await this.#quotas(client, key))
-      if (this.usageStore.internalTrafficPolicy?.matches({ apiKeyId: key.id, tenantId: key.tenant_id })) {
+      if (internalKey(this.usageStore, key)) {
         for (const row of items) {
           if (row.provider !== 'tikhub') continue
           if (row.kind === 'provider_rate') row.selectedKeyEffect = '当前 Key 豁免 TikHub 本地速率；此共享限制仍影响普通调用者。'
           if (row.kind === 'provider_circuit' && row.errorCode === 'upstream_rate_limited') {
-            const deadline = Math.min(Date.parse(row.until), Date.parse(row.startedAt) + 10000)
-            row.selectedKeyUntil = new Date(deadline).toISOString()
+            const selected = internalCircuitState(this.usageStore, keyContext(key), {
+              lastErrorCode: row.errorCode, lastFailureAt: row.startedAt, circuitOpenUntil: row.until,
+            })
+            row.selectedKeyUntil = selected.circuitOpenUntil
+            if (selected.rateCircuitExempt) {
+              row.selectedKeyExempt = true
+              row.selectedKeyEffect = '当前 LCY-delta Key 豁免 Hub 侧共享 429 熔断；上游实际限流仍如实返回，共享保护继续影响其他调用者。'
+              continue
+            }
+            const deadline = Date.parse(selected.circuitOpenUntil)
             row.selectedKeyEffect = deadline <= now ? '当前 Key 的内部速率冷却已到期；共享熔断仍影响普通调用者。'
               : '当前 Key 使用 10 秒内部速率冷却；下方展示的仍是供应商共享熔断。'
           }
@@ -147,36 +166,51 @@ export class AdmissionRecoveryService {
       if (Number.isInteger(plan?.limits?.[field]) && plan.limits[field] > 0) specs.push({ kind, target: key.consumer_id,
         limit: plan.limits[field], seconds, assignedAt: kind === 'plan_burst' ? null : plan.assigned_at })
     }
-    const exempt = this.usageStore.internalTrafficPolicy?.matches({ apiKeyId: key.id, tenantId: key.tenant_id }) === true
-    // One database round trip for all Key scopes (Keys can carry hundreds).
-    const measured = (await client.query(`WITH specs AS (
-      SELECT * FROM jsonb_to_recordset($1::jsonb) AS s(kind text,target uuid,type text,scope text,
+    const exempt = internalKey(this.usageStore, key)
+    // Read this caller's candidate usage/scopes once, rather than rescanning the
+    // usage ledger for every entitlement (managed Keys carry hundreds of them).
+    const measured = (await client.query(`WITH specs AS MATERIALIZED (
+      SELECT row_number() OVER () AS spec_id,s.*,r.reset_at,
+        greatest(CASE WHEN seconds IS NOT NULL THEN now()-seconds*interval '1 second' END,
+          "assignedAt",CASE WHEN s.kind='plan_month' THEN date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' END,
+          CASE WHEN s.kind NOT IN ('key_total','plan_month') THEN r.reset_at END,'-infinity'::timestamptz) AS since
+      FROM jsonb_to_recordset($1::jsonb) AS s(kind text,target uuid,type text,scope text,
         "limit" int,seconds int,"assignedAt" timestamptz,"allStatuses" boolean)
-    ) SELECT s.*, q.* FROM specs s CROSS JOIN LATERAL (
-      WITH counted AS (SELECT reserved_at FROM usage_requests request
-        WHERE ((s.kind LIKE 'key_%' AND request.api_key_id=s.target)
-            OR (s.kind NOT LIKE 'key_%' AND request.consumer_id=s.target))
-          AND (s."allStatuses" IS TRUE OR request.status IN ('reserved','committed','unknown'))
-          AND (s.type IS NULL OR EXISTS (SELECT 1 FROM usage_request_authorization_scopes a
-            WHERE a.usage_request_id=request.id AND a.scope_type=s.type AND a.scope_key=s.scope)
-            OR (NOT EXISTS (SELECT 1 FROM usage_request_authorization_scopes a WHERE a.usage_request_id=request.id)
-              AND CASE WHEN s.type='platform' THEN request.platform ELSE request.capability END=s.scope))
-          AND (s.seconds IS NULL OR reserved_at >= now()-s.seconds*interval '1 second')
-          AND (s."assignedAt" IS NULL OR reserved_at >= s."assignedAt")
-          AND (s.kind <> 'plan_month' OR reserved_at >= date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')
-          AND (s.kind IN ('key_total','plan_month') OR reserved_at > coalesce((SELECT max(created_at)
-            FROM control.admission_recoveries r WHERE r.kind=s.kind AND r.target=s.target::text
-              AND r.scope_type=coalesce(s.type,'') AND r.scope_key=coalesce(s.scope,'')), '-infinity'::timestamptz))
-      ), ranked AS (SELECT reserved_at,row_number() OVER (ORDER BY reserved_at) AS ordinal FROM counted)
-      SELECT count(*)::int AS used,max(reserved_at) AS latest,
-        (SELECT reserved_at FROM ranked WHERE ordinal=greatest(1,(SELECT count(*) FROM counted)-s."limit"+1)) AS frees_at,
-        (SELECT max(created_at) FROM control.admission_recoveries WHERE kind=s.kind AND target=s.target::text
-          AND scope_type=coalesce(s.type,'') AND scope_key=coalesce(s.scope,'')) AS reset_at,
-        (date_trunc('month',now() AT TIME ZONE 'UTC') + interval '1 month') AT TIME ZONE 'UTC' AS month_end
-      FROM counted
-    ) q`, [JSON.stringify(specs)])).rows
+      LEFT JOIN LATERAL (SELECT max(created_at) AS reset_at FROM control.admission_recoveries
+        WHERE kind=s.kind AND target=s.target::text AND scope_type=coalesce(s.type,'') AND scope_key=coalesce(s.scope,'')) r ON true
+    ), candidates AS MATERIALIZED (
+      SELECT id,api_key_id,consumer_id,platform,capability,status,reserved_at FROM usage_requests
+      WHERE (consumer_id=$2 OR api_key_id=$3) AND reserved_at >= (SELECT min(since) FROM specs)
+    ), authorizations AS MATERIALIZED (
+      SELECT a.* FROM usage_request_authorization_scopes a JOIN candidates c ON c.id=a.usage_request_id
+    ), scoped AS (
+      SELECT c.*,a.scope_type AS type,a.scope_key AS scope FROM candidates c JOIN authorizations a ON a.usage_request_id=c.id
+      UNION ALL SELECT c.*,v.type,v.scope FROM candidates c
+        CROSS JOIN LATERAL (VALUES ('platform',c.platform),('capability',c.capability)) v(type,scope)
+        WHERE NOT EXISTS (SELECT 1 FROM authorizations a WHERE a.usage_request_id=c.id)
+    ), matching_scopes AS (
+      SELECT s.*,c.api_key_id,c.consumer_id,c.status,c.reserved_at FROM specs s
+        JOIN scoped c ON s.type=c.type AND s.scope=c.scope
+      UNION ALL SELECT s.*,c.api_key_id,c.consumer_id,c.status,c.reserved_at FROM specs s
+        CROSS JOIN candidates c WHERE s.type IS NULL
+    ), matched AS (
+      SELECT spec_id,"limit",reserved_at FROM matching_scopes
+      WHERE (kind LIKE 'key_%' AND api_key_id=target OR kind NOT LIKE 'key_%' AND consumer_id=target)
+        AND ("allStatuses" IS TRUE OR status IN ('reserved','committed','unknown'))
+        AND reserved_at >= since
+        AND (kind IN ('key_total','plan_month') OR reset_at IS NULL OR reserved_at > reset_at)
+    ), ranked AS (
+      SELECT *,row_number() OVER (PARTITION BY spec_id ORDER BY reserved_at) AS ordinal,
+        count(*) OVER (PARTITION BY spec_id) AS used FROM matched
+    ), measured AS (
+      SELECT spec_id,max(used)::int AS used,max(reserved_at) AS latest,
+        min(reserved_at) FILTER (WHERE ordinal=greatest(1,used-"limit"+1)) AS frees_at
+      FROM ranked GROUP BY spec_id
+    ) SELECT s.*,coalesce(q.used,0) AS used,q.latest,q.frees_at,
+      (date_trunc('month',now() AT TIME ZONE 'UTC') + interval '1 month') AT TIME ZONE 'UTC' AS month_end
+      FROM specs s LEFT JOIN measured q USING(spec_id)`, [JSON.stringify(specs),key.consumer_id,key.id])).rows
     const rows = []
-    for (const s of measured) {
+    for (const { spec_id, since, ...s } of measured) {
       const q = { used: s.used, latest: s.latest, frees_at: s.frees_at, reset_at: s.reset_at }
       const until = s.kind === 'plan_month' ? iso(s.month_end)
         : s.seconds && q.frees_at ? new Date(new Date(q.frees_at).getTime() + s.seconds * 1000).toISOString() : null
@@ -184,7 +218,7 @@ export class AdmissionRecoveryService {
         scope: `${s.scope || plan?.plan_key}${s.kind.startsWith('plan_') || s.kind === 'consumer_window' ? ' · 该调用者的全部 Key 共享' : ' · 当前 Key'}`, limit: Number(s.limit), used: q.used, windowSeconds: s.seconds || null,
         startedAt: iso(q.latest), until: q.used >= s.limit && !exempt ? until : null, exempt,
         origin: 'Hub 配额', recoverable: writable.has(s.kind) && !exempt && q.used >= s.limit,
-        note: exempt ? '部署内部白名单豁免；仍保留用量与计费。' : writable.has(s.kind)
+        note: exempt ? '内部调用策略豁免；仍保留用量与计费。' : writable.has(s.kind)
           ? '手动恢复从当前时刻重新计算此层配额；不清空历史用量或账单。' : '累计额度请到 Key / 套餐设置调整，不清空商业用量。' }))
     }
     return rows
@@ -199,7 +233,14 @@ export class AdmissionRecoveryService {
       const result = await this.#read(client, filter)
       await client.query('COMMIT')
       return result
-    } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      if (error.code === '57014') throw new AppError(503, 'admission_snapshot_timeout',
+        '限制查询超时；可先查看全部上游共享保护，再由运维检查所选 Key 的配额统计性能')
+      if (['42P01', '42703', '42501'].includes(error.code)) throw new AppError(503, 'admission_snapshot_unavailable',
+        '限制证据暂不可读，请由运维核对数据库迁移和读取权限')
+      throw error
+    } finally { client.release() }
   }
 
   async recover(input, { actor = 'admin-token', requestId }) {

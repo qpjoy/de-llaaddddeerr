@@ -188,7 +188,8 @@ test('read-only database diagnosis traces an endpoint-wide blocker instead of tr
     [callId, evidence.body_bytes, evidence.body_sha256, capturedAt, evidence.body_bytes.length])
   const statements = []
   const pool = { async connect() { return { release() {}, query(sql, args) { statements.push(sql); return db.query(sql, args) } } } }
-  const report = await diagnoseInstagramSearch(pool, target, { blockedUntil: '2026-10-09T07:06:23.835Z' })
+  const report = await diagnoseInstagramSearch(pool, target, { blockedUntil: '2026-10-09T07:06:23.835Z', cooldownMs: 900000 })
+  assert.equal((await diagnoseInstagramSearch(pool, target)).cooldownMs, 300000)
   assert.match(statements[0], /READ ONLY$/)
   assert.equal(statements.at(-1), 'COMMIT')
   assert.equal(report.evidence.length, 1)

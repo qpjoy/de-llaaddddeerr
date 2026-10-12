@@ -9,6 +9,7 @@ import { XIAOHONGSHU_CRAWL_OPERATION } from '../../server/contracts/tikhub-xiaoh
 import { createExternalPlatformCursorCodec } from '../../server/external-platforms/cursor.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
+import { AppError } from '../../server/core/errors.mjs'
 
 const PEPPER = 'xiaohongshu-routing-test-pepper-with-entropy'
 const MODERN_PATH = '/api/v1/data/search'
@@ -820,6 +821,34 @@ test('direct-enabled capabilities merge search_posts into locally compiled compa
   }])
   assert.deepEqual(live.data.legacySearch, legacyCapabilities())
   assert.deepEqual(testKey.data.legacySearch, legacyCapabilities())
+})
+
+test('HTTP disconnect reaches the pending direct search through modern and both raw aliases', async t => {
+  const state = await routingFixture()
+  state.service.authenticate = async () => state.liveContext
+  let started, cancelled
+  state.service.externalSocialSearch = async (_context, input) => {
+    assert.ok(input.signal instanceof AbortSignal)
+    started()
+    await new Promise(resolve => input.signal.addEventListener('abort', resolve, { once: true }))
+    cancelled()
+    throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+  }
+  const server = createServer(createApp({ service: state.service, store: {}, adapter: {},
+    listenerMode: 'public', logger: { error() {} } }))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  for (const path of [MODERN_PATH, LEGACY_PATHS.raw, '/api/v1/search/raw']) {
+    const ready = new Promise(resolve => { started = resolve })
+    const stopped = new Promise(resolve => { cancelled = resolve })
+    const abort = new AbortController()
+    const response = fetch(`http://127.0.0.1:${server.address().port}${path}`, {
+      method: 'POST', headers: { authorization: 'Bearer mih_live_cancel-test', 'content-type': 'application/json', 'idempotency-key': 'cancel-alias-test' },
+      body: JSON.stringify({ platform: 'xiaohongshu', query: '队列取消' }), signal: abort.signal,
+    })
+    const rejected = assert.rejects(response, error => error.name === 'AbortError')
+    await ready; abort.abort(); await rejected; await stopped
+  }
 })
 
 test('legacy HTTP aliases share one canonical paid path and keep source-mode vocabulary', async () => {

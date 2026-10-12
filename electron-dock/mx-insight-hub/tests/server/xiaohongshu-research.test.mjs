@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import test from 'node:test'
 import { TikHubAdapter } from '../../server/adapters/tikhub.mjs'
+import { AppError } from '../../server/core/errors.mjs'
 import { createApp } from '../../server/app.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
@@ -30,7 +31,7 @@ const zeroDetail = () => detail({ readNum: 0, impNum: 0, likeNum: 0, favNum: 0, 
 const bloggerPage = (items, total = 50) => ({ code: 200, data: { code: 0, success: true, data: { noteList: items, total } } })
 const bloggerNote = (noteId = ID, fields = {}) => ({ noteInfo: { noteId, readNum: 619, impNum: 6499, engageNum: 107, favNum: 27, ...fields }, userInfo: { userId: AUTHOR } })
 
-async function fixture(fetchImpl = async () => response(detail()), { capabilities = XHS_RESEARCH_OPERATIONS, platforms = ['xiaohongshu'] } = {}) {
+async function fixture(fetchImpl = async () => response(detail()), { capabilities = XHS_RESEARCH_OPERATIONS, platforms = ['xiaohongshu'], admissionRuntime, reservationLeaseMs = 150000 } = {}) {
   const store = new MemoryStore()
   const service = new HubService({ store, adapter: {}, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Research tenant' })
@@ -42,17 +43,120 @@ async function fixture(fetchImpl = async () => response(detail()), { capabilitie
   const adapter = new TikHubAdapter({ apiKey: SECRET, fetchImpl })
   const platformStore = new MemoryExternalPlatformStore({ usageStore: store, providerKey: 'tikhub', authorizationPlatform: 'xiaohongshu' })
   const config = { detailQueue: { intervalMs: 5, jitterMs: 0 }, configured: true, contractVerified: true, researchContractVerified: true, searchContractVerified: true, userActivityContractVerified: true, maxConcurrency: 4, maxConsumerConcurrency: 4, maxRequestsPerMinute: 120, freshTtlMs: 60000, staleTtlMs: 86400000, billing: { currency: 'USD', monthlyBudgetMinor: 100000, monthlySubsidyBudgetMinor: 100000, unitCostMinorByEndpoint: Object.fromEntries(Object.values(endpoints).map(endpoint => [endpoint.endpointKey, 1])) } }
-  const gateway = new TikHubGateway({ usageStore: store, platformStore, adapter, config, apiKeyPepper: PEPPER, reservationLeaseMs: 150000, logger: { warn() {}, error() {} } })
+  const gateway = new TikHubGateway({ usageStore: store, platformStore, adapter, config, apiKeyPepper: PEPPER, reservationLeaseMs, admissionRuntime, logger: { warn() {}, error() {} } })
   const call = (name = 'note_detail', query = { note_id: ID }, key = 'research-request-001', path = (endpoints[name] || bloggerEndpoint).path, ctx = context) => gateway.officialXiaohongshu(ctx, { endpointName: name, query, method: 'POST', idempotencyKey: key, path })
   return { store, service, tenant, consumer, key, context, adapter, platformStore, config, gateway, call }
 }
+
+async function untilPending(gateway, count = 1) {
+  for (let i = 0; i < 100; i++) {
+    if (gateway.concurrencyQueue.entries.length === count) return
+    await new Promise(resolve => setTimeout(resolve, 2))
+  }
+  assert.fail('request did not enter the concurrency queue')
+}
+
+test('full foreground capacity queues comments without holding procurement or a dispatch lease, then sends once', async () => {
+  let finishFirst, notifyFirst
+  const firstStarted = new Promise(resolve => { notifyFirst = resolve })
+  let calls = 0
+  const state = await fixture(async () => {
+    if (++calls === 1) { notifyFirst(); await new Promise(resolve => { finishFirst = resolve }) }
+    return response(comments())
+  })
+  state.config.maxConcurrency = 1
+  const first = state.call('note_comments', { note_id: ID }, 'foreground-first')
+  await firstStarted
+  const second = state.call('note_comments', { note_id: OTHER }, 'foreground-second')
+  await untilPending(state.gateway)
+  assert.equal(calls, 1)
+  assert.equal(state.gateway.active, 1)
+  assert.equal(state.platformStore.leases.size, 1, 'only dispatched request owns a lease')
+  assert.equal(state.platformStore.calls.size, 1, 'waiting creates no paid attempt')
+  finishFirst()
+  await Promise.all([first, second])
+  assert.equal(calls, 2)
+  assert.equal(state.gateway.active, 0)
+  assert.equal(state.gateway.concurrencyQueue.entries.length, 0)
+  assert.equal(state.platformStore.leases.size, 0)
+  assert.ok([...state.platformStore.calls.values()].every(call => call.outcome === 'succeeded'))
+})
+
+test('waiting comments are cancelled or revalidated on release, without dispatch or unknown billing', async () => {
+  for (const change of ['cancel', 'revoke', 'circuit', 'unknown', 'budget', 'timeout']) {
+    let finishFirst, notifyFirst
+    const firstStarted = new Promise(resolve => { notifyFirst = resolve })
+    let calls = 0
+    const state = await fixture(async () => {
+      if (++calls === 1) { notifyFirst(); await new Promise(resolve => { finishFirst = resolve }) }
+      return response(comments())
+    })
+    state.config.maxConcurrency = 1
+    state.config.concurrencyQueue = { maxWaitMs: change === 'timeout' ? 30 : 1000, maxPending: 1 }
+    const first = state.call('note_comments', { note_id: ID }, `hold-first-${change}`)
+    await firstStarted
+    const abort = new AbortController()
+    const second = state.gateway.officialXiaohongshu(state.context, { endpointName: 'note_comments', query: { note_id: OTHER },
+      method: 'POST', path: endpoints.note_comments.path, idempotencyKey: `hold-second-${change}`, signal: abort.signal })
+    const expected = { cancel: 'request_cancelled', revoke: 'capability_not_granted', circuit: 'external_platform_circuit_open',
+      unknown: 'request_outcome_unknown', budget: 'external_platform_cost_budget_exhausted', timeout: 'external_platform_busy' }[change]
+    const rejected = assert.rejects(second, { code: expected }, change)
+    await untilPending(state.gateway)
+    if (change === 'cancel') abort.abort()
+    if (change === 'revoke') state.store.apiKeys.get(state.key.id).status = 'revoked'
+    if (change === 'circuit') state.platformStore.providerState = async () => ({ lastErrorCode: 'upstream_auth_or_balance_unavailable', circuitOpenUntil: new Date(Date.now() + 60000).toISOString() })
+    if (change === 'unknown') state.platformStore.acquireDispatchLease = async () => ({ kind: 'blocked', reason: 'unknown' })
+    if (change === 'budget') state.platformStore.reserveProviderCostWorkflow = async () => { throw new AppError(429, 'external_platform_cost_budget_exhausted', 'Budget changed') }
+    if (change === 'timeout') await rejected
+    finishFirst(); await first; await rejected
+    assert.equal(calls, 1, change)
+    assert.equal(state.gateway.active, 0, change)
+    assert.equal(state.gateway.concurrencyQueue.entries.length, 0, change)
+    assert.equal(state.platformStore.calls.size, 1, change)
+    assert.ok([...state.store.requests.values()].every(row => row.status !== 'unknown'), change)
+  }
+})
+
+test('HTTP overflow explains queue saturation and disconnect removes queued comments before dispatch', async t => {
+  let release, notify
+  const started = new Promise(resolve => { notify = resolve })
+  let calls = 0
+  const state = await fixture(async () => { calls++; notify(); await new Promise(resolve => { release = resolve }); return response(comments()) })
+  state.config.maxConcurrency = 1
+  state.config.concurrencyQueue = { maxWaitMs: 1000, maxPending: 1 }
+  const server = createServer(createApp({ service: state.service, store: state.store,
+    adapter: {}, tikHubGateway: state.gateway, listenerMode: 'public', logger: { error() {} } }))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const send = (note_id, key, signal) => fetch(`http://127.0.0.1:${server.address().port}${endpoints.note_comments.path}`, {
+    method: 'POST', headers: { authorization: `Bearer ${state.key.secret}`, 'content-type': 'application/json', 'idempotency-key': key },
+    body: JSON.stringify({ note_id }), signal,
+  })
+  const first = send(ID, 'http-hold-first')
+  await started
+  const abort = new AbortController()
+  const second = send(OTHER, 'http-queued-second', abort.signal)
+  const cancelled = assert.rejects(second, error => error.name === 'AbortError')
+  await untilPending(state.gateway)
+  const rejected = await send('6a20edfa0000000021020953', 'http-overflow-third')
+  assert.equal(rejected.status, 429)
+  assert.equal(rejected.headers.get('retry-after'), '1')
+  const body = await rejected.json()
+  assert.equal(body.error.details.reason, 'concurrency_queue_full')
+  assert.equal(body.error.details.upstreamDispatched, false)
+  abort.abort(); await cancelled
+  await untilPending(state.gateway, 0)
+  release(); assert.equal((await first).status, 200)
+  assert.equal(calls, 1)
+  assert.equal(state.gateway.active, 0)
+})
 
 test('detail and comments share circuit evidence and HTTP Retry-After while fresh cache remains readable', async t => {
   let dispatched = 0
   const state = await fixture(async () => { dispatched += 1; return response(detail()) })
   await state.call()
   state.config.circuitFailureThreshold = 3
-  const until = new Date(Date.now() + 60_000).toISOString()
+  const until = new Date(Date.now() + 120_000).toISOString()
   Object.assign(state.platformStore.state, { consecutiveFailures: 3,
     circuitOpenUntil: until, lastErrorCode: 'upstream_rate_limited' })
   const cached = await state.call('note_detail', { note_id: ID }, 'cached-during-circuit')
@@ -77,6 +181,96 @@ test('detail and comments share circuit evidence and HTTP Retry-After while fres
     assert.doesNotMatch(JSON.stringify(body), /tikhub|provider-secret|api\.tikhub/)
   }
   assert.equal(dispatched, 1)
+})
+
+async function circuitFixture({ internal = false, reason = 'upstream_rate_limited', remainingMs = 59000,
+  reservationLeaseMs, afterWait = () => {}, fetchImpl = async () => response(comments()) } = {}) {
+  let now = Date.now(), dispatched = 0
+  const start = now, waits = []
+  const runtime = { clock: () => now, async wait(ms) {
+    assert.equal(f.platformStore.calls.size,0)
+    assert.equal(f.gateway.active,0,'waiting must not occupy a dispatch concurrency slot')
+    assert.equal(f.platformStore.leases.size,0)
+    assert.equal(f.platformStore.costReservations.size,0)
+    waits.push(ms); now += ms; await afterWait(f,now)
+  } }
+  const f = await fixture(async (...args) => { dispatched++; return fetchImpl(...args) },{ admissionRuntime:runtime,reservationLeaseMs })
+  if(internal) {
+    f.store.apiKeys.get(f.key.id).accessProfile='managed_full'
+    f.context.apiKey.accessProfile='managed_full'
+    f.platformStore.acquireProviderRateLimit=()=>assert.fail('managed-full Key must retain its local rate exemption')
+  }
+  Object.assign(f.platformStore.state,{lastErrorCode:reason,lastFailureAt:new Date(start-1000).toISOString(),
+    circuitOpenUntil:new Date(start+remainingMs).toISOString()})
+  return {...f,start,waits,dispatches:()=>dispatched,advance(ms){now+=ms},
+    run:()=>f.call('note_comments',{note_id:ID},'comments-after-rate-cooldown')}
+}
+
+test('comments wait for internal ten-second or ordinary full rate cooldown, then dispatch and bill only once', async () => {
+  for(const internal of [true,false]) {
+    const f=await circuitFixture({internal})
+    const result=await f.run()
+    assert.equal(result.status,200)
+    assert.equal(result.sourceMode,'live')
+    assert.equal(f.waits.reduce((a,b)=>a+b,0),internal?9000:59000)
+    assert.equal(f.dispatches(),1)
+    assert.equal(f.platformStore.calls.size,1)
+    assert.equal([...f.platformStore.calls.values()][0].billed,true)
+    assert.equal((await f.run()).replay,true)
+    assert.equal(f.dispatches(),1)
+  }
+})
+
+test('comments do not wait past the admission/lease budget or for non-rate faults', async () => {
+  for(const options of [{remainingMs:61000},{reservationLeaseMs:40000},
+    {reason:'upstream_auth_or_balance_unavailable'},{reason:'invalid_upstream_contract'}]) {
+    const f=await circuitFixture(options)
+    await assert.rejects(f.run(),{code:'external_platform_circuit_open'})
+    assert.deepEqual(f.waits,[])
+    assert.equal(f.dispatches(),0)
+  }
+  const f=await circuitFixture({internal:true,afterWait(state,now){
+    state.platformStore.state.lastFailureAt=new Date(now).toISOString()
+    state.platformStore.state.circuitOpenUntil=new Date(now+60000).toISOString()
+  }})
+  await assert.rejects(f.run(),{code:'external_platform_circuit_open'})
+  assert.ok(f.waits.reduce((a,b)=>a+b,0)<=60000,'renewed circuits cannot extend the total wait indefinitely')
+  assert.equal(f.dispatches(),0)
+  const delayed=await circuitFixture({internal:true,reservationLeaseMs:50000,afterWait(){delayed.advance(30000)}})
+  await assert.rejects(delayed.run(),{code:'external_platform_unavailable'})
+  assert.equal(delayed.dispatches(),0,'late timer wakeups must retain enough lease time for dispatch')
+})
+
+test('comments recheck identity, grants, operation, procurement budget, credential and unknown-call protection after waiting', async () => {
+  const failures=[
+    [f=>{f.store.apiKeys.get(f.key.id).status='revoked'},'capability_not_granted'],
+    [f=>{f.store.tenants.get(f.tenant.id).status='suspended'},'capability_not_granted'],
+    [f=>{f.store.listEffectiveCapabilityGrants=async()=>[]},'capability_not_granted'],
+    [f=>{f.store.getConsumerPlan=async()=>null},'plan_assignment_unavailable'],
+    [f=>{f.config.researchContractVerified=false},'external_platform_contract_unverified'],
+    [f=>{f.gateway.adapter=null},'external_platform_not_configured'],
+    [f=>{f.platformStore.reserveProviderCostWorkflow=async()=>{throw new AppError(503,'external_platform_cost_budget_exhausted','budget exhausted')}},'external_platform_cost_budget_exhausted'],
+    [f=>{f.platformStore.acquireDispatchLease=async()=>({kind:'blocked',reason:'unknown'})},'request_outcome_unknown'],
+  ]
+  for(const [change,code] of failures) {
+    const f=await circuitFixture({internal:true,afterWait:change})
+    await assert.rejects(f.run(),{code})
+    assert.equal(f.dispatches(),0)
+    assert.equal(f.platformStore.calls.size,0)
+  }
+})
+
+test('comments cancel pending admission and do not retry an already dispatched 429', async () => {
+  const controller=new AbortController()
+  const cancelled=await circuitFixture({internal:true,afterWait(){controller.abort()}})
+  await assert.rejects(cancelled.gateway.officialXiaohongshu(cancelled.context,{endpointName:'note_comments',
+    query:{note_id:ID},method:'POST',path:endpoints.note_comments.path,idempotencyKey:'cancel-waiting-comments',signal:controller.signal}),{code:'request_cancelled'})
+  assert.equal(cancelled.dispatches(),0)
+  const rejected=await circuitFixture({internal:true,fetchImpl:async()=>new Response('{}',{status:429})})
+  await assert.rejects(rejected.run(),{code:'external_platform_capacity_exceeded'})
+  assert.equal(rejected.dispatches(),1)
+  assert.equal(rejected.platformStore.calls.size,1)
+  assert.equal([...rejected.platformStore.calls.values()][0].billed,null)
 })
 
 test('user analytics validates numeric v2 filters and maps a page without inventing unavailable metrics', () => {
@@ -628,6 +822,7 @@ test('explicit refresh never degrades to stored data when local concurrency is e
   await state.call()
   for (const row of state.platformStore.snapshots.values()) row.freshUntil = new Date(Date.now() - 1000).toISOString()
   state.gateway.active = state.config.maxConcurrency
+  state.config.concurrencyQueue = { maxWaitMs: 10, maxPending: 32 }
   const cached = await state.call('note_detail', { note_id: ID }, 'concurrency-cache-request')
   assert.equal(cached.sourceMode, 'stored_fallback')
   await assert.rejects(state.call('note_detail', { note_id: ID, deliveryMode: 'refresh' }, 'concurrency-refresh-request'), { code: 'external_platform_busy' })
@@ -635,22 +830,24 @@ test('explicit refresh never degrades to stored data when local concurrency is e
 })
 
 test('cancelling after attempt reservation but before dispatch releases holds as known unbilled', async () => {
-  const state = await fixture(async () => { assert.fail('cancelled request must not dispatch') })
-  const controller = new AbortController()
-  const begin = state.platformStore.beginProviderCall.bind(state.platformStore)
-  state.platformStore.beginProviderCall = async input => {
-    const call = await begin(input)
-    controller.abort()
-    return call
+  for (const endpointName of ['note_detail', 'note_comments']) {
+    const state = await fixture(async () => { assert.fail('cancelled request must not dispatch') })
+    const controller = new AbortController()
+    const begin = state.platformStore.beginProviderCall.bind(state.platformStore)
+    state.platformStore.beginProviderCall = async input => {
+      const call = await begin(input)
+      controller.abort()
+      return call
+    }
+    await assert.rejects(state.gateway.officialXiaohongshu(state.context, {
+      endpointName, query: { note_id: ID }, method: 'POST',
+      idempotencyKey: 'cancel-before-dispatch', path: endpoints[endpointName].path, signal: controller.signal,
+    }), { code: 'request_cancelled' })
+    assert.equal([...state.store.requests.values()][0].status, 'released')
+    const call = [...state.platformStore.calls.values()][0]
+    assert.equal(call.outcome, 'rejected')
+    assert.equal(call.billed, false)
+    assert.equal(state.platformStore.ingestJobs.length, 0)
+    assert.equal([...state.platformStore.costReservations.values()].some(row => row.status === 'reserved'), false)
   }
-  await assert.rejects(state.gateway.officialXiaohongshu(state.context, {
-    endpointName: 'note_detail', query: { note_id: ID }, method: 'POST',
-    idempotencyKey: 'cancel-before-dispatch', path: endpoints.note_detail.path, signal: controller.signal,
-  }), { code: 'request_cancelled' })
-  assert.equal([...state.store.requests.values()][0].status, 'released')
-  const call = [...state.platformStore.calls.values()][0]
-  assert.equal(call.outcome, 'rejected')
-  assert.equal(call.billed, false)
-  assert.equal(state.platformStore.ingestJobs.length, 0)
-  assert.equal([...state.platformStore.costReservations.values()].some(row => row.status === 'reserved'), false)
 })
