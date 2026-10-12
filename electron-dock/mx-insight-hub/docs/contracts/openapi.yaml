@@ -1845,6 +1845,7 @@ paths:
           - jd
           - xianyu
           - xiaohongshu_ec
+          - douyin_ec
           default: all
       - name: query
         in: query
@@ -3612,7 +3613,7 @@ paths:
                               description: Stable Hub contract version when the platform exposes one.
                             marketplaces:
                               type: array
-                              items: { type: string, enum: [taobao, tmall, jd, xiaohongshu_ec, xianyu] }
+                              items: { type: string, enum: [taobao, tmall, jd, xiaohongshu_ec, xianyu, douyin_ec] }
                             pagination: { type: string, enum: [opaque_cursor] }
                             idempotencyKey: { type: string, enum: [optional] }
                             deliveryModes:
@@ -3745,7 +3746,7 @@ paths:
                       source: hub
                       servingMode: live_with_stored_fallback
                       contractVersion: mx-insight-hub.ecommerce-products.v1
-                      marketplaces: [taobao, tmall, jd, xiaohongshu_ec, xianyu]
+                      marketplaces: [taobao, tmall, jd, xiaohongshu_ec, xianyu, douyin_ec]
                       pagination: opaque_cursor
                       idempotencyKey: optional
                       deliveryModes: [cache_only, cache_first, refresh, live_only]
@@ -11195,7 +11196,7 @@ components:
       properties:
         marketplace:
           type: string
-          enum: [taobao, tmall, jd, xiaohongshu_ec, xianyu]
+          enum: [taobao, tmall, jd, xiaohongshu_ec, xianyu, douyin_ec]
         query: { type: string, minLength: 1, maxLength: 200 }
         deliveryMode:
           type: string
@@ -11211,7 +11212,7 @@ components:
           minimum: 1
           maximum: 1000
           default: 1
-          description: Numeric page for a first traversal. Do not combine with cursor; continuation cursors are preferred.
+          description: Numeric page for a first traversal. xiaohongshu_ec and douyin_ec require a Hub cursor after page 1. Do not combine page with cursor.
         cursor:
           type: string
           minLength: 1
@@ -11224,7 +11225,7 @@ components:
             Marketplace-specific. taobao/tmall accept relevance, sales_desc,
             price_asc and price_desc; xianyu accepts relevance, recent,
             seller_credit, price_asc, price_desc, price_drop and newest; jd and
-            xiaohongshu_ec do not accept sort.
+            xiaohongshu_ec and douyin_ec do not accept sort.
         price:
           type: object
           additionalProperties: false
@@ -11242,7 +11243,7 @@ components:
       required: [id, marketplace, title, url, pricing, shop, images, signals, attributes]
       properties:
         id: { type: string, minLength: 1, maxLength: 256 }
-        marketplace: { type: string, enum: [taobao, tmall, jd, xiaohongshu_ec, xianyu] }
+        marketplace: { type: string, enum: [taobao, tmall, jd, xiaohongshu_ec, xianyu, douyin_ec] }
         title: { type: [string, "null"], maxLength: 4096 }
         url:
           type: [string, "null"]
@@ -11253,6 +11254,11 @@ components:
           type: [string, "null"]
           enum: [upstream, derived_from_id, null]
           description: 'upstream: source supplied the web URL; derived_from_id: Hub generated it from the product ID. null: no usable URL. May be absent on historical responses; absence does not establish provenance.'
+        appUrl:
+          type: string
+          format: uri
+          maxLength: 8192
+          description: Optional upstream product App link, currently identity-matched xhsdiscover or fleamarket. Not a web URL; open only on explicit user action with platform App handling. May be absent, including on historical responses.
         pricing:
           type: object
           additionalProperties: false

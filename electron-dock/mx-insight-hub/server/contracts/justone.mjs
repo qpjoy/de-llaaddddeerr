@@ -139,6 +139,31 @@ function projectXianyuItem(element) {
   }
 }
 
+// Reviewed single-page captures, 2026-10-12. Keep these render-card mappings
+// endpoint-specific; unrelated card IDs and prices are not product identities.
+function projectXiaohongshuProduct(element) {
+  if (!own(element, 'card_type') && !own(element, 'content')) return element
+  if (element.card_type !== 'dsl' || element.card_name !== 'cosmos_search_goods_card'
+    || !plainObject(element.content)) return null
+  const item = element.content
+  return {
+    goodsId: item.id, title: item.title, itemUrl: item.link, images: item.image,
+    price: item.price_info?.price, originPrice: item.price_info?.origin_price,
+    shopId: item.vendor?.seller_id, shopName: item.vendor?.vendor_name,
+  }
+}
+
+function projectDouyinProduct(element) {
+  if (!plainObject(element.base_info)) return null
+  const item = element.base_info
+  return {
+    productId: element.product_id, title: item.title, itemUrl: item.detail_url,
+    images: item.main_img?.url_list,
+    // The reviewed response has price=null. Do not guess units/structure for
+    // future populated price objects, or use promotion_id as the product ID.
+  }
+}
+
 // `data` is intentionally untyped in the upstream OpenAPI documents. These
 // paths are the small set of fixture shapes the Hub accepts. A new upstream
 // shape must arrive with a reviewed fixture and an explicit addition here.
@@ -171,7 +196,15 @@ export const JUSTONE_ENDPOINTS = Object.freeze({
   xiaohongshu_ec: endpoint({
     endpointKey: 'xiaohongshu-ec.product-search.v1',
     path: '/api/xiaohongshu-ec/search-products/v1',
-    itemPaths: [['data', 'items'], ['data', 'products']],
+    itemPaths: [['data', 'data', 'module', 'data'], ['data', 'items'], ['data', 'products']],
+    projectItem: projectXiaohongshuProduct,
+    contractVersion: 'justone.xiaohongshu-product-search.v2',
+  }),
+  douyin_ec: endpoint({
+    endpointKey: 'douyin-ec.product-search.v1',
+    path: '/api/douyin-ec/search-item-list/v1',
+    itemPaths: [['data', 'promotions']],
+    projectItem: projectDouyinProduct,
   }),
   xianyu: endpoint({
     endpointKey: 'xianyu.product-search.v1',
@@ -433,7 +466,7 @@ export function normalizeJustOneProductSearchRequest(body, {
     throw new JustOneContractError('cursor_scope_mismatch', 'cursor does not belong to this search')
   }
   const page = state?.page ?? normalizedPage(body.page)
-  if (marketplace === 'xiaohongshu_ec' && page > 1 && !state?.continuation) {
+  if (['xiaohongshu_ec', 'douyin_ec'].includes(marketplace) && page > 1 && !state?.continuation) {
     throw new JustOneContractError('continuation_required', 'a valid cursor is required after the first page')
   }
 
@@ -442,7 +475,7 @@ export function normalizeJustOneProductSearchRequest(body, {
   if (descriptor.tmall) upstreamQuery.tmall = 'true'
   if (price.min !== null) upstreamQuery.startPrice = price.min
   if (price.max !== null) upstreamQuery.endPrice = price.max
-  if (marketplace === 'xiaohongshu_ec' && state?.continuation) {
+  if (['xiaohongshu_ec', 'douyin_ec'].includes(marketplace) && state?.continuation) {
     upstreamQuery.searchId = state.continuation
   }
 
@@ -563,6 +596,11 @@ export function extractJustOneProductSearchItems(raw, marketplace) {
   const descriptor = JUSTONE_ENDPOINTS[marketplace]
   if (!descriptor) throw new JustOneResponseContractError('unsupported_marketplace', 'marketplace is not supported')
   const inspected = inspectJustOneEnvelope(raw)
+  if (marketplace === 'xiaohongshu_ec' && plainObject(raw?.data)
+    && (own(raw.data, 'success') || own(raw.data, 'code'))
+    && (raw.data.success !== true || raw.data.code !== 0)) {
+    throw new JustOneResponseContractError('invalid_xiaohongshu_product_response', 'product search did not return a successful business result')
+  }
   if (inspected.outcome !== 'success') {
     throw new JustOneResponseContractError(
       inspected.outcome === 'rejected' ? 'upstream_business_error' : 'invalid_upstream_envelope',
@@ -666,6 +704,7 @@ const PRODUCT_ID_FIELDS = Object.freeze({
   tmall: ['itemId', 'item_id', 'productId', 'product_id', 'goodsId', 'goods_id', 'id'],
   jd: ['skuId', 'sku_id', 'itemId', 'item_id', 'wareId', 'ware_id', 'productId', 'id'],
   xiaohongshu_ec: ['goodsId', 'goods_id', 'productId', 'product_id', 'itemId', 'id'],
+  douyin_ec: ['productId'],
   xianyu: ['itemId', 'item_id', 'productId', 'product_id', 'goodsId', 'goods_id', 'id'],
 })
 
@@ -677,8 +716,13 @@ const PRODUCT_WEB_URLS = Object.freeze({
 })
 
 function productLink(item, marketplace, rawId, id, secret) {
-  const upstream = firstUrl(item,
-    ['url', 'itemUrl', 'item_url', 'detailUrl', 'detail_url', 'auctionUrl'], secret)
+  const linkFields = ['url', 'itemUrl', 'item_url', 'detailUrl', 'detail_url', 'auctionUrl', 'auctionURL']
+  // Taobao V2 supplies protocol-relative auctionURL values. Add only the
+  // transport scheme; preserve the path, signed query and fragment verbatim.
+  const links = Object.fromEntries(linkFields.map(key => [key,
+    typeof item[key] === 'string' && item[key].startsWith('//') ? `https:${item[key]}` : item[key],
+  ]))
+  const upstream = firstUrl(links, linkFields, secret)
   if (upstream) return { url: upstream, urlSource: 'upstream' }
   // Some search responses have no URL; Xianyu may only provide an app URI.
   // Derive from the selected product identity, never from a deep-link payload.
@@ -688,6 +732,20 @@ function productLink(item, marketplace, rawId, id, secret) {
   const derived = exactId && PRODUCT_WEB_URLS[marketplace]
     ? safeUrl(PRODUCT_WEB_URLS[marketplace](id), secret) : null
   return { url: derived, urlSource: derived ? 'derived_from_id' : null }
+}
+
+function productAppLink(item, marketplace, id, secret) {
+  const value = item.itemUrl
+  if (typeof value !== 'string' || value.length > 8192 || /[\u0000-\u0020]/u.test(value)) return null
+  try {
+    const url = new URL(value)
+    if (url.username || url.password) return null
+    const matches = marketplace === 'xiaohongshu_ec'
+      ? url.protocol === 'xhsdiscover:' && url.hostname === 'goods_detail' && url.pathname === `/${id}`
+      : marketplace === 'xianyu' && url.protocol === 'fleamarket:' && url.hostname === 'item_detail'
+        && url.searchParams.get('itemId') === id
+    return matches ? redactCredentialEcho(value, secret) : null
+  } catch { return null }
 }
 
 export function normalizeJustOneProductItem(rawItem, marketplace, { secret = null } = {}) {
@@ -714,12 +772,14 @@ export function normalizeJustOneProductItem(rawItem, marketplace, { secret = nul
   const originalPrice = firstScalar(item, [
     'priceYuan', 'price_yuan', 'priceYuanDouble', 'originPrice', 'originalPrice', 'listPrice',
   ], 128) || firstScalar(priceObject, ['original', 'list', 'originalPrice'], 128)
+  const appUrl = productAppLink(item, marketplace, id, secret)
 
   return Object.freeze({
     id,
     marketplace,
     title: firstScalar(item, ['itemName', 'item_name', 'title', 'name', 'productName'], 4_096),
     ...productLink(item, marketplace, rawId, id, secret),
+    ...(appUrl ? { appUrl } : {}),
     pricing: Object.freeze({
       current: currentPrice,
       original: originalPrice,
@@ -769,7 +829,8 @@ function explicitPageHasMore(raw, request) {
   return current < totalPages
 }
 
-function explicitContinuation(raw) {
+function explicitContinuation(raw, marketplace) {
+  if (marketplace === 'douyin_ec') return scalarText(valueAt(raw, ['data', 'extra', 'search_id']), 2_048)
   for (const path of [
     ['data', 'searchId'], ['data', 'search_id'], ['searchId'], ['search_id'],
   ]) {
@@ -1005,7 +1066,9 @@ export function normalizeJustOneProductSearchResponse(raw, request, {
     else discardedCount += 1
   }
 
-  const explicitHasMore = explicitBoolean(raw, [
+  const cardHasMore = request.marketplace === 'xiaohongshu_ec'
+    ? explicitBoolean(raw, [['data', 'data', 'hierarchy', 'common', 'load_more']]) : null
+  const explicitHasMore = cardHasMore ?? explicitBoolean(raw, [
     ['data', 'hasMore'], ['data', 'has_more'],
     ['data', 'page', 'hasMore'], ['data', 'page', 'has_more'],
   ]) ?? explicitPageHasMore(raw, request)
@@ -1016,10 +1079,12 @@ export function normalizeJustOneProductSearchResponse(raw, request, {
   // continuation only when the pinned response explicitly says hasMore=true.
   if (extracted.items.length > 0 && explicitHasMore === true && request.page < MAX_PAGE) {
     const previousContinuation = request.upstreamQuery.searchId || null
-    const continuation = request.marketplace === 'xiaohongshu_ec'
-      ? previousContinuation || explicitContinuation(raw)
+    const requiresContinuation = ['xiaohongshu_ec', 'douyin_ec'].includes(request.marketplace)
+    const continuation = requiresContinuation
+      ? (request.marketplace === 'douyin_ec' ? explicitContinuation(raw, request.marketplace) || previousContinuation
+        : previousContinuation || explicitContinuation(raw, request.marketplace))
       : null
-    if (request.marketplace === 'xiaohongshu_ec' && !continuation) {
+    if (requiresContinuation && !continuation) {
       if (explicitHasMore === true) {
         throw new JustOneResponseContractError(
           'missing_upstream_continuation',

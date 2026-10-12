@@ -457,10 +457,10 @@ export class ExternalPlatformGateway {
         defaultVersion: resource.defaultVersion,
         ready: operationReadiness[resource.operationKey]?.ready ?? false,
       })),
-      marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
+      marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu', 'douyin_ec'],
       pagination: 'opaque_cursor',
       idempotencyKey: 'optional',
-      deliveryModes: ['cache_only', 'cache_first', 'refresh'],
+      deliveryModes: ['cache_only', 'cache_first', 'refresh', 'live_only'],
       freshnessModes: ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay'],
     }
   }

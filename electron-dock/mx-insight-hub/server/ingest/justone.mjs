@@ -9,7 +9,7 @@ import { canonicalJson, sha256 } from './normalizers.mjs'
 
 export const JUSTONE_DATASET_ID = 'ecommerce.products.v1'
 export const JUSTONE_CONNECTOR_ID = 'external-platform:justone'
-export const JUSTONE_PARSER_VERSION = 'mxih-justone-product-search.v3'
+export const JUSTONE_PARSER_VERSION = 'mxih-justone-product-search.v4'
 
 const QUEUED_RECORD_TIME_FIELDS = Object.freeze([
   'eventTime',
@@ -92,6 +92,12 @@ export function rehydrateJustOneQueuedRecords(records) {
 }
 
 export const JUSTONE_MARKETPLACE_CATALOG = Object.freeze({
+  douyin_ec: Object.freeze({
+    entryId: 'f9272169-838e-5cab-a1c5-1353a446cb6d',
+    sourceKey: 'source-catalog-0062',
+    revision: 1,
+    canonicalName: '抖音电商',
+  }),
   taobao: Object.freeze({
     entryId: '5a4e3453-86f2-5980-9d07-35df7a1acd83',
     sourceKey: 'source-catalog-0058',

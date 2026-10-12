@@ -64,7 +64,8 @@ const PRICE_BOOK_FIELDS = new Set([
 ])
 
 function uniqueEndpointKeys() {
-  return [...new Set(Object.values(JUSTONE_ENDPOINTS).map(({ endpointKey }) => endpointKey))]
+  return [...new Set(Object.entries(JUSTONE_ENDPOINTS)
+    .filter(([marketplace]) => marketplace !== 'douyin_ec').map(([, { endpointKey }]) => endpointKey))]
 }
 
 // The resource operations share the provider's single contract gate rather
@@ -95,6 +96,9 @@ export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
       legacyGate: 'contractVerified',
       contractVersion: ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
       endpointKeys: Object.freeze(uniqueEndpointKeys()),
+      // New marketplaces require an explicit reviewed price without blocking
+      // existing marketplaces when an older price book is still installed.
+      optionalEndpointKeys: Object.freeze([JUSTONE_ENDPOINTS.douyin_ec.endpointKey]),
     }),
     ...justoneResourceOperationEntries(),
     Object.freeze({

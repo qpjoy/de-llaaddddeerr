@@ -42,6 +42,18 @@ test('source web links retain their exact signed business URL and take priority 
   }
 })
 
+test('auctionURL protocol-relative links retain upstream provenance and signed parameters', () => {
+  const value = '//detail.tmall.com/item.htm?id=880001&signature=a%2Fb&skuId=42#variant'
+  const raw = { item_id: '880001', auctionURL: value }
+  const item = normalizeJustOneProductItem(raw, 'taobao')
+  assert.equal(item.url, `https:${value}`)
+  assert.equal(item.urlSource, 'upstream')
+  assert.equal(raw.auctionURL, value)
+  for (const unsafe of ['javascript:alert(1)', 'file:///product', 'not-a-url']) {
+    assert.equal(normalizeJustOneProductItem({ item_id: 'opaque', auctionURL: unsafe }, 'taobao').url, null)
+  }
+})
+
 test('Xianyu app links produce a labelled web URL without replacing the archived app link', () => {
   // Protocol/field nesting verified from the 2026-10-11 production archive;
   // host, ID and tracking values are synthetic, not a copied source URL.
@@ -53,6 +65,7 @@ test('Xianyu app links produce a labelled web URL without replacing the archived
     { capturedAt: '2026-10-10T16:23:24Z' })
   assert.equal(result.items[0].url, webUrls.xianyu)
   assert.equal(result.items[0].urlSource, 'derived_from_id')
+  assert.equal(result.items[0].appUrl, appUrl)
   assert.equal(result.records[0].url, webUrls.xianyu)
   assert.equal(result.records[0].stableFields.commerce.product.urlSource, 'derived_from_id')
   assert.equal(result.archiveObjects[1].rawItem.data.item.main.targetUrl, appUrl)
@@ -80,5 +93,6 @@ test('fallback follows the selected ID field, never a different alias, title or 
   assert.equal(item.url, null)
   const raw = product('xianyu', '880001', 'fleamarket://item_detail?itemId=999999')
   assert.equal(normalizeJustOneProductItem(raw, 'xianyu').url, webUrls.xianyu)
+  assert.equal(normalizeJustOneProductItem(raw, 'xianyu').appUrl, undefined)
   assert.equal(normalizeJustOneProductItem({ title: '880001' }, 'taobao'), null)
 })

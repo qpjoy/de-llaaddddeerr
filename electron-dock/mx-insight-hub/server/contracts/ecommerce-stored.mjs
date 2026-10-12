@@ -6,7 +6,7 @@ export function storedEcommerceQuery(input, consumerId, secret, maxPageSize = 10
   const marketplace = input.marketplace || 'all'
   const query = String(input.query || '').normalize('NFKC').trim()
   const pageSize = Number(input.pageSize || Math.min(10, maxPageSize))
-  if (!['all', 'taobao', 'tmall', 'jd', 'xianyu', 'xiaohongshu_ec'].includes(marketplace) || query.length > 200 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > Math.min(100, maxPageSize)) invalid()
+  if (!['all', 'taobao', 'tmall', 'jd', 'xianyu', 'xiaohongshu_ec', 'douyin_ec'].includes(marketplace) || query.length > 200 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > Math.min(100, maxPageSize)) invalid()
   const amount = value => {
     if (value == null || value === '') return null
     if (typeof value !== 'string' || !/^\d{1,12}(?:\.\d{1,2})?$/.test(value)) invalid()

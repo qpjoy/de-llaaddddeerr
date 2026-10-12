@@ -4,7 +4,7 @@ import { adminApi } from './api.js'
 import { DropdownField, Field } from './components.jsx'
 import { productMediaLoader } from './product-media-loader.js'
 
-const platforms = [{ value: 'all', label: '全部平台' }, { value: 'taobao', label: '淘宝' }, { value: 'tmall', label: '天猫' }, { value: 'jd', label: '京东' }, { value: 'xianyu', label: '闲鱼' }, { value: 'xiaohongshu_ec', label: '小红书店铺' }]
+const platforms = [{ value: 'all', label: '全部平台' }, { value: 'taobao', label: '淘宝' }, { value: 'tmall', label: '天猫' }, { value: 'jd', label: '京东' }, { value: 'xianyu', label: '闲鱼' }, { value: 'xiaohongshu_ec', label: '小红书店铺' }, { value: 'douyin_ec', label: '抖音电商' }]
 function StoredImage({ token, row, deliveryMode }) {
   const [url, setUrl] = useState(null)
   useEffect(() => {

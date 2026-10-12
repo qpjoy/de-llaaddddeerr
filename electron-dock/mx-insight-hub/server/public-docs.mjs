@@ -1511,7 +1511,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                         source: 'hub',
                         servingMode: 'live_with_stored_fallback',
                         contractVersion: 'mx-insight-hub.ecommerce-products.v1',
-                        marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
+                        marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu', 'douyin_ec'],
                         pagination: 'opaque_cursor',
                         idempotencyKey: 'optional',
                         deliveryModes: [...ECOMMERCE_DELIVERY_MODES],
@@ -1662,7 +1662,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         summary: 'Browse the authenticated consumer’s committed ecommerce history',
         description: 'Live ecommerce-granted API key required. No upstream dispatch. Sorted by recorded time descending, request ID descending, ordinal ascending. Cursor binds all filters and page size. Admin edits/global inventory are not exposed by this API.',
         parameters: [
-          { name: 'marketplace', in: 'query', schema: { type: 'string', enum: ['all','taobao','tmall','jd','xianyu','xiaohongshu_ec'], default: 'all' } },
+          { name: 'marketplace', in: 'query', schema: { type: 'string', enum: ['all','taobao','tmall','jd','xianyu','xiaohongshu_ec','douyin_ec'], default: 'all' } },
           { name: 'query', in: 'query', schema: { type: 'string', maxLength: 200 } },
           { name: 'pageSize', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100, default: 10 } },
           ...['minPrice','maxPrice'].map(name => ({ name, in: 'query', schema: { type: 'string' }, description: 'Inclusive nonnegative decimal price, up to two fractional digits.' })),
@@ -2767,7 +2767,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         properties: {
           marketplace: {
             type: 'string',
-            enum: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
+            enum: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu', 'douyin_ec'],
           },
           query: { type: 'string', minLength: 1, maxLength: 200 },
           deliveryMode: {
@@ -2778,7 +2778,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           },
           page: {
             type: 'integer', minimum: 1, maximum: 1000, default: 1,
-            description: 'Numeric page for a first traversal. Do not combine with cursor; continuation cursors are preferred.',
+            description: 'Numeric page for a first traversal. xiaohongshu_ec and douyin_ec require a Hub cursor after page 1. Do not combine page with cursor.',
           },
           cursor: {
             type: 'string', minLength: 1, maxLength: 4096,
@@ -2787,7 +2787,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           sort: {
             type: 'string',
             enum: ['relevance', 'sales_desc', 'price_asc', 'price_desc', 'recent', 'seller_credit', 'price_drop', 'newest'],
-            description: 'Marketplace-specific. taobao/tmall accept relevance, sales_desc, price_asc and price_desc; xianyu accepts relevance, recent, seller_credit, price_asc, price_desc, price_drop and newest; jd and xiaohongshu_ec do not accept sort.',
+            description: 'Marketplace-specific. taobao/tmall accept relevance, sales_desc, price_asc and price_desc; xianyu accepts relevance, recent, seller_credit, price_asc, price_desc, price_drop and newest; jd, xiaohongshu_ec and douyin_ec do not accept sort.',
           },
           price: {
             type: 'object',
@@ -2814,13 +2814,15 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           id: { type: 'string', minLength: 1, maxLength: 256 },
           marketplace: {
             type: 'string',
-            enum: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
+            enum: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu', 'douyin_ec'],
           },
           title: { type: ['string', 'null'], maxLength: 4096 },
           url: { type: ['string', 'null'], format: 'uri', maxLength: 2048,
             description: 'Product web URL. An upstream HTTP(S) URL takes priority; supported marketplaces may derive a web URL from an exact numeric product ID. See urlSource; availability is not verified.' },
           urlSource: { type: ['string', 'null'], enum: ['upstream', 'derived_from_id', null],
             description: 'upstream: source supplied the web URL; derived_from_id: Hub generated it from the product ID. null: no usable URL. May be absent on historical responses; absence does not establish provenance.' },
+          appUrl: { type: 'string', format: 'uri', maxLength: 8192,
+            description: 'Optional upstream product App link, currently identity-matched xhsdiscover or fleamarket. Not a web URL; open only on explicit user action with platform App handling. May be absent, including on historical responses.' },
           pricing: {
             type: 'object',
             additionalProperties: false,
@@ -4966,7 +4968,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
                     contractVersion: { type: 'string', description: 'Stable Hub contract version when the platform exposes one.' },
                     marketplaces: {
                       type: 'array',
-                      items: { type: 'string', enum: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'] },
+                      items: { type: 'string', enum: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu', 'douyin_ec'] },
                     },
                     pagination: { type: 'string', enum: ['opaque_cursor'] },
                     idempotencyKey: { type: 'string', enum: ['optional'] },
@@ -5648,13 +5650,20 @@ curl -sS "$HUB_URL/api/v1/data/source-catalog/$SOURCE_ID" \
     ${ipRiskDocumentationHtml()}
     <section class="doc-page" data-doc-page="ecommerce-treasure-box">
     <h2 id="ecommerce-treasure-box">电商数据</h2>
+    <h3>下游接入从这里开始</h3>
+    <table><thead><tr><th>需求</th><th>接口</th><th>返回 / 数据来源</th></tr></thead><tbody>
+    <tr><td>跨平台使用同一商品结构（推荐）</td><td><code>POST /api/v1/data/ecommerce/products/search</code></td><td>一次选择一个 marketplace；返回统一 items、url、pricing、shop 和 Hub cursor。实时采集或精确查询快照，见 sourceMode。</td></tr>
+    <tr><td>平台特有详情、SKU、评论或指定搜索版本</td><td><code>POST /api/v1/data/native/{endpoint}</code>（下方平台专用目录）</td><td>Hub 托管的固定接口；data 保留该接口业务结构，不能按统一 items 解析。每项独立授权与启用。</td></tr>
+    <tr><td>读取本调用身份已经查询到的商品</td><td><code>GET /api/v1/data/ecommerce/products/items</code></td><td>已存成功观察，不触发采集；all 仅用于这种历史查询。</td></tr>
+    </tbody></table>
+    <p>统一搜索现支持淘宝、天猫、京东、闲鱼、小红书电商、抖音电商；拼多多和快手商品搜索尚未接入。平台专用目录不是其他清洗任务的商品合集，也不代表其中每个平台都已支持统一搜索。手机采集和数据清洗记录走独立的已收录数据合同。</p>
     <p class="lead">面向外部系统的一套稳定商品搜索合同。调用方只认识 Hub 的 <code>ecommerce</code> 授权域、统一商品结构、交付模式与不透明游标，不依赖当前物理数据供应方。</p>
     <div class="notice">产品演示中的角色、球形陈列和动画只是管理端 renderer。外部系统始终调用现有 <code>POST /api/v1/data/ecommerce/products/search</code>；路径和授权规则不变，新增的可选 <code>deliveryMode</code> 只表达 Hub 是否可以访问外部平台，不是供应方选择器。</div>
     <p><code>ecommerce</code> 是稳定的数据域，不是某一家供应方的名字；<code>marketplace</code> 是本次要检索的业务站点，也不是供应方选择器。当前发布只有一个私有合格候选，尚未启用多供应商运行时路由或自动故障转移。第二个候选通过合同验证后，Hub 才会在私有路由层按操作、marketplace、已验证合同版本、凭据健康、熔断/配额、成本和租户策略确定性选择。调用方不能通过请求字段指定供应方，也不需要在新增供应方后修改集成。</p>
     <div class="notice">当前及未来，一次逻辑请求都最多派发给一个外部候选。未来 Hub 只有在尚未创建 provider-call 证据或发出网络请求、且能确定候选不可用时才可改选；一旦外部派发开始，超时、结果未知、可能已消耗供应方额度/内部采购成本或响应不可规范化，都不得自动改投第二家，避免重复成本与语义漂移。</div>
 
     <h3>1. 授权与运行能力预检</h3>
-    <p>使用管理台“API Keys”签发的同一把 Hub Public API Key，而不是任何上游密钥。无需为 ecommerce 再签一把 Key；为其所属调用身份启用 <code>ecommerce</code> 后即可直接调用，轮换 Key 也无需重配。外部电商采集只接受 <code>mih_live_</code>；旧 <code>mih_test_</code> 只是兼容元数据，不是隔离沙箱，capabilities 会把 ecommerce 报为 <code>ready=false</code>。先检查 capabilities 中的 <code>ecommerce</code> 项；Live Key 的 <code>ready=true</code> 表示当前允许实时调度，false 时仍可能按同一请求返回有效存储兜底。</p>
+    <p>使用管理台“API Keys”签发的同一把 Hub Public API Key，而不是任何上游密钥。无需为 ecommerce 再签一把 Key；为其所属调用身份启用 <code>ecommerce</code> 后即可直接调用，轮换 Key 也无需重配。外部电商采集只接受 <code>mih_live_</code>；旧 <code>mih_test_</code> 只是兼容元数据，不是隔离沙箱，capabilities 会把 ecommerce 报为 <code>ready=false</code>。先检查 capabilities 中的 <code>ecommerce</code> 项；Live Key 的 <code>ready=true</code> 表示商品搜索操作已就绪，不保证每个 marketplace 都已启用；具体平台仍可能返回 503。false 时仅允许回退的交付策略可能返回有效存储结果。</p>
     <pre><code>export HUB_URL="https://hub.example.com"
 read -rsp 'MX Insight API Key: ' MX_INSIGHT_API_KEY
 export MX_INSIGHT_API_KEY
@@ -5663,7 +5672,7 @@ printf '\n'
 curl -sS "$HUB_URL/api/v1/data/capabilities" \
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \
   | jq '.data.platforms[] | select(.platform == "ecommerce")'</code></pre>
-    <p>当前合同广告 <code>product_search</code>，支持 <code>taobao</code>、<code>tmall</code>、<code>jd</code>、<code>xiaohongshu_ec</code>、<code>xianyu</code>，分页方式是 <code>opaque_cursor</code>，交付方式是 <code>live_with_stored_fallback</code>，请求策略为 <code>cache_only / cache_first / refresh</code>。</p>
+    <p>当前合同提供 <code>product_search</code>，支持 <code>taobao</code>、<code>tmall</code>、<code>jd</code>、<code>xiaohongshu_ec</code>、<code>xianyu</code>、<code>douyin_ec</code>，分页方式是 <code>opaque_cursor</code>，交付方式是 <code>live_with_stored_fallback</code>，请求策略为 <code>cache_only / cache_first / refresh / live_only</code>。</p>
     <p><code>401 invalid_api_key</code> 表示认证失败：必须使用同一个 Hub 实例签发时仅展示一次的完整 Hub Public API secret；列表中的掩码、admin token 和外部平台密钥都不能调用公开数据接口。认证通过但 Key snapshot 未包含 ecommerce，或 consumer 已撤销该授权时，返回 <code>403 platform_not_granted</code>；后续补授不会扩大旧 snapshot Key，需签发明确包含 ecommerce 的替代 Key。使用兼容 Test Key 发起正式电商搜索则返回 <code>403 test_key_not_supported</code>，且在建立 usage reservation 或调用供应方前拒绝。</p>
     <div class="notice">管理台百宝箱不要求第二把 Key、UUID、费用复选框或人工 consumer 归属核查。选择 <code>refresh</code> 并点击“重新采集最新数据”即明确授权一次可能产生上游成本的新采集；这个唯一入口会自动完成能力预检与必要的只读请求状态 GET，再决定精确重放或一次受控新采集。</div>
 
@@ -5679,20 +5688,20 @@ curl -sS -D /tmp/mx-ecommerce.headers -X POST \
   -H "Idempotency-Key: $REQUEST_KEY" \
   -d "$REQUEST_BODY" | tee /tmp/mx-ecommerce.json | jq</code></pre>
     <table><thead><tr><th>字段</th><th>约束</th><th>平台差异</th></tr></thead><tbody>
-      <tr><td><code>marketplace</code></td><td>必填，使用上方五个稳定枚举之一</td><td>决定可用过滤与排序，不决定授权</td></tr>
+      <tr><td><code>marketplace</code></td><td>必填，使用上方六个稳定枚举之一</td><td>决定可用过滤与排序，不决定授权</td></tr>
       <tr><td><code>query</code></td><td>必填，1–200 字符，NFKC 规范化</td><td>所有平台</td></tr>
-      <tr><td><code>deliveryMode</code></td><td>可选，默认 <code>cache_first</code></td><td><code>cache_only</code> 绝不发起外部采集；<code>cache_first</code> 新鲜快照优先；<code>refresh</code> 绕过新鲜快照并要求显式 Idempotency-Key</td></tr>
-      <tr><td><code>sort</code></td><td>可选；必须是当前 marketplace 支持的值</td><td>淘宝/天猫：<code>relevance|sales_desc|price_asc|price_desc</code>；闲鱼：<code>relevance|recent|seller_credit|price_asc|price_desc|price_drop|newest</code>；京东和小红书电商不接受</td></tr>
+      <tr><td><code>deliveryMode</code></td><td>可选，默认 <code>cache_first</code></td><td><code>cache_only</code> 绝不发起外部采集；<code>cache_first</code> 新鲜快照优先；<code>refresh</code> 绕过新鲜快照，失败时可用存量回退；<code>live_only</code> 只接受实时结果。后两者均要求显式 Idempotency-Key</td></tr>
+      <tr><td><code>sort</code></td><td>可选；必须是当前 marketplace 支持的值</td><td>淘宝/天猫：<code>relevance|sales_desc|price_asc|price_desc</code>；闲鱼：<code>relevance|recent|seller_credit|price_asc|price_desc|price_drop|newest</code>；京东、小红书电商和抖音电商不接受</td></tr>
       <tr><td><code>price</code></td><td>可选 <code>{min,max}</code>，金额必须是十进制字符串</td><td>只支持淘宝/天猫</td></tr>
       <tr><td><code>page</code></td><td>首批兼容字段，1–1000；不能与 cursor 同时出现</td><td>新客户端优先使用 Hub cursor</td></tr>
       <tr><td><code>cursor</code></td><td>只使用上页返回的不透明签名值</td><td>绑定 marketplace/query/sort/price；不要解析或拼接</td></tr>
     </tbody></table>
-    <p>管理台外层分为数据列表与百宝箱。数据列表使用当前管理会话自动加载，默认每页 10 条；手机面板上划读取历史，下拉只采集所选单个平台。公开存量接口仍按客户 API Key 的 consumer 隔离。采集下一页使用新的 Idempotency-Key，并保持 query/sort/price 不变。有 nextCursor 时下滑加载；没有分页证据时可以明确尝试 page+1（小红书需要 continuation，不能跳页）。返回数量由上游决定，Hub 没有固定 10 条限制，也不接受自定义上游 pageSize。</p>
+    <p>管理台默认进入接口调试；产品展示内保留数据列表与百宝箱。数据列表使用当前管理会话自动加载，默认每页 10 条；手机面板上划读取历史，下拉只采集所选单个平台。公开存量接口仍按客户 API Key 的 consumer 隔离。采集下一页使用新的 Idempotency-Key，并保持 query/sort/price 不变。有 nextCursor 时下滑加载；没有分页证据时可以明确尝试 page+1（小红书和抖音电商需要 continuation，不能跳页）。返回数量由上游决定，Hub 没有固定 10 条限制，也不接受自定义上游 pageSize。</p>
     <h3>浏览已存电商数据与双向手机列表</h3>
     <p>文档左侧按 Hub 数据产品与业务站点分类。淘宝、京东、闲鱼是 marketplace；它们不是上游供应商。Hub 抽象能力使用稳定商品结构；平台原生合同保留站点版本字段；供应商兼容合同仅保持已发布的特定协议形状。供应商选择、凭据和路由由 Hub 管理，调用方无需传供应商名称，也不能假定不同版本参数通用。</p>
     <div class="endpoint"><span class="method">GET</span><code>/api/v1/data/ecommerce/products/items</code><p>需要 live Key 和 ecommerce 授权。只查本调用身份的原始成功观察；不调用上游，每次 GET 记录只读 usage。</p></div>
     <table><thead><tr><th>历史查询参数</th><th>约束</th></tr></thead><tbody>
-    <tr><td>marketplace</td><td>all（默认）或 taobao / tmall / jd / xianyu / xiaohongshu_ec</td></tr>
+    <tr><td>marketplace</td><td>all（默认）或 taobao / tmall / jd / xianyu / xiaohongshu_ec / douyin_ec</td></tr>
     <tr><td>query</td><td>可选标题子串，最多 200 字符；空值不筛选</td></tr>
     <tr><td>pageSize</td><td>默认 10，1–100；受调用身份 policy 限制</td></tr>
     <tr><td>minPrice / maxPrice</td><td>可选非负十进制字符串；按保存价格过滤，未知价格不匹配价格区间</td></tr>
@@ -5713,7 +5722,7 @@ curl -sS -D /tmp/mx-ecommerce.headers -X POST \
     <tr><td>taobao / tmall</td><td>sales_desc、relevance、price_asc、price_desc</td><td>price.min / max；page 或 cursor</td></tr>
     <tr><td>xianyu</td><td>relevance、recent、seller_credit、price_asc、price_desc、price_drop、newest</td><td>不支持采集 price；page 或 cursor</td></tr>
     <tr><td>jd</td><td>不传 sort</td><td>不支持采集 price；page 或 cursor</td></tr>
-    <tr><td>xiaohongshu_ec</td><td>不传 sort</td><td>不支持采集 price；第 2 页起必须携带 Hub cursor 中封装的 continuation</td></tr>
+    <tr><td>xiaohongshu_ec / douyin_ec</td><td>不传 sort</td><td>不支持采集 price；第 2 页起必须携带 Hub cursor 中封装的 continuation</td></tr>
     </tbody></table>
     <h4>图片来源、费用与缓存</h4>
     <p>product.images 保留外部原始链接。历史项 media 包含 originalUrl、hubUrl、externalFeeStatus（当前 unknown）、storage=memory_relay、retrievalPolicy=cache_first、staticUrl=null。外部费用不能根据链接判断；图片 GET 不发起商品搜索 API，但外部服务/流量费仍可能存在。unknown 不代表免费，未来接入持久存储时仍保留原链接。</p>
@@ -5723,6 +5732,8 @@ curl -sS -D /tmp/mx-ecommerce.headers -X POST \
     <pre><code>${ecommerceFeedExample.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}</code></pre>
 
     <h3>3. 消费统一响应</h3>
+    <p>网页商品链接统一读取 <code>data.items[].url</code>，并保留 <code>urlSource</code>：<code>upstream</code> 表示源站返回（协议相对链接补 HTTPS）；<code>derived_from_id</code> 表示依据可靠商品 ID 生成，不能作为上游原样返回或页面可访问的证明。没有可靠网页链接时为 null。可选 <code>appUrl</code> 是源站 App 商品链接，不能当作网页地址；客户端应在用户点击后交由对应 App 打开。历史缓存、存量结果及相同幂等键重放保留原字段，不会因升级自动补链。</p>
+    <p>抖音使用 <code>marketplace=douyin_ec</code>，与短视频搜索、TikTok Shop 分开；商品 ID 始终是字符串，不能转成 Number。当前校准样本价格缺失，<code>pricing.current=null</code>，不填零。小红书商品卡使用商品自身 ID 和 seller_id，原价与当前价使用商品价格字段，不使用换算展示价。后续页原样传 <code>data.page.nextCursor</code>，每页使用新的幂等键；无下一页游标时停止。</p>
     <pre><code>{
   "contractVersion": "mx-insight-hub.ecommerce-products.v1",
   "data": {
@@ -5781,11 +5792,12 @@ fi</code></pre>
     <div class="notice"><code>hasMore=false</code> 或 <code>hasMore=null</code> 都必须停止。null 表示 Hub 没有足够证据安全地产生 continuation；客户端不能改用自增页码绕过。</div>
 
     <h3>6. 同一接口的交付与成本语义</h3>
-    <p>请求里的 <code>deliveryMode</code> 是调用意图，响应里的 <code>sourceMode</code> 是实际交付证据，两者不能混为一谈。三种请求策略都使用同一把 Hub Public API Key 和同一路径：</p>
+    <p>请求里的 <code>deliveryMode</code> 是调用意图，响应里的 <code>sourceMode</code> 是实际交付证据，两者不能混为一谈。四种请求策略都使用同一把 Hub Public API Key 和同一路径：</p>
     <table><thead><tr><th>deliveryMode</th><th>外部采集</th><th>行为</th></tr></thead><tbody>
       <tr><td><code>cache_only</code></td><td>禁止</td><td>只查同 consumer、同规范化请求的精确 Hub 快照；新鲜返回 <code>fresh_cache</code>，过期但仍在保留期内返回 <code>stored_fallback</code>，没有快照返回 <code>404 stored_snapshot_not_found</code>。</td></tr>
       <tr><td><code>cache_first</code></td><td>按需</td><td>默认兼容模式；有新鲜快照就直接交付，否则允许一次受治理的外部采集，并在失败时使用精确存量兜底。</td></tr>
       <tr><td><code>refresh</code></td><td>明确允许</td><td>绕过新鲜快照尝试重新采集，必须提供调用方 Idempotency-Key；上游失败时仍可能返回精确存量兜底，因此是否真的调用及成功必须看证据。</td></tr>
+      <tr><td><code>live_only</code></td><td>明确允许</td><td>仅返回本次实时采集结果，必须提供调用方 Idempotency-Key；失败直接返回错误，不使用历史快照兜底。同键重放仍返回原交付。</td></tr>
     </tbody></table>
     <table><thead><tr><th>sourceMode</th><th>新 Hub usage</th><th>新上游调用</th><th>调用方含义</th></tr></thead><tbody>
       <tr><td><code>live</code></td><td>是</td><td>是</td><td>本次完成新的实时采集；上游成本以私有计费证据为准。</td></tr>

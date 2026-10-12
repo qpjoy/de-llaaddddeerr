@@ -268,7 +268,7 @@ function assertExternalCommerceContract(document) {
   ])
   assert.equal(request.properties.pageSize, undefined)
   assert.deepEqual(request.properties.marketplace.enum, [
-    'taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu',
+    'taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu', 'douyin_ec',
   ])
   assert.equal(request.properties.query.maxLength, 200)
   assert.deepEqual(request.properties.deliveryMode.enum, ['cache_only', 'cache_first', 'refresh', 'live_only'])
@@ -322,10 +322,11 @@ function assertExternalCommerceContract(document) {
   const product = document.components.schemas.ExternalCommerceProduct
   assert.equal(product.additionalProperties, false)
   assert.deepEqual(Object.keys(product.properties), [
-    'id', 'marketplace', 'title', 'url', 'urlSource', 'pricing', 'shop', 'images', 'signals', 'attributes',
+    'id', 'marketplace', 'title', 'url', 'urlSource', 'appUrl', 'pricing', 'shop', 'images', 'signals', 'attributes',
   ])
   assert.deepEqual(product.properties.urlSource.enum, ['upstream', 'derived_from_id', null])
   assert.equal(product.required.includes('urlSource'), false, 'historical deliveries remain valid')
+  assert.equal(product.required.includes('appUrl'), false, 'historical deliveries remain valid')
   assert.deepEqual(product.properties.pricing.required, ['current', 'original', 'currency'])
   assert.deepEqual(product.properties.shop.required, ['id', 'name'])
   assert.equal(product.properties.images.maxItems, 20)
@@ -387,7 +388,7 @@ function assertExternalCommerceContract(document) {
     source: 'hub',
     servingMode: 'live_with_stored_fallback',
     contractVersion: 'mx-insight-hub.ecommerce-products.v1',
-    marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu'],
+    marketplaces: ['taobao', 'tmall', 'jd', 'xiaohongshu_ec', 'xianyu', 'douyin_ec'],
     pagination: 'opaque_cursor',
     idempotencyKey: 'optional',
     deliveryModes: ['cache_only', 'cache_first', 'refresh', 'live_only'],

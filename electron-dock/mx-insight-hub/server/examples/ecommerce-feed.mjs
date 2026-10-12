@@ -57,7 +57,7 @@ export const ecommerceFeedExample = String.raw`function createEcommerceFeed(hubU
       upstreamCursor = result.data.page.nextCursor;
       upstreamPage = result.data.page.page + 1;
       upstreamEnded = result.data.page.hasMore === false || upstreamPage > 1000
-        || (filters.marketplace === 'xiaohongshu_ec' && !upstreamCursor);
+        || (['xiaohongshu_ec', 'douyin_ec'].includes(filters.marketplace) && !upstreamCursor);
       pending = null;
       show(queue.splice(0, filters.pageSize || 10), 'top');
     } finally { busy = false; } // rejected or ambiguous request remains pending

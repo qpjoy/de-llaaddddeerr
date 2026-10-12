@@ -89,6 +89,8 @@ test('records use the ecommerce canonical shape with catalog mapping and lineage
     // anything here.
     const raw = marketplace === 'xianyu'
       ? envelope([], { resultList: [{ data: { item: { main: { exContent: flatItem } } } }] })
+      : marketplace === 'douyin_ec'
+        ? envelope([], { promotions: [{ product_id: `${marketplace}-1`, base_info: { title: flatItem.title, price: null } }], has_more: false })
       : envelope([flatItem])
     const normalized = normalizeJustOneProductSearchPayload(raw, request, {
       capturedAt: '2026-09-03T00:00:00Z',
@@ -112,7 +114,7 @@ test('records use the ecommerce canonical shape with catalog mapping and lineage
       record.stableFields.source.connectorContractVersion,
       ['taobao', 'tmall'].includes(marketplace)
         ? 'justone.product-search.v2'
-        : 'justone.product-search.v1',
+        : marketplace === 'xiaohongshu_ec' ? 'justone.xiaohongshu-product-search.v2' : 'justone.product-search.v1',
     )
     assert.match(record.rawPayloadSha256, /^[a-f0-9]{64}$/u)
     assert.match(record.payloadSha256, /^[a-f0-9]{64}$/u)
@@ -138,7 +140,8 @@ test('records use the ecommerce canonical shape with catalog mapping and lineage
     // marketplace's own shape rather than one assumed path.
     assert.equal(
       itemArchive.envelopePointer,
-      marketplace === 'xianyu' ? '$.data.resultList[0]' : '$.data.items[0]',
+      marketplace === 'xianyu' ? '$.data.resultList[0]'
+        : marketplace === 'douyin_ec' ? '$.data.promotions[0]' : '$.data.items[0]',
     )
     assert.equal(record.sourcePointer, '$')
     assert.match(

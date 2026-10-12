@@ -15,7 +15,7 @@ const labels = {
   wechat_mp: '微信公众号', wechat_search: '微信搜一搜', twitter: 'X / Twitter', facebook: 'Facebook',
   instagram: 'Instagram', tiktok: 'TikTok', youtube: 'YouTube', reddit: 'Reddit', zhihu: '知乎',
   telegram: 'Telegram 会话', public_opinion: '全国舆情', ecommerce: '电商商品', mobile_commerce: '手机电商采集', social: '社交账号',
-  taobao: '淘宝', tmall: '天猫', jd: '京东', xiaohongshu_ec: '小红书店铺', xianyu: '闲鱼',
+  taobao: '淘宝', tmall: '天猫', jd: '京东', xiaohongshu_ec: '小红书店铺', xianyu: '闲鱼', douyin_ec: '抖音电商',
 }
 const fail = message => { throw new AppError(400, 'invalid_request', message) }
 function strings(value, name, max = 100, length = 100) {

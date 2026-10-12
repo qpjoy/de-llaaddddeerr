@@ -1923,6 +1923,45 @@ test('an unreleased resource is not reachable through the gateway', async () => 
   )
 })
 
+test('unpriced Douyin fails before dispatch while JD works, then priced Douyin replays exactly', async () => {
+  let dispatches = 0
+  const adapter = new JustOneAdapter({ token: 'fixture-secret', fetchImpl: async url => {
+    dispatches += 1
+    return Response.json({ code: 0, message: null, recordTime: null, data: String(url).includes('/douyin-ec/')
+      ? { promotions: [{ product_id: '3841000000000000001', promotion_id: '3842000000000000002', base_info: {
+        title: 'Synthetic product', detail_url: 'https://example.invalid/product/3841000000000000001', price: null,
+      } }], has_more: false }
+      : { items: [{ skuId: '123456', title: 'Synthetic JD product' }] } })
+  } })
+  const state = await fixture({ adapter })
+  const control = new MemoryExternalPlatformControlStore()
+  const gateway = new ExternalPlatformGateway({ usageStore: state.usageStore, platformStore: state.platformStore,
+    adapter, config: state.gatewayConfig, apiKeyPepper: PEPPER, reservationLeaseMs: 150_000,
+    operationControlStore: control, logger: { warn() {} } })
+  const path = '/api/v1/data/ecommerce/products/search'
+  const body = { marketplace: 'douyin_ec', query: '手机', deliveryMode: 'live_only' }
+  await assert.rejects(() => gateway.search(state.context, { body, path, idempotencyKey: 'douyin-unpriced-001' }),
+    { code: 'external_platform_cost_control_unavailable' })
+  assert.equal(dispatches, 0)
+  assert.equal(state.platformStore.calls.size, 0)
+  const jd = await gateway.search(state.context, { body: { marketplace: 'jd', query: '手机' }, path, idempotencyKey: 'jd-legacy-price-001' })
+  assert.equal(jd.body.data.items[0].id, '123456')
+  assert.equal(dispatches, 1)
+  await control.updatePolicy('justone', JUSTONE_OPERATION, { expectedRevision: 0, desiredState: 'active', reason: 'fixture calibration',
+    priceBook: { currency: 'CNY', pricingAsOf: '2026-10-12', monthlyBudgetMinor: 10000, monthlySubsidyBudgetMinor: 10000, unitCostMinorByEndpoint: {
+      ...Object.fromEntries(Object.entries(state.gatewayConfig.billing.unitCostMinorByEndpoint).filter(([key]) => key.endsWith('.product-search.v1'))),
+      'douyin-ec.product-search.v1': 1,
+    } } }, { runtime: { config: state.gatewayConfig, credentialConfigured: true } })
+  const input = { body, path, idempotencyKey: 'douyin-priced-001' }
+  const live = await gateway.search(state.context, input)
+  assert.equal(live.body.data.items[0].id, '3841000000000000001')
+  assert.equal(live.body.data.items[0].urlSource, 'upstream')
+  const replay = await gateway.search(state.context, input)
+  assert.deepEqual(replay.body, live.body)
+  assert.equal(dispatches, 2)
+  await adapter.close()
+})
+
 test('capabilities report readiness per operation, not one flag for the whole platform', async () => {
   const state = await fixture({ adapter: { async searchProducts() { assert.fail('unreachable') } } })
   const store = new MemoryExternalPlatformControlStore()

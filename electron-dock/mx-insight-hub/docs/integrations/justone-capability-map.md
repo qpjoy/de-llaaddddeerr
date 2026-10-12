@@ -2,10 +2,9 @@
 
 2026-09-26 update: [Night-All supplier migration](night-all-provider-migration.md) adds the 11 source-defined JustOne logical endpoints as fixed native contracts, disabled initially by migration 112. This is separate from the released ecommerce operations below; it does not switch legacy search responses or imply the complete vendor catalog is available.
 
-Status: five marketplace product-search mappings verified on the current single-provider JustOne runtime;
-every other listed capability is inventory only.
+Status: six unified marketplace product-search mappings implemented on the current single-provider JustOne runtime. Deployment and operation readiness remain independently gated. The fixed native ecommerce catalog exposes separate per-interface contracts.
 
-Last reviewed: 2026-09-07.
+Last reviewed: 2026-10-12. See [calibration and rollout evidence](../operations/ecommerce-contracts-2026-10-12.md).
 
 Primary upstream references:
 
@@ -56,8 +55,10 @@ it is not the `xiaohongshu` social-note platform and is never a fallback for Tik
 | `taobao` | `taobao-tmall.product-search.v1` | `justone.product-search.v2` | GET | `data.model.itemList`, `data.items`, `data.itemList` | sort + price; default `sales_desc`; `data.model.page` becomes the opaque Hub cursor | `source-catalog-0058` |
 | `tmall` | `taobao-tmall.product-search.v1` | `justone.product-search.v2` | GET | `data.model.itemList`, `data.items`, `data.itemList` | same endpoint with Tmall flag; sort + price; `data.model.page` becomes the opaque Hub cursor | `source-catalog-0059` |
 | `jd` | `jd.product-search.v1` | `justone.product-search.v1` | GET | `data.items`, `data.list`, `data.products` | provider default ordering | `source-catalog-0060` |
-| `xiaohongshu_ec` | `xiaohongshu-ec.product-search.v1` | `justone.product-search.v1` | GET | `data.items`, `data.products` | continuation remains inside opaque Hub cursor | `source-catalog-0064` |
-| `xianyu` | `xianyu.product-search.v1` | `justone.product-search.v1` | GET | `data.items`, `data.list` | seven reviewed sort values | `source-catalog-0073` |
+| `xiaohongshu_ec` | `xiaohongshu-ec.product-search.v1` | `justone.xiaohongshu-product-search.v2` | GET | `data.data.module.data`, `data.items`, `data.products` | continuation remains inside opaque Hub cursor | `source-catalog-0064` |
+| `xianyu` | `xianyu.product-search.v1` | `justone.product-search.v1` | GET | `data.resultList` | seven reviewed sort values | `source-catalog-0073` |
+
+| `douyin_ec` | `douyin-ec.product-search.v1` | `justone.product-search.v1` | GET | `data.promotions` | keyword/page; continuation in opaque Hub cursor after page 1; no sort/price filter | `source-catalog-0062` |
 
 The provider API documents response `data` broadly. Hub accepts only the item-container paths above. A new
 shape is a contract change: capture a redacted fixture, add a narrow path, run adapter/contract/ingest tests,
@@ -176,8 +177,7 @@ request.
 
 ## 4. Ecommerce candidates
 
-The provider catalog contains more ecommerce coverage than Hub currently exposes. The following inventory is
-grouped by the likely Hub product contract, not by raw route count.
+The following inventory describes candidates for **unified product contracts**, not native-route availability. The fixed native catalog already includes Taobao V2, Douyin, JD, Xiaohongshu ecommerce, 1688, AliExpress, Shopee, TikTok Shop and Amazon endpoints with their own authorization and pricing. They are not automatically normalized or a cleaning-task collection. Pinduoduo/Kuaishou product search has no reviewed route in the current pinned catalog; social Kuaishou endpoints do not establish ecommerce support.
 
 | Provider family | Candidate abilities | Hub adoption note |
 | --- | --- | --- |
@@ -185,7 +185,7 @@ grouped by the likely Hub product contract, not by raw route count.
 | JD | V2 search, detail versions, price, comments, shop lists | Price freshness and product/detail identity need explicit tests. |
 | Xianyu | product detail | Second-hand seller/privacy fields need a stricter public allowlist. |
 | Xiaohongshu ecommerce | search and product-oriented store data | Keep ecommerce identity separate from social-note identity. |
-| Douyin ecommerce | product search, detail, SKU, comments, shop data | Catalog row exists, but no Hub runtime marketplace is released. |
+| Douyin ecommerce | product search, detail, SKU, comments, shop data | Unified product search now uses `douyin_ec`; detail/SKU/comments remain separate native contracts and never auto-fill a search response. |
 | Dewu | search/detail commerce data | Candidate; no Hub contract. |
 | 1688 | wholesale search/detail | Candidate; business-price and company fields need a new schema. |
 | AliExpress | cross-border search/detail | Candidate; currencies, locale and region must be explicit. |

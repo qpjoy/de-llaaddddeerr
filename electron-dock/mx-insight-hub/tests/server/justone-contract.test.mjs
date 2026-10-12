@@ -52,6 +52,7 @@ test('contract pins the provider, operation and official V1 endpoint paths', () 
       jd: '/api/jd/search-item-list/v1',
       xiaohongshu_ec: '/api/xiaohongshu-ec/search-products/v1',
       xianyu: '/api/xianyu/search-item-list/v1',
+      douyin_ec: '/api/douyin-ec/search-item-list/v1',
     },
   )
   assert.ok(Object.values(JUSTONE_ENDPOINTS).every((entry) => (
@@ -65,7 +66,8 @@ test('contract pins the provider, operation and official V1 endpoint paths', () 
       taobao: 'justone.product-search.v2',
       tmall: 'justone.product-search.v2',
       jd: 'justone.product-search.v1',
-      xiaohongshu_ec: 'justone.product-search.v1',
+      xiaohongshu_ec: 'justone.xiaohongshu-product-search.v2',
+      douyin_ec: 'justone.product-search.v1',
       xianyu: 'justone.product-search.v1',
     },
   )

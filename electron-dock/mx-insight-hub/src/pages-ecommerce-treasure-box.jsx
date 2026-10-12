@@ -35,6 +35,7 @@ const MARKETPLACES = [
   { value: 'tmall', label: '天猫', catalogKey: 'source-catalog-0059', filters: '排序 · 价格' },
   { value: 'jd', label: '京东', catalogKey: 'source-catalog-0060', filters: '平台默认' },
   { value: 'xiaohongshu_ec', label: '小红书店铺', catalogKey: 'source-catalog-0064', filters: '平台默认' },
+  { value: 'douyin_ec', label: '抖音电商', catalogKey: 'source-catalog-0062', filters: '平台默认' },
   { value: 'xianyu', label: '闲鱼', catalogKey: 'source-catalog-0073', filters: '排序' },
 ]
 
@@ -791,8 +792,10 @@ function ResultEvidence({ product, evidence }) {
         <div><dt>销量信号</dt><dd>{product.signals?.sales || '—'}</dd></div>
         <div><dt>评价信号</dt><dd>{product.signals?.reviewCount || '—'}</dd></div>
         <div><dt>位置</dt><dd>{product.signals?.location || '—'}</dd></div>
+        <div><dt>网页链接来源</dt><dd>{product.urlSource === 'upstream' ? '原始返回' : product.urlSource === 'derived_from_id' ? '根据商品 ID 生成' : product.url ? '历史来源未标记' : '未提供'}</dd></div>
       </dl>
       {product.url ? <a className="qp-button qp-button--ghost qp-button--sm" href={product.url} target="_blank" rel="noreferrer">查看源页面<ArrowSquareOut size={14} aria-hidden="true" /></a> : null}
+      {product.appUrl ? <a className="qp-button qp-button--ghost qp-button--sm" href={product.appUrl} rel="noreferrer">在 App 中查看<ArrowSquareOut size={14} aria-hidden="true" /></a> : null}
     </div>
   )
 }
@@ -1437,7 +1440,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
   }
   const canContinue = phase !== 'searching' && products.length > 0 && resultScopeRef.current === resultScope && (storedOnly || !hasAmbiguousLiveRequest)
     && mode === 'hub_live' && resultPage?.hasMore !== false
-    && (storedOnly ? Boolean(resultPage?.nextCursor) : (Boolean(resultPage?.nextCursor) || (marketplace !== 'xiaohongshu_ec' && Number(resultPage?.page || 1) < 1000)))
+    && (storedOnly ? Boolean(resultPage?.nextCursor) : (Boolean(resultPage?.nextCursor) || (!['xiaohongshu_ec', 'douyin_ec'].includes(marketplace) && Number(resultPage?.page || 1) < 1000)))
   const loadNext = () => {
     if (!canContinue) return
     if (storedOnly) { void loadStored(true); return }
@@ -1574,7 +1577,7 @@ function EcommerceAcquisitionPanel({ notify, compact = false, controllerRef, onD
             <span className="mih-treasure-query"><MagnifyingGlass size={17} aria-hidden="true" /><input className="qp-input" value={query} maxLength="200" disabled={semanticsLocked} onChange={(event) => changeQuery(event.target.value)} placeholder="例如：便携相机" /></span>
           </Field>
           {!storedOnly && mode === 'hub_live' ? <>
-            <Field label="起始数据页" hint={marketplace === 'xiaohongshu_ec' ? '小红书从第 1 页开始，再使用数据服务 continuation。' : '刷新从此页重新采集；下一页使用独立幂等键。'}><input className="qp-input" type="number" min="1" max="1000" value={marketplace === 'xiaohongshu_ec' ? '1' : upstreamPage} disabled={semanticsLocked || marketplace === 'xiaohongshu_ec'} onChange={event => { setUpstreamPage(event.target.value); if (compact) onFilterChange?.('page', event.target.value) }} /></Field>
+            <Field label="起始数据页" hint={['xiaohongshu_ec', 'douyin_ec'].includes(marketplace) ? '小红书和抖音电商从第 1 页开始，后续使用 Hub cursor。' : '刷新从此页重新采集；下一页使用独立幂等键。'}><input className="qp-input" type="number" min="1" max="1000" value={['xiaohongshu_ec', 'douyin_ec'].includes(marketplace) ? '1' : upstreamPage} disabled={semanticsLocked || ['xiaohongshu_ec', 'douyin_ec'].includes(marketplace)} onChange={event => { setUpstreamPage(event.target.value); if (compact) onFilterChange?.('page', event.target.value) }} /></Field>
             {['taobao', 'tmall'].includes(marketplace) ? <div className="mih-commerce-price"><Field label="最低价"><input className="qp-input" type="number" min="0" value={minPrice} disabled={semanticsLocked} onChange={event => { setMinPrice(event.target.value); if (compact) onFilterChange?.('minPrice', event.target.value) }} /></Field><Field label="最高价"><input className="qp-input" type="number" min="0" value={maxPrice} disabled={semanticsLocked} onChange={event => { setMaxPrice(event.target.value); if (compact) onFilterChange?.('maxPrice', event.target.value) }} /></Field></div> : null}
           </> : null}
           {storedOnly ? <p>仅查询当前调用身份已提交的商品记录，按入库请求时间倒序、同批按数据服务顺序展示。不会调用数据服务。</p> : null}

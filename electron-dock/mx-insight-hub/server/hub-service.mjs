@@ -2652,7 +2652,7 @@ export class HubService {
     if (!deleting) {
       assert(typeof body.title === 'string' && body.title.trim().length > 0 && body.title.length <= 1000, 400, 'invalid_product', 'Title must be 1–1000 characters')
       assert(typeof body.price === 'string' && /^\d{1,12}(?:\.\d{1,2})?$/.test(body.price), 400, 'invalid_product', 'Price must be a decimal amount')
-      assert(!manual || ['taobao','tmall','jd','xianyu','xiaohongshu_ec'].includes(body.marketplace), 400, 'invalid_product', 'Choose one marketplace')
+      assert(!manual || ['taobao','tmall','jd','xianyu','xiaohongshu_ec','douyin_ec'].includes(body.marketplace), 400, 'invalid_product', 'Choose one marketplace')
       product = { ...(product || { id: requestId, marketplace: body.marketplace, images: [] }), title: body.title.trim(), pricing: { ...product?.pricing, current: body.price, currency: 'CNY' } }
     }
     const saved = await this.store.saveAdminEcommerceItem({ requestId, ordinal, product, manual, deleted: deleting, revision })

@@ -305,7 +305,13 @@ function archiveObjects({
   })
   // Native social payloads have no reviewed product identity. Keep call
   // evidence without routing them through the ecommerce item projector.
-  if (request.contractVersion === 'mx-insight-hub.native-forwarding.v1') return [archive]
+  if (request.contractVersion === 'mx-insight-hub.native-forwarding.v1') {
+    const capturedDate = new Date(capturedAt).toISOString().slice(0, 10)
+    return [{ ...archive, marketplace: request.marketplace, endpointVersion: request.endpointVersion,
+      capturedDate, sourceKey: `native:${request.key}`,
+      archivePath: `justone/${request.marketplace}/native/${request.key}/${capturedDate}/responses/${archive.rawPayloadSha256}.json`,
+    }]
+  }
   if (request.contractVersion === 'mx-insight-hub.xiaohongshu-discovery.v1') {
     const capturedDate = new Date(capturedAt).toISOString().slice(0, 10)
     return [{ ...archive, marketplace: 'xiaohongshu', endpointVersion: request.endpointVersion,

@@ -11,6 +11,7 @@ export const JUSTONE_MARKETPLACES = [
   { key: 'taobao', label: '淘宝 / 天猫' },
   { key: 'jd', label: '京东' },
   { key: 'xiaohongshu_ec', label: '小红书电商' },
+  { key: 'douyin_ec', label: '抖音电商' },
   { key: 'xianyu', label: '闲鱼' },
 ]
 
@@ -21,7 +22,7 @@ export const EXTERNAL_PLATFORM_CAPABILITY_MATRIX = [
     label: '电商商品搜索',
     hubContractVersion: 'mx-insight-hub.ecommerce-products.v1',
     providerMapping: 'direct_versioned_adapter',
-    scope: 'taobao/tmall, jd, xiaohongshu_ec, xianyu',
+    scope: 'taobao/tmall, jd, xiaohongshu_ec, xianyu, douyin_ec',
     status: 'implemented',
     fallback: 'exact_fingerprint_snapshot',
     note: '公开接口保持 Hub 稳定格式；JustOne endpoint/version 仅作为内部映射。',

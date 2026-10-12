@@ -1,6 +1,12 @@
 # 电商数据：管理列表与平台采集
 
-## 当前交互（2026-09-12 修订）
+## 2026-10-12 更新
+
+统一商品搜索增加 `douyin_ec`，与淘宝、天猫、京东、闲鱼、小红书电商共享商品字段和游标合同。网页 `url` 带 `urlSource`；可选 `appUrl` 保留经身份校验的 App 商品链接。原生接口归档补齐 UTC 日期，解决小红书截图中的日期校验失败。历史快照不重写。
+
+外层当前优先进入接口调试，并将「统一商品搜索」排在首位。平台专用原生接口、统一搜索和已收录商品是三个不同入口；原生目录不是清洗任务合集。详见[校准、兼容性及部署说明](operations/ecommerce-contracts-2026-10-12.md)。以下保留原产品展示的数据列表/百宝箱交互说明。
+
+## 产品展示交互（2026-09-12 修订）
 
 外层“数据列表 / 百宝箱”标签默认进入数据列表。列表使用当前 Admin Token 会话，自动读取全部平台的 Hub 已存商品，不要求客户 Public API Key。标题筛选默认空，每页默认 10，可设 1–100；筛选变化重新读取，游标不会跨条件复用。读取失败显示 HTTP 错误和重试入口，与空数据明确区分。
 
@@ -21,7 +27,7 @@
 
 ## 参数覆盖与边界
 
-商品搜索已发布淘宝、天猫、京东、小红书店铺、闲鱼。规范请求 query→keyword，page→page；淘宝/天猫 price.min/max→startPrice/endPrice，天猫标记由 marketplace 设置；淘宝/闲鱼 sort 按受审查枚举映射；小红书 searchId 包在签名 continuation 中。上游没有公开可设置的 pageSize，不承诺每页固定返回 10 条。
+商品搜索合同支持淘宝、天猫、京东、小红书电商、闲鱼、抖音电商；本次增量仍待部署并配置抖音采购价格。规范请求 query→keyword，page→page；淘宝/天猫 price.min/max→startPrice/endPrice，天猫标记由 marketplace 设置；淘宝/闲鱼 sort 按受审查枚举映射；小红书和抖音 searchId 包在签名 continuation 中，第 2 页起使用 Hub cursor。上游没有公开可设置的 pageSize，不承诺每页固定返回 10 条。
 
 [官方淘宝搜索 V1](https://docs.justoneapi.com/zh/api/taobao-and-tmall/product-search-v1)确认 page、sort、tmall、startPrice/endPrice。
 [官方闲鱼目录](https://docs.justoneapi.com/en/api/xianyu-goofish/)确认关键词搜索支持 page/sort。

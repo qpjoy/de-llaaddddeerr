@@ -1614,7 +1614,9 @@ function ExternalPlatformOperationCard({
             key={endpointKey}
             className="mih-external-operation-endpoint-price"
             label={`${endpointKey} 单次价格`}
-            hint={operation.release.optionalEndpointKeys?.includes(endpointKey) ? '按用户 ID 查询笔记指标的独立接口；每页单独计采购成本。留空时该分页接口不可用，原 note_id 详情仍可用且不会自动补数。' : operation.allowZeroCost ? '此接口允许经复核的 0 元价格；仍需明确发布。' : '必须大于 0；与这个上游 endpoint 精确绑定。'}
+            hint={endpointKey === 'douyin-ec.product-search.v1'
+              ? '抖音电商商品搜索，每页独立计采购成本。填写经复核的大于 0 的价格后发布；留空只停用抖音采集，不影响原有商品平台。'
+              : operation.release.optionalEndpointKeys?.includes(endpointKey) ? '按用户 ID 查询笔记指标的独立接口；每页单独计采购成本。留空时该分页接口不可用，原 note_id 详情仍可用且不会自动补数。' : operation.allowZeroCost ? '此接口允许经复核的 0 元价格；仍需明确发布。' : '必须大于 0；与这个上游 endpoint 精确绑定。'}
           >
             <input
               className="qp-input mih-mono"
