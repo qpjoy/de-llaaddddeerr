@@ -99,7 +99,7 @@ export function CommercePage({token,session,onUnauthorized,onSessionChanged,quer
         {!subscriptions.length&&tenantId?<section className="mih-shop-empty"><h2>还没有已开通的订阅</h2><button className={primary} onClick={()=>navigate('store')}>去商城看看</button></section>:null}
         <section className="mih-shop-orders"><h2>我的订单</h2><div className="qp-table-wrap"><table className="qp-table"><thead><tr><th>商品</th><th>金额</th><th>状态</th><th>操作</th></tr></thead><tbody>{purchases.orders.map(o=><tr key={o.id}><td><strong>{o.product.name}</strong><span className="mih-shop-date">{stamp(o.createdAt)}</span><details><summary>订单编号</summary><span className="mih-shop-id">{o.id}</span></details></td><td>{money(o.product.amountMinor)}</td><td>{status[o.status]}</td><td><div className="mih-shop-actions">{!o.deliveredAt?<><button className={secondary} disabled={busy} onClick={()=>action(o,'refresh')}>查询付款状态</button>{o.paymentStatus!=='paid'?<button className={primary} disabled={busy} onClick={()=>action(o,'checkout')}>去付款</button>:null}</>:<span>已完成</span>}</div></td></tr>)}</tbody></table></div>{!purchases.orders.length?<p>暂无订单</p>:null}</section>
       </>:null}
-      {view==='manage'&&admin?<><div className="mih-shop-admin-heading"><h2>商品管理</h2><button className={primary} onClick={()=>setEditing({sku:'',revision:0,name:'',description:'',status:'draft',harborListed:false,amountMinor:3399900,months:12,quota:100000,dailyLimit:null,activationMode:'immediate'})}>创建商品</button></div><div className="mih-shop-grid">{data.catalog.items.map(item=><section className="qp-panel mih-shop-card" key={item.sku}><span className="qp-tag">{productStatus[item.status]}</span><h2>{item.name}</h2><p>数港：{item.status==='published'&&item.harborListed!==false?'已上架':'未上架'}</p><p>{money(item.amountMinor)} / {period(item)} · {item.quota.toLocaleString()} 次</p><p>{item.dailyLimit?`每日最多 ${item.dailyLimit} 次`:'不单设每日上限'} · {item.kind==='trial'?'每个空间限领一次，领取后立即生效':item.activationMode==='immediate'?'付款后立即生效':'按已购期限顺延'}</p><div className="mih-shop-actions"><button className={secondary} onClick={()=>setEditing(item)}>编辑商品</button><button className={secondary} disabled={item.status!=='published'||item.kind==='trial'} onClick={()=>buy(item,true)}>创建 ¥1 验收订单</button></div></section>)}</div><IpRiskDeliverySettings token={token}/></>:null}
+      {view==='manage'&&admin?<><ProductManagement items={data.catalog.items} onEdit={setEditing} onAcceptance={item=>buy(item,true)}/><IpRiskDeliverySettings token={token}/></>:null}
     </>}
     {selected?<Modal title={`订阅 ${selected.item.name}`} onClose={busy?undefined:()=>setSelected(null)} closeOnBackdrop={!busy} closeOnEscape={!busy} footer={<button className={primary} disabled={busy||!canBuy||!tenantId||(selected.item.kind!=='trial'&&!data.catalog.purchaseAvailable)||selected.item.status!=='published'} onClick={purchase}>{busy?'正在处理…':selected.item.kind==='trial'?'确认免费领取':`确认并支付 ${money(selected.acceptance?100:selected.item.amountMinor)}`}</button>}>
       <div className="mih-shop-checkout"><div className="mih-shop-checkout-summary"><ShieldCheck size={36}/><div><strong>{term(selected.item)} · {selected.item.quota.toLocaleString()} 次</strong><p>网页查询与 API 接入 · 空间共享</p></div></div><DropdownField portalMenu label="使用空间" value={tenantId} options={tenants.map(t=>({value:t.id,label:t.name}))} onChange={value=>setQuery({tenantId:value})}/><p>{selected.item.kind==='trial'?'免费领取后自动为空间开通，每个空间限领一次。':'付款后自动为空间开通，无需选择调用者。'}</p>
@@ -111,6 +111,29 @@ export function CommercePage({token,session,onUnauthorized,onSessionChanged,quer
     </Modal>:null}
     {editing?<ProductEditor item={editing} token={token} onClose={()=>setEditing(null)} onSaved={()=>{setEditing(null);state.refresh()}}/>:null}
   </div>
+}
+
+function ProductManagement({items,onEdit,onAcceptance}) {
+  const [saleStatus,setSaleStatus]=useState('published'),[search,setSearch]=useState(''),[visibility,setVisibility]=useState('all')
+  const listed=item=>item.status==='published'&&item.harborListed!==false
+  const needle=search.trim().toLocaleLowerCase()
+  const visible=items.filter(item=>(saleStatus==='all'||item.status===saleStatus)&&(!needle||`${item.name} ${item.sku}`.toLocaleLowerCase().includes(needle))&&(visibility==='all'||listed(item)===(visibility==='listed')))
+  const filters=[['published','已上架'],['draft','草稿'],['retired','已下架'],['all','全部']]
+  return <section aria-label="商品管理目录">
+    <div className="mih-shop-admin-heading"><div><h2>商品管理</h2><p className="mih-shop-admin-hint">按销售状态管理商品，下架后已购订阅仍可使用。</p></div><button className={primary} onClick={()=>onEdit({sku:'',revision:0,name:'',description:'',status:'draft',harborListed:false,amountMinor:3399900,months:12,quota:100000,dailyLimit:null,activationMode:'immediate'})}>创建商品</button></div>
+    <div className="mih-shop-status-filter" role="group" aria-label="商品销售状态">{filters.map(([value,label])=><button key={value} type="button" aria-pressed={saleStatus===value} onClick={()=>setSaleStatus(value)}>{label}<span>{value==='all'?items.length:items.filter(item=>item.status===value).length}</span></button>)}</div>
+    <div className="mih-shop-catalog-toolbar"><Field label="搜索商品"><input type="search" className="qp-input" placeholder="商品名称或标识" value={search} onChange={e=>setSearch(e.target.value)}/></Field><DropdownField portalMenu label="DataPort 展示" value={visibility} options={[{value:'all',label:'全部商品'},{value:'listed',label:'对外展示'},{value:'hidden',label:'不对外展示'}]} onChange={setVisibility}/></div>
+    <p className="mih-shop-admin-hint" role="status">当前显示 {visible.length} 件商品</p>
+    <div className="mih-shop-grid mih-shop-catalog">{visible.map(item=><section className="qp-panel mih-shop-card" key={item.sku}>
+      <div className="mih-shop-card-top"><span className={`qp-tag mih-shop-product-status is-${item.status}`}>{productStatus[item.status]}</span><span className="mih-shop-admin-hint">{item.kind==='trial'?'免费试用':'付费订阅'}</span></div>
+      <h2>{item.name}</h2><span className="mih-shop-sku">{item.sku}</span>
+      <p>DataPort：{listed(item)?'对外展示':'不对外展示'}</p><p>{money(item.amountMinor)} / {period(item)} · {item.quota.toLocaleString()} 次</p>
+      <p>{item.dailyLimit?`每日最多 ${item.dailyLimit.toLocaleString()} 次`:'不单设每日上限'} · 有效期 {term(item)}</p>
+      <p>{item.kind==='trial'?'每个空间限领一次，领取后立即生效':item.activationMode==='immediate'?'付款后立即生效':'按已购期限顺延'}</p>
+      <div className="mih-shop-actions"><button className={secondary} onClick={()=>onEdit(item)}>编辑商品</button><button className={secondary} disabled={item.status!=='published'||item.kind==='trial'} onClick={()=>onAcceptance(item)}>创建 ¥1 验收订单</button></div>
+    </section>)}</div>
+    {!visible.length?<div className="mih-shop-catalog-empty"><h3>{needle||visibility!=='all'?'没有匹配的商品':`暂无${productStatus[saleStatus]||''}商品`}</h3><p>切换销售状态或调整搜索条件查看其他商品。</p>{needle||visibility!=='all'?<button className={secondary} onClick={()=>{setSearch('');setVisibility('all')}}>清除搜索和展示筛选</button>:null}</div>:null}
+  </section>
 }
 
 function ProductEditor({item,token,onClose,onSaved}) {

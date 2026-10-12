@@ -293,7 +293,13 @@ test("production readiness depends on the migrated database, not external enroll
     },
     staticRoot: root,
   });
-  assert.equal((await fetch(base + "/")).status, 200);
+  const page = await fetch(base + "/");
+  assert.equal(page.status, 200);
+  const csp = page.headers.get("content-security-policy");
+  assert.match(csp, /img-src 'self' data: https:\/\/tile\.openstreetmap\.org;/);
+  assert.match(csp, /script-src 'self';/);
+  assert.match(csp, /connect-src 'self';/);
+  assert.match(csp, /frame-src 'none';/);
   assert.equal((await fetch(base + "/ready")).status, 200);
   for (const route of [
     "/auth/sso/login",

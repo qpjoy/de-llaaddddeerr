@@ -13,5 +13,5 @@ export function ipLocation(profile: { longitude?: unknown; latitude?: unknown; c
   url.searchParams.set("bbox", bounds.join(","));
   url.searchParams.set("layer", "mapnik");
   if (wgs84) url.searchParams.set("marker", `${lat},${lng}`);
-  return { lng, lat, crs, wgs84, embed: supported ? url.href : null };
+  return { lng, lat, crs, wgs84, bounds, embed: supported ? url.href : null };
 }

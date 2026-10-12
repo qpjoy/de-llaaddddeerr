@@ -379,9 +379,9 @@ DataPort 对外、Hub 对内的边界不等于将 Hub 所有 Admin 产品直接�
 
 - `/#/overview`：当前空间近 7/30 个 UTC 自然日的请求、完成、释放、处理中/待确认、每日趋势、服务汇总及本期订阅。按 `usage_requests` 全量聚合，不能把最近 50 条记录当作总量。请求统计与订阅 `quota/used/held` 分开；无 `billing.read` 不请求订阅数据，无 `usage.read` 不请求用量。零调用、加载失败、无权限分别展示。
 - `/#/team`：读取当前空间实际成员、账号状态、自己的角色及服务端角色权限矩阵。这里提供权限查看；邀请、变更角色仍使用已有后台管理流程，未把平台级 `/members`、授权写接口或 Hub 邀请链接转发至 DataPort。完整客户自助成员管理仍需独立实现邀请接受和变更审计，不以演示按钮冒充上线能力。
-- GIS：从已交付画像的 `longitude/latitude` 生成 OpenStreetMap 区域视图，点击“加载地图”才访问底图，不重新查询 IP、不消耗次数，不发送 IP、Key 或请求编号。零坐标合法；缺失、字符串、越界坐标不生成地图。不猜测城市中心、不补造坐标系。来源未标注 CRS 时仅展示宽范围、不落精确点；明确 WGS84/EPSG:4326 才落点，其他已声明坐标系或超出底图纬度范围只展示原字段。IP 归属地不代表使用者实时位置。当前 Baidu 适配器未确认 CRS，因此使用区域参考模式。底图嵌入依据 [OpenStreetMap 官方说明](https://wiki.openstreetmap.org/wiki/Export)，CSP 仅放行该地图域名的 frame；地图可用性依赖浏览器外网连接，原画像读取独立。
+- GIS：从已交付画像的 `longitude/latitude` 生成 OpenStreetMap 区域视图，按 2026-10-12 用户最新要求，画像展示后自动展开并访问底图（替代此前手动加载约定），不重新查询 IP、不消耗次数，不发送 IP、Key 或请求编号。零坐标合法；缺失、字符串、越界坐标不生成地图。不猜测城市中心、不补造坐标系。来源未标注 CRS 时仅展示宽范围、不落精确点；明确 WGS84/EPSG:4326 才落点，其他已声明坐标系或超出底图纬度范围只展示原字段。IP 归属地不代表使用者实时位置。当前 Baidu 适配器未确认 CRS，因此使用区域参考模式。当前使用站内 Leaflet 渲染，底图使用遵循 [OpenStreetMap 瓦片策略](https://operations.osmfoundation.org/policies/tiles/)，CSP 仅额外放行官方 tile 图片域名、禁用外部 frame；地图可用性依赖浏览器外网连接，原画像读取独立。
 - Hub 商城 `商品管理 → 编辑商品 → 数港销售` 控制 `harborListed`。必须同时满足 `status=published` 和 `harborListed!=false` 才对 DataPort 展示并允许新购买；可信 Portal principal 决定销售入口，客户 body/header 不能伪造。修改沿用商品 revision CAS 与审计。旧商品缺省保持已上架，新商品缺省不在数港上架；旧管理客户端遗漏该字段时保留原值。商品仍写原 JSONB，无新迁移、不改订单快照。原请求幂等回放、已创建订单付款和已购订阅不受数港下架影响。当前创建商品仍是 IP 产品的不同套餐，不能用商品文案冒充未接入的产品交付能力。
-- DataPort 商城：一个商品沿用大卡片，多个商品切换响应式网格，提供名称/描述搜索、价格和调用次数排序。订阅提示仍沿用顺延续期语义。
+- DataPort 商城：一个商品沿用大卡片，多个商品切换响应式网格，提供名称/描述搜索，默认按价格升序（含 0 元试用），可切换调用次数降序排序。订阅提示仍沿用顺延续期语义。
 - 文档：Portal `/documentation` 强制唯一 `tenantId` 和 `/docs/openapi.json`，使用当前空间活跃成员权限和同一 consumer 的 platform/capability 交集；禁止跨空间拼接授权，停用空间拒绝读取。Hub 原有未指定空间的文档入口保持原语义。引用 schema 继续按可见 paths 的引用闭包裁剪。保留已授权产品所需的定价、历史、请求状态与用量通用合同，实际请求仍受 Key 权限、有效订阅及额度约束。界面加入目录、搜索分类、参数、JSON 合同、cURL 示例和当前过滤结果的 OpenAPI 下载。
 - 补齐现有 IP 合同：`Idempotency-Key` 可选但建议显式使用，同一重试保留原值；加入已存在的 `GET /data/ip/risk/subscription` 文档，严格匹配 product/v2 授权，v1 不继承此权限。未改实际查询或计费逻辑。
 

@@ -16,19 +16,21 @@
     "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
-    "@qpjoy/mx-common": "file:../mx-common",
     "@base-ui/react": "1.7.0",
+    "@qpjoy/mx-common": "file:../mx-common",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
+    "leaflet": "1.9.4",
     "lucide-react": "1.31.0",
+    "pg": "8.22.0",
     "radix-ui": "1.6.7",
     "react": "19.2.6",
     "react-dom": "19.2.6",
-    "tailwind-merge": "3.6.0",
-    "pg": "8.22.0"
+    "tailwind-merge": "3.6.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.2.1",
+    "@types/leaflet": "1.9.21",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",

@@ -2,6 +2,31 @@
 
 2026-10-12。应用目录已从 `mx-harbor` 改为 `mx-dataport`，正式入口为 `https://dataport.minsight-ai.com`。本轮只完成代码和本机验收，生产步骤由运维执行。商城规则见 [Hub 订阅设计](../mx-insight-hub/docs/product/dataport-subscriptions.md)。
 
+## 最新跟进：商品分类与地图加载（2026-10-12）
+
+用户补充：地图改为随画像自动展开加载；DataPort 数据商城默认按价格从低到高，与公开定价页一致（试用版 → 基础版 → 专业版 → 企业版），仍可切换调用次数排序。若上轮商品分类和地图优化已发布，这两项补充只需重新发布 DataPort，不需要新迁移。
+
+补充验收：DataPort 类型检查、生产构建和坐标/UI 相关 2 项测试通过；本机 Chrome 1920×1080、390×844 使用模拟业务数据验证打开历史画像即自动加载地图、收起/展开复用、失败重试、不兼容 CRS 不展示地图，以及乱序商品响应下的默认价格排序、手动切换次数排序、搜索和匿名定价页顺序一致。无运行时错误、无横向溢出、无新增画像查询。尚未发布生产。
+
+Hub「数据商城 → 商品管理」默认显示已上架商品，可切换草稿、已下架、全部并查看各分类总数；支持商品名称/SKU 搜索和 DataPort 展示筛选。销售状态与对外展示仍是两个独立配置：只有 published 且 harborListed 不为 false 才对外展示。筛选只是查看，不更改商品、订单或订阅。
+
+DataPort 地图改为站内 Leaflet 渲染，按用户最新要求，画像展示后自动展开并加载站内地图脚本和当前视野的 OSM 底图，移除外部网页 iframe 的脚本/样式加载链。收起再展开复用地图，正常使用浏览器缓存；不预取周边或其他缩放级别。8 秒仍未完成时提供慢加载提示、手动重试和 OSM 打开入口；失败不重新查询画像或改变额度。坐标系未知只显示大致区域、限制缩放、不画精确标记；明确不兼容坐标系不展示地图。瓦片仅发送区域路径与站点 origin Referer，不附带业务 Key、查询 IP、账号或页面查询参数。
+
+OSM 公共底图不保证响应时间，用户日本代理链路的具体延迟原因尚未通过该链路抓包确认。实现遵循 [OSM tile policy](https://operations.osmfoundation.org/policies/tiles/)：固定官方 tile 域名、可见署名、正常缓存、仅当前视野、有效 Referer。无第三方脚本 CDN、代理转发或备用供应商切换。
+
+本次没有新数据库迁移。同步代码后，依次部署 Hub 和 DataPort（沿用原环境参数）：
+
+```bash
+cd electron-dock/mx-insight-hub
+MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh ops internal-production deploy
+cd ../mx-dataport
+MX_HARBOR_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh ops internal-production deploy
+```
+
+DataPort 需完整发布包含静态资源及 CSP 的服务端镜像；仅将允许的图片源增加 `https://tile.openstreetmap.org`，脚本和业务连接仍限本站，禁用外部 iframe。无需发布 Launcher、Pay 或 Nginx。生产检查：四类切换与数量、搜索、DataPort 展示筛选、编辑原商品；打开历史画像后确认地图自动显示，再收起/展开地图，确认查询次数不变；模拟离线应提供重试。生产发布和用户代理链路验收仍待执行。
+
+首轮（手动展开版本）本机已验证：Hub/DataPort 生产构建、DataPort 12 项坐标及 BFF/CSP 测试通过；Chrome 1440×1080、390×844 下分类数量、搜索、展示筛选、空状态、原编辑入口、地图按需加载/复用/缩放、8 秒慢加载、失败后手动重试、未知坐标系无标记及 GCJ02 禁用地图均通过，无意外控制台错误或新画像查询。浏览器使用模拟业务数据及受控图片响应验证失败路径，另以单次真实 OSM 可见地图确认渲染：6 张底图，约 3.3 秒完成；不是生产或用户日本代理链路的基准。Browser plugin 不可用，使用本机 Playwright + Chrome；未执行真实付款。
+
 ## 必须保留的身份与数据
 
 `mx-harbor` 仍是现有 Auth appId/audience、K8s namespace/工作负载、会话库与网关协议的兼容标识，`MX_HARBOR_*` 环境变量继续有效。迁移只更换该应用的 origin、callback、interaction 和显示名称；不重建用户、空间、数据库，不轮换 clientSecret、sessionKey 或 gateway token，不改 MX-H2I/Luopan 网络授权。不要搜索替换线上 Secret 或重新初始化身份服务。
