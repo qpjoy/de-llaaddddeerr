@@ -2,6 +2,45 @@
 
 2026-10-08。沿用 `POST /api/v1/search/raw`，保留 `POST /api/v1/night-all/search/raw` 为同一入口。没有新增 `/api/v1/data/search/raw`。Delta 无需修改 URL；以后可只把 URL 改为 `/api/v1/search/raw`，请求体、Key 和同次请求的幂等键不变。
 
+## 2026-10-13：重复媒体的补充诊断
+
+补齐一个已由本地回归复现的窄分支：抖音图片在 `media.images`、视频在同一行的 `video_urls`、明确封面在 `cover_url` 时，也按完整 URL 相等移除重复封面。保留视频、封面、真实图片、图集/混合类型以及不同 URL；不改原始证据、历史交付或下游已保存副本。此修复尚不能证明用户截图正好命中该分支。
+
+Luopan 截图中头像旁的 ID 来自作者字段，不能当作帖子 ID。`t2_15nmkah` 对应的 `[X] ...` 是 Reddit 转载标题，应保留；Twitter/Facebook 的无标题政策不能按标题里出现 X 链接套用。小图和视频看起来相同，也不能仅凭截图删除所有图片。
+
+本轮通过已登录的 Hub 管理界面只读浏览，按作者与文本找到截图中的两条抖音记录：
+
+| 作者 ID | 帖子 ID | Hub canonical UUID |
+| --- | --- | --- |
+| `7644956974627521593` | `7694499580356934565` | `27c49438-6ebd-429e-8a7f-0b0bf2111b5f` |
+| `98668214217` | `7694498708125257014` | `f54db585-8310-469b-960d-82cef43cd5d6` |
+
+两条当前记录均属于 `night-all.search.v1`，`content_type=4`、revision 2、`collected_at=2026-10-09T03:15:57Z`；`media.images=[]`、视频数量 1，并保留 `coverUrl`。这证明这两条当前 canonical 已没有重复图片，不能证明旧交付、缓存或 Luopan 已保存副本同样修复；上面的嵌套字段窄分支也不是这两例已证实的重复原因。本次证据来自管理界面，不是 k8s 脚本执行；没有写库、部署或重新采集。
+
+同一管理界面随后核对 Reddit：canonical `41f923a6-5a34-4953-b9ea-b718b5347849`，帖子 `1x2arsq`、作者 `t2_15nmkah`，数据集 `night-all.search.v1`、revision 1、`collected_at=2026-10-10T10:44:20Z`。两张图片分别为官方 `preview.redd.it` 上的 `mk4i7zgtwluh1.png`（140×140、裁剪及签名参数）和 `https://i.redd.it/mk4i7zgtwluh1.png`；封面为前者，`videos=[]`。这确认为同一 Reddit 资产的缩略图与原图重复，不是“图片加视频”；不在文档保存签名值。
+
+据此新增 `reddit-original-image.v1` 窄规则：仅 Reddit、HTTPS 官方 `preview.redd.it` / `i.redd.it`、完全相同的单段字母数字资产文件名及 png/jpg/jpeg/webp/gif 后缀，且同一个图片数组已获得无查询参数的原图时，移除该预览附件并把对应封面换成已有原图 URL。保留原图顺序/对象信息、正文、原生标题、其他图片与全部视频。不接受凭据、端口、fragment、空白、编码/多段路径、未知域名或不同文件名；不对其他 CDN 去参数，不从预览地址生成原图。覆盖现代媒体、raw 字符串/数组及嵌套行、两类 canonical 入库；不合并图片别名，也不因原图位于另一字段就清空当前消费者读取的图片数组。实际发生修正的记录摘要含媒体政策，重复相同输入保持幂等，原始 payload 及其摘要保留。本轮仅本地代码和测试，不执行迁移、历史修复或发布，线上已保存 revision 1 不会被本次编辑自动改变。
+
+Luopan 本地源码 `/Users/qpjoy/workspace/mingxi/luopan/po-frontend` 的 `ClueWithTabs.vue` 和 `OpinionDetail.vue` 另接入共享 `src/utils/mediaDisplay.js`：仅在有视频且图片与明确封面完整 URL 一致时，从展示列表隐藏封面；Reddit 同数组的官方预览/原图使用上述窄身份规则。缩略图、计数和预览索引共用过滤后的图片列表，不改变接口响应、标题或持久化副本。9 项媒体行为测试、原有 clueTimeFilter 检查及 Quasar SPA 构建通过；原有 detailMixedMedia / mediaCardLazyVideo 两项检查在未修改源码上已有失败，未计入通过结论。此显示补救尚未发布，不代表已核对 Luopan 后端中的历史副本。
+
+新增 `server/ops/diagnose-search-media.mjs`，使用 Pod 已有 `DATABASE_URL` 查询存量证据，不调用供应商、不修改数据。允许 `--author-id`、`--text`、`--request-id`，组合时取交集。已部署工具时，在服务器执行：
+
+```bash
+kubectl -n mx-insight-hub exec deploy/mx-insight-hub-public -c api -- node server/ops/diagnose-search-media.mjs --platform douyin --author-id 7644956974627521593 --text '三台新车全部断踏板'
+```
+
+也可在持有工具源文件、已具备集群只读访问的 Hub checkout 中，通过 stdin 执行；无需复制文件进 Pod、发布或重启：
+
+```bash
+kubectl -n mx-insight-hub exec -i deploy/mx-insight-hub-public -c api -- sh -c 'cd /app/server/ops && exec node --input-type=module - "$@"' sh --platform douyin --author-id 98668214217 --text '谁经得起检验' < server/ops/diagnose-search-media.mjs
+```
+
+已知请求 UUID 时，保留 `--platform` 并改用 `--request-id UUID`，只读该已提交交付及其链接缓存；只传请求 ID 不推断它与当前 canonical 的关系。作者/文本模式检查最近交付、这些交付关联的缓存，以及 `night-all.search.v1` / `night-all.compat.v1` 的当前 canonical。默认候选上限 50、全报告匹配上限 20，可设 `--recent 1..200` / `--limit 1..50`。canonical 候选按现有索引的 `coalesce(event_time,collected_at,last_seen_at,first_seen_at)` 排序，是内容流窗口，不是采集时间排序；文本在有界候选中筛选，零命中不代表全库没有该记录。
+
+报告区分作者/帖子 ID、交付/缓存/当前修订，分开输出创建与采集时间，未知采集时间保留 null。媒体仅输出 URL 哈希、host、路径哈希和查询参数名，不打印正文或签名参数值；`samePathDifferentUrl` 只是候选关系，不能证明相同图片。`currentNormalization` 使用运行环境的规范化代码离线比较，不执行修复。报告明确未检查原始供应商档案和 Luopan/Delta 副本。
+
+每次事务为只读，语句/锁超时分别 5 秒/1 秒，单条正文上限 8 MiB，并报告候选、检查和截断范围。失败仅输出固定阶段及允许的 SQLSTATE 分类，不回显数据库异常或连接串。测试：`node --test tests/server/search-media-diagnostics.test.mjs tests/server/search-content.test.mjs tests/server/reddit-search-media.test.mjs`。诊断脚本已通过本地测试，尚未在生产执行；上述管理界面证据仅确认这三条当前 canonical，不代表完整交付链路已取证。
+
 ## 2026-10-09：统一搜索入口与抖音封面
 
 `/api/v1/data/search` 与两条旧 raw URL 现在统一进入 Hub 的 `search` 业务入口。内部选择 data/raw 输出分支，不通过 HTTP 再调用自身。旧 raw 的请求体、`raw_data` JSON 字符串、`raw_info`、分页、授权、raw meter 和幂等身份继续兼容，Delta 不需要改接口。现代入口保留严格的 `night-all.data-search.v1` 结构和原平台计费；data/raw 的游标与计费单位仍分别保持原约定，不能只替换成现代 URL 就混用两种请求结构。

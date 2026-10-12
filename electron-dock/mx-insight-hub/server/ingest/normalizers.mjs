@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { hasNoContentTitle } from '../contracts/social-content-title.mjs'
-import { normalizeSearchMedia, DOUYIN_MEDIA_POLICY } from '../contracts/search-content.mjs'
+import { normalizeSearchMedia, DOUYIN_MEDIA_POLICY, REDDIT_MEDIA_POLICY } from '../contracts/search-content.mjs'
 
 // Bump when the mapping below changes so revisions record which parser produced
 // them and historical rows can be recomputed selectively.
@@ -201,14 +201,16 @@ export function normalizeSearchPayload(payload, platform) {
     }
     record.rank = index + 1
     record.rawItem = item
-    if (platform === 'douyin') record.parserVersion = `${PARSER_VERSION}:${DOUYIN_MEDIA_POLICY}`
+    const mediaPolicy = platform === 'douyin' ? DOUYIN_MEDIA_POLICY
+      : platform === 'reddit' && item.media && record.stableFields.media !== item.media ? REDDIT_MEDIA_POLICY : null
+    if (mediaPolicy) record.parserVersion = `${PARSER_VERSION}:${mediaPolicy}`
     // Re-observing an older social post must also revise/reindex its corrected
     // title, even when the upstream payload itself has not changed.
     const content = contentPayload(item)
     // Existing Twitter/Facebook mappings retain their content identities.
     const titleParserVersion = platform === 'twitter' ? 'mxih-normalizer.v2'
       : platform === 'facebook' ? 'mxih-normalizer.v3' : PARSER_VERSION
-    record.payloadSha256 = sha256(canonicalJson(platform === 'douyin' ? { mediaPolicy: DOUYIN_MEDIA_POLICY, content }
+    record.payloadSha256 = sha256(canonicalJson(mediaPolicy ? { mediaPolicy, content }
       : ['twitter', 'facebook', 'weibo', 'instagram'].includes(platform)
       ? { parserVersion: titleParserVersion, content }
       : content))

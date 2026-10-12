@@ -100,6 +100,28 @@ test('raw nested results and media objects keep their shape without touching acc
   assert.equal(normalizeSearchMedia(media, 'douyin', { objectType: 'profile' }), media)
 })
 
+test('nested raw images use explicit video evidence on the same row without adding a second video field', () => {
+  for (const nestedVideos of [undefined, []]) {
+    const media = { images: [{ url: COVER, width: 120 }, { url: PHOTO }],
+      ...(nestedVideos ? { videos: nestedVideos } : {}) }
+    const row = rawRow({ image_urls: '[]', media })
+    const source = legacy([row]), original = structuredClone(source)
+    const output = JSON.parse(normalizeSearchContent(source, 'douyin', { format: 'raw' }).data.raw_data)[0]
+    assert.deepEqual(output.media.images, [{ url: PHOTO }])
+    assert.equal(output.media.coverUrl, COVER)
+    assert.deepEqual(output.media.videos, nestedVideos)
+    assert.equal(output.video_urls, row.video_urls)
+    assert.equal(output.cover_url, COVER)
+    assert.equal(output.image_urls, '[]')
+    assert.deepEqual(source, original)
+    assert.deepEqual(normalizeSearchContent({ data: { raw_data: [output] } }, 'douyin', { format: 'raw' }).data.raw_data[0], output)
+  }
+  for (const overrides of [{ video_urls: '[]' }, { cover_url: null }, { content_type: 'mixed' }]) {
+    const row = rawRow({ image_urls: '[]', media: { images: [COVER, PHOTO] }, ...overrides })
+    assert.deepEqual(normalizeSearchContent(legacy([row]), 'douyin', { format: 'raw' }), legacy([row]))
+  }
+})
+
 test('both canonical ingestion paths use the same media policy, retain raw evidence and revise old hashes', () => {
   const source = modern()
   const record = normalizeSearchPayload(source, 'douyin').records[0]

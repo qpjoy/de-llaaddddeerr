@@ -107,7 +107,7 @@ export function QueryResult({
                   ))}
                   {location && <div className="harbor-profile-coordinates">
                     <dt>经纬度</dt>
-                    <dd>{location.lng}, {location.lat}<small>{location.crs || "坐标系未标注"}</small></dd>
+                    <dd>{location.lng}, {location.lat}</dd>
                   </div>}
                 </dl>
               </div>

@@ -445,7 +445,6 @@
 }
 .harbor-profile-fields > .harbor-profile-coordinates { grid-column: 1 / -1; }
 .harbor-profile-coordinates dd { display: flex; align-items: baseline; flex-wrap: wrap; gap: .25rem .75rem; font-size: .9375rem; font-variant-numeric: tabular-nums; }
-.harbor-profile-coordinates small { font-size: .75rem; font-weight: 400; color: #64748b; }
 .harbor-tag-section {
   border-top: 1px solid var(--line-soft);
   padding-top: 1.25rem;
@@ -1046,14 +1045,7 @@
 .harbor-map-actions [data-slot="button"] { min-width: 0; max-width: 100%; }
 .harbor-map-credit { padding: .25rem .625rem; font-size: .6875rem; line-height: 1.5; color: #61718a; overflow-wrap: anywhere; }
 .harbor-map-credit a { text-decoration: underline; text-underline-offset: .125rem; }
-.harbor-location-note, .harbor-location-details { font-size: .75rem; line-height: 1.65; color: #64748b; margin-top: .625rem; overflow-wrap: anywhere; }
-.harbor-location-details summary { display: flex; align-items: center; justify-content: space-between; gap: .5rem; min-height: 2rem; color: #526b8e; cursor: pointer; list-style: none; }
-.harbor-location-details summary::-webkit-details-marker { display: none; }
-.harbor-location-disclaimer { color: #64748b; font-size: .6875rem; }
-.harbor-location-disclosure { display: inline-flex; align-items: center; gap: .25rem; margin-left: auto; flex-shrink: 0; }
-.harbor-location-details summary svg { width: 1rem; height: 1rem; flex-shrink: 0; transition: transform .15s; }
-.harbor-location-details[open] summary svg { transform: rotate(180deg); }
-.harbor-location-details p { margin-top: .5rem; }
+.harbor-location-note { font-size: .75rem; line-height: 1.65; color: #64748b; margin-top: .625rem; overflow-wrap: anywhere; }
 @container (max-width: 45rem) {
   .harbor-profile-overview { grid-template-columns: 1fr; gap: 1.5rem; }
   .harbor-location { max-width: none; }

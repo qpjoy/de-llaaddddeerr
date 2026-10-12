@@ -3,7 +3,7 @@ import test from 'node:test'
 import { canonicalJson, normalizeSearchPayload, sha256 } from '../../server/ingest/normalizers.mjs'
 import { normalizeNightAllLegacyPayload } from '../../server/ingest/legacy-night-all.mjs'
 import { refreshMappedPayloadSha256 } from '../../server/ingest/external/mapping.mjs'
-import { DOUYIN_MEDIA_POLICY } from '../../server/contracts/search-content.mjs'
+import { DOUYIN_MEDIA_POLICY, normalizeSearchContent } from '../../server/contracts/search-content.mjs'
 
 const externalId = '2087779969447686278'
 const body = '原文第一行\n第二行 ' + '完整正文'.repeat(100)
@@ -99,4 +99,30 @@ test('other platforms retain existing title and name fallback behavior', () => {
       assert.equal(records[0].body, body, platform)
     }
   }
+})
+
+test('Reddit reposts retain their own title even when it starts with [X] and links to Twitter', () => {
+  // Screenshot text is evidence of the Reddit title/body, not a Twitter post
+  // response. The displayed t2_ ID identifies its author, not the post itself.
+  const title = "[X] Those people behind him couldn't pour water out of a boot if the instructions were on the heel."
+  const linkedPost = 'https://x.com/Acyn/status/2108728878625865794'
+  const text = `[${linkedPost}](${linkedPost})`
+  const author = { id: 't2_15nmkah', name: 'c-k-q99903' }
+  const item = { externalId: 'synthetic-reddit-post', title, text, author }
+  const modern = { data: { items: [item] } }
+  const row = { content_id: item.externalId, title, full_text: text,
+    author_id: author.id, author_name: author.name, platform_name: 'reddit' }
+  const raw = { data: { raw_data: JSON.stringify([row]), raw_info: '[]' } }
+  const originals = structuredClone({ modern, raw })
+
+  assert.equal(normalizeSearchContent(modern, 'reddit').data.items[0].title, title)
+  assert.equal(JSON.parse(normalizeSearchContent(raw, 'reddit', { format: 'raw' }).data.raw_data)[0].title, title)
+  for (const record of [normalizeSearchPayload(modern, 'reddit').records[0],
+    normalizeNightAllLegacyPayload(raw, 'reddit', 'raw').records[0]]) {
+    assert.equal(record.title, title)
+    assert.equal(record.body, text)
+    assert.equal(record.authorExternalId, author.id)
+    assert.notEqual(record.externalId, author.id)
+  }
+  assert.deepEqual({ modern, raw }, originals)
 })
