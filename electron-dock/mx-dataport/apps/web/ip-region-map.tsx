@@ -11,6 +11,7 @@ type MapStatus = "loading" | "ready" | "slow" | "error";
 export function IpRegionMap({ location, visible }: { location: Location; visible: boolean }) {
   const container = useRef<HTMLDivElement>(null), mapRef = useRef<LeafletMap | null>(null);
   const [status, setStatus] = useState<MapStatus>("loading"), [attempt, setAttempt] = useState(0);
+  const [hasTiles, setHasTiles] = useState(false);
   const { lng, lat, wgs84 } = location;
   const [west, south, east, north] = location.bounds;
 
@@ -18,6 +19,7 @@ export function IpRegionMap({ location, visible }: { location: Location; visible
     let disposed = false, map: LeafletMap | undefined, observer: ResizeObserver | undefined;
     let timer: ReturnType<typeof setTimeout>;
     const failures = new Set<HTMLElement>();
+    setHasTiles(false);
     const loading = () => {
       if (disposed) return;
       clearTimeout(timer);
@@ -41,6 +43,7 @@ export function IpRegionMap({ location, visible }: { location: Location; visible
           maxZoom: 19, keepBuffer: 0, updateWhenIdle: true, referrerPolicy: "origin",
         });
         tiles.on("loading", loading);
+        tiles.on("tileload", () => { if (!disposed) setHasTiles(true); });
         tiles.on("tileerror", event => {
           failures.add(event.tile);
           if (!disposed) setStatus("error");
@@ -75,11 +78,11 @@ export function IpRegionMap({ location, visible }: { location: Location; visible
     if (visible) mapRef.current?.invalidateSize({ pan: false });
   }, [visible]);
 
-  return <div className="harbor-map-frame">
+  return <div className="harbor-map-frame" data-status={status} data-has-tiles={hasTiles}>
     <div ref={container} className="harbor-location-map" aria-label="IP 归属区域地图" role="region"/>
-    {status !== "ready" && <div className="harbor-map-status">
+    {status !== "ready" && (!hasTiles || status !== "loading") && <div className="harbor-map-status">
       <p role="status">{status === "loading" ? "正在加载地图…" : status === "slow" ? "底图加载较慢，可稍后重试；画像结果已保留。" : "部分或全部底图加载失败，可重试；画像结果已保留。"}</p>
-      {status !== "loading" && <div className="harbor-map-actions"><Button variant="outline" onClick={() => setAttempt(value => value + 1)}>重试地图</Button><a href={location.embed!} target="_blank" rel="noreferrer">在 OpenStreetMap 打开</a></div>}
+      {status !== "loading" && <div className="harbor-map-actions"><Button variant="outline" size="sm" onClick={() => setAttempt(value => value + 1)}>重试地图</Button><Button variant="ghost" size="sm" asChild><a href={location.embed!} target="_blank" rel="noreferrer" aria-label="在 OpenStreetMap 打开">打开底图 ↗</a></Button></div>}
     </div>}
   </div>;
 }

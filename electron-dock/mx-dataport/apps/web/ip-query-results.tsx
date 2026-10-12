@@ -1,4 +1,5 @@
 import { IpLocationMap } from "./ip-location-map";
+import { ipLocation } from "./ip-location";
 import { ArrowRight, Clock3, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
@@ -43,6 +44,7 @@ export function QueryResult({
 }) {
   const profile = result.response?.data?.data,
     state = portraitState(result);
+  const location = ipLocation(profile);
   const issue = result.error || result.response?.error;
   const tags: Record<string, any[]> = Object.create(null);
   for (const tag of profile?.risk_tags || []) {
@@ -77,34 +79,40 @@ export function QueryResult({
         ) : profile ? (
           <>
             <div className="harbor-profile-overview">
-              <div className="harbor-risk-summary">
-                <ShieldCheck aria-hidden="true" />
-                <span>风险等级</span>
-                <RiskLevel level={profile.risk_level} />
-                {profile.risk_score != null && (
-                  <small>风险评分 {profile.risk_score}</small>
-                )}
+              <div className="harbor-profile-summary">
+                <div className="harbor-risk-summary" data-level={String(profile.risk_level || "")}>
+                  <ShieldCheck aria-hidden="true" />
+                  <span>风险等级</span>
+                  <RiskLevel level={profile.risk_level} />
+                  {profile.risk_score != null && (
+                    <small>风险评分 {profile.risk_score}</small>
+                  )}
+                </div>
+                <dl className="harbor-profile-fields">
+                  {[
+                    [
+                      "归属地",
+                      [profile.country, profile.province, profile.city, profile.district]
+                        .filter(Boolean)
+                        .join(" · "),
+                    ],
+                    ["运营商", profile.isp],
+                    ["应用场景", profile.scene],
+                    ["代理类型", profile.proxy_type],
+                  ].map(([label, value]) => (
+                    <div key={label}>
+                      <dt>{label}</dt>
+                      <dd>{valueText(value)}</dd>
+                    </div>
+                  ))}
+                  {location && <div className="harbor-profile-coordinates">
+                    <dt>经纬度</dt>
+                    <dd>{location.lng}, {location.lat}<small>{location.crs || "坐标系未标注"}</small></dd>
+                  </div>}
+                </dl>
               </div>
-              <dl className="harbor-profile-fields">
-                {[
-                  [
-                    "归属地",
-                    [profile.country, profile.province, profile.city]
-                      .filter(Boolean)
-                      .join(" · "),
-                  ],
-                  ["运营商", profile.isp],
-                  ["应用场景", profile.scene],
-                  ["代理类型", profile.proxy_type],
-                ].map(([label, value]) => (
-                  <div key={label}>
-                    <dt>{label}</dt>
-                    <dd>{valueText(value)}</dd>
-                  </div>
-                ))}
-              </dl>
+              <IpLocationMap key={`${result.ip}:${result.response?.meta?.capturedAt}`} profile={profile} />
             </div>
-            <IpLocationMap key={`${result.ip}:${result.response?.meta?.capturedAt}`} profile={profile} />
             <section className="harbor-tag-section" aria-label="风险标签">
               <h3>风险标签</h3>
               {Object.keys(tags).length ? (

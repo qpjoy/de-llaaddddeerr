@@ -296,6 +296,7 @@
   margin-top: 1.25rem;
 }
 .harbor-console .harbor-portrait[data-slot="card"] {
+  container-type: inline-size;
   padding-top: 0;
   gap: 0;
   overflow: hidden;
@@ -352,35 +353,47 @@
 .harbor-result-state[data-state="error"]::before {
   background: #d65454;
 }
+/* Keep the risk summary and map on one top-aligned reading grid. */
 .harbor-profile-overview {
   display: grid;
-  grid-template-columns: 10rem minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) 18.75rem;
   gap: 2rem;
-  align-items: center;
-  padding: 1.75rem 0;
+  align-items: start;
+  padding: 1.5rem 0;
 }
+.harbor-profile-summary { min-width: 0; }
 .harbor-risk-summary {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 0.5rem;
-  color: var(--text-secondary);
-  font-size: 0.8125rem;
+  flex-wrap: wrap;
+  min-height: 2.5rem;
+  gap: .625rem;
+  margin-bottom: .75rem;
+  color: #52617a;
+  font-size: .875rem;
 }
 .harbor-risk-summary > svg {
-  width: 2rem;
-  height: 2rem;
-  stroke-width: 1.5;
-  color: #7294ce;
-  margin-bottom: 0.25rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  stroke-width: 1.7;
+  color: #71839b;
+  flex-shrink: 0;
 }
+.harbor-risk-summary[data-level="高"] > svg,
+.harbor-risk-summary[data-level="高风险"] > svg { color: #ba5050; }
+.harbor-risk-summary[data-level="中"] > svg,
+.harbor-risk-summary[data-level="中风险"] > svg { color: #996d22; }
+.harbor-risk-summary[data-level="低"] > svg,
+.harbor-risk-summary[data-level="低风险"] > svg { color: #357b68; }
 .harbor-risk-summary > .harbor-risk-level {
-  font-size: 1.5rem;
+  font-size: .9375rem;
   font-weight: 600;
-  padding: 0.125rem 0.875rem;
+  padding: .125rem .625rem;
 }
 .harbor-risk-summary small {
-  margin-top: 0.25rem;
+  margin-left: auto;
+  font-size: .8125rem;
+  color: #64748b;
 }
 .harbor-risk-level {
   display: inline-block;
@@ -409,20 +422,30 @@
 .harbor-profile-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1.5rem 2rem;
+  gap: 1.375rem 1.5rem;
 }
 .harbor-profile-fields > div {
+  min-width: 0;
   display: grid;
-  grid-template-columns: 4.5rem minmax(0, 1fr);
-  gap: 0.75rem;
-  font-size: 0.8125rem;
+  align-content: start;
+  gap: .375rem;
 }
 .harbor-profile-fields dt {
-  color: var(--text-secondary);
+  color: #64748b;
+  font-size: .8125rem;
+  line-height: 1.5;
 }
 .harbor-profile-fields dd {
+  min-width: 0;
+  color: #27364b;
+  font-size: 1rem;
+  font-weight: 500;
+  line-height: 1.6;
   overflow-wrap: anywhere;
 }
+.harbor-profile-fields > .harbor-profile-coordinates { grid-column: 1 / -1; }
+.harbor-profile-coordinates dd { display: flex; align-items: baseline; flex-wrap: wrap; gap: .25rem .75rem; font-size: .9375rem; font-variant-numeric: tabular-nums; }
+.harbor-profile-coordinates small { font-size: .75rem; font-weight: 400; color: #64748b; }
 .harbor-tag-section {
   border-top: 1px solid var(--line-soft);
   padding-top: 1.25rem;
@@ -449,11 +472,13 @@
   margin-top: 0.625rem;
 }
 .harbor-risk-tags > span {
-  background: #eef3ff;
-  border: 1px solid #dce6ff;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  background: #f1f5fa;
+  border: 1px solid #e1e8f1;
   border-radius: 0.375rem;
   padding: 0.1875rem 0.625rem;
-  color: #355899;
+  color: #506786;
   font-size: 0.8125rem;
 }
 .harbor-muted {
@@ -609,14 +634,6 @@
   }
   .harbor-query-page .public-query h1 {
     font-size: 1.75rem;
-  }
-  .harbor-profile-overview {
-    grid-template-columns: 1fr;
-    gap: 1.5rem;
-  }
-  .harbor-profile-fields {
-    grid-template-columns: 1fr;
-    gap: 1rem;
   }
   .harbor-tag-groups {
     grid-template-columns: 1fr;
@@ -990,17 +1007,62 @@
 .harbor-market-products.has-multiple .harbor-offer-copy > h2 { font-size: 1.25rem; }
 .harbor-market-products.has-multiple .harbor-benefits { gap: .5rem 1rem; font-size: .8125rem; }
 .harbor-market-products.has-multiple .harbor-price { font-size: 1.875rem; margin-top: auto; padding-top: 1.5rem; }
-.harbor-location { background: #f7faff; border: 1px solid #e0e9f7; border-radius: .75rem; padding: 1.25rem; margin: 1.5rem 0; }
-.harbor-location-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
-.harbor-location-heading h3 { display: flex; align-items: center; gap: .5rem; font-weight: 600; }
-.harbor-location-heading p { color: #52617a; margin: .5rem 0; }
-.harbor-map-frame { position: relative; isolation: isolate; margin: 1rem 0; }
-.harbor-location-map { width: 100%; height: 20rem; border: 0; border-radius: .5rem; background: #e4ebf2; }
-.harbor-map-status { position: absolute; z-index: 1000; bottom: .75rem; left: .75rem; right: .75rem; padding: .75rem 1rem; border: 1px solid #dee6f2; border-radius: .5rem; background: rgba(255,255,255,.96); color: #52617a; font-size: .8125rem; box-shadow: 0 2px 8px #23395d12; }
-.harbor-map-actions { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin-top: .5rem; }
-.harbor-map-actions a { color: #165dff; text-decoration: underline; }
-.harbor-map-credit { font-size: .75rem; color: #6b778a; margin-top: .5rem; }
-.harbor-map-credit a { text-decoration: underline; }
+.harbor-location { width: 100%; min-width: 0; }
+.harbor-location-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  min-height: 2.5rem;
+  margin-bottom: .75rem;
+}
+.harbor-location-heading h3 { display: flex; align-items: center; min-width: 0; gap: .375rem; font-size: .875rem; font-weight: 500; color: #52617a; }
+.harbor-location-heading h3 svg { width: 1.125rem; height: 1.125rem; flex-shrink: 0; }
+.harbor-map-surface { border: 1px solid #dfe7ef; border-radius: .625rem; overflow: hidden; background: #f5f8fb; }
+.harbor-map-frame { position: relative; isolation: isolate; }
+.harbor-location-map { width: 100%; height: 11.25rem; background: #edf2f7; }
+.harbor-location-map .leaflet-tile-pane { filter: saturate(.55); }
+.harbor-location-map .leaflet-control-zoom { border: 1px solid #d1dce8; border-radius: .375rem; overflow: hidden; box-shadow: 0 .125rem .375rem #1e3a5f14; }
+.harbor-location-map .leaflet-control-zoom a { width: 2rem; height: 2rem; line-height: 2rem; font-size: 1.375rem; color: #455b76; border-bottom-color: #e2e8f0; }
+.harbor-location-map .leaflet-control-zoom a:hover { background: #f0f5fb; color: #165dff; }
+.harbor-map-frame[data-has-tiles="false"] .leaflet-control-container { visibility: hidden; }
+.harbor-map-status {
+  position: absolute;
+  z-index: 1000;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: .75rem;
+  padding: 1rem;
+  overflow-y: auto;
+  background: #f3f6fa;
+  color: #61718a;
+  font-size: .8125rem;
+  line-height: 1.7;
+}
+.harbor-map-actions { display: flex; align-items: center; gap: .375rem; flex-wrap: wrap; }
+.harbor-map-frame[data-has-tiles="true"] .harbor-map-status { position: static; border-top: 1px solid #dfe7ef; }
+.harbor-map-actions [data-slot="button"] { min-width: 0; max-width: 100%; }
+.harbor-map-credit { padding: .25rem .625rem; font-size: .6875rem; line-height: 1.5; color: #61718a; overflow-wrap: anywhere; }
+.harbor-map-credit a { text-decoration: underline; text-underline-offset: .125rem; }
+.harbor-location-note, .harbor-location-details { font-size: .75rem; line-height: 1.65; color: #64748b; margin-top: .625rem; overflow-wrap: anywhere; }
+.harbor-location-details summary { display: flex; align-items: center; justify-content: space-between; gap: .5rem; min-height: 2rem; color: #526b8e; cursor: pointer; list-style: none; }
+.harbor-location-details summary::-webkit-details-marker { display: none; }
+.harbor-location-disclaimer { color: #64748b; font-size: .6875rem; }
+.harbor-location-disclosure { display: inline-flex; align-items: center; gap: .25rem; margin-left: auto; flex-shrink: 0; }
+.harbor-location-details summary svg { width: 1rem; height: 1rem; flex-shrink: 0; transition: transform .15s; }
+.harbor-location-details[open] summary svg { transform: rotate(180deg); }
+.harbor-location-details p { margin-top: .5rem; }
+@container (max-width: 45rem) {
+  .harbor-profile-overview { grid-template-columns: 1fr; gap: 1.5rem; }
+  .harbor-location { max-width: none; }
+  .harbor-location-map { height: 10rem; }
+}
+@container (max-width: 24rem) {
+  .harbor-profile-fields { gap: 1.25rem 1rem; }
+  .harbor-risk-summary small { width: 100%; margin-left: 0; }
+}
 .harbor-doc-search { display: flex; align-items: center; gap: .75rem; background: #fff; border: 1px solid #dee6f2; border-radius: .6rem; padding: .4rem 1rem; }
 .harbor-doc-search > input { box-shadow: none; border: 0; }
 .harbor-doc-search > span { white-space: nowrap; color: #6b778a; font-size: .8125rem; }
@@ -1029,7 +1091,7 @@
 .harbor-response { margin: .75rem 0; }
 .harbor-response summary { cursor: pointer; color: #52617a; font-size: .875rem; padding: .5rem 0; }
 @media (max-width: 1100px) { .harbor-stats { grid-template-columns: repeat(2,minmax(0,1fr)); } .harbor-doc-layout { grid-template-columns: minmax(11rem,14rem) minmax(0,1fr); gap: 1rem; } }
-@media (max-width: 767px) { .harbor-dashboard-grid, .harbor-doc-layout { grid-template-columns: 1fr; } .harbor-doc-nav { max-height: 16rem; } .harbor-market-toolbar { flex-wrap: wrap; } .harbor-market-toolbar > input { max-width: none; } .harbor-location { padding: 1rem; } }
+@media (max-width: 767px) { .harbor-dashboard-grid, .harbor-doc-layout { grid-template-columns: 1fr; } .harbor-doc-nav { max-height: 16rem; } .harbor-market-toolbar { flex-wrap: wrap; } .harbor-market-toolbar > input { max-width: none; } .harbor-location-map { height: 10rem; } }
 @media (max-width: 420px) { .harbor-stat { padding: 1rem; } .harbor-stat strong { font-size: 1.65rem; } .harbor-stats { gap: .75rem; } }
 .harbor-quota progress { appearance: none; border: none; border-radius: 1rem; overflow: hidden; background: #e7eefb; }
 .harbor-quota progress::-webkit-progress-bar { background: #e7eefb; border-radius: 1rem; }
