@@ -7,6 +7,15 @@ const metric = value => value != null && value !== '' && Number.isFinite(Number(
 const token = value => typeof value === 'string' && value.length <= 2048 ? value : null
 const POST_FIELDS = ['id', 'pk', 'code', 'shortcode', 'media', 'caption', 'caption_text',
   'media_type', 'taken_at', 'image_versions2', 'video_versions', 'carousel_media']
+const RECOMMENDATION_TYPES = ['user', 'hashtag', 'place']
+
+function recommendation(value, type) {
+  // IDs also occur on accounts/topics/places. The typed container establishes
+  // their meaning, but it must never hide a post or a conflicting wrapper.
+  if (!object(value) || POST_FIELDS.slice(2).some(field => Object.hasOwn(value, field))
+    || RECOMMENDATION_TYPES.some(field => Object.hasOwn(value, field))) return false
+  return type !== 'user' || !!((id(value.id) || id(value.pk)) && text(value.username).trim())
+}
 
 function listMedia(entries) {
   return entries.flatMap(entry => {
@@ -15,14 +24,67 @@ function listMedia(entries) {
     // discard a malformed post just because it also has a user or hashtag.
     if (object(entry.media)) return [entry.media]
     if (entry.code || entry.shortcode) return [entry]
-    if (!POST_FIELDS.some(field => Object.hasOwn(entry, field)) && object(entry.user)
-      && (id(entry.user.id) || id(entry.user.pk)) && text(entry.user.username).trim()) return []
-    // The retained 2026-10-12 response has position + hashtag, without media.
-    // Only classify this wrapper; do not infer a hashtag identity or ingest it.
-    if (!POST_FIELDS.some(field => Object.hasOwn(entry, field)) && object(entry.hashtag)
-      && !Object.hasOwn(entry, 'user') && !Object.hasOwn(entry, 'place')) return []
+    const types = RECOMMENDATION_TYPES.filter(field => Object.hasOwn(entry, field))
+    if (!POST_FIELDS.some(field => Object.hasOwn(entry, field)) && types.length === 1
+      && recommendation(entry[types[0]], types[0])) return []
     throw new Error('invalid_instagram_search_shape')
   })
+}
+
+function searchMedia(data) {
+  const values = []
+  let recognized = false, nonPostCount = 0
+  // Independent containers may coexist. Validate and collect all of them;
+  // an empty grid must not hide list media, nor suggestions hide a bad grid.
+  for (const field of ['media_grid', 'mediaGrid']) {
+    const grid = data[field]
+    if (grid == null) continue
+    if (!object(grid) || !Array.isArray(grid.sections)) throw new Error('invalid_instagram_search_shape')
+    recognized = true
+    for (const section of grid.sections) {
+      const layout = section?.layout_content ?? section?.layoutContent
+      if (!object(layout)) throw new Error('invalid_instagram_media_grid')
+      const media = layout.medias ?? layout.media ?? []
+      if (!Array.isArray(media)) throw new Error('invalid_instagram_media_grid')
+      values.push(...media.map(entry => entry?.media ?? entry))
+    }
+  }
+  if (data.items != null) {
+    if (!Array.isArray(data.items)) throw new Error('invalid_instagram_search_shape')
+    recognized = true
+    values.push(...data.items.map(entry => entry?.media ?? entry))
+  }
+  if (data.list != null) {
+    if (data.status !== 'ok' || !Array.isArray(data.list)) throw new Error('invalid_instagram_search_shape')
+    const media = listMedia(data.list)
+    recognized = true
+    nonPostCount += data.list.length - media.length
+    values.push(...media)
+  }
+  // The provider documents these separate groups as well as mixed list pages.
+  // Retain their original data in the raw archive; the post contract excludes them.
+  for (const [field, type] of [['users', 'user'], ['hashtags', 'hashtag'], ['places', 'place']]) {
+    if (data[field] == null) continue
+    if (!Array.isArray(data[field])) throw new Error('invalid_instagram_search_shape')
+    for (const entry of data[field]) {
+      if (object(entry) && Object.hasOwn(entry, type)) {
+        if (listMedia([entry]).length) throw new Error('invalid_instagram_search_shape')
+      } else if (!recommendation(entry, type)) throw new Error('invalid_instagram_search_shape')
+    }
+    recognized = true
+    nonPostCount += data[field].length
+  }
+  const keywords = data.other_results?.keyword_recommendations?.keywords
+  if (keywords != null) {
+    if (!Array.isArray(keywords) || keywords.some(value =>
+      !(typeof value === 'string' && value.trim()) && !recommendation(value, 'keyword'))) {
+      throw new Error('invalid_instagram_search_shape')
+    }
+    recognized = true
+    nonPostCount += keywords.length
+  }
+  if (!recognized) throw new Error('invalid_instagram_search_shape')
+  return { values, nonPostCount }
 }
 
 function rendition(values) {
@@ -31,8 +93,10 @@ function rendition(values) {
 }
 
 function instagramRow(value, capturedAt) {
+  if (!object(value)) throw new Error('invalid_instagram_post_identity')
   const contentId = id(value.id) || id(value.pk)
-  if (!contentId || !(value.code || value.shortcode)) throw new Error('invalid_instagram_post_identity')
+  const shortcode = text(value.code || value.shortcode).trim()
+  if (!contentId || !shortcode) throw new Error('invalid_instagram_post_identity')
   const caption = text(value.caption?.text || value.caption_text || value.caption)
   const user = value.user || value.owner || {}
   const images = [], videos = []
@@ -46,7 +110,7 @@ function instagramRow(value, capturedAt) {
   const date = timestamp > 0 ? new Date(timestamp * 1000) : null
   return { content_id: contentId, platform_name: 'instagram', title: '', text: caption, content: caption, full_text: caption,
     content_type: Number(value.media_type) === 2 ? 'video' : 'post',
-    url: `https://www.instagram.com/p/${encodeURIComponent(value.code || value.shortcode)}/`,
+    url: `https://www.instagram.com/p/${encodeURIComponent(shortcode)}/`,
     author_id: id(user.id) || id(user.pk), author_name: text(user.username || user.full_name),
     author_avatar_url: text(user.profile_pic_url || user.profile_picture_url) || null,
     created_at: date && Number.isFinite(date.getTime()) ? date.toISOString() : null, collected_at: capturedAt,
@@ -60,23 +124,7 @@ export function projectInstagramSearch(result, request) {
   const data = object(root?.data) ? root.data : root
   if (!object(data) || (data.status && data.status !== 'ok')) throw new Error('invalid_instagram_search_shape')
   const grid = data.media_grid || data.mediaGrid
-  let values
-  let listPage = false
-  if (Array.isArray(grid?.sections)) {
-    values = grid.sections.flatMap(section => {
-      const layout = section.layout_content || section.layoutContent
-      if (!object(layout)) throw new Error('invalid_instagram_media_grid')
-      const media = layout.medias || layout.media || []
-      if (!Array.isArray(media)) throw new Error('invalid_instagram_media_grid')
-      return media.map(entry => entry.media || entry)
-    })
-  } else if (Array.isArray(data.items)) values = data.items.map(entry => entry.media || entry)
-  else if (grid == null && data.items == null && data.status === 'ok' && Array.isArray(data.list)) {
-    values = listMedia(data.list)
-    listPage = true
-  }
-  else if (Array.isArray(data.other_results?.keyword_recommendations?.keywords)) values = []
-  else throw new Error('invalid_instagram_search_shape')
+  const { values, nonPostCount } = searchMedia(data)
   const capturedAt = result.publicBody.meta.capturedAt
   const rows = [...new Map(values.map(value => {
     const row = instagramRow(value, capturedAt)
@@ -90,16 +138,16 @@ export function projectInstagramSearch(result, request) {
   if ((nextValue != null && token(nextValue) === null) || (rankValue != null && token(rankValue) === null)) throw new Error('invalid_instagram_continuation')
   const next = token(nextValue)
   const rank = token(rankValue) || request.providerCursor?.rank_token || null
-  const more = page.more_available ?? page.has_more ?? page.has_next_page ?? data.more_available ?? data.has_more
+  const more = page.more_available ?? page.has_more ?? page.has_next_page ?? data.more_available ?? data.has_more ?? data.has_next_page
   if (more != null && ![true, false, 0, 1, '0', '1', 'true', 'false'].includes(more)) throw new Error('invalid_instagram_pagination')
   const expectsMore = [true, 1, '1', 'true'].includes(more)
-  // A verified non-post-only list can advertise more recommendations without
+  // A verified non-post-only page can advertise more recommendations without
   // giving a usable cursor. Report incomplete pagination, never invent a cursor
   // or quarantine the whole endpoint. Media/empty/unknown pages stay strict.
-  const nonPostContinuationMissing = expectsMore && !next && listPage && data.list.length > 0 && rows.length === 0
+  const nonPostContinuationMissing = expectsMore && !next && nonPostCount > 0 && rows.length === 0
   if (expectsMore && !next && !nonPostContinuationMissing) throw new Error('missing_instagram_continuation')
   // A recommendation-only page can still have a valid continuation to media.
-  const hasMore = (rows.length > 0 || listPage) && request.page < 15 && !!next
+  const hasMore = request.page < 15 && !!next
     && ![false, 0, '0', 'false'].includes(more) && next !== request.providerCursor?.next_max_id
   const nextCursor = hasMore ? request.encodeNext({ page: request.page + 1,
     providerCursor: { next_max_id: next, ...(rank ? { rank_token: rank } : {}) } }) : null

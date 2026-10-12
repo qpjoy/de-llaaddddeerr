@@ -22,6 +22,7 @@ DEPLOY_PORT_FORWARD_PID=""
 DEPLOY_DOCKER_IMAGE=""
 DEPLOY_DOCKER_IMAGE_ID=""
 DEPLOY_PREVIOUS_DOCKER_IMAGE_ID=""
+DEPLOY_BUILD_PROXY_BUILDER=""
 DEPLOY_PULLED_RUNTIME_IMAGE=""
 DEPLOY_LOCK_DIR=""
 DEPLOY_LOCK_FD_OPEN=0
@@ -1575,17 +1576,50 @@ containerd_import_docker_image() {
     || die "containerd import did not create required image ref $canonical"
 }
 
-# Opt-in: create (once) a scoped buildx builder that routes image pulls AND RUN
+# Opt-in: reuse a scoped buildx builder for this proxy, routing image pulls AND RUN
 # steps through MX_INSIGHT_BUILD_PROXY, WITHOUT touching the Docker daemon's own
 # proxy. Host network lets it reach a 127.0.0.1 proxy; the network.host
-# entitlement lets RUN steps reach it too. Idempotent.
+# entitlement lets RUN steps reach it too. Keep old builders and caches intact.
 ensure_build_proxy_builder() {
-  local proxy="$1"
-  local name="${MX_INSIGHT_BUILDX_BUILDER:-mx-insight-buildproxy}"
+  local proxy="$1" signature name info
+  signature="$(MX_INSIGHT_SELECTED_BUILD_PROXY="$proxy" node --input-type=module -e '
+import { createHash } from "node:crypto";
+const proxy = process.env.MX_INSIGHT_SELECTED_BUILD_PROXY;
+try {
+  const url = new URL(proxy);
+  if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.search || url.hash ||
+      url.pathname !== "/" || /[\s,"\x27]/.test(proxy)) throw new Error();
+} catch { console.error("Build proxy must be an HTTP(S) proxy URL (value hidden)"); process.exit(1); }
+console.log(createHash("sha256").update(proxy).digest("hex").slice(0, 16));
+')" || die "Invalid MX_INSIGHT_BUILD_PROXY; no builder changed."
+  name="${MX_INSIGHT_BUILDX_BUILDER:-mx-insight-buildproxy-${signature}}"
+  [[ "$name" =~ ^[a-zA-Z][a-zA-Z0-9_.-]*$ ]] || die "Invalid MX_INSIGHT_BUILDX_BUILDER."
   docker buildx version >/dev/null 2>&1 \
     || die "MX_INSIGHT_BUILD_PROXY requires 'docker buildx' (Docker with the buildx plugin)."
-  if ! docker buildx inspect "$name" >/dev/null 2>&1; then
-    say "Creating one-off buildx builder '$name' routed via ${proxy} (Docker daemon proxy left untouched)."
+  if info="$(docker buildx inspect "$name" 2>/dev/null)"; then
+    # Buildx retains driver options from creation. Merely changing the process
+    # environment never updates an existing buildkitd container. Inspect without
+    # echoing its output, which may contain a proxy password.
+    if ! printf '%s\n' "$info" | MX_INSIGHT_SELECTED_BUILD_PROXY="$proxy" node -e '
+const fs = require("node:fs");
+const info = fs.readFileSync(0, "utf8"), proxy = process.env.MX_INSIGHT_SELECTED_BUILD_PROXY;
+const options = [...info.matchAll(/^Driver Options:\s*(.*)$/gm)];
+const nodes = info.split(/^Nodes:\s*$/m)[1] || "";
+const matches = /^Driver:\s+docker-container\s*$/m.test(info)
+  && (nodes.match(/^Name:\s+/gm) || []).length === 1 && options.length === 1;
+const values = new Map([...((options[0]?.[1] || "").matchAll(/(?:^|\s)([\w.]+)="([^"\r\n]*)"/g))]
+  .map((entry) => [entry[1], entry[2]]));
+const proxyKeys = ["env.HTTP_PROXY", "env.HTTPS_PROXY"];
+const optionalProxyKeys = ["env.http_proxy", "env.https_proxy", "env.ALL_PROXY", "env.all_proxy"];
+process.exit(matches && values.get("network") === "host"
+  && proxyKeys.every(key => values.get(key) === proxy)
+  && optionalProxyKeys.every(key => !values.has(key) || values.get(key) === proxy)
+  && ["env.NO_PROXY", "env.no_proxy"].every(key => !values.get(key)) ? 0 : 1);
+'; then
+      die "Build proxy builder configuration differs or cannot be verified; existing builder/cache left intact. Unset MX_INSIGHT_BUILDX_BUILDER to select a proxy-specific builder, or use a new dedicated name."
+    fi
+  else
+    say "Creating scoped buildx builder '$name' (proxy value hidden; Docker daemon unchanged)."
     # No NO_PROXY on buildkitd: it only pulls external registries (docker.io), which
     # must all traverse the proxy. Comma-lists in --driver-opt trip buildx's CSV
     # parser; internal/RUN bypass is handled by the NO_PROXY build-arg instead.
@@ -1594,8 +1628,11 @@ ensure_build_proxy_builder() {
       --driver-opt network=host \
       --driver-opt "env.HTTP_PROXY=${proxy}" \
       --driver-opt "env.HTTPS_PROXY=${proxy}" \
+      --driver-opt "env.http_proxy=${proxy}" \
+      --driver-opt "env.https_proxy=${proxy}" \
       --buildkitd-flags '--allow-insecure-entitlement network.host' >/dev/null
   fi
+  DEPLOY_BUILD_PROXY_BUILDER="$name"
 }
 
 # Reconcile the shared mx-common data plane (Elasticsearch, Redis) before the
@@ -1697,17 +1734,22 @@ build_and_import_image() {
     ensure_build_proxy_builder "$MX_INSIGHT_BUILD_PROXY"
     HTTP_PROXY="$MX_INSIGHT_BUILD_PROXY" \
     HTTPS_PROXY="$MX_INSIGHT_BUILD_PROXY" \
+    ALL_PROXY="$MX_INSIGHT_BUILD_PROXY" \
     NO_PROXY="$build_no_proxy" \
     http_proxy="$MX_INSIGHT_BUILD_PROXY" \
     https_proxy="$MX_INSIGHT_BUILD_PROXY" \
+    all_proxy="$MX_INSIGHT_BUILD_PROXY" \
     no_proxy="$build_no_proxy" \
     docker buildx build \
-      --builder "${MX_INSIGHT_BUILDX_BUILDER:-mx-insight-buildproxy}" \
+      --builder "$DEPLOY_BUILD_PROXY_BUILDER" \
       --network host \
       --allow network.host \
       --build-arg "HTTP_PROXY=$MX_INSIGHT_BUILD_PROXY" \
       --build-arg "HTTPS_PROXY=$MX_INSIGHT_BUILD_PROXY" \
+      --build-arg "http_proxy=$MX_INSIGHT_BUILD_PROXY" \
+      --build-arg "https_proxy=$MX_INSIGHT_BUILD_PROXY" \
       --build-arg "NO_PROXY=$build_no_proxy" \
+      --build-arg "no_proxy=$build_no_proxy" \
       --label dev.qpjoy.mx-insight-hub.project=mx-insight-hub \
       --label dev.qpjoy.mx-insight-hub.image=internal \
       --build-context "ui_design=${ELECTRON_DOCK_DIR}/mx-launcher/ui-design" \

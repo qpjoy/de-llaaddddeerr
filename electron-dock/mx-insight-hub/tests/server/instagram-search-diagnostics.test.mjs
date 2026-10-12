@@ -21,14 +21,14 @@ test('offline diagnostics distinguish Instagram shape, layout, identity, overflo
     [{ items: [row], has_more: true }, 'missing_instagram_continuation'],
     [{ items: [row], next_max_id: 'private-cursor', rank_token: {} }, 'invalid_instagram_continuation'],
     [{ items: [row], has_more: 'private-value' }, 'invalid_instagram_pagination'],
-    [{ items: [null] }, 'unexpected_projection_error'],
+    [{ items: [null] }, 'invalid_instagram_post_identity'],
   ]) {
     const result = inspectInstagramArchive(archive(data), snapshot)
     assert.equal(result.state, 'current_projection_rejects')
     assert.equal(result.reason, reason)
     if (reason === 'invalid_instagram_post_identity') {
       assert.deepEqual(result.invalidRowIndexes, [0])
-      assert.equal(result.invalidRows[0].unsafeNumericId, true)
+      assert.equal(result.invalidRows[0].unsafeNumericId, data.items[0] !== null)
     }
     if (reason === 'instagram_page_exceeds_requested_count') assert.equal(result.uniqueValidIdentityCount, 21)
     assert.doesNotMatch(JSON.stringify(result), /private-|123456789012345678/)
@@ -135,6 +135,29 @@ test('October 12 hashtag-only archive shape reports partial pagination without e
 })
 
 const pgliteModule = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
+test('diagnostics count all coexisting media containers and typed recommendations without exposing values', () => {
+  const data = { status: 'ok', media_grid: { sections: [{ layout_content: { medias: [{ media: row }] } }] },
+    items: [{ ...row, pk: '123' }], list: [{ media: { ...row, pk: '456' } }, { place: { name: 'private-place' } }],
+    users: [{ pk: '789', username: 'private-account' }], hashtags: [{ name: 'private-tag' }], places: [{}] }
+  const report = inspectInstagramArchive(archive(data), snapshot)
+  assert.equal(report.state, 'current_projection_accepts')
+  assert.equal(report.resultCount, 3)
+  assert.equal(report.uniqueValidIdentityCount, 3)
+  assert.equal(report.returnedCount, 3)
+  assert.equal(report.shape.userCount, 1)
+  assert.equal(report.shape.hashtagCount, 1)
+  assert.equal(report.shape.placeCount, 1)
+  assert.equal(report.shape.listEntries[1].fields.place, 'object')
+  assert.doesNotMatch(JSON.stringify(report), /private-/)
+  for (const group of [{ users: data.users }, { hashtags: data.hashtags }, { places: data.places }]) {
+    const partial = inspectInstagramArchive(archive({ ...group, has_more: true }), snapshot)
+    assert.equal(partial.state, 'current_projection_accepts')
+    assert.equal(partial.deliveryStatus, 'partial')
+    assert.deepEqual(partial.warningCodes, ['INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE'])
+    assert.doesNotMatch(JSON.stringify(partial), /private-/)
+  }
+})
+
 test('read-only database diagnosis traces an endpoint-wide blocker instead of treating the 409 as a paid call', {
   skip: pgliteModule ? false : 'Set MX_INSIGHT_TEST_PGLITE_MODULE to a local @electric-sql/pglite module',
 }, async t => {

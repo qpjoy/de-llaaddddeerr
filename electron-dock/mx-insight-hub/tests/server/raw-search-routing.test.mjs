@@ -754,6 +754,7 @@ test('Instagram list media retain captions and IDs while an account-only page re
 test('Instagram non-post-only lists without a cursor return an explicit partial page, retain receipts and do not quarantine other queries', async () => {
   // Field types from the 2026-10-12 archive; hashtag contents were not disclosed.
   for (const recommendation of [{ position: 0, hashtag: {} },
+    { position: 0, place: { location: { pk: '123', name: 'fixture-place' } } },
     { position: 0, user: { id: '123', username: 'account-result' } }]) {
     for (const route of ['data', 'raw']) {
       const upstream = { status: 'ok', list: [recommendation], has_more: true, rank_token: 'r'.repeat(78) }
@@ -814,6 +815,41 @@ test('Instagram hashtag lists preserve real continuations and mixed media on bot
   }
 })
 
+test('Instagram grouped recommendations keep both delivery contracts, receipts, idempotency and post continuations', async () => {
+  for (const route of ['data', 'raw']) {
+    for (const group of [{ users: [{ pk: '123', username: 'fixture' }] },
+      { hashtags: [{ name: 'fixture' }] }, { places: [{ location: {} }] },
+      { other_results: { keyword_recommendations: { keywords: [{ name: 'fixture' }] } } }]) {
+      const instagramData = { status: 'ok', ...group, has_more: true, rank_token: 'fixture-rank' }
+      const h = await harness({ platform: 'instagram', instagramData })
+      const invoke = route === 'data' ? h.invokeData : h.invoke
+      const body = { platform: 'instagram', query: 'fixture', pageSize: 20 }
+      const response = await invoke(body, 'grouped-partial')
+      assert.equal(response.body.data.status, 'partial')
+      assert.equal(response.body.data.warnings[0].code, 'INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE')
+      assert.deepEqual((await invoke(body, 'grouped-partial')).body, response.body)
+      assert.equal(h.calls.length, 1)
+      assert.equal([...h.platformStore.calls.values()][0].billed, true)
+      assert.equal([...h.platformStore.calls.values()][0].outcome, 'succeeded')
+      assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+      instagramData.next_max_id = 'grouped-next'
+      const first = await invoke({ ...body, query: 'another-fixture' }, 'grouped-page-1')
+      const page = route === 'data' ? first.body.data.pageInfo : first.body.data.page
+      assert.equal(page.hasMore, true)
+      instagramData.items = [instagramPost]
+      instagramData.list = [{ media: { ...instagramPost, pk: '98765', code: 'second' } }]
+      instagramData.has_more = false
+      const second = await invoke({ ...body, query: 'another-fixture', cursor: page.nextCursor }, 'grouped-page-2')
+      assert.equal(route === 'data' ? second.body.data.items.length : JSON.parse(second.body.data.raw_data).length, 2)
+      assert.equal(h.calls.length, 3)
+      assert.equal(h.calls[2].searchParams.get('next_max_id'), 'grouped-next')
+      assert.equal(h.calls[2].searchParams.get('rank_token'), 'fixture-rank')
+      assert.equal(h.historical.length, 0)
+      if (route === 'data') assert.ok(isNightAllDataSearchV1Envelope(second.body))
+    }
+  }
+})
+
 test('Instagram partial recommendation pages keep HTTP raw-alias replay and strict data-search delivery', async t => {
   const h = await harness({ platform: 'instagram', instagramData: { status: 'ok',
     list: [{ position: 0, hashtag: {} }], has_more: true, rank_token: 'r'.repeat(78) } })
@@ -853,7 +889,7 @@ test('Instagram empty keyword suggestions remain empty; malformed, oversize and 
     [{ items: [instagramPost], has_more: 'unexpected-value' }, 'invalid_instagram_pagination'],
     [{ items: [{ ...instagramPost, pk: 9007199254740992 }] }, 'invalid_instagram_post_identity'],
     [{ media_grid: { sections: [{ layout_content: { medias: {} } }] } }, 'invalid_instagram_media_grid'],
-    [{ items: [null] }, 'invalid_instagram_search_contract'],
+    [{ items: [null] }, 'invalid_instagram_post_identity'],
     [{ status: 'ok', list: [{ user: { pk: '123', username: 'name' }, caption: 'malformed post' }], has_more: false }, 'invalid_instagram_search_shape'],
     [{ status: 'ok', list: [{ user: { pk: '123', username: 'name' }, media: null }], has_more: false }, 'invalid_instagram_search_shape'],
     [{ status: 'ok', list: [{ name: 'unrecognized result' }], has_more: false }, 'invalid_instagram_search_shape'],

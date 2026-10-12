@@ -1,5 +1,176 @@
 # Instagram 搜索冷却诊断
 
+## 2026-10-12 评论与回复各一次付费实测
+
+用户随后明确允许评论和回复付费校准，生产 Hub 管理台以现有 LCY-delta 身份各发送
+一次请求。评论输入沿用已实测搜索结果的公开帖子短码；回复输入完全取自刚收到的
+评论对象，不购买短码转换，也不构造不存在的评论 ID。
+
+```text
+POST /api/v1/data/native/t.api_4167d40172ce25ef
+{"deliveryMode":"live_only","params":{"code":"C_Yqdk4u__R","sort_order":"popular"}}
+
+POST /api/v1/data/native/t.api_4896d158e6531d9a
+{"deliveryMode":"live_only","params":{"media_id":"3447692265176956881","comment_id":"18024567395376549"}}
+```
+
+| 证据 | 评论 | 回复 |
+| --- | --- | --- |
+| Hub requestId | `d24f7dcf-7508-427e-b273-ac18ab161ca6` | `a0484ff9-fbf8-4113-8314-bed04e317cd2` |
+| 上游 requestId | `ba0cd540-6f62-4973-8ed0-8da8743b83e3` | `d5581281-3ac0-4158-a1f2-ec0365ef446d` |
+| 请求/完成时间（UTC） | `04:22:17.781Z` / `04:22:20.821Z` | `04:23:03.511Z` / `04:23:05.347Z` |
+| 上游耗时 | 2886ms | 1713ms |
+| 交付 | live、已提交响应、HTTP 200 | live、已提交响应、HTTP 200 |
+| 当次上游调用 | 一条，HTTP/业务码 200、已计费 | 一条，HTTP/业务码 200、已计费 |
+| 客户结算 | enforced、已扣款 ¥0.01 | enforced、已扣款 ¥0.01 |
+| 结果 | 9 条顶层 comments，28 个顶层业务字段 | 1 条 child_comments，9 个顶层业务字段 |
+
+日期均为 2026-10-12；完成时间对应北京时间 12:22:20、12:23:05。本轮客户合计扣费
+¥0.02。两条采购账本各为 `1 USD · estimated` 最小货币单位，即各估算 $0.01，
+不是供应商最终账单金额证明。两份受限响应均已归档，未重试、翻页或追加付费调用。
+
+实际格式核对：
+
+- 评论：`comments[]` 保留字符串 `pk/media_id/strong_id__`、正文、时间、作者、点赞数
+  与子评论元数据；`caption` 是独立对象，不混进评论数组。`comment_count=10`，
+  顶层评论 9 条，其中一个父评论的 `child_comment_count=1`。不能强制总数等于数组长度。
+- 评论页 `has_more_comments=false/has_more_headload_comments=false`，没有 `next_min_id`。
+  选中父评论的 `has_more_head_child_comments=true`、`num_head_child_comments=1`、
+  `has_more_tail_child_comments=false`、预览回复为空；评论列表结束不代表所有回复已交付。
+- 回复：`child_comments[1]`、独立 `parent_comment`、`child_comment_count=1`，
+  head/tail 的更多标志均为 false，没有 `next_min_child_cursor`。子评论的
+  `parent_comment_id/replied_to_comment_id` 与请求父评论 ID 相等，媒体 ID 与原评论一致。
+  `parent_comment` 没有原评论列表中的子评论分页元数据，不人为拼接两个对象。
+- 评论的 `user_id` 在这份样本中是安全整数，回复的 `user_id` 为字符串，作者对象还同时
+  含数字 `pk` 和字符串 `id/pk_id`；保持原生类型。全部实际业务数据未发现不安全整数，
+  评论/媒体的长 ID 均以字符串保留，不转成 JavaScript Number。
+
+现有原生转发已接受这两份结构，本轮无运行时代码修改。两份完整交付业务对象通过
+adapter 离线回放，逐字段相等、身份关联通过、零额外外部调用、无自动帖子入库。
+离线构造的成功外层不是生产原始采购回执；账本和受限响应仍以 Hub 为准。
+匿名化回归新增终页评论和非空回复两例，总计 6 项通过，保留此前 JSON 游标传递测试。
+
+此次真实样本均为终页，所以仅实测了无续页游标形态；有后续页的游标传递仍属于
+[官方评论契约](https://docs.tikhub.io/419083071e0)、
+[官方回复契约](https://docs.tikhub.io/419083072e0)及模拟测试证据，没有付费验证下一页。
+这些结论限定以上两个 V3 原生端点及此次样本，不表示所有 Instagram 版本/未来格式
+均已校准，也不代表 po-infra 已改接这两个端点。MX-H2I 登录和联网保持不变。
+
+## 2026-10-12 用户详情独立校准与评论契约核对
+
+用户后续允许为用户详情、评论等其他接口付费校准。本轮按总共一次新增请求执行，
+当时未收到扩大到每类各一次的答复；该次额度用于用户详情，当时评论与回复未付费实测。
+后续新增授权及两项真实校准结果见上一节。
+生产 Hub 管理台沿用现有 LCY-delta 身份，目标为前一次搜索结果中的公开帖子作者：
+
+```text
+POST /api/v1/data/native/t.instagram_v3_get_user_profile
+{"deliveryMode":"live_only","params":{"username":"worldwidewag_"}}
+```
+
+- Hub requestId：`f4362d8b-26e9-41d2-ba25-faa48fcc7567`。
+- 上游 requestId：`3b4cc3de-7a51-4a28-9f5f-3578ed861452`。
+- 请求 `2026-10-12T04:06:49.367Z`，完成 `04:06:52.672Z`（北京时间 12:06:52）。
+- 只读请求诊断确认已提交响应、HTTP 200、sourceMode=live；仅一条上游调用，
+  HTTP/业务码 200、3173ms、已计费、已保存受限响应。
+- 客户结算 enforced/已扣款，1 CNY 最小货币单位，即 ¥0.01。
+  采购 1 USD 最小货币单位标注 estimated，只代表 $0.01 估算。
+
+实际业务数据为扁平 `data`，含 18 个字段：字符串 `pk/id/username/full_name/biography`、
+两个头像 URL、`category/_rid`，数字 `follower_count/following_count/media_count`，
+布尔 `is_private/is_verified`，`external_url=null`，以及三个 `edge_*.count` 对象。
+`id=pk` 与前次搜索作者身份一致；三组直接计数与嵌套计数逐一一致。
+[官方用户详情说明](https://docs.tikhub.io/419083059e0) 描述 `data.user` 包装，
+本次线上结果没有该层。原生接口按原样交付业务对象，已支持这两种形态；不为匹配
+示例人为添加/删除 user 层，不把资料误交给综合搜索的帖子投影。
+
+| 接口 | Hub 原生 endpoint key | 独立格式和分页契约 | 本轮证据 |
+| --- | --- | --- | --- |
+| 用户详情 V3 | `t.instagram_v3_get_user_profile` | 本次扁平 data；文档 data.user；输入 username | 一次真实调用、诊断账本、完整业务数据离线回放 |
+| 帖子评论 V3 | `t.api_4167d40172ce25ef` | code；响应 comments、next_min_id、has_more_comments；后续 min_id 原样传递，sort_order 为 popular/newest | 官方说明、本地契约及模拟回归；未实测 |
+| 评论回复 V3 | `t.api_4896d158e6531d9a` | media_id/comment_id；next_min_child_cursor 作为后续 min_id | 已固定的官方契约快照及模拟回归；未实测 |
+
+[官方评论说明](https://docs.tikhub.io/419083071e0) 中的 `next_min_id` 可以是序列化 JSON
+字符串，必须整体保留，不能改用搜索的 next_max_id/rank_token。回复使用单独的子评论
+游标。调用这些端点均须使用其原生 endpoint key、现有权限和计费链路；一个请求只取
+一次响应，不自动继续分页或补买详情。其他 V1/V2/V3 端点不能从这三项推断已验证。
+
+新增 `tests/server/instagram-native.test.mjs` 的 4 项本地模拟回归全部通过：扁平/嵌套
+用户详情、评论 JSON 游标与长字符串 ID、回复独立游标；同时核对一次调用、受限原始字节
+及哈希、空值、Unicode 正文和无自动帖子入库。测试使用匿名合成数据，不包含真实账号、
+头像地址或游标。另用本次实际交付业务对象通过 adapter 离线回放，全部 18 个字段相等；
+模拟包装的 code=200 外层不是原始采购回执，原始回执由生产 Hub 受限保存。
+
+本轮仅增加证据和测试，无需为用户详情改动运行时代码或部署。评论/回复的模拟回归不能
+替代各自真实响应证据；本轮未断言其生产数据格式已完成校准。先前综合搜索兼容扩展仍须
+按下一节部署；MX-H2I 登录、联网、权限和结算规则均未改。
+
+## 2026-10-12 综合搜索兼容扩展与一次付费验证
+
+用户明确授权一次付费请求后，经生产 Hub 管理台现有 LCY-delta 身份，仅手动发送一次：
+
+```text
+POST /api/v1/data/native/t.instagram_v3_general_search
+{"deliveryMode":"live_only","params":{"query":"Paris"}}
+```
+
+- Hub requestId：`4517ae17-8cad-4ce6-9fbb-17df29625be5`。
+- 上游 requestId：`b1e44eef-916b-4d61-b3c3-addd39f26b0b`。
+- 请求时间 `2026-10-12T03:57:02.220Z`，完成 `03:57:09.332Z`。
+- 只读请求诊断显示 committed、HTTP 200、sourceMode=live；当次只有一条供应商调用，
+  HTTP/业务码 200，耗时 6958ms、已计费、已保存受限响应。
+- 客户结算为 enforced/已扣款，1 CNY 最小货币单位，即 ¥0.01。
+  采购账本显示 1 USD 最小货币单位并标注 estimated，即估算 $0.01；不是供应商最终账单金额证明。
+- 原生交付含一个账号推荐和 18 条网格帖子：9 条图片、5 条视频、4 条轮播；有有效下一页游标。
+  未翻页、未重试、未补发标准搜索。后续归档读取和本地回放不调用上游。
+
+这次调用验证的是原生接口的实际交付；标准 data-search/raw 的新增解析逻辑通过同一业务
+响应的离线投影与模拟集成测试验证，不能当作新增代码已在生产标准搜索上线的证明。
+只读交付归档重新读取为完整 JSON 后，离线投影保留全部 18 条帖子，`status=ok/hasMore=true`；
+逐条核对身份、正文、作者、发布时间及图片/视频链接，并核对 next_max_id/rank_token 均通过。
+该原生调用没有自动触发标准帖子入库；“采集查询复现”中的归档记录数为 0 不能解释为
+上游返回 0 条，原生完整业务对象就在该次交付响应中。
+
+兼容范围限定为 `instagram/v3/general_search`。根据已归档事故、此次实测、既有 Night-All
+关键词推荐样本及[官方接口说明](https://docs.tikhub.io/419083058e0)，覆盖如下：
+
+| 返回结构 | 标准帖子交付行为 | 证据范围 |
+| --- | --- | --- |
+| `media_grid.sections[].layout_content.medias[].media` | 保留图片、视频和轮播的帖子身份、正文、作者、时间和媒体链接 | 此次实测 18 条 + 回归 |
+| `mediaGrid/layoutContent/media` 别名、`items` 裸帖或 media 包装、嵌套 `data.data` | 按同一帖子校验规则处理 | 既有支持 + 回归 |
+| `list[].media`、裸帖、`list[].user/hashtag/place` | 保留帖子；账号、话题、地点不冒充帖子 | 账号/话题归档；地点为类型容器模拟测试 |
+| `users/hashtags/places` 分组 | 识别直接对象及对应类型包装，非帖子不入帖子结果 | 官方分组说明 + 模拟测试；本次未返回这些分组 |
+| `other_results.keyword_recommendations.keywords` | 识别关键词推荐，保留分页或不完整警告 | 既有 Night-All 样本 + 回归 |
+| 多个容器同时出现 | 按网格、items、list 顺序收集所有帖子，以交付身份去重 | 实测 grid+list；多帖子容器回归 |
+
+只含已识别非帖子结果且声明更多、缺游标时返回 `partial` 和
+`INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE`。有效游标在非帖子页甚至显式空页仍可传递；
+显式结束、同游标循环和第 15 页上限保持。空页声明更多却没有游标、坏帖、非法分类包装、
+损坏容器/分页、超出请求条数继续失败。检查所有同时出现的已知容器，不能用空网格或
+推荐结果掩盖其他容器里的帖子/异常；诊断也统计全部帖子容器，只输出固定字段类型和数量。
+
+这不是对所有 Instagram 端点、任意未知结构或未来改版的保证。未知结构继续保留原始
+归档并报错；原生接口保留业务对象，标准帖子接口遵守自身契约。无自动翻页、额外详情购买、
+重试、授权/计费/隔离保护更改；MX-H2I 登录和联网代码未改。
+
+本地回归：`instagram-search`、`instagram-search-diagnostics`、`raw-search-routing`、
+`admission-recovery`、`night-all-pagination-platforms` 五组测试，66 通过、0 失败、6 个可选
+数据库测试因未配置 PGlite 跳过。真实响应另在本地离线核对，不将账号、正文、签名 CDN
+地址和真实游标写入测试夹具。新增代码尚待服务器部署，无新增数据库迁移。
+
+在服务器同步本次代码后，从 Hub 源码目录执行既有部署流程：
+
+```bash
+bash scripts/manage.sh deploy
+kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-public --timeout=300s
+kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-admin --timeout=300s
+```
+
+部署后可用下文原事故的只读诊断命令复核，不需要再次付费。新原生调用的交付与结算可在
+管理台“请求诊断”按上述新 requestId 查询；现有 Instagram CLI 诊断限定标准搜索路径，
+不能把新原生调用 ID 填入后将“不支持/未找到”误解为调用失败。原生完整交付可在
+“数据中心 → 采集查询复现”只读查看。旧 po-infra 冷启动已经恢复成功，无需再恢复一次。
+
 ## 2026-10-12 话题推荐与缺失游标
 
 策略 `ad3c1131-6850-4cbf-a37a-ade3de846bd9` 的 Hub 请求
@@ -33,7 +204,7 @@
 
 本地用报告的字段类型构造模拟响应，验证旧代码拒绝、新代码接受，并覆盖标准 data-search、
 两个 raw HTTP 别名、幂等回放、采购回执、有效分页和坏帖保护。未读取生产话题内容，
-未发付费探测或修改历史状态。无新增 migration；仍需部署后回放服务器原文。
+未发付费探测或修改历史状态。无新增 migration；服务器归档回放结果见下方验收记录。
 
 在服务器的 Hub 源码目录按既有流程部署，然后只读验证：
 
@@ -53,6 +224,46 @@ kubectl -n mx-insight-hub exec deployment/mx-insight-hub-admin -c admin -- \
 部署全部 API 副本并确认当前限制后，才在告警所属 po-infra 环境恢复该策略的 Instagram
 冷启动任务，保留分页不完整的说明；Hub 部署不会自动重启下游任务。不要用 Dev 环境 404
 推断生产策略不存在，也不要扩大到全平台恢复。MX-H2I 登录和联网保持不变。
+
+### 操作者回传的归档回放验收
+
+2026-10-12 操作者再次提交同一请求、同一调用的诊断结果：
+`matchesReportedDeadline=true`、`current_projection_accepts`、`returnedCount=0`、
+`invalidRowCount=0`、`hasMore=false`、`deliveryStatus=partial`，且 `warningCodes` 为
+`["INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE"]`。该份历史响应已通过当前诊断所用解析器，
+符合预期的“话题结果、无可用后续游标”交付。
+
+旧请求的 `released` 和旧调用的 `succeeded_unusable/invalid_instagram_search_shape`
+保持不变，属于历史事实，不代表本次回放仍然失败；`released` 也不是当前端点保护状态。
+此报告不包含全部 API 副本版本、最新保护记录或下游任务状态，不能据此宣布采集已恢复，
+也不能将零条帖子解释为搜索穷尽。未为验收新增上游请求或改写采购账本。
+
+操作者随后确认告警所属 po-infra 是 Docker 容器 `mx_data-web-1`（同名前缀网关端口 59201），
+其上游为 `hub.minsight-ai.com`；Hub 自身在 Kubernetes。目标策略
+`ad3c1131-6850-4cbf-a37a-ade3de846bd9` 的本地 ID 为 295，启用且未过期，
+全局与 Instagram 均未暂停。Instagram 状态为 `failed/cold_start_failed`，尝试次数为 1；
+最近三条冷启动任务都失败且入库为 0，其中任务
+`2c6cd2ba-34ea-441a-9757-1fea6a41027e` 的错误文本匹配原告警请求 ID。
+`delta_59202-web-1` 未找到该策略；`delta_59201-web-1` 导入冷启动模型失败，
+不能据此判断其是否有策略，也不在本次恢复目标内。
+
+恢复目标限定为已定位的 `mx_data-web-1` 中该策略的 Instagram 冷启动。
+本地 po-infra 恢复入口 `recover_plan_cold_start` 支持 `platforms=["instagram"]`、
+`force=False`，优先从失败任务检查点继续，并遵守现有暂停、禁用和过期状态。
+采集器每次执行创建新的 step，按 step 标识生成本次 Hub 幂等键，不回放旧失败交付。
+恢复会按现有策略实际调用 Hub，可能产生正常采购/客户计费；不更改历史 Hub 请求与账本。
+操作者已执行恢复，返回 `plan_id=295`、`platforms=["instagram"]`、`resumed=true`，
+并列出原任务 `c3c65964-98cd-4bf4-97ae-e6c4d583de19`、
+`2c6cd2ba-34ea-441a-9757-1fea6a41027e`、`1c0be8d3-dc92-49ec-9ae9-973b3ad89ee2`。
+这确认三条原任务已恢复入队；调用时的 Python 语法/依赖警告未阻止该步骤。
+操作者随后回传终态：上述三条任务均为 `succeeded`、`collected_count=0`，分别于
+`2026-10-12T03:39:31.478383Z`、`03:39:31.450384Z`、`03:39:31.243494Z` 完成。
+平台冷启动状态于 `03:39:31.488933Z`（北京时间 11:39:31）变为 `succeeded`，
+`reason=instagram_hub_projection_fixed`、`attempt_count=2`。
+这确认本次解析修复的归档验收与下游失败任务恢复均已完成，冷启动失败状态已解除；
+无需再次执行恢复。该状态报告未包含新 Hub 响应内容或后续增量运行记录，零条入库
+不能证明搜索穷尽、上游没有相关帖子或后续增量已经执行。先前归档的 partial 警告仍保留其
+“缺少可用游标、无法安全继续该响应”的含义，不以任务成功替代数据完整性结论。
 
 ## 2026-10-09 冷启动失败
 

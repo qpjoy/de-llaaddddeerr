@@ -83,6 +83,31 @@ MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 \
 
 Docker 和 Kubernetes/containerd 是两个镜像存储。共享镜像缺失时优先导入本机 Docker 缓存，没有缓存才拉取；`MX_INSIGHT_BUILD_PROXY` 只控制 Hub 构建，不会替 Docker daemon 或 containerd 配置仓库代理。
 
+#### Docker Hub 令牌请求 EOF（2026-10-12）
+
+若构建停在 `load metadata for node:22-bookworm-slim`，并显示 `auth.docker.io/token ... EOF`，失败发生在基础镜像认证阶段，尚未编译 Hub，也与 npm 镜像源无关。EOF 本身不能确定是代理端口、出口节点还是上游连接问题。
+
+旧脚本固定复用 `mx-insight-buildproxy`，即使 `MX_INSIGHT_BUILD_PROXY` 从 `7788` 改成 `7789`，已创建的 buildkitd 仍保留旧代理。新版默认按代理 URL 的摘要选择 `mx-insight-buildproxy-<摘要>`，同一配置复用，配置变化创建独立构建器。复用前检查 driver、单节点、host 网络和代理选项；显式 `MX_INSIGHT_BUILDX_BUILDER` 若指向不匹配的构建器会停止，不自动删除或修改它。旧构建器及缓存保留，新构建器首次构建需要自己的缓存。Buildx 的容器与缓存生命周期见 [Docker 官方文档](https://docs.docker.com/build/builders/drivers/docker-container/)。
+
+同步新版脚本后，在服务器 Hub 目录执行；端口按本机实际 HTTP 代理设置（当前 setup 命令使用 `7789`）：
+
+```bash
+MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh deploy
+```
+
+若曾配置 `MX_INSIGHT_BUILDX_BUILDER`，先从调用环境及 `.env.internal` 删除这个手动覆盖，恢复自动选择；无需删除旧 builder 或执行 prune。构建代理同时覆盖 buildkitd、buildx 客户端的令牌请求和 Dockerfile RUN，仍不改变 Docker daemon、containerd、Launcher 或 MX-H2I 的代理。
+
+若仍遇到同一 EOF，在相同服务器验证代理到令牌端点的链路，响应正文直接丢弃，不输出 token：
+
+```bash
+curl --proxy http://127.0.0.1:7789 --noproxy '' \
+  --connect-timeout 10 --max-time 30 --silent --show-error \
+  --output /dev/null --write-out 'Docker token HTTP %{http_code}\n' \
+  'https://auth.docker.io/token?service=registry.docker.io&scope=repository%3Alibrary%2Fnode%3Apull'
+```
+
+预期 HTTP 200；仍为 EOF/000 时需修复该代理的 Docker Hub 出口。200 只证明这次宿主机令牌请求成功，不证明 manifest/blob 下载或完整部署成功。首次创建构建器还可能需要 Docker daemon 拉取 BuildKit 镜像，该拉取仍需主机已有网络或镜像缓存。
+
 核心依赖的 CLI 默认等待上限为单项 1200 秒，可用 `MX_COMMON_WAIT_TIMEOUT` 配置。PG/ES 另有 30 分钟容器启动探针预算，避免崩溃/WAL/索引恢复较慢时被早期 liveness 反复杀死；正常启动后才启用原有存活检测。启动探针语义见 [Kubernetes 官方文档](https://kubernetes.io/docs/concepts/workloads/pods/probes/)。这个预算与 CLI 等待、镜像下载耗时不同，CLI 超时不是删除原数据或立即强杀数据库的理由。
 
 PG/ES 正常终止保留 120 秒宽限。首次应用新的探针/启动保护或其他 Pod 模板变更会滚动这些服务；单节点期间 Hub 可能短暂不可用。后续配置不变时，mx-common 不因正常 ensure 而额外滚动，Hub 自身仍按既有 deploy 流程更新。

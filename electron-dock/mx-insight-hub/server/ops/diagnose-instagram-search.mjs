@@ -47,11 +47,12 @@ export function inspectInstagramArchive(archive, snapshot) {
     mediaGrid: kind(grid), sections: kind(sections), sectionCount: count(sections), sectionShapes,
     sectionsTruncated: Array.isArray(sections) && sections.length > 20,
     items: kind(data?.items), itemCount: count(data?.items),
-    list: kind(data?.list), listCount: count(data?.list), users: kind(data?.users),
+    list: kind(data?.list), listCount: count(data?.list), users: kind(data?.users), userCount: count(data?.users),
     listEntries: Array.isArray(data?.list) ? data.list.slice(0, 20).map((entry, index) => ({ index,
-      fields: listFields(entry), user: listFields(entry?.user), media: listFields(entry?.media) })) : [],
+      fields: listFields(entry), user: listFields(entry?.user), media: listFields(entry?.media),
+      hashtag: listFields(entry?.hashtag), place: listFields(entry?.place) })) : [],
     listEntriesTruncated: Array.isArray(data?.list) && data.list.length > 20,
-    hashtags: kind(data?.hashtags), places: kind(data?.places),
+    hashtags: kind(data?.hashtags), hashtagCount: count(data?.hashtags), places: kind(data?.places), placeCount: count(data?.places),
     keywords: kind(data?.other_results?.keyword_recommendations?.keywords),
     keywordCount: count(data?.other_results?.keyword_recommendations?.keywords),
     pagination: pagination(data), gridPagination: pagination(grid),
@@ -69,13 +70,14 @@ export function inspectInstagramArchive(archive, snapshot) {
   const capturedAt = timestamp.toISOString()
   const request = { query: '', page: 1, pageSize, encodeNext: () => 'offline-not-a-cursor' }
   // Independently inspect identities even if the full page fails another guard.
-  const values = Array.isArray(sections) ? sections.flatMap(section => {
+  const values = [data?.media_grid, data?.mediaGrid].flatMap(grid => Array.isArray(grid?.sections) ? grid.sections.flatMap(section => {
     const layout = section?.layout_content || section?.layoutContent
     const entries = layout?.medias || layout?.media || []
     return Array.isArray(entries) ? entries.map(entry => entry?.media || entry) : []
-  }) : Array.isArray(data?.items) ? data.items.map(entry => entry?.media || entry)
-    : grid == null && data?.items == null && Array.isArray(data?.list) ? data.list.flatMap(entry =>
-      object(entry?.media) ? [entry.media] : entry?.code || entry?.shortcode ? [entry] : []) : []
+  }) : [])
+  if (Array.isArray(data?.items)) values.push(...data.items.map(entry => entry?.media || entry))
+  if (Array.isArray(data?.list)) values.push(...data.list.flatMap(entry =>
+    object(entry?.media) ? [entry.media] : entry?.code || entry?.shortcode ? [entry] : []))
   const invalidRows = [], identities = new Set()
   let invalidRowCount = 0
   for (const [index, value] of values.entries()) {

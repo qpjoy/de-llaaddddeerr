@@ -50,14 +50,17 @@ build_proxy_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-build-proxy.XXXXXX"
   export MX_INSIGHT_BUILD_PROXY="http://127.0.0.1:7788"
   export MX_INSIGHT_BUILD_NO_PROXY="localhost,127.0.0.1,.svc"
   unset HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
+  export ALL_PROXY=http://stale-proxy.invalid:7788 all_proxy=http://stale-proxy.invalid:7788
   need() { :; }
-  ensure_build_proxy_builder() { :; }
+  ensure_build_proxy_builder() { DEPLOY_BUILD_PROXY_BUILDER=selected-proxy-builder; }
   containerd_import_docker_image() { :; }
   docker() {
     if [ "${1:-} ${2:-}" = "buildx build" ]; then
-      printf 'HTTP_PROXY=%s\nHTTPS_PROXY=%s\nNO_PROXY=%s\nhttp_proxy=%s\nhttps_proxy=%s\nno_proxy=%s\n' \
+      assert_eq selected-proxy-builder "$4" "build uses the selected proxy builder"
+      printf 'HTTP_PROXY=%s\nHTTPS_PROXY=%s\nNO_PROXY=%s\nhttp_proxy=%s\nhttps_proxy=%s\nno_proxy=%s\nALL_PROXY=%s\nall_proxy=%s\n' \
         "${HTTP_PROXY:-}" "${HTTPS_PROXY:-}" "${NO_PROXY:-}" \
         "${http_proxy:-}" "${https_proxy:-}" "${no_proxy:-}" \
+        "${ALL_PROXY:-}" "${all_proxy:-}" \
         >"$build_proxy_marker"
       return 0
     fi
@@ -70,10 +73,99 @@ build_proxy_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-build-proxy.XXXXXX"
   build_and_import_image
 )
 assert_eq \
-  $'HTTP_PROXY=http://127.0.0.1:7788\nHTTPS_PROXY=http://127.0.0.1:7788\nNO_PROXY=localhost,127.0.0.1,.svc\nhttp_proxy=http://127.0.0.1:7788\nhttps_proxy=http://127.0.0.1:7788\nno_proxy=localhost,127.0.0.1,.svc' \
+  $'HTTP_PROXY=http://127.0.0.1:7788\nHTTPS_PROXY=http://127.0.0.1:7788\nNO_PROXY=localhost,127.0.0.1,.svc\nhttp_proxy=http://127.0.0.1:7788\nhttps_proxy=http://127.0.0.1:7788\nno_proxy=localhost,127.0.0.1,.svc\nALL_PROXY=http://127.0.0.1:7788\nall_proxy=http://127.0.0.1:7788' \
   "$(cat "$build_proxy_marker")" \
   "scoped build proxy covers buildx client token requests"
 rm -f -- "$build_proxy_marker"
+
+# Existing buildkitd containers keep their creation-time proxy. Model buildx's
+# inspect output and ensure a changed port cannot silently reuse that container.
+(
+  builder_state="$(mktemp -d "${TMPDIR:-/tmp}/mx-insight-hub-builders.XXXXXX")"
+  trap 'rm -rf -- "$builder_state"' EXIT
+  unset MX_INSIGHT_BUILDX_BUILDER
+  docker() {
+    local name= driver= option options=
+    case "${1:-} ${2:-}" in
+      'buildx version') return 0 ;;
+      'buildx inspect')
+        [ -f "$builder_state/$3" ] || return 1
+        cat "$builder_state/$3"
+        ;;
+      'buildx create')
+        shift 2
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --name) name="$2" ;;
+            --driver) driver="$2" ;;
+            --driver-opt)
+              option="$2"
+              options="${options} ${option%%=*}=\"${option#*=}\""
+              ;;
+            --buildkitd-flags) assert_eq '--allow-insecure-entitlement network.host' "$2" 'host entitlement configured' ;;
+            *) printf 'unexpected buildx create argument: %s\n' "$1" >&2; exit 1 ;;
+          esac
+          shift 2
+        done
+        printf 'Name: %s\nDriver: %s\n\nNodes:\nName: %s0\nEndpoint: unix:///var/run/docker.sock\nDriver Options:%s\nStatus: running\n' \
+          "$name" "$driver" "$name" "$options" > "$builder_state/$name"
+        printf '%s\n' "$name" >> "$builder_state/created"
+        ;;
+      *) printf 'unexpected Docker mutation: %s\n' "$*" >&2; exit 1 ;;
+    esac
+  }
+  ensure_build_proxy_builder http://127.0.0.1:7788
+  first_builder="$DEPLOY_BUILD_PROXY_BUILDER"
+  ensure_build_proxy_builder http://127.0.0.1:7788
+  assert_eq "$first_builder" "$DEPLOY_BUILD_PROXY_BUILDER" 'same proxy reuses its builder'
+  assert_eq "$first_builder" "$(cat "$builder_state/created")" 'matching builder is not recreated'
+  ensure_build_proxy_builder http://127.0.0.1:7789
+  second_builder="$DEPLOY_BUILD_PROXY_BUILDER"
+  [ "$first_builder" != "$second_builder" ] || exit 1
+  assert_eq "$first_builder
+$second_builder" "$(cat "$builder_state/created")" 'changed proxy selects a new builder without removing old cache'
+  [ -f "$builder_state/$first_builder" ] || exit 1
+
+  export MX_INSIGHT_BUILDX_BUILDER="$first_builder"
+  ensure_build_proxy_builder http://127.0.0.1:7788
+  assert_eq "$first_builder" "$DEPLOY_BUILD_PROXY_BUILDER" 'matching explicit builder remains supported'
+  if (ensure_build_proxy_builder http://127.0.0.1:7789) > "$builder_state/error" 2>&1; then
+    printf 'not ok - stale explicit builder was reused\n' >&2; exit 1
+  fi
+  grep -q 'existing builder/cache left intact' "$builder_state/error"
+  assert_eq "$first_builder
+$second_builder" "$(cat "$builder_state/created")" 'mismatched explicit builder fails without mutations'
+
+  # Unknown drivers, inconsistent lower-case proxies, bypasses and multiple
+  # nodes must not pass as a correctly configured single Hub builder.
+  cp "$builder_state/$first_builder" "$builder_state/original"
+  for mismatch in driver lowercase bypass multiple; do
+    cp "$builder_state/original" "$builder_state/$first_builder"
+    case "$mismatch" in
+      driver) sed 's/Driver: docker-container/Driver: docker/' "$builder_state/original" > "$builder_state/$first_builder" ;;
+      lowercase) sed 's@env.http_proxy="http://127.0.0.1:7788"@env.http_proxy="http://stale.invalid:7788"@' "$builder_state/original" > "$builder_state/$first_builder" ;;
+      bypass) sed 's/Driver Options:/Driver Options: env.NO_PROXY="docker.io"/' "$builder_state/original" > "$builder_state/$first_builder" ;;
+      multiple) printf '\nName: other-node\n' >> "$builder_state/$first_builder" ;;
+    esac
+    if (ensure_build_proxy_builder http://127.0.0.1:7788) > "$builder_state/error" 2>&1; then
+      printf 'not ok - unverified builder accepted (%s)\n' "$mismatch" >&2; exit 1
+    fi
+    grep -q 'cannot be verified' "$builder_state/error"
+    printf 'ok - builder configuration rejects %s mismatch\n' "$mismatch"
+  done
+  unset MX_INSIGHT_BUILDX_BUILDER
+  for invalid_proxy in 'socks5://user:test-secret@127.0.0.1:7789' 'http://user:test-secret@127.0.0.1:7789/?query=1' 'http://user:test-secret,other@127.0.0.1:7789'; do
+    if (ensure_build_proxy_builder "$invalid_proxy") > "$builder_state/error" 2>&1; then
+      printf 'not ok - invalid proxy accepted\n' >&2; exit 1
+    fi
+    grep -q 'Invalid MX_INSIGHT_BUILD_PROXY' "$builder_state/error"
+    if grep -q 'test-secret' "$builder_state/error"; then exit 1; fi
+  done
+  ensure_build_proxy_builder http://user:test-secret@127.0.0.1:7789 > "$builder_state/output"
+  ensure_build_proxy_builder http://user:test-secret@127.0.0.1:7789 >> "$builder_state/output"
+  if grep -q 'test-secret' "$builder_state/output"; then exit 1; fi
+  printf 'ok - proxy validation and builder logs hide credentials\n'
+)
 
 # UI/CLI proxy overrides, including explicit direct mode, survive .env.internal.
 for proxy_mode in custom direct saved; do
