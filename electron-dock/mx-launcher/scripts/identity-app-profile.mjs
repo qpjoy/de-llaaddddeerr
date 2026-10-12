@@ -1,3 +1,13 @@
+import { createHash } from 'node:crypto';
+
+// Shared by deployment and its earlier recovery gate. Only an explicit offline
+// Harbor -> DataPort migration may change this public client's origin/name.
+export function isDataPortOriginMigration(current, desired, proof) {
+  return current?.appId === 'mx-harbor' && current.origin === 'https://harbor.minsight-ai.com'
+    && proof?.previousClientHash === createHash('sha256').update(JSON.stringify(current)).digest('hex')
+    && JSON.stringify({ ...current, origin: 'https://dataport.minsight-ai.com', displayName: '数港 DataPort' }) === JSON.stringify(desired);
+}
+
 export function validApplicationList(apps, reservedClientId, validateOrigin) {
   if (!Array.isArray(apps) || apps.length > 64) return false;
   const clients = new Set(), ids = new Set();

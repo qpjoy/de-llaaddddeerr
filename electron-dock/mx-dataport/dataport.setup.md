@@ -80,5 +80,6 @@ Hub 已从可信 Portal 的 `portalOrigin` 生成固定 `/payment/return`。完�
 - MX-H2I：用原验收账号检查登录及原联网能力；DataPort 退出不撤销其他应用会话。没有自动改变 H2I 配置或权限。
 - 域名切换失败时保留旧 API 和所有数据库，先修复新入口。Auth 配置尚未发布时可恢复迁移前的本地档案和网关；Auth 已发布后，身份保留检查会拒绝直接回灌旧客户端配置，应优先修复新域名。必须撤回时另做精确反向身份迁移，并同步两端 profile 与网关，不绕过保留检查。迁移后的新订阅数据不要回滚为旧快照。
 - 遇到部署锁，先运行 `bash scripts/manage.sh ops internal-production recover-lock` 只读检查。确认相关操作已退出后才使用 `--confirm-idle`；保留原锁名，兼容识别新旧目录中的操作进程。
+- 完成 `enroll --migrate-domain` 后，若 Launcher 在恢复预检报 `public identity application credentials differ; recovery stopped`，先确认已同步本次 Launcher 修复：恢复检查与身份发布共用精确迁移规则，仅凭原客户端哈希证明允许 Harbor → DataPort 的域名和显示名变化。更新 `scripts/identity-app-profile.mjs`、`scripts/identity-deploy.mjs`、`scripts/k8s-recovery-state.mjs` 后，在 Launcher 目录沿用原环境参数重跑 `bash scripts/manage.sh ops internal-production deploy`，无需重复迁移。不要删除恢复快照、身份档案或 Secret，也不要重新初始化身份服务。若新版仍报错，说明差异不符合上述规则，应停止并核对原档案；不要绕过检查或输出密钥。
 
 本地验证和截图记录：[2026-10-12 验证](docs/dataport-verification.md)。

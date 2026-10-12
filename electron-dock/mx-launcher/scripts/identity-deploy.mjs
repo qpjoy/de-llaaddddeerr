@@ -7,6 +7,7 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROFILE, initializeProfile, readProfile, renewProfile, savePrivate, publicStatus, diagnoseProfile } from './identity-profile.mjs';
 import { publicAdminConfig } from './identity-public-profile.mjs';
+import { isDataPortOriginMigration } from './identity-app-profile.mjs';
 import { identityProbe } from './identity-check.mjs';
 import { writeInternalIngress } from './identity-ingress.mjs';
 
@@ -97,11 +98,7 @@ export function inspectIdentity(p, execute = run, initializing = false) {
       return sha(before) === sha(after) && oldClients.every(app => {
         const nextApp=nextClients.find(nextApp => nextApp.clientId === app.clientId);
         if (sha(app) === sha(nextApp ?? null)) return true;
-        // Only the explicit offline DataPort migration can change this one origin.
-        // All keys, audiences and every other application remain exact matches.
-        return app.appId==='mx-harbor' && app.origin==='https://harbor.minsight-ai.com'
-          && p.dataportOriginMigration?.previousClientHash===sha(app)
-          && sha({...app,origin:'https://dataport.minsight-ai.com',displayName:'数港 DataPort'})===sha(nextApp ?? null);
+        return isDataPortOriginMigration(app, nextApp, p.dataportOriginMigration);
       });
     };
     if (!keepsPublic() || sha(oldCore) !== sha(nextCore) || oldApps.some(app => sha(app) !== sha(nextApps.find(nextApp => nextApp.clientId === app.clientId) ?? null))

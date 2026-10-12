@@ -7,6 +7,7 @@ import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readF
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROFILE, savePrivate, validateProfileForBackup } from './identity-profile.mjs';
+import { isDataPortOriginMigration } from './identity-app-profile.mjs';
 
 export const SECRET_NAMES = [
   'mx-launcher-db', 'mx-internal-ops', 'mx-feishu-oauth',
@@ -16,8 +17,12 @@ export const SECRET_NAMES = [
 const PG = '/var/lib/mx-launcher/k8s/postgres/pgdata';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const retainsApplications = (current = [], desired = []) => Array.isArray(current) && Array.isArray(desired) &&
-  current.every(app => app && typeof app.clientId === 'string' && same(app, desired.find(next => next.clientId === app.clientId)));
+const retainsApplications = (current = [], desired = [], migration) => Array.isArray(current) && Array.isArray(desired) &&
+  current.every(app => {
+    if (!app || typeof app.clientId !== 'string') return false;
+    const next = desired.find(next => next.clientId === app.clientId);
+    return same(app, next) || isDataPortOriginMigration(app, next, migration);
+  });
 export function run(command, args, input) {
   const result = spawnSync(command, args, { input, encoding: 'utf8', timeout: 30000, maxBuffer: 16 * 1024 * 1024 });
   // Do not include command output: errors can contain credentials or manifests.
@@ -104,13 +109,14 @@ function assertIdentityProfileMatchesSecrets(profile, secrets) {
     if (name === 'mx-identity-runtime') {
       let config;
       try { config = JSON.parse(field(secret, 'config.json')); } catch { throw new Error('invalid identity runtime snapshot'); }
-      // Registration saves the desired profile before deploy publishes it. As in
-      // inspectIdentity, allow additions but retain every deployed client and key.
+      // Registration/migration saves the desired profile before deploy publishes
+      // it. Match inspectIdentity: additions and the proven public DataPort move
+      // retain every deployed client/key; private applications remain exact.
       if (config.publicEntry) {
         const { applications: currentApps, ...currentCore } = config.publicEntry;
         const { applications: desiredApps, ...desiredCore } = profile.publicEntry ?? {};
         if (!same(currentCore, desiredCore)) throw new Error('public identity credentials differ; recovery stopped');
-        if (!retainsApplications(currentApps, desiredApps)) throw new Error('public identity application credentials differ; recovery stopped');
+        if (!retainsApplications(currentApps, desiredApps, profile.dataportOriginMigration)) throw new Error('public identity application credentials differ; recovery stopped');
       }
       for (const key of ['origin', 'issuer', 'clientId', 'clientSecret', 'cookieKeys', 'jwks']) {
         if (!same(config[key], profile[key])) throw new Error('identity profile and runtime credentials differ; recovery stopped');

@@ -9,7 +9,7 @@ import { guardPostgres } from './k8s-postgres-recovery.mjs';
 import { initializeProfile, readProfile, savePrivate } from './identity-profile.mjs';
 import { inspectIdentity, resources } from './identity-deploy.mjs';
 import { createPublicEntry } from './identity-public-profile.mjs';
-import { registerApplication } from './identity-app.mjs';
+import { migrateApplicationOrigin, registerApplication } from './identity-app.mjs';
 
 const identity = { node: 'mx-internal-server', ca: 'same-ca', pgSystemId: 'original-db', mounts: [{ path: '/var/lib/mx-launcher', identity: { device: 'disk-uuid', root: '/mx-runtime/mx-launcher' } }] };
 function fixture() {
@@ -62,6 +62,86 @@ function identityFixture(entry) {
   publish(profile);
   return { ...f, file, profile, publish, invoke: action => f.invoke(action, { identityProfileFile: file }) };
 }
+
+function dataportMigrationFixture() {
+  const f = identityFixture('public');
+  const appFile = join(f.directory, 'applications', 'mx-harbor.json');
+  registerApplication({ file: f.file, appFile, entry: 'public', appId: 'mx-harbor',
+    origin: 'https://harbor.minsight-ai.com', audience: 'mx-harbor' });
+  registerApplication({ file: f.file, appFile: join(f.directory, 'applications', 'mx-h2i.json'), entry: 'private',
+    appId: 'mx-h2i', origin: 'https://10.88.88.88:18152', audience: 'mx-h2i' });
+  const before = readProfile(f.file);
+  f.publish(before);
+  f.invoke('checkpoint');
+  migrateApplicationOrigin({ file: f.file, appFile, appId: 'mx-harbor',
+    fromOrigin: 'https://harbor.minsight-ai.com', origin: 'https://dataport.minsight-ai.com' });
+  return { ...f, before, pending: readProfile(f.file) };
+}
+
+test('explicit DataPort migration survives predeploy recovery, retries and missing-file recovery without publishing credentials', () => {
+  const f = dataportMigrationFixture();
+  try {
+    const running = structuredClone(f.secrets);
+    inspectIdentity(f.pending, args => f.execute('kubectl', args));
+    f.invoke('restore'); f.invoke('checkpoint'); f.invoke('restore');
+    assert.deepEqual(f.secrets, running);
+    assert.equal(f.writes.length, 0, 'predeploy recovery must not publish the pending domain change');
+    const checkpoint = JSON.parse(readFileSync(join(f.directory, 'latest.json'), 'utf8'));
+    assert.deepEqual(checkpoint.identityProfile, f.pending);
+    assert.deepEqual(checkpoint.secrets['mx-identity-runtime'].data, running['mx-identity-runtime'].data);
+    unlinkSync(f.file);
+    delete f.secrets['mx-identity-runtime'];
+    f.invoke('restore');
+    assert.deepEqual(readProfile(f.file), f.pending, 'retain migration proof in recovered profile');
+    assert.deepEqual(f.secrets['mx-identity-runtime'].data, running['mx-identity-runtime'].data);
+    f.invoke('checkpoint');
+    inspectIdentity(readProfile(f.file), args => f.execute('kubectl', args));
+    f.publish(f.pending); // Normal identity deployment applies the desired origin later.
+    f.invoke('restore'); f.invoke('checkpoint'); f.invoke('restore');
+    assert.deepEqual(JSON.parse(readFileSync(join(f.directory, 'latest.json'), 'utf8')).identityProfile, f.pending);
+    assert.deepEqual(f.pending.applications, f.before.applications, 'private H2I clients remain unchanged');
+    for (const app of [...f.pending.applications, ...f.pending.publicEntry.applications]) {
+      assert.ok(!f.logs.join('\n').includes(app.clientSecret));
+    }
+  } finally { f.cleanup(); }
+});
+
+test('DataPort migration proof never permits credential drift, unrelated client changes or reverse migration', async t => {
+  const f = dataportMigrationFixture();
+  try {
+    const checkpoint = readFileSync(join(f.directory, 'latest.json'), 'utf8');
+    delete f.secrets['mx-internal-ops']; // Must not restore even this unrelated Secret on a mismatch.
+    const client = p => p.publicEntry.applications.find(app => app.appId === 'mx-harbor');
+    const changes = [
+      { name: 'missing proof', mutate: p => { delete p.dataportOriginMigration; } },
+      { name: 'wrong proof', mutate: p => { p.dataportOriginMigration.previousClientHash = '0'.repeat(64); } },
+      ...Object.entries({ appId: 'mx-other', clientId: 'another-client', clientSecret: 'z'.repeat(43),
+        audience: 'another-audience', origin: 'https://other.example.com', displayName: 'Other' })
+        .map(([key, value]) => ({ name: `DataPort ${key}`, mutate: p => { client(p)[key] = value; } })),
+      { name: 'public Hub client', mutate: p => { p.publicEntry.applications.find(app => app.appId === 'mx-insight-hub').clientSecret = 'z'.repeat(43); } },
+      { name: 'private H2I client', mutate: p => { p.applications[0].clientSecret = 'z'.repeat(43); } },
+      { name: 'public provider credentials', mutate: p => { p.publicEntry.clientSecret = 'z'.repeat(43); } }
+    ];
+    for (const { name, mutate } of changes) await t.test(name, () => {
+      const changed = structuredClone(f.pending); mutate(changed); savePrivate(f.file, changed);
+      assert.throws(() => inspectIdentity(changed, args => f.execute('kubectl', args)), /客户端/);
+      for (const action of ['restore', 'checkpoint']) {
+        assert.throws(() => f.invoke(action), /credentials differ/);
+        assert.equal(f.writes.length, 0);
+        assert.equal(readFileSync(join(f.directory, 'latest.json'), 'utf8'), checkpoint);
+      }
+    });
+    f.publish(f.pending);
+    const rollback = { ...f.before, dataportOriginMigration: f.pending.dataportOriginMigration };
+    savePrivate(f.file, rollback);
+    assert.throws(() => inspectIdentity(rollback, args => f.execute('kubectl', args)), /客户端/);
+    for (const action of ['restore', 'checkpoint']) {
+      assert.throws(() => f.invoke(action), /credentials differ/);
+      assert.equal(f.writes.length, 0);
+      assert.equal(readFileSync(join(f.directory, 'latest.json'), 'utf8'), checkpoint);
+    }
+  } finally { f.cleanup(); }
+});
 
 for (const entry of ['public', 'private']) test(`${entry} application registration survives predeploy recovery, checkpoint and missing-file recovery`, () => {
   const f = identityFixture(entry);
