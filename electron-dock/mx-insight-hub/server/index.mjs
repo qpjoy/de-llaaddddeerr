@@ -17,6 +17,7 @@ import { NightAllPlatformAdminService } from './external-platforms/night-all-adm
 import { NightAllAService, NightAllADispatchStore } from './external-platforms/night-all-a.mjs'
 import { createServer } from 'node:http'
 import { PlatformSearchPolicyStore } from './external-platforms/platform-search-policy.mjs'
+import { EcommerceRoutingStore } from './external-platforms/ecommerce-routing.mjs'
 import { createPool, createQueue } from '@qpjoy/mx-common'
 import { createSegmenter } from '@qpjoy/mx-common/segmenter'
 import { dirname, resolve } from 'node:path'
@@ -254,6 +255,7 @@ export async function createRuntime(config = loadConfig()) {
     : null
   const tikHubProxyStore = pool ? new ExternalPlatformProxyStore(pool, config.deploymentEgress) : null
   const platformSearchPolicyStore = new PlatformSearchPolicyStore(pool)
+  const ecommerceRoutingStore = new EcommerceRoutingStore(pool)
   const facebookGateways = Object.fromEntries([
     ['rapidapi', rapidApiAdapter, rapidConfig, rapidApiCredentialStore],
     ['justone', justOneAdapter, config.justOne, externalPlatformCredentialStore],
@@ -341,6 +343,7 @@ export async function createRuntime(config = loadConfig()) {
     nightAllA,
   ])
   const externalPlatformGateway = new ExternalPlatformGateway({
+    ecommerceRoutingStore,
     usageStore: store,
     platformStore: externalPlatformStore,
     adapter: justOneAdapter,
@@ -584,6 +587,7 @@ export async function createRuntime(config = loadConfig()) {
   const app = createApp({
     harborPortal,
     platformSearchPolicyStore,
+    ecommerceRoutingStore,
     peripherals,
     admissionRecovery: pool ? new AdmissionRecoveryService({ pool, usageStore: store,
       providers: Object.fromEntries([externalPlatformStore, tikHubPlatformStore, rapidApiStore, qixinPlatformStore,

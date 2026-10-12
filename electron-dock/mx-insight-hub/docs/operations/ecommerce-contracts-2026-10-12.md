@@ -1,5 +1,7 @@
 # 电商统一合同校准与发布说明（2026-10-12）
 
+后续更新：2026-10-13 增加 TikHub 快手两项榜单、电商 Admin 默认配置与迁移 147/148，见 [快手电商与默认路由](kuaishou-ecommerce-routing-2026-10-13.md)。下文的“无新增迁移”和 62 项目录属于 10 月 12 日当时范围。
+
 状态：本地实现与离线回归完成，尚未部署生产。此次只修改 Hub；没有改动 Launcher、MX-H2I 登录、网络配置或现有身份/授权。没有新增数据库迁移，没有修改线上价格、余额、权限或启停状态。
 
 ## 下游应选择哪个入口
@@ -15,6 +17,38 @@
 统一搜索现支持 `taobao`、`tmall`、`jd`、`xianyu`、`xiaohongshu_ec`、`douyin_ec`。当前固定合同及核对的 JustOne 官方目录未提供可直接接入的拼多多/快手商品搜索证据；不要用快手社媒搜索冒充商品搜索。后续接入需要明确供应商端点、价格和真实样本，仍映射到同一商品合同。
 
 ## 本次修复与兼容性
+
+### 拼多多、快手接入核对补记
+
+用户指出官方 SDK 支持快手、GitHub 描述列出拼多多。再次核对后，确认平台宣传与具体
+商品接口需要分别判断；没有据此将尚无合同的平台加入统一商品搜索枚举。
+
+- 当前官方仓库为 `justoneapi-official/justoneapi-python`。本次核对
+  [固定版本 OpenAPI](https://github.com/justoneapi-official/justoneapi-python/blob/7162863b127c9898299cb8663b564c6c8f4e8033/openapi/public-api.json)，
+  共 368 个路径；文件 SHA-256 为 `85d0c3d3f0fee434830c6c53015628197146d74e9234333e3184feb4a726f736`。
+- [快手官方文档](https://docs.justoneapi.com/en/api/kuaishou/) 与 SDK 中的 8 个端点一致，
+  覆盖用户详情、用户视频、视频详情/评论、用户搜索、两个版本视频搜索和链接解析；这 8 个端点
+  以及通用 `source=KUAISHOU` 搜索均已在 Hub 原生目录。它们不是快手小店商品关键词搜索。
+- 旧 GitHub 描述和官方宣传文章确实提及拼多多；本次核对的现行 OpenAPI 没有
+  `pinduoduo/pdd` 路径或拼多多操作，也没有快手商品搜索。SDK 中的 Temu 不能冒充国内拼多多。
+
+| 当前快手路径 | 供应商分页参数 |
+| --- | --- |
+| `/api/kuaishou/get-user-detail/v1` | 无 |
+| `/api/kuaishou/get-user-video-list/v2` | `pcursor` |
+| `/api/kuaishou/get-video-comment/v1` | `pcursor` |
+| `/api/kuaishou/get-video-detail/v2` | 无 |
+| `/api/kuaishou/search-user/v2` | `page` |
+| `/api/kuaishou/search-video/v1` | `cursor` |
+| `/api/kuaishou/search-video/v2` | `page` |
+| `/api/kuaishou/share-url-transfer/v1` | 无 |
+
+阻塞项：需要 JustOne 提供拼多多、快手小店商品搜索的具体 SDK 方法、私有文档或 OpenAPI
+操作（路径、参数、价格和响应）。用户授权的各一次付费校准尚未使用；不探测猜测的付费
+路径、不用视频搜索样本推定商品或分页结构。取得合同后分别采样一次，核对商品 ID、链接、
+价格单位及 page/cursor/hasMore/终页语义，再按既有 `items/page` 合同添加适配器和回归。
+
+### 已完成的统一商品合同变更
 
 - 商品链接识别增加大小写精确的 `auctionURL`，`//host/path` 补 `https:`，保留签名参数。可用上游网页链接优先；保留已有 `url` 长度上限 2048 与精确数字商品 ID 派生规则。`urlSource=upstream|derived_from_id|null` 区分来源，不把派生地址冒充上游返回，也不承诺落地页可访问。
 - 新增可选 `appUrl`，只保留商品身份匹配的 `xhsdiscover://goods_detail/<id>` 或 `fleamarket://item_detail?itemId=<id>`；网页地址仍放在 `url`。小红书本次只有 App 链接，因此 `url=null` 合法。产品展示提供明确的 App 打开操作；不会自动跳转。

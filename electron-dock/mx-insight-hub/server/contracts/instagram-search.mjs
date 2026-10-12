@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 export const INSTAGRAM_SEARCH_KEY = 't.instagram_v3_general_search'
 const object = value => value && typeof value === 'object' && !Array.isArray(value)
 const text = value => typeof value === 'string' ? value : ''
@@ -130,8 +132,16 @@ export function projectInstagramSearch(result, request) {
     const row = instagramRow(value, capturedAt)
     return [row.content_id, row]
   })).values()]
-  // Never silently discard paid business records to fit the requested page.
-  if (rows.length > request.pageSize) throw new Error('instagram_page_exceeds_requested_count')
+  // The upstream has no count parameter. Page over its immutable paid receipt
+  // before advancing next_max_id; never truncate or reacquire an overflow page.
+  const rowsHash = createHash('sha256').update(JSON.stringify(rows)).digest('hex')
+  const offset = request.buffer?.offset ?? 0
+  if (request.buffer && (request.buffer.hash !== rowsHash || offset >= rows.length
+    || offset % request.pageSize !== 0)) throw new Error('instagram_buffer_mismatch')
+  const items = rows.slice(offset, offset + request.pageSize)
+  const buffered = offset + items.length < rows.length
+  const callId = request.buffer?.callId ?? request.archiveCallId
+  if (buffered && !callId) throw new Error('instagram_page_archive_required')
   const page = object(grid) ? grid : data
   const nextValue = page.next_max_id ?? data.next_max_id
   const rankValue = data.rank_token ?? page.rank_token
@@ -147,14 +157,19 @@ export function projectInstagramSearch(result, request) {
   const nonPostContinuationMissing = expectsMore && !next && nonPostCount > 0 && rows.length === 0
   if (expectsMore && !next && !nonPostContinuationMissing) throw new Error('missing_instagram_continuation')
   // A recommendation-only page can still have a valid continuation to media.
-  const hasMore = request.page < 15 && !!next
-    && ![false, 0, '0', 'false'].includes(more) && next !== request.providerCursor?.next_max_id
-  const nextCursor = hasMore ? request.encodeNext({ page: request.page + 1,
-    providerCursor: { next_max_id: next, ...(rank ? { rank_token: rank } : {}) } }) : null
-  return { ...result, items: rows, publicBody: { contractVersion: 'mx-insight-hub.raw-search.v1', data: { platform: 'instagram', query: request.query,
-    raw_info: '[]', raw_data: JSON.stringify(rows), page: { page: request.page, pageSize: request.pageSize,
-      returnedCount: rows.length, hasMore, nextCursor }, status: nonPostContinuationMissing ? 'partial' : 'ok',
-    ...(nonPostContinuationMissing ? { warnings: [{ code: 'INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE',
-      message: 'This page contains only non-post search results, but no usable continuation was supplied. Search completeness is unknown.' }] } : {}),
-    meta: { implementation: 'hub', resultCount: rows.length, upstreamCallCount: 1 } }, meta: { capturedAt } } }
+  const upstreamMore = !!next && ![false, 0, '0', 'false'].includes(more) && next !== request.providerCursor?.next_max_id
+  const hasMore = request.page < 15 && (buffered || upstreamMore)
+  const nextCursor = !hasMore ? null : request.encodeNext({ page: request.page + 1,
+    ...(buffered ? { buffer: { callId, offset: offset + items.length, hash: rowsHash }, providerCursor: request.providerCursor }
+      : { providerCursor: { next_max_id: next, ...(rank ? { rank_token: rank } : {}) } }) })
+  const warnings = []
+  if (nonPostContinuationMissing) warnings.push({ code: 'INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE',
+    message: 'This page contains only non-post search results, but no usable continuation was supplied. Search completeness is unknown.' })
+  if (request.page === 15 && (buffered || upstreamMore)) warnings.push({ code: 'INSTAGRAM_PAGE_LIMIT_REACHED',
+    message: 'The 15-page traversal limit was reached; additional results may exist.' })
+  return { ...result, items, acquiredItems: rows, publicBody: { contractVersion: 'mx-insight-hub.raw-search.v1', data: { platform: 'instagram', query: request.query,
+    raw_info: '[]', raw_data: JSON.stringify(items), page: { page: request.page, pageSize: request.pageSize,
+      returnedCount: items.length, hasMore, nextCursor }, status: warnings.length ? 'partial' : 'ok',
+    ...(warnings.length ? { warnings } : {}),
+    meta: { implementation: 'hub', resultCount: items.length, upstreamCallCount: request.buffer ? 0 : 1 } }, meta: { capturedAt } } }
 }

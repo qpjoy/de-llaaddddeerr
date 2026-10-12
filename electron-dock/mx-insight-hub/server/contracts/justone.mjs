@@ -218,6 +218,8 @@ export const JUSTONE_ENDPOINTS = Object.freeze({
 })
 
 export const JUSTONE_SUPPORTED_MARKETPLACES = Object.freeze(Object.keys(JUSTONE_ENDPOINTS))
+export const justOneProductAdapterId = marketplace => Object.hasOwn(JUSTONE_ENDPOINTS, marketplace)
+  ? `justone:${JUSTONE_ENDPOINTS[marketplace].endpointKey}` : null
 
 export const JUSTONE_BUSINESS_CODES = Object.freeze({
   100: Object.freeze({ category: 'authentication', errorCode: 'upstream_auth_invalid' }),
@@ -433,6 +435,7 @@ function safeCursor(value) {
 
 export function normalizeJustOneProductSearchRequest(body, {
   decodeCursor,
+  defaultAdapterId,
   // Accepted for a symmetric gateway codec interface. Encoding is performed
   // only while producing a response, never while validating a request.
   encodeCursor: _encodeCursor,
@@ -462,6 +465,13 @@ export function normalizeJustOneProductSearchRequest(body, {
   }
   const scope = cursorScope({ marketplace, query, sort, price })
   const state = decodedCursor(cursor, decodeCursor)
+  // Old cursors stay on their original baseline; defaults only select fresh
+  // traversals. Callers cannot submit an adapter override in the public body.
+  const adapterId = state ? state.adapterId ?? justOneProductAdapterId(marketplace)
+    : defaultAdapterId ?? justOneProductAdapterId(marketplace)
+  if (adapterId !== justOneProductAdapterId(marketplace)) {
+    throw new JustOneContractError(state ? 'invalid_cursor' : 'unsupported_product_adapter', 'Product adapter is not supported for this marketplace')
+  }
   if (state && (state.marketplace !== marketplace || state.scope !== scope)) {
     throw new JustOneContractError('cursor_scope_mismatch', 'cursor does not belong to this search')
   }
@@ -482,6 +492,7 @@ export function normalizeJustOneProductSearchRequest(body, {
   return Object.freeze({
     contractVersion: ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
     operation: JUSTONE_OPERATION,
+    adapterId,
     marketplace,
     query,
     deliveryMode,
@@ -851,6 +862,7 @@ function capturedAtIso(value) {
 function encodeNextCursor(request, continuation, encodeCursor) {
   const state = Object.freeze({
     version: 1,
+    adapterId: request.adapterId,
     marketplace: request.marketplace,
     page: request.page + 1,
     scope: request.cursorScope,

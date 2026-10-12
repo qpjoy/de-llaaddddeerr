@@ -21,7 +21,7 @@ export function ProductWorkbench({ Page, pageProps, enabled }) {
   if (!product || product.native) return <Page {...pageProps} />
   return <div className="mih-product-workbench">
     <header className="mih-page-header"><div><h1>{product.label}</h1><p>从 Hub 接口开始，查看产品展示与接入方式。</p></div><a className="qp-button qp-button--outline" href={publicDocsHref(`/docs/${product.docs}`)}>接口文档 ↗</a></header>
-    {product.docs === 'ecommerce-treasure-box' ? <p>跨平台商品列表优先接入「统一商品搜索」，使用相同的商品、链接和分页字段。平台专用接口用于详情、SKU、评论等独立查询；「已收录商品」只读已有数据。当前统一搜索支持淘宝、天猫、京东、闲鱼、小红书电商和抖音电商。</p> : null}
+    {product.docs === 'ecommerce-treasure-box' ? <><p>跨平台商品列表优先接入「统一商品搜索」，使用相同的商品、链接和分页字段。平台专用接口用于详情、SKU、评论及快手购物/品牌榜单等独立查询；「已收录商品」只读已有数据。当前统一搜索支持淘宝、天猫、京东、闲鱼、小红书电商和抖音电商。快手当前提供榜单接口。</p>{pageProps.session?.kind === 'admin-token' ? <p><a href="#/data-platforms?domain=ecommerce">Admin · 查看电商平台的上游供应商、适配接口与默认路由 →</a></p> : null}</> : null}
     <nav className="mih-source-section-tabs" aria-label={`${product.label}视图`}>
       {[['debug', '接口调试'], ['demo', '产品展示'], ['guide', '接入指南']].map(([id, label]) => <button key={id} type="button" aria-pressed={tab === id} onClick={() => { setTab(id); if (id === 'demo') setVisited(true) }}>{label}</button>)}
     </nav>

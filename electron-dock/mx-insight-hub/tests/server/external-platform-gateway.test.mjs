@@ -11,6 +11,7 @@ import { ExternalPlatformGateway } from '../../server/external-platforms/gateway
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
 import { AppError } from '../../server/core/errors.mjs'
+import { EcommerceRoutingStore } from '../../server/external-platforms/ecommerce-routing.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 
@@ -133,6 +134,30 @@ function successfulResult(body, options) {
     records: [],
   }
 }
+
+test('unified ecommerce search resolves the saved default and retains exact replay after a policy edit', async () => {
+  const routes = new EcommerceRoutingStore()
+  let calls = 0
+  const state = await fixture({ adapter: { async searchProducts(body, options) {
+    calls++
+    assert.equal(options.defaultAdapterId, 'justone:jd.product-search.v1')
+    return successfulResult(body, options)
+  } } })
+  state.gateway.ecommerceRoutingStore = routes
+  const input = { body: { marketplace: ' jd ', query: 'fixture', deliveryMode: 'live_only' },
+    idempotencyKey: 'configured-default-fixture', path: '/api/v1/data/ecommerce/products/search' }
+  const first = await state.gateway.search(state.context, input)
+  await routes.update('jd', { adapterId: 'justone:jd.product-search.v1', expectedRevision: 1, reason: 'Reviewed route' })
+  assert.deepEqual((await state.gateway.search(state.context, input)).body, first.body)
+  assert.equal(calls, 1)
+  routes.policies.get('jd').adapter_id = 'unregistered-adapter'
+  assert.deepEqual((await state.gateway.search(state.context, input)).body, first.body)
+  const cached = await state.gateway.search(state.context, { ...input, body: { ...input.body, deliveryMode: 'cache_only' }, idempotencyKey: 'configured-cache-fixture' })
+  assert.deepEqual(cached.body.data, first.body.data)
+  assert.notEqual(cached.sourceMode, 'live')
+  await assert.rejects(state.gateway.search(state.context, { ...input, idempotencyKey: 'invalid-default-fixture' }), { code: 'ecommerce_route_unavailable' })
+  assert.equal(calls, 1)
+})
 
 test('JustOne requires the operation grant in addition to the ecommerce platform grant', async () => {
   let providerDispatches = 0

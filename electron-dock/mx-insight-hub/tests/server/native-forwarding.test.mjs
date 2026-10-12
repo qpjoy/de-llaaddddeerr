@@ -234,6 +234,41 @@ test('public native route uses the governed gateway while unknown paths cannot b
   assert.equal(h.calls(), 1)
 })
 
+test('Kuaishou ecommerce rankings use TikHub, preserve native data/replay and reject fabricated pagination', async t => {
+  for (const key of ['t.kuaishou_ecommerce_shopping_top_list', 't.kuaishou_ecommerce_brand_top_list']) {
+    const h = await harness({ key })
+    const server = createServer(createApp({ store: h.usageStore, service: h.service, adapter: {},
+      socialAccountTikHubGateway: h.gateway,
+      externalPlatformGateway: { forwardNative() { throw new Error('must not dispatch TikHub through JustOne') } },
+      listenerMode: 'public', logger: { error() {} } }))
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    t.after(() => new Promise(resolve => server.close(resolve)))
+    const url = `http://127.0.0.1:${server.address().port}${h.endpoint.hubPath}`
+    const request = { method: 'POST', headers: { authorization: `Bearer ${h.apiKey.secret}`,
+      'content-type': 'application/json', 'idempotency-key': 'kuaishou-ranking-fixture' }, body: JSON.stringify({ params: {} }) }
+    const first = await fetch(url, request)
+    assert.equal(first.status, 200)
+    const payload = await first.json()
+    assert.deepEqual(payload.data, DATA)
+    assert.deepEqual(await (await fetch(url, request)).json(), payload)
+    assert.equal(h.calls(), 1)
+    assert.equal(h.platformStore.ingestJobs.length, 0)
+    assert.equal([...h.platformStore.calls.values()][0].providerKey, 'tikhub')
+    for (const params of [{ page: 2 }, { count: 20 }, { pcursor: 'next' }, { keyword: '手机' }, { subTabId: '1' }]) {
+      assert.equal((await fetch(url, { ...request, body: JSON.stringify({ params }) })).status, 400)
+    }
+    assert.equal(h.calls(), 1)
+    await h.usageStore.setPlatformGrant(h.context.consumer.id, 'ecommerce', false)
+    assert.equal((await fetch(url, request)).status, 403)
+    const disabled = await harness({ key, enabled: false })
+    await assert.rejects(disabled.gateway.forwardNative(disabled.context, { ...disabled.query, body: { params: {} } }), { status: 503 })
+    assert.equal(disabled.calls(), 0)
+  }
+  for (const key of ['t.api_382901fb0fa68660', 't.api_fb5e49d31884ca14']) {
+    assert.equal(nativeForwardingEndpoint(key).authorizationPlatform, 'social')
+  }
+})
+
 test('WeChat covers every reviewed official path with fixed neutral routes, precise IDs and one dispatch', async () => {
   const { default: snapshot } = await import('../../server/data/wechat-contracts.json', { with: { type: 'json' } })
   const { WECHAT_SERVICES } = await import('../../shared/wechat.mjs')

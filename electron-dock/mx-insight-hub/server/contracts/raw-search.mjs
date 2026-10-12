@@ -44,18 +44,23 @@ export function normalizeRawSearch(normalized, codec, { cursorScope } = {}) {
   const scope = createHash('sha256').update(JSON.stringify({ platform, query, pageSize,
     includeDetails: body.includeDetails === true, disableAutoDetails: body.disableAutoDetails === true,
     maxEnrichItems: body.maxEnrichItems ?? 20, ...(cursorScope ? { cursorScope } : {}) })).digest('hex')
-  let page = 1, providerCursor = null, expiresAt = Date.now() + 24 * 60 * 60_000
+  let page = 1, providerCursor = null, buffer = null, expiresAt = Date.now() + 24 * 60 * 60_000
   if (body.cursor) {
     try {
       const state = codec.decode(body.cursor)
       if (state.version !== RAW_SEARCH_VERSION || state.scope !== scope || !Number.isSafeInteger(state.expiresAt)
         || state.expiresAt <= Date.now() || !Number.isInteger(state.page) || state.page < 2 || state.page > 15
         || (platform === 'twitter' && (typeof state.providerCursor !== 'string' || !state.providerCursor || state.providerCursor.length > 4096))
-        || (platform === 'instagram' && (!state.providerCursor || typeof state.providerCursor.next_max_id !== 'string'
+        || (state.buffer != null && (platform !== 'instagram' || !state.buffer || Array.isArray(state.buffer)
+          || Object.keys(state.buffer).some(key => !['callId', 'offset', 'hash'].includes(key))
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(state.buffer.callId)
+          || !Number.isSafeInteger(state.buffer.offset) || state.buffer.offset < 1
+          || state.buffer.offset % pageSize !== 0 || !/^[0-9a-f]{64}$/.test(state.buffer.hash)))
+        || (platform === 'instagram' && !(state.buffer && state.providerCursor == null) && (!state.providerCursor || typeof state.providerCursor.next_max_id !== 'string'
           || !state.providerCursor.next_max_id || state.providerCursor.next_max_id.length > 2048
           || Object.keys(state.providerCursor).some(key => !['next_max_id', 'rank_token'].includes(key))
           || (state.providerCursor.rank_token != null && (typeof state.providerCursor.rank_token !== 'string' || state.providerCursor.rank_token.length > 2048))))) throw new Error('cursor')
-      ;({ page, providerCursor = null, expiresAt } = state)
+      ;({ page, providerCursor = null, buffer = null, expiresAt } = state)
     } catch { throw new AppError(400, 'invalid_cursor', 'Cursor is invalid, expired or belongs to another query/Key') }
   }
   const providerRequest = platform === 'weibo'
@@ -69,8 +74,9 @@ export function normalizeRawSearch(normalized, codec, { cursorScope } = {}) {
     if (providerCursor) providerRequest.upstreamQuery.cursor = providerCursor
   }
   const encodeNext = state => codec.encode({ version: RAW_SEARCH_VERSION, scope, expiresAt,
-    page: state.page, ...(state.providerCursor ? { providerCursor: state.providerCursor } : {}) })
-  return { ...providerRequest, platform, query, page, pageSize, providerCursor, providerRequest, encodeNext,
+    page: state.page, ...(state.providerCursor ? { providerCursor: state.providerCursor } : {}),
+    ...(state.buffer ? { buffer: state.buffer } : {}) })
+  return { ...providerRequest, platform, query, page, pageSize, providerCursor, buffer, providerRequest, encodeNext,
     enrichment: { enabled: body.includeDetails === true || body.disableAutoDetails !== true,
       all: body.includeDetails === true, maxItems: body.maxEnrichItems ?? 20 },
     // Same logical request and charge across both aliases, including old saved deliveries.

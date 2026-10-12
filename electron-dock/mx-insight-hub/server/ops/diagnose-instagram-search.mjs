@@ -30,7 +30,7 @@ export function inspectInstagramArchive(archive, snapshot) {
     return { state: 'archive_integrity_failed' }
   }
   let payload
-  try { payload = JSON.parse(bytes.toString('utf8')) }
+  try { payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
   catch { return { state: 'archive_not_json' } }
   const root = payload?.data
   const data = object(root?.data) ? root.data : root
@@ -68,7 +68,8 @@ export function inspectInstagramArchive(archive, snapshot) {
   const timestamp = new Date(archive.captured_at)
   if (!Number.isFinite(timestamp.getTime())) return { state: 'invalid_archive_timestamp', shape }
   const capturedAt = timestamp.toISOString()
-  const request = { query: '', page: 1, pageSize, encodeNext: () => 'offline-not-a-cursor' }
+  const request = { query: '', page: 1, pageSize, archiveCallId: '00000000-0000-0000-0000-000000000001',
+    encodeNext: () => 'offline-not-a-cursor' }
   // Independently inspect identities even if the full page fails another guard.
   const values = [data?.media_grid, data?.mediaGrid].flatMap(grid => Array.isArray(grid?.sections) ? grid.sections.flatMap(section => {
     const layout = section?.layout_content || section?.layoutContent
@@ -98,7 +99,8 @@ export function inspectInstagramArchive(archive, snapshot) {
   try {
     const result = projectInstagramSearch({ publicBody: { data: payload.data, meta: { capturedAt } } }, request)
     return { state: 'current_projection_accepts', pageSize, shape, ...rows,
-      returnedCount: result.items.length, hasMore: result.publicBody.data.page.hasMore,
+      returnedCount: result.items.length, bufferedCount: result.acquiredItems.length - result.items.length,
+      hasMore: result.publicBody.data.page.hasMore,
       deliveryStatus: result.publicBody.data.status,
       warningCodes: (result.publicBody.data.warnings || []).map(warning => warning.code)
         .filter(code => code === 'INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE') }

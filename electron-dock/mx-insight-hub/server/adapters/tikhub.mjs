@@ -851,7 +851,7 @@ export class TikHubAdapter {
     if (!resolvedCredential) throw new TypeError('TikHub credential is unavailable')
     const exchange = await requestTikHubJson(this, request.endpointPath, request.upstreamQuery,
       resolvedCredential, capturedAt, request.endpointVersion, request.method,
-      key.startsWith('wechat.') ? request.marketplace : undefined)
+      key.startsWith('wechat.') || request.marketplace === 'kuaishou_ec' ? request.marketplace : undefined)
     const persistence = exchange.persisted('accepted', exchange.acceptedAt)
     if (!Object.hasOwn(exchange.raw, 'data')) throw upstreamError('Native data envelope has no data', {
       outcome: 'succeeded_unusable', httpStatus: exchange.httpStatus, businessCode: 200,

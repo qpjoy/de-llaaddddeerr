@@ -3,12 +3,25 @@ import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { AppError } from '../core/errors.mjs'
 import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
+import { INSTAGRAM_SEARCH_KEY } from '../contracts/instagram-search.mjs'
 
 const clone = (value) => value == null ? value : structuredClone(value)
 const iso = (value = new Date()) => new Date(value).toISOString()
 const number = (value) => value == null ? null : Number(value)
 const FINISHED_PROVIDER_OUTCOMES = new Set(['succeeded', 'succeeded_unusable', 'rejected', 'unknown'])
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
+
+function instagramArchivePage(archive) {
+  const bytes = archive?.bodyBytes
+  if (!(bytes instanceof Uint8Array) || bytes.length > 8 * 1024 * 1024
+    || createHash('sha256').update(bytes).digest('hex') !== archive.bodySha256) return null
+  try {
+    // Match acquisition parsing, including a legal leading UTF-8 BOM.
+    const payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+    if (payload?.code !== 200 || !payload.data) return null
+    return { publicBody: { data: payload.data, meta: { capturedAt: iso(archive.capturedAt) } } }
+  } catch { return null }
+}
 
 function normalizedRestrictedResponseArchive(value) {
   if (value == null) return null
@@ -509,6 +522,26 @@ export class MemoryExternalPlatformStore {
     }
     // Keyed by marketplace; only contract failures land here.
     this.contractCircuits = new Map()
+  }
+
+  async instagramPageFor({ callId, tenantId, consumerId, apiKeyId, path }) {
+    const call = this.calls.get(callId)
+    const usage = this.usageStore.requests.get(call?.usageRequestId)
+    if (this.providerKey !== 'tikhub' || call?.outcome !== 'succeeded'
+      || call.operation !== `native.${INSTAGRAM_SEARCH_KEY}` || usage?.status !== 'committed'
+      || usage.responseStatus !== 200 || usage.platform !== 'instagram'
+      || usage.tenantId !== tenantId || usage.consumerId !== consumerId || usage.apiKeyId !== apiKeyId
+      || usage.acquisitionRequest?.path !== path
+      || Date.now() - new Date(call.completedAt).getTime() > 86400000) return null
+    return instagramArchivePage(this.restrictedResponseArchives.get(callId))
+  }
+
+  async commitInstagramPage({ delivery, sourceCallId, sourceMode, responseBody, capturedAt, usageUnitsActual }) {
+    await this.usageStore.commitRequest(delivery.usageRequestId, { responseStatus: 200, responseBody,
+      unitsActual: Math.max(1, usageUnitsActual), upstreamLatencyMs: 0,
+      deliverySourceMode: sourceMode === 'stored_fallback' ? 'stale' : 'live', capturedAt })
+    this.requests.push(requestEvent({ ...delivery, providerKey: this.providerKey, sourceMode,
+      succeeded: true, responseStatus: 200, providerCallId: sourceCallId }))
   }
 
   async snapshotFor(input, at = new Date()) {
@@ -1998,6 +2031,37 @@ export class PostgresExternalPlatformStore {
     this.rateLimitBurst = rateLimitBurst == null ? null : boundedRateLimit(rateLimitBurst, 'rateLimitBurst')
     this.uncertainCooldownMs = uncertainCooldownMs
     this.responseQuarantineCooldownMs = responseQuarantineCooldownMs
+  }
+
+  async instagramPageFor({ callId, tenantId, consumerId, apiKeyId, path }) {
+    if (this.providerKey !== 'tikhub') return null
+    const { rows: [row] } = await this.pool.query(
+      `SELECT raw.body_bytes, raw.body_sha256, raw.captured_at
+         FROM external_platform.provider_calls call
+         JOIN usage_requests request ON request.id = call.usage_request_id
+         JOIN control.external_platform_restricted_raw_responses raw ON raw.provider_call_id = call.id
+        WHERE call.id = $1 AND call.provider_key = 'tikhub' AND call.operation = $2
+          AND call.outcome = 'succeeded' AND call.completed_at >= now() - interval '24 hours'
+          AND request.tenant_id = $3 AND request.consumer_id = $4 AND request.api_key_id = $5
+          AND request.platform = 'instagram' AND request.status = 'committed' AND request.response_status = 200
+          AND request.acquisition_request->>'path' = $6 AND raw.body_size <= 8388608`,
+      [callId, `native.${INSTAGRAM_SEARCH_KEY}`, tenantId, consumerId, apiKeyId, path])
+    return row ? instagramArchivePage({ bodyBytes: row.body_bytes, bodySha256: row.body_sha256, capturedAt: row.captured_at }) : null
+  }
+
+  async commitInstagramPage({ delivery, sourceCallId, sourceMode, responseBody, capturedAt, usageUnitsActual }) {
+    return transaction(this.pool, async client => {
+      const usage = await client.query(
+        `UPDATE usage_requests SET status = 'committed', response_status = 200, response_body = $2,
+           units_actual = $3, upstream_latency_ms = 0, delivery_source_mode = $4,
+           response_captured_at = $5, completed_at = now()
+         WHERE id = $1 AND status = 'reserved' AND tenant_id = $6 AND consumer_id = $7 RETURNING id`,
+        [delivery.usageRequestId, responseBody, Math.max(1, usageUnitsActual),
+          sourceMode === 'stored_fallback' ? 'stale' : 'live', capturedAt, delivery.tenantId, delivery.consumerId])
+      if (!usage.rows[0]) throw new AppError(409, 'usage_request_state_conflict', 'Usage request is not reserved')
+      await this.#insertGatewayRequest(client, { ...delivery, sourceMode,
+        succeeded: true, responseStatus: 200, providerCallId: sourceCallId })
+    })
   }
 
   async snapshotFor(delivery, at = new Date()) {

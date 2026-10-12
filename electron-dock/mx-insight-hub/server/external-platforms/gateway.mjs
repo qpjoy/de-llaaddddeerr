@@ -298,6 +298,7 @@ export class ExternalPlatformGateway {
     reservationLeaseMs,
     operationControlStore = null,
     credentialStore = null,
+    ecommerceRoutingStore = null,
     // Everything in this class is provider-shaped rather than provider-specific:
     // the adapter, config, stores and credential all arrive by injection. The
     // provider key is the last constant, so naming it here lets a second vendor
@@ -315,6 +316,7 @@ export class ExternalPlatformGateway {
     this.reservationLeaseMs = reservationLeaseMs
     this.operationControlStore = operationControlStore
     this.credentialStore = credentialStore
+    this.ecommerceRoutingStore = ecommerceRoutingStore
     this.defaultPolicy = defaultPolicy
     this.logger = logger
     this.active = 0
@@ -466,15 +468,22 @@ export class ExternalPlatformGateway {
   }
 
   async search(context, { body, idempotencyKey, retryOfRequestId, path }) {
+    let defaultAdapterId
+    const normalize = ({ policy, codec }) => normalizeJustOneProductSearchRequest(body, {
+      defaultAdapterId, decodeCursor: codec.decode, encodeCursor: codec.encode, maxPageSize: policy.maxPageSize,
+    })
     return this.#deliver(context, { body, idempotencyKey, retryOfRequestId, path }, {
       operation: JUSTONE_OPERATION,
       capabilityMessage: 'E-commerce product search is not granted for this API key',
-      normalize: ({ policy, codec }) => normalizeJustOneProductSearchRequest(body, {
-        decodeCursor: codec.decode,
-        encodeCursor: codec.encode,
-        maxPageSize: policy.maxPageSize,
-      }),
+      normalize,
+      resolveLiveRoute: async ({ normalized, policy, codec }) => {
+        // Configuration only governs new acquisition. Saved responses, cache
+        // reads and existing traversal cursors survive a default-route edit.
+        if (!body.cursor) defaultAdapterId = await this.ecommerceRoutingStore?.select(normalized.marketplace)
+        return normalize({ policy, codec })
+      },
       dispatch: ({ policy, codec, credential }) => this.adapter.searchProducts(body, {
+        defaultAdapterId,
         decodeCursor: codec.decode,
         encodeCursor: codec.encode,
         maxPageSize: policy.maxPageSize,
@@ -588,19 +597,43 @@ export class ExternalPlatformGateway {
       datasetId: dataSearch ? 'night-all.search.v1' : RAW_SEARCH_DATASET, replayReleasedFailures: true,
       replayWindowMs: dataSearch?.replayWindowMs,
       dataSearch: Boolean(dataSearch), nativeForwarding: native, billingUnknown: !native,
-      normalize: () => (request = dataSearch ? normalizeHubDataSearch(normalized, codec, dataSearch.resultType) : normalizeRawSearch(normalized, codec)),
+      normalize: ({ policy }) => {
+        request = dataSearch ? normalizeHubDataSearch(normalized, codec, dataSearch.resultType) : normalizeRawSearch(normalized, codec)
+        if (request.pageSize > policy.maxPageSize) throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
+        return request
+      },
+      buffered: async () => {
+        if (!request.buffer) return null
+        const archived = await this.platformStore.instagramPageFor({ callId: request.buffer.callId,
+          tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
+          path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH })
+        if (!archived) throw new AppError(409, 'search_page_unavailable', 'The saved search page is unavailable; restart explicitly with a new Idempotency-Key')
+        let result
+        try { result = projectInstagramSearch(archived, request) }
+        catch { throw new AppError(409, 'search_page_unavailable', 'The saved search page no longer matches this cursor; restart explicitly with a new Idempotency-Key') }
+        if (dataSearch) result.publicBody = { ...projectDataSearch(result, request), meta: result.publicBody.meta }
+        return { result, sourceCallId: request.buffer.callId }
+      },
       dispatch: ({ credential }) => native
         ? this.adapter.forwardNative(nativeKey, { params: request.upstreamQuery }, credential)
         : this.adapter.execute(request.providerRequest, { ...credential, encodeCursor: request.encodeNext }),
-      finalize: async ({ result, delivery, credential, credentialRevision, deadlineAt }) => {
+      finalize: async ({ result, delivery, callId, credential, credentialRevision, deadlineAt }) => {
         if (native) {
-          try { result = (platform === 'weibo' ? projectWeiboSearch : projectInstagramSearch)(result, request) }
+          if (platform === 'instagram') request.archiveCallId = callId
+          try {
+            const receipt = result.restrictedResponseArchive
+            result = (platform === 'weibo' ? projectWeiboSearch : projectInstagramSearch)(result, request)
+            if (result.acquiredItems?.length > request.pageSize
+              && (!receipt || receipt.bodySize > 8388608)) {
+              throw new Error('instagram_page_archive_required')
+            }
+          }
           catch (error) {
             const reasons = platform === 'weibo' ? ['invalid_weibo_search_shape',
               'invalid_weibo_identity', 'weibo_page_exceeds_requested_count'] : [
               'invalid_instagram_search_shape', 'invalid_instagram_media_grid', 'invalid_instagram_post_identity',
               'instagram_page_exceeds_requested_count', 'invalid_instagram_continuation',
-              'invalid_instagram_pagination', 'missing_instagram_continuation',
+              'invalid_instagram_pagination', 'missing_instagram_continuation', 'instagram_page_archive_required',
             ]
             // Retain only known contract reasons, never arbitrary provider values or exception text.
             const normalizationCode = reasons.includes(error.message)
@@ -613,7 +646,11 @@ export class ExternalPlatformGateway {
           if (platform === 'weibo') result = await enrichWeiboRawSearch({ gateway: this, context, request, result, delivery,
             credential, credentialRevision, providerCostControl, deadlineAt })
         }
-        result.records = rawSearchRecords(result.publicBody, platform, this.providerKey)
+        // Ingest the whole paid page once, including buffered records. Later
+        // deliveries reuse its receipt and never create another acquisition.
+        const acquired = result.acquiredItems ? { ...result.publicBody, data: { ...result.publicBody.data,
+          raw_data: JSON.stringify(result.acquiredItems) } } : result.publicBody
+        result.records = rawSearchRecords(acquired, platform, this.providerKey)
         if (dataSearch) result.publicBody = { ...projectDataSearch(result, request), meta: result.publicBody.meta }
         return result
       },
@@ -949,6 +986,20 @@ export class ExternalPlatformGateway {
     }
 
     const activeRequestId = reservation.request.id
+    if (plan.buffered) {
+      const buffered = await plan.buffered()
+      if (buffered) {
+        const { result, sourceCallId } = buffered
+        const capturedAt = acceptedCaptureTime(result)
+        const sourceMode = Date.now() - capturedAt.getTime() <= this.config.freshTtlMs ? 'fresh_cache' : 'stored_fallback'
+        const responseBody = plan.dataSearch ? { data: result.publicBody.data, requestId: activeRequestId }
+          : deliveryBody(result.publicBody, { requestId: activeRequestId, sourceMode, capturedAt,
+            ...(sourceMode === 'stored_fallback' ? { fallbackReason: 'pagination_buffer' } : {}) })
+        await this.platformStore.commitInstagramPage({ delivery, sourceCallId, sourceMode, responseBody, capturedAt,
+          usageUnitsActual: plan.dataSearch ? result.items.length : 1 })
+        return resultFromBody(responseBody, { requestId: activeRequestId, replay: false, sourceMode, capturedAt })
+      }
+    }
     if (plan.route) {
       const routed = await plan.route(reservation)
       if (routed) { ownsReservation = false; return routed.result }
@@ -1001,6 +1052,7 @@ export class ExternalPlatformGateway {
       throw new AppError(404, 'stored_snapshot_not_found', 'No stored result matches this request')
     }
 
+    if (plan.resolveLiveRoute) normalized = await plan.resolveLiveRoute({ normalized, policy, codec })
     const sharedState = await this.platformStore.providerState(this.providerKey)
     const state = this.providerKey === 'tikhub' ? internalCircuitState(this.usageStore, context, sharedState) : sharedState
     // Two breakers: the provider-wide one for upstream faults, and this
@@ -1346,7 +1398,7 @@ export class ExternalPlatformGateway {
           }
         }
         if (plan.finalize) result = await plan.finalize({
-          result, delivery,
+          result, delivery, callId: call.id,
           credential: resolvedCredential.credential === undefined ? {} : { credential: resolvedCredential.credential },
           credentialRevision: resolvedCredential.revision,
           deadlineAt: new Date(reservation.request.leaseExpiresAt).getTime() || Date.now() + this.reservationLeaseMs,
@@ -1367,8 +1419,8 @@ export class ExternalPlatformGateway {
           staleUntil: new Date(capturedAt.getTime() + this.config.staleTtlMs),
           // A contract with no reviewed per-item identity extracts no items and
           // reports zero, rather than crashing the delivery on a missing field.
-          itemCount: result.items?.length ?? 0,
-          ...(plan.platformSearch && !plan.dataSearch ? { usageUnitsActual: 1 } : {}),
+          itemCount: result.acquiredItems?.length ?? result.items?.length ?? 0,
+          ...(plan.platformSearch ? { usageUnitsActual: plan.dataSearch ? Math.max(1, result.items?.length ?? 0) : 1 } : {}),
           latencyMs,
           ...(plan.platformSearch ? { usageLatencyMs: Math.max(0, Math.round(performance.now() - startedAt)) } : {}),
           // Official usage semantics count only code=0 as a successful billed

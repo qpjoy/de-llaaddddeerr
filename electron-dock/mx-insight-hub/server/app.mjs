@@ -11,6 +11,7 @@ import { paymentReportingRoute } from './payments/reporting.mjs'
 import { peripheralRoute } from './peripherals/routes.mjs'
 import { sourceConnectionSnapshot } from './data/source-connections.mjs'
 import { nativeForwardingByPath } from './contracts/native-forwarding.mjs'
+import { ecommerceRoutingCatalog } from './external-platforms/ecommerce-routing.mjs'
 import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSearchAlias } from './contracts/wechat-search-alias.mjs'
 import { hubSocialByPath } from './contracts/hub-social.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
@@ -781,6 +782,7 @@ export function createApp({
   embedding = null,
   externalPlatformAdmin = null,
   platformSearchPolicyStore = null,
+  ecommerceRoutingStore = null,
   provisioning = null,
   notifications = null,
   balanceMonitor = null,
@@ -2940,6 +2942,20 @@ export function createApp({
         requireNoQuery(searchParams, 'notification action')
         if (!notifications) throw new AppError(503, 'notifications_unavailable', 'Notifications are unavailable')
         sendJson(response, 200, { data: await notifications.act(params.id, await readJson(request, 8192)), requestId })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/ecommerce-routing') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'ecommerce routing inventory')
+        sendJson(response, 200, { data: ecommerceRoutingStore ? await ecommerceRoutingStore.catalog() : ecommerceRoutingCatalog(), requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/ecommerce-routing/:marketplace')
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'ecommerce route update')
+        if (!ecommerceRoutingStore) throw new AppError(503, 'ecommerce_route_unavailable', 'Product routes are unavailable')
+        sendJson(response, 200, { data: await ecommerceRoutingStore.update(params.marketplace, await readJson(request, 4096)), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/platform-search-policies') {
@@ -5864,8 +5880,8 @@ export function createApp({
       if (nativeEndpoint) {
         const context = await requirePublic(request)
         requireNoQuery(searchParams, 'native data forwarding')
-        const gateway = nativeEndpoint.authorizationPlatform === 'ecommerce' ? externalPlatformGateway
-          : nativeEndpoint.provider === 'tikhub' ? socialAccountTikHubGateway : socialAccountGateway
+        const gateway = nativeEndpoint.provider === 'tikhub' ? socialAccountTikHubGateway
+          : nativeEndpoint.authorizationPlatform === 'ecommerce' ? externalPlatformGateway : socialAccountGateway
         if (!gateway) throw new AppError(503, 'external_platform_unavailable', 'Native data endpoint is unavailable')
         const result = await gateway.forwardNative(context, {
           key: nativeEndpoint.key, body: await readJson(request, 64 * 1024),

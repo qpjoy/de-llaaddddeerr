@@ -24,7 +24,24 @@ const legacyEndpoints = snapshot.endpoints
     })
   })
 const legacyPaths = new Set(legacyEndpoints.map(row => `${row.provider}:${row.method}:${row.path}`))
+// Keep the released social keys/scopes intact. Ecommerce gets independently
+// granted operations over the same reviewed read contracts, not a product search.
+const kuaishouCommerce = [
+  ['t.kuaishou_ecommerce_shopping_top_list', 't.api_382901fb0fa68660'],
+  ['t.kuaishou_ecommerce_brand_top_list', 't.api_fb5e49d31884ca14'],
+].map(([key, originalKey]) => {
+  const row = official.endpoints.find(item => item.key === originalKey)
+  return Object.freeze({ ...row, key, id: key, platform: 'kuaishou_ec', platformLabel: '快手电商',
+    authorizationPlatform: 'ecommerce', operation: `native.${key}`, endpointKey: `native.${key}`,
+    hubPath: `/api/v1/data/native/${key}`, schemaVersion: 'hub-kuaishou-ecommerce.2026-10-13',
+    parameters: Object.freeze(row.parameters.map(p => Object.freeze({ ...p,
+      description: p.name === 'subTabId' ? '榜单子分类 ID，默认 0；不是页码，不支持自动翻页。'
+        : p.name === 'subTabName' ? '榜单子分类名称，可留空；不是关键词或分页游标。' : p.description,
+    }))), fixedQuery: Object.freeze({}),
+  })
+})
 export const NATIVE_FORWARDING_ENDPOINTS = Object.freeze([...legacyEndpoints,
+  ...kuaishouCommerce,
   ...wechat.endpoints.map(row => Object.freeze({ ...row, operation: `native.${row.key}`, endpointKey: `native.${row.key}` })),
   ...official.endpoints.filter(row => row.status === 'fixed_read_contract' && !legacyPaths.has(`${row.provider}:${row.method}:${row.path}`))
     .map(row => Object.freeze({ ...row, id: row.key, operation: `native.${row.key}`, endpointKey: `native.${row.key}`,

@@ -6,6 +6,60 @@
 `MX_INSIGHT_DIAGNOSTIC_COOLDOWN_MS=900000`，才能按当时期限匹配候选调用。
 此诊断变量不修改运行时规则；未知结果的同请求保护仍默认 15 分钟。
 
+## 2026-10-12 请求数量与上游分页不一致
+
+本节取代下文历史实现中“超出请求条数继续失败”的规则。状态：本地修复与回归完成，
+尚待操作者部署；本轮没有发起 Instagram 付费请求，没有重试原请求或重启下游 Run。
+
+管理台按 `203c6b95-e422-42cd-94cd-c9644adb78ed` 只读查询所得：
+
+- 请求时间 `2026-10-12T15:12:18.117Z`，完成 `15:12:35.260Z`；Hub committed、HTTP 502，
+  `external_platform_response_unusable / instagram_page_exceeds_requested_count`。
+- 实际端点 `native.t.instagram_v3_general_search`，上游 HTTP / 业务码均为 200、已计费，
+  耗时 17042ms；上游 requestId `81c76741-52ef-4082-b236-381145a22ab7`。
+- 客户结算 enforced、已扣款 ¥0.01；采购账本为估算 1 USD 最小货币单位，不能当作最终账单。
+  受限响应已保存。管理台没有暴露完整采购原文，因此本轮尚未核对原响应的确切帖子数量。
+
+[官方 OpenAPI](https://api.tikhub.io/openapi.json) 中
+`/api/v1/instagram/v3/general_search` 仅定义 `query/next_max_id/rank_token/enable_metadata`，
+没有 `count/pageSize`。Hub 对请求数量 20 的硬拒绝不能适配供应商自行决定的页大小。
+
+修复行为（标准 `/api/v1/data/search` 与两个 raw 别名保持各自原合同）：
+
+- 校验整页、去重后，每次最多交付请求数量。首次采集仍完整归档、入库所有帖子；不静默截断，
+  不忽略页尾坏帖。原生转发继续完整交付原业务结构。
+- 不透明 cursor 绑定 Key、查询、路由、页大小及查询类型；续页保存原采购调用、偏移和投影哈希。
+  同一上游页未读完前，只读它的受限原始响应，`providerCalls/upstreamCallCount=0`；不新增供应商调用，
+  不改变原采购账本。读完后才传递该响应的 `next_max_id/rank_token`。
+- 当前身份、授权、页大小权益、客户余额/额度及按请求客户定价继续生效；新页使用新幂等键，
+  同页原键重放不再次扣费。无需数据库迁移。
+- 保留 24 小时游标期限和 15 页遍历上限。第 15 页仍有结果时返回 partial 与
+  `INSTAGRAM_PAGE_LIMIT_REACHED`。存档缺失、过期或投影变化返回 `409 search_page_unavailable`，
+  不自动重新采集；大于 8MiB、无法安全续读的原始响应不发出不可用的缓冲游标。
+- 历史 502 及其幂等重放保持原样，不补写成功或改账。若需恢复下游任务，先只读核对原归档，
+  再由操作者决定是否发起新请求；部署本身不会使原请求重新执行。
+
+测试用合成 41 条帖子覆盖 20/20/1 分页、完整一次入库、下一上游游标、终页、15 页上限、
+归档完整性、过期、跨 Key/路由隔离、权益收紧、幂等与客户结算；PGlite 验证实际读取 SQL 和
+提交事务回滚。合成样本不能当作该事故的真实响应回放。
+
+本次相关回归共 199 项通过、0 失败、0 跳过，包含上述分页/存储测试、诊断、公开文档、
+电商合同、原生转发、Instagram 原生接口、准入恢复及历史分页；静态 OpenAPI 与动态定义一致。
+
+服务器同步审阅后的代码后，在 Hub 源码目录执行：
+
+```bash
+bash scripts/manage.sh deploy
+kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-public --timeout=300s
+kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-admin --timeout=300s
+kubectl -n mx-insight-hub exec deployment/mx-insight-hub-admin -c admin -- \
+  node /app/server/ops/diagnose-instagram-search.mjs \
+  203c6b95-e422-42cd-94cd-c9644adb78ed
+```
+
+最后一步只读验证归档哈希、报告总量/首批数量/`bufferedCount` 及投影状态；不会调用供应商、
+生成真实续页、改写旧响应或撤销旧收费。MX-H2I 登录和联网不在此次改动范围。
+
 ## 2026-10-12 评论与回复各一次付费实测
 
 用户随后明确允许评论和回复付费校准，生产 Hub 管理台以现有 LCY-delta 身份各发送

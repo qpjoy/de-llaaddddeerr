@@ -92,7 +92,7 @@ async function harness({ platform = 'weibo', detail = 'success', enabled = true,
         text: PREVIEW, text_raw: FULL, longText: { content: FULL } } })
     }
     if (searchFails) throw new Error('search transport outcome unknown')
-    if (platform === 'instagram') return Response.json({ code: 200, request_id: 'instagram-receipt', data: instagramData || {
+    if (platform === 'instagram') return Response.json({ code: 200, request_id: 'instagram-receipt', data: (typeof instagramData === 'function' ? instagramData(calls.at(-1)) : instagramData) || {
       status: 'ok', rank_token: 'search-rank-token', media_grid: { sections: [{ layout_content: { medias: [{ media: instagramPost }] } }],
         more_available: hasMore, ...(hasMore ? { next_max_id: 'next-instagram-page' } : {}) },
       other_results: { keyword_recommendations: { keywords: [{ id: '999', name: 'not a post' }] } },
@@ -878,12 +878,11 @@ test('Instagram partial recommendation pages keep HTTP raw-alias replay and stri
   assert.equal(h.historical.length, 0)
 })
 
-test('Instagram empty keyword suggestions remain empty; malformed, oversize and incomplete continuation shapes fail without fallback or retry', async () => {
+test('Instagram empty keyword suggestions remain empty; malformed and incomplete continuation shapes fail without fallback or retry', async () => {
   const empty = await harness({ platform: 'instagram', instagramData: { status: 'ok',
     other_results: { keyword_recommendations: { keywords: [{ id: '123', name: 'popular term' }] } } } })
   assert.deepEqual((await empty.invokeData()).body.data.items, [])
   for (const [data, reason] of [[{ unexpected: true }, 'invalid_instagram_search_shape'],
-    [{ items: Array.from({ length: 21 }, (_, i) => ({ ...instagramPost, pk: String(i + 1) })) }, 'instagram_page_exceeds_requested_count'],
     [{ items: [instagramPost], has_more: true }, 'missing_instagram_continuation'],
     [{ items: [instagramPost], next_max_id: 'valid', rank_token: { unexpected: 'shape' } }, 'invalid_instagram_continuation'],
     [{ items: [instagramPost], has_more: 'unexpected-value' }, 'invalid_instagram_pagination'],
@@ -910,7 +909,6 @@ test('Instagram empty keyword suggestions remain empty; malformed, oversize and 
     [{ status: 'ok', list: [], media_grid: {} }, 'invalid_instagram_search_shape'],
     [{ status: 'fail', list: [] }, 'invalid_instagram_search_shape'],
     [{ list: [] }, 'invalid_instagram_search_shape'],
-    [{ status: 'ok', list: Array.from({ length: 21 }, (_, i) => ({ media: { ...instagramPost, pk: String(i + 1) } })) }, 'instagram_page_exceeds_requested_count'],
   ]) {
     const h = await harness({ platform: 'instagram', instagramData: data })
     await assert.rejects(h.invokeData())
@@ -921,6 +919,110 @@ test('Instagram empty keyword suggestions remain empty; malformed, oversize and 
     assert.equal([...h.platformStore.calls.values()][0].outcome, 'succeeded_unusable')
     assert.equal([...h.platformStore.calls.values()][0].errorCode, reason)
   }
+})
+
+test('Instagram splits a paid oversized page losslessly on raw/data routes before advancing the upstream cursor', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    const rows = Array.from({ length: 41 }, (_, i) => ({ ...instagramPost, pk: String(i + 1) }))
+    const data = { status: 'ok', items: rows, list: [{ media: rows[0] }],
+      has_more: true, next_max_id: 'next-upstream', rank_token: 'first-rank' }
+    const h = await harness({ platform: 'instagram', instagramData: url => url.searchParams.has('next_max_id')
+      ? { items: [{ ...instagramPost, pk: '42' }], has_more: false } : data })
+    const body = route === 'invoke' ? { platform: 'instagram', query: 'fixture', count: 20 }
+      : { platform: 'instagram', query: 'fixture', pageSize: 20 }
+    const page = response => response.body.data.pageInfo || response.body.data.page
+    const ids = response => route === 'invoke' ? JSON.parse(response.body.data.raw_data).map(row => row.content_id)
+      : response.body.data.items.map(row => row.id)
+    const first = await h[route](body, 'overflow-page-1')
+    const receipt = Buffer.from([...h.platformStore.restrictedResponseArchives.values()][0].bodyBytes)
+    const second = await h[route]({ ...body, cursor: page(first).nextCursor }, 'overflow-page-2')
+    const replay = await h[route]({ ...body, cursor: page(first).nextCursor }, 'overflow-page-2')
+    assert.deepEqual(replay.body, second.body)
+    const third = await h[route]({ ...body, cursor: page(second).nextCursor }, 'overflow-page-3')
+    assert.deepEqual([ids(first).length, ids(second).length, ids(third).length], [20, 20, 1])
+    assert.deepEqual([...ids(first), ...ids(second), ...ids(third)], rows.map(row => row.pk))
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.platformStore.calls.size, 1)
+    assert.equal([...h.platformStore.calls.values()][0].itemCount, 41)
+    assert.equal(h.store.requests.get(first.requestId).unitsActual, route === 'invokeData' ? 20 : 1)
+    assert.equal(h.store.requests.get(third.requestId).unitsActual, 1)
+    assert.equal(h.platformStore.ingestJobs.length, 1)
+    assert.equal(h.platformStore.ingestJobs[0].payload.records.filter(row => row.objectType === 'post').length, 41)
+    assert.equal(second.body.data.meta.providerCalls ?? second.body.data.meta.upstreamCallCount, 0)
+    assert.ok(receipt.equals(Buffer.from([...h.platformStore.restrictedResponseArchives.values()][0].bodyBytes)))
+    const fourth = await h[route]({ ...body, cursor: page(third).nextCursor }, 'overflow-page-4')
+    assert.equal(h.calls.length, 2)
+    assert.equal(h.calls[1].searchParams.get('next_max_id'), 'next-upstream')
+    assert.equal(h.calls[1].searchParams.get('rank_token'), 'first-rank')
+    assert.deepEqual(ids(fourth), ['42'])
+    assert.equal(page(fourth).hasMore, false)
+    assert.equal(h.historical.length, 0)
+    if (route === 'invokeData') for (const result of [first, second, third, fourth]) assert.ok(isNightAllDataSearchV1Envelope(result.body))
+  }
+})
+
+test('Instagram terminal oversized pages preserve all rows, and missing/corrupt buffers never reacquire upstream', async () => {
+  const data = { items: Array.from({ length: 21 }, (_, i) => ({ ...instagramPost, pk: String(i + 1) })), has_more: false }
+  for (const corruption of [null, 'missing', 'bytes', 'hash', 'identity', 'failed']) {
+    const h = await harness({ platform: 'instagram', instagramData: data })
+    const first = await h.invokeData()
+    const cursor = first.body.data.pageInfo.nextCursor
+    const [callId, archive] = [...h.platformStore.restrictedResponseArchives][0]
+    if (corruption === 'missing') h.platformStore.restrictedResponseArchives.delete(callId)
+    if (corruption === 'bytes') archive.bodyBytes[0] = 0
+    if (corruption === 'hash') archive.bodySha256 = '0'.repeat(64)
+    if (corruption === 'identity') h.store.requests.get(first.requestId).apiKeyId = randomUUID()
+    if (corruption === 'failed') h.platformStore.calls.get(callId).outcome = 'succeeded_unusable'
+    const invoke = () => h.invokeData({ platform: 'instagram', query: '汽车', pageSize: 20, cursor }, 'buffer-next-page')
+    if (corruption) await assert.rejects(invoke(), { code: 'search_page_unavailable' })
+    else {
+      const last = await invoke()
+      assert.equal(last.body.data.items.length, 1)
+      assert.equal(last.body.data.pageInfo.hasMore, false)
+      assert.equal(last.body.data.pageInfo.nextCursor, null)
+    }
+    assert.equal(h.calls.length, 1)
+  }
+})
+
+test('Instagram buffer cursors retain route/query/Key/expiry and current grant/page-size boundaries', async () => {
+  const h = await harness({ platform: 'instagram', instagramData: { items: Array.from({ length: 21 }, (_, i) => ({ ...instagramPost, pk: String(i + 1) })) } })
+  const first = await h.invokeData()
+  const cursor = first.body.data.pageInfo.nextCursor
+  const body = { platform: 'instagram', query: '汽车', pageSize: 20, cursor }
+  const otherKey = await h.service.createApiKey({ consumerId: h.context.consumer.id, name: 'Second original scope', platforms: ['instagram'], capabilities: [] })
+  const otherContext = await h.service.authenticate(otherKey.secret)
+  await assert.rejects(h.service.search(otherContext, { body, idempotencyKey: 'buffer-other-key', path: '/api/v1/data/search' }), { code: 'invalid_cursor' })
+  await assert.rejects(h.invokeData({ ...body, query: 'another' }, 'buffer-query-change'), { code: 'invalid_cursor' })
+  await assert.rejects(h.invoke({ platform: 'instagram', query: '汽车', count: 20, cursor }, 'buffer-route-change'), { code: 'invalid_cursor' })
+  const codec = createDataSearchCursorCodec(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}`)
+  const state = codec.decode(cursor)
+  for (const patch of [{ expiresAt: 1 }, { buffer: { ...state.buffer, offset: 21 } },
+    { buffer: { ...state.buffer, callId: 'bad' } }, { buffer: { ...state.buffer, unexpected: true } }]) {
+    await assert.rejects(h.invokeData({ ...body, cursor: codec.encode({ ...state, ...patch }) }, randomUUID()), { code: 'invalid_cursor' })
+  }
+  await assert.rejects(h.invokeData({ ...body, cursor: codec.encode({ ...state, buffer: { ...state.buffer, hash: '0'.repeat(64) } }) }, 'buffer-drift'), { code: 'search_page_unavailable' })
+  h.store.apiKeyPlatformEntitlements.get(h.context.apiKey.id)[0].maxPageSize = 10
+  await assert.rejects(h.invokeData(body, 'buffer-lower-entitlement'), { code: 'page_size_exceeded' })
+  await h.store.setPlatformGrant(h.context.consumer.id, 'instagram', false)
+  await assert.rejects(h.invokeData(body, 'buffer-revoked-grant'), { code: 'platform_not_granted' })
+  assert.equal(h.calls.length, 1)
+})
+
+test('Instagram buffered pages keep customer per-request charges and settle exact replays only once', async () => {
+  const h = await harness({ platform: 'instagram', instagramData: { items: Array.from({ length: 21 }, (_, i) => ({ ...instagramPost, pk: String(i + 1) })) } })
+  await h.service.setTenantBillingProfile(h.context.tenant.id,
+    { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 1, defaultCurrency: 'CNY' }, 'test-admin')
+  await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline pagination fixture' },
+    { idempotencyKey: 'pagination-credit', actor: 'test-admin' })
+  const first = await h.invokeData()
+  const body = { platform: 'instagram', query: '汽车', pageSize: 20, cursor: first.body.data.pageInfo.nextCursor }
+  const second = await h.invokeData(body, 'buffer-paid-second')
+  assert.deepEqual((await h.invokeData(body, 'buffer-paid-second')).body, second.body)
+  assert.equal(h.calls.length, 1)
+  const charges = [...h.store.customerCharges.values()]
+  assert.equal(charges.length, 2)
+  assert.ok(charges.every(charge => charge.chargedMinor === 1 && charge.meterKey === 'instagram'))
 })
 
 test('Weibo/Instagram canonical and legacy normalization clear generated titles without modifying raw evidence or account/article names', () => {

@@ -296,7 +296,7 @@ test('JD issues a continuation when its own page counters prove another page exi
   assert.equal(response.page.hasMore, true)
   assert.equal(response.page.nextCursor, 'opaque-jd-page-2')
   assert.deepEqual(encodedStates, [{
-    version: 1, marketplace: 'jd', page: 2, scope: request.cursorScope, continuation: null,
+    version: 1, adapterId: request.adapterId, marketplace: 'jd', page: 2, scope: request.cursorScope, continuation: null,
   }])
 })
 
@@ -364,6 +364,7 @@ test('Taobao V1 accepts the observed data.model.itemList shape and model.page pa
   })
   assert.deepEqual(encodedStates, [{
     version: 1,
+    adapterId: request.adapterId,
     marketplace: 'taobao',
     page: 2,
     scope: request.cursorScope,

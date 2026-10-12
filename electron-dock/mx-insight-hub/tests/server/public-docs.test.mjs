@@ -67,7 +67,7 @@ const NIGHT_ALL_COMPATIBILITY_ERROR_CODES = {
   404: ['not_found', 'user_not_found', 'night_all_rejected'],
   409: [
     'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
-    'external_platform_response_unusable', 'night_all_rejected',
+    'external_platform_response_unusable', 'search_page_unavailable', 'night_all_rejected',
   ],
   422: ['night_all_rejected'],
   429: [
@@ -230,7 +230,7 @@ function assertExternalCommerceContract(document) {
       'external_platform_unavailable', 'external_platform_not_configured',
       'external_platform_circuit_open', 'external_platform_capacity_unavailable',
       'external_platform_cost_control_unavailable', 'external_platform_cost_evidence_incomplete',
-      ...EXTERNAL_OPERATION_CONTROL_ERROR_CODES,
+      ...EXTERNAL_OPERATION_CONTROL_ERROR_CODES, 'ecommerce_route_unavailable',
     ],
   })
   assert.deepEqual(
@@ -652,7 +652,10 @@ function assertExternalSocialPostContract(document) {
 function assertXiaohongshuSearchContract(document) {
   const operation = document.paths['/data/search']?.post
   assert.ok(operation)
-  assert.deepEqual(operation['x-mx-error-codes'], XIAOHONGSHU_SEARCH_ERROR_CODES)
+  assert.deepEqual(operation['x-mx-error-codes'], {
+    ...XIAOHONGSHU_SEARCH_ERROR_CODES,
+    409: [...XIAOHONGSHU_SEARCH_ERROR_CODES[409], 'search_page_unavailable'],
+  })
   assert.deepEqual(operation['x-mx-required-capabilities-by-platform'], {
     xiaohongshu: 'social.posts.search',
   })
@@ -1593,8 +1596,8 @@ test('public listener serves self-contained public API documentation', async () 
     assert.match(html, /电商数据/)
     assert.doesNotMatch(ecommerceHtml.match(/<section class="doc-page"[\s\S]*?<\/section>/u)?.[0] || '', FORBIDDEN_PROVIDER_NEUTRAL_CONTRACT_DETAILS)
     assert.match(html, /同一把 Hub Public API Key/u)
-    assert.match(html, /当前发布只有一个私有合格候选，尚未启用多供应商运行时路由或自动故障转移/u)
-    assert.match(html, /第二个候选通过合同验证后/u)
+    assert.match(html, /尚无可切换的第二个候选，也没有自动故障转移/u)
+    assert.match(html, /只有完成同一商品合同的字段、筛选和分页适配的接口才能作为候选/u)
     assert.match(html, /相同 <code>Idempotency-Key<\/code>/u)
     assert.match(html, /Hub customer|Hub 客户计价/u)
     assert.match(html, /fresh_cache/)

@@ -19,7 +19,8 @@ const groups = [
 ]
 function project(data, overrides = {}) {
   return projectInstagramSearch({ publicBody: { data, meta: { capturedAt } } }, {
-    query: 'fixture', page: 1, pageSize: 20, encodeNext: value => JSON.stringify(value), ...overrides,
+    query: 'fixture', page: 1, pageSize: 20, archiveCallId: '00000000-0000-0000-0000-000000000001',
+    encodeNext: value => JSON.stringify(value), ...overrides,
   })
 }
 
@@ -61,7 +62,14 @@ test('coexisting containers retain every post and deduplicate IDs without mutati
   assert.equal(result.publicBody.data.page.hasMore, true)
   assert.deepEqual(data, before)
   assert.equal(project({ status: 'ok', media_grid: { sections: [] }, list: [{ media: post }] }).items.length, 1)
-  assert.throws(() => project(data, { pageSize: 2 }), /instagram_page_exceeds_requested_count/)
+  const first = project(data, { pageSize: 2 })
+  assert.deepEqual(first.items.map(row => row.content_id), [post.id, second.id])
+  const buffered = project(data, { pageSize: 2, ...JSON.parse(first.publicBody.data.page.nextCursor) })
+  assert.deepEqual(buffered.items.map(row => row.content_id), [third.id])
+  assert.deepEqual(JSON.parse(buffered.publicBody.data.page.nextCursor), { page: 3,
+    providerCursor: { next_max_id: 'next', rank_token: 'rank' } })
+  assert.equal(buffered.publicBody.data.meta.upstreamCallCount, 0)
+  assert.deepEqual(data, before)
 })
 
 test('October 12 live response shape: account list and 18 grid photos, videos and carousels retain their media', () => {
@@ -137,4 +145,24 @@ test('recommendations never hide malformed posts, conflicting kinds or invalid s
   for (const more of [true, 1, '1', 'true']) assert.equal(project({ places: [{}], has_more: more }).publicBody.data.status, 'partial')
   assert.throws(() => project({ places: [{}], has_more: 'unknown' }), /invalid_instagram_pagination/)
   assert.throws(() => project({ places: [{}], next_max_id: {} }), /invalid_instagram_continuation/)
+})
+
+test('buffered terminal pages and traversal limits report accurate counts without mutating the receipt', () => {
+  const data = { items: Array.from({ length: 41 }, (_, i) => ({ ...post, id: String(i + 1) })), has_more: false }
+  const first = project(data)
+  assert.equal(first.items.length, 20)
+  const state = JSON.parse(first.publicBody.data.page.nextCursor)
+  const second = project(data, state)
+  const third = project(data, JSON.parse(second.publicBody.data.page.nextCursor))
+  assert.equal(third.items.length, 1)
+  assert.equal(third.publicBody.data.page.hasMore, false)
+  const capped = project(data, { page: 15 })
+  assert.equal(capped.publicBody.data.page.nextCursor, null)
+  assert.equal(capped.publicBody.data.status, 'partial')
+  assert.equal(capped.publicBody.data.warnings[0].code, 'INSTAGRAM_PAGE_LIMIT_REACHED')
+  assert.throws(() => project({ ...data, items: data.items.toReversed() }, state), /instagram_buffer_mismatch/)
+  const invalid = structuredClone(data)
+  invalid.items[40].id = null
+  invalid.items[40].pk = null
+  assert.throws(() => project(invalid), /invalid_instagram_post_identity/)
 })

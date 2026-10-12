@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react'
 import { adminApi } from './api.js'
 import { DropdownField, ErrorState, Field, PageHeading, formatDate, useRemoteData } from './components.jsx'
+import { EcommerceRoutingPage } from './ecommerce-routing.jsx'
 
 const MODES = { auto: '自动：RapidAPI → JustOne', rapidapi: '仅 RapidAPI', justone: '仅 JustOne', paused: '暂停搜索', existing: '沿用现有路由' }
 const REASONS = { quota_exhausted: '额度已用尽', rate_limited: '短时限流', recovery_probe: '等待恢复确认' }
@@ -42,7 +43,18 @@ function FacebookForm({ token, row, onSaved, notify }) {
   </form>
 }
 
-export function DataPlatformsPage({ token, query, setQuery, onUnauthorized, notify }) {
+export function DataPlatformsPage(props) {
+  const ecommerce = props.query.get('domain') === 'ecommerce'
+  return <>
+    <nav className="mih-source-section-tabs" aria-label="数据平台类型">
+      <button type="button" aria-pressed={!ecommerce} onClick={() => props.setQuery({ domain: 'social' })}>内容平台</button>
+      <button type="button" aria-pressed={ecommerce} onClick={() => props.setQuery({ domain: 'ecommerce' })}>电商平台</button>
+    </nav>
+    {ecommerce ? <EcommerceRoutingPage {...props} /> : <SocialDataPlatformsPage {...props} />}
+  </>
+}
+
+function SocialDataPlatformsPage({ token, query, setQuery, onUnauthorized, notify }) {
   const load = useCallback(() => adminApi.platformSearchPolicies(token), [token])
   const remote = useRemoteData(load, onUnauthorized)
   const selected = query.get('platform') || 'facebook'

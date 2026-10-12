@@ -444,12 +444,13 @@ export class JustOneAdapter {
   async searchProducts(body, {
     decodeCursor,
     encodeCursor,
+    defaultAdapterId,
     maxPageSize,
     capturedAt = null,
     credential: suppliedCredential,
   } = {}) {
     const credential = await this.#credentialFor(suppliedCredential)
-    const request = normalizeJustOneProductSearchRequest(body, { decodeCursor, maxPageSize })
+    const request = normalizeJustOneProductSearchRequest(body, { decodeCursor, maxPageSize, defaultAdapterId })
     return this.#dispatch({
       request,
       credential,

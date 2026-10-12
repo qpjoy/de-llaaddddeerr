@@ -17,7 +17,6 @@ test('offline diagnostics distinguish Instagram shape, layout, identity, overflo
     [{ 'private-field': 'private-value' }, 'invalid_instagram_search_shape'],
     [{ media_grid: { sections: [{ layout_content: { medias: {} } }] } }, 'invalid_instagram_media_grid'],
     [{ items: [{ ...row, pk: 123456789012345678 }] }, 'invalid_instagram_post_identity'],
-    [{ items: Array.from({ length: 21 }, (_, i) => ({ ...row, pk: String(i + 1) })) }, 'instagram_page_exceeds_requested_count'],
     [{ items: [row], has_more: true }, 'missing_instagram_continuation'],
     [{ items: [row], next_max_id: 'private-cursor', rank_token: {} }, 'invalid_instagram_continuation'],
     [{ items: [row], has_more: 'private-value' }, 'invalid_instagram_pagination'],
@@ -30,9 +29,18 @@ test('offline diagnostics distinguish Instagram shape, layout, identity, overflo
       assert.deepEqual(result.invalidRowIndexes, [0])
       assert.equal(result.invalidRows[0].unsafeNumericId, data.items[0] !== null)
     }
-    if (reason === 'instagram_page_exceeds_requested_count') assert.equal(result.uniqueValidIdentityCount, 21)
     assert.doesNotMatch(JSON.stringify(result), /private-|123456789012345678/)
   }
+})
+
+test('overflow diagnostics report lossless buffered delivery without printing posts or cursors', () => {
+  const result = inspectInstagramArchive(archive({ items: Array.from({ length: 41 }, (_, i) => ({ ...row, pk: String(i + 1) })) }), snapshot)
+  assert.equal(result.state, 'current_projection_accepts')
+  assert.equal(result.uniqueValidIdentityCount, 41)
+  assert.equal(result.returnedCount, 20)
+  assert.equal(result.bufferedCount, 21)
+  assert.equal(result.hasMore, true)
+  assert.doesNotMatch(JSON.stringify(result), /private-/)
 })
 
 test('media grid, nested items, duplicates and keyword-only responses replay without provider calls', () => {
