@@ -71,7 +71,7 @@ enforcement must be verified with the actual CNI.
 
 These mounts survive future normal deploys. No manual Deployment patch, shared
 admin token, identity reset or account/product grant is needed. See
-[Harbor operation steps](../../../mx-harbor/harbor.setup.md). Payment and purchase
+[Harbor operation steps](../../../mx-dataport/harbor.setup.md). Payment and purchase
 flows remain outside this read-only Portal stage.
 
 ## Secret preparation

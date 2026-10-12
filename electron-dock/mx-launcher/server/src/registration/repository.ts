@@ -99,7 +99,7 @@ export class RegistrationRepository {
   async updatePolicy(input: RegistrationPolicy) {
     if (!['closed', 'invite_code', 'open'].includes(input.mode) || !Number.isSafeInteger(input.version)) fail(400, 'invalid_policy', '注册策略无效。');
     if (input.hubMode !== undefined && !['inherit','closed','invite_code','open'].includes(input.hubMode)) fail(400,'invalid_policy','Hub 注册方式无效。');
-    if (input.applicationModes !== undefined && (!input.applicationModes || Array.isArray(input.applicationModes) || Object.entries(input.applicationModes).some(([app, mode]) => app !== 'mx-harbor' || !['closed','invite_code'].includes(mode)))) fail(400, 'invalid_policy', 'Harbor 当前仅支持关闭或邀请码注册。');
+    if (input.applicationModes !== undefined && (!input.applicationModes || Array.isArray(input.applicationModes) || Object.entries(input.applicationModes).some(([app, mode]) => app !== 'mx-harbor' || !['closed','invite_code'].includes(mode)))) fail(400, 'invalid_policy', 'DataPort 当前仅支持关闭或邀请码注册。');
     await this.ready();
     return this.db.transaction(async manager => {
       await this.lock(manager);
@@ -179,7 +179,7 @@ export class RegistrationRepository {
     await this.db.transaction(async manager => {
       await this.lock(manager);
       invitation.appGrant = input.admissionAppId === 'mx-harbor' ? {mode: 'selected', appIds: ['mx-harbor']} : await this.invitationGrant(manager, input.appGrant);
-      if (!input.admissionAppId && invitation.appGrant.appIds.includes('mx-harbor')) fail(400, 'invalid_app_grant', '请创建 Harbor 专用邀请。');
+      if (!input.admissionAppId && invitation.appGrant.appIds.includes('mx-harbor')) fail(400, 'invalid_app_grant', '请创建 DataPort 专用邀请。');
       await this.write(manager, 'registration-invite', invitation.id, invitation);
       await this.audit(manager, 'identity.invitation.created', { invitationId: invitation.id, clientId: this.clientId, maxUses: input.maxUses, appGrant: invitation.appGrant });
     });
@@ -197,7 +197,7 @@ export class RegistrationRepository {
       await this.audit(manager, 'identity.invitation.revoked', { invitationId: id });
     });
   }
-  /** Called only after Auth password verification on a registered Harbor interaction. */
+  /** Called only after Auth password verification on a registered DataPort interaction. */
   async redeemAdmission(input: {userId: string; inviteCode: string; source: RegistrationSource}) {
     validateRegistrationSource(input.source);
     if (input.source?.appId !== 'mx-harbor') fail(400, 'invalid_registration_source', '邀请应用不匹配。');
@@ -205,14 +205,14 @@ export class RegistrationRepository {
     return this.db.transaction(async manager => {
       await accountWriteLock(manager, this.environment); await this.lock(manager);
       const user = await this.read<UserCenterUser>(manager, 'iam-user', input.userId);
-      if (!user || user.status !== 'active' || user.appAccess.deniedAppIds.includes('mx-harbor')) fail(403, 'admission_denied', '此账号不可访问 Harbor，请联系管理员。');
+      if (!user || user.status !== 'active' || user.appAccess.deniedAppIds.includes('mx-harbor')) fail(403, 'admission_denied', '此账号不可访问 DataPort，请联系管理员。');
       // Retrying a successful redemption never consumes another seat or changes other app grants.
       if (user!.appAccess.allowedAppIds.includes('mx-harbor')) return {userId: user!.userId};
       const policy = effectivePolicy(await this.policyFor(manager), input.source);
-      if (policy.mode !== 'invite_code') fail(403, 'registration_closed', 'Harbor 暂未开放邀请，请联系管理员开通。');
+      if (policy.mode !== 'invite_code') fail(403, 'registration_closed', 'DataPort 暂未开放邀请，请联系管理员开通。');
       const rows = await manager.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='registration-invite' AND data->>'codeHash'=$2", [this.environment, hash(typeof input.inviteCode === 'string' ? input.inviteCode.trim() : '')]);
       const invite: Invitation | undefined = rows[0]?.data;
-      if (!invite || invite.clientId !== this.clientId || invite.admissionAppId !== 'mx-harbor' || invite.revoked || invite.uses >= invite.maxUses || Date.parse(invite.startsAt) > Date.now() || Date.parse(invite.expiresAt) <= Date.now()) fail(400, 'invitation_unavailable', 'Harbor 邀请码无效、已到期或名额已用完。');
+      if (!invite || invite.clientId !== this.clientId || invite.admissionAppId !== 'mx-harbor' || invite.revoked || invite.uses >= invite.maxUses || Date.parse(invite.startsAt) > Date.now() || Date.parse(invite.expiresAt) <= Date.now()) fail(400, 'invitation_unavailable', 'DataPort 邀请码无效、已到期或名额已用完。');
       await this.write(manager, 'iam-user', user!.userId, {...user, updatedAt: new Date().toISOString(), appAccess: {...user!.appAccess, allowedAppIds: [...user!.appAccess.allowedAppIds, 'mx-harbor']}});
       await this.write(manager, 'registration-invite', invite!.id, {...invite, uses: invite!.uses + 1});
       await this.audit(manager, 'identity.application.admitted', {appId: 'mx-harbor', invitationId: invite!.id, source: input.source}, user!.userId);
@@ -221,7 +221,7 @@ export class RegistrationRepository {
   }
   async register(input: RegistrationInput) {
     validateRegistrationSource(input.source);
-    if (input.source?.appId === 'mx-harbor' && (input.verifiedFeishuSubject || input.enterpriseInvitation)) fail(403, 'invalid_registration_source', 'Harbor 仅支持专用邀请码注册。');
+    if (input.source?.appId === 'mx-harbor' && (input.verifiedFeishuSubject || input.enterpriseInvitation)) fail(403, 'invalid_registration_source', 'DataPort 仅支持专用邀请码注册。');
     const account = typeof input.account === 'string' ? input.account.trim() : '';
     if (input.clientId !== this.clientId || !/^[A-Za-z0-9_-]{16,128}$/.test(input.transactionId ?? '')
       || !Number.isSafeInteger(input.policyVersion)) fail(400, 'invalid_transaction', '注册请求已失效，请重新打开登录页。');

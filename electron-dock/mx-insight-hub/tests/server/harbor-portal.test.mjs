@@ -9,6 +9,7 @@ import {SsoStore} from '../../server/identity/sso-store.mjs'
 import {createApp} from '../../server/app.mjs'
 import {HubService} from '../../server/hub-service.mjs'
 import {MemoryStore} from '../../server/stores/memory-store.mjs'
+import {AppError} from '../../server/core/errors.mjs'
 test('Portal allowlist rejects administrative, supplier and document bypass paths',()=>{
  for(const path of ['/runtime','/commerce/delivery','/commerce/tenants/abc/acceptance-orders','/../admin/session','/api-keys/abc/reveal'])assert.throws(()=>harborRoute('GET',path,new URLSearchParams()),{status:404})
  assert.throws(()=>harborRoute('POST','/commerce/products',new URLSearchParams()),{status:404})
@@ -17,7 +18,7 @@ test('Portal allowlist rejects administrative, supplier and document bypass path
 })
 test('Portal purchase and access writes are narrow and retain tenant authorization',async t=>{
  const tenant=randomUUID(),other=randomUUID()
- for(const path of [`/commerce/tenants/${tenant}/orders`,`/commerce/tenants/${tenant}/access`,`/commerce/tenants/${tenant}/orders/${randomUUID()}/checkout`,`/commerce/tenants/${tenant}/orders/${randomUUID()}/refresh`,'/demo-credentials','/payments/personal-account']) {
+ for(const path of [`/commerce/tenants/${tenant}/orders`,`/commerce/tenants/${tenant}/access`,`/commerce/tenants/${tenant}/subscription-selection`,`/commerce/tenants/${tenant}/orders/${randomUUID()}/checkout`,`/commerce/tenants/${tenant}/orders/${randomUUID()}/refresh`,'/demo-credentials','/payments/personal-account']) {
   assert.equal(harborRoute('POST',path,new URLSearchParams()),`/internal/v1/admin${path}`)
   assert.throws(()=>harborRoute('POST',path,new URLSearchParams('admin=1')),{status:400})
  }
@@ -89,6 +90,8 @@ test('optional Portal config is loaded at request time and missing/corrupt enrol
  const profile={appId:'mx-harbor',origin:'https://harbor.minsight-ai.com',issuer:hubSettings.issuer,audience:'mx-harbor',clientId:'mx-harbor-web',clientSecret:'s'.repeat(43),sessionKey:'k'.repeat(43)}
  writeFileSync(profileFile,JSON.stringify(profile),{mode:0o600});writeFileSync(tokenFile,'g'.repeat(43),{mode:0o600})
  await assert.rejects(portal.resolve({headers:{'x-mx-harbor-gateway':'wrong'}}),{status:401,code:'portal_auth_required'})
+ await assert.rejects(portal.resolve({headers:{'x-mx-harbor-gateway':'wrong'}},{catalogOnly:true}),{status:401,code:'portal_auth_required'})
+ assert.equal(await portal.resolve({headers:{'x-mx-harbor-gateway':'g'.repeat(43)}},{catalogOnly:true}),null)
  await assert.rejects(portal.resolve({headers:{'x-mx-harbor-gateway':'g'.repeat(43)}}),{status:401,code:'portal_session_required'})
  writeFileSync(tokenFile,'n'.repeat(43))
  await assert.rejects(portal.resolve({headers:{'x-mx-harbor-gateway':'g'.repeat(43)}}),{status:401,code:'portal_auth_required'})
@@ -98,4 +101,19 @@ test('optional Portal config is loaded at request time and missing/corrupt enrol
  await assert.rejects(portal.resolve({headers:{}}),error=>error.status===503&&!error.message.includes('sensitive'))
  rmSync(profileFile);rmSync(tokenFile)
  await assert.rejects(portal.resolve({headers:{}}),{status:503,code:'portal_unavailable'})
+})
+
+
+test('public catalog is a gateway-authenticated projection on the admin listener only',async t=>{
+ const store=new MemoryStore(),service=new HubService({store,adapter:{},apiKeyPepper:'fixture-long-pepper-for-catalog'})
+ const calls=[],portal={resolve:async(request,options)=>{calls.push(options);if(request.headers['x-mx-harbor-gateway']!=='gateway')throw new AppError(401,'portal_auth_required','unauthorized')}}
+ for(const listenerMode of ['public','admin']){
+  const server=createServer(createApp({store,service,adapter:{},listenerMode,harborPortal:portal}));await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.close(r);server.closeAllConnections()}));const base=`http://127.0.0.1:${server.address().port}/internal/v1/portal/catalog`
+  const response=await fetch(base,{headers:{'x-mx-harbor-gateway':'gateway'}})
+  assert.equal(response.status,listenerMode==='public'?404:200)
+  if(response.ok){assert.deepEqual((await response.json()).data,{items:[]});assert.equal((await fetch(base)).status,401)}
+  assert.notEqual((await fetch(base+'?admin=1',{headers:{'x-mx-harbor-gateway':'gateway'}})).status,200)
+  assert.notEqual((await fetch(base,{method:'POST',headers:{'x-mx-harbor-gateway':'gateway'}})).status,200)
+ }
+ assert.deepEqual(calls,[{catalogOnly:true},{catalogOnly:true}])
 })

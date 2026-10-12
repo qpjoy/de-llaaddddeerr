@@ -66,6 +66,7 @@ export class IpRiskGateway {
     }).catch(error => {
       if (error.code === 'P0001' && error.message === 'commerce_subscription_required') throw new AppError(403,error.message,'请先购买有效的 IP v2 订阅')
       if (error.code === 'P0001' && error.message === 'commerce_quota_exhausted') throw new AppError(429,error.message,'本期订阅额度已用尽')
+      if (error.code === 'P0001' && error.message === 'commerce_daily_limit_exhausted') throw new AppError(429,error.message,'今日订阅次数已用尽，将于北京时间次日 00:00 恢复')
       throw error
     })
     const requestId = reservation.request?.id

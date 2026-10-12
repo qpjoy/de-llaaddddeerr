@@ -72,10 +72,10 @@ async function fixture(t,{space=false}={}){
   const url=new URL(connectionString);url.pathname=`/${name}`
   const pool=new pg.Pool({connectionString:url.href,max:8}),migrationDir=await mkdtemp(join(tmpdir(),'hub-commerce-migration-'))
   t.after(async()=>{await pool.end();await admin.query(`DROP DATABASE ${name}`);await admin.end();await rm(migrationDir,{recursive:true,force:true})})
-  const selected=['001','002','003','004','005','007','016','018','031','041','051','052','053','054','055','056','057','058','060','063','065','075','076','077','078','081','082','083','094','113','119','122','123','126','127','128','129','138','144'],dir=new URL('../../migrations/',import.meta.url)
+  const selected=['001','002','003','004','005','007','016','018','031','041','051','052','053','054','055','056','057','058','060','063','065','075','076','077','078','081','082','083','094','113','119','122','123','126','127','128','129','138','144','145'],dir=new URL('../../migrations/',import.meta.url)
   if(space)selected.push('130')
   for(const file of (await readdir(dir)).sort().filter(f=>selected.includes(f.slice(0,3)))){
-    if(['129','130','144'].includes(file.slice(0,3))){await writeFile(join(migrationDir,file),await readFile(new URL(file,dir)));continue}
+    if(['129','130','144','145'].includes(file.slice(0,3))){await writeFile(join(migrationDir,file),await readFile(new URL(file,dir)));continue}
     const client=await pool.connect();try{await client.query('BEGIN');await client.query(await readFile(new URL(file,dir),'utf8'));await client.query('COMMIT')}catch(e){await client.query('ROLLBACK');e.message=`${file}: ${e.message}`;throw e}finally{client.release()}
   }
   await runMigrations({connectionString:url.href,migrationsDir:migrationDir})
@@ -387,4 +387,74 @@ test('PostgreSQL workspace reads use tenant predicates and full UTC day aggregat
   const rows=await store.usageDaily({tenantId:f.tenant,from:day+'T00:00:00Z',to:day+'T23:59:59.999Z'})
   assert.deepEqual(rows,[{day,requests:55,committed:0}])
   assert.deepEqual(await store.usageDaily({tenantId:other,from:day+'T00:00:00Z',to:day+'T23:59:59.999Z'}),[])
+})
+
+test('daily quota serializes the last call, releases failures, preserves holds across selection and resets by Shanghai date',database,async t=>{
+ const f=await fixture(t,{space:true});
+ const saved=await f.service.save('daily-fixture',{revision:0,name:'Daily',description:'fixture',status:'published',amountMinor:399900,months:12,quota:10,dailyLimit:1,activationMode:'immediate',harborListed:true},'admin');
+ const buy=async()=>{const o=await f.service.create(f.tenant,{sku:saved.sku,revision:saved.revision,environment:'live'},randomUUID(),'buyer');const e=await f.eventFor(o);await f.service.commit(e.source,e.event,e.payment);return o};
+ const a=await buy(),first=(await f.service.list(f.tenant)).subscriptions[0];
+ const race=await Promise.allSettled([f.reserve(),f.reserve()]);assert.equal(race.filter(r=>r.status==='fulfilled').length,1);assert.match(race.find(r=>r.status==='rejected').reason.message,/commerce_daily_limit_exhausted/);
+ const held=race.find(r=>r.status==='fulfilled').value;
+ assert.equal((await f.service.list(f.tenant)).subscriptions[0].dailyHeld,1);
+ await f.pool.query("UPDATE usage_requests SET status='released',units_actual=0 WHERE id=$1",[held]);
+ const consumed=await f.reserve();await f.pool.query("UPDATE usage_requests SET status='committed',units_actual=1 WHERE id=$1",[consumed]);
+ await assert.rejects(f.reserve(),/commerce_daily_limit_exhausted/);
+ const b=await buy(),second=(await f.service.list(f.tenant)).subscriptions.find(s=>s.orderId===b.id);
+ await f.service.selectSubscription(f.tenant,{subscriptionId:second.id},'owner');
+ const next=await f.reserve();assert.equal((await f.pool.query('SELECT subscription_id FROM hub_commerce.usage WHERE request_id=$1',[next])).rows[0].subscription_id,second.id);
+ await assert.rejects(f.service.selectSubscription(randomUUID(),{subscriptionId:first.id},'owner'),{code:'commerce_subscription_unavailable'});
+ await assert.rejects(f.service.selectSubscription(f.tenant,{subscriptionId:first.id},'owner'),{code:'commerce_subscription_unavailable'});
+ // Move only fixture usage to the previous local day; today's held reservation stays bound to second.
+ await f.pool.query("UPDATE hub_commerce.usage SET created_at=(date_trunc('day',now() AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai')-interval '1 second' WHERE request_id=$1",[consumed]);
+ const result=await f.service.selectSubscription(f.tenant,{subscriptionId:first.id},'owner');assert.equal(result.subscriptions.find(s=>s.selected).id,first.id);
+ await f.pool.query("UPDATE usage_requests SET status='committed',units_actual=1 WHERE id=$1",[next]);
+ assert.equal((await f.service.list(f.tenant)).subscriptions.find(s=>s.id===second.id).used,1,'in-flight calls settle on the original subscription');
+ const last=await f.reserve();assert.equal((await f.pool.query('SELECT subscription_id FROM hub_commerce.usage WHERE request_id=$1',[last])).rows[0].subscription_id,first.id);
+ assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM billing.credit_ledger_entries')).rows[0].n,0);
+});
+
+test('catalog rules are immutable per order, draft tiers remain private, and upgrade purchase keeps old rights',database,async t=>{
+ const f=await fixture(t,{space:true});
+ const catalog=await f.service.catalog(true),tiers=catalog.items.filter(i=>i.sku!==INITIAL_PRODUCT.sku);
+ assert.equal(tiers.length,3);assert.ok(tiers.every(i=>i.status==='draft'&&i.harborListed===false));
+ assert.equal((await f.service.publicCatalog()).items.length,1);
+ const save=async(sku,values)=>f.service.save(sku,{revision:0,name:sku,description:'fixture',status:'published',amountMinor:10000,months:12,quota:10,dailyLimit:2,activationMode:'immediate',harborListed:true,...values},'admin');
+ const low=await save('low-tier',{}),high=await save('high-tier',{amountMinor:20000,quota:30,dailyLimit:10});
+ const order=await f.service.create(f.tenant,{sku:low.sku,revision:low.revision,environment:'live'},randomUUID(),'buyer');
+ await save(low.sku,{revision:low.revision,dailyLimit:1,activationMode:'sequential'});
+ const e=await f.eventFor(order);await f.service.commit(e.source,e.event,e.payment);
+ const original=(await f.service.list(f.tenant)).subscriptions[0];assert.equal(original.dailyLimit,2);
+ const input={sku:high.sku,revision:high.revision,environment:'live',upgradeFrom:original.id},key=randomUUID();
+ const upgrade=await f.service.create(f.tenant,input,key,'buyer');assert.equal(upgrade.product.amountMinor,20000);
+ assert.equal((await f.service.create(f.tenant,input,key,'buyer')).id,upgrade.id);
+ const beforePayment=(await f.service.list(f.tenant)).subscriptions;assert.equal(beforePayment.length,1);assert.equal(beforePayment[0].id,original.id);assert.equal(beforePayment[0].preferred,false);
+ const paid=await f.eventFor(upgrade);await f.service.commit(paid.source,paid.event,paid.payment);await f.service.commit(paid.source,paid.event,paid.payment);
+ const subscriptions=(await f.service.list(f.tenant)).subscriptions,prior=subscriptions.find(s=>s.id===original.id),newTerm=subscriptions.find(s=>s.orderId===upgrade.id);
+ for(const field of ['quota','used','held','dailyLimit'])assert.equal(prior[field],original[field]);
+ for(const field of ['startsAt','endsAt'])assert.equal(+prior[field],+original[field]);
+ assert.equal(newTerm.selected,true);assert.equal(newTerm.preferred,true);assert.ok(newTerm.startsAt<original.endsAt);assert.equal(subscriptions.length,2);
+ assert.equal((await f.pool.query('SELECT * FROM billing.credit_ledger_entries')).rowCount,0);
+ await assert.rejects(f.service.create(f.tenant,{...input,upgradeFrom:randomUUID()},randomUUID(),'buyer'),{code:'commerce_invalid_upgrade'});
+ const publicOffer=(await f.service.publicCatalog()).items.find(i=>i.sku===high.sku);
+ assert.equal(publicOffer.dailyLimit,10);assert.equal(publicOffer.channel,undefined);assert.equal(publicOffer.revision,undefined);
+ // Old clients saving without new fields must not clear existing daily or activation rules.
+ const unchanged=await f.service.save(high.sku,{revision:high.revision,name:high.name,description:'changed',status:'published',amountMinor:20000,months:12,quota:30},'admin');
+ assert.equal(unchanged.dailyLimit,10);assert.equal(unchanged.activationMode,'immediate');
+});
+
+test('subscription selection checks current-space billing and Key authority',async()=>{
+ const tenant=randomUUID(),calls=[],principal={kind:'launcher-user',memberId:randomUUID(),tenantIds:[tenant],memberships:[{tenantId:tenant,capabilities:['billing.read']}]};
+ const invoke=p=>commerceRoute({commerce:{selectSubscription:async(...args)=>{calls.push(args);return {subscriptions:[]}}},request:{method:'POST',headers:{}},response:{},pathname:`/internal/v1/admin/commerce/tenants/${tenant}/subscription-selection`,searchParams:new URLSearchParams(),principal:p,readJson:async()=>({subscriptionId:null}),sendJson(){},requestId:'test'});
+ await assert.rejects(invoke(principal),{status:403});assert.equal(calls.length,0);
+ await invoke({...principal,memberships:[{tenantId:tenant,capabilities:['billing.read','apikey.write']}]});assert.deepEqual(calls[0],[tenant,{subscriptionId:null},principal.memberId]);
+});
+
+
+test('subscription summary retains legacy fallback when a Key also has product capability',database,async t=>{
+ const f=await fixture(t),order=await f.create(),paid=await f.eventFor(order);
+ await f.service.commit(paid.source,paid.event,paid.payment);
+ const service=new CommerceService({pool:f.pool,listEffectiveGrants:async()=>['ip_risk'],listEffectiveCapabilityGrants:async()=>[IP_PRODUCT_CAPABILITY,'ip.risk.query.v2']});
+ const result=await service.subscription({tenant:{id:f.tenant},consumer:{id:f.consumer},apiKey:{id:f.keyId}});
+ assert.equal(result.subscription.id,(await f.service.list(f.tenant)).subscriptions[0].id);
 })

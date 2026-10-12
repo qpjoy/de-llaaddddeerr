@@ -91,7 +91,7 @@ function page(action: string, csrf: string, message = '', policy?: RegistrationP
       <label for="inviteCode">邀请码</label>
       <input id="inviteCode" name="inviteCode" autocomplete="off" maxlength="128" required>
     </div>` : ''}` : ''}
-    ${!registering && web.admissionRequired ? '<div class="field"><label for="inviteCode">Harbor 邀请码（首次进入时填写）</label><input id="inviteCode" name="inviteCode" autocomplete="off" maxlength="128"></div>' : ''}
+    ${!registering && web.admissionRequired ? '<div class="field"><label for="inviteCode">DataPort 邀请码（首次进入时填写）</label><input id="inviteCode" name="inviteCode" autocomplete="off" maxlength="128"></div>' : ''}
     <button type="submit">${registering ? (web.pending ? '注册并绑定飞书' : '注册并继续') : (web.pending ? '验证账号并绑定' : '登录并继续')}</button>
     ${web.enabled && !web.pending && !registering ? '<button class="secondary" type="submit" name="intent" value="feishu" formnovalidate>使用飞书登录</button><details><summary>绑定已有账号</summary><button class="link-button" type="submit" name="intent" value="feishu-link" formnovalidate>绑定飞书到已有 MX 账号</button></details>' : ''}
   </form>
@@ -299,7 +299,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         let enterprise: Awaited<ReturnType<typeof resolveHubInvitation>> | undefined;
         let policy: RegistrationPolicy | undefined;
         const proof = await accounts.webState?.read('proof', interaction.uid);
-        if (source.appId === 'mx-harbor' && proof) throw new RegistrationClientError(403, 'Harbor 未开放飞书登录。');
+        if (source.appId === 'mx-harbor' && proof) throw new RegistrationClientError(403, 'DataPort 未开放飞书登录。');
         if (req.method === 'GET' && proof?.userId && !proof.link) {
           const linked = await accounts.account(String(proof.userId));
           if (!allowed(linked, clientId) || linked?.profile.externalIds.feishuSubject !== proof.subject) {
@@ -370,7 +370,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
           res.writeHead(303, { location: `${path}?view=login&account=${encodeURIComponent(choice.reference)}` }).end(); return;
         }
         if (['feishu', 'feishu-link'].includes(body.get('intent') ?? '')) {
-          if (source.appId === 'mx-harbor') return render('Harbor 未开放飞书登录。', 403);
+          if (source.appId === 'mx-harbor') return render('DataPort 未开放飞书登录。', 403);
           if (!accounts.webState || !registration?.feishu) return render('飞书 Web 登录尚未配置。', 503);
           return startFeishu(req, res, interaction.uid, body.get('intent') === 'feishu-link');
         }
@@ -409,7 +409,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         if (!user) return render('账号或密码不正确，或账号不可用。', 401);
         if (source.appId === 'mx-harbor' && !allowed(user, clientId)) {
           try {
-            if (!registration?.redeemAdmission) return render('Harbor 邀请服务需要更新。', 503);
+            if (!registration?.redeemAdmission) return render('DataPort 邀请服务需要更新。', 503);
             await registration.redeemAdmission({userId: user.userId, source, inviteCode: body.get('inviteCode') ?? ''});
             user = await accounts.account(user.userId);
           } catch (error) { return render(error instanceof RegistrationClientError ? error.message : '邀请暂不可用。', error instanceof RegistrationClientError ? error.status : 503); }

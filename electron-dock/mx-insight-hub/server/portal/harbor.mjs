@@ -12,7 +12,7 @@ export function harborRoute(method,path,searchParams) {
   const read=method==='GET'&&(reads.has(path)||/^\/commerce\/tenants\/[0-9a-f-]{36}(?:\/messages)?$/.test(path))
   // Existing handlers still enforce tenant capabilities, prices and paid delivery.
   // No product editing, acceptance pricing, supplier controls or key reveal.
-  const write=method==='POST'&&(['/demo-credentials','/payments/personal-account'].includes(path)||/^\/commerce\/tenants\/[0-9a-f-]{36}\/(?:messages\/[1-9][0-9]{0,17}\/read|access|orders(?:\/[0-9a-f-]{36}\/(?:checkout|refresh))?)$/.test(path))
+  const write=method==='POST'&&(['/demo-credentials','/payments/personal-account'].includes(path)||/^\/commerce\/tenants\/[0-9a-f-]{36}\/(?:messages\/[1-9][0-9]{0,17}\/read|subscription-selection|access|orders(?:\/[0-9a-f-]{36}\/(?:checkout|refresh))?)$/.test(path))
   if(!read&&!write)throw new AppError(404,'portal_route_unavailable','此客户功能尚未开放。')
   if(write&&searchParams.size)throw new AppError(400,'invalid_query','此操作不接受查询参数。')
   if(path==='/documentation'&&(searchParams.size!==2||searchParams.getAll('tenantId').length!==1||!searchParams.get('tenantId')||searchParams.get('path')!=='/docs/openapi.json'))throw new AppError(404,'not_found','请使用数港接口文档。')
@@ -27,8 +27,9 @@ function configuredPortal({pool,store,settings,token,hubSettings,oidcConfigurati
   const sessions=new SsoStore(pool,settings.sessionKey)
   const verifier=createApplicationSso({settings,store:sessions,oidcConfiguration,ErrorClass:AppError,validateIdentity(value){if(value.mxIdentity.issuer!==hubSettings.legacyIssuer)throw new AppError(401,'invalid_identity','统一身份来源不匹配。')}})
   return {
-    async resolve(request) {
+    async resolve(request, {catalogOnly=false}={}) {
       if(!secureEqual(request.headers['x-mx-harbor-gateway'],token))throw new AppError(401,'portal_auth_required','客户服务认证失败。')
+      if(catalogOnly)return null
       const accessToken=/^Bearer ([^\s]+)$/.exec(String(request.headers.authorization||''))?.[1],subject=request.headers['x-mx-harbor-subject']
       if(!accessToken||typeof subject!=='string'||subject.length>160)throw new AppError(401,'portal_session_required','请重新登录。')
       const verified=await verifier.verifySession({accessToken,subject,issuer:settings.issuer},true)
@@ -45,7 +46,7 @@ export function createHarborPortal({profileFile,token,tokenFile,...options}) {
   if(!profileFile&&!token&&!tokenFile)return null
   let cached,revision
   return {
-    async resolve(request) {
+    async resolve(request, resolveOptions) {
       let portal
       try {
         const settings=readApplicationSsoProfile(profileFile)
@@ -59,7 +60,7 @@ export function createHarborPortal({profileFile,token,tokenFile,...options}) {
       } catch {
         throw new AppError(503,'portal_unavailable','数港客户服务尚未接入或配置无效。')
       }
-      return portal.resolve(request)
+      return portal.resolve(request, resolveOptions)
     }
   }
 }

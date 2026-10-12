@@ -420,6 +420,7 @@ export const adminApi = {
   commerceProducts: token => request(token, `${ADMIN_ROOT}/commerce/products`),
   commerceSaveProduct: (token,sku,body) => request(token, `${ADMIN_ROOT}/commerce/products/${sku}`, {method:'PUT',body}),
   commercePurchases: (token,tenantId) => request(token, `${ADMIN_ROOT}/commerce/tenants/${tenantId}`),
+  commerceSelectSubscription: (token,tenantId,subscriptionId) => request(token, `${ADMIN_ROOT}/commerce/tenants/${tenantId}/subscription-selection`, {method:'POST',body:{subscriptionId}}),
   commercePurchase: (token,tenantId,body,key) => request(token, `${ADMIN_ROOT}/commerce/tenants/${tenantId}/orders`, {method:'POST',body,headers:{'idempotency-key':key}}),
   commerceOrderAction: (token,tenantId,id,action) => request(token, `${ADMIN_ROOT}/commerce/tenants/${tenantId}/orders/${id}/${action}`, {method:'POST',body:{}}),
   tenants: (token) => request(token, `${ADMIN_ROOT}/tenants`),

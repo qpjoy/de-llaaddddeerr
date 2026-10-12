@@ -94,7 +94,15 @@ export function inspectIdentity(p, execute = run, initializing = false) {
       if (!nextPublic) return false;
       const { applications: oldClients = [], ...before } = oldPublic;
       const { applications: nextClients = [], ...after } = nextPublic;
-      return sha(before) === sha(after) && oldClients.every(app => sha(app) === sha(nextClients.find(nextApp => nextApp.clientId === app.clientId) ?? null));
+      return sha(before) === sha(after) && oldClients.every(app => {
+        const nextApp=nextClients.find(nextApp => nextApp.clientId === app.clientId);
+        if (sha(app) === sha(nextApp ?? null)) return true;
+        // Only the explicit offline DataPort migration can change this one origin.
+        // All keys, audiences and every other application remain exact matches.
+        return app.appId==='mx-harbor' && app.origin==='https://harbor.minsight-ai.com'
+          && p.dataportOriginMigration?.previousClientHash===sha(app)
+          && sha({...app,origin:'https://dataport.minsight-ai.com',displayName:'数港 DataPort'})===sha(nextApp ?? null);
+      });
     };
     if (!keepsPublic() || sha(oldCore) !== sha(nextCore) || oldApps.some(app => sha(app) !== sha(nextApps.find(nextApp => nextApp.clientId === app.clientId) ?? null))
       || Buffer.from(previous.data['ca.crt'], 'base64').toString() !== p.caCert) throw new Error('身份密钥、客户端或 issuer 与现有部署不一致；请恢复原部署档案');

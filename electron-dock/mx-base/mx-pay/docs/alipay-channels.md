@@ -104,6 +104,12 @@ const checked = await pay.refresh(order.id) // POST /v1/orders/:id/refresh
 
 ## 验证与升级
 
+### 2026-10-12 DataPort 域名切换
+
+Harbor 已更名 DataPort，新的浏览器返回地址为 `https://dataport.minsight-ai.com/payment/return`。在原渠道的「额外付款返回地址」新增 `mx-insight-hub https://dataport.minsight-ai.com/payment/return`（机器 appId 以实际 Hub 支付来源为准），保留旧 Harbor 条目，保存、校验并发布。原 Hub 默认 `returnUrl`、Pay `notifyUrl`、商户身份、支付来源与所有密钥保持。若曾直接把默认值改为 Harbor，核对后恢复 Hub 原地址，按次返回使用额外目标。
+
+新地址在 Hub 可信 Portal profile 切至 DataPort 后自动用于客户 checkout，不由浏览器传入。已签发的旧链接不会自动换域名，可在原有效窗口内从 DataPort 重新打开同一订单。线上已支持 Harbor 按次返回时无需仅为此地址重新部署 Pay，发布渠道配置即可；旧版本须先完成全副本升级。完整顺序见 [DataPort 发布清单](../../../mx-dataport/dataport.setup.md)。下节为原功能验收记录。
+
 ### 2026-10-11 Harbor 付款返回修复
 
 保留原支付宝渠道的默认 `returnUrl`、商户和通知入口。在支付中心「支付渠道 → 编辑配置 → 额外付款返回地址」增加一行（第一项须与 Hub 支付接入的真实机器应用 ID 相同）：

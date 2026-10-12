@@ -1400,6 +1400,11 @@ export function createApp({
       const url = new URL(request.url, 'http://localhost')
       if (url.pathname.startsWith('/internal/v1/portal/')) {
         if (listenerMode === 'public' || !harborPortal) throw new AppError(404, 'not_found', 'Route not found')
+        if (request.method==='GET' && url.pathname==='/internal/v1/portal/catalog' && !url.search) {
+          await harborPortal.resolve(request,{catalogOnly:true})
+          sendJson(response,200,{data:await commerce.publicCatalog(),requestId},{'cache-control':'private, no-store'})
+          return
+        }
         const target = harborRoute(request.method, url.pathname.slice('/internal/v1/portal'.length), url.searchParams)
         request[portalPrincipal] = await harborPortal.resolve(request)
         url.pathname = target

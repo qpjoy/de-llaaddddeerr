@@ -23,6 +23,12 @@ export async function commerceRoute({ commerce, service, productGateway, request
     }
     if (searchParams.size) throw new AppError(400,'commerce_invalid_query','商城接口不接受额外查询参数')
     const actor = principal.memberId || principal.kind
+    const selection = new RegExp(`^${root}/tenants/([0-9a-f-]{36})/subscription-selection$`).exec(pathname)
+    if (selection && request.method==='POST') {
+      requireTenantCapability(principal,selection[1],'billing.read')
+      requireTenantCapability(principal,selection[1],'apikey.write')
+      return reply(await commerce.selectSubscription(selection[1],await readJson(request,1024),actor))
+    }
     if (pathname === `${root}/products` && request.method === 'GET') return reply(await commerce.catalog(principal.kind === 'admin-token', {harbor: Boolean(principal.portalOrigin)}))
     if(pathname===`${root}/delivery`) {
       requirePayment(principal.kind==='admin-token','admin_token_required','服务配置需要 Admin Token',403)

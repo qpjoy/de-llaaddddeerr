@@ -2,7 +2,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { PROFILE, readProfile, savePrivate } from './identity-profile.mjs';
 import { publicOrigin } from './identity-public-profile.mjs';
@@ -34,10 +34,37 @@ export function registerApplication({ appId, displayName, origin, audience, entr
   savePrivate(appFile, consumer);
   return { appId, origin, issuer: target.issuer, clientId: app.clientId, appFile };
 }
+
+/** Explicit, restartable public-domain migration. Retains the app/audience/client and every key. */
+export function migrateApplicationOrigin({ appId, fromOrigin, origin, appFile, file = PROFILE }) {
+  if (appId !== 'mx-harbor' || fromOrigin !== 'https://harbor.minsight-ai.com' || origin !== 'https://dataport.minsight-ai.com')
+    throw new Error('此迁移仅用于数港 DataPort 正式域名。');
+  const p = readProfile(file), app = p?.publicEntry?.applications?.find(value => value.appId === appId);
+  if (!app || ![fromOrigin, origin].includes(app.origin)) throw new Error('原应用登记缺失或域名不匹配，停止迁移。');
+  let consumer;
+  try { consumer = JSON.parse(readFileSync(appFile, 'utf8')); } catch { throw new Error('应用身份配置缺失或无法解析。'); }
+  if (consumer.appId !== appId || consumer.clientId !== app.clientId || consumer.clientSecret !== app.clientSecret || consumer.audience !== app.audience
+    || consumer.issuer !== p.publicEntry.issuer || ![fromOrigin, origin].includes(consumer.origin)
+    || consumer.callbackUrl !== `${consumer.origin}/auth/sso/callback` || consumer.interactionUrl !== `${consumer.origin}/auth/sso/interaction`
+    || !/^[A-Za-z0-9_-]{43}$/.test(consumer.sessionKey || '')) throw new Error('原应用身份不一致，停止迁移。');
+  const next = { ...consumer, origin, callbackUrl: `${origin}/auth/sso/callback`, interactionUrl: `${origin}/auth/sso/interaction` };
+  const applications = p.publicEntry.applications.map(value => value.appId === appId ? { ...value, origin, displayName: '数港 DataPort' } : value);
+  // Fixed backups survive an interrupted two-file update and repeated invocations.
+  if (!existsSync(`${file}.before-dataport`)) savePrivate(`${file}.before-dataport`, p, true);
+  if (!existsSync(`${appFile}.before-dataport`)) savePrivate(`${appFile}.before-dataport`, consumer, true);
+  const dataportOriginMigration = app.origin === fromOrigin
+    ? {previousClientHash:createHash('sha256').update(JSON.stringify(app)).digest('hex')}
+    : p.dataportOriginMigration;
+  savePrivate(file, { ...p, dataportOriginMigration, publicEntry: { ...p.publicEntry, applications } });
+  savePrivate(appFile, next);
+  return { appId, origin, issuer: next.issuer, clientId: next.clientId, appFile };
+}
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const { values } = parseArgs({ options: { app: { type: 'string' }, origin: { type: 'string' }, audience: { type: 'string' }, entry: { type: 'string' }, output: { type: 'string' }, profile: { type: 'string' } } });
-    const result = registerApplication({ appId: values.app, origin: values.origin, audience: values.audience, entry: values.entry, appFile: values.output, file: values.profile || PROFILE });
+    const { values } = parseArgs({ options: { app: { type: 'string' }, origin: { type: 'string' }, 'from-origin': { type: 'string' }, audience: { type: 'string' }, entry: { type: 'string' }, output: { type: 'string' }, profile: { type: 'string' } } });
+    const result = values['from-origin']
+      ? migrateApplicationOrigin({ appId: values.app, fromOrigin: values['from-origin'], origin: values.origin, appFile: values.output, file: values.profile || PROFILE })
+      : registerApplication({ appId: values.app, origin: values.origin, audience: values.audience, entry: values.entry, appFile: values.output, file: values.profile || PROFILE });
     console.log(`已登记 ${result.appId}，应用配置保存于 ${result.appFile}。按原流程部署 Auth 后生效；账号与旧客户端凭据保持。`);
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

@@ -96,7 +96,7 @@ export function createAppAccount(provider: Provider, settings: IdentitySettings,
         const completed = await state!.read('app-result', input.flow);
         if (completed) fail(409, '登录请求已提交，请重新开始。');
         const returnUrl = `${settings.origin}/identity/interaction/${uid}?app_complete=${input.flow}`;
-        if (app!.appId === 'mx-harbor' && (proof || action === 'feishu' || action === 'feishu-link')) fail(403, 'Harbor 仅支持账号密码登录与邀请码注册。');
+        if (app!.appId === 'mx-harbor' && (proof || action === 'feishu' || action === 'feishu-link')) fail(403, 'DataPort 仅支持账号密码登录与邀请码注册。');
         if (action === 'feishu' || action === 'feishu-link') {
           // Issuer browser visit sets the Feishu state cookie; the application cannot set it.
           if (!await state!.read('app-completion-lock', input.flow, true)) fail(409, '登录请求已提交。');
@@ -135,7 +135,7 @@ export function createAppAccount(provider: Provider, settings: IdentitySettings,
           }
         }
         if (app!.appId === 'mx-harbor' && !canAccessIdentityApplication(await accounts.account(userId), app!.appId)) {
-          if (!registration?.redeemAdmission) fail(503, 'Harbor 邀请服务需要更新。');
+          if (!registration?.redeemAdmission) fail(503, 'DataPort 邀请服务需要更新。');
           await registration!.redeemAdmission!({userId, source, inviteCode: typeof input.inviteCode === 'string' ? input.inviteCode : ''});
         }
         await allowed(userId, app!.appId);

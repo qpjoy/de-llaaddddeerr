@@ -52,3 +52,27 @@ test('additional applications preserve existing keys, support both entries and r
     assert.deepEqual({ ...readProfile(file), applications: undefined, publicEntry: undefined }, { ...p, applications: undefined, publicEntry: undefined });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('DataPort origin migration retains all credentials and other applications; deployment accepts only its exact proof',async()=>{
+ const {migrateApplicationOrigin}=await import('./identity-app.mjs');
+ const root=mkdtempSync(join(tmpdir(),'dataport-migration-')),file=join(root,'profile.json'),appFile=join(root,'app','profile.json');
+ try {
+  const p=initializeProfile('https://10.88.88.88:18443',file),publicEntry=createPublicEntry({origin:'https://auth.example.test',adminOrigin:'https://admin.example.test',hubOrigin:'https://hub.example.test',audience:'hub',privateOrigin:p.origin});
+  savePrivate(file,{...p,publicEntry});
+  registerApplication({file,appFile,appId:'mx-harbor',origin:'https://harbor.minsight-ai.com',audience:'mx-harbor',entry:'public'});
+  const before=readProfile(file),consumer=JSON.parse(readFileSync(appFile,'utf8')),runtime=resources(before).runtime;
+  const input={file,appFile,appId:'mx-harbor',fromOrigin:'https://harbor.minsight-ai.com',origin:'https://dataport.minsight-ai.com'};
+  migrateApplicationOrigin(input);migrateApplicationOrigin(input);
+  const after=readProfile(file),next=JSON.parse(readFileSync(appFile,'utf8'));
+  for(const key of ['clientId','clientSecret','sessionKey','audience','issuer'])assert.equal(next[key],consumer[key]);
+  assert.deepEqual(after.publicEntry.applications.filter(a=>a.appId!=='mx-harbor'),before.publicEntry.applications.filter(a=>a.appId!=='mx-harbor'));
+  assert.deepEqual({...after,publicEntry:undefined,dataportOriginMigration:undefined},{...before,publicEntry:undefined,dataportOriginMigration:undefined});
+  assert.deepEqual(JSON.parse(readFileSync(file+'.before-dataport','utf8')),before);
+  const execute=args=>args.includes('get')&&args.includes('mx-identity-runtime')?JSON.stringify(runtime):'';
+  assert.doesNotThrow(()=>inspectIdentity(after,execute));
+  assert.throws(()=>inspectIdentity({...after,dataportOriginMigration:undefined},execute),/客户端/);
+  const changed=structuredClone(after);changed.publicEntry.applications.find(a=>a.appId==='mx-harbor').clientSecret='z'.repeat(43);
+  assert.throws(()=>inspectIdentity(changed,execute),/客户端/);
+  assert.throws(()=>migrateApplicationOrigin({...input,appId:'mx-h2i'}),/仅用于/);
+ }finally{rmSync(root,{recursive:true,force:true})}
+});
