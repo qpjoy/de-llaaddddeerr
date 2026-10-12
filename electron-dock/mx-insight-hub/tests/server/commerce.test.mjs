@@ -66,7 +66,7 @@ test('checkout return comes only from the verified Portal principal, never custo
  await assert.rejects(invoke({...principal,memberships:[]}),{status:403})
  assert.deepEqual(calls,[])
 })
-async function fixture(t,{space=false}={}){
+async function fixture(t,{space=false,offers=false}={}){
   const admin=new pg.Pool({connectionString,max:1}),name=`commerce_${randomUUID().replaceAll('-','')}`
   await admin.query(`CREATE DATABASE ${name}`)
   const url=new URL(connectionString);url.pathname=`/${name}`
@@ -74,8 +74,9 @@ async function fixture(t,{space=false}={}){
   t.after(async()=>{await pool.end();await admin.query(`DROP DATABASE ${name}`);await admin.end();await rm(migrationDir,{recursive:true,force:true})})
   const selected=['001','002','003','004','005','007','016','018','031','041','051','052','053','054','055','056','057','058','060','063','065','075','076','077','078','081','082','083','094','113','119','122','123','126','127','128','129','138','144','145'],dir=new URL('../../migrations/',import.meta.url)
   if(space)selected.push('130')
+  if(offers)selected.push('146')
   for(const file of (await readdir(dir)).sort().filter(f=>selected.includes(f.slice(0,3)))){
-    if(['129','130','144','145'].includes(file.slice(0,3))){await writeFile(join(migrationDir,file),await readFile(new URL(file,dir)));continue}
+    if(['129','130','144','145','146'].includes(file.slice(0,3))){await writeFile(join(migrationDir,file),await readFile(new URL(file,dir)));continue}
     const client=await pool.connect();try{await client.query('BEGIN');await client.query(await readFile(new URL(file,dir),'utf8'));await client.query('COMMIT')}catch(e){await client.query('ROLLBACK');e.message=`${file}: ${e.message}`;throw e}finally{client.release()}
   }
   await runMigrations({connectionString:url.href,migrationsDir:migrationDir})
@@ -99,6 +100,7 @@ async function fixture(t,{space=false}={}){
     VALUES($1,$2,$3,$4,$6,repeat('b',64),'ip_risk',$5,'reserved',1,now()+interval '1 minute')`,[id,tenant,consumer,keyId,space?IP_PRODUCT_METER:IP_V2_METER,id]);return id}
   return {pool,service,tenant,consumer,keyId,source,payments,create,eventFor,reserve,
     async upgradeSpace(){await writeFile(join(migrationDir,'130_commerce_space_subscriptions.sql'),await readFile(new URL('130_commerce_space_subscriptions.sql',dir)));await runMigrations({connectionString:url.href,migrationsDir:migrationDir})},
+    async upgradeOffers(){await writeFile(join(migrationDir,'146_dataport_offers_and_trial.sql'),await readFile(new URL('146_dataport_offers_and_trial.sql',dir)));await runMigrations({connectionString:url.href,migrationsDir:migrationDir})},
     rerunMigrations:()=>runMigrations({connectionString:url.href,migrationsDir:migrationDir})}
 }
 const database={skip:!connectionString}
@@ -457,4 +459,96 @@ test('subscription summary retains legacy fallback when a Key also has product c
  const service=new CommerceService({pool:f.pool,listEffectiveGrants:async()=>['ip_risk'],listEffectiveCapabilityGrants:async()=>[IP_PRODUCT_CAPABILITY,'ip.risk.query.v2']});
  const result=await service.subscription({tenant:{id:f.tenant},consumer:{id:f.consumer},apiKey:{id:f.keyId}});
  assert.equal(result.subscription.id,(await f.service.list(f.tenant)).subscriptions[0].id);
+})
+
+
+test('DataPort offer migration publishes approved untouched tiers and preserves edited products and sold rights',database,async t=>{
+  const f=await fixture(t,{space:true})
+  const order=await f.create(),event=await f.eventFor(order)
+  await f.service.commit(event.source,event.event,event.payment)
+  const before=await f.service.list(f.tenant)
+  const pro=(await f.service.catalog(true)).items.find(p=>p.sku==='ip-risk-pro-annual')
+  const {sku,revision,name,description,status,amountMinor,months,quota}=pro
+  await f.service.save(sku,{revision,name,description:'operator-edited',status,amountMinor,months,quota},'operator')
+  await f.upgradeOffers()
+  const catalog=(await f.service.publicCatalog()).items
+  for(const [sku,amount,quota,dailyLimit] of [['ip-risk-basic-annual',399900,36000,100],['ip-risk-enterprise-annual',3499900,720000,null]]){
+    const product=catalog.find(p=>p.sku===sku)
+    assert.equal(product.amountMinor,amount);assert.equal(product.quota,quota);assert.equal(product.dailyLimit,dailyLimit);assert.equal(product.months,12)
+  }
+  assert.equal(catalog.some(p=>p.sku===pro.sku),false,'operator draft is not published')
+  assert.equal((await f.service.catalog(true)).items.find(p=>p.sku===pro.sku).description,'operator-edited')
+  const trial=catalog.find(p=>p.kind==='trial');assert.equal(trial.amountMinor,0);assert.equal(trial.quota,10);assert.equal(trial.trialDays,7)
+  assert.deepEqual(await f.service.list(f.tenant),before)
+  const published=await f.service.catalog(true);await f.rerunMigrations();assert.deepEqual(await f.service.catalog(true),published)
+})
+
+test('free trial is atomic, once per space across keys/SKUs, costs no payment, and shares a hard ten-query limit',database,async t=>{
+  const f=await fixture(t,{space:true,offers:true})
+  const tiers=(await f.service.publicCatalog()).items
+  assert.equal(tiers.find(p=>p.sku==='ip-risk-pro-annual').amountMinor,1499900)
+  const item=(await f.service.catalog(true)).items.find(p=>p.kind==='trial')
+  const body={sku:item.sku,revision:item.revision,environment:'live'},key=randomUUID()
+  const free=new CommerceService(new PostgresStore(f.pool)) // Trial must work with no Pay integration.
+  const results=await Promise.all(Array.from({length:5},()=>free.create(f.tenant,body,key,'owner',{harbor:true})))
+  assert.ok(results.every(r=>r.id===results[0].id && r.status==='active' && r.paymentStatus==='not_required'))
+  assert.equal(results[0].paymentId,null)
+  const row=await free.row(results[0].id,f.tenant);assert.equal(row.source_id,null);assert.equal(row.payment,null)
+  assert.equal(f.payments.size,0)
+  const attempts=await Promise.allSettled(Array.from({length:5},()=>free.create(f.tenant,body,randomUUID(),'owner',{harbor:true})))
+  assert.ok(attempts.every(r=>r.status==='rejected'&&r.reason.code==='commerce_trial_claimed'))
+  let list=await free.list(f.tenant);assert.equal(list.orders.length,1);assert.equal(list.subscriptions.length,1)
+  const sub=list.subscriptions[0];assert.equal(sub.quota,10);assert.equal(+sub.endsAt- +sub.startsAt,7*86400000)
+  assert.equal((await f.pool.query("SELECT * FROM hub_commerce.audit WHERE action='trial.claimed'")).rowCount,1)
+  assert.equal((await f.pool.query('SELECT * FROM hub_commerce.inbox')).rowCount,0)
+  assert.equal((await f.pool.query('SELECT * FROM billing.credit_ledger_entries')).rowCount,0)
+  await assert.rejects(free.action(f.tenant,row.id,'checkout'),{code:'commerce_trial_no_checkout'})
+  assert.equal((await free.action(f.tenant,row.id,'refresh')).id,row.id)
+  await assert.rejects(free.create(f.tenant,{...body,environment:'test'},randomUUID(),'owner'),{code:'commerce_invalid_trial'})
+  await assert.rejects(free.create(f.tenant,body,randomUUID(),'admin',{acceptance:true}),{code:'commerce_invalid_trial'})
+  const another=await free.save('another-trial',{revision:0,name:'Trial',description:'',status:'published',harborListed:true,kind:'trial',amountMinor:0,months:12,trialDays:30,quota:10,activationMode:'immediate'},'admin')
+  await assert.rejects(free.create(f.tenant,{...body,sku:another.sku,revision:another.revision},randomUUID(),'owner'),{code:'commerce_trial_claimed'})
+  const holds=await Promise.all(Array.from({length:10},()=>f.reserve()))
+  await assert.rejects(f.reserve(),/commerce_quota_exhausted/)
+  await f.pool.query("UPDATE usage_requests SET status='committed',units_actual=1 WHERE id=ANY($1::uuid[])",[holds])
+  await assert.rejects(f.reserve(),/commerce_quota_exhausted/)
+  assert.equal((await free.list(f.tenant)).subscriptions[0].used,10)
+  // Changing trial terms applies only to future claims; retries retain the snapshot.
+  const {revision,sku,name,description,status,amountMinor,months,quota}=item
+  await free.save(sku,{revision,name,description,status,amountMinor,months,quota,trialDays:30},'admin')
+  assert.equal((await free.create(f.tenant,body,key,'owner')).product.trialDays,7)
+  await assert.rejects(free.create(f.tenant,{...body,revision:revision+1},randomUUID(),'owner'),{code:'commerce_trial_claimed'})
+  await assert.rejects(f.pool.query("UPDATE hub_commerce.orders SET intent=jsonb_set(intent,'{purpose}','\"purchase\"') WHERE id=$1",[row.id]),/commerce_order_immutable/)
+  // Paid upgrade grants a new term and priority while retaining the consumed trial.
+  const basic=(await free.catalog()).items.find(p=>p.sku==='ip-risk-basic-annual')
+  const upgrade=await f.service.create(f.tenant,{sku:basic.sku,revision:basic.revision,environment:'live',upgradeFrom:sub.id},randomUUID(),'owner')
+  const paid=await f.eventFor(upgrade);await f.service.commit(paid.source,paid.event,paid.payment)
+  list=await free.list(f.tenant);assert.equal(list.subscriptions.length,2)
+  assert.equal(list.subscriptions.find(s=>s.id===sub.id).used,10)
+  assert.equal(list.subscriptions.find(s=>s.orderId===upgrade.id).preferred,true)
+  // A second legitimate space has its own one-time claim, and hidden offers still block it.
+  const other=randomUUID();await f.pool.query("INSERT INTO tenants(id,name) VALUES($1,'another space')",[other])
+  const next=await free.create(other,{...body,revision:revision+1},randomUUID(),'owner',{harbor:true})
+  assert.equal(next.product.trialDays,30);assert.equal((await free.list(other)).subscriptions.length,1)
+  assert.equal((await free.list(f.tenant)).subscriptions.length,2)
+})
+
+test('trial publication and product validation stay authoritative; failed delivery rolls back the claim and grants',database,async t=>{
+  const f=await fixture(t,{space:true,offers:true}),free=new CommerceService(new PostgresStore(f.pool))
+  const template={revision:0,name:'Trial',description:'',status:'published',harborListed:true,kind:'trial',amountMinor:0,months:12,trialDays:7,quota:10,activationMode:'immediate'}
+  for(const patch of [{kind:'paid'},{amountMinor:100},{trialDays:0},{trialDays:366},{activationMode:'sequential'}]){
+    await assert.rejects(free.save('invalid-trial',{...template,...patch},'admin'),{code:'commerce_invalid_product'})
+  }
+  const hidden=await free.save('hidden-trial',{...template,harborListed:false},'admin')
+  await assert.rejects(free.create(f.tenant,{sku:hidden.sku,revision:hidden.revision,environment:'live'},randomUUID(),'owner',{harbor:true}),{code:'commerce_product_changed'})
+  const item=(await free.catalog()).items.find(p=>p.sku==='ip-risk-trial-10'),body={sku:item.sku,revision:item.revision,environment:'live'},key=randomUUID()
+  await f.pool.query(`CREATE FUNCTION public.reject_trial_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN IF NEW.action='trial.claimed' THEN RAISE EXCEPTION 'fixture_delivery_failure'; END IF; RETURN NEW; END $$;
+    CREATE TRIGGER reject_trial_audit BEFORE INSERT ON hub_commerce.audit FOR EACH ROW EXECUTE FUNCTION public.reject_trial_audit()`)
+  await assert.rejects(free.create(f.tenant,body,key,'owner'),/fixture_delivery_failure/)
+  assert.deepEqual(await free.list(f.tenant),{orders:[],subscriptions:[],limit:100})
+  assert.equal((await f.pool.query('SELECT * FROM tenant_service_access WHERE tenant_id=$1',[f.tenant])).rowCount,0)
+  assert.equal((await f.pool.query('SELECT * FROM capability_grants WHERE consumer_id=$1',[f.consumer])).rowCount,0)
+  await f.pool.query('DROP TRIGGER reject_trial_audit ON hub_commerce.audit')
+  assert.equal((await free.create(f.tenant,body,key,'owner')).status,'active')
 })

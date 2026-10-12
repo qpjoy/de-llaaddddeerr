@@ -1,3 +1,5 @@
+- 2026-10-12 DataPort 后续：migration 146 自动上架未经编辑的三档草稿，并新增 0 元/10 次试用（当前默认 7 天，可在 Hub 修改）。试用每空间每服务限领一次，事务幂等交付，不调用 Pay、不伪造付款；保留旧商品与已售权益。DataPort 登录弹窗等待 SSO 表单准备后才展示，采用淡入。仅 Hub/DataPort 发布，不改 Launcher/MX-H2I 登录联网。见 dataport.setup.md（Hub 见 ../mx-dataport/dataport.setup.md）。
+
 # DataPort product boundary
 
 2026-10-12 当前变更：对外品牌/目录为 DataPort / mx-dataport，旧 mx-harbor 身份、数据库及部署标识保留兼容。订阅采用可配置立即/顺延、每日额度、最早到期优先及手动切换；升级已确定为全价新购立即生效并优先、旧订阅保留。详见 [发布清单](dataport.setup.md)。 历史段落中的全量顺延或补差价方案不再作为本轮要求。

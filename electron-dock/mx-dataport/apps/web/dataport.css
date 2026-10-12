@@ -841,6 +841,14 @@
 .auth-dialog[data-slot="dialog-content"] {
   overflow: hidden;
   grid-template-rows: minmax(0, 1fr);
+  animation: harbor-auth-appear 160ms ease-out;
+}
+@keyframes harbor-auth-appear {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .auth-dialog[data-slot="dialog-content"] { animation: none; }
 }
 .auth-dialog .auth-brand-panel {
   min-height: 0;
@@ -1027,4 +1035,9 @@
   .harbor-market-products.has-multiple .harbor-offer-copy > p { margin: .625rem 0; }
   .harbor-market-products.has-multiple .harbor-benefits { margin: .75rem 0; }
   .harbor-market-products.has-multiple .harbor-price { padding-top: .75rem; margin-bottom: .5rem; }
+}
+
+/* Keep four offers balanced; retain the existing three-tier layout otherwise. */
+@media (min-width: 681px) {
+  .ip-pricing-grid[data-offers="4"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

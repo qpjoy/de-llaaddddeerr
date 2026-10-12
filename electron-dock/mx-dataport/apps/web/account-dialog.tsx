@@ -33,21 +33,27 @@ import {
 } from "@/components/ui/input-group";
 import { Spinner } from "@/components/ui/spinner";
 import { request, loadAccountForm, type AccountOptions } from "./api";
-export function AccountDialog({
-  open,
-  onOpenChange,
-  preview = false,
-}: {
+type AccountDialogProps = {
   open: boolean;
   onOpenChange: (value: boolean) => void;
   preview?: boolean;
-}) {
+};
+export function AccountDialog(props: AccountDialogProps) {
+  // Each opening obtains a fresh form before mounting the dialog. A cold SSO
+  // redirect must not briefly display a form that will immediately disappear.
+  return props.open ? <AccountDialogSession {...props} /> : null;
+}
+function AccountDialogSession({
+  open,
+  onOpenChange,
+  preview = false,
+}: AccountDialogProps) {
   const [options, setOptions] = useState<AccountOptions | null>(null),
     [register, setRegister] = useState(false),
     [error, setError] = useState(""),
     [unavailable, setUnavailable] = useState(false),
     [retry, setRetry] = useState(0),
-    [checking, setChecking] = useState(false),
+    [checking, setChecking] = useState(!preview),
     [busy, setBusy] = useState(false),
     [show, setShow] = useState(false);
   useEffect(() => {
@@ -136,7 +142,7 @@ export function AccountDialog({
   }
   return (
     <Dialog
-      open={open}
+      open={open && (preview || !!options || unavailable)}
       onOpenChange={(value) => {
         if (!busy) {
           onOpenChange(value);

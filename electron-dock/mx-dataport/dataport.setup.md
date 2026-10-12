@@ -8,6 +8,16 @@
 
 旧目录中的 **secrets/** 是忽略文件，Git 拉取不会替你搬迁。更新前备份，更新后将旧目录 `secrets/` 原样移到新目录（保留权限和内容）；先运行 `status` 核对原集群/节点。不要丢弃 Launcher 的原身份档案。
 
+## 本次补丁：已完成 DataPort 域名切换的部署
+
+2026-10-12 后续：修复首次登录表单在 SSO 跳转前短暂显示，以及缩放入场引起的闪动。表单准备完成或明确失败后才显示弹窗；保留本应用 SSO、邀请和退出流程。
+
+同步本次代码后，沿用原环境参数，先在 **electron-dock/mx-insight-hub** 执行 `MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh ops internal-production deploy`。它运行新增 migration `146_dataport_offers_and_trial.sql`；等待所有 Hub 副本就绪后，再在 **electron-dock/mx-dataport** 执行 `MX_HARBOR_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh ops internal-production deploy`。本次无需发布 Launcher、Pay 或 Nginx，也无需再次 enroll。
+
+迁移自动发布未编辑过的三档初始套餐，并增加 0 元、10 次试用，默认 7 天有效、每个空间限领一次。Hub 的「数据商城 → 商品管理」可编辑试用有效天数、调用次数和销售开关。已编辑的三档商品不会被自动覆盖；需要自行将“销售状态”设为“已上架”，并开启“在数港上架”。原年度版继续保留；如果只展示新四档，在旧年度版编辑页关闭“在数港上架”，旧订单和订阅仍可使用。
+
+生产验收：冷浏览器首次登录、关闭后重开、注册切换；定价出现已上架商品；在有权限的空间明确点击免费领取后只生成一份 0 元订单，显示 10 次和实际到期时间，无支付宝收银台。重复领取被拒绝；正式订单仍使用原 Pay 付款与返回路径。试用查询仍可能产生供应商成本，本机验证只用隔离数据库和模拟上游，没有真实查询或付款。
+
 ## 已有 Harbor 迁移顺序
 
 ### 支付返回地址先准备

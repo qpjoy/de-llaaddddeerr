@@ -26,6 +26,7 @@ import {
   hasCapability,
   money,
   purchaseIntent,
+  productTerm,
   subscriptionState,
   subscriptionNotice,
   type Subscription,
@@ -38,6 +39,8 @@ type Product = {
   description: string;
   amountMinor: number;
   months: number;
+  kind?: string;
+  trialDays?: number;
   quota: number;
   status: string;
   dailyLimit?: number | null;
@@ -177,6 +180,8 @@ export function Commerce({
       await post(`/commerce/tenants/${tenant}/orders`, body, intent.key);
       sessionStorage.removeItem(intent.name);
       setSelected(null);
+      await refresh();
+      if (selected.kind === "trial") reloadSession();
       go("orders");
     });
   }
@@ -215,6 +220,7 @@ export function Commerce({
         test_delivered: "测试订单",
       }) as Record<string, string>
     )[order.status] || "待确认";
+  const trialClaimed = purchases.orders.some(order => order.product.kind === "trial");
   const paymentActions = (order: any) => (
     <div className="harbor-actions">
       {!order.deliveredAt && canPay && (
@@ -369,20 +375,19 @@ export function Commerce({
                     {money(item.amountMinor)}
                     <span>
                       {" "}
-                      / {item.months === 12 ? "年" : `${item.months} 个月`}
+                      / {item.kind === "trial" ? "次领取" : item.months === 12 ? "年" : `${item.months} 个月`}
                     </span>
                   </div>
                   <p>
-                    {item.quota.toLocaleString()} 次调用 · 有效期 {item.months}{" "}
-                    个月
+                    {item.quota.toLocaleString()} 次调用 · 有效期 {productTerm(item)}
                   </p>
                   <p>{item.dailyLimit ? `每日最多 ${item.dailyLimit.toLocaleString()} 次，北京时间 00:00 重置` : "不单设每日上限"}</p>
                   <div className="harbor-actions">
                     <Button
-                      disabled={!canBuy || busy}
+                      disabled={!canBuy || busy || (item.kind === "trial" && trialClaimed)}
                       onClick={() => { setUpgradeFrom(null); setSelected(item); }}
                     >
-                      {notice.latestEnd ? "继续订阅" : "立即订阅"} <ArrowRight />
+                      {item.kind === "trial" ? trialClaimed ? "已领取试用" : "免费领取" : notice.latestEnd ? "继续订阅" : "立即订阅"} <ArrowRight />
                     </Button>
                     <Button
                       variant="outline"
@@ -402,7 +407,7 @@ export function Commerce({
                   {detail === item.sku && (
                     <div className="harbor-terms">
                       <p>
-                        付款经服务端确认后自动开通；{item.activationMode === "immediate" ? "每次购买立即生效，各订阅独立计时。" : "续订从已购期限结束后顺延。"}成功查询（含有效无数据）计入次数，明确失败不计入，待核对请求保留次数。回看历史不增加调用。
+                        {item.kind === "trial" ? "每个空间限领一次，领取后立即生效。" : "付款经服务端确认后自动开通；"}{item.kind === "trial" ? "" : item.activationMode === "immediate" ? "每次购买立即生效，各订阅独立计时。" : "续订从已购期限结束后顺延。"}成功查询（含有效无数据）计入次数，明确失败不计入，待核对请求保留次数。回看历史不增加调用。
                       </p>
                       <p>
                         到期或本期次数用尽后暂停新查询，不自动续费或扣钱包。
@@ -477,7 +482,7 @@ export function Commerce({
                           </Button>
                         )}
                       </div>
-                      {canBuy && subscription.channel === "product" && !["expired", "future"].includes(state) && <div className="harbor-actions">{products.filter(item => item.amountMinor > (subscription.product?.amountMinor || Infinity) && item.quota > subscription.quota && item.months >= (subscription.product?.months || 0) && (item.dailyLimit == null || (subscription.dailyLimit != null && item.dailyLimit >= subscription.dailyLimit))).map(item => <Button variant="outline" key={item.sku} disabled={busy} onClick={() => { setUpgradeFrom(subscription); setSelected(item); }}>升级至 {item.name}</Button>)}</div>}
+                      {canBuy && subscription.channel === "product" && !["expired", "future"].includes(state) && <div className="harbor-actions">{products.filter(item => item.amountMinor > (subscription.product?.amountMinor ?? Infinity) && item.quota > subscription.quota && (subscription.product?.kind === "trial" || (item.months >= (subscription.product?.months || 0) && (item.dailyLimit == null || (subscription.dailyLimit != null && item.dailyLimit >= subscription.dailyLimit))))).map(item => <Button variant="outline" key={item.sku} disabled={busy} onClick={() => { setUpgradeFrom(subscription); setSelected(item); }}>升级至 {item.name}</Button>)}</div>}
                     </CardContent>
                   </Card>
                 );
@@ -511,7 +516,7 @@ export function Commerce({
                       <TableCell>
                         <strong>{order.product.name}</strong>
                         <small>
-                          {order.product.months} 个月 ·{" "}
+                          {productTerm(order.product)} ·{" "}
                           {order.product.quota.toLocaleString()} 次调用
                         </small>
                       </TableCell>
@@ -591,7 +596,7 @@ export function Commerce({
                 <div>
                   <dt>订阅权益</dt>
                   <dd>
-                    {detailOrder.product.months} 个月 ·{" "}
+                    {productTerm(detailOrder.product)} ·{" "}
                     {detailOrder.product.quota.toLocaleString()} 次调用
                   </dd>
                 </div>
@@ -645,12 +650,12 @@ export function Commerce({
                   ?.tenantName || tenant}
               </p>
               <p>
-                {selected.months} 个月 · {selected.quota.toLocaleString()}{" "}
+                {productTerm(selected)} · {selected.quota.toLocaleString()}{" "}
                 次调用 · 空间共享
               </p>
               <div className="harbor-price">{money(selected.amountMinor)}</div>
-              <p>{upgradeFrom ? "升级按新套餐全价购买，付款后立即生效并设为优先；旧订阅保留原到期日与剩余次数，不折抵、不退款。" : selected.activationMode === "immediate" ? "付款确认后立即生效，各订阅独立计时。不自动续费。" : "付款确认后开通，续订从已购期限结束后顺延。不自动续费。"}</p><p>{selected.dailyLimit ? `每日最多 ${selected.dailyLimit} 次，北京时间 00:00 重置` : "不单设每日上限"}</p>
-              {notice.latestEnd && <div className="harbor-subscription-notice" role="status">
+              <p>{selected.kind === "trial" ? "免费领取后立即生效，每个空间限领一次，无需付款。不自动续费。" : upgradeFrom ? "升级按新套餐全价购买，付款后立即生效并设为优先；旧订阅保留原到期日与剩余次数，不折抵、不退款。" : selected.activationMode === "immediate" ? "付款确认后立即生效，各订阅独立计时。不自动续费。" : "付款确认后开通，续订从已购期限结束后顺延。不自动续费。"}</p><p>{selected.dailyLimit ? `每日最多 ${selected.dailyLimit} 次，北京时间 00:00 重置` : "不单设每日上限"}</p>
+              {selected.kind !== "trial" && notice.latestEnd && <div className="harbor-subscription-notice" role="status">
                 <strong>你已订阅此服务，仍可继续购买</strong>
                 <p>已购有效期至 {dateTime(notice.latestEnd)}。当前剩余次数与原有效期不变；每份订阅次数独立，不结转。最终生效时间以付款交付时为准。</p>
               </div>}
@@ -658,7 +663,7 @@ export function Commerce({
                 <p>你已有此服务的未完成订单，可以先查看原订单，也可以另购一份。</p>
                 <Button variant="link" disabled={busy} onClick={() => { setSelected(null); go("orders"); }}>查看原订单</Button>
               </div>}
-              {!catalog?.purchaseAvailable && (
+              {selected.kind !== "trial" && !catalog?.purchaseAvailable && (
                 <p role="status">付款服务尚未就绪，请稍后重试。</p>
               )}
               {error && (
@@ -667,10 +672,10 @@ export function Commerce({
                 </p>
               )}
               <Button
-                disabled={busy || !catalog?.purchaseAvailable || !canBuy}
+                disabled={busy || (selected.kind !== "trial" && !catalog?.purchaseAvailable) || !canBuy || (selected.kind === "trial" && trialClaimed)}
                 onClick={purchase}
               >
-                {busy ? "正在创建订单…" : "确认并创建订单"}
+                {busy ? "正在处理…" : selected.kind === "trial" ? "确认免费领取" : "确认并创建订单"}
               </Button>
             </>
           )}

@@ -16,7 +16,7 @@ const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-
 const product = row => ({ ...row.document, revision: row.revision })
 const view = row => row && ({ id: row.id, tenantId: row.tenant_id, consumerId: row.consumer_id, environment: row.environment, product: row.intent.product,
   createdAt: row.created_at, deliveredAt: row.delivered_at, paymentId: row.payment_id, status: row.delivered_at ? (row.environment === 'test' ? 'test_delivered' : 'active') : row.payment?.status === 'paid' ? 'delivering' : 'pending',
-  paymentStatus: row.payment?.status || 'pending', receipt: row.receipt })
+  paymentStatus: row.intent.purpose === 'trial' ? 'not_required' : row.payment?.status || 'pending', receipt: row.receipt })
 
 export function addCalendarMonths(value, months) {
   const date = new Date(value), day = date.getUTCDate()
@@ -32,8 +32,8 @@ export class CommerceService {
   async publicCatalog() {
     if (!this.pool) return {items:[]}
     const catalog = await this.catalog(false,{harbor:true})
-    return {items:catalog.items.map(({sku,name,description,amountMinor,currency,months,quota,dailyLimit,activationMode}) =>
-      ({sku,name,description,amountMinor,currency,months,quota,dailyLimit:dailyLimit??null,activationMode:activationMode??'sequential'}))}
+    return {items:catalog.items.map(({sku,name,description,amountMinor,currency,months,quota,dailyLimit,activationMode,kind,trialDays}) =>
+      ({sku,name,description,amountMinor,currency,months,quota,dailyLimit:dailyLimit??null,activationMode:activationMode??'sequential',kind:kind??'paid',trialDays:trialDays??null}))}
   }
   async catalog(admin = false, { harbor = false } = {}) {
     if (!this.pool) return { items: [{ ...INITIAL_PRODUCT, revision: 1 }], purchaseAvailable: false }
@@ -41,14 +41,16 @@ export class CommerceService {
     return { items: rows.map(row => { const item=product(row); if (!admin) delete item.channel; return item }), purchaseAvailable: !!this.recharge }
   }
   async save(sku, body, actor) {
-    fields(body, ['revision','name','description','status','amountMinor','months','quota','harborListed','dailyLimit','activationMode'])
+    fields(body, ['revision','name','description','status','amountMinor','months','quota','harborListed','dailyLimit','activationMode','kind','trialDays'])
     requirePayment(/^[a-z][a-z0-9-]{2,79}$/.test(sku) && typeof body.name === 'string' && body.name.trim().length > 0 && body.name.length <= 100
       && typeof body.description === 'string' && body.description.length <= 2000 && ['draft','published','retired'].includes(body.status)
-      && Number.isSafeInteger(body.amountMinor) && body.amountMinor >= 100 && body.amountMinor <= 100000000
+      && Number.isSafeInteger(body.amountMinor) && (body.amountMinor === 0 || body.amountMinor >= 100) && body.amountMinor <= 100000000
       && Number.isInteger(body.months) && body.months >= 1 && body.months <= 36 && Number.isInteger(body.quota) && body.quota >= 1 && body.quota <= 10000000
       && (body.harborListed === undefined || typeof body.harborListed === 'boolean')
       && (body.dailyLimit === undefined || body.dailyLimit === null || (Number.isInteger(body.dailyLimit) && body.dailyLimit >= 1 && body.dailyLimit <= 10000000))
       && (body.activationMode === undefined || ['immediate','sequential'].includes(body.activationMode))
+      && (body.kind === undefined || ['paid','trial'].includes(body.kind))
+      && (body.trialDays === undefined || body.trialDays === null || (Number.isInteger(body.trialDays) && body.trialDays >= 1 && body.trialDays <= 365))
       && Number.isInteger(body.revision) && body.revision >= 0, 'commerce_invalid_product', '商品名称、价格、期限、额度或修订不正确')
     return this.atomic(async client => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`commerce-product:${sku}`])
@@ -58,7 +60,11 @@ export class CommerceService {
       const document = { ...INITIAL_PRODUCT, ...old?.document, ...values, sku,
         harborListed: values.harborListed ?? (old ? old.document.harborListed ?? true : false),
         dailyLimit: values.dailyLimit === undefined ? old?.document.dailyLimit ?? null : values.dailyLimit,
-        activationMode: values.activationMode ?? old?.document.activationMode ?? 'sequential' }
+        activationMode: values.activationMode ?? old?.document.activationMode ?? 'sequential',
+        kind: values.kind ?? old?.document.kind ?? 'paid', trialDays: values.trialDays ?? old?.document.trialDays ?? null }
+      requirePayment(document.kind === 'trial' ? document.amountMinor === 0 && document.entitlementScope === 'tenant'
+        && Number.isInteger(document.trialDays) && document.trialDays >= 1 && document.activationMode === 'immediate'
+        : document.amountMinor >= 100, 'commerce_invalid_product', '试用商品须为 0 元、立即生效并设置有效天数；付费商品至少 1 元')
       const row = (await client.query(`INSERT INTO hub_commerce.products(sku,revision,document) VALUES($1,1,$2)
         ON CONFLICT(sku) DO UPDATE SET revision=hub_commerce.products.revision+1,document=excluded.document,updated_at=now() RETURNING *`, [sku,document])).rows[0]
       await client.query('INSERT INTO hub_commerce.audit(actor,action,document) VALUES($1,$2,$3)', [actor,'product.saved',{sku,revision:row.revision,before:old?.document || null,after:document}])
@@ -154,7 +160,6 @@ export class CommerceService {
   async create(tenantId, body, key, actor, { acceptance = false, harbor = false } = {}) {
     fields(body, ['sku','revision','consumerId','environment','upgradeFrom']); requestKey(key)
     requirePayment(uuid(tenantId) && (body.consumerId == null || uuid(body.consumerId)) && ['live','test'].includes(body.environment) && Number.isInteger(body.revision), 'commerce_invalid_purchase', '请选择使用空间和商品版本')
-    requirePayment(this.recharge, 'commerce_payment_unavailable', '支付接入尚未就绪', 503)
     // Preserve the fingerprint of ordinary orders created before acceptance pricing.
     const hash = fingerprint(acceptance ? { ...body, acceptance: true } : body)
     const row = await this.atomic(async client => {
@@ -170,14 +175,33 @@ export class CommerceService {
         upgradeFrom=(await client.query(`SELECT s.*,o.intent->'product' AS product FROM hub_commerce.subscriptions s JOIN hub_commerce.orders o ON o.id=s.order_id
           WHERE s.id=$1 AND s.tenant_id=$2 AND s.channel='product' AND s.starts_at<=now() AND s.ends_at>now() FOR SHARE OF s`,[body.upgradeFrom,tenantId])).rows[0]
         requirePayment(upgradeFrom && sku.document.amountMinor>upgradeFrom.product.amountMinor && sku.document.quota>upgradeFrom.quota
-          && sku.document.months>=upgradeFrom.product.months
-          && (sku.document.dailyLimit == null || (upgradeFrom.daily_limit != null && sku.document.dailyLimit>=upgradeFrom.daily_limit)),
+          && (upgradeFrom.product.kind === 'trial' || (sku.document.months>=upgradeFrom.product.months
+          && (sku.document.dailyLimit == null || (upgradeFrom.daily_limit != null && sku.document.dailyLimit>=upgradeFrom.daily_limit)))),
           'commerce_invalid_upgrade','升级套餐需要更高总额度、不降低每日额度和服务期限',409)
       }
       requirePayment(!space || body.consumerId == null, 'commerce_space_purchase', '此商品为空间订阅，请刷新后选择使用空间')
       const beneficiary = (await client.query(space ? `SELECT id FROM tenants WHERE id=$2 AND status='active' AND $1::uuid IS NULL FOR SHARE` : `SELECT c.id FROM consumers c JOIN tenants t ON t.id=c.tenant_id
         WHERE c.id=$1 AND c.tenant_id=$2 AND c.status='active' AND t.status='active' FOR SHARE OF c,t`, [body.consumerId ?? null,tenantId])).rows[0]
       requirePayment(beneficiary, 'commerce_beneficiary_unavailable', '受益调用者不属于当前账户或已停用', 409)
+      if (sku.document.kind === 'trial') {
+        requirePayment(!acceptance && body.upgradeFrom === undefined && body.environment === 'live' && space
+          && sku.document.amountMinor === 0 && Number.isInteger(sku.document.trialDays) && sku.document.trialDays > 0,
+          'commerce_invalid_trial', '试用须在正式空间免费领取，不支持验收价或升级订单')
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`commerce-trial:${tenantId}:ip_risk`])
+        const claimed = (await client.query("SELECT id FROM hub_commerce.orders WHERE tenant_id=$1 AND intent->>'purpose'='trial' AND intent->'product'->>'product'='ip_risk'",[tenantId])).rows[0]
+        requirePayment(!claimed, 'commerce_trial_claimed', '当前空间已经领取过 IP 风险画像试用套餐', 409)
+        const id = randomUUID(), intent = {product:product(sku),createdBy:actor,purpose:'trial'}
+        const trial = (await client.query(`INSERT INTO hub_commerce.orders(id,tenant_id,consumer_id,environment,request_key,fingerprint,intent)
+          VALUES($1,$2,NULL,'live',$3,$4,$5) RETURNING *`,[id,tenantId,key,hash,intent])).rows[0]
+        const subscriptionId = await this.deliverSubscription(client,trial,`trial-claim:${actor}`,'空间领取 IP 风险画像试用')
+        const receipt = `hub-trial:${id}:${subscriptionId}`
+        const delivered = (await client.query('UPDATE hub_commerce.orders SET delivered_at=now(),receipt=$2 WHERE id=$1 RETURNING *',[id,receipt])).rows[0]
+        await client.query('INSERT INTO hub_commerce.audit(actor,action,document) VALUES($1,$2,$3)',
+          [actor,'trial.claimed',{orderId:id,tenantId,subscriptionId,receipt}])
+        return delivered
+      }
+      requirePayment(this.recharge, 'commerce_payment_unavailable', '支付接入尚未就绪', 503)
+      requirePayment(sku.document.amountMinor >= 100, 'commerce_invalid_product', '付费商品价格不正确')
       const route = await this.recharge.route(body.environment,client,'FOR SHARE')
       requirePayment(route?.source_id, 'commerce_payment_unavailable', '该环境尚未启用支付中心', 409)
       const purchasedProduct=product(sku)
@@ -188,6 +212,7 @@ export class CommerceService {
       return (await client.query(`INSERT INTO hub_commerce.orders(id,tenant_id,consumer_id,environment,request_key,fingerprint,source_id,app_id,intent)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`, [randomUUID(),tenantId,body.consumerId ?? null,body.environment,key,hash,route.source_id,route.app_id,intent])).rows[0]
     })
+    if (row.intent.purpose === 'trial') return view(row)
     try { await this.recharge.network(() => this.prepare(row)) } catch { return { ...view(row), recoveryRequired: true } }
     return view(await this.row(row.id,tenantId))
   }
@@ -215,6 +240,10 @@ export class CommerceService {
     const row = await this.row(id,tenantId)
     requirePayment(row,'commerce_not_found','购买订单不存在',404)
     requirePayment(['checkout','refresh','retry'].includes(action),'commerce_invalid_action','不支持该订单操作')
+    if (row.intent.purpose === 'trial') {
+      requirePayment(action !== 'checkout', 'commerce_trial_no_checkout', '免费试用无需付款', 409)
+      return view(row)
+    }
     return this.recharge.network(async () => {
       const {source,payment} = await this.prepare(row)
       if (action === 'checkout') {
@@ -229,6 +258,48 @@ export class CommerceService {
       return view(await this.row(id,tenantId))
     })
   }
+  async deliverSubscription(client,row,actor,reason) {
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`tenant-access:${row.tenant_id}`])
+    const space = row.intent.product.entitlementScope === 'tenant'
+    const beneficiary = (await client.query(space
+      ? "SELECT id FROM tenants WHERE id=$1 AND status='active' FOR SHARE"
+      : "SELECT c.id FROM consumers c JOIN tenants t ON c.tenant_id=t.id WHERE t.id=$1 AND c.id=$2 AND c.status='active' AND t.status='active' FOR SHARE OF c,t",
+      space ? [row.tenant_id] : [row.tenant_id,row.consumer_id])).rows[0]
+    requirePayment(beneficiary,'commerce_beneficiary_unavailable','受益空间不可用，需要处理',409)
+    let subscriptionId = null
+    if (row.environment === 'live') {
+      const channel=space?'product':'baidu-v2',capability=space?IP_PRODUCT_CAPABILITY:IP_V2_CAPABILITY
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`commerce-subscription:${space?row.tenant_id:row.consumer_id}:${channel}`])
+      const latest = (await client.query("SELECT ends_at FROM hub_commerce.subscriptions WHERE tenant_id=$1 AND consumer_id IS NOT DISTINCT FROM $2::uuid AND channel=$3 ORDER BY ends_at DESC LIMIT 1",[row.tenant_id,row.consumer_id,channel])).rows[0]
+      const immediate=row.intent.product.activationMode==='immediate' || row.intent.upgradePolicy==='new_term_keep_existing'
+      const start = new Date(Math.max(Date.now(),!immediate && latest ? new Date(latest.ends_at).getTime() : 0))
+      const end = row.intent.purpose === 'trial' ? new Date(start.getTime()+row.intent.product.trialDays*86400000) : addCalendarMonths(start,row.intent.product.months)
+      subscriptionId = randomUUID()
+      await client.query(`INSERT INTO hub_commerce.subscriptions(id,order_id,tenant_id,consumer_id,channel,starts_at,ends_at,quota,daily_limit) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[subscriptionId,row.id,row.tenant_id,row.consumer_id,channel,start,end,row.intent.product.quota,row.intent.product.dailyLimit??null])
+      if (row.intent.upgradePolicy==='new_term_keep_existing') await client.query(`INSERT INTO hub_commerce.subscription_selection(tenant_id,subscription_id) VALUES($1,$2)
+        ON CONFLICT(tenant_id) DO UPDATE SET subscription_id=excluded.subscription_id,revision=hub_commerce.subscription_selection.revision+1,updated_at=now()`,[row.tenant_id,subscriptionId])
+      if (space) {
+        // A dedicated product consumer makes a newly purchased empty space visible.
+        // Keys are issued through the normal service only when the owner clicks Start.
+        await client.query(`INSERT INTO consumers(id,tenant_id,name,business_id) VALUES($1,$2,'IP 风险画像', $3) ON CONFLICT (business_id) DO NOTHING`,[randomUUID(),row.tenant_id,`commerce:ip-risk:${row.tenant_id}`])
+        const before=await readTenantAccess(client,row.tenant_id)
+        const after={...before,revision:before.revision+1,platforms:[...new Set([...before.platforms,'ip_risk'])],capabilities:[...new Set([...before.capabilities,capability])]}
+        await client.query('INSERT INTO tenant_service_access(tenant_id,revision,configuration) VALUES($1,$2,$3) ON CONFLICT(tenant_id) DO UPDATE SET revision=excluded.revision,configuration=excluded.configuration,updated_at=now()',[row.tenant_id,after.revision,after])
+        await client.query('INSERT INTO tenant_service_access_events(tenant_id,revision,actor,reason,configuration) VALUES($1,$2,$3,$4,$5)',[row.tenant_id,after.revision,actor,reason,after])
+      }
+      const consumers=space?(await client.query("SELECT id FROM consumers WHERE tenant_id=$1 AND status='active' ORDER BY id",[row.tenant_id])).rows:[{id:row.consumer_id}]
+      for (const consumer of consumers) {
+        for (const scope of [{type:'platform',key:'ip_risk'},{type:'capability',key:capability}]) await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[authorizationScopeLockKey(consumer.id,scope)])
+        await client.query("INSERT INTO platform_grants(consumer_id,platform) VALUES($1,'ip_risk') ON CONFLICT DO NOTHING",[consumer.id])
+        await client.query('INSERT INTO capability_grants(consumer_id,capability) VALUES($1,$2) ON CONFLICT DO NOTHING',[consumer.id,capability])
+        await client.query(`INSERT INTO api_key_platform_entitlements(api_key_id,platform,max_requests,window_seconds,max_page_size)
+          SELECT id,'ip_risk',1000,3600,100 FROM api_keys WHERE consumer_id=$1 AND status='active' AND environment='live' ON CONFLICT DO NOTHING`,[consumer.id])
+        await client.query(`INSERT INTO api_key_capability_entitlements(api_key_id,capability,max_requests,window_seconds)
+          SELECT id,$2,1000,3600 FROM api_keys WHERE consumer_id=$1 AND status='active' AND environment='live' ON CONFLICT DO NOTHING`,[consumer.id,capability])
+      }
+    }
+    return subscriptionId
+  }
   async commit(source,event,payment) {
     requirePayment(event?.type === 'payment.paid' && event.version === 1 && uuid(event.id) && uuid(event.paymentId)
       && event.appId === source.appId && event.environment === source.environment && /^hub-purchase:[0-9a-f-]{36}$/.test(event.businessOrderId || ''), 'commerce_event_mismatch','购买付款事件不匹配',409)
@@ -242,44 +313,7 @@ export class CommerceService {
       const previous = (await client.query('SELECT * FROM hub_commerce.inbox WHERE source_id=$1 AND event_id=$2',[row.source_id,event.id])).rows[0]
       if (previous) { requirePayment(previous.fingerprint === hash && previous.order_id === id,'commerce_event_conflict','付款事件冲突',409); return previous.receipt }
       requirePayment(!row.delivered_at,'commerce_event_conflict','该订单已由其他事件交付',409)
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`tenant-access:${row.tenant_id}`])
-      const space = row.intent.product.entitlementScope === 'tenant'
-      const beneficiary = (await client.query(space
-        ? "SELECT id FROM tenants WHERE id=$1 AND status='active' FOR SHARE"
-        : "SELECT c.id FROM consumers c JOIN tenants t ON c.tenant_id=t.id WHERE t.id=$1 AND c.id=$2 AND c.status='active' AND t.status='active' FOR SHARE OF c,t",
-        space ? [row.tenant_id] : [row.tenant_id,row.consumer_id])).rows[0]
-      requirePayment(beneficiary,'commerce_beneficiary_unavailable','付款已确认，受益空间需要处理',409)
-      let subscriptionId = null
-      if (row.environment === 'live') {
-        const channel=space?'product':'baidu-v2',capability=space?IP_PRODUCT_CAPABILITY:IP_V2_CAPABILITY
-        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`commerce-subscription:${space?row.tenant_id:row.consumer_id}:${channel}`])
-        const latest = (await client.query("SELECT ends_at FROM hub_commerce.subscriptions WHERE tenant_id=$1 AND consumer_id IS NOT DISTINCT FROM $2::uuid AND channel=$3 ORDER BY ends_at DESC LIMIT 1",[row.tenant_id,row.consumer_id,channel])).rows[0]
-        const immediate=row.intent.product.activationMode==='immediate' || row.intent.upgradePolicy==='new_term_keep_existing'
-        const start = new Date(Math.max(Date.now(),!immediate && latest ? new Date(latest.ends_at).getTime() : 0)), end = addCalendarMonths(start,row.intent.product.months)
-        subscriptionId = randomUUID()
-        await client.query(`INSERT INTO hub_commerce.subscriptions(id,order_id,tenant_id,consumer_id,channel,starts_at,ends_at,quota,daily_limit) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[subscriptionId,id,row.tenant_id,row.consumer_id,channel,start,end,row.intent.product.quota,row.intent.product.dailyLimit??null])
-        if (row.intent.upgradePolicy==='new_term_keep_existing') await client.query(`INSERT INTO hub_commerce.subscription_selection(tenant_id,subscription_id) VALUES($1,$2)
-          ON CONFLICT(tenant_id) DO UPDATE SET subscription_id=excluded.subscription_id,revision=hub_commerce.subscription_selection.revision+1,updated_at=now()`,[row.tenant_id,subscriptionId])
-        if (space) {
-          // A dedicated product consumer makes a newly purchased empty space visible.
-          // Keys are issued through the normal service only when the owner clicks Start.
-          await client.query(`INSERT INTO consumers(id,tenant_id,name,business_id) VALUES($1,$2,'IP 风险画像', $3) ON CONFLICT (business_id) DO NOTHING`,[randomUUID(),row.tenant_id,`commerce:ip-risk:${row.tenant_id}`])
-          const before=await readTenantAccess(client,row.tenant_id)
-          const after={...before,revision:before.revision+1,platforms:[...new Set([...before.platforms,'ip_risk'])],capabilities:[...new Set([...before.capabilities,capability])]}
-          await client.query('INSERT INTO tenant_service_access(tenant_id,revision,configuration) VALUES($1,$2,$3) ON CONFLICT(tenant_id) DO UPDATE SET revision=excluded.revision,configuration=excluded.configuration,updated_at=now()',[row.tenant_id,after.revision,after])
-          await client.query('INSERT INTO tenant_service_access_events(tenant_id,revision,actor,reason,configuration) VALUES($1,$2,$3,$4,$5)',[row.tenant_id,after.revision,`payment-event:${event.id}`,'空间购买 IP 风险画像',after])
-        }
-        const consumers=space?(await client.query("SELECT id FROM consumers WHERE tenant_id=$1 AND status='active' ORDER BY id",[row.tenant_id])).rows:[{id:row.consumer_id}]
-        for (const consumer of consumers) {
-          for (const scope of [{type:'platform',key:'ip_risk'},{type:'capability',key:capability}]) await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[authorizationScopeLockKey(consumer.id,scope)])
-          await client.query("INSERT INTO platform_grants(consumer_id,platform) VALUES($1,'ip_risk') ON CONFLICT DO NOTHING",[consumer.id])
-          await client.query('INSERT INTO capability_grants(consumer_id,capability) VALUES($1,$2) ON CONFLICT DO NOTHING',[consumer.id,capability])
-          await client.query(`INSERT INTO api_key_platform_entitlements(api_key_id,platform,max_requests,window_seconds,max_page_size)
-            SELECT id,'ip_risk',1000,3600,100 FROM api_keys WHERE consumer_id=$1 AND status='active' AND environment='live' ON CONFLICT DO NOTHING`,[consumer.id])
-          await client.query(`INSERT INTO api_key_capability_entitlements(api_key_id,capability,max_requests,window_seconds)
-            SELECT id,$2,1000,3600 FROM api_keys WHERE consumer_id=$1 AND status='active' AND environment='live' ON CONFLICT DO NOTHING`,[consumer.id,capability])
-        }
-      }
+      const subscriptionId = await this.deliverSubscription(client,row,`payment-event:${event.id}`,'空间购买 IP 风险画像')
       const receipt = `hub-purchase:${id}:${subscriptionId || 'test'}`
       await client.query('UPDATE hub_commerce.orders SET payment_id=$2,payment=$3,delivered_at=now(),receipt=$4 WHERE id=$1',[id,payment.id,payment,receipt])
       await client.query('INSERT INTO hub_commerce.inbox(source_id,event_id,order_id,fingerprint,document,receipt) VALUES($1,$2,$3,$4,$5,$6)',[row.source_id,event.id,id,hash,event,receipt])

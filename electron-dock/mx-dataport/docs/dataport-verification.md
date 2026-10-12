@@ -26,3 +26,12 @@
 - `/tmp/dataport-hub-upgrade.png`：新购高档套餐、旧权益保留。
 
 发布前仍需按 [操作清单](../dataport.setup.md) 完成真实域名 HTTPS、应用 origin 迁移、Pay 返回地址、新旧 API 和原 H2I 账号的受控验收。三档新商品以草稿落库，不自动改旧商品或开放销售。
+
+## 后续：首开弹窗、套餐上架与 0 元试用
+
+本轮仍只做本机验收，未部署生产。新增 migration 146 在隔离 PostgreSQL 验证：未经运营编辑的三档草稿自动上架，已编辑商品、旧订单与已发权益保持，重复迁移不重复创建。
+
+- Hub Commerce 25 项通过，Portal 7 项通过。覆盖同键并发领取只发一份、不同键/SKU 不能重复领取、10 次共用额度及第 11 次拦截、失败事务回滚、试用升级、已售快照、免费订单不调用 Pay/不写支付事件或钱包。
+- DataPort 全套 64 项通过，默认跳过的 1 项持久会话测试已单独接隔离数据库补跑通过，总计 65 项。两端类型检查和生产构建通过。
+- 本机 Playwright + Chrome（环境无 Browser 插件），DataPort `127.0.0.1:4290`、Hub `127.0.0.1:5190`，1440×1080 与 390×844；页面标题、非空页面、无框架错误覆盖层、控制台与操作结果均验收。冷 SSO 以预期 410 → start → 返回 account 模拟，跳转前没有弹窗，返回后表单只显示一次且尺寸稳定；关闭重开不再次 start。免费领取在模拟 Pay 未就绪时仍成功，仅一份订单，无收银台。Hub 将商品改为试用后发送 0 元、有效天数与次数，页面正确刷新。
+- 截图在 `/tmp/dataport-trial-login-desktop.png`、`/tmp/dataport-trial-login-mobile.png`、`/tmp/dataport-trial-pricing-desktop.png`、`/tmp/dataport-trial-pricing-mobile.png`、`/tmp/dataport-trial-claim.png`、`/tmp/dataport-hub-trial-editor.png`。页面使用合成数据；生产 SSO、真实支付与供应商查询尚未验收。

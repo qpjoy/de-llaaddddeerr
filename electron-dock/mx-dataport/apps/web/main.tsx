@@ -495,10 +495,10 @@ function App() {
         >
           <PublicHeader
             current={location.pathname === "/pricing" ? "pricing" : "home"}
-            accountPending={checking}
+            accountPending={checking || auth}
             accountLabel={
-              checking
-                ? "正在确认…"
+              checking || auth
+                ? auth ? "正在连接…" : "正在确认…"
                 : signedIn === null
                   ? "重试连接"
                   : undefined

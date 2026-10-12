@@ -13,7 +13,7 @@ export type Subscription = {
   preferred?: boolean;
   selected?: boolean;
   available?: boolean;
-  product?: { name: string; sku: string; amountMinor: number; months: number };
+  product?: { name: string; sku: string; amountMinor: number; months: number; kind?: string; trialDays?: number };
 };
 export function subscriptionState(value: Subscription, now = Date.now()) {
   if (Date.parse(value.startsAt) > now) return "future";
@@ -137,4 +137,8 @@ export function checkoutLocation(
       "收银台或数港返回地址不匹配，原订单已保留，请联系管理员检查支付接入。",
     );
   return url.href;
+}
+
+export function productTerm(product: { months: number; kind?: string; trialDays?: number | null }) {
+  return product.kind === "trial" ? `${product.trialDays} 天` : `${product.months} 个月`;
 }

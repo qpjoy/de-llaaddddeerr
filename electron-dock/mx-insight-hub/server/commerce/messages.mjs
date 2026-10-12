@@ -10,7 +10,7 @@ export class CustomerMessages {
     this.timer = null
   }
 
-  // This worker reads only local paid entitlements. It never queries Pay/suppliers,
+  // This worker reads only local delivered entitlements. It never queries Pay/suppliers,
   // alters an entitlement, or shares the Admin-only supplier incident stream.
   async collectBatch() {
     return withPgTransaction(this.pool, async client => {
