@@ -1,5 +1,59 @@
 # Instagram 搜索冷却诊断
 
+## 2026-10-12 话题推荐与缺失游标
+
+策略 `ad3c1131-6850-4cbf-a37a-ade3de846bd9` 的 Hub 请求
+`7962155d-a920-4426-8663-ad5e68720806` 在 `01:55:44.930Z` 创建，
+`01:55:44.954Z` 释放，实际路径是 `/api/v1/data/search`。
+操作者返回的只读归档报告找到一条与告警截止时间完全匹配的候选：
+
+- 原 Hub 请求 `8ba962cb-701f-4b43-acb9-d002c20063db`，调用 `8b12d535-5a5b-4bd2-81ce-2059f08489fe`。
+- 调用结束于 `2026-10-12T01:51:24.698Z`，加 900000ms 正好是告警中的 `02:06:24.698Z`。
+- HTTP / 业务码均为 200，`billed=true`，上游请求 `71881104-9125-4e2d-85f0-7680f569ae49`。
+- `status=ok`、`list[1]`；唯一条目为 `position:number + hashtag:object`，
+  外层没有 `id/pk/code/shortcode/user/media/caption/media_type/place`。
+  没有媒体网格/items，`has_more=true`，`rank_token` 长 78，但没有 `next_max_id`。
+- 当时已部署解析器回放仍报 `invalid_instagram_search_shape`。这次是话题推荐，
+  与 10 月 9 日的账号推荐分支不同。旧记录未保存 blocker ID，仍保留候选关联的证据边界。
+
+[官方综合搜索说明](https://docs.tikhub.io/419083058e0)（2026-10-12 核对）说明返回可含
+用户、话题和地点，翻页需使用响应中的 `next_max_id` 与 `rank_token`。
+不能将话题当帖子、用 rank_token 代替 next_max_id，或为补齐数据额外自动购买一页。
+
+修复仅扩展已识别的 list 分支：没有帖子字段、没有 user/place 冲突、显式含 hashtag 对象的
+条目归类为非帖子；不猜测/规范化话题内部字段。原始话题对象仍完整留在受限响应归档。
+地点和未知条目仍不猜测。有媒体的条目继续走帖子身份校验。
+
+对于非空、全部为已识别账号/话题的 list，如果声明有更多结果但没有可用游标，
+交付 HTTP 200、`status=partial`、零条帖子、`hasMore=false/nextCursor=null`，并带
+`INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE` 警告。这里表示**无法安全继续这一响应**，
+不表示搜索已穷尽或 Instagram 没有相关帖子；标准 data-search 与 raw 都保留该警告。
+有有效游标时仍可继续；有帖子/空 list 却缺游标、损坏的 token/分页标志、未知或坏帖仍明确失败。
+这样不会为已识别的推荐页打开全端点解析冷却，也不会掩盖可能丢失的帖子。
+
+本地用报告的字段类型构造模拟响应，验证旧代码拒绝、新代码接受，并覆盖标准 data-search、
+两个 raw HTTP 别名、幂等回放、采购回执、有效分页和坏帖保护。未读取生产话题内容，
+未发付费探测或修改历史状态。无新增 migration；仍需部署后回放服务器原文。
+
+在服务器的 Hub 源码目录按既有流程部署，然后只读验证：
+
+```bash
+bash scripts/manage.sh deploy
+kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-public --timeout=300s
+kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-admin --timeout=300s
+kubectl -n mx-insight-hub exec deployment/mx-insight-hub-admin -c admin -- \
+  node /app/server/ops/diagnose-instagram-search.mjs \
+  7962155d-a920-4426-8663-ad5e68720806 \
+  --blocked-until 2026-10-12T02:06:24.698Z
+```
+
+匹配候选的 projection 预期：`current_projection_accepts`、`returnedCount=0`、
+`hasMore=false`、`deliveryStatus=partial`，warningCodes 含上述警告。
+旧请求依然是 released；不改账、不重写旧响应、不自动解除新出现的保护。
+部署全部 API 副本并确认当前限制后，才在告警所属 po-infra 环境恢复该策略的 Instagram
+冷启动任务，保留分页不完整的说明；Hub 部署不会自动重启下游任务。不要用 Dev 环境 404
+推断生产策略不存在，也不要扩大到全平台恢复。MX-H2I 登录和联网保持不变。
+
 ## 2026-10-09 冷启动失败
 
 策略 `78e90b16-999f-470f-b30c-45d83ad43429`，检索词 `Lu Benwei cheating`，
@@ -94,7 +148,7 @@ Night-All 的现有回归样本也包含 `list[].user`。操作者进一步读�
 - 若有有效后续游标，即使该页只有账号，也保留继续查询的能力；依然绑定 Key/查询，最多 15 页，
   不自动加发任何请求。
 - 未知 list 项、混合的坏帖、无 ID 的媒体、异常状态及损坏的网格/items 仍明确失败，
-  不以“过滤账号”为由掩盖丢失帖子。地点/话题形态尚未加入这个分支，不猜测它们的内部结构。
+  不以“过滤账号”为由掩盖丢失帖子。当时未支持地点/话题；话题的后续修复见上方 10 月 12 日记录。
 
 标准 `/api/v1/data/search` 与两个 raw URL 共用此修复；原始响应、采购计费、历史重放不修改，
 不回退 Night-All、不追加付费探测，不影响 MX-H2I 登录/联网。无新增 migration。

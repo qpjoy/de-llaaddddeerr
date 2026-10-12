@@ -11,12 +11,16 @@ const POST_FIELDS = ['id', 'pk', 'code', 'shortcode', 'media', 'caption', 'capti
 function listMedia(entries) {
   return entries.flatMap(entry => {
     if (!object(entry)) throw new Error('invalid_instagram_search_shape')
-    // A general-search list may mix media with account results. Never turn a
-    // nested user into a post, or discard a malformed post just because it has an author.
+    // General search mixes media with explicitly typed recommendations. Never
+    // discard a malformed post just because it also has a user or hashtag.
     if (object(entry.media)) return [entry.media]
     if (entry.code || entry.shortcode) return [entry]
     if (!POST_FIELDS.some(field => Object.hasOwn(entry, field)) && object(entry.user)
       && (id(entry.user.id) || id(entry.user.pk)) && text(entry.user.username).trim()) return []
+    // The retained 2026-10-12 response has position + hashtag, without media.
+    // Only classify this wrapper; do not infer a hashtag identity or ingest it.
+    if (!POST_FIELDS.some(field => Object.hasOwn(entry, field)) && object(entry.hashtag)
+      && !Object.hasOwn(entry, 'user') && !Object.hasOwn(entry, 'place')) return []
     throw new Error('invalid_instagram_search_shape')
   })
 }
@@ -89,14 +93,20 @@ export function projectInstagramSearch(result, request) {
   const more = page.more_available ?? page.has_more ?? page.has_next_page ?? data.more_available ?? data.has_more
   if (more != null && ![true, false, 0, 1, '0', '1', 'true', 'false'].includes(more)) throw new Error('invalid_instagram_pagination')
   const expectsMore = [true, 1, '1', 'true'].includes(more)
-  if (expectsMore && !next) throw new Error('missing_instagram_continuation')
-  // An account-only page can still have a valid continuation to later media.
+  // A verified non-post-only list can advertise more recommendations without
+  // giving a usable cursor. Report incomplete pagination, never invent a cursor
+  // or quarantine the whole endpoint. Media/empty/unknown pages stay strict.
+  const nonPostContinuationMissing = expectsMore && !next && listPage && data.list.length > 0 && rows.length === 0
+  if (expectsMore && !next && !nonPostContinuationMissing) throw new Error('missing_instagram_continuation')
+  // A recommendation-only page can still have a valid continuation to media.
   const hasMore = (rows.length > 0 || listPage) && request.page < 15 && !!next
     && ![false, 0, '0', 'false'].includes(more) && next !== request.providerCursor?.next_max_id
   const nextCursor = hasMore ? request.encodeNext({ page: request.page + 1,
     providerCursor: { next_max_id: next, ...(rank ? { rank_token: rank } : {}) } }) : null
   return { ...result, items: rows, publicBody: { contractVersion: 'mx-insight-hub.raw-search.v1', data: { platform: 'instagram', query: request.query,
     raw_info: '[]', raw_data: JSON.stringify(rows), page: { page: request.page, pageSize: request.pageSize,
-      returnedCount: rows.length, hasMore, nextCursor }, status: 'ok',
+      returnedCount: rows.length, hasMore, nextCursor }, status: nonPostContinuationMissing ? 'partial' : 'ok',
+    ...(nonPostContinuationMissing ? { warnings: [{ code: 'INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE',
+      message: 'This page contains only non-post search results, but no usable continuation was supplied. Search completeness is unknown.' }] } : {}),
     meta: { implementation: 'hub', resultCount: rows.length, upstreamCallCount: 1 } }, meta: { capturedAt } } }
 }

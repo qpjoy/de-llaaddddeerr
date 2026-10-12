@@ -115,6 +115,25 @@ test('missing, corrupt, invalid JSON and non-success archives cannot imply parse
   assert.equal(inspectInstagramArchive(failed, snapshot).state, 'not_success_envelope')
 })
 
+test('October 12 hashtag-only archive shape reports partial pagination without exposing topic or token values', () => {
+  const data = { status: 'ok', list: [{ position: 0, hashtag: { name: 'private-topic' } }],
+    has_more: true, rank_token: 'r'.repeat(78) }
+  const report = inspectInstagramArchive(archive(data), snapshot)
+  assert.equal(report.state, 'current_projection_accepts')
+  assert.equal(report.returnedCount, 0)
+  assert.equal(report.hasMore, false)
+  assert.equal(report.deliveryStatus, 'partial')
+  assert.deepEqual(report.warningCodes, ['INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE'])
+  assert.equal(report.shape.listEntries[0].fields.hashtag, 'object')
+  assert.equal(report.shape.pagination.hasMore, true)
+  assert.equal(report.shape.pagination.nextMaxId.type, 'missing')
+  assert.doesNotMatch(JSON.stringify(report), /private-|rrrr/)
+  data.has_more = false
+  const complete = inspectInstagramArchive(archive(data), snapshot)
+  assert.equal(complete.deliveryStatus, 'ok')
+  assert.deepEqual(complete.warningCodes, [])
+})
+
 const pgliteModule = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
 test('read-only database diagnosis traces an endpoint-wide blocker instead of treating the 409 as a paid call', {
   skip: pgliteModule ? false : 'Set MX_INSIGHT_TEST_PGLITE_MODULE to a local @electric-sql/pglite module',

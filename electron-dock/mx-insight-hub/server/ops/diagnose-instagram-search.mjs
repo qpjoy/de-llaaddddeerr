@@ -96,7 +96,10 @@ export function inspectInstagramArchive(archive, snapshot) {
   try {
     const result = projectInstagramSearch({ publicBody: { data: payload.data, meta: { capturedAt } } }, request)
     return { state: 'current_projection_accepts', pageSize, shape, ...rows,
-      returnedCount: result.items.length, hasMore: result.publicBody.data.page.hasMore }
+      returnedCount: result.items.length, hasMore: result.publicBody.data.page.hasMore,
+      deliveryStatus: result.publicBody.data.status,
+      warningCodes: (result.publicBody.data.warnings || []).map(warning => warning.code)
+        .filter(code => code === 'INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE') }
   } catch (error) {
     return { state: 'current_projection_rejects', pageSize, shape, ...rows,
       reason: REASONS.has(error.message) ? error.message : 'unexpected_projection_error' }

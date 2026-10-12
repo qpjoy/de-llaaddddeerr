@@ -751,6 +751,97 @@ test('Instagram list media retain captions and IDs while an account-only page re
   assert.equal(h.calls.length, 2)
 })
 
+test('Instagram non-post-only lists without a cursor return an explicit partial page, retain receipts and do not quarantine other queries', async () => {
+  // Field types from the 2026-10-12 archive; hashtag contents were not disclosed.
+  for (const recommendation of [{ position: 0, hashtag: {} },
+    { position: 0, user: { id: '123', username: 'account-result' } }]) {
+    for (const route of ['data', 'raw']) {
+      const upstream = { status: 'ok', list: [recommendation], has_more: true, rank_token: 'r'.repeat(78) }
+      const before = structuredClone(upstream)
+      const h = await harness({ platform: 'instagram', instagramData: upstream })
+      const invoke = route === 'data' ? h.invokeData : h.invoke
+      const body = route === 'data' ? { platform: 'instagram', query: 'fixture', pageSize: 20 }
+        : { platform: 'instagram', query: 'fixture', count: 20 }
+      const response = await invoke(body, 'instagram-non-post-list')
+      assert.equal(response.body.data.status, 'partial')
+      assert.deepEqual(route === 'data' ? response.body.data.items : JSON.parse(response.body.data.raw_data), [])
+      const page = route === 'data' ? response.body.data.pageInfo : response.body.data.page
+      assert.equal(page.returnedCount, 0)
+      assert.equal(page.hasMore, false)
+      assert.equal(page.nextCursor, null)
+      assert.deepEqual(response.body.data.warnings.map(warning => warning.code), ['INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE'])
+      assert.match(response.body.data.warnings[0].message, /completeness is unknown/)
+      assert.doesNotMatch(response.body.data.warnings[0].message, /Weibo|undefined/)
+      if (route === 'data') assert.equal(isNightAllDataSearchV1Envelope(response.body), true)
+      const call = [...h.platformStore.calls.values()][0]
+      assert.equal(call.outcome, 'succeeded')
+      assert.equal(call.billed, true)
+      assert.equal(call.errorCode, null)
+      assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+      assert.deepEqual((await invoke(body, 'instagram-non-post-list')).body, response.body)
+      assert.equal(h.calls.length, 1)
+      await invoke({ ...body, query: 'another fixture' }, 'instagram-after-non-post-list')
+      assert.equal(h.calls.length, 2)
+      assert.equal(h.historical.length, 0)
+      assert.deepEqual(upstream, before)
+    }
+  }
+})
+
+test('Instagram hashtag lists preserve real continuations and mixed media on both contracts', async () => {
+  for (const route of ['data', 'raw']) {
+    const instagramData = { status: 'ok', list: [{ position: 0, hashtag: { name: 'fixture' } }],
+      has_more: true, next_max_id: 'hashtag-next', rank_token: 'hashtag-rank' }
+    const h = await harness({ platform: 'instagram', instagramData })
+    const invoke = route === 'data' ? h.invokeData : h.invoke
+    const body = { platform: 'instagram', query: 'fixture', pageSize: 20 }
+    const first = await invoke(body, 'hashtag-page-1')
+    const page = route === 'data' ? first.body.data.pageInfo : first.body.data.page
+    assert.equal(first.body.data.status, 'ok')
+    assert.equal(page.returnedCount, 0)
+    assert.equal(page.hasMore, true)
+    assert.ok(page.nextCursor)
+    instagramData.list.push({ media: instagramPost })
+    instagramData.has_more = false
+    const second = await invoke({ ...body, cursor: page.nextCursor }, 'hashtag-page-2')
+    const items = route === 'data' ? second.body.data.items : JSON.parse(second.body.data.raw_data)
+    assert.equal(items.length, 1)
+    assert.equal(route === 'data' ? items[0].externalId : items[0].content_id, instagramPost.pk)
+    assert.equal(items[0].text, instagramPost.caption.text)
+    assert.equal(h.calls[1].searchParams.get('next_max_id'), 'hashtag-next')
+    assert.equal(h.calls[1].searchParams.get('rank_token'), 'hashtag-rank')
+    assert.equal(h.calls.length, 2)
+  }
+})
+
+test('Instagram partial recommendation pages keep HTTP raw-alias replay and strict data-search delivery', async t => {
+  const h = await harness({ platform: 'instagram', instagramData: { status: 'ok',
+    list: [{ position: 0, hashtag: {} }], has_more: true, rank_token: 'r'.repeat(78) } })
+  const server = createServer(createApp({ service: h.service, store: h.store, adapter: {},
+    adminToken: null, listenerMode: 'public', logger: { warn() {}, error() {} } }))
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const base = `http://127.0.0.1:${server.address().port}`
+  let first
+  for (const path of ['/api/v1/search/raw', RAW_SEARCH_PATH, '/api/v1/data/search']) {
+    const dataSearch = path === '/api/v1/data/search'
+    const response = await fetch(base + path, { method: 'POST', headers: {
+      Authorization: `Bearer ${h.key.secret}`, 'content-type': 'application/json',
+      'idempotency-key': dataSearch ? 'instagram-data-partial' : 'instagram-raw-partial' },
+    body: JSON.stringify({ platform: 'instagram', query: 'fixture', ...(dataSearch ? { pageSize: 20 } : { count: 20 }) }) })
+    const body = await response.json()
+    assert.equal(response.status, 200, JSON.stringify(body))
+    assert.equal(body.data.status, 'partial')
+    assert.equal(body.data.warnings[0].code, 'INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE')
+    if (dataSearch) assert.ok(isNightAllDataSearchV1Envelope(body))
+    else if (first) {
+      assert.deepEqual(body, first)
+      assert.equal(h.calls.length, 1)
+    } else first = body
+  }
+  assert.equal(h.historical.length, 0)
+})
+
 test('Instagram empty keyword suggestions remain empty; malformed, oversize and incomplete continuation shapes fail without fallback or retry', async () => {
   const empty = await harness({ platform: 'instagram', instagramData: { status: 'ok',
     other_results: { keyword_recommendations: { keywords: [{ id: '123', name: 'popular term' }] } } } })
@@ -767,7 +858,18 @@ test('Instagram empty keyword suggestions remain empty; malformed, oversize and 
     [{ status: 'ok', list: [{ user: { pk: '123', username: 'name' }, media: null }], has_more: false }, 'invalid_instagram_search_shape'],
     [{ status: 'ok', list: [{ name: 'unrecognized result' }], has_more: false }, 'invalid_instagram_search_shape'],
     [{ status: 'ok', list: [null], has_more: false }, 'invalid_instagram_search_shape'],
-    [{ status: 'ok', list: [{ user: { pk: '123', username: 'name' } }], has_more: true }, 'missing_instagram_continuation'],
+    [{ status: 'ok', list: [], has_more: true }, 'missing_instagram_continuation'],
+    [{ status: 'ok', list: [{ hashtag: {} }, { media: instagramPost }], has_more: true }, 'missing_instagram_continuation'],
+    [{ status: 'ok', list: [{ hashtag: {}, media: null }], has_more: true }, 'invalid_instagram_search_shape'],
+    [{ status: 'ok', list: [{ hashtag: {}, caption: 'malformed post' }] }, 'invalid_instagram_search_shape'],
+    [{ status: 'ok', list: [{ hashtag: {}, media: { caption: 'missing identity' } }] }, 'invalid_instagram_post_identity'],
+    [{ status: 'ok', list: [{ hashtag: {}, user: {} }] }, 'invalid_instagram_search_shape'],
+    [{ status: 'ok', list: [{ hashtag: {}, place: {} }] }, 'invalid_instagram_search_shape'],
+    ...[null, [], 'topic'].map(hashtag => [{ status: 'ok', list: [{ hashtag }] }, 'invalid_instagram_search_shape']),
+    [{ status: 'ok', list: [{ hashtag: {} }, { unknown: 'shape' }] }, 'invalid_instagram_search_shape'],
+    [{ status: 'ok', list: [{ hashtag: {} }], has_more: true, next_max_id: 123 }, 'invalid_instagram_continuation'],
+    [{ status: 'ok', list: [{ hashtag: {} }], has_more: true, rank_token: {} }, 'invalid_instagram_continuation'],
+    [{ status: 'ok', list: [{ hashtag: {} }], has_more: 'unexpected' }, 'invalid_instagram_pagination'],
     [{ status: 'ok', list: [], items: {} }, 'invalid_instagram_search_shape'],
     [{ status: 'ok', list: [], media_grid: {} }, 'invalid_instagram_search_shape'],
     [{ status: 'fail', list: [] }, 'invalid_instagram_search_shape'],

@@ -36,7 +36,7 @@ export function projectDataSearch(result, request) {
     items, pageInfo: { pageIndex: request.page, pageSize: request.pageSize, returnedCount: items.length,
       hasMore: raw.page.hasMore, nextCursor: raw.page.nextCursor, cursorType: raw.page.hasMore ? 'opaque' : 'none' },
     status: raw.status, warnings: (raw.warnings || []).map(warning => ({ code: warning.code,
-      message: `${warning.count} Weibo post(s) still contain an incomplete preview; full text was not verified.` })),
+      message: warning.message ?? `${warning.count} Weibo post(s) still contain an incomplete preview; full text was not verified.` })),
     meta: { capability: 'search_posts', capabilityStatus: 'ready', paginationMode: request.platform === 'weibo' ? 'page' : 'compound',
       providerCalls: raw.meta.upstreamCallCount } } }
   const projected = normalizeSearchContent(body, request.platform)
