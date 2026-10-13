@@ -3,7 +3,7 @@ import test from 'node:test'
 import { lookupRequestDiagnostics } from '../../server/acquisitions/diagnostics.mjs'
 
 const id = 'a227f54a-0ac6-43f5-9d23-687fc369f2ae'
-function fixture({ status = 'released', providers, connectors = [], matches = [{ id }], fail } = {}) {
+function fixture({ status = 'released', responseStatus = 502, providers, connectors = [], matches = [{ id }], fail } = {}) {
   const queries = []
   let released = false
   const pool = { async connect() { return {
@@ -12,7 +12,7 @@ function fixture({ status = 'released', providers, connectors = [], matches = [{
       assert.doesNotMatch(sql, /\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/)
       if (fail && sql.includes('request-diagnostics:usage')) throw Object.assign(new Error('secret connection data'), { code: fail })
       if (sql.includes('request-diagnostics:lookup')) return { rows: matches }
-      if (sql.includes('request-diagnostics:usage')) return { rows: [{ id: params[0], platform: 'enterprise', status, error_code: 'enterprise_query_rejected', response_status: 502, has_response_body: true, units_actual: 0, delivery_source_mode: 'live', response_body: { secret: 'hidden' } }] }
+      if (sql.includes('request-diagnostics:usage')) return { rows: [{ id: params[0], platform: 'enterprise', status, error_code: 'enterprise_query_rejected', response_status: responseStatus, has_response_body: true, units_actual: 0, delivery_source_mode: 'live', response_body: { secret: 'hidden' } }] }
       if (sql.includes('request-diagnostics:providers')) return { rows: providers || [{ id: 'call', provider_key: 'qixin', outcome: 'rejected', http_status: 200, business_code: 105, reviewed_message: '未授权调用该接口', has_restricted_archive: true, billed: null, cost_kind: 'estimated', cost_minor: '15', currency: 'CNY', raw_payload: { secret: 'hidden' } }] }
       if (sql.includes('request-diagnostics:connectors')) return { rows: connectors }
       if (sql.includes('request-diagnostics:charges')) return { rows: [{ status: 'released', enforcement_mode: 'enforced', charged_minor: '0', quoted_minor: '15', currency: 'CNY', pricing_snapshot: 'hidden' }] }
@@ -70,6 +70,37 @@ test('confirmed JustOne 301 explains collection failure without exposing upstrea
   }
   const unknown = await lookupRequestDiagnostics(fixture({ status: 'unknown', providers }).pool, id)
   assert.match(unknown.runs[0].guidance, /未知调用结果/u)
+})
+
+test('TikHub HTTP 400 explains failed delivery without inventing a parameter or billing cause', async () => {
+  const providers = [{ id: 'call', provider_key: 'tikhub', operation: 'social.posts.search',
+    outcome: 'rejected', http_status: 400, business_code: null,
+    error_code: 'upstream_request_rejected', upstream_request_id: null,
+    billed: null, reviewed_message: 'private supplier message', has_restricted_archive: true }]
+  const run = (await lookupRequestDiagnostics(fixture({ status: 'committed', providers }).pool, id)).runs[0]
+  assert.match(run.guidance, /已保存失败响应/u)
+  assert.match(run.guidance, /不能确定是参数问题还是上游内部错误/u)
+  assert.match(run.guidance, /计费未知不等于免费/u)
+  assert.match(run.guidance, /不会重新采集/u)
+  assert.equal(run.replayAvailable, true)
+  assert.equal(run.providerCalls[0].businessCode, null)
+  assert.equal(run.providerCalls[0].upstreamRequestId, null)
+  assert.equal(run.providerCalls[0].billed, null)
+  assert.doesNotMatch(JSON.stringify(run), /private supplier message/u)
+  const fallback = (await lookupRequestDiagnostics(fixture({ status: 'committed', responseStatus: 200, providers }).pool, id)).runs[0]
+  assert.doesNotMatch(fallback.guidance, /已保存失败响应/u)
+  assert.match(fallback.guidance, /存量回退/u)
+  const unknown = (await lookupRequestDiagnostics(fixture({ status: 'unknown', providers }).pool, id)).runs[0]
+  assert.match(unknown.guidance, /未知调用结果/u)
+})
+
+test('committed error responses are distinguished from successful deliveries without changing replay', async () => {
+  const failure = (await lookupRequestDiagnostics(fixture({ status: 'committed', providers: [] }).pool, id)).runs[0]
+  assert.match(failure.guidance, /已保存失败响应/u)
+  assert.equal(failure.replayAvailable, true)
+  const success = (await lookupRequestDiagnostics(fixture({ status: 'committed', responseStatus: 200, providers: [] }).pool, id)).runs[0]
+  assert.doesNotMatch(success.guidance, /已保存失败响应/u)
+  assert.equal(success.replayAvailable, true)
 })
 
 test('arbitrary archive messages never cross the diagnostic boundary; unknown outcomes remain unknown', async () => {

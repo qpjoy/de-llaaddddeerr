@@ -135,6 +135,25 @@ function postgresSafeText(value) {
   return isPostgresSafeText(value) ? value : null
 }
 
+function responseMetadata(raw, httpStatus, providerCredential = null) {
+  // HTTP failures may wrap their correlation fields in a detail object.
+  // Keep successful envelopes strictly top-level and never reinterpret the
+  // HTTP outcome from a nested business code.
+  const detail = Number.isInteger(httpStatus) && (httpStatus < 200 || httpStatus >= 300)
+    && raw?.detail && typeof raw.detail === 'object' && !Array.isArray(raw.detail)
+    ? raw.detail : null
+  const detailRequestId = detail?.request_id
+  const safeDetailRequestId = typeof detailRequestId === 'string'
+    && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,190}$/u.test(detailRequestId)
+    && providerCredentialSafePayload(detailRequestId, providerCredential) === detailRequestId
+    ? detailRequestId : null
+  return {
+    businessCode: Number.isInteger(raw?.code) ? raw.code
+      : Number.isInteger(detail?.code) ? detail.code : null,
+    requestId: postgresSafeText(raw?.request_id) ?? safeDetailRequestId,
+  }
+}
+
 function boundedInteger(value, fallback, maximum, name) {
   const parsed = value ?? fallback
   if (!Number.isInteger(parsed) || parsed <= 0 || parsed > maximum) {
@@ -232,6 +251,7 @@ function archiveEvidence({
   state,
   endpointVersion = TIKHUB_XIAOHONGSHU_ENDPOINT_VERSION,
 }) {
+  const metadata = responseMetadata(raw, httpStatus, providerCredential)
   let sanitized = null
   let payloadHash = Buffer.isBuffer(bodyBytes)
     ? createHash('sha256').update(bodyBytes).digest('hex')
@@ -267,7 +287,7 @@ function archiveEvidence({
     responseArchive: {
       contractState: state,
       httpStatus,
-      businessCode: Number.isInteger(raw?.code) ? raw.code : null,
+      businessCode: metadata.businessCode,
       contentType,
       bodySize,
       payloadSha256: payloadHash,
@@ -275,7 +295,7 @@ function archiveEvidence({
       capturedAt,
     },
     upstreamEvidence: {
-      requestId: postgresSafeText(raw?.request_id),
+      requestId: metadata.requestId,
       recordTime: null,
     },
     archiveObjects: payloadHash == null ? [] : [{
@@ -291,7 +311,7 @@ function archiveEvidence({
       contractState: state,
       contentType,
       bodySize,
-      upstreamRequestId: postgresSafeText(raw?.request_id),
+      upstreamRequestId: metadata.requestId,
     }],
   }
 }
@@ -474,7 +494,7 @@ async function requestTikHubJson(
       }
       throw upstreamError(
         'TikHub rejected the request',
-        { ...httpFailureEvidence(httpStatus, Number.isInteger(raw?.code) ? raw.code : null), ...(billedOnHttp200 && httpStatus === 400 ? { billed: false } : {}) },
+        { ...httpFailureEvidence(httpStatus, responseMetadata(raw, httpStatus, resolvedCredential).businessCode), ...(billedOnHttp200 && httpStatus === 400 ? { billed: false } : {}) },
         {
           ...archiveEvidence({ marketplace,
             raw,
@@ -1135,7 +1155,7 @@ export class TikHubAdapter {
         }
         throw upstreamError(
           'TikHub rejected the request',
-          httpFailureEvidence(httpStatus, Number.isInteger(raw?.code) ? raw.code : null),
+          httpFailureEvidence(httpStatus, responseMetadata(raw, httpStatus, resolvedCredential).businessCode),
           {
             ...archiveEvidence({
               raw,

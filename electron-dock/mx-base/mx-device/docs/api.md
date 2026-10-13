@@ -25,10 +25,15 @@
 | POST /api/jobs?mode=sim | 幂等提交搜索 / 详情 / 定义任务 |
 | POST /api/jobs/:id/cancel?mode=sim | 仅取消 queued，不取消在途执行 |
 | POST /api/scenarios?mode=sim | `{kind:five\|priority\|failover\|multiapp\|rack20,key}`；当前演示无活动任务时创建新场景 |
+| GET /api/pool-scenarios?mode=sim | 虚拟调度池的 8 类场景与默认策略；只读，不派发 |
+| POST /api/pool-simulate?mode=sim | `{scenario,deviceCount,seed,policy?}`；独立虚拟时钟对照，返回报告，不写入实际任务池 |
+| POST /api/loop-policy?mode=sim | `{rack,revision,...,scheduler?}`；模拟循环与池策略版本化更新 |
 | GET /health/live | API 进程存活，不检查外部设备 |
 | GET /health/ready | 本中心数据库可用，不检查 Hub、手机或 mx-rig |
 
 以上 mode 可按权限使用 sim / real，但场景只能 sim，probe 只能 real。没有任意 URL 转发或命令执行 API。
+
+调度池参数、场景和报告边界见 [任务调度中心方案](task-scheduling-center-2026-10-13.md#11-可重复场景与验收指标)。设备数量为 2/10/20/50/100，默认 mixed、10 台、seed 42。每 API 进程同时只计算一份报告，繁忙返回 429，6.5 秒计算超时返回 503。模拟设备登记可提供 `simApps:[xhs,weibo,xianyu]`、`simCommandCodes:[已登记代码]`；省略时兼容原小红书/微博设备。闲鱼仅支持模拟定义 `sim:xianyu.refresh:1`，不扩展旧搜索/详情端点。池软分配随 state 返回，属于预测，不是执行授权。
 
 Adapter 试运行仅 `sim`，`real` 返回 403。App 为 `xhs|weibo`；指令须在目录内且匹配 App，不接受内部 `session.restore`。服务端生成准备步骤：`app.open` 自身一条，其余先打开 App，`xhs.search.next` 还会先搜索。忽略调用方自传 plan/priority，固定为优先级 5 的小循环，仍遵守物理单槽、App 冷却、机架限额、暂停与检查点插入预算。新任务要求设备已启用且非隔离；相同 key/参数返回原 Job，更改命令、App、目标或关键词返回 409。Job 保存 `adapterTest:{code,appId}` 及冻结的 workflow plan，不自动新增任务定义；保存定义仍显式使用 `POST /api/task-definitions?mode=sim`。真实截图/状态/连接检查复用上表原有接口。
 

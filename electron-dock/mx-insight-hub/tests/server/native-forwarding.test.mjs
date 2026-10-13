@@ -117,7 +117,7 @@ test('TikHub native GET preserves an opaque pagination token without a request b
   assert.equal(calls, 1)
 })
 
-async function harness({ key = JKEY, grant = true, enabled = true, outcome = 'success', data = DATA } = {}) {
+async function harness({ key = JKEY, grant = true, enabled = true, outcome = 'success', data = DATA, upstreamResponse } = {}) {
   const endpoint = nativeForwardingEndpoint(key)
   const usageStore = new MemoryStore()
   const service = new HubService({ store: usageStore, adapter: {}, apiKeyPepper: PEPPER })
@@ -142,6 +142,7 @@ async function harness({ key = JKEY, grant = true, enabled = true, outcome = 'su
   const adapter = new Adapter({ token: 'fixture-j', apiKey: 'fixture-t', timeoutMs: 50, fetchImpl: async (_url, options) => {
     calls++
     dispatched.push(options.body ? JSON.parse(options.body) : null)
+    if (upstreamResponse) return upstreamResponse()
     if (outcome === 'unknown') throw new Error('connection closed after send')
     const code = outcome === 'rejected' ? (endpoint.provider === 'justone' ? 301 : 400) : endpoint.provider === 'justone' ? 0 : 200
     return Response.json({ code, message: 'fixture', recordTime: '2026-09-26', data: typeof data === 'function' ? data(dispatched.at(-1), calls) : data })
@@ -214,6 +215,73 @@ test('unknown and definitive failure keep the same request from redispatching, f
     assert.equal(h.calls(), 1)
     assert.equal(h.platformStore.calls.size, 1)
     if (outcome === 'unknown') assert.equal([...h.platformStore.calls.values()][0].billed, null)
+  }
+})
+
+test('TikHub nested error codes retain HTTP classification, unknown billing and immutable native replay', async () => {
+  for (const [httpStatus, businessCode, status, code, outcome] of [
+    [400, 302, 502, 'external_platform_rejected', 'rejected'],
+    [400, 600, 502, 'external_platform_rejected', 'rejected'],
+    [429, 600, 429, 'external_platform_capacity_exceeded', 'rejected'],
+    [503, 302, 502, 'external_platform_outcome_unknown', 'unknown'],
+  ]) {
+    const payload = { detail: { code: businessCode, request_id: 'native-nested-failure' } }
+    const h = await harness({ key: TKEY, upstreamResponse: () => Response.json(payload, { status: httpStatus }) })
+    let first
+    await assert.rejects(h.gateway.forwardNative(h.context, h.query), error => {
+      first = error
+      assert.equal(error.status, status)
+      assert.equal(error.code, code)
+      return true
+    })
+    await assert.rejects(h.gateway.forwardNative(h.context, h.query), error => {
+      assert.equal(error.status, outcome === 'unknown' ? 409 : first.status)
+      assert.equal(error.code, outcome === 'unknown' ? 'request_outcome_unknown' : first.code)
+      assert.deepEqual(error.details, first.details)
+      return true
+    })
+    assert.equal(h.calls(), 1)
+    assert.equal(h.platformStore.calls.size, 1)
+    const call = [...h.platformStore.calls.values()][0]
+    assert.equal(call.httpStatus, httpStatus)
+    assert.equal(call.businessCode, businessCode)
+    assert.equal(call.outcome, outcome)
+    assert.equal(call.billed, null)
+    const usage = h.usageStore.requests.get(first.details.requestId)
+    if (outcome === 'unknown') assert.equal(usage.status, 'unknown')
+    else {
+      assert.equal(usage.responseStatus, status)
+      assert.equal(usage.unitsActual, 0)
+    }
+    if (httpStatus === 400) {
+      assert.equal(usage.status, 'committed')
+      assert.equal(h.platformStore.state.consecutiveFailures, 0)
+      // Historical delivery evidence must retain its stored classification.
+      usage.responseStatus = 429
+      usage.responseBody.error.code = 'external_platform_capacity_exceeded'
+      await assert.rejects(h.gateway.forwardNative(h.context, h.query), {
+        status: 429, code: 'external_platform_capacity_exceeded',
+      })
+      assert.equal(h.calls(), 1)
+    }
+  }
+})
+
+test('JustOne business capacity codes retain their existing native statuses and unbilled replay', async () => {
+  for (const businessCode of [302, 303, 100, 600, 601, 602]) {
+    const status = [302, 303].includes(businessCode) ? 429 : 503
+    const code = status === 429 ? 'external_platform_capacity_exceeded' : 'external_platform_capacity_unavailable'
+    const h = await harness({ upstreamResponse: () => Response.json({ code: businessCode,
+      message: 'fixture', data: null, recordTime: '2026-10-13' }) })
+    await assert.rejects(h.gateway.forwardNative(h.context, h.query), { status, code })
+    await assert.rejects(h.gateway.forwardNative(h.context, h.query), { status, code })
+    assert.equal(h.calls(), 1)
+    const call = [...h.platformStore.calls.values()][0]
+    assert.equal(call.httpStatus, 200)
+    assert.equal(call.businessCode, businessCode)
+    assert.equal(call.billed, false)
+    assert.equal(call.outcome, 'rejected')
+    assert.equal(h.platformStore.calls.size, 1)
   }
 })
 

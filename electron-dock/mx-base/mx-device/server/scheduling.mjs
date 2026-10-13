@@ -1,29 +1,10 @@
-import {
-  AGING_INTERVAL_MS,
-  estimatedDuration,
-  taskLane,
-} from "./task-contract.mjs";
+import { estimatedDuration, taskLane } from "./task-contract.mjs";
+import { compareJobs, effectivePriority } from "./queue-order.mjs";
+export { compareJobs, effectivePriority } from "./queue-order.mjs";
 import { DEFAULT_LOOP_POLICY, loopPolicyFor } from "./loop-policy.mjs";
 import { deviceApps, appBlockers, deviceInterval, jobApp } from "./apps.mjs";
+import { planPool } from "./pool-planner.mjs";
 // Pure scheduling rules shared by claims and read-only explanations.
-export const effectivePriority = (job, now) =>
-  Math.max(
-    1,
-    job.priority -
-      Math.floor(Math.max(0, now - job.createdAt) / AGING_INTERVAL_MS),
-  );
-export const compareJobs = (now) => (a, b) => {
-  const priority = effectivePriority(a, now) - effectivePriority(b, now);
-  if (priority) return priority;
-  // Old jobs outrank fresh short jobs at equal effective priority. Among old jobs use FIFO.
-  if (Math.max(now - a.createdAt, now - b.createdAt) >= AGING_INTERVAL_MS)
-    return a.createdAt - b.createdAt || a.id.localeCompare(b.id);
-  return (
-    estimatedDuration(a) - estimatedDuration(b) ||
-    a.createdAt - b.createdAt ||
-    a.id.localeCompare(b.id)
-  );
-};
 export const matchesJob = (device, job) =>
   device.mode === job.mode &&
   (!job.deviceId || device.id === job.deviceId) &&
@@ -212,6 +193,13 @@ export function schedulingSnapshot(state, now, mode) {
   });
   const byDevice = new Map(availability.map((d) => [d.deviceId, d]));
   const byJob = new Map(jobs.map((j) => [j.id, j]));
+  const poolPlans =
+    mode === "sim"
+      ? (state.loopPolicies || [])
+          .filter((p) => p.mode === "sim" && p.scheduler?.enabled)
+          .map((p) => planPool(state, now, { rack: p.rack }))
+      : [];
+  const plansByRack = new Map(poolPlans.map((p) => [p.rack, p]));
   const waiting = queue.map((j, i) => {
     const reasons = [];
     if (j.notBefore > now)
@@ -241,7 +229,20 @@ export function schedulingSnapshot(state, now, mode) {
       ...(d.workflowAttemptId ? insertionBlockers(state, now, d, j) : []),
       ...appBlockers(state, now, d, j),
     ];
-    const ready = candidates.filter((d) => candidateReasons(d).length === 0);
+    const ready = candidates.filter(
+      (d) =>
+        candidateReasons(d).length === 0 &&
+        (!plansByRack.has(d.rack) ||
+          plansByRack
+            .get(d.rack)
+            .assignments.some(
+              (a) =>
+                a.jobId === j.id &&
+                a.deviceId === d.id &&
+                a.startAt <= now &&
+                a.queuePosition === 1,
+            )),
+    );
     if (!candidates.length)
       reasons.push({ code: "no-device", message: "没有匹配的已登记设备" });
     else if (!ready.length) {
@@ -254,8 +255,26 @@ export function schedulingSnapshot(state, now, mode) {
           }
         }
     }
+    const legacyReady = ready.some((d) => !plansByRack.has(d.rack));
+    const poolAssignment =
+      !legacyReady &&
+      poolPlans
+        .flatMap((p) => p.assignments)
+        .filter((a) => a.jobId === j.id)
+        .sort((a, b) => a.finishAt - b.finishAt)[0];
+    const poolBlocked = poolPlans
+      .flatMap((p) => p.blocked)
+      .find((b) => b.jobId === j.id);
+    if (!ready.length && poolAssignment && poolAssignment.startAt > now)
+      reasons.push({
+        code: "pool-soft-queue",
+        message: `${poolAssignment.reason}；软排队约 ${Math.ceil((poolAssignment.startAt - now) / 1000)} 秒，尚未绑定设备`,
+      });
+    else if (!ready.length && !poolAssignment && poolBlocked)
+      reasons.push({ code: poolBlocked.code, message: poolBlocked.reason });
     return {
       jobId: j.id,
+      poolAssignment: poolAssignment || null,
       order: i + 1,
       effectivePriority: effectivePriority(j, now),
       estimatedDurationMs: estimatedDuration(j),
@@ -310,6 +329,7 @@ export function schedulingSnapshot(state, now, mode) {
   return {
     at: now,
     groups,
+    poolPlans,
     devices: availability,
     queue: waiting,
     counts: {

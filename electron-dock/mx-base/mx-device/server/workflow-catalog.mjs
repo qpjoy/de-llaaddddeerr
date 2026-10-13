@@ -1,6 +1,14 @@
 // Logical command codes; only the simulator executes this catalog today.
 export const COMMANDS = [
   {
+    code: "xianyu.refresh",
+    name: "闲鱼下拉刷新",
+    appId: "xianyu",
+    estimateMs: 1800,
+    effect: "read",
+    mapping: "仅模拟；待 adapter：刷新完成与结构化结果证据",
+  },
+  {
     code: "app.open",
     name: "打开目标 App",
     appId: null,
@@ -113,6 +121,10 @@ const def = (code, name, appId, loop, steps, resumable = false) => ({
   executionModel: "checkpoint-session.v1",
 });
 export const BUILTIN_DEFINITIONS = [
+  def("xianyu.refresh", "闲鱼 · 下拉刷新", "xianyu", "small", [
+    { code: "app.open", repeat: 1 },
+    { code: "xianyu.refresh", repeat: 1 },
+  ]),
   def("weibo.list", "微博 · 浏览列表", "weibo", "small", [
     { code: "app.open", repeat: 1 },
     { code: "weibo.list", repeat: 1 },
@@ -169,7 +181,7 @@ export const DEMO_RACK = "调度实验机架";
 export function adapterTestDefinition(code, appId) {
   const command = commandByCode(code);
   if (
-    !["xhs", "weibo"].includes(appId) ||
+    !["xhs", "weibo", "xianyu"].includes(appId) ||
     !command ||
     command.internal ||
     (command.appId && command.appId !== appId)

@@ -30,6 +30,9 @@ import {
 import { configurePacing } from "./pacing.mjs";
 import { controlResource, updatePlacement } from "./resources.mjs";
 import { schedulingSnapshot } from "./scheduling.mjs";
+import { Worker } from "node:worker_threads";
+import { POOL_SCENARIOS, simulationOptions } from "./pool-simulator.mjs";
+import { DEFAULT_POOL_POLICY } from "./pool-policy.mjs";
 
 const equal = (a, b) =>
   typeof a === "string" &&
@@ -68,6 +71,43 @@ const summarize = (s) => ({
 export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
   const failures = new Map(),
     probeRequests = new Map();
+  let simulationBusy = false;
+  async function benchmark(options) {
+    if (simulationBusy)
+      throw new Fault("已有调度演练正在计算，请稍后重试", 429);
+    simulationBusy = true;
+    let worker;
+    try {
+      return await new Promise((resolve, reject) => {
+        worker = new Worker(
+          new URL("./pool-simulation-worker.mjs", import.meta.url),
+          { workerData: options },
+        );
+        const timer = setTimeout(
+          () => reject(new Fault("演练计算超时，请缩小规模或调整预算", 503)),
+          6500,
+        );
+        const done = (fn, value) => {
+          clearTimeout(timer);
+          fn(value);
+        };
+        worker.once("message", (value) =>
+          value.error
+            ? done(reject, new Fault(value.error, value.status))
+            : done(resolve, value.report),
+        );
+        worker.once("error", () =>
+          done(reject, new Fault("演练计算失败", 500)),
+        );
+        worker.once("exit", (code) => {
+          if (code) done(reject, new Fault("演练工作线程退出", 500));
+        });
+      });
+    } finally {
+      if (worker) await worker.terminate();
+      simulationBusy = false;
+    }
+  }
   const sign = (payload) =>
     createHmac("sha256", cfg.adminToken).update(payload).digest("hex");
   function role(req) {
@@ -152,6 +192,18 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
         const mode = realm(url.searchParams.get("mode") || "sim");
         if (who === "test" && mode !== "sim")
           throw new Fault("测试凭证仅允许模拟模式", 403);
+        if (path === "/api/pool-scenarios" && req.method === "GET") {
+          if (mode !== "sim") throw new Fault("调度池演练仅允许模拟模式", 403);
+          return json(res, 200, {
+            scenarios: POOL_SCENARIOS,
+            defaults: DEFAULT_POOL_POLICY,
+          });
+        }
+        if (path === "/api/pool-simulate" && req.method === "POST") {
+          if (mode !== "sim") throw new Fault("调度池演练仅允许模拟模式", 403);
+          const options = simulationOptions(await body(req));
+          return json(res, 200, await benchmark(options));
+        }
         if (path === "/api/state" && req.method === "GET") {
           const state = await store.snapshot(mode);
           return json(res, 200, {

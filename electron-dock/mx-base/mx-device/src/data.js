@@ -95,7 +95,7 @@ export const labels = {
 export const time = (value) =>
   value ? new Date(value).toLocaleTimeString("zh-CN", { hour12: false }) : "—";
 export const appName = (appId = "xhs") =>
-  ({ xhs: "小红书", weibo: "微博" })[appId] || appId;
+  ({ xhs: "小红书", weibo: "微博", xianyu: "闲鱼" })[appId] || appId;
 const operationTitle = (j) =>
   j.operation === "search"
     ? `搜索 · ${j.input.keyword}`

@@ -223,10 +223,13 @@ function publicFailure(error) {
       `External social data request failed (upstreamStatus: ${evidence.httpStatus ?? 'unknown'}${evidence.businessCode != null ? `, upstreamCode: ${evidence.businessCode}` : ''})`,
       { upstreamStatus: evidence.httpStatus, ...(evidence.businessCode != null ? {upstreamCode:evidence.businessCode} : {}), outcome: evidence.outcome, retryable: false })
   }
-  if (evidence.businessCode === 302 || evidence.businessCode === 303 || evidence.httpStatus === 429) {
+  // Business capacity codes belong to JustOne. Other suppliers may reuse
+  // those numbers in error metadata without reporting a capacity failure.
+  if (evidence.httpStatus === 429
+    || (error instanceof JustOneUpstreamError && [302, 303].includes(evidence.businessCode))) {
     return new AppError(429, 'external_platform_capacity_exceeded', 'External data capacity is temporarily exhausted')
   }
-  if ([100, 600, 601, 602].includes(evidence.businessCode)) {
+  if (error instanceof JustOneUpstreamError && [100, 600, 601, 602].includes(evidence.businessCode)) {
     return new AppError(503, 'external_platform_capacity_unavailable', 'External data capacity is unavailable')
   }
   if (evidence.outcome === 'succeeded_unusable') {

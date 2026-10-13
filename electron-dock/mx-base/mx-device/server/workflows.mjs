@@ -1,4 +1,5 @@
 import { randomUUID, createHash } from "node:crypto";
+import { recordCommandTiming } from "./command-timing.mjs";
 import {
   requireThat,
   str,
@@ -50,7 +51,7 @@ export function saveDefinition(s, now, mode, body) {
     name = str(body.name, "定义名称", 80);
   requireThat(/^[a-z][a-z0-9_.-]{2,59}$/.test(code), "定义代码格式无效", 400);
   requireThat(
-    ["xhs", "weibo"].includes(body.appId) &&
+    ["xhs", "weibo", "xianyu"].includes(body.appId) &&
       ["small", "large"].includes(body.loop),
     "无效 App 或循环类型",
     400,
@@ -297,6 +298,7 @@ export function claimContinuation(s, now, mode, workerId) {
       p = w.policySnapshot;
     if (d.cooldownUntil > now) continue;
     const canInsert =
+      !loopPolicyFor(s, d)?.scheduler?.enabled &&
       w.safePoint &&
       w.resumable &&
       d.enabled &&
@@ -539,6 +541,7 @@ export function completeCommand(s, now, a, c, r) {
   row.status = "succeeded";
   row.completedAt = now;
   row.receipt = r;
+  recordCommandTiming(d, row, now);
   if (row.restoring) {
     w.restorePending = false;
   } else {

@@ -1,5 +1,6 @@
 import DefinitionForm from "./DefinitionForm.jsx";
 import DevicePresentation from "./DevicePresentation.jsx";
+import PoolSimulator from "./PoolSimulator.jsx";
 import { useState } from "react";
 import {
   PlayCircle,
@@ -104,8 +105,11 @@ export default function SchedulerLab({
           <span className="lab-eyebrow">SIMULATION / 10 SLOTS</span>
           <h2>看见任务怎样流过一座机架</h2>
           <p className="muted">
-            5 个大循环 + 15
-            个小任务。每槽一条指令流，检查点可插入，冷却独立计时。
+            5 个大循环 + 15 个小任务。每槽一条指令流，
+            {policy.scheduler?.enabled
+              ? "池策略下完整会话独占"
+              : "检查点可插入"}
+            ，冷却独立计时。
           </p>
         </div>
         <div className="button-row">
@@ -147,9 +151,10 @@ export default function SchedulerLab({
           <div>
             <h2>{DEMO_RACK}</h2>
             <p className="small muted">
-              每个大任务最多插入 {policy.maxInsertions} 个小任务 · 插入预算{" "}
-              {policy.maxDetourMs / 1000} 秒 · 每条模拟指令{" "}
-              {policy.commandDelayMs / 1000} 秒
+              {policy.scheduler?.enabled
+                ? "已启用调度池策略 · 完整会话不插入其他任务"
+                : `每个大任务最多插入 ${policy.maxInsertions} 个小任务 · 插入预算 ${policy.maxDetourMs / 1000} 秒`}{" "}
+              · 每条模拟指令 {policy.commandDelayMs / 1000} 秒
             </p>
           </div>
           <button
@@ -256,6 +261,12 @@ export default function SchedulerLab({
           插槽是本中心的模拟资源。点击插槽打开手机展示层，查看指令与累计时间；演示会保留任务、策略和冷却历史。
         </p>
       </section>
+      <PoolSimulator
+        policy={policy}
+        busy={busy}
+        run={run}
+        canApply={devices.length > 0}
+      />
       <Timeline
         devices={devices}
         commands={commands}

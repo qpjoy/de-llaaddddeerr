@@ -92,6 +92,7 @@ export default function DefinitionForm({
           >
             <option value="xhs">小红书</option>
             <option value="weibo">微博</option>
+            <option value="xianyu">闲鱼（模拟）</option>
           </select>
         </label>
         <label>
@@ -169,7 +170,10 @@ export default function DefinitionForm({
           update("steps", [
             ...steps,
             {
-              code: draft.appId === "xhs" ? "xhs.list" : "weibo.list",
+              code:
+                draft.appId === "xianyu"
+                  ? "xianyu.refresh"
+                  : `${draft.appId}.list`,
               repeat: 1,
             },
           ])
