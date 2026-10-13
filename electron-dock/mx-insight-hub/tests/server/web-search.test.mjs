@@ -129,3 +129,25 @@ test('concurrent same intent dispatches once; a new intent honors the changed Ke
 test('bulk provisioning uses the Web Search domain and grants the explicitly chosen supplier',()=>{
  for(const p of WEB_SEARCH_PROVIDERS){const row=PROVISIONING_OPERATIONS.find(row=>row.id===`${p.key}:web.search`);assert.equal(row.platform,'web_search');assert.equal(row.capability,'web.search');assert.deepEqual(row.additionalCapabilities,[p.capability]);assert.equal(row.meterKey,'web.search')}
 })
+
+test('Web Search preserves cancellation through supplier selection while queued', async () => {
+  const h = await harness({ providers: ['baidu'] })
+  const gateway = h.search.gateways.get('baidu')
+  h.config.maxConcurrency = 1
+  gateway.active = 1
+  const controller = new AbortController()
+  const queued = Promise.withResolvers()
+  const enter = gateway.concurrencyQueue.enter.bind(gateway.concurrencyQueue)
+  gateway.concurrencyQueue.enter = input => { const result = enter(input); queued.resolve(); return result }
+  const pending = h.search.search(h.context, { body: { query: 'cancel before dispatch' },
+    idempotencyKey: 'web-search-queued-cancel', signal: controller.signal })
+  const rejected = assert.rejects(pending, { code: 'request_cancelled' })
+  await queued.promise
+  assert.equal(gateway.concurrencyQueue.entries.length, 1)
+  controller.abort()
+  await rejected
+  assert.equal(gateway.concurrencyQueue.entries.length, 0)
+  assert.equal(h.calls.length, 0)
+  assert.equal(gateway.platformStore.calls.size, 0)
+  gateway.active = 0
+})

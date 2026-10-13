@@ -3475,16 +3475,16 @@ export class HubService {
       estimateOnly: true, dispatches: 0, carriedSources: page?.carriedSources.length || 0 }
   }
 
-  async aggregateSearch(context, { body, idempotencyKey, path, products, hubSocial, onProgress }) {
+  async aggregateSearch(context, { body, idempotencyKey, path, products, hubSocial, onProgress, signal }) {
     const { sources } = await this.aggregateSources(context, body?.execution)
     const aggregate = normalizeAggregateRequest(body, sources)
     return this.canonicalSearch(context, {
       body: { query: aggregate.query, pageSize: aggregate.pageSize, ...(aggregate.cursor && aggregate.mode === 'stored' ? { cursor: aggregate.cursor } : {}) },
-      idempotencyKey, path, aggregate, originalBody: body, products, hubSocial, onProgress,
+      idempotencyKey, path, aggregate, originalBody: body, products, hubSocial, onProgress, signal,
     })
   }
 
-  async canonicalSearch(context, { body, idempotencyKey, path, aggregate = null, originalBody = body, products, hubSocial, onProgress }) {
+  async canonicalSearch(context, { body, idempotencyKey, path, aggregate = null, originalBody = body, products, hubSocial, onProgress, signal }) {
     assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
     assert(
       typeof idempotencyKey === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey),
@@ -3655,9 +3655,9 @@ export class HubService {
           const refreshed = await refreshAggregate({ ...aggregate, routes: page.routes }, {
             requestId: page.rootId || activeRequestId, pageIndex: page.pageIndex,
             onProgress, ...execution,
-            search: input => this.search(context, { ...input, liveOnly: true }),
-            hubSocial: input => hubSocial ? hubSocial(context, input) : Promise.reject(new AppError(503, 'social_data_unavailable', 'Hub social data is unavailable')),
-            products: input => products ? products(context, input) : Promise.reject(new AppError(503, 'source_unavailable', 'Product search is unavailable')),
+            search: input => this.search(context, { ...input, liveOnly: true, ...(signal ? { signal } : {}) }),
+            hubSocial: input => hubSocial ? hubSocial(context, { ...input, ...(signal ? { signal } : {}) }) : Promise.reject(new AppError(503, 'social_data_unavailable', 'Hub social data is unavailable')),
+            products: input => products ? products(context, { ...input, ...(signal ? { signal } : {}) }) : Promise.reject(new AppError(503, 'source_unavailable', 'Product search is unavailable')),
           })
           const items = refreshed.items
           const livePlatforms = new Set(aggregate.routes.map(route => route.platform))
@@ -4276,7 +4276,7 @@ export class HubService {
       throw new AppError(503, 'facebook_search_unavailable', 'Facebook search is unavailable')
     }
     if (operation === 'raw' && this.externalRawSearch && canRouteRawSearch(normalized)) {
-      return this.externalRawSearch(context, { normalized, body, idempotencyKey })
+      return this.externalRawSearch(context, { normalized, body, idempotencyKey, ...(signal ? { signal } : {}) })
     }
     const directUserActivity = directXiaohongshuLegacyUserActivityRequest(operation, normalized)
     if (
@@ -4293,6 +4293,7 @@ export class HubService {
       )
     ) {
       return this.externalSocialUserActivity(context, {
+        ...(signal ? { signal } : {}),
         operation,
         body: directUserActivity.body,
         idempotencyKey,
@@ -4738,6 +4739,7 @@ export class HubService {
     if (platform === 'facebook' && !this.externalDataSearch) throw new AppError(503, 'facebook_search_unavailable', 'Facebook search is unavailable')
     if (path === '/api/v1/data/search' && this.externalDataSearch && canRouteDataSearch(upstreamBody)) {
       return this.externalDataSearch(context, { body, normalized: upstreamBody, idempotencyKey,
+        ...(signal ? { signal } : {}),
         dataSearch: { resultType, replayWindowMs: replayWindowFor(resultType) } })
     }
     if (

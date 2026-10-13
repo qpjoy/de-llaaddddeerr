@@ -43,3 +43,35 @@ test('a caller blocked by its own quota does not hold up another eligible caller
   eligible = true; queue.drain(); await first
   assert.equal(queue.entries.length, 0)
 })
+
+
+test('queue errors identify the Hub business and stage and do not claim supplier rejection', async () => {
+  const queue = new ConcurrencyAdmissionQueue()
+  for (const [platform, label] of [['enterprise', '企业数据'], ['xiaohongshu', '小红书数据'], ['ip_risk', 'IP 风险数据']]) {
+    await assert.rejects(queue.enter({ maxPending: 0, deadline: Date.now() + 1000, tryEnter: () => false,
+      details: { platform, operation: 'query' } }), error => {
+      assert.match(error.message, new RegExp(label))
+      assert.match(error.message, /队列已满/u)
+      assert.equal(error.details.layer, 'hub')
+      assert.equal(error.details.stage, 'concurrency_admission')
+      assert.equal(error.details.platform, platform)
+      assert.equal(error.details.reason, 'concurrency_queue_full')
+      assert.equal(error.details.upstreamDispatched, false)
+      return true
+    })
+  }
+  await assert.rejects(queue.enter({ maxPending: 1, deadline: Date.now() + 10, tryEnter: () => false,
+    details: { platform: 'enterprise' } }), error => /企业数据.*超时/u.test(error.message))
+})
+
+test('an admission callback failure cleans its waiter without stranding later callers', async () => {
+  const queue = new ConcurrencyAdmissionQueue()
+  let ready = false
+  const first = queue.enter({ maxPending: 2, deadline: Date.now() + 1000,
+    tryEnter() { if (ready) throw new Error('admission failed'); return false } })
+  const rejected = assert.rejects(first, /admission failed/)
+  const second = queue.enter({ maxPending: 2, deadline: Date.now() + 1000, tryEnter: () => ready })
+  ready = true; queue.drain()
+  await rejected; await second
+  assert.equal(queue.entries.length, 0)
+})

@@ -2182,3 +2182,161 @@ test('live_only surfaces a control-plane block instead of quietly serving stored
     (error) => error.code === 'external_platform_not_configured',
   )
 })
+
+const queuedSearch = (query, extra = {}) => ({ body: { marketplace: 'jd', query },
+  idempotencyKey: `queued-${query}`, path: '/api/v1/data/ecommerce/products/search', ...extra })
+
+async function waitForQueue(gateway, depth = 1) {
+  for (let i = 0; i < 100 && gateway.concurrencyQueue.entries.length !== depth; i++) await new Promise(resolve => setTimeout(resolve, 2))
+  assert.equal(gateway.concurrencyQueue.entries.length, depth)
+}
+
+async function queueFixture(overrides = {}) {
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const calls = []
+  const state = await fixture({ gatewayConfig: config({ maxConcurrency: 1, maxConsumerConcurrency: 1,
+    concurrencyQueue: { maxWaitMs: 1000, maxPending: 4 }, ...overrides }),
+    adapter: { async searchProducts(body, options) {
+      calls.push(body.query)
+      if (body.query === 'blocker') await gate
+      return successfulResult(body, options)
+    } } })
+  const blocker = state.gateway.search(state.context, queuedSearch('blocker'))
+  for (let i = 0; i < 100 && !calls.length; i++) await new Promise(resolve => setTimeout(resolve, 2))
+  assert.deepEqual(calls, ['blocker'])
+  return { ...state, calls, blocker, release }
+}
+
+test('generic gateway queues saturation without holding dispatch leases or purchasing provider capacity', async () => {
+  const state = await queueFixture()
+  const pending = state.gateway.search(state.context, queuedSearch('next-query'))
+  await waitForQueue(state.gateway)
+  assert.equal(state.platformStore.calls.size, 1)
+  assert.equal(state.platformStore.leases.size, 1, 'only the dispatched request keeps its lease')
+  assert.equal(state.platformStore.costReservations.size, 1)
+  await assert.rejects(state.gateway.search(state.context, queuedSearch('next-query')), { code: 'request_in_progress' })
+  state.release()
+  const results = await Promise.all([state.blocker, pending])
+  assert.equal(results.every(result => result.status === 200), true)
+  assert.deepEqual(state.calls, ['blocker', 'next-query'])
+  assert.equal(state.gateway.active, 0)
+  assert.equal(state.gateway.activeByConsumer.size, 0)
+  assert.equal(state.platformStore.leases.size, 0)
+  assert.equal(state.gateway.concurrencyQueue.entries.length, 0)
+})
+
+test('generic gateway reuses a fresh permitted snapshot published by an earlier queued request', async () => {
+  const state = await queueFixture()
+  const first = state.gateway.search(state.context, queuedSearch('shared-query'))
+  await waitForQueue(state.gateway)
+  const second = state.gateway.search(state.context, queuedSearch('shared-query', { idempotencyKey: 'queued-shared-second' }))
+  await waitForQueue(state.gateway, 2)
+  state.release()
+  const [, live, cached] = await Promise.all([state.blocker, first, second])
+  assert.equal(live.sourceMode, 'live')
+  assert.equal(cached.sourceMode, 'fresh_cache')
+  assert.deepEqual(state.calls, ['blocker', 'shared-query'])
+  assert.equal(state.platformStore.calls.size, 2)
+})
+
+test('generic queue full, timeout and cancellation release customer reservations without dispatch', async t => {
+  for (const scenario of ['full', 'timeout', 'cancel']) await t.test(scenario, async () => {
+    const state = await queueFixture({ concurrencyQueue: { maxWaitMs: scenario === 'timeout' ? 30 : 1000, maxPending: 1 } })
+    const abort = new AbortController()
+    const pending = state.gateway.search(state.context, queuedSearch('waiting-query', { signal: abort.signal })).catch(error => error)
+    await waitForQueue(state.gateway)
+    if (scenario === 'full') {
+      const error = await state.gateway.search(state.context, queuedSearch('overflow-query')).catch(error => error)
+      assert.equal(error.status, 429)
+      assert.equal(error.code, 'external_platform_busy')
+      assert.equal(error.details.reason, 'concurrency_queue_full')
+      assert.equal(error.details.upstreamDispatched, false)
+      assert.equal(error.details.platform, 'ecommerce')
+      abort.abort()
+    } else if (scenario === 'cancel') abort.abort()
+    const error = await pending
+    assert.equal(error.code, scenario === 'timeout' ? 'external_platform_busy' : 'request_cancelled')
+    if (scenario === 'timeout') assert.equal(error.details.reason, 'concurrency_queue_timeout')
+    assert.equal(state.platformStore.calls.size, 1)
+    assert.equal([...state.usageStore.requests.values()].filter(request => request.status === 'reserved').length, 1)
+    assert.equal(state.gateway.concurrencyQueue.entries.length, 0)
+    state.release(); await state.blocker
+    assert.equal(state.gateway.active, 0)
+  })
+})
+
+test('queued requests revalidate current authorization, plan, credential, control and circuit', async t => {
+  const changes = {
+    revoked_key: state => state.usageStore.apiKeys.get(state.context.apiKey.id).status = 'revoked',
+    removed_grant: state => state.usageStore.setPlatformGrant(state.context.consumer.id, 'ecommerce', false),
+    removed_capability: state => { state.usageStore.listEffectiveCapabilityGrants = async () => [] },
+    unpublished_plan: state => { state.usageStore.getConsumerPlan = async () => null },
+    unavailable_credential: state => { state.gateway.adapter.resolveCredential = async () => null },
+    paused_operation: state => { state.gateway.operationControlStore = { authorizeDispatch: async () => { throw new AppError(503, 'operation_paused', 'Paused') } } },
+    provider_circuit: state => { state.platformStore.providerState = async () => ({ circuitOpenUntil: new Date(Date.now() + 60000).toISOString() }) },
+    invalidated_page_size: state => { state.usageStore.getApiKeyPlatformEntitlement = async () => ({ maxPageSize: 0 }) },
+  }
+  for (const [name, change] of Object.entries(changes)) await t.test(name, async () => {
+    const state = await queueFixture()
+    const pending = state.gateway.search(state.context, queuedSearch('waiting-query')).catch(error => error)
+    await waitForQueue(state.gateway)
+    await change(state)
+    state.release(); await state.blocker
+    const error = await pending
+    assert.ok(error instanceof AppError)
+    assert.deepEqual(state.calls, ['blocker'])
+    assert.equal(state.gateway.active, 0)
+    assert.equal(state.platformStore.leases.size, 0)
+    assert.equal([...state.usageStore.requests.values()].every(request => request.status !== 'reserved'), true)
+  })
+})
+
+test('queued request reacquires dispatch protection and preserves original reservation deadline', async () => {
+  const state = await queueFixture()
+  const acquisitions = []
+  const acquire = state.platformStore.acquireDispatchLease.bind(state.platformStore)
+  state.platformStore.acquireDispatchLease = async lease => {
+    acquisitions.push(lease)
+    if (acquisitions.length === 2) return { kind: 'blocked', reason: 'unknown' }
+    return acquire(lease)
+  }
+  const pending = state.gateway.search(state.context, queuedSearch('waiting-query')).catch(error => error)
+  await waitForQueue(state.gateway)
+  state.release(); await state.blocker
+  const error = await pending
+  assert.equal(error.code, 'request_outcome_unknown')
+  assert.equal(error.details.upstreamDispatched, false)
+  assert.equal(acquisitions.length, 2)
+  const original = [...state.usageStore.requests.values()].find(row => row.idempotencyKey === 'queued-waiting-query')
+  assert.equal(acquisitions[1].expiresAt.toISOString(), original.leaseExpiresAt)
+  assert.deepEqual(state.calls, ['blocker'])
+  assert.equal(state.gateway.active, 0)
+})
+
+test('queue cannot spend the timeout and settlement time reserved by the original customer lease', async () => {
+  const state = await queueFixture()
+  state.gateway.reservationLeaseMs = state.gateway.config.timeoutMs + 1000
+  const error = await state.gateway.search(state.context, queuedSearch('short-deadline')).catch(error => error)
+  assert.equal(error.code, 'external_platform_busy')
+  assert.equal(error.details.reason, 'concurrency_queue_timeout')
+  assert.equal(state.gateway.concurrencyQueue.entries.length, 0)
+  assert.deepEqual(state.calls, ['blocker'])
+  state.release(); await state.blocker
+})
+
+test('one consumer waiting at its cap does not block another eligible consumer', async () => {
+  const state = await queueFixture({ maxConcurrency: 2 })
+  const pending = state.gateway.search(state.context, queuedSearch('waiting-query'))
+  await waitForQueue(state.gateway)
+  const consumer = await state.hub.createConsumer({ tenantId: state.context.tenant.id, name: 'Queue fairness consumer' })
+  await state.usageStore.setPlatformGrant(consumer.id, 'ecommerce', true)
+  await state.hub.putCapabilityConfiguration(JUSTONE_OPERATION, { tenantId: state.context.tenant.id, consumerId: consumer.id, enabled: true })
+  const key = await state.hub.createApiKey({ consumerId: consumer.id, name: 'Queue fairness key', platforms: ['ecommerce'], capabilities: [JUSTONE_OPERATION] })
+  const other = await state.gateway.search(await state.hub.authenticate(key.secret), queuedSearch('other-consumer'))
+  assert.equal(other.status, 200)
+  assert.deepEqual(state.calls, ['blocker', 'other-consumer'])
+  assert.equal(state.gateway.concurrencyQueue.entries.length, 1)
+  state.release(); await Promise.all([state.blocker, pending])
+  assert.equal(state.gateway.active, 0)
+})

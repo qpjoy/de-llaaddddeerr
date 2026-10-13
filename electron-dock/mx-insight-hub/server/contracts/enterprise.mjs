@@ -69,7 +69,7 @@ export function normalizeEnterpriseRequest(id, input) {
 }
 
 export const QIXIN_CONFIG = Object.freeze({ contractVerified: true, configured: false,
-  maxConcurrency: 3, maxConsumerConcurrency: 1, maxRequestsPerMinute: 30,
+  maxConcurrency: 10, maxConsumerConcurrency: 10, maxRequestsPerMinute: 30,
   freshTtlMs: 3600000, staleTtlMs: 86400000,
   billing: { currency: 'CNY', source: 'manual', pricingAsOf: QIXIN_OFFICIAL_PRICES.observedAt, freeDailyCalls: null,
     unitCostMinorByEndpoint: Object.fromEntries([...prices].filter(([, price]) => price !== null).map(([id, price]) => [enterpriseEndpoint(id), price])),

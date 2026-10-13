@@ -630,7 +630,7 @@ export class TikHubGateway {
       // remain authoritative. No dispatch lock or provider budget is held here.
       await this.platformStore.releaseDispatchLease(lease)
       await this.concurrencyQueue.enter({ tryEnter: () => this.#enter(context), deadline,
-        maxPending: policy.maxPending, signal })
+        maxPending: policy.maxPending, signal, details: { platform: XIAOHONGSHU_PLATFORM, operation: delivery.operation } })
       entered = true
       context = await revalidate() || context
       if (!isInternalTraffic(this.usageStore, context)
@@ -653,9 +653,10 @@ export class TikHubGateway {
       return true
     } catch (error) {
       if (entered) this.#leave(context.consumer.id)
-      if (error.code === 'external_platform_busy') error.details = { ...error.details,
+      if (error.code === 'external_platform_busy') error = concurrencyBusy(error.details?.reason, { ...error.details,
+        platform: XIAOHONGSHU_PLATFORM, operation: delivery.operation,
         activeConcurrency: this.active, maxConcurrency: this.config.maxConcurrency,
-        queueDepth: this.concurrencyQueue.entries.length, maxPending: policy.maxPending }
+        queueDepth: this.concurrencyQueue.entries.length, maxPending: policy.maxPending })
       await this.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable',
         status: error.status || 503, errorCode: error.code || 'external_platform_unavailable' })
       throw error

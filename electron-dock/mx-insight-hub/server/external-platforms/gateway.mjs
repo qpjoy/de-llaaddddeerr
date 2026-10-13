@@ -1,5 +1,6 @@
 import { isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { circuitOpenError } from './availability-errors.mjs'
+import { ConcurrencyAdmissionQueue, DEFAULT_CONCURRENCY_QUEUE, concurrencyBusy } from './concurrency-admission.mjs'
 import { WebSearchUpstreamError } from '../adapters/web-search.mjs'
 import { gatewayWebSearchRequest } from '../web-search/contract.mjs'
 import { assertEnterpriseCallable, normalizeEnterpriseRequest, enterpriseOperation, ENTERPRISE_DATASET, ENTERPRISE_CAPABILITY } from '../contracts/enterprise.mjs'
@@ -309,6 +310,7 @@ export class ExternalPlatformGateway {
     providerKey = 'justone',
     defaultPolicy = DEFAULT_POLICY,
     logger = console,
+    admissionClock = Date.now,
   }) {
     this.providerKey = providerKey
     this.usageStore = usageStore
@@ -324,6 +326,8 @@ export class ExternalPlatformGateway {
     this.logger = logger
     this.active = 0
     this.activeByConsumer = new Map()
+    this.admissionClock = admissionClock
+    this.concurrencyQueue = new ConcurrencyAdmissionQueue({ clock: admissionClock })
   }
 
   #enter(context) {
@@ -343,6 +347,73 @@ export class ExternalPlatformGateway {
     const next = Math.max(0, (this.activeByConsumer.get(consumerId) || 1) - 1)
     if (next === 0) this.activeByConsumer.delete(consumerId)
     else this.activeByConsumer.set(consumerId, next)
+    this.concurrencyQueue.drain()
+  }
+
+  async #revalidateWaitingIdentity(context, platform, plan) {
+    const current = await this.usageStore.findApiKeyById(context.apiKey.id)
+    if (!current || current.apiKey.status !== 'active' || current.consumer.id !== context.consumer.id
+      || current.tenant.id !== context.tenant.id) throw new AppError(403, 'capability_not_granted', 'Access changed while waiting')
+    const grants = await this.usageStore.listEffectiveGrants(current.consumer.id, current.apiKey.id)
+    const capabilities = await this.usageStore.listEffectiveCapabilityGrants(current.consumer.id, current.apiKey.id)
+    const required = [...(!plan.platformSearch ? [plan.capability || plan.operation] : []), ...(plan.requiredCapabilities || [])]
+    if (!grants.includes(platform) || required.some(key => !capabilities.includes(key))) {
+      throw new AppError(403, 'capability_not_granted', 'Access changed while waiting')
+    }
+    const assignment = await this.usageStore.getConsumerPlan(current.consumer.id)
+    if (!assignment || assignment.status !== 'active' || assignment.versionStatus !== 'published') {
+      throw new AppError(503, 'plan_assignment_unavailable', 'An active published plan assignment is required')
+    }
+    return { ...context, ...current }
+  }
+
+  async #enterOrQueue(context, { lease, delivery, expiresAt, signal, platform, canWait, revalidate }) {
+    if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+    if (!this.concurrencyQueue.entries.length && this.#enter(context)) return true
+    if (!canWait) return false
+    const policy = { ...DEFAULT_CONCURRENCY_QUEUE, ...this.config.concurrencyQueue }
+    const deadline = Math.min(this.admissionClock() + policy.maxWaitMs,
+      new Date(expiresAt).getTime() - (this.config.timeoutMs || 30000) - 5000)
+    let entered = false
+    try {
+      // A queued HTTP request holds only its original customer reservation.
+      // Reclaim the shared dispatch lease after waiting so new unknown-outcome
+      // evidence remains authoritative, without extending the reservation.
+      await this.platformStore.releaseDispatchLease(lease)
+      await this.concurrencyQueue.enter({ tryEnter: () => this.#enter(context), deadline,
+        maxPending: policy.maxPending, signal })
+      entered = true
+      context = await revalidate()
+      if (!(this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context))
+        && (this.activeByConsumer.get(context.consumer.id) || 0) > this.config.maxConsumerConcurrency) {
+        throw concurrencyBusy('consumer_concurrency_changed')
+      }
+      if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+      if (this.admissionClock() >= deadline) throw concurrencyBusy('concurrency_queue_timeout')
+      const claim = await this.platformStore.acquireDispatchLease(lease)
+      if (claim !== true && claim?.kind !== 'acquired') {
+        const code = claim?.reason === 'unknown' ? 'request_outcome_unknown'
+          : claim?.reason === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'request_in_progress'
+        throw new AppError(409, code, 'Dispatch protection changed while waiting', {
+          upstreamDispatched: false, ...(claim?.blockedUntil ? { blockedUntil: claim.blockedUntil } : {}),
+        })
+      }
+      if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+      if (this.admissionClock() >= deadline) throw concurrencyBusy('concurrency_queue_timeout')
+      return true
+    } catch (cause) {
+      if (entered) this.#leave(context.consumer.id)
+      const error = cause.code === 'external_platform_busy' ? concurrencyBusy(cause.details?.reason, {
+        ...cause.details, platform, operation: delivery.operation,
+        activeConcurrency: this.active, maxConcurrency: this.config.maxConcurrency,
+        consumerActiveConcurrency: this.activeByConsumer.get(context.consumer.id) || 0,
+        maxConsumerConcurrency: this.config.maxConsumerConcurrency,
+        queueDepth: this.concurrencyQueue.entries.length, maxPending: policy.maxPending,
+      }) : cause
+      await this.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable',
+        status: error.status || 503, errorCode: error.code || 'external_platform_unavailable' })
+      throw error
+    }
   }
 
   async #resolvedCredential() {
@@ -470,12 +541,12 @@ export class ExternalPlatformGateway {
     }
   }
 
-  async search(context, { body, idempotencyKey, retryOfRequestId, path }) {
+  async search(context, { body, idempotencyKey, retryOfRequestId, path, signal }) {
     let defaultAdapterId
     const normalize = ({ policy, codec }) => normalizeJustOneProductSearchRequest(body, {
       defaultAdapterId, decodeCursor: codec.decode, encodeCursor: codec.encode, maxPageSize: policy.maxPageSize,
     })
-    return this.#deliver(context, { body, idempotencyKey, retryOfRequestId, path }, {
+    return this.#deliver(context, { body, idempotencyKey, retryOfRequestId, path, signal }, {
       operation: JUSTONE_OPERATION,
       capabilityMessage: 'E-commerce product search is not granted for this API key',
       normalize,
@@ -500,12 +571,12 @@ export class ExternalPlatformGateway {
   // idempotency, snapshot policy, dispatch lease, cost reservation, circuit and
   // operation control. Only request validation and the adapter call differ,
   // which is what these two hooks carry.
-  async fetchResource(context, { resourceKey, body, idempotencyKey, retryOfRequestId, path }) {
+  async fetchResource(context, { resourceKey, body, idempotencyKey, retryOfRequestId, path, signal }) {
     const resource = JUSTONE_RESOURCE_CATALOG[resourceKey]
     if (!resource?.released) {
       throw new AppError(404, 'unsupported_resource', 'This external resource is not available')
     }
-    return this.#deliver(context, { body, idempotencyKey, retryOfRequestId, path }, {
+    return this.#deliver(context, { body, idempotencyKey, retryOfRequestId, path, signal }, {
       operation: resource.operationKey,
       capabilityMessage: `${resource.label} is not granted for this API key`,
       normalize: () => normalizeJustOneResourceRequest(resourceKey, body, {
@@ -521,8 +592,8 @@ export class ExternalPlatformGateway {
   // Keyword account search for the platforms this provider serves. The other
   // two platforms in this contract are served by TikHub and dispatch through
   // that gateway; the contract, canonical records and dataset are shared.
-  async searchAccounts(context, { body, idempotencyKey, retryOfRequestId, path }) {
-    return this.#deliver(context, { body, idempotencyKey, retryOfRequestId, path }, {
+  async searchAccounts(context, { body, idempotencyKey, retryOfRequestId, path, signal }) {
+    return this.#deliver(context, { body, idempotencyKey, retryOfRequestId, path, signal }, {
       operation: SOCIAL_ACCOUNT_SEARCH_OPERATION,
       authorizationPlatform: SOCIAL_ACCOUNT_AUTHORIZATION_PLATFORM,
       capabilityMessage: 'Social account search is not granted for this API key',
@@ -536,13 +607,13 @@ export class ExternalPlatformGateway {
     })
   }
 
-  async hotXiaohongshuNotes(context, { body, idempotencyKey, path }) {
+  async hotXiaohongshuNotes(context, { body, idempotencyKey, path, signal }) {
     if (this.providerKey !== 'justone' || path !== XHS_DISCOVERY_ENDPOINTS.hot_notes.path) throw new AppError(404, 'not_found', 'Unknown discovery endpoint')
     if (!this.operationControlStore) throw new AppError(503, 'external_platform_contract_unverified', 'Discovery operation requires reviewed runtime controls')
     // Purpose/Key separation keeps a cursor from crossing identities or products.
     const secret = createHash('sha256').update(this.apiKeyPepper).update(`\u0000xhs-hot-notes:${context.apiKey.id}\u0000`).digest('hex')
     const codec = createExternalPlatformCursorCodec(secret, context.consumer.id)
-    return this.#deliver(context, { body, idempotencyKey, path }, {
+    return this.#deliver(context, { body, idempotencyKey, path, signal }, {
       operation: XHS_DISCOVERY_ENDPOINTS.hot_notes.operation, authorizationPlatform: 'xiaohongshu',
       capabilityMessage: 'Hot notes search is not granted for this API key', datasetId: 'social.posts.v1',
       replayReleasedFailures: true, skipIngest: true,
@@ -551,13 +622,13 @@ export class ExternalPlatformGateway {
     })
   }
 
-  async forwardNative(context, { key, body, idempotencyKey, path }) {
+  async forwardNative(context, { key, body, idempotencyKey, path, signal }) {
     const endpoint = nativeForwardingEndpoint(key)
     if (!endpoint || endpoint.provider !== this.providerKey || endpoint.hubPath !== path) {
       throw new AppError(404, 'native_endpoint_not_found', 'Unknown native data endpoint')
     }
     if (!this.operationControlStore) throw new AppError(503, 'external_platform_contract_unverified', 'Native forwarding requires reviewed operation controls')
-    return this.#deliver(context, { body, idempotencyKey, path }, {
+    return this.#deliver(context, { body, idempotencyKey, path, signal }, {
       operation: endpoint.operation, authorizationPlatform: endpoint.authorizationPlatform,
       capabilityMessage: 'This native data endpoint is not granted for this API key',
       skipIngest: true, replayReleasedFailures: true, nativeForwarding: true,
@@ -568,14 +639,14 @@ export class ExternalPlatformGateway {
     })
   }
 
-  async socialData(context, { operation, body, idempotencyKey, path }) {
+  async socialData(context, { operation, body, idempotencyKey, path, signal }) {
     const endpoint = HUB_SOCIAL_ENDPOINTS[operation]
     if (!endpoint || endpoint.path !== path || this.providerKey !== endpoint.provider) throw new AppError(404, 'not_found', 'Unknown Hub social endpoint')
     if (!this.operationControlStore) throw new AppError(503, 'external_platform_contract_unverified', 'Social data requires reviewed operation controls')
     const secret = createHash('sha256').update(this.apiKeyPepper).update(`\u0000hub-social:${context.apiKey.id}\u0000`).digest('hex')
     const codec = createExternalPlatformCursorCodec(secret, context.consumer.id)
     let normalized
-    return this.#deliver(context, { body, idempotencyKey, path }, {
+    return this.#deliver(context, { body, idempotencyKey, path, signal }, {
       operation: endpoint.operation, authorizationPlatform: endpoint.platform,
       capabilityMessage: 'This Hub social operation is not granted for this API key',
       replayReleasedFailures: true, skipIngest: true, billingUnknown: true,
@@ -584,7 +655,7 @@ export class ExternalPlatformGateway {
     })
   }
 
-  async searchRaw(context, { normalized, body, idempotencyKey, dataSearch = null }) {
+  async searchRaw(context, { normalized, body, idempotencyKey, dataSearch = null, signal }) {
     const platform = normalized.platform
     const nativeKey = platform === 'weibo' ? WEIBO_SEARCH_KEY : INSTAGRAM_SEARCH_KEY
     const native = platform !== 'twitter'
@@ -594,7 +665,7 @@ export class ExternalPlatformGateway {
     }
     const codec = (dataSearch ? createDataSearchCursorCodec : createRawSearchCursorCodec)(this.apiKeyPepper, `${context.consumer.id}:${context.apiKey.id}`)
     let request
-    return this.#deliver(context, { body, idempotencyKey, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH }, {
+    return this.#deliver(context, { body, idempotencyKey, signal, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH }, {
       operation: native ? `native.${nativeKey}` : 'social.content.search',
       authorizationPlatform: platform, platformSearch: true, meterKey: dataSearch ? platform : 'raw',
       datasetId: dataSearch ? 'night-all.search.v1' : RAW_SEARCH_DATASET, replayReleasedFailures: true,
@@ -661,7 +732,7 @@ export class ExternalPlatformGateway {
   }
 
   async searchFacebook(context, input, { policyStore, fallbackGateway, reservation = null, request: previousRequest = null, attempt = 0, providerCalls = 0 } = {}) {
-    const { normalized, body, idempotencyKey, dataSearch = null } = input
+    const { normalized, body, idempotencyKey, dataSearch = null, signal } = input
     const codec = (dataSearch ? createDataSearchCursorCodec : createRawSearchCursorCodec)(this.apiKeyPepper, `${context.consumer.id}:${context.apiKey.id}`)
     const request = previousRequest || normalizeFacebookSearch(normalized, codec, dataSearch)
     const rapid = this.providerKey === 'rapidapi'
@@ -672,7 +743,7 @@ export class ExternalPlatformGateway {
       if (request.provider) throw new AppError(409, 'search_restart_required', 'This search continuation is temporarily unavailable; restart from page 1 with a new Idempotency-Key')
       return fallbackGateway.searchFacebook(context, input, { policyStore, reservation: reserved, request, attempt: attempt + 1, providerCalls: previousCalls })
     }
-    return this.#deliver(context, { body, idempotencyKey, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH }, {
+    return this.#deliver(context, { body, idempotencyKey, signal, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH }, {
       operation: rapid ? FACEBOOK_OPERATION.operationKey : `native.${FACEBOOK_JUSTONE_KEY}`,
       authorizationPlatform: 'facebook', platformSearch: true, meterKey: dataSearch ? 'facebook' : 'raw',
       datasetId: dataSearch ? 'night-all.search.v1' : RAW_SEARCH_DATASET, replayReleasedFailures: true,
@@ -690,6 +761,11 @@ export class ExternalPlatformGateway {
           return { result: await fallbackGateway.searchFacebook(context, input, { policyStore, reservation: reserved, request, attempt }) }
         }
         return null
+      },
+      revalidateDispatch: async () => {
+        if ((await policyStore.facebook()).mode === 'paused') {
+          throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
+        }
       },
       unavailable: rapid ? async reserved => {
         const policy = await policyStore.facebook()
@@ -741,10 +817,10 @@ export class ExternalPlatformGateway {
     })
   }
 
-  async webSearch(context, { request, provider, body, idempotencyKey, path }) {
+  async webSearch(context, { request, provider, body, idempotencyKey, path, signal }) {
     if (!this.operationControlStore) throw new AppError(503, 'web_search_unavailable', 'Search controls are unavailable')
     let normalized
-    return this.#deliver(context, { body, idempotencyKey, path }, {
+    return this.#deliver(context, { body, idempotencyKey, path, signal }, {
       operation: 'web.search', authorizationPlatform: 'web_search',
       capabilityMessage: 'Web Search is not granted for this Key',
       requiredCapabilities: [provider.capability], replayReleasedFailures: true, skipIngest: true, billingUnknown: true,
@@ -764,11 +840,11 @@ export class ExternalPlatformGateway {
       .map(row => [row.operationKey, credentialReady && operationReadyForConsumer(row, consumerId)]))
   }
 
-  async queryEnterprise(context, { apiId, body, idempotencyKey, path }) {
+  async queryEnterprise(context, { apiId, body, idempotencyKey, path, signal }) {
     if (this.providerKey !== 'qixin') throw new AppError(404, 'enterprise_api_not_found', 'Unknown enterprise API')
     assertEnterpriseCallable(apiId)
     const request = normalizeEnterpriseRequest(apiId, body)
-    return this.#deliver(context, { body, idempotencyKey, path }, {
+    return this.#deliver(context, { body, idempotencyKey, path, signal }, {
       operation: enterpriseOperation(apiId), capability: ENTERPRISE_CAPABILITY,
       authorizationPlatform: 'enterprise', datasetId: ENTERPRISE_DATASET,
       capabilityMessage: 'Enterprise queries are not granted for this API key',
@@ -778,7 +854,7 @@ export class ExternalPlatformGateway {
     })
   }
 
-  async #deliver(context, { body, idempotencyKey, retryOfRequestId, path }, plan) {
+  async #deliver(context, { body, idempotencyKey, retryOfRequestId, path, signal }, plan) {
     // Operations under this provider do not all sit in the same data domain:
     // product search is `ecommerce`, account search is `social`. Grants, quota
     // policy, key entitlement and usage scope all follow the operation's own
@@ -822,7 +898,7 @@ export class ExternalPlatformGateway {
     const keyEntitlement = typeof this.usageStore.getApiKeyPlatformEntitlement === 'function'
       ? await this.usageStore.getApiKeyPlatformEntitlement(context.apiKey.id, authorizationPlatform)
       : null
-    const policy = {
+    let policy = {
       ...consumerPolicy,
       maxPageSize: keyEntitlement
         ? Math.min(consumerPolicy.maxPageSize, keyEntitlement.maxPageSize)
@@ -1068,7 +1144,7 @@ export class ExternalPlatformGateway {
       (state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now)
       || (contractCircuit?.circuitOpenUntil && new Date(contractCircuit.circuitOpenUntil) > now),
     )
-    const resolvedCredential = circuitOpen
+    let resolvedCredential = circuitOpen
       ? { ready: Boolean(this.adapter), credential: null, revision: null }
       : await this.#resolvedCredential()
     let operationControl = null
@@ -1144,21 +1220,23 @@ export class ExternalPlatformGateway {
 
     let ownsLease = false
     let entered = false
+    let waitedForCapacity = false
     let call = null
     let callSettled = false
     let lastDispatchEvidence = null
     let costReservation = null
     try {
-      const lease = await this.platformStore.acquireDispatchLease({
+      const dispatchLease = {
         consumerId: context.consumer.id,
         operation: plan.operation,
         fingerprint: requestFingerprint,
         endpointKey: normalized.endpointKey,
         contractVersion: normalized.endpointContractVersion,
         ownerRequestId: activeRequestId,
-        expiresAt: new Date(Date.now() + this.reservationLeaseMs),
+        expiresAt: new Date(reservation.request.leaseExpiresAt),
         retryOfRequestId: validatedRetryOfRequestId,
-      })
+      }
+      const lease = await this.platformStore.acquireDispatchLease(dispatchLease)
       ownsLease = lease === true || lease?.kind === 'acquired'
       if (!ownsLease) {
         // A leader may have finished between the first snapshot lookup and the
@@ -1241,7 +1319,38 @@ export class ExternalPlatformGateway {
       // Only a dispatch-lease owner consumes scarce provider concurrency.
       // Equal requests suppressed by the shared lease must not crowd out a
       // different customer query before they return their 409/cache result.
-      if (!this.#enter(context)) {
+      if (!await this.#enterOrQueue(context, { lease: dispatchLease, delivery,
+        expiresAt: reservation.request.leaseExpiresAt, signal, platform: authorizationPlatform,
+        canWait: !(allowStoredFallback && snapshot),
+        revalidate: async () => {
+          waitedForCapacity = true
+          context = await this.#revalidateWaitingIdentity(context, authorizationPlatform, plan)
+          const currentPolicy = { ...this.defaultPolicy, ...await this.usageStore.getPolicy(context.consumer.id, authorizationPlatform) }
+          const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(context.apiKey.id, authorizationPlatform)
+          policy = { ...currentPolicy, maxPageSize: entitlement
+            ? Math.min(currentPolicy.maxPageSize, entitlement.maxPageSize) : currentPolicy.maxPageSize }
+          try { plan.normalize({ body, policy, codec }) }
+          catch (error) {
+            if (error instanceof JustOneContractError || error instanceof SocialAccountContractError) throw new AppError(400, error.code, error.message)
+            throw error
+          }
+          const shared = await this.platformStore.providerState(this.providerKey)
+          const latest = this.providerKey === 'tikhub' ? internalCircuitState(this.usageStore, context, shared) : shared
+          const contract = await this.platformStore.contractCircuitState?.(this.providerKey, normalized.marketplace ?? null)
+          if ([latest, contract].some(value => value?.circuitOpenUntil && Date.parse(value.circuitOpenUntil) > this.admissionClock())) {
+            throw circuitOpenError(contract?.circuitOpenUntil && Date.parse(contract.circuitOpenUntil) > this.admissionClock() ? contract : latest,
+              this.config, 'External data is temporarily unavailable')
+          }
+          resolvedCredential = await this.#resolvedCredential()
+          if (!resolvedCredential.ready) throw new AppError(503, 'external_platform_not_configured', 'External data configuration changed while waiting')
+          operationControl = await this.operationControlStore?.authorizeDispatch(this.providerKey, plan.operation, {
+            consumerId: context.consumer.id, config: this.config,
+            credentialConfigured: resolvedCredential.ready, credentialRevision: resolvedCredential.revision,
+          })
+          await plan.revalidateDispatch?.()
+          return context
+        },
+      })) {
         if (allowStoredFallback && snapshot) {
           const responseBody = deliveryBody(snapshot.responseBody, {
             requestId: activeRequestId,
@@ -1269,9 +1378,20 @@ export class ExternalPlatformGateway {
           errorCode: 'external_platform_busy',
         })
         ownsReservation = false
-        throw new AppError(429, 'external_platform_busy', 'External product search concurrency is exhausted')
+        throw concurrencyBusy('concurrency_guard', { platform: authorizationPlatform, operation: plan.operation })
       }
       entered = true
+      if (waitedForCapacity && allowStoredFallback) {
+        const fresh = await this.platformStore.snapshotFor({ consumerId: context.consumer.id,
+          operation: plan.operation, fingerprint: requestFingerprint }, new Date())
+        if (fresh && new Date(fresh.freshUntil) >= new Date()) {
+          const responseBody = deliveryBody(fresh.responseBody, { requestId: activeRequestId,
+            sourceMode: 'fresh_cache', capturedAt: fresh.capturedAt })
+          await this.platformStore.commitSnapshotDelivery({ delivery, snapshot: fresh, sourceMode: 'fresh_cache', responseBody })
+          return resultFromBody(responseBody, { requestId: activeRequestId, replay: false,
+            sourceMode: 'fresh_cache', capturedAt: fresh.capturedAt })
+        }
+      }
 
       const costControl = providerCostControl(
         operationControl?.billing ? { billing: operationControl.billing } : this.config,
@@ -1336,6 +1456,7 @@ export class ExternalPlatformGateway {
         const routed = await plan.admit(reservation)
         if (routed) { ownsReservation = false; return routed.result }
       }
+      if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
       call = await this.platformStore.beginProviderCall({
         tenantId: context.tenant.id,
         consumerId: context.consumer.id,

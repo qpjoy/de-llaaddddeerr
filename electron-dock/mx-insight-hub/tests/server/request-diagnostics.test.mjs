@@ -3,7 +3,7 @@ import test from 'node:test'
 import { lookupRequestDiagnostics } from '../../server/acquisitions/diagnostics.mjs'
 
 const id = 'a227f54a-0ac6-43f5-9d23-687fc369f2ae'
-function fixture({ status = 'released', responseStatus = 502, providers, connectors = [], matches = [{ id }], fail } = {}) {
+function fixture({ status = 'released', responseStatus = 502, errorCode = 'enterprise_query_rejected', hasResponseBody = true, gateway = null, providers, connectors = [], matches = [{ id }], fail } = {}) {
   const queries = []
   let released = false
   const pool = { async connect() { return {
@@ -12,7 +12,8 @@ function fixture({ status = 'released', responseStatus = 502, providers, connect
       assert.doesNotMatch(sql, /\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/)
       if (fail && sql.includes('request-diagnostics:usage')) throw Object.assign(new Error('secret connection data'), { code: fail })
       if (sql.includes('request-diagnostics:lookup')) return { rows: matches }
-      if (sql.includes('request-diagnostics:usage')) return { rows: [{ id: params[0], platform: 'enterprise', status, error_code: 'enterprise_query_rejected', response_status: responseStatus, has_response_body: true, units_actual: 0, delivery_source_mode: 'live', response_body: { secret: 'hidden' } }] }
+      if (sql.includes('request-diagnostics:usage')) return { rows: [{ id: params[0], platform: 'enterprise', status, error_code: errorCode, response_status: responseStatus, has_response_body: hasResponseBody, units_actual: 0, delivery_source_mode: 'live', response_body: { secret: 'hidden' } }] }
+      if (sql.includes('request-diagnostics:gateway')) return { rows: gateway ? [gateway] : [] }
       if (sql.includes('request-diagnostics:providers')) return { rows: providers || [{ id: 'call', provider_key: 'qixin', outcome: 'rejected', http_status: 200, business_code: 105, reviewed_message: '未授权调用该接口', has_restricted_archive: true, billed: null, cost_kind: 'estimated', cost_minor: '15', currency: 'CNY', raw_payload: { secret: 'hidden' } }] }
       if (sql.includes('request-diagnostics:connectors')) return { rows: connectors }
       if (sql.includes('request-diagnostics:charges')) return { rows: [{ status: 'released', enforcement_mode: 'enforced', charged_minor: '0', quoted_minor: '15', currency: 'CNY', pricing_snapshot: 'hidden' }] }
@@ -150,5 +151,35 @@ test('invalid input never accesses the database; errors roll back and release wi
     await assert.rejects(lookupRequestDiagnostics(f.pool, id), error => error.status === 503 && !error.message.includes('secret'))
     assert.equal(f.queries.at(-1).sql, 'ROLLBACK')
     assert.ok(f.released())
+  }
+})
+
+
+test('historical Hub busy rejection uses gateway HTTP evidence without inventing a response or upstream limit', async () => {
+  const gateway = { id: 'gateway', provider_key: 'qixin', source_mode: 'unavailable', succeeded: false,
+    response_status: 429, error_code: 'external_platform_busy', provider_call_id: null }
+  const options = { errorCode: 'external_platform_busy', responseStatus: null, hasResponseBody: false, providers: [], gateway }
+  const f = fixture(options)
+  const run = (await lookupRequestDiagnostics(f.pool, id)).runs[0]
+  assert.equal(run.responseStatus, 429)
+  assert.equal(run.responseStatusSource, 'gateway_request')
+  assert.equal(run.hasResponseBody, false)
+  assert.equal(run.replayAvailable, false)
+  assert.equal(run.customerCharge.chargedMinor, '0')
+  assert.match(run.guidance, /企业数据.*自身并发准入限制/u)
+  assert.match(run.guidance, /不能据此认定供应商限流/u)
+  assert.match(f.queries.find(q => q.sql.includes('request-diagnostics:gateway')).sql, /source_mode <> 'idempotent_replay'/u)
+  for (const override of [
+    { gateway: null }, { gateway: { ...gateway, provider_call_id: 'call' } },
+    { providers: [{ id: 'call', outcome: 'unknown' }] },
+    { gateway: { ...gateway, error_code: 'upstream_rate_limited' } },
+    { status: 'committed', responseStatus: 200 },
+  ]) {
+    const result = (await lookupRequestDiagnostics(fixture({ ...options, ...override }).pool, id)).runs[0]
+    assert.doesNotMatch(result.guidance, /未进入上游调用阶段/u)
+    if (override.status === 'committed') {
+      assert.equal(result.responseStatus, 200)
+      assert.equal(result.responseStatusSource, 'usage_request')
+    }
   }
 })

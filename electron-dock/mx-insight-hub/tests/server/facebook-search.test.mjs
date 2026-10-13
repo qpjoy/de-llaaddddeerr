@@ -70,8 +70,28 @@ async function harness({ rapidStatus = 200, mode = 'auto', quotaAllowed = true, 
   service.externalRawSearch = dispatch; service.externalDataSearch = dispatch
   const invoke = (body = { platform: 'facebook', query: 'Unitree', count: 20 }, idempotencyKey = 'facebook-request-0001') =>
     service.nightAllCompatibilitySearch(context, { operation: 'raw', body, idempotencyKey, path: '/api/v1/night-all/search/raw' })
-  return { usage, service, stores, context, key, calls, policy, policyStore, observations, invoke, oldCalls: () => oldCalls }
+  return { usage, service, stores, gateways, context, key, calls, policy, policyStore, observations, invoke, oldCalls: () => oldCalls }
 }
+
+test('Facebook pause applied during concurrency waiting blocks both supplier dispatch and quota admission', async () => {
+  const h = await harness()
+  const gateway = h.gateways.rapidapi
+  gateway.config = { ...gateway.config, maxConcurrency: 1, concurrencyQueue: { maxWaitMs: 1000, maxPending: 2 } }
+  gateway.active = 1
+  let admissions = 0
+  h.policyStore.admitRapid = async () => { admissions += 1; return { allowed: true } }
+  const pending = h.invoke().catch(error => error)
+  for (let i = 0; i < 100 && !gateway.concurrencyQueue.entries.length; i++) await new Promise(resolve => setTimeout(resolve, 2))
+  assert.equal(gateway.concurrencyQueue.entries.length, 1)
+  h.policy.mode = 'paused'
+  gateway.active = 0
+  gateway.concurrencyQueue.drain()
+  assert.equal((await pending).code, 'facebook_search_paused')
+  assert.equal(admissions, 0)
+  assert.equal(h.calls.length, 0)
+  assert.equal(gateway.active, 0)
+  assert.equal(h.stores.rapidapi.leases.size, 0)
+})
 
 test('Facebook raw owns both providers, dates, exact replay and canonical ingest', async () => {
   const h = await harness()

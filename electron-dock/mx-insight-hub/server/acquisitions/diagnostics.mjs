@@ -14,11 +14,18 @@ export function diagnosticIdentifier(value) {
   return value.trim()
 }
 
-function advice(request, providers, connectors) {
+function advice(request, providers, connectors, gateway) {
   const qixin = providers.find(p => p.provider_key === 'qixin' && p.outcome === 'rejected')
   if (qixin?.business_code === 105) return '启信宝拒绝接口授权。核对当次 AppKey 所属应用的接口开通与授权有效期；不能据此判断未开通、过期或应用不匹配。'
   if (qixin?.business_code === 104) return '启信宝返回白名单拒绝。核对该应用访问供应商时的实际出口 IP。'
   if (request.status === 'unknown' || providers.some(p => p.outcome === 'unknown')) return '存在未知调用结果。保留原请求身份，先核对上游记录与结算，不自动重发。'
+  if (request.status === 'released' && request.error_code === 'external_platform_busy'
+    && gateway?.error_code === 'external_platform_busy' && gateway.response_status === 429
+    && gateway.source_mode === 'unavailable' && gateway.succeeded === false && !gateway.provider_call_id
+    && !providers.length && !connectors.length) {
+    const business = request.platform === 'enterprise' ? '企业数据' : '数据'
+    return `Hub 处理${business}请求时触发自身并发准入限制，网关账本记录 HTTP 429，未进入上游调用阶段。当前版本会先有界排队；队列已满或等待超时仍会返回 429。该历史记录未保存当时的并发数与排队原因，不能据此认定供应商限流或推断具体上限。客户结算请查看下方账本。`
+  }
   if (providers.some(p => p.provider_key === 'justone' && p.outcome === 'rejected'
     && p.business_code === 301 && p.error_code === 'upstream_collection_failed')) {
     return 'JustOne 已返回业务码 301（采集失败），具体采集原因需结合供应商记录排查。供应商 billed 与客户扣费分别查看各自账本；HTTP 200 仅表示收到了上游响应。同一幂等标识会保留原交付结果，不会重新采集；若已交付存量回退，请结合交付来源和响应状态判断。'
@@ -70,6 +77,12 @@ export async function lookupRequestDiagnostics(pool, input) {
           units_reserved, units_actual, reserved_at, completed_at
         FROM public.usage_requests WHERE id = $1`, [id])
       if (!request) continue
+      const { rows: [gateway] } = await client.query(`/* request-diagnostics:gateway */
+        SELECT id, provider_key, source_mode, succeeded, response_status, error_code,
+          provider_call_id, created_at
+        FROM external_platform.gateway_requests WHERE usage_request_id = $1
+          AND source_mode <> 'idempotent_replay'
+        ORDER BY created_at DESC, id DESC LIMIT 1`, [id])
       const providers = (await client.query(`/* request-diagnostics:providers */
         SELECT p.id, p.provider_key, p.operation, p.endpoint_key, p.outcome,
           p.http_status, p.business_code, p.error_code, p.upstream_request_id,
@@ -106,9 +119,15 @@ export async function lookupRequestDiagnostics(pool, input) {
         costKind: text(p.cost_kind), currency: text(p.currency), latencyMs: p.latency_ms,
         startedAt: p.started_at, completedAt: p.completed_at,
       }))
+      // Historical pre-dispatch failures release usage without a response body;
+      // the gateway ledger still records their actual HTTP status. Do not let a
+      // later replay or a different error overwrite the original usage evidence.
+      const gatewayStatus = request.status === 'released' && gateway?.error_code === request.error_code
+        ? gateway.response_status : null
       runs.push({
         requestId: request.id, platform: text(request.platform), status: text(request.status),
-        errorCode: text(request.error_code), responseStatus: request.response_status,
+        errorCode: text(request.error_code), responseStatus: request.response_status ?? gatewayStatus,
+        responseStatusSource: request.response_status != null ? 'usage_request' : gatewayStatus != null ? 'gateway_request' : null,
         sourceMode: text(request.delivery_source_mode), hasResponseBody: request.has_response_body,
         replayAvailable: request.status === 'committed' && request.has_response_body,
         unitsReserved: request.units_reserved, unitsActual: request.units_actual,
@@ -127,7 +146,7 @@ export async function lookupRequestDiagnostics(pool, input) {
           quotedMinor: charges[0].quoted_minor, chargedMinor: charges[0].charged_minor,
           currency: text(charges[0].currency), settledAt: charges[0].settled_at,
         } : null,
-        guidance: advice(request, providers, connectors),
+        guidance: advice(request, providers, connectors, gateway),
       })
     }
     await client.query('COMMIT')

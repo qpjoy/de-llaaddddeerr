@@ -1095,3 +1095,25 @@ test('the user data/search curl shape works through the public HTTP route withou
   assert.equal(h.calls.length, 2)
   assert.equal(h.historical.length, 0)
 })
+
+
+test('raw and data-search forward cancellation through Hub routing before generic admission', async () => {
+  const h = await harness()
+  const controller = new AbortController()
+  const observed = []
+  const cancelled = async (_context, input) => {
+    observed.push(input.signal)
+    assert.equal(input.signal, controller.signal)
+    assert.equal(input.signal.aborted, true)
+    throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+  }
+  h.service.externalRawSearch = cancelled
+  h.service.externalDataSearch = cancelled
+  controller.abort()
+  await assert.rejects(h.service.nightAllCompatibilitySearch(h.context, { operation: 'raw', body: BODY,
+    path: RAW_SEARCH_PATH, idempotencyKey: 'raw-cancel-routing', signal: controller.signal }), { code: 'request_cancelled' })
+  await assert.rejects(h.service.search(h.context, { body: { platform: 'weibo', query: '汽车', pageSize: 20 },
+    path: '/api/v1/data/search', idempotencyKey: 'data-cancel-routing', signal: controller.signal }), { code: 'request_cancelled' })
+  assert.equal(observed.length, 2)
+  assert.equal(h.calls.length, 0)
+})
