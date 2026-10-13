@@ -2,6 +2,46 @@
 
 Hub 外部数据平台新增启信慧眼；接口说明统一位于「接口文档 → 企业数据」，平台详情只提供凭据、运行配置、用量与证据。
 
+## 2026-10-13 企业请求并发拒绝追踪
+
+用户提供请求 `7443d5db-d9b0-4d99-b204-eacd4e92df6c`。通过现有管理会话只读核对：
+
+- 原 Key 为 LCY-delta；平台 `enterprise`，错误码 `external_platform_busy`。
+- 2026-10-13 09:26:25.469 至 09:26:25.478 UTC（北京时间 17:26:25），约 9 ms；状态 `released`，没有保存响应正文，也没有该次上游调用记录。
+- 客户计费为 `released / enforced / 0 CNY`，冻结已经释放。
+- 18:14 左右的“限制与恢复”快照没有生效的持久化限制；供应商页当时显示最近一次启信成功为 17:29。二者都不能复原 17:26 的瞬时并发。
+
+当前代码链路为 `POST /api/v1/data/enterprise/{apiId}/query` → 启信专用实例的
+`ExternalPlatformGateway` → 幂等、授权、用量/钱包预占和派发租约 → 进程内并发门禁。
+`QIXIN_CONFIG` 固定供应商并发 3、单调用者并发 1；单调用者的不同企业接口共同占用此容量。
+`gateway.mjs` 的 `#enter` 满额时立即返回 `429 external_platform_busy`，不排队；该分支位于
+采购成本预占、`beginProviderCall` 及实际 adapter 派发之前。LCY 的 TikHub 特例不豁免启信并发限制。
+已保存的 9 ms / released / 零扣款 / 无调用记录与这个分支吻合；不能将其表述成启信返回业务错误或供应商宕机。
+
+“响应 HTTP 未记录”是诊断证据来源不完整：`rejectWithoutDispatch` 将 429、`unavailable`
+及错误码写入 `external_platform.gateway_requests`，而 `usage_requests` 只记 released 和错误码。
+当前诊断读取后者，没有关联网关记录。具体接口编号需读 `usage_requests.billing_meter_key`
+或快照中的固定接口路径；`gateway_requests` 本身没有 operation 字段。
+
+进一步核对不需要重发企业查询。将下面的只读脚本文件同步到有生产 Kubernetes 访问的服务器后，
+从仓库根目录执行（不要求更新服务镜像）：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - 7443d5db-d9b0-4d99-b204-eacd4e92df6c \
+  < electron-dock/mx-insight-hub/server/ops/diagnose-enterprise-busy.mjs
+```
+
+脚本读取精确请求的接口编号/方法/路径、网关拒绝记录及其前后 30 秒时间窗重叠的启信调用；
+只输出 ID、状态、时间、HTTP 和同调用者/同 Key 的布尔关系，不读取企业参数、正文或凭据。
+使用只读一致性事务和查询超时，结束回滚。最多各返回 100 条网关记录、上游记录并明确截断。
+尚未取得该脚本的生产输出，不能确定具体 apiId 或当时占用容量的请求。
+由于历史没有保存进程内计数或 Pod 身份，重叠调用只能提供关联证据，不能单独严格区分总并发 3 与单调用者 1 哪项先命中。
+
+本轮只调查和准备诊断脚本，未修改业务并发、权限、价格或登录联网，也没有发起付费请求。
+该次 busy 没有保存错误响应；相同幂等键重新发送可能创建新业务请求，不应将它当成只读回放。
+脚本的 5 项本地模拟测试、Node 语法检查及差异格式检查通过；未在生产数据库执行。
+
 ## 目录与契约依据
 
 - 用户提供的 `/tmp/company/qixin_api/catalog.json` 是初始合同依据（2026-09-01，272 项）。2026-09-17 补入官方新接口 77.58 医院信息、43.82 企业证券名称变更的合同，当前 18 类、274 项；既有 272 项的参数合同保持原样。仓库内固定副本为 `server/external-platforms/qixin-catalog.json`，运行不依赖 `/tmp/company`。
