@@ -4756,6 +4756,7 @@ export class HubService {
         idempotencyKey,
         path,
         responseMode: 'modern',
+        acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
         fingerprintBody: { ...fingerprintQuery, type: resultType, ...(liveOnly ? { deliveryMode: 'live_only' } : {}) },
         liveOnly,
         enrichment: {},

@@ -262,9 +262,15 @@ export const publicDataApi = {
       ? await readAggregateEvents(response, onEvent) : await response.json()
     return { status: response.status, payload, evidence: { requestId: payload.requestId, idempotentReplay: payload.replay === true } }
   },
-  acquisitionComparison: (apiKey, body, idempotencyKey) => publicDataRequest(
-    apiKey, '/api/v1/night-all/search/raw', { method: 'POST', body, idempotencyKey },
-  ),
+  acquisitionComparison: (apiKey, body, idempotencyKey, path = '/api/v1/night-all/search/raw', method = 'POST') => {
+    const nativeSearch = path === '/api/v1/xiaohongshu/app_v2/search_notes'
+    if (!['/api/v1/data/search', '/api/v1/night-all/search/raw', '/api/v1/search/raw'].includes(path) && !nativeSearch) throw new Error('Unsupported acquisition comparison path')
+    if (method !== 'POST' && !(nativeSearch && method === 'GET')) throw new Error('Unsupported acquisition comparison method')
+    // Native GET accepts explicit empty strings as default values. Keep them;
+    // null/absent optional parameters have the same meaning at this endpoint.
+    const query = method === 'GET' ? new URLSearchParams(Object.entries(body || {}).filter(([, value]) => value != null).map(([key, value]) => [key, String(value)])).toString() : ''
+    return publicDataRequest(apiKey, query ? `${path}?${query}` : path, { method, ...(method === 'POST' ? { body } : {}), idempotencyKey })
+  },
   enterpriseQuery: (key, apiId, body, options) => publicDataRequest(key, `/api/v1/data/enterprise/${encodeURIComponent(apiId)}/query`, { ...options, method: 'POST', body }),
   ipRiskBatch: (key, body, options) => publicDataRequest(key, '/api/v1/data/ip/risk/batch', { ...options, method: 'POST', body }),
   ipRiskService: (apiKey,body,options) => publicDataRequest(apiKey, '/api/v1/data/ip/risk/service', {...options,method:'POST',body}),

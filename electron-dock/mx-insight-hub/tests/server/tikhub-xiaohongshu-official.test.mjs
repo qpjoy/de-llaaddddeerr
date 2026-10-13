@@ -434,6 +434,40 @@ test('official search_notes enforces the consumer canary before reservations whi
   assert.equal(allowed.platformStore.calls.size, 1)
 })
 
+test('a new official search identity retains method and parameters without replacing the rejected request', async () => {
+  for (const method of ['GET', 'POST']) {
+    let calls = 0
+    const state = await fixture(async () => {
+      calls += 1
+      return calls === 1
+        ? new Response(JSON.stringify({ detail: { code: 400, request_id: 'provider-rejected-search', message: 'Request failed.' } }), {
+          status: 400, headers: { 'content-type': 'application/json' },
+        })
+        : jsonResponse({ code: 200, data: { data: { items: [] } } })
+    })
+    const query = { keyword: 'original keyword', page: '1', sort_type: 'time_descending', ai_mode: '0' }
+    const input = { endpointName: 'search_notes', path: TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_PATH,
+      method, query, idempotencyKey: `original-search-${method}` }
+    await assert.rejects(state.gateway.officialXiaohongshu(state.context, input), { code: 'external_platform_rejected', status: 502 })
+    const [original] = state.usageStore.requests.values()
+    const originalEvidence = structuredClone(original)
+    assert.equal(original.status, 'committed')
+    assert.deepEqual(original.acquisitionRequest, { method, path: input.path, body: query })
+    await assert.rejects(state.gateway.officialXiaohongshu(state.context, input), { code: 'external_platform_rejected', status: 502 })
+    assert.equal(calls, 1, 'reading the previous identity must retain its rejection')
+    const fresh = await state.gateway.officialXiaohongshu(state.context, { ...input, idempotencyKey: `new-search-${method}` })
+    assert.equal(fresh.status, 200)
+    assert.equal(fresh.sourceMode, 'live')
+    assert.notEqual(fresh.requestId, original.id)
+    assert.equal(calls, 2, 'the explicit new identity makes one new provider request')
+    assert.deepEqual(state.usageStore.requests.get(original.id), originalEvidence)
+    const freshUsage = state.usageStore.requests.get(fresh.requestId)
+    assert.equal(freshUsage.apiKeyId, original.apiKeyId)
+    assert.equal(freshUsage.consumerId, original.consumerId)
+    assert.deepEqual(freshUsage.acquisitionRequest, original.acquisitionRequest)
+  }
+})
+
 test('all five official-shaped routes preserve business envelopes and share governed storage', async () => {
   const calls = []
   const bodies = new Map([

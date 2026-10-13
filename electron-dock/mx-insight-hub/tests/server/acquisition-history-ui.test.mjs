@@ -23,6 +23,21 @@ test('Data Center offers an admin-only exact-delivery acquisition history lookup
   assert.match(api, /acquisitionHistory: \(token, requestId\) => request\([\s\S]*?\/acquisitions\/\$\{encodeURIComponent\(requestId\)\}/u)
 })
 
+test('request-validation sessions belong to the authenticated App and survive a Data Browser unmount', async () => {
+  const [app, page, diagnostics] = await Promise.all([
+    readFile(new URL('../../src/App.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/pages-data-browser.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/request-diagnostics.jsx', import.meta.url), 'utf8'),
+  ])
+  assert.match(app, /const diagnosticComparisonSession = useMemo\(\(\) => \(\{ current: null \}\), \[token\]\)/u)
+  assert.match(app, /const pageProps = \{[\s\S]*?diagnosticComparisonSession,/u)
+  assert.match(page, /const diagnosticComparisonSessions = diagnosticComparisonSession \|\| localDiagnosticComparisonSessions/u)
+  assert.match(page, /comparisonSessions=\{diagnosticComparisonSessions\}/u)
+  assert.match(diagnostics, /acquisitionComparisonSessionFor\(comparisonSessions \|\| localComparisonSessions, token, run.requestId\)/u)
+  assert.match(page, /autoIdentifier=\{query\?\.get\('requestId'\) \|\| ''\}/u)
+  assert.match(diagnostics, /lookupRef\.current\(null, autoIdentifier\)[\s\S]*?\[token, autoIdentifier\]/u)
+})
+
 test('public docs describe acquisition replay as caller-owned and no-dispatch', async () => {
   const [yaml, contract, curlGuide] = await Promise.all([
     readFile(new URL('../../docs/contracts/openapi.yaml', import.meta.url), 'utf8'),

@@ -131,7 +131,7 @@ test('JustOne command center distinguishes unknown evidence from real zero value
   assert.match(pageSource, /未知不会绘制为 0/u)
   assert.match(pageSource, /不会用示例平台或推测指标填充/u)
   assert.match(pageSource, /不会自行假设免费额度、阶梯价或充值折扣/u)
-  assert.match(pageSource, /尚无已登记外部数据平台/u)
+  assert.match(pageSource, /尚无已登记上游供应商/u)
   assert.match(pageSource, /暂无调用趋势/u)
   assert.match(pageSource, /暂无能力矩阵/u)
   assert.match(pageSource, /暂无租户排名/u)

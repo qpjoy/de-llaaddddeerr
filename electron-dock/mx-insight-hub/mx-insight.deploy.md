@@ -6,6 +6,8 @@
 
 Facebook 搜索迁移、自动选路及部署时导入供应商凭据见 [Facebook 搜索由 Hub 管理](docs/product/facebook-search-routing.md)。部署会自动从本机 Night-All 工作区发现配置；只有非标准目录才需要 `NIGHT_ALL_CONFIG_PATH`。重复 deploy 保留已有密钥、人工暂停和额度状态。
 
+Web Search 的八家适配器已在 Hub。Internal deploy/apply 在默认采购价检查前，通过只读 SQL 从 Night-All 数据库凭据中心补齐 active 渠道的缺失凭据，保留已有密钥及人工清空。在服务器 `.env.internal` 配置独立的 `NIGHT_ALL_DATABASE_URL`；不会误用 Hub `DATABASE_URL` 或回退 JSON。源不可用会警告，不阻断 Hub。迁移后可在“Web Search → 供应商管理”查看/修改各家 Token，并进入对应供应商管理运行状态、价格和代理。服务器步骤和验收见 [Web Search 迁移](docs/operations/web-search-migration-2026-10-13.md)。
+
 ## 固定依赖和责任边界
 
 **Hub 的持久业务数据来自兄弟项目 `../mx-common`，不是 Hub 容器文件层或 Hub 自己的 PostgreSQL。** Hub 与 mx-common 都要同步代码；仅拉取/复制 Hub 子目录不能获得共享部署脚本的修复。

@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import { adminApi } from './api.js'
 import { Field, DropdownField, ErrorState } from './components.jsx'
 import { EgressRelayPanel } from './egress-relay-panel.jsx'
+import { webSearchProvider } from '../shared/web-search.mjs'
 
 const PROBE_FIELDS = [
   { key: 'timeoutMs', label: '单次探测超时（毫秒）', min: 1000, max: 60000,
@@ -26,7 +27,7 @@ function failureSummary(attempts) {
 }
 
 export function ExternalProxyPanel({ token, provider = 'tikhub', proxy, relay, onSaved, onUnauthorized, Panel, notify }) {
-  const providerLabel = ({ rapidapi: 'RapidAPI', qixin: '启信慧眼' })[provider] || 'TikHub'
+  const providerLabel = webSearchProvider(provider)?.label || ({ tikhub: 'TikHub', rapidapi: 'RapidAPI', qixin: '启信慧眼' })[provider] || provider
   const relaySection = useRef(null)
   const relayBase = relay?.effectiveBase || null
   const [mode, setMode] = useState(proxy.mode)

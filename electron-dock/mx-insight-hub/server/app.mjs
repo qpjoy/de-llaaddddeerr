@@ -1841,7 +1841,7 @@ export function createApp({
         sendJson(response, 200, {
           data: await acquisitionHistory.getAdminDeliveredRun(params.requestId),
           requestId,
-        })
+        }, { 'cache-control': 'private, no-store' })
         return
       }
       if (

@@ -821,6 +821,7 @@ export function App() {
   // One in-memory search round across the product and retained browser entry.
   // A console identity change discards it; demo credential renewal does not.
   const aggregateSession = useMemo(() => ({ current: null }), [token])
+  const diagnosticComparisonSession = useMemo(() => ({ current: null }), [token])
 
   useEffect(() => {
     const root = document.documentElement
@@ -969,6 +970,7 @@ export function App() {
   const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && ![...WECHAT_PRODUCTS.map(product => `/data-products/${product.key}`), '/data-products/search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise', '/data-products/web-search'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
   const pageProps = {
     aggregateSession,
+    diagnosticComparisonSession,
     theme,
     token,
     session,

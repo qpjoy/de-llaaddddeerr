@@ -426,6 +426,51 @@ test('Admin acquisition history includes owner and provider cost lineage without
   )
 })
 
+test('a committed search rejection retains saved request, original identity and immutable failure for a new comparison', async () => {
+  const root = rootRow({
+    platform: 'xiaohongshu',
+    capability: 'social.posts.search',
+    billing_meter_key: 'social.posts.search',
+    acquisition_request: { method: 'POST', path: '/api/v1/data/search', body: {
+      platform: 'xiaohongshu', query: 'example search', pageSize: 20,
+    } },
+    response_status: 502,
+    response_body: { error: { code: 'external_platform_rejected', message: 'External data platform rejected the request' } },
+    units_actual: 1,
+    customer_charged_minor: '10',
+  })
+  const original = structuredClone(root)
+  const pool = connectedPool({
+    root: [root], items: [], 'gateway-events': [], 'connector-calls': [],
+    'provider-calls': [{
+      id: randomUUID(), provider_key: 'tikhub', usage_request_id: root.id,
+      request_call: true, delivered_source: false, call_ordinal: 0,
+      operation: 'social.posts.search', endpoint_key: 'xiaohongshu.app-v2.search-notes.v1',
+      outcome: 'rejected', http_status: 400, business_code: 400,
+      billed: null, cost_minor: '1', cost_kind: 'estimated', currency: 'USD',
+      error_code: 'upstream_request_rejected', upstream_request_id: randomUUID(),
+      restricted_raw: 'must-not-be-returned', provider_credential: 'must-not-be-returned',
+    }],
+  })
+  const result = await new PostgresAcquisitionHistoryStore(pool).getAdminDeliveredRun(root.id)
+  assert.deepEqual(result.requestEvidence.request, original.acquisition_request)
+  assert.equal(result.requestEvidence.idempotencyKey, original.idempotency_key)
+  assert.equal(result.owner.apiKeyId, original.api_key_id)
+  assert.equal(result.owner.consumerId, original.consumer_id)
+  assert.equal(result.owner.consumerBusinessId, original.consumer_business_id)
+  assert.equal(result.delivered.responseStatus, 502)
+  assert.deepEqual(result.delivered.responseBody, original.response_body)
+  assert.equal(result.customerCharge.chargedMinor, '10')
+  assert.equal(result.costLineage.providerCalls[0].billed, null)
+  assert.equal(result.costLineage.providerCalls[0].requestCall, true)
+  assert.equal(result.costLineage.providerCalls[0].httpStatus, 400)
+  assert.deepEqual(result.items, [])
+  assert.deepEqual(root, original)
+  assert.match(pool.queries[0].sql, /REPEATABLE READ READ ONLY/u)
+  assert.doesNotMatch(pool.queries.map(query => query.sql).join('\n'), /(?:INSERT|UPDATE|DELETE|restricted_raw_responses)/iu)
+  assert.doesNotMatch(JSON.stringify(result), /must-not-be-returned/u)
+})
+
 test('a known but not committed request has no historical delivery projection', async () => {
   const root = rootRow({
     status: 'reserved',
