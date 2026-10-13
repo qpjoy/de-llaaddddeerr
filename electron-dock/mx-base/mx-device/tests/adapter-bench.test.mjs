@@ -209,14 +209,26 @@ test("bench API enforces auth/CSRF/real boundary; reads do not dispatch and temp
   assert.equal(store.state.definitions.length, BUILTIN_DEFINITIONS.length);
   const seed = adapterTestDefinition(data.code, data.appId);
   const saved = await request("task-definitions?mode=sim", {
-    ...seed,
+    appId: seed.appId,
+    loop: seed.loop,
+    resumable: seed.resumable,
+    steps: seed.steps,
     code: "custom.bench",
     name: "调试组合",
     expectedVersion: 0,
   });
   assert.equal(saved.status, 201);
   assert.equal(store.state.definitions.length, BUILTIN_DEFINITIONS.length + 1);
-  assert.deepEqual((await saved.json()).steps, seed.steps);
+  const savedSteps = (await saved.json()).steps;
+  assert.deepEqual(
+    savedSteps.map(({ commandDefinition, ...step }) => step),
+    seed.steps,
+  );
+  assert(
+    savedSteps.every(
+      (step) => step.commandDefinition.version === step.commandVersion,
+    ),
+  );
 });
 
 const url = process.env.MX_DEVICE_TEST_DATABASE_URL;
@@ -292,7 +304,10 @@ test(
       await store.atomic(
         (s, n) =>
           saveDefinition(s, n, "sim", {
-            ...adapterTestDefinition("session.back", "xhs"),
+            appId: "xhs",
+            loop: "small",
+            resumable: false,
+            steps: adapterTestDefinition("session.back", "xhs").steps,
             code: "custom.back",
             name: "返回",
             expectedVersion: 0,

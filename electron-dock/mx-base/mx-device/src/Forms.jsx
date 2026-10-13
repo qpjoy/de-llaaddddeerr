@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useId } from "react";
 import { X } from "@phosphor-icons/react";
-import { defaultDurationMs } from "./data.js";
+import { appName, defaultDurationMs } from "./data.js";
 import { requestId } from "./request-id.mjs";
 export function Modal({ title, children, onClose, className }) {
   const titleId = useId();
@@ -36,13 +36,18 @@ export function Modal({ title, children, onClose, className }) {
 }
 export function DeviceForm({ mode, workers, onSubmit, busy }) {
   const [adapter, setAdapter] = useState("mobile-agent");
+  const [simApps, setSimApps] = useState(["xhs", "weibo"]);
   return (
     <form
       className="form"
       onSubmit={(e) => {
         e.preventDefault();
         const b = Object.fromEntries(new FormData(e.currentTarget));
-        onSubmit({ ...b, approved: b.approved === "on" });
+        onSubmit({
+          ...b,
+          approved: b.approved === "on",
+          ...(mode === "sim" ? { simApps } : {}),
+        });
       }}
     >
       <p className="muted">
@@ -145,6 +150,32 @@ export function DeviceForm({ mode, workers, onSubmit, busy }) {
           </>
         )}
       </div>
+      {mode === "sim" && (
+        <fieldset className="catalog-bindings">
+          <legend>模拟设备的平台能力</legend>
+          <p className="small muted">
+            明确选择这台模拟设备支持的平台；拼多多任务需要勾选拼多多能力。
+          </p>
+          <div className="form-grid">
+            {["xhs", "weibo", "xianyu", "pdd"].map((id) => (
+              <label className="check" key={id}>
+                <input
+                  type="checkbox"
+                  checked={simApps.includes(id)}
+                  onChange={(e) =>
+                    setSimApps((apps) =>
+                      e.target.checked
+                        ? [...apps, id]
+                        : apps.filter((x) => x !== id),
+                    )
+                  }
+                />
+                {appName(id)}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      )}
       {mode === "real" && (
         <>
           <p className="notice">
@@ -160,7 +191,10 @@ export function DeviceForm({ mode, workers, onSubmit, busy }) {
         </>
       )}
       <div className="form-actions">
-        <button className="primary" disabled={busy}>
+        <button
+          className="primary"
+          disabled={busy || (mode === "sim" && !simApps.length)}
+        >
           {mode === "real" ? "保存为暂停状态" : "添加模拟设备"}
         </button>
       </div>

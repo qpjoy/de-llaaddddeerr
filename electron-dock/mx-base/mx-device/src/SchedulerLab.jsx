@@ -14,11 +14,7 @@ import {
 import { api, time, appName, jobTitle, labels } from "./data.js";
 import { Modal } from "./Forms.jsx";
 import { requestId } from "./request-id.mjs";
-import {
-  COMMANDS,
-  DEMO_RACK,
-  commandByCode,
-} from "../server/workflow-catalog.mjs";
+import { DEMO_RACK } from "../server/workflow-catalog.mjs";
 const defaults = {
   maxInsertions: 3,
   maxDetourMs: 15000,
@@ -32,7 +28,9 @@ const defaults = {
 const seconds = (n) => `${(Math.max(0, n || 0) / 1000).toFixed(1)}s`;
 const latestDefinitions = (rows) =>
   rows.filter(
-    (d) => !rows.some((x) => x.code === d.code && x.version > d.version),
+    (d) =>
+      !d.archived &&
+      !rows.some((x) => x.code === d.code && x.version > d.version),
   );
 
 export default function SchedulerLab({
@@ -72,6 +70,7 @@ export default function SchedulerLab({
     revision: 0,
   };
   const defs = latestDefinitions(state.definitions || []);
+  const catalogCommands = latestDefinitions(state.commandDefinitions || []);
   const byJob = new Map(state.jobs.map((j) => [j.id, j]));
   const selectedCommands = commands
     .filter((c) => c.deviceId === device?.id)
@@ -458,7 +457,7 @@ export default function SchedulerLab({
               </tr>
             </thead>
             <tbody>
-              {COMMANDS.map((c) => (
+              {catalogCommands.map((c) => (
                 <tr key={c.code}>
                   <td>
                     <code>{c.code}</code>
@@ -534,6 +533,7 @@ export default function SchedulerLab({
           ) : modal === "definition" ? (
             <DefinitionForm
               definitions={state.definitions || []}
+              commandDefinitions={state.commandDefinitions || []}
               busy={busy}
               onSubmit={async (b) => {
                 if (

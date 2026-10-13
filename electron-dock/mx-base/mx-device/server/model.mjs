@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from "node:crypto";
 import { planPool } from "./pool-planner.mjs";
-import { COMMANDS } from "./workflow-catalog.mjs";
+import { commandDefinitions } from "./command-registry.mjs";
 import {
   deviceBlockers,
   effectivePriority,
@@ -229,7 +229,7 @@ export function register(s, now, mode, body) {
     requireThat(
       Array.isArray(body.simApps) &&
         body.simApps.length > 0 &&
-        body.simApps.length <= 3 &&
+        body.simApps.length <= Object.keys(APP_NAMES).length &&
         body.simApps.every((id) => Object.hasOwn(APP_NAMES, id)),
       "模拟 App 清单无效",
       400,
@@ -240,9 +240,9 @@ export function register(s, now, mode, body) {
     requireThat(
       Array.isArray(body.simCommandCodes) &&
         body.simCommandCodes.length > 0 &&
-        body.simCommandCodes.length <= COMMANDS.length &&
+        body.simCommandCodes.length <= commandDefinitions(s).length &&
         body.simCommandCodes.every((code) =>
-          COMMANDS.some((c) => c.code === code),
+          commandDefinitions(s).some((c) => c.code === code),
         ),
       "模拟指令清单无效",
       400,
@@ -730,6 +730,7 @@ export function checkpoint(s, now, a, result) {
     jobId: a.jobId,
     commandId: result.commandId || null,
     commandCode: result.commandCode || null,
+    commandAction: result.commandAction || null,
     page: result.page || null,
     count: result.count ?? null,
     keyword: result.keyword || null,
@@ -783,6 +784,21 @@ export function finish(s, now, a, outcome) {
     j.reason = "手机未报告空闲，已暂停设备；任务保留";
     d.enabled = false;
     d.state = "idle";
+  } else if (
+    outcome.rejectedBeforeCommand &&
+    j.mode === "sim" &&
+    j.workflow &&
+    (s.commands || [])
+      .filter((c) => c.attemptId === a.id)
+      .every((c) => c.status === "succeeded" && c.receipt?.stopped === true)
+  ) {
+    // No in-flight operation: an empty/missing result is a known business failure.
+    row.status = "failed";
+    j.status = "failed";
+    j.completedAt = now;
+    j.reason = outcome.error;
+    d.state = "idle";
+    recordAppFinish(s, now, d, row);
   } else if (outcome.error) {
     row.status = "unknown";
     j.status = "unknown";

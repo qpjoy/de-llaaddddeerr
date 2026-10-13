@@ -26,6 +26,7 @@ const empty = {
   resources: [],
   apps: [],
   definitions: [],
+  commandDefinitions: [],
   commands: [],
   loopPolicies: [],
 };
@@ -82,6 +83,7 @@ export const labels = {
   running: "执行中",
   yielded: "检查点等待",
   succeeded: "已完成",
+  failed: "业务输入未满足",
   unknown: "结果待核验",
   blocked: "依赖阻塞",
   skipped: "已跳过",
@@ -95,7 +97,8 @@ export const labels = {
 export const time = (value) =>
   value ? new Date(value).toLocaleTimeString("zh-CN", { hour12: false }) : "—";
 export const appName = (appId = "xhs") =>
-  ({ xhs: "小红书", weibo: "微博", xianyu: "闲鱼" })[appId] || appId;
+  ({ xhs: "小红书", weibo: "微博", xianyu: "闲鱼", pdd: "拼多多" })[appId] ||
+  appId;
 const operationTitle = (j) =>
   j.operation === "search"
     ? `搜索 · ${j.input.keyword}`

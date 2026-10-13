@@ -1,4 +1,7 @@
-import { BUILTIN_DEFINITIONS } from "./workflow-catalog.mjs";
+import {
+  BUILTIN_DEFINITIONS,
+  BUILTIN_COMMAND_DEFINITIONS,
+} from "./workflow-catalog.mjs";
 import pg from "pg";
 import { readFile, readdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
@@ -15,6 +18,7 @@ export class MemoryStore {
       resources: [],
       apps: [],
       definitions: structuredClone(BUILTIN_DEFINITIONS),
+      commandDefinitions: structuredClone(BUILTIN_COMMAND_DEFINITIONS),
       commands: [],
       loopPolicies: [],
     };
@@ -234,6 +238,12 @@ export class PgStore {
           [mode],
         )
       ).rows.map((r) => r.document);
+      const commandDefinitions = (
+        await c.query(
+          "SELECT document FROM mx_device.command_definitions WHERE mode=$1",
+          [mode],
+        )
+      ).rows.map((r) => r.document);
       const loopPolicies = (
         await c.query(
           "SELECT document FROM mx_device.loop_policies WHERE mode=$1",
@@ -253,6 +263,7 @@ export class PgStore {
           resources,
           apps,
           definitions,
+          commandDefinitions,
           loopPolicies,
           commands,
           events: [],
@@ -269,6 +280,10 @@ export class PgStore {
             ...commands,
           ].map((r) => [r.id, JSON.stringify(r)]),
         );
+      // Task and command catalogs intentionally share logical code/version IDs.
+      const commandsBefore = new Map(
+        commandDefinitions.map((d) => [d.id, JSON.stringify(d)]),
+      );
       const result = fn(state, now);
       if (result?.then)
         throw new Error("Async work inside transaction is forbidden");
@@ -276,6 +291,12 @@ export class PgStore {
         if (before.get(d.id) !== JSON.stringify(d))
           await c.query(
             "INSERT INTO mx_device.task_definitions VALUES($1,$2,$3,$4,$5)",
+            [d.id, d.mode, d.code, d.version, d],
+          );
+      for (const d of state.commandDefinitions)
+        if (commandsBefore.get(d.id) !== JSON.stringify(d))
+          await c.query(
+            "INSERT INTO mx_device.command_definitions VALUES($1,$2,$3,$4,$5)",
             [d.id, d.mode, d.code, d.version, d],
           );
       for (const p of state.loopPolicies)
@@ -363,6 +384,7 @@ export class PgStore {
         r,
         apps,
         definitions,
+        commandDefinitions,
         loopPolicies,
         commands,
         clock,
@@ -402,6 +424,10 @@ export class PgStore {
           [mode],
         ),
         await client.query(
+          "SELECT document FROM mx_device.command_definitions WHERE mode=$1",
+          [mode],
+        ),
+        await client.query(
           "SELECT document FROM mx_device.loop_policies WHERE mode=$1",
           [mode],
         ),
@@ -422,6 +448,7 @@ export class PgStore {
         resources: r.rows.map((r) => r.document),
         apps: apps.rows.map((r) => r.document),
         definitions: definitions.rows.map((r) => r.document),
+        commandDefinitions: commandDefinitions.rows.map((r) => r.document),
         loopPolicies: loopPolicies.rows.map((r) => r.document),
         commands: commands.rows.map((r) => r.document),
         now: Number(clock.rows[0].now),

@@ -21,6 +21,18 @@ import {
   loopPolicyFor,
   configureLoops,
 } from "./loop-policy.mjs";
+import {
+  commandDefinitions,
+  resolveCommand,
+  validateData,
+} from "./command-registry.mjs";
+import {
+  expandDefinition,
+  validateStepInput,
+  commandInput,
+  sampleOutput,
+} from "./workflow-input.mjs";
+import { APP_NAMES } from "./apps.mjs";
 import { deviceApps, appBlockers, ensureApps } from "./apps.mjs";
 import {
   compareJobs,
@@ -47,11 +59,29 @@ export function saveDefinition(s, now, mode, body) {
     "新指令组合仅允许模拟，真实 adapter 尚未通过执行契约",
     403,
   );
+  requireThat(
+    body &&
+      typeof body === "object" &&
+      !Array.isArray(body) &&
+      Object.keys(body).every((k) =>
+        [
+          "code",
+          "name",
+          "appId",
+          "loop",
+          "steps",
+          "resumable",
+          "expectedVersion",
+        ].includes(k),
+      ),
+    "任务含不支持或只读字段",
+    400,
+  );
   const code = str(body.code, "定义代码", 60),
     name = str(body.name, "定义名称", 80);
   requireThat(/^[a-z][a-z0-9_.-]{2,59}$/.test(code), "定义代码格式无效", 400);
   requireThat(
-    ["xhs", "weibo", "xianyu"].includes(body.appId) &&
+    Object.hasOwn(APP_NAMES, body.appId) &&
       ["small", "large"].includes(body.loop),
     "无效 App 或循环类型",
     400,
@@ -65,7 +95,17 @@ export function saveDefinition(s, now, mode, body) {
   );
   let size = 0;
   const steps = body.steps.map((step) => {
-    const c = commandByCode(step?.code);
+    requireThat(
+      step &&
+        Object.keys(step).every((k) =>
+          ["code", "repeat", "commandVersion", "input"].includes(k),
+        ),
+      "步骤含不支持或只读字段",
+      400,
+    );
+    const active = resolveCommand(s, step.code);
+    const c =
+      active && resolveCommand(s, step.code, { version: step.commandVersion });
     requireThat(
       c && !c.internal && (!c.appId || c.appId === body.appId),
       "指令未登记或不属于此 App",
@@ -77,22 +117,36 @@ export function saveDefinition(s, now, mode, body) {
       400,
     );
     size += step.repeat;
-    return { code: c.code, repeat: step.repeat };
+    return {
+      code: c.code,
+      repeat: step.repeat,
+      commandVersion: c.version,
+      commandDefinition: c,
+      ...(step.input === undefined
+        ? {}
+        : { input: structuredClone(step.input) }),
+    };
   });
   requireThat(
     size <= (body.loop === "small" ? 4 : 30),
     "小任务最多 4 条指令，大任务最多 30 条",
     400,
   );
-  requireThat(steps[0].code === "app.open", "第一条指令必须打开目标 App", 400);
+  requireThat(
+    steps[0].commandDefinition.action === "open",
+    "第一条指令必须打开目标 App",
+    400,
+  );
+  const expanded = expandDefinition(s, { steps });
+  expanded.forEach((step, index) => validateStepInput(step, index, expanded));
   let hasSearch = false;
   for (const step of steps) {
-    if (step.code === "xhs.search") hasSearch = true;
-    if (step.code === "xhs.search.next")
+    if (step.commandDefinition.action === "search") hasSearch = true;
+    if (step.commandDefinition.action === "next")
       requireThat(hasSearch, "翻页前必须有搜索", 400);
   }
   s.definitions ||= structuredClone(BUILTIN_DEFINITIONS);
-  requireThat(s.definitions.length < 128, "任务定义版本数量已达上限", 429);
+  requireThat(s.definitions.length < 2048, "任务定义版本数量已达上限", 429);
   const latest = Math.max(
     0,
     ...s.definitions
@@ -114,6 +168,7 @@ export function saveDefinition(s, now, mode, body) {
     code,
     name,
     version: latest + 1,
+    archived: false,
     appId: body.appId,
     loop: body.loop,
     steps,
@@ -130,6 +185,43 @@ export function saveDefinition(s, now, mode, body) {
   );
   return row;
 }
+export function archiveDefinition(s, now, mode, id, body) {
+  requireThat(mode === "sim", "任务目录仅允许模拟", 403);
+  requireThat(
+    body && Object.keys(body).every((k) => k === "expectedVersion"),
+    "归档请求含不支持字段",
+    400,
+  );
+  const row = definitions(s).find((d) => d.mode === mode && d.id === id);
+  requireThat(row, "任务定义不存在", 404);
+  const latest = definitions(s)
+    .filter((d) => d.mode === mode && d.code === row.code)
+    .sort((a, b) => b.version - a.version)[0];
+  requireThat(
+    latest.id === id &&
+      !latest.archived &&
+      body.expectedVersion === latest.version,
+    "任务定义已更新或归档，请刷新后重试",
+  );
+  requireThat(definitions(s).length < 2048, "任务定义版本数量已达上限", 429);
+  const version = latest.version + 1;
+  const next = {
+    ...structuredClone(latest),
+    id: `${mode}:${row.code}:${version}`,
+    version,
+    archived: true,
+    createdAt: now,
+  };
+  s.definitions ||= structuredClone(BUILTIN_DEFINITIONS);
+  s.definitions.push(next);
+  event(
+    s,
+    now,
+    "definition",
+    `归档任务 ${row.code} v${version}；已有任务继续保留`,
+  );
+  return next;
+}
 export function addWorkflow(s, now, mode, body) {
   requireThat(mode === "sim", "组合指令仅模拟；真实派发未启用", 403);
   const def = definitions(s).find(
@@ -139,9 +231,27 @@ export function addWorkflow(s, now, mode, body) {
   return enqueueWorkflow(s, now, mode, body, def);
 }
 function enqueueWorkflow(s, now, mode, body, def) {
+  requireThat(
+    body.input === undefined ||
+      (body.input &&
+        typeof body.input === "object" &&
+        !Array.isArray(body.input) &&
+        JSON.stringify(body.input).length <= 16000),
+    "任务 input 须为有界对象",
+    400,
+  );
   const params = {
-    keyword: str(body.keyword || "演示关键词", "关键词", 200),
-    target: str(body.target || "demo-note-1", "目标标识", 200),
+    ...(body.input || {}),
+    keyword: str(
+      body.keyword || body.input?.keyword || "演示关键词",
+      "关键词",
+      200,
+    ),
+    target: str(
+      body.target || body.input?.target || "demo-note-1",
+      "目标标识",
+      200,
+    ),
   };
   const deviceId = body.deviceId ? uuid(body.deviceId) : null;
   const priority = Number(body.priority ?? 5);
@@ -169,6 +279,14 @@ function enqueueWorkflow(s, now, mode, body, def) {
     );
     return prior;
   }
+  const latest = definitions(s)
+    .filter((d) => d.mode === mode && d.code === def.code)
+    .sort((a, b) => b.version - a.version)[0];
+  requireThat(
+    !def.archived && !latest?.archived,
+    "任务定义已归档，不能提交新任务",
+    409,
+  );
   requireThat(
     s.jobs.filter(
       (j) => j.mode === mode && ["queued", "running"].includes(j.status),
@@ -184,18 +302,11 @@ function enqueueWorkflow(s, now, mode, body, def) {
     );
     requireThat(!spec.rack || spec.rack === d.rack, "设备不属于所选机架", 400);
   }
-  const plan = [];
-  let page = 0;
-  for (const step of def.steps)
-    for (let n = 0; n < step.repeat; n++) {
-      if (step.code === "xhs.search") page = 1;
-      else if (step.code === "xhs.search.next") page++;
-      plan.push({
-        code: step.code,
-        page: step.code.startsWith("xhs.search") ? page : null,
-        ordinal: plan.length + 1,
-      });
-    }
+  const plan = expandDefinition(s, def);
+  plan.forEach((step, index) => {
+    validateStepInput(step, index, plan);
+    commandInput(s, { input: params, appId: def.appId }, null, step, true);
+  });
   const j = {
     id: randomUUID(),
     mode,
@@ -208,7 +319,7 @@ function enqueueWorkflow(s, now, mode, body, def) {
     priority,
     placement: spec.rack ? { rack: spec.rack, host: null } : undefined,
     estimatedDurationMs: plan.reduce(
-      (n, step) => n + commandByCode(step.code).estimateMs,
+      (n, step) => n + step.definition.estimateMs,
       0,
     ),
     executionModel: def.executionModel,
@@ -251,8 +362,18 @@ export function testAdapterCommand(s, now, mode, deviceId, body) {
   );
   const device = s.devices.find((d) => d.id === deviceId && d.mode === mode);
   requireThat(device, "设备不存在", 404);
-  const def = adapterTestDefinition(body.code, body.appId);
-  requireThat(def, "指令未登记、仅供内部使用或不属于此 App", 400);
+  const def = adapterTestDefinition(
+    body.code,
+    body.appId,
+    commandDefinitions(s),
+  );
+  requireThat(def, "指令未登记、准备指令不可用或不属于此 App", 400);
+  def.steps = def.steps.map((step) => ({
+    ...step,
+    commandDefinition: resolveCommand(s, step.code, {
+      version: step.commandVersion,
+    }),
+  }));
   const job = enqueueWorkflow(
     s,
     now,
@@ -262,6 +383,7 @@ export function testAdapterCommand(s, now, mode, deviceId, body) {
       deviceId,
       keyword: body.keyword,
       target: body.target,
+      input: body.input,
       priority: 5,
     },
     def,
@@ -401,6 +523,22 @@ export function beginCommand(s, now, a) {
     ? { code: "session.restore", ordinal: w.nextStep + 1 }
     : w.plan[w.nextStep];
   if (!step) return null;
+  const definition =
+    step.definition || resolveCommand(s, step.code, { version: 1 });
+  let params;
+  try {
+    params = commandInput(s, j, a, { ...step, definition });
+  } catch (error) {
+    if (error.status !== 400) throw error;
+    finish(s, now, a, { error: error.message, rejectedBeforeCommand: true });
+    const device = s.devices.find((d) => d.id === a.deviceId);
+    if (a.id === device.workflowAttemptId) delete device.workflowAttemptId;
+    else if (a.parentAttemptId && device.state !== "quarantined") {
+      device.state = "running";
+      device.revision++;
+    }
+    return null;
+  }
   markDispatch(s, now, a);
   const policy = w.policySnapshot || DEFAULT_LOOP_POLICY;
   const c = {
@@ -413,11 +551,13 @@ export function beginCommand(s, now, a) {
     code: step.code,
     stepIndex: w.nextStep,
     page: step.page || null,
-    params: j.input,
+    params,
+    definition: structuredClone(definition),
+    commandVersion: definition.version,
     status: "running",
     createdAt: now,
     epoch: a.epoch,
-    estimatedDurationMs: commandByCode(step.code).estimateMs,
+    estimatedDurationMs: definition.estimateMs,
     simulationDurationMs: policy.commandDelayMs,
     restoring: step.code === "session.restore",
     loop: w.loop,
@@ -427,6 +567,7 @@ export function beginCommand(s, now, a) {
   s.commands.push(c);
   return c;
 }
+const actionOf = (c) => c.definition?.action || commandByCode(c.code)?.action;
 export function simulateCommand(c) {
   const receipt = {
     commandId: c.id,
@@ -436,40 +577,51 @@ export function simulateCommand(c) {
     appId: c.appId,
     code: c.code,
     stepIndex: c.stepIndex,
+    ...(c.commandVersion === undefined
+      ? {}
+      : { commandVersion: c.commandVersion }),
     stopped: true,
     source: "simulator",
   };
-  if (c.code === "session.restore")
-    return {
-      ...receipt,
-      result: { restoredStep: c.stepIndex, appId: c.appId },
+  const action = actionOf(c);
+  let result;
+  if (action === "restore")
+    result = { restoredStep: c.stepIndex, appId: c.appId };
+  else if (action === "open") result = { foregroundAppId: c.appId };
+  else if (action === "home") result = { home: true };
+  else if (action === "back") result = { backed: true };
+  else if (action === "like") result = { target: c.params.target, liked: true };
+  else if (["detail", "ocr"].includes(action)) {
+    result = {
+      target: c.params.target,
+      fullText: "模拟正文：商品内容与 OCR 合成证据，仅用于演练。",
+      complete: true,
     };
-  if (c.code === "app.open")
-    return { ...receipt, result: { foregroundAppId: c.appId } };
-  if (c.code === "session.home") return { ...receipt, result: { home: true } };
-  if (c.code === "session.back")
-    return { ...receipt, result: { backed: true } };
-  if (c.code === "weibo.like")
-    return { ...receipt, result: { target: c.params.target, liked: true } };
-  if (c.code.includes("detail") || c.code.endsWith("ocr"))
-    return {
-      ...receipt,
-      result: {
-        target: c.params.target,
-        fullText: "模拟正文：完整任务内容与 OCR 证据，仅用于演示。",
-        complete: true,
-      },
-    };
-  return {
-    ...receipt,
-    result: {
+    if (c.appId === "pdd" && action === "detail")
+      Object.assign(result, {
+        goodsId: c.params.target,
+        title: "模拟商品",
+        priceCents: 1990,
+      });
+    if (c.appId === "pdd" && action === "ocr")
+      result.blocks = [{ text: "模拟商品 ¥19.90", confidence: 0.98 }];
+  } else
+    result = {
       keyword: c.params.keyword,
       page: c.page,
       items: [1, 2, 3].map((n) => ({
         id: `${c.id}-${n}`,
         title: `${c.params.keyword} · 合成内容 ${n}`,
+        ...(c.appId === "pdd"
+          ? { goodsId: `${c.id}-${n}`, priceCents: 1990 + n * 100 }
+          : {}),
       })),
-    },
+    };
+  return {
+    ...receipt,
+    result: c.definition
+      ? sampleOutput(c.definition.outputSchema, result)
+      : result,
   };
 }
 export function validReceipt(c, r) {
@@ -485,30 +637,45 @@ export function validReceipt(c, r) {
       "appId",
       "code",
       "stepIndex",
-    ].some((k) => r[k] !== { commandId: c.id, ...c }[k])
+    ].some((k) => r[k] !== { commandId: c.id, ...c }[k]) ||
+    (c.commandVersion !== undefined && r.commandVersion !== c.commandVersion)
   )
     return false;
   const x = r.result;
-  if (c.code === "session.restore")
+  const outputSchema = (c.definition || commandByCode(c.code))?.outputSchema;
+  if (outputSchema) {
+    try {
+      validateData(x, outputSchema, "指令回执");
+    } catch {
+      return false;
+    }
+  }
+  // Preserve semantic evidence for canonical fields when the platform schema declares them.
+  const has = (key) =>
+    !c.definition || Object.hasOwn(c.definition.outputSchema.properties, key);
+  const action = actionOf(c);
+  if (action === "restore")
     return x?.restoredStep === c.stepIndex && x?.appId === c.appId;
-  if (c.code === "app.open") return x?.foregroundAppId === c.appId;
-  if (c.code === "session.home") return x?.home === true;
-  if (c.code === "session.back") return x?.backed === true;
-  if (c.code === "weibo.like")
-    return x?.target === c.params.target && x?.liked === true;
-  if (c.code.includes("detail") || c.code.endsWith("ocr"))
+  if (action === "open")
+    return !has("foregroundAppId") || x?.foregroundAppId === c.appId;
+  if (action === "home") return !has("home") || x?.home === true;
+  if (action === "back") return !has("backed") || x?.backed === true;
+  if (action === "like")
     return (
-      x?.target === c.params.target &&
-      x?.complete === true &&
-      typeof x?.fullText === "string" &&
-      x.fullText.length > 0
+      (!has("target") || x?.target === c.params.target) &&
+      (!has("liked") || x?.liked === true)
+    );
+  if (["detail", "ocr"].includes(action))
+    return (
+      (!has("target") || x?.target === c.params.target) &&
+      (!has("complete") || x?.complete === true) &&
+      (!has("fullText") ||
+        (typeof x?.fullText === "string" && x.fullText.length > 0))
     );
   return (
-    x?.keyword === c.params.keyword &&
-    x?.page === c.page &&
-    Array.isArray(x?.items) &&
-    x.items.length > 0 &&
-    x.items.every((i) => typeof i.id === "string")
+    (!has("keyword") || x?.keyword === c.params.keyword) &&
+    (!has("page") || x?.page === c.page) &&
+    (!has("items") || Array.isArray(x?.items))
   );
 }
 export function completeCommand(s, now, a, c, r) {
@@ -548,6 +715,7 @@ export function completeCommand(s, now, a, c, r) {
     w.receipts.push({
       commandId: row.id,
       code: row.code,
+      commandVersion: row.commandVersion,
       stepIndex: row.stepIndex,
       page: row.page,
       count: r.result.items?.length || 0,
@@ -556,15 +724,28 @@ export function completeCommand(s, now, a, c, r) {
     w.nextStep++;
   }
   checkpoint(s, now, a, {
-    status: `${commandByCode(row.code).name} · ${w.nextStep}/${w.plan.length}`,
+    status: `${row.definition?.name || commandByCode(row.code)?.name || row.code} · ${w.nextStep}/${w.plan.length}`,
     commandId: row.id,
     commandCode: row.code,
+    commandAction: actionOf(row),
     detail: r.result.fullText
       ? { id: r.result.target, title: "模拟正文", content: r.result.fullText }
       : undefined,
     page: row.page,
     count: r.result.items?.length,
-    items: r.result.items || [],
+    // Projection is a bounded display summary, not the platform result schema.
+    items: (r.result.items || [])
+      .filter((i) => i && typeof i === "object" && !Array.isArray(i))
+      .map((i) => ({
+        id:
+          typeof i.id === "string"
+            ? i.id
+            : typeof i.goodsId === "string"
+              ? i.goodsId
+              : undefined,
+        title: typeof i.title === "string" ? i.title : "结构化记录（详见回执）",
+        authorName: typeof i.authorName === "string" ? i.authorName : undefined,
+      })),
     keyword: j.input.keyword,
   });
   if (w.nextStep === w.plan.length) {
@@ -573,6 +754,21 @@ export function completeCommand(s, now, a, c, r) {
         definitionId: w.definitionId,
         completedSteps: w.nextStep,
         receipts: w.receipts,
+        steps: s.commands
+          .filter(
+            (c) =>
+              c.jobId === j.id &&
+              c.attemptId === a.id &&
+              !c.restoring &&
+              c.status === "succeeded",
+          )
+          .sort((a, b) => a.stepIndex - b.stepIndex)
+          .map((c) => ({
+            stepIndex: c.stepIndex,
+            code: c.code,
+            commandVersion: c.commandVersion,
+            result: c.receipt.result,
+          })),
         stopped: true,
         completion: "all-command-receipts-validated",
       },
@@ -588,7 +784,9 @@ export function completeCommand(s, now, a, c, r) {
     const current = s.attempts.find((x) => x.id === a.id);
     current.status = "yielded";
     current.checkpointAt = now;
-    w.safePoint = commandByCode(row.code).effect === "read" && !row.restoring;
+    w.safePoint =
+      (row.definition || commandByCode(row.code)).effect === "read" &&
+      !row.restoring;
     j.reason = `检查点 ${w.nextStep}/${w.plan.length}，保留插槽`;
   }
   return true;

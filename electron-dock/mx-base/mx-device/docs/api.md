@@ -35,7 +35,7 @@
 
 调度池参数、场景和报告边界见 [任务调度中心方案](task-scheduling-center-2026-10-13.md#11-可重复场景与验收指标)。设备数量为 2/10/20/50/100，默认 mixed、10 台、seed 42。每 API 进程同时只计算一份报告，繁忙返回 429，6.5 秒计算超时返回 503。模拟设备登记可提供 `simApps:[xhs,weibo,xianyu]`、`simCommandCodes:[已登记代码]`；省略时兼容原小红书/微博设备。闲鱼仅支持模拟定义 `sim:xianyu.refresh:1`，不扩展旧搜索/详情端点。池软分配随 state 返回，属于预测，不是执行授权。
 
-Adapter 试运行仅 `sim`，`real` 返回 403。App 为 `xhs|weibo`；指令须在目录内且匹配 App，不接受内部 `session.restore`。服务端生成准备步骤：`app.open` 自身一条，其余先打开 App，`xhs.search.next` 还会先搜索。忽略调用方自传 plan/priority，固定为优先级 5 的小循环，仍遵守物理单槽、App 冷却、机架限额、暂停与检查点插入预算。新任务要求设备已启用且非隔离；相同 key/参数返回原 Job，更改命令、App、目标或关键词返回 409。Job 保存 `adapterTest:{code,appId}` 及冻结的 workflow plan，不自动新增任务定义；保存定义仍显式使用 `POST /api/task-definitions?mode=sim`。真实截图/状态/连接检查复用上表原有接口。
+Adapter 试运行仅 `sim`，`real` 返回 403。App 为 `xhs|weibo|xianyu|pdd`；指令须在当前活跃目录内且匹配 App，不接受内部 `session.restore`。服务端生成准备步骤：`app.open` 自身一条，其余先打开 App，`action: next` 还会先执行该平台的活跃搜索指令。忽略调用方自传 plan/priority，固定为优先级 5 的小循环，仍遵守物理单槽、App 冷却、机架限额、暂停与检查点插入预算。新任务要求设备已启用且非隔离；相同 key/参数返回原 Job，更改命令、App、目标或关键词返回 409。Job 保存 `adapterTest:{code,appId}` 及冻结的 workflow plan，不自动新增任务定义；保存定义仍显式使用 `POST /api/task-definitions?mode=sim`。真实截图/状态/连接检查复用上表原有接口。
 
 资源策略：不存在持久策略时 `revision:0`，之后使用快照中的版本；陈旧版本返回 409。`limit` 的 `maxConcurrent` 为 1–64 整数或 null（不另设上限）。`drain` 暂停全部成员并阻止后来成员新领取，不中断在途；`release` 只解除本级排空，设备仍暂停，上级排空仍有效。资源分组必须已有设备；每模式最多 512 条策略。归属编辑不能更改 Worker、serial、入口或账号，不调用外部服务。
 
@@ -97,12 +97,24 @@ pacing 接口的整机间隔为模拟 0–86400000、真机 2000–86400000 整�
 
 ## 十槽实验室接口（仅 sim）
 
-- `GET /api/task-definitions?mode=sim`：版本化定义及逻辑指令目录，`realEnabled:false` 明确当前边界。
-- `POST /api/task-definitions?mode=sim`：`{code,name,appId,loop:"small"|"large",resumable?,expectedVersion,steps:[{code,repeat}]}`，返回 201。新代码 expectedVersion=0，后续等于现有最高版本；冲突 409。不修改旧版本。
-- `POST /api/jobs?mode=sim`：`{key,definitionId,keyword?,target?,priority?,deviceId?,rack?}`。提交时冻结版本/指令，未绑定设备则由中心匹配；不支持 host 条件。相同 key/规范化参数重放，变更参数 409，活动队列 200 条后 429（精确重放仍可返回原任务）。
+- `GET /api/task-definitions?mode=sim`：返回 `{definitions,commands}`，包含任务全部历史和当前活跃指令；real 返回空目录。
+- `POST /api/task-definitions?mode=sim`：`{code,name,appId,loop:"small"|"large",resumable?,expectedVersion,steps:[{code,repeat,commandVersion?,input?}]}`，返回 201。新代码 expectedVersion=0，后续等于现有最高版本；冲突 409。不修改旧版本。
+- `POST /api/jobs?mode=sim`：`{key,definitionId,keyword?,target?,input?,priority?,deviceId?,rack?}`。定义保存时冻结指令快照，提交时再冻结计划，未绑定设备则由中心匹配；不支持 host 条件。相同 key/规范化参数重放，变更参数 409，活动队列 200 条后 429（精确重放仍可返回原任务）。
 - `POST /api/loop-policy?mode=sim`：`{rack,revision,maxInsertions,maxDetourMs,windowMs,smallLimit,largeLimit,cooldownMinMs,cooldownMaxMs,commandDelayMs}`，全部时间为整数毫秒。默认值及边界见 [实验室说明](rack-lab-2026-10-10.md)。
 - `POST /api/scenarios?mode=sim`：`{kind:"rack20",key}`，202。没有活动模拟任务/控制会话且十槽都空闲、未隔离、未排空、冷却到期才能开始；同 key 返回原 runId。保留历史、限额与循环配置。
 
 这些写入在 real 模式拒绝；真实 Job 接口仍先执行原来的 confirmed 检查，未确认时可先返回 400。没有新增任意手机操作/ADB 转发接口。指令完成接口目前只在 worker 内部调用，不暴露无需执行身份的通用 webhook。
 
-`GET state` 新增 definitions、loopPolicies、commands。PG 快照返回所有活动任务指令及另外最近 400 条终态指令，省略 receipt/lateEvidence；`GET jobs/:id` 返回该任务完整 Command/Receipt。`yielded` 父 Attempt 会完整返回，仍占用原设备。waiting 的检查点/次数/预算原因与实际领取使用同一规则。规则中“候选”仍需 worker 在事务中再核验。
+`GET state` 包含 definitions、commandDefinitions（所有历史）、loopPolicies、commands。PG 快照返回所有活动任务指令及另外最近 400 条终态指令，省略 receipt/lateEvidence；`GET jobs/:id` 返回该任务完整 Command/Receipt。`yielded` 父 Attempt 会完整返回，仍占用原设备。waiting 的检查点/次数/预算原因与实际领取使用同一规则。规则中“候选”仍需 worker 在事务中再核验。
+
+
+## 平台目录 CRUD（007，仅 sim）
+
+- `GET /api/command-definitions?mode=sim` 返回 `{commands,history}`：活跃最新版本与包括归档的历史。
+- `POST /api/command-definitions?mode=sim` 接受 `{code,name,appId,action,effect,estimateMs,timeoutMs,inputSchema,outputSchema,bindings,mapping?,expectedVersion}`。`appId` 可为 null 表示通用；binding 为 `{kind:"poc"|"adb"|"custom",adapterId,operation}`，只允许逻辑引用。返回201；非法 Schema/字段返回400，版本冲突409。
+- `DELETE /api/command-definitions/:id?mode=sim` 与 `DELETE /api/task-definitions/:id?mode=sim`：`id` 为完整版本 ID，须 URL 编码；JSON body `{expectedVersion}`，只归档最新活跃版本，返回200的新 tombstone。恢复时 POST 原可写字段及当前 tombstone 版本号，会追加活跃版本。
+- POST/DELETE 同样要求认证、同站 Origin（请求提供时）和 JSON Content-Type；real 写入403。目录读取不领取设备或发送指令。
+
+任务第一条 action 必须为 open；next 前必须 search。同一任务内所有指令属于目标平台或通用。步骤 input 可写字面值，或 `{target:{fromStep:1,path:["items",0,"goodsId"]}}`：fromStep 是展开后的零基索引，只读本次任务此前已验证的结果。输入预检在入队和每条指令派发前执行；空结果导致后续输入缺失时，模拟任务标记 failed 并保留前序回执，确认无在途指令才正常释放设备。错误完成身份/输出格式仍为 unknown＋隔离。完成结果含 `steps:[{stepIndex,code,commandVersion,result}]`，经任务详情读取。
+
+指令归档阻止新模板引用，已有模板仍使用冻结版本；任务最新版本归档阻止其所有版本的新提交，已有 Job 及幂等重放保留。详见 [平台指令目录](platform-command-catalog-2026-10-13.md)。

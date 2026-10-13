@@ -1,4 +1,5 @@
 import AdapterBench from "./AdapterBench.jsx";
+import Catalog from "./Catalog.jsx";
 import DefinitionForm from "./DefinitionForm.jsx";
 import SchedulerLab from "./SchedulerLab.jsx";
 import { useState, useCallback, useEffect } from "react";
@@ -13,6 +14,7 @@ import {
   Plus,
   ArrowsClockwise,
   HardDrives,
+  Code,
 } from "@phosphor-icons/react";
 import { api, useSnapshot } from "./data.js";
 import { Modal, DeviceForm, JobForm, ObserverForm } from "./Forms.jsx";
@@ -189,6 +191,7 @@ function Workspace({ onExpired }) {
     ["racks", "机架总览", HardDrives],
     ["workbench", "设备工作台", Desktop],
     ["jobs", "任务池与调度", FileText],
+    ["catalog", "指令与任务库", Code],
     ["settings", "连接设置", Gear],
   ];
   return (
@@ -259,9 +262,11 @@ function Workspace({ onExpired }) {
                   ? "让调度过程可观测、可控制"
                   : page === "racks"
                     ? "机架与设备资源"
-                    : page === "jobs"
-                      ? "让任务有序流向设备"
-                      : "让每一次执行都有据可查"}
+                    : page === "catalog"
+                      ? "平台指令与任务模板"
+                      : page === "jobs"
+                        ? "让任务有序流向设备"
+                        : "让每一次执行都有据可查"}
               </h1>
               <p>单机串行，多机协作。真实执行与模拟演练严格分离。</p>
             </div>
@@ -339,6 +344,14 @@ function Workspace({ onExpired }) {
                 setHistory(e);
                 setPage("workbench");
               }}
+            />
+          ) : page === "catalog" ? (
+            <Catalog
+              key={mode}
+              state={state}
+              mode={mode}
+              busy={busy}
+              run={run}
             />
           ) : page === "settings" ? (
             <Connections
@@ -536,6 +549,7 @@ function Workspace({ onExpired }) {
           {modal === "definition" ? (
             <DefinitionForm
               definitions={state.definitions || []}
+              commandDefinitions={state.commandDefinitions || []}
               initialDefinition={definitionSeed}
               busy={busy}
               onSubmit={async (body) => {

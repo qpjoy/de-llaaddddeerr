@@ -41,7 +41,9 @@ export function calibratedDuration(device, job) {
       total +
       (sample?.count >= 3
         ? sample.p90Ms
-        : commandByCode(step.code)?.estimateMs || 1000)
+        : step.definition?.estimateMs ||
+          commandByCode(step.code)?.estimateMs ||
+          1000)
     );
   }, 0);
 }

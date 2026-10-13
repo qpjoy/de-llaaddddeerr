@@ -6,11 +6,12 @@ export default function PhoneProjection({
   projection: p = device?.projection,
 }) {
   const simulated = device?.mode === "sim";
-  const launcher = p?.commandCode === "session.home";
-  const opened = ["app.open", "session.back", "session.restore"].includes(
-    p?.commandCode,
-  );
-  const liked = p?.commandCode === "weibo.like";
+  const launcher =
+    p?.commandAction === "home" || p?.commandCode === "session.home";
+  const opened =
+    ["open", "back", "restore"].includes(p?.commandAction) ||
+    ["app.open", "session.back", "session.restore"].includes(p?.commandCode);
+  const liked = p?.commandAction === "like" || p?.commandCode === "weibo.like";
   return (
     <div
       className={`phone ${simulated ? "simulated-phone" : ""}`}

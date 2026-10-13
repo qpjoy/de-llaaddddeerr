@@ -1,6 +1,11 @@
 import { recordLoopUsage, recordPoolDispatch } from "./loop-policy.mjs";
 // Scheduling metadata only. An App entry never creates another physical slot.
-export const APP_NAMES = { xhs: "小红书", weibo: "微博", xianyu: "闲鱼" };
+export const APP_NAMES = {
+  xhs: "小红书",
+  weibo: "微博",
+  xianyu: "闲鱼",
+  pdd: "拼多多",
+};
 export const appName = (id = "xhs") => APP_NAMES[id] || id;
 export const jobApp = (job) => job.appId || "xhs";
 export const deviceInterval = (device) =>

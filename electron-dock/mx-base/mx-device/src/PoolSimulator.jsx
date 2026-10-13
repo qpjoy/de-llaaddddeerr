@@ -177,6 +177,7 @@ export default function PoolSimulator({ policy, busy, run, canApply }) {
       "xhs",
       "weibo",
       "xianyu",
+      "pdd",
       ...Object.keys(settings.appPolicies),
     ]),
   ];

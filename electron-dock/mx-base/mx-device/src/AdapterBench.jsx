@@ -6,10 +6,8 @@ import {
   Pulse,
   PlugsConnected,
 } from "@phosphor-icons/react";
-import {
-  COMMANDS,
-  adapterTestDefinition,
-} from "../server/workflow-catalog.mjs";
+import { adapterTestDefinition } from "../server/workflow-catalog.mjs";
+import { latestDefinitions } from "./DefinitionForm.jsx";
 import { api, appName, labels, time } from "./data.js";
 import { requestId } from "./request-id.mjs";
 
@@ -30,8 +28,15 @@ export default function AdapterBench({
   const request = useRef(null);
   const sim = d.mode === "sim",
     now = state.now || Date.now();
-  const command = COMMANDS.find((c) => c.code === code);
-  const preview = adapterTestDefinition(code, appId);
+  const commands = latestDefinitions(state.commandDefinitions || []).filter(
+    (c) => !c.archived && !c.internal,
+  );
+  const compatible = commands.filter((c) => !c.appId || c.appId === appId);
+  const command = compatible.find((c) => c.code === code) || compatible[0];
+  const selectedCode = command?.code || "";
+  const preview = adapterTestDefinition(selectedCode, appId, commands) || {
+    steps: [],
+  };
   const tests = state.jobs
     .filter((j) => j.deviceId === d.id && j.adapterTest)
     .sort((a, b) => b.createdAt - a.createdAt);
@@ -45,7 +50,7 @@ export default function AdapterBench({
         ? "控制会话预留中；请先释放会话，再启用调度。"
         : null;
   async function test() {
-    const body = { code, appId, keyword, target };
+    const body = { code: selectedCode, appId, keyword, target };
     const fingerprint = JSON.stringify(body);
     if (request.current?.fingerprint !== fingerprint)
       request.current = { fingerprint, key: requestId() };
@@ -161,21 +166,22 @@ export default function AdapterBench({
                 setCode("app.open");
               }}
             >
-              <option value="xhs">小红书</option>
-              <option value="weibo">微博</option>
+              {["xhs", "weibo", "xianyu", "pdd"].map((id) => (
+                <option key={id} value={id}>
+                  {appName(id)}
+                </option>
+              ))}
             </select>
           </label>
           <label>
             常用指令
             <select
               aria-label="常用 Adapter 指令"
-              value={code}
+              value={selectedCode}
               disabled={busy}
               onChange={(e) => setCode(e.target.value)}
             >
-              {COMMANDS.filter(
-                (c) => !c.internal && (!c.appId || c.appId === appId),
-              ).map((c) => (
+              {compatible.map((c) => (
                 <option key={c.code} value={c.code}>
                   {c.name} · {c.code}
                 </option>
@@ -184,18 +190,22 @@ export default function AdapterBench({
           </label>
         </div>
         <div className="adapter-shortcuts">
-          {["app.open", "session.back", "session.home"].map((c) => (
-            <button
-              key={c}
-              disabled={busy}
-              aria-pressed={code === c}
-              onClick={() => setCode(c)}
-            >
-              {COMMANDS.find((x) => x.code === c).name}
-            </button>
-          ))}
+          {compatible
+            .filter((c) => ["open", "back", "home"].includes(c.action))
+            .map((c) => (
+              <button
+                key={c.code}
+                disabled={busy}
+                aria-pressed={selectedCode === c.code}
+                onClick={() => setCode(c.code)}
+              >
+                {c.name}
+              </button>
+            ))}
         </div>
-        <p className="small muted">{command.mapping}</p>
+        <p className="small muted">
+          {command?.mapping || "当前平台暂无可用指令，请在指令与任务库创建。"}
+        </p>
         {sim && (
           <div className="form-grid">
             <label>
@@ -240,19 +250,19 @@ export default function AdapterBench({
             <div className="button-row">
               <button
                 className="primary"
-                disabled={busy || !!disabledReason}
+                disabled={busy || !!disabledReason || !command}
                 onClick={test}
               >
                 <PlayCircle size={19} />
                 试运行（模拟）
               </button>
               <button
-                disabled={busy}
+                disabled={busy || !command}
                 onClick={() =>
                   onDefine({
                     ...preview,
-                    code: `custom.${appId}.${code}`,
-                    name: `${appName(appId)} · ${command.name}`,
+                    code: `custom.${appId}.${selectedCode}`,
+                    name: `${appName(appId)} · ${command?.name || ""}`,
                   })
                 }
               >

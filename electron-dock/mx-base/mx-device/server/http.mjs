@@ -1,10 +1,15 @@
 import {
   definitions,
   saveDefinition,
+  archiveDefinition,
   rackScenario,
   testAdapterCommand,
 } from "./workflows.mjs";
-import { COMMANDS } from "./workflow-catalog.mjs";
+import {
+  commandDefinitions,
+  saveCommand,
+  archiveCommand,
+} from "./command-registry.mjs";
 import { configureLoops } from "./loop-policy.mjs";
 import { createServer } from "node:http";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
@@ -146,7 +151,7 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
         await store.ready();
         return json(res, 200, { ok: true });
       }
-      if (req.method === "POST") {
+      if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) {
         if (
           req.headers.origin &&
           new URL(req.headers.origin).host !== req.headers.host
@@ -211,15 +216,53 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
             scheduling: schedulingSnapshot(state, state.now, mode),
           });
         }
+        if (path === "/api/command-definitions" && req.method === "GET") {
+          const state = await store.snapshot(mode);
+          return json(res, 200, {
+            commands: mode === "sim" ? commandDefinitions(state) : [],
+            history:
+              mode === "sim"
+                ? commandDefinitions(state, {
+                    history: true,
+                    includeArchived: true,
+                  })
+                : [],
+          });
+        }
+        if (path === "/api/command-definitions" && req.method === "POST") {
+          const b = await body(req);
+          return json(
+            res,
+            201,
+            await store.atomic((s, n) => saveCommand(s, n, mode, b), { mode }),
+          );
+        }
+        const catalogArchive = path.match(
+          /^\/api\/(command|task)-definitions\/([^/]+)$/,
+        );
+        if (catalogArchive && req.method === "DELETE") {
+          const b = await body(req);
+          let id;
+          try {
+            id = decodeURIComponent(catalogArchive[2]);
+          } catch {
+            throw new Fault("目录 ID 无效", 400);
+          }
+          const archive =
+            catalogArchive[1] === "command"
+              ? archiveCommand
+              : archiveDefinition;
+          return json(
+            res,
+            200,
+            await store.atomic((s, n) => archive(s, n, mode, id, b), { mode }),
+          );
+        }
         if (path === "/api/task-definitions" && req.method === "GET") {
           const state = await store.snapshot(mode);
           return json(res, 200, {
             definitions: definitions(state).filter((d) => d.mode === mode),
-            commands: COMMANDS.map((c) => ({
-              ...c,
-              realEnabled: false,
-              simulated: true,
-            })),
+            commands: mode === "sim" ? commandDefinitions(state) : [],
           });
         }
         if (path === "/api/task-definitions" && req.method === "POST") {
@@ -470,7 +513,10 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
     } catch (e) {
       json(res, e.status || 503, {
         error:
-          e instanceof Fault ? e.message : "服务暂不可用；未自动重试设备操作",
+          e instanceof Fault ||
+          (Number.isInteger(e.status) && e.status >= 400 && e.status < 500)
+            ? e.message
+            : "服务暂不可用；未自动重试设备操作",
       });
     }
   });
