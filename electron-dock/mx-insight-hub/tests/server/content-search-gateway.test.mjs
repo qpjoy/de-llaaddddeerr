@@ -8,10 +8,11 @@ import { TikHubAdapter } from '../../server/adapters/tikhub.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
-import { nativeForwardingEndpoint } from '../../server/contracts/native-forwarding.mjs'
+import { nativeForwardingEndpoint, NATIVE_FORWARDING_VERSION } from '../../server/contracts/native-forwarding.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from '../../server/contracts/tikhub-content-search.mjs'
 import { RAW_SEARCH_VERSION } from '../../server/contracts/raw-search.mjs'
 import { requestFingerprint } from '../../server/core/crypto.mjs'
+import { isPostgresSafeJsonValue } from '../../server/core/postgres-json.mjs'
 import { createNightAllCompatibilityCursorCodec } from '../../server/external-platforms/cursor.mjs'
 import { capNightAllDataSearchTraversal, prepareNightAllCompatibilityTraversal } from '../../server/data/night-all-pagination.mjs'
 
@@ -27,6 +28,33 @@ const terminal = platform => {
 }
 const biliPage = (ids, page = 1, total = page) => ({ code: 0, data: { page, numPages: total,
   result: ids.map(id => ({ id, title: `真实标题 ${id}`, description: `内容 ${id}`, review: 7, play: 0 })) } })
+// Names/types follow the hash-verified v6 single-card schema. Every value is
+// synthetic; this does not copy private suggestions, IDs or media from it.
+const douyinRelatedWordsCard = () => ({
+  data: { card_tags: null, rs_extra_info: { hide_related_words: null, impr_extra: '{}', hide_related_words_id: null,
+    query_id: 'synthetic-query-id' }, hotspot_tab_config: null, common_tab_config: null },
+  type: 6, related_word_list: Array.from({ length: 6 }, (_, index) => ({ related_word: `fixture suggestion ${index}`,
+    word_record: { group_id: `synthetic-group-${index}`, words_position: index, words_content: `fixture suggestion ${index}`,
+      words_source: 'synthetic-source', words_image: { url_list: [`https://example.test/suggestion-${index}.jpg?signature=a%2Fb`] },
+      force_update_rank: false, product_id: `synthetic-product-${index}` }, related_img: `https://example.test/suggestion-${index}.jpg`,
+    rand_num: index, extra_info: { words_type: 'synthetic-type' } })),
+  words_query_record: { info: '{}', words_source: 'synthetic-source', query_id: 'synthetic-query-id' },
+  card_info: { index: 4, fingerprint: 'synthetic-fingerprint', double_n: 0, pos: 4, first_pos: 4 }, doc_type: 0,
+  sub_card_list: null, ui_info: { quality_style_corner_type: 0, is_waterfall_layout: 0 },
+  provider_doc_id: 0, provider_doc_id_str: 'synthetic-provider-doc-id', tab: null, show_tab: null, debug_diff_info: {}, aweme_list: null,
+  send_back: 'synthetic-send-back', card_type: 9, card_style_type: 0, ecom_goods_list: null, music_info_list: null,
+  debug_data: { filter_debug_info_list: null }, card_type_name: 'synthetic-type-name', ops: null, card_id: 'synthetic-card-id',
+  qishui_music_list: null, shoot_position_list: null,
+})
+function douyinMixedPage(number = 1, hasMore = true) {
+  const data = Array.from({ length: 7 }, (_, index) => ({ type: 1, aweme_info: {
+    aweme_id: String(7535855189035991000n + BigInt(number * 10 + index)), desc: `完整正文 ${number}/${index}`,
+    video: { play_addr: { url_list: [`https://example.test/video-${number}-${index}.mp4?signature=a%2Fb`] } },
+    statistics: { digg_count: 0, comment_count: index },
+  } }))
+  data.splice(4, 0, douyinRelatedWordsCard())
+  return { data, has_more: hasMore, cursor: number * 20, log_pb: { impr_id: 'fixture-session' }, backtrace: 'fixture-backtrace' }
+}
 
 async function harness({ platform = 'bilibili', payload, fetchImpl, leaseMs = 120000 } = {}) {
   const store = new MemoryStore(), calls = [], historical = []
@@ -87,6 +115,206 @@ test('all four platforms use fixed TikHub keyword endpoints for standard and bot
   }
 })
 
+test('Douyin data.awemeId inside a type-6 wrapper remains a real video on standard and raw contracts', async () => {
+  const payload = { data: [{ type: 6, card_type: 9, aweme_list: null, data: { awemeId: '7535855189035991057', desc: '完整视频正文'.repeat(300),
+    author: { uid: 'author-1', nickname: 'fixture author' }, statistics: { digg_count: 0, comment_count: 2 },
+    video: { play_addr: { url_list: ['https://example.test/video.mp4?signature=a%2Fb'] },
+      cover: { url_list: ['https://example.test/cover.jpg'] } } } }], has_more: false, cursor: 20 }
+  for (const standard of [true, false]) {
+    const h = await harness({ platform: 'douyin', payload })
+    const body = standard ? { platform: 'douyin', query: '城市', pageSize: 20 } : { platform: 'douyin', keyword: '城市', count: 20 }
+    const first = await (standard ? h.invokeData(body) : h.invoke(body))
+    const item = standard ? first.body.data.items[0] : JSON.parse(first.body.data.raw_data)[0]
+    assert.equal(standard ? item.externalId : item.content_id, payload.data[0].data.awemeId)
+    assert.equal(item.text, payload.data[0].data.desc)
+    assert.equal(standard ? item.metrics.likes : item.like_count, 0)
+    assert.deepEqual(standard ? item.media.videos : JSON.parse(item.video_urls), payload.data[0].data.video.play_addr.url_list)
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.platformStore.ingestJobs.length, 1)
+    const call = [...h.platformStore.calls.values()][0]
+    assert.equal(call.outcome, 'succeeded')
+    assert.equal(call.itemCount, 1)
+    const archive = h.platformStore.restrictedResponseArchives.get(call.id)
+    assert.deepEqual(JSON.parse(Buffer.from(archive.bodyBytes).toString('utf8')).data, payload)
+    const replay = await (standard ? h.invokeData(body) : h.invoke(body, 'content-raw-first', '/api/v1/search/raw'))
+    assert.equal(replay.replay, true)
+    assert.deepEqual(replay.body, first.body)
+    assert.equal(h.calls.length, 1)
+  }
+})
+
+test('Douyin unknown type-6 data cards still fail closed with the complete paid archive and immutable error replay', async () => {
+  const payload = { data: [{ type: 6, data: { unrecognized_schema: { private_value: 'fixture opaque card' } } }],
+    has_more: false, cursor: 20 }
+  for (const standard of [true, false]) {
+    const h = await harness({ platform: 'douyin', payload })
+    const body = standard ? { platform: 'douyin', query: '城市', pageSize: 20 } : { platform: 'douyin', keyword: '城市', count: 20 }
+    const invoke = (idem = standard ? 'content-data-first' : 'content-raw-first', path) => standard
+      ? h.invokeData(body, idem) : h.invoke(body, idem, path)
+    await assert.rejects(invoke(), error => error.code === 'external_platform_response_unusable' && error.status === 502)
+    assert.equal(h.calls.length, 1)
+    const call = [...h.platformStore.calls.values()][0], usage = [...h.store.requests.values()][0]
+    assert.equal(call.outcome, 'succeeded_unusable')
+    assert.equal(call.billed, true)
+    assert.equal(usage.status, 'committed')
+    assert.equal(usage.responseStatus, 502)
+    assert.equal(h.platformStore.ingestJobs.length, 0)
+    const archive = h.platformStore.restrictedResponseArchives.get(call.id)
+    assert.deepEqual(JSON.parse(Buffer.from(archive.bodyBytes).toString('utf8')).data, payload)
+    const original = structuredClone(usage)
+    await assert.rejects(invoke(undefined, standard ? undefined : '/api/v1/search/raw'),
+      error => error.code === 'external_platform_response_unusable' && error.status === 502)
+    assert.deepEqual(h.store.requests.get(usage.id), original)
+    await assert.rejects(invoke('douyin-card-new-idem'), error => error.code === 'external_platform_response_unusable')
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+  }
+})
+
+test('Douyin fixed related-word schema preserves all eight source entries and delivers seven posts once on both contracts', async () => {
+  for (const standard of [true, false]) {
+    const h = await harness({ platform: 'douyin', payload: (_call, n) => douyinMixedPage(n) })
+    const body = standard ? { platform: 'douyin', query: '城市', pageSize: 7 }
+      : { platform: 'douyin', keyword: '城市', count: 7 }
+    const first = await (standard ? h.invokeData(body) : h.invoke(body))
+    const data = first.body.data, items = standard ? data.items : JSON.parse(data.raw_data)
+    const page = standard ? data.pageInfo : data.page
+    assert.equal(items.length, 7)
+    assert.equal(page.hasMore, true)
+    assert.ok(page.nextCursor)
+    assert.ok(data.warnings.some(row => row.code === 'non_post_items_excluded'))
+    assert.equal(h.calls.length, 1)
+    const saved = h.store.requests.get(first.requestId), manifest = saved.acquisitionRequest.contentSearch
+    assert.deepEqual(manifest.state.jobs[0].providerCursor,
+      { cursor: '20', search_id: 'fixture-session', backtrace: 'fixture-backtrace' })
+    const call = [...h.platformStore.calls.values()][0], raw = h.platformStore.restrictedResponseArchives.get(call.id)
+    assert.equal(call.outcome, 'succeeded')
+    assert.equal(call.itemCount, 7)
+    assert.deepEqual(JSON.parse(Buffer.from(raw.bodyBytes).toString('utf8')).data, douyinMixedPage(1))
+    assert.equal(JSON.parse(Buffer.from(raw.bodyBytes).toString('utf8')).data.data.length, 8)
+    assert.equal(h.platformStore.ingestJobs.length, 1)
+    assert.equal(h.platformStore.ingestJobs[0].payload.records.length, 7)
+    assert.ok(h.platformStore.ingestJobs[0].payload.records.every(record =>
+      record.body.startsWith('完整正文') && !record.externalId.startsWith('synthetic-group-')))
+    assert.equal(JSON.parse(Buffer.from(raw.bodyBytes).toString('utf8')).data.data[4].related_word_list.length, 6)
+    assert.deepEqual(standard ? items[0].media.videos : JSON.parse(items[0].video_urls),
+      douyinMixedPage(1).data[0].aweme_info.video.play_addr.url_list)
+    const replay = await (standard ? h.invokeData(body) : h.invoke(body, 'content-raw-first', '/api/v1/search/raw'))
+    assert.deepEqual(replay.body, first.body)
+    assert.equal(h.calls.length, 1)
+    const secondBody = { ...body, cursor: page.nextCursor }
+    const second = await (standard ? h.invokeData(secondBody, 'douyin-second-page') : h.invoke(secondBody, 'douyin-second-page'))
+    const secondItems = standard ? second.body.data.items : JSON.parse(second.body.data.raw_data)
+    assert.equal(secondItems.length, 7)
+    assert.equal(h.calls.length, 2)
+    assert.equal(Number(h.calls[1].params.cursor), 20)
+    assert.equal(h.calls[1].params.search_id, 'fixture-session')
+    assert.equal(h.calls[1].params.backtrace, 'fixture-backtrace')
+    assert.ok(h.calls.every(call => call.url.pathname === h.recipe.path))
+    assert.equal(h.platformStore.ingestJobs.length, 2)
+    assert.equal(new Set([...items, ...secondItems].map(item => standard ? item.externalId : item.content_id)).size, 14)
+  }
+})
+
+test('Douyin filtered cards do not alter the standard three-dispatch bound or provider-pinned continuation scope', async () => {
+  const h = await harness({ platform: 'douyin', payload: (_call, n) => douyinMixedPage(n) })
+  const body = { platform: 'douyin', query: '城市', pageSize: 30, params: { sort_type: '2' } }
+  const first = await h.invokeData(body)
+  assert.equal(first.body.data.items.length, 21)
+  assert.equal(h.calls.length, 3)
+  assert.equal(first.body.data.status, 'partial')
+  assert.equal(first.body.data.pageInfo.hasMore, true)
+  assert.ok(first.body.data.warnings.some(row => row.code === 'content_search_fill_stopped'))
+  assert.deepEqual(h.calls.map(call => Number(call.params.cursor)), [0, 20, 40])
+  assert.ok([...h.platformStore.calls.values()].every(call => call.providerKey === 'tikhub' && call.itemCount === 7))
+  assert.equal(h.platformStore.ingestJobs.length, 3)
+  assert.ok([...h.platformStore.restrictedResponseArchives.values()].every(archive =>
+    JSON.parse(Buffer.from(archive.bodyBytes).toString('utf8')).data.data.length === 8))
+  const cursor = first.body.data.pageInfo.nextCursor
+  const manifest = h.store.requests.get(first.requestId).acquisitionRequest.contentSearch
+  assert.equal(manifest.state.jobs[0].upstreamPages, 3)
+  assert.deepEqual(manifest.state.jobs[0].providerCursor, { cursor: '60', search_id: 'fixture-session', backtrace: 'fixture-backtrace' })
+  assert.equal(manifest.sources.length, 3)
+  await assert.rejects(h.invokeData({ ...body, query: 'changed', cursor }, 'douyin-changed-query'), error => error.code === 'invalid_cursor')
+  await assert.rejects(h.invokeData({ ...body, params: { sort_type: '1' }, cursor }, 'douyin-changed-filter'), error => error.code === 'invalid_cursor')
+  const otherKey = await h.service.createApiKey({ consumerId: h.context.consumer.id, name: 'Other synthetic Key', platforms: ['douyin'], capabilities: [] })
+  const otherContext = await h.service.authenticate(otherKey.secret)
+  await assert.rejects(h.service.search(otherContext, { body: { ...body, cursor }, idempotencyKey: 'douyin-other-key', path: '/api/v1/data/search' }),
+    error => error.code === 'invalid_cursor')
+  assert.equal(h.calls.length, 3)
+  assert.deepEqual((await h.invokeData(body)).body, first.body)
+  assert.equal(h.calls.length, 3)
+})
+
+test('Douyin related-word schema never hides content markers or unknown nested containers', async () => {
+  for (const inner of [false, true]) for (const extra of [
+    { video: { play_addr: { url_list: ['https://example.test/real.mp4'] } } },
+    { title: 'possible real post' }, { statistics: { digg_count: 0 } },
+    { items: [{ aweme_id: 'real-post', desc: 'real body' }] },
+    { unrecognized_container: { aweme_id: 'real-post', desc: 'real body' } },
+  ]) {
+    const card = douyinRelatedWordsCard()
+    Object.assign(inner ? card.data : card, extra)
+    const payload = { data: [card], has_more: false, cursor: 20 }, h = await harness({ platform: 'douyin', payload })
+    await assert.rejects(h.invokeData(), error => error.code === 'external_platform_response_unusable' && error.status === 502)
+    assert.equal(h.calls.length, 1)
+    const call = [...h.platformStore.calls.values()][0]
+    assert.equal(call.outcome, 'succeeded_unusable')
+    assert.equal(h.platformStore.ingestJobs.length, 0)
+    assert.deepEqual(JSON.parse(Buffer.from(h.platformStore.restrictedResponseArchives.get(call.id).bodyBytes).toString('utf8')).data, payload)
+  }
+})
+
+test('Douyin validates every related-word item, including third and sixth entries after diagnostic samples', async () => {
+  for (const index of [2, 5]) for (const malformed of [
+    word => { word.related_word = 123 },
+    word => { word.word_record.words_image.url_list.push(123) },
+    word => { word.word_record.unrecognized_container = { aweme_id: 'real-post', desc: 'possible real body' } },
+  ]) {
+    const card = douyinRelatedWordsCard()
+    malformed(card.related_word_list[index])
+    const payload = { data: [card], has_more: false, cursor: 20 }, h = await harness({ platform: 'douyin', payload })
+    await assert.rejects(h.invokeData(), error => error.code === 'external_platform_response_unusable' && error.status === 502)
+    const call = [...h.platformStore.calls.values()][0]
+    assert.equal(call.outcome, 'succeeded_unusable')
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.platformStore.ingestJobs.length, 0)
+    const archive = h.platformStore.restrictedResponseArchives.get(call.id)
+    assert.deepEqual(JSON.parse(Buffer.from(archive.bodyBytes).toString('utf8')).data, payload)
+  }
+})
+
+test('a historical Douyin unusable mixed-card receipt replays its original paid error after parser changes', async () => {
+  for (const standard of [true, false]) {
+    const payload = douyinMixedPage(1), h = await harness({ platform: 'douyin', payload })
+    const body = standard ? { platform: 'douyin', query: '城市', pageSize: 20 } : { platform: 'douyin', keyword: '城市', count: 20 }
+    const path = standard ? '/api/v1/data/search' : '/api/v1/night-all/search/raw', id = randomUUID()
+    const fingerprint = requestFingerprint({ method: 'POST', path, body: standard ? { ...body, type: 'fresh' }
+      : { contractVersion: 'mx-insight-hub.night-all-compat.v1', ...body } })
+    const delivery = { usageRequestId: id, tenantId: h.context.tenant.id, consumerId: h.context.consumer.id,
+      apiKeyId: h.context.apiKey.id, fingerprint, operation: nativeForwardingEndpoint(h.recipe.key).operation }
+    await h.store.reserve({ ...delivery, requestId: id, platform: 'douyin', idempotencyKey: 'historical-douyin-card',
+      leaseExpiresAt: new Date(Date.now() + 120000), windowStart: new Date(Date.now() - 60000), maxRequests: 100,
+      acquisitionRequest: { path, body }, unitsReserved: 1 })
+    const endpoint = nativeForwardingEndpoint(h.recipe.key)
+    const call = await h.platformStore.beginProviderCall({ ...delivery, endpointKey: endpoint.endpointKey,
+      endpointVersion: endpoint.endpointVersion, contractVersion: NATIVE_FORWARDING_VERSION })
+    const result = await h.gateway.adapter.forwardNative(h.recipe.key, { params: { ...h.recipe.defaults, keyword: '城市' } })
+    const responseBody = { error: { code: 'external_platform_response_unusable', message: 'Original saved failure' }, requestId: id }
+    await h.platformStore.finishFailure({ ...result, callId: call.id, delivery, outcome: 'succeeded_unusable',
+      billed: true, httpStatus: 200, businessCode: 200, errorCode: 'invalid_content_search_contract', latencyMs: 1,
+      restrictedResponseArchive: result.restrictedResponseArchive, failureResponseStatus: 502, failureResponseBody: responseBody })
+    const original = structuredClone(h.store.requests.get(id)), originalArchive = structuredClone(h.platformStore.restrictedResponseArchives.get(call.id))
+    await assert.rejects(standard ? h.invokeData(body, 'historical-douyin-card')
+      : h.invoke(body, 'historical-douyin-card', '/api/v1/search/raw'),
+    error => error.code === 'external_platform_response_unusable' && error.status === 502 && error.message === 'Original saved failure')
+    assert.equal(h.calls.length, 1)
+    assert.deepEqual(h.store.requests.get(id), original)
+    assert.deepEqual(structuredClone(h.platformStore.restrictedResponseArchives.get(call.id)), originalArchive)
+    assert.equal(h.platformStore.calls.get(call.id).outcome, 'succeeded_unusable')
+  }
+})
+
 test('standard fills at most three pages, carries overflow, deduplicates delivered IDs and ingests each full archive only once', async () => {
   const h = await harness({ payload: (_call, n) => n === 1 ? biliPage(['a', 'b', 'c'], 1, 3) : n === 2 ? biliPage(['b', 'd'], 2, 3) : biliPage(['e'], 3, 3) })
   const body = { platform: 'bilibili', query: '城市', pageSize: 2 }
@@ -104,6 +332,35 @@ test('standard fills at most three pages, carries overflow, deduplicates deliver
   assert.equal(h.platformStore.ingestJobs.length, 3)
   assert.deepEqual(h.calls.map(call => Number(call.params.page)), [1, 2, 3])
   assert.equal(h.platformStore.requests.filter(row => row.sourceMode === 'live').length, 3)
+})
+
+test('Zhihu 18 plus 18 acquired rows deliver 20 and persist the second-page 16-row carry as a JSON tree', async () => {
+  const page = number => ({ data: Array.from({ length: 18 }, (_, index) => ({ type: 'search_result', object: {
+    id: String(number * 100 + index), type: 'article', title: `fixture ${number}/${index}`, content: `<p>完整正文 ${number}/${index}</p>`,
+  } })), paging: { is_end: false, next: `https://api.zhihu.com/search_v3?offset=${number * 20}&search_hash_id=fixture-session` } })
+  const h = await harness({ platform: 'zhihu', payload: (_call, n) => page(n) })
+  const first = await h.invokeData({ platform: 'zhihu', query: '城市', pageSize: 20 })
+  assert.equal(first.body.data.items.length, 20)
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.platformStore.ingestJobs.length, 2)
+  assert.deepEqual([...h.platformStore.calls.values()].map(call => [call.outcome, call.itemCount]), [['succeeded', 18], ['succeeded', 18]])
+  const saved = [...h.store.requests.values()][0]
+  assert.equal(saved.status, 'committed')
+  const manifest = saved.acquisitionRequest.contentSearch, job = manifest.state.jobs[0]
+  assert.equal(job.buffer.offset, 2)
+  assert.notEqual(job.buffer.providerCursor, job.providerCursor)
+  assert.deepEqual(job.buffer.providerCursor, job.providerCursor)
+  assert.equal(isPostgresSafeJsonValue(manifest), true)
+  assert.deepEqual((await h.invokeData({ platform: 'zhihu', query: '城市', pageSize: 20 })).body, first.body)
+  assert.equal(h.calls.length, 2)
+  const second = await h.invokeData({ platform: 'zhihu', query: '城市', pageSize: 20,
+    cursor: first.body.data.pageInfo.nextCursor }, 'zhihu-second-delivery')
+  assert.deepEqual(second.body.data.items.map(row => row.id), [
+    ...Array.from({ length: 16 }, (_, index) => String(202 + index)),
+    ...Array.from({ length: 4 }, (_, index) => String(300 + index)),
+  ])
+  assert.equal(h.calls.length, 3)
+  assert.equal(h.platformStore.ingestJobs.length, 3)
 })
 
 test('three real calls are a per-request bound, preserving remaining continuation and one public usage settlement', async () => {
@@ -222,6 +479,45 @@ test('transport uncertainty never returns acquired partial results or repurchase
   assert.equal(h.calls.length, 2)
 })
 
+test('paid persistence uncertainty logs only fixed phase/class/SQLState and durable IDs without changing safe unknown handling', async () => {
+  for (const [method, phase, cause] of [
+    ['stageProviderEvidence', 'stage_evidence', new TypeError('private credential/body/query')],
+    ['finishProviderStep', 'finish_step', Object.assign(new Error('private SQL and parameters'), { code: '23514',
+      detail: 'private detail', table: 'private table', constraint: 'private constraint' })],
+  ]) {
+    const h = await harness({ platform: 'kuaishou' }), logs = []
+    h.gateway.logger = { warn(...values) { logs.push(values) } }
+    h.platformStore[method] = async () => { throw cause }
+    await assert.rejects(h.invokeData(), error => error.code === 'request_outcome_unknown')
+    const usage = [...h.store.requests.values()][0], call = [...h.platformStore.calls.values()][0]
+    assert.equal(usage.status, 'unknown')
+    assert.equal(h.calls.length, 1)
+    assert.deepEqual(logs, [[{ requestId: usage.id, callId: call.id, phase,
+      errorClass: cause.name, sqlState: cause.code || null }, 'content search outcome is unknown']])
+    assert.doesNotMatch(JSON.stringify(logs), /private|fixture-secret|城市/)
+    await assert.rejects(h.invokeData(undefined, 'kuaishou-persistence-new-idem'), error => error.code === 'request_outcome_unknown')
+    assert.equal(h.calls.length, 1)
+  }
+})
+
+test('a failed uncertainty logger cannot release the original hold or permit another paid request', async () => {
+  const h = await harness({ platform: 'kuaishou' })
+  await h.service.setTenantBillingProfile(h.context.tenant.id,
+    { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'offline-admin')
+  await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline fixture' },
+    { idempotencyKey: 'kuaishou-logger-credit', actor: 'offline-admin' })
+  h.gateway.logger = { warn() { throw new Error('private logger failure') } }
+  h.platformStore.stageProviderEvidence = async () => { throw new TypeError('private stage failure') }
+  await assert.rejects(h.invokeData(), error => error.code === 'request_outcome_unknown')
+  assert.equal([...h.store.requests.values()][0].status, 'unknown')
+  await assert.rejects(h.invokeData(undefined, 'kuaishou-logger-new-idem'), error => error.code === 'request_outcome_unknown')
+  assert.equal(h.calls.length, 1)
+  const charges = [...h.store.customerCharges.values()]
+  assert.equal(charges.filter(row => row.status === 'unknown').length, 1)
+  assert.equal(h.store.creditAccounts.get(h.context.tenant.id).heldMinor, 3)
+  assert.equal(h.store.creditAccounts.get(h.context.tenant.id).availableMinor, 97)
+})
+
 test('provider preview is visible partial content and missing modern metrics stay null', async () => {
   const h = await harness({ platform: 'zhihu' })
   const result = await h.invokeData()
@@ -245,6 +541,28 @@ test('buffer projection checks original archive hash before delivery and cannot 
   assert.equal(JSON.stringify(first.body).includes('fixture-secret'), false)
   await assert.rejects(h.invokeData({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'content-buffer-hash'), error => error.code === 'search_page_unavailable')
   assert.equal(h.calls.length, 1)
+})
+
+test('Zhihu numeric surrogate entities preserve paid raw evidence while full Unicode text and the committed manifest remain JSON-safe', async () => {
+  const rawContent = '<p>完整正文😀 &#128512; &#x1F642; &#xD800; &#57343; ' + '尾段'.repeat(1200) + '</p>'
+  const payload = { data: [{ type: 'search_result', object: { id: 'unicode-article', type: 'article',
+    title: '真实标题 &#xDFFF; &#128512;', content: rawContent } }], paging: { is_end: true } }
+  const h = await harness({ platform: 'zhihu', payload })
+  const result = await h.invokeData({ platform: 'zhihu', query: '城市', pageSize: 20, type: 'stable' }, 'content-unicode-projection')
+  const item = result.body.data.items[0], saved = h.store.requests.get(result.requestId)
+  assert.equal(saved.status, 'committed')
+  assert.equal(item.title, '真实标题 &#xDFFF; 😀')
+  assert.equal(item.text, rawContent.replace('<p>', '').replace('</p>', '').replace('&#128512;', '😀').replace('&#x1F642;', '🙂'))
+  assert.ok(item.text.length > 2000)
+  assert.ok(isPostgresSafeJsonValue(result.body))
+  assert.ok(isPostgresSafeJsonValue(saved.acquisitionRequest.contentSearch))
+  assert.ok(isPostgresSafeJsonValue(JSON.parse(JSON.stringify(h.platformStore.ingestJobs[0].payload))))
+  assert.equal(h.platformStore.ingestJobs[0].payload.records[0].body, item.text)
+  const raw = [...h.platformStore.restrictedResponseArchives.values()][0]
+  assert.deepEqual(JSON.parse(Buffer.from(raw.bodyBytes).toString('utf8')).data, payload)
+  assert.deepEqual((await h.invokeData({ platform: 'zhihu', query: '城市', pageSize: 20, type: 'stable' }, 'content-unicode-projection')).body, result.body)
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.platformStore.ingestJobs.length, 1)
 })
 
 test('filter key ordering is canonical in cursor scope, while changed filters and Key remain invalid', async () => {
@@ -315,4 +633,17 @@ test('fifty raw keyword jobs retain the existing work bound with fifty independe
   assert.equal(h.store.requests.size, 1)
   await assert.rejects(h.invoke({ platform: 'bilibili', queries: [...queries, 'fifty-one'], count: 1 }, 'content-raw-too-many'), error => error.code === 'work_budget_exceeded')
   assert.equal(h.calls.length, 50)
+})
+
+test('assembly errors identify the durable usage request for readonly lookup, including post-dispatch uncertainty', async () => {
+  const h = await harness({fetchImpl:()=>{throw new Error('synthetic transport uncertainty')}})
+  let failure
+  try {await h.invokeData()} catch(error){failure=error}
+  const request=[...h.store.requests.values()][0]
+  assert.ok(request)
+  assert.equal(request.status,'unknown')
+  assert.equal(failure.details.requestId,request.id)
+  assert.equal(h.calls.length,1)
+  await assert.rejects(h.invokeData(),error=>error.details.requestId===request.id&&error.code==='request_outcome_unknown')
+  assert.equal(h.calls.length,1)
 })

@@ -45,7 +45,7 @@ const html = value => string(value).replace(/<br\s*\/?\s*>/gi, '\n').replace(/<\
   .replace(/<[^>]*>/g, '').replace(/&(amp|lt|gt|quot|apos|nbsp);/g, (_, name) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' })[name])
   .replace(/&#(x[\da-f]+|\d+);/gi, (match, number) => {
     const code = number[0].toLowerCase() === 'x' ? parseInt(number.slice(1), 16) : Number(number)
-    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match
+    return code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff) ? String.fromCodePoint(code) : match
   }).trim()
 function timestamp(value) {
   if (value == null || value === '') return null
@@ -120,6 +120,65 @@ function douyinRow(value, capturedAt) {
     publishedAt: value.create_time ?? value.created_at, likes: count(value.like_count, stats.digg_count, stats.like_count), comments: count(value.comment_count, stats.comment_count),
     shares: count(value.share_count, stats.share_count), bookmarks: count(value.collect_count, stats.collect_count), views: count(value.view_count, stats.play_count), cover, images, videos })
 }
+const plainCardObject = value => object(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value))
+const cardString = value => typeof value === 'string'
+const cardNumber = value => typeof value === 'number' && Number.isFinite(value) && !Object.is(value, -0)
+const cardNull = value => value === null
+const cardBoolean = value => typeof value === 'boolean'
+function cardShape(value, fields, required = []) {
+  return plainCardObject(value) && required.every(key => Object.hasOwn(value, key))
+    && Object.entries(value).every(([key, field]) => Object.hasOwn(fields, key) && fields[key](field))
+}
+function emptyCardJson(value) {
+  if (!cardString(value) || value.length > 65536) return false
+  try { return cardShape(JSON.parse(value), {}) } catch { return false }
+}
+const relatedWordImage = value => cardShape(value, {
+  url_list: urls => Array.isArray(urls) && urls.length <= 100 && urls.every(cardString),
+}, ['url_list'])
+const relatedWordRecord = value => cardShape(value, {
+  group_id: cardString, words_position: cardNumber, words_content: cardString, words_source: cardString,
+  words_image: relatedWordImage, force_update_rank: cardBoolean, product_id: cardString,
+}, ['words_content'])
+const relatedWord = value => cardShape(value, {
+  related_word: word => cardString(word) && Boolean(word.trim()), word_record: relatedWordRecord,
+  related_img: cardString, rand_num: cardNumber, extra_info: extra => cardShape(extra, { words_type: cardString }),
+}, ['related_word', 'word_record'])
+const relatedWordData = value => cardShape(value, {
+  card_tags: cardNull, hotspot_tab_config: cardNull, common_tab_config: cardNull,
+  rs_extra_info: extra => cardShape(extra, {
+    hide_related_words: cardNull, impr_extra: emptyCardJson, hide_related_words_id: cardNull, query_id: cardString,
+  }, ['impr_extra']),
+}, ['rs_extra_info'])
+function relatedWordsCardMetadata(entry) {
+  // This is the related-word recommendation envelope observed in the retained
+  // V1 receipt, not a rule to discard all numeric type-six or empty cards.
+  // Unknown fields, including null/scalar fields and encoded post containers,
+  // prevent exclusion. Real native post wrappers still reach video parsing.
+  return cardShape(entry, {
+    type: value => value === 6,
+    related_word_list: value => Array.isArray(value) && value.length > 0 && value.length <= 100,
+    words_query_record: value => cardShape(value, { info: emptyCardJson, words_source: cardString, query_id: cardString }, ['info']),
+    card_info: value => cardShape(value, { index: cardNumber, fingerprint: cardString, double_n: cardNumber, pos: cardNumber, first_pos: cardNumber }),
+    doc_type: cardNumber, data: relatedWordData, sub_card_list: cardNull,
+    ui_info: value => cardShape(value, { quality_style_corner_type: cardNumber, is_waterfall_layout: cardNumber }),
+    provider_doc_id: cardNumber, provider_doc_id_str: cardString, tab: cardNull, show_tab: cardNull,
+    debug_diff_info: value => cardShape(value, {}), aweme_list: cardNull, send_back: cardString,
+    card_type: value => Number.isSafeInteger(value) && value >= 0 && !Object.is(value, -0), card_style_type: cardNumber,
+    ecom_goods_list: cardNull, music_info_list: cardNull,
+    debug_data: value => cardShape(value, { filter_debug_info_list: cardNull }),
+    card_type_name: cardString, ops: cardNull, card_id: cardString, qishui_music_list: cardNull, shoot_position_list: cardNull,
+  }, ['type', 'related_word_list', 'words_query_record', 'card_type', 'aweme_list', 'data'])
+}
+export function isDouyinRelatedWordsCard(entry) {
+  return relatedWordsCardMetadata(entry) && entry.related_word_list.every(relatedWord)
+}
+export function douyinRelatedWordsCardCoverage(entry) {
+  const words = entry?.related_word_list, bounded = Array.isArray(words) && words.length <= 100
+  const invalidIndexes = bounded ? words.flatMap((word, index) => relatedWord(word) ? [] : [index]) : []
+  return { metadataAccepted: relatedWordsCardMetadata(entry), relatedWordCount: Array.isArray(words) ? words.length : null,
+    inspectedCount: bounded ? words.length : 0, invalidIndexes, truncated: Array.isArray(words) && !bounded }
+}
 function shareParam(value, name) {
   const match = string(value).match(new RegExp(`(?:^|[?&])${name}=([^&]+)`))
   if (!match) return ''
@@ -138,6 +197,22 @@ function kuaishouRow(entry, capturedAt) {
     publishedAt: value.timestamp ?? value.time ?? value.created_at, likes: count(value.like_count, value.likeCount, stats.like_count), comments: count(value.comment_count, value.commentCount, stats.comment_count),
     shares: count(value.share_count, value.forward_count, stats.share_count), bookmarks: count(value.collect_count, stats.collect_count), views: count(value.view_count, value.viewCount, stats.view_count),
     cover: first(value.coverUrl, value.cover_url, value.thumbnail_url, value.main_url), images: value.images, videos })
+}
+function kuaishouDiagnostic(entry) {
+  const value = object(entry.feed) ? { ...entry, ...entry.feed } : object(entry.photo) ? { ...entry, ...entry.photo } : entry
+  const diagnosticId = first(value.external_id, value.externalId, value.id)
+  if (!/^search_(quality|cover|similar|outdated|authoritative|ir?relevant|rrelevant|title|seen|missing)\d*$/i.test(diagnosticId)) return false
+  const user = object(value.user) ? value.user : {}
+  const stats = object(value.stats) ? value.stats : {}
+  // Known feedback IDs alone are not content. Keep a matching real post when
+  // it also carries identity, author, media, timestamp or metric evidence.
+  return ![value.cid, value.photo_id, value.photoId, value.url, value.share_url, value.cover_url, value.coverUrl,
+    value.thumbnail_url, value.main_url, value.user_id, user.id, user.uid, user.name, value.user_name,
+    value.timestamp, value.time, value.created_at, value.main_mv_url, value.video_url, value.video?.url,
+    ...array(value.main_mv_urls), ...array(value.images), ...array(value.streamManifest?.adaptationSet)
+      .flatMap(set => array(set?.representation).flatMap(rep => [rep?.url, ...array(rep?.backupUrl)]))].some(Boolean)
+    && !['like_count', 'likeCount', 'comment_count', 'commentCount', 'view_count', 'viewCount', 'share_count', 'forward_count', 'collect_count']
+      .some(name => value[name] != null || stats[name] != null)
 }
 function zhihuRow(entry, capturedAt) {
   const value = entry.type === 'search_result' && object(entry.object) ? entry.object : entry
@@ -236,11 +311,11 @@ export function projectTikHubContentSearch(result, request) {
     if (!object(entry)) throw new Error('invalid_content_search_entry')
     const type = first(entry.type, entry.itemType)
     if (['relevant_query', 'knowledge_ad', 'user', 'search_user', 'related_search', 'suggestion', 'keyword', 'hot_timing'].includes(type)) { nonPostCount++; continue }
-    if (request.platform === 'kuaishou' && /^search_(quality|cover|similar|outdated|authoritative|ir?relevant|rrelevant|title|seen|missing)\d*$/i.test(string(entry.id))
-      && ![entry.cid, entry.photo_id, entry.photoId, entry.url, entry.cover_url, entry.user_id].some(Boolean)) { nonPostCount++; continue }
+    if (request.platform === 'kuaishou' && kuaishouDiagnostic(entry)) { nonPostCount++; continue }
     if (request.platform === 'douyin') {
+      if (isDouyinRelatedWordsCard(entry)) { nonPostCount++; continue }
       entry = object(entry.data?.aweme_info) ? entry.data.aweme_info : object(entry.aweme_info) ? entry.aweme_info
-        : object(entry.data) && entry.data.aweme_id != null ? entry.data : entry
+        : object(entry.data) && (entry.data.aweme_id != null || entry.data.awemeId != null) ? entry.data : entry
     }
     const row = ({ bilibili: bilibiliRow, douyin: douyinRow, kuaishou: kuaishouRow, zhihu: zhihuRow })[request.platform](entry, capturedAt)
     if (rows.has(row.content_id)) duplicateCount++

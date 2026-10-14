@@ -188,6 +188,30 @@ function publishedAt(value, capturedAt) {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null
 }
 
+function weiboMetric(...values) {
+  for (const value of values) {
+    if (typeof value !== 'number' && (typeof value !== 'string' || !value.trim())) continue
+    const number = Number(value)
+    if (Number.isFinite(number) && number >= 0) return number
+  }
+  return null
+}
+
+function weiboPostUrl(value, authorId, contentId) {
+  // TikHub realtime-search fixtures use protocol-relative post_url. Keep the
+  // supplier's path/query (including signed parameters), after URL validation.
+  for (const candidate of [value.post_url, value.url, value.postUrl, value.web_url]) {
+    if (typeof candidate !== 'string' || !candidate.trim()) continue
+    const url = candidate.trim().startsWith('//') ? `https:${candidate.trim()}` : candidate.trim()
+    try {
+      const parsed = new URL(url)
+      if (['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password) return url
+    } catch {}
+  }
+  const postId = value.mblogid || value.mblogId || value.bid || contentId
+  return authorId ? `https://weibo.com/${authorId}/${postId}` : null
+}
+
 export function weiboRow(value, capturedAt) {
   const contentId = id(value?.weibo_id ?? value?.idstr ?? value?.id)
   if (!contentId) throw new Error('invalid_weibo_identity')
@@ -200,13 +224,15 @@ export function weiboRow(value, capturedAt) {
   const images = value.media?.images || value.pic_ids?.map(pic => value.pic_infos?.[pic]?.original?.url).filter(Boolean) || []
   const videos = value.media?.videos || []
   return { content_id: contentId, platform_name: 'weibo', title: '',
-    summary, text, content: text, full_text: full, url: value.post_url || value.url || (authorId ? `https://weibo.com/${authorId}/${value.mblogid || contentId}` : null),
+    summary, text, content: text, full_text: full, url: weiboPostUrl(value, authorId, contentId),
     author_id: authorId, author_name: user.screen_name || value.user_name || '',
     author_avatar_url: user.profile_image_url || value.user_avatar || null,
     created_at: publishedAt(value.created_at || value.publish_time, capturedAt), collected_at: capturedAt,
-    like_count: metric(value.attitudes_count ?? value.interaction?.like_count ?? value.interaction?.likes),
-    comment_count: metric(value.comments_count ?? value.interaction?.comment_count ?? value.interaction?.comments),
-    forward_count: metric(value.reposts_count ?? value.interaction?.repost_count ?? value.interaction?.reposts),
+    like_count: weiboMetric(value.attitudes_count, value.like_count, value.liked_count, value.interaction?.like_count, value.interaction?.likes),
+    comment_count: weiboMetric(value.comments_count, value.comment_count, value.commentCount, value.interaction?.comment_count, value.interaction?.comments),
+    forward_count: weiboMetric(value.reposts_count, value.share_count, value.shared_count, value.interaction?.repost_count, value.interaction?.reposts),
+    view_count: weiboMetric(value.view_count, value.viewCount, value.play_count, value.playCount, value.read_count, value.readCount, value.views_count, value.views),
+    bookmark_count: weiboMetric(value.collect_count, value.collected_count),
     image_urls: JSON.stringify(images), video_urls: JSON.stringify(videos),
     body_provenance: { policy: WEIBO_DETAIL_POLICY, summary: { source: 'search', capturedAt },
       fullText: full ? { source: 'search', field: 'longText.content', capturedAt, postId: contentId, authorId } : null },

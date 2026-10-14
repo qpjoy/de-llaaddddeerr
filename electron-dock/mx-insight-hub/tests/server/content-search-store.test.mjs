@@ -6,7 +6,8 @@ import { pathToFileURL } from 'node:url'
 import { ContentSearchStateStore } from '../../server/external-platforms/content-search-store.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { MemoryExternalPlatformStore, PostgresExternalPlatformStore } from '../../server/external-platforms/store.mjs'
-import { normalizeTikHubContentSearchRequest, TIKHUB_CONTENT_SEARCH_VERSION } from '../../server/contracts/tikhub-content-search.mjs'
+import { normalizeTikHubContentSearchRequest, projectTikHubContentSearch, contentSearchDataItem, TIKHUB_CONTENT_SEARCH_VERSION } from '../../server/contracts/tikhub-content-search.mjs'
+import { isPostgresSafeJsonValue } from '../../server/core/postgres-json.mjs'
 import { NATIVE_FORWARDING_VERSION } from '../../server/contracts/native-forwarding.mjs'
 
 const modulePath = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
@@ -15,19 +16,19 @@ const digest = value => createHash('sha256').update(value).digest('hex')
 const clone = value => structuredClone(value)
 const scopeHash = 'a'.repeat(64), fingerprint = 'b'.repeat(64)
 
-async function fixture(t, postgres) {
+async function fixture(t, postgres, platform = 'bilibili') {
   const identity = { tenantId: randomUUID(), consumerId: randomUUID(), apiKeyId: randomUUID(), path: '/api/v1/data/search', scopeHash }
   const sourceId = randomUUID(), targetId = randomUUID(), callId = randomUUID(), ownCallId = randomUUID(), accountId = randomUUID()
-  const capturedAt = ago(1000), recipe = normalizeTikHubContentSearchRequest({ platform: 'bilibili', query: 'fixture' })
+  const capturedAt = ago(1000), recipe = normalizeTikHubContentSearchRequest({ platform, query: 'fixture' })
   const manifest = { version: TIKHUB_CONTENT_SEARCH_VERSION, scopeHash, previousDeliveryId: null, capturedAt,
     state: { jobs: [{ query: 'fixture', providerPage: 1, providerCursor: null, done: true,
       started: true, upstreamPages: 1, buffer: null }] }, deliveredIds: [['already-delivered']] }
-  const source = { id: sourceId, ...identity, platform: 'bilibili', status: 'committed', responseStatus: 200, fingerprint: 'c'.repeat(64),
-    acquisitionRequest: { path: identity.path, body: { platform: 'bilibili', query: 'fixture', pageSize: 20 }, contentSearch: manifest },
+  const source = { id: sourceId, ...identity, platform, status: 'committed', responseStatus: 200, fingerprint: 'c'.repeat(64),
+    acquisitionRequest: { path: identity.path, body: { platform, query: 'fixture', pageSize: 20 }, contentSearch: manifest },
     responseBody: { data: { items: [{ id: 'already-delivered' }] } }, reservedAt: capturedAt }
   delete source.path; delete source.scopeHash
   const target = { ...clone(source), id: targetId, status: 'reserved', responseStatus: null, responseBody: null, fingerprint,
-    acquisitionRequest: { path: identity.path, body: { platform: 'bilibili', query: 'fixture', pageSize: 20 } } }
+    acquisitionRequest: { path: identity.path, body: { platform, query: 'fixture', pageSize: 20 } } }
   const call = { id: callId, usageRequestId: sourceId, tenantId: identity.tenantId, consumerId: identity.consumerId, apiKeyId: identity.apiKeyId,
     providerKey: 'tikhub', operation: recipe.operation, endpointKey: recipe.endpointKey, endpointVersion: recipe.endpointVersion,
     contractVersion: NATIVE_FORWARDING_VERSION, outcome: 'succeeded', httpStatus: 200, businessCode: 200, completedAt: capturedAt }
@@ -85,18 +86,18 @@ async function fixture(t, postgres) {
     await insert('billing.customer_charges', { id: randomUUID(), usage_request_id: targetId, tenant_id: identity.tenantId,
       account_id: accountId, status: 'reserved', enforcement_mode: 'enforced', quoted_minor: 9, currency: 'CNY' })
     pool = { query: (sql, args) => db.query(sql, args), connect: async () => ({ query: (sql, args) => db.query(sql, args), release() {} }) }
-    providerStore = new PostgresExternalPlatformStore({ pool, providerKey: 'tikhub', authorizationPlatform: 'bilibili' })
+    providerStore = new PostgresExternalPlatformStore({ pool, providerKey: 'tikhub', authorizationPlatform: platform })
   } else {
     usageStore = new MemoryStore()
     usageStore.requests.set(sourceId, clone(source)); usageStore.requests.set(targetId, clone(target))
     usageStore.creditAccounts.set(identity.tenantId, { id: accountId, availableMinor: 91, heldMinor: 9, revision: 1, currency: 'CNY' })
     usageStore.customerCharges.set(targetId, { id: randomUUID(), usageRequestId: targetId, accountId, tenantId: identity.tenantId,
       enforcementMode: 'enforced', status: 'reserved', quotedMinor: 9, currency: 'CNY' })
-    providerStore = new MemoryExternalPlatformStore({ usageStore, providerKey: 'tikhub', authorizationPlatform: 'bilibili' })
+    providerStore = new MemoryExternalPlatformStore({ usageStore, providerKey: 'tikhub', authorizationPlatform: platform })
     providerStore.calls.set(callId, clone(call)); providerStore.calls.set(ownCallId, { ...clone(call), id: ownCallId, usageRequestId: targetId })
     for (const id of [callId, ownCallId]) providerStore.restrictedResponseArchives.set(id, clone(archive))
   }
-  const store = new ContentSearchStateStore(providerStore, { platform: 'bilibili', operation: recipe.operation,
+  const store = new ContentSearchStateStore(providerStore, { platform, operation: recipe.operation,
     endpointKey: recipe.endpointKey, endpointVersion: recipe.endpointVersion })
   const setUsage = async (id, changes) => {
     if (!postgres) return Object.assign(usageStore.requests.get(id), clone(changes))
@@ -217,4 +218,48 @@ test('PGlite rollback leaves usage, settlement and source manifest untouched whe
   await assert.rejects(f.store.commitDelivery(f.saved), /synthetic gateway failure/)
   assert.deepEqual(await f.getUsage(f.target.id), original)
   assert.deepEqual(await f.counts(), { gateways: 0, calls: 2, captures: 0, representative: undefined, charge: 'reserved' })
+})
+
+test('PGlite Zhihu 18+18 finalization commits 20 items and a lossless 16-item second-page buffer with one customer capture', { skip: !modulePath }, async t => {
+  const f = await fixture(t, true, 'zhihu'), capturedAt = f.archive.capturedAt
+  const providerCursor = { offset: '20', search_hash_id: 'fixture-session' }
+  const acquisitions = [1, 2].map(page => {
+    const payload = { code: 200, data: { data: Array.from({ length: 18 }, (_, index) => ({ type: 'search_result', object: {
+      id: String(page * 100 + index), type: 'article', title: `fixture ${page}/${index}`, content: `<p>完整正文 ${page}/${index}</p>`,
+    } })), paging: { is_end: false, next: `https://api.zhihu.com/search_v3?offset=${page * 20}&search_hash_id=fixture-session` } } }
+    const bytes = Buffer.from(JSON.stringify(payload)), callId = page === 1 ? f.callId : f.ownCallId
+    const request = normalizeTikHubContentSearchRequest({ platform: 'zhihu', query: 'fixture', pageSize: 20,
+      page, providerCursor: page === 1 ? null : providerCursor })
+    const projected = projectTikHubContentSearch({ publicBody: { data: payload.data, meta: { capturedAt } } }, request)
+    assert.equal(projected.acquiredItems.length, 18)
+    return { payload, projected, archive: { bodyBytes: bytes, bodySize: bytes.length, bodySha256: digest(bytes), capturedAt },
+      source: { callId, bodySize: bytes.length, bodySha256: digest(bytes), capturedAt,
+        rowsHash: digest(JSON.stringify(projected.acquiredItems)), own: true } }
+  })
+  // Both receipts belong to this reserved delivery; no older delivery is edited.
+  await f.db.query('UPDATE external_platform.provider_calls SET usage_request_id=$2 WHERE id=$1', [f.callId, f.target.id])
+  for (const acquisition of acquisitions) await f.setArchiveFor(acquisition.source.callId, acquisition.archive)
+  const rows = [...acquisitions[0].projected.acquiredItems, ...acquisitions[1].projected.acquiredItems.slice(0, 2)]
+  const job = { query: 'fixture', providerPage: 2, providerCursor, upstreamPages: 2, started: true, done: false,
+    buffer: { callId: f.ownCallId, offset: 2, hash: acquisitions[1].source.rowsHash, providerCursor, providerPage: 2 } }
+  const saved = { ...f.saved, sources: acquisitions.map(row => row.source), usageUnitsActual: 20,
+    responseBody: { data: { items: rows.map(contentSearchDataItem) } },
+    manifest: { ...f.manifest, previousDeliveryId: null, state: { jobs: [job] }, deliveredIds: [rows.map(row => row.content_id)] } }
+  assert.equal(isPostgresSafeJsonValue(saved.manifest), false)
+  await assert.rejects(f.store.commitDelivery(saved), { code: 'search_page_unavailable' })
+  assert.equal((await f.getUsage(f.target.id)).status, 'reserved')
+  assert.equal((await f.counts()).captures, 0)
+  job.buffer.providerCursor = { ...job.providerCursor }
+  assert.equal(isPostgresSafeJsonValue(saved.manifest), true)
+  await f.store.commitDelivery(saved)
+  const usage = await f.getUsage(f.target.id)
+  assert.equal(usage.responseBody.data.items.length, 20)
+  assert.equal(usage.acquisitionRequest.contentSearch.state.jobs[0].buffer.offset, 2)
+  assert.deepEqual(await f.counts(), { gateways: 1, calls: 2, captures: 1, representative: f.ownCallId, charge: 'captured' })
+  const carry = await f.store.pageFor({ ...f.identity, callId: f.ownCallId })
+  assert.deepEqual(carry.payload, acquisitions[1].payload)
+  assert.equal(acquisitions[1].projected.acquiredItems.slice(job.buffer.offset).length, 16)
+  assert.equal(usage.acquisitionRequest.contentSearch.sources.length, 2)
+  const history = await f.store.historyFor({ ...f.identity, previousDeliveryId: f.target.id, jobCount: 1, totalLimit: 20 })
+  assert.equal(history.seenIds[0].size, 20)
 })

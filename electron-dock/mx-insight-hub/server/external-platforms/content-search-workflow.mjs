@@ -65,6 +65,17 @@ export async function runContentSearch({ gateway, context, request, delivery, de
   const maxCalls = request.standard ? 3 : 50
   let calls = 0, bytes = 0, capturedAt = null, ownsParent = false, ownsChild = false, entered = false
   let currentCall = null, currentEvidence = null, costReservation = null, settledFailure = false, retainLease = false, stopped = false
+  let phase = 'admission'
+  const logUnknown = error => {
+    try {
+      const classes = ['Error', 'TypeError', 'RangeError', 'SyntaxError', 'AppError', 'TikHubUpstreamError']
+      const name = error?.name, code = error?.code
+      gateway.logger?.warn?.({ requestId: delivery.usageRequestId, callId: currentCall?.id ?? null, phase,
+        errorClass: classes.includes(name) ? name : 'Error',
+        sqlState: typeof code === 'string' && /^[0-9A-Z]{5}$/u.test(code) ? code : null },
+      'content search outcome is unknown')
+    } catch { /* Logging must never change the original unknown/hold handling. */ }
+  }
   const enoughTime = () => Number.isFinite(deadlineAt) && clock() + (gateway.config.timeoutMs || 30000) + 5000 < deadlineAt
   const warn = (code, message) => { if (!warnings.some(row => row.code === code)) warnings.push({ code, message }) }
   const stop = reason => { stopped = true; warn('content_search_fill_stopped', `The bounded content search stopped before another dispatch (${reason}); acquired results were retained.`) }
@@ -96,7 +107,9 @@ export async function runContentSearch({ gateway, context, request, delivery, de
       warn('body_completeness_unknown', 'Some returned content is a provider preview; full text was not independently acquired.')
     }
     if (position < rows.length) job.buffer = { callId: source.callId, offset: position, hash: rowsHash,
-      providerCursor: job.providerCursor, providerPage: job.providerPage }
+      // The manifest must be a JSON tree. Reusing this object under both job
+      // and buffer makes the strict persistence guard reject a paid overflow.
+      providerCursor: job.providerCursor == null ? null : { ...job.providerCursor }, providerPage: job.providerPage }
     else {
       job.buffer = null
       const next = projected.providerPage
@@ -145,6 +158,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           pageSize: request.pageSize, params: request.params, page: job.providerPage, providerCursor: job.providerCursor,
           maxQueryLength: request.standard ? 500 : 2048 })
         try {
+          phase = 'admission'
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           context = await revalidateIdentity({ operation: nativeRequest.operation, totalLimit: request.totalLimit })
           const states = await Promise.all([store.providerState('tikhub'), store.contractCircuitState?.('tikhub', request.platform)])
@@ -171,6 +185,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           if (!enoughTime()) throw new AppError(503, 'content_search_deadline', 'Content-search deadline reached before dispatch')
           currentEvidence = null
+          phase = 'begin_call'
           currentCall = await store.beginProviderCall({ ...delivery, operation: nativeRequest.operation,
             contractVersion: nativeRequest.endpointContractVersion, endpointKey: nativeRequest.endpointKey,
             endpointVersion: nativeRequest.endpointVersion, marketplace: request.platform, callOrdinal: calls,
@@ -180,7 +195,9 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           const callStart = performance.now()
           let result, projected
           try {
+            phase = 'provider_request'
             result = await gateway.adapter.forwardNative(request.recipe.key, { params: nativeRequest.upstreamQuery }, { credential: credential.credential })
+            phase = 'project_response'
             try { projected = projectTikHubContentSearch(result, nativeRequest) }
             catch { throw new TikHubUpstreamError('Content-search response could not be normalized', {
               outcome: 'succeeded_unusable', billed: true, httpStatus: 200, businessCode: 200,
@@ -194,11 +211,13 @@ export async function runContentSearch({ gateway, context, request, delivery, de
               responseArchive: error.responseArchive, restrictedResponseArchive: error.restrictedResponseArchive,
               upstreamEvidence: error.upstreamEvidence, archiveObjects: error.archiveObjects }
             const code = evidence.outcome === 'unknown' ? 'upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'external_platform_rejected'
+            phase = 'finish_failure'
             await store.finishFailure({ ...currentEvidence, failureResponseStatus: status,
               failureResponseBody: { error: { code, message: 'Content-search acquisition failed; inspect its saved outcome', details: { outcome: evidence.outcome } }, requestId: delivery.usageRequestId } })
             currentCall = null; settledFailure = true
             throw new AppError(status, code, 'Content-search acquisition failed; inspect its saved outcome', { outcome: evidence.outcome })
           }
+          phase = 'validate_evidence'
           const receipt = result.restrictedResponseArchive
           currentEvidence = { callId: currentCall.id, delivery, outcome: 'succeeded', billed: true, httpStatus: 200, businessCode: 200,
             costMinor: cost.costMinor, costKind: cost.costKind, currency: cost.currency,
@@ -206,18 +225,23 @@ export async function runContentSearch({ gateway, context, request, delivery, de
             responseArchive: result.responseArchive, restrictedResponseArchive: receipt,
             upstreamEvidence: result.upstreamEvidence, archiveObjects: result.archiveObjects, affectsCircuit: false }
           if (!receipt || receipt.bodySize > 8388608) throw unavailable()
+          phase = 'stage_evidence'
           await store.stageProviderEvidence(currentEvidence)
+          phase = 'normalize_ingest'
           const records = rawSearchRecords({ data: { raw_info: '[]', raw_data: JSON.stringify(projected.acquiredItems), page: {}, meta: {} } }, request.platform, 'tikhub')
+          phase = 'finish_step'
           await store.finishProviderStep({ ...currentEvidence, ingestJob: { payload: { kind: 'external-platform-result', providerKey: 'tikhub',
             consumerId: context.consumer.id, datasetId: request.standard ? 'night-all.search.v1' : RAW_SEARCH_DATASET,
             platform: request.platform, requestId: delivery.usageRequestId, queryFingerprint: delivery.fingerprint,
             providerCallId: currentCall.id, records }, dedupeKey: `external-platform:tikhub:${currentCall.id}`, priority: 100 } })
           bytes += receipt.bodySize
           const callId = currentCall.id; currentCall = null
+          phase = 'assemble_page'
           consume(projected, { ...receipt, callId, own: true }, job, index)
           if (job.manualContinuation) break
         } catch (error) {
           if (currentCall || error.code === 'external_platform_call_persistence_unknown') {
+            logUnknown(error)
             if (currentCall) await store.markPersistenceUnknown({ callId: currentCall.id, delivery, ...(currentEvidence || {}) }).catch(() => {})
             await markUnknown(); throw uncertain()
           }
@@ -233,18 +257,21 @@ export async function runContentSearch({ gateway, context, request, delivery, de
       if (stopped) break
     }
     if (!sources.length) throw new AppError(503, 'content_search_unavailable', 'No content page could be acquired within the bounded request')
+    phase = 'build_delivery'
     const responseBody = buildResponse({ rowsByJob, state, calls, warnings })
     const sourceMode = calls ? 'live' : clock() - Date.parse(capturedAt) <= gateway.config.freshTtlMs ? 'fresh_cache' : 'stored_fallback'
     try {
+      phase = 'commit_delivery'
       await stateStore.commitDelivery({ ...identity, delivery, responseBody, sources, capturedAt, sourceMode,
         usageUnitsActual: request.standard ? rowsByJob.flat().length : 1,
         latencyMs: Math.round(performance.now() - started), manifest: { version: TIKHUB_CONTENT_SEARCH_VERSION,
           scopeHash: request.scopeHash, previousDeliveryId: history.previousDeliveryId, state,
           deliveredIds: rowsByJob.map(rows => rows.map(row => row.content_id)) } })
-    } catch { await markUnknown(); throw uncertain() }
+    } catch (error) { logUnknown(error); await markUnknown(); throw uncertain() }
     return { status: 200, body: responseBody, requestId: delivery.usageRequestId, replay: false, sourceMode, capturedAt }
   } catch (error) {
     if (calls && !settledFailure) {
+      if (!error.preserveReservation) logUnknown(error)
       await markUnknown()
       if (!error.preserveReservation) throw uncertain()
     }

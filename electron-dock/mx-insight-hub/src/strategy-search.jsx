@@ -33,7 +33,7 @@ export function StrategySearchPage({ token, session, query, setQuery, onUnauthor
       <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/strategy-search')}>接口文档 ↗</a>
     </PageHeading>
     <ProductViewTabs label="策略搜索" value={tab} onChange={changeTab} session={session} />
-    {pendingSearch ? <p role="status">有查询正在执行或结果待核实；新请求暂不可发送。可在产品展示中只读核对原请求。</p> : null}
+    {pendingSearch ? <p role="status">有平台的原查询正在执行或结果待核实。产品展示可切换其他平台；接口调试暂不可发送新请求。可回到原平台只读核对。</p> : null}
     <div hidden={tab !== 'debug'}><ProductApiConsole product={productForPath('/data-products/strategy-search')} token={token} initialEndpoint={query.get('endpoint')} onResult={setResult} blocked={pendingSearch} attemptStore={searchState.consoleAttempts} onAttempt={event => recordStrategyAttempt(cell, event)} /></div>
     <div hidden={tab !== 'product'}><StrategySearchExperience strategySession={searchSession} initialResult={result} onResult={setResult} /></div>
     <div className="mih-strategy-guide" hidden={tab !== 'guide'}>

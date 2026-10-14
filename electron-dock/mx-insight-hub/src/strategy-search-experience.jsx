@@ -7,7 +7,7 @@ import { WechatResult } from './wechat-product.jsx'
 import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 import { requestUuid } from './request-id.js'
 import { STRATEGY_DATA_SEARCH_PATH, STRATEGY_SEARCH_PLATFORMS, strategySearchPlatforms, strategySearchBody,
-  strategyPageInfo, uncertainStrategySearch, safeStrategyUrl, isFacebookPhotoPage, createStrategySearchCell, strategyRequestFingerprint, strategyOutcomeMatches } from './strategy-search-experience-model.js'
+  strategyPageInfo, uncertainStrategySearch, safeStrategyUrl, isFacebookPhotoPage, createStrategySearchCell, strategyRequestFingerprint, strategyOutcomeMatches, strategyUnresolvedAttempt, strategyFailureRequestId } from './strategy-search-experience-model.js'
 
 export function useStrategySearchState(strategySession) {
   const identity = useDemoIdentity(), access = useDemoAccessSnapshot()
@@ -21,12 +21,14 @@ export function StrategySearchExperience({ initialResult, strategySession, onRes
   const [key] = useDemoApiKey()
   const { identity, access, cell, state } = useStrategySearchState(strategySession)
   const platforms = strategySearchPlatforms(access)
-  const { form, attempts, result, busy, error, checking } = state
-  const unresolved = [...attempts.values()].find(attempt => ['sending', 'uncertain'].includes(attempt.state))
-  const change = patch => cell.update({ form: { ...form, ...patch }, error: null })
+  const { form, attempts, result, busy, checking } = state
+  const unresolved = strategyUnresolvedAttempt(attempts, form.platform)
+  const error = state.error || unresolved?.error
+  const change = patch => cell.update({ form: { ...form, ...patch }, error: null, outcomeNote: null })
   useEffect(() => {
     if (initialResult?.identity === identity && initialResult.input?.path === STRATEGY_DATA_SEARCH_PATH) {
       const input = initialResult.input.body
+      if (cell.getSnapshot().result === initialResult) return
       cell.update({ result: initialResult, ...(strategySearchPlatforms(access).some(row => row.platform === input?.platform)
         ? { form: { platform: input.platform, query: input.query || '', pageSize: input.pageSize || 20 } } : {}) })
     }
@@ -54,8 +56,9 @@ export function StrategySearchExperience({ initialResult, strategySession, onRes
       cell.update({ result: delivery }); onResult?.(delivery)
     } catch (failure) {
       operation.state = uncertainStrategySearch(failure) ? 'uncertain' : 'received'
-      operation.requestId = failure.requestId
-      cell.update({ error: failure })
+      operation.requestId = strategyFailureRequestId(failure) || operation.requestId
+      operation.error = failure
+      if (cell.getSnapshot().form.platform === requestBody.platform) cell.update({ error: failure })
     } finally { cell.update({ busy: false }) }
   }
   async function checkOutcome() {
@@ -67,20 +70,24 @@ export function StrategySearchExperience({ initialResult, strategySession, onRes
       // Lookup is owner-scoped and never redispatches. Unknown/not-found stays
       // locked, even after the short replay window of a debugger request.
       if (strategyOutcomeMatches(unresolved, recorded)) {
-        unresolved.state = 'received'; unresolved.requestId = recorded.id
-        cell.update({ outcomeNote: recorded.status === 'committed' ? '已确认原请求已提交。可显式重放原查询，或新建另一次查询。' : '已确认原预留已释放。再次查询需显式发送，并按当前规则计量。' })
-      } else cell.update({ outcomeNote: '原请求仍未确认结束。请保留原请求标识，稍后只读核对使用记录。' })
-    } catch (failure) { cell.update({ error: failure }) }
+        unresolved.state = 'received'; unresolved.requestId = recorded.id; unresolved.error = null
+        if (cell.getSnapshot().form.platform === unresolved.body.platform) cell.update({ outcomeNote: recorded.status === 'committed' ? '已确认原请求已提交。可显式重放原查询，或新建另一次查询。' : '已确认原预留已释放。再次查询需显式发送，并按当前规则计量。' })
+      } else if (cell.getSnapshot().form.platform === unresolved.body.platform) cell.update({ outcomeNote: '原请求仍未确认结束。请保留原请求标识，稍后只读核对使用记录。' })
+    } catch (failure) { if (cell.getSnapshot().form.platform === unresolved.body.platform) cell.update({ error: failure }) }
     finally { cell.update({ checking: false }) }
   }
   return <div className="mih-strategy-experience">
     <section className="qp-panel mih-panel mih-strategy-composer" aria-label="策略搜索产品展示">
       <header><div><p className="qp-kicker">统一内容搜索</p><h2>选择平台，搜索内容</h2><p>每次查询一个目标平台，结果保留正文、作者、互动与来源。</p></div><code>POST {STRATEGY_DATA_SEARCH_PATH}</code></header>
       <form onSubmit={event => { event.preventDefault(); void search(body) }}>
-        <fieldset disabled={busy || checking || Boolean(unresolved)}>
+        <fieldset>
           <legend>目标平台 <span>{!key ? '请选择调用身份（可预览支持平台）' : access ? `当前 Key 可见 ${platforms.length} 个` : '支持平台 · 发送时验证权限'}</span></legend>
           <div className="mih-strategy-platform-grid">{platforms.map(row => <button type="button" className={`mih-strategy-platform${form.platform === row.platform ? ' is-selected' : ''}`} key={row.platform}
-            aria-pressed={form.platform === row.platform} onClick={() => change({ platform: row.platform, ...(row.platform.startsWith('wechat_') ? { pageSize: 20 } : {}) })}>
+            aria-pressed={form.platform === row.platform} onClick={() => {
+              const pending = strategyUnresolvedAttempt(attempts, row.platform), original = pending?.body
+              change({ platform: row.platform, ...(row.platform.startsWith('wechat_') ? { pageSize: 20 } : {}),
+                ...(original ? { query: original.query || original.keyword || form.query, pageSize: original.pageSize || original.count || form.pageSize } : {}) })
+            }}>
             <span className={`mih-strategy-platform-mark is-${row.platform}`} aria-hidden="true">{row.mark}</span><span>{row.label}</span>{form.platform === row.platform ? <Check size={15} weight="bold" aria-hidden="true" /> : null}
           </button>)}</div>
           {!platforms.length ? <p>当前 Key 没有可调用的内容搜索平台。请检查 Key 与业务授权。</p> : null}
@@ -93,9 +100,9 @@ export function StrategySearchExperience({ initialResult, strategySession, onRes
         {form.query && validation ? <p role="status">{validation}</p> : null}
         {attempt && !unresolved ? <div className="mih-strategy-repeat"><span>本页使用 stable 保留首次响应；相同参数沿用原请求标识。</span><button className="qp-button qp-button--outline qp-button--sm" type="button" disabled={busy || checking} onClick={() => { attempts.delete(fingerprint); cell.update({ error: null }) }}>新建相同查询（再次发送会计量）</button></div> : null}
       </form>
-      {unresolved ? <div className="mih-strategy-unresolved" role="alert"><strong>原请求结果待核实</strong><p>本次请求保持锁定。超时不代表取消；请先只读核对，避免重复采集和计费。</p><code>{unresolved.idempotencyKey}</code><button className="qp-button qp-button--outline" type="button" disabled={!key || busy || checking} onClick={checkOutcome}>{checking ? '核对中…' : '只读核对原请求状态'}</button>{unresolved.requestId ? <a href={`#/usage?requestId=${encodeURIComponent(unresolved.requestId)}`}>查看使用记录 ↗</a> : null}</div> : null}
+      {unresolved ? <div className="mih-strategy-unresolved" role="alert"><strong>原请求结果待核实</strong><p>此平台的原请求保持锁定。超时不代表取消；请先只读核对，避免重复采集和计费。可选择其他平台，切换不会发送请求。</p><p>幂等键 <code>{unresolved.idempotencyKey}</code></p>{unresolved.requestId ? <p>Hub 请求 ID <code>{unresolved.requestId}</code></p> : null}<button className="qp-button qp-button--outline" type="button" disabled={!key || busy || checking} onClick={checkOutcome}>{checking ? '核对中…' : '只读核对原请求状态'}</button>{unresolved.requestId ? <a href={`#/usage?requestId=${encodeURIComponent(unresolved.requestId)}`}>查看使用记录 ↗</a> : null}</div> : null}
       {state.outcomeNote ? <p role="status">{state.outcomeNote}</p> : null}
-      {error ? <ErrorState error={error} /> : null}
+      {error ? <ErrorState error={unresolved?.requestId && error === unresolved.error ? { ...error, message: error.message, requestId: unresolved.requestId } : error} /> : null}
     </section>
     {result?.identity === identity ? <>
       {!matching ? <p className="qp-muted">以下保留已返回结果；新的平台或关键词需手动搜索。</p> : null}

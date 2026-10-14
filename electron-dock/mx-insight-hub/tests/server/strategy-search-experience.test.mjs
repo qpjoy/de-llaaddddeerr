@@ -99,3 +99,11 @@ test('debugger attempt storage survives view remount and explicit new-request re
   afterNavigation.delete(fingerprint)
   assert.equal(beforeNavigation.has(fingerprint), false)
 })
+
+test('failed search ledger identity comes from explicit details rather than the HTTP correlation ID', async () => {
+  const { strategyFailureRequestId } = await import('../../src/strategy-search-experience-model.js')
+  assert.equal(strategyFailureRequestId({ requestId: 'http-only' }), null)
+  assert.equal(strategyFailureRequestId({ requestId: 'http-only', details: { requestId: 'ledger' } }), 'ledger')
+  assert.equal(strategyFailureRequestId({ responseBody: { error: { details: { requestId: 'ledger-body' } } } }), 'ledger-body')
+  assert.equal(strategyFailureRequestId({ details: { requestId: { unexpected: true } } }), null)
+})

@@ -1227,6 +1227,10 @@ export class ExternalPlatformGateway {
         // confirmed. Leave that original customer hold for durable recovery;
         // an unrelated prior-unknown admission still releases its new hold.
         if (error.preserveReservation === true) ownsReservation = false
+        // A transport correlation ID does not identify the durable usage row.
+        // Keep an explicit ledger ID for read-only outcome checks after errors.
+        if (error instanceof AppError) error.details = { ...error.details,
+          requestId: error.details?.requestId || delivery.usageRequestId }
         throw error
       }
     }

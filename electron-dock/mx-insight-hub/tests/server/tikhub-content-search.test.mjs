@@ -5,6 +5,7 @@ import { TIKHUB_CONTENT_SEARCH_RECIPES, normalizeTikHubContentSearchRequest,
   projectTikHubContentSearch, contentSearchLegacyRow, contentSearchDataItem } from '../../server/contracts/tikhub-content-search.mjs'
 import { nativeForwardingEndpoint } from '../../server/contracts/native-forwarding.mjs'
 import { rawSearchRecords } from '../../server/contracts/raw-search.mjs'
+import { isPostgresSafeJsonValue } from '../../server/core/postgres-json.mjs'
 
 const capturedAt = '2026-10-15T04:00:00.000Z'
 const request = (platform, options = {}) => normalizeTikHubContentSearchRequest({ platform, query: '城市', ...options })
@@ -128,6 +129,161 @@ test('Douyin business_data wrapper and extra.logid preserve actual image posts a
   assert.deepEqual(projected.providerPage.nextParams, { cursor: '20', search_id: 'real-session' })
 })
 
+test('Douyin fixed direct/data/aweme_info wrappers preserve snake and camel native IDs regardless of numeric card type', () => {
+  const wrappers = [value => value, value => ({ data: value }), value => ({ aweme_info: value }), value => ({ data: { aweme_info: value } })]
+  for (const wrap of wrappers) for (const alias of ['aweme_id', 'awemeId']) for (const type of [1, 6]) {
+    const payload = { data: [{ type, ...wrap({ [alias]: '123', desc: '真实视频正文',
+      video: { play_addr: { url_list: ['https://example.test/play.mp4?signature=unchanged'] } },
+      statistics: { digg_count: 0 } }) }], has_more: false }
+    const original = structuredClone(payload), projected = project('douyin', payload)
+    assert.equal(projected.items.length, 1)
+    assert.equal(projected.nonPostCount, 0)
+    assert.equal(projected.items[0].content_id, '123')
+    assert.equal(projected.items[0].full_text, '真实视频正文')
+    assert.deepEqual(contentSearchDataItem(projected.items[0]).media.videos, ['https://example.test/play.mp4?signature=unchanged'])
+    assert.equal(projected.items[0].like_count, 0)
+    assert.deepEqual(payload, original)
+    assert.deepEqual(projected.restrictedResponseArchive, { sha256: 'immutable-archive' })
+  }
+  assert.equal(project('douyin', { data: [{ type: 6, data: { awemeId: 123, desc: '安全整数身份' } }], has_more: false }).items[0].content_id, '123')
+})
+
+test('Douyin fixed wrappers still reject absent or unsafe IDs and unknown numeric cards rather than silently dropping them', () => {
+  const wrappers = [value => value, value => ({ data: value }), value => ({ aweme_info: value }), value => ({ data: { aweme_info: value } })]
+  for (const wrap of wrappers) for (const alias of ['aweme_id', 'awemeId']) for (const id of [undefined, null, '', 0, -1, Number.MAX_SAFE_INTEGER + 1, {}, '\u0000']) {
+    assert.throws(() => project('douyin', { data: [{ type: 6, ...wrap({ [alias]: id, desc: '有正文但无有效身份', video: {} }) }], has_more: false }), /invalid_content_search_identity/)
+  }
+  assert.throws(() => project('douyin', { data: [{ type: 6, data: { unknown: {} } }], has_more: false }), /invalid_content_search_identity/)
+  assert.throws(() => project('douyin', { data: [{ type: 6, data: { unrelated: { awemeId: '123' } } }], has_more: false }), /invalid_content_search_identity/)
+})
+
+// Exact field names/kinds from the v6 incident schema; scalar values and all six
+// recommendation entries are synthetic, not the original restricted receipt.
+const relatedWordsDouyinCard = () => ({ type: 6,
+  data: { card_tags: null, rs_extra_info: { hide_related_words: null, impr_extra: '{}', hide_related_words_id: null, query_id: 'fixture-query' }, hotspot_tab_config: null, common_tab_config: null },
+  related_word_list: Array.from({ length: 6 }, (_, index) => ({ related_word: `fixture-related-${index}`,
+    word_record: { group_id: `fixture-group-${index}`, words_position: index, words_content: `fixture-related-${index}`, words_source: 'fixture-source',
+      words_image: { url_list: [`https://example.test/recommendation-${index}.jpg`] }, force_update_rank: false, product_id: 'fixture-product' },
+    related_img: '', rand_num: 0, extra_info: { words_type: 'fixture-type' } })),
+  words_query_record: { info: '{}', words_source: 'fixture-source', query_id: 'fixture-query' },
+  card_info: { index: 4, fingerprint: 'fixture-fingerprint', double_n: 0, pos: 4, first_pos: 4 }, doc_type: 0, sub_card_list: null,
+  ui_info: { quality_style_corner_type: 0, is_waterfall_layout: 0 }, provider_doc_id: 0, provider_doc_id_str: 'fixture-doc', tab: null, show_tab: null,
+  debug_diff_info: {}, aweme_list: null, send_back: 'fixture-send-back', card_type: 42, card_style_type: 0,
+  ecom_goods_list: null, music_info_list: null, debug_data: { filter_debug_info_list: null }, card_type_name: 'fixture-card', ops: null,
+  card_id: 'fixture-card-id', qishui_music_list: null, shoot_position_list: null })
+
+test('Douyin known related-words card preserves all eight raw entries while projecting seven real posts', () => {
+  const entries = Array.from({ length: 7 }, (_, index) => ({ type: 1, aweme_info: {
+    aweme_id: String(index + 1), desc: `完整正文-${index}`, video: { play_addr: { url_list: [`https://example.test/${index}.mp4`] } },
+    statistics: { digg_count: 0 },
+  } }))
+  entries.splice(4, 0, relatedWordsDouyinCard())
+  assert.equal(Object.keys(entries[4]).length, 25)
+  assert.equal(entries[4].related_word_list.length, 6)
+  const payload = { data: entries, aweme_list: null, has_more: 1, cursor: 20, backtrace: 'fixed-trace', extra: { logid: 'fixed-session' } }
+  const original = structuredClone(payload), projected = project('douyin', payload)
+  assert.equal(projected.items.length, 7)
+  assert.equal(projected.nonPostCount, 1)
+  assert.equal(projected.duplicateCount, 0)
+  assert.equal(projected.providerPage.sourceCount, 8)
+  assert.deepEqual(projected.providerPage.nextParams, { cursor: '20', search_id: 'fixed-session', backtrace: 'fixed-trace' })
+  assert.equal(projected.publicBody.data.data.length, 8)
+  assert.deepEqual(projected.publicBody.data, original)
+  assert.deepEqual(projected.restrictedResponseArchive, { sha256: 'immutable-archive' })
+  assert.ok(isPostgresSafeJsonValue(projected.acquiredItems))
+  assert.deepEqual(payload, original)
+})
+
+test('Douyin related-words recognition never hides real type-six posts in fixed native wrappers', () => {
+  const wrappers = [value => value, value => ({ data: value }), value => ({ aweme_info: value }), value => ({ data: { aweme_info: value } })]
+  for (const wrap of wrappers) for (const alias of ['aweme_id', 'awemeId']) {
+    const card = { ...relatedWordsDouyinCard(), ...wrap({ [alias]: 'real-6', desc: '真实 type6 视频', video: {}, statistics: { digg_count: 0 } }) }
+    const projected = project('douyin', { data: [card], has_more: false })
+    assert.equal(projected.nonPostCount, 0)
+    assert.equal(projected.items[0].content_id, 'real-6')
+    assert.equal(projected.items[0].full_text, '真实 type6 视频')
+  }
+})
+
+test('Douyin related-words recognition fails closed on material signals, potential post containers and invalid native identities', () => {
+  const signals = { aweme_id: Number.MAX_SAFE_INTEGER + 1, awemeId: '', id: 'unmapped-identity',
+    desc: '', text: '', title: '', content: '', full_text: '', description: '', caption: '',
+    video: {}, images: [], author: {}, statistics: {}, stats: {},
+    create_time: 0, created_at: 0, share_url: '', url: '', video_url: '', cover_url: '',
+    like_count: 0, comment_count: 0, share_count: 0, collect_count: 0, view_count: 0, aweme_info: {}, aweme: {}, aweme_detail: {},
+    aweme_list: [], business_data: [], item: {}, items: [], list: [], object: {} }
+  for (const location of ['outer', 'data']) for (const [name, value] of Object.entries(signals)) {
+    const card = relatedWordsDouyinCard()
+    if (location === 'outer') card[name] = value
+    else card.data[name] = value
+    assert.throws(() => project('douyin', { data: [card], has_more: false }), /invalid_content_search_identity/, `${location}.${name} prevents non-post exclusion`)
+    if (location !== 'outer' || name !== 'aweme_list') {
+      const nullCard = relatedWordsDouyinCard()
+      if (location === 'outer') nullCard[name] = null
+      else nullCard.data[name] = null
+      assert.throws(() => project('douyin', { data: [nullCard], has_more: false }), /invalid_content_search_identity/, `present ${location}.${name}=null is not the observed missing field`)
+    }
+  }
+})
+
+test('Douyin related-words recognition never discards unknown composite payloads at outer or data scope', () => {
+  for (const location of ['outer', 'data']) for (const value of [{}, [], { awemeId: 'unrecognized-nested-post', desc: '潜在真实内容' }, [{ aweme_id: 'unrecognized-carousel-post' }]]) {
+    const card = relatedWordsDouyinCard()
+    if (location === 'outer') card.unknownComposite = value
+    else card.data.unknownComposite = value
+    assert.throws(() => project('douyin', { data: [card], has_more: false }), /invalid_content_search_identity/)
+  }
+})
+
+test('Douyin related-words recognition requires the exact numeric discriminators and explicit null/object envelope', () => {
+  const changes = [{ type: '6' }, { type: 1 }, { type: 7 }, { card_type: undefined }, { card_type: '42' },
+    { card_type: null }, { card_type: NaN }, { card_type: Infinity }, { card_type: 1.5 }, { card_type: -1 },
+    { aweme_list: undefined }, { aweme_list: [] }, { aweme_list: {} }, { data: undefined }, { data: null }, { data: [] }, { data: 'unknown' }]
+  for (const change of changes) {
+    assert.throws(() => project('douyin', { data: [{ ...relatedWordsDouyinCard(), ...change }], has_more: false }), /invalid_content_search_identity/)
+  }
+  assert.throws(() => project('douyin', { data: [{ type: 6, card_type: 42, aweme_list: null,
+    data: { opaqueA: 1, opaqueB: '', opaqueC: null, opaqueD: false } }], has_more: false }), /invalid_content_search_identity/,
+  'the superseded scalar-only candidate is not retained as a general type-six exclusion')
+})
+
+test('Douyin related-words recognition validates every word, including unsampled third and sixth entries', () => {
+  const changes = [row => { delete row.related_word }, row => { row.related_word = '' }, row => { row.related_word = 123 },
+    row => { row.word_record = null }, row => { row.word_record.words_image.url_list = [123] },
+    row => { row.word_record.force_update_rank = 'false' }, row => { row.extra_info = [] },
+    row => { row.aweme_info = { aweme_id: 'hidden-real-post', desc: '潜在帖子' } },
+    row => { row.word_record.hidden_post = { awemeId: 'hidden-real-post', video: {} } }]
+  for (const index of [2, 5]) for (const change of changes) {
+    const card = relatedWordsDouyinCard()
+    change(card.related_word_list[index])
+    assert.throws(() => project('douyin', { data: [card], has_more: false }), /invalid_content_search_identity/, `word ${index + 1} is fully validated`)
+  }
+  for (const related_word_list of [undefined, null, [], 'not-an-array']) {
+    assert.throws(() => project('douyin', { data: [{ ...relatedWordsDouyinCard(), related_word_list }], has_more: false }), /invalid_content_search_identity/)
+  }
+})
+
+test('Douyin related-words recognition rejects unknown scalar keys and hidden post containers throughout the fixed schema', () => {
+  const locations = [card => card, card => card.data, card => card.data.rs_extra_info, card => card.words_query_record,
+    card => card.card_info, card => card.ui_info, card => card.debug_diff_info, card => card.debug_data,
+    card => card.related_word_list[5], card => card.related_word_list[5].word_record,
+    card => card.related_word_list[5].word_record.words_image, card => card.related_word_list[5].extra_info]
+  for (const locate of locations) for (const value of [null, 'unknown', {}, [{ aweme_id: 'hidden-post', desc: '不可静默丢弃' }]]) {
+    const card = relatedWordsDouyinCard()
+    locate(card).unrecognized = value
+    assert.throws(() => project('douyin', { data: [card], has_more: false }), /invalid_content_search_identity/)
+  }
+})
+
+test('Douyin related-words encoded metadata must remain an empty JSON object rather than carry unknown content', () => {
+  const locations = [card => [card.data.rs_extra_info, 'impr_extra'], card => [card.words_query_record, 'info']]
+  for (const locate of locations) for (const value of ['', 'not-json', 'null', '[]', '{"unknown":null}', '{"aweme_info":{"aweme_id":"hidden-post"}}', null, {}]) {
+    const card = relatedWordsDouyinCard(), [object, key] = locate(card)
+    object[key] = value
+    assert.throws(() => project('douyin', { data: [card], has_more: false }), /invalid_content_search_identity/)
+  }
+})
+
 test('Kuaishou mixFeeds retains real photos and video alternatives and derives public links only from known public identity', () => {
   const projected = project('kuaishou'), row = projected.items[0], modern = contentSearchDataItem(row)
   assert.equal(row.content_id, '5216857423057152000')
@@ -153,6 +309,28 @@ test('Kuaishou explicit photo wrappers preserve their author and known search di
   assert.equal(projected.items[0].full_text, '完整正文')
 })
 
+test('Kuaishou Night-All diagnostic ID aliases exclude only known feedback cards without material content', () => {
+  // Same diagnostic ID forms as Night-All tests/tikhub-normalizer.test.js.
+  // These are synthetic compatibility fixtures, not the incident receipt.
+  const ids = ['search_quality2', 'search_title', 'search_cover', 'search_similar', 'search_outdated',
+    'search_authoritative', 'search_rrelevant2', 'search_seen', 'search_missing']
+  for (const alias of ['external_id', 'externalId']) {
+    const projected = project('kuaishou', { feeds: [
+      { photoId: 'real-photo', caption: '完整正文' },
+      ...ids.map(id => ({ [alias]: id, title: '搜索反馈' })),
+      { id: 'search_title', caption: '真实同名作品', user: { id: 'real-author' }, coverUrl: 'https://example.test/real-cover.jpg' },
+      { id: 'search_missing', caption: '真实零互动作品', like_count: 0 },
+      { feed: { [alias]: 'search_quality2', title: '搜索反馈' } },
+    ], pcursor: 'no_more' })
+    assert.deepEqual(projected.items.map(row => row.content_id), ['real-photo', 'search_title', 'search_missing'])
+    assert.equal(projected.nonPostCount, ids.length + 1)
+    assert.equal(projected.items[1].author_id, 'real-author')
+    assert.equal(projected.items[2].like_count, 0)
+  }
+  assert.throws(() => project('kuaishou', { feeds: [{ external_id: 'unknown-card', title: '未知结构' }], pcursor: 'no_more' }),
+    /invalid_content_search_identity/, 'unknown cards remain a contract error rather than being silently dropped')
+})
+
 test('Zhihu search_result preserves original article/question titles, full content vs explicit preview and fixed next URL fields only', () => {
   const projected = project('zhihu'), answer = contentSearchDataItem(projected.items[0]), article = contentSearchDataItem(projected.items[1])
   assert.equal(projected.nonPostCount, 1)
@@ -164,6 +342,25 @@ test('Zhihu search_result preserves original article/question titles, full conte
   assert.equal(projected.items[1].body_completeness, 'provider_preview')
   assert.deepEqual(projected.providerPage.nextParams, { offset: 20, search_hash_id: 'zh-session' })
   assert.equal(Object.hasOwn(projected.providerPage.nextParams, 'q'), false)
+})
+
+test('HTML numeric entities decode Unicode scalar values without introducing PostgreSQL-unsafe lone surrogates', () => {
+  const body = '完整正文😀 &#128512; &#x1F642; &#xD800; &#57343; &#x110000; &#0; ' + '尾段'.repeat(1200)
+  const payload = { data: [{ type: 'search_result', object: { id: 'unicode-article', type: 'article',
+    title: '原始标题 &#xDFFF; &#128512;', content: `<p>${body}</p>` } }], paging: { is_end: true } }
+  const original = structuredClone(payload), projected = project('zhihu', payload)
+  const row = projected.acquiredItems[0], modern = contentSearchDataItem(row)
+  assert.equal(row.full_text, body.replace('&#128512;', '😀').replace('&#x1F642;', '🙂'))
+  assert.equal(modern.title, '原始标题 &#xDFFF; 😀')
+  assert.equal(modern.text, row.full_text)
+  assert.ok(modern.text.length > 2000)
+  assert.ok(isPostgresSafeJsonValue(projected.acquiredItems))
+  assert.ok(isPostgresSafeJsonValue(modern))
+  const records = rawSearchRecords({ data: { raw_info: '[]', raw_data: JSON.stringify(projected.acquiredItems) } }, 'zhihu', 'tikhub')
+  assert.equal(records[0].body, row.full_text)
+  assert.ok(isPostgresSafeJsonValue(JSON.parse(JSON.stringify(records))))
+  assert.deepEqual(payload, original, 'supplier payload evidence remains unchanged')
+  assert.deepEqual(projected.restrictedResponseArchive, { sha256: 'immutable-archive' })
 })
 
 test('projection retains an entire oversized page with first-wins dedup for gateway buffering and unchanged evidence', () => {

@@ -9,6 +9,49 @@ const ROUTES = new Set(['/api/v1/data/search', '/api/v1/search/raw', '/api/v1/ni
 const REASONS = new Set(['invalid_weibo_search_shape', 'invalid_weibo_identity', 'weibo_page_exceeds_requested_count'])
 const kind = value => value === undefined ? 'missing' : value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
 
+const METRIC_FIELDS = Object.freeze({
+  likes: ['attitudes_count', 'like_count', 'liked_count', 'interaction.like_count', 'interaction.likes'],
+  comments: ['comments_count', 'comment_count', 'commentCount', 'interaction.comment_count', 'interaction.comments'],
+  shares: ['reposts_count', 'share_count', 'shared_count', 'interaction.repost_count', 'interaction.reposts'],
+  views: ['view_count', 'viewCount', 'play_count', 'playCount', 'read_count', 'readCount', 'views_count', 'views'],
+  bookmarks: ['collect_count', 'collected_count'],
+})
+const METRIC_OUTPUT = { likes: 'like_count', comments: 'comment_count', shares: 'forward_count', views: 'view_count', bookmarks: 'bookmark_count' }
+
+// Fixed known field names and aggregate counts only. Bound work/output even for
+// a malformed oversized archive; never expose metric values, URLs or row IDs.
+export function inspectWeiboMetricCoverage(payload, capturedAt) {
+  const rows = payload?.data?.parsed_data?.results
+  if (!Array.isArray(rows)) return { available: false, reason: 'results_not_array' }
+  const selected = rows.slice(0, 100)
+  const fields = {}
+  for (const paths of Object.values(METRIC_FIELDS)) for (const path of paths) fields[path] = { present: 0, numeric: 0, zero: 0 }
+  const projected = Object.fromEntries(Object.keys(METRIC_FIELDS).map(name => [name, { provided: 0, zero: 0, missing: 0 }]))
+  const urls = { provided: 0, missing: 0, protocolRelativePostUrl: 0 }
+  let invalidRows = 0
+  for (const row of selected) {
+    for (const [path, counts] of Object.entries(fields)) {
+      const value = path.split('.').reduce((value, key) => value?.[key], row)
+      if (value !== undefined) counts.present++
+      if ((typeof value === 'number' || typeof value === 'string' && value.trim())
+        && Number.isFinite(Number(value)) && Number(value) >= 0) {
+        counts.numeric++
+        if (Number(value) === 0) counts.zero++
+      }
+    }
+    if (typeof row?.post_url === 'string' && row.post_url.trim().startsWith('//')) urls.protocolRelativePostUrl++
+    let output
+    try { output = weiboRow(row, capturedAt) } catch { invalidRows++; continue }
+    for (const [name, counts] of Object.entries(projected)) {
+      const value = output[METRIC_OUTPUT[name]]
+      if (value === null || value === undefined) counts.missing++
+      else { counts.provided++; if (value === 0) counts.zero++ }
+    }
+    urls[output.url ? 'provided' : 'missing']++
+  }
+  return { available: true, rowsExamined: selected.length, truncated: rows.length > selected.length, invalidRows, fields, projected, urls }
+}
+
 // Deliberately no raw text, field values, arbitrary keys, URLs or exception messages
 // leave this offline projection. Exact archive bytes remain in restricted storage.
 export function inspectWeiboArchive(archive, snapshot) {
@@ -38,6 +81,7 @@ export function inspectWeiboArchive(archive, snapshot) {
     ? body.pageSize ?? 20 : body.count ?? body.pageSize ?? body.limit ?? 20)
   if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) return { state: 'invalid_saved_page_size', shape }
   const capturedAt = new Date(archive.captured_at).toISOString()
+  const metricCoverage = inspectWeiboMetricCoverage(payload, capturedAt)
   // Inspect all identities even when the earlier pagination guard is what fails.
   const invalidRowIndexes = []
   if (Array.isArray(rows)) for (const [index, row] of rows.entries()) {
@@ -47,10 +91,10 @@ export function inspectWeiboArchive(archive, snapshot) {
     const result = projectWeiboSearch({ publicBody: { data: payload.data, meta: { capturedAt } } },
       { query: '', page: 1, pageSize, encodeNext: () => 'offline-not-a-cursor' })
     return { state: 'current_projection_accepts', pageSize, shape, returnedCount: result.items.length,
-      hasMore: result.publicBody.data.page.hasMore }
+      hasMore: result.publicBody.data.page.hasMore, metricCoverage }
   } catch (error) {
     return { state: 'current_projection_rejects', pageSize, shape, invalidRowIndexes,
-      reason: REASONS.has(error.message) ? error.message : 'unexpected_projection_error' }
+      reason: REASONS.has(error.message) ? error.message : 'unexpected_projection_error', metricCoverage }
   }
 }
 

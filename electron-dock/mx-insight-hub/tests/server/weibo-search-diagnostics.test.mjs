@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
-import { inspectWeiboArchive, diagnoseWeiboSearch } from '../../server/ops/diagnose-weibo-search.mjs'
+import { inspectWeiboArchive, inspectWeiboMetricCoverage, diagnoseWeiboSearch } from '../../server/ops/diagnose-weibo-search.mjs'
 
 const capturedAt = '2026-10-08T07:44:13.288Z'
 const snapshot = { path: '/api/v1/data/search', body: { platform: 'weibo', query: 'private-query', pageSize: 20 } }
@@ -62,6 +62,29 @@ test('verified empty pagination accepts valid short pages and exposes bounded co
     assert.equal(report.shape.hasNextPage, 'missing')
     assert.doesNotMatch(JSON.stringify(report), /private-|5351726865449966/)
   }
+})
+
+test('Weibo field coverage is bounded, value-free and distinguishes original zero from absent metrics', () => {
+  const native = { ...row, post_url: '//weibo.com/private-id/private-path?private-signature',
+    interaction: { like_count: '987654321', comment_count: 0, repost_count: '2', 'private-key': 'private-value' },
+    view_count: ' ', collect_count: false }
+  const payload = { data: { parsed_data: { results: [native, row] } } }
+  const report = inspectWeiboMetricCoverage(payload, capturedAt)
+  assert.equal(report.rowsExamined, 2)
+  assert.deepEqual(report.fields['interaction.like_count'], { present: 1, numeric: 1, zero: 0 })
+  assert.deepEqual(report.fields['interaction.comment_count'], { present: 1, numeric: 1, zero: 1 })
+  assert.deepEqual(report.projected.likes, { provided: 1, zero: 0, missing: 1 })
+  assert.deepEqual(report.projected.comments, { provided: 1, zero: 1, missing: 1 })
+  assert.deepEqual(report.projected.views, { provided: 0, zero: 0, missing: 2 })
+  assert.deepEqual(report.projected.bookmarks, { provided: 0, zero: 0, missing: 2 })
+  assert.deepEqual(report.urls, { provided: 1, missing: 1, protocolRelativePostUrl: 1 })
+  const attached = inspectWeiboArchive(archive(payload.data), snapshot)
+  assert.deepEqual(attached.metricCoverage, report)
+  assert.doesNotMatch(JSON.stringify(report), /private-|987654321|5351726865449966/)
+  const bounded = inspectWeiboMetricCoverage({ data: { parsed_data: { results: Array(101).fill(native) } } }, capturedAt)
+  assert.equal(bounded.rowsExamined, 100)
+  assert.equal(bounded.truncated, true)
+  assert.deepEqual(inspectWeiboMetricCoverage({}, capturedAt), { available: false, reason: 'results_not_array' })
 })
 
 const pgliteModule = process.env.MX_INSIGHT_TEST_PGLITE_MODULE

@@ -65,13 +65,30 @@ export function createStrategySearchCell(platform) {
 
 export const strategyRequestFingerprint = input => JSON.stringify([input.method, input.path, input.body])
 
+export function strategyUnresolvedAttempt(attempts, platform) {
+  return [...attempts.values()].find(attempt => ['sending', 'uncertain'].includes(attempt.state)
+    && strategyAttemptPlatform(attempt.body?.platform) === strategyAttemptPlatform(platform))
+}
+
+const strategyAttemptPlatform = value => {
+  const platform = String(value || '').trim().toLowerCase()
+  return { ig: 'instagram', ins: 'instagram', insta: 'instagram', x: 'twitter', xhs: 'xiaohongshu',
+    red: 'xiaohongshu', rednote: 'xiaohongshu', wechat: 'wechat_search', weixin: 'wechat_search' }[platform] || platform
+}
+
+// Error envelopes can contain an HTTP correlation ID at the top level. Only
+// explicit ledger details establish the request ID used for status matching.
+export const strategyFailureRequestId = error => [error?.details?.requestId, error?.responseBody?.error?.details?.requestId]
+  .find(value => typeof value === 'string' && value.trim()) || null
+
 export function recordStrategyAttempt(cell, event) {
   if (!event.idempotencyKey) return
   const state = cell.getSnapshot(), scope = strategyRequestFingerprint(event.input)
   const operation = state.attempts.get(scope)?.idempotencyKey === event.idempotencyKey
     ? state.attempts.get(scope) : { idempotencyKey: event.idempotencyKey, body: event.input.body, input: event.input }
   operation.state = event.state === 'failed' ? uncertainStrategySearch(event.error) ? 'uncertain' : 'received' : event.state
-  operation.requestId = event.requestId || operation.requestId
+  operation.requestId = (event.state === 'failed' ? strategyFailureRequestId(event.error) : event.requestId) || operation.requestId
+  if (event.state === 'failed') operation.error = event.error
   state.attempts.set(scope, operation)
   cell.update({ busy: event.state === 'sending', ...(event.state === 'sending' ? { outcomeNote: null } : {}) })
 }

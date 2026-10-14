@@ -149,6 +149,31 @@ async function harness({ platform = 'weibo', detail = 'success', enabled = true,
   return { store, service, gateway, platformStore, controls, config, context, key, calls, historical, logs, oldPayload, oldDataPayload, invoke, invokeData }
 }
 
+test('Weibo native protocol-relative URL and flat metrics reach new deliveries without changing immutable saved replay', async () => {
+  const native = { weibo_id: POST_ID, user_name: 'fixture author', user_url: `//weibo.com/${AUTHOR}`,
+    post_url: `//weibo.com/${AUTHOR}/Abc?refer_flag=1001030103_`, content: FULL,
+    longText: { content: FULL }, like_count: '12', comment_count: '3', share_count: '2',
+    view_count: '0', collect_count: 0, media: { images: ['https://example.test/image.jpg?sig=a%2Fb'] } }
+  for (const route of ['invoke', 'invokeData']) {
+    const h = await harness({ rows: [native] })
+    const first = await h[route]()
+    const item = route === 'invoke' ? JSON.parse(first.body.data.raw_data)[0] : first.body.data.items[0]
+    assert.equal(item.url, `https://weibo.com/${AUTHOR}/Abc?refer_flag=1001030103_`)
+    assert.deepEqual(route === 'invoke' ? [item.like_count, item.comment_count, item.forward_count, item.view_count, item.bookmark_count]
+      : Object.values(item.metrics), [12, 3, 2, 0, 0])
+    assert.equal(h.calls.length, 1)
+    const [call] = h.platformStore.calls.values()
+    const originalArchive = structuredClone(h.platformStore.restrictedResponseArchives.get(call.id))
+    native.like_count = '99'
+    const replay = await h[route]()
+    assert.equal(replay.replay, true)
+    assert.deepEqual(replay.body, first.body)
+    assert.equal(h.calls.length, 1)
+    assert.deepEqual(structuredClone(h.platformStore.restrictedResponseArchives.get(call.id)), originalArchive)
+    native.like_count = '12'
+  }
+})
+
 test('allowlisted Weibo callers keep the same local RPM exemption for search and full text on both routes', async () => {
   for (const route of ['invoke', 'invokeData']) {
     const h = await harness()
