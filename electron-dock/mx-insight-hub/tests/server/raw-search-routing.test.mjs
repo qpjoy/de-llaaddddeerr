@@ -587,6 +587,64 @@ test('Twitter data/search directly preserves full text, author, zero metrics and
   assert.equal(h.calls.length, 1)
 })
 
+test('Twitter data/search unwraps a root TimelineAddEntries instruction and preserves archive, replay and scoped pagination', async () => {
+  const posts = Array.from({ length: 20 }, (_, index) => ({ ...twitterZeroPost, rest_id: String(1843144227000000000n + BigInt(index)) }))
+  const entries = twitterTimeline(posts, 'root-wrapper-next').data.search_by_raw_query.search_timeline.timeline.instructions[0].entries
+  const value = entries[1].content.itemContent.tweet_results.result
+  entries[1].content.itemContent.tweet_results.result = { __typename: 'TweetWithVisibilityResults', tweet: value }
+  const wire = { entries: [{ type: 'TimelineAddEntries', entries }] }
+  const h = await harness({ platform: 'twitter', twitterData: wire })
+  const body = { platform: 'twitter', query: 'fixture', pageSize: 20, type: 'stable' }
+  const first = await h.invokeData(body, 'twitter-root-wrapper-first')
+  assert.equal(isNightAllDataSearchV1Envelope(first.body), true)
+  assert.equal(first.body.data.items.length, 20)
+  assert.equal(first.body.data.pageInfo.returnedCount, 20)
+  assert.equal(first.body.data.pageInfo.hasMore, true)
+  assert.match(first.body.data.pageInfo.nextCursor, /^mxds1\./)
+  assert.equal(h.calls[0].searchParams.get('category'), 'Top')
+  assert.equal(h.calls[0].searchParams.get('count'), '20')
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.historical.length, 0)
+  const receipt = [...h.platformStore.restrictedResponseArchives.values()][0]
+  const originalBytes = Buffer.from(receipt.bodyBytes), originalHash = receipt.bodySha256
+  assert.deepEqual(JSON.parse(originalBytes.toString()), wire)
+  assert.deepEqual((await h.invokeData(body, 'twitter-root-wrapper-first')).body, first.body)
+  assert.equal(h.calls.length, 1)
+  const next = await h.invokeData({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'twitter-root-wrapper-next')
+  assert.equal(next.body.data.pageInfo.pageIndex, 2)
+  assert.equal(next.body.data.items.length, 20)
+  assert.equal(next.body.data.pageInfo.hasMore, false, 'a repeated supplier token is terminal')
+  assert.equal(h.calls[1].searchParams.get('cursor'), 'root-wrapper-next')
+  assert.equal(h.calls.length, 2)
+  assert.equal(receipt.bodySha256, originalHash)
+  assert.ok(originalBytes.equals(Buffer.from(receipt.bodyBytes)))
+})
+
+test('Twitter parser correction never rewrites a committed stable empty delivery or acquires it again', async () => {
+  const h = await harness({ platform: 'twitter', enabled: false })
+  const body = { platform: 'twitter', query: 'fixture', pageSize: 20, type: 'stable' }
+  const requestId = randomUUID()
+  await h.store.reserve({ requestId, idempotencyKey: 'twitter-stable-empty-history',
+    fingerprint: requestFingerprint({ method: 'POST', path: '/api/v1/data/search', body }),
+    tenantId: h.context.tenant.id, consumerId: h.context.consumer.id, apiKeyId: h.context.apiKey.id,
+    platform: 'twitter', unitsReserved: 1, leaseExpiresAt: new Date(Date.now() + 120000),
+    windowStart: new Date(Date.now() - 3600000), maxRequests: 100, replayWindowMs: null })
+  const saved = structuredClone(h.oldDataPayload)
+  saved.requestId = requestId
+  saved.data.query = body.query
+  saved.data.items = []
+  saved.data.pageInfo.returnedCount = 0
+  await h.store.commitRequest(requestId, { responseStatus: 200, responseBody: saved, unitsActual: 1 })
+  h.store.requests.get(requestId).completedAt = new Date(Date.now() - 86400000).toISOString()
+  const replay = await h.invokeData(body, 'twitter-stable-empty-history')
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, saved)
+  assert.deepEqual(h.store.requests.get(requestId).responseBody, saved)
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.historical.length, 0)
+  assert.equal(h.platformStore.restrictedResponseArchives.size, 0)
+})
+
 test('Twitter standard photo, video and GIF media retain their types without changing raw search media', async () => {
   const photo = twitterPost.legacy.extended_entities.media[0]
   const video = twitterPost.legacy.extended_entities.media[1]

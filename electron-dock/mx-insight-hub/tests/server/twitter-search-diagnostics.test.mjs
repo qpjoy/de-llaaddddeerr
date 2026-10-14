@@ -70,6 +70,19 @@ test('diagnostic structural inventory can reveal fixed module wrappers the insta
   noSecrets(report)
 })
 
+test('diagnostic locates nested entries wrappers without revealing arbitrary names or payload values', () => {
+  const report = inspectTwitterArchive(archive({ entries: [{ type: 'TimelineAddEntries', entries: [
+    { content: { itemContent } }, cursor,
+  ] }] }), snapshot)
+  assert.equal(report.structure.rootFields.entries, 'array')
+  assert.equal(report.structure.rootFields.instructions, 'missing')
+  assert.deepEqual(report.structure.entryContainers, [{ path: 'payload.entries', count: 1 }, { path: 'payload.entries[0].entries', count: 2 }])
+  assert.equal(report.structure.entryWrapperTypes.TimelineAddEntries, 1)
+  assert.equal(report.structure.entries[0].wrapperType, 'TimelineAddEntries')
+  assert.equal(report.structure.entries[1].containerPath, 'payload.entries[0].entries')
+  noSecrets(report)
+})
+
 test('archive integrity, saved inputs and structural limits fail closed before offline projection', () => {
   const valid = archive(timeline())
   assert.equal(inspectTwitterArchive(null, snapshot).state, 'archive_missing')
@@ -116,6 +129,9 @@ function databaseFixture({ fail = false, provider = 'rapidapi' } = {}) {
 
 test('request diagnostic joins only its stored provider calls under a read-only transaction', async () => {
   const h = databaseFixture(), report = await diagnoseTwitterSearch(h.pool, REQUEST)
+  assert.equal(report.diagnosticRevision, 'twitter-search-diagnostic.v2')
+  assert.equal(report.projectionImplementation, 'installed_hub_contract')
+  assert.equal(report.parserSha256, null)
   assert.match(h.statements[0].sql, /READ ONLY$/)
   assert.equal(h.statements.at(-1).sql, 'COMMIT')
   assert.ok(h.statements.every(({ sql }) => /^(BEGIN|SET LOCAL|SELECT|COMMIT)/.test(sql)))

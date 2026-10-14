@@ -7,6 +7,8 @@ import pg from 'pg'
 const contracts = process.argv[1] === '-'
   ? pathToFileURL(`${process.cwd()}/server/contracts/`) : new URL('../contracts/', import.meta.url)
 const { normalizeHubSocialRequest, normalizeTwitterResponse, HUB_SOCIAL_VERSION } = await import(new URL('hub-social.mjs', contracts))
+const DIAGNOSTIC_IMPLEMENTATION = { projectionImplementation: 'installed_hub_contract', parserSha256: null } // TWITTER_DIAGNOSTIC_IMPLEMENTATION
+export const TWITTER_DIAGNOSTIC_REVISION = 'twitter-search-diagnostic.v2'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const MAX_BYTES = 4 * 1024 * 1024
@@ -35,21 +37,23 @@ export function twitterInputShapes(snapshot) {
 function timelineShape(payload) {
   const root = object(payload?.data) ? payload.data : payload
   const summary = { payload: kind(payload), data: kind(payload?.data), root: kind(root),
+    rootFields: Object.fromEntries(['entries', 'instructions', 'search_by_raw_query', 'search_timeline',
+      'timeline', 'timeline_v2', 'result', 'module', 'items'].map(field => [field, kind(root?.[field])])),
     errors: listCount(payload?.errors), rootErrors: listCount(root?.errors),
     rootError: kind(root?.error), rootMessage: kind(root?.message),
-    instructionCount: 0, instructionTypes: {}, entryCount: 0, entries: [],
+    instructionCount: 0, instructionTypes: {}, entryCount: 0, entryWrapperTypes: {}, entryContainers: [], entries: [],
     moduleItemsCount: 0, itemsCount: 0, moduleCount: 0,
     tweetResultCount: 0, tweetResultTypes: {}, tweetLegacyCount: 0, tweetStringIdentityCount: 0,
     tweetNumericIdentityCount: 0, bottomCursorCount: 0, showMoreCursorCount: 0, topCursorCount: 0,
     nodesInspected: 0, truncated: false }
-  const pending = [payload], seen = new Set()
-  const enqueue = value => {
+  const pending = [{ value: payload, path: 'payload' }], seen = new Set()
+  const enqueue = (value, path) => {
     if (!object(value)) return
-    if (pending.length < MAX_NODES) pending.push(value)
+    if (pending.length < MAX_NODES) pending.push({ value, path: path.length <= 256 ? path : 'bounded_nested_path' })
     else summary.truncated = true
   }
   for (let index = 0; index < pending.length && index < MAX_NODES; index++) {
-    const node = pending[index]
+    const { value: node, path } = pending[index]
     if (!object(node) || seen.has(node)) continue
     seen.add(node); summary.nodesInspected++
     if (Array.isArray(node.instructions)) {
@@ -62,10 +66,21 @@ function timelineShape(payload) {
     }
     if (Array.isArray(node.entries)) {
       summary.entryCount += node.entries.length
+      if (summary.entryContainers.length < 20) summary.entryContainers.push({ path: `${path}.entries`, count: node.entries.length })
+      for (const entry of node.entries.slice(0, MAX_NODES)) {
+        const type = known(entry?.type, ['TimelineAddEntries', 'TimelineReplaceEntry', 'TimelineAddToModule',
+          'TimelineTerminateTimeline', 'TimelineClearCache', 'TimelinePinEntry'])
+        summary.entryWrapperTypes[type] = (summary.entryWrapperTypes[type] || 0) + 1
+      }
       for (const entry of node.entries.slice(0, 20)) {
         if (summary.entries.length >= 20) break
         const content = entry?.content, item = content?.itemContent, result = item?.tweet_results?.result
-        summary.entries.push({ content: kind(content), itemContent: kind(item),
+        summary.entries.push({ containerPath: `${path}.entries`, wrapperType: known(entry?.type,
+          ['TimelineAddEntries', 'TimelineReplaceEntry', 'TimelineAddToModule', 'TimelineTerminateTimeline', 'TimelineClearCache', 'TimelinePinEntry']),
+          content: kind(content), itemContent: kind(item),
+          directItemContent: kind(entry?.itemContent), directItem: kind(entry?.item),
+          directTweetResults: kind(entry?.tweet_results), directCursorType: known(entry?.cursorType, ['Bottom', 'Top', 'ShowMore']),
+          nestedEntries: listCount(entry?.entries),
           itemType: known(item?.itemType, ['TimelineTweet', 'TimelineUser', 'TimelineTombstone']),
           tweetResults: kind(item?.tweet_results), result: kind(result), resultType: resultType(result?.__typename),
           tweet: kind(result?.tweet), legacy: kind((result?.tweet || result)?.legacy),
@@ -89,14 +104,15 @@ function timelineShape(payload) {
       if (typeof tweet?.rest_id === 'number') summary.tweetNumericIdentityCount++
     }
     for (const field of ['data', 'search_by_raw_query', 'search_timeline', 'timeline', 'timeline_v2',
-      'user', 'result', 'module', 'content', 'itemContent', 'item', 'tweet_results', 'tweet', 'entry']) enqueue(node[field])
+      'user', 'result', 'module', 'content', 'itemContent', 'item', 'tweet_results', 'tweet', 'entry']) enqueue(node[field], `${path}.${field}`)
     for (const field of ['instructions', 'entries', 'items', 'moduleItems']) {
       if (!Array.isArray(node[field])) continue
       if (node[field].length > MAX_NODES) summary.truncated = true
-      for (const child of node[field].slice(0, MAX_NODES)) enqueue(child)
+      for (const [childIndex, child] of node[field].slice(0, MAX_NODES).entries()) enqueue(child, `${path}.${field}[${childIndex}]`)
     }
   }
   summary.entriesTruncated = summary.entryCount > summary.entries.length
+  summary.entryContainersTruncated = summary.entryContainers.length >= 20 && summary.entryCount > summary.entryContainers.reduce((sum, entry) => sum + entry.count, 0)
   return summary
 }
 
@@ -189,7 +205,8 @@ export async function diagnoseTwitterSearch(pool, requestId) {
     }
     await client.query('COMMIT')
     const snapshot = request.acquisition_request
-    return { requestId, status: known(request.status, ['reserved', 'committed', 'released', 'unknown']),
+    return { diagnosticRevision: TWITTER_DIAGNOSTIC_REVISION, ...DIAGNOSTIC_IMPLEMENTATION,
+      requestId, status: known(request.status, ['reserved', 'committed', 'released', 'unknown']),
       responseStatus: integer(request.response_status), path: ROUTES.has(snapshot?.path) ? snapshot.path : 'other_or_missing',
       requestedAt: request.reserved_at, completedAt: request.completed_at, input: twitterInputShapes(snapshot),
       delivery: { contractVersion: known(request.delivery_contract_version, ['night-all.data-search.v1', HUB_SOCIAL_VERSION]),

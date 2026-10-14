@@ -172,11 +172,27 @@ export function normalizeTwitterResponse(payload, request, { encodeCursor, captu
   } else {
     // Follow only known timeline containers, never quoted/related tweet trees.
     const pending = [root], entries = []
-    let recognized = false
+    let recognized = false, entryNodeCount = 0
     for (let index = 0; index < pending.length && index < 10000; index++) {
       const node = pending[index]
       if (!object(node)) continue
-      if (Array.isArray(node.entries)) { recognized = true; entries.push(...node.entries) }
+      if (Array.isArray(node.entries)) {
+        recognized = true
+        const entryStack = node.entries.slice().reverse()
+        if (entryStack.length + entryNodeCount > 10000) throw new Error('timeline_too_large')
+        while (entryStack.length) {
+          const entry = entryStack.pop()
+          if (++entryNodeCount > 10000) throw new Error('timeline_too_large')
+          // AIO may wrap its TimelineAddEntries instruction in root.entries.
+          // Follow only this known wrapper, never arbitrary nested entries in
+          // tweet, quoted-status or recommendation business objects. Expand
+          // in place so duplicate first-wins and bottom-cursor order survive.
+          if (object(entry) && entry.type === 'TimelineAddEntries' && Array.isArray(entry.entries)) {
+            if (entryStack.length + entry.entries.length + entryNodeCount > 10000) throw new Error('timeline_too_large')
+            for (let child = entry.entries.length - 1; child >= 0; child--) entryStack.push(entry.entries[child])
+          } else entries.push(entry)
+        }
+      }
       if (Array.isArray(node.instructions)) { if (!node.instructions.length) recognized = true; pending.push(...node.instructions) }
       if (node.type === 'TimelineTerminateTimeline') recognized = true
       for (const key of ['search_by_raw_query', 'search_timeline', 'timeline', 'user', 'result']) if (object(node[key])) pending.push(node[key])

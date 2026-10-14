@@ -69,6 +69,76 @@ test('normalization keeps full body, zero metrics, deduplicates and never consum
   assert.equal(normalizeTwitterResponse(retweetTimeline, normalize({}, 'crawl')).data.items.length, 1, 'account time line may contain retweets by other authors')
 })
 
+test('AIO root entries can contain a known TimelineAddEntries wrapper without losing tweets or bottom continuation', () => {
+  const actualEntries = Array.from({ length: 20 }, (_, index) => entry(String(index + 1)))
+  actualEntries[1].content.itemContent.tweet_results.result = {
+    __typename: 'TweetWithVisibilityResults', tweet: actualEntries[1].content.itemContent.tweet_results.result,
+  }
+  actualEntries[0].content.itemContent.tweet_results.result.quoted_status_result = {
+    result: { ...tweet('999'), entries: [entry('998')] },
+  }
+  actualEntries.push({ entryId: 'cursor-top-0', content: { cursorType: 'Top', value: 'not-the-next-page' } },
+    { entryId: 'cursor-bottom-0', content: { cursorType: 'Bottom', value: 'vendor-page-2' } },
+    { entryId: 'search-metadata', content: { itemContent: { itemType: 'TimelineUser' } } })
+  const request = normalize({ sort: 'top' })
+  let cursorState
+  const result = normalizeTwitterResponse({ entries: [{ type: 'TimelineAddEntries', entries: actualEntries }] }, request,
+    { encodeCursor: state => { cursorState = state; return 'opaque-page-2' } })
+  assert.equal(result.data.items.length, 20)
+  assert.deepEqual(result.data.items.map(item => item.id), Array.from({ length: 20 }, (_, index) => String(index + 1)))
+  assert.equal(result.data.page.discardedCount, 0)
+  assert.equal(result.data.page.duplicateCount, 0)
+  assert.equal(result.data.page.nextCursor, 'opaque-page-2')
+  assert.equal(cursorState.providerCursor, 'vendor-page-2')
+  assert.equal(normalize({ sort: 'top', cursor: 'opaque-page-2' }, 'search', { decodeCursor: () => cursorState }).page, 2)
+  assert.deepEqual(normalizeTwitterResponse({ entries: actualEntries }, request, { encodeCursor: () => 'opaque-page-2' }).data.items,
+    result.data.items, 'direct root entries remain supported')
+})
+
+test('nested known entry wrappers retain de-duplication, strict counts and the final page boundary', () => {
+  const data = { entries: [{ type: 'TimelineAddEntries', entries: [entry('1'), entry('1'),
+    { content: { itemContent: { tweet_results: { result: { rest_id: '2' } } } } },
+    { entryId: 'cursor-bottom-0', content: { cursorType: 'Bottom', value: 'vendor-page-2' } },
+  ] }] }
+  const result = normalizeTwitterResponse(data, normalize(), { encodeCursor: () => 'opaque' })
+  assert.equal(result.data.items.length, 1)
+  assert.equal(result.data.page.duplicateCount, 1)
+  assert.equal(result.data.page.discardedCount, 1)
+  assert.equal(result.data.status, 'partial')
+  const last = normalizeTwitterResponse(data, { ...normalize(), page: 15 }, { encodeCursor: () => 'opaque' })
+  assert.equal(last.data.page.hasMore, false)
+  assert.equal(last.data.page.nextCursor, null)
+  assert.throws(() => normalizeTwitterResponse({ entries: [{ type: 'TimelineAddEntries', entries: [entry('1'), entry('2')] }] },
+    normalize({ count: 1 })), /upstream_page_exceeds_requested_count/)
+  assert.deepEqual(normalizeTwitterResponse({ entries: [{ type: 'TimelineAddEntries', entries: [] }] }, normalize()).data.items, [])
+  assert.deepEqual(normalizeTwitterResponse({ entries: [{ type: 'UnreviewedWrapper', entries: [entry('1')] }] }, normalize()).data.items, [],
+    'unknown wrappers do not become an arbitrary recursive tweet collector')
+})
+
+test('mixed direct and wrapped entries preserve input order and the final bottom cursor', () => {
+  const wrapped = entry('1'), later = entry('1')
+  wrapped.content.itemContent.tweet_results.result.note_tweet.note_tweet_results.result.text = 'wrapped first'
+  later.content.itemContent.tweet_results.result.note_tweet.note_tweet_results.result.text = 'direct later'
+  const bottom = value => ({ content: { cursorType: 'Bottom', value } })
+  let state
+  const result = normalizeTwitterResponse({ entries: [
+    { type: 'TimelineAddEntries', entries: [wrapped, bottom('wrapped-bottom')] },
+    entry('2'), later, bottom('direct-final-bottom'),
+  ] }, normalize(), { encodeCursor: value => { state = value; return 'opaque' } })
+  assert.deepEqual(result.data.items.map(item => item.id), ['1', '2'])
+  assert.equal(result.data.items[0].content, 'wrapped first')
+  assert.equal(result.data.page.duplicateCount, 1)
+  assert.equal(state.providerCursor, 'direct-final-bottom')
+})
+
+test('known entries wrapper expansion rejects oversized or deeply nested structures within a bounded node budget', () => {
+  assert.throws(() => normalizeTwitterResponse({ entries: [{ type: 'TimelineAddEntries', entries: Array(10000).fill({}) }] }, normalize()),
+    /timeline_too_large/)
+  let nested = entry('1')
+  for (let depth = 0; depth < 10000; depth++) nested = { type: 'TimelineAddEntries', entries: [nested] }
+  assert.throws(() => normalizeTwitterResponse({ entries: [nested] }, normalize()), /timeline_too_large/)
+})
+
 test('direct HTTP contracts perform exactly one fixed-host call without about or Python', async () => {
   for (const operation of ['search', 'crawl', 'user-info']) {
     let calls = 0
