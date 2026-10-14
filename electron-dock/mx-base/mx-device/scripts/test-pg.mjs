@@ -30,4 +30,7 @@ const child = spawn(process.execPath, ["--test", ...files], {
   stdio: "inherit",
   env: { ...process.env, MX_DEVICE_TEST_DATABASE_URL: db.url },
 });
-child.once("exit", (code, signal) => void stopAndExit(code ?? (signal ? 1 : 0)));
+child.once(
+  "exit",
+  (code, signal) => void stopAndExit(code ?? (signal ? 1 : 0)),
+);

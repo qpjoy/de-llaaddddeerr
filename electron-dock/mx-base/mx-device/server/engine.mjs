@@ -18,6 +18,7 @@ import {
   completeInspection,
 } from "./model.mjs";
 import { captureMobile } from "./mobile-agent.mjs";
+import { eventRetention } from "./retention.mjs";
 import { inspectMobile } from "./mobile-status.mjs";
 import {
   callPoC,
@@ -37,6 +38,8 @@ export class Engine {
       realDelay = 2000,
       capture = captureMobile,
       inspect = inspectMobile,
+      retention = eventRetention(),
+      pruneEveryMs = 600000,
     } = {},
   ) {
     this.store = store;
@@ -47,6 +50,11 @@ export class Engine {
     this.realDelay = realDelay;
     this.capture = capture;
     this.inspect = inspect;
+    this.retention = retention;
+    this.pruneEveryMs = pruneEveryMs;
+    this.lastPruneAt = 0;
+    this.lastPrune = null;
+    this.pruning = null;
     this.inflight = new Map();
     this.simulationInflight = new Set();
     this.stopped = false;
@@ -204,7 +212,9 @@ export class Engine {
         maxSimulationInflight: 10,
         realInflight: this.inflight.size - this.simulationInflight.size,
         maxRealInflight: 4,
+        eventPrune: this.lastPrune,
       });
+      this.prune();
       if (this.inflight.size - this.simulationInflight.size < 4) {
         const device = await this.store.atomic(
           (s, n) => {
@@ -303,6 +313,32 @@ export class Engine {
       this.ticking = false;
     }
   }
+  // Event retention runs beside the scan loop and never delays claims.
+  prune() {
+    if (
+      this.pruning ||
+      !this.store.pruneEvents ||
+      Date.now() - this.lastPruneAt < this.pruneEveryMs
+    )
+      return;
+    this.lastPruneAt = Date.now();
+    this.pruning = this.store
+      .pruneEvents(this.retention)
+      .then(
+        (deleted) => {
+          this.lastPrune = { at: Date.now(), deleted };
+        },
+        () => {
+          this.lastPrune = {
+            at: Date.now(),
+            error: "事件清理失败，下个周期重试",
+          };
+        },
+      )
+      .finally(() => {
+        this.pruning = null;
+      });
+  }
   start() {
     this.timer = setInterval(() => void this.tick(), 500);
     this.timer.unref();
@@ -312,6 +348,7 @@ export class Engine {
     this.stopped = true;
     clearInterval(this.timer);
     while (this.ticking) await sleep(20);
+    await this.pruning;
     await Promise.allSettled([...this.inflight.values()]);
   }
 }

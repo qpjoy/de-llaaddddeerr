@@ -19,7 +19,9 @@ const time = value => {
 const allowed = (value, values) => values.includes(value) ? value : value == null ? null : 'other'
 const errors = ['external_platform_persistence_unknown', 'external_platform_call_persistence_unknown', 'invalid_content_search_contract',
   'upstream_outcome_unknown', 'request_outcome_unknown', 'external_platform_response_unusable', 'invalid_upstream_contract',
-  'reservation_lease_expired', 'invalid_json', 'business_rejected', 'external_platform_rejected']
+  'reservation_lease_expired', 'invalid_json', 'business_rejected', 'external_platform_rejected',
+  'upstream_transport_error', 'upstream_deadline_exceeded', 'upstream_body_read_failed', 'upstream_response_too_large',
+  'invalid_upstream_encoding', 'invalid_upstream_json', 'proxy_route_unavailable', 'proxy_routes_unreachable']
 const reasons = new Set(['invalid_content_search_shape', 'content_search_business_rejected', 'content_search_page_too_large',
   'invalid_content_search_entry', 'invalid_content_search_identity', 'invalid_content_search_pagination',
   'missing_content_search_continuation', 'invalid_content_search_continuation', 'invalid_content_search_capture_time'])
@@ -270,8 +272,21 @@ export function inspectContentFillCoverage(calls, snapshot, platform) {
   }
 }
 
-export async function diagnoseContentSearch(pool, identifiers) {
+function boundedWeiboQuery(value) {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > 500 || value.includes('\u0000')) throw new Error('invalid_weibo_query')
+  return value.trim()
+}
+export function parseContentDiagnosticArguments(args) {
+  if (!Array.isArray(args) || args.some(value => typeof value !== 'string')) throw new Error('invalid_identifiers')
+  const flags = args.filter(value => value.startsWith('--weibo-query='))
+  if (flags.length > 1) throw new Error('invalid_weibo_query')
+  const identifiers = args.filter(value => !value.startsWith('--weibo-query='))
+  if (!identifiers.length || identifiers.length > 10 || identifiers.some(value => !UUID.test(value))) throw new Error('invalid_identifiers')
+  return { identifiers, options: { weiboQuery: boundedWeiboQuery(flags.length ? flags[0].slice('--weibo-query='.length) : '王一博') } }
+}
+export async function diagnoseContentSearch(pool, identifiers, { weiboQuery = '王一博' } = {}) {
   if (!Array.isArray(identifiers) || !identifiers.length || identifiers.length > 10 || identifiers.some(value => !UUID.test(value))) throw new Error('invalid_identifiers')
+  weiboQuery = boundedWeiboQuery(weiboQuery)
   let client,stage='connect',requestId=null,callId=null
   try {
     client = await pool.connect()
@@ -284,7 +299,7 @@ export async function diagnoseContentSearch(pool, identifiers) {
       idempotency_key = ANY($2::text[]) AS matched_idempotency_key
       FROM public.usage_requests WHERE id=ANY($1::uuid[]) OR idempotency_key=ANY($2::text[])
       ORDER BY reserved_at DESC LIMIT 12`, [identifiers, identifiers])
-    // Screenshot-specific follow-ups: exact known queries, same calling Key as
+    // Screenshot-specific follow-ups: exact selected query, same calling Key as
     // a matched request, at most three per platform within 48 hours. No free
     // browsing across tenants and no query values leave the report.
     stage='lookup_same_key_followups'
@@ -297,10 +312,10 @@ export async function diagnoseContentSearch(pool, identifiers) {
         AND followup.reserved_at>=now()-interval '48 hours'
         AND followup.acquisition_request->>'path' IN ('/api/v1/data/search','/api/v1/night-all/search/raw','/api/v1/search/raw')
         AND coalesce(followup.acquisition_request->'body'->>'query',followup.acquisition_request->'body'->>'keyword')
-          = CASE followup.platform WHEN 'weibo' THEN '王一博' ELSE '深夜热舞' END
+          = CASE followup.platform WHEN 'weibo' THEN $2::text ELSE '深夜热舞' END
         AND EXISTS(SELECT 1 FROM public.usage_requests matched WHERE matched.id=ANY($1::uuid[])
           AND matched.tenant_id=followup.tenant_id AND matched.consumer_id=followup.consumer_id AND matched.api_key_id=followup.api_key_id)
-    ) scoped WHERE rn<=3 ORDER BY reserved_at DESC LIMIT 6`, [requests.map(request=>request.id)])
+    ) scoped WHERE rn<=3 ORDER BY reserved_at DESC LIMIT 6`, [requests.map(request=>request.id), weiboQuery])
     const combined=[...requests,...recent.filter(row=>!requests.some(request=>request.id===row.id))]
     stage='read_database_clock'
     const {rows:[database]}=await client.query('SELECT clock_timestamp() AS database_now')
@@ -357,7 +372,7 @@ export async function diagnoseContentSearch(pool, identifiers) {
     }
     stage='finish_readonly'
     await client.query('ROLLBACK')
-    return {diagnosticRevision:'content-search-diagnostic.v7',...DIAGNOSTIC_BUILD,runtimeNow:new Date().toISOString(),databaseNow:time(database.database_now),requests:reports,matchedRequestCount:requests.length}
+    return {diagnosticRevision:'content-search-diagnostic.v8',...DIAGNOSTIC_BUILD,runtimeNow:new Date().toISOString(),databaseNow:time(database.database_now),requests:reports,matchedRequestCount:requests.length}
   } catch(error) {
     if(client) await client.query('ROLLBACK').catch(()=>{})
     if(error && typeof error==='object') Object.defineProperty(error,'diagnosticContext',{value:{stage,requestId,callId},configurable:true})
@@ -369,8 +384,8 @@ export function contentDiagnosticFailure(error) {
   const stages=['connect','begin_readonly','lookup_requests','lookup_same_key_followups','read_database_clock',
     'resolve_fixed_recipe','lookup_provider_calls','read_persistence_status','inspect_archive','summarize_request','finish_readonly']
   const codes=['missing_parameter','unsupported_request_field','invalid_parameter','invalid_page_size','invalid_platform','invalid_query']
-  const messages=['invalid_identifiers','database_url_required','diagnostic_contract_changed']
-  return {diagnosticRevision:'content-search-diagnostic.v7',...DIAGNOSTIC_BUILD,
+  const messages=['invalid_identifiers','invalid_weibo_query','database_url_required','diagnostic_contract_changed']
+  return {diagnosticRevision:'content-search-diagnostic.v8',...DIAGNOSTIC_BUILD,
     error:messages.includes(error?.message)?error.message:'diagnostic_read_failed',
     stage:stages.includes(context.stage)?context.stage:'initialization',
     errorType:allowed(error?.name,['AppError','TypeError','RangeError','Error']),
@@ -384,7 +399,8 @@ if (process.argv[1] && (process.argv[1]==='-' || import.meta.url===pathToFileURL
   try {
     if (!process.env.DATABASE_URL) throw new Error('database_url_required')
     pool=new pg.Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000})
-    console.log(JSON.stringify(await diagnoseContentSearch(pool,process.argv.slice(2)),null,2))
+    const {identifiers,options}=parseContentDiagnosticArguments(process.argv.slice(2))
+    console.log(JSON.stringify(await diagnoseContentSearch(pool,identifiers,options),null,2))
   } catch(error) {
     console.error(JSON.stringify(contentDiagnosticFailure(error)))
     process.exitCode=1

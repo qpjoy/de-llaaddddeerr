@@ -11,6 +11,66 @@ import { readFile, readdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 
 const clone = (value) => structuredClone(value);
+
+// Queries over tables that grow with history. Exported so scripts/pg-baseline.mjs
+// explains and times exactly the statements the store runs. Each branch of a
+// UNION is index-backed (009_history_indexes.sql); a single WHERE with OR across
+// these conditions made PostgreSQL scan all history on every transaction.
+const SOURCE_ID = `(document->>'sourceJobId') ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'`;
+export const SQL = {
+  // Live jobs, explicit job/key/attempt, the latest 100, and sources of live jobs.
+  // Results are loaded only for sources that live dependents still need.
+  atomicJobs: `WITH sources AS (
+      SELECT (document->>'sourceJobId')::uuid AS id FROM mx_device.jobs
+      WHERE mode=$1 AND status IN ('queued','running') AND ${SOURCE_ID}
+    ), ids AS (
+      SELECT id FROM mx_device.jobs WHERE mode=$1 AND status IN ('queued','running')
+      UNION SELECT id FROM mx_device.jobs WHERE id=$2
+      UNION SELECT id FROM mx_device.jobs WHERE mode=$1 AND request_key=$3
+      UNION (SELECT id FROM mx_device.jobs WHERE mode=$1 ORDER BY created_at DESC,id DESC LIMIT 100)
+      UNION SELECT id FROM sources
+      UNION SELECT job_id FROM mx_device.attempts WHERE id=$4
+    )
+    SELECT CASE WHEN j.id IN (SELECT id FROM sources) THEN j.document ELSE j.document - 'result' END AS document
+    FROM mx_device.jobs j WHERE j.mode=$1 AND j.id = ANY(ARRAY(SELECT id FROM ids))
+    ORDER BY j.created_at, j.id`,
+  atomicAttempts:
+    "SELECT document FROM mx_device.attempts WHERE mode=$1 AND (status IN ('running','yielded') OR id=$2)",
+  atomicCommands: `SELECT document FROM mx_device.execution_commands WHERE mode=$1 AND id = ANY(ARRAY(
+      SELECT id FROM mx_device.execution_commands WHERE status='running'
+      UNION SELECT id FROM mx_device.execution_commands WHERE job_id=$2
+      UNION SELECT id FROM mx_device.execution_commands WHERE attempt_id=$3
+      UNION SELECT c.id FROM mx_device.execution_commands c JOIN mx_device.jobs j ON j.id=c.job_id
+        WHERE j.mode=$1 AND j.status='running'
+    )) ORDER BY created_at, id`,
+  snapshotJobs: `SELECT document - 'result' AS document FROM mx_device.jobs WHERE mode=$1 AND id = ANY(ARRAY(
+      SELECT id FROM mx_device.jobs WHERE mode=$1 AND status IN ('queued','running')
+      UNION (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status NOT IN ('queued','running') ORDER BY created_at DESC,id DESC LIMIT 100)
+      UNION SELECT (document->>'sourceJobId')::uuid FROM mx_device.jobs WHERE mode=$1 AND status='queued' AND ${SOURCE_ID}
+    )) ORDER BY created_at, id`,
+  // Pick the latest 100 finished attempts from the index first; trimming large
+  // documents before the LIMIT used to detoast every attempt ever recorded.
+  snapshotAttempts: `(SELECT document - 'result' - 'lateEvidence' - 'checkpoints' AS document
+      FROM mx_device.attempts WHERE mode=$1 AND status IN ('running','yielded'))
+    UNION ALL
+    (SELECT a.document - 'result' - 'lateEvidence' - 'checkpoints' FROM (
+      SELECT id, created_at FROM mx_device.attempts
+      WHERE mode=$1 AND status NOT IN ('running','yielded') ORDER BY created_at DESC LIMIT 100
+    ) r JOIN mx_device.attempts a ON a.id=r.id ORDER BY r.created_at DESC)`,
+  snapshotCommands: `(SELECT document - 'receipt' - 'lateEvidence' AS document FROM mx_device.execution_commands
+      WHERE mode=$1 AND id = ANY(ARRAY(
+        SELECT id FROM mx_device.execution_commands WHERE status='running'
+        UNION SELECT c.id FROM mx_device.execution_commands c JOIN mx_device.jobs j ON j.id=c.job_id
+          WHERE j.mode=$1 AND j.status='running'
+      )) ORDER BY created_at, id)
+    UNION ALL
+    (SELECT c.document - 'receipt' - 'lateEvidence' FROM (
+      SELECT id, created_at FROM mx_device.execution_commands
+      WHERE mode=$1 AND status<>'running' AND job_id NOT IN (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status='running')
+      ORDER BY created_at DESC LIMIT 400
+    ) r JOIN mx_device.execution_commands c ON c.id=r.id ORDER BY r.created_at DESC)`,
+};
+
 export class MemoryStore {
   constructor(clock = Date.now) {
     this.clock = clock;
@@ -78,6 +138,23 @@ export class MemoryStore {
   async heartbeat(id, doc) {
     this.workers = this.workers.filter((w) => w.id !== id);
     this.workers.push({ id, at: this.clock(), ...doc });
+  }
+  async pruneEvents({ retentionMs, keepLatest }) {
+    return this.atomic((s, now) => {
+      const deleted = {};
+      for (const mode of ["sim", "real"]) {
+        const keep = new Set(
+          s.events.filter((e) => e.mode === mode).slice(-keepLatest),
+        );
+        const before = s.events.length;
+        s.events = s.events.filter(
+          (e) =>
+            e.mode !== mode || keep.has(e) || e.at >= now - retentionMs[mode],
+        );
+        deleted[mode] = before - s.events.length;
+      }
+      return deleted;
+    });
   }
   async ready() {
     return true;
@@ -170,6 +247,38 @@ export class PgStore {
   async close() {
     await this.pool.end();
   }
+  // Small batches outside the realm lock: store transactions only append events,
+  // so deleting old rows never blocks scheduling for long.
+  async pruneEvents({
+    retentionMs,
+    keepLatest,
+    batchSize = 5000,
+    maxBatches = 20,
+  }) {
+    const deleted = {};
+    for (const mode of ["sim", "real"]) {
+      deleted[mode] = 0;
+      const floor = (
+        await this.pool.query(
+          "SELECT seq FROM mx_device.events WHERE mode=$1 ORDER BY seq DESC OFFSET $2 LIMIT 1",
+          [mode, keepLatest - 1],
+        )
+      ).rows[0]?.seq;
+      if (floor == null) continue;
+      for (let i = 0; i < maxBatches; i++) {
+        const { rowCount } = await this.pool.query(
+          `DELETE FROM mx_device.events WHERE seq IN (
+            SELECT seq FROM mx_device.events WHERE mode=$1 AND seq<$2
+              AND at < (extract(epoch FROM clock_timestamp())*1000)::bigint - $3
+            ORDER BY at LIMIT $4)`,
+          [mode, floor, retentionMs[mode], batchSize],
+        );
+        deleted[mode] += rowCount;
+        if (rowCount < batchSize) break;
+      }
+    }
+    return deleted;
+  }
   async heartbeat(id, doc) {
     await this.pool.query(
       "INSERT INTO mx_device.workers VALUES($1,(extract(epoch FROM clock_timestamp())*1000)::bigint,$2) ON CONFLICT(id) DO UPDATE SET at=excluded.at,document=excluded.document",
@@ -209,22 +318,10 @@ export class PgStore {
         ])
       ).rows.map((r) => r.document);
       const jobs = (
-        await c.query(
-          `SELECT CASE WHEN id::text IN
-        (SELECT document->>'sourceJobId' FROM mx_device.jobs WHERE mode=$1 AND status IN ('queued','running'))
-        THEN document ELSE document - 'result' END AS document FROM mx_device.jobs WHERE mode=$1 AND (
-        status IN ('queued','running') OR id=$2 OR request_key=$3 OR
-        id IN (SELECT id FROM mx_device.jobs WHERE mode=$1 ORDER BY created_at DESC,id DESC LIMIT 100) OR
-        id::text IN (SELECT document->>'sourceJobId' FROM mx_device.jobs WHERE mode=$1 AND status IN ('queued','running')) OR
-        id IN (SELECT job_id FROM mx_device.attempts WHERE id=$4))`,
-          [mode, jobId, key, attemptId],
-        )
+        await c.query(SQL.atomicJobs, [mode, jobId, key, attemptId])
       ).rows.map((r) => r.document);
       const attempts = (
-        await c.query(
-          "SELECT document FROM mx_device.attempts WHERE mode=$1 AND (status IN ('running','yielded') OR id=$2)",
-          [mode, attemptId],
-        )
+        await c.query(SQL.atomicAttempts, [mode, attemptId])
       ).rows.map((r) => r.document);
       const resources = (
         await c.query(
@@ -269,10 +366,7 @@ export class PgStore {
         )
       ).rows.map((r) => r.document);
       const commands = (
-        await c.query(
-          "SELECT document FROM mx_device.execution_commands WHERE mode=$1 AND (status='running' OR job_id=$2 OR attempt_id=$3 OR job_id IN (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status='running'))",
-          [mode, jobId, attemptId],
-        )
+        await c.query(SQL.atomicCommands, [mode, jobId, attemptId])
       ).rows.map((r) => r.document);
       const state = {
           devices,
@@ -433,13 +527,7 @@ export class PgStore {
           "SELECT document FROM mx_device.devices WHERE mode=$1 ORDER BY id",
           [mode],
         ),
-        await client.query(
-          `SELECT document - 'result' AS document FROM mx_device.jobs WHERE mode=$1 AND (
-          status IN ('queued','running') OR
-          id IN (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status NOT IN ('queued','running') ORDER BY created_at DESC,id DESC LIMIT 100) OR
-          id::text IN (SELECT document->>'sourceJobId' FROM mx_device.jobs WHERE mode=$1 AND status='queued'))`,
-          [mode],
-        ),
+        await client.query(SQL.snapshotJobs, [mode]),
         await client.query(
           "SELECT seq,document FROM mx_device.events WHERE mode=$1 ORDER BY seq DESC LIMIT 100",
           [mode],
@@ -447,10 +535,7 @@ export class PgStore {
         await client.query(
           "SELECT id,at,document FROM mx_device.workers ORDER BY id",
         ),
-        await client.query(
-          "SELECT document - 'result' - 'lateEvidence' - 'checkpoints' AS document FROM mx_device.attempts WHERE mode=$1 AND status IN ('running','yielded') UNION ALL (SELECT document - 'result' - 'lateEvidence' - 'checkpoints' FROM mx_device.attempts WHERE mode=$1 AND status NOT IN ('running','yielded') ORDER BY created_at DESC LIMIT 100)",
-          [mode],
-        ),
+        await client.query(SQL.snapshotAttempts, [mode]),
         await client.query(
           "SELECT document FROM mx_device.resource_policies WHERE mode=$1",
           [mode],
@@ -479,10 +564,7 @@ export class PgStore {
           "SELECT document FROM mx_device.loop_policies WHERE mode=$1",
           [mode],
         ),
-        await client.query(
-          "SELECT document - 'receipt' - 'lateEvidence' AS document FROM mx_device.execution_commands WHERE mode=$1 AND (status='running' OR job_id IN (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status='running')) UNION ALL (SELECT document - 'receipt' - 'lateEvidence' FROM mx_device.execution_commands WHERE mode=$1 AND status<>'running' AND job_id NOT IN (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status='running') ORDER BY created_at DESC LIMIT 400)",
-          [mode],
-        ),
+        await client.query(SQL.snapshotCommands, [mode]),
         await client.query(
           "SELECT (extract(epoch FROM clock_timestamp())*1000)::bigint AS now",
         ),

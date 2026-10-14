@@ -8,6 +8,7 @@ import {
   policiesFor,
   matchesJob,
 } from "./scheduling.mjs";
+import { starved } from "./queue-order.mjs";
 
 import {
   APP_NAMES,
@@ -677,7 +678,7 @@ export function claim(s, now, mode, workerId) {
     j.status = "running";
     j.attemptCount++;
     j.lastDeviceId = d.id;
-    j.reason = `优先级 ${j.priority}，等待提升后 ${effectivePriority(j, now)}；预计 ${estimatedDuration(j) / 1000} 秒；整段会话独占执行`;
+    j.reason = `优先级 ${j.priority}，等待提升后 ${effectivePriority(j, now)}${starved(j, now) ? "（等待超过 5 分钟，按防饿死规则提前）" : ""}；预计 ${estimatedDuration(j) / 1000} 秒；整段会话独占执行`;
     if (poolAssignment) j.reason += `；${poolAssignment.reason}`;
     j.startedAt = now;
     d.state = "running";

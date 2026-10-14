@@ -30,7 +30,9 @@ const candidates = () => {
 export function findPostgres() {
   const bin = candidates().find(
     (dir) =>
-      dir && existsSync(join(dir, "initdb")) && existsSync(join(dir, "postgres")),
+      dir &&
+      existsSync(join(dir, "initdb")) &&
+      existsSync(join(dir, "postgres")),
   );
   if (!bin)
     throw Error(
@@ -72,13 +74,27 @@ async function waitReady(url, child, deadline) {
 
 /** Starts a throwaway cluster; returns {url, version, stop}. Durability is
  * deliberately off: this is for disposable tests and relative measurements. */
-export async function startTempPostgres({ maxConnections = 200, settings = {} } = {}) {
+export async function startTempPostgres({
+  maxConnections = 200,
+  settings = {},
+} = {}) {
   const { bin, version } = findPostgres();
   const dir = await mkdtemp(join(tmpdir(), "mx-device-pg-"));
   const data = join(dir, "data");
   const init = spawnSync(
     join(bin, "initdb"),
-    ["-D", data, "-U", "postgres", "-A", "trust", "-E", "UTF8", "--no-locale", "--no-sync"],
+    [
+      "-D",
+      data,
+      "-U",
+      "postgres",
+      "-A",
+      "trust",
+      "-E",
+      "UTF8",
+      "--no-locale",
+      "--no-sync",
+    ],
     { encoding: "utf8" },
   );
   if (init.status) {

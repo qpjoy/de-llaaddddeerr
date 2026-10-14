@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
-import { inspectContentArchive, diagnoseContentSearch, contentDiagnosticFailure, inspectDouyinEntryCoverage, inspectContentFillCoverage, inspectSingleCardSchema, isDouyinIncidentCardSource } from '../../server/ops/diagnose-content-search.mjs'
+import { inspectContentArchive, diagnoseContentSearch, contentDiagnosticFailure, inspectDouyinEntryCoverage, inspectContentFillCoverage, inspectSingleCardSchema, isDouyinIncidentCardSource, parseContentDiagnosticArguments } from '../../server/ops/diagnose-content-search.mjs'
 import { normalizeTikHubContentSearchRequest } from '../../server/contracts/tikhub-content-search.mjs'
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex')
 const archiveFor=payload=>{const bytes=Buffer.from(JSON.stringify(payload));return {body_bytes:bytes,body_size:bytes.length,body_sha256:digest(bytes),captured_at:new Date().toISOString()}}
@@ -24,7 +24,7 @@ test('offline diagnostic resolves supplied ledger or idempotency IDs, keeps foll
   const client={release(){sql.push('RELEASE')},async query(statement,args){
     sql.push(statement)
     if(statement.includes('idempotency_key = ANY')) {assert.deepEqual(args,[[identifier],[identifier]]);return {rows:[{id,platform:'kuaishou',status:'unknown',error_code:'external_platform_persistence_unknown',reserved_at:new Date(),acquisition_request:snapshot,matched_idempotency_key:true}]}}
-    if(statement.includes('row_number()')){assert.match(statement,/matched\.tenant_id=followup\.tenant_id/);assert.match(statement,/matched\.api_key_id=followup\.api_key_id/);assert.match(statement,/rn<=3/);assert.deepEqual(args,[[id]]);return {rows:[]}}
+    if(statement.includes('row_number()')){assert.match(statement,/matched\.tenant_id=followup\.tenant_id/);assert.match(statement,/matched\.api_key_id=followup\.api_key_id/);assert.match(statement,/rn<=3/);assert.deepEqual(args,[[id],'王一博']);return {rows:[]}}
     if(statement.includes('clock_timestamp')) return {rows:[{database_now:new Date()}]}
     if(statement.includes('FROM external_platform.provider_calls')) return {rows:[{id:callId,usage_request_id:id,operation:endpoint.operation,
       endpoint_key:endpoint.endpointKey,endpoint_version:endpoint.endpointVersion,contract_version:endpoint.endpointContractVersion,
@@ -68,7 +68,7 @@ test('PGlite diagnostic reads real schema and limits screenshot followups to the
   await db.query(`INSERT INTO control.external_platform_restricted_raw_responses VALUES($1,$2,$3,$4,$5)`,[callId,archive.body_bytes,archive.body_size,archive.body_sha256,archive.captured_at])
   const pool={connect:async()=>({query:(sql,args)=>db.query(sql,args),release(){}})}
   const report=await diagnoseContentSearch(pool,[requestId,ownBilibili,ownZhihu])
-  assert.equal(report.diagnosticRevision,'content-search-diagnostic.v7')
+  assert.equal(report.diagnosticRevision,'content-search-diagnostic.v8')
   assert.deepEqual(new Set(report.requests.map(row=>row.requestId)),new Set([requestId,ownWeibo,ownDouyin,ownBilibili,ownZhihu]))
   assert.deepEqual(new Set(report.requests.map(row=>row.platform)),new Set(['kuaishou','zhihu','douyin','weibo','bilibili']))
   assert.equal(report.requests.find(row=>row.requestId===requestId).evidence[0].archive.projection.state,'candidate_accepts')
@@ -76,6 +76,74 @@ test('PGlite diagnostic reads real schema and limits screenshot followups to the
   assert.equal(report.requests.find(row=>row.requestId===ownDouyin).recentSameKeyCandidate,true)
   assert.doesNotMatch(JSON.stringify(report),/private-/)
   assert.equal((await db.query('SELECT count(*)::int AS n FROM usage_requests')).rows[0].n,6)
+  const xiaoRows=Array.from({length:4},()=>randomUUID())
+  const seedXiao=async(id,{tenant=tenantId,consumer=consumerId,key=keyId,ageMs=0}={})=>db.query(`INSERT INTO usage_requests VALUES($1,$2,$3,$4,$5,'weibo','unknown',NULL,NULL,$6,$6,$7)`,
+    [id,tenant,consumer,key,randomUUID(),new Date(Date.now()-ageMs).toISOString(),JSON.stringify({path:'/api/v1/data/search',body:{platform:'weibo',query:'肖战',pageSize:20}})])
+  for(const [index,id] of xiaoRows.entries())await seedXiao(id,{ageMs:(index+1)*1000})
+  await seedXiao(randomUUID(),{key:randomUUID()})
+  await seedXiao(randomUUID(),{consumer:randomUUID()})
+  await seedXiao(randomUUID(),{tenant:randomUUID()})
+  await seedXiao(randomUUID(),{ageMs:49*3600000})
+  const custom=await diagnoseContentSearch(pool,[requestId,ownBilibili,ownZhihu],{weiboQuery:'  肖战  '})
+  assert.deepEqual(new Set(custom.requests.map(row=>row.requestId)),new Set([requestId,ownDouyin,ownBilibili,ownZhihu,...xiaoRows.slice(0,3)]))
+  assert.ok(custom.requests.filter(row=>xiaoRows.includes(row.requestId)).every(row=>row.recentSameKeyCandidate===true))
+  assert.equal(custom.requests.some(row=>row.requestId===ownWeibo),false,'custom query does not broaden the default keyword')
+  assert.doesNotMatch(JSON.stringify(custom),/肖战|王一博|private-/,'the query is used for lookup only, never copied to diagnostic output')
+  const unchangedDefault=await diagnoseContentSearch(pool,[requestId,ownBilibili,ownZhihu])
+  assert.deepEqual(new Set(unchangedDefault.requests.map(row=>row.requestId)),new Set([requestId,ownWeibo,ownDouyin,ownBilibili,ownZhihu]))
+  const parameterized=await diagnoseContentSearch(pool,[requestId,ownBilibili,ownZhihu],{weiboQuery:"private-query' OR true --"})
+  assert.deepEqual(new Set(parameterized.requests.map(row=>row.requestId)),new Set([requestId,ownDouyin,ownBilibili,ownZhihu]))
+  assert.doesNotMatch(JSON.stringify(parameterized),/private-|OR true/)
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM usage_requests')).rows[0].n,14)
+})
+
+test('v8 CLI accepts UUID identities and one bounded keyword option while preserving the legacy default',()=>{
+  const ids=[randomUUID(),randomUUID()]
+  assert.deepEqual(parseContentDiagnosticArguments(ids),{identifiers:ids,options:{weiboQuery:'王一博'}})
+  assert.deepEqual(parseContentDiagnosticArguments([ids[0],'--weibo-query=  肖战  ',ids[1]]),{identifiers:ids,options:{weiboQuery:'肖战'}})
+  assert.deepEqual(parseContentDiagnosticArguments(['--weibo-query='+ '词'.repeat(500),ids[0]]).options,{weiboQuery:'词'.repeat(500)})
+  for(const argv of [null,{},[123],[],Array.from({length:11},()=>randomUUID()),['not-a-uuid'],[ids[0],'--unknown=private-secret'],[ids[0],'--weibo-query'],
+    [ids[0],'--weibo-query=肖战','--weibo-query=王一博'],[ids[0],'--weibo-query='],[ids[0],'--weibo-query=  '],
+    [ids[0],'--weibo-query='+ '词'.repeat(501)],[ids[0],'--weibo-query=private-\0-secret']]) {
+    let error
+    try{parseContentDiagnosticArguments(argv)}catch(cause){error=cause}
+    assert.ok(error instanceof Error)
+    assert.doesNotMatch(JSON.stringify(contentDiagnosticFailure(error)),/private-|肖战|王一博/)
+  }
+})
+
+test('v8 direct diagnostic keyword validation fails before any database access and never echoes the input',async()=>{
+  let connects=0
+  const pool={connect(){connects++;throw new Error('Unexpected database access')}}
+  for(const weiboQuery of [null,123,{},'','  ','词'.repeat(501),'private-\0-secret']) {
+    let error
+    try{await diagnoseContentSearch(pool,[randomUUID()],{weiboQuery})}catch(cause){error=cause}
+    assert.equal(error.message,'invalid_weibo_query')
+    assert.doesNotMatch(JSON.stringify(contentDiagnosticFailure(error)),/private-|词词/)
+  }
+  assert.equal(connects,0)
+})
+
+test('v8 fixed transport/proxy/body errors remain distinguishable without exposing arbitrary provider errors',async()=>{
+  const endpoint=normalizeTikHubContentSearchRequest({platform:'kuaishou',query:'fixture'})
+  for(const code of ['upstream_transport_error','upstream_deadline_exceeded','upstream_body_read_failed','upstream_response_too_large',
+    'invalid_upstream_encoding','invalid_upstream_json','proxy_route_unavailable','proxy_routes_unreachable','private://error/body']) {
+    const requestId=randomUUID(),callId=randomUUID(),snapshot={path:'/api/v1/data/search',body:{platform:'kuaishou',query:'private-query'}}
+    const client={release(){},async query(sql){
+      if(sql.includes('idempotency_key = ANY'))return{rows:[{id:requestId,platform:'kuaishou',status:'unknown',error_code:code,reserved_at:new Date(),acquisition_request:snapshot}]}
+      if(sql.includes('clock_timestamp'))return{rows:[{database_now:new Date()}]}
+      if(sql.includes('FROM external_platform.provider_calls'))return{rows:[{id:callId,usage_request_id:requestId,operation:endpoint.operation,
+        endpoint_key:endpoint.endpointKey,endpoint_version:endpoint.endpointVersion,contract_version:endpoint.endpointContractVersion,
+        outcome:'unknown',error_code:code,http_status:null,business_code:null,billed:null,started_at:new Date(),completed_at:new Date(),acquisition_request:snapshot}]}
+      if(sql.includes('AS operational_archive'))return{rows:[{operational_archive:false,archive_objects:0,ingest_job:false}]}
+      return{rows:[]}
+    }}
+    const report=await diagnoseContentSearch({connect:async()=>client},[requestId]),expected=code.startsWith('private:')?'other':code
+    assert.equal(report.requests[0].errorCode,expected)
+    assert.equal(report.requests[0].evidence[0].errorCode,expected)
+    assert.equal(report.requests[0].evidence[0].archive.state,'archive_missing')
+    assert.doesNotMatch(JSON.stringify(report),/private-|private:\/\//)
+  }
 })
 
 

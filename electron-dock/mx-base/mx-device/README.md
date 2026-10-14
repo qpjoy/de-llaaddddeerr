@@ -166,6 +166,25 @@ node tests/acceptance.mjs .runtime/config.json .runtime/acceptance-report.json
 
 不提供测试数据库地址时，PostgreSQL 集成用例明确标为 skipped，不应把普通 `npm test` 说成数据库并发验收。验收脚本会创建模拟任务、注入模拟断线，需在空闲的专用演示实例运行。
 
+**本地可复现的 PG 测试与压测**（不需要预先运行数据库）：
+
+```bash
+# 在临时目录 initdb 一个一次性 PostgreSQL（只监听 127.0.0.1 随机端口），跑全部测试后删除
+npm run test:pg
+# 也可只跑指定文件
+npm run test:pg -- tests/postgres.test.mjs
+# 历史数据压测：100 台满载在线状态 + 逐级灌入历史，输出 EXPLAIN 与事务耗时
+npm run bench:pg -- --jobs 0,5000,20000,60000 --iterations 20 --out report.json
+```
+
+脚本依次在 `MX_DEVICE_PG_BIN`、`PATH`、Homebrew 的 `postgresql@*`、Postgres.app、`/usr/lib/postgresql/*` 中查找同时含 `initdb` 和 `postgres` 的目录；找不到时直接失败（不跳过），可用 `brew install postgresql@17` 安装，或设置 `MX_DEVICE_PG_BIN`。临时库关闭 fsync，只用于测试和相对比较；压测会先检查磁盘余量。两者都不连接项目数据库、手机或其他服务。2026-10-15 的压测结果见 [V2-0 基线](docs/v2-0-baseline-2026-10-15.md)。
+
+**事件保留**：Worker 每 10 分钟分批清理事件时间线（每批 5000 行，每轮最多 10 万行），默认模拟 7 天、真实 90 天，并始终保留每个运行域最新 1000 条。Job、Attempt、指令回执和迟到证据不在清理范围内。可在 worker 配置（Compose 中为 `.runtime/worker.json`）中调整，非法值会阻止 Worker 启动：
+
+```json
+{ "eventRetention": { "simDays": 7, "realDays": 90, "keepLatest": 1000 } }
+```
+
 - [演示脚本与通过标准](docs/demo.md)
 - [调度模型、边界与扩展路线](docs/architecture.md)
 - [API 与 mx-rig 接入边界](docs/api.md)

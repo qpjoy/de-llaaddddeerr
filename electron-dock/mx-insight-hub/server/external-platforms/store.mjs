@@ -4281,7 +4281,12 @@ export class PostgresExternalPlatformStore {
           randomUUID(), object.kind === 'response' ? 'response' : 'item',
           object.marketplace, delivery.operation, object.endpointVersion,
           capturedDate, object.archivePath, object.envelopePointer || '$', object.sourceKey,
-          object.payloadSha256, object.rawPayload, callId, ordinal,
+          object.payloadSha256,
+          // node-postgres maps JS null to SQL NULL. A response can explicitly
+          // lack a safe JSON projection while its exact bytes remain archived;
+          // encode that absence as JSON null without relaxing item constraints.
+          object.kind === 'response' && object.rawPayload === null ? 'null' : object.rawPayload,
+          callId, ordinal,
           this.providerKey,
         ],
       )

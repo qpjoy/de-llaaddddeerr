@@ -17,19 +17,71 @@ const METRIC_FIELDS = Object.freeze({
   bookmarks: ['collect_count', 'collected_count'],
 })
 const METRIC_OUTPUT = { likes: 'like_count', comments: 'comment_count', shares: 'forward_count', views: 'view_count', bookmarks: 'bookmark_count' }
+// Exact candidates read by Night-All's normalizer, inspected independently of
+// its first-object selection. Coverage never changes the business projection.
+const NESTED_METRIC_CONTAINERS = ['stats', 'statistics', 'postStats', 'interact_info', 'interactInfo', 'counts']
+const NESTED_METRIC_FIELDS = {
+  likes: ['like_count', 'likedCount', 'digg_count'], comments: ['comment_count', 'commentCount'],
+  shares: ['share_count', 'shareCount'], bookmarks: ['collect_count', 'collectCount', 'collect_count_v2'],
+  views: ['view_count', 'viewCount', 'viewCountTotal', 'play_count', 'playCount', 'video_play_count', 'videoPlayCount',
+    'video_view_count', 'videoViewCount', 'read_count', 'readCount', 'reads_count', 'readsCount', 'views_count', 'viewsCount',
+    'views', 'impression_count', 'impressionCount', 'display_count', 'displayCount']
+    .flatMap(field => [field, ...['count', 'value', 'total'].map(child => `${field}.${child}`)]),
+}
+const RAW_HTML_FIELDS = ['raw_html', 'rawHtml', 'html', 'html_content', 'htmlContent', 'raw_data', 'rawData', 'raw_response', 'rawResponse', 'raw']
+const kinds = () => ({ missing: 0, null: 0, object: 0, array: 0, string: 0, number: 0, boolean: 0, other: 0 })
+const valueAt = (value, path) => path.split('.').reduce((value, key) => value?.[key], value)
+const recordKind = (counts, value) => { const type = kind(value); counts[Object.hasOwn(counts, type) ? type : 'other']++ }
+function recordMetric(counts, value) {
+  counts.present++
+  if ((typeof value === 'number' || typeof value === 'string' && value.trim())
+    && Number.isFinite(Number(value)) && Number(value) >= 0) {
+    counts.numeric++
+    counts[Number(value) === 0 ? 'zero' : 'nonzero']++
+  }
+}
+function rawHtmlCoverage(payload, rows) {
+  const paths = {}
+  for (const prefix of ['payload', 'payload.data', 'payload.data.parsed_data']) for (const field of RAW_HTML_FIELDS) {
+    const value = valueAt({ payload }, `${prefix}.${field}`)
+    paths[`${prefix}.${field}`] = { present: value !== undefined, kind: kind(value) }
+  }
+  const rowFields = {}
+  for (const row of rows) for (const field of RAW_HTML_FIELDS) {
+    const value = row?.[field]
+    if (value === undefined) continue
+    const counts = rowFields[field] ||= { present: 0, kindCounts: kinds() }
+    counts.present++; recordKind(counts.kindCounts, value)
+  }
+  return { scope: 'fixed_candidates_only', rowCandidates: RAW_HTML_FIELDS, rowsExamined: rows.length, paths, rowFields }
+}
 
 // Fixed known field names and aggregate counts only. Bound work/output even for
 // a malformed oversized archive; never expose metric values, URLs or row IDs.
 export function inspectWeiboMetricCoverage(payload, capturedAt) {
   const rows = payload?.data?.parsed_data?.results
-  if (!Array.isArray(rows)) return { available: false, reason: 'results_not_array' }
-  const selected = rows.slice(0, 100)
+  const selected = Array.isArray(rows) ? rows.slice(0, 100) : []
+  const rawHtmlCandidates = rawHtmlCoverage(payload, selected)
+  if (!Array.isArray(rows)) return { available: false, reason: 'results_not_array', rawHtmlCandidates }
+  const knownNestedMetrics = { scope: 'fixed_candidates_only', candidateFields: NESTED_METRIC_FIELDS,
+    containers: Object.fromEntries(NESTED_METRIC_CONTAINERS.map(name => [name, { kindCounts: kinds(), fields: {} }])) }
   const fields = {}
   for (const paths of Object.values(METRIC_FIELDS)) for (const path of paths) fields[path] = { present: 0, numeric: 0, zero: 0 }
   const projected = Object.fromEntries(Object.keys(METRIC_FIELDS).map(name => [name, { provided: 0, zero: 0, missing: 0 }]))
   const urls = { provided: 0, missing: 0, protocolRelativePostUrl: 0 }
   let invalidRows = 0
   for (const row of selected) {
+    for (const [name, coverage] of Object.entries(knownNestedMetrics.containers)) {
+      const container = row?.[name]
+      recordKind(coverage.kindCounts, container)
+      if (!container || typeof container !== 'object' || Array.isArray(container)) continue
+      for (const field of Object.values(NESTED_METRIC_FIELDS).flat()) {
+        const value = valueAt(container, field)
+        if (value === undefined) continue
+        const counts = coverage.fields[field] ||= { present: 0, numeric: 0, zero: 0, nonzero: 0 }
+        recordMetric(counts, value)
+      }
+    }
     for (const [path, counts] of Object.entries(fields)) {
       const value = path.split('.').reduce((value, key) => value?.[key], row)
       if (value !== undefined) counts.present++
@@ -49,7 +101,8 @@ export function inspectWeiboMetricCoverage(payload, capturedAt) {
     }
     urls[output.url ? 'provided' : 'missing']++
   }
-  return { available: true, rowsExamined: selected.length, truncated: rows.length > selected.length, invalidRows, fields, projected, urls }
+  return { available: true, rowsExamined: selected.length, truncated: rows.length > selected.length,
+    invalidRows, fields, projected, urls, knownNestedMetrics, rawHtmlCandidates }
 }
 
 // Deliberately no raw text, field values, arbitrary keys, URLs or exception messages

@@ -84,7 +84,79 @@ test('Weibo field coverage is bounded, value-free and distinguishes original zer
   const bounded = inspectWeiboMetricCoverage({ data: { parsed_data: { results: Array(101).fill(native) } } }, capturedAt)
   assert.equal(bounded.rowsExamined, 100)
   assert.equal(bounded.truncated, true)
-  assert.deepEqual(inspectWeiboMetricCoverage({}, capturedAt), { available: false, reason: 'results_not_array' })
+  const missing = inspectWeiboMetricCoverage({}, capturedAt)
+  assert.equal(missing.available, false)
+  assert.equal(missing.reason, 'results_not_array')
+  assert.deepEqual(missing.rawHtmlCandidates.paths['payload.data.raw_html'], { present: false, kind: 'missing' })
+})
+
+test('Weibo nested coverage inspects all six declared stats containers without changing zeros in the projection', () => {
+  const containers = ['stats', 'statistics', 'postStats', 'interact_info', 'interactInfo', 'counts']
+  const rows = containers.map((name, index) => ({ ...row,
+    interaction: { like_count: 0, comment_count: 0, repost_count: 0 },
+    [name]: { like_count: String(987654321 + index), commentCount: 0, shareCount: '0', collect_count_v2: null,
+      view_count: { count: '123456789' }, private_metric: 'private-value' },
+  }))
+  const report = inspectWeiboMetricCoverage({ data: { parsed_data: { results: rows } } }, capturedAt)
+  assert.deepEqual(report.projected.likes, { provided: 6, zero: 6, missing: 0 })
+  assert.deepEqual(Object.keys(report.knownNestedMetrics.containers), containers)
+  assert.equal(report.knownNestedMetrics.scope, 'fixed_candidates_only')
+  for (const name of containers) {
+    const coverage = report.knownNestedMetrics.containers[name]
+    assert.equal(coverage.kindCounts.object, 1)
+    assert.equal(coverage.kindCounts.missing, 5)
+    assert.deepEqual(coverage.fields.like_count, { present: 1, numeric: 1, zero: 0, nonzero: 1 })
+    assert.deepEqual(coverage.fields.commentCount, { present: 1, numeric: 1, zero: 1, nonzero: 0 })
+    assert.deepEqual(coverage.fields.shareCount, { present: 1, numeric: 1, zero: 1, nonzero: 0 })
+    assert.deepEqual(coverage.fields.collect_count_v2, { present: 1, numeric: 0, zero: 0, nonzero: 0 })
+    assert.deepEqual(coverage.fields['view_count.count'], { present: 1, numeric: 1, zero: 0, nonzero: 1 })
+    assert.equal(coverage.fields.private_metric, undefined)
+  }
+  assert.doesNotMatch(JSON.stringify(report), /private-|private_metric|98765432|123456789|5351726865449966/)
+})
+
+test('Weibo raw/HTML candidate coverage reports only fixed kinds, even without parsed results, and never parses HTML', () => {
+  const payload = { raw_html: '<div>private-body and 987654321 likes</div>', data: {
+    raw_data: { 'private-dynamic-key': 'private-value' }, html: ['private-fragment'], unknown_html: 'private-alternative',
+    parsed_data: { raw_response: null, results: [{ ...row, html_content: '<p>private-row-body</p>',
+      unknown_html: 'private-row-alternative' }] },
+  } }
+  const report = inspectWeiboMetricCoverage(payload, capturedAt)
+  assert.equal(report.rawHtmlCandidates.scope, 'fixed_candidates_only')
+  assert.deepEqual(report.rawHtmlCandidates.paths['payload.raw_html'], { present: true, kind: 'string' })
+  assert.deepEqual(report.rawHtmlCandidates.paths['payload.data.raw_data'], { present: true, kind: 'object' })
+  assert.deepEqual(report.rawHtmlCandidates.paths['payload.data.html'], { present: true, kind: 'array' })
+  assert.deepEqual(report.rawHtmlCandidates.paths['payload.data.parsed_data.raw_response'], { present: true, kind: 'null' })
+  assert.equal(report.rawHtmlCandidates.rowFields.html_content.present, 1)
+  assert.equal(report.rawHtmlCandidates.rowFields.html_content.kindCounts.string, 1)
+  assert.deepEqual(report.projected.likes, { provided: 0, zero: 0, missing: 1 })
+  const withoutResults = inspectWeiboMetricCoverage({ data: { raw_html: '<p>private-body</p>' } }, capturedAt)
+  assert.equal(withoutResults.available, false)
+  assert.deepEqual(withoutResults.rawHtmlCandidates.paths['payload.data.raw_html'], { present: true, kind: 'string' })
+  assert.doesNotMatch(JSON.stringify([report, withoutResults]), /private-|unknown_html|987654321|5351726865449966/)
+})
+
+test('Weibo new coverage is bounded at 100 rows and distinguishes malformed containers and invalid numbers from genuine zero', () => {
+  const invalid = { ...row, stats: { like_count: true, comment_count: ' ', share_count: -1, view_count: 'NaN' },
+    statistics: null, postStats: [], interact_info: 'private-string', interactInfo: false, counts: 123,
+    html: 'private-row-html' }
+  const finalRow = { ...row, stats: { like_count: 987654321 }, raw_html: 'private-beyond-bound' }
+  const report = inspectWeiboMetricCoverage({ data: { parsed_data: { results: [...Array(100).fill(invalid), finalRow] } } }, capturedAt)
+  assert.equal(report.rowsExamined, 100)
+  assert.equal(report.truncated, true)
+  const coverage = report.knownNestedMetrics.containers
+  for (const name of ['like_count', 'comment_count', 'share_count', 'view_count']) {
+    assert.deepEqual(coverage.stats.fields[name], { present: 100, numeric: 0, zero: 0, nonzero: 0 })
+  }
+  assert.equal(coverage.statistics.kindCounts.null, 100)
+  assert.equal(coverage.postStats.kindCounts.array, 100)
+  assert.equal(coverage.interact_info.kindCounts.string, 100)
+  assert.equal(coverage.interactInfo.kindCounts.boolean, 100)
+  assert.equal(coverage.counts.kindCounts.number, 100)
+  assert.equal(report.rawHtmlCandidates.rowsExamined, 100)
+  assert.equal(report.rawHtmlCandidates.rowFields.html.present, 100)
+  assert.equal(report.rawHtmlCandidates.rowFields.raw_html, undefined)
+  assert.doesNotMatch(JSON.stringify(report), /private-|987654321|5351726865449966/)
 })
 
 const pgliteModule = process.env.MX_INSIGHT_TEST_PGLITE_MODULE

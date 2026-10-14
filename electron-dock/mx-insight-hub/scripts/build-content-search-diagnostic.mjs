@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto'
 const sha=source=>createHash('sha256').update(source).digest('hex')
 const parser=await readFile(new URL('../server/contracts/tikhub-content-search.mjs',import.meta.url))
 const diagnostic=await readFile(new URL('../server/ops/diagnose-content-search.mjs',import.meta.url))
-const metadata={implementation:'bundled_local_candidate',parserSha256:sha(parser),diagnosticSha256:sha(diagnostic)}
+const weiboDiagnostic=await readFile(new URL('../server/ops/diagnose-weibo-search.mjs',import.meta.url))
+const metadata={implementation:'bundled_local_candidate',parserSha256:sha(parser),diagnosticSha256:sha(diagnostic),weiboDiagnosticSha256:sha(weiboDiagnostic)}
 const result=await build({entryPoints:[new URL('../server/ops/diagnose-content-search.mjs',import.meta.url).pathname],
   bundle:true,write:false,platform:'node',format:'esm',target:'node22',external:['pg'],
   define:{__CONTENT_SEARCH_DIAGNOSTIC_BUILD__:JSON.stringify(metadata)},
@@ -18,5 +19,5 @@ const result=await build({entryPoints:[new URL('../server/ops/diagnose-content-s
 if(result.outputFiles.length!==1) throw new Error('unexpected_bundle_output')
 const source=result.outputFiles[0].text
 if(Buffer.byteLength(source)>2097152) throw new Error('bundle_too_large')
-process.stderr.write(JSON.stringify({diagnosticRevision:'content-search-diagnostic.v7',parserSha256:sha(parser),diagnosticSha256:sha(diagnostic),bundleSha256:sha(source),bundleBytes:Buffer.byteLength(source)})+'\n')
+process.stderr.write(JSON.stringify({diagnosticRevision:'content-search-diagnostic.v8',...metadata,bundleSha256:sha(source),bundleBytes:Buffer.byteLength(source)})+'\n')
 process.stdout.write(source)

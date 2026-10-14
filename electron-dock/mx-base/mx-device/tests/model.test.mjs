@@ -15,6 +15,7 @@ import {
   origin,
 } from "../server/model.mjs";
 import { simulatedResult } from "../server/transport.mjs";
+import { compareJobs, effectivePriority } from "../server/queue-order.mjs";
 const state = () => ({ devices: [], jobs: [], attempts: [], events: [] });
 const sim = (s, name = "A") => register(s, 1000, "sim", { name });
 const job = (s, key, extra = {}) =>
@@ -55,9 +56,58 @@ test("priority is non-preemptive, FIFO tie break, aging prevents low-priority st
   assert.equal(a.status, "succeeded");
   const last = structuredClone(s.attempts.at(-1));
   finish(s, 2000, last, { result: {} });
-  job(s, "later-high", { priority: 1 });
-  s.jobs.at(-1).createdAt = 211000;
-  assert.equal(claim(s, 212000, "sim", "w").job.id, b.id);
+  const laterHigh = job(s, "later-high", { priority: 1 });
+  laterHigh.createdAt = 211000;
+  // Aging lifts at most three levels: after 3.5 minutes the background job is
+  // effective priority 5, so fresh top-priority work still goes first.
+  const high = structuredClone(claim(s, 212000, "sim", "w"));
+  assert.equal(high.job.id, laterHigh.id);
+  finish(s, 213000, high.attempt, { result: {} });
+  // Past the 5-minute starvation bound it is served before new top-priority arrivals.
+  const fresh = job(s, "fresh-high", { priority: 1 });
+  fresh.createdAt = 300500;
+  const rescued = claim(s, 301000, "sim", "w");
+  assert.equal(rescued.job.id, b.id);
+  assert.match(rescued.job.reason, /防饿死/);
+});
+test("priority aging is bounded and the queue order stays consistent", () => {
+  const at = (priority, createdAt, estimatedDurationMs = 15000) => ({
+    id: `${priority}-${createdAt}`,
+    priority,
+    createdAt,
+    estimatedDurationMs,
+  });
+  const now = 1000000;
+  assert.equal(effectivePriority(at(9, now - 29999), now), 9);
+  assert.equal(effectivePriority(at(9, now - 30000), now), 8);
+  assert.equal(
+    effectivePriority(at(9, now - 120000), now),
+    6,
+    "capped at 3 levels",
+  );
+  assert.equal(effectivePriority(at(9, now - 299999), now), 6);
+  assert.equal(
+    effectivePriority(at(9, now - 300000), now),
+    1,
+    "starvation bound",
+  );
+  assert.equal(effectivePriority(at(2, now - 90000), now), 1);
+  // Exhaustive check on a mixed queue: the comparator is a strict weak order.
+  const rows = [];
+  for (const priority of [1, 2, 5, 8, 9])
+    for (const age of [
+      0, 10000, 29999, 30000, 95000, 200000, 299999, 300000, 600000,
+    ])
+      for (const est of [5000, 60000]) rows.push(at(priority, now - age, est));
+  const cmp = compareJobs(now);
+  for (const a of rows) {
+    assert.equal(cmp(a, a), 0);
+    for (const b of rows) {
+      assert.equal(Math.sign(cmp(a, b)) + Math.sign(cmp(b, a)), 0);
+      if (cmp(a, b) < 0)
+        for (const c of rows) if (cmp(b, c) < 0) assert(cmp(a, c) < 0);
+    }
+  }
 });
 test("idempotency accepts exact replay and rejects altered arguments", () => {
   const s = state();
