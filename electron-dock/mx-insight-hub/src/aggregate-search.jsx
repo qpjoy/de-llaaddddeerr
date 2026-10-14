@@ -61,8 +61,8 @@ function MultiFilter({ label, allLabel, options, values, onChange, disabled, ico
 export function DataSearchPage({ aggregateSession, session, token }) {
   const [mode, setMode] = useState('aggregate'), [wechatVisited, setWechatVisited] = useState(false)
   const canWechat = session?.platformAdmin || productAllowed('/data-products/wechat-search', session?.productScopes || [])
-  return <div className="mih-aggregate"><PageHeading title="数据搜索" description="用关键词、平台和条目类型搜索 Hub 数据；同一 API 可供下游产品调用。" />
-    {canWechat ? <nav className="mih-source-section-tabs" aria-label="数据搜索方式"><button type="button" aria-pressed={mode === 'aggregate'} onClick={() => setMode('aggregate')}>跨平台 / 已收录</button><button type="button" aria-pressed={mode === 'wechat'} onClick={() => { setMode('wechat'); setWechatVisited(true) }}>微信专项搜索</button></nav> : null}
+  return <div className="mih-aggregate"><PageHeading title="聚合搜索" description="用关键词、平台和条目类型搜索 Hub 数据；同一 API 可供下游产品调用。" />
+    {canWechat ? <nav className="mih-source-section-tabs" aria-label="聚合搜索方式"><button type="button" aria-pressed={mode === 'aggregate'} onClick={() => setMode('aggregate')}>跨平台 / 已收录</button><button type="button" aria-pressed={mode === 'wechat'} onClick={() => { setMode('wechat'); setWechatVisited(true) }}>微信专项搜索</button></nav> : null}
     <div hidden={canWechat && mode !== 'aggregate'}><AggregateSearchPanel session={aggregateSession} showCatalog={session?.kind === 'admin-token'} /></div>
     {canWechat && wechatVisited ? <div hidden={mode !== 'wechat'}><p>独立查询公众号、文章和视频；每页手动发送，不参与跨平台扇出。已返回数据不等于已入库。</p><ProductApiConsole product={productForPath('/data-products/wechat-search')} token={token} /></div> : null}
   </div>

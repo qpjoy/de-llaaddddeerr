@@ -8,9 +8,10 @@ import { requestUuid } from './request-id.js'
 import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 import { copyText } from './open-capabilities.js'
 import { REQUEST_FORMATS, requestSnippet } from './request-snippets.js'
+import { ProductViewTabs, ProductManagement } from './product-management.jsx'
 import { enterpriseAccessIssues, enterpriseConsoleEndpoints, enterpriseConsoleFields, enterpriseConsoleBody, enterpriseRequestIdentity } from './enterprise-console.js'
 
-export function EnterprisePage({ token, query, onUnauthorized }) {
+export function EnterprisePage({ token, query, session, onUnauthorized }) {
   const [apiKey] = useDemoApiKey()
   const access = useDemoAccessSnapshot()
   const issues = enterpriseAccessIssues(access)
@@ -87,10 +88,9 @@ export function EnterprisePage({ token, query, onUnauthorized }) {
   const filtered = endpoints.filter(item => !category || item.category === category)
   return <div className="mih-page mih-enterprise-page">
     <header className="mih-page-header"><div><h1>企业数据</h1><p>企业检索、工商、风险与关联信息 · 使用当前 Hub Key 调用</p></div><a className="qp-button qp-button--outline" href="#/docs?path=/docs/enterprise">接口文档</a></header>
-    <nav className="mih-source-section-tabs" aria-label="企业数据视图">
-      <button type="button" aria-pressed={tab === 'debug'} onClick={() => setTab('debug')}>接口调试</button>
-      <button type="button" aria-pressed={tab === 'integration'} onClick={() => setTab('integration')}>接入指南</button>
-    </nav>
+    <ProductViewTabs label="企业数据" value={tab} onChange={setTab} session={session} guide="integration" />
+    {tab === 'management' ? <ProductManagement session={session} path="/data-products/enterprise" label="企业数据" /> : null}
+    <section hidden={tab !== 'product'} className="qp-panel mih-panel"><h2>企业查询结果</h2><p>在接口调试中发送查询后，在这里查看同一份响应。报告处理状态与返回字段以所选接口为准。</p>{result ? <><p>请求：{result.evidence?.requestId || error?.requestId || '未取得'} · 状态：{result.payload?.meta?.resultState || '见响应'}</p><pre className="mih-api-response">{JSON.stringify(result.payload, null, 2)}</pre></> : <p>尚未发送查询。</p>}</section>
     <div style={{ display: tab === 'integration' ? undefined : 'none' }} className="qp-panel mih-panel">
       <h2>下游应用接入 Hub</h2><p>使用已授权 enterprise + enterprise.query 的 Hub Live API Key，按接口文档构建 JSON 请求。Hub 处理平台认证并保留交付结果，应用不需要其他平台密钥。</p>
       <p>在调试页选择接口、填写参数并复制 cURL 或 JavaScript 示例，替换 Hub Key 即可接入。接口说明、响应字段和 OpenAPI 保留在「接口文档」。</p>

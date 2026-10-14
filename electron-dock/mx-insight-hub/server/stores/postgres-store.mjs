@@ -6281,6 +6281,37 @@ export class PostgresStore {
     return media?.type === 'image' && typeof media.url === 'string' && media.url ? media.url : null
   }
 
+  async strategySearchUsage({ from, to, paths, timeZone }) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN READ ONLY')
+      await client.query("SET LOCAL statement_timeout = '10000ms'")
+      const { rows } = await client.query(
+        `SELECT to_char(request.created_at AT TIME ZONE $4, 'YYYY-MM-DD') AS day,
+                request.acquisition_request ->> 'path' AS path, request.platform,
+                count(*)::bigint AS requests,
+                count(*) FILTER (WHERE EXISTS (
+                  SELECT 1 FROM serving.connector_calls call WHERE call.usage_request_id = request.id
+                ))::bigint AS "nightAllRequests"
+           FROM usage_requests request
+          WHERE request.created_at >= $1 AND request.created_at < $2
+            AND request.acquisition_request ->> 'path' = ANY($3::text[])
+          GROUP BY 1, 2, 3 ORDER BY 1, 2, 3`,
+        [from, to, paths, timeZone],
+      )
+      await client.query('COMMIT')
+      return rows
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      if (error.code === '57014') {
+        throw new AppError(503, 'strategy_search_usage_timeout', 'Request statistics timed out; select fewer days')
+      }
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
   async usageDaily({ tenantId, from, to }) {
     const { rows } = await this.pool.query(`SELECT to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD') AS day,
       count(*)::integer AS requests, count(*) FILTER (WHERE status='committed')::integer AS committed

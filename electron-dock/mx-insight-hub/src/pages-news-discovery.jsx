@@ -6,6 +6,7 @@ import { newsAccessIssue } from './demo-access.js'
 import { DropdownField, EmptyState, ErrorState, Field, LoadingState, Modal, PageHeading } from './components.jsx'
 import { NewsSourceSelect } from './news-source-select.jsx'
 import { NewsApiConsole } from './news-api-console.jsx'
+import { ProductViewTabs, ProductIntegrationGuide, ProductManagement } from './product-management.jsx'
 import './news-discovery.css'
 
 const dateText = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '未提供'
@@ -111,9 +112,10 @@ export function NewsDiscoveryPage({ session }) {
       <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/news-discovery')}>接口文档 <ArrowSquareOut size={16} /></a>
       {session?.kind === 'admin-token' ? <a className="qp-button qp-button--outline" href="#/agent/catalog-classifier">数据归类</a> : null}
     </PageHeading>
-    <div className="mih-news-tabs" role="tablist" aria-label="新闻发现视图">
-      {[['api', '接口调试'], ['list', '新闻列表']].map(([id, label]) => <button key={id} role="tab" aria-selected={tab === id} className={`qp-button ${tab === id ? 'qp-button--primary' : 'qp-button--ghost'}`} onClick={() => setTab(id)}>{label}</button>)}
-    </div>
+    <ProductViewTabs label="新闻发现" value={tab} onChange={setTab} session={session} debug="api" product="list" />
+    {tab === 'guide' ? <ProductIntegrationGuide label="新闻发现" docs="news-discovery"><p>仅查询已收录新闻；数据类别授权与数据源目录授权分别检查。来源统计不代表全库完整分布。</p></ProductIntegrationGuide> : null}
+    {tab === 'management' ? <ProductManagement session={session} path="/data-products/news" label="新闻发现" /> : null}
+    <div hidden={!['api', 'list'].includes(tab)}>
     {!key || accessIssue ? <div className="mih-inline-warning" role="status"><div>
       <p>{!key ? (canSelectKey
         ? '尚未取得调用 Key。请在页面顶部“当前调用身份”选择可用的 Live Key；有多把 Key 时需要手动选择。若身份加载失败，请查看上方原因或重新检查。'
@@ -151,6 +153,7 @@ export function NewsDiscoveryPage({ session }) {
       </article>)}</div> : result ? <EmptyState title="没有匹配的新闻" description="可调整来源、时间或类别；待归类新闻也保留在全部记录中。" /> : <EmptyState title="从一个来源，发现更多新闻" description="按目录选择来源，或直接输入关键词。留空可浏览全部已授权类别的新闻。" />}
       {result?.payload.data.pageInfo.hasMore ? <button className="qp-button qp-button--outline" disabled={busy || !key} onClick={() => void search(true)}>加载下一页</button> : result ? <p className="mih-news-hint">当前查询已无后续记录。</p> : null}
     </> : null}
+    </div>
     {detail ? <Modal title={detail.title || '新闻详情'} size="large" onClose={() => setDetail(null)} busy={detailBusy}>
       <div className="mih-news-detail"><p>{detail.source.name} · {EXTENT[detail.contentExtent]} · {detail.author?.name || '作者未提供'}</p><p>原文发布：{detail.publishedAt ? dateText(detail.publishedAt) : detail.publishedDate || '未提供'} · 首次收录：{dateText(detail.firstSeenAt)}</p>
         {detailBusy ? <LoadingState label="正在读取已存文章" /> : null}{detailError ? <><ErrorState error={detailError} /><button className="qp-button qp-button--outline" onClick={() => void openArticle(detail)}>重试同一详情请求</button></> : null}

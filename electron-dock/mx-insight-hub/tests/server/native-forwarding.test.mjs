@@ -647,6 +647,48 @@ test('data/search fails closed for WeChat permissions, runtime and balance witho
   }
 })
 
+test('data/search WeChat aliases and next pages retain native fields and one billing identity across paths', async t => {
+  const h = await harness({ key: 'wechat.search.search', data: params => ({
+    items: [{ docID: params.cursor ? '9223372036854775806' : '9223372036854775807', title: '完整标题', desc: '完整摘要' }],
+    categories: [{ word: '全部' }], continue_flag: params.cursor ? 0 : 1,
+    cursor: params.cursor ? '' : 'wechat-native-next-page', unknown: { nullable: null, count: 0 },
+  }) }), app = await wechatAliasApp(t, h)
+  const input = { platform: 'wechat_search', query: '自行车', pageSize: 20, params: { raw: false } }
+  const first = await app.request('/api/v1/data/search', input, 'wechat-unified-first')
+  const payload = await first.json()
+  assert.equal(first.status, 200)
+  assert.equal(payload.endpoint, 'wechat.search.search')
+  assert.equal(payload.data.items[0].docID, '9223372036854775807')
+  assert.deepEqual(payload.data.unknown, { nullable: null, count: 0 })
+  assert.equal(payload.data.cursor, 'wechat-native-next-page')
+  for (const platform of ['wechat', 'weixin', ' WECHAT_SEARCH ']) {
+    const replay = await app.request('/api/v1/data/search', { ...input, platform, type: 'stable' }, 'wechat-unified-first')
+    assert.equal(replay.status, 200)
+    assert.equal(replay.headers.get('idempotent-replay'), 'true')
+    assert.deepEqual(await replay.json(), payload)
+  }
+  // Native idempotency remains durable even when the old data-search fresh
+  // window would have expired. Do not buy another page to refresh a replay.
+  for (const request of h.usageStore.requests.values()) request.completedAt = new Date(Date.now() - 180_000).toISOString()
+  const fresh = await app.request('/api/v1/data/search', { ...input, type: 'fresh' }, 'wechat-unified-first')
+  assert.equal(fresh.headers.get('idempotent-replay'), 'true')
+  assert.deepEqual(await fresh.json(), payload)
+  assert.equal(h.calls(), 1)
+  const nextInput = { ...input, cursor: payload.data.cursor }
+  const next = await app.request('/api/v1/data/search', nextInput, 'wechat-unified-next')
+  const page2 = await next.json()
+  assert.equal(next.status, 200)
+  assert.equal(page2.data.items[0].docID, '9223372036854775806')
+  assert.equal(page2.data.continue_flag, 0)
+  assert.equal(h.dispatched[1].cursor, 'wechat-native-next-page')
+  const canonical = await app.request(WECHAT_SEARCH_PATH, { params: { keyword: '自行车', raw: false, cursor: payload.data.cursor } }, 'wechat-unified-next')
+  assert.equal(canonical.headers.get('idempotent-replay'), 'true')
+  assert.deepEqual(await canonical.json(), page2)
+  assert.equal(h.calls(), 2)
+  assert.equal(h.usageStore.requests.size, 2)
+  assert.equal(app.historicalCalls(), 0)
+})
+
 test('aggregate WeChat discovery separates native live permission from stored platform grants', async t => {
   const h = await harness({ key: 'wechat.search.search' })
   await wechatAliasApp(t, h)

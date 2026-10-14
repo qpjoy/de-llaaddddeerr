@@ -623,6 +623,7 @@ export const adminApi = {
   sourceConnections: token => request(token, `${ADMIN_ROOT}/source-connections`),
   platformSearchPolicies: token => request(token, `${ADMIN_ROOT}/platform-search-policies`),
   strategySearch: token => request(token, `${ADMIN_ROOT}/strategy-search`),
+  strategySearchUsage: (token, days = 7) => request(token, `${ADMIN_ROOT}/strategy-search/usage?days=${encodeURIComponent(days)}`),
   updateInstagramSearchStrategy: (token, body) => request(token, `${ADMIN_ROOT}/strategy-search/search/instagram`, { method: 'PUT', body }),
   ecommerceRouting: token => request(token, `${ADMIN_ROOT}/ecommerce-routing`),
   updateEcommerceRoute: (token, marketplace, body) => request(token, `${ADMIN_ROOT}/ecommerce-routing/${encodeURIComponent(marketplace)}`, { method: 'PUT', body }),

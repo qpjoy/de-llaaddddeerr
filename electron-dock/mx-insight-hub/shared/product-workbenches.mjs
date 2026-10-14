@@ -7,7 +7,7 @@ export const PRODUCT_WORKBENCHES = [
   ...WECHAT_PRODUCTS.map(product => ({ path: `/data-products/${product.key}`, label: product.label, docs: product.key,
     prefixes: [`/data/wechat/${product.group}/`, ...(product.group === 'mp' ? ['/data/wechat/demo/'] : [])] })),
   { path: '/source-catalog', label: '数据源目录', docs: 'source-catalog', prefixes: ['/data/source-catalog'] },
-  { path: '/data-products/search', label: '数据搜索', docs: 'aggregate-search', prefixes: ['/data/aggregate/'] },
+  { path: '/data-products/search', label: '聚合搜索', docs: 'aggregate-search', prefixes: ['/data/aggregate/'] },
   { path: '/data-products/telegram', label: 'Telegram 会话', docs: 'telegram', prefixes: ['/data/telegram/', '/data/canonical/items/'] },
   { path: '/data-products/ecommerce-treasure-box', label: '电商数据', docs: 'ecommerce-treasure-box', prefixes: ['/data/ecommerce/', '/data/native/'], nativePlatform: 'ecommerce' },
   { path: '/data-products/social-content', label: '社媒与内容数据', docs: 'social-content', prefixes: ['/data/native/', '/data/social/'], nativePlatform: 'social' },

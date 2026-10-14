@@ -117,7 +117,7 @@ const LazyTopicInsightsPage = lazy(() => import('./pages-topic-insights.jsx').th
 const LazyNewsDiscoveryPage = lazy(() => import('./pages-news-discovery.jsx').then(module => ({ default: module.NewsDiscoveryPage })))
 const LazyDataSearchPage = lazy(() => import('./aggregate-search.jsx').then(module => ({ default: module.DataSearchPage })))
 function DataSearchPage(props) {
-  return <Suspense fallback={<LoadingState label="正在加载数据搜索" />}><LazyDataSearchPage {...props} /></Suspense>
+  return <Suspense fallback={<LoadingState label="正在加载聚合搜索" />}><LazyDataSearchPage {...props} /></Suspense>
 }
 const LazyCatalogClassifierPage = lazy(() => import('./pages-catalog-classifier.jsx').then(module => ({ default: module.CatalogClassifierPage })))
 function NewsDiscoveryPage(props) {
@@ -395,7 +395,7 @@ const ROUTES = [
   { path: '/data-browser', label: '数据浏览中心', description: '账号、内容与热点线索', icon: MagnifyingGlass, group: '数据平面', component: DataBrowserPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
-  { path: '/data-products/search', label: '数据搜索', description: '跨平台关键词检索与 API', icon: MagnifyingGlass, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: DataSearchPage, capability: 'apikey.read' },
+  { path: '/data-products/search', label: '聚合搜索', description: '跨平台实时与已收录数据检索', icon: MagnifyingGlass, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: DataSearchPage, capability: 'apikey.read' },
   { path: '/data-products/strategy-search', label: '策略搜索', description: '业务接口、目标平台与上游策略', icon: MagnifyingGlass, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: StrategySearchPage, capability: 'apikey.read' },
   { path: '/data-products/telegram', label: 'Telegram 会话', description: '频道、群组与完整对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/ecommerce-treasure-box', label: '电商数据', description: '商品搜索演示与交付证据', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EcommerceTreasureBoxPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
@@ -823,6 +823,7 @@ export function App() {
   // One in-memory search round across the product and retained browser entry.
   // A console identity change discards it; demo credential renewal does not.
   const aggregateSession = useMemo(() => ({ current: null }), [token])
+  const strategySession = useMemo(() => new Map(), [token])
   const diagnosticComparisonSession = useMemo(() => ({ current: null }), [token])
 
   useEffect(() => {
@@ -969,9 +970,10 @@ export function App() {
   // Falling back to the first permitted route rather than the dashboard: a user
   // scoped out of the dashboard would otherwise land on a permanent 403.
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
-  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && ![...WECHAT_PRODUCTS.map(product => `/data-products/${product.key}`), '/data-products/search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise', '/data-products/web-search'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
+  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && ![...WECHAT_PRODUCTS.map(product => `/data-products/${product.key}`), '/data-products/search', '/data-products/strategy-search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise', '/data-products/web-search'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
   const pageProps = {
     aggregateSession,
+    strategySession,
     diagnosticComparisonSession,
     theme,
     token,
@@ -1035,7 +1037,7 @@ export function App() {
           </div>
         </header>
         <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' || route.path === '/source-catalog' || route.path === '/external-platforms' || route.path === '/data-products/ecommerce-treasure-box' || route.path === '/data-products/xiaohongshu-note' || route.path === '/data-products/topic-insights' ? ' mih-content--dashboard' : ''}${route.path === '/data-products/ip-risk' ? ' mih-content--ip-risk' : ''}`} id="mih-main-content" tabIndex="-1">
-          <DemoProductPage Page={Page} pageProps={pageProps} enabled={route.navParent === DATA_PRODUCTS_NAV_KEY && route.path !== '/data-products/strategy-search'} admin={session?.kind === 'admin-token'} compact={['/data-products/news', '/data-products/search', '/data-products/ip-risk'].includes(route.path)} />
+          <DemoProductPage Page={Page} pageProps={pageProps} enabled={route.navParent === DATA_PRODUCTS_NAV_KEY} admin={session?.kind === 'admin-token'} compact={['/data-products/news', '/data-products/search', '/data-products/ip-risk'].includes(route.path)} />
         </main>
       </div>
       <ToastStack toasts={toasts} onDismiss={dismissToast} />

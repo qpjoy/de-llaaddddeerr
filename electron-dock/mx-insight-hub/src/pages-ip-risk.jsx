@@ -13,6 +13,7 @@ import { DocsPage } from './pages-docs.jsx'
 import { ServicePrice } from './service-price.jsx'
 import { PagedItems } from './paged-items.jsx'
 import { IP_RISK_STATES, parseIpRiskInput, ipRiskRows, ipRiskFailureRows, ipRiskBatchRows, ipRiskHistoryRows, ipRiskHistoryCsv, riskTone, riskValue, riskTime, riskWarning, ipRiskSummary, ipRiskCsv } from './ip-risk-view.js'
+import { ProductViewTabs } from './product-management.jsx'
 import './ip-risk.css'
 
 const DOC_QUERY = new URLSearchParams({ path: '/docs/ip-risk' })
@@ -171,7 +172,7 @@ export function IpRiskPage({ token, session, onUnauthorized, theme }) {
   </form>
   return <div className="mih-page mih-product-workbench mih-ip-page">
     <header className="mih-page-header"><div><h1>IP 风险画像</h1><p>查看 IPv4 的归属地、应用场景和风险线索；用分类标签快速定位需要关注的信号。</p></div></header>
-    <nav className="mih-source-section-tabs mih-ip-tabs" aria-label="IP 风险画像视图">{[['product', '风险画像'], ['debug', '接口调用'], ['docs', '接口文档'], ...(admin ? [['channels', '渠道与接入']] : [])].map(([id, label]) => <button key={id} type="button" aria-pressed={tab === id} onClick={() => { setTab(id); if (id === 'docs') setDocsVisited(true) }}>{label}</button>)}</nav>
+    <ProductViewTabs label="IP 风险画像" value={tab} session={session} guide="docs" management="channels" onChange={id => { setTab(id); if (id === 'docs') setDocsVisited(true) }} />
     {!allowed && ['product', 'debug'].includes(tab) ? <div role="status" className="mih-inline-warning mih-ip-access"><div>{!key ? <p>请选择已授权的 Hub Live Key 后查询。</p> : null}{accessIssues.map(issue => <p key={issue.scope}>{issue.message}</p>)}{runtimeBlocked ? <p>查询服务尚未就绪。已开通权限无需重复授予；{admin ? <a href={`#/external-platforms?provider=${v2 ? 'baidu-ip' : 'ipsearch'}`}>检查服务运行配置 ↗</a> : '请联系管理员恢复服务。'}</p> : null}<DemoCredentialRecheck /></div></div> : null}
     <div hidden={tab !== 'product'} className="mih-ip-product">
       <section className="qp-panel mih-ip-subscription"><div><strong>IP 风险画像 · 订阅服务</strong><p>{subscription ? `本期已调用 ${subscription.used.toLocaleString()} / ${subscription.quota.toLocaleString()} 次 · 有效期还剩 ${Math.max(0,Math.ceil((new Date(subscription.endsAt).getTime()-Date.now())/86400000))} 天 · 到期 ${riskTime(subscription.endsAt)}` : offer ? `¥${(offer.amountMinor/100).toLocaleString()} / ${offer.months} 个月 · 最多 ${offer.quota.toLocaleString()} 次 · 年度订阅` : '前往商城查看在售套餐、价格与服务状态'}</p></div><a className="qp-button qp-button--primary" href="#/store?view=purchases">查看权益 / 续订</a><a className="qp-button qp-button--outline" href="#/store">前往商城</a></section>

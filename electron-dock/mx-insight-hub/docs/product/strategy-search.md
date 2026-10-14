@@ -14,6 +14,12 @@
 
 查看目录、保存策略、发布本轮代码均不自动新增业务授权、Key scope、套餐或价格。调用继续遵循原平台、操作授权和现有计费规则。MX-H2I 用户登录、联网、Launcher 服务不在本轮修改范围。
 
+## 产品工作台（2026-10-15）
+
+页面统一为接口调试、产品展示、接入指南、管理。调试器读取当前身份可见的 OpenAPI 固定接口；产品展示使用平台卡片发起一次单平台 `/api/v1/data/search`，展示真实返回的完整正文、作者、互动、图片及来源链接，保留缺失值与零的区别。微信按既有专项响应呈现，不把分类导航当作内容；其余微信与 TikTok 系列接口继续保留，详见 [统一搜索兼容说明](../integrations/unified-strategy-search.md)。
+
+只有 Admin Token 平台管理会话看到管理标签；原迁移状态、Instagram/Facebook 策略与每日调用统计都在此处。旧 `view=routing/interfaces` 链接仍映射到管理/接入指南。页面内状态按原 Key 身份隔离，临时凭据刷新、标签切换和路由往返保留请求标识；调试与展示共享进行中/未知结果锁，核对只读，不自动重发。产品展示的新查询使用 `stable`，下一页保留原请求合同与游标；明确新建相同查询才产生新的请求标识。
+
 ## 生产证据与本机调用链必须分开
 
 已归档的 Instagram 事故请求 `ddecf6fe-c6e9-4632-9fb6-67014bdf261a` 原入口是 **`POST /api/v1/data/search`**，不是从路径名猜测出的 raw 请求。该请求由 Hub 调用 TikHub Instagram V3 general_search，外部 HTTP/业务码 400，Hub committed 502，客户结算 CNY 0.01。唯一一次已授权同参数复测 `9c43a396-57bc-433d-9eba-1f30c3762631` 仍返回 400。没有成功数据可用来证明恢复；通用错误文字不能定位为某个确定参数缺陷。详见 [事故记录](../operations/instagram-search-rejection-2026-10-14.md)。该次付费验证授权已经消耗，不随本轮发布再次执行。
@@ -111,3 +117,15 @@ MX_INSIGHT_SYNC_LAUNCHER=0 bash scripts/manage.sh ops internal-production deploy
 ```
 
 该命令限定 Hub 发布，不同步 Launcher。检查迁移 Job 已应用 `150_strategy_search_routes.sql`，然后用 Admin 只读确认数据服务中的策略搜索目录、Instagram 默认值和已有 Facebook 配额信息。租户指南只应显示其原有权限范围。保存策略是显式管理操作；浏览、检查目录与发布不应发起业务搜索。验收本轮使用本地 mock、纯合同和隔离数据库测试，不附加生产付费探测，也不声称已验证线上成功或真实下一页。
+
+## 每日接口请求统计（2026-10-15）
+
+管理面通过 `GET /internal/v1/admin/strategy-search/usage?days=7` 只读查询，`days` 为 1–31，默认 7，包含今天。只接受 Admin Token；普通租户、浏览器平台管理员会话和 Public API Key 均不可读取跨客户统计，Public listener 不开放此接口。查询在 PostgreSQL READ ONLY 事务内执行，最长 10 秒，超时提示缩小日期范围。无需新增迁移，不修改历史请求或采集路由，也不发起供应商调用。
+
+统计使用 `usage_requests.created_at` 和已保存的 `acquisition_request.path`，按 **Asia/Shanghai 自然日** 汇总业务请求，逐日补零；今日为未结束的部分日期。返回 `items` 按内容搜索、账号内容、账号资料及逻辑路径分组，各项包含 `total`、`nightAllRequests`、`daily` 和 `platforms`。`daily` 行为 `{day, requests, nightAllRequests}`；`platforms` 采用相同的逐日格式。跨平台或未标明单一平台的记录使用 `unspecified`。
+
+每条已记录业务请求计一次，包含保留的预留、成功、释放与未知状态；幂等重放不会增加同一记录，预检失败尚未进入用量账本，不计入。已存在的 raw/crawl/user-info 双兼容别名会归一为逻辑合同，统计合并显示对应 `paths`，**不能区分旧 URL 与新 URL 的真实 HTTP 访问量**。没有保存请求路径的历史记录不计入，因此零值不能单独证明接口已无人调用。
+
+微信的 `/api/v1/data/search`、`/api/v1/search/raw` 与专项入口共享原生业务合同，保存的路径均为 `/api/v1/data/wechat/search/search`，账本授权平台为 `social`。因此统计会集中在该专项路径及 `social` 平台，不能拆分三个实际入口的流量，也不按 `wechat_search/wechat_mp` 或其别名分别计数。这种归一不代表调用方已经迁移到专项 URL。
+
+`nightAllRequests` 仅计存在关联 `serving.connector_calls` 证据的业务请求；同一请求有多条旧连接器证据仍只计一次。这是进入旧适配器的已记录请求证据，不是供应商付费派发次数，也不是完整迁移率。部分历史 `/data/search` 分支没有写此连接器记录；没有关联证据不能反推它由 Hub 原生执行。停用 Night-All 或特定旧 URL 前仍需结合足够时间的访问日志、客户端迁移情况和对应调用证据确认。

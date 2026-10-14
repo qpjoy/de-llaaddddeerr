@@ -13,6 +13,7 @@ import { sourceConnectionSnapshot } from './data/source-connections.mjs'
 import { nativeForwardingByPath } from './contracts/native-forwarding.mjs'
 import { ecommerceRoutingCatalog } from './external-platforms/ecommerce-routing.mjs'
 import { strategySearchCatalog } from './data/strategy-search-catalog.mjs'
+import { strategySearchUsageResponse, strategySearchUsageWindow } from './data/strategy-search-usage.mjs'
 import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSearchAlias } from './contracts/wechat-search-alias.mjs'
 import { hubSocialByPath } from './contracts/hub-social.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
@@ -2958,6 +2959,13 @@ export function createApp({
         requireNoQuery(searchParams, 'ecommerce route update')
         if (!ecommerceRoutingStore) throw new AppError(503, 'ecommerce_route_unavailable', 'Product routes are unavailable')
         sendJson(response, 200, { data: await ecommerceRoutingStore.update(params.marketplace, await readJson(request, 4096)), requestId })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/strategy-search/usage') {
+        requireSourceAdmin(principal)
+        const window = strategySearchUsageWindow(searchParams)
+        const rows = await store.strategySearchUsage(window)
+        sendJson(response, 200, { data: strategySearchUsageResponse(window, rows), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/strategy-search') {

@@ -6,7 +6,7 @@ export function WechatOverview({ routePath }) {
   return <section className="qp-panel mih-panel"><h2>{product.label}</h2><p>{product.description}。在接口调试中选择服务、填写参数并查看当前账户价格。</p>
     {product.group === 'mp' ? <p>阅读文章可优先选择“文章详情（H5）”。账号资料、文章列表、阅读互动、评论及回复分别查询；每次发送对应一个接口，不会自动查询关联内容。</p> : null}
     <p>本产品交付实时查询结果与调用记录。结果不会自动加入已收录数据搜索；数据源目录分别记录接口覆盖与入库状态。</p>
-    <div className="mih-page-actions"><a href="#/source-catalog">数据源目录 →</a><a href="#/data-products/search">数据搜索 →</a></div>
+    <div className="mih-page-actions"><a href="#/source-catalog">数据源目录 →</a><a href="#/data-products/search">聚合搜索 →</a></div>
     <ul>{wechatServices(product).map(row => <li key={row.key}><a href={`#/data-products/${product.key}?endpoint=${row.key}`}>{row.summary}</a></li>)}</ul>
   </section>
 }

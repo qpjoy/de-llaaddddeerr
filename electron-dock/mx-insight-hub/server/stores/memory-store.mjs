@@ -1,5 +1,6 @@
 import { createInternalTrafficPolicy } from '../core/internal-traffic-policy.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
+import { strategySearchUsageDay } from '../data/strategy-search-usage.mjs'
 import { assertMemoryKeyAccessLimits } from './key-access-limits.mjs'
 import { matchesStoredEcommerceFilters } from '../contracts/ecommerce-stored.mjs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -2320,6 +2321,23 @@ export class MemoryStore {
     ) return null
     const media = record.responseBody?.data?.item?.media?.[mediaIndex]
     return media?.type === 'image' && typeof media.url === 'string' && media.url ? media.url : null
+  }
+
+  async strategySearchUsage({ from, to, paths }) {
+    const allowedPaths = new Set(paths)
+    const legacyRequestIds = new Set([...this.connectorCalls.values()].map(call => call.requestId))
+    const groups = new Map()
+    for (const record of this.requests.values()) {
+      const path = record.acquisitionRequest?.path
+      if (!allowedPaths.has(path) || record.createdAt < from || record.createdAt >= to) continue
+      const day = strategySearchUsageDay(record.createdAt)
+      const key = JSON.stringify([day, path, record.platform])
+      const row = groups.get(key) || { day, path, platform: record.platform, requests: 0, nightAllRequests: 0 }
+      row.requests++
+      if (legacyRequestIds.has(record.id)) row.nightAllRequests++
+      groups.set(key, row)
+    }
+    return [...groups.values()]
   }
 
   async usageDaily({ tenantId, from, to }) {

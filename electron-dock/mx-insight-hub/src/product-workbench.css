@@ -36,3 +36,7 @@
 .mih-web-search-results h4 { margin:.5rem 0; }
 .mih-web-search-results p { white-space:pre-wrap; overflow-wrap:anywhere; }
 .mih-web-search-url { overflow-wrap:anywhere; }
+.mih-product-management-links { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 16px; margin-top: 20px; }
+.mih-product-management-links > a { display: grid; gap: 10px; padding: 20px; color: var(--qp-text-1); text-decoration: none; }
+.mih-product-management-links > a strong { color: var(--qp-primary); }
+.mih-product-management-links > a span { color: var(--qp-text-muted); line-height: 1.6; }

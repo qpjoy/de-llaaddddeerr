@@ -1,29 +1,41 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
+import { productForPath } from '../shared/product-workbenches.mjs'
+import { ProductApiConsole } from './product-workbench.jsx'
+import { ProductViewTabs, ProductIntegrationGuide } from './product-management.jsx'
+import { StrategySearchExperience, useStrategySearchState } from './strategy-search-experience.jsx'
 import { ArrowRight, MagnifyingGlass, User, Users } from '@phosphor-icons/react'
 import { adminApi, publicDocsHref } from './api.js'
 import { DropdownField, ErrorState, Field, LoadingState, PageHeading, useRemoteData } from './components.jsx'
 import { FacebookSearchPolicyForm } from './platform-search-policy.jsx'
 import { STRATEGY_SEARCH_INTERFACES, STRATEGY_PROVIDER_LABELS, INSTAGRAM_STRATEGY_MODE_LABELS,
   STRATEGY_MIGRATION_LABELS, instagramStrategyOptions, instagramStrategyUpdate } from './strategy-search-model.js'
+import { recordStrategyAttempt } from './strategy-search-experience-model.js'
 import './strategy-search.css'
 
 const icons = { search: MagnifyingGlass, crawl: Users, 'user-info': User }
 const supplier = value => STRATEGY_PROVIDER_LABELS[value] || value
 const migration = value => STRATEGY_MIGRATION_LABELS[value] || value || '状态未提供'
 
-export function StrategySearchPage({ token, session, query, setQuery, onUnauthorized, notify }) {
+export function StrategySearchPage({ token, session, query, setQuery, onUnauthorized, notify, strategySession }) {
   const admin = session?.kind === 'admin-token' && session.platformAdmin === true
-  const routing = admin && query.get('view') === 'routing'
+  const requested = { routing: 'management', interfaces: 'guide', demo: 'product' }[query.get('view')] || query.get('view')
+  const tab = ['debug', 'product', 'guide', ...(admin ? ['management'] : [])].includes(requested) ? requested : 'debug'
+  const [managementVisited, setManagementVisited] = useState(tab === 'management')
+  const [result, setResult] = useState(null)
+  const localStrategySession = useRef(new Map()), searchSession = strategySession || localStrategySession.current
+  const { cell, state: searchState } = useStrategySearchState(searchSession)
+  const pendingSearch = [...searchState.attempts.values()].some(attempt => ['sending', 'uncertain'].includes(attempt.state))
   const selected = STRATEGY_SEARCH_INTERFACES.find(row => row.id === query.get('interface')) || STRATEGY_SEARCH_INTERFACES[0]
+  const changeTab = view => { if (view === 'management') setManagementVisited(true); setQuery({ view }) }
   return <div className="mih-page mih-strategy-search">
-    <PageHeading title="策略搜索" description="以业务接口和目标平台组织内容获取；调用方保持统一合同，管理员独立管理上游策略。">
+    <PageHeading title="策略搜索" description="从关键词、账号内容与资料接口接入 Hub，按目标平台查看内容与接入方式。">
       <a className="qp-button qp-button--outline" href={publicDocsHref('/docs/strategy-search')}>接口文档 ↗</a>
     </PageHeading>
-    <nav className="mih-source-section-tabs" aria-label="策略搜索视图">
-      <button type="button" aria-pressed={!routing} onClick={() => setQuery({ view: 'interfaces' })}>业务接口</button>
-      {admin ? <button type="button" aria-pressed={routing} onClick={() => setQuery({ view: 'routing' })}>上游策略</button> : null}
-    </nav>
-    {routing ? <StrategySearchManagement key={token} {...{ token, query, setQuery, onUnauthorized, notify }} /> : <>
+    <ProductViewTabs label="策略搜索" value={tab} onChange={changeTab} session={session} />
+    {pendingSearch ? <p role="status">有查询正在执行或结果待核实；新请求暂不可发送。可在产品展示中只读核对原请求。</p> : null}
+    <div hidden={tab !== 'debug'}><ProductApiConsole product={productForPath('/data-products/strategy-search')} token={token} initialEndpoint={query.get('endpoint')} onResult={setResult} blocked={pendingSearch} attemptStore={searchState.consoleAttempts} onAttempt={event => recordStrategyAttempt(cell, event)} /></div>
+    <div hidden={tab !== 'product'}><StrategySearchExperience strategySession={searchSession} initialResult={result} onResult={setResult} /></div>
+    <div className="mih-strategy-guide" hidden={tab !== 'guide'}>
       <div className="mih-strategy-interface-cards" role="group" aria-label="选择业务接口">
         {STRATEGY_SEARCH_INTERFACES.map(row => { const Icon = icons[row.id]; return <button type="button" key={row.id}
           className={`mih-strategy-interface-card${selected.id === row.id ? ' is-selected' : ''}`} aria-pressed={selected.id === row.id}
@@ -33,19 +45,19 @@ export function StrategySearchPage({ token, session, query, setQuery, onUnauthor
       </div>
       <section className="qp-panel mih-panel mih-strategy-contract">
         <header><div><p className="qp-kicker">业务接口</p><h2>{selected.label}</h2></div>
-          {admin ? <button className="qp-button qp-button--outline" type="button" onClick={() => setQuery({ view: 'routing', interface: selected.id })}>查看平台路由 <ArrowRight size={16} aria-hidden="true" /></button> : null}</header>
+          {admin ? <button className="qp-button qp-button--outline" type="button" onClick={() => { setManagementVisited(true); setQuery({ view: 'routing', interface: selected.id }) }}>迁移状态与平台路由 <ArrowRight size={16} aria-hidden="true" /></button> : null}</header>
         <div className="mih-strategy-paths">{selected.paths.map(path => <code key={path}>{path}</code>)}</div>
         <dl className="mih-strategy-contract-grid"><div><dt>请求</dt><dd>{selected.input}</dd></div><div><dt>响应</dt><dd>{selected.output}</dd></div></dl>
         <p>{selected.boundary}</p>
       </section>
-      <section className="qp-panel mih-panel mih-strategy-contract">
-        <h2>接入约定</h2>
-        <p>业务请求继续使用已授权的 Hub API Key、平台权限与套餐；目录展示不代表当前身份已开通或接口此刻可用。</p>
-        <p>下一页原样传回游标，并使用新的 Idempotency-Key。查询条件或供应商变化后，旧游标可能要求从第一页重新开始。</p>
-        <p>超时或结果未知时，先只读核对使用记录和请求诊断。同一幂等标识受接口与回放窗口限制，重新发送也可能再次计费。</p>
-        <a href={publicDocsHref('/docs/strategy-search')}>查看参数、兼容范围与响应说明 ↗</a>
-      </section>
-    </>}
+      <ProductIntegrationGuide label="策略搜索" docs="strategy-search">
+        <p>统一内容搜索使用 <code>/api/v1/data/search</code>，一次选择一个平台；TikTok 使用统一条目和分页字段。多个平台同时检索请使用聚合搜索。</p>
+        <p>微信也使用此路径，兼容既有原生响应 <code>contractVersion / endpoint / data / meta / requestId</code>；可用 <code>params.raw=false</code> 显示 items，按 <code>continue_flag / cursor</code> 续页。微信公众号默认检索文章；其他微信与 TikTok 系列接口继续保留。</p>
+        <p>每个新查询与下一页各使用新的 Idempotency-Key。fresh 原请求仅在 120 秒内重放已提交响应；stable 固定首次响应。产品展示使用 stable；新建相同查询必须显式操作。超时或结果未知时先只读核对使用记录。</p>
+        <p>接口调试保留统一接口与兼容入口，按当前权限展示文档。微信的 <code>/api/v1/night-all/search/raw</code> 已退役并返回 410；其他保留入口继续遵守各自合同，不能互换游标。</p>
+      </ProductIntegrationGuide>
+    </div>
+    {admin && (managementVisited || tab === 'management') ? <div hidden={tab !== 'management'}><StrategySearchManagement key={token} {...{ token, query, setQuery, onUnauthorized, notify }} /></div> : null}
   </div>
 }
 
@@ -97,6 +109,7 @@ function StrategySearchManagement({ token, query, setQuery, onUnauthorized, noti
       <button className="qp-button qp-button--outline" type="button" disabled={remote.loading} onClick={remote.refresh}>{remote.loading ? '刷新中…' : '刷新策略'}</button></div>
     {remote.error ? <ErrorState error={remote.error} onRetry={remote.refresh} /> : null}
     {!remote.data && remote.loading ? <LoadingState label="正在读取接口与平台路由" /> : null}
+    <StrategySearchUsage {...{ token, onUnauthorized }} interfaceId={selected?.id || query.get('interface') || 'search'} />
     {remote.data ? <>
       <div className="mih-strategy-route-layout">
         <nav className="mih-strategy-interface-nav" aria-label="上游策略业务接口">{interfaces.map(item => <button type="button" key={item.id}
@@ -124,4 +137,26 @@ function StrategySearchManagement({ token, query, setQuery, onUnauthorized, noti
       </table></div></section> : null}
     </> : null}
   </div>
+}
+
+function StrategySearchUsage({ token, onUnauthorized, interfaceId }) {
+  const [days, setDays] = useState(7)
+  const load = useCallback(() => adminApi.strategySearchUsage(token, days), [token, days])
+  const remote = useRemoteData(load, onUnauthorized)
+  const data = remote.data?.data || remote.data
+  const items = (data?.items || []).filter(row => row.interface === interfaceId)
+  return <section className="qp-panel mih-panel mih-strategy-usage" aria-label="策略接口每日调用次数">
+    <header><div><h2>接口每日调用次数</h2><p>按已记录的业务请求观察迁移使用情况；读取此处不会发起采集。</p></div><div className="mih-page-actions">
+      <DropdownField label="统计范围" value={String(days)} onChange={value => setDays(Number(value))} disabled={remote.loading} options={[7, 14, 31].map(value => ({ value: String(value), label: `最近 ${value} 天` }))} />
+      <button className="qp-button qp-button--outline" type="button" disabled={remote.loading} onClick={remote.refresh}>刷新统计</button></div></header>
+    {remote.error ? <ErrorState error={remote.error} onRetry={remote.refresh} /> : null}
+    {!data && remote.loading ? <LoadingState label="正在读取每日请求统计" /> : null}
+    {data ? <><p>{data.fromDay} 至 {data.throughDay} · {data.timeZone || 'Asia/Shanghai'} · 今日数据尚未完整</p>
+      <div className="qp-table-wrap mih-table-wrap"><table className="qp-table mih-table"><thead><tr><th>接口（逻辑合同）</th><th>合计</th><th>进入 Night-All</th>{(data.days || []).map(day => <th key={day}>{day.slice(5)}</th>)}</tr></thead>
+        <tbody>{items.map(row => <tr key={row.path}><td><code>{row.path}</code>{row.paths?.length > 1 ? <small className="mih-strategy-usage-alias">合并兼容别名</small> : null}</td><td>{row.total}</td><td>{row.nightAllRequests}</td>{(data.days || []).map(day => { const point = row.daily?.find(item => item.day === day); return <td key={day}><span>{point?.requests ?? 0}</span><small className="mih-strategy-usage-alias">Night-All {point?.nightAllRequests ?? 0}</small></td> })}</tr>)}</tbody>
+      </table></div>
+      {items.map(row => <details key={row.path}><summary><code>{row.path}</code> · 按平台查看</summary><div className="qp-table-wrap mih-table-wrap"><table className="qp-table mih-table"><thead><tr><th>平台</th><th>合计</th><th>进入 Night-All</th>{(data.days || []).map(day => <th key={day}>{day.slice(5)}</th>)}</tr></thead><tbody>{(row.platforms || []).map(platform => <tr key={platform.platform}><td>{platform.platform === 'unspecified' ? '未指定平台' : platform.platform}</td><td>{platform.total}</td><td>{platform.nightAllRequests}</td>{(data.days || []).map(day => { const point = platform.daily?.find(item => item.day === day); return <td key={day}>{point?.requests ?? 0}<small className="mih-strategy-usage-alias">Night-All {point?.nightAllRequests ?? 0}</small></td> })}</tr>)}</tbody></table></div>{!row.platforms?.length ? <p>此统计窗口没有已记录的平台请求。</p> : null}</details>)}
+      <div className="mih-strategy-usage-notes">{(data.notes || []).map((note, index) => <p key={index}>{note}</p>)}<p>历史兼容别名按逻辑合同合并，无法据此区分真实旧 URL 流量。Night-All 数量只统计关联到旧适配器证据的业务请求，不等同供应商派发次数；零值不能单独作为下线依据。</p></div>
+    </> : null}
+  </section>
 }

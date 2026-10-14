@@ -63,3 +63,29 @@ test('guide distinguishes standard and raw parsing and does not promise paid ret
   assert.match(html, /幂等回放有有效窗口/)
   assert.match(html, /不能将超时后反复 POST/)
 })
+
+test('WeChat-only strategy guide documents the existing unified response without granting old live access', () => {
+  const scopes = [{ platforms: ['social'], capabilities: ['native.wechat.search.search'] }]
+  const before = structuredClone(scopes)
+  const html = publicDocsHtmlForPath('/docs/strategy-search', { tenant: true, scopes })
+  assert.ok(html)
+  const main = html.match(/<main>([\s\S]*?)<\/main>/)?.[1]
+  assert.match(main, /POST \/api\/v1\/data\/search/)
+  assert.match(main, /POST \/api\/v1\/data\/wechat\/search\/search/)
+  assert.match(main, /wechat_search|wechat_mp/)
+  assert.match(main, /contractVersion\/endpoint\/data\/meta\/requestId/)
+  assert.match(main, /params\.raw=false/)
+  assert.match(main, /data\.items/)
+  assert.match(main, /data\.categories/)
+  assert.match(main, /data\.continue_flag/)
+  assert.match(main, /data\.cursor/)
+  assert.match(main, /永久幂等重放/)
+  assert.match(main, /410 wechat_search_route_retired/)
+  assert.doesNotMatch(main, /instagram|twitter|facebook|tikhub|justone|rapidapi/i)
+  assert.deepEqual(scopes, before)
+  for (const denied of [
+    [{ platforms: ['wechat_search', 'wechat_mp'], capabilities: [] }],
+    [{ platforms: ['social'], capabilities: ['native.wechat.search.search-videos'] }],
+    [{ platforms: ['social'], capabilities: [] }, { platforms: [], capabilities: ['native.wechat.search.search'] }],
+  ]) assert.doesNotMatch(strategySearchGuide(denied), /<h2>微信搜索<\/h2>|POST \/api\/v1\/data\/wechat\/search\/search/)
+})

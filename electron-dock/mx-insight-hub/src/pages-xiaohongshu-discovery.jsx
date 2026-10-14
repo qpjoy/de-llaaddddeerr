@@ -7,6 +7,7 @@ import { useDemoApiKey, useDemoAccessSnapshot, DemoCredentialRecheck } from './d
 import { demoAccessIssues } from './demo-access.js'
 import { requestUuid } from './request-id.js'
 import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
+import { ProductViewTabs, ProductIntegrationGuide, ProductManagement } from './product-management.jsx'
 import './xiaohongshu-discovery.css'
 
 const SORT_LABELS = { premium_imp_num: '曝光量', premium_good_read_rate: '阅读率', premium_read_num: '阅读数', premium_engage_num: '互动数', premium_engage_rate: '互动率', premium_like_num: '点赞数', premium_fav_num: '收藏数', premium_cmt_num: '评论数', DAY_3: '最近 3 天', DAY_7: '最近 7 天', DAY_14: '最近 14 天', DAY_30: '最近 30 天' }
@@ -39,10 +40,10 @@ function DiscoveryResults({ payload, inspiration }) {
 
 export function XiaohongshuDiscoveryPage({ session, routePath }) {
   const product = XHS_DISCOVERY_PRODUCTS.find(item => routePath === `/data-products/${item.key}`) || XHS_DISCOVERY_PRODUCTS[0]
-  return <DiscoveryWorkbench key={product.id} product={product} admin={session?.platformAdmin === true} />
+  return <DiscoveryWorkbench key={product.id} product={product} session={session} admin={session?.kind === 'admin-token' && session.platformAdmin === true} />
 }
 
-function DiscoveryWorkbench({ product, admin }) {
+function DiscoveryWorkbench({ product, session, admin }) {
   const [apiKey] = useDemoApiKey()
   const access = useDemoAccessSnapshot()
   const issues = demoAccessIssues(access, product.operation)
@@ -79,7 +80,10 @@ function DiscoveryWorkbench({ product, admin }) {
     : <label className="mih-xhs-discovery-field" key={key}><span>{label}</span><input className="qp-input" value={values[key] || ''} disabled={busy} maxLength={key === 'cursor' ? 8192 : key === 'noteContentCategory' ? 200 : 500} placeholder={key === 'noteContentCategory' ? '内容类目#美妆 或 所属行业#母婴' : key === 'cursor' ? '首页留空；下一页原样使用返回游标' : '留空浏览热门内容'} onChange={event => setValues(current => ({ ...current, [key]: event.target.value, ...(key !== 'cursor' ? { cursor: '' } : {}) }))} /></label>
   return <>
     <PageHeading eyebrow="DATA PRODUCT / XIAOHONGSHU" title={product.label} description={product.description}><a className="qp-button qp-button--outline" href={publicDocsHref(`/docs/${product.key}`)}>接口文档</a><a className="qp-button qp-button--outline" href="#/plans">合同费率</a></PageHeading>
-    <nav className="mih-source-section-tabs" aria-label={`${product.label}视图`}><button aria-pressed={view === 'debug'} onClick={() => setView('debug')}>接口调试</button><button aria-pressed={view === 'board'} onClick={() => setView('board')}>{product.tab}</button></nav>
+    <ProductViewTabs label={product.label} value={view} onChange={setView} session={session} product="board" />
+    {view === 'guide' ? <ProductIntegrationGuide label={product.label} docs={product.key} /> : null}
+    {view === 'management' ? <ProductManagement session={session} path={`/data-products/${product.key}`} label={product.label} /> : null}
+    <div hidden={!['debug', 'board'].includes(view)}>
     <section className="qp-panel mih-panel mih-xhs-discovery-query"><header><div><h2>{view === 'debug' ? '请求参数' : product.id === 'hot_notes' ? '发现热门内容' : '热点创作灵感'}</h2>{admin ? <small>内部来源：{provider === 'justone' ? 'JustOne' : 'TikHub'} · 独立操作与调用记录</small> : null}</div><span className="mih-api-method">POST</span></header>
       {view === 'debug' ? <code className="mih-xhs-discovery-path">{product.path}</code> : null}
       {issues.map(issue => <p className="mih-inline-warning" key={`${issue.kind}:${issue.scope}`}>{issue.message}</p>)}
@@ -98,5 +102,6 @@ function DiscoveryWorkbench({ product, admin }) {
     {page ? <section className="qp-panel mih-panel mih-xhs-discovery-pagination"><div><strong>已获取第 {page.page} 页</strong><p>{({ exhausted: '本页已结束。', limit_reached: '达到 15 页上限，不代表内容耗尽。', unknown: '没有可用的继续信息，停止翻页。', next_page_probe: '结果未说明是否还有数据；点击下一页将查询下一页，可能返回空结果并计费。', continuable: '可按需继续获取下一页。' })[page.paginationStatus]}</p>{!currentResult ? <p>筛选已修改，请先执行当前查询。</p> : null}</div><button className="qp-button qp-button--outline" disabled={blocked || !currentResult || !page.nextCursor} onClick={() => { const next = { ...result.request.body, cursor: page.nextCursor }; setValues(next); void send(next) }}>下一页 <ArrowRight /></button></section> : null}
     {result?.evidence?.requestId ? <small>Request ID：{result.evidence.requestId}</small> : null}
     <AdminExecutionEvidence requestId={result?.evidence?.requestId || error?.requestId} />
+    </div>
   </>
 }

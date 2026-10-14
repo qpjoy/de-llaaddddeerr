@@ -7,6 +7,7 @@ import { useDemoApiKey } from './demo-credentials.jsx'
 import { ErrorState } from './components.jsx'
 import { WebSearchExperience } from './web-search-experience.jsx'
 import { WebSearchManagement } from './web-search-management.jsx'
+import { ProductViewTabs } from './product-management.jsx'
 import './web-search.css'
 
 export function WebSearchPage({ token, session, onUnauthorized, notify }) {
@@ -26,9 +27,7 @@ export function WebSearchPage({ token, session, onUnauthorized, notify }) {
   const admin = session?.kind === 'admin-token' && session.platformAdmin
   return <div className="mih-page mih-product-workbench mih-web-search-page">
     <header className="mih-page-header"><div><h1>Web Search</h1><p>搜索网页、图片与视频，将带来源的结果接入您的应用。</p></div><a className="qp-button qp-button--outline" href={publicDocsHref('/docs/web-search')}>接口文档 ↗</a></header>
-    <nav className="mih-source-section-tabs" aria-label="Web Search 视图">
-      {[['debug', '接口调试'], ['product', '产品展示'], ['channels', '搜索渠道与接入'], ...(admin ? [['management', '供应商管理']] : [])].map(([id, label]) => <button key={id} type="button" aria-pressed={tab === id} onClick={() => setTab(id)}>{label}</button>)}
-    </nav>
+    <ProductViewTabs label="Web Search " value={tab} onChange={setTab} session={session} guide="channels" />
     {tab !== 'management' ? <div className="mih-search-readiness" role="status">
       <Globe size={20} aria-hidden="true" /><div>{!key ? '请选择调用 Key，查看搜索渠道。' : loading ? '正在读取当前 Key 的渠道状态…' : error ? '渠道状态读取失败，请刷新后重试。' : !providers.length ? '当前 Key 没有完整的 Web Search 权限。' : <><strong>已授权 {providers.length} 个渠道 · {ready.length} 个可调用</strong>{!ready.length ? <span>{admin ? '权限已生效，无需重复保存租户授权。请检查渠道运行开关、凭据及采购配置。' : '已开通搜索服务，渠道暂未就绪，请联系服务管理员。'}</span> : null}</>}</div>
       <button className="qp-button qp-button--ghost qp-button--sm" type="button" disabled={!key || loading} onClick={() => setRefresh(value => value + 1)}><ArrowClockwise size={16} aria-hidden="true" />刷新状态</button>
