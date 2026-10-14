@@ -129,3 +129,5 @@ MX_INSIGHT_SYNC_LAUNCHER=0 bash scripts/manage.sh ops internal-production deploy
 微信的 `/api/v1/data/search`、`/api/v1/search/raw` 与专项入口共享原生业务合同，保存的路径均为 `/api/v1/data/wechat/search/search`，账本授权平台为 `social`。因此统计会集中在该专项路径及 `social` 平台，不能拆分三个实际入口的流量，也不按 `wechat_search/wechat_mp` 或其别名分别计数。这种归一不代表调用方已经迁移到专项 URL。
 
 `nightAllRequests` 仅计存在关联 `serving.connector_calls` 证据的业务请求；同一请求有多条旧连接器证据仍只计一次。这是进入旧适配器的已记录请求证据，不是供应商付费派发次数，也不是完整迁移率。部分历史 `/data/search` 分支没有写此连接器记录；没有关联证据不能反推它由 Hub 原生执行。停用 Night-All 或特定旧 URL 前仍需结合足够时间的访问日志、客户端迁移情况和对应调用证据确认。
+
+新增只读 `/internal/v1/admin/strategy-search/data-statistics?days=7` 将每日新增 canonical 对象、内容更新、版本和观察与接口调用数分开。该看板仅覆盖有入库链路的子集，Twitter 专用社交接口和微信原生转发当前不自动入 canonical；内存模式明确不可用。完整调用链、Night-All 自存限制、指标去重与退役条件见 [策略接口、持久化与每日入库统计](strategy-search-data-flow.md)。

@@ -45,3 +45,56 @@ export function instagramStrategyUpdate(row, draft) {
     fallbackProvider: draft.mode === 'priority' ? providers.find(value => value !== draft.primaryProvider) : null,
     expectedRevision: row.policy.revision, reason }
 }
+
+export const FACEBOOK_STRATEGY_MODE_LABELS = {
+  auto: '额度优先：RapidAPI → JustOne', rapidapi: '固定：仅 RapidAPI', justone: '固定：仅 JustOne', paused: '暂停新搜索',
+}
+
+export function strategyPolicyEditor(interfaceId, row) {
+  if (interfaceId !== 'search') return null
+  const instagram = instagramStrategyOptions(row)
+  if (instagram.providers.length && instagram.modes.length) return 'instagram'
+  if (row?.platform === 'facebook' && row.editable === true && row.policy
+    && Number.isSafeInteger(row.policy.revision) && row.policy.revision > 0
+    && Object.hasOwn(FACEBOOK_STRATEGY_MODE_LABELS, row.policy.mode)
+    && ['rapidapi', 'justone'].every(provider => row.providers?.includes(provider))
+    && row.allowedModes?.includes(row.policy.mode)) return 'facebook'
+  return null
+}
+
+// A registered route and a configurable strategy are different facts. Only the
+// two reviewed search policy editors can expose writes; inventory is read-only.
+export function strategyPolicySummary(interfaceId, row) {
+  const editor = strategyPolicyEditor(interfaceId, row)
+  const providerLabel = provider => STRATEGY_PROVIDER_LABELS[provider] || provider || '未提供'
+  if (!row) return { title: '尚未选择目标平台', mode: '未提供', description: '选择业务接口和平台后查看策略。', providers: [], modes: [], editor: null }
+  if (editor === 'instagram') {
+    const policy = row.policy, { providers, modes } = instagramStrategyOptions(row)
+    const primary = providerLabel(policy.primaryProvider), fallback = providerLabel(policy.fallbackProvider)
+    const current = policy.mode === 'priority'
+      ? { title: `优先 ${primary} → 保底 ${fallback}`, mode: '优先与保底', description: '仅在首请求尚未派发且优先供应商未通过准入时选用保底供应商；400、超时、未知结果与已付费不可用结果不会触发自动切换。' }
+      : policy.mode === 'paused'
+        ? { title: '暂停新的 Instagram 搜索', mode: '暂停', description: '停止新的采集；已保存请求保留既有回放规则，原供应商设置保持不变。' }
+        : { title: `固定 ${primary}`, mode: '固定供应商', description: `新搜索仅使用 ${primary}。该供应商未就绪时返回具体原因，不自动转到其他供应商。` }
+    return { ...current, editor, providers, modes: modes.map(mode => INSTAGRAM_STRATEGY_MODE_LABELS[mode]), revision: policy.revision }
+  }
+  if (editor === 'facebook') {
+    const policy = row.policy
+    const current = policy.mode === 'auto'
+      ? { title: 'RapidAPI 额度优先 → JustOne 保底', mode: '额度优先', description: '优先使用 RapidAPI 套餐额度；额度不可用时按现有规则转 JustOne。已派发的请求仅确认 429 时可按既有规则使用保底，400、超时和未知结果不会触发自动重试。' }
+      : policy.mode === 'paused'
+        ? { title: '暂停新的 Facebook 搜索', mode: '暂停', description: '停止新的搜索采集，保留原额度记录与已保存请求。' }
+        : { title: `固定 ${providerLabel(policy.mode)}`, mode: '固定供应商', description: `新搜索仅使用 ${providerLabel(policy.mode)}；此模式不启用另一供应商作为保底。` }
+    return { ...current, editor, providers: ['rapidapi', 'justone'],
+      modes: row.allowedModes.filter(mode => Object.hasOwn(FACEBOOK_STRATEGY_MODE_LABELS, mode)).map(mode => FACEBOOK_STRATEGY_MODE_LABELS[mode]), revision: policy.revision }
+  }
+  if (row.platform === 'twitter') return { title: '仅 RapidAPI', mode: '已登记路由 · 只读',
+    description: 'Twitter 仅使用 RapidAPI。兼容入口的迁移状态独立展示，当前没有已接入的可切换供应商。', providers: ['rapidapi'], modes: [], editor: null }
+  if (row.migrationStatus === 'local') return { title: 'Hub 已收录数据', mode: '本地检索 · 只读',
+    description: '读取已采集数据，不选择付费搜索供应商。', providers: [], modes: [], editor: null }
+  return { title: row.providers?.length === 1 ? `已登记供应商：${providerLabel(row.providers[0])}` : '沿用当前路由',
+    mode: row.editable ? '策略尚未就绪' : '已登记路由 · 只读',
+    description: row.editable ? '尚未读取到完整、可编辑的策略与修订。请刷新策略；不会根据供应商目录模拟切换。'
+      : row.readOnlyReason || '此业务接口当前没有已验证的供应商切换策略，沿用现有路由。',
+    providers: row.providers || [], modes: [], editor: null }
+}

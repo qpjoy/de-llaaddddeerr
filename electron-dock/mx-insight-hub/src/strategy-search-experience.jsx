@@ -114,10 +114,10 @@ export function StrategySearchResult({ payload, evidence }) {
   const label = STRATEGY_SEARCH_PLATFORMS.find(row => row.platform === data?.platform)?.label || (nativeWechat ? '微信搜索' : data?.platform)
   const metricLabels = { likes: '点赞', comments: '评论', shares: '分享', views: '浏览', bookmarks: '收藏' }
   return <section className="qp-panel mih-panel mih-strategy-results" aria-label="内容搜索结果">
-    <header><div><p className="qp-kicker">{label}</p><h2>{data?.query || '已返回搜索内容'}</h2><p>{nativeWechat ? '微信原生业务响应' : `本页 ${items.length} 条 · ${data?.status === 'partial' ? '部分返回' : data?.status === 'empty' ? '无结果' : '已返回'}`}</p></div>
+    <header><div><p className="qp-kicker">{label}</p><h2>{data?.query || '已返回搜索内容'}</h2><p>{nativeWechat ? '微信原生业务响应' : `本页 ${items.length} 条 · ${!items.length ? '本页无内容' : data?.status === 'partial' ? '部分返回' : '已返回'}`}</p></div>
       {!nativeWechat ? <label className="mih-strategy-image-toggle"><input type="checkbox" checked={images} onChange={event => setImages(event.target.checked)} /><ImageIcon size={16} aria-hidden="true" />显示已返回图片</label> : null}</header>
     {(data?.warnings || []).length ? <div role="status" className="mih-strategy-result-warnings">{data.warnings.map((warning, index) => <p key={`${warning.code}:${index}`}><strong>{warning.code}</strong> · {warning.message}</p>)}</div> : null}
-    {nativeWechat ? <WechatResult payload={payload} /> : !items.length ? <p>本页没有内容。空结果不会自动补页或切换供应商。</p> : <div className="mih-strategy-result-list">{items.map((item, index) => {
+    {nativeWechat ? <WechatResult payload={payload} /> : !items.length ? <p>{data?.pageInfo?.hasMore && data?.pageInfo?.nextCursor ? '本页没有可展示的内容，但响应仍提供后续游标；可手动读取下一页，不能据此判定搜索结束。' : '本页没有可展示的内容；不会自动补页或切换供应商。'}</p> : <div className="mih-strategy-result-list">{items.map((item, index) => {
       const url = safeStrategyUrl(item.url)
       const image = safeStrategyUrl(item.media?.coverUrl) || (item.media?.images || []).map(safeStrategyUrl).find(Boolean)
       return <article key={`${item.platform}:${item.id || index}`} className="mih-strategy-result-card">

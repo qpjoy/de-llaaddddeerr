@@ -2340,6 +2340,10 @@ export class MemoryStore {
     return [...groups.values()]
   }
 
+  async strategySearchDataStatistics() {
+    return { available: false, rows: [], reason: '当前内存存储没有持久化的入库版本与观测链路，无法提供真实新增和更新统计。' }
+  }
+
   async usageDaily({ tenantId, from, to }) {
     const days = new Map()
     for (const record of this.requests.values()) {

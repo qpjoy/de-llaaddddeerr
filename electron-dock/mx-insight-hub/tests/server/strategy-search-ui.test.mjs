@@ -64,3 +64,35 @@ test('Instagram UI fails closed when backend editing, provider, mode or revision
   assert.throws(() => instagramStrategyUpdate({ ...row, providers: ['justone'] }, { ...draft, mode: 'priority' }), /不允许/)
   for (const reason of ['', '  ', 'x'.repeat(1001)]) assert.throws(() => instagramStrategyUpdate(row, { ...draft, reason }), /修改原因/)
 })
+
+test('current strategy explains Instagram fixed/priority separately from Facebook quota-first routing', async () => {
+  const { strategyPolicySummary } = await import('../../src/strategy-search-model.js')
+  const instagram = strategyPolicySummary('search', row)
+  assert.equal(instagram.title, '固定 JustOne')
+  assert.equal(instagram.editor, 'instagram')
+  assert.match(instagram.description, /不自动转到其他供应商/)
+  const priority = strategyPolicySummary('search', { ...row, policy: { ...row.policy, mode: 'priority', primaryProvider: 'tikhub', fallbackProvider: 'justone' } })
+  assert.equal(priority.title, '优先 TikHub → 保底 JustOne')
+  assert.match(priority.description, /尚未派发/)
+  const facebook = { platform: 'facebook', editable: true, providers: ['rapidapi', 'justone'], allowedModes: ['auto', 'rapidapi', 'justone', 'paused'], policy: { mode: 'auto', revision: 7 } }
+  const auto = strategyPolicySummary('search', facebook)
+  assert.equal(auto.title, 'RapidAPI 额度优先 → JustOne 保底')
+  assert.equal(auto.editor, 'facebook')
+  assert.match(auto.description, /确认 429/)
+  assert.equal(strategyPolicySummary('search', { ...facebook, policy: { ...facebook.policy, mode: 'rapidapi' } }).title, '固定 RapidAPI')
+  assert.equal(strategyPolicySummary('search', { ...facebook, policy: { ...facebook.policy, mode: 'justone' } }).title, '固定 JustOne')
+})
+
+test('unverified pairs and missing policy evidence never expose simulated supplier switches', async () => {
+  const { strategyPolicySummary, strategyPolicyEditor } = await import('../../src/strategy-search-model.js')
+  assert.equal(strategyPolicyEditor('crawl', row), null)
+  assert.equal(strategyPolicySummary('search', { platform: 'twitter', providers: ['rapidapi'], editable: false }).title, '仅 RapidAPI')
+  for (const platform of ['twitter', 'douyin', 'tiktok', 'weibo', 'wechat_search']) {
+    const summary = strategyPolicySummary('search', { ...row, platform, editable: false, providers: [platform === 'twitter' ? 'rapidapi' : 'tikhub'] })
+    assert.equal(summary.editor, null)
+    assert.deepEqual(summary.modes, [])
+  }
+  assert.equal(strategyPolicySummary('search', { ...row, policy: null }).mode, '策略尚未就绪')
+  assert.equal(strategyPolicySummary('search', { platform: 'telegram', migrationStatus: 'local', providers: [] }).title, 'Hub 已收录数据')
+  assert.equal(strategyPolicyEditor('search', { platform: 'facebook', editable: true, providers: ['rapidapi', 'justone'], allowedModes: ['auto'], policy: { mode: 'priority', revision: 2 } }), null)
+})

@@ -7,7 +7,7 @@ const LABELS = {
   tiktok: 'TikTok', twitter: 'Twitter / X', weibo: '微博', xiaohongshu: '小红书',
   youtube: 'YouTube', zhihu: '知乎', wechat_search: '微信搜索', wechat_mp: '微信公众号',
 }
-const READ_ONLY_REASON = '当前接口尚未开放供应商策略配置；此处仅展示已有路由，不改变授权、价格或运行状态。'
+const READ_ONLY_REASON = '此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。'
 
 function historicalPlatform(platform, operation) {
   const provider = platform === 'twitter' ? 'rapidapi' : platform === 'facebook' ? 'justone' : 'tikhub'
@@ -34,22 +34,27 @@ function searchPlatform(platform, { instagramPolicy, facebookPolicy }) {
   }
   if (platform === 'twitter') return {
     ...row, migrationStatus: 'conditional',
+    readOnlyReason: 'Twitter 当前固定使用 RapidAPI，尚无接入此业务合同的第二供应商。统一入口已直连，复杂 raw 仍可能经过 Night-All；两种执行路径不等于两个可切换供应商。',
     routeSummary: 'data/search 和 data/social/search 由 Hub 直连 RapidAPI。raw 的单关键词、每页不超过 50 条等已迁移形状由 Hub 执行；批量、复杂参数及历史兼容形状仍经 Night-All，默认同为 RapidAPI。',
   }
   if (platform === 'weibo') return {
     ...row, migrationStatus: 'conditional',
+    readOnlyReason: '已迁移形状使用 TikHub；其余形状仍走兼容链路。尚无第二个已接入同一合同的供应商，不能仅通过修改默认名称切换。',
     routeSummary: '已迁移的单关键词 raw 和 data/search（首请求 pageSize 至少 20 或已有 Hub 游标）由 Hub 直连 TikHub；其他兼容形状仍经 Night-All。',
   }
   if (platform === 'xiaohongshu') return {
     ...row, migrationStatus: 'conditional',
+    readOnlyReason: '当前已接入的搜索形状使用 TikHub；其他形状仍遵循兼容路由。其他平台原生接口需完成参数、响应、分页及费用适配后才能作为本合同的可选供应商。',
     routeSummary: '单关键词、每页 20 条等受支持形状在 Hub 操作启用且为正式 Key 时直连 TikHub；已有 Hub 游标保持该链路。其他形状、未启用直连或测试 Key 仍走 Night-All。',
   }
   if (WECHAT_LEGACY_SEARCH_PLATFORMS.includes(platform)) return {
     ...row, migrationStatus: 'hub_native',
+    readOnlyReason: '微信搜索当前固定使用已接入专项合同的 TikHub，没有第二供应商保底。已退役的 Night-All 微信搜索不会作为失败回退。',
     routeSummary: `${platform === 'wechat_mp' ? '文章搜索' : '微信搜索'}的 data/search 与 /api/v1/search/raw 由 Hub 直连 TikHub，使用 /api/v1/data/wechat/search/search 的新合同；/api/v1/night-all/search/raw 已退役并返回 410，不回退 Night-All。`,
   }
   if (platform === 'telegram') return {
     ...row, providers: [], migrationStatus: 'local',
+    readOnlyReason: 'Telegram 在此检索 Hub 已收录数据，没有付费上游供应商选路。数据采集配置与此搜索接口分别管理。',
     routeSummary: 'Telegram 从 Hub 本地已采集数据检索。本机已核查的 po-infra 源码使用 data/canonical/search；也有 data/telegram/search 和 data/search 入口，不经过 Night-All 或社交供应商。',
   }
   return row
@@ -59,10 +64,12 @@ function accountPlatform(platform, operation) {
   const row = historicalPlatform(platform, operation)
   if (platform === 'twitter') return {
     ...row, migrationStatus: 'conditional',
+    readOnlyReason: 'Twitter 账号服务当前仅使用 RapidAPI。Hub 专用合同已直连，旧账号兼容合同仍经 Night-All；切换入口需要按各自合同改造调用方，不是供应商默认值切换。',
     routeSummary: `data/social/${operation} 是 Hub 直连 RapidAPI 的 Twitter 专用合同；/search/${operation} 兼容入口仍经 Night-All，默认 RapidAPI。本机 po-infra 源码使用兼容入口，不能据此确认线上调用版本。两类入口不能视为同一响应合同。`,
   }
   if (platform === 'xiaohongshu') return {
     ...row, migrationStatus: 'conditional',
+    readOnlyReason: '已支持的单账号形状使用 TikHub，其他形状保留兼容链路。账号内容与资料尚无经过此合同适配的第二供应商，关键词搜索策略不会改变这里的路由。',
     routeSummary: operation === 'crawl'
       ? '单一账号、posts、每页 20 条及受支持游标等形状，在 Hub 操作启用且为正式 Key 时直连 TikHub；其他兼容形状仍经 Night-All。'
       : '单一账号和受支持标识等形状，在 Hub 操作启用且为正式 Key 时直连 TikHub；批量或其他兼容形状仍经 Night-All。',
