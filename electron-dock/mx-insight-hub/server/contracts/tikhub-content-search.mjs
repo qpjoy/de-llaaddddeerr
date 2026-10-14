@@ -214,6 +214,41 @@ function kuaishouDiagnostic(entry) {
     && !['like_count', 'likeCount', 'comment_count', 'commentCount', 'view_count', 'viewCount', 'share_count', 'forward_count', 'collect_count']
       .some(name => value[name] != null || stats[name] != null)
 }
+function kuaishouCardJson(value, fields) {
+  if (!cardString(value) || Buffer.byteLength(value) > 65536) return false
+  try { return cardShape(JSON.parse(value), fields, Object.keys(fields)) } catch { return false }
+}
+const kuaishouRelatedSearch = value => cardShape(value, {
+  expTag: cardString, keyword: cardString, iconText: cardString, subtagType: cardNumber, type: cardString,
+  extParams: value => kuaishouCardJson(value, {
+    reco_reason: cardString, sever_path: cardString, module: cardString, request_source: cardString,
+  }), iconColor: cardString,
+}, ['expTag', 'keyword', 'iconText', 'subtagType', 'type', 'extParams', 'iconColor'])
+function kuaishouRelatedSearchesMetadata(entry) {
+  // Fixed related-search envelope from the retained comprehensive-search page.
+  // Every key and recommendation is validated; numeric itemType nine alone
+  // never authorizes dropping a card or a real post embedded beside metadata.
+  return cardShape(entry, {
+    itemType: value => value === 9,
+    position: cardNumber, atmosphereType: cardNumber,
+    relatedSearches: value => Array.isArray(value) && value.length > 0 && value.length <= 100,
+    itemTransferInfo: value => kuaishouCardJson(value, { refer_single_double_type: cardNumber }),
+    rank: cardNumber,
+    extInfo: value => cardShape(value, { styleType: cardNumber, screenItemKey: cardString, lines: cardNumber, rsType: cardNumber },
+      ['styleType', 'screenItemKey', 'lines', 'rsType']),
+    isSingleColumnMode: cardBoolean,
+  }, ['itemType', 'position', 'atmosphereType', 'relatedSearches', 'itemTransferInfo', 'rank', 'extInfo', 'isSingleColumnMode'])
+}
+export function isKuaishouRelatedSearchesCard(entry) {
+  return kuaishouRelatedSearchesMetadata(entry) && entry.relatedSearches.every(kuaishouRelatedSearch)
+}
+export function kuaishouRelatedSearchesCardCoverage(entry) {
+  const words = entry?.relatedSearches, bounded = Array.isArray(words) && words.length <= 100
+  return { metadataAccepted: kuaishouRelatedSearchesMetadata(entry), relatedSearchCount: Array.isArray(words) ? words.length : null,
+    inspectedCount: bounded ? words.length : 0,
+    invalidIndexes: bounded ? words.flatMap((word, index) => kuaishouRelatedSearch(word) ? [] : [index]) : [],
+    truncated: Array.isArray(words) && !bounded }
+}
 function zhihuRow(entry, capturedAt) {
   const value = entry.type === 'search_result' && object(entry.object) ? entry.object : entry
   const id = identity(value.id), questionId = identity(value.question?.id), author = object(value.author) ? value.author : {}
@@ -311,7 +346,7 @@ export function projectTikHubContentSearch(result, request) {
     if (!object(entry)) throw new Error('invalid_content_search_entry')
     const type = first(entry.type, entry.itemType)
     if (['relevant_query', 'knowledge_ad', 'user', 'search_user', 'related_search', 'suggestion', 'keyword', 'hot_timing'].includes(type)) { nonPostCount++; continue }
-    if (request.platform === 'kuaishou' && kuaishouDiagnostic(entry)) { nonPostCount++; continue }
+    if (request.platform === 'kuaishou' && (kuaishouDiagnostic(entry) || isKuaishouRelatedSearchesCard(entry))) { nonPostCount++; continue }
     if (request.platform === 'douyin') {
       if (isDouyinRelatedWordsCard(entry)) { nonPostCount++; continue }
       entry = object(entry.data?.aweme_info) ? entry.data.aweme_info : object(entry.aweme_info) ? entry.aweme_info

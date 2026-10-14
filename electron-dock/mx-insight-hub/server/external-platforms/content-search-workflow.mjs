@@ -1,10 +1,29 @@
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
-import { normalizeTikHubContentSearchRequest, projectTikHubContentSearch, TIKHUB_CONTENT_SEARCH_VERSION } from '../contracts/tikhub-content-search.mjs'
+import { normalizeTikHubContentSearchRequest, projectTikHubContentSearch, contentSearchDataItem, TIKHUB_CONTENT_SEARCH_VERSION } from '../contracts/tikhub-content-search.mjs'
 import { rawSearchRecords, RAW_SEARCH_DATASET } from '../contracts/raw-search.mjs'
 import { isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { ContentSearchStateStore } from './content-search-store.mjs'
+
+// Validate every persisted/served projection before a paid page is classified
+// as succeeded. The complete raw receipt may contain unused JSONB-unsafe data.
+export function projectContentPage(result, request) {
+  const projected = projectTikHubContentSearch(result, request)
+  if (!isPostgresSafeJsonValue(projected.acquiredItems) || !isPostgresSafeJsonValue(projected.providerPage)
+    || !isPostgresSafeJsonValue(projected.acquiredItems.map(contentSearchDataItem))) {
+    throw new Error('invalid_content_search_projection')
+  }
+  const records = rawSearchRecords({ data: { raw_info: '[]', raw_data: JSON.stringify(projected.acquiredItems), page: {}, meta: {} } }, request.platform, 'tikhub')
+  // Canonical records intentionally alias some fields and contain Date values.
+  // Validate each JSONB field using the queue's existing ISO time semantics;
+  // do not stringify arbitrary values first and hide NaN/Infinity/-0 changes.
+  if (!records.every(record => Object.entries(record).every(([name, value]) => isPostgresSafeJsonValue(
+    ['eventTime', 'collectedAt', 'editedAt', 'deletedAt'].includes(name) && value instanceof Date ? value.toISOString() : value,
+  )))) throw new Error('invalid_content_search_projection')
+  return { projected, records }
+}
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const unavailable = () => new AppError(409, 'search_page_unavailable', 'The saved content page cannot be continued; restart explicitly')
@@ -62,7 +81,6 @@ export async function runContentSearch({ gateway, context, request, delivery, de
   const parentLease = { consumerId: context.consumer.id, fingerprint: delivery.fingerprint,
     ownerRequestId: delivery.usageRequestId, expiresAt: new Date(deadlineAt).toISOString() }
   const childLease = { ...parentLease, operation: sample.operation, endpointKey: sample.endpointKey, contractVersion: sample.endpointContractVersion }
-  const maxCalls = request.standard ? 3 : 50
   let calls = 0, bytes = 0, capturedAt = null, ownsParent = false, ownsChild = false, entered = false
   let currentCall = null, currentEvidence = null, costReservation = null, settledFailure = false, retainLease = false, stopped = false
   let phase = 'admission'
@@ -143,12 +161,12 @@ export async function runContentSearch({ gateway, context, request, delivery, de
         const acquiredRequest = normalizeTikHubContentSearchRequest({ platform: request.platform, query: job.query,
           pageSize: request.pageSize, params: request.params, page: job.buffer.providerPage,
           providerCursor: job.buffer.providerCursor, maxQueryLength: request.standard ? 500 : 2048 })
-        const projected = projectTikHubContentSearch({ publicBody: { data: page.payload.data, meta: { capturedAt: page.capturedAt } } }, acquiredRequest)
+        const { projected } = projectContentPage({ publicBody: { data: page.payload.data, meta: { capturedAt: page.capturedAt } } }, acquiredRequest)
         consume(projected, { ...page, callId: job.buffer.callId }, job, index, job.buffer.offset, job.buffer.hash)
       }
       const tokens = new Set()
       while (rowsByJob[index].length < request.pageSize && !job.buffer && !job.done && !job.manualContinuation) {
-        if (calls >= maxCalls) { stop('dispatch_limit'); break }
+        if (!request.standard && calls >= 50) { stop('dispatch_limit'); break }
         if (job.upstreamPages >= 15) { job.done = true; stop('upstream_page_limit'); break }
         if (bytes + 8388608 > 12582912) { stop('archive_byte_limit'); break }
         if (!enoughTime()) { stop('deadline'); break }
@@ -193,12 +211,13 @@ export async function runContentSearch({ gateway, context, request, delivery, de
             costControl: cost.costMinor === 0 ? null : cost, costReservationId: costReservation.id, operationControl: control })
           calls++; job.upstreamPages++; job.started = true; tokens.add(token)
           const callStart = performance.now()
-          let result, projected
+          let result, projected, records
           try {
             phase = 'provider_request'
-            result = await gateway.adapter.forwardNative(request.recipe.key, { params: nativeRequest.upstreamQuery }, { credential: credential.credential })
+            result = await gateway.adapter.forwardNative(request.recipe.key, { params: nativeRequest.upstreamQuery }, { credential: credential.credential,
+              contentSearchProjection: request.standard && request.platform === 'kuaishou' })
             phase = 'project_response'
-            try { projected = projectTikHubContentSearch(result, nativeRequest) }
+            try { ({ projected, records } = projectContentPage(result, nativeRequest)) }
             catch { throw new TikHubUpstreamError('Content-search response could not be normalized', {
               outcome: 'succeeded_unusable', billed: true, httpStatus: 200, businessCode: 200,
               errorCode: 'invalid_content_search_contract', affectsCircuit: true,
@@ -227,8 +246,6 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           if (!receipt || receipt.bodySize > 8388608) throw unavailable()
           phase = 'stage_evidence'
           await store.stageProviderEvidence(currentEvidence)
-          phase = 'normalize_ingest'
-          const records = rawSearchRecords({ data: { raw_info: '[]', raw_data: JSON.stringify(projected.acquiredItems), page: {}, meta: {} } }, request.platform, 'tikhub')
           phase = 'finish_step'
           await store.finishProviderStep({ ...currentEvidence, ingestJob: { payload: { kind: 'external-platform-result', providerKey: 'tikhub',
             consumerId: context.consumer.id, datasetId: request.standard ? 'night-all.search.v1' : RAW_SEARCH_DATASET,

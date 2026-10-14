@@ -6,7 +6,7 @@ import { FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY, projectFacebookSearch, facebo
 import { projectDataSearch } from '../contracts/hub-data-search.mjs'
 import { rawSearchRecords } from '../contracts/raw-search.mjs'
 
-const MAX_CALLS = 3, MAX_PAGES = 15, MAX_BYTES = 12 * 1024 * 1024
+const MAX_PAGES = 15, MAX_BYTES = 12 * 1024 * 1024
 const PAGE_BYTES = { rapidapi: 4 * 1024 * 1024, justone: 8 * 1024 * 1024 }
 const hash = rows => createHash('sha256').update(JSON.stringify(rows)).digest('hex')
 const unavailable = () => new AppError(409, 'search_page_unavailable', 'The saved Facebook page cannot be continued; restart explicitly')
@@ -110,7 +110,6 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
     }
     while (rows.length < request.pageSize && !buffer) {
       if (providerCursor && tokens.has(providerCursor)) { stopReason = 'repeated_cursor'; providerCursor = null; break }
-      if (calls >= MAX_CALLS) { stopReason = 'dispatch_limit'; break }
       if (upstreamPages >= MAX_PAGES) { stopReason = 'upstream_page_limit'; break }
       if (sources.length && !providerCursor) break
       let currentCall = null, evidence = null, costReservation = null, childLease = null, entered = false
@@ -210,7 +209,7 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         if (failure) {
           const policyNow = await policyStore.facebook()
           const mayFallback = provider === 'rapidapi' && failure.evidence.httpStatus === 429
-            && failure.evidence.outcome === 'rejected' && policyNow.mode === 'auto' && !pinned && !inputCursor && calls < MAX_CALLS
+            && failure.evidence.outcome === 'rejected' && policyNow.mode === 'auto' && !pinned && !inputCursor && upstreamPages < MAX_PAGES
           if (mayFallback) {
             await target.platformStore.finishProviderStep({ ...evidence, affectsCircuit: false })
             currentCall = null

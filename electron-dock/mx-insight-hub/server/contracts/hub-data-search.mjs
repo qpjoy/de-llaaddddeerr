@@ -110,7 +110,7 @@ export function projectDataSearch(result, request) {
   const warnings = [...(raw.warnings || [])]
   if (request.platform === 'twitter' && request.pageSize > request.providerRequest.count) warnings.push({
     code: 'provider_page_size_limit',
-    message: 'Twitter requests at most 50 items per provider call; Hub fills pages within its dispatch limit and retains any buffered overflow.',
+    message: 'Twitter requests at most 50 items per provider call; Hub fills pages while continuation and acquisition controls allow, retaining any buffered overflow.',
   })
   const body = { data: { contractVersion: 'night-all.data-search.v1', platform: request.platform, query: request.query,
     items, pageInfo: { pageIndex: request.page, pageSize: request.pageSize, returnedCount: items.length,

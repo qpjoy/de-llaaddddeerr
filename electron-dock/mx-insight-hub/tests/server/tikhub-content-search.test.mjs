@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fixtures from '../fixtures/tikhub-content-search.json' with { type: 'json' }
 import { TIKHUB_CONTENT_SEARCH_RECIPES, normalizeTikHubContentSearchRequest,
-  projectTikHubContentSearch, contentSearchLegacyRow, contentSearchDataItem } from '../../server/contracts/tikhub-content-search.mjs'
+  projectTikHubContentSearch, contentSearchLegacyRow, contentSearchDataItem,
+  isKuaishouRelatedSearchesCard, kuaishouRelatedSearchesCardCoverage } from '../../server/contracts/tikhub-content-search.mjs'
 import { nativeForwardingEndpoint } from '../../server/contracts/native-forwarding.mjs'
 import { rawSearchRecords } from '../../server/contracts/raw-search.mjs'
 import { isPostgresSafeJsonValue } from '../../server/core/postgres-json.mjs'
@@ -329,6 +330,110 @@ test('Kuaishou Night-All diagnostic ID aliases exclude only known feedback cards
   }
   assert.throws(() => project('kuaishou', { feeds: [{ external_id: 'unknown-card', title: '未知结构' }], pcursor: 'no_more' }),
     /invalid_content_search_identity/, 'unknown cards remain a contract error rather than being silently dropped')
+})
+
+// Types and keys follow the verified v9 receipt's related-search card; all
+// words, screen keys and transfer values here are synthetic.
+const kuaishouRelatedSearchesCard = () => ({ itemType: 9, position: 5, atmosphereType: 0,
+  relatedSearches: Array.from({ length: 8 }, (_, index) => ({ expTag: 'fixture-tag', keyword: `fixture-word-${index}`,
+    iconText: '', subtagType: 0, type: 'fixture-type',
+    extParams: JSON.stringify({ reco_reason: 'fixture-reason', sever_path: 'fixture-path', module: 'fixture-module', request_source: 'fixture-source' }),
+    iconColor: 'fixture-color' })),
+  itemTransferInfo: JSON.stringify({ refer_single_double_type: 0 }), rank: 5,
+  extInfo: { styleType: 0, screenItemKey: 'fixture-screen-key', lines: 2, rsType: 0 }, isSingleColumnMode: true,
+})
+
+test('Kuaishou fixed related-search card excludes one non-post while retaining all eleven source entries', () => {
+  const entries = Array.from({ length: 10 }, (_, index) => ({ itemType: 5,
+    feed: { photoId: `real-photo-${index}`, caption: `完整正文 ${index}`, like_count: 0, comment_count: 2,
+      main_mv_url: `https://example.test/video-${index}.mp4?signature=a%2Fb` } }))
+  entries.splice(5, 0, kuaishouRelatedSearchesCard())
+  const payload = { mixFeeds: entries, pcursor: 'native-next', has_more: true }, original = structuredClone(payload)
+  assert.equal(Object.keys(entries[5]).length, 8)
+  assert.equal(isKuaishouRelatedSearchesCard(entries[5]), true)
+  assert.deepEqual(kuaishouRelatedSearchesCardCoverage(entries[5]), {
+    metadataAccepted: true, relatedSearchCount: 8, inspectedCount: 8, invalidIndexes: [], truncated: false,
+  })
+  const projected = project('kuaishou', payload)
+  assert.equal(projected.items.length, 10); assert.equal(projected.nonPostCount, 1)
+  assert.equal(projected.providerPage.sourceCount, 11); assert.equal(projected.duplicateCount, 0)
+  assert.deepEqual(projected.providerPage.nextParams, { pcursor: 'native-next' })
+  assert.equal(projected.items[0].like_count, 0)
+  assert.deepEqual(contentSearchDataItem(projected.items[0]).media.videos, ['https://example.test/video-0.mp4?signature=a%2Fb'])
+  assert.deepEqual(projected.publicBody.data, original)
+  assert.deepEqual(projected.restrictedResponseArchive, { sha256: 'immutable-archive' })
+  assert.ok(isPostgresSafeJsonValue(projected.acquiredItems))
+  assert.deepEqual(payload, original)
+})
+
+test('Kuaishou related-search recognition validates every recommendation including rows three and eight', () => {
+  for (let index = 0; index < 8; index++) for (const change of [{ keyword: null }, { unknown: null },
+    { video: { url: 'https://example.test/hidden.mp4' } }, { photoId: 'hidden-post' }]) {
+    const card = kuaishouRelatedSearchesCard()
+    Object.assign(card.relatedSearches[index], change)
+    assert.equal(isKuaishouRelatedSearchesCard(card), false)
+    assert.deepEqual(kuaishouRelatedSearchesCardCoverage(card).invalidIndexes, [index])
+    assert.throws(() => project('kuaishou', { mixFeeds: [card], pcursor: 'no_more' }), /invalid_content_search_identity/)
+  }
+  const full = kuaishouRelatedSearchesCard()
+  full.relatedSearches = Array.from({ length: 100 }, () => structuredClone(full.relatedSearches[0]))
+  assert.equal(isKuaishouRelatedSearchesCard(full), true)
+  full.relatedSearches[99].extParams = JSON.stringify({ reco_reason: '', sever_path: '', module: '', request_source: '', hidden: null })
+  assert.deepEqual(kuaishouRelatedSearchesCardCoverage(full).invalidIndexes, [99])
+  full.relatedSearches.push(structuredClone(full.relatedSearches[0]))
+  assert.equal(isKuaishouRelatedSearchesCard(full), false)
+  assert.equal(kuaishouRelatedSearchesCardCoverage(full).truncated, true)
+  assert.equal(kuaishouRelatedSearchesCardCoverage(full).inspectedCount, 0)
+})
+
+test('Kuaishou related-search metadata and encoded JSON accept only the complete observed typed key sets', () => {
+  const reject = card => {
+    assert.equal(isKuaishouRelatedSearchesCard(card), false)
+    assert.throws(() => project('kuaishou', { mixFeeds: [card], has_more: false }), /invalid_content_search_identity/)
+  }
+  for (const name of Object.keys(kuaishouRelatedSearchesCard())) {
+    const card = kuaishouRelatedSearchesCard(); delete card[name]; reject(card)
+  }
+  for (const changes of [{ itemType: '9' }, { position: '5' }, { atmosphereType: null }, { rank: -0 },
+    { rank: Infinity }, { isSingleColumnMode: 1 }, { relatedSearches: [] }, { unknown: null }, { unknown: 'scalar' }]) {
+    reject({ ...kuaishouRelatedSearchesCard(), ...changes })
+  }
+  for (const info of [null, {}, 'null', '[]', '{', '{}', '{"refer_single_double_type":"0"}',
+    '{"refer_single_double_type":0,"unknown":null}', '{"refer_single_double_type":0,"photo":{"photoId":"hidden"}}']) {
+    reject({ ...kuaishouRelatedSearchesCard(), itemTransferInfo: info })
+  }
+  for (const changes of [{ unknown: null }, { lines: '2' }, { screenItemKey: {} }]) {
+    const card = kuaishouRelatedSearchesCard(); Object.assign(card.extInfo, changes); reject(card)
+  }
+  for (const name of Object.keys(kuaishouRelatedSearchesCard().relatedSearches[0])) {
+    const card = kuaishouRelatedSearchesCard(); delete card.relatedSearches[7][name]; reject(card)
+  }
+  for (const info of [null, '{}', '{', '[]', '{"reco_reason":"","server_path":"","module":"","request_source":""}',
+    JSON.stringify({ reco_reason: '', sever_path: '', module: '', request_source: '', unknown: null }),
+    JSON.stringify({ reco_reason: '词'.repeat(23000), sever_path: '', module: '', request_source: '' })]) {
+    const card = kuaishouRelatedSearchesCard(); card.relatedSearches[7].extParams = info; reject(card)
+  }
+})
+
+test('Kuaishou itemType-nine real posts are never hidden by related-search metadata', () => {
+  const post = { photoId: 'real-type-nine', caption: '真实正文', like_count: 0,
+    main_mv_url: 'https://example.test/real.mp4?signature=a%2Fb' }
+  for (const wrap of [value => value, value => ({ feed: value }), value => ({ photo: value })]) {
+    const card = { ...kuaishouRelatedSearchesCard(), ...wrap(post) }
+    assert.equal(isKuaishouRelatedSearchesCard(card), false)
+    const projected = project('kuaishou', { mixFeeds: [card], has_more: false })
+    assert.equal(projected.nonPostCount, 0); assert.equal(projected.items[0].content_id, post.photoId)
+    assert.equal(projected.items[0].full_text, post.caption)
+    assert.deepEqual(contentSearchDataItem(projected.items[0]).media.videos, [post.main_mv_url])
+  }
+  for (const [key, value] of Object.entries({ cid: null, photo_id: '', photo_info: {}, data: {}, user: {}, author: {},
+    video: {}, images: [], caption: '', text: '', title: '', url: '', timestamp: 0, like_count: 0, stats: {} })) {
+    const card = { ...kuaishouRelatedSearchesCard(), [key]: value }
+    assert.equal(isKuaishouRelatedSearchesCard(card), false, key)
+    assert.throws(() => project('kuaishou', { mixFeeds: [card], has_more: false }), /invalid_content_search_identity/)
+  }
+  assert.throws(() => project('kuaishou', { mixFeeds: [{ itemType: 9, relatedSearches: [{ keyword: 'unverified' }] }], has_more: false }),
+    /invalid_content_search_identity/)
 })
 
 test('Zhihu search_result preserves original article/question titles, full content vs explicit preview and fixed next URL fields only', () => {

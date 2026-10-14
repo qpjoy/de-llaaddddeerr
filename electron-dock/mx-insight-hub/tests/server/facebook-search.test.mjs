@@ -199,24 +199,24 @@ test('Facebook standard media separates only an explicit video poster and preser
     images: [photo, poster, variant, landing], videos: [] }, 'without playback evidence no photo is removed')
 })
 
-test('Facebook new standard deliveries distinguish video cover and bounded short pages while raw contracts and exact replay stay intact', async () => {
+test('Facebook new standard deliveries distinguish video cover and terminal short pages while raw contracts and exact replay stay intact', async () => {
   const photo = 'https://assets.example/photo.jpg', poster = 'https://assets.example/poster.jpg', video = 'https://assets.example/movie.mp4'
   const landing = 'https://www.facebook.com/photo.php?fbid=123'
   const source = { ...post, image: { uri: photo }, album_preview: [{ uri: photo }, { uri: landing }],
     video_thumbnail: { uri: poster }, video_files: [{ url: video }, { url: video }] }
   for (const mode of ['auto', 'justone']) {
     const h = await harness({ mode, respond: ({ provider, ordinal }) => facebookResponse(provider,
-      [{ ...source, post_id: `media-${ordinal}` }], `media-cursor-${ordinal}`) })
+      [{ ...source, post_id: `media-${ordinal}` }], ordinal < 3 ? `media-cursor-${ordinal}` : null) })
     const body = { platform: 'facebook', query: 'fixture', pageSize: 20, type: 'stable' }
     const invoke = () => h.service.search(h.context, { body, idempotencyKey: 'facebook-media-standard', path: '/api/v1/data/search' })
     const standard = await invoke()
     assert.ok(isNightAllDataSearchV1Envelope(standard.body))
     assert.deepEqual(standard.body.data.items[0].media, { coverUrl: poster, images: [photo, landing], videos: [video] })
     assert.equal(standard.body.data.items[0].title, null)
-    assert.equal(standard.body.data.status, 'partial')
-    assert.equal(standard.body.data.pageInfo.hasMore, true)
+    assert.equal(standard.body.data.status, 'ok')
+    assert.equal(standard.body.data.pageInfo.hasMore, false)
     assert.equal(standard.body.data.meta.providerCalls, 3)
-    assert.equal(h.calls.length, 3, 'standard search fills only within its actual-dispatch bound')
+    assert.equal(h.calls.length, 3, 'standard search stops when the provider explicitly exhausts its continuation')
     assert.deepEqual((await invoke()).body, standard.body)
     assert.equal(h.calls.length, 3)
     const raw = await h.invoke({ platform: 'facebook', query: 'fixture', count: 20 }, 'facebook-media-raw')
@@ -267,26 +267,32 @@ test('Facebook standard search fills from same-provider pages, buffers every pai
   }
 })
 
-test('Facebook initial confirmed 429 counts toward the three-call cap and preserves one settlement and provider pinning', async () => {
+test('Facebook initial confirmed 429 permits five successful fill pages with one settlement and provider pinning', async () => {
   const h = await harness({ respond: ({ provider, ordinal }) => provider === 'rapidapi'
     ? facebookResponse(provider, [], null, 429)
-    : facebookResponse(provider, fixturePosts((ordinal - 2) * 5, 5), `justone-${ordinal}`) })
+    : facebookResponse(provider, fixturePosts((ordinal - 2) * 4, 4), `justone-${ordinal}`) })
   const body = { platform: 'facebook', query: 'fixture', pageSize: 20, type: 'stable' }
   const first = await invokeStandard(h, body, 'fb-fill-fallback-first')
-  assert.deepEqual(h.calls.map(row => row.provider), ['rapidapi', 'justone', 'justone'])
-  assert.equal(first.body.data.meta.providerCalls, 3)
-  assert.equal(first.body.data.items.length, 10)
-  assert.equal(first.body.data.status, 'partial')
+  assert.deepEqual(h.calls.map(row => row.provider), ['rapidapi', ...Array(5).fill('justone')])
+  assert.equal(first.body.data.meta.providerCalls, 6)
+  assert.equal(first.body.data.items.length, 20)
+  assert.equal(first.body.data.status, 'ok')
   assert.equal(first.body.data.pageInfo.hasMore, true)
   assert.equal(h.usage.requests.size, 1)
   assert.equal([...h.usage.requests.values()][0].status, 'committed')
   assert.equal(h.stores.rapidapi.calls.size, 1)
   assert.equal([...h.stores.rapidapi.calls.values()][0].outcome, 'rejected')
-  assert.equal(h.stores.justone.calls.size, 2)
-  assert.deepEqual(h.stores.justone.ingestJobs.map(job => job.payload.records.length), [5, 5])
+  assert.equal(h.stores.justone.calls.size, 5)
+  assert.deepEqual(h.stores.justone.ingestJobs.map(job => job.payload.records.length), Array(5).fill(4))
+  assert.equal(h.stores.justone.restrictedResponseArchives.size, 5)
+  const saved = [...h.usage.requests.values()][0]
+  assert.equal(saved.acquisitionRequest.facebookFill.sources.length, 5)
+  assert.equal(saved.acquisitionRequest.facebookFill.upstreamPages, 6)
+  assert.deepEqual((await invokeStandard(h, body, 'fb-fill-fallback-first')).body, first.body)
+  assert.equal(h.calls.length, 6)
   h.policy.mode = 'rapidapi'
   await invokeStandard(h, { ...body, cursor: first.body.data.pageInfo.nextCursor }, 'fb-fill-fallback-second')
-  assert.ok(h.calls.slice(3).every(row => row.provider === 'justone'), 'continuation never sends a JustOne cursor to RapidAPI')
+  assert.ok(h.calls.slice(6).every(row => row.provider === 'justone'), 'continuation never sends a JustOne cursor to RapidAPI')
 })
 
 test('Facebook standard fills an empty or duplicate intermediate page without returning duplicates', async () => {

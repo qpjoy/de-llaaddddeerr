@@ -164,12 +164,17 @@ for (const postgres of [false,true]) for (const provider of ['rapidapi','justone
     }
     await f.setArchive({bodySha256:'0'.repeat(64)});assert.equal(await read(),null)
   })
-  test(`${name} Facebook commits carry plus private source in one settlement`,options,async t=>{
-    const f=await fixture(t,postgres,provider),own=randomUUID()
-    await f.insertCall({...f.call,id:own,usageRequestId:f.target.id})
-    await f.insertArchive(own,f.archive)
+  test(`${name} Facebook commits carry plus five private sources in one settlement`,options,async t=>{
+    const f=await fixture(t,postgres,provider),owned=Array.from({length:5},()=>randomUUID()),own=owned.at(-1)
+    for(const id of owned) {
+      await f.insertCall({...f.call,id,usageRequestId:f.target.id})
+      await f.insertArchive(id,f.archive)
+    }
     assert.equal(await f.store.facebookPageFor({...f.input,callId:own}),null)
-    const commit={...f.saved,sources:[...f.saved.sources,{...f.saved.sources[0],callId:own}]}
+    const commit={...f.saved,lineage:{...f.saved.lineage,upstreamPages:6},
+      sources:[...f.saved.sources,...owned.map(callId=>({...f.saved.sources[0],callId}))]}
+    await assert.rejects(f.store.commitFacebookFillDelivery({...commit,
+      sources:Array.from({length:17},()=>({...f.saved.sources[0],callId:randomUUID()}))}),{code:'search_page_unavailable'})
     if(postgres) {
       await f.db.exec('ALTER TABLE external_platform.gateway_requests ADD CONSTRAINT force_rollback CHECK (false)')
       await assert.rejects(f.store.commitFacebookFillDelivery(commit))
@@ -183,7 +188,7 @@ for (const postgres of [false,true]) for (const provider of ['rapidapi','justone
     assert.deepEqual(target.responseBody,commit.responseBody)
     assert.deepEqual(target.acquisitionRequest.facebookFill.sources,commit.sources)
     assert.deepEqual((await f.getUsage(f.source.id)).responseBody,f.source.responseBody)
-    assert.equal(counts.gateways,1);assert.equal(counts.captures,1);assert.equal(counts.charge,'captured')
+    assert.equal(counts.calls,6);assert.equal(counts.gateways,1);assert.equal(counts.captures,1);assert.equal(counts.charge,'captured')
     assert.equal(counts.provider,provider);assert.equal(counts.sourceCallId,own)
     assert.ok(await f.store.facebookPageFor({...f.input,callId:own}))
     await assert.rejects(f.store.commitFacebookFillDelivery(commit),{code:'search_page_unavailable'})

@@ -897,30 +897,34 @@ test('Twitter fill de-duplicates previous delivered pages and carries an arbitra
     'one representative gateway event per delivered HTTP request, not per acquisition')
 })
 
-test('Twitter fill caps real dispatches at three and carries its upstream traversal count without resetting', async () => {
+test('Twitter fills beyond three real dispatches and carries its upstream traversal count without resetting', async () => {
   const h = await harness({ platform: 'twitter', twitterData: url => {
     const index = Number(url.searchParams.get('cursor')?.replace('bounded-', '') || 0)
-    return twitterTimeline([{ ...twitterZeroPost, rest_id: String(index + 1) }], `bounded-${index + 1}`)
+    return twitterTimeline(Array.from({ length: 4 }, (_, offset) => ({ ...twitterZeroPost,
+      rest_id: String(index * 4 + offset + 1) })), `bounded-${index + 1}`)
   } })
   const body = { platform: 'twitter', query: 'fixture', pageSize: 20, type: 'stable' }
   let cursor, count = 0
-  for (let page = 1; page <= 5; page++) {
+  for (let page = 1; page <= 3; page++) {
     const result = await h.invokeData({ ...body, ...(cursor ? { cursor } : {}) }, `twitter-bounded-${page}`)
-    assert.equal(result.body.data.items.length, 3)
-    assert.equal(result.body.data.meta.providerCalls, 3)
-    assert.equal(result.body.data.status, 'partial')
+    assert.equal(result.body.data.items.length, 20)
+    assert.equal(result.body.data.meta.providerCalls, 5)
+    assert.equal(result.body.data.status, page < 3 ? 'ok' : 'partial')
     count += result.body.data.items.length
     cursor = result.body.data.pageInfo.nextCursor
-    if (page < 5) {
+    if (page < 3) {
       const codec = createDataSearchCursorCodec(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}`)
-      assert.equal(codec.decode(cursor).fill.upstreamPages, page * 3)
+      assert.equal(codec.decode(cursor).fill.upstreamPages, page * 5)
     } else assert.equal(cursor, null)
   }
   assert.equal(h.calls.length, 15)
-  assert.equal(count, 15)
+  assert.equal(count, 60)
+  assert.equal(h.platformStore.restrictedResponseArchives.size, 15)
+  assert.equal(h.platformStore.ingestJobs.length, 15)
+  assert.equal(h.store.requests.size, 3)
 })
 
-test('Twitter fill closes a known repeated Bottom loop at the dispatch limit without publishing it for another purchase', async () => {
+test('Twitter fill closes a known repeated Bottom loop without publishing it for another purchase', async () => {
   const h = await harness({ platform: 'twitter', twitterData: url => {
     const cursor = url.searchParams.get('cursor')
     const id = cursor === 'loop-A' ? '2' : cursor === 'loop-B' ? '3' : '1'

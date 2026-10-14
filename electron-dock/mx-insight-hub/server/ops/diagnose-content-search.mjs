@@ -21,7 +21,9 @@ const errors = ['external_platform_persistence_unknown', 'external_platform_call
   'upstream_outcome_unknown', 'request_outcome_unknown', 'external_platform_response_unusable', 'invalid_upstream_contract',
   'reservation_lease_expired', 'invalid_json', 'business_rejected', 'external_platform_rejected',
   'upstream_transport_error', 'upstream_deadline_exceeded', 'upstream_body_read_failed', 'upstream_response_too_large',
-  'invalid_upstream_encoding', 'invalid_upstream_json', 'proxy_route_unavailable', 'proxy_routes_unreachable']
+  'invalid_upstream_encoding', 'invalid_upstream_json', 'invalid_upstream_content_type', 'upstream_payload_unrepresentable',
+  'upstream_rate_limited', 'upstream_auth_or_balance_unavailable', 'upstream_endpoint_unavailable',
+  'upstream_business_error', 'upstream_request_rejected', 'upstream_http_error', 'proxy_route_unavailable', 'proxy_routes_unreachable']
 const reasons = new Set(['invalid_content_search_shape', 'content_search_business_rejected', 'content_search_page_too_large',
   'invalid_content_search_entry', 'invalid_content_search_identity', 'invalid_content_search_pagination',
   'missing_content_search_continuation', 'invalid_content_search_continuation', 'invalid_content_search_capture_time'])
@@ -170,6 +172,58 @@ export function inspectDouyinEntryCoverage(payload, request, capturedAt) {
   })
   return { available: true, entryCount: data.data.length, examined: entries.length, truncated: data.data.length > entries.length, entries }
 }
+
+// Follow the current parser's fixed selection order, without guessing new
+// wrappers or treating an unrecognized card as a non-post. The per-row probes
+// keep the original pagination fields; adapter/credential checks are not replayed.
+export function inspectKuaishouEntryCoverage(payload, request, capturedAt) {
+  const data = payload?.data, paths = [['mixFeeds'], ['feeds'], ['result', 'items'], ['items'], ['data']]
+  const report = { mode: 'data_projection_only', adapterValidation: 'not_replayed',
+    limits: { maxEntries: 100, maxRejectedSchemas: 3, schemaMaxNodes: 300, schemaMaxDepth: 8, schemaArraySamples: 2 } }
+  let selectedPath = null, rows = null
+  for (const path of paths) {
+    const value = path.reduce((current, key) => current?.[key], data)
+    if (value != null) { selectedPath = path; rows = value; break }
+  }
+  if (selectedPath == null && Array.isArray(data)) { selectedPath = []; rows = data }
+  if (!Array.isArray(rows)) return { ...report, available: false,
+    reason: 'unrecognized_entry_container', selectedPath: selectedPath ? `payload.data.${selectedPath.join('.')}` : null,
+    dataSchema: inspectSingleCardSchema(data) }
+  let schemas = 0
+  const entries = rows.slice(0, report.limits.maxEntries).map((entry, index) => {
+    const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+    const wrappers = { entry, feed: entry?.feed, photo: entry?.photo, photo_info: entry?.photo_info,
+      photoInfo: entry?.photoInfo, data: entry?.data }
+    const selected = record(entry?.feed) ? { ...entry, ...entry.feed }
+      : record(entry?.photo) ? { ...entry, ...entry.photo } : entry
+    const probeData = selectedPath.length ? { ...data } : null
+    if (selectedPath.length) {
+      let target = probeData
+      for (const key of selectedPath.slice(0, -1)) { target[key] = { ...target[key] }; target = target[key] }
+      target[selectedPath.at(-1)] = [entry]
+    }
+    let projection
+    try {
+      const projected = projectTikHubContentSearch({ publicBody: { data: selectedPath.length ? probeData : [entry], meta: { capturedAt } } }, request)
+      projection = { state: 'candidate_accepts', itemCount: projected.acquiredItems.length,
+        nonPostCount: projected.nonPostCount, postgresSafeItems: isPostgresSafeJsonValue(projected.acquiredItems) }
+    } catch (error) {
+      projection = { state: 'candidate_rejects', reason: reasons.has(error.message) ? error.message : 'request_or_projection_rejected' }
+    }
+    const schema = projection.state === 'candidate_rejects' && schemas < report.limits.maxRejectedSchemas
+      ? (schemas++, inspectSingleCardSchema(entry)) : null
+    return { index, type: entryType(entry?.type), itemType: entryType(entry?.itemType),
+      selectedPath: record(entry?.feed) ? 'entry.feed' : record(entry?.photo) ? 'entry.photo' : 'entry',
+      wrappers: Object.fromEntries(Object.entries(wrappers).map(([path, value]) => [path, { kind: kind(value),
+        identities: Object.fromEntries(['cid', 'photo_id', 'photoId', 'id', 'external_id', 'externalId'].map(key => [key, identityState(value?.[key])])),
+        fields: Object.fromEntries(['caption', 'text', 'title', 'shareText', 'share_info', 'video', 'images', 'user', 'stats'].map(key => [key, kind(value?.[key])])) }])),
+      selectedIdentities: Object.fromEntries(['cid', 'photo_id', 'photoId', 'id'].map(key => [key, identityState(selected?.[key])])),
+      projection, ...(schema ? { schema } : {}) }
+  })
+  return { ...report, available: true, selectedPath: selectedPath.length ? `payload.data.${selectedPath.join('.')}` : 'payload.data',
+    entryCount: rows.length, examined: entries.length, truncated: rows.length > entries.length,
+    rejectedSchemas: schemas, entries }
+}
 export function inspectContentArchive(archive, snapshot, platform, { incidentSchema = false } = {}) {
   const bytes = archive?.body_bytes
   if (!(bytes instanceof Uint8Array) || !Number.isSafeInteger(Number(archive.body_size)) || bytes.length !== Number(archive.body_size)
@@ -193,6 +247,7 @@ export function inspectContentArchive(archive, snapshot, platform, { incidentSch
   }
   visit(payload, 'payload', 0)
   const report = { state: 'archive_verified', hashVerified: true, bodySize: bytes.length, bodySha256: archive.body_sha256,
+    projectionScope: 'data_projection_only', adapterValidation: 'not_replayed',
     shape: { containers: containers.slice(0, 30), samples: samples.slice(0, 12) } }
   if (incidentSchema && platform === 'douyin' && isDouyinIncidentCardSource(archive, payload)) {
     report.incidentCardSchema = { entryIndex: 4, ...inspectSingleCardSchema(payload.data.data[4]) }
@@ -207,6 +262,7 @@ export function inspectContentArchive(archive, snapshot, platform, { incidentSch
     request = normalizeTikHubContentSearchRequest({ platform, query, pageSize: body.pageSize ?? body.count ?? body.limit ?? 20,
       page: body.page ?? 1, params, maxQueryLength: 2048 })
     if (platform === 'douyin') report.entryCoverage = inspectDouyinEntryCoverage(payload, request, time(archive.captured_at))
+    if (incidentSchema && platform === 'kuaishou') report.entryCoverage = inspectKuaishouEntryCoverage(payload, request, time(archive.captured_at))
     const result = projectTikHubContentSearch({ publicBody: { data: payload.data, meta: { capturedAt: time(archive.captured_at) } } }, request)
     return { ...report, projection: { state: 'candidate_accepts', itemCount: result.acquiredItems.length,
       nonPostCount: result.nonPostCount, duplicateCount: result.duplicateCount,
@@ -350,7 +406,8 @@ export async function diagnoseContentSearch(pool, identifiers, { weiboQuery = 'ç
           EXISTS(SELECT 1 FROM mxq.jobs WHERE queue='mx-insight-hub:ingest' AND dedupe_key='external-platform:tikhub:' || $1::text) AS ingest_job`, [call.id])
         stage='inspect_archive'
         evidence.push({ callId:call.id, requestId:call.usage_request_id, relation:call.usage_request_id===request.id?'own':'quarantine_candidate',
-          operation:call.operation, endpointVersion:call.endpoint_version, contractVersion:call.contract_version,
+          operation:allowed(call.operation,[operation]), endpointVersion:allowed(call.endpoint_version,[endpointVersion]),
+          contractVersion:allowed(call.contract_version,[NATIVE_FORWARDING_VERSION]),
           outcome:allowed(call.outcome,['pending','succeeded','succeeded_unusable','unknown','rejected']), httpStatus:call.http_status,
           businessCode:call.business_code,billed:call.billed,itemCount:call.item_count,errorCode:allowed(call.error_code,errors),
           startedAt:time(call.started_at),completedAt:time(call.completed_at),persistence,
@@ -372,7 +429,7 @@ export async function diagnoseContentSearch(pool, identifiers, { weiboQuery = 'ç
     }
     stage='finish_readonly'
     await client.query('ROLLBACK')
-    return {diagnosticRevision:'content-search-diagnostic.v8',...DIAGNOSTIC_BUILD,runtimeNow:new Date().toISOString(),databaseNow:time(database.database_now),requests:reports,matchedRequestCount:requests.length}
+    return {diagnosticRevision:'content-search-diagnostic.v9',...DIAGNOSTIC_BUILD,runtimeNow:new Date().toISOString(),databaseNow:time(database.database_now),requests:reports,matchedRequestCount:requests.length}
   } catch(error) {
     if(client) await client.query('ROLLBACK').catch(()=>{})
     if(error && typeof error==='object') Object.defineProperty(error,'diagnosticContext',{value:{stage,requestId,callId},configurable:true})
@@ -385,7 +442,7 @@ export function contentDiagnosticFailure(error) {
     'resolve_fixed_recipe','lookup_provider_calls','read_persistence_status','inspect_archive','summarize_request','finish_readonly']
   const codes=['missing_parameter','unsupported_request_field','invalid_parameter','invalid_page_size','invalid_platform','invalid_query']
   const messages=['invalid_identifiers','invalid_weibo_query','database_url_required','diagnostic_contract_changed']
-  return {diagnosticRevision:'content-search-diagnostic.v8',...DIAGNOSTIC_BUILD,
+  return {diagnosticRevision:'content-search-diagnostic.v9',...DIAGNOSTIC_BUILD,
     error:messages.includes(error?.message)?error.message:'diagnostic_read_failed',
     stage:stages.includes(context.stage)?context.stage:'initialization',
     errorType:allowed(error?.name,['AppError','TypeError','RangeError','Error']),

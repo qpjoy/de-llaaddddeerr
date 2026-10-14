@@ -426,6 +426,7 @@ async function requestTikHubJson(
   endpointVersion,
   method = 'GET',
   marketplace = XIAOHONGSHU_PLATFORM,
+  allowUnrepresentableRaw = false,
 ) {
   const billedOnHttp200 = [XHS_RESEARCH_ENDPOINTS.note_detail.providerPath, XHS_BLOGGER_NOTES_V2.providerPath].includes(path)
   const url = new URL(path, adapter.baseUrl)
@@ -623,7 +624,7 @@ async function requestTikHubJson(
         billed: true, errorCode: 'invalid_upstream_content_type', affectsCircuit: true,
       }, persisted('invalid_content_type'))
     }
-    if (!isPostgresSafeJsonValue(raw)) {
+    if (!allowUnrepresentableRaw && !isPostgresSafeJsonValue(raw)) {
       throw upstreamError('TikHub returned JSON that cannot be represented in PostgreSQL', {
         outcome: 'succeeded_unusable', httpStatus, businessCode: 200,
         billed: true, errorCode: 'upstream_payload_unrepresentable', affectsCircuit: true,
@@ -864,14 +865,18 @@ export class TikHubAdapter {
     }
   }
 
-  async forwardNative(key, body, { capturedAt = null, credential: suppliedCredential } = {}) {
+  async forwardNative(key, body, { capturedAt = null, credential: suppliedCredential, contentSearchProjection = false } = {}) {
     if (nativeForwardingEndpoint(key)?.provider !== 'tikhub') throw new TypeError('Unsupported native endpoint')
+    // Only the standard Kuaishou workflow consumes a validated post projection.
+    // Its exact receipt remains authoritative even when unrelated raw fields
+    // cannot be stored as JSONB. Native/raw APIs keep their full-payload guard.
+    if (contentSearchProjection && key !== 't.kuaishou_app_search_comprehensive') throw new TypeError('Unsupported content projection endpoint')
     const request = normalizeNativeForwardingRequest(key, body)
     const resolvedCredential = suppliedCredential === undefined ? await this.resolveCredential() : credential(suppliedCredential)
     if (!resolvedCredential) throw new TypeError('TikHub credential is unavailable')
     const exchange = await requestTikHubJson(this, request.endpointPath, request.upstreamQuery,
       resolvedCredential, capturedAt, request.endpointVersion, request.method,
-      key.startsWith('wechat.') || request.marketplace === 'kuaishou_ec' ? request.marketplace : undefined)
+      key.startsWith('wechat.') || request.marketplace === 'kuaishou_ec' ? request.marketplace : undefined, contentSearchProjection)
     const persistence = exchange.persisted('accepted', exchange.acceptedAt)
     if (!Object.hasOwn(exchange.raw, 'data')) throw upstreamError('Native data envelope has no data', {
       outcome: 'succeeded_unusable', httpStatus: exchange.httpStatus, businessCode: 200,

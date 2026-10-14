@@ -161,7 +161,7 @@ function assertTwitterFill(input) {
   if (!lineage || lineage.version !== 'twitter-fill.v1' || !SHA256_PATTERN.test(lineage.scopeHash || '')
     || lineage.previousDeliveryId != null && !twitterPageIdentity(lineage.previousDeliveryId)
     || !Number.isInteger(lineage.upstreamPages) || lineage.upstreamPages < 0 || lineage.upstreamPages > 15
-    || !Array.isArray(sources) || sources.length < 1 || sources.length > 4 || new Set(sources.map(source => source.callId)).size !== sources.length
+    || !Array.isArray(sources) || sources.length < 1 || sources.length > 16 || new Set(sources.map(source => source.callId)).size !== sources.length
     || !['live', 'fresh_cache', 'stored_fallback'].includes(sourceMode)
     || responseBody?.data?.platform !== 'twitter' || responseBody.data.query !== input.query
     || responseBody.data.pageInfo?.pageSize !== input.pageSize

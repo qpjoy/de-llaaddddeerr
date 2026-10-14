@@ -25,14 +25,15 @@ const jobValid = job => job && typeof job === 'object' && !Array.isArray(job)
 const scopeMatches = (row, input, platform) => row && row.platform === platform && row.tenantId === input.tenantId
   && row.consumerId === input.consumerId && row.apiKeyId === input.apiKeyId && row.acquisitionRequest?.path === input.path
 
-function verifiedArchive(archive) {
+function verifiedArchive(archive, allowUnrepresentableRaw = false) {
   const bytes = archive?.bodyBytes
   if (!(bytes instanceof Uint8Array) || !Number.isSafeInteger(archive.bodySize) || archive.bodySize !== bytes.length
     || !bytes.length || bytes.length > 8388608 || !sha(archive.bodySha256)
     || createHash('sha256').update(bytes).digest('hex') !== archive.bodySha256 || !age(archive.capturedAt)) return null
   try {
     const payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/u, ''))
-    if (!payload || payload.code !== 200 || !Object.hasOwn(payload, 'data') || !isPostgresSafeJsonValue(payload)) return null
+    if (!payload || payload.code !== 200 || !Object.hasOwn(payload, 'data')
+      || !allowUnrepresentableRaw && !isPostgresSafeJsonValue(payload)) return null
     return { payload, bodySize: bytes.length, bodySha256: archive.bodySha256, capturedAt: new Date(archive.capturedAt).toISOString() }
   } catch { return null }
 }
@@ -134,7 +135,11 @@ export class ContentSearchStateStore {
       || !(usage.status === 'committed' && usage.responseStatus === 200
         || usage.id === input.ownUsageRequestId && usage.status === 'reserved')
       || usage.id !== input.ownUsageRequestId && usage.acquisitionRequest?.contentSearch?.scopeHash !== input.scopeHash) return null
-    const page = verifiedArchive(archive)
+    // Standard Kuaishou projects only validated content from the exact receipt;
+    // unrelated raw metadata need not have a JSONB representation. The workflow
+    // still validates delivered/ingested items and continuation state separately.
+    // Other platforms and legacy raw traversal keep their strict full-root gate.
+    const page = verifiedArchive(archive, this.platform === 'kuaishou' && input.path === '/api/v1/data/search')
     return page ? { ...page, sourceUsageRequestId: usage.id } : null
   }
 

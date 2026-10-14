@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { test } from 'node:test'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
@@ -216,34 +216,35 @@ test('Douyin fixed related-word schema preserves all eight source entries and de
   }
 })
 
-test('Douyin filtered cards do not alter the standard three-dispatch bound or provider-pinned continuation scope', async () => {
+test('Douyin fills beyond three pages while retaining every filtered source and provider-pinned continuation scope', async () => {
   const h = await harness({ platform: 'douyin', payload: (_call, n) => douyinMixedPage(n) })
   const body = { platform: 'douyin', query: '城市', pageSize: 30, params: { sort_type: '2' } }
   const first = await h.invokeData(body)
-  assert.equal(first.body.data.items.length, 21)
-  assert.equal(h.calls.length, 3)
+  assert.equal(first.body.data.items.length, 30)
+  assert.equal(h.calls.length, 5)
   assert.equal(first.body.data.status, 'partial')
   assert.equal(first.body.data.pageInfo.hasMore, true)
-  assert.ok(first.body.data.warnings.some(row => row.code === 'content_search_fill_stopped'))
-  assert.deepEqual(h.calls.map(call => Number(call.params.cursor)), [0, 20, 40])
+  assert.equal(first.body.data.warnings.some(row => row.code === 'content_search_fill_stopped'), false)
+  assert.deepEqual(h.calls.map(call => Number(call.params.cursor)), [0, 20, 40, 60, 80])
   assert.ok([...h.platformStore.calls.values()].every(call => call.providerKey === 'tikhub' && call.itemCount === 7))
-  assert.equal(h.platformStore.ingestJobs.length, 3)
+  assert.equal(h.platformStore.ingestJobs.length, 5)
   assert.ok([...h.platformStore.restrictedResponseArchives.values()].every(archive =>
     JSON.parse(Buffer.from(archive.bodyBytes).toString('utf8')).data.data.length === 8))
   const cursor = first.body.data.pageInfo.nextCursor
   const manifest = h.store.requests.get(first.requestId).acquisitionRequest.contentSearch
-  assert.equal(manifest.state.jobs[0].upstreamPages, 3)
-  assert.deepEqual(manifest.state.jobs[0].providerCursor, { cursor: '60', search_id: 'fixture-session', backtrace: 'fixture-backtrace' })
-  assert.equal(manifest.sources.length, 3)
+  assert.equal(manifest.state.jobs[0].upstreamPages, 5)
+  assert.equal(manifest.state.jobs[0].buffer.offset, 2)
+  assert.deepEqual(manifest.state.jobs[0].providerCursor, { cursor: '80', search_id: 'fixture-session', backtrace: 'fixture-backtrace' })
+  assert.equal(manifest.sources.length, 5)
   await assert.rejects(h.invokeData({ ...body, query: 'changed', cursor }, 'douyin-changed-query'), error => error.code === 'invalid_cursor')
   await assert.rejects(h.invokeData({ ...body, params: { sort_type: '1' }, cursor }, 'douyin-changed-filter'), error => error.code === 'invalid_cursor')
   const otherKey = await h.service.createApiKey({ consumerId: h.context.consumer.id, name: 'Other synthetic Key', platforms: ['douyin'], capabilities: [] })
   const otherContext = await h.service.authenticate(otherKey.secret)
   await assert.rejects(h.service.search(otherContext, { body: { ...body, cursor }, idempotencyKey: 'douyin-other-key', path: '/api/v1/data/search' }),
     error => error.code === 'invalid_cursor')
-  assert.equal(h.calls.length, 3)
+  assert.equal(h.calls.length, 5)
   assert.deepEqual((await h.invokeData(body)).body, first.body)
-  assert.equal(h.calls.length, 3)
+  assert.equal(h.calls.length, 5)
 })
 
 test('Douyin related-word schema never hides content markers or unknown nested containers', async () => {
@@ -315,7 +316,7 @@ test('a historical Douyin unusable mixed-card receipt replays its original paid 
   }
 })
 
-test('standard fills at most three pages, carries overflow, deduplicates delivered IDs and ingests each full archive only once', async () => {
+test('standard carries overflow, deduplicates delivered IDs and ingests each full archive only once', async () => {
   const h = await harness({ payload: (_call, n) => n === 1 ? biliPage(['a', 'b', 'c'], 1, 3) : n === 2 ? biliPage(['b', 'd'], 2, 3) : biliPage(['e'], 3, 3) })
   const body = { platform: 'bilibili', query: '城市', pageSize: 2 }
   const first = await h.invokeData(body, 'content-fill-first')
@@ -363,16 +364,33 @@ test('Zhihu 18 plus 18 acquired rows deliver 20 and persist the second-page 16-r
   assert.equal(h.platformStore.ingestJobs.length, 3)
 })
 
-test('three real calls are a per-request bound, preserving remaining continuation and one public usage settlement', async () => {
-  const h = await harness({ payload: (_call, n) => biliPage([String(n)], n, 10) })
-  const first = await h.invokeData({ platform: 'bilibili', query: '城市', pageSize: 5 })
-  assert.equal(h.calls.length, 3)
-  assert.equal(first.body.data.items.length, 3)
-  assert.equal(first.body.data.status, 'partial')
-  assert.equal(first.body.data.pageInfo.hasMore, true)
-  assert.ok(first.body.data.warnings.some(row => row.code === 'content_search_fill_stopped'))
-  assert.equal(h.store.requests.size, 1)
-  assert.equal([...h.store.requests.values()][0].status, 'committed')
+test('all four standard platforms fill beyond three real calls with complete archives and one public usage settlement', async () => {
+  const pages = {
+    bilibili: n => biliPage([String(n)], n, 10),
+    douyin: n => ({ ...douyinMixedPage(n), data: [douyinMixedPage(n).data[0]] }),
+    kuaishou: n => ({ mixFeeds: [{ itemType: 'feed_photo', feed: { photoId: `photo-${n}`, caption: `完整正文 ${n}` } }],
+      pcursor: `next-${n}`, has_more: true }),
+    zhihu: n => ({ data: [{ type: 'search_result', object: { id: String(n), type: 'article', title: `标题 ${n}`, content: `<p>完整正文 ${n}</p>` } }],
+      paging: { is_end: false, next: `https://api.zhihu.com/search_v3?offset=${n * 20}&search_hash_id=fixture-session` } }),
+  }
+  for (const [platform, page] of Object.entries(pages)) {
+    const h = await harness({ platform, payload: (_call, n) => page(n) })
+    const body = { platform, query: '城市', pageSize: 5 }
+    const first = await h.invokeData(body)
+    assert.equal(h.calls.length, 5, platform)
+    assert.equal(first.body.data.items.length, 5)
+    assert.equal(new Set(first.body.data.items.map(row => row.id)).size, 5)
+    assert.equal(first.body.data.status, 'ok')
+    assert.equal(first.body.data.pageInfo.hasMore, true)
+    assert.equal(first.body.data.warnings.some(row => row.code === 'content_search_fill_stopped'), false)
+    assert.equal(h.platformStore.restrictedResponseArchives.size, 5)
+    assert.equal(h.platformStore.ingestJobs.length, 5)
+    assert.equal([...h.store.requests.values()][0].acquisitionRequest.contentSearch.sources.length, 5)
+    assert.deepEqual((await h.invokeData(body)).body, first.body)
+    assert.equal(h.calls.length, 5)
+    assert.equal(h.store.requests.size, 1)
+    assert.equal([...h.store.requests.values()][0].status, 'committed')
+  }
 })
 
 test('raw batch preserves plural keyword precedence, per-query count, fixed filters and bounded direct calls', async () => {
@@ -647,3 +665,103 @@ test('assembly errors identify the durable usage request for readonly lookup, in
   await assert.rejects(h.invokeData(),error=>error.details.requestId===request.id&&error.code==='request_outcome_unknown')
   assert.equal(h.calls.length,1)
 })
+
+
+const kuaishouRelatedCard = () => ({ itemType: 9, position: 5, atmosphereType: 0,
+  relatedSearches: Array.from({ length: 8 }, (_, i) => ({ expTag: 'fixture-tag', keyword: `fixture-word-${i}`,
+    iconText: '', subtagType: 0, type: 'fixture-type', iconColor: 'fixture-color',
+    extParams: JSON.stringify({ reco_reason: 'fixture-reason', sever_path: 'fixture-path', module: 'fixture-module', request_source: 'fixture-source' }) })),
+  itemTransferInfo: JSON.stringify({ refer_single_double_type: 0 }), rank: 5,
+  extInfo: { styleType: 0, screenItemKey: 'fixture-screen', lines: 2, rsType: 0 }, isSingleColumnMode: true })
+const kuaishouMixedPage = (page = 1, hasMore = false) => {
+  const mixFeeds = Array.from({ length: 10 }, (_, i) => ({ itemType: 5, feed: {
+    photo_id: Number.MAX_SAFE_INTEGER + 2, caption: `完整内容 ${page}/${i}`, like_count: i, comment_count: 0,
+    share_info: `https://example.test/share?photoId=photo-${page}-${i}&userId=author-${i}`,
+    main_mv_url: `https://example.test/video-${page}-${i}.mp4`, timestamp: 1760000000000 } }))
+  mixFeeds.splice(5, 0, kuaishouRelatedCard())
+  return { mixFeeds, has_more: hasMore, pcursor: hasMore ? `native-${page + 1}` : 'no_more' }
+}
+
+for (const [name, marker] of [['NUL', '"\\u0000"'], ['lone surrogate', '"\\ud800"'], ['negative zero', '-0'], ['nonfinite numeric parse', '1e400']]) {
+  test(`Kuaishou standard search accepts safe posts from exact receipts with unused ${name} metadata`, async () => {
+    const rawText = `{"code":200,"data":${JSON.stringify(kuaishouMixedPage())},"unused":${marker}}`
+    const bytes = Buffer.from(rawText), sha = createHash('sha256').update(bytes).digest('hex')
+    assert.equal(isPostgresSafeJsonValue(JSON.parse(rawText)), false)
+    const h = await harness({ platform: 'kuaishou', fetchImpl: () => new Response(bytes, { headers: { 'content-type': 'application/json' } }) })
+    const first = await h.invokeData({ platform: 'kuaishou', query: '城市', pageSize: 20 })
+    assert.equal(first.status, 200)
+    assert.equal(first.body.data.items.length, 10)
+    assert.deepEqual(first.body.data.items.map(item => item.externalId), Array.from({ length: 10 }, (_, i) => `photo-1-${i}`), 'use exact public string identities rather than rounded numeric IDs')
+    assert.equal(first.body.data.pageInfo.hasMore, false)
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.platformStore.ingestJobs.length, 1)
+    assert.equal(h.platformStore.ingestJobs[0].payload.records.filter(row => row.objectType === 'post').length, 10)
+    assert.ok(isPostgresSafeJsonValue(first.body))
+    assert.ok(isPostgresSafeJsonValue(JSON.parse(JSON.stringify(h.platformStore.ingestJobs[0].payload))))
+    const call = [...h.platformStore.calls.values()][0], archive = h.platformStore.restrictedResponseArchives.get(call.id)
+    assert.equal(call.outcome, 'succeeded'); assert.equal(call.itemCount, 10); assert.equal(call.billed, true)
+    assert.equal(archive.bodySize, bytes.length); assert.equal(archive.bodySha256, sha)
+    assert.deepEqual(Buffer.from(archive.bodyBytes), bytes)
+    assert.equal(archive.parsedPayload, null)
+    const snapshot = structuredClone(h.store.requests.get(first.requestId))
+    assert.deepEqual((await h.invokeData({ platform: 'kuaishou', query: '城市', pageSize: 20 })).body, first.body)
+    assert.equal(h.calls.length, 1)
+    assert.deepEqual(h.store.requests.get(first.requestId), snapshot)
+  })
+}
+
+test('Kuaishou standard overflow reprojects exact unsafe-root bytes without new calls or duplicate ingestion', async () => {
+  const rawText = JSON.stringify({ code: 200, data: kuaishouMixedPage(), unused: '\u0000' })
+  const bytes = Buffer.from(rawText)
+  const h = await harness({ platform: 'kuaishou', fetchImpl: () => new Response(bytes, { headers: { 'content-type': 'application/json' } }) })
+  const body = { platform: 'kuaishou', query: '城市', pageSize: 3 }, seen = []
+  let cursor
+  for (let page = 1; page <= 4; page++) {
+    const result = await h.invokeData({ ...body, ...(cursor ? { cursor } : {}) }, `kuaishou-unsafe-buffer-${page}`)
+    seen.push(...result.body.data.items.map(item => item.externalId))
+    cursor = result.body.data.pageInfo.nextCursor
+    assert.equal(result.body.data.items.length, page < 4 ? 3 : 1)
+    assert.equal(result.body.data.meta.providerCalls, page === 1 ? 1 : 0)
+  }
+  assert.equal(cursor, null)
+  assert.deepEqual(seen, Array.from({ length: 10 }, (_, i) => `photo-1-${i}`))
+  assert.equal(h.calls.length, 1); assert.equal(h.platformStore.ingestJobs.length, 1)
+})
+
+test('Kuaishou standard filling preserves full safe-post receipts while raw and native APIs keep full JSONB validation', async () => {
+  const h = await harness({ platform: 'kuaishou', payload: (_call, n) => ({ ...kuaishouMixedPage(n, n === 1), unused: '\u0000' }) })
+  const result = await h.invokeData({ platform: 'kuaishou', query: '城市', pageSize: 20 })
+  assert.equal(result.body.data.items.length, 20); assert.equal(h.calls.length, 2)
+  assert.equal(new Set(result.body.data.items.map(item => item.externalId)).size, 20)
+  assert.equal(h.platformStore.ingestJobs.length, 2)
+  const raw = await harness({ platform: 'kuaishou', payload: { ...kuaishouMixedPage(), unused: '\u0000' } })
+  await assert.rejects(raw.invoke(), error => error.code === 'external_platform_response_unusable' && error.status === 502)
+  assert.equal([...raw.platformStore.calls.values()][0].errorCode, 'upstream_payload_unrepresentable')
+  assert.equal(raw.platformStore.ingestJobs.length, 0)
+  const native = await harness({ platform: 'kuaishou', payload: { ...kuaishouMixedPage(), unused: '\u0000' } })
+  await assert.rejects(native.gateway.adapter.forwardNative(native.recipe.key, { params: { keyword: 'fixture' } }), error => error.evidence?.errorCode === 'upstream_payload_unrepresentable')
+  assert.equal(native.calls.length, 1)
+  const other = await harness()
+  await assert.rejects(other.gateway.adapter.forwardNative(other.recipe.key, { params: { keyword: 'fixture' } }, { contentSearchProjection: true }), /Unsupported content projection endpoint/)
+  assert.equal(other.calls.length, 0)
+})
+
+for (const field of ['caption', 'image', 'cursor']) {
+  test(`Kuaishou unsafe served ${field} is archived as a definite unusable result before ingest`, async () => {
+    const payload = kuaishouMixedPage()
+    if (field === 'caption') payload.mixFeeds[0].feed.caption = 'body\u0000unsafe'
+    if (field === 'image') payload.mixFeeds[0].feed.images = ['https://example.test/unsafe\u0000image.jpg']
+    if (field === 'cursor') { payload.has_more = true; payload.pcursor = '\ud800' }
+    const h = await harness({ platform: 'kuaishou', payload })
+    await assert.rejects(h.invokeData(), error => error.code === 'external_platform_response_unusable' && error.status === 502)
+    const call = [...h.platformStore.calls.values()][0], request = [...h.store.requests.values()][0]
+    assert.equal(call.outcome, 'succeeded_unusable'); assert.equal(call.billed, true)
+    assert.equal(call.errorCode, 'invalid_content_search_contract')
+    assert.equal(request.status, 'committed'); assert.equal(request.responseStatus, 502)
+    assert.equal(h.calls.length, 1); assert.equal(h.platformStore.ingestJobs.length, 0)
+    assert.ok(h.platformStore.restrictedResponseArchives.has(call.id))
+    const before = structuredClone(request)
+    await assert.rejects(h.invokeData(), error => error.code === 'external_platform_response_unusable')
+    assert.equal(h.calls.length, 1); assert.deepEqual([...h.store.requests.values()][0], before)
+  })
+}

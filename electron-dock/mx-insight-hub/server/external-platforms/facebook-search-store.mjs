@@ -161,7 +161,7 @@ function validateDelivery(input) {
     || lineage.startDate !== input.startDate || lineage.endDate !== input.endDate
     || lineage.previousDeliveryId != null && !UUID.test(lineage.previousDeliveryId)
     || !Number.isInteger(lineage.upstreamPages) || lineage.upstreamPages < 0 || lineage.upstreamPages > 15
-    || !Array.isArray(sources) || !sources.length || sources.length>4
+    || !Array.isArray(sources) || !sources.length || sources.length>16
     || new Set(sources.map(source=>source.callId)).size !== sources.length || new Set(sources.map(source=>source.providerKey)).size !== 1
     || !['live','fresh_cache','stored_fallback'].includes(sourceMode) || !fresh(capturedAt)
     || !Number.isInteger(usageUnitsActual) || usageUnitsActual<0 || usageUnitsActual>input.pageSize

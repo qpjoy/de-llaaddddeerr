@@ -19,5 +19,5 @@ const result=await build({entryPoints:[new URL('../server/ops/diagnose-content-s
 if(result.outputFiles.length!==1) throw new Error('unexpected_bundle_output')
 const source=result.outputFiles[0].text
 if(Buffer.byteLength(source)>2097152) throw new Error('bundle_too_large')
-process.stderr.write(JSON.stringify({diagnosticRevision:'content-search-diagnostic.v8',...metadata,bundleSha256:sha(source),bundleBytes:Buffer.byteLength(source)})+'\n')
+process.stderr.write(JSON.stringify({diagnosticRevision:'content-search-diagnostic.v9',...metadata,bundleSha256:sha(source),bundleBytes:Buffer.byteLength(source)})+'\n')
 process.stdout.write(source)

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
-import { inspectContentArchive, diagnoseContentSearch, contentDiagnosticFailure, inspectDouyinEntryCoverage, inspectContentFillCoverage, inspectSingleCardSchema, isDouyinIncidentCardSource, parseContentDiagnosticArguments } from '../../server/ops/diagnose-content-search.mjs'
+import { inspectContentArchive, diagnoseContentSearch, contentDiagnosticFailure, inspectDouyinEntryCoverage, inspectKuaishouEntryCoverage, inspectContentFillCoverage, inspectSingleCardSchema, isDouyinIncidentCardSource, parseContentDiagnosticArguments } from '../../server/ops/diagnose-content-search.mjs'
 import { normalizeTikHubContentSearchRequest } from '../../server/contracts/tikhub-content-search.mjs'
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex')
 const archiveFor=payload=>{const bytes=Buffer.from(JSON.stringify(payload));return {body_bytes:bytes,body_size:bytes.length,body_sha256:digest(bytes),captured_at:new Date().toISOString()}}
@@ -68,7 +68,7 @@ test('PGlite diagnostic reads real schema and limits screenshot followups to the
   await db.query(`INSERT INTO control.external_platform_restricted_raw_responses VALUES($1,$2,$3,$4,$5)`,[callId,archive.body_bytes,archive.body_size,archive.body_sha256,archive.captured_at])
   const pool={connect:async()=>({query:(sql,args)=>db.query(sql,args),release(){}})}
   const report=await diagnoseContentSearch(pool,[requestId,ownBilibili,ownZhihu])
-  assert.equal(report.diagnosticRevision,'content-search-diagnostic.v8')
+  assert.equal(report.diagnosticRevision,'content-search-diagnostic.v9')
   assert.deepEqual(new Set(report.requests.map(row=>row.requestId)),new Set([requestId,ownWeibo,ownDouyin,ownBilibili,ownZhihu]))
   assert.deepEqual(new Set(report.requests.map(row=>row.platform)),new Set(['kuaishou','zhihu','douyin','weibo','bilibili']))
   assert.equal(report.requests.find(row=>row.requestId===requestId).evidence[0].archive.projection.state,'candidate_accepts')
@@ -124,10 +124,12 @@ test('v8 direct diagnostic keyword validation fails before any database access a
   assert.equal(connects,0)
 })
 
-test('v8 fixed transport/proxy/body errors remain distinguishable without exposing arbitrary provider errors',async()=>{
+test('v9 fixed adapter/transport/proxy/body errors remain distinguishable without exposing arbitrary provider errors',async()=>{
   const endpoint=normalizeTikHubContentSearchRequest({platform:'kuaishou',query:'fixture'})
   for(const code of ['upstream_transport_error','upstream_deadline_exceeded','upstream_body_read_failed','upstream_response_too_large',
-    'invalid_upstream_encoding','invalid_upstream_json','proxy_route_unavailable','proxy_routes_unreachable','private://error/body']) {
+    'invalid_upstream_encoding','invalid_upstream_json','invalid_upstream_content_type','upstream_payload_unrepresentable',
+    'upstream_rate_limited','upstream_auth_or_balance_unavailable','upstream_endpoint_unavailable','upstream_business_error',
+    'upstream_request_rejected','upstream_http_error','proxy_route_unavailable','proxy_routes_unreachable','private://error/body']) {
     const requestId=randomUUID(),callId=randomUUID(),snapshot={path:'/api/v1/data/search',body:{platform:'kuaishou',query:'private-query'}}
     const client={release(){},async query(sql){
       if(sql.includes('idempotency_key = ANY'))return{rows:[{id:requestId,platform:'kuaishou',status:'unknown',error_code:code,reserved_at:new Date(),acquisition_request:snapshot}]}
@@ -144,6 +146,148 @@ test('v8 fixed transport/proxy/body errors remain distinguishable without exposi
     assert.equal(report.requests[0].evidence[0].archive.state,'archive_missing')
     assert.doesNotMatch(JSON.stringify(report),/private-|private:\/\//)
   }
+})
+
+test('Kuaishou v9 locates the rejected twentieth entry and reports schema without values or mutation',()=>{
+  const request=normalizeTikHubContentSearchRequest({platform:'kuaishou',query:'private-query'}),capturedAt=new Date().toISOString()
+  const rows=Array.from({length:19},(_,index)=>({feed:{photoId:`private-id-${index}`,caption:`private-body-${index}`}}))
+  rows.push({photo_info:{photoId:'private-last-id',caption:'private-last-body',media:{url:'https://private.example/video?token=private-token'}},
+    'private-dynamic-key':'private-value',Qp7Ab9Cd2Ef4:'private-value'})
+  const payload={code:200,data:{mixFeeds:rows,pcursor:'private-native-cursor',has_more:true}},original=structuredClone(payload)
+  const coverage=inspectKuaishouEntryCoverage(payload,request,capturedAt)
+  assert.equal(coverage.mode,'data_projection_only');assert.equal(coverage.adapterValidation,'not_replayed')
+  assert.equal(coverage.selectedPath,'payload.data.mixFeeds')
+  assert.equal(coverage.entryCount,20);assert.equal(coverage.examined,20);assert.equal(coverage.truncated,false)
+  assert.ok(coverage.entries.slice(0,19).every(row=>row.projection.state==='candidate_accepts'&&row.projection.itemCount===1))
+  assert.deepEqual(coverage.entries[19].projection,{state:'candidate_rejects',reason:'invalid_content_search_identity'})
+  assert.equal(coverage.entries[19].wrappers.photo_info.identities.photoId,'valid_string')
+  assert.equal(coverage.entries[19].selectedIdentities.photoId,'missing')
+  assert.equal(coverage.rejectedSchemas,1)
+  assert.ok(coverage.entries[19].schema.nodesVisited<=300)
+  assert.doesNotMatch(JSON.stringify(coverage),/private-|private\.example|Qp7Ab9Cd2Ef4/)
+  assert.deepEqual(payload,original)
+})
+
+test('Kuaishou v9 fixed container selection and per-entry feed/photo identity match the current parser',()=>{
+  const request=normalizeTikHubContentSearchRequest({platform:'kuaishou',query:'fixture'}),capturedAt=new Date().toISOString()
+  const entry={photo:{photoId:1234567,caption:'private-body'},user:{id:'private-author'}}
+  for(const [path,data] of [
+    ['mixFeeds',{mixFeeds:[entry],has_more:false}],['feeds',{feeds:[entry],has_more:false}],
+    ['result.items',{result:{items:[entry]},has_more:false}],['items',{items:[entry],has_more:false}],
+    ['data',{data:[entry],has_more:false}],['',[entry]],
+  ]) {
+    const original=structuredClone(data),coverage=inspectKuaishouEntryCoverage({data},request,capturedAt)
+    assert.equal(coverage.selectedPath,path?`payload.data.${path}`:'payload.data')
+    assert.equal(coverage.entries[0].selectedPath,'entry.photo')
+    assert.equal(coverage.entries[0].selectedIdentities.photoId,'safe_positive_integer')
+    assert.equal(coverage.entries[0].projection.state,'candidate_accepts')
+    assert.equal(coverage.entries[0].projection.itemCount,1)
+    assert.doesNotMatch(JSON.stringify(coverage),/private-|1234567/)
+    assert.deepEqual(data,original)
+  }
+  const priority=inspectKuaishouEntryCoverage({data:{mixFeeds:[],feeds:[entry],has_more:false}},request,capturedAt)
+  assert.equal(priority.selectedPath,'payload.data.mixFeeds');assert.equal(priority.entryCount,0)
+})
+
+test('Kuaishou v9 probes preserve pagination errors instead of fabricating terminal metadata',()=>{
+  const request=normalizeTikHubContentSearchRequest({platform:'kuaishou',query:'fixture'}),capturedAt=new Date().toISOString()
+  for(const [pagination,reason] of [[{has_more:true},'missing_content_search_continuation'],[{has_more:'private-invalid-flag'},'invalid_content_search_pagination']]) {
+    const payload={data:{feeds:[{photoId:'private-id',caption:'private-body'}],...pagination}},original=structuredClone(payload)
+    const coverage=inspectKuaishouEntryCoverage(payload,request,capturedAt)
+    assert.deepEqual(coverage.entries[0].projection,{state:'candidate_rejects',reason})
+    assert.equal(coverage.rejectedSchemas,1)
+    assert.doesNotMatch(JSON.stringify(coverage),/private-/)
+    assert.deepEqual(payload,original)
+  }
+  const missingTime=inspectKuaishouEntryCoverage({data:{items:[{photoId:'private-id'}],has_more:false}},request,null)
+  assert.equal(missingTime.entries[0].projection.reason,'invalid_content_search_capture_time')
+})
+
+test('Kuaishou v9 caps entry probes and rejected schemas while classifying all fixed identity types',()=>{
+  const request=normalizeTikHubContentSearchRequest({platform:'kuaishou',query:'fixture'}),capturedAt=new Date().toISOString()
+  const identities=[undefined,null,'private-valid',1234567,Number.MAX_SAFE_INTEGER+2,'',true,1.5]
+  const rows=Array.from({length:120},(_,index)=>({photoId:identities[index%identities.length],caption:'private-body'}))
+  const coverage=inspectKuaishouEntryCoverage({data:{items:rows,has_more:false}},request,capturedAt)
+  assert.equal(coverage.entryCount,120);assert.equal(coverage.examined,100);assert.equal(coverage.truncated,true)
+  assert.equal(coverage.rejectedSchemas,3)
+  assert.equal(coverage.entries.filter(row=>row.schema).length,3)
+  assert.deepEqual(coverage.entries.slice(0,8).map(row=>row.selectedIdentities.photoId),
+    ['missing','null','valid_string','safe_positive_integer','unsafe_integer','invalid_string','invalid_type','invalid_number'])
+  assert.ok(coverage.entries.filter(row=>row.schema).every(row=>row.schema.nodesVisited<=300&&row.schema.limits.maxDepth===8))
+  assert.ok(JSON.stringify(coverage).length<400000)
+  assert.doesNotMatch(JSON.stringify(coverage),/private-|1234567|9007199254740992/)
+})
+
+test('Kuaishou v9 unrecognized data containers expose bounded sanitized schema and preserve selection precedence',()=>{
+  const request=normalizeTikHubContentSearchRequest({platform:'kuaishou',query:'fixture'}),capturedAt=new Date().toISOString()
+  let deep={body:'private-deep-body'}
+  for(let depth=0;depth<12;depth++)deep={nested:deep}
+  const data={results:[{photo_info:{photoId:'private-id',caption:'private-body'}}],metadata:deep,
+    'https://private.example/id?token=private-token':'private-value',encoded:JSON.stringify({related_words:['private-word']})}
+  const original=structuredClone(data),coverage=inspectKuaishouEntryCoverage({data},request,capturedAt)
+  assert.equal(coverage.available,false);assert.equal(coverage.reason,'unrecognized_entry_container')
+  assert.equal(coverage.selectedPath,null)
+  assert.ok(coverage.dataSchema.nodesVisited<=300)
+  assert.ok(coverage.dataSchema.truncationReasons.includes('depth_limit'))
+  assert.doesNotMatch(JSON.stringify(coverage),/private-|private\.example/)
+  assert.deepEqual(data,original)
+  const malformed=inspectKuaishouEntryCoverage({data:{mixFeeds:{unknown:'private-body'},feeds:[{photoId:'private-id'}]}},request,capturedAt)
+  assert.equal(malformed.available,false);assert.equal(malformed.selectedPath,'payload.data.mixFeeds')
+})
+
+test('Kuaishou v9 expanded schema requires verified own receipt opt-in and labels projection-only acceptance',()=>{
+  const snapshot={path:'/api/v1/data/search',body:{platform:'kuaishou',query:'private-query',pageSize:20}}
+  const archive=archiveFor({code:200,data:{feeds:[{data:{photoId:'private-id',caption:'private-body'}}],has_more:false}})
+  const own=inspectContentArchive(archive,snapshot,'kuaishou',{incidentSchema:true})
+  assert.equal(own.projectionScope,'data_projection_only');assert.equal(own.adapterValidation,'not_replayed')
+  assert.equal(own.entryCoverage.examined,1)
+  assert.equal(own.entryCoverage.entries[0].wrappers.data.identities.photoId,'valid_string')
+  assert.equal(own.entryCoverage.entries[0].projection.reason,'invalid_content_search_identity')
+  assert.equal(inspectContentArchive(archive,snapshot,'kuaishou').entryCoverage,undefined)
+  assert.equal(inspectContentArchive({...archive,body_sha256:'0'.repeat(64)},snapshot,'kuaishou',{incidentSchema:true}).entryCoverage,undefined)
+  assert.equal(inspectContentArchive({...archive,body_size:archive.body_size+1},snapshot,'kuaishou',{incidentSchema:true}).entryCoverage,undefined)
+  assert.doesNotMatch(JSON.stringify(own),/private-/)
+  const unrelated=archiveFor({code:200,data:{unrecognized:{content:'private-body'}}})
+  const unknown=inspectContentArchive(unrelated,snapshot,'kuaishou',{incidentSchema:true})
+  assert.equal(unknown.projection.reason,'invalid_content_search_shape')
+  assert.equal(unknown.entryCoverage.dataSchema.schema.kind,'object')
+})
+
+test('Kuaishou v9 batch expands only hash-verified own sources with exact endpoint contracts',async()=>{
+  const requestId=randomUUID(),neighborId=randomUUID(),snapshot={path:'/api/v1/data/search',body:{platform:'kuaishou',query:'private-query',pageSize:20}}
+  const endpoint=normalizeTikHubContentSearchRequest({platform:'kuaishou',query:'fixture'})
+  const archive=archiveFor({code:200,data:{results:[{photo_info:{photoId:'private-id',caption:'private-content'}}]}})
+  const base={usage_request_id:requestId,provider_key:'tikhub',operation:endpoint.operation,endpoint_key:endpoint.endpointKey,
+    endpoint_version:endpoint.endpointVersion,contract_version:endpoint.endpointContractVersion,
+    outcome:'succeeded_unusable',http_status:200,business_code:200,billed:true,error_code:'invalid_content_search_contract',
+    started_at:new Date(),completed_at:new Date(),acquisition_request:snapshot,...archive}
+  const calls=[{...base,id:randomUUID()},{...base,id:randomUUID(),usage_request_id:neighborId},
+    {...base,id:randomUUID(),endpoint_key:'wrong-endpoint'},
+    {...base,id:randomUUID(),endpoint_version:'wrong-version'},
+    {...base,id:randomUUID(),contract_version:'wrong-contract'},
+    {...base,id:randomUUID(),body_sha256:'0'.repeat(64)},
+    {...base,id:randomUUID(),body_size:archive.body_size+1}]
+  const queries=[],client={release(){},async query(sql,args){
+    queries.push(sql)
+    if(sql.includes('idempotency_key = ANY'))return{rows:[{id:requestId,platform:'kuaishou',status:'committed',response_status:502,
+      reserved_at:new Date(),completed_at:new Date(),acquisition_request:snapshot}]}
+    if(sql.includes('clock_timestamp'))return{rows:[{database_now:new Date()}]}
+    if(sql.includes('FROM external_platform.provider_calls')){
+      assert.deepEqual(args.slice(0,2),[requestId,endpoint.operation]);assert.match(sql,/call\.provider_key='tikhub'/)
+      return{rows:calls}
+    }
+    if(sql.includes('AS operational_archive'))return{rows:[{operational_archive:true,archive_objects:1,ingest_job:false}]}
+    return{rows:[]}
+  }}
+  const report=await diagnoseContentSearch({connect:async()=>client},[requestId]),evidence=report.requests[0].evidence
+  assert.equal(report.diagnosticRevision,'content-search-diagnostic.v9')
+  assert.equal(evidence[0].relation,'own');assert.ok(evidence[0].archive.entryCoverage.dataSchema)
+  assert.equal(evidence[1].relation,'quarantine_candidate');assert.equal(evidence[1].archive.entryCoverage,undefined)
+  assert.ok(evidence.slice(2,5).every(row=>row.archive.state==='source_contract_mismatch'&&!row.archive.entryCoverage))
+  assert.ok(evidence.slice(5).every(row=>row.archive.state==='archive_integrity_failed'&&!row.archive.entryCoverage))
+  assert.equal(queries[0],'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+  assert.doesNotMatch(queries.join('\n'),/\b(?:INSERT|UPDATE|DELETE|ALTER|CREATE)\b/i)
+  assert.doesNotMatch(JSON.stringify(report),/private-|wrong-endpoint|wrong-version|wrong-contract/)
 })
 
 

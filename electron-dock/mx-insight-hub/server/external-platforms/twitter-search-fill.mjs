@@ -5,7 +5,7 @@ import { normalizeTwitterResponse } from '../contracts/hub-social.mjs'
 import { projectTwitterDataSearch } from '../contracts/hub-data-search.mjs'
 import { rawSearchRecords } from '../contracts/raw-search.mjs'
 
-const MAX_CALLS = 3, MAX_UPSTREAM_PAGES = 15, MAX_BYTES = 12 * 1024 * 1024, MAX_PAGE_BYTES = 4 * 1024 * 1024
+const MAX_UPSTREAM_PAGES = 15, MAX_BYTES = 12 * 1024 * 1024, MAX_PAGE_BYTES = 4 * 1024 * 1024
 const hash = items => createHash('sha256').update(JSON.stringify(items)).digest('hex')
 const unavailable = () => new AppError(409, 'search_page_unavailable', 'The saved Twitter page cannot be continued; explicitly restart the search')
 const uncertain = message => {
@@ -118,7 +118,6 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
     }
     while(items.length<request.pageSize && !buffer) {
       if(providerCursor && tokens.has(providerCursor)) { stopReason='repeated_cursor';providerCursor=null;break }
-      if(calls>=MAX_CALLS) { stopReason='dispatch_limit'; break }
       if(upstreamPages>=MAX_UPSTREAM_PAGES) { stopReason='upstream_page_limit'; break }
       if(sources.length && !providerCursor) break
       if(bytes+MAX_PAGE_BYTES>MAX_BYTES) { stopReason='archive_byte_limit'; break }

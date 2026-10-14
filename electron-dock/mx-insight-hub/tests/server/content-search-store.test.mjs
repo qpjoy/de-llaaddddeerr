@@ -16,6 +16,22 @@ const digest = value => createHash('sha256').update(value).digest('hex')
 const clone = value => structuredClone(value)
 const scopeHash = 'a'.repeat(64), fingerprint = 'b'.repeat(64)
 
+function unsafeKuaishouArchive(capturedAt, metadataLiteral) {
+  const data = { mixFeeds: Array.from({ length: 3 }, (_, index) => ({
+    photoId: `fixture-photo-${index}`, caption: `Fixture post ${index}`, like_count: index,
+  })), has_more: false }
+  // Keep the original lexical values: JSON.stringify would rewrite -0/Infinity.
+  const bodyBytes = Buffer.from(`{"code":200,"data":${JSON.stringify(data).slice(0, -1)},"optionalMetadata":${metadataLiteral}}}`)
+  const payload = JSON.parse(bodyBytes.toString('utf8'))
+  const projected = projectTikHubContentSearch({ publicBody: { data: payload.data, meta: { capturedAt } } },
+    normalizeTikHubContentSearchRequest({ platform: 'kuaishou', query: 'fixture', pageSize: 2 }))
+  assert.equal(isPostgresSafeJsonValue(payload), false)
+  assert.equal(isPostgresSafeJsonValue(projected.acquiredItems), true)
+  assert.equal(isPostgresSafeJsonValue(projected.acquiredItems.map(contentSearchDataItem)), true)
+  assert.equal(isPostgresSafeJsonValue(projected.providerPage), true)
+  return { payload, projected, bodyBytes, bodySize: bodyBytes.length, bodySha256: digest(bodyBytes), capturedAt }
+}
+
 async function fixture(t, postgres, platform = 'bilibili') {
   const identity = { tenantId: randomUUID(), consumerId: randomUUID(), apiKeyId: randomUUID(), path: '/api/v1/data/search', scopeHash }
   const sourceId = randomUUID(), targetId = randomUUID(), callId = randomUUID(), ownCallId = randomUUID(), accountId = randomUUID()
@@ -147,6 +163,102 @@ for (const postgres of [false, true]) {
       await f.setArchive({ bodyBytes: bytes, bodySize: bytes.length, bodySha256: digest(bytes) }); assert.equal(await read(), null)
     }
     assert.deepEqual(await f.counts(), { gateways: 0, calls: 2, captures: 0, representative: undefined, charge: 'reserved' })
+  })
+
+  test(`${name} standard Kuaishou reads exact unsafe-metadata receipts without relaxing source or archive integrity`, options, async t => {
+    const f = await fixture(t, postgres, 'kuaishou'), original = await f.getUsage(f.source.id)
+    let archive
+    for (const literal of ['"\\u0000"', '"\\ud800"', '-0', '1e400']) {
+      archive = unsafeKuaishouArchive(f.archive.capturedAt, literal)
+      for (const callId of [f.callId, f.ownCallId]) await f.setArchiveFor(callId, {
+        bodyBytes: archive.bodyBytes, bodySize: archive.bodySize, bodySha256: archive.bodySha256, capturedAt: archive.capturedAt,
+      })
+      for (const [callId, ownUsageRequestId] of [[f.callId, undefined], [f.ownCallId, f.target.id]]) {
+        const page = await f.store.pageFor({ ...f.identity, callId, ...(ownUsageRequestId ? { ownUsageRequestId } : {}) })
+        assert.deepEqual(page.payload, archive.payload)
+        assert.equal(page.bodySha256, digest(archive.bodyBytes))
+        assert.equal(page.bodySize, archive.bodyBytes.length)
+      }
+    }
+    assert.equal(await f.store.pageFor({ ...f.identity, callId: f.ownCallId }), null, 'another reserved delivery is not a readable source')
+    for (const field of ['tenantId', 'consumerId', 'apiKeyId', 'callId']) {
+      assert.equal(await f.store.pageFor({ ...f.identity, callId: f.callId, [field]: randomUUID() }), null)
+    }
+    assert.equal(await f.store.pageFor({ ...f.identity, callId: f.callId, scopeHash: 'e'.repeat(64) }), null)
+    assert.equal(await f.store.pageFor({ ...f.identity, callId: f.callId,
+      path: '/api/v1/data/native/t.kuaishou_app_search_comprehensive' }), null)
+    const read = () => f.store.pageFor({ ...f.identity, callId: f.callId })
+    for (const change of [{ endpointVersion: 'changed' }, { endpointKey: 'native.t.other' }, { operation: 'native.t.other' },
+      { providerKey: 'justone' }, { contractVersion: 'changed' }, { outcome: 'unknown' }, { outcome: 'succeeded_unusable' },
+      { httpStatus: 201 }, { businessCode: 0 }, { completedAt: ago(25 * 3600000) }]) {
+      await f.setCall(change); assert.equal(await read(), null, JSON.stringify(change)); await f.setCall(f.call)
+    }
+    await f.setCall({ outcome: 'succeeded_unusable' })
+    await f.setUsage(f.source.id, { responseStatus: 502 })
+    const failed = await f.getUsage(f.source.id)
+    assert.equal(await read(), null, 'an old paid failure is not repaired by the new projection mode')
+    assert.deepEqual(await f.getUsage(f.source.id), failed)
+    await f.setCall(f.call); await f.setUsage(f.source.id, { responseStatus: 200 })
+    for (const change of [{ bodySha256: null }, { bodySha256: '0'.repeat(64) }, { bodySize: archive.bodySize + 1 },
+      { capturedAt: ago(25 * 3600000) }, { capturedAt: ago(-3600000) }]) {
+      await f.setArchive(change); assert.equal(await read(), null, JSON.stringify(change))
+      await f.setArchive({ bodyBytes: archive.bodyBytes, bodySize: archive.bodySize, bodySha256: archive.bodySha256, capturedAt: archive.capturedAt })
+    }
+    for (const bodyBytes of [Buffer.from([255]), Buffer.from('{"code":200}'), Buffer.from('{"code":201,"data":{}}'),
+      Buffer.from('{"code":200,"data":"literal\0nul"}'), Buffer.from(JSON.stringify({ code: 200, data: 'a'.repeat(8388608) }))]) {
+      await f.setArchive({ bodyBytes, bodySize: bodyBytes.length, bodySha256: digest(bodyBytes) })
+      assert.equal(await read(), null)
+    }
+    assert.deepEqual(await f.getUsage(f.source.id), original)
+    assert.deepEqual(await f.counts(), { gateways: 0, calls: 2, captures: 0, representative: undefined, charge: 'reserved' })
+  })
+
+  for (const platform of ['bilibili', 'douyin', 'zhihu', 'kuaishou']) {
+    test(`${name} unsafe-root opt-in stays unavailable for ${platform === 'kuaishou' ? 'legacy raw Kuaishou' : platform}`, options, async t => {
+      const f = await fixture(t, postgres, platform)
+      const archive = unsafeKuaishouArchive(f.archive.capturedAt, '"\\u0000"')
+      await f.setArchive({ bodyBytes: archive.bodyBytes, bodySize: archive.bodySize, bodySha256: archive.bodySha256 })
+      const identity = { ...f.identity }
+      if (platform === 'kuaishou') {
+        identity.path = '/api/v1/night-all/search/raw'
+        await f.setUsage(f.source.id, { acquisitionRequest: { ...f.source.acquisitionRequest, path: identity.path } })
+      }
+      assert.equal(await f.store.pageFor({ ...identity, callId: f.callId }), null)
+      assert.equal((await f.counts()).captures, 0)
+    })
+  }
+
+  test(`${name} standard Kuaishou unsafe optional metadata still finalizes once and retains a verifiable overflow receipt`, options, async t => {
+    const f = await fixture(t, postgres, 'kuaishou'), original = await f.getUsage(f.source.id)
+    const archive = unsafeKuaishouArchive(f.archive.capturedAt, '"\\ud800"')
+    const rows = archive.projected.acquiredItems, rowsHash = digest(JSON.stringify(rows))
+    for (const callId of [f.callId, f.ownCallId]) await f.setArchiveFor(callId, {
+      bodyBytes: archive.bodyBytes, bodySize: archive.bodySize, bodySha256: archive.bodySha256, capturedAt: archive.capturedAt,
+    })
+    const sources = f.saved.sources.map(source => ({ ...source, bodySize: archive.bodySize,
+      bodySha256: archive.bodySha256, rowsHash }))
+    const saved = { ...f.saved, sources, responseBody: { data: { items: rows.slice(0, 2).map(contentSearchDataItem) } },
+      manifest: { ...f.saved.manifest, deliveredIds: [rows.slice(0, 2).map(row => row.content_id)],
+        state: { jobs: [{ ...f.manifest.state.jobs[0], done: false, buffer: {
+          callId: f.ownCallId, offset: 2, hash: rowsHash, providerCursor: null, providerPage: 1,
+        } }] } } }
+    await f.store.commitDelivery(saved)
+    assert.deepEqual(await f.getUsage(f.source.id), original)
+    assert.deepEqual(await f.counts(), { gateways: 1, calls: 2, captures: 1, representative: f.ownCallId, charge: 'captured' })
+    const usage = await f.getUsage(f.target.id), buffer = usage.acquisitionRequest.contentSearch.state.jobs[0].buffer
+    assert.deepEqual(usage.acquisitionRequest.contentSearch.sources, sources)
+    const carry = await f.store.pageFor({ ...f.identity, callId: buffer.callId })
+    assert.equal(carry.bodySha256, archive.bodySha256)
+    assert.equal(carry.bodySize, archive.bodyBytes.length)
+    assert.deepEqual(carry.payload, archive.payload)
+    const reprojected = projectTikHubContentSearch({ publicBody: { data: carry.payload.data, meta: { capturedAt: carry.capturedAt } } },
+      normalizeTikHubContentSearchRequest({ platform: 'kuaishou', query: 'fixture', pageSize: 2 }))
+    assert.equal(digest(JSON.stringify(reprojected.acquiredItems)), buffer.hash)
+    assert.deepEqual(reprojected.acquiredItems.slice(buffer.offset).map(row => row.content_id), ['fixture-photo-2'])
+    const history = await f.store.historyFor({ ...f.identity, previousDeliveryId: f.target.id, jobCount: 1, totalLimit: 20 })
+    assert.deepEqual([...history.seenIds[0]], ['fixture-photo-0', 'fixture-photo-1', 'already-delivered'])
+    await assert.rejects(f.store.commitDelivery(saved), { code: 'search_page_unavailable' })
+    assert.equal((await f.counts()).captures, 1)
   })
 
   test(`${name} content finalization atomically settles once and binds carried plus newly purchased sources`, options, async t => {

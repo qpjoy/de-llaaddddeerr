@@ -253,23 +253,27 @@ for (const postgres of [false, true]) {
     await assert.rejects(f.store.twitterDeliveredIdsFor({...input,previousDeliveryId:previous}),{code:'search_page_unavailable'})
   })
 
-  test(`${name} Twitter final fill binds own and historical receipts atomically and guards unknown parent reentry`,options,async t=>{
-    const f=await fixture(t,postgres),ownCall={...f.call,id:randomUUID(),usageRequestId:f.target.id}
+  test(`${name} Twitter final fill binds five own receipts plus carry atomically and guards unknown parent reentry`,options,async t=>{
+    const f=await fixture(t,postgres),ownCalls=Array.from({length:5},()=>({...f.call,id:randomUUID(),usageRequestId:f.target.id}))
+    const ownCall=ownCalls.at(-1)
     await f.setUsage(f.target.id,{status:'unknown'})
     assert.equal(await f.store.twitterFillUnknownFor(f.saved.delivery),true,'buffer-only unknown has no owned provider call')
     await f.setUsage(f.target.id,{status:'reserved',acquisitionRequest:{...f.target.acquisitionRequest,
       body:{...f.target.acquisitionRequest.body,platform:' X '}}})
-    await f.insertCall(ownCall)
-    await f.insertArchive(ownCall.id,f.archive)
+    for(const call of ownCalls) {
+      await f.insertCall(call)
+      await f.insertArchive(call.id,f.archive)
+    }
     const source=callId=>({callId,bodySize:f.archive.bodySize,bodySha256:f.archive.bodySha256,
       capturedAt:f.archive.capturedAt,rowsHash:'e'.repeat(64)})
     const input={...f.saved,query:'fixture',pageSize:20,type:'fresh',sourceMode:'live',
       responseBody:{data:{platform:'twitter',query:'fixture',pageInfo:{pageSize:20},items:[{id:'1'}]}},
-      lineage:{version:'twitter-fill.v1',scopeHash:'c'.repeat(64),upstreamPages:2,previousDeliveryId:f.source.id},
-      sources:[source(f.call.id),source(ownCall.id)]}
+      lineage:{version:'twitter-fill.v1',scopeHash:'c'.repeat(64),upstreamPages:6,previousDeliveryId:f.source.id},
+      sources:[source(f.call.id),...ownCalls.map(call=>source(call.id))]}
     assert.equal(await f.store.twitterFillUnknownFor(f.saved.delivery),false)
     assert.equal(await f.store.twitterPageFor({...f.input,callId:ownCall.id}),null,'reserved source is private to atomic own-delivery commit')
     await assert.rejects(f.store.commitTwitterFillDelivery({...input,sources:[{...source(ownCall.id),bodySha256:'0'.repeat(64)}]}),{code:'search_page_unavailable'})
+    await assert.rejects(f.store.commitTwitterFillDelivery({...input,sources:Array.from({length:17},()=>source(randomUUID()))}),{code:'search_page_unavailable'})
     assert.equal((await f.getUsage(f.target.id)).status,'reserved')
     if(postgres) {
       await f.db.exec('ALTER TABLE external_platform.gateway_requests ADD CONSTRAINT force_fill_failure CHECK (false)')
@@ -287,9 +291,9 @@ for (const postgres of [false, true]) {
     await f.store.commitTwitterFillDelivery(input)
     const delivered=await f.getUsage(f.target.id)
     assert.equal(delivered.status,'committed')
-    assert.equal(delivered.acquisitionRequest.twitterFill.sources.length,2)
+    assert.equal(delivered.acquisitionRequest.twitterFill.sources.length,6)
     assert.deepEqual(delivered.acquisitionRequest.body,{...f.target.acquisitionRequest.body,platform:' X '})
-    assert.equal((await f.counts()).calls,2)
+    assert.equal((await f.counts()).calls,6)
     assert.equal((await f.counts()).gateways,1,'one logical HTTP delivery, all sources in internal manifest')
     assert.equal((await f.counts()).sourceCallId,ownCall.id)
     assert.equal((await f.counts()).captures,1)
