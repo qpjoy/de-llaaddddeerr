@@ -13,6 +13,8 @@ function FacebookForm({ token, row, onSaved, notify }) {
   const [mode, setMode] = useState(row.mode)
   const [limit, setLimit] = useState(row.monthly_limit)
   const [interval, setInterval] = useState(row.probe_interval_hours)
+  const [billingDay, setBillingDay] = useState(row.billing_cycle_day ?? 27)
+  const [billingInterval, setBillingInterval] = useState(row.billing_probe_interval_hours ?? 6)
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -22,7 +24,8 @@ function FacebookForm({ token, row, onSaved, notify }) {
     setBusy(true); setError(null)
     try {
       await adminApi.updatePlatformSearchPolicy(token, 'facebook', { mode, monthlyLimit: Number(limit),
-        probeIntervalHours: Number(interval), expectedRevision: row.revision, reason })
+        probeIntervalHours: Number(interval), billingCycleDay: Number(billingDay),
+        billingProbeIntervalHours: Number(billingInterval), expectedRevision: row.revision, reason })
       onSaved(); notify?.('Facebook 搜索策略已保存')
     } catch (e) { setError(e) } finally { setBusy(false) }
   }
@@ -33,11 +36,13 @@ function FacebookForm({ token, row, onSaved, notify }) {
         options={Object.entries(MODES).filter(([key]) => key !== 'existing').map(([value, label]) => ({ value, label }))} />
       <Field label="RapidAPI 每周期调用上限"><input className="qp-input" type="number" min="1" max="1000000" required value={limit} disabled={busy} onChange={e => setLimit(e.target.value)} /></Field>
       <Field label="重置时间未知时，恢复探测间隔（小时）"><input className="qp-input" type="number" min="24" max="744" required value={interval} disabled={busy} onChange={e => setInterval(e.target.value)} /></Field>
+      <Field label="预计每月扣费日（北京时间）"><input className="qp-input" type="number" min="1" max="31" required value={billingDay} disabled={busy} onChange={e => setBillingDay(e.target.value)} /></Field>
+      <Field label="扣费日前一天至后两天，恢复检查间隔（小时）"><input className="qp-input" type="number" min="1" max="24" required value={billingInterval} disabled={busy} onChange={e => setBillingInterval(e.target.value)} /></Field>
       <Field label="修改原因"><input className="qp-input" required maxLength={1000} value={reason} disabled={busy} onChange={e => setReason(e.target.value)} placeholder="记录此次调整的原因" /></Field>
     </div>
-    <p>已预留调用：{row.used ?? 0}；供应商剩余额度：{row.remaining ?? '尚未返回'}。{REASONS[row.availability_reason] || '按策略选路'}。</p>
-    <p>额度重置：{row.reset_at ? formatDate(row.reset_at) : '未知，等待供应商响应'}；下次可尝试：{row.blocked_until ? formatDate(row.blocked_until) : '可随业务请求尝试'}。</p>
-    <p>恢复探测使用到期后的第一条实际业务请求，每次只放行一次；结果确认仍有额度后恢复。未知周期的探测可能计费。分页继续使用原渠道，无法继续时需要重新搜索。</p>
+    <p>当前周期计数（含预留）：{row.used ?? 0}；供应商剩余额度：{row.remaining ?? '尚未返回'}。{REASONS[row.availability_reason] || '按策略选路'}。</p>
+    <p>供应商重置提示：{row.reset_at ? formatDate(row.reset_at) : '未知，等待供应商响应'}；下次可随业务请求检查：{row.next_recovery_check_at ? formatDate(row.next_recovery_check_at) : '按当前策略尝试'}。</p>
+    <p>恢复检查使用到期后的第一条实际业务请求，每次只放行一次，不定时发送请求。扣费日期或重置时间到点仅允许检查；成功响应的套餐计费剩余额度确认大于零后才恢复，短时限流额度不作月额度。检查可能计费。分页继续使用原渠道，无法继续时需要重新搜索。</p>
     {error ? <ErrorState error={error} /> : null}
     <div><button className="qp-button qp-button--primary" disabled={busy || !reason.trim()}>{busy ? '保存中…' : '保存平台策略'}</button></div>
   </form>

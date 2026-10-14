@@ -237,6 +237,58 @@ test('RapidAPI billing headers are separate from short rate windows', () => {
   assert.equal(v.remaining, 0); assert.equal(v.resetSeconds, 80000); assert.equal(v.retryAfterSeconds, 20)
 })
 
+test('a quota-store write failure preserves successful and rejected receipts without a paid retry', async () => {
+  for (const rapidStatus of [200, 429]) {
+    const h = await harness({ rapidStatus })
+    let observations = 0
+    h.policyStore.observeRapid = async () => { observations++; throw new Error('synthetic quota storage failure') }
+    const first = await h.invoke()
+    assert.deepEqual(h.calls.map(row => row.provider), rapidStatus === 429 ? ['rapidapi', 'justone'] : ['rapidapi'])
+    assert.equal([...h.stores.rapidapi.calls.values()][0].outcome, rapidStatus === 429 ? 'rejected' : 'succeeded')
+    assert.equal(observations, 1, 'cleanup must not release an uncertain quota lease')
+    assert.deepEqual((await h.invoke()).body, first.body)
+    assert.equal(h.calls.length, rapidStatus === 429 ? 2 : 1)
+  }
+})
+
+test('confirmed Facebook 429 with an unreadable body still switches once and preserves one request', async () => {
+  const h = await harness({ rapidStatus: 429 })
+  const originalFetch = h.gateways.rapidapi.adapter.fetch
+  h.gateways.rapidapi.adapter.fetch = async (...args) => {
+    await originalFetch(...args)
+    return new Response(new Uint8Array([0xff]), { status: 429, headers: { 'x-ratelimit-requests-remaining': '0' } })
+  }
+  const first = await h.invoke()
+  assert.deepEqual(h.calls.map(row => row.provider), ['rapidapi', 'justone'])
+  const rapid = [...h.stores.rapidapi.calls.values()][0], fallback = [...h.stores.justone.calls.values()][0]
+  assert.equal(rapid.outcome, 'rejected')
+  assert.equal(rapid.usageRequestId, fallback.usageRequestId)
+  assert.equal(first.body.data.meta.upstreamCallCount, 2)
+  assert.equal(h.observations[0].remaining, 0)
+  assert.deepEqual((await h.invoke()).body, first.body)
+  assert.equal(h.calls.length, 2)
+})
+
+test('RapidAPI local rate limits allow auto first pages to use JustOne, never pinned cursors or forced mode', async () => {
+  const deny = async () => ({ allowed: false, retryAfterMs: 1000 })
+  const automatic = await harness()
+  automatic.stores.rapidapi.acquireProviderRateLimit = deny
+  const first = await automatic.invoke()
+  assert.deepEqual(automatic.calls.map(row => row.provider), ['justone'])
+  assert.equal(first.body.data.meta.upstreamCallCount, 1)
+  assert.equal(automatic.stores.rapidapi.calls.size, 0)
+  const forced = await harness({ mode: 'rapidapi' })
+  forced.stores.rapidapi.acquireProviderRateLimit = deny
+  await assert.rejects(forced.invoke(), { code: 'external_platform_rate_limited' })
+  assert.equal(forced.calls.length, 0)
+  const pinned = await harness({ hasMore: true })
+  const page = await pinned.invoke()
+  pinned.stores.rapidapi.acquireProviderRateLimit = deny
+  await assert.rejects(pinned.invoke({ platform: 'facebook', query: 'Unitree', count: 20,
+    cursor: page.body.data.page.nextCursor }, 'facebook-rate-pinned-page2'), { code: 'external_platform_rate_limited' })
+  assert.deepEqual(pinned.calls.map(row => row.provider), ['rapidapi'])
+})
+
 test('PostgreSQL fallback preserves one usage identity, two raw receipts and one ingest job', { skip: !process.env.MX_FACEBOOK_TEST_DATABASE_URL }, async () => {
   const pool = new pg.Pool({ connectionString: process.env.MX_FACEBOOK_TEST_DATABASE_URL })
   try {
@@ -274,7 +326,7 @@ test('PostgreSQL quota serializes replicas, recovers from reset/probes and audit
     await store.observeRapid(first, { ok: true, remaining: 0, resetSeconds: 3600 })
     assert.equal((await store.admitRapid()).allowed, false)
     await pool.query("UPDATE control.facebook_rapid_quota SET reset_at=now()-interval '1 second'")
-    const reset = await store.admitRapid(); assert.equal(reset.allowed, true)
+    const reset = await store.admitRapid(); assert.equal(reset.allowed, true); assert.equal(reset.probe, true)
     await store.observeRapid(reset, { ok: true, remaining: 999 })
     await pool.query("UPDATE control.facebook_rapid_quota SET used=1000, remaining=0, reset_at=NULL, blocked_until=now()-interval '1 second'")
     const probes = await Promise.all(Array.from({ length: 12 }, () => store.admitRapid()))

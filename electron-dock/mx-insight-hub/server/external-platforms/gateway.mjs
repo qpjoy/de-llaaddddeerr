@@ -744,7 +744,17 @@ export class ExternalPlatformGateway {
     const request = previousRequest || normalizeFacebookSearch(normalized, codec, dataSearch)
     const rapid = this.providerKey === 'rapidapi'
     const providerRequest = request.forProvider(this.providerKey)
-    let admission = null
+    let admission = null, observationFailed = false
+    const observe = async quota => {
+      if (observationFailed) return
+      try { await policyStore.observeRapid(admission, quota) }
+      catch {
+        // The supplier receipt is already authoritative. A quota-store fault
+        // must not erase it, retry a paid call, or release an uncertain lease.
+        observationFailed = true
+        this.logger?.warn?.('[external-platform] Facebook quota observation is unavailable; admission remains reserved until expiry')
+      }
+    }
     const next = async (reserved, previousCalls = 0) => {
       if (!rapid || !fallbackGateway) throw new AppError(503, 'facebook_search_unavailable', 'Facebook search is unavailable')
       if (request.provider) throw new AppError(409, 'search_restart_required', 'This search continuation is temporarily unavailable; restart from page 1 with a new Idempotency-Key')
@@ -789,7 +799,7 @@ export class ExternalPlatformGateway {
         try {
           let result = rapid ? await this.adapter.execute({ ...request, ...providerRequest }, credential)
             : await this.adapter.forwardNative(FACEBOOK_JUSTONE_KEY, { params: providerRequest.upstreamQuery }, credential)
-          if (rapid) await policyStore.observeRapid(admission, result.quota)
+          if (rapid) await observe(result.quota)
           else {
             try { result = { ...result, restrictedResponseArchive: result.restrictedResponseArchive,
               archiveObjects: facebookJustOneArchives(result.archiveObjects, providerRequest.endpointVersion),
@@ -800,7 +810,7 @@ export class ExternalPlatformGateway {
           }
           return result
         } catch (error) {
-          if (rapid) await policyStore.observeRapid(admission, error.evidence?.quota)
+          if (rapid) await observe(error.evidence?.quota)
           else if (error instanceof JustOneUpstreamError) throw new JustOneUpstreamError(error.name, error.message,
             error.evidence, facebookJustOneArchives(error.archiveObjects, providerRequest.endpointVersion), error.restrictedResponseArchive)
           throw error
@@ -813,7 +823,7 @@ export class ExternalPlatformGateway {
         await settle()
         return { result: await next(reserved, 1) }
       } : null,
-      cleanup: rapid ? () => policyStore.observeRapid(admission) : null,
+      cleanup: rapid ? () => observe() : null,
       costUnknown: () => admission?.probe === true,
       finalize: ({ result }) => {
         result.publicBody.data.meta.upstreamCallCount = providerCalls + 1
@@ -1430,6 +1440,13 @@ export class ExternalPlatformGateway {
           })
         : { allowed: true, retryAfterMs: 0 }
       if (!rateLimit.allowed) {
+        // Facebook's auto policy may choose its other supplier before any
+        // RapidAPI dispatch. The route itself preserves administrator mode and
+        // provider-bound cursors; other operations have no unavailable route.
+        if (plan.unavailable) {
+          const routed = await plan.unavailable(reservation)
+          if (routed) { ownsReservation = false; return routed.result }
+        }
         if (allowStoredFallback && snapshot) {
           const responseBody = deliveryBody(snapshot.responseBody, {
             requestId: activeRequestId,
