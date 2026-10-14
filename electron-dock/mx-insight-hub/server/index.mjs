@@ -31,6 +31,7 @@ import { JustOneAdapter } from './adapters/justone.mjs'
 import { TikHubAdapter } from './adapters/tikhub.mjs'
 import { RapidApiAdapter } from './adapters/rapidapi.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
+import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
 import { RAPIDAPI_METADATA, rapidApiConfig } from './external-platforms/rapidapi-config.mjs'
 import { createApp } from './app.mjs'
 import { createPeripheralRuntime } from './peripherals/runtime.mjs'
@@ -405,7 +406,8 @@ export async function createRuntime(config = loadConfig()) {
       credentialStore: justone ? externalPlatformCredentialStore : tikHubCredentialStore,
     })
   }
-  const nativeSearchGateways = { weibo: nativeSearchGateway('weibo', 'tikhub') }
+  const nativeSearchGateways = Object.fromEntries(['weibo', ...Object.keys(TIKHUB_CONTENT_SEARCH_RECIPES)]
+    .map(platform => [platform, nativeSearchGateway(platform, 'tikhub')]))
   const instagramSearchGateways = Object.fromEntries(['justone', 'tikhub'].map(provider => [provider, nativeSearchGateway('instagram', provider)]))
   const instagramSearch = (context, input) => instagramSearchGateways.justone.searchRaw(context, input, {
     policyStore: strategySearchRoutingStore, gateways: instagramSearchGateways,
@@ -529,6 +531,19 @@ export async function createRuntime(config = loadConfig()) {
       })
       return { ready: readiness['social.content.search'] === true }
     },
+    externalContentSearchCapabilities: async options => {
+      const selected = Object.keys(TIKHUB_CONTENT_SEARCH_RECIPES)
+        .filter(platform => !Array.isArray(options?.platforms) || options.platforms.includes(platform))
+      if (!selected.length) return {}
+      const credential = await tikHubCredentialStore.describeCredential('tikhub')
+      const readiness = await nativeSearchGateways[selected[0]].nativeReadiness({ ...options,
+        operationKeys: selected.map(platform => `native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`),
+        credentialConfigured: credential.credentialConfigured,
+      })
+      return Object.fromEntries(selected.map(platform => [platform, {
+        ready: readiness[`native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`] === true,
+      }]))
+    },
     externalFacebookCapabilities: async options => {
       const policy = await platformSearchPolicyStore.facebook()
       if (policy.mode === 'paused') return { ready: false }
@@ -550,9 +565,11 @@ export async function createRuntime(config = loadConfig()) {
     externalWechatSearch: (context, input) => socialAccountTikHubGateway.forwardNative(context, input),
     externalRawSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
       : input.normalized.platform === 'instagram' ? instagramSearch(context, input)
+      : TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform] ? nativeSearchGateways[input.normalized.platform].searchContent(context, input)
       : (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
     externalDataSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
       : input.normalized.platform === 'instagram' ? instagramSearch(context, input)
+      : TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform] ? nativeSearchGateways[input.normalized.platform].searchContent(context, input)
       : (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
     // The gateway reads the audited operation policy on every dispatch; static
     // env flags must not prevent routing to a database-enabled operation.
@@ -677,6 +694,7 @@ export async function createRuntime(config = loadConfig()) {
     externalPlatformControlStore, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     hubSocialGateway, rapidApiStore, rapidApiCredentialStore, rapidApiProxyStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
+    nativeSearchGateways,
   }
 }
 

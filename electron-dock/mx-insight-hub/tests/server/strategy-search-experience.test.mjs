@@ -43,6 +43,13 @@ test('result links accept only credential-free HTTP(S) sources', () => {
   for (const value of ['javascript:alert(1)', 'data:text/html,<b>x</b>', 'https://user:pass@example.test', '/relative']) assert.equal(safeStrategyUrl(value), null)
 })
 
+test('Facebook photo landing detection requires the known host and exact HTML endpoint', async () => {
+  const { isFacebookPhotoPage } = await import('../../src/strategy-search-experience-model.js')
+  for (const url of ['https://facebook.com/photo.php?fbid=1', 'https://m.facebook.com/photo.php?fbid=1']) assert.equal(isFacebookPhotoPage(url), true)
+  for (const url of ['https://facebook.com.evil.test/photo.php', 'https://facebook.com/photo.jpg',
+    'https://user:pass@facebook.com/photo.php', 'javascript:alert(1)', null]) assert.equal(isFacebookPhotoPage(url), false)
+})
+
 test('debugger and product share a durable identity cell through navigation and credential renewal', async () => {
   const { createStrategySearchCell, recordStrategyAttempt, strategyRequestFingerprint } = await import('../../src/strategy-search-experience-model.js')
   const session = new Map(), identity = 'original-key-id'

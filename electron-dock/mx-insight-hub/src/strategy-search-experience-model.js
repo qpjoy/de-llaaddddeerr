@@ -49,6 +49,13 @@ export function safeStrategyUrl(value) {
   catch { return null }
 }
 
+export function isFacebookPhotoPage(value) {
+  try {
+    const url = new URL(safeStrategyUrl(value))
+    return (url.hostname === 'facebook.com' || url.hostname.endsWith('.facebook.com')) && url.pathname === '/photo.php'
+  } catch { return false }
+}
+
 export function createStrategySearchCell(platform) {
   let state = { form: { platform, query: '', pageSize: 20 }, attempts: new Map(), consoleAttempts: new Map(), result: null, busy: false, error: null, checking: false }
   const listeners = new Set()

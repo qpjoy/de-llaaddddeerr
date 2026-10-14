@@ -7,7 +7,7 @@ import { WechatResult } from './wechat-product.jsx'
 import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 import { requestUuid } from './request-id.js'
 import { STRATEGY_DATA_SEARCH_PATH, STRATEGY_SEARCH_PLATFORMS, strategySearchPlatforms, strategySearchBody,
-  strategyPageInfo, uncertainStrategySearch, safeStrategyUrl, createStrategySearchCell, strategyRequestFingerprint, strategyOutcomeMatches } from './strategy-search-experience-model.js'
+  strategyPageInfo, uncertainStrategySearch, safeStrategyUrl, isFacebookPhotoPage, createStrategySearchCell, strategyRequestFingerprint, strategyOutcomeMatches } from './strategy-search-experience-model.js'
 
 export function useStrategySearchState(strategySession) {
   const identity = useDemoIdentity(), access = useDemoAccessSnapshot()
@@ -101,7 +101,7 @@ export function StrategySearchExperience({ initialResult, strategySession, onRes
       {!matching ? <p className="qp-muted">以下保留已返回结果；新的平台或关键词需手动搜索。</p> : null}
       <StrategySearchResult payload={result.payload} evidence={result.evidence} />
       {matching && pageInfo?.hasMore && pageInfo.nextCursor ? <button className="qp-button qp-button--outline mih-strategy-next" type="button" disabled={!canSend} onClick={() => search({ ...result.input.body, cursor: pageInfo.nextCursor })}><ArrowDown size={16} aria-hidden="true" />读取下一页（按当前规则计量）</button> : null}
-      <details className="qp-panel mih-panel"><summary>完整响应与请求证据</summary><pre className="mih-api-response">{JSON.stringify(result.payload, null, 2)}</pre><AdminExecutionEvidence requestId={result.evidence?.requestId} /></details>
+      <details className="qp-panel mih-panel mih-strategy-response"><summary>完整响应与请求证据</summary><pre className="mih-api-response" role="region" aria-label="完整响应 JSON" tabIndex={0}>{JSON.stringify(result.payload, null, 2)}</pre><AdminExecutionEvidence requestId={result.evidence?.requestId} /></details>
     </> : <section className="qp-panel mih-panel mih-strategy-result-empty"><MagnifyingGlass size={32} weight="duotone" /><h3>搜索内容将在这里展示</h3><p>可按平台查看正文、作者、互动指标与原文链接。</p></section>}
   </div>
 }
@@ -117,15 +117,17 @@ export function StrategySearchResult({ payload, evidence }) {
     <header><div><p className="qp-kicker">{label}</p><h2>{data?.query || '已返回搜索内容'}</h2><p>{nativeWechat ? '微信原生业务响应' : `本页 ${items.length} 条 · ${!items.length ? '本页无内容' : data?.status === 'partial' ? '部分返回' : '已返回'}`}</p></div>
       {!nativeWechat ? <label className="mih-strategy-image-toggle"><input type="checkbox" checked={images} onChange={event => setImages(event.target.checked)} /><ImageIcon size={16} aria-hidden="true" />显示已返回图片</label> : null}</header>
     {(data?.warnings || []).length ? <div role="status" className="mih-strategy-result-warnings">{data.warnings.map((warning, index) => <p key={`${warning.code}:${index}`}><strong>{warning.code}</strong> · {warning.message}</p>)}</div> : null}
-    {nativeWechat ? <WechatResult payload={payload} /> : !items.length ? <p>{data?.pageInfo?.hasMore && data?.pageInfo?.nextCursor ? '本页没有可展示的内容，但响应仍提供后续游标；可手动读取下一页，不能据此判定搜索结束。' : '本页没有可展示的内容；不会自动补页或切换供应商。'}</p> : <div className="mih-strategy-result-list">{items.map((item, index) => {
+    {nativeWechat ? <WechatResult payload={payload} /> : !items.length ? <p>{data?.pageInfo?.hasMore && data?.pageInfo?.nextCursor ? '本页没有可展示的内容，但响应仍提供后续游标；可手动读取下一页，不能据此判定搜索结束。' : '本页没有可展示的内容；后续状态以响应中的游标与警告为准。'}</p> : <div className="mih-strategy-result-list">{items.map((item, index) => {
       const url = safeStrategyUrl(item.url)
-      const image = safeStrategyUrl(item.media?.coverUrl) || (item.media?.images || []).map(safeStrategyUrl).find(Boolean)
+      const imageUrls = [item.media?.coverUrl, ...(item.media?.images || [])].map(safeStrategyUrl).filter(Boolean)
+      const photoPages = data?.platform === 'facebook' ? [...new Set(imageUrls.filter(isFacebookPhotoPage))] : []
+      const image = imageUrls.find(value => !photoPages.includes(value))
       return <article key={`${item.platform}:${item.id || index}`} className="mih-strategy-result-card">
         {images && image ? <img src={image} alt={item.title || '内容配图'} loading="lazy" referrerPolicy="no-referrer" onError={event => { event.currentTarget.hidden = true }} /> : null}
         <div><header><strong>{item.author?.name || '作者未提供'}</strong><span>{item.publishedAt ? formatDate(item.publishedAt) : '发布时间未提供'}</span></header>
           {item.title ? <h3>{item.title}</h3> : null}<p className="mih-strategy-result-text">{item.text || '此条目未提供正文。'}</p>
           <div className="mih-strategy-result-metrics">{Object.entries(metricLabels).map(([name, title]) => <span key={name}>{title} <b>{item.metrics?.[name] == null ? '未提供' : item.metrics[name].toLocaleString()}</b></span>)}</div>
-          <footer><span>{item.contentType || '内容'}{item.externalId || item.id ? ` · ${item.externalId || item.id}` : ''}</span>{url ? <a href={url} target="_blank" rel="noopener noreferrer">查看原文 <ArrowUpRight size={14} aria-hidden="true" /></a> : <span>原文链接未提供</span>}</footer>
+          <footer><span>{item.contentType || '内容'}{item.externalId || item.id ? ` · ${item.externalId || item.id}` : ''}</span><span className="mih-strategy-media-links">{photoPages.map((href, index) => <a key={href} href={href} target="_blank" rel="noopener noreferrer">查看配图{photoPages.length > 1 ? ` ${index + 1}` : ''} <ArrowUpRight size={14} aria-hidden="true" /></a>)}{url ? <a href={url} target="_blank" rel="noopener noreferrer">查看原文 <ArrowUpRight size={14} aria-hidden="true" /></a> : <span>原文链接未提供</span>}</span></footer>
         </div>
       </article>
     })}</div>}

@@ -42,23 +42,41 @@ export function normalizeFacebookSearch(normalized, codec, dataSearch = null, no
       state = codec.decode(body.cursor)
       if (state.version !== FACEBOOK_VERSION || state.scope !== scope || !['rapidapi', 'justone'].includes(state.provider)
         || !Number.isInteger(state.page) || state.page < 2 || state.page > 15 || !Number.isSafeInteger(state.expiresAt) || state.expiresAt <= now
-        || typeof state.providerCursor !== 'string' || !state.providerCursor || state.providerCursor.length > 4096
+        || (!(dataSearch && state.buffer && state.providerCursor == null)
+          && (typeof state.providerCursor !== 'string' || !state.providerCursor || state.providerCursor.length > 4096))
+        || (state.fill != null && (!dataSearch || !state.fill || typeof state.fill !== 'object' || Array.isArray(state.fill)
+          || Object.keys(state.fill).some(key => !['version', 'previousDeliveryId', 'upstreamPages'].includes(key))
+          || state.fill.version !== 'facebook-fill.v1'
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(state.fill.previousDeliveryId)
+          || !Number.isInteger(state.fill.upstreamPages) || state.fill.upstreamPages < 0 || state.fill.upstreamPages > 15))
+        || (state.buffer != null && (!state.fill || !state.buffer || typeof state.buffer !== 'object' || Array.isArray(state.buffer)
+          || Object.keys(state.buffer).some(key => !['callId', 'offset', 'hash'].includes(key))
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(state.buffer.callId)
+          || !Number.isSafeInteger(state.buffer.offset) || state.buffer.offset < 1 || state.buffer.offset > 10000
+          || !/^[0-9a-f]{64}$/.test(state.buffer.hash)))
         || date(state.startDate) !== state.startDate || date(state.endDate) !== state.endDate) throw new Error('cursor')
     } catch { throw new AppError(400, 'invalid_cursor', 'Restart Facebook search from page 1 with a new Idempotency-Key; the cursor is invalid, expired or belongs to another query/Key') }
   }
   if (state.startDate > state.endDate) invalid('Search start must not be after end')
-  return { ...state, platform: 'facebook', query, pageSize, marketplace: 'facebook', deliveryMode: 'live_only',
+  return { ...state, platform: 'facebook', query, pageSize, scopeHash: scope, resultType: dataSearch?.resultType,
+    standardSearch: Boolean(dataSearch), marketplace: 'facebook', deliveryMode: 'live_only',
     fingerprintBody: dataSearch ? { ...normalized, type: dataSearch.resultType }
       : { contractVersion: 'mx-insight-hub.night-all-compat.v1', ...body },
     forProvider(provider) {
       return provider === 'rapidapi' ? { endpointKey: FACEBOOK_ENDPOINT, endpointContractVersion: FACEBOOK_VERSION,
         endpointVersion: 'v1', endpointPath: '/search/posts', upstreamQuery: { query, start_date: state.startDate,
-          end_date: state.endDate, ...(state.providerCursor ? { cursor: state.providerCursor } : {}) } }
+          end_date: state.endDate, ...(state.providerCursor ? { cursor: state.providerCursor } : {}) },
+          ...(dataSearch ? { standardSearch: true, allowOverflow: true } : {}) }
         : normalizeNativeForwardingRequest(FACEBOOK_JUSTONE_KEY, { params: { keyword: query, startDate: state.startDate,
           endDate: state.endDate, ...(state.providerCursor ? { cursor: state.providerCursor } : {}) } })
     },
     encodeNext: (provider, providerCursor) => codec.encode({ ...state, version: FACEBOOK_VERSION, scope, provider,
       providerCursor, page: state.page + 1 }),
+    encodeFillNext: ({ provider, providerCursor, buffer, previousDeliveryId, upstreamPages }) => codec.encode({
+      version: FACEBOOK_VERSION, scope, provider, providerCursor, page: state.page + 1, expiresAt: state.expiresAt,
+      startDate: state.startDate, endDate: state.endDate, ...(buffer ? { buffer } : {}),
+      fill: { version: 'facebook-fill.v1', previousDeliveryId, upstreamPages },
+    }),
   }
 }
 
@@ -86,20 +104,36 @@ export function facebookRow(post, capturedAt) {
     view_count: metric(post.video_view_count), image_urls: JSON.stringify(images), video_urls: JSON.stringify(videos) }
 }
 
-export function projectFacebookSearch(raw, request, provider, capturedAt) {
+// The standard view separates an explicit video poster from real photos.
+// Keep the raw row and every supplier URL intact; neither a first-photo guess
+// nor a Facebook landing-page URL establishes a downloadable media asset.
+export function facebookStandardMedia(row) {
+  const urls = value => [...new Set(JSON.parse(value || '[]').filter(value => typeof value === 'string'))]
+  const images = urls(row.image_urls), videos = urls(row.video_urls)
+  const poster = row.video_thumbnail
+  const explicit = typeof poster === 'string' ? poster : poster?.uri || poster?.url
+  const coverUrl = text(explicit) || text(row.cover_url) || text(row.coverUrl) || null
+  return { coverUrl, images: videos.length && coverUrl ? images.filter(url => url !== coverUrl) : images, videos }
+}
+
+export function projectFacebookSearch(raw, request, provider, capturedAt, { allowOverflow = false } = {}) {
   const items = provider === 'justone' ? raw?.business_data ?? raw?.results : raw?.results
   if (!raw || typeof raw !== 'object' || !Array.isArray(items)) throw new Error('invalid_facebook_response')
+  if (items.length > 10000) throw new Error('facebook_page_too_large')
   const rows = items.map(post => facebookRow(post, capturedAt))
   // Suppliers do not accept count. Never silently discard paid business rows.
-  if (rows.length > request.pageSize) throw new Error('facebook_page_exceeds_requested_count')
+  if (rows.length > request.pageSize && !allowOverflow) throw new Error('facebook_page_exceeds_requested_count')
   const cursor = raw.cursor || raw.next_cursor || raw.nextCursor || raw.pagination?.next_cursor || raw.pagination?.nextCursor || null
   if (cursor != null && (typeof cursor !== 'string' || cursor.length > 4096)) throw new Error('invalid_facebook_continuation')
   const hasMore = Boolean(cursor) && cursor !== request.providerCursor && request.page < 15
-  return { publicBody: { contractVersion: RAW_SEARCH_VERSION, data: { platform: 'facebook', query: request.query,
+  const publicBody = { contractVersion: RAW_SEARCH_VERSION, data: { platform: 'facebook', query: request.query,
     raw_info: '[]', raw_data: JSON.stringify(rows), items: rows,
     page: { page: request.page, pageSize: request.pageSize, returnedCount: rows.length, hasMore,
       nextCursor: hasMore ? request.encodeNext(provider, cursor) : null }, status: 'ok', warnings: [],
-    meta: { upstreamCallCount: 1 } }, meta: { capturedAt } }, items: rows }
+    meta: { upstreamCallCount: 1 } }, meta: { capturedAt } }
+  if (allowOverflow) Object.defineProperty(publicBody, 'providerPage', { enumerable: false,
+    value: { nextProviderCursor: cursor && cursor !== request.providerCursor ? cursor : null } })
+  return { publicBody, items: rows }
 }
 
 export function facebookJustOneArchives(objects, endpointVersion) {

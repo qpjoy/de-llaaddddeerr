@@ -7,6 +7,7 @@ import { JUSTONE_ENDPOINTS } from '../contracts/justone.mjs'
 import { publicStoredSearchItem } from './stored-search.mjs'
 import { createAggregateCursorCodec } from '../external-platforms/cursor.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from '../contracts/hub-social.mjs'
+import { TIKHUB_CONTENT_SEARCH_RECIPES } from '../contracts/tikhub-content-search.mjs'
 
 export const AGGREGATE_CONTRACT = 'mx-insight-hub.aggregate-search.v1'
 export const AGGREGATE_TYPES = ['post', 'article', 'message', 'chat', 'comment', 'product', 'account', 'user', 'profile', 'saved_record', 'commerce_capture', 'opinion_item']
@@ -46,6 +47,10 @@ export function aggregateSourceCatalog(grants, capabilities, crawlerSpecs = [], 
           operation: WECHAT_SEARCH_OPERATION, objectType, label: labels[platform] }] : [] }
     }
     if (execution === 'hub_only') {
+      if (Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, platform)) return [{
+        platform, label: labels[platform], stored: true, refresh: true, objectTypes: ['post'],
+        routes: [{ id: `hub-content:${platform}`, platform, kind: 'hub_content', operation: 'data.search', objectType: 'post', label: labels[platform] }],
+      }]
       const endpoint = HUB_SOCIAL_ENDPOINTS.search
       const available = platform === endpoint.platform && capabilities.includes(endpoint.operation)
       return [{ platform, label: labels[platform] || platform, stored: true, refresh: available, objectTypes: ['post'],
@@ -97,7 +102,8 @@ export function normalizeAggregateRequest(body, sources) {
   if (mode === 'refresh' && (filters.tags.length || filters.from || filters.to)) throw new AppError(400, 'refresh_filters_unsupported', 'Live sources do not support Hub tags/date filters; use stored mode or remove these filters')
   const selected = sources.filter(source => platforms.includes(source.platform))
   const routes = mode === 'refresh' ? selected.flatMap(source => source.routes).filter(route => !objectTypes.length || objectTypes.includes(route.objectType)) : []
-  if (body.execution === 'hub_only' && routes.some(route => !['hub_social', 'wechat'].includes(route.kind))) fail('Hub-only search requires Hub-owned source routes')
+  if (body.execution === 'hub_only' && routes.some(route => !['hub_social', 'wechat', 'hub_content'].includes(route.kind)
+    || route.kind === 'hub_content' && !Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, route.platform))) fail('Hub-only search requires Hub-owned source routes')
   if (mode === 'refresh' && !routes.length) throw new AppError(400, 'refresh_unavailable', 'No selected source supports this authorized live operation')
   // Validate WeChat's 100-character keyword limit before any paid child starts.
   for (const route of routes.filter(route => route.kind === 'wechat')) normalizeWechatSearchAlias({ platform: route.platform, query: body.query })

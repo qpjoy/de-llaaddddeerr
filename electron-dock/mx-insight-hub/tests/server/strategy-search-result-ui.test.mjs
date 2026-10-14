@@ -37,3 +37,17 @@ test('WeChat category navigation never becomes a content count or guessed unifie
   assert.match(html, /微信原生业务响应/u)
   assert.doesNotMatch(html, /此分类不是搜索条目|本页返回 1 条/u)
 })
+
+test('Facebook photo landing pages stay original links while explicit mixed-media images remain visible', async () => {
+  const { StrategySearchResult } = await view
+  const photo = 'https://www.facebook.com/photo.php?fbid=123&set=fixture'
+  const image = 'https://example.test/actual-photo.jpg'
+  const html = renderToStaticMarkup(createElement(StrategySearchResult, { payload: { data: {
+    platform: 'facebook', items: [{ id: 'mixed', text: '正文', metrics: {},
+      media: { coverUrl: photo, images: [photo, image], videos: ['https://example.test/video.mp4'] } }],
+  } } }))
+  assert.match(html, /href="https:\/\/www\.facebook\.com\/photo\.php\?fbid=123&amp;set=fixture"/u)
+  assert.match(html, /查看配图/u)
+  assert.match(html, /<img[^>]+src="https:\/\/example\.test\/actual-photo\.jpg"/u)
+  assert.doesNotMatch(html, /<img[^>]+src="https:\/\/www\.facebook\.com\/photo\.php/u)
+})

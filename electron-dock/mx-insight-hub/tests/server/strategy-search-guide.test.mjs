@@ -64,6 +64,26 @@ test('guide distinguishes standard and raw parsing and does not promise paid ret
   assert.match(html, /不能将超时后反复 POST/)
 })
 
+test('platform-scoped guides describe bounded Twitter and Facebook filling without leaking other scopes', () => {
+  const twitter = strategySearchGuide([{ platforms: ['twitter'], capabilities: [] }])
+  assert.match(twitter, /Twitter 标准分页/)
+  assert.match(twitter, /剩余 4 条/)
+  assert.match(twitter, /最多 3 次上游调用/)
+  assert.match(twitter, /15 个上游页和 15 个公开页/)
+  assert.match(twitter, /旧 raw、social、crawl 接口未新增此补页行为/)
+  assert.doesNotMatch(twitter, /Facebook|Instagram|rapidapi|justone|tikhub/i)
+  const facebook = strategySearchGuide([{ platforms: ['facebook'], capabilities: [] }])
+  assert.match(facebook, /一次 Hub 请求最多 3 次实际派发/)
+  assert.match(facebook, /params\.startTime\/endTime/)
+  assert.match(facebook, /不代表所有旧分页都能无缝续接/)
+  assert.doesNotMatch(facebook, /Twitter|Instagram|最多 3 次上游调用|rapidapi|justone|tikhub/i)
+  for (const html of [twitter, facebook]) {
+    assert.match(html, /已取得的 0 与未提供的 null/)
+    assert.match(html, /包括此前的空结果或失败/)
+    assert.match(html, /不从正文生成标题/)
+  }
+})
+
 test('WeChat-only strategy guide documents the existing unified response without granting old live access', () => {
   const scopes = [{ platforms: ['social'], capabilities: ['native.wechat.search.search'] }]
   const before = structuredClone(scopes)
@@ -88,4 +108,14 @@ test('WeChat-only strategy guide documents the existing unified response without
     [{ platforms: ['social'], capabilities: ['native.wechat.search.search-videos'] }],
     [{ platforms: ['social'], capabilities: [] }, { platforms: [], capabilities: ['native.wechat.search.search'] }],
   ]) assert.doesNotMatch(strategySearchGuide(denied), /<h2>微信搜索<\/h2>|POST \/api\/v1\/data\/wechat\/search\/search/)
+})
+
+
+test('four-platform migration guide is scoped and distinguishes keyword search from account and enrichment operations', () => {
+  const html = strategySearchGuide([{platforms:['bilibili'],capabilities:[]}])
+  assert.match(html,/关键词搜索直连/)
+  assert.match(html,/bilibili 的新关键词搜索由 Hub 执行/)
+  assert.match(html,/标准搜索余量优先、跨页去重、每请求最多 3 次上游派发/)
+  assert.match(html,/显式附采参数会在采购前拒绝/)
+  assert.doesNotMatch(html,/douyin|kuaishou|zhihu|Twitter|Facebook|tikhub|rapidapi|justone/i)
 })

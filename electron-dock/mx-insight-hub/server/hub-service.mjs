@@ -169,6 +169,7 @@ import { withNightAllLegacyCountWarning } from './contracts/night-all-count-audi
 import { acquisitionRequestSnapshot } from './acquisitions/request-snapshot.mjs'
 import { canRouteRawSearch } from './contracts/raw-search.mjs'
 import { canRouteDataSearch } from './contracts/hub-data-search.mjs'
+import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
 import { normalizeSearchContent } from './contracts/search-content.mjs'
 import {
   capNightAllCompatibilityTraversal,
@@ -582,6 +583,7 @@ export class HubService {
     externalPostCapabilities = null,
     externalFacebookCapabilities = null,
     externalTwitterCapabilities = null,
+    externalContentSearchCapabilities = null,
     externalNativeCapabilities = null,
     externalSocialSearch = null,
     externalWechatSearch = null,
@@ -613,6 +615,7 @@ export class HubService {
     this.externalPostCapabilities = externalPostCapabilities
     this.externalFacebookCapabilities = externalFacebookCapabilities
     this.externalTwitterCapabilities = externalTwitterCapabilities
+    this.externalContentSearchCapabilities = externalContentSearchCapabilities
     this.externalNativeCapabilities = externalNativeCapabilities
     this.externalSocialSearch = externalSocialSearch
     this.externalWechatSearch = externalWechatSearch
@@ -1605,6 +1608,16 @@ export class HubService {
       catch { this.logger?.warn?.('[twitter] Search capability state is unavailable') }
       const row = payload.data.platforms.find(row => row.platform === 'twitter')
       if (row) row.search = { ready, source: 'hub', servingMode: 'live_only', contractVersion: 'night-all.data-search.v1' }
+    }
+    const directContentPlatforms = canonicalGrants.filter(platform => Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, platform))
+    if (directContentPlatforms.length && this.externalContentSearchCapabilities) {
+      let states = {}
+      try { if (!isTestApiKey(context.apiKey)) states = await this.externalContentSearchCapabilities({ consumerId: context.consumer.id, platforms: directContentPlatforms }) }
+      catch { this.logger?.warn?.('[content-search] Search capability state is unavailable') }
+      for (const platform of directContentPlatforms) {
+        const row = payload.data.platforms.find(row => row.platform === platform)
+        if (row) row.search = { ready: states[platform]?.ready === true, source: 'hub', servingMode: 'live_only', contractVersion: 'night-all.data-search.v1' }
+      }
     }
     for (const platform of canonicalGrants.filter(value => wechatSearchPlatform(value))) {
       payload.data.platforms.push({ platform, ready: Boolean(this.searchQueries?.searchContent),
@@ -3453,11 +3466,15 @@ export class HubService {
     const page = query.mode === 'refresh' ? await aggregateLivePage(query, { context, store: this.store, secret: this.apiKeyPepper }) : null
     const routes = page?.routes || [{ id: 'stored', label: 'Hub 历史数据', platform: null, kind: 'stored' }]
     const readCapabilities = async fn => { try { return await fn({ consumerId: context.consumer.id }) } catch { return null } }
-    const [social, ecommerce, wechat] = await Promise.all([
+    const contentPlatforms = [...new Set(routes.filter(route => ['posts', 'hub_content'].includes(route.kind)
+      && Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, route.platform)).map(route => route.platform))]
+    const [social, ecommerce, wechat, content] = await Promise.all([
       routes.some(row => row.platform === 'xiaohongshu') && this.externalPostCapabilities ? readCapabilities(this.externalPostCapabilities) : null,
       routes.some(row => ['products', 'hub_social'].includes(row.kind)) && this.externalPlatformCapabilities ? readCapabilities(this.externalPlatformCapabilities) : null,
       routes.some(row => row.kind === 'wechat') && this.externalNativeCapabilities
         ? readCapabilities(options => this.externalNativeCapabilities({ ...options, operationKeys: [WECHAT_SEARCH_OPERATION] })) : null,
+      contentPlatforms.length && this.externalContentSearchCapabilities && !isTestApiKey(context.apiKey)
+        ? readCapabilities(options => this.externalContentSearchCapabilities({ ...options, platforms: contentPlatforms })) : null,
     ])
     const items = routes.map(route => {
       const meterKey = route.kind === 'stored' ? CANONICAL_SEARCH_USAGE_SCOPE : ['products', 'hub_social', 'wechat'].includes(route.kind) ? route.operation : route.platform === 'xiaohongshu' ? XIAOHONGSHU_SEARCH_OPERATION : route.platform
@@ -3465,7 +3482,8 @@ export class HubService {
       const enforced = billing.profile?.mode === 'enforced'
       const cost = price.quotedMinor
       assert(Number.isSafeInteger(cost) && cost >= 0, 400, 'quote_too_large', 'Quote exceeds safe integer range')
-      const runtime = route.kind === 'wechat' && typeof wechat?.[meterKey] === 'boolean' ? { ready: wechat[meterKey] }
+      const runtime = contentPlatforms.includes(route.platform) && this.externalContentSearchCapabilities ? { ready: content?.[route.platform]?.ready === true }
+        : route.kind === 'wechat' && typeof wechat?.[meterKey] === 'boolean' ? { ready: wechat[meterKey] }
         : (route.platform === 'xiaohongshu' ? social : ['products', 'hub_social'].includes(route.kind) ? ecommerce : null)?.operations?.[meterKey]
       return { id: route.id, platform: route.platform, label: route.label, meterKey, pages: 1,
         priceStatus: !enforced ? 'billing_disabled' : price.priceSource === 'tenant_default' ? cost === 0 ? 'unpriced_free' : 'tenant_default' : cost === 0 ? 'explicit_free' : 'priced',
@@ -4281,6 +4299,10 @@ export class HubService {
       maxPageSize: policy.maxPageSize,
       maxCrawlWork: storedPolicy?.maxCrawlWork ?? Math.min(policy.maxPageSize, 100),
     })
+    if (operation === 'raw' && Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, normalized.platform)) {
+      assert(this.externalRawSearch, 503, 'content_search_unavailable', 'Hub content search is unavailable')
+      return this.externalRawSearch(context, { normalized, body, idempotencyKey, ...(signal ? { signal } : {}) })
+    }
     if (operation === 'raw' && normalized.platform === 'facebook' && !this.externalRawSearch) {
       throw new AppError(503, 'facebook_search_unavailable', 'Facebook search is unavailable')
     }
@@ -4677,10 +4699,12 @@ export class HubService {
     )
     assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
     const dedicatedTelegramSearch = path === '/api/v1/data/telegram/search'
-    const facebookSearch = canonicalPlatform(body.platform) === 'facebook'
+    const requestedPlatform = canonicalPlatform(body.platform)
+    const facebookSearch = requestedPlatform === 'facebook'
+    const directContentSearch = Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, requestedPlatform)
     const unsupportedFields = dedicatedTelegramSearch
       ? []
-      : Object.keys(body).filter((field) => !PUBLIC_SEARCH_FIELDS.has(field) && !(facebookSearch && field === 'params'))
+      : Object.keys(body).filter((field) => !PUBLIC_SEARCH_FIELDS.has(field) && !((facebookSearch || directContentSearch) && field === 'params'))
     assert(unsupportedFields.length === 0, 400, 'unsupported_fields', `Unsupported public fields: ${unsupportedFields.join(', ')}`)
     const platform = dedicatedTelegramSearch ? 'telegram' : canonicalPlatform(body.platform)
     assert(!RESERVED_PLATFORM_NAMES.has(platform), 400, 'invalid_platform', 'A single explicit platform is required')
@@ -4737,7 +4761,7 @@ export class HubService {
       query,
       pageSize,
       ...(cursor ? { cursor } : {}),
-      ...(facebookSearch && body.params !== undefined ? { params: body.params } : {}),
+      ...((facebookSearch || directContentSearch) && body.params !== undefined ? { params: body.params } : {}),
     }
     const resultType = resolveResultType(body)
     let fingerprintQuery = telegramQuery ?? upstreamBody
@@ -4754,6 +4778,11 @@ export class HubService {
     }
     if (platform === 'instagram' && path === '/api/v1/data/search' && !this.externalDataSearch) {
       throw new AppError(503, 'instagram_search_unavailable', 'Hub Instagram search is unavailable')
+    }
+    if (path === '/api/v1/data/search' && directContentSearch) {
+      assert(this.externalDataSearch, 503, 'content_search_unavailable', 'Hub content search is unavailable')
+      return this.externalDataSearch(context, { body, normalized: upstreamBody, idempotencyKey,
+        ...(signal ? { signal } : {}), dataSearch: { resultType, replayWindowMs: replayWindowFor(resultType) } })
     }
     if (path === '/api/v1/data/search' && this.externalDataSearch && canRouteDataSearch(upstreamBody)) {
       return this.externalDataSearch(context, { body, normalized: upstreamBody, idempotencyKey,

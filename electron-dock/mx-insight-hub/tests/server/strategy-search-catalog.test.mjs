@@ -78,3 +78,29 @@ test('WeChat retired compatibility route and Telegram local search are not adver
   assert.deepEqual(telegram.providers, [])
   assert.match(telegram.routeSummary, /canonical\/search/)
 })
+
+test('four migrated keyword searches remain fixed TikHub while their account operations retain their own historical routes', () => {
+  const catalog = strategySearchCatalog()
+  for (const platform of ['bilibili', 'douyin', 'kuaishou', 'zhihu']) {
+    const search = platformById(catalog, 'search', platform)
+    assert.equal(search.migrationStatus, 'hub_native')
+    assert.equal(search.editable, false)
+    assert.deepEqual(search.providers, ['tikhub'])
+    assert.match(search.routeSummary, /关键词批量.*Hub 直连 TikHub/)
+    assert.match(search.routeSummary, /不再转交 Night-All/)
+    assert.equal(Object.hasOwn(search, 'ready'), false)
+    for (const operation of ['crawl', 'user-info']) {
+      const account = platformById(catalog, operation, platform)
+      if (!NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS[operation].includes(platform)) {
+        assert.equal(account, undefined)
+        continue
+      }
+      assert.equal(account.migrationStatus, 'night_all')
+      assert.equal(account.editable, false)
+      assert.match(account.routeSummary, new RegExp(`Night-All.*search/${operation}`))
+    }
+  }
+  const facebook = platformById(catalog, 'search', 'facebook')
+  assert.match(facebook.routeSummary, /标准搜索.*有界补齐/)
+  assert.match(facebook.routeSummary, /raw 保持既有分页/)
+})

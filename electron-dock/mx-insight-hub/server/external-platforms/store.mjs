@@ -7,12 +7,17 @@ import { INSTAGRAM_SEARCH_KEY } from '../contracts/instagram-search.mjs'
 import { JUSTONE_INSTAGRAM_SEARCH_KEY } from '../contracts/instagram-justone-search.mjs'
 import { NATIVE_FORWARDING_VERSION } from '../contracts/native-forwarding.mjs'
 import { HUB_SOCIAL_VERSION } from '../contracts/hub-social.mjs'
+import { canonicalPlatform } from '../hub-service.mjs'
+import * as facebookSearchStore from './facebook-search-store.mjs'
 
 const clone = (value) => value == null ? value : structuredClone(value)
 const iso = (value = new Date()) => new Date(value).toISOString()
 const number = (value) => value == null ? null : Number(value)
 const FINISHED_PROVIDER_OUTCOMES = new Set(['succeeded', 'succeeded_unusable', 'rejected', 'unknown'])
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
+const ownedSearchDelivery = (provider, operation) => provider === 'rapidapi'
+  ? ['social.content.search', 'social.facebook.search'].includes(operation)
+  : provider === 'justone' && operation === 'native.j.facebook_post_search_v1'
 
 const instagramOperation = provider => provider === 'tikhub' ? `native.${INSTAGRAM_SEARCH_KEY}`
   : provider === 'justone' ? `native.${JUSTONE_INSTAGRAM_SEARCH_KEY}` : null
@@ -50,7 +55,7 @@ function twitterArchivePage(archive) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !isPostgresSafeJsonValue(payload)) return null
     // Restricted, complete provider payload. The gateway must re-project and
     // verify its signed acquired-row hash before exposing a buffered slice.
-    return { payload, capturedAt: iso(archive.capturedAt) }
+    return { payload, capturedAt: iso(archive.capturedAt), bodySize: bytes.byteLength, bodySha256: archive.bodySha256 }
   } catch { return null }
 }
 
@@ -59,10 +64,10 @@ function twitterPageInput(input) {
     && ['callId', 'tenantId', 'consumerId', 'apiKeyId'].every(key => twitterPageIdentity(input[key]))
 }
 
-async function postgresTwitterPage(queryable, input, lock = false) {
+async function postgresTwitterPage(queryable, input, lock = false, ownUsageRequestId = null) {
   if (!twitterPageInput(input)) return null
   const { rows: [row] } = await queryable.query(
-    `SELECT raw.body_bytes, raw.body_sha256, raw.body_size, raw.captured_at
+    `SELECT raw.body_bytes, raw.body_sha256, raw.body_size, raw.captured_at, request.id AS source_usage_request_id
        FROM external_platform.provider_calls call
        JOIN usage_requests request ON request.id = call.usage_request_id
        JOIN control.external_platform_restricted_raw_responses raw ON raw.provider_call_id = call.id
@@ -73,16 +78,101 @@ async function postgresTwitterPage(queryable, input, lock = false) {
         AND call.completed_at BETWEEN now() - interval '24 hours' AND now()
         AND call.tenant_id = $2 AND call.consumer_id = $3 AND call.api_key_id = $4
         AND request.tenant_id = $2 AND request.consumer_id = $3 AND request.api_key_id = $4
-        AND request.platform = 'twitter' AND request.status = 'committed' AND request.response_status = 200
+        AND request.platform = 'twitter'
+        AND ((request.status = 'committed' AND request.response_status = 200)
+          OR (request.id = $6::uuid AND request.status = 'reserved'))
         AND request.acquisition_request->>'path' = '/api/v1/data/search'
         AND raw.captured_at BETWEEN now() - interval '24 hours' AND now()
         AND raw.body_size > 0 AND raw.body_size <= ${TWITTER_PAGE_MAX_BYTES}
         AND octet_length(raw.body_bytes) = raw.body_size
       ${lock ? 'FOR SHARE OF call, request, raw' : ''}`,
-    [input.callId, input.tenantId, input.consumerId, input.apiKeyId, HUB_SOCIAL_VERSION],
+    [input.callId, input.tenantId, input.consumerId, input.apiKeyId, HUB_SOCIAL_VERSION, ownUsageRequestId],
   )
-  return row ? twitterArchivePage({ bodyBytes: row.body_bytes, bodySha256: row.body_sha256,
+  const page = row ? twitterArchivePage({ bodyBytes: row.body_bytes, bodySha256: row.body_sha256,
     bodySize: Number(row.body_size), capturedAt: row.captured_at }) : null
+  return page ? { ...page, sourceUsageRequestId: row.source_usage_request_id } : null
+}
+
+function memoryTwitterPage(store, input, ownUsageRequestId = null) {
+  if (store.providerKey !== 'rapidapi' || !twitterPageInput(input)) return null
+  const call = store.calls.get(input.callId)
+  const usage = store.usageStore.requests.get(call?.usageRequestId)
+  if (call?.providerKey !== 'rapidapi' || call.operation !== 'social.content.search'
+    || call.endpointKey !== 'twitter-aio.search' || call.endpointVersion !== 'twitter-aio.hub.v1'
+    || call.contractVersion !== HUB_SOCIAL_VERSION || call.outcome !== 'succeeded' || call.httpStatus !== 200
+    || !twitterPageTime(call.completedAt)
+    || call.tenantId !== input.tenantId || call.consumerId !== input.consumerId || call.apiKeyId !== input.apiKeyId
+    || !usage || !(usage.status === 'committed' && usage.responseStatus === 200
+      || usage.id === ownUsageRequestId && usage.status === 'reserved') || usage.platform !== 'twitter'
+    || usage.tenantId !== input.tenantId || usage.consumerId !== input.consumerId || usage.apiKeyId !== input.apiKeyId
+    || usage.acquisitionRequest?.path !== TWITTER_PAGE_PATH) return null
+  const page = twitterArchivePage(store.restrictedResponseArchives.get(input.callId))
+  return page ? { ...page, sourceUsageRequestId: usage.id } : null
+}
+
+const twitterHistoryError = () => new AppError(409, 'search_page_unavailable', 'The saved Twitter traversal does not match this request')
+const twitterBodyMatches = (snapshot, input) => {
+  try {
+    return snapshot?.path === TWITTER_PAGE_PATH && canonicalPlatform(snapshot.body?.platform) === 'twitter'
+      && snapshot.body?.query?.trim() === input.query && (snapshot.body.pageSize ?? 20) === input.pageSize
+      && (snapshot.body.type ?? 'fresh') === input.type
+  } catch { return false }
+}
+
+async function twitterDeliveredIds(read, input, rootId) {
+  if (!SHA256_PATTERN.test(input.scopeHash || '') || !['fresh', 'stable'].includes(input.type)
+    || !Number.isInteger(input.pageSize) || input.pageSize < 1 || input.pageSize > 100
+    || typeof input.query !== 'string' || !input.query
+    || !['tenantId', 'consumerId', 'apiKeyId'].every(key => twitterPageIdentity(input[key]))) throw twitterHistoryError()
+  const visited = new Set(), ids = new Set()
+  let previousDeliveryId = rootId
+  while (previousDeliveryId != null) {
+    if (!twitterPageIdentity(previousDeliveryId) || visited.has(previousDeliveryId) || visited.size >= 15) throw twitterHistoryError()
+    visited.add(previousDeliveryId)
+    const row = await read(previousDeliveryId)
+    if (!row || row.status !== 'committed' || row.responseStatus !== 200 || row.platform !== 'twitter'
+      || row.tenantId !== input.tenantId || row.consumerId !== input.consumerId || row.apiKeyId !== input.apiKeyId
+      || !twitterBodyMatches(row.acquisitionRequest, input)
+      || row.responseBody?.data?.platform !== 'twitter' || row.responseBody.data.query !== input.query
+      || row.responseBody.data.pageInfo?.pageSize !== input.pageSize) throw twitterHistoryError()
+    const items = row.responseBody.data.items
+    if (!Array.isArray(items) || items.length > input.pageSize) throw twitterHistoryError()
+    for (const item of items) {
+      if (typeof item?.id !== 'string' || !/^[0-9]{1,30}$/u.test(item.id)) throw twitterHistoryError()
+      ids.add(item.id)
+      if (ids.size > 1500) throw twitterHistoryError()
+    }
+    const lineage = row.acquisitionRequest.twitterFill
+    if (lineage == null) previousDeliveryId = null // Legacy compatibility window: only this known delivery.
+    else {
+      if (lineage.version !== 'twitter-fill.v1' || lineage.scopeHash !== input.scopeHash
+        || !Number.isInteger(lineage.upstreamPages) || lineage.upstreamPages < 0 || lineage.upstreamPages > 15
+        || lineage.previousDeliveryId != null && !twitterPageIdentity(lineage.previousDeliveryId)) throw twitterHistoryError()
+      previousDeliveryId = lineage.previousDeliveryId
+    }
+  }
+  return { ids: [...ids], previousDeliveryId: rootId ?? null, deliveries: visited.size }
+}
+
+function assertTwitterFill(input) {
+  const { delivery, lineage, sources, responseBody, capturedAt, usageUnitsActual, sourceMode } = input
+  assertTwitterPageDelivery('rapidapi', { ...input, sourceCallId: sources?.[0]?.callId ?? delivery?.usageRequestId,
+    sourceMode: sourceMode === 'live' ? 'fresh_cache' : sourceMode })
+  if (!lineage || lineage.version !== 'twitter-fill.v1' || !SHA256_PATTERN.test(lineage.scopeHash || '')
+    || lineage.previousDeliveryId != null && !twitterPageIdentity(lineage.previousDeliveryId)
+    || !Number.isInteger(lineage.upstreamPages) || lineage.upstreamPages < 0 || lineage.upstreamPages > 15
+    || !Array.isArray(sources) || sources.length < 1 || sources.length > 4 || new Set(sources.map(source => source.callId)).size !== sources.length
+    || !['live', 'fresh_cache', 'stored_fallback'].includes(sourceMode)
+    || responseBody?.data?.platform !== 'twitter' || responseBody.data.query !== input.query
+    || responseBody.data.pageInfo?.pageSize !== input.pageSize
+    || !Array.isArray(responseBody.data.items) || responseBody.data.items.length !== usageUnitsActual
+    || responseBody.data.items.some(item => typeof item?.id !== 'string' || !/^[0-9]{1,30}$/u.test(item.id))
+    || new Set(responseBody.data.items.map(item => item.id)).size !== usageUnitsActual
+    || !twitterPageTime(capturedAt)) throw twitterHistoryError()
+  for (const source of sources) if (!twitterPageIdentity(source.callId)
+    || !SHA256_PATTERN.test(source.bodySha256 || '') || !SHA256_PATTERN.test(source.rowsHash || '')
+    || !Number.isSafeInteger(source.bodySize) || source.bodySize < 1 || source.bodySize > TWITTER_PAGE_MAX_BYTES
+    || !twitterPageTime(source.capturedAt)) throw twitterHistoryError()
 }
 
 function assertTwitterPageDelivery(providerKey, { delivery, sourceCallId, sourceMode, capturedAt, usageUnitsActual }) {
@@ -617,19 +707,63 @@ export class MemoryExternalPlatformStore {
       succeeded: true, responseStatus: 200, providerCallId: sourceCallId }))
   }
 
+  async facebookPageFor(input) { return facebookSearchStore.facebookPageFor(this, input) }
+  async facebookDeliveredIdsFor(input) { return facebookSearchStore.facebookDeliveredIdsFor(this, input) }
+  async facebookFillUnknownFor(input) { return facebookSearchStore.facebookFillUnknownFor(this, input) }
+  async acquireFacebookFillDeliveryLease(input) { return facebookSearchStore.acquireFacebookFillDeliveryLease(this, input) }
+  async commitFacebookFillDelivery(input) { return facebookSearchStore.commitFacebookFillDelivery(this, input) }
+
   async twitterPageFor(input) {
-    if (this.providerKey !== 'rapidapi' || !twitterPageInput(input)) return null
-    const call = this.calls.get(input.callId)
-    const usage = this.usageStore.requests.get(call?.usageRequestId)
-    if (call?.providerKey !== 'rapidapi' || call.operation !== 'social.content.search'
-      || call.endpointKey !== 'twitter-aio.search' || call.endpointVersion !== 'twitter-aio.hub.v1'
-      || call.contractVersion !== HUB_SOCIAL_VERSION || call.outcome !== 'succeeded' || call.httpStatus !== 200
-      || !twitterPageTime(call.completedAt)
-      || call.tenantId !== input.tenantId || call.consumerId !== input.consumerId || call.apiKeyId !== input.apiKeyId
-      || usage?.status !== 'committed' || usage.responseStatus !== 200 || usage.platform !== 'twitter'
-      || usage.tenantId !== input.tenantId || usage.consumerId !== input.consumerId || usage.apiKeyId !== input.apiKeyId
-      || usage.acquisitionRequest?.path !== TWITTER_PAGE_PATH) return null
-    return twitterArchivePage(this.restrictedResponseArchives.get(input.callId))
+    return memoryTwitterPage(this, input)
+  }
+
+  async twitterDeliveredIdsFor(input) {
+    if (this.providerKey !== 'rapidapi') throw twitterHistoryError()
+    const rootId = input.previousDeliveryId ?? (input.sourceCallId ? this.calls.get(input.sourceCallId)?.usageRequestId : null)
+    if (input.sourceCallId && !rootId) throw twitterHistoryError()
+    return twitterDeliveredIds(async id => this.usageStore.requests.get(id), input, rootId)
+  }
+
+  async twitterFillUnknownFor(delivery) {
+    return [...this.usageStore.requests.values()].some(row => row.platform === 'twitter' && row.status === 'unknown'
+      && row.tenantId === delivery.tenantId && row.consumerId === delivery.consumerId && row.apiKeyId === delivery.apiKeyId
+      && row.fingerprint === delivery.fingerprint && row.acquisitionRequest?.path === TWITTER_PAGE_PATH
+      && Date.now()-new Date(row.reservedAt ?? row.createdAt ?? Date.now()).getTime() <= TWITTER_PAGE_MAX_AGE_MS)
+  }
+
+  async acquireTwitterFillDeliveryLease(input) {
+    if(this.providerKey!=='rapidapi' || input.operation!=='social.content.search'
+      || !twitterPageIdentity(input.ownerRequestId) || !twitterPageIdentity(input.consumerId)
+      || !SHA256_PATTERN.test(input.fingerprint || '') || new Date(input.expiresAt).getTime()<=Date.now()) throw twitterHistoryError()
+    const key=snapshotKey(input),current=this.leases.get(key)
+    if(current && new Date(current.expiresAt).getTime()>Date.now()) return {kind:'busy',blockedUntil:current.expiresAt}
+    this.leases.set(key,{ownerRequestId:input.ownerRequestId,expiresAt:iso(input.expiresAt)})
+    return {kind:'acquired'}
+  }
+
+  async commitTwitterFillDelivery(input) {
+    if (this.providerKey !== 'rapidapi') throw twitterHistoryError()
+    assertTwitterFill(input)
+    const { delivery, sources, lineage, capturedAt, responseBody, usageUnitsActual, sourceMode, latencyMs = 0 } = input
+    const usage = this.usageStore.requests.get(delivery.usageRequestId)
+    if (usage?.status !== 'reserved' || usage.tenantId !== delivery.tenantId || usage.consumerId !== delivery.consumerId
+      || usage.apiKeyId !== delivery.apiKeyId || usage.fingerprint !== delivery.fingerprint || usage.platform !== 'twitter'
+      || !twitterBodyMatches(usage.acquisitionRequest, input)) throw twitterHistoryError()
+    for (const source of sources) {
+      const page = memoryTwitterPage(this, { ...delivery, callId: source.callId, path: TWITTER_PAGE_PATH }, delivery.usageRequestId)
+      if (!page || page.bodySha256 !== source.bodySha256 || page.bodySize !== source.bodySize || page.capturedAt !== iso(source.capturedAt)) throw twitterHistoryError()
+      const sourceUsage = this.usageStore.requests.get(page.sourceUsageRequestId)
+      if (!twitterBodyMatches(sourceUsage?.acquisitionRequest, input)) throw twitterHistoryError()
+    }
+    const manifest = { version: lineage.version, scopeHash: lineage.scopeHash, previousDeliveryId: lineage.previousDeliveryId ?? null,
+      upstreamPages: lineage.upstreamPages, sources: clone(sources) }
+    await this.usageStore.commitRequest(delivery.usageRequestId, { responseStatus: 200, responseBody,
+      unitsActual: Math.max(1, usageUnitsActual), upstreamLatencyMs: latencyMs,
+      deliverySourceMode: sourceMode === 'stored_fallback' ? 'stale' : 'live', capturedAt })
+    usage.acquisitionRequest = { ...usage.acquisitionRequest, twitterFill: manifest }
+    const representative = [...sources].reverse().find(source => this.calls.get(source.callId)?.usageRequestId === delivery.usageRequestId) ?? sources[0]
+    this.requests.push(requestEvent({ ...delivery, providerKey: this.providerKey, sourceMode,
+      succeeded: true, responseStatus: 200, providerCallId: representative.callId }))
   }
 
   async commitTwitterPage(input) {
@@ -689,6 +823,7 @@ export class MemoryExternalPlatformStore {
     ownerRequestId,
     expiresAt,
     retryOfRequestId = null,
+    ownedDeliveryLease = false,
   }) {
     const now = Date.now()
     const blocker = [...this.calls.values()]
@@ -742,6 +877,8 @@ export class MemoryExternalPlatformStore {
     const key = snapshotKey({ consumerId, operation, fingerprint })
     const current = this.leases.get(key)
     if (current && new Date(current.expiresAt).getTime() > now) {
+      if(ownedDeliveryLease && ownedSearchDelivery(this.providerKey, operation)
+        && current.ownerRequestId===ownerRequestId && current.expiresAt===iso(expiresAt)) return {kind:'acquired'}
       return { kind: 'busy', blockedUntil: current.expiresAt }
     }
     this.leases.set(key, { ownerRequestId, expiresAt: iso(expiresAt) })
@@ -2173,8 +2310,95 @@ export class PostgresExternalPlatformStore {
     })
   }
 
+  async facebookPageFor(input) { return facebookSearchStore.facebookPageFor(this, input) }
+  async facebookDeliveredIdsFor(input) { return facebookSearchStore.facebookDeliveredIdsFor(this, input) }
+  async facebookFillUnknownFor(input) { return facebookSearchStore.facebookFillUnknownFor(this, input) }
+  async acquireFacebookFillDeliveryLease(input) { return facebookSearchStore.acquireFacebookFillDeliveryLease(this, input) }
+  async commitFacebookFillDelivery(input) { return facebookSearchStore.commitFacebookFillDelivery(this, input) }
+
   async twitterPageFor(input) {
     return this.providerKey === 'rapidapi' ? postgresTwitterPage(this.pool, input) : null
+  }
+
+  async twitterDeliveredIdsFor(input) {
+    if (this.providerKey !== 'rapidapi') throw twitterHistoryError()
+    let rootId = input.previousDeliveryId
+    if (!rootId && input.sourceCallId) {
+      if (!twitterPageIdentity(input.sourceCallId)) throw twitterHistoryError()
+      rootId = (await this.pool.query(`SELECT usage_request_id FROM external_platform.provider_calls
+        WHERE id=$1 AND provider_key='rapidapi' AND tenant_id=$2 AND consumer_id=$3 AND api_key_id=$4
+          AND operation='social.content.search'`, [input.sourceCallId, input.tenantId, input.consumerId, input.apiKeyId])).rows[0]?.usage_request_id
+      if (!rootId) throw twitterHistoryError()
+    }
+    return twitterDeliveredIds(async id => {
+      // Return only delivered identities, never load prior content or raw archives.
+      const row = (await this.pool.query(`SELECT id,tenant_id,consumer_id,api_key_id,platform,status,response_status,acquisition_request,
+        jsonb_build_object('data',jsonb_build_object('platform',response_body->'data'->'platform',
+          'query',response_body->'data'->'query','pageInfo',response_body->'data'->'pageInfo',
+          'items',CASE WHEN jsonb_typeof(response_body->'data'->'items')='array' THEN
+            (SELECT coalesce(jsonb_agg(jsonb_build_object('id',item->'id')),'[]'::jsonb)
+              FROM (SELECT item FROM jsonb_array_elements(response_body->'data'->'items') item LIMIT 101) bounded_items)
+            ELSE NULL END)) AS response_body
+        FROM usage_requests WHERE id=$1 AND tenant_id=$2 AND consumer_id=$3 AND api_key_id=$4`,
+      [id,input.tenantId,input.consumerId,input.apiKeyId])).rows[0]
+      return row ? { id:row.id,tenantId:row.tenant_id,consumerId:row.consumer_id,apiKeyId:row.api_key_id,
+        platform:row.platform,status:row.status,responseStatus:row.response_status,acquisitionRequest:row.acquisition_request,responseBody:row.response_body } : null
+    }, input, rootId ?? null)
+  }
+
+  async twitterFillUnknownFor(delivery) {
+    if (!['tenantId','consumerId','apiKeyId'].every(key=>twitterPageIdentity(delivery[key]))
+      || !SHA256_PATTERN.test(delivery.fingerprint || '')) throw twitterHistoryError()
+    // The quota index bounds this read by tenant, consumer, platform and time.
+    // Buffer-only unknown deliveries have no owned provider call to join.
+    const {rows}=await this.pool.query(`SELECT 1 FROM usage_requests request
+      WHERE request.tenant_id=$1 AND request.consumer_id=$2 AND request.api_key_id=$3
+        AND request.platform='twitter' AND request.fingerprint=$4 AND request.status='unknown'
+        AND request.acquisition_request->>'path'='/api/v1/data/search'
+        AND request.reserved_at >= now()-interval '24 hours' LIMIT 1`,
+    [delivery.tenantId,delivery.consumerId,delivery.apiKeyId,delivery.fingerprint])
+    return rows.length>0
+  }
+
+  async acquireTwitterFillDeliveryLease(input) {
+    if(this.providerKey!=='rapidapi' || input.operation!=='social.content.search'
+      || !twitterPageIdentity(input.ownerRequestId) || !twitterPageIdentity(input.consumerId)
+      || !SHA256_PATTERN.test(input.fingerprint || '') || new Date(input.expiresAt).getTime()<=Date.now()) throw twitterHistoryError()
+    const {rows}=await this.pool.query(`INSERT INTO external_platform.dispatch_leases
+      (consumer_id,operation,request_fingerprint,owner_request_id,expires_at) VALUES ($1,$2,$3,$4,$5)
+      ON CONFLICT(consumer_id,operation,request_fingerprint) DO UPDATE SET owner_request_id=EXCLUDED.owner_request_id,
+        expires_at=EXCLUDED.expires_at,created_at=now()
+      WHERE external_platform.dispatch_leases.expires_at<=now() RETURNING owner_request_id`,
+    [input.consumerId,input.operation,input.fingerprint,input.ownerRequestId,input.expiresAt])
+    return rows[0]?.owner_request_id===input.ownerRequestId?{kind:'acquired'}:{kind:'busy'}
+  }
+
+  async commitTwitterFillDelivery(input) {
+    if (this.providerKey !== 'rapidapi') throw twitterHistoryError()
+    assertTwitterFill(input)
+    const { delivery, sources, lineage, capturedAt, responseBody, usageUnitsActual, sourceMode, latencyMs = 0 } = input
+    return transaction(this.pool, async client => {
+      const usage = (await client.query(`SELECT acquisition_request FROM usage_requests WHERE id=$1 AND status='reserved'
+        AND tenant_id=$2 AND consumer_id=$3 AND api_key_id=$4 AND fingerprint=$5 AND platform='twitter' FOR UPDATE`,
+      [delivery.usageRequestId,delivery.tenantId,delivery.consumerId,delivery.apiKeyId,delivery.fingerprint])).rows[0]
+      if (!usage || !twitterBodyMatches(usage.acquisition_request, input)) throw twitterHistoryError()
+      let representative = sources[0].callId
+      for (const source of sources) {
+        const page = await postgresTwitterPage(client, { ...delivery, callId: source.callId, path: TWITTER_PAGE_PATH }, true, delivery.usageRequestId)
+        if (!page || page.bodySha256 !== source.bodySha256 || page.bodySize !== source.bodySize || page.capturedAt !== iso(source.capturedAt)) throw twitterHistoryError()
+        const owner = (await client.query('SELECT acquisition_request FROM usage_requests WHERE id=$1', [page.sourceUsageRequestId])).rows[0]
+        if (!twitterBodyMatches(owner?.acquisition_request, input)) throw twitterHistoryError()
+        if (page.sourceUsageRequestId === delivery.usageRequestId) representative = source.callId
+      }
+      const manifest = { version:lineage.version,scopeHash:lineage.scopeHash,previousDeliveryId:lineage.previousDeliveryId ?? null,
+        upstreamPages:lineage.upstreamPages,sources }
+      await client.query(`UPDATE usage_requests SET status='committed',response_status=200,response_body=$2,units_actual=$3,
+        upstream_latency_ms=$4,delivery_source_mode=$5,response_captured_at=$6,completed_at=now(),
+        acquisition_request=acquisition_request || jsonb_build_object('twitterFill',$7::jsonb) WHERE id=$1`,
+      [delivery.usageRequestId,responseBody,Math.max(1,usageUnitsActual),latencyMs,
+        sourceMode==='stored_fallback'?'stale':'live',capturedAt,JSON.stringify(manifest)])
+      await this.#insertGatewayRequest(client, { ...delivery,sourceMode,succeeded:true,responseStatus:200,providerCallId:representative })
+    })
   }
 
   async commitTwitterPage(input) {
@@ -2253,6 +2477,7 @@ export class PostgresExternalPlatformStore {
     ownerRequestId,
     expiresAt,
     retryOfRequestId = null,
+    ownedDeliveryLease = false,
   }) {
     const { rows } = await this.pool.query(
       `INSERT INTO external_platform.dispatch_leases
@@ -2311,6 +2536,8 @@ export class PostgresExternalPlatformStore {
          expires_at = EXCLUDED.expires_at,
          created_at = now()
        WHERE external_platform.dispatch_leases.expires_at <= now()
+         OR ($12::boolean AND external_platform.dispatch_leases.owner_request_id=EXCLUDED.owner_request_id
+           AND external_platform.dispatch_leases.expires_at=EXCLUDED.expires_at)
        RETURNING owner_request_id, expires_at`,
       [
         consumerId, operation, fingerprint, ownerRequestId, expiresAt,
@@ -2320,6 +2547,7 @@ export class PostgresExternalPlatformStore {
         contractVersion,
         this.providerKey,
         Math.ceil(this.responseQuarantineCooldownMs / 1_000),
+        ownedDeliveryLease && ownedSearchDelivery(this.providerKey, operation),
       ],
     )
     if (rows[0]?.owner_request_id === ownerRequestId) return { kind: 'acquired' }

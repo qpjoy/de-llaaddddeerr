@@ -7,7 +7,7 @@ import { assertEnterpriseCallable, normalizeEnterpriseRequest, enterpriseOperati
 import { nativeForwardingEndpoint, normalizeNativeForwardingRequest } from '../contracts/native-forwarding.mjs'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
-import { HUB_SOCIAL_ENDPOINTS, normalizeHubSocialRequest, normalizeTwitterResponse, projectTwitterSearchPage } from '../contracts/hub-social.mjs'
+import { HUB_SOCIAL_ENDPOINTS, normalizeHubSocialRequest } from '../contracts/hub-social.mjs'
 import { normalizeXhsDiscoveryRequest, XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -37,7 +37,10 @@ import { normalizeRawSearch, projectWeiboSearch, rawSearchRecords, RAW_SEARCH_DA
 import { enrichWeiboRawSearch } from './raw-search-enrichment.mjs'
 import { INSTAGRAM_SEARCH_KEY, projectInstagramSearch } from '../contracts/instagram-search.mjs'
 import { JUSTONE_INSTAGRAM_SEARCH_KEY, projectJustOneInstagramSearch } from '../contracts/instagram-justone-search.mjs'
-import { normalizeHubDataSearch, projectDataSearch, projectTwitterDataSearch } from '../contracts/hub-data-search.mjs'
+import { normalizeHubDataSearch, projectDataSearch, projectTwitterSearchFillDelivery } from '../contracts/hub-data-search.mjs'
+import { runTwitterSearchFill } from './twitter-search-fill.mjs'
+import { contentSearchPlan } from './content-search.mjs'
+import { runFacebookSearchFill } from './facebook-search-fill.mjs'
 import { normalizeFacebookSearch, projectFacebookSearch, facebookJustOneArchives, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY } from '../contracts/facebook-search.mjs'
 
 const AUTHORIZATION_PLATFORM = 'ecommerce'
@@ -656,6 +659,24 @@ export class ExternalPlatformGateway {
     })
   }
 
+  async searchContent(context, input) {
+    const platform = input.normalized.platform
+    const prepared = contentSearchPlan({ gateway: this, context, input, dependencies: {
+      resolveCredential: () => this.#resolvedCredential(),
+      revalidateIdentity: async ({ operation, totalLimit }) => {
+        const current = await this.#revalidateWaitingIdentity(context, platform, { platformSearch: true, operation })
+        const policy = await this.usageStore.getPolicy(current.consumer.id, platform)
+        const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, platform)
+        if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+          entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Content-search work exceeds the current Key entitlement')
+        return current
+      },
+      enterCapacity: options => this.#enterOrQueue(context, { ...options, canWait: false }),
+      leaveCapacity: () => this.#leave(context.consumer.id), providerCostControl,
+    } })
+    return this.#deliver(context, prepared.input, prepared.plan)
+  }
+
   async searchRaw(context, input, { policyStore = null, gateways = null, reservation = null, selection = null, fallbackUsed = false } = {}) {
     const { normalized, body, idempotencyKey, dataSearch = null, signal } = input
     const platform = normalized.platform
@@ -750,30 +771,40 @@ export class ExternalPlatformGateway {
           })
         }
       } : null,
+      assemble: platform === 'twitter' && dataSearch ? async ({ delivery, deadlineAt, signal }) => {
+        if (request.restartRequired) throw new AppError(409, 'search_restart_required',
+          'Twitter search now runs in Hub; restart from page 1 with a new Idempotency-Key.')
+        return runTwitterSearchFill({ gateway: this, context, delivery, request, deadlineAt, signal,
+          resolveCredential: () => this.#resolvedCredential(),
+          revalidateIdentity: async () => {
+            const current = await this.#revalidateWaitingIdentity(context, 'twitter', {
+              platformSearch: true, operation: 'social.content.search' })
+            const currentPolicy = await this.usageStore.getPolicy(context.consumer.id, 'twitter')
+            const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(context.apiKey.id, 'twitter')
+            const maxPageSize = Math.min(currentPolicy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+              entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)
+            if (request.pageSize > maxPageSize) throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
+            return current
+          },
+          enterCapacity: options => this.#enterOrQueue(context, { ...options, delivery, platform: 'twitter', canWait: false }),
+          leaveCapacity: () => this.#leave(context.consumer.id), providerCostControl,
+          projectDelivery: input => projectTwitterSearchFillDelivery(input, request),
+        })
+      } : null,
       buffered: async () => {
         // Historical responses replay before this hook. Never interpret a
         // retired TikHub buffer or continuation using the JustOne contract.
         if (request.restartRequired || !request.buffer) return null
-        const readPage = platform === 'twitter' && dataSearch
-          ? this.platformStore.twitterPageFor.bind(this.platformStore) : this.platformStore.instagramPageFor.bind(this.platformStore)
-        const archived = await readPage({ callId: request.buffer.callId,
+        const archived = await this.platformStore.instagramPageFor({ callId: request.buffer.callId,
           tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
           path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH })
         if (!archived) throw new AppError(409, 'search_page_unavailable', 'The saved search page is unavailable; restart explicitly with a new Idempotency-Key')
         let result
-        try {
-          if (platform === 'twitter' && dataSearch) {
-            const publicBody = normalizeTwitterResponse(archived.payload, request.providerRequest,
-              { allowOverflow: true, capturedAt: archived.capturedAt, encodeCursor: request.encodeNext })
-            result = projectTwitterDataSearch(projectTwitterSearchPage({ publicBody, items: publicBody.data.items }, request))
-          } else result = instagramProjection(archived, request)
-        }
+        try { result = instagramProjection(archived, request) }
         catch { throw new AppError(409, 'search_page_unavailable', 'The saved search page no longer matches this cursor; restart explicitly with a new Idempotency-Key') }
         if (dataSearch) result.publicBody = { ...projectDataSearch(result, request), meta: result.publicBody.meta }
         return { result, sourceCallId: request.buffer.callId }
       },
-      commitBufferedPage: platform === 'twitter' && dataSearch
-        ? input => this.platformStore.commitTwitterPage(input) : null,
       dispatch: ({ credential }) => native
         ? this.adapter.forwardNative(nativeKey, { params: request.upstreamQuery }, credential)
         : this.adapter.execute(request.providerRequest, { ...credential, encodeCursor: request.encodeNext }),
@@ -810,20 +841,6 @@ export class ExternalPlatformGateway {
         }
         // Ingest the whole paid page once, including buffered records. Later
         // deliveries reuse its receipt and never create another acquisition.
-        if (platform === 'twitter' && dataSearch) {
-          request.archiveCallId = callId
-          try {
-            const receipt = result.restrictedResponseArchive
-            result = projectTwitterSearchPage(result, request)
-            if (result.acquiredItems.length > request.pageSize && (!receipt || receipt.bodySize > 4194304)) {
-              throw new Error('twitter_page_archive_required')
-            }
-            result = projectTwitterDataSearch(result)
-          } catch {
-            throw new RapidApiUpstreamError({ outcome: 'succeeded_unusable', billed: null, httpStatus: 200,
-              businessCode: null, errorCode: 'social_upstream_response_unusable' }, result)
-          }
-        }
         const acquired = result.acquiredItems ? { ...result.publicBody, data: { ...result.publicBody.data,
           raw_data: JSON.stringify(result.acquiredItems) } } : result.publicBody
         result.records = rawSearchRecords(acquired, platform, this.providerKey)
@@ -856,7 +873,7 @@ export class ExternalPlatformGateway {
       return fallbackGateway.searchFacebook(context, input, { policyStore, reservation: reserved, request, attempt: attempt + 1, providerCalls: previousCalls })
     }
     return this.#deliver(context, { body, idempotencyKey, signal, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH }, {
-      operation: rapid ? FACEBOOK_OPERATION.operationKey : `native.${FACEBOOK_JUSTONE_KEY}`,
+      operation: dataSearch || rapid ? FACEBOOK_OPERATION.operationKey : `native.${FACEBOOK_JUSTONE_KEY}`,
       authorizationPlatform: 'facebook', platformSearch: true, meterKey: dataSearch ? 'facebook' : 'raw',
       datasetId: dataSearch ? 'night-all.search.v1' : RAW_SEARCH_DATASET, replayReleasedFailures: true,
       replayWindowMs: dataSearch?.replayWindowMs, dataSearch: Boolean(dataSearch), billingUnknown: rapid, allowZeroCost: rapid,
@@ -865,6 +882,27 @@ export class ExternalPlatformGateway {
         if (request.pageSize > policy.maxPageSize) throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
         return { ...providerRequest, ...request }
       },
+      assemble: dataSearch ? ({ delivery, deadlineAt, signal }) => {
+        if (!rapid) throw new AppError(503, 'facebook_search_unavailable', 'The Facebook standard search coordinator is unavailable')
+        const gateways = { rapidapi: this, ...(fallbackGateway ? { justone: fallbackGateway } : {}) }
+        return runFacebookSearchFill({ gateway: this, gateways, context, delivery, request, policyStore, deadlineAt, signal,
+          resolveCredential: provider => gateways[provider].#resolvedCredential(),
+          enterCapacity: (provider, options) => gateways[provider].#enterOrQueue(context,
+            { ...options, delivery, platform: 'facebook', canWait: false }),
+          leaveCapacity: provider => gateways[provider].#leave(context.consumer.id),
+          revalidateIdentity: async () => {
+            const current = await this.#revalidateWaitingIdentity(context, 'facebook', {
+              platformSearch: true, operation: FACEBOOK_OPERATION.operationKey })
+            const currentPolicy = await this.usageStore.getPolicy(context.consumer.id, 'facebook')
+            const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(context.apiKey.id, 'facebook')
+            if (request.pageSize > Math.min(currentPolicy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+              entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) {
+              throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
+            }
+            return current
+          }, providerCostControl, persistedCallEvidence, publicFailure,
+        })
+      } : null,
       // Called only after idempotent replay and authorization, never on a replay.
       route: async reserved => {
         const policy = await policyStore.facebook()
@@ -1178,6 +1216,20 @@ export class ExternalPlatformGateway {
     }
 
     const activeRequestId = reservation.request.id
+    if (plan.assemble) {
+      try {
+        const assembled = await plan.assemble({ delivery, signal,
+          deadlineAt: new Date(reservation.request.leaseExpiresAt).getTime() || Date.now() + this.reservationLeaseMs })
+        ownsReservation = false
+        return assembled
+      } catch (error) {
+        // The workflow may retain its lease while an unknown write cannot be
+        // confirmed. Leave that original customer hold for durable recovery;
+        // an unrelated prior-unknown admission still releases its new hold.
+        if (error.preserveReservation === true) ownsReservation = false
+        throw error
+      }
+    }
     if (plan.buffered) {
       const buffered = await plan.buffered()
       if (buffered) {
@@ -1187,8 +1239,7 @@ export class ExternalPlatformGateway {
         const responseBody = plan.dataSearch ? { data: result.publicBody.data, requestId: activeRequestId }
           : deliveryBody(result.publicBody, { requestId: activeRequestId, sourceMode, capturedAt,
             ...(sourceMode === 'stored_fallback' ? { fallbackReason: 'pagination_buffer' } : {}) })
-        const commitPage = plan.commitBufferedPage || (input => this.platformStore.commitInstagramPage(input))
-        await commitPage({ delivery, sourceCallId, sourceMode, responseBody, capturedAt,
+        await this.platformStore.commitInstagramPage({ delivery, sourceCallId, sourceMode, responseBody, capturedAt,
           usageUnitsActual: plan.dataSearch ? result.items.length : 1 })
         return resultFromBody(responseBody, { requestId: activeRequestId, replay: false, sourceMode, capturedAt })
       }

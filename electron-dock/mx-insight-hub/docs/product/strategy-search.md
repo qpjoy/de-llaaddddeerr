@@ -20,6 +20,8 @@
 
 只有 Admin Token 平台管理会话看到管理标签；原迁移状态、Instagram/Facebook 策略与每日调用统计都在此处。旧 `view=routing/interfaces` 链接仍映射到管理/接入指南。页面内状态按原 Key 身份隔离，临时凭据刷新、标签切换和路由往返保留请求标识；调试与展示共享进行中/未知结果锁，核对只读，不自动重发。产品展示的新查询使用 `stable`，下一页保留原请求合同与游标；明确新建相同查询才产生新的请求标识。
 
+完整响应已改为保留全文、自动换行并在限定高度内滚动；长标识不再撑开页面。Facebook `photo.php` 落地页显示原始链接，明确的视频封面与真实混合图片在新标准投影中分开；旧 raw 与 canonical 入库投影不重写。Bilibili 的原生指标修复已移入 Hub 关键词搜索投影，新标准保留缺失 null 与真实 0，兼容 raw 默认值保留。Facebook 标准搜索已加入最多 3 次实际派发的自动补页。完整字段、接口文档与旧游标兼容边界见 [本轮核查](../operations/strategy-search-contract-audit-2026-10-15.md)。
+
 ## 生产证据与本机调用链必须分开
 
 已归档的 Instagram 事故请求 `ddecf6fe-c6e9-4632-9fb6-67014bdf261a` 原入口是 **`POST /api/v1/data/search`**，不是从路径名猜测出的 raw 请求。该请求由 Hub 调用 TikHub Instagram V3 general_search，外部 HTTP/业务码 400，Hub committed 502，客户结算 CNY 0.01。唯一一次已授权同参数复测 `9c43a396-57bc-433d-9eba-1f30c3762631` 仍返回 400。没有成功数据可用来证明恢复；通用错误文字不能定位为某个确定参数缺陷。详见 [事故记录](../operations/instagram-search-rejection-2026-10-14.md)。该次付费验证授权已经消耗，不随本轮发布再次执行。
@@ -66,14 +68,14 @@ S=内容搜索，C=账号内容，U=账号资料。下表是 Hub 当前源码可
 | Instagram | Hub → JustOne / TikHub，本轮可配置 | Night-All → TikHub | Night-All → TikHub |
 | 微博 | 合规单关键词形状 Hub → TikHub；其他形状经 Night-All | Night-All → TikHub | Night-All → TikHub |
 | 小红书 | 受支持形状且直连门禁允许时 Hub → TikHub；其他形状经 Night-All | 同左，限单账号 posts 等形状 | 同左，限单账号等形状 |
-| 抖音 | Night-All → TikHub | Night-All → TikHub | Night-All → TikHub |
+| 抖音 | Hub → TikHub 固定关键词端点 | Night-All → TikHub | Night-All → TikHub |
 | TikTok | Night-All → TikHub | Night-All → TikHub | — |
 | Reddit | Night-All → TikHub | Night-All → TikHub | — |
 | YouTube | Night-All → TikHub | Night-All → TikHub | — |
 | LinkedIn | — | Night-All → TikHub | Night-All → TikHub |
-| 知乎 | Night-All → TikHub | — | Night-All → TikHub |
-| 哔哩哔哩 | Night-All → TikHub | — | — |
-| 快手 | Night-All → TikHub | — | — |
+| 知乎 | Hub → TikHub 固定关键词端点 | — | Night-All → TikHub |
+| 哔哩哔哩 | Hub → TikHub 固定关键词端点 | — | — |
+| 快手 | Hub → TikHub 固定关键词端点 | — | — |
 | 微信搜索 / 微信公众号 | Hub → TikHub，独立微信搜索合同 | — | — |
 | Telegram | Hub 本地数据检索 | — | — |
 
@@ -85,6 +87,26 @@ S=内容搜索，C=账号内容，U=账号资料。下表是 Hub 当前源码可
 - 微信 `/api/v1/search/raw` 与 `/api/v1/data/search` 映射到 `/api/v1/data/wechat/search/search`，采用新合同；**`/api/v1/night-all/search/raw` 的微信请求返回 410**，不回退 Night-All。因此上述本机 po-infra 的通用旧适配器若实际用于微信，会碰到这个边界；需在对应客户端项目单独迁移，不能在 Hub 悄悄恢复旧路径。
 
 路由声明见 `server/contracts/night-all-legacy.mjs`、`raw-search.mjs`、`hub-data-search.mjs`、`hub-social.mjs`、`wechat-search-alias.mjs`；条件分支由 `server/hub-service.mjs` 执行。管理目录在 `server/data/strategy-search-catalog.mjs`，不把声明的支持范围当成供应商实时可用性。
+
+## Twitter 标准搜索自动补页（2026-10-15）
+
+Twitter `/api/v1/data/search` 先消耗已采购完整页的余量，未达到 `pageSize` 时，沿同一 RapidAPI Bottom 游标继续采购并合并。比如上一上游页有 24 条、已交付 20 条，下一次 Hub 请求会先取剩余 4 条，再取后续页补到 20 条；新上游页未消费的内容继续保留。下游只需传回 `pageInfo.nextCursor`，无需识别供应商分页、拼接余量或自行跨页去重。
+
+该方式参考 Night-All 统一分页服务的缓冲优先、跨页去重及有界补采；不复用其爬虫自动重试或提前截断原始页的逻辑。新游标使用服务端已交付记录链去重，完整付费页仍分别归档，各提交一次入库任务。旧 Hub 游标可以继续；没有历史交付链的旧原生游标只能从此次继续时建立去重窗口，不能反查或重写旧交付。
+
+补齐有明确边界：一次 Hub 请求最多派发 3 次上游调用，每次最多请求 50 条；整次查询最多 15 个上游页、15 个公开页，游标仍有 24 小时期限。每次组页还受原请求期限、归档字节上限、当前授权、采购预算和速率门禁约束。供应商没有后续页时自然返回不足一页；达到补齐上限或准入受限时，返回已有内容、`partial` 和警告，并在仍可安全继续时保留下一页。因此 `pageSize` 仍是单页上限，不保证任何情况下都恰好返回该条数。
+
+一个 Hub 请求仍按现有客户价格结算一次，每笔实际上游派发分别预留采购费用并记录原始凭证。补页不跨供应商，不自动重试已派发的失败或未知结果；未知状态保留原请求锁与归档，调用方应读取使用记录核对。raw、`/data/social/*`、账号内容与账号资料的既有分页合同保持原样。此次补页没有新增数据库迁移，不修改授权、单价、历史响应或账单。
+
+本轮补页相关回归 411 项全部通过，无失败或跳过；包含模拟 HTTP、隔离 PGlite、真实计费触发器及故障注入，类型检查通过。生产仍需按下文流程仅发布 Hub；没有执行真实付费查询或改动 MX-H2I 登录联网。
+
+## Facebook 补页与四平台直连（2026-10-15）
+
+Facebook 标准搜索采用余量优先、交付 ID 去重与有界补页：一个 Hub 请求最多 3 次实际派发，包含初次明确 429 后的保底派发。既有月额度策略只决定新查询的供应商；取得第一页或持有游标后不跨供应商补页。完整上游页逐份归档与入库，余量保留，客户请求只结算一次。raw 保持原单页边界。
+
+Bilibili、抖音、快手、知乎新关键词搜索在 Hub 运行固定原生端点，不依赖 Night-All 运行时，也不暗中回退。标准接口保留 items/pageInfo、原平台授权与价格；两个 raw 别名保留字符串合同和原 raw 计量。标准逻辑页最多 3 次派发、整个查询最多 15 个上游页和公开页，游标有效 24 小时。旧已保存响应先精确重放，旧 Night-All 游标的新采集要求明确重启。详情、评论附采尚未迁移，显式参数在派发前拒绝；账号内容与资料保留表中原路径。接口是否可用仍取决于现有固定操作状态、凭据与采购准入，目录登记不会自动启用操作。
+
+Bilibili 点赞 like/stat.like、评论 review/stat.reply、收藏 favorites/stat.favorite、播放 play/stat.view 已在 Hub 投影；不把弹幕或硬币猜作评论、分享。正文、原生视频／文章标题和完整媒体 URL 保留。详细映射、边界与部署验收见 [直连迁移记录](../operations/content-search-direct-migration-2026-10-15.md)。
 
 ## 可配置策略与失败边界
 

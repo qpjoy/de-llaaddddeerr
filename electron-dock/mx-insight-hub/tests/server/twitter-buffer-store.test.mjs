@@ -23,11 +23,12 @@ async function fixture(t, postgres) {
   const archive = { bodyBytes, bodySize: bodyBytes.length, bodySha256: digest(bodyBytes), capturedAt }
   const source = { id: sourceId, tenantId: input.tenantId, consumerId: input.consumerId, apiKeyId: input.apiKeyId,
     platform: 'twitter', status: 'committed', responseStatus: 200, fingerprint: 'b'.repeat(64),
-    acquisitionRequest: { path: PATH }, responseBody: { immutable: 'original delivery' }, unitsActual: 20 }
+    acquisitionRequest: { path: PATH, body: {platform:'twitter',query:'fixture',pageSize:20} }, responseBody: { immutable: 'original delivery' }, unitsActual: 20 }
   const target = { ...source, id: targetId, status: 'reserved', responseStatus: null, responseBody: null, fingerprint, unitsActual: null }
   const call = { id: input.callId, usageRequestId: sourceId, tenantId: input.tenantId, consumerId: input.consumerId, apiKeyId: input.apiKeyId,
     providerKey: 'rapidapi', operation: 'social.content.search', endpointKey: 'twitter-aio.search', endpointVersion: 'twitter-aio.hub.v1',
-    contractVersion: HUB_SOCIAL_VERSION, outcome: 'succeeded', httpStatus: 200, completedAt: capturedAt }
+    contractVersion: HUB_SOCIAL_VERSION, outcome: 'succeeded', httpStatus: 200, completedAt: capturedAt,startedAt:capturedAt,
+    dispatchFingerprint:fingerprint,errorCode:null }
   const delivery = { usageRequestId: targetId, tenantId: input.tenantId, consumerId: input.consumerId, apiKeyId: input.apiKeyId,
     operation: 'social.content.search', fingerprint }
   const saved = { delivery, sourceCallId: input.callId, sourceMode: 'fresh_cache', capturedAt,
@@ -46,6 +47,9 @@ async function fixture(t, postgres) {
       setCall: async changes => Object.assign(store.calls.get(input.callId), changes),
       setUsage: async (id, changes) => Object.assign(usageStore.requests.get(id), changes),
       setArchive: async changes => Object.assign(store.restrictedResponseArchives.get(input.callId), changes),
+      insertCall: async value=>store.calls.set(value.id,structuredClone(value)),
+      insertArchive: async (id,value)=>store.restrictedResponseArchives.set(id,structuredClone(value)),
+      insertUsage: async value=>usageStore.requests.set(value.id,structuredClone(value)),
       getUsage: async id => structuredClone(usageStore.requests.get(id)),
       counts: async () => ({ calls: store.calls.size, gateways: store.requests.length, captures: usageStore.creditLedgerEntries.length,
         sourceCallId: store.requests[0]?.providerCallId, charge: usageStore.customerCharges.get(targetId).status }),
@@ -57,10 +61,15 @@ async function fixture(t, postgres) {
   await db.exec(`CREATE SCHEMA external_platform; CREATE SCHEMA control; CREATE SCHEMA billing;
     CREATE TABLE usage_requests (id uuid PRIMARY KEY, tenant_id uuid, consumer_id uuid, api_key_id uuid,
       platform text, status text, response_status int, fingerprint char(64), acquisition_request jsonb, response_body jsonb,
-      units_actual int, upstream_latency_ms int, delivery_source_mode text, response_captured_at timestamptz, completed_at timestamptz);
+      units_actual int, upstream_latency_ms int, delivery_source_mode text, response_captured_at timestamptz, completed_at timestamptz,
+      reserved_at timestamptz DEFAULT now());
     CREATE TABLE external_platform.provider_calls (id uuid PRIMARY KEY, usage_request_id uuid REFERENCES usage_requests,
       tenant_id uuid, consumer_id uuid, api_key_id uuid, provider_key text, operation text, endpoint_key text,
-      endpoint_version text, contract_version text, outcome text, http_status int, completed_at timestamptz);
+      endpoint_version text, contract_version text, outcome text, http_status int, completed_at timestamptz,started_at timestamptz,
+      dispatch_fingerprint char(64),error_code text,request_fingerprint char(64));
+    CREATE TABLE control.admission_recoveries(kind text,target text);
+    CREATE TABLE external_platform.dispatch_leases (consumer_id uuid,operation text,request_fingerprint char(64),owner_request_id uuid,
+      expires_at timestamptz,created_at timestamptz DEFAULT now(),UNIQUE(consumer_id,operation,request_fingerprint));
     CREATE TABLE control.external_platform_restricted_raw_responses (provider_call_id uuid REFERENCES external_platform.provider_calls,
       body_bytes bytea, body_sha256 text, body_size int, captured_at timestamptz);
     CREATE TABLE external_platform.gateway_requests (id uuid, provider_key text, tenant_id uuid, consumer_id uuid,
@@ -80,7 +89,7 @@ async function fixture(t, postgres) {
     providerKey: 'provider_key', endpointKey: 'endpoint_key', endpointVersion: 'endpoint_version', contractVersion: 'contract_version',
     httpStatus: 'http_status', completedAt: 'completed_at', responseStatus: 'response_status', responseBody: 'response_body',
     acquisitionRequest: 'acquisition_request', unitsActual: 'units_actual', bodyBytes: 'body_bytes', bodySize: 'body_size',
-    bodySha256: 'body_sha256', capturedAt: 'captured_at' }
+    bodySha256: 'body_sha256', capturedAt: 'captured_at',dispatchFingerprint:'dispatch_fingerprint',startedAt:'started_at',errorCode:'error_code' }
   const sqlValue = value => value && typeof value === 'object' && !(value instanceof Uint8Array) ? JSON.stringify(value) : value
   const insert = async (table, data) => {
     const entries = Object.entries(data)
@@ -108,6 +117,9 @@ async function fixture(t, postgres) {
       finally { await db.exec('ALTER TABLE usage_requests ENABLE TRIGGER usage_requests_settle_customer_charge') }
     },
     setArchive: changes => update('control.external_platform_restricted_raw_responses', 'provider_call_id', input.callId, changes),
+    insertCall: value=>insert('external_platform.provider_calls',value),
+    insertArchive: (id,value)=>insert('control.external_platform_restricted_raw_responses',{provider_call_id:id,...value}),
+    insertUsage: value=>insert('usage_requests',value),
     getUsage: async id => {
       const row = (await db.query('SELECT * FROM usage_requests WHERE id=$1', [id])).rows[0]
       return Object.fromEntries(Object.entries(row).map(([key, value]) => [Object.entries(columns).find(([, column]) => column === key)?.[0] || key,
@@ -127,7 +139,8 @@ for (const postgres of [false, true]) {
   test(`${name} Twitter buffer reads verify exact archive integrity and original acquisition scope`, options, async t => {
     const f = await fixture(t, postgres)
     const read = () => f.store.twitterPageFor(f.input)
-    assert.deepEqual(await read(), { payload: f.payload, capturedAt: f.archive.capturedAt })
+    assert.deepEqual(await read(), { payload: f.payload, capturedAt: f.archive.capturedAt,
+      bodySize:f.archive.bodySize,bodySha256:f.archive.bodySha256,sourceUsageRequestId:f.source.id })
     for (const field of ['callId', 'tenantId', 'consumerId', 'apiKeyId', 'path']) {
       assert.equal(await f.store.twitterPageFor({ ...f.input, [field]: field === 'path' ? '/api/v1/search/raw' : randomUUID() }), null, field)
     }
@@ -202,5 +215,100 @@ for (const postgres of [false, true]) {
     assert.deepEqual(await f.counts(), { calls: 1, gateways: 1, captures: 1, sourceCallId: f.input.callId, charge: 'captured' })
     await assert.rejects(f.store.commitTwitterPage(f.saved), { code: 'usage_request_state_conflict' })
     assert.equal((await f.counts()).captures, 1)
+  })
+
+  test(`${name} Twitter delivered-ID lineage is scoped, bounded and rejects drift or cycles`,options,async t=>{
+    const f=await fixture(t,postgres)
+    const scopeHash='c'.repeat(64)
+    const input={...f.input,previousDeliveryId:f.source.id,query:'fixture',pageSize:20,type:'fresh',scopeHash}
+    const responseBody={data:{platform:'twitter',query:'fixture',pageInfo:{pageSize:20},items:[{id:'1'},{id:'2'}]}}
+    await f.setUsage(f.source.id,{responseBody})
+    for(const items of [undefined,null,{},[{id:1}]]) {
+      await f.setUsage(f.source.id,{responseBody:{data:{...responseBody.data,items}}})
+      await assert.rejects(f.store.twitterDeliveredIdsFor(input),{code:'search_page_unavailable'})
+    }
+    await f.setUsage(f.source.id,{responseBody:{data:{...responseBody.data,items:[]}}})
+    assert.deepEqual((await f.store.twitterDeliveredIdsFor(input)).ids,[])
+    await f.setUsage(f.source.id,{responseBody})
+    assert.deepEqual((await f.store.twitterDeliveredIdsFor(input)).ids,['1','2'])
+    assert.deepEqual((await f.store.twitterDeliveredIdsFor({...input,previousDeliveryId:undefined,sourceCallId:f.call.id})).ids,['1','2'])
+    for(const patch of [{apiKeyId:randomUUID()},{consumerId:randomUUID()},{tenantId:randomUUID()},
+      {query:'different'},{pageSize:10},{type:'stable'}]) {
+      await assert.rejects(f.store.twitterDeliveredIdsFor({...input,...patch}),{code:'search_page_unavailable'})
+    }
+    await f.setUsage(f.source.id,{acquisitionRequest:{...f.source.acquisitionRequest,
+      twitterFill:{version:'twitter-fill.v1',scopeHash,upstreamPages:1,previousDeliveryId:f.source.id}}})
+    await assert.rejects(f.store.twitterDeliveredIdsFor(input),{code:'search_page_unavailable'})
+    await f.setUsage(f.source.id,{acquisitionRequest:{...f.source.acquisitionRequest,
+      twitterFill:{version:'twitter-fill.v1',scopeHash:'d'.repeat(64),upstreamPages:1,previousDeliveryId:null}}})
+    await assert.rejects(f.store.twitterDeliveredIdsFor(input),{code:'search_page_unavailable'})
+    let previous=f.source.id
+    await f.setUsage(f.source.id,{acquisitionRequest:f.source.acquisitionRequest})
+    for(let index=0;index<15;index++) {
+      const id=randomUUID()
+      await f.insertUsage({...f.source,id,responseBody,acquisitionRequest:{...f.source.acquisitionRequest,
+        twitterFill:{version:'twitter-fill.v1',scopeHash,upstreamPages:1,previousDeliveryId:previous}}})
+      previous=id
+    }
+    await assert.rejects(f.store.twitterDeliveredIdsFor({...input,previousDeliveryId:previous}),{code:'search_page_unavailable'})
+  })
+
+  test(`${name} Twitter final fill binds own and historical receipts atomically and guards unknown parent reentry`,options,async t=>{
+    const f=await fixture(t,postgres),ownCall={...f.call,id:randomUUID(),usageRequestId:f.target.id}
+    await f.setUsage(f.target.id,{status:'unknown'})
+    assert.equal(await f.store.twitterFillUnknownFor(f.saved.delivery),true,'buffer-only unknown has no owned provider call')
+    await f.setUsage(f.target.id,{status:'reserved',acquisitionRequest:{...f.target.acquisitionRequest,
+      body:{...f.target.acquisitionRequest.body,platform:' X '}}})
+    await f.insertCall(ownCall)
+    await f.insertArchive(ownCall.id,f.archive)
+    const source=callId=>({callId,bodySize:f.archive.bodySize,bodySha256:f.archive.bodySha256,
+      capturedAt:f.archive.capturedAt,rowsHash:'e'.repeat(64)})
+    const input={...f.saved,query:'fixture',pageSize:20,type:'fresh',sourceMode:'live',
+      responseBody:{data:{platform:'twitter',query:'fixture',pageInfo:{pageSize:20},items:[{id:'1'}]}},
+      lineage:{version:'twitter-fill.v1',scopeHash:'c'.repeat(64),upstreamPages:2,previousDeliveryId:f.source.id},
+      sources:[source(f.call.id),source(ownCall.id)]}
+    assert.equal(await f.store.twitterFillUnknownFor(f.saved.delivery),false)
+    assert.equal(await f.store.twitterPageFor({...f.input,callId:ownCall.id}),null,'reserved source is private to atomic own-delivery commit')
+    await assert.rejects(f.store.commitTwitterFillDelivery({...input,sources:[{...source(ownCall.id),bodySha256:'0'.repeat(64)}]}),{code:'search_page_unavailable'})
+    assert.equal((await f.getUsage(f.target.id)).status,'reserved')
+    if(postgres) {
+      await f.db.exec('ALTER TABLE external_platform.gateway_requests ADD CONSTRAINT force_fill_failure CHECK (false)')
+      await assert.rejects(f.store.commitTwitterFillDelivery(input))
+      const row=await f.getUsage(f.target.id)
+      assert.equal(row.status,'reserved')
+      assert.equal(row.acquisitionRequest.twitterFill,undefined)
+      assert.equal((await f.counts()).captures,0)
+      await f.db.exec('ALTER TABLE external_platform.gateway_requests DROP CONSTRAINT force_fill_failure')
+    }
+    await f.setUsage(f.target.id,{status:'unknown'})
+    assert.equal(await f.store.twitterFillUnknownFor(f.saved.delivery),true,'succeeded acquisition still guards unknown final delivery')
+    assert.equal(await f.store.twitterFillUnknownFor({...f.saved.delivery,apiKeyId:randomUUID()}),false)
+    await f.setUsage(f.target.id,{status:'reserved'})
+    await f.store.commitTwitterFillDelivery(input)
+    const delivered=await f.getUsage(f.target.id)
+    assert.equal(delivered.status,'committed')
+    assert.equal(delivered.acquisitionRequest.twitterFill.sources.length,2)
+    assert.deepEqual(delivered.acquisitionRequest.body,{...f.target.acquisitionRequest.body,platform:' X '})
+    assert.equal((await f.counts()).calls,2)
+    assert.equal((await f.counts()).gateways,1,'one logical HTTP delivery, all sources in internal manifest')
+    assert.equal((await f.counts()).sourceCallId,ownCall.id)
+    assert.equal((await f.counts()).captures,1)
+    await assert.rejects(f.store.commitTwitterFillDelivery(input),{code:'search_page_unavailable'})
+  })
+
+  test(`${name} Twitter delivery lease protects cached finalization while owned paid admission retains quarantine`,options,async t=>{
+    const f=await fixture(t,postgres)
+    const lease={consumerId:f.input.consumerId,operation:'social.content.search',fingerprint,ownerRequestId:f.target.id,
+      endpointKey:'twitter-aio.search',contractVersion:HUB_SOCIAL_VERSION,expiresAt:new Date(Date.now()+120000)}
+    assert.equal((await f.store.acquireTwitterFillDeliveryLease(lease)).kind,'acquired')
+    assert.equal((await f.store.acquireTwitterFillDeliveryLease({...lease,ownerRequestId:randomUUID()})).kind,'busy')
+    assert.equal((await f.store.acquireDispatchLease(lease)).kind,'busy','generic leases keep their existing same-owner behavior')
+    assert.equal((await f.store.acquireDispatchLease({...lease,ownedDeliveryLease:true})).kind,'acquired')
+    assert.equal((await f.store.acquireDispatchLease({...lease,ownedDeliveryLease:true,expiresAt:new Date(Date.now()+240000)})).kind,'busy','owned claim cannot extend its deadline')
+    await f.setCall({outcome:'succeeded_unusable',errorCode:'social_upstream_response_unusable',completedAt:new Date().toISOString()})
+    assert.equal((await f.store.acquireDispatchLease({...lease,ownedDeliveryLease:true})).kind,'blocked','paid child still enforces endpoint quarantine')
+    await f.store.releaseDispatchLease(lease)
+    assert.equal((await f.store.acquireTwitterFillDeliveryLease(lease)).kind,'acquired','read-only delivery claim remains possible under supplier quarantine')
+    await f.store.releaseDispatchLease(lease)
   })
 }

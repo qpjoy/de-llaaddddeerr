@@ -10,6 +10,9 @@ import { normalizeCanonicalSearchQuery, canonicalSearchResponse } from '../../se
 import { SearchQueries } from '../../server/search/queries.mjs'
 import { readAggregateEvents } from '../../src/aggregate-stream.js'
 import { aggregateDiagnostics } from '../../server/data/aggregate-diagnostics.mjs'
+import { randomUUID } from 'node:crypto'
+import { createDataSearchCursorCodec } from '../../server/external-platforms/cursor.mjs'
+import { normalizeSearchContent } from '../../server/contracts/search-content.mjs'
 
 const pepper = 'aggregate-search-test-pepper-with-enough-entropy'
 const id = '11111111-1111-4111-8111-111111111111'
@@ -160,7 +163,36 @@ async function setup({ platforms = ['weibo', 'telegram'], capabilities = [], sea
     calls.push(input)
     return { payload: { data: { items: [{ id: 'live-1', title: '实时新闻', text: '最新正文', privateToken: 'never-return' }], pageInfo: { hasMore: false } } }, raw: { items: [] } }
   } }
-  const service = new HubService({ store, adapter, apiKeyPepper: pepper, searchQueries })
+  // The four migrated content platforms now require an explicit direct
+  // gateway. Model its immutable child delivery evidence, while using the
+  // same controllable fixture acquisition for fan-out/timing assertions.
+  const externalDataSearch = async (context, input) => {
+    const previous = [...store.requests.values()].find(row => row.consumerId === context.consumer.id
+      && row.apiKeyId === context.apiKey.id && row.idempotencyKey === input.idempotencyKey)
+    if (previous?.status === 'committed') return { status: previous.responseStatus, requestId: previous.id, body: previous.responseBody, replay: true }
+    if (previous) throw new AppError(409, 'request_outcome_unknown', 'Fixture acquisition is unresolved', { requestId: previous.id })
+    const requestId = randomUUID()
+    const row = { id: requestId, tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
+      platform: input.normalized.platform, idempotencyKey: input.idempotencyKey, status: 'reserved',
+      acquisitionRequest: { path: '/api/v1/data/search', body: input.body } }
+    store.requests.set(requestId, row)
+    try {
+      const codec = createDataSearchCursorCodec(pepper, `${context.consumer.id}:${context.apiKey.id}`)
+      const fixtureBody = { ...input.normalized }
+      if (fixtureBody.cursor?.startsWith('mxds1.')) fixtureBody.cursor = codec.decode(fixtureBody.cursor).fixtureCursor
+      const acquired = await adapter.search({ body: fixtureBody })
+      const responseBody = { ...normalizeSearchContent(acquired.payload, input.normalized.platform), requestId }
+      const nativeCursor = responseBody.data?.pageInfo?.nextCursor
+      if (nativeCursor) responseBody.data.pageInfo.nextCursor = codec.encode({ fixtureCursor: nativeCursor })
+      Object.assign(row, { status: 'committed', responseStatus: 200, responseBody })
+      return { status: 200, requestId, body: responseBody, replay: false }
+    } catch (error) {
+      row.status = error.code === 'upstream_outcome_unknown' ? 'unknown' : 'released'
+      error.details = { ...error.details, requestId }
+      throw error
+    }
+  }
+  const service = new HubService({ store, adapter, apiKeyPepper: pepper, searchQueries, externalDataSearch })
   const tenant = await service.createTenant({ name: 'aggregate test' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'caller' })
   for (const platform of platforms) await service.putPlatformConfiguration(platform, { tenantId: tenant.id, consumerId: consumer.id, enabled: true, maxRequests: 100, windowSeconds: 60, maxPageSize: 100 })

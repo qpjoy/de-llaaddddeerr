@@ -30,7 +30,12 @@ function searchPlatform(platform, { instagramPolicy, facebookPolicy }) {
     platform, label: LABELS[platform], editable: true, migrationStatus: 'hub_native',
     providers: ['rapidapi', 'justone'], allowedModes: ['auto', 'rapidapi', 'justone', 'paused'],
     policy: facebookPolicy == null ? null : structuredClone(facebookPolicy),
-    routeSummary: '内容搜索的 data/search 与 raw 入口由 Hub 执行。auto 使用 RapidAPI 月度额度，额度不可用时按既有规则转 JustOne；游标绑定供应商，未知结果不触发切换。',
+    routeSummary: '内容搜索的 data/search 与 raw 入口由 Hub 执行。auto 使用 RapidAPI 月度额度，额度不可用时按既有规则转 JustOne；标准搜索先消费已采购余量，再有界补齐当前页，raw 保持既有分页。游标绑定供应商，未知结果不触发切换。',
+  }
+  if (['bilibili', 'douyin', 'kuaishou', 'zhihu'].includes(platform)) return {
+    ...row, migrationStatus: 'hub_native',
+    readOnlyReason: '关键词内容搜索由 Hub 执行已适配的固定 TikHub 合同，当前没有接入同一合同的第二供应商；不能仅改目录名称切换。账号内容与账号资料独立保留兼容链路。',
+    routeSummary: 'data/search 与两个 raw 入口的关键词内容搜索、已声明筛选和关键词批量由 Hub 直连 TikHub；完整已采购页归档后按 Hub 游标交付，不再转交 Night-All。历史游标须遵循原回放及明确重启边界；crawl 和 user-info 的迁移状态分别显示。',
   }
   if (platform === 'twitter') return {
     ...row, migrationStatus: 'conditional',
