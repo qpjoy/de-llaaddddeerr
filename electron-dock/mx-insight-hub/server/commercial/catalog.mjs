@@ -4,7 +4,7 @@ import { EXTERNAL_PLATFORM_OPERATION_CATALOG } from '../external-platforms/contr
 import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
 import { implementedRoutes } from '../data/source-connections.mjs'
 import { QIXIN_OFFICIAL_PRICES } from '../../shared/qixin-official-prices.mjs'
-import tikPrices from '../data/tikhub-reference-prices.json' with { type: 'json' }
+import tikPrices from '../data/tikhub-official-prices.json' with { type: 'json' }
 
 export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const native = new Map(NATIVE_FORWARDING_ENDPOINTS.map(row => [row.operation, row]))
@@ -34,7 +34,7 @@ export function officialPriceDraft(provider) {
   if (provider === 'tikhub') {
     const prices = new Map(tikPrices.rows.map(row => [row.path,row.unitPrice]))
     return { provider, available:true, sourceKind:'official', sourceUrl:tikPrices.sourceUrl, observedAt:tikPrices.observedAt,
-      name:'TikHub 新账户逐接口参考价（部分核验）',
+      name:'TikHub 官方逐接口基础价（2026-10-14；账户折扣另计）',
       rates:NATIVE_FORWARDING_ENDPOINTS.filter(row=>row.provider===provider && !row.key.startsWith('wechat.') && prices.has(row.path)).map(row=>({
         endpointKey:row.endpointKey,currency:tikPrices.currency,unitPrice:prices.get(row.path),billingUnit:'request',
       })) }

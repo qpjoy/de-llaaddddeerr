@@ -43,9 +43,9 @@ Hub 游标绑定 Key、查询、时间和渠道，有效期一天、最多 15 �
 
 正常 `bash scripts/manage.sh deploy` 会应用迁移 143，创建并种入策略、额度和审计表；迁移登记保证重复部署不重置额度或管理员配置。RapidAPI 新搜索操作初次启用；已有手工策略不覆盖。JustOne 使用现有原生接口的价格发布流程，管理员暂停仍保留。
 
-部署还会运行 `scripts/migrate-facebook-credentials.mjs`：先读 Hub 目标配置，只对从未配置的 RapidAPI/JustOne 凭据做 CAS 导入。已有数据库/环境凭据、手动清空记录均保留。密钥由现有 Hub 加密凭据库管理，不写入迁移 SQL、日志或文档。
+部署通过 `scripts/migrate-night-all-deploy-credentials.mjs` 统一导入：先读 Hub 目标配置，只对从未配置的供应商凭据做 CAS 导入。已有数据库/环境凭据、手动清空记录均保留。RapidAPI/JustOne 使用既有独立凭据存储，不写入迁移 SQL、日志或文档。普通详情不返回明文，查看仍需二次 Admin Token 验证。完整来源规则见 [Night-All 供应商凭据迁移](../operations/night-all-credential-migration.md)。
 
-**不需要配置 `NIGHT_ALL_CONFIG_PATH`。** 部署脚本会从当前主机约定的 Night-All 本地工作区自动发现 `config.json`（当前用户工作区下的 `workspace/mingxi/Night-All`，以及 Hub 上级目录的常规兄弟路径），然后使用安全读取器导入。也支持显式环境变量覆盖路径；找不到来源时记录 `source_unavailable`，管理员仍可在供应商详情填入密钥，部署不以这个可选来源作为身份系统的健康条件。
+标准目录不需要配置 `NIGHT_ALL_CONFIG_PATH`：部署脚本从服务器当前用户的 `workspace/mingxi/Night-All` 和 Hub 上级目录的常规兄弟路径发现 `config.json`。其他目录在服务器 `.env.internal` 显式指定路径。仅自动发现不到文件时保留旧 Facebook 环境/legacy 导入兼容；显式错误路径、JSON 无效或未知写入不会改用另一来源重试。来源不可用会提示，管理员仍可在供应商详情填入密钥，不将可选来源作为身份系统的健康条件。
 
 ```bash
 cd electron-dock/mx-insight-hub

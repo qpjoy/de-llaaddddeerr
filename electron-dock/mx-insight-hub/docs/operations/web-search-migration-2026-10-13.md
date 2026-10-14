@@ -2,6 +2,8 @@
 
 2026-10-13。用户选择在 Internal 服务器重新部署 Hub；本次交付代码、迁移工具和接入文档，未在生产写入凭据、启用操作或发起收费搜索。Delta 的调用合同见 [Web Search](../integrations/web-search.md)。
 
+2026-10-14 部署补充：用户要求从 `config.json` 自动补缺。未配置 `NIGHT_ALL_DATABASE_URL` 的部署现在使用服务器 JSON 导入已支持供应商；已配置 SQL 来源的部署仍遵循下文 SQL 流程，SQL 失败不回退 JSON。每家每次部署仅选一个来源，已有凭据和人工清空保持。JSON 路径发现与状态说明见 [Night-All 供应商凭据迁移](night-all-credential-migration.md)。
+
 ## 已核对的来源
 
 本机 Night-All 根目录 `config.json` 的 `searchApis` 中，Exa、Tavily、Serper、You.com、SearchAPI、Firecrawl 六家均有非空 `apiKey` 且 `enabled=true`，固定 origin 与 Hub 适配器相符。SerpApi 没有密钥且停用；没有百度配置节点。此清单只记录存在性，不包含密钥值，不证明供应商账号仍有效。

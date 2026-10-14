@@ -1,7 +1,7 @@
 import official from './provider-official-contracts.json' with { type: 'json' }
 import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
 import { PROVIDER_CATALOG_ADDITIONS } from './provider-catalog-additions.mjs'
-import tikPrices from './tikhub-reference-prices.json' with { type: 'json' }
+import tikPrices from './tikhub-official-prices.json' with { type: 'json' }
 import wechat from './wechat-contracts.json' with { type: 'json' }
 
 // Explicit platform identities, not substring matches against editable labels.
@@ -31,7 +31,10 @@ export function officialProviderCatalog(operations = []) {
       operation:endpoint?.operation || null, implementation:endpoint ? 'fixed_contract' : 'documented_only',
       reason:endpoint ? null : row.reason, effectiveState:policy?.effectiveState || 'not_checked',
       priceReviewed:policy?.priceBook?.source === 'database' && policy?.priceBook?.status === 'reviewed' && policy?.priceBook?.ready === true,
-      procurementReference:row.procurementReference || (row.provider === 'tikhub' && referencePrices.has(row.path) ? {currency:tikPrices.currency,unitPrice:referencePrices.get(row.path),sourceUrl:tikPrices.sourceUrl,observedAt:tikPrices.observedAt} : null),
+      procurementReference:row.provider === 'tikhub' && referencePrices.has(row.path)
+        ? {currency:tikPrices.currency,unitPrice:referencePrices.get(row.path),sourceUrl:tikPrices.sourceUrl,observedAt:tikPrices.observedAt,
+          priceBasis:'official_catalog_base_rate',actualChargeVerified:false}
+        : row.procurementReference || null,
       runtimeStatus:'not_checked' }
   })
   return { version:official.version, observedAt:official.observedAt, rows,

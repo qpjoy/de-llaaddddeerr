@@ -92,12 +92,12 @@ test('Web Search deploy hook skips import without an Admin credential', async t 
   assert.doesNotMatch(result.stdout, /WARNING/)
 })
 
-test('internal deploy and apply import Web Search credentials after Facebook and before price seeding', async () => {
+test('internal deploy and apply import explicit SQL credentials after JSON coordination and before price seeding', async () => {
   const source = await readFile(join(root, 'scripts/manage.sh'), 'utf8')
   for (const action of ['deploy', 'apply']) {
     const branch = source.match(new RegExp(`^    ${action}\\)\\n([\\s\\S]*?)^      ;;`, 'm'))?.[1]
     assert.ok(branch, `${action} branch exists`)
-    assert.match(branch, /ensure_facebook_supplier_credentials\s+ensure_web_search_supplier_credentials\s+seed_default_price_books/)
+    assert.match(branch, /ensure_night_all_supplier_credentials\s+ensure_web_search_supplier_credentials\s+seed_default_price_books/)
     assert.equal(branch.match(/ensure_web_search_supplier_credentials/g)?.length, 1)
   }
 })

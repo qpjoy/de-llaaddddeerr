@@ -77,6 +77,21 @@ kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-ingest --time
 
 旧请求 `c421b9bb-02e7-4359-b4ad-bef9163a6475` 的 unknown 状态保持，不能将新链路部署当作自动重试授权；`0468e788-a452-4168-992b-d2fb2c46e9bf` 的旧失败交付也不改写。新采集意图使用新幂等键，旧 mxnc1 续页需要显式重新开始。不能根据本地测试宣称线上已经恢复。
 
+### 发布后的配置阻断：Hub 未取得 RapidAPI 凭据
+
+发布后请求 `78c2c47a-de60-4fde-b9e6-594b76743027` 返回 `503 external_platform_operation_blocked`，
+唯一报告的 blocker 为 `credential_missing`，`liveAttempted=false`。这证明请求已进入 Hub 自有执行治理，
+本次没有派发供应商搜索；不是 Night-All 的 `endpoint_degraded` 再次拒绝。该错误表示运行时没有取得可用凭据，
+也可能包含凭据存储读取失败，不能仅凭它断言数据库里没有 Key。
+
+Hub 使用自己的 RapidAPI 凭据存储或可选 `MX_INSIGHT_RAPIDAPI_API_KEY` 环境配置，不读取 Night-All 的文件。
+2026-10-14 后续按用户要求将 JSON 补缺接入 `deploy/apply`：从服务器 Night-All 配置补齐 RapidAPI、TikHub、JustOne，保留已有 Key 和人工清空。非标准路径在服务器 `.env.internal` 设置 `NIGHT_ALL_CONFIG_PATH`；完整规则见 [供应商凭据自动迁移](night-all-credential-migration.md)。旧独立工具的 `--all` 仍只包含 TikHub/JustOne，不用于本次自动补缺。
+在 Hub 的 Admin Token 管理入口，进入 **上游供应商 → RapidAPI → API Key 管理** 保存已有可用 Key，
+会写入 Hub 数据库，后续请求动态读取，无需重启 Launcher、Night-All 或 Hub。
+若管理端已经显示数据库凭据已配置，应先核对 Public Pod 的凭据来源、读取状态和 Admin/Public 数据库一致性，避免盲目覆盖。
+从 Night-All 导入的具体步骤见 [RapidAPI 凭据迁移](../integrations/hub-social-data.md#rapidapi-凭据迁移与系统代理2026-09-28-后续)。
+保存后先只读核对搜索操作状态，凭据可用不代表其操作、价格、预算或供应商订阅一定就绪。
+
 ## 2026-09-21：Twitter 供应商拒绝的历史排查
 
 2026-09-21，针对 Hub requestId `9788c8f2-d59a-455a-8659-12d26bd2172d`。

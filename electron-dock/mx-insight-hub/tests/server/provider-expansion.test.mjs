@@ -25,7 +25,8 @@ test('official snapshot has reproducible sources; every added dispatch is a fixe
   assert.deepEqual(official.collection.justoneErrors,[])
   assert.ok(official.sources.every(row=>/^[a-f0-9]{64}$/.test(row.sha256)))
   assert.equal(official.endpoints.length,1343)
-  assert.equal(endpoints.filter(row=>row.schemaVersion && !row.key.startsWith('wechat.')).length,987)
+  const originalExpansion=endpoints.filter(row=>row.schemaVersion && !row.key.startsWith('wechat.') && row.schemaVersion!=='hub-kuaishou-ecommerce.2026-10-13')
+  assert.equal(originalExpansion.length,987)
   assert.equal(endpoints.filter(row=>!row.schemaVersion).length,50)
   assert.equal(new Set(endpoints.map(row=>row.hubPath)).size,endpoints.length)
   for (const platform of ['taobao','jd','xianyu','douyin-ec','xiaohongshu-ec','1688','aliexpress','shopee','tiktok-shop','amazon']) {
@@ -34,7 +35,7 @@ test('official snapshot has reproducible sources; every added dispatch is a fixe
     assert.ok(rows.every(row=>row.authorizationPlatform==='ecommerce'),platform)
   }
   const sql=readFileSync(new URL('../../migrations/114_official_provider_contracts.sql',import.meta.url),'utf8')
-  for(const row of endpoints.filter(row=>row.schemaVersion && !row.key.startsWith('wechat.'))) {
+  for(const row of originalExpansion) {
     assert.equal(row.method,'GET');assert.ok(row.path.startsWith('/api/'))
     assert.ok(!row.parameters.some(p=>/^(token|cookie|authorization|api_key|password)$/i.test(p.name)))
     assert.ok(sql.includes(row.operation));assert.ok(PROVISIONING_OPERATIONS.some(op=>op.operation===row.operation))
@@ -79,7 +80,7 @@ test('per-interface docs and OpenAPI use the same exact grants; customer docs co
   }
   assert.match(enterpriseDocumentationHtml('enterprise-1.31',{procurementEvidence:true}),/Admin 采购参考/)
   for (const [platform,path] of [['social','/data-products/social-content'],['ecommerce','/data-products/ecommerce-treasure-box']]) {
-    assert.deepEqual(PRODUCT_ACCESS[path].any.filter(value=>value.startsWith('native.')),endpoints.filter(row=>row.authorizationPlatform===platform).map(row=>row.operation))
+    assert.deepEqual(PRODUCT_ACCESS[path].any.filter(value=>value.startsWith('native.')).sort(),endpoints.filter(row=>row.authorizationPlatform===platform).map(row=>row.operation).sort())
   }
   const both=['social','ecommerce']
   assert.equal(productAllowed('/data-products/social-content',[{platforms:both,capabilities:[nativeForwardingEndpoint(J).operation]}]),false)
@@ -93,7 +94,8 @@ test('account price snapshot preserves decimals and incompleteness; it never syn
   const {available,...spec}=officialPriceDraft('tikhub')
   assert.equal(available,true)
   const draft=normalizePriceDraft(spec)
-  assert.equal(draft.rates.length,710)
+  assert.equal(draft.rates.length,755)
+  assert.equal(draft.sourceUrl,'https://api.tikhub.io/api/v1/tikhub/user/get_all_endpoints_info')
   const subcent=draft.rates.find(row=>row.unitPrice==='0.001')
   assert.equal(subcent.amountMicros,'1000');assert.equal(subcent.budgetMinor,1);assert.equal(subcent.rounded,true)
   assert.equal(officialPriceDraft('justone').available,false)
@@ -103,7 +105,7 @@ test('catalog distinguishes declared coverage, fixed contracts, runtime state an
   const catalog=officialProviderCatalog([])
   assert.equal(catalog.rows.length,1343);assert.ok(catalog.rows.every(row=>row.effectiveState==='not_checked'))
   assert.deepEqual(providerCatalogKeys('lemon8'),['source-platform-lemon8'])
-  assert.ok(catalog.rows.some(row=>row.procurementReference?.unitPrice==='0.0010'))
+  assert.ok(catalog.rows.some(row=>row.procurementReference?.unitPrice==='0.001' && row.procurementReference.actualChargeVerified===false))
   assert.ok(catalog.rows.some(row=>row.implementation==='documented_only'&&row.hubPath===null))
 })
 

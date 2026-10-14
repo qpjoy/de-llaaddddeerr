@@ -25,6 +25,7 @@
     "migrate:external-platform-credentials": "node scripts/migrate-tikhub-credential.mjs --all",
     "migrate:tikhub-credential": "node scripts/migrate-tikhub-credential.mjs",
     "migrate:rapidapi-credential": "node scripts/migrate-tikhub-credential.mjs --provider rapidapi",
+    "migrate:night-all-credentials": "node scripts/migrate-night-all-credentials.mjs",
     "migrate:web-search-credentials": "node scripts/migrate-web-search-credentials.mjs",
     "test": "node --test tests/server/*.test.mjs tests/sites-worker.test.mjs && bash tests/manage-script.test.sh",
     "test:server": "node --test tests/server/*.test.mjs",
