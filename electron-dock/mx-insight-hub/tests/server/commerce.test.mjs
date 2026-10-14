@@ -1,4 +1,7 @@
 import { IpRiskProduct } from '../../server/external-platforms/ip-risk-product.mjs'
+import { createServer } from 'node:http'
+import { createApp } from '../../server/app.mjs'
+import { capabilitiesForRole } from '../../server/identity/index.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { commerceRoute } from '../../server/commerce/routes.mjs'
 import test from 'node:test'
@@ -104,6 +107,32 @@ async function fixture(t,{space=false,offers=false}={}){
     rerunMigrations:()=>runMigrations({connectionString:url.href,migrationsDir:migrationDir})}
 }
 const database={skip:!connectionString}
+test('DataPort HTTP delegates to the real product quota boundary without exposing keys and rechecks roles on every request',database,async t=>{
+  const f=await fixture(t,{space:true}),order=await f.create(),paid=await f.eventFor(order);await f.service.commit(paid.source,paid.event,paid.payment)
+  await f.pool.query(await readFile(new URL('../../migrations/149_dataport_enterprise.sql',import.meta.url),'utf8'))
+  const member=randomUUID();await f.pool.query("INSERT INTO iam.members(id,display_name) VALUES($1,'DataPort analyst')",[member]);await f.pool.query("INSERT INTO iam.tenant_memberships(id,tenant_id,member_id,role) VALUES($1,$2,$3,'viewer')",[randomUUID(),f.tenant,member]);await f.pool.query("INSERT INTO dataport.member_roles(tenant_id,member_id,role_id) VALUES($1,$2,'analyst')",[f.tenant,member])
+  const store=new PostgresStore(f.pool),service=new HubService({store,adapter:{},apiKeyPepper:'dataport-integration-fixture-pepper-at-least-32'});let calls=0
+  const gateway=new IpRiskGateway({usageStore:store,platformStore:new PostgresExternalPlatformStore({pool:f.pool,providerKey:'ipsearch',authorizationPlatform:'ip_risk'}),enabled:true,providerKey:'ipsearch',operation:'ip.risk.query',meterKey:'ip.risk.query',adapter:{configured:true,async query(){calls++;return {outcome:'succeeded',normalized:{status:'success',data:{risk_level:'中风险',risk_score:null,risk_tags:[]},warnings:[]},latencyMs:1}}}})
+  const product=new IpRiskProduct({channels:{'legacy-v1':gateway}},f.service)
+  const portal={resolve:async()=>{const memberships=(await store.listTenantMemberships(member)).filter(m=>m.status==='active').map(m=>({...m,capabilities:capabilitiesForRole(m.role)}));return {kind:'launcher-user',memberId:member,displayName:'Analyst',platformAdmin:false,tenantIds:memberships.map(m=>m.tenantId),memberships,portalOrigin:'https://fixture.example.test'}}}
+  const server=createServer(createApp({store,service,adapter:{},listenerMode:'admin',harborPortal:portal,ipRiskProduct:product}));await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.close(r);server.closeAllConnections()}))
+  const base=`http://127.0.0.1:${server.address().port}/internal/v1/portal`,root=`/enterprises/${f.tenant}`,key=randomUUID()
+  const post=(path,body={},intent=key)=>fetch(base+path,{method:'POST',headers:{'content-type':'application/json','idempotency-key':intent,'x-mx-dataport-session':'a'.repeat(64),'x-asserted-role':'owner'},body:JSON.stringify(body)})
+  const first=await post(root+'/query',{ip:'8.8.8.8'});assert.equal(first.status,200);const result=await first.json();assert.equal(result.data.response.data.data.risk_score,null);assert.ok(!JSON.stringify(result).includes('mih_live_'))
+  assert.equal((await post(root+'/query',{ip:'8.8.8.8'})).status,200);assert.equal(calls,1)
+  assert.equal((await f.pool.query('SELECT sum(used)::int AS used FROM hub_commerce.subscriptions')).rows[0].used,1)
+  assert.equal((await fetch(base+root+'/keys')).status,403);assert.equal((await fetch(base+root+'/billing')).status,403);assert.equal((await post('/demo-credentials')).status,404)
+  await f.pool.query("UPDATE dataport.member_roles SET role_id='viewer' WHERE member_id=$1",[member]);assert.equal((await post(root+'/query',{ip:'1.1.1.1'},randomUUID())).status,403);assert.equal(calls,1)
+  const history=await(await fetch(base+root+'/history')).json();assert.equal(history.data.total,1);assert.equal(history.data.items[0].actor,member)
+  await f.pool.query("UPDATE dataport.member_roles SET role_id='admin' WHERE member_id=$1",[member]);const issued=await(await post(root+'/keys',{name:'Integration',expiresInDays:30})).json();assert.ok(issued.data.secret.startsWith('mih_live_'))
+  const listed=await(await fetch(base+root+'/keys')).json();assert.ok(listed.data.items.some(k=>k.id===issued.data.id));assert.ok(listed.data.items.every(k=>!Object.hasOwn(k,'secret')))
+  assert.equal((await post(root+`/keys/${issued.data.id}/revoke`)).status,200)
+  const purchaser=randomUUID();await f.pool.query("INSERT INTO dataport.roles(tenant_id,id,name,permissions) VALUES($1,$2,'Purchaser',$3)",[f.tenant,purchaser,JSON.stringify(['subscriptions.read','subscriptions.buy'])]);await f.pool.query('UPDATE dataport.member_roles SET role_id=$2 WHERE member_id=$1',[member,purchaser]);
+  const original=await f.service.row(order.id,f.tenant),retry=await post(root+'/orders',{sku:INITIAL_PRODUCT.sku,revision:2,environment:'live'},original.request_key);assert.equal(retry.status,403);assert.equal((await retry.json()).error.code,'commerce_order_not_permitted');
+  assert.equal((await post(root+'/orders',{sku:'invalid',revision:1,environment:'live'},randomUUID())).status,409,'business validation errors retain their status across the new Portal');
+  await f.pool.query("UPDATE iam.tenant_memberships SET status='suspended' WHERE member_id=$1",[member]);assert.equal((await fetch(base+root+'/history')).status,403)
+  assert.equal((await f.pool.query('SELECT * FROM billing.customer_charges')).rowCount,0)
+})
 test('commerce list pages are validated and require the current tenant billing permission', async () => {
   const tenant=randomUUID(), calls=[]
   const principal={kind:'launcher-user',memberId:randomUUID(),tenantIds:[tenant],memberships:[{tenantId:tenant,capabilities:['billing.read']}]}

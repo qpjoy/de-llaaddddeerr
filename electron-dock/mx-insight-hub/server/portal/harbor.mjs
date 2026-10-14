@@ -7,12 +7,10 @@ import {secureEqual} from '../core/crypto.mjs'
 import {readFileSync} from 'node:fs'
 // This Symbol is never derived from headers, cookies, query parameters or JSON.
 export const portalPrincipal = Symbol('verified-harbor-principal')
-const reads = new Set(['/session','/me/overview','/me/workspace','/me/usage','/api-keys','/tenants','/consumers','/usage','/documentation','/commerce/products','/payments/return-order'])
+const reads = new Set(['/session','/me/usage','/documentation','/commerce/products','/payments/return-order'])
 export function harborRoute(method,path,searchParams) {
-  const read=method==='GET'&&(reads.has(path)||/^\/commerce\/tenants\/[0-9a-f-]{36}(?:\/messages)?$/.test(path))
-  // Existing handlers still enforce tenant capabilities, prices and paid delivery.
-  // No product editing, acceptance pricing, supplier controls or key reveal.
-  const write=method==='POST'&&(['/demo-credentials','/payments/personal-account'].includes(path)||/^\/commerce\/tenants\/[0-9a-f-]{36}\/(?:messages\/[1-9][0-9]{0,17}\/read|subscription-selection|access|orders(?:\/[0-9a-f-]{36}\/(?:checkout|refresh))?)$/.test(path))
+  const read=method==='GET'&&(reads.has(path)||/^\/commerce\/tenants\/[0-9a-f-]{36}\/messages$/.test(path))
+  const write=method==='POST'&&/^\/commerce\/tenants\/[0-9a-f-]{36}\/messages\/[1-9][0-9]{0,17}\/read$/.test(path)
   if(!read&&!write)throw new AppError(404,'portal_route_unavailable','此客户功能尚未开放。')
   if(write&&searchParams.size)throw new AppError(400,'invalid_query','此操作不接受查询参数。')
   if(path==='/documentation'&&(searchParams.size!==2||searchParams.getAll('tenantId').length!==1||!searchParams.get('tenantId')||searchParams.get('path')!=='/docs/openapi.json'))throw new AppError(404,'not_found','请使用数港接口文档。')
@@ -33,9 +31,9 @@ function configuredPortal({pool,store,settings,token,hubSettings,oidcConfigurati
       const accessToken=/^Bearer ([^\s]+)$/.exec(String(request.headers.authorization||''))?.[1],subject=request.headers['x-mx-harbor-subject']
       if(!accessToken||typeof subject!=='string'||subject.length>160)throw new AppError(401,'portal_session_required','请重新登录。')
       const verified=await verifier.verifySession({accessToken,subject,issuer:settings.issuer},true)
-      const memberId=await sessions.provision({issuer:settings.issuer,subject,clientId:settings.clientId,canonical:verified.mxIdentity,sharedAudience:hubSettings.audience,personalTenant:hubSettings.personalTenant===true})
+      const memberId=await sessions.provision({issuer:settings.issuer,subject,clientId:settings.clientId,canonical:verified.mxIdentity,sharedAudience:hubSettings.audience,personalTenant:false})
       const memberships=(await store.listTenantMemberships(memberId)).filter(m=>m.status==='active').map(m=>({...m,capabilities:capabilitiesForRole(m.role)}))
-      return {kind:'launcher-user',memberId,displayName:verified.displayName,subject:verified.mxIdentity.subject,issuer:verified.mxIdentity.issuer,platformAdmin:false,tenantIds:memberships.map(m=>m.tenantId),memberships,capabilities:[...new Set(memberships.flatMap(m=>m.capabilities))],portalOrigin:settings.origin}
+      return {kind:'launcher-user',memberId,displayName:verified.displayName,subject:verified.mxIdentity.subject,issuer:verified.mxIdentity.issuer,platformAdmin:false,tenantIds:memberships.map(m=>m.tenantId),memberships,capabilities:[...new Set(memberships.flatMap(m=>m.capabilities))],portalOrigin:settings.origin,portalAudience:hubSettings.audience}
     }
   }
 }

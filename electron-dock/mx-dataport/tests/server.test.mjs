@@ -106,7 +106,7 @@ test("customer writes require a fresh session, exact origin and CSRF and preserv
     "x-mx-csrf": "csrf-fixture",
     "idempotency-key": "original-intent",
   };
-  const path = `/bff/v1/commerce/tenants/${tenant}/orders`;
+  const path = `/bff/v1/enterprises/${tenant}/orders`;
   const body = JSON.stringify({
     sku: "annual",
     revision: 1,
@@ -140,18 +140,22 @@ test("customer writes require a fresh session, exact origin and CSRF and preserv
   assert.equal(calls[0].options.headers["idempotency-key"], "original-intent");
   assert.equal(calls[0].options.headers.authorization, "Bearer server-token");
   assert.equal(calls[0].options.headers["x-mx-csrf"], undefined);
+  assert.match(calls[0].options.headers["x-mx-dataport-session"], /^[a-f0-9]{64}$/);
   assert.doesNotMatch(await response.text(), /server-token|server-only/);
   const messagePath = `/bff/v1/commerce/tenants/${tenant}/messages/1/read`;
   assert.equal((await fetch(base + messagePath, {method: "POST", headers: {...headers, "x-mx-csrf": ""}, body: "{}"})).status, 403);
   assert.equal((await fetch(base + messagePath, {method: "POST", headers, body: "{}"})).status, 201);
   assert.equal(calls[1].url, `http://hub.internal:18151/internal/v1/portal/commerce/tenants/${tenant}/messages/1/read`);
+  const ticketBody=JSON.stringify({content:"问题".repeat(2500),category:"technical"});
+  assert.equal((await fetch(base+`/bff/v1/enterprises/${tenant}/tickets`,{method:"POST",headers,body:ticketBody})).status,201);
+  assert.equal(calls[2].options.body,ticketBody);
   active = false;
   assert.equal(
     (await fetch(base + path, { method: "POST", headers, body })).status,
     401,
   );
-  assert.equal(calls.length, 2);
-  assert.equal(verified, 7);
+  assert.equal(calls.length, 3);
+  assert.equal(verified, 8);
   for (const forbidden of [
     "/commerce/delivery",
     `/commerce/tenants/${tenant}/acceptance-orders`,
@@ -228,7 +232,7 @@ test("BFF fresh verification, fixed upstream credential, no browser secret and b
     { url: "https://harbor.example.test/api/v1" },
   ]);
   assert.equal(JSON.parse(body).data.html, null);
-  const listPath = "/bff/v1/commerce/tenants/11111111-1111-4111-8111-111111111111?ordersPage=6&subscriptionsPage=2&pageSize=20";
+  const listPath = "/bff/v1/enterprises/11111111-1111-4111-8111-111111111111/billing?page=6&pageSize=20";
   assert.equal((await fetch(base + listPath)).status, 200);
   assert.equal(requests[1].url, config.upstream + listPath.replace("/bff/v1/", "/internal/v1/portal/"));
   assert.equal(verified, 2);

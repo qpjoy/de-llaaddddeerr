@@ -17,6 +17,7 @@ const product = row => ({ ...row.document, revision: row.revision })
 const view = row => row && ({ id: row.id, tenantId: row.tenant_id, consumerId: row.consumer_id, environment: row.environment, product: row.intent.product,
   createdAt: row.created_at, deliveredAt: row.delivered_at, paymentId: row.payment_id, status: row.delivered_at ? (row.environment === 'test' ? 'test_delivered' : 'active') : row.payment?.status === 'paid' ? 'delivering' : 'pending',
   paymentStatus: row.intent.purpose === 'trial' ? 'not_required' : row.payment?.status || 'pending', receipt: row.receipt })
+export { view as commerceOrderView }
 
 export function addCalendarMonths(value, months) {
   const date = new Date(value), day = date.getUTCDate()
@@ -179,7 +180,7 @@ export class CommerceService {
       [context.tenant.id,context.consumer.id,capabilities.includes(IP_PRODUCT_CAPABILITY),capabilities.includes(IP_V2_CAPABILITY)])).rows[0]
     return {subscription:row||null}
   }
-  async create(tenantId, body, key, actor, { acceptance = false, harbor = false } = {}) {
+  async create(tenantId, body, key, actor, { acceptance = false, harbor = false, purchaseActorOnly = false } = {}) {
     fields(body, ['sku','revision','consumerId','environment','upgradeFrom']); requestKey(key)
     requirePayment(uuid(tenantId) && (body.consumerId == null || uuid(body.consumerId)) && ['live','test'].includes(body.environment) && Number.isInteger(body.revision), 'commerce_invalid_purchase', '请选择使用空间和商品版本')
     // Preserve the fingerprint of ordinary orders created before acceptance pricing.
@@ -187,7 +188,7 @@ export class CommerceService {
     const row = await this.atomic(async client => {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`commerce-order:${tenantId}:${key}`])
       const prior = (await client.query('SELECT * FROM hub_commerce.orders WHERE tenant_id=$1 AND environment=$2 AND request_key=$3', [tenantId,body.environment,key])).rows[0]
-      if (prior) { requirePayment(prior.fingerprint === hash, 'commerce_idempotency_conflict', '请求已用于其他购买', 409); return prior }
+      if (prior) { requirePayment(!purchaseActorOnly || prior.intent.createdBy === actor,'commerce_order_not_permitted','此操作编号属于另一位成员的购买，请核对本人待处理订单。',403); requirePayment(prior.fingerprint === hash, 'commerce_idempotency_conflict', '请求已用于其他购买', 409); return prior }
       const sku = (await client.query('SELECT * FROM hub_commerce.products WHERE sku=$1 FOR SHARE', [body.sku])).rows[0]
       requirePayment(sku?.document.status === 'published' && sku.revision === body.revision && (!harbor || sku.document.harborListed !== false), 'commerce_product_changed', '商品已变更或下架，请重新确认', 409)
       const space = sku.document.entitlementScope === 'tenant'

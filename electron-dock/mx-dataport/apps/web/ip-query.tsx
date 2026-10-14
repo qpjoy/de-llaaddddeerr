@@ -1,317 +1,172 @@
+import { riskAdvice } from "./risk-advice";
 import { useEffect, useRef, useState } from "react";
+import { Search, Download, Clock3 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { PublicIpSearch } from "./public-ip-search";
-import { QueryHistory, QueryResult } from "./ip-query-results";
-import { request } from "./api";
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
-  currentSubscription,
-  hasCapability,
-  PRODUCT_CAPABILITY,
-  subscriptionState,
-  queryIntent,
-  type Subscription,
-} from "./commerce-state";
+  Table,
+  TableHeader,
+  TableHead,
+  TableRow,
+  TableBody,
+  TableCell,
+} from "@/components/ui/table";
+import { PublicIpSearch } from "./public-ip-search";
+import { QueryResult, RiskLevel } from "./ip-query-results";
+import { BatchQuery } from "./batch-query";
+import { request } from "./api";
+import { dateTime, portraitState, queryIntent } from "./commerce-state";
+import { enterpriseUrl, hasPermission } from "./permissions";
+import { Pagination } from "./pagination";
+import { downloadExcel } from "./download";
 
 export function IpQuery({
   tenant,
   session,
   csrf,
   go,
-  initialIp,
+  initialIp = "",
 }: {
   tenant: string;
   session: any;
   csrf: string;
   go: (page: string) => void;
-  initialIp: string;
+  initialIp?: string;
 }) {
-  const [subscription, setSubscription] = useState<Subscription | undefined>(),
-    [credential, setCredential] = useState<any>(null);
-  const [loading, setLoading] = useState(true),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState(""),
-    [accessError, setAccessError] = useState("");
   const [result, setResult] = useState<any>(null),
-    [history, setHistory] = useState<any[]>([]),
-    [cursor, setCursor] = useState<string | null>(null);
-  const [historyError, setHistoryError] = useState(""),
-    [historyLoading, setHistoryLoading] = useState(false);
-  const [querying, setQuerying] = useState(false);
-  const [search, setSearch] = useState({ ip: initialIp, revision: 0 });
-  const resultRef = useRef<HTMLDivElement>(null);
-  const lock = useRef(false),
-    live = useRef(true);
-  const canUse = hasCapability(session, tenant, "apikey.write"),
-    canRead = hasCapability(session, tenant, "billing.read");
-  const post = (path: string, body: any) =>
-    request(`/bff/v1${path}`, {
-      method: "POST",
-      headers: { "x-mx-csrf": csrf },
-      body: JSON.stringify(body),
-    });
-  const publicRead = (path: string, key: any, options: RequestInit = {}) =>
-    request(`/api/v1/data/ip/risk${path}`, {
-      ...options,
-      credentials: "omit",
-      headers: { Authorization: `Bearer ${key.secret}`, ...options.headers },
-    });
-  async function loadHistory(key: any, next?: string) {
-    setHistoryLoading(true);
-    setHistoryError("");
-    try {
-      const data = await publicRead(
-        `/history?limit=10${next ? `&cursor=${encodeURIComponent(next)}` : ""}`,
-        key,
-      );
-      if (!live.current) return;
-      setHistory((previous) =>
-        next ? [...previous, ...data.items] : data.items,
-      );
-      setCursor(data.nextCursor);
-    } catch (e) {
-      if (live.current) setHistoryError((e as Error).message);
-    } finally {
-      if (live.current) setHistoryLoading(false);
-    }
-  }
-  async function connect(keyId: string) {
-    const { data } = await post("/demo-credentials", { keyId });
-    if (
-      !data.access?.platforms?.includes("ip_risk") ||
-      !data.access?.capabilities?.includes(PRODUCT_CAPABILITY)
-    )
-      throw Error("当前访问身份未包含已购产品的查询权限，请联系空间管理员。");
-    if (!live.current) return null;
-    setCredential(data);
-    await loadHistory(data);
-    return data;
-  }
-  async function load() {
-    setLoading(true);
-    setCredential(null);
-    setError("");
-    setAccessError("");
-    try {
-      if (!tenant || !canRead) return;
-      const [purchases, keys] = await Promise.all([
-        request(`/bff/v1/commerce/tenants/${tenant}`),
-        canUse ? request("/bff/v1/api-keys") : Promise.resolve({ data: [] }),
-      ]);
-      if (!live.current) return;
-      setSubscription(currentSubscription(purchases.data.subscriptions));
-      const key = keys.data.find(
-        (item: any) =>
-          item.tenantId === tenant &&
-          (item.effectiveStatus || item.status) === "active" &&
-          item.environment === "live" &&
-          item.capabilities?.includes(PRODUCT_CAPABILITY),
-      );
-      if (key) await connect(key.id);
-    } catch (e) {
-      if (live.current) setAccessError((e as Error).message);
-    } finally {
-      if (live.current) setLoading(false);
-    }
-  }
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const [history, setHistory] = useState<any>(null),
+    [historyError, setHistoryError] = useState(""),
+    [page, setPage] = useState(1),
+    [q, setQ] = useState(""),
+    [version, setVersion] = useState(0),
+    [batch, setBatch] = useState(false),
+    [exporting, setExporting] = useState(false);
+  const [search, setSearch] = useState({ ip: initialIp, revision: 0 }),
+    live = useRef(true),
+    lock = useRef(false),
+    resultRef = useRef<HTMLDivElement>(null);
+  const canQuery = hasPermission(session, tenant, "query.execute"),
+    canRead = hasPermission(session, tenant, "history.read"),
+    canExport = hasPermission(session, tenant, "history.export");
   useEffect(() => {
     live.current = true;
-    void load();
     return () => {
       live.current = false;
     };
-  }, [tenant]);
+  }, []);
   useEffect(() => {
-    if (!result) return;
-    resultRef.current?.focus({ preventScroll: true });
-    resultRef.current?.scrollIntoView({ block: "nearest" });
+    if (!canRead) return;
+    const c = new AbortController();
+    setHistory(null);
+    setHistoryError("");
+    request(
+      enterpriseUrl(
+        tenant,
+        `history?page=${page}&pageSize=5&q=${encodeURIComponent(q)}`,
+      ),
+      { signal: c.signal },
+    )
+      .then((v) => {
+        if (!c.signal.aborted) setHistory(v.data);
+      })
+      .catch((e) => {
+        if (!c.signal.aborted) setHistoryError(e.message);
+      });
+    return () => c.abort();
+  }, [tenant, page, q, version, canRead]);
+  useEffect(() => {
+    if (result) {
+      resultRef.current?.focus({ preventScroll: true });
+      resultRef.current?.scrollIntoView({
+        block: "nearest",
+        behavior: "smooth",
+      });
+    }
   }, [result]);
-  async function perform(work: () => Promise<void>) {
-    if (lock.current) return;
+  async function query(ip: string, fresh = false) {
+    if (lock.current || !canQuery) return;
     lock.current = true;
     setBusy(true);
     setError("");
+    const intent = queryIntent(
+      sessionStorage,
+      `${tenant}:${session.memberId}:${ip}`,
+    );
+    if (fresh) {
+      sessionStorage.removeItem(intent.name);
+      intent.key = queryIntent(
+        sessionStorage,
+        `${tenant}:${session.memberId}:${ip}`,
+      ).key;
+    }
     try {
-      await work();
-    } catch (e: any) {
+      const { data } = await request(enterpriseUrl(tenant, "query"), {
+        method: "POST",
+        headers: { "x-mx-csrf": csrf, "Idempotency-Key": intent.key },
+        body: JSON.stringify({ ip }),
+        signal: AbortSignal.timeout(120000),
+      });
+      if (["success", "partial", "no_data"].includes(portraitState(data)))
+        sessionStorage.removeItem(intent.name);
+      if (live.current) {
+        setResult(data);
+        setSearch((s) => ({ ip, revision: s.revision + 1 }));
+        setPage(1);
+        setVersion((v) => v + 1);
+      }
+    } catch (e) {
       if (live.current)
         setError(
-          `${e.message}${e.requestId ? ` · 请求编号：${e.requestId}` : ""}`,
+          (e as Error).message +
+            " 请先查看历史确认上次结果，重试会沿用原操作编号。",
         );
     } finally {
       lock.current = false;
-      if (live.current) {
-        setBusy(false);
-        setQuerying(false);
-      }
+      if (live.current) setBusy(false);
     }
   }
-  const active = subscription && subscriptionState(subscription) === "active";
-  const ready =
-    credential?.access?.operations?.[PRODUCT_CAPABILITY]?.ready === true;
-  const hint = loading
-    ? "正在读取空间订阅…"
-    : accessError
-      ? "查询服务暂时无法连接。"
-      : !tenant
-        ? "请先开通或加入使用空间。"
-        : !canUse || !canRead
-          ? "当前账号没有网页查询权限，请联系空间管理员。"
-          : !subscription
-            ? "购买并完成付款后，即可使用空间共享的查询次数。"
-            : !active
-              ? subscriptionState(subscription) === "daily_exhausted"
-                ? "今日订阅次数已用尽，北京时间次日 00:00 恢复；可到「我的订阅」切换。"
-                : "本期可用次数不足，请到「我的订阅」查看。"
-              : !credential
-                ? "订阅已开通，启用查询后即可使用。"
-                : !ready
-                  ? "数据服务暂不可用，请稍后再试。"
-                  : `本期已用 ${subscription.used.toLocaleString()} / ${subscription.quota.toLocaleString()} 次${subscription.dailyLimit ? ` · 今日 ${subscription.dailyUsed || 0} / ${subscription.dailyLimit} 次` : ""} · ${new Date(subscription.endsAt).toLocaleDateString("zh-CN")} 到期`;
-  async function query(ip: string) {
-    if (!subscription) {
-      go("market");
-      return;
-    }
-    if (!active) return;
-    if (!credential) {
-      await perform(async () => {
-        const { data } = await post(`/commerce/tenants/${tenant}/access`, {});
-        await connect(data.keyId);
-      });
-      return;
-    }
-    if (!ready) return;
-    await perform(async () => {
-      setQuerying(true);
-      setResult(null);
-      // Renew a temporary credential without replacing the real Key or request identity.
-      const key =
-        credential.expiresAt <= Date.now() + 1000
-          ? await connect(credential.keyId)
-          : credential;
-      if (!key) return;
-      const signature = `${tenant}:${key.keyId}:${ip}`;
-      // Preserve the request identity even if an uncertain response is followed by reload.
-      // Temporary credentials and returned portraits remain in memory only.
-      const intent = queryIntent(sessionStorage, signature);
-      try {
-        const data = await publicRead("/service", key, {
-          method: "POST",
-          body: JSON.stringify({ ip }),
-          headers: { "Idempotency-Key": intent.key },
-          signal: AbortSignal.timeout(90000),
-        });
-        if (!live.current) return;
-        const item = data.data?.[0];
-        if (!item) throw Error("查询返回格式异常，请核对原请求。");
-        setResult({
-          ...item,
-          batchId: data.batchId,
-          intentName: intent.name,
-          historical: false,
-        });
-      } catch (e: any) {
-        throw Error(
-          `${e.message}。请求可能已执行；再次查询同一 IP 将使用原请求编号核对，不自动重试。${e.requestId ? `请求编号：${e.requestId}` : ""}`,
-        );
-      } finally {
-        if (live.current) {
-          try {
-            const [{ data }] = await Promise.all([
-              request(`/bff/v1/commerce/tenants/${tenant}`),
-              loadHistory(key),
-            ]);
-            if (live.current)
-              setSubscription(currentSubscription(data.subscriptions));
-          } catch {
-            /* Keep the actual query outcome. */
-          }
-        }
-      }
-    });
-  }
-  async function openHistory(item: any) {
-    await perform(async () => {
-      const key =
-        credential.expiresAt <= Date.now() + 1000
-          ? await connect(credential.keyId)
-          : credential;
-      if (!key) return;
-      const record = await publicRead(
-        `/history/${item.kind}/${item.recordId}`,
-        key,
-      );
-      if (!live.current) return;
-      const payload = record.payload;
-      setSearch((previous) => ({
-        ip: item.ip || "",
-        revision: previous.revision + 1,
-      }));
-      setResult(
-        Array.isArray(payload.data)
-          ? {
-              ...payload.data[item.index],
-              batchId: payload.batchId,
-              historical: true,
-            }
-          : {
-              ip: record.request.ip,
-              status: record.status,
-              response: payload,
-              historical: true,
-            },
-      );
-    });
-  }
-  const accessUnavailable =
-    !loading && (accessError || (active && credential && !ready));
   return (
     <div className="harbor-query-page" data-result={!!result}>
       <PublicIpSearch
         key={search.revision}
         initialIp={search.ip}
         showIntro={false}
-        validateInput={!!credential}
-        available={
-          !loading &&
-          !busy &&
-          !accessError &&
-          canUse &&
-          canRead &&
-          (active ? !credential || ready : !subscription)
-        }
+        validateInput
+        available={canQuery && !busy}
         busy={busy}
-        busyLabel={querying ? "正在查询…" : "请稍候…"}
-        actionLabel={
-          loading
-            ? "加载中"
-            : accessUnavailable
-              ? "暂不可用"
-              : !subscription
-                ? "去选购"
-                : active && !credential
-                  ? "启用查询"
-                  : "查询"
-        }
+        busyLabel="正在查询…"
         hint={
-          accessUnavailable ? (
-            <span className="harbor-access-issue" role="status">
-              查询服务暂不可用
-              <Button
-                variant="link"
-                size="sm"
-                disabled={busy || loading}
-                onClick={() => perform(load)}
-              >
-                重新连接
-              </Button>
-            </span>
-          ) : (
-            hint
-          )
+          canQuery
+            ? "与企业共享订阅次数；查看历史不消耗次数。"
+            : "当前角色仅可查看已授权的历史记录。"
         }
-        onQuery={query}
+        onQuery={(ip) => query(ip)}
       />
+      {hasPermission(session, tenant, "query.batch") && (
+        <div className="dp-batch-entry">
+          <Button
+            variant="ghost"
+            disabled={busy}
+            onClick={() => setBatch((v) => !v)}
+          >
+            {batch ? "收起批量查询" : "Excel 批量查询"}
+          </Button>
+        </div>
+      )}
+      {batch && (
+        <BatchQuery
+          tenant={tenant}
+          session={session}
+          csrf={csrf}
+          onComplete={() => {
+            setPage(1);
+            setVersion((v) => v + 1);
+          }}
+        />
+      )}
       <div className="harbor-query-workspace">
         {error && (
           <p role="alert" className="harbor-error">
@@ -323,30 +178,185 @@ export function IpQuery({
             ref={resultRef}
             tabIndex={-1}
             className="harbor-result-focus"
-            aria-label={`${result.ip || "IP"} 风险画像查询结果`}
+            aria-label="IP 风险画像查询结果"
           >
             <QueryResult
               result={result}
               busy={busy}
-              canQuery={!!active && ready}
-              onQueryAgain={() => {
-                sessionStorage.removeItem(result.intentName);
-                void query(result.ip);
+              canQuery={canQuery}
+              onQueryAgain={() => void query(result.ip, true)}
+              onReport={() => {
+                sessionStorage.setItem(
+                  "dataport:report-error",
+                  `IP：${result.ip}\n查询编号：${result.id || result.batchId || ""}\n问题描述：`,
+                );
+                go("support");
               }}
             />
           </div>
         )}
-        {credential && (
-          <QueryHistory
-            history={history}
-            loading={historyLoading}
-            error={historyError}
-            busy={busy}
-            more={!!cursor}
-            onRetry={() => perform(() => loadHistory(credential))}
-            onMore={() => perform(() => loadHistory(credential, cursor!))}
-            onOpen={openHistory}
-          />
+        {canRead && (
+          <Card className="harbor-history">
+            <CardHeader className="harbor-history-heading">
+              <CardTitle>
+                <h2>最近查询</h2>
+              </CardTitle>
+              <span>企业共享 · 回看不消耗次数</span>
+            </CardHeader>
+            <CardContent>
+              <div className="dp-toolbar">
+                <div className="dp-history-search">
+                  <Search size={17} />
+                  <Input
+                    aria-label="搜索查询历史"
+                    placeholder="搜索 IP 地址"
+                    value={q}
+                    onChange={(e) => {
+                      setQ(e.target.value);
+                      setPage(1);
+                    }}
+                  />
+                </div>
+                {canExport && (
+                  <Button
+                    variant="outline"
+                    disabled={exporting || !history?.total}
+                    onClick={async () => {
+                      setExporting(true);
+                      try {
+                        let items: any[] = [];
+                        for (let n = 1; ; n++) {
+                          const { data } = await request(
+                            enterpriseUrl(
+                              tenant,
+                              `history?page=${n}&pageSize=100&q=${encodeURIComponent(q)}&export=1`,
+                            ),
+                          );
+                          items.push(...data.items);
+                          if (items.length >= data.total) break;
+                        }
+                        await downloadExcel(
+                          "数港查询历史",
+                          [
+                            "IP",
+                            "风险等级",
+                            "查询时间",
+                            "状态",
+                            "风险参考建议",
+                          ],
+                          items.map((i) => [
+                            i.ip,
+                            i.payload?.response?.data?.data?.risk_level ||
+                              "未提供",
+                            dateTime(i.createdAt),
+                            i.payload ? portraitState(i.payload) : "待确认",
+                            riskAdvice(
+                              i.payload?.response?.data?.data?.risk_level,
+                            ),
+                          ]),
+                        );
+                      } catch (e) {
+                        setHistoryError((e as Error).message);
+                      } finally {
+                        setExporting(false);
+                      }
+                    }}
+                  >
+                    <Download size={16} />
+                    导出
+                  </Button>
+                )}
+              </div>
+              {historyError ? (
+                <div className="harbor-empty" role="alert">
+                  {historyError}
+                  <Button
+                    variant="link"
+                    onClick={() => setVersion((v) => v + 1)}
+                  >
+                    重新加载
+                  </Button>
+                </div>
+              ) : !history ? (
+                <p className="harbor-empty">正在读取查询记录…</p>
+              ) : history.items.length ? (
+                <>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>IP 地址</TableHead>
+                        <TableHead>风险等级</TableHead>
+                        <TableHead>查询状态</TableHead>
+                        <TableHead>查询时间</TableHead>
+                        <TableHead />
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {history.items.map((i: any) => (
+                        <TableRow key={i.id}>
+                          <TableCell>
+                            <code>{i.ip}</code>
+                          </TableCell>
+                          <TableCell>
+                            <RiskLevel
+                              level={
+                                i.payload?.response?.data?.data?.risk_level
+                              }
+                            />
+                          </TableCell>
+                          <TableCell>
+                            {!i.payload
+                              ? "结果待确认"
+                              : (
+                                  {
+                                    success: "查询成功",
+                                    partial: "部分数据",
+                                    no_data: "暂无数据",
+                                    unknown: "结果待确认",
+                                    error: "查询失败",
+                                  } as Record<string, string>
+                                )[portraitState(i.payload)]}
+                          </TableCell>
+                          <TableCell>{dateTime(i.createdAt)}</TableCell>
+                          <TableCell>
+                            <Button
+                              variant="link"
+                              disabled={!i.payload || busy}
+                              onClick={() => {
+                                setResult({
+                                  ...i.payload,
+                                  id: i.id,
+                                  historical: true,
+                                });
+                                setSearch((s) => ({
+                                  ip: i.ip,
+                                  revision: s.revision + 1,
+                                }));
+                              }}
+                            >
+                              查看 →
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                  <p className="harbor-hint">共 {history.total} 条查询记录</p>
+                  <Pagination
+                    label="查询历史"
+                    {...history}
+                    onChange={setPage}
+                  />
+                </>
+              ) : (
+                <div className="harbor-history-empty">
+                  <Clock3 />
+                  <h3>{q ? "没有匹配的查询记录" : "尚无查询记录"}</h3>
+                  <p>完成查询后，可在这里回看画像。</p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
         )}
       </div>
     </div>

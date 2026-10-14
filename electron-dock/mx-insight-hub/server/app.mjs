@@ -1,5 +1,8 @@
 import { workspaceRoute } from './portal/workspace.mjs'
 import {portalPrincipal, harborRoute} from './portal/harbor.mjs'
+import { DataportStore } from './portal/dataport-store.mjs'
+import { PaymentError } from '@qpjoy/mx-pay'
+import { dataportRoute, dataportRouteAllowed, authorizeLegacyPortal } from './portal/dataport-routes.mjs'
 import { IpRiskProduct } from './external-platforms/ip-risk-product.mjs'
 import { CommerceService } from './commerce/service.mjs'
 import { commerceRoute } from './commerce/routes.mjs'
@@ -840,6 +843,7 @@ export function createApp({
   })
 
   const commerce = new CommerceService(store, recharge)
+  const dataport = new DataportStore(store.pool)
   ipRiskProduct ??= ipRiskChannels ? new IpRiskProduct(ipRiskChannels,commerce) : null
   if (recharge) recharge.commerce = commerce
   const payments = new PaymentService(store)
@@ -1407,8 +1411,29 @@ export function createApp({
           sendJson(response,200,{data:await commerce.publicCatalog(),requestId},{'cache-control':'private, no-store'})
           return
         }
-        const target = harborRoute(request.method, url.pathname.slice('/internal/v1/portal'.length), url.searchParams)
-        request[portalPrincipal] = await harborPortal.resolve(request)
+        const portalPath=url.pathname.slice('/internal/v1/portal'.length)
+        const dedicated=dataportRouteAllowed(request.method,portalPath)
+        const target=dedicated?null:harborRoute(request.method,portalPath,url.searchParams)
+        let customer=await harborPortal.resolve(request)
+        const customerDataport=Object.create(dataport)
+        customerDataport.requestId=requestId
+        if(store.pool)customer=await customerDataport.enrich(customer,request.headers['x-mx-dataport-session'])
+        if(dedicated) {
+          try {await dataportRoute({request,response,path:portalPath,searchParams:url.searchParams,principal:customer,dataport:customerDataport,store,commerce,service,product:ipRiskProduct,readJson,sendJson,requestId,audience:customer.portalAudience||launcherAudience})}
+          catch(error) {
+            const tenant=/^\/enterprises\/([0-9a-f-]{36})\//.exec(portalPath)?.[1]
+            if(request.method==='POST'&&tenant&&customer.memberships.some(m=>m.tenantId===tenant))await customerDataport.event(tenant,customer.memberId,'operation.failed',portalPath,error.status||500).catch(()=>{})
+            if(error instanceof PaymentError)throw new AppError(error.status,error.code,error.message)
+            throw error
+          }
+          return
+        }
+        if(portalPath==='/session') {
+          const memberships=customer.memberships.map(m=>m.dataport?.ownerChallengeRequired?{...m,capabilities:[],dataport:{...m.dataport,permissions:[]}}:m)
+          sendJson(response,200,{data:{kind:customer.kind,memberId:customer.memberId,displayName:customer.displayName,platformAdmin:false,scoped:true,tenantIds:customer.tenantIds,capabilities:[],memberships,identityProvider:'mx-launcher',tenantInvitationsEnabled:false,canOpenPersonalAccount:false,publicApiBaseUrl:customer.portalOrigin},requestId},{'cache-control':'private, no-store'})
+          return
+        }
+        request[portalPrincipal]=authorizeLegacyPortal(customer,request.method,portalPath,url.searchParams)
         url.pathname = target
       }
       const { pathname, searchParams } = url
@@ -1578,6 +1603,13 @@ export function createApp({
       let principal = null
       if (isAdminPath) {
         principal = await resolvePrincipal(request)
+      }
+      if(request.method==='POST'&&pathname==='/internal/v1/admin/dataport/owner-code') {
+        if(principal?.kind!=='admin-token')throw new AppError(403,'admin_token_required','此操作仅允许平台管理员执行。')
+        const body=await readJson(request,2048)
+        const operationStore=Object.create(dataport);operationStore.requestId=requestId
+        sendJson(response,200,{data:await operationStore.configureOwnerCode(body.tenantId,body.memberId,body.code,'admin-token'),requestId},{'cache-control':'private, no-store'})
+        return
       }
 
       if (await peripheralRoute({ service: peripherals, request, response, pathname, searchParams, principal, requestId })) return

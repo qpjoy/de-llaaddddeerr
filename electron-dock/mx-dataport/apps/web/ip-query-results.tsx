@@ -1,6 +1,8 @@
 import { IpLocationMap } from "./ip-location-map";
 import { ipLocation } from "./ip-location";
-import { ArrowRight, Clock3, ShieldCheck } from "lucide-react";
+import { useState } from "react";
+import { ArrowRight, Clock3, Copy, Check, Sparkles } from "lucide-react";
+import { riskAdvice, riskBand } from "./risk-advice";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import {
@@ -23,9 +25,13 @@ const states: Record<string, string> = {
 const valueText = (value: unknown) =>
   value == null || value === "" ? "未提供" : String(value);
 
-function RiskLevel({ level }: { level: unknown }) {
+export function RiskLevel({ level }: { level: unknown }) {
   return (
-    <span className="harbor-risk-level" data-level={String(level || "")}>
+    <span
+      className="harbor-risk-level"
+      data-level={String(level || "")}
+      data-band={riskBand(level)}
+    >
       {valueText(level)}
     </span>
   );
@@ -36,12 +42,16 @@ export function QueryResult({
   busy,
   canQuery,
   onQueryAgain,
+  onReport,
 }: {
   result: any;
   busy: boolean;
   canQuery: boolean;
   onQueryAgain: () => void;
+  onReport?: () => void;
 }) {
+  const [copied, setCopied] = useState(false),
+    [copyError, setCopyError] = useState("");
   const profile = result.response?.data?.data,
     state = portraitState(result);
   const location = ipLocation(profile);
@@ -60,13 +70,35 @@ export function QueryResult({
       <CardHeader className="harbor-report-heading">
         <div>
           <h2>{result.ip || "查询结果"}</h2>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="复制 IP 地址"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(result.ip);
+                setCopied(true);
+                setCopyError("");
+              } catch {
+                setCopyError("复制失败，请手动复制 IP 地址。");
+              }
+            }}
+          >
+            {copied ? <Check /> : <Copy />}
+          </Button>
+          <RiskLevel level={profile?.risk_level} />
           <span className="harbor-result-state" data-state={state}>
             {result.historical ? "历史画像" : states[state]}
           </span>
         </div>
-        <time>{dateTime(result.response?.meta?.capturedAt)}</time>
+        {onReport && (
+          <Button variant="link" onClick={onReport}>
+            信息报错
+          </Button>
+        )}
       </CardHeader>
       <CardContent>
+        {copyError && <p role="status">{copyError}</p>}
         {issue ? (
           <div className="harbor-result-message" role="status">
             <h3>{states[state]}</h3>
@@ -80,10 +112,24 @@ export function QueryResult({
           <>
             <div className="harbor-profile-overview">
               <div className="harbor-profile-summary">
-                <div className="harbor-risk-summary" data-level={String(profile.risk_level || "")}>
-                  <ShieldCheck aria-hidden="true" />
-                  <span>风险等级</span>
-                  <RiskLevel level={profile.risk_level} />
+                <div
+                  className="harbor-risk-summary"
+                  data-level={String(profile.risk_level || "")}
+                  data-band={riskBand(profile.risk_level)}
+                >
+                  <div
+                    className="dp-risk-ring"
+                    role="img"
+                    aria-label={`风险等级 ${valueText(profile.risk_level)}`}
+                  >
+                    <svg viewBox="0 0 120 120" aria-hidden="true">
+                      <circle cx="60" cy="60" r="51" />
+                    </svg>
+                    <div>
+                      <strong>{valueText(profile.risk_level)}</strong>
+                      <span>风险等级</span>
+                    </div>
+                  </div>
                   {profile.risk_score != null && (
                     <small>风险评分 {profile.risk_score}</small>
                   )}
@@ -92,26 +138,35 @@ export function QueryResult({
                   {[
                     [
                       "归属地",
-                      [profile.country, profile.province, profile.city, profile.district]
+                      [
+                        profile.country,
+                        profile.province,
+                        profile.city,
+                        profile.district,
+                      ]
                         .filter(Boolean)
                         .join(" · "),
                     ],
                     ["运营商", profile.isp],
                     ["应用场景", profile.scene],
-                    ["代理类型", profile.proxy_type],
+                    ["归属机构", profile.organization],
+                    [
+                      "经纬度",
+                      location ? `${location.lng}, ${location.lat}` : null,
+                    ],
+                    ["更新时间", profile.data_date],
                   ].map(([label, value]) => (
                     <div key={label}>
                       <dt>{label}</dt>
                       <dd>{valueText(value)}</dd>
                     </div>
                   ))}
-                  {location && <div className="harbor-profile-coordinates">
-                    <dt>经纬度</dt>
-                    <dd>{location.lng}, {location.lat}</dd>
-                  </div>}
                 </dl>
               </div>
-              <IpLocationMap key={`${result.ip}:${result.response?.meta?.capturedAt}`} profile={profile} />
+              <IpLocationMap
+                key={`${result.ip}:${result.response?.meta?.capturedAt}`}
+                profile={profile}
+              />
             </div>
             <section className="harbor-tag-section" aria-label="风险标签">
               <h3>风险标签</h3>
@@ -122,7 +177,19 @@ export function QueryResult({
                       <h4>{category}</h4>
                       <div className="harbor-risk-tags">
                         {values.map((tag, index) => (
-                          <span key={index}>
+                          <span
+                            key={index}
+                            data-neutral={[
+                              "网络属性",
+                              "基础属性",
+                              "IP 基础属性",
+                              "IP基础属性",
+                              "IP网络属性",
+                              "归属信息",
+                              "network",
+                              "infrastructure",
+                            ].includes(category)}
+                          >
                             {tag.name || tag.code || "未命名标签"}
                           </span>
                         ))}
@@ -138,6 +205,17 @@ export function QueryResult({
                   ，不代表无风险。
                 </p>
               )}
+            </section>
+            <section className="dp-risk-advice">
+              <h3>
+                <Sparkles size={19} />
+                风险参考建议
+              </h3>
+              <p>{riskAdvice(profile.risk_level)}</p>
+              <small>
+                当前建议依据风险等级规则生成，AI
+                模型尚未接入。仅供业务风控参考。
+              </small>
             </section>
           </>
         ) : (
@@ -276,7 +354,12 @@ export function QueryHistory({
             </div>
           )
         )}
-        {!!history.length && <p className="harbor-hint" aria-live="polite">已显示 {history.length} 条{more ? "，可继续加载更早记录。" : "，已显示全部记录。"}</p>}
+        {!!history.length && (
+          <p className="harbor-hint" aria-live="polite">
+            已显示 {history.length} 条
+            {more ? "，可继续加载更早记录。" : "，已显示全部记录。"}
+          </p>
+        )}
         {more && (
           <div className="harbor-history-more">
             <Button variant="ghost" disabled={busy || loading} onClick={onMore}>

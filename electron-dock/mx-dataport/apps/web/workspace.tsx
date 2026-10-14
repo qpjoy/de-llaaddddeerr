@@ -1,3 +1,4 @@
+import { hasPermission, enterpriseUrl } from "./permissions";
 import { useEffect, useState } from "react";
 import { Activity, CheckCircle2, Clock3, RefreshCw, ShieldCheck, Users, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -26,12 +27,12 @@ export function UsageOverview({ tenant, session, go }: { tenant: string; session
   const [subscriptions, setSubscriptions] = useState<Subscription[] | null>(null), [subscriptionError, setSubscriptionError] = useState("");
   const [subscriptionCount, setSubscriptionCount] = useState(0);
   const meters = useLocalPage<[string, any]>(Object.entries(data?.meters || {}), 10);
-  const canRead = hasCapability(session, tenant, "usage.read"), canBill = hasCapability(session, tenant, "billing.read");
+  const canRead = hasPermission(session,tenant,"usage.read"), canBill = hasPermission(session,tenant,"subscriptions.read");
   useEffect(() => {
     let active = true; setData(null); setError(""); setSubscriptions(null); setSubscriptionError(""); setSubscriptionCount(0);
     if (!tenant || !canRead) return;
     request(`/bff/v1/me/usage?tenantId=${encodeURIComponent(tenant)}&days=${days}`).then(({ data }) => { if (active) setData(data); }).catch(e => { if (active) setError(e.message); });
-    if (canBill) request(`/bff/v1/commerce/tenants/${tenant}?pageSize=20`).then(({ data }) => { if (active) { setSubscriptions(data.subscriptions); setSubscriptionCount(data.summary?.activeSubscriptionCount ?? data.subscriptions.filter((s: Subscription) => Date.parse(s.startsAt) <= Date.now() && Date.parse(s.endsAt) > Date.now()).length); } }).catch(e => { if (active) setSubscriptionError(e.message); });
+    if (canBill) request(enterpriseUrl(tenant,"subscriptions?pageSize=20")).then(({ data }) => { if (active) { setSubscriptions(data.subscriptions); setSubscriptionCount(data.summary?.activeSubscriptionCount ?? data.subscriptions.filter((s: Subscription) => Date.parse(s.startsAt) <= Date.now() && Date.parse(s.endsAt) > Date.now()).length); } }).catch(e => { if (active) setSubscriptionError(e.message); });
     return () => { active = false; };
   }, [tenant, canRead, canBill, days, version]);
   const daily = data ? Array.from({ length: data.days }, (_, i) => {
@@ -59,7 +60,7 @@ export function UsageOverview({ tenant, session, go }: { tenant: string; session
         </div></div><p className="harbor-hint">调用请求数与订阅消耗次数分别统计；历史回看不发起新查询。</p>
       </CardContent></Card>
       <div className="harbor-dashboard-grid"><Card><CardHeader><CardTitle>本期订阅</CardTitle><CardDescription>展示最多 3 份生效订阅，完整记录见「我的订阅」。网页与 API 共用次数。</CardDescription></CardHeader><CardContent>
-        {!canBill ? <p className="harbor-hint">当前角色没有账单查看权限。</p> : subscriptionError ? <p role="alert">{subscriptionError}</p> : !subscriptions ? <p>正在读取订阅…</p> : current?.length ? current.slice(0, 3).map(s => <div key={s.id} className="harbor-quota"><strong>IP 风险画像{ s.channel === "product" ? " · 空间共享" : " · 原调用者订阅" }</strong><p><b>{n(s.used)}</b> / {n(s.quota)} 次已用</p><progress aria-label="订阅额度占用" max={s.quota} value={s.used + s.held} /><p>可用 {n(Math.max(0, s.quota - s.used - s.held))} 次 · 待确认 {n(s.held)} 次</p><p>{dateTime(s.endsAt)} 到期</p></div>) : <p className="harbor-hint">{subscriptionCount ? `当前有 ${subscriptionCount} 份生效订阅，请查看完整列表。` : "当前没有生效中的订阅。"}{subscriptions.some(s => new Date(s.startsAt) > new Date()) ? "已有订阅等待生效。" : ""}</p>}
+        {!canBill ? <p className="harbor-hint">当前角色没有订阅查看权限。</p> : subscriptionError ? <p role="alert">{subscriptionError}</p> : !subscriptions ? <p>正在读取订阅…</p> : current?.length ? current.slice(0, 3).map(s => <div key={s.id} className="harbor-quota"><strong>IP 风险画像{ s.channel === "product" ? " · 空间共享" : " · 原调用者订阅" }</strong><p><b>{n(s.used)}</b> / {n(s.quota)} 次已用</p><progress aria-label="订阅额度占用" max={s.quota} value={s.used + s.held} /><p>可用 {n(Math.max(0, s.quota - s.used - s.held))} 次 · 待确认 {n(s.held)} 次</p><p>{dateTime(s.endsAt)} 到期</p></div>) : <p className="harbor-hint">{subscriptionCount ? `当前有 ${subscriptionCount} 份生效订阅，请查看完整列表。` : "当前没有生效中的订阅。"}{subscriptions.some(s => new Date(s.startsAt) > new Date()) ? "已有订阅等待生效。" : ""}</p>}
         <Button variant="link" onClick={() => go("services")}>查看我的订阅 →</Button>
       </CardContent></Card><Card><CardHeader><CardTitle>服务用量</CardTitle><CardDescription>当前时间范围内的各项调用。</CardDescription></CardHeader><CardContent>
         <Table><TableHeader><TableRow><TableHead>数据服务</TableHead><TableHead>调用</TableHead><TableHead>已完成</TableHead></TableRow></TableHeader><TableBody>{meters.items.map(([key, entry]: any) => <TableRow key={key}><TableCell>{meterName(key)}</TableCell><TableCell>{n(entry.requests)}</TableCell><TableCell>{n(entry.committed)}</TableCell></TableRow>)}</TableBody></Table>

@@ -16,11 +16,11 @@ test('Portal allowlist rejects administrative, supplier and document bypass path
  assert.throws(()=>harborRoute('GET','/documentation',new URLSearchParams('path=/docs/procurement')),{status:404})
  assert.equal(harborRoute('GET','/documentation',new URLSearchParams('path=/docs/openapi.json&tenantId='+randomUUID())),'/internal/v1/admin/documentation')
 })
-test('Portal purchase and access writes are narrow and retain tenant authorization',async t=>{
+test('retired browser Key and purchase routes cannot bypass the enterprise API',async t=>{
  const tenant=randomUUID(),other=randomUUID()
  for(const path of [`/commerce/tenants/${tenant}/orders`,`/commerce/tenants/${tenant}/access`,`/commerce/tenants/${tenant}/subscription-selection`,`/commerce/tenants/${tenant}/orders/${randomUUID()}/checkout`,`/commerce/tenants/${tenant}/orders/${randomUUID()}/refresh`,'/demo-credentials','/payments/personal-account']) {
-  assert.equal(harborRoute('POST',path,new URLSearchParams()),`/internal/v1/admin${path}`)
-  assert.throws(()=>harborRoute('POST',path,new URLSearchParams('admin=1')),{status:400})
+  assert.throws(()=>harborRoute('POST',path,new URLSearchParams()),{status:404})
+  assert.throws(()=>harborRoute('POST',path,new URLSearchParams('admin=1')),{status:404})
  }
  for(const path of [`/commerce/tenants/${tenant}/acceptance-orders`,'/commerce/delivery','/commerce/products/annual','/payments/integration/live/activate','/admin-execution-credential'])assert.throws(()=>harborRoute('POST',path,new URLSearchParams()),{status:404})
  const store=new MemoryStore(),service=new HubService({store,adapter:{},apiKeyPepper:'fixture-long-pepper-for-harbor'})
@@ -28,11 +28,11 @@ test('Portal purchase and access writes are narrow and retain tenant authorizati
  const portal={resolve:async()=>{resolutions++;return {kind:'launcher-user',memberId:randomUUID(),platformAdmin:false,tenantIds:[tenant],memberships:[{tenantId:tenant,status:'active',capabilities:caps}],capabilities:caps}}}
  const server=createServer(createApp({store,service,adapter:{},listenerMode:'admin',harborPortal:portal}));await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.close(r);server.closeAllConnections()}));const base=`http://127.0.0.1:${server.address().port}`
  const post=path=>fetch(`${base}/internal/v1/portal${path}`,{method:'POST',headers:{'content-type':'application/json'},body:'{}'})
- for(const path of [`/commerce/tenants/${tenant}/orders`,`/commerce/tenants/${tenant}/access`,'/demo-credentials'])assert.equal((await post(path)).status,403)
+ for(const path of [`/commerce/tenants/${tenant}/orders`,`/commerce/tenants/${tenant}/access`,'/demo-credentials'])assert.equal((await post(path)).status,404)
  caps=['billing.read','recharge.create','apikey.write']
- for(const path of [`/commerce/tenants/${other}/orders`,`/commerce/tenants/${other}/access`,`/commerce/tenants/${other}/orders/${randomUUID()}/checkout`])assert.equal((await post(path)).status,403)
- assert.equal((await post(`/commerce/tenants/${tenant}/access`)).status,503,'authorized access still needs persisted paid subscription; no in-memory free grant')
- assert.equal(resolutions,7)
+ for(const path of [`/commerce/tenants/${other}/orders`,`/commerce/tenants/${other}/access`,`/commerce/tenants/${other}/orders/${randomUUID()}/checkout`])assert.equal((await post(path)).status,404)
+ assert.equal((await post(`/commerce/tenants/${tenant}/access`)).status,404,'browser cannot obtain a delegated API credential')
+ assert.equal(resolutions,0)
 })
 test('Public listener never opens portal; admin listener uses only verified customer scope',async t=>{
  const store=new MemoryStore(),service=new HubService({store,adapter:{},apiKeyPepper:'fixture-long-pepper-for-harbor'})
@@ -46,7 +46,7 @@ test('Public listener never opens portal; admin listener uses only verified cust
  }assert.equal(resolutions,1)
 })
 
-test('customer messages require current tenant billing access and never expose supplier notifications',async t=>{
+test('customer messages require current tenant membership and never expose supplier notifications',async t=>{
  const tenant=randomUUID(),other=randomUUID(),member=randomUUID()
  const store=new MemoryStore(),service=new HubService({store,adapter:{},apiKeyPepper:'fixture-long-pepper-for-harbor'})
  let capabilities=['billing.read']
@@ -61,8 +61,8 @@ test('customer messages require current tenant billing access and never expose s
  assert.equal((await read('/notifications')).status,404)
  assert.equal((await read(`/commerce/tenants/${tenant}/messages?status=all&status=unread`)).status,400)
  capabilities=[]
- assert.equal((await read(`/commerce/tenants/${tenant}/messages`)).status,403)
- assert.equal((await mark(`/commerce/tenants/${tenant}/messages/1/read`)).status,403)
+ assert.equal((await read(`/commerce/tenants/${tenant}/messages`)).status,503,'personal messages no longer depend on billing authority')
+ assert.equal((await mark(`/commerce/tenants/${tenant}/messages/1/read`)).status,503)
 })
 const connectionString=process.env.MX_SSO_TEST_DATABASE_URL
 test('Shared identity binding reuses Hub member and tenant, preserves platform admin and serializes simultaneous onboarding',{skip:!connectionString},async t=>{

@@ -1,11 +1,7 @@
 /* One design scale for public pages, the workspace and portalled dialogs.
    Design lengths use rem (16px baseline); viewport breakpoints and hairlines
    stay in px. Keep mobile controls at their original, touch-friendly size. */
-@media (min-width: 768px) {
-  :root {
-    font-size: 80%;
-  }
-}
+:root { font-size: 100%; }
 
 .brand-symbol > svg,
 .auth-close > svg {

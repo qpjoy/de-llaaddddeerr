@@ -1,5 +1,5 @@
 import { PublicPricing } from "./public-pricing";
-import { UsageOverview, SpacePermissions } from "./workspace";
+import { UsageOverview } from "./workspace";
 import { Documentation } from "./documentation";
 import React, { useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -11,10 +11,7 @@ import {
   BookOpen,
   Wallet,
   Plug,
-  Users,
-  UserRound,
-  ShoppingBag,
-  Bell,
+  MessageCircle,
 } from "lucide-react";
 import {
   SidebarProvider,
@@ -35,17 +32,7 @@ import {
   CardHeader,
   CardTitle,
   CardDescription,
-  CardContent,
 } from "@/components/ui/card";
-import {
-  Table,
-  TableHeader,
-  TableRow,
-  TableHead,
-  TableBody,
-  TableCell,
-} from "@/components/ui/table";
-import { Input } from "@/components/ui/input";
 import { PublicHeader } from "./public-header";
 import { emptySession, loadHarborSession } from "./session";
 import { PublicIpSearch } from "./public-ip-search";
@@ -53,32 +40,42 @@ import { AccessContext } from "./public-access";
 import { AccountDialog } from "./account-dialog";
 import { SidebarAccountMenu } from "./sidebar-account-menu";
 import { request } from "./api";
+import {
+  EnterpriseMembers,
+  OwnerChallenge,
+  Support,
+  Audit,
+  JoinEnterprise,
+} from "./enterprise";
+import { ApiKeys } from "./keys";
+import { LegalDocument, LegalFooter, CookieNotice } from "./legal";
+import { canOpenPage, membershipFor } from "./permissions";
 import { AccountSecurity } from "./account-security";
 import { Commerce } from "./commerce";
 import { IpQuery } from "./ip-query";
-import { hasCapability, paymentReturnTrade } from "./commerce-state";
+import { paymentReturnTrade } from "./commerce-state";
 import { Messages, useMessageInbox } from "./messages";
-import { Pagination, useLocalPage } from "./pagination";
 import "@/styles/dataport.css";
 import "./design-scale.css";
 import "./dataport.css";
+import "./alignment.css";
 const pages = [
   ["intelligence", "新建查询", SquarePen],
   ["overview", "用量概览", ChartNoAxesCombined],
-  ["team", "空间权限", Users],
   ["keys", "API Keys", KeyRound],
-  ["market", "数据商城", ShoppingBag],
   ["services", "我的订阅", Plug],
-  ["orders", "支付订单", Wallet],
-  ["messages", "消息中心", Bell],
+  ["orders", "账单与发票", Wallet],
   ["docs-ip", "接口文档", BookOpen],
-  ["account", "账户安全", UserRound],
 ] as const;
 function Navigation({
   page,
   go,
   unread,
+  session,
+  tenant,
 }: {
+  session?: any;
+  tenant?: string;
   page: string;
   go: (page: string) => void;
   unread?: number;
@@ -87,16 +84,23 @@ function Navigation({
   return (
     <SidebarMenu>
       {pages
-        .filter(([id]) => id !== "account" && id !== "orders")
+        .filter(
+          ([id]) =>
+            session === undefined || canOpenPage(session, tenant || "", id),
+        )
         .map(([id, title, Icon]) => (
           <SidebarMenuItem
             key={id}
-            className={id === "market" ? "nav-divider" : ""}
+            className={id === "services" ? "nav-divider" : ""}
           >
             <SidebarMenuButton
               className="nav-button"
-              isActive={page === id}
-              aria-current={page === id ? "page" : undefined}
+              isActive={page === id || (id === "services" && page === "market")}
+              aria-current={
+                page === id || (id === "services" && page === "market")
+                  ? "page"
+                  : undefined
+              }
               onClick={() => {
                 go(id);
                 if (sidebar.isMobile) sidebar.setOpenMobile(false);
@@ -104,7 +108,6 @@ function Navigation({
             >
               <Icon size={18} />
               <span>{title}</span>
-              {id === "messages" && !!unread && <span className="harbor-unread" aria-label={`${unread} 条未读消息`}>{unread > 99 ? "99+" : unread}</span>}
             </SidebarMenuButton>
           </SidebarMenuItem>
         ))}
@@ -113,15 +116,32 @@ function Navigation({
 }
 function ConsoleBrand({ go }: { go: (page: string) => void }) {
   const sidebar = useSidebar();
-  return <a className="brand" href="/#/intelligence" onClick={event => {
-    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    event.preventDefault();
-    go("intelligence");
-    if (sidebar.isMobile) sidebar.setOpenMobile(false);
-  }}>
-    <span className="brand-symbol"><Layers3 size={24} /></span>
-    <strong>数港<span>DataPort</span></strong>
-  </a>;
+  return (
+    <a
+      className="brand"
+      href="/#/intelligence"
+      onClick={(event) => {
+        if (
+          event.button !== 0 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey
+        )
+          return;
+        event.preventDefault();
+        go("intelligence");
+        if (sidebar.isMobile) sidebar.setOpenMobile(false);
+      }}
+    >
+      <span className="brand-symbol">
+        <Layers3 size={24} />
+      </span>
+      <strong>
+        数港<span>DataPort</span>
+      </strong>
+    </a>
+  );
 }
 export function ConsoleShell({
   page,
@@ -130,7 +150,11 @@ export function ConsoleShell({
   children,
   onLogout,
   unread,
+  session,
+  tenant,
 }: {
+  session?: any;
+  tenant?: string;
   page: string;
   go: (page: string) => void;
   name: string;
@@ -149,12 +173,34 @@ export function ConsoleShell({
         </SidebarHeader>
         <SidebarContent>
           <SidebarGroup>
-            <Navigation page={page} go={go} unread={unread} />
+            <Navigation
+              page={page}
+              go={go}
+              unread={unread}
+              session={session}
+              tenant={tenant}
+            />
           </SidebarGroup>
         </SidebarContent>
         <SidebarFooter className="console-sidebar-footer">
+          {(session === undefined ||
+            canOpenPage(session, tenant || "", "support")) && (
+            <Button
+              variant="ghost"
+              className="support-card"
+              onClick={() => go("support")}
+            >
+              <MessageCircle size={20} />
+              <span>
+                联系客服<small>购买咨询与技术支持</small>
+              </span>
+            </Button>
+          )}
           <SidebarAccountMenu
             name={name}
+            session={session}
+            tenant={tenant}
+            unread={unread}
             page={page}
             navigate={go}
             onLogout={onLogout}
@@ -170,6 +216,7 @@ export function ConsoleShell({
             aria-label="展开导航"
           />
           {children}
+          <LegalFooter inConsole />
         </main>
       </div>
     </SidebarProvider>
@@ -194,34 +241,40 @@ function RemotePanel({
   tenant: string;
   messages: ReturnType<typeof useMessageInbox>;
 }) {
-  const [data, setData] = useState<any>(null),
-    [error, setError] = useState("");
-  const keys = useLocalPage<any>((Array.isArray(data) ? data : []).filter(key => key.tenantId === tenant), 20);
-  const endpoints: Record<string, string> = {
-    keys: "/api-keys",
-  };
-  useEffect(() => {
-    setData(null);
-    setError("");
-    if (!endpoints[page] || (!tenant && ["services", "orders"].includes(page)))
-      return;
-    let active = true;
-    request(`/bff/v1${endpoints[page]}`)
-      .then((v) => {
-        if (active) setData(v.data);
-      })
-      .catch((e) => {
-        if (active) setError(e.message);
-      });
-    return () => {
-      active = false;
-    };
-  }, [page, tenant]);
-  if (page === "overview") return <UsageOverview tenant={tenant} session={session} go={go} />;
-  if (page === "team") return <SpacePermissions tenant={tenant} session={session} />;
-  if (page === "docs-ip") return <Documentation tenant={tenant} session={session} />;
+  if (!canOpenPage(session, tenant, page))
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>无权访问此页面</CardTitle>
+          <CardDescription>
+            当前角色没有页面所需权限，请联系企业超管。
+          </CardDescription>
+        </CardHeader>
+      </Card>
+    );
+  if (page === "team")
+    return <EnterpriseMembers tenant={tenant} session={session} csrf={csrf} />;
+  if (page === "audit")
+    return <Audit tenant={tenant} session={session} csrf={csrf} />;
+  if (page === "support")
+    return <Support tenant={tenant} session={session} csrf={csrf} />;
+  if (page === "keys")
+    return <ApiKeys tenant={tenant} session={session} csrf={csrf} />;
+  if (page === "overview")
+    return <UsageOverview tenant={tenant} session={session} go={go} />;
+  if (page === "docs-ip")
+    return <Documentation tenant={tenant} session={session} />;
   if (page === "account") return <AccountSecurity />;
-  if (page === "messages") return <Messages tenant={tenant} csrf={csrf} enabled={hasCapability(session, tenant, "billing.read")} state={messages} go={go} />;
+  if (page === "messages")
+    return (
+      <Messages
+        tenant={tenant}
+        csrf={csrf}
+        enabled={true}
+        state={messages}
+        go={go}
+      />
+    );
   if (page === "intelligence")
     return (
       <IpQuery
@@ -243,48 +296,9 @@ function RemotePanel({
         reloadSession={reloadSession}
       />
     );
-  const title = pages.find((p) => p[0] === page)?.[1] || "服务";
-  return (
-    <>
-      <div className="page-heading">
-        <h1>{title}</h1>
-      </div>
-      {error ? (
-        <div className="harbor-empty" role="alert">
-          {error}
-        </div>
-      ) : !data ? (
-        <div className="harbor-empty">
-          {!tenant ? "当前账号尚无可用空间，请联系空间管理员。" : "正在读取…"}
-        </div>
-      ) : page === "keys" ? (
-        <Card className="harbor-table-panel">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>名称</TableHead>
-                <TableHead>标识</TableHead>
-                <TableHead>状态</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {keys.items.map((key: any) => (
-                <TableRow key={key.id}>
-                  <TableCell>{key.name}</TableCell>
-                  <TableCell>{key.prefix || key.id}</TableCell>
-                  <TableCell>{key.effectiveStatus || key.status}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-          <Pagination label="API Keys" {...keys.pagination} onChange={keys.setPage} />
-          {!data.some((key: any) => key.tenantId === tenant) && <p className="harbor-empty">尚无 API Key</p>}
-        </Card>
-      ) : null}
-
-    </>
-  );
+  return null;
 }
+
 function App() {
   const [queryIp, setQueryIp] = useState(
     sessionStorage.getItem("harbor:query-ip") || "",
@@ -298,12 +312,23 @@ function App() {
     [page, setPage] = useState(location.hash.slice(2) || "intelligence"),
     [bootError, setBootError] = useState("");
   const { active: signedIn, customer: session, csrf, issue } = boot;
-  const messages = useMessageInbox(tenant, signedIn === true && hasCapability(session, tenant, "billing.read"));
+  const messages = useMessageInbox(
+    tenant,
+    signedIn === true &&
+      !!tenant &&
+      !membershipFor(session, tenant)?.dataport?.ownerChallengeRequired,
+  );
   const go = (p: string) => {
     location.hash = `/${p}`;
     setPage(p);
   };
   useEffect(() => {
+    const joinToken = new URLSearchParams(location.search).get("token");
+    if (
+      location.pathname === "/join" &&
+      /^[A-Za-z0-9_-]{43}$/.test(joinToken || "")
+    )
+      sessionStorage.setItem("dataport:join-token", joinToken!);
     const listener = () => setPage(location.hash.slice(2) || "intelligence");
     addEventListener("hashchange", listener);
     if (new URLSearchParams(location.search).has("account")) setAuth(true);
@@ -337,9 +362,36 @@ function App() {
         if (!current) return;
         setBoot(value);
         if (value.customer) {
-          setTenant(previous => value.customer.tenantIds?.includes(previous) ? previous : value.customer.tenantIds?.[0] || "");
+          const joinToken = sessionStorage.getItem("dataport:join-token");
+          if (
+            joinToken &&
+            /^[A-Za-z0-9_-]{43}$/.test(joinToken) &&
+            location.pathname !== "/join"
+          )
+            history.replaceState(null, "", `/join?token=${joinToken}`);
+          setTenant((previous) =>
+            value.customer.tenantIds?.includes(previous)
+              ? previous
+              : value.customer.tenantIds?.[0] || "",
+          );
           const destination = sessionStorage.getItem("harbor:return");
-          if (pages.some((p) => p[0] === destination)) {
+          if (
+            destination &&
+            [
+              "intelligence",
+              "overview",
+              "keys",
+              "services",
+              "market",
+              "orders",
+              "docs-ip",
+              "support",
+              "team",
+              "audit",
+              "account",
+              "messages",
+            ].includes(destination)
+          ) {
             go(destination!);
             sessionStorage.removeItem("harbor:return");
           }
@@ -351,10 +403,17 @@ function App() {
           } catch {
             /* Ignore a damaged locator; never infer payment state. */
           }
-          sessionStorage.removeItem("harbor:payment-return");
-          if (
+          const validReturn =
             returned?.expires > Date.now() &&
-            /^MXP[0-9a-f]{32}$/i.test(returned.trade)
+            /^MXP[0-9a-f]{32}$/i.test(returned.trade || "");
+          if (!validReturn) sessionStorage.removeItem("harbor:payment-return");
+          if (
+            validReturn &&
+            value.customer.memberships?.some(
+              (m: any) =>
+                canOpenPage(value.customer, m.tenantId, "orders") ||
+                canOpenPage(value.customer, m.tenantId, "market"),
+            )
           ) {
             void request(
               `/bff/v1/payments/return-order?trade=${encodeURIComponent(returned.trade)}`,
@@ -365,14 +424,26 @@ function App() {
                   throw Error(
                     "该返回记录不是数据订阅订单，请到原购买应用查看。",
                   );
+                sessionStorage.removeItem("harbor:payment-return");
                 setTenant(data.tenantId);
-                go("orders");
+                go(
+                  canOpenPage(value.customer, data.tenantId, "orders")
+                    ? "orders"
+                    : "services",
+                );
               })
               .catch((error) => {
                 if (current) setBootError(error.message);
               });
           }
-        } else setTenant("");
+        } else {
+          setTenant("");
+          if (
+            value.active === false &&
+            sessionStorage.getItem("dataport:join-token")
+          )
+            setAuth(true);
+        }
       })
       .finally(() => {
         if (current) setChecking(false);
@@ -382,6 +453,25 @@ function App() {
     };
   }, [retry]);
   const retrySession = () => setRetry((value) => value + 1);
+  useEffect(() => {
+    if (!signedIn) return;
+    let live = true;
+    const refresh = () => {
+      if (document.hidden) return;
+      void loadHarborSession(request).then((value) => {
+        if (live) setBoot(value);
+      });
+    };
+    addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    const timer = setInterval(refresh, 30000);
+    return () => {
+      live = false;
+      clearInterval(timer);
+      removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [signedIn]);
   const access = {
     signedIn: signedIn === true,
     enter: (dest: string, ip?: string) => {
@@ -415,9 +505,7 @@ function App() {
       </h2>
       <p>{issue.message}</p>
       {signedIn && (
-        <p>
-          无需重新注册或再次兑换邀请码。服务恢复后，点击重试即可读取空间与权限。
-        </p>
+        <p>登录身份已确认。服务恢复后，点击重试即可读取企业与权限。</p>
       )}
       {(issue.code || issue.requestId) && (
         <p className="harbor-session-reference">
@@ -435,9 +523,13 @@ function App() {
   );
   return (
     <AccessContext.Provider value={access}>
-      {signedIn ? (
+      {["/privacy", "/terms", "/cookies"].includes(location.pathname) ? (
+        <LegalDocument kind={location.pathname.slice(1)} />
+      ) : signedIn ? (
         <ConsoleShell
           page={page}
+          session={session}
+          tenant={tenant}
           go={(destination) => {
             if (destination === "intelligence" && page === "intelligence") {
               setQueryIp("");
@@ -480,7 +572,25 @@ function App() {
           )}
           {bootError && <p role="alert">{bootError}</p>}
           {sessionNotice}
-          {session ? (
+          {location.pathname === "/join" && session ? (
+            <JoinEnterprise
+              token={new URLSearchParams(location.search).get("token") || ""}
+              csrf={csrf}
+              onJoined={(target) => {
+                sessionStorage.removeItem("dataport:join-token");
+                setTenant(target);
+                go("intelligence");
+                retrySession();
+              }}
+            />
+          ) : membershipFor(session, tenant)?.dataport
+              ?.ownerChallengeRequired ? (
+            <OwnerChallenge
+              tenant={tenant}
+              csrf={csrf}
+              onVerified={retrySession}
+            />
+          ) : session ? (
             <RemotePanel
               key={`${page}:${tenant}:${queryRevision}`}
               page={page}
@@ -498,7 +608,14 @@ function App() {
         </ConsoleShell>
       ) : signedIn === null ? (
         <main className="harbor-session-pending query-backdrop">
-          <div className="brand"><span className="brand-symbol"><Layers3 size={24} /></span><strong>数港<span>DataPort</span></strong></div>
+          <div className="brand">
+            <span className="brand-symbol">
+              <Layers3 size={24} />
+            </span>
+            <strong>
+              数港<span>DataPort</span>
+            </strong>
+          </div>
           {checking ? <p role="status">正在确认登录状态…</p> : sessionNotice}
         </main>
       ) : (
@@ -510,7 +627,9 @@ function App() {
             accountPending={checking || auth}
             accountLabel={
               checking || auth
-                ? auth ? "正在连接…" : "正在确认…"
+                ? auth
+                  ? "正在连接…"
+                  : "正在确认…"
                 : signedIn === null
                   ? "重试连接"
                   : undefined
@@ -529,8 +648,10 @@ function App() {
               <PublicIpSearch />
             )}
           </main>
+          <LegalFooter />
         </div>
       )}
+      <CookieNotice />
       <AccountDialog open={auth} onOpenChange={setAuth} />
     </AccessContext.Provider>
   );

@@ -90,13 +90,13 @@ export function createAppAccount(provider: Provider, settings: IdentitySettings,
           let enterprise = false, invitationError = '';
           if (invitationHandle) { try { enterprise = Boolean(await enterpriseProof()); } catch { invitationError = '邀请已失效，请返回原邀请链接重新开始。'; } }
           return json(200, { policy: policy.status === 'fulfilled' ? policy.value : null,
-            admissionRequired: app!.appId === 'mx-harbor', feishu: app!.appId !== 'mx-harbor' && feishu.status === 'fulfilled' && feishu.value?.enabled === true, pending: Boolean(proof), enterprise, invitationError, loginHint: flow!.loginHint ?? '' });
+            admissionRequired: false, feishu: app!.appId !== 'mx-harbor' && feishu.status === 'fulfilled' && feishu.value?.enabled === true, pending: Boolean(proof), enterprise, invitationError, loginHint: flow!.loginHint ?? '' });
         }
         if (!['login', 'register', 'feishu', 'feishu-link'].includes(action)) fail(400, '不支持的账号操作。');
         const completed = await state!.read('app-result', input.flow);
         if (completed) fail(409, '登录请求已提交，请重新开始。');
         const returnUrl = `${settings.origin}/identity/interaction/${uid}?app_complete=${input.flow}`;
-        if (app!.appId === 'mx-harbor' && (proof || action === 'feishu' || action === 'feishu-link')) fail(403, 'DataPort 仅支持账号密码登录与邀请码注册。');
+        if (app!.appId === 'mx-harbor' && (proof || action === 'feishu' || action === 'feishu-link')) fail(403, '数港请使用统一 MX 账号密码登录。');
         if (action === 'feishu' || action === 'feishu-link') {
           // Issuer browser visit sets the Feishu state cookie; the application cannot set it.
           if (!await state!.read('app-completion-lock', input.flow, true)) fail(409, '登录请求已提交。');
@@ -115,6 +115,7 @@ export function createAppAccount(provider: Provider, settings: IdentitySettings,
           if (expected?.userId !== input.expectedSubject) fail(409, '请使用原账号完成绑定。');
         }
         if (action === 'register') {
+          if (source.appId === 'mx-harbor') fail(403, '数港账号由管理员开户，请联系企业超管。');
           if (!registration || !accounts.allowRegistrationAttempt || !await accounts.allowRegistrationAttempt(ip, login)) fail(429, '暂时无法注册，请稍后重试。');
           const policy = await registration!.policy(source);
           if (policy.mode === 'closed') fail(403, '暂未开放注册，已有账号可以登录。');
@@ -135,8 +136,7 @@ export function createAppAccount(provider: Provider, settings: IdentitySettings,
           }
         }
         if (app!.appId === 'mx-harbor' && !canAccessIdentityApplication(await accounts.account(userId), app!.appId)) {
-          if (!registration?.redeemAdmission) fail(503, 'DataPort 邀请服务需要更新。');
-          await registration!.redeemAdmission!({userId, source, inviteCode: typeof input.inviteCode === 'string' ? input.inviteCode : ''});
+          fail(403, '此 MX 账号尚未开通数港，请联系平台管理员或企业超管。');
         }
         await allowed(userId, app!.appId);
         if (!await state!.read('app-completion-lock', input.flow, true)) fail(409, '登录请求已提交，请重新开始。');

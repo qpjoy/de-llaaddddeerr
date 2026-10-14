@@ -1,31 +1,37 @@
 import { readFile } from "node:fs/promises";
 import { resolve, extname, sep } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHmac } from "node:crypto";
 import { createApplicationSso } from "@qpjoy/mx-common/identity/sso";
 import { PostgresSsoStore } from "@qpjoy/mx-common/identity/postgres";
 import { SsoError, equal, readSsoJson } from "@qpjoy/mx-common/identity/http";
 const reads = new Set([
   "/session",
-  "/me/overview",
-  "/me/workspace",
   "/me/usage",
-  "/api-keys",
-  "/tenants",
-  "/consumers",
-  "/usage",
   "/documentation",
   "/commerce/products",
   "/payments/return-order",
 ]);
 export function permittedCustomerRoute(method, path) {
+  const enterprise = /^\/enterprises\/[0-9a-f-]{36}\/(.*)$/.exec(path);
+  if (enterprise)
+    return method === "GET"
+      ? /^(roles|members|tickets|audit|history|keys|subscriptions|billing|query-access)$/.test(
+          enterprise[1],
+        )
+      : method === "POST" &&
+          /^(challenge|roles|members|tickets|query|keys|subscription-selection|orders|members\/[0-9a-f-]{36}(?:\/initial-password)?|keys\/[0-9a-f-]{36}\/revoke|orders\/[0-9a-f-]{36}\/(?:checkout|refresh))$/.test(
+            enterprise[1],
+          );
+  if (/^\/joins\/[A-Za-z0-9_-]{43}$/.test(path))
+    return ["GET", "POST"].includes(method);
   return (
     (method === "GET" &&
-      (reads.has(path) || /^\/commerce\/tenants\/[0-9a-f-]{36}(?:\/messages)?$/.test(path))) ||
+      (reads.has(path) ||
+        /^\/commerce\/tenants\/[0-9a-f-]{36}\/messages$/.test(path))) ||
     (method === "POST" &&
-      (["/demo-credentials", "/payments/personal-account"].includes(path) ||
-        /^\/commerce\/tenants\/[0-9a-f-]{36}\/(?:messages\/[1-9][0-9]{0,17}\/read|subscription-selection|access|orders(?:\/[0-9a-f-]{36}\/(?:checkout|refresh))?)$/.test(
-          path,
-        )))
+      /^\/commerce\/tenants\/[0-9a-f-]{36}\/messages\/[1-9][0-9]{0,17}\/read$/.test(
+        path,
+      ))
   );
 }
 export function createHarborApp({
@@ -67,15 +73,36 @@ export function createHarborApp({
     };
     try {
       const url = new URL(req.url, "http://localhost");
-      if (req.method === "GET" && url.pathname === "/bff/v1/catalog" && !url.search) {
+      if (
+        req.method === "GET" &&
+        url.pathname === "/bff/v1/catalog" &&
+        !url.search
+      ) {
         const integration = resolveDependencies();
-        if (!integration.upstream || !integration.gatewayToken) throw new SsoError(503,"catalog_unavailable","套餐信息暂不可用，请稍后重试。");
-        const upstream = await fetcher(`${integration.upstream}/internal/v1/portal/catalog`, {
-          redirect: "error", signal: AbortSignal.timeout(15000),
-          headers: { "x-mx-harbor-gateway": integration.gatewayToken, "x-request-id": id },
-        });
-        if (!upstream.ok) throw new SsoError(503,"catalog_unavailable","套餐信息暂不可用，请稍后重试。");
-        return json(200,await upstream.json());
+        if (!integration.upstream || !integration.gatewayToken)
+          throw new SsoError(
+            503,
+            "catalog_unavailable",
+            "套餐信息暂不可用，请稍后重试。",
+          );
+        const upstream = await fetcher(
+          `${integration.upstream}/internal/v1/portal/catalog`,
+          {
+            redirect: "error",
+            signal: AbortSignal.timeout(15000),
+            headers: {
+              "x-mx-harbor-gateway": integration.gatewayToken,
+              "x-request-id": id,
+            },
+          },
+        );
+        if (!upstream.ok)
+          throw new SsoError(
+            503,
+            "catalog_unavailable",
+            "套餐信息暂不可用，请稍后重试。",
+          );
+        return json(200, await upstream.json());
       }
       if (url.pathname === "/health" && req.method === "GET")
         return json(200, {
@@ -133,7 +160,9 @@ export function createHarborApp({
               "invalid_content_type",
               "请使用 JSON 请求。",
             );
-          body = JSON.stringify(await readSsoJson(req, 8192));
+          body = JSON.stringify(
+            await readSsoJson(req, path.endsWith("/tickets") ? 32768 : 8192),
+          );
         }
         if (!integration.upstream || !integration.gatewayToken)
           throw new SsoError(
@@ -147,11 +176,19 @@ export function createHarborApp({
             method: req.method,
             body,
             redirect: "error",
-            signal: AbortSignal.timeout(15000),
+            signal: AbortSignal.timeout(
+              path.endsWith("/query") ? 120000 : 15000,
+            ),
             headers: {
               authorization: `Bearer ${session.accessToken}`,
               "x-mx-harbor-subject": session.subject,
               "x-mx-harbor-gateway": integration.gatewayToken,
+              "x-mx-dataport-session": createHmac(
+                "sha256",
+                integration.gatewayToken,
+              )
+                .update(`${session.subject}:${session.csrf}`)
+                .digest("hex"),
               "x-request-id": id,
               ...(body ? { "content-type": "application/json" } : {}),
               ...(req.headers["idempotency-key"]
@@ -210,7 +247,14 @@ export function createHarborApp({
         throw new SsoError(404, "not_found", "接口不存在。");
       const asset =
         url.pathname === "/" ||
-        ["/pricing", "/payment/return"].includes(url.pathname)
+        [
+          "/pricing",
+          "/payment/return",
+          "/privacy",
+          "/terms",
+          "/cookies",
+          "/join",
+        ].includes(url.pathname)
           ? "index.html"
           : decodeURIComponent(url.pathname).slice(1);
       const file = resolve(staticRoot, asset);

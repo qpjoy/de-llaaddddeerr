@@ -1,5 +1,13 @@
+import { hasPermission, enterpriseUrl } from "./permissions";
+import { downloadExcel } from "./download";
 import { Input } from "@/components/ui/input";
-import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from "@/components/ui/select";
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, Check, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -24,7 +32,6 @@ import { Pagination, useLocalPage, type PageInfo } from "./pagination";
 import {
   checkoutLocation,
   dateTime,
-  hasCapability,
   money,
   purchaseIntent,
   productTerm,
@@ -48,11 +55,11 @@ type Product = {
   activationMode?: string;
 };
 export function Commerce({
-  page,
+  page: routePage,
   tenant,
   session,
   csrf,
-  go,
+  go: navigate,
   reloadSession,
 }: {
   page: string;
@@ -62,6 +69,23 @@ export function Commerce({
   go: (page: string) => void;
   reloadSession: () => void;
 }) {
+  const [catalogOpen, setCatalogOpen] = useState(routePage === "market");
+  const page = routePage === "services" && catalogOpen ? "market" : routePage;
+  const go = (next: string) => {
+    if (next === "market") {
+      setCatalogOpen(true);
+      if (routePage !== "services" && routePage !== "market")
+        navigate("market");
+    } else if (next === "services") {
+      setCatalogOpen(false);
+      navigate("services");
+    } else navigate(next);
+  };
+  const [billQ, setBillQ] = useState(""),
+    [billStatus, setBillStatus] = useState(""),
+    [billFrom, setBillFrom] = useState(""),
+    [billTo, setBillTo] = useState(""),
+    [exporting, setExporting] = useState(false);
   const [catalog, setCatalog] = useState<{
     items: Product[];
     purchaseAvailable: boolean;
@@ -70,7 +94,13 @@ export function Commerce({
     orders: any[];
     subscriptions: Subscription[];
     pagination?: { orders: PageInfo; subscriptions: PageInfo };
-    summary?: { trialClaimed: boolean; currentCount: number; futureCount: number; latestEnd?: string; pendingSkus: string[] };
+    summary?: {
+      trialClaimed: boolean;
+      currentCount: number;
+      futureCount: number;
+      latestEnd?: string;
+      pendingSkus: string[];
+    };
   }>({ orders: [], subscriptions: [] });
   const [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
@@ -82,31 +112,57 @@ export function Commerce({
   const [orderDetail, setOrderDetail] = useState<string | null>(null);
   const [loadVersion, setLoadVersion] = useState(0),
     [loadFailed, setLoadFailed] = useState(false);
-  const [productSearch, setProductSearch] = useState(""), [productSort, setProductSort] = useState("price");
-  const products = (catalog?.items || []).filter(item => item.status === "published" && `${item.name} ${item.description}`.toLowerCase().includes(productSearch.toLowerCase())).sort((a,b) => productSort === "quota" ? b.quota - a.quota : a.amountMinor - b.amountMinor);
+  const [productSearch, setProductSearch] = useState(""),
+    [productSort, setProductSort] = useState("price");
+  const products = (catalog?.items || [])
+    .filter(
+      (item) =>
+        item.status === "published" &&
+        `${item.name} ${item.description}`
+          .toLowerCase()
+          .includes(productSearch.toLowerCase()),
+    )
+    .sort((a, b) =>
+      productSort === "quota"
+        ? b.quota - a.quota
+        : a.amountMinor - b.amountMinor,
+    );
   const market = useLocalPage(products, 12);
-  const [ordersPage, setOrdersPage] = useState(1), [subscriptionsPage, setSubscriptionsPage] = useState(1);
-  const listUrl = `/bff/v1/commerce/tenants/${tenant}?ordersPage=${ordersPage}&subscriptionsPage=${subscriptionsPage}&pageSize=${page === "services" ? 6 : 20}`;
+  const [ordersPage, setOrdersPage] = useState(1),
+    [subscriptionsPage, setSubscriptionsPage] = useState(1);
+  const listUrl = enterpriseUrl(
+    tenant,
+    page === "orders"
+      ? `billing?page=${ordersPage}&pageSize=20&q=${encodeURIComponent(billQ)}&status=${billStatus}&from=${billFrom}&to=${billTo}`
+      : `subscriptions?page=${subscriptionsPage}&pageSize=6`,
+  );
   const lock = useRef(false);
-  const canRead = hasCapability(session, tenant, "billing.read");
-  const canPay = hasCapability(session, tenant, "recharge.create");
-  const canBuy = canPay && hasCapability(session, tenant, "apikey.write");
+  const canRead = hasPermission(
+    session,
+    tenant,
+    page === "orders" ? "billing.read" : "subscriptions.read",
+  );
+  const canPay = hasPermission(session, tenant, "subscriptions.buy");
+  const canBuy = canPay;
   const notice = subscriptionNotice(purchases.subscriptions);
   const latestEnd = purchases.summary?.latestEnd ?? notice.latestEnd;
   const currentCount = purchases.summary?.currentCount ?? notice.current.length;
   const futureCount = purchases.summary?.futureCount ?? notice.future.length;
   const post = (path: string, body = {}, key?: string) =>
-    request(`/bff/v1${path}`, {
-      method: "POST",
-      headers: {
-        "x-mx-csrf": csrf,
-        ...(key ? { "Idempotency-Key": key } : {}),
+    request(
+      `/bff/v1${path.replace(`/commerce/tenants/${tenant}`, `/enterprises/${tenant}`)}`,
+      {
+        method: "POST",
+        headers: {
+          "x-mx-csrf": csrf,
+          ...(key ? { "Idempotency-Key": key } : {}),
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    });
+    );
   async function refresh() {
     const result = await request(listUrl);
-    setPurchases(result.data);
+    setPurchases({ orders: [], subscriptions: [], ...result.data });
   }
   useEffect(() => {
     let active = true;
@@ -115,14 +171,13 @@ export function Commerce({
     setError("");
     Promise.all([
       request("/bff/v1/commerce/products"),
-      canRead
-        ? request(listUrl)
-        : Promise.resolve(null),
+      canRead ? request(listUrl) : Promise.resolve(null),
     ])
       .then(([products, records]) => {
         if (active) {
           setCatalog(products.data);
-          if (records) setPurchases(records.data);
+          if (records)
+            setPurchases({ orders: [], subscriptions: [], ...records.data });
         }
       })
       .catch((e) => {
@@ -149,7 +204,8 @@ export function Commerce({
       running = true;
       try {
         const result = await request(listUrl);
-        if (active) setPurchases(result.data);
+        if (active)
+          setPurchases({ orders: [], subscriptions: [], ...result.data });
       } catch {
         /* Retain the last confirmed state; order actions report failures. */
       } finally {
@@ -184,14 +240,21 @@ export function Commerce({
         environment: "live",
         ...(upgradeFrom ? { upgradeFrom: upgradeFrom.id } : {}),
       };
-      const signature = JSON.stringify([tenant, body]);
+      const signature = JSON.stringify([
+        tenant,
+        body,
+        ...(hasPermission(session, tenant, "billing.read")
+          ? []
+          : [session.memberId]),
+      ]);
       const intent = purchaseIntent(sessionStorage, signature);
       await post(`/commerce/tenants/${tenant}/orders`, body, intent.key);
       sessionStorage.removeItem(intent.name);
       setSelected(null);
       await refresh();
       if (selected.kind === "trial") reloadSession();
-      go("orders");
+      if (hasPermission(session, tenant, "billing.read")) go("orders");
+      else go("services");
     });
   }
   async function action(order: any, action: "checkout" | "refresh") {
@@ -213,9 +276,9 @@ export function Commerce({
   }
   const heading =
     page === "market"
-      ? "数据商城"
+      ? "我的订阅"
       : page === "orders"
-        ? "支付订单"
+        ? "账单与发票"
         : "我的订阅";
   const detailOrder = purchases.orders.find(
     (order) => order.id === orderDetail,
@@ -229,7 +292,9 @@ export function Commerce({
         test_delivered: "测试订单",
       }) as Record<string, string>
     )[order.status] || "待确认";
-  const trialClaimed = purchases.summary?.trialClaimed ?? purchases.orders.some(order => order.product.kind === "trial");
+  const trialClaimed =
+    purchases.summary?.trialClaimed ??
+    purchases.orders.some((order) => order.product.kind === "trial");
   const paymentActions = (order: any) => (
     <div className="harbor-actions">
       {!order.deliveredAt && canPay && (
@@ -284,26 +349,139 @@ export function Commerce({
           </p>
         </div>
         <div className="harbor-actions">
-          <Button
-            variant={page === "market" ? "secondary" : "ghost"}
-            onClick={() => go("market")}
-          >
-            发现服务
-          </Button>
+          {canBuy && (
+            <Button
+              variant={page === "market" ? "secondary" : "ghost"}
+              onClick={() => go("market")}
+            >
+              选购套餐
+            </Button>
+          )}
           <Button
             variant={page === "services" ? "secondary" : "ghost"}
             onClick={() => go("services")}
           >
             我的订阅
           </Button>
-          <Button
-            variant={page === "orders" ? "secondary" : "ghost"}
-            onClick={() => go("orders")}
-          >
-            支付订单
-          </Button>
+          {hasPermission(session, tenant, "billing.read") && (
+            <Button
+              variant={page === "orders" ? "secondary" : "ghost"}
+              onClick={() => go("orders")}
+            >
+              账单与发票
+            </Button>
+          )}
         </div>
       </div>
+      {!hasPermission(session, tenant, "billing.read") &&
+        canBuy &&
+        purchases.orders.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>我的待处理购买</CardTitle>
+              <p>最近 20 笔由你创建的购买订单</p>
+            </CardHeader>
+            <CardContent>
+              {purchases.orders.map((order) => (
+                <div className="harbor-subscription-notice" key={order.id}>
+                  <strong>
+                    {order.product.name} · {money(order.product.amountMinor)}
+                  </strong>
+                  <p>
+                    {dateTime(order.createdAt)} · {orderStatus(order)}
+                  </p>
+                  {paymentActions(order)}
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+      {page === "orders" && (
+        <>
+          <div className="dp-toolbar">
+            <Input
+              aria-label="搜索账单"
+              placeholder="搜索订单号或产品"
+              value={billQ}
+              onChange={(e) => {
+                setBillQ(e.target.value);
+                setOrdersPage(1);
+              }}
+            />
+            <select
+              aria-label="支付状态"
+              value={billStatus}
+              onChange={(e) => {
+                setBillStatus(e.target.value);
+                setOrdersPage(1);
+              }}
+            >
+              <option value="">全部状态</option>
+              <option value="pending">待付款</option>
+              <option value="paid">已支付</option>
+              <option value="delivered">已开通</option>
+            </select>
+            <input
+              type="date"
+              aria-label="开始日期"
+              value={billFrom}
+              onChange={(e) => {
+                setBillFrom(e.target.value);
+                setOrdersPage(1);
+              }}
+            />
+            <input
+              type="date"
+              aria-label="结束日期"
+              value={billTo}
+              onChange={(e) => {
+                setBillTo(e.target.value);
+                setOrdersPage(1);
+              }}
+            />
+            {hasPermission(session, tenant, "billing.export") && (
+              <Button
+                variant="outline"
+                disabled={exporting}
+                onClick={async () => {
+                  setExporting(true);
+                  try {
+                    let rows: any[] = [];
+                    for (let n = 1; ; n++) {
+                      const { data } = await request(
+                        listUrl.replace(/page=\d+/, `page=${n}`) + "&export=1",
+                      );
+                      rows.push(...data.orders);
+                      if (rows.length >= data.pagination.orders.total) break;
+                    }
+                    await downloadExcel(
+                      "数港账单",
+                      ["订单号", "产品", "金额（元）", "创建时间", "支付状态"],
+                      rows.map((r) => [
+                        r.id,
+                        r.product.name,
+                        r.product.amountMinor / 100,
+                        dateTime(r.createdAt),
+                        r.paymentStatus,
+                      ]),
+                    );
+                  } catch (e) {
+                    setError((e as Error).message);
+                  } finally {
+                    setExporting(false);
+                  }
+                }}
+              >
+                导出账单
+              </Button>
+            )}
+            <Button variant="outline" disabled title="发票服务尚未接入">
+              申请发票（暂未开放）
+            </Button>
+          </div>
+          <p className="harbor-hint">发票服务尚未接入，暂不收集开票资料。</p>
+        </>
+      )}
       {error && (
         <div role="alert" className="harbor-error harbor-inline-issue">
           {error}
@@ -350,14 +528,52 @@ export function Commerce({
         <p role="status">正在读取服务…</p>
       ) : loadFailed ? null : page === "market" ? (
         <>
-          {latestEnd && <div className="harbor-subscription-notice" role="status">
-            <strong>{currentCount ? "你已在订阅期内" : "你已有待生效的订阅"}</strong>
-            <p>已购有效期至 {dateTime(latestEnd)}{futureCount ? `，其中 ${futureCount} 份续订待生效` : ""}。可以继续订阅，生效方式以所选套餐为准，各订阅独立计次。</p>
-            <Button variant="link" onClick={() => go("services")}>查看我的订阅 <ArrowRight /></Button>
-          </div>}
-          <div className="harbor-market-toolbar"><Input aria-label="搜索数据服务" placeholder="搜索数据服务或套餐" value={productSearch} onChange={e => { setProductSearch(e.target.value); market.setPage(1); }} /><Select value={productSort} onValueChange={value => { setProductSort(value); market.setPage(1); }}><SelectTrigger aria-label="商品排序"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="price">价格从低到高</SelectItem><SelectItem value="quota">调用次数从多到少</SelectItem></SelectContent></Select><span>{products.length} 款服务</span></div>
-          <div className={`harbor-market-products ${(catalog?.items.length || 0) > 1 ? "has-multiple" : ""}`}>
-          {market.items.map((item) => (
+          {latestEnd && (
+            <div className="harbor-subscription-notice" role="status">
+              <strong>
+                {currentCount ? "你已在订阅期内" : "你已有待生效的订阅"}
+              </strong>
+              <p>
+                已购有效期至 {dateTime(latestEnd)}
+                {futureCount ? `，其中 ${futureCount} 份续订待生效` : ""}
+                。可以继续订阅，生效方式以所选套餐为准，各订阅独立计次。
+              </p>
+              <Button variant="link" onClick={() => go("services")}>
+                查看我的订阅 <ArrowRight />
+              </Button>
+            </div>
+          )}
+          <div className="harbor-market-toolbar">
+            <Input
+              aria-label="搜索数据服务"
+              placeholder="搜索数据服务或套餐"
+              value={productSearch}
+              onChange={(e) => {
+                setProductSearch(e.target.value);
+                market.setPage(1);
+              }}
+            />
+            <Select
+              value={productSort}
+              onValueChange={(value) => {
+                setProductSort(value);
+                market.setPage(1);
+              }}
+            >
+              <SelectTrigger aria-label="商品排序">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="price">价格从低到高</SelectItem>
+                <SelectItem value="quota">调用次数从多到少</SelectItem>
+              </SelectContent>
+            </Select>
+            <span>{products.length} 款服务</span>
+          </div>
+          <div
+            className={`harbor-market-products ${(catalog?.items.length || 0) > 1 ? "has-multiple" : ""}`}
+          >
+            {market.items.map((item) => (
               <article className="harbor-offer" key={item.sku}>
                 <div className="harbor-offer-art" aria-hidden="true">
                   <ShieldCheck />
@@ -384,19 +600,43 @@ export function Commerce({
                     {money(item.amountMinor)}
                     <span>
                       {" "}
-                      / {item.kind === "trial" ? "次领取" : item.months === 12 ? "年" : `${item.months} 个月`}
+                      /{" "}
+                      {item.kind === "trial"
+                        ? "次领取"
+                        : item.months === 12
+                          ? "年"
+                          : `${item.months} 个月`}
                     </span>
                   </div>
                   <p>
-                    {item.quota.toLocaleString()} 次调用 · 有效期 {productTerm(item)}
+                    {item.quota.toLocaleString()} 次调用 · 有效期{" "}
+                    {productTerm(item)}
                   </p>
-                  <p>{item.dailyLimit ? `每日最多 ${item.dailyLimit.toLocaleString()} 次，北京时间 00:00 重置` : "不单设每日上限"}</p>
+                  <p>
+                    {item.dailyLimit
+                      ? `每日最多 ${item.dailyLimit.toLocaleString()} 次，北京时间 00:00 重置`
+                      : "不单设每日上限"}
+                  </p>
                   <div className="harbor-actions">
                     <Button
-                      disabled={!canBuy || busy || (item.kind === "trial" && trialClaimed)}
-                      onClick={() => { setUpgradeFrom(null); setSelected(item); }}
+                      disabled={
+                        !canBuy ||
+                        busy ||
+                        (item.kind === "trial" && trialClaimed)
+                      }
+                      onClick={() => {
+                        setUpgradeFrom(null);
+                        setSelected(item);
+                      }}
                     >
-                      {item.kind === "trial" ? trialClaimed ? "已领取试用" : "免费领取" : latestEnd ? "继续订阅" : "立即订阅"} <ArrowRight />
+                      {item.kind === "trial"
+                        ? trialClaimed
+                          ? "已领取试用"
+                          : "免费领取"
+                        : latestEnd
+                          ? "继续订阅"
+                          : "立即订阅"}{" "}
+                      <ArrowRight />
                     </Button>
                     <Button
                       variant="outline"
@@ -416,7 +656,15 @@ export function Commerce({
                   {detail === item.sku && (
                     <div className="harbor-terms">
                       <p>
-                        {item.kind === "trial" ? "每个空间限领一次，领取后立即生效。" : "付款经服务端确认后自动开通；"}{item.kind === "trial" ? "" : item.activationMode === "immediate" ? "每次购买立即生效，各订阅独立计时。" : "续订从已购期限结束后顺延。"}成功查询（含有效无数据）计入次数，明确失败不计入，待核对请求保留次数。回看历史不增加调用。
+                        {item.kind === "trial"
+                          ? "每个空间限领一次，领取后立即生效。"
+                          : "付款经服务端确认后自动开通；"}
+                        {item.kind === "trial"
+                          ? ""
+                          : item.activationMode === "immediate"
+                            ? "每次购买立即生效，各订阅独立计时。"
+                            : "续订从已购期限结束后顺延。"}
+                        成功查询（含有效无数据）计入次数，明确失败不计入，待核对请求保留次数。回看历史不增加调用。
                       </p>
                       <p>
                         到期或本期次数用尽后暂停新查询，不自动续费或扣钱包。
@@ -427,85 +675,210 @@ export function Commerce({
               </article>
             ))}
           </div>
-          <Pagination label="数据服务" {...market.pagination} onChange={market.setPage} />
-          {catalog && !products.length && <p className="harbor-empty">{catalog.items.length ? "没有匹配的服务，请尝试其他关键词。" : "暂时没有可购买的服务。"}</p>}
+          <Pagination
+            label="数据服务"
+            {...market.pagination}
+            onChange={market.setPage}
+          />
+          {catalog && !products.length && (
+            <p className="harbor-empty">
+              {catalog.items.length
+                ? "没有匹配的服务，请尝试其他关键词。"
+                : "暂时没有可购买的服务。"}
+            </p>
+          )}
         </>
       ) : !canRead ? (
         <p className="harbor-empty">请使用有当前空间账单查看权限的账号。</p>
       ) : (
         <>
           {page === "services" ? (
-            <><div className="harbor-subscription-notice"><p>默认优先消费最早到期的可用订阅。可手动设置优先订阅；额度不足时自动选择其他可用订阅，处理中请求仍结算到原订阅。</p><Button variant="outline" disabled={busy || !hasCapability(session, tenant, "apikey.write")} onClick={() => perform(async () => { await post(`/commerce/tenants/${tenant}/subscription-selection`, { subscriptionId: null }); await refresh(); })}>恢复自动选择</Button></div><div className="harbor-grid">
-              {purchases.subscriptions.map((subscription) => {
-                const state = subscriptionState(subscription);
-                const expiring = notice.expiring.some(value => value.id === subscription.id);
-                return (
-                  <Card key={subscription.id}>
-                    <CardHeader>
-                      <CardTitle>{subscription.product?.name || "IP 风险画像"}</CardTitle>
-                      <span>
-                        {
+            <>
+              <div className="harbor-subscription-notice">
+                <p>
+                  默认优先消费最早到期的可用订阅。可手动设置优先订阅；额度不足时自动选择其他可用订阅，处理中请求仍结算到原订阅。
+                </p>
+                <Button
+                  variant="outline"
+                  disabled={
+                    busy || !hasPermission(session, tenant, "query.execute")
+                  }
+                  onClick={() =>
+                    perform(async () => {
+                      await post(
+                        `/commerce/tenants/${tenant}/subscription-selection`,
+                        { subscriptionId: null },
+                      );
+                      await refresh();
+                    })
+                  }
+                >
+                  恢复自动选择
+                </Button>
+              </div>
+              <div className="harbor-grid">
+                {purchases.subscriptions.map((subscription) => {
+                  const state = subscriptionState(subscription);
+                  const expiring = notice.expiring.some(
+                    (value) => value.id === subscription.id,
+                  );
+                  return (
+                    <Card key={subscription.id}>
+                      <CardHeader>
+                        <CardTitle>
+                          {subscription.product?.name || "IP 风险画像"}
+                        </CardTitle>
+                        <span>
                           {
-                            active: subscription.selected ? "当前消费" : "可用",
-                            daily_exhausted: "今日次数已用尽",
-                            exhausted: "本期次数已用尽或处理中",
-                            expired: "已到期",
-                            future: "待生效",
-                          }[state]
-                        }
-                      </span>
-                      {expiring && <span className="harbor-expiry-warning">{Date.parse(subscription.endsAt) - Date.now() <= 86400_000 ? "24 小时内到期" : "7 天内到期"}</span>}
-                    </CardHeader>
-                    <CardContent>
-                      <p className="harbor-price">
-                        {subscription.used.toLocaleString()}
-                        <span> / {subscription.quota.toLocaleString()} 次</span>
-                      </p>
-                      <progress
-                        max={subscription.quota}
-                        value={subscription.used + subscription.held}
-                        aria-label="本期调用次数"
-                      />
-                      <p>
-                        有效期：{dateTime(subscription.startsAt)} —{" "}
-                        {dateTime(subscription.endsAt)}
-                      </p>
-                      <p>{subscription.dailyLimit ? `今日 ${subscription.dailyUsed || 0} / ${subscription.dailyLimit} 次，处理中 ${subscription.dailyHeld || 0} 次；北京时间 00:00 重置` : "不单设每日上限"}</p>
-                      {subscription.held > 0 && (
-                        <p>{subscription.held} 次请求处理中</p>
-                      )}
-                      {expiring && <p>当前订阅即将到期{futureCount ? "，已购续订将在约定时间生效。" : "，可提前续订保持服务连续。"}</p>}
-                      <div className="harbor-actions">
-                        <Button
-                          disabled={state !== "active"}
-                          onClick={() => go("intelligence")}
-                        >
-                          开始使用 <ArrowRight />
-                        </Button>
-                        {hasCapability(session, tenant, "apikey.write") && subscription.channel === "product" && <Button variant="outline" disabled={busy || state !== "active" || subscription.preferred} onClick={() => perform(async () => { await post(`/commerce/tenants/${tenant}/subscription-selection`, { subscriptionId: subscription.id }); await refresh(); })}>{subscription.preferred ? "优先消费" : "设为优先"}</Button>}
-                        {canBuy && (
-                          <Button
-                            variant="outline"
-                            onClick={() => go("market")}
-                          >
-                            续订
-                          </Button>
+                            {
+                              active: subscription.selected
+                                ? "当前消费"
+                                : "可用",
+                              daily_exhausted: "今日次数已用尽",
+                              exhausted: "本期次数已用尽或处理中",
+                              expired: "已到期",
+                              future: "待生效",
+                            }[state]
+                          }
+                        </span>
+                        {expiring && (
+                          <span className="harbor-expiry-warning">
+                            {Date.parse(subscription.endsAt) - Date.now() <=
+                            86400_000
+                              ? "24 小时内到期"
+                              : "7 天内到期"}
+                          </span>
                         )}
-                      </div>
-                      {canBuy && subscription.channel === "product" && !["expired", "future"].includes(state) && <div className="harbor-actions">{products.filter(item => item.amountMinor > (subscription.product?.amountMinor ?? Infinity) && item.quota > subscription.quota && (subscription.product?.kind === "trial" || (item.months >= (subscription.product?.months || 0) && (item.dailyLimit == null || (subscription.dailyLimit != null && item.dailyLimit >= subscription.dailyLimit))))).map(item => <Button variant="outline" key={item.sku} disabled={busy} onClick={() => { setUpgradeFrom(subscription); setSelected(item); }}>升级至 {item.name}</Button>)}</div>}
-                    </CardContent>
-                  </Card>
-                );
-              })}
-              {!purchases.subscriptions.length && (
-                <div className="harbor-empty">
-                  <p>尚未开通服务，购买并完成付款后即可使用。</p>
-                  {canBuy && (
-                    <Button onClick={() => go("market")}>选购数据服务</Button>
-                  )}
-                </div>
+                      </CardHeader>
+                      <CardContent>
+                        <p className="harbor-price">
+                          {subscription.used.toLocaleString()}
+                          <span>
+                            {" "}
+                            / {subscription.quota.toLocaleString()} 次
+                          </span>
+                        </p>
+                        <progress
+                          max={subscription.quota}
+                          value={subscription.used + subscription.held}
+                          aria-label="本期调用次数"
+                        />
+                        <p>
+                          有效期：{dateTime(subscription.startsAt)} —{" "}
+                          {dateTime(subscription.endsAt)}
+                        </p>
+                        <p>
+                          {subscription.dailyLimit
+                            ? `今日 ${subscription.dailyUsed || 0} / ${subscription.dailyLimit} 次，处理中 ${subscription.dailyHeld || 0} 次；北京时间 00:00 重置`
+                            : "不单设每日上限"}
+                        </p>
+                        {subscription.held > 0 && (
+                          <p>{subscription.held} 次请求处理中</p>
+                        )}
+                        {expiring && (
+                          <p>
+                            当前订阅即将到期
+                            {futureCount
+                              ? "，已购续订将在约定时间生效。"
+                              : "，可提前续订保持服务连续。"}
+                          </p>
+                        )}
+                        <div className="harbor-actions">
+                          <Button
+                            disabled={state !== "active"}
+                            onClick={() => go("intelligence")}
+                          >
+                            开始使用 <ArrowRight />
+                          </Button>
+                          {hasPermission(session, tenant, "query.execute") &&
+                            subscription.channel === "product" && (
+                              <Button
+                                variant="outline"
+                                disabled={
+                                  busy ||
+                                  state !== "active" ||
+                                  subscription.preferred
+                                }
+                                onClick={() =>
+                                  perform(async () => {
+                                    await post(
+                                      `/commerce/tenants/${tenant}/subscription-selection`,
+                                      { subscriptionId: subscription.id },
+                                    );
+                                    await refresh();
+                                  })
+                                }
+                              >
+                                {subscription.preferred
+                                  ? "优先消费"
+                                  : "设为优先"}
+                              </Button>
+                            )}
+                          {canBuy && (
+                            <Button
+                              variant="outline"
+                              onClick={() => go("market")}
+                            >
+                              续订
+                            </Button>
+                          )}
+                        </div>
+                        {canBuy &&
+                          subscription.channel === "product" &&
+                          !["expired", "future"].includes(state) && (
+                            <div className="harbor-actions">
+                              {products
+                                .filter(
+                                  (item) =>
+                                    item.amountMinor >
+                                      (subscription.product?.amountMinor ??
+                                        Infinity) &&
+                                    item.quota > subscription.quota &&
+                                    (subscription.product?.kind === "trial" ||
+                                      (item.months >=
+                                        (subscription.product?.months || 0) &&
+                                        (item.dailyLimit == null ||
+                                          (subscription.dailyLimit != null &&
+                                            item.dailyLimit >=
+                                              subscription.dailyLimit)))),
+                                )
+                                .map((item) => (
+                                  <Button
+                                    variant="outline"
+                                    key={item.sku}
+                                    disabled={busy}
+                                    onClick={() => {
+                                      setUpgradeFrom(subscription);
+                                      setSelected(item);
+                                    }}
+                                  >
+                                    升级至 {item.name}
+                                  </Button>
+                                ))}
+                            </div>
+                          )}
+                      </CardContent>
+                    </Card>
+                  );
+                })}
+                {!purchases.subscriptions.length && (
+                  <div className="harbor-empty">
+                    <p>尚未开通服务，购买并完成付款后即可使用。</p>
+                    {canBuy && (
+                      <Button onClick={() => go("market")}>选购数据服务</Button>
+                    )}
+                  </div>
+                )}
+              </div>
+              {purchases.pagination && (
+                <Pagination
+                  label="订阅"
+                  {...purchases.pagination.subscriptions}
+                  busy={busy || loading}
+                  onChange={setSubscriptionsPage}
+                />
               )}
-            </div>{purchases.pagination && <Pagination label="订阅" {...purchases.pagination.subscriptions} busy={busy || loading} onChange={setSubscriptionsPage} />}</>
+            </>
           ) : (
             <Card className="harbor-table-panel harbor-orders">
               <Table className="harbor-orders-table">
@@ -564,7 +937,14 @@ export function Commerce({
                   ))}
                 </TableBody>
               </Table>
-              {purchases.pagination && <Pagination label="订单" {...purchases.pagination.orders} busy={busy || loading} onChange={setOrdersPage} />}
+              {purchases.pagination && (
+                <Pagination
+                  label="订单"
+                  {...purchases.pagination.orders}
+                  busy={busy || loading}
+                  onChange={setOrdersPage}
+                />
+              )}
               {!purchases.orders.length && (
                 <div className="harbor-empty">
                   <p>暂无订单</p>
@@ -665,15 +1045,52 @@ export function Commerce({
                 次调用 · 空间共享
               </p>
               <div className="harbor-price">{money(selected.amountMinor)}</div>
-              <p>{selected.kind === "trial" ? "免费领取后立即生效，每个空间限领一次，无需付款。不自动续费。" : upgradeFrom ? "升级按新套餐全价购买，付款后立即生效并设为优先；旧订阅保留原到期日与剩余次数，不折抵、不退款。" : selected.activationMode === "immediate" ? "付款确认后立即生效，各订阅独立计时。不自动续费。" : "付款确认后开通，续订从已购期限结束后顺延。不自动续费。"}</p><p>{selected.dailyLimit ? `每日最多 ${selected.dailyLimit} 次，北京时间 00:00 重置` : "不单设每日上限"}</p>
-              {selected.kind !== "trial" && latestEnd && <div className="harbor-subscription-notice" role="status">
-                <strong>你已订阅此服务，仍可继续购买</strong>
-                <p>已购有效期至 {dateTime(latestEnd)}。当前剩余次数与原有效期不变；每份订阅次数独立，不结转。最终生效时间以付款交付时为准。</p>
-              </div>}
-              {(purchases.summary?.pendingSkus.includes(selected.sku) ?? purchases.orders.some(order => order.product.sku === selected.sku && !order.deliveredAt && order.paymentStatus !== "paid")) && <div className="harbor-subscription-notice">
-                <p>你已有此服务的未完成订单，可以先查看原订单，也可以另购一份。</p>
-                <Button variant="link" disabled={busy} onClick={() => { setSelected(null); go("orders"); }}>查看原订单</Button>
-              </div>}
+              <p>
+                {selected.kind === "trial"
+                  ? "免费领取后立即生效，每个空间限领一次，无需付款。不自动续费。"
+                  : upgradeFrom
+                    ? "升级按新套餐全价购买，付款后立即生效并设为优先；旧订阅保留原到期日与剩余次数，不折抵、不退款。"
+                    : selected.activationMode === "immediate"
+                      ? "付款确认后立即生效，各订阅独立计时。不自动续费。"
+                      : "付款确认后开通，续订从已购期限结束后顺延。不自动续费。"}
+              </p>
+              <p>
+                {selected.dailyLimit
+                  ? `每日最多 ${selected.dailyLimit} 次，北京时间 00:00 重置`
+                  : "不单设每日上限"}
+              </p>
+              {selected.kind !== "trial" && latestEnd && (
+                <div className="harbor-subscription-notice" role="status">
+                  <strong>你已订阅此服务，仍可继续购买</strong>
+                  <p>
+                    已购有效期至 {dateTime(latestEnd)}
+                    。当前剩余次数与原有效期不变；每份订阅次数独立，不结转。最终生效时间以付款交付时为准。
+                  </p>
+                </div>
+              )}
+              {(purchases.summary?.pendingSkus?.includes(selected.sku) ??
+                purchases.orders.some(
+                  (order) =>
+                    order.product.sku === selected.sku &&
+                    !order.deliveredAt &&
+                    order.paymentStatus !== "paid",
+                )) && (
+                <div className="harbor-subscription-notice">
+                  <p>
+                    你已有此服务的未完成订单，可以先查看原订单，也可以另购一份。
+                  </p>
+                  <Button
+                    variant="link"
+                    disabled={busy}
+                    onClick={() => {
+                      setSelected(null);
+                      go("orders");
+                    }}
+                  >
+                    查看原订单
+                  </Button>
+                </div>
+              )}
               {selected.kind !== "trial" && !catalog?.purchaseAvailable && (
                 <p role="status">付款服务尚未就绪，请稍后重试。</p>
               )}
@@ -683,10 +1100,19 @@ export function Commerce({
                 </p>
               )}
               <Button
-                disabled={busy || (selected.kind !== "trial" && !catalog?.purchaseAvailable) || !canBuy || (selected.kind === "trial" && trialClaimed)}
+                disabled={
+                  busy ||
+                  (selected.kind !== "trial" && !catalog?.purchaseAvailable) ||
+                  !canBuy ||
+                  (selected.kind === "trial" && trialClaimed)
+                }
                 onClick={purchase}
               >
-                {busy ? "正在处理…" : selected.kind === "trial" ? "确认免费领取" : "确认并创建订单"}
+                {busy
+                  ? "正在处理…"
+                  : selected.kind === "trial"
+                    ? "确认免费领取"
+                    : "确认并创建订单"}
               </Button>
             </>
           )}

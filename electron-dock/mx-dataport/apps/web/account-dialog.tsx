@@ -77,7 +77,7 @@ function AccountDialogSession({
           }
           setOptions(value.options);
           setUnavailable(false);
-          if (!retry) setRegister(value.options.view === "register");
+          setRegister(false);
         }
       })
       .catch((error) => {
@@ -181,37 +181,9 @@ function AccountDialogSession({
           <DialogHeader>
             <DialogTitle>{register ? "受邀加入数港" : "登录数港"}</DialogTitle>
             <DialogDescription>
-              使用统一 MX 账号，首次进入需邀请或管理员开通
+              使用统一 MX 账号登录。企业账号由管理员开通，员工账号由企业超管创建或邀请。
             </DialogDescription>
           </DialogHeader>
-          <div
-            className="harbor-auth-tabs"
-            role="group"
-            aria-label="登录或注册"
-          >
-            <Button
-              type="button"
-              variant={!register ? "secondary" : "ghost"}
-              disabled={busy || checking}
-              onClick={() => {
-                setRegister(false);
-                if (!unavailable) setError("");
-              }}
-            >
-              登录
-            </Button>
-            <Button
-              type="button"
-              variant={register ? "secondary" : "ghost"}
-              disabled={busy || checking}
-              onClick={() => {
-                setRegister(true);
-                if (!unavailable) setError("");
-              }}
-            >
-              邀请码注册
-            </Button>
-          </div>
           <form onSubmit={submit} aria-busy={busy || checking}>
             <FieldGroup>
               <Field>
@@ -279,30 +251,6 @@ function AccountDialogSession({
                   </InputGroup>
                 </Field>
               )}
-              <Field>
-                <FieldLabel htmlFor="auth-invite">
-                  {register ? "DataPort 邀请码" : "DataPort 邀请码（选填）"}
-                </FieldLabel>
-                <InputGroup>
-                  <InputGroupInput
-                    id="auth-invite"
-                    name="inviteCode"
-                    required={register}
-                    maxLength={128}
-                    autoComplete="off"
-                    aria-describedby={
-                      !register ? "auth-invite-help" : undefined
-                    }
-                    placeholder="输入邀请人提供的邀请码"
-                    disabled={busy}
-                  />
-                </InputGroup>
-                {!register && (
-                  <FieldDescription id="auth-invite-help">
-                    仅尚未开通数港的账号首次进入时填写。已开通或由管理员授权的账号可留空。
-                  </FieldDescription>
-                )}
-              </Field>
               {register &&
               options &&
               options?.policy?.mode !== "invite_code" &&
