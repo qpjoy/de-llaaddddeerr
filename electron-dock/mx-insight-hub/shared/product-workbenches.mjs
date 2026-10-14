@@ -27,7 +27,8 @@ export const productForDocs = path => PRODUCT_WORKBENCHES.find(product => path?.
   || product.docs === 'ip-risk' && ['/docs/ip-risk-subscription','/docs/ip-risk-v2'].includes(path?.split('#')[0]))
 
 export function productEndpoints(document, product) {
-  const labels = { '/data/aggregate/sources': '当前 Key 的搜索范围', '/data/aggregate/preview': '预览本批范围与费用', '/data/aggregate/search': '聚合数据搜索 · 实时 / 已收录',
+  const labels = { '/data/search': '统一内容搜索 · 单个平台', '/search/{operation}': '兼容业务接口 · 按 operation 选择',
+    '/night-all/search/{operation}': '历史路径别名 · 按 operation 选择', '/data/aggregate/sources': '当前 Key 的搜索范围', '/data/aggregate/preview': '预览本批范围与费用', '/data/aggregate/search': '聚合数据搜索 · 实时 / 已收录',
     '/data/ecommerce/products/search': '统一商品搜索 · 跨平台', '/data/ecommerce/products/items': '已收录商品 · 不采集' }
   const preferred = new Set(['/api/v1/data/wechat/mp/article-detail-h5', '/api/v1/data/ecommerce/products/search'])
   return Object.entries(document?.paths || {}).flatMap(([path, item]) => {

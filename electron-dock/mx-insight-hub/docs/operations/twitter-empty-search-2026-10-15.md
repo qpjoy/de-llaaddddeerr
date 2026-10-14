@@ -1,6 +1,6 @@
 # Twitter 标准搜索零条结果核查
 
-更新：2026-10-15。生产归档已确认 Hub 内容提取遗漏；具体包装层和候选修复对原页的效果仍待离线验证，尚未发布。
+更新：2026-10-15。生产原归档已确认 `TimelineAddEntries` 包装遗漏，修复代码对同一归档只读投影返回 20 条并保留下一页；尚未发布。
 
 ## 已取得的生产归档报告与本轮修复
 
@@ -14,7 +14,24 @@
 
 因此“上游原页没有内容”已被这份证据排除；Hub 的固定容器提取遗漏了这些帖子，不能据此修改关键词、排序或切换供应商。原报告没有记录 entries 所在的固定路径与 wrapper type；再次收到的报告也没有新版字段，不能把具体生产包装层说成已经确定。
 
-本轮独立复现一个最小解析缺口：`entries:[{type:"TimelineAddEntries",entries:[…实际条目…]}]` 会被原 parser 识别为 timeline，但只检查外层 wrapper 的 content，返回成功且 0 条。相同合成页内 20 条完整帖子和 Bottom 游标在修复后可以正确交付。该已知 wrapper 是当前**候选修复**，还需对上述原 hash 归档做候选离线投影，确认生产页是否采用此结构。
+本轮独立复现一个最小解析缺口：`entries:[{type:"TimelineAddEntries",entries:[…实际条目…]}]` 会被原 parser 识别为 timeline，但只检查外层 wrapper 的 content，返回成功且 0 条。相同合成页内 20 条完整帖子和 Bottom 游标在修复后可以正确交付。随后操作者通过内存 bundle 对上述原 hash 归档验证，确认生产页正是该结构。
+
+### 原生产页只读验证通过
+
+返回的 `diagnosticRevision=twitter-search-diagnostic.v2`、`projectionImplementation=bundled_local_candidate` 与本地生成的源码哈希完全匹配：
+
+| 证据 | 已核对结果 |
+| --- | --- |
+| 候选 parser SHA-256 | `6ebb098a5ad60102d0a9d9c619a31cf078017461f7304c69967382803e1c975c` |
+| bundle SHA-256 | `6a84466cd5f30a692d7aad7879444c50f01136aec10358abed89a79fa340b022` |
+| 原供应商调用 | `eabb5d55-3bdf-45f8-b15d-f8248acb7274`，RapidAPI `twitter-aio.search` |
+| 原归档 | 135269 字节，`hashVerified=true`，SHA 同上 |
+| 外层数组 | `payload.entries`，1 项，类型 `TimelineAddEntries` |
+| 实际条目 | `payload.entries[0].entries`，23 项，包含 20 条推文和 Top/Bottom 游标 |
+| 新投影 | `returnedCount=20`、`duplicateCount=0`、`discardedCount=0`、`hasMore=true`、`deliveryStatus=ok` |
+| 历史交付 | 仍为 0 条、无续页，`deliveredCountMatchesCurrent=false` |
+
+具体根因已确认：原解析器跳过了指令包装内的实际条目。新投影与历史交付不相同是预期结果，不是归档完整性失败。此次验证没有发布镜像、调用供应商或改写数据库；它证明本次修复能正确解析该原生产页，不能证明新实时请求已经恢复。
 
 修改只在 entries 数组中展开明确 `type=TimelineAddEntries` 且具有 entries 数组的包装，按原位置保留顺序；未知 wrapper、引用帖与推荐业务树不递归采集。总展开最多 10000 个节点，过深或过大明确拒绝；原 count 上限、去重与丢弃统计、Bottom 游标、Key/query/pageSize/type 绑定和 15 页边界继续保留。
 
@@ -88,7 +105,7 @@ kubectl -n mx-insight-hub exec deployment/mx-insight-hub-admin -c admin -- \
 
 ## 原归档验证后的 Hub 发布
 
-待候选报告核对为同一归档、正确包装路径和 20 条及续页后，再由生产操作者在 Hub 子目录发布本轮解析器：
+候选报告已核对为同一归档、正确包装路径和 20 条及续页。由生产操作者在 Hub 子目录发布本轮解析器：
 
 ```bash
 MX_INSIGHT_SYNC_LAUNCHER=0 bash scripts/manage.sh ops internal-production deploy

@@ -1,10 +1,12 @@
 .mih-product-workbench { display: grid; gap: 16px; min-width: 0; }
 .mih-product-workbench [hidden] { display: none !important; }
 .mih-product-workbench .mih-api-console-nav { max-height: 740px; overflow: auto; }
-.mih-product-workbench .mih-api-console-nav code { display: block; font-size: 11px; overflow-wrap: anywhere; }
 .mih-product-workbench .mih-api-console { grid-template-columns: 260px minmax(0, 1fr); }
-.mih-product-workbench .mih-api-console-nav .mih-api-endpoint-option { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 6px; text-align: left; align-items: start; }
-.mih-product-workbench .mih-api-console-nav button code { grid-column: 1 / -1; color: var(--qp-text-3); }
+.mih-api-console-nav { min-width: 0; }
+.mih-api-console-nav .mih-api-endpoint-option { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 6px; align-items: start; width: 100%; min-width: 0; max-width: 100%; text-align: left; white-space: normal; }
+.mih-api-console-nav .mih-api-endpoint-option > small { white-space: nowrap; }
+.mih-api-console-nav .mih-api-endpoint-option > span { min-width: 0; overflow-wrap: anywhere; line-height: 1.55; }
+.mih-api-console-nav .mih-api-endpoint-option > code { display: block; grid-column: 1 / -1; min-width: 0; color: var(--qp-text-3); font-size: 11px; line-height: 1.55; white-space: normal; overflow-wrap: anywhere; }
 .mih-product-workbench .mih-api-console-main { min-width: 0; }
 .mih-product-workbench .mih-api-console-main form { display: grid; gap: 14px; }
 .mih-product-workbench .mih-api-console-main header { flex-wrap: wrap; overflow-wrap: anywhere; }
