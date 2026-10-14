@@ -6,6 +6,7 @@ import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-js
 import { INSTAGRAM_SEARCH_KEY } from '../contracts/instagram-search.mjs'
 import { JUSTONE_INSTAGRAM_SEARCH_KEY } from '../contracts/instagram-justone-search.mjs'
 import { NATIVE_FORWARDING_VERSION } from '../contracts/native-forwarding.mjs'
+import { HUB_SOCIAL_VERSION } from '../contracts/hub-social.mjs'
 
 const clone = (value) => value == null ? value : structuredClone(value)
 const iso = (value = new Date()) => new Date(value).toISOString()
@@ -26,6 +27,72 @@ function instagramArchivePage(archive, provider) {
     if (!instagramOperation(provider) || payload?.code !== (provider === 'justone' ? 0 : 200) || !payload.data) return null
     return { publicBody: { data: payload.data, meta: { capturedAt: iso(archive.capturedAt) } } }
   } catch { return null }
+}
+
+const TWITTER_PAGE_PATH = '/api/v1/data/search'
+const TWITTER_PAGE_MAX_BYTES = 4 * 1024 * 1024
+const TWITTER_PAGE_MAX_AGE_MS = 86400000
+const twitterPageIdentity = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)
+const twitterPageTime = value => {
+  const time = new Date(value).getTime(), age = Date.now() - time
+  return value != null && Number.isFinite(time) && age >= 0 && age <= TWITTER_PAGE_MAX_AGE_MS
+}
+
+function twitterArchivePage(archive) {
+  const bytes = archive?.bodyBytes
+  if (!(bytes instanceof Uint8Array) || !Number.isSafeInteger(archive.bodySize)
+    || archive.bodySize !== bytes.byteLength || bytes.byteLength === 0 || bytes.byteLength > TWITTER_PAGE_MAX_BYTES
+    || !SHA256_PATTERN.test(archive.bodySha256 || '')
+    || createHash('sha256').update(bytes).digest('hex') !== archive.bodySha256
+    || !twitterPageTime(archive.capturedAt)) return null
+  try {
+    const payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/u, ''))
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !isPostgresSafeJsonValue(payload)) return null
+    // Restricted, complete provider payload. The gateway must re-project and
+    // verify its signed acquired-row hash before exposing a buffered slice.
+    return { payload, capturedAt: iso(archive.capturedAt) }
+  } catch { return null }
+}
+
+function twitterPageInput(input) {
+  return input?.path === TWITTER_PAGE_PATH
+    && ['callId', 'tenantId', 'consumerId', 'apiKeyId'].every(key => twitterPageIdentity(input[key]))
+}
+
+async function postgresTwitterPage(queryable, input, lock = false) {
+  if (!twitterPageInput(input)) return null
+  const { rows: [row] } = await queryable.query(
+    `SELECT raw.body_bytes, raw.body_sha256, raw.body_size, raw.captured_at
+       FROM external_platform.provider_calls call
+       JOIN usage_requests request ON request.id = call.usage_request_id
+       JOIN control.external_platform_restricted_raw_responses raw ON raw.provider_call_id = call.id
+      WHERE call.id = $1 AND call.provider_key = 'rapidapi'
+        AND call.operation = 'social.content.search' AND call.endpoint_key = 'twitter-aio.search'
+        AND call.endpoint_version = 'twitter-aio.hub.v1' AND call.contract_version = $5
+        AND call.outcome = 'succeeded' AND call.http_status = 200
+        AND call.completed_at BETWEEN now() - interval '24 hours' AND now()
+        AND call.tenant_id = $2 AND call.consumer_id = $3 AND call.api_key_id = $4
+        AND request.tenant_id = $2 AND request.consumer_id = $3 AND request.api_key_id = $4
+        AND request.platform = 'twitter' AND request.status = 'committed' AND request.response_status = 200
+        AND request.acquisition_request->>'path' = '/api/v1/data/search'
+        AND raw.captured_at BETWEEN now() - interval '24 hours' AND now()
+        AND raw.body_size > 0 AND raw.body_size <= ${TWITTER_PAGE_MAX_BYTES}
+        AND octet_length(raw.body_bytes) = raw.body_size
+      ${lock ? 'FOR SHARE OF call, request, raw' : ''}`,
+    [input.callId, input.tenantId, input.consumerId, input.apiKeyId, HUB_SOCIAL_VERSION],
+  )
+  return row ? twitterArchivePage({ bodyBytes: row.body_bytes, bodySha256: row.body_sha256,
+    bodySize: Number(row.body_size), capturedAt: row.captured_at }) : null
+}
+
+function assertTwitterPageDelivery(providerKey, { delivery, sourceCallId, sourceMode, capturedAt, usageUnitsActual }) {
+  if (providerKey !== 'rapidapi' || !delivery || delivery.operation !== 'social.content.search'
+    || !twitterPageInput({ ...delivery, callId: sourceCallId, path: TWITTER_PAGE_PATH })
+    || !twitterPageIdentity(delivery.usageRequestId) || !SHA256_PATTERN.test(delivery.fingerprint || '')
+    || !['fresh_cache', 'stored_fallback'].includes(sourceMode) || !twitterPageTime(capturedAt)
+    || !Number.isSafeInteger(usageUnitsActual) || usageUnitsActual < 0 || usageUnitsActual > 100) {
+    throw new AppError(409, 'search_page_unavailable', 'The saved Twitter search page cannot be delivered')
+  }
 }
 
 function normalizedRestrictedResponseArchive(value) {
@@ -543,6 +610,41 @@ export class MemoryExternalPlatformStore {
   }
 
   async commitInstagramPage({ delivery, sourceCallId, sourceMode, responseBody, capturedAt, usageUnitsActual }) {
+    await this.usageStore.commitRequest(delivery.usageRequestId, { responseStatus: 200, responseBody,
+      unitsActual: Math.max(1, usageUnitsActual), upstreamLatencyMs: 0,
+      deliverySourceMode: sourceMode === 'stored_fallback' ? 'stale' : 'live', capturedAt })
+    this.requests.push(requestEvent({ ...delivery, providerKey: this.providerKey, sourceMode,
+      succeeded: true, responseStatus: 200, providerCallId: sourceCallId }))
+  }
+
+  async twitterPageFor(input) {
+    if (this.providerKey !== 'rapidapi' || !twitterPageInput(input)) return null
+    const call = this.calls.get(input.callId)
+    const usage = this.usageStore.requests.get(call?.usageRequestId)
+    if (call?.providerKey !== 'rapidapi' || call.operation !== 'social.content.search'
+      || call.endpointKey !== 'twitter-aio.search' || call.endpointVersion !== 'twitter-aio.hub.v1'
+      || call.contractVersion !== HUB_SOCIAL_VERSION || call.outcome !== 'succeeded' || call.httpStatus !== 200
+      || !twitterPageTime(call.completedAt)
+      || call.tenantId !== input.tenantId || call.consumerId !== input.consumerId || call.apiKeyId !== input.apiKeyId
+      || usage?.status !== 'committed' || usage.responseStatus !== 200 || usage.platform !== 'twitter'
+      || usage.tenantId !== input.tenantId || usage.consumerId !== input.consumerId || usage.apiKeyId !== input.apiKeyId
+      || usage.acquisitionRequest?.path !== TWITTER_PAGE_PATH) return null
+    return twitterArchivePage(this.restrictedResponseArchives.get(input.callId))
+  }
+
+  async commitTwitterPage(input) {
+    assertTwitterPageDelivery(this.providerKey, input)
+    const { delivery, sourceCallId, sourceMode, responseBody, capturedAt, usageUnitsActual } = input
+    const page = await this.twitterPageFor({ ...delivery, callId: sourceCallId, path: TWITTER_PAGE_PATH })
+    if (!page || page.capturedAt !== iso(capturedAt)) {
+      throw new AppError(409, 'search_page_unavailable', 'The saved Twitter search page cannot be delivered')
+    }
+    const usage = this.usageStore.requests.get(delivery.usageRequestId)
+    if (usage?.status !== 'reserved' || usage.platform !== 'twitter'
+      || usage.tenantId !== delivery.tenantId || usage.consumerId !== delivery.consumerId || usage.apiKeyId !== delivery.apiKeyId
+      || usage.fingerprint !== delivery.fingerprint || usage.acquisitionRequest?.path !== TWITTER_PAGE_PATH) {
+      throw new AppError(409, 'usage_request_state_conflict', 'Usage request is not reserved for this Twitter delivery')
+    }
     await this.usageStore.commitRequest(delivery.usageRequestId, { responseStatus: 200, responseBody,
       unitsActual: Math.max(1, usageUnitsActual), upstreamLatencyMs: 0,
       deliverySourceMode: sourceMode === 'stored_fallback' ? 'stale' : 'live', capturedAt })
@@ -2066,6 +2168,36 @@ export class PostgresExternalPlatformStore {
         [delivery.usageRequestId, responseBody, Math.max(1, usageUnitsActual),
           sourceMode === 'stored_fallback' ? 'stale' : 'live', capturedAt, delivery.tenantId, delivery.consumerId])
       if (!usage.rows[0]) throw new AppError(409, 'usage_request_state_conflict', 'Usage request is not reserved')
+      await this.#insertGatewayRequest(client, { ...delivery, sourceMode,
+        succeeded: true, responseStatus: 200, providerCallId: sourceCallId })
+    })
+  }
+
+  async twitterPageFor(input) {
+    return this.providerKey === 'rapidapi' ? postgresTwitterPage(this.pool, input) : null
+  }
+
+  async commitTwitterPage(input) {
+    assertTwitterPageDelivery(this.providerKey, input)
+    const { delivery, sourceCallId, sourceMode, responseBody, capturedAt, usageUnitsActual } = input
+    return transaction(this.pool, async client => {
+      const page = await postgresTwitterPage(client, { ...delivery, callId: sourceCallId, path: TWITTER_PAGE_PATH }, true)
+      if (!page || page.capturedAt !== iso(capturedAt)) {
+        throw new AppError(409, 'search_page_unavailable', 'The saved Twitter search page cannot be delivered')
+      }
+      // The ordinary status transition retains the existing customer-charge
+      // settlement trigger; its gateway provenance is committed atomically.
+      const usage = await client.query(
+        `UPDATE usage_requests SET status = 'committed', response_status = 200, response_body = $2,
+           units_actual = $3, upstream_latency_ms = 0, delivery_source_mode = $4,
+           response_captured_at = $5, completed_at = now()
+         WHERE id = $1 AND status = 'reserved' AND tenant_id = $6 AND consumer_id = $7
+           AND api_key_id = $8 AND fingerprint = $9 AND platform = 'twitter'
+           AND acquisition_request->>'path' = '/api/v1/data/search' RETURNING id`,
+        [delivery.usageRequestId, responseBody, Math.max(1, usageUnitsActual),
+          sourceMode === 'stored_fallback' ? 'stale' : 'live', capturedAt,
+          delivery.tenantId, delivery.consumerId, delivery.apiKeyId, delivery.fingerprint])
+      if (!usage.rows[0]) throw new AppError(409, 'usage_request_state_conflict', 'Usage request is not reserved for this Twitter delivery')
       await this.#insertGatewayRequest(client, { ...delivery, sourceMode,
         succeeded: true, responseStatus: 200, providerCallId: sourceCallId })
     })

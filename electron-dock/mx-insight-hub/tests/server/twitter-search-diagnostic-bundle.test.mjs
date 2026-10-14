@@ -107,7 +107,7 @@ for (const corruptedArchive of [false, true]) test(`generated candidate bundle e
   assert.equal(result.status, 0, result.stderr)
   assert.equal(result.stderr, '')
   const report = JSON.parse(result.stdout)
-  assert.equal(report.diagnosticRevision, 'twitter-search-diagnostic.v2')
+  assert.equal(report.diagnosticRevision, 'twitter-search-diagnostic.v3')
   for (const [key, value] of Object.entries(built.metadata)) assert.equal(report[key], value)
   assert.equal(report.delivery.itemCount, 0)
   assert.equal(report.evidence[0].projection.state, corruptedArchive ? 'archive_integrity_failed' : 'current_projection_accepts')

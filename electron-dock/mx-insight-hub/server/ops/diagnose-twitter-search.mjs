@@ -6,9 +6,9 @@ import pg from 'pg'
 // Normal module imports resolve relative to this saved source instead.
 const contracts = process.argv[1] === '-'
   ? pathToFileURL(`${process.cwd()}/server/contracts/`) : new URL('../contracts/', import.meta.url)
-const { normalizeHubSocialRequest, normalizeTwitterResponse, HUB_SOCIAL_VERSION } = await import(new URL('hub-social.mjs', contracts))
+const { normalizeHubSocialRequest, normalizeTwitterResponse, projectTwitterSearchPage, HUB_SOCIAL_VERSION } = await import(new URL('hub-social.mjs', contracts))
 const DIAGNOSTIC_IMPLEMENTATION = { projectionImplementation: 'installed_hub_contract', parserSha256: null } // TWITTER_DIAGNOSTIC_IMPLEMENTATION
-export const TWITTER_DIAGNOSTIC_REVISION = 'twitter-search-diagnostic.v2'
+export const TWITTER_DIAGNOSTIC_REVISION = 'twitter-search-diagnostic.v3'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const MAX_BYTES = 4 * 1024 * 1024
@@ -116,7 +116,7 @@ function timelineShape(payload) {
   return summary
 }
 
-export function inspectTwitterArchive(archive, snapshot, { httpStatus = 200 } = {}) {
+export function inspectTwitterArchive(archive, snapshot, { httpStatus = 200, callId = '00000000-0000-4000-8000-000000000001' } = {}) {
   if (!archive) return { state: 'archive_missing' }
   if (integer(archive.body_size) !== null && archive.body_size > MAX_BYTES) return { state: 'archive_too_large' }
   const bytes = archive.body_bytes instanceof Uint8Array ? Buffer.from(archive.body_bytes) : null
@@ -150,10 +150,30 @@ export function inspectTwitterArchive(archive, snapshot, { httpStatus = 200 } = 
     queryLength: request.query.length, requestedPageSize: pageSize, providerCount: request.count,
     category: request.upstreamQuery.category, includeTimestamp: request.upstreamQuery.includeTimestamp }
   try {
-    const result = normalizeTwitterResponse(payload, request, { capturedAt: date.toISOString(), encodeCursor: () => 'offline-not-a-cursor' })
+    const whole = normalizeTwitterResponse(payload, request, { capturedAt: date.toISOString(),
+      encodeCursor: () => 'offline-not-a-cursor', ...(standard ? { allowOverflow: true } : {}) })
+    let result = whole, paging = {}
+    if (standard) {
+      let nextState
+      const acquired = { publicBody: whole, items: whole.data.items }
+      const first = projectTwitterSearchPage(acquired, { pageSize, page: 1, buffer: null,
+        archiveCallId: callId, providerCursor: null,
+        encodeNext: state => { nextState = state; return 'offline-not-a-cursor' } })
+      result = first.publicBody
+      paging = { acquiredCount: first.acquiredItems.length, bufferedCount: first.acquiredItems.length - first.items.length }
+      if (nextState?.buffer) {
+        const buffered = projectTwitterSearchPage(acquired, { pageSize, page: nextState.page,
+          buffer: nextState.buffer, archiveCallId: callId, providerCursor: nextState.providerCursor ?? null,
+          encodeNext: () => 'offline-not-a-cursor' })
+        paging.bufferPreview = { returnedCount: buffered.items.length,
+          upstreamCallCount: buffered.publicBody.data.meta.upstreamCallCount,
+          hasMore: buffered.publicBody.data.page.hasMore }
+      }
+    }
     return { state: 'current_projection_accepts', ...integrity, structure, mapping,
       returnedCount: result.data.items.length, duplicateCount: result.data.page.duplicateCount,
-      discardedCount: result.data.page.discardedCount, hasMore: result.data.page.hasMore, deliveryStatus: result.data.status }
+      discardedCount: result.data.page.discardedCount, hasMore: result.data.page.hasMore,
+      deliveryStatus: result.data.status, ...paging }
   } catch (error) {
     return { state: 'current_projection_rejects', ...integrity, structure, mapping,
       reason: REASONS.has(error.message) ? error.message : 'unexpected_projection_error' }
@@ -190,7 +210,7 @@ export async function diagnoseTwitterSearch(pool, requestId) {
       if (supported) ({ rows: [archive] } = await client.query(`SELECT body_sha256, body_size, captured_at,
         CASE WHEN body_size <= $2 AND octet_length(body_bytes) <= $2 THEN body_bytes END AS body_bytes
         FROM control.external_platform_restricted_raw_responses WHERE provider_call_id = $1`, [call.id, MAX_BYTES]))
-      const projection = supported ? inspectTwitterArchive(archive, request.acquisition_request, { httpStatus: call.http_status })
+      const projection = supported ? inspectTwitterArchive(archive, request.acquisition_request, { httpStatus: call.http_status, callId: call.id })
         : { state: 'not_current_twitter_aio_search_contract' }
       evidence.push({ callId: call.id, provider: known(call.provider_key, ['rapidapi', 'tikhub', 'justone']),
         operation: known(call.operation, ['social.content.search']), endpoint: known(call.endpoint_key, ['twitter-aio.search']),

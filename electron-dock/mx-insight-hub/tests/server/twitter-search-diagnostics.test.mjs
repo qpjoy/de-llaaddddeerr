@@ -42,21 +42,29 @@ test('verified empty Twitter timeline is distinguished from missing or unusable 
   noSecrets(invalid)
 })
 
-test('a successful HTTP archive with more tweets than requested reports the exact strict projection guard read-only', () => {
-  const entries = Array.from({ length: 21 }, (_, index) => ({ content: { itemContent: {
+test('standard search previews a whole oversized paid page without losing buffered posts or changing the archive', () => {
+  const entries = Array.from({ length: 24 }, (_, index) => ({ content: { itemContent: {
     ...itemContent, tweet_results: { result: { ...tweet, rest_id: String(index + 1) } },
   } } }))
-  const receipt = archive({ entries: [{ type: 'TimelineAddEntries', entries }] })
+  const receipt = archive({ entries: [{ type: 'TimelineAddEntries', entries: [...entries, cursor] }] })
   const originalBytes = Buffer.from(receipt.body_bytes), originalHash = receipt.body_sha256
   const report = inspectTwitterArchive(receipt, snapshot)
-  assert.equal(report.state, 'current_projection_rejects')
-  assert.equal(report.reason, 'upstream_page_exceeds_requested_count')
+  assert.equal(report.state, 'current_projection_accepts')
+  assert.equal(report.returnedCount, 20)
+  assert.equal(report.acquiredCount, 24)
+  assert.equal(report.bufferedCount, 4)
+  assert.equal(report.hasMore, true)
+  assert.deepEqual(report.bufferPreview, { returnedCount: 4, upstreamCallCount: 0, hasMore: true })
   assert.equal(report.hashVerified, true)
-  assert.equal(report.structure.tweetResultCount, 21)
+  assert.equal(report.structure.tweetResultCount, 24)
   assert.equal(report.mapping.providerCount, 20)
   assert.equal(receipt.body_sha256, originalHash)
   assert.ok(originalBytes.equals(receipt.body_bytes))
+  const independent = inspectTwitterArchive(receipt, { path: '/api/v1/data/social/search', body: { platform: 'twitter', query: 'private-query', count: 20 } })
+  assert.equal(independent.state, 'current_projection_rejects')
+  assert.equal(independent.reason, 'upstream_page_exceeds_requested_count')
   noSecrets(report)
+  noSecrets(independent)
 })
 
 test('known TimelineTimelineModule items are counted and parsed while unrelated quoted trees stay excluded', () => {
@@ -146,7 +154,7 @@ function databaseFixture({ fail = false, provider = 'rapidapi' } = {}) {
 
 test('request diagnostic joins only its stored provider calls under a read-only transaction', async () => {
   const h = databaseFixture(), report = await diagnoseTwitterSearch(h.pool, REQUEST)
-  assert.equal(report.diagnosticRevision, 'twitter-search-diagnostic.v2')
+  assert.equal(report.diagnosticRevision, 'twitter-search-diagnostic.v3')
   assert.equal(report.projectionImplementation, 'installed_hub_contract')
   assert.equal(report.parserSha256, null)
   assert.match(h.statements[0].sql, /READ ONLY$/)

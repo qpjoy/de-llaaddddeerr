@@ -645,6 +645,198 @@ test('Twitter parser correction never rewrites a committed stable empty delivery
   assert.equal(h.platformStore.restrictedResponseArchives.size, 0)
 })
 
+test('Twitter standard oversized module pages deliver 20 plus 4 from one immutable purchase then follow Bottom', async () => {
+  const posts = Array.from({ length: 24 }, (_, i) => ({ ...twitterZeroPost, rest_id: String(i + 1) }))
+  const entries = twitterTimeline(posts, 'original-twitter-bottom').data.search_by_raw_query.search_timeline.timeline.instructions[0].entries
+  const module = rows => ({ content: { entryType: 'TimelineTimelineModule', items: rows.map(row => ({ item: row.content })) } })
+  const wire = { entries: [{ type: 'TimelineAddEntries', entries: [...entries.slice(0, 18),
+    module(entries.slice(18, 21)), module(entries.slice(21, 24)), entries[24],
+    { content: { cursorType: 'Top', value: 'original-twitter-top' } },
+    { content: { itemContent: { itemType: 'TimelineUser' } } }] }] }
+  assert.equal(wire.entries[0].entries.length, 23)
+  const h = await harness({ platform: 'twitter', twitterData: url => url.searchParams.has('cursor') ? twitterTimeline([twitterPost], null) : wire })
+  await h.service.setTenantBillingProfile(h.context.tenant.id,
+    { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 1, defaultCurrency: 'CNY' }, 'test-admin')
+  await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline Twitter pagination fixture' },
+    { idempotencyKey: 'twitter-pagination-credit', actor: 'test-admin' })
+  const body = { platform: 'twitter', query: 'fixture', pageSize: 20, type: 'stable' }
+  const first = await h.invokeData(body, 'twitter-overflow-first')
+  assert.equal(first.body.data.items.length, 20)
+  assert.equal(first.body.data.pageInfo.hasMore, true)
+  assert.equal(first.body.data.meta.providerCalls, 1)
+  const codec = createDataSearchCursorCodec(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}`)
+  const state = codec.decode(first.body.data.pageInfo.nextCursor)
+  assert.equal(state.provider, 'rapidapi')
+  assert.equal(state.buffer.offset, 20)
+  assert.equal(state.providerCursor, undefined)
+  const receipt = [...h.platformStore.restrictedResponseArchives.values()][0]
+  const bytes = Buffer.from(receipt.bodyBytes), sha = receipt.bodySha256
+  assert.deepEqual(JSON.parse(bytes.toString()), wire)
+  const bufferedBody = { ...body, cursor: first.body.data.pageInfo.nextCursor }
+  const second = await h.invokeData(bufferedBody, 'twitter-overflow-buffer')
+  assert.deepEqual((await h.invokeData(bufferedBody, 'twitter-overflow-buffer')).body, second.body)
+  assert.equal(second.body.data.items.length, 4)
+  assert.equal(second.body.data.meta.providerCalls, 0)
+  assert.equal(second.body.data.pageInfo.pageIndex, 2)
+  assert.equal(second.body.data.pageInfo.hasMore, true)
+  assert.deepEqual([...first.body.data.items, ...second.body.data.items].map(row => row.id), posts.map(row => row.rest_id))
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.platformStore.calls.size, 1)
+  assert.equal([...h.platformStore.calls.values()][0].itemCount, 24)
+  assert.equal(h.platformStore.ingestJobs.length, 1)
+  assert.equal(h.platformStore.ingestJobs[0].payload.records.filter(row => row.objectType === 'post').length, 24)
+  assert.equal(h.store.requests.get(first.requestId).unitsActual, 20)
+  assert.equal(h.store.requests.get(second.requestId).unitsActual, 4)
+  const third = await h.invokeData({ ...body, cursor: second.body.data.pageInfo.nextCursor }, 'twitter-overflow-bottom')
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.calls[1].searchParams.get('cursor'), 'original-twitter-bottom')
+  assert.equal(h.calls[1].searchParams.get('category'), 'Top')
+  assert.equal(h.calls[1].searchParams.get('count'), '20')
+  assert.equal(h.calls[1].searchParams.get('includeTimestamp'), 'false')
+  assert.equal(third.body.data.items.length, 1)
+  assert.equal(third.body.data.pageInfo.hasMore, false)
+  assert.equal(receipt.bodySha256, sha)
+  assert.ok(bytes.equals(Buffer.from(receipt.bodyBytes)))
+  const charges = [...h.store.customerCharges.values()]
+  assert.equal(charges.length, 3)
+  assert.ok(charges.every(row => row.chargedMinor === 1 && row.meterKey === 'twitter'))
+  assert.equal(h.historical.length, 0)
+  for (const result of [first, second, third]) assert.ok(isNightAllDataSearchV1Envelope(result.body))
+})
+
+test('Twitter buffer failures preserve paid evidence and never reacquire; credential echoes fail closed', async () => {
+  for (const corruption of [null, 'missing', 'bytes', 'hash', 'identity', 'failed', 'credential-echo']) {
+    const posts = Array.from({ length: 21 }, (_, i) => ({ ...twitterZeroPost, rest_id: String(i + 1),
+      legacy: { ...twitterZeroPost.legacy, full_text: corruption === 'credential-echo' ? 'fixture-secret' : 'safe fixture' } }))
+    const h = await harness({ platform: 'twitter', twitterData: twitterTimeline(posts, null) })
+    const body = { platform: 'twitter', query: 'fixture', pageSize: 20, type: 'stable' }
+    const first = await h.invokeData(body, 'twitter-buffer-source')
+    const [callId, archive] = [...h.platformStore.restrictedResponseArchives][0]
+    assert.doesNotMatch(JSON.stringify(first.body), /fixture-secret/)
+    if (corruption === 'missing') h.platformStore.restrictedResponseArchives.delete(callId)
+    if (corruption === 'bytes') archive.bodyBytes[0] = 0
+    if (corruption === 'hash') archive.bodySha256 = '0'.repeat(64)
+    if (corruption === 'identity') h.store.requests.get(first.requestId).apiKeyId = randomUUID()
+    if (corruption === 'failed') h.platformStore.calls.get(callId).outcome = 'succeeded_unusable'
+    if (!corruption) h.gateway.adapter.apiKey = 'rotated-credential-with-no-provider-echo'
+    const invoke = () => h.invokeData({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'twitter-buffer-followup')
+    if (corruption) await assert.rejects(invoke(), { code: 'search_page_unavailable' })
+    else {
+      const last = await invoke()
+      assert.equal(last.body.data.items.length, 1)
+      assert.equal(last.body.data.pageInfo.hasMore, false)
+      assert.equal(last.body.data.pageInfo.nextCursor, null)
+      assert.equal(last.body.data.meta.providerCalls, 0)
+    }
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.platformStore.ingestJobs.length, 1)
+  }
+})
+
+test('Twitter later paid-page overflow preserves its input cursor until all buffered rows are delivered', async () => {
+  const rows = count => Array.from({ length: count }, (_, i) => ({ ...twitterZeroPost, rest_id: String(i + 1) }))
+  const h = await harness({ platform: 'twitter', twitterData: url => {
+    const cursor = url.searchParams.get('cursor')
+    return cursor === 'first-bottom' ? twitterTimeline(rows(5), 'second-bottom')
+      : cursor === 'second-bottom' ? twitterTimeline([], null) : twitterTimeline(rows(1), 'first-bottom')
+  } })
+  const body = { platform: 'twitter', query: 'fixture', pageSize: 2, type: 'stable' }
+  let current = await h.invokeData(body, 'twitter-later-page-first')
+  const second = await h.invokeData({ ...body, cursor: current.body.data.pageInfo.nextCursor }, 'twitter-later-page-second')
+  assert.equal(second.body.data.items.length, 2)
+  assert.equal(h.calls.length, 2)
+  const codec = createDataSearchCursorCodec(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}`)
+  const state = codec.decode(second.body.data.pageInfo.nextCursor)
+  assert.equal(state.providerCursor, 'first-bottom')
+  current = second
+  const ids = [...second.body.data.items.map(item => item.id)]
+  for (const page of [3, 4]) {
+    current = await h.invokeData({ ...body, cursor: current.body.data.pageInfo.nextCursor }, `twitter-later-buffer-${page}`)
+    ids.push(...current.body.data.items.map(item => item.id))
+    assert.equal(current.body.data.meta.providerCalls, 0)
+    assert.equal(h.calls.length, 2)
+  }
+  assert.deepEqual(ids, ['1', '2', '3', '4', '5'])
+  assert.equal(codec.decode(current.body.data.pageInfo.nextCursor).providerCursor, 'second-bottom')
+  const last = await h.invokeData({ ...body, cursor: current.body.data.pageInfo.nextCursor }, 'twitter-later-native-third')
+  assert.equal(h.calls.length, 3)
+  assert.equal(h.calls[2].searchParams.get('cursor'), 'second-bottom')
+  assert.equal(last.body.data.pageInfo.hasMore, false)
+  assert.equal(h.platformStore.ingestJobs.length, 3, 'each live acquisition enqueues once; buffer deliveries enqueue nothing')
+})
+
+test('Twitter overflow offsets use requested pageSize100 rather than capped provider count50', async () => {
+  const posts = Array.from({ length: 120 }, (_, i) => ({ ...twitterZeroPost, rest_id: String(i + 1) }))
+  const h = await harness({ platform: 'twitter', twitterData: twitterTimeline(posts, null) })
+  const body = { platform: 'twitter', query: 'fixture', pageSize: 100, type: 'stable' }
+  const first = await h.invokeData(body, 'twitter-hundred-first')
+  assert.equal(h.calls[0].searchParams.get('count'), '50')
+  assert.equal(first.body.data.items.length, 100)
+  const second = await h.invokeData({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'twitter-hundred-buffer')
+  assert.equal(second.body.data.items.length, 20)
+  assert.equal(second.body.data.meta.providerCalls, 0)
+  assert.equal(second.body.data.pageInfo.hasMore, false)
+  assert.deepEqual([...first.body.data.items, ...second.body.data.items].map(row => row.id), posts.map(row => row.rest_id))
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.platformStore.ingestJobs[0].payload.records.filter(row => row.objectType === 'post').length, 120)
+})
+
+test('Twitter buffers retain route, provider, query, page-size, type, Key and current authorization boundaries', async () => {
+  const posts = Array.from({ length: 21 }, (_, i) => ({ ...twitterZeroPost, rest_id: String(i + 1) }))
+  const h = await harness({ platform: 'twitter', twitterData: twitterTimeline(posts, null) })
+  const body = { platform: 'twitter', query: 'fixture', pageSize: 20, type: 'stable' }
+  const first = await h.invokeData(body, 'twitter-buffer-boundary-first')
+  const cursor = first.body.data.pageInfo.nextCursor, nextBody = { ...body, cursor }
+  const codec = createDataSearchCursorCodec(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}`), state = codec.decode(cursor)
+  for (const patch of [{ expiresAt: 1 }, { page: 16 }, { provider: 'tikhub' }, { provider: null },
+    { buffer: { ...state.buffer, offset: 21 } }, { buffer: { ...state.buffer, callId: 'bad' } },
+    { buffer: { ...state.buffer, unexpected: true } }]) {
+    await assert.rejects(h.invokeData({ ...body, cursor: codec.encode({ ...state, ...patch }) }, randomUUID()), { code: 'invalid_cursor' })
+  }
+  for (const patch of [{ query: 'different' }, { pageSize: 10 }, { type: 'fresh' }]) {
+    await assert.rejects(h.invokeData({ ...nextBody, ...patch }, randomUUID()), { code: 'invalid_cursor' })
+  }
+  await assert.rejects(h.invoke({ platform: 'twitter', query: body.query, count: body.pageSize, cursor }, 'twitter-buffer-raw-route'), { code: 'invalid_cursor' })
+  const otherKey = await h.service.createApiKey({ consumerId: h.context.consumer.id, name: 'Other Twitter key', platforms: ['twitter'], capabilities: [] })
+  const otherContext = await h.service.authenticate(otherKey.secret)
+  await assert.rejects(h.service.search(otherContext, { body: nextBody, idempotencyKey: 'twitter-buffer-other-key', path: '/api/v1/data/search' }), { code: 'invalid_cursor' })
+  await assert.rejects(h.invokeData({ ...body, cursor: codec.encode({ ...state, buffer: { ...state.buffer, hash: '0'.repeat(64) } }) }, 'twitter-buffer-projection-drift'), { code: 'search_page_unavailable' })
+  h.store.apiKeyPlatformEntitlements.get(h.context.apiKey.id)[0].maxPageSize = 10
+  await assert.rejects(h.invokeData(nextBody, 'twitter-buffer-page-limit'), { code: 'page_size_exceeded' })
+  h.store.apiKeyPlatformEntitlements.get(h.context.apiKey.id)[0].maxPageSize = 100
+  await h.store.setPlatformGrant(h.context.consumer.id, 'twitter', false)
+  await assert.rejects(h.invokeData(nextBody, 'twitter-buffer-grant-revoked'), { code: 'platform_not_granted' })
+  assert.equal(h.calls.length, 1)
+})
+
+test('Twitter raw aliases remain strict for oversized pages and do not gain standard buffers', async () => {
+  const posts = Array.from({ length: 21 }, (_, i) => ({ ...twitterZeroPost, rest_id: String(i + 1) }))
+  const h = await harness({ platform: 'twitter', twitterData: twitterTimeline(posts, null) })
+  await assert.rejects(h.invoke({ platform: 'twitter', query: 'fixture', count: 20 }, 'twitter-raw-overflow'), { code: 'social_upstream_response_unusable' })
+  assert.equal(h.calls.length, 1)
+  assert.equal([...h.platformStore.calls.values()][0].outcome, 'succeeded_unusable')
+  assert.equal(h.platformStore.ingestJobs.length, 0)
+  assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+})
+
+test('Twitter overflow correction preserves an already committed stable unusable response without a paid retry', async () => {
+  const h = await harness({ platform: 'twitter', enabled: false })
+  const body = { platform: 'twitter', query: 'fixture', pageSize: 20, type: 'stable' }, requestId = randomUUID()
+  await h.store.reserve({ requestId, idempotencyKey: 'twitter-historical-unusable',
+    fingerprint: requestFingerprint({ method: 'POST', path: '/api/v1/data/search', body }),
+    tenantId: h.context.tenant.id, consumerId: h.context.consumer.id, apiKeyId: h.context.apiKey.id,
+    platform: 'twitter', unitsReserved: 1, leaseExpiresAt: new Date(Date.now() + 120000),
+    windowStart: new Date(Date.now() - 3600000), maxRequests: 100, replayWindowMs: null })
+  const saved = { requestId, error: { code: 'social_upstream_response_unusable', message: 'Historical immutable failure',
+    details: { requestId, upstreamStatus: 200, outcome: 'succeeded_unusable' } } }
+  await h.store.commitRequest(requestId, { responseStatus: 502, responseBody: saved, unitsActual: 1 })
+  await assert.rejects(h.invokeData(body, 'twitter-historical-unusable'), { status: 502, code: 'social_upstream_response_unusable' })
+  assert.deepEqual(h.store.requests.get(requestId).responseBody, saved)
+  assert.equal(h.store.requests.get(requestId).responseStatus, 502)
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.platformStore.ingestJobs.length, 0)
+})
+
 test('Twitter standard photo, video and GIF media retain their types without changing raw search media', async () => {
   const photo = twitterPost.legacy.extended_entities.media[0]
   const video = twitterPost.legacy.extended_entities.media[1]

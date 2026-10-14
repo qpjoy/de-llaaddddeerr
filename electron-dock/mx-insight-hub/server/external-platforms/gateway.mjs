@@ -7,7 +7,7 @@ import { assertEnterpriseCallable, normalizeEnterpriseRequest, enterpriseOperati
 import { nativeForwardingEndpoint, normalizeNativeForwardingRequest } from '../contracts/native-forwarding.mjs'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
-import { HUB_SOCIAL_ENDPOINTS, normalizeHubSocialRequest } from '../contracts/hub-social.mjs'
+import { HUB_SOCIAL_ENDPOINTS, normalizeHubSocialRequest, normalizeTwitterResponse, projectTwitterSearchPage } from '../contracts/hub-social.mjs'
 import { normalizeXhsDiscoveryRequest, XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -754,16 +754,26 @@ export class ExternalPlatformGateway {
         // Historical responses replay before this hook. Never interpret a
         // retired TikHub buffer or continuation using the JustOne contract.
         if (request.restartRequired || !request.buffer) return null
-        const archived = await this.platformStore.instagramPageFor({ callId: request.buffer.callId,
+        const readPage = platform === 'twitter' && dataSearch
+          ? this.platformStore.twitterPageFor.bind(this.platformStore) : this.platformStore.instagramPageFor.bind(this.platformStore)
+        const archived = await readPage({ callId: request.buffer.callId,
           tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
           path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH })
         if (!archived) throw new AppError(409, 'search_page_unavailable', 'The saved search page is unavailable; restart explicitly with a new Idempotency-Key')
         let result
-        try { result = instagramProjection(archived, request) }
+        try {
+          if (platform === 'twitter' && dataSearch) {
+            const publicBody = normalizeTwitterResponse(archived.payload, request.providerRequest,
+              { allowOverflow: true, capturedAt: archived.capturedAt, encodeCursor: request.encodeNext })
+            result = projectTwitterDataSearch(projectTwitterSearchPage({ publicBody, items: publicBody.data.items }, request))
+          } else result = instagramProjection(archived, request)
+        }
         catch { throw new AppError(409, 'search_page_unavailable', 'The saved search page no longer matches this cursor; restart explicitly with a new Idempotency-Key') }
         if (dataSearch) result.publicBody = { ...projectDataSearch(result, request), meta: result.publicBody.meta }
         return { result, sourceCallId: request.buffer.callId }
       },
+      commitBufferedPage: platform === 'twitter' && dataSearch
+        ? input => this.platformStore.commitTwitterPage(input) : null,
       dispatch: ({ credential }) => native
         ? this.adapter.forwardNative(nativeKey, { params: request.upstreamQuery }, credential)
         : this.adapter.execute(request.providerRequest, { ...credential, encodeCursor: request.encodeNext }),
@@ -800,7 +810,20 @@ export class ExternalPlatformGateway {
         }
         // Ingest the whole paid page once, including buffered records. Later
         // deliveries reuse its receipt and never create another acquisition.
-        if (platform === 'twitter' && dataSearch) result = projectTwitterDataSearch(result)
+        if (platform === 'twitter' && dataSearch) {
+          request.archiveCallId = callId
+          try {
+            const receipt = result.restrictedResponseArchive
+            result = projectTwitterSearchPage(result, request)
+            if (result.acquiredItems.length > request.pageSize && (!receipt || receipt.bodySize > 4194304)) {
+              throw new Error('twitter_page_archive_required')
+            }
+            result = projectTwitterDataSearch(result)
+          } catch {
+            throw new RapidApiUpstreamError({ outcome: 'succeeded_unusable', billed: null, httpStatus: 200,
+              businessCode: null, errorCode: 'social_upstream_response_unusable' }, result)
+          }
+        }
         const acquired = result.acquiredItems ? { ...result.publicBody, data: { ...result.publicBody.data,
           raw_data: JSON.stringify(result.acquiredItems) } } : result.publicBody
         result.records = rawSearchRecords(acquired, platform, this.providerKey)
@@ -1098,6 +1121,7 @@ export class ExternalPlatformGateway {
       tenantId: context.tenant.id,
       tenantName: context.tenant.name,
       consumerId: context.consumer.id,
+      apiKeyId: context.apiKey.id,
       usageRequestId: reservation.request.id,
       operation: plan.operation,
       fingerprint: requestFingerprint,
@@ -1163,7 +1187,8 @@ export class ExternalPlatformGateway {
         const responseBody = plan.dataSearch ? { data: result.publicBody.data, requestId: activeRequestId }
           : deliveryBody(result.publicBody, { requestId: activeRequestId, sourceMode, capturedAt,
             ...(sourceMode === 'stored_fallback' ? { fallbackReason: 'pagination_buffer' } : {}) })
-        await this.platformStore.commitInstagramPage({ delivery, sourceCallId, sourceMode, responseBody, capturedAt,
+        const commitPage = plan.commitBufferedPage || (input => this.platformStore.commitInstagramPage(input))
+        await commitPage({ delivery, sourceCallId, sourceMode, responseBody, capturedAt,
           usageUnitsActual: plan.dataSearch ? result.items.length : 1 })
         return resultFromBody(responseBody, { requestId: activeRequestId, replay: false, sourceMode, capturedAt })
       }

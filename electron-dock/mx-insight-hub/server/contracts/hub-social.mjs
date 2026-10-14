@@ -157,7 +157,7 @@ function rawPost(item) {
     metadata: JSON.stringify({ user_screen_name: item.author?.username ?? null, hashtags: item.tags }) }
 }
 
-export function normalizeTwitterResponse(payload, request, { encodeCursor, capturedAt = new Date().toISOString() } = {}) {
+export function normalizeTwitterResponse(payload, request, { encodeCursor, capturedAt = new Date().toISOString(), allowOverflow = false } = {}) {
   const root = object(payload?.data) ? payload.data : payload
   if (!object(root)) throw new Error('invalid_response_shape')
   if ((Array.isArray(payload?.errors) && payload.errors.length) || (Array.isArray(root.errors) && root.errors.length)) throw new Error('upstream_business_errors')
@@ -216,15 +216,17 @@ export function normalizeTwitterResponse(payload, request, { encodeCursor, captu
       seen.add(item.id); items.push(item)
     }
     if (contents.length > 10000) throw new Error('timeline_too_large')
-    if (items.length > request.count) throw new Error('upstream_page_exceeds_requested_count')
+    if (items.length > request.count && !(allowOverflow && request.operation === 'search')) throw new Error('upstream_page_exceeds_requested_count')
     const account = profile(root.user?.result)
     if (request.operation === 'crawl' && account && (request.userId ? account.userId !== request.userId : account.username.toLowerCase() !== request.username)) throw new Error('profile_identity_mismatch')
     if (account) profiles = [account]
   }
-  if (next && (next.length > 4096 || next === request.providerCursor || !items.length || request.page >= 15)) next = null
+  if (next && (next.length > 4096 || next === request.providerCursor || !items.length)) next = null
+  const nextProviderCursor = next
+  if (request.page >= 15) next = null
   const cursor = next ? encodeCursor({ version: HUB_SOCIAL_VERSION, queryHash: request.queryHash,
     page: request.page + 1, expiresAt: request.expiresAt, providerCursor: next }) : null
-  return { contractVersion: HUB_SOCIAL_VERSION, data: { platform: 'twitter', items,
+  const publicBody = { contractVersion: HUB_SOCIAL_VERSION, data: { platform: 'twitter', items,
     raw_info: JSON.stringify(profiles.map(rawProfile)), raw_data: JSON.stringify(request.operation === 'user-info' ? [] : items.map(rawPost)),
     page: { page: request.page, pageSize: request.count, returnedCount: items.length, duplicateCount, discardedCount, hasMore: !!cursor, nextCursor: cursor },
     pageInfo: { hasMore: !!cursor, nextCursor: cursor },
@@ -232,4 +234,48 @@ export function normalizeTwitterResponse(payload, request, { encodeCursor, captu
       profileCompleteness: request.operation === 'user-info' ? 'base_profile_without_about' : undefined },
     status: discardedCount ? 'partial' : 'ok',
   }, meta: { capturedAt } }
+  // The governed standard search can retain a whole paid page before slicing.
+  // Keep the supplier token internal, including when the public cursor is buffered.
+  if (allowOverflow && request.operation === 'search') Object.defineProperty(publicBody, 'providerPage', {
+    value: { nextProviderCursor }, enumerable: false,
+  })
+  return publicBody
+}
+
+export function projectTwitterSearchPage(result, { pageSize, page, buffer = null, archiveCallId,
+  providerCursor = null, encodeNext } = {}) {
+  const fullItems = result.publicBody?.data?.items
+  const upstreamNext = result.publicBody?.providerPage?.nextProviderCursor
+  if (!Array.isArray(fullItems) || fullItems.length > 10000
+    || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100
+    || !Number.isInteger(page) || page < 1 || page > 15
+    || !result.publicBody.providerPage) throw new Error('invalid_twitter_search_page')
+  const rowsHash = hash(fullItems), offset = buffer?.offset ?? 0
+  // Check the complete normalized page before exposing any archived content.
+  // A raw credential echo redacted during acquisition changes this hash and
+  // fails closed rather than exposing a secret or purchasing the page again.
+  if (buffer && (buffer.hash !== rowsHash || !Number.isSafeInteger(offset) || offset < 1
+    || offset >= fullItems.length || offset % pageSize !== 0)) throw new Error('twitter_buffer_mismatch')
+  const items = fullItems.slice(offset, offset + pageSize)
+  const buffered = offset + items.length < fullItems.length
+  const callId = buffer?.callId ?? archiveCallId
+  if (buffered && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(callId || '')) {
+    throw new Error('twitter_page_archive_required')
+  }
+  const hasMore = page < 15 && (buffered || Boolean(upstreamNext))
+  const nextCursor = hasMore ? encodeNext({ page: page + 1,
+    ...(buffered ? { buffer: { callId, offset: offset + items.length, hash: rowsHash }, providerCursor }
+      : { providerCursor: upstreamNext }) }) : null
+  const warnings = [...(result.publicBody.data.warnings || [])]
+  if (page === 15 && (buffered || upstreamNext)) warnings.push({ code: 'TWITTER_PAGE_LIMIT_REACHED',
+    message: 'Twitter search reached the 15-page limit. Restart explicitly to search again.' })
+  return { ...result, restrictedResponseArchive: result.restrictedResponseArchive, items, acquiredItems: fullItems,
+    publicBody: { ...result.publicBody, data: { ...result.publicBody.data, items,
+      raw_data: JSON.stringify(items.map(rawPost)),
+      page: { ...result.publicBody.data.page, page, pageSize, returnedCount: items.length, hasMore, nextCursor },
+      pageInfo: { hasMore, nextCursor },
+      meta: { ...result.publicBody.data.meta, resultCount: items.length, upstreamCallCount: buffer ? 0 : 1 },
+      ...(warnings.length ? { warnings } : {}),
+      status: warnings.length ? 'partial' : result.publicBody.data.status,
+    } } }
 }

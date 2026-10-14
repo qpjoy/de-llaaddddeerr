@@ -30,8 +30,11 @@ export function normalizeHubDataSearch(body, codec, resultType, historicalCodec,
     upstreamBody: { platform, query, count: providerPageSize, ...(cursor ? { cursor } : {}) } }, codec,
   { cursorScope: platform === 'twitter' ? { type: resultType, pageSize } : resultType,
     instagramProvider, instagramStrategy, historicalCodec,
-    ...(platform === 'twitter' ? { twitterSort: 'top' } : {}) })
-  if (platform === 'twitter') normalized.providerRequest.standardSearch = true
+    ...(platform === 'twitter' ? { twitterSort: 'top', twitterBuffer: true, bufferPageSize: pageSize } : {}) })
+  if (platform === 'twitter') {
+    normalized.providerRequest.standardSearch = true
+    normalized.providerRequest.allowOverflow = true
+  }
   // Keep the exact pre-cutover data/search identity, including fresh/stable.
   return { ...normalized, pageSize, fingerprintBody: { ...body, type: resultType } }
 }
@@ -40,7 +43,7 @@ export function normalizeHubDataSearch(body, codec, resultType, historicalCodec,
 // search and canonical ingestion. Build the shared row once, before either.
 export function projectTwitterDataSearch(result) {
   const capturedAt = result.publicBody.meta.capturedAt
-  const rows = result.items.map(item => ({
+  const row = item => ({
     content_id: item.id, platform_name: 'twitter', content_type: item.objectType, title: '',
     content: item.content, full_text: item.content, url: item.url,
     created_at: item.publishedAt, collected_at: capturedAt,
@@ -50,8 +53,10 @@ export function projectTwitterDataSearch(result) {
     view_count: item.metrics.views, bookmark_count: item.metrics.bookmarks, quote_count: item.metrics.quotes,
     cover_url: item.coverUrl ?? null, image_urls: JSON.stringify(item.imageUrls), video_urls: JSON.stringify(item.videoUrls),
     metadata: { hashtags: item.tags },
-  }))
+  })
+  const rows = result.items.map(row)
   return { ...result, restrictedResponseArchive: result.restrictedResponseArchive, items: rows,
+    ...(result.acquiredItems ? { acquiredItems: result.acquiredItems.map(row) } : {}),
     publicBody: { ...result.publicBody, data: { ...result.publicBody.data, raw_data: JSON.stringify(rows) } } }
 }
 
@@ -74,7 +79,7 @@ export function projectDataSearch(result, request) {
   const warnings = [...(raw.warnings || [])]
   if (request.platform === 'twitter' && request.pageSize > request.providerRequest.count) warnings.push({
     code: 'provider_page_size_limit',
-    message: 'Twitter returns at most 50 items per provider page; follow nextCursor for more results. No additional provider call was made to fill pageSize.',
+    message: 'Twitter requests at most 50 items per provider call; follow nextCursor for any buffered overflow or more results. No additional provider call was made to fill pageSize.',
   })
   const body = { data: { contractVersion: 'night-all.data-search.v1', platform: request.platform, query: request.query,
     items, pageInfo: { pageIndex: request.page, pageSize: request.pageSize, returnedCount: items.length,

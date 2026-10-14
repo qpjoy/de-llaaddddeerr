@@ -44,7 +44,8 @@ function supportsRawSearch({ platform, upstreamBody: body, pageSize }, instagram
 const justOneCursor = value => typeof value === 'string' && value.trim().length > 0
   && value.length <= 2048 && !value.includes('\u0000')
 
-export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort, instagramProvider = 'tikhub', instagramStrategy = false, historicalCodec } = {}) {
+export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort, twitterBuffer = false, bufferPageSize,
+  instagramProvider = 'tikhub', instagramStrategy = false, historicalCodec } = {}) {
   const { platform, upstreamBody: body, pageSize } = normalized
   const justone = platform === 'instagram' && instagramProvider === 'justone'
   if (platform === 'instagram' && !['tikhub', 'justone'].includes(instagramProvider)) {
@@ -75,12 +76,15 @@ export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort
       const state = codec.decode(body.cursor)
       if (state.version !== RAW_SEARCH_VERSION || state.scope !== scope || !Number.isSafeInteger(state.expiresAt)
         || state.expiresAt <= Date.now() || !Number.isInteger(state.page) || state.page < 2 || state.page > 15
-        || (platform === 'twitter' && (typeof state.providerCursor !== 'string' || !state.providerCursor || state.providerCursor.length > 4096))
-        || (state.buffer != null && (platform !== 'instagram' || !state.buffer || Array.isArray(state.buffer)
+        || (platform === 'twitter' && (!(twitterBuffer && state.buffer && state.providerCursor == null)
+          && (typeof state.providerCursor !== 'string' || !state.providerCursor || state.providerCursor.length > 4096)))
+        || (platform === 'twitter' && state.provider != null && state.provider !== 'rapidapi')
+        || (state.buffer != null && (!(platform === 'instagram' || platform === 'twitter' && twitterBuffer && state.provider === 'rapidapi')
+          || !state.buffer || Array.isArray(state.buffer)
           || Object.keys(state.buffer).some(key => !['callId', 'offset', 'hash'].includes(key))
           || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(state.buffer.callId)
           || !Number.isSafeInteger(state.buffer.offset) || state.buffer.offset < 1
-          || state.buffer.offset % pageSize !== 0 || !/^[0-9a-f]{64}$/.test(state.buffer.hash)))
+          || state.buffer.offset % (bufferPageSize ?? pageSize) !== 0 || !/^[0-9a-f]{64}$/.test(state.buffer.hash)))
         || (platform === 'instagram' && state.provider != null && !['justone', 'tikhub'].includes(state.provider))
         || (platform === 'instagram' && state.provider === 'justone' && (!justone
           || (!(state.buffer && state.providerCursor == null) && !justOneCursor(state.providerCursor))))
@@ -121,6 +125,7 @@ export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort
     }
     return codec.encode({ version: RAW_SEARCH_VERSION, scope, expiresAt,
       ...(platform === 'instagram' && (justone || instagramStrategy) ? { provider: instagramProvider } : {}),
+      ...(platform === 'twitter' && twitterBuffer ? { provider: 'rapidapi' } : {}),
       page: state.page, ...(state.providerCursor ? { providerCursor: state.providerCursor } : {}),
       ...(state.buffer ? { buffer: state.buffer } : {}) })
   }

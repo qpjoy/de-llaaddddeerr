@@ -105,7 +105,8 @@ export class RapidApiAdapter {
       if (!parsed || !isPostgresSafeJsonValue(raw)) throw new Error('invalid_response_json')
       let publicBody
       try { publicBody = facebook ? projectFacebookSearch(safe(raw), request, 'rapidapi', capturedAt).publicBody
-        : normalizeTwitterResponse(safe(raw), request, { encodeCursor, capturedAt }) }
+        : normalizeTwitterResponse(safe(raw), request, { encodeCursor, capturedAt,
+          allowOverflow: request.operation === 'search' && request.standardSearch === true && request.allowOverflow === true }) }
       catch { throw new Error('invalid_social_response') }
       const result = { publicBody, items: publicBody.data.items, records: [], archiveObjects: [], ...persistence('accepted'),
         ...(facebook ? { quota } : {}) }
