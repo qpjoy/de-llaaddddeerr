@@ -57,7 +57,9 @@ function localStorage(root, previous) {
   writePrivate(receipt,current,true)
   fs.mkdirSync(selected,{recursive:true,mode:0o700})
   assert(fs.realpathSync(selected)===selected,'Payment data path is not canonical')
-  fs.chownSync(selected,999,999); fs.chmodSync(selected,0o700)
+  // Do not reset a retained volume root: OnRootMismatch would recursively
+  // grant group write to the existing PGDATA on the next mount/reboot.
+  if (!previous) { fs.chownSync(selected,999,999); fs.chmodSync(selected,0o700) }
   return current
 }
 export function databaseResources(settings, credentials, { initialize=false }={}) {
@@ -112,7 +114,10 @@ psql -XAt -U mx_pay_owner -d postgres -c 'SELECT system_identifier FROM pg_contr
     return resource('Job','mx-pay-postgres-init',{apiVersion:'batch/v1',spec:{backoffLimit:0,activeDeadlineSeconds:240,template:{metadata:{labels},spec:{...base,restartPolicy:'Never',containers:[{...container,command:['sh','-ec',script]}]}}}})
   }
   assert(/^\d+$/.test(settings.systemIdentifier || ''),'Initialized PostgreSQL identity is required before running the database')
-  const guard=mountGuard+`test "$(cat /var/lib/postgresql/data/.installation-id)" = '${credentials.installationID}' && test "$(cat "$PGDATA/PG_VERSION")" = 16 && test -d "$PGDATA/base" && test "$(LC_ALL=C pg_controldata "$PGDATA" | awk -F ': *' '$1 == "Database system identifier" {print $2}')" = '${settings.systemIdentifier}' || { echo 'Payment data identity missing/changed; startup refused' >&2; exit 1; }; exec postgres -c listen_addresses='*' -c max_connections=100 -c shared_buffers=256MB`
+  // Kubelet fsGroup can widen directory modes during volume setup. Narrow only
+  // PGDATA, after all identity checks, as its existing non-root owner. The extra
+  // zero also clears a directory's setgid bit with GNU chmod; never recurse.
+  const guard=mountGuard+`test "$(cat /var/lib/postgresql/data/.installation-id)" = '${credentials.installationID}' && test "$(cat "$PGDATA/PG_VERSION")" = 16 && test -d "$PGDATA/base" && test "$(LC_ALL=C pg_controldata "$PGDATA" | awk -F ': *' '$1 == "Database system identifier" {print $2}')" = '${settings.systemIdentifier}' || { echo 'Payment data identity missing/changed; startup refused' >&2; exit 1; }; chmod -- 00700 "$PGDATA"; exec postgres -c listen_addresses='*' -c max_connections=100 -c shared_buffers=256MB`
   const probe={exec:{command:['pg_isready','-h','127.0.0.1','-U','mx_pay_owner','-d','mx_pay']},timeoutSeconds:3,periodSeconds:5}
   return {apiVersion:'v1',kind:'List',items:[
     resource('Service',name,{spec:{selector:labels,ports:[{name:'postgres',port:5432,targetPort:5432}]}}),

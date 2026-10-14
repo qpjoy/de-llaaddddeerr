@@ -27,11 +27,14 @@ const empty = {
   apps: [],
   definitions: [],
   commandDefinitions: [],
+  ruleDefinitions: [],
+  strategyDefinitions: [],
   commands: [],
   loopPolicies: [],
 };
 export function useSnapshot(mode, onExpired) {
   const [state, setState] = useState(empty),
+    [stateMode, setStateMode] = useState(mode),
     [error, setError] = useState(""),
     [loading, setLoading] = useState(true),
     reload = useRef(() => {});
@@ -40,6 +43,8 @@ export function useSnapshot(mode, onExpired) {
       busy = false;
     const controller = new AbortController();
     setState(empty);
+    setStateMode(mode);
+    setError("");
     setLoading(true);
     const load = async () => {
       if (busy || !alive) return;
@@ -72,9 +77,9 @@ export function useSnapshot(mode, onExpired) {
     };
   }, [mode, onExpired]);
   return {
-    state,
-    error,
-    loading,
+    state: stateMode === mode ? state : empty,
+    error: stateMode === mode ? error : "",
+    loading: stateMode !== mode || loading,
     refresh: useCallback(() => reload.current(), []),
   };
 }

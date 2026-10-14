@@ -2,6 +2,10 @@ import {
   BUILTIN_DEFINITIONS,
   BUILTIN_COMMAND_DEFINITIONS,
 } from "./workflow-catalog.mjs";
+import {
+  BUILTIN_RULE_DEFINITIONS,
+  BUILTIN_STRATEGY_DEFINITIONS,
+} from "./strategy-catalog.mjs";
 import pg from "pg";
 import { readFile, readdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
@@ -19,6 +23,8 @@ export class MemoryStore {
       apps: [],
       definitions: structuredClone(BUILTIN_DEFINITIONS),
       commandDefinitions: structuredClone(BUILTIN_COMMAND_DEFINITIONS),
+      ruleDefinitions: structuredClone(BUILTIN_RULE_DEFINITIONS),
+      strategyDefinitions: structuredClone(BUILTIN_STRATEGY_DEFINITIONS),
       commands: [],
       loopPolicies: [],
     };
@@ -250,6 +256,18 @@ export class PgStore {
           [mode],
         )
       ).rows.map((r) => r.document);
+      const ruleDefinitions = (
+        await c.query(
+          "SELECT document FROM mx_device.rule_definitions WHERE mode=$1",
+          [mode],
+        )
+      ).rows.map((r) => r.document);
+      const strategyDefinitions = (
+        await c.query(
+          "SELECT document FROM mx_device.strategy_definitions WHERE mode=$1",
+          [mode],
+        )
+      ).rows.map((r) => r.document);
       const commands = (
         await c.query(
           "SELECT document FROM mx_device.execution_commands WHERE mode=$1 AND (status='running' OR job_id=$2 OR attempt_id=$3 OR job_id IN (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status='running'))",
@@ -264,6 +282,8 @@ export class PgStore {
           apps,
           definitions,
           commandDefinitions,
+          ruleDefinitions,
+          strategyDefinitions,
           loopPolicies,
           commands,
           events: [],
@@ -284,6 +304,12 @@ export class PgStore {
       const commandsBefore = new Map(
         commandDefinitions.map((d) => [d.id, JSON.stringify(d)]),
       );
+      const rulesBefore = new Map(
+        ruleDefinitions.map((d) => [d.id, JSON.stringify(d)]),
+      );
+      const strategiesBefore = new Map(
+        strategyDefinitions.map((d) => [d.id, JSON.stringify(d)]),
+      );
       const result = fn(state, now);
       if (result?.then)
         throw new Error("Async work inside transaction is forbidden");
@@ -297,6 +323,18 @@ export class PgStore {
         if (commandsBefore.get(d.id) !== JSON.stringify(d))
           await c.query(
             "INSERT INTO mx_device.command_definitions VALUES($1,$2,$3,$4,$5)",
+            [d.id, d.mode, d.code, d.version, d],
+          );
+      for (const d of state.ruleDefinitions)
+        if (rulesBefore.get(d.id) !== JSON.stringify(d))
+          await c.query(
+            "INSERT INTO mx_device.rule_definitions VALUES($1,$2,$3,$4,$5)",
+            [d.id, d.mode, d.code, d.version, d],
+          );
+      for (const d of state.strategyDefinitions)
+        if (strategiesBefore.get(d.id) !== JSON.stringify(d))
+          await c.query(
+            "INSERT INTO mx_device.strategy_definitions VALUES($1,$2,$3,$4,$5)",
             [d.id, d.mode, d.code, d.version, d],
           );
       for (const p of state.loopPolicies)
@@ -385,6 +423,8 @@ export class PgStore {
         apps,
         definitions,
         commandDefinitions,
+        ruleDefinitions,
+        strategyDefinitions,
         loopPolicies,
         commands,
         clock,
@@ -428,6 +468,14 @@ export class PgStore {
           [mode],
         ),
         await client.query(
+          "SELECT document FROM mx_device.rule_definitions WHERE mode=$1",
+          [mode],
+        ),
+        await client.query(
+          "SELECT document FROM mx_device.strategy_definitions WHERE mode=$1",
+          [mode],
+        ),
+        await client.query(
           "SELECT document FROM mx_device.loop_policies WHERE mode=$1",
           [mode],
         ),
@@ -449,6 +497,8 @@ export class PgStore {
         apps: apps.rows.map((r) => r.document),
         definitions: definitions.rows.map((r) => r.document),
         commandDefinitions: commandDefinitions.rows.map((r) => r.document),
+        ruleDefinitions: ruleDefinitions.rows.map((r) => r.document),
+        strategyDefinitions: strategyDefinitions.rows.map((r) => r.document),
         loopPolicies: loopPolicies.rows.map((r) => r.document),
         commands: commands.rows.map((r) => r.document),
         now: Number(clock.rows[0].now),

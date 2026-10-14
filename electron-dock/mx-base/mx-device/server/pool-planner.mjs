@@ -10,6 +10,10 @@ import {
 const appIdOf = (job) => job.appId || "xhs";
 const matches = (device, job) =>
   device.mode === job.mode &&
+  (!device.workstationDemo ||
+    job.runId === device.workstationDemo.runId ||
+    job.deviceId === device.id ||
+    job.placement?.rack === device.rack) &&
   (!job.deviceId || device.id === job.deviceId) &&
   (!job.placement ||
     (device.rack === job.placement.rack &&

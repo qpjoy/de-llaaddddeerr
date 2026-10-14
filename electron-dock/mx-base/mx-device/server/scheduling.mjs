@@ -7,6 +7,10 @@ import { planPool } from "./pool-planner.mjs";
 // Pure scheduling rules shared by claims and read-only explanations.
 export const matchesJob = (device, job) =>
   device.mode === job.mode &&
+  (!device.workstationDemo ||
+    job.runId === device.workstationDemo.runId ||
+    job.deviceId === device.id ||
+    job.placement?.rack === device.rack) &&
   (!job.deviceId || device.id === job.deviceId) &&
   (!job.placement ||
     (device.rack === job.placement.rack &&

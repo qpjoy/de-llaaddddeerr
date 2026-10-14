@@ -38,6 +38,21 @@ import { schedulingSnapshot } from "./scheduling.mjs";
 import { Worker } from "node:worker_threads";
 import { POOL_SCENARIOS, simulationOptions } from "./pool-simulator.mjs";
 import { DEFAULT_POOL_POLICY } from "./pool-policy.mjs";
+import {
+  listRules,
+  listStrategies,
+  saveRule,
+  saveStrategy,
+  archiveRule,
+  archiveStrategy,
+  applyStrategy,
+} from "./strategy-registry.mjs";
+import {
+  assignQueuedJob,
+  cancelQueuedJob,
+  configureSimDevice,
+  launchWorkstationDemo,
+} from "./workstation.mjs";
 
 const equal = (a, b) =>
   typeof a === "string" &&
@@ -215,6 +230,121 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
             ...summarize(state),
             scheduling: schedulingSnapshot(state, state.now, mode),
           });
+        }
+        if (
+          ["/api/strategy-definitions", "/api/rule-definitions"].includes(path)
+        ) {
+          const strategy = path === "/api/strategy-definitions";
+          if (req.method === "GET") {
+            const state = await store.snapshot(mode);
+            const history = { history: true, includeArchived: true };
+            return json(
+              res,
+              200,
+              strategy
+                ? {
+                    strategies: mode === "sim" ? listStrategies(state) : [],
+                    history:
+                      mode === "sim" ? listStrategies(state, history) : [],
+                    rules: mode === "sim" ? listRules(state) : [],
+                    ruleHistory:
+                      mode === "sim" ? listRules(state, history) : [],
+                  }
+                : {
+                    rules: mode === "sim" ? listRules(state) : [],
+                    history: mode === "sim" ? listRules(state, history) : [],
+                  },
+            );
+          }
+          if (req.method === "POST") {
+            if (mode !== "sim")
+              throw new Fault("策略与规则当前仅用于模拟调度", 403);
+            const b = await body(req),
+              save = strategy ? saveStrategy : saveRule;
+            return json(
+              res,
+              201,
+              await store.atomic((s, n) => save(s, n, mode, b), { mode }),
+            );
+          }
+        }
+        const strategyArchive = path.match(
+          /^\/api\/(strategy|rule)-definitions\/([^/]+)$/,
+        );
+        if (strategyArchive && req.method === "DELETE") {
+          if (mode !== "sim")
+            throw new Fault("策略与规则当前仅用于模拟调度", 403);
+          const b = await body(req);
+          let id;
+          try {
+            id = decodeURIComponent(strategyArchive[2]);
+          } catch {
+            throw new Fault("目录 ID 无效", 400);
+          }
+          const archive =
+            strategyArchive[1] === "strategy" ? archiveStrategy : archiveRule;
+          return json(
+            res,
+            200,
+            await store.atomic((s, n) => archive(s, n, mode, id, b), { mode }),
+          );
+        }
+        if (path === "/api/strategy-apply" && req.method === "POST") {
+          if (mode !== "sim") throw new Fault("策略当前仅应用于模拟机架", 403);
+          const b = await body(req);
+          return json(
+            res,
+            200,
+            await store.atomic((s, n) => applyStrategy(s, n, mode, b), {
+              mode,
+            }),
+          );
+        }
+        if (path === "/api/workstation-demo" && req.method === "POST") {
+          if (mode !== "sim") throw new Fault("演示场景不能驱动真机", 403);
+          const b = await body(req);
+          return json(
+            res,
+            202,
+            await store.atomic((s, n) => launchWorkstationDemo(s, n, mode, b), {
+              mode,
+            }),
+          );
+        }
+        const assignment = path.match(
+          /^\/api\/jobs\/([^/]+)\/(assignment|queue-cancel)$/,
+        );
+        if (assignment && req.method === "POST") {
+          if (mode !== "sim")
+            throw new Fault("此工作台任务管理仅用于模拟", 403);
+          const id = uuid(assignment[1]),
+            b = await body(req);
+          const mutate =
+            assignment[2] === "assignment" ? assignQueuedJob : cancelQueuedJob;
+          return json(
+            res,
+            200,
+            await store.atomic((s, n) => mutate(s, n, mode, id, b), {
+              mode,
+              jobId: id,
+            }),
+          );
+        }
+        const capabilities = path.match(
+          /^\/api\/devices\/([^/]+)\/sim-capabilities$/,
+        );
+        if (capabilities && req.method === "POST") {
+          if (mode !== "sim") throw new Fault("设备能力编辑仅用于模拟", 403);
+          const id = uuid(capabilities[1]),
+            b = await body(req);
+          return json(
+            res,
+            200,
+            await store.atomic(
+              (s, n) => configureSimDevice(s, n, mode, id, b),
+              { mode },
+            ),
+          );
         }
         if (path === "/api/command-definitions" && req.method === "GET") {
           const state = await store.snapshot(mode);
@@ -403,10 +533,36 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
         }
         if (path === "/api/devices" && req.method === "POST") {
           const b = await body(req);
+          if (mode !== "sim" && b.defaultStrategyId !== undefined)
+            throw new Fault("真实设备不能应用模拟默认策略", 403);
           return json(
             res,
             201,
-            await store.atomic((s, n) => register(s, n, mode, b), { mode }),
+            await store.atomic(
+              (s, n) => {
+                const device = register(s, n, mode, b);
+                if (
+                  b.defaultStrategyId !== undefined &&
+                  !s.devices.some(
+                    (d) =>
+                      d.mode === mode &&
+                      d.rack === device.rack &&
+                      d.id !== device.id,
+                  ) &&
+                  !s.loopPolicies?.some(
+                    (p) => p.mode === mode && p.rack === device.rack,
+                  )
+                ) {
+                  applyStrategy(s, n, mode, {
+                    rack: device.rack,
+                    revision: 0,
+                    strategyId: b.defaultStrategyId,
+                  });
+                }
+                return device;
+              },
+              { mode },
+            ),
           );
         }
         if (path === "/api/jobs" && req.method === "POST") {

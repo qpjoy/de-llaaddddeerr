@@ -118,3 +118,10 @@ pacing 接口的整机间隔为模拟 0–86400000、真机 2000–86400000 整�
 任务第一条 action 必须为 open；next 前必须 search。同一任务内所有指令属于目标平台或通用。步骤 input 可写字面值，或 `{target:{fromStep:1,path:["items",0,"goodsId"]}}`：fromStep 是展开后的零基索引，只读本次任务此前已验证的结果。输入预检在入队和每条指令派发前执行；空结果导致后续输入缺失时，模拟任务标记 failed 并保留前序回执，确认无在途指令才正常释放设备。错误完成身份/输出格式仍为 unknown＋隔离。完成结果含 `steps:[{stepIndex,code,commandVersion,result}]`，经任务详情读取。
 
 指令归档阻止新模板引用，已有模板仍使用冻结版本；任务最新版本归档阻止其所有版本的新提交，已有 Job 及幂等重放保留。详见 [平台指令目录](platform-command-catalog-2026-10-13.md)。
+
+
+## 工作台任务管理与调度目录（2026-10-14）
+
+新增 `rule-definitions`、`strategy-definitions` 的 GET/POST/DELETE 版本化目录、`strategy-apply`、`workstation-demo`、`jobs/:id/assignment`、`jobs/:id/queue-cancel` 和 `devices/:id/sim-capabilities`。请求字段、版本校验、归档语义与默认策略行为见 [工作台 API 增量](workstation-strategies-2026-10-14.md#api-增量)。这些新增管理写接口仅在模拟域开放。读取页面/目录不会派发任务；人工指派不能迁移已领取任务。
+
+迁移 `008_scheduling_strategies.sql` 只新增规则/策略表与种子，保留旧机架、任务、App 冷却和既有循环策略。已运行真实设备仍沿用原接口与授权边界。

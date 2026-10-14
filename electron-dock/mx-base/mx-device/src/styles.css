@@ -144,7 +144,7 @@ small,
 }
 .app-shell {
   display: grid;
-  grid-template-columns: 230px minmax(0, 1fr);
+  grid-template-columns: 204px minmax(0, 1fr);
   min-height: 100vh;
   padding: 14px;
   gap: 0;
@@ -161,7 +161,7 @@ small,
   z-index: 2;
 }
 .brand {
-  font-size: 28px;
+  font-size: 25px;
   font-weight: 720;
   letter-spacing: -0.5px;
   padding: 20px 22px 28px;
@@ -184,9 +184,9 @@ small,
   background: transparent;
   color: #243249;
   justify-content: flex-start;
-  gap: 20px;
-  padding: 13px 15px;
-  font-size: 16px;
+  gap: 12px;
+  padding: 13px 12px;
+  font-size: 14px;
   font-weight: 500;
   position: relative;
 }

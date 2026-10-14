@@ -34,15 +34,27 @@ export function Modal({ title, children, onClose, className }) {
     </dialog>
   );
 }
-export function DeviceForm({ mode, workers, onSubmit, busy }) {
+export function DeviceForm({
+  mode,
+  workers,
+  onSubmit,
+  busy,
+  strategyDefinitions = [],
+}) {
   const [adapter, setAdapter] = useState("mobile-agent");
   const [simApps, setSimApps] = useState(["xhs", "weibo"]);
+  const latest = new Map();
+  for (const row of strategyDefinitions)
+    if (!latest.has(row.code) || latest.get(row.code).version < row.version)
+      latest.set(row.code, row);
+  const strategies = [...latest.values()].filter((row) => !row.archived);
   return (
     <form
       className="form"
       onSubmit={(e) => {
         e.preventDefault();
         const b = Object.fromEntries(new FormData(e.currentTarget));
+        if (!b.defaultStrategyId) delete b.defaultStrategyId;
         onSubmit({
           ...b,
           approved: b.approved === "on",
@@ -150,6 +162,26 @@ export function DeviceForm({ mode, workers, onSubmit, busy }) {
           </>
         )}
       </div>
+      {mode === "sim" && (
+        <label>
+          新机架默认策略
+          <select
+            name="defaultStrategyId"
+            defaultValue={strategies.find((s) => s.recommended)?.id || ""}
+          >
+            {strategies.map((row) => (
+              <option key={row.id} value={row.id}>
+                {row.name} · v{row.version}
+                {row.recommended ? "（推荐）" : ""}
+              </option>
+            ))}
+            <option value="">暂不应用策略</option>
+          </select>
+          <span className="small muted">
+            仅在新机架首次登记时应用；添加到已有机架不会覆盖当前策略。
+          </span>
+        </label>
+      )}
       {mode === "sim" && (
         <fieldset className="catalog-bindings">
           <legend>模拟设备的平台能力</legend>
