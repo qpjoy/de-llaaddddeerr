@@ -54,6 +54,7 @@ export function classifyExternalPlatformIngest(payload) {
     && payload.platform === 'xiaohongshu'
   const hubRaw = ['night-all.search.v1', NIGHT_ALL_COMPAT_DATASET_ID].includes(payload?.datasetId)
     && ((payload.providerKey === 'tikhub' && ['weibo', 'instagram'].includes(payload.platform))
+      || (payload.providerKey === 'justone' && payload.platform === 'instagram')
       || (payload.providerKey === 'rapidapi' && payload.platform === 'twitter'))
   if (payload?.kind !== 'external-platform-result'
     || (!justOne && !tikHubXiaohongshu && !enterprise && !hubRaw) || !Array.isArray(payload.records)) {

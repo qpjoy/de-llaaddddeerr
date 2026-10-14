@@ -12,6 +12,7 @@ import { peripheralRoute } from './peripherals/routes.mjs'
 import { sourceConnectionSnapshot } from './data/source-connections.mjs'
 import { nativeForwardingByPath } from './contracts/native-forwarding.mjs'
 import { ecommerceRoutingCatalog } from './external-platforms/ecommerce-routing.mjs'
+import { strategySearchCatalog } from './data/strategy-search-catalog.mjs'
 import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSearchAlias } from './contracts/wechat-search-alias.mjs'
 import { hubSocialByPath } from './contracts/hub-social.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
@@ -783,6 +784,7 @@ export function createApp({
   externalPlatformAdmin = null,
   platformSearchPolicyStore = null,
   ecommerceRoutingStore = null,
+  strategySearchRoutingStore = null,
   provisioning = null,
   notifications = null,
   balanceMonitor = null,
@@ -2956,6 +2958,26 @@ export function createApp({
         requireNoQuery(searchParams, 'ecommerce route update')
         if (!ecommerceRoutingStore) throw new AppError(503, 'ecommerce_route_unavailable', 'Product routes are unavailable')
         sendJson(response, 200, { data: await ecommerceRoutingStore.update(params.marketplace, await readJson(request, 4096)), requestId })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/strategy-search') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'strategy search inventory')
+        const [instagramPolicy, facebookPolicies] = await Promise.all([
+          strategySearchRoutingStore?.get('search', 'instagram') ?? null,
+          platformSearchPolicyStore?.list() ?? [],
+        ])
+        sendJson(response, 200, { data: strategySearchCatalog({ instagramPolicy,
+          facebookPolicy: facebookPolicies.find(row => row.platform === 'facebook') || null }), requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/strategy-search/:interface/:platform')
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'strategy search update')
+        if (!strategySearchRoutingStore) throw new AppError(503, 'strategy_search_route_unavailable', 'Search strategy configuration is unavailable')
+        sendJson(response, 200, { data: await strategySearchRoutingStore.update(params.interface, params.platform,
+          await readJson(request, 4096)), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/platform-search-policies') {

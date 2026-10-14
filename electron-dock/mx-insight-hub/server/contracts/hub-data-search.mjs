@@ -6,13 +6,13 @@ import { prepareNightAllCompatibilityTraversal } from '../data/night-all-paginat
 
 export const isHubDataCursor = value => typeof value === 'string' && value.startsWith('mxds1.')
 export function canRouteDataSearch({ platform, pageSize, cursor }) {
-  if (['facebook', 'twitter'].includes(platform)) return true
-  return ['weibo', 'instagram'].includes(platform) && (isHubDataCursor(cursor) || (!cursor && pageSize >= 20))
+  if (['facebook', 'twitter', 'instagram'].includes(platform)) return true
+  return platform === 'weibo' && (isHubDataCursor(cursor) || (!cursor && pageSize >= 20))
 }
 
-export function normalizeHubDataSearch(body, codec, resultType, historicalCodec) {
+export function normalizeHubDataSearch(body, codec, resultType, historicalCodec, { instagramProvider = 'tikhub', instagramStrategy = false } = {}) {
   const { platform, query, pageSize, cursor } = body
-  if (platform === 'twitter' && cursor?.startsWith('mxnc1.')) {
+  if ((platform === 'twitter' || platform === 'instagram' && (instagramProvider === 'justone' || instagramStrategy)) && cursor?.startsWith('mxnc1.')) {
     // Decode only to preserve the old ledger identity. Replay/unknown checks
     // must run before refusing a new dispatch with a retired continuation.
     const historical = prepareNightAllCompatibilityTraversal({ operation: 'data-search',
@@ -29,6 +29,7 @@ export function normalizeHubDataSearch(body, codec, resultType, historicalCodec)
   const normalized = normalizeRawSearch({ platform, pageSize: providerPageSize,
     upstreamBody: { platform, query, count: providerPageSize, ...(cursor ? { cursor } : {}) } }, codec,
   { cursorScope: platform === 'twitter' ? { type: resultType, pageSize } : resultType,
+    instagramProvider, instagramStrategy, historicalCodec,
     ...(platform === 'twitter' ? { twitterSort: 'top' } : {}) })
   if (platform === 'twitter') normalized.providerRequest.standardSearch = true
   // Keep the exact pre-cutover data/search identity, including fresh/stable.
@@ -81,7 +82,8 @@ export function projectDataSearch(result, request) {
     status: request.platform === 'twitter' && raw.page.hasMore && items.length < request.pageSize ? 'partial' : raw.status,
     warnings: warnings.map(warning => ({ code: warning.code,
       message: warning.message ?? `${warning.count} Weibo post(s) still contain an incomplete preview; full text was not verified.` })),
-    meta: { capability: 'search_posts', capabilityStatus: 'ready', paginationMode: request.platform === 'twitter' ? 'cursor' : request.platform === 'weibo' ? 'page' : 'compound',
+    meta: { capability: 'search_posts', capabilityStatus: 'ready', paginationMode: request.platform === 'twitter'
+      || (request.platform === 'instagram' && request.provider === 'justone') ? 'cursor' : request.platform === 'weibo' ? 'page' : 'compound',
       providerCalls: raw.meta.upstreamCallCount } } }
   const projected = normalizeSearchContent(body, request.platform)
   if (!isNightAllDataSearchV1Envelope(projected)) throw new Error('invalid_hub_data_search_projection')

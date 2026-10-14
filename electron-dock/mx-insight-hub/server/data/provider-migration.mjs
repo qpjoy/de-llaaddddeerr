@@ -13,7 +13,7 @@ export function providerMigrationSnapshot() {
   const native = new Map(NATIVE_FORWARDING_ENDPOINTS.filter(row => !row.schemaVersion).map(row => [`${row.provider}:${row.id}`, row]))
   const rows = snapshot.endpoints.map(row => {
     const endpoint = native.get(`${row.provider}:${row.id}`)
-    const rawCutover = ['t.weibo_web_v2_fetch_realtime_search', 't.instagram_v3_general_search', 'j.facebook_post_search_v1'].includes(endpoint?.key)
+    const rawCutover = ['t.weibo_web_v2_fetch_realtime_search', 'j.facebook_post_search_v1'].includes(endpoint?.key)
     return { id: endpoint?.key || `deferred:${row.platform}:app-launch`, platform: row.platform,
       catalogKeys: DIRECTORY[row.platform] ? [`source-catalog-${DIRECTORY[row.platform]}`]
         : JUSTONE_MARKETPLACE_CATALOG[row.platform] ? [JUSTONE_MARKETPLACE_CATALOG[row.platform].sourceKey] : [],
@@ -22,11 +22,16 @@ export function providerMigrationSnapshot() {
       hubPath: endpoint?.hubPath || null, operation: endpoint?.operation || null,
       legacyStatus: endpoint?.key === 'j.facebook_post_search_v1' ? 'hub_search_cutover' : rawCutover ? 'hub_raw_subset' : 'existing_routes_unchanged', runtimeStatus: 'not_checked',
       boundary: endpoint?.key === 'j.facebook_post_search_v1' ? 'Facebook raw 与 data/search 由 Hub 策略自动选择 RapidAPI 或 JustOne；不转发 Night-All。单关键词，页大小 1–100；旧游标需重新开始，不支持的请求明确拒绝。其他 Facebook 操作不变。'
+        : endpoint?.key === 't.instagram_v3_general_search' ? '保留显式 TikHub 原生接口与历史记录；Instagram 标准 raw/data 搜索已改为 JustOne，旧 TikHub 搜索游标需从第一页重新开始。'
         : rawCutover ? '单关键词 raw 与 data/search 的 20–100 页大小请求由 Hub 直连，微博按需补全文，普通帖子不生成标题；旧游标和复杂形状仍走历史链路。操作、凭据和价格须就绪。'
         : endpoint ? '固定单接口；默认禁用，须逐接口授权、审核价格并启用。旧搜索投影与游标尚未切换。'
         : '启动应用的端点不属于数据读取，暂不接入。',
     }
   })
+  rows.push({ id: 'justone-instagram-search', platform: 'instagram', sourceLabel: 'JustOne', capabilities: ['search_posts'],
+    status: 'native_contract', hubPath: '/api/v1/data/search', operation: 'native.j.api_7968b9ed3e986618',
+    catalogKeys: ['source-catalog-0087'], legacyStatus: 'hub_search_cutover', runtimeStatus: 'not_checked',
+    boundary: 'Instagram raw 与 data/search 新请求使用 JustOne 综合搜索，保留现有平台授权与客户计费。单关键词、页大小 1–100；旧游标需重新开始，复杂形状明确拒绝；失败不自动切回 TikHub。接口门禁与实际可用性分别核验。' })
   rows.push({ id: 'rapid-facebook', platform: 'facebook', sourceLabel: 'RapidAPI', capabilities: ['search_posts'],
     status: 'native_contract', hubPath: '/api/v1/night-all/search/raw', operation: 'social.facebook.search',
     catalogKeys: ['source-catalog-0088'], legacyStatus: 'hub_search_cutover', runtimeStatus: 'not_checked',

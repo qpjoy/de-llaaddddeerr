@@ -1,0 +1,46 @@
+{
+  "code": 0,
+  "message": null,
+  "data": {
+    "data": {
+      "count": 1,
+      "items": [
+        {
+          "id": "9007199254740993001",
+          "code": "fixtureShortcode",
+          "caption": { "text": "匿名示例 #主题\n第二行😀" },
+          "user": {
+            "id": "9007199254740993002",
+            "username": "fixture_author",
+            "full_name": "匿名作者",
+            "profile_pic_url": "https://example.invalid/avatar.jpg"
+          },
+          "taken_at": 1792022400,
+          "taken_at_date": "2026-10-15T00:00:00Z",
+          "media_type": 2,
+          "type": "XDTMediaDict",
+          "is_video": true,
+          "thumbnail_url": "https://example.invalid/thumbnail.jpg",
+          "image_versions": {
+            "items": [
+              { "url": "https://example.invalid/image.jpg", "width": 1080, "height": 1920 }
+            ]
+          },
+          "video_versions": [
+            { "url": "https://example.invalid/video.mp4", "width": 1080, "height": 1920 }
+          ],
+          "video_url": "https://example.invalid/fallback.mp4",
+          "carousel_media": null,
+          "like_count": 7,
+          "comment_count": 2,
+          "share_count": 1,
+          "repost_count": 0,
+          "play_count": 21,
+          "view_count": null
+        }
+      ]
+    },
+    "pagination_token": "fixture+/opaque==&next=2#fragment"
+  },
+  "recordTime": null
+}

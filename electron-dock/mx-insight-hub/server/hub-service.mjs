@@ -4284,6 +4284,9 @@ export class HubService {
     if (operation === 'raw' && normalized.platform === 'facebook' && !this.externalRawSearch) {
       throw new AppError(503, 'facebook_search_unavailable', 'Facebook search is unavailable')
     }
+    if (operation === 'raw' && normalized.platform === 'instagram' && !this.externalRawSearch) {
+      throw new AppError(503, 'instagram_search_unavailable', 'Hub Instagram search is unavailable')
+    }
     if (operation === 'raw' && this.externalRawSearch && canRouteRawSearch(normalized)) {
       return this.externalRawSearch(context, { normalized, body, idempotencyKey, ...(signal ? { signal } : {}) })
     }
@@ -4748,6 +4751,9 @@ export class HubService {
     if (platform === 'facebook' && !this.externalDataSearch) throw new AppError(503, 'facebook_search_unavailable', 'Facebook search is unavailable')
     if (platform === 'twitter' && path === '/api/v1/data/search' && !this.externalDataSearch) {
       throw new AppError(503, 'twitter_search_unavailable', 'Hub Twitter search is unavailable')
+    }
+    if (platform === 'instagram' && path === '/api/v1/data/search' && !this.externalDataSearch) {
+      throw new AppError(503, 'instagram_search_unavailable', 'Hub Instagram search is unavailable')
     }
     if (path === '/api/v1/data/search' && this.externalDataSearch && canRouteDataSearch(upstreamBody)) {
       return this.externalDataSearch(context, { body, normalized: upstreamBody, idempotencyKey,

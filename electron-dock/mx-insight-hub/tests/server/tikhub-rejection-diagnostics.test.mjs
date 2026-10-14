@@ -9,6 +9,8 @@ import { inspectTikHubRejectionArchive, summarizeRejectionRequest, diagnoseTikHu
 const requestId = '10000000-0000-4000-8000-000000000001'
 const callId = '10000000-0000-4000-8000-000000000002'
 const upstreamId = '10000000-0000-4000-8000-000000000003'
+const instagramOperation = 'native.t.instagram_v3_general_search'
+const nativeContract = 'mx-insight-hub.native-forwarding.v1'
 const secret = 'private-credential-keyword-cursor-body'
 const noChargeClaim = "Request failed. Please retry. Check the docs below to verify your parameters, test with the default demo parameters, and send the response JSON to support. You won't be charged for this request."
 function archive(payload) {
@@ -84,6 +86,45 @@ test('archives require matching bytes, size, hash, bounded size and valid UTF-8 
   }
 })
 
+test('Instagram echoed params expose only fixed field types, string lengths and empty state after hash verification', () => {
+  const saved = archive({ detail: { code: 400, request_id: upstreamId, params: {
+    query: secret, next_max_id: '', rank_token: null, enable_metadata: true,
+    authorization: secret, [secret]: { token: secret },
+  } }, params: { query: 'wrong-root-location' } })
+  const bytes = Buffer.from(saved.body_bytes)
+  const report = inspectTikHubRejectionArchive(saved, { instagramSearch: true })
+  assert.equal(report.state, 'archive_verified')
+  assert.deepEqual(report.detail.params, { type: 'object', fields: {
+    query: { type: 'string', length: secret.length, empty: false },
+    next_max_id: { type: 'string', length: 0, empty: true },
+    rank_token: { type: 'null', length: null, empty: null },
+    enable_metadata: { type: 'boolean', length: null, empty: null },
+  } })
+  assert.doesNotMatch(JSON.stringify(report), /private-|authorization|wrong-root-location/)
+  assert.deepEqual(saved.body_bytes, bytes)
+  assert.equal(inspectTikHubRejectionArchive(saved).detail.params, undefined, 'existing XHS output remains unchanged')
+  assert.deepEqual(inspectTikHubRejectionArchive({ ...saved, body_sha256: '0'.repeat(64) }, { instagramSearch: true }),
+    { state: 'archive_integrity_failed' })
+  for (const params of [undefined, null, secret, [secret], { query: { [secret]: secret }, rank_token: [secret], enable_metadata: 'true' }]) {
+    const result = inspectTikHubRejectionArchive(archive({ detail: { params } }), { instagramSearch: true })
+    assert.deepEqual(Object.keys(result.detail.params.fields), ['query', 'next_max_id', 'rank_token', 'enable_metadata'])
+    assert.doesNotMatch(JSON.stringify(result), /private-/)
+    if (params == null || typeof params !== 'object' || Array.isArray(params)) {
+      assert.ok(Object.values(result.detail.params.fields).every(field => field.type === 'missing'))
+    } else {
+      assert.equal(result.detail.params.fields.query.type, 'object')
+      assert.equal(result.detail.params.fields.rank_token.type, 'array')
+      assert.deepEqual(result.detail.params.fields.enable_metadata, { type: 'string', length: 4, empty: false })
+    }
+  }
+  for (const payload of [{ params: { query: secret } }, { detail: { request: { params: { query: secret } } } },
+    { detail: JSON.stringify({ params: { query: secret } }) }]) {
+    const result = inspectTikHubRejectionArchive(archive(payload), { instagramSearch: true })
+    assert.equal(result.detail.params.type, 'missing', 'unreviewed nesting is never reinterpreted')
+    assert.doesNotMatch(JSON.stringify(result), /private-/)
+  }
+})
+
 test('request snapshot emits only known paths, numeric page fields and value-free keyword/cursor metadata', () => {
   const report = summarizeRejectionRequest({ ...snapshot, body: { ...snapshot.body, keyword: secret, count: 10 } })
   assert.equal(report.path, snapshot.path)
@@ -102,7 +143,8 @@ test('request snapshot emits only known paths, numeric page fields and value-fre
   assert.equal(unknown.cursorPresent, false)
 })
 
-function mockPool({ calls = 1, failQuery = false, missingRequest = false, message = secret, billed = null } = {}) {
+function mockPool({ calls = 1, failQuery = false, missingRequest = false, message = secret, billed = null,
+  requestOverrides = {}, callOverrides = {}, archivePayload = null } = {}) {
   const statements = []
   let released = false
   const client = { async query(sql, values) {
@@ -110,15 +152,15 @@ function mockPool({ calls = 1, failQuery = false, missingRequest = false, messag
     if (/FROM public.usage_requests/.test(sql)) {
       if (failQuery) throw new Error(secret)
       return { rows: missingRequest ? [] : [{ platform: 'xiaohongshu', status: 'committed', response_status: 502,
-        error_code: 'upstream_request_rejected', acquisition_request: snapshot }] }
+        error_code: 'upstream_request_rejected', acquisition_request: snapshot, ...requestOverrides }] }
     }
     if (/FROM external_platform.provider_calls/.test(sql)) return { rows: Array.from({ length: calls }, () => ({
       id: callId, operation: 'social.posts.search', endpoint_key: 'xiaohongshu.app-v2.search-notes.v1',
       contract_version: 'night-all.data-search.v1', outcome: 'rejected', http_status: 400,
       business_code: null, error_code: 'upstream_request_rejected', upstream_request_id: null, billed,
-      authorization: secret,
+      authorization: secret, ...callOverrides,
     })) }
-    if (/FROM control.external_platform_restricted_raw_responses/.test(sql)) return { rows: [archive({
+    if (/FROM control.external_platform_restricted_raw_responses/.test(sql)) return { rows: [archive(archivePayload ?? {
       detail: { code: 400, request_id: upstreamId, message }, token: secret,
     })] }
     return { rows: [] }
@@ -152,6 +194,35 @@ test('database diagnosis reads one exact request and bounded TikHub calls in a r
   assert.equal(report.evidence[0].billed, null)
   assert.equal(report.evidence[0].archive.detail.code, 400)
   assert.doesNotMatch(JSON.stringify(report), /private-|authorization/)
+})
+
+test('Instagram diagnosis recognizes only registered provenance and keeps unknown calls and routes restricted', async () => {
+  const options = { requestOverrides: { platform: 'instagram', acquisition_request: {
+    ...snapshot, path: '/api/v1/data/native/t.instagram_v3_general_search' } },
+  callOverrides: { operation: instagramOperation, endpoint_key: instagramOperation, contract_version: nativeContract },
+  archivePayload: { detail: { code: 400, request_id: upstreamId, params: { query: secret } } } }
+  const db = mockPool(options)
+  const report = await diagnoseTikHubRejection(db.pool, requestId)
+  assert.equal(report.platform, 'instagram')
+  assert.equal(report.request.path, options.requestOverrides.acquisition_request.path)
+  assert.equal(report.evidence[0].operation, instagramOperation)
+  assert.equal(report.evidence[0].endpoint, instagramOperation)
+  assert.equal(report.evidence[0].contract, nativeContract)
+  assert.equal(report.evidence[0].archive.detail.params.fields.query.length, secret.length)
+  assert.equal(report.evidence[0].billed, null)
+  assert.equal(report.evidence[0].businessCode, null, 'archive metadata never rewrites historical call metadata')
+  assert.equal(db.statements.at(-1).sql, 'ROLLBACK')
+  assert.ok(db.statements.every(({ sql }) => /^(BEGIN|SET LOCAL|SELECT|ROLLBACK)\b/.test(sql)))
+  assert.doesNotMatch(JSON.stringify(report), /private-/)
+  for (const field of ['operation', 'endpoint_key', 'contract_version']) {
+    const unknown = await diagnoseTikHubRejection(mockPool({ ...options,
+      requestOverrides: { platform: secret, acquisition_request: { ...snapshot, path: `/${secret}` } },
+      callOverrides: { ...options.callOverrides, [field]: secret } }).pool, requestId)
+    assert.equal(unknown.platform, 'other')
+    assert.equal(unknown.request.path, 'other')
+    assert.equal(unknown.evidence[0].archive.detail.params, undefined)
+    assert.doesNotMatch(JSON.stringify(unknown), /private-/)
+  }
 })
 
 test('supplier no-charge claim does not override any saved billing state or issue writes', async () => {
@@ -193,4 +264,42 @@ test('standalone source works through stdin without runtime imports and sanitize
     assert.deepEqual(JSON.parse(result.stderr), { error: expected })
     assert.doesNotMatch(result.stderr, /private-|Error:|at /)
   }
+})
+
+test('standalone stdin Instagram report preserves the restricted schema with an offline database fixture', () => {
+  const source = readFileSync(new URL('../../server/ops/diagnose-tikhub-rejection.mjs', import.meta.url), 'utf8')
+  const payload = JSON.stringify({ detail: { code: 400, request_id: upstreamId, params: {
+    query: secret, next_max_id: '', rank_token: secret, enable_metadata: 'true', password: secret,
+  } } })
+  const saved = archive(Buffer.from(payload))
+  const request = { platform: 'instagram', status: 'committed', error_code: 'upstream_request_rejected',
+    response_status: 502, acquisition_request: snapshot }
+  const call = { id: callId, operation: instagramOperation, endpoint_key: instagramOperation,
+    contract_version: nativeContract, outcome: 'rejected', http_status: 400, business_code: 400,
+    error_code: 'upstream_request_rejected', upstream_request_id: upstreamId, billed: null }
+  const importPg = "const { default: pg } = await import('pg')"
+  assert.ok(source.includes(importPg))
+  const offlinePg = `const pg = { Pool: class {
+    async connect() { return { release() {}, async query(sql) {
+      if (!/^(BEGIN|SET LOCAL|SELECT|ROLLBACK)\\b/.test(sql)) throw new Error('write_forbidden')
+      if (sql.includes('FROM public.usage_requests')) return { rows: [${JSON.stringify(request)}] }
+      if (sql.includes('FROM external_platform.provider_calls')) return { rows: [${JSON.stringify(call)}] }
+      if (sql.includes('FROM control.external_platform_restricted_raw_responses')) return { rows: [{
+        body_bytes: Buffer.from(${JSON.stringify(payload)}), body_size: ${saved.body_size}, body_sha256: ${JSON.stringify(saved.body_sha256)} }] }
+      return { rows: [] }
+    } } }
+    async end() {}
+  } }`
+  const result = spawnSync(process.execPath, ['--input-type=module', '-', requestId], {
+    input: source.replace(importPg, offlinePg), encoding: 'utf8',
+    env: { ...process.env, DATABASE_URL: 'offline-fixture-no-network' },
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stderr, '')
+  const report = JSON.parse(result.stdout)
+  assert.equal(report.platform, 'instagram')
+  assert.equal(report.evidence[0].archive.hashVerified, true)
+  assert.equal(report.evidence[0].archive.detail.params.fields.next_max_id.empty, true)
+  assert.equal(report.evidence[0].archive.detail.params.fields.enable_metadata.type, 'string')
+  assert.doesNotMatch(result.stdout, /private-|password|offline-fixture|Request failed/)
 })

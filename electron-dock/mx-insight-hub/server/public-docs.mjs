@@ -12,6 +12,8 @@ import { newsOpenApiPaths, newsGuide } from './contracts/news-discovery-docs.mjs
 import { xhsDiscoveryPaths, xhsDiscoveryPages, xhsDiscoveryGuide } from './contracts/xiaohongshu-discovery-docs.mjs'
 import { XHS_DISCOVERY_PRODUCTS } from '../shared/xiaohongshu-discovery.mjs'
 import { AGGREGATE_TYPES } from './data/aggregate-search.mjs'
+import { strategySearchGuide } from './data/strategy-search-guide.mjs'
+import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from './contracts/night-all-legacy.mjs'
 import { ENTERPRISE_DOC_ROUTES, enterpriseOpenApiPaths, enterpriseDocumentationHtml, enterpriseDocsPaths } from './contracts/enterprise-docs.mjs'
 import { ipRiskResponseSchema, ipRiskBatchSchema, ipRiskExample, ipRiskBatchExample, ipRiskDocumentationHtml, ipRiskHistoryPaths } from './contracts/ip-risk-docs.mjs'
 import { ecommerceFeedExample } from './examples/ecommerce-feed.mjs'
@@ -5358,6 +5360,7 @@ export const PUBLIC_DOCS_ROUTES = Object.freeze([
   {key:'web-search',path:'/docs/web-search',label:'Web Search',section:'数据产品'},
   ...WECHAT_PRODUCTS.map(product => ({ key: product.key, path: `/docs/${product.key}`, label: product.label, section: '微信数据服务' })),
   { key:'social-content', path:'/docs/social-content', label:'社媒与内容数据', section:'数据服务' },
+  { key:'strategy-search', path:'/docs/strategy-search', label:'策略搜索', section:'数据服务' },
   ...NATIVE_DOC_ROUTES,
   ...ENTERPRISE_DOC_ROUTES,
   { key:'ip-risk-subscription', path:'/docs/ip-risk-subscription', label:'IP 风险画像 · 空间订阅', section:'数据产品' },
@@ -6555,6 +6558,7 @@ const TENANT_PRODUCT_PATHS = {
   'native-data': Object.keys(nativeForwardingPaths),
   ...Object.fromEntries(XHS_DISCOVERY_PRODUCTS.map(product => [product.key, [product.path.slice('/api/v1'.length)]])),
   'aggregate-search': ['/data/aggregate/sources', '/data/aggregate/preview', '/data/aggregate/search'],
+  'strategy-search': ['/data/aggregate/search'],
   'ip-risk-subscription': Object.keys(ipRiskProductPaths),
   'ip-risk-v2': Object.keys(ipRiskV2Paths),
   'ip-risk': ['/data/ip/risk', '/data/ip/risk/batch', ...Object.keys(ipRiskHistoryPaths)],
@@ -6572,6 +6576,11 @@ const TENANT_PRODUCT_PATHS = {
 const tenantDocsRoute = (route, scopes) => {
   if (TENANT_HIDDEN_DOCS.has(route.key)) return false
   if (scopes == null || ['start', 'rules', 'errors'].includes(route.key)) return true
+  if (route.key === 'strategy-search') {
+    const supported = new Set([...Object.values(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS).flat(), 'wechat_search', 'wechat_mp', 'telegram'])
+    return scopes.some(scope => scope.platforms.some(platform => supported.has(platform))
+      || (scope.platforms.includes('social') && scope.capabilities.includes('native.wechat.search.search')))
+  }
   if (route.key === 'topic-reports' && !tenantDocumentPathAllowed('/data/topic-reports', scopes)) return false
   if (route.key === 'news-discovery' && !tenantDocumentPathAllowed('/data/news/search', scopes)) return false
   const paths = route.key.startsWith('enterprise') ? enterpriseDocsPaths(route.key) : route.key.startsWith('tikhub-') ? [`/xiaohongshu/app_v2/${route.key.slice(7)}`] : TENANT_PRODUCT_PATHS[route.key] || []
@@ -6611,6 +6620,7 @@ export function tenantOpenApiDocument(scopes) {
 }
 
 function tenantDocBody(route, scopes) {
+  if (route.key === 'strategy-search') return strategySearchGuide(scopes)
   if (route.key === 'web-search') return webSearchGuide
   if (route.nativeKey) return nativeEndpointGuide(route.key)
   if (WECHAT_PRODUCTS.some(product => product.key === route.key)) return nativeServiceGuide(route.key, path=>tenantDocumentPathAllowed(path, scopes))
@@ -6685,6 +6695,7 @@ export function publicDocsHtmlForPath(pathname, { tenant = false, scopes, procur
   if (route.key === 'ip-risk-v2') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${ipRiskV2Guide}</main>`)
   if (route.key === 'web-search') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${webSearchGuide}</main>`)
   if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${hubSocialGuide()}${nativeServiceGuide(route.key)}</main>`)
+  if (route.key === 'strategy-search') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${strategySearchGuide()}</main>`)
   if (route.key === 'ecommerce-treasure-box') html = html.replace('</main>', () => `${nativeServiceGuide(route.key)}</main>`)
   if (tenant) {
     html = html.replace(/<a href="(\/docs[^"#]*)(?:#[^"]*)?"[^>]*>([\s\S]*?)<\/a>/g, (link, path, text) => {

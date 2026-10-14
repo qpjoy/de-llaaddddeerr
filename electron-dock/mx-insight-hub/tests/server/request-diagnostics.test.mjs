@@ -56,7 +56,9 @@ test('confirmed JustOne 301 explains collection failure without exposing upstrea
     billed: false, reviewed_message: 'private-token upstream text', has_restricted_archive: true }]
   const { runs: [run] } = await lookupRequestDiagnostics(fixture({ status: 'committed', providers }).pool, id)
   assert.match(run.guidance, /301（采集失败）/u)
-  assert.match(run.guidance, /不会重新采集/u)
+  assert.match(run.guidance, /只读历史查询/u)
+  assert.match(run.guidance, /POST.*各接口幂等规则与回放窗口限制/u)
+  assert.match(run.guidance, /同一幂等标识也可能重新采集并再次计费/u)
   assert.match(run.guidance, /客户扣费分别查看/u)
   assert.equal(run.providerCalls[0].billed, false)
   assert.equal(run.providerCalls[0].message, null)
@@ -82,7 +84,9 @@ test('TikHub HTTP 400 explains failed delivery without inventing a parameter or 
   assert.match(run.guidance, /已保存失败响应/u)
   assert.match(run.guidance, /不能确定是参数问题还是上游内部错误/u)
   assert.match(run.guidance, /计费未知不等于免费/u)
-  assert.match(run.guidance, /不会重新采集/u)
+  assert.match(run.guidance, /只读历史查询/u)
+  assert.match(run.guidance, /POST.*各接口幂等规则与回放窗口限制/u)
+  assert.match(run.guidance, /同一幂等标识也可能重新采集并再次计费/u)
   assert.equal(run.replayAvailable, true)
   assert.equal(run.providerCalls[0].businessCode, null)
   assert.equal(run.providerCalls[0].upstreamRequestId, null)
@@ -98,6 +102,9 @@ test('TikHub HTTP 400 explains failed delivery without inventing a parameter or 
 test('committed error responses are distinguished from successful deliveries without changing replay', async () => {
   const failure = (await lookupRequestDiagnostics(fixture({ status: 'committed', providers: [] }).pool, id)).runs[0]
   assert.match(failure.guidance, /已保存失败响应/u)
+  assert.match(failure.guidance, /只读历史查询/u)
+  assert.match(failure.guidance, /POST.*各接口幂等规则与回放窗口限制/u)
+  assert.match(failure.guidance, /同一幂等标识也可能重新采集并再次计费/u)
   assert.equal(failure.replayAvailable, true)
   const success = (await lookupRequestDiagnostics(fixture({ status: 'committed', responseStatus: 200, providers: [] }).pool, id)).runs[0]
   assert.doesNotMatch(success.guidance, /已保存失败响应/u)

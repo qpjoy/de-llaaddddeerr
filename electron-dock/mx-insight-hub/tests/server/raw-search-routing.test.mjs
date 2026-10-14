@@ -7,7 +7,11 @@ import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
+import { StrategySearchRoutingStore } from '../../server/external-platforms/strategy-search-routing.mjs'
 import { TikHubAdapter } from '../../server/adapters/tikhub.mjs'
+import { JustOneAdapter } from '../../server/adapters/justone.mjs'
+import { classifyExternalPlatformIngest } from '../../server/workers/ingest.mjs'
+import { JUSTONE_INSTAGRAM_SEARCH_KEY } from '../../server/contracts/instagram-justone-search.mjs'
 import { RapidApiAdapter } from '../../server/adapters/rapidapi.mjs'
 import { nativeForwardingEndpoint } from '../../server/contracts/native-forwarding.mjs'
 import { createApp } from '../../server/app.mjs'
@@ -75,7 +79,8 @@ function legacy() {
 }
 
 async function harness({ platform = 'weibo', detail = 'success', enabled = true, detailEnabled = true,
-  hasMore = false, malformed = false, searchFails = false, rows = [preview], instagramData, twitterData, weiboData, weiboDetailData } = {}) {
+  hasMore = false, malformed = false, searchFails = false, rows = [preview], instagramData, twitterData, weiboData, weiboDetailData,
+  instagramProvider = 'tikhub', justOneCode = 0 } = {}) {
   const store = new MemoryStore(), calls = [], historical = [], logs = []
   const oldPayload = legacy()
   const oldDataPayload = oldDataSearch(platform)
@@ -89,12 +94,12 @@ async function harness({ platform = 'weibo', detail = 'success', enabled = true,
   await store.setPlatformGrant(consumer.id, platform, true)
   const key = await service.createApiKey({ consumerId: consumer.id, name: 'Original raw scope', platforms: [platform], capabilities: [] })
   const context = await service.authenticate(key.secret)
-  const providerKey = ['weibo', 'instagram'].includes(platform) ? 'tikhub' : 'rapidapi'
+  const providerKey = platform === 'instagram' ? instagramProvider : platform === 'weibo' ? 'tikhub' : 'rapidapi'
   const config = { configured: true, contractVerified: true, dispatchEnabled: true, timeoutMs: 100,
     freshTtlMs: 60000, staleTtlMs: 86400000, maxConcurrency: 3, maxConsumerConcurrency: 3, maxRequestsPerMinute: 100, billing: {} }
   const controls = new MemoryExternalPlatformControlStore()
   const operations = platform === 'weibo' ? [WEIBO_SEARCH_KEY, WEIBO_DETAIL_KEY].map(nativeForwardingEndpoint)
-    : platform === 'instagram' ? [nativeForwardingEndpoint(INSTAGRAM_SEARCH_KEY)] : [{ operation: 'social.content.search', endpointKey: 'twitter-aio.search' }]
+    : platform === 'instagram' ? [nativeForwardingEndpoint(providerKey === 'justone' ? JUSTONE_INSTAGRAM_SEARCH_KEY : INSTAGRAM_SEARCH_KEY)] : [{ operation: 'social.content.search', endpointKey: 'twitter-aio.search' }]
   for (const [i, endpoint] of operations.entries()) {
     if (!enabled || (i === 1 && !detailEnabled)) continue
     await controls.updatePolicy(providerKey, endpoint.operation, { expectedRevision: 1, desiredState: 'active', reason: 'Offline regression fixture',
@@ -102,8 +107,8 @@ async function harness({ platform = 'weibo', detail = 'success', enabled = true,
         monthlySubsidyBudgetMinor: 100000, unitCostMinorByEndpoint: { [endpoint.endpointKey]: 12 } } },
     { runtime: { config, credentialConfigured: true } })
   }
-  const Adapter = providerKey === 'tikhub' ? TikHubAdapter : RapidApiAdapter
-  const adapter = new Adapter({ apiKey: 'fixture-secret', timeoutMs: 100, fetchImpl: async url => {
+  const Adapter = providerKey === 'justone' ? JustOneAdapter : providerKey === 'tikhub' ? TikHubAdapter : RapidApiAdapter
+  const adapter = new Adapter({ apiKey: 'fixture-secret', token: 'fixture-secret', timeoutMs: 100, fetchImpl: async url => {
     calls.push(new URL(url))
     if (calls.at(-1).pathname.endsWith('fetch_post_detail')) {
       if (detail === 'unknown') throw new Error('connection lost after dispatch')
@@ -114,6 +119,10 @@ async function harness({ platform = 'weibo', detail = 'success', enabled = true,
         text: PREVIEW, text_raw: FULL, longText: { content: FULL } } })
     }
     if (searchFails) throw new Error('search transport outcome unknown')
+    if (platform === 'instagram' && providerKey === 'justone') return Response.json({ code: justOneCode, requestId: 'justone-instagram-receipt', message: null, recordTime: null,
+      data: (typeof instagramData === 'function' ? instagramData(calls.at(-1)) : instagramData) || {
+        data: { count: 1, items: [instagramPost] }, pagination_token: hasMore ? 'justone-next-page' : '',
+      } })
     if (platform === 'instagram') return Response.json({ code: 200, request_id: 'instagram-receipt', data: (typeof instagramData === 'function' ? instagramData(calls.at(-1)) : instagramData) || {
       status: 'ok', rank_token: 'search-rank-token', media_grid: { sections: [{ layout_content: { medias: [{ media: instagramPost }] } }],
         more_available: hasMore, ...(hasMore ? { next_max_id: 'next-instagram-page' } : {}) },
@@ -953,8 +962,8 @@ test('existing data-search requests replay original responses across cutover; fr
   }
 })
 
-test('historical small pages and old continuations clean titles in Hub while preserving source payloads and profile names', async () => {
-  for (const platform of ['weibo', 'instagram']) {
+test('Weibo historical small pages clean titles while preserving source payloads and profile names', async () => {
+  for (const platform of ['weibo']) {
     const h = await harness({ platform })
     const before = structuredClone(h.oldDataPayload)
     const result = await h.invokeData({ platform, query: '汽车', pageSize: 10 })
@@ -964,13 +973,13 @@ test('historical small pages and old continuations clean titles in Hub while pre
     assert.equal(h.historical.length, 1)
     assert.equal(h.calls.length, 0)
   }
-  const h = await harness({ platform: 'instagram' })
-  const body = { platform: 'instagram', query: '汽车', pageSize: 20 }
+  const h = await harness({ platform: 'weibo' })
+  const body = { platform: 'weibo', query: '汽车', pageSize: 20 }
   const codec = createNightAllCompatibilityCursorCodec(PEPPER, h.context.consumer.id)
-  const traversal = prepareNightAllCompatibilityTraversal({ operation: 'data-search', platform: 'instagram', upstreamBody: body, codec })
+  const traversal = prepareNightAllCompatibilityTraversal({ operation: 'data-search', platform: 'weibo', upstreamBody: body, codec })
   const old = structuredClone(h.oldDataPayload)
   Object.assign(old.data.pageInfo, { hasMore: true, nextCursor: 'old-night-all-token', cursorType: 'opaque' })
-  const wrapped = capNightAllDataSearchTraversal(old, { platform: 'instagram', page: 1, scope: traversal.scope, codec })
+  const wrapped = capNightAllDataSearchTraversal(old, { platform: 'weibo', page: 1, scope: traversal.scope, codec })
   await h.invokeData({ ...body, cursor: wrapped.data.pageInfo.nextCursor })
   assert.equal(h.historical[0].body.cursor, 'old-night-all-token')
   assert.equal(h.calls.length, 0)
@@ -1403,4 +1412,394 @@ test('raw and data-search forward cancellation through Hub routing before generi
     path: '/api/v1/data/search', idempotencyKey: 'data-cancel-routing', signal: controller.signal }), { code: 'request_cancelled' })
   assert.equal(observed.length, 2)
   assert.equal(h.calls.length, 0)
+})
+
+test('JustOne Instagram standard/raw routing preserves grants, customer meters and one immutable receipt', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    const h = await harness({ platform: 'instagram', instagramProvider: 'justone' })
+    await h.service.setTenantBillingProfile(h.context.tenant.id,
+      { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'test-admin')
+    await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline JustOne fixture' },
+      { idempotencyKey: 'justone-credit', actor: 'test-admin' })
+    const body = { platform: 'instagram', query: '#fashion/中文 &+', pageSize: 10 }
+    const first = await h[route](body, 'justone-instagram-first')
+    assert.equal(first.status, 200)
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.calls[0].origin, 'https://api.justoneapi.com')
+    assert.equal(h.calls[0].pathname, '/api/instagram/general-search/v1')
+    assert.deepEqual(Object.fromEntries(h.calls[0].searchParams), { token: 'fixture-secret', keyword: body.query, paginationToken: '' })
+    const item = route === 'invokeData' ? first.body.data.items[0] : JSON.parse(first.body.data.raw_data)[0]
+    assert.equal(item.text, instagramPost.caption.text)
+    assert.deepEqual((await h[route](body, 'justone-instagram-first')).body, first.body)
+    assert.equal(h.calls.length, 1)
+    const call = [...h.platformStore.calls.values()][0]
+    assert.equal(call.providerKey, 'justone')
+    assert.equal(call.operation, `native.${JUSTONE_INSTAGRAM_SEARCH_KEY}`)
+    assert.equal(call.businessCode, 0)
+    assert.equal(call.outcome, 'succeeded')
+    assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+    assert.equal(h.platformStore.ingestJobs.length, 1)
+    const charges = [...h.store.customerCharges.values()]
+    assert.equal(classifyExternalPlatformIngest(h.platformStore.ingestJobs[0].payload).hubRaw, true)
+    assert.equal(charges.length, 1)
+    assert.equal(charges[0].chargedMinor, 3)
+    assert.equal(charges[0].meterKey, route === 'invokeData' ? 'instagram' : 'raw')
+    assert.equal(h.historical.length, 0)
+  }
+})
+
+test('JustOne Instagram buffers oversized pages without extra purchases then passes the exact opaque token', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    const rows = Array.from({ length: 41 }, (_, i) => ({ ...instagramPost, pk: String(i + 1) }))
+    const h = await harness({ platform: 'instagram', instagramProvider: 'justone', instagramData: url => url.searchParams.get('paginationToken')
+      ? { data: { count: 1, items: [{ ...instagramPost, pk: '42' }] }, pagination_token: null }
+      : { data: { count: rows.length, items: rows }, pagination_token: 'next+opaque/=中文' } })
+    const body = { platform: 'instagram', query: 'fixture', pageSize: 20 }
+    const page = response => response.body.data.pageInfo || response.body.data.page
+    const ids = response => route === 'invoke' ? JSON.parse(response.body.data.raw_data).map(row => row.content_id) : response.body.data.items.map(row => row.id)
+    const first = await h[route](body, 'justone-overflow-first')
+    const secondBody = { ...body, cursor: page(first).nextCursor }
+    const second = await h[route](secondBody, 'justone-overflow-second')
+    assert.deepEqual((await h[route](secondBody, 'justone-overflow-second')).body, second.body)
+    const third = await h[route]({ ...body, cursor: page(second).nextCursor }, 'justone-overflow-third')
+    assert.deepEqual([...ids(first), ...ids(second), ...ids(third)], rows.map(row => row.pk))
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.platformStore.ingestJobs.length, 1)
+    assert.equal(h.platformStore.ingestJobs[0].payload.records.filter(row => row.objectType === 'post').length, 41)
+    const fourth = await h[route]({ ...body, cursor: page(third).nextCursor }, 'justone-overflow-fourth')
+    assert.deepEqual(ids(fourth), ['42'])
+    assert.equal(page(fourth).hasMore, false)
+    assert.equal(h.calls.length, 2)
+    assert.equal(h.calls[1].searchParams.get('paginationToken'), 'next+opaque/=中文')
+    assert.equal(h.historical.length, 0)
+  }
+})
+
+test('Instagram cutover replays TikHub deliveries exactly but retires old cursors before any new purchase', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    for (const buffered of [false, true]) {
+      const h = await harness({ platform: 'instagram', hasMore: true,
+        ...(buffered ? { instagramData: { items: Array.from({ length: 41 }, (_, i) => ({ ...instagramPost, pk: String(i + 1) })) } } : {}) })
+      const body = { platform: 'instagram', query: 'fixture', pageSize: 20 }
+      const first = await h[route](body, 'precutover-first')
+      const cursor = (first.body.data.pageInfo || first.body.data.page).nextCursor
+      const continuedBody = { ...body, cursor }
+      const second = await h[route](continuedBody, 'precutover-second')
+      const j = await harness({ platform: 'instagram', instagramProvider: 'justone' })
+      j.gateway.usageStore = h.store
+      j.platformStore.usageStore = h.store
+      h.service.externalRawSearch = (context, input) => j.gateway.searchRaw(context, input)
+      h.service.externalDataSearch = (context, input) => j.gateway.searchRaw(context, input)
+      assert.deepEqual((await h[route](body, 'precutover-first')).body, first.body)
+      assert.deepEqual((await h[route](continuedBody, 'precutover-second')).body, second.body)
+      await assert.rejects(h[route](continuedBody, 'postcutover-old-cursor'), { code: 'search_restart_required', status: 409 })
+      assert.equal(j.calls.length, 0)
+      await h[route](body, 'postcutover-first')
+      assert.equal(j.calls.length, 1)
+      assert.equal(h.calls.length, buffered ? 1 : 2)
+      assert.equal(h.historical.length, 0)
+    }
+  }
+})
+
+test('JustOne Instagram rejects unavailable, malformed and uncertain requests without TikHub or Night-All fallback', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    for (const options of [{ justOneCode: 400 }, { searchFails: true }, { instagramData: { unexpected: [] } }, { enabled: false }]) {
+      const h = await harness({ platform: 'instagram', instagramProvider: 'justone', ...options })
+      const first = await h[route]().catch(error => error)
+      assert.ok(first.status >= 400)
+      assert.equal(h.calls.length, options.enabled === false ? 0 : 1)
+      if (options.instagramData) {
+        const call = [...h.platformStore.calls.values()][0]
+        assert.equal(call.businessCode, 0)
+        assert.equal(call.billed, true)
+        assert.equal(call.outcome, 'succeeded_unusable')
+        assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+      }
+      await h[route]().catch(() => {})
+      assert.equal(h.calls.length, options.enabled === false ? 0 : 1)
+      assert.equal(h.historical.length, 0)
+    }
+    const h = await harness({ platform: 'instagram', instagramProvider: 'justone' })
+    h.service.externalRawSearch = null
+    h.service.externalDataSearch = null
+    await assert.rejects(h[route](), { code: 'instagram_search_unavailable' })
+    assert.equal(h.historical.length, 0)
+    assert.equal(h.calls.length, 0)
+  }
+})
+
+async function instagramStrategyHarness({ justone = {}, tikhub = {}, policy = {} } = {}) {
+  const j = await harness({ platform: 'instagram', instagramProvider: 'justone', ...justone })
+  const t = await harness({ platform: 'instagram', instagramProvider: 'tikhub', ...tikhub })
+  t.gateway.usageStore = j.store
+  t.platformStore.usageStore = j.store
+  const policyStore = new StrategySearchRoutingStore()
+  const gateways = { justone: j.gateway, tikhub: t.gateway }
+  const setPolicy = async patch => policyStore.update('search', 'instagram', {
+    mode: 'fixed', primaryProvider: 'justone', fallbackProvider: null,
+    expectedRevision: (await policyStore.get('search', 'instagram')).revision,
+    reason: 'Offline strategy fixture', ...patch,
+  })
+  if (Object.keys(policy).length) await setPolicy(policy)
+  j.service.externalRawSearch = j.service.externalDataSearch = (context, input) => j.gateway.searchRaw(context, input, { policyStore, gateways })
+  // PostgreSQL enforces one active procurement hold per usage request across
+  // suppliers. Separate memory stores must not hide overlapping fallback holds.
+  for (const current of [j, t]) {
+    const reserve = current.platformStore.reserveProviderCostWorkflow.bind(current.platformStore)
+    current.platformStore.reserveProviderCostWorkflow = async input => {
+      if ([j, t].some(h => [...h.platformStore.costReservations.values()].some(row => row.status === 'active'
+        && row.usageRequestId === input.usageRequestId))) {
+        throw new AppError(409, 'external_platform_cost_reservation_exists', 'Fixture mirrors PostgreSQL active usage uniqueness')
+      }
+      return reserve(input)
+    }
+  }
+  return { ...j, providers: { justone: j, tikhub: t }, policyStore, setPolicy }
+}
+
+const instagramPage = response => response.body.data.pageInfo || response.body.data.page
+const instagramBody = { platform: 'instagram', query: 'strategy fixture', pageSize: 20 }
+
+test('Instagram strategy fixed TikHub uses the original customer meter and one shared reservation', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    const h = await instagramStrategyHarness({ policy: { primaryProvider: 'tikhub' } })
+    await h.service.setTenantBillingProfile(h.context.tenant.id,
+      { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'test-admin')
+    await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline strategy fixture' },
+      { idempotencyKey: 'strategy-credit', actor: 'test-admin' })
+    const body = { ...instagramBody, pageSize: 10 }
+    const first = await h[route](body, 'strategy-fixed-tikhub')
+    assert.equal(first.status, 200)
+    assert.equal(h.providers.justone.calls.length, 0)
+    assert.equal(h.providers.tikhub.calls.length, 1)
+    assert.equal(h.store.requests.size, 1)
+    const charges = [...h.store.customerCharges.values()]
+    assert.equal(charges.length, 1)
+    assert.equal(charges[0].chargedMinor, 3)
+    assert.equal(charges[0].meterKey, route === 'invoke' ? 'raw' : 'instagram')
+    assert.deepEqual((await h[route](body, 'strategy-fixed-tikhub')).body, first.body)
+    assert.equal(h.providers.tikhub.calls.length, 1)
+  }
+})
+
+test('Instagram strategy provider-pinned cursors retain buffers and upstream tokens across default changes', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    for (const provider of ['justone', 'tikhub']) {
+      const rows = Array.from({ length: 41 }, (_, i) => ({ ...instagramPost, pk: String(i + 1) }))
+      const h = await instagramStrategyHarness({ policy: { primaryProvider: provider },
+        justone: { instagramData: url => url.searchParams.get('paginationToken')
+          ? { data: { count: 1, items: [{ ...instagramPost, pk: '42' }] }, pagination_token: null }
+          : { data: { count: 41, items: rows }, pagination_token: 'justone-opaque-next' } },
+        tikhub: { instagramData: url => url.searchParams.get('next_max_id')
+          ? { items: [{ ...instagramPost, pk: '42' }], more_available: false }
+          : { items: rows, more_available: true, next_max_id: 'tikhub-opaque-next', rank_token: 'tikhub-rank' } },
+      })
+      const first = await h[route](instagramBody, 'strategy-pin-first')
+      const codec = (route === 'invoke' ? createRawSearchCursorCodec : createDataSearchCursorCodec)(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}`)
+      assert.equal(codec.decode(instagramPage(first).nextCursor).provider, provider)
+      const other = provider === 'justone' ? 'tikhub' : 'justone'
+      await h.setPolicy({ primaryProvider: other })
+      const secondBody = { ...instagramBody, cursor: instagramPage(first).nextCursor }
+      const second = await h[route](secondBody, 'strategy-pin-second')
+      assert.deepEqual((await h[route](secondBody, 'strategy-pin-second')).body, second.body)
+      const third = await h[route]({ ...instagramBody, cursor: instagramPage(second).nextCursor }, 'strategy-pin-third')
+      assert.equal(h.providers[provider].calls.length, 1)
+      assert.equal(h.providers[other].calls.length, 0)
+      assert.equal(h.providers[provider].platformStore.ingestJobs.length, 1)
+      assert.equal(h.providers[provider].platformStore.ingestJobs[0].payload.records.filter(row => row.objectType === 'post').length, 41)
+      const fourth = await h[route]({ ...instagramBody, cursor: instagramPage(third).nextCursor }, 'strategy-pin-fourth')
+      assert.equal(instagramPage(fourth).hasMore, false)
+      assert.equal(h.providers[provider].calls.length, 2)
+      assert.equal(h.providers[other].calls.length, 0)
+      const query = h.providers[provider].calls[1].searchParams
+      assert.equal(query.get(provider === 'justone' ? 'paginationToken' : 'next_max_id'), `${provider}-opaque-next`)
+      if (provider === 'tikhub') assert.equal(query.get('rank_token'), 'tikhub-rank')
+      assert.equal(h.historical.length, 0)
+    }
+  }
+})
+
+test('Instagram strategy priority falls back only before dispatch with one customer settlement', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    for (const blocker of ['disabled', 'local-rate-limit']) {
+      const h = await instagramStrategyHarness({ justone: { enabled: blocker !== 'disabled' },
+        policy: { mode: 'priority', primaryProvider: 'justone', fallbackProvider: 'tikhub' } })
+      if (blocker === 'local-rate-limit') h.providers.justone.platformStore.acquireProviderRateLimit = async () => ({ allowed: false, retryAfterMs: 1000 })
+      await h.service.setTenantBillingProfile(h.context.tenant.id,
+        { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'test-admin')
+      await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline fallback fixture' },
+        { idempotencyKey: 'strategy-fallback-credit', actor: 'test-admin' })
+      const first = await h[route](instagramBody, 'strategy-priority-first')
+      assert.equal(first.status, 200)
+      assert.equal(h.providers.justone.calls.length, 0)
+      assert.equal(h.providers.tikhub.calls.length, 1)
+      assert.equal(h.store.requests.size, 1)
+      assert.equal(h.store.customerCharges.size, 1)
+      assert.equal([...h.store.customerCharges.values()][0].chargedMinor, 3)
+      assert.deepEqual((await h[route](instagramBody, 'strategy-priority-first')).body, first.body)
+      assert.equal(h.providers.tikhub.calls.length, 1)
+      assert.ok(Object.values(h.providers).every(p => [...p.platformStore.costReservations.values()].every(hold => hold.status !== 'active')))
+    }
+  }
+})
+
+test('Instagram strategy priority never retries upstream rejection, paid unusable or unknown outcomes', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    for (const justone of [{ justOneCode: 400 }, { searchFails: true }, { instagramData: { unexpected: [] } }]) {
+      const h = await instagramStrategyHarness({ justone,
+        policy: { mode: 'priority', primaryProvider: 'justone', fallbackProvider: 'tikhub' } })
+      const first = await h[route](instagramBody, 'strategy-failed-first').catch(error => error)
+      assert.ok(first.status >= 400)
+      await h[route](instagramBody, 'strategy-failed-first').catch(() => {})
+      assert.equal(h.providers.justone.calls.length, 1)
+      assert.equal(h.providers.tikhub.calls.length, 0)
+      assert.equal(h.store.requests.size, 1)
+      if (justone.searchFails) assert.equal([...h.store.requests.values()][0].status, 'unknown')
+      if (justone.instagramData) assert.equal([...h.platformStore.calls.values()][0].billed, true)
+    }
+  }
+})
+
+test('Instagram strategy pause and configuration database failure preserve exact saved replay', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    const h = await instagramStrategyHarness()
+    const first = await h[route](instagramBody, 'strategy-replay-first')
+    await h.setPolicy({ mode: 'paused' })
+    assert.deepEqual((await h[route](instagramBody, 'strategy-replay-first')).body, first.body)
+    await assert.rejects(h[route](instagramBody, 'strategy-paused-new'), { code: 'strategy_search_paused' })
+    let reads = 0
+    h.policyStore.get = async () => { reads++; throw new AppError(503, 'strategy_search_route_unavailable', 'Fixture database unavailable') }
+    assert.deepEqual((await h[route](instagramBody, 'strategy-replay-first')).body, first.body)
+    assert.equal(reads, 0)
+    await assert.rejects(h[route](instagramBody, 'strategy-database-new'), { code: 'strategy_search_route_unavailable' })
+    assert.equal(reads, 1)
+    assert.equal(h.providers.justone.calls.length, 1)
+    assert.equal(h.providers.tikhub.calls.length, 0)
+  }
+})
+
+test('Instagram strategy cannot substitute a provider for pinned unavailable continuations or missing buffers', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    for (const missingBuffer of [false, true]) {
+      const h = await instagramStrategyHarness({ justone: { hasMore: true,
+        ...(missingBuffer ? { instagramData: { data: { count: 21,
+          items: Array.from({ length: 21 }, (_, i) => ({ ...instagramPost, pk: String(i + 1) })) }, pagination_token: null } } : {}) } })
+      const first = await h[route](instagramBody, 'strategy-protected-first')
+      const cursor = instagramPage(first).nextCursor
+      await h.setPolicy({ mode: 'priority', primaryProvider: 'tikhub', fallbackProvider: 'justone' })
+      if (missingBuffer) h.platformStore.restrictedResponseArchives.clear()
+      else h.gateway.adapter = null
+      await assert.rejects(h[route]({ ...instagramBody, cursor }, 'strategy-protected-next'),
+        missingBuffer ? { code: 'search_page_unavailable' } : error => error.status >= 400)
+      assert.equal(h.providers.justone.calls.length, 1)
+      assert.equal(h.providers.tikhub.calls.length, 0)
+    }
+  }
+})
+
+test('Instagram strategy retires untagged historical cursors while retaining their immutable deliveries', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    for (const buffered of [false, true]) {
+      const h = await instagramStrategyHarness({ tikhub: { hasMore: true,
+        ...(buffered ? { instagramData: { items: Array.from({ length: 41 }, (_, i) => ({ ...instagramPost, pk: String(i + 1) })) } } : {}) } })
+      const strategy = h.service.externalRawSearch
+      h.service.externalRawSearch = h.service.externalDataSearch = (context, input) => h.providers.tikhub.gateway.searchRaw(context, input)
+      const first = await h[route](instagramBody, 'strategy-historical-first')
+      const nextBody = { ...instagramBody, cursor: instagramPage(first).nextCursor }
+      const second = await h[route](nextBody, 'strategy-historical-second')
+      h.service.externalRawSearch = h.service.externalDataSearch = strategy
+      await h.setPolicy({ primaryProvider: 'tikhub' })
+      assert.deepEqual((await h[route](instagramBody, 'strategy-historical-first')).body, first.body)
+      assert.deepEqual((await h[route](nextBody, 'strategy-historical-second')).body, second.body)
+      await assert.rejects(h[route](nextBody, 'strategy-retired-new'), { status: 409, code: 'search_restart_required' })
+      assert.equal(h.providers.justone.calls.length, 0)
+      assert.equal(h.providers.tikhub.calls.length, buffered ? 1 : 2)
+    }
+  }
+})
+
+test('Instagram strategy stops after one unavailable backup and never treats control database faults as fallback permission', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    for (const fault of ['both-disabled', 'control-database']) {
+      const h = await instagramStrategyHarness({ justone: { enabled: false }, tikhub: { enabled: false },
+        policy: { mode: 'priority', primaryProvider: 'justone', fallbackProvider: 'tikhub' } })
+      let backupAttempts = 0
+      const forward = h.providers.tikhub.gateway.searchRaw.bind(h.providers.tikhub.gateway)
+      h.providers.tikhub.gateway.searchRaw = (...args) => { backupAttempts++; return forward(...args) }
+      if (fault === 'control-database') h.controls.authorizeDispatch = async () => { throw new Error('fixture control database fault') }
+      await assert.rejects(h[route](instagramBody, 'strategy-availability-first'))
+      assert.equal(backupAttempts, fault === 'both-disabled' ? 1 : 0)
+      assert.equal(h.providers.justone.calls.length, 0)
+      assert.equal(h.providers.tikhub.calls.length, 0)
+      assert.equal(h.store.requests.size, 1)
+      assert.equal([...h.store.requests.values()][0].status, 'released')
+    }
+  }
+})
+
+test('Instagram strategy unknown replay is resolved before reading changed or unavailable policy', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    const h = await instagramStrategyHarness({ justone: { searchFails: true },
+      policy: { mode: 'priority', primaryProvider: 'justone', fallbackProvider: 'tikhub' } })
+    await assert.rejects(h[route](instagramBody, 'strategy-unknown-first'))
+    let reads = 0
+    h.policyStore.get = async () => { reads++; throw new Error('fixture policy database fault') }
+    await assert.rejects(h[route](instagramBody, 'strategy-unknown-first'), { code: 'request_outcome_unknown' })
+    assert.equal(reads, 0)
+    assert.equal(h.providers.justone.calls.length, 1)
+    assert.equal(h.providers.tikhub.calls.length, 0)
+    assert.equal([...h.store.requests.values()][0].status, 'unknown')
+  }
+})
+
+test('Instagram strategy cannot bypass an equal unknown or paid unusable dispatch via a primary-provider circuit', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    for (const justone of [{ searchFails: true }, { instagramData: { unexpected: [] } }]) {
+      const h = await instagramStrategyHarness({ justone,
+        policy: { mode: 'priority', primaryProvider: 'justone', fallbackProvider: 'tikhub' } })
+      h.platformStore.circuitFailureThreshold = 1
+      await assert.rejects(h[route](instagramBody, 'strategy-circuit-unresolved'))
+      const providerState = await h.platformStore.providerState()
+      const contractState = await h.platformStore.contractCircuitState('justone', 'instagram')
+      assert.ok(providerState?.circuitOpenUntil || contractState?.circuitOpenUntil)
+      await assert.rejects(h[route](instagramBody, 'strategy-circuit-different-key'), {
+        code: justone.searchFails ? 'request_outcome_unknown' : 'external_platform_response_unusable',
+      })
+      assert.equal(h.providers.justone.calls.length, 1)
+      assert.equal(h.providers.tikhub.calls.length, 0)
+      assert.equal([...h.store.requests.values()][0].status, justone.searchFails ? 'unknown' : 'committed')
+      // Unknown protection is query-specific. Contract quarantine also blocks
+      // different queries until the existing endpoint guard permits dispatch.
+      const other = h[route]({ ...instagramBody, query: 'different strategy fixture' }, 'strategy-circuit-other-query')
+      if (justone.searchFails) assert.equal((await other).status, 200)
+      else await assert.rejects(other, { code: 'external_platform_response_unusable' })
+      assert.equal(h.providers.tikhub.calls.length, justone.searchFails ? 1 : 0)
+      assert.equal(h.platformStore.leases.size, 0)
+    }
+  }
+})
+
+test('Instagram strategy holds the primary dispatch lease until its backup finishes', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    const h = await instagramStrategyHarness({ justone: { enabled: false },
+      policy: { mode: 'priority', primaryProvider: 'justone', fallbackProvider: 'tikhub' } })
+    let signalStarted, release
+    const started = new Promise(resolve => { signalStarted = resolve })
+    const waiting = new Promise(resolve => { release = resolve })
+    const adapter = h.providers.tikhub.gateway.adapter
+    const original = adapter.forwardNative.bind(adapter)
+    adapter.forwardNative = async (...args) => { signalStarted(); await waiting; return original(...args) }
+    const leader = h[route](instagramBody, 'strategy-concurrent-leader')
+    await started
+    try {
+      assert.equal(h.platformStore.leases.size, 1)
+      await assert.rejects(h[route](instagramBody, 'strategy-concurrent-follower'), { code: 'request_in_progress' })
+      assert.equal(h.providers.tikhub.platformStore.calls.size, 1)
+    } finally { release() }
+    assert.equal((await leader).status, 200)
+    assert.equal(h.platformStore.leases.size, 0)
+    assert.equal(h.providers.tikhub.platformStore.leases.size, 0)
+    assert.equal(h.providers.tikhub.calls.length, 1)
+  }
 })

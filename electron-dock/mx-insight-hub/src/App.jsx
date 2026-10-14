@@ -73,6 +73,7 @@ import { VirtualSupermarketPage } from './pages-virtual-supermarket.jsx'
 import { SourceCatalogPage } from './pages-source-catalog.jsx'
 import { ExternalPlatformsPage } from './pages-external-platforms.jsx'
 import { DataPlatformsPage } from './platform-search-policy.jsx'
+import { StrategySearchPage } from './strategy-search.jsx'
 import { NotificationsPage } from './pages-notifications.jsx'
 import { AgentProxyPage, AgentSequencePage } from './pages-agent-center.tsx'
 
@@ -395,6 +396,7 @@ const ROUTES = [
   { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/search', label: '数据搜索', description: '跨平台关键词检索与 API', icon: MagnifyingGlass, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: DataSearchPage, capability: 'apikey.read' },
+  { path: '/data-products/strategy-search', label: '策略搜索', description: '业务接口、目标平台与上游策略', icon: MagnifyingGlass, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: StrategySearchPage, capability: 'apikey.read' },
   { path: '/data-products/telegram', label: 'Telegram 会话', description: '频道、群组与完整对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/ecommerce-treasure-box', label: '电商数据', description: '商品搜索演示与交付证据', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EcommerceTreasureBoxPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/web-search', label: 'Web Search', description: '全网检索与多渠道搜索', icon: Globe, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: WebSearchPage, capability: 'apikey.read' },
@@ -413,7 +415,7 @@ const ROUTES = [
   { path: '/sources', label: '清洗任务计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/provisioning', label: '批量开通', description: '价格草稿、授权与启用', icon: Globe, group: '策略控制', component: ProvisioningPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/external-platforms', label: '上游供应商', description: '实时接口、成本与调用保障', icon: Globe, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: ExternalPlatformsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
-  { path: '/data-platforms', label: '数据平台', description: '平台服务、上游选择与额度策略', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DataPlatformsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-platforms', label: '数据平台', description: '平台目录与非搜索服务治理', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DataPlatformsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },
   { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read', platformAdmin: true },
   { path: '/agent/providers', label: 'LLM Provider', description: '模型账号、协议与密钥', icon: Key, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentProvidersRoute, capability: 'membership.write', platformAdmin: true },
@@ -1033,7 +1035,7 @@ export function App() {
           </div>
         </header>
         <main className={`qp-main qp-scrollbar mih-content${route.path === '/dashboard' || route.path === '/source-catalog' || route.path === '/external-platforms' || route.path === '/data-products/ecommerce-treasure-box' || route.path === '/data-products/xiaohongshu-note' || route.path === '/data-products/topic-insights' ? ' mih-content--dashboard' : ''}${route.path === '/data-products/ip-risk' ? ' mih-content--ip-risk' : ''}`} id="mih-main-content" tabIndex="-1">
-          <DemoProductPage Page={Page} pageProps={pageProps} enabled={route.navParent === DATA_PRODUCTS_NAV_KEY} admin={session?.kind === 'admin-token'} compact={['/data-products/news', '/data-products/search', '/data-products/ip-risk'].includes(route.path)} />
+          <DemoProductPage Page={Page} pageProps={pageProps} enabled={route.navParent === DATA_PRODUCTS_NAV_KEY && route.path !== '/data-products/strategy-search'} admin={session?.kind === 'admin-token'} compact={['/data-products/news', '/data-products/search', '/data-products/ip-risk'].includes(route.path)} />
         </main>
       </div>
       <ToastStack toasts={toasts} onDismiss={dismissToast} />

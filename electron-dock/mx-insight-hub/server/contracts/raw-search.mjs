@@ -5,21 +5,29 @@ import { normalizeHubSocialRequest } from './hub-social.mjs'
 import { normalizeNightAllLegacyPayload, NIGHT_ALL_COMPAT_DATASET_ID } from '../ingest/legacy-night-all.mjs'
 import { refreshMappedPayloadSha256 } from '../ingest/external/mapping.mjs'
 import { INSTAGRAM_SEARCH_KEY } from './instagram-search.mjs'
+import { JUSTONE_INSTAGRAM_SEARCH_KEY } from './instagram-justone-search.mjs'
 import { normalizeSearchContent } from './search-content.mjs'
+import { prepareNightAllCompatibilityTraversal } from '../data/night-all-pagination.mjs'
 
 export const RAW_SEARCH_VERSION = 'mx-insight-hub.raw-search.v1'
 export const RAW_SEARCH_PATH = '/api/v1/night-all/search/raw'
 export const RAW_SEARCH_DATASET = NIGHT_ALL_COMPAT_DATASET_ID
 export const WEIBO_SEARCH_KEY = 't.weibo_web_v2_fetch_realtime_search'
 export const WEIBO_DETAIL_KEY = 't.api_4f35621a9c07e539'
+export { JUSTONE_INSTAGRAM_SEARCH_KEY }
 export const isHubRawCursor = value => typeof value === 'string' && value.startsWith('mxraw1.')
 
-// Only verified request shapes move. Existing Night-All continuations remain
-// pinned there; a Hub continuation must never fall back to the old provider.
+// Migrated platforms fail closed in Hub; the remaining platforms move only
+// their verified shapes. No Hub continuation may fall back to Night-All.
 export function canRouteRawSearch({ platform, upstreamBody: body, pageSize }) {
-  if (platform === 'facebook') return true // Every shape stays in Hub; unsupported shapes fail before dispatch.
+  if (['facebook', 'instagram'].includes(platform)) return true // Unsupported shapes fail in Hub, never fall back to Night-All.
   if (!['weibo', 'twitter', 'instagram'].includes(platform)) return false
   if (isHubRawCursor(body.cursor)) return true
+  return supportsRawSearch({ platform, upstreamBody: body, pageSize })
+}
+
+function supportsRawSearch({ platform, upstreamBody: body, pageSize }, instagramProvider = 'tikhub', instagramStrategy = false) {
+  if (!['weibo', 'twitter', 'instagram'].includes(platform)) return false
   if (body.cursor || body.params?.cursor || body.page > 1) return false
   if (body.keywords != null || body.queries != null) return false
   if (body.params && Object.keys(body.params).length) return false
@@ -30,14 +38,29 @@ export function canRouteRawSearch({ platform, upstreamBody: body, pageSize }) {
   const values = [body.keyword, body.query].filter(value => value != null)
   return values.length === 1 && typeof values[0] === 'string' && values[0].trim().length > 0
     && (platform !== 'twitter' || !['.', '..'].includes(values[0].trim()))
-    && values[0].length <= 500 && (platform === 'twitter' || pageSize >= 20)
+    && values[0].length <= 500 && (platform === 'twitter' || pageSize >= (platform === 'instagram' && (instagramProvider === 'justone' || instagramStrategy) ? 1 : 20))
 }
 
-export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort } = {}) {
+const justOneCursor = value => typeof value === 'string' && value.trim().length > 0
+  && value.length <= 2048 && !value.includes('\u0000')
+
+export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort, instagramProvider = 'tikhub', instagramStrategy = false, historicalCodec } = {}) {
   const { platform, upstreamBody: body, pageSize } = normalized
+  const justone = platform === 'instagram' && instagramProvider === 'justone'
+  if (platform === 'instagram' && !['tikhub', 'justone'].includes(instagramProvider)) {
+    throw new AppError(400, 'invalid_raw_search', 'Unsupported Instagram provider')
+  }
+  if (platform === 'instagram' && (justone || instagramStrategy) && ((typeof body.cursor === 'string' && body.cursor.startsWith('mxnc1.'))
+    || (typeof body.params?.cursor === 'string' && body.params.cursor.startsWith('mxnc1.')))) {
+    const historical = prepareNightAllCompatibilityTraversal({ operation: 'raw', platform,
+      upstreamBody: body, codec: historicalCodec })
+    return { platform, pageSize, marketplace: platform, deliveryMode: 'live_only', restartRequired: true,
+      fingerprintBody: { contractVersion: 'mx-insight-hub.night-all-compat.v1', ...historical.upstreamBody } }
+  }
   const withoutCursor = { ...body }
   delete withoutCursor.cursor
-  if (!canRouteRawSearch({ ...normalized, upstreamBody: withoutCursor }) || body.page > 1) {
+  if (!supportsRawSearch({ ...normalized, upstreamBody: withoutCursor }, instagramProvider, instagramStrategy) || body.page > 1
+    || (platform === 'instagram' && (justone || instagramStrategy) && (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100))) {
     throw new AppError(400, 'invalid_raw_search', 'This request shape cannot use the Hub raw search continuation')
   }
   const query = (body.keyword ?? body.query).trim()
@@ -45,6 +68,8 @@ export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort
     includeDetails: body.includeDetails === true, disableAutoDetails: body.disableAutoDetails === true,
     maxEnrichItems: body.maxEnrichItems ?? 20, ...(cursorScope ? { cursorScope } : {}) })).digest('hex')
   let page = 1, providerCursor = null, buffer = null, expiresAt = Date.now() + 24 * 60 * 60_000
+  let cursorProvider = justone ? 'justone' : 'tikhub'
+  let taggedProvider = false
   if (body.cursor) {
     try {
       const state = codec.decode(body.cursor)
@@ -56,16 +81,33 @@ export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort
           || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(state.buffer.callId)
           || !Number.isSafeInteger(state.buffer.offset) || state.buffer.offset < 1
           || state.buffer.offset % pageSize !== 0 || !/^[0-9a-f]{64}$/.test(state.buffer.hash)))
-        || (platform === 'instagram' && !(state.buffer && state.providerCursor == null) && (!state.providerCursor || typeof state.providerCursor.next_max_id !== 'string'
+        || (platform === 'instagram' && state.provider != null && !['justone', 'tikhub'].includes(state.provider))
+        || (platform === 'instagram' && state.provider === 'justone' && (!justone
+          || (!(state.buffer && state.providerCursor == null) && !justOneCursor(state.providerCursor))))
+        || (platform === 'instagram' && state.provider !== 'justone' && !(state.buffer && state.providerCursor == null) && (!state.providerCursor || typeof state.providerCursor.next_max_id !== 'string'
           || !state.providerCursor.next_max_id || state.providerCursor.next_max_id.length > 2048
           || Object.keys(state.providerCursor).some(key => !['next_max_id', 'rank_token'].includes(key))
           || (state.providerCursor.rank_token != null && (typeof state.providerCursor.rank_token !== 'string' || state.providerCursor.rank_token.length > 2048))))) throw new Error('cursor')
       ;({ page, providerCursor = null, buffer = null, expiresAt } = state)
+      if (platform === 'instagram') {
+        cursorProvider = state.provider || 'tikhub'
+        taggedProvider = Boolean(state.provider)
+      }
     } catch { throw new AppError(400, 'invalid_cursor', 'Cursor is invalid, expired or belongs to another query/Key') }
+  }
+  if ((justone && cursorProvider !== 'justone') || (platform === 'instagram' && instagramStrategy && body.cursor && !taggedProvider)) {
+    // Preserve the exact old ledger identity before the gateway refuses a new
+    // dispatch. TikHub continuation fields must never become JustOne tokens.
+    return { platform, query, page, pageSize, provider: cursorProvider, providerCursor, buffer,
+      marketplace: platform, deliveryMode: 'live_only', restartRequired: true,
+      fingerprintBody: { contractVersion: 'mx-insight-hub.night-all-compat.v1', ...body } }
   }
   const providerRequest = platform === 'weibo'
     ? normalizeNativeForwardingRequest(WEIBO_SEARCH_KEY, { params: { query, page } })
-    : platform === 'instagram' ? normalizeNativeForwardingRequest(INSTAGRAM_SEARCH_KEY, { params: { query, enable_metadata: true, ...providerCursor } })
+    : platform === 'instagram' ? justone
+      ? normalizeNativeForwardingRequest(JUSTONE_INSTAGRAM_SEARCH_KEY, { params: { keyword: query,
+        ...(providerCursor ? { paginationToken: providerCursor } : {}) } })
+      : normalizeNativeForwardingRequest(INSTAGRAM_SEARCH_KEY, { params: { query, enable_metadata: true, ...providerCursor } })
       : normalizeHubSocialRequest('search', { platform, query, count: pageSize, ...(twitterSort ? { sort: twitterSort } : {}) })
   if (platform === 'twitter') {
     providerRequest.page = page
@@ -73,10 +115,17 @@ export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort
     providerRequest.providerCursor = providerCursor
     if (providerCursor) providerRequest.upstreamQuery.cursor = providerCursor
   }
-  const encodeNext = state => codec.encode({ version: RAW_SEARCH_VERSION, scope, expiresAt,
-    page: state.page, ...(state.providerCursor ? { providerCursor: state.providerCursor } : {}),
-    ...(state.buffer ? { buffer: state.buffer } : {}) })
+  const encodeNext = state => {
+    if (justone && !(state.buffer && state.providerCursor == null) && !justOneCursor(state.providerCursor)) {
+      throw new AppError(400, 'invalid_cursor', 'Instagram continuation requires a JustOne pagination token')
+    }
+    return codec.encode({ version: RAW_SEARCH_VERSION, scope, expiresAt,
+      ...(platform === 'instagram' && (justone || instagramStrategy) ? { provider: instagramProvider } : {}),
+      page: state.page, ...(state.providerCursor ? { providerCursor: state.providerCursor } : {}),
+      ...(state.buffer ? { buffer: state.buffer } : {}) })
+  }
   return { ...providerRequest, platform, query, page, pageSize, providerCursor, buffer, providerRequest, encodeNext,
+    ...(platform === 'instagram' && (justone || instagramStrategy) ? { provider: instagramProvider } : {}),
     enrichment: { enabled: body.includeDetails === true || body.disableAutoDetails !== true,
       all: body.includeDetails === true, maxItems: body.maxEnrichItems ?? 20 },
     // Same logical request and charge across both aliases, including old saved deliveries.

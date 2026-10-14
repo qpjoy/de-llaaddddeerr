@@ -28,7 +28,7 @@ import {
   SocialAccountContractError,
   normalizeSocialAccountSearchRequest,
 } from '../contracts/social-accounts.mjs'
-import { JustOneUpstreamError } from '../adapters/justone.mjs'
+import { JustOneUpstreamError, JustOneSucceededUnusableError } from '../adapters/justone.mjs'
 import { AppError } from '../core/errors.mjs'
 import { createExternalPlatformCursorCodec, createRawSearchCursorCodec, createDataSearchCursorCodec, createNightAllCompatibilityCursorCodec } from './cursor.mjs'
 import { describeDeliveryReason } from './delivery-reason.mjs'
@@ -36,6 +36,7 @@ import { acquisitionRequestSnapshot } from '../acquisitions/request-snapshot.mjs
 import { normalizeRawSearch, projectWeiboSearch, rawSearchRecords, RAW_SEARCH_DATASET, RAW_SEARCH_PATH, WEIBO_SEARCH_KEY } from '../contracts/raw-search.mjs'
 import { enrichWeiboRawSearch } from './raw-search-enrichment.mjs'
 import { INSTAGRAM_SEARCH_KEY, projectInstagramSearch } from '../contracts/instagram-search.mjs'
+import { JUSTONE_INSTAGRAM_SEARCH_KEY, projectJustOneInstagramSearch } from '../contracts/instagram-justone-search.mjs'
 import { normalizeHubDataSearch, projectDataSearch, projectTwitterDataSearch } from '../contracts/hub-data-search.mjs'
 import { normalizeFacebookSearch, projectFacebookSearch, facebookJustOneArchives, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY } from '../contracts/facebook-search.mjs'
 
@@ -655,15 +656,35 @@ export class ExternalPlatformGateway {
     })
   }
 
-  async searchRaw(context, { normalized, body, idempotencyKey, dataSearch = null, signal }) {
+  async searchRaw(context, input, { policyStore = null, gateways = null, reservation = null, selection = null, fallbackUsed = false } = {}) {
+    const { normalized, body, idempotencyKey, dataSearch = null, signal } = input
     const platform = normalized.platform
-    const nativeKey = platform === 'weibo' ? WEIBO_SEARCH_KEY : INSTAGRAM_SEARCH_KEY
+    const strategy = platform === 'instagram' && policyStore && gateways
+    const codec = (dataSearch ? createDataSearchCursorCodec : createRawSearchCursorCodec)(this.apiKeyPepper, `${context.consumer.id}:${context.apiKey.id}`)
+    const cursor = dataSearch ? normalized.cursor : normalized.upstreamBody?.cursor
+    let pinnedProvider = null
+    if (strategy && cursor) {
+      // Only an authenticated Hub cursor can select a provider. Full query,
+      // expiry and shape validation still runs in the receiving normalizer.
+      try {
+        const state = codec.decode(cursor)
+        if (['justone', 'tikhub'].includes(state.provider)) pinnedProvider = state.provider
+      } catch { /* Normalization reports invalid or retired cursors. */ }
+    }
+    const forward = (provider, reserved, usedFallback = fallbackUsed) => {
+      if (!gateways?.[provider]) throw new AppError(503, 'strategy_search_route_unavailable', 'The selected search supplier is unavailable')
+      return gateways[provider].searchRaw(context, input, { policyStore, gateways,
+        reservation: reserved, selection, fallbackUsed: usedFallback })
+    }
+    if (pinnedProvider && pinnedProvider !== this.providerKey) return forward(pinnedProvider, reservation)
+    const justOneInstagram = platform === 'instagram' && this.providerKey === 'justone'
+    const instagramProjection = justOneInstagram ? projectJustOneInstagramSearch : projectInstagramSearch
+    const nativeKey = platform === 'weibo' ? WEIBO_SEARCH_KEY : justOneInstagram ? JUSTONE_INSTAGRAM_SEARCH_KEY : INSTAGRAM_SEARCH_KEY
     const native = platform !== 'twitter'
     if (!this.operationControlStore || !['weibo', 'twitter', 'instagram'].includes(platform)
-      || this.providerKey !== (native ? 'tikhub' : 'rapidapi')) {
+      || this.providerKey !== (justOneInstagram ? 'justone' : native ? 'tikhub' : 'rapidapi')) {
       throw new AppError(503, 'raw_search_unavailable', 'Hub raw search is unavailable')
     }
-    const codec = (dataSearch ? createDataSearchCursorCodec : createRawSearchCursorCodec)(this.apiKeyPepper, `${context.consumer.id}:${context.apiKey.id}`)
     let request
     return this.#deliver(context, { body, idempotencyKey, signal, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH }, {
       operation: native ? `native.${nativeKey}` : 'social.content.search',
@@ -671,25 +692,74 @@ export class ExternalPlatformGateway {
       datasetId: dataSearch ? 'night-all.search.v1' : RAW_SEARCH_DATASET, replayReleasedFailures: true,
       replayWindowMs: dataSearch?.replayWindowMs,
       dataSearch: Boolean(dataSearch), nativeForwarding: native, billingUnknown: !native,
+      reservation,
       normalize: ({ policy }) => {
+        const historicalCodec = createNightAllCompatibilityCursorCodec(this.apiKeyPepper, context.consumer.id)
+        const options = { instagramProvider: justOneInstagram ? 'justone' : 'tikhub', instagramStrategy: Boolean(strategy), historicalCodec }
         request = dataSearch ? normalizeHubDataSearch(normalized, codec, dataSearch.resultType,
-          createNightAllCompatibilityCursorCodec(this.apiKeyPepper, context.consumer.id)) : normalizeRawSearch(normalized, codec)
+          historicalCodec, options) : normalizeRawSearch(normalized, codec, options)
         if (request.pageSize > policy.maxPageSize) throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
         return request
       },
-      route: async () => {
+      route: async reserved => {
         if (request.restartRequired) throw new AppError(409, 'search_restart_required',
-          'Twitter search now runs in Hub; restart from page 1 with a new Idempotency-Key. Historical Night-All cursors cannot be continued.')
+          platform === 'instagram'
+            ? 'Instagram search now uses a different provider; restart from page 1 with a new Idempotency-Key. Historical cursors cannot be continued.'
+            : 'Twitter search now runs in Hub; restart from page 1 with a new Idempotency-Key. Historical Night-All cursors cannot be continued.')
+        if (strategy) {
+          selection ||= await policyStore.get('search', 'instagram')
+          if (selection.mode === 'paused') throw new AppError(503, 'strategy_search_paused', 'Instagram search is paused')
+          if (!pinnedProvider && !fallbackUsed && selection.primaryProvider !== this.providerKey) {
+            return { result: await forward(selection.primaryProvider, reserved) }
+          }
+        }
         return null
       },
+      revalidateDispatch: strategy ? async () => {
+        if ((await policyStore.get('search', 'instagram')).mode === 'paused') {
+          throw new AppError(503, 'strategy_search_paused', 'Instagram search is paused')
+        }
+      } : null,
+      // Priority applies only before the first supplier dispatch. An upstream
+      // rejection, unknown result or paid unusable response never retries here.
+      unavailable: strategy ? async (reserved, availability) => {
+        if (pinnedProvider || cursor || fallbackUsed || selection?.mode !== 'priority'
+          || !availability?.safeToFallback) return null
+        const latest = await policyStore.get('search', 'instagram')
+        if (latest.mode === 'paused') throw new AppError(503, 'strategy_search_paused', 'Instagram search is paused')
+        if (latest.revision !== selection.revision) return null
+        let ownsFallbackLease = false
+        if (!availability.dispatchLeaseHeld) {
+          // Provider/circuit readiness is checked before the ordinary dispatch
+          // lease. Preserve its equal-request unknown/quarantine guard even
+          // when a different supplier would otherwise be ready to run.
+          const lease = await this.platformStore.acquireDispatchLease(availability.dispatchLease)
+          ownsFallbackLease = lease === true || lease?.kind === 'acquired'
+          if (!ownsFallbackLease) {
+            const code = lease?.kind === 'blocked' && lease.reason === 'unknown' ? 'request_outcome_unknown'
+              : lease?.kind === 'blocked' && lease.reason === 'succeeded_unusable' ? 'external_platform_response_unusable'
+                : 'request_in_progress'
+            throw new AppError(409, code, 'An equal search is pending or has an unresolved result; supplier fallback is blocked',
+              { upstreamDispatched: false, blockedUntil: lease?.blockedUntil || null })
+          }
+        }
+        try { return { result: await forward(selection.fallbackProvider, reserved, true) } }
+        finally {
+          if (ownsFallbackLease) await this.platformStore.releaseDispatchLease(availability.dispatchLease).catch(() => {
+            this.logger?.warn?.('[external-platform] search fallback lease release is unavailable')
+          })
+        }
+      } : null,
       buffered: async () => {
-        if (!request.buffer) return null
+        // Historical responses replay before this hook. Never interpret a
+        // retired TikHub buffer or continuation using the JustOne contract.
+        if (request.restartRequired || !request.buffer) return null
         const archived = await this.platformStore.instagramPageFor({ callId: request.buffer.callId,
           tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
           path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH })
         if (!archived) throw new AppError(409, 'search_page_unavailable', 'The saved search page is unavailable; restart explicitly with a new Idempotency-Key')
         let result
-        try { result = projectInstagramSearch(archived, request) }
+        try { result = instagramProjection(archived, request) }
         catch { throw new AppError(409, 'search_page_unavailable', 'The saved search page no longer matches this cursor; restart explicitly with a new Idempotency-Key') }
         if (dataSearch) result.publicBody = { ...projectDataSearch(result, request), meta: result.publicBody.meta }
         return { result, sourceCallId: request.buffer.callId }
@@ -702,7 +772,7 @@ export class ExternalPlatformGateway {
           if (platform === 'instagram') request.archiveCallId = callId
           try {
             const receipt = result.restrictedResponseArchive
-            result = (platform === 'weibo' ? projectWeiboSearch : projectInstagramSearch)(result, request)
+            result = (platform === 'weibo' ? projectWeiboSearch : instagramProjection)(result, request)
             if (result.acquiredItems?.length > request.pageSize
               && (!receipt || receipt.bodySize > 8388608)) {
               throw new Error('instagram_page_archive_required')
@@ -718,10 +788,12 @@ export class ExternalPlatformGateway {
             // Retain only known contract reasons, never arbitrary provider values or exception text.
             const normalizationCode = reasons.includes(error.message)
               ? error.message : `invalid_${platform}_search_contract`
-            throw new TikHubUpstreamError('Social search response could not be normalized', {
-              outcome: 'succeeded_unusable', billed: true, httpStatus: 200, businessCode: 200,
+            const evidence = {
+              outcome: 'succeeded_unusable', billed: true, httpStatus: 200, businessCode: justOneInstagram ? 0 : 200,
               errorCode: normalizationCode,
-            }, result)
+            }
+            if (justOneInstagram) throw new JustOneSucceededUnusableError(evidence, result.archiveObjects, result.restrictedResponseArchive)
+            throw new TikHubUpstreamError('Social search response could not be normalized', evidence, result)
           }
           if (platform === 'weibo') result = await enrichWeiboRawSearch({ gateway: this, context, request, result, delivery,
             credential, credentialRevision, providerCostControl, deadlineAt })
@@ -1187,7 +1259,14 @@ export class ExternalPlatformGateway {
     }
     if (!resolvedCredential.ready || circuitOpen || operationControlError) {
       if (plan.unavailable) {
-        const routed = await plan.unavailable(reservation)
+        const routed = await plan.unavailable(reservation, { dispatchLeaseHeld: false,
+          dispatchLease: { consumerId: context.consumer.id, operation: plan.operation, fingerprint: requestFingerprint,
+            endpointKey: normalized.endpointKey, contractVersion: normalized.endpointContractVersion,
+            ownerRequestId: activeRequestId, expiresAt: new Date(reservation.request.leaseExpiresAt),
+            retryOfRequestId: validatedRetryOfRequestId }, safeToFallback: !operationControlError
+          || (operationControlError instanceof AppError && ['external_platform_operation_blocked',
+            'external_platform_operation_disabled', 'external_platform_operation_paused',
+            'external_platform_operation_shadow', 'external_platform_operation_canary'].includes(operationControlError.code)) })
         if (routed) { ownsReservation = false; return routed.result }
       }
       if (allowStoredFallback && snapshot) {
@@ -1444,7 +1523,16 @@ export class ExternalPlatformGateway {
         // RapidAPI dispatch. The route itself preserves administrator mode and
         // provider-bound cursors; other operations have no unavailable route.
         if (plan.unavailable) {
-          const routed = await plan.unavailable(reservation)
+          // A usage request may have only one active procurement reservation.
+          // No call has started, so release this provider's hold before a
+          // priority route reuses the same customer request with its backup.
+          if (costReservation) {
+            await this.platformStore.releaseProviderCostWorkflow({
+              reservationId: costReservation.id, usageRequestId: activeRequestId,
+            })
+            costReservation = null
+          }
+          const routed = await plan.unavailable(reservation, { safeToFallback: true, dispatchLeaseHeld: ownsLease, dispatchLease })
           if (routed) { ownsReservation = false; return routed.result }
         }
         if (allowStoredFallback && snapshot) {

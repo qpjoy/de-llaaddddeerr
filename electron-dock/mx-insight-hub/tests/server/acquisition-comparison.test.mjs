@@ -60,6 +60,190 @@ test('stored request parameters cannot be overwritten by a later replay', async 
 
 const savedRun = (path, body, method = 'POST') => ({ ...run, requestEvidence: { ...run.requestEvidence, request: { method, path, body } } })
 
+// Matches getAdminDeliveredRun's owner/scope/requestEvidence/providerCall projection.
+const instagramRun = (body = { platform: 'instagram', query: '原查询', pageSize: 20 }) => ({
+  ...savedRun('/api/v1/data/search', body), scope: { platform: 'instagram' },
+  costLineage: { providerCalls: [{ usageRequestId: run.requestId, requestCall: true,
+    providerKey: 'tikhub', operation: 'native.t.instagram_v3_general_search',
+    endpointKey: 'native.t.instagram_v3_general_search', contractVersion: 'mx-insight-hub.native-forwarding.v1',
+    outcome: 'rejected', httpStatus: 400 }] },
+})
+
+test('Instagram comparison accepts only saved data-search parameters tied to its original native call', () => {
+  for (const parameters of [
+    { platform: 'instagram', query: ' 原查询 ', pageSize: 20 },
+    { platform: 'ig', query: '原查询', pageSize: 30, type: 'stable', cursor: 'mxds1.original-opaque-cursor' },
+    { platform: 'instagram', query: '原查询', pageSize: null, type: null, cursor: null },
+  ]) {
+    const original = instagramRun(parameters)
+    assert.equal(comparisonUnavailableReason(original), null)
+    const before = structuredClone(original)
+    for (const savedOnly of [false, true]) {
+      const attempt = createAcquisitionComparison(original, JSON.stringify(parameters), 'instagram-new-request', { savedOnly })
+      assert.equal(attempt.path, '/api/v1/data/search')
+      assert.equal(attempt.method, 'POST')
+      assert.equal(attempt.keyId, run.owner.apiKeyId)
+      assert.equal(attempt.parameterSource, 'saved')
+      assert.deepEqual(attempt.body, parameters)
+      const edited = JSON.stringify({ ...parameters, query: '手动重构' })
+      assert.throws(() => createAcquisitionComparison(original, edited, 'instagram-new-request', { savedOnly, verifiedBody: edited }), /保存的原参数/)
+    }
+    assert.throws(() => createAcquisitionComparison(original, JSON.stringify(parameters), run.requestEvidence.idempotencyKey))
+    assert.deepEqual(original, before)
+  }
+})
+
+test('Instagram comparison refuses missing snapshots, foreign or incomplete call evidence, and alternate routes', () => {
+  const original = instagramRun()
+  const evidence = original.costLineage.providerCalls[0]
+  for (const patch of [{ usageRequestId: 'another-request' }, { requestCall: false, deliveredSource: true },
+    { providerKey: 'rapidapi' }, { operation: 'social.posts.search' }, { endpointKey: 'native.other' },
+    { contractVersion: null }, { contractVersion: 'unverified-contract' }]) {
+    const invalid = { ...original, costLineage: { providerCalls: [{ ...evidence, ...patch }] } }
+    assert.ok(comparisonUnavailableReason(invalid))
+    assert.throws(() => createAcquisitionComparison(invalid, JSON.stringify(original.requestEvidence.request.body), 'instagram-new-request'))
+  }
+  for (const request of [null, { method: 'POST', path: '/api/v1/data/search', bodyOmitted: 'oversize' },
+    { method: 'POST', path: '/api/v1/data/search', body: { platform: 'instagram', query: '[redacted]' } },
+    ...['/api/v1/search/raw', '/api/v1/night-all/search/raw', '/api/v1/data/native/t.instagram_v3_general_search',
+      '/api/v1/data/search?provider=tikhub', 'https://untrusted.invalid/search'].map(path => ({ ...original.requestEvidence.request, path })),
+    { ...original.requestEvidence.request, method: 'GET' },
+  ]) {
+    const invalid = { ...original, requestEvidence: { ...original.requestEvidence, request } }
+    assert.ok(comparisonUnavailableReason(invalid))
+    assert.throws(() => createAcquisitionComparison(invalid, JSON.stringify(original.requestEvidence.request.body), 'instagram-new-request'))
+  }
+})
+
+test('unsupported Instagram saved parameters never obtain a credential or dispatch', async () => {
+  const valid = instagramRun().requestEvidence.request.body
+  for (const patch of [{ params: {} }, { provider: 'tikhub' }, { page: 2 }, { keyword: 'another' },
+    { platform: 'xiaohongshu' }, { query: '' }, { pageSize: 1 }, { pageSize: '20' }, { pageSize: 101 },
+    { type: 'note' }, { cursor: 'mxec2.xhs-cursor' }, { cursor: 'mxnc1.historical-cursor' }]) {
+    const original = instagramRun({ ...valid, ...patch })
+    const session = createAcquisitionComparisonSession(original)
+    await sendAcquisitionComparison(session, { token: 'admin', original }, {
+      adminApi: { demoCredential: () => assert.fail('invalid parameters must not obtain credentials') },
+      publicDataApi: { acquisitionComparison: () => assert.fail('invalid parameters must not dispatch') },
+    })
+    assert.ok(session.getSnapshot().error)
+    assert.deepEqual(session.getSnapshot().attempts, [])
+  }
+})
+
+test('Instagram uncertainty never reposts, even after the fresh replay window or with a changed retry state', async t => {
+  let now = Date.parse('2026-10-14T12:00:00Z')
+  t.mock.method(Date, 'now', () => now)
+  for (const type of [undefined, null, 'fresh', 'stable']) {
+    const original = instagramRun({ platform: 'instagram', query: '原查询', pageSize: 20, ...(type === undefined ? {} : { type }) })
+    const session = createAcquisitionComparisonSession(original)
+    const calls = []
+    let credentials = 0
+    const dependencies = {
+      adminApi: { demoCredential: async (_token, keyId) => {
+        credentials++
+        return { keyId, secret: 'temporary-instagram-key' }
+      } },
+      publicDataApi: { acquisitionComparison: async (...args) => {
+        calls.push(args)
+        throw new TypeError('transport interrupted after possible upstream success')
+      } },
+    }
+    const options = { token: 'admin', original, newIdempotencyKey: () => 'instagram-new-request' }
+    await sendAcquisitionComparison(session, options, dependencies)
+    const pending = session.getSnapshot().attempts[0]
+    assert.equal(pending.state, 'uncertain')
+    for (const elapsed of [0, 120_001, 24 * 60 * 60_000]) {
+      now += elapsed
+      await sendAcquisitionComparison(session, { ...options, newIdempotencyKey: () => assert.fail('no new attempt during uncertainty') }, dependencies)
+      await sendAcquisitionComparison(session, { ...options, retry: pending }, dependencies)
+      await sendAcquisitionComparison(session, { ...options, retry: { ...pending, state: 'not_sent' } }, dependencies)
+      assert.equal(calls.length, 1, 'same-key POST must not repeat a possibly completed paid call')
+      assert.equal(credentials, 1)
+      assert.equal(session.getSnapshot().attempts[0].state, 'uncertain')
+      assert.match(session.getSnapshot().error.message, /只读核查/)
+    }
+    assert.deepEqual(calls[0], ['temporary-instagram-key', original.requestEvidence.request.body,
+      'instagram-new-request', '/api/v1/data/search', 'POST'])
+    assert.equal(session.getSnapshot().attempts.length, 1)
+    assert.equal(JSON.stringify(session.getSnapshot()).includes('temporary-instagram-key'), false)
+  }
+})
+
+const instagramResponseId = '11111111-2222-4333-8444-555555555555'
+const instagramSuccess = { data: { contractVersion: 'night-all.data-search.v1', platform: 'instagram', query: '原查询',
+  items: [], pageInfo: { pageIndex: 1, pageSize: 20, returnedCount: 0, hasMore: false, nextCursor: null, cursorType: 'none' },
+  status: 'ok', warnings: [], meta: {} }, requestId: instagramResponseId }
+
+test('Instagram treats JSON proxy errors and malformed successful responses as uncertain and never unlocks another POST', async () => {
+  for (const [status, payload, evidence = {}] of [
+    [502, { message: 'Gateway timeout' }], [504, { message: 'Gateway timeout' }], [502, {}], [504, {}],
+    [502, { error: { code: 'gateway_timeout', message: 'Proxy error' } }],
+    [504, { requestId: instagramResponseId, error: { code: 'gateway_timeout', message: 'Proxy error' } }, { requestId: instagramResponseId }],
+    [200, {}], [200, []], [200, { data: [] }],
+    [200, { requestId: instagramResponseId, data: {} }, { requestId: instagramResponseId }],
+    [200, { ...instagramSuccess, data: { ...instagramSuccess.data, pageInfo: {} } }, { requestId: instagramResponseId }],
+    [200, instagramSuccess, { requestId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' }],
+  ]) {
+    const original = instagramRun()
+    const session = createAcquisitionComparisonSession(original)
+    let calls = 0
+    const dependencies = {
+      adminApi: { demoCredential: async (_token, keyId) => ({ keyId, secret: 'fixture-key' }),
+        acquisitionHistory: async () => { throw new Error('no committed receipt') } },
+      publicDataApi: { acquisitionComparison: async () => { calls++; return { status, payload, evidence } } },
+    }
+    const options = { token: 'admin', original, newIdempotencyKey: () => 'instagram-new-request' }
+    await sendAcquisitionComparison(session, options, dependencies)
+    assert.equal(session.getSnapshot().attempts[0].state, 'uncertain')
+    assert.deepEqual(session.getSnapshot().attempts[0].delivered.body, payload)
+    await sendAcquisitionComparison(session, { ...options, newIdempotencyKey: () => assert.fail('untrusted JSON must not unlock a new key') }, dependencies)
+    await sendAcquisitionComparison(session, { ...options, retry: session.getSnapshot().attempts[0] }, dependencies)
+    assert.equal(calls, 1)
+  }
+})
+
+test('Instagram confirms only its exact committed terminal history when a proxy response was ambiguous', async () => {
+  const original = instagramRun()
+  const committed = { requestId: instagramResponseId, status: 'committed', owner: original.owner,
+    requestEvidence: { idempotencyKey: 'instagram-new-request' },
+    delivered: { responseStatus: 200, responseBody: instagramSuccess } }
+  for (const [history, confirmed] of [[committed, true],
+    [{ ...committed, requestId: 'different-request' }, false],
+    [{ ...committed, status: 'reserved' }, false],
+    [{ ...committed, owner: { apiKeyId: 'different-key' } }, false],
+    [{ ...committed, requestEvidence: { idempotencyKey: 'different-idempotency' } }, false],
+    [{ ...committed, delivered: { responseStatus: 200, responseBody: {} } }, false],
+    [{ ...committed, delivered: { responseStatus: 503, responseBody: { error: { code: 'external_platform_outcome_unknown', message: 'Unknown' } } } }, false],
+  ]) {
+    const session = createAcquisitionComparisonSession(original)
+    let calls = 0
+    await sendAcquisitionComparison(session, { token: 'admin', original, newIdempotencyKey: () => 'instagram-new-request' }, {
+      adminApi: { demoCredential: async (_token, keyId) => ({ keyId, secret: 'fixture-key' }), acquisitionHistory: async () => history },
+      publicDataApi: { acquisitionComparison: async () => { calls++; return { status: 504,
+        payload: { message: 'Gateway timeout' }, evidence: { requestId: instagramResponseId } } } },
+    })
+    assert.equal(session.getSnapshot().attempts[0].state, confirmed ? 'received' : 'uncertain')
+    assert.equal(session.getSnapshot().attempts[0].delivered.status, 504, 'the observed browser response stays intact')
+    assert.equal(calls, 1, 'history verification never redispatches')
+    assert.equal(Boolean(session.getSnapshot().attempts[0].history), confirmed)
+  }
+})
+
+test('Instagram still recognizes correlated Hub success and terminal error envelopes without history', async () => {
+  for (const [status, payload] of [[200, instagramSuccess], [502, { requestId: instagramResponseId,
+    error: { code: 'external_platform_rejected', message: 'External data platform rejected the request' } }]]) {
+    const original = instagramRun()
+    const session = createAcquisitionComparisonSession(original)
+    await sendAcquisitionComparison(session, { token: 'admin', original, newIdempotencyKey: () => 'instagram-new-request' }, {
+      adminApi: { demoCredential: async (_token, keyId) => ({ keyId, secret: 'fixture-key' }),
+        acquisitionHistory: async () => { throw new Error('history temporarily unavailable') } },
+      publicDataApi: { acquisitionComparison: async () => ({ status, payload, evidence: { requestId: instagramResponseId } }) },
+    })
+    assert.equal(session.getSnapshot().attempts[0].state, 'received')
+  }
+})
+
 test('saved data-search, raw aliases and App V2 search retain their exact route, method, parameters and original Key', () => {
   const examples = [
     ['/api/v1/data/search', { platform: 'xiaohongshu', query: '旅行攻略', pageSize: 20, type: 'note' }],
@@ -161,6 +345,7 @@ test('a wrong original identity cannot dispatch; cache and idempotent success ne
   }
   assert.match(comparisonResultMessage({ delivered: { status: 502, evidence: { sourceMode: 'live' } } }), /仍未成功/u)
   assert.match(comparisonResultMessage({ delivered: { status: 200, evidence: { sourceMode: 'live' } } }), /本次实时请求成功/u)
+  assert.match(comparisonResultMessage({ delivered: { status: 504 }, history: { delivered: { responseStatus: 200, sourceMode: 'live' } } }), /浏览器收到 HTTP 504，账本记录的最终交付为 HTTP 200/u)
 })
 
 test('retry admission and transport errors cannot resolve an earlier unknown paid request or replace its request ID', async () => {

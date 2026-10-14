@@ -25,12 +25,16 @@ const TKEY = 't.douyin_search_fetch_video_search_v1'
 const body = { params: { keyword: '自行车', page: 1, sortType: '_2' } }
 const DATA = { rows: [{ id: 'one', title: '', body: '完整正文\n#话题', unknown: { nested: [false, 0, null] } }], nextCursor: 'opaque-vendor-cursor' }
 
-test('source inventory records the Facebook search cutover without inventing supplier health', () => {
+test('source inventory records Facebook and Instagram search cutovers without inventing supplier health', () => {
   const snapshot = providerMigrationSnapshot()
   assert.equal(snapshot.summary.sourceEndpoints, 51)
   assert.equal(snapshot.summary.nativeContracts, 50)
-  assert.equal(snapshot.summary.legacyCutovers, 2)
-  assert.ok(snapshot.rows.filter(row => row.legacyStatus === 'hub_search_cutover').every(row => row.platform === 'facebook'))
+  assert.equal(snapshot.summary.legacyCutovers, 3)
+  assert.ok(snapshot.rows.filter(row => row.legacyStatus === 'hub_search_cutover').every(row => ['facebook', 'instagram'].includes(row.platform)))
+  const instagram = snapshot.rows.find(row => row.id === 'justone-instagram-search')
+  assert.equal(instagram.operation, 'native.j.api_7968b9ed3e986618')
+  assert.equal(instagram.hubPath, '/api/v1/data/search')
+  assert.equal(snapshot.rows.find(row => row.id === 't.instagram_v3_general_search').legacyStatus, 'existing_routes_unchanged')
   assert.equal(snapshot.incompleteInventory, true)
   assert.equal(NATIVE_FORWARDING_ENDPOINTS.filter(r => r.provider === 'justone' && !r.schemaVersion).length, 11)
   assert.equal(NATIVE_FORWARDING_ENDPOINTS.filter(r => r.provider === 'tikhub' && !r.schemaVersion).length, 39)

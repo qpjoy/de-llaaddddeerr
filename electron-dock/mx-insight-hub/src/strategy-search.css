@@ -1,0 +1,36 @@
+.mih-strategy-search { display: grid; gap: 20px; min-width: 0; }
+.mih-strategy-interface-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.mih-strategy-interface-card { display: grid; grid-template-columns: 28px minmax(0, 1fr) 18px; gap: 12px; align-items: center; padding: 22px; border: 1px solid var(--qp-line); border-radius: 14px; background: var(--qp-bg-2); color: var(--qp-text); cursor: pointer; text-align: left; }
+.mih-strategy-interface-card > span { grid-column: 1 / -1; color: var(--qp-text-2); line-height: 1.7; }
+.mih-strategy-interface-card > svg:last-child { grid-column: 3; grid-row: 1; }
+.mih-strategy-interface-card.is-selected { border-color: var(--qp-primary); box-shadow: inset 0 0 0 1px var(--qp-primary); }
+.mih-strategy-interface-card:focus-visible, .mih-strategy-interface-nav button:focus-visible { outline: 2px solid var(--qp-primary); outline-offset: 3px; }
+.mih-strategy-contract, .mih-strategy-route-panel { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 24px; min-width: 0; }
+.mih-strategy-contract h2, .mih-strategy-route-panel h2, .mih-strategy-route-heading h3, .mih-strategy-management-heading h2 { margin: 0; }
+.mih-strategy-contract p, .mih-strategy-route-panel p, .mih-strategy-management-heading p { margin: 0; line-height: 1.7; color: var(--qp-text-2); }
+.mih-strategy-contract > header, .mih-strategy-management-heading, .mih-strategy-route-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.mih-strategy-paths { display: flex; flex-wrap: wrap; gap: 8px; }
+.mih-strategy-paths code { padding: 7px 10px; border: 1px solid var(--qp-line); border-radius: 7px; font-size: 12px; overflow-wrap: anywhere; }
+.mih-strategy-contract-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; margin: 0; }
+.mih-strategy-contract-grid dt { font-weight: 600; margin-bottom: 8px; }
+.mih-strategy-contract-grid dd { margin: 0; color: var(--qp-text-2); line-height: 1.7; }
+.mih-strategy-management { display: grid; gap: 20px; }
+.mih-strategy-management-heading > div { display: grid; gap: 8px; }
+.mih-strategy-route-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 18px; align-items: start; }
+.mih-strategy-interface-nav { display: grid; gap: 8px; }
+.mih-strategy-interface-nav button { display: grid; gap: 8px; text-align: left; border: 1px solid var(--qp-line); border-radius: 10px; padding: 16px; color: var(--qp-text); background: var(--qp-bg-2); cursor: pointer; }
+.mih-strategy-interface-nav button.is-selected { border-color: var(--qp-primary); }
+.mih-strategy-interface-nav small { color: var(--qp-text-3); }
+.mih-strategy-policy-form { display: grid; gap: 18px; padding-top: 18px; border-top: 1px solid var(--qp-line); }
+.mih-strategy-provider-links { display: flex; flex-wrap: wrap; gap: 16px; }
+.mih-strategy-readonly { display: grid; gap: 8px; padding: 16px; border: 1px solid var(--qp-line); border-radius: 10px; }
+.mih-strategy-search .mih-table-wrap { max-width: 100%; overflow-x: auto; }
+@media (max-width: 900px) {
+  .mih-strategy-interface-cards { grid-template-columns: 1fr; }
+  .mih-strategy-route-layout { grid-template-columns: 1fr; }
+  .mih-strategy-interface-nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 600px) {
+  .mih-strategy-contract, .mih-strategy-route-panel { padding: 18px; }
+  .mih-strategy-contract-grid, .mih-strategy-interface-nav { grid-template-columns: 1fr; }
+}

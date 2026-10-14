@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react'
 import { adminApi } from './api.js'
 import { DropdownField, ErrorState, Field, PageHeading, formatDate, useRemoteData } from './components.jsx'
 import { EcommerceRoutingPage } from './ecommerce-routing.jsx'
+import { strategySearchLink } from './strategy-search-model.js'
 
 const MODES = { auto: '自动：RapidAPI → JustOne', rapidapi: '仅 RapidAPI', justone: '仅 JustOne', paused: '暂停搜索', existing: '沿用现有路由' }
 const REASONS = { quota_exhausted: '额度已用尽', rate_limited: '短时限流', recovery_probe: '等待恢复确认' }
@@ -9,7 +10,7 @@ const PLATFORM_LABELS = { facebook: 'Facebook', xiaohongshu: '小红书', weibo:
   bilibili: '哔哩哔哩', zhihu: '知乎', wechat_mp: '微信公众号', wechat_search: '微信搜一搜', tiktok: 'TikTok',
   twitter: 'Twitter / X', instagram: 'Instagram', youtube: 'YouTube', reddit: 'Reddit', linkedin: 'LinkedIn', telegram: 'Telegram' }
 
-function FacebookForm({ token, row, onSaved, notify }) {
+export function FacebookSearchPolicyForm({ token, row, onSaved, notify }) {
   const [mode, setMode] = useState(row.mode)
   const [limit, setLimit] = useState(row.monthly_limit)
   const [interval, setInterval] = useState(row.probe_interval_hours)
@@ -30,7 +31,7 @@ function FacebookForm({ token, row, onSaved, notify }) {
     } catch (e) { setError(e) } finally { setBusy(false) }
   }
   return <form onSubmit={save} className="mih-page">
-    <h3>Raw Search · 上游选路</h3>
+    <h3>关键词搜索 · Facebook 额度与选路</h3>
     <div className="mih-external-two-column">
       <DropdownField label="上游供应商" value={mode} disabled={busy} onChange={setMode}
         options={Object.entries(MODES).filter(([key]) => key !== 'existing').map(([value, label]) => ({ value, label }))} />
@@ -59,35 +60,30 @@ export function DataPlatformsPage(props) {
   </>
 }
 
-function SocialDataPlatformsPage({ token, query, setQuery, onUnauthorized, notify }) {
+function SocialDataPlatformsPage({ token, query, setQuery, onUnauthorized }) {
   const load = useCallback(() => adminApi.platformSearchPolicies(token), [token])
   const remote = useRemoteData(load, onUnauthorized)
   const selected = query.get('platform') || 'facebook'
   const row = remote.data?.items?.find(row => row.platform === selected)
   return <>
-    <PageHeading title="数据平台" description="按 Facebook、小红书、微博等内容平台管理接入服务与默认上游。" loading={remote.loading} onRefresh={remote.refresh} />
+    <PageHeading title="数据平台" description="查看内容平台目录和治理入口；搜索接口的供应商配置已归入“策略搜索”数据产品。" loading={remote.loading} onRefresh={remote.refresh} />
     <section className="qp-panel mih-panel" style={{ gridTemplateColumns: 'minmax(0, 1fr)' }}>
       <div style={{ padding: 16 }}>
         {remote.error ? <ErrorState error={remote.error} /> : null}
-        {!remote.data && !remote.error ? <p>加载策略…</p> : null}
+        {!remote.data && !remote.error ? <p>加载平台目录…</p> : null}
         {remote.data?.items?.length ? <DropdownField label="数据平台" value={selected} onChange={value => setQuery({ platform: value })}
           options={remote.data.items.map(item => ({ value: item.platform, label: PLATFORM_LABELS[item.platform] || item.platform }))} /> : null}
         {row ? <>
           <h2>{PLATFORM_LABELS[row.platform] || row.platform}</h2>
           <p>目录编号：{row.catalog_key}</p>
-          {row.platform === 'facebook' ? <>
-            <p>帖子搜索由 Hub 处理。默认优先使用 RapidAPI 周期额度，再使用 JustOne；也可在此固定选择一个供应商。业务请求使用已保存的策略。</p>
-            <FacebookForm key={`${row.platform}:${row.revision}`} {...{ token, notify, row }} onSaved={remote.refresh} />
-            <p><a href="#/external-platforms?provider=rapidapi">RapidAPI 凭据与采购配置</a> · <a href="#/external-platforms?provider=justone">JustOne 凭据与采购配置</a></p>
-            <details><summary>服务接口与兼容关系</summary>
-              <p><code>/api/v1/night-all/search/raw</code> 与 <code>/api/v1/search/raw</code> 返回 raw 合同；<code>/api/v1/data/search</code> 返回统一内容合同。三个入口共用 Facebook 搜索处理器与本页策略。</p>
-              <p>正文保持完整；没有独立标题的帖子不从首句生成标题。搜索结果异步写入 canonical，已存数据查询不会再次采集。Facebook 账号和 crawl 操作仍沿用原有链路。</p>
-            </details>
-          </> : <p>此平台沿用现有接口与路由。当前可配置的 Raw Search 供应商策略仅开放 Facebook。</p>}
+          <p>关键词搜索、账号内容与账号资料的路由分别展示在“策略搜索”。接口迁移与供应商可用性按业务能力独立判断。</p>
+          <p><a className="qp-button qp-button--primary" href={strategySearchLink(row.platform)}>打开 {PLATFORM_LABELS[row.platform] || row.platform} 搜索策略 →</a></p>
+          <p><a href="#/source-catalog">平台覆盖与治理目录 ↗</a> · <a href="#/external-platforms">供应商凭据、运行状态与采购配置 ↗</a></p>
+          <p>账号、评论及其他非搜索能力继续遵循各自接口与平台授权；本页不提供统一覆盖这些能力的供应商开关。</p>
         </> : remote.data ? <p>{remote.data.items?.length ? '未找到所选数据平台。' : '尚未安装平台策略迁移。'}</p> : null}
-        <details><summary>全部数据平台与当前路由</summary><div className="qp-table-wrap mih-table-wrap" style={{ maxWidth: '100%', overflowX: 'auto' }}><table className="qp-table mih-table">
-          <thead><tr><th>数据平台</th><th>目录编号</th><th>上游策略</th></tr></thead>
-          <tbody>{(remote.data?.items || []).map(item => <tr key={item.platform}><td><button className="qp-button qp-button--ghost" type="button" onClick={() => setQuery({ platform: item.platform })}>{PLATFORM_LABELS[item.platform] || item.platform}</button></td><td>{item.catalog_key}</td><td>{MODES[item.mode]}</td></tr>)}</tbody>
+        <details><summary>全部内容平台目录</summary><div className="qp-table-wrap mih-table-wrap" style={{ maxWidth: '100%', overflowX: 'auto' }}><table className="qp-table mih-table">
+          <thead><tr><th>数据平台</th><th>目录编号</th><th>搜索业务接口</th></tr></thead>
+          <tbody>{(remote.data?.items || []).map(item => <tr key={item.platform}><td><button className="qp-button qp-button--ghost" type="button" onClick={() => setQuery({ platform: item.platform })}>{PLATFORM_LABELS[item.platform] || item.platform}</button></td><td>{item.catalog_key}</td><td><a href={strategySearchLink(item.platform)}>查看策略 →</a></td></tr>)}</tbody>
         </table></div></details>
       </div>
     </section>

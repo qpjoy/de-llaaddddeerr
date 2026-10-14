@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { test } from 'node:test'
-import { TikHubAdapter } from '../../server/adapters/tikhub.mjs'
-import { normalizeNativeForwardingRequest } from '../../server/contracts/native-forwarding.mjs'
+import { TikHubAdapter, TikHubUpstreamError } from '../../server/adapters/tikhub.mjs'
+import { nativeForwardingEndpoint, normalizeNativeForwardingRequest, NATIVE_FORWARDING_VERSION } from '../../server/contracts/native-forwarding.mjs'
+import { normalizeRawSearch } from '../../server/contracts/raw-search.mjs'
+import { projectInstagramSearch } from '../../server/contracts/instagram-search.mjs'
+import { createRawSearchCursorCodec } from '../../server/external-platforms/cursor.mjs'
+import legacyInventory from '../../server/data/night-all-provider-inventory.json' with { type: 'json' }
+import officialContracts from '../../server/data/provider-official-contracts.json' with { type: 'json' }
 
 // Anonymous shape fixtures only. The flat profile was observed in paid request
 // f4362d8b-26e9-41d2-ba25-faa48fcc7567. Terminal comment/reply shapes were
@@ -29,6 +34,7 @@ async function replay({ key, params, data, path, expectedQuery }) {
     assert.equal(options.body, undefined)
     const parsed = new URL(url)
     assert.equal(parsed.pathname, path)
+    assert.equal(parsed.hash, '', 'hashtags and cursor characters remain query data, never a URL fragment')
     assert.deepEqual(Object.fromEntries(parsed.searchParams), expectedQuery)
     return new Response(wire, { headers: { 'content-type': 'application/json' } })
   } })
@@ -40,6 +46,126 @@ async function replay({ key, params, data, path, expectedQuery }) {
   assert.deepEqual(result.records, [])
   assert.equal(result.restrictedResponseArchive.bodyText, wire)
   assert.equal(result.restrictedResponseArchive.bodySha256, createHash('sha256').update(wire).digest('hex'))
+}
+
+const instagramSearchKey = 't.instagram_v3_general_search'
+const instagramSearchPath = '/api/v1/instagram/v3/general_search'
+
+test('Instagram legacy general-search identity retains the exact official four-parameter contract', () => {
+  const endpoint = nativeForwardingEndpoint(instagramSearchKey)
+  const official = officialContracts.endpoints.find(row => row.provider === 'tikhub' && row.method === 'GET' && row.path === instagramSearchPath)
+  const contract = parameters => parameters.map(({ name, required, type, ...rest }) => ({ name, required, type,
+    ...(Object.hasOwn(rest, 'default') ? { default: rest.default } : {}) }))
+  const expected = [
+    { name: 'query', required: true, type: 'string' },
+    { name: 'next_max_id', required: false, type: 'string' },
+    { name: 'rank_token', required: false, type: 'string' },
+    { name: 'enable_metadata', required: false, type: 'boolean', default: true },
+  ]
+  assert.deepEqual(contract(official.parameters), expected)
+  assert.deepEqual(contract(endpoint.parameters), expected)
+  const request = normalizeNativeForwardingRequest(instagramSearchKey, { params: { query: 'justin' } })
+  assert.equal(endpoint.key, instagramSearchKey)
+  assert.equal(endpoint.operation, `native.${instagramSearchKey}`)
+  assert.equal(endpoint.endpointKey, `native.${instagramSearchKey}`)
+  assert.equal(request.endpointPath, instagramSearchPath)
+  assert.equal(request.method, 'GET')
+  assert.equal(request.endpointVersion, legacyInventory.version)
+  assert.equal(request.contractVersion, NATIVE_FORWARDING_VERSION)
+  assert.deepEqual(request.upstreamQuery, { query: 'justin' }, 'the documented default must not be injected into legacy request identity')
+  assert.deepEqual(request.fingerprintBody, { contractVersion: NATIVE_FORWARDING_VERSION, key: instagramSearchKey,
+    params: { query: 'justin' }, deliveryMode: 'live_only' })
+})
+
+test('Instagram official metadata does not change accepted legacy scalar fingerprints or GET semantics', async () => {
+  // Legacy normalization precedes idempotency lookup. Tightening it here would
+  // block exact historical replay; published metadata does not rewrite receipts.
+  for (const params of [{ query: 123, enable_metadata: 'true' },
+    { query: 'justin', enable_metadata: 'false' },
+    { query: true, next_max_id: 123, rank_token: false, enable_metadata: 0 }]) {
+    const request = normalizeNativeForwardingRequest(instagramSearchKey, { params })
+    assert.deepEqual(request.upstreamQuery, params)
+    assert.deepEqual(request.fingerprintBody, { contractVersion: NATIVE_FORWARDING_VERSION, key: instagramSearchKey,
+      params, deliveryMode: 'live_only' })
+    assert.equal(request.endpointVersion, legacyInventory.version)
+    await replay({ key: instagramSearchKey, params, path: instagramSearchPath,
+      expectedQuery: Object.fromEntries(Object.entries(params).map(([key, value]) => [key, String(value)])),
+      data: { status: 'ok', items: [], has_more: false } })
+  }
+})
+
+test('Instagram GET encodes documented and multilingual keywords plus both opaque cursors without inserting metadata defaults', async () => {
+  const cursors = { next_max_id: 'next+/==&page=2#tail', rank_token: 'rank 中文+/=&token' }
+  for (const query of ['justin', '#fashion', '#fashion/中文&+/ 空格']) {
+    for (const metadata of [undefined, false, true]) {
+      const params = { query, ...cursors, ...(metadata === undefined ? {} : { enable_metadata: metadata }) }
+      const request = normalizeNativeForwardingRequest(instagramSearchKey, { params })
+      assert.deepEqual(request.fingerprintBody.params, params)
+      await replay({ key: instagramSearchKey, params, path: instagramSearchPath,
+        expectedQuery: { query, ...cursors, ...(metadata === undefined ? {} : { enable_metadata: String(metadata) }) },
+        data: { status: 'ok', items: [], has_more: false } })
+    }
+  }
+})
+
+test('a generic Swagger code-200 data string remains native evidence and is not a valid standard Instagram search', async () => {
+  let calls = 0
+  const wire = ' {"code":200,"message":"ok","data":"string"}\n'
+  const adapter = new TikHubAdapter({ apiKey: 'instagram-fixture-secret', fetchImpl: async () => {
+    calls++
+    return new Response(wire, { headers: { 'content-type': 'application/json' } })
+  } })
+  const result = await adapter.forwardNative(instagramSearchKey, { params: { query: 'justin' } })
+  assert.equal(result.publicBody.data, 'string')
+  assert.equal(result.restrictedResponseArchive.bodyText, wire)
+  assert.throws(() => projectInstagramSearch(result, { query: 'justin', page: 1, pageSize: 20 }), /invalid_instagram_search_shape/)
+  assert.equal(calls, 1)
+})
+
+for (const continuation of [false, true]) {
+  test(`Instagram general search ${continuation ? 'continuation' : 'first page'} preserves HTTP 400 evidence without projection or retry`, async () => {
+    const codec = createRawSearchCursorCodec('instagram-offline-cursor-secret', 'fixture-consumer:fixture-key')
+    const normalized = { platform: 'instagram', pageSize: 20,
+      upstreamBody: { keyword: ' 测试 & fixture ', pageSize: 20 } }
+    const first = normalizeRawSearch(normalized, codec)
+    const providerCursor = { next_max_id: 'next+/==&page=2', rank_token: 'rank+/==&opaque=1' }
+    const request = continuation ? normalizeRawSearch({ ...normalized, upstreamBody: {
+      ...normalized.upstreamBody, cursor: first.encodeNext({ page: 2, providerCursor }),
+    } }, codec) : first
+    const requestId = '11111111-2222-4333-8444-555555555555'
+    // Synthetic rejection, not a claim about the incident's uninspected body.
+    const payload = { detail: { code: 400, request_id: requestId, message: 'Fixture request rejected.' } }
+    const wire = ` ${JSON.stringify(payload)}\n`
+    let calls = 0
+    const adapter = new TikHubAdapter({ apiKey: 'instagram-fixture-secret', fetchImpl: async (url, options) => {
+      calls++
+      assert.equal(options.method, 'GET')
+      assert.equal(options.body, undefined)
+      const parsed = new URL(url)
+      assert.equal(parsed.pathname, '/api/v1/instagram/v3/general_search')
+      assert.deepEqual(Object.fromEntries(parsed.searchParams), {
+        query: '测试 & fixture', enable_metadata: 'true', ...(continuation ? providerCursor : {}),
+      }, 'only contract parameters reach TikHub; count/pageSize and the Hub cursor stay local')
+      return new Response(wire, { status: 400, headers: { 'content-type': 'application/json' } })
+    } })
+    await assert.rejects(() => adapter.forwardNative('t.instagram_v3_general_search', { params: request.upstreamQuery }), error => {
+      assert.ok(error instanceof TikHubUpstreamError)
+      assert.deepEqual(error.evidence, {
+        outcome: 'rejected', httpStatus: 400, businessCode: 400, billed: null,
+        errorCode: 'upstream_request_rejected', affectsCircuit: false, retryable: false,
+      })
+      assert.equal(error.responseArchive.contractState, 'provider_rejected')
+      assert.equal(error.responseArchive.businessCode, 400)
+      assert.equal(error.upstreamEvidence.requestId, requestId)
+      assert.equal(error.archiveObjects[0].upstreamRequestId, requestId)
+      assert.equal(error.restrictedResponseArchive.bodyText, wire)
+      assert.deepEqual(error.restrictedResponseArchive.bodyBytes, Buffer.from(wire))
+      assert.equal(error.restrictedResponseArchive.bodySha256, createHash('sha256').update(wire).digest('hex'))
+      assert.deepEqual(error.restrictedResponseArchive.parsedPayload, payload)
+      return true
+    })
+    assert.equal(calls, 1, 'a rejected paid attempt never automatically retries or advances pagination')
+  })
 }
 
 for (const [shape, data] of [['flat live shape', profile], ['documented user wrapper', { user: profile }]]) {

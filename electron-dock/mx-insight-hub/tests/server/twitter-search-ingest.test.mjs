@@ -52,6 +52,20 @@ test('Twitter standard ingestion keeps every previously allowed provider/platfor
   }
 })
 
+test('Instagram JustOne search ingestion accepts only its standard/raw datasets and retains old queued TikHub jobs', () => {
+  for (const datasetId of ['night-all.search.v1', NIGHT_ALL_COMPAT_DATASET_ID]) {
+    for (const providerKey of ['justone', 'tikhub']) assert.deepEqual(classifyExternalPlatformIngest(job(providerKey, 'instagram', datasetId)), {
+      enterprise: false, justOne: false, tikHubXiaohongshu: false, hubRaw: true,
+    })
+    for (const platform of ['twitter', 'weibo', 'facebook']) {
+      assert.throws(() => classifyExternalPlatformIngest(job('justone', platform, datasetId)), /pinned contract/)
+    }
+  }
+  for (const datasetId of ['social.data.v1', 'ecommerce.products.v1', '']) {
+    assert.throws(() => classifyExternalPlatformIngest(job('justone', 'instagram', datasetId)), /pinned contract/)
+  }
+})
+
 test('ingest worker direct entry still refuses the memory driver without starting services', () => {
   const result = spawnSync(process.execPath, [fileURLToPath(new URL('../../server/workers/ingest.mjs', import.meta.url))], {
     env: {

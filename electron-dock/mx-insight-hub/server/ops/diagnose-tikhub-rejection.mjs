@@ -5,15 +5,18 @@ import { pathToFileURL } from 'node:url'
 // No runtime adapter imports, supplier requests, writes or request replays.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const MAX_BYTES = 8 * 1024 * 1024
+const INSTAGRAM_OPERATION = 'native.t.instagram_v3_general_search'
+const NATIVE_CONTRACT = 'mx-insight-hub.native-forwarding.v1'
 const PATHS = new Set(['/api/v1/data/search', '/api/v1/search/raw', '/api/v1/night-all/search/raw',
-  '/api/v1/xiaohongshu/app_v2/search_notes'])
+  '/api/v1/xiaohongshu/app_v2/search_notes', '/api/v1/data/native/t.instagram_v3_general_search'])
 const ERRORS = new Set(['upstream_request_rejected', 'upstream_rate_limited', 'upstream_auth_or_balance_unavailable',
   'upstream_endpoint_unavailable', 'upstream_http_error', 'external_platform_rejected'])
 const OUTCOMES = new Set(['pending', 'succeeded', 'succeeded_unusable', 'rejected', 'unknown'])
 const STATUSES = new Set(['reserved', 'committed', 'released', 'unknown'])
-const OPERATIONS = new Set(['social.posts.search'])
-const ENDPOINTS = new Set(['xiaohongshu.app-v2.search-notes.v1'])
-const CONTRACTS = new Set(['night-all.data-search.v1'])
+const PLATFORMS = new Set(['xiaohongshu', 'instagram'])
+const OPERATIONS = new Set(['social.posts.search', INSTAGRAM_OPERATION])
+const ENDPOINTS = new Set(['xiaohongshu.app-v2.search-notes.v1', INSTAGRAM_OPERATION])
+const CONTRACTS = new Set(['night-all.data-search.v1', NATIVE_CONTRACT])
 const MESSAGES = new Map([['Bad Request', 'bad_request'], ['Unauthorized', 'unauthorized'],
   ['Forbidden', 'forbidden'], ['Not Found', 'not_found'], ['Too Many Requests', 'too_many_requests'],
   ['Internal Server Error', 'internal_server_error'],
@@ -31,6 +34,11 @@ const messageShape = value => ({ ...textShape(value), classification: typeof val
   ? MESSAGES.get(value) || 'other_text' : 'not_text' })
 const envelope = value => ({ type: kind(value), code: integer(value?.code), requestId: uuid(value?.request_id),
   message: messageShape(value?.message), msg: messageShape(value?.msg) })
+const instagramParameterShape = params => ({ type: kind(params),
+  fields: Object.fromEntries(['query', 'next_max_id', 'rank_token', 'enable_metadata'].map(name => {
+    const value = object(params) ? params[name] : undefined
+    return [name, { ...textShape(value), empty: typeof value === 'string' ? value.length === 0 : null }]
+  })) })
 
 export function summarizeRejectionRequest(snapshot) {
   const body = object(snapshot?.body) ? snapshot.body : {}
@@ -41,7 +49,7 @@ export function summarizeRejectionRequest(snapshot) {
 
 // Emit only fixed keys, integers, UUIDs and text types/lengths. Never emit an
 // arbitrary message, field name, URL, keyword, cursor, credential or raw body.
-export function inspectTikHubRejectionArchive(archive) {
+export function inspectTikHubRejectionArchive(archive, { instagramSearch = false } = {}) {
   if (!archive) return { state: 'archive_missing' }
   if (archive.body_size > MAX_BYTES) return { state: 'archive_too_large' }
   const bytes = archive.body_bytes instanceof Uint8Array ? Buffer.from(archive.body_bytes) : null
@@ -53,8 +61,13 @@ export function inspectTikHubRejectionArchive(archive) {
   let payload
   try { payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
   catch { return { state: 'archive_not_json', hashVerified: true } }
+  const detail = object(payload) ? payload.detail : undefined
   return { state: 'archive_verified', hashVerified: true, byteLength: bytes.length,
-    root: envelope(payload), detail: envelope(object(payload) ? payload.detail : undefined) }
+    root: envelope(payload), detail: { ...envelope(detail),
+      // The reviewed supplier error envelope can echo params under detail.
+      // Report only that location's shape; do not search other nesting, decode
+      // strings or infer parameter validity from its values or from HTTP 400.
+      ...(instagramSearch ? { params: instagramParameterShape(object(detail) ? detail.params : undefined) } : {}) } }
 }
 
 export async function diagnoseTikHubRejection(pool, requestId) {
@@ -83,9 +96,10 @@ export async function diagnoseTikHubRejection(pool, requestId) {
         outcome: allowed(call.outcome, OUTCOMES), httpStatus: integer(call.http_status),
         businessCode: integer(call.business_code), errorCode: allowed(call.error_code, ERRORS),
         upstreamRequestId: uuid(call.upstream_request_id), billed: typeof call.billed === 'boolean' ? call.billed : null,
-        archive: inspectTikHubRejectionArchive(archive) })
+        archive: inspectTikHubRejectionArchive(archive, { instagramSearch: call.operation === INSTAGRAM_OPERATION
+          && call.endpoint_key === INSTAGRAM_OPERATION && call.contract_version === NATIVE_CONTRACT }) })
     }
-    return { requestId, platform: request.platform === 'xiaohongshu' ? 'xiaohongshu' : 'other',
+    return { requestId, platform: allowed(request.platform, PLATFORMS),
       status: allowed(request.status, STATUSES), httpStatus: integer(request.response_status),
       errorCode: allowed(request.error_code, ERRORS), request: summarizeRejectionRequest(request.acquisition_request),
       callLimit: 10, callLimitReached: calls.length >= 10, evidence }

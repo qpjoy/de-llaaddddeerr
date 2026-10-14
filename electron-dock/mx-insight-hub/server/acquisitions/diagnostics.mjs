@@ -6,6 +6,7 @@ const LIMIT = 20
 const CALL_LIMIT = 50
 const MESSAGES = new Set(['未授权调用该接口', '未添加IP白名单'])
 const text = value => typeof value === 'string' && /^[\w.:/-]{1,191}$/.test(value) ? value : null
+const HISTORY_GUIDANCE = '请先通过只读历史查询核对已保存的响应与账本。重新发送业务请求（包括 POST）受各接口幂等规则与回放窗口限制；沿用同一幂等标识也可能重新采集并再次计费。'
 
 export function diagnosticIdentifier(value) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,190}$/.test(value.trim())) {
@@ -28,17 +29,17 @@ function advice(request, providers, connectors, gateway) {
   }
   if (providers.some(p => p.provider_key === 'justone' && p.outcome === 'rejected'
     && p.business_code === 301 && p.error_code === 'upstream_collection_failed')) {
-    return 'JustOne 已返回业务码 301（采集失败），具体采集原因需结合供应商记录排查。供应商 billed 与客户扣费分别查看各自账本；HTTP 200 仅表示收到了上游响应。同一幂等标识会保留原交付结果，不会重新采集；若已交付存量回退，请结合交付来源和响应状态判断。'
+    return `JustOne 已返回业务码 301（采集失败），具体采集原因需结合供应商记录排查。供应商 billed 与客户扣费分别查看各自账本；HTTP 200 仅表示收到了上游响应。若已交付存量回退，请结合交付来源和响应状态判断。${HISTORY_GUIDANCE}`
   }
   if (providers.some(p => p.provider_key === 'tikhub' && p.outcome === 'rejected'
     && p.http_status === 400 && p.error_code === 'upstream_request_rejected')) {
     const delivery = request.status === 'committed' && request.response_status >= 400
       ? 'Hub 已保存失败响应；已提交不代表查询成功。' : '请结合 Hub 响应状态与交付来源判断是否交付了存量回退。'
-    return `${delivery}TikHub 返回 HTTP 400，仅凭该状态不能确定是参数问题还是上游内部错误；需核对受限响应中的错误结构与上游关联 ID。供应商计费未知不等于免费，客户扣费请另查账本。同一幂等标识会复现原响应，不会重新采集。`
+    return `${delivery}TikHub 返回 HTTP 400，仅凭该状态不能确定是参数问题还是上游内部错误；需核对受限响应中的错误结构与上游关联 ID。供应商计费未知不等于免费，客户扣费请另查账本。${HISTORY_GUIDANCE}`
   }
   if (connectors.some(c => c.failure_evidence)) return '已保留 Night-All 结构化错误链。查看候选端点和内层错误码；缺失的字段不推测，多个端点失败不等同于已确认唯一根因。'
   if (connectors.some(c => c.error_code)) return '已保存连接器错误码和上游关联 ID；完整上游错误正文未接入本诊断，请按该 ID 和调用时间核对上游日志。'
-  if (request.status === 'committed' && request.response_status >= 400) return 'Hub 已保存失败响应；已提交不代表查询成功。复现会返回原错误，不会重新采集。请结合上游证据继续排查，客户扣费另查结算账本。'
+  if (request.status === 'committed' && request.response_status >= 400) return `Hub 已保存失败响应；已提交不代表查询成功。请结合上游证据继续排查，客户扣费另查结算账本。${HISTORY_GUIDANCE}`
   if (request.status === 'committed') return 'Hub 已提交响应。上游失败可能已由存量结果回退；请结合交付来源和响应 HTTP 状态判断。下游入库校验结果不在本诊断范围。'
   return '请结合 Hub 状态、上游业务码和调用时间继续排查；缺少调用记录不能单独证明上游未执行。'
 }

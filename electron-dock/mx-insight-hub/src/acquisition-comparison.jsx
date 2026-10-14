@@ -3,7 +3,12 @@ import { adminApi, publicDataApi } from './api.js'
 import { ErrorState } from './components.jsx'
 import { ACQUISITION_COMPARISON_PATH, PARAMETER_SOURCE_LABELS, comparisonUnavailableReason, comparisonResultMessage, createAcquisitionComparisonSession, sendAcquisitionComparison } from './acquisition-comparison.js'
 
-export function AcquisitionComparison({ token, original, onBusyChange, session, savedOnly = false }) {
+export function AcquisitionComparison({ token, original, onBusyChange, session, savedOnly: requestedSavedOnly = false }) {
+  const instagram = original.scope?.platform === 'instagram'
+  const savedOnly = requestedSavedOnly || instagram
+  // Instagram dispatch uses the App-owned diagnostic session so leaving this
+  // history panel cannot discard an unknown result and unlock a new paid call.
+  const diagnosticOnly = instagram && !session
   const local = useRef(null)
   if (!local.current) local.current = createAcquisitionComparisonSession(original)
   const store = session || local.current
@@ -14,7 +19,7 @@ export function AcquisitionComparison({ token, original, onBusyChange, session, 
   const setError = error => store.update({ error })
   const setVerifying = verifying => store.update({ verifying })
   const setVerified = verified => store.update({ verified })
-  const send = retry => sendAcquisitionComparison(store, { token, original, retry, savedOnly, onBusyChange }, { adminApi, publicDataApi })
+  const send = retry => !diagnosticOnly && sendAcquisitionComparison(store, { token, original, retry, savedOnly, onBusyChange }, { adminApi, publicDataApi })
 
   // Read-only: it recomputes a fingerprint server-side and never dispatches.
   const verify = async () => {
@@ -47,8 +52,11 @@ export function AcquisitionComparison({ token, original, onBusyChange, session, 
         ? `无法校验：${verified.rejected.message}`
         : '校验不通过：该 JSON 不是本次历史请求的参数。指纹不可逆，系统不会反推原参数。'}</p> : null}
     {error ? <ErrorState error={error} /> : null}
-    <button className="qp-button qp-button--primary" type="button" disabled={busy || verifying || unresolved || !bodyText.trim()} onClick={() => send()}>{busy ? '请求处理中…' : savedOnly ? '按原参数发送新请求（可能计费）' : '发送新请求并对比（可能计费）'}</button>
-    {unresolved ? <p role="alert">未收到明确响应，结果未知。保留本次参数与幂等键；请使用下方同键查询/重试，不要重复创建新请求。</p> : null}
+    {diagnosticOnly ? <p>原参数已只读展示。请到<a href={`#/data-browser?view=diagnostics&requestId=${encodeURIComponent(original.requestId)}`}>请求诊断</a>准备并发送新请求；该页面会在切换页面后继续保留未确定请求的状态。</p>
+      : <button className="qp-button qp-button--primary" type="button" disabled={busy || verifying || unresolved || !bodyText.trim()} onClick={() => send()}>{busy ? '请求处理中…' : savedOnly ? '按原参数发送新请求（可能计费）' : '发送新请求并对比（可能计费）'}</button>}
+    {unresolved ? <p role="alert">{instagram
+      ? '未收到明确结果。请保留本次参数与幂等键，只读核查请求状态与账本。同键重发也可能再次采集和计费，此处不再发送业务请求。'
+      : '未收到明确响应，结果未知。保留本次参数与幂等键；请使用下方同键查询/重试，不要重复创建新请求。'}</p> : null}
     {attempts.map((attempt, index) => <article className="qp-panel mih-panel" key={attempt.idempotencyKey}>
       <h4>对比请求 {index + 1} · {PARAMETER_SOURCE_LABELS[attempt.parameterSource] || '手动参数'}</h4>
       <dl className="mih-search-reindex__facts">
@@ -60,11 +68,15 @@ export function AcquisitionComparison({ token, original, onBusyChange, session, 
         <div><dt>原 → 新 HTTP</dt><dd>{original.delivered?.responseStatus || '—'} → {attempt.delivered?.status || '—'}</dd></div>
       </dl>
       {attempt.delivered?.evidence?.requestId ? <p><a href={`#/data-browser?view=diagnostics&requestId=${encodeURIComponent(attempt.delivered.evidence.requestId)}`}>查看这次新请求的诊断 →</a></p> : null}
-      {attempt.delivered ? <p>{comparisonResultMessage(attempt)}</p> : null}
+      {attempt.delivered ? <p>{instagram && attempt.state === 'uncertain'
+        ? '本次请求结果尚未确认，请只读核查诊断与账本。'
+        : instagram && attempt.history?.status === 'committed'
+          ? `已只读核对本次请求的提交记录：HTTP ${attempt.history.delivered.responseStatus}。下方保留浏览器收到的原始响应。`
+          : comparisonResultMessage(attempt)}</p> : null}
       {attempt.message ? <p role="alert">{attempt.message}</p> : null}
       {attempt.historyError ? <p>{attempt.historyError}</p> : null}
       {attempt.retryCheck ? <details><summary>同键查询/重试 HTTP {attempt.retryCheck.status}（尚未确认原请求结果）</summary><pre className="qp-code-block"><code>{JSON.stringify(attempt.retryCheck.body, null, 2)}</code></pre></details> : null}
-      {['uncertain', 'not_sent'].includes(attempt.state) ? <button className="qp-button qp-button--outline" disabled={busy || attempts.some(other => ['sending', 'uncertain'].includes(other.state) && other.idempotencyKey !== attempt.idempotencyKey)} onClick={() => send(attempt)} type="button">沿用本次幂等键查询/重试</button> : null}
+      {['uncertain', 'not_sent'].includes(attempt.state) && !(instagram && attempt.state === 'uncertain') ? <button className="qp-button qp-button--outline" disabled={busy || attempts.some(other => ['sending', 'uncertain'].includes(other.state) && other.idempotencyKey !== attempt.idempotencyKey)} onClick={() => send(attempt)} type="button">沿用本次幂等键查询/重试</button> : null}
       <details><summary>本次参数</summary><pre className="qp-code-block"><code>{JSON.stringify(attempt.body, null, 2)}</code></pre></details>
       {attempt.delivered ? <details open><summary>新请求完整响应（旧响应仍保留在上方）</summary><pre className="qp-code-block"><code>{JSON.stringify(attempt.delivered.body, null, 2)}</code></pre></details> : null}
       {attempt.history?.costLineage?.providerCalls?.length ? <details><summary>新请求上游调用证据</summary><pre className="qp-code-block"><code>{JSON.stringify(attempt.history.costLineage.providerCalls, null, 2)}</code></pre></details> : null}

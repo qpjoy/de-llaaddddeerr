@@ -64,3 +64,21 @@ test('comparison browser client retains the new failed response, request ID and 
     return true
   })
 })
+
+test('Instagram saved comparison uses the original data-search route and JSON without parameter conversion', async t => {
+  const api = await client()
+  const body = { platform: 'instagram', query: ' 原查询 ', pageSize: 30, type: 'stable', cursor: 'mxds1.saved-cursor' }
+  let calls = 0
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    calls++
+    assert.equal(url, 'https://public-hub.example/api/v1/data/search')
+    assert.equal(options.method, 'POST')
+    assert.equal(options.body, JSON.stringify(body))
+    assert.equal(options.headers.authorization, 'Bearer original-key-ticket')
+    assert.equal(options.headers['idempotency-key'], 'instagram-new-request')
+    return Response.json({ data: {}, requestId: 'instagram-new-response' })
+  })
+  api.configurePublicApiBase('https://public-hub.example')
+  await api.publicDataApi.acquisitionComparison('original-key-ticket', body, 'instagram-new-request', '/api/v1/data/search', 'POST')
+  assert.equal(calls, 1)
+})
