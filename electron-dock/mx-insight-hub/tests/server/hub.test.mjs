@@ -141,7 +141,7 @@ before(async () => {
     const body = JSON.parse(options.body)
     upstreamBodies.push(body)
     upstreamCalls.set(body.platform, (upstreamCalls.get(body.platform) || 0) + 1)
-    if (body.platform === 'twitter') throw new TypeError('connection reset')
+    if (body.platform === 'douyin') throw new TypeError('connection reset')
     if (body.platform === 'reddit') return jsonResponse({ error: { code: 'unavailable' } }, 503)
     return jsonResponse(nightAllSearchEnvelope(body))
   }
@@ -1114,10 +1114,10 @@ test('Night-All compatibility route preserves the envelope and serves only an ex
   assert.equal([...store.connectorCalls.values()].at(-1).sourceMode, 'stale')
 })
 
-test('ambiguous POST is called once and held in unknown state', async () => {
+test('ambiguous historical POST is called once and held in unknown state', async () => {
   const tenant = (await store.listTenants())[0]
   const consumer = (await store.listConsumers(tenant.id))[0]
-  await call('/internal/v1/admin/platforms/twitter', {
+  await call('/internal/v1/admin/platforms/douyin', {
     method: 'PUT',
     headers: adminHeaders,
     body: { tenantId: tenant.id, consumerId: consumer.id, enabled: true },
@@ -1125,26 +1125,26 @@ test('ambiguous POST is called once and held in unknown state', async () => {
   const issued = await call('/internal/v1/admin/api-keys', {
     method: 'POST',
     headers: adminHeaders,
-    body: { consumerId: consumer.id, name: 'Unknown test key', platforms: ['twitter'] },
+    body: { consumerId: consumer.id, name: 'Unknown test key', platforms: ['douyin'] },
   })
   const headers = { authorization: `Bearer ${issued.payload.data.secret}` }
   const first = await call('/api/v1/data/search', {
     method: 'POST',
     headers: { ...headers, 'idempotency-key': 'unknown-one' },
-    body: { platform: 'twitter', query: 'AI' },
+    body: { platform: 'douyin', query: 'AI' },
   })
   assert.equal(first.response.status, 502)
   assert.equal(first.payload.error.code, 'upstream_outcome_unknown')
-  assert.equal(upstreamCalls.get('twitter'), 1)
+  assert.equal(upstreamCalls.get('douyin'), 1)
 
   const second = await call('/api/v1/data/search', {
     method: 'POST',
     headers: { ...headers, 'idempotency-key': 'unknown-one' },
-    body: { platform: 'twitter', query: 'AI' },
+    body: { platform: 'douyin', query: 'AI' },
   })
   assert.equal(second.response.status, 409)
   assert.equal(second.payload.error.code, 'request_outcome_unknown')
-  assert.equal(upstreamCalls.get('twitter'), 1)
+  assert.equal(upstreamCalls.get('douyin'), 1)
 })
 
 test('known upstream rejection releases reservation so explicit retry is possible', async () => {

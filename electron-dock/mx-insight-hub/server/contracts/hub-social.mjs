@@ -104,7 +104,7 @@ function profile(user) {
     createdAt: timestamp(legacy.created_at || core.created_at),
   }
 }
-function post(result) {
+function post(result, { standardSearch = false } = {}) {
   const tweet = result?.tweet || result
   if (!object(tweet)) return null
   const legacy = tweet.legacy
@@ -113,13 +113,25 @@ function post(result) {
   const author = profile(tweet.core?.user_results?.result)
   const note = tweet.note_tweet?.note_tweet_results?.result
   const content = text(note?.text || note?.richtext?.text || legacy.full_text || legacy.text)
-  const media = legacy.extended_entities?.media || legacy.entities?.media || []
+  const media = standardSearch
+    ? [...(Array.isArray(legacy.extended_entities?.media) ? legacy.extended_entities.media : []),
+      ...(Array.isArray(legacy.entities?.media) ? legacy.entities.media : [])]
+    : legacy.extended_entities?.media || legacy.entities?.media || []
   const images = [], videos = []
+  let coverUrl = null
   for (const item of Array.isArray(media) ? media : []) {
-    if (item.media_url_https || item.media_url) images.push(item.media_url_https || item.media_url)
+    if (!object(item)) continue
+    const url = item.media_url_https || item.media_url
+    const video = ['video', 'animated_gif'].includes(item.type)
+    // The standard contract separates a known video poster from photos. Keep
+    // the independent social/raw imageUrls contract unchanged.
+    if (standardSearch && video) coverUrl ||= typeof url === 'string' ? url : null
+    else if (typeof url === 'string' && (!standardSearch || !images.includes(url))) images.push(url)
     const variants = (item.video_info?.variants || []).filter(v => v.content_type === 'video/mp4' && typeof v.url === 'string')
     variants.sort((a,b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0))
-    if (variants[0]) videos.push(variants[0].url)
+    const videoUrl = variants[0]?.url || (standardSearch && video
+      ? (item.video_info?.variants || []).find(v => typeof v.url === 'string')?.url : null)
+    if (videoUrl && (!standardSearch || !videos.includes(videoUrl))) videos.push(videoUrl)
   }
   return { id, platform: 'twitter', objectType: 'post', title: null, content, summary: content,
     url: `https://twitter.com/${author?.username || 'i'}/status/${id}`,
@@ -127,6 +139,7 @@ function post(result) {
     metrics: { likes: integer(legacy.favorite_count), replies: integer(legacy.reply_count),
       shares: integer(legacy.retweet_count), quotes: integer(legacy.quote_count), views: integer(tweet.views?.count), bookmarks: integer(legacy.bookmark_count) },
     tags: (legacy.entities?.hashtags || []).map(tag => text(tag.text)).filter(Boolean), imageUrls: images, videoUrls: videos,
+    ...(standardSearch ? { coverUrl } : {}),
   }
 }
 function rawProfile(item) {
@@ -181,7 +194,7 @@ export function normalizeTwitterResponse(payload, request, { encodeCursor, captu
       if (Array.isArray(content.items)) contents.push(...content.items.map(item => ({ id: item.entryId, content: item.item || item })))
       const result = content.itemContent?.tweet_results?.result
       if (!result) continue
-      const item = post(result)
+      const item = post(result, request)
       if (!item) { discardedCount++; continue }
       if (seen.has(item.id)) { duplicateCount++; continue }
       seen.add(item.id); items.push(item)

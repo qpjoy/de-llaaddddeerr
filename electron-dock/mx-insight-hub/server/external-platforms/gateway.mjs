@@ -30,13 +30,13 @@ import {
 } from '../contracts/social-accounts.mjs'
 import { JustOneUpstreamError } from '../adapters/justone.mjs'
 import { AppError } from '../core/errors.mjs'
-import { createExternalPlatformCursorCodec, createRawSearchCursorCodec, createDataSearchCursorCodec } from './cursor.mjs'
+import { createExternalPlatformCursorCodec, createRawSearchCursorCodec, createDataSearchCursorCodec, createNightAllCompatibilityCursorCodec } from './cursor.mjs'
 import { describeDeliveryReason } from './delivery-reason.mjs'
 import { acquisitionRequestSnapshot } from '../acquisitions/request-snapshot.mjs'
 import { normalizeRawSearch, projectWeiboSearch, rawSearchRecords, RAW_SEARCH_DATASET, RAW_SEARCH_PATH, WEIBO_SEARCH_KEY } from '../contracts/raw-search.mjs'
 import { enrichWeiboRawSearch } from './raw-search-enrichment.mjs'
 import { INSTAGRAM_SEARCH_KEY, projectInstagramSearch } from '../contracts/instagram-search.mjs'
-import { normalizeHubDataSearch, projectDataSearch } from '../contracts/hub-data-search.mjs'
+import { normalizeHubDataSearch, projectDataSearch, projectTwitterDataSearch } from '../contracts/hub-data-search.mjs'
 import { normalizeFacebookSearch, projectFacebookSearch, facebookJustOneArchives, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY } from '../contracts/facebook-search.mjs'
 
 const AUTHORIZATION_PLATFORM = 'ecommerce'
@@ -672,9 +672,15 @@ export class ExternalPlatformGateway {
       replayWindowMs: dataSearch?.replayWindowMs,
       dataSearch: Boolean(dataSearch), nativeForwarding: native, billingUnknown: !native,
       normalize: ({ policy }) => {
-        request = dataSearch ? normalizeHubDataSearch(normalized, codec, dataSearch.resultType) : normalizeRawSearch(normalized, codec)
+        request = dataSearch ? normalizeHubDataSearch(normalized, codec, dataSearch.resultType,
+          createNightAllCompatibilityCursorCodec(this.apiKeyPepper, context.consumer.id)) : normalizeRawSearch(normalized, codec)
         if (request.pageSize > policy.maxPageSize) throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
         return request
+      },
+      route: async () => {
+        if (request.restartRequired) throw new AppError(409, 'search_restart_required',
+          'Twitter search now runs in Hub; restart from page 1 with a new Idempotency-Key. Historical Night-All cursors cannot be continued.')
+        return null
       },
       buffered: async () => {
         if (!request.buffer) return null
@@ -722,6 +728,7 @@ export class ExternalPlatformGateway {
         }
         // Ingest the whole paid page once, including buffered records. Later
         // deliveries reuse its receipt and never create another acquisition.
+        if (platform === 'twitter' && dataSearch) result = projectTwitterDataSearch(result)
         const acquired = result.acquiredItems ? { ...result.publicBody, data: { ...result.publicBody.data,
           raw_data: JSON.stringify(result.acquiredItems) } } : result.publicBody
         result.records = rawSearchRecords(acquired, platform, this.providerKey)

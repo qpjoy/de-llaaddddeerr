@@ -510,6 +510,13 @@ export async function createRuntime(config = loadConfig()) {
         ...(await ipRiskProduct.capabilities().catch(()=>({operations:{'ip.risk.subscription.query':{ready:false}}}))).operations, 'enterprise.query': { ready: enterpriseReady } } }
     },
     externalPostCapabilities,
+    externalTwitterCapabilities: async options => {
+      const credential = await rapidApiCredentialStore.describeCredential('rapidapi')
+      const readiness = await hubSocialGateway.nativeReadiness({ ...options,
+        operationKeys: ['social.content.search'], credentialConfigured: credential.credentialConfigured,
+      })
+      return { ready: readiness['social.content.search'] === true }
+    },
     externalFacebookCapabilities: async options => {
       const policy = await platformSearchPolicyStore.facebook()
       if (policy.mode === 'paused') return { ready: false }
@@ -530,7 +537,7 @@ export async function createRuntime(config = loadConfig()) {
     externalRawSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
       : (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
     externalDataSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
-      : nativeSearchGateways[input.normalized.platform].searchRaw(context, input),
+      : (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
     // The gateway reads the audited operation policy on every dispatch; static
     // env flags must not prevent routing to a database-enabled operation.
     externalSocialSearchEnabled: (context) => useTikHubOperation(context, 'social.posts.search'),

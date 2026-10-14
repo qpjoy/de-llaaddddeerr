@@ -581,6 +581,7 @@ export class HubService {
     externalPlatformCapabilities = null,
     externalPostCapabilities = null,
     externalFacebookCapabilities = null,
+    externalTwitterCapabilities = null,
     externalNativeCapabilities = null,
     externalSocialSearch = null,
     externalWechatSearch = null,
@@ -611,6 +612,7 @@ export class HubService {
     this.externalPlatformCapabilities = externalPlatformCapabilities
     this.externalPostCapabilities = externalPostCapabilities
     this.externalFacebookCapabilities = externalFacebookCapabilities
+    this.externalTwitterCapabilities = externalTwitterCapabilities
     this.externalNativeCapabilities = externalNativeCapabilities
     this.externalSocialSearch = externalSocialSearch
     this.externalWechatSearch = externalWechatSearch
@@ -1595,6 +1597,13 @@ export class HubService {
       try { ready = !isTestApiKey(context.apiKey) && (await this.externalFacebookCapabilities({ consumerId: context.consumer.id }))?.ready === true }
       catch { this.logger?.warn?.('[facebook] Search capability state is unavailable') }
       const row = payload.data.platforms.find(row => row.platform === 'facebook')
+      if (row) row.search = { ready, source: 'hub', servingMode: 'live_only', contractVersion: 'night-all.data-search.v1' }
+    }
+    if (canonicalGrants.includes('twitter') && this.externalTwitterCapabilities) {
+      let ready = false
+      try { ready = !isTestApiKey(context.apiKey) && (await this.externalTwitterCapabilities({ consumerId: context.consumer.id }))?.ready === true }
+      catch { this.logger?.warn?.('[twitter] Search capability state is unavailable') }
+      const row = payload.data.platforms.find(row => row.platform === 'twitter')
       if (row) row.search = { ready, source: 'hub', servingMode: 'live_only', contractVersion: 'night-all.data-search.v1' }
     }
     for (const platform of canonicalGrants.filter(value => wechatSearchPlatform(value))) {
@@ -4737,6 +4746,9 @@ export class HubService {
       delete fingerprintQuery.sourceScope
     }
     if (platform === 'facebook' && !this.externalDataSearch) throw new AppError(503, 'facebook_search_unavailable', 'Facebook search is unavailable')
+    if (platform === 'twitter' && path === '/api/v1/data/search' && !this.externalDataSearch) {
+      throw new AppError(503, 'twitter_search_unavailable', 'Hub Twitter search is unavailable')
+    }
     if (path === '/api/v1/data/search' && this.externalDataSearch && canRouteDataSearch(upstreamBody)) {
       return this.externalDataSearch(context, { body, normalized: upstreamBody, idempotencyKey,
         ...(signal ? { signal } : {}),

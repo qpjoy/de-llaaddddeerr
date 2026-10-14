@@ -33,7 +33,7 @@ export function canRouteRawSearch({ platform, upstreamBody: body, pageSize }) {
     && values[0].length <= 500 && (platform === 'twitter' || pageSize >= 20)
 }
 
-export function normalizeRawSearch(normalized, codec, { cursorScope } = {}) {
+export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort } = {}) {
   const { platform, upstreamBody: body, pageSize } = normalized
   const withoutCursor = { ...body }
   delete withoutCursor.cursor
@@ -66,7 +66,7 @@ export function normalizeRawSearch(normalized, codec, { cursorScope } = {}) {
   const providerRequest = platform === 'weibo'
     ? normalizeNativeForwardingRequest(WEIBO_SEARCH_KEY, { params: { query, page } })
     : platform === 'instagram' ? normalizeNativeForwardingRequest(INSTAGRAM_SEARCH_KEY, { params: { query, enable_metadata: true, ...providerCursor } })
-      : normalizeHubSocialRequest('search', { platform, query, count: pageSize })
+      : normalizeHubSocialRequest('search', { platform, query, count: pageSize, ...(twitterSort ? { sort: twitterSort } : {}) })
   if (platform === 'twitter') {
     providerRequest.page = page
     providerRequest.expiresAt = expiresAt

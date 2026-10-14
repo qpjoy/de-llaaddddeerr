@@ -1,6 +1,7 @@
 import { CrawlerSavedRecordsPipeline } from '../ingest/crawler/pipeline.mjs'
 import { runCrawlerDiscovery } from '../ingest/crawler/discovery.mjs'
 import process from 'node:process'
+import { pathToFileURL } from 'node:url'
 import { createPool, createQueue, runCommonMigrations, startWorker } from '@qpjoy/mx-common'
 import { NightAllAdapter } from '../adapters/night-all.mjs'
 import { loadConfig } from '../config.mjs'
@@ -42,6 +43,25 @@ const logger = console
 const INGEST_QUEUE = 'ingest'
 const BACKFILL_QUEUE = 'backfill'
 
+export function classifyExternalPlatformIngest(payload) {
+  const enterprise = payload?.providerKey === 'qixin' && payload.datasetId === 'enterprise.responses.v1' && payload.platform === 'enterprise'
+  const justOne = payload?.providerKey === 'justone'
+    && payload.datasetId === 'ecommerce.products.v1'
+    && payload.platform === 'ecommerce'
+  const tikHubXiaohongshu = payload?.providerKey === 'tikhub'
+    && [TIKHUB_XIAOHONGSHU_DATASET_ID, NIGHT_ALL_COMPAT_DATASET_ID, 'social.comments.v1']
+      .includes(payload.datasetId)
+    && payload.platform === 'xiaohongshu'
+  const hubRaw = ['night-all.search.v1', NIGHT_ALL_COMPAT_DATASET_ID].includes(payload?.datasetId)
+    && ((payload.providerKey === 'tikhub' && ['weibo', 'instagram'].includes(payload.platform))
+      || (payload.providerKey === 'rapidapi' && payload.platform === 'twitter'))
+  if (payload?.kind !== 'external-platform-result'
+    || (!justOne && !tikHubXiaohongshu && !enterprise && !hubRaw) || !Array.isArray(payload.records)) {
+    throw new Error('external-platform ingest payload does not match the pinned contract')
+  }
+  return { enterprise, justOne, tikHubXiaohongshu, hubRaw }
+}
+
 async function main() {
   const config = loadConfig()
   if (config.storeDriver !== 'postgres') {
@@ -81,20 +101,7 @@ async function main() {
 
   async function handleIngest(payload) {
     if (payload?.kind === 'external-platform-result') {
-      const enterprise = payload.providerKey === 'qixin' && payload.datasetId === 'enterprise.responses.v1' && payload.platform === 'enterprise'
-      const justOne = payload.providerKey === 'justone'
-        && payload.datasetId === 'ecommerce.products.v1'
-        && payload.platform === 'ecommerce'
-      const tikHubXiaohongshu = payload.providerKey === 'tikhub'
-        && [TIKHUB_XIAOHONGSHU_DATASET_ID, NIGHT_ALL_COMPAT_DATASET_ID, 'social.comments.v1']
-          .includes(payload.datasetId)
-        && payload.platform === 'xiaohongshu'
-      const hubRaw = (['night-all.search.v1', NIGHT_ALL_COMPAT_DATASET_ID].includes(payload.datasetId)
-        && payload.providerKey === 'tikhub' && ['weibo', 'instagram'].includes(payload.platform))
-        || (payload.datasetId === NIGHT_ALL_COMPAT_DATASET_ID && payload.providerKey === 'rapidapi' && payload.platform === 'twitter')
-      if ((!justOne && !tikHubXiaohongshu && !enterprise && !hubRaw) || !Array.isArray(payload.records)) {
-        throw new Error('external-platform ingest payload does not match the pinned contract')
-      }
+      const { enterprise, justOne, hubRaw } = classifyExternalPlatformIngest(payload)
       const records = justOne || enterprise
         ? rehydrateJustOneQueuedRecords(payload.records)
         : rehydrateTikHubXiaohongshuQueuedRecords(payload.records)
@@ -244,7 +251,9 @@ function startLoop(queue, name, handler, signal, concurrency = 4) {
   return startWorker(queue, { name, handler, concurrency, signal, logger }).done
 }
 
-main().catch((error) => {
-  logger.error(`[ingest] fatal: ${error.stack || error.message}`)
-  process.exit(1)
-})
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    logger.error(`[ingest] fatal: ${error.stack || error.message}`)
+    process.exit(1)
+  })
+}

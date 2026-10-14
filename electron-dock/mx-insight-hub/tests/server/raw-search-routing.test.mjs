@@ -36,6 +36,28 @@ const instagramPost = { pk: '123456789012345678', code: 'DEMO', taken_at: 179144
   caption: { text: 'Full Instagram caption <3\nSecond line #tag' }, user: { pk: '7761793874', username: 'creator', profile_pic_url: 'https://example.test/avatar.jpg' },
   image_versions2: { candidates: [{ url: 'https://example.test/large.jpg', width: 1080, height: 1080 }, { url: 'https://example.test/small.jpg', width: 150, height: 150 }] },
   video_versions: [{ url: 'https://example.test/movie.mp4', width: 1080, height: 1920 }], like_count: 12, comment_count: 3 }
+const TWITTER_LONG_TEXT = `完整长文 🚗\n${'保留正文而非截断预览。'.repeat(80)}#汽车`
+const twitterPost = { rest_id: '1843144227000000001', core: { user_results: { result: {
+  rest_id: '1843144227000000002', legacy: { screen_name: 'fixture_author', name: '作者显示名',
+    profile_image_url_https: 'https://example.test/twitter-avatar.jpg' },
+} } }, note_tweet: { note_tweet_results: { result: { text: TWITTER_LONG_TEXT } } }, views: { count: '0' },
+legacy: { full_text: '截断预览…', created_at: 'Thu Oct 08 01:00:00 +0000 2026',
+  favorite_count: 0, reply_count: 7, retweet_count: 0, quote_count: 3, bookmark_count: 9,
+  extended_entities: { media: [{ type: 'photo', media_url_https: 'https://example.test/twitter-photo.jpg' },
+    { type: 'video', media_url_https: 'https://example.test/twitter-video-cover.jpg', video_info: { variants: [
+      { content_type: 'application/x-mpegURL', url: 'https://example.test/movie.m3u8' },
+      { content_type: 'video/mp4', bitrate: 256000, url: 'https://example.test/twitter-small.mp4' },
+      { content_type: 'video/mp4', bitrate: 2176000, url: 'https://example.test/twitter-large.mp4' },
+    ] } }] } } }
+const twitterZeroPost = { rest_id: '1843144227000000003', views: { count: '0' },
+  legacy: { full_text: '普通正文', created_at: '2026-10-08T02:00:00Z',
+    favorite_count: 0, reply_count: 0, retweet_count: 0, bookmark_count: 0 } }
+function twitterTimeline(tweets = [twitterPost], next = null) {
+  return { data: { search_by_raw_query: { search_timeline: { timeline: { instructions: [{ entries: [
+    ...tweets.map(tweet => ({ entryId: `tweet-${tweet.rest_id}`, content: { itemContent: { tweet_results: { result: tweet } } } })),
+    ...(next ? [{ entryId: 'cursor-bottom', content: { cursorType: 'Bottom', value: next } }] : []),
+  ] }] } } } } }
+}
 function oldDataSearch(platform) {
   return { data: { contractVersion: 'night-all.data-search.v1', platform, query: '汽车',
     items: [{ id: POST_ID, externalId: POST_ID, platform, contentType: 'post', url: 'https://example.test/post', title: PREVIEW,
@@ -53,7 +75,7 @@ function legacy() {
 }
 
 async function harness({ platform = 'weibo', detail = 'success', enabled = true, detailEnabled = true,
-  hasMore = false, malformed = false, searchFails = false, rows = [preview], instagramData, weiboData, weiboDetailData } = {}) {
+  hasMore = false, malformed = false, searchFails = false, rows = [preview], instagramData, twitterData, weiboData, weiboDetailData } = {}) {
   const store = new MemoryStore(), calls = [], historical = [], logs = []
   const oldPayload = legacy()
   const oldDataPayload = oldDataSearch(platform)
@@ -97,7 +119,7 @@ async function harness({ platform = 'weibo', detail = 'success', enabled = true,
         more_available: hasMore, ...(hasMore ? { next_max_id: 'next-instagram-page' } : {}) },
       other_results: { keyword_recommendations: { keywords: [{ id: '999', name: 'not a post' }] } },
     } })
-    if (platform === 'twitter') return Response.json({ data: { search_by_raw_query: { search_timeline: { timeline: {
+    if (platform === 'twitter') return Response.json((typeof twitterData === 'function' ? twitterData(calls.at(-1)) : twitterData) || { data: { search_by_raw_query: { search_timeline: { timeline: {
       instructions: [{ entries: [{ entryId: 'tweet-one', content: { itemContent: { tweet_results: { result: {
         rest_id: POST_ID, legacy: { full_text: FULL, created_at: '2026-10-08T01:00:00Z', favorite_count: 0 },
       } } } } }, ...(hasMore ? [{ entryId: 'cursor-bottom', content: { cursorType: 'Bottom', value: 'opaque-next' } }] : [])] }],
@@ -498,6 +520,267 @@ test('Twitter uses existing direct adapter with empty raw title and null canonic
   assert.equal(h.platformStore.ingestJobs[0].payload.records[0].title, null)
   assert.equal(h.historical.length, 0)
   assert.equal(h.calls.length, 1)
+  assert.equal(h.calls[0].searchParams.get('category'), 'Latest')
+})
+
+test('Twitter data/search directly preserves full text, author, zero metrics and media in strict v1', async () => {
+  const h = await harness({ platform: 'twitter', twitterData: twitterTimeline([twitterPost, twitterZeroPost]) })
+  const startedAt = Date.now()
+  const body = { platform: 'twitter', query: '汽车', pageSize: 10 }
+  const result = await h.invokeData(body)
+  assert.ok(isNightAllDataSearchV1Envelope(result.body))
+  assert.equal(result.body.data.contractVersion, 'night-all.data-search.v1')
+  assert.equal(result.body.data.query, body.query)
+  assert.deepEqual(result.body.data.pageInfo, { pageIndex: 1, pageSize: 10, returnedCount: 2,
+    hasMore: false, nextCursor: null, cursorType: 'none' })
+  assert.equal(result.body.data.meta.providerCalls, 1)
+  const [item, zero] = result.body.data.items
+  assert.equal(item.id, twitterPost.rest_id)
+  assert.equal(item.externalId, twitterPost.rest_id)
+  assert.equal(item.platform, 'twitter')
+  assert.equal(item.contentType, 'post')
+  assert.equal(item.title, null)
+  assert.equal(item.text, TWITTER_LONG_TEXT)
+  assert.equal(item.url, `https://twitter.com/fixture_author/status/${twitterPost.rest_id}`)
+  assert.equal(item.publishedAt, '2026-10-08T01:00:00.000Z')
+  assert.ok(Date.parse(item.collectedAt) >= startedAt && Date.parse(item.collectedAt) <= Date.now())
+  assert.deepEqual(item.author, { id: '1843144227000000002', name: '作者显示名', avatarUrl: 'https://example.test/twitter-avatar.jpg' })
+  assert.deepEqual(item.metrics, { likes: 0, comments: 7, shares: 0, views: 0, bookmarks: 9 })
+  assert.deepEqual(item.media, { coverUrl: 'https://example.test/twitter-video-cover.jpg',
+    images: ['https://example.test/twitter-photo.jpg'],
+    videos: ['https://example.test/twitter-large.mp4'] })
+  assert.deepEqual(item.source, { provider: null, endpointId: null })
+  assert.equal(zero.text, '普通正文')
+  assert.deepEqual(zero.metrics, { likes: 0, comments: 0, shares: 0, views: 0, bookmarks: 0 })
+  assert.deepEqual(zero.author, { id: null, name: null, avatarUrl: null })
+  assert.deepEqual(zero.media, { coverUrl: null, images: [], videos: [] })
+  assert.equal(zero.publishedAt, '2026-10-08T02:00:00.000Z')
+  assert.equal(h.calls[0].searchParams.get('category'), 'Top')
+  assert.equal(h.calls[0].searchParams.get('count'), '10')
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.historical.length, 0)
+  const usage = [...h.store.requests.values()][0]
+  assert.equal(usage.billingMeterKey, 'twitter')
+  assert.equal(usage.unitsActual, 2)
+  assert.equal(h.platformStore.ingestJobs[0].payload.datasetId, 'night-all.search.v1')
+  assert.equal(h.platformStore.ingestJobs[0].payload.records[0].title, null)
+  assert.equal(h.platformStore.ingestJobs[0].payload.records[0].body, TWITTER_LONG_TEXT)
+  const record = h.platformStore.ingestJobs[0].payload.records[0]
+  assert.equal(record.authorExternalId, item.author.id)
+  assert.equal(record.authorName, item.author.name)
+  assert.equal(record.stableFields.author.avatarUrl, item.author.avatarUrl)
+  assert.deepEqual(record.metrics, item.metrics)
+  assert.deepEqual(record.stableFields.media, item.media)
+  assert.equal(new Date(record.eventTime).toISOString(), item.publishedAt)
+  assert.equal(new Date(record.collectedAt).toISOString(), item.collectedAt)
+  assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+  assert.deepEqual((await h.invokeData(body)).body, result.body)
+  assert.equal(h.calls.length, 1)
+})
+
+test('Twitter standard photo, video and GIF media retain their types without changing raw search media', async () => {
+  const photo = twitterPost.legacy.extended_entities.media[0]
+  const video = twitterPost.legacy.extended_entities.media[1]
+  const gif = { type: 'animated_gif', media_url_https: 'https://example.test/twitter-gif-cover.jpg',
+    video_info: { variants: [{ content_type: 'video/mp4', url: 'https://example.test/twitter-gif.mp4' }] } }
+  for (const [media, expected] of [
+    [photo, { coverUrl: null, images: [photo.media_url_https], videos: [] }],
+    [video, { coverUrl: video.media_url_https, images: [], videos: ['https://example.test/twitter-large.mp4'] }],
+    [gif, { coverUrl: gif.media_url_https, images: [], videos: ['https://example.test/twitter-gif.mp4'] }],
+  ]) {
+    const tweet = { ...twitterZeroPost, legacy: { ...twitterZeroPost.legacy, extended_entities: { media: [media] } } }
+    const h = await harness({ platform: 'twitter', twitterData: twitterTimeline([tweet]) })
+    const result = await h.invokeData()
+    assert.ok(isNightAllDataSearchV1Envelope(result.body))
+    assert.deepEqual(result.body.data.items[0].media, expected)
+    assert.deepEqual(h.platformStore.ingestJobs[0].payload.records[0].stableFields.media, expected)
+    const raw = await h.invoke()
+    const rawItem = JSON.parse(raw.body.data.raw_data)[0]
+    assert.deepEqual(JSON.parse(rawItem.image_urls), [media.media_url_https])
+    assert.deepEqual(JSON.parse(rawItem.video_urls), expected.videos)
+    assert.equal(h.calls.length, 2)
+    assert.equal(h.historical.length, 0)
+  }
+})
+
+test('Twitter data/search keeps mxds1 continuations scoped to Key, query, size and type through page fifteen', async () => {
+  const h = await harness({ platform: 'twitter', twitterData: twitterTimeline([twitterPost], 'twitter-next-page') })
+  const body = { platform: 'twitter', query: '汽车', pageSize: 10, type: 'stable' }
+  const first = await h.invokeData(body)
+  const cursor = first.body.data.pageInfo.nextCursor
+  assert.match(cursor, /^mxds1\./)
+  const second = await h.invokeData({ ...body, cursor }, 'twitter-data-page-two')
+  assert.ok(isNightAllDataSearchV1Envelope(second.body))
+  assert.equal(second.body.data.pageInfo.pageIndex, 2)
+  assert.equal(h.calls[1].searchParams.get('cursor'), 'twitter-next-page')
+  assert.equal(h.calls[1].searchParams.get('category'), 'Top')
+  assert.equal(second.body.data.pageInfo.nextCursor, null) // Repeated provider cursor is terminal.
+  for (const patch of [{ query: 'different' }, { pageSize: 20 }, { type: 'fresh' }]) {
+    await assert.rejects(h.invokeData({ ...body, ...patch, cursor }, `twitter-invalid-${Object.keys(patch)[0]}`), { code: 'invalid_cursor' })
+  }
+  const codec = createDataSearchCursorCodec(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}`)
+  const state = codec.decode(cursor)
+  const otherKey = createDataSearchCursorCodec(PEPPER, `${h.context.consumer.id}:other-key`)
+  await assert.rejects(h.invokeData({ ...body, cursor: otherKey.encode(state) }, 'twitter-other-key'), { code: 'invalid_cursor' })
+  await assert.rejects(h.invoke({ platform: 'twitter', query: body.query, count: body.pageSize, cursor }, 'twitter-data-cursor-in-raw'), { code: 'invalid_cursor' })
+  const rawCodec = createRawSearchCursorCodec(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}`)
+  await assert.rejects(h.invokeData({ ...body, cursor: rawCodec.encode(state) }, 'twitter-raw-cursor-in-data'), { code: 'invalid_cursor' })
+  await assert.rejects(h.invokeData({ ...body, cursor: codec.encode({ ...state, expiresAt: Date.now() - 1 }) }, 'twitter-expired-cursor'), { code: 'invalid_cursor' })
+  assert.equal(h.calls.length, 2)
+  const last = await h.invokeData({ ...body, cursor: codec.encode({ ...state, page: 15 }) }, 'twitter-data-page-fifteen')
+  assert.equal(last.body.data.pageInfo.pageIndex, 15)
+  assert.equal(last.body.data.pageInfo.hasMore, false)
+  assert.equal(last.body.data.pageInfo.nextCursor, null)
+  await assert.rejects(h.invokeData({ ...body, cursor: codec.encode({ ...state, page: 16 }) }, 'twitter-data-page-sixteen'), { code: 'invalid_cursor' })
+  assert.equal(h.calls.length, 3)
+  assert.equal(h.historical.length, 0)
+})
+
+test('Twitter data/search rejects historical mxnc1 and unwrapped provider cursors without calling Night-All', async () => {
+  const h = await harness({ platform: 'twitter' })
+  const body = { platform: 'twitter', query: '汽车', pageSize: 20 }
+  const codec = createNightAllCompatibilityCursorCodec(PEPPER, h.context.consumer.id)
+  const traversal = prepareNightAllCompatibilityTraversal({ operation: 'data-search', platform: 'twitter', upstreamBody: body, codec })
+  const old = structuredClone(h.oldDataPayload)
+  Object.assign(old.data.pageInfo, { hasMore: true, nextCursor: 'night-all-twitter-token', cursorType: 'opaque' })
+  const wrapped = capNightAllDataSearchTraversal(old, { platform: 'twitter', page: 1, scope: traversal.scope, codec })
+  assert.match(wrapped.data.pageInfo.nextCursor, /^mxnc1\./)
+  const cases = [[wrapped.data.pageInfo.nextCursor, 'search_restart_required'], ['night-all-twitter-token', 'invalid_cursor'],
+    [`${wrapped.data.pageInfo.nextCursor}tampered`, 'invalid_cursor']]
+  for (const [index, [cursor, code]] of cases.entries()) {
+    await assert.rejects(h.invokeData({ ...body, cursor }, `twitter-old-cursor-${index}`), { code })
+  }
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.historical.length, 0)
+})
+
+test('Twitter legacy mxnc1 continuations replay saved success and retain unknown outcomes after cutover', async () => {
+  for (const [type, status] of ['fresh', 'stable'].flatMap(type => ['committed', 'unknown'].map(status => [type, status]))) {
+    const h = await harness({ platform: 'twitter', enabled: false })
+    const body = { platform: 'twitter', query: '汽车', pageSize: 20 }
+    const codec = createNightAllCompatibilityCursorCodec(PEPPER, h.context.consumer.id)
+    const traversal = prepareNightAllCompatibilityTraversal({ operation: 'data-search', platform: 'twitter', upstreamBody: body, codec })
+    const old = structuredClone(h.oldDataPayload)
+    Object.assign(old.data.pageInfo, { hasMore: true, nextCursor: 'night-all-twitter-token', cursorType: 'opaque' })
+    const wrapped = capNightAllDataSearchTraversal(old, { platform: 'twitter', page: 1, scope: traversal.scope, codec })
+    const requestId = randomUUID()
+    await h.store.reserve({ requestId, idempotencyKey: 'data-fixture-first',
+      fingerprint: requestFingerprint({ method: 'POST', path: '/api/v1/data/search',
+        body: { ...body, cursor: 'night-all-twitter-token', type } }),
+      tenantId: h.context.tenant.id, consumerId: h.context.consumer.id, apiKeyId: h.context.apiKey.id,
+      platform: 'twitter', unitsReserved: 1, leaseExpiresAt: new Date(Date.now() + 120000),
+      windowStart: new Date(Date.now() - 3600000), maxRequests: 100, replayWindowMs: type === 'fresh' ? 120000 : null })
+    const savedResponse = { ...h.oldDataPayload, requestId }
+    const input = { ...body, type, cursor: wrapped.data.pageInfo.nextCursor }
+    if (status === 'committed') {
+      await h.store.commitRequest(requestId, { responseStatus: 200, responseBody: savedResponse, unitsActual: 1 })
+      assert.deepEqual((await h.invokeData(input)).body, savedResponse)
+    } else {
+      await h.store.markRequestUnknown(requestId, 'night_all_outcome_unknown')
+      h.store.requests.get(requestId).completedAt = new Date(Date.now() - 121000).toISOString()
+      await assert.rejects(h.invokeData(input), error => {
+        assert.equal(error.code, 'request_outcome_unknown')
+        assert.equal(error.details.requestId, requestId)
+        return true
+      })
+    }
+    assert.equal(h.store.requests.size, 1)
+    assert.equal(h.calls.length, 0)
+    assert.equal(h.historical.length, 0)
+  }
+})
+
+test('Twitter standard page sizes one through one hundred retain the requested ceiling with one capped provider call', async () => {
+  const posts = Array.from({ length: 50 }, (_, index) => ({ ...twitterZeroPost, rest_id: String(1843144227000000100n + BigInt(index)) }))
+  const h = await harness({ platform: 'twitter', twitterData: twitterTimeline(posts, 'twitter-large-page-next') })
+  const body = { platform: 'twitter', query: '汽车', pageSize: 100 }
+  const first = await h.invokeData(body)
+  assert.ok(isNightAllDataSearchV1Envelope(first.body))
+  assert.equal(first.body.data.pageInfo.pageSize, 100)
+  assert.equal(first.body.data.pageInfo.returnedCount, 50)
+  assert.equal(first.body.data.pageInfo.hasMore, true)
+  assert.equal(first.body.data.status, 'partial')
+  assert.equal(first.body.data.warnings[0].code, 'provider_page_size_limit')
+  assert.equal(h.calls[0].searchParams.get('count'), '50')
+  assert.equal(h.calls.length, 1)
+  assert.equal([...h.store.requests.values()][0].unitsActual, 50)
+  const cursor = first.body.data.pageInfo.nextCursor
+  for (const pageSize of [50, 99]) {
+    await assert.rejects(h.invokeData({ ...body, pageSize, cursor }, `twitter-size-${pageSize}`), { code: 'invalid_cursor' })
+  }
+  await assert.rejects(h.invokeData({ ...body, pageSize: 101 }, 'twitter-size-over-limit'), { code: 'page_size_exceeded' })
+  assert.equal(h.calls.length, 1)
+  const second = await h.invokeData({ ...body, cursor }, 'twitter-large-page-two')
+  assert.equal(second.body.data.pageInfo.pageIndex, 2)
+  assert.equal(second.body.data.pageInfo.pageSize, 100)
+  assert.equal(h.calls[1].searchParams.get('count'), '50')
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.historical.length, 0)
+  const one = await harness({ platform: 'twitter', twitterData: twitterTimeline([twitterPost]) })
+  const single = await one.invokeData({ ...body, pageSize: 1 })
+  assert.equal(single.body.data.pageInfo.pageSize, 1)
+  assert.equal(single.body.data.pageInfo.returnedCount, 1)
+  assert.deepEqual(single.body.data.warnings, [])
+  assert.equal(one.calls[0].searchParams.get('count'), '1')
+  assert.equal(one.calls.length, 1)
+  assert.equal(one.historical.length, 0)
+})
+
+test('Twitter data/search records uncertain dispatch once and never retries it for fresh or stable requests', async () => {
+  for (const type of ['fresh', 'stable']) {
+    const h = await harness({ platform: 'twitter', searchFails: true })
+    const body = { platform: 'twitter', query: '汽车', pageSize: 20, type }
+    await assert.rejects(h.invokeData(body), { code: 'social_upstream_outcome_unknown' })
+    const usage = [...h.store.requests.values()][0]
+    assert.equal(usage.status, 'unknown')
+    assert.equal(usage.billingMeterKey, 'twitter')
+    usage.completedAt = new Date(Date.now() - 121000).toISOString()
+    await assert.rejects(h.invokeData(body), { status: 409, code: 'request_outcome_unknown' })
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.historical.length, 0)
+  }
+})
+
+test('Twitter cutover retains old unknown request identity without dispatching either provider', async () => {
+  for (const type of ['fresh', 'stable']) {
+    const h = await harness({ platform: 'twitter' })
+    const body = { platform: 'twitter', query: '汽车', pageSize: 20, type }
+    const requestId = randomUUID()
+    await h.store.reserve({ requestId, idempotencyKey: 'data-fixture-first',
+      fingerprint: requestFingerprint({ method: 'POST', path: '/api/v1/data/search', body }),
+      tenantId: h.context.tenant.id, consumerId: h.context.consumer.id, apiKeyId: h.context.apiKey.id,
+      platform: 'twitter', unitsReserved: 1, leaseExpiresAt: new Date(Date.now() + 120000),
+      windowStart: new Date(Date.now() - 3600000), maxRequests: 100, replayWindowMs: type === 'fresh' ? 120000 : null })
+    await h.store.markRequestUnknown(requestId, 'night_all_outcome_unknown')
+    h.store.requests.get(requestId).completedAt = new Date(Date.now() - 121000).toISOString()
+    await assert.rejects(h.invokeData(body), error => {
+      assert.equal(error.code, 'request_outcome_unknown')
+      assert.equal(error.details.requestId, requestId)
+      return true
+    })
+    assert.equal(h.store.requests.size, 1)
+    assert.equal(h.calls.length, 0)
+    assert.equal(h.historical.length, 0)
+  }
+})
+
+test('Twitter data/search preserves platform admission and empty-result usage without a historical fallback', async () => {
+  const empty = await harness({ platform: 'twitter', twitterData: twitterTimeline([]) })
+  const result = await empty.invokeData()
+  assert.ok(isNightAllDataSearchV1Envelope(result.body))
+  assert.deepEqual(result.body.data.items, [])
+  assert.equal(result.body.data.pageInfo.returnedCount, 0)
+  assert.equal([...empty.store.requests.values()][0].unitsActual, 1)
+  assert.equal(empty.historical.length, 0)
+  const revoked = await harness({ platform: 'twitter' })
+  await revoked.store.setPlatformGrant(revoked.context.consumer.id, 'twitter', false)
+  await assert.rejects(revoked.invokeData(), { code: 'platform_not_granted' })
+  const paused = await harness({ platform: 'twitter', enabled: false })
+  await assert.rejects(paused.invokeData(), /operation/i)
+  for (const h of [revoked, paused]) {
+    assert.equal(h.calls.length, 0)
+    assert.equal(h.historical.length, 0)
+  }
 })
 
 test('Facebook cutover cannot fall back through the old raw gateway', async () => {
@@ -647,14 +930,14 @@ test('data-search cursor preserves compound Instagram params and binds Key, page
 })
 
 test('existing data-search requests replay original responses across cutover; fresh expiry and stable semantics survive', async () => {
-  for (const type of ['fresh', 'stable']) {
-    const h = await harness({ enabled: false })
-    const body = { platform: 'weibo', query: '汽车', pageSize: 20, type }
+  for (const [platform, type] of ['weibo', 'twitter'].flatMap(platform => ['fresh', 'stable'].map(type => [platform, type]))) {
+    const h = await harness({ platform, enabled: false })
+    const body = { platform, query: '汽车', pageSize: 20, type }
     const requestId = randomUUID()
     await h.store.reserve({ requestId, idempotencyKey: 'data-fixture-first',
       fingerprint: requestFingerprint({ method: 'POST', path: '/api/v1/data/search', body }),
       tenantId: h.context.tenant.id, consumerId: h.context.consumer.id, apiKeyId: h.context.apiKey.id,
-      platform: 'weibo', unitsReserved: 1, leaseExpiresAt: new Date(Date.now() + 120000),
+      platform, unitsReserved: 1, leaseExpiresAt: new Date(Date.now() + 120000),
       windowStart: new Date(Date.now() - 3600000), maxRequests: 100, replayWindowMs: type === 'fresh' ? 120000 : null })
     const old = { ...h.oldDataPayload, requestId }
     await h.store.commitRequest(requestId, { responseStatus: 200, responseBody: old, unitsActual: 1 })
@@ -671,7 +954,7 @@ test('existing data-search requests replay original responses across cutover; fr
 })
 
 test('historical small pages and old continuations clean titles in Hub while preserving source payloads and profile names', async () => {
-  for (const platform of ['weibo', 'instagram', 'twitter']) {
+  for (const platform of ['weibo', 'instagram']) {
     const h = await harness({ platform })
     const before = structuredClone(h.oldDataPayload)
     const result = await h.invokeData({ platform, query: '汽车', pageSize: 10 })
@@ -1050,31 +1333,35 @@ test('Weibo/Instagram canonical and legacy normalization clear generated titles 
 })
 
 test('data/search preserves the platform price, item usage and immutable Key limits without granting native capabilities', async () => {
-  const h = await harness({ rows: [{ ...preview, content: FULL }, { ...preview, weibo_id: '5351726865449967', content: FULL }] })
-  const plan = await h.service.publishPlanVersion({ key: 'data-search-paid', name: 'Offline platform price',
-    limits: { monthlyRequests: 10000, maxPageSize: 100, burstRps: 100 },
-    priceBook: { key: 'data-search-paid', currency: 'CNY', defaultMultiplierPpm: 1000000,
-      entries: [{ meterKey: 'weibo', billingUnit: 'request', unitPriceMinor: 9 }] } }, 'test-admin')
-  const current = await h.service.getConsumerPlan(h.context.consumer.id)
-  await h.service.assignConsumerPlan(h.context.consumer.id, { planVersionId: plan.versionId, expectedRevision: current.revision }, 'test-admin')
-  await h.service.setTenantBillingProfile(h.context.tenant.id, { mode: 'enforced', multiplierPpm: 1000000 }, 'test-admin')
-  await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline fixture' },
-    { idempotencyKey: 'data-search-credit', actor: 'test-admin' })
-  await h.invokeData()
-  await h.invokeData()
-  assert.equal([...h.store.requests.values()][0].unitsActual, 2)
-  assert.equal(h.calls.length, 1)
-  const charges = [...h.store.customerCharges.values()]
-  assert.equal(charges.length, 1)
-  assert.equal(charges[0].meterKey, 'weibo')
-  assert.equal(charges[0].chargedMinor, 9)
-  const key = h.store.apiKeyPlatformEntitlements.get(h.context.apiKey.id)[0]
-  key.maxPageSize = 10
-  await assert.rejects(h.invokeData(undefined, 'data-limit-exceeded'), { code: 'page_size_exceeded' })
-  assert.equal(h.calls.length, 1)
-  await h.store.setPlatformGrant(h.context.consumer.id, 'weibo', false)
-  await assert.rejects(h.invokeData(), { code: 'platform_not_granted' })
-  assert.equal(h.calls.length, 1)
+  for (const platform of ['weibo', 'twitter']) {
+    const h = await harness({ platform, twitterData: twitterTimeline([twitterPost, twitterZeroPost]),
+      rows: [{ ...preview, content: FULL }, { ...preview, weibo_id: '5351726865449967', content: FULL }] })
+    const plan = await h.service.publishPlanVersion({ key: 'data-search-paid', name: 'Offline platform price',
+      limits: { monthlyRequests: 10000, maxPageSize: 100, burstRps: 100 },
+      priceBook: { key: 'data-search-paid', currency: 'CNY', defaultMultiplierPpm: 1000000,
+        entries: [{ meterKey: platform, billingUnit: 'request', unitPriceMinor: 9 }] } }, 'test-admin')
+    const current = await h.service.getConsumerPlan(h.context.consumer.id)
+    await h.service.assignConsumerPlan(h.context.consumer.id, { planVersionId: plan.versionId, expectedRevision: current.revision }, 'test-admin')
+    await h.service.setTenantBillingProfile(h.context.tenant.id, { mode: 'enforced', multiplierPpm: 1000000 }, 'test-admin')
+    await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline fixture' },
+      { idempotencyKey: 'data-search-credit', actor: 'test-admin' })
+    await h.invokeData()
+    await h.invokeData()
+    assert.equal([...h.store.requests.values()][0].unitsActual, 2)
+    assert.equal(h.calls.length, 1)
+    const charges = [...h.store.customerCharges.values()]
+    assert.equal(charges.length, 1)
+    assert.equal(charges[0].meterKey, platform)
+    assert.equal(charges[0].chargedMinor, 9)
+    const key = h.store.apiKeyPlatformEntitlements.get(h.context.apiKey.id)[0]
+    key.maxPageSize = 10
+    await assert.rejects(h.invokeData(undefined, 'data-limit-exceeded'), { code: 'page_size_exceeded' })
+    assert.equal(h.calls.length, 1)
+    await h.store.setPlatformGrant(h.context.consumer.id, platform, false)
+    await assert.rejects(h.invokeData(), { code: 'platform_not_granted' })
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.historical.length, 0)
+  }
 })
 
 test('the user data/search curl shape works through the public HTTP route without a Night-All hop', async t => {
