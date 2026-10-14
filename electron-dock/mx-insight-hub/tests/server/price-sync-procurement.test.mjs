@@ -35,6 +35,15 @@ test('verified prices replace old estimates without enabling operations or chang
   }
 })
 
+test('legacy controls are not promoted from a runtime-free view even with a complete database price book', () => {
+  const current = operation(detail, { controlSource: 'legacy_environment', desiredState: 'disabled', canaryConsumerIds: [] })
+  const before = structuredClone(current)
+  const plan = planProcurementSync({ operations: [current], rates: [rate()] })
+  assert.equal(plan.updates.length, 0)
+  assert.equal(plan.skipped[0].reason, 'legacy_control_requires_runtime_review')
+  assert.deepEqual(current, before)
+})
+
 test('partial sync retains other required and optional endpoint prices and exact references', () => {
   const current = operation(search)
   const optional = search.optionalEndpointKeys[0]

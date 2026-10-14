@@ -109,6 +109,7 @@ export function planProcurementSync({ operations, rates }) {
     const identity = { provider: operation.provider, operationKey: operation.operationKey }
     const skip = reason => skipped.push({ ...identity, reason, endpointKeys: targets.map(rate => rate.endpointKey) })
     const book = operation.priceBook || {}
+    if (operation.controlSource !== 'database') { skip('legacy_control_requires_runtime_review'); continue }
     if (operation.migrationRequired || operation.release?.status !== 'released' || !Number.isSafeInteger(operation.revision)) { skip('release_unavailable'); continue }
     if (book.status === 'retired') { skip('retired_price_book'); continue }
     if (definition.dispatchBlock) { skip('operation_not_priceable'); continue }

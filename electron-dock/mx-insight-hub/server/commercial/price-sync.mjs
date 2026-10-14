@@ -19,7 +19,8 @@ function decisionFingerprint(value) {
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, key === 'exposure'
     ? { state: item.state, reasons: item.reasons } : decisionFingerprint(item)]))
 }
-const previewHash = value => priceSyncHash(decisionFingerprint(value))
+export const priceSyncPreviewHash = value => priceSyncHash(decisionFingerprint(value))
+const previewHash = priceSyncPreviewHash
 const tally = rows => Object.fromEntries(rows.reduce((map, row) => map.set(row.reason, (map.get(row.reason) || 0) + 1), new Map()))
 
 export function summarizePriceSync(preview) {
