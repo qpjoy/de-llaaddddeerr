@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { createHmac } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { AppError } from "../core/errors.mjs";
 
 // A dedicated Auth credential, never the platform operator token. Lazy reads
@@ -45,6 +45,10 @@ export class DataportAccountsClient {
     return createHmac("sha256", this.config().token)
       .update(`dataport-join:${tenantId}:${commandId}`)
       .digest("base64url");
+  }
+  async isPlatformAdmin(userId, issuer) {
+    const value = await this.execute({operation: "platform-admin-status", requestId: randomUUID(), tenantId: randomUUID(), actor: randomUUID(), userId});
+    return value.active === true && value.issuer === issuer;
   }
   async execute(input) {
     const { origin, token } = this.config();

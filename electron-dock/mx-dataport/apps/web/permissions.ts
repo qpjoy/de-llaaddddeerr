@@ -27,6 +27,7 @@ export const pagePermission: Record<string, string> = {
   support: "support.read.self",
 };
 export function canOpenPage(session: any, tenant: string, page: string) {
+  if (page === "platform") return session?.dataportPlatformAdmin === true;
   if (membershipFor(session, tenant)?.dataport?.ownerChallengeRequired)
     return false;
   if (page === "intelligence")

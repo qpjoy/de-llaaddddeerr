@@ -131,6 +131,10 @@ spec:
                 secretKeyRef:
                   name: mx-insight-hub-secrets
                   key: NIGHT_ALL_SERVICE_TOKEN
+            - name: MX_DATAPORT_ACCOUNT_ORIGIN
+              value: http://mx-launcher-internal.mx-internal-shadow.svc.cluster.local:18090
+            - name: MX_DATAPORT_ACCOUNT_TOKEN_FILE
+              value: /run/dataport-accounts/token
             - name: MX_INSIGHT_TG_MONITOR_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -163,6 +167,9 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            - name: dataport-accounts
+              mountPath: /run/dataport-accounts
+              readOnly: true
             - name: harbor-portal
               mountPath: /run/harbor-portal
               readOnly: true
@@ -175,6 +182,14 @@ spec:
               mountPath: /shared_dir
               readOnly: true
       volumes:
+        - name: dataport-accounts
+          secret:
+            secretName: mx-dataport-accounts
+            optional: true
+            defaultMode: 288
+            items:
+              - key: token
+                path: token
         - name: harbor-portal
           secret:
             secretName: mx-harbor-portal

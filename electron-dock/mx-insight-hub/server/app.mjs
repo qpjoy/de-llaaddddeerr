@@ -1425,8 +1425,8 @@ export function createApp({
         if(dedicated) {
           try {await dataportRoute({request,response,path:portalPath,searchParams:url.searchParams,principal:customer,dataport:customerDataport,store,commerce,service,product:ipRiskProduct,readJson,sendJson,requestId,audience:customer.portalAudience||launcherAudience})}
           catch(error) {
-            const tenant=/^\/enterprises\/([0-9a-f-]{36})\//.exec(portalPath)?.[1]
-            if(request.method==='POST'&&tenant&&customer.memberships.some(m=>m.tenantId===tenant))await customerDataport.event(tenant,customer.memberId,'operation.failed',portalPath,error.status||500).catch(()=>{})
+            const tenant=/^(?:\/platform)?\/enterprises\/([0-9a-f-]{36})\//.exec(portalPath)?.[1]
+            if(request.method==='POST'&&tenant&&(customer.dataportPlatformAdmin===true||customer.memberships.some(m=>m.tenantId===tenant)))await customerDataport.event(tenant,customer.memberId,'operation.failed',portalPath,error.status||500).catch(()=>{})
             if(error instanceof PaymentError)throw new AppError(error.status,error.code,error.message)
             throw error
           }
@@ -1434,7 +1434,7 @@ export function createApp({
         }
         if(portalPath==='/session') {
           const memberships=customer.memberships.map(m=>m.dataport?.ownerChallengeRequired?{...m,capabilities:[],dataport:{...m.dataport,permissions:[]}}:m)
-          sendJson(response,200,{data:{kind:customer.kind,memberId:customer.memberId,displayName:customer.displayName,platformAdmin:false,scoped:true,tenantIds:customer.tenantIds,capabilities:[],memberships,identityProvider:'mx-launcher',tenantInvitationsEnabled:false,canOpenPersonalAccount:false,publicApiBaseUrl:customer.portalOrigin},requestId},{'cache-control':'private, no-store'})
+          sendJson(response,200,{data:{kind:customer.kind,memberId:customer.memberId,displayName:customer.displayName,platformAdmin:false,dataportPlatformAdmin:customer.dataportPlatformAdmin===true,scoped:true,tenantIds:customer.tenantIds,capabilities:[],memberships,identityProvider:'mx-launcher',tenantInvitationsEnabled:false,canOpenPersonalAccount:false,publicApiBaseUrl:customer.portalOrigin},requestId},{'cache-control':'private, no-store'})
           return
         }
         request[portalPrincipal]=authorizeLegacyPortal(customer,request.method,portalPath,url.searchParams)
