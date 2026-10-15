@@ -80,3 +80,36 @@ test('PostgreSQL queue uses one short row-locked transaction and releases the co
   assert.equal(queries.filter(sql => sql.includes('FOR UPDATE')).length, 2)
   assert.equal(queries.filter(sql => sql === 'COMMIT').length, 2)
 })
+
+test('exempt PGY requests skip unrelated scheduling but retain shared identity, expiry and unknown guards', () => {
+  const state = {}
+  transition(state, 'join', 0); transition(state, 'claim', 0)
+  state.nextAt = 59999
+  const admitted = { id: 'lcy', fingerprint: 'lcy-note', hubRateLimitExempt: true }
+  assert.equal(transition(state, 'join', 1, admitted).kind, 'acquired')
+  assert.equal(transition(state, 'dispatch', 2, admitted).kind, 'acquired')
+  assert.equal(state.active.id, 'a'); assert.equal(state.nextAt, 59999)
+  assert.equal(state.exemptActive.length, 1)
+  assert.equal(transition(state, 'join', 3, { ...admitted, id: 'same' }).kind, 'follower')
+  transition(state, 'finish', 4, { ...admitted, outcome: 'unknown' })
+  assert.equal(state.exemptActive.length, 0)
+  assert.equal(state.active.id, 'a'); assert.equal(state.nextAt, 59999)
+  assert.equal(transition(state, 'join', 5, { ...admitted, id: 'retry' }).kind, 'unknown')
+  assert.equal(transition(state, 'join', 6, { ...admitted, id: 'ordinary', hubRateLimitExempt: false }).kind, 'unknown')
+  assert.equal(transition(state, 'join', 7, { ...admitted, id: 'expiring', fingerprint: 'other' }).kind, 'acquired')
+  assert.equal(transition(state, 'join', 30008, { ...admitted, id: 'after-expiry', fingerprint: 'other' }).kind, 'unknown')
+})
+
+test('an exempt same-owner rejoin cannot cancel or share its active ownership token', async () => {
+  const queue = new DispatchQueue()
+  const input = { scope: 'lcy-rejoin', id: 'lcy', fingerprint: 'same-note', policy,
+    deadline: Date.now() + 60000, leaseMs: 30000, hubRateLimitExempt: true }
+  const owner = await queue.enter(input)
+  await assert.rejects(queue.enter(input), { status: 409, code: 'request_in_progress' })
+  const state = queue.states.get(input.scope)
+  assert.equal(state.exemptActive.length, 1)
+  assert.equal(state.exemptActive[0].id, owner.id)
+  assert.equal(state.done.length, 0)
+  await queue.finish(owner, 'unknown')
+  await assert.rejects(queue.enter({ ...input, id: 'later' }), { code: 'request_outcome_unknown' })
+})

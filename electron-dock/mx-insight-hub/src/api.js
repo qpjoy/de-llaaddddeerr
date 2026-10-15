@@ -442,6 +442,8 @@ export const adminApi = {
   documentation: (token, path) => request(token, `${ADMIN_ROOT}/documentation`, { query: { path } }),
   keyAccessLimits: (token, id) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/access-limits`),
   saveKeyAccessLimit: (token, id, body) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/access-limits`, { method: 'PUT', body }),
+  keyHubLimits: (token, id, options = {}) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/hub-limits`, options),
+  saveKeyHubLimits: (token, id, body) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/hub-limits`, { method: 'PUT', body }),
   apiKeys: (token, consumerId) => request(token, `${ADMIN_ROOT}/api-keys`, { query: { consumerId } }),
   revealApiKey: (token, id, body) => request(token, `${ADMIN_ROOT}/api-keys/${encodeURIComponent(id)}/reveal`, { method: 'POST', body }),
   createApiKey: (token, body) => request(token, `${ADMIN_ROOT}/api-keys`, { method: 'POST', body }),

@@ -28,6 +28,9 @@ export function createInternalTrafficPolicy({ keyIds = [], tenantIds = [] } = {}
 
 export function isInternalTraffic(store, context) {
   // accessProfile comes only from the authenticated store record, never a body.
+  if (isLcyHubLimitIdentity(context) && typeof context.apiKey.hubRateLimitExempt === 'boolean') {
+    return context.apiKey.hubRateLimitExempt
+  }
   return context?.apiKey?.accessProfile === 'managed_full' || store.internalTrafficPolicy?.matches({
     apiKeyId: context?.apiKey?.id,
     tenantId: context?.tenant?.id,
@@ -36,16 +39,29 @@ export function isInternalTraffic(store, context) {
 
 // User-authorized exception for the original store-authenticated LCY identity.
 // A mutable name, another managed Key or a request-supplied flag cannot opt in.
-export function isLcyRateCircuitExempt(context) {
+export function isLcyHubLimitIdentity(context) {
   return context?.apiKey?.id === 'fd2f8cc9-0ff1-4052-a538-8cc8150bde83'
-    && context.apiKey.accessProfile === 'managed_full'
     && context?.tenant?.id === '277bf8a4-5ed5-414d-b429-d72fcd7d36b6'
     && context?.consumer?.id === 'be7d07fe-3d98-4db3-b00d-e5cbe5a76190'
+}
+
+export function isHubRateLimitExempt(context) {
+  return isLcyHubLimitIdentity(context) && context.apiKey.hubRateLimitExempt === true
+}
+
+export function isLcyRateCircuitExempt(context) {
+  return isLcyHubLimitIdentity(context) && context.apiKey.hubRateLimitExempt !== false
+    && (context.apiKey.hubRateLimitExempt === true || context.apiKey.accessProfile === 'managed_full')
 }
 
 // Retain the stored shared circuit and all non-rate failures. LCY bypasses its
 // rate deadline; other internal callers retain the ten-second rate cooldown.
 export function internalCircuitState(store, context, state) {
+  // Baidu's retained business-601 classification is also an explicit supplier
+  // rate failure. Older generic IP rejection codes are deliberately not guessed.
+  if (state?.lastErrorCode === 'ip_channel_rate_limited' && isHubRateLimitExempt(context)) {
+    return { ...state, rateCircuitExempt: true, circuitOpenUntil: null }
+  }
   if (state?.lastErrorCode !== 'upstream_rate_limited') return state
   if (isLcyRateCircuitExempt(context)) return { ...state, rateCircuitExempt: true, circuitOpenUntil: null }
   if (!isInternalTraffic(store, context)) return state

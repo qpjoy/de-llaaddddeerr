@@ -1435,3 +1435,36 @@ test('request parameters are reserved with the paid request, never after dispatc
   }))
   assert.equal(failed.adapter.calls.search.length, 0)
 })
+
+test('LCY main Xiaohongshu search and detail enrichment bypass Hub slots without releasing ordinary capacity', async () => {
+  const { LCY_IDENTITY } = await import('../fixtures/lcy-hub-limit-store.mjs')
+  const adapter = adapterFor({ notes: [note(FIRST_NOTE_ID, '预览')], detailById: new Map([[FIRST_NOTE_ID, detailResult(FIRST_NOTE_ID, '完整正文')]]) })
+  const f = fixture(adapter, { maxConcurrency: 1, maxConsumerConcurrency: 1 })
+  Object.assign(f.context.apiKey, { id: LCY_IDENTITY.key, hubRateLimitExempt: true })
+  f.context.tenant.id = LCY_IDENTITY.tenant; f.context.consumer.id = LCY_IDENTITY.consumer
+  f.gateway.active = 1; f.gateway.activeEnrichment = 1; f.gateway.activeByConsumer.set(f.context.consumer.id, 1)
+  f.platformStore.acquireProviderRateLimit = async () => assert.fail('exempt Xiaohongshu must not consume rate tokens')
+  const result = await f.gateway.searchNotes(f.context, request({ enrichment: { includeDetails: true } }))
+  assert.equal(result.status, 200)
+  assert.equal(adapter.calls.search.length, 1); assert.equal(adapter.calls.detail.length, 1)
+  assert.equal(f.gateway.active, 1); assert.equal(f.gateway.activeEnrichment, 1)
+  assert.equal(f.gateway.activeByConsumer.get(f.context.consumer.id), 1)
+})
+
+test('a queued LCY exemption change retains its admission ownership instead of decrementing ordinary slots', async () => {
+  const { LCY_IDENTITY } = await import('../fixtures/lcy-hub-limit-store.mjs')
+  const adapter = adapterFor({ notes: [] })
+  const f = fixture(adapter, { maxConcurrency: 1, concurrencyQueue: { maxWaitMs: 1000, maxPending: 4 } })
+  Object.assign(f.context.apiKey, { id: LCY_IDENTITY.key, hubRateLimitExempt: false })
+  f.context.tenant.id = LCY_IDENTITY.tenant; f.context.consumer.id = LCY_IDENTITY.consumer
+  f.gateway.active = 1
+  const pending = f.gateway.searchNotes(f.context, request())
+  for (let i = 0; i < 100 && !f.gateway.concurrencyQueue.entries.length; i++) await new Promise(resolve => setTimeout(resolve, 2))
+  assert.equal(f.gateway.concurrencyQueue.entries.length, 1)
+  f.context.apiKey.hubRateLimitExempt = true
+  f.gateway.concurrencyQueue.drain()
+  assert.equal((await pending).status, 200)
+  assert.equal(f.gateway.active, 1)
+  assert.equal(f.gateway.activeByConsumer.size, 0)
+  assert.equal(adapter.calls.search.length, 1)
+})

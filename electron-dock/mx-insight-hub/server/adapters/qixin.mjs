@@ -43,7 +43,7 @@ export class QixinAdapter {
     let httpStatus = null, businessCode = null
     const fail = (outcome, code, affectsCircuit = true) => {
       const error = new JustOneUpstreamError('EnterpriseUpstreamError', 'Enterprise query could not be completed',
-        { outcome, errorCode: code, httpStatus, businessCode, billed: null, affectsCircuit,
+        { outcome, errorCode: httpStatus === 429 ? 'upstream_rate_limited' : code, httpStatus, businessCode, billed: null, affectsCircuit,
           circuitCategory: outcome === 'unknown' ? 'transport' : 'upstream' }, [], restrictedResponseArchive)
       Object.defineProperty(error, 'responseArchive', { value: responseArchive, enumerable: false })
       return error

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { quarantineRecoverySql } from '../core/admission-recovery.mjs'
-import { isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { isInternalTraffic, isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const iso = value => value == null ? null : new Date(value).toISOString()
@@ -23,7 +23,8 @@ function validateFilter(filter) {
 }
 
 const keyContext = key => ({
-  apiKey: { id: key.id, accessProfile: key.access_profile }, tenant: { id: key.tenant_id }, consumer: { id: key.consumer_id },
+  apiKey: { id: key.id, accessProfile: key.access_profile, hubRateLimitExempt: key.hub_rate_limit_exempt },
+  tenant: { id: key.tenant_id }, consumer: { id: key.consumer_id },
 })
 const internalKey = (store, key) => isInternalTraffic(store, keyContext(key))
 
@@ -104,13 +105,21 @@ export class AdmissionRecoveryService {
     let key = null
     if (apiKeyId) {
       key = (await client.query(`SELECT id, tenant_id, consumer_id, name, status, scope_mode,
-        to_jsonb(api_keys)->>'access_profile' AS access_profile FROM api_keys WHERE id=$1`, [apiKeyId])).rows[0]
+        to_jsonb(api_keys)->>'access_profile' AS access_profile,
+        (to_jsonb(api_keys)->>'hub_rate_limit_exempt')::boolean AS hub_rate_limit_exempt
+        FROM api_keys WHERE id=$1`, [apiKeyId])).rows[0]
       if (!key) throw new AppError(404, 'api_key_not_found', 'Key not found')
       items.push(...await this.#quotas(client, key))
       if (internalKey(this.usageStore, key)) {
+        const fullExemption = isHubRateLimitExempt(keyContext(key))
         for (const row of items) {
-          if (row.provider !== 'tikhub') continue
-          if (row.kind === 'provider_rate') row.selectedKeyEffect = '当前 Key 豁免 TikHub 本地速率；此共享限制仍影响普通调用者。'
+          if (!fullExemption && row.provider !== 'tikhub') continue
+          if (row.kind === 'provider_rate') {
+            row.selectedKeyExempt = true
+            row.selectedKeyEffect = fullExemption
+              ? '当前 Key 已开启 Hub 限流豁免，跳过本地供应商速率；共享限制仍影响普通调用者，上游实际限流仍会返回。'
+              : '当前 Key 豁免 TikHub 本地速率；此共享限制仍影响普通调用者。'
+          }
           if (row.kind === 'provider_circuit' && row.errorCode === 'upstream_rate_limited') {
             const selected = internalCircuitState(this.usageStore, keyContext(key), {
               lastErrorCode: row.errorCode, lastFailureAt: row.startedAt, circuitOpenUntil: row.until,
@@ -132,7 +141,9 @@ export class AdmissionRecoveryService {
       FROM control.admission_recoveries ORDER BY created_at DESC LIMIT 30`)).rows
     return { serverTime: iso(clock.server_time), items: items.filter(row => !key || !row.consumerId || row.kind === 'response_quarantine' || row.consumerId === key.consumer_id).map(row => ({ ...row,
       active: !row.exempt && (row.until ? Date.parse(row.until) > now : row.used == null || row.used >= row.limit) })),
-      apiKeyId, key: key ? { id: key.id, name: key.name, status: key.status } : null, correlation,
+      apiKeyId, key: key ? { id: key.id, name: key.name, status: key.status,
+        tenantId: key.tenant_id, consumerId: key.consumer_id,
+        hubRateLimitExempt: key.hub_rate_limit_exempt ?? null } : null, correlation,
       keys: keys.slice(0, 200).map(row => ({ id: row.id, name: row.name, status: row.status, consumerName: row.consumer_name })),
       keysTruncated: keys.length > 200, callsTruncated: calls.length > 200, leasesTruncated: leases.length > 200, history,
       coverage: '显示供应商共享冷却及当前调用保护；选定 Key 后显示该 Key、调用者和套餐配额。进程内并发计数不跨副本共享，执行中调用仅作为观察证据。余额、授权和运营停用请在上游供应商 / Key 设置中处理；解除冷却不会绕过这些检查。' }

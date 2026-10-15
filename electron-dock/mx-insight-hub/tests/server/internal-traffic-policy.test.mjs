@@ -124,3 +124,30 @@ for (const driver of ['memory', 'postgres']) for (const profile of ['environment
     } finally { await pool?.end() }
   })
 }
+
+test('explicit LCY toggle wins over managed/environment exceptions and never transfers by mutable name', async () => {
+  const { isInternalTraffic, isHubRateLimitExempt } = await import('../../server/core/internal-traffic-policy.mjs')
+  const context = { apiKey: { id: 'fd2f8cc9-0ff1-4052-a538-8cc8150bde83', accessProfile: 'managed_full', hubRateLimitExempt: true },
+    tenant: { id: '277bf8a4-5ed5-414d-b429-d72fcd7d36b6' }, consumer: { id: 'be7d07fe-3d98-4db3-b00d-e5cbe5a76190' } }
+  const store = { internalTrafficPolicy: createInternalTrafficPolicy({ tenantIds: [context.tenant.id] }) }
+  const state = Object.freeze({ lastErrorCode: 'upstream_rate_limited', lastFailureAt: new Date().toISOString(), circuitOpenUntil: new Date(Date.now() + 60000).toISOString() })
+  assert.equal(isHubRateLimitExempt(context), true)
+  const baidu = { ...state, lastErrorCode: 'ip_channel_rate_limited' }
+  assert.equal(internalCircuitState(store, context, baidu).circuitOpenUntil, null)
+  const ambiguousIp = { ...state, lastErrorCode: 'ip_query_rejected' }
+  assert.equal(internalCircuitState(store, context, ambiguousIp), ambiguousIp)
+  context.apiKey.hubRateLimitExempt = false
+  assert.equal(internalCircuitState(store, context, baidu), baidu)
+  assert.equal(isInternalTraffic(store, context), false)
+  assert.equal(isLcyRateCircuitExempt(context), false)
+  assert.equal(internalCircuitState(store, context, state), state)
+  let rate = 0
+  assert.equal((await acquireTikHubRateLimit(store, context, { acquireProviderRateLimit: async () => { rate++; return { allowed: false } } }, {})).allowed, false)
+  assert.equal(rate, 1)
+  context.apiKey.hubRateLimitExempt = null
+  assert.equal(isInternalTraffic(store, context), true)
+  assert.equal(isHubRateLimitExempt(context), false)
+  context.apiKey.hubRateLimitExempt = true
+  for (const changed of [ { ...context, apiKey: { ...context.apiKey, id: randomUUID(), name: 'lcy-delta' } },
+    { ...context, tenant: { id: randomUUID() } }, { ...context, consumer: { id: randomUUID() } } ]) assert.equal(isHubRateLimitExempt(changed), false)
+})

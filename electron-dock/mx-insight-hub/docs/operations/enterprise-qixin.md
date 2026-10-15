@@ -82,6 +82,84 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 混合版本发布期间旧实例仍可能立即拒绝。无需调整 Key、授权、价格或供应商代理，MX-H2I 登录和联网不变。
 本次没有新增线上付费验证或生产部署。
 
+## 2026-10-15 工商股东历史拒绝复核
+
+用户提供请求 `162d5e50-0360-45c9-9511-8dfc2a95b1dc`，下游标记为 **1.43 工商股东**。
+截图记录 2026-10-13 07:55:36.567–36.578 UTC（北京时间 15:55:36），11 ms 后
+`released / external_platform_busy`，客户结算 `released / enforced / 0 CNY`，没有保存响应正文或该次上游调用。
+下游收到 HTTP 429 和 `External product search concurrency is exhausted`。
+
+这条英文消息对应旧版通用网关的进程内并发拒绝；企业接口也复用了这条商品搜索文案。
+用户随后返回只读脚本输出（网关与调用结果均未截断），已确认实际路径和计费键均为 1.43。
+网关记录 `f066eab5-e2ee-4851-8009-f331c0bfa1bb` 为
+`qixin / unavailable / succeeded=false / HTTP 429 / external_platform_busy / providerCallId=null`。
+结合旧代码拒绝分支，确认这次是 Hub 派发前并发拒绝，不是启信上游返回的 429，也不经过 Night-All 13141。
+`savedHttpStatus=null` 只是旧 usage 记录未保存状态；网关记录明确保存了 429。
+
+| 北京时间（2026-10-13） | 已保存的事件 |
+| --- | --- |
+| 15:55:36.367 | 同租户、同 consumer、同 Key 的 1.31 企业模糊搜索开始调用 |
+| 15:55:36.567 | 目标 1.43 工商股东请求预留 |
+| 15:55:36.578 | 目标请求被 Hub 并发门禁拒绝并释放预占 |
+| 15:55:36.597 | 上述 1.31 上游调用成功，HTTP/业务码均为 200 |
+| 15:55:37.357–37.559 | 同身份的 1.45 主要人员查询调用成功，不与目标重叠 |
+
+重叠的 1.31 请求为 `8e9fe5f4-22f8-4501-8af0-4e954fe378d3`，调用为
+`19163ccc-cd9f-402e-a589-83200922163c`；它比目标预留早 200 ms 开始，在拒绝后 19 ms 才完成。
+这强烈支持旧版单 consumer 并发 1 被在途查询占用的判断；历史没有记录 Pod/网关实例和瞬时计数，
+仍不能严格排除实例总并发 3 也已满。调用结束不等于网关释放名额，不能据此保证等待 19 ms 即可成功。
+1.45 的成功不是原股东请求已重试或恢复的证据。
+
+现有修复提交 `a4d1d751`（2026-10-13 18:56:18 +08:00）晚于事故时间，且已经包含在当前分支中：
+容量 10/10、满额等待 10 秒/32 项、明确 Hub 企业准入错误及历史诊断 HTTP 回填均已实现。
+这次复核不重复修改容量或业务实现。新增真实本地 HTTP 回归，使用合成供应商响应，验证
+1.41 与 1.43 混合占满十个名额后，第十一个 1.43 请求保持预占、等待且不创建供应商调用；
+释放后得到原业务数据，幂等重放不重复采集。企业、诊断、队列与 HTTP 取消相关测试共
+47 项通过、无跳过，包括 PGlite 全量迁移/结算/诊断集成测试。
+
+### 线上只读核验
+
+在有集群访问权限的服务器、仓库根目录执行；不会发送企业查询、重试原请求或修改账本：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - 162d5e50-0360-45c9-9511-8dfc2a95b1dc \
+  < electron-dock/mx-insight-hub/server/ops/diagnose-enterprise-busy.mjs
+
+# 检查所有 Public API Pod，而不是仅查看 Deployment 配置中的镜像标签。
+kubectl -n mx-insight-hub get pods \
+  -l app.kubernetes.io/name=mx-insight-hub-public \
+  -o custom-columns='NAME:.metadata.name,START:.status.startTime,IMAGE_ID:.status.containerStatuses[*].imageID'
+
+for pod in $(kubectl -n mx-insight-hub get pods \
+  -l app.kubernetes.io/name=mx-insight-hub-public -o name); do
+  echo "$pod"
+  kubectl -n mx-insight-hub exec "$pod" -c api -- node --input-type=module -e '
+    import { readFileSync } from "node:fs";
+    import { createHash } from "node:crypto";
+    import { QIXIN_CONFIG } from "/app/server/contracts/enterprise.mjs";
+    const gateway = readFileSync("/app/server/external-platforms/gateway.mjs", "utf8");
+    console.log(JSON.stringify({
+      maxConcurrency: QIXIN_CONFIG.maxConcurrency,
+      maxConsumerConcurrency: QIXIN_CONFIG.maxConsumerConcurrency,
+      maxRequestsPerMinute: QIXIN_CONFIG.maxRequestsPerMinute,
+      gatewaySha256: createHash("sha256").update(gateway).digest("hex"),
+      hasLegacyBusyMessage: gateway.includes("External product search concurrency is exhausted")
+    }));
+    try {
+      const { DEFAULT_CONCURRENCY_QUEUE } = await import("/app/server/external-platforms/concurrency-admission.mjs");
+      console.log(JSON.stringify({ queue: DEFAULT_CONCURRENCY_QUEUE }));
+    } catch { console.log(JSON.stringify({ queue: "unavailable" })); }
+  '
+done
+```
+
+当前源码期望 10/10、30 RPM、队列 10000 ms/32 项且不含旧消息；这些是容器文件的版本证据，
+不是历史进程计数。将网关 SHA-256 与待发布版本同一文件比较；仅有队列模块存在不能证明调用路径接入正确。
+若仍是旧版本，按现有 Hub 独立部署流程重新构建并发布 Public API 与 Admin；不要仅重启旧镜像。
+如果线上已是新版本而只有这条历史请求失败，无须再次增加并发，也不会自动将历史失败改成成功。
+本次没有连接生产或重新发起付费查询；线上生效状态等待运维输出核对。没有修改 MX-H2I 登录或联网。
+
 ## 目录与契约依据
 
 - 用户提供的 `/tmp/company/qixin_api/catalog.json` 是初始合同依据（2026-09-01，272 项）。2026-09-17 补入官方新接口 77.58 医院信息、43.82 企业证券名称变更的合同，当前 18 类、274 项；既有 272 项的参数合同保持原样。仓库内固定副本为 `server/external-platforms/qixin-catalog.json`，运行不依赖 `/tmp/company`。

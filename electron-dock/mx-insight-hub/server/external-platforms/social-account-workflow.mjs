@@ -1,8 +1,9 @@
+import { upstreamCapacityError } from './availability-errors.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
 import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
-import { isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
 import { JustOneUpstreamError } from '../adapters/justone.mjs'
@@ -186,7 +187,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           context = await revalidateIdentity({ totalLimit: request.totalLimit })
           const states = await Promise.all([store.providerState(provider), store.contractCircuitState?.(provider, request.platform)])
-          if (provider === 'tikhub') states[0] = internalCircuitState(gateway.usageStore, context, states[0])
+          if (provider === 'tikhub' || isHubRateLimitExempt(context)) states[0] = internalCircuitState(gateway.usageStore, context, states[0])
           if (states.some(row => row?.circuitOpenUntil && Date.parse(row.circuitOpenUntil) > clock())) throw new AppError(503, 'external_platform_circuit_open', 'Account acquisition is temporarily unavailable')
           const credential = await resolveCredential()
           if (!credential.ready) throw new AppError(503, 'external_platform_not_configured', 'Account acquisition is unavailable')
@@ -196,13 +197,15 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           const lease = await store.acquireDispatchLease(pendingLease)
           if (lease !== true && lease?.kind !== 'acquired') throw new AppError(409, lease?.reason === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', 'The acquisition is pending; inspect the original request')
           childLease = pendingLease
+          if (entered === 'exempt' && !isHubRateLimitExempt(context)) {
+            leaveCapacity(entered); entered = false
+          }
           if (!entered) {
-            if (!await enterCapacity({ delivery, expiresAt: new Date(deadlineAt), signal, platform: request.platform })) throw new AppError(503, 'external_platform_busy', 'Account acquisition capacity is occupied')
-            entered = true
+            if (!(entered = await enterCapacity({ delivery, expiresAt: new Date(deadlineAt), signal, platform: request.platform }))) throw new AppError(503, 'external_platform_busy', 'Account acquisition capacity is occupied')
           }
           const cost = providerCostControl(control?.billing ? { billing: control.billing } : gateway.config, expected.endpointKey)
           costReservation = await store.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
-          const rate = provider === 'tikhub' && isInternalTraffic(gateway.usageStore, context) ? { allowed: true }
+          const rate = isHubRateLimitExempt(context) || (provider === 'tikhub' && isInternalTraffic(gateway.usageStore, context)) ? { allowed: true }
             : await store.acquireProviderRateLimit({ limit: gateway.config.maxRequestsPerMinute ?? 90, windowMs: 60000 })
           if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Account acquisition rate limit is exhausted')
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
@@ -234,14 +237,15 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           } catch (error) {
             if (!(error instanceof TikHubUpstreamError || error instanceof RapidApiUpstreamError || error instanceof JustOneUpstreamError)) throw error
             const evidence = error.evidence, status = evidence.httpStatus === 429 ? 429 : 502
+            const failureDetails = { ...(evidence.httpStatus === 429 ? upstreamCapacityError(evidence).details : {}), outcome: evidence.outcome, retryable: false }
             currentEvidence = { ...evidence, callId: currentCall.id, delivery: callDelivery, costMinor: cost.costMinor,
               costKind: cost.costKind, currency: cost.currency, latencyMs: Math.round(performance.now() - callStart),
               ...persistedEvidence(error), archiveObjects: archiveObjects(error, step, currentCall.id) }
             const code = evidence.outcome === 'unknown' ? 'upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'external_platform_rejected'
             await store.finishFailure({ ...currentEvidence, failureResponseStatus: status,
-              failureResponseBody: { error: { code, message: 'Account acquisition failed; inspect its saved outcome', details: { outcome: evidence.outcome, retryable: false } }, requestId: delivery.usageRequestId } })
+              failureResponseBody: { error: { code, message: 'Account acquisition failed; inspect its saved outcome', details: failureDetails }, requestId: delivery.usageRequestId } })
             currentCall = null; settledFailure = true
-            throw new AppError(status, code, 'Account acquisition failed; inspect its saved outcome', { outcome: evidence.outcome, retryable: false })
+            throw new AppError(status, code, 'Account acquisition failed; inspect its saved outcome', failureDetails)
           }
           const receipt = result.restrictedResponseArchive
           currentEvidence = { callId: currentCall.id, delivery: callDelivery, outcome: 'succeeded', billed, httpStatus: 200, businessCode,
@@ -292,6 +296,6 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
     throw error
   } finally {
     if (ownsParent && !retainLease) await stateStore.releaseDeliveryLease(parentLease).catch(() => {})
-    if (entered) leaveCapacity()
+    if (entered) leaveCapacity(entered)
   }
 }

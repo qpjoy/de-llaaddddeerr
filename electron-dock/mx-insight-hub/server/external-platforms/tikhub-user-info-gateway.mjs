@@ -1,4 +1,4 @@
-import { isInternalTraffic, internalCircuitState, acquireTikHubRateLimit } from '../core/internal-traffic-policy.mjs'
+import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit } from '../core/internal-traffic-policy.mjs'
 import { circuitOpenError, upstreamCapacityError } from './availability-errors.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 
@@ -164,6 +164,7 @@ export class TikHubUserInfoGateway {
   }
 
   #enter(context) {
+    if (isHubRateLimitExempt(context)) return 'exempt'
     const consumerId = context.consumer.id
     const consumerActive = this.activeByConsumer.get(consumerId) || 0
     if (this.active >= this.config.maxConcurrency || (!isInternalTraffic(this.usageStore, context) && consumerActive >= this.config.maxConsumerConcurrency)) {
@@ -174,7 +175,8 @@ export class TikHubUserInfoGateway {
     return true
   }
 
-  #leave(consumerId) {
+  #leave(consumerId, admission = true) {
+    if (admission === 'exempt') return
     this.active = Math.max(0, this.active - 1)
     const next = Math.max(0, (this.activeByConsumer.get(consumerId) || 1) - 1)
     if (next === 0) this.activeByConsumer.delete(consumerId)
@@ -210,6 +212,7 @@ export class TikHubUserInfoGateway {
 
   async #enterOrQueue(context, { lease, expiresAt, expectedProviderCalls, signal, canWait, revalidate }) {
     if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+    if (isHubRateLimitExempt(context)) return 'exempt'
     if (!this.concurrencyQueue.entries.length && this.#enter(context)) return true
     if (!canWait) return false
     const policy = { ...DEFAULT_CONCURRENCY_QUEUE, ...this.config.concurrencyQueue }
@@ -220,9 +223,8 @@ export class TikHubUserInfoGateway {
     let entered = false
     try {
       await this.platformStore.releaseDispatchLease(lease)
-      await this.concurrencyQueue.enter({ tryEnter: () => this.#enter(context), deadline,
+      await this.concurrencyQueue.enter({ tryEnter: () => (entered = this.#enter(context)), deadline,
         maxPending: policy.maxPending, signal, details: { platform: XIAOHONGSHU_PLATFORM } })
-      entered = true
       context = await revalidate()
       if (!isInternalTraffic(this.usageStore, context)
         && (this.activeByConsumer.get(context.consumer.id) || 0) > this.config.maxConsumerConcurrency) {
@@ -240,9 +242,9 @@ export class TikHubUserInfoGateway {
       }
       if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
       if (this.admissionClock() >= deadline) throw concurrencyBusy('concurrency_queue_timeout')
-      return true
+      return entered
     } catch (error) {
-      if (entered) this.#leave(context.consumer.id)
+      if (entered) this.#leave(context.consumer.id, entered)
       if (error.code === 'external_platform_busy') {
         error.details = { ...error.details, platform: XIAOHONGSHU_PLATFORM,
           activeConcurrency: this.active, maxConcurrency: this.config.maxConcurrency,
@@ -627,7 +629,7 @@ export class TikHubUserInfoGateway {
           ownsReservation = false
           throw new AppError(429, 'external_platform_busy', 'External Xiaohongshu concurrency is exhausted')
         }
-        entered = true
+        entered = admitted
         if (waitedForCapacity) {
           const fresh = await this.platformStore.snapshotFor({ consumerId: context.consumer.id,
             operation: gatewayOperation, fingerprint: dispatchFingerprint }, new Date())
@@ -1036,7 +1038,7 @@ export class TikHubUserInfoGateway {
             ownerRequestId: activeRequestId,
           }).catch(() => {})
         }
-        if (entered) this.#leave(context.consumer.id)
+        if (entered) this.#leave(context.consumer.id, entered)
       }
     } catch (error) {
       if (error instanceof StoredFallbackDelivery) return error.result

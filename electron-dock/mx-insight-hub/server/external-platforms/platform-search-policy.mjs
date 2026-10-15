@@ -110,7 +110,7 @@ export class PlatformSearchPolicyStore {
       let reason = null
       if (!['auto', 'rapidapi'].includes(s.mode)) reason = 'strategy_changed'
       else if (s.lease_until && new Date(s.lease_until).getTime() > now) reason = 'source_busy'
-      else if (s.reason === 'rate_limited' && blockedUntil && new Date(blockedUntil).getTime() > now) reason = 'rate_limited'
+      else if (ticket?.hubRateLimitExempt !== true && s.reason === 'rate_limited' && blockedUntil && new Date(blockedUntil).getTime() > now) reason = 'rate_limited'
       if (!reason && probe) {
         blockedUntil = new Date(facebookRecoveryCheckAt(s, now))
         if (blockedUntil.getTime() > now) reason = 'quota_exhausted'

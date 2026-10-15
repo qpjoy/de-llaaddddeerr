@@ -10,7 +10,7 @@ const busy = reason => new AppError(503, 'external_platform_busy',
 // All replicas join the same PostgreSQL FIFO. Polling holds no DB connection,
 // quota token or new provider call; only the head can reserve included quota.
 export async function waitForFacebookRapidAdmission({ policyStore, requestId, deadlineAt, timeoutMs,
-  signal, revalidate, logger }, { clock = Date.now, wait = sleep } = {}) {
+  signal, revalidate, logger, rateLimitExempt = () => false }, { clock = Date.now, wait = sleep } = {}) {
   const started = clock(), deadline = Math.min(started + 10000, deadlineAt - timeoutMs - 5000)
   const ticket = { id: randomUUID(), requestId, deadline }
   let admission = null, returned = false
@@ -28,7 +28,7 @@ export async function waitForFacebookRapidAdmission({ policyStore, requestId, de
     while (true) {
       if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
       if (!Number.isFinite(deadline) || clock() >= deadline) throw busy('queue_timeout')
-      admission = await policyStore.admitRapid(ticket)
+      admission = await policyStore.admitRapid({ ...ticket, hubRateLimitExempt: rateLimitExempt() === true })
       if (admission.allowed) {
         if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
         if (clock() >= deadline) throw busy('queue_timeout')

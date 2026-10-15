@@ -1,3 +1,5 @@
+import { upstreamCapacityError } from './availability-errors.mjs'
+import { isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
@@ -34,7 +36,7 @@ function upstreamFailure(error) {
     : evidence.outcome === 'succeeded_unusable' ? 'social_upstream_response_unusable' : 'social_upstream_rejected'
   return new AppError(evidence.httpStatus === 429 ? 429 : evidence.errorCode === 'social_egress_unavailable' ? 503 : 502,
     code, 'External social data request failed; verify its saved outcome before retrying',
-    { upstreamStatus:evidence.httpStatus ?? null,outcome:evidence.outcome,retryable:false })
+    { ...(evidence.httpStatus === 429 ? upstreamCapacityError(evidence).details : {}), upstreamStatus:evidence.httpStatus ?? null,outcome:evidence.outcome,retryable:false })
 }
 
 // A single customer intent owns all acquisition steps. Every paid receipt is
@@ -71,7 +73,8 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
   const authorizeAcquisition=async()=>{
     context=await revalidateIdentity()
     if(await store.twitterFillUnknownFor(delivery)) throw new AppError(409,'request_outcome_unknown','A previous equal delivery has an unknown outcome')
-    const state=await store.providerState('rapidapi')
+    const shared=await store.providerState('rapidapi')
+    const state=isHubRateLimitExempt(context)?internalCircuitState(gateway.usageStore,context,shared):shared
     const contract=await store.contractCircuitState?.('rapidapi','twitter')
     if([state,contract].some(row=>row?.circuitOpenUntil && Date.parse(row.circuitOpenUntil)>clock())) {
       throw new AppError(503,'external_platform_circuit_open','External data is temporarily unavailable')
@@ -148,12 +151,15 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
           throw new AppError(409,code,'An equal search is pending or has an unresolved result',{upstreamDispatched:false})
         }
         if(await store.twitterFillUnknownFor(delivery)) throw new AppError(409,'request_outcome_unknown','A previous equal delivery has an unknown outcome')
+        if(entered==='exempt' && !isHubRateLimitExempt(context)) {
+          leaveCapacity(entered); entered=false
+        }
         if(!entered) {
-          if(!await enterCapacity({lease:{...dispatchLease,ownedDeliveryLease:true},expiresAt:new Date(deadlineAt),signal,
+          if(!(entered=await enterCapacity({lease:{...dispatchLease,ownedDeliveryLease:true},expiresAt:new Date(deadlineAt),signal,
             canWait:!sources.length,revalidate:async()=>{
               acquisition=await authorizeAcquisition()
               return context
-            }})) {
+            }}))) {
             const active=gateway.active, consumerActive=gateway.activeByConsumer.get(context.consumer.id) || 0
             const reason=active>=gateway.config.maxConcurrency ? 'hub_concurrency_exhausted'
               : consumerActive>=gateway.config.maxConsumerConcurrency ? 'consumer_concurrency_exhausted' : 'concurrency_queue_pending'
@@ -165,11 +171,10 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
               queueDepth:gateway.concurrencyQueue.entries.length,
             })
           }
-          entered=true
         }
         const {credential,control,cost}=acquisition
         currentCost=await store.reserveProviderCostWorkflow({ ...delivery,apiKeyId:context.apiKey.id,costControls:[cost] })
-        const rate=await store.acquireProviderRateLimit({ limit:gateway.config.maxRequestsPerMinute ?? 90,windowMs:60000 })
+        const rate=isHubRateLimitExempt(context)?{allowed:true}:await store.acquireProviderRateLimit({ limit:gateway.config.maxRequestsPerMinute ?? 90,windowMs:60000 })
         if(!rate.allowed) throw new AppError(429,'external_platform_rate_limited','External data rate limit is exhausted')
         if(!enoughTime()) throw new AppError(503,'twitter_fill_deadline','The bounded search deadline has been reached')
         if(signal?.aborted) throw new AppError(499,'request_cancelled','Request cancelled before dispatch')
@@ -259,6 +264,6 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
     throw error
   } finally {
     if(ownsLease && !retainLease) await store.releaseDispatchLease(dispatchLease).catch(()=>{})
-    if(entered) leaveCapacity()
+    if(entered) leaveCapacity(entered)
   }
 }

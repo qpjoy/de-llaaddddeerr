@@ -62,8 +62,8 @@ function douyinMixedPage(number = 1, hasMore = true) {
   return { data, has_more: hasMore, cursor: number * 20, log_pb: { impr_id: 'fixture-session' }, backtrace: 'fixture-backtrace' }
 }
 
-async function harness({ platform = 'bilibili', payload, fetchImpl, leaseMs = 120000 } = {}) {
-  const store = new MemoryStore(), calls = [], historical = []
+async function harness({ platform = 'bilibili', payload, fetchImpl, leaseMs = 120000, store = new MemoryStore() } = {}) {
+  const calls = [], historical = []
   const service = new HubService({ store, apiKeyPepper: PEPPER, adapter: {
     async legacySearch(input) { historical.push(input); throw new Error('Unexpected Night-All dispatch') },
     async search(input) { historical.push(input); throw new Error('Unexpected Night-All dispatch') },
@@ -893,4 +893,44 @@ for (const platform of ['reddit', 'youtube']) test(`${platform} a repeated conti
   assert.equal(h.platformStore.ingestJobs.length, 2)
   assert.deepEqual((await h.invokeData({ platform, query: 'repeat query', pageSize: 20 })).body, result.body)
   assert.equal(h.calls.length, 2)
+})
+
+test('LCY content-search uses refreshed switch and excludes exempt work from ordinary counters', async () => {
+  const { LcyHubLimitStore } = await import('../fixtures/lcy-hub-limit-store.mjs')
+  const f = await harness({ store: new LcyHubLimitStore() })
+  f.gateway.active = f.config.maxConcurrency
+  f.gateway.activeByConsumer.set(f.context.consumer.id, 1)
+  f.platformStore.acquireProviderRateLimit = async () => assert.fail('exempt content must not consume provider tokens')
+  const result = await f.invokeData()
+  assert.equal(result.status, 200); assert.equal(f.calls.length, 1)
+  assert.equal(f.gateway.active, f.config.maxConcurrency)
+  assert.equal(f.gateway.activeByConsumer.get(f.context.consumer.id), 1)
+  f.store.apiKeys.get(f.context.apiKey.id).hubRateLimitExempt = false
+  // Caller holds the earlier authenticated snapshot; acquisition revalidation
+  // must still see the administrator's current setting before admission.
+  await assert.rejects(f.invokeData({ platform: 'bilibili', query: '已关闭', pageSize: 20 }, 'content-switch-disabled'),
+    { code: 'external_platform_busy' })
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.gateway.active, f.config.maxConcurrency)
+})
+
+test('turning LCY exemption off between acquired pages restores capacity before the next paid dispatch', async () => {
+  const { LcyHubLimitStore } = await import('../fixtures/lcy-hub-limit-store.mjs')
+  const store = new LcyHubLimitStore()
+  const f = await harness({ store, payload: () => {
+    store.apiKeys.get('fd2f8cc9-0ff1-4052-a538-8cc8150bde83').hubRateLimitExempt = false
+    return biliPage(['first-paid-row'], 1, 2)
+  } })
+  f.gateway.active = f.config.maxConcurrency
+  f.gateway.activeByConsumer.set(f.context.consumer.id, 2)
+  f.platformStore.acquireProviderRateLimit = async () => assert.fail('the second page must fail concurrency before taking a rate token')
+  const result = await f.invokeData()
+  assert.equal(result.status, 200, 'already acquired records remain deliverable')
+  assert.equal(result.body.data.status, 'partial')
+  assert.deepEqual(result.body.data.items.map(row => row.externalId), ['first-paid-row'])
+  assert.equal(f.calls.length, 1, 'the second page must not dispatch after the switch turns off')
+  assert.equal(f.gateway.active, f.config.maxConcurrency)
+  assert.equal(f.gateway.activeByConsumer.get(f.context.consumer.id), 2)
+  assert.equal([...f.platformStore.calls.values()].length, 1)
+  assert.equal([...f.store.requests.values()][0].status, 'committed')
 })

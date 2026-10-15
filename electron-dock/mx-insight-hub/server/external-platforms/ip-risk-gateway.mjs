@@ -1,3 +1,5 @@
+import { upstreamCapacityError } from './availability-errors.mjs'
+import { isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { IpRiskBatch } from './ip-risk-batch.mjs'
@@ -23,7 +25,7 @@ export class IpRiskGateway {
     this.active++
     return true
   }
-  #leave() { this.active = Math.max(0, this.active - 1); this.concurrencyQueue.drain() }
+  #leave(admission = true) { if (admission === 'exempt') return; this.active = Math.max(0, this.active - 1); this.concurrencyQueue.drain() }
   async #revalidate(context) {
     const current = await this.usageStore.findApiKeyById(context.apiKey.id)
     if (!current || current.apiKey.status !== 'active' || current.consumer.id !== context.consumer.id || current.tenant.id !== context.tenant.id) {
@@ -36,19 +38,22 @@ export class IpRiskGateway {
     ])
     if (!grants.includes(IP_RISK_PLATFORM) || !capabilities.includes(this.operation)) throw new AppError(403, 'capability_not_granted', 'IP risk access changed while waiting')
     if (!plan || plan.status !== 'active' || plan.versionStatus !== 'published') throw new AppError(503, 'plan_assignment_unavailable', 'An active published plan assignment is required')
-    if (this.adapter.capabilities && !(await this.adapter.capabilities()).ready) throw new AppError(503, 'ip_risk_unavailable', 'IP risk service changed while waiting')
+    if (this.adapter.capabilities && !(await this.adapter.capabilities({ hubRateLimitExempt: isHubRateLimitExempt(current) })).ready) throw new AppError(503, 'ip_risk_unavailable', 'IP risk service changed while waiting')
+    return { ...context, ...current }
   }
-  async #credential() {
+  async #credential(context) {
     const credential = await this.credentialStore?.readCredentialSnapshot(this.providerKey)
     const apiKey = credential?.source === 'database' ? credential.apiKey : credential?.apiKey ?? this.adapter.apiKey
     if (!(this.enabled || credential?.source === 'database') || (this.credentialStore ? !apiKey : !this.adapter.configured)) throw new AppError(503, 'ip_risk_unavailable', 'IP risk service is not enabled')
-    const state = await this.platformStore.providerState()
+    const shared = await this.platformStore.providerState()
+    const state = isHubRateLimitExempt(context) ? internalCircuitState(this.usageStore, context, shared) : shared
     if (state.circuitOpenUntil && new Date(state.circuitOpenUntil) > new Date()) throw new AppError(503, 'ip_risk_unavailable', 'IP risk service is temporarily unavailable')
     return apiKey
   }
   async #enterOrQueue(context, { lease, expiresAt, signal, revalidate }) {
     if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
-    if (!this.concurrencyQueue.entries.length && this.#enter()) return
+    if (isHubRateLimitExempt(context)) return 'exempt'
+    if (!this.concurrencyQueue.entries.length && this.#enter()) return true
     const budget = this.dispatchBudgetMs
     if (!Number.isFinite(budget) || budget <= 0) throw new AppError(503, 'ip_risk_unavailable', 'IP risk dispatch time budget is unavailable', { upstreamDispatched: false })
     const policy = { ...DEFAULT_CONCURRENCY_QUEUE, ...this.concurrencyPolicy }
@@ -59,14 +64,15 @@ export class IpRiskGateway {
       await this.concurrencyQueue.enter({ tryEnter: () => this.#enter(), deadline, maxPending: policy.maxPending, signal,
         details: { platform: IP_RISK_PLATFORM, maxConcurrency: 3, maxPending: policy.maxPending } })
       entered = true
-      await this.#revalidate(context)
-      await revalidate()
+      context = await this.#revalidate(context)
+      await revalidate(context)
       if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
       if (this.admissionClock() >= deadline) throw concurrencyBusy('concurrency_queue_timeout', { platform: IP_RISK_PLATFORM })
       const acquired = await this.platformStore.acquireDispatchLease(lease)
       if (acquired.kind !== 'acquired') throw new AppError(409, 'ip_query_in_progress_or_unknown', 'An equal query is running or has an uncertain result', { upstreamDispatched: false })
       if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
       if (this.admissionClock() >= deadline) throw concurrencyBusy('concurrency_queue_timeout', { platform: IP_RISK_PLATFORM })
+      return true
     } catch (error) {
       if (entered) this.#leave()
       throw error
@@ -138,29 +144,33 @@ export class IpRiskGateway {
     if (reservation.kind !== 'reserved') throw new AppError(409, `request_${reservation.kind}`, 'Request cannot be dispatched; retain its Idempotency-Key', { requestId })
     let call = null, evidence = null, lease = false, terminal = false, slot = false
     try {
-      let apiKeyValue = await this.#credential()
+      let apiKeyValue = await this.#credential(context)
       const dispatchLease = { consumerId: consumer.id, operation: this.operation, fingerprint,
         endpointKey: 'risk.query', contractVersion: this.version, ownerRequestId: requestId, expiresAt: reservation.request.leaseExpiresAt }
       const acquired = await this.platformStore.acquireDispatchLease(dispatchLease)
       if (acquired.kind !== 'acquired') throw new AppError(409, 'ip_query_in_progress_or_unknown', 'An equal query is running or has an uncertain result')
       lease = true
-      await this.#enterOrQueue(context, { lease: dispatchLease, expiresAt: reservation.request.leaseExpiresAt, signal,
-        revalidate: async () => { apiKeyValue = await this.#credential() } })
-      slot = true
-      const rate = await this.platformStore.acquireProviderRateLimit({ limit: 60 })
+      slot = await this.#enterOrQueue(context, { lease: dispatchLease, expiresAt: reservation.request.leaseExpiresAt, signal,
+        revalidate: async current => { context = current; apiKeyValue = await this.#credential(context) } })
+      const rate = isHubRateLimitExempt(context) ? { allowed: true } : await this.platformStore.acquireProviderRateLimit({ limit: 60 })
       if (!rate.allowed) throw new AppError(429, 'ip_query_rate_limited', 'IP query rate limit reached')
       if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
       call = await this.platformStore.beginProviderCall({ tenantId: tenant.id, consumerId: consumer.id, apiKeyId: apiKey.id, usageRequestId: requestId,
         operation: this.operation, contractVersion: this.version, endpointKey: 'risk.query', endpointVersion: this.endpointVersion, marketplace: IP_RISK_PLATFORM, fingerprint })
-      evidence = await this.adapter.query(input.ip, { apiKey: apiKeyValue, requestId })
+      evidence = await this.adapter.query(input.ip, { apiKey: apiKeyValue, requestId, hubRateLimitExempt: isHubRateLimitExempt(context) })
       const common = { callId: call.id, delivery, billed: null, costMinor: null, costKind: 'unknown', currency: null,
         latencyMs: evidence.latencyMs, responseArchive: evidence.responseArchive, restrictedResponseArchive: evidence.restrictedResponseArchive }
       if (evidence.outcome !== 'succeeded') {
-        const failure = { error: { code: evidence.errorCode, message: 'IP query could not be completed; retain the request identity' }, requestId }
+        const rateLimited = evidence.httpStatus === 429 || evidence.errorCode === 'ip_channel_rate_limited'
+        // This API historically projects supplier failures as HTTP 502. Keep
+        // that contract and expose the supplier 429/business limit in details.
+        const status = 502
+        const failure = { error: { code: evidence.errorCode, message: 'IP query could not be completed; retain the request identity',
+          ...(rateLimited ? { details: upstreamCapacityError(evidence).details } : {}) }, requestId }
         await this.platformStore.finishFailure({ ...common, outcome: evidence.outcome, httpStatus: evidence.httpStatus, businessCode: evidence.businessCode,
-          errorCode: evidence.errorCode, failureResponseStatus: 502, failureResponseBody: failure })
+          errorCode: rateLimited ? 'upstream_rate_limited' : evidence.errorCode, failureResponseStatus: status, failureResponseBody: failure })
         terminal = true
-        return { status: 502, body: failure, requestId, replay: false }
+        return { status, body: failure, requestId, replay: false }
       }
       const capturedAt = new Date()
       const responseBody = { contractVersion: this.version, data: { ip: input.ip, ...evidence.normalized },
@@ -180,7 +190,7 @@ export class IpRiskGateway {
       throw error
     } finally {
       if (lease) await this.platformStore.releaseDispatchLease({ consumerId: consumer.id, operation: this.operation, fingerprint, ownerRequestId: requestId }).catch(() => {})
-      if (slot) this.#leave()
+      if (slot) this.#leave(slot)
     }
   }
 }

@@ -32,6 +32,10 @@ MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh ops internal
 # 仅在 Docker Hub 可以直接访问、只需让 RUN 使用宿主网络时，才改用下面这一条：
 MX_INSIGHT_BUILD_NETWORK=host \
 bash scripts/manage.sh ops internal-production deploy
+# deploy
+MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 \
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 \
+bash scripts/manage.sh ops internal-production deploy
 
 # deploy 不会触发 Elasticsearch 全量重建。若数据中心仍开启“projector 重启时
 # 自动全量重建”，deploy 会幂等关闭这个重启副作用、打印提示并继续；不会启动或

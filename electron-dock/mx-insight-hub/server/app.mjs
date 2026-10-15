@@ -26,6 +26,7 @@ import { capabilityCatalog, syncCapabilityCatalog } from './data/capability-cata
 import { formatBrowserExport } from './data/browser-export.mjs'
 import { browseData, browserStatistics, exportBrowserData, parseBrowserQuery } from './data/browser.mjs'
 import { readKeyAccessLimits, saveKeyAccessLimit } from './stores/key-access-limits.mjs'
+import { readKeyHubLimits, saveKeyHubLimits } from './stores/key-hub-limits.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { extname, join, normalize } from 'node:path'
@@ -2741,6 +2742,16 @@ export function createApp({
         sendJson(response, 201, { data: await service.createApiKey(body), requestId })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/api-keys/:id/hub-limits')
+      if (params && ['GET', 'PUT'].includes(request.method)) {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'Key Hub limits')
+        response.setHeader('Cache-Control', 'no-store')
+        const data = request.method === 'GET' ? await readKeyHubLimits(store, params.id)
+          : await saveKeyHubLimits(store, params.id, await readJson(request, 4096), { actor: principal.kind, requestId })
+        sendJson(response, 200, { data, requestId }); return
+      }
+
       params = routeMatch(pathname, '/internal/v1/admin/api-keys/:id/access-limits')
       if (params && ['GET','PUT'].includes(request.method)) {
         requireSourceAdmin(principal)
