@@ -1,9 +1,9 @@
 {
-  "reference": "External Harbor design prototype supplied by the user",
+  "reference": "User-provided /dataport UI prototype",
   "files": [
     {
       "source": "app/globals.css",
-      "sha256": "e6b3cbb63154cbad8d18eb3669228c38b67d781bc0cb70b95a93200eaaa0ed9d"
+      "sha256": "c6c27781a768d7f08fe9ae3acbc62f1db03b47790f85c6d45b9d907d4c844865"
     },
     {
       "source": "components/ui/alert.tsx",
@@ -67,7 +67,7 @@
     },
     {
       "source": "components/ui/sidebar.tsx",
-      "sha256": "b653d6061852b996be8417923ab7cd5c5dd901dae6db3f94e12740fff4f0e720"
+      "sha256": "e356883d3178d49e05637b9a9a8671392ef982a7aff0be8d8a529d141cdfa42d"
     },
     {
       "source": "components/ui/skeleton.tsx",
@@ -109,5 +109,7 @@
       "source": "vendor/shadcn-tailwind-4.13.0.css",
       "sha256": "bc7d83425702955b4cb67cb14ede9d603f9d912376d57a2d81d661094d2a782a"
     }
-  ]
+  ],
+  "syncedAt": "2026-10-15",
+  "notes": "globals.css and sidebar.tsx resynced byte-for-byte. Other entries retain original extraction provenance; business adapters are in apps/web."
 }

@@ -49,6 +49,9 @@ export function PublicIpSearch({
   onQuery,
   showIntro = true,
   validateInput = true,
+  consoleView = false,
+  tools,
+  children,
 }: {
   initialIp?: string;
   available?: boolean;
@@ -59,6 +62,9 @@ export function PublicIpSearch({
   onQuery?: (ip: string) => void;
   showIntro?: boolean;
   validateInput?: boolean;
+  consoleView?: boolean;
+  tools?: React.ReactNode;
+  children?: React.ReactNode;
 }) {
   const { signedIn, enter } = usePublicAccess();
   const [ip, setIp] = useState(initialIp);
@@ -81,88 +87,99 @@ export function PublicIpSearch({
   }
   return (
     <section
-      className="public-query ip-query-surface"
+      className={`${consoleView ? "intelligence-search" : "public-query"} ip-query-surface`}
       aria-labelledby="public-query-title"
     >
       <h1 id="public-query-title">IP 风险画像</h1>
-      <p>查询风险等级、行为标签与网络归属</p>
-      <form
-        onSubmit={submit}
-        noValidate
-        role="search"
-        aria-label="IP 风险画像查询"
-      >
-        <FieldGroup>
-          <Field data-invalid={!!error}>
-            <FieldLabel htmlFor="public-ip" className="sr-only">
-              IP 地址
-            </FieldLabel>
-            <InputGroup className="intelligence-input">
-              <InputGroupInput
-                ref={inputRef}
-                id="public-ip"
-                value={ip}
-                onChange={(event) => {
-                  setIp(event.target.value);
-                  setError("");
-                }}
-                placeholder="输入 IPv4 地址"
-                autoComplete="off"
-                autoCapitalize="none"
-                enterKeyHint="search"
-                spellCheck={false}
-                maxLength={64}
-                aria-invalid={!!error}
-                aria-describedby={
-                  error ? "public-ip-error" : "public-query-hint"
-                }
-              />
-              <InputGroupAddon>
-                <Search aria-hidden="true" />
-              </InputGroupAddon>
-              <InputGroupAddon align="inline-end">
-                {ip && (
-                  <InputGroupButton
-                    aria-label="清空 IP"
-                    size="icon-sm"
-                    onClick={() => {
-                      setIp("");
-                      setError("");
-                      inputRef.current?.focus();
-                    }}
-                  >
-                    <X />
-                  </InputGroupButton>
-                )}
-                <Button
-                  type="submit"
-                  disabled={!available || busy}
-                  className="intelligence-submit"
-                  aria-label={
-                    actionLabel && actionLabel !== "查询"
-                      ? actionLabel
-                      : "查询 IP 画像"
+      <p>
+        {consoleView
+          ? "查询 IP 风险画像，关联代理特征与网络归属"
+          : "查询风险等级、行为标签与网络归属"}
+      </p>
+      <div className={consoleView ? "query-input-tools" : undefined}>
+        <form
+          onSubmit={submit}
+          noValidate
+          role="search"
+          aria-label="IP 风险画像查询"
+        >
+          <FieldGroup>
+            <Field data-invalid={!!error}>
+              <FieldLabel htmlFor="public-ip" className="sr-only">
+                IP 地址
+              </FieldLabel>
+              <InputGroup className="intelligence-input">
+                <InputGroupInput
+                  ref={inputRef}
+                  id="public-ip"
+                  value={ip}
+                  onChange={(event) => {
+                    setIp(event.target.value);
+                    setError("");
+                  }}
+                  placeholder="输入 IPv4 地址"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  enterKeyHint="search"
+                  spellCheck={false}
+                  maxLength={64}
+                  aria-invalid={!!error}
+                  aria-describedby={
+                    error ? "public-ip-error" : "public-query-hint"
                   }
-                >
-                  <span>
-                    {busy
-                      ? busyLabel
-                      : actionLabel || (available ? "查询" : "暂不可用")}
-                  </span>
-                </Button>
-              </InputGroupAddon>
-            </InputGroup>
-            {error && <FieldError id="public-ip-error">{error}</FieldError>}
-          </Field>
-        </FieldGroup>
-      </form>
-      <p id="public-query-hint" className="public-query-hint">
+                />
+                <InputGroupAddon>
+                  <Search aria-hidden="true" />
+                </InputGroupAddon>
+                <InputGroupAddon align="inline-end">
+                  {tools}
+                  {ip && (
+                    <InputGroupButton
+                      aria-label="清空 IP"
+                      size="icon-sm"
+                      onClick={() => {
+                        setIp("");
+                        setError("");
+                        inputRef.current?.focus();
+                      }}
+                    >
+                      <X />
+                    </InputGroupButton>
+                  )}
+                  <Button
+                    type="submit"
+                    disabled={!available || busy}
+                    className="intelligence-submit"
+                    aria-label={
+                      actionLabel && actionLabel !== "查询"
+                        ? actionLabel
+                        : "查询 IP 画像"
+                    }
+                  >
+                    <span>
+                      {busy
+                        ? busyLabel
+                        : actionLabel || (available ? "查询" : "暂不可用")}
+                    </span>
+                  </Button>
+                </InputGroupAddon>
+              </InputGroup>
+              {error && <FieldError id="public-ip-error">{error}</FieldError>}
+            </Field>
+          </FieldGroup>
+        </form>
+        {children}
+      </div>
+      <p
+        id="public-query-hint"
+        className={consoleView ? "risk-query-hint" : "public-query-hint"}
+      >
         {hint ||
           (signedIn
             ? available
               ? "输入 IP 后进入控制台查询"
               : "数据查询尚未开放"
-            : "受邀加入数港，已有 MX 账号也需首次开通")}
+            : "登录后即可查询，账号由管理员统一开通")}
       </p>
       {showIntro && (
         <ul className="public-query-intro" aria-label="查询功能介绍">

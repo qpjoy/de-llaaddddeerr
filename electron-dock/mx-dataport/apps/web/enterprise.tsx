@@ -6,6 +6,7 @@ import {
   ShieldCheck,
   Download,
   MessageCircle,
+  RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
@@ -173,21 +174,17 @@ export function EnterpriseMembers(props: Props) {
           <p>统一 MX 账号 · 企业成员与角色权限</p>
         </div>
         <div className="harbor-actions">
+          <Button
+            variant="outline"
+            aria-label="刷新企业账号"
+            onClick={view.reload}
+          >
+            <RefreshCw size={16} />
+          </Button>
           {owner && (
             <Button variant="outline" onClick={() => setRoleEditor(true)}>
               <ShieldCheck size={16} />
               角色与权限
-            </Button>
-          )}
-          {hasPermission(session, tenant, "members.create") && (
-            <Button
-              onClick={() => {
-                setCommandId(crypto.randomUUID());
-                setOpen(true);
-              }}
-            >
-              <Plus size={16} />
-              创建员工账号
             </Button>
           )}
         </div>
@@ -210,7 +207,21 @@ export function EnterpriseMembers(props: Props) {
           {view.error || write.error}
         </p>
       )}
-      <Card className="harbor-table-panel">
+      <Card className="harbor-table-panel parity-members-panel">
+        <div className="section-title">
+          <h3>企业成员</h3>
+          {hasPermission(session, tenant, "members.create") && (
+            <Button
+              onClick={() => {
+                setCommandId(crypto.randomUUID());
+                setOpen(true);
+              }}
+            >
+              <Plus size={16} />
+              新建子账号
+            </Button>
+          )}
+        </div>
         <Table>
           <TableHeader>
             <TableRow>
@@ -326,7 +337,7 @@ export function EnterpriseMembers(props: Props) {
           if (!write.busy) setOpen(v);
         }}
       >
-        <DialogContent>
+        <DialogContent className="dp-dialog">
           <DialogHeader>
             <DialogTitle>创建或关联员工账号</DialogTitle>
             <DialogDescription>
@@ -420,7 +431,7 @@ export function EnterpriseMembers(props: Props) {
           if (!v) setInvite(null);
         }}
       >
-        <DialogContent>
+        <DialogContent className="dp-dialog">
           <DialogHeader>
             <DialogTitle>员工加入邀请</DialogTitle>
             <DialogDescription>
@@ -449,7 +460,7 @@ export function EnterpriseMembers(props: Props) {
           if (!v) setPassword(null);
         }}
       >
-        <DialogContent>
+        <DialogContent className="dp-dialog">
           <DialogHeader>
             <DialogTitle>员工初始密码</DialogTitle>
             <DialogDescription>
@@ -471,7 +482,7 @@ export function EnterpriseMembers(props: Props) {
           if (!v && !write.busy) setEditingMember(null);
         }}
       >
-        <DialogContent>
+        <DialogContent className="dp-dialog">
           <DialogHeader>
             <DialogTitle>编辑员工资料</DialogTitle>
             <DialogDescription>
@@ -661,75 +672,80 @@ export function Support(props: Props) {
     <>
       <div className="page-heading">
         <div>
-          <h1>联系客服</h1>
+          <h1>服务工单</h1>
           <p>提交购买、接入或账户问题，查看工单记录。</p>
         </div>
         {hasPermission(props.session, props.tenant, "support.create") && (
           <Button onClick={() => setOpen(true)}>
             <MessageCircle size={16} />
-            提交工单
+            新建工单
           </Button>
         )}
       </div>
-      <div className="dp-toolbar">
-        <Input
-          placeholder="搜索问题或工单号"
-          aria-label="搜索工单"
-          value={q}
-          onChange={(e) => {
-            setQ(e.target.value);
-            setPage(1);
-          }}
-        />
-        <select
-          aria-label="工单分类"
-          value={category}
-          onChange={(e) => {
-            setCategory(e.target.value);
-            setPage(1);
-          }}
-        >
-          <option value="">全部分类</option>
-          {Object.entries(categories).map(([v, l]) => (
-            <option key={v} value={v}>
-              {l}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="工单状态"
-          value={status}
-          onChange={(e) => {
-            setStatus(e.target.value);
-            setPage(1);
-          }}
-        >
-          <option value="">全部状态</option>
-          <option value="saved">已记录</option>
-        </select>
-      </div>
-      {view.error && <p role="alert">{view.error}</p>}
-      <Card className="harbor-table-panel">
+      <Card className="harbor-table-panel parity-ticket-panel">
+        <div className="dp-toolbar">
+          <Input
+            placeholder="搜索问题或工单编号"
+            aria-label="搜索工单"
+            value={q}
+            onChange={(e) => {
+              setQ(e.target.value);
+              setPage(1);
+            }}
+          />
+          <select
+            aria-label="工单分类"
+            value={category}
+            onChange={(e) => {
+              setCategory(e.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">全部分类</option>
+            {Object.entries(categories).map(([v, l]) => (
+              <option key={v} value={v}>
+                {l}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="工单状态"
+            value={status}
+            onChange={(e) => {
+              setStatus(e.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">全部状态</option>
+            <option value="saved">已提交</option>
+          </select>
+        </div>
+        {view.error && <p role="alert">{view.error}</p>}
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>问题内容</TableHead>
+              <TableHead>工单编号 / 问题</TableHead>
               <TableHead>分类</TableHead>
               <TableHead>优先级</TableHead>
               <TableHead>状态</TableHead>
               <TableHead>提交时间</TableHead>
-              <TableHead />
+              <TableHead>操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {view.data?.items.map((t: any) => (
               <TableRow key={t.id}>
-                <TableCell>{t.content.slice(0, 45)}</TableCell>
+                <TableCell>
+                  <strong>{t.content.slice(0, 45)}</strong>
+                  <small className="dp-account-id">{t.id}</small>
+                </TableCell>
                 <TableCell>{categories[t.category]}</TableCell>
                 <TableCell>
                   {t.priority === "urgent" ? "紧急" : "普通"}
                 </TableCell>
-                <TableCell>已记录</TableCell>
+                <TableCell>
+                  <span className="status good">已提交</span>
+                </TableCell>
                 <TableCell>{dateTime(t.created_at)}</TableCell>
                 <TableCell>
                   <Button variant="link" onClick={() => setDetail(t)}>
@@ -753,7 +769,7 @@ export function Support(props: Props) {
           if (!write.busy) setOpen(v);
         }}
       >
-        <DialogContent>
+        <DialogContent className="dp-dialog">
           <DialogHeader>
             <DialogTitle>提交工单</DialogTitle>
             <DialogDescription>
@@ -819,7 +835,7 @@ export function Support(props: Props) {
           if (!v) setDetail(null);
         }}
       >
-        <DialogContent>
+        <DialogContent className="dp-dialog">
           <DialogHeader>
             <DialogTitle>工单详情</DialogTitle>
             <DialogDescription>{detail?.id} · 已记录</DialogDescription>
@@ -856,6 +872,18 @@ export function Audit(props: Props) {
     [status, setStatus] = useState(""),
     [from, setFrom] = useState(""),
     [to, setTo] = useState("");
+  const [actors, setActors] = useState<any[]>([]);
+  useEffect(() => {
+    const c = new AbortController();
+    setActors([]);
+    if (hasPermission(props.session, props.tenant, "members.read"))
+      request(enterpriseUrl(props.tenant, "members"), { signal: c.signal })
+        .then(({ data }) => {
+          if (!c.signal.aborted) setActors(data.items || []);
+        })
+        .catch(() => {});
+    return () => c.abort();
+  }, [props.tenant, props.session]);
   const path = `audit?page=${page}&q=${encodeURIComponent(q)}&action=${encodeURIComponent(action)}&actor=${encodeURIComponent(actor)}&status=${status}&from=${from}&to=${to}`,
     view = useEnterprise(props.tenant, path),
     [exporting, setExporting] = useState(false);
@@ -866,130 +894,158 @@ export function Audit(props: Props) {
           <h1>日志审阅</h1>
           <p>企业操作记录 · 时间、操作者与操作结果</p>
         </div>
-        {hasPermission(props.session, props.tenant, "audit.export") && (
-          <Button
-            variant="outline"
-            disabled={exporting}
-            onClick={async () => {
-              setExporting(true);
-              try {
-                let rows: any[] = [];
-                for (let n = 1; ; n++) {
-                  const { data } = await request(
-                    enterpriseUrl(
-                      props.tenant,
-                      `${path.replace(/page=\d+/, `page=${n}`)}&pageSize=100&export=1`,
-                    ),
+        <div className="harbor-actions">
+          <Button variant="outline" aria-label="刷新日志" onClick={view.reload}>
+            <RefreshCw size={16} />
+          </Button>
+          {hasPermission(props.session, props.tenant, "audit.export") && (
+            <Button
+              variant="outline"
+              disabled={exporting}
+              onClick={async () => {
+                setExporting(true);
+                try {
+                  let rows: any[] = [];
+                  for (let n = 1; ; n++) {
+                    const { data } = await request(
+                      enterpriseUrl(
+                        props.tenant,
+                        `${path.replace(/page=\d+/, `page=${n}`)}&pageSize=100&export=1`,
+                      ),
+                    );
+                    rows.push(...data.items);
+                    if (rows.length >= data.total) break;
+                  }
+                  await downloadExcel(
+                    "数港审计日志",
+                    ["时间", "操作者", "操作", "目标", "状态", "请求编号"],
+                    rows.map((r) => [
+                      dateTime(r.created_at),
+                      r.actorName || "平台管理员",
+                      actionNames[r.action] || r.action,
+                      r.target,
+                      r.status,
+                      r.detail?.requestId || "",
+                    ]),
                   );
-                  rows.push(...data.items);
-                  if (rows.length >= data.total) break;
+                } catch (e) {
+                  view.setError((e as Error).message);
+                } finally {
+                  setExporting(false);
                 }
-                await downloadExcel(
-                  "数港审计日志",
-                  ["时间", "操作者", "操作", "目标", "状态", "请求编号"],
-                  rows.map((r) => [
-                    dateTime(r.created_at),
-                    r.actorName || "平台管理员",
-                    actionNames[r.action] || r.action,
-                    r.target,
-                    r.status,
-                    r.detail?.requestId || "",
-                  ]),
-                );
-              } catch (e) {
-                view.setError((e as Error).message);
-              } finally {
-                setExporting(false);
-              }
+              }}
+            >
+              <Download size={16} />
+              导出日志
+            </Button>
+          )}
+        </div>
+      </div>
+      <Card className="harbor-table-panel parity-audit-panel">
+        <div className="dp-toolbar">
+          <Input
+            aria-label="搜索日志"
+            placeholder="搜索目标、操作者或请求编号"
+            value={q}
+            onChange={(e) => {
+              setQ(e.target.value);
+              setPage(1);
+            }}
+          />
+          <select
+            aria-label="操作类型"
+            value={action}
+            onChange={(e) => {
+              setAction(e.target.value);
+              setPage(1);
             }}
           >
-            <Download size={16} />
-            导出日志
-          </Button>
-        )}
-      </div>
-      <div className="dp-toolbar">
-        <Input
-          aria-label="搜索日志"
-          placeholder="搜索目标、操作者或请求编号"
-          value={q}
-          onChange={(e) => {
-            setQ(e.target.value);
-            setPage(1);
-          }}
-        />
-        <select
-          aria-label="操作类型"
-          value={action}
-          onChange={(e) => {
-            setAction(e.target.value);
-            setPage(1);
-          }}
-        >
-          <option value="">全部操作</option>
-          {Object.entries(actionNames).map(([id, name]) => (
-            <option value={id} key={id}>
-              {name}
-            </option>
-          ))}
-        </select>
-        <Input
-          aria-label="操作者编号"
-          placeholder="操作者编号"
-          value={actor}
-          onChange={(e) => {
-            setActor(e.target.value);
-            setPage(1);
-          }}
-        />
-        <select
-          aria-label="操作结果"
-          value={status}
-          onChange={(e) => {
-            setStatus(e.target.value);
-            setPage(1);
-          }}
-        >
-          <option value="">全部结果</option>
-          <option value="success">成功</option>
-          <option value="failure">失败</option>
-        </select>
-        <input
-          type="date"
-          aria-label="日志开始日期"
-          value={from}
-          onChange={(e) => {
-            setFrom(e.target.value);
-            setPage(1);
-          }}
-        />
-        <input
-          type="date"
-          aria-label="日志结束日期"
-          value={to}
-          onChange={(e) => {
-            setTo(e.target.value);
-            setPage(1);
-          }}
-        />
-      </div>
-      {view.error && <p role="alert">{view.error}</p>}
-      <Card className="harbor-table-panel">
+            <option value="">全部操作</option>
+            {Object.entries(actionNames).map(([id, name]) => (
+              <option value={id} key={id}>
+                {name}
+              </option>
+            ))}
+          </select>
+          <select
+            className="parity-actor-select"
+            aria-label="操作者"
+            value={actor}
+            onChange={(e) => {
+              setActor(e.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">全部账号</option>
+            {actors.map((member) => (
+              <option key={member.id} value={member.id}>
+                {member.displayName || member.account || member.id}
+              </option>
+            ))}
+            {actor && !actors.some((member) => member.id === actor) && (
+              <option value={actor}>{actor}</option>
+            )}
+          </select>
+        </div>
+        <details className="parity-extra-filters">
+          <summary>更多筛选</summary>
+          <div className="dp-toolbar">
+            <Input
+              aria-label="操作者编号"
+              placeholder="操作者编号"
+              value={actor}
+              onChange={(e) => {
+                setActor(e.target.value);
+                setPage(1);
+              }}
+            />
+
+            <select
+              aria-label="操作结果"
+              value={status}
+              onChange={(e) => {
+                setStatus(e.target.value);
+                setPage(1);
+              }}
+            >
+              <option value="">全部结果</option>
+              <option value="success">成功</option>
+              <option value="failure">失败</option>
+            </select>
+            <input
+              type="date"
+              aria-label="日志开始日期"
+              value={from}
+              onChange={(e) => {
+                setFrom(e.target.value);
+                setPage(1);
+              }}
+            />
+            <input
+              type="date"
+              aria-label="日志结束日期"
+              value={to}
+              onChange={(e) => {
+                setTo(e.target.value);
+                setPage(1);
+              }}
+            />
+          </div>
+        </details>
+        {view.error && <p role="alert">{view.error}</p>}
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>操作时间</TableHead>
               <TableHead>操作者</TableHead>
               <TableHead>操作</TableHead>
               <TableHead>目标</TableHead>
               <TableHead>结果</TableHead>
-              <TableHead>请求编号</TableHead>
+              <TableHead>操作时间</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {view.data?.items.map((r: any) => (
               <TableRow key={r.id}>
-                <TableCell>{dateTime(r.created_at)}</TableCell>
                 <TableCell title={r.actor}>
                   {r.actorName || (r.actor ? "未记录姓名" : "平台管理员")}
                 </TableCell>
@@ -1001,7 +1057,13 @@ export function Audit(props: Props) {
                   {r.status < 400 ? "成功" : "失败"} · {r.status}
                 </TableCell>
                 <TableCell>
-                  <code>{r.detail?.requestId || "—"}</code>
+                  {dateTime(r.created_at)}
+                  {r.detail?.requestId && (
+                    <details className="audit-request-id">
+                      <summary>请求编号</summary>
+                      <code>{r.detail.requestId}</code>
+                    </details>
+                  )}
                 </TableCell>
               </TableRow>
             ))}

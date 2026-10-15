@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Plus, Copy, KeyRound } from "lucide-react";
+import { Plus, Copy, KeyRound, Info, Database } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -91,9 +91,16 @@ export function ApiKeys({
         {hasPermission(session, tenant, "keys.create") && (
           <Button onClick={() => setOpen(true)}>
             <Plus size={16} />
-            创建 API Key
+            签发 API Key
           </Button>
         )}
+      </div>
+      <div className="notice">
+        <Info size={16} />
+        <span>
+          完整密钥仅展示一次。替换密钥时，请先完成客户端切换，再手动撤销旧
+          Key。实际调用仍受企业、Key 权限和订阅额度限制。
+        </span>
       </div>
       {error && (
         <p role="alert" className="harbor-error">
@@ -101,50 +108,81 @@ export function ApiKeys({
         </p>
       )}
       <Card className="harbor-table-panel">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>名称</TableHead>
-              <TableHead>Key 标识</TableHead>
-              <TableHead>状态</TableHead>
-              <TableHead>到期时间</TableHead>
-              <TableHead />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.items.map((k) => (
-              <TableRow key={k.id}>
-                <TableCell>
-                  <KeyRound size={15} />
-                  {k.name}
-                </TableCell>
-                <TableCell>
-                  <code>{k.prefix || k.id}••••••</code>
-                </TableCell>
-                <TableCell>{k.effectiveStatus || k.status}</TableCell>
-                <TableCell>{dateTime(k.expiresAt)}</TableCell>
-                <TableCell>
-                  {hasPermission(session, tenant, "keys.revoke") &&
-                    (k.effectiveStatus || k.status) === "active" && (
-                      <Button variant="ghost" onClick={() => setRevoke(k)}>
-                        撤销
-                      </Button>
-                    )}
-                </TableCell>
+        {items.length > 0 && (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>名称</TableHead>
+                <TableHead>Key 标识</TableHead>
+                <TableHead>状态</TableHead>
+                <TableHead>到期时间</TableHead>
+                <TableHead />
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+            </TableHeader>
+            <TableBody>
+              {rows.items.map((k) => (
+                <TableRow key={k.id}>
+                  <TableCell>
+                    <KeyRound size={15} />
+                    {k.name}
+                  </TableCell>
+                  <TableCell>
+                    <code>{k.prefix || k.id}••••••</code>
+                  </TableCell>
+                  <TableCell>
+                    <span
+                      className={`status ${(k.effectiveStatus || k.status) === "active" ? "good" : "pending"}`}
+                    >
+                      {(
+                        {
+                          active: "正常",
+                          revoked: "已撤销",
+                          expired: "已到期",
+                          suspended: "已停用",
+                        } as Record<string, string>
+                      )[k.effectiveStatus || k.status] || "不可用"}
+                    </span>
+                  </TableCell>
+                  <TableCell>{dateTime(k.expiresAt)}</TableCell>
+                  <TableCell>
+                    {hasPermission(session, tenant, "keys.revoke") &&
+                      (k.effectiveStatus || k.status) === "active" && (
+                        <Button variant="ghost" onClick={() => setRevoke(k)}>
+                          撤销
+                        </Button>
+                      )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
         {loading ? (
           <p className="harbor-empty">正在读取 API Keys…</p>
         ) : (
-          !items.length && <p className="harbor-empty">尚无 API Key</p>
+          !items.length && (
+            <div className="empty-state parity-key-empty">
+              <div className="empty-icon">
+                <Database size={28} />
+              </div>
+              <h3>签发你的第一把 API Key</h3>
+              <p>密钥用于服务端请求鉴权，完整凭证只展示一次。</p>
+              {hasPermission(session, tenant, "keys.create") && (
+                <Button onClick={() => setOpen(true)}>
+                  <Plus size={16} />
+                  签发 API Key
+                </Button>
+              )}
+            </div>
+          )
         )}
-        <Pagination
-          label="API Keys"
-          {...rows.pagination}
-          onChange={rows.setPage}
-        />
+        {items.length > 0 && (
+          <Pagination
+            label="API Keys"
+            {...rows.pagination}
+            onChange={rows.setPage}
+          />
+        )}
       </Card>
       <Dialog
         open={open}
@@ -152,9 +190,9 @@ export function ApiKeys({
           if (!busy) setOpen(v);
         }}
       >
-        <DialogContent>
+        <DialogContent className="dp-dialog">
           <DialogHeader>
-            <DialogTitle>创建 API Key</DialogTitle>
+            <DialogTitle>签发 API Key</DialogTitle>
             <DialogDescription>
               新 Key 仅授权当前企业 IP
               风险画像产品，完整凭证仅在创建成功后显示一次。
@@ -200,7 +238,7 @@ export function ApiKeys({
           if (!v) setSecret("");
         }}
       >
-        <DialogContent>
+        <DialogContent className="dp-dialog">
           <DialogHeader>
             <DialogTitle>保存你的 API Key</DialogTitle>
             <DialogDescription>
@@ -229,7 +267,7 @@ export function ApiKeys({
           if (!v && !busy) setRevoke(null);
         }}
       >
-        <DialogContent>
+        <DialogContent className="dp-dialog">
           <DialogHeader>
             <DialogTitle>撤销 API Key</DialogTitle>
             <DialogDescription>

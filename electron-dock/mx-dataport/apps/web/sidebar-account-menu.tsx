@@ -71,6 +71,7 @@ export function SidebarAccountMenu({
   const { isMobile, setOpenMobile } = useSidebar();
   const navigating = useRef(false);
   function select(next: string) {
+    setOpen(false);
     navigating.current = isMobile;
     navigate(next);
     setOpenMobile(false);
@@ -111,40 +112,62 @@ export function SidebarAccountMenu({
               navigating.current = false;
             }}
           >
-            <DropdownMenuLabel className="sidebar-account-label">
-              <strong>{name}</strong>
-              {hasPermission(session, tenant || "", "usage.read") && (
-                <div className="dp-account-quota">
-                  {loading ? (
-                    "正在读取额度…"
-                  ) : quotaError ? (
-                    "额度暂不可用"
-                  ) : quota ? (
-                    <>
-                      <p>
-                        {quota.used} / {quota.quota} 次已用
-                      </p>
-                      <progress
-                        max={quota.quota}
-                        value={quota.used + quota.held}
-                        aria-label="企业订阅额度"
-                      />
-                      <small>
-                        到期{" "}
-                        {new Date(quota.endsAt).toLocaleDateString("zh-CN")}
-                      </small>
-                    </>
-                  ) : (
-                    "暂无生效订阅"
-                  )}
-                </div>
-              )}
+            <DropdownMenuLabel className="sidebar-account-label account-profile-header">
+              <Avatar aria-hidden="true">
+                <AvatarFallback>
+                  {name.slice(0, 1).toUpperCase()}
+                </AvatarFallback>
+              </Avatar>
+              <div>
+                <strong title={name}>{name}</strong>
+                <span>
+                  {loading
+                    ? "加载中…"
+                    : quotaError
+                      ? "套餐暂不可用"
+                      : quota
+                        ? quota.product?.name || "企业订阅"
+                        : "尚未订阅"}
+                </span>
+              </div>
             </DropdownMenuLabel>
-            <DropdownMenuSeparator />
+            {hasPermission(session, tenant || "", "usage.read") && (
+              <div className="account-plan-summary" aria-live="polite">
+                {loading ? (
+                  <p>正在读取额度…</p>
+                ) : quotaError ? (
+                  <p>额度暂不可用</p>
+                ) : (
+                  <>
+                    <div>
+                      <span>剩余查询</span>
+                      <b>
+                        {quota
+                          ? Math.max(
+                              0,
+                              quota.quota - quota.used - quota.held,
+                            ).toLocaleString("zh-CN")
+                          : 0}
+                        <small> 次</small>
+                      </b>
+                    </div>
+                    {quota && (
+                      <p>
+                        {new Date(quota.endsAt).toLocaleDateString("zh-CN")}{" "}
+                        到期{quota.held > 0 ? ` · ${quota.held} 次待确认` : ""}
+                      </p>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
             <DropdownMenuGroup>
               {(session === undefined ||
                 canOpenPage(session, tenant || "", "services")) && (
-                <DropdownMenuItem onSelect={() => select("services")}>
+                <DropdownMenuItem
+                  className="account-upgrade"
+                  onSelect={() => select("services")}
+                >
                   <CircleArrowUp />
                   升级套餐
                 </DropdownMenuItem>

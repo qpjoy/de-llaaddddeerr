@@ -7,7 +7,6 @@ import { Slot } from "radix-ui"
 
 import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
-import { readSidebarPreference, saveSidebarPreference } from "@/lib/cookie-consent"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
@@ -72,10 +71,6 @@ function SidebarProvider({
   // We use openProp and setOpenProp for control from outside the component.
   const [_open, _setOpen] = React.useState(defaultOpen)
   const open = openProp ?? _open
-  React.useEffect(() => {
-    const saved = readSidebarPreference()
-    if (saved !== null) _setOpen(saved)
-  }, [])
   const setOpen = React.useCallback(
     (value: boolean | ((value: boolean) => boolean)) => {
       const openState = typeof value === "function" ? value(open) : value
@@ -85,8 +80,6 @@ function SidebarProvider({
         _setOpen(openState)
       }
 
-      // Persist optional UI preferences only after explicit permission.
-      saveSidebarPreference(openState)
     },
     [setOpenProp, open]
   )

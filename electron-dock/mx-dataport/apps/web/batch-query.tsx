@@ -105,8 +105,11 @@ export function BatchQuery({
   return (
     <Card className="dp-batch-panel">
       <CardContent>
+        <p className="parity-batch-instructions">
+          上传 .xlsx / .xls 文件，第一行为 IP 列。最多 500 行、5 MB，重复 IP
+          自动合并。
+        </p>
         <div className="dp-toolbar">
-          <strong>Excel 批量查询</strong>
           <Button
             variant="outline"
             disabled={busy || running}
@@ -116,7 +119,7 @@ export function BatchQuery({
             上传文件
           </Button>
           <Button
-            variant="ghost"
+            variant="outline"
             disabled={busy || running}
             onClick={() =>
               void downloadExcel("IP批量查询模板", ["IP"], [["8.8.8.8"]]).catch(
@@ -161,8 +164,7 @@ export function BatchQuery({
           }}
         />
         <p className="harbor-hint">
-          第一行包含 IP 列，最多 500 行、5
-          MB，自动去重。逐条消耗企业额度；待确认的记录不会自动重试。
+          每个 IP 分别查询并消耗企业额度；待确认的记录不会自动重试。
         </p>
         {error && (
           <p role="alert" className="harbor-error">

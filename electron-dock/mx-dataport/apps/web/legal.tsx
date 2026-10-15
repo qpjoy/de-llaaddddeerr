@@ -1,40 +1,26 @@
-import { useState } from "react";
-import { Button } from "@/components/ui/button";
 export function LegalFooter({ inConsole = false }: { inConsole?: boolean }) {
   return (
     <footer
-      className={`dp-legal-footer ${inConsole ? "dp-legal-console" : ""}`}
+      className={inConsole ? "page-footer legal-footer" : "public-footer"}
     >
-      <span>© 2026 数港 DataPort</span>
-      <nav aria-label="法律信息">
-        <a href="/privacy">隐私政策</a>
-        <a href="/terms">用户协议</a>
-        <a href="/cookies">Cookie 说明</a>
-      </nav>
+      <div
+        className={
+          inConsole
+            ? "legal-footer-inner"
+            : "public-container legal-footer-inner"
+        }
+      >
+        <span>© 2026 数港 DataPort</span>
+        <nav aria-label="法律信息">
+          <a href="/privacy">隐私政策</a>
+          <a href="/terms">用户协议</a>
+          <a href="/cookies">Cookie 说明</a>
+        </nav>
+      </div>
     </footer>
   );
 }
-export function CookieNotice() {
-  const [visible, setVisible] = useState(
-    () => !localStorage.getItem("dataport:cookie-notice"),
-  );
-  return visible ? (
-    <aside className="dp-cookie-notice" aria-label="Cookie 说明">
-      <p>
-        数港使用必要 Cookie 维持登录与保护会话。<a href="/cookies">了解详情</a>
-      </p>
-      <Button
-        variant="outline"
-        onClick={() => {
-          localStorage.setItem("dataport:cookie-notice", "1");
-          setVisible(false);
-        }}
-      >
-        我知道了
-      </Button>
-    </aside>
-  ) : null;
-}
+
 const documents: Record<
   string,
   { title: string; sections: [string, string][] }
@@ -98,7 +84,7 @@ const documents: Record<
       ],
       [
         "本地存储",
-        "浏览器本地或会话存储用于保留页面返回目标、查询操作编号、支付返回定位信息和此说明的已读状态。查询操作编号用于避免同一次操作重复发起计费。",
+        "浏览器本地或会话存储用于保留页面返回目标、查询操作编号、支付返回定位信息。查询操作编号用于避免同一次操作重复发起计费。",
       ],
       [
         "第三方内容",
