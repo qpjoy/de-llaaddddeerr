@@ -35,7 +35,7 @@ export function normalizeAdminBase(value) {
   return parsed.origin
 }
 
-async function readPrivateJson(configPath, { optional = false, allowReadableConfig = false } = {}) {
+export async function readPrivateJson(configPath, { optional = false, allowReadableConfig = false } = {}) {
   const pathInfo = await lstat(configPath).catch(error => {
     if (optional && error.code === 'ENOENT') return null
     throw migrationError('Night-All config could not be inspected')

@@ -15,6 +15,9 @@ import { peripheralRoute } from './peripherals/routes.mjs'
 import { sourceConnectionSnapshot } from './data/source-connections.mjs'
 import { nativeForwardingByPath } from './contracts/native-forwarding.mjs'
 import { ecommerceRoutingCatalog } from './external-platforms/ecommerce-routing.mjs'
+import { strategySearchCatalog } from './data/strategy-search-catalog.mjs'
+import { strategySearchUsageResponse, strategySearchUsageWindow } from './data/strategy-search-usage.mjs'
+import { strategySearchDataStatisticsResponse } from './data/strategy-search-data-statistics.mjs'
 import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSearchAlias } from './contracts/wechat-search-alias.mjs'
 import { hubSocialByPath } from './contracts/hub-social.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
@@ -786,6 +789,7 @@ export function createApp({
   externalPlatformAdmin = null,
   platformSearchPolicyStore = null,
   ecommerceRoutingStore = null,
+  strategySearchRoutingStore = null,
   provisioning = null,
   notifications = null,
   balanceMonitor = null,
@@ -1873,7 +1877,7 @@ export function createApp({
         sendJson(response, 200, {
           data: await acquisitionHistory.getAdminDeliveredRun(params.requestId),
           requestId,
-        })
+        }, { 'cache-control': 'private, no-store' })
         return
       }
       if (
@@ -2988,6 +2992,40 @@ export function createApp({
         requireNoQuery(searchParams, 'ecommerce route update')
         if (!ecommerceRoutingStore) throw new AppError(503, 'ecommerce_route_unavailable', 'Product routes are unavailable')
         sendJson(response, 200, { data: await ecommerceRoutingStore.update(params.marketplace, await readJson(request, 4096)), requestId })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/strategy-search/data-statistics') {
+        requireSourceAdmin(principal)
+        const window = strategySearchUsageWindow(searchParams)
+        const result = await store.strategySearchDataStatistics(window)
+        sendJson(response, 200, { data: strategySearchDataStatisticsResponse(window, result), requestId })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/strategy-search/usage') {
+        requireSourceAdmin(principal)
+        const window = strategySearchUsageWindow(searchParams)
+        const rows = await store.strategySearchUsage(window)
+        sendJson(response, 200, { data: strategySearchUsageResponse(window, rows), requestId })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/strategy-search') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'strategy search inventory')
+        const [instagramPolicy, facebookPolicies] = await Promise.all([
+          strategySearchRoutingStore?.get('search', 'instagram') ?? null,
+          platformSearchPolicyStore?.list() ?? [],
+        ])
+        sendJson(response, 200, { data: strategySearchCatalog({ instagramPolicy,
+          facebookPolicy: facebookPolicies.find(row => row.platform === 'facebook') || null }), requestId })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/strategy-search/:interface/:platform')
+      if (params && request.method === 'PUT') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'strategy search update')
+        if (!strategySearchRoutingStore) throw new AppError(503, 'strategy_search_route_unavailable', 'Search strategy configuration is unavailable')
+        sendJson(response, 200, { data: await strategySearchRoutingStore.update(params.interface, params.platform,
+          await readJson(request, 4096)), requestId })
         return
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/platform-search-policies') {
@@ -5736,10 +5774,11 @@ export function createApp({
         const context = await requirePublic(request)
         requireNoQuery(searchParams, 'enterprise query')
         if (!enterpriseGateway) throw new AppError(503, 'enterprise_unavailable', 'Enterprise queries are unavailable')
-        const result = await enterpriseGateway.queryEnterprise(context, {
+        const result = await withAdmissionSignal(response, async signal => enterpriseGateway.queryEnterprise(context, {
+          signal,
           apiId: params.apiId, body: await readJson(request, 65536), path: `/api/v1/data/enterprise/${params.apiId}/query`,
           idempotencyKey: request.headers['idempotency-key'],
-        })
+        }))
         sendJson(response, result.status, result.body, {
           'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
           'x-mx-insight-source-mode': result.sourceMode,
@@ -5750,7 +5789,7 @@ export function createApp({
         if(!ipRiskProduct)throw new AppError(503,'ip_risk_unavailable','IP 风险画像服务暂不可用')
         requireNoQuery(searchParams,'IP risk product')
         const context=await requirePublic(request)
-        const result=await ipRiskProduct.query(context,{body:await readJson(request,16384),path:pathname,idempotencyKey:request.headers['idempotency-key']})
+        const result=await withAdmissionSignal(response, async signal => ipRiskProduct.query(context,{signal,body:await readJson(request,16384),path:pathname,idempotencyKey:request.headers['idempotency-key']}))
         sendJson(response,result.status,result.body,{'cache-control':'private, no-store'});return
       }
       if (request.method === 'GET' && pathname === '/api/v1/data/ip/risk/subscription') {
@@ -5763,7 +5802,7 @@ export function createApp({
         const context = await requirePublic(request)
         requireNoQuery(searchParams, 'IP v2 query')
         if (!ipRiskChannels) throw new AppError(503, 'ip_risk_unavailable', 'IP v2 is unavailable')
-        const result = await ipRiskChannels.query(context, {body:await readJson(request,8192),idempotencyKey:request.headers['idempotency-key'],path:pathname})
+        const result = await withAdmissionSignal(response, async signal => ipRiskChannels.query(context, {signal,body:await readJson(request,8192),idempotencyKey:request.headers['idempotency-key'],path:pathname}))
         sendJson(response,result.status,result.body,{'cache-control':'private, no-store','idempotent-replay':String(result.replay),'x-mx-insight-batch-id':result.batchId})
         return
       }
@@ -5785,7 +5824,7 @@ export function createApp({
         const context = await requirePublic(request)
         if (!ipRiskGateway) throw new AppError(503, 'ip_risk_unavailable', 'IP risk service is unavailable')
         const handler = pathname.endsWith('/batch') ? ipRiskGateway.batch : ipRiskGateway
-        const result = await handler.query(context, { body: await readJson(request, 4096), idempotencyKey: request.headers['idempotency-key'], path: pathname })
+        const result = await withAdmissionSignal(response, async signal => handler.query(context, {signal, body: await readJson(request, 4096), idempotencyKey: request.headers['idempotency-key'], path: pathname }))
         sendJson(response, result.status, result.body, { 'idempotent-replay': String(result.replay), ...(result.requestId ? { 'x-mx-insight-request-id': result.requestId } : { 'x-mx-insight-batch-id': result.batchId }), 'x-mx-insight-source-mode': result.replay ? 'idempotent_replay' : 'live' })
         return
       }
@@ -5795,9 +5834,10 @@ export function createApp({
         if (request.method !== 'POST') throw new AppError(405, 'method_not_allowed', 'Use JSON POST for this endpoint')
         requireNoQuery(searchParams, 'Hot notes JSON request')
         if (!xiaohongshuHotNotesGateway?.hotXiaohongshuNotes) throw new AppError(503, 'external_platform_unavailable', 'Hot notes service is unavailable')
-        const result = await xiaohongshuHotNotesGateway.hotXiaohongshuNotes(context, {
+        const result = await withAdmissionSignal(response, async signal => xiaohongshuHotNotesGateway.hotXiaohongshuNotes(context, {
+          signal,
           body: await readJson(request, 32 * 1024), idempotencyKey: request.headers['idempotency-key'], path: pathname,
-        })
+        }))
         sendJson(response, result.status, result.body, { 'cache-control': 'private, no-store', 'idempotent-replay': String(result.replay),
           'x-mx-insight-request-id': result.requestId, 'x-mx-insight-source-mode': result.sourceMode,
           ...(result.capturedAt ? { 'x-mx-insight-captured-at': result.capturedAt } : {}),
@@ -5810,12 +5850,13 @@ export function createApp({
         if (!externalPlatformGateway) {
           throw new AppError(503, 'external_platform_unavailable', 'External product search is unavailable')
         }
-        const result = await externalPlatformGateway.search(context, {
+        const result = await withAdmissionSignal(response, async signal => externalPlatformGateway.search(context, {
+          signal,
           body: await readJson(request, 64 * 1024),
           idempotencyKey: request.headers['idempotency-key'],
           retryOfRequestId: request.headers['x-mx-insight-retry-of'],
           path: pathname,
-        })
+        }))
         sendJson(response, result.status, result.body, {
           'idempotent-replay': String(result.replay),
           'x-mx-insight-request-id': result.requestId,
@@ -5855,12 +5896,13 @@ export function createApp({
         if (!accountGateway) {
           throw new AppError(503, 'external_platform_unavailable', 'Social account search is unavailable')
         }
-        const result = await accountGateway.searchAccounts(context, {
+        const result = await withAdmissionSignal(response, async signal => accountGateway.searchAccounts(context, {
+          signal,
           body: accountBody,
           idempotencyKey: request.headers['idempotency-key'],
           retryOfRequestId: request.headers['x-mx-insight-retry-of'],
           path: pathname,
-        })
+        }))
         sendJson(response, result.status, result.body, {
           'idempotent-replay': String(result.replay),
           'x-mx-insight-request-id': result.requestId,
@@ -5889,7 +5931,7 @@ export function createApp({
         requireNoQuery(searchParams, 'Web Search')
         if (!webSearchService) throw new AppError(503, 'web_search_unavailable', 'Web Search is unavailable')
         if (request.method === 'GET') { sendJson(response,200,{data:await webSearchService.capabilities(context)},{'cache-control':'private, no-store'}); return }
-        const result = await webSearchService.search(context,{body:await readJson(request,64*1024),idempotencyKey:request.headers['idempotency-key'],baiduCompatible:pathname.endsWith('/compatible/baidu')})
+        const result = await withAdmissionSignal(response, async signal => webSearchService.search(context,{signal,body:await readJson(request,64*1024),idempotencyKey:request.headers['idempotency-key'],baiduCompatible:pathname.endsWith('/compatible/baidu')}))
         sendJson(response,result.status,result.body,{'idempotent-replay':String(result.replay),'x-mx-insight-request-id':result.requestId,'x-mx-insight-source-mode':result.sourceMode})
         return
       }
@@ -5898,10 +5940,11 @@ export function createApp({
         const context = await requirePublic(request)
         requireNoQuery(searchParams, 'Hub social data')
         if (!hubSocialGateway) throw new AppError(503, 'social_data_unavailable', 'Hub social data is unavailable')
-        const result = await hubSocialGateway.socialData(context, {
+        const result = await withAdmissionSignal(response, async signal => hubSocialGateway.socialData(context, {
+          signal,
           operation: socialEndpoint.key, body: await readJson(request, 64 * 1024), path: pathname,
           idempotencyKey: request.headers['idempotency-key'],
-        })
+        }))
         sendJson(response, result.status, result.body, {
           'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
           'x-mx-insight-source-mode': result.sourceMode,
@@ -5915,10 +5958,11 @@ export function createApp({
         const gateway = nativeEndpoint.provider === 'tikhub' ? socialAccountTikHubGateway
           : nativeEndpoint.authorizationPlatform === 'ecommerce' ? externalPlatformGateway : socialAccountGateway
         if (!gateway) throw new AppError(503, 'external_platform_unavailable', 'Native data endpoint is unavailable')
-        const result = await gateway.forwardNative(context, {
+        const result = await withAdmissionSignal(response, async signal => gateway.forwardNative(context, {
+          signal,
           key: nativeEndpoint.key, body: await readJson(request, 64 * 1024),
           idempotencyKey: request.headers['idempotency-key'], path: pathname,
-        })
+        }))
         sendJson(response, result.status, result.body, {
           'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
           'x-mx-insight-source-mode': result.sourceMode,
@@ -5935,13 +5979,14 @@ export function createApp({
         if (!externalPlatformGateway) {
           throw new AppError(503, 'external_platform_unavailable', 'External acquisition is unavailable')
         }
-        const result = await externalPlatformGateway.fetchResource(context, {
+        const result = await withAdmissionSignal(response, async signal => externalPlatformGateway.fetchResource(context, {
+          signal,
           resourceKey: justoneResource.resourceKey,
           body: await readJson(request, 64 * 1024),
           idempotencyKey: request.headers['idempotency-key'],
           retryOfRequestId: request.headers['x-mx-insight-retry-of'],
           path: pathname,
-        })
+        }))
         sendJson(response, result.status, result.body, {
           'idempotent-replay': String(result.replay),
           'x-mx-insight-request-id': result.requestId,
@@ -6025,9 +6070,10 @@ export function createApp({
           requireNoQuery(searchParams, 'WeChat search')
           const mapped = normalizeWechatSearchAlias(body)
           if (!socialAccountTikHubGateway) throw new AppError(503, 'external_platform_unavailable', 'WeChat data service is unavailable')
-          const result = await socialAccountTikHubGateway.forwardNative(context, {
+          const result = await withAdmissionSignal(response, async signal => socialAccountTikHubGateway.forwardNative(context, {
+            signal,
             ...mapped, idempotencyKey: request.headers['idempotency-key'],
-          })
+          }))
           sendJson(response, result.status, result.body, {
             'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
             'x-mx-insight-source-mode': result.sourceMode,
@@ -6296,13 +6342,14 @@ export function createApp({
         const stream = /(?:^|,)\s*text\/event-stream(?:\s*;[^,]*)?(?:,|$)/i.test(request.headers.accept || '') ? aggregateStream(response) : null
         let aggregateRequestId = requestId
         try {
-          const result = await service.aggregateSearch(context, {
+          const result = await withAdmissionSignal(response, async signal => service.aggregateSearch(context, {
+            signal,
             body: await readJson(request, 64 * 1024),
             idempotencyKey: request.headers['idempotency-key'], path: pathname,
             products: externalPlatformGateway ? (ctx, input) => externalPlatformGateway.search(ctx, input) : null,
             hubSocial: hubSocialGateway ? (ctx, input) => hubSocialGateway.socialData(ctx, input) : null,
             onProgress: (event, data) => { if (event === 'search.started') aggregateRequestId = data.requestId; stream?.write(event, data) },
-          })
+          }))
           if (stream) stream.write('search.completed', { ...result.body, requestId: result.requestId, replay: result.replay })
           else sendJson(response, result.status, { ...result.body, requestId: result.requestId }, {
             'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,

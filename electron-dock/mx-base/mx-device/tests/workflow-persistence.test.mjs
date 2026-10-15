@@ -13,6 +13,7 @@ import {
   rackScenario,
 } from "../server/workflows.mjs";
 import { configureLoops, DEFAULT_LOOP_POLICY } from "../server/loop-policy.mjs";
+import { BUILTIN_DEFINITIONS } from "../server/workflow-catalog.mjs";
 import { schedulingSnapshot } from "../server/scheduling.mjs";
 
 test("workflow API: immutable versions, request replay, realm guards and reads never dispatch", async (t) => {
@@ -102,7 +103,10 @@ test(
     const options = { mode: "sim" };
     try {
       await Promise.all([a.migrate(), b.migrate()]);
-      assert.equal((await a.snapshot("sim")).definitions.length, 8);
+      assert.equal(
+        (await a.snapshot("sim")).definitions.length,
+        BUILTIN_DEFINITIONS.length,
+      );
       const { d, parent, child } = await a.atomic((s, n) => {
         const d = register(s, n, "sim", {
           name: "persisted slot",

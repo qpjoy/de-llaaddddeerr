@@ -2615,15 +2615,42 @@ seed_default_price_books() {
     < "${ROOT_DIR}/scripts/migrate-missing-operation-prices.mjs"
 }
 
-# Only missing Facebook supplier credentials are imported. Never print keys,
-# overwrite a configured Hub supplier, or make this optional source a login gate.
-ensure_facebook_supplier_credentials() {
+# Import missing JSON credentials once per provider. Explicit SQL configuration
+# owns Web Search; optional source failures never become a login dependency.
+ensure_night_all_supplier_credentials() {
   need node
   [ -n "${MX_INSIGHT_ADMIN_TOKEN:-}" ] || return 0
   MX_INSIGHT_ADMIN_TOKEN="$MX_INSIGHT_ADMIN_TOKEN" \
     MX_INSIGHT_ADMIN_BASE_URL="http://127.0.0.1:18151" \
-    node "${ROOT_DIR}/scripts/migrate-facebook-credentials.mjs" \
-    || say "WARNING: Facebook supplier import incomplete; inspect supplier credentials in Hub Admin."
+    NIGHT_ALL_CONFIG_PATH="${NIGHT_ALL_CONFIG_PATH:-}" \
+    NIGHT_ALL_DATABASE_URL="${NIGHT_ALL_DATABASE_URL:-}" \
+    node "${ROOT_DIR}/scripts/migrate-night-all-deploy-credentials.mjs" \
+    || say "WARNING: Night-All supplier import incomplete; check NIGHT_ALL_CONFIG_PATH and Hub Admin credentials. Existing services remain available."
+}
+
+# Import active search credentials from the Night-All database credential center.
+# The importer preserves configured suppliers and deliberate database clears.
+# Optional source failures must not turn into Hub or MX-H2I login failures.
+ensure_web_search_supplier_credentials() {
+  # Without an explicit SQL source, the preceding JSON coordinator owns these
+  # suppliers. Never retry an unknown JSON write through the SQL importer.
+  [ -n "${NIGHT_ALL_DATABASE_URL:-}" ] || return 0
+  need docker
+  [ -n "${MX_INSIGHT_ADMIN_TOKEN:-}" ] || return 0
+  MX_INSIGHT_ADMIN_TOKEN="$MX_INSIGHT_ADMIN_TOKEN" \
+    MX_INSIGHT_ADMIN_BASE_URL="http://127.0.0.1:18151" \
+    NIGHT_ALL_DATABASE_URL="${NIGHT_ALL_DATABASE_URL:-}" \
+    NIGHT_ALL_WEB_SEARCH_BINDINGS="${NIGHT_ALL_WEB_SEARCH_BINDINGS:-}" \
+    docker run --rm --pull=never --network host --read-only \
+      --cap-drop=ALL --security-opt no-new-privileges \
+      --mount "type=bind,source=${ROOT_DIR}/scripts,target=/app/scripts,readonly" \
+      --env MX_INSIGHT_ADMIN_TOKEN --env MX_INSIGHT_ADMIN_BASE_URL \
+      --env NIGHT_ALL_DATABASE_URL --env NIGHT_ALL_WEB_SEARCH_BINDINGS \
+      --entrypoint node "${MX_INSIGHT_IMAGE:-mx-insight-hub:shadow}" \
+      /app/scripts/migrate-web-search-credentials.mjs \
+      --providers baidu,exa,tavily,serper,you,searchapi,firecrawl,serpapi \
+      --source database --apply \
+    || say "WARNING: Web Search credential import incomplete; inspect the migration report and Hub supplier settings. Existing services remain available."
 }
 
 # Idempotently guarantee a usable public API key after deploy. The plaintext key
@@ -3123,7 +3150,8 @@ ops_action() {
       apply_k8s
       k8s_smoke
       ensure_default_api_key
-      ensure_facebook_supplier_credentials
+      ensure_night_all_supplier_credentials
+      ensure_web_search_supplier_credentials
       seed_default_price_books
       print_deploy_summary
       if [ "${MX_INSIGHT_REQUIRE_SEARCH:-1}" = 1 ]; then
@@ -3147,7 +3175,8 @@ ops_action() {
       apply_k8s
       k8s_smoke
       ensure_default_api_key
-      ensure_facebook_supplier_credentials
+      ensure_night_all_supplier_credentials
+      ensure_web_search_supplier_credentials
       seed_default_price_books
       print_deploy_summary
       ;;

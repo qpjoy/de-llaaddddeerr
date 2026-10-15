@@ -649,6 +649,22 @@ test('direct and fallback routes preserve replay windows and historical fingerpr
   assert.equal(state.searchCalls.every((call) => call.body.type === undefined), true)
 })
 
+test('direct modern search preserves caller parameters separately from dispatch normalization', async () => {
+  const state = await routingFixture()
+  const body = { platform: 'xhs', query: ' original query ', type: 'stable' }
+  const original = structuredClone(body)
+  await modernSearch(state, 'saved-direct-original-body', body)
+  const [call] = state.directCalls
+  assert.deepEqual(call.acquisitionRequest, { method: 'POST', path: MODERN_PATH, body: original })
+  assert.deepEqual(call.body, { platform: 'xiaohongshu', query: 'original query', pageSize: 20 })
+  assert.deepEqual(call.fingerprintBody, { ...call.body, type: 'stable' })
+  assert.equal(call.replayWindowMs, null)
+  assert.deepEqual(body, original)
+  assert.equal(state.directCalls.length, 1)
+  assert.equal(state.searchCalls.length, 0)
+  assert.equal(state.legacyCalls.length, 0)
+})
+
 test('historical Xiaohongshu data-search cursors are Hub-wrapped and stop after page 15', async () => {
   const providerCursors = []
   const state = await routingFixture({

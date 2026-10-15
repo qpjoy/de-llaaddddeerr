@@ -4,7 +4,9 @@
 
 可选的浏览器 SSO 接入见 [Hub SSO 部署与恢复](../mx-launcher/docs/40-hub-sso-and-feishu-web.md)：先在 Launcher 集中登记 Hub HTTPS origin，再依次运行两个系统原 deploy。之后无需重复设置开关；未登记的部署保留原登录。
 
-Facebook 搜索迁移、自动选路及部署时导入供应商凭据见 [Facebook 搜索由 Hub 管理](docs/product/facebook-search-routing.md)。部署会自动从本机 Night-All 工作区发现配置；只有非标准目录才需要 `NIGHT_ALL_CONFIG_PATH`。重复 deploy 保留已有密钥、人工暂停和额度状态。
+部署包含 [Night-All 供应商凭据迁移](docs/operations/night-all-credential-migration.md)：自动查找**服务器上**的 Night-All `config.json`，补齐 RapidAPI、TikHub、JustOne；未配置 SQL 来源时也补齐八家 Web Search 的缺失 Key。非标准目录在服务器 `.env.internal` 设置 `NIGHT_ALL_CONFIG_PATH`。重复 deploy 保留已有密钥、人工清空、暂停和额度状态，不发起供应商搜索。Facebook 业务选路见 [Facebook 搜索由 Hub 管理](docs/product/facebook-search-routing.md)。
+
+Web Search 的八家适配器已在 Hub。若服务器 `.env.internal` 已配置独立的 `NIGHT_ALL_DATABASE_URL`，Internal deploy/apply 仍通过只读 SQL 从 Night-All 数据库凭据中心补齐 active 渠道，此时 JSON 只负责三家采集供应商。不会误用 Hub `DATABASE_URL`，SQL 失败也不会改用 JSON 重试。源不可用会警告，不阻断 Hub。迁移后可在“Web Search → 供应商管理”查看/修改各家 Token，并进入对应供应商管理运行状态、价格和代理。SQL 来源步骤见 [Web Search 迁移](docs/operations/web-search-migration-2026-10-13.md)。
 
 ## 固定依赖和责任边界
 

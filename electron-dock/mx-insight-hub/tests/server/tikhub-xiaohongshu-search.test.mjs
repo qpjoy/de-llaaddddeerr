@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { test } from 'node:test'
 
 import { TikHubAdapter, TikHubUpstreamError } from '../../server/adapters/tikhub.mjs'
@@ -219,6 +220,65 @@ test('pagination accepts terminal outer next_page and rejects page or layer conf
         && error.code === 'invalid_upstream_pagination',
     )
   }
+})
+
+test('numbered empty App V2 pages end traversal while retaining the complete paid response', async () => {
+  const body = { platform: 'xiaohongshu', query: '空页分页', pageSize: 20 }
+  const first = normalizeXiaohongshuSearchRequest(body)
+  for (const page of [2, 6, 15]) {
+    const codec = cursorCodec()
+    codec.values.set('saved-page', { version: 1, platform: 'xiaohongshu', page,
+      scope: first.cursorScope, searchId: 'previous-search', searchSessionId: 'previous-session' })
+    // Mirrors the verified incident pagination fields, not the original body.
+    const raw = currentEnvelope([], { page, next_page: page + 1 })
+    const bytes = Buffer.from(JSON.stringify(raw, null, 2))
+    let calls = 0
+    const adapter = new TikHubAdapter({ apiKey: PROVIDER_KEY, fetchImpl: async url => {
+      calls++
+      assert.equal(new URL(url).searchParams.get('page'), String(page))
+      return new Response(bytes, { status: 200, headers: { 'content-type': 'application/json' } })
+    } })
+    const result = await adapter.searchXiaohongshuNotes({ ...body, cursor: 'saved-page' }, {
+      decodeCursor: codec.decodeCursor.bind(codec),
+      encodeCursor() { assert.fail('an empty numbered page must not issue another cursor') },
+    })
+    assert.equal(calls, 1)
+    assert.deepEqual(result.publicBody.data.items, [])
+    assert.deepEqual(result.records, [])
+    assert.equal(result.publicBody.data.status, 'ok')
+    assert.deepEqual(result.publicBody.data.warnings, [])
+    assert.deepEqual(result.publicBody.data.pageInfo, {
+      pageIndex: page, pageSize: 20, returnedCount: 0, hasMore: false, nextCursor: null, cursorType: 'none',
+    })
+    assert.deepEqual(result.responseArchive.rawPayload, raw)
+    assert.equal(result.responseArchive.contractState, 'accepted')
+    assert.equal(result.archiveObjects.length, 1, 'retain one response archive without inventing item archives')
+    assert.deepEqual(result.archiveObjects[0].rawPayload, raw)
+    assert.equal(result.restrictedResponseArchive.bodyBytes.equals(bytes), true)
+    assert.equal(result.restrictedResponseArchive.bodySize, bytes.length)
+    assert.equal(result.restrictedResponseArchive.bodySha256, createHash('sha256').update(bytes).digest('hex'))
+  }
+})
+
+test('empty numbered pages still reject page conflicts and explicit continuation claims', () => {
+  const request = normalizeXiaohongshuSearchRequest({ platform: 'xiaohongshu', query: '空页校验' })
+  const missingPage = currentEnvelope([], { next_page: 2 })
+  delete missingPage.data.page
+  const cases = [
+    missingPage,
+    currentEnvelope([], { page: 2, next_page: 3 }),
+    currentEnvelope([], { next_page: 3 }),
+    currentEnvelope([], { next_page: 2 }, { page: 2 }),
+    currentEnvelope([], { next_page: 2 }, { next_page: null }),
+    currentEnvelope([], { next_page: 2 }, { has_more: false }),
+    currentEnvelope([], { next_page: 2, has_more: true }),
+    currentEnvelope([], { next_page: 2 }, { hasMore: true }),
+    envelope([], { has_more: true }),
+  ]
+  for (const payload of cases) assert.throws(
+    () => normalizeTikHubXiaohongshuSearchResponse(payload, request),
+    error => error instanceof TikHubXiaohongshuSearchResponseError && error.code === 'invalid_upstream_pagination',
+  )
 })
 
 test('pagination is capped at 15 pages even when TikHub reports another page', () => {

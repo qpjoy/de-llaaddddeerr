@@ -6,6 +6,7 @@ const LIMIT = 20
 const CALL_LIMIT = 50
 const MESSAGES = new Set(['未授权调用该接口', '未添加IP白名单'])
 const text = value => typeof value === 'string' && /^[\w.:/-]{1,191}$/.test(value) ? value : null
+const HISTORY_GUIDANCE = '请先通过只读历史查询核对已保存的响应与账本。重新发送业务请求（包括 POST）受各接口幂等规则与回放窗口限制；沿用同一幂等标识也可能重新采集并再次计费。'
 
 export function diagnosticIdentifier(value) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,190}$/.test(value.trim())) {
@@ -14,17 +15,31 @@ export function diagnosticIdentifier(value) {
   return value.trim()
 }
 
-function advice(request, providers, connectors) {
+function advice(request, providers, connectors, gateway) {
   const qixin = providers.find(p => p.provider_key === 'qixin' && p.outcome === 'rejected')
   if (qixin?.business_code === 105) return '启信宝拒绝接口授权。核对当次 AppKey 所属应用的接口开通与授权有效期；不能据此判断未开通、过期或应用不匹配。'
   if (qixin?.business_code === 104) return '启信宝返回白名单拒绝。核对该应用访问供应商时的实际出口 IP。'
   if (request.status === 'unknown' || providers.some(p => p.outcome === 'unknown')) return '存在未知调用结果。保留原请求身份，先核对上游记录与结算，不自动重发。'
+  if (request.status === 'released' && request.error_code === 'external_platform_busy'
+    && gateway?.error_code === 'external_platform_busy' && gateway.response_status === 429
+    && gateway.source_mode === 'unavailable' && gateway.succeeded === false && !gateway.provider_call_id
+    && !providers.length && !connectors.length) {
+    const business = request.platform === 'enterprise' ? '企业数据' : '数据'
+    return `Hub 处理${business}请求时触发自身并发准入限制，网关账本记录 HTTP 429，未进入上游调用阶段。当前版本会先有界排队；队列已满或等待超时仍会返回 429。该历史记录未保存当时的并发数与排队原因，不能据此认定供应商限流或推断具体上限。客户结算请查看下方账本。`
+  }
   if (providers.some(p => p.provider_key === 'justone' && p.outcome === 'rejected'
     && p.business_code === 301 && p.error_code === 'upstream_collection_failed')) {
-    return 'JustOne 已返回业务码 301（采集失败），具体采集原因需结合供应商记录排查。供应商 billed 与客户扣费分别查看各自账本；HTTP 200 仅表示收到了上游响应。同一幂等标识会保留原交付结果，不会重新采集；若已交付存量回退，请结合交付来源和响应状态判断。'
+    return `JustOne 已返回业务码 301（采集失败），具体采集原因需结合供应商记录排查。供应商 billed 与客户扣费分别查看各自账本；HTTP 200 仅表示收到了上游响应。若已交付存量回退，请结合交付来源和响应状态判断。${HISTORY_GUIDANCE}`
+  }
+  if (providers.some(p => p.provider_key === 'tikhub' && p.outcome === 'rejected'
+    && p.http_status === 400 && p.error_code === 'upstream_request_rejected')) {
+    const delivery = request.status === 'committed' && request.response_status >= 400
+      ? 'Hub 已保存失败响应；已提交不代表查询成功。' : '请结合 Hub 响应状态与交付来源判断是否交付了存量回退。'
+    return `${delivery}TikHub 返回 HTTP 400，仅凭该状态不能确定是参数问题还是上游内部错误；需核对受限响应中的错误结构与上游关联 ID。供应商计费未知不等于免费，客户扣费请另查账本。${HISTORY_GUIDANCE}`
   }
   if (connectors.some(c => c.failure_evidence)) return '已保留 Night-All 结构化错误链。查看候选端点和内层错误码；缺失的字段不推测，多个端点失败不等同于已确认唯一根因。'
   if (connectors.some(c => c.error_code)) return '已保存连接器错误码和上游关联 ID；完整上游错误正文未接入本诊断，请按该 ID 和调用时间核对上游日志。'
+  if (request.status === 'committed' && request.response_status >= 400) return `Hub 已保存失败响应；已提交不代表查询成功。请结合上游证据继续排查，客户扣费另查结算账本。${HISTORY_GUIDANCE}`
   if (request.status === 'committed') return 'Hub 已提交响应。上游失败可能已由存量结果回退；请结合交付来源和响应 HTTP 状态判断。下游入库校验结果不在本诊断范围。'
   return '请结合 Hub 状态、上游业务码和调用时间继续排查；缺少调用记录不能单独证明上游未执行。'
 }
@@ -63,6 +78,12 @@ export async function lookupRequestDiagnostics(pool, input) {
           units_reserved, units_actual, reserved_at, completed_at
         FROM public.usage_requests WHERE id = $1`, [id])
       if (!request) continue
+      const { rows: [gateway] } = await client.query(`/* request-diagnostics:gateway */
+        SELECT id, provider_key, source_mode, succeeded, response_status, error_code,
+          provider_call_id, created_at
+        FROM external_platform.gateway_requests WHERE usage_request_id = $1
+          AND source_mode <> 'idempotent_replay'
+        ORDER BY created_at DESC, id DESC LIMIT 1`, [id])
       const providers = (await client.query(`/* request-diagnostics:providers */
         SELECT p.id, p.provider_key, p.operation, p.endpoint_key, p.outcome,
           p.http_status, p.business_code, p.error_code, p.upstream_request_id,
@@ -99,9 +120,15 @@ export async function lookupRequestDiagnostics(pool, input) {
         costKind: text(p.cost_kind), currency: text(p.currency), latencyMs: p.latency_ms,
         startedAt: p.started_at, completedAt: p.completed_at,
       }))
+      // Historical pre-dispatch failures release usage without a response body;
+      // the gateway ledger still records their actual HTTP status. Do not let a
+      // later replay or a different error overwrite the original usage evidence.
+      const gatewayStatus = request.status === 'released' && gateway?.error_code === request.error_code
+        ? gateway.response_status : null
       runs.push({
         requestId: request.id, platform: text(request.platform), status: text(request.status),
-        errorCode: text(request.error_code), responseStatus: request.response_status,
+        errorCode: text(request.error_code), responseStatus: request.response_status ?? gatewayStatus,
+        responseStatusSource: request.response_status != null ? 'usage_request' : gatewayStatus != null ? 'gateway_request' : null,
         sourceMode: text(request.delivery_source_mode), hasResponseBody: request.has_response_body,
         replayAvailable: request.status === 'committed' && request.has_response_body,
         unitsReserved: request.units_reserved, unitsActual: request.units_actual,
@@ -120,7 +147,7 @@ export async function lookupRequestDiagnostics(pool, input) {
           quotedMinor: charges[0].quoted_minor, chargedMinor: charges[0].charged_minor,
           currency: text(charges[0].currency), settledAt: charges[0].settled_at,
         } : null,
-        guidance: advice(request, providers, connectors),
+        guidance: advice(request, providers, connectors, gateway),
       })
     }
     await client.query('COMMIT')

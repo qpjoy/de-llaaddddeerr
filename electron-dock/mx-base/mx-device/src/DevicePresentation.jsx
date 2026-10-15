@@ -67,7 +67,9 @@ export default function DevicePresentation({
           </strong>
           <p className="current-command">
             {current
-              ? commandByCode(current.code)?.name
+              ? current.definition?.name ||
+                commandByCode(current.code)?.name ||
+                current.code
               : parent?.reason || (d.enabled ? "插槽已启用" : "已暂停新领取")}
           </p>
           {current && (
@@ -141,7 +143,11 @@ export default function DevicePresentation({
               <button key={c.id} onClick={() => onInspect({ id: c.jobId })}>
                 <span className={`command-dot ${c.appId} ${c.status}`} />
                 <span>
-                  <strong>{commandByCode(c.code)?.name || c.code}</strong>
+                  <strong>
+                    {c.definition?.name ||
+                      commandByCode(c.code)?.name ||
+                      c.code}
+                  </strong>
                   <small>
                     <code>{c.code}</code> · {time(c.createdAt)}
                   </small>

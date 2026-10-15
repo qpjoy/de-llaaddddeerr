@@ -2,10 +2,12 @@ import { WECHAT_PRODUCTS } from './wechat.mjs'
 // Product navigation and API docs share one mapping. It never grants access.
 export const PRODUCT_WORKBENCHES = [
   {path:'/data-products/web-search',label:'Web Search',docs:'web-search',prefixes:['/data/web-search/'],native:true},
+  { path: '/data-products/strategy-search', label: '策略搜索', docs: 'strategy-search',
+    prefixes: ['/data/search', '/search/raw', '/search/crawl', '/search/user-info', '/night-all/search/'], native: true },
   ...WECHAT_PRODUCTS.map(product => ({ path: `/data-products/${product.key}`, label: product.label, docs: product.key,
     prefixes: [`/data/wechat/${product.group}/`, ...(product.group === 'mp' ? ['/data/wechat/demo/'] : [])] })),
   { path: '/source-catalog', label: '数据源目录', docs: 'source-catalog', prefixes: ['/data/source-catalog'] },
-  { path: '/data-products/search', label: '数据搜索', docs: 'aggregate-search', prefixes: ['/data/aggregate/'] },
+  { path: '/data-products/search', label: '聚合搜索', docs: 'aggregate-search', prefixes: ['/data/aggregate/'] },
   { path: '/data-products/telegram', label: 'Telegram 会话', docs: 'telegram', prefixes: ['/data/telegram/', '/data/canonical/items/'] },
   { path: '/data-products/ecommerce-treasure-box', label: '电商数据', docs: 'ecommerce-treasure-box', prefixes: ['/data/ecommerce/', '/data/native/'], nativePlatform: 'ecommerce' },
   { path: '/data-products/social-content', label: '社媒与内容数据', docs: 'social-content', prefixes: ['/data/native/', '/data/social/'], nativePlatform: 'social' },
@@ -25,7 +27,8 @@ export const productForDocs = path => PRODUCT_WORKBENCHES.find(product => path?.
   || product.docs === 'ip-risk' && ['/docs/ip-risk-subscription','/docs/ip-risk-v2'].includes(path?.split('#')[0]))
 
 export function productEndpoints(document, product) {
-  const labels = { '/data/aggregate/sources': '当前 Key 的搜索范围', '/data/aggregate/preview': '预览本批范围与费用', '/data/aggregate/search': '聚合数据搜索 · 实时 / 已收录',
+  const labels = { '/data/search': '统一内容搜索 · 单个平台', '/search/{operation}': '兼容业务接口 · 按 operation 选择',
+    '/night-all/search/{operation}': '历史路径别名 · 按 operation 选择', '/data/aggregate/sources': '当前 Key 的搜索范围', '/data/aggregate/preview': '预览本批范围与费用', '/data/aggregate/search': '聚合数据搜索 · 实时 / 已收录',
     '/data/ecommerce/products/search': '统一商品搜索 · 跨平台', '/data/ecommerce/products/items': '已收录商品 · 不采集' }
   const preferred = new Set(['/api/v1/data/wechat/mp/article-detail-h5', '/api/v1/data/ecommerce/products/search'])
   return Object.entries(document?.paths || {}).flatMap(([path, item]) => {

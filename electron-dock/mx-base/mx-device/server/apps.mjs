@@ -1,13 +1,18 @@
-import { recordLoopUsage } from "./loop-policy.mjs";
+import { recordLoopUsage, recordPoolDispatch } from "./loop-policy.mjs";
 // Scheduling metadata only. An App entry never creates another physical slot.
-export const APP_NAMES = { xhs: "小红书", weibo: "微博" };
+export const APP_NAMES = {
+  xhs: "小红书",
+  weibo: "微博",
+  xianyu: "闲鱼",
+  pdd: "拼多多",
+};
 export const appName = (id = "xhs") => APP_NAMES[id] || id;
 export const jobApp = (job) => job.appId || "xhs";
 export const deviceInterval = (device) =>
   device.taskIntervalMs ?? (device.mode === "real" ? 2000 : 300);
 export const supportedApps = (device) =>
   device.mode === "sim"
-    ? ["xhs", "weibo"]
+    ? device.simApps || ["xhs", "weibo"]
     : device.adapter === "legacy-poc"
       ? ["xhs"]
       : [];
@@ -18,7 +23,8 @@ export function initialApp(device, appId) {
     mode: device.mode,
     deviceId: device.id,
     appId,
-    accountKey: appId === "xhs" ? device.accountKey : `sim:${device.id}:weibo`,
+    accountKey:
+      appId === "xhs" ? device.accountKey : `sim:${device.id}:${appId}`,
     cooldownMs: 0,
     cooldownUntil: 0,
     lastClaimedAt: null,
@@ -57,6 +63,19 @@ export function appBlockers(state, now, device, job) {
         message: `当前适配器不支持${appName(appId)}任务`,
       },
     ];
+  if (
+    device.mode === "sim" &&
+    device.simCommandCodes &&
+    job.workflow?.plan.some(
+      (step) => !device.simCommandCodes.includes(step.code),
+    )
+  )
+    return [
+      {
+        code: "command-unsupported",
+        message: "此设备尚未迁入任务所需的全部指令",
+      },
+    ];
   if (app.cooldownUntil > now)
     return [
       {
@@ -74,6 +93,7 @@ export function recordAppDispatch(state, now, device, attempt) {
     (a) => a.appId === jobApp(attempt),
   );
   if (!app) return;
+  recordPoolDispatch(state, now, device, attempt);
   app.lastDispatchedAt = now;
   app.lastAttemptId = attempt.id;
   // Charge even when the subsequent response is lost. Completion may extend this.

@@ -1,0 +1,312 @@
+.device-workspace-dialog {
+  width: min(1260px, calc(100vw - 40px));
+}
+.device-workspace-layout {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  align-items: start;
+}
+.device-workspace-layout > .projection {
+  position: static;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  margin: 0;
+  background: #f4f8fc;
+}
+.device-workspace-layout .projection > h2 {
+  font-size: 18px;
+}
+.device-workspace-layout .projection .phone {
+  width: 236px;
+  height: 462px;
+}
+.device-workspace-content {
+  display: grid;
+  gap: 24px;
+  padding: 24px;
+  min-width: 0;
+}
+.device-workspace-identity {
+  display: grid;
+  gap: 7px;
+}
+.device-workspace-identity > span,
+.device-workspace-identity > small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.device-workspace-identity > strong {
+  font-size: 24px;
+}
+.device-workspace-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f5f8fb;
+}
+.device-workspace-tabs > button {
+  flex: 1;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  padding: 11px 6px;
+  font-size: 13px;
+}
+.device-workspace-tabs > button[aria-pressed="true"] {
+  background: #fff;
+  color: #07827f;
+  box-shadow: 0 2px 7px #243b5320;
+}
+.device-workspace-section-heading {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 13px;
+}
+.device-workspace-section-heading h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.device-workspace-section-heading small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.device-current-task {
+  display: grid;
+  width: 100%;
+  text-align: left;
+  gap: 12px;
+  border: 1px solid #b9dcda;
+  background: #f0faf8;
+  padding: 18px;
+}
+.device-current-task strong {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+.device-current-task > span {
+  font-size: 14px;
+}
+.device-current-task small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.device-current-task progress {
+  width: 100%;
+  height: 5px;
+  accent-color: #008d88;
+}
+.device-queue-list {
+  display: grid;
+  gap: 10px;
+}
+.device-queue-list article {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 13px;
+  min-width: 0;
+}
+.device-queue-list article > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.device-queue-list article p {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.65;
+  margin: 7px 0 11px;
+}
+.device-queue-list .button-row {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.device-queue-list .button-row > small {
+  color: var(--muted);
+  font-size: 11px;
+  margin-right: auto;
+}
+.device-queue-list .button-row > button {
+  padding: 6px 9px;
+  font-size: 11px;
+}
+.device-task-submit {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f8fbfd;
+}
+.device-task-submit > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 15px;
+  cursor: pointer;
+  color: #087e7c;
+  font-size: 14px;
+}
+.device-task-submit .form {
+  padding: 0 15px 15px;
+}
+.device-command-stream {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.device-command-stream > li {
+  display: flex;
+  gap: 11px;
+  align-items: center;
+  padding: 11px 0;
+  border-bottom: 1px solid #edf1f6;
+}
+.device-command-stream button {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  display: grid;
+  gap: 5px;
+  text-align: left;
+}
+.device-command-stream strong {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.device-command-stream small {
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.device-command-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #a2adb8;
+  flex-shrink: 0;
+}
+.device-command-dot.running {
+  background: #078a87;
+  box-shadow: 0 0 0 4px #078a8718;
+}
+.device-command-dot.succeeded {
+  background: #77aaa1;
+}
+.device-command-dot.unknown {
+  background: #be8c44;
+}
+.device-capability-form {
+  display: grid;
+  gap: 18px;
+}
+.device-capability-form > p {
+  margin: 0;
+}
+.device-capability-form fieldset {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.device-capability-form legend {
+  font-size: 14px;
+  padding: 0 6px;
+}
+.device-capability-platforms {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.device-capability-commands {
+  display: grid;
+  gap: 12px;
+  padding-top: 13px;
+  max-height: 330px;
+  overflow: auto;
+}
+.device-capability-commands .check {
+  align-items: start;
+}
+.device-capability-commands span {
+  display: grid;
+  gap: 4px;
+}
+.device-capability-commands small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.device-workspace-content .adapter-bench {
+  margin-top: 0;
+}
+.classic-lab-entry {
+  margin-top: 24px;
+  padding: 18px 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.classic-lab-entry p {
+  margin: 4px 0 0;
+}
+@media (max-width: 900px) {
+  .device-workspace-layout {
+    grid-template-columns: 300px minmax(0, 1fr);
+  }
+  .device-workspace-content {
+    padding: 18px;
+  }
+  .device-workspace-tabs {
+    flex-wrap: wrap;
+  }
+  .device-workspace-tabs > button {
+    white-space: nowrap;
+  }
+}
+@media (max-width: 720px) {
+  .device-workspace-dialog {
+    width: calc(100vw - 20px);
+    max-height: calc(100dvh - 20px);
+  }
+  .device-workspace-layout {
+    display: flex;
+    flex-direction: column;
+  }
+  .device-workspace-layout > .projection {
+    width: 100%;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .device-workspace-content {
+    width: 100%;
+    padding: 18px 14px;
+  }
+  .device-workspace-layout .projection .phone {
+    width: 220px;
+    height: 410px;
+  }
+  .device-workspace-layout .projection > h2,
+  .device-workspace-layout .projection > .small {
+    display: block;
+  }
+  .device-workspace-layout .projection .app-pacing {
+    display: block;
+  }
+  .device-workspace-tabs > button {
+    font-size: 11px;
+  }
+  .device-queue-list article > div:first-child {
+    align-items: start;
+    flex-wrap: wrap;
+  }
+  .classic-lab-entry {
+    flex-direction: column;
+    align-items: start;
+  }
+}

@@ -1,6 +1,9 @@
-import AdapterBench from "./AdapterBench.jsx";
+import Catalog from "./Catalog.jsx";
 import DefinitionForm from "./DefinitionForm.jsx";
 import SchedulerLab from "./SchedulerLab.jsx";
+import Workstation from "./Workstation.jsx";
+import Scenarios from "./Scenarios.jsx";
+import DeviceWorkspace from "./DeviceWorkspace.jsx";
 import { useState, useCallback, useEffect } from "react";
 import {
   Desktop,
@@ -11,16 +14,16 @@ import {
   PlayCircle,
   Info,
   Plus,
-  ArrowsClockwise,
   HardDrives,
+  Code,
+  Stack,
 } from "@phosphor-icons/react";
 import { api, useSnapshot } from "./data.js";
 import { Modal, DeviceForm, JobForm, ObserverForm } from "./Forms.jsx";
-import { Devices, Connections } from "./Devices.jsx";
-import { Tasks, Events, JobDetail, Scheduler } from "./Tasks.jsx";
+import { Connections } from "./Devices.jsx";
+import { JobDetail, Scheduler } from "./Tasks.jsx";
 import { Racks, ResourceForm, PlacementForm } from "./Racks.jsx";
 import { PacingForm } from "./AppPacing.jsx";
-import Projection from "./Projection.jsx";
 import { requestId } from "./request-id.mjs";
 import { submitJob } from "./submit-job.mjs";
 
@@ -98,8 +101,10 @@ export default function App() {
 }
 function Workspace({ onExpired }) {
   const [mode, setMode] = useState("sim"),
-    [page, setPage] = useState("lab"),
+    [page, setPage] = useState("workbench"),
+    [rack, setRack] = useState(""),
     [selectedId, setSelectedId] = useState(null),
+    [workspaceDeviceId, setWorkspaceDeviceId] = useState(null),
     [history, setHistory] = useState(null),
     [modal, setModal] = useState(null),
     [busy, setBusy] = useState(false),
@@ -110,22 +115,21 @@ function Workspace({ onExpired }) {
     [placement, setPlacement] = useState(null),
     [pacing, setPacing] = useState(null),
     [definitionSeed, setDefinitionSeed] = useState(null);
-  const { state, error, loading, refresh } = useSnapshot(mode, onExpired);
+  const { state, error, refresh } = useSnapshot(mode, onExpired);
   useEffect(() => {
     window.scrollTo(0, 0);
   }, [page, mode]);
   const device =
     state.devices.find((d) => d.id === selectedId) || state.devices[0];
-  const active = state.jobs.some((j) =>
-    ["queued", "running"].includes(j.status),
-  );
-  const latestRun = state.jobs
-    .filter((j) => j.runId)
-    .sort((a, b) => b.createdAt - a.createdAt)[0]?.runId;
-  const visibleJobs =
-    page === "jobs"
-      ? state.jobs
-      : state.jobs.filter((j) => !j.runId || j.runId === latestRun);
+  const workspaceDevice = state.devices.find((d) => d.id === workspaceDeviceId);
+  const openDevice = (value) => {
+    const id = typeof value === "string" ? value : value.id;
+    setSelectedId(id);
+    setWorkspaceDeviceId(id);
+    setHistory(null);
+    setNotice("");
+    setFailure(false);
+  };
   async function run(fn, message) {
     setBusy(true);
     setNotice("");
@@ -185,10 +189,11 @@ function Workspace({ onExpired }) {
     setModal("pacing");
   };
   const nav = [
-    ["lab", "调度实验室", PlayCircle],
-    ["racks", "机架总览", HardDrives],
     ["workbench", "设备工作台", Desktop],
-    ["jobs", "任务池与调度", FileText],
+    ["scenarios", "场景与策略", Stack],
+    ["racks", "机架管理", HardDrives],
+    ["jobs", "任务中心", FileText],
+    ["catalog", "指令与任务库", Code],
     ["settings", "连接设置", Gear],
   ];
   return (
@@ -218,7 +223,7 @@ function Workspace({ onExpired }) {
         <header className="topbar">
           <span>
             设备中心 <span className="slash">/</span>{" "}
-            {nav.find((n) => n[0] === page)[1]}
+            {nav.find((n) => n[0] === page)?.[1] || "经典十槽实验"}
           </span>
           <div className="button-row">
             <label className={`mode-select ${mode === "real" ? "real" : ""}`}>
@@ -230,6 +235,8 @@ function Workspace({ onExpired }) {
                 onChange={(e) => {
                   setMode(e.target.value);
                   setSelectedId(null);
+                  setWorkspaceDeviceId(null);
+                  setRack("");
                   setHistory(null);
                   setNotice("");
                   setModal(null);
@@ -257,11 +264,17 @@ function Workspace({ onExpired }) {
               <h1>
                 {page === "lab"
                   ? "让调度过程可观测、可控制"
-                  : page === "racks"
-                    ? "机架与设备资源"
-                    : page === "jobs"
-                      ? "让任务有序流向设备"
-                      : "让每一次执行都有据可查"}
+                  : page === "workbench"
+                    ? "机架运行，一眼掌握"
+                    : page === "scenarios"
+                      ? "场景、规则与调度策略"
+                      : page === "racks"
+                        ? "机架与设备资源"
+                        : page === "catalog"
+                          ? "平台指令与任务模板"
+                          : page === "jobs"
+                            ? "让任务有序流向设备"
+                            : "让每一次执行都有据可查"}
               </h1>
               <p>单机串行，多机协作。真实执行与模拟演练严格分离。</p>
             </div>
@@ -286,7 +299,47 @@ function Workspace({ onExpired }) {
               {error || notice}
             </div>
           )}
-          {page === "lab" ? (
+          {page === "workbench" ? (
+            <Workstation
+              state={state}
+              mode={mode}
+              busy={busy}
+              run={run}
+              rack={rack}
+              setRack={setRack}
+              onOpenDevice={openDevice}
+              onInspect={inspect}
+              onScenarios={() => setPage("scenarios")}
+              onRackManage={() => setPage("racks")}
+              onAdd={() => setModal("device")}
+              onRealSubmit={() => setModal("real-demo")}
+            />
+          ) : page === "scenarios" ? (
+            <>
+              <Scenarios
+                key={mode}
+                state={state}
+                mode={mode}
+                busy={busy}
+                run={run}
+                onOpenRack={(value) => {
+                  setRack(value);
+                  setPage("workbench");
+                }}
+              />
+              {mode === "sim" && (
+                <section className="panel classic-lab-entry">
+                  <div>
+                    <strong>经典十槽实验</strong>
+                    <p className="small muted">
+                      查看历史检查点插入与大、小循环演示。
+                    </p>
+                  </div>
+                  <button onClick={() => setPage("lab")}>打开经典实验</button>
+                </section>
+              )}
+            </>
+          ) : page === "lab" ? (
             <SchedulerLab
               key={mode}
               state={state}
@@ -297,11 +350,7 @@ function Workspace({ onExpired }) {
               failure={failure}
               notice={notice}
               onDevices={() => setPage("racks")}
-              onWorkbench={(id) => {
-                setSelectedId(id);
-                setHistory(null);
-                setPage("workbench");
-              }}
+              onWorkbench={openDevice}
             />
           ) : page === "racks" ? (
             <Racks
@@ -311,11 +360,7 @@ function Workspace({ onExpired }) {
               busy={busy}
               onPacing={openPacing}
               onAdd={() => setModal("device")}
-              onOpenDevice={(id) => {
-                setSelectedId(id);
-                setHistory(null);
-                setPage("workbench");
-              }}
+              onOpenDevice={openDevice}
               onPolicy={(group) => {
                 setResource(group);
                 setModal("resource");
@@ -331,14 +376,31 @@ function Workspace({ onExpired }) {
               state={state}
               busy={busy}
               onInspect={inspect}
-              onCancel={(j) => run(() => api(`jobs/${j.id}/cancel`, mode, {}))}
+              onCancel={(j) =>
+                run(() =>
+                  api(
+                    `jobs/${j.id}/${mode === "sim" ? "queue-cancel" : "cancel"}`,
+                    mode,
+                    mode === "sim" ? { revision: j.revision || 0 } : {},
+                  ),
+                )
+              }
               onSubmit={() => setModal("job")}
               onScene={mode === "sim" ? newScene : null}
               onReplay={(e) => {
                 setSelectedId(e.deviceId);
+                setWorkspaceDeviceId(e.deviceId);
                 setHistory(e);
                 setPage("workbench");
               }}
+            />
+          ) : page === "catalog" ? (
+            <Catalog
+              key={mode}
+              state={state}
+              mode={mode}
+              busy={busy}
+              run={run}
             />
           ) : page === "settings" ? (
             <Connections
@@ -347,164 +409,61 @@ function Workspace({ onExpired }) {
               onConnectReal={() => {
                 setMode("real");
                 setSelectedId(null);
+                setWorkspaceDeviceId(null);
+                setRack("");
                 setHistory(null);
                 setNotice("");
                 setModal("device");
               }}
             />
-          ) : (
-            <div className="work-grid">
-              <section className="panel scheduling">
-                <div className="section-head">
-                  <h2>{page === "jobs" ? "任务池与执行证据" : "设备与调度"}</h2>
-                  <div className="button-row">
-                    {mode === "sim" && (
-                      <>
-                        <button
-                          disabled={busy || active}
-                          onClick={() => newScene("five")}
-                        >
-                          五任务演示
-                        </button>
-                        <button
-                          disabled={busy || active}
-                          onClick={() => newScene("failover")}
-                        >
-                          双机接管演示
-                        </button>
-                      </>
-                    )}
-                    {mode === "real" && (
-                      <button
-                        disabled={
-                          busy ||
-                          !state.devices.some(
-                            (d) => d.enabled && d.state !== "quarantined",
-                          )
-                        }
-                        onClick={() => setModal("real-demo")}
-                      >
-                        真机搜索 → 详情演示
-                      </button>
-                    )}
-                    <button
-                      className="icon-button"
-                      aria-label="刷新本中心记录"
-                      onClick={refresh}
-                    >
-                      <ArrowsClockwise size={20} />
-                    </button>
-                  </div>
-                </div>
-                <div className="panel-body">
-                  {mode === "real" && (
-                    <p className="notice">
-                      看画面：Mobile-Agent 8787 + 手机序列号 → 开始观看。已有
-                      PoC 手机直接配置画面连接，不重复登记。 旧 18081
-                      搜索/详情仍需明确空闲和独占交接；观察不会清
-                      busy、点击手机或重启 VPN。
-                    </p>
-                  )}
-                  {loading ? (
-                    <p className="muted">读取本中心记录…</p>
-                  ) : (
-                    <Devices
-                      devices={state.devices}
-                      selected={device}
-                      onSelect={(id) => {
-                        setSelectedId(id);
-                        setHistory(null);
-                      }}
-                    />
-                  )}
-                  {device && (
-                    <AdapterBench
-                      key={`${mode}:${device.id}`}
-                      device={device}
-                      state={state}
-                      busy={busy}
-                      run={run}
-                      onInspect={inspect}
-                      onDefine={(seed) => {
-                        setDefinitionSeed(seed);
-                        setModal("definition");
-                      }}
-                      onConfigure={() => setModal("observer")}
-                    />
-                  )}
-                  <div className="sub-head">
-                    <h3>任务池</h3>
-                    <div className="button-row">
-                      {mode === "sim" && (
-                        <button
-                          className="text-button"
-                          disabled={busy || active}
-                          onClick={() => newScene("priority")}
-                        >
-                          优先级演示
-                        </button>
-                      )}
-                      <button
-                        className="text-button"
-                        onClick={() => setModal("job")}
-                      >
-                        提交任务
-                      </button>
-                    </div>
-                  </div>
-                  <Tasks
-                    jobs={visibleJobs}
-                    devices={state.devices}
-                    scheduling={state.scheduling}
-                    onInspect={inspect}
-                    onCancel={(j) =>
-                      run(() => api(`jobs/${j.id}/cancel`, mode, {}))
-                    }
-                  />
-                  {active && (
-                    <p className="small muted">
-                      运行中的搜索会话不可抢占；等待每 30
-                      秒提升一级优先级。点击任务名称查看尝试证据。
-                    </p>
-                  )}
-                  <h3 className="events-heading">调度事件</h3>
-                  <Events
-                    events={state.events}
-                    onReplay={(e) => {
-                      setSelectedId(e.deviceId);
-                      setHistory(e);
-                    }}
-                  />
-                </div>
-              </section>
-              <Projection
-                key={`${mode}:${device?.id}`}
-                device={device}
-                history={history}
-                availability={state.scheduling?.devices.find(
-                  (a) => a.deviceId === device?.id,
-                )}
-                now={state.scheduling?.at}
-                onPacing={openPacing}
-                onLive={() => setHistory(null)}
-                busy={busy}
-                onControl={control}
-                onRefresh={refresh}
-                onConfigure={() => setModal("observer")}
-                onProbe={(d) =>
-                  run(
-                    () =>
-                      api(`devices/${d.id}/probe`, mode, {
-                        revision: d.revision,
-                      }),
-                    "只读检查已排入执行器；若无回执，请查看连接设置中的心跳。",
-                  )
-                }
-              />
-            </div>
-          )}
+          ) : null}
         </main>
       </div>
+      {workspaceDevice && (
+        <Modal
+          title={`${workspaceDevice.mode === "sim" ? "模拟手机工作台" : "手机工作台"} · ${workspaceDevice.name}`}
+          className="device-workspace-dialog"
+          onClose={() => {
+            setWorkspaceDeviceId(null);
+            setHistory(null);
+          }}
+        >
+          {notice && (
+            <p
+              role={failure ? "alert" : "status"}
+              className={failure ? "error modal-error" : "feedback success"}
+            >
+              {notice}
+            </p>
+          )}
+          <DeviceWorkspace
+            key={`${mode}:${workspaceDevice.id}`}
+            device={workspaceDevice}
+            state={state}
+            history={history}
+            busy={busy}
+            run={run}
+            onInspect={inspect}
+            onControl={control}
+            onRefresh={refresh}
+            onPacing={openPacing}
+            onLive={() => setHistory(null)}
+            onConfigure={() => setModal("observer")}
+            onSubmit={() => setModal("job")}
+            onDefine={(seed) => {
+              setDefinitionSeed(seed);
+              setModal("definition");
+            }}
+            onProbe={(d) =>
+              run(
+                () =>
+                  api(`devices/${d.id}/probe`, mode, { revision: d.revision }),
+                "只读检查已排入执行器；等待回执",
+              )
+            }
+          />
+        </Modal>
+      )}
       {modal && (
         <Modal
           title={
@@ -536,12 +495,13 @@ function Workspace({ onExpired }) {
           {modal === "definition" ? (
             <DefinitionForm
               definitions={state.definitions || []}
+              commandDefinitions={state.commandDefinitions || []}
               initialDefinition={definitionSeed}
               busy={busy}
               onSubmit={async (body) => {
                 const result = await run(
                   () => api("task-definitions", mode, body),
-                  "任务定义新版本已保存，可在调度实验室提交",
+                  "任务定义新版本已保存，可在设备工作台提交",
                 );
                 if (result) setModal(null);
               }}
@@ -607,6 +567,7 @@ function Workspace({ onExpired }) {
             <DeviceForm
               mode={mode}
               workers={state.workers}
+              strategyDefinitions={state.strategyDefinitions || []}
               busy={busy}
               onSubmit={async (b) => {
                 const d = await run(
@@ -615,6 +576,7 @@ function Workspace({ onExpired }) {
                 );
                 if (d) {
                   setSelectedId(d.id);
+                  setRack(d.rack);
                   setModal(null);
                 }
               }}

@@ -31,7 +31,7 @@ export class IpRiskBatch {
     finally { await this.gateway.events.finish(eventId, result?.status || failure?.status || 503,
       failure?.code || null, null, !!result?.replay, Date.now() - started, result?.batchId || failure?.details?.batchId).catch(() => {}) }
   }
-  async execute(context, { body, idempotencyKey, path }) {
+  async execute(context, { body, idempotencyKey, path, signal }) {
     const grants = await this.gateway.usageStore.listEffectiveGrants(context.consumer.id, context.apiKey.id)
     const capabilities = await this.gateway.usageStore.listEffectiveCapabilityGrants(context.consumer.id, context.apiKey.id)
     if (!grants.includes('ip_risk') || !capabilities.includes(this.gateway.operation)) throw new AppError(403, 'capability_not_granted', 'IP risk queries are not granted')
@@ -60,10 +60,12 @@ export class IpRiskBatch {
         chains.set(ip, new Promise(resolve => { release = resolve }))
         await previous
         try {
+          if (signal?.aborted) { results[index] = { index, ip, status: 499, error: { code: 'request_cancelled', message: 'Item was cancelled before dispatch' } }; continue }
           // Do not launch work that cannot finish within the batch budget.
-          if (Date.now() + 15000 > deadline) { results[index] = { index, ip, status: 504, error: { code: 'batch_deadline_not_dispatched', message: 'Item was not dispatched before the batch deadline' } }; continue }
+          const dispatchBudget = this.gateway.dispatchBudgetMs
+          if (Date.now() + (Number.isFinite(dispatchBudget) && dispatchBudget > 0 ? dispatchBudget + 5000 : 15000) > deadline) { results[index] = { index, ip, status: 504, error: { code: 'batch_deadline_not_dispatched', message: 'Item was not dispatched before the batch deadline' } }; continue }
           try {
-            const result = await this.gateway.execute(context, { body: { ip }, path: path.replace(/\/batch$/, ''), idempotencyKey: `ip-batch-${row.id}-${index}` })
+            const result = await this.gateway.execute(context, { body: { ip }, path: path.replace(/\/batch$/, ''), idempotencyKey: `ip-batch-${row.id}-${index}`, signal, dispatchDeadline: deadline })
             results[index] = { index, ip, status: result.status, response: result.body }
           } catch (error) { results[index] = { index, ip, status: error.status || 503, error: { code: error.code || 'ip_risk_unavailable', message: 'Item could not be completed' }, requestId: error.details?.requestId } }
         } finally { release() }

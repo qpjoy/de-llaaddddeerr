@@ -1,0 +1,39 @@
+{
+  "provenance": {
+    "synthetic": true,
+    "description": "Synthetic native payloads derived from local Night-All curated endpoint/normalizer tests and po-infra spiders. No production receipt or live provider acquisition.",
+    "bilibili": "Night-All tests/bilibili-metrics.test.js; po-infra/media/spiders_src/bilibili-content-by-keywords.py (general_search data.result, page/numPages, review/favorites/play)",
+    "douyin": "Night-All curated-search-endpoints.js and normalizer tests; po-infra Douyin V1 pagination aliases log_pb.impr_id/extra.logid",
+    "kuaishou": "Night-All tests/tikhub-normalizer.test.js mixFeeds/feed/photo wrappers and public photoId/share_info identity. Stream media aliases retained from local po-infra feed parser; its search_video_v2 endpoint is not selected here.",
+    "zhihu": "Night-All tests/tikhub-normalizer.test.js search_result wrapper; po-infra/media/spiders_src/zhihu-posts-by-keywords.py paging.next offset/search_hash_id. Excerpts are explicitly previews."
+  },
+  "bilibili": {
+    "code": 0,
+    "data": {
+      "page": 1,
+      "numPages": 3,
+      "result": [{ "id": "116328836961725", "aid": "116328836961725", "bvid": "BV1xx411c7mD", "type": "video", "title": "<em class=\"keyword\">城市</em>纪录", "description": "完整描述", "arcurl": "https://www.bilibili.com/video/BV1xx411c7mD", "mid": "123456789012345678", "author": "作者", "upic": "https://example.test/bili-author.jpg", "pic": "//example.test/bili-cover.jpg", "pubdate": 1787041898, "review": 4, "favorites": 9, "play": 123, "video_review": 999, "coin": 88 }]
+    },
+    "params": { "page": 1, "cursor": "request-echo-ignored" }
+  },
+  "douyin": {
+    "data": [{ "aweme_info": { "aweme_id": "7535855189035991057", "desc": "完整抖音正文", "aweme_type": 4, "create_time": 1787041898, "author": { "uid": "987654321012345678", "nickname": "抖音作者", "avatar_thumb": { "url_list": ["https://example.test/dy-author.jpg"] } }, "statistics": { "digg_count": 0, "comment_count": 2, "share_count": 3, "collect_count": 4, "play_count": 123456 }, "video": { "cover": { "url_list": ["https://example.test/dy-cover.jpg"] }, "play_addr": { "url_list": ["https://example.test/dy-play.mp4?signature=one"] }, "download_addr": { "url_list": ["https://example.test/dy-play.mp4?signature=two"] } } } }],
+    "cursor": 20, "has_more": 1, "log_pb": { "impr_id": "session-1" }, "backtrace": "trace-1",
+    "params": { "cursor": 0, "search_id": "old-request-session" },
+    "related_search": [{ "aweme_id": "never-project", "desc": "推荐内容" }]
+  },
+  "kuaishou": {
+    "mixFeeds": [{ "rank": 1, "itemType": "feed_photo", "feed": { "photo_id": "5216857423057152000", "photoId": "3xtdqvdnqd3psuc", "caption": "完整快手正文", "pureTitle": "快手标题", "share_info": "userId=author-1&photoId=3xtdqvdnqd3psuc", "user_id": "author-1", "user_name": "快手作者", "headurl": "https://example.test/ks-author.jpg", "coverUrl": "https://example.test/ks-cover.jpg", "timestamp": 1787041898000, "like_count": 0, "comment_count": 3, "view_count": 99, "main_mv_url": "https://example.test/ks-play.mp4?signature=one", "images": [{ "url": "https://example.test/ks-real-photo.jpg" }], "streamManifest": { "adaptationSet": [{ "representation": [{ "url": "https://example.test/ks-play.mp4?signature=two" }] }] } } }],
+    "pcursor": "ks-next", "has_more": true,
+    "search_quality": [{ "id": "search_missing", "title": "作品缺集" }]
+  },
+  "zhihu": {
+    "data": [
+      { "type": "search_result", "object": { "id": "2073094725792445480", "type": "answer", "question": { "id": "2070091050450941275", "name": "城市问题？" }, "content": "<p>完整答案第一段。</p><p>完整答案第二段。</p>", "excerpt": "较短摘要…", "url": "https://api.zhihu.com/answers/2073094725792445480", "created_time": 1787041898, "voteup_count": 0, "comment_count": 2, "author": { "id": "zh-author", "name": "知乎作者", "avatar_url": "https://example.test/zh-avatar.jpg" } } },
+      { "type": "search_result", "object": { "id": "117200001", "type": "article", "title": "<em>城市</em>专栏", "excerpt": "仅提供摘要…", "url": "https://zhuanlan.zhihu.com/p/117200001", "created_time": 1786953600 } },
+      { "type": "relevant_query", "id": "rq-1", "query_list": [{ "query": "城市写作" }] }
+    ],
+    "paging": { "is_end": false, "next": "https://api.zhihu.com/search_v3?t=general&q=ignored&offset=20&search_hash_id=zh-session" },
+    "params": { "offset": "0", "search_hash_id": "request-echo-ignored" }
+  }
+}

@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { MagnifyingGlass } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
 import { ErrorState } from './components.jsx'
+import { AcquisitionComparison } from './acquisition-comparison.jsx'
+import { acquisitionComparisonSessionFor } from './acquisition-comparison.js'
 import './request-diagnostics.css'
 
 const shown = value => value == null || value === '' ? '未记录' : String(value)
@@ -42,16 +44,39 @@ function Call({ call, provider }) {
   </article>
 }
 
-export default function RequestDiagnostics({ token, onUnauthorized, session, setSession }) {
+function RequestValidation({ token, run, session, onUnauthorized }) {
+  const { original, loading, error } = useSyncExternalStore(session.subscribe, session.getSnapshot)
+  const prepare = async () => {
+    if (session.getSnapshot().loading || session.getSnapshot().original) return
+    session.update({ loading: true, error: null })
+    try {
+      const original = await adminApi.acquisitionHistory(token, run.requestId)
+      session.update({ original, bodyText: original.requestEvidence?.request?.body ? JSON.stringify(original.requestEvidence.request.body, null, 2) : '' })
+    } catch (error) {
+      session.update({ error })
+      if ([401, 403].includes(error.status)) onUnauthorized?.(error)
+    } finally { session.update({ loading: false }) }
+  }
+  if (!run.replayAvailable) return <p className="mih-diagnostic-note">该请求尚无可复现的已提交响应，暂不支持按原参数重新验证。处理中或结果未知时，请先核对原请求结果。</p>
+  if (original) return <AcquisitionComparison {...{ token, original, session }} savedOnly/>
+  return <section className="mih-diagnostic-validation">
+    <button type="button" className="qp-button qp-button--outline" disabled={loading} onClick={prepare}>{loading ? '正在读取原参数…' : '准备按原参数发起新请求验证'}</button>
+    <p className="mih-diagnostic-note">此步只读取保存的接口、参数与原 Key 身份；查看后单独点击发送才会发起新请求，可能计费。</p>
+    {error ? <ErrorState error={error}/> : null}
+  </section>
+}
+
+export default function RequestDiagnostics({ token, onUnauthorized, session, setSession, comparisonSessions, autoIdentifier = '' }) {
   const current = session?.token === token ? session : { identifier: '', data: null, error: null }
   const [busy, setBusy] = useState(false)
   const active = useRef(null)
+  const localComparisonSessions = useRef(null)
   useEffect(() => () => { active.current?.abort(); active.current = null }, [token])
   const update = patch => setSession(previous => ({ ...(previous?.token === token ? previous : {}), ...patch, token }))
-  const lookup = async event => {
-    event.preventDefault()
+  const lookup = async (event, requestedIdentifier = current.identifier) => {
+    event?.preventDefault()
     if (active.current) return
-    const identifier = (current.identifier || '').trim()
+    const identifier = (requestedIdentifier || '').trim()
     if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,190}$/.test(identifier)) {
       update({ data: null, error: new Error('请输入完整请求 ID，最多 191 个字母、数字、点、冒号、下划线或连字符。') })
       return
@@ -59,7 +84,7 @@ export default function RequestDiagnostics({ token, onUnauthorized, session, set
     const controller = new AbortController()
     active.current = controller
     setBusy(true)
-    update({ data: null, error: null })
+    update({ identifier, data: null, error: null })
     try {
       const data = await adminApi.requestDiagnostics(token, identifier, { signal: controller.signal })
       if (!controller.signal.aborted) update({ data, error: null })
@@ -72,8 +97,17 @@ export default function RequestDiagnostics({ token, onUnauthorized, session, set
       if (active.current === controller) { active.current = null; setBusy(false) }
     }
   }
+  const lookupRef = useRef(lookup)
+  lookupRef.current = lookup
+  useEffect(() => {
+    if (!autoIdentifier) return
+    // A diagnostic deep link is a read, never a business-request retry.
+    active.current?.abort()
+    active.current = null
+    lookupRef.current(null, autoIdentifier)
+  }, [token, autoIdentifier])
   return <section className="qp-card mih-request-diagnostics" aria-labelledby="request-diagnostics-title">
-    <header><h2 id="request-diagnostics-title">请求诊断</h2><p>管理员只读查询 · 查看已保存的请求状态、上游错误与结算证据，不触发采集或重试。</p></header>
+    <header><h2 id="request-diagnostics-title">请求诊断</h2><p>查询只读取已保存的请求状态、上游错误与结算证据。按原参数验证需单独发送新请求，可能计费。</p></header>
     <form className="mih-diagnostic-form" onSubmit={lookup}>
       <label htmlFor="diagnostic-request-id">Hub / 上游请求 ID<input id="diagnostic-request-id" className="qp-input" value={current.identifier || ''} maxLength={191} placeholder="Hub UUID 或 Night-All req_…" onChange={event => update({ identifier: event.target.value })} /></label>
       <button className="qp-button qp-button--primary" disabled={busy || !current.identifier?.trim()}><MagnifyingGlass/>{busy ? '查询中…' : '查询诊断'}</button>
@@ -96,6 +130,7 @@ export default function RequestDiagnostics({ token, onUnauthorized, session, set
             ['请求时间', formatDate(run.reservedAt)], ['完成时间', formatDate(run.completedAt)],
           ]}/>
           <p className="mih-diagnostic-guidance">{run.guidance}</p>
+          <RequestValidation token={token} run={run} onUnauthorized={onUnauthorized} session={acquisitionComparisonSessionFor(comparisonSessions || localComparisonSessions, token, run.requestId)}/>
           <h4>客户结算</h4>
           {run.customerCharge ? <Facts entries={[
             ['结算状态', stateName(run.customerCharge.status)], ['执行模式', run.customerCharge.enforcementMode],

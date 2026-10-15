@@ -1,5 +1,9 @@
 # MX Device · 独立设备实验中心
 
+新增“设备工作台”首屏：机架屏幕墙/列表、中央队列、模拟手机弹窗、设备能力管理；“场景与策略”提供 8 类场景、规则/策略版本化 CRUD 与机架默认策略。新增 008 迁移，详见 [设计、并发与边界](docs/workstation-strategies-2026-10-14.md)。仅本地验收，尚未部署。
+
+新增“指令与任务库”：平台指令/任务版本化 CRUD，拼多多 9 条指令与 6 个组合模板，支持搜索结果传详情/OCR，PoC/ADB/custom 适配引用。新增 007 数据库迁移，真实 handler 与 mx-ocr 仍待接入。见 [平台目录与迁移](docs/platform-command-catalog-2026-10-13.md)。
+
 新增「调度实验室」：十槽 / 20 任务、版本化指令组合、检查点有限插入与恢复、随机冷却和实际指令时间线。新增能力仅模拟，本轮未部署。详见 [实现与边界](docs/rack-lab-2026-10-10.md)、[文档入口](docs/README.md)。
 
 **新会话接手请从 [docs/README.md](docs/README.md) 开始**：包含背景/现状、服务器端口与 PoC 关系、本机导出源码位置、开源调查、产品路线和实施边界（交接基线 2026-10-10）。
@@ -161,6 +165,25 @@ node tests/acceptance.mjs .runtime/config.json .runtime/acceptance-report.json
 ```
 
 不提供测试数据库地址时，PostgreSQL 集成用例明确标为 skipped，不应把普通 `npm test` 说成数据库并发验收。验收脚本会创建模拟任务、注入模拟断线，需在空闲的专用演示实例运行。
+
+**本地可复现的 PG 测试与压测**（不需要预先运行数据库）：
+
+```bash
+# 在临时目录 initdb 一个一次性 PostgreSQL（只监听 127.0.0.1 随机端口），跑全部测试后删除
+npm run test:pg
+# 也可只跑指定文件
+npm run test:pg -- tests/postgres.test.mjs
+# 历史数据压测：100 台满载在线状态 + 逐级灌入历史，输出 EXPLAIN 与事务耗时
+npm run bench:pg -- --jobs 0,5000,20000,60000 --iterations 20 --out report.json
+```
+
+脚本依次在 `MX_DEVICE_PG_BIN`、`PATH`、Homebrew 的 `postgresql@*`、Postgres.app、`/usr/lib/postgresql/*` 中查找同时含 `initdb` 和 `postgres` 的目录；找不到时直接失败（不跳过），可用 `brew install postgresql@17` 安装，或设置 `MX_DEVICE_PG_BIN`。临时库关闭 fsync，只用于测试和相对比较；压测会先检查磁盘余量。两者都不连接项目数据库、手机或其他服务。2026-10-15 的压测结果见 [V2-0 基线](docs/v2-0-baseline-2026-10-15.md)。
+
+**事件保留**：Worker 每 10 分钟分批清理事件时间线（每批 5000 行，每轮最多 10 万行），默认模拟 7 天、真实 90 天，并始终保留每个运行域最新 1000 条。Job、Attempt、指令回执和迟到证据不在清理范围内。可在 worker 配置（Compose 中为 `.runtime/worker.json`）中调整，非法值会阻止 Worker 启动：
+
+```json
+{ "eventRetention": { "simDays": 7, "realDays": 90, "keepLatest": 1000 } }
+```
 
 - [演示脚本与通过标准](docs/demo.md)
 - [调度模型、边界与扩展路线](docs/architecture.md)

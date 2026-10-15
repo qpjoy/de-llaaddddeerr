@@ -5,14 +5,72 @@ import { IpRiskHistory } from './ip-risk-history.mjs'
 import { IpSearchEvents } from './ipsearch-events.mjs'
 import { IP_RISK_PLATFORM, IP_RISK_OPERATION, IP_RISK_VERSION, normalizeIpRiskRequest } from '../contracts/ip-risk.mjs'
 import { acquisitionRequestSnapshot } from '../acquisitions/request-snapshot.mjs'
+import { ConcurrencyAdmissionQueue, DEFAULT_CONCURRENCY_QUEUE, concurrencyBusy } from './concurrency-admission.mjs'
 
 export class IpRiskGateway {
-  constructor({ usageStore, platformStore, adapter, credentialStore = null, enabled = false, credentialConfigured = adapter.configured, reservationLeaseMs = 60000, providerKey = 'ipsearch', operation = IP_RISK_OPERATION, version = IP_RISK_VERSION, meterKey = operation, endpointVersion = providerKey === 'ipsearch' ? 'v2-sdk-0.1.0' : version }) {
-    Object.assign(this, { usageStore, platformStore, adapter, credentialStore, enabled, credentialConfigured, reservationLeaseMs, providerKey, operation, version, meterKey, endpointVersion })
+  constructor({ usageStore, platformStore, adapter, credentialStore = null, enabled = false, credentialConfigured = adapter.configured, reservationLeaseMs = 60000, providerKey = 'ipsearch', operation = IP_RISK_OPERATION, version = IP_RISK_VERSION, meterKey = operation, endpointVersion = providerKey === 'ipsearch' ? 'v2-sdk-0.1.0' : version, concurrencyPolicy = DEFAULT_CONCURRENCY_QUEUE, admissionRuntime = {} }) {
+    Object.assign(this, { usageStore, platformStore, adapter, credentialStore, enabled, credentialConfigured, reservationLeaseMs, providerKey, operation, version, meterKey, endpointVersion, concurrencyPolicy })
     this.events = new IpSearchEvents(platformStore.pool)
     this.active = 0
+    this.admissionClock = admissionRuntime.clock || Date.now
+    this.concurrencyQueue = new ConcurrencyAdmissionQueue({ clock: this.admissionClock })
     this.batch = new IpRiskBatch(this)
     this.history = new IpRiskHistory(this)
+  }
+  get dispatchBudgetMs() { return this.adapter.dispatchBudgetMs }
+  #enter() {
+    if (this.active >= 3) return false
+    this.active++
+    return true
+  }
+  #leave() { this.active = Math.max(0, this.active - 1); this.concurrencyQueue.drain() }
+  async #revalidate(context) {
+    const current = await this.usageStore.findApiKeyById(context.apiKey.id)
+    if (!current || current.apiKey.status !== 'active' || current.consumer.id !== context.consumer.id || current.tenant.id !== context.tenant.id) {
+      throw new AppError(403, 'capability_not_granted', 'IP risk access changed while waiting')
+    }
+    const [grants, capabilities, plan] = await Promise.all([
+      this.usageStore.listEffectiveGrants(current.consumer.id, current.apiKey.id),
+      this.usageStore.listEffectiveCapabilityGrants(current.consumer.id, current.apiKey.id),
+      this.usageStore.getConsumerPlan(current.consumer.id),
+    ])
+    if (!grants.includes(IP_RISK_PLATFORM) || !capabilities.includes(this.operation)) throw new AppError(403, 'capability_not_granted', 'IP risk access changed while waiting')
+    if (!plan || plan.status !== 'active' || plan.versionStatus !== 'published') throw new AppError(503, 'plan_assignment_unavailable', 'An active published plan assignment is required')
+    if (this.adapter.capabilities && !(await this.adapter.capabilities()).ready) throw new AppError(503, 'ip_risk_unavailable', 'IP risk service changed while waiting')
+  }
+  async #credential() {
+    const credential = await this.credentialStore?.readCredentialSnapshot(this.providerKey)
+    const apiKey = credential?.source === 'database' ? credential.apiKey : credential?.apiKey ?? this.adapter.apiKey
+    if (!(this.enabled || credential?.source === 'database') || (this.credentialStore ? !apiKey : !this.adapter.configured)) throw new AppError(503, 'ip_risk_unavailable', 'IP risk service is not enabled')
+    const state = await this.platformStore.providerState()
+    if (state.circuitOpenUntil && new Date(state.circuitOpenUntil) > new Date()) throw new AppError(503, 'ip_risk_unavailable', 'IP risk service is temporarily unavailable')
+    return apiKey
+  }
+  async #enterOrQueue(context, { lease, expiresAt, signal, revalidate }) {
+    if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+    if (!this.concurrencyQueue.entries.length && this.#enter()) return
+    const budget = this.dispatchBudgetMs
+    if (!Number.isFinite(budget) || budget <= 0) throw new AppError(503, 'ip_risk_unavailable', 'IP risk dispatch time budget is unavailable', { upstreamDispatched: false })
+    const policy = { ...DEFAULT_CONCURRENCY_QUEUE, ...this.concurrencyPolicy }
+    const deadline = Math.min(this.admissionClock() + policy.maxWaitMs, new Date(expiresAt).getTime() - budget - 5000)
+    let entered = false
+    try {
+      await this.platformStore.releaseDispatchLease(lease)
+      await this.concurrencyQueue.enter({ tryEnter: () => this.#enter(), deadline, maxPending: policy.maxPending, signal,
+        details: { platform: IP_RISK_PLATFORM, maxConcurrency: 3, maxPending: policy.maxPending } })
+      entered = true
+      await this.#revalidate(context)
+      await revalidate()
+      if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+      if (this.admissionClock() >= deadline) throw concurrencyBusy('concurrency_queue_timeout', { platform: IP_RISK_PLATFORM })
+      const acquired = await this.platformStore.acquireDispatchLease(lease)
+      if (acquired.kind !== 'acquired') throw new AppError(409, 'ip_query_in_progress_or_unknown', 'An equal query is running or has an uncertain result', { upstreamDispatched: false })
+      if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+      if (this.admissionClock() >= deadline) throw concurrencyBusy('concurrency_queue_timeout', { platform: IP_RISK_PLATFORM })
+    } catch (error) {
+      if (entered) this.#leave()
+      throw error
+    }
   }
   async capabilities() {
     if (this.adapter.capabilities) return this.adapter.capabilities()
@@ -22,12 +80,12 @@ export class IpRiskGateway {
     return { platform: IP_RISK_PLATFORM, ready: enabled && configured,
       operations: { [this.operation]: { ready: enabled && configured } } }
   }
-  async query(context, { body, idempotencyKey, path }) {
+  async query(context, { body, idempotencyKey, path, signal, dispatchDeadline }) {
     const started = Date.now()
     const eventId = await this.events.begin(context)
     let result, failure
     try {
-      result = await this.execute(context, { body, idempotencyKey, path })
+      result = await this.execute(context, { body, idempotencyKey, path, signal, dispatchDeadline })
       return result
     } catch (error) { failure = error; throw error }
     finally {
@@ -37,7 +95,7 @@ export class IpRiskGateway {
         !!result?.replay, Date.now() - started).catch(() => {})
     }
   }
-  async execute(context, { body, idempotencyKey, path }) {
+  async execute(context, { body, idempotencyKey, path, signal, dispatchDeadline }) {
     const { tenant, consumer, apiKey } = context
     const grants = await this.usageStore.listEffectiveGrants(consumer.id, apiKey.id)
     const capabilities = await this.usageStore.listEffectiveCapabilityGrants(consumer.id, apiKey.id)
@@ -61,7 +119,7 @@ export class IpRiskGateway {
       meterKey: this.meterKey,
       acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
       requiredAuthorizationScopes: [{ type: 'platform', key: IP_RISK_PLATFORM }, { type: 'capability', key: this.operation }],
-      unitsReserved: 1, leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
+      unitsReserved: 1, leaseExpiresAt: new Date(Math.min(Date.now() + this.reservationLeaseMs, dispatchDeadline ?? Infinity)),
       windowStart: new Date(Date.now() - policy.windowSeconds * 1000), maxRequests: policy.maxRequests, replayWindowMs: null,
     }).catch(error => {
       if (error.code === 'P0001' && error.message === 'commerce_subscription_required') throw new AppError(403,error.message,'请先购买有效的 IP v2 订阅')
@@ -80,19 +138,18 @@ export class IpRiskGateway {
     if (reservation.kind !== 'reserved') throw new AppError(409, `request_${reservation.kind}`, 'Request cannot be dispatched; retain its Idempotency-Key', { requestId })
     let call = null, evidence = null, lease = false, terminal = false, slot = false
     try {
-      const credential = await this.credentialStore?.readCredentialSnapshot(this.providerKey)
-      const apiKeyValue = credential?.apiKey ?? this.adapter.apiKey
-      if (!(this.enabled || credential?.source === 'database') || (this.credentialStore ? !apiKeyValue : !this.adapter.configured)) throw new AppError(503, 'ip_risk_unavailable', 'IP risk service is not enabled')
-      const state = await this.platformStore.providerState()
-      if (state.circuitOpenUntil && new Date(state.circuitOpenUntil) > new Date()) throw new AppError(503, 'ip_risk_unavailable', 'IP risk service is temporarily unavailable')
-      const acquired = await this.platformStore.acquireDispatchLease({ consumerId: consumer.id, operation: this.operation, fingerprint,
-        endpointKey: 'risk.query', contractVersion: this.version, ownerRequestId: requestId, expiresAt: new Date(Date.now() + this.reservationLeaseMs) })
+      let apiKeyValue = await this.#credential()
+      const dispatchLease = { consumerId: consumer.id, operation: this.operation, fingerprint,
+        endpointKey: 'risk.query', contractVersion: this.version, ownerRequestId: requestId, expiresAt: reservation.request.leaseExpiresAt }
+      const acquired = await this.platformStore.acquireDispatchLease(dispatchLease)
       if (acquired.kind !== 'acquired') throw new AppError(409, 'ip_query_in_progress_or_unknown', 'An equal query is running or has an uncertain result')
       lease = true
-      if (this.active >= 3) throw new AppError(429, 'ip_query_concurrency_limited', 'IP query capacity is temporarily exhausted')
-      this.active++; slot = true
+      await this.#enterOrQueue(context, { lease: dispatchLease, expiresAt: reservation.request.leaseExpiresAt, signal,
+        revalidate: async () => { apiKeyValue = await this.#credential() } })
+      slot = true
       const rate = await this.platformStore.acquireProviderRateLimit({ limit: 60 })
       if (!rate.allowed) throw new AppError(429, 'ip_query_rate_limited', 'IP query rate limit reached')
+      if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
       call = await this.platformStore.beginProviderCall({ tenantId: tenant.id, consumerId: consumer.id, apiKeyId: apiKey.id, usageRequestId: requestId,
         operation: this.operation, contractVersion: this.version, endpointKey: 'risk.query', endpointVersion: this.endpointVersion, marketplace: IP_RISK_PLATFORM, fingerprint })
       evidence = await this.adapter.query(input.ip, { apiKey: apiKeyValue, requestId })
@@ -119,10 +176,11 @@ export class IpRiskGateway {
         throw new AppError(503, 'ip_query_outcome_unknown', 'Query outcome requires reconciliation; do not submit a new request', { requestId })
       }
       if (!terminal) await this.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable', status: error.status || 503, errorCode: error.code || 'ip_risk_unavailable' })
+      if (error instanceof AppError) throw new AppError(error.status, error.code, error.message, { ...error.details, requestId })
       throw error
     } finally {
-      if (slot) this.active--
       if (lease) await this.platformStore.releaseDispatchLease({ consumerId: consumer.id, operation: this.operation, fingerprint, ownerRequestId: requestId }).catch(() => {})
+      if (slot) this.#leave()
     }
   }
 }

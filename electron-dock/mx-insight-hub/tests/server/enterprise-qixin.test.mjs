@@ -385,6 +385,28 @@ test('PostgreSQL migration, price controls, archives, worker ingest and outbox p
   assert.equal(archivedFailure[0].outcome, 'rejected')
   assert.equal(archivedFailure[0].billed, null, 'customer release does not invent supplier billing evidence')
   assert.equal(archivedFailure[0].parsed_payload.status, '104')
+
+  // A pre-dispatch busy request has no usage response body. Diagnostics must
+  // recover its HTTP status from the actual gateway table, without rewriting it.
+  f.gateway.config = { ...QIXIN_CONFIG, concurrencyQueue: { maxWaitMs: 1, maxPending: 32 } }
+  f.gateway.active = 10
+  let busyId
+  try {
+    await assert.rejects(f.gateway.queryEnterprise(f.context, { ...request,
+      idempotencyKey: 'enterprise-pg-queue-timeout', body: { query: { keyword: '排队诊断' } } }), error => {
+      assert.equal(error.code, 'external_platform_busy')
+      busyId = error.details.requestId
+      return true
+    })
+  } finally { f.gateway.active = 0 }
+  const busyDiagnostic = (await history.getAdminDiagnostics(busyId)).runs[0]
+  assert.equal(busyDiagnostic.responseStatus, 429)
+  assert.equal(busyDiagnostic.responseStatusSource, 'gateway_request')
+  assert.equal(busyDiagnostic.status, 'released')
+  assert.equal(busyDiagnostic.hasResponseBody, false)
+  assert.equal(busyDiagnostic.providerCalls.length, 0)
+  assert.equal(busyDiagnostic.customerCharge.chargedMinor, '0')
+  assert.match(busyDiagnostic.guidance, /企业数据.*自身并发准入限制/u)
 })
 
 test('official defaults allow granted billed requests, while negotiated APIs and missing grants never dispatch', async () => {
@@ -473,4 +495,47 @@ test('a relay base must be absolute and carry no query, credentials or fragment'
   for (const bad of ['/u/qixin', 'ftp://host/u', 'http://a:b@host/u', 'http://host/u?x=1', 'http://host/u#f']) {
     assert.equal(normalizeRelayBase(bad), undefined, bad)
   }
+})
+
+test('enterprise capacity admits ten requests for one consumer and queues the eleventh', async () => {
+  let release
+  const hold = new Promise(resolve => { release = resolve })
+  let calls = 0
+  const f = await enterpriseFixture({ fetchImpl: async () => {
+    calls += 1
+    await hold
+    return new Response(JSON.stringify(payload))
+  } })
+  assert.equal(QIXIN_CONFIG.maxConcurrency, 10)
+  assert.equal(QIXIN_CONFIG.maxConsumerConcurrency, 10)
+  const requests = Array.from({ length: 11 }, (_, index) => f.gateway.queryEnterprise(f.context, {
+    ...request, body: { query: { keyword: `企业-${index}` } }, idempotencyKey: `enterprise-concurrent-${index}`,
+  }))
+  for (let i = 0; i < 100 && f.gateway.concurrencyQueue.entries.length !== 1; i++) await new Promise(resolve => setTimeout(resolve, 2))
+  assert.equal(calls, 10)
+  assert.equal(f.gateway.concurrencyQueue.entries.length, 1)
+  release()
+  const results = await Promise.all(requests)
+  assert.equal(calls, 11)
+  assert.equal(results.every(result => result.status === 200), true)
+  assert.equal(f.gateway.active, 0)
+})
+
+test('enterprise queue timeout identifies the Hub enterprise gate and creates no supplier call', async () => {
+  const f = await enterpriseFixture()
+  f.gateway.config = { ...QIXIN_CONFIG, maxConcurrency: 1, maxConsumerConcurrency: 1,
+    concurrencyQueue: { maxWaitMs: 15, maxPending: 1 } }
+  f.gateway.active = 1
+  const error = await f.gateway.queryEnterprise(f.context, request).catch(error => error)
+  assert.equal(error.status, 429)
+  assert.equal(error.code, 'external_platform_busy')
+  assert.match(error.message, /企业数据/u)
+  assert.equal(error.details.reason, 'concurrency_queue_timeout')
+  assert.equal(error.details.platform, 'enterprise')
+  assert.equal(error.details.operation, 'enterprise.api.1.31')
+  assert.equal(error.details.upstreamDispatched, false)
+  assert.equal(f.platformStore.calls.size, 0)
+  const usage = [...f.store.requests.values()][0]
+  assert.equal(usage.status, 'released')
+  assert.equal(usage.errorCode, 'external_platform_busy')
 })

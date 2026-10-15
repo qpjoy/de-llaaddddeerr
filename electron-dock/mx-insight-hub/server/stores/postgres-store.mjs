@@ -1,6 +1,7 @@
 import { quotaRecoverySql } from '../core/admission-recovery.mjs'
 import { createInternalTrafficPolicy } from '../core/internal-traffic-policy.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
+import { STRATEGY_DATA_CONNECTORS, STRATEGY_DATA_STREAMS } from '../data/strategy-search-data-statistics.mjs'
 import { ensurePostgresAdminExecution } from './admin-execution.mjs'
 import { assertPostgresKeyAccessLimits } from './key-access-limits.mjs'
 import { readTenantAccess, writeTenantAccess, applyTenantAccess, previewTenantAccess } from './tenant-service-access.mjs'
@@ -6279,6 +6280,99 @@ export class PostgresStore {
     )
     const media = rows[0]?.response_body?.data?.item?.media?.[mediaIndex]
     return media?.type === 'image' && typeof media.url === 'string' && media.url ? media.url : null
+  }
+
+  async strategySearchUsage({ from, to, paths, timeZone }) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN READ ONLY')
+      await client.query("SET LOCAL statement_timeout = '10000ms'")
+      const { rows } = await client.query(
+        `SELECT to_char(request.created_at AT TIME ZONE $4, 'YYYY-MM-DD') AS day,
+                request.acquisition_request ->> 'path' AS path, request.platform,
+                count(*)::bigint AS requests,
+                count(*) FILTER (WHERE EXISTS (
+                  SELECT 1 FROM serving.connector_calls call WHERE call.usage_request_id = request.id
+                ))::bigint AS "nightAllRequests"
+           FROM usage_requests request
+          WHERE request.created_at >= $1 AND request.created_at < $2
+            AND request.acquisition_request ->> 'path' = ANY($3::text[])
+          GROUP BY 1, 2, 3 ORDER BY 1, 2, 3`,
+        [from, to, paths, timeZone],
+      )
+      await client.query('COMMIT')
+      return rows
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      if (error.code === '57014') {
+        throw new AppError(503, 'strategy_search_usage_timeout', 'Request statistics timed out; select fewer days')
+      }
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async strategySearchDataStatistics({ from, to, paths, timeZone }) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN READ ONLY')
+      await client.query("SET LOCAL statement_timeout = '10000ms'")
+      const { rows } = await client.query(
+        `WITH scoped_runs AS MATERIALIZED (
+           SELECT run.id, run.started_at,
+                  CASE
+                    WHEN request.acquisition_request ->> 'path' IN ('/api/v1/search/crawl', '/api/v1/night-all/search/crawl', '/api/v1/data/social/crawl') THEN 'crawl'
+                    WHEN request.acquisition_request ->> 'path' IN ('/api/v1/search/user-info', '/api/v1/night-all/search/user-info', '/api/v1/data/social/user-info') THEN 'user-info'
+                    ELSE 'search'
+                  END AS interface
+             FROM ingest.ingest_runs run
+             JOIN usage_requests request ON request.id = run.request_id
+            WHERE run.connector_id = ANY($5::text[]) AND run.stream_id = ANY($6::text[])
+              AND run.started_at >= $1 AND run.started_at < $2 AND run.finished_at IS NOT NULL
+              AND request.acquisition_request ->> 'path' = ANY($3::text[])
+         ), facts AS (
+           SELECT run.interface, record.platform, record.object_type,
+                  to_char(run.started_at AT TIME ZONE $4, 'YYYY-MM-DD') AS day,
+                  observation.id AS observation_id, record.id AS record_id,
+                  revision.revision,
+                  first_revision.ingest_run_id = run.id
+                    AND record.first_seen_at = first_revision.valid_from
+                    AND first_revision.valid_from = run.started_at
+                    AND to_char(record.first_seen_at AT TIME ZONE $4, 'YYYY-MM-DD') = to_char(run.started_at AT TIME ZONE $4, 'YYYY-MM-DD')
+                    AND to_char(first_revision.valid_from AT TIME ZONE $4, 'YYYY-MM-DD') = to_char(run.started_at AT TIME ZONE $4, 'YYYY-MM-DD') AS is_new,
+                  revision.revision > 1 AND revision.ingest_run_id = run.id
+                    AND to_char(revision.valid_from AT TIME ZONE $4, 'YYYY-MM-DD') = to_char(run.started_at AT TIME ZONE $4, 'YYYY-MM-DD') AS is_update
+             FROM scoped_runs run
+             JOIN core.observations observation ON observation.ingest_run_id = run.id
+             JOIN core.canonical_records record ON record.id = observation.record_id
+             LEFT JOIN core.record_revisions first_revision ON first_revision.record_id = record.id AND first_revision.revision = 1
+             LEFT JOIN core.record_revisions revision ON revision.record_id = record.id AND revision.revision = observation.canonical_revision
+         )
+         SELECT CASE WHEN grouping(interface) = 1 THEN 'summary'
+                     WHEN grouping(day) = 1 THEN 'total' ELSE 'daily' END AS level,
+                interface, platform, object_type AS "objectType", day,
+                count(DISTINCT record_id) FILTER (WHERE is_new)::bigint AS "newObjects",
+                count(DISTINCT record_id) FILTER (WHERE is_update)::bigint AS "updatedObjects",
+                count(DISTINCT (record_id, revision)) FILTER (WHERE is_update)::bigint AS "contentRevisions",
+                count(DISTINCT observation_id)::bigint AS observations,
+                count(DISTINCT record_id)::bigint AS "observedObjects"
+           FROM facts
+          GROUP BY GROUPING SETS ((interface, platform, object_type, day), (interface, platform, object_type), ())
+          ORDER BY interface, platform, object_type, day`,
+        [from, to, paths, timeZone, STRATEGY_DATA_CONNECTORS, STRATEGY_DATA_STREAMS],
+      )
+      await client.query('COMMIT')
+      return { available: true, rows }
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      if (error.code === '57014') {
+        throw new AppError(503, 'strategy_search_data_statistics_timeout', 'Stored data statistics timed out; select fewer days')
+      }
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   async usageDaily({ tenantId, from, to }) {

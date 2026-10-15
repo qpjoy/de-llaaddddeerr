@@ -109,6 +109,28 @@ bash scripts/manage.sh start
 
 ### 重启、持久化与存量系统
 
+2026-10-14 Internal 重启后，Pay PostgreSQL 报 `data directory ... has invalid permissions`。现场原 XFS 数据盘仍挂载，卷根目录及 `pgdata` 都是 `999:999 / 2770`；其中组写权限使 PostgreSQL 拒绝启动，进而导致 API/console CrashLoop 和公网 502。这条报错本身不表示数据库丢失或需要恢复备份。
+
+代码中存在与现场吻合的触发链：旧部署脚本每次将卷根目录重置为 `0700`，而 Pod 使用 `fsGroup: 999` / `OnRootMismatch`；重新挂载时 kubelet 发现卷根权限不匹配，会递归补组权限及 setgid，使已有 `pgdata` 变成 `2770`。参见 [Kubernetes v1.36.2 卷权限实现](https://github.com/kubernetes/kubernetes/blob/v1.36.2/pkg/volume/volume_linux.go#L135-L212)。首次 initdb 在卷挂载后创建目录，因此问题可能到后续重启才暴露。
+
+在确认原磁盘、原路径、owner 以及上述日志后，本次现场恢复只收紧 `pgdata` 一个目录，保留卷根目录 `2770`，让当前失败容器自动重试：
+
+```bash
+bash <<'SH'
+set -e
+chmod -- 00700 /data/mx-pay/mx-pay/postgres/pgdata
+stat -c '%n uid=%u gid=%g mode=%a' /data/mx-pay/mx-pay/postgres/pgdata
+kubectl --context kubernetes-admin@kubernetes -n mx-pay wait --for=condition=Ready pod/mx-pay-postgres-0 --timeout=360s
+kubectl --context kubernetes-admin@kubernetes -n mx-pay rollout status deployment/mx-pay --timeout=360s
+kubectl --context kubernetes-admin@kubernetes -n mx-pay rollout status deployment/mx-pay-console --timeout=360s
+kubectl --context kubernetes-admin@kubernetes -n mx-pay get pods,deploy,statefulset
+SH
+```
+
+预期目录权限 `999:999 / 700`、PostgreSQL `1/1`、API 和 console 各 `2/2`。`00700` 明确清除 setgid；GNU `chmod 0700` 可能保留该位，参见 [GNU 目录特殊权限说明](https://www.gnu.org/software/coreutils/manual/html_node/Directory-Setuid-and-Setgid.html)。不要递归 chmod/chown、改卷父目录、删除 PVC、执行 initdb 或恢复备份。保留当前 Pod，避免恢复过程中主动触发新的卷挂载。若等待超时，检查最新 `logs --previous` 与当前日志，不扩大重启范围。两个应用的 `/health/ready` 应返回 `200` 且 `status=ready`；公网首页恢复只证明入口可用，登录及业务需另行验证。
+
+仓库防复发修复：已保留的卷根目录不再由 deploy 重置 owner/mode；新生成的 PG 启动命令在挂载、安装标识、PG16、base 目录及 system identifier 校验全部成功后，由原非 root 用户对 `$PGDATA` 执行单目录 `chmod 00700`，失败即停止。保留 fsGroup 以维持 Secret 和卷访问。**已有 StatefulSet 不会被普通 deploy 改写，且使用 OnDelete；同步代码不会自动更新现有数据库 Pod 的命令。** 已有安装仍需单独核对并更新该 StatefulSet 的启动命令，在 Pay 维护窗口仅重建其 PG Pod 后验证；本次现场 chmod 与仓库修复不能当作该更新已上线的证据。
+
 Launcher 当前已有 local PV/磁盘身份与恢复凭据保护，mx-common 已有 PG system identifier、文件系统 UUID 与保留卷检查，Hub 遇到 mx-common 存储身份错误会停止部署。这些已有机制与 mx-pay 相互独立；本次不修改 H2I 登录、Launcher 身份或 Hub 租户数据。
 
 曾出现“重启后像切到了另一份备份”的情况，应先核对实际挂载、PV/PVC、数据库连接、PG 身份、关键记录最新时间和业务流水，保留所有候选数据，不能用部署命令自动择库。身份检查能阻止误指向与空库初始化，**不能证明同一实例的一份物理历史备份足够新**；正式恢复仍需确定恢复点、核对在途交易/总账/上游流水后才开放写入。当前仅完成代码检查和测试，未连接服务器确认上次事故原因，也未替现有数据做新旧裁决。

@@ -3,7 +3,7 @@ import test from 'node:test'
 import { lookupRequestDiagnostics } from '../../server/acquisitions/diagnostics.mjs'
 
 const id = 'a227f54a-0ac6-43f5-9d23-687fc369f2ae'
-function fixture({ status = 'released', providers, connectors = [], matches = [{ id }], fail } = {}) {
+function fixture({ status = 'released', responseStatus = 502, errorCode = 'enterprise_query_rejected', hasResponseBody = true, gateway = null, providers, connectors = [], matches = [{ id }], fail } = {}) {
   const queries = []
   let released = false
   const pool = { async connect() { return {
@@ -12,7 +12,8 @@ function fixture({ status = 'released', providers, connectors = [], matches = [{
       assert.doesNotMatch(sql, /\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/)
       if (fail && sql.includes('request-diagnostics:usage')) throw Object.assign(new Error('secret connection data'), { code: fail })
       if (sql.includes('request-diagnostics:lookup')) return { rows: matches }
-      if (sql.includes('request-diagnostics:usage')) return { rows: [{ id: params[0], platform: 'enterprise', status, error_code: 'enterprise_query_rejected', response_status: 502, has_response_body: true, units_actual: 0, delivery_source_mode: 'live', response_body: { secret: 'hidden' } }] }
+      if (sql.includes('request-diagnostics:usage')) return { rows: [{ id: params[0], platform: 'enterprise', status, error_code: errorCode, response_status: responseStatus, has_response_body: hasResponseBody, units_actual: 0, delivery_source_mode: 'live', response_body: { secret: 'hidden' } }] }
+      if (sql.includes('request-diagnostics:gateway')) return { rows: gateway ? [gateway] : [] }
       if (sql.includes('request-diagnostics:providers')) return { rows: providers || [{ id: 'call', provider_key: 'qixin', outcome: 'rejected', http_status: 200, business_code: 105, reviewed_message: '未授权调用该接口', has_restricted_archive: true, billed: null, cost_kind: 'estimated', cost_minor: '15', currency: 'CNY', raw_payload: { secret: 'hidden' } }] }
       if (sql.includes('request-diagnostics:connectors')) return { rows: connectors }
       if (sql.includes('request-diagnostics:charges')) return { rows: [{ status: 'released', enforcement_mode: 'enforced', charged_minor: '0', quoted_minor: '15', currency: 'CNY', pricing_snapshot: 'hidden' }] }
@@ -55,7 +56,9 @@ test('confirmed JustOne 301 explains collection failure without exposing upstrea
     billed: false, reviewed_message: 'private-token upstream text', has_restricted_archive: true }]
   const { runs: [run] } = await lookupRequestDiagnostics(fixture({ status: 'committed', providers }).pool, id)
   assert.match(run.guidance, /301（采集失败）/u)
-  assert.match(run.guidance, /不会重新采集/u)
+  assert.match(run.guidance, /只读历史查询/u)
+  assert.match(run.guidance, /POST.*各接口幂等规则与回放窗口限制/u)
+  assert.match(run.guidance, /同一幂等标识也可能重新采集并再次计费/u)
   assert.match(run.guidance, /客户扣费分别查看/u)
   assert.equal(run.providerCalls[0].billed, false)
   assert.equal(run.providerCalls[0].message, null)
@@ -70,6 +73,42 @@ test('confirmed JustOne 301 explains collection failure without exposing upstrea
   }
   const unknown = await lookupRequestDiagnostics(fixture({ status: 'unknown', providers }).pool, id)
   assert.match(unknown.runs[0].guidance, /未知调用结果/u)
+})
+
+test('TikHub HTTP 400 explains failed delivery without inventing a parameter or billing cause', async () => {
+  const providers = [{ id: 'call', provider_key: 'tikhub', operation: 'social.posts.search',
+    outcome: 'rejected', http_status: 400, business_code: null,
+    error_code: 'upstream_request_rejected', upstream_request_id: null,
+    billed: null, reviewed_message: 'private supplier message', has_restricted_archive: true }]
+  const run = (await lookupRequestDiagnostics(fixture({ status: 'committed', providers }).pool, id)).runs[0]
+  assert.match(run.guidance, /已保存失败响应/u)
+  assert.match(run.guidance, /不能确定是参数问题还是上游内部错误/u)
+  assert.match(run.guidance, /计费未知不等于免费/u)
+  assert.match(run.guidance, /只读历史查询/u)
+  assert.match(run.guidance, /POST.*各接口幂等规则与回放窗口限制/u)
+  assert.match(run.guidance, /同一幂等标识也可能重新采集并再次计费/u)
+  assert.equal(run.replayAvailable, true)
+  assert.equal(run.providerCalls[0].businessCode, null)
+  assert.equal(run.providerCalls[0].upstreamRequestId, null)
+  assert.equal(run.providerCalls[0].billed, null)
+  assert.doesNotMatch(JSON.stringify(run), /private supplier message/u)
+  const fallback = (await lookupRequestDiagnostics(fixture({ status: 'committed', responseStatus: 200, providers }).pool, id)).runs[0]
+  assert.doesNotMatch(fallback.guidance, /已保存失败响应/u)
+  assert.match(fallback.guidance, /存量回退/u)
+  const unknown = (await lookupRequestDiagnostics(fixture({ status: 'unknown', providers }).pool, id)).runs[0]
+  assert.match(unknown.guidance, /未知调用结果/u)
+})
+
+test('committed error responses are distinguished from successful deliveries without changing replay', async () => {
+  const failure = (await lookupRequestDiagnostics(fixture({ status: 'committed', providers: [] }).pool, id)).runs[0]
+  assert.match(failure.guidance, /已保存失败响应/u)
+  assert.match(failure.guidance, /只读历史查询/u)
+  assert.match(failure.guidance, /POST.*各接口幂等规则与回放窗口限制/u)
+  assert.match(failure.guidance, /同一幂等标识也可能重新采集并再次计费/u)
+  assert.equal(failure.replayAvailable, true)
+  const success = (await lookupRequestDiagnostics(fixture({ status: 'committed', responseStatus: 200, providers: [] }).pool, id)).runs[0]
+  assert.doesNotMatch(success.guidance, /已保存失败响应/u)
+  assert.equal(success.replayAvailable, true)
 })
 
 test('arbitrary archive messages never cross the diagnostic boundary; unknown outcomes remain unknown', async () => {
@@ -119,5 +158,35 @@ test('invalid input never accesses the database; errors roll back and release wi
     await assert.rejects(lookupRequestDiagnostics(f.pool, id), error => error.status === 503 && !error.message.includes('secret'))
     assert.equal(f.queries.at(-1).sql, 'ROLLBACK')
     assert.ok(f.released())
+  }
+})
+
+
+test('historical Hub busy rejection uses gateway HTTP evidence without inventing a response or upstream limit', async () => {
+  const gateway = { id: 'gateway', provider_key: 'qixin', source_mode: 'unavailable', succeeded: false,
+    response_status: 429, error_code: 'external_platform_busy', provider_call_id: null }
+  const options = { errorCode: 'external_platform_busy', responseStatus: null, hasResponseBody: false, providers: [], gateway }
+  const f = fixture(options)
+  const run = (await lookupRequestDiagnostics(f.pool, id)).runs[0]
+  assert.equal(run.responseStatus, 429)
+  assert.equal(run.responseStatusSource, 'gateway_request')
+  assert.equal(run.hasResponseBody, false)
+  assert.equal(run.replayAvailable, false)
+  assert.equal(run.customerCharge.chargedMinor, '0')
+  assert.match(run.guidance, /企业数据.*自身并发准入限制/u)
+  assert.match(run.guidance, /不能据此认定供应商限流/u)
+  assert.match(f.queries.find(q => q.sql.includes('request-diagnostics:gateway')).sql, /source_mode <> 'idempotent_replay'/u)
+  for (const override of [
+    { gateway: null }, { gateway: { ...gateway, provider_call_id: 'call' } },
+    { providers: [{ id: 'call', outcome: 'unknown' }] },
+    { gateway: { ...gateway, error_code: 'upstream_rate_limited' } },
+    { status: 'committed', responseStatus: 200 },
+  ]) {
+    const result = (await lookupRequestDiagnostics(fixture({ ...options, ...override }).pool, id)).runs[0]
+    assert.doesNotMatch(result.guidance, /未进入上游调用阶段/u)
+    if (override.status === 'committed') {
+      assert.equal(result.responseStatus, 200)
+      assert.equal(result.responseStatusSource, 'usage_request')
+    }
   }
 })

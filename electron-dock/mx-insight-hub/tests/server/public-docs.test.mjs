@@ -60,14 +60,14 @@ const NIGHT_ALL_COMPATIBILITY_ERROR_CODES = {
     'work_budget_exceeded', 'unsupported_fields', 'business_id_mismatch',
     'idempotency_key_required', 'invalid_idempotency_key',
     'invalid_user_profile_url', 'cursor_page_mismatch',
-    'platform_operation_unsupported', 'night_all_rejected',
+    'platform_operation_unsupported', 'night_all_rejected', 'content_search_option_unsupported', 'content_search_pagination_unsupported',
   ],
   401: ['api_key_required', 'invalid_api_key'],
   403: ['platform_not_granted', 'capability_not_granted', 'test_key_not_supported'],
   404: ['not_found', 'user_not_found', 'night_all_rejected'],
   409: [
     'request_in_progress', 'idempotency_conflict', 'request_outcome_unknown',
-    'external_platform_response_unusable', 'search_page_unavailable', 'night_all_rejected',
+    'external_platform_response_unusable', 'search_page_unavailable', 'night_all_rejected', 'search_restart_required',
   ],
   422: ['night_all_rejected'],
   429: [
@@ -93,6 +93,7 @@ const NIGHT_ALL_COMPATIBILITY_ERROR_CODES = {
     'external_platform_cost_control_unavailable',
     'external_platform_cost_evidence_incomplete',
     ...EXTERNAL_OPERATION_CONTROL_ERROR_CODES,
+    'content_search_unavailable', 'content_search_deadline', 'request_outcome_unknown',
   ],
 }
 
@@ -198,6 +199,10 @@ function assertExternalCommerceContract(document) {
   assert.equal(operation.operationId, 'searchExternalCommerceProducts')
   assert.equal(operation['x-mx-required-platform'], 'ecommerce')
   assert.deepEqual(operation['x-mx-required-capabilities'], ['ecommerce.products.search'])
+  for (const field of ['ecommerce_service_credit_exhausted', 'ecommerce_service_quota_exhausted',
+    'ecommerce_service_daily_quota_exhausted', 'circuitOpenUntil', 'retryable=false']) {
+    assert.ok(operation.description.includes(field), `Missing ecommerce availability guidance: ${field}`)
+  }
   assert.doesNotMatch(JSON.stringify(operation), /tikhub|rapidapi|justone/i)
   assert.deepEqual(operation['x-mx-error-codes'], {
     400: [
@@ -654,7 +659,10 @@ function assertXiaohongshuSearchContract(document) {
   assert.ok(operation)
   assert.deepEqual(operation['x-mx-error-codes'], {
     ...XIAOHONGSHU_SEARCH_ERROR_CODES,
-    409: [...XIAOHONGSHU_SEARCH_ERROR_CODES[409], 'search_page_unavailable'],
+    400: [...XIAOHONGSHU_SEARCH_ERROR_CODES[400], 'content_search_option_unsupported', 'content_search_pagination_unsupported', 'work_budget_exceeded'],
+    409: [...XIAOHONGSHU_SEARCH_ERROR_CODES[409], 'search_page_unavailable', 'search_restart_required'],
+    502: [...XIAOHONGSHU_SEARCH_ERROR_CODES[502], 'social_upstream_response_unusable', 'social_upstream_outcome_unknown', 'social_upstream_rejected'],
+    503: [...XIAOHONGSHU_SEARCH_ERROR_CODES[503], 'request_outcome_unknown', 'facebook_search_paused', 'twitter_fill_deadline', 'content_search_unavailable', 'content_search_deadline'],
   })
   assert.deepEqual(operation['x-mx-required-capabilities-by-platform'], {
     xiaohongshu: 'social.posts.search',
@@ -665,6 +673,12 @@ function assertXiaohongshuSearchContract(document) {
   assert.match(operation.description, /bounded detail/i)
   assert.match(operation.description, /independent rollout gate/i)
   assert.match(operation.description, /never selects|never.*provider/i)
+  assert.match(operation.description, /Twitter standard search[\s\S]*without a separate default per-request call-count cap/)
+  assert.match(operation.description, /Facebook standard search[\s\S]*without a separate default per-request call-count cap/)
+  assert.doesNotMatch(operation.description, /at most 3 actual upstream|within 3 actual dispatches/)
+  assert.match(operation.description, /preserve available zero values and display null as unavailable/)
+  assert.match(operation.description, /default zeros alone do not prove an observed measurement/)
+  assert.match(operation.description, /Retired Twitter mxnc1 and Instagram historical\/untagged/)
 
   const request = resolveSchema(
     document,
@@ -677,6 +691,11 @@ function assertXiaohongshuSearchContract(document) {
   assert.deepEqual(request.properties.type.enum, ['fresh', 'stable'])
   assert.equal(request.properties.type.default, 'fresh')
   assert.match(request.properties.cursor.description, /same path, platform, query and pageSize/i)
+  assert.equal(request.properties.params.additionalProperties, false)
+  assert.deepEqual(Object.keys(request.properties.params.properties), ['startTime', 'endTime', 'startDate', 'endDate', 'order', 'duration', 'pubtime_begin_s', 'pubtime_end_s', 'sort_type', 'publish_time', 'filter_duration', 'content_type', 'show_all_topics', 'search_source', 'sort'])
+  assert.match(request.properties.params.description, /native offsets, sessions[\s\S]*not public pagination controls/)
+  assert.match(operation.description, /Bilibili, Douyin, Kuaishou and Zhihu keyword searches[\s\S]*without historical-service dispatch or fallback/)
+  assert.ok(operation['x-mx-error-codes'][400].includes('content_search_option_unsupported'))
 
   const headers = operation.responses[200].headers
   for (const header of [
@@ -983,6 +1002,8 @@ function assertNightAllPublicContract(document) {
   assert.equal(compatibilityContent.schema.$ref, '#/components/schemas/NightAllLegacyRequest')
   assert.deepEqual(compatibilityContent.examples, NIGHT_ALL_COMPATIBILITY_EXAMPLES)
   assert.deepEqual(compatibility['x-mx-error-codes'], NIGHT_ALL_COMPATIBILITY_ERROR_CODES)
+  assert.match(compatibility.description, /Bilibili, Douyin, Kuaishou and Zhihu raw keyword searches[\s\S]*original raw meter/)
+  assert.match(compatibility.description, /content_search_option_unsupported before procurement/)
   assert.deepEqual(compatibility['x-mx-required-capabilities-by-platform-operation'], {
     xiaohongshu: {
       raw: 'social.posts.search',

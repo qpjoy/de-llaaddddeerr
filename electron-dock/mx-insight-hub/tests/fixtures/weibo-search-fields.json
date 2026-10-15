@@ -1,0 +1,30 @@
+{
+  "provenance": "Synthetic fixture adapted from local Night-All tests/tikhub-normalizer.test.js realtime Weibo case and lib/integrations/tikhub/normalizer.js declared aliases; not a production receipt.",
+  "capturedAt": "2026-10-15T07:00:00.000Z",
+  "native": {
+    "weibo_id": "5313432754327440",
+    "user_name": "fixture author",
+    "user_url": "//weibo.com/7069883894?refer_flag=1001030103_",
+    "user_avatar": "https://example.test/avatar.jpg",
+    "post_url": "//weibo.com/7069883894/R5DrJi9Lq?refer_flag=1001030103_",
+    "content": "完整微博正文第一段。<br>第二段 &amp; #话题#",
+    "longText": { "content": "完整微博正文第一段。<br>第二段 &amp; #话题#" },
+    "interaction": { "like_count": "12", "comment_count": "3", "repost_count": "2" },
+    "publish_time": "06月24日 16:29",
+    "media": {
+      "images": ["https://example.test/image.jpg?signature=a%2Fb&expires=1"],
+      "videos": ["https://example.test/video.mp4?signature=c%2Fd&expires=1"]
+    }
+  },
+  "flat": {
+    "weibo_id": "5313432754327441",
+    "user": { "idstr": "7069883894", "screen_name": "fixture author" },
+    "bid": "R5DrJi9Lr",
+    "text_raw": "来自已有标准化字段的正文。",
+    "like_count": "21",
+    "comment_count": "4",
+    "share_count": "5",
+    "view_count": "31",
+    "collect_count": "6"
+  }
+}

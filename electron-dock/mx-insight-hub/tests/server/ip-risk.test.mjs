@@ -387,10 +387,16 @@ test('IP failure releases customer hold; uncertain transport retains it for reco
 })
 
 
-test('old Xiaohongshu-only pricing leaves IP free, while insufficient IP credit blocks before dispatch', async () => {
+test('explicit zero fallback pricing leaves unlisted IP free, while insufficient IP credit blocks before dispatch', async () => {
   let calls = 0
   const f = await fixture(async () => { calls++; return new Response(JSON.stringify(payload)) })
   await enableIpBilling(f, false)
+  // New tenant profiles default to one cent. Exercise the existing explicit
+  // free fallback here instead of assuming a missing plan entry means free.
+  const profile = (await f.hub.getTenantBilling(f.tenant.id)).profile
+  await f.hub.setTenantBillingProfile(f.tenant.id, {
+    mode: 'enforced', defaultUnitPriceMinor: 0, expectedRevision: profile.revision,
+  }, 'admin')
   assert.equal((await f.gateway.query(f.context, request)).status, 200)
   assert.equal((await f.hub.getTenantBilling(f.tenant.id)).account.availableMinor, 100)
   assert.equal(f.store.customerCharges.size, 0)

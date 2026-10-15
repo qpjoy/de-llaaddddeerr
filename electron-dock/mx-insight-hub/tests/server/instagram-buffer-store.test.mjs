@@ -5,7 +5,8 @@ import { pathToFileURL } from 'node:url'
 import { PostgresExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 
 const modulePath = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
-test('PostgreSQL buffer reads enforce ownership, success, route, age and receipt integrity; delivery is atomic', {
+for (const [provider, operation, businessCode] of [['tikhub', 'native.t.instagram_v3_general_search', 200],
+  ['justone', 'native.j.api_7968b9ed3e986618', 0]]) test(`PostgreSQL ${provider} buffer reads enforce provider/contract, ownership, age and receipt integrity; delivery is atomic`, {
   skip: modulePath ? false : 'Set MX_INSIGHT_TEST_PGLITE_MODULE to a local @electric-sql/pglite module',
 }, async t => {
   const { PGlite } = await import(pathToFileURL(modulePath).href)
@@ -16,7 +17,7 @@ test('PostgreSQL buffer reads enforce ownership, success, route, age and receipt
       platform text, status text, response_status int, acquisition_request jsonb, response_body jsonb,
       units_actual int, upstream_latency_ms int, delivery_source_mode text, response_captured_at timestamptz, completed_at timestamptz);
     CREATE TABLE external_platform.provider_calls (id uuid PRIMARY KEY, usage_request_id uuid REFERENCES usage_requests,
-      provider_key text, operation text, outcome text, completed_at timestamptz);
+      provider_key text, operation text, outcome text, completed_at timestamptz, endpoint_key text, contract_version text);
     CREATE TABLE control.external_platform_restricted_raw_responses (provider_call_id uuid REFERENCES external_platform.provider_calls,
       body_bytes bytea, body_sha256 text, captured_at timestamptz, body_size int);
     CREATE TABLE external_platform.gateway_requests (id uuid, provider_key text, tenant_id uuid, consumer_id uuid,
@@ -25,25 +26,27 @@ test('PostgreSQL buffer reads enforce ownership, success, route, age and receipt
   const pool = { query: (sql, args) => db.query(sql, args), connect: async () => ({
     query: (sql, args) => db.query(sql, args), release() {},
   }) }
-  const store = new PostgresExternalPlatformStore({ pool, providerKey: 'tikhub' })
+  const store = new PostgresExternalPlatformStore({ pool, providerKey: provider })
   const input = { callId: randomUUID(), tenantId: randomUUID(), consumerId: randomUUID(), apiKeyId: randomUUID(), path: '/api/v1/data/search' }
   const source = randomUUID(), request = randomUUID(), capturedAt = new Date().toISOString()
   const data = { items: [{ pk: '9007199254740993', code: 'fixture' }] }
-  const bytes = Buffer.from('\uFEFF' + JSON.stringify({ code: 200, data }))
+  const bytes = Buffer.from('\uFEFF' + JSON.stringify({ code: businessCode, data }))
   const hash = createHash('sha256').update(bytes).digest('hex')
   await db.query(`INSERT INTO usage_requests(id,tenant_id,consumer_id,api_key_id,platform,status,response_status,acquisition_request)
     VALUES ($1,$2,$3,$4,'instagram','committed',200,$5),($6,$2,$3,$4,'instagram','reserved',NULL,$5)`,
   [source, input.tenantId, input.consumerId, input.apiKeyId, JSON.stringify({ path: input.path }), request])
-  await db.query(`INSERT INTO external_platform.provider_calls VALUES ($1,$2,'tikhub','native.t.instagram_v3_general_search','succeeded',now())`, [input.callId, source])
+  await db.query(`INSERT INTO external_platform.provider_calls VALUES ($1,$2,$3,$4,'succeeded',now(),$4,'mx-insight-hub.native-forwarding.v1')`, [input.callId, source, provider, operation])
   await db.query(`INSERT INTO control.external_platform_restricted_raw_responses VALUES ($1,$2,$3,$4,$5)`, [input.callId, bytes, hash, capturedAt, bytes.length])
   assert.deepEqual((await store.instagramPageFor(input)).publicBody.data, data)
   for (const field of ['callId', 'tenantId', 'consumerId', 'apiKeyId', 'path']) {
     assert.equal(await store.instagramPageFor({ ...input, [field]: field === 'path' ? '/api/v1/night-all/search/raw' : randomUUID() }), null)
   }
-  for (const condition of ["outcome = 'succeeded_unusable'", "completed_at = now() - interval '25 hours'", "operation = 'native.other'"]) {
+  for (const condition of ["outcome = 'succeeded_unusable'", "completed_at = now() - interval '25 hours'", "operation = 'native.other'",
+    "provider_key = 'other'", "endpoint_key = 'native.other'", "contract_version = 'unreviewed'"]) {
     await db.exec(`UPDATE external_platform.provider_calls SET ${condition}`)
     assert.equal(await store.instagramPageFor(input), null)
-    await db.exec(`UPDATE external_platform.provider_calls SET outcome='succeeded', completed_at=now(), operation='native.t.instagram_v3_general_search'`)
+    await db.query(`UPDATE external_platform.provider_calls SET outcome='succeeded', completed_at=now(), operation=$1,
+      provider_key=$2, endpoint_key=$1, contract_version='mx-insight-hub.native-forwarding.v1'`, [operation, provider])
   }
   await db.query(`UPDATE control.external_platform_restricted_raw_responses SET body_sha256=$1`, ['0'.repeat(64)])
   assert.equal(await store.instagramPageFor(input), null)

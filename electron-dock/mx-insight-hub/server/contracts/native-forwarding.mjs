@@ -14,12 +14,16 @@ const legacyEndpoints = snapshot.endpoints
   .map(row => {
     const key = `${FAMILY[row.provider]}.${row.id.replace(/^(tikhub|justone)_/, '')}`
     const documented = official.endpoints.find(item => item.provider === row.provider && item.method === row.method && item.path === row.path)
+    // This released key shadows the newer official entry for the same route.
+    // Restore its documented types/defaults without changing its legacy version,
+    // scalar coercion or omitted-default fingerprint (including historical replay).
+    const parameters = key === 't.instagram_v3_general_search' ? documented.parameters : row.parameters
     return Object.freeze({ ...row, key,
       platformLabel: documented?.platformLabel || row.platform, summary: documented?.summary || row.id,
       operation: `native.${key}`, endpointKey: `native.${key}`,
       hubPath: `/api/v1/data/native/${key}`,
       authorizationPlatform: row.platform === 'xianyu' ? 'ecommerce' : 'social',
-      parameters: Object.freeze(row.parameters.filter(p => !PRIVATE_PARAMS.has(p.name)).map(p => Object.freeze({ ...p }))),
+      parameters: Object.freeze(parameters.filter(p => !PRIVATE_PARAMS.has(p.name)).map(p => Object.freeze({ ...p }))),
       fixedQuery: Object.freeze({ ...row.fixedQuery }),
     })
   })

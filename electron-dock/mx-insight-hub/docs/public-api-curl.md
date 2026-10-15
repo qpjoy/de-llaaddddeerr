@@ -959,6 +959,21 @@ curl -sS \
 
 ### `POST /api/v1/data/search`
 
+Twitter 标准搜索先消费已取得的余量，再有界补齐当前逻辑页并跨页去重，一次 Hub
+请求最多 3 次上游调用；整次查询最多 15 个上游页和 15 个公开页，游标有效期 24 小时。
+例如前一页取得 24 条、交付 20 条，下一次由 Hub 将余下 4 条与后续结果合并。
+Facebook 标准搜索同样自动补页，最多 3 次实际派发，首次 429 后保底也计入上限；
+已取得第一页或持有游标后固定原供应商，raw 仍保留单页边界。每个新页面
+保持原查询、页大小、type 和 Key，原样传回 `data.pageInfo.nextCursor`，使用新的
+`Idempotency-Key`；不要根据短页自行停止或补采。补齐受预算、期限和准入限制，不能
+保证任何情况下都恰好返回 pageSize。Twitter raw/social/crawl 未新增这一补页行为。
+
+标准指标按合同区分已取得的零值 `0` 与未提供的 `null`；历史或上游默认 0 不能单独证明实测零值。普通 Twitter/Facebook/微博/Instagram
+帖子使用 `title=null` 并保留全文，具有原生标题的视频或文章按对应平台合同保留。
+`media.coverUrl/images/videos` 分别表示封面、图片和视频引用；不同签名 URL 不因路径
+相似而合并。原 raw 字符串格式和历史幂等交付保留，旧的已退役／未验证游标需明确重启，
+不能跨路径或切换供应链转换 token。详见 [统一搜索兼容说明](integrations/unified-strategy-search.md)。
+
 必填 body 字段为 `platform` 和 `query`。可选字段包括 `pageSize`（`1..100`，policy
 可能进一步降低）、opaque `cursor`（最多 8192 字符）和 `type`。一次请求只能指定
 一个已授权平台，`all` 和 `*` 无效。`platform=telegram` 时搜索 Hub 已存 canonical

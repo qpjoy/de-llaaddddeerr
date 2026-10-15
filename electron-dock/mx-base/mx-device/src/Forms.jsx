@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useId } from "react";
 import { X } from "@phosphor-icons/react";
-import { defaultDurationMs } from "./data.js";
+import { appName, defaultDurationMs } from "./data.js";
 import { requestId } from "./request-id.mjs";
 export function Modal({ title, children, onClose, className }) {
   const titleId = useId();
@@ -34,15 +34,32 @@ export function Modal({ title, children, onClose, className }) {
     </dialog>
   );
 }
-export function DeviceForm({ mode, workers, onSubmit, busy }) {
+export function DeviceForm({
+  mode,
+  workers,
+  onSubmit,
+  busy,
+  strategyDefinitions = [],
+}) {
   const [adapter, setAdapter] = useState("mobile-agent");
+  const [simApps, setSimApps] = useState(["xhs", "weibo"]);
+  const latest = new Map();
+  for (const row of strategyDefinitions)
+    if (!latest.has(row.code) || latest.get(row.code).version < row.version)
+      latest.set(row.code, row);
+  const strategies = [...latest.values()].filter((row) => !row.archived);
   return (
     <form
       className="form"
       onSubmit={(e) => {
         e.preventDefault();
         const b = Object.fromEntries(new FormData(e.currentTarget));
-        onSubmit({ ...b, approved: b.approved === "on" });
+        if (!b.defaultStrategyId) delete b.defaultStrategyId;
+        onSubmit({
+          ...b,
+          approved: b.approved === "on",
+          ...(mode === "sim" ? { simApps } : {}),
+        });
       }}
     >
       <p className="muted">
@@ -145,6 +162,52 @@ export function DeviceForm({ mode, workers, onSubmit, busy }) {
           </>
         )}
       </div>
+      {mode === "sim" && (
+        <label>
+          新机架默认策略
+          <select
+            name="defaultStrategyId"
+            defaultValue={strategies.find((s) => s.recommended)?.id || ""}
+          >
+            {strategies.map((row) => (
+              <option key={row.id} value={row.id}>
+                {row.name} · v{row.version}
+                {row.recommended ? "（推荐）" : ""}
+              </option>
+            ))}
+            <option value="">暂不应用策略</option>
+          </select>
+          <span className="small muted">
+            仅在新机架首次登记时应用；添加到已有机架不会覆盖当前策略。
+          </span>
+        </label>
+      )}
+      {mode === "sim" && (
+        <fieldset className="catalog-bindings">
+          <legend>模拟设备的平台能力</legend>
+          <p className="small muted">
+            明确选择这台模拟设备支持的平台；拼多多任务需要勾选拼多多能力。
+          </p>
+          <div className="form-grid">
+            {["xhs", "weibo", "xianyu", "pdd"].map((id) => (
+              <label className="check" key={id}>
+                <input
+                  type="checkbox"
+                  checked={simApps.includes(id)}
+                  onChange={(e) =>
+                    setSimApps((apps) =>
+                      e.target.checked
+                        ? [...apps, id]
+                        : apps.filter((x) => x !== id),
+                    )
+                  }
+                />
+                {appName(id)}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      )}
       {mode === "real" && (
         <>
           <p className="notice">
@@ -160,7 +223,10 @@ export function DeviceForm({ mode, workers, onSubmit, busy }) {
         </>
       )}
       <div className="form-actions">
-        <button className="primary" disabled={busy}>
+        <button
+          className="primary"
+          disabled={busy || (mode === "sim" && !simApps.length)}
+        >
           {mode === "real" ? "保存为暂停状态" : "添加模拟设备"}
         </button>
       </div>

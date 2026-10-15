@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { JustOneRejectedError } from '../../server/adapters/justone.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { HubService } from '../../server/hub-service.mjs'
@@ -38,6 +39,20 @@ test('internal tenant traffic gets the shorter TikHub protection without bypassi
     else await assert.rejects(dispatch, error => error.code === 'external_platform_circuit_open')
   }
   assert.equal(dispatches, 1)
+})
+
+test('a social account capacity failure is not labelled as Hub ecommerce quota', async () => {
+  const state = await fixture({ adapter: { async searchAccounts() {
+    throw new JustOneRejectedError({ outcome: 'rejected', httpStatus: 200, businessCode: 601,
+      billed: false, errorCode: 'upstream_balance_exhausted', affectsCircuit: true })
+  } } })
+  await assert.rejects(state.gateway.searchAccounts(state.context, { body: { platform: 'douyin', keyword: '示例' },
+    path: PATH, idempotencyKey: 'social-balance-guard' }), error => {
+    assert.equal(error.code, 'external_platform_capacity_unavailable')
+    assert.equal(error.details.reasonCode, undefined)
+    assert.doesNotMatch(error.message, /电商/u)
+    return true
+  })
 })
 
 function config() {

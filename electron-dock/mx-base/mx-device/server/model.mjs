@@ -1,4 +1,6 @@
 import { randomUUID, createHash } from "node:crypto";
+import { planPool } from "./pool-planner.mjs";
+import { commandDefinitions } from "./command-registry.mjs";
 import {
   deviceBlockers,
   effectivePriority,
@@ -6,6 +8,7 @@ import {
   policiesFor,
   matchesJob,
 } from "./scheduling.mjs";
+import { starved } from "./queue-order.mjs";
 
 import {
   APP_NAMES,
@@ -151,8 +154,9 @@ const findDevice = (s, mode, id) => {
 };
 export function register(s, now, mode, body) {
   requireThat(
-    s.devices.filter((d) => d.mode === mode).length < 64,
-    "首版每个模式最多 64 台设备",
+    s.devices.filter((d) => d.mode === mode).length <
+      (mode === "sim" ? 100 : 64),
+    mode === "sim" ? "模拟池最多 100 台设备" : "真实模式最多 64 台设备",
   );
   const adapter = mode === "sim" ? "simulator" : body.adapter || "legacy-poc";
   requireThat(
@@ -222,6 +226,30 @@ export function register(s, now, mode, body) {
     createdAt: now,
   };
   if (policiesFor(s, d).some((p) => p.draining)) d.enabled = false;
+  if (mode === "sim" && body.simApps !== undefined) {
+    requireThat(
+      Array.isArray(body.simApps) &&
+        body.simApps.length > 0 &&
+        body.simApps.length <= Object.keys(APP_NAMES).length &&
+        body.simApps.every((id) => Object.hasOwn(APP_NAMES, id)),
+      "模拟 App 清单无效",
+      400,
+    );
+    d.simApps = [...new Set(body.simApps)];
+  }
+  if (mode === "sim" && body.simCommandCodes !== undefined) {
+    requireThat(
+      Array.isArray(body.simCommandCodes) &&
+        body.simCommandCodes.length > 0 &&
+        body.simCommandCodes.length <= commandDefinitions(s).length &&
+        body.simCommandCodes.every((code) =>
+          commandDefinitions(s).some((c) => c.code === code),
+        ),
+      "模拟指令清单无效",
+      400,
+    );
+    d.simCommandCodes = [...new Set(body.simCommandCodes)];
+  }
   s.devices.push(d);
   ensureApps(s, d);
   event(
@@ -241,8 +269,8 @@ export function addJob(s, now, mode, body) {
     operation = body.operation;
   const appId = body.appId ?? "xhs";
   requireThat(
-    typeof appId === "string" && Object.hasOwn(APP_NAMES, appId),
-    "不支持的 App",
+    ["xhs", "weibo"].includes(appId),
+    "此搜索/详情接口不支持该 App；小红书、微博之外请使用已登记的组合任务",
     400,
   );
   requireThat(
@@ -573,6 +601,13 @@ export function claim(s, now, mode, workerId) {
     (j) => j.mode === mode && j.status === "queued" && j.notBefore <= now,
   );
   pending.sort(compareJobs(now));
+  const poolPlans = new Map(
+    mode === "sim" && devices.length
+      ? (s.loopPolicies || [])
+          .filter((p) => p.mode === "sim" && p.scheduler?.enabled)
+          .map((p) => [p.rack, planPool(s, now, { rack: p.rack })])
+      : [],
+  );
   for (const j of pending) {
     if (j.sourceJobId) {
       const src = s.jobs.find((x) => x.id === j.sourceJobId);
@@ -600,16 +635,31 @@ export function claim(s, now, mode, workerId) {
       }
     }
     const d = devices.find(
-      (d) => matchesJob(d, j) && !appBlockers(s, now, d, j).length,
+      (d) =>
+        matchesJob(d, j) &&
+        !appBlockers(s, now, d, j).length &&
+        (!poolPlans.has(d.rack) ||
+          poolPlans
+            .get(d.rack)
+            .assignments.some(
+              (a) =>
+                a.jobId === j.id &&
+                a.deviceId === d.id &&
+                a.startAt <= now &&
+                a.queuePosition === 1,
+            )),
     );
     if (!d) continue;
+    const poolAssignment = poolPlans
+      .get(d.rack)
+      ?.assignments.find((a) => a.jobId === j.id && a.deviceId === d.id);
     const app = ensureApps(s, d).find((a) => a.appId === jobApp(j));
     const a = {
       id: randomUUID(),
       jobId: j.id,
       appId: app.appId,
       accountKey: app.accountKey,
-      estimatedDurationMs: estimatedDuration(j),
+      estimatedDurationMs: poolAssignment?.durationMs ?? estimatedDuration(j),
       executionModel: j.executionModel || EXECUTION_MODEL,
       loop:
         j.workflow?.loop ||
@@ -628,7 +678,8 @@ export function claim(s, now, mode, workerId) {
     j.status = "running";
     j.attemptCount++;
     j.lastDeviceId = d.id;
-    j.reason = `优先级 ${j.priority}，等待提升后 ${effectivePriority(j, now)}；预计 ${estimatedDuration(j) / 1000} 秒；整段会话独占执行`;
+    j.reason = `优先级 ${j.priority}，等待提升后 ${effectivePriority(j, now)}${starved(j, now) ? "（等待超过 5 分钟，按防饿死规则提前）" : ""}；预计 ${estimatedDuration(j) / 1000} 秒；整段会话独占执行`;
+    if (poolAssignment) j.reason += `；${poolAssignment.reason}`;
     j.startedAt = now;
     d.state = "running";
     d.lastClaimedAt = now;
@@ -680,6 +731,7 @@ export function checkpoint(s, now, a, result) {
     jobId: a.jobId,
     commandId: result.commandId || null,
     commandCode: result.commandCode || null,
+    commandAction: result.commandAction || null,
     page: result.page || null,
     count: result.count ?? null,
     keyword: result.keyword || null,
@@ -733,6 +785,21 @@ export function finish(s, now, a, outcome) {
     j.reason = "手机未报告空闲，已暂停设备；任务保留";
     d.enabled = false;
     d.state = "idle";
+  } else if (
+    outcome.rejectedBeforeCommand &&
+    j.mode === "sim" &&
+    j.workflow &&
+    (s.commands || [])
+      .filter((c) => c.attemptId === a.id)
+      .every((c) => c.status === "succeeded" && c.receipt?.stopped === true)
+  ) {
+    // No in-flight operation: an empty/missing result is a known business failure.
+    row.status = "failed";
+    j.status = "failed";
+    j.completedAt = now;
+    j.reason = outcome.error;
+    d.state = "idle";
+    recordAppFinish(s, now, d, row);
   } else if (outcome.error) {
     row.status = "unknown";
     j.status = "unknown";

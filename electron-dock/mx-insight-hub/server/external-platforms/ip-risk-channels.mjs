@@ -5,7 +5,7 @@ import { normalizeIpRiskRequest } from '../contracts/ip-risk.mjs'
 // Explicit fan-out only. A durable batch fixes every selected channel before dispatch.
 export class IpRiskChannels {
   constructor(v1,v2) { this.v1=v1; this.v2=v2; this.channels={'legacy-v1':v1,'baidu-v2':v2} }
-  async query(context,{body,idempotencyKey,path}) {
+  async query(context,{body,idempotencyKey,path,signal}) {
     if(!body || Array.isArray(body) || Object.keys(body).some(k=>!['ip','ips','channels'].includes(k)) || (!!body.ip === !!body.ips)) throw new AppError(400,'invalid_ip_request','Provide ip or ips and optional channels')
     const channels=body.channels ?? ['baidu-v2']
     const ips=body.ips ?? [body.ip]
@@ -27,9 +27,11 @@ export class IpRiskChannels {
     const deadline=Date.now()+60000,data=[]
     for(const ip of values)for(const channel of channels){
       const index=data.length,gateway=this.channels[channel]
-      if(Date.now()+22000>deadline){data.push({index,ip,channel,status:504,error:{code:'batch_deadline_not_dispatched',message:'Item was not dispatched'}});continue}
+      if(signal?.aborted){data.push({index,ip,channel,status:499,error:{code:'request_cancelled',message:'Item was cancelled before dispatch'}});continue}
+      const dispatchBudget=gateway.dispatchBudgetMs
+      if(Date.now()+(Number.isFinite(dispatchBudget)&&dispatchBudget>0?dispatchBudget+5000:22000)>deadline){data.push({index,ip,channel,status:504,error:{code:'batch_deadline_not_dispatched',message:'Item was not dispatched'}});continue}
       try{
-        const result=await gateway.execute(context,{body:{ip},path:channel==='legacy-v1'?'/api/v1/data/ip/risk':'/api/v1/data/ip/risk/v2',idempotencyKey:`ip-batch-${row.id}-${index}`})
+        const result=await gateway.execute(context,{body:{ip},path:channel==='legacy-v1'?'/api/v1/data/ip/risk':'/api/v1/data/ip/risk/v2',idempotencyKey:`ip-batch-${row.id}-${index}`,signal,dispatchDeadline:deadline})
         data.push({index,ip,channel,status:result.status,response:result.body})
       }catch(error){data.push({index,ip,channel,status:error.status||503,error:{code:error instanceof AppError ? error.code : 'ip_risk_unavailable',message:error instanceof AppError ? error.message : 'IP query could not be completed'},requestId:error.details?.requestId})}
     }

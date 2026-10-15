@@ -1,3 +1,4 @@
+import { ProductViewTabs, ProductIntegrationGuide, ProductManagement } from './product-management.jsx'
 import { XiaohongshuConsole } from './xiaohongshu-console.jsx'
 import { FeedRuler } from './feed-ruler.jsx'
 import { useDemoAccess, useDemoIdentity, DemoAccessNotice } from './demo-credentials.jsx'
@@ -273,9 +274,12 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
   }
 
   return <section className={`mih-commerce-manager mih-xhs-browser ${view === 'list' ? 'mih-xhs-list-view' : ''}`}>
-    <nav className="mih-source-section-tabs mih-xhs-view-tabs" aria-label="笔记展示方式"><button aria-pressed={view === 'api'} onClick={() => changeView('api')}>接口调试</button><button aria-pressed={view === 'list'} onClick={() => changeView('list')}>列表视图</button><button aria-pressed={view === 'mobile'} onClick={() => changeView('mobile')}>Mobile 视图</button></nav>
+    <div className="mih-xhs-view-tabs"><ProductViewTabs label="小红书笔记画卷" value={['list', 'mobile'].includes(view) ? 'list' : view} onChange={changeView} session={session} debug="api" product="list" /></div>
+    {view === 'guide' ? <div style={{ gridColumn: '1 / -1' }}><ProductIntegrationGuide label="小红书笔记画卷" docs="xiaohongshu-note" /></div> : null}
+    {view === 'management' ? <div style={{ gridColumn: '1 / -1' }}><ProductManagement session={session} path="/data-products/xiaohongshu-note" label="小红书笔记画卷" /></div> : null}
+    {['list', 'mobile'].includes(view) ? <nav className="mih-source-section-tabs mih-xhs-view-tabs" aria-label="笔记展示方式"><button type="button" aria-pressed={view === 'list'} onClick={() => changeView('list')}>列表视图</button><button type="button" aria-pressed={view === 'mobile'} onClick={() => changeView('mobile')}>Mobile 视图</button></nav> : null}
     <div className="mih-api-console-tab" hidden={view !== 'api'}><XiaohongshuConsole apiKey={apiKey} admin={session?.platformAdmin === true} /></div>
-    <aside className="qp-panel mih-commerce-filters" style={view === 'api' ? { display: 'none' } : undefined}>
+    <aside className="qp-panel mih-commerce-filters" style={!['list', 'mobile'].includes(view) ? { display: 'none' } : undefined}>
       <h2>笔记列表</h2>
       <p>{isAdmin ? '读取 Hub 已存笔记；列表按页浏览，Mobile 上划加载历史。点击笔记直接加载详情。' : '使用当前账户查询笔记，点击卡片查看正文、图片和标签。'}</p>
       {isAdmin ? <><Field label="查找 Hub 已存笔记"><input className="qp-input" value={query} onChange={event => setQuery(event.target.value)} maxLength={500} /></Field>
@@ -294,7 +298,7 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
       {acquireError ? <ErrorState error={acquireError} /> : null}
       {evidence ? <p>交付：{evidence.sourceMode || '未知'}<br />请求：{evidence.requestId}<br />查询结果已返回，历史记录稍后更新。</p> : null}
     </aside>
-    <div className="mih-commerce-phone-wrap mih-xhs-phone-navigation" style={view === 'api' ? { display: 'none' } : undefined}><div className="mih-commerce-phone">
+    <div className="mih-commerce-phone-wrap mih-xhs-phone-navigation" style={!['list', 'mobile'].includes(view) ? { display: 'none' } : undefined}><div className="mih-commerce-phone">
       <header><span>MX · 小红书笔记</span><strong>笔记画卷</strong><small>{rows.length} 篇已加载</small></header>
       <div className="mih-commerce-phone-actions"><span>{armed ? '下拉采集下一页' : '下拉采集未开启'}</span><span>{isAdmin ? '上划读取 Hub 历史' : '本次查询结果'}</span></div>
       <div className="mih-commerce-phone-feed" ref={viewport} tabIndex={0} aria-label="小红书笔记列表" aria-busy={loading} onKeyDown={event => { if (['ArrowDown', 'PageDown', 'End', ' '].includes(event.key)) historyScrollIntent.current = true }}

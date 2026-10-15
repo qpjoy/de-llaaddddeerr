@@ -2,6 +2,29 @@
 
 日期：2026-09-28。阶段：独立接口第一批实现，默认禁用；尚未部署、未做付费上游验收。后续覆盖完成才由下游切换。
 
+## 2026-10-14：Twitter 标准搜索迁入 Hub
+
+下文保留 9 月首批独立接口记录。当前工作区新增 Twitter 标准搜索迁移，尚未部署或执行真实付费验收：
+
+| Twitter 入口 | 当前实现 |
+| --- | --- |
+| `/api/v1/data/social/search` | Hub 直连 RapidAPI，独立社媒响应、操作权限和计量；不回退 Night-All |
+| `/api/v1/search/raw`，以及 `/api/v1/night-all/search/raw` 别名 | 满足单关键词、页大小不超过 50 等已迁移形状时，复用 Hub RapidAPI 执行器；复杂参数、批量和旧续页仍保留历史链路，详见 [raw 路由边界](../operations/hub-raw-search-routing.md) |
+| `/api/v1/data/search` | Twitter 标准搜索复用 Hub RapidAPI 执行器，保留严格 `night-all.data-search.v1` 响应；首次和 Hub 续页均不再请求 Night-All |
+
+这三者不能只换 URL：raw 使用 raw meter，独立社媒使用 `social.content.search`，标准入口使用 twitter meter；响应投影、游标及默认排序也有差异。
+本次生产请求已证实走标准入口并受 Night-All `endpoint_degraded` 阻断，见 [诊断记录](../operations/night-all-502-diagnosis.md)。
+此次无需调用方换 URL 或增加独立社媒操作授权。标准入口仍要求 `twitter` 平台授权，使用原 `twitter` meter 与 `max(1, 实际返回条数)` 用量；执行受 Hub 已有凭据、`social.content.search` 操作状态、采购价格/预算、限流、并发和熔断控制。缺失或停用时明确失败，不自动开通或回退 Night-All。
+
+- 标准请求继续使用 `platform/query/pageSize/cursor/type`，默认 Top 排序；`type=fresh|stable` 是幂等回放策略，不是排序。独立 social/raw 的默认 Latest 不变。
+- `pageSize` 支持 1–100，仍受 Key 更低上限约束。每次交付只请求一个供应商页，count 最多 50；大于 50 时返回 `provider_page_size_limit` 提示。`pageInfo.pageSize` 保留请求上限，`returnedCount` 是实际条数；短页且有续页标为 partial，由调用方明确请求下一页，不隐藏追加采购。
+- `mxds1` 游标绑定消费者、Key、查询、原始 pageSize 和 fresh/stable，24 小时有效、最多 15 页。raw/social/旧 Night-All 游标不能混用。有效旧 `mxnc1` 的新续页返回 `409 search_restart_required`，要求显式从第一页开始；同幂等键旧成功仍精确回放、旧 unknown 仍禁止派发。历史记录不改写。
+- `items` 保留 ID、完整 note_tweet 正文、作者 ID/显示名/头像、UTC 发帖与采集时间；replies 映射 comments，收藏与零指标保留，未知值为 null。Twitter title 为 null。照片、视频和明确的视频封面分别映射；不把视频封面重复放进图片数组，不把引用帖当额外结果。没有明确封面时 coverUrl 为 null。
+- 相同字段进入 canonical，数据集仍为 `night-all.search.v1`，内部 lineage 记录实际供应商及调用 ID；严格公开 source 保持 null，不泄露供应商配置。API 与 ingest worker 必须发布同一版本。
+- `GET /api/v1/data/capabilities` 的 Twitter `search` 子项报告 Hub 自有只读 readiness；顶层保守 ready 不代表全部 Twitter 操作就绪。读取 capabilities 不发起供应商搜索。
+
+上述是代码实现及离线验证状态，不能据此声称生产 Hub 的 RapidAPI 凭据、操作启用或供应商调用已经验收。raw 的复杂请求、批量及其他尚未迁移操作仍见上表，不属于本次标准搜索迁移。
+
 ## 路径与隔离
 
 原有两组 `/api/v1/search/{raw,crawl,user-info}` 与 `/api/v1/night-all/search/{raw,crawl,user-info}` 是同一兼容服务的别名。另有 `/api/v1/data/search` 提供统一搜索展示合同；本批不替换这三种入口，不迁移其游标或历史交付。MX-H2I/Launcher 登录与联网没有改动。

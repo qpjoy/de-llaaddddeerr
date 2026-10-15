@@ -47,7 +47,7 @@ function AccountHeader({ token, row, onUnauthorized, onBack, onTag }) {
   const state = useRemoteData(load, onUnauthorized)
   return <><AccountHero row={state.loading ? row : state.data?.items?.[0] || row} onBack={onBack} onTag={onTag} onRefresh={state.refresh} />{state.error ? <ErrorState error={state.error} onRetry={state.refresh} /> : null}</>
 }
-export function DataBrowserPage({ token, query, onUnauthorized, aggregateSession: sharedAggregateSession }) {
+export function DataBrowserPage({ token, query, onUnauthorized, aggregateSession: sharedAggregateSession, diagnosticComparisonSession }) {
   const resultsRef = useRef(null)
   const localAggregateSession = useRef(null)
   const aggregateSession = sharedAggregateSession || localAggregateSession
@@ -68,12 +68,13 @@ export function DataBrowserPage({ token, query, onUnauthorized, aggregateSession
   const [limits, setLimits] = useState(() => new URLSearchParams(window.location.hash.split('?')[1]).get('view') === 'limits')
   const [diagnostics, setDiagnostics] = useState(() => new URLSearchParams(window.location.hash.split('?')[1]).get('view') === 'diagnostics')
   const [diagnosticSession, setDiagnosticSession] = useState(() => ({ token, identifier: new URLSearchParams(window.location.hash.split('?')[1]).get('requestId') || '', data: null, error: null }))
+  const localDiagnosticComparisonSessions = useRef(null)
+  const diagnosticComparisonSessions = diagnosticComparisonSession || localDiagnosticComparisonSessions
   useEffect(() => {
     setLimits(query?.get('view') === 'limits')
     if (query?.get('view') === 'limits') { setAggregate(false); setAdvanced(false); setDiagnostics(false) }
     else if (query?.get('view') === 'diagnostics') {
       setAggregate(false); setAdvanced(false); setDiagnostics(true)
-      if (query.get('requestId')) setDiagnosticSession({ token, identifier: query.get('requestId'), data: null, error: null })
     } else if (query?.get('view') === 'aggregate') { setAggregate(true); setAdvanced(false); setDiagnostics(false) }
   }, [token, query?.get('view'), query?.get('requestId')])
   const [filters, setFilters] = useState({ ...emptySearch, view: 'accounts', account: '', page: 1, pageSize: 20 })
@@ -116,7 +117,7 @@ export function DataBrowserPage({ token, query, onUnauthorized, aggregateSession
   }
   if (limits) return <div className="mih-data-browser"><PageHeading title="数据浏览中心"/><nav className="mih-browser-tabs" aria-label="浏览类型">{views.map(([key,label])=><button key={key} aria-pressed={key==='limits'} onClick={()=>navigate(key)}>{label}</button>)}</nav><Suspense fallback={<LoadingState/>}><AdmissionLimits key={token} token={token} onUnauthorized={onUnauthorized} requestId={query?.get('requestId') || ''}/></Suspense></div>
   if (aggregate) return <div className="mih-data-browser is-aggregate"><PageHeading title="数据浏览中心" description="搜索最新与已存数据，查看各来源交付情况。"/><nav className="mih-browser-tabs" aria-label="浏览类型">{views.map(([key,label])=><button key={key} aria-pressed={key==='aggregate'} onClick={()=>navigate(key)}>{label}</button>)}</nav><Suspense fallback={<LoadingState/>}><DemoProductPage Page={AggregateSearchPanel} pageProps={{session: aggregateSession}} enabled admin compact /></Suspense></div>
-  if (diagnostics) return <div className="mih-data-browser"><PageHeading title="数据浏览中心" description="发现账号、检索内容，理解已入库的数据。"/><nav className="mih-browser-tabs" aria-label="浏览类型">{views.map(([key,label])=><button key={key} aria-pressed={key==='diagnostics'} onClick={()=>navigate(key)}>{label}</button>)}</nav><Suspense fallback={<LoadingState/>}><RequestDiagnostics key={token} token={token} onUnauthorized={onUnauthorized} session={diagnosticSession} setSession={setDiagnosticSession}/></Suspense></div>
+  if (diagnostics) return <div className="mih-data-browser"><PageHeading title="数据浏览中心" description="发现账号、检索内容，理解已入库的数据。"/><nav className="mih-browser-tabs" aria-label="浏览类型">{views.map(([key,label])=><button key={key} aria-pressed={key==='diagnostics'} onClick={()=>navigate(key)}>{label}</button>)}</nav><Suspense fallback={<LoadingState/>}><RequestDiagnostics key={token} token={token} onUnauthorized={onUnauthorized} session={diagnosticSession} setSession={setDiagnosticSession} comparisonSessions={diagnosticComparisonSessions} autoIdentifier={query?.get('requestId') || ''}/></Suspense></div>
   if (advanced) return <div className="mih-data-browser"><PageHeading title="数据浏览中心" description="发现账号、检索内容，理解已入库的数据。"/><nav className="mih-browser-tabs" aria-label="浏览类型">{views.map(([key,label])=><button key={key} aria-pressed={key==='advanced'} onClick={()=>navigate(key)}>{label}</button>)}</nav><Suspense fallback={<LoadingState/>}><AdvancedSearchPanel token={token} onUnauthorized={onUnauthorized} onAccount={selectAccount} onTag={selectTag}/></Suspense></div>
   if (selected) return <ContentDetail key={selected.id} row={selected} {...{ token, onUnauthorized }} onClose={() => setSelected(null)} onAccount={selectAccount} onTag={selectTag} onDetail={setSelected} />
   return <div className={`mih-data-browser ${filters.view === "accounts" ? "is-account-list" : ""}`}>

@@ -137,6 +137,9 @@ spec:
         - name: gateway
           image: caddy:2.8.4-alpine
           imagePullPolicy: IfNotPresent
+          # Hosts whose Nginx owns HTTP must persist
+          # MX_INTERNAL_GATEWAY_PORT80_OWNER=host-nginx on this container.
+          # Keep env undeclared here so normal apply preserves that opt-in.
           command:
             - /bin/sh
             - -ec
@@ -144,8 +147,17 @@ spec:
             - |
               source_config=/etc/caddy-source/Caddyfile
               runtime_config=/tmp/mx-internal-gateway.Caddyfile
-              if awk 'NR > 1 { split($2, address, ":"); if (toupper(address[2]) == "0050" && $4 == "0A") found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
-                echo "host port 80 is already in use; starting Internal gateway on fallback port 8008"
+              port80_owner="${MX_INTERNAL_GATEWAY_PORT80_OWNER:-auto}"
+              case "$port80_owner" in
+                auto|host-nginx) ;;
+                *) echo "invalid MX_INTERNAL_GATEWAY_PORT80_OWNER; use auto or host-nginx" >&2; exit 1 ;;
+              esac
+              if [ "$port80_owner" = host-nginx ] || awk 'NR > 1 { split($2, address, ":"); if (toupper(address[2]) == "0050" && $4 == "0A") found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+                if [ "$port80_owner" = host-nginx ]; then
+                  echo "host port 80 is reserved for Nginx; starting Internal gateway on fallback port 8008"
+                else
+                  echo "host port 80 is already in use; starting Internal gateway on fallback port 8008"
+                fi
                 awk '
                   function brace_delta(line, copy, count) {
                     copy = line

@@ -2,13 +2,49 @@ import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 
 const hours = 3600000
+const day = 24 * hours
+
+// Calendar hints only shorten the interval between demand-triggered checks.
+// They never establish a new quota period or replenish the included calls.
+export function facebookProbeIntervalHours(policy, now) {
+  const local = new Date(now + 8 * hours) // The operator's billing-day hint is Asia/Shanghai.
+  const cycleDay = policy.billing_cycle_day ?? 27
+  for (const offset of [-1, 0, 1]) {
+    const month = local.getUTCMonth() + offset, year = local.getUTCFullYear()
+    const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate()
+    const cycle = Date.UTC(year, month, Math.min(cycleDay, lastDay)) - 8 * hours
+    if (now >= cycle - day && now < cycle + 3 * day) {
+      return Math.min(policy.probe_interval_hours, policy.billing_probe_interval_hours ?? 6)
+    }
+  }
+  return policy.probe_interval_hours
+}
+
+export function facebookRecoveryCheckAt(state, now) {
+  if (state.reset_at) return new Date(state.reset_at).getTime()
+  const interval = facebookProbeIntervalHours(state, now) * hours
+  if (!state.blocked_until) return now + interval
+  // A previously scheduled 72-hour wait can enter the shorter billing window.
+  return Math.min(new Date(state.blocked_until).getTime(), new Date(state.updated_at).getTime() + interval)
+}
+
 export class PlatformSearchPolicyStore {
   constructor(pool) { this.pool = pool }
   async list() {
     if (!this.pool) return []
-    return (await this.pool.query(`SELECT p.*, s.used, s.remaining, s.reset_at, s.blocked_until, s.reason AS availability_reason,
-      s.lease_until, s.updated_at AS observed_at FROM control.platform_search_policies p
-      LEFT JOIN control.facebook_rapid_quota s ON p.platform='facebook' ORDER BY p.platform`)).rows
+    const { rows } = await this.pool.query(`SELECT p.*, s.used, s.remaining, s.reset_at, s.blocked_until, s.reason AS availability_reason,
+      s.lease_until, s.updated_at AS observed_at, now() AS checked_at FROM control.platform_search_policies p
+      LEFT JOIN control.facebook_rapid_quota s ON p.platform='facebook' ORDER BY p.platform`)
+    return rows.map(({ checked_at: checkedAt, ...row }) => {
+      if (row.platform !== 'facebook') return row
+      const now = new Date(checkedAt).getTime()
+      const needsCheck = row.used >= row.monthly_limit || row.remaining === 0
+        || ['quota_exhausted', 'recovery_probe'].includes(row.availability_reason)
+        || (row.reset_at && new Date(row.reset_at).getTime() <= now)
+      const rateLimited = row.availability_reason === 'rate_limited' && row.blocked_until && new Date(row.blocked_until).getTime() > now
+      return { ...row, next_recovery_check_at: rateLimited ? row.blocked_until : needsCheck
+        ? new Date(facebookRecoveryCheckAt({ ...row, updated_at: row.observed_at }, now)) : null }
+    })
   }
   async facebook() {
     const policy = (await this.list()).find(row => row.platform === 'facebook')
@@ -17,10 +53,12 @@ export class PlatformSearchPolicyStore {
   }
   async update(platform, input) {
     if (platform !== 'facebook') throw new AppError(400, 'platform_search_policy_read_only', 'This platform retains its existing route')
-    if (!input || Object.keys(input).some(k => !['mode', 'monthlyLimit', 'probeIntervalHours', 'expectedRevision', 'reason'].includes(k))
+    if (!input || Object.keys(input).some(k => !['mode', 'monthlyLimit', 'probeIntervalHours', 'billingCycleDay', 'billingProbeIntervalHours', 'expectedRevision', 'reason'].includes(k))
       || !['auto', 'rapidapi', 'justone', 'paused'].includes(input.mode)
       || !Number.isInteger(input.monthlyLimit) || input.monthlyLimit < 1 || input.monthlyLimit > 1000000
       || !Number.isInteger(input.probeIntervalHours) || input.probeIntervalHours < 24 || input.probeIntervalHours > 744
+      || (input.billingCycleDay !== undefined && (!Number.isInteger(input.billingCycleDay) || input.billingCycleDay < 1 || input.billingCycleDay > 31))
+      || (input.billingProbeIntervalHours !== undefined && (!Number.isInteger(input.billingProbeIntervalHours) || input.billingProbeIntervalHours < 1 || input.billingProbeIntervalHours > 24))
       || !Number.isSafeInteger(input.expectedRevision) || typeof input.reason !== 'string' || !input.reason.trim() || input.reason.length > 1000) {
       throw new AppError(400, 'invalid_platform_search_policy', 'Provide mode, quota, probe interval, revision and reason')
     }
@@ -28,8 +66,10 @@ export class PlatformSearchPolicyStore {
     try {
       await client.query('BEGIN')
       const changed = await client.query(`UPDATE control.platform_search_policies SET mode=$1, monthly_limit=$2,
-        probe_interval_hours=$3, revision=revision+1, reason=$4, updated_at=now()
-        WHERE platform=$5 AND revision=$6 RETURNING *`, [input.mode, input.monthlyLimit, input.probeIntervalHours, input.reason.trim(), platform, input.expectedRevision])
+        probe_interval_hours=$3, revision=revision+1, reason=$4, updated_at=now(),
+        billing_cycle_day=coalesce($7,billing_cycle_day), billing_probe_interval_hours=coalesce($8,billing_probe_interval_hours)
+        WHERE platform=$5 AND revision=$6 RETURNING *`, [input.mode, input.monthlyLimit, input.probeIntervalHours, input.reason.trim(), platform, input.expectedRevision,
+        input.billingCycleDay ?? null, input.billingProbeIntervalHours ?? null])
       if (!changed.rowCount) throw new AppError(409, 'platform_search_revision_conflict', 'Strategy changed; refresh before saving')
       await client.query(`INSERT INTO control.platform_search_policy_events(platform,revision,actor,policy)
         VALUES($1,$2,'admin-token',$3::jsonb)`, [platform, changed.rows[0].revision, JSON.stringify(changed.rows[0])])
@@ -44,34 +84,34 @@ export class PlatformSearchPolicyStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
-      const { rows: [s] } = await client.query(`SELECT s.*, p.monthly_limit, p.probe_interval_hours, p.mode,
+      const { rows: [s] } = await client.query(`SELECT s.*, p.monthly_limit, p.probe_interval_hours, p.billing_cycle_day, p.billing_probe_interval_hours, p.mode,
         now() AS checked_at FROM control.facebook_rapid_quota s CROSS JOIN control.platform_search_policies p
         WHERE p.platform='facebook' FOR UPDATE OF s FOR SHARE OF p`)
       if (!s) throw new AppError(503, 'platform_search_policy_unavailable', 'Search strategy is unavailable')
       const now = new Date(s.checked_at).getTime()
       let used = s.used, remaining = s.remaining, resetAt = s.reset_at, blockedUntil = s.blocked_until
       const elapsedReset = resetAt && new Date(resetAt).getTime() <= now
-      if (elapsedReset) { used = 0; remaining = null; resetAt = null; blockedUntil = null }
+      const exhausted = used >= s.monthly_limit || remaining === 0
+      const probe = exhausted || Boolean(elapsedReset) || ['quota_exhausted', 'recovery_probe'].includes(s.reason)
       let reason = null
       if (!['auto', 'rapidapi'].includes(s.mode)) reason = 'strategy_changed'
       else if (s.lease_until && new Date(s.lease_until).getTime() > now) reason = 'source_busy'
-      else if (blockedUntil && new Date(blockedUntil).getTime() > now) reason = s.reason || 'source_cooldown'
-      const exhausted = used >= s.monthly_limit || remaining === 0
-      if (!reason && exhausted && resetAt && new Date(resetAt).getTime() > now) reason = 'quota_exhausted'
-      if (!reason && exhausted && !blockedUntil) {
-        blockedUntil = new Date(now + s.probe_interval_hours * hours)
-        reason = 'quota_exhausted'
+      else if (s.reason === 'rate_limited' && blockedUntil && new Date(blockedUntil).getTime() > now) reason = 'rate_limited'
+      if (!reason && probe) {
+        blockedUntil = new Date(facebookRecoveryCheckAt(s, now))
+        if (blockedUntil.getTime() > now) reason = 'quota_exhausted'
       }
       if (reason) {
-        if (reason === 'quota_exhausted') await client.query(`UPDATE control.facebook_rapid_quota SET blocked_until=$1,reason=$2 WHERE singleton`, [resetAt || blockedUntil, reason])
+        if (reason === 'quota_exhausted') await client.query(`UPDATE control.facebook_rapid_quota SET blocked_until=$1,reason=$2 WHERE singleton`, [blockedUntil, reason])
         await client.query('COMMIT')
         return { allowed: false, reason }
       }
-      const token = randomUUID(), probe = exhausted
+      const token = randomUUID()
+      if (elapsedReset) resetAt = null
       await client.query(`UPDATE control.facebook_rapid_quota SET used=$1,remaining=$2,reset_at=$3,
         blocked_until=$4,lease_token=$5,lease_until=now()+interval '2 minutes',reason=$6,updated_at=now() WHERE singleton`,
       [used + 1, remaining == null ? null : Math.max(0, remaining - 1), resetAt,
-        probe ? new Date(now + s.probe_interval_hours * hours) : blockedUntil, token, probe ? 'recovery_probe' : null])
+        probe ? new Date(now + facebookProbeIntervalHours(s, now) * hours) : blockedUntil, token, probe ? 'recovery_probe' : null])
       await client.query('COMMIT')
       return { allowed: true, token, probe }
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error }
@@ -82,21 +122,26 @@ export class PlatformSearchPolicyStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
-      const { rows: [s] } = await client.query(`SELECT s.*, p.monthly_limit, p.probe_interval_hours, now() AS checked_at
+      const { rows: [s] } = await client.query(`SELECT s.*, p.monthly_limit, p.probe_interval_hours, p.billing_cycle_day, p.billing_probe_interval_hours, now() AS checked_at
         FROM control.facebook_rapid_quota s CROSS JOIN control.platform_search_policies p
         WHERE s.lease_token=$1 AND p.platform='facebook' FOR UPDATE OF s`, [admission.token])
       if (s) {
         const now = new Date(s.checked_at).getTime()
         let { remaining, used, reset_at: resetAt, blocked_until: blockedUntil, reason } = s
-        if (Number.isInteger(observation.remaining) && observation.remaining >= 0) remaining = observation.remaining
+        const reliableRemaining = Number.isInteger(observation.remaining) && observation.remaining >= 0
+          && observation.remaining <= s.monthly_limit && !observation.quotaConflict
+          && (observation.limit == null || observation.limit === s.monthly_limit)
+        if (reliableRemaining) remaining = observation.remaining
         if (observation.monthlyExhausted) remaining = 0
-        if (Number.isInteger(observation.resetSeconds) && observation.resetSeconds > 0 && observation.resetSeconds <= 32 * 86400) resetAt = new Date(now + observation.resetSeconds * 1000)
-        if (admission.probe && observation.ok && remaining > 0) {
+        if (resetAt && new Date(resetAt).getTime() <= now) resetAt = null
+        if (reliableRemaining && Number.isInteger(observation.resetSeconds) && observation.resetSeconds > 0 && observation.resetSeconds <= 32 * 86400) resetAt = new Date(now + observation.resetSeconds * 1000)
+        if (reliableRemaining && observation.ok && remaining > 0 && !observation.monthlyExhausted) {
           // A successful HTTP response alone is insufficient: it may be an overage.
           used = Math.max(1, s.monthly_limit - Math.min(s.monthly_limit, remaining)); blockedUntil = null; reason = null
         }
-        if (remaining === 0 || used >= s.monthly_limit || observation.monthlyExhausted) {
-          blockedUntil = resetAt || new Date(now + s.probe_interval_hours * hours); reason = 'quota_exhausted'
+        if (remaining === 0 || used >= s.monthly_limit || observation.monthlyExhausted
+          || (admission.probe && !(reliableRemaining && observation.ok && remaining > 0))) {
+          blockedUntil = resetAt || new Date(now + facebookProbeIntervalHours(s, now) * hours); reason = 'quota_exhausted'
         } else if (observation.status === 429) {
           blockedUntil = new Date(now + Math.max(60, Math.min(observation.retryAfterSeconds || 300, 86400)) * 1000); reason = 'rate_limited'
         }
@@ -111,10 +156,15 @@ export class PlatformSearchPolicyStore {
 
 export function rapidQuotaObservation(response) {
   const integer = name => { const v = response.headers.get(name); return v != null && /^\d+$/.test(v) && Number.isSafeInteger(Number(v)) ? Number(v) : null }
-  const remaining = [integer('x-ratelimit-requests-remaining'), integer('x-rate-limit-rapid-free-plans-hard-limit-remaining')].filter(v => v != null)
-  const resets = [integer('x-ratelimit-requests-reset'), integer('x-rate-limit-rapid-free-plans-hard-limit-reset')].filter(v => v > 0)
+  // The operator-confirmed Facebook plan is monthly. Generic rate windows and
+  // free-plan hard limits are different counters and cannot prove its recovery.
+  const counters = ['x-ratelimit-requests', 'x-rapidapi-requests'].map(source => ({ source,
+    remaining: integer(`${source}-remaining`), limit: integer(`${source}-limit`), reset: integer(`${source}-reset`) }))
+  const quotaConflict = ['remaining', 'limit', 'reset'].some(field => counters.every(c => c[field] != null) && counters[0][field] !== counters[1][field])
+  const counter = quotaConflict ? null : counters.find(c => c.remaining != null)
   const retry = response.headers.get('retry-after')
-  return { ok: response.ok, status: response.status, remaining: remaining.length ? Math.min(...remaining) : null,
-    resetSeconds: resets.length ? Math.max(...resets) : null,
+  return { ok: response.ok, status: response.status, remaining: counter?.remaining ?? null,
+    limit: counter?.limit ?? null, resetSeconds: counter?.reset ?? null,
+    billingHeaderSource: counter?.source ?? null, quotaConflict,
     retryAfterSeconds: integer('retry-after') ?? (Number.isFinite(Date.parse(retry)) ? Math.max(0, Math.ceil((Date.parse(retry) - Date.now()) / 1000)) : null) }
 }

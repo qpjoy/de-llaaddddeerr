@@ -1,0 +1,139 @@
+.mih-strategy-search { display: grid; gap: 20px; min-width: 0; }
+.mih-strategy-interface-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.mih-strategy-interface-card { display: grid; grid-template-columns: 28px minmax(0, 1fr) 18px; gap: 12px; align-items: center; padding: 22px; border: 1px solid var(--qp-line); border-radius: 14px; background: var(--qp-bg-2); color: var(--qp-text-1); cursor: pointer; text-align: left; }
+.mih-strategy-interface-card > span { grid-column: 1 / -1; color: var(--qp-text-2); line-height: 1.7; }
+.mih-strategy-interface-card > svg:last-child { grid-column: 3; grid-row: 1; }
+.mih-strategy-interface-card.is-selected { border-color: var(--qp-primary); box-shadow: inset 0 0 0 1px var(--qp-primary); }
+.mih-strategy-interface-card:focus-visible { outline: 2px solid var(--qp-primary); outline-offset: 3px; }
+.mih-strategy-contract, .mih-strategy-route-panel { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 24px; min-width: 0; }
+.mih-strategy-contract h2, .mih-strategy-route-panel h2, .mih-strategy-route-heading h3, .mih-strategy-management-heading h2 { margin: 0; }
+.mih-strategy-contract p, .mih-strategy-route-panel p, .mih-strategy-management-heading p { margin: 0; line-height: 1.7; color: var(--qp-text-2); }
+.mih-strategy-contract > header, .mih-strategy-management-heading, .mih-strategy-route-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.mih-strategy-paths { display: flex; flex-wrap: wrap; gap: 8px; }
+.mih-strategy-paths code { padding: 7px 10px; border: 1px solid var(--qp-line); border-radius: 7px; font-size: 12px; overflow-wrap: anywhere; }
+.mih-strategy-contract-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; margin: 0; }
+.mih-strategy-contract-grid dt { font-weight: 600; margin-bottom: 8px; }
+.mih-strategy-contract-grid dd { margin: 0; color: var(--qp-text-2); line-height: 1.7; }
+.mih-strategy-management { display: grid; gap: 20px; }
+.mih-strategy-management-heading > div { display: grid; gap: 8px; }
+.mih-strategy-policy-form { display: grid; gap: 18px; padding-top: 18px; border-top: 1px solid var(--qp-line); }
+.mih-strategy-provider-links { display: flex; flex-wrap: wrap; gap: 16px; }
+.mih-strategy-readonly { display: grid; gap: 8px; padding: 16px; border: 1px solid var(--qp-line); border-radius: 10px; }
+.mih-strategy-search .mih-table-wrap { max-width: 100%; overflow-x: auto; }
+@media (max-width: 900px) {
+  .mih-strategy-interface-cards { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+  .mih-strategy-contract, .mih-strategy-route-panel { padding: 18px; }
+  .mih-strategy-contract-grid { grid-template-columns: 1fr; }
+}
+.mih-strategy-guide, .mih-strategy-experience { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; min-width: 0; }
+.mih-strategy-experience > * { min-width: 0; max-width: 100%; }
+.mih-strategy-guide[hidden] { display: none; }
+.mih-strategy-composer, .mih-strategy-results, .mih-strategy-usage { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; padding: 24px; min-width: 0; }
+.mih-strategy-composer > header, .mih-strategy-results > header, .mih-strategy-usage > header { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; }
+.mih-strategy-composer h2, .mih-strategy-results h2, .mih-strategy-usage h2 { margin: 0 0 8px; }
+.mih-strategy-composer p, .mih-strategy-usage p { margin: 0; color: var(--qp-text-2); line-height: 1.65; }
+.mih-strategy-composer > header > code { font-size: 12px; color: var(--qp-text-2); overflow-wrap: anywhere; }
+.mih-strategy-composer form { display: grid; gap: 18px; }
+.mih-strategy-composer fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.mih-strategy-composer legend { margin-bottom: 14px; font-weight: 600; }
+.mih-strategy-composer legend span { margin-left: 10px; color: var(--qp-text-3); font-size: 12px; font-weight: 400; }
+.mih-strategy-platform-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+.mih-strategy-platform { position: relative; display: flex; align-items: center; gap: 10px; min-height: 66px; padding: 12px 14px; border: 1px solid var(--qp-line); border-radius: 12px; background: var(--qp-bg-2); color: var(--qp-text-2); font: inherit; text-align: left; cursor: pointer; }
+.mih-strategy-platform > span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mih-strategy-platform > svg { position: absolute; right: 8px; top: 8px; color: var(--qp-primary); }
+.mih-strategy-platform.is-selected { border-color: var(--qp-primary); color: var(--qp-primary); background: color-mix(in srgb, var(--qp-primary) 7%, var(--qp-bg-2)); box-shadow: inset 0 0 0 1px var(--qp-primary); }
+.mih-strategy-platform:focus-visible { outline: 2px solid var(--qp-primary); outline-offset: 3px; }
+.mih-strategy-platform-mark { display: inline-grid; flex-shrink: 0; place-items: center; width: 30px; height: 30px; border-radius: 9px; color: var(--qp-text-1); background: var(--qp-bg-1); border: 1px solid var(--qp-line); font-size: 13px; font-weight: 700; }
+.mih-strategy-platform-mark.is-douyin, .mih-strategy-platform-mark.is-tiktok, .mih-strategy-platform-mark.is-twitter { background: #15232c; color: #fff; }
+.mih-strategy-platform-mark.is-facebook, .mih-strategy-platform-mark.is-zhihu { background: #2168ce; color: #fff; }
+.mih-strategy-platform-mark.is-weibo, .mih-strategy-platform-mark.is-xiaohongshu, .mih-strategy-platform-mark.is-youtube { background: #db4764; color: #fff; }
+.mih-strategy-platform-mark.is-telegram { background: #248db4; color: #fff; }
+.mih-strategy-platform-mark.is-wechat_search, .mih-strategy-platform-mark.is-wechat_mp { background: #2a9970; color: #fff; }
+.mih-strategy-platform-mark.is-reddit, .mih-strategy-platform-mark.is-kuaishou { background: #d66430; color: #fff; }
+.mih-strategy-query-row { display: grid; grid-template-columns: minmax(0, 1fr) 140px auto; align-items: end; gap: 14px; }
+.mih-strategy-query-row > .qp-button { min-height: 40px; }
+.mih-strategy-search-note { font-size: 12px; color: var(--qp-text-3); line-height: 1.7; overflow-wrap: anywhere; }
+.mih-strategy-search-note a { margin-left: 6px; }
+.mih-strategy-repeat { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; font-size: 12px; color: var(--qp-text-2); }
+.mih-strategy-unresolved { display: grid; gap: 12px; padding: 18px; border: 1px solid var(--qp-line); border-radius: 10px; background: var(--qp-bg-2); }
+.mih-strategy-unresolved code { overflow-wrap: anywhere; }
+.mih-strategy-result-empty { display: grid; justify-items: center; text-align: center; padding: 50px 24px; color: var(--qp-text-3); }
+.mih-strategy-result-empty h3 { color: var(--qp-text-1); margin: 18px 0 8px; }
+.mih-strategy-result-empty p { margin: 0; }
+.mih-strategy-image-toggle { display: flex; align-items: center; gap: 7px; color: var(--qp-text-2); font-size: 12px; }
+.mih-strategy-result-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; min-width: 0; }
+.mih-strategy-result-card { display: flex; align-items: start; gap: 20px; min-width: 0; padding: 20px; border: 1px solid var(--qp-line); border-radius: 12px; background: var(--qp-bg-2); overflow-wrap: anywhere; }
+.mih-strategy-result-card > img { width: 128px; max-height: 160px; object-fit: cover; border-radius: 8px; }
+.mih-strategy-result-card > div { flex: 1; min-width: 0; }
+.mih-strategy-result-card header, .mih-strategy-result-card footer { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--qp-text-3); }
+.mih-strategy-result-card header > *, .mih-strategy-result-card footer > * { min-width: 0; max-width: 100%; }
+.mih-strategy-result-card header strong { color: var(--qp-text-1); }
+.mih-strategy-result-card h3 { margin: 12px 0; font-size: 16px; }
+.mih-strategy-result-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.85; margin: 12px 0 18px; }
+.mih-strategy-result-metrics { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 18px; color: var(--qp-text-3); font-size: 12px; }
+.mih-strategy-result-metrics b { color: var(--qp-text-2); font-weight: 500; }
+.mih-strategy-result-card footer a { display: inline-flex; align-items: center; gap: 4px; }
+.mih-strategy-media-links { display: flex; flex-wrap: wrap; gap: 10px 16px; }
+.mih-strategy-next { justify-self: center; }
+.mih-strategy-result-warnings { border-left: 3px solid var(--qp-primary); padding-left: 14px; font-size: 12px; color: var(--qp-text-2); }
+.mih-strategy-result-warnings p { margin: 5px 0; }
+.mih-strategy-response { grid-template-columns: minmax(0, 1fr); }
+.mih-strategy-response > summary { cursor: pointer; overflow-wrap: anywhere; }
+.mih-strategy-response > .mih-api-response { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; min-height: 0; max-height: min(600px, 65vh); margin: 0; padding: 16px; overflow: auto; overscroll-behavior: contain; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--qp-line); border-radius: 8px; background: var(--qp-bg-1); color: var(--qp-text-1); font-size: 12px; line-height: 1.6; }
+.mih-strategy-response > .mih-api-response:focus-visible { outline: 2px solid var(--qp-primary); outline-offset: 2px; }
+.mih-strategy-usage-alias { display: block; margin-top: 5px; color: var(--qp-text-3); white-space: nowrap; font-size: 10px; }
+.mih-strategy-usage .mih-table th:not(:first-child), .mih-strategy-usage .mih-table td:not(:first-child) { white-space: nowrap; }
+.mih-strategy-usage .mih-table code { font-size: 11px; }
+.mih-strategy-usage-notes { display: grid; gap: 8px; font-size: 12px; }
+@media (max-width: 1100px) { .mih-strategy-platform-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 700px) {
+  .mih-strategy-platform-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mih-strategy-query-row { grid-template-columns: minmax(0, 1fr) 120px; }
+  .mih-strategy-query-row > .qp-button { grid-column: 1 / -1; }
+  .mih-strategy-composer, .mih-strategy-results, .mih-strategy-usage { padding: 18px; }
+  .mih-strategy-result-card { flex-direction: column; }
+  .mih-strategy-result-card > img { width: 100%; max-height: 220px; }
+}
+.mih-strategy-scope { display: grid; gap: 16px; padding: 22px 24px; min-width: 0; }
+.mih-strategy-scope-fields { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(240px, 2fr); gap: 18px; }
+.mih-strategy-scope p { margin: 0; font-size: 12px; line-height: 1.7; color: var(--qp-text-2); }
+.mih-strategy-scope p strong { color: var(--qp-text-1); }
+.mih-strategy-configurable-links, .mih-strategy-route-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.mih-strategy-configurable-links { color: var(--qp-text-3); font-size: 12px; }
+.mih-strategy-effective-policy { display: grid; gap: 12px; padding: 20px; background: color-mix(in srgb, var(--qp-primary) 6%, var(--qp-bg-2)); border: 1px solid var(--qp-line); border-left: 3px solid var(--qp-primary); border-radius: 12px; }
+.mih-strategy-effective-policy > strong { font-size: 21px; color: var(--qp-text-1); line-height: 1.5; }
+.mih-strategy-effective-policy dl { display: flex; flex-wrap: wrap; gap: 22px 40px; margin: 0; font-size: 12px; }
+.mih-strategy-effective-policy dt { color: var(--qp-text-3); margin-bottom: 6px; }
+.mih-strategy-effective-policy dd { margin: 0; color: var(--qp-text-1); }
+.mih-strategy-editor { display: grid; gap: 18px; padding-top: 18px; }
+.mih-strategy-editor > header { display: grid; gap: 8px; }
+.mih-strategy-editor h3 { margin: 0; }
+.mih-strategy-editor .mih-strategy-policy-form { border: 0; padding-top: 0; }
+.mih-strategy-route-details { border-top: 1px solid var(--qp-line); padding-top: 16px; }
+.mih-strategy-route-details[open] { display: grid; gap: 14px; }
+.mih-strategy-policy-boundary, .mih-strategy-usage-boundary { font-size: 12px; }
+.mih-strategy-usage-boundary { padding: 12px 14px; background: var(--qp-bg-2); border: 1px solid var(--qp-line); border-radius: 8px; }
+@media (max-width: 700px) { .mih-strategy-scope-fields { grid-template-columns: 1fr; } .mih-strategy-scope { padding: 18px; } }
+.mih-strategy-facebook-form { gap: 18px; }
+.mih-strategy-draft-policy { padding: 12px 14px; border-radius: 8px; background: var(--qp-bg-2); }
+.mih-strategy-quota-observation { display: grid; gap: 8px; padding: 16px; border: 1px solid var(--qp-line); border-radius: 10px; }
+.mih-strategy-quota-observation strong { font-size: 12px; }
+.mih-strategy-quota-observation p, .mih-strategy-quota-settings p { font-size: 12px; }
+.mih-strategy-quota-settings > .mih-external-two-column { margin: 16px 0; }
+.mih-strategy-data-statistics { padding: 22px 24px; min-width: 0; }
+.mih-strategy-data-statistics > summary { display: flex; align-items: center; gap: 12px; cursor: pointer; list-style: none; }
+.mih-strategy-data-statistics > summary::-webkit-details-marker { display: none; }
+.mih-strategy-data-statistics > summary > span { display: grid; gap: 6px; flex: 1; }
+.mih-strategy-data-statistics > summary small { color: var(--qp-text-3); font-size: 12px; line-height: 1.6; }
+.mih-strategy-data-statistics[open] > summary > svg:last-child { transform: rotate(180deg); }
+.mih-strategy-data-statistics-body { display: grid; gap: 18px; padding-top: 22px; }
+.mih-strategy-data-statistics-body > header, .mih-strategy-data-table-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; flex-wrap: wrap; }
+.mih-strategy-data-statistics-body h3, .mih-strategy-data-statistics-body h4 { margin: 0 0 8px; }
+.mih-strategy-data-statistics-body p { margin: 0; color: var(--qp-text-2); line-height: 1.65; font-size: 12px; }
+.mih-strategy-data-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.mih-strategy-data-table-heading > .qp-field { min-width: 180px; }
+.mih-strategy-data-processing { display: grid; gap: 8px; padding: 16px; border: 1px solid var(--qp-line); border-radius: 10px; }
+@media (max-width: 1100px) { .mih-strategy-data-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 700px) { .mih-strategy-data-statistics { padding: 18px; } .mih-strategy-data-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

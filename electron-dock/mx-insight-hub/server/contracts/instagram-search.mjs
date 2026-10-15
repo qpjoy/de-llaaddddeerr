@@ -94,7 +94,7 @@ function rendition(values) {
     .sort((a, b) => (Number(b.width) * Number(b.height) || 0) - (Number(a.width) * Number(a.height) || 0))[0]?.url
 }
 
-function instagramRow(value, capturedAt) {
+export function instagramRow(value, capturedAt) {
   if (!object(value)) throw new Error('invalid_instagram_post_identity')
   const contentId = id(value.id) || id(value.pk)
   const shortcode = text(value.code || value.shortcode).trim()

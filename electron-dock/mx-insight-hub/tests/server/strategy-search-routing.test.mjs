@@ -1,0 +1,101 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import { pathToFileURL } from 'node:url'
+import { StrategySearchRoutingStore } from '../../server/external-platforms/strategy-search-routing.mjs'
+
+const change = (patch = {}) => ({ mode: 'fixed', primaryProvider: 'tikhub', fallbackProvider: null,
+  expectedRevision: 1, reason: 'Reviewed compatible supplier', ...patch })
+
+test('strategy search preserves the Instagram default and keeps other policies outside this store', async () => {
+  const store = new StrategySearchRoutingStore()
+  assert.deepEqual(await store.get('search', 'instagram'), { interface: 'search', platform: 'instagram',
+    mode: 'fixed', primaryProvider: 'justone', fallbackProvider: null, revision: 1, reason: 'initial_route', updatedAt: null })
+  for (const [interfaceId, platform] of [['search','facebook'], ['search','twitter'], ['crawl','instagram'], ['user-info','instagram']]) {
+    assert.equal(await store.get(interfaceId, platform), null)
+    await assert.rejects(store.update(interfaceId, platform, change()), { code: 'strategy_search_route_read_only' })
+  }
+  const rows = await store.list()
+  rows[0].primaryProvider = 'tikhub'
+  assert.equal((await store.get('search','instagram')).primaryProvider, 'justone')
+  assert.equal(store.events.length, 0)
+})
+
+test('strategy changes use revision CAS and record a separate immutable snapshot', async () => {
+  const store = new StrategySearchRoutingStore()
+  const [first, second] = await Promise.allSettled([
+    store.update('search', 'instagram', change()),
+    store.update('search', 'instagram', change({ mode: 'priority', fallbackProvider: 'justone' })),
+  ])
+  assert.equal(first.status, 'fulfilled')
+  assert.equal(second.status, 'rejected')
+  assert.equal(second.reason.code, 'strategy_search_route_revision_conflict')
+  first.value.primaryProvider = 'justone'
+  assert.equal((await store.get('search','instagram')).primaryProvider, 'tikhub')
+  assert.equal(store.events[0].primaryProvider, 'tikhub')
+  assert.equal(store.events[0].actor, 'admin-token')
+  const priority = await store.update('search', 'instagram', change({ mode: 'priority', fallbackProvider: 'justone', expectedRevision: 2 }))
+  assert.equal(priority.revision, 3)
+  assert.equal(priority.fallbackProvider, 'justone')
+  const paused = await store.update('search','instagram', change({ mode: 'paused', expectedRevision: 3 }))
+  assert.equal(paused.mode, 'paused')
+  assert.equal(store.events.length, 3)
+  assert.equal(store.events[0].revision, 2)
+})
+
+test('incompatible fallback, missing revision/reason and undeclared fields never mutate configuration', async () => {
+  const store = new StrategySearchRoutingStore()
+  for (const input of [null, [], 'invalid', change({ primaryProvider: 'rapidapi' }), change({ mode: 'auto' }),
+    change({ fallbackProvider: 'justone' }), change({ fallbackProvider: undefined }),
+    change({ mode: 'priority' }), change({ mode: 'priority', fallbackProvider: 'tikhub' }),
+    change({ mode: 'paused', fallbackProvider: 'justone' }), change({ expectedRevision: 0 }),
+    change({ expectedRevision: '1' }), change({ reason: '  ' }), change({ reason: 'a'.repeat(1001) }),
+    change({ providerKey: 'tikhub' }), change({ retry: true })]) {
+    await assert.rejects(store.update('search','instagram', input), { code: 'invalid_strategy_search_route' })
+  }
+  assert.equal((await store.get('search','instagram')).revision, 1)
+  assert.equal(store.events.length, 0)
+})
+
+test('missing, corrupt or unreadable deployed configuration fails closed without selecting a supplier', async () => {
+  for (const pool of [
+    { query: async () => ({ rows: [] }) },
+    { query: async () => ({ rows: [{ interface_key: 'search', platform: 'instagram', mode: 'fixed', primary_provider: 'rapidapi', revision: 1 }] }) },
+    { query: async () => { throw new Error('database unavailable') } },
+  ]) {
+    const store = new StrategySearchRoutingStore(pool)
+    await assert.rejects(store.get('search','instagram'), { status: 503, code: 'strategy_search_route_unavailable' })
+  }
+})
+
+test('SQL migration, CAS and audit failure rollback preserve the last reviewed strategy', { skip: !process.env.MX_INSIGHT_TEST_PGLITE_MODULE }, async t => {
+  const { PGlite } = await import(pathToFileURL(process.env.MX_INSIGHT_TEST_PGLITE_MODULE).href)
+  const db = new PGlite()
+  t.after(() => db.close())
+  await db.exec('CREATE SCHEMA control')
+  await db.exec(await readFile(new URL('../../migrations/150_strategy_search_routes.sql', import.meta.url), 'utf8'))
+  const pool = { query: (sql, values) => db.query(sql, values), connect: async () => ({ query: (sql, values) => db.query(sql, values), release() {} }) }
+  const store = new StrategySearchRoutingStore(pool)
+  assert.equal((await store.list()).length, 1)
+  assert.equal((await store.get('search','instagram')).primaryProvider, 'justone')
+  const result = await store.update('search','instagram', change({ mode: 'priority', fallbackProvider: 'justone', reason: ' Reviewed priority ' }))
+  assert.equal(result.revision, 2)
+  assert.equal(result.reason, 'Reviewed priority')
+  await assert.rejects(store.update('search','instagram', change()), { code: 'strategy_search_route_revision_conflict' })
+  const events = (await db.query('SELECT actor,policy FROM control.strategy_search_route_events ORDER BY revision')).rows
+  assert.deepEqual(events.map(row => row.actor), ['migration-150','admin-token'])
+  assert.equal(events[0].policy.primaryProvider, 'justone')
+  assert.equal(events[1].policy.mode, 'priority')
+  assert.equal(events[1].policy.revision, 2)
+  await db.exec('ALTER TABLE control.strategy_search_route_events ADD CHECK (revision < 3)')
+  await assert.rejects(store.update('search','instagram', change({ expectedRevision: 2 })))
+  assert.equal((await store.get('search','instagram')).revision, 2)
+  assert.equal((await store.get('search','instagram')).mode, 'priority')
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM control.strategy_search_route_events')).rows[0].n, 2)
+  // Database guards also reject invalid direct writes, independently of JS validation.
+  await assert.rejects(db.query("UPDATE control.strategy_search_routes SET fallback_provider=primary_provider"))
+  await assert.rejects(db.query("UPDATE control.strategy_search_routes SET mode='fixed'"))
+  await assert.rejects(db.query("UPDATE control.strategy_search_routes SET primary_provider='rapidapi'"))
+  await assert.rejects(db.query("UPDATE control.strategy_search_routes SET platform='facebook'"))
+  assert.equal((await store.get('search','instagram')).revision, 2)
+})

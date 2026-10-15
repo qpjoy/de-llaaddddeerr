@@ -35,6 +35,8 @@ export class BaiduIpRiskAdapter {
   constructor({pool,fetchImpl=fetch,timeoutMs=10000,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}={}) {
     Object.assign(this,{pool,fetch:fetchImpl,timeoutMs,sleep}); this.configured=true
   }
+  // Both original subrequests can wait up to ten seconds for their provider slot.
+  get dispatchBudgetMs() { return 2 * (this.timeoutMs + 10000) }
   async policy() {
     if (!this.pool) return {enabled:false,revision:0,daily_limit:1200,spacing_ms:2000,calls:0}
     return (await this.pool.query("SELECT * FROM hub_commerce.ip_channel WHERE id='baidu-v2'")).rows[0]

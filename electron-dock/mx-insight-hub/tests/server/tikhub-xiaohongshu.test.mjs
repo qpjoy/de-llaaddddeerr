@@ -794,6 +794,104 @@ test('HTTP 401 HTML and HTTP 429 oversized bodies retain status-first classifica
   }
 })
 
+test('both TikHub HTTP failure paths retain nested correlation metadata without changing dispatch or billing', async () => {
+  const calls = [
+    adapter => adapter.searchXiaohongshuNotes({ platform: 'xiaohongshu', query: '离线测试' }),
+    adapter => adapter.getXiaohongshuPost({ platform: 'xiaohongshu', url: noteUrl() }),
+  ]
+  const nestedId = '11111111-2222-4333-8444-555555555555'
+  const cases = [
+    { payload: { detail: { code: 400, request_id: nestedId } }, code: 400, id: nestedId },
+    { payload: { detail: { code: 400, request_id: nestedId,
+      message: "Request failed. Please retry. Check the docs below to verify your parameters, test with the default demo parameters, and send the response JSON to support. You won't be charged for this request.",
+    } }, code: 400, id: nestedId },
+    { payload: { code: 403, request_id: 'legacy root identifier', detail: { code: 429, request_id: nestedId } }, code: 403, id: 'legacy root identifier' },
+    { payload: { detail: { code: 429, request_id: nestedId } }, code: 429, id: nestedId },
+    { payload: { detail: [{ code: 400, request_id: nestedId }] }, code: null, id: null },
+    { payload: { detail: JSON.stringify({ code: 400, request_id: nestedId }) }, code: null, id: null },
+    { payload: { detail: { code: '400', request_id: { value: nestedId } } }, code: null, id: null },
+    { payload: { detail: { code: 400.5, request_id: 'https://private.example/token' } }, code: null, id: null },
+    { payload: { detail: { code: 400, request_id: 'x'.repeat(192) } }, code: 400, id: null },
+    { payload: { detail: { code: 400, request_id: PROVIDER_KEY } }, code: 400, id: null },
+  ]
+  for (const call of calls) for (const expected of cases) {
+    let dispatches = 0
+    const bodyText = JSON.stringify(expected.payload)
+    const adapter = new TikHubAdapter({
+      apiKey: PROVIDER_KEY,
+      fetchImpl: async () => {
+        dispatches++
+        return new Response(bodyText, { status: 400, headers: { 'content-type': 'application/json' } })
+      },
+    })
+    const error = await captureError(() => call(adapter))
+    assert.ok(error instanceof TikHubUpstreamError)
+    assert.deepEqual(error.evidence, {
+      outcome: 'rejected', httpStatus: 400, businessCode: expected.code,
+      billed: null, errorCode: 'upstream_request_rejected', affectsCircuit: false, retryable: false,
+    })
+    assert.equal(error.responseArchive.businessCode, expected.code)
+    assert.equal(error.upstreamEvidence.requestId, expected.id)
+    assert.equal(error.archiveObjects[0].upstreamRequestId, expected.id)
+    assert.equal(error.restrictedResponseArchive.bodyText, bodyText)
+    assert.deepEqual(error.restrictedResponseArchive.bodyBytes, Buffer.from(bodyText))
+    assert.deepEqual(error.restrictedResponseArchive.parsedPayload, expected.payload)
+    assert.equal(dispatches, 1)
+  }
+})
+
+test('nested HTTP failure metadata preserves shared status classification and the PGY unbilled exception', async () => {
+  for (const [status, outcome, billed, errorCode, affectsCircuit] of [
+    [400, 'rejected', false, 'upstream_request_rejected', false],
+    [401, 'rejected', null, 'upstream_auth_or_balance_unavailable', true],
+    [429, 'rejected', null, 'upstream_rate_limited', true],
+    [503, 'unknown', null, 'upstream_http_error', true],
+  ]) {
+    let dispatches = 0
+    const adapter = new TikHubAdapter({
+      apiKey: PROVIDER_KEY,
+      fetchImpl: async () => {
+        dispatches++
+        return jsonResponse({ detail: { code: 400, request_id: 'pgy-error-receipt' } }, status)
+      },
+    })
+    const error = await captureError(() => adapter.getXiaohongshuAppV2(
+      'xiaohongshu.pgy.note-detail.v1', { note_id: NOTE_ID },
+    ))
+    assert.deepEqual(error.evidence, {
+      outcome, httpStatus: status, businessCode: 400, billed, errorCode, affectsCircuit, retryable: false,
+    })
+    assert.equal(error.upstreamEvidence.requestId, 'pgy-error-receipt')
+    assert.equal(dispatches, 1)
+  }
+})
+
+test('both TikHub success paths still require top-level business status and correlation metadata', async () => {
+  for (const call of [
+    adapter => adapter.searchXiaohongshuNotes({ platform: 'xiaohongshu', query: '离线测试' }),
+    adapter => adapter.getXiaohongshuPost({ platform: 'xiaohongshu', url: noteUrl() }),
+  ]) {
+    let dispatches = 0
+    const bodyText = JSON.stringify({ detail: { code: 200, request_id: 'nested-success-receipt', data: {} } })
+    const adapter = new TikHubAdapter({
+      apiKey: PROVIDER_KEY,
+      fetchImpl: async () => {
+        dispatches++
+        return new Response(bodyText, { status: 200, headers: { 'content-type': 'application/json' } })
+      },
+    })
+    const error = await captureError(() => call(adapter))
+    assert.deepEqual(error.evidence, {
+      outcome: 'succeeded_unusable', httpStatus: 200, businessCode: null, billed: null,
+      errorCode: 'invalid_upstream_contract', affectsCircuit: true, retryable: false,
+    })
+    assert.equal(error.responseArchive.businessCode, null)
+    assert.equal(error.upstreamEvidence.requestId, null)
+    assert.equal(error.restrictedResponseArchive.bodyText, bodyText)
+    assert.equal(dispatches, 1)
+  }
+})
+
 test('deep valid JSON still retains exact restricted TikHub response bytes', async () => {
   const depth = 12_000
   const bodyText = `{"code":400,"data":${'{"nested":'.repeat(depth)}null${'}'.repeat(depth)}}`

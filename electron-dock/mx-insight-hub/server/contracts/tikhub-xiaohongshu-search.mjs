@@ -278,7 +278,11 @@ function searchPagination(responseData, itemData, request) {
       'TikHub response omitted both next_page and has_more',
     )
   }
-  if (itemData.items.length === 0 && inferredHasMore) {
+  // App V2 can keep page + 1 on an empty result without an explicit has_more.
+  // End that numbered page after validating both page numbers; explicit
+  // continuation claims and inconsistent pagination still fail closed.
+  if (itemData.items.length === 0 && inferredHasMore
+    && !(currentPage.present && nextPage.present && !hasMore.present)) {
     invalidResponse(
       'invalid_upstream_pagination',
       'TikHub returned an empty page with another page advertised',

@@ -73,6 +73,7 @@ import { VirtualSupermarketPage } from './pages-virtual-supermarket.jsx'
 import { SourceCatalogPage } from './pages-source-catalog.jsx'
 import { ExternalPlatformsPage } from './pages-external-platforms.jsx'
 import { DataPlatformsPage } from './platform-search-policy.jsx'
+import { StrategySearchPage } from './strategy-search.jsx'
 import { NotificationsPage } from './pages-notifications.jsx'
 import { AgentProxyPage, AgentSequencePage } from './pages-agent-center.tsx'
 
@@ -116,7 +117,7 @@ const LazyTopicInsightsPage = lazy(() => import('./pages-topic-insights.jsx').th
 const LazyNewsDiscoveryPage = lazy(() => import('./pages-news-discovery.jsx').then(module => ({ default: module.NewsDiscoveryPage })))
 const LazyDataSearchPage = lazy(() => import('./aggregate-search.jsx').then(module => ({ default: module.DataSearchPage })))
 function DataSearchPage(props) {
-  return <Suspense fallback={<LoadingState label="正在加载数据搜索" />}><LazyDataSearchPage {...props} /></Suspense>
+  return <Suspense fallback={<LoadingState label="正在加载聚合搜索" />}><LazyDataSearchPage {...props} /></Suspense>
 }
 const LazyCatalogClassifierPage = lazy(() => import('./pages-catalog-classifier.jsx').then(module => ({ default: module.CatalogClassifierPage })))
 function NewsDiscoveryPage(props) {
@@ -394,7 +395,8 @@ const ROUTES = [
   { path: '/data-browser', label: '数据浏览中心', description: '账号、内容与热点线索', icon: MagnifyingGlass, group: '数据平面', component: DataBrowserPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/data-center', label: '数据中心', description: '数据集、记录与存储现状', icon: Stack, group: '数据平面', component: DataCenterPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/source-catalog', label: '数据源目录', description: '覆盖、分类与实施状态', icon: Books, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SourceCatalogPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
-  { path: '/data-products/search', label: '数据搜索', description: '跨平台关键词检索与 API', icon: MagnifyingGlass, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: DataSearchPage, capability: 'apikey.read' },
+  { path: '/data-products/search', label: '聚合搜索', description: '跨平台实时与已收录数据检索', icon: MagnifyingGlass, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: DataSearchPage, capability: 'apikey.read' },
+  { path: '/data-products/strategy-search', label: '策略搜索', description: '业务接口、目标平台与上游策略', icon: MagnifyingGlass, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: StrategySearchPage, capability: 'apikey.read' },
   { path: '/data-products/telegram', label: 'Telegram 会话', description: '频道、群组与完整对话上下文', icon: ChatsCircle, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: TelegramPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/ecommerce-treasure-box', label: '电商数据', description: '商品搜索演示与交付证据', icon: MagicWand, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EcommerceTreasureBoxPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/data-products/web-search', label: 'Web Search', description: '全网检索与多渠道搜索', icon: Globe, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: WebSearchPage, capability: 'apikey.read' },
@@ -413,7 +415,7 @@ const ROUTES = [
   { path: '/sources', label: '清洗任务计划', description: '接入、映射与清洗执行', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: SourcesPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/provisioning', label: '批量开通', description: '价格草稿、授权与启用', icon: Globe, group: '策略控制', component: ProvisioningPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/external-platforms', label: '上游供应商', description: '实时接口、成本与调用保障', icon: Globe, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: ExternalPlatformsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
-  { path: '/data-platforms', label: '数据平台', description: '平台服务、上游选择与额度策略', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DataPlatformsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
+  { path: '/data-platforms', label: '数据平台', description: '平台目录与非搜索服务治理', icon: Database, group: '数据平面', navParent: DATA_CLEANING_NAV_KEY, component: DataPlatformsPage, capability: 'membership.write', platformAdmin: true, adminTokenOnly: true },
   { path: '/backfill', label: '历史回填', description: 'Night-All 存量拉取', icon: DownloadSimple, group: '数据平面', component: BackfillPage, capability: 'membership.write', platformAdmin: true },
   { path: '/retrieval', label: '检索管线', description: '切分、向量与混合检索', icon: MagnifyingGlass, group: '数据平面', component: RetrievalPage, capability: 'usage.read', platformAdmin: true },
   { path: '/agent/providers', label: 'LLM Provider', description: '模型账号、协议与密钥', icon: Key, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentProvidersRoute, capability: 'membership.write', platformAdmin: true },
@@ -821,6 +823,8 @@ export function App() {
   // One in-memory search round across the product and retained browser entry.
   // A console identity change discards it; demo credential renewal does not.
   const aggregateSession = useMemo(() => ({ current: null }), [token])
+  const strategySession = useMemo(() => new Map(), [token])
+  const diagnosticComparisonSession = useMemo(() => ({ current: null }), [token])
 
   useEffect(() => {
     const root = document.documentElement
@@ -966,9 +970,11 @@ export function App() {
   // Falling back to the first permitted route rather than the dashboard: a user
   // scoped out of the dashboard would otherwise land on a permanent 403.
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
-  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && ![...WECHAT_PRODUCTS.map(product => `/data-products/${product.key}`), '/data-products/search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise', '/data-products/web-search'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
+  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && ![...WECHAT_PRODUCTS.map(product => `/data-products/${product.key}`), '/data-products/search', '/data-products/strategy-search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise', '/data-products/web-search'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
   const pageProps = {
     aggregateSession,
+    strategySession,
+    diagnosticComparisonSession,
     theme,
     token,
     session,

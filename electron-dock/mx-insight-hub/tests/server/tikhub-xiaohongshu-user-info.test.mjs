@@ -26,6 +26,7 @@ import { MemoryExternalPlatformStore } from '../../server/external-platforms/sto
 import { TikHubUserInfoGateway } from '../../server/external-platforms/tikhub-user-info-gateway.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
+import { AppError } from '../../server/core/errors.mjs'
 
 const USER_ID = '61b46d790000000010008153'
 const NOTE_ID = '675d277d000000000600e655'
@@ -603,6 +604,156 @@ async function gatewayFixture(fetchImpl, {
   return { context, usageStore, platformStore, gateway }
 }
 
+function queuedUserRequest(suffix, userId = 'aaaaaaaaaaaaaaaaaaaaaaaa') {
+  return { body: { platform: 'xiaohongshu', userId, count: 20 },
+    idempotencyKey: `xhs-user-queue-${suffix}`, path: '/api/v1/search/user-info' }
+}
+
+async function occupiedUserGateway(t, options = {}) {
+  const started = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const queueObserved = Promise.withResolvers()
+  const calls = []
+  const state = await gatewayFixture(async (url) => {
+    const parsed = new URL(url)
+    calls.push(parsed)
+    if (calls.length === 1) { started.resolve(); await release.promise }
+    if (parsed.pathname.endsWith('/get_user_posted_notes')) {
+      return jsonResponse({ code: 200, data: { data: { has_more: false, notes: [] } } })
+    }
+    return jsonResponse({ code: 200, data: { data: {
+      user_id: parsed.searchParams.get('user_id'), nickname: 'Queued profile',
+    } } })
+  }, options)
+  Object.assign(state.gateway.config, { maxConcurrency: 2, maxConsumerConcurrency: 1,
+    timeoutMs: 1000, concurrencyQueue: { maxWaitMs: 1000, maxPending: 2 } })
+  const originalEnter = state.gateway.concurrencyQueue.enter.bind(state.gateway.concurrencyQueue)
+  state.gateway.concurrencyQueue.enter = (input) => {
+    const result = originalEnter(input)
+    queueObserved.resolve()
+    return result
+  }
+  const first = state.gateway.legacyUserInfo(state.context, queuedUserRequest('first', USER_ID))
+  t.after(async () => { release.resolve(); await first })
+  await started.promise
+  return { ...state, calls, first, release: release.resolve, queued: queueObserved.promise }
+}
+
+test('user-info and crawl wait on the same consumer capacity without holding dispatch locks or provider budgets', async (t) => {
+  const state = await occupiedUserGateway(t)
+  const request = { ...queuedUserRequest('crawl'), path: '/api/v1/search/crawl' }
+  const second = state.gateway.legacyCrawl(state.context, request)
+  await state.queued
+  assert.equal(state.calls.length, 1)
+  assert.equal(state.gateway.concurrencyQueue.entries.length, 1)
+  assert.equal(state.platformStore.leases.size, 1, 'only the dispatched request retains a lease')
+  assert.equal(state.platformStore.costReservations.size, 1, 'queued work has no supplier budget hold')
+  state.release()
+  await state.first
+  const delivered = await second
+  assert.equal(delivered.sourceMode, 'live')
+  assert.equal(state.calls.length, 3, 'one profile followed by the original two-call crawl workflow')
+  assert.equal((await state.gateway.legacyCrawl(state.context, request)).replay, true)
+  assert.equal(state.calls.length, 3, 'replay must not enqueue another workflow')
+  assert.equal(state.gateway.active, 0)
+  assert.equal(state.gateway.concurrencyQueue.entries.length, 0)
+  assert.equal(state.platformStore.leases.size, 0)
+})
+
+test('user activity queue rejects overflow, removes cancelled work, and leaves zero provider calls for both', async (t) => {
+  const state = await occupiedUserGateway(t)
+  state.gateway.config.concurrencyQueue.maxPending = 1
+  const controller = new AbortController()
+  const second = state.gateway.legacyUserInfo(state.context, {
+    ...queuedUserRequest('cancelled'), signal: controller.signal,
+  }).catch(error => error)
+  await state.queued
+  await assert.rejects(state.gateway.legacyUserInfo(state.context, queuedUserRequest('overflow', 'bbbbbbbbbbbbbbbbbbbbbbbb')),
+    error => error.code === 'external_platform_busy' && error.details.reason === 'concurrency_queue_full'
+      && error.details.upstreamDispatched === false)
+  controller.abort()
+  assert.equal((await second).code, 'request_cancelled')
+  assert.equal(state.gateway.concurrencyQueue.entries.length, 0)
+  assert.equal(state.gateway.active, 1)
+  assert.equal(state.calls.length, 1)
+  assert.equal([...state.usageStore.requests.values()].filter(row => row.status === 'released').length, 2)
+})
+
+test('user activity queue timeout releases the customer reservation without a paid retry', async (t) => {
+  const state = await occupiedUserGateway(t)
+  state.gateway.config.concurrencyQueue.maxWaitMs = 20
+  await assert.rejects(state.gateway.legacyUserInfo(state.context, queuedUserRequest('timeout')),
+    error => error.code === 'external_platform_busy' && error.details.reason === 'concurrency_queue_timeout')
+  assert.equal(state.calls.length, 1)
+  assert.equal(state.gateway.concurrencyQueue.entries.length, 0)
+  const request = [...state.usageStore.requests.values()].find(row => row.idempotencyKey === 'xhs-user-queue-timeout')
+  assert.equal(request.status, 'released')
+  assert.equal(request.errorCode, 'external_platform_busy')
+})
+
+test('queued crawl reserves time for the entire original workflow instead of renewing the customer lease', async (t) => {
+  const state = await occupiedUserGateway(t)
+  state.gateway.config.timeoutMs = 30000
+  state.gateway.reservationLeaseMs = 65000
+  const request = { body: { platform: 'xiaohongshu', username: 'alice', count: 20 },
+    idempotencyKey: 'xhs-user-queue-workflow-deadline', path: '/api/v1/search/crawl' }
+  await assert.rejects(state.gateway.legacyCrawl(state.context, request),
+    error => error.code === 'external_platform_busy' && error.details.reason === 'concurrency_queue_timeout')
+  assert.equal(state.calls.length, 1)
+  assert.equal(state.platformStore.leases.size, 1)
+})
+
+test('queued user activity revalidates current identity, grants, plans, credentials, circuit and operation controls', async (t) => {
+  const scenarios = [
+    { name: 'revoked key', code: 'capability_not_granted', mutate: state => { state.usageStore.apiKeys.get(state.context.apiKey.id).status = 'revoked' } },
+    { name: 'revoked capability', code: 'capability_not_granted', mutate: state => { state.usageStore.capabilityGrants.set(state.context.consumer.id, []) } },
+    { name: 'inactive plan', code: 'plan_assignment_unavailable', mutate: state => { state.usageStore.consumerPlans.get(state.context.consumer.id).status = 'paused' } },
+    { name: 'cleared credential', code: 'external_platform_not_configured', mutate: state => { state.credential.apiKey = null } },
+    { name: 'provider circuit', code: 'external_platform_circuit_open', mutate: state => {
+      state.platformStore.providerState = async () => ({ circuitOpenUntil: new Date(Date.now() + 60000).toISOString() })
+    } },
+    { name: 'paused operation', code: 'external_platform_operation_paused', mutate: state => { state.control.paused = true } },
+  ]
+  for (const scenario of scenarios) await t.test(scenario.name, async (subtest) => {
+    const credential = { source: 'database', revision: 1, apiKey: 'fake-provider-key' }
+    const control = { paused: false }
+    const state = await occupiedUserGateway(subtest, {
+      credentialStore: { async readCredentialSnapshot() { return { ...credential } } },
+      operationControlStore: { async authorizeDispatch() {
+        if (control.paused) throw new AppError(503, 'external_platform_operation_paused', 'Operation paused')
+        return null
+      } },
+    })
+    const second = state.gateway.legacyUserInfo(state.context, queuedUserRequest('revalidate')).catch(error => error)
+    await state.queued
+    scenario.mutate({ ...state, credential, control })
+    state.release()
+    const rejected = await second
+    assert.equal(rejected.code, scenario.code)
+    assert.equal(state.calls.length, 1, 'changed authority must not dispatch the waiting request')
+    assert.equal(state.gateway.active, 0)
+    assert.equal(state.platformStore.leases.size, 0)
+  })
+})
+
+test('queued user activity rechecks unknown-outcome dispatch protection before any provider call', async (t) => {
+  const state = await occupiedUserGateway(t)
+  const originalAcquire = state.platformStore.acquireDispatchLease.bind(state.platformStore)
+  let protectionChanged = false
+  state.platformStore.acquireDispatchLease = async (input) => protectionChanged
+    ? { kind: 'blocked', reason: 'unknown' } : originalAcquire(input)
+  const second = state.gateway.legacyUserInfo(state.context, queuedUserRequest('unknown')).catch(error => error)
+  await state.queued
+  protectionChanged = true
+  state.release()
+  const rejected = await second
+  assert.equal(rejected.code, 'request_outcome_unknown')
+  assert.equal(rejected.details.upstreamDispatched, false)
+  assert.equal(state.calls.length, 1)
+  assert.equal(state.gateway.active, 0)
+  assert.equal(state.platformStore.leases.size, 0)
+})
+
 test('user-info binds database policy, price-book and credential revisions to its paid call', async () => {
   let authorization = null
   let admissionRuntime = null
@@ -971,6 +1122,8 @@ test('user-activity rollout gate is a live-dispatch kill switch for direct route
 test('Hub routes all gated Xiaohongshu crawl and user-info shapes before Night-All dispatch', async () => {
   const usageStore = new MemoryStore()
   const activityCalls = []
+  const activitySignals = []
+  const signal = new AbortController().signal
   let nightAllPreflights = 0
   const historicalCalls = []
   const service = new HubService({
@@ -1002,6 +1155,7 @@ test('Hub routes all gated Xiaohongshu crawl and user-info shapes before Night-A
     apiKeyPepper: 'user-activity-routing-pepper-with-entropy',
     externalSocialUserActivityEnabled: true,
     externalSocialUserActivity: async (_context, input) => {
+      activitySignals.push(input.signal)
       activityCalls.push(structuredClone(input))
       return { status: 200, body: { data: { source: 'tikhub' } }, requestId: 'direct', replay: false }
     },
@@ -1043,12 +1197,14 @@ test('Hub routes all gated Xiaohongshu crawl and user-info shapes before Night-A
   await service.nightAllCompatibilitySearch(context, {
     operation: 'crawl',
     body: { platform: 'xiaohongshu', username: 'alice', count: 20 },
+    signal,
     idempotencyKey: 'route-xhs-crawl-01',
     path: '/api/v1/night-all/search/crawl',
   })
   await service.nightAllCompatibilitySearch(context, {
     operation: 'user-info',
     body: { platform: 'xiaohongshu', userId: USER_ID },
+    signal,
     idempotencyKey: 'route-xhs-user-info-01',
     path: '/api/v1/night-all/search/user-info',
   })
@@ -1065,6 +1221,7 @@ test('Hub routes all gated Xiaohongshu crawl and user-info shapes before Night-A
     path: '/api/v1/night-all/search/user-info',
   })
 
+  assert.deepEqual(activitySignals, [signal, signal])
   assert.deepEqual(activityCalls.map(({ operation }) => operation), ['crawl', 'user-info'])
   assert.equal(activityCalls[0].body.username, 'alice')
   assert.equal(activityCalls[1].body.userId, USER_ID)

@@ -1,5 +1,99 @@
 # Night-All 502 与采集查询复现排查
 
+## 2026-10-14：Twitter 标准搜索与本机连接拒绝
+
+本次请求为 `c421b9bb-02e7-4359-b4ad-bef9163a6475`，与下文 9 月的供应商 HTTP 400 事件不同。
+用户从生产环境只读取回的证据如下：
+
+- 实际请求是 `POST /api/v1/data/search`，计费 meter 为 `twitter`；调用方日志的
+  `operation=raw` 不能用来判断 Hub 的实际 HTTP 路径。
+- `reserved_at=2026-10-14T04:48:00.138Z`，`completed_at=2026-10-14T04:48:00.150Z`，
+  状态为 `unknown/night_all_outcome_unknown`，没有交付正文，connector calls 为空。
+  记录间隔为 12 毫秒，不支持将本次直接归因于线上配置的 `NIGHT_ALL_TIMEOUT_MS=30000`。
+- Pod 位于 `mx-internal-server`，`hostNetwork=true`，镜像标签为 `mx-insight-hub:shadow`。
+  标签本身不能确定镜像版本。
+- `2026-10-14T05:03:23.052Z` 从 Hub 执行 Night-All 健康 GET，目标为
+  `http://127.0.0.1:13141`，返回 `TypeError`、底层 `ECONNREFUSED`。
+  这证明检查时该地址拒绝连接，与原请求的快速失败相符；原调用没有保存底层异常，
+  因此不能把十五分钟后的健康检查当成原调用异常的直接记录。
+
+故障发生时的标准 Twitter 搜索仍经过 Night-All，且这条现代 search 路径不写 connector call；
+Twitter raw 接口的部分形状已直连 Hub，不意味着标准接口也已迁移。
+不要只在 `canRouteDataSearch` 加上 Twitter：现有标准投影和网关装配不适用于
+RapidAPI social item，需单独验证协议、分页、授权和计费。
+
+恢复前在 **mx-internal-server 宿主机** 核实已有服务管理方式与监听地址：
+
+```bash
+sudo ss -ltnp '( sport = :13141 or sport = :18141 or sport = :18142 )'
+```
+
+Night-All 宿主实例默认 `13141`，隔离 Docker 实例和 Facade 默认分别为 `18141`、`18142`，
+不能只根据端口可连就切换实例。应恢复原实例，或核实身份和配置后修正 Hub 的目标地址。
+`start-node.sh` 默认是 restart，且 start 也会安装依赖、迁移、初始化并启动 API/worker；
+它没有只读 status 子命令，不应用作进程探测。当前尚未确认服务停止或端口变化的具体原因，
+也未执行恢复、付费请求、自动重试或修改历史 unknown 记录。MX-H2I 登录与联网保持不变。
+
+### Night-All 启动后的第二个阻断
+
+用户随后启动 Night-All，新请求 `0468e788-a452-4168-992b-d2fb2c46e9bf` 返回
+Hub `502 night_all_rejected`，上游明确为 `503 DATA_PLATFORM_NOT_READY`。
+这次已有 Night-All 应用响应，与前一笔连接结果未知的错误不同；旧 unknown 记录不因此改写。
+
+故障版本的 Hub 标准搜索固定使用 `availabilityMode=ready_only`，Night-All 在供应商派发前检查
+Twitter 的 `search_posts` execution readiness，不满足时抛出该错误。具体原因需读取
+Night-All `GET /api/v1/data/capabilities` 的 `catalog.database` 和 Twitter 项的
+`execution.reasons` / `providers[].reasonCodes`；该 GET 不执行搜索。
+可能的原因包括凭据缺失、供应商停用、目录数据库不可用、端点降级或契约未验证。
+随后取得 `2026-10-14T05:18:06.779Z` 的现场状态：目录数据库为 ready，Twitter 的
+TikHub 和 RapidAPI 均为 `degraded/endpoint_degraded`，选中的执行供应商为 RapidAPI。
+本次当前阻断已经收窄到端点健康状态，不能将它改称凭据缺失或契约未验证。
+
+本地目录默认不将 RapidAPI 平台声明为已验证。对于已入库的选中端点，契约检查要求
+`last_success_at` 和 `contract_updated_at` 都有效，且前者不早于后者；凭据与端点状态
+还有独立检查。不要伪造验证时间或将 Hub 改为 `best_effort` 来消除错误。
+`markEndpointFailure` 在失败计数达到 3 时保存 degraded；现有实现没有自动过期或半开恢复。
+标准入口在派发前拒绝，因此重启或反复请求该入口不会清除状态。
+实际采集且持久化成功后，`markEndpointSuccess` 才会恢复 active 并记录真实成功时间。
+若继续诊断旧 Night-All，需读取目录健康计数、最后失败/成功时间及历史 raw 失败记录，关联当时的采集日志；
+RapidAPI 子进程失败可能不创建 `source_call_logs`，不能由账本无行判断没有供应商调用。
+目前尚未取得降级时的具体内层错误，尚未确认第二个阻断已解除。
+
+### 本轮修复：标准 Twitter 搜索使用 Hub 自有链路
+
+用户确认采用逐步迁移方案。本地已将 `POST /api/v1/data/search` 的 Twitter 接入 Hub 现有 RapidAPI 执行器，并补齐严格响应与 canonical 入库字段、Top 排序、分页、原平台计费和历史幂等保护，详见 [Twitter 标准搜索契约](../integrations/hub-social-data.md)。新调用不再依赖 Night-All 的进程、数据库或 endpoint_degraded 状态；其他平台及旧 raw 复杂请求保留已有路由。
+
+本地定向集成回归共 211 项：205 通过、6 项依赖独立 PostgreSQL 的回归按原条件跳过；`git diff --check` 通过。覆盖标准字段/媒体与 canonical 一致、分页与历史回放、unknown 不重发、原授权/计费、其他搜索平台和只读 readiness；供应商全部使用 mock。
+
+尚未发布或请求真实供应商。发布需同时包含 Public API 与 ingest worker；没有新增数据库迁移，也无需调整 MX-H2I、Launcher、Night-All 的账号或网络。同步代码到服务器 Hub checkout 后，可按既有发布入口执行，显式关闭可选 Launcher 同步/重启：
+
+```bash
+MX_INSIGHT_SYNC_LAUNCHER=0 bash scripts/manage.sh ops internal-production deploy
+kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-public --timeout=240s
+kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-ingest --timeout=240s
+```
+
+发布后用调用方现有 Hub Key 只读查询 `GET /api/v1/data/capabilities`，检查 Twitter `search.source=hub` 和 `search.ready`。这是 Hub 配置就绪检查，不能代替真实搜索验收；ready=false 时在 Hub 外部数据平台检查 RapidAPI 的现有凭据与搜索操作状态/采购价格，不能继续清 Night-All health 或临时开启权限来掩盖问题。
+
+旧请求 `c421b9bb-02e7-4359-b4ad-bef9163a6475` 的 unknown 状态保持，不能将新链路部署当作自动重试授权；`0468e788-a452-4168-992b-d2fb2c46e9bf` 的旧失败交付也不改写。新采集意图使用新幂等键，旧 mxnc1 续页需要显式重新开始。不能根据本地测试宣称线上已经恢复。
+
+### 发布后的配置阻断：Hub 未取得 RapidAPI 凭据
+
+发布后请求 `78c2c47a-de60-4fde-b9e6-594b76743027` 返回 `503 external_platform_operation_blocked`，
+唯一报告的 blocker 为 `credential_missing`，`liveAttempted=false`。这证明请求已进入 Hub 自有执行治理，
+本次没有派发供应商搜索；不是 Night-All 的 `endpoint_degraded` 再次拒绝。该错误表示运行时没有取得可用凭据，
+也可能包含凭据存储读取失败，不能仅凭它断言数据库里没有 Key。
+
+Hub 使用自己的 RapidAPI 凭据存储或可选 `MX_INSIGHT_RAPIDAPI_API_KEY` 环境配置，不读取 Night-All 的文件。
+2026-10-14 后续按用户要求将 JSON 补缺接入 `deploy/apply`：从服务器 Night-All 配置补齐 RapidAPI、TikHub、JustOne，保留已有 Key 和人工清空。非标准路径在服务器 `.env.internal` 设置 `NIGHT_ALL_CONFIG_PATH`；完整规则见 [供应商凭据自动迁移](night-all-credential-migration.md)。旧独立工具的 `--all` 仍只包含 TikHub/JustOne，不用于本次自动补缺。
+在 Hub 的 Admin Token 管理入口，进入 **上游供应商 → RapidAPI → API Key 管理** 保存已有可用 Key，
+会写入 Hub 数据库，后续请求动态读取，无需重启 Launcher、Night-All 或 Hub。
+若管理端已经显示数据库凭据已配置，应先核对 Public Pod 的凭据来源、读取状态和 Admin/Public 数据库一致性，避免盲目覆盖。
+从 Night-All 导入的具体步骤见 [RapidAPI 凭据迁移](../integrations/hub-social-data.md#rapidapi-凭据迁移与系统代理2026-09-28-后续)。
+保存后先只读核对搜索操作状态，凭据可用不代表其操作、价格、预算或供应商订阅一定就绪。
+
+## 2026-09-21：Twitter 供应商拒绝的历史排查
+
 2026-09-21，针对 Hub requestId `9788c8f2-d59a-455a-8659-12d26bd2172d`。
 已收到用户从故障所在 Internal 生产环境取回的 Hub 数据库和健康检查结果。
 已取得对应 Night-All 错误日志；其他服务器的健康检查不作为本次事故证据。

@@ -6,7 +6,10 @@ import pg from "pg";
 import { MemoryStore, PgStore } from "../server/store.mjs";
 import { createApp } from "../server/http.mjs";
 import { register, claim, control } from "../server/model.mjs";
-import { adapterTestDefinition } from "../server/workflow-catalog.mjs";
+import {
+  adapterTestDefinition,
+  BUILTIN_DEFINITIONS,
+} from "../server/workflow-catalog.mjs";
 import {
   testAdapterCommand,
   beginCommand,
@@ -68,7 +71,7 @@ test("adapter tests prepare only whitelisted commands; next-page needs search an
     ["app.open", "xhs.search", "xhs.search.next"],
   );
   assert.equal(j.priority, 5);
-  assert.equal(s.definitions.length, 8);
+  assert.equal(s.definitions.length, BUILTIN_DEFINITIONS.length);
   const work = claim(s, 1000, "sim", "worker");
   finishTest(s, 1001, work);
   assert.equal(j.status, "succeeded");
@@ -203,17 +206,29 @@ test("bench API enforces auth/CSRF/real boundary; reads do not dispatch and temp
   assert.deepEqual(store.state, before);
   assert.equal(store.state.commands.length, 0);
   assert.equal(store.state.attempts.length, 0);
-  assert.equal(store.state.definitions.length, 8);
+  assert.equal(store.state.definitions.length, BUILTIN_DEFINITIONS.length);
   const seed = adapterTestDefinition(data.code, data.appId);
   const saved = await request("task-definitions?mode=sim", {
-    ...seed,
+    appId: seed.appId,
+    loop: seed.loop,
+    resumable: seed.resumable,
+    steps: seed.steps,
     code: "custom.bench",
     name: "调试组合",
     expectedVersion: 0,
   });
   assert.equal(saved.status, 201);
-  assert.equal(store.state.definitions.length, 9);
-  assert.deepEqual((await saved.json()).steps, seed.steps);
+  assert.equal(store.state.definitions.length, BUILTIN_DEFINITIONS.length + 1);
+  const savedSteps = (await saved.json()).steps;
+  assert.deepEqual(
+    savedSteps.map(({ commandDefinition, ...step }) => step),
+    seed.steps,
+  );
+  assert(
+    savedSteps.every(
+      (step) => step.commandDefinition.version === step.commandVersion,
+    ),
+  );
 });
 
 const url = process.env.MX_DEVICE_TEST_DATABASE_URL;
@@ -280,7 +295,7 @@ test(
       const detail = await store.detail("sim", j.id),
         snap = await store.snapshot("sim");
       assert.equal(detail.commands.length, 2);
-      assert.equal(snap.definitions.length, 8);
+      assert.equal(snap.definitions.length, BUILTIN_DEFINITIONS.length);
       assert.equal(
         snap.devices[0].projection.detail.content,
         detail.commands.find((c) => c.code.endsWith("ocr")).receipt.result
@@ -289,14 +304,20 @@ test(
       await store.atomic(
         (s, n) =>
           saveDefinition(s, n, "sim", {
-            ...adapterTestDefinition("session.back", "xhs"),
+            appId: "xhs",
+            loop: "small",
+            resumable: false,
+            steps: adapterTestDefinition("session.back", "xhs").steps,
             code: "custom.back",
             name: "返回",
             expectedVersion: 0,
           }),
         { mode: "sim" },
       );
-      assert.equal((await store.snapshot("sim")).definitions.length, 9);
+      assert.equal(
+        (await store.snapshot("sim")).definitions.length,
+        BUILTIN_DEFINITIONS.length + 1,
+      );
     } finally {
       await store.close();
       await admin.query(`DROP DATABASE ${name} WITH (FORCE)`);

@@ -18,6 +18,7 @@ import { NightAllAService, NightAllADispatchStore } from './external-platforms/n
 import { createServer } from 'node:http'
 import { PlatformSearchPolicyStore } from './external-platforms/platform-search-policy.mjs'
 import { EcommerceRoutingStore } from './external-platforms/ecommerce-routing.mjs'
+import { StrategySearchRoutingStore } from './external-platforms/strategy-search-routing.mjs'
 import { createPool, createQueue } from '@qpjoy/mx-common'
 import { createSegmenter } from '@qpjoy/mx-common/segmenter'
 import { dirname, resolve } from 'node:path'
@@ -30,6 +31,7 @@ import { JustOneAdapter } from './adapters/justone.mjs'
 import { TikHubAdapter } from './adapters/tikhub.mjs'
 import { RapidApiAdapter } from './adapters/rapidapi.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
+import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
 import { RAPIDAPI_METADATA, rapidApiConfig } from './external-platforms/rapidapi-config.mjs'
 import { createApp } from './app.mjs'
 import { createPeripheralRuntime } from './peripherals/runtime.mjs'
@@ -256,6 +258,7 @@ export async function createRuntime(config = loadConfig()) {
   const tikHubProxyStore = pool ? new ExternalPlatformProxyStore(pool, config.deploymentEgress) : null
   const platformSearchPolicyStore = new PlatformSearchPolicyStore(pool)
   const ecommerceRoutingStore = new EcommerceRoutingStore(pool)
+  const strategySearchRoutingStore = new StrategySearchRoutingStore(pool)
   const facebookGateways = Object.fromEntries([
     ['rapidapi', rapidApiAdapter, rapidConfig, rapidApiCredentialStore],
     ['justone', justOneAdapter, config.justOne, externalPlatformCredentialStore],
@@ -385,19 +388,30 @@ export async function createRuntime(config = loadConfig()) {
     operationControlStore: externalPlatformControlStore,
     credentialStore: tikHubCredentialStore,
   })
-  const nativeSearchGateways = Object.fromEntries(['weibo', 'instagram'].map(platform => [platform, new ExternalPlatformGateway({
-    usageStore: store,
-    platformStore: createExternalPlatformStore({ pool, usageStore: store,
-      providerKey: 'tikhub', authorizationPlatform: platform,
-      rateLimitBurst: config.tikHub.rateLimitBurst,
-      circuitFailureThreshold: config.tikHub.circuitFailureThreshold,
-      circuitOpenMs: config.tikHub.circuitOpenMs,
-      uncertainCooldownMs: config.tikHub.unknownFingerprintCooldownMs,
-      responseQuarantineCooldownMs: config.tikHub.responseQuarantineCooldownMs }),
-    adapter: tikHubAdapter, config: config.tikHub, providerKey: 'tikhub',
-    apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: config.reservationLeaseMs,
-    operationControlStore: externalPlatformControlStore, credentialStore: tikHubCredentialStore,
-  })]))
+  const nativeSearchGateway = (platform, providerKey) => {
+    const justone = providerKey === 'justone'
+    const providerConfig = justone ? config.justOne : config.tikHub
+    return new ExternalPlatformGateway({
+      usageStore: store,
+      platformStore: createExternalPlatformStore({ pool, usageStore: store,
+        providerKey, authorizationPlatform: platform,
+        rateLimitBurst: providerConfig.rateLimitBurst,
+        circuitFailureThreshold: providerConfig.circuitFailureThreshold,
+        circuitOpenMs: providerConfig.circuitOpenMs,
+        uncertainCooldownMs: providerConfig.unknownFingerprintCooldownMs,
+        responseQuarantineCooldownMs: providerConfig.responseQuarantineCooldownMs }),
+      adapter: justone ? justOneAdapter : tikHubAdapter, config: providerConfig, providerKey,
+      apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: config.reservationLeaseMs,
+      operationControlStore: externalPlatformControlStore,
+      credentialStore: justone ? externalPlatformCredentialStore : tikHubCredentialStore,
+    })
+  }
+  const nativeSearchGateways = Object.fromEntries(['weibo', ...Object.keys(TIKHUB_CONTENT_SEARCH_RECIPES)]
+    .map(platform => [platform, nativeSearchGateway(platform, 'tikhub')]))
+  const instagramSearchGateways = Object.fromEntries(['justone', 'tikhub'].map(provider => [provider, nativeSearchGateway('instagram', provider)]))
+  const instagramSearch = (context, input) => instagramSearchGateways.justone.searchRaw(context, input, {
+    policyStore: strategySearchRoutingStore, gateways: instagramSearchGateways,
+  })
   const tikHubGateway = new TikHubGateway({
     usageStore: store,
     platformStore: tikHubPlatformStore,
@@ -510,6 +524,26 @@ export async function createRuntime(config = loadConfig()) {
         ...(await ipRiskProduct.capabilities().catch(()=>({operations:{'ip.risk.subscription.query':{ready:false}}}))).operations, 'enterprise.query': { ready: enterpriseReady } } }
     },
     externalPostCapabilities,
+    externalTwitterCapabilities: async options => {
+      const credential = await rapidApiCredentialStore.describeCredential('rapidapi')
+      const readiness = await hubSocialGateway.nativeReadiness({ ...options,
+        operationKeys: ['social.content.search'], credentialConfigured: credential.credentialConfigured,
+      })
+      return { ready: readiness['social.content.search'] === true }
+    },
+    externalContentSearchCapabilities: async options => {
+      const selected = Object.keys(TIKHUB_CONTENT_SEARCH_RECIPES)
+        .filter(platform => !Array.isArray(options?.platforms) || options.platforms.includes(platform))
+      if (!selected.length) return {}
+      const credential = await tikHubCredentialStore.describeCredential('tikhub')
+      const readiness = await nativeSearchGateways[selected[0]].nativeReadiness({ ...options,
+        operationKeys: selected.map(platform => `native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`),
+        credentialConfigured: credential.credentialConfigured,
+      })
+      return Object.fromEntries(selected.map(platform => [platform, {
+        ready: readiness[`native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`] === true,
+      }]))
+    },
     externalFacebookCapabilities: async options => {
       const policy = await platformSearchPolicyStore.facebook()
       if (policy.mode === 'paused') return { ready: false }
@@ -520,17 +554,23 @@ export async function createRuntime(config = loadConfig()) {
         return [provider, Object.values(readiness).some(Boolean)]
       }))
       const ready = Object.fromEntries(states.filter(row => row.status === 'fulfilled').map(row => row.value))
-      const resetDue = policy.reset_at && new Date(policy.reset_at).getTime() <= Date.now()
-      const blocked = !resetDue && ((policy.blocked_until && new Date(policy.blocked_until).getTime() > Date.now())
-        || (!policy.blocked_until && (policy.used >= policy.monthly_limit || policy.remaining === 0)))
+      // A due check permits one demand-triggered probe; it does not replenish
+      // the subscription. Use the same shortened billing-window schedule as admission.
+      const checkAt = policy.next_recovery_check_at || policy.blocked_until
+      const blocked = checkAt ? new Date(checkAt).getTime() > Date.now()
+        : policy.used >= policy.monthly_limit || policy.remaining === 0
       return { ready: Boolean((policy.mode !== 'justone' && ready.rapidapi && !blocked) || (policy.mode !== 'rapidapi' && ready.justone)) }
     },
     externalSocialSearch: (context, input) => tikHubGateway.searchNotes(context, input),
     externalWechatSearch: (context, input) => socialAccountTikHubGateway.forwardNative(context, input),
     externalRawSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
+      : input.normalized.platform === 'instagram' ? instagramSearch(context, input)
+      : TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform] ? nativeSearchGateways[input.normalized.platform].searchContent(context, input)
       : (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
     externalDataSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
-      : nativeSearchGateways[input.normalized.platform].searchRaw(context, input),
+      : input.normalized.platform === 'instagram' ? instagramSearch(context, input)
+      : TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform] ? nativeSearchGateways[input.normalized.platform].searchContent(context, input)
+      : (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
     // The gateway reads the audited operation policy on every dispatch; static
     // env flags must not prevent routing to a database-enabled operation.
     externalSocialSearchEnabled: (context) => useTikHubOperation(context, 'social.posts.search'),
@@ -588,6 +628,7 @@ export async function createRuntime(config = loadConfig()) {
     harborPortal,
     platformSearchPolicyStore,
     ecommerceRoutingStore,
+    strategySearchRoutingStore,
     peripherals,
     admissionRecovery: pool ? new AdmissionRecoveryService({ pool, usageStore: store,
       providers: Object.fromEntries([externalPlatformStore, tikHubPlatformStore, rapidApiStore, qixinPlatformStore,
@@ -653,6 +694,7 @@ export async function createRuntime(config = loadConfig()) {
     externalPlatformControlStore, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     hubSocialGateway, rapidApiStore, rapidApiCredentialStore, rapidApiProxyStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
+    nativeSearchGateways,
   }
 }
 

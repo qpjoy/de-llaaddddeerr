@@ -1,4 +1,7 @@
 .mih-web-search-page { --search-muted: var(--qp-text-3); }
+.mih-search-management { display: grid; gap: 16px; min-width: 0; }
+.mih-search-supplier-tabs { display: flex; flex-wrap: wrap; gap: 8px; }
+.mih-search-supplier-tabs button[aria-pressed=true] { color: var(--qp-primary); border-color: var(--qp-primary); background: var(--qp-primary-soft, var(--qp-bg-2)); }
 .mih-web-search-page > .mih-page-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
 .mih-web-search-page > .mih-page-header h1 { margin: 0; }
 .mih-web-search-page > .mih-page-header p { margin: 8px 0 0; color: var(--search-muted); }

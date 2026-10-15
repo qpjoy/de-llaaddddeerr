@@ -9,6 +9,7 @@ export class IpSearchAdapter {
     this.timeoutMs = timeoutMs
   }
   get configured() { return !!this.apiKey && this.apiKey.length <= 1024 && !/\s/u.test(this.apiKey) }
+  get dispatchBudgetMs() { return this.timeoutMs }
   async query(ip, { apiKey = this.apiKey } = {}) {
     const started = Date.now()
     const result = { outcome: 'unknown', errorCode: 'ip_query_outcome_unknown', httpStatus: null, businessCode: null }

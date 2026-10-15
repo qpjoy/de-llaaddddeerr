@@ -11,10 +11,12 @@ const searchablePlatforms = new Set([
   'telegram', 'public_opinion', 'ecommerce', 'social', 'mobile_commerce',
 ])
 const savedRecordCategory = platform => /^data_center_saved_records_[a-z][a-z0-9_]*$/.test(platform)
+const strategySearchPlatforms = new Set([...Object.values(NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS).flat(), 'wechat_mp', 'wechat_search', 'telegram'])
 export const PRODUCT_ACCESS = {
   '/data-products/web-search': {platform:'web_search',any:['web.search'],docs:'web-search'},
   ...Object.fromEntries(WECHAT_PRODUCTS.map(product => [`/data-products/${product.key}`, { platform: 'social', any: wechatServices(product).map(row => row.operation), docs: product.key } ])),
   '/data-products/search': { domain: 'search', docs: 'aggregate-search' },
+  '/data-products/strategy-search': { domain: 'strategy-search', docs: 'strategy-search' },
   '/data-products/news': { domain: 'news', docs: 'news-discovery' },
   '/data-products/social-content': { platform: 'social', any: ['social.accounts.search', ...nativeServiceCapabilities.social], docs:'social-content' },
   '/data-products/xiaohongshu-hot-notes': { platform: 'xiaohongshu', any: ['social.posts.hot_search'], docs: 'xiaohongshu-hot-notes' },
@@ -34,6 +36,8 @@ export function productAllowed(path, scopes = []) {
 
   if (path === '/data-products/social-content' && scopes.some(scope => scope.platforms?.includes('twitter') && ['social.content.search', 'social.content.crawl', 'social.profile.get'].some(capability => scope.capabilities?.includes(capability)))) return true
   const rule = PRODUCT_ACCESS[path]
+  if (rule?.domain === 'strategy-search') return scopes.some(scope => scope.platforms?.some(platform => strategySearchPlatforms.has(platform))
+    || (scope.platforms?.includes('social') && scope.capabilities?.includes('native.wechat.search.search')))
   if (rule?.domain) return scopes.some(scope => scope.platforms?.some(platform =>
     savedRecordCategory(platform) || (rule.domain === 'search' && searchablePlatforms.has(platform))))
   return !!rule && scopes.some(scope => scope.platforms?.includes(rule.platform) && (!rule.any || rule.any.some(value => scope.capabilities?.includes(value))))

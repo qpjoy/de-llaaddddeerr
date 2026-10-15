@@ -1,5 +1,10 @@
 import { randomInt, randomUUID } from "node:crypto";
 import { requireThat, str } from "./model.mjs";
+import {
+  normalizePoolPolicy,
+  poolAppPolicy,
+  poolRunHistory,
+} from "./pool-policy.mjs";
 export const DEFAULT_LOOP_POLICY = {
   maxInsertions: 3,
   maxDetourMs: 15000,
@@ -42,18 +47,47 @@ export function configureLoops(s, now, mode, body) {
   };
   const config = {};
   for (const [key, [min, max]] of Object.entries(limits)) {
+    const value =
+      body[key] === undefined
+        ? (row?.[key] ?? DEFAULT_LOOP_POLICY[key])
+        : body[key];
     requireThat(
-      Number.isInteger(body[key]) && body[key] >= min && body[key] <= max,
+      Number.isInteger(value) && value >= min && value <= max,
       `${key} 须为 ${min}–${max} 的整数`,
       400,
     );
-    config[key] = body[key];
+    config[key] = value;
   }
   requireThat(
     config.cooldownMinMs <= config.cooldownMaxMs,
     "冷却下限不能大于上限",
     400,
   );
+  if (body.scheduler !== undefined) {
+    requireThat(
+      body.scheduler &&
+        typeof body.scheduler === "object" &&
+        !Array.isArray(body.scheduler),
+      "scheduler 须为对象",
+      400,
+    );
+    normalizePoolPolicy(body.scheduler);
+    const old = row?.scheduler || {};
+    config.scheduler = normalizePoolPolicy({
+      ...old,
+      ...body.scheduler,
+      appDefaults: { ...old.appDefaults, ...body.scheduler.appDefaults },
+      appPolicies:
+        body.scheduler.appPolicies === undefined
+          ? old.appPolicies || {}
+          : Object.fromEntries(
+              Object.keys(body.scheduler.appPolicies).map((id) => [
+                id,
+                { ...old.appPolicies?.[id], ...body.scheduler.appPolicies[id] },
+              ]),
+            ),
+    });
+  }
   if (!row) {
     row = { id: randomUUID(), mode, rack, revision: 0 };
     s.loopPolicies.push(row);
@@ -69,6 +103,7 @@ export function configureLoops(s, now, mode, body) {
   return row;
 }
 export function recordLoopUsage(s, now, device, app, attempt) {
+  recordPoolFinish(s, now, device, attempt);
   const loop = attempt.loop || "small";
   app.recentRuns ||= [];
   app.recentRuns.push({
@@ -113,4 +148,58 @@ export function recordLoopUsage(s, now, device, app, attempt) {
     jobId: attempt.jobId,
     message: `${device.name} ${app.appId} 窗口内 ${small} 小 / ${large} 大，生成冷却 ${(durationMs / 1000).toFixed(1)} 秒（已保存，不随刷新重抽）`,
   });
+}
+
+// Reservation is charged once at dispatch, then replaced with measured service.
+// This ledger is persisted inside the existing device_app JSON document.
+export function recordPoolDispatch(s, now, device, attempt) {
+  const scheduler = loopPolicyFor(s, device)?.scheduler;
+  if (device.mode !== "sim" || !scheduler?.enabled) return;
+  const app = (s.apps || []).find(
+    (a) =>
+      a.mode === "sim" &&
+      a.deviceId === device.id &&
+      a.appId === (attempt.appId || "xhs"),
+  );
+  if (!app) return;
+  const policy = poolAppPolicy(scheduler, app.appId);
+  app.poolRuns = poolRunHistory(app, now, policy);
+  if (app.poolRuns.some((r) => r.attemptId === attempt.id)) return;
+  app.poolRuns.push({
+    attemptId: attempt.id,
+    at: now,
+    reservedServiceMs: attempt.estimatedDurationMs,
+    finishedAt: null,
+    policySnapshot: { ...policy },
+  });
+  app.poolRuns = app.poolRuns.slice(-10000);
+}
+export function recordPoolFinish(s, now, device, attempt) {
+  const app = (s.apps || []).find(
+    (a) =>
+      a.mode === "sim" &&
+      a.deviceId === device.id &&
+      a.appId === (attempt.appId || "xhs"),
+  );
+  const charge = app?.poolRuns?.find((r) => r.attemptId === attempt.id);
+  if (!charge || device.mode !== "sim") return;
+  charge.finishedAt = now;
+  charge.actualServiceMs = Math.max(0, now - charge.at);
+  const scheduler = loopPolicyFor(s, device)?.scheduler;
+  const policy =
+    charge.policySnapshot || (scheduler && poolAppPolicy(scheduler, app.appId));
+  if (!policy) return;
+  // Inspect the burst admitted at dispatch, before any window can expire while
+  // the task is running. Once earned, this rest survives policy edits/disable.
+  const usedMs = app.poolRuns.reduce(
+    (n, r) => n + (r.actualServiceMs ?? r.reservedServiceMs ?? 0),
+    0,
+  );
+  if (app.poolRuns.length >= policy.maxRuns || usedMs >= policy.maxServiceMs) {
+    app.poolRestUntil = Math.max(
+      app.poolRestUntil || 0,
+      now + policy.cooldownMs,
+    );
+    app.cooldownUntil = Math.max(app.cooldownUntil || 0, app.poolRestUntil);
+  }
 }

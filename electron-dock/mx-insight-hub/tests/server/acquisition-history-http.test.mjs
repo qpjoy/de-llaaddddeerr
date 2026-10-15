@@ -107,6 +107,7 @@ test('acquisition history routes keep admin evidence separate from owner-scoped 
       headers: { 'x-mx-insight-admin-token': ADMIN_TOKEN },
     })
     assert.equal(admin.status, 200)
+    assert.equal(admin.headers.get('cache-control'), 'private, no-store')
     const adminBody = await admin.json()
     assert.equal(adminBody.data.owner.consumerId, CONSUMER_ID)
     assert.deepEqual(calls[0], { audience: 'admin', requestId })

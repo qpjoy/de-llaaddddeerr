@@ -25,12 +25,16 @@ const TKEY = 't.douyin_search_fetch_video_search_v1'
 const body = { params: { keyword: '自行车', page: 1, sortType: '_2' } }
 const DATA = { rows: [{ id: 'one', title: '', body: '完整正文\n#话题', unknown: { nested: [false, 0, null] } }], nextCursor: 'opaque-vendor-cursor' }
 
-test('source inventory records the Facebook search cutover without inventing supplier health', () => {
+test('source inventory records Facebook and Instagram search cutovers without inventing supplier health', () => {
   const snapshot = providerMigrationSnapshot()
   assert.equal(snapshot.summary.sourceEndpoints, 51)
   assert.equal(snapshot.summary.nativeContracts, 50)
-  assert.equal(snapshot.summary.legacyCutovers, 2)
-  assert.ok(snapshot.rows.filter(row => row.legacyStatus === 'hub_search_cutover').every(row => row.platform === 'facebook'))
+  assert.equal(snapshot.summary.legacyCutovers, 3)
+  assert.ok(snapshot.rows.filter(row => row.legacyStatus === 'hub_search_cutover').every(row => ['facebook', 'instagram'].includes(row.platform)))
+  const instagram = snapshot.rows.find(row => row.id === 'justone-instagram-search')
+  assert.equal(instagram.operation, 'native.j.api_7968b9ed3e986618')
+  assert.equal(instagram.hubPath, '/api/v1/data/search')
+  assert.equal(snapshot.rows.find(row => row.id === 't.instagram_v3_general_search').legacyStatus, 'existing_routes_unchanged')
   assert.equal(snapshot.incompleteInventory, true)
   assert.equal(NATIVE_FORWARDING_ENDPOINTS.filter(r => r.provider === 'justone' && !r.schemaVersion).length, 11)
   assert.equal(NATIVE_FORWARDING_ENDPOINTS.filter(r => r.provider === 'tikhub' && !r.schemaVersion).length, 39)
@@ -117,7 +121,7 @@ test('TikHub native GET preserves an opaque pagination token without a request b
   assert.equal(calls, 1)
 })
 
-async function harness({ key = JKEY, grant = true, enabled = true, outcome = 'success', data = DATA } = {}) {
+async function harness({ key = JKEY, grant = true, enabled = true, outcome = 'success', data = DATA, upstreamResponse } = {}) {
   const endpoint = nativeForwardingEndpoint(key)
   const usageStore = new MemoryStore()
   const service = new HubService({ store: usageStore, adapter: {}, apiKeyPepper: PEPPER })
@@ -142,6 +146,7 @@ async function harness({ key = JKEY, grant = true, enabled = true, outcome = 'su
   const adapter = new Adapter({ token: 'fixture-j', apiKey: 'fixture-t', timeoutMs: 50, fetchImpl: async (_url, options) => {
     calls++
     dispatched.push(options.body ? JSON.parse(options.body) : null)
+    if (upstreamResponse) return upstreamResponse()
     if (outcome === 'unknown') throw new Error('connection closed after send')
     const code = outcome === 'rejected' ? (endpoint.provider === 'justone' ? 301 : 400) : endpoint.provider === 'justone' ? 0 : 200
     return Response.json({ code, message: 'fixture', recordTime: '2026-09-26', data: typeof data === 'function' ? data(dispatched.at(-1), calls) : data })
@@ -214,6 +219,73 @@ test('unknown and definitive failure keep the same request from redispatching, f
     assert.equal(h.calls(), 1)
     assert.equal(h.platformStore.calls.size, 1)
     if (outcome === 'unknown') assert.equal([...h.platformStore.calls.values()][0].billed, null)
+  }
+})
+
+test('TikHub nested error codes retain HTTP classification, unknown billing and immutable native replay', async () => {
+  for (const [httpStatus, businessCode, status, code, outcome] of [
+    [400, 302, 502, 'external_platform_rejected', 'rejected'],
+    [400, 600, 502, 'external_platform_rejected', 'rejected'],
+    [429, 600, 429, 'external_platform_capacity_exceeded', 'rejected'],
+    [503, 302, 502, 'external_platform_outcome_unknown', 'unknown'],
+  ]) {
+    const payload = { detail: { code: businessCode, request_id: 'native-nested-failure' } }
+    const h = await harness({ key: TKEY, upstreamResponse: () => Response.json(payload, { status: httpStatus }) })
+    let first
+    await assert.rejects(h.gateway.forwardNative(h.context, h.query), error => {
+      first = error
+      assert.equal(error.status, status)
+      assert.equal(error.code, code)
+      return true
+    })
+    await assert.rejects(h.gateway.forwardNative(h.context, h.query), error => {
+      assert.equal(error.status, outcome === 'unknown' ? 409 : first.status)
+      assert.equal(error.code, outcome === 'unknown' ? 'request_outcome_unknown' : first.code)
+      assert.deepEqual(error.details, first.details)
+      return true
+    })
+    assert.equal(h.calls(), 1)
+    assert.equal(h.platformStore.calls.size, 1)
+    const call = [...h.platformStore.calls.values()][0]
+    assert.equal(call.httpStatus, httpStatus)
+    assert.equal(call.businessCode, businessCode)
+    assert.equal(call.outcome, outcome)
+    assert.equal(call.billed, null)
+    const usage = h.usageStore.requests.get(first.details.requestId)
+    if (outcome === 'unknown') assert.equal(usage.status, 'unknown')
+    else {
+      assert.equal(usage.responseStatus, status)
+      assert.equal(usage.unitsActual, 0)
+    }
+    if (httpStatus === 400) {
+      assert.equal(usage.status, 'committed')
+      assert.equal(h.platformStore.state.consecutiveFailures, 0)
+      // Historical delivery evidence must retain its stored classification.
+      usage.responseStatus = 429
+      usage.responseBody.error.code = 'external_platform_capacity_exceeded'
+      await assert.rejects(h.gateway.forwardNative(h.context, h.query), {
+        status: 429, code: 'external_platform_capacity_exceeded',
+      })
+      assert.equal(h.calls(), 1)
+    }
+  }
+})
+
+test('JustOne business capacity codes retain their existing native statuses and unbilled replay', async () => {
+  for (const businessCode of [302, 303, 100, 600, 601, 602]) {
+    const status = [302, 303].includes(businessCode) ? 429 : 503
+    const code = status === 429 ? 'external_platform_capacity_exceeded' : 'external_platform_capacity_unavailable'
+    const h = await harness({ upstreamResponse: () => Response.json({ code: businessCode,
+      message: 'fixture', data: null, recordTime: '2026-10-13' }) })
+    await assert.rejects(h.gateway.forwardNative(h.context, h.query), { status, code })
+    await assert.rejects(h.gateway.forwardNative(h.context, h.query), { status, code })
+    assert.equal(h.calls(), 1)
+    const call = [...h.platformStore.calls.values()][0]
+    assert.equal(call.httpStatus, 200)
+    assert.equal(call.businessCode, businessCode)
+    assert.equal(call.billed, false)
+    assert.equal(call.outcome, 'rejected')
+    assert.equal(h.platformStore.calls.size, 1)
   }
 })
 
@@ -573,6 +645,48 @@ test('data/search fails closed for WeChat permissions, runtime and balance witho
     assert.equal((await app.request('/api/v1/data/search', { platform: 'wechat', query: '自行车' })).status, options.status)
     assert.equal(h.calls(), 0); assert.equal(app.historicalCalls(), 0)
   }
+})
+
+test('data/search WeChat aliases and next pages retain native fields and one billing identity across paths', async t => {
+  const h = await harness({ key: 'wechat.search.search', data: params => ({
+    items: [{ docID: params.cursor ? '9223372036854775806' : '9223372036854775807', title: '完整标题', desc: '完整摘要' }],
+    categories: [{ word: '全部' }], continue_flag: params.cursor ? 0 : 1,
+    cursor: params.cursor ? '' : 'wechat-native-next-page', unknown: { nullable: null, count: 0 },
+  }) }), app = await wechatAliasApp(t, h)
+  const input = { platform: 'wechat_search', query: '自行车', pageSize: 20, params: { raw: false } }
+  const first = await app.request('/api/v1/data/search', input, 'wechat-unified-first')
+  const payload = await first.json()
+  assert.equal(first.status, 200)
+  assert.equal(payload.endpoint, 'wechat.search.search')
+  assert.equal(payload.data.items[0].docID, '9223372036854775807')
+  assert.deepEqual(payload.data.unknown, { nullable: null, count: 0 })
+  assert.equal(payload.data.cursor, 'wechat-native-next-page')
+  for (const platform of ['wechat', 'weixin', ' WECHAT_SEARCH ']) {
+    const replay = await app.request('/api/v1/data/search', { ...input, platform, type: 'stable' }, 'wechat-unified-first')
+    assert.equal(replay.status, 200)
+    assert.equal(replay.headers.get('idempotent-replay'), 'true')
+    assert.deepEqual(await replay.json(), payload)
+  }
+  // Native idempotency remains durable even when the old data-search fresh
+  // window would have expired. Do not buy another page to refresh a replay.
+  for (const request of h.usageStore.requests.values()) request.completedAt = new Date(Date.now() - 180_000).toISOString()
+  const fresh = await app.request('/api/v1/data/search', { ...input, type: 'fresh' }, 'wechat-unified-first')
+  assert.equal(fresh.headers.get('idempotent-replay'), 'true')
+  assert.deepEqual(await fresh.json(), payload)
+  assert.equal(h.calls(), 1)
+  const nextInput = { ...input, cursor: payload.data.cursor }
+  const next = await app.request('/api/v1/data/search', nextInput, 'wechat-unified-next')
+  const page2 = await next.json()
+  assert.equal(next.status, 200)
+  assert.equal(page2.data.items[0].docID, '9223372036854775806')
+  assert.equal(page2.data.continue_flag, 0)
+  assert.equal(h.dispatched[1].cursor, 'wechat-native-next-page')
+  const canonical = await app.request(WECHAT_SEARCH_PATH, { params: { keyword: '自行车', raw: false, cursor: payload.data.cursor } }, 'wechat-unified-next')
+  assert.equal(canonical.headers.get('idempotent-replay'), 'true')
+  assert.deepEqual(await canonical.json(), page2)
+  assert.equal(h.calls(), 2)
+  assert.equal(h.usageStore.requests.size, 2)
+  assert.equal(app.historicalCalls(), 0)
 })
 
 test('aggregate WeChat discovery separates native live permission from stored platform grants', async t => {

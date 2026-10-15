@@ -144,7 +144,7 @@ small,
 }
 .app-shell {
   display: grid;
-  grid-template-columns: 230px minmax(0, 1fr);
+  grid-template-columns: 204px minmax(0, 1fr);
   min-height: 100vh;
   padding: 14px;
   gap: 0;
@@ -161,7 +161,7 @@ small,
   z-index: 2;
 }
 .brand {
-  font-size: 28px;
+  font-size: 25px;
   font-weight: 720;
   letter-spacing: -0.5px;
   padding: 20px 22px 28px;
@@ -184,9 +184,9 @@ small,
   background: transparent;
   color: #243249;
   justify-content: flex-start;
-  gap: 20px;
-  padding: 13px 15px;
-  font-size: 16px;
+  gap: 12px;
+  padding: 13px 12px;
+  font-size: 14px;
   font-weight: 500;
   position: relative;
 }
@@ -2380,5 +2380,302 @@ summary {
   }
   .device-dialog .modal-head h2 {
     font-size: 18px;
+  }
+}
+
+/* Independent virtual-clock pool benchmark. */
+.pool-simulator .section-head > svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.pool-simulator .section-head p {
+  margin: 7px 0 0;
+}
+.pool-isolation {
+  padding: 11px 14px;
+  border-radius: 6px;
+  background: #eaf5f4;
+  color: #2d706d;
+  font-size: 12px;
+  margin: 0 0 20px;
+}
+.pool-fields {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.pool-simulator label {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+  color: #53677e;
+}
+.pool-scenario-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(100px, 1fr) minmax(100px, 1fr);
+  gap: 14px;
+}
+.pool-scenario-description {
+  margin: 10px 0 18px;
+}
+.pool-policy-controls {
+  padding: 15px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fafcfe;
+}
+.pool-simulator summary {
+  cursor: pointer;
+  color: #344c67;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.8;
+}
+.pool-strategy-field {
+  margin: 20px 0 16px;
+  max-width: 320px;
+}
+.pool-policy-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+.pool-policy-grid small {
+  font-weight: 400;
+  line-height: 1.65;
+  color: var(--muted);
+  font-size: 11px;
+}
+.pool-app-policy-title {
+  margin: 22px 0 7px;
+}
+.pool-app-overrides {
+  margin-top: 16px;
+}
+.pool-app-override {
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+.pool-simulator .pool-override-toggle {
+  display: flex;
+  align-items: center;
+}
+.pool-override-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.pool-app-override .pool-policy-grid {
+  margin-top: 14px;
+}
+.pool-run-row,
+.pool-report-head,
+.pool-live-apply {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+.pool-run-row {
+  margin-top: 18px;
+}
+.pool-run-row p,
+.pool-report-head p,
+.pool-live-apply p {
+  margin: 0;
+}
+.pool-run-row button,
+.pool-live-apply button {
+  flex-shrink: 0;
+}
+.pool-empty {
+  padding-top: 18px;
+  margin: 20px 0 0;
+  border-top: 1px solid var(--line);
+}
+.pool-report {
+  margin-top: 24px;
+  border-top: 1px solid var(--line);
+  padding-top: 24px;
+}
+.pool-report-head {
+  align-items: start;
+  margin-bottom: 16px;
+}
+.pool-report-head h3 {
+  margin-bottom: 6px;
+}
+.pool-check {
+  font-size: 12px;
+  color: #087f79;
+  background: #e9f6f3;
+  border: 1px solid #cbe6df;
+  border-radius: 5px;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+.pool-check.has-violations {
+  background: #fff0ed;
+  color: #ae4235;
+  border-color: #edc3ba;
+}
+.pool-comparison {
+  width: 100%;
+  min-width: 440px;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.pool-comparison th,
+.pool-comparison td {
+  padding: 11px 15px;
+  border-bottom: 1px solid var(--line);
+  text-align: right;
+}
+.pool-comparison th:first-child {
+  text-align: left;
+}
+.pool-comparison thead {
+  background: #f2f7fa;
+}
+.pool-comparison tbody th {
+  color: #61768a;
+  font-weight: 400;
+}
+.pool-comparison td:nth-child(2) {
+  color: #087f79;
+  font-weight: 600;
+}
+.pool-comparison-note {
+  margin: 12px 0 20px;
+}
+.pool-report-details {
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+.pool-report-details > p {
+  margin: 12px 0 0;
+}
+.pool-applied-settings {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin: 17px 0;
+  font-size: 12px;
+}
+.pool-applied-settings dt {
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.pool-applied-settings dd {
+  margin: 0;
+}
+.pool-device-loads {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+  max-height: 400px;
+  overflow: auto;
+}
+.pool-device-loads > div {
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.pool-device-loads span {
+  display: block;
+  color: var(--muted);
+  margin: 7px 0 10px;
+  line-height: 1.6;
+}
+.pool-device-loads progress {
+  accent-color: var(--accent);
+  width: 100%;
+  height: 5px;
+}
+.pool-event-list {
+  list-style: none;
+  padding: 0;
+  margin-bottom: 0;
+  max-height: 420px;
+  overflow: auto;
+}
+.pool-event-list li {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  gap: 14px;
+  padding: 11px 0;
+  border-bottom: 1px solid #edf1f5;
+  font-size: 12px;
+}
+.pool-event-list time,
+.pool-event-list small {
+  color: var(--muted);
+}
+.pool-event-list strong {
+  font-weight: 500;
+}
+.pool-event-list small {
+  display: block;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+.pool-limitations {
+  padding: 16px;
+  border-radius: 7px;
+  background: #f2f6fa;
+  margin-top: 16px;
+}
+.pool-limitations h4 {
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+.pool-limitations ul {
+  margin: 0;
+  padding-left: 18px;
+  color: #61768a;
+  font-size: 12px;
+  line-height: 1.85;
+}
+.pool-live-apply {
+  margin-top: 20px;
+}
+.pool-live-apply strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+@media (max-width: 1000px) {
+  .pool-policy-grid,
+  .pool-device-loads {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 620px) {
+  .pool-scenario-fields,
+  .pool-policy-grid {
+    grid-template-columns: 1fr;
+  }
+  .pool-applied-settings {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .pool-run-row,
+  .pool-live-apply,
+  .pool-report-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 14px;
+  }
+  .pool-check {
+    align-self: start;
+  }
+  .pool-event-list li {
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 10px;
   }
 }

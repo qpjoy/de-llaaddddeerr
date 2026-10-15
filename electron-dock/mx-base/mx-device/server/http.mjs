@@ -1,10 +1,15 @@
 import {
   definitions,
   saveDefinition,
+  archiveDefinition,
   rackScenario,
   testAdapterCommand,
 } from "./workflows.mjs";
-import { COMMANDS } from "./workflow-catalog.mjs";
+import {
+  commandDefinitions,
+  saveCommand,
+  archiveCommand,
+} from "./command-registry.mjs";
 import { configureLoops } from "./loop-policy.mjs";
 import { createServer } from "node:http";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
@@ -30,6 +35,24 @@ import {
 import { configurePacing } from "./pacing.mjs";
 import { controlResource, updatePlacement } from "./resources.mjs";
 import { schedulingSnapshot } from "./scheduling.mjs";
+import { Worker } from "node:worker_threads";
+import { POOL_SCENARIOS, simulationOptions } from "./pool-simulator.mjs";
+import { DEFAULT_POOL_POLICY } from "./pool-policy.mjs";
+import {
+  listRules,
+  listStrategies,
+  saveRule,
+  saveStrategy,
+  archiveRule,
+  archiveStrategy,
+  applyStrategy,
+} from "./strategy-registry.mjs";
+import {
+  assignQueuedJob,
+  cancelQueuedJob,
+  configureSimDevice,
+  launchWorkstationDemo,
+} from "./workstation.mjs";
 
 const equal = (a, b) =>
   typeof a === "string" &&
@@ -68,6 +91,43 @@ const summarize = (s) => ({
 export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
   const failures = new Map(),
     probeRequests = new Map();
+  let simulationBusy = false;
+  async function benchmark(options) {
+    if (simulationBusy)
+      throw new Fault("已有调度演练正在计算，请稍后重试", 429);
+    simulationBusy = true;
+    let worker;
+    try {
+      return await new Promise((resolve, reject) => {
+        worker = new Worker(
+          new URL("./pool-simulation-worker.mjs", import.meta.url),
+          { workerData: options },
+        );
+        const timer = setTimeout(
+          () => reject(new Fault("演练计算超时，请缩小规模或调整预算", 503)),
+          6500,
+        );
+        const done = (fn, value) => {
+          clearTimeout(timer);
+          fn(value);
+        };
+        worker.once("message", (value) =>
+          value.error
+            ? done(reject, new Fault(value.error, value.status))
+            : done(resolve, value.report),
+        );
+        worker.once("error", () =>
+          done(reject, new Fault("演练计算失败", 500)),
+        );
+        worker.once("exit", (code) => {
+          if (code) done(reject, new Fault("演练工作线程退出", 500));
+        });
+      });
+    } finally {
+      if (worker) await worker.terminate();
+      simulationBusy = false;
+    }
+  }
   const sign = (payload) =>
     createHmac("sha256", cfg.adminToken).update(payload).digest("hex");
   function role(req) {
@@ -106,7 +166,7 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
         await store.ready();
         return json(res, 200, { ok: true });
       }
-      if (req.method === "POST") {
+      if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) {
         if (
           req.headers.origin &&
           new URL(req.headers.origin).host !== req.headers.host
@@ -152,6 +212,18 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
         const mode = realm(url.searchParams.get("mode") || "sim");
         if (who === "test" && mode !== "sim")
           throw new Fault("测试凭证仅允许模拟模式", 403);
+        if (path === "/api/pool-scenarios" && req.method === "GET") {
+          if (mode !== "sim") throw new Fault("调度池演练仅允许模拟模式", 403);
+          return json(res, 200, {
+            scenarios: POOL_SCENARIOS,
+            defaults: DEFAULT_POOL_POLICY,
+          });
+        }
+        if (path === "/api/pool-simulate" && req.method === "POST") {
+          if (mode !== "sim") throw new Fault("调度池演练仅允许模拟模式", 403);
+          const options = simulationOptions(await body(req));
+          return json(res, 200, await benchmark(options));
+        }
         if (path === "/api/state" && req.method === "GET") {
           const state = await store.snapshot(mode);
           return json(res, 200, {
@@ -159,15 +231,168 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
             scheduling: schedulingSnapshot(state, state.now, mode),
           });
         }
+        if (
+          ["/api/strategy-definitions", "/api/rule-definitions"].includes(path)
+        ) {
+          const strategy = path === "/api/strategy-definitions";
+          if (req.method === "GET") {
+            const state = await store.snapshot(mode);
+            const history = { history: true, includeArchived: true };
+            return json(
+              res,
+              200,
+              strategy
+                ? {
+                    strategies: mode === "sim" ? listStrategies(state) : [],
+                    history:
+                      mode === "sim" ? listStrategies(state, history) : [],
+                    rules: mode === "sim" ? listRules(state) : [],
+                    ruleHistory:
+                      mode === "sim" ? listRules(state, history) : [],
+                  }
+                : {
+                    rules: mode === "sim" ? listRules(state) : [],
+                    history: mode === "sim" ? listRules(state, history) : [],
+                  },
+            );
+          }
+          if (req.method === "POST") {
+            if (mode !== "sim")
+              throw new Fault("策略与规则当前仅用于模拟调度", 403);
+            const b = await body(req),
+              save = strategy ? saveStrategy : saveRule;
+            return json(
+              res,
+              201,
+              await store.atomic((s, n) => save(s, n, mode, b), { mode }),
+            );
+          }
+        }
+        const strategyArchive = path.match(
+          /^\/api\/(strategy|rule)-definitions\/([^/]+)$/,
+        );
+        if (strategyArchive && req.method === "DELETE") {
+          if (mode !== "sim")
+            throw new Fault("策略与规则当前仅用于模拟调度", 403);
+          const b = await body(req);
+          let id;
+          try {
+            id = decodeURIComponent(strategyArchive[2]);
+          } catch {
+            throw new Fault("目录 ID 无效", 400);
+          }
+          const archive =
+            strategyArchive[1] === "strategy" ? archiveStrategy : archiveRule;
+          return json(
+            res,
+            200,
+            await store.atomic((s, n) => archive(s, n, mode, id, b), { mode }),
+          );
+        }
+        if (path === "/api/strategy-apply" && req.method === "POST") {
+          if (mode !== "sim") throw new Fault("策略当前仅应用于模拟机架", 403);
+          const b = await body(req);
+          return json(
+            res,
+            200,
+            await store.atomic((s, n) => applyStrategy(s, n, mode, b), {
+              mode,
+            }),
+          );
+        }
+        if (path === "/api/workstation-demo" && req.method === "POST") {
+          if (mode !== "sim") throw new Fault("演示场景不能驱动真机", 403);
+          const b = await body(req);
+          return json(
+            res,
+            202,
+            await store.atomic((s, n) => launchWorkstationDemo(s, n, mode, b), {
+              mode,
+            }),
+          );
+        }
+        const assignment = path.match(
+          /^\/api\/jobs\/([^/]+)\/(assignment|queue-cancel)$/,
+        );
+        if (assignment && req.method === "POST") {
+          if (mode !== "sim")
+            throw new Fault("此工作台任务管理仅用于模拟", 403);
+          const id = uuid(assignment[1]),
+            b = await body(req);
+          const mutate =
+            assignment[2] === "assignment" ? assignQueuedJob : cancelQueuedJob;
+          return json(
+            res,
+            200,
+            await store.atomic((s, n) => mutate(s, n, mode, id, b), {
+              mode,
+              jobId: id,
+            }),
+          );
+        }
+        const capabilities = path.match(
+          /^\/api\/devices\/([^/]+)\/sim-capabilities$/,
+        );
+        if (capabilities && req.method === "POST") {
+          if (mode !== "sim") throw new Fault("设备能力编辑仅用于模拟", 403);
+          const id = uuid(capabilities[1]),
+            b = await body(req);
+          return json(
+            res,
+            200,
+            await store.atomic(
+              (s, n) => configureSimDevice(s, n, mode, id, b),
+              { mode },
+            ),
+          );
+        }
+        if (path === "/api/command-definitions" && req.method === "GET") {
+          const state = await store.snapshot(mode);
+          return json(res, 200, {
+            commands: mode === "sim" ? commandDefinitions(state) : [],
+            history:
+              mode === "sim"
+                ? commandDefinitions(state, {
+                    history: true,
+                    includeArchived: true,
+                  })
+                : [],
+          });
+        }
+        if (path === "/api/command-definitions" && req.method === "POST") {
+          const b = await body(req);
+          return json(
+            res,
+            201,
+            await store.atomic((s, n) => saveCommand(s, n, mode, b), { mode }),
+          );
+        }
+        const catalogArchive = path.match(
+          /^\/api\/(command|task)-definitions\/([^/]+)$/,
+        );
+        if (catalogArchive && req.method === "DELETE") {
+          const b = await body(req);
+          let id;
+          try {
+            id = decodeURIComponent(catalogArchive[2]);
+          } catch {
+            throw new Fault("目录 ID 无效", 400);
+          }
+          const archive =
+            catalogArchive[1] === "command"
+              ? archiveCommand
+              : archiveDefinition;
+          return json(
+            res,
+            200,
+            await store.atomic((s, n) => archive(s, n, mode, id, b), { mode }),
+          );
+        }
         if (path === "/api/task-definitions" && req.method === "GET") {
           const state = await store.snapshot(mode);
           return json(res, 200, {
             definitions: definitions(state).filter((d) => d.mode === mode),
-            commands: COMMANDS.map((c) => ({
-              ...c,
-              realEnabled: false,
-              simulated: true,
-            })),
+            commands: mode === "sim" ? commandDefinitions(state) : [],
           });
         }
         if (path === "/api/task-definitions" && req.method === "POST") {
@@ -308,10 +533,36 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
         }
         if (path === "/api/devices" && req.method === "POST") {
           const b = await body(req);
+          if (mode !== "sim" && b.defaultStrategyId !== undefined)
+            throw new Fault("真实设备不能应用模拟默认策略", 403);
           return json(
             res,
             201,
-            await store.atomic((s, n) => register(s, n, mode, b), { mode }),
+            await store.atomic(
+              (s, n) => {
+                const device = register(s, n, mode, b);
+                if (
+                  b.defaultStrategyId !== undefined &&
+                  !s.devices.some(
+                    (d) =>
+                      d.mode === mode &&
+                      d.rack === device.rack &&
+                      d.id !== device.id,
+                  ) &&
+                  !s.loopPolicies?.some(
+                    (p) => p.mode === mode && p.rack === device.rack,
+                  )
+                ) {
+                  applyStrategy(s, n, mode, {
+                    rack: device.rack,
+                    revision: 0,
+                    strategyId: b.defaultStrategyId,
+                  });
+                }
+                return device;
+              },
+              { mode },
+            ),
           );
         }
         if (path === "/api/jobs" && req.method === "POST") {
@@ -418,7 +669,10 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
     } catch (e) {
       json(res, e.status || 503, {
         error:
-          e instanceof Fault ? e.message : "服务暂不可用；未自动重试设备操作",
+          e instanceof Fault ||
+          (Number.isInteger(e.status) && e.status >= 400 && e.status < 500)
+            ? e.message
+            : "服务暂不可用；未自动重试设备操作",
       });
     }
   });

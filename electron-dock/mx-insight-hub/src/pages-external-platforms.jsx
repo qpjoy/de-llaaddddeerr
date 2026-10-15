@@ -2222,7 +2222,7 @@ export function ExternalPlatformsPage({ token, query, setQuery, onUnauthorized, 
   if (provider === 'ipsearch') return <IntegrationSlotFrame provider={provider}><IpSearchPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} /></IntegrationSlotFrame>
   if (provider === 'night-all') return <IntegrationSlotFrame provider={provider}><NightAllPlatformDetail token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} /></IntegrationSlotFrame>
   if (provider) {
-    return <IntegrationSlotFrame provider={provider}><PlatformDetail token={token} range={range} provider={provider} selectedOperation={query.get('operation')} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} /></IntegrationSlotFrame>
+    return <IntegrationSlotFrame provider={provider}><PlatformDetail key={`${token}:${provider}`} token={token} range={range} provider={provider} selectedOperation={query.get('operation')} setQuery={setQuery} onUnauthorized={onUnauthorized} notify={notify} /></IntegrationSlotFrame>
   }
   return <PlatformsOverview token={token} range={range} setQuery={setQuery} onUnauthorized={onUnauthorized} />
 }

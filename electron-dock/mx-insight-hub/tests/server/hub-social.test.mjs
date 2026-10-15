@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createServer } from 'node:http'
-import { HUB_SOCIAL_ENDPOINTS, normalizeHubSocialRequest, normalizeTwitterResponse } from '../../server/contracts/hub-social.mjs'
+import { HUB_SOCIAL_ENDPOINTS, normalizeHubSocialRequest, normalizeTwitterResponse, projectTwitterSearchPage } from '../../server/contracts/hub-social.mjs'
 import { RapidApiAdapter, TWITTER_AIO_HOST } from '../../server/adapters/rapidapi.mjs'
 import { rapidApiConfig } from '../../server/external-platforms/rapidapi-config.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
@@ -67,6 +67,128 @@ test('normalization keeps full body, zero metrics, deduplicates and never consum
   const retweetTimeline = { data: { user: { result: { ...USER, timeline: { timeline: { instructions: [{ entries: [entry('3')] }] } } } } } }
   retweetTimeline.data.user.result.timeline.timeline.instructions[0].entries[0].content.itemContent.tweet_results.result.core.user_results.result = { ...USER, rest_id: '43', legacy: { screen_name: 'other' } }
   assert.equal(normalizeTwitterResponse(retweetTimeline, normalize({}, 'crawl')).data.items.length, 1, 'account time line may contain retweets by other authors')
+})
+
+test('AIO root entries can contain a known TimelineAddEntries wrapper without losing tweets or bottom continuation', () => {
+  const actualEntries = Array.from({ length: 20 }, (_, index) => entry(String(index + 1)))
+  actualEntries[1].content.itemContent.tweet_results.result = {
+    __typename: 'TweetWithVisibilityResults', tweet: actualEntries[1].content.itemContent.tweet_results.result,
+  }
+  actualEntries[0].content.itemContent.tweet_results.result.quoted_status_result = {
+    result: { ...tweet('999'), entries: [entry('998')] },
+  }
+  actualEntries.push({ entryId: 'cursor-top-0', content: { cursorType: 'Top', value: 'not-the-next-page' } },
+    { entryId: 'cursor-bottom-0', content: { cursorType: 'Bottom', value: 'vendor-page-2' } },
+    { entryId: 'search-metadata', content: { itemContent: { itemType: 'TimelineUser' } } })
+  const request = normalize({ sort: 'top' })
+  let cursorState
+  const result = normalizeTwitterResponse({ entries: [{ type: 'TimelineAddEntries', entries: actualEntries }] }, request,
+    { encodeCursor: state => { cursorState = state; return 'opaque-page-2' } })
+  assert.equal(result.data.items.length, 20)
+  assert.deepEqual(result.data.items.map(item => item.id), Array.from({ length: 20 }, (_, index) => String(index + 1)))
+  assert.equal(result.data.page.discardedCount, 0)
+  assert.equal(result.data.page.duplicateCount, 0)
+  assert.equal(result.data.page.nextCursor, 'opaque-page-2')
+  assert.equal(cursorState.providerCursor, 'vendor-page-2')
+  assert.equal(normalize({ sort: 'top', cursor: 'opaque-page-2' }, 'search', { decodeCursor: () => cursorState }).page, 2)
+  assert.deepEqual(normalizeTwitterResponse({ entries: actualEntries }, request, { encodeCursor: () => 'opaque-page-2' }).data.items,
+    result.data.items, 'direct root entries remain supported')
+})
+
+test('nested known entry wrappers retain de-duplication, strict counts and the final page boundary', () => {
+  const data = { entries: [{ type: 'TimelineAddEntries', entries: [entry('1'), entry('1'),
+    { content: { itemContent: { tweet_results: { result: { rest_id: '2' } } } } },
+    { entryId: 'cursor-bottom-0', content: { cursorType: 'Bottom', value: 'vendor-page-2' } },
+  ] }] }
+  const result = normalizeTwitterResponse(data, normalize(), { encodeCursor: () => 'opaque' })
+  assert.equal(result.data.items.length, 1)
+  assert.equal(result.data.page.duplicateCount, 1)
+  assert.equal(result.data.page.discardedCount, 1)
+  assert.equal(result.data.status, 'partial')
+  const last = normalizeTwitterResponse(data, { ...normalize(), page: 15 }, { encodeCursor: () => 'opaque' })
+  assert.equal(last.data.page.hasMore, false)
+  assert.equal(last.data.page.nextCursor, null)
+  assert.throws(() => normalizeTwitterResponse({ entries: [{ type: 'TimelineAddEntries', entries: [entry('1'), entry('2')] }] },
+    normalize({ count: 1 })), /upstream_page_exceeds_requested_count/)
+  assert.deepEqual(normalizeTwitterResponse({ entries: [{ type: 'TimelineAddEntries', entries: [] }] }, normalize()).data.items, [])
+  assert.deepEqual(normalizeTwitterResponse({ entries: [{ type: 'UnreviewedWrapper', entries: [entry('1')] }] }, normalize()).data.items, [],
+    'unknown wrappers do not become an arbitrary recursive tweet collector')
+})
+
+test('mixed direct and wrapped entries preserve input order and the final bottom cursor', () => {
+  const wrapped = entry('1'), later = entry('1')
+  wrapped.content.itemContent.tweet_results.result.note_tweet.note_tweet_results.result.text = 'wrapped first'
+  later.content.itemContent.tweet_results.result.note_tweet.note_tweet_results.result.text = 'direct later'
+  const bottom = value => ({ content: { cursorType: 'Bottom', value } })
+  let state
+  const result = normalizeTwitterResponse({ entries: [
+    { type: 'TimelineAddEntries', entries: [wrapped, bottom('wrapped-bottom')] },
+    entry('2'), later, bottom('direct-final-bottom'),
+  ] }, normalize(), { encodeCursor: value => { state = value; return 'opaque' } })
+  assert.deepEqual(result.data.items.map(item => item.id), ['1', '2'])
+  assert.equal(result.data.items[0].content, 'wrapped first')
+  assert.equal(result.data.page.duplicateCount, 1)
+  assert.equal(state.providerCursor, 'direct-final-bottom')
+})
+
+test('known entries wrapper expansion rejects oversized or deeply nested structures within a bounded node budget', () => {
+  assert.throws(() => normalizeTwitterResponse({ entries: [{ type: 'TimelineAddEntries', entries: Array(10000).fill({}) }] }, normalize()),
+    /timeline_too_large/)
+  let nested = entry('1')
+  for (let depth = 0; depth < 10000; depth++) nested = { type: 'TimelineAddEntries', entries: [nested] }
+  assert.throws(() => normalizeTwitterResponse({ entries: [nested] }, normalize()), /timeline_too_large/)
+})
+
+test('governed standard Twitter overflow preserves module tweets and pages 20 plus 4 before Bottom', () => {
+  const module = ids => ({ content: { entryType: 'TimelineTimelineModule', items: ids.map(id => ({ item: entry(id).content })) } })
+  const wire = { entries: [{ type: 'TimelineAddEntries', entries: [
+    ...Array.from({ length: 18 }, (_, i) => entry(String(i + 1))), module(['19', '20', '21']), module(['22', '23', '24']),
+    { content: { cursorType: 'Top', value: 'not-bottom' } }, { content: { cursorType: 'Bottom', value: 'original-bottom' } },
+    { content: { itemContent: { itemType: 'TimelineUser' } } },
+  ] }] }
+  const request = { ...normalize(), standardSearch: true }
+  assert.throws(() => normalizeTwitterResponse(wire, request), /upstream_page_exceeds_requested_count/)
+  assert.throws(() => normalizeTwitterResponse(wire, { ...request, operation: 'crawl' }, { allowOverflow: true }), /upstream_page_exceeds_requested_count/)
+  const publicBody = normalizeTwitterResponse(wire, request, { allowOverflow: true, encodeCursor: () => 'unused-provider-cursor' })
+  assert.equal(publicBody.data.items.length, 24)
+  assert.doesNotMatch(JSON.stringify(publicBody), /original-bottom/)
+  const next = [], options = { page: 1, pageSize: 20, archiveCallId: '992e50ff-aa36-480b-b25e-e9a0f7abd625',
+    encodeNext: state => { next.push(state); return `opaque-${state.page}` } }
+  const full = { publicBody, items: publicBody.data.items }
+  const first = projectTwitterSearchPage(full, options)
+  assert.equal(first.items.length, 20)
+  assert.equal(first.acquiredItems.length, 24)
+  assert.equal(JSON.parse(first.publicBody.data.raw_data).length, 20)
+  assert.equal(next[0].buffer.offset, 20)
+  assert.equal(next[0].providerCursor, null)
+  assert.equal(first.publicBody.data.page.hasMore, true)
+  const last = projectTwitterSearchPage(full, { ...options, page: 2, buffer: next[0].buffer })
+  assert.deepEqual([...first.items, ...last.items].map(item => item.id), Array.from({ length: 24 }, (_, i) => String(i + 1)))
+  assert.equal(last.publicBody.data.meta.upstreamCallCount, 0)
+  assert.deepEqual(next[1], { page: 3, providerCursor: 'original-bottom' })
+  assert.throws(() => projectTwitterSearchPage(full, { ...options, buffer: { ...next[0].buffer, hash: '0'.repeat(64) } }), /twitter_buffer_mismatch/)
+  assert.throws(() => projectTwitterSearchPage(full, { ...options, archiveCallId: null }), /twitter_page_archive_required/)
+  const capped = projectTwitterSearchPage(full, { ...options, page: 15 })
+  assert.equal(capped.publicBody.data.page.hasMore, false)
+  assert.equal(capped.publicBody.data.page.nextCursor, null)
+  assert.equal(capped.publicBody.data.warnings[0].code, 'TWITTER_PAGE_LIMIT_REACHED')
+  const finalProviderBody = normalizeTwitterResponse(timeline(['1'], 'last-bottom'), { ...request, page: 15 },
+    { allowOverflow: true, encodeCursor: () => assert.fail('page fifteen cannot encode a continuation') })
+  assert.equal(finalProviderBody.data.page.hasMore, false)
+  const finalPage = projectTwitterSearchPage({ publicBody: finalProviderBody }, { ...options, page: 15 })
+  assert.equal(finalPage.publicBody.data.page.nextCursor, null)
+  assert.equal(finalPage.publicBody.data.warnings[0].code, 'TWITTER_PAGE_LIMIT_REACHED')
+})
+
+test('RapidAPI overflow is accepted only by internal standard-search opt-in', async () => {
+  for (const flags of [{}, { allowOverflow: true }, { standardSearch: true }, { standardSearch: true, allowOverflow: true }]) {
+    let calls = 0
+    const adapter = new RapidApiAdapter({ apiKey: SECRET, fetchImpl: async () => { calls++; return Response.json(timeline(['1', '2'], null)) } })
+    const promise = adapter.execute({ ...normalize({ count: 1 }), ...flags })
+    if (flags.allowOverflow && flags.standardSearch) assert.equal((await promise).items.length, 2)
+    else await assert.rejects(promise, error => error.evidence?.outcome === 'succeeded_unusable')
+    assert.equal(calls, 1)
+  }
 })
 
 test('direct HTTP contracts perform exactly one fixed-host call without about or Python', async () => {

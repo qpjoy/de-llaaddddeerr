@@ -52,7 +52,7 @@ export class WebSearchService {
     }))
     return {contractVersion:WEB_SEARCH_VERSION,order,providers,defaultAccess:'explicit',selection:'pre_dispatch_only'}
   }
-  async search(context,{body,idempotencyKey,baiduCompatible=false}) {
+  async search(context,{body,idempotencyKey,baiduCompatible=false,signal}) {
     assert(typeof idempotencyKey==='string'&&/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey),400,'idempotency_key_required','Provide an Idempotency-Key with 8–128 safe characters')
     const request=normalizeWebSearch(body,{baiduCompatible})
     const fingerprint=requestFingerprint({method:'POST',path:WEB_SEARCH_PATH,body:request})
@@ -73,7 +73,7 @@ export class WebSearchService {
     assert(visible.order.includes(route.provider),403,'web_search_provider_not_granted','Saved search supplier is no longer granted')
     // The durable choice survives order, credential and rollout changes. Only
     // the chosen gateway may replay/dispatch this intent, even after timeout.
-    return this.gateways.get(route.provider).webSearch(context,{request,provider:webSearchProvider(route.provider),body,idempotencyKey,path:WEB_SEARCH_PATH})
+    return this.gateways.get(route.provider).webSearch(context,{request,provider:webSearchProvider(route.provider),body,idempotencyKey,path:WEB_SEARCH_PATH,...(signal?{signal}:{})})
   }
 }
 class SearchAdminService extends ExternalPlatformAdminService {

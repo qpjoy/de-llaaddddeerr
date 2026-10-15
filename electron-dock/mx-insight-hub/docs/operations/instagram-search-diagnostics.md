@@ -1,5 +1,7 @@
 # Instagram 搜索冷却诊断
 
+2026-10-15 更新：标准搜索新请求已在代码中切到 JustOne，待 Hub 发布。本文保留 TikHub 历史故障及原生接口诊断；最新路由、游标与发布边界见 [搜索切换记录](instagram-search-rejection-2026-10-14.md)。
+
 2026-10-12 可用性调整后，解析冷却默认改为 5 分钟，配置项为
 `MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS=300000`。下文中的 15 分钟与
 `900000ms` 属于历史事故证据；用新诊断脚本追查这些旧请求时，在诊断命令上设置
