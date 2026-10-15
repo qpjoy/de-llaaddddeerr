@@ -144,3 +144,34 @@ test('platform choice stays independent while an original read-only status looku
   h.select('快手')
   assert.equal(button(h.render(), '只读核对原请求状态'), undefined)
 })
+
+test('account composer follows a short page cursor with a new identity and keeps profile requests separate', async () => {
+  const { StrategySearchExperience } = await view
+  const previousAccess = environment.access
+  environment.access = { platforms: ['twitter'], capabilities: ['social.content.crawl', 'social.profile.get'] }
+  environment.identity = 'account-key'
+  const cell = createStrategySearchCell('twitter'), session = new Map([['account-key', cell]]), sent = []
+  let operation = 'crawl'
+  cell.update({ form: { ...cell.getSnapshot().form, accountField: 'user_id', account: 'ui_batch_019', pageSize: 500 } })
+  environment.send = async (_key, input, idem) => {
+    sent.push({ input, idem })
+    return { payload: { data: { platform: 'twitter', items: [], pageInfo: { hasMore: !input.body.cursor, nextCursor: input.body.cursor ? null : 'opaque-short-page' } } }, evidence: { requestId: `fixture-${sent.length}` } }
+  }
+  const render = () => StrategySearchExperience({ strategySession: session, operation })
+  try {
+    nodes(render()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} }); await flush()
+    assert.equal(sent[0].input.path, '/api/v1/data/social/crawl')
+    assert.deepEqual(sent[0].input.body, { platform: 'twitter', user_id: 'ui_batch_019', pageSize: 500 })
+    await button(render(), '读取下一页').props.onClick()
+    assert.deepEqual(sent[1].input.body, { ...sent[0].input.body, cursor: 'opaque-short-page' })
+    assert.notEqual(sent[1].idem, sent[0].idem)
+    assert.equal(button(render(), '读取下一页'), undefined)
+    operation = 'user-info'
+    assert.equal(sent.length, 2, 'operation changes never dispatch')
+    assert.equal(button(render(), '读取下一页'), undefined, 'content cursors cannot become profile continuation')
+    nodes(render()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} }); await flush()
+    assert.equal(sent[2].input.path, '/api/v1/data/social/user-info')
+    assert.deepEqual(sent[2].input.body, { platform: 'twitter', user_id: 'ui_batch_019' })
+    assert.notEqual(sent[2].idem, sent[0].idem)
+  } finally { environment.access = previousAccess }
+})

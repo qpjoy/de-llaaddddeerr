@@ -107,7 +107,7 @@ export class RapidApiAdapter {
       try { publicBody = facebook ? projectFacebookSearch(safe(raw), request, 'rapidapi', capturedAt,
         { allowOverflow: request.standardSearch === true && request.allowOverflow === true }).publicBody
         : normalizeTwitterResponse(safe(raw), request, { encodeCursor, capturedAt,
-          allowOverflow: request.operation === 'search' && request.standardSearch === true && request.allowOverflow === true }) }
+          allowOverflow: (request.operation === 'search' && request.standardSearch === true || request.accountCompatibility === true) && request.allowOverflow === true }) }
       catch { throw new Error('invalid_social_response') }
       const result = { publicBody, items: publicBody.data.items, records: [], archiveObjects: [], ...persistence('accepted'),
         ...(facebook ? { quota } : {}) }

@@ -1,5 +1,6 @@
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
 import { WECHAT_LEGACY_SEARCH_PLATFORMS } from '../contracts/wechat-search-alias.mjs'
+import { HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS, HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS } from '../../shared/social-account-contract.mjs'
 
 const LABELS = {
   bilibili: '哔哩哔哩', douyin: '抖音', facebook: 'Facebook', instagram: 'Instagram',
@@ -67,19 +68,15 @@ function searchPlatform(platform, { instagramPolicy, facebookPolicy }) {
 
 function accountPlatform(platform, operation) {
   const row = historicalPlatform(platform, operation)
-  if (platform === 'twitter') return {
-    ...row, migrationStatus: 'conditional',
-    readOnlyReason: 'Twitter 账号服务当前仅使用 RapidAPI。Hub 专用合同已直连，旧账号兼容合同仍经 Night-All；切换入口需要按各自合同改造调用方，不是供应商默认值切换。',
-    routeSummary: `data/social/${operation} 是 Hub 直连 RapidAPI 的 Twitter 专用合同；/search/${operation} 兼容入口仍经 Night-All，默认 RapidAPI。本机 po-infra 源码使用兼容入口，不能据此确认线上调用版本。两类入口不能视为同一响应合同。`,
+  const legacy = NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS[operation].includes(platform)
+  return {
+    ...row, migrationStatus: 'hub_native',
+    readOnlyReason: 'Hub 账号接口按已审核的平台及活动合同执行固定路由，当前未提供可互换的供应商策略。关键词搜索的供应商配置不会改变账号内容或资料路由；操作状态、凭据和准入仍独立检查。',
+    routeSummary: `POST /api/v1/data/social/${operation} 由 Hub 执行账号解析、字段适配及托管分页，不转交 Night-All。保留已声明的账号参数别名及 raw_info/raw_data 字符串，并提供 items、page/pageInfo；使用新接口返回的游标。${legacy
+      ? platform === 'xiaohongshu' ? '旧 /search 与 /night-all/search 入口继续保持原先按请求形状直连或转发的规则。'
+        : '旧 /search 与 /night-all/search 入口仍经 Night-All，供下游逐步切换。'
+      : '旧兼容入口未声明此平台与业务组合，不能据此认为旧入口也新增支持。'}目录表示已实现合同，不代表当前线上已部署或供应商已验证可用。`,
   }
-  if (platform === 'xiaohongshu') return {
-    ...row, migrationStatus: 'conditional',
-    readOnlyReason: '已支持的单账号形状使用 TikHub，其他形状保留兼容链路。账号内容与资料尚无经过此合同适配的第二供应商，关键词搜索策略不会改变这里的路由。',
-    routeSummary: operation === 'crawl'
-      ? '单一账号、posts、每页 20 条及受支持游标等形状，在 Hub 操作启用且为正式 Key 时直连 TikHub；其他兼容形状仍经 Night-All。'
-      : '单一账号和受支持标识等形状，在 Hub 操作启用且为正式 Key 时直连 TikHub；批量或其他兼容形状仍经 Night-All。',
-  }
-  return row
 }
 
 // This is an Admin product/routing inventory, not a readiness declaration.
@@ -100,14 +97,14 @@ export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy =
       {
         id: 'crawl', label: '账号内容',
         paths: ['/api/v1/search/crawl', '/api/v1/night-all/search/crawl', '/api/v1/data/social/crawl'],
-        description: '按已知账号获取内容，支持的平台与内容搜索不同。data/social/crawl 当前仅支持 Twitter；本机已核查的 po-infra 账号采集源码使用 Night-All 兼容入口。',
-        platforms: NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS.crawl.map(platform => accountPlatform(platform, 'crawl')),
+        description: '按已知账号获取内容。data/social/crawl 由 Hub 执行，要求平台及 social.content.crawl 授权；单页上限 500，仍受 Key 上限约束。旧兼容入口保持原路由和原平台范围，迁移从第一页开始。',
+        platforms: HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS.map(platform => accountPlatform(platform, 'crawl')),
       },
       {
         id: 'user-info', label: '账号资料',
         paths: ['/api/v1/search/user-info', '/api/v1/night-all/search/user-info', '/api/v1/data/social/user-info'],
-        description: '按已知账号获取资料，不是关键词搜账号。data/social/user-info 当前仅支持 Twitter；本机已核查的 po-infra 资料补充源码使用 Night-All 兼容入口。',
-        platforms: NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS['user-info'].map(platform => accountPlatform(platform, 'user-info')),
+        description: '按已知账号获取资料，不是关键词搜账号。data/social/user-info 由 Hub 执行，要求平台及 social.profile.get 授权；旧兼容入口保持原路由和原平台范围。接口可见不会自动增加调用权限。',
+        platforms: HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS.map(platform => accountPlatform(platform, 'user-info')),
       },
     ],
   }

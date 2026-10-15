@@ -1,0 +1,57 @@
+{
+  "results": [
+    {
+      "post_id": "rapid-fixture-album",
+      "type": "post",
+      "url": "https://www.facebook.com/fixture/posts/rapid-fixture-album",
+      "message": "完整正文\n(练习生 OR \"idol trainee\") — synthetic fixture",
+      "timestamp": 1791763200,
+      "reactions_count": 0,
+      "comments_count": 3,
+      "reshare_count": 2,
+      "video_view_count": null,
+      "author": {
+        "id": "rapid-fixture-author",
+        "name": "Fixture Author",
+        "url": "https://www.facebook.com/fixture-author",
+        "profile_picture_url": "https://cdn.example.test/avatar.jpg"
+      },
+      "image": { "uri": "https://cdn.example.test/photo-1.jpg?asset=original" },
+      "album_preview": [
+        { "uri": "https://cdn.example.test/photo-1.jpg?asset=original" },
+        { "url": "https://cdn.example.test/photo-2.jpg?sig=two" }
+      ]
+    },
+    {
+      "post_id": "rapid-fixture-video",
+      "type": "video",
+      "url": "https://www.facebook.com/fixture/videos/rapid-fixture-video",
+      "message": "Synthetic video fixture",
+      "timestamp": 1791763260,
+      "reactions_count": 12,
+      "comments_count": 0,
+      "reshare_count": 0,
+      "video_view_count": 123,
+      "author": {
+        "id": "rapid-fixture-author",
+        "name": "Fixture Author",
+        "profile_picture_url": "https://cdn.example.test/avatar.jpg"
+      },
+      "image": { "uri": "https://cdn.example.test/mixed-photo.jpg" },
+      "video_thumbnail": { "uri": "https://cdn.example.test/poster.jpg?sig=one" },
+      "video_files": {
+        "video_hd_file": "https://cdn.example.test/video-hd.mp4?sig=one",
+        "video_sd_file": "https://cdn.example.test/video-sd.mp4?sig=two"
+      }
+    },
+    {
+      "post_id": "rapid-fixture-text",
+      "type": "post",
+      "url": "https://www.facebook.com/fixture/posts/rapid-fixture-text",
+      "message": "Synthetic text-only fixture",
+      "timestamp": 1791763320,
+      "author_title": "Fixture Page"
+    }
+  ],
+  "cursor": "synthetic-rapid-next"
+}

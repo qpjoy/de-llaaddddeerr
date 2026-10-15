@@ -7,6 +7,7 @@ import {
   compareJobs,
   policiesFor,
   matchesJob,
+  schedulingIndex,
 } from "./scheduling.mjs";
 import { starved } from "./queue-order.mjs";
 
@@ -581,14 +582,17 @@ export function sweep(s, now, mode) {
   cleanWorkflowFaults(s, now);
   sweepSessions(s, now, mode);
 }
-export function claim(s, now, mode, workerId) {
+// reference: true decides without the read-only index (equivalence tests).
+export function claim(s, now, mode, workerId, { reference = false } = {}) {
   sweep(s, now, mode);
-  const continued = claimContinuation(s, now, mode, workerId);
+  // Built after sweep; the decision below only mutates state once it returns.
+  const index = reference ? undefined : schedulingIndex(s, now);
+  const continued = claimContinuation(s, now, mode, workerId, index);
   if (continued) return continued;
   const devices = s.devices.filter(
     (d) =>
       d.mode === mode &&
-      deviceBlockers(s, now, d).length === 0 &&
+      deviceBlockers(s, now, d, index).length === 0 &&
       (mode === "sim" || d.workerId === workerId),
   );
   devices.sort(
@@ -637,7 +641,7 @@ export function claim(s, now, mode, workerId) {
     const d = devices.find(
       (d) =>
         matchesJob(d, j) &&
-        !appBlockers(s, now, d, j).length &&
+        !appBlockers(s, now, d, j, index).length &&
         (!poolPlans.has(d.rack) ||
           poolPlans
             .get(d.rack)

@@ -67,6 +67,7 @@ test('PostgreSQL Facebook quota admission and recovery preserve subscription evi
       const baseline = await readFile(new URL('../../migrations/143_facebook_platform_search.sql', import.meta.url), 'utf8')
       await pool.query(baseline.slice(baseline.indexOf('CREATE TABLE'), baseline.indexOf('ALTER TABLE')))
       await pool.query(await readFile(new URL('../../migrations/149_facebook_billing_window.sql', import.meta.url), 'utf8'))
+      await pool.query(await readFile(new URL('../../migrations/151_facebook_rapid_admission_queue.sql', import.meta.url), 'utf8'))
       const store = new PlatformSearchPolicyStore(pool)
       const reset = async () => {
         await pool.query(`UPDATE control.facebook_rapid_quota SET used=0,remaining=NULL,reset_at=NULL,
@@ -115,15 +116,15 @@ test('PostgreSQL Facebook quota admission and recovery preserve subscription evi
         }
       })
 
-      await t.test('positive billing evidence confirms recovery and ordinary renewal updates the local counter', async () => {
+      await t.test('positive probe evidence confirms recovery while ordinary larger headers cannot replenish quota', async () => {
         for (const exhausted of [true, false]) {
           await reset()
           await pool.query(`UPDATE control.facebook_rapid_quota SET used=$1,remaining=$2,
             blocked_until=now()-interval '1 second'`, exhausted ? [1000, 0] : [900, 100])
           await store.observeRapid(await store.admitRapid(), observe({ 'x-rapidapi-requests-remaining': '998', 'x-rapidapi-requests-limit': '1000' }))
           const state = await store.facebook()
-          assert.equal(state.used, 2)
-          assert.equal(state.remaining, 998)
+          assert.equal(state.used, exhausted ? 2 : 901)
+          assert.equal(state.remaining, exhausted ? 998 : 99)
           assert.equal(state.blocked_until, null)
           assert.equal((await store.admitRapid()).allowed, true)
         }

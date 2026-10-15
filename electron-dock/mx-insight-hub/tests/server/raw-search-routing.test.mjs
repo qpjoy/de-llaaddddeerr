@@ -971,11 +971,17 @@ test('Twitter full-page repeated Bottom closes immediately, while repeated-page 
   }
 })
 
-test('Twitter standard busy identifies Hub or consumer concurrency before dispatch and releases only the rejected request', async () => {
+async function waitForTwitterQueue(gateway, depth = 1) {
+  for (let i = 0; i < 100 && gateway.concurrencyQueue.entries.length !== depth; i++) await new Promise(resolve => setTimeout(resolve, 2))
+  assert.equal(gateway.concurrencyQueue.entries.length, depth)
+}
+
+test('Twitter standard bounded waiting times out at either concurrency limit and releases only the rejected request', async () => {
   for (const limit of ['hub', 'consumer']) {
     const h = await harness({ platform: 'twitter', twitterData: twitterTimeline([twitterPost], null) })
     h.config.maxConcurrency = limit === 'hub' ? 1 : 3
     h.config.maxConsumerConcurrency = 1
+    h.config.concurrencyQueue = { maxWaitMs: 30, maxPending: 1 }
     let started, finish
     const pending = new Promise(resolve => { started = resolve })
     const held = new Promise(resolve => { finish = resolve })
@@ -991,9 +997,10 @@ test('Twitter standard busy identifies Hub or consumer concurrency before dispat
         assert.match(error.message, /Hub Twitter.*并发.*尚未发起采集/)
         assert.equal(error.details.layer, 'hub')
         assert.equal(error.details.stage, 'concurrency_admission')
-        assert.equal(error.details.reason, `${limit === 'hub' ? 'hub' : 'consumer'}_concurrency_exhausted`)
+        assert.equal(error.details.reason, 'concurrency_queue_timeout')
         assert.equal(error.details.upstreamDispatched, false)
-        assert.equal(error.details.admissionMode, 'immediate')
+        assert.equal(error.details.admissionMode, 'bounded_wait')
+        assert.equal(error.details.maxWaitMs, 30)
         assert.equal(error.details.retryAfterMs, 1000)
         assert.equal(error.details.activeConcurrency, 1)
         assert.equal(error.details.consumerActiveConcurrency, 1)
@@ -1017,9 +1024,149 @@ test('Twitter standard busy identifies Hub or consumer concurrency before dispat
   }
 })
 
+test('Twitter standard third request waits for a consumer slot without buying capacity or losing equal-intent protection', async () => {
+  const h = await harness({ platform: 'twitter', twitterData: twitterTimeline([twitterPost], null) })
+  await h.service.setTenantBillingProfile(h.context.tenant.id,
+    { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 1, defaultCurrency: 'CNY' }, 'test-admin')
+  await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline queue hold fixture' },
+    { idempotencyKey: 'twitter-queue-credit', actor: 'test-admin' })
+  h.config.maxConsumerConcurrency = 2
+  h.config.concurrencyQueue = { maxWaitMs: 1000, maxPending: 4 }
+  const finish = [], dispatched = []
+  const execute = h.gateway.adapter.execute.bind(h.gateway.adapter)
+  h.gateway.adapter.execute = async (...args) => {
+    dispatched.push(args)
+    if (dispatched.length <= 2) await new Promise(resolve => finish.push(resolve))
+    return execute(...args)
+  }
+  const body = { platform: 'twitter', query: 'one', pageSize: 20 }
+  const one = h.invokeData(body, 'twitter-queue-one')
+  const two = h.invokeData({ ...body, query: 'two' }, 'twitter-queue-two')
+  for (let i = 0; i < 100 && finish.length < 2; i++) await new Promise(resolve => setTimeout(resolve, 2))
+  assert.equal(finish.length, 2)
+  const three = h.invokeData({ ...body, query: 'three' }, 'twitter-queue-three')
+  try {
+    await waitForTwitterQueue(h.gateway)
+    const pending = [...h.store.requests.values()].find(row => row.idempotencyKey === 'twitter-queue-three')
+    assert.equal(pending.status, 'reserved')
+    assert.equal([...h.store.customerCharges.values()].find(row => row.usageRequestId === pending.id).status, 'reserved')
+    const heldLease = [...h.platformStore.leases.values()].find(row => row.ownerRequestId === pending.id)
+    assert.ok(heldLease, 'delivery arbitration remains held while waiting')
+    assert.equal(heldLease.expiresAt, pending.leaseExpiresAt)
+    assert.equal(h.platformStore.calls.size, 2)
+    assert.equal(h.platformStore.costReservations.size, 2, 'the queued request has no procurement reservation')
+    await assert.rejects(h.invokeData({ ...body, query: 'three' }, 'twitter-queue-three-equal'), { code: 'request_in_progress' })
+    h.gateway.adapter.resolveCredential = async () => 'fresh-fixture-credential'
+    finish[0]()
+    assert.equal((await one).status, 200)
+    assert.equal((await three).status, 200)
+    assert.equal([...h.store.customerCharges.values()].find(row => row.usageRequestId === pending.id).status, 'captured')
+    assert.equal(dispatched.length, 3)
+    assert.equal(dispatched[2][1].credential, 'fresh-fixture-credential', 'credential is resolved again after waiting')
+    assert.equal(pending.leaseExpiresAt, heldLease.expiresAt, 'waiting cannot extend the original deadline')
+    assert.equal(h.gateway.active, 1, 'second original acquisition still owns one slot')
+  } finally { finish.forEach(resolve => resolve()); await Promise.allSettled([one, two, three]) }
+  assert.equal(h.gateway.active, 0)
+  assert.equal(h.gateway.activeByConsumer.size, 0)
+  assert.equal(h.platformStore.leases.size, 0)
+  assert.equal(h.gateway.concurrencyQueue.entries.length, 0)
+})
+
+test('Twitter queued admission rechecks current access, operation, circuit and unknown-delivery protection', async t => {
+  for (const scenario of ['key', 'grant', 'credential', 'operation', 'circuit', 'parent_unknown', 'dispatch_unknown']) await t.test(scenario, async () => {
+    const h = await harness({ platform: 'twitter' })
+    h.gateway.active = h.config.maxConcurrency
+    h.config.concurrencyQueue = { maxWaitMs: 1000, maxPending: 4 }
+    const pending = h.invokeData({ platform: 'twitter', query: 'waiting', pageSize: 20 }, `twitter-queue-${scenario}`).catch(error => error)
+    await waitForTwitterQueue(h.gateway)
+    if (scenario === 'key') await h.store.revokeApiKey(h.key.id)
+    if (scenario === 'grant') await h.store.setPlatformGrant(h.context.consumer.id, 'twitter', false)
+    if (scenario === 'credential') h.gateway.adapter.resolveCredential = async () => null
+    if (scenario === 'operation') h.controls.authorizeDispatch = async () => { throw new AppError(503, 'external_platform_operation_paused', 'paused') }
+    if (scenario === 'circuit') h.platformStore.providerState = async () => ({ circuitOpenUntil: new Date(Date.now() + 60000).toISOString() })
+    if (scenario === 'parent_unknown') h.platformStore.twitterFillUnknownFor = async () => true
+    if (scenario === 'dispatch_unknown') h.platformStore.acquireDispatchLease = async () => ({ kind: 'blocked', reason: 'unknown' })
+    h.gateway.active = 0
+    h.gateway.concurrencyQueue.drain()
+    const error = await pending
+    assert.ok(error instanceof AppError)
+    assert.equal(error.code, ({ key: 'capability_not_granted', grant: 'capability_not_granted', credential: 'external_platform_not_configured',
+      operation: 'external_platform_operation_paused', circuit: 'external_platform_circuit_open',
+      parent_unknown: 'request_outcome_unknown', dispatch_unknown: 'request_outcome_unknown' })[scenario])
+    assert.equal(h.platformStore.calls.size, 0)
+    assert.equal(h.calls.length, 0)
+    assert.equal(h.gateway.active, 0)
+    assert.equal(h.gateway.activeByConsumer.size, 0)
+    assert.equal(h.platformStore.leases.size, 0)
+    assert.equal([...h.store.requests.values()][0].status, 'released')
+  })
+})
+
+test('Twitter admission bounds full queues, cancellation and the original settlement margin before acquisition', async () => {
+  const h = await harness({ platform: 'twitter' })
+  h.gateway.active = h.config.maxConcurrency
+  h.config.concurrencyQueue = { maxWaitMs: 1000, maxPending: 1 }
+  const abort = new AbortController()
+  const pending = h.service.search(h.context, { body: { platform: 'twitter', query: 'waiting', pageSize: 20 },
+    idempotencyKey: 'twitter-queue-cancelled', path: '/api/v1/data/search', signal: abort.signal }).catch(error => error)
+  await waitForTwitterQueue(h.gateway)
+  await assert.rejects(h.invokeData({ platform: 'twitter', query: 'overflow', pageSize: 20 }, 'twitter-queue-full'), error => {
+    assert.equal(error.status, 503)
+    assert.equal(error.details.reason, 'concurrency_queue_full')
+    assert.match(error.message, /Hub Twitter.*等待队列已满/)
+    return true
+  })
+  abort.abort()
+  assert.equal((await pending).code, 'request_cancelled')
+  assert.equal(h.gateway.concurrencyQueue.entries.length, 0)
+  h.gateway.reservationLeaseMs = h.config.timeoutMs + 5120
+  await assert.rejects(h.invokeData({ platform: 'twitter', query: 'short-budget', pageSize: 20 }, 'twitter-queue-no-time'), error => {
+    assert.equal(error.code, 'external_platform_busy')
+    assert.equal(error.details.reason, 'concurrency_queue_timeout')
+    return true
+  })
+  assert.equal(h.gateway.active, h.config.maxConcurrency, 'rejected requests do not release another owner capacity')
+  assert.equal(h.platformStore.calls.size, 0)
+  assert.equal(h.platformStore.leases.size, 0)
+  assert.ok([...h.store.requests.values()].every(row => row.status === 'released'))
+})
+
+test('Twitter busy after consuming paid carry returns a short committed page and preserves its Bottom without waiting or another acquisition', async () => {
+  const rows = start => Array.from({ length: 24 }, (_, i) => ({ ...twitterZeroPost, rest_id: String(start + i) }))
+  const h = await harness({ platform: 'twitter', twitterData: url => url.searchParams.has('cursor')
+    ? twitterTimeline(rows(25), null) : twitterTimeline(rows(1), 'carry-bottom') })
+  await h.service.setTenantBillingProfile(h.context.tenant.id,
+    { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 1, defaultCurrency: 'CNY' }, 'test-admin')
+  await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline paid carry fixture' },
+    { idempotencyKey: 'twitter-busy-carry-credit', actor: 'test-admin' })
+  const body = { platform: 'twitter', query: 'carry', pageSize: 20, type: 'stable' }
+  const first = await h.invokeData(body, 'twitter-busy-carry-first')
+  h.gateway.active = h.config.maxConcurrency
+  const second = await h.invokeData({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'twitter-busy-carry-second')
+  assert.equal(second.status, 200)
+  assert.deepEqual(second.body.data.items.map(row => row.id), ['21', '22', '23', '24'])
+  assert.equal(second.body.data.status, 'partial')
+  assert.equal(second.body.data.meta.providerCalls, 0)
+  assert.equal(second.body.data.pageInfo.hasMore, true)
+  assert.equal(h.store.requests.get(second.requestId).status, 'committed')
+  const charge = [...h.store.customerCharges.values()].find(row => row.usageRequestId === second.requestId)
+  assert.equal(charge.status, 'captured')
+  assert.equal(charge.chargedMinor, 1)
+  assert.equal(h.gateway.concurrencyQueue.entries.length, 0)
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.platformStore.ingestJobs.length, 1)
+  assert.deepEqual((await h.invokeData({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'twitter-busy-carry-second')).body, second.body)
+  h.gateway.active = 0
+  const third = await h.invokeData({ ...body, cursor: second.body.data.pageInfo.nextCursor }, 'twitter-busy-carry-third')
+  assert.equal(third.body.data.items[0].id, '25')
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.platformStore.ingestJobs.length, 2)
+})
+
 test('Twitter standard HTTP busy exposes its Hub cause, durable request ID and backoff hint', async t => {
   const h = await harness({ platform: 'twitter' })
   h.gateway.active = h.config.maxConcurrency
+  h.config.concurrencyQueue = { maxWaitMs: 20, maxPending: 1 }
   const server = createServer(createApp({ service: h.service, store: h.store, adapter: {}, listenerMode: 'public', logger: { error() {} } }))
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
   t.after(() => { server.closeAllConnections(); server.close() })
@@ -1032,7 +1179,8 @@ test('Twitter standard HTTP busy exposes its Hub cause, durable request ID and b
   assert.equal(response.headers.get('retry-after'), '1')
   assert.equal(body.error.code, 'external_platform_busy')
   assert.match(body.error.message, /Hub Twitter.*并发/)
-  assert.equal(body.error.details.reason, 'hub_concurrency_exhausted')
+  assert.equal(body.error.details.reason, 'concurrency_queue_timeout')
+  assert.equal(body.error.details.admissionMode, 'bounded_wait')
   assert.equal(body.error.details.upstreamDispatched, false)
   assert.equal(body.error.details.requestId, body.requestId)
   assert.equal(h.store.requests.get(body.requestId).status, 'released')

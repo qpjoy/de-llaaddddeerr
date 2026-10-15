@@ -34,11 +34,13 @@ export function ProductWorkbench({ Page, pageProps, enabled }) {
   </div>
 }
 
-function initialBody(document, endpoint) {
+function initialBody(document, endpoint, access) {
   const content = endpoint?.requestBody?.content?.['application/json']
   const schema = resolveProductSchema(document, content?.schema)
   const example = field => field.default ?? (field.type === 'object' ? Object.fromEntries(Object.entries(field.properties || {}).filter(([name,p])=>field.required?.includes(name) || p.default !== undefined).map(([name,p])=>[name,example(p)])) : field.type === 'array' ? [] : field.type === 'boolean' ? false : ['number','integer'].includes(field.type) ? 0 : '')
-  return JSON.stringify(content?.example || Object.values(content?.examples || {})[0]?.value || schema.example || example(schema), null, 2)
+  const body = structuredClone(content?.example || Object.values(content?.examples || {})[0]?.value || schema.example || example(schema))
+  if (body && endpoint?.['x-mx-platform-options'] && access) body.platform = endpoint['x-mx-platform-options'].find(platform => access.platforms?.includes(platform)) || body.platform
+  return JSON.stringify(body, null, 2)
 }
 
 export function ProductApiConsole({ product, token, initialEndpoint, onResult, onAttempt, blocked = false, attemptStore }) {
@@ -56,7 +58,9 @@ export function ProductApiConsole({ product, token, initialEndpoint, onResult, o
     adminApi.documentation(token, '/docs/openapi.json').then(value => { if (active) setDocument(value.schema) }).catch(failure => { if (active) setLoadError(failure) })
     return () => { active = false }
   }, [token])
-  const endpoints = useMemo(() => productEndpoints(document, product).filter(row => !access || !row['x-mx-required-platform'] || access.platforms?.includes(row['x-mx-required-platform']) && (row['x-mx-required-capabilities'] || []).every(cap => access.capabilities?.includes(cap))), [document, product, access])
+  const endpoints = useMemo(() => productEndpoints(document, product).filter(row => !access || (row['x-mx-platform-options']
+    ? row['x-mx-platform-options'].some(platform => access.platforms?.includes(platform)) && (row['x-mx-required-capabilities'] || []).every(cap => access.capabilities?.includes(cap))
+    : !row['x-mx-required-platform'] || access.platforms?.includes(row['x-mx-required-platform']) && (row['x-mx-required-capabilities'] || []).every(cap => access.capabilities?.includes(cap)))), [document, product, access])
   const categories = [...new Set(endpoints.map(row=>row['x-mx-category'] || '通用'))].sort()
   const visibleEndpoints = endpoints.filter(row=>!category || (row['x-mx-category'] || '通用') === category)
   const initialSelection = endpoints.find(row => row['x-mx-endpoint-key'] === initialEndpoint || row.id === `post:/data/native/${initialEndpoint}`)?.id
@@ -64,8 +68,9 @@ export function ProductApiConsole({ product, token, initialEndpoint, onResult, o
   const endpoint = visibleEndpoints.find(row => row.id === selected) || visibleEndpoints[0]
   const revealItem = useMemo(() => { const index=endpoints.filter(row=>!category || (row['x-mx-category'] || '通用')===category).findIndex(row=>row['x-mx-endpoint-key'] === initialEndpoint || row.id===`post:/data/native/${initialEndpoint}`); return initialEndpoint && index>=0 ? {index} : null },[endpoints,category,initialEndpoint])
   const draft = drafts[endpoint?.id] || {}, values = draft.values || {}
-  const json = draft.json ?? initialBody(document, endpoint)
+  const json = draft.json ?? initialBody(document, endpoint, access)
   const schema = structuredClone(resolveProductSchema(document, endpoint?.requestBody?.content?.['application/json']?.schema))
+  if (endpoint?.['x-mx-platform-options'] && access && schema.properties?.platform) schema.properties.platform.enum = endpoint['x-mx-platform-options'].filter(platform => access.platforms?.includes(platform))
   if (product.docs === 'web-search' && access && schema.properties?.provider) schema.properties.provider.enum = searchProviderKeys(access.capabilities)
   let input = null, validation = ''
   try { input = productConsoleRequest(endpoint, values, json) } catch (failure) { validation = failure.message }

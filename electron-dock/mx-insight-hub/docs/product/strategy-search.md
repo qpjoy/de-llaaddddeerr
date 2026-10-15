@@ -16,9 +16,9 @@
 
 ## 产品工作台（2026-10-15）
 
-页面统一为接口调试、产品展示、接入指南、管理。调试器读取当前身份可见的 OpenAPI 固定接口；产品展示使用平台卡片发起一次单平台 `/api/v1/data/search`，展示真实返回的完整正文、作者、互动、图片及来源链接，保留缺失值与零的区别。微信按既有专项响应呈现，不把分类导航当作内容；其余微信与 TikTok 系列接口继续保留，详见 [统一搜索兼容说明](../integrations/unified-strategy-search.md)。
+页面统一为接口调试、产品展示、接入指南、管理。调试器读取当前身份可见的 OpenAPI 固定接口，包含 `/data/social/crawl` 和 `/data/social/user-info`。产品展示可选择内容搜索、账号内容、账号资料：内容搜索调用 `/api/v1/data/search`，账号查询调用相应 social 入口。展示完整正文、作者、互动、图片、账号资料及来源链接，保留缺失值与零的区别。微信按既有专项响应呈现，不把分类导航当作内容；其余微信与 TikTok 系列接口继续保留，详见 [统一搜索兼容说明](../integrations/unified-strategy-search.md)。
 
-只有 Admin Token 平台管理会话看到管理标签；原迁移状态、Instagram/Facebook 策略与每日调用统计都在此处。旧 `view=routing/interfaces` 链接仍映射到管理/接入指南。页面内状态按原 Key 身份隔离，临时凭据刷新、标签切换和路由往返保留请求标识；调试与展示共享进行中/未知结果锁，核对只读，不自动重发。产品展示的新查询使用 `stable`，下一页保留原请求合同与游标；明确新建相同查询才产生新的请求标识。
+只有 Admin Token 平台管理会话看到管理标签；原迁移状态、Instagram/Facebook 策略与每日调用统计都在此处。旧 `view=routing/interfaces` 链接仍映射到管理/接入指南。页面内状态按原 Key 身份隔离，临时凭据刷新、标签切换和路由往返保留请求标识；调试与展示共享进行中/未知结果锁，核对只读，不自动重发。内容搜索展示的新查询使用 `stable`，账号展示沿用账号接口的原请求幂等规则；下一页保留原请求合同与游标，明确新建相同查询才产生新的请求标识。
 
 完整响应已改为保留全文、自动换行并在限定高度内滚动；长标识不再撑开页面。Facebook `photo.php` 落地页显示原始链接，明确的视频封面与真实混合图片在新标准投影中分开；旧 raw 与 canonical 入库投影不重写。Bilibili 的原生指标修复已移入 Hub 关键词搜索投影，新标准保留缺失 null 与真实 0，兼容 raw 默认值保留。Facebook 标准搜索已加入自动补页；本轮取消默认每请求 3 次的补页调用上限，保留独立的遍历与资源边界。完整字段、接口文档与旧游标兼容边界见 [本轮核查](../operations/strategy-search-contract-audit-2026-10-15.md) 及 [本轮补页调整](../operations/youtube-search-fill-2026-10-15.md)。
 
@@ -55,15 +55,17 @@ Telegram 在本机 po-infra 中单独使用 Hub `/api/v1/data/canonical/search`�
 | 兼容内容搜索 | `POST /api/v1/search/raw`、`POST /api/v1/night-all/search/raw` | 普通平台 `data.raw_data`、`data.raw_info` 是 JSON 字符串，分页在 `data.page`；微信路径例外见下文 |
 | 兼容账号内容 | `POST /api/v1/search/crawl`、`POST /api/v1/night-all/search/crawl` | 账号与内容原始结构；只支持下表 C 列列出的平台 |
 | 兼容账号资料 | `POST /api/v1/search/user-info`、`POST /api/v1/night-all/search/user-info` | 已知账号资料；只支持下表 U 列列出的平台 |
-| Hub 专用社交接口 | `POST /api/v1/data/social/search`、`crawl`、`user-info` | 当前仅 Twitter，有自己的严格字段与响应合同，不能泛化给其他平台 |
+| Hub 账号内容 | `POST /api/v1/data/social/crawl` | Hub 账号合同；平台范围与兼容规则见下文，要求 `social.content.crawl` |
+| Hub 账号资料 | `POST /api/v1/data/social/user-info` | Hub 账号合同；平台范围与兼容规则见下文，要求 `social.profile.get` |
+| Hub 专用社交搜索 | `POST /api/v1/data/social/search` | 保留既有 Twitter 专用搜索；本轮没有扩展此接口，关键词接入优先使用 `/data/search` |
 
 普通标准搜索的核心字段为 `platform`、`query`、`pageSize`；兼容搜索保留 `keyword/query`、`count/pageSize/limit` 等已声明字段。不能只换 URL 而保留另一接口的请求体、分页逻辑或响应解析。业务调用不接受任意 provider、endpoint、凭据或费用放大控制字段；供应商选择由管理策略决定。
 
-S=内容搜索，C=账号内容，U=账号资料。下表是 Hub 当前源码可证明的范围，不是线上健康保证；“—”表示没有在对应 Hub 兼容合同中声明。
+S=内容搜索，C/U 为**旧 `/search` 与 `/night-all/search` 账号转发入口**。下表保留旧入口的范围；新 `/data/social` 账号合同见下一节，不能将其支持范围当成旧转发入口新增支持。“—”表示没有在对应旧兼容合同中声明；表格不是线上健康保证。
 
 | 平台 | S：供应商与执行位置 | C：供应商与执行位置 | U：供应商与执行位置 |
 | --- | --- | --- | --- |
-| Twitter / X | 标准/social 由 Hub 直连 RapidAPI；raw 部分形状仍经 Night-All，默认 RapidAPI | social 直连 RapidAPI；兼容入口经 Night-All → RapidAPI | 同 C |
+| Twitter / X | 标准/social 由 Hub 直连 RapidAPI；raw 部分形状仍经 Night-All，默认 RapidAPI | 旧兼容入口经 Night-All → RapidAPI | 同 C |
 | Facebook | Hub → RapidAPI / JustOne，沿用月额度策略 | Night-All → JustOne | Night-All → JustOne |
 | Instagram | Hub → JustOne / TikHub，本轮可配置 | Night-All → TikHub | Night-All → TikHub |
 | 微博 | 合规单关键词形状 Hub → TikHub；其他形状经 Night-All | Night-All → TikHub | Night-All → TikHub |
@@ -88,6 +90,12 @@ S=内容搜索，C=账号内容，U=账号资料。下表是 Hub 当前源码可
 
 路由声明见 `server/contracts/night-all-legacy.mjs`、`raw-search.mjs`、`hub-data-search.mjs`、`hub-social.mjs`、`wechat-search-alias.mjs`；条件分支由 `server/hub-service.mjs` 执行。管理目录在 `server/data/strategy-search-catalog.mjs`，不把声明的支持范围当成供应商实时可用性。
 
+## Hub 账号接口迁移（2026-10-15）
+
+`/data/social/crawl` 与 `/data/social/user-info` 现在由 Hub 执行账号解析、字段适配、余量交付、去重及托管分页。固定平台与活动合同、1–500 逻辑页上限、批量工作量限制、参数别名、返回字段及下游示例见 [Hub 账号内容与资料接入指南](../integrations/social-account-migration.md)。两项分别要求目标平台及 `social.content.crawl` / `social.profile.get`，不会从旧平台授权自动扩权。
+
+旧 `/search` 与 `/night-all/search` 账号入口保持原路由，等待下游切换后再考虑退役。`/data/social/search` 仍为原 Twitter 专用搜索，关键词检索继续逐步接入 `/data/search`。本轮不执行线上付费验证、部署或 Launcher/MX-H2I 变更。
+
 ## Twitter 标准搜索自动补页（2026-10-15）
 
 Twitter `/api/v1/data/search` 先消耗已采购完整页的余量，未达到 `pageSize` 时，沿同一 RapidAPI Bottom 游标继续采购并合并。比如上一上游页有 24 条、已交付 20 条，下一次 Hub 请求会先取剩余 4 条，再取后续页补到 20 条；新上游页未消费的内容继续保留。下游只需传回 `pageInfo.nextCursor`，无需识别供应商分页、拼接余量或自行跨页去重。
@@ -96,7 +104,7 @@ Twitter `/api/v1/data/search` 先消耗已采购完整页的余量，未达到 `
 
 本轮取消默认每个 Hub 请求最多 3 次上游调用的补齐限制；每次上游页仍最多请求 50 条，整次查询最多 15 个上游页、15 个公开页，游标仍有 24 小时期限。每次组页还受原请求期限、归档字节上限、当前授权、采购预算和速率门禁约束。供应商没有后续页时自然返回不足一页；达到独立遍历或资源边界、准入受限时，返回已有内容、`partial` 和警告，并在仍可安全继续时保留下一页。未知结果仍需核对，不能为补齐而重试。因此 `pageSize` 仍是单页上限，不保证任何情况下都恰好返回该条数。
 
-一个 Hub 请求仍按现有客户价格结算一次，每笔实际上游派发分别预留采购费用并记录原始凭证。补页不跨供应商，不自动重试已派发的失败或未知结果；未知状态保留原请求锁与归档，调用方应读取使用记录核对。raw、`/data/social/*`、账号内容与账号资料的既有分页合同保持原样。此次补页没有新增数据库迁移，不修改授权、单价、历史响应或账单。
+一个 Hub 请求仍按现有客户价格结算一次，每笔实际上游派发分别预留采购费用并记录原始凭证。补页不跨供应商，不自动重试已派发的失败或未知结果；未知状态保留原请求锁与归档，调用方应读取使用记录核对。raw、`/data/social/search` 与旧账号转发入口保持既有合同；新账号 social 分页见前节。此次补页没有新增数据库迁移，不修改授权、单价、历史响应或账单。
 
 本轮补页相关回归 411 项全部通过，无失败或跳过；包含模拟 HTTP、隔离 PGlite、真实计费触发器及故障注入，类型检查通过。生产仍需按下文流程仅发布 Hub；没有执行真实付费查询或改动 MX-H2I 登录联网。
 

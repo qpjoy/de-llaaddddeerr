@@ -899,7 +899,35 @@ Successful responses preserve the stable Night-All data-search envelope and add:
   `x-mx-insight-captured-at`, `Age`, and `Warning: 110` when a stored fallback
   is returned.
 
-Twitter standard search may return `503 external_platform_busy` before its first data acquisition when the Hub gateway has no concurrency slot. This is Hub admission, not a quota error or a timed circuit breaker. New errors include a neutral Chinese message and `details.platform=twitter`, `layer=hub`, `stage=concurrency_admission`, `upstreamDispatched=false`, `admissionMode=immediate`, `reason=hub_concurrency_exhausted|consumer_concurrency_exhausted|concurrency_queue_pending`, current/maximum concurrency, queue depth and `retryAfterMs=1000`. The latter is a backoff hint, not a recovery deadline. Callers must display `error.message` and preserve the durable request ID; a safe pre-dispatch rejection does not authorize automatically restarting a blocked acquisition. Older errors retain their original evidence.
+Twitter standard requests with no acquired page wait for Hub concurrency before their
+first acquisition, default up to 10 seconds and 32 pending, within the original request
+deadline and with the full acquisition timeout plus 5 seconds reserved for persistence.
+A full queue or timeout returns `503 external_platform_busy`, a neutral Chinese message,
+`details.platform=twitter`, `layer=hub`, `stage=concurrency_admission`,
+`upstreamDispatched=false`, `admissionMode=bounded_wait`,
+`reason=concurrency_queue_full|concurrency_queue_timeout`, current/maximum concurrency,
+queue depth, `maxWaitMs` and `retryAfterMs=1000`. The backoff hint is not a recovery
+deadline. Waiting rechecks current access, credentials, operation, circuit and dispatch
+protection without extending the original lease or retrying a dispatched request.
+Paid carry remains deliverable as a committed short page when new acquisition is busy;
+it does not wait or purchase another page. Callers must display `error.message` and
+preserve the durable request ID. Older errors retain their original evidence.
+
+Facebook raw and standard searches share a global FIFO gate before each new
+included-capacity acquisition: up to 10 seconds and 32 pending, bounded by the original
+deadline. Busy alone does not switch acquisition channels. Full/expired waiting returns
+`503 external_platform_busy` with `details.platform=facebook`, `layer=hub`,
+`stage=facebook_quota_admission`, `reason=queue_full|queue_timeout`,
+`upstreamDispatched=false` and `retryAfterMs=1000`. Unreadable shared state
+returns `503 facebook_quota_state_unavailable` without dispatch. Callers must
+display the message and retain requestId rather than treating every 503 as the
+same fault. Included allowance counts each provider acquisition attempt,
+including fill pages, rather than posts or Hub requests; replay and saved
+overflow require no new acquisition. Ordinary observations cannot refill quota.
+Existing demand-triggered recovery probes remain enabled and may incur a charge;
+only a reliable positive probe can establish renewal. Confirmed quota exhaustion
+uses the existing automatic alternate route, while pinned continuations still require
+their original channel or an explicit restart. Customer settlement rules remain.
 
 Direct Xiaohongshu errors add `403 test_key_not_supported`,
 `400 invalid_page_size|cursor_scope_mismatch`,
