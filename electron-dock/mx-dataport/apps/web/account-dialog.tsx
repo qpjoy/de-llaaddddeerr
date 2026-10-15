@@ -180,9 +180,7 @@ function AccountDialogSession({
           </div>
           <DialogHeader>
             <DialogTitle>{register ? "受邀加入数港" : "登录数港"}</DialogTitle>
-            <DialogDescription>
-              使用统一 MX 账号登录。企业账号由管理员开通，员工账号由企业超管创建或邀请。
-            </DialogDescription>
+            <DialogDescription>使用统一 MX 账号登录数港。</DialogDescription>
           </DialogHeader>
           <form onSubmit={submit} aria-busy={busy || checking}>
             <FieldGroup>
@@ -292,8 +290,15 @@ function AccountDialogSession({
           <p className="auth-register-hint">
             {register
               ? "使用 DataPort 专用邀请码创建 MX 账号并开通数港。已有 MX 账号请在登录页使用邀请码开通。"
-              : "可直接填写其他 MX 账号登录。忘记密码或需要开通数港，请联系管理员。"}
+              : "企业账号由管理员开通，员工账号由企业超管创建或邀请。忘记密码请联系管理员。"}
           </p>
+          <nav className="auth-legal-links" aria-label="登录法律信息">
+            <a href="/terms">用户协议</a>
+            <span>·</span>
+            <a href="/privacy">隐私政策</a>
+            <span>·</span>
+            <a href="/cookies">Cookie 说明</a>
+          </nav>
           <DialogClose
             className="auth-close"
             aria-label="关闭登录"

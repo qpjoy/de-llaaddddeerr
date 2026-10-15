@@ -32,7 +32,12 @@ export function RiskLevel({ level }: { level: unknown }) {
       data-level={String(level || "")}
       data-band={riskBand(level)}
     >
-      {valueText(level)}
+      {{
+        high: "高风险",
+        medium: "中风险",
+        low: "低风险",
+        unknown: valueText(level),
+      }[riskBand(level)] || valueText(level)}
     </span>
   );
 }
@@ -56,9 +61,28 @@ export function QueryResult({
     state = portraitState(result);
   const location = ipLocation(profile);
   const issue = result.error || result.response?.error;
-  const tags: Record<string, any[]> = Object.create(null);
+  const tagDescriptions: Record<string, string> = {
+    行为风险: "请求或访问行为相关的风险线索。",
+    关联设备风险: "与该 IP 关联的设备异常线索。",
+    恶意事件风险: "与恶意攻击、失陷事件或恶意软件相关的线索。",
+    其他标签: "IP 网络属性及其他非威胁行为标签。",
+  };
+  const tags: Record<string, any[]> = Object.fromEntries(
+    Object.keys(tagDescriptions).map((name) => [name, []]),
+  );
+  const aliases: Record<string, string> = {
+    风险行为: "行为风险",
+    网络属性: "其他标签",
+    基础属性: "其他标签",
+    "IP 基础属性": "其他标签",
+    IP基础属性: "其他标签",
+    IP网络属性: "其他标签",
+    归属信息: "其他标签",
+    network: "其他标签",
+    infrastructure: "其他标签",
+  };
   for (const tag of profile?.risk_tags || []) {
-    const category = tag.category || "其他标签";
+    const category = aliases[tag.category] || tag.category || "其他标签";
     (tags[category] ||= []).push(tag);
   }
   const repeatable =
@@ -66,8 +90,8 @@ export function QueryResult({
     (["success", "partial", "no_data"].includes(state) ||
       (state === "error" && result.status >= 400 && issue?.code));
   return (
-    <Card className="harbor-portrait">
-      <CardHeader className="harbor-report-heading">
+    <Card className="harbor-portrait parity-portrait">
+      <CardHeader className="harbor-report-heading risk-report-heading">
         <div>
           <h2>{result.ip || "查询结果"}</h2>
           <Button
@@ -87,7 +111,11 @@ export function QueryResult({
             {copied ? <Check /> : <Copy />}
           </Button>
           <RiskLevel level={profile?.risk_level} />
-          <span className="harbor-result-state" data-state={state}>
+          <span
+            className="harbor-result-state"
+            data-state={state}
+            hidden={state === "success"}
+          >
             {result.historical ? "历史画像" : states[state]}
           </span>
         </div>
@@ -110,7 +138,7 @@ export function QueryResult({
           </div>
         ) : profile ? (
           <>
-            <div className="harbor-profile-overview">
+            <div className="harbor-profile-overview risk-profile">
               <div className="harbor-profile-summary">
                 <div
                   className="harbor-risk-summary"
@@ -118,15 +146,39 @@ export function QueryResult({
                   data-band={riskBand(profile.risk_level)}
                 >
                   <div
-                    className="dp-risk-ring"
+                    className="risk-score"
+                    data-risk={riskBand(profile.risk_level)}
+                    data-display="level"
                     role="img"
                     aria-label={`风险等级 ${valueText(profile.risk_level)}`}
                   >
                     <svg viewBox="0 0 120 120" aria-hidden="true">
-                      <circle cx="60" cy="60" r="51" />
+                      <circle
+                        className="risk-score-track"
+                        cx="60"
+                        cy="60"
+                        r="51"
+                      />
+                      <circle
+                        className="risk-score-progress"
+                        cx="60"
+                        cy="60"
+                        r="51"
+                        pathLength="100"
+                        strokeDasharray="100 100"
+                      />
                     </svg>
                     <div>
-                      <strong>{valueText(profile.risk_level)}</strong>
+                      <strong>
+                        {
+                          {
+                            high: "高风险",
+                            medium: "中风险",
+                            low: "低风险",
+                            unknown: "未知",
+                          }[riskBand(profile.risk_level)]
+                        }
+                      </strong>
                       <span>风险等级</span>
                     </div>
                   </div>
@@ -147,8 +199,8 @@ export function QueryResult({
                         .filter(Boolean)
                         .join(" · "),
                     ],
-                    ["运营商", profile.isp],
                     ["应用场景", profile.scene],
+                    ["运营商", profile.isp],
                     ["归属机构", profile.organization],
                     [
                       "经纬度",
@@ -168,14 +220,25 @@ export function QueryResult({
                 profile={profile}
               />
             </div>
-            <section className="harbor-tag-section" aria-label="风险标签">
+            <section
+              className="harbor-tag-section risk-report-overview"
+              aria-label="风险标签"
+            >
               <h3>风险标签</h3>
               {Object.keys(tags).length ? (
-                <div className="harbor-tag-groups">
+                <div className="harbor-tag-groups risk-tag-groups">
                   {Object.entries(tags).map(([category, values]) => (
-                    <div key={category}>
+                    <section key={category}>
                       <h4>{category}</h4>
                       <div className="harbor-risk-tags">
+                        {!values.length && (
+                          <span
+                            className="parity-tag-missing"
+                            title="未返回此类标签，不代表无风险。"
+                          >
+                            未返回此类标签
+                          </span>
+                        )}
                         {values.map((tag, index) => (
                           <span
                             key={index}
@@ -188,13 +251,18 @@ export function QueryResult({
                               "归属信息",
                               "network",
                               "infrastructure",
-                            ].includes(category)}
+                            ].includes(tag.category)}
+                            title={tag.description || undefined}
                           >
                             {tag.name || tag.code || "未命名标签"}
                           </span>
                         ))}
                       </div>
-                    </div>
+                      <p>
+                        {tagDescriptions[category] ||
+                          "数据源提供的其他分类标签。"}
+                      </p>
+                    </section>
                   ))}
                 </div>
               ) : (
@@ -206,9 +274,9 @@ export function QueryResult({
                 </p>
               )}
             </section>
-            <section className="dp-risk-advice">
+            <section className="dp-risk-advice risk-advice-summary">
               <h3>
-                <Sparkles size={19} />
+                <Sparkles size={22} />
                 风险参考建议
               </h3>
               <p>{riskAdvice(profile.risk_level)}</p>

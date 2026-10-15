@@ -1,3 +1,10 @@
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import { PublicPricing } from "./public-pricing";
 import { UsageOverview } from "./workspace";
 import { Documentation } from "./documentation";
@@ -6,12 +13,11 @@ import { createRoot } from "react-dom/client";
 import {
   Layers3,
   SquarePen,
-  ChartNoAxesCombined,
+  LayoutDashboard,
+  Headphones,
   KeyRound,
   BookOpen,
   Wallet,
-  Plug,
-  MessageCircle,
 } from "lucide-react";
 import {
   SidebarProvider,
@@ -48,7 +54,7 @@ import {
   JoinEnterprise,
 } from "./enterprise";
 import { ApiKeys } from "./keys";
-import { LegalDocument, LegalFooter, CookieNotice } from "./legal";
+import { LegalDocument, LegalFooter } from "./legal";
 import { canOpenPage, membershipFor } from "./permissions";
 import { AccountSecurity } from "./account-security";
 import { Commerce } from "./commerce";
@@ -59,11 +65,12 @@ import "@/styles/dataport.css";
 import "./design-scale.css";
 import "./dataport.css";
 import "./alignment.css";
+import "./prototype-parity.css";
 const pages = [
   ["intelligence", "新建查询", SquarePen],
-  ["overview", "用量概览", ChartNoAxesCombined],
+  ["overview", "用量概览", LayoutDashboard],
   ["keys", "API Keys", KeyRound],
-  ["services", "我的订阅", Plug],
+  ["services", "我的订阅", Layers3],
   ["orders", "账单与发票", Wallet],
   ["docs-ip", "接口文档", BookOpen],
 ] as const;
@@ -152,7 +159,9 @@ export function ConsoleShell({
   unread,
   session,
   tenant,
+  onNotifications,
 }: {
+  onNotifications?: () => void;
   session?: any;
   tenant?: string;
   page: string;
@@ -190,10 +199,8 @@ export function ConsoleShell({
               className="support-card"
               onClick={() => go("support")}
             >
-              <MessageCircle size={20} />
-              <span>
-                联系客服<small>购买咨询与技术支持</small>
-              </span>
+              <Headphones size={23} />
+              <span>联系客服</span>
             </Button>
           )}
           <SidebarAccountMenu
@@ -202,7 +209,10 @@ export function ConsoleShell({
             tenant={tenant}
             unread={unread}
             page={page}
-            navigate={go}
+            navigate={(next) => {
+              if (next === "messages" && onNotifications) onNotifications();
+              else go(next);
+            }}
             onLogout={onLogout}
           />
         </SidebarFooter>
@@ -210,7 +220,7 @@ export function ConsoleShell({
       <div
         className={`app-main ${page === "intelligence" ? "query-backdrop" : ""}`}
       >
-        <main className="content harbor-console">
+        <main className="content harbor-console" data-page={page}>
           <SidebarTrigger
             className="console-mobile-trigger"
             aria-label="展开导航"
@@ -300,10 +310,25 @@ function RemotePanel({
 }
 
 function App() {
+  useEffect(() => {
+    document.cookie = "sidebar_state=; Path=/; Max-Age=0; SameSite=Lax";
+    try {
+      for (const key of [
+        "dataport_cookie_consent",
+        "harbor_cookie_consent",
+        "dataport:cookie-notice",
+      ])
+        localStorage.removeItem(key);
+    } catch {
+      /* Storage can be disabled. */
+    }
+  }, []);
+
   const [queryIp, setQueryIp] = useState(
     sessionStorage.getItem("harbor:query-ip") || "",
   );
   const [queryRevision, setQueryRevision] = useState(0);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [auth, setAuth] = useState(false),
     [boot, setBoot] = useState(emptySession),
     [checking, setChecking] = useState(true),
@@ -314,9 +339,7 @@ function App() {
   const { active: signedIn, customer: session, csrf, issue } = boot;
   const messages = useMessageInbox(
     tenant,
-    signedIn === true &&
-      !!tenant &&
-      canOpenPage(session, tenant, "messages"),
+    signedIn === true && !!tenant && canOpenPage(session, tenant, "messages"),
   );
   const go = (p: string) => {
     location.hash = `/${p}`;
@@ -548,6 +571,7 @@ function App() {
             go(destination);
           }}
           name={session?.displayName || "已登录"}
+          onNotifications={() => setNotificationsOpen(true)}
           unread={messages.inbox?.unread}
           onLogout={async () => {
             try {
@@ -629,7 +653,7 @@ function App() {
         </main>
       ) : (
         <div
-          className={`public-site ${location.pathname === "/pricing" ? "harbor-pricing" : "query-backdrop"}`}
+          className={`public-site query-site ${location.pathname === "/pricing" ? "pricing-site harbor-pricing" : "query-home"}`}
         >
           <PublicHeader
             current={location.pathname === "/pricing" ? "pricing" : "home"}
@@ -648,7 +672,9 @@ function App() {
           <main
             id="main-content"
             className={
-              location.pathname === "/pricing" ? undefined : "public-query-main"
+              location.pathname === "/pricing"
+                ? undefined
+                : "public-query-main query-backdrop"
             }
           >
             {location.pathname === "/pricing" ? (
@@ -660,7 +686,32 @@ function App() {
           <LegalFooter />
         </div>
       )}
-      <CookieNotice />
+
+      <Dialog
+        open={notificationsOpen && canOpenPage(session, tenant, "messages")}
+        onOpenChange={setNotificationsOpen}
+      >
+        <DialogContent className="notification-dialog parity-notifications">
+          <DialogHeader>
+            <DialogTitle>消息通知</DialogTitle>
+            <DialogDescription className="sr-only">
+              企业订阅动态与到期提醒
+            </DialogDescription>
+          </DialogHeader>
+          <Messages
+            key={tenant}
+            compact
+            tenant={tenant}
+            csrf={csrf}
+            enabled={true}
+            state={messages}
+            go={(next) => {
+              setNotificationsOpen(false);
+              go(next);
+            }}
+          />
+        </DialogContent>
+      </Dialog>
       <AccountDialog open={auth} onOpenChange={setAuth} />
     </AccessContext.Provider>
   );

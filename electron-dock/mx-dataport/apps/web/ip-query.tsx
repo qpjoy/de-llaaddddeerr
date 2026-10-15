@@ -1,6 +1,6 @@
 import { riskAdvice } from "./risk-advice";
 import { useEffect, useRef, useState } from "react";
-import { Search, Download, Clock3 } from "lucide-react";
+import { Search, Download, Clock3, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -43,6 +43,7 @@ export function IpQuery({
     [q, setQ] = useState(""),
     [version, setVersion] = useState(0),
     [batch, setBatch] = useState(false),
+    [showHistory, setShowHistory] = useState(false),
     [exporting, setExporting] = useState(false);
   const [search, setSearch] = useState({ ip: initialIp, revision: 0 }),
     live = useRef(true),
@@ -81,7 +82,7 @@ export function IpQuery({
     if (result) {
       resultRef.current?.focus({ preventScroll: true });
       resultRef.current?.scrollIntoView({
-        block: "nearest",
+        block: "start",
         behavior: "smooth",
       });
     }
@@ -128,45 +129,84 @@ export function IpQuery({
       if (live.current) setBusy(false);
     }
   }
+  async function exportHistory() {
+    setExporting(true);
+    try {
+      let items: any[] = [];
+      for (let n = 1; ; n++) {
+        const { data } = await request(
+          enterpriseUrl(
+            tenant,
+            `history?page=${n}&pageSize=100&q=${encodeURIComponent(q)}&export=1`,
+          ),
+        );
+        items.push(...data.items);
+        if (items.length >= data.total) break;
+      }
+      await downloadExcel(
+        "数港查询历史",
+        ["IP", "风险等级", "查询时间", "状态", "风险参考建议"],
+        items.map((i) => [
+          i.ip,
+          i.payload?.response?.data?.data?.risk_level || "未提供",
+          dateTime(i.createdAt),
+          i.payload ? portraitState(i.payload) : "待确认",
+          riskAdvice(i.payload?.response?.data?.data?.risk_level),
+        ]),
+      );
+    } catch (e) {
+      setHistoryError((e as Error).message);
+    } finally {
+      setExporting(false);
+    }
+  }
   return (
-    <div className="harbor-query-page" data-result={!!result}>
+    <div className="intelligence-page" data-result={!!result}>
       <PublicIpSearch
         key={search.revision}
         initialIp={search.ip}
+        consoleView
         showIntro={false}
         validateInput
         available={canQuery && !busy}
         busy={busy}
-        busyLabel="正在查询…"
+        busyLabel="查询中"
         hint={
           canQuery
             ? "与企业共享订阅次数；查看历史不消耗次数。"
             : "当前角色仅可查看已授权的历史记录。"
         }
+        tools={
+          hasPermission(session, tenant, "query.batch") && (
+            <Button
+              type="button"
+              variant="ghost"
+              className="query-upload"
+              disabled={busy}
+              onClick={() => setBatch((v) => !v)}
+              aria-expanded={batch}
+            >
+              <Upload />
+              <span>Excel 导入</span>
+            </Button>
+          )
+        }
         onQuery={(ip) => query(ip)}
-      />
-      {hasPermission(session, tenant, "query.batch") && (
-        <div className="dp-batch-entry">
-          <Button
-            variant="ghost"
-            disabled={busy}
-            onClick={() => setBatch((v) => !v)}
-          >
-            {batch ? "收起批量查询" : "Excel 批量查询"}
-          </Button>
-        </div>
-      )}
-      {batch && (
-        <BatchQuery
-          tenant={tenant}
-          session={session}
-          csrf={csrf}
-          onComplete={() => {
-            setPage(1);
-            setVersion((v) => v + 1);
-          }}
-        />
-      )}
+      >
+        {batch && (
+          <div className="batch-query-content parity-batch-inline">
+            <BatchQuery
+              tenant={tenant}
+              session={session}
+              csrf={csrf}
+              onComplete={() => {
+                setPage(1);
+                setVersion((v) => v + 1);
+              }}
+            />
+          </div>
+        )}
+      </PublicIpSearch>
       <div className="harbor-query-workspace">
         {error && (
           <p role="alert" className="harbor-error">
@@ -195,18 +235,24 @@ export function IpQuery({
             />
           </div>
         )}
-        {canRead && (
+        {result && canRead && (
+          <Button
+            className="history-reveal"
+            variant="link"
+            onClick={() => setShowHistory((v) => !v)}
+          >
+            {showHistory ? "收起最近查询" : "查看最近查询"}
+          </Button>
+        )}
+        {canRead && (!result || showHistory) && (
           <Card className="harbor-history">
             <CardHeader className="harbor-history-heading">
               <CardTitle>
                 <h2>最近查询</h2>
               </CardTitle>
-              <span>企业共享 · 回看不消耗次数</span>
-            </CardHeader>
-            <CardContent>
-              <div className="dp-toolbar">
+              <div className="history-tools">
                 <div className="dp-history-search">
-                  <Search size={17} />
+                  <Search size={16} />
                   <Input
                     aria-label="搜索查询历史"
                     placeholder="搜索 IP 地址"
@@ -219,54 +265,19 @@ export function IpQuery({
                 </div>
                 {canExport && (
                   <Button
-                    variant="outline"
+                    variant="ghost"
+                    className="history-export"
+                    aria-label="导出查询历史"
+                    title="导出查询历史"
                     disabled={exporting || !history?.total}
-                    onClick={async () => {
-                      setExporting(true);
-                      try {
-                        let items: any[] = [];
-                        for (let n = 1; ; n++) {
-                          const { data } = await request(
-                            enterpriseUrl(
-                              tenant,
-                              `history?page=${n}&pageSize=100&q=${encodeURIComponent(q)}&export=1`,
-                            ),
-                          );
-                          items.push(...data.items);
-                          if (items.length >= data.total) break;
-                        }
-                        await downloadExcel(
-                          "数港查询历史",
-                          [
-                            "IP",
-                            "风险等级",
-                            "查询时间",
-                            "状态",
-                            "风险参考建议",
-                          ],
-                          items.map((i) => [
-                            i.ip,
-                            i.payload?.response?.data?.data?.risk_level ||
-                              "未提供",
-                            dateTime(i.createdAt),
-                            i.payload ? portraitState(i.payload) : "待确认",
-                            riskAdvice(
-                              i.payload?.response?.data?.data?.risk_level,
-                            ),
-                          ]),
-                        );
-                      } catch (e) {
-                        setHistoryError((e as Error).message);
-                      } finally {
-                        setExporting(false);
-                      }
-                    }}
+                    onClick={() => void exportHistory()}
                   >
                     <Download size={16} />
-                    导出
                   </Button>
                 )}
               </div>
+            </CardHeader>
+            <CardContent>
               {historyError ? (
                 <div className="harbor-empty" role="alert">
                   {historyError}
@@ -279,81 +290,91 @@ export function IpQuery({
                 </div>
               ) : !history ? (
                 <p className="harbor-empty">正在读取查询记录…</p>
-              ) : history.items.length ? (
+              ) : (
                 <>
                   <Table>
                     <TableHeader>
                       <TableRow>
                         <TableHead>IP 地址</TableHead>
-                        <TableHead>风险等级</TableHead>
                         <TableHead>查询状态</TableHead>
+                        <TableHead>风险等级</TableHead>
                         <TableHead>查询时间</TableHead>
-                        <TableHead />
+                        <TableHead>
+                          <span className="sr-only">操作</span>
+                        </TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {history.items.map((i: any) => (
-                        <TableRow key={i.id}>
-                          <TableCell>
-                            <code>{i.ip}</code>
-                          </TableCell>
-                          <TableCell>
-                            <RiskLevel
-                              level={
-                                i.payload?.response?.data?.data?.risk_level
-                              }
-                            />
-                          </TableCell>
-                          <TableCell>
-                            {!i.payload
-                              ? "结果待确认"
-                              : (
-                                  {
-                                    success: "查询成功",
-                                    partial: "部分数据",
-                                    no_data: "暂无数据",
-                                    unknown: "结果待确认",
-                                    error: "查询失败",
-                                  } as Record<string, string>
-                                )[portraitState(i.payload)]}
-                          </TableCell>
-                          <TableCell>{dateTime(i.createdAt)}</TableCell>
-                          <TableCell>
-                            <Button
-                              variant="link"
-                              disabled={!i.payload || busy}
-                              onClick={() => {
-                                setResult({
-                                  ...i.payload,
-                                  id: i.id,
-                                  historical: true,
-                                });
-                                setSearch((s) => ({
-                                  ip: i.ip,
-                                  revision: s.revision + 1,
-                                }));
-                              }}
-                            >
-                              查看 →
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      ))}
+                      {history.items.map((i: any) => {
+                        const state = i.payload
+                          ? portraitState(i.payload)
+                          : "unknown";
+                        const label =
+                          (
+                            {
+                              success: "成功",
+                              partial: "部分数据",
+                              no_data: "暂无数据",
+                              unknown: "待确认",
+                              error: "失败",
+                            } as Record<string, string>
+                          )[state] || "待确认";
+                        return (
+                          <TableRow key={i.id}>
+                            <TableCell>{i.ip}</TableCell>
+                            <TableCell>
+                              <span
+                                className={`status ${state === "success" ? "good" : state === "error" ? "bad" : "pending"}`}
+                              >
+                                {label}
+                              </span>
+                            </TableCell>
+                            <TableCell>
+                              <RiskLevel
+                                level={
+                                  i.payload?.response?.data?.data?.risk_level
+                                }
+                              />
+                            </TableCell>
+                            <TableCell>{dateTime(i.createdAt)}</TableCell>
+                            <TableCell>
+                              <Button
+                                variant="link"
+                                aria-label={`查看 ${i.ip} 的查询记录`}
+                                disabled={!i.payload || busy}
+                                onClick={() => {
+                                  setResult({
+                                    ...i.payload,
+                                    id: i.id,
+                                    historical: true,
+                                  });
+                                  setSearch((s) => ({
+                                    ip: i.ip,
+                                    revision: s.revision + 1,
+                                  }));
+                                }}
+                              >
+                                详情
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
                     </TableBody>
                   </Table>
-                  <p className="harbor-hint">共 {history.total} 条查询记录</p>
+                  {!history.items.length && (
+                    <div className="harbor-history-empty">
+                      <Clock3 />
+                      <h3>{q ? "没有匹配的查询记录" : "尚无查询记录"}</h3>
+                      <p>完成查询后，可在这里回看画像。</p>
+                    </div>
+                  )}
                   <Pagination
                     label="查询历史"
                     {...history}
                     onChange={setPage}
                   />
                 </>
-              ) : (
-                <div className="harbor-history-empty">
-                  <Clock3 />
-                  <h3>{q ? "没有匹配的查询记录" : "尚无查询记录"}</h3>
-                  <p>完成查询后，可在这里回看画像。</p>
-                </div>
               )}
             </CardContent>
           </Card>
