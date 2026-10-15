@@ -971,6 +971,76 @@ test('Twitter full-page repeated Bottom closes immediately, while repeated-page 
   }
 })
 
+test('Twitter standard busy identifies Hub or consumer concurrency before dispatch and releases only the rejected request', async () => {
+  for (const limit of ['hub', 'consumer']) {
+    const h = await harness({ platform: 'twitter', twitterData: twitterTimeline([twitterPost], null) })
+    h.config.maxConcurrency = limit === 'hub' ? 1 : 3
+    h.config.maxConsumerConcurrency = 1
+    let started, finish
+    const pending = new Promise(resolve => { started = resolve })
+    const held = new Promise(resolve => { finish = resolve })
+    const execute = h.gateway.adapter.execute.bind(h.gateway.adapter)
+    h.gateway.adapter.execute = async (...args) => { started(); await held; return execute(...args) }
+    const body = { platform: 'twitter', query: 'leader', pageSize: 20 }
+    const leader = h.invokeData(body, `twitter-${limit}-busy-leader`)
+    await pending
+    try {
+      await assert.rejects(h.invokeData({ ...body, query: 'follower' }, `twitter-${limit}-busy-follower`), error => {
+        assert.equal(error.status, 503)
+        assert.equal(error.code, 'external_platform_busy')
+        assert.match(error.message, /Hub Twitter.*并发.*尚未发起采集/)
+        assert.equal(error.details.layer, 'hub')
+        assert.equal(error.details.stage, 'concurrency_admission')
+        assert.equal(error.details.reason, `${limit === 'hub' ? 'hub' : 'consumer'}_concurrency_exhausted`)
+        assert.equal(error.details.upstreamDispatched, false)
+        assert.equal(error.details.admissionMode, 'immediate')
+        assert.equal(error.details.retryAfterMs, 1000)
+        assert.equal(error.details.activeConcurrency, 1)
+        assert.equal(error.details.consumerActiveConcurrency, 1)
+        assert.equal(error.details.queueDepth, 0)
+        assert.equal(h.store.requests.get(error.details.requestId).status, 'released')
+        return true
+      })
+      assert.equal(h.platformStore.calls.size, 1, 'only the leader reached dispatch')
+      assert.equal(h.platformStore.requests.length, 1)
+      assert.equal(h.platformStore.requests[0].providerCallId, null)
+      assert.equal(h.platformStore.requests[0].responseStatus, 503)
+      assert.equal(h.platformStore.requests[0].errorCode, 'external_platform_busy')
+      assert.equal(h.gateway.active, 1, 'rejected follower does not release the leader capacity')
+    } finally { finish() }
+    assert.equal((await leader).status, 200)
+    assert.equal(h.gateway.active, 0)
+    assert.equal(h.gateway.activeByConsumer.size, 0)
+    assert.equal((await h.invokeData({ ...body, query: 'follower' }, `twitter-${limit}-busy-explicit-retry`)).status, 200)
+    assert.equal(h.calls.length, 2, 'only an explicit new business request dispatches after capacity becomes free')
+    assert.equal(h.gateway.active, 0)
+  }
+})
+
+test('Twitter standard HTTP busy exposes its Hub cause, durable request ID and backoff hint', async t => {
+  const h = await harness({ platform: 'twitter' })
+  h.gateway.active = h.config.maxConcurrency
+  const server = createServer(createApp({ service: h.service, store: h.store, adapter: {}, listenerMode: 'public', logger: { error() {} } }))
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+  t.after(() => { server.closeAllConnections(); server.close() })
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/data/search`, {
+    method: 'POST', headers: { authorization: `Bearer ${h.key.secret}`, 'content-type': 'application/json', 'idempotency-key': 'twitter-http-busy' },
+    body: JSON.stringify({ platform: 'twitter', query: 'fixture', pageSize: 20 }),
+  })
+  const body = await response.json()
+  assert.equal(response.status, 503)
+  assert.equal(response.headers.get('retry-after'), '1')
+  assert.equal(body.error.code, 'external_platform_busy')
+  assert.match(body.error.message, /Hub Twitter.*并发/)
+  assert.equal(body.error.details.reason, 'hub_concurrency_exhausted')
+  assert.equal(body.error.details.upstreamDispatched, false)
+  assert.equal(body.error.details.requestId, body.requestId)
+  assert.equal(h.store.requests.get(body.requestId).status, 'released')
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.platformStore.calls.size, 0)
+  assert.equal(h.platformStore.requests[0].responseStatus, 503)
+})
+
 test('Twitter known rate admission may deliver a short page while a later unknown acquisition never becomes partial 200', async () => {
   const rows = start => Array.from({ length: 5 }, (_, i) => ({ ...twitterZeroPost, rest_id: String(start + i) }))
   const partial = await harness({ platform: 'twitter', twitterData: twitterTimeline(rows(1), 'rate-next') })

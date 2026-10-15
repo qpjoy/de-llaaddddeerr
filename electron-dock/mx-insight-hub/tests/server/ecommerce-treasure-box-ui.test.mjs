@@ -19,7 +19,7 @@ let behaviorModulePromise
 function behaviorModule() {
   behaviorModulePromise ||= build({
     stdin: {
-      contents: "export { normalizedStoredLiveRequest, liveRequestRecoveryDecision, liveRequestStorageDecision } from './pages-ecommerce-treasure-box.jsx'",
+      contents: "export { normalizedStoredLiveRequest, liveRequestRecoveryDecision, liveRequestStorageDecision, ecommerceErrorPresentation } from './pages-ecommerce-treasure-box.jsx'",
       loader: 'js',
       resolveDir: fileURLToPath(new URL('../../src/', import.meta.url)),
     },
@@ -382,6 +382,35 @@ test('ambiguous refresh is one click without fee checkbox, UUID or manual reconc
   assert.match(pageSource, /mode === 'safe_demo' \? safeDemoIdleMessage\(demoDeliveryMode, demoCacheOnlyScene\)/u)
   assert.match(pageSource, /aria-pressed=\{capabilityGroup === group\.id\}/u)
   assert.match(pageSource, /role="tablist" aria-label="电商数据工作区"/u)
+})
+
+test('ecommerce capacity presentation names service quota ownership and the actual protection deadline', async () => {
+  const { ecommerceErrorPresentation } = await behaviorModule()
+  for (const [reasonCode, title] of [
+    ['ecommerce_service_credit_exhausted', 'Hub 电商采集额度不足'],
+    ['ecommerce_service_quota_exhausted', 'Hub 电商采集配额已用完'],
+    ['ecommerce_service_daily_quota_exhausted', 'Hub 电商今日采集配额已用完'],
+  ]) {
+    for (const code of ['external_platform_capacity_unavailable', 'external_platform_capacity_exceeded', 'external_platform_circuit_open']) {
+      const result = ecommerceErrorPresentation({ code, status: 503, details: { service: 'ecommerce', reasonCode,
+        circuitOpenUntil: '2026-10-14T09:42:40.165Z' } })
+      assert.equal(result.title, title)
+      assert.equal(result.reasonCode, reasonCode)
+      assert.match(result.description, /管理员.*页面不会自动重试/u)
+      assert.match(result.description, /17:42:40.*北京时间.*到期后仍需确认服务额度已恢复/u)
+      assert.doesNotMatch(JSON.stringify(result), /供应商|上游|justone|upstream/iu)
+    }
+  }
+  const direct = ecommerceErrorPresentation({ code: 'external_platform_capacity_unavailable',
+    details: { service: 'ecommerce', reasonCode: 'ecommerce_service_credit_exhausted' } })
+  assert.doesNotMatch(direct.description, /截止时间/u)
+  for (const details of [undefined, { service: 'social', reasonCode: 'ecommerce_service_credit_exhausted' },
+    { service: 'ecommerce', reasonCode: 'unreviewed-value', circuitOpenUntil: 'invalid' }]) {
+    assert.equal(ecommerceErrorPresentation({ code: 'external_platform_capacity_unavailable', details }).title, '数据容量暂不可用')
+  }
+  assert.equal(ecommerceErrorPresentation({ code: 'api_key_quota_exceeded',
+    details: { service: 'ecommerce', reasonCode: 'ecommerce_service_credit_exhausted' } }).title,
+  '这把 API Key 自己的额度已用完')
 })
 
 test('data-product errors are localized by ownership and always retain operator evidence', async () => {

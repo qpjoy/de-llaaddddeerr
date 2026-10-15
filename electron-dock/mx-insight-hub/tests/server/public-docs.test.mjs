@@ -199,6 +199,10 @@ function assertExternalCommerceContract(document) {
   assert.equal(operation.operationId, 'searchExternalCommerceProducts')
   assert.equal(operation['x-mx-required-platform'], 'ecommerce')
   assert.deepEqual(operation['x-mx-required-capabilities'], ['ecommerce.products.search'])
+  for (const field of ['ecommerce_service_credit_exhausted', 'ecommerce_service_quota_exhausted',
+    'ecommerce_service_daily_quota_exhausted', 'circuitOpenUntil', 'retryable=false']) {
+    assert.ok(operation.description.includes(field), `Missing ecommerce availability guidance: ${field}`)
+  }
   assert.doesNotMatch(JSON.stringify(operation), /tikhub|rapidapi|justone/i)
   assert.deepEqual(operation['x-mx-error-codes'], {
     400: [

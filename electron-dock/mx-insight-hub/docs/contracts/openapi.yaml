@@ -3870,7 +3870,13 @@ paths:
         items array is a valid delivery, not an interface failure. External platform identity, credentials,
         endpoint coordinates, provider rate/balance/free quota, procurement
         amounts, customer invoices and raw responses are not exposed. sourceMode
-        is delivery evidence, not a customer price. The optional
+        is delivery evidence, not a customer price. Service credit/quota failures keep the existing HTTP status
+        and error.code and add error.details.service=ecommerce with reasonCode=ecommerce_service_credit_exhausted,
+        ecommerce_service_quota_exhausted or ecommerce_service_daily_quota_exhausted. Display error.message
+        and reasonCode, retain requestId, and direct service-limit issues to an administrator. Active protection
+        includes circuitOpenUntil, retryAfterMs, circuitDurationMs and failureThreshold; retryable=false.
+        A protection deadline does not promise credit/quota recovery or permit automatic retries. Old committed
+        errors replay unchanged. The optional
         X-MX-Insight-Retry-Of header is accepted only for refresh with a new
         Idempotency-Key when its request UUID identifies a matching prior
         same-consumer request in unknown state; it never bypasses reserved state,

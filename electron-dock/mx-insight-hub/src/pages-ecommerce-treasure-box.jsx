@@ -180,8 +180,32 @@ function sourceModeEvidence(mode) {
   }
 }
 
-function ecommerceErrorPresentation(error) {
+export function ecommerceErrorPresentation(error) {
   const code = error?.code || ''
+  const capacityReasons = {
+    ecommerce_service_credit_exhausted: {
+      title: 'Hub 电商采集额度不足',
+      description: '当前电商数据服务的采集额度不足，暂时无法更新商品。请联系管理员处理服务额度；页面不会自动重试。',
+    },
+    ecommerce_service_quota_exhausted: {
+      title: 'Hub 电商采集配额已用完',
+      description: '当前电商数据服务的采集配额已用完。请联系管理员处理服务配额；页面不会自动重试。',
+    },
+    ecommerce_service_daily_quota_exhausted: {
+      title: 'Hub 电商今日采集配额已用完',
+      description: '当前电商数据服务的今日采集配额已用完。请联系管理员核对配额恢复时间；页面不会自动重试。',
+    },
+  }
+  const reasonCode = error?.details?.reasonCode
+  if (error?.details?.service === 'ecommerce' && Object.hasOwn(capacityReasons, reasonCode)
+    && ['external_platform_capacity_unavailable', 'external_platform_capacity_exceeded', 'external_platform_circuit_open'].includes(code)) {
+    const capacity = capacityReasons[reasonCode]
+    const until = Date.parse(error.details.circuitOpenUntil)
+    const protection = Number.isFinite(until)
+      ? ` 当前保护截止时间：${new Date(until).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}（北京时间）。到期后仍需确认服务额度已恢复。`
+      : ''
+    return { ...capacity, description: capacity.description + protection, reasonCode, operatorAction: true }
+  }
   if (!code) {
     return {
       title: error?.message || '商品数据暂时没有交付',
@@ -840,6 +864,7 @@ function TreasureProductError({ error, mode, onUseSafeDemo }) {
         <p>{presentation.description}</p>
         <small>
           {error?.code ? <>错误码 <code>{error.code}</code></> : '本次操作未完成'}
+          {presentation.reasonCode ? <> · 原因码 <code>{presentation.reasonCode}</code></> : null}
           {error?.requestId ? <> · Request ID <code>{error.requestId}</code></> : null}
         </small>
       </div>

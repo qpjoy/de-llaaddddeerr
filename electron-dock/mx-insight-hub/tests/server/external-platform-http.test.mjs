@@ -7,6 +7,7 @@ import { ExternalPlatformGateway } from '../../server/external-platforms/gateway
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
+import { ecommerceCapacityError } from '../../server/external-platforms/availability-errors.mjs'
 
 const PEPPER = 'external-platform-http-test-pepper-with-entropy'
 const PATH = '/api/v1/data/ecommerce/products/search'
@@ -357,6 +358,41 @@ test('one consumer grant covers rotated keys while ecommerce accounting keeps de
     await close(server)
     await usageStore.close()
   }
+})
+
+test('public ecommerce capacity errors retain neutral reason, ledger identity and Retry-After', async () => {
+  const requestId = randomUUID()
+  const until = new Date(Date.now() + 60_000).toISOString()
+  const app = createApp({ store: {}, adapter: {}, listenerMode: 'public', logger: { error() {} },
+    service: { async authenticate() { return { consumer: { id: randomUUID() }, apiKey: { environment: 'live' } } } },
+    externalPlatformGateway: { async search() {
+      const error = ecommerceCapacityError('upstream_balance_exhausted', {
+        code: 'external_platform_circuit_open', state: { circuitOpenUntil: until },
+        config: { circuitFailureThreshold: 3, circuitOpenMs: 60_000 },
+      })
+      error.details.requestId = requestId
+      throw error
+    } },
+  })
+  const server = createServer(app)
+  const baseUrl = await listen(server)
+  try {
+    const response = await fetch(`${baseUrl}${PATH}`, { method: 'POST',
+      headers: { authorization: 'Bearer local-only', 'content-type': 'application/json', 'idempotency-key': 'http-service-quota' },
+      body: JSON.stringify(BODY) })
+    const payload = await response.json()
+    assert.equal(response.status, 503)
+    assert.equal(payload.error.code, 'external_platform_circuit_open')
+    assert.match(payload.error.message, /Hub 电商采集额度不足/u)
+    assert.equal(payload.error.details.reasonCode, 'ecommerce_service_credit_exhausted')
+    assert.equal(payload.error.details.requestDispatched, false)
+    assert.equal(payload.error.details.circuitOpenUntil, until)
+    assert.equal(payload.error.details.retryable, false)
+    assert.equal(payload.requestId, requestId)
+    assert.equal(response.headers.get('x-mx-insight-request-id'), requestId)
+    assert.ok(Number(response.headers.get('retry-after')) > 0 && Number(response.headers.get('retry-after')) <= 60)
+    assert.doesNotMatch(JSON.stringify(payload), /justone|upstream|601/iu)
+  } finally { await close(server) }
 })
 
 test('public ecommerce route forwards the exact uncertain request reference', async () => {

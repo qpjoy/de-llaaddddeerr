@@ -906,6 +906,70 @@ test('product link provenance survives live delivery, cache and replay without r
   }
 })
 
+test('ecommerce service credit and quota failures explain both the direct refusal and circuit protection', async () => {
+  for (const [businessCode, reasonCode] of [
+    [601, 'ecommerce_service_credit_exhausted'],
+    [602, 'ecommerce_service_quota_exhausted'],
+    [303, 'ecommerce_service_daily_quota_exhausted'],
+  ]) {
+    let calls = 0
+    const adapter = new JustOneAdapter({ token: 'synthetic-quota-token', fetchImpl: async () => {
+      calls++
+      return new Response(JSON.stringify({ code: businessCode, message: 'private-provider-message', data: null,
+        recordTime: '2026-10-14T09:41:40Z', requestId: 'synthetic-provider-receipt' }),
+        { headers: { 'content-type': 'application/json' } })
+    } })
+    const state = await fixture({ adapter, gatewayConfig: config({ circuitFailureThreshold: 1 }) })
+    const input = { body: { marketplace: 'taobao', query: 'camera', deliveryMode: 'live_only' },
+      idempotencyKey: `service-quota-${businessCode}`, path: '/api/v1/data/ecommerce/products/search' }
+    await assert.rejects(state.gateway.search(state.context, input), error => {
+      assert.equal(error.status, businessCode === 303 ? 429 : 503)
+      assert.equal(error.code, businessCode === 303 ? 'external_platform_capacity_exceeded' : 'external_platform_capacity_unavailable')
+      assert.equal(error.details.reasonCode, reasonCode)
+      assert.equal(error.details.service, 'ecommerce')
+      assert.equal(error.details.requestDispatched, true)
+      assert.equal(error.details.retryable, false)
+      assert.equal(error.details.circuitOpenUntil, undefined)
+      assert.match(error.message, /Hub 电商.*额度|Hub 电商.*配额/u)
+      assert.doesNotMatch(JSON.stringify(error.details) + error.message, /justone|upstream|private-provider|synthetic-quota|601|602|303/iu)
+      return true
+    })
+    const [call] = [...state.platformStore.calls.values()]
+    assert.equal(call.businessCode, businessCode)
+    assert.equal(call.billed, false)
+    const original = structuredClone(state.usageStore.requests.get(call.usageRequestId).responseBody)
+    await assert.rejects(state.gateway.search(state.context, { ...input, idempotencyKey: `${input.idempotencyKey}-circuit` }), error => {
+      assert.equal(error.status, 503)
+      assert.equal(error.code, 'external_platform_circuit_open')
+      assert.equal(error.details.reasonCode, reasonCode)
+      assert.equal(error.details.requestDispatched, false)
+      assert.equal(error.details.circuitDurationMs, 60_000)
+      assert.equal(error.details.failureThreshold, 1)
+      assert.ok(Date.parse(error.details.circuitOpenUntil) > Date.now())
+      assert.ok(error.details.retryAfterMs > 0 && error.details.retryAfterMs <= 60_000)
+      assert.equal(error.details.retryable, false)
+      assert.doesNotMatch(JSON.stringify(error.details) + error.message, /justone|upstream|private-provider/iu)
+      return true
+    })
+    await assert.rejects(state.gateway.search(state.context, input), error => error.details.reasonCode === reasonCode)
+    assert.deepEqual(state.usageStore.requests.get(call.usageRequestId).responseBody, original)
+    assert.equal(calls, 1, 'neither circuit suppression nor exact replay retries the provider')
+    assert.equal(state.platformStore.calls.size, 1)
+    // Model a saved pre-change error; replay must not rewrite it using today's presentation.
+    const usage = state.usageStore.requests.get(call.usageRequestId)
+    usage.responseBody.error.message = 'External data capacity is unavailable'
+    delete usage.responseBody.error.details.reasonCode
+    await assert.rejects(state.gateway.search(state.context, input), error =>
+      error.message === 'External data capacity is unavailable' && error.details.reasonCode === undefined)
+    assert.equal(calls, 1)
+    state.platformStore.state.circuitOpenUntil = new Date(Date.now() - 1).toISOString()
+    await assert.rejects(state.gateway.search(state.context, { ...input, idempotencyKey: `${input.idempotencyKey}-after-expiry` }),
+      error => error.code !== 'external_platform_circuit_open' && error.details.reasonCode === reasonCode
+        && error.details.requestDispatched === true)
+    assert.equal(calls, 2, 'deadline expiry admits a new explicit request without claiming quota recovery')
+  }
+})
+
 test('authentication failures advance the global circuit and retain a durable request id', async () => {
   const state = await fixture({
     adapter: {
@@ -2290,6 +2354,25 @@ test('queued requests revalidate current authorization, plan, credential, contro
     assert.equal(state.platformStore.leases.size, 0)
     assert.equal([...state.usageStore.requests.values()].every(request => request.status !== 'reserved'), true)
   })
+})
+
+test('an ecommerce quota circuit discovered after queueing retains its public reason without dispatch', async () => {
+  const state = await queueFixture()
+  const pending = state.gateway.search(state.context, queuedSearch('waiting-quota')).catch(error => error)
+  await waitForQueue(state.gateway)
+  const until = new Date(Date.now() + 60_000).toISOString()
+  state.platformStore.providerState = async () => ({ lastErrorCode: 'upstream_balance_exhausted', circuitOpenUntil: until })
+  state.release()
+  await state.blocker
+  const error = await pending
+  assert.equal(error.code, 'external_platform_circuit_open')
+  assert.equal(error.details.reasonCode, 'ecommerce_service_credit_exhausted')
+  assert.equal(error.details.circuitOpenUntil, until)
+  assert.equal(error.details.requestDispatched, false)
+  assert.deepEqual(state.calls, ['blocker'])
+  assert.equal(state.platformStore.calls.size, 1)
+  assert.equal(state.gateway.active, 0)
+  assert.equal(state.platformStore.leases.size, 0)
 })
 
 test('queued request reacquires dispatch protection and preserves original reservation deadline', async () => {

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { TikHubUpstreamError } from '../../server/adapters/tikhub.mjs'
+import { TikHubAdapter, TikHubUpstreamError } from '../../server/adapters/tikhub.mjs'
+import { HubService } from '../../server/hub-service.mjs'
+import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { AppError } from '../../server/core/errors.mjs'
 import { createInternalTrafficPolicy } from '../../server/core/internal-traffic-policy.mjs'
 import { isNightAllDataSearchV1Envelope } from '../../server/contracts/night-all-data-search.mjs'
@@ -1186,6 +1188,89 @@ test('legacy direct pagination accepts its opaque cursor and keeps the second pa
   }, {
     operation: 'social.posts.search', callRole: 'primary',
   }])
+})
+
+test('modern and legacy empty numbered pages commit once and replay without purchasing another page', async () => {
+  for (const responseMode of ['modern', 'legacy']) {
+    const usageStore = new MemoryStore()
+    const service = new HubService({ store: usageStore, adapter: {}, apiKeyPepper: PEPPER })
+    const tenant = await service.createTenant({ name: 'Empty page tenant' })
+    const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Empty page consumer' })
+    await service.putPlatformConfiguration('xiaohongshu', { tenantId: tenant.id, consumerId: consumer.id,
+      enabled: true, maxRequests: 1000, windowSeconds: 3600, maxPageSize: 20 })
+    await service.putCapabilityConfiguration(XIAOHONGSHU_SEARCH_OPERATION, {
+      tenantId: tenant.id, consumerId: consumer.id, enabled: true, maxRequests: 1000, windowSeconds: 3600,
+    })
+    const key = await service.createApiKey({ consumerId: consumer.id, name: 'Search key',
+      platforms: ['xiaohongshu'], capabilities: [XIAOHONGSHU_SEARCH_OPERATION] })
+    const plan = await service.publishPlanVersion({ key: `empty-page-${responseMode}`, name: 'Paid search',
+      limits: { monthlyRequests: 1000, maxPageSize: 20, burstRps: 100 },
+      priceBook: { key: `empty-page-price-${responseMode}`, currency: 'CNY', defaultMultiplierPpm: 1_000_000,
+        entries: [{ meterKey: XIAOHONGSHU_SEARCH_OPERATION, billingUnit: 'request', unitPriceMinor: 7 }] },
+    }, 'test-admin')
+    const currentPlan = await service.getConsumerPlan(consumer.id)
+    await service.assignConsumerPlan(consumer.id, { planVersionId: plan.versionId,
+      expectedRevision: currentPlan.revision }, 'test-admin')
+    await service.setTenantBillingProfile(tenant.id, { mode: 'enforced', multiplierPpm: 1_000_000 }, 'test-admin')
+    await service.addTenantCredit(tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Synthetic test credit' },
+      { idempotencyKey: `empty-page-credit-${responseMode}`, actor: 'test-admin' })
+    const context = await service.authenticate(key.secret)
+    const captures = []
+    const adapter = new TikHubAdapter({ apiKey: 'synthetic-search-credential', fetchImpl: async url => {
+      const page = Number(new URL(url).searchParams.get('page'))
+      const payload = searchEnvelope(page === 1 ? [note(FIRST_NOTE_ID, '完整正文')] : [], {
+        page, hasMore: true, searchId: 'saved-search', searchSessionId: 'saved-session',
+      })
+      const bytes = Buffer.from(JSON.stringify(payload, null, 2))
+      captures.push(bytes)
+      return new Response(bytes, { status: 200, headers: { 'content-type': 'application/json' } })
+    } })
+    const platformStore = new MemoryExternalPlatformStore({ usageStore,
+      providerKey: 'tikhub', authorizationPlatform: 'xiaohongshu' })
+    const gateway = new TikHubGateway({ usageStore, platformStore, adapter,
+      apiKeyPepper: PEPPER, config: config(), reservationLeaseMs: 150_000, logger: { warn() {}, error() {} } })
+    const invoke = (body, idempotencyKey) => gateway.searchNotes(context, { body, idempotencyKey, responseMode,
+      path: responseMode === 'legacy' ? RAW_SEARCH_PATH : '/api/v1/data/search',
+      enrichment: { includeDetails: false } })
+    const body = { platform: 'xiaohongshu', query: '空页终止', pageSize: 20 }
+    const first = await invoke(body, 'empty-page-first')
+    const firstPage = responseMode === 'legacy' ? first.body.data.page : first.body.data.pageInfo
+    const nextBody = { ...body, cursor: firstPage.nextCursor }
+    assert.equal(firstPage.hasMore, true)
+    const second = await invoke(nextBody, 'empty-page-second')
+    const page = responseMode === 'legacy' ? second.body.data.page : second.body.data.pageInfo
+    assert.equal(second.status, 200)
+    assert.equal(page.returnedCount, 0)
+    assert.equal(page.hasMore, false)
+    assert.equal(page.nextCursor, null)
+    if (responseMode === 'legacy') assert.deepEqual(JSON.parse(second.body.data.raw_data), [])
+    else assert.deepEqual(second.body.data.items, [])
+    const call = [...platformStore.calls.values()].find(row => row.usageRequestId === second.requestId)
+    assert.equal(call.outcome, 'succeeded')
+    assert.equal(call.billed, true)
+    assert.equal(call.itemCount, 0)
+    assert.deepEqual(Buffer.from(platformStore.restrictedResponseArchives.get(call.id).bodyBytes), captures[1])
+    assert.equal(platformStore.responseArchives.get(call.id).rawPayload.data.next_page, 3)
+    const usage = usageStore.requests.get(second.requestId)
+    assert.equal(usage.status, 'committed')
+    assert.equal(usage.unitsActual, 1, 'an empty paid page retains normal request metering')
+    const charge = [...usageStore.customerCharges.values()].find(row => row.usageRequestId === second.requestId)
+    assert.equal(charge.status, 'captured')
+    assert.equal(charge.enforcementMode, 'enforced')
+    assert.equal(charge.quotedMinor, 7)
+    assert.equal(charge.chargedMinor, 7)
+    const replay = await invoke(nextBody, 'empty-page-second')
+    assert.equal(replay.sourceMode, 'idempotent_replay')
+    assert.deepEqual(replay.body, second.body)
+    assert.equal(usageStore.customerCharges.size, 2, 'replay does not charge the empty page twice')
+    const cached = await invoke(nextBody, 'empty-page-cache')
+    assert.equal(cached.sourceMode, 'fresh_cache')
+    assert.equal(captures.length, 2, 'no retry or third provider page')
+    assert.equal(platformStore.calls.size, 2)
+    assert.equal(platformStore.ingestJobs.length, 2, 'one ingest job for each acquired page, none for replay/cache')
+    assert.deepEqual(platformStore.ingestJobs[1].payload.records, [])
+    assert.equal([...platformStore.calls.values()].some(row => row.outcome === 'succeeded_unusable'), false)
+  }
 })
 
 test('turning off the search contract blocks an issued cursor before credential, cost, RPM, or provider dispatch', async () => {

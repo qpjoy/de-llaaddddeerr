@@ -556,6 +556,34 @@ can be delivered, its policy state is exposed without umbrella remapping:
 The provider call-rate admission code is `429 external_platform_rate_limited`;
 it is distinct from consumer quota, Hub concurrency and provider capacity.
 
+### Ecommerce service credit and quota errors
+
+New ecommerce failures distinguish service acquisition limits using a neutral Chinese
+`error.message` and `error.details.reasonCode`, while retaining the existing HTTP status
+and primary `error.code`:
+
+| `reasonCode` | Meaning | Direct refusal | Protection refusal |
+| --- | --- | --- | --- |
+| `ecommerce_service_credit_exhausted` | Hub 电商采集额度不足 | 503 `external_platform_capacity_unavailable` | 503 `external_platform_circuit_open` |
+| `ecommerce_service_quota_exhausted` | Hub 电商采集配额已用完 | 503 `external_platform_capacity_unavailable` | 503 `external_platform_circuit_open` |
+| `ecommerce_service_daily_quota_exhausted` | Hub 电商今日采集配额已用完 | 429 `external_platform_capacity_exceeded` | 503 `external_platform_circuit_open` |
+
+`details.service=ecommerce` and `details.action=contact_administrator` identify a service
+limit requiring the Hub operator. Customer wallet, consumer, API-key and plan quota errors
+retain their independent semantics. `requestDispatched` distinguishes a dispatched refusal
+from a request stopped before acquisition; `retryable=false` prohibits automatic paid retries.
+Keep the request's identity and check its saved outcome before preparing any explicit recovery.
+
+When protection is active, `circuitOpenUntil` gives its deadline, `retryAfterMs` its remaining
+duration and `circuitDurationMs`/`failureThreshold` the configured protection parameters.
+HTTP `Retry-After` rounds the remaining duration up to seconds. Deadline expiry only reopens
+admission; it does not prove service credit/quota recovery. No reset time is invented for a
+direct quota refusal. Already committed historical errors continue to replay unchanged.
+
+Clients must display `error.message` and the recognized `reasonCode`, retaining `requestId`
+for support. A wrapper that logs only HTTP status and the primary error code discards the
+specific service-limit explanation.
+
 ### Ecommerce product media relay
 
 ```http
@@ -870,6 +898,8 @@ Successful responses preserve the stable Night-All data-search envelope and add:
 - for direct Xiaohongshu delivery, `x-mx-insight-source-mode`,
   `x-mx-insight-captured-at`, `Age`, and `Warning: 110` when a stored fallback
   is returned.
+
+Twitter standard search may return `503 external_platform_busy` before its first data acquisition when the Hub gateway has no concurrency slot. This is Hub admission, not a quota error or a timed circuit breaker. New errors include a neutral Chinese message and `details.platform=twitter`, `layer=hub`, `stage=concurrency_admission`, `upstreamDispatched=false`, `admissionMode=immediate`, `reason=hub_concurrency_exhausted|consumer_concurrency_exhausted|concurrency_queue_pending`, current/maximum concurrency, queue depth and `retryAfterMs=1000`. The latter is a backoff hint, not a recovery deadline. Callers must display `error.message` and preserve the durable request ID; a safe pre-dispatch rejection does not authorize automatically restarting a blocked acquisition. Older errors retain their original evidence.
 
 Direct Xiaohongshu errors add `403 test_key_not_supported`,
 `400 invalid_page_size|cursor_scope_mismatch`,

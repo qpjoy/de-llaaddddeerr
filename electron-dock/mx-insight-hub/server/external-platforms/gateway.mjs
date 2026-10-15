@@ -1,5 +1,5 @@
 import { isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
-import { circuitOpenError } from './availability-errors.mjs'
+import { circuitOpenError, ecommerceCapacityError } from './availability-errors.mjs'
 import { ConcurrencyAdmissionQueue, DEFAULT_CONCURRENCY_QUEUE, concurrencyBusy } from './concurrency-admission.mjs'
 import { WebSearchUpstreamError } from '../adapters/web-search.mjs'
 import { gatewayWebSearchRequest } from '../web-search/contract.mjs'
@@ -212,7 +212,7 @@ function replayedFailure(request) {
   return new AppError(status, code, message, { ...storedDetails, requestId: request.id })
 }
 
-function publicFailure(error) {
+function publicFailure(error, { ecommerce = false } = {}) {
   const evidence = error.evidence || {}
   if (error instanceof WebSearchUpstreamError) {
     const code = evidence.outcome === 'unknown' ? 'web_search_upstream_outcome_unknown'
@@ -230,6 +230,16 @@ function publicFailure(error) {
   }
   // Business capacity codes belong to JustOne. Other suppliers may reuse
   // those numbers in error metadata without reporting a capacity failure.
+  if (ecommerce && error instanceof JustOneUpstreamError
+    && ({ 601: 'upstream_balance_exhausted', 602: 'upstream_token_limit_exceeded',
+      303: 'upstream_daily_quota_exceeded' })[evidence.businessCode] === evidence.errorCode) {
+    const capacity = ecommerceCapacityError(evidence.errorCode, {
+      status: evidence.businessCode === 303 ? 429 : 503,
+      code: evidence.businessCode === 303 ? 'external_platform_capacity_exceeded' : 'external_platform_capacity_unavailable',
+      requestDispatched: true,
+    })
+    if (capacity) return capacity
+  }
   if (evidence.httpStatus === 429
     || (error instanceof JustOneUpstreamError && [302, 303].includes(evidence.businessCode))) {
     return new AppError(429, 'external_platform_capacity_exceeded', 'External data capacity is temporarily exhausted')
@@ -1387,6 +1397,13 @@ export class ExternalPlatformGateway {
         errorCode,
       })
       if (operationControlError) throw operationControlError
+      if (this.providerKey === 'justone' && authorizationPlatform === 'ecommerce'
+        && state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now) {
+        const capacity = ecommerceCapacityError(state.lastErrorCode, {
+          code: 'external_platform_circuit_open', state, config: this.config,
+        })
+        if (capacity) throw capacity
+      }
       if (this.providerKey === 'tikhub' && circuitOpen
         && !(contractCircuit?.circuitOpenUntil && new Date(contractCircuit.circuitOpenUntil) > now)) {
         throw circuitOpenError(state, this.config, 'External data is temporarily unavailable')
@@ -1514,6 +1531,13 @@ export class ExternalPlatformGateway {
           const latest = this.providerKey === 'tikhub' ? internalCircuitState(this.usageStore, context, shared) : shared
           const contract = await this.platformStore.contractCircuitState?.(this.providerKey, normalized.marketplace ?? null)
           if ([latest, contract].some(value => value?.circuitOpenUntil && Date.parse(value.circuitOpenUntil) > this.admissionClock())) {
+            if (this.providerKey === 'justone' && authorizationPlatform === 'ecommerce'
+              && latest?.circuitOpenUntil && Date.parse(latest.circuitOpenUntil) > this.admissionClock()) {
+              const capacity = ecommerceCapacityError(latest.lastErrorCode, {
+                code: 'external_platform_circuit_open', state: latest, config: this.config,
+              })
+              if (capacity) throw capacity
+            }
             throw circuitOpenError(contract?.circuitOpenUntil && Date.parse(contract.circuitOpenUntil) > this.admissionClock() ? contract : latest,
               this.config, 'External data is temporarily unavailable')
           }
@@ -1779,7 +1803,7 @@ export class ExternalPlatformGateway {
           && !(plan.nativeForwarding && error instanceof TikHubUpstreamError)) throw error
         const evidence = error.evidence
         const persistedEvidence = persistedCallEvidence(error)
-        const mappedError = publicFailure(error)
+        const mappedError = publicFailure(error, { ecommerce: authorizationPlatform === 'ecommerce' })
         const latencyMs = Math.max(0, Math.round(performance.now() - startedAt))
         const billed = plan.billingFree ? false : evidence.billed ?? null
         const unitCost = plan.costUnknown?.() ? null : costControl.costMinor

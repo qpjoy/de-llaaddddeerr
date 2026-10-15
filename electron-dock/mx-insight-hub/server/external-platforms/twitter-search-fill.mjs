@@ -144,7 +144,16 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         if(await store.twitterFillUnknownFor(delivery)) throw new AppError(409,'request_outcome_unknown','A previous equal delivery has an unknown outcome')
         if(!entered) {
           if(!await enterCapacity({dispatchLease,expiresAt:new Date(deadlineAt),signal})) {
-            throw new AppError(503,'external_platform_busy','External data capacity is occupied')
+            const active=gateway.active, consumerActive=gateway.activeByConsumer.get(context.consumer.id) || 0
+            const reason=active>=gateway.config.maxConcurrency ? 'hub_concurrency_exhausted'
+              : consumerActive>=gateway.config.maxConsumerConcurrency ? 'consumer_concurrency_exhausted' : 'concurrency_queue_pending'
+            await store.rejectWithoutDispatch({delivery,sourceMode:'unavailable',status:503,errorCode:'external_platform_busy'})
+            throw new AppError(503,'external_platform_busy','Hub Twitter 数据采集并发名额暂不可用，本次尚未发起采集，请稍后重试。',{
+              platform:'twitter',layer:'hub',stage:'concurrency_admission',reason,upstreamDispatched:false,
+              retryAfterMs:1000,admissionMode:'immediate',activeConcurrency:active,maxConcurrency:gateway.config.maxConcurrency,
+              consumerActiveConcurrency:consumerActive,maxConsumerConcurrency:gateway.config.maxConsumerConcurrency,
+              queueDepth:gateway.concurrencyQueue.entries.length,
+            })
           }
           entered=true
         }
