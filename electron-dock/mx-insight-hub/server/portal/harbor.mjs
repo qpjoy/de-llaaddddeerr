@@ -33,7 +33,7 @@ function configuredPortal({pool,store,settings,token,hubSettings,oidcConfigurati
       const verified=await verifier.verifySession({accessToken,subject,issuer:settings.issuer},true)
       const memberId=await sessions.provision({issuer:settings.issuer,subject,clientId:settings.clientId,canonical:verified.mxIdentity,sharedAudience:hubSettings.audience,personalTenant:false})
       const memberships=(await store.listTenantMemberships(memberId)).filter(m=>m.status==='active').map(m=>({...m,capabilities:capabilitiesForRole(m.role)}))
-      return {kind:'launcher-user',memberId,displayName:verified.displayName,subject:verified.mxIdentity.subject,issuer:verified.mxIdentity.issuer,platformAdmin:false,tenantIds:memberships.map(m=>m.tenantId),memberships,capabilities:[...new Set(memberships.flatMap(m=>m.capabilities))],portalOrigin:settings.origin,portalAudience:hubSettings.audience}
+      return {kind:'launcher-user',memberId,displayName:verified.displayName,subject:verified.mxIdentity.subject,issuer:verified.mxIdentity.issuer,platformAdmin:false,dataportPlatformAdmin:verified.mxIdentity.principal.scopes.includes('mx:dataport:admin'),tenantIds:memberships.map(m=>m.tenantId),memberships,capabilities:[...new Set(memberships.flatMap(m=>m.capabilities))],portalOrigin:settings.origin,portalAudience:hubSettings.audience}
     }
   }
 }

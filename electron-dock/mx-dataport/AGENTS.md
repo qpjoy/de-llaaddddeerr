@@ -1,3 +1,5 @@
+- 2026-10-15 平台管理使用显式 MX 角色 `mx-dataport-admin` / scope `mx:dataport:admin`，绝不按 taku/root 用户名或通用 platformAdmin 自动授权。只开放数港企业/超管/专属码接口；已有 MX 账号确认加入、平台邀请发起人实时复验、企业业务仍需原权限。Auth → Hub migration 151 → DataPort 部署；独立账号密钥必须保留，见 [平台管理说明](docs/platform-administration.md)。
+
 - 2026-10-14 用户已授权本轮原型对齐涉及 Hub 数港服务端及 Launcher/Auth 的数港账号链路。新增企业角色、超管会话邀请码、托管员工与邀请确认；部署需要 Auth → Hub migration 149 → DataPort。不得扩展到 MX-H2I/罗盘或修改网络。详情见 [本轮实现及上线配置](docs/alignment-and-enterprise.md)。下文“不改 Auth/无需迁移”等历史说明仅对应其原轮次。
 
 - 2026-10-12 DataPort 后续：migration 146 自动上架未经编辑的三档草稿，并新增 0 元/10 次试用（当前默认 7 天，可在 Hub 修改）。试用每空间每服务限领一次，事务幂等交付，不调用 Pay、不伪造付款；保留旧商品与已售权益。DataPort 登录弹窗等待 SSO 表单准备后才展示，采用淡入。仅 Hub/DataPort 发布，不改 Launcher/MX-H2I 登录联网。见 dataport.setup.md（Hub 见 ../mx-dataport/dataport.setup.md）。

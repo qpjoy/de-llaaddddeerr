@@ -1,3 +1,4 @@
+import { PlatformAdmin } from "./platform";
 import { PublicPricing } from "./public-pricing";
 import { UsageOverview } from "./workspace";
 import { Documentation } from "./documentation";
@@ -12,6 +13,7 @@ import {
   Wallet,
   Plug,
   MessageCircle,
+  ShieldCheck,
 } from "lucide-react";
 import {
   SidebarProvider,
@@ -66,6 +68,7 @@ const pages = [
   ["services", "我的订阅", Plug],
   ["orders", "账单与发票", Wallet],
   ["docs-ip", "接口文档", BookOpen],
+  ["platform", "平台管理", ShieldCheck],
 ] as const;
 function Navigation({
   page,
@@ -86,7 +89,7 @@ function Navigation({
       {pages
         .filter(
           ([id]) =>
-            session === undefined || canOpenPage(session, tenant || "", id),
+            (session === undefined && id !== "platform") || canOpenPage(session, tenant || "", id),
         )
         .map(([id, title, Icon]) => (
           <SidebarMenuItem
@@ -247,11 +250,12 @@ function RemotePanel({
         <CardHeader>
           <CardTitle>无权访问此页面</CardTitle>
           <CardDescription>
-            当前角色没有页面所需权限，请联系企业超管。
+            {page === "platform" ? "当前账号没有数港平台管理权限，请联系平台管理员。" : "当前角色没有页面所需权限，请联系企业超管。"}
           </CardDescription>
         </CardHeader>
       </Card>
     );
+  if (page === "platform") return <PlatformAdmin csrf={csrf} memberId={session.memberId} />;
   if (page === "team")
     return <EnterpriseMembers tenant={tenant} session={session} csrf={csrf} />;
   if (page === "audit")
@@ -374,6 +378,7 @@ function App() {
               ? previous
               : value.customer.tenantIds?.[0] || "",
           );
+          if (value.customer.dataportPlatformAdmin === true && !location.hash && !sessionStorage.getItem("harbor:return")) go("platform");
           const destination = sessionStorage.getItem("harbor:return");
           if (
             destination &&
@@ -390,6 +395,7 @@ function App() {
               "audit",
               "account",
               "messages",
+              "platform",
             ].includes(destination)
           ) {
             go(destination!);
@@ -592,7 +598,7 @@ function App() {
                 retrySession();
               }}
             />
-          ) : membershipFor(session, tenant)?.dataport
+          ) : page !== "platform" && membershipFor(session, tenant)?.dataport
               ?.ownerChallengeRequired ? (
             <OwnerChallenge
               tenant={tenant}

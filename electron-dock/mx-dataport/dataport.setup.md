@@ -1,5 +1,11 @@
 # DataPort 发布与域名迁移
 
+## 数港平台管理与 pro 分支（2026-10-15）
+
+新增网页「平台管理」入口，支持创建企业、添加企业超管、配置/重置专属邀请码。平台管理员使用统一 MX 独立角色 `mx-dataport-admin`，用户指定现有 `taku` 账号；代码不按用户名授予权限，需在 Auth 发布后于用户中心明确勾选并保存。原 MX Admin/Hub 管理员及企业超管不会自动获得该权限。
+
+本轮及后续数港修改在 `pro` 提交、合并。先将 pro 成功推送并在服务器同步，再按 Auth → Hub（新增 migration 151，依赖 149）→ DataPort 发布。账号服务专用 Secret 挂载、首次配置、完整命令及网页使用方式见 [平台管理部署说明](docs/platform-administration.md)。本地验证不等于线上账号已授权。
+
 ## 登录成功但所有导航消失（2026-10-15）
 
 若 `/bff/v1/session` 返回有效的 `role: "owner"` 和旧 `capabilities`，但 `memberships[]` 没有 `dataport` 对象，说明当前 Hub 会话接口尚未提供新版数港权限协议。此时重复授予 owner 无法补齐接口；应核对数港的 Hub 上游、全部 Hub 副本版本，并部署包含 migration `149_dataport_enterprise.sql` 的 Hub，再发布数港。迁移由 Hub 原部署流程执行，不改写已应用迁移。

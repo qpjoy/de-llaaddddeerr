@@ -198,6 +198,10 @@ spec:
                 secretKeyRef:
                   name: mx-internal-ops
                   key: token
+            - name: MX_DATAPORT_ACCOUNT_TOKEN_FILE
+              value: /run/dataport-accounts/token
+            - name: MX_DATAPORT_CREDENTIAL_KEY_FILE
+              value: /run/dataport-accounts/credential-key
             - name: MX_INSIGHT_HUB_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -242,6 +246,9 @@ spec:
               memory: 1Gi
               ephemeral-storage: 1Gi
           volumeMounts:
+            - name: dataport-accounts
+              mountPath: /run/dataport-accounts
+              readOnly: true
             - name: identity-ca
               mountPath: /run/mx-identity-ca
               readOnly: true
@@ -252,6 +259,11 @@ spec:
             - name: site-slots
               mountPath: /app/runtime-artifacts/site-slots
       volumes:
+        - name: dataport-accounts
+          secret:
+            secretName: mx-dataport-accounts
+            optional: true
+            defaultMode: 288
         - name: identity-ca
           secret:
             secretName: mx-identity-ca

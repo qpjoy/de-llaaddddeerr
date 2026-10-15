@@ -1,3 +1,4 @@
+import { DataportPlatform, platformRouteAllowed, requireDataportPlatformAdmin } from "./dataport-platform.mjs";
 import { AppError } from "../core/errors.mjs";
 import {
   requireDataportAccess,
@@ -32,6 +33,7 @@ const endpoints = {
   ],
 };
 export function dataportRouteAllowed(method, path) {
+  if (platformRouteAllowed(method,path)) return true;
   if (method === "GET" && path === "/payments/return-order") return true;
   if (/^\/joins\/[A-Za-z0-9_-]{43}$/.test(path))
     return ["GET", "POST"].includes(method);
@@ -70,6 +72,7 @@ export async function dataportRoute({
       throw new AppError(400, "invalid_request", "请使用 JSON 对象请求。");
     return body;
   };
+  if (path.startsWith("/platform/")) requireDataportPlatformAdmin(principal);
   dataport.available();
   const reply = (data, status = 200) => {
     sendJson(
@@ -83,6 +86,21 @@ export async function dataportRoute({
   if (request.method === "POST" && searchParams.size)
     throw new AppError(400, "invalid_query", "此操作不接受查询参数。");
   const accounts = new DataportAccountsClient();
+  if (path.startsWith("/platform/")) {
+    const platform = new DataportPlatform(dataport,accounts);
+    if (path === "/platform/enterprises") return reply(request.method === "GET"
+      ? await platform.list(principal,searchParams)
+      : await platform.create(principal,await readJson(request,1024)));
+    const [,tenantId,memberId,operation] = /^\/platform\/enterprises\/([^/]+)\/owners(?:\/([^/]+)\/(code|initial-password))?$/.exec(path);
+    if (!memberId) return reply(await platform.owner(principal,tenantId,await readJson(request,2048),audience));
+    const body=await readJson(request,1024);
+    if (operation === "code") {
+      if (Object.keys(body).length!==1 || typeof body.code!=="string") throw new AppError(400,"invalid_owner_code","请填写专属邀请码。");
+      return reply(await dataport.configureOwnerCode(tenantId,memberId,body.code,principal.memberId));
+    }
+    if (Object.keys(body).length) throw new AppError(400,"invalid_request","此操作不接受额外参数。");
+    return reply(await platform.password(principal,tenantId,memberId));
+  }
   if (path === "/payments/return-order") {
     const trade = searchParams.get("trade");
     if (
@@ -143,6 +161,7 @@ export async function dataportRoute({
         path.split("/")[2],
         request.method === "POST",
         audience,
+        accounts,
       ),
     );
   }

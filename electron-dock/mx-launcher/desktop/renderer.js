@@ -10038,7 +10038,7 @@ function renderUserEditorDrawer() {
             </label>
             <fieldset class="app-form-field app-form-wide user-role-selector">
               <legend>角色与应用授权（可多选）</legend>
-              <p class="muted">MX Admin 管理 Launcher；Hub、Pay 的管理权限分别勾选。邀请注册后也可在这里授权，保存后无需重新部署。明确禁止的应用仍不能登录。</p>
+              <p class="muted">MX Admin 管理 Launcher；数港、Hub、Pay 的管理权限分别勾选。邀请注册后也可在这里授权，保存后无需重新部署。明确禁止的应用仍不能登录。</p>
               <div class="app-editor-grid">${editorRoles.map(role => `<label class="app-checkbox"><input type="checkbox" data-user-role data-user-editor-field="roles" value="${escapeHtml(role.value)}" ${selectedRoleIds.includes(role.value) ? 'checked' : ''} /><span>${escapeHtml(role.label)}</span></label>`).join('')}</div>
             </fieldset>
           </div>
