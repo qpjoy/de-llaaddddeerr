@@ -65,7 +65,7 @@ HTTP 200 只表示收到响应，committed 只表示该失败响应及其结算�
 
 ## 原始失败与历史选路的进一步只读检查
 
-用户要求确认之前错误的具体原因；截至本轮仍未收到该 136 字节归档的校验结果。
+用户要求确认之前错误的具体原因；首次准备以下检查时尚未收到该 136 字节归档的校验结果。
 全局队列和单调额度修复针对本地可复现风险，不是已完成的历史根因证明。
 新增独立脚本 `server/ops/diagnose-facebook-failure.mjs` 可直接送入原 Admin 镜像，
 无需先部署新运行时。在同步脚本后的 Hub 目录执行：
@@ -92,4 +92,42 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 脚本没有读取任意深层内容，因此未投影的位置不能被宣称不存在其他证据。
 
 本地五项测试全部通过，包含实际 PGlite 只读 SQL、原始字节校验、历史审计时点、
-重叠调用响应时间边界、隐私输出和 CLI；尚无该生产请求的新诊断回执。
+重叠调用响应时间边界、隐私输出和 CLI；随后收到的生产回执如下。
+
+## 2026-10-15 06:36:44Z 运营者回执
+
+运营者返回 `facebook-failure.v1`：原 JustOne 归档校验成功，136 字节，SHA-256
+`54e41613e2de5814bd92bc4c05142acb01504e84f621be07425a4e1b7e3e724b`，
+code=301、上游请求 ID 与原账本一致；data=null、无 root msg/error。
+root message 是 34 字符字符串，`unreviewedText=true`，内容尚未展示。
+这不是“已确认原文只写了采集失败”，也不能据此归因查询语法、内部超时、Cookie 或风控。
+
+最后一条请求前策略审计为 revision1、auto、monthlyLimit1000，创建于 2026-10-10T14:34:16.402Z。
+请求前最近已完成 RapidAPI 调用 `e36dc76c-587f-4ee4-b28f-a2465e64b077`
+于 01:08:20.897Z 完成，计费头 remaining282／limit1000，无冲突、未报月额度耗尽。
+重叠调用 `65a66fbd-557e-4f83-9cf6-ea8c3e4a7341` 于 01:09:11.018Z 开始，
+目标请求于 01:09:11.260Z 预占；该调用在 01:09:16.317Z 才完成，届时 remaining281。
+此 281 是选路后证据，不能倒填成当时已知状态。
+
+这些证据更支持旧版 `source_busy` 首请求转 JustOne，且不支持供应商月额度耗尽的解释；
+原始准入原因／本地额度快照仍未记录，故不宣称唯一根因已完全证实。
+最近十五条样本被截断，不能代替完整周期计数，也不证明普通计费头曾补额度的风险已在此请求发生。
+
+为继续核对 301 文本，增加独立显式读取工具 `server/ops/read-facebook-failure-message.mjs`。
+要求运营者给出原请求 UUID、原 call UUID、已确认 SHA 三个身份，SQL 限定 Facebook／JustOne／
+固定操作与端点／HTTP200／rejected／业务301。只取最大4KiB归档、校验原始长度和SHA，
+核对 payload code 和关联 ID 后返回 root message（最多512字符）；遮蔽 URL、凭据赋值和长不透明串。
+默认诊断和公共错误不会获得任意消息文本。此工具只读，不需要重新部署或业务请求。
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - \
+  e0885b83-be96-4525-bfdd-c5b3c5bf1d4f \
+  a6617674-59ef-4f96-92d4-41d8bb072af1 \
+  54e41613e2de5814bd92bc4c05142acb01504e84f621be07425a4e1b7e3e724b \
+  < server/ops/read-facebook-failure-message.mjs
+```
+
+八项测试通过，包括实际 PGlite 的显式单归档读取、三身份不匹配拒绝、原字节／关联 ID 校验、
+消息投影与脱敏、默认诊断不泄露文本、CLI 无数据库失败路径。该 34 字符原文仍待运营者输出，
+没有发起付费请求、读取通用日志、部署或修改历史、计费与 MX-H2I 登录联网。

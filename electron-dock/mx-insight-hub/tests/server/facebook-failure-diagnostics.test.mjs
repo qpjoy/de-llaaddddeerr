@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { diagnoseFacebookFailure, inspectFacebookFailureArchive } from '../../server/ops/diagnose-facebook-failure.mjs'
+import { readFacebookFailureMessage, projectFacebookFailureMessage, redactFacebookErrorMessage } from '../../server/ops/read-facebook-failure-message.mjs'
 import { facebookQuotaFixture } from '../helpers/facebook-quota.mjs'
 
 const archive = payload => {
@@ -92,6 +93,12 @@ test('historical Facebook diagnostic runs read-only SQL and separates overlappin
   assert.equal(concurrent.billingHeaders.remaining, 0, 'a later response is clearly marked as arriving after the decision')
   assert.match(report.routingEvidence, /original admission reason and quota snapshot are not present/)
   assert.doesNotMatch(JSON.stringify(report), /private-/u)
+  const single = await readFacebookFailureMessage(guarded, { requestId, callId, sha256: saved.body_sha256 })
+  assert.equal(single.hashVerified, true); assert.equal(single.message, '采集失败'); assert.equal(single.redacted, false)
+  for (const identity of [{ requestId: randomUUID(), callId, sha256: saved.body_sha256 },
+    { requestId, callId: before, sha256: saved.body_sha256 }, { requestId, callId, sha256: '0'.repeat(64) }]) {
+    await assert.rejects(readFacebookFailureMessage(guarded, identity), /archive_missing_or_scope_mismatch/u)
+  }
   const other = randomUUID()
   await db.query(`INSERT INTO public.usage_requests VALUES($1,'twitter','released',NULL,NULL,now(),now())`, [other])
   await assert.rejects(diagnoseFacebookFailure(guarded, other), /request_is_not_facebook/u)
@@ -116,6 +123,41 @@ test('standalone Facebook failure diagnostic supports stdin and validates before
   assert.doesNotMatch(source, /from ['"]\.\.?\/|\bfetch\s*\(/u)
   const env = { ...process.env }; delete env.DATABASE_URL
   for (const [args, error] of [[[], 'invalid_arguments'], [['invalid'], 'invalid_request_id'], [[randomUUID()], 'database_url_required']]) {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-', ...args], { input: source, env, encoding: 'utf8' })
+    assert.equal(result.status, 1); assert.deepEqual(JSON.parse(result.stderr), { error })
+  }
+})
+
+test('explicit single-archive message projection keeps only the verified error message and rejects changed metadata', () => {
+  const upstream = '2b74548b0a604b22b885abf6dcddde88'
+  const saved = { ...archive({ code: 301, requestId: upstream, message: 'Synthetic collector rejected this query.',
+    data: { privateBody: 'private-business-data' }, headers: { Authorization: 'private-credential' } }), upstream_request_id: upstream }
+  const result = projectFacebookFailureMessage(saved)
+  assert.equal(result.message, 'Synthetic collector rejected this query.')
+  assert.equal(result.redacted, false); assert.doesNotMatch(JSON.stringify(result), /private-/u)
+  assert.throws(() => projectFacebookFailureMessage({ ...saved, body_sha256: '0'.repeat(64) }), /archive_integrity_failed/u)
+  assert.throws(() => projectFacebookFailureMessage({ ...saved, upstream_request_id: randomUUID() }), /archive_body_invalid/u)
+  for (const payload of [{ code: 0, requestId: upstream, message: 'ignored' }, { code: 301, requestId: upstream, message: 'x'.repeat(513) }]) {
+    assert.throws(() => projectFacebookFailureMessage({ ...archive(payload), upstream_request_id: upstream }))
+  }
+})
+
+test('explicit error text redacts URL, credential, opaque-token and terminal-control content', () => {
+  for (const value of ['failed at https://private.test/?token=private-value', 'Bearer private-bearer-value',
+    'token=private-token-value', 'cookie="private-cookie-value"', 'key abcdefghijklmnopqrstuvwxyz123456', '\u001bprivate-control']) {
+    const result = redactFacebookErrorMessage(value)
+    assert.equal(result.redacted, true)
+    assert.doesNotMatch(result.text, /https:\/\/private|private-(?:value|bearer|token|cookie)|abcdefghijklmnopqrstuvwxyz|\u001b/u)
+  }
+  assert.deepEqual(redactFacebookErrorMessage('采集失败，请稍后重试'), { text: '采集失败，请稍后重试', redacted: false })
+})
+
+test('single-message stdin command requires exact request/call/hash before accessing the database', () => {
+  const source = readFileSync(new URL('../../server/ops/read-facebook-failure-message.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /from ['"]\.\.?\/|\bfetch\s*\(/u)
+  const env = { ...process.env }; delete env.DATABASE_URL
+  for (const [args, error] of [[[], 'invalid_arguments'], [[randomUUID(), randomUUID(), 'bad-hash'], 'invalid_archive_identity'],
+    [[randomUUID(), randomUUID(), '0'.repeat(64)], 'database_url_required']]) {
     const result = spawnSync(process.execPath, ['--input-type=module', '-', ...args], { input: source, env, encoding: 'utf8' })
     assert.equal(result.status, 1); assert.deepEqual(JSON.parse(result.stderr), { error })
   }
