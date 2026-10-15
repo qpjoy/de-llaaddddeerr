@@ -302,10 +302,37 @@ export function mergeWeiboDetail(row, result) {
   return true
 }
 
-export function rawSearchRecords(body, platform, provider) {
+export function rawSearchRecords(body, platform, provider, { projectionVersion } = {}) {
   const records = normalizeNightAllLegacyPayload(body, platform, 'raw', {
     connectorId: `external-platform:${provider}`, parserVersion: RAW_SEARCH_VERSION,
   }).records
+  if (platform === 'facebook' && projectionVersion === 2) for (const record of records) {
+    if (record.objectType !== 'post') continue
+    // The shared legacy mapper skips null and tries supplier aliases. New
+    // Facebook rows already contain the calibrated measurements: an explicit
+    // unknown must not revive stale source fields in canonical ingestion.
+    // Keep rawItem and its independent hash intact as the original evidence.
+    const row = record.rawItem
+    const nullable = value => typeof value === 'string' && value ? value : null
+    const observedAt = value => typeof value === 'string' && value && Number.isFinite(Date.parse(value)) ? new Date(value) : null
+    record.contentType = row.content_type || 'post'
+    record.url = nullable(row.url)
+    record.body = nullable(row.full_text || row.text)
+    record.authorExternalId = nullable(row.author_id)
+    record.authorName = nullable(row.author_name)
+    record.eventTime = observedAt(row.created_at)
+    record.collectedAt = observedAt(row.collected_at)
+    const metrics = Object.fromEntries([
+      ['likes', 'like_count'], ['comments', 'comment_count'], ['shares', 'forward_count'],
+      ['views', 'view_count'], ['bookmarks', 'bookmark_count'],
+    ].map(([key, field]) => [key, typeof row[field] === 'number' && Number.isFinite(row[field]) && row[field] >= 0 ? row[field] : null]))
+    record.metrics = metrics
+    record.stableFields.metrics = metrics
+    record.stableFields.author = { ...record.stableFields.author, externalId: record.authorExternalId,
+      name: record.authorName, avatarUrl: nullable(row.author_avatar_url) }
+    record.parserVersion = `${record.parserVersion}:facebook-fields.v2`
+    refreshMappedPayloadSha256(record)
+  }
   if (platform === 'weibo') for (const record of records) {
     record.extensions.rawSearch = { version: RAW_SEARCH_VERSION,
       bodyCompleteness: record.rawItem.body_completeness }

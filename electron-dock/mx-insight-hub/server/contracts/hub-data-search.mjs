@@ -103,7 +103,7 @@ export function projectDataSearch(result, request) {
     author: { id: row.author_id || null, name: nullable(row.author_name), avatarUrl: nullable(row.author_avatar_url) },
     metrics: { likes: metric(row.like_count), comments: metric(row.comment_count), shares: metric(row.forward_count),
       views: metric(row.view_count), bookmarks: metric(row.bookmark_count) },
-    media: request.platform === 'facebook' ? facebookStandardMedia(row)
+    media: request.platform === 'facebook' ? facebookStandardMedia(row, { projectionVersion: request.projectionVersion })
       : { coverUrl: nullable(row.cover_url), images: urls(row.image_urls), videos: urls(row.video_urls) },
     source: { provider: null, endpointId: null },
   }))

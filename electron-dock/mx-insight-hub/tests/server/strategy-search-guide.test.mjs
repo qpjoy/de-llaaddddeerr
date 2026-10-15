@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { strategySearchGuide } from '../../server/data/strategy-search-guide.mjs'
-import { publicDocsHtmlForPath } from '../../server/public-docs.mjs'
+import { publicDocsHtmlForPath, tenantOpenApiDocument, tenantDocumentPathAllowed } from '../../server/public-docs.mjs'
 
 test('the authenticated product documentation includes account-only access and denies unrelated scopes', () => {
   const html = publicDocsHtmlForPath('/docs/strategy-search', { tenant: true,
@@ -70,7 +70,7 @@ test('platform-scoped guides describe bounded Twitter and Facebook filling witho
   assert.match(twitter, /剩余 4 条/)
   assert.match(twitter, /不再设置每次 Hub 请求默认 3 次的补页调用上限/)
   assert.match(twitter, /15 个上游页和 15 个公开页/)
-  assert.match(twitter, /旧 raw、social、crawl 接口未新增此补页行为/)
+  assert.match(twitter, /旧 raw 与旧 crawl 转发入口未新增此补页行为/)
   assert.doesNotMatch(twitter, /Facebook|Instagram|rapidapi|justone|tikhub/i)
   const facebook = strategySearchGuide([{ platforms: ['facebook'], capabilities: [] }])
   assert.match(facebook, /不再设置每次 Hub 请求默认 3 次的补页派发上限/)
@@ -121,4 +121,43 @@ test('four-platform migration guide is scoped and distinguishes keyword search f
   assert.match(html,/15 个上游页／公开页/)
   assert.match(html,/显式附采参数会在采购前拒绝/)
   assert.doesNotMatch(html,/douyin|kuaishou|zhihu|Twitter|Facebook|tikhub|rapidapi|justone/i)
+})
+
+test('new account docs require same-scope platform and operation and narrow debugger schemas to authorized platforms', () => {
+  const scopes = [{ platforms: ['linkedin', 'bilibili'], capabilities: ['social.content.crawl'] }]
+  const before = structuredClone(scopes)
+  const document = tenantOpenApiDocument(scopes)
+  const entry = document.paths['/data/social/crawl'].post
+  assert.deepEqual(entry.requestBody.content['application/json'].schema.properties.platform.enum, ['bilibili', 'linkedin'])
+  assert.equal(entry.requestBody.content['application/json'].example.platform, 'bilibili')
+  assert.equal(entry.requestBody.content['application/json'].schema.properties.businessId.deprecated, true)
+  const response = entry.responses['200'].content['application/json'].schema
+  assert.equal(response.properties.data.properties.raw_data.type, 'string')
+  assert.equal(response.properties.data.properties.items.type, 'array')
+  assert.deepEqual(response.properties.data.properties.pageInfo.properties.nextCursor.type, ['string', 'null'])
+  assert.equal(document.paths['/data/social/user-info'], undefined)
+  assert.equal(tenantDocumentPathAllowed('/data/social/crawl', [
+    { platforms: ['linkedin'], capabilities: [] }, { platforms: [], capabilities: ['social.content.crawl'] },
+  ]), false)
+  const html = strategySearchGuide(scopes)
+  assert.match(html, /POST \/api\/v1\/data\/social\/crawl/)
+  assert.match(html, /social\.content\.crawl/)
+  assert.match(html, /page_size/)
+  assert.match(html, /不能把整个 raw_data 字符串当作一条内容/)
+  assert.match(html, /短页、空页或 partial 都应检查游标/)
+  assert.doesNotMatch(html, /POST \/api\/v1\/data\/social\/user-info|Twitter \/ X|instagram/i)
+  assert.deepEqual(scopes, before)
+})
+
+test('account profile docs are independently authorized and leave old compatibility documentation intact', () => {
+  const scopes = [{ platforms: ['twitter'], capabilities: ['social.profile.get'] }]
+  const html = strategySearchGuide(scopes)
+  assert.match(html, /POST \/api\/v1\/data\/social\/user-info/)
+  assert.doesNotMatch(html, /POST \/api\/v1\/data\/social\/crawl/)
+  assert.match(html, /\/api\/v1\/night-all\/search\/crawl/)
+  assert.match(html, /非数字 userId\/user_id\/uid 兼容为用户名/)
+  assert.match(html, /429 不等于分页耗尽/)
+  const document = tenantOpenApiDocument(scopes)
+  assert.deepEqual(document.paths['/data/social/user-info'].post['x-mx-platform-options'], ['twitter'])
+  assert.equal(document.paths['/data/social/crawl'], undefined)
 })

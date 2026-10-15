@@ -216,12 +216,14 @@ export function normalizeTwitterResponse(payload, request, { encodeCursor, captu
       seen.add(item.id); items.push(item)
     }
     if (contents.length > 10000) throw new Error('timeline_too_large')
-    if (items.length > request.count && !(allowOverflow && request.operation === 'search')) throw new Error('upstream_page_exceeds_requested_count')
+    if (items.length > request.count && !(allowOverflow && (request.operation === 'search' || request.accountCompatibility === true))) throw new Error('upstream_page_exceeds_requested_count')
     const account = profile(root.user?.result)
     if (request.operation === 'crawl' && account && (request.userId ? account.userId !== request.userId : account.username.toLowerCase() !== request.username)) throw new Error('profile_identity_mismatch')
     if (account) profiles = [account]
   }
-  if (next && (next.length > 4096 || next === request.providerCursor || !items.length)) next = null
+  const accountCursorStalled = request.accountCompatibility === true && next && next === request.providerCursor
+  if (next && request.accountCompatibility === true && next.length > 4096) throw new Error('invalid_account_pagination')
+  if (next && (next.length > 4096 || next === request.providerCursor || !items.length && request.accountCompatibility !== true)) next = null
   const nextProviderCursor = next
   if (request.page >= 15) next = null
   const cursor = next ? encodeCursor({ version: HUB_SOCIAL_VERSION, queryHash: request.queryHash,
@@ -236,8 +238,8 @@ export function normalizeTwitterResponse(payload, request, { encodeCursor, captu
   }, meta: { capturedAt } }
   // The governed standard search can retain a whole paid page before slicing.
   // Keep the supplier token internal, including when the public cursor is buffered.
-  if (allowOverflow && request.operation === 'search') Object.defineProperty(publicBody, 'providerPage', {
-    value: { nextProviderCursor }, enumerable: false,
+  if (allowOverflow && (request.operation === 'search' || request.accountCompatibility === true)) Object.defineProperty(publicBody, 'providerPage', {
+    value: { nextProviderCursor, ...(request.accountCompatibility === true ? { stopReason: accountCursorStalled ? 'repeated_cursor' : null } : {}) }, enumerable: false,
   })
   return publicBody
 }

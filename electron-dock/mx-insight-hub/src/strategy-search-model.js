@@ -6,15 +6,15 @@ export const STRATEGY_SEARCH_INTERFACES = [
     output: '统一接口交付 items、pageInfo、status 和 warnings；raw 入口保留 raw_info / raw_data。',
     boundary: '每次查询针对一个目标平台。路由策略属于业务接口，修改搜索策略不会更改账号内容或账号资料接口。' },
   { id: 'crawl', label: '账号内容', description: '按账号获取其内容，沿用各平台已登记的账号标识和分页合同。',
-    paths: ['/api/v1/search/crawl', '/api/v1/night-all/search/crawl'],
-    input: '使用目标平台及其既有账号参数；不同平台的账号 ID、链接与分页字段不能互换。',
-    output: '保持兼容响应及平台内容字段，通过返回的游标继续读取。',
-    boundary: '迁移状态与关键词搜索分别管理。当前不可配置的接口保留原路由，页面只展示接入状态。' },
+    paths: ['/api/v1/data/social/crawl', '/api/v1/search/crawl', '/api/v1/night-all/search/crawl'],
+    input: 'Hub 接口接受 platform、username / userId / user_id / uid，以及 count / pageSize / page_size / limit；批量账号和平台特定参数见详细文档。',
+    output: 'Hub 返回 items、raw_info / raw_data JSON 字符串及 page / pageInfo；只按返回的 nextCursor 续页，短页不代表结束。',
+    boundary: 'Hub 接口需要当前平台及 social.content.crawl 授权。旧转发入口保留；从旧接口切换时从第一页开始，不混用旧游标。' },
   { id: 'user-info', label: '账号资料', description: '查询指定账号的公开资料，保持平台账号身份和原有返回字段。',
-    paths: ['/api/v1/search/user-info', '/api/v1/night-all/search/user-info'],
-    input: '按接口文档提交平台和账号标识，不把关键词搜索的参数用于资料查询。',
-    output: '交付账号资料与请求关联信息，保留现有兼容合同。',
-    boundary: '资料查询与内容采集是独立业务接口。搜索供应商的调整不会自动迁移账号资料调用。' },
+    paths: ['/api/v1/data/social/user-info', '/api/v1/search/user-info', '/api/v1/night-all/search/user-info'],
+    input: 'Hub 接口接受 platform 与 username / userId / user_id / uid；各平台的 ID 与用户名不可互换，批量别名见详细文档。',
+    output: '交付账号资料 items、raw_info JSON 字符串及请求关联信息，缺失字段与真实零值分别保留。',
+    boundary: 'Hub 接口需要当前平台及 social.profile.get 授权。资料查询与内容采集独立管理，旧转发入口继续保留。' },
 ]
 
 export const STRATEGY_PROVIDER_LABELS = { justone: 'JustOne', tikhub: 'TikHub', rapidapi: 'RapidAPI', 'night-all': 'Night-All' }

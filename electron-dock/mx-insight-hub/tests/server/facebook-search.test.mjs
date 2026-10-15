@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
@@ -12,11 +13,14 @@ import { JustOneAdapter } from '../../server/adapters/justone.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
 import { MemoryExternalPlatformStore, PostgresExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { createExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
-import { FACEBOOK_ENDPOINT, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY, facebookRow, facebookStandardMedia } from '../../server/contracts/facebook-search.mjs'
+import { FACEBOOK_ENDPOINT, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY, facebookRow, facebookRowV1, facebookStandardMedia,
+  normalizeFacebookSearch } from '../../server/contracts/facebook-search.mjs'
 import { isNightAllDataSearchV1Envelope } from '../../server/contracts/night-all-data-search.mjs'
-import { createDataSearchCursorCodec } from '../../server/external-platforms/cursor.mjs'
+import { createDataSearchCursorCodec, createRawSearchCursorCodec } from '../../server/external-platforms/cursor.mjs'
+import { requestFingerprint } from '../../server/core/crypto.mjs'
 import { PlatformSearchPolicyStore, rapidQuotaObservation } from '../../server/external-platforms/platform-search-policy.mjs'
 import { migrateFacebookCredentials } from '../../scripts/migrate-facebook-credentials.mjs'
+import { facebookQuotaFixture } from '../helpers/facebook-quota.mjs'
 
 const PEPPER = 'facebook-offline-test-pepper-at-least-32-characters'
 const ADMIN = 'facebook-offline-admin-token-at-least-32-characters'
@@ -30,6 +34,30 @@ const facebookResponse = (provider, posts, cursor = null, status = 200) => provi
     data: { business_data: posts, cursor } }, { status })
 const invokeStandard = (h, body, idempotencyKey, signal) => h.service.search(h.context,
   { body, idempotencyKey, signal, path: '/api/v1/data/search' })
+
+// Independent pre-calibration fixture. Do not generate a legacy cursor hash
+// from the current projector: old paid buffers bind the exact v1 row JSON.
+function frozenFacebookRowV1(post, capturedAt) {
+  const text = value => typeof value === 'string' ? value : ''
+  const metric = value => value != null && Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null
+  const timestamp = value => {
+    if (value == null || value === '') return null
+    const result = new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value)
+    return Number.isFinite(result.getTime()) ? result.toISOString() : null
+  }
+  const id = post.post_id ?? post.postId ?? post.id, author = post.author || post.user || {}
+  const urls = values => [...new Set(values.flat().map(v => typeof v === 'string' ? v : v?.uri || v?.url).filter(Boolean))]
+  const images = urls([post.image, ...(post.album_preview || []), post.video_thumbnail].filter(Boolean))
+  const files = post.video_files && !Array.isArray(post.video_files) ? Object.values(post.video_files) : post.video_files || []
+  const videos = urls([post.video, ...files].filter(Boolean)), content = text(post.message ?? post.text ?? post.content)
+  return { ...post, content_id: String(id), platform_name: 'facebook', title: '', text: content, content, full_text: content,
+    url: text(post.url ?? post.post_url), author_id: String(author.id ?? post.author_id ?? ''),
+    author_name: text(author.name ?? post.author_title), author_avatar_url: text(author.profile_picture_url),
+    created_at: timestamp(post.timestamp ?? post.created_at), collected_at: capturedAt,
+    like_count: metric(post.reactions_count), comment_count: metric(post.comments_count), forward_count: metric(post.reshare_count),
+    view_count: metric(post.video_view_count), image_urls: JSON.stringify(images), video_urls: JSON.stringify(videos) }
+}
+const rowsDigest = rows => createHash('sha256').update(JSON.stringify(rows)).digest('hex')
 
 async function harness({ rapidStatus = 200, mode = 'auto', quotaAllowed = true, malformed = false, hasMore = false,
   posts = [post], policyStore: suppliedPolicy, pool = null, respond = null } = {}) {
@@ -141,6 +169,116 @@ test('exhausted quota and administrator-selected JustOne never send RapidAPI tra
   }
 })
 
+test('Facebook raw and standard replicas wait for shared allowance and only one consumes the last included call',
+  { skip: !process.env.MX_INSIGHT_TEST_PGLITE_MODULE }, async t => {
+    for (const route of ['raw', 'standard']) for (const used of [0, 999]) await t.test(`${route}-${used}`, async t => {
+      const { db, store, replica } = await facebookQuotaFixture(t)
+      await db.query('UPDATE control.facebook_rapid_quota SET used=$1,remaining=$2', [used, 1000 - used])
+      let finish, started
+      const ready = new Promise(resolve => { started = resolve }), gate = new Promise(resolve => { finish = resolve })
+      const a = await harness({ policyStore: store, respond: async ({ provider }) => {
+        assert.equal(provider, 'rapidapi'); started(); await gate
+        return Response.json({ results: [post], cursor: null }, { headers: {
+          'x-ratelimit-requests-limit': '1000', 'x-ratelimit-requests-remaining': String(999 - used) } })
+      } })
+      const b = await harness({ policyStore: replica })
+      const invoke = (h, key) => route === 'raw' ? h.invoke({ platform: 'facebook', query: key, count: 20 }, key)
+        : invokeStandard(h, { platform: 'facebook', query: key, pageSize: 20 }, key)
+      const first = invoke(a, 'facebook-shared-first')
+      await ready
+      const second = invoke(b, 'facebook-shared-second')
+      try {
+        for (let i = 0; i < 100 && !(await store.facebook()).queue_depth; i++) await new Promise(resolve => setTimeout(resolve, 2))
+        assert.equal((await store.facebook()).queue_depth, 1)
+        assert.equal(b.calls.length, 0, 'busy does not spend a JustOne call')
+        assert.equal((await store.facebook()).used, used + 1, 'waiting did not reserve another call')
+      } finally { finish() }
+      assert.equal((await first).status, 200)
+      assert.equal((await second).status, 200)
+      assert.deepEqual(b.calls.map(row => row.provider), [used === 999 ? 'justone' : 'rapidapi'])
+      assert.equal((await store.facebook()).used, used === 999 ? 1000 : 2)
+      assert.equal((await store.facebook()).queue_depth, 0)
+      assert.equal((await store.facebook()).lease_until, null)
+    })
+  })
+
+test('Facebook shared queue timeout and cancellation return Hub busy without purchasing the fallback',
+  { skip: !process.env.MX_INSIGHT_TEST_PGLITE_MODULE }, async t => {
+    for (const scenario of ['timeout', 'cancel']) await t.test(scenario, async t => {
+      const { store } = await facebookQuotaFixture(t)
+      const active = await store.admitRapid()
+      const h = await harness({ policyStore: store })
+      if (scenario === 'timeout') h.gateways.rapidapi.reservationLeaseMs = 6100
+      const abort = new AbortController()
+      const pending = invokeStandard(h, { platform: 'facebook', query: 'queue-failure', pageSize: 20 }, 'facebook-shared-failure', abort.signal).catch(error => error)
+      if (scenario === 'cancel') {
+        for (let i = 0; i < 100 && !(await store.facebook()).queue_depth; i++) await new Promise(resolve => setTimeout(resolve, 2))
+        abort.abort()
+      }
+      const error = await pending
+      assert.equal(error.code, scenario === 'cancel' ? 'request_cancelled' : 'external_platform_busy')
+      assert.equal(h.calls.length, 0)
+      assert.equal((await store.facebook()).queue_depth, 0)
+      assert.equal((await store.facebook()).used, 1)
+      assert.equal([...h.usage.requests.values()][0].status, 'released')
+      await store.observeRapid(active)
+    })
+  })
+
+test('Facebook 301 preserves the failed receipt and existing customer settlement without a RapidAPI dispatch or automatic retry', async () => {
+  for (const route of ['raw', 'standard']) for (const mode of ['justone', 'auto']) {
+    const h = await harness({ mode, respond: ({ provider }) => {
+      assert.equal(provider, 'justone')
+      return Response.json({ code: 301, message: 'private-collector-error', data: null,
+        requestId: 'fixture-301-request', recordTime: '2026-10-15T01:09:11Z' })
+    } })
+    h.policyStore.admitRapid = async () => ({ allowed: false, reason: 'quota_exhausted' })
+    await h.service.setTenantBillingProfile(h.context.tenant.id,
+      { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 1, defaultCurrency: 'CNY' }, 'test-admin')
+    await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline Facebook 301 receipt fixture' },
+      { idempotencyKey: 'facebook-301-credit', actor: 'test-admin' })
+    const query = '(练习生 OR "idol trainee")'
+    const body = { platform: 'facebook', query, params: { startTime: '2026-10-12T00:47:59.087335Z', endTime: '2026-10-15T00:47:59.087335Z' },
+      ...(route === 'raw' ? { count: 20 } : { pageSize: 20, type: 'stable' }) }
+    const invoke = () => route === 'raw' ? h.invoke(body, 'facebook-301-request') : invokeStandard(h, body, 'facebook-301-request')
+    let first
+    await assert.rejects(invoke(), error => {
+      first = error
+      assert.equal(error.status, 502)
+      assert.equal(error.code, 'external_platform_rejected')
+      assert.equal(error.details.reasonCode, 'upstream_collection_failed')
+      assert.equal(error.details.retryable, false)
+      assert.doesNotMatch(JSON.stringify([error.message, error.details]), /private-collector-error|fixture-only-key/)
+      return true
+    })
+    assert.deepEqual(h.calls.map(row => row.provider), ['justone'])
+    assert.equal(h.calls[0].url.searchParams.get('keyword'), query)
+    assert.equal(h.calls[0].url.searchParams.get('startDate'), '2026-10-12')
+    assert.equal(h.calls[0].url.searchParams.get('endDate'), '2026-10-15')
+    assert.equal(h.stores.rapidapi.calls.size, 0)
+    const call = [...h.stores.justone.calls.values()][0]
+    assert.equal(call.businessCode, 301)
+    assert.equal(call.billed, false)
+    assert.equal(call.outcome, 'rejected')
+    assert.equal(h.stores.justone.ingestJobs.length, 0)
+    const usage = h.usage.requests.get(first.details.requestId)
+    assert.equal(usage.status, 'committed')
+    assert.equal(usage.responseStatus, 502)
+    assert.equal(usage.unitsActual, 0)
+    const charge = [...h.usage.customerCharges.values()].find(row => row.usageRequestId === usage.id)
+    assert.equal(charge.status, 'captured', 'observes the existing request-fee policy; does not authorize refunds or a new policy')
+    assert.equal(charge.chargedMinor, 1)
+    h.policy.mode = 'paused'
+    await assert.rejects(invoke(), error => {
+      assert.equal(error.message, first.message)
+      assert.deepEqual(error.details, first.details)
+      return true
+    })
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.usage.customerCharges.size, 1)
+  }
+})
+
 test('ambiguous or malformed paid responses never fall through or retry', async () => {
   for (const options of [{ rapidStatus: 'timeout' }, { rapidStatus: 503 }, { malformed: true }]) {
     const h = await harness(options)
@@ -183,6 +321,169 @@ test('data/search projects Facebook into the existing canonical-compatible v1 en
   assert.equal(h.oldCalls(), 0)
 })
 
+test('Facebook calibration keeps existing date aliases, request fingerprints and scope hashes unchanged', () => {
+  const query = '(练习生 OR "idol trainee")', params = { endTime: '2026-10-15T00:47:59.087335Z', startTime: '2026-10-12T00:47:59.087335Z' }
+  for (const route of ['raw', 'standard']) {
+    const body = { platform: 'facebook', query, ...(route === 'raw' ? { count: 20 } : { pageSize: 20 }), params }
+    const normalized = route === 'raw' ? { platform: 'facebook', pageSize: 20, upstreamBody: body } : body
+    const codec = (route === 'raw' ? createRawSearchCursorCodec : createDataSearchCursorCodec)(PEPPER, 'calibration-identity')
+    const result = normalizeFacebookSearch(normalized, codec, route === 'raw' ? null : { resultType: 'stable' }, Date.parse('2026-10-15T01:00:00Z'))
+    const expectedFingerprint = route === 'raw'
+      ? { contractVersion: 'mx-insight-hub.night-all-compat.v1', ...body } : { ...body, type: 'stable' }
+    const expectedScope = rowsDigest({ query, pageSize: 20, dates: { startTime: params.startTime, endTime: params.endTime },
+      format: route === 'raw' ? 'raw' : 'stable' })
+    assert.deepEqual(result.fingerprintBody, expectedFingerprint)
+    assert.equal(result.scopeHash, expectedScope)
+    assert.equal(result.projectionVersion, 2)
+    for (const provider of ['rapidapi', 'justone']) {
+      const { upstreamQuery } = result.forProvider(provider)
+      assert.deepEqual(upstreamQuery, provider === 'rapidapi'
+        ? { query, start_date: '2026-10-12', end_date: '2026-10-15' }
+        : { keyword: query, startDate: '2026-10-12', endDate: '2026-10-15' })
+    }
+  }
+})
+
+test('Facebook calibration rejects unknown cursor projection versions without dispatch on either public contract', async () => {
+  for (const route of ['raw', 'standard']) {
+    const h = await harness({ mode: 'rapidapi', posts: fixturePosts(0, 20), hasMore: true })
+    const body = { platform: 'facebook', query: 'projection-version', ...(route === 'raw' ? { count: 20 } : { pageSize: 20, type: 'stable' }) }
+    const invoke = (nextBody, key) => route === 'raw' ? h.invoke(nextBody, key) : invokeStandard(h, nextBody, key)
+    const first = await invoke(body, `fb-version-${route}-first`)
+    const cursor = route === 'raw' ? first.body.data.page.nextCursor : first.body.data.pageInfo.nextCursor
+    const codec = (route === 'raw' ? createRawSearchCursorCodec : createDataSearchCursorCodec)(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}`)
+    const state = codec.decode(cursor)
+    assert.equal(state.projectionVersion, 2)
+    for (const projectionVersion of [0, 3, '2']) {
+      await assert.rejects(invoke({ ...body, cursor: codec.encode({ ...state, projectionVersion }) },
+        `fb-version-${route}-${projectionVersion}`), { code: 'invalid_cursor' })
+    }
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.stores.rapidapi.ingestJobs.length, 1)
+  }
+})
+
+test('Facebook calibration preserves pre-upgrade immutable 200 and 301 replay without projection, procurement or settlement', async () => {
+  for (const route of ['raw', 'standard']) for (const status of [200, 502]) {
+    const h = await harness({ mode: 'paused' })
+    const body = { platform: 'facebook', query: 'legacy immutable body', ...(route === 'raw' ? { count: 20 } : { pageSize: 20, type: 'stable' }),
+      params: { startTime: '2026-10-12T00:47:59.087335Z', endTime: '2026-10-15T00:47:59.087335Z' } }
+    const path = route === 'raw' ? '/api/v1/night-all/search/raw' : '/api/v1/data/search'
+    const fingerprintBody = route === 'raw' ? { contractVersion: 'mx-insight-hub.night-all-compat.v1', ...body } : body
+    const id = randomUUID(), idempotencyKey = `fb-pre-upgrade-${route}-${status}`
+    await h.usage.reserve({ requestId: id, idempotencyKey, fingerprint: requestFingerprint({ method: 'POST', path, body: fingerprintBody }),
+      tenantId: h.context.tenant.id, consumerId: h.context.consumer.id, apiKeyId: h.context.apiKey.id,
+      platform: 'facebook', meterKey: route === 'raw' ? 'raw' : 'facebook', unitsReserved: 1,
+      leaseExpiresAt: new Date(Date.now() + 120000), windowStart: new Date(Date.now() - 3600000), maxRequests: 100, replayWindowMs: null })
+    const saved = status === 502 ? { error: { code: 'external_platform_rejected', message: 'The data source reported a collection failure',
+      details: { reasonCode: 'upstream_collection_failed', outcome: 'rejected', retryable: false, requestId: id } }, requestId: id }
+      : route === 'raw' ? { data: { platform: 'facebook', query: body.query, raw_info: '[]',
+        raw_data: '[{"content_id":"legacy-post","title":"saved historical title","full_text":"saved body","like_count":0}]',
+        status: 'ok', warnings: [], page: { page: 1, pageSize: 20, returnedCount: 1, hasMore: false, nextCursor: null }, meta: { upstreamCallCount: 1 } }, requestId: id }
+        : { data: { contractVersion: 'night-all.data-search.v1', platform: 'facebook', query: body.query,
+          items: [{ id: 'legacy-post', title: 'saved historical title', text: 'saved body', metrics: { likes: 0 } }],
+          pageInfo: { pageIndex: 1, pageSize: 20, returnedCount: 1, hasMore: false, nextCursor: null },
+          status: 'ok', warnings: [], meta: { providerCalls: 1 } }, requestId: id }
+    await h.usage.commitRequest(id, { responseStatus: status, responseBody: saved, unitsActual: status === 502 ? 0 : 1 })
+    const charges = structuredClone([...h.usage.customerCharges.values()])
+    h.policyStore.admitRapid = async () => { throw new Error('immutable replay must precede new admission') }
+    const invoke = () => route === 'raw' ? h.invoke(body, idempotencyKey) : invokeStandard(h, body, idempotencyKey)
+    if (status === 200) {
+      const result = await invoke()
+      assert.equal(result.replay, true)
+      assert.deepEqual(result.body, saved)
+    } else await assert.rejects(invoke(), error => {
+      assert.equal(error.status, 502)
+      assert.equal(error.code, saved.error.code)
+      assert.equal(error.message, saved.error.message)
+      assert.deepEqual(error.details, saved.error.details)
+      return true
+    })
+    assert.deepEqual(h.usage.requests.get(id).responseBody, saved)
+    assert.deepEqual([...h.usage.customerCharges.values()], charges)
+    assert.equal(h.usage.requests.size, 1)
+    assert.equal(h.calls.length, 0)
+    assert.equal(h.stores.rapidapi.ingestJobs.length + h.stores.justone.ingestJobs.length, 0)
+  }
+})
+
+test('Facebook calibration continues real pre-upgrade buffer hashes and pins the entire old traversal to v1', async () => {
+  for (const mode of ['rapidapi', 'justone']) {
+    const legacyPosts = fixturePosts(0, 45).map(row => ({ ...row, message: 'legacy buffered body', reactions_count: '', timestamp: String(post.timestamp),
+      album_preview: [{ uri: 'https://www.facebook.com/photo.php?fbid=123' }] }))
+    const newPosts = fixturePosts(45, 20).map(row => ({ ...row, message: 'legacy continued body', reactions_count: '', timestamp: String(post.timestamp) }))
+    const h = await harness({ mode, respond: ({ provider, ordinal }) => facebookResponse(provider,
+      ordinal === 1 ? legacyPosts : newPosts, ordinal === 1 ? 'old-provider-next' : null) })
+    const body = { platform: 'facebook', query: 'legacy projection traversal', pageSize: 20, type: 'stable' }
+    const first = await invokeStandard(h, body, `fb-real-v1-${mode}-first`)
+    const store = h.stores[mode], archive = [...store.restrictedResponseArchives.values()][0]
+    const archiveBefore = structuredClone(archive), capturedAt = archive.capturedAt
+    const frozenRows = legacyPosts.map(row => frozenFacebookRowV1(row, capturedAt))
+    assert.deepEqual(facebookRowV1(legacyPosts[0], capturedAt), frozenRows[0])
+    assert.notEqual(rowsDigest(frozenRows), rowsDigest(legacyPosts.map(row => facebookRow(row, capturedAt))), 'the fixture must distinguish old and new projections')
+    const codec = createDataSearchCursorCodec(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}`)
+    const state = codec.decode(first.body.data.pageInfo.nextCursor)
+    delete state.projectionVersion
+    state.buffer.hash = rowsDigest(frozenRows)
+    const oldCursor = codec.encode(state), oldResponse = structuredClone(first.body)
+    oldResponse.data.pageInfo.nextCursor = oldCursor
+    for (const item of oldResponse.data.items) {
+      item.metrics.likes = 0
+      item.publishedAt = null
+      item.media.images = ['https://www.facebook.com/photo.php?fbid=123']
+    }
+    h.usage.requests.get(first.requestId).responseBody = structuredClone(oldResponse)
+    const ingestBefore = store.ingestJobs.length
+    const second = await invokeStandard(h, { ...body, cursor: oldCursor }, `fb-real-v1-${mode}-second`)
+    assert.deepEqual(second.body.data.items.map(item => item.id), Array.from({ length: 20 }, (_, i) => `post-${20 + i}`))
+    assert.ok(second.body.data.items.every(item => item.metrics.likes === 0 && item.publishedAt === null))
+    assert.ok(second.body.data.items.every(item => item.media.images.includes('https://www.facebook.com/photo.php?fbid=123')))
+    assert.equal(second.body.data.meta.providerCalls, 0)
+    assert.equal(h.calls.length, 1)
+    assert.equal(store.ingestJobs.length, ingestBefore)
+    const secondState = codec.decode(second.body.data.pageInfo.nextCursor)
+    assert.equal(secondState.projectionVersion, 1)
+    assert.equal(secondState.buffer.hash, rowsDigest(frozenRows))
+    assert.equal(secondState.buffer.offset, 40)
+    const third = await invokeStandard(h, { ...body, cursor: second.body.data.pageInfo.nextCursor }, `fb-real-v1-${mode}-third`)
+    assert.deepEqual(third.body.data.items.map(item => item.id), Array.from({ length: 20 }, (_, i) => `post-${40 + i}`))
+    assert.ok(third.body.data.items.every(item => item.metrics.likes === 0 && item.publishedAt === null), 'new source pages in an old traversal keep the original projection')
+    assert.equal(third.body.data.meta.providerCalls, 1)
+    assert.equal(h.calls.length, 2)
+    assert.equal(h.calls[1].url.searchParams.get('cursor'), 'old-provider-next')
+    assert.equal(codec.decode(third.body.data.pageInfo.nextCursor).projectionVersion, 1)
+    assert.deepEqual(structuredClone(archive), archiveBefore)
+    assert.equal(createHash('sha256').update(archive.bodyBytes).digest('hex'), archiveBefore.bodySha256)
+    assert.deepEqual(h.usage.requests.get(first.requestId).responseBody, oldResponse)
+    assert.deepEqual(store.ingestJobs.map(job => job.payload.records.length), [45, 20])
+  }
+})
+
+test('Facebook calibration keeps pre-upgrade raw provider cursors on v1 without changing supplier requests', async () => {
+  for (const mode of ['rapidapi', 'justone']) {
+    const source = { ...post, reactions_count: '', timestamp: String(post.timestamp),
+      album_preview: [{ uri: 'https://www.facebook.com/photo.php?fbid=123' }] }
+    const h = await harness({ mode, respond: ({ provider, ordinal }) => facebookResponse(provider,
+      [{ ...source, post_id: `old-raw-${ordinal}` }], ordinal < 3 ? `old-raw-source-${ordinal}` : null) })
+    const body = { platform: 'facebook', query: '(练习生 OR "idol trainee")', count: 20,
+      params: { startTime: '2026-10-12T00:47:59.087335Z', endTime: '2026-10-15T00:47:59.087335Z' } }
+    const first = await h.invoke(body, `fb-old-raw-${mode}-first`)
+    const codec = createRawSearchCursorCodec(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}`)
+    const state = codec.decode(first.body.data.page.nextCursor)
+    delete state.projectionVersion
+    const second = await h.invoke({ ...body, cursor: codec.encode(state) }, `fb-old-raw-${mode}-second`)
+    const [row] = JSON.parse(second.body.data.raw_data)
+    const capturedAt = [...h.stores[mode].restrictedResponseArchives.values()][1].capturedAt
+    assert.deepEqual(row, frozenFacebookRowV1({ ...source, post_id: 'old-raw-2' }, capturedAt))
+    assert.equal(codec.decode(second.body.data.page.nextCursor).projectionVersion, 1)
+    assert.equal(h.calls[1].url.searchParams.get('cursor'), 'old-raw-source-1')
+    assert.equal(h.calls[1].url.searchParams.get(mode === 'rapidapi' ? 'query' : 'keyword'), body.query)
+    assert.equal(h.calls[1].url.searchParams.get(mode === 'rapidapi' ? 'start_date' : 'startDate'), '2026-10-12')
+    assert.equal(h.calls[1].url.searchParams.get(mode === 'rapidapi' ? 'end_date' : 'endDate'), '2026-10-15')
+    assert.equal(h.calls.length, 2)
+  }
+})
+
 test('Facebook standard media separates only an explicit video poster and preserves genuine mixed photos and URL queries', () => {
   const photo = 'https://assets.example/photo.jpg?asset=original', poster = 'https://assets.example/poster.jpg?sig=one'
   const variant = 'https://assets.example/poster.jpg?sig=two', video = 'https://assets.example/movie.mp4'
@@ -190,13 +491,13 @@ test('Facebook standard media separates only an explicit video poster and preser
   const row = facebookRow({ ...post, image: { uri: photo }, album_preview: [{ uri: photo }, { url: poster }, { url: variant }, { uri: landing }],
     video_thumbnail: { uri: poster }, video_files: [{ url: video }, { url: video }] }, '2026-10-15T01:00:00.000Z')
   const original = structuredClone(row)
-  assert.deepEqual(facebookStandardMedia(row), { coverUrl: poster, images: [photo, variant, landing], videos: [video] })
+  assert.deepEqual(facebookStandardMedia(row), { coverUrl: poster, images: [photo, variant], videos: [video] })
   assert.deepEqual(row, original)
-  assert.deepEqual(JSON.parse(row.image_urls), [photo, poster, variant, landing], 'the legacy raw image list remains intact')
-  assert.deepEqual(facebookStandardMedia({ ...row, video_thumbnail: null }), { coverUrl: null,
-    images: [photo, poster, variant, landing], videos: [video] }, 'first photo is never inferred to be a video poster')
-  assert.deepEqual(facebookStandardMedia({ ...row, video_urls: '[]' }), { coverUrl: poster,
-    images: [photo, poster, variant, landing], videos: [] }, 'without playback evidence no photo is removed')
+  assert.deepEqual(JSON.parse(row.image_urls), [photo, variant], 'explicit Facebook landing pages and video covers are not photo assets')
+  assert.deepEqual(facebookStandardMedia({ ...row, video_thumbnail: null, cover_url: null }), { coverUrl: null,
+    images: [photo, variant], videos: [video] }, 'first photo is never inferred to be a video poster')
+  assert.deepEqual(facebookStandardMedia({ ...row, video_urls: '[]', image_urls: JSON.stringify([photo, poster, variant]) }), { coverUrl: poster,
+    images: [photo, poster, variant], videos: [] }, 'without playback evidence no photo is removed')
 })
 
 test('Facebook new standard deliveries distinguish video cover and terminal short pages while raw contracts and exact replay stay intact', async () => {
@@ -211,7 +512,7 @@ test('Facebook new standard deliveries distinguish video cover and terminal shor
     const invoke = () => h.service.search(h.context, { body, idempotencyKey: 'facebook-media-standard', path: '/api/v1/data/search' })
     const standard = await invoke()
     assert.ok(isNightAllDataSearchV1Envelope(standard.body))
-    assert.deepEqual(standard.body.data.items[0].media, { coverUrl: poster, images: [photo, landing], videos: [video] })
+    assert.deepEqual(standard.body.data.items[0].media, { coverUrl: poster, images: [photo], videos: [video] })
     assert.equal(standard.body.data.items[0].title, null)
     assert.equal(standard.body.data.status, 'ok')
     assert.equal(standard.body.data.pageInfo.hasMore, false)
@@ -221,7 +522,7 @@ test('Facebook new standard deliveries distinguish video cover and terminal shor
     assert.equal(h.calls.length, 3)
     const raw = await h.invoke({ platform: 'facebook', query: 'fixture', count: 20 }, 'facebook-media-raw')
     const [row] = JSON.parse(raw.body.data.raw_data)
-    assert.deepEqual(JSON.parse(row.image_urls), [photo, landing, poster])
+    assert.deepEqual(JSON.parse(row.image_urls), [photo])
     assert.deepEqual(JSON.parse(row.video_urls), [video])
     assert.equal(row.title, '')
     assert.equal(raw.body.data.status, 'ok')
@@ -690,6 +991,11 @@ test('PostgreSQL quota serializes replicas, recovers from reset/probes and audit
     const sql = await readFile(new URL('../../migrations/143_facebook_platform_search.sql', import.meta.url), 'utf8')
     await pool.query('CREATE SCHEMA IF NOT EXISTS control')
     await pool.query(sql.slice(sql.indexOf('CREATE TABLE'), sql.indexOf('ALTER TABLE')))
+    for (const [column, migration] of [['billing_cycle_day', '149_facebook_billing_window.sql'], ['waiters', '151_facebook_rapid_admission_queue.sql']]) {
+      const table = column === 'waiters' ? 'facebook_rapid_quota' : 'platform_search_policies'
+      const present = await pool.query(`SELECT 1 FROM information_schema.columns WHERE table_schema='control' AND table_name=$1 AND column_name=$2`, [table, column])
+      if (!present.rowCount) await pool.query(await readFile(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'))
+    }
     const store = new PlatformSearchPolicyStore(pool)
     const results = await Promise.all(Array.from({ length: 20 }, () => store.admitRapid()))
     assert.equal(results.filter(r => r.allowed).length, 1)

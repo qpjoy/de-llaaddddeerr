@@ -31,12 +31,12 @@ export const SQL = {
       UNION SELECT id FROM sources
       UNION SELECT job_id FROM mx_device.attempts WHERE id=$4
     )
-    SELECT CASE WHEN j.id IN (SELECT id FROM sources) THEN j.document ELSE j.document - 'result' END AS document
+    SELECT CASE WHEN j.id IN (SELECT id FROM sources) THEN j.document ELSE j.document - 'result' END AS document, j.version
     FROM mx_device.jobs j WHERE j.mode=$1 AND j.id = ANY(ARRAY(SELECT id FROM ids))
     ORDER BY j.created_at, j.id`,
   atomicAttempts:
-    "SELECT document FROM mx_device.attempts WHERE mode=$1 AND (status IN ('running','yielded') OR id=$2)",
-  atomicCommands: `SELECT document FROM mx_device.execution_commands WHERE mode=$1 AND id = ANY(ARRAY(
+    "SELECT document,version FROM mx_device.attempts WHERE mode=$1 AND (status IN ('running','yielded') OR id=$2)",
+  atomicCommands: `SELECT document,version FROM mx_device.execution_commands WHERE mode=$1 AND id = ANY(ARRAY(
       SELECT id FROM mx_device.execution_commands WHERE status='running'
       UNION SELECT id FROM mx_device.execution_commands WHERE job_id=$2
       UNION SELECT id FROM mx_device.execution_commands WHERE attempt_id=$3
@@ -70,6 +70,78 @@ export const SQL = {
       ORDER BY created_at DESC LIMIT 400
     ) r JOIN mx_device.execution_commands c ON c.id=r.id ORDER BY r.created_at DESC)`,
 };
+
+// Plan steps and execution commands freeze a command definition version. Those
+// rows are immutable, so PgStore stores an identical snapshot as definitionRef
+// and restores the shared, frozen catalog object on read: the model and API see
+// the full definition while each transaction moves ~10x less job JSON. A
+// snapshot that differs from its catalog row (or has no row) stays embedded.
+const SNAPSHOTS = new Map(); // catalog row JSON -> frozen object, shared across transactions
+const deepFreeze = (value) => {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
+};
+export function snapshotCatalog(rows) {
+  const byId = new Map();
+  for (const row of rows) {
+    const json = JSON.stringify(row);
+    let object = SNAPSHOTS.get(json);
+    if (!object) {
+      if (SNAPSHOTS.size >= 4096) SNAPSHOTS.clear();
+      object = deepFreeze(JSON.parse(json));
+      SNAPSHOTS.set(json, object);
+    }
+    byId.set(row.id, { json, object });
+  }
+  return byId;
+}
+function storedDefinition(holder, catalog) {
+  const definition = holder.definition;
+  if (!definition || typeof definition !== "object") return holder;
+  const entry = catalog.get(definition.id);
+  if (
+    entry &&
+    (entry.object === definition || entry.json === JSON.stringify(definition))
+  ) {
+    const { definition: _, ...rest } = holder;
+    return { ...rest, definitionRef: definition.id };
+  }
+  if (!Object.hasOwn(holder, "definitionRef")) return holder;
+  const { definitionRef: _, ...rest } = holder;
+  return rest;
+}
+function restoreDefinition(holder, catalog) {
+  if (!holder.definitionRef || holder.definition) return;
+  const entry = catalog.get(holder.definitionRef);
+  if (!entry)
+    throw Error(`执行快照引用的指令版本缺失：${holder.definitionRef}`);
+  holder.definition = entry.object;
+}
+export const storedJob = (job, catalog) =>
+  job.workflow?.plan
+    ? {
+        ...job,
+        workflow: {
+          ...job.workflow,
+          plan: job.workflow.plan.map((step) =>
+            storedDefinition(step, catalog),
+          ),
+        },
+      }
+    : job;
+export const storedCommand = (command, catalog) =>
+  storedDefinition(command, catalog);
+export function restoreJob(job, catalog) {
+  for (const step of job.workflow?.plan || []) restoreDefinition(step, catalog);
+  return job;
+}
+export function restoreCommand(command, catalog) {
+  restoreDefinition(command, catalog);
+  return command;
+}
 
 export class MemoryStore {
   constructor(clock = Date.now) {
@@ -174,11 +246,295 @@ export class MemoryStore {
   }
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+class Conflict extends Error {
+  constructor(table) {
+    super(`并发写入冲突：${table}`);
+    this.code = "MXCONFLICT";
+  }
+}
+export class LeadershipLost extends Error {
+  constructor() {
+    super("调度器已失去领导权，本次调度未提交");
+    this.code = "MXLEADER";
+    this.status = 409;
+  }
+}
+// What makes work claimable: a scheduler is notified only when this changes,
+// not on every command receipt.
+const schedulable = (table, row) =>
+  table === "devices"
+    ? `${row.state}|${row.enabled}|${row.connected}|${row.session?.status}`
+    : table === "jobs" || table === "attempts"
+      ? row.status
+      : null;
+// Version conflicts, deadlocks, lock timeouts and concurrent inserts re-run fn.
+const RETRYABLE = new Set(["MXCONFLICT", "40001", "40P01", "55P03", "23505"]);
+
+// Mutable rows, in foreign-key write order.
+const ROW_TABLES = [
+  ["loopPolicies", "loop_policies"],
+  ["resources", "resource_policies"],
+  ["devices", "devices"],
+  ["apps", "device_apps"],
+  ["jobs", "jobs"],
+  ["attempts", "attempts"],
+  ["commands", "execution_commands"],
+];
+// Append-only version catalogs. Task and command catalogs share logical ids.
+const CATALOG_TABLES = [
+  ["definitions", "task_definitions"],
+  ["commandDefinitions", "command_definitions"],
+  ["ruleDefinitions", "rule_definitions"],
+  ["strategyDefinitions", "strategy_definitions"],
+];
+const stored = (table, row, catalog) =>
+  table === "jobs"
+    ? storedJob(row, catalog)
+    : table === "execution_commands"
+      ? storedCommand(row, catalog)
+      : row;
+const WRITERS = {
+  loop_policies: {
+    insert:
+      "INSERT INTO mx_device.loop_policies(id,mode,rack,document,version) VALUES($1,$2,$3,$4,1) ON CONFLICT(id) DO NOTHING",
+    insertArgs: (p, json) => [p.id, p.mode, p.rack, json],
+    update:
+      "UPDATE mx_device.loop_policies SET document=$2,version=version+1 WHERE id=$1 AND version=$3",
+    updateArgs: (p, json, v) => [p.id, json, v],
+  },
+  resource_policies: {
+    insert:
+      "INSERT INTO mx_device.resource_policies(id,mode,resource_key,document,version) VALUES($1,$2,$3,$4,1) ON CONFLICT(id) DO NOTHING",
+    insertArgs: (r, json) => [r.id, r.mode, r.resourceKey, json],
+    update:
+      "UPDATE mx_device.resource_policies SET document=$2,version=version+1 WHERE id=$1 AND version=$3",
+    updateArgs: (r, json, v) => [r.id, json, v],
+  },
+  devices: {
+    insert:
+      "INSERT INTO mx_device.devices(id,mode,resource_key,account_key,document,version) VALUES($1,$2,$3,$4,$5,1) ON CONFLICT(id) DO NOTHING",
+    insertArgs: (d, json) => [d.id, d.mode, d.resourceKey, d.accountKey, json],
+    update:
+      "UPDATE mx_device.devices SET document=$2,resource_key=$3,account_key=$4,version=version+1 WHERE id=$1 AND version=$5",
+    updateArgs: (d, json, v) => [d.id, json, d.resourceKey, d.accountKey, v],
+  },
+  device_apps: {
+    insert:
+      "INSERT INTO mx_device.device_apps(id,mode,device_id,app_id,account_key,document,version) VALUES($1,$2,$3,$4,$5,$6,1) ON CONFLICT(id) DO NOTHING",
+    insertArgs: (a, json) => [
+      a.id,
+      a.mode,
+      a.deviceId,
+      a.appId,
+      a.accountKey,
+      json,
+    ],
+    update:
+      "UPDATE mx_device.device_apps SET document=$2,version=version+1 WHERE id=$1 AND version=$3",
+    updateArgs: (a, json, v) => [a.id, json, v],
+  },
+  jobs: {
+    insert:
+      "INSERT INTO mx_device.jobs(id,mode,request_key,status,created_at,document,version) VALUES($1,$2,$3,$4,$5,$6,1) ON CONFLICT(id) DO NOTHING",
+    insertArgs: (j, json) => [j.id, j.mode, j.key, j.status, j.createdAt, json],
+    update:
+      "UPDATE mx_device.jobs SET status=$2,document=$3,version=version+1 WHERE id=$1 AND version=$4",
+    updateArgs: (j, json, v) => [j.id, j.status, json, v],
+  },
+  attempts: {
+    insert:
+      "INSERT INTO mx_device.attempts(id,mode,job_id,device_id,status,created_at,document,version) VALUES($1,$2,$3,$4,$5,$6,$7,1) ON CONFLICT(id) DO NOTHING",
+    insertArgs: (a, json) => [
+      a.id,
+      a.mode,
+      a.jobId,
+      a.deviceId,
+      a.status,
+      a.createdAt,
+      json,
+    ],
+    update:
+      "UPDATE mx_device.attempts SET status=$2,document=$3,version=version+1 WHERE id=$1 AND version=$4",
+    updateArgs: (a, json, v) => [a.id, a.status, json, v],
+  },
+  execution_commands: {
+    insert:
+      "INSERT INTO mx_device.execution_commands(id,mode,job_id,attempt_id,device_id,status,created_at,document,version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,1) ON CONFLICT(id) DO NOTHING",
+    insertArgs: (c, json) => [
+      c.id,
+      c.mode,
+      c.jobId,
+      c.attemptId,
+      c.deviceId,
+      c.status,
+      c.createdAt,
+      json,
+    ],
+    update:
+      "UPDATE mx_device.execution_commands SET status=$2,document=$3,version=version+1 WHERE id=$1 AND version=$4",
+    updateArgs: (c, json, v) => [c.id, c.status, json, v],
+  },
+};
+
+// A scoped transaction must not silently see an empty or partial realm where it
+// expects the whole one; touching a collection it did not load is an error.
+const UNLOADED = Symbol("unloaded");
+const unloaded = (name) =>
+  new Proxy([], {
+    get(target, prop) {
+      if (prop === UNLOADED) return true;
+      throw new Error(`作用域事务访问了未加载的集合：${name}`);
+    },
+  });
+const isUnloaded = (rows) => rows?.[UNLOADED] === true;
+
+async function select(c, table, sql, params, versions) {
+  const { rows } = await c.query(sql, params);
+  return rows.map((r) => {
+    if (r.version !== undefined)
+      versions.set(`${table}:${r.document.id}`, String(r.version));
+    return r.document;
+  });
+}
+const byMode = (table) =>
+  `SELECT document${table.versioned ? ",version" : ""} FROM mx_device.${table.name} WHERE mode=$1`;
+
+async function loadRealm(c, mode, { jobId, key, attemptId }) {
+  const versions = new Map();
+  const all = (name, versioned = true) =>
+    select(c, name, byMode({ name, versioned }), [mode], versions);
+  const rows = {
+    devices: await all("devices"),
+    jobs: await select(
+      c,
+      "jobs",
+      SQL.atomicJobs,
+      [mode, jobId, key, attemptId],
+      versions,
+    ),
+    attempts: await select(
+      c,
+      "attempts",
+      SQL.atomicAttempts,
+      [mode, attemptId],
+      versions,
+    ),
+    resources: await all("resource_policies"),
+    apps: await all("device_apps"),
+    definitions: await all("task_definitions", false),
+    commandDefinitions: await all("command_definitions", false),
+    loopPolicies: await all("loop_policies"),
+    ruleDefinitions: await all("rule_definitions", false),
+    strategyDefinitions: await all("strategy_definitions", false),
+    commands: await select(
+      c,
+      "execution_commands",
+      SQL.atomicCommands,
+      [mode, jobId, attemptId],
+      versions,
+    ),
+  };
+  return { rows, versions };
+}
+
+// One device and the live work on it, locked FOR UPDATE in a fixed order:
+// device, attempts, jobs, commands, apps.
+async function loadScoped(c, mode, scope, { deviceId, attemptId, jobId }) {
+  if (!["attempt", "device"].includes(scope))
+    throw new Error(`未知事务作用域：${scope}`);
+  const versions = new Map();
+  if (!deviceId && attemptId)
+    deviceId = (
+      await c.query("SELECT device_id FROM mx_device.attempts WHERE id=$1", [
+        attemptId,
+      ])
+    ).rows[0]?.device_id;
+  const devices = deviceId
+    ? await select(
+        c,
+        "devices",
+        "SELECT document,version FROM mx_device.devices WHERE id=$1 AND mode=$2 FOR UPDATE",
+        [deviceId, mode],
+        versions,
+      )
+    : [];
+  const rows = {
+    devices,
+    jobs: unloaded("jobs"),
+    attempts: unloaded("attempts"),
+    resources: unloaded("resources"),
+    apps: unloaded("apps"),
+    definitions: unloaded("definitions"),
+    commandDefinitions: [],
+    loopPolicies: unloaded("loopPolicies"),
+    ruleDefinitions: unloaded("ruleDefinitions"),
+    strategyDefinitions: unloaded("strategyDefinitions"),
+    commands: unloaded("commands"),
+  };
+  if (scope === "device") return { rows, versions };
+  const attemptIds = [attemptId, devices[0]?.workflowAttemptId].filter(Boolean);
+  rows.attempts = await select(
+    c,
+    "attempts",
+    "SELECT document,version FROM mx_device.attempts WHERE mode=$1 AND (id=ANY($2::uuid[]) OR (device_id=$3 AND status IN ('running','yielded'))) ORDER BY id FOR UPDATE",
+    [mode, attemptIds, deviceId ?? null],
+    versions,
+  );
+  const jobIds = [
+    ...new Set([jobId, ...rows.attempts.map((a) => a.jobId)].filter(Boolean)),
+  ];
+  rows.jobs = await select(
+    c,
+    "jobs",
+    "SELECT document,version FROM mx_device.jobs WHERE mode=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE",
+    [mode, jobIds],
+    versions,
+  );
+  rows.commands = await select(
+    c,
+    "execution_commands",
+    "SELECT document,version FROM mx_device.execution_commands WHERE mode=$1 AND (attempt_id=ANY($2::uuid[]) OR job_id=ANY($3::uuid[]) OR (device_id=$4 AND status='running')) ORDER BY created_at,id FOR UPDATE",
+    [mode, rows.attempts.map((a) => a.id), jobIds, deviceId ?? null],
+    versions,
+  );
+  rows.apps = await select(
+    c,
+    "device_apps",
+    "SELECT document,version FROM mx_device.device_apps WHERE mode=$1 AND device_id=$2 ORDER BY id FOR UPDATE",
+    [mode, deviceId ?? null],
+    versions,
+  );
+  rows.loopPolicies = await select(
+    c,
+    "loop_policies",
+    byMode({ name: "loop_policies", versioned: true }),
+    [mode],
+    versions,
+  );
+  rows.resources = await select(
+    c,
+    "resource_policies",
+    byMode({ name: "resource_policies", versioned: true }),
+    [mode],
+    versions,
+  );
+  rows.commandDefinitions = await select(
+    c,
+    "command_definitions",
+    byMode({ name: "command_definitions", versioned: false }),
+    [mode],
+    versions,
+  );
+  return { rows, versions };
+}
+
 export class PgStore {
-  constructor(url) {
+  constructor(url, { max = 4 } = {}) {
+    this.conflicts = 0;
     this.pool = new pg.Pool({
       connectionString: url,
-      max: 4,
+      max,
       connectionTimeoutMillis: 2000,
       query_timeout: 5000,
       idleTimeoutMillis: 10000,
@@ -285,7 +641,28 @@ export class PgStore {
       [id, doc],
     );
   }
-  async atomic(
+  /** Runs a pure, synchronous state transition and persists the rows it changed.
+   *
+   * Global (default): loads the realm under the realm advisory lock; for
+   * scheduling, admin and claims. scope "attempt" | "device": loads only that
+   * device's rows FOR UPDATE and takes no realm lock, so per-device execution
+   * never queues behind other devices. Unloaded collections throw if touched.
+   * Every write is a version CAS; on conflict the transaction rolls back and
+   * fn re-runs on fresh rows (fn performs no I/O, so re-running is safe).
+   * epoch: when given, the transaction must still belong to that scheduler
+   * leader epoch, or it fails with LeadershipLost and is not retried. */
+  async atomic(fn, options = {}) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.#transaction(fn, options);
+      } catch (error) {
+        if (attempt >= 4 || !RETRYABLE.has(error.code)) throw error;
+        this.conflicts++;
+        await sleep(5 + Math.floor(Math.random() * 20) * attempt);
+      }
+    }
+  }
+  async #transaction(
     fn,
     {
       mode = "sim",
@@ -293,18 +670,32 @@ export class PgStore {
       attemptId = null,
       key = null,
       frame = null,
-    } = {},
+      scope = null,
+      deviceId = null,
+      epoch = null,
+    },
   ) {
     const c = await this.pool.connect();
     try {
       await c.query("BEGIN");
       await c.query("SET LOCAL lock_timeout='2s'");
       await c.query("SET LOCAL statement_timeout='5s'");
-      // Bounded experimental control plane: serialize short scheduling decisions per realm,
-      // NEVER physical execution. Independent devices still execute concurrently.
-      await c.query("SELECT pg_advisory_xact_lock(1297634386,$1)", [
-        mode === "real" ? 1 : 0,
-      ]);
+      if (epoch != null) {
+        // FOR SHARE: a new leader's epoch bump waits for this transaction, and
+        // this transaction sees the bump if it came first.
+        const current = (
+          await c.query(
+            "SELECT epoch FROM mx_device.scheduler_leader WHERE id=1 FOR SHARE",
+          )
+        ).rows[0]?.epoch;
+        if (Number(current) !== Number(epoch)) throw new LeadershipLost();
+      }
+      if (!scope)
+        // Serialize realm-wide decisions (claims, admin) with each other; never
+        // physical execution. Per-device work uses scoped row locks instead.
+        await c.query("SELECT pg_advisory_xact_lock(1297634386,$1)", [
+          mode === "real" ? 1 : 0,
+        ]);
       const now = Number(
         (
           await c.query(
@@ -312,176 +703,72 @@ export class PgStore {
           )
         ).rows[0].now,
       );
-      const devices = (
-        await c.query("SELECT document FROM mx_device.devices WHERE mode=$1", [
-          mode,
-        ])
-      ).rows.map((r) => r.document);
-      const jobs = (
-        await c.query(SQL.atomicJobs, [mode, jobId, key, attemptId])
-      ).rows.map((r) => r.document);
-      const attempts = (
-        await c.query(SQL.atomicAttempts, [mode, attemptId])
-      ).rows.map((r) => r.document);
-      const resources = (
-        await c.query(
-          "SELECT document FROM mx_device.resource_policies WHERE mode=$1",
-          [mode],
-        )
-      ).rows.map((r) => r.document);
-      const apps = (
-        await c.query(
-          "SELECT document FROM mx_device.device_apps WHERE mode=$1",
-          [mode],
-        )
-      ).rows.map((r) => r.document);
-      const definitions = (
-        await c.query(
-          "SELECT document FROM mx_device.task_definitions WHERE mode=$1",
-          [mode],
-        )
-      ).rows.map((r) => r.document);
-      const commandDefinitions = (
-        await c.query(
-          "SELECT document FROM mx_device.command_definitions WHERE mode=$1",
-          [mode],
-        )
-      ).rows.map((r) => r.document);
-      const loopPolicies = (
-        await c.query(
-          "SELECT document FROM mx_device.loop_policies WHERE mode=$1",
-          [mode],
-        )
-      ).rows.map((r) => r.document);
-      const ruleDefinitions = (
-        await c.query(
-          "SELECT document FROM mx_device.rule_definitions WHERE mode=$1",
-          [mode],
-        )
-      ).rows.map((r) => r.document);
-      const strategyDefinitions = (
-        await c.query(
-          "SELECT document FROM mx_device.strategy_definitions WHERE mode=$1",
-          [mode],
-        )
-      ).rows.map((r) => r.document);
-      const commands = (
-        await c.query(SQL.atomicCommands, [mode, jobId, attemptId])
-      ).rows.map((r) => r.document);
-      const state = {
-          devices,
-          jobs,
-          attempts,
-          resources,
-          apps,
-          definitions,
-          commandDefinitions,
-          ruleDefinitions,
-          strategyDefinitions,
-          loopPolicies,
-          commands,
-          events: [],
-        },
-        before = new Map(
-          [
-            ...devices,
-            ...jobs,
-            ...attempts,
-            ...resources,
-            ...apps,
-            ...definitions,
-            ...loopPolicies,
-            ...commands,
-          ].map((r) => [r.id, JSON.stringify(r)]),
-        );
-      // Task and command catalogs intentionally share logical code/version IDs.
-      const commandsBefore = new Map(
-        commandDefinitions.map((d) => [d.id, JSON.stringify(d)]),
-      );
-      const rulesBefore = new Map(
-        ruleDefinitions.map((d) => [d.id, JSON.stringify(d)]),
-      );
-      const strategiesBefore = new Map(
-        strategyDefinitions.map((d) => [d.id, JSON.stringify(d)]),
-      );
+      const loaded = scope
+        ? await loadScoped(c, mode, scope, { deviceId, attemptId, jobId })
+        : await loadRealm(c, mode, { jobId, key, attemptId });
+      const { rows, versions } = loaded;
+      const catalog = snapshotCatalog(rows.commandDefinitions);
+      const state = { ...rows, events: [] };
+      // Row JSON as loaded; jobs and commands compare in stored (by-reference) form.
+      const before = new Map(),
+        signals = new Map();
+      for (const [name, table] of ROW_TABLES)
+        if (Array.isArray(rows[name]) && !isUnloaded(rows[name]))
+          for (const row of rows[name]) {
+            before.set(
+              `${table}:${row.id}`,
+              JSON.stringify(stored(table, row, catalog)),
+            );
+            signals.set(`${table}:${row.id}`, schedulable(table, row));
+          }
+      for (const j of isUnloaded(rows.jobs) ? [] : rows.jobs)
+        restoreJob(j, catalog);
+      for (const cdoc of isUnloaded(rows.commands) ? [] : rows.commands)
+        restoreCommand(cdoc, catalog);
+      const catalogsBefore = new Map();
+      for (const [name, table] of CATALOG_TABLES)
+        if (!isUnloaded(rows[name]))
+          for (const row of rows[name])
+            catalogsBefore.set(`${table}:${row.id}`, JSON.stringify(row));
+
       const result = fn(state, now);
       if (result?.then)
         throw new Error("Async work inside transaction is forbidden");
-      for (const d of state.definitions)
-        if (before.get(d.id) !== JSON.stringify(d))
-          await c.query(
-            "INSERT INTO mx_device.task_definitions VALUES($1,$2,$3,$4,$5)",
-            [d.id, d.mode, d.code, d.version, d],
+
+      // Append-only catalogs: new versions are inserted; existing ones never change.
+      for (const [name, table] of CATALOG_TABLES) {
+        if (isUnloaded(state[name])) continue;
+        for (const d of state[name]) {
+          const prior = catalogsBefore.get(`${table}:${d.id}`);
+          if (prior === undefined)
+            await c.query(
+              `INSERT INTO mx_device.${table} VALUES($1,$2,$3,$4,$5)`,
+              [d.id, d.mode, d.code, d.version, d],
+            );
+          else if (prior !== JSON.stringify(d))
+            throw new Error(`目录版本不可修改：${table} ${d.id}`);
+        }
+      }
+      let workChanged = false;
+      for (const [name, table] of ROW_TABLES) {
+        if (isUnloaded(state[name])) continue;
+        const writer = WRITERS[table];
+        for (const row of state[name]) {
+          const id = `${table}:${row.id}`,
+            json = JSON.stringify(stored(table, row, catalog));
+          if (before.get(id) === json) continue;
+          const version = versions.get(id);
+          const { rowCount } = await c.query(
+            version === undefined ? writer.insert : writer.update,
+            version === undefined
+              ? writer.insertArgs(row, json)
+              : writer.updateArgs(row, json, version),
           );
-      for (const d of state.commandDefinitions)
-        if (commandsBefore.get(d.id) !== JSON.stringify(d))
-          await c.query(
-            "INSERT INTO mx_device.command_definitions VALUES($1,$2,$3,$4,$5)",
-            [d.id, d.mode, d.code, d.version, d],
-          );
-      for (const d of state.ruleDefinitions)
-        if (rulesBefore.get(d.id) !== JSON.stringify(d))
-          await c.query(
-            "INSERT INTO mx_device.rule_definitions VALUES($1,$2,$3,$4,$5)",
-            [d.id, d.mode, d.code, d.version, d],
-          );
-      for (const d of state.strategyDefinitions)
-        if (strategiesBefore.get(d.id) !== JSON.stringify(d))
-          await c.query(
-            "INSERT INTO mx_device.strategy_definitions VALUES($1,$2,$3,$4,$5)",
-            [d.id, d.mode, d.code, d.version, d],
-          );
-      for (const p of state.loopPolicies)
-        if (before.get(p.id) !== JSON.stringify(p))
-          await c.query(
-            "INSERT INTO mx_device.loop_policies VALUES($1,$2,$3,$4) ON CONFLICT(id) DO UPDATE SET document=excluded.document",
-            [p.id, p.mode, p.rack, p],
-          );
-      for (const r of state.resources)
-        if (before.get(r.id) !== JSON.stringify(r))
-          await c.query(
-            "INSERT INTO mx_device.resource_policies VALUES($1,$2,$3,$4) ON CONFLICT(id) DO UPDATE SET document=excluded.document",
-            [r.id, r.mode, r.resourceKey, r],
-          );
-      for (const d of state.devices)
-        if (before.get(d.id) !== JSON.stringify(d))
-          await c.query(
-            "INSERT INTO mx_device.devices VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET document=excluded.document,resource_key=excluded.resource_key,account_key=excluded.account_key",
-            [d.id, d.mode, d.resourceKey, d.accountKey, d],
-          );
-      for (const a of state.apps)
-        if (before.get(a.id) !== JSON.stringify(a))
-          await c.query(
-            "INSERT INTO mx_device.device_apps VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO UPDATE SET document=excluded.document",
-            [a.id, a.mode, a.deviceId, a.appId, a.accountKey, a],
-          );
-      for (const j of state.jobs)
-        if (before.get(j.id) !== JSON.stringify(j))
-          await c.query(
-            "INSERT INTO mx_device.jobs VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO UPDATE SET status=excluded.status,document=excluded.document",
-            [j.id, j.mode, j.key, j.status, j.createdAt, j],
-          );
-      for (const a of state.attempts)
-        if (before.get(a.id) !== JSON.stringify(a))
-          await c.query(
-            "INSERT INTO mx_device.attempts VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO UPDATE SET status=excluded.status,document=excluded.document",
-            [a.id, a.mode, a.jobId, a.deviceId, a.status, a.createdAt, a],
-          );
-      for (const cdoc of state.commands)
-        if (before.get(cdoc.id) !== JSON.stringify(cdoc))
-          await c.query(
-            "INSERT INTO mx_device.execution_commands VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO UPDATE SET status=excluded.status,document=excluded.document",
-            [
-              cdoc.id,
-              cdoc.mode,
-              cdoc.jobId,
-              cdoc.attemptId,
-              cdoc.deviceId,
-              cdoc.status,
-              cdoc.createdAt,
-              cdoc,
-            ],
-          );
+          if (rowCount !== 1) throw new Conflict(table);
+          const signal = schedulable(table, row);
+          if (signal !== null && signal !== signals.get(id)) workChanged = true;
+        }
+      }
       for (const e of state.events)
         await c.query(
           "INSERT INTO mx_device.events(mode,at,document) VALUES($1,$2,$3)",
@@ -493,10 +780,13 @@ export class PgStore {
           [frame.deviceId, frame.captureId, frame.version, now, frame.png],
         );
       }
+      // Delivered on commit; wakes schedulers listening for new or freed work.
+      if (workChanged)
+        await c.query("SELECT pg_notify('mx_device_work', $1)", [mode]);
       await c.query("COMMIT");
       return clone(result);
     } catch (e) {
-      await c.query("ROLLBACK");
+      await c.query("ROLLBACK").catch(() => {});
       throw e;
     } finally {
       c.release();
@@ -570,9 +860,12 @@ export class PgStore {
         ),
       ];
       await client.query("COMMIT");
+      const catalog = snapshotCatalog(
+        commandDefinitions.rows.map((r) => r.document),
+      );
       return {
         devices: d.rows.map((r) => r.document),
-        jobs: j.rows.map((r) => r.document),
+        jobs: j.rows.map((r) => restoreJob(r.document, catalog)),
         attempts: a.rows.map((r) => r.document),
         events: e.rows.reverse().map((r) => ({ ...r.document, seq: r.seq })),
         resources: r.rows.map((r) => r.document),
@@ -582,7 +875,7 @@ export class PgStore {
         ruleDefinitions: ruleDefinitions.rows.map((r) => r.document),
         strategyDefinitions: strategyDefinitions.rows.map((r) => r.document),
         loopPolicies: loopPolicies.rows.map((r) => r.document),
-        commands: commands.rows.map((r) => r.document),
+        commands: commands.rows.map((r) => restoreCommand(r.document, catalog)),
         now: Number(clock.rows[0].now),
         workers: w.rows.map((r) => ({
           ...r.document,
@@ -610,14 +903,22 @@ export class PgStore {
       [id, mode],
     );
     if (!j.rowCount) return null;
+    const catalog = snapshotCatalog(
+      (
+        await this.pool.query(
+          "SELECT document FROM mx_device.command_definitions WHERE mode=$1",
+          [mode],
+        )
+      ).rows.map((r) => r.document),
+    );
     return {
-      job: j.rows[0].document,
+      job: restoreJob(j.rows[0].document, catalog),
       commands: (
         await this.pool.query(
           "SELECT document FROM mx_device.execution_commands WHERE job_id=$1 ORDER BY created_at,id",
           [id],
         )
-      ).rows.map((r) => r.document),
+      ).rows.map((r) => restoreCommand(r.document, catalog)),
       attempts: (
         await this.pool.query(
           "SELECT document FROM mx_device.attempts WHERE job_id=$1 ORDER BY created_at",

@@ -399,34 +399,63 @@ export function startWorkflow(s, now, device, job, attempt) {
   attempt.executionGeneration = 1;
   if (job.workflow.loop === "large") device.workflowAttemptId = attempt.id;
 }
-export function claimContinuation(s, now, mode, workerId) {
+// The yielded large session on device d, if it could continue now (ignoring
+// the device cooldown when asked), and whether a small task may be inserted at
+// this checkpoint.
+function yieldedSession(s, now, d, ignoreCooldown = false) {
+  const a = s.attempts.find((a) => a.id === d.workflowAttemptId);
+  const j = s.jobs.find((j) => j.id === a?.jobId);
+  if (
+    !a ||
+    !j ||
+    a.status !== "yielded" ||
+    d.state === "quarantined" ||
+    d.connected === "offline"
+  )
+    return null;
+  if (s.attempts.some((a) => a.deviceId === d.id && a.status === "running"))
+    return null;
+  const w = j.workflow,
+    p = w.policySnapshot;
+  if (!ignoreCooldown && d.cooldownUntil > now) return null;
+  const canInsert =
+    !loopPolicyFor(s, d)?.scheduler?.enabled &&
+    w.safePoint &&
+    w.resumable &&
+    d.enabled &&
+    !policiesFor(s, d).some((p) => p.draining) &&
+    !["waiting", "held"].includes(d.session?.status) &&
+    w.insertions < p.maxInsertions;
+  return { a, j, w, p, canInsert };
+}
+// A task's own dispatch reservation does not block its next step. Another task's rest does.
+function sessionAppCooldown(s, d, { a, j }) {
+  const app = deviceApps(s, d).find((x) => x.appId === j.appId);
+  return app && app.lastAttemptId !== a.id ? app.cooldownUntil || 0 : 0;
+}
+function resumeSession(s, now, d, { a, j, w }, workerId) {
+  if (w.detourStartedAt != null) {
+    w.detourMs += now - w.detourStartedAt;
+    w.detourStartedAt = null;
+  }
+  a.status = "running";
+  a.workerId = workerId;
+  a.executionGeneration++;
+  a.leaseUntil = now + 180000;
+  d.revision++;
+  j.reason = w.restorePending
+    ? "恢复已保存上下文，再继续大循环"
+    : "从已确认检查点继续";
+  return { device: d, job: j, attempt: a };
+}
+export function claimContinuation(s, now, mode, workerId, index) {
   if (mode !== "sim") return null;
   for (const d of s.devices.filter(
     (d) => d.mode === mode && d.workflowAttemptId,
   )) {
-    const a = s.attempts.find((a) => a.id === d.workflowAttemptId);
-    const j = s.jobs.find((j) => j.id === a?.jobId);
-    if (
-      !a ||
-      !j ||
-      a.status !== "yielded" ||
-      d.state === "quarantined" ||
-      d.connected === "offline"
-    )
-      continue;
-    if (s.attempts.some((a) => a.deviceId === d.id && a.status === "running"))
-      continue;
-    const w = j.workflow,
-      p = w.policySnapshot;
-    if (d.cooldownUntil > now) continue;
-    const canInsert =
-      !loopPolicyFor(s, d)?.scheduler?.enabled &&
-      w.safePoint &&
-      w.resumable &&
-      d.enabled &&
-      !policiesFor(s, d).some((p) => p.draining) &&
-      !["waiting", "held"].includes(d.session?.status) &&
-      w.insertions < p.maxInsertions;
+    const session = yieldedSession(s, now, d);
+    if (!session) continue;
+    const { a, j, w, p, canInsert } = session;
     const children = canInsert
       ? s.jobs
           .filter(
@@ -436,8 +465,8 @@ export function claimContinuation(s, now, mode, workerId) {
               c.notBefore <= now &&
               c.workflow?.loop === "small" &&
               matchesJob(d, c) &&
-              !appBlockers(s, now, d, c).length &&
-              !insertionBlockers(s, now, d, c).length,
+              !appBlockers(s, now, d, c, index).length &&
+              !insertionBlockers(s, now, d, c, index).length,
           )
           .sort(compareJobs(now))
       : [];
@@ -486,27 +515,36 @@ export function claimContinuation(s, now, mode, workerId) {
       );
       return { device: d, job: child, attempt: ca };
     }
-    const app = deviceApps(s, d).find((x) => x.appId === j.appId);
-    // A task's own dispatch reservation does not block its next step. Another task's rest does.
-    if (app?.cooldownUntil > now && app.lastAttemptId !== a.id) {
+    if (sessionAppCooldown(s, d, session) > now) {
       j.reason = `检查点等待 ${j.appId} 冷却，保留原插槽`;
       continue;
     }
-    if (w.detourStartedAt != null) {
-      w.detourMs += now - w.detourStartedAt;
-      w.detourStartedAt = null;
-    }
-    a.status = "running";
-    a.workerId = workerId;
-    a.executionGeneration++;
-    a.leaseUntil = now + 180000;
-    d.revision++;
-    j.reason = w.restorePending
-      ? "恢复已保存上下文，再继续大循环"
-      : "从已确认检查点继续";
-    return { device: d, job: j, attempt: a };
+    return resumeSession(s, now, d, session, workerId);
   }
   return null;
+}
+/** Execution-side continuation of one's own yielded session when no small task
+ * can be inserted at this checkpoint. Device and session are already bound, so
+ * this is not a placement decision and needs only that device's rows.
+ * Returns the resumed work; { waitUntil } when only a cooldown blocks it; or
+ * null when the realm scheduler must decide (insertion possible, session taken
+ * over or ended) — the same outcome claimContinuation would reach. */
+export function resumeOwnSession(s, now, attempt, workerId) {
+  const d = s.devices.find((x) => x.id === attempt.deviceId);
+  if (!d || d.mode !== "sim" || d.workflowAttemptId !== attempt.id) return null;
+  const session = yieldedSession(s, now, d, true);
+  if (
+    !session ||
+    session.canInsert ||
+    session.a.executionGeneration !== attempt.executionGeneration
+  )
+    return null;
+  const waitUntil = Math.max(
+    d.cooldownUntil || 0,
+    sessionAppCooldown(s, d, session),
+  );
+  if (waitUntil > now) return { waitUntil };
+  return resumeSession(s, now, d, session, workerId);
 }
 export function beginCommand(s, now, a) {
   if (!owned(s, now, a)) return null;

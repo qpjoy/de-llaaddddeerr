@@ -32,6 +32,8 @@ import { TikHubAdapter } from './adapters/tikhub.mjs'
 import { RapidApiAdapter } from './adapters/rapidapi.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
+import { normalizeHubSocialCompatRequest } from './contracts/hub-social-compat.mjs'
+import { HUB_SOCIAL_COMPAT_PLATFORMS } from '../shared/social-account-contract.mjs'
 import { RAPIDAPI_METADATA, rapidApiConfig } from './external-platforms/rapidapi-config.mjs'
 import { createApp } from './app.mjs'
 import { createPeripheralRuntime } from './peripherals/runtime.mjs'
@@ -408,6 +410,13 @@ export async function createRuntime(config = loadConfig()) {
   }
   const nativeSearchGateways = Object.fromEntries(['weibo', ...Object.keys(TIKHUB_CONTENT_SEARCH_RECIPES)]
     .map(platform => [platform, nativeSearchGateway(platform, 'tikhub')]))
+  const socialAccountDataGateways = Object.fromEntries(HUB_SOCIAL_COMPAT_PLATFORMS.map(platform => [platform,
+    platform === 'twitter' ? hubSocialGateway : nativeSearchGateway(platform, platform === 'facebook' ? 'justone' : 'tikhub')]))
+  const socialDataGateway = { socialData: (context, input) => {
+    if (input.operation === 'search') return hubSocialGateway.socialData(context, input)
+    const normalized = normalizeHubSocialCompatRequest(input.operation, input.body, { businessId: context.consumer?.businessId })
+    return socialAccountDataGateways[normalized.platform].socialAccountData(context, input)
+  } }
   const instagramSearchGateways = Object.fromEntries(['justone', 'tikhub'].map(provider => [provider, nativeSearchGateway('instagram', provider)]))
   const instagramSearch = (context, input) => instagramSearchGateways.justone.searchRaw(context, input, {
     policyStore: strategySearchRoutingStore, gateways: instagramSearchGateways,
@@ -637,7 +646,7 @@ export async function createRuntime(config = loadConfig()) {
     service,
     store,
     adapter,
-    hubSocialGateway,
+    hubSocialGateway: socialDataGateway,
     webSearchService: webSearch.service,
     identity,
     sso: config.listenerMode === 'public' ? null : createSso({ settings: readSsoProfile(process.env.MX_INSIGHT_SSO_PROFILE), pool, identity, adminToken:config.adminToken }),
@@ -694,7 +703,7 @@ export async function createRuntime(config = loadConfig()) {
     externalPlatformControlStore, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     hubSocialGateway, rapidApiStore, rapidApiCredentialStore, rapidApiProxyStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
-    nativeSearchGateways,
+    nativeSearchGateways, socialAccountDataGateways, socialDataGateway,
   }
 }
 

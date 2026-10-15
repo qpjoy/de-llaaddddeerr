@@ -35,7 +35,8 @@ export function StrategySearchPage({ token, session, query, setQuery, onUnauthor
     <ProductViewTabs label="策略搜索" value={tab} onChange={changeTab} session={session} />
     {pendingSearch ? <p role="status">有平台的原查询正在执行或结果待核实。产品展示可切换其他平台；接口调试暂不可发送新请求。可回到原平台只读核对。</p> : null}
     <div hidden={tab !== 'debug'}><ProductApiConsole product={productForPath('/data-products/strategy-search')} token={token} initialEndpoint={query.get('endpoint')} onResult={setResult} blocked={pendingSearch} attemptStore={searchState.consoleAttempts} onAttempt={event => recordStrategyAttempt(cell, event)} /></div>
-    <div hidden={tab !== 'product'}><StrategySearchExperience strategySession={searchSession} initialResult={result} onResult={setResult} /></div>
+    <div hidden={tab !== 'product'}><StrategySearchExperience strategySession={searchSession} initialResult={result} onResult={setResult}
+      operation={selected.id} onOperationChange={interfaceId => setQuery({ interface: interfaceId })} /></div>
     <div className="mih-strategy-guide" hidden={tab !== 'guide'}>
       <div className="mih-strategy-interface-cards" role="group" aria-label="选择业务接口">
         {STRATEGY_SEARCH_INTERFACES.map(row => { const Icon = icons[row.id]; return <button type="button" key={row.id}
@@ -52,6 +53,8 @@ export function StrategySearchPage({ token, session, query, setQuery, onUnauthor
         <p>{selected.boundary}</p>
       </section>
       <ProductIntegrationGuide label="策略搜索" docs="strategy-search">
+        <p>账号内容使用 <code>/api/v1/data/social/crawl</code>，账号资料使用 <code>/api/v1/data/social/user-info</code>。保留 username、userId、user_id、uid 等账号别名与 raw_info / raw_data JSON 字符串，并提供 items 与 pageInfo。各平台支持范围、批量参数和返回字段见接口文档。</p>
+        <p>账号接口分别要求平台授权及 <code>social.content.crawl</code>、<code>social.profile.get</code>。旧转发入口暂时保留；切换到 Hub 社交接口需从第一页开始，不能携带旧路径游标。</p>
         <p>统一内容搜索使用 <code>/api/v1/data/search</code>，一次选择一个平台；TikTok 使用统一条目和分页字段。多个平台同时检索请使用聚合搜索。</p>
         <p>微信也使用此路径，兼容既有原生响应 <code>contractVersion / endpoint / data / meta / requestId</code>；可用 <code>params.raw=false</code> 显示 items，按 <code>continue_flag / cursor</code> 续页。微信公众号默认检索文章；其他微信与 TikTok 系列接口继续保留。</p>
         <p>每个新查询与下一页各使用新的 Idempotency-Key。fresh 原请求仅在 120 秒内重放已提交响应；stable 固定首次响应。产品展示使用 stable；新建相同查询必须显式操作。超时或结果未知时先只读核对使用记录。</p>
