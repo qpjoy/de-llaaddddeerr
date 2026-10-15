@@ -5,6 +5,7 @@ import { JustOneUpstreamError } from '../adapters/justone.mjs'
 import { FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY, projectFacebookSearch, facebookJustOneArchives } from '../contracts/facebook-search.mjs'
 import { projectDataSearch } from '../contracts/hub-data-search.mjs'
 import { rawSearchRecords } from '../contracts/raw-search.mjs'
+import { waitForFacebookRapidAdmission } from './facebook-rapid-admission.mjs'
 
 const MAX_PAGES = 15, MAX_BYTES = 12 * 1024 * 1024
 const PAGE_BYTES = { rapidapi: 4 * 1024 * 1024, justone: 8 * 1024 * 1024 }
@@ -125,18 +126,25 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         if (!target) throw new AppError(503, 'external_platform_not_configured', 'Facebook supplier is unavailable')
         if (bytes + PAGE_BYTES[provider] > MAX_BYTES) { stopReason = 'archive_byte_limit'; break }
         if (!Number.isFinite(deadlineAt) || clock() + (target.config.timeoutMs || 30000) + 5000 >= deadlineAt) { stopReason = 'deadline'; break }
-        const state = await target.platformStore.providerState(provider)
-        const contract = await target.platformStore.contractCircuitState?.(provider, 'facebook')
-        if ([state, contract].some(value => value?.circuitOpenUntil && Date.parse(value.circuitOpenUntil) > clock())) {
-          throw new AppError(503, 'external_platform_circuit_open', 'Facebook supplier is temporarily unavailable')
-        }
-        const credential = await resolveCredential(provider)
-        if (!credential.ready) throw new AppError(503, 'external_platform_not_configured', 'Facebook supplier is unavailable')
         const base = request.forProvider(provider), operation = provider === 'rapidapi' ? FACEBOOK_OPERATION.operationKey : base.operation
         const stepDelivery = { ...delivery, operation }
-        const control = await target.operationControlStore.authorizeDispatch(provider, operation, {
-          consumerId: context.consumer.id, config: target.config, credentialConfigured: true, credentialRevision: credential.revision })
-        const cost = providerCostControl(control?.billing ? { billing: control.billing } : target.config, base.endpointKey, provider === 'rapidapi')
+        const authorizeStep = async () => {
+          context = await revalidateIdentity()
+          if ((await policyStore.facebook()).mode === 'paused') throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
+          if (await store.facebookFillUnknownFor(delivery)) throw new AppError(409, 'request_outcome_unknown', 'An equal Facebook delivery has an unknown outcome')
+          const state = await target.platformStore.providerState(provider)
+          const contract = await target.platformStore.contractCircuitState?.(provider, 'facebook')
+          if ([state, contract].some(value => value?.circuitOpenUntil && Date.parse(value.circuitOpenUntil) > clock())) {
+            throw new AppError(503, 'external_platform_circuit_open', 'Facebook supplier is temporarily unavailable')
+          }
+          const credential = await resolveCredential(provider)
+          if (!credential.ready) throw new AppError(503, 'external_platform_not_configured', 'Facebook supplier is unavailable')
+          const control = await target.operationControlStore.authorizeDispatch(provider, operation, {
+            consumerId: context.consumer.id, config: target.config, credentialConfigured: true, credentialRevision: credential.revision })
+          const cost = providerCostControl(control?.billing ? { billing: control.billing } : target.config, base.endpointKey, provider === 'rapidapi')
+          return { credential, control, cost }
+        }
+        let authorization = await authorizeStep()
         const sourceLease = { ...parentLease, operation, endpointKey: base.endpointKey, contractVersion: base.endpointContractVersion }
         const lease = await target.platformStore.acquireDispatchLease({ ...sourceLease, ownedDeliveryLease: provider === 'rapidapi' })
         if (lease !== true && lease?.kind !== 'acquired') {
@@ -145,17 +153,34 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
           throw new AppError(409, code, 'An equal Facebook search is pending or has an unresolved result')
         }
         if (provider !== 'rapidapi') childLease = sourceLease
-        if (!await enterCapacity(provider, { lease: sourceLease, expiresAt: new Date(deadlineAt), signal })) {
+        if (!await enterCapacity(provider, { lease: { ...sourceLease, ownedDeliveryLease: provider === 'rapidapi' },
+          expiresAt: new Date(deadlineAt), signal, canWait: !sources.length,
+          revalidate: async () => { authorization = await authorizeStep(); return context } })) {
           throw new AppError(503, 'external_platform_busy', 'Facebook supplier capacity is occupied')
         }
         entered = true
+        let { credential, control, cost } = authorization
         costReservation = cost.costMinor === 0 ? null : await target.platformStore.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
         const rate = await target.platformStore.acquireProviderRateLimit({ limit: target.config.maxRequestsPerMinute ?? 90, windowMs: 60000 })
         if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Facebook supplier rate limit is exhausted')
         if (provider === 'rapidapi') {
-          admission = await policyStore.admitRapid()
-          if (!admission.allowed) throw new AppError(503, pinned ? 'search_restart_required' : 'facebook_search_capacity_unavailable',
-            'Facebook search capacity is temporarily unavailable')
+          admission = await waitForFacebookRapidAdmission({ policyStore, requestId: delivery.usageRequestId,
+            deadlineAt, timeoutMs: target.config.timeoutMs || 30000, signal, logger: gateway.logger,
+            revalidate: async () => {
+              const latest = await authorizeStep()
+              if (JSON.stringify(latest.cost) !== JSON.stringify(cost)) throw new AppError(503,
+                'external_platform_cost_control_unavailable', 'Procurement controls changed while waiting')
+              credential = latest.credential; control = latest.control
+              const claim = await target.platformStore.acquireDispatchLease({ ...sourceLease, ownedDeliveryLease: true })
+              if (claim !== true && claim?.kind !== 'acquired') throw new AppError(409,
+                claim?.reason === 'unknown' ? 'request_outcome_unknown' : claim?.reason === 'succeeded_unusable'
+                  ? 'external_platform_response_unusable' : 'request_in_progress', 'Dispatch protection changed while waiting')
+            } })
+          if (!admission.allowed) {
+            if ((await policyStore.facebook()).mode === 'paused') throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
+            throw new AppError(503, pinned ? 'search_restart_required' : 'facebook_search_capacity_unavailable',
+              'Facebook search capacity is temporarily unavailable')
+          }
         }
         if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
         if (clock() + (target.config.timeoutMs || 30000) + 5000 >= deadlineAt) { stopReason = 'deadline'; break }
@@ -249,11 +274,16 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         }
         if (knownAdmission(error)) {
           const policy = await policyStore.facebook()
-          if (provider === 'rapidapi' && !pinned && !providerCursor && policy.mode === 'auto' && gateways.justone) {
+          const hubQueueBusy = error.code === 'external_platform_busy' && error.details?.layer === 'hub'
+          if (!hubQueueBusy && provider === 'rapidapi' && !pinned && !providerCursor && policy.mode === 'auto' && gateways.justone) {
             provider = 'justone'
             continue
           }
           if (sources.length) { stopReason = error.code; break }
+        }
+        if (!sources.length && error.details?.stage === 'facebook_quota_admission') {
+          await target.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable',
+            status: error.status || 503, errorCode: error.code })
         }
         throw error
       } finally {

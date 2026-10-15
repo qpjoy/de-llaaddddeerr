@@ -3,6 +3,7 @@ import { AppError } from '../core/errors.mjs'
 
 const hours = 3600000
 const day = 24 * hours
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 
 // Calendar hints only shorten the interval between demand-triggered checks.
 // They never establish a new quota period or replenish the included calls.
@@ -33,7 +34,7 @@ export class PlatformSearchPolicyStore {
   async list() {
     if (!this.pool) return []
     const { rows } = await this.pool.query(`SELECT p.*, s.used, s.remaining, s.reset_at, s.blocked_until, s.reason AS availability_reason,
-      s.lease_until, s.updated_at AS observed_at, now() AS checked_at FROM control.platform_search_policies p
+      s.lease_until, jsonb_array_length(s.waiters) AS queue_depth, s.updated_at AS observed_at, now() AS checked_at FROM control.platform_search_policies p
       LEFT JOIN control.facebook_rapid_quota s ON p.platform='facebook' ORDER BY p.platform`)
     return rows.map(({ checked_at: checkedAt, ...row }) => {
       if (row.platform !== 'facebook') return row
@@ -42,7 +43,9 @@ export class PlatformSearchPolicyStore {
         || ['quota_exhausted', 'recovery_probe'].includes(row.availability_reason)
         || (row.reset_at && new Date(row.reset_at).getTime() <= now)
       const rateLimited = row.availability_reason === 'rate_limited' && row.blocked_until && new Date(row.blocked_until).getTime() > now
-      return { ...row, next_recovery_check_at: rateLimited ? row.blocked_until : needsCheck
+      return { ...row, available_included: row.platform === 'facebook'
+        ? Math.max(0, Math.min(row.monthly_limit - row.used, row.remaining ?? row.monthly_limit)) : null,
+        next_recovery_check_at: rateLimited ? row.blocked_until : needsCheck
         ? new Date(facebookRecoveryCheckAt({ ...row, updated_at: row.observed_at }, now)) : null }
     })
   }
@@ -80,15 +83,26 @@ export class PlatformSearchPolicyStore {
   }
   // One admitted RapidAPI request at a time for this subscription. This also
   // makes a remaining=1 response safe across Hub replicas and ordered headers.
-  async admitRapid() {
+  async admitRapid(ticket = null) {
+    if (ticket && (!UUID.test(ticket.id || '') || !UUID.test(ticket.requestId || '')
+      || !Number.isSafeInteger(ticket.deadline))) throw new AppError(400, 'invalid_facebook_admission', 'Invalid admission identity')
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
+      await client.query("SET LOCAL lock_timeout = '1s'")
+      await client.query("SET LOCAL statement_timeout = '3s'")
       const { rows: [s] } = await client.query(`SELECT s.*, p.monthly_limit, p.probe_interval_hours, p.billing_cycle_day, p.billing_probe_interval_hours, p.mode,
         now() AS checked_at FROM control.facebook_rapid_quota s CROSS JOIN control.platform_search_policies p
         WHERE p.platform='facebook' FOR UPDATE OF s FOR SHARE OF p`)
       if (!s) throw new AppError(503, 'platform_search_policy_unavailable', 'Search strategy is unavailable')
       const now = new Date(s.checked_at).getTime()
+      let waiters = (s.waiters || []).filter(row => row.deadline > now)
+      const finish = async reason => {
+        if (ticket && reason !== 'source_busy') waiters = waiters.filter(row => row.id !== ticket.id)
+        await client.query('UPDATE control.facebook_rapid_quota SET waiters=$1::jsonb WHERE singleton', [JSON.stringify(waiters)])
+        await client.query('COMMIT')
+        return { allowed: false, reason, used: s.used, remaining: s.remaining, queueDepth: waiters.length }
+      }
       let used = s.used, remaining = s.remaining, resetAt = s.reset_at, blockedUntil = s.blocked_until
       const elapsedReset = resetAt && new Date(resetAt).getTime() <= now
       const exhausted = used >= s.monthly_limit || remaining === 0
@@ -103,19 +117,40 @@ export class PlatformSearchPolicyStore {
       }
       if (reason) {
         if (reason === 'quota_exhausted') await client.query(`UPDATE control.facebook_rapid_quota SET blocked_until=$1,reason=$2 WHERE singleton`, [blockedUntil, reason])
-        await client.query('COMMIT')
-        return { allowed: false, reason }
+        // Busy callers join below; terminal quota/policy decisions do not wait.
+        if (reason !== 'source_busy') return await finish(reason)
       }
+      if (ticket) {
+        if (ticket.deadline <= now) return await finish('queue_timeout')
+        const existing = waiters.find(row => row.id === ticket.id)
+        if (existing && (existing.requestId !== ticket.requestId || existing.deadline !== ticket.deadline)) {
+          throw new AppError(409, 'facebook_admission_conflict', 'Admission identity changed')
+        }
+        if (!existing) {
+          if (waiters.length >= 32) return await finish('queue_full')
+          waiters.push({ id: ticket.id, requestId: ticket.requestId, deadline: ticket.deadline })
+        }
+      }
+      if (reason === 'source_busy' || (waiters.length && waiters[0].id !== ticket?.id)) return await finish('source_busy')
+      if (ticket) waiters = waiters.filter(row => row.id !== ticket.id)
       const token = randomUUID()
       if (elapsedReset) resetAt = null
       await client.query(`UPDATE control.facebook_rapid_quota SET used=$1,remaining=$2,reset_at=$3,
-        blocked_until=$4,lease_token=$5,lease_until=now()+interval '2 minutes',reason=$6,updated_at=now() WHERE singleton`,
+        blocked_until=$4,lease_token=$5,lease_until=now()+interval '2 minutes',reason=$6,waiters=$7::jsonb,updated_at=now() WHERE singleton`,
       [used + 1, remaining == null ? null : Math.max(0, remaining - 1), resetAt,
-        probe ? new Date(now + facebookProbeIntervalHours(s, now) * hours) : blockedUntil, token, probe ? 'recovery_probe' : null])
+        probe ? new Date(now + facebookProbeIntervalHours(s, now) * hours) : blockedUntil, token, probe ? 'recovery_probe' : null, JSON.stringify(waiters)])
       await client.query('COMMIT')
-      return { allowed: true, token, probe }
+      return { allowed: true, token, probe, used: used + 1, remaining: remaining == null ? null : Math.max(0, remaining - 1), queueDepth: waiters.length }
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error }
     finally { client.release() }
+  }
+  async cancelRapidWait(ticket) {
+    if (!UUID.test(ticket?.id || '') || !UUID.test(ticket?.requestId || '')) return
+    await this.pool.query(`UPDATE control.facebook_rapid_quota SET waiters=coalesce((
+      SELECT jsonb_agg(entry.value ORDER BY entry.ordinality)
+      FROM jsonb_array_elements(waiters) WITH ORDINALITY AS entry(value, ordinality)
+      WHERE NOT (entry.value->>'id'=$1 AND entry.value->>'requestId'=$2)
+    ),'[]'::jsonb) WHERE singleton`, [ticket.id, ticket.requestId])
   }
   async observeRapid(admission, observation = {}) {
     if (!admission?.token) return
@@ -131,14 +166,21 @@ export class PlatformSearchPolicyStore {
         const reliableRemaining = Number.isInteger(observation.remaining) && observation.remaining >= 0
           && observation.remaining <= s.monthly_limit && !observation.quotaConflict
           && (observation.limit == null || observation.limit === s.monthly_limit)
-        if (reliableRemaining) remaining = observation.remaining
+        if (reliableRemaining) remaining = remaining == null ? observation.remaining : Math.min(remaining, observation.remaining)
         if (observation.monthlyExhausted) remaining = 0
         if (resetAt && new Date(resetAt).getTime() <= now) resetAt = null
         if (reliableRemaining && Number.isInteger(observation.resetSeconds) && observation.resetSeconds > 0 && observation.resetSeconds <= 32 * 86400) resetAt = new Date(now + observation.resetSeconds * 1000)
         if (reliableRemaining && observation.ok && remaining > 0 && !observation.monthlyExhausted) {
-          // A successful HTTP response alone is insufficient: it may be an overage.
-          used = Math.max(1, s.monthly_limit - Math.min(s.monthly_limit, remaining)); blockedUntil = null; reason = null
+          used = Math.max(used, s.monthly_limit - remaining)
+          blockedUntil = null; reason = null
         }
+        if (admission.probe && reliableRemaining && observation.ok && observation.remaining > 0 && !observation.monthlyExhausted) {
+          // Only an explicitly admitted recovery probe can establish renewal.
+          // Ordinary/stale headers can tighten quota but never refill it.
+          remaining = observation.remaining
+          used = Math.max(1, s.monthly_limit - remaining); blockedUntil = null; reason = null
+        }
+        if (remaining != null) remaining = Math.min(remaining, Math.max(0, s.monthly_limit - used))
         if (remaining === 0 || used >= s.monthly_limit || observation.monthlyExhausted
           || (admission.probe && !(reliableRemaining && observation.ok && remaining > 0))) {
           blockedUntil = resetAt || new Date(now + facebookProbeIntervalHours(s, now) * hours); reason = 'quota_exhausted'

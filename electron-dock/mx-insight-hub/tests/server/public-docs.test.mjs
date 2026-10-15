@@ -662,7 +662,7 @@ function assertXiaohongshuSearchContract(document) {
     400: [...XIAOHONGSHU_SEARCH_ERROR_CODES[400], 'content_search_option_unsupported', 'content_search_pagination_unsupported', 'work_budget_exceeded'],
     409: [...XIAOHONGSHU_SEARCH_ERROR_CODES[409], 'search_page_unavailable', 'search_restart_required'],
     502: [...XIAOHONGSHU_SEARCH_ERROR_CODES[502], 'social_upstream_response_unusable', 'social_upstream_outcome_unknown', 'social_upstream_rejected'],
-    503: [...XIAOHONGSHU_SEARCH_ERROR_CODES[503], 'request_outcome_unknown', 'facebook_search_paused', 'twitter_fill_deadline', 'content_search_unavailable', 'content_search_deadline'],
+    503: [...XIAOHONGSHU_SEARCH_ERROR_CODES[503], 'request_outcome_unknown', 'facebook_search_paused', 'twitter_fill_deadline', 'content_search_unavailable', 'content_search_deadline', 'external_platform_busy', 'facebook_quota_state_unavailable'],
   })
   assert.deepEqual(operation['x-mx-required-capabilities-by-platform'], {
     xiaohongshu: 'social.posts.search',
@@ -674,7 +674,13 @@ function assertXiaohongshuSearchContract(document) {
   assert.match(operation.description, /independent rollout gate/i)
   assert.match(operation.description, /never selects|never.*provider/i)
   assert.match(operation.description, /Twitter standard search[\s\S]*without a separate default per-request call-count cap/)
+  assert.match(operation.description, /up to 10 seconds and 32 pending/)
+  assert.match(operation.description, /503 external_platform_busy[\s\S]*admissionMode=bounded_wait/)
+  assert.match(operation.description, /Paid carry remains deliverable as a short page/)
   assert.match(operation.description, /Facebook standard search[\s\S]*without a separate default per-request call-count cap/)
+  assert.match(operation.description, /Facebook raw and standard search share a global FIFO allowance gate/)
+  assert.match(operation.description, /Ordinary billing observations can only tighten allowance/)
+  assert.match(operation.description, /recovery probes remain enabled and may incur a charge/)
   assert.doesNotMatch(operation.description, /at most 3 actual upstream|within 3 actual dispatches/)
   assert.match(operation.description, /preserve available zero values and display null as unavailable/)
   assert.match(operation.description, /default zeros alone do not prove an observed measurement/)

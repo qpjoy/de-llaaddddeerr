@@ -17,6 +17,7 @@ import { isNightAllDataSearchV1Envelope } from '../../server/contracts/night-all
 import { createDataSearchCursorCodec } from '../../server/external-platforms/cursor.mjs'
 import { PlatformSearchPolicyStore, rapidQuotaObservation } from '../../server/external-platforms/platform-search-policy.mjs'
 import { migrateFacebookCredentials } from '../../scripts/migrate-facebook-credentials.mjs'
+import { facebookQuotaFixture } from '../helpers/facebook-quota.mjs'
 
 const PEPPER = 'facebook-offline-test-pepper-at-least-32-characters'
 const ADMIN = 'facebook-offline-admin-token-at-least-32-characters'
@@ -138,6 +139,116 @@ test('exhausted quota and administrator-selected JustOne never send RapidAPI tra
     const h = await harness(options)
     await h.invoke()
     assert.deepEqual(h.calls.map(row => row.provider), ['justone'])
+  }
+})
+
+test('Facebook raw and standard replicas wait for shared allowance and only one consumes the last included call',
+  { skip: !process.env.MX_INSIGHT_TEST_PGLITE_MODULE }, async t => {
+    for (const route of ['raw', 'standard']) for (const used of [0, 999]) await t.test(`${route}-${used}`, async t => {
+      const { db, store, replica } = await facebookQuotaFixture(t)
+      await db.query('UPDATE control.facebook_rapid_quota SET used=$1,remaining=$2', [used, 1000 - used])
+      let finish, started
+      const ready = new Promise(resolve => { started = resolve }), gate = new Promise(resolve => { finish = resolve })
+      const a = await harness({ policyStore: store, respond: async ({ provider }) => {
+        assert.equal(provider, 'rapidapi'); started(); await gate
+        return Response.json({ results: [post], cursor: null }, { headers: {
+          'x-ratelimit-requests-limit': '1000', 'x-ratelimit-requests-remaining': String(999 - used) } })
+      } })
+      const b = await harness({ policyStore: replica })
+      const invoke = (h, key) => route === 'raw' ? h.invoke({ platform: 'facebook', query: key, count: 20 }, key)
+        : invokeStandard(h, { platform: 'facebook', query: key, pageSize: 20 }, key)
+      const first = invoke(a, 'facebook-shared-first')
+      await ready
+      const second = invoke(b, 'facebook-shared-second')
+      try {
+        for (let i = 0; i < 100 && !(await store.facebook()).queue_depth; i++) await new Promise(resolve => setTimeout(resolve, 2))
+        assert.equal((await store.facebook()).queue_depth, 1)
+        assert.equal(b.calls.length, 0, 'busy does not spend a JustOne call')
+        assert.equal((await store.facebook()).used, used + 1, 'waiting did not reserve another call')
+      } finally { finish() }
+      assert.equal((await first).status, 200)
+      assert.equal((await second).status, 200)
+      assert.deepEqual(b.calls.map(row => row.provider), [used === 999 ? 'justone' : 'rapidapi'])
+      assert.equal((await store.facebook()).used, used === 999 ? 1000 : 2)
+      assert.equal((await store.facebook()).queue_depth, 0)
+      assert.equal((await store.facebook()).lease_until, null)
+    })
+  })
+
+test('Facebook shared queue timeout and cancellation return Hub busy without purchasing the fallback',
+  { skip: !process.env.MX_INSIGHT_TEST_PGLITE_MODULE }, async t => {
+    for (const scenario of ['timeout', 'cancel']) await t.test(scenario, async t => {
+      const { store } = await facebookQuotaFixture(t)
+      const active = await store.admitRapid()
+      const h = await harness({ policyStore: store })
+      if (scenario === 'timeout') h.gateways.rapidapi.reservationLeaseMs = 6100
+      const abort = new AbortController()
+      const pending = invokeStandard(h, { platform: 'facebook', query: 'queue-failure', pageSize: 20 }, 'facebook-shared-failure', abort.signal).catch(error => error)
+      if (scenario === 'cancel') {
+        for (let i = 0; i < 100 && !(await store.facebook()).queue_depth; i++) await new Promise(resolve => setTimeout(resolve, 2))
+        abort.abort()
+      }
+      const error = await pending
+      assert.equal(error.code, scenario === 'cancel' ? 'request_cancelled' : 'external_platform_busy')
+      assert.equal(h.calls.length, 0)
+      assert.equal((await store.facebook()).queue_depth, 0)
+      assert.equal((await store.facebook()).used, 1)
+      assert.equal([...h.usage.requests.values()][0].status, 'released')
+      await store.observeRapid(active)
+    })
+  })
+
+test('Facebook 301 preserves the failed receipt and existing customer settlement without a RapidAPI dispatch or automatic retry', async () => {
+  for (const route of ['raw', 'standard']) for (const mode of ['justone', 'auto']) {
+    const h = await harness({ mode, respond: ({ provider }) => {
+      assert.equal(provider, 'justone')
+      return Response.json({ code: 301, message: 'private-collector-error', data: null,
+        requestId: 'fixture-301-request', recordTime: '2026-10-15T01:09:11Z' })
+    } })
+    h.policyStore.admitRapid = async () => ({ allowed: false, reason: 'quota_exhausted' })
+    await h.service.setTenantBillingProfile(h.context.tenant.id,
+      { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 1, defaultCurrency: 'CNY' }, 'test-admin')
+    await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline Facebook 301 receipt fixture' },
+      { idempotencyKey: 'facebook-301-credit', actor: 'test-admin' })
+    const query = '(练习生 OR "idol trainee")'
+    const body = { platform: 'facebook', query, params: { startTime: '2026-10-12T00:47:59.087335Z', endTime: '2026-10-15T00:47:59.087335Z' },
+      ...(route === 'raw' ? { count: 20 } : { pageSize: 20, type: 'stable' }) }
+    const invoke = () => route === 'raw' ? h.invoke(body, 'facebook-301-request') : invokeStandard(h, body, 'facebook-301-request')
+    let first
+    await assert.rejects(invoke(), error => {
+      first = error
+      assert.equal(error.status, 502)
+      assert.equal(error.code, 'external_platform_rejected')
+      assert.equal(error.details.reasonCode, 'upstream_collection_failed')
+      assert.equal(error.details.retryable, false)
+      assert.doesNotMatch(JSON.stringify([error.message, error.details]), /private-collector-error|fixture-only-key/)
+      return true
+    })
+    assert.deepEqual(h.calls.map(row => row.provider), ['justone'])
+    assert.equal(h.calls[0].url.searchParams.get('keyword'), query)
+    assert.equal(h.calls[0].url.searchParams.get('startDate'), '2026-10-12')
+    assert.equal(h.calls[0].url.searchParams.get('endDate'), '2026-10-15')
+    assert.equal(h.stores.rapidapi.calls.size, 0)
+    const call = [...h.stores.justone.calls.values()][0]
+    assert.equal(call.businessCode, 301)
+    assert.equal(call.billed, false)
+    assert.equal(call.outcome, 'rejected')
+    assert.equal(h.stores.justone.ingestJobs.length, 0)
+    const usage = h.usage.requests.get(first.details.requestId)
+    assert.equal(usage.status, 'committed')
+    assert.equal(usage.responseStatus, 502)
+    assert.equal(usage.unitsActual, 0)
+    const charge = [...h.usage.customerCharges.values()].find(row => row.usageRequestId === usage.id)
+    assert.equal(charge.status, 'captured', 'observes the existing request-fee policy; does not authorize refunds or a new policy')
+    assert.equal(charge.chargedMinor, 1)
+    h.policy.mode = 'paused'
+    await assert.rejects(invoke(), error => {
+      assert.equal(error.message, first.message)
+      assert.deepEqual(error.details, first.details)
+      return true
+    })
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.usage.customerCharges.size, 1)
   }
 })
 
@@ -690,6 +801,11 @@ test('PostgreSQL quota serializes replicas, recovers from reset/probes and audit
     const sql = await readFile(new URL('../../migrations/143_facebook_platform_search.sql', import.meta.url), 'utf8')
     await pool.query('CREATE SCHEMA IF NOT EXISTS control')
     await pool.query(sql.slice(sql.indexOf('CREATE TABLE'), sql.indexOf('ALTER TABLE')))
+    for (const [column, migration] of [['billing_cycle_day', '149_facebook_billing_window.sql'], ['waiters', '151_facebook_rapid_admission_queue.sql']]) {
+      const table = column === 'waiters' ? 'facebook_rapid_quota' : 'platform_search_policies'
+      const present = await pool.query(`SELECT 1 FROM information_schema.columns WHERE table_schema='control' AND table_name=$1 AND column_name=$2`, [table, column])
+      if (!present.rowCount) await pool.query(await readFile(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'))
+    }
     const store = new PlatformSearchPolicyStore(pool)
     const results = await Promise.all(Array.from({ length: 20 }, () => store.admitRapid()))
     assert.equal(results.filter(r => r.allowed).length, 1)

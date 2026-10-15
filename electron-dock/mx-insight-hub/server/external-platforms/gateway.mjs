@@ -41,6 +41,7 @@ import { normalizeHubDataSearch, projectDataSearch, projectTwitterSearchFillDeli
 import { runTwitterSearchFill } from './twitter-search-fill.mjs'
 import { contentSearchPlan } from './content-search.mjs'
 import { runFacebookSearchFill } from './facebook-search-fill.mjs'
+import { waitForFacebookRapidAdmission } from './facebook-rapid-admission.mjs'
 import { normalizeFacebookSearch, projectFacebookSearch, facebookJustOneArchives, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY } from '../contracts/facebook-search.mjs'
 
 const AUTHORIZATION_PLATFORM = 'ecommerce'
@@ -388,12 +389,16 @@ export class ExternalPlatformGateway {
     const policy = { ...DEFAULT_CONCURRENCY_QUEUE, ...this.config.concurrencyQueue }
     const deadline = Math.min(this.admissionClock() + policy.maxWaitMs,
       new Date(expiresAt).getTime() - (this.config.timeoutMs || 30000) - 5000)
+    const ownedSearchDelivery = this.providerKey === 'rapidapi' && ['twitter', 'facebook'].includes(platform) && lease?.ownedDeliveryLease === true
     let entered = false
     try {
-      // A queued HTTP request holds only its original customer reservation.
-      // Reclaim the shared dispatch lease after waiting so new unknown-outcome
-      // evidence remains authoritative, without extending the reservation.
-      await this.platformStore.releaseDispatchLease(lease)
+      // Ordinary queued requests release dispatch arbitration while keeping
+      // their original customer reservation. Reclaim it after waiting so new
+      // unknown-outcome evidence remains authoritative, without extending it.
+      // Standard social searches also own finalization. Keep their arbitration
+      // during first-acquisition waiting; the owned claim below still checks
+      // new unknown/quarantine evidence without extending that lease.
+      if (!ownedSearchDelivery) await this.platformStore.releaseDispatchLease(lease)
       await this.concurrencyQueue.enter({ tryEnter: () => this.#enter(context), deadline,
         maxPending: policy.maxPending, signal })
       entered = true
@@ -424,6 +429,13 @@ export class ExternalPlatformGateway {
         maxConsumerConcurrency: this.config.maxConsumerConcurrency,
         queueDepth: this.concurrencyQueue.entries.length, maxPending: policy.maxPending,
       }) : cause
+      if (ownedSearchDelivery && error.code === 'external_platform_busy') {
+        const causeText = error.details?.reason === 'concurrency_queue_full' ? '等待队列已满'
+          : error.details?.reason === 'concurrency_queue_timeout' ? '等待并发名额超时' : '并发名额暂不可用'
+        error.status = 503
+        error.message = `Hub ${platform === 'twitter' ? 'Twitter' : 'Facebook'} 数据采集${causeText}，本次尚未发起采集，请稍后重试。`
+        error.details = { ...error.details, admissionMode: 'bounded_wait', maxWaitMs: policy.maxWaitMs }
+      }
       await this.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable',
         status: error.status || 503, errorCode: error.code || 'external_platform_unavailable' })
       throw error
@@ -796,7 +808,7 @@ export class ExternalPlatformGateway {
             if (request.pageSize > maxPageSize) throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
             return current
           },
-          enterCapacity: options => this.#enterOrQueue(context, { ...options, delivery, platform: 'twitter', canWait: false }),
+          enterCapacity: options => this.#enterOrQueue(context, { ...options, delivery, platform: 'twitter' }),
           leaveCapacity: () => this.#leave(context.consumer.id), providerCostControl,
           projectDelivery: input => projectTwitterSearchFillDelivery(input, request),
         })
@@ -898,7 +910,7 @@ export class ExternalPlatformGateway {
         return runFacebookSearchFill({ gateway: this, gateways, context, delivery, request, policyStore, deadlineAt, signal,
           resolveCredential: provider => gateways[provider].#resolvedCredential(),
           enterCapacity: (provider, options) => gateways[provider].#enterOrQueue(context,
-            { ...options, delivery, platform: 'facebook', canWait: false }),
+            { ...options, delivery, platform: 'facebook' }),
           leaveCapacity: provider => gateways[provider].#leave(context.consumer.id),
           revalidateIdentity: async () => {
             const current = await this.#revalidateWaitingIdentity(context, 'facebook', {
@@ -931,10 +943,12 @@ export class ExternalPlatformGateway {
         const policy = await policyStore.facebook()
         return policy.mode === 'auto' && !request.provider ? { result: await next(reserved) } : null
       } : null,
-      admit: rapid ? async reserved => {
-        admission = await policyStore.admitRapid()
+      admit: rapid ? async (reserved, { revalidate, delivery, deadlineAt }) => {
+        admission = await waitForFacebookRapidAdmission({ policyStore, requestId: delivery.usageRequestId,
+          deadlineAt, timeoutMs: this.config.timeoutMs || 30000, signal, revalidate, logger: this.logger })
         if (admission.allowed) return null
         const policy = await policyStore.facebook()
+        if (policy.mode === 'paused') throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
         if (policy.mode === 'auto') return { result: await next(reserved) }
         throw new AppError(503, 'facebook_search_capacity_unavailable', 'Search capacity is temporarily unavailable')
       } : null,
@@ -1509,47 +1523,49 @@ export class ExternalPlatformGateway {
         throw new AppError(409, errorCode, 'An equal external provider dispatch is already in progress')
       }
 
+      const revalidateCapacity = async () => {
+        waitedForCapacity = true
+        context = await this.#revalidateWaitingIdentity(context, authorizationPlatform, plan)
+        const currentPolicy = { ...this.defaultPolicy, ...await this.usageStore.getPolicy(context.consumer.id, authorizationPlatform) }
+        const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(context.apiKey.id, authorizationPlatform)
+        policy = { ...currentPolicy, maxPageSize: entitlement
+          ? Math.min(currentPolicy.maxPageSize, entitlement.maxPageSize) : currentPolicy.maxPageSize }
+        try { plan.normalize({ body, policy, codec }) }
+        catch (error) {
+          if (error instanceof JustOneContractError || error instanceof SocialAccountContractError) throw new AppError(400, error.code, error.message)
+          throw error
+        }
+        const shared = await this.platformStore.providerState(this.providerKey)
+        const latest = this.providerKey === 'tikhub' ? internalCircuitState(this.usageStore, context, shared) : shared
+        const contract = await this.platformStore.contractCircuitState?.(this.providerKey, normalized.marketplace ?? null)
+        if ([latest, contract].some(value => value?.circuitOpenUntil && Date.parse(value.circuitOpenUntil) > this.admissionClock())) {
+          if (this.providerKey === 'justone' && authorizationPlatform === 'ecommerce'
+            && latest?.circuitOpenUntil && Date.parse(latest.circuitOpenUntil) > this.admissionClock()) {
+            const capacity = ecommerceCapacityError(latest.lastErrorCode, {
+              code: 'external_platform_circuit_open', state: latest, config: this.config,
+            })
+            if (capacity) throw capacity
+          }
+          throw circuitOpenError(contract?.circuitOpenUntil && Date.parse(contract.circuitOpenUntil) > this.admissionClock() ? contract : latest,
+            this.config, 'External data is temporarily unavailable')
+        }
+        resolvedCredential = await this.#resolvedCredential()
+        if (!resolvedCredential.ready) throw new AppError(503, 'external_platform_not_configured', 'External data configuration changed while waiting')
+        operationControl = await this.operationControlStore?.authorizeDispatch(this.providerKey, plan.operation, {
+          consumerId: context.consumer.id, config: this.config,
+          credentialConfigured: resolvedCredential.ready, credentialRevision: resolvedCredential.revision,
+        })
+        await plan.revalidateDispatch?.()
+        return context
+      }
+
       // Only a dispatch-lease owner consumes scarce provider concurrency.
       // Equal requests suppressed by the shared lease must not crowd out a
       // different customer query before they return their 409/cache result.
       if (!await this.#enterOrQueue(context, { lease: dispatchLease, delivery,
         expiresAt: reservation.request.leaseExpiresAt, signal, platform: authorizationPlatform,
         canWait: !(allowStoredFallback && snapshot),
-        revalidate: async () => {
-          waitedForCapacity = true
-          context = await this.#revalidateWaitingIdentity(context, authorizationPlatform, plan)
-          const currentPolicy = { ...this.defaultPolicy, ...await this.usageStore.getPolicy(context.consumer.id, authorizationPlatform) }
-          const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(context.apiKey.id, authorizationPlatform)
-          policy = { ...currentPolicy, maxPageSize: entitlement
-            ? Math.min(currentPolicy.maxPageSize, entitlement.maxPageSize) : currentPolicy.maxPageSize }
-          try { plan.normalize({ body, policy, codec }) }
-          catch (error) {
-            if (error instanceof JustOneContractError || error instanceof SocialAccountContractError) throw new AppError(400, error.code, error.message)
-            throw error
-          }
-          const shared = await this.platformStore.providerState(this.providerKey)
-          const latest = this.providerKey === 'tikhub' ? internalCircuitState(this.usageStore, context, shared) : shared
-          const contract = await this.platformStore.contractCircuitState?.(this.providerKey, normalized.marketplace ?? null)
-          if ([latest, contract].some(value => value?.circuitOpenUntil && Date.parse(value.circuitOpenUntil) > this.admissionClock())) {
-            if (this.providerKey === 'justone' && authorizationPlatform === 'ecommerce'
-              && latest?.circuitOpenUntil && Date.parse(latest.circuitOpenUntil) > this.admissionClock()) {
-              const capacity = ecommerceCapacityError(latest.lastErrorCode, {
-                code: 'external_platform_circuit_open', state: latest, config: this.config,
-              })
-              if (capacity) throw capacity
-            }
-            throw circuitOpenError(contract?.circuitOpenUntil && Date.parse(contract.circuitOpenUntil) > this.admissionClock() ? contract : latest,
-              this.config, 'External data is temporarily unavailable')
-          }
-          resolvedCredential = await this.#resolvedCredential()
-          if (!resolvedCredential.ready) throw new AppError(503, 'external_platform_not_configured', 'External data configuration changed while waiting')
-          operationControl = await this.operationControlStore?.authorizeDispatch(this.providerKey, plan.operation, {
-            consumerId: context.consumer.id, config: this.config,
-            credentialConfigured: resolvedCredential.ready, credentialRevision: resolvedCredential.revision,
-          })
-          await plan.revalidateDispatch?.()
-          return context
-        },
+        revalidate: revalidateCapacity
       })) {
         if (allowStoredFallback && snapshot) {
           const responseBody = deliveryBody(snapshot.responseBody, {
@@ -1669,8 +1685,28 @@ export class ExternalPlatformGateway {
       }
 
       if (plan.admit) {
-        const routed = await plan.admit(reservation)
-        if (routed) { ownsReservation = false; return routed.result }
+        try {
+          const routed = await plan.admit(reservation, { revalidate: async () => {
+            await revalidateCapacity()
+            const latestCost = providerCostControl(operationControl?.billing ? { billing: operationControl.billing } : this.config,
+              normalized.endpointKey, plan.allowZeroCost === true)
+            if (JSON.stringify(latestCost) !== JSON.stringify(costControl)) throw new AppError(503,
+              'external_platform_cost_control_unavailable', 'Procurement controls changed while waiting')
+            const claim = await this.platformStore.acquireDispatchLease({ ...dispatchLease, ownedDeliveryLease: true })
+            if (claim !== true && claim?.kind !== 'acquired') throw new AppError(409,
+              claim?.reason === 'unknown' ? 'request_outcome_unknown' : claim?.reason === 'succeeded_unusable'
+                ? 'external_platform_response_unusable' : 'request_in_progress', 'Dispatch protection changed while waiting')
+          }, delivery,
+            deadlineAt: new Date(reservation.request.leaseExpiresAt).getTime() })
+          if (routed) { ownsReservation = false; return routed.result }
+        } catch (error) {
+          if (error.details?.stage === 'facebook_quota_admission') {
+            await this.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable',
+              status: error.status || 503, errorCode: error.code || 'facebook_quota_state_unavailable' })
+            ownsReservation = false
+          }
+          throw error
+        }
       }
       if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
       call = await this.platformStore.beginProviderCall({

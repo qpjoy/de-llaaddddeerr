@@ -67,6 +67,21 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
       retainLease=true
     }
   }
+  const authorizeAcquisition=async()=>{
+    context=await revalidateIdentity()
+    if(await store.twitterFillUnknownFor(delivery)) throw new AppError(409,'request_outcome_unknown','A previous equal delivery has an unknown outcome')
+    const state=await store.providerState('rapidapi')
+    const contract=await store.contractCircuitState?.('rapidapi','twitter')
+    if([state,contract].some(row=>row?.circuitOpenUntil && Date.parse(row.circuitOpenUntil)>clock())) {
+      throw new AppError(503,'external_platform_circuit_open','External data is temporarily unavailable')
+    }
+    const credential=await resolveCredential()
+    if(!credential.ready) throw new AppError(503,'external_platform_not_configured','External data is unavailable')
+    const control=await gateway.operationControlStore.authorizeDispatch('rapidapi',delivery.operation,
+      { consumerId:context.consumer.id,config:gateway.config,credentialConfigured:true,credentialRevision:credential.revision })
+    const cost=providerCostControl(control?.billing?{billing:control.billing}:gateway.config,request.providerRequest.endpointKey)
+    return {credential,control,cost}
+  }
   const consume=(publicBody,source,inputCursor,offset=0,expectedHash=null)=>{
     const full=publicBody.data.items
     if (!Array.isArray(full) || full.length>10000) throw unavailable()
@@ -124,17 +139,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
       if(!enoughTime()) { stopReason='deadline'; break }
       try {
         if(signal?.aborted) throw new AppError(499,'request_cancelled','Request cancelled before dispatch')
-        context=await revalidateIdentity()
-        const state=await store.providerState('rapidapi')
-        const contract=await store.contractCircuitState?.('rapidapi','twitter')
-        if([state,contract].some(row=>row?.circuitOpenUntil && Date.parse(row.circuitOpenUntil)>clock())) {
-          throw new AppError(503,'external_platform_circuit_open','External data is temporarily unavailable')
-        }
-        const credential=await resolveCredential()
-        if(!credential.ready) throw new AppError(503,'external_platform_not_configured','External data is unavailable')
-        const control=await gateway.operationControlStore.authorizeDispatch('rapidapi',delivery.operation,
-          { consumerId:context.consumer.id,config:gateway.config,credentialConfigured:true,credentialRevision:credential.revision })
-        const cost=providerCostControl(control?.billing?{billing:control.billing}:gateway.config,request.providerRequest.endpointKey)
+        let acquisition=await authorizeAcquisition()
         const lease=await store.acquireDispatchLease({...dispatchLease,ownedDeliveryLease:true})
         if(lease!==true && lease?.kind!=='acquired') {
           const code=lease?.reason==='unknown'?'request_outcome_unknown':lease?.reason==='succeeded_unusable'
@@ -143,11 +148,15 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         }
         if(await store.twitterFillUnknownFor(delivery)) throw new AppError(409,'request_outcome_unknown','A previous equal delivery has an unknown outcome')
         if(!entered) {
-          if(!await enterCapacity({dispatchLease,expiresAt:new Date(deadlineAt),signal})) {
+          if(!await enterCapacity({lease:{...dispatchLease,ownedDeliveryLease:true},expiresAt:new Date(deadlineAt),signal,
+            canWait:!sources.length,revalidate:async()=>{
+              acquisition=await authorizeAcquisition()
+              return context
+            }})) {
             const active=gateway.active, consumerActive=gateway.activeByConsumer.get(context.consumer.id) || 0
             const reason=active>=gateway.config.maxConcurrency ? 'hub_concurrency_exhausted'
               : consumerActive>=gateway.config.maxConsumerConcurrency ? 'consumer_concurrency_exhausted' : 'concurrency_queue_pending'
-            await store.rejectWithoutDispatch({delivery,sourceMode:'unavailable',status:503,errorCode:'external_platform_busy'})
+            if(!sources.length) await store.rejectWithoutDispatch({delivery,sourceMode:'unavailable',status:503,errorCode:'external_platform_busy'})
             throw new AppError(503,'external_platform_busy','Hub Twitter 数据采集并发名额暂不可用，本次尚未发起采集，请稍后重试。',{
               platform:'twitter',layer:'hub',stage:'concurrency_admission',reason,upstreamDispatched:false,
               retryAfterMs:1000,admissionMode:'immediate',activeConcurrency:active,maxConcurrency:gateway.config.maxConcurrency,
@@ -157,6 +166,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
           }
           entered=true
         }
+        const {credential,control,cost}=acquisition
         currentCost=await store.reserveProviderCostWorkflow({ ...delivery,apiKeyId:context.apiKey.id,costControls:[cost] })
         const rate=await store.acquireProviderRateLimit({ limit:gateway.config.maxRequestsPerMinute ?? 90,windowMs:60000 })
         if(!rate.allowed) throw new AppError(429,'external_platform_rate_limited','External data rate limit is exhausted')
