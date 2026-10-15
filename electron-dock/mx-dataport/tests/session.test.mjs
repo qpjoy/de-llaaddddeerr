@@ -61,7 +61,10 @@ test("customer gateway errors do not expire authentication and retry reads the a
     memberId: "member-fixture",
     displayName: "邀请用户",
     tenantIds: ["space-fixture"],
-    memberships: [{ tenantId: "space-fixture", role: "viewer" }],
+    memberships: [{
+      tenantId: "space-fixture", role: "viewer",
+      dataport: { permissions: ["history.read"], ownerChallengeRequired: false },
+    }],
     platformAdmin: false,
   };
   const read = async (path) => {
@@ -92,6 +95,51 @@ test("malformed successful responses do not fabricate a login or customer permis
   assert.equal(result.active, true);
   assert.equal(result.customer, null);
   assert.ok(result.issue);
+});
+
+test("old Hub owner sessions are service failures, retain diagnostics and recover after Hub is updated", async () => {
+  const owner = {
+    tenantIds: ["space-fixture"],
+    memberships: [{ tenantId: "space-fixture", role: "owner", capabilities: ["membership.write", "usage.read"] }],
+  };
+  const read = async path => path === "/auth/sso/session"
+    ? { active: true, csrf: "same-csrf" }
+    : { data: owner, requestId: "hub-request" };
+  const old = await loadHarborSession(read);
+  assert.equal(old.active, true);
+  assert.equal(old.csrf, "same-csrf");
+  assert.equal(old.customer, null);
+  assert.equal(old.issue.code, "customer_permissions_unavailable");
+  assert.equal(old.issue.requestId, "hub-request");
+  owner.memberships[0].dataport = { permissions: [], ownerChallengeRequired: true };
+  const pending = await loadHarborSession(read);
+  assert.equal(pending.customer.memberships[0].dataport.ownerChallengeRequired, true);
+  assert.equal(pending.issue, null);
+  owner.memberships[0].dataport = { permissions: ["history.read", "members.read"], ownerChallengeRequired: false };
+  const ready = await loadHarborSession(read);
+  assert.deepEqual(ready.customer, owner);
+  assert.equal(ready.issue, null);
+});
+
+test("incomplete permission contracts fail closed while real empty permissions and join-only sessions remain valid", async () => {
+  for (const dataport of [null, {}, { permissions: [] }, { permissions: [null], ownerChallengeRequired: false }, { permissions: ["history.read"], ownerChallengeRequired: "false" }]) {
+    const result = await loadHarborSession(async path => path === "/auth/sso/session"
+      ? { active: true }
+      : { data: { tenantIds: ["space"], memberships: [{ tenantId: "space", role: "owner", dataport }] } });
+    assert.equal(result.active, true);
+    assert.equal(result.customer, null);
+    assert.equal(result.issue.code, "customer_permissions_unavailable");
+  }
+  const empty = { tenantIds: ["space"], memberships: [{ tenantId: "space", role: "viewer", dataport: { permissions: [], ownerChallengeRequired: false } }] };
+  const joinOnly = { tenantIds: [], memberships: [] };
+  for (const customer of [empty, joinOnly]) {
+    const result = await loadHarborSession(async path => path === "/auth/sso/session" ? { active: true } : { data: customer });
+    assert.deepEqual(result.customer, customer);
+    assert.equal(result.issue, null);
+  }
+  const missing = await loadHarborSession(async path => path === "/auth/sso/session" ? { active: true } : { data: { tenantIds: ["space"], memberships: [] } });
+  assert.equal(missing.customer, null);
+  assert.equal(missing.issue.code, "customer_permissions_unavailable");
 });
 
 test("request errors retain only diagnostic identifiers and handle HTML gateway failures", async (t) => {

@@ -1,5 +1,21 @@
 # DataPort 发布与域名迁移
 
+## 登录成功但所有导航消失（2026-10-15）
+
+若 `/bff/v1/session` 返回有效的 `role: "owner"` 和旧 `capabilities`，但 `memberships[]` 没有 `dataport` 对象，说明当前 Hub 会话接口尚未提供新版数港权限协议。此时重复授予 owner 无法补齐接口；应核对数港的 Hub 上游、全部 Hub 副本版本，并部署包含 migration `149_dataport_enterprise.sql` 的 Hub，再发布数港。迁移由 Hub 原部署流程执行，不改写已应用迁移。
+
+```bash
+# 服务器已同步本轮 Auth/Hub/DataPort 代码，并完成账号服务配置后执行
+cd ../mx-insight-hub
+MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 \
+  bash scripts/manage.sh ops internal-production deploy
+bash scripts/manage.sh ops internal-production status
+```
+
+新版会话中的每个企业须返回 `dataport.permissions` 字符串数组及 `dataport.ownerChallengeRequired` 布尔值。未通过专属邀请码校验的超管应显示验证表单，而不是“当前角色没有权限”。需在原 Hub Admin Token 通道为该企业超管配置专属邀请码，具体接口见 [企业权限上线配置](docs/alignment-and-enterprise.md)。不要以旧 capabilities 或 role 在浏览器推导完整新权限来绕过超管验证。
+
+数港现已校验新会话协议：缺字段、权限结构错误或租户无法匹配成员时保留登录态，显示“企业权限服务尚未就绪”，诊断码为 `customer_permissions_unavailable`，不加载私有业务或消息。后台会话恢复时同步当前企业选择，避免已取得新权限仍匹配空企业而误报无权访问。真实的空权限仍按无权访问处理；无企业成员的账号仍可走邀请确认。此提示修复需要另行提交、同步并发布数港；不会自动更新线上 Hub 或配置邀请码。
+
 ## 构建镜像拉取 EOF 与代理端口切换（2026-10-15）
 
 若构建停在 `docker.io/docker/dockerfile:1.7` 或基础镜像元数据请求并返回 `EOF`，说明构建器访问 Docker Hub 的链路失败，尚未进入数港编译和数据库迁移。先在部署服务器检查实际 HTTP 代理：
