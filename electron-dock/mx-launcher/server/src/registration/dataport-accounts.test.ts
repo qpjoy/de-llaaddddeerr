@@ -13,7 +13,6 @@ import {
   DataportAccountsController,
 } from "./dataport-accounts.js";
 import { RegistrationRepository } from "./repository.js";
-import { builtinUserCenterRoles } from "../store/domain.js";
 import { canAccessIdentityApplication } from "../identity/application-access.js";
 
 const databaseUrl = process.env.MX_SSO_TEST_DATABASE_URL;
@@ -72,15 +71,6 @@ test(
       assert.deepEqual(user?.appAccess.allowedAppIds, ["mx-harbor"]);
       for (const app of ["mx-h2i", "luopan"])
         assert.equal(canAccessIdentityApplication(user, app), false);
-      const statusCommand = {operation:"platform-admin-status" as const,requestId:randomUUID(),tenantId:input.tenantId,actor:input.actor,userId:created.userId};
-      assert.equal((await repo.execute(statusCommand)).active,false);
-      const role=builtinUserCenterRoles().find(r=>r.roleId==="mx-dataport-admin")!;
-      await db.query("INSERT INTO mx_platform_records(environment,kind,id,site_id,data) VALUES($1,'iam-role',$2,'test',$3)",[environment,role.roleId,role]);
-      await db.query("UPDATE mx_platform_records SET data=jsonb_set(data,'{roleIds}',$3::jsonb) WHERE environment=$1 AND kind='iam-user' AND id=$2",[environment,created.userId,JSON.stringify(["mx-user","mx-dataport-admin"])]);
-      assert.equal((await repo.execute(statusCommand)).active,true);
-      assert.equal((await repo.execute(statusCommand)).issuer,`mx-user-center:${environment}`);
-      await db.query("UPDATE mx_platform_records SET data=jsonb_set(data,'{roleIds}',$3::jsonb) WHERE environment=$1 AND kind='iam-user' AND id=$2",[environment,created.userId,JSON.stringify(["mx-user"])]);
-      assert.equal((await repo.execute(statusCommand)).active,false,"same request ID cannot cache an administrator grant after revocation");
       const plain = await repo.execute({
         operation: "initial-password",
         requestId: randomUUID(),

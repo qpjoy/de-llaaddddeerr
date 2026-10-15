@@ -39,12 +39,3 @@ test('ambiguous batch outcomes stop dispatch and explicit continuation never ret
   calls=0;await runBatchRows(rows(),async()=>{calls++;return {status:429,error:{code:'quota_exhausted'}}},()=>false,()=>{});assert.equal(calls,1)
 })
 test('reference advice preserves unrated and low-risk uncertainty',()=>{assert.match(riskAdvice(null),/未提供/);assert.match(riskAdvice('low'),/不代表绝对安全/);assert.match(riskAdvice('高风险'),/核验/);})
-
-test('platform page requires the dedicated verified flag and never unlocks customer business pages',()=>{
-  for(const candidate of [null,{platformAdmin:true},{displayName:'taku'},session(['members.create','roles.manage'])])assert.equal(canOpenPage(candidate,'','platform'),false);
-  const platform={dataportPlatformAdmin:true,memberships:[]};
-  assert.equal(canOpenPage(platform,'','platform'),true);
-  for(const page of ['intelligence','team','keys','orders'])assert.equal(canOpenPage(platform,tenant,page),false);
-  const pending=session(['billing.read']);pending.dataportPlatformAdmin=true;pending.memberships[0].dataport.ownerChallengeRequired=true;
-  assert.equal(canOpenPage(pending,tenant,'platform'),true);assert.equal(canOpenPage(pending,tenant,'orders'),false);
-});

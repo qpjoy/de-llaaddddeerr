@@ -117,17 +117,3 @@ test('public catalog is a gateway-authenticated projection on the admin listener
  }
  assert.deepEqual(calls,[{catalogOnly:true},{catalogOnly:true}])
 })
-
-test('DataPort platform routes require a freshly resolved explicit grant before storage and never expose generic Hub administration',async t=>{
- const store=new MemoryStore(),service=new HubService({store,adapter:{},apiKeyPepper:'fixture-long-pepper-for-harbor'});
- let allowed=false;
- const portal={resolve:async()=>({kind:'launcher-user',memberId:randomUUID(),displayName:'taku',platformAdmin:true,dataportPlatformAdmin:allowed,tenantIds:[],memberships:[]})};
- const server=createServer(createApp({store,service,adapter:{},listenerMode:'admin',harborPortal:portal}));await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>{server.close(r);server.closeAllConnections()}));
- const base=`http://127.0.0.1:${server.address().port}/internal/v1/portal`;
- const read=()=>fetch(base+'/platform/enterprises',{headers:{'x-mx-dataport-admin':'true'}});
- assert.equal((await read()).status,403);
- allowed=true;assert.equal((await read()).status,503,'authorized platform calls still require storage');
- const session=await (await fetch(base+'/session')).json();assert.equal(session.data.dataportPlatformAdmin,true);assert.equal(session.data.platformAdmin,false);
- assert.equal((await fetch(base+'/runtime')).status,404);
- allowed=false;assert.equal((await read()).status,403);assert.equal((await (await fetch(base+'/session')).json()).data.dataportPlatformAdmin,false);
-});

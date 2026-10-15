@@ -499,16 +499,3 @@ test("public catalog forwards only server credentials and cannot bypass customer
   assert.notEqual((await fetch(base+"/bff/v1/catalog",{method:"POST"})).status,200);
   assert.equal(calls.length,1);
 });
-
-test("BFF exposes only the dedicated platform enrollment routes with the existing origin and CSRF protections",async t=>{
-  const id="11111111-1111-4111-8111-111111111111", origin="https://dataport.example.test";let calls=0;
-  const base=await fixture(t,{config:{sso:{origin},upstream:"http://hub.internal",gatewayToken:"fixture-server-token"},sso:{sessionFor:async()=>({csrf:"fixture-csrf",subject:"fixture",accessToken:"server-only"}),verifySession:async()=>true,checkOrigin:req=>{if(req.headers.origin!==origin)throw Object.assign(Error("origin"),{status:403});}},fetch:async(url,options)=>{calls++;assert.equal(options.headers['x-mx-harbor-gateway'],"fixture-server-token");assert.equal(options.headers['x-mx-dataport-admin'],undefined);return new Response(JSON.stringify({data:{created:true}}));}});
-  const path=`/platform/enterprises/${id}/owners`;
-  assert.equal(permittedCustomerRoute('POST',path),true);
-  assert.equal(permittedCustomerRoute('GET',path),false);
-  assert.equal(permittedCustomerRoute('POST',`/platform/enterprises/${id}/owners/${id}/code`),true);
-  assert.equal(permittedCustomerRoute('POST','/platform/admin-token'),false);
-  const post=headers=>fetch(base+'/bff/v1'+path,{method:'POST',headers:{'content-type':'application/json',...headers},body:'{}'});
-  assert.equal((await post({origin})).status,403);assert.equal(calls,0);
-  assert.equal((await post({origin,'x-mx-csrf':'fixture-csrf','x-mx-dataport-admin':'true'})).status,200);assert.equal(calls,1);
-});

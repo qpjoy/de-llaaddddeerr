@@ -163,7 +163,7 @@ export class DataportStore {
       problem(400, "invalid_owner_code", "邀请码须为 12–128 位。");
     return withPgTransaction(this.pool, async (db) => {
       const owner = await db.query(
-        "SELECT 1 FROM iam.tenant_memberships tm JOIN tenants t ON t.id=tm.tenant_id JOIN iam.members m ON m.id=tm.member_id WHERE tm.tenant_id=$1 AND tm.member_id=$2 AND tm.role='owner' AND tm.status='active' AND t.status='active' AND m.status='active' FOR UPDATE OF tm",
+        "SELECT 1 FROM iam.tenant_memberships WHERE tenant_id=$1 AND member_id=$2 AND role='owner' AND status='active' FOR UPDATE",
         [tenantId, memberId],
       );
       if (!owner.rowCount) problem(404, "owner_not_found", "企业超管不存在。");
@@ -178,7 +178,7 @@ export class DataportStore {
       );
       await this.event(
         tenantId,
-        uuid(actor) ? actor : null,
+        null,
         "owner.code.configured",
         memberId,
         200,
@@ -744,8 +744,7 @@ export class DataportStore {
       return { memberId, account: identity.account };
     });
   }
-  async bindManaged(db, tenantId, identity, audience, roleId, actor, managed, platformOwner = false) {
-    if (roleId === "owner" && !platformOwner) problem(403, "platform_owner_required", "仅平台管理员可添加企业超管。");
+  async bindManaged(db, tenantId, identity, audience, roleId, actor, managed) {
     await db.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
       identityLock(identity.issuer, identity.subject, audience),
     ]);
@@ -766,19 +765,15 @@ export class DataportStore {
         [randomUUID(), memberId, identity.issuer, identity.subject, audience],
       );
     }
-    if (!(await db.query("SELECT 1 FROM iam.members WHERE id=$1 AND status='active'",[memberId])).rowCount)
-      problem(409, "member_inactive", "成员已停用，不能添加到企业。");
     // Never silently reactivate or replace an existing enterprise membership.
     const existing = await db.query(
-      "SELECT role,status FROM iam.tenant_memberships WHERE tenant_id=$1 AND member_id=$2",
+      "SELECT 1 FROM iam.tenant_memberships WHERE tenant_id=$1 AND member_id=$2",
       [tenantId, memberId],
     );
-    if (platformOwner && existing.rowCount && (existing.rows[0].role !== "owner" || existing.rows[0].status !== "active"))
-      problem(409, "membership_exists", "此账号已有企业成员记录，请先由管理员核实，不能覆盖原角色或恢复停用成员。");
     if (!existing.rowCount) {
       await db.query(
-        "INSERT INTO iam.tenant_memberships(id,tenant_id,member_id,role,granted_by) VALUES($1,$2,$3,$4,$5)",
-        [randomUUID(), tenantId, memberId, platformOwner ? "owner" : "viewer", actor],
+        "INSERT INTO iam.tenant_memberships(id,tenant_id,member_id,role,granted_by) VALUES($1,$2,$3,'viewer',$4)",
+        [randomUUID(), tenantId, memberId, actor],
       );
       await db.query(
         "INSERT INTO dataport.member_roles(tenant_id,member_id,role_id) VALUES($1,$2,$3)",
@@ -791,7 +786,7 @@ export class DataportStore {
     );
     return memberId;
   }
-  async join(principal, token, confirm, audience, accounts) {
+  async join(principal, token, confirm, audience) {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token))
       problem(404, "join_not_found", "邀请不存在。");
     return withPgTransaction(this.pool, async (db) => {
@@ -813,13 +808,6 @@ export class DataportStore {
       await db.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
         `dataport-members:${join.tenant_id}`,
       ]);
-      if (join.platform_authorizer) {
-        const authorizer = join.platform_authorizer;
-        const active = (await db.query("SELECT 1 FROM iam.members WHERE id=$1 AND status='active'",[join.requested_by])).rowCount;
-        const tenantActive = (await db.query("SELECT 1 FROM tenants WHERE id=$1 AND status='active'",[join.tenant_id])).rowCount;
-        if (join.role_id !== "owner" || !active || !tenantActive || typeof authorizer.subject !== "string" || !authorizer.subject.startsWith("user:") || !accounts || !await accounts.isPlatformAdmin(authorizer.subject.slice(5),authorizer.issuer))
-          problem(410, "join_revoked", "平台邀请已撤销，请联系数港平台管理员。");
-      } else {
       const creator = (
         await db.query(
           "SELECT tm.role,a.role_id,m.status AS member_status,t.status AS tenant_status FROM iam.tenant_memberships tm JOIN iam.members m ON m.id=tm.member_id JOIN tenants t ON t.id=tm.tenant_id LEFT JOIN dataport.member_roles a ON a.tenant_id=tm.tenant_id AND a.member_id=tm.member_id WHERE tm.tenant_id=$1 AND tm.member_id=$2 AND tm.status='active'",
@@ -842,7 +830,6 @@ export class DataportStore {
         targetRole.permissions.some((p) => !creatorRole.permissions.includes(p))
       )
         problem(410, "join_revoked", "邀请已撤销。");
-      }
       if (!confirm)
         return {
           tenantName: join.name,
@@ -866,7 +853,6 @@ export class DataportStore {
           join.role_id,
           join.requested_by,
           false,
-          !!join.platform_authorizer,
         );
         await db.query(
           "UPDATE dataport.joins SET consumed_by=$2 WHERE digest=$1",

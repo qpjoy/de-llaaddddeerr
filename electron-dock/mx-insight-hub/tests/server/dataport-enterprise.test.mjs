@@ -1,5 +1,4 @@
 import test from "node:test";
-import { DataportPlatform, requireDataportPlatformAdmin, platformRouteAllowed } from "../../server/portal/dataport-platform.mjs";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFile, readdir, mkdtemp, writeFile, rm } from "node:fs/promises";
@@ -39,7 +38,7 @@ async function fixture(t) {
   });
   const dir = new URL("../../migrations/", import.meta.url),
     files = await readdir(dir);
-  for (const prefix of ["001_", "007_", "149_", "151_dataport_"])
+  for (const prefix of ["001_", "007_", "149_"])
     await pool.query(
       await readFile(
         new URL(
@@ -784,54 +783,3 @@ test(
     });
   },
 );
-
-
-test('platform administration rejects enterprise owners, names, generic Hub admin and wrong routes', async()=>{
-  for(const value of [null,{kind:'admin-token',dataportPlatformAdmin:true},{kind:'launcher-user',platformAdmin:true},{kind:'launcher-user',displayName:'taku'},{kind:'launcher-user',memberships:[{role:'owner'}]}])assert.throws(()=>requireDataportPlatformAdmin(value),{code:'dataport_platform_admin_required'});
-  const id=randomUUID();
-  for(const [method,path] of [['GET','/platform/enterprises'],['POST',`/platform/enterprises/${id}/owners`],['POST',`/platform/enterprises/${id}/owners/${id}/code`]])assert.equal(platformRouteAllowed(method,path),true);
-  for(const [method,path] of [['GET',`/platform/enterprises/${id}/owners`],['DELETE','/platform/enterprises'],['POST','/platform/admin-token'],['POST',`/platform/enterprises/${id}/members`]])assert.equal(platformRouteAllowed(method,path),false);
-});
-
-test('platform enterprise enrollment, owner creation/invitation, code hashing and revocation use isolated PostgreSQL', {skip:!connectionString}, async t=>{
-  const f=await fixture(t), principal={...await f.principal(f.viewer),dataportPlatformAdmin:true};
-  let enabled=true,calls=0;
-  const identities=new Map();
-  const accounts={
-    isPlatformAdmin:async()=>enabled,
-    invitation:(id)=>digest(id).slice(0,43),
-    execute:async input=>{calls++;if(input.operation==='initial-password')return {password:'fixture-secret'};
-      if(!identities.has(input.requestId))identities.set(input.requestId,{userId:`usr_${randomUUID()}`,subject:`user:usr_${randomUUID()}`,issuer:principal.issuer,account:input.account,displayName:input.displayName||input.account});return identities.get(input.requestId);}
-  };
-  const service=new DataportPlatform(f.store,accounts),id=randomUUID();
-  await assert.rejects(service.create(await f.principal(),{commandId:id,name:'New enterprise'}),{code:'dataport_platform_admin_required'});
-  const enterprise=await service.create(principal,{commandId:id,name:'New enterprise'});
-  assert.deepEqual(await service.create(principal,{commandId:id,name:'New enterprise'}),enterprise);
-  await assert.rejects(service.create(principal,{commandId:id,name:'Other enterprise'}),{code:'platform_command_conflict'});
-  const body={commandId:randomUUID(),operation:'create',account:'owner-fixture',displayName:'New owner'};
-  const created=await service.owner(principal,id,body,'mx-insight-hub');
-  assert.deepEqual(await service.owner(principal,id,body,'mx-insight-hub'),created);
-  assert.equal((await f.pool.query('SELECT role FROM iam.tenant_memberships WHERE tenant_id=$1 AND member_id=$2',[id,created.memberId])).rows[0].role,'owner');
-  assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM iam.tenant_memberships WHERE tenant_id=$1',[id])).rows[0].n,1,'the operator does not become a tenant owner');
-  await f.store.configureOwnerCode(id,created.memberId,'fixture-owner-code-platform',principal.memberId);
-  const listed=await service.list(principal,new URLSearchParams('q=New enterprise'));
-  assert.equal(listed.items[0].owners[0].codeConfigured,true);assert.equal(JSON.stringify(listed).includes('fixture-owner-code-platform'),false);
-  const stored=(await f.pool.query('SELECT digest FROM dataport.owner_codes WHERE tenant_id=$1',[id])).rows[0];assert.notEqual(stored.digest,'fixture-owner-code-platform');
-  const audit=(await f.pool.query("SELECT actor,detail FROM dataport.events WHERE tenant_id=$1 AND action='owner.code.configured'",[id])).rows[0];assert.equal(audit.actor,principal.memberId);assert.equal(JSON.stringify(audit).includes('fixture-owner-code-platform'),false);
-  assert.deepEqual(await service.password(principal,id,created.memberId),{password:'fixture-secret'});
-  const invite={commandId:randomUUID(),operation:'invite',account:'existing-fixture'};
-  const invitation=await service.owner(principal,id,invite,'mx-insight-hub'), identity=identities.get(invite.commandId);
-  const invited={...principal,dataportPlatformAdmin:false,subject:identity.subject,issuer:identity.issuer};
-  enabled=false;
-  await assert.rejects(f.store.join(invited,invitation.joinToken,true,'mx-insight-hub',accounts),{code:'join_revoked'});
-  enabled=true;
-  const preview=await f.store.join(invited,invitation.joinToken,false,'mx-insight-hub',accounts);assert.equal(preview.roleId,'owner');
-  assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM iam.tenant_memberships WHERE tenant_id=$1',[id])).rows[0].n,1);
-  const realInvited={...invited,memberId:randomUUID()};
-  await f.pool.query('INSERT INTO iam.members(id,display_name) VALUES($1,$2)',[realInvited.memberId,'Existing user']);
-  await f.pool.query('INSERT INTO iam.external_identity_bindings(id,member_id,issuer,subject,audience) VALUES($1,$2,$3,$4,$5)',[randomUUID(),realInvited.memberId,identity.issuer,identity.subject,'mx-insight-hub']);
-  await f.store.join(realInvited,invitation.joinToken,true,'mx-insight-hub',accounts);
-  assert.equal((await f.pool.query('SELECT role FROM iam.tenant_memberships WHERE tenant_id=$1 AND member_id=$2',[id,realInvited.memberId])).rows[0].role,'owner');
-  enabled=false;
-  await assert.rejects(service.owner(principal,id,{commandId:randomUUID(),operation:'invite',account:'revoked-fixture'},'mx-insight-hub'),{code:'dataport_platform_admin_required'});
-});

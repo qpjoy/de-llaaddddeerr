@@ -12,8 +12,6 @@ const reads = new Set([
   "/payments/return-order",
 ]);
 export function permittedCustomerRoute(method, path) {
-  if (path === "/platform/enterprises") return ["GET","POST"].includes(method);
-  if (/^\/platform\/enterprises\/[0-9a-f-]{36}\/(?:owners|owners\/[0-9a-f-]{36}\/(?:code|initial-password))$/.test(path)) return method === "POST";
   const enterprise = /^\/enterprises\/[0-9a-f-]{36}\/(.*)$/.exec(path);
   if (enterprise)
     return method === "GET"

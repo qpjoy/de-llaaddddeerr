@@ -25,16 +25,13 @@ import type {
   RuntimeConfig,
   UserCenterUser,
   UserCenterUserCredential,
-  UserCenterRole,
 } from "../types.js";
 import {
   createUserCenterUser,
   createUserCenterUserCredential,
   userCredentialSummary,
   userMatchesLogin,
-  createUserPrincipalFromRecord,
 } from "../store/domain.js";
-import { canAccessIdentityApplication } from "../identity/application-access.js";
 import { accountWriteLock, RegistrationError } from "./repository.js";
 
 const hash = (v: string) => createHash("sha256").update(v).digest("hex");
@@ -51,7 +48,7 @@ const fail = (status: number, code: string, message: string): never => {
   throw new RegistrationError(status, code, message);
 };
 export interface DataportAccountCommand {
-  operation: "create" | "invite" | "initial-password" | "platform-admin-status";
+  operation: "create" | "invite" | "initial-password";
   requestId: string;
   tenantId: string;
   actor: string;
@@ -129,7 +126,7 @@ export class DataportAccounts {
   async execute(input: DataportAccountCommand) {
     if (
       !input ||
-      !["create", "invite", "initial-password", "platform-admin-status"].includes(input.operation) ||
+      !["create", "invite", "initial-password"].includes(input.operation) ||
       !/^[0-9a-f-]{36}$/i.test(input.tenantId || "") ||
       !/^[0-9a-f-]{36}$/i.test(input.actor || "") ||
       !/^[0-9a-f-]{36}$/i.test(input.requestId || "") ||
@@ -154,14 +151,6 @@ export class DataportAccounts {
     await this.ready();
     return this.db.transaction(async (db) => {
       await accountWriteLock(db, this.environment);
-      // This check is never cached or recorded as an idempotent command: an
-      // outstanding owner invitation must stop working on role revocation.
-      if (input.operation === "platform-admin-status") {
-        const user = await this.read<UserCenterUser>(db, "iam-user", input.userId || "");
-        const roles: Array<{data: UserCenterRole}> = await db.query(
-          "SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='iam-role'", [this.environment]);
-        return {issuer: `mx-user-center:${this.environment}`, active: user?.status === "active" && canAccessIdentityApplication(user,"mx-harbor") && createUserPrincipalFromRecord(user, roles.map(r => r.data)).scopes.includes("mx:dataport:admin")};
-      }
       const commandId = hash(input.tenantId + ":" + input.requestId),
         fingerprint = hash(
           JSON.stringify([
