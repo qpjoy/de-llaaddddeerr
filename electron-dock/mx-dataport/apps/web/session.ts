@@ -40,13 +40,33 @@ export async function loadHarborSession(
   };
   if (!identity.active) return result;
   try {
-    const { data } = await read("/bff/v1/session");
+    const { data, requestId } = await read("/bff/v1/session");
     if (
       !data ||
       !Array.isArray(data.tenantIds) ||
       !Array.isArray(data.memberships)
     )
       throw Error("空间权限响应无效，请重试。");
+    // Older Hub sessions contain tenant roles/capabilities but no DataPort
+    // permissions. Treat an incomplete deployment as a dependency failure,
+    // never as a denied role or as permission to bypass the owner challenge.
+    if (
+      data.memberships.some((member: any) =>
+        !member ||
+        typeof member.tenantId !== "string" ||
+        !Array.isArray(member.dataport?.permissions) ||
+        !member.dataport.permissions.every((permission: unknown) => typeof permission === "string") ||
+        typeof member.dataport.ownerChallengeRequired !== "boolean"
+      ) ||
+      data.tenantIds.some((tenant: unknown) =>
+        typeof tenant !== "string" ||
+        !data.memberships.some((member: any) => member.tenantId === tenant)
+      )
+    )
+      throw Object.assign(
+        Error("企业权限服务尚未就绪，请联系管理员完成服务更新。"),
+        { code: "customer_permissions_unavailable", requestId },
+      );
     return { ...result, customer: data };
   } catch (error: any) {
     // Only an explicit local/session rejection expires authentication. A Portal

@@ -1,5 +1,27 @@
 # DataPort 发布与域名迁移
 
+## 撤回数港独立平台管理员方案（2026-10-15）
+
+用户已取消本轮新增的 `mx-dataport-admin` 角色、平台管理网页及对应企业/超管管理接口，恢复原统一 MX 登录、Hub 企业权限和 Admin Token 配置专属邀请码的方式。前序登录权限协议校验及会话恢复修复保留，后续提交仍合并到 `pro`。没有按用户名自动授予权限，也未在本地工作中给线上 `taku` 授权。
+
+`151_dataport_platform.sql` 已随之前的 pro 提交发布到版本历史，保留原文以兼容可能已执行的实例；该文件仅建表/加列，不授予管理员角色，回退后的服务不使用这些结构。不要修改校验值、删除线上表或执行数据回滚。如果尚未部署之前的平台管理版本，无需为已撤回功能部署 Auth/Hub；如果已经部署，则需要发布本次回退的 Auth → Hub → DataPort 代码，撤掉新增授权逻辑、入口及接口。已有 Auth 数据中若曾登记或授予该角色，应先核实记录再清理，不能推定代码回退会删除线上角色记录。
+
+## 登录成功但所有导航消失（2026-10-15）
+
+若 `/bff/v1/session` 返回有效的 `role: "owner"` 和旧 `capabilities`，但 `memberships[]` 没有 `dataport` 对象，说明当前 Hub 会话接口尚未提供新版数港权限协议。此时重复授予 owner 无法补齐接口；应核对数港的 Hub 上游、全部 Hub 副本版本，并部署包含 migration `149_dataport_enterprise.sql` 的 Hub，再发布数港。迁移由 Hub 原部署流程执行，不改写已应用迁移。
+
+```bash
+# 服务器已同步本轮 Auth/Hub/DataPort 代码，并完成账号服务配置后执行
+cd ../mx-insight-hub
+MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 \
+  bash scripts/manage.sh ops internal-production deploy
+bash scripts/manage.sh ops internal-production status
+```
+
+新版会话中的每个企业须返回 `dataport.permissions` 字符串数组及 `dataport.ownerChallengeRequired` 布尔值。未通过专属邀请码校验的超管应显示验证表单，而不是“当前角色没有权限”。需在原 Hub Admin Token 通道为该企业超管配置专属邀请码，具体接口见 [企业权限上线配置](docs/alignment-and-enterprise.md)。不要以旧 capabilities 或 role 在浏览器推导完整新权限来绕过超管验证。
+
+数港现已校验新会话协议：缺字段、权限结构错误或租户无法匹配成员时保留登录态，显示“企业权限服务尚未就绪”，诊断码为 `customer_permissions_unavailable`，不加载私有业务或消息。后台会话恢复时同步当前企业选择，避免已取得新权限仍匹配空企业而误报无权访问。真实的空权限仍按无权访问处理；无企业成员的账号仍可走邀请确认。此提示修复需要另行提交、同步并发布数港；不会自动更新线上 Hub 或配置邀请码。
+
 ## 构建镜像拉取 EOF 与代理端口切换（2026-10-15）
 
 若构建停在 `docker.io/docker/dockerfile:1.7` 或基础镜像元数据请求并返回 `EOF`，说明构建器访问 Docker Hub 的链路失败，尚未进入数港编译和数据库迁移。先在部署服务器检查实际 HTTP 代理：

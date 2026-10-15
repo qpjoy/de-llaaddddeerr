@@ -316,7 +316,7 @@ function App() {
     tenant,
     signedIn === true &&
       !!tenant &&
-      !membershipFor(session, tenant)?.dataport?.ownerChallengeRequired,
+      canOpenPage(session, tenant, "messages"),
   );
   const go = (p: string) => {
     location.hash = `/${p}`;
@@ -459,7 +459,16 @@ function App() {
     const refresh = () => {
       if (document.hidden) return;
       void loadHarborSession(request).then((value) => {
-        if (live) setBoot(value);
+        if (live) {
+          setBoot(value);
+          // A recovered service or changed membership must also reconcile the
+          // selected enterprise; otherwise a valid owner session has no match.
+          setTenant((previous) =>
+            value.customer?.tenantIds.includes(previous)
+              ? previous
+              : value.customer?.tenantIds[0] || "",
+          );
+        }
       });
     };
     addEventListener("focus", refresh);
