@@ -131,3 +131,68 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 八项测试通过，包括实际 PGlite 的显式单归档读取、三身份不匹配拒绝、原字节／关联 ID 校验、
 消息投影与脱敏、默认诊断不泄露文本、CLI 无数据库失败路径。该 34 字符原文仍待运营者输出，
 没有发起付费请求、读取通用日志、部署或修改历史、计费与 MX-H2I 登录联网。
+
+## 原始错误文本回执与调查边界
+
+运营者随后返回 `facebook-failure-message.v1`，原请求／call／136B SHA 与上述记录一致，
+`hashVerified=true`、`originalMessageLength=34`、`redacted=false`，实际 root message 为：
+
+```text
+COLLECT FAILED, SEND REQUEST AGAIN
+```
+
+它是供应商泛化的“采集失败，请再次请求”声明，没有在这条文本中给出查询语法、风控、
+Cookie、超时或其他内部细节。不能因其包含重发建议而自动发起付费重试，
+也不能把这条文本解释为独立验证了暂时性故障、当前恢复或免费重试。
+已知 root msg/error 缺失、data=null；诊断并未检查所有未知字段，结论只覆盖已验证位置。
+
+当前最符合证据的链路是：自动策略下 RapidAPI 尚有套餐余量且另一调用正在执行，
+旧版繁忙选路可能将本请求送往 JustOne；JustOne 返回了明确 301，Hub 保存失败并返回 502。
+前半段仍缺当次准入原因／本地快照，不能称为唯一原因已证实；后半段的返回值与原文已核实。
+共享队列修复可消除因这类繁忙而切换的路径，不能据此声称修复 JustOne 内部采集失败。
+
+无需再为同一已验证响应重复导出通用 Hub 日志、响应或进行付费试探。
+更具体的采集原因需要供应商内部记录：接口 `native.j.facebook_post_search_v1`，
+上游 ID `2b74548b0a604b22b885abf6dcddde88`，北京时间 2026-10-15
+09:09:11.333–09:09:12.203（UTC 01:09:11.333–01:09:12.203）。
+本轮仅更新证据记录，未对外发消息、调用供应商、改运行时、部署或改写历史与计费。
+
+## 两渠道处理逻辑与检索语义核查
+
+用户进一步询问是否由 RapidAPI／JustOne 处理逻辑差异引起。
+2026-10-15 只读核对当前 Hub 源码、Night-All 原实现及
+[JustOne 官方 Facebook V1 文档](https://docs.justoneapi.com/zh/api/facebook/post-search-v1)。
+官方仅将 keyword 描述为支持基础文本匹配，没有明确承诺或禁止 OR、括号与引号短语语义。
+因此 `(练习生 OR "idol trainee")` 在两家间的搜索语义等价性尚未验证；
+这是一条值得核查的候选原因，不能仅由通用 301 证明语法不支持。
+官方另列 400 为参数错误；301 仍仅为采集失败。RapidAPI 官方页面未提供可核验的相同语法保证。
+
+本地调用实际 normalizeFacebookSearch + 两家真实适配器、使用替代 fetch 返回合成响应，
+覆盖 raw／standard × 两渠道共四次离线调用，捕获并去除鉴权后核对如下：
+
+| 项目 | RapidAPI | JustOne |
+| --- | --- | --- |
+| 方法／路径 | GET `/search/posts` | GET `/api/facebook/search-post/v1` |
+| 检索式字段 | query | keyword |
+| 检索式值 | 原样 `(练习生 OR "idol trainee")` | 原样 `(练习生 OR "idol trainee")` |
+| 日期字段 | start_date／end_date | startDate／endDate |
+| 显式 params 示例的日期值 | 2026-10-12／2026-10-15 | 2026-10-12／2026-10-15 |
+| 首次请求游标 | 未发送 | 未发送 |
+
+两条路径都使用 URL.searchParams 编码，没有手工删除／翻译 OR、括号或引号；
+供应商不接受 count，Hub 页大小不作为同名供应商参数发送。
+该离线检查证明当前代码的参数映射，不是生产原始请求重放；
+未读取生产 acquisition_request，不能证明当时下游确实把日期放进 params，
+顶层时间被 legacy 归一化忽略的问题同时影响两渠道而非两者参数命名差异。
+Night-All 原 Facebook 实现也分别发送上述字段，没有通用布尔语法翻译。
+
+结果投影在供应商业务成功后执行，本次原归档已是 code301／data=null，
+因此成功结果的字段归一化不能生成本次原始 301；本次首页也没有分页游标混用证据。
+相邻 RapidAPI 成功调用尚未证明属于同一检索式，不能用它们证明该式在 RapidAPI 已成功。
+进一步应向 JustOne 确认该 keyword 表达式的语法支持，并按既有上游关联 ID 查询内部失败原因。
+不要通过未授权的拆 OR、多次采集或改写原检索式来宣称根因已验证；会改变语义、分页和费用。
+本轮四次 fetch 均为本地合成，供应商网络请求为零，没有运行时路由或 MX-H2I 改动。
+
+随后按用户要求实现 Hub 双渠道字段校准，详见
+[字段矩阵、兼容版本及最终回归](facebook-provider-field-calibration-2026-10-15.md)。
+它修复成功结果的媒体和类型映射，不改写本条已验证 301，也不把字段缺陷当作供应商采集失败的已证实原因。

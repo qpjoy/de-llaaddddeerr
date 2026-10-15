@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { strategySearchPlatforms, strategySearchBody, strategyPageInfo, uncertainStrategySearch, safeStrategyUrl } from '../../src/strategy-search-experience-model.js'
+import { strategyAccountPlatforms, strategyAccountBody, strategyOperationPath, strategyResultMatches } from '../../src/strategy-search-experience-model.js'
 
 const access = { platforms: ['tiktok', 'social', 'xiaohongshu', 'telegram'], capabilities: ['native.wechat.search.search'] }
 const platforms = strategySearchPlatforms(access)
@@ -106,4 +107,30 @@ test('failed search ledger identity comes from explicit details rather than the 
   assert.equal(strategyFailureRequestId({ requestId: 'http-only', details: { requestId: 'ledger' } }), 'ledger')
   assert.equal(strategyFailureRequestId({ responseBody: { error: { details: { requestId: 'ledger-body' } } } }), 'ledger-body')
   assert.equal(strategyFailureRequestId({ details: { requestId: { unexpected: true } } }), null)
+})
+
+test('account composer uses explicit operation grants, legacy identity aliases and large logical page caps', () => {
+  const access = { platforms: ['twitter', 'linkedin'], capabilities: ['social.content.crawl'] }
+  const platforms = strategyAccountPlatforms(access, 'crawl')
+  assert.deepEqual(platforms.map(row => row.platform), ['twitter', 'linkedin'])
+  assert.equal(strategyAccountPlatforms(access, 'user-info').length, 0)
+  const body = strategyAccountBody('crawl', { platform: 'twitter', accountField: 'user_id', account: ' ui_batch_019 ', pageSize: 500 }, platforms, 'opaque-cursor')
+  assert.deepEqual(body, { platform: 'twitter', user_id: 'ui_batch_019', pageSize: 500, cursor: 'opaque-cursor' })
+  assert.equal(strategyOperationPath('crawl'), '/api/v1/data/social/crawl')
+  assert.equal(strategyOperationPath('user-info'), '/api/v1/data/social/user-info')
+  assert.throws(() => strategyAccountBody('crawl', { platform: 'twitter', account: 'example', pageSize: 501 }, platforms))
+  assert.throws(() => strategyAccountBody('crawl', { platform: 'instagram', account: 'example', pageSize: 20 }, platforms))
+  const profiles = strategyAccountPlatforms({ ...access, capabilities: ['social.profile.get'] }, 'user-info')
+  assert.deepEqual(strategyAccountBody('user-info', { platform: 'linkedin', account: 'example' }, profiles), { platform: 'linkedin', username: 'example' })
+})
+
+test('account continuation belongs to its exact endpoint and account, not merely the platform', () => {
+  const input = { method: 'POST', path: strategyOperationPath('crawl'), body: { platform: 'twitter', username: 'example', pageSize: 500 } }
+  const result = { identity: 'same-key', input: { ...input, body: { ...input.body, cursor: 'first-cursor' } } }
+  assert.equal(strategyResultMatches(result, 'same-key', input), true)
+  assert.equal(strategyResultMatches(result, 'same-key', { ...input, path: strategyOperationPath('user-info') }), false)
+  assert.equal(strategyResultMatches(result, 'same-key', { ...input, body: { ...input.body, username: 'other' } }), false)
+  assert.equal(strategyResultMatches(result, 'different-key', input), false)
+  const page = { hasMore: true, nextCursor: 'continue-even-when-empty' }
+  assert.equal(strategyPageInfo({ data: { items: [], page } }), page)
 })

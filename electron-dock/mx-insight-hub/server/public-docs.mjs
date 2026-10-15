@@ -5,7 +5,7 @@ import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
 import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-research-docs.mjs'
 import { nativeForwardingPaths, nativeForwardingGuide, NATIVE_DOC_ROUTES, nativeDocPaths, nativeEndpointGuide, nativeServiceGuide } from './contracts/native-forwarding-docs.mjs'
-import { hubSocialPaths, hubSocialGuide } from './contracts/hub-social-docs.mjs'
+import { hubSocialPaths, hubSocialGuide, hubSocialAccountPlatforms } from './contracts/hub-social-docs.mjs'
 import { productForDocs } from '../shared/product-workbenches.mjs'
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
 import { newsOpenApiPaths, newsGuide } from './contracts/news-discovery-docs.mjs'
@@ -6530,6 +6530,7 @@ function normalizedDocsPath(pathname) {
 const TENANT_HIDDEN_DOCS = new Set(['search', 'night-all', 'tools', 'discovery'])
 export function tenantDocumentPathAllowed(path, scopes) {
   if (scopes == null) return true
+  if (['/data/social/crawl', '/data/social/user-info'].includes(path)) return hubSocialAccountPlatforms(path.split('/').at(-1), scopes).length > 0
   if (path === '/data/ip/risk/subscription') return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query.v2') || s.capabilities.includes('ip.risk.subscription.query')))
   if (path.startsWith('/data/ip/risk/history')) return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query') || s.capabilities.includes('ip.risk.query.v2') || s.capabilities.includes('ip.risk.subscription.query')))
   if (path.startsWith('/data/web-search/')) return scopes.some(s=>s.platforms.includes('web_search') && s.capabilities.includes('web.search') && (path.endsWith('/baidu') ? s.capabilities.includes('web.search.provider.baidu') : WEB_SEARCH_PROVIDERS.some(p=>s.capabilities.includes(p.capability))))
@@ -6602,6 +6603,14 @@ export function tenantOpenApiDocument(scopes) {
     !hidden.has(path) && tenantDocumentPathAllowed(path, scopes) && !path.startsWith('/night-all/') && (!path.startsWith('/search/') || path === '/search/raw')))
   const searchSchema=document.paths['/data/web-search/search']?.post?.requestBody?.content?.['application/json']?.schema
   if(searchSchema && scopes) searchSchema.properties.provider.enum=WEB_SEARCH_PROVIDERS.filter(p=>scopes.some(s=>s.platforms.includes('web_search')&&s.capabilities.includes('web.search')&&s.capabilities.includes(p.capability))).map(p=>p.key)
+  for (const operation of ['crawl', 'user-info']) {
+    const entry = document.paths[`/data/social/${operation}`]?.post
+    if (!entry) continue
+    const platforms = hubSocialAccountPlatforms(operation, scopes)
+    entry['x-mx-platform-options'] = platforms
+    entry.requestBody.content['application/json'].schema.properties.platform.enum = platforms
+    entry.requestBody.content['application/json'].example.platform = platforms[0]
+  }
   const refs = new Set()
   const visit = value => {
     if (!value || typeof value !== 'object') return
@@ -6629,7 +6638,7 @@ function tenantDocBody(route, scopes) {
   if (route.key === 'web-search') return webSearchGuide
   if (route.nativeKey) return nativeEndpointGuide(route.key)
   if (WECHAT_PRODUCTS.some(product => product.key === route.key)) return nativeServiceGuide(route.key, path=>tenantDocumentPathAllowed(path, scopes))
-  if (route.key === 'social-content') return hubSocialGuide(path=>tenantDocumentPathAllowed(path,scopes)) + nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
+  if (route.key === 'social-content') return hubSocialGuide(path=>tenantDocumentPathAllowed(path,scopes), scopes) + nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
   if (route.key === 'news-discovery') return newsGuide()
   if (route.key.startsWith('enterprise')) return enterpriseDocumentationHtml(route.key, { tenant: true })
   if (route.key === 'ip-risk-subscription') return ipRiskProductGuide

@@ -36,13 +36,20 @@ export function initialApp(device, appId) {
   };
 }
 
-export function deviceApps(state, device) {
+export const appKey = (mode, deviceId, appId) =>
+  `${mode}\u0000${deviceId}\u0000${appId}`;
+// index (optional): a read-only schedulingIndex built for this state; results are identical.
+export function deviceApps(state, device, index) {
   return supportedApps(device).map(
     (id) =>
-      (state.apps || []).find(
-        (a) =>
-          a.mode === device.mode && a.deviceId === device.id && a.appId === id,
-      ) || initialApp(device, id),
+      (index
+        ? index.apps.get(appKey(device.mode, device.id, id))
+        : (state.apps || []).find(
+            (a) =>
+              a.mode === device.mode &&
+              a.deviceId === device.id &&
+              a.appId === id,
+          )) || initialApp(device, id),
   );
 }
 
@@ -53,9 +60,9 @@ export function ensureApps(state, device) {
   return deviceApps(state, device);
 }
 
-export function appBlockers(state, now, device, job) {
+export function appBlockers(state, now, device, job, index) {
   const appId = jobApp(job);
-  const app = deviceApps(state, device).find((a) => a.appId === appId);
+  const app = deviceApps(state, device, index).find((a) => a.appId === appId);
   if (!app)
     return [
       {

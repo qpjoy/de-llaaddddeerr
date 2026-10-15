@@ -1,4 +1,22 @@
-# Hub 独立社媒接口
+# Hub 社媒接口
+
+更新：2026-10-15。账号内容和账号资料已在当前源码迁入 Hub 执行；旧转发入口保留，生产部署和实时供应商验收尚未完成。
+
+| 接口 | 当前合同 |
+| --- | --- |
+| `POST /api/v1/data/social/crawl` | Hub 账号内容：13 个固定平台合同、单平台多账号及声明活动、兼容标识别名、`items` 与 `raw_info/raw_data` 字符串、托管游标和有界补页；需要目标平台 + `social.content.crawl` |
+| `POST /api/v1/data/social/user-info` | Hub 账号资料：13 个固定平台合同、单平台多账号、兼容资料字段与可续批次游标；需要目标平台 + `social.profile.get` |
+| `POST /api/v1/data/social/search` | 保留原 Twitter 专用搜索合同及 `social.content.search`，本轮未扩展为其他平台 |
+| `POST /api/v1/data/search` | 既有统一关键词内容搜索；账号迁移不改变其现有平台路由 |
+
+**接入以 [Hub 账号内容与资料接入指南](social-account-migration.md)、运行时 `/docs/strategy-search` 和 `/docs/openapi.json` 为准。** 详细指南包括平台与活动清单、参数优先级、1–500 页大小及 Key 上限、返回结构、短页与游标处理、旧 Twitter 游标/幂等兼容和下游迁移步骤。新账号流程按实际采购保留归档并入队 canonical ingest；进入索引仍依赖正常 worker，不把交付成功等同索引已经可见。
+
+旧 `/api/v1/search/crawl|user-info` 与 `/api/v1/night-all/search/crawl|user-info` 不在本轮删除或重定向；其原字段、平台范围和转发规则继续保留。新账号操作须显式授权，内部供应商操作的合同、状态、凭据及费用准入继续独立检查。打开文档、上线代码不会自动扩权、启用供应商操作或发起真实查询。
+
+下面保留首批设计与当时验证记录，仅用于历史追溯。其中“仅 Twitter”“最多 50”“单账号/单次调用”“不补页”“不入 canonical”等账号说明已被本页当前合同及新指南替代，不能作为当前账号接口的接入或上线指令。旧 Twitter 精确幂等交付和已发布游标仍由原合同处理，不重写历史响应。
+
+<details>
+<summary>2026-09-28 首批设计及 2026-10-14 标准搜索迁移历史（账号合同已被替代）</summary>
 
 日期：2026-09-28。阶段：独立接口第一批实现，默认禁用；尚未部署、未做付费上游验收。后续覆盖完成才由下游切换。
 
@@ -154,3 +172,5 @@ SH
 Night-All 的 `raw`、`crawl`、`user-info` 都要求显式 `platform` 或 `platforms`，缺少时分别报 `SEARCH_PLATFORM_REQUIRED`、`CRAWL_PLATFORM_REQUIRED`、`USER_INFO_PLATFORM_REQUIRED`。raw 还需 query/keyword；crawl 和 user-info 则需账号标识。平台先确定，再按平台/操作选择供应商、参数映射和解析实现。Twitter 默认 RapidAPI；部分其它平台按操作采用 TikHub 或 JustOne，不应仅靠全局默认值推断所有操作。
 
 Night-All 原生批量 raw 会展开指定的“平台 × 关键词”组合；不是猜测关键词属于哪个平台。Hub 现有兼容入口要求一个显式平台，且不让下游指定供应商；Hub 聚合搜索才负责按已授权范围跨平台展开。新三个社媒入口同样按传入 platform 适配，当前仅 Twitter；后续补充平台时保留同一路径及业务参数原则。
+
+</details>

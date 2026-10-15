@@ -1,0 +1,148 @@
+{
+  "code": 0,
+  "message": null,
+  "data": {
+    "results": [
+      {
+        "post_id": "fixture-justone-album",
+        "type": "post",
+        "url": "https://www.facebook.com/fixture-page/posts/fixture-justone-album",
+        "message": "Synthetic album post.\nSecond line.",
+        "message_rich": "Synthetic album post.\nSecond line.",
+        "timestamp": 1791597600,
+        "comments_count": 0,
+        "reactions_count": 12,
+        "reshare_count": 3,
+        "reactions": { "angry": 0, "care": 0, "haha": 0, "like": 10, "love": 2, "sad": 0, "wow": 0 },
+        "author": {
+          "id": "fixture-author-album",
+          "name": "Fixture Album Author",
+          "url": "https://www.facebook.com/fixture-page",
+          "profile_picture_url": "https://cdn.example.test/avatar-album.jpg",
+          "delegate_page_id": "fixture-delegate-album"
+        },
+        "authors": [
+          {
+            "id": "fixture-author-album",
+            "name": "Fixture Album Author",
+            "url": "https://www.facebook.com/fixture-page",
+            "profile_picture_url": "https://cdn.example.test/avatar-album.jpg",
+            "delegate_page_id": "fixture-delegate-album"
+          }
+        ],
+        "author_title": null,
+        "image": null,
+        "video": null,
+        "video_view_count": null,
+        "album_preview": [
+          {
+            "type": "photo",
+            "image_file_uri": "https://cdn.example.test/album-1.jpg",
+            "url": "https://www.facebook.com/photo.php?fbid=fixture-photo-1&set=fixture-album&type=3",
+            "id": "fixture-photo-1"
+          },
+          {
+            "type": "photo",
+            "image_file_uri": "https://cdn.example.test/album-2.jpg",
+            "url": "https://www.facebook.com/photo.php?fbid=fixture-photo-2&set=fixture-album&type=3",
+            "id": "fixture-photo-2"
+          }
+        ],
+        "video_files": null,
+        "video_thumbnail": null,
+        "external_url": null,
+        "attached_event": null,
+        "attached_group": null,
+        "attached_post": null,
+        "attached_post_url": null,
+        "text_format_metadata": null,
+        "comments_id": "fixture-justone-album",
+        "shares_id": "fixture-justone-album",
+        "associated_group_id": null,
+        "associated_group": null,
+        "images_count": 8,
+        "top_comments": []
+      },
+      {
+        "post_id": "fixture-justone-image",
+        "type": "post",
+        "url": "https://www.facebook.com/fixture-page/posts/fixture-justone-image",
+        "message": "Synthetic single-image post.",
+        "message_rich": "Synthetic single-image post.",
+        "timestamp": 1791597660,
+        "comments_count": 2,
+        "reactions_count": 0,
+        "reshare_count": 0,
+        "reactions": { "angry": 0, "care": 0, "haha": 0, "like": 0, "love": 0, "sad": 0, "wow": 0 },
+        "author": {
+          "id": "fixture-author-image",
+          "name": "Fixture Image Author",
+          "url": "https://www.facebook.com/fixture-image-page",
+          "profile_picture_url": "https://cdn.example.test/avatar-image.jpg",
+          "delegate_page_id": "fixture-delegate-image"
+        },
+        "authors": [],
+        "author_title": null,
+        "image": { "uri": "https://cdn.example.test/photo.jpg", "height": 1080, "width": 1080, "id": "fixture-photo-main" },
+        "video": null,
+        "video_view_count": null,
+        "album_preview": null,
+        "video_files": null,
+        "video_thumbnail": null,
+        "external_url": null,
+        "attached_event": null,
+        "attached_group": null,
+        "attached_post": null,
+        "attached_post_url": null,
+        "text_format_metadata": null,
+        "comments_id": "fixture-justone-image",
+        "shares_id": "fixture-justone-image",
+        "associated_group_id": null,
+        "associated_group": null,
+        "images_count": null,
+        "top_comments": []
+      },
+      {
+        "post_id": "fixture-justone-text",
+        "type": "post",
+        "url": "https://www.facebook.com/fixture-page/posts/fixture-justone-text",
+        "message": "Synthetic text-only post.",
+        "message_rich": "Synthetic text-only post.",
+        "timestamp": 1791597720,
+        "comments_count": 7,
+        "reactions_count": 19,
+        "reshare_count": 5,
+        "reactions": { "angry": 0, "care": 0, "haha": 1, "like": 16, "love": 2, "sad": 0, "wow": 0 },
+        "author": {
+          "id": "fixture-author-text",
+          "name": "Fixture Text Author",
+          "url": "https://www.facebook.com/fixture-text-page",
+          "profile_picture_url": "https://cdn.example.test/avatar-text.jpg",
+          "delegate_page_id": null
+        },
+        "authors": [],
+        "author_title": null,
+        "image": null,
+        "video": null,
+        "video_view_count": null,
+        "album_preview": null,
+        "video_files": null,
+        "video_thumbnail": null,
+        "external_url": null,
+        "attached_event": null,
+        "attached_group": null,
+        "attached_post": null,
+        "attached_post_url": null,
+        "text_format_metadata": null,
+        "comments_id": "fixture-justone-text",
+        "shares_id": "fixture-justone-text",
+        "associated_group_id": null,
+        "associated_group": null,
+        "images_count": null,
+        "top_comments": []
+      }
+    ],
+    "cursor": "fixture-justone-next-cursor"
+  },
+  "recordTime": null
+}

@@ -51,3 +51,49 @@ test('Facebook photo landing pages stay original links while explicit mixed-medi
   assert.match(html, /<img[^>]+src="https:\/\/example\.test\/actual-photo\.jpg"/u)
   assert.doesNotMatch(html, /<img[^>]+src="https:\/\/www\.facebook\.com\/photo\.php/u)
 })
+
+test('account content displays social body and reply fields without changing raw payloads', async () => {
+  const { StrategySearchResult } = await view
+  const payload = { data: { platform: 'twitter', items: [{ id: 'one', content: '账号完整正文', metrics: { likes: 0, replies: 3 }, imageUrls: [] }] } }
+  const before = structuredClone(payload)
+  const html = renderToStaticMarkup(createElement(StrategySearchResult, { payload, operation: 'crawl' }))
+  assert.match(html, /账号完整正文/)
+  assert.match(html, /评论 <b>3<\/b>/)
+  assert.match(html, /点赞 <b>0<\/b>/)
+  assert.deepEqual(payload, before)
+})
+
+test('account profile showcase preserves absent metrics, stable identity and safe source links', async () => {
+  const { StrategySearchResult } = await view
+  const html = renderToStaticMarkup(createElement(StrategySearchResult, { operation: 'user-info', payload: { data: {
+    platform: 'twitter', items: [{ id: '123', userId: '123', username: 'example', name: '示例账号', description: '公开简介',
+      followers: 0, following: null, posts: 2, url: 'javascript:alert(1)', avatarUrl: 'https://user:password@example.test/avatar' }],
+  } } }))
+  assert.match(html, /账号资料结果/)
+  assert.match(html, /示例账号/)
+  assert.match(html, /粉丝 <b>0<\/b>/)
+  assert.match(html, /关注 <b>未提供<\/b>/)
+  assert.match(html, /twitter.*123/)
+  assert.doesNotMatch(html, /href="javascript:|src="https:\/\/user:/)
+})
+
+test('new account compatibility delivery renders its actual flattened fields without interpreting a JSON string as one row', async () => {
+  const { StrategySearchResult } = await view
+  const content = { platform_name: 'twitter', content_id: '123', content: '兼容账号正文', author_name: '作者',
+    like_count: 0, reply_count: 4, image_urls: JSON.stringify(['https://example.test/photo.jpg']) }
+  const html = renderToStaticMarkup(createElement(StrategySearchResult, { operation: 'crawl', payload: { data: {
+    platform: 'twitter', items: [content], raw_data: JSON.stringify([content]),
+  } } }))
+  assert.match(html, /兼容账号正文/)
+  assert.match(html, /作者/)
+  assert.match(html, /评论 <b>4<\/b>/)
+  assert.match(html, /点赞 <b>0<\/b>/)
+  assert.match(html, /src="https:\/\/example\.test\/photo.jpg"/)
+  const profile = renderToStaticMarkup(createElement(StrategySearchResult, { operation: 'user-info', payload: { data: {
+    platform: 'twitter', items: [{ user_id: '123', user_name: 'example', nickname: '资料名称', followers_count: 0, following_count: null, statuses_count: 3 }],
+  } } }))
+  assert.match(profile, /资料名称/)
+  assert.match(profile, /@example/)
+  assert.match(profile, /粉丝 <b>0<\/b>/)
+  assert.match(profile, /内容数 <b>3<\/b>/)
+})

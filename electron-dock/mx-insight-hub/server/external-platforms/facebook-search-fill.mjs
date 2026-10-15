@@ -253,7 +253,7 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         const receipt = result.restrictedResponseArchive
         if (!receipt || receipt.bodySize > PAGE_BYTES[provider] || !result.publicBody.providerPage) throw unavailable()
         bytes += receipt.bodySize
-        const records = rawSearchRecords(result.publicBody, 'facebook', provider)
+        const records = rawSearchRecords(result.publicBody, 'facebook', provider, { projectionVersion: request.projectionVersion })
         await target.platformStore.stageProviderEvidence(evidence)
         await target.platformStore.finishProviderStep({ ...evidence, ingestJob: { payload: { kind: 'external-platform-result',
           providerKey: provider, consumerId: context.consumer.id, datasetId: 'night-all.search.v1', platform: 'facebook',

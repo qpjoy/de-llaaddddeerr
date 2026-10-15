@@ -3,7 +3,7 @@ import { WECHAT_PRODUCTS } from './wechat.mjs'
 export const PRODUCT_WORKBENCHES = [
   {path:'/data-products/web-search',label:'Web Search',docs:'web-search',prefixes:['/data/web-search/'],native:true},
   { path: '/data-products/strategy-search', label: '策略搜索', docs: 'strategy-search',
-    prefixes: ['/data/search', '/search/raw', '/search/crawl', '/search/user-info', '/night-all/search/'], native: true },
+    prefixes: ['/data/search', '/data/social/search', '/data/social/crawl', '/data/social/user-info', '/search/raw', '/search/crawl', '/search/user-info', '/night-all/search/'], native: true },
   ...WECHAT_PRODUCTS.map(product => ({ path: `/data-products/${product.key}`, label: product.label, docs: product.key,
     prefixes: [`/data/wechat/${product.group}/`, ...(product.group === 'mp' ? ['/data/wechat/demo/'] : [])] })),
   { path: '/source-catalog', label: '数据源目录', docs: 'source-catalog', prefixes: ['/data/source-catalog'] },
@@ -28,6 +28,7 @@ export const productForDocs = path => PRODUCT_WORKBENCHES.find(product => path?.
 
 export function productEndpoints(document, product) {
   const labels = { '/data/search': '统一内容搜索 · 单个平台', '/search/{operation}': '兼容业务接口 · 按 operation 选择',
+    '/data/social/search': '社交内容搜索 · Hub 接口', '/data/social/crawl': '账号内容 · Hub 接口', '/data/social/user-info': '账号资料 · Hub 接口',
     '/night-all/search/{operation}': '历史路径别名 · 按 operation 选择', '/data/aggregate/sources': '当前 Key 的搜索范围', '/data/aggregate/preview': '预览本批范围与费用', '/data/aggregate/search': '聚合数据搜索 · 实时 / 已收录',
     '/data/ecommerce/products/search': '统一商品搜索 · 跨平台', '/data/ecommerce/products/items': '已收录商品 · 不采集' }
   const preferred = new Set(['/api/v1/data/wechat/mp/article-detail-h5', '/api/v1/data/ecommerce/products/search'])

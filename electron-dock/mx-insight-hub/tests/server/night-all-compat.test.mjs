@@ -783,19 +783,21 @@ test('decisive idempotency states remain unchanged without capabilities network 
   assert.equal(conflict.capabilityCalls(), 0)
   assert.equal(conflict.calls(), 1)
 
-  const unsupportedConflict = await compatibilityFixture({ grants: ['bilibili'] })
+  // Keep this legacy-path assertion on a platform whose keyword route still
+  // uses Night-All; Bilibili keyword search has its own direct gateway now.
+  const unsupportedConflict = await compatibilityFixture({ grants: ['youtube'] })
   await unsupportedConflict.service.nightAllCompatibilitySearch(unsupportedConflict.context, {
     operation: 'raw',
     path: '/api/v1/night-all/search/raw',
     idempotencyKey: 'compat-operation-conflict',
-    body: { platform: 'bilibili', query: 'first', count: 20 },
+    body: { platform: 'youtube', query: 'first', count: 20 },
   })
   await assert.rejects(
     () => unsupportedConflict.service.nightAllCompatibilitySearch(unsupportedConflict.context, {
-      operation: 'crawl',
-      path: '/api/v1/night-all/search/crawl',
+      operation: 'user-info',
+      path: '/api/v1/night-all/search/user-info',
       idempotencyKey: 'compat-operation-conflict',
-      body: { platform: 'bilibili', username: 'alice', count: 20 },
+      body: { platform: 'youtube', username: 'alice', count: 20 },
     }),
     (error) => error?.code === 'idempotency_conflict',
   )

@@ -40,6 +40,7 @@ import { JUSTONE_INSTAGRAM_SEARCH_KEY, projectJustOneInstagramSearch } from '../
 import { normalizeHubDataSearch, projectDataSearch, projectTwitterSearchFillDelivery } from '../contracts/hub-data-search.mjs'
 import { runTwitterSearchFill } from './twitter-search-fill.mjs'
 import { contentSearchPlan } from './content-search.mjs'
+import { socialAccountPlan } from './social-account-delivery.mjs'
 import { runFacebookSearchFill } from './facebook-search-fill.mjs'
 import { waitForFacebookRapidAdmission } from './facebook-rapid-admission.mjs'
 import { normalizeFacebookSearch, projectFacebookSearch, facebookJustOneArchives, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY } from '../contracts/facebook-search.mjs'
@@ -665,6 +666,36 @@ export class ExternalPlatformGateway {
     })
   }
 
+  async socialAccountData(context, input) {
+    // Preserve already-issued Twitter cursors and exact historical replay.
+    // Only new traversals adopt the account manifest; old receipts are immutable.
+    if (this.providerKey === 'rapidapi') {
+      if (typeof input.body?.cursor === 'string' && input.body.cursor.startsWith('mxec2.')) return this.socialData(context, input)
+      const saved = input.idempotencyKey && await this.usageStore.getUsageRequestByIdempotencyKey(context.consumer.id, input.idempotencyKey)
+      if (saved && saved.apiKeyId === context.apiKey.id && saved.acquisitionRequest?.path === input.path) {
+        let old
+        try { old = normalizeHubSocialRequest(input.operation, input.body) } catch { /* New account aliases use the managed contract below. */ }
+        if (old && saved.fingerprint === fingerprint({ method: 'POST', path: input.path, body: old.fingerprintBody })) return this.socialData(context, input)
+      }
+    }
+    const capability = input.operation === 'crawl' ? 'social.content.crawl' : 'social.profile.get'
+    const prepared = socialAccountPlan({ gateway: this, context, input, dependencies: {
+      resolveCredential: () => this.#resolvedCredential(),
+      revalidateIdentity: async ({ totalLimit }) => {
+        const platform = prepared.plan.authorizationPlatform
+        const current = await this.#revalidateWaitingIdentity(context, platform, { operation: capability })
+        const policy = await this.usageStore.getPolicy(current.consumer.id, platform)
+        const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, platform)
+        if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+          entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Account work exceeds the current Key entitlement')
+        return current
+      },
+      enterCapacity: options => this.#enterOrQueue(context, { ...options, canWait: false }),
+      leaveCapacity: () => this.#leave(context.consumer.id), providerCostControl,
+    } })
+    return this.#deliver(context, prepared.input, prepared.plan)
+  }
+
   async socialData(context, { operation, body, idempotencyKey, path, signal }) {
     const endpoint = HUB_SOCIAL_ENDPOINTS[operation]
     if (!endpoint || endpoint.path !== path || this.providerKey !== endpoint.provider) throw new AppError(404, 'not_found', 'Unknown Hub social endpoint')
@@ -984,7 +1015,7 @@ export class ExternalPlatformGateway {
       costUnknown: () => admission?.probe === true,
       finalize: ({ result }) => {
         result.publicBody.data.meta.upstreamCallCount = providerCalls + 1
-        result.records = rawSearchRecords(result.publicBody, 'facebook', this.providerKey)
+        result.records = rawSearchRecords(result.publicBody, 'facebook', this.providerKey, { projectionVersion: request.projectionVersion })
         if (dataSearch) result.publicBody = { ...projectDataSearch(result, request), meta: result.publicBody.meta }
         return result
       },

@@ -2,7 +2,13 @@ import { estimatedDuration, taskLane } from "./task-contract.mjs";
 import { compareJobs, effectivePriority } from "./queue-order.mjs";
 export { compareJobs, effectivePriority } from "./queue-order.mjs";
 import { DEFAULT_LOOP_POLICY, loopPolicyFor } from "./loop-policy.mjs";
-import { deviceApps, appBlockers, deviceInterval, jobApp } from "./apps.mjs";
+import {
+  appKey,
+  deviceApps,
+  appBlockers,
+  deviceInterval,
+  jobApp,
+} from "./apps.mjs";
 import { planPool } from "./pool-planner.mjs";
 // Pure scheduling rules shared by claims and read-only explanations.
 export const matchesJob = (device, job) =>
@@ -22,27 +28,59 @@ export const inResource = (device, resource) =>
   device.mode === resource.mode &&
   device.rack === resource.rack &&
   (resource.scope === "rack" || device.host === resource.host);
-export function resourcePolicy(state, mode, scope, rack, host = null) {
-  return (state.resources || []).find(
-    (r) =>
-      r.mode === mode && r.resourceKey === resourceKey({ scope, rack, host }),
-  );
+export function resourcePolicy(state, mode, scope, rack, host = null, index) {
+  const key = resourceKey({ scope, rack, host });
+  return index
+    ? index.policies.get(`${mode}\u0000${key}`)
+    : (state.resources || []).find(
+        (r) => r.mode === mode && r.resourceKey === key,
+      );
 }
-export function policiesFor(state, device) {
+export function policiesFor(state, device, index) {
   return [
-    resourcePolicy(state, device.mode, "rack", device.rack),
-    resourcePolicy(state, device.mode, "host", device.rack, device.host),
+    resourcePolicy(state, device.mode, "rack", device.rack, null, index),
+    resourcePolicy(state, device.mode, "host", device.rack, device.host, index),
   ].filter(Boolean);
 }
-export function deviceBlockers(state, now, d) {
+const scopeCount = (mode, scope, rack, host) =>
+  JSON.stringify([mode, scope, rack, scope === "rack" ? null : host]);
+/** Read-only lookups for decisions over one unchanged state at one instant.
+ * Helpers accept it as an optional last argument and return identical results;
+ * it only replaces repeated linear scans (apps, resources, running counts) and
+ * memoizes per-device blockers. Rebuild it after any mutation. */
+export function schedulingIndex(state, now) {
+  const apps = new Map(),
+    policies = new Map(),
+    running = new Map();
+  for (const a of state.apps || []) {
+    const key = appKey(a.mode, a.deviceId, a.appId);
+    if (!apps.has(key)) apps.set(key, a);
+  }
+  for (const r of state.resources || []) {
+    const key = `${r.mode}\u0000${r.resourceKey}`;
+    if (!policies.has(key)) policies.set(key, r);
+  }
+  for (const x of state.devices)
+    if (x.state === "running")
+      for (const key of [
+        scopeCount(x.mode, "rack", x.rack),
+        scopeCount(x.mode, "host", x.rack, x.host),
+      ])
+        running.set(key, (running.get(key) || 0) + 1);
+  return { now, apps, policies, running, blockers: new Map() };
+}
+export function deviceBlockers(state, now, d, index) {
+  if (index && index.now === now && index.blockers.has(d.id))
+    return index.blockers.get(d.id);
   const reasons = [],
     add = (code, message) => reasons.push({ code, message });
-  for (const p of policiesFor(state, d)) {
+  for (const p of policiesFor(state, d, index)) {
     const label = p.scope === "rack" ? "机架" : "宿主机";
     if (p.draining) add(`${p.scope}-draining`, `${label}已排空，停止新领取`);
-    const running = state.devices.filter(
-      (x) => inResource(x, p) && x.state === "running",
-    ).length;
+    const running = index
+      ? index.running.get(scopeCount(p.mode, p.scope, p.rack, p.host)) || 0
+      : state.devices.filter((x) => inResource(x, p) && x.state === "running")
+          .length;
     if (p.maxConcurrent != null && running >= p.maxConcurrent)
       add(
         `${p.scope}-capacity`,
@@ -72,6 +110,7 @@ export function deviceBlockers(state, now, d) {
       "cooldown",
       `设备冷却中，约 ${Math.ceil((d.cooldownUntil - now) / 1000)} 秒`,
     );
+  if (index && index.now === now) index.blockers.set(d.id, reasons);
   return reasons;
 }
 export function workerHealth(worker, now) {
@@ -116,7 +155,7 @@ export function insertionCost(state, device, child) {
     child.workflow.plan.length * p.commandDelayMs,
   );
 }
-export function insertionBlockers(state, now, device, child) {
+export function insertionBlockers(state, now, device, child, index) {
   const a = state.attempts.find((a) => a.id === device.workflowAttemptId);
   const parent = state.jobs.find((j) => j.id === a?.jobId);
   const w = parent?.workflow;
@@ -140,8 +179,8 @@ export function insertionBlockers(state, now, device, child) {
       (other) =>
         other.id !== device.id &&
         matchesJob(other, child) &&
-        !deviceBlockers(state, now, other).length &&
-        !appBlockers(state, now, other, child).length,
+        !deviceBlockers(state, now, other, index).length &&
+        !appBlockers(state, now, other, child, index).length,
     )
   )
     add("idle-preferred", "另有匹配的空闲插槽，优先直接分配");
@@ -159,7 +198,14 @@ export function insertionBlockers(state, now, device, child) {
   return reasons;
 }
 
-export function schedulingSnapshot(state, now, mode) {
+// reference: true recomputes every lookup without the index (equivalence tests).
+export function schedulingSnapshot(
+  state,
+  now,
+  mode,
+  { reference = false } = {},
+) {
+  const index = reference ? undefined : schedulingIndex(state, now);
   const devices = state.devices.filter((d) => d.mode === mode);
   const jobs = state.jobs.filter((j) => j.mode === mode);
   const queue = jobs
@@ -167,17 +213,17 @@ export function schedulingSnapshot(state, now, mode) {
     .sort(compareJobs(now));
   const availability = devices.map((d) => {
     const common = [
-      ...deviceBlockers(state, now, d),
+      ...deviceBlockers(state, now, d, index),
       ...workerBlockers(state, now, d),
     ];
     const running = state.attempts?.find(
       (a) => a.deviceId === d.id && a.status === "running",
     );
-    const apps = deviceApps(state, d).map((app) => ({
+    const apps = deviceApps(state, d, index).map((app) => ({
       ...app,
       active: !!running && jobApp(running) === app.appId,
       nextAllowedAt: Math.max(d.cooldownUntil || 0, app.cooldownUntil),
-      blockers: [...common, ...appBlockers(state, now, d, app)],
+      blockers: [...common, ...appBlockers(state, now, d, app, index)],
     }));
     return {
       deviceId: d.id,
@@ -204,6 +250,20 @@ export function schedulingSnapshot(state, now, mode) {
           .map((p) => planPool(state, now, { rack: p.rack }))
       : [];
   const plansByRack = new Map(poolPlans.map((p) => [p.rack, p]));
+  // Plan lookups grouped by job, preserving plan order.
+  const group = (rows) => {
+    const byJob = new Map();
+    for (const row of rows) {
+      if (!byJob.has(row.jobId)) byJob.set(row.jobId, []);
+      byJob.get(row.jobId).push(row);
+    }
+    return byJob;
+  };
+  const rackAssignments = new Map(
+    poolPlans.map((p) => [p.rack, group(p.assignments)]),
+  );
+  const allAssignments = group(poolPlans.flatMap((p) => p.assignments));
+  const allBlocked = group(poolPlans.flatMap((p) => p.blocked));
   const waiting = queue.map((j, i) => {
     const reasons = [];
     if (j.notBefore > now)
@@ -222,30 +282,32 @@ export function schedulingSnapshot(state, now, mode) {
         });
     }
     const candidates = devices.filter((d) => matchesJob(d, j));
-    const candidateReasons = (d) => [
-      ...byDevice
-        .get(d.id)
-        .commonBlockers.filter(
-          (r) =>
-            !d.workflowAttemptId ||
-            !["running", "rack-capacity", "host-capacity"].includes(r.code),
-        ),
-      ...(d.workflowAttemptId ? insertionBlockers(state, now, d, j) : []),
-      ...appBlockers(state, now, d, j),
-    ];
+    const reasonsByDevice = new Map();
+    const candidateReasons = (d) => {
+      if (!reasonsByDevice.has(d.id))
+        reasonsByDevice.set(d.id, [
+          ...byDevice
+            .get(d.id)
+            .commonBlockers.filter(
+              (r) =>
+                !d.workflowAttemptId ||
+                !["running", "rack-capacity", "host-capacity"].includes(r.code),
+            ),
+          ...(d.workflowAttemptId
+            ? insertionBlockers(state, now, d, j, index)
+            : []),
+          ...appBlockers(state, now, d, j, index),
+        ]);
+      return reasonsByDevice.get(d.id);
+    };
     const ready = candidates.filter(
       (d) =>
         candidateReasons(d).length === 0 &&
         (!plansByRack.has(d.rack) ||
-          plansByRack
-            .get(d.rack)
-            .assignments.some(
-              (a) =>
-                a.jobId === j.id &&
-                a.deviceId === d.id &&
-                a.startAt <= now &&
-                a.queuePosition === 1,
-            )),
+          (rackAssignments.get(d.rack).get(j.id) || []).some(
+            (a) =>
+              a.deviceId === d.id && a.startAt <= now && a.queuePosition === 1,
+          )),
     );
     if (!candidates.length)
       reasons.push({ code: "no-device", message: "没有匹配的已登记设备" });
@@ -262,13 +324,10 @@ export function schedulingSnapshot(state, now, mode) {
     const legacyReady = ready.some((d) => !plansByRack.has(d.rack));
     const poolAssignment =
       !legacyReady &&
-      poolPlans
-        .flatMap((p) => p.assignments)
-        .filter((a) => a.jobId === j.id)
-        .sort((a, b) => a.finishAt - b.finishAt)[0];
-    const poolBlocked = poolPlans
-      .flatMap((p) => p.blocked)
-      .find((b) => b.jobId === j.id);
+      [...(allAssignments.get(j.id) || [])].sort(
+        (a, b) => a.finishAt - b.finishAt,
+      )[0];
+    const poolBlocked = allBlocked.get(j.id)?.[0];
     if (!ready.length && poolAssignment && poolAssignment.startAt > now)
       reasons.push({
         code: "pool-soft-queue",
