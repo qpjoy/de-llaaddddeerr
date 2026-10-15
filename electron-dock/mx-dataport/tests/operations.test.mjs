@@ -108,7 +108,29 @@ if(cmd==='kubectl'){
  else if(a[0]==='delete'&&a[1]?.startsWith('job/')&&process.env.HARBOR_TEST_DELETE_FAILURE)process.exit(1);
  else if(a[0]==='delete'&&a.includes('--raw')){if(process.env.HARBOR_TEST_UNLOCK_FAILURE)process.exit(1);const options=JSON.parse(fs.readFileSync(a.at(-1)));if(options.preconditions.uid!==fs.readFileSync(dir+'/lock','utf8'))process.exit(1);fs.unlinkSync(dir+'/lock');}
 }else if(cmd==='bash'){if(args.join(' ')!=='../mx-common/scripts/manage.sh provision mx-harbor')process.exit(1);process.stdout.write('postgres://test:test@pg.internal/mx_harbor');}
-else if(cmd==='docker'&&args.includes('-t'))fs.writeFileSync(dir+'/image',args[args.indexOf('-t')+1]);
+else if(cmd==='docker'&&args[0]==='buildx'&&args[1]==='inspect'){
+ const file=dir+'/builders.json',builders=fs.existsSync(file)?JSON.parse(fs.readFileSync(file)):{};
+ const name=args[2];
+ let options=builders[name];
+ if(name==='mx-harbor-buildproxy')options=['network=host','env.HTTP_PROXY=http://127.0.0.1:7789','env.HTTPS_PROXY=http://127.0.0.1:7789'];
+ if(process.env.HARBOR_TEST_BUILDER_DRIFT)options=['network=bridge','env.HTTP_PROXY=http://127.0.0.1:7789','env.HTTPS_PROXY=http://127.0.0.1:7789'];
+ if(!options)process.exit(1);
+ if(process.env.HARBOR_TEST_BUILDER_NO_PROXY)options=[...options,'env.NO_PROXY=docker.io'];
+ if(process.env.HARBOR_TEST_BUILDER_OTHER_LOWERCASE)options=[...options,'env.http_proxy=http://127.0.0.1:7790'];
+ const driver=process.env.HARBOR_TEST_BUILDER_DRIVER?'docker':'docker-container';
+ const nodeCount=process.env.HARBOR_TEST_BUILDER_MULTINODE?2:1;
+ process.stdout.write('Name: '+name+'\\nDriver: '+driver+'\\nNodes:\\n'+Array.from({length:nodeCount},(_,i)=>'Name: '+name+i+'\\nDriver Options: '+options.map(o=>{const p=o.indexOf('=');return o.slice(0,p)+'='+JSON.stringify(o.slice(p+1))}).join(' ')).join('\\n')+'\\n');
+}
+else if(cmd==='docker'&&args[0]==='buildx'&&args[1]==='create'){
+ const file=dir+'/builders.json',builders=fs.existsSync(file)?JSON.parse(fs.readFileSync(file)):{};
+ const name=args[args.indexOf('--name')+1];
+ builders[name]=args.flatMap((value,i)=>value==='--driver-opt'?[args[i+1]]:[]);
+ fs.writeFileSync(file,JSON.stringify(builders));
+}
+else if(cmd==='docker'&&args.includes('-t')){
+ if(process.env.HARBOR_TEST_BUILD_FAILURE)process.exit(1);
+ fs.writeFileSync(dir+'/image',args[args.indexOf('-t')+1]);
+}
 else if(cmd==='ctr'&&args.includes('ls'))process.stdout.write('docker.io/library/'+fs.readFileSync(dir+'/image','utf8')+'\\n');
 `;
   for (const cmd of ["kubectl", "docker", "ctr", "bash"])
@@ -267,6 +289,62 @@ test("legacy migrate and restart commands both run the complete deploy workflow"
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /now runs the full deploy workflow/);
     assertFullDeploy(f.calls());
+  }
+});
+test("proxy port changes select separate builders and matching repeats reuse the verified builder", (t) => {
+  const f = fixture(t);
+  for (const port of [7789, 7788, 7788]) {
+    const result = f.run("deploy", { MX_HARBOR_BUILD_PROXY: `http://127.0.0.1:${port}` });
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const dockerCalls = f.calls().filter(c => c.cmd === "docker"),
+    creates = dockerCalls.filter(c => c.args[0] === "buildx" && c.args[1] === "create"),
+    builds = dockerCalls.filter(c => c.args[0] === "buildx" && c.args[1] === "build");
+  assert.equal(creates.length, 2, "one builder per proxy; old builder is left intact");
+  assert.equal(builds.length, 3);
+  const names = builds.map(c => c.args[c.args.indexOf("--builder") + 1]);
+  assert.notEqual(names[0], names[1]);
+  assert.equal(names[1], names[2]);
+  assert.ok(names.every(n => /^mx-harbor-buildproxy-[a-f0-9]{16}$/.test(n)));
+  for (const [index, call] of creates.entries()) {
+    const proxy = `http://127.0.0.1:${index === 0 ? 7789 : 7788}`,
+      options = call.args.flatMap((v,i) => v === "--driver-opt" ? [call.args[i+1]] : []);
+    assert.deepEqual(options, ["network=host", ...["HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy"].map(key => `env.${key}=${proxy}`)]);
+    assert.ok(call.args.includes("--allow-insecure-entitlement network.host"));
+  }
+  assert.ok(!dockerCalls.some(c => c.args.includes("mx-harbor-buildproxy") || c.args.includes("rm")));
+  assert.equal(existsSync(join(f.dir, "lock")), false);
+});
+test("unverified builder options stop before building without deleting cache or deploying", (t) => {
+  for (const flag of ["HARBOR_TEST_BUILDER_DRIFT", "HARBOR_TEST_BUILDER_NO_PROXY", "HARBOR_TEST_BUILDER_OTHER_LOWERCASE", "HARBOR_TEST_BUILDER_DRIVER", "HARBOR_TEST_BUILDER_MULTINODE"]) {
+    const f = fixture(t);
+    // A verified creation on the first run supplies the existing matching name.
+    assert.equal(f.run("deploy", { MX_HARBOR_BUILD_PROXY: "http://127.0.0.1:7788" }).status, 0);
+    const count = f.calls().length,
+      result = f.run("deploy", { MX_HARBOR_BUILD_PROXY: "http://127.0.0.1:7788", [flag]: "1" }),
+      calls = f.calls().slice(count);
+    assert.notEqual(result.status, 0, flag);
+    assert.match(result.stderr, /configuration differs or cannot be verified/);
+    assert.ok(!calls.some(c => c.cmd === "docker" && ["build", "create", "rm"].some(v => c.args.includes(v))));
+    assert.ok(!calls.some(c => c.stdin.includes('"kind":"Job"') || c.stdin.includes('"kind":"Deployment"')));
+    assert.equal(existsSync(join(f.dir, "lock")), false);
+  }
+});
+test("registry build failure never starts migration or updates the running workload", (t) => {
+  const f = fixture(t),
+    result = f.run("deploy", { MX_HARBOR_BUILD_PROXY: "http://127.0.0.1:7788", HARBOR_TEST_BUILD_FAILURE: "1" });
+  assert.notEqual(result.status, 0);
+  assert.ok(!f.calls().some(c => c.stdin.includes('"kind":"Job"') || c.stdin.includes('"kind":"Deployment"')));
+  assert.equal(existsSync(join(f.dir, "lock")), false);
+});
+test("malformed build proxies are rejected without printing their value or configuring a builder", (t) => {
+  for (const proxy of ["socks5://127.0.0.1:7788", "http://127.0.0.1:7788/path", "http://127.0.0.1:7788/?secret=hidden", "http://private-user:private-password@127.0.0.1:7788", "invalid-private-value"]) {
+    const f = fixture(t), result = f.run("deploy", { MX_HARBOR_BUILD_PROXY: proxy });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Invalid HTTP\(S\) build proxy \(value hidden\)/);
+    assert.ok(!result.stderr.includes(proxy));
+    assert.ok(!f.calls().some(c => c.cmd === "docker"));
+    assert.equal(existsSync(join(f.dir, "lock")), false);
   }
 });
 test("rollout or readiness failure reports failure instead of a successful deployment", (t) => {

@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { workload } from "../deploy/k8s/render.mjs";
 import { readConfig } from "../apps/server/config.mjs";
 import {
@@ -261,24 +261,58 @@ try {
       ".",
     ];
   if (proxy) {
-    const proxyUrl = new URL(proxy);
-    if (
-      !["http:", "https:"].includes(proxyUrl.protocol) ||
-      proxyUrl.username ||
-      proxyUrl.password
-    )
-      throw Error("Invalid build proxy");
+    try {
+      const proxyUrl = new URL(proxy);
+      if (
+        !["http:", "https:"].includes(proxyUrl.protocol) ||
+        proxyUrl.username ||
+        proxyUrl.password ||
+        proxyUrl.pathname !== "/" ||
+        proxyUrl.search ||
+        proxyUrl.hash ||
+        /[\s,"']/.test(proxy)
+      )
+        throw Error();
+    } catch {
+      throw Error("Invalid HTTP(S) build proxy (value hidden)");
+    }
     Object.assign(env, {
       HTTP_PROXY: proxy,
       HTTPS_PROXY: proxy,
       http_proxy: proxy,
       https_proxy: proxy,
     });
-    const builder = "mx-harbor-buildproxy";
-    if (
-      run("docker", ["buildx", "inspect", builder], { optional: true })
-        .status !== 0
-    )
+    // buildkitd keeps creation-time environment: changing build args or the
+    // caller's proxy does not change registry pulls in an existing builder.
+    // Keep previous builders/caches and select one scoped to this proxy.
+    const signature = createHash("sha256").update(proxy).digest("hex").slice(0, 16),
+      builder = `mx-harbor-buildproxy-${signature}`,
+      inspection = run("docker", ["buildx", "inspect", builder], {
+        optional: true,
+      });
+    if (inspection.status === 0) {
+      const info = inspection.stdout,
+        nodes = info.split(/^Nodes:\s*$/m)[1] || "",
+        options = [...info.matchAll(/^Driver Options:\s*(.*)$/gm)],
+        values = new Map(
+          [...(options[0]?.[1] || "").matchAll(/(?:^|\s)([\w.]+)="([^"\r\n]*)"/g)]
+            .map((entry) => [entry[1], entry[2]]),
+        );
+      if (
+        !/^Driver:\s+docker-container\s*$/m.test(info) ||
+        (nodes.match(/^Name:\s+/gm) || []).length !== 1 ||
+        options.length !== 1 ||
+        values.get("network") !== "host" ||
+        ["env.HTTP_PROXY", "env.HTTPS_PROXY"].some(key => values.get(key) !== proxy) ||
+        ["env.http_proxy", "env.https_proxy", "env.ALL_PROXY", "env.all_proxy"]
+          .some(key => values.has(key) && values.get(key) !== proxy) ||
+        ["env.NO_PROXY", "env.no_proxy"].some(key => values.get(key))
+      )
+        throw Error(
+          "Build proxy builder configuration differs or cannot be verified; existing builder/cache left intact. Inspect this builder before retrying.",
+        );
+    } else {
+      console.log(`DataPort: creating scoped build proxy builder ${builder}`);
       run(
         "docker",
         [
@@ -289,10 +323,21 @@ try {
           "--driver",
           "docker-container",
           "--driver-opt",
-          `network=host,env.HTTP_PROXY=${proxy},env.HTTPS_PROXY=${proxy}`,
+          "network=host",
+          "--driver-opt",
+          `env.HTTP_PROXY=${proxy}`,
+          "--driver-opt",
+          `env.HTTPS_PROXY=${proxy}`,
+          "--driver-opt",
+          `env.http_proxy=${proxy}`,
+          "--driver-opt",
+          `env.https_proxy=${proxy}`,
+          "--buildkitd-flags",
+          "--allow-insecure-entitlement network.host",
         ],
         { env },
       );
+    }
     args.splice(
       2,
       0,

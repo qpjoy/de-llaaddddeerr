@@ -1,5 +1,29 @@
 # DataPort 发布与域名迁移
 
+## 构建镜像拉取 EOF 与代理端口切换（2026-10-15）
+
+若构建停在 `docker.io/docker/dockerfile:1.7` 或基础镜像元数据请求并返回 `EOF`，说明构建器访问 Docker Hub 的链路失败，尚未进入数港编译和数据库迁移。先在部署服务器检查实际 HTTP 代理：
+
+```bash
+curl --proxy http://127.0.0.1:7788 --connect-timeout 10 --max-time 30 \
+  -I https://registry-1.docker.io/v2/
+```
+
+此匿名请求返回 `401 Unauthorized` 及 Docker Registry 认证提示属正常，表示已收到仓库的 HTTPS 响应；不代表随后所有镜像、认证及下载请求都已验证。若仍为 EOF 或连接拒绝，先处理该代理的监听、协议或 Docker Hub 出口，不靠删除缓存修复。
+
+旧脚本固定复用 `mx-harbor-buildproxy`，仅首次创建时配置 BuildKit 容器代理；更改 `MX_HARBOR_BUILD_PROXY` 无法更新已有构建器的镜像拉取代理。本次改为按代理地址摘要选择独立构建器，复用前核对单节点、host 网络、代理及绕过配置；旧构建器和缓存保留。新构建器明确允许 `network.host`，使构建 RUN 步骤也能访问本机代理。
+
+更新并同步本次脚本后，使用服务器实际端口重跑：
+
+```bash
+MX_HARBOR_BUILD_PROXY=http://127.0.0.1:7788 \
+  bash scripts/manage.sh ops internal-production deploy
+```
+
+若服务器暂未同步修复，可在确认没有其他构建占用这个专用构建器后，执行 `docker buildx rm --keep-state mx-harbor-buildproxy`，再用上面的原命令重跑。旧脚本会按本次传入的代理重新创建构建器；`--keep-state` 保留其构建缓存。该操作不重启 Docker、数港运行容器或 Kubernetes，不更改业务权限与网关配置。
+
+`MX_HARBOR_BUILD_PROXY` 是构建代理，不会配置 Git 的代理。构建阶段失败不会创建数港迁移 Job 或更新运行 Deployment；部署前置步骤可能已校验或同步本应用 Secret 与命名空间标签，不能据此声称整次部署完全无写入。
+
 ## 本轮：原型对齐与企业权限（2026-10-14）
 
 已实现原型尺寸与导航、固定/自定义角色、统一 MX 员工开户与邀请确认、超管新登录邀请码校验、企业共享查询历史、Excel 批量查询、风险参考建议、Key 管理、账单筛选、工单和审计。用户已授权本轮修改数港相关 Auth/Hub 链路；需要 Auth → Hub 新迁移 149 → DataPort 的发布顺序。专用服务令牌、Auth 加密密钥和现有超管邀请码必须先配置，不能直接沿用以下历史轮次的“无需迁移/不改 Auth”结论。
