@@ -14,6 +14,7 @@ export const isDirectContentSearchPlatform = platform => Object.hasOwn(TIKHUB_CO
 export function normalizeContentSearchDelivery(normalized, { dataSearch, codec, historicalCodec }) {
   const platform = normalized.platform, recipe = TIKHUB_CONTENT_SEARCH_RECIPES[platform]
   if (!recipe) throw new AppError(400, 'invalid_platform', 'Unsupported direct content-search platform')
+  if (!dataSearch && recipe.rawCompatibility === false) throw new AppError(400, 'content_search_option_unsupported', 'This platform uses the standard data/search contract; raw compatibility retains its existing route')
   const body = dataSearch ? normalized : normalized.upstreamBody
   const queryValues = dataSearch ? [body.query] : [...(body.queries || []), ...(body.keywords || [])]
   if (!queryValues.length) queryValues.push(body.query || body.keyword)

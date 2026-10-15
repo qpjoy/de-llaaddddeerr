@@ -4,6 +4,7 @@ import { randomUUID, createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { ContentSearchStateStore } from '../../server/external-platforms/content-search-store.mjs'
+import { projectContentPage } from '../../server/external-platforms/content-search-workflow.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { MemoryExternalPlatformStore, PostgresExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { normalizeTikHubContentSearchRequest, projectTikHubContentSearch, contentSearchDataItem, TIKHUB_CONTENT_SEARCH_VERSION } from '../../server/contracts/tikhub-content-search.mjs'
@@ -375,3 +376,93 @@ test('PGlite Zhihu 18+18 finalization commits 20 items and a lossless 16-item se
   const history = await f.store.historyFor({ ...f.identity, previousDeliveryId: f.target.id, jobCount: 1, totalLimit: 20 })
   assert.equal(history.seenIds[0].size, 20)
 })
+
+for (const platform of ['reddit', 'youtube']) {
+  test(`PGlite ${platform} persists its native token and all 24 acquired posts while delivering 20 once`, { skip: !modulePath }, async t => {
+    const f = await fixture(t, true, platform), capturedAt = f.archive.capturedAt
+    const original = await f.getUsage(f.source.id), nextToken = 'fixture-next+/==%25'
+    const ids = Array.from({ length: 24 }, (_, index) => `fixture${index}`)
+    // Synthetic provider pages exercise the real parser, archive reader and
+    // PostgreSQL settlement transaction, without an HTTP request or credential.
+    const nativeRows = ids.map(id => platform === 'reddit'
+      ? { id: `t3_${id}`, postTitle: `Post ${id}`, content: { markdown: `Full post ${id}` },
+          permalink: `/r/fixture/comments/${id}/post/`, createdAt: '2026-10-15T00:00:00.000Z',
+          score: 0, commentCount: 2, authorInfo: { name: 'fixture-author' } }
+      : { video_id: id, title: `Video ${id}`, description: `Full video ${id}`,
+          url: `https://www.youtube.com/watch?v=${id}`, view_count: 0 })
+    const data = platform === 'reddit'
+      ? { search: { dynamic: { components: { main: {
+          edges: nativeRows.map(post => ({ node: { post } })),
+          pageInfo: { endCursor: nextToken, hasNextPage: true },
+        } } } } }
+      : { videos: nativeRows, continuation_token: nextToken }
+    const payload = { code: 200, params: { [platform === 'reddit' ? 'after' : 'continuation_token']: 'previous-token' }, data }
+    const bodyBytes = Buffer.from(JSON.stringify(payload, null, 2)), archive = {
+      bodyBytes, bodySize: bodyBytes.length, bodySha256: digest(bodyBytes), capturedAt,
+    }
+    const request = normalizeTikHubContentSearchRequest({ platform, query: 'fixture', pageSize: 20 })
+    const { projected, records } = projectContentPage({ publicBody: { data, meta: { capturedAt } } }, request)
+    const rows = projected.acquiredItems, providerCursor = projected.providerPage.nextParams
+    const expectedCursor = { [platform === 'reddit' ? 'after' : 'continuation_token']: nextToken }
+    assert.deepEqual(providerCursor, expectedCursor)
+    assert.deepEqual(rows.map(row => row.content_id), ids)
+    const posts = records.filter(record => record.objectType === 'post')
+    assert.deepEqual(posts.map(record => record.externalId), ids)
+    assert.deepEqual(posts.map(record => record.rawItem.content_id), ids,
+      'canonical IDs and per-post detail evidence retain the original post identity')
+    assert.deepEqual(rows.map(contentSearchDataItem).map(item => item.id), ids.map(id => `${platform}:${id}`))
+    const rowsHash = digest(JSON.stringify(rows))
+    await f.setArchiveFor(f.ownCallId, archive)
+    const source = { callId: f.ownCallId, bodySize: archive.bodySize, bodySha256: archive.bodySha256,
+      capturedAt, rowsHash, own: true }
+    const job = { query: 'fixture', providerPage: 1, providerCursor, upstreamPages: 1, started: true, done: false,
+      buffer: { callId: f.ownCallId, offset: 20, hash: rowsHash, providerCursor, providerPage: 1 } }
+    const saved = { ...f.saved, sources: [source], usageUnitsActual: 20,
+      responseBody: { data: { items: rows.slice(0, 20).map(contentSearchDataItem) } },
+      manifest: { ...f.manifest, previousDeliveryId: null, state: { jobs: [job] }, deliveredIds: [ids.slice(0, 20)] } }
+    assert.equal(isPostgresSafeJsonValue(saved.manifest), false, 'shared continuation objects must not bypass the JSON guard')
+    await assert.rejects(f.store.commitDelivery(saved), { code: 'search_page_unavailable' })
+    assert.equal((await f.counts()).captures, 0)
+    job.buffer.providerCursor = { ...providerCursor }
+    assert.equal(isPostgresSafeJsonValue(saved.manifest), true)
+    for (const field of ['tenantId', 'consumerId', 'apiKeyId']) {
+      await assert.rejects(f.store.commitDelivery({ ...saved, delivery: { ...saved.delivery, [field]: randomUUID() } }),
+        { code: 'search_page_unavailable' })
+    }
+    await f.store.commitDelivery(saved)
+    const usage = await f.getUsage(f.target.id), snapshot = clone(usage)
+    const storedJob = usage.acquisitionRequest.contentSearch.state.jobs[0]
+    assert.deepEqual(storedJob.providerCursor, expectedCursor)
+    assert.deepEqual(storedJob.buffer.providerCursor, expectedCursor)
+    assert.notEqual(storedJob.providerCursor, storedJob.buffer.providerCursor)
+    assert.deepEqual(usage.responseBody, saved.responseBody)
+    assert.equal(usage.responseBody.data.items.length, 20)
+    assert.deepEqual(await f.counts(), { gateways: 1, calls: 2, captures: 1, representative: f.ownCallId, charge: 'captured' })
+    assert.equal((await f.db.query('SELECT charged_minor FROM billing.customer_charges')).rows[0].charged_minor, 9)
+    const persistedArchive = (await f.db.query(`SELECT body_bytes,body_size,body_sha256
+      FROM control.external_platform_restricted_raw_responses WHERE provider_call_id=$1`, [f.ownCallId])).rows[0]
+    assert.deepEqual(Buffer.from(persistedArchive.body_bytes), bodyBytes, 'the full upstream page retains its exact lexical bytes')
+    assert.equal(persistedArchive.body_size, bodyBytes.length)
+    assert.equal(persistedArchive.body_sha256, digest(bodyBytes))
+    const carry = await f.store.pageFor({ ...f.identity, callId: f.ownCallId })
+    assert.deepEqual(carry.payload, payload)
+    const restored = projectContentPage({ publicBody: { data: carry.payload.data, meta: { capturedAt: carry.capturedAt } } }, request)
+    assert.equal(digest(JSON.stringify(restored.projected.acquiredItems)), storedJob.buffer.hash)
+    assert.deepEqual(restored.projected.acquiredItems.slice(storedJob.buffer.offset).map(row => row.content_id), ids.slice(20))
+    const continued = normalizeTikHubContentSearchRequest({ platform, query: 'fixture', pageSize: 20,
+      page: 2, providerCursor: storedJob.providerCursor })
+    assert.equal(continued.upstreamQuery[Object.keys(expectedCursor)[0]], nextToken)
+    const historyInput = { ...f.identity, previousDeliveryId: f.target.id, jobCount: 1, totalLimit: 20 }
+    assert.deepEqual([...(await f.store.historyFor(historyInput)).seenIds[0]], ids.slice(0, 20))
+    for (const field of ['tenantId', 'consumerId', 'apiKeyId']) {
+      assert.equal(await f.store.pageFor({ ...f.identity, callId: f.ownCallId, [field]: randomUUID() }), null)
+      await assert.rejects(f.store.historyFor({ ...historyInput, [field]: randomUUID() }), { code: 'search_page_unavailable' })
+    }
+    storedJob.providerCursor[Object.keys(expectedCursor)[0]] = 'caller-mutation'
+    saved.responseBody.data.items[0].title = 'caller-mutation'
+    assert.deepEqual(await f.getUsage(f.target.id), snapshot, 're-reading a paid response cannot mutate the durable delivery')
+    await assert.rejects(f.store.commitDelivery(saved), { code: 'search_page_unavailable' })
+    assert.equal((await f.counts()).captures, 1, 'repeated finalization cannot capture another customer charge')
+    assert.deepEqual(await f.getUsage(f.source.id), original)
+  })
+}

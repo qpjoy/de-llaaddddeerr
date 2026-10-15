@@ -38,6 +38,11 @@ function searchPlatform(platform, { instagramPolicy, facebookPolicy }) {
     readOnlyReason: '关键词内容搜索由 Hub 执行已适配的固定 TikHub 合同，当前没有接入同一合同的第二供应商；不能仅改目录名称切换。账号内容与账号资料独立保留兼容链路。',
     routeSummary: 'data/search 与两个 raw 入口的关键词内容搜索、已声明筛选和关键词批量由 Hub 直连 TikHub；完整已采购页归档后按 Hub 游标交付，不再转交 Night-All。历史游标须遵循原回放及明确重启边界；crawl 和 user-info 的迁移状态分别显示。',
   }
+  if (['reddit', 'youtube'].includes(platform)) return {
+    ...row, migrationStatus: 'conditional',
+    readOnlyReason: '标准内容搜索由 Hub 执行固定 TikHub 合同，当前没有已接入的第二供应商策略；两个 raw 兼容入口仍走原链路。操作状态、凭据和采购准入独立检查，目录不代表线上已经部署或实时可用。',
+    routeSummary: 'POST /api/v1/data/search 的新内容搜索由 Hub 直连 TikHub，保留原标准请求与 items/pageInfo 合同，不转发或失败回退到 Night-All。POST /api/v1/search/raw 与 /api/v1/night-all/search/raw 继续原 Night-All 链路。已保存交付精确重放；旧 mxnc1 游标的新派发返回 409 search_restart_required，由调用方明确使用新 Idempotency-Key 从首页开始。新分页只回传本接口的 Hub 游标；账号内容和资料状态分别显示。',
+  }
   if (platform === 'twitter') return {
     ...row, migrationStatus: 'conditional',
     readOnlyReason: 'Twitter 当前固定使用 RapidAPI，尚无接入此业务合同的第二供应商。统一入口已直连，复杂 raw 仍可能经过 Night-All；两种执行路径不等于两个可切换供应商。',

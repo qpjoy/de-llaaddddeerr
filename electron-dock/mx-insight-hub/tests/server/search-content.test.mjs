@@ -11,6 +11,11 @@ import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 import { createApp } from '../../server/app.mjs'
+import { TikHubAdapter } from '../../server/adapters/tikhub.mjs'
+import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
+import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
+import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
+import { nativeForwardingEndpoint } from '../../server/contracts/native-forwarding.mjs'
 
 const COVER = 'https://media.example.test/poster.jpg?sig=original'
 const PHOTO = 'https://media.example.test/photo.jpg'
@@ -141,17 +146,66 @@ test('both canonical ingestion paths use the same media policy, retain raw evide
 })
 
 async function harness() {
-  const store = new MemoryStore(), calls = [], source = modern(), raw = legacy()
-  const service = new HubService({ store, apiKeyPepper: 'search-content-test-pepper-at-least-32-bytes', adapter: {
-    async search(input) { calls.push({ format: 'data', input }); return { payload: structuredClone(source), raw: structuredClone(source) } },
-    async legacySearch(input) { calls.push({ format: 'raw', input }); return { payload: structuredClone(raw), raw: structuredClone(raw) } },
+  const store = new MemoryStore(), calls = [], raw = legacy()
+  // Current Douyin search is a governed native acquisition. The native cover
+  // remains evidence and must not become an additional image attachment.
+  const source = { data: [{ aweme_info: { aweme_id: 'post-1', title: '原生标题', desc: '完整正文', aweme_type: 4,
+    create_time: 1791511200, author: { uid: 'author-1', nickname: '作者' },
+    statistics: { digg_count: 3, comment_count: 0, share_count: 0 },
+    video: { cover: { url_list: [COVER] }, play_addr: { url_list: [VIDEO] } },
+  } }], has_more: false }
+  const pepper = 'search-content-test-pepper-at-least-32-bytes'
+  const service = new HubService({ store, apiKeyPepper: pepper, adapter: {
+    async search() { throw new Error('Unexpected Night-All acquisition') },
+    async legacySearch() { throw new Error('Unexpected Night-All acquisition') },
   } })
   const tenant = await service.createTenant({ name: 'Search content' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Original Delta caller' })
   await service.putPlatformConfiguration('douyin', { tenantId: tenant.id, consumerId: consumer.id, enabled: true, maxRequests: 1000, windowSeconds: 3600, maxPageSize: 100 })
   const key = await service.createApiKey({ consumerId: consumer.id, name: 'Original key', platforms: ['douyin'], capabilities: [] })
   const context = await service.authenticate(key.secret)
-  return { store, service, calls, key, context, source, raw }
+  await service.setTenantBillingProfile(tenant.id,
+    { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'offline-admin')
+  await service.addTenantCredit(tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline media fixture' },
+    { idempotencyKey: 'search-content-credit', actor: 'offline-admin' })
+  const endpoint = nativeForwardingEndpoint('t.douyin_search_fetch_video_search_v1')
+  const config = { configured: true, contractVerified: true, dispatchEnabled: true, timeoutMs: 100,
+    freshTtlMs: 60000, staleTtlMs: 86400000, maxConcurrency: 3, maxConsumerConcurrency: 3, maxRequestsPerMinute: 100, billing: {} }
+  const controls = new MemoryExternalPlatformControlStore()
+  await controls.updatePolicy('tikhub', endpoint.operation, { expectedRevision: 1, desiredState: 'active', reason: 'Offline media regression',
+    priceBook: { currency: 'USD', pricingAsOf: '2026-10-08T00:00:00Z', monthlyBudgetMinor: 100000,
+      monthlySubsidyBudgetMinor: 100000, unitCostMinorByEndpoint: { [endpoint.endpointKey]: 12 } } },
+  { runtime: { config, credentialConfigured: true } })
+  const adapter = new TikHubAdapter({ apiKey: 'synthetic-only', timeoutMs: 100, fetchImpl: async (url, options) => {
+    calls.push({ path: new URL(url).pathname, method: options.method, params: JSON.parse(options.body) })
+    return Response.json({ code: 200, request_id: 'synthetic-media-receipt', data: structuredClone(source) })
+  } })
+  const platformStore = new MemoryExternalPlatformStore({ usageStore: store, providerKey: 'tikhub', authorizationPlatform: 'douyin' })
+  const gateway = new ExternalPlatformGateway({ usageStore: store, platformStore, adapter, config, providerKey: 'tikhub',
+    apiKeyPepper: pepper, reservationLeaseMs: 120000, operationControlStore: controls, logger: { warn() {} } })
+  service.externalRawSearch = (context, input) => gateway.searchContent(context, input)
+  service.externalDataSearch = (context, input) => gateway.searchContent(context, input)
+  return { store, service, calls, key, context, source, raw, platformStore }
+}
+
+function assertNativeEvidenceAndSingleCharge(h) {
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.calls[0].path, '/api/v1/douyin/search/fetch_video_search_v1')
+  assert.equal(h.calls[0].params.keyword, '汽车')
+  assert.equal(h.platformStore.calls.size, 1)
+  const call = [...h.platformStore.calls.values()][0]
+  assert.equal(call.outcome, 'succeeded')
+  assert.equal(call.itemCount, 1)
+  const archive = h.platformStore.restrictedResponseArchives.get(call.id)
+  assert.deepEqual(JSON.parse(Buffer.from(archive.bodyBytes).toString('utf8')).data, h.source)
+  assert.equal(h.platformStore.ingestJobs.length, 1)
+  const charges = [...h.store.customerCharges.values()]
+  assert.equal(charges.length, 1)
+  assert.equal(charges[0].status, 'captured')
+  assert.equal(charges[0].chargedMinor, 3)
+  assert.equal(h.store.requests.size, 1)
+  assert.equal([...h.store.requests.values()][0].status, 'committed')
+  assert.equal([...h.store.requests.values()][0].unitsActual, 1)
 }
 
 test('old raw aliases enter the shared search service, retain one raw charge and immutable replay', async t => {
@@ -181,7 +235,7 @@ test('old raw aliases enter the shared search service, retain one raw charge and
   old.responseBody = { ...h.raw, requestId: old.id }
   const replay = await h.service.nightAllCompatibilitySearch(h.context, { operation: 'raw', body: { platform: 'douyin', keyword: '汽车', count: 20 }, idempotencyKey: 'douyin-old-client', path: '/api/v1/night-all/search/raw' })
   assert.equal(JSON.parse(replay.body.data.raw_data)[0].image_urls, JSON.stringify([COVER]))
-  assert.equal(h.calls.length, 1)
+  assertNativeEvidenceAndSingleCharge(h)
 })
 
 test('data/search keeps its strict envelope, platform meter and upstream evidence with no second acquisition', async () => {
@@ -191,9 +245,9 @@ test('data/search keeps its strict envelope, platform meter and upstream evidenc
   assert.ok(isNightAllDataSearchV1Envelope(first.body))
   assert.deepEqual(first.body.data.items[0].media, { coverUrl: COVER, images: [], videos: [VIDEO] })
   assert.deepEqual((await h.service.search(h.context, input)).body, first.body)
-  assert.equal(h.calls.length, 1)
+  assertNativeEvidenceAndSingleCharge(h)
   assert.equal([...h.store.requests.values()][0].billingMeterKey, 'douyin')
-  assert.deepEqual(h.source.data.items[0].media.images, [COVER])
+  assert.deepEqual(h.source.data[0].aweme_info.video.cover.url_list, [COVER])
   await assert.rejects(() => h.service.search(h.context, { ...input, idempotencyKey: 'invalid-body-format',
     body: { ...input.body, responseFormat: 'raw' } }), error => error.code === 'unsupported_fields')
 })

@@ -21,7 +21,7 @@ const poolRack = (s, n) => {
     commandDelayMs: 200,
     cooldownMinMs: 0,
     cooldownMaxMs: 0,
-    scheduler: { enabled: true },
+    scheduler: { enabled: true, switchCostMs: 0 },
   });
   return addWorkflow(s, n, "sim", {
     key: "big",

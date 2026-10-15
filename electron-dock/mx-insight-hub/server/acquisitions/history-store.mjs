@@ -5,6 +5,7 @@ import { nightAllLegacyCountAudit } from '../contracts/night-all-count-audit.mjs
 import { verifyAcquisitionRequestCandidate } from './request-verification.mjs'
 import { canonicalPlatform } from '../hub-service.mjs'
 import { lookupRequestDiagnostics } from './diagnostics.mjs'
+import { prepareTwitterRetry } from './twitter-retry.mjs'
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const CONTRACT_VERSION = 'mx-insight-hub.acquisition-query-run.v1'
@@ -201,15 +202,21 @@ function connectorCall(row) {
 }
 
 export class PostgresAcquisitionHistoryStore {
-  constructor(pool) {
+  constructor(pool, { apiKeyPepper = null } = {}) {
     if (!pool || typeof pool.query !== 'function') {
       throw new TypeError('PostgresAcquisitionHistoryStore requires a PostgreSQL pool')
     }
     this.pool = pool
+    this.apiKeyPepper = apiKeyPepper
   }
 
   async getAdminDiagnostics(identifier) {
     return lookupRequestDiagnostics(this.pool, identifier)
+  }
+
+  async getAdminTwitterRetryPreparation(requestId) {
+    requireUuid(requestId, 'request_id')
+    return withReadSnapshot(this.pool, (client) => prepareTwitterRetry(client, requestId, { apiKeyPepper: this.apiKeyPepper }))
   }
 
   async getPublicDeliveredRun({ requestId, consumerId, apiKeyId }) {

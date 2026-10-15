@@ -28,6 +28,12 @@ const terminal = platform => {
 }
 const biliPage = (ids, page = 1, total = page) => ({ code: 0, data: { page, numPages: total,
   result: ids.map(id => ({ id, title: `真实标题 ${id}`, description: `内容 ${id}`, review: 7, play: 0 })) } })
+const internationalPage = (platform, ids, next = null) => platform === 'reddit'
+  ? { search: { dynamic: { components: { main: { edges: ids.map(id => ({ node: { post: {
+    id: `t3_${id}`, postTitle: `标题 ${id}`, content: { markdown: `完整正文 ${id}` }, score: 0,
+  } } })), pageInfo: { hasNextPage: Boolean(next), endCursor: next } } } } } }
+  : { videos: ids.map(id => ({ video_id: id, title: `标题 ${id}`, description: `完整正文 ${id}`, view_count: 0 })),
+    has_more: Boolean(next), continuation_token: next }
 // Names/types follow the hash-verified v6 single-card schema. Every value is
 // synthetic; this does not copy private suggestions, IDs or media from it.
 const douyinRelatedWordsCard = () => ({
@@ -86,13 +92,15 @@ async function harness({ platform = 'bilibili', payload, fetchImpl, leaseMs = 12
     apiKeyPepper: PEPPER, reservationLeaseMs: leaseMs, operationControlStore: controls, logger: { warn() {} } })
   service.externalRawSearch = (context, input) => gateway.searchContent(context, input)
   service.externalDataSearch = (context, input) => gateway.searchContent(context, input)
-  const invoke = (body = { platform, keyword: '城市', count: 20 }, idempotencyKey = 'content-raw-first', path = '/api/v1/night-all/search/raw') => service.nightAllCompatibilitySearch(context, { operation: 'raw', body, idempotencyKey, path })
+  const invoke = (body = { platform, keyword: '城市', count: 20 }, idempotencyKey = 'content-raw-first', path = '/api/v1/night-all/search/raw') => service.nightAllCompatibilitySearch(context, { operation: 'raw', body, idempotencyKey,
+    // app.mjs canonicalizes both public aliases before invoking the service.
+    path: path.replace('/api/v1/search/', '/api/v1/night-all/search/') })
   const invokeData = (body = { platform, query: '城市', pageSize: 20 }, idempotencyKey = 'content-data-first') => service.search(context, { body, idempotencyKey, path: '/api/v1/data/search' })
   return { store, service, platformStore, gateway, context, config, controls, recipe, calls, historical, invoke, invokeData }
 }
 
 test('all four platforms use fixed TikHub keyword endpoints for standard and both raw aliases, with immutable replay', async () => {
-  for (const platform of Object.keys(TIKHUB_CONTENT_SEARCH_RECIPES)) {
+  for (const platform of Object.keys(TIKHUB_CONTENT_SEARCH_RECIPES).filter(key => TIKHUB_CONTENT_SEARCH_RECIPES[key].rawCompatibility !== false)) {
     const h = await harness({ platform })
     const first = await h.invokeData()
     assert.equal(first.body.data.contractVersion, 'night-all.data-search.v1')
@@ -444,20 +452,20 @@ test('standard stable delivery retains its route, dataset and platform meter', a
 })
 
 test('historical standard signed cursor replays original committed body before restart and retains old stable failure', async () => {
-  for (const type of ['fresh', 'stable']) {
+  for (const platform of ['bilibili', 'reddit', 'youtube']) for (const type of ['fresh', 'stable']) {
     for (const responseStatus of [200, 502]) {
-      const h = await harness()
-      const body = { platform: 'bilibili', query: '城市', pageSize: 20 }
+      const h = await harness({ platform })
+      const body = { platform, query: platform === 'bilibili' ? '城市' : '城'.repeat(500), pageSize: 20 }
       const codec = createNightAllCompatibilityCursorCodec(PEPPER, h.context.consumer.id)
-      const traversal = prepareNightAllCompatibilityTraversal({ operation: 'data-search', platform: 'bilibili', upstreamBody: body, codec })
+      const traversal = prepareNightAllCompatibilityTraversal({ operation: 'data-search', platform, upstreamBody: body, codec })
       const wrapped = capNightAllDataSearchTraversal({ data: { pageInfo: { pageIndex: 1, pageSize: 20, returnedCount: 0,
-        hasMore: true, nextCursor: 'old-native-token', cursorType: 'opaque' }, warnings: [] } }, { platform: 'bilibili', page: 1, scope: traversal.scope, codec })
+        hasMore: true, nextCursor: 'old-native-token', cursorType: 'opaque' }, warnings: [] } }, { platform, page: 1, scope: traversal.scope, codec })
       const cursor = wrapped.data.pageInfo.nextCursor
       const id = randomUUID(), saved = responseStatus === 200 ? { original: true, requestId: id }
         : { error: { code: 'old_upstream_failure', message: 'Original saved error' }, requestId: id }
       await h.store.reserve({ requestId: id, idempotencyKey: 'historical-standard-page',
         fingerprint: requestFingerprint({ method: 'POST', path: '/api/v1/data/search', body: { ...body, cursor: 'old-native-token', type } }),
-        tenantId: h.context.tenant.id, consumerId: h.context.consumer.id, apiKeyId: h.context.apiKey.id, platform: 'bilibili',
+        tenantId: h.context.tenant.id, consumerId: h.context.consumer.id, apiKeyId: h.context.apiKey.id, platform,
         unitsReserved: 1, leaseExpiresAt: new Date(Date.now() + 120000), windowStart: new Date(Date.now() - 60000), maxRequests: 100 })
       await h.store.commitRequest(id, { responseStatus, responseBody: saved, unitsActual: 1 })
       if (responseStatus === 200) assert.deepEqual((await h.invokeData({ ...body, type, cursor }, 'historical-standard-page')).body, saved)
@@ -765,3 +773,124 @@ for (const field of ['caption', 'image', 'cursor']) {
     assert.equal(h.calls.length, 1); assert.deepEqual([...h.store.requests.values()][0], before)
   })
 }
+
+for (const platform of ['reddit', 'youtube']) {
+  test(`${platform} standard search fills 19+5, buffers all paid overflow and replays without Night-All`, async () => {
+    const firstIds = Array.from({ length: 19 }, (_, i) => `first-${i}`)
+    const secondIds = Array.from({ length: 5 }, (_, i) => `second-${i}`)
+    const h = await harness({ platform, payload: (_call, n) => n === 1
+      ? internationalPage(platform, firstIds, 'next-page-token') : internationalPage(platform, secondIds) })
+    await h.service.setTenantBillingProfile(h.context.tenant.id,
+      { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'offline-admin')
+    await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline fixture' },
+      { idempotencyKey: 'international-content-credit', actor: 'offline-admin' })
+    const body = { platform, query: 'Zhejiang public incident', pageSize: 20 }
+    const first = await h.invokeData(body)
+    assert.equal(first.body.data.contractVersion, 'night-all.data-search.v1')
+    assert.equal(first.body.data.platform, platform)
+    assert.equal(first.body.data.query, body.query)
+    assert.deepEqual(first.body.data.items.map(row => row.externalId), [...firstIds, secondIds[0]])
+    assert.equal(first.body.data.items[0].id, `${platform}:${firstIds[0]}`)
+    assert.equal(first.body.data.items[0].metrics[platform === 'reddit' ? 'likes' : 'views'], 0)
+    assert.equal(first.body.data.items[0].metrics.comments, null)
+    assert.equal(first.body.data.pageInfo.returnedCount, 20)
+    assert.match(first.body.data.pageInfo.nextCursor, /^mxds1\./)
+    assert.equal(h.calls.length, 2)
+    assert.ok(h.calls.every(call => call.url.pathname === h.recipe.path && call.options.method === 'GET'))
+    assert.equal(h.calls[0].params[platform === 'reddit' ? 'query' : 'keyword'], body.query)
+    assert.equal(h.calls[1].params[platform === 'reddit' ? 'after' : 'continuation_token'], 'next-page-token')
+    assert.ok(h.calls.every(call => !Object.hasOwn(call.params, 'page_size') && !Object.hasOwn(call.params, 'count')))
+    assert.deepEqual([...h.platformStore.calls.values()].map(call => call.itemCount), [19, 5])
+    assert.equal(h.platformStore.restrictedResponseArchives.size, 2)
+    assert.equal(h.platformStore.ingestJobs.length, 2)
+    assert.ok(h.platformStore.ingestJobs.every(job => job.payload.datasetId === 'night-all.search.v1'))
+    const saved = h.store.requests.get(first.requestId)
+    assert.equal(saved.billingMeterKey, platform)
+    assert.ok(isPostgresSafeJsonValue(saved.acquisitionRequest.contentSearch))
+    assert.equal([...h.store.customerCharges.values()].filter(row => row.status === 'captured').length, 1)
+    assert.deepEqual((await h.invokeData(body)).body, first.body)
+    assert.equal(h.calls.length, 2)
+    const second = await h.invokeData({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'international-content-second')
+    assert.deepEqual(second.body.data.items.map(row => row.externalId), secondIds.slice(1))
+    assert.equal(second.body.data.pageInfo.hasMore, false)
+    assert.equal(second.body.data.pageInfo.nextCursor, null)
+    assert.equal(h.calls.length, 2, 'a terminal archived remainder needs no additional supplier purchase')
+    assert.equal(h.platformStore.ingestJobs.length, 2)
+    assert.equal(h.historical.length, 0)
+  })
+
+  test(`${platform} raw aliases retain their original forwarding and parameter contract`, async () => {
+    const h = await harness({ platform })
+    const payload = { data: { platform, raw_info: '[]', raw_data: '[]', page: { page: 1, hasMore: false },
+      status: 'ok', warnings: [], meta: { original: true } } }
+    h.service.adapter.legacySearch = async input => { h.historical.push(input); return { payload, raw: payload } }
+    const body = { platform, keyword: 'original raw query', count: 20, includeDetails: true, params: { fixture: 'original-filter' } }
+    const first = await h.invoke(body, 'international-original-raw')
+    assert.equal(h.historical.length, 1)
+    assert.equal(h.historical[0].operation, 'raw')
+    assert.equal(h.historical[0].body.includeDetails, true)
+    assert.deepEqual(h.historical[0].body.params, body.params)
+    assert.deepEqual((await h.invoke(body, 'international-original-raw', '/api/v1/search/raw')).body, first.body)
+    assert.equal(h.historical.length, 1)
+    assert.equal(h.calls.length, 0)
+  })
+
+  test(`${platform} public contract rejects supplier options and never falls back when native execution is unavailable`, async () => {
+    const h = await harness({ platform })
+    const body = { platform, query: 'same query', pageSize: 20 }
+    for (const extra of [{ params: {} }, { provider: 'tikhub' }, { includeDetails: true }]) {
+      await assert.rejects(h.invokeData({ ...body, ...extra }), error => error.status === 400 && error.code === 'unsupported_fields')
+    }
+    await assert.rejects(h.invokeData({ ...body, cursor: 'unwrapped-provider-token' }),
+      error => error.status === 400 && error.code === 'content_search_pagination_unsupported')
+    h.service.externalDataSearch = null
+    await assert.rejects(h.invokeData(body), error => error.status === 503 && error.code === 'content_search_unavailable')
+    assert.equal(h.calls.length, 0)
+    assert.equal(h.historical.length, 0)
+  })
+
+  test(`${platform} direct cursors remain bound to query, page size and API Key`, async () => {
+    const h = await harness({ platform, payload: internationalPage(platform, ['one', 'two']) })
+    const body = { platform, query: 'cursor query', pageSize: 1 }
+    const first = await h.invokeData(body)
+    const cursor = first.body.data.pageInfo.nextCursor
+    for (const change of [{ query: 'another' }, { pageSize: 2 }]) {
+      await assert.rejects(h.invokeData({ ...body, cursor, ...change }, 'international-invalid-cursor'), error => error.code === 'invalid_cursor')
+    }
+    const issued = await h.service.createApiKey({ consumerId: h.context.consumer.id, name: 'Another Key', platforms: [platform], capabilities: [] })
+    const context = await h.service.authenticate(issued.secret)
+    await assert.rejects(h.service.search(context, { body: { ...body, cursor }, idempotencyKey: 'international-another-key', path: '/api/v1/data/search' }),
+      error => error.code === 'invalid_cursor')
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.historical.length, 0)
+  })
+
+  test(`${platform} uncertain second supplier call holds the original work without automatic retry or historical fallback`, async () => {
+    const h = await harness({ platform, fetchImpl: (_call, n) => {
+      if (n === 2) throw new TypeError('synthetic transport uncertainty')
+      return Response.json({ code: 200, data: internationalPage(platform, ['one'], 'next-page-token') })
+    } })
+    const body = { platform, query: 'uncertain query', pageSize: 20 }
+    await assert.rejects(h.invokeData(body), error => ['upstream_outcome_unknown', 'request_outcome_unknown'].includes(error.code))
+    assert.equal([...h.store.requests.values()][0].status, 'unknown')
+    await assert.rejects(h.invokeData(body, 'international-uncertain-new-key'), error => error.code === 'request_outcome_unknown')
+    assert.equal(h.calls.length, 2)
+    assert.equal(h.historical.length, 0)
+  })
+}
+
+for (const platform of ['reddit', 'youtube']) test(`${platform} a repeated continuation retains paid content with an explicit partial stop`, async () => {
+  const h = await harness({ platform, payload: (_call, n) => internationalPage(platform, [String(n)], 'same-token') })
+  const result = await h.invokeData({ platform, query: 'repeat query', pageSize: 20 })
+  assert.deepEqual(result.body.data.items.map(row => row.externalId), ['1', '2'])
+  assert.equal(result.body.data.status, 'partial')
+  assert.ok(result.body.data.warnings.some(row => row.code === 'content_search_repeated_cursor'))
+  assert.equal(result.body.data.pageInfo.hasMore, false)
+  assert.equal(result.body.data.pageInfo.nextCursor, null)
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.historical.length, 0)
+  assert.ok([...h.platformStore.calls.values()].every(call => call.outcome === 'succeeded'))
+  assert.equal(h.platformStore.ingestJobs.length, 2)
+  assert.deepEqual((await h.invokeData({ platform, query: 'repeat query', pageSize: 20 })).body, result.body)
+  assert.equal(h.calls.length, 2)
+})

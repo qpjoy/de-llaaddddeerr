@@ -48,6 +48,20 @@ export const RULE_KINDS = [
   },
 ];
 
+// Rule fields added after the first catalog release. They are optional in
+// stored rules and default from the pool policy (see normalizeRule).
+export const RULE_OPTIONAL_DEFAULTS = Object.freeze({
+  placement: Object.freeze({
+    switchCostMs: DEFAULT_POOL_POLICY.switchCostMs,
+  }),
+  queue: Object.freeze({
+    stickyGainMs: DEFAULT_POOL_POLICY.stickyGainMs,
+    stickyGainPct: DEFAULT_POOL_POLICY.stickyGainPct,
+    maxPlanMoves: DEFAULT_POOL_POLICY.maxPlanMoves,
+    planFreezeMs: DEFAULT_POOL_POLICY.planFreezeMs,
+  }),
+});
+
 export const HARD_SCHEDULING_CONSTRAINTS = [
   {
     code: "one-stream",
@@ -130,6 +144,13 @@ export const BUILTIN_RULE_DEFINITIONS = [
   ),
 ];
 
+// Seeds stay byte-identical to migration 008; later optional fields are
+// defaulted when a strategy is compiled or applied, not stored in the seed.
+const seedPolicy = (policy) => {
+  for (const key of Object.values(RULE_OPTIONAL_DEFAULTS).flatMap(Object.keys))
+    delete policy[key];
+  return policy;
+};
 const seedStrategy = (
   code,
   name,
@@ -157,11 +178,13 @@ const seedStrategy = (
     archived: false,
     recommended,
     rules,
-    policy: normalizePoolPolicy({
-      ...rules[0].definition.config,
-      ...rules[1].definition.config,
-      appDefaults: rules[2].definition.config,
-    }),
+    policy: seedPolicy(
+      normalizePoolPolicy({
+        ...rules[0].definition.config,
+        ...rules[1].definition.config,
+        appDefaults: rules[2].definition.config,
+      }),
+    ),
     createdAt: 0,
   };
 };

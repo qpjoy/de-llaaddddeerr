@@ -1844,6 +1844,18 @@ export function createApp({
         }, { 'cache-control': 'private, no-store' })
         return
       }
+      params = routeMatch(pathname, '/internal/v1/admin/acquisitions/:requestId/twitter-retry')
+      if (request.method === 'GET' && params) {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'Twitter retry preparation')
+        if (!acquisitionHistory?.getAdminTwitterRetryPreparation) {
+          throw new AppError(503, 'twitter_retry_unavailable', 'Twitter 重试准备需要 PostgreSQL 历史证据')
+        }
+        sendJson(response, 200, {
+          data: await acquisitionHistory.getAdminTwitterRetryPreparation(params.requestId), requestId,
+        }, { 'cache-control': 'private, no-store' })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/acquisitions/:requestId/verify-request')
       if (request.method === 'POST' && params) {
         requireSourceAdmin(principal)
@@ -6452,6 +6464,7 @@ export function createApp({
           signal,
           body,
           idempotencyKey: request.headers['idempotency-key'],
+          retryOfRequestId: request.headers['x-mx-insight-retry-of'],
           path: pathname,
         }))
         sendJson(response, result.status, { ...result.body, requestId: result.requestId }, {

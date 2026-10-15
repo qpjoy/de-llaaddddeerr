@@ -118,13 +118,19 @@ export function DeviceForm({
               <input
                 name="workerId"
                 list="workers"
-                defaultValue={workers[0]?.id || "mx-internal-server-worker"}
+                defaultValue={
+                  workers[0]?.workerId ??
+                  workers[0]?.id ??
+                  "mx-internal-server-worker"
+                }
                 required
               />
               <datalist id="workers">
-                {workers.map((w) => (
-                  <option key={w.id} value={w.id} />
-                ))}
+                {[...new Set(workers.map((w) => w.workerId ?? w.id))].map(
+                  (id) => (
+                    <option key={id} value={id} />
+                  ),
+                )}
               </datalist>
             </label>
             <label>

@@ -148,7 +148,7 @@ export function simulationOptions(body = {}) {
   return { scenario, deviceCount, seed, policy };
 }
 
-function execute(options, jobs, baseline = false) {
+function execute(options, jobs, baseline = false, experiment = {}) {
   const { scenario, deviceCount } = options;
   const policy = {
     ...options.policy,
@@ -178,6 +178,7 @@ function execute(options, jobs, baseline = false) {
     index = 0,
     replans = 0,
     appSwitches = 0,
+    switchTimeMs = 0,
     violations = 0;
   let changed = false,
     failed = false,
@@ -220,6 +221,7 @@ function execute(options, jobs, baseline = false) {
     busyTime.set(d.id, 0);
     if (scenario === "affinity" && number === 0) {
       d.projection = { appId: "xhs" };
+      d.foregroundAppId = "xhs";
       const app = state.apps.find(
         (a) => a.deviceId === d.id && a.appId === "xhs",
       );
@@ -292,7 +294,18 @@ function execute(options, jobs, baseline = false) {
     const command = beginCommand(state, now, work.attempt);
     requireThat(command, "模拟指令无法开始");
     const spec = jobSpecs.get(work.job.id);
-    const duration = spec.duration[command.stepIndex] || 1000;
+    // beginCommand adds the policy's switch cost when the App is not in front.
+    // Experiments may fix the modeled switch independently of what the planner
+    // assumes, to compare a switch-aware plan with an unaware one fairly.
+    const switchMs =
+      experiment.modeledSwitchMs == null
+        ? command.switchMs || 0
+        : command.definition?.action === "open" &&
+            work.device.foregroundAppId !== work.job.appId
+          ? experiment.modeledSwitchMs
+          : 0;
+    const duration = (spec.duration[command.stepIndex] || 1000) + switchMs;
+    switchTimeMs += switchMs;
     active.set(work.device.id, { work, command, end: now + duration });
     if (command.stepIndex === 0) {
       if (
@@ -408,7 +421,9 @@ function execute(options, jobs, baseline = false) {
       lastPlan.set(assignment.jobId, assignment.deviceId);
     }
     let work;
-    while ((work = claim(state, now, "sim", "virtual-worker"))) start(work);
+    const round = {};
+    while ((work = claim(state, now, "sim", "virtual-worker", { round })))
+      start(work);
     peak = Math.max(peak, active.size);
     for (const d of state.devices) {
       if (
@@ -465,6 +480,7 @@ function execute(options, jobs, baseline = false) {
       ),
       utilization: totalCapacityMs ? totalBusy / totalCapacityMs : 0,
       appSwitches,
+      switchTimeMs,
       replans,
       peakConcurrency: peak,
       invariantViolations: violations,
@@ -494,11 +510,13 @@ function execute(options, jobs, baseline = false) {
   };
 }
 
-export function runPoolSimulation(body) {
+// experiment (internal, not exposed over HTTP): { modeledSwitchMs } fixes the
+// simulated App switch time regardless of the policy's planning assumption.
+export function runPoolSimulation(body, experiment = {}) {
   const options = simulationOptions(body);
   const jobs = workload(options.scenario, options.deviceCount, options.seed);
-  const current = execute(options, jobs);
-  const baseline = execute(options, jobs, true);
+  const current = execute(options, jobs, false, experiment);
+  const baseline = execute(options, jobs, true, experiment);
   return {
     ...options,
     name: POOL_SCENARIOS.find((s) => s.id === options.scenario).name,
@@ -517,7 +535,8 @@ export function runPoolSimulation(body) {
     limitations: [
       "本次是隔离的虚拟时钟演练，不保存到运行中任务池，不调用真实手机。",
       "相同 seed 使用相同逐指令耗时；对照仅比较放置策略，不证明普遍最优。",
-      "100 台是虚拟调度实验；当前在线 Worker 仍最多并行 10 个模拟执行，不是生产容量或 HA 验收。",
+      "100 台是虚拟调度实验；在线 Worker 默认并行 10 个模拟执行（可配置），不是生产容量或 HA 验收。",
+      "App 切换按策略的切换耗时计入会话第一条打开指令；真实切换耗时需实测校准。",
       "任务最长模拟 10 分钟，未完成项明确保留；等待分位数只统计已开始任务，应结合积压一起判断。",
       "耗时校准来自合成回执；平台限流、真实页面恢复、账号安全、Hub 业务结果契约仍需独立验收。",
     ],

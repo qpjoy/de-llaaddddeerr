@@ -50,7 +50,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
     || request.body.commentLimit != null || request.body.cacheMaxAgeHours != null) {
     throw new AppError(400, 'content_search_option_unsupported', 'Direct content search does not execute paid detail/comments or cache-hint options; use the dedicated data product or explicitly remove these options')
   }
-  const defaults = { page: 1, offset: 0, cursor: 0, search_id: '', backtrace: '', pcursor: '', search_hash_id: '' }
+  const defaults = { page: 1, offset: 0, cursor: 0, search_id: '', backtrace: '', pcursor: '', search_hash_id: '', after: '', continuation_token: '' }
   for (const [name, expected] of Object.entries(defaults)) {
     if (Object.hasOwn(request.params, name) && String(request.params[name]) !== String(expected)) {
       throw new AppError(400, 'content_search_pagination_unsupported', 'Native continuation parameters cannot replace the signed Hub cursor; restart explicitly')
@@ -61,7 +61,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
       throw new AppError(400, 'content_search_pagination_unsupported', 'Native page size must equal the public request page size')
     }
   }
-  if (Object.hasOwn(request.params, 'keyword') && request.params.keyword !== request.queries[0]) {
+  if (['keyword', 'query'].some(name => Object.hasOwn(request.params, name) && request.params[name] !== request.queries[0])) {
     throw new AppError(400, 'unsupported_fields', 'Use the public keyword/query field for content search')
   }
   const sample = normalizeTikHubContentSearchRequest({ platform: request.platform, query: request.queries[0],
@@ -121,6 +121,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
       rowsByJob[index].push(row)
     }
     if (projected.nonPostCount) warn('non_post_items_excluded', 'The provider returned non-content entries; these were excluded from content results.')
+    if (projected.providerPage.stopReason === 'repeated_cursor') warn('content_search_repeated_cursor', 'The supplier repeated its continuation; acquired content was retained and further acquisition stopped.')
     if (rows.some(row => ['provider_preview', 'title_only'].includes(row.body_completeness))) {
       warn('body_completeness_unknown', 'Some returned content is a provider preview; full text was not independently acquired.')
     }

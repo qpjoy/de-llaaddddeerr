@@ -8,6 +8,15 @@ export const DEFAULT_POOL_POLICY = Object.freeze({
   maxQueueWaitMs: 30000,
   maxQueuePerDevice: 100,
   shortTaskMs: 15000,
+  // Extra device time to open an App that is not the device's warm App.
+  switchCostMs: 3000,
+  // Plan stability: a planned job moves to another device only if that finishes
+  // at least max(stickyGainMs, stickyGainPct% of its remaining time) earlier,
+  // at most maxPlanMoves times, and never within planFreezeMs of its start.
+  stickyGainMs: 2000,
+  stickyGainPct: 20,
+  maxPlanMoves: 3,
+  planFreezeMs: 1000,
   appDefaults: Object.freeze({
     windowMs: 60000,
     maxRuns: 3,
@@ -63,6 +72,11 @@ export function normalizePoolPolicy(input = {}) {
       maxQueueWaitMs: [0, 86400000],
       maxQueuePerDevice: [1, 10000],
       shortTaskMs: [1000, 180000],
+      switchCostMs: [0, 600000],
+      stickyGainMs: [0, 600000],
+      stickyGainPct: [0, 100],
+      maxPlanMoves: [0, 100],
+      planFreezeMs: [0, 60000],
     },
     "scheduler",
   );

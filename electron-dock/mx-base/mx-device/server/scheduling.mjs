@@ -113,6 +113,18 @@ export function deviceBlockers(state, now, d, index) {
   if (index && index.now === now) index.blockers.set(d.id, reasons);
   return reasons;
 }
+// Simulation slots of the scheduler that places simulation work: the fresh
+// leader(s), or fresh workers that predate leadership. Unknown without one.
+export function placingSlots(state, now) {
+  const fresh = (state.workers || []).filter(
+    (w) => w.role === "device-worker" && workerHealth(w, now) === "fresh",
+  );
+  const leaders = fresh.filter((w) => w.scheduler === "leader");
+  const placing = leaders.length ? leaders : fresh.filter((w) => !w.scheduler);
+  return placing.length
+    ? placing.reduce((n, w) => n + (w.maxSimulationInflight ?? 10), 0)
+    : null;
+}
 export function workerHealth(worker, now) {
   if (!worker || now - worker.at >= 10000 || worker.at > now + 1000)
     return "stale";
@@ -122,7 +134,7 @@ function workerBlockers(state, now, device) {
   const workers = (state.workers || []).filter(
     (w) =>
       w.role === "device-worker" &&
-      (device.mode === "sim" || w.id === device.workerId),
+      (device.mode === "sim" || (w.workerId ?? w.id) === device.workerId),
   );
   const healthy = workers.filter((w) => workerHealth(w, now) === "fresh");
   if (!healthy.length)
@@ -247,7 +259,12 @@ export function schedulingSnapshot(
     mode === "sim"
       ? (state.loopPolicies || [])
           .filter((p) => p.mode === "sim" && p.scheduler?.enabled)
-          .map((p) => planPool(state, now, { rack: p.rack }))
+          .map((p) =>
+            planPool(state, now, {
+              rack: p.rack,
+              executorSlots: placingSlots(state, now),
+            }),
+          )
       : [];
   const plansByRack = new Map(poolPlans.map((p) => [p.rack, p]));
   // Plan lookups grouped by job, preserving plan order.

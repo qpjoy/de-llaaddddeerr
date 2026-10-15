@@ -141,8 +141,8 @@ before(async () => {
     const body = JSON.parse(options.body)
     upstreamBodies.push(body)
     upstreamCalls.set(body.platform, (upstreamCalls.get(body.platform) || 0) + 1)
-    if (body.platform === 'douyin') throw new TypeError('connection reset')
-    if (body.platform === 'reddit') return jsonResponse({ error: { code: 'unavailable' } }, 503)
+    if (body.platform === 'tiktok') throw new TypeError('connection reset')
+    if (body.platform === 'linkedin') return jsonResponse({ error: { code: 'unavailable' } }, 503)
     return jsonResponse(nightAllSearchEnvelope(body))
   }
   adapter = new NightAllAdapter({ baseUrl: 'http://night-all.invalid', fetchImpl })
@@ -1117,7 +1117,8 @@ test('Night-All compatibility route preserves the envelope and serves only an ex
 test('ambiguous historical POST is called once and held in unknown state', async () => {
   const tenant = (await store.listTenants())[0]
   const consumer = (await store.listConsumers(tenant.id))[0]
-  await call('/internal/v1/admin/platforms/douyin', {
+  // TikTok remains on the historical keyword adapter; migrated platforms fail closed in Hub.
+  await call('/internal/v1/admin/platforms/tiktok', {
     method: 'PUT',
     headers: adminHeaders,
     body: { tenantId: tenant.id, consumerId: consumer.id, enabled: true },
@@ -1125,32 +1126,32 @@ test('ambiguous historical POST is called once and held in unknown state', async
   const issued = await call('/internal/v1/admin/api-keys', {
     method: 'POST',
     headers: adminHeaders,
-    body: { consumerId: consumer.id, name: 'Unknown test key', platforms: ['douyin'] },
+    body: { consumerId: consumer.id, name: 'Unknown test key', platforms: ['tiktok'] },
   })
   const headers = { authorization: `Bearer ${issued.payload.data.secret}` }
   const first = await call('/api/v1/data/search', {
     method: 'POST',
     headers: { ...headers, 'idempotency-key': 'unknown-one' },
-    body: { platform: 'douyin', query: 'AI' },
+    body: { platform: 'tiktok', query: 'AI' },
   })
   assert.equal(first.response.status, 502)
   assert.equal(first.payload.error.code, 'upstream_outcome_unknown')
-  assert.equal(upstreamCalls.get('douyin'), 1)
+  assert.equal(upstreamCalls.get('tiktok'), 1)
 
   const second = await call('/api/v1/data/search', {
     method: 'POST',
     headers: { ...headers, 'idempotency-key': 'unknown-one' },
-    body: { platform: 'douyin', query: 'AI' },
+    body: { platform: 'tiktok', query: 'AI' },
   })
   assert.equal(second.response.status, 409)
   assert.equal(second.payload.error.code, 'request_outcome_unknown')
-  assert.equal(upstreamCalls.get('douyin'), 1)
+  assert.equal(upstreamCalls.get('tiktok'), 1)
 })
 
 test('known upstream rejection releases reservation so explicit retry is possible', async () => {
   const tenant = (await store.listTenants())[0]
   const consumer = (await store.listConsumers(tenant.id))[0]
-  await call('/internal/v1/admin/platforms/reddit', {
+  await call('/internal/v1/admin/platforms/linkedin', {
     method: 'PUT',
     headers: adminHeaders,
     body: { tenantId: tenant.id, consumerId: consumer.id, enabled: true },
@@ -1158,10 +1159,10 @@ test('known upstream rejection releases reservation so explicit retry is possibl
   const issued = await call('/internal/v1/admin/api-keys', {
     method: 'POST',
     headers: adminHeaders,
-    body: { consumerId: consumer.id, name: 'Release test key', platforms: ['reddit'] },
+    body: { consumerId: consumer.id, name: 'Release test key', platforms: ['linkedin'] },
   })
   const headers = { authorization: `Bearer ${issued.payload.data.secret}`, 'idempotency-key': 'released-one' }
-  const body = { platform: 'reddit', query: 'AI' }
+  const body = { platform: 'linkedin', query: 'AI' }
   const first = await call('/api/v1/data/search', { method: 'POST', headers, body })
   const second = await call('/api/v1/data/search', { method: 'POST', headers, body })
   assert.equal(first.payload.error.code, 'night_all_rejected')
@@ -1177,20 +1178,20 @@ test('known upstream rejection releases reservation so explicit retry is possibl
     assert.equal(result.response.headers.get('x-mx-insight-request-id'), result.payload.requestId)
     assert.equal(store.requests.get(result.payload.requestId).status, 'released')
   }
-  assert.equal(upstreamCalls.get('reddit'), 2)
+  assert.equal(upstreamCalls.get('linkedin'), 2)
 })
 
 test('all legacy HTTP aliases include the Night-All code without exposing nested diagnostics', async () => {
   const tenant = await store.createTenant({ name: 'Rejection tenant' })
   const consumer = await store.createConsumer({ tenantId: tenant.id, name: 'Rejection consumer', businessId: 'rejection-test' })
-  await store.replaceGrants(consumer.id, ['douyin'])
-  const issued = await service.createApiKey({ consumerId: consumer.id, name: 'Rejection key', platforms: ['douyin'] })
+  await store.replaceGrants(consumer.id, ['reddit', 'douyin'])
+  const issued = await service.createApiKey({ consumerId: consumer.id, name: 'Rejection key', platforms: ['reddit', 'douyin'] })
   for (const prefix of ['/api/v1/search', '/api/v1/night-all/search']) {
     for (const operation of ['raw', 'crawl', 'user-info']) {
       const result = await call(`${prefix}/${operation}`, {
         method: 'POST',
         headers: { authorization: `Bearer ${issued.secret}`, 'idempotency-key': `rejection-${prefix.includes('night-all')}-${operation}` },
-        body: { platform: 'douyin', [operation === 'raw' ? 'keyword' : 'username']: 'compat-rejected', count: 1 },
+        body: { platform: operation === 'user-info' ? 'douyin' : 'reddit', [operation === 'raw' ? 'keyword' : 'username']: 'compat-rejected', count: 1 },
       })
       assert.equal(result.response.status, 502)
       assert.equal(result.payload.error.code, 'night_all_rejected')

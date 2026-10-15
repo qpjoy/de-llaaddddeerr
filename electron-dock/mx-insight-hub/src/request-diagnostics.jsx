@@ -4,6 +4,7 @@ import { adminApi } from './api.js'
 import { ErrorState } from './components.jsx'
 import { AcquisitionComparison } from './acquisition-comparison.jsx'
 import { acquisitionComparisonSessionFor } from './acquisition-comparison.js'
+import { TwitterRequestRetry } from './twitter-request-retry.jsx'
 import './request-diagnostics.css'
 
 const shown = value => value == null || value === '' ? '未记录' : String(value)
@@ -57,6 +58,7 @@ function RequestValidation({ token, run, session, onUnauthorized }) {
       if ([401, 403].includes(error.status)) onUnauthorized?.(error)
     } finally { session.update({ loading: false }) }
   }
+  if (run.platform === 'twitter' && run.status === 'unknown') return <TwitterRequestRetry {...{ token, run, session }}/>
   if (!run.replayAvailable) return <p className="mih-diagnostic-note">该请求尚无可复现的已提交响应，暂不支持按原参数重新验证。处理中或结果未知时，请先核对原请求结果。</p>
   if (original) return <AcquisitionComparison {...{ token, original, session }} savedOnly/>
   return <section className="mih-diagnostic-validation">

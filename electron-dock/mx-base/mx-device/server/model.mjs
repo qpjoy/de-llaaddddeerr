@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from "node:crypto";
-import { planPool } from "./pool-planner.mjs";
+import { planPool, recordPlans } from "./pool-planner.mjs";
 import { commandDefinitions } from "./command-registry.mjs";
 import {
   deviceBlockers,
@@ -583,7 +583,16 @@ export function sweep(s, now, mode) {
   sweepSessions(s, now, mode);
 }
 // reference: true decides without the read-only index (equivalence tests).
-export function claim(s, now, mode, workerId, { reference = false } = {}) {
+// round: an object shared by the claims of one transaction (same state and
+// instant); pool plans are computed once per round, not once per claim.
+// executorSlots: the claiming executor's simulation slots (capacity-aware plans).
+export function claim(
+  s,
+  now,
+  mode,
+  workerId,
+  { reference = false, round = null, executorSlots = null } = {},
+) {
   sweep(s, now, mode);
   // Built after sweep; the decision below only mutates state once it returns.
   const index = reference ? undefined : schedulingIndex(s, now);
@@ -605,13 +614,24 @@ export function claim(s, now, mode, workerId, { reference = false } = {}) {
     (j) => j.mode === mode && j.status === "queued" && j.notBefore <= now,
   );
   pending.sort(compareJobs(now));
-  const poolPlans = new Map(
-    mode === "sim" && devices.length
-      ? (s.loopPolicies || [])
-          .filter((p) => p.mode === "sim" && p.scheduler?.enabled)
-          .map((p) => [p.rack, planPool(s, now, { rack: p.rack })])
-      : [],
-  );
+  let poolPlans = round?.plans;
+  if (!poolPlans) {
+    // Planned even when no device is free, so every round records the plan
+    // that stickiness compares against.
+    poolPlans = new Map(
+      mode === "sim" && pending.length
+        ? (s.loopPolicies || [])
+            .filter((p) => p.mode === "sim" && p.scheduler?.enabled)
+            .map((p) => [
+              p.rack,
+              planPool(s, now, { rack: p.rack, executorSlots }),
+            ])
+        : [],
+    );
+    // Persist planned devices so the next round's plan is sticky.
+    recordPlans(s, now, poolPlans.values());
+    if (round) round.plans = poolPlans;
+  }
   for (const j of pending) {
     if (j.sourceJobId) {
       const src = s.jobs.find((x) => x.id === j.sourceJobId);

@@ -11,7 +11,9 @@ try {
   );
   store = new PgStore(cfg.databaseUrl);
   const result = await store.pool.query(
-    `SELECT 1 FROM mx_device.workers WHERE id=$1 AND document->>'instanceId'=$2
+    // Rows are keyed per instance (workerId/instanceId) when the worker runs
+    // with scheduler leadership; older single-instance rows use workerId.
+    `SELECT 1 FROM mx_device.workers WHERE id IN ($1, $1 || '/' || $2) AND document->>'instanceId'=$2
      AND at > (extract(epoch FROM clock_timestamp())*1000)-10000
      AND document->>'lastError' IS NULL`,
     [cfg.workerId, instanceId],

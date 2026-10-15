@@ -36,7 +36,9 @@ function fixture(count = 2, scheduler = {}) {
     largeLimit: 100,
     cooldownMinMs: 0,
     cooldownMaxMs: 0,
-    scheduler,
+    // Older cases isolate affinity, budgets and capacity from switch cost;
+    // switch cost and plan stability have their own tests below.
+    scheduler: { switchCostMs: 0, ...scheduler },
   });
   return s;
 }

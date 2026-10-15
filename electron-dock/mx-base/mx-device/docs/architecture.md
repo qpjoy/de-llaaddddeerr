@@ -31,7 +31,7 @@
 - event loop：事件驱动、短事务处理状态、慢 I/O 在事务外；不能仅靠单个 Node 进程内的队列保存真实任务。
 - 数据库：持久任务、原子领取、唯一占用约束、执行尝试、租约与回执校验。数据库锁保护调度记录，**不是手机上的取消令牌或物理锁**。
 
-首版每个模式使用 PostgreSQL 事务级 advisory lock，短暂串行化调度决策；HTTP 不在事务内。数据库另有每设备、每任务最多一个 running Attempt 的部分唯一索引。多个手机的耗时执行可以并行，不是整个系统串行。锁语义依据 [PostgreSQL 官方文档](https://www.postgresql.org/docs/17/explicit-locking.html)。
+首版每个模式使用 PostgreSQL 事务级 advisory lock，短暂串行化调度决策；HTTP 不在事务内。2026-10-15（V2-1）起，域锁只用于领取、清扫和管理员写入；每台设备的指令执行改为按行事务（`FOR UPDATE` 本设备数据），全部写入按行版本号做乐观并发，冲突即重跑；模拟任务的领取只由单活调度器（会话级咨询锁 + epoch 防护）执行，见 [V2-1 内核](v2-1-kernel-2026-10-15.md)。数据库另有每设备、每任务最多一个 running Attempt 的部分唯一索引。多个手机的耗时执行可以并行，不是整个系统串行。锁语义依据 [PostgreSQL 官方文档](https://www.postgresql.org/docs/17/explicit-locking.html)。
 
 这是有界实验调度器，不声称实现了 `SKIP LOCKED` 高吞吐队列，也没有引入 Redis、Temporal 或 Kubernetes Operator。每个模式 64 台、200 个活动任务的上限是保护措施；历史结果较大时仍需监控数据库体积。管理列表返回活动任务、最近 100 个终态及活动依赖、最近 100 个事件，以及所有 running/yielded Attempt 和最近 100 个结束尝试；使用只读一致快照，完整任务证据按 ID 查询。
 

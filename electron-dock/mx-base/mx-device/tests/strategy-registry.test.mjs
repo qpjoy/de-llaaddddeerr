@@ -6,7 +6,10 @@ import pg from "pg";
 import { MemoryStore, PgStore } from "../server/store.mjs";
 import { register } from "../server/model.mjs";
 import { configureLoops } from "../server/loop-policy.mjs";
-import { DEFAULT_POOL_POLICY } from "../server/pool-policy.mjs";
+import {
+  DEFAULT_POOL_POLICY,
+  normalizePoolPolicy,
+} from "../server/pool-policy.mjs";
 import {
   BUILTIN_RULE_DEFINITIONS,
   BUILTIN_STRATEGY_DEFINITIONS,
@@ -119,7 +122,8 @@ test("strategy compilation freezes rule versions, rejects conflicts and preserve
   assert.equal(created.policy.idleSpreadThresholdPct, 72);
   assert.equal(created.policy.appPolicies.pdd.maxRuns, 2);
   assert.equal(created.policy.enabled, true);
-  assert.deepEqual(seed.policy, DEFAULT_POOL_POLICY);
+  // Seeds omit fields added later; compiling defaults them.
+  assert.deepEqual(normalizePoolPolicy(seed.policy), DEFAULT_POOL_POLICY);
   assert.equal(
     resolveStrategy(s, "pool.balanced").policy.idleSpreadThresholdPct,
     50,

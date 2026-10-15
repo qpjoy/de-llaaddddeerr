@@ -33,6 +33,7 @@ import {
   sampleOutput,
 } from "./workflow-input.mjs";
 import { APP_NAMES } from "./apps.mjs";
+import { normalizePoolPolicy } from "./pool-policy.mjs";
 import { deviceApps, appBlockers, ensureApps } from "./apps.mjs";
 import {
   compareJobs,
@@ -579,6 +580,15 @@ export function beginCommand(s, now, a) {
   }
   markDispatch(s, now, a);
   const policy = w.policySnapshot || DEFAULT_LOOP_POLICY;
+  // Simulated switch: opening an App that is not the device's foreground App
+  // takes the pool policy's switch cost, as the planner assumes.
+  const device = s.devices.find((d) => d.id === a.deviceId);
+  const switchMs =
+    definition.action === "open" &&
+    policy.scheduler?.enabled &&
+    device?.foregroundAppId !== j.appId
+      ? normalizePoolPolicy(policy.scheduler).switchCostMs
+      : 0;
   const c = {
     id: randomUUID(),
     mode: "sim",
@@ -596,7 +606,8 @@ export function beginCommand(s, now, a) {
     createdAt: now,
     epoch: a.epoch,
     estimatedDurationMs: definition.estimateMs,
-    simulationDurationMs: policy.commandDelayMs,
+    simulationDurationMs: policy.commandDelayMs + switchMs,
+    ...(switchMs ? { switchMs } : {}),
     restoring: step.code === "session.restore",
     loop: w.loop,
     definitionId: w.definitionId,
@@ -747,6 +758,7 @@ export function completeCommand(s, now, a, c, r) {
   row.completedAt = now;
   row.receipt = r;
   recordCommandTiming(d, row, now);
+  if (actionOf(row) === "open") d.foregroundAppId = row.appId;
   if (row.restoring) {
     w.restorePending = false;
   } else {

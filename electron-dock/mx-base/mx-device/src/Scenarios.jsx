@@ -15,7 +15,11 @@ import {
 import { api, appName } from "./data.js";
 import { Modal } from "./Forms.jsx";
 import { requestId } from "./request-id.mjs";
-import { RULE_KINDS } from "../server/strategy-catalog.mjs";
+import {
+  RULE_KINDS,
+  RULE_OPTIONAL_DEFAULTS,
+} from "../server/strategy-catalog.mjs";
+import { DEFAULT_POOL_POLICY } from "../server/pool-policy.mjs";
 import "./scenarios.css";
 
 const scenarioDetails = {
@@ -137,6 +141,15 @@ const fieldGroups = {
       "秒",
       "为减少 App 切换，最多多等多久。",
     ],
+    [
+      "switchCostMs",
+      "App 切换耗时",
+      1000,
+      0,
+      600,
+      "秒",
+      "设备当前 App 与任务不同时，计划额外计入的切换时间；模拟执行同样计入。",
+    ],
   ],
   queue: [
     [
@@ -166,23 +179,68 @@ const fieldGroups = {
       "秒",
       "短任务参与同 App 亲和，不会抢占正在执行的会话。",
     ],
+    [
+      "stickyGainMs",
+      "改派最小提前量",
+      1000,
+      0,
+      600,
+      "秒",
+      "已计划的任务换设备，至少要提前这么多完成。",
+    ],
+    [
+      "stickyGainPct",
+      "改派最小提前比例",
+      1,
+      0,
+      100,
+      "%",
+      "按剩余预计时间计算，与上一项取较大者。",
+    ],
+    [
+      "maxPlanMoves",
+      "最多改派次数",
+      1,
+      0,
+      100,
+      "次",
+      "达到后保留计划设备，除非它变为不可用。",
+    ],
+    [
+      "planFreezeMs",
+      "开始前冻结",
+      1000,
+      0,
+      60,
+      "秒",
+      "距计划开始不足此时间时不再改派。",
+    ],
   ],
   "app-budget": appFields,
   "app-override": appFields,
 };
+// Fields added later are optional in stored rules; show and edit their defaults.
+const withOptional = (kind, config) => ({
+  ...(RULE_OPTIONAL_DEFAULTS[kind] || {}),
+  ...config,
+});
 function ruleSummary(rule) {
-  const c = rule.config || {};
+  const c = withOptional(rule.kind, rule.config || {});
   if (rule.kind === "placement")
-    return c.strategy === "adaptive"
-      ? `空闲 > ${c.idleSpreadThresholdPct}% 分散；亲和多等 ≤ ${secs(c.maxAffinityDelayMs)}`
-      : `${strategyNames[c.strategy]} · 亲和多等 ≤ ${secs(c.maxAffinityDelayMs)}`;
+    return `${
+      c.strategy === "adaptive"
+        ? `空闲 > ${c.idleSpreadThresholdPct}% 分散；亲和多等 ≤ ${secs(c.maxAffinityDelayMs)}`
+        : `${strategyNames[c.strategy]} · 亲和多等 ≤ ${secs(c.maxAffinityDelayMs)}`
+    }；App 切换计 ${secs(c.switchCostMs)}`;
   if (rule.kind === "queue")
-    return `计划等待 ≤ ${secs(c.maxQueueWaitMs)} · 单机 ≤ ${c.maxQueuePerDevice} 个 · 短任务 ≤ ${secs(c.shortTaskMs)}`;
+    return `计划等待 ≤ ${secs(c.maxQueueWaitMs)} · 单机 ≤ ${c.maxQueuePerDevice} 个 · 短任务 ≤ ${secs(c.shortTaskMs)}；改派需提前 ≥ ${secs(c.stickyGainMs)} 且 ≥ ${c.stickyGainPct}%，最多 ${c.maxPlanMoves} 次`;
   const p = rule.kind === "app-override" ? c.policy : c;
   return `${rule.kind === "app-override" ? `${appName(c.appId)} · ` : ""}${secs(p?.windowMs)}内 ≤ ${p?.maxRuns ?? "—"} 个 / ${secs(p?.maxServiceMs)}，冷却 ${secs(p?.cooldownMs)}`;
 }
-function PolicyReading({ policy, compact = false }) {
-  if (!policy) return null;
+function PolicyReading({ policy: given, compact = false }) {
+  if (!given) return null;
+  // Seeded strategies omit fields added later; read them with their defaults.
+  const policy = { ...DEFAULT_POOL_POLICY, ...given };
   const rows = [
     [
       "01",
@@ -190,7 +248,7 @@ function PolicyReading({ policy, compact = false }) {
       policy.strategy === "adaptive"
         ? `空闲 > ${policy.idleSpreadThresholdPct}% 时分散`
         : strategyNames[policy.strategy],
-      `同 App 亲和额外等待 ≤ ${secs(policy.maxAffinityDelayMs)}`,
+      `同 App 亲和额外等待 ≤ ${secs(policy.maxAffinityDelayMs)}；App 切换计 ${secs(policy.switchCostMs)}`,
     ],
     [
       "02",
@@ -203,6 +261,12 @@ function PolicyReading({ policy, compact = false }) {
       "应用冷却",
       `${policy.appDefaults.maxRuns} 个任务 / ${secs(policy.appDefaults.windowMs)}`,
       `累计服务 ≤ ${secs(policy.appDefaults.maxServiceMs)}，冷却 ${secs(policy.appDefaults.cooldownMs)}`,
+    ],
+    [
+      "04",
+      "计划稳定",
+      `改派需提前 ≥ ${secs(policy.stickyGainMs)} 且 ≥ ${policy.stickyGainPct}%`,
+      `每个任务最多改派 ${policy.maxPlanMoves} 次；开始前 ${secs(policy.planFreezeMs)} 冻结`,
     ],
   ];
   return (
@@ -277,10 +341,14 @@ function RuleEditor({ initial, editing, busy, onSubmit }) {
     name: "自定义放置规则",
     description: "",
     kind: "placement",
-    config: structuredClone(
-      RULE_KINDS.find((k) => k.kind === "placement").defaults,
+    config: withOptional(
+      "placement",
+      structuredClone(RULE_KINDS.find((k) => k.kind === "placement").defaults),
     ),
     ...initial,
+    ...(initial?.config
+      ? { config: withOptional(initial.kind, structuredClone(initial.config)) }
+      : {}),
   }));
   const values =
     draft.kind === "app-override" ? draft.config.policy : draft.config;
@@ -323,7 +391,7 @@ function RuleEditor({ initial, editing, busy, onSubmit }) {
               setDraft({
                 ...draft,
                 kind: kind.kind,
-                config: structuredClone(kind.defaults),
+                config: withOptional(kind.kind, structuredClone(kind.defaults)),
               });
             }}
           >

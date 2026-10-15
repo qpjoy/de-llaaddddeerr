@@ -102,7 +102,12 @@ test(
         const jobs = s.jobs.filter((j) => ids.includes(j.id));
         return jobs.every((j) => j.status === "succeeded") && s;
       });
-      const worker = done.workers.find((w) => w.id === "row-worker");
+      const worker = done.workers.find((w) => w.workerId === "row-worker");
+      assert.match(
+        worker.id,
+        /^row-worker\//,
+        "one heartbeat row per instance",
+      );
       assert.equal(worker.scheduler, "leader");
       assert(worker.epoch >= 1);
       // The unique index makes overlap impossible; check the recorded intervals too.

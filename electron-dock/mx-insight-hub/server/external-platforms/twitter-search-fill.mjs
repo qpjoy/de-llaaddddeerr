@@ -54,7 +54,8 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
   let ownsLease=false, entered=false, currentCall=null, currentEvidence=null, currentCost=null, settledFailure=false, retainLease=false
   const dispatchLease={ consumerId:context.consumer.id,operation:delivery.operation,fingerprint:delivery.fingerprint,
     endpointKey:request.providerRequest.endpointKey,contractVersion:request.providerRequest.endpointContractVersion,
-    ownerRequestId:delivery.usageRequestId,expiresAt:new Date(deadlineAt) }
+    ownerRequestId:delivery.usageRequestId,expiresAt:new Date(deadlineAt),
+    ...(delivery.twitterManualRetry ? { twitterManualRetry: { ...delivery, ...delivery.twitterManualRetry } } : {}) }
   const timeoutMargin=(gateway.config.timeoutMs || 30000)+5000
   const enoughTime=()=>Number.isFinite(deadlineAt) && clock()+timeoutMargin<deadlineAt
   const markUnknown=async()=>{
@@ -182,6 +183,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         currentCall=await store.beginProviderCall({ ...delivery,apiKeyId:context.apiKey.id,
           contractVersion:step.endpointContractVersion,endpointKey:step.endpointKey,endpointVersion:step.endpointVersion,
           marketplace:'twitter',callOrdinal:calls,callRole:calls?'enrichment':'primary',dispatchFingerprint:delivery.fingerprint,
+          ...(delivery.twitterManualRetry && calls===0 ? { retryOfRequestId:delivery.twitterManualRetry.retryOfRequestId } : {}),
           costControl:cost,costReservationId:currentCost.id,operationControl:control })
         calls++;upstreamPages++
         if(inputCursor) tokens.add(inputCursor)

@@ -9,6 +9,7 @@ import { NATIVE_FORWARDING_VERSION } from '../contracts/native-forwarding.mjs'
 import { HUB_SOCIAL_VERSION } from '../contracts/hub-social.mjs'
 import { canonicalPlatform } from '../hub-service.mjs'
 import * as facebookSearchStore from './facebook-search-store.mjs'
+import * as twitterRetryStore from './twitter-manual-retry.mjs'
 
 const clone = (value) => value == null ? value : structuredClone(value)
 const iso = (value = new Date()) => new Date(value).toISOString()
@@ -18,6 +19,9 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 const ownedSearchDelivery = (provider, operation) => provider === 'rapidapi'
   ? ['social.content.search', 'social.facebook.search'].includes(operation)
   : provider === 'justone' && operation === 'native.j.facebook_post_search_v1'
+const twitterRetryInput = input => ({ ...input,
+  retryOfRequestId: input.twitterManualRetry.retryOfRequestId,
+  bufferCallId: input.twitterManualRetry.bufferCallId })
 
 const instagramOperation = provider => provider === 'tikhub' ? `native.${INSTAGRAM_SEARCH_KEY}`
   : provider === 'justone' ? `native.${JUSTONE_INSTAGRAM_SEARCH_KEY}` : null
@@ -725,11 +729,18 @@ export class MemoryExternalPlatformStore {
   }
 
   async twitterFillUnknownFor(delivery) {
+    const excluded = delivery.twitterManualRetry
+      ? (await this.validateTwitterManualRetry(twitterRetryInput(delivery))).ancestorRequestIds : []
     return [...this.usageStore.requests.values()].some(row => row.platform === 'twitter' && row.status === 'unknown'
       && row.tenantId === delivery.tenantId && row.consumerId === delivery.consumerId && row.apiKeyId === delivery.apiKeyId
       && row.fingerprint === delivery.fingerprint && row.acquisitionRequest?.path === TWITTER_PAGE_PATH
+      && !excluded.includes(row.id)
       && Date.now()-new Date(row.reservedAt ?? row.createdAt ?? Date.now()).getTime() <= TWITTER_PAGE_MAX_AGE_MS)
   }
+
+  async validateTwitterManualRetry(input) { return twitterRetryStore.validateTwitterManualRetry(this, input) }
+  async twitterManualRetryOwnerFor(id) { return twitterRetryStore.twitterManualRetryOwnerFor(this, id) }
+  async twitterManualRetryOriginalFor(id) { return twitterRetryStore.twitterManualRetryOriginalFor(this, id) }
 
   async acquireTwitterFillDeliveryLease(input) {
     if(this.providerKey!=='rapidapi' || input.operation!=='social.content.search'
@@ -755,6 +766,7 @@ export class MemoryExternalPlatformStore {
       const sourceUsage = this.usageStore.requests.get(page.sourceUsageRequestId)
       if (!twitterBodyMatches(sourceUsage?.acquisitionRequest, input)) throw twitterHistoryError()
     }
+    if (delivery.twitterManualRetry) await twitterRetryStore.claimTwitterManualRetry(this, twitterRetryInput(delivery))
     const manifest = { version: lineage.version, scopeHash: lineage.scopeHash, previousDeliveryId: lineage.previousDeliveryId ?? null,
       upstreamPages: lineage.upstreamPages, sources: clone(sources) }
     await this.usageStore.commitRequest(delivery.usageRequestId, { responseStatus: 200, responseBody,
@@ -824,7 +836,12 @@ export class MemoryExternalPlatformStore {
     expiresAt,
     retryOfRequestId = null,
     ownedDeliveryLease = false,
+    twitterManualRetry = null,
   }) {
+    if (twitterManualRetry && (operation !== 'social.content.search' || twitterManualRetry.usageRequestId !== ownerRequestId
+      || twitterManualRetry.consumerId !== consumerId || twitterManualRetry.fingerprint !== fingerprint)) throw twitterRetryStore.twitterRetryDenied()
+    const excluded = twitterManualRetry
+      ? (await this.validateTwitterManualRetry(twitterManualRetry)).ancestorRequestIds : []
     const now = Date.now()
     const blocker = [...this.calls.values()]
       .filter((call) => (
@@ -842,6 +859,7 @@ export class MemoryExternalPlatformStore {
                 && call.dispatchFingerprint === fingerprint
                 && call.outcome === 'unknown'
                 && call.usageRequestId !== retryOfRequestId
+                && !excluded.includes(call.usageRequestId)
               )
               || (
                 call.endpointKey === endpointKey
@@ -1287,6 +1305,7 @@ export class MemoryExternalPlatformStore {
         || retryTarget.status !== 'unknown'
         || retryTarget.tenantId !== input.tenantId
         || retryTarget.consumerId !== input.consumerId
+        || (input.twitterManualRetry && retryTarget.apiKeyId !== input.apiKeyId)
         || retryTarget.platform !== this.authorizationPlatform
         || retryTarget.fingerprint !== input.fingerprint
         || retryAlreadyUsed
@@ -1422,6 +1441,7 @@ export class MemoryExternalPlatformStore {
       startedAt: iso(),
       completedAt: null,
     }
+    if (input.twitterManualRetry) await twitterRetryStore.claimTwitterManualRetry(this, twitterRetryInput(input))
     this.calls.set(call.id, call)
     this.state.lastCallAt = call.startedAt
     return clone(call)
@@ -2351,14 +2371,21 @@ export class PostgresExternalPlatformStore {
       || !SHA256_PATTERN.test(delivery.fingerprint || '')) throw twitterHistoryError()
     // The quota index bounds this read by tenant, consumer, platform and time.
     // Buffer-only unknown deliveries have no owned provider call to join.
+    const excluded = delivery.twitterManualRetry
+      ? (await this.validateTwitterManualRetry(twitterRetryInput(delivery))).ancestorRequestIds : []
     const {rows}=await this.pool.query(`SELECT 1 FROM usage_requests request
       WHERE request.tenant_id=$1 AND request.consumer_id=$2 AND request.api_key_id=$3
         AND request.platform='twitter' AND request.fingerprint=$4 AND request.status='unknown'
         AND request.acquisition_request->>'path'='/api/v1/data/search'
+        AND NOT (request.id = ANY($5::uuid[]))
         AND request.reserved_at >= now()-interval '24 hours' LIMIT 1`,
-    [delivery.tenantId,delivery.consumerId,delivery.apiKeyId,delivery.fingerprint])
+    [delivery.tenantId,delivery.consumerId,delivery.apiKeyId,delivery.fingerprint,excluded])
     return rows.length>0
   }
+
+  async validateTwitterManualRetry(input) { return twitterRetryStore.validateTwitterManualRetry(this, input) }
+  async twitterManualRetryOwnerFor(id) { return twitterRetryStore.twitterManualRetryOwnerFor(this, id) }
+  async twitterManualRetryOriginalFor(id) { return twitterRetryStore.twitterManualRetryOriginalFor(this, id) }
 
   async acquireTwitterFillDeliveryLease(input) {
     if(this.providerKey!=='rapidapi' || input.operation!=='social.content.search'
@@ -2390,6 +2417,7 @@ export class PostgresExternalPlatformStore {
         if (!twitterBodyMatches(owner?.acquisition_request, input)) throw twitterHistoryError()
         if (page.sourceUsageRequestId === delivery.usageRequestId) representative = source.callId
       }
+      if (delivery.twitterManualRetry) await twitterRetryStore.claimTwitterManualRetry(this, twitterRetryInput(delivery), client)
       const manifest = { version:lineage.version,scopeHash:lineage.scopeHash,previousDeliveryId:lineage.previousDeliveryId ?? null,
         upstreamPages:lineage.upstreamPages,sources }
       await client.query(`UPDATE usage_requests SET status='committed',response_status=200,response_body=$2,units_actual=$3,
@@ -2478,7 +2506,12 @@ export class PostgresExternalPlatformStore {
     expiresAt,
     retryOfRequestId = null,
     ownedDeliveryLease = false,
+    twitterManualRetry = null,
   }) {
+    if (twitterManualRetry && (operation !== 'social.content.search' || twitterManualRetry.usageRequestId !== ownerRequestId
+      || twitterManualRetry.consumerId !== consumerId || twitterManualRetry.fingerprint !== fingerprint)) throw twitterRetryStore.twitterRetryDenied()
+    const excluded = twitterManualRetry
+      ? (await this.validateTwitterManualRetry(twitterManualRetry)).ancestorRequestIds : []
     const { rows } = await this.pool.query(
       `INSERT INTO external_platform.dispatch_leases
          (consumer_id, operation, request_fingerprint, owner_request_id, expires_at)
@@ -2507,6 +2540,7 @@ export class PostgresExternalPlatformStore {
                      )
                      AND call.outcome = 'unknown'
                      AND ($8::uuid IS NULL OR call.usage_request_id <> $8)
+                     AND NOT (call.usage_request_id = ANY($13::uuid[]))
                    )
                    OR (
                      call.endpoint_key = $7
@@ -2548,6 +2582,7 @@ export class PostgresExternalPlatformStore {
         this.providerKey,
         Math.ceil(this.responseQuarantineCooldownMs / 1_000),
         ownedDeliveryLease && ownedSearchDelivery(this.providerKey, operation),
+        excluded,
       ],
     )
     if (rows[0]?.owner_request_id === ownerRequestId) return { kind: 'acquired' }
@@ -2582,6 +2617,7 @@ export class PostgresExternalPlatformStore {
                   )
                   AND outcome = 'unknown'
                   AND ($6::uuid IS NULL OR usage_request_id <> $6)
+                  AND NOT (usage_request_id = ANY($10::uuid[]))
                 )
                 OR (
                   endpoint_key = $5
@@ -2613,6 +2649,7 @@ export class PostgresExternalPlatformStore {
         contractVersion,
         this.providerKey,
         Math.ceil(this.responseQuarantineCooldownMs / 1_000),
+        excluded,
       ],
     )
     if (blocker.rows[0]) {
@@ -3187,6 +3224,7 @@ export class PostgresExternalPlatformStore {
             }
           }
         }
+        if (input.twitterManualRetry) await twitterRetryStore.claimTwitterManualRetry(this, twitterRetryInput(input), client)
         const { rows } = await client.query(
           `WITH owned_request AS MATERIALIZED (
              SELECT request.id
@@ -3207,6 +3245,7 @@ export class PostgresExternalPlatformStore {
                 AND retry.status = 'unknown'
                 AND retry.tenant_id = $2
                 AND retry.consumer_id = $3
+                ${input.twitterManualRetry ? 'AND retry.api_key_id = $4' : ''}
                 AND retry.fingerprint = $11
                 AND retry.platform = $14
                 AND NOT EXISTS (

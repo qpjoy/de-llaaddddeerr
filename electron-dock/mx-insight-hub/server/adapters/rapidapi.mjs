@@ -10,6 +10,37 @@ import { rapidQuotaObservation } from '../external-platforms/platform-search-pol
 export const TWITTER_AIO_HOST = 'twitter-aio.p.rapidapi.com'
 const TWITTER_ENDPOINTS = new Set(Object.values(HUB_SOCIAL_ENDPOINTS).map(endpoint => endpoint.endpointKey))
 const MAX_BYTES = 4 * 1024 * 1024
+// Fetch hides DNS/TCP/TLS errors in cause or AggregateError. Retain only fixed
+// technical codes; exception messages, stacks and URLs can contain credentials.
+const SAFE_FAILURE_CODES = new Set([
+  'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT',
+  'ENETUNREACH', 'EHOSTUNREACH', 'EPIPE', 'ERR_TLS_CERT_ALTNAME_INVALID',
+  'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_SOCKET', 'UND_ERR_ABORTED', 'ABORT_ERR',
+  'proxy_route_unavailable', 'proxy_routes_unreachable',
+  // The fetch wrapper reads the provider route before a business HTTP call.
+  // These codes distinguish failed route reads without asserting dispatch.
+  '08000', '08001', '08003', '08004', '08006', '08007', '08P01',
+  '42501', '42703', '42P01', '53300', '53400', '57P01', '57P02', '57P03',
+])
+function transportFailure(error, phase, deadlineExceeded, startedAt, timeoutMs) {
+  const pending = [error], seen = new Set(), codes = new Set()
+  for (let index = 0; index < pending.length && index < 12; index++) {
+    const entry = pending[index]
+    if (!entry || typeof entry !== 'object' || seen.has(entry)) continue
+    seen.add(entry)
+    try {
+      const code = entry.code, errors = entry.errors
+      if (SAFE_FAILURE_CODES.has(code)) codes.add(code)
+      pending.push(entry.cause)
+      if (Array.isArray(errors)) pending.push(...errors.slice(0, 4))
+    } catch { /* Diagnostic accessors must not replace the original failure. */ }
+  }
+  return { phase, codes: [...codes], deadlineExceeded,
+    elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)), timeoutMs }
+}
 export class RapidApiUpstreamError extends Error {
   constructor(evidence, persistence = {}) {
     super('External social data request failed')
@@ -62,8 +93,10 @@ export class RapidApiAdapter {
     if (url.origin !== `https://${host}`) throw new Error('Unexpected provider origin')
     for (const [name, value] of Object.entries(request.upstreamQuery)) url.searchParams.set(name, String(value))
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs)
-    let response, bytes, raw, bodyText, quota, parsed = false
+    let deadlineExceeded = false
+    const timer = setTimeout(() => { deadlineExceeded = true; controller.abort() }, this.timeoutMs)
+    let response, bytes, raw, bodyText, quota, failure = null, phase = 'request', parsed = false
+    const startedAt = performance.now()
     const capturedAt = new Date().toISOString()
     const scrub = createCredentialEchoRedactor(key)
     const safe = value => {
@@ -74,10 +107,11 @@ export class RapidApiAdapter {
     }
     const persistence = state => ({
       upstreamEvidence: { requestId: scrub(response?.headers.get('x-rapidapi-request-id') || response?.headers.get('x-request-id') || '') || null },
-      responseArchive: response ? { contractState: state, httpStatus: response.status, businessCode: null,
-        contentType: response.headers.get('content-type'), bodySize: bytes?.length ?? null,
+      responseArchive: response || failure ? { contractState: state, httpStatus: response?.status ?? null, businessCode: null,
+        contentType: response?.headers.get('content-type') ?? null, bodySize: bytes?.length ?? null,
         payloadSha256: bytes ? createHash('sha256').update(bytes).digest('hex') : null,
-        rawPayload: { response: { httpStatus: response.status, requestId: scrub(response.headers.get('x-rapidapi-request-id') || '') || null,
+        rawPayload: { response: { httpStatus: response?.status ?? null, requestId: scrub(response?.headers.get('x-rapidapi-request-id') || '') || null,
+          ...(failure ? { transportFailure: failure } : {}),
           ...(facebook ? { quota } : {}) } }, capturedAt } : null,
       restrictedResponseArchive: bytes ? { state, capturedAt, httpStatus: response.status, contentType: response.headers.get('content-type'),
         bodySize: bytes.length, bodySha256: createHash('sha256').update(bytes).digest('hex'), bodyBytes: bytes,
@@ -87,8 +121,10 @@ export class RapidApiAdapter {
     try {
       response = await this.fetch(url, { method: 'GET', redirect: 'error', signal: controller.signal,
         headers: { 'x-rapidapi-host': host, 'x-rapidapi-key': key, 'user-agent': HUB_USER_AGENT } })
+      phase = 'body'
       if (facebook) quota = rapidQuotaObservation(response)
       bytes = await readBody(response, controller)
+      phase = 'decode'
       bodyText = new TextDecoder('utf-8', {fatal:true, ignoreBOM:true}).decode(bytes)
       try { raw = JSON.parse(bodyText.replace(/^\uFEFF/, '')); parsed = true } catch { /* preserved exact bytes below */ }
       if (facebook) quota = { ...quota, monthlyExhausted: response.status === 429
@@ -115,6 +151,7 @@ export class RapidApiAdapter {
       return result
     } catch (error) {
       if (error instanceof RapidApiUpstreamError) throw error
+      if (phase === 'request' || phase === 'body') failure = transportFailure(error, phase, deadlineExceeded, startedAt, this.timeoutMs)
       if (error instanceof AppError && ['proxy_route_unavailable', 'proxy_routes_unreachable'].includes(error.code)) {
         throw new RapidApiUpstreamError({ outcome: 'rejected', billed: false, httpStatus: null, businessCode: null,
           errorCode: 'social_egress_unavailable', affectsCircuit: false }, persistence('not_dispatched'))

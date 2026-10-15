@@ -72,8 +72,8 @@ S=内容搜索，C/U 为**旧 `/search` 与 `/night-all/search` 账号转发入�
 | 小红书 | 受支持形状且直连门禁允许时 Hub → TikHub；其他形状经 Night-All | 同左，限单账号 posts 等形状 | 同左，限单账号等形状 |
 | 抖音 | Hub → TikHub 固定关键词端点 | Night-All → TikHub | Night-All → TikHub |
 | TikTok | Night-All → TikHub | Night-All → TikHub | — |
-| Reddit | Night-All → TikHub | Night-All → TikHub | — |
-| YouTube | Night-All → TikHub | Night-All → TikHub | — |
+| Reddit | 标准 data/search 由 Hub → TikHub；两个 raw 入口仍经 Night-All → TikHub | Night-All → TikHub | — |
+| YouTube | 标准 data/search 由 Hub → TikHub；两个 raw 入口仍经 Night-All → TikHub | Night-All → TikHub | — |
 | LinkedIn | — | Night-All → TikHub | Night-All → TikHub |
 | 知乎 | Hub → TikHub 固定关键词端点 | — | Night-All → TikHub |
 | 哔哩哔哩 | Hub → TikHub 固定关键词端点 | — | — |
@@ -85,6 +85,7 @@ S=内容搜索，C/U 为**旧 `/search` 与 `/night-all/search` 账号转发入�
 
 - Twitter raw 首次请求只迁移单关键词、每页不超过 50 条且无不兼容复杂参数等形状；标准 `/data/search` 已有独立迁移分支。Twitter 的供应商规则保持 RapidAPI，其他平台不能借此走 RapidAPI。
 - 微博首个标准请求 `pageSize >= 20` 或已有 Hub 游标才进入已迁移分支；raw 还需符合单关键词等约束。
+- Reddit、YouTube 本轮只迁移标准 `/api/v1/data/search` 的内部执行；两个 raw 兼容路径仍按原路转发，因此管理目录标记“部分已迁移”。旧已保存交付先按原规则重放；旧 `mxnc1` 下一页的新派发返回 `409 search_restart_required`，调用方明确使用新幂等键、去掉游标后从首页重启。不能承诺旧供应链游标无缝转换为新 Hub 游标。
 - 小红书搜索直连要求单关键词、每页 20 条及相容参数；crawl 要求单一标识、posts、每页 20 条等；user-info 要求单一受支持标识。首次直连还受操作状态和正式 Key 条件约束，已有 Hub 游标保持原链路。原操作 capability 仍必须满足。
 - 微信 `/api/v1/search/raw` 与 `/api/v1/data/search` 映射到 `/api/v1/data/wechat/search/search`，采用新合同；**`/api/v1/night-all/search/raw` 的微信请求返回 410**，不回退 Night-All。因此上述本机 po-infra 的通用旧适配器若实际用于微信，会碰到这个边界；需在对应客户端项目单独迁移，不能在 Hub 悄悄恢复旧路径。
 
@@ -116,13 +117,25 @@ Bilibili、抖音、快手、知乎新关键词搜索在 Hub 运行固定原生�
 
 Bilibili 点赞 like/stat.like、评论 review/stat.reply、收藏 favorites/stat.favorite、播放 play/stat.view 已在 Hub 投影；不把弹幕或硬币猜作评论、分享。正文、原生视频／文章标题和完整媒体 URL 保留。详细映射、边界与部署验收见 [直连迁移记录](../operations/content-search-direct-migration-2026-10-15.md)。
 
-## YouTube 短页与缺失指标（2026-10-15）
+## Reddit、YouTube 标准搜索直连（2026-10-15）
 
-YouTube 内容搜索目前仍通过 Night-All 执行。旧 HTTP 请求默认只获取 1 个上游页面；内部服务兜底为 3 次，并非默认 20 次。`DATA_PROVIDER_CALL_LIMIT_REACHED` 表示尚有后续结果、当前逻辑页不足 `pageSize` 时触及该补页次数预算。标准搜索关闭详情与评论附采，19 条结果不能解释为“1 次搜索加 19 次详情耗完 20 次”，也不能据此判断账户余额或供应商总配额。
+两平台的新 `POST /api/v1/data/search` 请求现在由 Hub 固定 TikHub 合同直接执行；对外不新增 API，不要求调用方增加 provider 或原生端点参数。原 `platform/query/pageSize/type/cursor`、`data.contractVersion=night-all.data-search.v1`、标准 items/pageInfo、status/warnings 与请求标识继续保留。标准入口继续拒绝 `params`，内部沿用原默认搜索条件，不把其他平台或 raw 的筛选参数扩到这两平台的标准请求。`/api/v1/search/raw` 和 `/api/v1/night-all/search/raw` 继续原转发链路与已有参数合同，账号 social 的既有迁移状态不变。
 
-本轮取消 Night-All 普通请求的默认补页次数限制；直接调用 Night-All 时显式给出的 `maxProviderCalls` 仍作为调用方预算。Hub 公共搜索合同不新增此字段。达到 `pageSize`、结果耗尽、分页没有进展或原资源／准入边界触发时仍停止，不承诺所有查询都能满页。Hub 的 15 页边界仍保留；详情、评论、账号内容与资料不因本次补页调整增加调用。
+策略搜索的接口调试、产品展示和接入指南沿用同一标准接口。管理行显示“部分已迁移”，以区分标准直连与仍保留的 raw 转发；固定供应商没有可编辑切换选项。查看目录和指南不会启用供应商操作，也不能据此推断当前线上已经部署或服务实时可用。
 
-YouTube 新标准响应的 `metrics` 保留真实的 `0`，上游未提供的互动、浏览和收藏计数为 `null`，产品展示显示“未提供”。不能由缺失值推断互动为零，也不能从旧默认零恢复未保存的数值。兼容 raw 默认值、已保存响应及原幂等重放保持原样。仅发布 Hub 不能更新仍在 Night-All 执行的 YouTube 补页与原生映射；具体证据、发布范围与无重搜取 ID 方法见 [YouTube 补页记录](../operations/youtube-search-fill-2026-10-15.md)。
+管理员上线时核对 `native.t.reddit_app_fetch_dynamic_search` 和 `native.t.youtube_web_v2_get_general_search_v2` 的操作状态、已审核合同、TikHub 凭据及采购价格。已有平台授权和客户计费方案继续使用；无需向客户 Key 增授原生供应商操作权限。缺少这些准入条件时标准搜索明确失败，不自动回退 13141 上的 Night-All，也不会通过迁移修改价格或自动启用操作。
+
+新标准分页保留已获取余量并去重，最多 15 个上游页和 15 个公开页，Hub 游标有效 24 小时；页大小是交付上限，不保证满页。新游标绑定 Key、查询、type 和页大小，不能跨接口或供应链使用。旧 `mxnc1` 请求仍先检查历史交付；没有可重放交付时返回 `409 search_restart_required`，调用方明确用新的 `Idempotency-Key` 从首页开始。无效参数/游标为 400，未知结果先只读核对，不自动重购或回退 Night-All。下游示例与字段说明见 [统一内容搜索接入指南](../integrations/unified-strategy-search.md)。
+
+供应商重复当前游标时保留本页已取得的真实内容与完整归档，停止继续采购，并返回 `partial` 和 `content_search_repeated_cursor`；这表示分页没有进展，不应解读为结果自然耗尽。
+
+## 先前 YouTube 短页排查与缺失指标（2026-10-15）
+
+本节记录此次标准直连之前的 Night-All 调整，不描述新 Hub 标准执行位置，也不改写历史事故证据。当时 YouTube 标准内容搜索通过 Night-All：旧 HTTP 请求默认只获取 1 个上游页面，内部服务兜底为 3 次，并非默认 20 次。`DATA_PROVIDER_CALL_LIMIT_REACHED` 表示尚有后续结果、当前逻辑页不足 `pageSize` 时触及该补页次数预算；不能把 19 条结果解释为“1 次搜索加 19 次详情耗完 20 次”，也不能据此判断余额或供应商总配额。
+
+此前 Night-All 调整取消普通请求默认补页次数限制，显式 `maxProviderCalls` 仍作为其内部调用方预算；Hub 公共合同没有增加此字段。该历史调整和原生指标映射需要对应 Night-All 版本才会影响仍走其链路的请求；新 Hub 标准直连则需部署 Hub 版本。原排查、发布记录和无重搜取 ID 方法保留在 [YouTube 补页记录](../operations/youtube-search-fill-2026-10-15.md)。
+
+新标准 `metrics` 保留真实的 `0`，未提供的互动、浏览和收藏计数为 `null`，产品展示显示“未提供”。不能由缺失值推断互动为零，也不能从旧默认零恢复未保存的数值。兼容 raw 默认值与已保存交付继续按原合同处理。
 
 ## 可配置策略与失败边界
 

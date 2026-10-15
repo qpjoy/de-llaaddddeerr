@@ -39,21 +39,24 @@ const supports = (d, j) =>
 const service = (row) =>
   row.actualServiceMs ?? row.reservedServiceMs ?? row.serviceMs ?? 0;
 
-// Find the earliest interval with a spare rack/host permit. Running reservations
-// and every prior soft assignment participate; this never grants a real lease.
-function capacityStart(start, duration, resources, reservations) {
+// Find the earliest interval with a spare permit. A permit is a rack/host
+// concurrency limit or the executor's slot count; running reservations and every
+// prior soft assignment participate. This never grants a real lease.
+function capacityStart(start, duration, permits, reservations) {
   let cursor = start;
   for (let n = 0; n <= reservations.length * 2 + 1; n++) {
     let bump = cursor;
-    for (const p of resources) {
+    for (const p of permits) {
       if (p.maxConcurrent == null) continue;
       if (p.maxConcurrent < 1) return Infinity;
       const relevant = reservations.filter(
         (r) =>
-          within(r.device, p) &&
+          p.contains(r.device) &&
           r.finishAt > cursor &&
           r.startAt < cursor + duration,
       );
+      // Fewer overlapping reservations than permits: no instant can be full.
+      if (relevant.length < p.maxConcurrent) continue;
       const points = [
         ...new Set([
           cursor,
@@ -96,12 +99,48 @@ function appStart(app, start, duration, policy) {
     return { code: "app-budget-unresolved" };
   return { at, history };
 }
+// Estimated end of the session holding device d (state "running"), or now.
+function busyUntil(state, now, d, jobsById) {
+  const active = (state.attempts || []).find(
+    (a) => a.deviceId === d.id && ["running", "yielded"].includes(a.status),
+  );
+  const runningJob = jobsById.get(active?.jobId);
+  const runningDuration = runningJob ? durationFor(d, runningJob) : 180000;
+  const estimateFinish = (active?.createdAt ?? now) + runningDuration;
+  // An overdue estimate is uncertain, not evidence that a slot is 1 ms away.
+  const finishAt =
+    d.state === "running"
+      ? estimateFinish > now
+        ? estimateFinish
+        : now + runningDuration
+      : now;
+  return { active, runningJob, finishAt };
+}
+// In spread mode, a candidate that can start within this time counts as free.
+const SPREAD_START_MS = 1000;
+const REASONS = {
+  "idle-spread": "空闲比例触发分散，优先可立即开始的设备",
+  "bounded-affinity": "同 App 小任务亲和，等待增加未超过上限",
+  "earliest-finish": "约束满足后按预计最早完成分配（含 App 切换耗时）",
+  "sticky-gain": "保留上次计划设备：改派提前量低于稳定门槛",
+  "sticky-frozen": "保留上次计划设备：即将开始，计划已冻结",
+  "sticky-limit": "保留上次计划设备：已达改派次数上限",
+};
 
 /** Pure, disposable placement hints for simulation only. Calls never mutate state.
- * Pending jobs are reconsidered on every plan. A running Attempt never migrates.
- * Estimates are empirical; claim still checks current hard safety guards.
+ * Pending jobs are reconsidered on every plan. Between future slots a job keeps
+ * its previous planned device (job.poolPlan, persisted by claim) unless moving
+ * gains enough (stickiness), it is about to start (freeze), or it moved too
+ * often; a device that can start it now always wins (uncounted). A running
+ * Attempt never migrates. finishAt includes the App switch on a device whose
+ * warm App differs. executorSlots (optional) caps concurrent sessions across all
+ * racks. Estimates are empirical; claim still checks current hard safety guards.
  */
-export function planPool(state, now, { rack, policy: suppliedPolicy } = {}) {
+export function planPool(
+  state,
+  now,
+  { rack, policy: suppliedPolicy, executorSlots = null } = {},
+) {
   const configured = (state.loopPolicies || []).find(
     (p) => p.mode === "sim" && p.rack === rack,
   )?.scheduler;
@@ -111,6 +150,7 @@ export function planPool(state, now, { rack, policy: suppliedPolicy } = {}) {
     mode: "sim",
     rack: rack ?? null,
     policy,
+    executorSlots,
     assignments: [],
     blocked: [],
     idlePercent: 0,
@@ -123,21 +163,23 @@ export function planPool(state, now, { rack, policy: suppliedPolicy } = {}) {
   const resources = (state.resources || []).filter((r) => r.mode === "sim");
   const reservations = [];
   const jobsById = new Map(state.jobs.map((j) => [j.id, j]));
+  // Sessions of other racks share the executor's slots.
+  const simDevices = state.devices.filter((d) => d.mode === "sim");
+  const executor =
+    Number.isInteger(executorSlots) && executorSlots < simDevices.length
+      ? { maxConcurrent: executorSlots, contains: () => true }
+      : null;
+  if (executor)
+    for (const d of simDevices)
+      if (d.state === "running" && rack && d.rack !== rack)
+        reservations.push({
+          device: d,
+          startAt: now,
+          finishAt: busyUntil(state, now, d, jobsById).finishAt,
+        });
   const devices = [];
   for (const d of allDevices) {
-    const active = (state.attempts || []).find(
-      (a) => a.deviceId === d.id && ["running", "yielded"].includes(a.status),
-    );
-    const runningJob = jobsById.get(active?.jobId);
-    const runningDuration = runningJob ? durationFor(d, runningJob) : 180000;
-    const estimateFinish = (active?.createdAt ?? now) + runningDuration;
-    // An overdue estimate is uncertain, not evidence that a slot is 1 ms away.
-    const finishAt =
-      d.state === "running"
-        ? estimateFinish > now
-          ? estimateFinish
-          : now + runningDuration
-        : now;
+    const { active, runningJob, finishAt } = busyUntil(state, now, d, jobsById);
     if (d.state === "running")
       reservations.push({ device: d, startAt: now, finishAt });
     const deviceResources = resources.filter((p) => within(d, p));
@@ -169,18 +211,23 @@ export function planPool(state, now, { rack, policy: suppliedPolicy } = {}) {
         return [appId, app];
       }),
     );
+    // Warm App: the running session's, else the last opened, else the last claimed.
     const warm = runningJob
       ? appIdOf(runningJob)
-      : [...apps.values()]
+      : (d.foregroundAppId ??
+        [...apps.values()]
           .filter((a) => a.lastClaimedAt != null)
-          .sort((a, b) => b.lastClaimedAt - a.lastClaimedAt)[0]?.appId;
+          .sort((a, b) => b.lastClaimedAt - a.lastClaimedAt)[0]?.appId);
     devices.push({
       device: d,
       freeAt: Math.max(finishAt, d.cooldownUntil || 0),
       apps,
       warmApp: warm,
       queueLength: 0,
-      resources: deviceResources,
+      permits: deviceResources.map((p) => ({
+        maxConcurrent: p.maxConcurrent,
+        contains: (x) => within(x, p),
+      })),
     });
   }
   result.deviceCount = devices.length;
@@ -228,6 +275,17 @@ export function planPool(state, now, { rack, policy: suppliedPolicy } = {}) {
           compatible.length) *
         100
       : 0;
+    // The executor permit is device-independent: reuse it within this job.
+    const executorCache = new Map();
+    const executorStart = (at, span) => {
+      const key = `${at}:${span}`;
+      if (!executorCache.has(key))
+        executorCache.set(
+          key,
+          capacityStart(at, span, [executor], reservations),
+        );
+      return executorCache.get(key);
+    };
     for (const slot of devices) {
       const d = slot.device;
       if (!matches(d, job)) continue;
@@ -243,6 +301,8 @@ export function planPool(state, now, { rack, policy: suppliedPolicy } = {}) {
         app = slot.apps.get(appId),
         appPolicy = poolAppPolicy(policy, appId);
       const duration = durationFor(d, job);
+      // Device time to bring a non-warm App forward; not App service budget.
+      const switchMs = slot.warmApp === appId ? 0 : policy.switchCostMs;
       const ready = appStart(
         app,
         Math.max(now, slot.freeAt, job.notBefore || 0),
@@ -253,14 +313,16 @@ export function planPool(state, now, { rack, policy: suppliedPolicy } = {}) {
         codes.add(ready.code);
         continue;
       }
-      const startAt = capacityStart(
-        ready.at,
-        duration,
-        slot.resources,
-        reservations,
-      );
+      const span = switchMs + duration;
+      let startAt = ready.at;
+      for (let n = 0; n < 20 && Number.isFinite(startAt); n++) {
+        const local = capacityStart(startAt, span, slot.permits, reservations);
+        const global = executor ? executorStart(local, span) : local;
+        if (global === startAt) break;
+        startAt = global;
+      }
       if (!Number.isFinite(startAt)) {
-        codes.add("resource-capacity");
+        codes.add(executor ? "executor-capacity" : "resource-capacity");
         continue;
       }
       if (startAt - now > policy.maxQueueWaitMs) {
@@ -272,8 +334,9 @@ export function planPool(state, now, { rack, policy: suppliedPolicy } = {}) {
         app,
         appPolicy,
         duration,
+        switchMs,
         startAt,
-        finishAt: startAt + duration,
+        finishAt: startAt + span,
         affinity: duration <= policy.shortTaskMs && slot.warmApp === appId,
       });
     }
@@ -284,6 +347,7 @@ export function planPool(state, now, { rack, policy: suppliedPolicy } = {}) {
         "queue-limit": "软队列已达到配置上限",
         "app-service-budget": "整段任务预计耗时超过 App 服务预算",
         "resource-capacity": "机架或宿主机没有并发许可",
+        "executor-capacity": "执行器工作槽在等待预算内没有空位",
         "queue-wait-budget": "预计排队时间超过软队列等待预算",
         "no-device": "没有可规划的模拟设备",
         "app-budget-unresolved": "历史派发尚未完成核验，App 预算保留",
@@ -309,7 +373,12 @@ export function planPool(state, now, { rack, policy: suppliedPolicy } = {}) {
       policy.strategy === "spread" ||
       (policy.strategy === "adaptive" &&
         idlePercent > policy.idleSpreadThresholdPct);
-    if (!spread) {
+    // Spreading favors starting now on a free device over waiting for a warm
+    // one, even if the warm device would finish earlier after the switch.
+    if (spread)
+      chosen =
+        candidates.find((c) => c.startAt <= now + SPREAD_START_MS) || chosen;
+    else {
       const warm = candidates
         .filter(
           (c) =>
@@ -324,18 +393,55 @@ export function planPool(state, now, { rack, policy: suppliedPolicy } = {}) {
         );
       if (warm.length) chosen = warm[0];
     }
-    const { slot, app, appPolicy, startAt, finishAt, duration, affinity } =
-      chosen;
-    const reasonCode = spread
+    let reasonCode = spread
       ? "idle-spread"
-      : affinity
+      : chosen.affinity
         ? "bounded-affinity"
         : "earliest-finish";
-    const reason = {
-      "idle-spread": "空闲比例触发分散，按预计最早完成分配",
-      "bounded-affinity": "同 App 小任务亲和，等待增加未超过上限",
-      "earliest-finish": "约束满足后按预计最早完成分配",
-    }[reasonCode];
+    // Plan stability: keep the previously planned device unless moving pays off.
+    const previous = job.poolPlan;
+    const moves = previous?.moves || 0;
+    let moved = false,
+      forced = false;
+    if (previous?.deviceId && previous.deviceId !== chosen.slot.device.id) {
+      const kept = candidates.find(
+        (c) => c.slot.device.id === previous.deviceId,
+      );
+      if (!kept) moved = forced = true;
+      else if (chosen.startAt <= now && kept.startAt > now) {
+        // A soft plan has no physical cost: never hold a job back from a
+        // device that can start it now. Not counted against the move cap.
+        moved = forced = true;
+      } else {
+        const gain = kept.finishAt - chosen.finishAt;
+        const threshold = Math.max(
+          policy.stickyGainMs,
+          ((kept.finishAt - now) * policy.stickyGainPct) / 100,
+        );
+        const stay =
+          kept.startAt <= now + policy.planFreezeMs
+            ? "sticky-frozen"
+            : moves >= policy.maxPlanMoves
+              ? "sticky-limit"
+              : gain < threshold
+                ? "sticky-gain"
+                : null;
+        if (stay) {
+          chosen = kept;
+          reasonCode = stay;
+        } else moved = true;
+      }
+    }
+    const {
+      slot,
+      app,
+      appPolicy,
+      startAt,
+      finishAt,
+      duration,
+      switchMs,
+      affinity,
+    } = chosen;
     result.assignments.push({
       jobId: job.id,
       deviceId: slot.device.id,
@@ -343,13 +449,18 @@ export function planPool(state, now, { rack, policy: suppliedPolicy } = {}) {
       startAt,
       finishAt,
       durationMs: duration,
+      switchMs,
       waitMs: startAt - now,
       costMs: finishAt - now,
       queuePosition: slot.queueLength + 1,
       affinity,
       idlePercent,
       reasonCode,
-      reason,
+      reason: REASONS[reasonCode],
+      previousDeviceId: previous?.deviceId ?? null,
+      moved,
+      forced,
+      moves: moves + (moved && !forced ? 1 : 0),
       mutable: true,
     });
     app.poolRuns = poolRunHistory(app, startAt, appPolicy);
@@ -365,4 +476,17 @@ export function planPool(state, now, { rack, policy: suppliedPolicy } = {}) {
     reservations.push({ device: slot.device, startAt, finishAt });
   }
   return result;
+}
+
+/** Persists each job's planned device for the next round's stability check.
+ * Written only when the device changes, so unchanged plans cost no writes. */
+export function recordPlans(state, now, plans) {
+  const jobs = new Map(state.jobs.map((j) => [j.id, j]));
+  for (const plan of plans)
+    for (const a of plan.assignments) {
+      const job = jobs.get(a.jobId);
+      if (!job || job.status !== "queued") continue;
+      if (job.poolPlan?.deviceId === a.deviceId) continue;
+      job.poolPlan = { deviceId: a.deviceId, moves: a.moves, since: now };
+    }
 }

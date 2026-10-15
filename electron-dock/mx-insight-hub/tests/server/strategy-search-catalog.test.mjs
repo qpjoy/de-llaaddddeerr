@@ -82,6 +82,22 @@ test('WeChat retired compatibility route and Telegram local search are not adver
   assert.match(telegram.routeSummary, /canonical\/search/)
 })
 
+test('Reddit and YouTube catalog separates direct standard searches from retained raw routes', () => {
+  const catalog = strategySearchCatalog()
+  for (const platform of ['reddit', 'youtube']) {
+    const row = platformById(catalog, 'search', platform)
+    assert.equal(row.migrationStatus, 'conditional')
+    assert.equal(row.editable, false)
+    assert.deepEqual(row.providers, ['tikhub'])
+    assert.match(row.routeSummary, /POST \/api\/v1\/data\/search.*Hub 直连 TikHub/)
+    assert.match(row.routeSummary, /\/api\/v1\/search\/raw 与 \/api\/v1\/night-all\/search\/raw 继续原 Night-All 链路/)
+    assert.match(row.routeSummary, /409 search_restart_required/)
+    assert.match(row.readOnlyReason, /不代表线上已经部署或实时可用/)
+    assert.equal(Object.hasOwn(row, 'ready'), false)
+    assert.equal(platformById(catalog, 'crawl', platform).migrationStatus, 'hub_native')
+  }
+})
+
 test('account social migration and retained legacy operation coverage are documented independently', () => {
   const catalog = strategySearchCatalog()
   for (const platform of ['bilibili', 'douyin', 'kuaishou', 'zhihu']) {

@@ -4,10 +4,12 @@
 
 ## 路径与响应
 
-TikTok 与微信都可使用 `POST /api/v1/data/search`。统一的是 Hub 入口、调用身份和管理方式，已发布的响应合同继续保留：
+Reddit、YouTube、TikTok 与微信都可使用 `POST /api/v1/data/search`。统一的是 Hub 入口、调用身份和管理方式，已发布的响应合同继续保留：
 
 | 场景 | 请求核心字段 | 响应解析 | 分页 |
 | --- | --- | --- | --- |
+| Reddit / YouTube 标准搜索 | `platform=reddit/youtube`、`query`、`pageSize` | `data.contractVersion=night-all.data-search.v1`；`data.items` 数组，Hub 直接执行 | `data.pageInfo.nextCursor` |
+| Reddit / YouTube 旧 raw 搜索 | `platform=reddit/youtube`、`keyword/query`、`count` | 原 `data.raw_info/raw_data` JSON 字符串；继续 Night-All 链路 | 原 `data.page.nextCursor` |
 | TikTok 标准搜索 | `platform=tiktok`、`query`、`pageSize` | `data.contractVersion=night-all.data-search.v1`；`data.items` 数组 | `data.pageInfo.nextCursor` |
 | TikTok 旧 raw 搜索 | `platform=tiktok`、`keyword/query`、`count` | `data.raw_info`、`data.raw_data` 为 JSON 字符串 | `data.page.nextCursor` |
 | 微信标准入口 | `platform=wechat_search/wechat_mp`、`query`、可选 `params` | 顶层 `endpoint=wechat.search.search`；保留专项 `contractVersion/endpoint/data/meta/requestId` | `data.continue_flag` 与 `data.cursor` |
@@ -24,6 +26,28 @@ Twitter 标准 `/data/search` 已有有界自动补页：先读归档余量，�
 已有标准数组和 raw JSON 字符串格式、客户单价、授权和幂等身份保留。已提交的响应仍精确重放，包括原空结果、失败或旧字段值，不会因为升级解析器而重写。可验证的 Hub 游标保持原查询、Key、路径、页大小、type 和原供应链；策略切换不把旧 token 发到新供应链。已退役的 Twitter `mxnc1`、Instagram 历史或无供应商标签的游标，以及未受 Hub 保护的 Facebook 旧游标，分别按既有 `search_restart_required`／`invalid_cursor` 边界要求调用方明确从第一页开始，不能承诺所有旧分页无缝继续。
 
 普通 Twitter/Facebook/微博/Instagram 帖子保留完整正文，标准 `title=null`，raw 对应标题为空字符串；Bilibili 等具有真实视频标题的内容继续保留原生标题。媒体仅对已有完整 URL 作精确去重，明确的视频封面与真实图片分开；不去掉 CDN 查询参数、不把第一张照片猜成封面，也不把图片落地页改造成猜测的直链。此次 Facebook 封面修复只作用于新标准投影，旧 raw、原始归档和已有 canonical 入库投影不重写。完整核查与 Bilibili 上游修复见 [字段及兼容性核查](../operations/strategy-search-contract-audit-2026-10-15.md)。
+
+## Reddit、YouTube 标准请求
+
+本轮只把两个平台的标准内容搜索内部执行迁入 Hub，使用固定 TikHub 合同；外部仍是 `POST /api/v1/data/search`，无新增 API。公共参数面保持 `platform/query/pageSize/type/cursor`，**Reddit、YouTube 标准请求继续拒绝 `params`**，沿用原默认搜索条件。其他平台支持的可选 params 不构成这两个平台的授权参数，已有 raw 参数也不能直接放到标准入口。不能传任意 provider、endpoint、凭据或原生 continuation。两个 raw 转发路径及原参数合同仍保留，不把标准游标交给 raw。账号 `/data/social/crawl` 和 `/data/social/user-info` 沿用各自已经发布的账号合同，不受本轮关键词迁移影响。
+
+```bash
+curl -sS "$HUB_URL/api/v1/data/search" \
+  -H "Authorization: Bearer $HUB_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: reddit-search-page-1' \
+  --data '{"platform":"reddit","query":"城市观察","pageSize":20,"type":"stable"}'
+```
+
+YouTube 使用相同字段，`platform` 为 `youtube`，并使用属于该请求的独立幂等键。以上是接入示例，本次未运行。平台授权、当前 Key 页大小上限、客户计量与余额检查保持原规则；内部直连不是自动授予原生接口权限或启用供应商操作。
+
+继续解析 `data.contractVersion=night-all.data-search.v1`、`data.items` 数组、`data.pageInfo`、`data.status/warnings` 以及响应 requestId。合同名称保留历史命名，不表示调用仍经 Night-All。条目 `id` 保持 `reddit:<原生ID>` / `youtube:<原生ID>`，`externalId` 为原生 ID 字符串；保留原链接、已取得的完整正文、原生视频/帖子标题、作者、媒体与指标。真实 `0` 与未提供的 `null` 区分；不靠列表条数推算互动指标，不为填充缺失指标自动附采详情/评论。公开 `source.provider/endpointId` 均为 `null`，不暴露或控制执行渠道。YouTube 搜索结果中的频道、广告不作为内容条目；未知返回形状会报兼容错误，不伪造空内容或总数。
+
+新 `mxds1` 游标先交付已获取余量并去重，再在边界内补齐当前逻辑页，最多 15 个上游页和 15 个公开页，有效期 24 小时。Hub 保持完整已采购页的归档；下游只原样传回 `data.pageInfo.nextCursor`，保持平台、查询、Key、type 和页大小，下一页使用新 `Idempotency-Key`。资源期限、字节、授权与采购准入限制仍可产生短页或 `partial`；读 `hasMore/nextCursor/warnings`，不要把少于 pageSize 当作耗尽。
+
+旧已保存请求在原重放窗口内精确重放，包含历史响应及失败；`fresh/stable` 不因迁移变为另一种重放政策。旧 `mxnc1` 下一页若没有可重放交付，将返回 **409 `search_restart_required`**，并在该分支不派发新的供应商请求。由调用方明确移除 cursor、使用新的 `Idempotency-Key` 从首页开始；不要自行转换旧游标、静默重启或自动换键。其他无效游标/参数保持 400；已派发的失败或未知结果不触发 Night-All 回退或再次采购。
+
+这次直连的上线需要发布包含该实现的 Hub 版本；保留的 raw 链路仍受 Night-All 运行状态影响。目录状态表示源码已实现范围，不保证当前生产镜像或供应商实时可用。
 
 ## TikTok 标准请求
 

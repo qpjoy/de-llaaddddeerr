@@ -14,7 +14,7 @@ async function runtimeFor(t) {
   return runtime
 }
 
-test('runtime binds both search entry points to each platform-owned TikHub content gateway without disturbing Weibo/Twitter dispatch', async t => {
+test('runtime binds supported search entry points to each platform-owned TikHub content gateway without disturbing Weibo/Twitter dispatch', async t => {
   const runtime = await runtimeFor(t)
   for (const platform of platforms) {
     const gateway = runtime.nativeSearchGateways[platform]
@@ -24,9 +24,10 @@ test('runtime binds both search entry points to each platform-owned TikHub conte
     const calls = []
     gateway.searchContent = async (context, input) => { calls.push({ context, input }); return platform }
     const context = { fixture: platform }, input = { normalized: { platform }, body: { fixture: true } }
-    assert.equal(await runtime.service.externalRawSearch(context, input), platform)
+    const rawSupported = TIKHUB_CONTENT_SEARCH_RECIPES[platform].rawCompatibility !== false
+    if (rawSupported) assert.equal(await runtime.service.externalRawSearch(context, input), platform)
     assert.equal(await runtime.service.externalDataSearch(context, input), platform)
-    assert.deepEqual(calls, [{ context, input }, { context, input }])
+    assert.deepEqual(calls, Array.from({ length: rawSupported ? 2 : 1 }, () => ({ context, input })))
   }
   runtime.nativeSearchGateways.weibo.searchRaw = async () => 'weibo-original-route'
   runtime.hubSocialGateway.searchRaw = async () => 'twitter-original-route'
@@ -44,8 +45,8 @@ async function capabilityHarness(t) {
   t.after(() => { assert.equal(secrets.mock.callCount(), 0); assert.equal(snapshots.mock.callCount(), 0); assert.equal(legacy.mock.callCount(), 0) })
   const tenant = await service.createTenant({ name: 'Four content fixture' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Platform-only content caller' })
-  for (const platform of ['bilibili', 'douyin']) await service.putPlatformConfiguration(platform, { tenantId: tenant.id, consumerId: consumer.id, enabled: true })
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Content-only', platforms: ['bilibili', 'douyin'], capabilities: [] })
+  for (const platform of ['bilibili', 'douyin', 'reddit', 'youtube']) await service.putPlatformConfiguration(platform, { tenantId: tenant.id, consumerId: consumer.id, enabled: true })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Content-only', platforms: ['bilibili', 'douyin', 'reddit', 'youtube'], capabilities: [] })
   const context = await service.authenticate(key.secret)
   const setPolicy = async (platform, desiredState) => {
     const operation = `native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`
@@ -59,7 +60,7 @@ async function capabilityHarness(t) {
     metadataReads: () => metadataReads, setConfigured: value => { configured = value } }
 }
 
-test('four-platform search readiness uses existing operation state and metadata for a platform-only key without granting native operations', async t => {
+test('content search readiness uses existing operation state and metadata for a platform-only key without granting native operations', async t => {
   const h = await capabilityHarness(t)
   await h.setPolicy('bilibili', 'active')
   const read = async () => (await h.service.capabilities(h.context)).data.platforms
@@ -81,7 +82,7 @@ test('content readiness excludes Test/ungranted keys and fails closed on metadat
   const testRows = (await h.service.capabilities({ ...h.context, apiKey: { ...h.context.apiKey, environment: 'test' } })).data.platforms
   assert(testRows.every(row => row.search?.ready === false))
   assert.equal(h.metadataReads(), before)
-  for (const platform of ['bilibili', 'douyin']) await h.store.setPlatformGrant(h.consumer.id, platform, false)
+  for (const platform of ['bilibili', 'douyin', 'reddit', 'youtube']) await h.store.setPlatformGrant(h.consumer.id, platform, false)
   assert.deepEqual((await h.service.capabilities(h.context)).data.platforms, [])
   assert.equal(h.metadataReads(), before)
   await h.store.setPlatformGrant(h.consumer.id, 'bilibili', true)
@@ -89,4 +90,18 @@ test('content readiness excludes Test/ungranted keys and fails closed on metadat
   const payload = await h.service.capabilities(h.context)
   assert.equal(payload.data.platforms[0].search.ready, false)
   assert.doesNotMatch(JSON.stringify(payload), /synthetic-private-supplier-error|tikhub/)
+})
+
+for (const platform of ['reddit', 'youtube']) test(`${platform} capability readiness is Hub-owned and follows operation and credential controls`, async t => {
+  const h = await capabilityHarness(t)
+  const read = async () => (await h.service.capabilities(h.context)).data.platforms.find(row => row.platform === platform)
+  assert.equal((await read()).search.ready, false)
+  await h.setPolicy(platform, 'active')
+  assert.deepEqual((await read()).search, { ready: true, source: 'hub', servingMode: 'live_only', contractVersion: 'night-all.data-search.v1' })
+  await h.setPolicy(platform, 'paused')
+  assert.equal((await read()).search.ready, false)
+  await h.setPolicy(platform, 'active')
+  h.setConfigured(false)
+  assert.equal((await read()).search.ready, false)
+  assert.deepEqual(await h.store.listEffectiveCapabilityGrants(h.consumer.id, h.context.apiKey.id), [])
 })

@@ -4,7 +4,8 @@ import { commandByCode } from "./workflow-catalog.mjs";
 // A model version/command code key prevents mixing incompatible command versions.
 export function recordCommandTiming(device, command, completedAt) {
   if (device.mode !== "sim" || command.restoring) return;
-  const elapsed = completedAt - command.createdAt;
+  // A simulated App switch is planned separately (switchMs); train only the command.
+  const elapsed = completedAt - command.createdAt - (command.switchMs || 0);
   if (!Number.isFinite(elapsed) || elapsed <= 0 || elapsed > 180000) return;
   const key = `${command.definitionId}/${command.code}`;
   device.commandTimings ||= {};

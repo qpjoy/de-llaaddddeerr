@@ -731,8 +731,11 @@ export class ExternalPlatformGateway {
   }
 
   async searchRaw(context, input, { policyStore = null, gateways = null, reservation = null, selection = null, fallbackUsed = false } = {}) {
-    const { normalized, body, idempotencyKey, dataSearch = null, signal } = input
+    const { normalized, body, idempotencyKey, retryOfRequestId, dataSearch = null, signal } = input
     const platform = normalized.platform
+    if (retryOfRequestId != null && !(platform === 'twitter' && dataSearch)) {
+      throw new AppError(400, 'invalid_uncertain_retry', 'Explicit Twitter retry requires the standard data search route')
+    }
     const strategy = platform === 'instagram' && policyStore && gateways
     const codec = (dataSearch ? createDataSearchCursorCodec : createRawSearchCursorCodec)(this.apiKeyPepper, `${context.consumer.id}:${context.apiKey.id}`)
     const cursor = dataSearch ? normalized.cursor : normalized.upstreamBody?.cursor
@@ -760,12 +763,13 @@ export class ExternalPlatformGateway {
       throw new AppError(503, 'raw_search_unavailable', 'Hub raw search is unavailable')
     }
     let request
-    return this.#deliver(context, { body, idempotencyKey, signal, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH }, {
+    return this.#deliver(context, { body, idempotencyKey, retryOfRequestId, signal, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH }, {
       operation: native ? `native.${nativeKey}` : 'social.content.search',
       authorizationPlatform: platform, platformSearch: true, meterKey: dataSearch ? platform : 'raw',
       datasetId: dataSearch ? 'night-all.search.v1' : RAW_SEARCH_DATASET, replayReleasedFailures: true,
       replayWindowMs: dataSearch?.replayWindowMs,
       dataSearch: Boolean(dataSearch), nativeForwarding: native, billingUnknown: !native,
+      twitterManualRetry: platform === 'twitter' && Boolean(dataSearch),
       reservation,
       normalize: ({ policy }) => {
         const historicalCodec = createNightAllCompatibilityCursorCodec(this.apiKeyPepper, context.consumer.id)
@@ -1147,36 +1151,48 @@ export class ExternalPlatformGateway {
       if (
         typeof retryOfRequestId !== 'string'
         || !UUID_PATTERN.test(retryOfRequestId.trim())
-        || normalized.deliveryMode !== 'refresh'
+        || (plan.twitterManualRetry ? !suppliedKey || normalized.restartRequired : normalized.deliveryMode !== 'refresh')
       ) {
         throw new AppError(
           400,
           'invalid_uncertain_retry',
-          'X-MX-Insight-Retry-Of requires a request UUID and deliveryMode refresh',
+          plan.twitterManualRetry ? 'Twitter retry requires a request UUID, current standard search and a new Idempotency-Key'
+            : 'X-MX-Insight-Retry-Of requires a request UUID and deliveryMode refresh',
         )
       }
       const candidateId = retryOfRequestId.trim()
-      const previous = await this.usageStore.getUsageRequestForRetry(candidateId, context.consumer.id)
-      if (
-        !previous
-        || previous.status !== 'unknown'
-        || previous.platform !== authorizationPlatform
-        || previous.fingerprint !== requestFingerprint
-        || previous.idempotencyKey === idempotencyKey
-      ) {
-        throw new AppError(
-          409,
-          'uncertain_retry_not_allowed',
-          'The referenced uncertain request cannot authorize this retry',
-        )
+      if (plan.twitterManualRetry) {
+        // Validate durable ownership after ordinary idempotency handling so an
+        // acknowledged successor can replay its immutable saved response.
+        validatedRetryOfRequestId = candidateId
+      } else {
+        const previous = await this.usageStore.getUsageRequestForRetry(candidateId, context.consumer.id)
+        if (
+          !previous
+          || previous.status !== 'unknown'
+          || previous.platform !== authorizationPlatform
+          || previous.fingerprint !== requestFingerprint
+          || previous.idempotencyKey === idempotencyKey
+        ) {
+          throw new AppError(
+            409,
+            'uncertain_retry_not_allowed',
+            'The referenced uncertain request cannot authorize this retry',
+          )
+        }
+        validatedRetryOfRequestId = candidateId
       }
-      validatedRetryOfRequestId = candidateId
     }
     const requestId = randomUUID()
     const effectiveKey = suppliedKey
       ? idempotencyKey
       : `auto:${context.apiKey.id}:${requestId}`
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
+    let replayWindowMs = plan.replayWindowMs ?? null
+    if (plan.twitterManualRetry && suppliedKey) {
+      const previous = await this.usageStore.getUsageRequestByIdempotencyKey(context.consumer.id, idempotencyKey)
+      if (validatedRetryOfRequestId || previous && await this.platformStore.twitterManualRetryOriginalFor(previous.id)) replayWindowMs = null
+    }
     const reservation = plan.reservation || await this.usageStore.reserve({
       requestId,
       idempotencyKey: effectiveKey,
@@ -1199,7 +1215,7 @@ export class ExternalPlatformGateway {
       // A caller-supplied key names one immutable delivery attempt. An omitted
       // key means this HTTP call is a new billable intent; only explicit key
       // reuse is idempotent.
-      replayWindowMs: plan.replayWindowMs ?? null,
+      replayWindowMs,
       // A definitive enterprise rejection releases the wallet hold, but the
       // same caller intent must still replay its saved error without dispatch.
       replayReleasedFailures: this.providerKey === 'qixin' || plan.replayReleasedFailures === true,
@@ -1218,6 +1234,11 @@ export class ExternalPlatformGateway {
       usageRequestId: reservation.request.id,
       operation: plan.operation,
       fingerprint: requestFingerprint,
+    }
+    if (plan.twitterManualRetry && validatedRetryOfRequestId && reservation.kind !== 'reserved') {
+      const owner = await this.platformStore.twitterManualRetryOwnerFor(validatedRetryOfRequestId)
+      if (owner !== delivery.usageRequestId && !(reservation.kind === 'in_progress' && owner == null)) throw new AppError(409, 'uncertain_retry_not_allowed',
+        'This Idempotency-Key does not identify the acknowledged Twitter retry')
     }
     if (reservation.kind === 'in_progress') {
       await this.platformStore.recordGatewayAttempt({
@@ -1271,6 +1292,11 @@ export class ExternalPlatformGateway {
     }
 
     const activeRequestId = reservation.request.id
+    if (plan.twitterManualRetry && validatedRetryOfRequestId) {
+      delivery.twitterManualRetry = { retryOfRequestId: validatedRetryOfRequestId,
+        ...(normalized.buffer ? { bufferCallId: normalized.buffer.callId } : {}) }
+      await this.platformStore.validateTwitterManualRetry({ ...delivery, ...delivery.twitterManualRetry, idempotencyKey })
+    }
     if (plan.assemble) {
       try {
         const assembled = await plan.assemble({ delivery, signal,

@@ -187,6 +187,7 @@ async function publicDataRequest(apiKey, path, {
   const payload = await parsePayload(response)
   const evidence = {
     requestId: payload?.requestId || response.headers.get('x-mx-insight-request-id'),
+    headerRequestId: response.headers.get('x-mx-insight-request-id'),
     sourceMode: response.headers.get('x-mx-insight-source-mode') || payload?.meta?.sourceMode || null,
     idempotentReplay: response.headers.get('idempotent-replay') === 'true',
     capturedAt: response.headers.get('x-mx-insight-captured-at') || payload?.meta?.capturedAt || null,
@@ -241,6 +242,9 @@ async function publicDataImage(apiKey, path, query, { signal } = {}) {
 // credential. The data-product workbench keeps the value in component memory
 // and calls the same stable public contract used by external clients.
 export const publicDataApi = {
+  twitterRetry: (apiKey, body, idempotencyKey, retryOfRequestId) => publicDataRequest(apiKey, '/api/v1/data/search', {
+    method: 'POST', body, idempotencyKey, retryOfRequestId,
+  }),
   productRequest: (key, input, idempotencyKey) => publicDataRequest(key, input.path, { method: input.method, body: input.body, idempotencyKey }),
   servicePricing: (key, path) => publicDataRequest(key, `/api/v1/data/services/pricing?path=${encodeURIComponent(path)}`),
   newsSources: (key, signal) => publicDataRequest(key, '/api/v1/data/news/sources', { signal }),
@@ -590,6 +594,9 @@ export const adminApi = {
   acquisitionHistory: (token, requestId) => request(
     token,
     `${ADMIN_ROOT}/acquisitions/${encodeURIComponent(requestId)}`,
+  ),
+  twitterRetryPreparation: (token, requestId) => request(
+    token, `${ADMIN_ROOT}/acquisitions/${encodeURIComponent(requestId)}/twitter-retry`,
   ),
   verifyAcquisitionRequest: (token, requestId, candidate) => request(
     token,

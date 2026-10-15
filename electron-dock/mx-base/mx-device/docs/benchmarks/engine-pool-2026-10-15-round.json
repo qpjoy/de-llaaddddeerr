@@ -1,0 +1,51 @@
+{
+  "at": "2026-10-15T09:33:13.139Z",
+  "devices": 100,
+  "jobs": 200,
+  "inflight": 100,
+  "poolScheduler": true,
+  "switchCostMs": 0,
+  "commandDelayMs": 200,
+  "runs": [
+    {
+      "label": "行级事务（当前）",
+      "succeeded": 200,
+      "jobs": 200,
+      "commands": 720,
+      "seconds": 3.7,
+      "commandsPerSecond": 194.9,
+      "peakConcurrentSessions": 100,
+      "conflictsRetried": 11,
+      "scopedTx": {
+        "count": 2168,
+        "p50": 31.9,
+        "p95": 74.6
+      },
+      "realmTx": {
+        "count": 68,
+        "p50": 15.4,
+        "p95": 131.3
+      }
+    },
+    {
+      "label": "全部走域事务（V2-1 前）",
+      "succeeded": 200,
+      "jobs": 200,
+      "commands": 720,
+      "seconds": 29.1,
+      "commandsPerSecond": 24.7,
+      "peakConcurrentSessions": 100,
+      "conflictsRetried": 0,
+      "scopedTx": {
+        "count": 0,
+        "p50": null,
+        "p95": null
+      },
+      "realmTx": {
+        "count": 1895,
+        "p50": 1086.3,
+        "p95": 1724.9
+      }
+    }
+  ]
+}
