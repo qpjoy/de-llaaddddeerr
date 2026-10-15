@@ -17,6 +17,10 @@ export const HUB_SOCIAL_OPERATIONS = Object.values(HUB_SOCIAL_ENDPOINTS).map(row
 }))
 const fail = message => { throw new AppError(400, 'invalid_social_request', message) }
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+// Search text is one opaque path segment. Match Night-All's quote(safe=''):
+// encodeURIComponent alone leaves !'()* literal, which can affect provider routing.
+const encodeSearchTerm = value => encodeURIComponent(value).replace(/[!'()*]/g,
+  character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)
 const scalar = (value, name, max = 500) => {
   if (typeof value !== 'string' || !value.trim() || value.length > max) fail(`${name} must be a non-empty string of at most ${max} characters`)
   return value.trim()
@@ -70,7 +74,7 @@ export function normalizeHubSocialRequest(operation, body, { maxPageSize = 50, d
   const upstreamQuery = operation === 'search' ? { count, category: sort === 'top' ? 'Top' : 'Latest', includeTimestamp: 'false' }
     : operation === 'crawl' ? { count, ...(username ? { username } : {}) } : userId ? { ids: userId } : {}
   if (providerCursor) upstreamQuery.cursor = providerCursor
-  const endpointPath = operation === 'search' ? `/search/${encodeURIComponent(query)}`
+  const endpointPath = operation === 'search' ? `/search/${encodeSearchTerm(query)}`
     : operation === 'crawl' ? `/user/${userId || '-1'}/tweets`
       : userId ? '/user/users/by/ids' : `/user/by/username/${encodeURIComponent(username)}`
   return { ...identity, queryHash, page, expiresAt, providerCursor, endpointPath, upstreamQuery,

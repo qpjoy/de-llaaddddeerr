@@ -168,3 +168,53 @@ MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh ops internal-p
 这是人工恢复入口，不是已确认的 10 秒连接超时修复，也不能保证重试成功。本次没有执行生产重试或修改原事故账本。
 
 人工重试阶段验证：相关回归共 362 项全部通过、无跳过，包括实际 PGlite SQL/唯一约束/事务回滚/原账单保持、多页与仅缓冲交付、带或不带请求头的过期 fresh 回放、鉴权 HTTP 和文档一致性。PGlite 是单会话 PostgreSQL 引擎，没有将其结果宣称为真实 PostgreSQL 多进程锁调度验收。类型检查及前端构建通过。Browser 插件不可用，使用本机 Playwright/Chrome 检查实际 Admin SPA 的 1440px/390px 界面：成功、网络中断、缺失证据、切换页面、刷新后查询后续记录；全部业务 API 被离线拦截，采集只在明确确认时发生一次模拟 POST，页面无异常、无横向溢出。
+
+## 重试返回上游 400：与成功展示请求对比
+
+用户后续截图确认：重试 `03d6c41f-88c4-42dd-a7f7-eb502d0b148b` 已提交 HTTP 502，错误为 `social_upstream_rejected`，`upstreamStatus=400`、`outcome=rejected`、`retryable=false`。这次收到明确的上游拒绝，与原 `ced3bb03-709d-438b-8d80-4deada7f8476` 没有 HTTP 状态的 transport unknown 不同，不能继续将两者都解释成 10 秒连接超时。HTTP 400 分支发生在响应内容解析之前，不是成功结果投影或补页解析失败的证据。
+
+用户指定成功展示请求 `8cef2ac9-69ea-426b-9c36-1864d87def47`，截图查询 `timo`，页大小 20。当前展示页与手动重试都使用 `/api/v1/data/search` 和同一 Twitter adapter；重试头只控制旧 unknown 的人工例外及幂等关系，不会选择旧版采集器。展示页提交 `type=stable`，原请求的实际 `type` 等参数仍需读取保存记录。离线使用真实 normalizer/adapter 配合模拟 fetch 确认：同一查询的 fresh/stable 上游参数相同，首请求为 `GET /search/{encoded query}?count=min(pageSize,50)&category=Top&includeTimestamp=false`；查询 `#chipban` 编码为 `%23chipban`，没有变成 URL fragment。此验证假设页大小 20、无游标，不代表读取了生产原参数。
+
+新增 `server/ops/compare-twitter-requests.mjs`，对以上三个明确 UUID 执行有界 READ ONLY 查询，不扫描其他成功候选。报告显示原始 query、页大小/type/sort、路径、Key 身份是否相同、游标长度/哈希、当次调用合同/配置版本及结果。仅读取当次当前 Twitter 合同的 rejected HTTP 400 原归档，校验字节长度及 SHA 后投影有限错误字段；不输出完整响应、凭据、任意嵌套参数或游标值。错误文字是供应方陈述，不是独立确认的根因；涉及凭据的文字、未审核代码和超长字段不展开。
+
+在服务器同步这个脚本后，从 `electron-dock/mx-insight-hub` 执行，不需要重新部署或付费重跑：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - \
+  ced3bb03-709d-438b-8d80-4deada7f8476 \
+  03d6c41f-88c4-42dd-a7f7-eb502d0b148b \
+  8cef2ac9-69ea-426b-9c36-1864d87def47 \
+  < server/ops/compare-twitter-requests.mjs
+```
+
+`savedInput` 是数据库保存的 Hub 参数；`currentFirstCall` 是按诊断容器已安装合同重建的首个上游请求，必须与历史实际发出的 URL 区分。历史账本未保存完整 outgoing URL，Admin 源码哈希也不能替代所有 Public 服务实例版本。只有生产输出确认两次参数与 400 原因后，才决定是否需要参数兼容性修复；不根据 `timo` 成功就认定复杂查询或时间条件也被供应商接受。
+
+本阶段新增对比测试 7 项，与既有只读诊断测试合跑 13/13 通过、无跳过，包含实际 PGlite SQL、精确 UUID/归档范围、只读事务、长度/SHA 校验、敏感字段过滤和错误清理。生产三笔报告尚待运营者执行返回；没有修改运行时搜索逻辑、部署应用或发起付费查询。
+
+## 三笔生产回执：路径拒绝与编码兼容修复
+
+运营者已返回 `twitter-request-comparison.v1`。原请求与重试的保存参数及指纹完全相同；三笔请求同 tenant/consumer/Key，均为 `twitter-aio.search`、`twitter-aio.hub.v1`、`mx-insight-hub.social-data.v1`，凭据 revision=1、策略 revision=2。成功查询不是旧请求的同参验证。
+
+| 项目 | 失败重试 `03d6c41f…` | 成功 `8cef2ac9…` |
+| --- | --- | --- |
+| Hub 入口 | `/api/v1/data/search` | 相同 |
+| query | `("US semiconductor export" OR "semiconductor export controls" OR SMIC) AND #chipban` | `timo` |
+| pageSize | 20 | 20 |
+| type | 未传，默认 fresh | stable |
+| cursor / params / 其他字段 | 均无 | 均无 |
+| 当前合同上游参数重建 | count=20、category=Top、includeTimestamp=false | 相同 |
+| 实际上游 HTTP / 耗时 | 400 / 1935 ms | 200 / 4629 ms |
+| 结果 | 上游拒绝，Hub 保存 502 | 上游 22 条，Hub 交付 20 条、有后续 |
+
+失败 call `e890c334-d906-4f78-b84a-8405f0ee1ec2` 的原归档 32 字节、SHA `38db74815e48e244760fb674b1f1a3d1f796f23a83c2e5826e243c18c46797f2` 已校验，错误字段原文为 `invalid request path`，未脱敏。其上游 requestId 为 `cbb7bbac5692797086f12b34ee2cbebb7066802471c1ba4b2ab5a984e3e65f83`，调用时间 2026-10-15 18:32:36.439–18:32:38.394（Asia/Shanghai）。这不是原 10494 ms/noHTTP 的再次发生，也不是成功响应解析或补页故障。
+
+代码核对找到路径编码差异：旧 Night-All 的 `crawlers/twitter/rapid/GetCommentByKeywords.py` 使用 `quote(search_term, safe="")`；Hub 的 `encodeURIComponent` 会保留 `!'()*`，事故表达式中括号直接进入路径。现在仅在 Twitter 搜索路径段补齐这五个字符的百分号转义，使实际 adapter 生成 `/search/%28%22US…SMIC%29%20AND%20%23chipban`。解码后查询逐字不变，不拆分/改写 AND、OR、引号或标签；仅编码原始查询一次，保留字面百分号含义，不改变 Top、页大小和供应商选择。
+
+这是与历史编码行为一致的最小兼容修复，生产错误支持优先处理这个差异；**尚无修正路径的供应商成功回执，不能断言括号是唯一根因或线上已恢复**。RFC 允许这些字符作为路径中的 sub-delims，并不是所有含括号 URL 都非法；对 opaque 查询路径段作严格转义可避免路由解释差异。参考 [MDN 的编码说明](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/encodeURIComponent#encoding_for_rfc3986)、[Python quote 文档](https://docs.python.org/3/library/urllib.parse.html#urllib.parse.quote)；[Twitter AIO Search 文档](https://rapidapi.com/viperscores-viperscores-default/api/twitter-aio/playground/apiendpoint_602d9730-5aec-48f1-ae31-7020727eb762)确认搜索词为路径参数，但没有确认本次错误的具体路由判定。
+
+保存记录也确认原请求未携带时间字段，query 内没有 since/until；下游报错中的时间窗口不是这笔 Hub 请求的上游时间过滤证据。本次不凭窗口描述自动追加时间条件。
+
+修复只作用于供应商路径段，身份和指纹仍由原始查询构造：公开合同版本、原 query、指纹、游标 scope、档案和结算均保持。旧游标继续按既有规则验证；`03d6c41f…` 的已提交 502 和 `ced3bb03…` 的 unknown 不会被改写，同一幂等身份仍回放历史结果。新请求仍受既有 unknown/授权/计费保护，修复不会自动重发。只需运营者同步完整 Hub 源码并执行上文 Hub-only 发布命令，无新增迁移，不涉及 MX-H2I 登录或联网。本轮未向供应商发送查询。
+
+验证：相关 10 个测试文件共 197 项通过，无跳过；其中 5 项 HTTP 测试首次受沙箱本机端口限制，允许 127.0.0.1 监听后定向重跑全部通过。新增测试使用实际 normalizer/adapter 配合模拟 fetch，并以固定旧格式的加密游标与指纹验证兼容性，不以模拟成功证明供应商恢复。其余覆盖原失败回放零采集、人工重试保护、分页缓冲与实际 PGlite 归档/计费事务。类型检查、差异格式检查通过。修复后 `server/contracts/hub-social.mjs` SHA-256 为 `27c88c5b6d203f1bfd1dd7b860401951d6efbc3e1b806634cfbb41cbeecb9e3b`。
