@@ -243,24 +243,6 @@
   border: 0;
   border-radius: 0;
 }
-.parity-members-panel > .section-title {
-  margin-bottom: 24px;
-}
-.parity-members-panel .section-title [data-slot="button"] {
-  margin: 0;
-}
-.harbor-console[data-page="team"]
-  .dp-team-summary
-  > [data-slot="card-content"] {
-  padding: 24px;
-}
-.dp-team-summary > [data-slot="card-content"] > svg {
-  display: none;
-}
-.dp-team-summary > [data-slot="card-content"] h2 {
-  font-size: 20px;
-  margin: 8px 0 12px;
-}
 .audit-request-id {
   font-size: 11px;
   color: #86909c;
@@ -528,18 +510,6 @@
   font-size: 12px;
   margin-top: 22px;
 }
-.dp-team-summary > [data-slot="card-content"] > svg {
-  display: block;
-  width: 48px;
-  height: 48px;
-  padding: 12px;
-  color: #395ff4;
-  background: #eef3ff;
-  border-radius: 12px;
-}
-.dp-team-summary > [data-slot="card-content"] {
-  gap: 16px;
-}
 .parity-extra-filters {
   margin: 0 0 20px;
   font-size: 12px;
@@ -776,33 +746,6 @@
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
-.harbor-console .dp-team-summary {
-  padding: 0;
-  gap: 0;
-}
-.harbor-console .dp-team-summary > [data-slot="card-content"] {
-  padding: 24px;
-  min-height: 140px;
-}
-.dp-team-summary > [data-slot="card-content"] > svg {
-  box-sizing: border-box;
-  flex-shrink: 0;
-}
-.harbor-console .dp-team-summary h2 {
-  font-size: 14px;
-  font-weight: 400;
-  margin: 6px 0 16px;
-}
-.harbor-console .dp-team-summary small {
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--text-secondary);
-}
-.harbor-console .dp-team-summary p {
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--text-secondary);
-}
 .parity-batch-inline {
   text-align: left;
 }
@@ -997,30 +940,38 @@
   [data-slot="button"][data-variant="default"] {
   color: white;
 }
-.parity-members-panel [data-slot="table"] {
-  min-width: 900px;
-}
-.parity-members-panel .harbor-actions {
-  flex-wrap: nowrap;
-  white-space: nowrap;
-}
-.parity-members-panel [data-slot="table-cell"] {
-  height: 68px;
-}
-.parity-members-panel [data-slot="table-cell"]:first-child {
-  min-width: 200px;
-}
-.parity-members-panel [data-slot="table-cell"]:last-child {
-  min-width: 400px;
-}
 .dp-dialog[data-slot="dialog-content"] {
   max-height: calc(100dvh - 32px);
   overflow-y: auto;
 }
+.parity-members-panel > .section-title {
+  margin-bottom: 0;
+}
+.dp-team-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+.parity-members-panel .simple-data-table :is(th, td) {
+  white-space: nowrap;
+}
+.parity-members-panel .team-member-identity strong {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 900px) {
+  .parity-members-panel .team-member-identity strong {
+    max-width: 160px;
+  }
+}
+@media (max-width: 540px) {
+  .parity-members-panel > .section-title {
+    flex-wrap: wrap;
+  }
+}
 /* Plain prototype tables differ from the query history's compact headers. */
 .harbor-console
   :is(
-    .parity-members-panel,
     .parity-audit-panel,
     .parity-ticket-panel,
     .usage-bottom .simple-data-table
@@ -1034,7 +985,6 @@
 }
 .harbor-console
   :is(
-    .parity-members-panel,
     .parity-audit-panel,
     .parity-ticket-panel,
     .usage-bottom .simple-data-table
@@ -1044,16 +994,6 @@
   line-height: 1.5;
 }
 .harbor-console .harbor-history [data-slot="table-head"] {
-  color: var(--text-secondary);
-}
-.parity-members-panel [data-slot="table-cell"] strong {
-  font-size: 13px;
-  font-weight: 500;
-}
-.parity-members-panel .dp-account-id {
-  font-size: 11px;
-  line-height: 1.5;
-  margin-top: 4px;
   color: var(--text-secondary);
 }
 .dp-form > label,

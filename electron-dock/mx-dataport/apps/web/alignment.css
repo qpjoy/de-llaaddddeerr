@@ -96,31 +96,6 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.dp-team-summary {
-  margin-bottom: 1.5rem;
-}
-.dp-team-summary > [data-slot="card-content"] {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 1.8rem;
-}
-.dp-team-summary svg {
-  background: #eef4ff;
-  color: #165dff;
-  border-radius: 0.75rem;
-  box-sizing: content-box;
-  padding: 0.8rem;
-}
-.dp-team-summary h2 {
-  font-size: 1.25rem;
-  margin: 0.4rem 0;
-}
-.dp-team-summary p,
-.dp-team-summary small {
-  color: #86909c;
-  font-size: 0.8rem;
-}
 .dp-owner-challenge {
   max-width: 33rem;
   margin: 6rem auto;

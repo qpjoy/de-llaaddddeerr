@@ -163,9 +163,20 @@ export function EnterpriseMembers(props: Props) {
     [invite, setInvite] = useState<any>(null),
     [password, setPassword] = useState<string | null>(null),
     [roleEditor, setRoleEditor] = useState(false),
-    [editingMember, setEditingMember] = useState<any>(null);
+    [editingMember, setEditingMember] = useState<any>(null),
+    [editingDetails, setEditingDetails] = useState<"profile" | "role" | null>(
+      null,
+    ),
+    [statusMember, setStatusMember] = useState<any>(null);
   const roles = view.data?.roles || [],
     members = view.data?.items || [];
+  const membership = membershipFor(session, tenant);
+  const memberRoleName = (member: any) =>
+    member.role === "owner"
+      ? "企业超管"
+      : roles.find((role: any) => role.id === member.roleId)?.name ||
+        roleNames[member.roleId] ||
+        (member.roleId ? "自定义角色" : `原有 ${member.role} 角色`);
   return (
     <>
       <div className="page-heading">
@@ -179,7 +190,8 @@ export function EnterpriseMembers(props: Props) {
             aria-label="刷新企业账号"
             onClick={view.reload}
           >
-            <RefreshCw size={16} />
+            <RefreshCw size={15} />
+            刷新
           </Button>
           {owner && (
             <Button variant="outline" onClick={() => setRoleEditor(true)}>
@@ -189,25 +201,40 @@ export function EnterpriseMembers(props: Props) {
           )}
         </div>
       </div>
-      <Card className="dp-team-summary">
-        <CardContent>
-          <Users />
+      <section className="panel team-summary">
+        <div className="team-summary-heading">
+          <span className="team-space-avatar">
+            <Users size={24} />
+          </span>
           <div>
-            <small>当前企业</small>
-            <h2>{membershipFor(session, tenant)?.tenantName}</h2>
-            <p>
-              {membershipFor(session, tenant)?.dataport?.roleName} ·{" "}
-              {members.length} 位成员
-            </p>
+            <span className="team-eyebrow">当前企业</span>
+            <h3>{membership?.tenantName}</h3>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+        <div className="team-summary-meta">
+          <span
+            className={`team-status ${membership?.status === "active" ? "" : "inactive"}`}
+            title="当前企业成员状态"
+          >
+            <i aria-hidden="true" />
+            {membership?.status === "active" ? "正常" : "已停用"}
+          </span>
+          <span>
+            {view.data
+              ? `${members.filter((m: any) => m.role !== "owner").length} 个员工子账号`
+              : view.error
+                ? "成员数量暂不可用"
+                : "正在读取成员…"}
+          </span>
+          <span>{membership?.dataport?.roleName}</span>
+        </div>
+      </section>
       {(view.error || write.error) && (
         <p className="harbor-error" role="alert">
           {view.error || write.error}
         </p>
       )}
-      <Card className="harbor-table-panel parity-members-panel">
+      <section className="panel team-members-panel parity-members-panel">
         <div className="section-title">
           <h3>企业成员</h3>
           {hasPermission(session, tenant, "members.create") && (
@@ -235,115 +262,99 @@ export function EnterpriseMembers(props: Props) {
             </div>
           )}
         </div>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>成员 / MX 账号</TableHead>
-              <TableHead>角色</TableHead>
-              <TableHead>状态</TableHead>
-              <TableHead>操作</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {members.map((m: any) => (
-              <TableRow key={m.id}>
-                <TableCell>
-                  <strong>{m.displayName || "未设置姓名"}</strong>
-                  {m.id === session.memberId && "（你）"}
-                  <small className="dp-account-id">
-                    {m.account || "已有 MX 账号"}
-                  </small>
-                </TableCell>
-                <TableCell>
-                  {m.role === "owner"
-                    ? "企业超管"
-                    : roles.find((r: any) => r.id === m.roleId)?.name ||
-                      roleNames[m.roleId] ||
-                      (m.roleId ? "自定义角色" : `原有 ${m.role} 角色`)}
-                </TableCell>
-                <TableCell>
-                  {m.status === "active" ? "正常" : "已停用"}
-                </TableCell>
-                <TableCell>
-                  {m.role !== "owner" && m.id !== session.memberId && (
-                    <div className="harbor-actions">
-                      {hasPermission(session, tenant, "members.update") && (
-                        <Button
-                          variant="ghost"
-                          disabled={write.busy}
-                          onClick={() => setEditingMember(m)}
-                        >
-                          编辑
-                        </Button>
-                      )}
-                      {hasPermission(session, tenant, "members.assign") && (
-                        <select
-                          aria-label={`更改 ${m.displayName} 的角色`}
-                          value={m.roleId || ""}
-                          disabled={write.busy}
-                          onChange={(e) =>
-                            void write
-                              .run(`members/${m.id}`, {
-                                roleId: e.target.value,
-                              })
-                              .then(view.reload)
-                              .catch(() => {})
-                          }
-                        >
-                          <option value="" disabled>
-                            分配数港角色
-                          </option>
-                          {roles
-                            .filter((r: any) => r.id !== "owner")
-                            .map((r: any) => (
-                              <option key={r.id} value={r.id}>
-                                {r.name}
-                              </option>
-                            ))}
-                        </select>
-                      )}
-                      {hasPermission(session, tenant, "members.disable") && (
-                        <Button
-                          variant="ghost"
-                          disabled={write.busy}
-                          onClick={() =>
-                            void write
-                              .run(`members/${m.id}`, {
-                                status:
-                                  m.status === "active"
-                                    ? "suspended"
-                                    : "active",
-                              })
-                              .then(view.reload)
-                              .catch(() => {})
-                          }
-                        >
-                          {m.status === "active" ? "停用" : "启用"}
-                        </Button>
-                      )}
-                      {owner && m.managed && (
-                        <Button
-                          variant="ghost"
-                          disabled={write.busy}
-                          onClick={() =>
-                            void write
-                              .run(`members/${m.id}/initial-password`, {})
-                              .then((v) => setPassword(v.password))
-                              .catch(() => {})
-                          }
-                        >
-                          查看初始密码
-                        </Button>
+        <div
+          className="dp-team-table-scroll"
+          role="region"
+          aria-label="企业成员列表"
+          tabIndex={0}
+        >
+          <table className="simple-data-table">
+            <thead>
+              <tr>
+                <th scope="col">员工 / 登录账号</th>
+                <th scope="col">账号类型</th>
+                <th scope="col">状态</th>
+                <th scope="col">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {members.map((m: any) => (
+                <tr key={m.id}>
+                  <td>
+                    <div className="team-member-identity">
+                      <span className="team-member-avatar" aria-hidden="true">
+                        {Array.from(
+                          String(m.displayName || m.account || "未"),
+                        )[0].toUpperCase()}
+                      </span>
+                      <div>
+                        <strong title={m.displayName || "未设置姓名"}>
+                          {m.displayName || "未设置姓名"}
+                        </strong>
+                        <small title={m.account || "已有 MX 账号"}>
+                          {m.account || "已有 MX 账号"}
+                        </small>
+                      </div>
+                      {m.id === session.memberId && (
+                        <span className="team-self-label">你</span>
                       )}
                     </div>
-                  )}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-        {!view.data && <p className="harbor-empty">正在读取成员…</p>}
-      </Card>
+                  </td>
+                  <td>{m.role === "owner" ? "企业超管" : "员工子账号"}</td>
+                  <td>
+                    <span
+                      className={`team-status ${m.status === "active" ? "" : "inactive"}`}
+                    >
+                      <i aria-hidden="true" />
+                      {m.status === "active" ? "正常" : "已停用"}
+                    </span>
+                  </td>
+                  <td>
+                    {m.role !== "owner" && m.id !== session.memberId ? (
+                      <div className="account-row-actions">
+                        <Button
+                          variant="link"
+                          disabled={write.busy}
+                          onClick={() => {
+                            setEditingDetails(null);
+                            setEditingMember(m);
+                          }}
+                        >
+                          详情
+                        </Button>
+                        {hasPermission(session, tenant, "members.disable") && (
+                          <Button
+                            variant="link"
+                            disabled={write.busy}
+                            onClick={() => setStatusMember(m)}
+                          >
+                            {m.status === "active" ? "停用" : "启用"}
+                          </Button>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="muted">—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {view.error ? (
+          <p className="team-empty">成员读取失败，请刷新重试。</p>
+        ) : !view.data ? (
+          <p className="team-empty" role="status">
+            正在读取成员…
+          </p>
+        ) : members.length === 0 ? (
+          <p className="team-empty">暂无企业成员</p>
+        ) : null}
+        <p className="team-summary-note">
+          员工按分配的角色权限查询 IP
+          风险画像、查看记录和新建工单；子账号与日志由企业超管管理。
+        </p>
+      </section>
       <Dialog
         open={open}
         onOpenChange={(v) => {
@@ -433,7 +444,7 @@ export function EnterpriseMembers(props: Props) {
             </label>
             <small>
               {operation === "create"
-                ? "初始密码自动生成，仅企业超管可在列表中查看和复制。"
+                ? "初始密码自动生成，仅企业超管可在详情中查看和复制。"
                 : "邀请链接 24 小时有效，员工登录统一 MX 账号并确认后加入企业。"}
             </small>
             {write.error && <p role="alert">{write.error}</p>}
@@ -506,36 +517,206 @@ export function EnterpriseMembers(props: Props) {
       >
         <DialogContent className="dp-dialog">
           <DialogHeader>
-            <DialogTitle>编辑员工资料</DialogTitle>
+            <DialogTitle>
+              {editingDetails === "role"
+                ? "分配数港角色"
+                : editingDetails
+                  ? "编辑员工资料"
+                  : "子账号详情"}
+            </DialogTitle>
             <DialogDescription>
-              修改该员工在本企业的显示名称，统一 MX 账号资料由员工本人维护。
+              {editingDetails === "role"
+                ? "为该员工选择企业角色，页面和操作按角色权限开放。"
+                : editingDetails
+                  ? "修改该员工在本企业的显示名称，统一 MX 账号资料由员工本人维护。"
+                  : "查看员工的登录账号、企业角色和当前状态。"}
             </DialogDescription>
           </DialogHeader>
-          <form
-            className="dp-form"
-            onSubmit={async (e) => {
-              e.preventDefault();
-              try {
-                await write.run(`members/${editingMember.id}`, {
-                  displayName: new FormData(e.currentTarget).get("displayName"),
-                });
-                setEditingMember(null);
-                view.reload();
-              } catch {}
-            }}
-          >
-            <label>
-              企业显示名称
-              <Input
-                name="displayName"
-                required
-                maxLength={80}
-                defaultValue={editingMember?.displayName || ""}
-              />
-            </label>
-            {write.error && <p role="alert">{write.error}</p>}
-            <Button disabled={write.busy}>保存</Button>
-          </form>
+          {editingMember &&
+            (editingDetails ? (
+              <form
+                className="ticket-form"
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  const values = new FormData(e.currentTarget),
+                    patch: Record<string, string> = {};
+                  if (
+                    editingDetails === "profile" &&
+                    hasPermission(session, tenant, "members.update")
+                  )
+                    patch.displayName = String(values.get("displayName") || "");
+                  if (
+                    editingDetails === "role" &&
+                    hasPermission(session, tenant, "members.assign")
+                  )
+                    patch.roleId = String(values.get("roleId") || "");
+                  if (!Object.keys(patch).length) return;
+                  try {
+                    await write.run(`members/${editingMember.id}`, patch);
+                    setEditingMember(null);
+                    view.reload();
+                  } catch {}
+                }}
+              >
+                {editingDetails === "profile" &&
+                  hasPermission(session, tenant, "members.update") && (
+                    <label>
+                      员工名称
+                      <input
+                        name="displayName"
+                        required
+                        maxLength={80}
+                        defaultValue={editingMember.displayName || ""}
+                      />
+                    </label>
+                  )}
+                {editingDetails === "role" &&
+                  hasPermission(session, tenant, "members.assign") && (
+                    <label>
+                      角色
+                      <select
+                        name="roleId"
+                        required
+                        defaultValue={editingMember.roleId || ""}
+                      >
+                        <option value="" disabled>
+                          分配数港角色
+                        </option>
+                        {roles
+                          .filter((r: any) => r.id !== "owner")
+                          .map((r: any) => (
+                            <option key={r.id} value={r.id}>
+                              {r.name}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                  )}
+                {write.error && <p role="alert">{write.error}</p>}
+                <div className="account-row-actions">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={write.busy}
+                    onClick={() => setEditingDetails(null)}
+                  >
+                    取消
+                  </Button>
+                  <Button disabled={write.busy}>保存</Button>
+                </div>
+              </form>
+            ) : (
+              <>
+                <div className="credential-success">
+                  <div className="credential-field">
+                    <span>员工名称</span>
+                    <strong>{editingMember.displayName || "未设置姓名"}</strong>
+                  </div>
+                  <div className="credential-field">
+                    <span>登录账号</span>
+                    <code>{editingMember.account || "已有 MX 账号"}</code>
+                  </div>
+                  <div className="credential-field">
+                    <span>角色</span>
+                    <strong>{memberRoleName(editingMember)}</strong>
+                  </div>
+                  <div className="credential-field">
+                    <span>状态</span>
+                    <strong>
+                      {editingMember.status === "active" ? "正常" : "已停用"}
+                    </strong>
+                  </div>
+                </div>
+                {hasPermission(session, tenant, "members.update") && (
+                  <Button
+                    variant="outline"
+                    onClick={() => setEditingDetails("profile")}
+                  >
+                    编辑员工资料
+                  </Button>
+                )}
+                {hasPermission(session, tenant, "members.assign") && (
+                  <Button
+                    variant="outline"
+                    onClick={() => setEditingDetails("role")}
+                  >
+                    分配角色
+                  </Button>
+                )}
+                {owner && editingMember.managed && (
+                  <Button
+                    disabled={write.busy}
+                    onClick={() =>
+                      void write
+                        .run(`members/${editingMember.id}/initial-password`, {})
+                        .then((v) => {
+                          setEditingMember(null);
+                          setPassword(v.password);
+                        })
+                        .catch(() => {})
+                    }
+                  >
+                    <Copy size={16} />
+                    查看初始密码
+                  </Button>
+                )}
+                {write.error && <p role="alert">{write.error}</p>}
+              </>
+            ))}
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={!!statusMember}
+        onOpenChange={(v) => {
+          if (!v && !write.busy) setStatusMember(null);
+        }}
+      >
+        <DialogContent className="dp-dialog">
+          <DialogHeader>
+            <DialogTitle>
+              {statusMember?.status === "active"
+                ? "确认停用子账号？"
+                : "确认启用子账号？"}
+            </DialogTitle>
+            <DialogDescription>
+              {statusMember?.displayName || statusMember?.account} ·{" "}
+              {statusMember?.status === "active"
+                ? "停用后该成员将无法继续访问企业数据。"
+                : "启用后该成员可按角色权限访问企业数据。"}
+            </DialogDescription>
+          </DialogHeader>
+          {write.error && <p role="alert">{write.error}</p>}
+          <div className="account-row-actions">
+            <Button
+              variant="outline"
+              disabled={write.busy}
+              onClick={() => setStatusMember(null)}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={write.busy}
+              onClick={() => {
+                if (!hasPermission(session, tenant, "members.disable")) return;
+                void write
+                  .run(`members/${statusMember.id}`, {
+                    status:
+                      statusMember.status === "active" ? "suspended" : "active",
+                  })
+                  .then(() => {
+                    setStatusMember(null);
+                    view.reload();
+                  })
+                  .catch(() => {});
+              }}
+            >
+              {write.busy
+                ? "处理中…"
+                : statusMember?.status === "active"
+                  ? "确认停用"
+                  : "确认启用"}
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
       {owner && roleEditor && (
