@@ -1,5 +1,13 @@
 # 验证记录
 
+## 2026-10-16：Internal 集群部署时服务端反复崩溃（镜像里缺 test-packs）
+
+- **现象**：`scripts/manage.sh deploy` 报 `deployment "mx-rig-server" exceeded its progress deadline`，Pod 处于 `CrashLoopBackOff`。日志显示启动时找不到 `/app/mx-rig/test-packs/compass/rig-specs/electron/case-catalog.electron.json`。
+- **原因**：M5 起，内核在加载时读取验收包里的罗盘用例目录（`onboarding/compass.mjs`），从验收包创建项目也要读 `test-packs/`；但服务端镜像从来没有复制这个目录。本机和测试都直接在仓库里运行，所以一直没暴露。
+- **修复**：`deploy/Dockerfile` 加上 `COPY mx-rig/test-packs ./test-packs`，约 240 KB，`node_modules` 已被构建上下文排除。
+- **防回归**：新增 `tests/server-image.test.mjs`。它从 `apps/server/index.mjs` 出发，沿相对路径的 import 和 `new URL(…, import.meta.url)` 读取的文件走一遍，检查每一个都在 Dockerfile 复制的目录里。去掉这行 COPY 时，测试失败并指出缺的就是这个文件。
+- 在本机用和容器相同的方式启动服务端（生产模式、设置 Launcher 地址），`/readyz` 和新接口返回 200。镜像要在 Internal 节点上重新构建部署才能验证。
+
 ## 2026-10-16：桌面端 Launcher 独立端 P1（自己的产品网络、统一账号、登记命令）
 
 - `npm run check` 通过：仓库自检只允许 `apps/desktop/launcher-network.mjs` 一个文件带数据面代码。

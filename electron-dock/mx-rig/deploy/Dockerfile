@@ -25,6 +25,9 @@ COPY mx-rig/packages/test-platform/web ./packages/test-platform/web
 COPY mx-rig/packages/test-platform/bin ./packages/test-platform/bin
 COPY mx-rig/packages/test-platform/contracts ./packages/test-platform/contracts
 COPY mx-rig/packages/test-platform/migrations ./packages/test-platform/migrations
+# Acceptance packs: the kernel reads their catalogs when it starts (Compass
+# onboarding) and when a project is created from a pack.
+COPY mx-rig/test-packs ./test-packs
 RUN mkdir -p /data/control /data/artifacts && chown -R node:node /data
 USER node
 ENV NODE_ENV=production MX_RIG_HOST=0.0.0.0 MX_RIG_PORT=8791 MX_RIG_STATE_DIR=/data/control MX_RIG_ARTIFACTS_DIR=/data/artifacts
