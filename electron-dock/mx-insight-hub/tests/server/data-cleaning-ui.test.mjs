@@ -153,3 +153,18 @@ test('every scheduled cleaning plan saves its runtime interval independently fro
   assert.match(pageSource, /onSave=\{saveSyncInterval\} busy=\{Boolean\(busyAction\)\}/u)
   assert.match(pageSource, /onSave=\{saveSchedule\} busy=\{busy\}/u)
 })
+
+test('Night-All recheck and recovery feedback stay separate from writer activation', async () => {
+  const [, , pageSource] = await frontendSources()
+  const modal = pageSource.split('function NightAllSavedRecordsPipelineModal(')[1].split('function mobileCommerceRunning')[0]
+  assert.match(modal, /progress\.loading \? '正在核对…' : '重新核对'/u)
+  assert.match(modal, /progress\.loading \|\| progress\.error \? '上次核对' : '核对完成'/u)
+  assert.match(modal, /重新核对无需勾选 Writer 确认/u)
+  assert.match(modal, /勾选不会执行检查、修复或恢复/u)
+  assert.match(modal, /isCrawlerPipelineSnapshot\(updated\)/u)
+  assert.match(modal, /crawlerRecoveryFeedback\(sourceKeys, updated\)/u)
+  assert.doesNotMatch(modal, /失败任务已从各自 checkpoint 恢复/u)
+  const resume = modal.split('const resumeFailed =')[1].split('const resetCheckpoints')[0]
+  assert.doesNotMatch(resume, /writerContractConfirmed|changeStatus|resetNightAll/u)
+  assert.match(resume, /resumeNightAllSavedRecordsPipeline\(token\)/u)
+})
