@@ -4,3 +4,6 @@ dist/
 secrets/
 .deploy/
 *.log
+
+# Local UI review screenshots belong in the workspace screenshot directory.
+/docs/screenshots/

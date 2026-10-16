@@ -43,22 +43,24 @@
 
 ## 截图
 
+截图已迁至工作区本地目录 `/Users/lanan/Desktop/yjj/数港/screenshot/`，不随代码仓库分发；以下链接按当前工作区结构访问。
+
 原型查询首页：
 
-![原型查询首页](screenshots/prototype-parity-20261015/source-query.png)
+![原型查询首页](../../../../screenshot/prototype-parity-20261015/source-query.png)
 
 对齐后的实际查询页（合成数据）：
 
-![实际查询页](screenshots/prototype-parity-20261015/query.png)
+![实际查询页](../../../../screenshot/prototype-parity-20261015/query.png)
 
 对齐后的实际画像：
 
-![画像页](screenshots/prototype-parity-20261015/result.png)
+![画像页](../../../../screenshot/prototype-parity-20261015/result.png)
 
 对齐后的订阅卡片：
 
-![订阅页](screenshots/prototype-parity-20261015/services.png)
+![订阅页](../../../../screenshot/prototype-parity-20261015/services.png)
 
 手机视口：
 
-![手机查询页](screenshots/prototype-parity-20261015/mobile-query.png)
+![手机查询页](../../../../screenshot/prototype-parity-20261015/mobile-query.png)
