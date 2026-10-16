@@ -27,12 +27,14 @@
 
 ## 当前截图
 
+截图已迁至工作区本地目录 `/Users/lanan/Desktop/yjj/数港/screenshot/`，不随代码仓库分发；以下链接按当前工作区结构访问。
+
 | 视图 | 原型 | 应用 |
 | --- | --- | --- |
-| 查询及桌面侧栏 | [原型](screenshots/typography-20261016/source-query-final.png) | [应用](screenshots/typography-20261016/actual-query-final.png) |
-| 桌面新建子账号 | [原型](screenshots/typography-20261016/source-dialog-final.png) | [应用](screenshots/typography-20261016/actual-dialog-final.png) |
-| 手机新建子账号 | [原型](screenshots/typography-20261016/source-mobile-dialog-final.png) | [应用](screenshots/typography-20261016/actual-mobile-dialog-final.png) |
-| 手机侧栏 | [原型](screenshots/typography-20261016/source-mobile-sidebar.png) | [应用](screenshots/typography-20261016/actual-mobile-sidebar.png) |
+| 查询及桌面侧栏 | [原型](../../../../screenshot/typography-20261016/source-query-final.png) | [应用](../../../../screenshot/typography-20261016/actual-query-final.png) |
+| 桌面新建子账号 | [原型](../../../../screenshot/typography-20261016/source-dialog-final.png) | [应用](../../../../screenshot/typography-20261016/actual-dialog-final.png) |
+| 手机新建子账号 | [原型](../../../../screenshot/typography-20261016/source-mobile-dialog-final.png) | [应用](../../../../screenshot/typography-20261016/actual-mobile-dialog-final.png) |
+| 手机侧栏 | [原型](../../../../screenshot/typography-20261016/source-mobile-sidebar.png) | [应用](../../../../screenshot/typography-20261016/actual-mobile-sidebar.png) |
 
 关键同名文字的计算样式见 [测量记录](typography-measurements-20261016.json)。业务记录数、商品描述、订阅状态和权限相关功能由各自后端决定，截图使用本地样例，不作为线上数据验收。
 
