@@ -12,10 +12,16 @@
 // --dir           an unpacked app folder instead of an installer
 // --launcher      Launcher mode (docs/25): the app is Launcher's standalone
 //                 product mx-rig and reaches the service through its own
-//                 product network; carries the WireGuard engine for its
-//                 platform. --server then overrides the product VIP.
+//                 product network; carries the WireGuard and Mihomo engines
+//                 for its platform (the network, and the overseas channel of
+//                 docs/25 P3). --server then overrides the product VIP.
 // --bootstrap     Launcher entrances to try, in order (default: the public
 //                 relay by IP, then h2i.minsight-ai.com)
+//
+// A Launcher-mode installer also gets a release manifest beside it
+// (<installer>.json: version, platform, arch, size, SHA-256), which is what
+// scripts/manage.sh release publish uploads to Release Center (docs/25 P2).
+// Only installers update themselves; a --dir build is 'portable' and does not.
 
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -26,6 +32,8 @@ import { join, resolve } from 'node:path'
 import { Arch, build, Platform } from 'electron-builder'
 import { serviceUrl } from '../packages/contracts/index.mjs'
 import { DEFAULT_BOOTSTRAP_URLS } from '../apps/desktop/launcher-network.mjs'
+import { INSTALLER_EXTENSIONS, manifestPath, writeInstallerManifest } from './release-artifact.mjs'
+import { binaryName, enginePackage } from '../apps/desktop/mihomo-engine.mjs'
 import {
   chromiumBuild,
   executableIn,
@@ -58,7 +66,14 @@ const launcher = flag('launcher')
 if (launcher) {
   const bootstrapUrls = (option('bootstrap') ?? '').split(',').map((url) => url.trim()).filter(Boolean)
   const serverUrl = server ? serviceUrl(server, { privateHttp: true }) : null
-  const defaults = { launcher: { enabled: true, bootstrapUrls: bootstrapUrls.length ? bootstrapUrls : DEFAULT_BOOTSTRAP_URLS, ...(serverUrl ? { serverUrl } : {}) } }
+  const defaults = {
+    launcher: {
+      enabled: true,
+      bootstrapUrls: bootstrapUrls.length ? bootstrapUrls : DEFAULT_BOOTSTRAP_URLS,
+      ...(serverUrl ? { serverUrl } : {}),
+      distribution: flag('dir') ? 'portable' : 'installed'
+    }
+  }
   await writeFile(defaultsFile, `${JSON.stringify(defaults, null, 2)}\n`)
   say(`Launcher mode: product mx-rig through ${defaults.launcher.bootstrapUrls.join(', ')}; the service is ${serverUrl ?? 'the product VIP'}`)
 } else if (server) {
@@ -140,6 +155,44 @@ if (launcher) {
   say(`bundling the WireGuard engine ${from}`)
 }
 
+// -- the Mihomo engine, in Launcher mode ------------------------------------------------
+
+// The overseas channel (docs/25 P3) runs Launcher's Mihomo build, shipped
+// gzipped in Resources/mihomo/<platform>-<arch> and unpacked on first use.
+// npm installs only this machine's engine package; another target's is
+// fetched once at the version package.json pins. The engine packages never
+// go into app.asar.
+config.files = [...config.files, '!node_modules/@qpjoy/electron-plugin-tunnel-engine-*/**']
+if (launcher) {
+  const releasePlatform = { mac: 'darwin', win: 'win32', linux: 'linux' }[target]
+  const key = `${releasePlatform}-${arch}`
+  const name = enginePackage(releasePlatform, arch)
+  const require = createRequire(import.meta.url)
+  let dir = null
+  try {
+    dir = resolve(require.resolve(`${name}/package.json`), '..')
+  } catch {
+    const own = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
+    const version = own.optionalDependencies?.[name]
+    if (!version) throw new Error(`no Mihomo engine is pinned for ${key} (${name} in package.json)`)
+    dir = resolve(root, '.runtime/mihomo-engines', key, 'package')
+    if (!existsSync(dir)) {
+      say(`fetching ${name}@${version} (once; kept in .runtime/mihomo-engines)`)
+      const into = resolve(root, '.runtime/mihomo-engines', key)
+      await mkdir(into, { recursive: true })
+      const packed = spawnSync('npm', ['pack', `${name}@${version}`, '--pack-destination', into, '--silent'], { encoding: 'utf8', shell: process.platform === 'win32' })
+      if (packed.status !== 0) throw new Error(`fetching ${name} failed: ${packed.stderr}`)
+      const tarball = join(into, packed.stdout.trim().split(/\r?\n/).at(-1))
+      const unpacked = spawnSync('tar', ['-xzf', tarball, '-C', into], { stdio: 'inherit' })
+      if (unpacked.status !== 0) throw new Error(`unpacking ${tarball} failed`)
+    }
+  }
+  const from = join(dir, 'resources', 'engine', key, `${binaryName(releasePlatform)}.gz`)
+  if (!existsSync(from)) throw new Error(`the Mihomo engine for ${key} has no binary at ${from}`)
+  config.extraResources = [...(config.extraResources ?? []), { from, to: `mihomo/${key}/${binaryName(releasePlatform)}.gz` }]
+  say(`bundling the Mihomo engine ${from}`)
+}
+
 // -- the first open of an unsigned build ------------------------------------------------
 
 // macOS asks once before running an app without a Developer ID signature; the
@@ -175,6 +228,7 @@ if (target === 'mac' && process.platform === 'darwin' && !process.env.CSC_LINK &
 
 // -- build ------------------------------------------------------------------------------
 
+let built = []
 try {
   const archs = [Arch[arch]].filter((value) => value !== undefined)
   if (flag('dir')) {
@@ -183,10 +237,22 @@ try {
       config.electronDist = resolve(root, 'node_modules/electron/dist')
     config.win = { ...config.win, signAndEditExecutable: false }
     await build({ projectDir: root, targets: platform.createTarget('dir', ...archs), config })
-  } else await build({ projectDir: root, targets: platform.createTarget(null, ...archs), config })
+  } else built = await build({ projectDir: root, targets: platform.createTarget(null, ...archs), config })
 } finally {
   // The address belongs to that build only; a desktop run from source keeps
   // starting with its own.
   await rm(defaultsFile, { force: true })
+}
+
+// -- what Release Center gets, in Launcher mode ---------------------------------------
+
+if (launcher && !flag('dir')) {
+  const releasePlatform = { mac: 'darwin', win: 'win32', linux: 'linux' }[target]
+  const { version } = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
+  for (const file of built.filter((path) => path.endsWith(INSTALLER_EXTENSIONS[releasePlatform]))) {
+    const manifest = await writeInstallerManifest(file, { version, platform: releasePlatform, arch })
+    say(`release manifest ${manifestPath(file)} (${manifest.digest.slice(0, 19)}…)`)
+    say(`publish: copy both files to the Internal node, then scripts/manage.sh release publish ${manifest.fileName} --install-id <安装 ID>`)
+  }
 }
 say(`output: ${resolve(root, 'dist')}`)

@@ -37,8 +37,10 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
+    "@qpjoy/electron-core-mihomo": "0.1.2",
     "@qpjoy/electron-launcher": "^2.3.19",
     "playwright": "1.58.2",
+    "yaml": "^2.9.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {
@@ -48,5 +50,12 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "optionalDependencies": {
+    "@qpjoy/electron-plugin-tunnel-engine-darwin-arm64": "0.1.6",
+    "@qpjoy/electron-plugin-tunnel-engine-darwin-x64": "0.1.6",
+    "@qpjoy/electron-plugin-tunnel-engine-linux-arm64": "0.1.6",
+    "@qpjoy/electron-plugin-tunnel-engine-linux-x64": "0.1.6",
+    "@qpjoy/electron-plugin-tunnel-engine-win32-x64": "0.1.6"
   }
 }

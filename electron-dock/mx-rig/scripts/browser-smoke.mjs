@@ -191,6 +191,35 @@ try {
   await openNav(page, '出网与通道')
   await page.locator('.rig-table[data-layout="egress"]').waitFor({ state: 'visible' })
   await page.screenshot({ path: join(qa, 'web-egress.png') })
+  // The desktop's overseas channel card (docs/25 P3) exists only in the
+  // Launcher-mode desktop; here it is drawn from its states with the page's
+  // own styles, to see what each says and offers.
+  const oversea = await page.evaluate(async () => {
+    const { overseaPanel } = await import(new URL('views.js', location.href).href)
+    const calls = []
+    const ctx = { run: (work) => work(), oversea: async (action, body) => calls.push([action, body ?? null]) }
+    const base = { channelId: 'launcher-oversea', enabled: false, browser: false, usingBrowser: false, verified: null, latencyMs: null, sites: [], busy: false }
+    const states = [
+      { ...base, state: 'unavailable', enabled: true, text: '用平台统一账号登录、连上内网后才能开启。' },
+      { ...base, state: 'ready', enabled: true, browser: true, usingBrowser: true, verified: true, latencyMs: 286, text: '海外通道已就绪（试访问 286 ms）。' },
+      { ...base, state: 'error', enabled: true, text: '这个账号没有海外权限，请联系管理员开通。' }
+    ]
+    const box = document.createElement('div')
+    box.id = 'oversea-preview'
+    box.className = 'rig-oversea-preview'
+    for (const snap of states) box.append(overseaPanel(ctx, snap))
+    document.querySelector('#view').prepend(box)
+    const buttons = [...box.querySelectorAll('#oversea-toggle')].map((button) => button.textContent)
+    box.querySelectorAll('#oversea-toggle')[1].click()
+    box.querySelectorAll('#oversea-browser')[1].click()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    return { buttons, calls, statuses: [...box.querySelectorAll('#oversea-state')].map((node) => node.dataset.status) }
+  })
+  assert.deepEqual(oversea.buttons, ['开启海外通道', '关闭海外通道', '重试'])
+  assert.deepEqual(oversea.statuses, ['default', 'success', 'danger'])
+  assert.deepEqual(oversea.calls, [['oversea-stop', null], ['oversea-browser', { on: false }]])
+  await page.locator('#oversea-preview').screenshot({ path: join(qa, 'web-oversea-panel.png') })
+  await page.evaluate(() => document.querySelector('#oversea-preview').remove())
 
   // The orchestration centre: open a saved spec, break it, see the compiler
   // refuse it by name, repair it, and watch the draft preview come back.
@@ -753,7 +782,7 @@ try {
 
   assert.deepEqual(errors, [])
   console.log(
-    'Browser tools and Web smoke passed: origin policy, real page fill/click, password refusal, screenshots, HttpOnly login, unconfigured model blocked, Internal settings, Agent market, quality report (empty rates read "—", report focus reorders sections), orchestration centre (compiled spec, draft preview, refused draft), egress observation, the system layer (signal vs platform evidence, claim, floating panel), one-line dispatch parsing (real plan id, no execution), switching Rig\'s own egress channel, streamed model output (a visible draft that the final answer replaces), a structured finding whose unread citation is marked, accounts (create, sign in with the one-time password, role, reset, disable), runners (enrol command, remove), the run detail (waiting for a runner, live pipeline, results with a seekable recording, rerun one case, cancel, an unstarted Agent analysis drafted from it, the read-only tour on the web, a quest offering it, a published tour recording playing in 新手引导), creating a project from the Compass acceptance pack (references shown, not counted), and M6 (scheduling only after a verified run, the setup checklist, the audit trail of a schedule change, registering an installer, the old console read-only), and the published versions of a test repository in the browser.'
+    'Browser tools and Web smoke passed: origin policy, real page fill/click, password refusal, screenshots, HttpOnly login, unconfigured model blocked, Internal settings, Agent market, quality report (empty rates read "—", report focus reorders sections), orchestration centre (compiled spec, draft preview, refused draft), egress observation, the desktop overseas channel card in each state, the system layer (signal vs platform evidence, claim, floating panel), one-line dispatch parsing (real plan id, no execution), switching Rig\'s own egress channel, streamed model output (a visible draft that the final answer replaces), a structured finding whose unread citation is marked, accounts (create, sign in with the one-time password, role, reset, disable), runners (enrol command, remove), the run detail (waiting for a runner, live pipeline, results with a seekable recording, rerun one case, cancel, an unstarted Agent analysis drafted from it, the read-only tour on the web, a quest offering it, a published tour recording playing in 新手引导), creating a project from the Compass acceptance pack (references shown, not counted), and M6 (scheduling only after a verified run, the setup checklist, the audit trail of a schedule change, registering an installer, the old console read-only), and the published versions of a test repository in the browser.'
   )
 } finally {
   await tools.close()

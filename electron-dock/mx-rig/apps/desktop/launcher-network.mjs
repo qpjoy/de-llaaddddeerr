@@ -27,6 +27,7 @@ import { join } from 'node:path'
 export const PRODUCT_ID = 'mx-rig'
 export const DEFAULT_BOOTSTRAP_URLS = ['http://116.62.51.154:18090', 'https://h2i.minsight-ai.com']
 const INTERNAL_PORT = 18090
+export const SIGN_IN_SCOPE = 'auth.read oversea.subscription.ensure'
 const STATE_FILE = 'mx-rig-launcher.json'
 const PROFILE_NAME = 'mx-rig.conf'
 const DISPLAY_NAME = 'MX Rig'
@@ -202,6 +203,47 @@ export class LauncherNetwork {
     if (this.config.serverUrl) return this.config.serverUrl
     const vip = this.state.connection.serviceVip
     return vip ? `http://${vip}` : null
+  }
+
+  /**
+   * Where Release Center answers for this install (docs/25 P2): Launcher
+   * Internal behind Rig's own VIP, and only while the network is ready —
+   * never another product's VIP, never a fixed address.
+   */
+  releaseContext() {
+    const { status, internalBaseUrl, serviceVip } = this.state.connection
+    if (status !== 'ready' || !internalBaseUrl || !serviceVip) return null
+    if (new URL(internalBaseUrl).hostname !== serviceVip) return null
+    const { identity } = this.state
+    return { baseUrl: internalBaseUrl, installId: this.state.installId, userId: identity.kind === 'user' ? identity.userId : null }
+  }
+
+  /**
+   * The signed-in account, for the overseas channel (docs/25 P3): its token
+   * travels only to Launcher Internal behind Rig's own VIP. Main process only.
+   */
+  overseaSession() {
+    const context = this.releaseContext()
+    if (!context?.userId || !this.accessToken) return null
+    return { baseUrl: context.baseUrl, userId: context.userId, accessToken: this.accessToken }
+  }
+
+  /** The network as the update controller weighs it: nothing is installed mid-connect. */
+  updateGate() {
+    switch (this.state.connection.status) {
+      case 'ready':
+        return 'connected'
+      case 'resolving':
+      case 'enrolling':
+      case 'applying':
+        return 'connecting'
+      case 'pending':
+        return 'recovering'
+      case 'error':
+        return 'permission-required'
+      default:
+        return 'idle'
+    }
   }
 
   #exclusive(task) {
@@ -441,7 +483,9 @@ export class LauncherNetwork {
       method: 'POST',
       signal: AbortSignal.timeout(20_000),
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ grant_type: 'password', username: name, password, audience: 'mx-sdk', scope: 'auth.read', requestId: `mx-rig-oauth-${Date.now()}` })
+      // oversea.subscription.ensure: the overseas channel (docs/25 P3) asks
+      // for the account's subscription with this token. Guests are not granted it.
+      body: JSON.stringify({ grant_type: 'password', username: name, password, audience: 'mx-sdk', scope: SIGN_IN_SCOPE, requestId: `mx-rig-oauth-${Date.now()}` })
     })
     const body = await answer.text()
     let payload = {}

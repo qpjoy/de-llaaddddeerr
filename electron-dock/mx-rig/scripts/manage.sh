@@ -4,9 +4,11 @@
 #
 # This script only ever touches its own things: the compose project "mx-rig",
 # its dedicated proxy builder/cache, or the Kubernetes namespace "mx-rig" and
-# its two PersistentVolumes. It never
-# reads or writes another product's namespace, Service, Secret, database or
-# volume, and it does not look for Launcher — Rig accounts are its own.
+# its two PersistentVolumes. It never writes another product's namespace,
+# Service, Secret, database or volume. Of Launcher it reads only where its
+# Service is (for unified sign-in and the desktop's Launcher mode), and it
+# writes to Launcher only through Launcher's own API, with an ops token the
+# operator passes in (launcher apply).
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -58,8 +60,10 @@ Internal 服务器（Kubernetes，在节点上执行）
   scripts/manage.sh migrate                 只跑迁移
   scripts/manage.sh stop                    服务缩到 0；数据库、Secret 与数据目录保留
   scripts/manage.sh launcher plan | apply   桌面端 Launcher 模式要在 Launcher 登记的内容（docs/25）：
-                                            plan 只读；apply 写入产品网络和 AppCenter 条目（需要 MX_LAUNCHER_OPS_TOKEN），
-                                            并列出只能在 Launcher Admin 里做的步骤
+                                            plan 只读；apply 写入产品网络、AppCenter 条目和两个发版账号（需要 MX_LAUNCHER_OPS_TOKEN），
+                                            发版凭据只存进 mx-rig/mx-rig-release，不打印；并列出只能在 Launcher Admin 里做的步骤
+  scripts/manage.sh release status | publish <安装包> --install-id <ID> | approve <plan> --smoke passed | reject <plan> | promote <plan>
+                                            经 Release Center 发布桌面端新版本（docs/25 P2）：先定向、手动验证后批准，再推给所有人
 
 开发
   scripts/manage.sh dev | test | eval [参数]
@@ -655,6 +659,51 @@ cmd_stop() {
 
 # -- development -----------------------------------------------------------------
 
+# Launcher Internal as this node reaches it: an explicit MX_LAUNCHER_URL, or
+# its Service's ClusterIP.
+launcher_internal_url() {
+  local found
+  if [ -n "${MX_LAUNCHER_URL:-}" ]; then printf '%s' "$MX_LAUNCHER_URL"; return 0; fi
+  need kubectl
+  found="$(kubectl -n mx-internal-shadow get service mx-launcher-internal \
+    -o 'jsonpath={.spec.clusterIP}:{.spec.ports[?(@.name=="http")].port}' 2>/dev/null || true)"
+  [ -n "$found" ] && [ "$found" != ":" ] || die "Launcher Internal is not in this cluster; set MX_LAUNCHER_URL"
+  printf 'http://%s' "$found"
+}
+
+# Rig's release credentials (docs/25 P2) live in their own Secret, apart from
+# the server's: the server never needs them.
+RELEASE_SECRET=mx-rig-release
+read_release_secret() {
+  local encoded
+  encoded="$(kube get secret "$RELEASE_SECRET" --ignore-not-found -o "jsonpath={.data.$1}" 2>/dev/null || true)"
+  [ -z "$encoded" ] || printf '%s' "$encoded" | base64 -d
+}
+# Which of the two this cluster keeps: "publisher,approver", a part, or "".
+release_kept() {
+  local kept=()
+  [ -z "$(read_release_secret MX_RIG_RELEASE_CLIENT_SECRET)" ] || kept+=(publisher)
+  [ -z "$(read_release_secret MX_RIG_RELEASE_APPROVER_CLIENT_SECRET)" ] || kept+=(approver)
+  local IFS=,
+  printf '%s' "${kept[*]+"${kept[*]}"}"
+}
+# A credential Launcher issued is shown once: merged into the Secret, and the
+# file it came in is removed only once it is stored.
+keep_release_secret() {
+  local file="$1"
+  [ -s "$file" ] || { rm -f "$file"; return 0; }
+  if kubectl apply -f "${K8S_DIR}/00-namespace.yaml" >/dev/null 2>&1 &&
+    { kube get secret "$RELEASE_SECRET" >/dev/null 2>&1 || kube create secret generic "$RELEASE_SECRET" >/dev/null; } &&
+    kube patch secret "$RELEASE_SECRET" --type merge --patch-file "$file" >/dev/null; then
+    rm -f "$file"
+    say "release credentials kept in ${NAMESPACE}/${RELEASE_SECRET}"
+  else
+    say "WARNING: could not store the release credentials; they are in ${file} (mode 600). Store them with:"
+    say "  kubectl -n ${NAMESPACE} patch secret ${RELEASE_SECRET} --type merge --patch-file ${file}"
+    return 1
+  fi
+}
+
 # What the desktop's Launcher mode needs registered in Launcher (docs/25 §3.4).
 # Run on the Internal node: both services are found in the cluster.
 cmd_launcher() {
@@ -662,20 +711,47 @@ cmd_launcher() {
   local action="${1:-plan}"
   shift || true
   case "$action" in plan | apply) ;; *) die "usage: scripts/manage.sh launcher plan|apply" ;; esac
-  local url="${MX_LAUNCHER_URL:-}" found
-  if [ -z "$url" ]; then
-    need kubectl
-    found="$(kubectl -n mx-internal-shadow get service mx-launcher-internal \
-      -o 'jsonpath={.spec.clusterIP}:{.spec.ports[?(@.name=="http")].port}' 2>/dev/null || true)"
-    [ -n "$found" ] && [ "$found" != ":" ] || die "Launcher Internal is not in this cluster; set MX_LAUNCHER_URL"
-    url="http://${found}"
-  fi
+  local url status=0 out
+  url="$(launcher_internal_url)"
   # The Rig service the VIP route points at: what deploy published.
   if [ -z "${MX_RIG_PUBLIC_URL:-}" ] && command -v kubectl >/dev/null 2>&1; then
     load_env
     resolve_public_url 2>/dev/null || true
   fi
-  node "${ROOT_DIR}/scripts/launcher-register.mjs" "$action" --url "$url" ${MX_RIG_PUBLIC_URL:+--rig-url "$MX_RIG_PUBLIC_URL"}
+  # Known only with the cluster at hand; unknown means nothing is rotated.
+  if command -v kubectl >/dev/null 2>&1 && kubectl version --request-timeout=5s >/dev/null 2>&1; then
+    MX_RIG_RELEASE_HAVE="$(release_kept)"
+    export MX_RIG_RELEASE_HAVE
+  fi
+  if [ "$action" = plan ]; then
+    node "${ROOT_DIR}/scripts/launcher-register.mjs" plan --url "$url" ${MX_RIG_PUBLIC_URL:+--rig-url "$MX_RIG_PUBLIC_URL"}
+    return
+  fi
+  out="$(umask 077 && mktemp "${TMPDIR:-/tmp}/mx-rig-release.XXXXXX")"
+  node "${ROOT_DIR}/scripts/launcher-register.mjs" apply --url "$url" --secret-out "$out" \
+    ${MX_RIG_PUBLIC_URL:+--rig-url "$MX_RIG_PUBLIC_URL"} || status=$?
+  # Whatever was issued before a failure is kept too.
+  keep_release_secret "$out" || status=1
+  return "$status"
+}
+
+# Publishing a desktop build (docs/25 P2), on the Internal node with the
+# installer and its .json manifest copied here. The credentials go to the
+# command through its environment, never its arguments.
+cmd_release() {
+  need node
+  [ $# -gt 0 ] || die "usage: scripts/manage.sh release status | publish <installer> --install-id <id> | approve <plan> --smoke passed | reject <plan> | promote <plan>"
+  local key value
+  MX_LAUNCHER_URL="$(launcher_internal_url)"
+  export MX_LAUNCHER_URL
+  if command -v kubectl >/dev/null 2>&1; then
+    for key in MX_RIG_RELEASE_CLIENT_ID MX_RIG_RELEASE_CLIENT_SECRET MX_RIG_RELEASE_APPROVER_CLIENT_ID MX_RIG_RELEASE_APPROVER_CLIENT_SECRET; do
+      [ -z "${!key:-}" ] || continue
+      value="$(read_release_secret "$key")"
+      [ -z "$value" ] || export "${key}=${value}"
+    done
+  fi
+  node "${ROOT_DIR}/scripts/release-publish.mjs" "$@"
 }
 
 cmd_desktop() {
@@ -741,6 +817,7 @@ if [ "${MX_RIG_MANAGE_SOURCE_ONLY:-0}" != "1" ]; then
     eval) need npm; npm --prefix "$ROOT_DIR" run eval -- "$@" ;;
     desktop) cmd_desktop "$@" ;;
     launcher) cmd_launcher "$@" ;;
+    release) cmd_release "$@" ;;
     local) cmd_local "$@" ;;
     help | -h | --help) usage ;;
     *) usage; exit 1 ;;

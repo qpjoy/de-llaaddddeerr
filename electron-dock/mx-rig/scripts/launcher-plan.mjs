@@ -39,12 +39,29 @@ export function freeStandaloneIndex(products) {
   throw new Error('no free standalone product index is left in Launcher')
 }
 
+const RELEASE = MANIFEST.release
+
+/** The AppCenter entry as Release Center needs it: standalone, Rig's network, Rig's package, the channel. */
+function appMatches(app) {
+  const wanted = MANIFEST.appCenterApp
+  return (
+    app.launcherMode === 'standalone' &&
+    app.productNetworkId === PRODUCT_ID &&
+    String(app.packageName ?? '').toLowerCase() === wanted.packageName.toLowerCase() &&
+    (!Array.isArray(app.channels) || app.channels.includes(RELEASE.channel))
+  )
+}
+
 /**
  * The plan: each registration with its state — `ok` (already as needed),
  * `create` / `update` (the command can do it, with Launcher's ops token), or
  * `manual` (only Launcher Admin can, and the plan says exactly what to enter).
+ *
+ * `resolved` is Release Center's answer for Rig's package name (null when it
+ * has none); `credentials` says which release credentials this cluster
+ * already keeps ({ publisher, approver }, or null when not known).
  */
-export function launcherPlan({ products = [], app = null, routes = [], rigUrl = null }) {
+export function launcherPlan({ products = [], app = null, routes = [], rigUrl = null, resolved = null, credentials = null }) {
   const existing = products.find((product) => product.productId === PRODUCT_ID) ?? null
   const wanted = MANIFEST.productNetwork
   const shape = existing
@@ -55,7 +72,14 @@ export function launcherPlan({ products = [], app = null, routes = [], rigUrl = 
     : existing.mode === wanted.mode && existing.networkScope === wanted.networkScope && existing.enabled !== false
       ? 'ok'
       : 'update'
-  const appState = !app ? 'create' : app.launcherMode === 'standalone' && app.productNetworkId === PRODUCT_ID ? 'ok' : 'update'
+  const appState = !app ? 'create' : appMatches(app) ? 'ok' : 'update'
+  const identityState =
+    resolved?.productId === PRODUCT_ID && String(resolved.packageName ?? '').toLowerCase() === RELEASE.packageName.toLowerCase()
+      ? 'ok'
+      : appState === 'ok'
+        ? 'manual'
+        : 'create'
+  const credentialState = credentials?.publisher && credentials?.approver ? 'ok' : 'create'
   const route = routes.find((entry) => entry.host === shape.serviceVip && entry.enabled !== false) ?? null
   const origin = (url) => {
     try {
@@ -98,10 +122,22 @@ export function launcherPlan({ products = [], app = null, routes = [], rigUrl = 
         body: MANIFEST.appCenterApp
       },
       {
-        id: 'release-center',
-        state: 'later',
-        title: `Release Center components ${MANIFEST.releaseComponents.join(' / ')}`,
-        detail: 'needed for automatic updates (docs/25 P2); not for connecting'
+        id: 'release-identity',
+        state: identityState,
+        title: `Release Center identity ${RELEASE.packageName} → ${PRODUCT_ID} (${RELEASE.channel})`,
+        detail:
+          identityState === 'manual'
+            ? `the AppCenter entry is there but Release Center does not resolve ${RELEASE.packageName} to ${PRODUCT_ID}: look for another app registering the same package name`
+            : 'comes with the AppCenter entry; the desktop finds its updates by this package name (docs/25 P2)'
+      },
+      {
+        id: 'release-credentials',
+        state: credentialState,
+        title: `Release credentials ${RELEASE.publisher} / ${RELEASE.approver}`,
+        detail:
+          credentialState === 'ok'
+            ? 'kept in this cluster (Secret mx-rig/mx-rig-release) for scripts/manage.sh release'
+            : `issued by Launcher once and kept in Secret mx-rig/mx-rig-release — never printed; one already issued but not kept here is rotated`
       }
     ]
   }

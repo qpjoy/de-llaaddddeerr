@@ -1,6 +1,7 @@
 {
   "appId": "dev.qpjoy.mx-rig",
   "productName": "MX Rig",
+  "artifactName": "MX-Rig-${version}-${os}-${arch}.${ext}",
   "npmRebuild": false,
   "directories": {
     "output": "dist"
@@ -30,6 +31,9 @@
   "asarUnpack": [
     "node_modules/playwright*/**"
   ],
+  "nsis": {
+    "artifactName": "MX-Rig-${version}-${os}-${arch}.${ext}"
+  },
   "win": {
     "target": [
       "nsis"

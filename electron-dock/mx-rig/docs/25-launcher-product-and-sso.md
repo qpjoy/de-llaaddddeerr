@@ -78,7 +78,7 @@ Rig 服务           http://<Rig 的 VIP>          ← Internal 网关按 Host �
 | Rig 服务 | `scripts/manage.sh deploy` 在集群里找到 `mx-launcher-internal.mx-internal-shadow:18090`，自动作为 `MX_RIG_LAUNCHER_URL`；网络策略只多放行这一个端口 | 否 |
 | Rig 服务 | deploy 结束时打印要登记的网关路由（host = Rig 的 VIP，目标 = Rig 服务的 NodePort 地址） | 复制一次 |
 | 桌面端 | 产品标识、bootstrap 地址打进安装包；VIP 和服务地址运行时取 | 否 |
-| Launcher 侧登记 | mx-rig 自己带登记清单（`deploy/launcher/`）和 `scripts/manage.sh launcher plan / apply`：先预览，确认后写入。SDK 公开了 ProductNetwork 的登记接口（`upsertProduct`），这一项由命令完成；应用目录、网关路由和 Release Center 组件如果没有公开接口，命令打印要填的确切内容 | 一次（运维确认） |
+| Launcher 侧登记 | mx-rig 自己带登记清单（`deploy/launcher/`）和 `scripts/manage.sh launcher plan / apply`：先预览，确认后写入。命令写入 ProductNetwork、AppCenter 条目（Release Center 靠它的包名认出 Rig）和两个发版账号，发版凭据直接存进 Secret `mx-rig/mx-rig-release`；VIP 对齐和网关路由没有公开接口，命令打印要填的确切内容 | 一次（运维确认） |
 
 登记清单和命令都在 mx-rig 里，和 Rig 的其他部署放在一起；Launcher 的代码和部署不动。
 
@@ -87,8 +87,8 @@ Rig 服务           http://<Rig 的 VIP>          ← Internal 网关按 Host �
 | 阶段 | 内容 | 前置 | 验收 |
 | --- | --- | --- | --- |
 | **P1** | 服务端：自动接 Launcher、网络策略、打印路由。桌面端：Launcher 模式（匿名 lease → WireGuard → VIP → 统一账号登录 → 用户 lease）、网络状态和断开 / 卸载、打包带上 WireGuard 引擎 | Launcher Admin 登记 ProductNetwork 和网关路由；一台装着 MX-H2I 的测试机做并存检查 | 测试机上装包 → 授权 → 登录 → 用 Rig；MX-H2I 照常（C1–C12） |
-| **P2** | Release Center 自动更新（安装包和热更新、回滚）；Windows / macOS 两端的签名与交付 | Release Center 组件；证书（可选） | 装旧版后检查、更新、回滚 |
-| **P3** | 外网：海外订阅 → 隔离代理 → Rig 出网通道 | 账号有海外订阅权限 | 测试浏览器经通道打开海外站点，系统代理不变 |
+| **P2** | Release Center 自动更新（完整安装包；热更新另议，见 §8）；Windows / macOS 两端的交付 | AppCenter 条目与发版账号（`launcher apply`）；证书（可选） | 装旧版后检查、下载、安装；定向 → 全量 |
+| **P3** | 外网：海外订阅 → 本机回环代理 → 测试浏览器的出网通道（见 §9） | 账号有海外订阅权限 | 测试浏览器经通道打开海外站点，系统代理不变 |
 | **P4** | 绑域名后的浏览器 SSO（网页端和桌面端） | 域名、Auth 登记 `mx-rig` | 浏览器已登录时一键进入，飞书可用 |
 
 ## 5. 不变的边界
@@ -96,7 +96,7 @@ Rig 服务           http://<Rig 的 VIP>          ← Internal 网关按 Host �
 - 不改 MX-H2I 和 Luopan 的代码；不复用它们的 VIP、lease 或凭据；不设系统级 DNS / PAC。
 - Rig 的任何故障不能进入 Launcher 或 MX-H2I 的登录关键路径。
 - Rig 本地账号保留：用于应急管理员和没有 Launcher 的环境。
-- Launcher 生产环境里的登记由你或运维在 Launcher Admin 里操作；Rig 这边不写线上 Launcher。
+- Launcher 生产环境里的登记由你或运维完成：要么在 Launcher Admin 里操作，要么由运维带着 ops token 运行 `scripts/manage.sh launcher apply`。除此之外 Rig 不写线上 Launcher；发版只用 Rig 自己的 Publisher / Approver 账号，只能动 `mx-rig` 这个产品。
 
 ## 6. 手动验收
 
@@ -145,3 +145,143 @@ Rig 服务           http://<Rig 的 VIP>          ← Internal 网关按 Host �
 5. 打开 →「连接内网」→ 系统授权 → 已连接 → 用统一账号登录 → 「内网 · 用户网络」；
 6. 同时检查 MX-H2I：登录、已有连接、断开、退出都照常（Launcher 的并存检查 C1–C12）；
 7. 退出 MX Rig，隧道随之停止；再打开时自动重连，不再要授权。
+
+## 8. P2 交付记录（2026-10-16）：Release Center 自动更新
+
+**决定**
+
+- **只发完整安装包**（macOS DMG、Windows NSIS），桌面端只检查 `app-installer`，不检查 `app-asar`。热更新（只换 app.asar）要求已安装的版本经 ASAR bootstrap 启动，还要能从新 asar 找到安装包里的 `node_modules`。Rig 的主进程是未打包的 ESM，Playwright 必须留在真实文件系统上，现有 bootstrap 做不到这一点。贸然接入的话，下载下来的 .asar 永远加载不了。所以先不检查，误发的 ASAR 计划也不会被下载。
+- **更新和网络互不干扰**：检查、下载都不重连、不改路由；Release Center 的地址每次从 Rig 自己的产品网络读（`http://<Rig 的 VIP>:18090`），网络没有 ready 就不检查，也绝不用别的产品的 VIP。
+- **只有 Launcher 模式的安装包能发布**：非 Launcher 模式的包要是经更新装到用户机器上，会把他们的产品网络拿掉。打包时只给 `--launcher` 的安装包写发布清单，发布命令没有清单就拒绝。
+- **先定向，再全量**：新版本先发给指定的安装 ID 或用户；手动验证后，由另一个账号（Approver）批准；定向更新走通后再推给所有人。发布命令只提供这一种顺序。
+
+**已在 mx-rig 里实现**
+
+- **桌面端**（`apps/desktop/launcher-updates.mjs`）：用 `@qpjoy/electron-launcher` 的应用更新控制器（L3）。Rig 只提供自己的部分：
+  - 按包名 `@qpjoy/mx-rig` 解析发布身份，渠道 `stable`；
+  - 连上内网后自动检查一次，同一个网络、账号、版本不重复检查；
+  - 下载经过大小和 SHA-256 校验，存在 userData 下；
+  - 点「关闭并安装」才打开安装程序，然后停掉 Rig 自己的 Runtime、执行机、工位和隧道（和退出时一样），再退出。
+  - 页面只收到状态投影：阶段、固定的中文文案、版本、更新说明、进度、可用的按钮，以及手动检查时显示的安装 ID。URL、本机路径、原始错误只留在主进程日志里。
+  - 网络或账号在检查之后变了，必须重新检查。
+  - 从源码运行是 development，`--dir` 包是 portable，这两种都不自动更新。`MX_RIG_UPDATE_DISTRIBUTION=installed` 是从源码测试更新用的入口，打包后无效。
+- **界面**：
+  - 登录页「内网」面板里显示版本和「检查更新」，旧到登录不了的客户端也能更新；
+  - 工作台顶栏显示版本，有新版本时变成「新版本 x.y.z」；
+  - 右下角的更新卡片会在有可做的事时自己出现：下载、进度（总大小未知时显示不定进度）、取消、关闭并安装、更新说明。
+- **登记**（`launcher apply`）：
+  - AppCenter 条目带上 `channels: ["stable"]`；
+  - 第一次写入条目时 Launcher 签发的 Publisher 凭据，和单独创建的 Approver 账号（只能读和批准，只限 `mx-rig`），都直接写进一个 0600 的临时文件，再合并进 Secret `mx-rig/mx-rig-release`，然后删掉文件，任何地方都不打印；
+  - 集群里已有的不再动。已经签发过、但集群里没有保存的，才轮换一次。不知道集群里存了什么时（不经 manage.sh 直接运行），一律不轮换；
+  - `plan` 多两项：Release Center 能否按包名解析到 `mx-rig`，以及发版凭据是否已在集群里。
+- **打包**：
+  - 安装包改名为 `MX-Rig-<版本>-<mac|win>-<架构>.<dmg|exe>`（Release Center 要求 ASCII 文件名）；
+  - `--launcher` 的安装包旁边生成 `<安装包>.json` 发布清单，含版本、平台、架构、大小和 SHA-256；
+  - defaults 写入 `distribution`。
+- **发布**（`scripts/manage.sh release`，在 Internal 节点上运行，凭据经环境变量从 Secret 交给命令，不经命令行参数）：
+
+  ```text
+  release publish <安装包> --install-id <ID> [--user-id <ID>] [--notes <文件>] [--from <旧版本>]
+      上传（发布前核对清单与文件一致）并建定向计划；gate 处于 blocked，谁都还收不到
+  release approve <plan> --smoke passed      在测试机上亲手装过、打开过之后，用 Approver 批准
+  release promote <plan>                     定向更新走通后，同一个制品建全量计划（又是 blocked）
+  release approve <全量 plan> --smoke passed  批准全量；证据里引用定向计划
+  release reject <plan> | release status
+  ```
+
+  安装 ID 在桌面端点「检查更新」后显示。同样的请求重复执行，得到的是同一个计划；`releaseId` 和 `requestId` 由文件摘要、受众和更新说明决定。
+
+**验证**
+
+- `tests/launcher-updates.test.mjs`（7 项）：真实的 SDK 控制器，对着替身 Release Center：
+  - 连上后按包名检查一次，只问 `app-installer`；同一网络不重复检查，换账号重新检查；
+  - 下载、校验、安装：安装程序只打开一次，路径在 userData 下，然后清理、`exit(0)`；页面收到的所有状态里没有 URL、路径或替身地址；
+  - 没联网时不访问 Release Center，development 发行形态直接 unsupported；
+  - 检查后换账号，下载被拒绝，要求重新检查；重连中不安装，也不清理、不退出；
+  - Release Center 返回别的包名的身份时拒绝，文案里不带对方的名字；
+  - 投影：总大小未知时不显示 0%，原始错误不外泄；
+  - 产品网络只在 ready 时、只在自己的 VIP 上给出 Release Center 地址。
+- `tests/release-publish.test.mjs`（3 项）：
+  - 发布清单：没有清单、不是 Launcher 模式、文件被改过、扩展名和平台不符、文件名有空格，都拒绝；
+  - 完整流程：不指定受众不发布；凭据不能放在参数里；上传参数和字节正确；同样的请求得到同一个 requestId；未批准不能推全量；批准要 `--smoke passed`，由 Approver 账号执行；全量计划复用制品，证据里引用定向计划；输出里没有密钥。
+- `tests/launcher-register.test.mjs` 新增：
+  - Release Center 身份和凭据的计划状态；
+  - `apply` 没有 `--secret-out` 就拒绝；两份凭据写进 0600 文件，且不打印；
+  - 已签发、未保存时轮换；两份都已保存时不动；直接运行时不轮换。
+- `tests/manage-release.test.mjs`：用假的 kubectl 跑 `manage.sh launcher apply` 和 `release status`：
+  - 凭据进了 Secret `mx-rig-release`，临时文件已删除；
+  - 输出和 kubectl 参数里没有密钥；
+  - 再执行一次时不签发也不轮换；
+  - `release` 从 Secret 取凭据，交给命令。
+- `npm run test:desktop`：Launcher 模式的登录页显示版本；未连接时点「检查更新」，卡片显示「连上内网后才能检查更新」和安装 ID，没有下载或安装按钮，卡片可以收起。
+- 顺带修了 `tests/build-proxy.test.mjs`：`npm test` 把临时文件放在本仓库里（`"type": "module"`），Node 22.21 会把没有扩展名的假工具当 ES 模块加载，导致 9 项失败。和本次改动无关；在假工具的目录里放一个 `{"type":"commonjs"}` 就好了。
+
+**还没有验证的**：
+
+- 真实 Release Center 上的完整一轮（检查 → 下载 → 打开安装程序 → 新版本首次启动时上报 `installer-completed`）。要先完成 P1 的登记，再：
+  1. 把 `package.json` 的版本改高，`scripts/manage.sh desktop --launcher` 打出新包；
+  2. 把安装包和 `.json` 一起拷到 Internal 节点，`scripts/manage.sh release publish … --install-id <测试机的安装 ID>`；
+  3. 在测试机上手动装一遍新包确认能用，然后 `release approve`；
+  4. 测试机装回旧版本，点「检查更新」→ 下载 → 关闭并安装。macOS 会打开安装盘，把 MX Rig 拖进「应用程序」替换；Windows 会运行安装程序；
+  5. 新版本打开、连上内网后，`release status` 里能看到上报；然后 `release promote`、`release approve`；
+  6. 同时确认 MX-H2I 不受影响。
+- macOS 的 Developer ID 签名、公证，以及 Windows 的 Authenticode 签名：现在仍是 ad-hoc 签名（macOS 第一次打开要确认一次）。经更新下载的安装包是 Rig 主进程自己写的文件，按理不带隔离标记，替换后不用再确认一次；这一点还要在真机上确认。
+
+## 9. P3 交付记录（2026-10-17）：外网通道
+
+**做了什么**：在「出网与通道」页面开启后，用平台统一账号的海外订阅，在这台电脑的回环地址上跑一个海外代理；选择「让这台电脑上的测试浏览器走海外通道」后，Agent 的测试浏览器（以及这台电脑上的试验规程回放）经它出网。系统代理、DNS、路由都不动，MX-H2I 和其他应用感觉不到。
+
+**决定**
+
+- **和罗盘同一条链路，用平台已有的部件**：
+  - 订阅由 `@qpjoy/electron-launcher` 的 `ensureElectronLauncherUserOverseaSubscription` 申请，请求只经 Rig 自己的 VIP 发给 Launcher Internal；
+  - 配置由平台的 `@qpjoy/electron-core-mihomo` 编译；
+  - 代理引擎用 Launcher 发布的 `@qpjoy/electron-plugin-tunnel-engine-<平台>` 里的 Mihomo。不引入 `electron-plugin-tunnel` 本体：它依赖原生模块 better-sqlite3，Rig 用不到那部分。
+- **只留一个回环端口**：
+  - 端口每次随机挑空闲的，不用订阅里写的 7788。7788 正是这类本地代理的常用端口，这台开发机上就有一个；
+  - 编译后删掉 DNS 监听、外部控制器和 secret；不开局域网，不开虚拟网卡（TUN）；
+  - 配置里一旦出现 TUN 或局域网就拒绝启动。用真实的 Mihomo 实测过：进程只在 `127.0.0.1:<端口>` 上监听。
+- **不用 geo 规则**：订阅里的 `GEOSITE/GEOIP,CN` 会让 Mihomo 启动前先从 GitHub 下载 GeoIP / GeoSite 两个数据文件。在这台机器上实测花了 83 秒，测试机上可能直接失败；打包带上又要多约 21 MB。所以用平台编译器的 app-global 模式，关掉 geo 规则：内网地址、Internal 预留网段和常见国内站点（编译器自带的列表）直连，其余都经海外出去。
+- **由人选择、跟着账号走**：
+  - 开启和「测试浏览器走海外」都要人去点，这两个选择存在本机；
+  - 海外权限属于统一账号：退出登录或断开内网时通道停止，再次以统一账号连上时自动重开；
+  - Rig 本地账号、访客账号都用不了。登录时多申请了 `oversea.subscription.ensure` 这个 scope；Launcher 会和账号实际拥有的 scope 取交集，访客照样能登录。
+- **和服务端通道用同一个入口**：桌面端把这个本机通道叠加到 Runtime 每一步都会重读的策略上，策略版本号随之改变。所以切换后测试浏览器在下一步重开，进行中的确认要重新发起，和 docs/09 的切换语义一致。服务端不知道这个本机通道，也不需要知道。
+- **订阅里有每个用户自己的密码**：只在通道运行时以 0600 写在 userData 下，停止时删除；页面和日志里都不出现密码、token、端口或订阅内容。App 崩溃后遗留的代理进程，下次启动时只有确认进程名是 mihomo 才会结束它。
+
+**实现**
+
+- 桌面端：
+  - [launcher-oversea.mjs](../apps/desktop/launcher-oversea.mjs)：申请订阅（遇到「同步中」最多试 4 次）、编译配置、启动、等端口、经代理访问 `https://www.gstatic.com/generate_204` 验证（这个地址国外能通、国内不通，和平台自己的健康检查一样）、停止、清理遗留进程；
+  - [mihomo-engine.mjs](../apps/desktop/mihomo-engine.mjs)：找到引擎并按摘要解压一次。
+- Runtime：[local-egress.mjs](../packages/runtime/local-egress.mjs) 只接受回环地址上的 HTTP 代理；worker 新增 `local-egress` 消息，初始化时也会带上。
+- 网络：`overseaSession()` 只在内网 ready、登录的是统一账号时，交出 VIP、用户 ID 和 token，并且只给主进程。
+- 界面：「出网与通道」页面多了一张「本机海外通道（Launcher 订阅）」卡片，只在 Launcher 模式的桌面端出现；测试浏览器走海外时，顶栏显示「内网 · 用户网络 · 海外」。
+- 打包：`--launcher` 的安装包带上目标平台的 Mihomo 引擎，放在 `Resources/mihomo/<平台>-<架构>`；引擎包本身不打进 app.asar。
+- 仓库自检：桌面端和 Runtime 里出现设置系统代理的命令（networksetup、scutil --proxy、netsh winhttp、注册表 Internet Settings 等）就报错。
+
+**验证**
+
+- `tests/launcher-oversea.test.mjs`（10 项）：
+  - 用真实的平台编译器编译：只剩回环端口；没有 geo 规则、DNS 监听和控制器；预留网段直连；配置里不再有写着账号邮箱的注释；编译出 TUN 时拒绝；
+  - 开启：经 VIP 申请；「同步中」会等待；配置文件是 0600；选择后测试浏览器才用它；页面收到的内容里没有密码、token、端口或 YAML；关闭时进程结束、配置删除、选择被记住；
+  - 跟着账号：退出登录就停，换回统一账号连上后自动重开；从没开启过的不会启动；没有统一账号时只等待，不发申请；
+  - 失败时的说明：没有权限、没有线路、一直在同步、试访问失败、进程意外退出（测试浏览器随之不再走它）；
+  - 遗留进程只在确认是 mihomo 时才结束；
+  - 经 CONNECT 代理的试访问：拒绝、502、完整的 TLS 204 都覆盖；
+  - Runtime 只接受回环代理；策略版本号随之改变；浏览器会重开；只有 execution-config 被改写；
+  - 引擎按摘要解压一次，旧版本删除；
+  - **用真实的 Mihomo**：编译出的配置能启动；经代理访问本机页面成功；用 lsof 看只监听在 `127.0.0.1:<端口>`；停止后端口关闭。
+- `tests/launcher-network.test.mjs`：登录申请的 scope 包含 `oversea.subscription.ensure`；登录后 `overseaSession()` 交出 VIP 地址，退出后返回 null。
+- `npm run test:desktop`：Launcher 模式下，没有统一账号时开启海外通道，状态是「等待」并记住开启，关闭后恢复。这一路经过真实 Electron 主进程的 IPC。
+- `npm run test:browser`：用页面自己的样式画出卡片的三种状态（等待、就绪并选中、没有权限），核对按钮和动作。截图在 `.runtime/qa/web-oversea-panel.png`。
+
+**还没有验证的**：真实的海外订阅和 Hysteria2 线路。要在 P1 登记完成后，用一个开通了海外权限的统一账号：
+
+1. 登录 → 「出网与通道」→「开启海外通道」，等到「已就绪（试访问 … ms）」。
+2. 勾选「让这台电脑上的测试浏览器走海外通道」。
+3. 在一个允许访问海外站点的任务里，让 Agent 打开这个站点，能打开。
+4. 同时确认系统代理设置没变，MX-H2I 的连接照常。
+5. 退出登录时通道停止，进程和配置文件都不在了。
+
+Hysteria2 走 UDP 51288 端口。网络拦截 UDP 时，试访问会失败，卡片上会写明。

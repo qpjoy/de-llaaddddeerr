@@ -126,6 +126,9 @@ test('signing in goes through the VIP, keeps the token in memory, and swaps to a
   assert.deepEqual(snap.identity, { kind: 'user', displayName: '测试员' })
   const token = f.calls.fetch.find((call) => call.url.endsWith('/oauth/token'))
   assert.equal(new URL(token.url).hostname, VIP, 'the password never goes to the public bootstrap')
+  // The overseas channel (docs/25 P3) needs the account's oversea scope; Launcher grants guests only auth.read.
+  assert.equal(JSON.parse(token.init.body).scope, 'auth.read oversea.subscription.ensure')
+  assert.deepEqual(network.overseaSession(), { baseUrl: `http://${VIP}:18090`, userId: 'u-42', accessToken: 'mx-v1-user-token' })
   const user = f.calls.connect.at(-1)
   assert.deepEqual([user.identityKind, user.leaseProfile, user.userId, user.accessToken], ['user', 'employee', 'u-42', 'mx-v1-user-token'])
   assert.equal(f.calls.clients.at(-1), `http://${VIP}:18090`, 'the user lease is asked for inside the tunnel')
@@ -135,6 +138,7 @@ test('signing in goes through the VIP, keeps the token in memory, and swaps to a
   // Signing out goes back to an anonymous lease: the login page still reaches the service.
   const out = await network.signOut()
   assert.deepEqual([out.status, out.identity.kind, f.calls.connect.at(-1).identityKind], ['ready', 'anonymous', 'anonymous'])
+  assert.equal(network.overseaSession(), null, 'no account, no overseas channel')
 })
 
 test('no secure storage, no connection; a conflict with another network is reported, not forced', async () => {

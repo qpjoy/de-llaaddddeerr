@@ -1,5 +1,34 @@
 # 验证记录
 
+## 2026-10-17：桌面端 P3，本机海外通道（Launcher 订阅 → 回环代理 → 测试浏览器）
+
+- `npm run check` 通过；仓库自检新增一条：桌面端和 Runtime 里出现设置系统代理的命令就报错。放一个临时文件试过，确实会报错。
+- `npm test`：731 项，707 通过，0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/p3-tests.log`。新增：
+  - `tests/launcher-oversea.test.mjs`（10 项），其中一项用真实的 Mihomo 1.19.28，只在回环地址上运行；
+  - `tests/launcher-network.test.mjs` 增加了 scope 和 `overseaSession()` 的断言。
+- 用真实的 Mihomo 单独核对过：
+  - 订阅原样使用时，要先从 GitHub 下载 GeoIP / GeoSite，用了 83 秒；
+  - 用平台编译器编译、去掉 geo 规则后，配置检查 8 ms 通过，不下载任何东西；
+  - 运行时只监听在 `127.0.0.1:<端口>`，经代理访问本机页面返回 200。
+- `npm run test:desktop` 通过：Launcher 模式下，海外通道在没有统一账号时会等待，并记住开启；这一路经过真实 Electron 主进程的 IPC。日志 `.runtime/p3-desktop.log`。
+- `npm run test:browser` 通过：画出海外通道卡片的三种状态，核对按钮和动作。截图 `.runtime/qa/web-oversea-panel.png`，日志 `.runtime/p3-browser.log`。
+- `npm run package -- --dir --launcher`：`Resources/mihomo/darwin-arm64/mihomo.gz` 在包里（16 MB）；引擎包没有进 app.asar，编译器和 yaml 在；`--dir` 包的发行形态是 portable。日志 `.runtime/p3-package.log`。
+- 真实的海外订阅和线路还没有验证，步骤见 [docs/25 §9](25-launcher-product-and-sso.md)。
+
+## 2026-10-16：桌面端 P2，经 Release Center 自动更新（完整安装包）
+
+- `npm run check` 通过。
+- `npm test`：721 项，697 通过，0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/p2-tests.log`。新增：
+  - `tests/launcher-updates.test.mjs`（7 项，真实的 SDK 控制器对替身 Release Center）；
+  - `tests/release-publish.test.mjs`（3 项）；
+  - `tests/manage-release.test.mjs`（1 项，假的 kubectl）；
+  - `tests/launcher-register.test.mjs` 增加 1 项，原有项也做了扩充。
+- `npm run test:desktop` 通过：Launcher 模式的登录页显示版本；未连接时「检查更新」说明要先连内网，并显示安装 ID。截图 `.runtime/qa/desktop-launcher-login.png`，日志 `.runtime/p2-desktop.log`。
+- `npm run test:browser` 通过（网页端没有更新入口）。日志 `.runtime/p2-browser.log`。
+- `npm run package -- --launcher`（Apple 芯片）：得到 `dist/MX-Rig-0.8.0-mac-arm64.dmg`（265 MB）和同名 `.json` 发布清单，发布命令的核对通过；应用里的 defaults 是 `distribution: installed`，SDK 的更新控制器和 `launcher-updates.mjs` 都打进去了。日志 `.runtime/p2-package.log`。
+- 修了 `tests/build-proxy.test.mjs` 的 9 项失败：`npm test` 把临时文件放在本仓库（ESM 包）里，Node 22.21 把没有扩展名的假工具当 ES 模块加载。和本次改动无关；在假工具的目录里放 `{"type":"commonjs"}` 就好了。
+- 真实 Release Center 上的完整一轮还没有验证，步骤见 [docs/25 §8](25-launcher-product-and-sso.md)。
+
 ## 2026-10-16：Internal 集群部署时服务端反复崩溃（镜像里缺 test-packs）
 
 - **现象**：`scripts/manage.sh deploy` 报 `deployment "mx-rig-server" exceeded its progress deadline`，Pod 处于 `CrashLoopBackOff`。日志显示启动时找不到 `/app/mx-rig/test-packs/compass/rig-specs/electron/case-catalog.electron.json`。

@@ -8,6 +8,7 @@ import { provisionFromEnv } from './browser-provision.mjs'
 import { NativeStation } from './native.mjs'
 import { ProcedureBench } from './procedure-bench.mjs'
 import { MissionSync } from './sync.mjs'
+import { decorateClient, localChannel } from './local-egress.mjs'
 import { RigError, safeMessage } from '../contracts/index.mjs'
 import { join } from 'node:path'
 
@@ -23,13 +24,16 @@ let stationBrowser
 let provision
 let bench
 let sourceWorkspace
+// This desktop's own channel for the test browser (docs/25 P3), set by main.
+let localEgress = null
 process.on('message', async (message) => {
   if (!message || typeof message.id !== 'number') return
   try {
     let result
     if (message.method === 'init' && !runtime) {
       const { root, url, token, owner, electronApps = [], privateHttp = false } = message.input
-      const client = new RigClient({ url, token, privateHttp })
+      localEgress = localChannel(message.input.localEgress)
+      const client = decorateClient(new RigClient({ url, token, privateHttp }), () => localEgress)
       // Every durable save is also queued for the service, so the web
       // workbench and the team's reports see what this desktop ran.
       const store = await new MissionStore(join(root, 'missions'), {
@@ -156,6 +160,11 @@ process.on('message', async (message) => {
           break
         case 'cancel':
           result = { mission: await runtime.cancel(message.input.id) }
+          break
+        case 'local-egress':
+          // Taken up at the next browser step: the browser reopens on it.
+          localEgress = localChannel(message.input.channel)
+          result = { channel: localEgress?.id ?? null }
           break
         case 'set-electron-apps':
           stationBrowser?.setElectronApps(message.input.apps ?? [])

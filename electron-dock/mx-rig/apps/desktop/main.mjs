@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ipcMain, dialog, net, protocol, safeStorage } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, dialog, net, protocol, safeStorage, shell } from 'electron'
 import { execFile, fork } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
@@ -17,6 +17,9 @@ import { LocalRunner, localStation } from './local-runner.mjs'
 import { replayDocument } from '../../packages/runtime/replay.mjs'
 import { firstRun } from './first-run.mjs'
 import { DEFAULT_BOOTSTRAP_URLS, LauncherNetwork } from './launcher-network.mjs'
+import { LauncherUpdates } from './launcher-updates.mjs'
+import { LauncherOversea } from './launcher-oversea.mjs'
+import { prepareEngine, shippedEngine } from './mihomo-engine.mjs'
 import { existsSync, readdirSync } from 'node:fs'
 
 // Read actions the workbench may forward. An explicit table means the renderer
@@ -145,6 +148,17 @@ async function readJson(file) {
 // defaults, or MX_RIG_LAUNCHER=1 from source. The desktop then reaches the Rig
 // service through its own product network instead of an address typed in.
 let network = null
+// …and in Launcher mode its versions come from Launcher's Release Center (docs/25 P2).
+let updates = null
+// …and the account's overseas subscription can become a channel for the test browser (P3).
+let oversea = null
+
+// The Runtime takes the overseas channel with its policy; a Runtime started
+// later gets it at init.
+function syncLocalEgress() {
+  if (!worker?.connected || !client) return
+  rpc('local-egress', { channel: oversea?.browserProxy() ?? null }).catch(() => {})
+}
 async function launcherSettings() {
   const packaged = (await readJson(join(root, 'apps/desktop/defaults.json'))) ?? {}
   const enabled = process.env.MX_RIG_LAUNCHER === '1' || (process.env.MX_RIG_LAUNCHER !== '0' && packaged.launcher?.enabled === true)
@@ -152,8 +166,23 @@ async function launcherSettings() {
   const fromEnv = String(process.env.MX_RIG_BOOTSTRAP_URLS ?? '').split(',').map((url) => url.trim()).filter(Boolean)
   return {
     bootstrapUrls: fromEnv.length ? fromEnv : packaged.launcher?.bootstrapUrls?.length ? packaged.launcher.bootstrapUrls : DEFAULT_BOOTSTRAP_URLS,
-    serverUrl: process.env.MX_RIG_SERVER_URL || packaged.launcher?.serverUrl || null
+    serverUrl: process.env.MX_RIG_SERVER_URL || packaged.launcher?.serverUrl || null,
+    distribution: updateDistribution(packaged.launcher?.distribution)
   }
+}
+
+// Only an installed copy updates itself: from source it is 'development', a
+// --dir build is 'portable'. MX_RIG_UPDATE_DISTRIBUTION=installed is the test
+// entry for exercising updates from source; a packaged app ignores it.
+function updateDistribution(packaged) {
+  if (!app.isPackaged) return process.env.MX_RIG_UPDATE_DISTRIBUTION === 'installed' ? 'installed' : 'development'
+  return packaged === 'portable' ? 'portable' : 'installed'
+}
+
+// The version Release Center compares: package.json's, the same from source
+// (where Electron would report its own) and packaged.
+async function appVersion() {
+  return (await readJson(join(root, 'package.json')))?.version ?? app.getVersion()
 }
 
 async function loginDefaults() {
@@ -270,7 +299,8 @@ async function login(input) {
     owner: principal.id,
     root: join(app.getPath('userData'), 'workspaces', workspace),
     electronApps: await loadElectronApps(),
-    privateHttp
+    privateHttp,
+    localEgress: oversea?.browserProxy() ?? null
   })
   client = next
   member = principal
@@ -453,6 +483,25 @@ app
       if (input.action === 'network-disconnect') {
         if (!network) throw new RigError('not_launcher', '这个安装包不是 Launcher 模式')
         return network.disconnect('manual')
+      }
+      // The overseas channel follows the account's network, not the Rig login.
+      if (input.action === 'oversea-status') return oversea ? oversea.snapshot() : null
+      if (input.action.startsWith('oversea-')) {
+        if (!oversea) throw new RigError('not_launcher', '这个安装包不是 Launcher 模式')
+        if (input.action === 'oversea-start') return oversea.start()
+        if (input.action === 'oversea-stop') return oversea.stop()
+        if (input.action === 'oversea-browser') return oversea.setBrowser(input.body?.on === true)
+        throw new RigError('invalid_action', '未知动作')
+      }
+      // Updates too: a client too old to sign in can still be updated.
+      if (input.action === 'update-status') return updates ? updates.status() : null
+      if (input.action.startsWith('update-')) {
+        if (!updates) throw new RigError('not_launcher', '这个安装包不是 Launcher 模式')
+        if (input.action === 'update-check') return updates.check()
+        if (input.action === 'update-download') return updates.download()
+        if (input.action === 'update-install') return updates.install()
+        if (input.action === 'update-cancel') return updates.cancel()
+        throw new RigError('invalid_action', '未知动作')
       }
       if (input.action === 'me') return { principal: member }
       if (!client) throw new RigError('login_required', '请先登录')
@@ -957,17 +1006,59 @@ app
       }
     })
     const launcher = await launcherSettings()
-    if (launcher)
+    if (launcher) {
+      const version = await appVersion()
       network = await LauncherNetwork.open({
         dir: app.getPath('userData'),
         sdk: await import('@qpjoy/electron-launcher'),
         safeStorage,
         config: launcher,
-        appVersion: app.getVersion(),
+        appVersion: version,
         onChange: (snapshot) => {
           if (window && !window.isDestroyed()) window.webContents.send('mx-rig:network', snapshot)
+          updates?.networkChanged(snapshot)
+          oversea?.networkChanged(snapshot)
         }
       })
+      oversea = await LauncherOversea.open({
+        dir: app.getPath('userData'),
+        network,
+        sdk: await import('@qpjoy/electron-launcher'),
+        compiler: await import('@qpjoy/electron-core-mihomo'),
+        engine: () =>
+          prepareEngine({
+            shipped: shippedEngine({ packaged: app.isPackaged, resourcesPath: process.resourcesPath }),
+            cacheDir: join(app.getPath('userData'), 'mihomo-engine')
+          }),
+        onChange: (snapshot) => {
+          if (window && !window.isDestroyed()) window.webContents.send('mx-rig:oversea', snapshot)
+          syncLocalEgress()
+        }
+      })
+      updates = new LauncherUpdates({
+        sdk: await import('@qpjoy/electron-launcher/application-updater'),
+        network,
+        baseDir: app.getPath('userData'),
+        appVersion: version,
+        distribution: launcher.distribution,
+        openInstaller: async (filePath) => {
+          const message = await shell.openPath(filePath)
+          if (message) throw new Error(`无法打开安装程序：${message}`)
+        },
+        // The installer is open: stop what this app started, as on quit, then
+        // leave (app.exit skips before-quit, so it is done here).
+        cleanup: async () => {
+          quitting = true
+          await stopEverything()
+        },
+        exit: (code) => app.exit(code),
+        onChange: (state) => {
+          if (window && !window.isDestroyed()) window.webContents.send('mx-rig:update', state)
+        },
+        // The raw reason stays in this process's log.
+        log: (state) => console.info(`[mx-rig update] ${state.phase}${state.reason ? `: ${state.reason}` : ''}`)
+      })
+    }
     window = new BrowserWindow({
       width: 1440,
       height: 960,
@@ -1000,13 +1091,16 @@ app
     app.quit()
   })
 app.on('window-all-closed', () => app.quit())
+// Everything this app started, stopped: on quit, and before an installer
+// takes over.
+function stopEverything() {
+  // The tunnel lives as long as the app: it stops with it (at most 15 s).
+  const tunnel = network ? Promise.race([network.disconnect('shutdown'), new Promise((resolve) => setTimeout(resolve, 15_000))]) : null
+  return Promise.allSettled([stopWorker(), localRunner?.stop(10_000), station?.stop(10_000), provingGround?.close(), oversea?.shutdown(), tunnel])
+}
 app.on('before-quit', (event) => {
   if (quitting) return
   event.preventDefault()
   quitting = true
-  // The tunnel lives as long as the app: it stops with it (at most 15 s).
-  const tunnel = network ? Promise.race([network.disconnect('shutdown'), new Promise((resolve) => setTimeout(resolve, 15_000))]) : null
-  Promise.allSettled([stopWorker(), localRunner?.stop(10_000), station?.stop(10_000), provingGround?.close(), tunnel]).finally(() =>
-    app.quit()
-  )
+  stopEverything().finally(() => app.quit())
 })

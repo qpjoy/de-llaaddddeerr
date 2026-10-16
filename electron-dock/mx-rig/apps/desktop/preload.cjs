@@ -28,6 +28,18 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.on('mx-rig:network', listener)
       return () => ipcRenderer.off('mx-rig:network', listener)
     },
+    // …its overseas channel: state and texts, never the subscription or its port.
+    onOversea: (callback) => {
+      const listener = (_event, info) => callback(info)
+      ipcRenderer.on('mx-rig:oversea', listener)
+      return () => ipcRenderer.off('mx-rig:oversea', listener)
+    },
+    // …and its updates from Launcher's Release Center: a projection, no paths or URLs.
+    onUpdate: (callback) => {
+      const listener = (_event, info) => callback(info)
+      ipcRenderer.on('mx-rig:update', listener)
+      return () => ipcRenderer.off('mx-rig:update', listener)
+    },
     // The page raised an alert / confirm / prompt while a person has it.
     onDialog: (callback) => {
       const listener = (_event, info) => callback(info)

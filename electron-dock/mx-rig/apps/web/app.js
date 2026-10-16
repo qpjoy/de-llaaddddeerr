@@ -245,7 +245,9 @@ const state = {
   // A parsed one-liner waiting to be confirmed. Never executed on its own.
   plan: null,
   polling: false,
-  scroll: {}
+  scroll: {},
+  // Launcher mode: the desktop's overseas channel (docs/25 P3), or null.
+  oversea: null
 }
 
 const REPORT_VIEW_KEY = 'mx-rig.report-view'
@@ -400,6 +402,11 @@ const ctx = {
   clearPlan,
   activateEgress,
   saveEgress,
+  oversea: async (action, body) => {
+    state.oversea = await api(action, body)
+    paintNetworkChip()
+    if (state.view === 'egress') await render()
+  },
   canRun: () => ['operator', 'admin'].includes(state.principal?.role)
 }
 
@@ -993,12 +1000,32 @@ function showNetwork(snap) {
   connect.textContent = snap.status === 'idle' && !snap.connectedOnce ? '连接内网' : '重新连接'
   $('network-disconnect').hidden = snap.status !== 'ready'
   $('login-form').querySelector('button[type=submit]').disabled = snap.status !== 'ready' || snap.serverReachable === false
+  lastNetwork = snap
+  paintNetworkChip()
+}
+let lastNetwork = null
+function paintNetworkChip() {
+  const snap = lastNetwork
+  if (!snap) return
   const chip = $('network-chip')
   chip.hidden = false
   chip.dataset.status = snap.status
-  chip.textContent = snap.status === 'ready' ? `内网 · ${snap.identity.kind === 'user' ? '用户网络' : '匿名'}` : `内网 · ${snap.statusText}`
-  chip.title = [snap.message, snap.leaseIp ? `本机地址 ${snap.leaseIp}` : null, snap.serviceVip ? `VIP ${snap.serviceVip}` : null].filter(Boolean).join('\n')
+  const overseas = state.oversea?.usingBrowser ? ' · 海外' : ''
+  chip.textContent = snap.status === 'ready' ? `内网 · ${snap.identity.kind === 'user' ? '用户网络' : '匿名'}${overseas}` : `内网 · ${snap.statusText}`
+  chip.title = [snap.message, snap.leaseIp ? `本机地址 ${snap.leaseIp}` : null, snap.serviceVip ? `VIP ${snap.serviceVip}` : null, state.oversea ? state.oversea.text : null]
+    .filter(Boolean)
+    .join('\n')
 }
+// The overseas channel, as it changes: the chip, and the page that shows it.
+function showOversea(snap) {
+  if (!snap) return
+  const changed = JSON.stringify(snap) !== JSON.stringify(state.oversea)
+  state.oversea = snap
+  paintNetworkChip()
+  if (changed && state.principal && state.view === 'egress') render()
+}
+if (native) api('oversea-status').then(showOversea).catch(() => {})
+if (native && window.mxRig.onOversea) window.mxRig.onOversea(showOversea)
 if (native && window.mxRig.onNetwork) window.mxRig.onNetwork(showNetwork)
 $('network-connect').addEventListener('click', () => {
   $('network-connect').disabled = true
@@ -1009,6 +1036,74 @@ $('network-connect').addEventListener('click', () => {
 })
 $('network-disconnect').addEventListener('click', () => {
   api('network-disconnect').then(showNetwork).catch((error) => { $('network-message').textContent = error.message })
+})
+
+/**
+ * Launcher mode (docs/25 P2): versions from Release Center. The card comes up
+ * by itself only for what can be acted on; what a person asked for (检查更新)
+ * is answered even when there is nothing to do. Closed, it stays closed until
+ * the state changes.
+ */
+const UPDATE_ACTIONABLE = new Set(['available', 'downloading', 'verifying', 'staged', 'ready', 'installing'])
+let updateState = null
+let updateClosed = null
+const updateKey = (state) => `${state.phase}:${state.targetVersion ?? ''}`
+function showUpdate(state) {
+  if (!state) return
+  updateState = state
+  const actionable = UPDATE_ACTIONABLE.has(state.phase)
+  $('update-line').hidden = false
+  $('update-version').textContent = state.currentVersion
+  $('update-check').disabled = !state.actions.check
+  const chip = $('update-chip')
+  chip.hidden = false
+  chip.dataset.phase = state.phase
+  chip.textContent = actionable ? (state.phase === 'ready' ? '更新已就绪' : `新版本 ${state.targetVersion ?? ''}`) : `v${state.currentVersion}`
+  chip.title = actionable ? '查看更新' : '检查更新'
+  $('update-banner').hidden = !(actionable || state.origin === 'user') || updateClosed === updateKey(state)
+  $('update-text').textContent = state.text
+  const bar = $('update-progress')
+  bar.hidden = !state.progress
+  // An unknown total is an indeterminate bar, never 0%.
+  if (state.progress?.percent != null) bar.value = state.progress.percent
+  else bar.removeAttribute('value')
+  $('update-notes-box').hidden = !state.notes
+  $('update-notes').textContent = state.notes ?? ''
+  // Asked for by hand: the install ID, for a targeted validation plan.
+  const id = $('update-install-id')
+  id.hidden = !(state.origin === 'user' && state.installId)
+  id.textContent = state.installId ? `安装 ID：${state.installId}（定向验证新版本时发给管理员）` : ''
+  $('update-download').hidden = !state.actions.download
+  $('update-install').hidden = !state.actions.install
+  $('update-cancel').hidden = !state.actions.cancel
+  $('update-retry').hidden = !['error', 'cancelled'].includes(state.phase)
+  $('update-actions').hidden = [...$('update-actions').children].every((button) => button.hidden)
+}
+function updateAction(action) {
+  updateClosed = null
+  return api(action)
+    .then(showUpdate)
+    .catch((error) => {
+      $('update-text').textContent = error.message
+      $('update-banner').hidden = false
+    })
+}
+if (native) api('update-status').then(showUpdate).catch(() => {})
+if (native && window.mxRig.onUpdate) window.mxRig.onUpdate(showUpdate)
+$('update-check').addEventListener('click', () => updateAction('update-check'))
+$('update-retry').addEventListener('click', () => updateAction('update-check'))
+$('update-download').addEventListener('click', () => updateAction('update-download'))
+$('update-cancel').addEventListener('click', () => updateAction('update-cancel'))
+$('update-install').addEventListener('click', () => updateAction('update-install'))
+$('update-close').addEventListener('click', () => {
+  if (updateState) updateClosed = updateKey(updateState)
+  $('update-banner').hidden = true
+})
+$('update-chip').addEventListener('click', () => {
+  if (updateState && UPDATE_ACTIONABLE.has(updateState.phase)) {
+    updateClosed = null
+    $('update-banner').hidden = false
+  } else updateAction('update-check')
 })
 
 /**

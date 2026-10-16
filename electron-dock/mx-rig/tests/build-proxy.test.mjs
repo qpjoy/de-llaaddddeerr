@@ -14,6 +14,9 @@ const imageId = 'a'.repeat(64);
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'mx-rig-build-proxy-'));
   mkdirSync(join(dir, 'bin'));
+  // The fakes are CommonJS. npm test keeps temp files inside this
+  // "type": "module" package, where Node would load them as ES modules.
+  writeFileSync(join(dir, 'bin', 'package.json'), '{"type":"commonjs"}\n');
   mkdirSync(join(dir, 'tmp'));
   const log = join(dir, 'calls.jsonl');
   const fake = `#!${process.execPath}

@@ -3723,11 +3723,13 @@ export async function egress(ctx, mount) {
         ROUTE_TEXT[observed.route.model] ?? observed.route.model,
         '服务端发出的请求'
       ),
-      metric(
-        '隔离浏览器',
-        ROUTE_TEXT[observed.route.browser] ?? observed.route.browser,
-        '桌面 Runtime 打开的页面'
-      ),
+      ctx.state.oversea?.usingBrowser
+        ? metric('隔离浏览器', '本机海外通道', '这台电脑上的测试浏览器')
+        : metric(
+            '隔离浏览器',
+            ROUTE_TEXT[observed.route.browser] ?? observed.route.browser,
+            '桌面 Runtime 打开的页面'
+          ),
       metric(
         '环境变量观测',
         observed.configured ? (observed.honored ? '已配置且生效' : '已配置但未生效') : '未配置',
@@ -3785,6 +3787,7 @@ export async function egress(ctx, mount) {
         )
       )
     ),
+    ctx.state.oversea ? overseaPanel(ctx, ctx.state.oversea) : null,
     channelsEgressPanel(ctx, observed),
     panel(
       '这一页管什么、不管什么',
@@ -3807,6 +3810,51 @@ export async function egress(ctx, mount) {
           text: '需要私网连通时，仍由管理员在部署层提供，或通过 standalone launcher 的既有能力接入。'
         })
       )
+    )
+  )
+}
+
+/**
+ * The desktop's overseas channel (docs/25 P3), Launcher mode only: the
+ * account's overseas subscription as a proxy on this computer's loopback,
+ * which the test browser here can be sent through. A person turns it on and
+ * chooses to use it; nothing else on the computer is touched.
+ */
+export function overseaPanel(ctx, snap) {
+  const act = (action, body) => ctx.run(() => ctx.oversea(action, body))
+  const running = snap.state === 'ready' || snap.busy
+  const toggle = h('button', {
+    class: `qp-button qp-button--sm ${running ? 'qp-button--ghost' : 'qp-button--primary'}`,
+    id: 'oversea-toggle',
+    type: 'button',
+    text: snap.busy && snap.state !== 'stopping' ? '取消' : running ? '关闭海外通道' : snap.state === 'error' ? '重试' : '开启海外通道',
+    disabled: snap.state === 'stopping'
+  })
+  toggle.onclick = () => act(running ? 'oversea-stop' : 'oversea-start')
+  const use = h('input', { type: 'checkbox', id: 'oversea-browser' })
+  use.checked = snap.browser
+  use.onchange = () => act('oversea-browser', { on: use.checked })
+  return panel(
+    '本机海外通道（Launcher 订阅）',
+    h(
+      'div',
+      { class: 'rig-oversea__head' },
+      h('span', { class: 'qp-status', id: 'oversea-state', 'data-status': snap.state === 'ready' ? (snap.verified ? 'success' : 'warning') : snap.state === 'error' ? 'danger' : 'default', text: snap.text }),
+      toggle
+    ),
+    h(
+      'label',
+      { class: 'qp-choice qp-choice--checkbox' },
+      use,
+      h('span', { class: 'qp-choice__control' }),
+      h('span', { class: 'qp-body-2', text: snap.usingBrowser ? '这台电脑上的测试浏览器正走海外通道' : '让这台电脑上的测试浏览器走海外通道（通道就绪后生效）' })
+    ),
+    h(
+      'ul',
+      { class: 'qp-caption qp-soft' },
+      h('li', { text: '海外权限跟着平台统一账号走：订阅经 MX Rig 自己的内网向 Launcher 申请，只存在这台电脑上，关闭时删除。' }),
+      h('li', { text: '代理只在本机回环地址上，只有 Rig 的测试浏览器使用；不改系统代理、DNS 或路由，不影响 MX-H2I 和其他应用。' }),
+      h('li', { text: '走海外时，除内网地址和常见国内站点外，测试浏览器的流量都从海外出去。切换后浏览器在下一步重开，进行中的确认需要重新发起。' })
     )
   )
 }
