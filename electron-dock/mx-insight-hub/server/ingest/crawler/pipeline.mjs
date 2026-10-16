@@ -840,12 +840,19 @@ export class CrawlerSavedRecordsPipeline {
   async resumeFailedTasks(identifier = null) {
     const specs = await listCrawlerSpecs(this.store)
     if (identifier) return this.resumeFailedTask(identifier)
-    const settled = await Promise.allSettled(specs.map((spec) => this.#resumeSpec(spec)))
+    const tasks = []
+    // Every leaf also takes the shared pipeline try-lock. Recover sequentially
+    // so this batch does not report its own siblings as source_busy.
+    for (const spec of specs) {
+      try {
+        tasks.push(await this.#resumeSpec(spec))
+      } catch (error) {
+        tasks.push({ sourceKey: spec.sourceKey, resumed: false, error: taskError(error) })
+      }
+    }
     return {
       pipelineKey: CRAWLER_PIPELINE_KEY,
-      tasks: settled.map((result, index) => result.status === 'fulfilled'
-        ? result.value
-        : { sourceKey: specs[index].sourceKey, resumed: false, error: taskError(result.reason) }),
+      tasks,
     }
   }
 

@@ -1,6 +1,7 @@
 import { scheduleActiveDatabaseSources } from '../../server/ingest/external/scheduler.mjs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { DatabaseSourcePuller } from '../../server/ingest/external/database-source.mjs'
 import {
   CRAWLER_MAPPING_VERSION,
   CRAWLER_PIPELINE_KEY,
@@ -188,13 +189,17 @@ function fixture() {
       return `job-${payload.sourceKey}`
     },
   }
+  // Use the real fail-fast in-process locks so concurrent pipeline operations
+  // cannot silently share a lock as they did with the old no-op test double.
+  const lockPuller = new DatabaseSourcePuller({ store, queue })
   const databasePuller = {
     withSourceLocks: async (keys, operation) => {
       calls.locks.push([...keys])
-      return operation(async () => {
+      return lockPuller.withSourceLocks(keys, (assertOwned, clients) => operation(async () => {
+        await assertOwned()
         calls.guards += 1
         if (guardError) throw guardError
-      }, null)
+      }, clients))
     },
     resolveConnectionCandidate: async ({ databaseConnectionId, connection }) => ({
       databaseConnectionId: databaseConnectionId ?? null,
@@ -226,6 +231,7 @@ function fixture() {
     store,
     queue,
     databasePuller,
+    lockPuller,
     sources,
     mappings,
     activeMappings,
@@ -428,6 +434,94 @@ test('crawler resume, progress and reset keep per-leaf evidence independent', as
   assert.equal(reset.resets.length, 13)
   assert.equal(setup.calls.reset[0].keys.length, 13)
   assert.equal(Object.keys(setup.calls.reset[0].options.mappingOverrides).length, 13)
+})
+
+test('crawler bulk recovery restores all 14 failed leaves without competing for its own pipeline lock', async () => {
+  const setup = fixture()
+  setup.activateAll()
+  const tender = crawlerSourceSpec('tender')
+  await setup.store.registerCrawlerSource(tender, setup.sources.get(CRAWLER_SOURCES[0].sourceKey))
+  setup.activeMappings.set(tender.sourceKey, { ...setup.mappings.get(tender.sourceKey), approvedAt: new Date().toISOString() })
+  const contract = crawlerWriterContractForSpec(tender)
+  setup.setSourceAttestation(contract.pipelineKey, { contractVersion: contract.version, contractDigest: contract.digest })
+  setup.descriptions.set(tender.sourceKey, { columns: validColumns(), issues: [], warnings: [] })
+  for (const source of setup.sources.values()) {
+    setup.cursors.set(source.sourceKey, {
+      status: 'failed', error: 'source_contract_mismatch',
+      position: { cursor: '2026-10-13 04:15:16.123456+00', lastId: source.sourceKey,
+        contractHash: 'original-contract', mappingVersion: 1, importRunId: 'original-run' },
+    })
+  }
+  const originalPositions = new Map([...setup.cursors].map(([key, cursor]) => [key, structuredClone(cursor.position)]))
+  const originalSources = structuredClone([...setup.sources.values()])
+  const originalMappings = structuredClone([...setup.activeMappings.values()])
+
+  const result = await setup.pipeline.resumeFailedTasks()
+
+  assert.equal(result.tasks.length, 14)
+  assert.equal(result.tasks.filter(task => task.resumed).length, 14, JSON.stringify(result.tasks))
+  assert.deepEqual(result.tasks.map(task => task.sourceKey), [...setup.sources.keys()].sort())
+  assert.equal(setup.calls.saved.length, 14)
+  assert.equal(setup.calls.guards, 14)
+  for (const [key, cursor] of setup.cursors) {
+    assert.equal(cursor.status, 'idle')
+    assert.equal(cursor.error, null)
+    assert.deepEqual(cursor.position, originalPositions.get(key))
+  }
+  assert.deepEqual([...setup.sources.values()], originalSources)
+  assert.deepEqual([...setup.activeMappings.values()], originalMappings)
+  assert.equal(setup.calls.activations.length, 0)
+  assert.equal(setup.calls.updates.length, 0)
+  assert.equal(setup.calls.enqueued.length, 0)
+  assert.equal(setup.calls.reset.length, 0)
+  const repeated = await setup.pipeline.resumeFailedTasks()
+  assert.ok(repeated.tasks.every(task => task.resumed === false && !task.error))
+  assert.equal(setup.calls.saved.length, 14)
+})
+
+test('crawler bulk recovery respects an external pipeline lock without changing failed cursors', async () => {
+  const setup = fixture()
+  setup.activateAll()
+  for (const spec of CRAWLER_SOURCES) setup.cursors.set(spec.sourceKey, {
+    status: 'failed', position: { lastId: '7' }, error: 'original_failure',
+  })
+  const original = structuredClone([...setup.cursors])
+
+  await setup.lockPuller.withSourceLock(CRAWLER_PIPELINE_KEY, async () => {
+    const result = await setup.pipeline.resumeFailedTasks()
+    assert.equal(result.tasks.length, 13)
+    assert.ok(result.tasks.every(task => task.resumed === false && task.error?.code === 'source_busy'))
+    assert.deepEqual([...setup.cursors], original)
+    assert.equal(setup.calls.saved.length, 0)
+  })
+  const retried = await setup.pipeline.resumeFailedTasks()
+  assert.ok(retried.tasks.every(task => task.resumed === true && !task.error))
+})
+
+test('crawler bulk recovery isolates a busy leaf and a failed probe while continuing later leaves', async () => {
+  const setup = fixture()
+  setup.activateAll()
+  const [busy, invalid] = CRAWLER_SOURCES
+  for (const spec of CRAWLER_SOURCES) setup.cursors.set(spec.sourceKey, {
+    status: 'failed', position: { lastId: '7' }, error: 'original_failure',
+  })
+  const originalBusy = structuredClone(setup.cursors.get(busy.sourceKey))
+  const originalInvalid = structuredClone(setup.cursors.get(invalid.sourceKey))
+  setup.descriptions.get(invalid.sourceKey).issues = ['cursor index unavailable']
+
+  await setup.lockPuller.withSourceLock(busy.sourceKey, async () => {
+    const result = await setup.pipeline.resumeFailedTasks()
+    assert.equal(result.tasks.find(task => task.sourceKey === busy.sourceKey).error.code, 'source_busy')
+    assert.equal(result.tasks.find(task => task.sourceKey === invalid.sourceKey).error.code, 'source_probe_failed')
+    assert.equal(result.tasks.filter(task => task.resumed).length, 11)
+    assert.deepEqual(setup.cursors.get(busy.sourceKey), originalBusy)
+    assert.deepEqual(setup.cursors.get(invalid.sourceKey), originalInvalid)
+    assert.equal(setup.calls.saved.length, 11)
+  })
+  setup.descriptions.get(invalid.sourceKey).issues = []
+  const retried = await setup.pipeline.resumeFailedTasks()
+  assert.equal(retried.tasks.filter(task => task.resumed).length, 2)
+  assert.ok(retried.tasks.every(task => !task.error))
 })
 
 test('crawler resume accepts nullable tag with the original mapping and checkpoint without enabling a paused source', async () => {
