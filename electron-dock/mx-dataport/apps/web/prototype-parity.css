@@ -951,8 +951,39 @@
   width: 100%;
   overflow-x: auto;
 }
+.parity-members-panel .simple-data-table {
+  table-layout: fixed;
+  min-width: 640px;
+}
+/* Measured prototype column proportions at 1440px; independent of MX account length. */
+.parity-members-panel .team-column-identity {
+  width: 68.9528%;
+}
+.parity-members-panel .team-column-type {
+  width: 12.481%;
+}
+.parity-members-panel .team-column-status {
+  width: 10.1407%;
+}
+.parity-members-panel .team-column-actions {
+  width: 8.4255%;
+}
 .parity-members-panel .simple-data-table :is(th, td) {
   white-space: nowrap;
+}
+.parity-members-panel .account-row-actions {
+  flex-wrap: wrap;
+  gap: 0 8px;
+}
+.parity-members-panel .account-row-actions [data-slot="button"] {
+  padding-inline: 0;
+}
+.parity-members-panel .team-member-identity > div {
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+.parity-members-panel .team-self-label {
+  flex-shrink: 0;
 }
 .parity-members-panel .team-member-identity strong {
   max-width: 360px;
@@ -960,6 +991,18 @@
   text-overflow: ellipsis;
 }
 @media (max-width: 900px) {
+  .parity-members-panel .team-column-identity {
+    width: auto;
+  }
+  .parity-members-panel .team-column-type {
+    width: 124px;
+  }
+  .parity-members-panel .team-column-status {
+    width: 100px;
+  }
+  .parity-members-panel .team-column-actions {
+    width: 92px;
+  }
   .parity-members-panel .team-member-identity strong {
     max-width: 160px;
   }
