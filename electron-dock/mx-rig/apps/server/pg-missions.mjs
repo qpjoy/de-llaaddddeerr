@@ -37,6 +37,9 @@ export class PgMissionStore {
     // Saves for one mission are applied in the order they were made; a late
     // streaming snapshot must never land on top of a newer full record.
     this.queues = new Map()
+    // An old execution object cannot borrow a later execution's claim.
+    this.claims = new WeakMap()
+    this.versions = new WeakMap()
   }
   get shared() {
     return true
@@ -69,9 +72,13 @@ export class PgMissionStore {
       if (live.owner !== owner) throw new RigError('not_found', '任务不存在', 404)
       return live
     }
-    const { rows } = await this.pool.query('SELECT doc FROM rig_missions WHERE id = $1', [id])
+    const { rows } = await this.pool.query(
+      'SELECT doc, execution_epoch FROM rig_missions WHERE id = $1',
+      [id]
+    )
     const doc = rows[0]?.doc
     if (!doc || doc.owner !== owner) throw new RigError('not_found', '任务不存在', 404)
+    this.versions.set(doc, rows[0].execution_epoch)
     return doc
   }
   public(row) {
@@ -108,7 +115,8 @@ export class PgMissionStore {
       agentKey: input.agentKey ?? null,
       orchestrationKey: input.orchestrationKey ?? null,
       inputs: input.inputs ?? null,
-      status: 'queued',
+      status: input.workbench ? 'draft' : 'queued',
+      ...(input.workbench ? { workbench: structuredClone(input.workbench) } : {}),
       createdAt: new Date().toISOString(),
       events: [],
       messages: [],
@@ -119,12 +127,14 @@ export class PgMissionStore {
       evidence: [],
       graph: null
     }
-    await this.pool.query(
+    const inserted = await this.pool.query(
       `INSERT INTO rig_missions (id, owner, surface, mode, status, doc, holder, heartbeat_at, created_at)
-       VALUES ($1, $2, 'internal', $3, $4, $5::jsonb, $6, now(), $7)`,
-      [row.id, owner, row.mode, row.status, JSON.stringify(row), this.instance, row.createdAt]
+       VALUES ($1, $2, 'internal', $3, $4, $5::jsonb, $6, now(), $7) RETURNING execution_epoch`,
+      [row.id, owner, row.mode, row.status, JSON.stringify(row), input.workbench ? null : this.instance, row.createdAt]
     )
-    this.live.set(row.id, row)
+    if (!input.workbench) this.claims.set(row, inserted.rows[0].execution_epoch)
+    this.versions.set(row, inserted.rows[0].execution_epoch)
+    if (!input.workbench) this.live.set(row.id, row)
     return row
   }
 
@@ -145,28 +155,61 @@ export class PgMissionStore {
    * can abort what is in flight.
    */
   save(row) {
+    const epoch = this.claims.get(row)
+    if (epoch === undefined) return Promise.reject(this.#lost(row))
     row.updatedAt = new Date().toISOString()
     const doc = JSON.stringify(row)
     const status = row.status
     const live = LIVE.includes(status)
-    if (live) this.live.set(row.id, row)
-    else this.live.delete(row.id)
     return this.#enqueue(row.id, async () => {
       const { rows } = await this.pool.query(
         `UPDATE rig_missions SET
            doc = $2::jsonb,
            status = $3,
            mode = $4,
-           holder = CASE WHEN $5 THEN $6 ELSE NULL END,
+           holder = $6,
            heartbeat_at = CASE WHEN $5 THEN now() ELSE heartbeat_at END,
            cancel_requested_at = CASE WHEN $3 = ANY($7) THEN NULL ELSE cancel_requested_at END,
            updated_at = now()
-         WHERE id = $1
+         WHERE id = $1 AND holder = $6 AND execution_epoch = $8 AND surface = 'internal'
          RETURNING cancel_requested_at`,
-        [row.id, doc, status, row.mode, live, this.instance, [...TERMINAL]]
+        [row.id, doc, status, row.mode, live, this.instance, [...TERMINAL], epoch]
       )
+      if (!rows.length) throw this.#lost(row)
+      if (live) this.live.set(row.id, row)
+      else if (this.live.get(row.id) === row) this.live.delete(row.id)
       return { cancelRequested: Boolean(rows[0]?.cancel_requested_at) }
     })
+  }
+
+  #lost(row) {
+    this.claims.delete(row)
+    if (this.live.get(row.id) === row) this.live.delete(row.id)
+    return new RigError(
+      'execution_claim_lost',
+      '任务执行权已失效；请读取当前状态，不重放外部动作',
+      409
+    )
+  }
+
+  /** Explicitly claim a continuation; concurrent workbenches cannot both win. */
+  async claimFollowup(row) {
+    const epoch = this.versions.get(row)
+    if (epoch === undefined) return false
+    const { rows } = await this.pool.query(
+      `UPDATE rig_missions SET doc = $3::jsonb, status = 'queued', mode = $4,
+         holder = $5, execution_epoch = execution_epoch + 1, heartbeat_at = now(),
+         cancel_requested_at = NULL, updated_at = now()
+       WHERE id = $1 AND owner = $2 AND surface = 'internal' AND status = ANY($6)
+         AND execution_epoch = $7
+       RETURNING execution_epoch`,
+      [row.id, row.owner, JSON.stringify(row), row.mode, this.instance, ['draft', ...TERMINAL], epoch]
+    )
+    if (!rows.length) return false
+    this.claims.set(row, rows[0].execution_epoch)
+    this.versions.set(row, rows[0].execution_epoch)
+    this.live.set(row.id, row)
+    return true
   }
 
   /**
@@ -194,13 +237,16 @@ export class PgMissionStore {
 
   /** Partial text while a model answers: only the draft changes. */
   saveStream(row) {
+    const epoch = this.claims.get(row)
+    if (epoch === undefined) return Promise.reject(this.#lost(row))
     const stream = JSON.stringify(row.stream ?? null)
     return this.#enqueue(row.id, async () => {
-      await this.pool.query(
+      const result = await this.pool.query(
         `UPDATE rig_missions SET doc = jsonb_set(doc, '{stream}', $2::jsonb), heartbeat_at = now()
-         WHERE id = $1 AND holder = $3`,
-        [row.id, stream, this.instance]
+         WHERE id = $1 AND holder = $3 AND execution_epoch = $4 AND status = ANY($5)`,
+        [row.id, stream, this.instance, epoch, LIVE]
       )
+      if (!result.rowCount && LIVE.includes(row.status)) throw this.#lost(row)
     })
   }
 
@@ -209,14 +255,17 @@ export class PgMissionStore {
    * written only if the mission is still waiting on exactly this approval.
    */
   async claimApproval(row, approvalId) {
-    const { rowCount } = await this.pool.query(
+    const { rows } = await this.pool.query(
       `UPDATE rig_missions SET
          doc = $3::jsonb, status = $4, holder = $5, heartbeat_at = now(),
-         cancel_requested_at = NULL, updated_at = now()
-       WHERE id = $1 AND status = 'awaiting_approval' AND doc->'pending'->>'approvalId' = $2`,
+         execution_epoch = execution_epoch + 1, cancel_requested_at = NULL, updated_at = now()
+       WHERE id = $1 AND status = 'awaiting_approval' AND doc->'pending'->>'approvalId' = $2
+       RETURNING execution_epoch`,
       [row.id, approvalId, JSON.stringify(row), row.status, this.instance]
     )
-    if (rowCount !== 1) return false
+    if (rows.length !== 1) return false
+    this.claims.set(row, rows[0].execution_epoch)
+    this.versions.set(row, rows[0].execution_epoch)
     this.live.set(row.id, row)
     return true
   }
@@ -241,6 +290,7 @@ export class PgMissionStore {
       }
       const { rowCount } = await this.pool.query(
         `UPDATE rig_missions SET doc = $2::jsonb, status = 'cancelled', holder = NULL,
+           execution_epoch = execution_epoch + 1,
            cancel_requested_at = NULL, updated_at = now()
          WHERE id = $1 AND status = 'awaiting_approval'`,
         [row.id, JSON.stringify(closed)]
@@ -265,6 +315,7 @@ export class PgMissionStore {
     }
     const stale = await this.pool.query(
       `UPDATE rig_missions SET doc = $2::jsonb, status = 'cancelled', holder = NULL,
+         execution_epoch = execution_epoch + 1,
          cancel_requested_at = NULL, updated_at = now()
        WHERE id = $1 AND status = ANY($3)
          AND (heartbeat_at IS NULL OR heartbeat_at < now() - ($4::text || ' milliseconds')::interval)`,
@@ -284,13 +335,31 @@ export class PgMissionStore {
    * those missions someone asked to stop.
    */
   async heartbeat() {
+    // Freeze the candidates before awaiting SQL. A mission created while the
+    // heartbeat is in flight must not be mistaken for a lost claim.
+    const candidates = [...this.live.values()].filter((row) => LIVE.includes(row.status))
+    if (!candidates.length) return []
     const { rows } = await this.pool.query(
-      `UPDATE rig_missions SET heartbeat_at = now()
-       WHERE holder = $1 AND status = ANY($2)
-       RETURNING id, cancel_requested_at IS NOT NULL AS cancel`,
-      [this.instance, LIVE]
+      `UPDATE rig_missions AS mission SET heartbeat_at = now()
+       FROM unnest($2::uuid[], $3::bigint[]) AS claim(id, epoch)
+       WHERE mission.id = claim.id AND mission.execution_epoch = claim.epoch
+         AND mission.holder = $1 AND mission.status = ANY($4)
+       RETURNING mission.id, mission.cancel_requested_at IS NOT NULL AS cancel`,
+      [
+        this.instance,
+        candidates.map((row) => row.id),
+        candidates.map((row) => this.claims.get(row)),
+        LIVE
+      ]
     )
-    return rows.filter((row) => row.cancel).map((row) => row.id)
+    const held = new Set(rows.map((row) => row.id))
+    const lost = candidates
+      .filter(
+        (row) => !held.has(row.id) && this.live.get(row.id) === row && LIVE.includes(row.status)
+      )
+      .map((row) => row.id)
+    for (const id of lost) this.#lost(this.live.get(id))
+    return [...new Set([...rows.filter((row) => row.cancel).map((row) => row.id), ...lost])]
   }
 
   /** Close missions whose holder is gone. Safe to run from every replica. */
@@ -305,6 +374,7 @@ export class PgMissionStore {
       `UPDATE rig_missions SET
          status = 'blocked',
          holder = NULL,
+         execution_epoch = execution_epoch + 1,
          cancel_requested_at = NULL,
          updated_at = now(),
          doc = doc || jsonb_build_object(

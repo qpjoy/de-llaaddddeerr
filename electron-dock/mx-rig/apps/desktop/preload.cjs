@@ -22,6 +22,12 @@ contextBridge.exposeInMainWorld(
       ipcRenderer.on('mx-rig:provision', listener)
       return () => ipcRenderer.off('mx-rig:provision', listener)
     },
+    // Launcher mode (docs/25): this product's own network, as it changes.
+    onNetwork: (callback) => {
+      const listener = (_event, info) => callback(info)
+      ipcRenderer.on('mx-rig:network', listener)
+      return () => ipcRenderer.off('mx-rig:network', listener)
+    },
     // The page raised an alert / confirm / prompt while a person has it.
     onDialog: (callback) => {
       const listener = (_event, info) => callback(info)

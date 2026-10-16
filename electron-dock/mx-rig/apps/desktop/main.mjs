@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ipcMain, dialog } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, dialog, net, protocol, safeStorage } from 'electron'
 import { execFile, fork } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
@@ -7,11 +7,17 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { join, resolve } from 'node:path'
 import { RigClient } from '../../packages/runtime/client.mjs'
 import { RigError, serviceUrl } from '../../packages/contracts/index.mjs'
+import { REPORT_PATH } from './report-request.mjs'
+import { MEDIA_SCHEME, mediaResponse } from './run-media.mjs'
+import { ProjectWorkspaces, readPack } from '../../packages/runtime/project-workspace.mjs'
+import { PUBLISH_POLICY, TestRepositories, taskBranch } from '../../packages/runtime/test-repository.mjs'
+import { routeAction } from '../web/routes.js'
 import { syncDesignAssets } from '../../scripts/design-assets.mjs'
 import { LocalRunner, localStation } from './local-runner.mjs'
 import { replayDocument } from '../../packages/runtime/replay.mjs'
 import { firstRun } from './first-run.mjs'
-import { existsSync } from 'node:fs'
+import { DEFAULT_BOOTSTRAP_URLS, LauncherNetwork } from './launcher-network.mjs'
+import { existsSync, readdirSync } from 'node:fs'
 
 // Read actions the workbench may forward. An explicit table means the renderer
 // can never name an arbitrary path, and the desktop and web surfaces cannot
@@ -25,22 +31,55 @@ const READ_ACTIONS = {
   tasks: '/api/v1/tasks',
   runs: '/api/v1/runs?limit=20',
   apps: '/api/v1/apps',
+  members: '/api/v1/members',
   runners: '/api/v1/runners',
-  hooks: '/api/rig/v1/hooks'
+  hooks: '/api/rig/v1/hooks',
+  'tour-videos': '/api/rig/v1/tour-videos'
 }
 
-// Pages the desktop will hand to the system browser. That session logs in
-// separately; nothing from this process's credentials travels with it.
-const EXTERNAL_PATHS = [/^\/test-center\/$/, /^\/api\/v1\/runs\/[A-Za-z0-9_-]{1,80}\/report$/]
+// The desktop hands nothing to the system browser any more: the old
+// test-management console's functions are in the workbench (docs/21 M1–M3),
+// and execution reports open in a window of the desktop's own
+// (report-window.mjs).
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const ui = fileURLToPath(new URL('../web/index.html', import.meta.url))
+
+// The built-in proving ground (test-packs/proving-ground): a small app with
+// planted defects, for learning and demos. It runs only on this computer, only
+// when someone asks for it, and never stands for a real product. One already
+// running on its usual port (npm run proving-ground) is used as it is.
+const PROVING_GROUND_PORT = 4610
+// Recording the tours (scripts/record-tours.mjs) points this at a neutral
+// copy, so no one's home folder appears in a video meant to be shown around.
+const provingGroundDir = process.env.MX_RIG_PROVING_GROUND_DIR || join(root, 'test-packs', 'proving-ground')
+let provingGround = null
+async function provingGroundAt(origin) {
+  const answer = await fetch(origin, { signal: AbortSignal.timeout(1500) }).catch(() => null)
+  return Boolean(answer?.ok && (await answer.text().catch(() => '')).includes('星港物资台'))
+}
+async function provingGroundStatus() {
+  if (provingGround) return { running: true, origin: provingGround.origin, directory: provingGroundDir }
+  const usual = `http://127.0.0.1:${PROVING_GROUND_PORT}`
+  if (await provingGroundAt(usual)) return { running: true, origin: usual, directory: provingGroundDir }
+  return { running: false, origin: null, directory: provingGroundDir }
+}
+async function provingGroundStart() {
+  const status = await provingGroundStatus()
+  if (status.running) return status
+  const { startProvingGround } = await import(pathToFileURL(join(provingGroundDir, 'server.mjs')).href)
+  // The usual port may be taken by something else: then any free one.
+  provingGround = await startProvingGround({ port: PROVING_GROUND_PORT }).catch(() => startProvingGround({ port: 0 }))
+  return provingGroundStatus()
+}
 let window,
   client,
   worker,
   member,
   localRunner = null,
   station = null,
+  projectWorkspaces = null,
+  testRepositories = null,
   quitting = false,
   sequence = 0
 const pending = new Map()
@@ -102,7 +141,26 @@ async function readJson(file) {
   }
 }
 
+// Launcher mode (docs/25 §3): built into an installer with `launcher` in its
+// defaults, or MX_RIG_LAUNCHER=1 from source. The desktop then reaches the Rig
+// service through its own product network instead of an address typed in.
+let network = null
+async function launcherSettings() {
+  const packaged = (await readJson(join(root, 'apps/desktop/defaults.json'))) ?? {}
+  const enabled = process.env.MX_RIG_LAUNCHER === '1' || (process.env.MX_RIG_LAUNCHER !== '0' && packaged.launcher?.enabled === true)
+  if (!enabled) return null
+  const fromEnv = String(process.env.MX_RIG_BOOTSTRAP_URLS ?? '').split(',').map((url) => url.trim()).filter(Boolean)
+  return {
+    bootstrapUrls: fromEnv.length ? fromEnv : packaged.launcher?.bootstrapUrls?.length ? packaged.launcher.bootstrapUrls : DEFAULT_BOOTSTRAP_URLS,
+    serverUrl: process.env.MX_RIG_SERVER_URL || packaged.launcher?.serverUrl || null
+  }
+}
+
 async function loginDefaults() {
+  if (network) {
+    const last = (await readJson(lastLoginFile())) ?? {}
+    return { server: network.serverUrl() ?? '', privateHttp: true, account: last.account ?? '', packaged: null, launcher: network.snapshot() }
+  }
   const packaged = (await readJson(join(root, 'apps/desktop/defaults.json'))) ?? {}
   const last = (await readJson(lastLoginFile())) ?? {}
   const server = last.server || packaged.server || process.env.MX_RIG_SERVER_URL || 'http://127.0.0.1:8791'
@@ -131,15 +189,34 @@ function browserEnv() {
   }
 }
 
+/**
+ * A test repository's own Playwright looks for browsers in its default cache.
+ * Point it at this app's Chromium when there is one, so a run never starts by
+ * downloading a browser.
+ */
+function playwrightBrowsers() {
+  const env = browserEnv()
+  for (const dir of [env.MX_RIG_BUNDLED_BROWSERS, env.MX_RIG_BROWSERS_DIR]) {
+    if (dir && existsSync(dir) && readdirSync(dir).some((name) => name.startsWith('chromium'))) return { PLAYWRIGHT_BROWSERS_PATH: dir }
+  }
+  return {}
+}
+
 async function login(input) {
   await stopWorker()
   await Promise.allSettled([localRunner?.stop(), station?.stop()])
   localRunner = null
   station = null
+  projectWorkspaces = null
+  testRepositories = null
   client = null
   member = null
-  const privateHttp = input.privateHttp === true || process.env.MX_RIG_ALLOW_PRIVATE_HTTP === '1'
-  const url = serviceUrl(input.url || process.env.MX_RIG_SERVER_URL || 'http://127.0.0.1:8791', {
+  // Launcher mode: the service is behind this product's VIP, inside the tunnel.
+  const launched = network ? network.snapshot() : null
+  if (launched && (launched.status !== 'ready' || !launched.serverUrl))
+    throw new RigError('network_not_ready', '先连上内网再登录')
+  const privateHttp = Boolean(launched) || input.privateHttp === true || process.env.MX_RIG_ALLOW_PRIVATE_HTTP === '1'
+  const url = serviceUrl(launched?.serverUrl || input.url || process.env.MX_RIG_SERVER_URL || 'http://127.0.0.1:8791', {
     privateHttp
   })
   const next = new RigClient({ url, token: '', privateHttp })
@@ -198,12 +275,23 @@ async function login(input) {
   client = next
   member = principal
   await rememberLogin({ server: url, privateHttp, account: input.account }).catch(() => {})
+  // A unified account also takes the network over to a user lease. Rig's own
+  // accounts and the service admin have no Launcher identity: the lease stays.
+  if (network && !/^local:/.test(principal.id) && principal.id !== 'service-admin')
+    void network.signIn({ account: input.account, password: input.password }).catch((error) => {
+      window?.webContents.send('mx-rig:network', { ...network.snapshot(), message: `已登录 Rig；网络仍是匿名的（${error.message}）` })
+    })
+  // Test projects' snapshots and QA repositories on this computer (docs/21 §5).
+  projectWorkspaces = new ProjectWorkspaces(join(app.getPath('userData'), 'workspaces', workspace, 'project-workspaces'))
+  // The same directory: a project's test repository is its workspace's qa/ (docs/23).
+  testRepositories = new TestRepositories(projectWorkspaces.root)
   // This computer as a runner for this member on this service. Its token
-  // lives next to the member's workspace, never in the renderer.
+  // lives next to the member's workspace, never in the renderer. It is told
+  // where the project workspaces are, and where this app's Chromium is.
   localRunner = new LocalRunner({
     dir: join(app.getPath('userData'), 'workspaces', workspace, 'runner'),
     script: join(root, 'packages/test-platform/bin/mxt-runner.mjs'),
-    extraEnv: { ELECTRON_RUN_AS_NODE: '1' }
+    extraEnv: { ELECTRON_RUN_AS_NODE: '1', MXT_PROJECT_WORKSPACES: projectWorkspaces.root, ...browserEnv(), ...playwrightBrowsers() }
   })
   // On duty (值守): procedure regression queued on the service is replayed
   // here, by the same `mx-rig station` a server would run, in its own process
@@ -335,9 +423,16 @@ function trusted(event) {
   )
     throw new RigError('untrusted_frame', '拒绝非工作台请求')
 }
+// A run's recordings play inside the workbench (run-media.mjs). Streaming is
+// what lets a <video> send Range requests, and so seek to a step.
+protocol.registerSchemesAsPrivileged([
+  { scheme: MEDIA_SCHEME, privileges: { standard: true, secure: true, stream: true } }
+])
+
 app
   .whenReady()
   .then(async () => {
+    protocol.handle(MEDIA_SCHEME, (request) => mediaResponse(request, { session: client, fetch: net.fetch }))
     // A packaged build already carries the copy; in a source checkout this
     // picks up whatever version of the design system is installed.
     // Only from source: inside a packaged app the folder is part of the
@@ -349,6 +444,16 @@ app
         throw new RigError('invalid_request', '请求无效')
       if (input.action === 'login') return login(input.body || {})
       if (input.action === 'login-defaults') return loginDefaults()
+      // The product network is there before anyone signs in: the login page needs it.
+      if (input.action === 'network-status') return network ? network.snapshot() : null
+      if (input.action === 'network-connect') {
+        if (!network) throw new RigError('not_launcher', '这个安装包不是 Launcher 模式')
+        return network.connect()
+      }
+      if (input.action === 'network-disconnect') {
+        if (!network) throw new RigError('not_launcher', '这个安装包不是 Launcher 模式')
+        return network.disconnect('manual')
+      }
       if (input.action === 'me') return { principal: member }
       if (!client) throw new RigError('login_required', '请先登录')
       switch (input.action) {
@@ -361,9 +466,12 @@ app
           await Promise.allSettled([localRunner?.stop(), station?.stop()])
           localRunner = null
           station = null
+          projectWorkspaces = null
+          testRepositories = null
           await ending.request('/api/rig/v1/logout', {}).catch(() => {})
           client = null
           member = null
+          if (network?.snapshot().identity.kind === 'user') void network.signOut()
           return { ok: true }
         }
         case 'change-password':
@@ -373,6 +481,64 @@ app
           })
         case 'missions':
           return rpc('list')
+        case 'project-access':
+        case 'project-access-save': {
+          const { app, ...body } = input.body ?? {}
+          if (typeof app !== 'string' || !/^[a-z0-9-]{1,64}$/.test(app)) throw new RigError('invalid_input', '项目标识无效')
+          return client.request(`/api/v1/apps/${app}/access`, input.action === 'project-access' ? undefined : body)
+        }
+        case 'project-create':
+          return client.request('/api/v1/apps', input.body)
+        case 'project-directory': {
+          const picked = await dialog.showOpenDialog(window, { title: '选择被测项目目录', properties: ['openDirectory'] })
+          return { directory: picked.canceled ? null : picked.filePaths[0] }
+        }
+        case 'source-connect': {
+          const picked = await dialog.showOpenDialog(window, { title: '连接本任务源码（只读，所读内容会提供给模型）', properties: ['openDirectory'] })
+          return picked.canceled ? rpc('source-status', input.body) : rpc('source-connect', { id: input.body?.id, directory: picked.filePaths[0] }, 60_000)
+        }
+        case 'source-git-connect':
+        case 'source-refresh':
+          return rpc(input.action, input.body, 180_000)
+        case 'source-cancel':
+        case 'source-status':
+        case 'source-disconnect':
+        case 'implementation-export':
+          return rpc(input.action, input.body)
+        case 'task-implementation':
+        case 'task-implementation-save':
+        case 'task-implementation-approve': {
+          const { id, ...body } = input.body ?? {}
+          if (!/^[a-f0-9-]{36}$/.test(id)) throw new RigError('invalid_input', '任务编号无效')
+          const base = `/api/rig/v1/missions/${id}/implementation`
+          if (input.action === 'task-implementation') return client.request(base + (body.revision ? `?revision=${encodeURIComponent(body.revision)}` : ''))
+          return client.request(base + (input.action === 'task-implementation-approve' ? ':approve' : ''), body)
+        }
+        case 'test-task-create':
+          if (!['admin', 'operator'].includes(member?.role)) throw new RigError('forbidden', '需要测试操作权限', 403)
+          return rpc('test-task-create', input.body)
+        case 'task-cases':
+        case 'task-cases-save':
+        case 'task-cases-confirm': {
+          const id = String(input.body?.id ?? '')
+          if (!/^[a-f0-9-]{36}$/.test(id)) throw new RigError('invalid_input', '任务编号无效')
+          const base = `/api/rig/v1/missions/${id}/cases`
+          if (input.action === 'task-cases')
+            return client.request(base + (input.body.revision ? `?revision=${encodeURIComponent(input.body.revision)}` : ''))
+          return client.request(base + (input.action === 'task-cases-confirm' ? ':confirm' : ''), {
+            expectedRevision: input.body.expectedRevision,
+            ...(input.action === 'task-cases-save' ? { cases: input.body.cases } : {})
+          })
+        }
+        case 'task-executions':
+        case 'task-execution-plan':
+        case 'task-execution-dispatch': {
+          const { id, ...body } = input.body ?? {}
+          if (!/^[a-f0-9-]{36}$/.test(id)) throw new RigError('invalid_input', '任务编号无效')
+          const base = `/api/rig/v1/missions/${id}/executions`
+          return input.action === 'task-executions' ? client.request(base + (body.runId ? `?run=${encodeURIComponent(body.runId)}` : ''))
+            : client.request(base + (input.action === 'task-execution-plan' ? ':plan' : ':dispatch'), body)
+        }
         case 'start':
           return rpc('start', input.body)
         case 'followup':
@@ -457,6 +623,160 @@ app
           return client.request('/api/rig/v1/hooks:tick', {})
         case 'cases-import':
           return client.request('/api/rig/v1/cases:import', { cases: input.body?.cases })
+        // A test project's workspace on this computer (docs/21 §5).
+        case 'workspace-status': {
+          const state = await projectWorkspaces.status(String(input.body?.app ?? ''))
+          const behind = state.snapshot ? await projectWorkspaces.behind(state.app).catch(() => null) : null
+          return { ...state, behind }
+        }
+        case 'workspace-pick': {
+          const picked = await dialog.showOpenDialog(window, {
+            title: '选择被测项目所在的目录',
+            properties: ['openDirectory']
+          })
+          return picked.canceled || !picked.filePaths[0] ? { canceled: true } : { directory: picked.filePaths[0] }
+        }
+        case 'workspace-create': {
+          const body = input.body ?? {}
+          const pack = await readPack(join(root, 'test-packs'), String(body.pack ?? ''))
+          const source =
+            body.source?.kind === 'local'
+              ? { kind: 'local', directory: String(body.source.directory ?? '') }
+              : { kind: 'git', repoUrl: String(body.source?.repoUrl ?? '') }
+          return projectWorkspaces.create({
+            app: String(body.app ?? ''),
+            pack,
+            source,
+            ref: typeof body.ref === 'string' && body.ref ? body.ref : undefined,
+            commit: typeof body.commit === 'string' && body.commit ? body.commit : undefined
+          })
+        }
+        case 'workspace-open': {
+          const state = await projectWorkspaces.status(String(input.body?.app ?? ''))
+          const target = input.body?.which === 'snapshot' ? state.snapshot?.dir : state.qa ? join(projectWorkspaces.root, state.app, 'qa') : null
+          if (!target) throw new RigError('not_found', '这个项目在本机还没有工作区', 404)
+          const { shell } = await import('electron')
+          const failed = await shell.openPath(target)
+          if (failed) throw new RigError('open_failed', failed)
+          return { ok: true }
+        }
+        // A project's test repository on this computer, and its versions on the service (docs/23).
+        case 'repository-status': {
+          const appSlug = String(input.body?.app ?? '')
+          const local = await testRepositories.status(appSlug)
+          const server = await client.request(`/api/rig/v1/projects/${encodeURIComponent(appSlug)}/test-versions`).catch(() => ({ versions: [], head: null }))
+          let task = null
+          if (input.body?.missionId && local.exists) {
+            const branch = taskBranch(String(input.body.missionId))
+            const head = local.branches.find((entry) => entry.name === branch) ?? null
+            task = { branch, commit: head?.commit ?? null, merged: Boolean(head?.merged), cases: head ? await testRepositories.cases(appSlug, head.commit) : [] }
+          }
+          return { local, server, task }
+        }
+        case 'repository-ensure': {
+          // The repository, the fixed suite that runs it, and a plan pinned to this computer.
+          const appSlug = String(input.body?.app ?? '')
+          const repository = await testRepositories.ensure(appSlug)
+          const { suite } = await client.request(`/api/v1/apps/${encodeURIComponent(appSlug)}/workspace-suite`, {})
+          let runner = await localRunner.status()
+          if (!runner.registered) runner = await localRunner.register(client, {})
+          const { tasks } = await client.request(`/api/v1/tasks?app=${encodeURIComponent(appSlug)}`)
+          let plan = tasks.find((task) => task.suiteId === suite.id && task.runnerId === runner.runnerId) ?? null
+          if (!plan && input.body?.targetUrl) {
+            plan = (
+              await client.request('/api/v1/tasks', {
+                app: appSlug,
+                suite: suite.slug,
+                name: `本机测试仓库 · ${runner.name ?? '本机'}`,
+                targetUrl: String(input.body.targetUrl),
+                runsOn: 'pinned-runner',
+                runnerId: runner.runnerId,
+                schedule: { kind: 'manual' }
+              })
+            ).task
+          }
+          return { repository, suite, plan, runner }
+        }
+        case 'repository-commit': {
+          const appSlug = String(input.body?.app ?? '')
+          const missionId = String(input.body?.missionId ?? '')
+          if (!/^[a-f0-9-]{36}$/.test(missionId)) throw new RigError('invalid_input', '任务编号无效')
+          const { proposal, stale } = await client.request(`/api/rig/v1/missions/${missionId}/implementation`)
+          if (!proposal?.reviewedAt || stale) throw new RigError('implementation_not_reviewed', '请先批准当前用例对应的最新实现', 409)
+          await testRepositories.ensure(appSlug)
+          return testRepositories.commitImplementation(appSlug, { missionId, goal: proposal.summary, implementation: proposal })
+        }
+        case 'repository-merge':
+          return testRepositories.mergeToMain(String(input.body?.app ?? ''), String(input.body?.commit ?? ''))
+        case 'repository-publish': {
+          const appSlug = String(input.body?.app ?? '')
+          const commit = String(input.body?.commit ?? '')
+          const base = `/api/rig/v1/projects/${encodeURIComponent(appSlug)}/test-versions`
+          const { head } = await client.request(base)
+          // The service's history is a line: a new version contains the latest one.
+          if (head && !(await testRepositories.contains(appSlug, head.commit, commit)))
+            throw new RigError(
+              'version_not_on_line',
+              (await testRepositories.has(appSlug, head.commit))
+                ? `这个提交没有包含服务器最新版本 v${head.version}：先合入本机主线（它已同步到 v${head.version}）再发布`
+                : `本机还没有服务器最新版本 v${head.version}：先「同步服务器版本」，合入后再发布`,
+              409
+            )
+          const inspected = await testRepositories.inspect(appSlug, commit, head?.commit ?? null)
+          if (inspected.problems.length)
+            throw new RigError('publish_policy', `这些内容不能进测试版本：${inspected.problems.slice(0, 6).join('；')}`, 409)
+          // Every tenth version is complete, so the service can drop the increments
+          // before it. A history too big for one upload stays in increments, which
+          // do not overlap: either way the service keeps about one copy of it.
+          let checkpoint = !head || (head.version + 1) % 10 === 0
+          let bundle = await testRepositories.bundle(appSlug, commit, checkpoint ? null : head.commit)
+          if (checkpoint && head && Buffer.byteLength(bundle, 'base64') > PUBLISH_POLICY.uploadBytes) {
+            checkpoint = false
+            bundle = await testRepositories.bundle(appSlug, commit, head.commit)
+          }
+          const cases = (await testRepositories.cases(appSlug, commit)).map((entry) => entry.caseId)
+          const { version } = await client.request(base, {
+            commit,
+            parent: head?.commit ?? null,
+            branch: String(input.body?.branch ?? 'main'),
+            summary: String(input.body?.summary ?? '').slice(0, 500) || `发布 ${commit.slice(0, 7)}`,
+            runId: String(input.body?.runId ?? ''),
+            cases,
+            checkpoint,
+            bundle
+          })
+          await testRepositories.importVersion(appSlug, { version: version.version, commit, bundle })
+          return { version }
+        }
+        case 'repository-pull': {
+          const appSlug = String(input.body?.app ?? '')
+          const base = `/api/rig/v1/projects/${encodeURIComponent(appSlug)}/test-versions`
+          const { versions } = await client.request(base)
+          await testRepositories.ensure(appSlug)
+          const local = await testRepositories.status(appSlug)
+          const pulled = []
+          const ascending = [...versions].sort((a, b) => a.version - b.version)
+          for (const entry of ascending) {
+            if (local.versions.some((tag) => tag.version === entry.version)) continue
+            // Merged into a later full version: its commit arrives with that one.
+            if (entry.pruned) continue
+            const { bundle } = await client.request(`${base}/${entry.version}/bundle`)
+            pulled.push(await testRepositories.importVersion(appSlug, { version: entry.version, commit: entry.commit, bundle }))
+          }
+          for (const entry of ascending.filter((row) => row.pruned)) await testRepositories.tagVersion(appSlug, entry.version, entry.commit)
+          return { pulled, local: await testRepositories.status(appSlug) }
+        }
+        case 'repository-open': {
+          const { shell } = await import('electron')
+          const failed = await shell.openPath(testRepositories.path(String(input.body?.app ?? '')))
+          if (failed) throw new RigError('open_failed', failed)
+          return { ok: true }
+        }
+        // Rig's own proving ground (docs/24 M8b): a practice app, started here on request.
+        case 'proving-ground-status':
+          return provingGroundStatus()
+        case 'proving-ground-start':
+          return provingGroundStart()
         case 'runner-status':
           return localRunner.status()
         case 'runner-register':
@@ -496,11 +816,6 @@ app
             {}
           )
         // One app's case catalogue; the renderer names the app, never a path.
-        case 'app-cases': {
-          const app = String(input.body?.app ?? '')
-          if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(app)) throw new RigError('invalid_input', '应用标识无效')
-          return client.request(`/api/v1/apps/${app}/cases`)
-        }
         case 'electron-apps':
           return { apps: await loadElectronApps(), platform: process.platform }
         // The System Settings pane where a person grants what macOS asks for;
@@ -582,13 +897,18 @@ app
           const days = Number(input.body?.window) || 14
           return client.request(`/api/rig/v1/insights?window=${encodeURIComponent(days)}`)
         }
-        case 'test-center':
+        // A run's report as a PDF file (docs/21 M4); the member picks where.
+        case 'report-save': {
+          const path = String(input.body?.path || '')
+          if (!REPORT_PATH.test(path.split('?')[0])) throw new RigError('invalid_path', '只能保存执行报告')
+          const { saveReport } = await import('./report-window.mjs')
+          return saveReport({ origin: new URL(client.url).origin, path, token: () => client.token, parent: window, dialog })
+        }
         case 'open-path': {
-          const path = input.action === 'test-center' ? '/test-center/' : input.body?.path || ''
-          if (!EXTERNAL_PATHS.some((pattern) => pattern.test(path)))
-            throw new RigError('invalid_path', '不允许在外部浏览器打开该地址')
-          const { shell } = await import('electron')
-          await shell.openExternal(client.url + path)
+          const path = String(input.body?.path || '')
+          if (!REPORT_PATH.test(path.split('?')[0])) throw new RigError('invalid_path', '桌面端只在应用内打开执行报告')
+          const { openReport } = await import('./report-window.mjs')
+          await openReport({ origin: new URL(client.url).origin, path, token: () => client.token, parent: window })
           return { ok: true }
         }
         case 'artifact': {
@@ -619,12 +939,35 @@ app
           await writeFile(saved.filePath, html)
           return { saved: true, path: saved.filePath, frames }
         }
-        default:
+        default: {
           if (Object.hasOwn(READ_ACTIONS, input.action))
             return client.request(READ_ACTIONS[input.action])
+          // Project and administration actions: the same table the browser
+          // uses (apps/web/routes.js), sent with this process's token. A
+          // one-time password in an answer goes to the page that asked, once.
+          let routed
+          try {
+            routed = routeAction(input.action, input.body)
+          } catch (error) {
+            throw new RigError('invalid_input', error.message)
+          }
+          if (routed) return client.send(routed.method, routed.path, routed.body)
           throw new RigError('invalid_action', '未知动作')
+        }
       }
     })
+    const launcher = await launcherSettings()
+    if (launcher)
+      network = await LauncherNetwork.open({
+        dir: app.getPath('userData'),
+        sdk: await import('@qpjoy/electron-launcher'),
+        safeStorage,
+        config: launcher,
+        appVersion: app.getVersion(),
+        onChange: (snapshot) => {
+          if (window && !window.isDestroyed()) window.webContents.send('mx-rig:network', snapshot)
+        }
+      })
     window = new BrowserWindow({
       width: 1440,
       height: 960,
@@ -648,6 +991,9 @@ app
     // Unsigned on macOS: offer to move into Applications and clear the
     // quarantine flag, through the system's own prompt when needed.
     await firstRun({ app, dialog, window }).catch(() => false)
+    // Connected before: the system service is installed, so reconnecting asks
+    // for nothing. The first time waits for 连接内网 on the login page.
+    if (network?.snapshot().connectedOnce) void network.connect()
   })
   .catch((error) => {
     dialog.showErrorBox('MX Rig 启动失败', error.message)
@@ -658,7 +1004,9 @@ app.on('before-quit', (event) => {
   if (quitting) return
   event.preventDefault()
   quitting = true
-  Promise.allSettled([stopWorker(), localRunner?.stop(10_000), station?.stop(10_000)]).finally(() =>
+  // The tunnel lives as long as the app: it stops with it (at most 15 s).
+  const tunnel = network ? Promise.race([network.disconnect('shutdown'), new Promise((resolve) => setTimeout(resolve, 15_000))]) : null
+  Promise.allSettled([stopWorker(), localRunner?.stop(10_000), station?.stop(10_000), provingGround?.close(), tunnel]).finally(() =>
     app.quit()
   )
 })

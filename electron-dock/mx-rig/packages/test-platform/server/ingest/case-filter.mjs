@@ -78,6 +78,8 @@ export async function resolveCaseFilter({ store, appId, filter, suiteSlug = null
     caseIds: matchedCaseIds,
     // What every engine understands. compass reads this as `E2E_SPEC`.
     specs: [...specs],
+    // The spec paths that were written as such, not derived from a case id.
+    globs,
     suiteSlug,
   }
 }
@@ -89,10 +91,12 @@ export async function resolveCaseFilter({ store, appId, filter, suiteSlug = null
  * "registered but never ran" — technically true, and it would make `notRun`
  * useless the first time anybody used a filter.
  */
-export function catalogSubsetFor(catalogCases, filter) {
+export function catalogSubsetFor(catalogCases, filter, { byCaseId = false } = {}) {
   if (!filter) return catalogCases
   const ids = new Set(filter.caseIds ?? [])
-  const specs = new Set(filter.specs ?? [])
+  // A suite that selects by case id runs exactly the ids named; only spec
+  // paths written as such bring in whole files.
+  const specs = new Set(byCaseId ? (filter.globs ?? []) : (filter.specs ?? []))
   return catalogCases.filter(
     (entry) => ids.has(entry.caseId) || (entry.specPath && specs.has(entry.specPath)),
   )

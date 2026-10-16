@@ -18,6 +18,13 @@
     "bin/mx-rig.mjs",
     "apps/terminal/**",
     "scripts/design-assets.mjs",
+    "test-packs/*/pack.json",
+    "test-packs/*/README.md",
+    "test-packs/*/reference/**",
+    "test-packs/*/rig-specs/**",
+    "test-packs/proving-ground/**",
+    "!test-packs/**/node_modules/**",
+    "!test-packs/**/artifacts/**",
     "package.json"
   ],
   "asarUnpack": [

@@ -60,8 +60,8 @@ export function requireSecretKey(key) {
     // Fail closed. Storing a test account's password in plaintext because a
     // variable was missing is worse than refusing the request, and refusing is
     // visible at the moment someone sets it up rather than months later.
-    throw new AppError(400, 'secrets_not_configured', '平台未配置 MXT_SECRET_KEY，无法保存密钥', {
-      hint: '生成一个：openssl rand -hex 32，写入 .env.internal 的 MXT_SECRET_KEY 后重新部署。',
+    throw new AppError(400, 'secrets_not_configured', '服务端没有配置加密密钥 MX_RIG_SECRET_KEY，暂时不能保存密钥', {
+      hint: '本机体验由 bash scripts/manage.sh local init 自动生成；部署时用 openssl rand -hex 32 生成，写入 MX_RIG_SECRET_KEY（旧名 MXT_SECRET_KEY）后重启服务。',
     })
   }
   return key

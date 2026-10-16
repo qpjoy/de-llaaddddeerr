@@ -9,6 +9,7 @@ import { deliverPending } from './notify/dispatch.mjs'
 import { KubernetesDispatcher, dispatchQueued, reconcileServerRuns } from './runner/dispatcher.mjs'
 import { startScheduler } from './scheduler.mjs'
 import { MemoryStore } from './store/memory.mjs'
+import { ProjectAccess } from './project-access.mjs'
 
 // Loaded on demand so memory mode — local development and the test suite —
 // runs without the `pg` driver installed at all.
@@ -19,7 +20,8 @@ export async function createStore(config) {
 }
 
 export async function createRuntime(config = loadConfig(), { schedule = true } = {}) {
-  const store = await createStore(config)
+  const projectAccess = new ProjectAccess(await createStore(config))
+  const store = projectAccess.store
   const identity = createIdentity({ store, config })
   const artifacts = new ArtifactStore({
     root: config.artifactsDir,
@@ -39,7 +41,7 @@ export async function createRuntime(config = loadConfig(), { schedule = true } =
   // Per-runtime, so the retention clock is not shared between two servers in
   // one process.
   const retention = { lastSweepAt: 0 }
-  const app = createApp({ store, config, identity, artifacts, runEvents })
+  const app = createApp({ store, config, identity, artifacts, runEvents, projectAccess })
 
   // Dispatching rides the scheduler tick: both are "look at what is due and act
   // on it", and keeping them on one timer means one place can double-fire.
@@ -60,7 +62,7 @@ export async function createRuntime(config = loadConfig(), { schedule = true } =
         },
       })
     : () => {}
-  return { store, app, config, identity, artifacts, dispatcher, runEvents, stopScheduler }
+  return { store, app, config, identity, artifacts, dispatcher, runEvents, stopScheduler, projectAccess }
 }
 
 async function dispatchServerRuns({ store, dispatcher, config, runEvents }) {

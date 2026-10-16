@@ -972,7 +972,7 @@ export async function dispatchQueued({
 
   for (const run of queued) {
     if (activeServerRuns >= maxConcurrentServerRuns) break
-    const suite = await store.getSuite(run.suiteId)
+    const suite = run.workbench?.suite ?? await store.getSuite(run.suiteId)
     if (!suite) continue
     // No image and no command: a Rig station claims these, including ones
     // placed on "the server" (a station registered as `kind: server`).
@@ -983,7 +983,7 @@ export async function dispatchQueued({
     // choice existed carry no value, so the suite still answers for them.
     const runsOn = run.runsOn ?? (suite.runnerKind === 'local' ? 'any-runner' : 'server')
     if (runsOn !== 'server') continue
-    const app = await store.getApp(run.appId)
+    const app = run.workbench?.app ?? await store.getApp(run.appId)
     try {
       const runToken = await issueRunToken(run)
       await store.updateRun(run.id, {

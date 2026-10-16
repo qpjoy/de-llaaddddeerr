@@ -62,7 +62,12 @@ import { hostname } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { PgMissionStore } from './pg-missions.mjs'
 import { PgDocument } from './state-documents.mjs'
+import { CaseBooks, caseBookRoutes } from './case-books.mjs'
+import { WorkbenchExecutions, workbenchExecutionRoutes } from './workbench-executions.mjs'
 import { SharedScheduleState } from './orchestration-schedule.mjs'
+import { TestImplementations, testImplementationRoutes } from './test-implementations.mjs'
+import { TestVersions, runnerTestVersionRoutes, testVersionRoutes } from './test-versions.mjs'
+import { TourVideos, tourVideoRoutes } from './tour-videos.mjs'
 import { InProcessClient } from './in-process-client.mjs'
 import { FileProcedureStore, PgProcedureStore, Procedures } from './procedure-store.mjs'
 import { procedureRoutes } from './procedure-routes.mjs'
@@ -150,14 +155,37 @@ export async function start(env = process.env, options = {}) {
   const settings = await new Settings(
     shared ? new PgDocument(pool, 'settings') : resolve(dataRoot, 'settings.json')
   ).init()
-  const missions = shared
+  const missionStore = shared
     ? await new PgMissionStore(pool, { instance }).init()
     : await new MissionStore(resolve(dataRoot, 'missions')).init()
-  const procedures = new Procedures(
+  const missions = kernel.projectAccess.missions(missionStore)
+  const caseBooks = new CaseBooks((id) => shared
+    ? new PgDocument(pool, `cases-${id.replaceAll('-', '')}`)
+    : resolve(dataRoot, 'case-books', `${id}.json`))
+  const implementations = new TestImplementations((id) => shared
+    ? new PgDocument(pool, `impl-${id.replaceAll('-', '')}`)
+    : resolve(dataRoot, 'implementations', `${id}.json`), caseBooks)
+  const executions = new WorkbenchExecutions({ store: kernel.store, caseBooks })
+  // Published versions of projects' test repositories (docs/23).
+  // Bundles are files on the artifacts volume (shared between replicas); the
+  // version list is a document like the others.
+  // 演示录像 (docs/24 M8c): the latest recording of each tour.
+  const tourVideos = new TourVideos(resolve(kernel.config.artifactsDir, 'tour-videos'), {
+    minFreeBytes: kernel.config.artifactLimits?.minFreeBytes ?? 0
+  })
+  const testVersions = new TestVersions(
+    (key) => (shared ? new PgDocument(pool, `testver-${key}`) : resolve(dataRoot, 'test-versions', `${key}.json`)),
+    {
+      blobRoot: resolve(kernel.config.artifactsDir, 'test-versions'),
+      minFreeBytes: kernel.config.artifactLimits?.minFreeBytes ?? 0,
+      quotaBytes: Number(process.env.MX_RIG_TEST_VERSION_QUOTA_BYTES) > 0 ? Number(process.env.MX_RIG_TEST_VERSION_QUOTA_BYTES) : undefined
+    }
+  )
+  const procedures = new Procedures(kernel.projectAccess.procedures(
     shared
       ? new PgProcedureStore(pool)
       : await new FileProcedureStore(resolve(dataRoot, 'procedures')).init()
-  )
+  ))
   const progress = await new SystemProgress(
     shared ? new PgDocument(pool, 'system-progress') : resolve(dataRoot, 'system-progress.json')
   ).init()
@@ -174,7 +202,7 @@ export async function start(env = process.env, options = {}) {
   let origin
   let sameServer = () => false
   const newRuntime = (principal) => {
-    const client = new InProcessClient({ principal, kernel, settings, gateway })
+    const client = new InProcessClient({ principal, kernel, settings, gateway, caseBooks, missions, executions, implementations })
     return new RigRuntime({
       store: missions,
       client,
@@ -282,7 +310,22 @@ export async function start(env = process.env, options = {}) {
         '/rig/graph-view.js': 'graph-view.js',
         '/rig/style.css': 'style.css',
         '/rig/activity.js': 'activity.js',
+        '/rig/projects.js': 'projects.js',
+        '/rig/test-execution.js': 'test-execution.js',
+        '/rig/test-implementation.js': 'test-implementation.js',
         '/rig/replay.js': 'replay.js',
+        '/rig/routes.js': 'routes.js',
+        '/rig/project-settings.js': 'project-settings.js',
+        '/rig/plans.js': 'plans.js',
+        '/rig/run-detail.js': 'run-detail.js',
+        '/rig/run-model.js': 'run-model.js',
+        '/rig/packs.js': 'packs.js',
+        '/rig/audit.js': 'audit.js',
+        '/rig/checklist.js': 'checklist.js',
+        '/rig/project-model.js': 'project-model.js',
+        '/rig/repository.js': 'repository.js',
+        '/rig/tour.js': 'tour.js',
+        '/rig/tours.js': 'tours.js',
         '/rig/replay.css': 'replay.css',
         // Served from the copy the design sync wrote, so the workbench and the
         // test console cannot end up on two versions of the design system.
@@ -318,6 +361,16 @@ export async function start(env = process.env, options = {}) {
         res.end()
       }
       return
+    }
+    // A runner fetching the published test versions of its run (docs/23 M7b):
+    // they live here, beside the kernel, so this is answered before it.
+    if (path.startsWith('/runner/v1/runs/') && path.includes('/test-versions')) {
+      try {
+        const answer = await runnerTestVersionRoutes({ req, path, token: bearerToken(req), store: kernel.store, versions: testVersions })
+        if (answer) return sendJson(res, 200, answer)
+      } catch (error) {
+        return sendJson(res, error.status || 500, { error: { code: error.code || 'internal_error', message: error.status && error.status < 500 ? error.message : safeMessage(error) } })
+      }
     }
     // Preserve the complete, separately owned test API and classic console.
     if (!path.startsWith('/api/rig/')) {
@@ -383,6 +436,7 @@ export async function start(env = process.env, options = {}) {
         return
       const token = bearerToken(req)
       const principal = await kernel.identity.resolve(token, source)
+      return await kernel.projectAccess.scope(principal, async () => {
       // Another replica may have saved new settings; at most one version
       // check per second per replica.
       await settings.refresh()
@@ -403,6 +457,18 @@ export async function start(env = process.env, options = {}) {
         sendJson(res, 200, { principal })
         return
       }
+      const projectGate = /^\/api\/rig\/v1\/missions\/([a-f0-9-]{36})\/project-access$/.exec(path)
+      if (projectGate && req.method === 'GET') {
+        const row = await missions.get(projectGate[1], principal.id)
+        await kernel.projectAccess.mission(row, 'write')
+        sendJson(res, 200, { allowed: true })
+        return
+      }
+      if (await testImplementationRoutes({ projectAccess: kernel.projectAccess, req, res, path, url, principal, missions, implementations, readJson, sendJson, requireRole })) return
+      if (await caseBookRoutes({ projectAccess: kernel.projectAccess, req, res, path, url, principal, missions, caseBooks, readJson, sendJson, requireRole, store: kernel.store })) return
+      if (await workbenchExecutionRoutes({ projectAccess: kernel.projectAccess, req, res, path, url, principal, missions, executions, readJson, sendJson, requireRole })) return
+      if (await testVersionRoutes({ req, res, path, principal, store: kernel.store, projectAccess: kernel.projectAccess, versions: testVersions, readJson, sendJson, requireRole })) return
+      if (await tourVideoRoutes({ req, res, path, principal, videos: tourVideos, readJson, sendJson, requireRole })) return
       if (path === '/api/rig/v1/config' && req.method === 'GET') {
         sendJson(res, 200, settings.public())
         return
@@ -502,7 +568,9 @@ export async function start(env = process.env, options = {}) {
               timeZone,
               now
             }),
-            missions: missionInsights(recentMissions, { windowDays: days, now, detail: operator })
+            missions: missionInsights(recentMissions, {
+              windowDays: days, now, detail: operator, detailOwner: principal.id
+            })
           },
           sampledRuns: sampled.length,
           sample: { runLimit: 200, caseRunLimit: 40, potentiallyTruncated: runs.length === 200 }
@@ -529,7 +597,8 @@ export async function start(env = process.env, options = {}) {
               runners: runners.map((runner) => ({ ...runner, online: runnerIsOnline(runner) })),
               missions: await missions.list(principal.id),
               config: { ...settings.public(), egress: settings.egress(env) },
-              signals: entry.signals
+              signals: entry.signals,
+              principalId: principal.id
             }),
             progress: entry
           })
@@ -813,6 +882,10 @@ export async function start(env = process.env, options = {}) {
         return
       }
       const runtime = runtimeFor(principal)
+      if (path === '/api/rig/v1/test-tasks' && req.method === 'POST') {
+        sendJson(res, 201, { mission: await runtime.createTestTask(await readJson(req, 16_000)) })
+        return
+      }
       if (path === '/api/rig/v1/missions' && req.method === 'POST') {
         const body = parseBody(missionStartBody, await readJson(req, 16_000))
         sendJson(res, 201, { mission: await runtime.start(body) })
@@ -822,6 +895,7 @@ export async function start(env = process.env, options = {}) {
         path
       )
       if (match && req.method === 'POST') {
+        await kernel.projectAccess.mission(await missions.get(match[1], principal.id), 'write')
         const raw = await readJson(req, 16_000)
         const schema = {
           approve: missionApproveBody,
@@ -839,6 +913,7 @@ export async function start(env = process.env, options = {}) {
         return
       }
       throw new RigError('not_found', '接口不存在', 404)
+      })
     } catch (error) {
       if (!res.headersSent && !res.destroyed)
         sendJson(res, error.status || 500, {
@@ -878,7 +953,13 @@ export async function start(env = process.env, options = {}) {
         .catch((error) => console.error(`任务心跳失败：${safeMessage(error)}`))
     }, HEARTBEAT_MS).unref()
     sweeper = setInterval(() => {
-      missions.sweep().catch((error) => console.error(`任务回收失败：${safeMessage(error)}`))
+      missions.sweep()
+        .then((ids) => {
+          for (const id of ids)
+            for (const runtime of [...runtimes.values(), scheduleRuntime, hookRuntime])
+              if (runtime?.interrupt(id)) break
+        })
+        .catch((error) => console.error(`任务回收失败：${safeMessage(error)}`))
     }, SWEEP_MS).unref()
   }
   if (options.schedule ?? true)

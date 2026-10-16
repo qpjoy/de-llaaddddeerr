@@ -1,3 +1,4 @@
+import { ProjectAccess, initialAccess } from './project-access.mjs'
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { extname, join, resolve, sep } from 'node:path'
@@ -41,7 +42,9 @@ import { enqueueForRun } from './notify/dispatch.mjs'
 import { NOTIFY_EVENTS, channelWants, composeDebrief } from './notify/events.mjs'
 import { catalogSubsetFor, parseCaseFilter, resolveCaseFilter } from './ingest/case-filter.mjs'
 import { compareWithCatalog, normalizeSourceRef, normalizeSummary } from './ingest/summary.mjs'
+import { reconcileWorkbench } from './ingest/workbench.mjs'
 import { buildCompassPlan, DEFAULT_COMPASS_REPO } from './onboarding/compass.mjs'
+import { buildPackPlan, describePack, listPacks, loadPack, PUBLISHED_REPO, publishedRepo, WORKSPACE_REPO, workspaceRepo } from './onboarding/packs.mjs'
 import { renderReport } from './report.mjs'
 import {
   decryptSecret,
@@ -84,6 +87,8 @@ const CATALOG_COVERAGE_STATES = ['automated', 'manual-witness', 'unsupported', '
 // runner. There is no command and no container image for it.
 const ENGINES = ['cypress', 'playwright', 'playwright-electron', 'pytest', 'k6', 'generic', 'rig-procedure']
 const PROCEDURE_SUITE = 'rig-procedures'
+const WORKSPACE_SUITE = 'rig-tests-web'
+const PUBLISHED_SUITE = 'rig-tests-web-published'
 const SURFACES = ['web', 'electron']
 const RUNNER_KINDS = ['server', 'local']
 // How long a machine has to redeem an enrolment code.
@@ -91,6 +96,8 @@ const RUNNER_KINDS = ['server', 'local']
 // Short because the command carrying it ends up in shell history and in chat
 // messages; long enough that "let me find a terminal" is not a race.
 const ENROLLMENT_TTL_MS = 15 * 60_000
+// Events per answer of GET /api/v1/runs/:runId/progress.
+const PROGRESS_PAGE = 500
 // Where the system under test comes from. `self` means the suite starts its own
 // target — 罗盘's `pnpm e2e:local` builds the SPA and serves it on loopback — so
 // asking a task for a target URL would be asking for a value nothing reads.
@@ -159,6 +166,8 @@ function gitRemote(body, name, { required = false, fallback = null } = {}) {
   }
 
   if (/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+$/u.test(value)) return value
+  // The project's QA repository on the machine that holds its workspace.
+  if (WORKSPACE_REPO.test(value) || PUBLISHED_REPO.test(value)) return value
   let parsed
   try {
     parsed = new URL(value)
@@ -174,6 +183,38 @@ function gitRemote(body, name, { required = false, fallback = null } = {}) {
     })
   }
   return value
+}
+
+/** The parts of an execution plan an audit record keeps. */
+function planFacts(task) {
+  return {
+    name: task.name,
+    suiteId: task.suiteId,
+    runsOn: task.runsOn ?? null,
+    runnerId: task.runnerId ?? null,
+    profile: task.profile,
+    track: task.track,
+    targetUrl: task.targetUrl ?? null,
+    caseFilter: task.caseFilter ?? null,
+    scheduleKind: task.scheduleKind,
+    cronExpr: task.cronExpr ?? null,
+    timezone: task.timezone ?? null,
+    enabled: task.enabled !== false,
+  }
+}
+
+/**
+ * What a suite needs from a machine, and how it selects cases. `os` limits the
+ * machines that may take it; `caseSelection: 'case-id'` says the suite runs
+ * exactly the case ids a filter names (rig-specs do), so a filtered run is
+ * measured against those ids rather than everything in the same spec files.
+ */
+function suiteRequirements(value) {
+  const requirements = {}
+  const os = stringArray(value?.os, { maxItems: 3, maxLength: 12 })
+  if (os.length > 0) requirements.os = os
+  if (value?.caseSelection === 'case-id') requirements.caseSelection = 'case-id'
+  return requirements
 }
 
 function parseCatalogCoverage(value) {
@@ -273,7 +314,10 @@ export function createApp({
   artifacts,
   logger = console,
   runEvents = new RunEventBus(),
+  projectAccess,
 }) {
+  projectAccess ??= new ProjectAccess(store)
+  store = projectAccess.store
   const recordRunEvents = createRunEventRecorder({ store, bus: runEvents })
   let compassReconcileInFlight = false
 
@@ -358,7 +402,7 @@ export function createApp({
       'writesData',
     ]
     const suites = new Map((await store.listSuites(app.id)).map((suite) => [suite.slug, suite]))
-    for (const desired of plan.suites) {
+    for (const { ownSource, ...desired } of plan.suites) {
       const normalized = {
         ...desired,
         appId: app.id,
@@ -374,7 +418,9 @@ export function createApp({
         retryPolicy: desired.retryPolicy ?? {},
         secretRefs: desired.secretRefs ?? [],
         writesData: Boolean(desired.writesData),
-        ...(desired.surface === 'web' ? webSource : {}),
+        // A web suite follows the app's source unless it names its own (a
+        // pack's workspace suite checks out the project's QA repository).
+        ...(desired.surface === 'web' && !ownSource ? webSource : {}),
       }
       let current = suites.get(desired.slug)
       if (!current) {
@@ -445,12 +491,16 @@ export function createApp({
         timezone,
         claimWindowMinutes: 720,
         runsOn: desired.runsOn ?? null,
-        runnerId: null,
+        runnerId: desired.runsOn === 'pinned-runner' ? (desired.runnerId ?? null) : null,
         caseFilter: desired.caseFilter ?? null,
         enabled: true,
         createdBy: principal.id,
       }
       normalized.nextRunAt = computeNextRunAt(normalized)
+      if (normalized.runsOn) {
+        const runner = normalized.runnerId ? await store.getRunner(normalized.runnerId) : null
+        assertPlacementPossible({ runsOn: normalized.runsOn, suite, runner, runnerMatches: runnerMatchesSuite })
+      }
 
       let current = tasks.find((task) => task.name === desired.name)
       if (!current) {
@@ -477,13 +527,18 @@ export function createApp({
 
     const changed = summary.created.length + summary.updated.length
     const message = changed
-      ? `Compass 已对齐：新建 ${summary.created.length} 项，更新 ${summary.updated.length} 项；未启动测试。`
-      : 'Compass 配置已经是最新；未启动测试。'
+      ? `Compass 历史回归/冒烟配置已对齐：新建 ${summary.created.length} 项，更新 ${summary.updated.length} 项；未启动测试，不代表双端全量验收。`
+      : 'Compass 历史回归/冒烟配置已经是最新；未启动测试，不代表双端全量验收。'
     return {
       app,
       suites: plan.suites.map((suite) => suites.get(suite.slug)),
       tasks: reconciledTasks,
       electronConfigured: plan.electronConfigured,
+      acceptance: {
+        scope: 'legacy-regression-and-smoke',
+        fullAcceptance: false,
+        prerequisites: ['Web 分支必须实际包含 e2e:local；默认 public 模板不能套用到缺少该脚本的分支。', 'Electron 模板仅包含两个启动用例和一个登录用例。'],
+      },
       summary,
       message,
     }
@@ -537,6 +592,42 @@ export function createApp({
       secretRefs: [],
       writesData: false,
     })
+  }
+
+  /**
+   * The suite that runs a project's own test repository on the machine that
+   * holds it (docs/23). A fixed definition, like the procedure suite: nobody
+   * chooses its command, so a test engineer may create it.
+   */
+  async function ensureWorkspaceSuite(app, principal, request, { published = false } = {}) {
+    const slug = published ? PUBLISHED_SUITE : WORKSPACE_SUITE
+    const definition = {
+      displayName: published ? '已发布测试版本 · Web' : '本机测试仓库 · Web',
+      engine: 'playwright',
+      surface: 'web',
+      runnerKind: 'local',
+      runnerImage: null,
+      workingDir: null,
+      targetMode: 'external',
+      kind: 'test',
+      repoUrl: published ? publishedRepo(app.slug) : workspaceRepo(app.slug),
+      // A published plan runs the latest version unless a run names one.
+      defaultBranch: published ? 'latest' : 'main',
+      artifactPath: null,
+      requirements: { caseSelection: 'case-id' },
+      command: ['npx', 'playwright', 'test'],
+      retryPolicy: { maxAttempts: 1 },
+      secretRefs: [],
+      writesData: false,
+    }
+    const existing = (await store.listSuites(app.id)).find((entry) => entry.slug === slug)
+    if (existing) {
+      const patch = changedFields(existing, definition, Object.keys(definition))
+      return Object.keys(patch).length ? store.updateSuite(existing.id, patch) : existing
+    }
+    const suite = await store.createSuite({ appId: app.id, slug, ...definition })
+    await recordAudit(store, { principal, request, action: 'suite.create', resourceType: 'suite', resourceId: suite.id, appId: app.id, after: { slug: suite.slug, fixed: published ? 'published' : 'workspace' } })
+    return suite
   }
 
   /** A suite of this app, addressed by slug or by id — whichever the caller has. */
@@ -644,7 +735,7 @@ export function createApp({
     const capable = runners.filter((entry) => runnerIsOnline(entry) && runnerMatchesSuite(entry, suite))
     return capable.length > 0
       ? `已排队，${capable.length} 台在线执行机能接这条套件。`
-      : '已排队，但现在没有能跑这条套件的在线执行机。到「执行机」页面把一台电脑接进来，它一上线就会接手。'
+      : '已排队，但现在没有能跑这条套件的在线执行机。到「执行机与工位」页面接入一台电脑，它一上线就会接手。'
   }
 
   /**
@@ -856,7 +947,7 @@ export function createApp({
       pattern: '/api/v1',
       auth: 'none',
       handler: async () => {
-        const apps = await store.listApps()
+        const apps = (await store.listApps()).filter((app) => !app.access || app.access.visibility === 'legacy-shared')
         return {
           status: 200,
           body: {
@@ -878,6 +969,7 @@ export function createApp({
               runs: '/api/v1/runs',
               report: '/api/v1/runs/:runId/report',
               liveEvents: '/api/v1/runs/:runId/events',
+              progress: '/api/v1/runs/:runId/progress',
             },
           },
         }
@@ -1136,17 +1228,99 @@ export function createApp({
       },
     },
 
+    // -- acceptance packs (docs/21 §5) ---------------------------------------
+    {
+      method: 'GET',
+      pattern: '/api/v1/onboarding/packs',
+      handler: async () => ({ status: 200, body: { packs: listPacks().map(describePack) } }),
+    },
+    {
+      method: 'POST',
+      pattern: '/api/v1/onboarding/packs/:pack:apply',
+      handler: async ({ params, principal, body, request }) => {
+        requireRole(principal, 'admin')
+        const unknown = Object.keys(body ?? {}).filter((key) => key !== 'runnerId')
+        if (unknown.length > 0) {
+          throw new AppError(400, 'invalid_request', `不支持的配置项：${unknown.join('、')}`, {
+            hint: '验收包的执行方式、命令和用例由包本身固定；这里只能指定持有工作区的执行机。',
+          })
+        }
+        const pack = loadPack(params.pack)
+        if (!pack) throw new AppError(404, 'pack_not_found', '没有这个验收包')
+        const runnerId = optionalString(body, 'runnerId', { maxLength: 64 })
+        if (runnerId && !(await store.getRunner(runnerId))) {
+          throw new AppError(400, 'runner_not_found', '指定的执行机不存在')
+        }
+        const plan = buildPackPlan(pack, { runnerId })
+        if (compassReconcileInFlight) {
+          throw new AppError(409, 'onboarding_busy', '另一位管理员正在建立项目，请稍后重试')
+        }
+        compassReconcileInFlight = true
+        try {
+          const result = await reconcileCompass(plan, principal)
+          result.summary.warnings.push(...plan.warnings)
+          await recordAudit(store, {
+            principal,
+            request,
+            action: 'onboarding.pack_apply',
+            resourceType: 'onboarding',
+            resourceId: result.app.id,
+            appId: result.app.id,
+            after: { pack: pack.id, version: pack.version, runnerId: runnerId ?? null, summary: result.summary },
+          })
+          const changed = result.summary.created.length + result.summary.updated.length
+          return {
+            status: 200,
+            body: {
+              app: result.app,
+              suites: result.suites,
+              tasks: result.tasks,
+              summary: result.summary,
+              source: pack.source,
+              boundary: pack.boundary ?? null,
+              message: changed
+                ? `已按验收包「${pack.title}」建立：新建 ${result.summary.created.length} 项，更新 ${result.summary.updated.length} 项；没有开始任何测试。`
+                : `验收包「${pack.title}」的配置已经是最新；没有开始任何测试。`,
+            },
+          }
+        } finally {
+          compassReconcileInFlight = false
+        }
+      },
+    },
+
     // -- apps & suites -------------------------------------------------------
     { method: 'GET', pattern: '/api/v1/apps', handler: async () => ({ status: 200, body: { apps: await store.listApps() } }) },
+    {
+      method: 'GET', pattern: '/api/v1/apps/:app/access',
+      handler: async ({ params, principal }) => {
+        const app = await requireApp(params.app)
+        return { status: 200, body: { access: await projectAccess.policy(app.id, principal) } }
+      },
+    },
+    {
+      method: 'POST', pattern: '/api/v1/apps/:app/access',
+      handler: async ({ params, body, principal }) => {
+        requireRole(principal, 'operator')
+        const app = await requireApp(params.app)
+        await projectAccess.change(app.id, body, principal)
+        return { status: 200, body: { access: await projectAccess.policy(app.id, principal) } }
+      },
+    },
     {
       method: 'POST',
       pattern: '/api/v1/apps',
       handler: async ({ body, principal, request }) => {
         requireRole(principal, 'admin')
+        const sourceDirectory = optionalString(body, 'sourceDirectory', { maxLength: 2000 })
+        if (sourceDirectory && (!/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(sourceDirectory) || /[\r\n\0]/.test(sourceDirectory)))
+          throw new AppError(400, 'invalid_request', '项目目录必须是绝对路径')
         const created = await store.createApp({
+          access: initialAccess(principal, body.visibility),
           slug: slug(body, 'slug'),
           displayName: requiredString(body, 'displayName'),
           repoUrl: optionalString(body, 'repoUrl', { maxLength: 500 }),
+          sourceDirectory,
           // Which ref a run checks out when the run itself does not name one.
           // Named per app so that "test the release branch" and "test main"
           // are two apps' worth of configuration rather than two codebases.
@@ -1262,9 +1436,7 @@ export function createApp({
       handler: async ({ params, body, principal, request }) => {
         requireRole(principal, 'admin')
         const app = await requireApp(params.app)
-        const requirements = {}
-        const os = stringArray(body.requirements?.os, { maxItems: 3, maxLength: 12 })
-        if (os.length > 0) requirements.os = os
+        const requirements = suiteRequirements(body.requirements)
         const suite = await store.createSuite({
           appId: app.id,
           slug: slug(body, 'slug'),
@@ -1347,12 +1519,7 @@ export function createApp({
         if ('command' in body) put('command', suiteCommand(body.command))
         if ('secretRefs' in body) put('secretRefs', stringArray(body.secretRefs, { maxItems: 10, maxLength: 120 }))
         if ('writesData' in body) put('writesData', body.writesData === true)
-        if ('requirements' in body) {
-          const requirements = {}
-          const os = stringArray(body.requirements?.os, { maxItems: 3, maxLength: 12 })
-          if (os.length > 0) requirements.os = os
-          put('requirements', requirements)
-        }
+        if ('requirements' in body) put('requirements', suiteRequirements(body.requirements))
         if ('retryPolicy' in body) {
           put('retryPolicy', {
             maxAttempts: Math.min(3, Math.max(1, Number(body.retryPolicy?.maxAttempts) || 1)),
@@ -1514,6 +1681,28 @@ export function createApp({
     },
     {
       method: 'POST',
+      pattern: '/api/v1/apps/:app/workspace-suite',
+      handler: async ({ params, principal, request }) => {
+        requireRole(principal, 'operator')
+        const app = await requireApp(params.app)
+        await projectAccess.require(app.id, 'write', principal)
+        return { status: 200, body: { suite: await ensureWorkspaceSuite(app, principal, request) } }
+      },
+    },
+    {
+      // The same tests, as published to the service: any runner can run them,
+      // so a team's scheduled plan does not depend on one person's computer.
+      method: 'POST',
+      pattern: '/api/v1/apps/:app/published-suite',
+      handler: async ({ params, principal, request }) => {
+        requireRole(principal, 'operator')
+        const app = await requireApp(params.app)
+        await projectAccess.require(app.id, 'write', principal)
+        return { status: 200, body: { suite: await ensureWorkspaceSuite(app, principal, request, { published: true }) } }
+      },
+    },
+    {
+      method: 'POST',
       pattern: '/api/v1/apps/:app/procedure-suite',
       // The suite a regression task of Rig procedures is created on. Made on
       // first use; operators may schedule procedures, so operators may ask.
@@ -1654,7 +1843,7 @@ export function createApp({
     {
       method: 'POST',
       pattern: '/api/v1/tasks',
-      handler: async ({ body, principal }) => {
+      handler: async ({ body, principal, request }) => {
         requireRole(principal, 'operator')
         const app = await requireApp(requiredString(body, 'app', { maxLength: 64 }))
         const suiteSlug = requiredString(body, 'suite', { maxLength: 96 })
@@ -1713,13 +1902,15 @@ export function createApp({
           createdBy: principal.id,
         }
         draft.nextRunAt = computeNextRunAt(draft)
-        return { status: 201, body: { task: await store.createTask(draft) } }
+        const created = await store.createTask(draft)
+        await recordAudit(store, { principal, request, action: 'task.create', resourceType: 'task', resourceId: created.id, appId: app.id, after: planFacts(created) })
+        return { status: 201, body: { task: created } }
       },
     },
     {
       method: 'PATCH',
       pattern: '/api/v1/tasks/:taskId',
-      handler: async ({ params, body, principal }) => {
+      handler: async ({ params, body, principal, request }) => {
         requireRole(principal, 'operator')
         const task = await store.getTask(params.taskId)
         if (!task) throw new AppError(404, 'task_not_found', '找不到该任务')
@@ -1753,16 +1944,22 @@ export function createApp({
         // Any change to schedule or enablement invalidates the stored fire time;
         // recompute from the merged task, never from the patch alone.
         patch.nextRunAt = computeNextRunAt({ ...task, ...patch })
-        return { status: 200, body: { task: await store.updateTask(task.id, patch) } }
+        const updated = await store.updateTask(task.id, patch)
+        // Who turned a schedule on, or pointed a plan at another machine, is
+        // the question an audit trail exists to answer.
+        await recordAudit(store, { principal, request, action: 'task.update', resourceType: 'task', resourceId: task.id, appId: task.appId, before: planFacts(task), after: planFacts(updated) })
+        return { status: 200, body: { task: updated } }
       },
     },
     {
       method: 'DELETE',
       pattern: '/api/v1/tasks/:taskId',
-      handler: async ({ params, principal }) => {
+      handler: async ({ params, principal, request }) => {
         requireRole(principal, 'operator')
+        const task = await store.getTask(params.taskId)
         const deleted = await store.deleteTask(params.taskId)
         if (!deleted) throw new AppError(404, 'task_not_found', '找不到该任务')
+        await recordAudit(store, { principal, request, action: 'task.delete', resourceType: 'task', resourceId: params.taskId, appId: task?.appId ?? null, before: task ? planFacts(task) : null })
         return { status: 204, body: null }
       },
     },
@@ -1970,7 +2167,7 @@ export function createApp({
         if (run.status !== 'running') {
           throw new AppError(409, 'run_not_running', `这次执行是「${run.status}」，不再下发密钥`)
         }
-        const suite = await store.getSuite(run.suiteId)
+        const suite = run.workbench?.suite ?? await store.getSuite(run.suiteId)
         return {
           status: 200,
           body: {
@@ -2180,7 +2377,7 @@ export function createApp({
         const run = await requireRun(params.runId)
         const [app, suite, task] = await Promise.all([
           store.getApp(run.appId),
-          run.suiteId ? store.getSuite(run.suiteId) : null,
+          run.workbench?.suite ?? (run.suiteId ? store.getSuite(run.suiteId) : null),
           run.taskId ? store.getTask(run.taskId) : null,
         ])
         return {
@@ -2218,6 +2415,22 @@ export function createApp({
       handler: async ({ params }) => {
         await requireRun(params.runId)
         return { status: 200, body: { artifacts: await artifacts.list(params.runId) } }
+      },
+    },
+    {
+      // The same timeline as /events, a page at a time, for a client that
+      // polls: the desktop workbench sends every request through its main
+      // process, which answers with JSON and does not relay a stream.
+      method: 'GET',
+      pattern: '/api/v1/runs/:runId/progress',
+      handler: async ({ params, url }) => {
+        const run = await requireRun(params.runId)
+        const afterSeq = Math.max(0, Math.floor(Number(url.searchParams.get('afterSeq'))) || 0)
+        const page = await store.listRunEvents(run.id, { afterSeq, limit: PROGRESS_PAGE + 1 })
+        return {
+          status: 200,
+          body: { status: run.status, events: page.slice(0, PROGRESS_PAGE), more: page.length > PROGRESS_PAGE },
+        }
       },
     },
     {
@@ -2367,7 +2580,7 @@ export function createApp({
         if (!enrollment) throw new AppError(401, 'enrollment_invalid', '接入码无效')
         if (enrollment.usedAt) {
           throw new AppError(409, 'enrollment_used', '这个接入码已经用过了', {
-            hint: '一个码只能接一台机器。回到「执行机」页面再点一次「把这台电脑变成执行机」。',
+            hint: '一个码只能接一台机器。回到「执行机与工位」页面再点一次「接入另一台电脑」。',
           })
         }
         if (new Date(enrollment.expiresAt) <= new Date()) {
@@ -2474,7 +2687,7 @@ export function createApp({
         }
         await store.touchRunner(runner.id, 'busy')
         const { run, suite } = claimed
-        const app = await store.getApp(run.appId)
+        const app = run.workbench?.app ?? await store.getApp(run.appId)
         // The first thing the run page can show. It is written by the server
         // rather than reported by the runner on purpose: a runner that never
         // reports anything else still produces a timeline that starts with
@@ -2633,6 +2846,8 @@ export function createApp({
    * `Last-Event-ID`, and `web/` stays a directory with no build step.
    */
   async function streamRunEvents({ run, request, response, url }) {
+    const principal = projectAccess.context.getStore()
+    let deliveries = Promise.resolve()
     const fromHeader = Number(request.headers['last-event-id'])
     const fromQuery = Number(url.searchParams.get('lastEventId'))
     let cursor = 0
@@ -2648,6 +2863,7 @@ export function createApp({
       // which is worse than not having it.
       'x-accel-buffering': 'no',
     })
+    response.flushHeaders?.()
 
     let closed = false
     let timer = null
@@ -2658,15 +2874,14 @@ export function createApp({
       if (timer) clearInterval(timer)
     }
     const write = (event) => {
-      if (closed) return
-      cursor = Math.max(cursor, event.seq)
-      try {
-        response.write(
-          `id: ${event.seq}\nevent: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`,
-        )
-      } catch {
-        stop()
-      }
+      deliveries = deliveries.then(async () => {
+        if (closed || event.seq <= cursor) return
+        await projectAccess.require(run.appId, 'read', principal)
+        if (closed) return
+        cursor = event.seq
+        response.write(`id: ${event.seq}\nevent: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`)
+      }).catch(() => { stop(); response.end() })
+      return deliveries
     }
 
     // Subscribing before reading the backlog, and holding what arrives in
@@ -2685,7 +2900,7 @@ export function createApp({
         // The run just ended. Closing here rather than on the next heartbeat is
         // the difference between the page showing its result immediately and
         // sitting on a finished run for another fifteen seconds.
-        if (event.kind === 'run.finished') queueMicrotask(() => finish(event.payload?.status ?? 'finished'))
+        if (event.kind === 'run.finished') deliveries.then(() => finish(event.payload?.status ?? 'finished'))
       }
     })
 
@@ -2703,9 +2918,9 @@ export function createApp({
     }
 
     for (const event of await store.listRunEvents(run.id, { afterSeq: cursor, limit: RUN_EVENT_CAP })) {
-      write(event)
+      await write(event)
     }
-    for (const event of buffered) if (event.seq > cursor) write(event)
+    for (const event of buffered) if (event.seq > cursor) await write(event)
     live = true
 
     if (TERMINAL_RUN_STATUS.includes(run.status)) {
@@ -2716,9 +2931,11 @@ export function createApp({
     timer = setInterval(async () => {
       if (closed) return
       try {
+        await projectAccess.require(run.appId, 'read', principal)
         response.write(': ping\n\n')
       } catch {
         stop()
+        response.end()
         return
       }
       // Re-read the run rather than waiting for a `run.finished` event: a
@@ -2729,7 +2946,7 @@ export function createApp({
       const current = await store.getRun(run.id).catch(() => null)
       if (!current || TERMINAL_RUN_STATUS.includes(current.status)) {
         for (const event of await store.listRunEvents(run.id, { afterSeq: cursor, limit: 500 })) {
-          write(event)
+          await write(event)
         }
         finish(current?.status ?? 'unknown')
       }
@@ -2755,7 +2972,7 @@ export function createApp({
         store.listAllSteps(run.id),
         artifacts.list(run.id),
         store.getApp(run.appId),
-        run.suiteId ? store.getSuite(run.suiteId) : null,
+        run.workbench?.suite ?? (run.suiteId ? store.getSuite(run.suiteId) : null),
       ])
       const html = renderReport({
         run,
@@ -2825,7 +3042,7 @@ export function createApp({
         headers: {},
         socket: { remoteAddress: source },
       }
-      const result = await route.handler({ params, url, request, body: body ?? {}, principal })
+      const result = await projectAccess.scope(principal, () => route.handler({ params, url, request, body: body ?? {}, principal }))
       if (result.status >= 400) {
         throw new AppError(
           result.status,
@@ -2835,7 +3052,7 @@ export function createApp({
       }
       // A JSON round trip, so the caller gets exactly what an HTTP client
       // would have: plain data, no shared references into the store.
-      return result.status === 204 ? null : JSON.parse(JSON.stringify(result.body))
+      return result.status === 204 ? null : JSON.parse(JSON.stringify(publicRunResult(result.body)))
     }
     throw new AppError(404, 'not_found', '没有这个接口')
   }
@@ -2874,12 +3091,12 @@ export function createApp({
         if (!route.rawBody && ['POST', 'PATCH', 'PUT'].includes(request.method)) {
           context.body = await readJson(request)
         }
-        const result = await route.handler(context)
+        const result = await projectAccess.scope(context.principal, () => route.handler(context))
         if (result.status === 204) {
           response.writeHead(204).end()
           return
         }
-        sendJson(response, result.status, result.body, result.headers ?? {})
+        sendJson(response, result.status, publicRunResult(result.body), result.headers ?? {})
         return
       }
 
@@ -2887,8 +3104,8 @@ export function createApp({
         // Reports and artifacts stream or render HTML rather than returning
         // JSON, so they sit outside the route table — but they authenticate
         // first, before any work or any bytes.
-        await identity.resolve(bearerToken(request), directClientAddress(request))
-        if (await handleSpecial(request, response, url)) return
+        const principal = await identity.resolve(bearerToken(request), directClientAddress(request))
+        if (await projectAccess.scope(principal, () => handleSpecial(request, response, url))) return
       }
 
       // The package download also streams, but it is authenticated as a machine
@@ -2954,7 +3171,7 @@ set -eu
 
 MXT_SERVER="\${MXT_SERVER:-${base}}"
 if [ -z "\${MXT_CODE:-}" ]; then
-  echo "缺少 MXT_CODE。到平台的「执行机」页面点「把这台电脑变成执行机」拿一个接入码。" >&2
+  echo "缺少 MXT_CODE。到平台的「执行机与工位」页面点「接入另一台电脑」拿一个接入码。" >&2
   exit 1
 fi
 
@@ -3000,7 +3217,7 @@ $ErrorActionPreference = 'Stop'
 
 $server = if ($env:MXT_SERVER) { $env:MXT_SERVER } else { '${base}' }
 if (-not $env:MXT_CODE) {
-  Write-Error "缺少 MXT_CODE。到平台的「执行机」页面点「把这台电脑变成执行机」拿一个接入码。"
+  Write-Error "缺少 MXT_CODE。到平台的「执行机与工位」页面点「接入另一台电脑」拿一个接入码。"
   exit 1
 }
 
@@ -3101,6 +3318,20 @@ async function serveStatic(request, response, url) {
  * `scripts/e2e-run.mjs` reads those names, so the platform speaks them too
  * rather than asking that repository to rename anything.
  */
+// Mission case text is owner-private. Shared test APIs expose execution metadata only.
+function publicRunResult(body) {
+  const present = (run) => {
+    if (!run?.workbench) return run
+    const { missionId, revision, platform, executionScope, planHash } = run.workbench
+    return { ...run, workbench: { missionId, revision, platform, executionScope, planHash } }
+  }
+  if (!body || typeof body !== 'object') return body
+  return { ...body,
+    ...(body.run ? { run: present(body.run) } : {}),
+    ...(Array.isArray(body.runs) ? { runs: body.runs.map(present) } : {})
+  }
+}
+
 export function runnerEnv({ run, suite, app, config, caseFilter = null }) {
   const artifactsRoot = `${config.artifactsDir}/runs`
   const artifactsDir = `${artifactsRoot}/${run.id}`
@@ -3219,7 +3450,7 @@ export async function completeRun({ store, artifacts, run, body, config = null, 
   // through the test pipeline would record "0 tests" and a catalog report
   // claiming every registered case went unexecuted — true, meaningless, and it
   // would poison the drift numbers for the suites that do test things.
-  const runSuite = run.suiteId ? await store.getSuite(run.suiteId) : null
+  const runSuite = run.workbench?.suite ?? (run.suiteId ? await store.getSuite(run.suiteId) : null)
   if (runSuite?.kind === 'build') {
     // Same validation as the test path: a sha the runner did not actually check
     // out is worse than none, so it goes through the same normaliser rather
@@ -3251,7 +3482,7 @@ export async function completeRun({ store, artifacts, run, body, config = null, 
   // old value no longer decrypts.
   if (config?.secretKey) {
     try {
-      const suite = await store.getSuite(run.suiteId)
+      const suite = run.workbench?.suite ?? await store.getSuite(run.suiteId)
       const issued = Object.values(
         await resolveSuiteSecrets({ store, key: config.secretKey, suite, appId: run.appId }),
       )
@@ -3274,8 +3505,12 @@ export async function completeRun({ store, artifacts, run, body, config = null, 
   // nothing is exactly the kind of thing that should not be able to hide from
   // every run by being unassigned.
   const suiteSlug = runSuite?.slug ?? null
+  // A reference case (an old case kept for its intent, docs/21 §5) is never
+  // part of what a run is measured against.
   const catalogCases = (await store.listCases(run.appId)).filter(
-    (entry) => !entry.suiteSlug || !suiteSlug || entry.suiteSlug === suiteSlug,
+    (entry) =>
+      entry.automationState !== 'reference' &&
+      (!entry.suiteSlug || !suiteSlug || entry.suiteSlug === suiteSlug),
   )
   // A run that was asked for three cases is measured against those three.
   // Comparing it with the whole catalog would report the rest as "registered
@@ -3292,8 +3527,10 @@ export async function completeRun({ store, artifacts, run, body, config = null, 
     scope = new Set(normalized.cases.map((entry) => entry.caseId))
   const inScope = scope
     ? catalogCases.filter((entry) => scope.has(entry.caseId))
-    : catalogSubsetFor(catalogCases, filter)
-  const { cases, catalog } = compareWithCatalog(inScope, normalized.cases, {
+    : catalogSubsetFor(catalogCases, filter, { byCaseId: runSuite?.requirements?.caseSelection === 'case-id' })
+  const { cases, catalog } = run.workbench
+    ? reconcileWorkbench(run.workbench, normalized)
+    : compareWithCatalog(inScope, normalized.cases, {
     // A suite may reconcile against its own full catalog and report every case
     // it knows about — compass does. Those extra entries are registered cases
     // outside this run's scope, not unknown ones.

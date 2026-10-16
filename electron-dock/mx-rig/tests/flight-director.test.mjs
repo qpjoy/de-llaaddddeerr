@@ -82,7 +82,7 @@ test('a model draft is held to the same rules, and cannot grant itself anything'
   assert.deepEqual(spec.authorize, { dispatch: false }, 'nor pre-authorise its dispatches')
   const invented = structuredClone(modelPlan)
   invented.nodes[1].taskId = 'tsk_made_up'
-  assert.throws(() => checkDraft(JSON.stringify(invented), { tasks }), /不存在的测试计划/)
+  assert.throws(() => checkDraft(JSON.stringify(invented), { tasks }), /不存在的执行计划/)
   assert.throws(() => checkDraft('这不是 JSON', { tasks }), /不是 JSON/)
 })
 
@@ -166,6 +166,14 @@ test('the draft route answers with a plan and the graph it compiles to', async (
   assert.equal(draft.spec.nodes.find((node) => node.type === 'flight').taskId, task.body.task.id)
   assert.ok(draft.graph.nodes.some((node) => node.name === 'n_static_fire__wait'))
 
+  // Check schema rejection while idle, independently of the job completing its final save.
+  const invalid = await api('/api/rig/v1/missions', {
+    mode: 'orchestration',
+    goal: 'x',
+    spec: { key: 'bad', nodes: [{ id: 'a', type: 'shell' }] }
+  })
+  assert.equal(invalid.status, 400)
+
   // Run once, as drafted: the dispatch still waits for a person.
   const started = await api('/api/rig/v1/missions', {
     mode: 'orchestration',
@@ -186,11 +194,4 @@ test('the draft route answers with a plan and the graph it compiles to', async (
   assert.equal(row.flight.verdict, 'scrubbed')
   assert.match(row.report.markdown, /SCRUB/)
   assert.equal((await api('/api/v1/runs')).body.runs.length, 0)
-
-  const invalid = await api('/api/rig/v1/missions', {
-    mode: 'orchestration',
-    goal: 'x',
-    spec: { key: 'bad', nodes: [{ id: 'a', type: 'shell' }] }
-  })
-  assert.equal(invalid.status, 400)
 })

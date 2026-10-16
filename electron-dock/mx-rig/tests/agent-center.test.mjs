@@ -44,7 +44,7 @@ test('the tool catalogue reports effect, surface and whether Internal allows it'
   const { api } = await fixture(t)
   const { status, body } = await api('/api/rig/v1/tools')
   assert.equal(status, 200)
-  assert.equal(body.tools.length, 36)
+  assert.equal(body.tools.length, 40)
   // The project directory exists only in a terminal: reading it ships on for
   // new deployments, running or changing things waits for an admin.
   const workspace = Object.fromEntries(

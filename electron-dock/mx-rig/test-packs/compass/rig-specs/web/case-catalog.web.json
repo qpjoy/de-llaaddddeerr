@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 2,
+  "application": "luopan",
+  "catalogFile": "rig-specs/web/case-catalog.web.json",
+  "surface": "web",
+  "suite": "compass-web-snapshot",
+  "executionMode": "snapshot-mock",
+  "cases": [
+    {
+      "id": "CPS-WEB-AUTH-001",
+      "title": "未登录打开首页时进入登录页",
+      "priority": "P0",
+      "tags": [
+        "登录",
+        "主路径"
+      ],
+      "spec": "web/auth.spec.mjs",
+      "coverageMode": "automated-browser",
+      "automationState": "implemented"
+    },
+    {
+      "id": "CPS-WEB-AUTH-002",
+      "title": "账号密码加滑块验证后登录，进入首页",
+      "priority": "P0",
+      "tags": [
+        "登录",
+        "主路径"
+      ],
+      "spec": "web/auth.spec.mjs",
+      "coverageMode": "automated-browser",
+      "automationState": "implemented"
+    },
+    {
+      "id": "CPS-WEB-AUTH-003",
+      "title": "密码错误时提示并停留在登录页",
+      "priority": "P1",
+      "tags": [
+        "登录",
+        "异常提示"
+      ],
+      "spec": "web/auth.spec.mjs",
+      "coverageMode": "automated-browser",
+      "automationState": "implemented"
+    },
+    {
+      "id": "CPS-WEB-CHAT-001",
+      "title": "提问后回答逐段出现，并完整显示",
+      "priority": "P0",
+      "tags": [
+        "AI 对话",
+        "主路径"
+      ],
+      "spec": "web/chat.spec.mjs",
+      "coverageMode": "automated-browser",
+      "automationState": "implemented"
+    },
+    {
+      "id": "CPS-WEB-CHAT-002",
+      "title": "分析服务出错时显示失败原因，不留下空白回答",
+      "priority": "P1",
+      "tags": [
+        "AI 对话",
+        "异常提示"
+      ],
+      "spec": "web/chat.spec.mjs",
+      "coverageMode": "automated-browser",
+      "automationState": "implemented"
+    },
+    {
+      "id": "CPS-WEB-HOME-001",
+      "title": "首页显示提问入口和地区舆情榜",
+      "priority": "P0",
+      "tags": [
+        "首页",
+        "主路径"
+      ],
+      "spec": "web/home.spec.mjs",
+      "coverageMode": "automated-browser",
+      "automationState": "implemented"
+    },
+    {
+      "id": "CPS-WEB-HOME-002",
+      "title": "点选热点后右侧显示它的摘要和来源",
+      "priority": "P1",
+      "tags": [
+        "首页",
+        "主路径"
+      ],
+      "spec": "web/home.spec.mjs",
+      "coverageMode": "automated-browser",
+      "automationState": "implemented"
+    },
+    {
+      "id": "CPS-WEB-HOME-003",
+      "title": "历史记录列出以前的对话，点开进入 AI 对话",
+      "priority": "P1",
+      "tags": [
+        "首页",
+        "主路径"
+      ],
+      "spec": "web/home.spec.mjs",
+      "coverageMode": "automated-browser",
+      "automationState": "implemented"
+    },
+    {
+      "id": "CPS-WEB-STRAT-001",
+      "title": "策略列表显示名称、白话、状态和总数",
+      "priority": "P0",
+      "tags": [
+        "策略",
+        "主路径"
+      ],
+      "spec": "web/strategy.spec.mjs",
+      "coverageMode": "automated-browser",
+      "automationState": "implemented"
+    },
+    {
+      "id": "CPS-WEB-STRAT-002",
+      "title": "按关键词查找策略，只列出匹配的一条",
+      "priority": "P1",
+      "tags": [
+        "策略",
+        "主路径"
+      ],
+      "spec": "web/strategy.spec.mjs",
+      "coverageMode": "automated-browser",
+      "automationState": "implemented"
+    },
+    {
+      "id": "CPS-WEB-STRAT-003",
+      "title": "平台列表取不到时，策略列表仍然加载",
+      "priority": "P2",
+      "tags": [
+        "策略",
+        "韧性"
+      ],
+      "spec": "web/strategy.spec.mjs",
+      "coverageMode": "automated-browser",
+      "automationState": "implemented"
+    }
+  ]
+}

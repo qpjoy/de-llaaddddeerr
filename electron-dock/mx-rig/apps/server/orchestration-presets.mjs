@@ -11,9 +11,9 @@ export const BUILTIN_ORCHESTRATIONS = Object.freeze([
     key: 'guarded-dispatch',
     displayName: '有人接才派发',
     summary:
-      '先确认有在线执行机，再派发测试计划；没有执行机就直接说清楚，不制造一条永远排队的 Run。',
+      '先确认有在线执行机，再派发执行计划；没有执行机就直接说清楚，不制造一条永远排队的 Run。',
     enabled: true,
-    inputs: [{ name: 'taskId', label: '测试计划', kind: 'task', required: true }],
+    inputs: [{ name: 'taskId', label: '执行计划', kind: 'task', required: true }],
     entry: 'read_runners',
     nodes: [
       {
@@ -36,7 +36,7 @@ export const BUILTIN_ORCHESTRATIONS = Object.freeze([
       {
         id: 'dispatch',
         type: 'tool',
-        title: '派发测试计划',
+        title: '派发执行计划',
         tool: 'tests_run',
         args: { taskId: '{{taskId}}' },
         capture: { runId: { from: 'run.id' }, runStatus: { from: 'run.status' } },

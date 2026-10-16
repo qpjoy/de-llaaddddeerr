@@ -62,6 +62,34 @@ test('an untouched deployment has every quest open and nothing claimed', () => {
   assert.ok(state.quests.every((quest) => quest.detail.length > 0))
 })
 
+test('a run counts as yours when you started it by hand; a tour counts when you followed it', () => {
+  const runs = [
+    { status: 'passed', createdBy: 'local:me', trigger: 'manual' },
+    { status: 'failed', createdBy: 'local:colleague', trigger: 'manual' },
+    { status: 'passed', createdBy: 'local:me', trigger: 'schedule' }
+  ]
+  const mine = systemFacts({ runs, principalId: 'local:me' })
+  assert.equal(mine.myRuns, 1, 'only manual runs of this member')
+  assert.equal(mine.dispatchedMissions, 0)
+  const state = evaluateSystem({ facts: mine })
+  const quest = (id, from = state) => from.quests.find((entry) => entry.id === id)
+  assert.equal(quest('first-dispatch').status, 'claimable', '立即执行 on a plan counts')
+  assert.match(quest('first-dispatch').detail, /1 次由你发起的执行/)
+  // A colleague's run is platform state for everyone, but not your own dispatch.
+  const theirs = evaluateSystem({ facts: systemFacts({ runs, principalId: 'local:someone-else' }) })
+  assert.equal(quest('first-dispatch', theirs).status, 'open')
+  assert.equal(quest('first-verdict', theirs).status, 'claimable', 'a verdict on the platform is shared')
+  // 跟做 to the end is reported by the workbench, and says so.
+  assert.ok(SIGNALS.includes('tour_followed'))
+  assert.equal(quest('follow-a-tour').status, 'open')
+  assert.equal(quest('follow-a-tour').evidence, 'signal')
+  const followed = evaluateSystem({ facts: systemFacts({ signals: { tour_followed: '2026-10-08T00:00:00.000Z' } }) })
+  assert.equal(quest('follow-a-tour', followed).status, 'claimable')
+  // Quests carry the tours that teach them; the workbench offers those it can.
+  assert.deepEqual(quest('first-verdict').tour, ['read-a-run'])
+  assert.deepEqual(quest('runner-online').tour, [])
+})
+
 test('quests are verified against platform state, and say where the state came from', () => {
   const facts = systemFacts({
     apps: [{ id: 'app_1', slug: 'compass' }],
@@ -207,7 +235,7 @@ test('the system API verifies on the server and never trusts the request', async
   const ready = await api('/api/rig/v1/system')
   const quest = ready.body.system.quests.find((entry) => entry.id === 'onboard-app')
   assert.equal(quest.status, 'claimable')
-  assert.match(quest.detail, /已有 1 个应用/)
+  assert.match(quest.detail, /已有 1 个项目/)
   const claimed = await api('/api/rig/v1/system/claim', { questId: 'onboard-app' })
   assert.equal(claimed.status, 200)
   assert.equal(claimed.body.system.level.xp, quest.reward.xp)
@@ -251,4 +279,14 @@ test('the tutorial is readable by a viewer and grants no capability', async (t) 
     403
   )
   assert.equal((await api('/api/rig/v1/dispatch:plan', { text: '跑一下' }, viewer)).status, 403)
+})
+
+test('report focus replaces the lens quest while preserving previous completion credit', () => {
+  for (const signal of ['lens_switched', 'report_view_changed']) {
+    const state = evaluateSystem({ facts: systemFacts({ signals: { [signal]: '2026-10-03T00:00:00Z' } }) })
+    const quest = state.quests.find((row) => row.id === 'try-lenses')
+    assert.equal(quest.status, 'claimable')
+    assert.equal(quest.target.view, 'report')
+    assert.equal(quest.title, '选择报告重点')
+  }
 })

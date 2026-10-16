@@ -2,7 +2,7 @@
 // its own test browser, so the people who install it only log in.
 //
 //   npm run package -- [--dir] [--server <地址>] [--private-http] [--no-browser]
-//                      [--mac | --win | --linux]
+//                      [--launcher [--bootstrap <地址,地址>]] [--mac | --win | --linux]
 //
 // --server        the Internal address the login page starts with (people can
 //                 still change it; the one that worked is remembered)
@@ -10,14 +10,22 @@
 // --no-browser    leave Chromium out: a smaller installer that downloads it
 //                 on first use (or uses the computer's Chrome / Edge)
 // --dir           an unpacked app folder instead of an installer
+// --launcher      Launcher mode (docs/25): the app is Launcher's standalone
+//                 product mx-rig and reaches the service through its own
+//                 product network; carries the WireGuard engine for its
+//                 platform. --server then overrides the product VIP.
+// --bootstrap     Launcher entrances to try, in order (default: the public
+//                 relay by IP, then h2i.minsight-ai.com)
 
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { join, resolve } from 'node:path'
 import { Arch, build, Platform } from 'electron-builder'
 import { serviceUrl } from '../packages/contracts/index.mjs'
+import { DEFAULT_BOOTSTRAP_URLS } from '../apps/desktop/launcher-network.mjs'
 import {
   chromiumBuild,
   executableIn,
@@ -46,7 +54,14 @@ const arch = flag('x64') ? 'x64' : flag('arm64') ? 'arm64' : target === 'win' ? 
 
 const defaultsFile = resolve(root, 'apps/desktop/defaults.json')
 const server = option('server') ?? process.env.MX_RIG_SERVER_URL
-if (server) {
+const launcher = flag('launcher')
+if (launcher) {
+  const bootstrapUrls = (option('bootstrap') ?? '').split(',').map((url) => url.trim()).filter(Boolean)
+  const serverUrl = server ? serviceUrl(server, { privateHttp: true }) : null
+  const defaults = { launcher: { enabled: true, bootstrapUrls: bootstrapUrls.length ? bootstrapUrls : DEFAULT_BOOTSTRAP_URLS, ...(serverUrl ? { serverUrl } : {}) } }
+  await writeFile(defaultsFile, `${JSON.stringify(defaults, null, 2)}\n`)
+  say(`Launcher mode: product mx-rig through ${defaults.launcher.bootstrapUrls.join(', ')}; the service is ${serverUrl ?? 'the product VIP'}`)
+} else if (server) {
   const privateHttp = flag('private-http')
   // Refused here rather than on twenty people's login pages.
   const url = serviceUrl(server, { privateHttp })
@@ -89,6 +104,40 @@ if (!flag('no-browser')) {
     config.extraResources = [...(config.extraResources ?? []), { from, to: `ms-playwright/${folder}` }]
     say(`bundling ${from}`)
   }
+}
+
+// -- the WireGuard engine, in Launcher mode ---------------------------------------------
+
+// Launcher looks for it in Resources/wireguard/<platform>-<arch>. npm installs
+// only this machine's engine; another platform's or architecture's is fetched
+// once, at the version electron-core-wireguard asks for.
+if (launcher) {
+  const key = `${{ mac: 'darwin', win: 'win32', linux: 'linux' }[target]}-${arch}`
+  const name = `@qpjoy/electron-core-wireguard-engine-${key}`
+  const require = createRequire(import.meta.url)
+  let dir = null
+  try {
+    dir = resolve(require.resolve(`${name}/package.json`), '..')
+  } catch {
+    const core = JSON.parse(await readFile(require.resolve('@qpjoy/electron-core-wireguard/package.json'), 'utf8'))
+    const version = core.optionalDependencies?.[name]
+    if (!version) throw new Error(`no WireGuard engine is published for ${key}`)
+    dir = resolve(root, '.runtime/wireguard-engines', key, 'package')
+    if (!existsSync(dir)) {
+      say(`fetching ${name}@${version} (once; kept in .runtime/wireguard-engines)`)
+      const into = resolve(root, '.runtime/wireguard-engines', key)
+      await mkdir(into, { recursive: true })
+      const packed = spawnSync('npm', ['pack', `${name}@${version}`, '--pack-destination', into, '--silent'], { encoding: 'utf8', shell: process.platform === 'win32' })
+      if (packed.status !== 0) throw new Error(`fetching ${name} failed: ${packed.stderr}`)
+      const tarball = join(into, packed.stdout.trim().split(/\r?\n/).at(-1))
+      const unpacked = spawnSync('tar', ['-xzf', tarball, '-C', into], { stdio: 'inherit' })
+      if (unpacked.status !== 0) throw new Error(`unpacking ${tarball} failed`)
+    }
+  }
+  const from = join(dir, 'resources', 'wireguard', key)
+  if (!existsSync(from)) throw new Error(`the WireGuard engine for ${key} has no binaries at ${from}`)
+  config.extraResources = [...(config.extraResources ?? []), { from, to: `wireguard/${key}` }]
+  say(`bundling the WireGuard engine ${from}`)
 }
 
 // -- the first open of an unsigned build ------------------------------------------------

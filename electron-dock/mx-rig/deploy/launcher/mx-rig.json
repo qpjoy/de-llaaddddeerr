@@ -1,0 +1,34 @@
+{
+  "productNetwork": {
+    "productId": "mx-rig",
+    "displayName": "MX Rig",
+    "mode": "standalone",
+    "networkScope": "owner",
+    "enabled": true
+  },
+  "appCenterApp": {
+    "appId": "mx-rig",
+    "displayName": "MX Rig",
+    "fullName": "MX Rig 测试工作台",
+    "packageName": "@qpjoy/mx-rig",
+    "category": "custom",
+    "description": "Standalone test workbench: projects, cases, test repositories, runners and evidence. Reaches its own service through its own product network.",
+    "launcherMode": "standalone",
+    "standaloneChannelProductId": "mx-rig",
+    "productNetworkId": "mx-rig",
+    "permissions": ["auth.read", "network.wg.peer"],
+    "requiredCapabilities": ["launcher-network", "launcher-standalone", "wireguard-peer"],
+    "accessPolicy": {
+      "defaultDecision": "public",
+      "allowAdmin": true,
+      "allowRoles": [],
+      "allowUserIds": [],
+      "allowOrgIds": [],
+      "allowRegisteredByAppIds": [],
+      "allowHomeAppIds": [],
+      "requirePermissionGrant": false
+    },
+    "updatePolicy": "launcher-managed"
+  },
+  "releaseComponents": ["mx-rig", "mx-rig-renderer"]
+}

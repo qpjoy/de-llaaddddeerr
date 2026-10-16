@@ -395,7 +395,9 @@ export class ProcedurePlayer {
       try {
         signal?.throwIfAborted()
         const bound = bindStep(step, procedure.variables, procedure.baseUrl)
-        const outcome = await this.browser.perform(bound, { policy, signal, runId })
+        const outcome = await this.browser.perform(bound, { policy, signal, runId, index })
+        // 自动检查项 read on this step: beside its status, never deciding it.
+        const signals = outcome.signals?.length ? { signals: outcome.signals.slice(0, 20) } : {}
         if (outcome.assertion && !outcome.assertion.passed) {
           failure = await this.#failure(
             index,
@@ -411,7 +413,8 @@ export class ProcedurePlayer {
             ...entry,
             status: 'failed',
             durationMs: Date.now() - at,
-            assertion: outcome.assertion
+            assertion: outcome.assertion,
+            ...signals
           })
         } else {
           steps.push({
@@ -419,7 +422,8 @@ export class ProcedurePlayer {
             status: 'passed',
             durationMs: Date.now() - at,
             ...(outcome.assertion ? { assertion: outcome.assertion } : {}),
-            ...(outcome.wait ? { wait: outcome.wait } : {})
+            ...(outcome.wait ? { wait: outcome.wait } : {}),
+            ...signals
           })
         }
       } catch (error) {
@@ -435,6 +439,12 @@ export class ProcedurePlayer {
       }
       onStep?.(steps.at(-1))
     }
+    // The whole replay's leads, deduplicated, with the step each came from —
+    // including what arrived after a step had ended (a late 500, a spinner
+    // that never stopped) — and the timings a monitor would chart.
+    // A replay that stops early for a repair leaves the page as it is.
+    const sensing =
+      signal?.aborted || stopBefore !== null ? null : await this.browser.finishSensing?.().catch(() => null)
     const finished = this.now()
     const verdict = !failure
       ? stopBefore === null
@@ -452,6 +462,7 @@ export class ProcedurePlayer {
       failedStep: failure?.index ?? null,
       failure,
       steps,
+      ...(sensing ? { signals: sensing.signals.slice(0, 100), metrics: sensing.metrics } : {}),
       startedAt: started.toISOString(),
       finishedAt: finished.toISOString(),
       durationMs: finished.getTime() - started.getTime()
@@ -463,6 +474,30 @@ export class ProcedurePlayer {
     // a person reads, and where a repair starts.
     const scene = await this.browser.scene?.(runId).catch(() => null)
     return { index, code, message, ...(scene ?? {}) }
+  }
+}
+
+/** A replay's record without the sensors' fields, for a service from before they existed. */
+export function withoutSensing(run) {
+  if (!run) return run
+  const { signals, metrics, ...rest } = run
+  void signals
+  void metrics
+  return { ...rest, steps: (rest.steps ?? []).map(({ signals: dropped, ...step }) => (void dropped, step)) }
+}
+
+/**
+ * Report a replay. A service older than the sensors refuses their fields
+ * (its schema is strict); the replay still happened, so it is reported
+ * again without them rather than lost.
+ */
+export async function reportRun(send, run) {
+  try {
+    return await send(run)
+  } catch (error) {
+    const sensed = run && (run.signals || run.metrics || run.steps?.some((step) => step.signals))
+    if (!sensed || !/signals|metrics/.test(String(error?.message ?? ''))) throw error
+    return send(withoutSensing(run))
   }
 }
 

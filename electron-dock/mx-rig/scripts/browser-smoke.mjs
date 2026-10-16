@@ -6,9 +6,23 @@ import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 import { BrowserTools } from '../packages/runtime/browser.mjs'
 import { start } from '../apps/server/index.mjs'
+import { pretendRunner, recordClip, smokeCatalog, twoCaseSummary } from './smoke-run.mjs'
+
+async function openNav(page, title) {
+  const item = page.locator('.rig-nav__item').filter({ hasText: title })
+  // Right after signing in the workspace shows before the nav is drawn.
+  await item.waitFor({ state: 'attached' })
+  const group = item.locator('xpath=parent::details')
+  if (await group.count() && !await group.evaluate((node) => node.open)) await group.locator('summary').click()
+  await item.click()
+}
+async function newAgentTask(page) {
+  await openNav(page, 'Agent 会话')
+  await page.locator('#new-agent-mission').click()
+}
 
 const root = fileURLToPath(new URL('../', import.meta.url))
-const qa = resolve(root, '.runtime/qa')
+const qa = resolve(process.env.MX_RIG_QA_DIR || resolve(root, '.runtime/qa'))
 await mkdir(qa, { recursive: true })
 const state = await mkdtemp(join(qa, 'browser-'))
 const target = createServer((_req, res) => {
@@ -66,6 +80,8 @@ try {
   server = await start(
     {
       MX_RIG_ADMIN_TOKEN: 'web-test-secret',
+      // Secrets are encrypted at rest; without a key the service refuses to keep one.
+      MX_RIG_SECRET_KEY: '5a'.repeat(32),
       MX_RIG_PORT: '0',
       MX_RIG_HOST: '127.0.0.1',
       MX_RIG_STORE: 'memory',
@@ -126,44 +142,40 @@ try {
   await page.goto(server.origin + '/rig/')
   await page.locator('#account').fill('admin')
   await page.locator('#password').fill('web-test-secret')
-  await page.locator('#login-form button').click()
+  await page.locator('#login-form button[type=submit]').click()
   await page.locator('#workspace').waitFor({ state: 'visible' })
-  await page.getByRole('button', { name: '任务工作台', exact: false }).click()
+  await openNav(page, 'Agent 会话')
   await page.locator('#goal').fill('检查未配置模型的明确失败状态')
   await page.locator('#start').click()
   await page.waitForFunction(
     () => document.querySelector('#mission-status')?.textContent === '受阻'
   )
-  await page.getByRole('button', { name: 'Internal 配置', exact: false }).click()
+  await openNav(page, 'Internal 配置')
   await page.locator('#max-turns').fill('8')
   await page.locator('#save-settings').click()
   await page.getByText('已保存').waitFor({ state: 'visible' })
-  await page.getByRole('button', { name: '工具与边界', exact: false }).click()
+  await openNav(page, '工具与边界')
   await page.locator('.rig-table[data-layout="tools"]').first().waitFor({ state: 'visible' })
   await page.screenshot({ path: join(qa, 'web-tools.png') })
-  await page.getByRole('button', { name: 'Agent 市场', exact: false }).click()
+  await openNav(page, 'Agent 市场')
   await page.getByText('结果分析师', { exact: true }).waitFor({ state: 'visible' })
   await page.screenshot({ path: join(qa, 'web-agents.png') })
-  // The quality report, and the lens switcher that reorders it. The switcher
-  // sits inside a wrapper on purpose; a regression there collapses it to a
-  // 2px sliver that still passes a visibility check but cannot be clicked.
-  await page.locator('.rig-nav__item', { hasText: '质量报告' }).click()
+  // Focus belongs to the report, while the main navigation stays project based.
+  await openNav(page, '质量报告')
   await page.locator('.rig-trend, .rig-empty').first().waitFor({ state: 'visible' })
-  const lens = page.locator('.rig-nav__lens .qp-segmented')
-  assert.ok(
-    (await lens.evaluate((el) => el.getBoundingClientRect().height)) > 24,
-    'the lens switcher must not collapse'
-  )
+  assert.equal(await page.locator('.rig-nav__lens').count(), 0)
+  const focus = page.getByRole('group', { name: '报告重点', exact: true })
+  assert.ok((await focus.evaluate((el) => el.getBoundingClientRect().height)) > 24)
   // The headline row; the Agent section below has tiles of its own.
   const metrics = await page.locator('.qp-metric-grid').first().locator('.qp-metric__value').allTextContents()
   assert.equal(metrics.length, 4)
   // Nothing ran in this fixture, so every rate must read "—", never 0% or 100%.
   assert.equal(metrics[0], '—')
-  await page.getByRole('button', { name: '负责人', exact: true }).click()
+  await page.getByRole('button', { name: '摘要', exact: true }).click()
   await page.waitForTimeout(400)
   const ordered = await page.locator('.rig-view > .qp-panel > h2').allTextContents()
-  assert.equal(ordered[0], '每日通过率', `lead lens leads with the trend, saw ${ordered[0]}`)
-  await page.getByRole('button', { name: '测试', exact: true }).click()
+  assert.equal(ordered[0], '每日通过率', `summary focus leads with the trend, saw ${ordered[0]}`)
+  await page.getByRole('button', { name: '风险', exact: true }).click()
   await page.waitForTimeout(400)
   assert.equal(
     (await page.locator('.rig-view > .qp-panel > h2').allTextContents())[0],
@@ -171,18 +183,18 @@ try {
   )
   await page.screenshot({ path: join(qa, 'web-report.png'), fullPage: true })
 
-  await page.getByRole('button', { name: '编排中心', exact: false }).click()
+  await openNav(page, '编排中心')
   await page.locator('.rig-graph svg').waitFor({ state: 'visible' })
   // The generic task graph: seven nodes, one of them the approval pause.
   assert.equal(await page.locator('.rig-graph__node').count(), 7)
   await page.screenshot({ path: join(qa, 'web-orchestration.png') })
-  await page.getByRole('button', { name: '出网与通道', exact: false }).click()
+  await openNav(page, '出网与通道')
   await page.locator('.rig-table[data-layout="egress"]').waitFor({ state: 'visible' })
   await page.screenshot({ path: join(qa, 'web-egress.png') })
 
   // The orchestration centre: open a saved spec, break it, see the compiler
   // refuse it by name, repair it, and watch the draft preview come back.
-  await page.getByRole('button', { name: '编排中心', exact: false }).click()
+  await openNav(page, '编排中心')
   await page.getByRole('button', { name: '有人接才派发', exact: true }).click()
   // Selecting a spec fetches its compiled shape; wait for one of its own
   // nodes rather than for "a graph", which the task graph already satisfies.
@@ -212,7 +224,7 @@ try {
   // Two pages have been visited by now (工具与边界, 出网与通道), so their
   // signal-evidence quests must be claimable and the platform-state ones must
   // not: this asserts the difference is real, not decorative.
-  await page.locator('.rig-nav__item', { hasText: '系统' }).click()
+  await openNav(page, '系统')
   await page.locator('.rig-level').waitFor({ state: 'visible' })
   assert.match(await page.locator('.rig-level h2').textContent(), /Lv\.1/)
   const chapters = await page.locator('.rig-quests').count()
@@ -234,7 +246,7 @@ try {
   // The teaching panel follows the reader across pages and can be put away.
   await page.locator('#hud-toggle').click()
   await page.locator('#hud .rig-quest').waitFor({ state: 'visible' })
-  await page.locator('.rig-nav__item', { hasText: '总览' }).click()
+  await openNav(page, '总览')
   await page.locator('#hud .rig-quest').waitFor({ state: 'visible' })
   await page.screenshot({ path: join(qa, 'web-system-hud.png') })
   await page.locator('#hud').getByRole('button', { name: '收起', exact: true }).click()
@@ -273,7 +285,7 @@ try {
   assert.equal(plan.status, 201, JSON.stringify(plan.body))
   // A new task, not the blocked one from earlier: parsing belongs to a fresh
   // composer, and a follow-up on a finished mission has no target to choose.
-  await page.locator('#new-mission').click()
+  await newAgentTask(page)
   await page.locator('#refresh').click()
   await page.locator('#goal').waitFor({ state: 'visible' })
   await page.locator('#goal').fill('跑一下 Compass Web 冒烟')
@@ -308,7 +320,7 @@ try {
     ],
     sequence: ['primary']
   })
-  await page.locator('#new-mission').click()
+  await newAgentTask(page)
   await page.locator('#goal').waitFor({ state: 'visible' })
   await page.locator('#goal').fill('这次执行为什么没通过？读证据后给结论。')
   await page.locator('#start').click()
@@ -333,7 +345,7 @@ try {
   await page.screenshot({ path: join(qa, 'web-finding.png'), fullPage: true })
 
   // -- 出网通道 ---------------------------------------------------------------
-  await page.locator('.rig-nav__item', { hasText: '出网与通道' }).click()
+  await openNav(page, '出网与通道')
   await page.getByRole('button', { name: '保存通道', exact: true }).waitFor({ state: 'visible' })
   await page.getByLabel('通道 ID').fill('office')
   await page.getByLabel('名称').fill('办公网代理')
@@ -350,9 +362,398 @@ try {
   await page.getByRole('button', { name: '改为直连', exact: true }).click()
   await page.getByText('已改为直连', { exact: false }).waitFor({ state: 'visible' })
 
+  // -- 账号与成员、执行机与工位（docs/21 M1）：不再需要旧管理台 --------------------
+  const admin = async (method, path, body) => {
+    const response = await fetch(server.origin + path, {
+      method,
+      headers: { authorization: 'Bearer web-test-secret', ...(body ? { 'content-type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined
+    })
+    return response.status === 204 ? {} : response.json()
+  }
+  await openNav(page, '账号与成员')
+  await page.locator('#new-member-account').fill('alice')
+  await page.locator('#new-member-name').fill('Alice')
+  await page.locator('#new-member-role').selectOption('operator')
+  await page.getByRole('button', { name: '新建账号', exact: true }).click()
+  const firstPassword = (await page.locator('#one-time-password-value').textContent()).trim()
+  assert.ok(firstPassword.length >= 10, 'a one-time password is shown once')
+  await page.screenshot({ path: join(qa, 'web-members-created.png'), fullPage: true })
+  await page.locator('#one-time-password-done').click()
+  await page.locator('#one-time-password').waitFor({ state: 'detached' })
+  const signIn = await fetch(server.origin + '/api/v1/auth/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: firstPassword })
+  })
+  assert.equal(signIn.status, 200, 'the new account signs in with its one-time password')
+  await page.locator('[data-member-role="local:alice"]').selectOption('viewer')
+  await page.getByText('权限已更新', { exact: true }).waitFor()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator('[data-member-reset="local:alice"]').click()
+  const secondPassword = (await page.locator('#one-time-password-value').textContent()).trim()
+  assert.notEqual(secondPassword, firstPassword, 'a reset issues a new password')
+  await page.locator('#one-time-password-done').click()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator('[data-member-disable="local:alice"]').click()
+  await page.locator('[data-member-disable="local:alice"]', { hasText: '启用' }).waitFor()
+  const alice = (await admin('GET', '/api/v1/members')).members.find((member) => member.principalId === 'local:alice')
+  assert.deepEqual([alice.role, alice.local.disabled], ['viewer', true])
+
+  await openNav(page, '执行机与工位')
+  await page.locator('#enroll-start').click()
+  assert.match(await page.locator('#enroll-command').textContent(), /MXT_CODE/, 'a one-time command to join another computer')
+  assert.match(await page.locator('#enroll-status').textContent(), /等那台电脑连上来/)
+  await page.screenshot({ path: join(qa, 'web-runners-enroll.png'), fullPage: true })
+  await page.getByRole('button', { name: '关闭', exact: true }).click()
+  await admin('POST', '/runner/v1/runners:register', { name: '测试机 A', os: 'linux', engines: ['playwright'], surfaces: ['web'] })
+  await openNav(page, '执行记录')
+  await openNav(page, '执行机与工位')
+  await page.getByText('测试机 A', { exact: true }).waitFor()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator('[data-remove-runner]').first().click()
+  await page.getByText('已移除「测试机 A」', { exact: true }).waitFor()
+  assert.equal((await admin('GET', '/api/v1/runners')).runners.length, 0)
+
+  // -- 项目设置、用例库、提升到用例库、通知渠道（docs/21 M2）----------------------
+  await admin('POST', '/api/v1/apps', { slug: 'm2-demo', displayName: 'M2 演示项目', surfaces: ['web'], visibility: 'private' })
+  const task = (await admin('POST', '/api/rig/v1/test-tasks', { app: 'm2-demo', goal: 'M2 登录验收' })).mission
+  const book = `/api/rig/v1/missions/${task.id}/cases`
+  await admin('POST', book, {
+    expectedRevision: 0,
+    cases: [{ caseId: 'M2-FE-AUTH-002', title: '错误密码提示', steps: '打开登录页\n输入错误密码', expected: '停留在登录页\n提示账号或密码错误', priority: 'P1', platforms: ['web'] }]
+  })
+  await admin('POST', `${book}:confirm`, { expectedRevision: 1 })
+  await openNav(page, '项目与任务')
+  await page.locator('#test-project').selectOption('m2-demo')
+  // 设置：从模板新建执行方式，保存一个只写不读的密钥。
+  await page.locator('.rig-project-tabs [role=tab]', { hasText: '设置' }).click()
+  await page.locator('[data-suite-template="playwright"]').click()
+  await page.locator('#suite-slug').fill('web-smoke')
+  await page.locator('#suite-name').fill('Web 冒烟')
+  // The notice shows before the page is drawn again: fill the new secret form, not the old one.
+  await page.locator('#secret-form').evaluate((node) => (node.dataset.before = '1'))
+  await page.locator('#suite-form button[type=submit]').click()
+  await page.getByText('已新建执行方式「Web 冒烟」', { exact: true }).waitFor()
+  await page.locator('#secret-form:not([data-before])').waitFor()
+  const suites = (await admin('GET', '/api/v1/apps/m2-demo/suites')).suites
+  assert.deepEqual([suites[0].slug, suites[0].engine, suites[0].command.join(' ')], ['web-smoke', 'playwright', 'npx playwright test'])
+  await page.locator('#secret-name').fill('M2_TEST_PASSWORD')
+  await page.locator('#secret-value').fill('m2-secret-value-never-shown')
+  await page.locator('#secret-form button[type=submit]').click()
+  await page.locator('[data-secret-delete="M2_TEST_PASSWORD"]').waitFor()
+  assert.equal((await page.content()).includes('m2-secret-value-never-shown'), false, 'a secret value never comes back to the page')
+  await page.screenshot({ path: join(qa, 'web-project-settings.png'), fullPage: true })
+  // 用例库：写一条、编辑、停用。
+  await page.locator('.rig-project-tabs [role=tab]', { hasText: '用例库' }).click()
+  await page.locator('#catalog-new').click()
+  await page.locator('#catalog-case-id').fill('M2-FE-AUTH-001')
+  await page.locator('#catalog-case-title').fill('有效账号登录')
+  await page.getByLabel('第 1 步操作').fill('打开 /login')
+  await page.getByLabel('第 1 步期望').fill('出现登录表单')
+  await page.locator('#catalog-form button[type=submit]').click()
+  await page.locator('[data-case-edit="M2-FE-AUTH-001"]').click()
+  await page.locator('#catalog-case-title').fill('有效账号登录并进入首页')
+  await page.locator('#catalog-form button[type=submit]').click()
+  await page.getByText('有效账号登录并进入首页', { exact: true }).waitFor()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator('[data-case-retire="M2-FE-AUTH-001"]').click()
+  await page.getByText('已停用 M2-FE-AUTH-001', { exact: true }).waitFor()
+  // 提升：任务里已确认的用例进入用例库。
+  await page.locator('.rig-project-tabs [role=tab]', { hasText: '测试任务' }).click()
+  // The task was made over the API after this page loaded.
+  await page.locator('#refresh').click()
+  await page.getByRole('button', { name: 'M2 登录验收', exact: true }).click()
+  await page.locator('#promote-cases').click()
+  assert.match(await page.locator('#promote-result').textContent(), /M2-FE-AUTH-002 · 已新增到用例库/)
+  const library = (await admin('GET', '/api/v1/apps/m2-demo/cases')).cases
+  assert.deepEqual(library.map((entry) => entry.caseId), ['M2-FE-AUTH-002'], 'the promoted case is in the library; the retired one is not listed')
+  assert.deepEqual(library[0].steps.map((step) => step.expect), ['停留在登录页', '提示账号或密码错误'])
+  await page.screenshot({ path: join(qa, 'web-promote.png'), fullPage: true })
+  // 通知渠道：登记、发测试消息、删除。
+  await openNav(page, '通知渠道')
+  await page.locator('#channel-name').fill('测试群')
+  await page.locator('#channel-url').fill('https://open.feishu.cn/open-apis/bot/v2/hook/smoke-only')
+  await page.locator('#channel-form button[type=submit]').click()
+  await page.getByText('open.feishu.cn', { exact: true }).waitFor()
+  await page.locator('[data-channel-test]').first().click()
+  await page.getByText('已入队', { exact: false }).waitFor()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator('[data-channel-delete]').first().click()
+  await page.getByText('已删除通知渠道「测试群」', { exact: true }).waitFor()
+  // 删除项目：输入标识确认。
+  await openNav(page, '项目与任务')
+  await page.locator('#test-project').selectOption('m2-demo')
+  await page.locator('.rig-project-tabs [role=tab]', { hasText: '设置' }).click()
+  await page.locator('#project-delete-confirm').fill('m2-demo')
+  await page.locator('#project-delete').click()
+  await page.getByText('已删除项目', { exact: true }).waitFor()
+  assert.equal((await admin('GET', '/api/v1/apps')).apps.some((app) => app.slug === 'm2-demo'), false)
+
+  // -- 执行计划（docs/21 M3）与「定时前先验证」（M6）：新建手动计划 → 立即执行 → 通过后才能定时 --
+  await admin('POST', '/api/v1/apps', { slug: 'm3-demo', displayName: 'M3 演示项目', surfaces: ['web'], visibility: 'private' })
+  await admin('POST', '/api/v1/apps/m3-demo/suites', { slug: 'web-smoke', displayName: 'Web 冒烟', engine: 'playwright', surface: 'web', runnerKind: 'local', targetMode: 'external', command: ['npx', 'playwright', 'test'] })
+  await openNav(page, '项目与任务')
+  await page.locator('#test-project').selectOption('m3-demo')
+  // The setup checklist: an execution method exists; a plan is the next step.
+  const checklist = page.locator('#setup-checklist')
+  // This project's list: its execution method is already listed.
+  await checklist.locator('li[data-step="suite"]', { hasText: 'Web 冒烟' }).waitFor()
+  assert.equal(await checklist.getAttribute('data-left'), '3')
+  assert.equal(await checklist.locator('li[data-next="true"]').getAttribute('data-step'), 'plan')
+  await page.locator('.rig-project-tabs [role=tab]', { hasText: '执行计划' }).click()
+  await page.locator('#plan-new').click()
+  const cronOffered = () => page.locator('#plan-schedule option[value="cron"]').evaluate((option) => !option.disabled)
+  assert.equal(await cronOffered(), false, 'a new plan cannot be scheduled')
+  await page.getByText('定时要先验证', { exact: false }).waitFor()
+  await page.locator('#plan-name').fill('每晚冒烟')
+  await page.locator('#plan-target').fill('http://127.0.0.1:4610')
+  await page.locator('#plan-form button[type=submit]').click()
+  await page.getByText('已新建执行计划「每晚冒烟」', { exact: true }).waitFor()
+  const m3plan = (await admin('GET', '/api/v1/tasks?app=m3-demo')).tasks[0]
+  assert.deepEqual([m3plan.scheduleKind, m3plan.runsOn, m3plan.targetUrl], ['manual', 'any-runner', 'http://127.0.0.1:4610'])
+  assert.equal(await page.locator(`[data-plan="${m3plan.id}"] [data-verification]`).getAttribute('data-verification'), 'unverified')
+  // Run it now; a runner picks it up and it passes.
+  const m3runner = pretendRunner(server.origin, 'web-test-secret')
+  const m3machine = await m3runner.register('M3 测试机')
+  await page.locator(`[data-plan-run-now="${m3plan.id}"]`).click()
+  const dispatched = await page.locator('[data-plan-run]').getAttribute('data-plan-run')
+  assert.match(dispatched, /^trun_/, 'run now creates a real run')
+  assert.equal((await admin('GET', `/api/v1/runs/${dispatched}`)).run.taskId, m3plan.id)
+  await m3runner.clearQueue(dispatched)
+  const m3claim = await m3runner.claim()
+  assert.equal(m3claim.runId, dispatched)
+  await m3runner.call('POST', `/runner/v1/runs/${dispatched}:complete`, {
+    token: m3claim.runToken,
+    body: { exitCode: 0, summary: { schemaVersion: 2, runId: dispatched, app: 'm3-demo', status: 'passed', totals: { tests: 1, passed: 1 }, cases: [{ caseId: 'M3-FE-AUTH-001', status: 'passed', durationMs: 500 }] } }
+  })
+  await page.locator('#refresh').click()
+  await page.locator(`[data-plan="${m3plan.id}"] [data-verification="verified"]`).waitFor()
+  // Verified: now it may be scheduled.
+  await page.locator(`[data-plan-edit="${m3plan.id}"]`).click()
+  assert.equal(await cronOffered(), true, 'a verified plan can be scheduled')
+  await page.locator('#plan-name').fill('每晚冒烟（只跑登录）')
+  await page.locator('#plan-schedule').selectOption('cron')
+  await page.locator('#plan-cron').fill('0 2 * * *')
+  await page.locator('#plan-form button[type=submit]').click()
+  await page.getByText('已更新执行计划「每晚冒烟（只跑登录）」', { exact: true }).waitFor()
+  const scheduled = (await admin('GET', '/api/v1/tasks?app=m3-demo')).tasks[0]
+  assert.deepEqual([scheduled.scheduleKind, scheduled.cronExpr], ['cron', '0 2 * * *'])
+  assert.ok(scheduled.nextRunAt, 'a cron plan knows when it fires next')
+  assert.equal(await page.locator('#setup-checklist').getAttribute('data-left'), '0')
+  await page.getByText('上手清单 · 已经可以定时运行', { exact: true }).waitFor()
+  await page.screenshot({ path: join(qa, 'web-plans.png'), fullPage: true })
+  // 审计（M6）：the schedule change is on record, field by field.
+  await openNav(page, '审计')
+  await page.locator('#audit-resource').selectOption('task')
+  const scheduleChange = page.locator('.rig-audit-row[data-action="task.update"]').first()
+  await scheduleChange.waitFor()
+  await scheduleChange.locator('summary').click()
+  const changeText = await scheduleChange.innerText()
+  assert.match(changeText, /修改执行计划/)
+  assert.match(changeText, /scheduleKind\s+manual\s+cron/)
+  await page.screenshot({ path: join(qa, 'web-audit.png'), fullPage: true })
+  await openNav(page, '项目与任务')
+  await page.locator(`[data-plan-toggle="${m3plan.id}"]`).click()
+  await page.getByText('不再定时触发', { exact: false }).waitFor()
+  assert.equal((await admin('GET', '/api/v1/tasks?app=m3-demo')).tasks[0].enabled, false)
+  await page.locator(`[data-plan-toggle="${m3plan.id}"]`).click()
+  await page.getByText('已启用', { exact: false }).waitFor()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator(`[data-plan-delete="${m3plan.id}"]`).click()
+  await page.getByText('已删除执行计划', { exact: false }).waitFor()
+  assert.equal((await admin('GET', '/api/v1/tasks?app=m3-demo')).tasks.length, 0)
+  await m3runner.remove(m3machine.id)
+  // A test task with no plan: make one inside 「执行与结果」, and it is the one picked.
+  const m3task = (await admin('POST', '/api/rig/v1/test-tasks', { app: 'm3-demo', goal: 'M3 任务内建计划' })).mission
+  await admin('POST', `/api/rig/v1/missions/${m3task.id}/cases`, {
+    expectedRevision: 0,
+    cases: [{ caseId: 'M3-FE-AUTH-001', title: '登录', steps: '打开登录页', expected: '看到表单', platforms: ['web'] }]
+  })
+  await admin('POST', `/api/rig/v1/missions/${m3task.id}/cases:confirm`, { expectedRevision: 1 })
+  await page.locator('.rig-project-tabs [role=tab]', { hasText: '测试任务' }).click()
+  await page.locator('#refresh').click()
+  await page.getByRole('button', { name: 'M3 任务内建计划', exact: true }).click()
+  await page.locator('.rig-test-tabs [role=tab]', { hasText: '执行与结果' }).click()
+  assert.equal(await page.locator('#inline-plan').evaluate((node) => node.open), true, 'with no plan, the creator is open')
+  await page.locator('#plan-name').fill('任务内的冒烟计划')
+  await page.locator('#plan-target').fill('http://127.0.0.1:4610')
+  await page.locator('#plan-form button[type=submit]').click()
+  await page.locator('#execution-task').waitFor()
+  assert.match(await page.locator('#execution-task option:checked').textContent(), /任务内的冒烟计划/)
+  await page.screenshot({ path: join(qa, 'web-inline-plan.png'), fullPage: true })
+
+  // -- 执行详情（docs/21 M4）：等待认领 → 实时流水 → 结果与录像跳转 → 只重跑这条 → 取消 --
+  const clip = await recordClip(browser, join(state, 'clip'))
+  const M4_CATALOG = smokeCatalog('m4-demo', 'web-smoke', 'M4-FE-AUTH')
+  await admin('POST', '/api/v1/apps', { slug: 'm4-demo', displayName: 'M4 演示项目', surfaces: ['web'], visibility: 'private' })
+  await admin('POST', '/api/v1/apps/m4-demo/suites', { slug: 'web-smoke', displayName: 'Web 冒烟', engine: 'playwright', surface: 'web', runnerKind: 'local', targetMode: 'external', command: ['npx', 'playwright', 'test'] })
+  // The repository's catalog: two cases with specs, one registered and not yet written.
+  await admin('POST', '/api/v1/apps/m4-demo/catalog:sync', M4_CATALOG)
+  const m4plan = (await admin('POST', '/api/v1/tasks', { app: 'm4-demo', suite: 'web-smoke', name: '登录冒烟', targetUrl: 'http://127.0.0.1:4610', runsOn: 'any-runner', schedule: { kind: 'manual' } })).task
+  const m4run = (await admin('POST', `/api/v1/tasks/${m4plan.id}:run`, {})).run.id
+  const runner = pretendRunner(server.origin, 'web-test-secret')
+  await runner.clearQueue(m4run)
+  await openNav(page, '项目与任务')
+  await page.locator('#test-project').selectOption('m4-demo')
+  await page.locator('.rig-project-tabs [role=tab]', { hasText: '执行记录' }).click()
+  await page.locator(`[data-run-open="${m4run}"]`).click()
+  await page.locator(`#run-detail[data-run="${m4run}"]`).waitFor()
+  await page.getByText('正在等一台执行机认领。', { exact: true }).waitFor()
+  // A runner claims it and reports progress; the page follows without a reload.
+  const machine4 = await runner.register()
+  const claim4 = await runner.claim()
+  assert.equal(claim4.runId, m4run)
+  await runner.events(m4run, claim4.runToken, [
+    { kind: 'stage', stage: 'checkout', status: 'ok' },
+    { kind: 'stage', stage: 'execute', status: 'running' },
+    { kind: 'case.started', caseId: 'M4-FE-AUTH-001', title: '有效账号登录' },
+    { kind: 'step', caseId: 'M4-FE-AUTH-001', seq: 1, label: '打开登录页', offsetMs: 200 },
+    { kind: 'log', line: 'Running 2 tests using 1 worker' }
+  ])
+  await page.locator('#run-live [data-case="M4-FE-AUTH-001"]').waitFor()
+  await page.getByText('冒烟测试机 已经接手。', { exact: true }).waitFor()
+  assert.equal(await page.locator('.rig-run-flow__node[data-state="active"]').count(), 1, 'one stage is in progress')
+  assert.equal(await page.locator('.rig-run-flow__node[data-state="skipped"]').count(), 2, 'overtaken stages read as not applicable')
+  await page.screenshot({ path: join(qa, 'web-run-live.png'), fullPage: true })
+  // It finishes: the page reads the result once more and shows every case with its evidence.
+  const clipPath = 'videos/M4-FE-AUTH-001.webm'
+  await runner.upload(m4run, claim4.runToken, clipPath, clip)
+  await runner.complete(m4run, claim4.runToken, twoCaseSummary(m4run, 'm4-demo', { video: clipPath, passed: 'M4-FE-AUTH-001', failed: 'M4-FE-AUTH-002' }))
+  await page.locator('#run-cases').waitFor()
+  assert.equal(await page.locator('#run-detail').getAttribute('data-status'), 'failed')
+  const failedRow = page.locator('details.rig-run-case[data-case="M4-FE-AUTH-002"]')
+  assert.equal(await failedRow.evaluate((node) => node.open), true, 'a failed case opens by itself')
+  assert.match(await failedRow.innerText(), /账号或密码错误/)
+  await page.getByText('有 1 条用例登记了但没有跑到。', { exact: true }).waitFor()
+  const passedRow = page.locator('details.rig-run-case[data-case="M4-FE-AUTH-001"]')
+  await passedRow.locator('summary').click()
+  const player = await passedRow.locator('video').elementHandle()
+  await page.waitForFunction((node) => node.readyState >= 1, player)
+  await passedRow.locator('[data-seek="0.90"]').click()
+  await page.waitForFunction((node) => Math.abs(node.currentTime - 0.9) < 0.6, player)
+  await page.locator('[data-filter="failed"]').click()
+  assert.equal(await page.locator('#run-cases .rig-run-case').count(), 1, 'the failed filter shows only failures')
+  await page.locator('[data-filter="all"]').click()
+  await passedRow.locator('summary').click()
+  await page.screenshot({ path: join(qa, 'web-run-detail.png'), fullPage: true })
+  // 只重跑这条: the same plan narrowed to that case, opened in place.
+  await page.locator('[data-rerun="M4-FE-AUTH-002"]').click()
+  await page.waitForFunction((id) => {
+    const node = document.querySelector('#run-detail')
+    return Boolean(node) && node.dataset.run !== id
+  }, m4run)
+  const rerun = await page.locator('#run-detail').getAttribute('data-run')
+  assert.equal((await admin('GET', `/api/v1/runs/${rerun}`)).run.caseFilter, 'M4-FE-AUTH-002')
+  await page.getByText('只跑了 M4-FE-AUTH-002', { exact: true }).waitFor()
+  page.once('dialog', (dialog) => dialog.accept())
+  await page.locator('#run-cancel').click()
+  await page.waitForFunction(() => document.querySelector('#run-detail')?.dataset.status === 'cancelled')
+  // 返回 goes back to the tab the run was opened from.
+  await page.locator('#run-back').click()
+  await page.locator(`[data-run-open="${m4run}"]`).waitFor()
+  // 让 Agent 分析这次执行 (docs/23 M7c): a drafted, unstarted task for the failure grader.
+  await page.locator(`[data-run-open="${m4run}"]`).click()
+  await page.locator('#run-analyze').click()
+  await page.waitForFunction((id) => document.querySelector('#goal')?.value.includes(id), m4run)
+  assert.match(await page.locator('#goal').inputValue(), /能不能上线/)
+  await page.getByText('Agent · failure-triage', { exact: true }).waitFor()
+  assert.equal((await admin('GET', '/api/rig/v1/missions')).missions.filter((row) => row.goal?.includes(m4run)).length, 0, 'nothing starts until a person does')
+  await runner.remove(machine4.id)
+  // 演示一遍 on the web (docs/24): the Compass tour needs the desktop and says
+  // so; 读懂一次执行 runs here, 快速准备 straight to the step the person presses.
+  await openNav(page, '新手引导')
+  assert.match(await page.locator('[data-tour-card="compass-web-smoke"]').innerText(), /要在桌面端演示/)
+  assert.equal(await page.locator('[data-tour-card="compass-web-smoke"] [data-tour-start]').count(), 0)
+  await openNav(page, '项目与任务')
+  await page.locator('#test-project').selectOption('m4-demo')
+  await openNav(page, '新手引导')
+  await page.locator('[data-tour-card="read-a-run"] [data-tour-start]').click()
+  await page.locator('#tour[data-state="intro"]').waitFor({ state: 'attached' })
+  await page.locator('#tour [data-tour-action="fast"]').click()
+  await page.locator('#tour[data-state="final"][data-step="analyze"]').waitFor({ state: 'attached', timeout: 30_000 })
+  assert.equal(await page.locator('#run-detail').getAttribute('data-run'), rerun, 'the latest run of the project')
+  await page.locator('#tour [data-tour-action="end"]').click()
+  await page.locator('#tour').waitFor({ state: 'detached' })
+  // A quest offers the tour that teaches it, as far as this end can take it:
+  // here 「跟着演示亲手走一遍」 offers 读懂一次执行, since 新项目 needs the desktop.
+  await openNav(page, '新手引导')
+  assert.match(await page.locator('[data-tour-card="new-project"]').innerText(), /要在桌面端演示/)
+  await openNav(page, '系统')
+  const followCard = page.locator('[data-quest-tour="follow-a-tour"]')
+  await followCard.click()
+  await page.locator('#tour[data-tour="read-a-run"][data-state="intro"]').waitFor({ state: 'attached' })
+  await page.locator('#tour [data-tour-action="cancel"]').click()
+  await page.locator('#tour').waitFor({ state: 'detached' })
+  // The person signed in to this page, not the service token.
+  const ownSystem = await page.evaluate(() => fetch('/api/rig/v1/system').then((answer) => answer.json()))
+  assert.equal(ownSystem.system.quests.find((quest) => quest.id === 'follow-a-tour').status, 'open', '快速准备 does not count as following')
+  // 演示录像 (docs/24 M8c): a published recording plays on its card in 新手引导,
+  // here also for a tour only the desktop can take.
+  const published = await admin('PUT', '/api/rig/v1/tour-videos/new-project', { version: '0.8.0', recordedAt: new Date().toISOString(), durationMs: 2100, video: clip.toString('base64') })
+  assert.equal(published.video.bytes, clip.length)
+  await openNav(page, '新手引导')
+  const tourVideo = page.locator('[data-tour-video="new-project"] video')
+  assert.equal(await tourVideo.getAttribute('src'), '/api/rig/v1/tour-videos/new-project.webm')
+  await page.waitForFunction(() => document.querySelector('[data-tour-video="new-project"] video')?.readyState >= 1, null, { timeout: 15_000 })
+  assert.match(await page.locator('[data-tour-video="new-project"] figcaption').innerText(), /0\.8\.0 版界面/)
+  assert.equal(await page.locator('[data-tour-video="read-a-run"]').count(), 0, 'a tour without a recording shows none')
+
+  // -- 从验收包创建（docs/21 M5）：网页端登记项目、执行方式和用例库；快照在桌面端建立 --
+  await openNav(page, '项目与任务')
+  await page.locator('#pack-creator summary').click()
+  const compassCard = page.locator('[data-pack="compass"]')
+  await compassCard.waitFor()
+  assert.match(await compassCard.innerText(), /23 条旧用例作参考（不计入）/)
+  assert.match(await compassCard.innerText(), /feat\/yjj\/hdo_v2@a4cc5de/)
+  await page.locator('#pack-submit-compass').click()
+  await page.getByText('源码快照和 QA 仓库要在桌面端建立', { exact: false }).waitFor()
+  await page.getByText('这个项目的测试对固定提交的源码快照运行', { exact: false }).waitFor()
+  const packSuites = (await admin('GET', '/api/v1/apps/luopan/suites')).suites
+  assert.deepEqual(packSuites.map((suite) => suite.repoUrl), ['rig-workspace://luopan/qa', 'rig-workspace://luopan/qa'])
+  assert.equal((await admin('GET', '/api/v1/tasks?app=luopan')).tasks.length, 0, 'no plans until a desktop holds the workspace')
+  await page.screenshot({ path: join(qa, 'web-pack.png'), fullPage: true })
+  await page.locator('.rig-project-tabs [role=tab]', { hasText: '用例库' }).click()
+  const referenceTags = page.locator('.qp-tag', { hasText: /^参考（不计入）$/ })
+  await referenceTags.first().waitFor()
+  assert.equal(await referenceTags.count(), 23)
+
+  // -- 安装包（M6）：桌面端测的是安装包，登记在项目设置里 ------------------------------
+  await page.locator('.rig-project-tabs [role=tab]', { hasText: '设置' }).click()
+  await page.locator('#package-form').waitFor()
+  await page.getByText('还没有登记安装包', { exact: false }).waitFor()
+  await page.locator('#package-url').fill('https://downloads.example.com/compass/Compass-Setup-2.0.6.exe')
+  await page.locator('#package-sha256').fill('ab'.repeat(32))
+  await page.locator('#package-version').fill('2.0.6')
+  await page.locator('#package-form button[type=submit]').click()
+  await page.getByText('已登记安装包', { exact: false }).waitFor()
+  assert.match(await page.locator('#package-latest').innerText(), new RegExp('ab'.repeat(32)))
+  assert.equal((await admin('GET', '/api/v1/apps')).apps.find((app) => app.slug === 'luopan').latestPackage.version, '2.0.6')
+
+  // -- 测试仓库（M7）：网页端只看服务器上的发布版本；写入、合入、发布在桌面端 -----------
+  await admin('POST', '/api/v1/apps', { slug: 'm7-web', displayName: 'M7 测试仓库', surfaces: ['web'], visibility: 'private' })
+  assert.equal((await admin('POST', '/api/v1/apps/m7-web/workspace-suite', {})).suite.slug, 'rig-tests-web')
+  await page.locator('#refresh').click()
+  await page.locator('#test-project').selectOption('m7-web')
+  await page.locator('.rig-project-tabs [role=tab]', { hasText: '执行计划' }).click()
+  await page.getByText('这个项目的测试写在它自己的测试仓库里', { exact: false }).waitFor()
+  await page.getByText('服务器上还没有发布过测试版本。', { exact: true }).waitFor()
+
+  // -- 旧管理台只读（M6）：横幅说明去向，写操作的按钮都不在了 ---------------------------
+  // The last section, so the workbench page itself goes to the old console.
+  const legacy = page
+  await legacy.goto(server.origin + '/tasks')
+  await legacy.getByText('旧管理台已改为只读，保留用来查看历史。', { exact: true }).waitFor()
+  assert.match(await legacy.locator('[data-read-only]').innerText(), /项目与任务 → 执行计划/)
+  assert.equal(await legacy.locator('[data-new-task], [data-run]').count(), 0, 'no way to create or run from the old console')
+  await legacy.goto(server.origin + '/members')
+  await legacy.locator('[data-read-only]').waitFor()
+  assert.equal(await legacy.locator('[data-create], [data-reset], [data-disable]').count(), 0)
+  await legacy.screenshot({ path: join(qa, 'web-legacy-readonly.png'), fullPage: true })
+
   assert.deepEqual(errors, [])
   console.log(
-    'Browser tools and Web smoke passed: origin policy, real page fill/click, password refusal, screenshots, HttpOnly login, unconfigured model blocked, Internal settings, Agent market, quality report (empty rates read "—", lens reorders sections), orchestration centre (compiled spec, draft preview, refused draft), egress observation, the system layer (signal vs platform evidence, claim, floating panel), one-line dispatch parsing (real plan id, no execution), switching Rig\'s own egress channel, streamed model output (a visible draft that the final answer replaces), and a structured finding whose unread citation is marked.'
+    'Browser tools and Web smoke passed: origin policy, real page fill/click, password refusal, screenshots, HttpOnly login, unconfigured model blocked, Internal settings, Agent market, quality report (empty rates read "—", report focus reorders sections), orchestration centre (compiled spec, draft preview, refused draft), egress observation, the system layer (signal vs platform evidence, claim, floating panel), one-line dispatch parsing (real plan id, no execution), switching Rig\'s own egress channel, streamed model output (a visible draft that the final answer replaces), a structured finding whose unread citation is marked, accounts (create, sign in with the one-time password, role, reset, disable), runners (enrol command, remove), the run detail (waiting for a runner, live pipeline, results with a seekable recording, rerun one case, cancel, an unstarted Agent analysis drafted from it, the read-only tour on the web, a quest offering it, a published tour recording playing in 新手引导), creating a project from the Compass acceptance pack (references shown, not counted), and M6 (scheduling only after a verified run, the setup checklist, the audit trail of a schedule change, registering an installer, the old console read-only), and the published versions of a test repository in the browser.'
   )
 } finally {
   await tools.close()

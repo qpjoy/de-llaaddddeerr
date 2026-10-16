@@ -1,0 +1,153 @@
+/* 试验场 · 星港物资台。样式刻意朴素：被测的是行为，不是外观。 */
+
+:root {
+  --pg-ink: #172033;
+  --pg-muted: #5b6474;
+  --pg-line: #dfe3ea;
+  --pg-paper: #f6f7f9;
+  --pg-card: #ffffff;
+  --pg-accent: #1f6fd1;
+  --pg-danger: #b42318;
+  font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;
+  color: var(--pg-ink);
+  background: var(--pg-paper);
+}
+
+body {
+  margin: 0;
+}
+
+.pg-bar {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 12px 24px;
+  background: var(--pg-ink);
+  color: #f6f7f9;
+}
+
+.pg-bar strong {
+  margin-right: auto;
+}
+
+.pg-bar a {
+  color: #dbe7ff;
+  text-decoration: none;
+}
+
+.pg-bar a[aria-current='page'] {
+  color: #ffffff;
+  font-weight: 600;
+}
+
+main {
+  max-width: 880px;
+  margin: 24px auto;
+  padding: 0 16px;
+}
+
+.pg-card {
+  padding: 20px 24px;
+  margin-bottom: 16px;
+  background: var(--pg-card);
+  border: 1px solid var(--pg-line);
+  border-radius: 10px;
+}
+
+form.pg-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+}
+
+.pg-field {
+  display: grid;
+  gap: 4px;
+}
+
+input,
+select,
+button {
+  font: inherit;
+  padding: 6px 10px;
+  border: 1px solid var(--pg-line);
+  border-radius: 6px;
+}
+
+button {
+  background: var(--pg-accent);
+  border-color: var(--pg-accent);
+  color: #ffffff;
+  cursor: pointer;
+}
+
+button.pg-ghost {
+  background: transparent;
+  color: var(--pg-accent);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--pg-line);
+}
+
+dl {
+  display: grid;
+  grid-template-columns: 6em 1fr;
+  gap: 8px 16px;
+}
+
+dt {
+  color: var(--pg-muted);
+}
+
+dd {
+  margin: 0;
+}
+
+.pg-kpis {
+  display: flex;
+  gap: 16px;
+}
+
+.pg-kpi {
+  flex: 1;
+  padding: 12px 16px;
+  border: 1px solid var(--pg-line);
+  border-radius: 8px;
+}
+
+.pg-kpi b {
+  display: block;
+  font-size: 24px;
+}
+
+.pg-muted {
+  color: var(--pg-muted);
+}
+
+.pg-alert {
+  color: var(--pg-danger);
+}
+
+.pg-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* PG-005：固定宽度、裁掉溢出、没有 title——英文文案一长就被截断。 */
+.pg-fixed {
+  width: 110px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

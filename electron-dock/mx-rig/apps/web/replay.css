@@ -176,3 +176,110 @@
   color: #475569;
   line-height: 1.6;
 }
+
+/* 自动检查项：每一步一格，最严重的线索决定颜色；只是线索，不改变步骤结果。 */
+.rig-replay {
+  --rig-replay-warn: var(--qp-warning, #f59e0b);
+  --rig-replay-notice: var(--qp-info, #60a5fa);
+}
+
+.rig-replay__track {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
+.rig-replay__track-label {
+  margin-right: 6px;
+  font-size: 12px;
+  color: var(--rig-replay-muted);
+}
+
+.rig-replay__tick {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid var(--rig-replay-line);
+  border-radius: 3px;
+  background: var(--rig-replay-raised);
+  cursor: pointer;
+}
+
+.rig-replay__tick[data-level='error'] {
+  background: var(--rig-replay-danger);
+  border-color: var(--rig-replay-danger);
+}
+
+.rig-replay__tick[data-level='warn'] {
+  background: var(--rig-replay-warn);
+  border-color: var(--rig-replay-warn);
+}
+
+.rig-replay__tick[data-level='notice'] {
+  background: var(--rig-replay-notice);
+  border-color: var(--rig-replay-notice);
+}
+
+.rig-replay__tick.is-current {
+  outline: 2px solid var(--rig-replay-accent);
+  outline-offset: 1px;
+}
+
+.rig-replay__signals {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+.rig-replay__signals li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 8px;
+  border-left: 3px solid var(--rig-replay-line);
+  background: var(--rig-replay-surface);
+  border-radius: 4px;
+}
+
+.rig-replay__signals li[data-level='error'] {
+  border-left-color: var(--rig-replay-danger);
+}
+
+.rig-replay__signals li[data-level='warn'] {
+  border-left-color: var(--rig-replay-warn);
+}
+
+.rig-replay__signals li[data-level='notice'] {
+  border-left-color: var(--rig-replay-notice);
+}
+
+.rig-replay__signals b {
+  flex: none;
+  font-weight: 600;
+}
+
+.rig-replay__signals-none {
+  color: var(--rig-replay-muted);
+}
+
+.rig-replay__step-signals {
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-style: normal;
+  background: var(--rig-replay-notice);
+  color: #0b1018;
+}
+
+.rig-replay__step-signals[data-level='error'] {
+  background: var(--rig-replay-danger);
+}
+
+.rig-replay__step-signals[data-level='warn'] {
+  background: var(--rig-replay-warn);
+}

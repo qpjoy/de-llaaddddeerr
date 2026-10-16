@@ -39,7 +39,7 @@ export const NODE_TYPES = Object.freeze({
   flight: {
     title: '架次',
     kind: 'tool',
-    hint: '派发一个测试计划，有界等待它结束，并把用例结果汇总成变量；派发仍需确认，除非管理员对这条计划预授权'
+    hint: '派发一个执行计划，有界等待它结束，并把用例结果汇总成变量；派发仍需确认，除非管理员对这条计划预授权'
   },
   explore: {
     title: '探索',
@@ -632,7 +632,7 @@ export function validateOrchestration(input, { toolNames = [], agentKeys = [], r
     )
       throw new OrchestrationError(`节点 ${node.id} 引用了不存在的 Agent ${node.agentKey}`, node.id)
     if (node.type === 'flight' && !node.taskId.trim())
-      throw new OrchestrationError(`架次 ${node.id} 需要一个测试计划`, node.id)
+      throw new OrchestrationError(`架次 ${node.id} 需要一个执行计划`, node.id)
     if (node.type === 'procedure' && new Set(node.procedureIds).size !== node.procedureIds.length)
       throw new OrchestrationError(`规程试车 ${node.id} 里有重复的规程`, node.id)
     if (node.type === 'gate')

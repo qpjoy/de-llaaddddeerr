@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "app": "proving-ground",
+  "title": "试验场 · 星港物资台",
+  "note": "试验场是埋好已知缺陷的夹具。它的结果只说明 Rig 的检测能力，永远不作为任何真实产品的通过证据。",
+  "defects": [
+    {
+      "id": "PG-001",
+      "title": "按「已归档」加关键字筛选时，列表接口返回 500，页面却悄悄显示 0 条",
+      "category": "接口",
+      "page": "/items",
+      "procedure": "list-filter",
+      "detect": { "by": "sensor", "sensor": "http_error", "url": "/api/items" }
+    },
+    {
+      "id": "PG-002",
+      "title": "搜索没有结果时，前端读取空值崩溃，整页白屏",
+      "category": "渲染",
+      "page": "/items",
+      "procedure": "list-empty",
+      "detect": { "by": "sensor", "sensor": "blank_page", "also": ["page_error"] }
+    },
+    {
+      "id": "PG-003",
+      "title": "没有负责人的物资，详情页显示「负责人：undefined」",
+      "category": "内容",
+      "page": "/items/:id",
+      "procedure": "item-detail",
+      "detect": { "by": "sensor", "sensor": "content_leak", "match": "undefined" }
+    },
+    {
+      "id": "PG-004",
+      "title": "切换到英文后，保存按钮显示未翻译的文案键 settings.save.button",
+      "category": "国际化",
+      "page": "/settings",
+      "procedure": "settings-english",
+      "detect": { "by": "sensor", "sensor": "content_leak", "match": "settings.save.button" }
+    },
+    {
+      "id": "PG-005",
+      "title": "英文界面下「Notification preferences」按钮被截断，且没有任何办法看到全文",
+      "category": "国际化",
+      "page": "/settings",
+      "procedure": "settings-english",
+      "detect": { "by": "sensor", "sensor": "text_truncated", "match": "Notification" }
+    },
+    {
+      "id": "PG-006",
+      "title": "报表页加载时控制台报错「图表配置解析失败」",
+      "category": "脚本",
+      "page": "/reports",
+      "procedure": "reports",
+      "detect": { "by": "sensor", "sensor": "console_error", "match": "图表配置" }
+    },
+    {
+      "id": "PG-007",
+      "title": "点击「导出报表」后接口一直不返回，加载提示永远不结束",
+      "category": "性能",
+      "page": "/reports",
+      "procedure": "reports",
+      "detect": { "by": "sensor", "sensor": "stuck_loading", "url": "/reports" }
+    },
+    {
+      "id": "PG-008",
+      "title": "详情页的「收藏」按钮点了没有任何反应",
+      "category": "交互",
+      "page": "/items/:id",
+      "procedure": "item-detail",
+      "detect": { "by": "sensor", "sensor": "dead_click", "match": "收藏" }
+    },
+    {
+      "id": "PG-009",
+      "title": "报表的 KPI 接口需要 2.5 秒才返回",
+      "category": "性能",
+      "page": "/reports",
+      "procedure": "reports",
+      "detect": { "by": "sensor", "sensor": "slow_request", "url": "/api/reports/kpi" }
+    },
+    {
+      "id": "PG-010",
+      "title": "登录成功后跳转地址里带着令牌（?token=…）",
+      "category": "安全",
+      "page": "/login",
+      "procedure": "login",
+      "detect": { "by": "sensor", "sensor": "secret_in_url", "match": "token" }
+    },
+    {
+      "id": "PG-011",
+      "title": "新建物资时连点两次「提交」，会创建两条重复记录",
+      "category": "数据",
+      "page": "/new",
+      "procedure": "create-once",
+      "detect": { "by": "assertion" }
+    },
+    {
+      "id": "PG-012",
+      "title": "未登录（或登录过期）访问列表时不跳转登录页，只显示 0 条",
+      "category": "会话",
+      "page": "/items",
+      "procedure": "session-expired",
+      "detect": { "by": "assertion" }
+    }
+  ]
+}

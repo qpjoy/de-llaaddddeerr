@@ -31,8 +31,8 @@ const ORCHESTRATIONS = [
   {
     key: 'guarded-dispatch',
     displayName: '有人接才派发',
-    summary: '先确认有在线执行机，再派发测试计划。',
-    inputs: [{ name: 'taskId', label: '测试计划', kind: 'task', required: true }],
+    summary: '先确认有在线执行机，再派发执行计划。',
+    inputs: [{ name: 'taskId', label: '执行计划', kind: 'task', required: true }],
     missingTools: []
   },
   {
@@ -129,7 +129,7 @@ test('no online runner is a warning on the proposal, not a refusal', () => {
   assert.ok(workflow.warnings.some((line) => line.includes('等待执行机')))
   // With nothing registered at all, dispatch really is blocked.
   const bare = planDispatch({ text: '跑一下测试', tasks: [], apps: [], runnersOnline: 0 })
-  assert.match(bare.proposals[0].blocked, /还没有测试计划/)
+  assert.match(bare.proposals[0].blocked, /还没有执行计划/)
 })
 
 test('an analysis verb reaches the right Agent, and says so when no model can run it', () => {
@@ -163,7 +163,7 @@ test('an orchestration is proposed with the inputs the sentence actually supplie
   const bare = plan('跑一下有人接才派发这条编排')
   const unfilled = bare.proposals.find((entry) => entry.kind === 'orchestration')
   assert.deepEqual(unfilled.missing, ['taskId'])
-  assert.equal(unfilled.candidates[0].label.includes('测试计划'), true)
+  assert.equal(unfilled.candidates[0].label.includes('执行计划'), true)
 })
 
 test('an unmatched sentence proposes nothing and says what to type instead', () => {

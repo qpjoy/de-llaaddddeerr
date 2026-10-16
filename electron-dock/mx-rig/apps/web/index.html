@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: rig-media:; media-src 'self' rig-media:; connect-src 'self'; base-uri 'none'; form-action 'self'"
     />
     <title>MX Rig · 自动化测试与 Agent 工作台</title>
     <link rel="stylesheet" href="./vendor/styles.css" />
@@ -29,9 +29,22 @@
       </section>
       <form id="login-form" class="rig-login__form">
         <div>
-          <p class="qp-caption qp-muted">MISSION CONTROL</p>
+          <p class="qp-caption qp-muted">TEST WORKSPACE</p>
           <h2 class="qp-heading-1">进入工作台</h2>
         </div>
+        <section id="network-panel" class="rig-network" aria-live="polite" hidden>
+          <div class="rig-network__head">
+            <strong class="qp-body-2">内网</strong><span id="network-status" class="qp-tag"></span>
+          </div>
+          <p id="network-message" class="qp-caption"></p>
+          <p id="network-first" class="qp-caption qp-muted" hidden>
+            第一次连接会请求管理员权限，安装 MX Rig 的网络服务。它只给 Rig 自己的地址建路由，不改系统 DNS 和代理，不影响 MX-H2I。
+          </p>
+          <div class="qp-row">
+            <button id="network-connect" class="qp-button qp-button--primary qp-button--sm" type="button">连接内网</button>
+            <button id="network-disconnect" class="qp-button qp-button--ghost qp-button--sm" type="button" hidden>断开</button>
+          </div>
+        </section>
         <label id="server-field" class="qp-field"
           ><span class="qp-field__label">Internal 服务地址</span
           ><input id="server" class="qp-input" type="url" value="http://127.0.0.1:8791" required
@@ -57,7 +70,7 @@
           登录工作台 →
         </button>
         <p id="login-error" class="qp-body-2 rig-error" role="alert"></p>
-        <p class="qp-caption qp-muted">
+        <p id="login-hint" class="qp-caption qp-muted">
           用管理员发给你的账号和一次性密码登录。本机体验：账号 admin，密码用 bash scripts/manage.sh local token 查看。凭据只在主进程与服务端处理。
         </p>
       </form>
@@ -92,12 +105,13 @@
       <main class="qp-main qp-scrollbar rig-main">
         <header class="rig-topbar">
           <div>
-            <p id="view-kicker" class="qp-caption qp-muted">MISSION CONTROL</p>
-            <h1 id="view-title" class="qp-heading-1">总览</h1>
+            <p id="view-kicker" class="qp-caption qp-muted">TEST WORKSPACE</p>
+            <h1 id="view-title" class="qp-heading-1">项目与任务</h1>
             <p id="view-note" class="qp-body-2 qp-muted"></p>
           </div>
           <div class="qp-row">
             <span id="surface" class="qp-tag"></span>
+            <span id="network-chip" class="qp-tag rig-network-chip" hidden></span>
             <button
               id="hud-toggle"
               class="qp-button qp-button--ghost qp-button--sm rig-print-hide"
@@ -115,7 +129,8 @@
               href="/test-center/"
               target="_blank"
               rel="noopener"
-              >完整测试管理台 ↗</a
+              title="旧测试管理台已改为只读，保留用来查看历史；新建、修改和执行都在工作台里"
+              >旧管理台（只读）↗</a
             >
           </div>
         </header>

@@ -14,6 +14,7 @@ import {
   kernelSummary,
   procedureFromMission
 } from '../../packages/runtime/procedure.mjs'
+import { metricsSchema, signalSchema } from '../../packages/runtime/sensors.mjs'
 import { parseBody } from './schemas.mjs'
 
 const ID = 'prc_[a-f0-9]{18}'
@@ -36,7 +37,9 @@ const stepResult = z
     durationMs: z.number().int().min(0),
     error: z.object({ code: shortText(60), message: shortText(600) }).optional(),
     assertion: z.record(z.string(), z.unknown()).optional(),
-    wait: z.record(z.string(), z.unknown()).optional()
+    wait: z.record(z.string(), z.unknown()).optional(),
+    // 自动检查项 read on this step: leads, never its status.
+    signals: z.array(signalSchema).max(20).optional()
   })
   .strict()
 export const replay = z
@@ -60,6 +63,8 @@ export const replay = z
       .strict()
       .nullable(),
     steps: z.array(stepResult).max(200),
+    signals: z.array(signalSchema).max(100).optional(),
+    metrics: metricsSchema.optional(),
     // Stored with the procedure and passed to the test kernel as the run's
     // times: a value that is not an instant would fail there.
     startedAt: z.iso.datetime(),

@@ -1,7 +1,8 @@
 # Control-plane policy. The server talks to DNS, its own PostgreSQL, the
-# Kubernetes API (runner Jobs), model gateways and notification webhooks.
-# A model gateway on another port (a LAN vLLM on :8000, say) needs a line
-# added here; the Rig does not reach Launcher or any other MX system.
+# Kubernetes API (runner Jobs), model gateways, notification webhooks, and
+# Launcher Internal for unified-account sign-in (docs/25) — nothing else of
+# Launcher, and no other MX system. A model gateway on another port (a LAN
+# vLLM on :8000, say) needs a line added here.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -38,6 +39,15 @@ spec:
     # HTTP webhooks and model gateways on plain HTTP.
     - ports:
         - port: 80
+          protocol: TCP
+    # Launcher Internal: password sign-in and token introspection for
+    # unified accounts. Its API port only, in its own namespace.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: mx-internal-shadow
+      ports:
+        - port: 18090
           protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1

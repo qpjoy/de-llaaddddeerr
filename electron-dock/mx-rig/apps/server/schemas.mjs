@@ -44,7 +44,7 @@ export const missionStartBody = z
   })
   .strict()
   .refine((body) => body.mode !== 'workflow' || Boolean(body.taskId), {
-    message: '测试工作流必须选择一个测试计划',
+    message: '测试工作流必须选择一个执行计划',
     path: ['taskId']
   })
   .refine((body) => body.mode !== 'orchestration' || Boolean(body.orchestrationKey || body.spec), {
@@ -67,6 +67,7 @@ const syncedMission = z.looseObject({
   goal: z.string().max(8000),
   mode: z.enum(['agent', 'workflow', 'orchestration']),
   status: z.enum([
+    'draft',
     'queued',
     'running',
     'awaiting_approval',

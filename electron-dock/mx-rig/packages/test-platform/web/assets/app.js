@@ -1,4 +1,4 @@
-// MX 测试平台 — 前端。
+// MX 测试平台的旧管理台 — 前端。docs/21 M6 起只读。
 //
 // 无框架、无构建步骤：设计系统本身就是纯 CSS + tokens，它自己的 demo 也是这么写的。
 // 一个内部工具不该为了「看起来现代」而背上一套打包链路。
@@ -65,6 +65,57 @@ const clock = (ms) =>
 
 const state = { me: null, apps: [], route: { name: 'overview', params: {} }, loginEnabled: true, stream: null }
 
+// Read-only since docs/21 M6: everything this console did now happens in the
+// Rig workbench (/rig/). It stays to look at history. Signing in and out and
+// changing one's own password still work; every other write is refused here,
+// and the controls that would start one are taken off each page.
+const READ_ONLY = true
+const READ_ONLY_WRITES = new Set(['/api/v1/auth/login', '/api/v1/auth/logout', '/api/v1/auth/password'])
+const WRITE_CONTROLS = [
+  '[data-new-task]',
+  '[data-run]',
+  '[data-rerun]',
+  '[data-drop]',
+  '[data-onboard-compass]',
+  '[data-new-app]',
+  '[data-new-case]',
+  '[data-edit]',
+  '[data-enroll]',
+  '[data-remove]',
+  '[data-create]',
+  '[data-reset]',
+  '[data-disable]',
+].join(',')
+// Where each page's work went.
+const MOVED_TO = {
+  overview: '总览、项目与任务',
+  tasks: '项目与任务 → 执行计划',
+  runs: '执行记录',
+  run: '执行记录 → 执行详情',
+  apps: '项目与任务（登记项目、从验收包创建、设置）',
+  cases: '项目与任务 → 用例库',
+  runners: '执行机与工位',
+  members: '管理 → 账号与成员',
+  help: '帮助 → 新手引导',
+}
+
+function lockForReadOnly(main) {
+  main.querySelectorAll(WRITE_CONTROLS).forEach((control) => {
+    // A rerun button comes with its own explanation; both go.
+    ;(control.closest('.mxt-case-row__tools') ?? control).remove()
+  })
+  main.querySelectorAll('[data-role]').forEach((select) => {
+    select.disabled = true
+  })
+  main.prepend(
+    $(`<div class="mxt-banner mxt-banner--info" data-read-only>
+      <b>旧管理台已改为只读，保留用来查看历史。</b>
+      <p class="qp-body-2">新建、修改和执行都在 Rig 工作台：这一页的功能在「${esc(MOVED_TO[state.route.name] ?? '工作台')}」。</p>
+      <p><a class="qp-button qp-button--primary qp-button--sm" href="/rig/">打开 Rig 工作台</a></p>
+    </div>`),
+  )
+}
+
 function toast(message, tone = 'info') {
   const node = $(
     `<div class="qp-toast" data-tone="${tone}" role="status">${esc(message)}</div>`,
@@ -74,6 +125,9 @@ function toast(message, tone = 'info') {
 }
 
 async function api(method, path, body) {
+  if (READ_ONLY && method !== 'GET' && !READ_ONLY_WRITES.has(path)) {
+    throw new Error('旧管理台已改为只读：新建、修改和执行请到 Rig 工作台（/rig/）。')
+  }
   const response = await fetch(path, {
     method,
     // The session lives in an httpOnly cookie, so a recording in a <video> tag
@@ -214,8 +268,8 @@ function shell(content) {
         <div class="mxt-brand">
           <div class="mxt-brand__mark">MX</div>
           <div>
-            <div class="qp-body-1 qp-body-1--semibold">测试平台</div>
-            <div class="qp-caption qp-muted">自动化 e2e</div>
+            <div class="qp-body-1 qp-body-1--semibold">旧管理台</div>
+            <div class="qp-caption qp-muted">只读 · 查看历史</div>
           </div>
         </div>
         <nav class="mxt-nav">
@@ -1849,7 +1903,7 @@ function renderLogin(root) {
       <div class="mxt-login__card">
         <div class="mxt-brand" style="margin-bottom:20px">
           <div class="mxt-brand__mark">MX</div>
-          <div><div class="qp-heading-2">测试平台</div><div class="qp-caption qp-muted">Rig 账号或服务管理员登录</div></div>
+          <div><div class="qp-heading-2">旧管理台（只读）</div><div class="qp-caption qp-muted">Rig 账号或服务管理员登录；新建和修改请到 <a href="/rig/">Rig 工作台</a></div></div>
         </div>
         <form class="mxt-form">
           ${field('账号', '<input class="qp-input" name="username" autocomplete="username" required>')}
@@ -1913,6 +1967,7 @@ async function render() {
   main.innerHTML = '<div class="qp-spinner"></div>'
   try {
     await PAGES[state.route.name](main, state.route.params)
+    if (READ_ONLY) lockForReadOnly(main)
     if (state.me.mustChangePassword) {
       main.prepend(
         $(`<div class="mxt-banner mxt-banner--warning"><b>请修改初始密码</b><p>你正在使用管理员发放的一次性密码。点左下角「修改密码」换成只有你知道的密码。</p></div>`),

@@ -31,8 +31,10 @@ import { compileOrchestration } from './orchestration-graph.mjs'
 import { VERDICTS, auditFinding } from './finding.mjs'
 import { exportPlaywright } from './export.mjs'
 import { compactMessages, meter, totalTokens } from './context.mjs'
-import { ProcedurePlayer } from './procedure.mjs'
+import { ProcedurePlayer, reportRun } from './procedure.mjs'
+import { mergeSignals } from './sensors.mjs'
 import { asks, originOf, scopeSites, siteDecision } from './sites.mjs'
+import { testTaskBody, readTestInput, caseBrief } from './test-workspace.mjs'
 
 // How much of a streaming answer is kept on the mission row, and how often
 // that row is written while text is arriving. The window bounds the file; the
@@ -77,7 +79,7 @@ const recoverable = (error) => error instanceof RigError && RECOVERABLE.has(erro
 // the flight step's job, so an exploration is not offered the tools for it.
 const EXPLORE_RULES = `这是飞行计划中的一个探索阶段。
 按目标在允许的页面上操作；每达到一个检查点就调用 browser_assert 记录确定性断言。
-不要派发或取消测试计划。完成后用一段话总结你检查了什么、哪些断言没有通过。`
+不要派发或取消执行计划。完成后用一段话总结你检查了什么、哪些断言没有通过。`
 const EXPLORE_EXCLUDED = new Set(['tests_run', 'tests_cancel'])
 
 /** A record a desktop reported: it ran there, and only that desktop can act on it. */
@@ -144,18 +146,45 @@ export class RigRuntime {
   async exportMission(id) {
     return exportPlaywright(this.store.public(await this.store.get(id, this.owner)))
   }
+  /** A test task starts as a saved brief. No model, tool or suite is required. */
+  async createTestTask(input) {
+    if (this.closed) throw new RigError('closed', 'Runtime 已关闭', 409)
+    const body = readTestInput(testTaskBody, input)
+    const { apps } = await this.client.request('/api/v1/apps')
+    const app = apps.find((entry) => entry.slug === body.app && entry.enabled !== false)
+    if (!app) throw new RigError('not_found', '请先接入被测项目', 404)
+    const { access } = await this.client.request(`/api/v1/apps/${encodeURIComponent(app.slug)}/access`)
+    if (access?.canWrite === false) throw new RigError('project_forbidden', '没有此项目的任务编辑权限', 403)
+    const row = await this.store.create(this.owner, {
+      goal: body.goal,
+      mode: 'agent',
+      agentKey: 'rig-test-assistant',
+      workbench: { appId: app.id, appSlug: app.slug, displayName: app.displayName, sourceDirectory: app.sourceDirectory ?? null, repoUrl: app.repoUrl ?? null, ref: app.defaultBranch ?? null }
+    })
+    return this.store.public(row)
+  }
   async followup(id, input) {
     if (this.closed || this.active) throw new RigError('busy', '请先完成或取消当前任务', 409)
+    if (this.executor.source?.busy(id)) throw new RigError('busy', '请等待源码连接完成后再开始对话', 409)
     // Reserved before the first await, like `start`.
     this.active = id
     let row
+    let brief = ''
     try {
       row = await this.store.get(id, this.owner)
       refuseDesktop(row)
-      if (!TERMINAL.has(row.status)) throw new RigError('busy', '这项任务尚未结束', 409)
+      if (row.status !== 'draft' && !TERMINAL.has(row.status)) throw new RigError('busy', '这项任务尚未结束', 409)
       text(input.goal, '补充说明', 8000)
       if (row.events.length > 100 || row.messages.length > 120)
         throw new RigError('history_budget', '这项任务历史已较长，请创建新任务并引用执行 ID', 409)
+      if (row.workbench) {
+        const { book } = await this.client.request(`/api/rig/v1/missions/${row.id}/cases`)
+        brief = caseBrief(row, book)
+        const source = this.executor.source?.status(row.id)
+        if (source?.directory) brief += `\n用户已连接的只读源码：${source.directory}。源码基准：${JSON.stringify(source.baseline)}。用 project_source 核实文件；测试实现用 implementation_draft 提交，不写入这个目录。源码基准不是线上部署证明。`
+        row.workbenchCaseIds = book.cases.map((entry) => entry.caseId)
+        row.caseContextRevision = book.revision
+      }
     } catch (error) {
       this.active = null
       throw error
@@ -167,7 +196,7 @@ export class RigRuntime {
         role: 'assistant',
         content: `此前工作流派发的测试 Run ID 为 ${row.testRunId}。仍须读取原始状态。`
       })
-    row.messages.push({ role: 'user', content: goal })
+    row.messages.push({ role: 'user', content: brief ? `${goal}\n\n${brief}` : goal })
     row.mode = 'agent'
     row.turns = 0
     row.status = 'queued'
@@ -175,6 +204,8 @@ export class RigRuntime {
     row.pending = null
     row.graph = null
     try {
+      if (this.store.claimFollowup && !(await this.store.claimFollowup(row)))
+        throw new RigError('busy', '任务已经在另一个工作台续接，请刷新状态', 409)
       await this.event(row, 'user', goal)
     } catch (error) {
       this.active = null
@@ -189,7 +220,7 @@ export class RigRuntime {
     const goal = text(input.goal, '任务目标', 8000)
     if (!['agent', 'workflow', 'orchestration'].includes(input.mode))
       throw new RigError('invalid_mode', '请选择 Agent、测试工作流或编排')
-    const taskId = input.mode === 'workflow' ? text(input.taskId, '测试计划', 200) : null
+    const taskId = input.mode === 'workflow' ? text(input.taskId, '执行计划', 200) : null
     const agentKey =
       input.mode === 'agent' && input.agentKey ? text(input.agentKey, 'Agent', 64) : null
     // A drafted flight plan can run once without being saved: the spec
@@ -308,6 +339,7 @@ export class RigRuntime {
     return true
   }
   async config(row) {
+    if (row.workbench) await this.client.request(`/api/rig/v1/missions/${row.id}/project-access`)
     const config = await this.client.request(
       '/api/rig/v1/execution-config',
       undefined,
@@ -883,7 +915,7 @@ export class RigRuntime {
       } else
         for (const { taskId, task, app, suite } of catalogue.entries) {
           if (!task || !suite) {
-            add(check, false, `测试计划 ${taskId} 不存在或已被删除`)
+            add(check, false, `执行计划 ${taskId} 不存在或已被删除`)
             continue
           }
           if (check === 'runners') {
@@ -970,7 +1002,7 @@ export class RigRuntime {
     row.status = 'running'
     const taskId = renderTemplate(node.taskId, state.vars).trim()
     if (!taskId)
-      throw new RigError('invalid_arguments', `架次「${node.title}」没有可派发的测试计划`)
+      throw new RigError('invalid_arguments', `架次「${node.title}」没有可派发的执行计划`)
     const args = { taskId }
     const def = this.executor.definition('tests_run', args, policy)
     // Standing authorisation is the saved plan's, never a draft's, and only
@@ -1197,10 +1229,9 @@ export class RigRuntime {
           await browser.close()
           let posted = null
           try {
-            posted = await this.client.request(
-              `/api/rig/v1/procedures/${encodeURIComponent(id)}/runs`,
-              { run: { ...result, station: 'desktop' } },
-              signal
+            posted = await reportRun(
+              (run) => this.client.request(`/api/rig/v1/procedures/${encodeURIComponent(id)}/runs`, { run }, signal),
+              { ...result, station: 'desktop' }
             )
           } catch {
             // The replay happened; only its record failed. The stage still
@@ -1519,7 +1550,9 @@ export class RigRuntime {
         (!def.workspace || Boolean(this.executor.workspace)) &&
         (!def.native || Boolean(this.executor.browser?.native?.supported)) &&
         // A repair proposal only means something with a procedure under repair.
-        (def.name !== 'procedure_propose' || Boolean(row?.procedureBase))
+        (def.name !== 'procedure_propose' || Boolean(row?.procedureBase)) &&
+        (!['task_results', 'implementation_read', 'implementation_draft'].includes(def.name) || Boolean(row?.workbench)) &&
+        (!def.source || Boolean(row?.workbench && this.executor.source?.status(row.id).directory))
     ).map((def) => def.name)
     return usableTools(offered)
   }
@@ -1545,6 +1578,9 @@ export class RigRuntime {
         approved: state.approved,
         signal: this.controller.signal,
         missionId: row.id,
+        caseIds: row.workbenchCaseIds,
+        caseRevision: row.caseContextRevision,
+        workbench: Boolean(row.workbench),
         procedure: row.procedureBase ?? null
       })
     } catch (error) {
@@ -1618,6 +1654,8 @@ export class RigRuntime {
    * the cheap kind of invention and claims nothing about the reasoning.
    */
   async #record(row, name, result) {
+    // 自动检查项: the mission's leads, one per signature, beside its result.
+    if (result?.signals?.length) row.signals = mergeSignals(row.signals ?? [], result.signals)
     if ((name === 'browser_assert' || name === 'native_assert') && result?.assertion) {
       const assertion = { ...result.assertion, screenshot: result.screenshot ?? null }
       row.assertions = [...(row.assertions ?? []), assertion].slice(-ASSERTION_LIMIT)
@@ -1632,6 +1670,7 @@ export class RigRuntime {
       return
     }
     if (name === 'case_draft' && result?.draft) {
+      if (row.workbench) result.draft.baseCaseRevision = row.caseContextRevision
       row.caseDrafts = [...(row.caseDrafts ?? []), result.draft].slice(-30)
       await this.event(
         row,
@@ -1757,7 +1796,7 @@ export class RigRuntime {
   async cancel(id) {
     const row = await this.store.get(id, this.owner)
     refuseDesktop(row)
-    if (TERMINAL.has(row.status)) return this.store.public(row)
+    if (row.status === 'draft' || TERMINAL.has(row.status)) return this.store.public(row)
     // Not executing here: a paused mission is closed in place, a running one
     // is asked to stop by whichever process is executing it.
     if (this.active !== id && this.store.requestCancel)

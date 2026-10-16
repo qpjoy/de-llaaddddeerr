@@ -258,7 +258,7 @@ export function templatePlan({
     warnings: [
       ...(smoke || replays.length
         ? []
-        : ['没有找到和这句话匹配的测试计划，草稿只包含预检与讲评，请手动加上架次。']),
+        : ['没有找到和这句话匹配的执行计划，草稿只包含预检与讲评，请手动加上架次。']),
       ...(mentions(text, PROCEDURE_WORDS) && !replays.length
         ? [
             desktop
@@ -331,11 +331,11 @@ ${palette}
 - debrief：notify（布尔）、next。
 - next 为 null 表示结束。
 
-规则：第一个节点是 preflight；每个 flight 或 procedure 后面跟一个 gate；最后是 debrief；gate 的 onFail 与 preflight 的 onNoGo 指向 debrief，让报告总能生成。只使用清单里的测试计划 id。
+规则：第一个节点是 preflight；每个 flight 或 procedure 后面跟一个 gate；最后是 debrief；gate 的 onFail 与 preflight 的 onNoGo 指向 debrief，让报告总能生成。只使用清单里的执行计划 id。
 
 需求：${text}
 
-可用测试计划：
+可用执行计划：
 ${catalogue || '（没有）'}
 
 已启用的试验规程（无模型重放，每条记为一次执行）：
@@ -391,11 +391,11 @@ export function checkDraft(content, { tasks, desktop, procedures = [] }) {
           )
     }
     if (node.type === 'flight' && !known.has(node.taskId))
-      throw new OrchestrationError(`架次 ${node.id} 引用了不存在的测试计划 ${node.taskId}`, node.id)
+      throw new OrchestrationError(`架次 ${node.id} 引用了不存在的执行计划 ${node.taskId}`, node.id)
     if (node.type === 'preflight')
       for (const id of node.taskIds)
         if (!known.has(id))
-          throw new OrchestrationError(`预检 ${node.id} 引用了不存在的测试计划 ${id}`, node.id)
+          throw new OrchestrationError(`预检 ${node.id} 引用了不存在的执行计划 ${id}`, node.id)
   }
   return spec
 }

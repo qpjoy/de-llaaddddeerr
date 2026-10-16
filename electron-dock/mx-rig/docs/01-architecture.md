@@ -2,6 +2,8 @@
 
 状态：MX Rig 0.7 已实现的边界；2026-09-16。
 
+时效说明（2026-10-02）：本文保留 0.7 架构快照。后续已新增自有账号、PG 控制面、MCP、用量计量、终端工作区、浏览器/Electron 增量和 macOS 原生预览；本文末尾的未交付列表不代表当前 0.8 能力。当前实现按 [README](../README.md)、[docs/12](12-self-contained-rig-and-flight-model.md) 及 docs/13–18 核对；Rig 下一阶段规划与 Luopan 验收见 [docs/19](19-test-workbench-plan.md)。
+
 ## 产品边界
 
 MX Rig 是一个工作区、一个桌面产品、一个独立 Internal 服务。无需在 Launcher demos 放产品副本。桌面通过稳定 API 使用身份和任务；未来消费 Launcher SDK 时使用已发布包，不相对导入 MX-H2I 主进程。

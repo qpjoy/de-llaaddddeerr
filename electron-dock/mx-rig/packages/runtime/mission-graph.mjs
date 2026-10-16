@@ -50,9 +50,9 @@ export function buildMissionGraph(handlers, { maxSteps = 200 } = {}) {
       ...stamp('seed_workflow')
     }),
     {
-      title: '载入测试计划',
+      title: '载入执行计划',
       kind: 'tool',
-      description: '把选中的测试计划变成一次待确认的派发动作，不经过模型。'
+      description: '把选中的执行计划变成一次待确认的派发动作，不经过模型。'
     }
   )
   graph.addNode(

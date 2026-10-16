@@ -1,5 +1,235 @@
 # 验证记录
 
+## 2026-10-16：桌面端 Launcher 独立端 P1（自己的产品网络、统一账号、登记命令）
+
+- `npm run check` 通过：仓库自检只允许 `apps/desktop/launcher-network.mjs` 一个文件带数据面代码。
+- `npm test`：698 项，674 通过，0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/l1-tests.log`。新增：
+  - `tests/launcher-network.test.mjs`（7 项）；
+  - `tests/launcher-register.test.mjs`（3 项）。
+- `npm run test:desktop`：新增 Launcher 模式启动（本地替身入口，走到「未登记」为止，不装 WireGuard）。截图在 `.runtime/qa/desktop-launcher-login.png`。
+- `npm run test:browser` 通过。
+- 修了一处冒烟和测试里的定位：登录页多了网络面板的按钮，改为只点提交按钮（四个地方）。
+- `npm run package -- --dir --launcher`：WireGuard 引擎、SDK、Launcher 默认配置都在应用里。
+- 真实 Launcher 上的连接还没有验证：要先登记，在装着 MX-H2I 的测试机上做，步骤见 [docs/25 §7](25-launcher-product-and-sso.md)。
+
+## 2026-10-08：M8c 演示录像（发版时录制、发布、新手引导里播放）
+
+- `npm run check` 通过。
+- `npm test`：688 项，664 通过，0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/m8c-tests.log`。新增 `tests/tour-videos.test.mjs`。
+- `npm run test:browser`、`npm run test:desktop` 通过，新增内容：
+  - 发布一段录像后，网页端和桌面端的新手引导都能播放：网页端从服务地址取，桌面端通过 `rig-media:` 取。
+  - 日志在 `.runtime/m8c-browser.log` 和 `m8c-desktop.log`。
+- `npm run record:tours`：三段录像分别是 20 秒、44 秒和 20 秒，合计 9 MB；中间那次真实执行通过。日志在 `.runtime/m8c-record.log`。
+- 逐帧检查录像，发现并修了两处：面板里出现文字「null」（M8a 起就有），以及画面灰边。
+- 详见 [docs/24 §9](24-guided-tours.md)。
+
+## 2026-10-08：M8b 新项目关卡、内置试验场、关卡接入系统任务
+
+- `npm run check` 通过。
+- `npm test`：684 项，660 通过，0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/m8b-tests.log`。
+- `npm run test:desktop`：
+  - 跟着「新项目」关卡走完 23 步：试验场在本机启动，计划指向它，停在执行之前；
+  - 跟做走完罗盘关卡后，「跟着演示亲手走一遍」可以领取。
+  - 日志在 `.runtime/m8b-desktop.log`。
+- `npm run test:browser`：
+  - 任务卡片上的「演示一遍」打开网页端能走的关卡；
+  - 用「快速准备」走完不算完成任务。
+  - 日志在 `.runtime/m8b-browser.log`。
+- 关卡之后的正式流程：同一条用例和实现，在带缺陷的试验场上真跑一次，通过（8 秒，带录像）。
+- 修了 M8a 留下的问题：冒烟脚本最后一行的英文撇号造成语法错误。是在最后一次冒烟之后改的那一行，没有重新检查。
+- 详见 [docs/24 §8](24-guided-tours.md)。
+
+## 2026-10-08：M8a 演示一遍（可自动化的教学关卡）
+
+- `npm run check` 通过。
+- `npm test`：681 项，657 通过，0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/m8a-tests.log`。新增 `tests/tours.test.mjs`。
+- `npm run test:desktop`：
+  - 罗盘项目改为跟着关卡建立，冒烟脚本扮演用户；
+  - 「读懂一次执行」用演示速度走：接手、继续，停在最后一步。
+  - 日志在 `.runtime/m8a-desktop.log`，截图在 `.runtime/qa/desktop-tour-compass.png` 和 `desktop-tour-read.png`。
+- `npm run test:browser`：
+  - 网页端说明罗盘关卡要在桌面端进行；
+  - 「读懂一次执行」用快速准备走完。
+  - 日志在 `.runtime/m8a-browser.log`。
+- 截图里发现两个问题并修掉：系统面板挡住目标；页面重画后目标滚出屏幕。冒烟脚本现在检查目标在屏幕内。
+- 修了两处原有的冒烟竞态：密钥表单和「已合入本机主线」。
+- 详见 [docs/24 §7](24-guided-tours.md)。
+
+## 2026-10-06：M7b 团队执行机跑已发布版本、M7c 上线检查与 Agent 分析、测试版本存储
+
+- `npm run check` 通过。
+- `npm test`：678 项，654 通过，0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/m7c-tests.log`。新增：
+  - 测试版本存成文件；完整版本到达后，之前的增量删除；单个项目的上限；不挤占磁盘保留区；
+  - 执行机只能凭自己正在进行的执行读取版本；
+  - 发布检查逐个看两次发布之间的每个提交：提交后又删掉的录像和大文件照样拦下；
+  - 内核的已发布版本执行方式。
+- 端到端：一台没有任何测试仓库的“团队工位”执行机跑已发布的 `rig/v1`，两条用例通过，执行记录里是 `rig/v1` 和提交号。
+- `npm run test:desktop` 新增：原分支前进后「上线检查」把基准更新到最新提交，并打开「全部用例」计划的这次执行。执行在被领取前取消，没有真正运行罗盘用例。日志在 `.runtime/m7c-desktop.log`。
+  - 修了冒烟脚本里的一处竞态：提示先出现、页面后重画，脚本拿到的是旧节点。
+- `npm run test:browser` 新增：执行详情「让 Agent 分析这次执行」跳到测试任务，草稿里有执行编号和“能不能上线”，选的是失败定级员，没有自动开始。日志在 `.runtime/m7c-browser.log`。
+- 存储实测：`node scripts/measure-test-versions.mjs`。200 个版本、50 个测试文件、300 条用例，服务器上占 298 KB（不清理是 3.3 MB）。详见 [docs/23 §7](23-test-repository.md)。
+
+## 2026-10-06：M7 测试仓库（本机版本、验证、发布与同步）
+
+- `npm run check` 通过。
+- `npm test`：672 项，648 通过，0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/m7-tests.log`。
+  - 有一次全量运行时，传感器评测（`proving-ground.test`）在高负载下超时失败，单独运行和再次全量运行都通过。它本来就对时间敏感。
+- 端到端（试验场 + 本机执行机 + `npx playwright test`）：
+  - 缺陷版：002 失败，即缺陷 PG-003；
+  - 修复版：通过；
+  - 用失败的执行发布被拒绝，用通过的执行发布成 v1；
+  - 另一台电脑同步后主线跟上。
+- `npm run test:desktop`：界面上完成写入、执行、验证、合入和发布 v1。截图在 `.runtime/qa/desktop-repository-task.png`、`desktop-repository.png`。
+- `npm run test:browser`：网页端只读显示服务器版本。
+- 详见 [docs/23 §5](23-test-repository.md)。
+
+## 2026-10-06：整合旧管理台 M6（旧管理台只读、新手引导、审计、安装包）与流程修复
+
+- `npm run check` 通过。
+- `npm test`：662 项，638 通过，0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/m6-tests.log`。
+- 新增 `tests/project-model.test.mjs`；内核计划审计用现有测试覆盖，`api.test`、`audit.test`、`packs.test` 都通过。
+- `npm run test:browser`：
+  - 定时前先验证：新计划不能定时，验证通过后可以；
+  - 上手清单；
+  - 审计里的定时改动；
+  - 登记安装包；
+  - 旧管理台只读。
+  - 截图在 `.runtime/qa/web-plans.png`、`web-audit.png`、`web-legacy-readonly.png`。
+- `npm run test:desktop` 通过。
+- 走查结论见 [docs/22](22-flow-review.md)，记录详见 [docs/21 §6.7](21-test-center-consolidation.md)。
+
+## 2026-10-06：整合旧管理台 M5（罗盘验收包、源码快照与 QA 仓库）
+
+- `npm run check` 通过。
+- `npm test`：658 项，634 通过，0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/m5-tests.log`。
+- 新增测试：
+  - `tests/project-workspace.test.mjs`；
+  - `tests/compass-pack.test.mjs`；
+  - 内核 `packs.test.mjs`。
+- 对真实 hdo_v2（`feat/yjj/hdo_v2@a4cc5de`）的端到端运行：
+  - 主路径冒烟 10/10 通过；
+  - 全部用例 10 通过、1 失败。失败的 `CPS-WEB-STRAT-003` 是产品问题：平台列表接口失败时，策略列表不加载；
+  - 原仓库的 HEAD、引用和 status 前后一致。
+- `npm run test:browser`：网页端从验收包登记项目，用例库显示 23 条参考用例。截图在 `.runtime/qa/web-pack.png`。
+- `npm run test:desktop`：桌面端选目录建立工作区，计划指定在本机执行机上；更新基准后保留旧快照。截图在 `.runtime/qa/desktop-pack-workspace.png`。
+- 桌面端罗盘启动冒烟**没有运行**：它会初始化 Launcher 和网络，不能在有 MX-H2I 的本机上跑。只核对了它依赖的选择器。
+- 详见 [docs/21 §6.6](21-test-center-consolidation.md)。
+
+## 2026-10-05：整合旧管理台 M4（统一的执行详情）
+
+- `npm run check` 通过。
+- `npm test`：640 项，616 通过，0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/m4-tests.log`。
+- 新增测试：
+  - `tests/run-detail.test.mjs`；
+  - 内核 `events.test.mjs` 里的 `/progress` 用例。
+- `npm run test:browser`：扮演执行机跑完一次执行（真实录制的 webm）。页面依次显示：等待认领 → 实时流水与用例 → 结果、录像按步骤跳转、筛选 → 只重跑这条 → 取消 → 返回。截图在 `.runtime/qa/web-run-live.png`、`web-run-detail.png`。
+- `npm run test:desktop`：时间线经主进程轮询；录像经 `rig-media:` 播放并跳转，非录像文件被拒绝；对外版报告在应用内打开并保存为 PDF。截图在 `.runtime/qa/desktop-run-detail.png`。
+- **实测中发现并修复**：
+  - 流水下面多出 “null”；
+  - 跑完的执行仍显示“进行中”的段；
+  - 步骤时间只精确到秒；
+  - 全局执行记录表的列宽。
+- 详见 [docs/21 §6.5](21-test-center-consolidation.md)。
+
+## 2026-10-05：整合旧管理台 M3（执行计划；桌面端去掉旧管理台）
+
+- `npm run check` 通过。
+- `npm test`：632 项，608 通过，0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/m3-tests.log`。
+- `npm run test:browser`：执行计划的完整生命周期，以及任务内当场新建计划，都通过。截图在 `.runtime/qa/web-plans.png`、`web-inline-plan.png`。
+- `npm run test:desktop`：经主进程管理计划通过；桌面端没有旧管理台入口，打开 `/test-center/` 被拒绝。
+- **实测中发现并修复**：
+  - 卡片里的操作按钮被挤成一个字一行，长说明溢出卡片；
+  - 服务端提示仍指向旧的“执行机”页面；
+  - smoke 脚本里的变量名冲突。
+- 详见 [docs/21 §6.4](21-test-center-consolidation.md)。
+
+## 2026-10-05：整合旧管理台 M2（项目设置、用例库、提升到用例库、通知渠道）
+
+- `npm run check` 通过。
+- `npm test`：全量 0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/m2-tests.log`。
+- 新增测试 `tests/case-promotion.test.mjs`。
+- `npm run test:browser`：网页端执行方式、密钥、用例库、提升、通知渠道、删除项目的完整流程通过。截图在 `.runtime/qa/web-project-settings.png`、`web-promote.png`。
+- `npm run test:desktop`：经主进程完成同样的操作（含 PUT），越界路径被拒绝。
+- **实测中发现并修复**：
+  - smoke 服务没有配置加密密钥，暴露出提示里写的还是旧项目的变量名和 `.env.internal`，已改成 Rig 的说法；
+  - 用 API 建的任务需要先刷新页面才会出现在列表里（smoke 脚本已补上刷新）；
+  - 已确认的用例按钮仍写着“确认本次用例”；
+  - 一行表单末尾的按钮会折成两行。
+- 详见 [docs/21 §6.3](21-test-center-consolidation.md)。
+
+## 2026-10-05：整合旧管理台 M1（账号与成员、执行机与工位）
+
+- `npm run check` 通过。
+- `npm test`：全量 0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/m1-tests.log`。
+- 新增测试 `tests/client.test.mjs`：桌面客户端的 PATCH、DELETE、204 处理，以及 4xx 原因透传。
+- `npm run test:browser`：网页端账号与执行机的完整流程通过。截图在 `.runtime/qa/web-members-created.png`、`web-runners-enroll.png`。
+- `npm run test:desktop`：经主进程管理账号、接入码、移除执行机通过。截图在 `.runtime/qa/desktop-runners.png`。
+- **实测中发现并修复**：
+  - id 冲突；
+  - 导航分组展开状态与轮询重绘的竞争；
+  - smoke 脚本登录后立即判断导航的竞争；
+  - 规程页测试写死旧分组。
+- 详见 [docs/21 §6.2](21-test-center-consolidation.md)。
+
+## 2026-10-05：整合旧管理台 M0（导航、用语、项目页签、桌面端内看报告）
+
+- `npm run check`：217 个模块通过。
+- `npm test`：627 项，603 通过，0 失败；24 项 PostgreSQL 测试跳过（没有设置 `MX_RIG_TEST_DATABASE_URL`）。日志在 `.runtime/m0-tests.log`。
+- `npm run test:browser`：通过。
+- `npm run test:desktop`：通过。新增一步：真实派发后在桌面端打开执行报告。核对了：报告带登录态渲染、颜色变量已加载、报告窗口里请求其他接口被拦截。截图在 `.runtime/qa/desktop-report-window.png`。
+- 新增测试 `tests/report-window.test.mjs`：报告窗口只给本次执行的报告和产物加凭据；其他执行、其他接口、其他站点、写请求和路径技巧都被拒绝；样式文件和它导入的 tokens 放行。
+- 本机服务 UI 核对（无头浏览器，管理员密码只经环境变量传入）：项目页签、执行计划卡片、全局执行记录页。截图在 `.runtime/m0-ui/`。
+- **实测中发现并修复**：
+  - 报告样式 `neon-void.css` 会 `@import ./tokens.css`，报告窗口没有放行，页面颜色全失；
+  - “项目与任务”的副标题含“执行记录”四个字，和新页面名冲突，界面和 smoke 脚本都会认错；
+  - `views.js` 里有两个同名常量 `RUNS_ON`；
+  - 规程试车记录的“执行记录”按钮原本指向无效地址。
+- 详见 [docs/21 §6.1](21-test-center-consolidation.md)。
+
+## 2026-10-05：试验场 v1 与传感器（自动检查项）
+
+环境：macOS 14.4.1（Apple 芯片）、Node 22.21.1、Playwright 1.58.2 / Chromium 145.0.7632.6，无头模式。
+
+- `npm run check`：215 个模块通过。
+- `npm test`：624 项，600 通过，0 失败；24 项跳过，原因都是没有设置 `MX_RIG_TEST_DATABASE_URL`，跳过的是 PostgreSQL 多副本测试。日志在 `.runtime/sensors-full-tests.log`。
+- 新增测试：
+  - `tests/sensors.test.mjs`（8 项）：
+    - 脱敏，URL 只留路径，令牌只报参数名；
+    - 按签名去重计数；
+    - 站点范围外被拦下的请求、导航取消、关闭之后的事件都不算页面失败；
+    - 不应答的页面跳过，不等待；
+    - 服务端 schema 接收新字段，老版本服务端拒收后去掉新字段重报；
+    - 回放帧带上信号。
+  - `tests/proving-ground.test.mjs`（4 项）：
+    - 缺陷开关；
+    - 服务的页面与鉴权；
+    - 两个版本的完整评测；
+    - Agent 步骤携带信号，包括对“无效点击”的回归测试。
+- **评测**：`evals/sensors.mjs`，卡死阈值取 2 秒。夹具结果，不是产品质量：
+
+| 项目 | 结果 |
+| --- | --- |
+| 传感器负责的缺陷（10 个） | 全部检出 |
+| 断言负责的缺陷（2 个） | 有缺陷版本判失败、修复版判通过 |
+| 修复版误报 | 0 条 |
+| 修复版未通过的规程 | 0 条 |
+| 无法对应到已知缺陷的线索 | 0 条 |
+| 断言全部通过、但传感器报警的规程 | 5 条：login、list-filter、item-detail、reports、settings-english |
+
+  一次完整评测约 35 秒。
+- **Agent 路径实测**：用 `BrowserTools.execute` 按 Agent 的方式在有缺陷版本上走 11 步，读到 6 类信号：URL 中的令牌、内容泄漏、无效点击、控制台报错、慢接口、加载卡死（这条路线没有走到会白屏和接口 500 的页面）。然后导出回放 HTML，在内置浏览器里核对：
+  - “自动检查项”轨道按严重度着色，当前步骤带外框；
+  - 当前步骤的线索列表正确；
+  - 步骤列表上有计数徽标。
+- **实测中发现并修复**：Agent 点击前会截一张带遮罩的意图图，Playwright 截图时临时插入的 `x-pw-glass` 节点被算成“页面有反应”，导致“无效点击”在 Agent 路径上漏报；规程路径没有这个问题。已排除工具自身的节点，并补了回归测试。
+- **没有做**：
+  - 没有在桌面端界面和 `mx-rig` 终端这两个正式入口对试验场实测；
+  - 没有在 Electron 应用上实测传感器；
+  - 没有在 Windows 和 Linux 上运行；
+  - 没有用真实被测系统做误报评估；
+  - 信号还没有进入内核 Run 与质量报告。
+- 详见 [docs/20](20-blueprint.md) §12 与 [试验场说明](../test-packs/proving-ground/README.md)。
+
 ## 2026-10-02：本机一键体验、自带测试浏览器、写好服务器地址的安装包
 
 - `npm run check`：189 个模块通过。

@@ -33,7 +33,7 @@ export class MissionStore {
       const row = JSON.parse(await readFile(join(this.root, file), 'utf8'))
       this.rows.set(row.id, row)
       // A desktop's copy is that desktop's to update; this process never ran it.
-      if (row.surface === 'desktop') continue
+      if (row.surface === 'desktop' || row.status === 'draft') continue
       if (!TERMINAL.has(row.status)) {
         row.status = 'blocked'
         row.pending = null
@@ -91,7 +91,8 @@ export class MissionStore {
       agentKey: input.agentKey ?? null,
       orchestrationKey: input.orchestrationKey ?? null,
       inputs: input.inputs ?? null,
-      status: 'queued',
+      status: input.workbench ? 'draft' : 'queued',
+      ...(input.workbench ? { workbench: structuredClone(input.workbench) } : {}),
       createdAt: new Date().toISOString(),
       events: [],
       messages: [],

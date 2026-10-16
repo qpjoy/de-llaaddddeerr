@@ -4,6 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { RigError, isProductionHost } from '../contracts/index.mjs'
 import { annotateSnapshot, isRef, sameElement } from './aria.mjs'
 import { intentLabel, pilotScript } from './pilot.mjs'
+import { Sensors, vitalsScript } from './sensors.mjs'
 import { asks, isProduction, siteDecision } from './sites.mjs'
 
 // How long one action may wait for its element to become actionable. Short on
@@ -135,9 +136,22 @@ export class BrowserTools {
   constructor(
     artifactRoot,
     launcher,
-    { headless = false, electronLauncher = null, native = null, pilot = true, dwellMs = null, provision = null } = {}
+    {
+      headless = false,
+      electronLauncher = null,
+      native = null,
+      pilot = true,
+      dwellMs = null,
+      provision = null,
+      sensors = {}
+    } = {}
   ) {
     this.root = artifactRoot
+    // 自动检查项 (sensors.mjs): options for each session's sensors, or false
+    // for none. What they read rides on each step's result as `signals`.
+    this.sensorOptions = sensors === false ? null : sensors
+    this.sensors = null
+    this.actions = 0
     // The visible cursor and intent captions (pilot.mjs). A person watching a
     // headed browser gets a pause at each target to see what is about to
     // happen; headless runs keep full speed.
@@ -282,12 +296,15 @@ export class BrowserTools {
       const request = route.request()
       if (this.#permits(request)) return route.continue()
       if (isTopNavigation(request)) this.happened.blocked = request.url()
+      // Stopped by the station, not failed by the page.
+      this.sensors?.refuse(request)
       return route.abort()
     })
     await context.routeWebSocket?.(/.*/, (socket) =>
       this.#permitsSocket(socket.url()) ? socket.connectToServer() : socket.close()
     )
     await this.#installPilot(context)
+    await this.#startSensing(context)
     this.#followTabs(context)
     // The flight recorder: every action, DOM snapshot and screenshot of this
     // session, saved next to the mission's other evidence when it closes.
@@ -341,8 +358,9 @@ export class BrowserTools {
     })
   }
 
-  /** What every tab needs: dialogs answered, downloads kept, its closing noticed. */
+  /** What every tab needs: dialogs answered, downloads kept, its closing noticed, its errors read. */
   #watch(page) {
+    this.sensors?.attachPage(page)
     page.on?.('dialog', (dialog) => this.#dialog(dialog))
     page.on?.('download', (download) => this.#download(download))
     page.on?.('close', () => this.#tabClosed(page))
@@ -461,6 +479,50 @@ export class BrowserTools {
     } catch {
       // No cursor on this page; the work itself is unaffected.
     }
+  }
+
+  /**
+   * A fresh set of sensors for a new session (context): network, console and
+   * page errors as they happen, Web Vitals from each page's first moment.
+   */
+  async #startSensing(context, { now = null } = {}) {
+    this.sensors?.stop()
+    this.sensors = this.sensorOptions ? new Sensors(this.sensorOptions) : null
+    if (!this.sensors) return
+    this.sensors.attachContext(context)
+    try {
+      await context.addInitScript?.(vitalsScript)
+      // A window that loaded before the script existed.
+      if (now) await now.evaluate?.(vitalsScript)
+    } catch {
+      // No vitals on this page; the other sensors still read it.
+    }
+  }
+
+  /** Whether the page answered an action in a way a mutation count cannot see. */
+  #effects() {
+    const happened = this.happened
+    return Boolean(happened.dialogs.length || happened.downloads.length || happened.saving.length || happened.notes.length || happened.blocked)
+  }
+
+  /** Read the page after a step and take what the sensors found since the last one. */
+  async #sense() {
+    if (!this.sensors || !this.page) return []
+    await this.sensors.probe(this.page)
+    return this.sensors.take()
+  }
+
+  /**
+   * The end of a sensed session (a procedure's replay): a spinner still
+   * turning gets the rest of its allowance, then everything read, and the
+   * timings a monitor would chart. Null when this station has no sensors.
+   */
+  async finishSensing() {
+    const sensors = this.sensors
+    if (!sensors) return null
+    await sensors.finish(this.page).catch(() => {})
+    sensors.take()
+    return { signals: sensors.all(), metrics: sensors.metrics(), dropped: sensors.dropped }
   }
 
   /**
@@ -928,8 +990,10 @@ export class BrowserTools {
     this.context = this.electronApp.context()
     await this.context.tracing?.start({ screenshots: true, snapshots: true }).catch(() => {})
     await this.#installPilot(this.context)
+    await this.#startSensing(this.context)
     this.page = await this.electronApp.firstWindow({ timeout: 30_000 })
     this.#watch(this.page)
+    await this.page.evaluate?.(vitalsScript).catch?.(() => {})
     this.#followTabs(this.context)
     this.channel = 'electron'
     // The first window loaded before the init script existed.
@@ -972,6 +1036,8 @@ export class BrowserTools {
       let extra = {}
       this.lastTarget = null
       this.lastAim = null
+      this.sensors?.at(this.actions++)
+      if (name === 'browser_click') await this.sensors?.armClick(this.page)
       switch (name) {
         case 'browser_open':
           await this.page.goto(args.url, { waitUntil: 'domcontentloaded', timeout: 30_000 })
@@ -1030,6 +1096,11 @@ export class BrowserTools {
       // A click or a key may open a tab or start a download a moment later.
       if (name === 'browser_click' || name === 'browser_press') await sleep(SETTLE_MS)
       if (this.happened.saving.length) await Promise.race([Promise.allSettled(this.happened.saving), sleep(10_000)])
+      if (name === 'browser_click')
+        await this.sensors?.checkClick(this.page, {
+          label: this.lastTarget?.name ?? this.lastTarget?.label ?? null,
+          effects: this.#effects()
+        })
       // Stopped at the edge of this mission's sites: the tab shows an error
       // page; step back to where it was, and the note says where it wanted to go.
       if (this.happened.blocked && /^chrome-error:/.test(this.page.url()))
@@ -1043,6 +1114,9 @@ export class BrowserTools {
       }
       if (!this.allowed(this.page.url(), policy))
         throw new RigError('origin_denied', '导航超出允许范围', 403)
+      // 自动检查项: leads read on this step, beside its result, never instead of it.
+      const signals = await this.#sense()
+      if (signals.length) extra = { ...extra, signals }
       extra = { ...extra, ...(await this.#takeHappenings()) }
       // What was actually done, in terms a script can replay: the exporter
       // turns a mission's actions into a Playwright spec from these.
@@ -1269,20 +1343,24 @@ export class BrowserTools {
    * Same Range Safety as `execute`: allowed origins, the production block and
    * the sensitive-field refusal all apply.
    */
-  async perform(step, { policy, signal, runId }) {
+  async perform(step, { policy, signal, runId, index = null }) {
     signal?.throwIfAborted()
     this.missionId = runId
     this.lastTarget = null
+    this.sensors?.at(index)
     if (step.do === 'launch') {
       await this.#launchElectron(step.app, policy)
+      this.sensors?.at(index)
       await this.page.waitForLoadState('domcontentloaded').catch(() => {})
-      return {}
+      const signals = await this.#sense()
+      return signals.length ? { signals } : {}
     }
     if (step.do === 'open') {
       if (!this.allowed(step.url, policy))
         throw new RigError('origin_denied', `${step.url} 不在浏览器允许列表中`, 403)
       this.policy = policy
       if (this.mode !== 'electron') await this.#launch(policy)
+      this.sensors?.at(index)
       try {
         await this.page.goto(step.url, { waitUntil: 'domcontentloaded', timeout: 30_000 })
       } catch (error) {
@@ -1294,7 +1372,8 @@ export class BrowserTools {
           502
         )
       }
-      return {}
+      const signals = await this.#sense()
+      return signals.length ? { signals } : {}
     }
     if (!this.page) throw new RigError('browser_missing', '规程还没有打开页面')
     this.policy = policy
@@ -1310,7 +1389,12 @@ export class BrowserTools {
       const act = (perform) => this.#step(step.target, perform, intentLabel(step.do, step.target, step))
       switch (step.do) {
         case 'click':
+          await this.sensors?.armClick(this.page)
           await act((target) => target.click({ timeout: ACTION_TIMEOUT_MS }))
+          await this.sensors?.checkClick(this.page, {
+            label: step.target?.name ?? step.target?.label ?? null,
+            effects: this.#effects()
+          })
           break
         case 'fill':
           await act(async (target) => {
@@ -1367,9 +1451,14 @@ export class BrowserTools {
         throw new RigError('origin_denied', '导航超出允许范围', 403)
       // Downloads finish and dialogs are answered; a navigation stopped at the
       // edge of the procedure's sites is the step not doing what it says.
+      const signals = await this.#sense()
       const happened = await this.#takeHappenings()
       if (happened.blocked) throw new RigError('origin_denied', happened.notice, 403)
-      return { ...outcome, ...(happened.downloads ? { downloads: happened.downloads } : {}) }
+      return {
+        ...outcome,
+        ...(happened.downloads ? { downloads: happened.downloads } : {}),
+        ...(signals.length ? { signals } : {})
+      }
     } finally {
       this.dialogAnswer = null
       signal?.removeEventListener('abort', onAbort)
@@ -1486,6 +1575,9 @@ export class BrowserTools {
 
   async close() {
     this.native?.close()
+    // Closing aborts what is in flight; that is not the page failing.
+    this.sensors?.stop()
+    this.sensors = null
     const browser = this.browser
     const context = this.context
     const electronApp = this.electronApp

@@ -52,11 +52,15 @@ Internal 服务器（Kubernetes，在节点上执行）
   scripts/manage.sh verify | status | logs [server|migrate|postgres] | admin-token
   scripts/manage.sh migrate                 只跑迁移
   scripts/manage.sh stop                    服务缩到 0；数据库、Secret 与数据目录保留
+  scripts/manage.sh launcher plan | apply   桌面端 Launcher 模式要在 Launcher 登记的内容（docs/25）：
+                                            plan 只读；apply 写入产品网络和 AppCenter 条目（需要 MX_LAUNCHER_OPS_TOKEN），
+                                            并列出只能在 Launcher Admin 里做的步骤
 
 开发
   scripts/manage.sh dev | test | eval [参数]
-  scripts/manage.sh desktop [--dir] [--server <地址>] [--private-http] [--no-browser]
-                                            打包桌面端：自带测试浏览器；--server 写入登录页的服务地址
+  scripts/manage.sh desktop [--dir] [--server <地址>] [--private-http] [--no-browser] [--launcher]
+                                            打包桌面端：自带测试浏览器；--server 写入登录页的服务地址；
+                                            --launcher 打成 Launcher 独立端（自己的产品网络，带 WireGuard 引擎）
 
 登录：账号 admin，密码是管理员令牌（token / admin-token 输出），之后在「成员」页开通个人账号。
 可选覆盖写在 .env（或 MX_RIG_ENV_FILE）：MX_RIG_MODEL_API_KEY、MX_RIG_PUBLIC_URL、
@@ -312,6 +316,23 @@ resolve_sticky() {
   export "${name?}"
 }
 
+# Launcher Internal in the same cluster answers sign-in with the platform's
+# unified accounts (docs/25 §3.4). Found here so nobody types it: an explicit
+# MX_RIG_LAUNCHER_URL wins and is remembered; MX_RIG_LAUNCHER_DISCOVER=0 leaves
+# it off.
+resolve_launcher_url() {
+  resolve_sticky MX_RIG_LAUNCHER_URL
+  [ -z "$MX_RIG_LAUNCHER_URL" ] || return 0
+  [ "${MX_RIG_LAUNCHER_DISCOVER:-1}" != 0 ] || return 0
+  local port
+  port="$(kubectl -n mx-internal-shadow get service mx-launcher-internal \
+    -o 'jsonpath={.spec.ports[?(@.name=="http")].port}' 2>/dev/null || true)"
+  [ -n "$port" ] || return 0
+  MX_RIG_LAUNCHER_URL="http://mx-launcher-internal.mx-internal-shadow.svc.cluster.local:${port}"
+  export MX_RIG_LAUNCHER_URL
+  say "unified accounts: signing in through Launcher Internal at ${MX_RIG_LAUNCHER_URL}"
+}
+
 resolve_public_url() {
   resolve_sticky MX_RIG_PUBLIC_URL
   [ -z "$MX_RIG_PUBLIC_URL" ] || return 0
@@ -503,9 +524,10 @@ prepare_kubernetes() {
   resolve_preserved_secret MX_RIG_SECRET_KEY "the credential-encryption key" 32
   export MX_RIG_DATABASE_URL="postgres://mx_rig:${MX_RIG_POSTGRES_PASSWORD}@mx-rig-postgres:5432/mx_rig"
   local name
-  for name in MX_RIG_INSECURE_COOKIES MX_RIG_MODEL_API_KEY MX_RIG_MODEL_API_KEY_2 MX_RIG_GIT_TOKEN MX_RIG_LAUNCHER_URL; do
+  for name in MX_RIG_INSECURE_COOKIES MX_RIG_MODEL_API_KEY MX_RIG_MODEL_API_KEY_2 MX_RIG_GIT_TOKEN; do
     resolve_sticky "$name"
   done
+  resolve_launcher_url
   resolve_public_url
   resolve_data_root
   resolve_runner_cidrs
@@ -541,6 +563,11 @@ cmd_deploy() {
   cmd_verify
   say "deployed: ${MX_RIG_PUBLIC_URL:-kubectl -n ${NAMESPACE} port-forward service/mx-rig-server 8791:80}"
   say "sign in as admin with: scripts/manage.sh admin-token"
+  # The desktop reaches this server through its own product VIP (docs/25 §3.2):
+  # one reverse-proxy route in Launcher Admin, registered once.
+  if [ -n "${MX_RIG_PUBLIC_URL:-}" ]; then
+    say "desktop (Launcher mode): in Launcher Admin add the reverse-proxy route  host <mx-rig service VIP>  ->  ${MX_RIG_PUBLIC_URL}"
+  fi
 }
 
 cmd_migrate() {
@@ -606,13 +633,37 @@ cmd_stop() {
 
 # -- development -----------------------------------------------------------------
 
+# What the desktop's Launcher mode needs registered in Launcher (docs/25 §3.4).
+# Run on the Internal node: both services are found in the cluster.
+cmd_launcher() {
+  need node
+  local action="${1:-plan}"
+  shift || true
+  case "$action" in plan | apply) ;; *) die "usage: scripts/manage.sh launcher plan|apply" ;; esac
+  local url="${MX_LAUNCHER_URL:-}" found
+  if [ -z "$url" ]; then
+    need kubectl
+    found="$(kubectl -n mx-internal-shadow get service mx-launcher-internal \
+      -o 'jsonpath={.spec.clusterIP}:{.spec.ports[?(@.name=="http")].port}' 2>/dev/null || true)"
+    [ -n "$found" ] && [ "$found" != ":" ] || die "Launcher Internal is not in this cluster; set MX_LAUNCHER_URL"
+    url="http://${found}"
+  fi
+  # The Rig service the VIP route points at: what deploy published.
+  if [ -z "${MX_RIG_PUBLIC_URL:-}" ] && command -v kubectl >/dev/null 2>&1; then
+    load_env
+    resolve_public_url 2>/dev/null || true
+  fi
+  node "${ROOT_DIR}/scripts/launcher-register.mjs" "$action" --url "$url" ${MX_RIG_PUBLIC_URL:+--rig-url "$MX_RIG_PUBLIC_URL"}
+}
+
 cmd_desktop() {
   need npm
   local args=("$@") public
   # The server this machine runs (compose up) is the one the build points at,
   # unless --server says otherwise.
   public="$(env_value MX_RIG_PUBLIC_URL)"
-  if [ -n "$public" ] && ! printf '%s\n' "${args[@]+"${args[@]}"}" | grep -qx -- '--server'; then
+  # A Launcher-mode build reaches the service through its product VIP instead.
+  if [ -n "$public" ] && ! printf '%s\n' "${args[@]+"${args[@]}"}" | grep -qx -e '--server' -e '--launcher'; then
     args+=(--server "$public")
     case "$public" in http://10.* | http://192.168.* | http://172.*) args+=(--private-http) ;; esac
     say "login page will start with ${public} (pass --server to change)"
@@ -667,6 +718,7 @@ if [ "${MX_RIG_MANAGE_SOURCE_ONLY:-0}" != "1" ]; then
     test) need npm; npm --prefix "$ROOT_DIR" test ;;
     eval) need npm; npm --prefix "$ROOT_DIR" run eval -- "$@" ;;
     desktop) cmd_desktop "$@" ;;
+    launcher) cmd_launcher "$@" ;;
     local) cmd_local "$@" ;;
     help | -h | --help) usage ;;
     *) usage; exit 1 ;;

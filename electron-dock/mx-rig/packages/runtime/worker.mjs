@@ -1,3 +1,4 @@
+import { TestProjectWorkspace } from './test-project-workspace.mjs'
 import { MissionStore } from './store.mjs'
 import { RigRuntime } from './engine.mjs'
 import { RigClient } from './client.mjs'
@@ -21,6 +22,7 @@ function assertTakeover(active, id) {
 let stationBrowser
 let provision
 let bench
+let sourceWorkspace
 process.on('message', async (message) => {
   if (!message || typeof message.id !== 'number') return
   try {
@@ -55,10 +57,13 @@ process.on('message', async (message) => {
       // A page's alert / confirm / prompt while a person has it: the window asks.
       browser.onDialog = (info) => process.send?.({ event: 'dialog', info })
       stationBrowser = browser
+      sourceWorkspace = new TestProjectWorkspace(root)
+      const executor = new ToolExecutor(client, browser)
+      executor.source = sourceWorkspace
       runtime = new RigRuntime({
         store,
         client,
-        executor: new ToolExecutor(client, browser),
+        executor,
         owner
       })
       bench = new ProcedureBench({ client, runtime, browser })
@@ -66,11 +71,49 @@ process.on('message', async (message) => {
     } else {
       if (!runtime) throw new RigError('not_ready', 'Runtime 尚未就绪')
       switch (message.method) {
-        case 'list':
-          result = { missions: runtime.list() }
+        case 'source-status':
+        case 'source-connect':
+        case 'source-git-connect':
+        case 'source-refresh':
+        case 'source-cancel':
+        case 'source-disconnect':
+        case 'implementation-export': {
+          const row = await runtime.store.get(message.input.id, runtime.owner)
+          if (!row.workbench) throw new RigError('not_test_task', '任务未关联项目', 409)
+          if (message.method === 'source-status') { result = sourceWorkspace.status(row.id); break }
+          if (!['source-cancel', 'source-disconnect'].includes(message.method))
+            await runtime.client.request(`/api/rig/v1/missions/${row.id}/project-access`)
+          // Server rechecks the signed-in member's current role, not the cached login role.
+          await runtime.client.request('/api/rig/v1/execution-config')
+          if (message.method === 'source-cancel') { result = await sourceWorkspace.cancel(row.id); break }
+          if (message.method === 'implementation-export') {
+            const data = await runtime.client.request(`/api/rig/v1/missions/${row.id}/implementation`)
+            result = await sourceWorkspace.export(row.id, data, message.input)
+          } else {
+            if (runtime.active) throw new RigError('busy', '请先结束当前对话再切换源码目录', 409)
+            if (message.method === 'source-connect') result = await sourceWorkspace.bind(row.id, message.input.directory)
+            else if (message.method === 'source-git-connect') result = await sourceWorkspace.connectGit(row.id, row.workbench)
+            else if (message.method === 'source-refresh') result = await sourceWorkspace.refresh(row.id)
+            else result = sourceWorkspace.disconnect(row.id)
+            row.sourceBaseline = result.baseline
+            await runtime.event(row, 'source_baseline', result.directory ? '已记录只读源码基准' : '已断开源码', { baseline: result.baseline })
+            await sync.flush()
+          }
           break
+        }
+        case 'list': {
+          const { apps } = await runtime.client.request('/api/v1/apps')
+          const visible = new Set(apps.map((app) => app.id))
+          result = { missions: (await runtime.list()).filter((row) => !row.workbench || visible.has(row.workbench.appId)) }
+          break
+        }
         case 'start':
           result = { mission: await runtime.start(message.input) }
+          break
+        case 'test-task-create':
+          result = { mission: await runtime.createTestTask(message.input) }
+          // The case book is shared on the service; publish identity before its first read.
+          await sync.flush()
           break
         case 'followup':
           result = { mission: await runtime.followup(message.input.id, message.input) }
@@ -141,6 +184,7 @@ process.on('message', async (message) => {
           result = await bench.repair(message.input.id, message.input.runId)
           break
         case 'close':
+          await sourceWorkspace.close()
           await runtime.close()
           await sync?.close()
           result = { closed: true }
@@ -158,7 +202,7 @@ process.on('message', async (message) => {
   }
 })
 process.on('disconnect', () => {
-  Promise.resolve(runtime?.close())
+  Promise.resolve(sourceWorkspace?.close()).then(() => runtime?.close())
     .then(() => sync?.close())
     .finally(() => process.exit())
     .catch(() => process.exit(1))
