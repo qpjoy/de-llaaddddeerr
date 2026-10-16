@@ -1,5 +1,6 @@
 import { AppError } from '../core/errors.mjs'
 import { normalizeNativeForwardingRequest } from './native-forwarding.mjs'
+import { normalizeSearchMedia } from './search-content.mjs'
 
 // These are the retained Night-All default keyword endpoints, not an editable
 // URL catalog. All execution, archives, leases and public cursor signing live
@@ -14,9 +15,14 @@ export const TIKHUB_CONTENT_SEARCH_RECIPES = Object.freeze(Object.fromEntries([
     { sort_type: 'newest', publish_time: 'all', duration: 'all' }, ['keyword', 'pcursor', 'sort_type', 'publish_time', 'duration']],
   ['zhihu', 'zhihu_web_fetch_article_search_v3', 'GET', '/api/v1/zhihu/web/fetch_article_search_v3', 'offset',
     { offset: '0', show_all_topics: 0, search_source: 'Normal', search_hash_id: '', sort: 'created_time' }, ['keyword', 'offset', 'limit', 'show_all_topics', 'search_source', 'search_hash_id', 'sort']],
-].map(([platform, endpointId, method, path, pagination, defaults, parameterNames]) => [platform, Object.freeze({
+  ['reddit', 'reddit_app_fetch_dynamic_search', 'GET', '/api/v1/reddit/app/fetch_dynamic_search', 'cursor',
+    { search_type: 'post', sort: 'NEW', time_range: 'all', safe_search: 'unset', allow_nsfw: '0', after: '', need_format: false },
+    ['query', 'search_type', 'sort', 'time_range', 'safe_search', 'allow_nsfw', 'after', 'need_format'], false, false],
+  ['youtube', 'youtube_web_v2_get_general_search_v2', 'GET', '/api/v1/youtube/web_v2/get_general_search_v2', 'cursor',
+    { sort_by: 'upload_date', continuation_token: '' }, ['keyword', 'continuation_token', 'upload_date', 'type', 'duration', 'features', 'sort_by'], false, false],
+].map(([platform, endpointId, method, path, pagination, defaults, parameterNames, rawCompatibility = true, publicParams = true]) => [platform, Object.freeze({
   platform, key: `t.${endpointId}`, endpointId, method, path, pagination,
-  defaults: Object.freeze(defaults), parameterNames: Object.freeze(parameterNames),
+  defaults: Object.freeze(defaults), parameterNames: Object.freeze(parameterNames), rawCompatibility, publicParams,
 })])))
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -70,9 +76,10 @@ export function normalizeTikHubContentSearchRequest({ platform, query, pageSize 
   if (typeof query !== 'string' || !query.trim() || query.length > maxQueryLength || query.includes('\u0000')) throw new AppError(400, 'invalid_query', 'A bounded keyword is required')
   if (!object(params) || Object.keys(params).some(name => !recipe.parameterNames.includes(name))) throw new AppError(400, 'unsupported_fields', 'Unsupported content-search parameter')
   if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > maxPageSize) throw new AppError(400, 'invalid_page_size', 'Invalid content-search page or page size')
-  const nextNames = { bilibili: ['page'], douyin: ['cursor', 'search_id', 'backtrace'], kuaishou: ['pcursor'], zhihu: ['offset', 'search_hash_id'] }[platform]
+  const nextNames = { bilibili: ['page'], douyin: ['cursor', 'search_id', 'backtrace'], kuaishou: ['pcursor'], zhihu: ['offset', 'search_hash_id'], reddit: ['after'], youtube: ['continuation_token'] }[platform]
   if (providerCursor != null && (!object(providerCursor) || Object.keys(providerCursor).some(name => !nextNames.includes(name)))) throw new AppError(400, 'invalid_cursor', 'Invalid platform continuation')
-  const upstream = { ...recipe.defaults, ...params, keyword: query.trim(), ...(providerCursor || {}) }
+  const upstream = { ...recipe.defaults, ...params, [platform === 'reddit' ? 'query' : 'keyword']: query.trim(), ...(providerCursor || {}) }
+  if (platform === 'reddit' || platform === 'youtube') validateStandardOnlyParameters(platform, upstream)
   if (platform === 'bilibili') { upstream.page ??= page; upstream.page_size ??= pageSize }
   if (platform === 'zhihu') upstream.limit ??= String(pageSize)
   for (const name of ['page', 'page_size', 'offset', 'cursor', 'limit', 'pubtime_begin_s', 'pubtime_end_s']) {
@@ -80,6 +87,27 @@ export function normalizeTikHubContentSearchRequest({ platform, query, pageSize 
   }
   const native = normalizeNativeForwardingRequest(recipe.key, { params: upstream }, { maxPageSize })
   return { ...native, platform, query: query.trim(), page, pageSize, providerCursor, recipeKey: recipe.key }
+}
+
+function validateStandardOnlyParameters(platform, input) {
+  // These filters are an internal fixed-contract boundary. The standard public
+  // entry deliberately does not offer arbitrary params or native cursor input.
+  const enums = platform === 'reddit' ? {
+    search_type: ['post', 'media'], sort: ['RELEVANCE', 'HOT', 'TOP', 'NEW', 'COMMENTS'],
+    time_range: ['all', 'year', 'month', 'week', 'day', 'hour'], safe_search: ['unset', 'strict'], allow_nsfw: ['0', '1'],
+  } : { upload_date: ['last_hour', 'today', 'this_week', 'this_month', 'this_year'], type: ['video'],
+    duration: ['short', 'medium', 'long'], sort_by: ['relevance', 'upload_date', 'view_count', 'rating'] }
+  for (const [name, values] of Object.entries(enums)) {
+    if (Object.hasOwn(input, name) && !values.includes(input[name])) throw new AppError(400, 'invalid_parameter', `Invalid ${name}`)
+  }
+  const cursorName = platform === 'reddit' ? 'after' : 'continuation_token'
+  const cursor = input[cursorName]
+  if (typeof cursor !== 'string' || cursor.length > 4096 || cursor.includes('\u0000') || cursor && !cursor.trim()) throw new AppError(400, 'invalid_cursor', 'Invalid platform continuation')
+  if (platform === 'reddit') {
+    if (typeof input.need_format !== 'boolean' || input.search_type === 'media' && input.sort === 'COMMENTS') throw new AppError(400, 'invalid_parameter', 'Invalid Reddit search parameter')
+  } else {
+    if (Object.hasOwn(input, 'features') && (typeof input.features !== 'string' || !input.features || input.features.split(',').some(value => !['live', '4k', 'hd', 'subtitles', 'creative_commons', '360', 'vr180', '3d', 'hdr'].includes(value)))) throw new AppError(400, 'invalid_parameter', 'Invalid features')
+  }
 }
 
 function baseRow(platform, id, capturedAt, values) {
@@ -264,6 +292,195 @@ function zhihuRow(entry, capturedAt) {
     completeness: full ? 'provided_content' : preview ? 'provider_preview' : 'title_only' })
 }
 
+// Reddit and YouTube are standard-search-only recipes. Keep their bounded,
+// explicit containers separate from the four established raw contracts.
+const boundedEntries = value => {
+  if (!Array.isArray(value)) throw new Error('invalid_content_search_shape')
+  if (value.length > 10000) throw new Error('content_search_page_too_large')
+  return value
+}
+const exactCount = (...values) => {
+  for (const value of values) if ((typeof value === 'number' || typeof value === 'string' && /^\d+$/.test(value.trim()))
+    && Number.isSafeInteger(Number(value)) && Number(value) >= 0) return Number(value)
+  return null
+}
+const suppliedTimestamp = value => typeof value === 'number' || typeof value === 'string' ? value : null
+function redditRow(value, capturedAt) {
+  const rawId = identity(value.id, value.name, value.post_id)
+  if (!rawId || /^t[012456789]_/.test(rawId)) throw new Error('invalid_content_search_identity')
+  const id = rawId.replace(/^t3_/, '')
+  const author = object(value.authorInfo) ? value.authorInfo : object(value.author) ? value.author : {}
+  const link = first(value.url, value.permalink, value.post_url)
+  const permalink = link.startsWith('/') ? `https://www.reddit.com${link}` : urls(link)[0]
+  const images = urls(value.images, value.image_urls, array(value.preview?.images).map(image => image?.source),
+    array(value.gallery_data?.items).map(item => value.media_metadata?.[item?.media_id]?.s?.u))
+  const videos = urls(value.video_url, value.video_urls, value.media?.reddit_video?.fallback_url, value.secure_media?.reddit_video?.fallback_url)
+  const title = first(value.postTitle, value.title)
+  return baseRow('reddit', id, capturedAt, { kind: first(value.type, 'post'), title,
+    text: first(value.content?.markdown, value.selftext, value.text, value.full_text, value.content, value.body, title),
+    url: permalink, publishedAt: suppliedTimestamp(value.created_utc ?? value.createdAt ?? value.created_at ?? value.published_at),
+    authorId: identity(author.id, value.author_id, value.author), authorName: first(author.name, value.author_name, value.author), avatar: first(author.icon?.url, author.avatar_url, value.author_avatar_url),
+    likes: exactCount(value.like_count, value.score, value.ups), comments: exactCount(value.comment_count, value.commentCount, value.num_comments),
+    shares: exactCount(value.share_count), bookmarks: exactCount(value.collect_count, value.bookmark_count), views: exactCount(value.view_count),
+    cover: first(value.thumbnail, value.cover_url) || images[0], images, videos })
+}
+function youtubeText(value) {
+  if (typeof value === 'string') return value
+  if (!object(value)) return ''
+  return first(value.simpleText, array(value.runs).map(run => string(run?.text)).join(''))
+}
+function youtubeRow(value, capturedAt, videoContainer = false) {
+  const id = identity(value.video_id, value.videoId, videoContainer || value.type === 'video' ? value.id : null)
+  const author = object(value.channel) ? value.channel : object(value.author) ? value.author : {}
+  const owner = array(value.ownerText?.runs)[0] || array(value.longBylineText?.runs)[0] || {}
+  const title = youtubeText(value.title)
+  // Human-readable abbreviated counts and relative publication dates are not
+  // precise observations. Only supplied exact counters/timestamps are retained.
+  const viewText = youtubeText(value.viewCountText)
+  const exactViews = /^(\d{1,3}(?:,\d{3})*|\d+) views?$/.exec(viewText)?.[1]?.replaceAll(',', '')
+  return baseRow('youtube', id, capturedAt, { kind: 'video', title,
+    text: first(value.text, value.full_text, youtubeText(value.description), youtubeText(value.descriptionSnippet),
+      array(value.detailedMetadataSnippets).map(item => youtubeText(item?.snippetText)).filter(Boolean).join('\n'), title),
+    url: urls(value.url, value.video_url)[0] || `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`,
+    publishedAt: suppliedTimestamp(value.published_at ?? value.publishedAt ?? value.published_time ?? value.created_at),
+    authorId: author.channel_id ?? author.channelId ?? author.id ?? value.channel_id ?? value.author_id ?? owner.navigationEndpoint?.browseEndpoint?.browseId,
+    authorName: first(author.name, author.title, author.display_name, value.channel_name, value.channelTitle, value.author_name, owner.text),
+    avatar: first(author.avatar_url, value.author_avatar_url),
+    likes: exactCount(value.like_count), comments: exactCount(value.comment_count), shares: exactCount(value.share_count),
+    bookmarks: exactCount(value.collect_count, value.bookmark_count), views: exactCount(value.view_count, value.viewCount, exactViews),
+    cover: urls(value.thumbnail, value.thumbnail_url, value.thumbnails, value.thumbnail?.thumbnails)[0],
+    images: value.images, videos: urls(value.video_urls, value.play_url, value.download_url) })
+}
+function standardPayloadData(data, platform) {
+  const recognized = value => object(value) && (platform === 'reddit'
+    ? value.search?.dynamic?.components?.main != null || value.search?.Dynamic?.components?.main != null || value.kind === 'Listing' || Array.isArray(value.children) || Array.isArray(value.posts) || Array.isArray(value.items)
+    : Array.isArray(value.videos) || Array.isArray(value.items) || value.contents != null || value.onResponseReceivedCommands != null || value.onResponseReceivedActions != null)
+  // A single documented payload envelope is allowed. Never search params,
+  // request echoes, recommendations, or arbitrary descendant objects.
+  return !recognized(data) && recognized(data.data) ? data.data : data
+}
+function standardCursorPage({ scopes, tokenNames, flagNames, inputToken, nextName, sourceCount, extraTokens = [], nullIsEnd = false }) {
+  const tokens = [...extraTokens], flags = []
+  let explicitNull = false
+  for (const scope of scopes.filter(object)) {
+    for (const name of tokenNames) if (Object.hasOwn(scope, name)) {
+      const value = scope[name]
+      if (value == null || value === '') { explicitNull = true; continue }
+      if (typeof value !== 'string' || !token(value)) throw new Error('invalid_content_search_continuation')
+      tokens.push(value)
+    }
+    for (const name of flagNames) if (Object.hasOwn(scope, name) && scope[name] != null) flags.push(flag(scope[name]))
+  }
+  const unique = [...new Set(tokens)], states = [...new Set(flags)]
+  if (unique.length > 1 || states.length > 1 || unique.length && states[0] === false) throw new Error('contradictory_content_search_continuation')
+  const next = unique[0]
+  if (next && next === inputToken) return { hasMore: false, nextParams: null, nextPage: null,
+    paginationMode: 'cursor', sourceCount, stopReason: 'repeated_cursor' }
+  if (states[0] === true && !next) throw new Error('missing_content_search_continuation')
+  const hasMore = next ? true : states[0] ?? (nullIsEnd && explicitNull ? false : null)
+  return { hasMore, nextParams: next ? { [nextName]: next } : null, nextPage: null, paginationMode: 'cursor', sourceCount }
+}
+function redditProjection(data, request, capturedAt) {
+  const main = (data.search?.dynamic || data.search?.Dynamic)?.components?.main
+  const rows = [], scopes = [], nonposts = []
+  let inspectedCount = 0
+  const add = value => {
+    if (!object(value)) throw new Error('invalid_content_search_entry')
+    if (value.isCommercialCommunication === true || value.promoted === true || value.removedByCategory || value.removed_by_category) { nonposts.push(value); return }
+    rows.push(redditRow(value, capturedAt))
+  }
+  if (main != null) {
+    if (!object(main)) throw new Error('invalid_content_search_shape')
+    const visit = (node, depth = 0) => {
+      if (++inspectedCount > 20000 || depth > 8) throw new Error('content_search_page_too_large')
+      if (!object(node)) throw new Error('invalid_content_search_entry')
+      let recognized = false
+      if (Object.hasOwn(node, 'post')) { add(node.post); recognized = true }
+      if (Object.hasOwn(node, 'children')) { boundedEntries(node.children).forEach(child => visit(child, depth + 1)); recognized = true }
+      if (!recognized && ['community', 'comment', 'author'].some(name => object(node[name]))) { nonposts.push(node); recognized = true }
+      if (!recognized) throw new Error('invalid_content_search_entry')
+    }
+    for (const edge of boundedEntries(main.edges)) visit(edge?.node)
+    scopes.push(main.pageInfo, main)
+  } else {
+    const listing = data.kind === 'Listing' ? data.data : data
+    if (!object(listing) && !Array.isArray(listing)) throw new Error('invalid_content_search_shape')
+    const entries = selectedArray(listing, [['children'], ['posts'], ['items']])
+    for (const entry of entries) {
+      if (!object(entry)) throw new Error('invalid_content_search_entry')
+      if (['t1', 't2', 't5'].includes(entry.kind) || ['community', 'comment', 'author', 'user', 'ad'].includes(entry.type)) { nonposts.push(entry); continue }
+      if (entry.kind != null && entry.kind !== 't3') throw new Error('invalid_content_search_entry')
+      add(entry.kind === 't3' ? entry.data : entry.post || entry)
+    }
+    scopes.push(listing.pageInfo, listing)
+  }
+  const sourceCount = rows.length + nonposts.length
+  if (sourceCount > 10000) throw new Error('content_search_page_too_large')
+  return { rows, nonPostCount: nonposts.length, providerPage: standardCursorPage({ scopes,
+    tokenNames: ['endCursor', 'after', 'next_cursor'], flagNames: ['hasNextPage', 'has_more', 'hasMore'],
+    inputToken: request.upstreamQuery.after, nextName: 'after', sourceCount, nullIsEnd: true }) }
+}
+function youtubeProjection(data, request, capturedAt) {
+  const rows = [], continuations = []
+  let nonPostCount = 0, inspectedCount = 0
+  const visit = (entry, depth = 0, videoContainer = false) => {
+    if (++inspectedCount > 20000 || depth > 8) throw new Error('content_search_page_too_large')
+    if (!object(entry)) throw new Error('invalid_content_search_entry')
+    // Process a genuine video before applying any non-post discriminator.
+    if (Object.hasOwn(entry, 'videoRenderer')) {
+      if (!object(entry.videoRenderer)) throw new Error('invalid_content_search_entry')
+      rows.push(youtubeRow(entry.videoRenderer, capturedAt, true)); return
+    }
+    if (Object.hasOwn(entry, 'video')) {
+      if (!object(entry.video)) throw new Error('invalid_content_search_entry')
+      rows.push(youtubeRow(entry.video, capturedAt, true)); return
+    }
+    if (Object.hasOwn(entry, 'continuationItemRenderer')) {
+      const next = entry.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token
+      if (typeof next !== 'string' || !token(next)) throw new Error('invalid_content_search_continuation')
+      continuations.push(next); return
+    }
+    for (const name of ['itemSectionRenderer', 'sectionListRenderer', 'richGridRenderer']) if (Object.hasOwn(entry, name)) {
+      boundedEntries(entry[name]?.contents).forEach(value => visit(value, depth + 1)); return
+    }
+    if (Object.hasOwn(entry, 'richItemRenderer')) { visit(entry.richItemRenderer?.content, depth + 1); return }
+    if (Object.hasOwn(entry, 'shelfRenderer')) {
+      const content = entry.shelfRenderer?.content
+      const list = content?.verticalListRenderer?.items ?? content?.horizontalListRenderer?.items ?? content?.expandedShelfContentsRenderer?.items
+      boundedEntries(list).forEach(value => visit(value, depth + 1)); return
+    }
+    if (['channel', 'playlist', 'ad', 'advertisement', 'promoted'].includes(entry.type)
+      || ['channelRenderer', 'playlistRenderer', 'adSlotRenderer', 'promotedSparklesWebRenderer', 'searchPyvRenderer', 'promotedVideoRenderer'].some(name => object(entry[name]))) { nonPostCount++; return }
+    rows.push(youtubeRow(entry, capturedAt, videoContainer))
+  }
+  let entries
+  if (data.contents?.twoColumnSearchResultsRenderer != null) entries = [data.contents.twoColumnSearchResultsRenderer.primaryContents]
+  else if (data.onResponseReceivedCommands != null || data.onResponseReceivedActions != null) {
+    const commands = boundedEntries(data.onResponseReceivedCommands ?? data.onResponseReceivedActions)
+    entries = commands.flatMap(command => {
+      const action = command?.appendContinuationItemsAction ?? command?.reloadContinuationItemsCommand
+      if (!object(action)) throw new Error('invalid_content_search_shape')
+      return boundedEntries(action.continuationItems)
+    })
+  } else entries = selectedArray(data, [['videos'], ['items'], ['contents']])
+  entries.forEach(entry => visit(entry, 0, Array.isArray(data.videos)))
+  const sourceCount = rows.length + nonPostCount
+  if (sourceCount > 10000) throw new Error('content_search_page_too_large')
+  return { rows, nonPostCount, providerPage: standardCursorPage({ scopes: [data, data.page, data.pageInfo, data.pagination],
+    tokenNames: ['continuation_token', 'continuationToken', 'nextContinuationToken'], flagNames: ['has_more', 'hasMore', 'hasNextPage'],
+    inputToken: request.upstreamQuery.continuation_token, nextName: 'continuation_token', extraTokens: continuations, sourceCount }) }
+}
+function standardOnlyProjection(result, data, request, capturedAt) {
+  data = standardPayloadData(data, request.platform)
+  if (data.code != null && ![0, 200, '0', '200'].includes(data.code)) throw new Error('content_search_business_rejected')
+  const projected = request.platform === 'reddit' ? redditProjection(data, request, capturedAt) : youtubeProjection(data, request, capturedAt)
+  const unique = new Map()
+  for (const row of projected.rows) if (!unique.has(row.content_id)) unique.set(row.content_id, row)
+  const items = [...unique.values()]
+  return { ...result, items, acquiredItems: items, providerPage: projected.providerPage,
+    nonPostCount: projected.nonPostCount, duplicateCount: projected.rows.length - items.length }
+}
+
 function selectedArray(data, paths) {
   for (const path of paths) {
     const value = path.reduce((current, key) => current?.[key], data)
@@ -325,6 +542,7 @@ export function projectTikHubContentSearch(result, request) {
   if (data.code != null && ![0, 200, '0', '200'].includes(data.code)) throw new Error('content_search_business_rejected')
   const capturedAt = timestamp(result.publicBody?.meta?.capturedAt)
   if (!capturedAt) throw new Error('invalid_content_search_capture_time')
+  if (request.platform === 'reddit' || request.platform === 'youtube') return standardOnlyProjection(result, data, request, capturedAt)
   let entries = selectedArray(data, { bilibili: [['result'], ['data', 'result'], ['data']], douyin: [['business_data'], ['aweme_list'], ['data'], ['items']],
     kuaishou: [['mixFeeds'], ['feeds'], ['result', 'items'], ['items'], ['data']], zhihu: [['data'], ['items']] }[request.platform])
   let nonPostCount = 0
@@ -371,11 +589,12 @@ export function contentSearchLegacyRow(row) {
     profile_image_url: row.author_avatar_url || '', cover_url: row.cover_url || '', metadata: '{}' }
 }
 export function contentSearchDataItem(row) {
-  return { id: row.content_id, externalId: row.content_id, platform: row.platform_name, contentType: row.content_type || null,
+  const media = { coverUrl: row.cover_url || null, images: JSON.parse(row.image_urls), videos: JSON.parse(row.video_urls) }
+  return { id: ['reddit', 'youtube'].includes(row.platform_name) ? `${row.platform_name}:${row.content_id}` : row.content_id, externalId: row.content_id, platform: row.platform_name, contentType: row.content_type || null,
     url: row.url || null, title: row.title || null, text: row.full_text || row.text || null,
     publishedAt: row.created_at || null, collectedAt: row.collected_at,
     author: { id: row.author_id || null, name: row.author_name || null, avatarUrl: row.author_avatar_url || null },
     metrics: { likes: row.like_count ?? null, comments: row.reply_count ?? null, shares: row.forward_count ?? null, views: row.view_count ?? null, bookmarks: row.bookmark_count ?? null },
-    media: { coverUrl: row.cover_url || null, images: JSON.parse(row.image_urls), videos: JSON.parse(row.video_urls) },
+    media: row.platform_name === 'reddit' ? normalizeSearchMedia(media, 'reddit', row) : media,
     source: { provider: null, endpointId: null } }
 }

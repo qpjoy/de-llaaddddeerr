@@ -31,8 +31,7 @@ const zeroDetail = () => detail({ readNum: 0, impNum: 0, likeNum: 0, favNum: 0, 
 const bloggerPage = (items, total = 50) => ({ code: 200, data: { code: 0, success: true, data: { noteList: items, total } } })
 const bloggerNote = (noteId = ID, fields = {}) => ({ noteInfo: { noteId, readNum: 619, impNum: 6499, engageNum: 107, favNum: 27, ...fields }, userInfo: { userId: AUTHOR } })
 
-async function fixture(fetchImpl = async () => response(detail()), { capabilities = XHS_RESEARCH_OPERATIONS, platforms = ['xiaohongshu'], admissionRuntime, reservationLeaseMs = 150000 } = {}) {
-  const store = new MemoryStore()
+async function fixture(fetchImpl = async () => response(detail()), { capabilities = XHS_RESEARCH_OPERATIONS, platforms = ['xiaohongshu'], admissionRuntime, reservationLeaseMs = 150000, store = new MemoryStore() } = {}) {
   const service = new HubService({ store, adapter: {}, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Research tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Research caller' })
@@ -850,4 +849,32 @@ test('cancelling after attempt reservation but before dispatch releases holds as
     assert.equal(state.platformStore.ingestJobs.length, 0)
     assert.equal([...state.platformStore.costReservations.values()].some(row => row.status === 'reserved'), false)
   }
+})
+
+test('LCY PGY skips scheduler capacity/spacing while retaining shared dispatch evidence and original fingerprints', async () => {
+  const { LcyHubLimitStore } = await import('../fixtures/lcy-hub-limit-store.mjs')
+  let calls = 0
+  const f = await fixture(async () => { calls++; return response(detail()) }, { store: new LcyHubLimitStore() })
+  f.gateway.active = f.config.maxConcurrency
+  f.gateway.activeByConsumer.set(f.context.consumer.id, 2)
+  f.platformStore.acquireProviderRateLimit = async () => assert.fail('exempt PGY must not consume rate tokens')
+  let scope
+  const enter = f.gateway.detailQueue.enter.bind(f.gateway.detailQueue)
+  f.gateway.detailQueue.enter = input => {
+    scope = input.scope
+    if (!f.gateway.detailQueue.states.has(scope)) f.gateway.detailQueue.states.set(scope, {
+      active: { id: 'ordinary', fingerprint: 'different-note', startedAt: Date.now(), expiresAt: Date.now() + 60000 },
+      nextAt: Date.now() + 60000,
+    })
+    return enter(input)
+  }
+  const result = await f.call()
+  assert.equal(result.status, 200); assert.equal(calls, 1)
+  const state = f.gateway.detailQueue.states.get(scope)
+  assert.equal(state.active.id, 'ordinary'); assert.equal(state.exemptActive.length, 0)
+  assert.equal(state.done.length, 1); assert.equal(state.done[0].outcome, 'succeeded')
+  assert.equal(f.gateway.active, f.config.maxConcurrency)
+  assert.equal(f.gateway.activeByConsumer.get(f.context.consumer.id), 2)
+  const replay = await f.call()
+  assert.equal(replay.replay, true); assert.equal(calls, 1)
 })

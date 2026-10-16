@@ -18,7 +18,9 @@
     "check": "node scripts/check.mjs",
     "test:acceptance": "node tests/acceptance.mjs",
     "demo:pool": "node scripts/pool-demo.mjs",
-    "bench:pg": "node scripts/pg-baseline.mjs"
+    "bench:pg": "node scripts/pg-baseline.mjs",
+    "bench:engine": "node scripts/pg-engine-bench.mjs",
+    "drill:failover": "node scripts/failover-drill.mjs"
   },
   "dependencies": {
     "pg": "8.22.0"

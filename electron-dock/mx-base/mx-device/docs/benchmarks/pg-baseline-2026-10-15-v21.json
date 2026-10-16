@@ -1,0 +1,424 @@
+{
+  "at": "2026-10-15T08:44:10.355Z",
+  "postgres": "18.4",
+  "iterations": 20,
+  "live": {
+    "devices": 100,
+    "running": 100,
+    "queued": 100
+  },
+  "steps": [
+    {
+      "historyJobs": 0,
+      "seedMs": 34,
+      "rows": {
+        "jobs": 200,
+        "attempts": 100,
+        "commands": 100,
+        "events": 401
+      },
+      "databaseMiB": 10,
+      "plans": {
+        "atomicJobs": {
+          "executionMs": 1.5,
+          "seqScans": [
+            "jobs"
+          ],
+          "sharedBlocks": 362
+        },
+        "atomicAttempts": {
+          "executionMs": 0,
+          "seqScans": [
+            "attempts"
+          ],
+          "sharedBlocks": 10
+        },
+        "atomicCommands": {
+          "executionMs": 0.1,
+          "seqScans": [
+            "execution_commands",
+            "jobs"
+          ],
+          "sharedBlocks": 86
+        },
+        "snapshotJobs": {
+          "executionMs": 1.2,
+          "seqScans": [
+            "jobs"
+          ],
+          "sharedBlocks": 354
+        },
+        "snapshotAttempts": {
+          "executionMs": 0.3,
+          "seqScans": [
+            "attempts"
+          ],
+          "sharedBlocks": 20
+        },
+        "snapshotCommands": {
+          "executionMs": 0.3,
+          "seqScans": [
+            "execution_commands",
+            "jobs"
+          ],
+          "sharedBlocks": 92
+        }
+      },
+      "timings": {
+        "atomicNoop": {
+          "p50": 10.5,
+          "p95": 11,
+          "max": 12.9,
+          "errors": 0
+        },
+        "atomicScoped": {
+          "p50": 1.7,
+          "p95": 2,
+          "max": 2.2,
+          "errors": 0
+        },
+        "atomicTouchDevice": {
+          "p50": 10.7,
+          "p95": 12.2,
+          "max": 22.6,
+          "errors": 0
+        },
+        "snapshot": {
+          "p50": 7.4,
+          "p95": 10.7,
+          "max": 11.8,
+          "errors": 0
+        },
+        "apiState": {
+          "p50": 28.1,
+          "p95": 32.4,
+          "max": 40.4,
+          "errors": 0
+        }
+      },
+      "planPoolMs": {
+        "p50": 4.8,
+        "max": 5.1
+      }
+    },
+    {
+      "historyJobs": 5000,
+      "seedMs": 2536,
+      "rows": {
+        "jobs": 5200,
+        "attempts": 5100,
+        "commands": 25100,
+        "events": 45401
+      },
+      "databaseMiB": 121,
+      "plans": {
+        "atomicJobs": {
+          "executionMs": 1.7,
+          "seqScans": [],
+          "sharedBlocks": 300
+        },
+        "atomicAttempts": {
+          "executionMs": 0,
+          "seqScans": [],
+          "sharedBlocks": 13
+        },
+        "atomicCommands": {
+          "executionMs": 0.4,
+          "seqScans": [],
+          "sharedBlocks": 524
+        },
+        "snapshotJobs": {
+          "executionMs": 4.3,
+          "seqScans": [],
+          "sharedBlocks": 684
+        },
+        "snapshotAttempts": {
+          "executionMs": 2,
+          "seqScans": [
+            "attempts"
+          ],
+          "sharedBlocks": 441
+        },
+        "snapshotCommands": {
+          "executionMs": 4.8,
+          "seqScans": [],
+          "sharedBlocks": 2183
+        }
+      },
+      "timings": {
+        "atomicNoop": {
+          "p50": 10.8,
+          "p95": 11.8,
+          "max": 16,
+          "errors": 0
+        },
+        "atomicScoped": {
+          "p50": 1.8,
+          "p95": 1.9,
+          "max": 3.3,
+          "errors": 0
+        },
+        "atomicTouchDevice": {
+          "p50": 10.8,
+          "p95": 11.6,
+          "max": 11.9,
+          "errors": 0
+        },
+        "snapshot": {
+          "p50": 22.9,
+          "p95": 25.4,
+          "max": 35.2,
+          "errors": 0
+        },
+        "apiState": {
+          "p50": 46.2,
+          "p95": 54.2,
+          "max": 55.5,
+          "errors": 0
+        }
+      },
+      "planPoolMs": {
+        "p50": 6,
+        "max": 7
+      }
+    },
+    {
+      "historyJobs": 20000,
+      "seedMs": 7869,
+      "rows": {
+        "jobs": 20200,
+        "attempts": 20100,
+        "commands": 100100,
+        "events": 180401
+      },
+      "databaseMiB": 452,
+      "plans": {
+        "atomicJobs": {
+          "executionMs": 2.4,
+          "seqScans": [],
+          "sharedBlocks": 497
+        },
+        "atomicAttempts": {
+          "executionMs": 0,
+          "seqScans": [],
+          "sharedBlocks": 13
+        },
+        "atomicCommands": {
+          "executionMs": 0.6,
+          "seqScans": [],
+          "sharedBlocks": 834
+        },
+        "snapshotJobs": {
+          "executionMs": 4.9,
+          "seqScans": [],
+          "sharedBlocks": 832
+        },
+        "snapshotAttempts": {
+          "executionMs": 3.8,
+          "seqScans": [
+            "attempts"
+          ],
+          "sharedBlocks": 668
+        },
+        "snapshotCommands": {
+          "executionMs": 6.4,
+          "seqScans": [],
+          "sharedBlocks": 2893
+        }
+      },
+      "timings": {
+        "atomicNoop": {
+          "p50": 11.4,
+          "p95": 12.4,
+          "max": 15.2,
+          "errors": 0
+        },
+        "atomicScoped": {
+          "p50": 1.8,
+          "p95": 2,
+          "max": 2,
+          "errors": 0
+        },
+        "atomicTouchDevice": {
+          "p50": 11.5,
+          "p95": 12.5,
+          "max": 12.8,
+          "errors": 0
+        },
+        "snapshot": {
+          "p50": 24.2,
+          "p95": 26.1,
+          "max": 30.1,
+          "errors": 0
+        },
+        "apiState": {
+          "p50": 48.6,
+          "p95": 58,
+          "max": 61.5,
+          "errors": 0
+        }
+      },
+      "planPoolMs": {
+        "p50": 6,
+        "max": 6.9
+      }
+    },
+    {
+      "historyJobs": 60000,
+      "seedMs": 22677,
+      "rows": {
+        "jobs": 60200,
+        "attempts": 60100,
+        "commands": 300100,
+        "events": 540401
+      },
+      "databaseMiB": 1334,
+      "plans": {
+        "atomicJobs": {
+          "executionMs": 2.9,
+          "seqScans": [],
+          "sharedBlocks": 770
+        },
+        "atomicAttempts": {
+          "executionMs": 0.1,
+          "seqScans": [],
+          "sharedBlocks": 14
+        },
+        "atomicCommands": {
+          "executionMs": 1.2,
+          "seqScans": [],
+          "sharedBlocks": 848
+        },
+        "snapshotJobs": {
+          "executionMs": 5,
+          "seqScans": [],
+          "sharedBlocks": 1244
+        },
+        "snapshotAttempts": {
+          "executionMs": 2.2,
+          "seqScans": [],
+          "sharedBlocks": 732
+        },
+        "snapshotCommands": {
+          "executionMs": 7.3,
+          "seqScans": [],
+          "sharedBlocks": 2907
+        }
+      },
+      "timings": {
+        "atomicNoop": {
+          "p50": 12,
+          "p95": 30.3,
+          "max": 32.2,
+          "errors": 0
+        },
+        "atomicScoped": {
+          "p50": 1.8,
+          "p95": 1.9,
+          "max": 2.8,
+          "errors": 0
+        },
+        "atomicTouchDevice": {
+          "p50": 11.3,
+          "p95": 12.8,
+          "max": 13.3,
+          "errors": 0
+        },
+        "snapshot": {
+          "p50": 24.3,
+          "p95": 26.8,
+          "max": 27,
+          "errors": 0
+        },
+        "apiState": {
+          "p50": 49.6,
+          "p95": 58.9,
+          "max": 67.1,
+          "errors": 0
+        }
+      },
+      "planPoolMs": {
+        "p50": 5.9,
+        "max": 6.8
+      }
+    }
+  ],
+  "history": {
+    "commandsPerJob": 5,
+    "eventsPerJob": 9,
+    "approxDocumentBytesPerJob": 24964
+  },
+  "atomicBreakdown": {
+    "loads": [
+      {
+        "load": "devices",
+        "rows": 100,
+        "kib": 60,
+        "p50Ms": 0.4
+      },
+      {
+        "load": "jobs",
+        "rows": 200,
+        "kib": 308,
+        "p50Ms": 3.2
+      },
+      {
+        "load": "attempts",
+        "rows": 100,
+        "kib": 50,
+        "p50Ms": 0.3
+      },
+      {
+        "load": "resource_policies",
+        "rows": 0,
+        "kib": 0,
+        "p50Ms": 0.1
+      },
+      {
+        "load": "device_apps",
+        "rows": 400,
+        "kib": 167,
+        "p50Ms": 0.7
+      },
+      {
+        "load": "task_definitions",
+        "rows": 15,
+        "kib": 41,
+        "p50Ms": 0.4
+      },
+      {
+        "load": "command_definitions",
+        "rows": 22,
+        "kib": 19,
+        "p50Ms": 0.2
+      },
+      {
+        "load": "loop_policies",
+        "rows": 1,
+        "kib": 1,
+        "p50Ms": 0.2
+      },
+      {
+        "load": "rule_definitions",
+        "rows": 6,
+        "kib": 2,
+        "p50Ms": 0.1
+      },
+      {
+        "load": "strategy_definitions",
+        "rows": 3,
+        "kib": 4,
+        "p50Ms": 0.2
+      },
+      {
+        "load": "execution_commands",
+        "rows": 100,
+        "kib": 56,
+        "p50Ms": 0.7
+      }
+    ],
+    "queriesP50SumMs": 6.5,
+    "atomicNoopP50Ms": 12,
+    "inProcessAndTxMs": 5.5
+  }
+}

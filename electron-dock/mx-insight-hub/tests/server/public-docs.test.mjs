@@ -659,8 +659,8 @@ function assertXiaohongshuSearchContract(document) {
   assert.ok(operation)
   assert.deepEqual(operation['x-mx-error-codes'], {
     ...XIAOHONGSHU_SEARCH_ERROR_CODES,
-    400: [...XIAOHONGSHU_SEARCH_ERROR_CODES[400], 'content_search_option_unsupported', 'content_search_pagination_unsupported', 'work_budget_exceeded'],
-    409: [...XIAOHONGSHU_SEARCH_ERROR_CODES[409], 'search_page_unavailable', 'search_restart_required'],
+    400: [...XIAOHONGSHU_SEARCH_ERROR_CODES[400], 'content_search_option_unsupported', 'content_search_pagination_unsupported', 'work_budget_exceeded', 'invalid_uncertain_retry', 'uncertain_retry_not_supported'],
+    409: [...XIAOHONGSHU_SEARCH_ERROR_CODES[409], 'search_page_unavailable', 'search_restart_required', 'uncertain_retry_not_allowed'],
     502: [...XIAOHONGSHU_SEARCH_ERROR_CODES[502], 'social_upstream_response_unusable', 'social_upstream_outcome_unknown', 'social_upstream_rejected'],
     503: [...XIAOHONGSHU_SEARCH_ERROR_CODES[503], 'request_outcome_unknown', 'facebook_search_paused', 'twitter_fill_deadline', 'content_search_unavailable', 'content_search_deadline', 'external_platform_busy', 'facebook_quota_state_unavailable'],
   })
@@ -685,6 +685,12 @@ function assertXiaohongshuSearchContract(document) {
   assert.match(operation.description, /preserve available zero values and display null as unavailable/)
   assert.match(operation.description, /default zeros alone do not prove an observed measurement/)
   assert.match(operation.description, /Retired Twitter mxnc1 and Instagram historical\/untagged/)
+
+  const retry = operation.parameters.find(parameter => parameter.name === 'X-MX-Insight-Retry-Of')
+  assert.equal(retry.required, false)
+  assert.match(retry.description, /original active API Key/)
+  assert.match(retry.description, /permanent idempotent replay/)
+  assert.match(retry.description, /never automatically resend/)
 
   const request = resolveSchema(
     document,

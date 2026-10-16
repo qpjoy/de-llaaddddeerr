@@ -216,6 +216,12 @@ function QueueRows({
               <p>
                 {[
                   assignment?.reason,
+                  assignment?.switchMs
+                    ? `含 App 切换约 ${Math.round(assignment.switchMs / 1000)} 秒`
+                    : null,
+                  assignment?.moves
+                    ? `计划已改派 ${assignment.moves} 次`
+                    : null,
                   ...(planned?.reasons || []).map((r) => r.message),
                 ]
                   .filter(Boolean)

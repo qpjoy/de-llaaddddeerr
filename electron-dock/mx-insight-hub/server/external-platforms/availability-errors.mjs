@@ -46,12 +46,14 @@ export function ecommerceCapacityError(errorCode, {
 
 export function upstreamCapacityError(evidence) {
   return new AppError(429, 'external_platform_capacity_exceeded', 'External data capacity is temporarily exhausted', {
+    layer: 'upstream',
     reason: 'upstream_rate_limited',
     upstreamDispatched: true,
     upstreamStatus: Number.isInteger(evidence.httpStatus) ? evidence.httpStatus : null,
     // The supplier's account/endpoint threshold is not a Hub quota. Do not
     // misrepresent our configured RPM as the limit that rejected this call.
     limit: null,
+    ...(typeof evidence.outcome === 'string' ? { outcome: evidence.outcome } : {}),
     retryable: false,
   })
 }

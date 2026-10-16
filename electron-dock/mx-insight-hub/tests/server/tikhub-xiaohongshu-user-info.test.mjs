@@ -535,8 +535,8 @@ async function gatewayFixture(fetchImpl, {
   monthlySubsidyBudgetMinor = 1_000,
   operationControlStore = null,
   credentialStore = null,
+  usageStore = new MemoryStore(),
 } = {}) {
-  const usageStore = new MemoryStore()
   const service = new HubService({
     store: usageStore,
     adapter: {},
@@ -1227,4 +1227,28 @@ test('Hub routes all gated Xiaohongshu crawl and user-info shapes before Night-A
   assert.equal(activityCalls[1].body.userId, USER_ID)
   assert.deepEqual(historicalCalls.map(({ operation }) => operation), ['crawl', 'user-info'])
   assert.equal(nightAllPreflights, 0)
+})
+
+test('LCY standalone Xiaohongshu profile/crawl bypass retains ordinary slots and explicit false restores admission', async () => {
+  const { LcyHubLimitStore } = await import('../fixtures/lcy-hub-limit-store.mjs')
+  let calls = 0
+  const f = await gatewayFixture(async url => {
+    calls++
+    const parsed = new URL(url)
+    return jsonResponse({ code: 200, data: { data: parsed.pathname.endsWith('/get_user_posted_notes')
+      ? { has_more: false, notes: [] } : { user_id: parsed.searchParams.get('user_id'), nickname: 'Synthetic profile' } } })
+  }, { usageStore: new LcyHubLimitStore() })
+  f.gateway.active = 8; f.gateway.activeByConsumer.set(f.context.consumer.id, 4)
+  f.platformStore.acquireProviderRateLimit = async () => assert.fail('exempt profile/crawl must not consume rate tokens')
+  assert.equal((await f.gateway.legacyUserInfo(f.context, queuedUserRequest('lcy', USER_ID))).status, 200)
+  assert.equal((await f.gateway.legacyCrawl(f.context, { ...queuedUserRequest('lcy-crawl', USER_ID), path: '/api/v1/search/crawl' })).status, 200)
+  assert.ok(calls >= 2)
+  assert.equal(f.gateway.active, 8); assert.equal(f.gateway.activeByConsumer.get(f.context.consumer.id), 4)
+  Object.assign(f.gateway.config, { concurrencyQueue: { maxWaitMs: 1, maxPending: 0 } })
+  f.usageStore.apiKeys.get(f.context.apiKey.id).hubRateLimitExempt = false
+  f.context.apiKey.hubRateLimitExempt = false
+  const before = calls
+  await assert.rejects(f.gateway.legacyUserInfo(f.context, queuedUserRequest('lcy-off')), { code: 'external_platform_busy' })
+  assert.equal(calls, before)
+  assert.equal(f.gateway.active, 8)
 })

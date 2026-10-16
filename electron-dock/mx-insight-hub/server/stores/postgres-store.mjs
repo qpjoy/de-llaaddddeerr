@@ -1,5 +1,5 @@
 import { quotaRecoverySql } from '../core/admission-recovery.mjs'
-import { createInternalTrafficPolicy } from '../core/internal-traffic-policy.mjs'
+import { createInternalTrafficPolicy, isInternalTraffic } from '../core/internal-traffic-policy.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { STRATEGY_DATA_CONNECTORS, STRATEGY_DATA_STREAMS } from '../data/strategy-search-data-statistics.mjs'
 import { ensurePostgresAdminExecution } from './admin-execution.mjs'
@@ -766,6 +766,8 @@ function apiKey(row) {
     environment: row.environment,
     scopeMode: row.scope_mode || 'legacy_dynamic',
     accessProfile: row.access_profile || 'standard',
+    hubRateLimitExempt: row.hub_rate_limit_exempt ?? null,
+    hubRateLimitRevision: Number(row.hub_rate_limit_revision ?? 0),
     webSearchOrder: row.web_search_order || [],
     status: row.status,
     effectiveStatus: expired ? 'expired' : row.status,
@@ -2446,7 +2448,10 @@ export class PostgresStore {
       }
       const quotaInput = {
         ...input,
-        managedQuotaExempt: owner.access_profile === 'managed_full',
+        managedQuotaExempt: isInternalTraffic(this, {
+          apiKey: { id: input.apiKeyId, accessProfile: owner.access_profile, hubRateLimitExempt: owner.hub_rate_limit_exempt },
+          tenant: { id: input.tenantId }, consumer: { id: input.consumerId },
+        }),
         authorizationScopes,
         scopeEntitlements,
         legacySingleScope,
@@ -2575,7 +2580,9 @@ export class PostgresStore {
     // The snapshot is only meaningful for a key that belongs to the consumer
     // whose ceiling it reports, so the pairing is verified rather than assumed.
     const owner = await this.pool.query(
-      `SELECT to_jsonb(api_keys)->>'access_profile' AS access_profile FROM api_keys WHERE id = $1 AND consumer_id = $2 AND tenant_id = $3`,
+      `SELECT to_jsonb(api_keys)->>'access_profile' AS access_profile,
+         (to_jsonb(api_keys)->>'hub_rate_limit_exempt')::boolean AS hub_rate_limit_exempt
+         FROM api_keys WHERE id = $1 AND consumer_id = $2 AND tenant_id = $3`,
       [apiKeyId, consumerId, tenantId],
     )
     if (owner.rowCount === 0) return []
@@ -2655,7 +2662,8 @@ export class PostgresStore {
           windowSeconds: keyWindowSeconds,
         },
       ].map((layer) => ({ ...layer, remaining: Math.max(0, layer.limit - layer.used) }))
-      if (owner.rows[0].access_profile === 'managed_full' || this.internalTrafficPolicy.matches({ tenantId, apiKeyId })) {
+      if (isInternalTraffic(this, { apiKey: { id: apiKeyId, accessProfile: owner.rows[0].access_profile,
+        hubRateLimitExempt: owner.rows[0].hub_rate_limit_exempt }, tenant: { id: tenantId }, consumer: { id: consumerId } })) {
         for (const layer of layers) Object.assign(layer, { exempt: true, limit: null, remaining: null })
       }
       const binding = layers.reduce((tightest, layer) => (
@@ -2720,7 +2728,8 @@ export class PostgresStore {
   }
 
   async #assertQuota(client, input) {
-    const internal = input.managedQuotaExempt || this.internalTrafficPolicy.matches(input)
+    // reserve() sets this only from the current locked owner row, never caller input.
+    const internal = input.managedQuotaExempt === true
     if (!internal) await assertPostgresKeyAccessLimits(client, input.apiKeyId, input.authorizationScopes)
     for (const scope of internal ? [] : input.authorizationScopes) {
       const keyEntitlement = input.scopeEntitlements.get(authorizationScopeKey(scope))
@@ -2879,7 +2888,8 @@ export class PostgresStore {
 
   async #assertApiKeyOwner(client, input) {
     const result = await client.query(
-      `SELECT id, to_jsonb(api_keys)->>'access_profile' AS access_profile
+      `SELECT id, to_jsonb(api_keys)->>'access_profile' AS access_profile,
+              (to_jsonb(api_keys)->>'hub_rate_limit_exempt')::boolean AS hub_rate_limit_exempt
          FROM api_keys
         WHERE id = $1
           AND consumer_id = $2

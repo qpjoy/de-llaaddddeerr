@@ -1,3 +1,4 @@
+import { isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
@@ -132,7 +133,8 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
           context = await revalidateIdentity()
           if ((await policyStore.facebook()).mode === 'paused') throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
           if (await store.facebookFillUnknownFor(delivery)) throw new AppError(409, 'request_outcome_unknown', 'An equal Facebook delivery has an unknown outcome')
-          const state = await target.platformStore.providerState(provider)
+          const shared = await target.platformStore.providerState(provider)
+          const state = isHubRateLimitExempt(context) ? internalCircuitState(gateway.usageStore, context, shared) : shared
           const contract = await target.platformStore.contractCircuitState?.(provider, 'facebook')
           if ([state, contract].some(value => value?.circuitOpenUntil && Date.parse(value.circuitOpenUntil) > clock())) {
             throw new AppError(503, 'external_platform_circuit_open', 'Facebook supplier is temporarily unavailable')
@@ -153,18 +155,17 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
           throw new AppError(409, code, 'An equal Facebook search is pending or has an unresolved result')
         }
         if (provider !== 'rapidapi') childLease = sourceLease
-        if (!await enterCapacity(provider, { lease: { ...sourceLease, ownedDeliveryLease: provider === 'rapidapi' },
+        if (!(entered = await enterCapacity(provider, { lease: { ...sourceLease, ownedDeliveryLease: provider === 'rapidapi' },
           expiresAt: new Date(deadlineAt), signal, canWait: !sources.length,
-          revalidate: async () => { authorization = await authorizeStep(); return context } })) {
+          revalidate: async () => { authorization = await authorizeStep(); return context } }))) {
           throw new AppError(503, 'external_platform_busy', 'Facebook supplier capacity is occupied')
         }
-        entered = true
         let { credential, control, cost } = authorization
         costReservation = cost.costMinor === 0 ? null : await target.platformStore.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
-        const rate = await target.platformStore.acquireProviderRateLimit({ limit: target.config.maxRequestsPerMinute ?? 90, windowMs: 60000 })
+        const rate = isHubRateLimitExempt(context) ? { allowed: true } : await target.platformStore.acquireProviderRateLimit({ limit: target.config.maxRequestsPerMinute ?? 90, windowMs: 60000 })
         if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Facebook supplier rate limit is exhausted')
         if (provider === 'rapidapi') {
-          admission = await waitForFacebookRapidAdmission({ policyStore, requestId: delivery.usageRequestId,
+          admission = await waitForFacebookRapidAdmission({ policyStore, rateLimitExempt: () => isHubRateLimitExempt(context), requestId: delivery.usageRequestId,
             deadlineAt, timeoutMs: target.config.timeoutMs || 30000, signal, logger: gateway.logger,
             revalidate: async () => {
               const latest = await authorizeStep()
@@ -293,7 +294,7 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         if (costReservation) await target.platformStore.releaseProviderCostWorkflow({ reservationId: costReservation.id,
           usageRequestId: delivery.usageRequestId }).catch(() => {})
         if (childLease) await target.platformStore.releaseDispatchLease(childLease).catch(() => {})
-        if (entered) leaveCapacity(sourceProvider)
+        if (entered) leaveCapacity(sourceProvider, entered)
         if (admission && !observationFailed) await policyStore.observeRapid(admission).catch(() => {})
       }
     }

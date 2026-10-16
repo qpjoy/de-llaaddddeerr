@@ -5,6 +5,7 @@ import {
   BUILTIN_RULE_DEFINITIONS,
   BUILTIN_STRATEGY_DEFINITIONS,
   RULE_KINDS,
+  RULE_OPTIONAL_DEFAULTS,
 } from "./strategy-catalog.mjs";
 export { strategyStatus } from "./strategy-catalog.mjs";
 
@@ -136,15 +137,19 @@ function normalizeRule(kind, input) {
     RULE_KINDS.some((row) => row.kind === kind),
     "规则类型无效",
   );
-  const allowed = {
+  const required = {
     placement: ["strategy", "idleSpreadThresholdPct", "maxAffinityDelayMs"],
     queue: ["maxQueueWaitMs", "maxQueuePerDevice", "shortTaskMs"],
     "app-budget": ["windowMs", "maxRuns", "maxServiceMs", "cooldownMs"],
     "app-override": ["appId", "policy"],
   }[kind];
+  // Added after rules were first stored: optional, defaulted when absent, so
+  // existing rule versions and migration seeds keep compiling unchanged.
+  const optional = Object.keys(RULE_OPTIONAL_DEFAULTS[kind] || {});
+  const allowed = [...required, ...optional];
   keys(input, allowed, "规则配置");
   check(
-    allowed.every((key) => Object.hasOwn(input, key)),
+    required.every((key) => Object.hasOwn(input, key)),
     "规则配置缺少必填字段",
   );
   if (kind === "placement" || kind === "queue") {

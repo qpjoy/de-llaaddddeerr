@@ -230,6 +230,13 @@ test(
           lastError: "storage unavailable",
         });
         assert.equal(checkHealth(), 1, "scheduler error must fail");
+        // A worker with scheduler leadership reports one row per instance.
+        await a.heartbeat("health-worker/current-process", {
+          workerId: "health-worker",
+          instanceId: "current-process",
+          lastError: null,
+        });
+        assert.equal(checkHealth(), 0, "per-instance heartbeat row");
       } finally {
         await rm(healthDir, { recursive: true, force: true });
       }

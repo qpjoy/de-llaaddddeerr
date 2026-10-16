@@ -539,3 +539,106 @@ test('enterprise queue timeout identifies the Hub enterprise gate and creates no
   assert.equal(usage.status, 'released')
   assert.equal(usage.errorCode, 'external_platform_busy')
 })
+
+test('shareholders HTTP query waits behind mixed enterprise queries and replays without another paid dispatch', async t => {
+  let release
+  const hold = new Promise(resolve => { release = resolve })
+  const calls = []
+  const f = await enterpriseFixture({ activate: false, fetchImpl: async url => {
+    calls.push(new URL(url))
+    await hold
+    return new Response(JSON.stringify(payload))
+  } })
+  await f.enable('1.41')
+  await f.enable('1.43')
+  const server = createServer(createApp({ service: f.hub, store: f.store,
+    enterpriseGateway: f.gateway, logger: { info() {}, error() {} } }))
+  t.after(() => { release(); server.closeAllConnections(); return new Promise(resolve => server.close(resolve)) })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const origin = `http://127.0.0.1:${server.address().port}`
+  const send = (apiId, index) => fetch(`${origin}/api/v1/data/enterprise/${apiId}/query`, {
+    method: 'POST', headers: { authorization: `Bearer ${f.key.secret}`,
+      'content-type': 'application/json', 'idempotency-key': `enterprise-mixed-http-${index}` },
+    body: JSON.stringify({ query: { keyword: `合成企业-${index}` } }),
+  })
+  const waitFor = async predicate => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt++) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.ok(predicate(), 'expected admission state was reached')
+  }
+  // Different enterprise operations share one consumer's capacity. A
+  // shareholders query must not fall back to the old immediate-refusal path.
+  const active = Array.from({ length: 10 }, (_, index) => send(index % 2 ? '1.43' : '1.41', index))
+  await waitFor(() => calls.length === 10)
+  const pending = send('1.43', 10)
+  await waitFor(() => f.gateway.concurrencyQueue.entries.length === 1)
+  assert.equal(calls.length, 10)
+  assert.equal(f.platformStore.calls.size, 10, 'waiting does not create an upstream call')
+  assert.equal([...f.store.requests.values()].filter(row => row.status === 'reserved').length, 11)
+  release()
+  const responses = await Promise.all([...active, pending])
+  for (const response of responses) {
+    assert.equal(response.status, 200)
+    assert.deepEqual((await response.clone().json()).data, payload)
+  }
+  const delivered = await responses.at(-1).json()
+  assert.equal(calls.length, 11)
+  assert.equal(calls.at(-1).pathname, '/APIService/enterprise/getPartners')
+  assert.equal(calls.at(-1).searchParams.get('keyword'), '合成企业-10')
+  assert.equal(f.gateway.active, 0)
+  assert.equal(f.gateway.concurrencyQueue.entries.length, 0)
+  const replay = await send('1.43', 10)
+  assert.equal(replay.status, 200)
+  assert.equal(replay.headers.get('idempotent-replay'), 'true')
+  assert.deepEqual(await replay.json(), delivered)
+  assert.equal(calls.length, 11, 'replay must not reacquire or query the supplier')
+})
+
+test('LCY switch bypasses only Hub admission, leaves ordinary occupancy intact and preserves supplier evidence/replay', async () => {
+  const { LcyHubLimitStore } = await import('../fixtures/lcy-hub-limit-store.mjs')
+  let calls = 0, rates = 0
+  const f = await enterpriseFixture({ store: new LcyHubLimitStore(), fetchImpl: async () => {
+    calls++
+    return Response.json({ status: '429', message: 'Synthetic rate limit' }, { status: 429 })
+  } })
+  f.gateway.active = f.gateway.config.maxConcurrency
+  f.gateway.activeByConsumer.set(f.context.consumer.id, 2)
+  f.gateway.concurrencyQueue.entries.push({ settled: false })
+  f.platformStore.acquireProviderRateLimit = async () => { rates++; return { allowed: false, retryAfterMs: 60000 } }
+  Object.assign(f.platformStore.state, { lastErrorCode: 'upstream_rate_limited', circuitOpenUntil: new Date(Date.now() + 60000).toISOString() })
+  await assert.rejects(f.gateway.queryEnterprise(f.context, request), error => {
+    assert.equal(error.status, 429)
+    assert.equal(error.details.layer, 'upstream')
+    assert.equal(error.details.upstreamDispatched, true)
+    assert.equal(error.details.retryable, false)
+    assert.equal(error.details.outcome, 'rejected')
+    return true
+  })
+  assert.equal(calls, 1); assert.equal(rates, 0)
+  assert.equal(f.gateway.active, f.gateway.config.maxConcurrency)
+  assert.equal(f.gateway.activeByConsumer.get(f.context.consumer.id), 2)
+  assert.equal(f.gateway.concurrencyQueue.entries.length, 1)
+  const replay = await f.gateway.queryEnterprise(f.context, request).catch(error => error)
+  assert.equal(replay.status, 429); assert.equal(calls, 1)
+  const recorded = [...f.platformStore.calls.values()][0]
+  assert.equal(recorded.errorCode, 'upstream_rate_limited')
+  assert.equal(recorded.billed, null)
+  f.context.apiKey.hubRateLimitExempt = false
+  f.store.apiKeys.get(f.context.apiKey.id).hubRateLimitExempt = false
+  await assert.rejects(f.gateway.queryEnterprise(f.context, { ...request, idempotencyKey: 'enterprise-lcy-disabled', body: { query: { keyword: '另一个查询' } } }),
+    { code: 'external_platform_circuit_open' })
+  assert.equal(calls, 1)
+})
+
+test('LCY Hub-limit switch never releases a supplier 429 with unknown billing nor bypasses non-rate circuits', async () => {
+  const { LcyHubLimitStore } = await import('../fixtures/lcy-hub-limit-store.mjs')
+  let calls = 0
+  const f = await enterpriseFixture({ store: new LcyHubLimitStore(), fetchImpl: async () => { calls++; return new Response('unknown body', { status: 429 }) } })
+  await assert.rejects(f.gateway.queryEnterprise(f.context, request), error => error.status === 429 && error.details.outcome === 'unknown' && error.details.layer === 'upstream')
+  assert.equal([...f.store.requests.values()][0].status, 'unknown')
+  await assert.rejects(f.gateway.queryEnterprise(f.context, request), { status: 409 })
+  assert.equal(calls, 1)
+  Object.assign(f.platformStore.state, { lastErrorCode: 'upstream_auth_or_balance_unavailable', circuitOpenUntil: new Date(Date.now() + 60000).toISOString() })
+  await assert.rejects(f.gateway.queryEnterprise(f.context, { ...request, idempotencyKey: 'enterprise-lcy-nonrate', body: { query: { keyword: '新查询' } } }),
+    { code: 'external_platform_circuit_open' })
+  assert.equal(calls, 1)
+})

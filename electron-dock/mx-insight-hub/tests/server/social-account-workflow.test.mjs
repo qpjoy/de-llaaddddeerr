@@ -31,8 +31,8 @@ const timeline = (ids, cursor = null, username = 'ui_batch_019', userId = '42') 
   ] }] },
 } } } })
 
-async function harness(t, { platform = 'twitter', fetchImpl, maxPageSize = 500, grant = true, enabled = true } = {}) {
-  const store = new MemoryStore(), calls = [], historical = []
+async function harness(t, { platform = 'twitter', fetchImpl, maxPageSize = 500, grant = true, enabled = true, store = new MemoryStore() } = {}) {
+  const calls = [], historical = []
   // Exercise the historical caller's page_size=500 only under an explicitly
   // entitled fixture plan; the production Launch plan remains capped at 100.
   store.plans[0].limits.maxPageSize = maxPageSize
@@ -470,4 +470,23 @@ test('a supplier cursor cycle across public pages is detected before repurchasin
   assert.equal(third.body.data.page.nextCursor, null)
   assert.ok(third.body.data.warnings.some(warning => warning.code === 'repeated_cursor'))
   assert.equal(h.calls.length, 4)
+})
+
+for (const platform of ['twitter', 'facebook', 'weibo']) test(`LCY ${platform} account workflow bypasses Hub capacity/rate with unchanged ordinary slots`, async t => {
+  const { LcyHubLimitStore } = await import('../fixtures/lcy-hub-limit-store.mjs')
+  const f = await harness(t, { platform, store: new LcyHubLimitStore() })
+  f.gateway.active = f.config.maxConcurrency
+  f.gateway.activeByConsumer.set(f.context.consumer.id, 2)
+  f.platformStore.acquireProviderRateLimit = async () => assert.fail('exempt account must not consume provider tokens')
+  Object.assign(f.platformStore.state, { lastErrorCode: 'upstream_rate_limited', circuitOpenUntil: new Date(Date.now() + 60000).toISOString() })
+  const result = await f.invoke()
+  assert.equal(result.status, 200)
+  assert.ok(f.calls.length >= 1)
+  assert.equal(f.gateway.active, f.config.maxConcurrency)
+  assert.equal(f.gateway.activeByConsumer.get(f.context.consumer.id), 2)
+  const before = f.calls.length
+  f.store.apiKeys.get(f.context.apiKey.id).hubRateLimitExempt = false
+  await assert.rejects(f.invoke({ platform, userId: '55', count: 20 }, 'account-switch-disabled'), error =>
+    ['external_platform_busy', 'external_platform_circuit_open'].includes(error.code))
+  assert.equal(f.calls.length, before)
 })

@@ -189,6 +189,47 @@ test('legacy Key scopes and internal TikHub exemptions remain visible without cl
   assert.equal((await f.db.query('SELECT count(*)::int n FROM control.admission_recoveries')).rows[0].n,0)
 })
 
+test('LCY limit toggle diagnostics apply across providers and explicit off overrides inherited exemptions without resetting evidence', {skip:!modulePath}, async t => {
+  const f = await fixture(t)
+  const key = 'fd2f8cc9-0ff1-4052-a538-8cc8150bde83'
+  await f.db.exec('ALTER TABLE api_keys ADD access_profile text, ADD hub_rate_limit_exempt boolean')
+  await f.db.query(`UPDATE api_keys SET id=$1,tenant_id='277bf8a4-5ed5-414d-b429-d72fcd7d36b6',
+    consumer_id='be7d07fe-3d98-4db3-b00d-e5cbe5a76190',access_profile='managed_full'`, [key])
+  await f.db.query("INSERT INTO api_key_platform_entitlements(api_key_id,platform,max_requests,window_seconds,max_page_size) VALUES($1,'enterprise',1,3600,20)", [key])
+  await f.db.exec(`INSERT INTO external_platform.provider_state VALUES
+    ('tikhub',3,now()+interval '1 minute',now(),'upstream_rate_limited',now()),
+    ('qixin',3,now()+interval '1 minute',now(),'upstream_rate_limited',now());
+    INSERT INTO external_platform.provider_rate_buckets VALUES
+    ('tikhub',1,3600000,0,false,now(),now()),('qixin',1,3600000,0,false,now(),now());`)
+  f.store.internalTrafficPolicy = { matches: () => true }
+  const snapshot = () => f.service.snapshot({apiKeyId:key})
+  const stateBefore = (await f.db.query('SELECT * FROM external_platform.provider_state ORDER BY provider_key')).rows
+  const rateBefore = (await f.db.query('SELECT * FROM external_platform.provider_rate_buckets ORDER BY provider_key')).rows
+  const inherited = await snapshot()
+  assert.equal(inherited.key.hubRateLimitExempt, null)
+  assert.equal(inherited.items.find(row => row.provider === 'qixin' && row.kind === 'provider_rate').selectedKeyExempt, undefined)
+  for (const enabled of [true, false]) {
+    await f.db.query('UPDATE api_keys SET hub_rate_limit_exempt=$1 WHERE id=$2', [enabled, key])
+    const result = await snapshot()
+    assert.equal(result.key.hubRateLimitExempt, enabled)
+    assert.equal(result.items.find(row => row.kind === 'key_window').exempt, enabled)
+    for (const provider of ['tikhub', 'qixin']) {
+      for (const kind of ['provider_rate', 'provider_circuit']) {
+        const row = result.items.find(row => row.provider === provider && row.kind === kind)
+        assert.equal(row.selectedKeyExempt === true, enabled)
+        assert.equal(row.active, true, 'the shared limit remains active for ordinary callers')
+      }
+    }
+  }
+  await f.db.query('UPDATE api_keys SET hub_rate_limit_exempt=true WHERE id=$1', [key])
+  await f.db.exec("UPDATE external_platform.provider_state SET last_error_code='upstream_auth_or_balance_unavailable' WHERE provider_key='qixin'")
+  assert.equal((await snapshot()).items.find(row => row.provider === 'qixin' && row.kind === 'provider_circuit').selectedKeyExempt, undefined)
+  await f.db.exec("UPDATE external_platform.provider_state SET last_error_code='upstream_rate_limited' WHERE provider_key='qixin'")
+  assert.deepEqual((await f.db.query('SELECT * FROM external_platform.provider_state ORDER BY provider_key')).rows, stateBefore)
+  assert.deepEqual((await f.db.query('SELECT * FROM external_platform.provider_rate_buckets ORDER BY provider_key')).rows, rateBefore)
+  assert.equal((await f.db.query('SELECT count(*)::int n FROM control.admission_recoveries')).rows[0].n, 0)
+})
+
 test('managed-full Key diagnostics match runtime quota exemption and ten-second rate cooldown', {skip:!modulePath}, async t => {
   const f=await fixture(t)
   await f.db.exec("ALTER TABLE api_keys ADD access_profile text NOT NULL DEFAULT 'standard'")

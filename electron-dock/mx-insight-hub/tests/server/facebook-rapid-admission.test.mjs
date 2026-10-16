@@ -156,3 +156,19 @@ test('standalone quota diagnostic validates stdin execution without app imports 
     assert.deepEqual(JSON.parse(result.stderr), { error: expected })
   }
 })
+
+test('LCY may bypass a Hub rate cooldown but retains purchased quota and shared dispatch ownership', pg, async t => {
+  const { db, store } = await fixture(t)
+  await db.exec("UPDATE control.facebook_rapid_quota SET used=10,remaining=990,reason='rate_limited',blocked_until=now()+interval '5 minutes'")
+  assert.equal((await store.admitRapid(ticket())).reason, 'rate_limited')
+  const admitted = await store.admitRapid({ ...ticket(), hubRateLimitExempt: true })
+  assert.equal(admitted.allowed, true)
+  assert.equal(admitted.used, 11)
+  assert.equal(admitted.remaining, 989)
+  const waiting = { ...ticket(), hubRateLimitExempt: true }
+  assert.equal((await store.admitRapid(waiting)).reason, 'source_busy')
+  await store.cancelRapidWait(waiting)
+  await store.observeRapid(admitted)
+  await db.exec("UPDATE control.facebook_rapid_quota SET used=1000,remaining=0,reason='quota_exhausted',blocked_until=now()+interval '1 day'")
+  assert.equal((await store.admitRapid({ ...ticket(), hubRateLimitExempt: true })).reason, 'quota_exhausted')
+})

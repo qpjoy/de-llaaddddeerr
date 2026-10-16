@@ -8,10 +8,15 @@ const busy = (retryAfterMs = 5000) => new AppError(429, 'external_platform_busy'
 // call or timer holds a database connection. Only digests and request IDs persist.
 export function queueTransition(state, action, now) {
   state.queue ||= []; state.done ||= []; state.followers ||= []
+  state.exemptActive ||= []
   state.followers = state.followers.filter(item => item.deadline > now)
   state.done = state.done.filter(item => item.until > now)
   const finish = (item, outcome) => { state.done.push({ id: item.id, fingerprint: item.fingerprint, outcome, until: now + (outcome === 'unknown' ? 900000 : 120000) }); state.done = [...state.done.filter(row => row.outcome === 'unknown'), ...state.done.filter(row => row.outcome !== 'unknown').slice(-256)] }
   if (state.active && state.active.expiresAt <= now) { finish(state.active, 'unknown'); state.active = null }
+  state.exemptActive = state.exemptActive.filter(item => {
+    if (item.expiresAt > now) return true
+    finish(item, 'unknown'); return false
+  })
   state.queue = state.queue.filter(item => { if (item.deadline > now) return true; finish(item, 'expired'); return false })
   const { policy } = action
   const spacing = Math.max(policy.intervalMs, Math.min(state.latencyMs || 0, 120000)) + policy.jitterMs
@@ -20,12 +25,20 @@ export function queueTransition(state, action, now) {
     if (state.done.filter(item => item.outcome === 'unknown').length >= 512) return { kind: 'busy', retryAfterMs: 60000 }
     const unsafe = state.done.find(item => item.fingerprint === action.fingerprint && item.outcome === 'unknown')
     if (unsafe) return { kind: 'unknown' }
-    const equal = [state.active, ...state.queue].find(item => item?.fingerprint === action.fingerprint)
+    const equal = [state.active, ...state.exemptActive, ...state.queue].find(item => item?.fingerprint === action.fingerprint)
     if (equal) {
+      if (equal.id === action.id && state.exemptActive.includes(equal)) return { kind: 'already_owned' }
       if (equal.id === action.id) return { kind: 'queued', id: equal.id }
       if (state.followers.length >= 100) return { kind: 'busy', retryAfterMs: spacing }
       state.followers.push({ id: action.id, deadline: action.deadline })
       return { kind: 'follower', id: equal.id }
+    }
+    // Exempt callers skip scheduling only. Keep shared identity, unknown and
+    // expiry evidence so parallel work cannot repurchase an uncertain note.
+    if (action.hubRateLimitExempt === true) {
+      state.exemptActive.push({ id: action.id, fingerprint: action.fingerprint,
+        startedAt: now, expiresAt: now + action.leaseMs })
+      return { kind: 'acquired', id: action.id }
     }
     const due = Math.max(estimate(), action.notBefore || 0)
     if (state.queue.length >= policy.maxPending || due >= action.deadline) return { kind: 'busy', retryAfterMs: Math.max(spacing, due - now) }
@@ -48,6 +61,11 @@ export function queueTransition(state, action, now) {
     return { kind: 'acquired' }
   }
   if (action.type === 'dispatch') {
+    const exempt = state.exemptActive.find(item => item.id === action.id)
+    if (exempt) {
+      exempt.startedAt = now; exempt.expiresAt = now + action.leaseMs
+      return { kind: 'acquired' }
+    }
     if (state.active?.id !== action.id) return { kind: 'expired' }
     state.active.startedAt = now
     state.active.expiresAt = now + action.leaseMs
@@ -72,13 +90,15 @@ export function queueTransition(state, action, now) {
   }
   if (action.type === 'finish') {
     const active = state.active?.id === action.id ? state.active : null
-    const item = active || state.queue.find(entry => entry.id === action.id)
+    const exempt = state.exemptActive.find(entry => entry.id === action.id)
+    const item = active || exempt || state.queue.find(entry => entry.id === action.id)
     if (!item) return { kind: 'expired' }
     if (active) {
       state.latencyMs = Math.round((state.latencyMs || policy.intervalMs) * 0.75 + Math.max(0, now - active.startedAt) * 0.25)
       state.active = null
     }
     state.queue = state.queue.filter(entry => entry.id !== action.id)
+    state.exemptActive = state.exemptActive.filter(entry => entry.id !== action.id)
     finish(item, action.outcome)
     return { kind: 'finished' }
   }
@@ -110,11 +130,14 @@ export class DispatchQueue {
       return result
     } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error } finally { client.release() }
   }
-  async enter({ scope, id, fingerprint, policy, deadline, leaseMs, notBefore = 0, signal }) {
-    const action = { policy, id, fingerprint, deadline, notBefore }
+  async enter({ scope, id, fingerprint, policy, deadline, leaseMs, notBefore = 0, signal, hubRateLimitExempt = false }) {
+    if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+    const action = { policy, id, fingerprint, deadline, notBefore, leaseMs, hubRateLimitExempt }
     const joined = await this.transition(scope, { ...action, type: 'join' })
     if (joined.kind === 'busy') throw busy(joined.retryAfterMs)
     if (joined.kind === 'unknown') throw new AppError(409, 'request_outcome_unknown', 'Previous acquisition outcome is unknown')
+    if (joined.kind === 'already_owned') throw new AppError(409, 'request_in_progress', 'The acquisition is already owned')
+    if (joined.kind === 'acquired') return { scope, id: joined.id, policy, follower: false, hubRateLimitExempt: true }
     const follower = joined.kind === 'follower'
     try {
       while (true) {

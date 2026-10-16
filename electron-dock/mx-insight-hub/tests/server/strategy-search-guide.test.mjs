@@ -123,6 +123,24 @@ test('four-platform migration guide is scoped and distinguishes keyword search f
   assert.doesNotMatch(html,/douyin|kuaishou|zhihu|Twitter|Facebook|tikhub|rapidapi|justone/i)
 })
 
+test('Reddit and YouTube standard direct guide is scoped and does not migrate raw or promise old cursor conversion', () => {
+  for (const platform of ['reddit', 'youtube']) {
+    const scopes = [{ platforms: [platform], capabilities: [] }]
+    const html = strategySearchGuide(scopes)
+    assert.match(html, /标准内容搜索直连/)
+    assert.match(html, new RegExp(`${platform} 的新 <code>POST /api/v1/data/search`))
+    assert.match(html, /data\.contractVersion=night-all\.data-search\.v1/)
+    assert.match(html, /两个 raw 入口.*继续原链路/)
+    assert.match(html, /标准请求继续拒绝 <code>params<\/code>/)
+    assert.match(html, /15 个上游页和 15 个公开页/)
+    assert.match(html, /409 search_restart_required/)
+    assert.match(html, /新的 Idempotency-Key 从首页重启；不要自动重启/)
+    assert.match(html, /其他无效游标或参数返回 400/)
+    assert.doesNotMatch(html, /POST \/api\/v1\/data\/social\/crawl|tikhub|rapidapi|justone|详情附采已启用/i)
+    assert.doesNotMatch(html, new RegExp(platform === 'reddit' ? 'youtube' : 'reddit', 'i'))
+  }
+})
+
 test('new account docs require same-scope platform and operation and narrow debugger schemas to authorized platforms', () => {
   const scopes = [{ platforms: ['linkedin', 'bilibili'], capabilities: ['social.content.crawl'] }]
   const before = structuredClone(scopes)

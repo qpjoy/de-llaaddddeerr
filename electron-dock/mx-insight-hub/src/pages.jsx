@@ -9,6 +9,7 @@ import { QixinPricingAdjustment } from './qixin-pricing.jsx'
 import { QIXIN_OFFICIAL_PRICES } from '../shared/qixin-official-prices.mjs'
 import { BILLING_FEATURES, compileBillingComponents } from '../shared/billing-composition.mjs'
 import { KeyAccessLimitsPanel } from './key-access-limits.jsx'
+import { KeyHubLimitsModal, canManageKeyHubLimits } from './key-hub-limits.jsx'
 import { withIpRiskProductScopes, withEnterpriseProductScopes } from '../shared/product-access.mjs'
 import { KeyReveal } from './key-reveal.jsx'
 import { TenantServiceAccess } from './tenant-service-access.jsx'
@@ -1377,6 +1378,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
   const [overviewTarget, setOverviewTarget] = useState(null)
   const [overviewLoading, setOverviewLoading] = useState(false)
   const [overviewError, setOverviewError] = useState(null)
+  const [hubLimitsTarget, setHubLimitsTarget] = useState(null)
 
   const load = useCallback(async () => {
     const allConsumers = (await adminApi.consumers(token)) || []
@@ -1704,6 +1706,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
                     <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => showOverview(key)}>
                       <ChartLine size={15} aria-hidden="true" />额度与用量
                     </button>
+                    {canManageKeyHubLimits(session, key) ? <button className="qp-button qp-button--ghost qp-button--sm" type="button" onClick={() => setHubLimitsTarget(key)}><SlidersHorizontal size={15} aria-hidden="true" />Hub 限制开关</button> : null}
                     {tenantAllows(session, key.tenantId, 'apikey.write') && key.effectiveStatus === 'active' ? <button className="qp-button qp-button--ghost qp-button--sm" onClick={() => setRevealTarget(key)}>查看完整 Key</button> : null}
                     {session?.platformAdmin && tenantAllows(session, key.tenantId, 'platform.write') ? (
                       <a
@@ -1880,6 +1883,7 @@ export function ApiKeysPage({ token, session, query, setQuery, onUnauthorized, n
         </Modal>
       ) : null}
 
+      {hubLimitsTarget && canManageKeyHubLimits(session, hubLimitsTarget) ? <KeyHubLimitsModal key={`${token}:${hubLimitsTarget.id}`} token={token} apiKey={hubLimitsTarget} onUnauthorized={onUnauthorized} onClose={() => setHubLimitsTarget(null)} /> : null}
       {overviewTarget ? (
         <Modal
           title={`${overviewTarget.key.name} · 额度与用量`}

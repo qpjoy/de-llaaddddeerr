@@ -166,7 +166,9 @@ export function Racks({
                         {mode === "sim"
                           ? "模拟资源 · 不代表实际 USB 宿主机"
                           : host.workerIds.map((id) => {
-                              const w = state.workers.find((w) => w.id === id),
+                              const w = state.workers
+                                  .filter((w) => (w.workerId ?? w.id) === id)
+                                  .sort((a, b) => b.at - a.at)[0],
                                 age = w
                                   ? Math.max(
                                       0,

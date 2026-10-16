@@ -4299,7 +4299,8 @@ export class HubService {
       maxPageSize: policy.maxPageSize,
       maxCrawlWork: storedPolicy?.maxCrawlWork ?? Math.min(policy.maxPageSize, 100),
     })
-    if (operation === 'raw' && Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, normalized.platform)) {
+    if (operation === 'raw' && Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, normalized.platform)
+      && TIKHUB_CONTENT_SEARCH_RECIPES[normalized.platform].rawCompatibility !== false) {
       assert(this.externalRawSearch, 503, 'content_search_unavailable', 'Hub content search is unavailable')
       return this.externalRawSearch(context, { normalized, body, idempotencyKey, ...(signal ? { signal } : {}) })
     }
@@ -4683,7 +4684,12 @@ export class HubService {
     }
   }
 
-  async search(context, { body, idempotencyKey, path, liveOnly = false, responseFormat = 'data', signal }) {
+  async search(context, { body, idempotencyKey, path, liveOnly = false, responseFormat = 'data', signal, retryOfRequestId }) {
+    if (retryOfRequestId != null) {
+      assert(path === '/api/v1/data/search' && responseFormat === 'data'
+        && typeof body?.platform === 'string' && canonicalPlatform(body.platform) === 'twitter',
+      400, 'uncertain_retry_not_supported', 'Manual retry is only supported for standard Twitter search')
+    }
     if (responseFormat === 'raw') return this.#nightAllCompatibilitySearch(context, { operation: 'raw', body, idempotencyKey, path, signal })
     if (wechatSearchPlatform(body?.platform)) {
       const mapped = normalizeWechatDataSearch(body)
@@ -4702,9 +4708,10 @@ export class HubService {
     const requestedPlatform = canonicalPlatform(body.platform)
     const facebookSearch = requestedPlatform === 'facebook'
     const directContentSearch = Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, requestedPlatform)
+    const contentSearchParams = directContentSearch && TIKHUB_CONTENT_SEARCH_RECIPES[requestedPlatform].publicParams !== false
     const unsupportedFields = dedicatedTelegramSearch
       ? []
-      : Object.keys(body).filter((field) => !PUBLIC_SEARCH_FIELDS.has(field) && !((facebookSearch || directContentSearch) && field === 'params'))
+      : Object.keys(body).filter((field) => !PUBLIC_SEARCH_FIELDS.has(field) && !((facebookSearch || contentSearchParams) && field === 'params'))
     assert(unsupportedFields.length === 0, 400, 'unsupported_fields', `Unsupported public fields: ${unsupportedFields.join(', ')}`)
     const platform = dedicatedTelegramSearch ? 'telegram' : canonicalPlatform(body.platform)
     assert(!RESERVED_PLATFORM_NAMES.has(platform), 400, 'invalid_platform', 'A single explicit platform is required')
@@ -4761,7 +4768,7 @@ export class HubService {
       query,
       pageSize,
       ...(cursor ? { cursor } : {}),
-      ...((facebookSearch || directContentSearch) && body.params !== undefined ? { params: body.params } : {}),
+      ...((facebookSearch || contentSearchParams) && body.params !== undefined ? { params: body.params } : {}),
     }
     const resultType = resolveResultType(body)
     let fingerprintQuery = telegramQuery ?? upstreamBody
@@ -4786,6 +4793,7 @@ export class HubService {
     }
     if (path === '/api/v1/data/search' && this.externalDataSearch && canRouteDataSearch(upstreamBody)) {
       return this.externalDataSearch(context, { body, normalized: upstreamBody, idempotencyKey,
+        ...(retryOfRequestId != null ? { retryOfRequestId } : {}),
         ...(signal ? { signal } : {}),
         dataSearch: { resultType, replayWindowMs: replayWindowFor(resultType) } })
     }
@@ -4886,8 +4894,19 @@ export class HubService {
     const activeRequestId = reservation.request.id
     const startedAt = performance.now()
     let commitAttempted = false
+    let nightAllCall = null
+    const finishNightAllCall = async evidence => {
+      if (!nightAllCall || typeof this.store.finishConnectorCall !== 'function') return
+      try { await this.store.finishConnectorCall(nightAllCall.id, evidence) } catch { /* Diagnostics must not change acquisition settlement. */ }
+    }
     try {
       const localTelegram = platform === 'telegram'
+      if (!localTelegram && typeof this.store.beginConnectorCall === 'function') {
+        try {
+          nightAllCall = await this.store.beginConnectorCall({ consumerId: context.consumer.id,
+            requestId: activeRequestId, operation: 'data-search', fingerprint, platform, sourceMode: 'live' })
+        } catch { /* Keep the existing acquisition behavior if diagnostic storage is unavailable. */ }
+      }
       const upstream = localTelegram
         ? null
         : await this.adapter.search({
@@ -4909,6 +4928,12 @@ export class HubService {
       // appending requestId only after the usage commit.
       const responseBody = { ...normalizeSearchContent(responsePayload, platform), requestId: activeRequestId }
       const itemCount = Array.isArray(responseBody?.data?.items) ? responseBody.data.items.length : 0
+      const connectorOutcome = ['partial', 'failed'].includes(upstream?.payload?.data?.status)
+        ? upstream.payload.data.status : 'complete'
+      await finishNightAllCall({ outcome: connectorOutcome, httpStatus: 200, businessStatus: connectorOutcome,
+        failureKind: connectorOutcome === 'failed' ? 'business' : null,
+        upstreamLatencyMs: Math.round(performance.now() - startedAt), sourceMode: 'live',
+        nightAllRequestId: upstream?.raw?.requestId ?? null, nightAllTraceId: upstream?.raw?.traceId ?? null })
       const commit = {
         responseStatus: 200,
         responseBody,
@@ -4952,9 +4977,22 @@ export class HubService {
 
       return { status: 200, body: responseBody, requestId: activeRequestId, replay: false }
     } catch (error) {
+      if (nightAllCall && error instanceof UpstreamRejectedError && typeof this.store.recordConnectorFailureEvidence === 'function') {
+        try { await this.store.recordConnectorFailureEvidence(nightAllCall.id, nightAllFailureEvidence(error)) } catch { /* Best-effort bounded diagnostics. */ }
+      }
+      if (error instanceof UpstreamRejectedError || error instanceof UpstreamAmbiguousError) {
+        const evidence = compatibilityUpstreamEvidence(error)
+        await finishNightAllCall({ outcome: error instanceof UpstreamRejectedError ? 'failed' : 'unknown',
+          httpStatus: error instanceof UpstreamRejectedError ? error.status : null,
+          businessStatus: error instanceof UpstreamRejectedError ? 'failed' : 'unknown',
+          upstreamLatencyMs: Math.round(performance.now() - startedAt), errorCode: evidence.errorCode,
+          failureKind: compatibilityFailureKind(error), sourceMode: 'live',
+          nightAllRequestId: error instanceof UpstreamRejectedError ? error.body?.requestId ?? error.upstreamRequestId ?? null : null,
+          nightAllTraceId: error instanceof UpstreamRejectedError ? error.body?.traceId ?? error.upstreamTraceId ?? null : null })
+      }
       if (error instanceof UpstreamRejectedError) {
         await this.store.releaseRequest(activeRequestId, `night_all_http_${error.status}`)
-        throw nightAllRejectionError(error, 502, activeRequestId)
+        throw nightAllRejectionError(error, error.status === 429 ? 429 : 502, activeRequestId)
       }
       if (error instanceof UpstreamAmbiguousError) {
         await this.store.markRequestUnknown(activeRequestId, 'night_all_outcome_unknown')
@@ -4971,6 +5009,8 @@ export class HubService {
         await this.store.markRequestUnknown(activeRequestId, 'usage_commit_ambiguous').catch(() => {})
         throw error
       }
+      await finishNightAllCall({ outcome: 'failed', businessStatus: 'failed', failureKind: 'internal',
+        errorCode: 'internal_error', upstreamLatencyMs: Math.round(performance.now() - startedAt), sourceMode: 'live' })
       await this.store.releaseRequest(activeRequestId, 'internal_error')
       throw error
     }

@@ -1,10 +1,11 @@
+import { upstreamCapacityError } from './availability-errors.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { normalizeTikHubContentSearchRequest, projectTikHubContentSearch, contentSearchDataItem, TIKHUB_CONTENT_SEARCH_VERSION } from '../contracts/tikhub-content-search.mjs'
 import { rawSearchRecords, RAW_SEARCH_DATASET } from '../contracts/raw-search.mjs'
-import { isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { ContentSearchStateStore } from './content-search-store.mjs'
 
 // Validate every persisted/served projection before a paid page is classified
@@ -50,7 +51,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
     || request.body.commentLimit != null || request.body.cacheMaxAgeHours != null) {
     throw new AppError(400, 'content_search_option_unsupported', 'Direct content search does not execute paid detail/comments or cache-hint options; use the dedicated data product or explicitly remove these options')
   }
-  const defaults = { page: 1, offset: 0, cursor: 0, search_id: '', backtrace: '', pcursor: '', search_hash_id: '' }
+  const defaults = { page: 1, offset: 0, cursor: 0, search_id: '', backtrace: '', pcursor: '', search_hash_id: '', after: '', continuation_token: '' }
   for (const [name, expected] of Object.entries(defaults)) {
     if (Object.hasOwn(request.params, name) && String(request.params[name]) !== String(expected)) {
       throw new AppError(400, 'content_search_pagination_unsupported', 'Native continuation parameters cannot replace the signed Hub cursor; restart explicitly')
@@ -61,7 +62,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
       throw new AppError(400, 'content_search_pagination_unsupported', 'Native page size must equal the public request page size')
     }
   }
-  if (Object.hasOwn(request.params, 'keyword') && request.params.keyword !== request.queries[0]) {
+  if (['keyword', 'query'].some(name => Object.hasOwn(request.params, name) && request.params[name] !== request.queries[0])) {
     throw new AppError(400, 'unsupported_fields', 'Use the public keyword/query field for content search')
   }
   const sample = normalizeTikHubContentSearchRequest({ platform: request.platform, query: request.queries[0],
@@ -121,6 +122,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
       rowsByJob[index].push(row)
     }
     if (projected.nonPostCount) warn('non_post_items_excluded', 'The provider returned non-content entries; these were excluded from content results.')
+    if (projected.providerPage.stopReason === 'repeated_cursor') warn('content_search_repeated_cursor', 'The supplier repeated its continuation; acquired content was retained and further acquisition stopped.')
     if (rows.some(row => ['provider_preview', 'title_only'].includes(row.body_completeness))) {
       warn('body_completeness_unknown', 'Some returned content is a provider preview; full text was not independently acquired.')
     }
@@ -191,9 +193,11 @@ export async function runContentSearch({ gateway, context, request, delivery, de
             lease?.reason === 'unknown' ? 'request_outcome_unknown' : lease?.reason === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'request_in_progress',
             'The procurement result is pending or unavailable; verify the original request')
           ownsChild = true
+          if (entered === 'exempt' && !isHubRateLimitExempt(context)) {
+            leaveCapacity(entered); entered = false
+          }
           if (!entered) {
-            if (!await enterCapacity({ delivery, expiresAt: new Date(deadlineAt), signal, platform: request.platform })) throw new AppError(503, 'external_platform_busy', 'Content-search capacity is occupied')
-            entered = true
+            if (!(entered = await enterCapacity({ delivery, expiresAt: new Date(deadlineAt), signal, platform: request.platform }))) throw new AppError(503, 'external_platform_busy', 'Content-search capacity is occupied')
           }
           const cost = providerCostControl(control?.billing ? { billing: control.billing } : gateway.config, nativeRequest.endpointKey)
           costReservation = await store.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
@@ -225,6 +229,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           } catch (error) {
             if (!(error instanceof TikHubUpstreamError)) throw error
             const evidence = error.evidence, status = evidence.httpStatus === 429 ? 429 : 502
+            const failureDetails = { ...(evidence.httpStatus === 429 ? upstreamCapacityError(evidence).details : {}), outcome: evidence.outcome, retryable: false }
             currentEvidence = { ...evidence, callId: currentCall.id, delivery, costMinor: cost.costMinor,
               costKind: cost.costKind, currency: cost.currency, latencyMs: Math.round(performance.now() - callStart),
               responseArchive: error.responseArchive, restrictedResponseArchive: error.restrictedResponseArchive,
@@ -232,9 +237,9 @@ export async function runContentSearch({ gateway, context, request, delivery, de
             const code = evidence.outcome === 'unknown' ? 'upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'external_platform_rejected'
             phase = 'finish_failure'
             await store.finishFailure({ ...currentEvidence, failureResponseStatus: status,
-              failureResponseBody: { error: { code, message: 'Content-search acquisition failed; inspect its saved outcome', details: { outcome: evidence.outcome } }, requestId: delivery.usageRequestId } })
+              failureResponseBody: { error: { code, message: 'Content-search acquisition failed; inspect its saved outcome', details: failureDetails }, requestId: delivery.usageRequestId } })
             currentCall = null; settledFailure = true
-            throw new AppError(status, code, 'Content-search acquisition failed; inspect its saved outcome', { outcome: evidence.outcome })
+            throw new AppError(status, code, 'Content-search acquisition failed; inspect its saved outcome', failureDetails)
           }
           phase = 'validate_evidence'
           const receipt = result.restrictedResponseArchive
@@ -295,6 +300,6 @@ export async function runContentSearch({ gateway, context, request, delivery, de
     throw error
   } finally {
     if (ownsParent && !retainLease) await stateStore.releaseDeliveryLease(parentLease).catch(() => {})
-    if (entered) leaveCapacity()
+    if (entered) leaveCapacity(entered)
   }
 }

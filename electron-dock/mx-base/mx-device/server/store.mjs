@@ -640,6 +640,10 @@ export class PgStore {
       "INSERT INTO mx_device.workers VALUES($1,(extract(epoch FROM clock_timestamp())*1000)::bigint,$2) ON CONFLICT(id) DO UPDATE SET at=excluded.at,document=excluded.document",
       [id, doc],
     );
+    // Per-instance rows from restarted workers expire after a day.
+    await this.pool.query(
+      "DELETE FROM mx_device.workers WHERE at < (extract(epoch FROM clock_timestamp())*1000)::bigint - 86400000",
+    );
   }
   /** Runs a pure, synchronous state transition and persists the rows it changed.
    *

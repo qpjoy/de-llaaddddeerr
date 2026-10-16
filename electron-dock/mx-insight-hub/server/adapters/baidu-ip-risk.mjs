@@ -41,35 +41,35 @@ export class BaiduIpRiskAdapter {
     if (!this.pool) return {enabled:false,revision:0,daily_limit:1200,spacing_ms:2000,calls:0}
     return (await this.pool.query("SELECT * FROM hub_commerce.ip_channel WHERE id='baidu-v2'")).rows[0]
   }
-  async capabilities() {
+  async capabilities({ hubRateLimitExempt = false } = {}) {
     const policy = await this.policy()
-    const ready = policy?.enabled === true && (!policy.cooldown_until || new Date(policy.cooldown_until) <= new Date())
+    const ready = policy?.enabled === true && (hubRateLimitExempt || !policy.cooldown_until || new Date(policy.cooldown_until) <= new Date())
     return {platform:'ip_risk',ready,operations:{'ip.risk.query.v2':{ready,effectiveState:ready?'active':'paused'}}}
   }
-  async claim(requestId,endpoint) {
+  async claim(requestId,endpoint,{ hubRateLimitExempt = false } = {}) {
     return withPgTransaction(this.pool,async client=>{
       const policy = (await client.query("SELECT *,now() AS current_time,(now() AT TIME ZONE 'Asia/Shanghai')::date AS today FROM hub_commerce.ip_channel WHERE id='baidu-v2' FOR UPDATE")).rows[0]
       if (!policy?.enabled) throw new AppError(503,'ip_channel_paused','IP v2 渠道暂停')
       const now = new Date(policy.current_time).getTime()
-      if (policy.cooldown_until && new Date(policy.cooldown_until).getTime() > now) throw new AppError(429,'ip_channel_cooling','IP v2 渠道限流冷却中')
+      if (!hubRateLimitExempt && policy.cooldown_until && new Date(policy.cooldown_until).getTime() > now) throw new AppError(429,'ip_channel_cooling','IP v2 渠道限流冷却中')
       const tokens = Math.min(10, Number(policy.tokens) + Math.max(0,now-new Date(policy.refill_at).getTime())/60000)
-      if(tokens < 1) throw new AppError(429,'ip_channel_busy','IP v2 上游令牌不足，每分钟恢复 1 次请求')
+      if(!hubRateLimitExempt && tokens < 1) throw new AppError(429,'ip_channel_busy','IP v2 上游令牌不足，每分钟恢复 1 次请求')
       const used = String(policy.day) === String(policy.today) ? policy.calls : 0
-      if (used >= policy.daily_limit) throw new AppError(429,'ip_channel_daily_limit','IP v2 上游日配额已用尽')
-      const slot = Math.max(now,new Date(policy.next_at || now).getTime())
+      if (!hubRateLimitExempt && used >= policy.daily_limit) throw new AppError(429,'ip_channel_daily_limit','IP v2 上游日配额已用尽')
+      const slot = hubRateLimitExempt ? now : Math.max(now,new Date(policy.next_at || now).getTime())
       if (slot-now > 10000) throw new AppError(429,'ip_channel_busy','IP v2 渠道繁忙，请稍后查询')
       const id = randomUUID()
-      await client.query("UPDATE hub_commerce.ip_channel SET day=(now() AT TIME ZONE 'Asia/Shanghai')::date,calls=$1,next_at=$2,tokens=$3,refill_at=now() WHERE id='baidu-v2'",[used+1,new Date(slot+policy.spacing_ms),tokens-1])
+      await client.query("UPDATE hub_commerce.ip_channel SET day=(now() AT TIME ZONE 'Asia/Shanghai')::date,calls=$1,next_at=$2,tokens=$3,refill_at=now() WHERE id='baidu-v2'",[used+1,hubRateLimitExempt ? policy.next_at : new Date(slot+policy.spacing_ms),hubRateLimitExempt ? tokens : tokens-1])
       await client.query('INSERT INTO hub_commerce.ip_upstream_calls(id,request_id,endpoint) VALUES($1,$2,$3)',[id,requestId,endpoint])
       return {id,wait:slot-now}
     })
   }
-  async query(ip,{requestId}={}) {
+  async query(ip,{requestId,hubRateLimitExempt=false}={}) {
     const started=Date.now(), evidence=[], values={}
     const result={outcome:'unknown',errorCode:'ip_query_outcome_unknown',httpStatus:null,businessCode:null}
     try {
       for (const endpoint of ['base','overall']) {
-        const slot=await this.claim(requestId,endpoint)
+        const slot=await this.claim(requestId,endpoint,{hubRateLimitExempt})
         if(slot.wait>0)await this.sleep(slot.wait)
         let bytes=null,status=null,outcome='unknown'
         try {

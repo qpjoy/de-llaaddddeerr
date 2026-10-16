@@ -1,4 +1,4 @@
-import { createInternalTrafficPolicy } from '../core/internal-traffic-policy.mjs'
+import { createInternalTrafficPolicy, isInternalTraffic } from '../core/internal-traffic-policy.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { strategySearchUsageDay } from '../data/strategy-search-usage.mjs'
 import { assertMemoryKeyAccessLimits } from './key-access-limits.mjs'
@@ -779,6 +779,8 @@ export class MemoryStore {
     const { digest: _digest, ...safe } = record
     return clone({
       ...safe,
+      hubRateLimitExempt: safe.hubRateLimitExempt ?? null,
+      hubRateLimitRevision: safe.hubRateLimitRevision ?? 0,
       platforms: (record.scopeMode === 'legacy_dynamic'
         ? this.#dynamicPlatformEntitlements(record)
         : this.apiKeyPlatformEntitlements.get(record.id) || []).map((entry) => entry.platform),
@@ -1677,7 +1679,7 @@ export class MemoryStore {
         { limitScope: 'consumer', limit: consumerMax, used: consumerUsed, windowSeconds: consumerWindowSeconds },
         { limitScope: 'api_key', limit: keyMax, used: keyUsed, windowSeconds: keyWindowSeconds },
       ].map((layer) => ({ ...layer, remaining: Math.max(0, layer.limit - layer.used) }))
-      if (key.accessProfile === 'managed_full' || this.internalTrafficPolicy.matches({ tenantId, apiKeyId })) {
+      if (isInternalTraffic(this, { apiKey: key, tenant: { id: tenantId }, consumer: { id: consumerId } })) {
         for (const layer of layers) Object.assign(layer, { exempt: true, limit: null, remaining: null })
       }
       const binding = layers.reduce((tightest, layer) => (
@@ -1733,7 +1735,8 @@ export class MemoryStore {
     tenantId, consumerId, apiKeyId, platform, capability,
     windowStart, maxRequests, authorizationScopes, scopeEntitlements, legacySingleScope,
   }) {
-    const internal = this.apiKeys.get(apiKeyId)?.accessProfile === 'managed_full' || this.internalTrafficPolicy.matches({ tenantId, apiKeyId })
+    const internal = isInternalTraffic(this, { apiKey: this.apiKeys.get(apiKeyId),
+      tenant: { id: tenantId }, consumer: { id: consumerId } })
     if (!internal) assertMemoryKeyAccessLimits(this, apiKeyId, authorizationScopes)
     const records = [...this.requests.values()]
     for (const scope of internal ? [] : authorizationScopes) {

@@ -193,6 +193,7 @@ export function Connections({ state, onAdd, onConnectReal }) {
               <thead>
                 <tr>
                   <th>标识</th>
+                  <th>调度</th>
                   <th>最近心跳</th>
                   <th>状态</th>
                 </tr>
@@ -200,7 +201,22 @@ export function Connections({ state, onAdd, onConnectReal }) {
               <tbody>
                 {state.workers.map((w) => (
                   <tr key={w.id}>
-                    <td>{w.id}</td>
+                    <td>
+                      {w.workerId ?? w.id}
+                      {w.workerId && w.instanceId && (
+                        <span className="muted">
+                          {" "}
+                          · 实例 {w.instanceId.slice(0, 8)}
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      {w.scheduler === "leader"
+                        ? `模拟调度领导者 · epoch ${w.epoch}`
+                        : w.scheduler === "standby"
+                          ? "备用（只执行真实设备与已领取工作）"
+                          : "—"}
+                    </td>
                     <td>{time(w.at)}</td>
                     <td>
                       {Date.now() - w.at < 10000 ? "心跳正常" : "心跳过期"}

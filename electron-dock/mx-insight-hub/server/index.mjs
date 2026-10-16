@@ -109,7 +109,7 @@ export async function createRuntime(config = loadConfig()) {
   const pool = config.storeDriver === 'postgres'
     ? createPool(config.common.postgres, { applicationName: 'mx-insight-hub-api' })
     : null
-  const acquisitionHistory = pool ? new PostgresAcquisitionHistoryStore(pool) : null
+  const acquisitionHistory = pool ? new PostgresAcquisitionHistoryStore(pool, { apiKeyPepper: config.apiKeyPepper }) : null
   const topicReports = pool ? new TopicReportStore(pool) : null
   const newsDiscovery = pool ? new NewsDiscoveryStore(pool, { queryTimeoutMs: config.newsQueryTimeoutMs }) : null
   const queue = pool ? createQueue({ ...config.common.queue, driver: 'postgres' }, { pool }) : null
@@ -574,7 +574,8 @@ export async function createRuntime(config = loadConfig()) {
     externalWechatSearch: (context, input) => socialAccountTikHubGateway.forwardNative(context, input),
     externalRawSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
       : input.normalized.platform === 'instagram' ? instagramSearch(context, input)
-      : TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform] ? nativeSearchGateways[input.normalized.platform].searchContent(context, input)
+      : TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform]?.rawCompatibility !== false
+        && TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform] ? nativeSearchGateways[input.normalized.platform].searchContent(context, input)
       : (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
     externalDataSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
       : input.normalized.platform === 'instagram' ? instagramSearch(context, input)

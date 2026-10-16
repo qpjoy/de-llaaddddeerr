@@ -5,7 +5,9 @@
     "bilibili": "Night-All tests/bilibili-metrics.test.js; po-infra/media/spiders_src/bilibili-content-by-keywords.py (general_search data.result, page/numPages, review/favorites/play)",
     "douyin": "Night-All curated-search-endpoints.js and normalizer tests; po-infra Douyin V1 pagination aliases log_pb.impr_id/extra.logid",
     "kuaishou": "Night-All tests/tikhub-normalizer.test.js mixFeeds/feed/photo wrappers and public photoId/share_info identity. Stream media aliases retained from local po-infra feed parser; its search_video_v2 endpoint is not selected here.",
-    "zhihu": "Night-All tests/tikhub-normalizer.test.js search_result wrapper; po-infra/media/spiders_src/zhihu-posts-by-keywords.py paging.next offset/search_hash_id. Excerpts are explicitly previews."
+    "zhihu": "Night-All tests/tikhub-normalizer.test.js search_result wrapper; po-infra/media/spiders_src/zhihu-posts-by-keywords.py paging.next offset/search_hash_id. Excerpts are explicitly previews.",
+    "reddit": "Night-All tests/tikhub-normalizer.test.js dynamic components.main.edges node.post and pageInfo; synthetic terminal page.",
+    "youtube": "Night-All tests/youtube-metrics.test.js formatted videos array; synthetic terminal page."
   },
   "bilibili": {
     "code": 0,
@@ -35,5 +37,16 @@
     ],
     "paging": { "is_end": false, "next": "https://api.zhihu.com/search_v3?t=general&q=ignored&offset=20&search_hash_id=zh-session" },
     "params": { "offset": "0", "search_hash_id": "request-echo-ignored" }
+  },
+  "reddit": {
+    "search": { "dynamic": { "components": { "main": {
+      "edges": [{ "node": { "post": { "id": "t3_reddit1", "postTitle": "Reddit 城市标题", "content": { "markdown": "完整 Reddit 正文" }, "permalink": "/r/fixture/comments/reddit1/title/", "createdAt": "2026-10-15T00:00:00Z", "authorInfo": { "name": "作者" }, "score": 0 } } }],
+      "pageInfo": { "hasNextPage": false, "endCursor": null }
+    } } } }
+  },
+  "youtube": {
+    "videos": [{ "video_id": "youtube1", "title": "YouTube 城市标题", "description": "完整 YouTube 正文", "published_at": "2026-10-15T00:00:00Z", "view_count": 0 }],
+    "has_more": false,
+    "continuation_token": null
   }
 }

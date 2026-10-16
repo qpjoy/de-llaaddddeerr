@@ -14,13 +14,13 @@ const result = (payload, req) => projectTikHubContentSearch({ publicBody: { data
   restrictedResponseArchive: { sha256: 'immutable-archive' } }, req)
 const project = (platform, payload = fixtures[platform], options = {}) => result(structuredClone(payload), request(platform, options))
 
-test('four fixed recipes reuse retained native endpoints and former defaults without Night-All dispatch', () => {
+test('fixed recipes reuse retained native endpoints and former defaults without Night-All dispatch', () => {
   for (const [platform, recipe] of Object.entries(TIKHUB_CONTENT_SEARCH_RECIPES)) {
     const endpoint = nativeForwardingEndpoint(recipe.key), normalized = request(platform)
     assert.equal(endpoint.path, recipe.path)
     assert.equal(normalized.endpointPath, recipe.path)
     assert.equal(normalized.method, recipe.method)
-    assert.equal(normalized.upstreamQuery.keyword, '城市')
+    assert.equal(normalized.upstreamQuery[platform === 'reddit' ? 'query' : 'keyword'], '城市')
     assert.deepEqual(Object.keys(normalized.upstreamQuery).filter(key => !recipe.parameterNames.includes(key)), [])
   }
   assert.equal(request('douyin').key, 't.douyin_search_fetch_video_search_v1')

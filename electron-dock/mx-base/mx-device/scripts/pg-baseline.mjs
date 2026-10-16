@@ -345,6 +345,14 @@ try {
     const device = deviceIds[0];
     const timings = {
       atomicNoop: await time(() => store.atomic(() => null, commandPath)),
+      // Per-device execution path: row-scoped, no realm lock (V2-1).
+      atomicScoped: await time(() =>
+        store.atomic(() => null, {
+          ...commandPath,
+          scope: "attempt",
+          deviceId: probe.device.id,
+        }),
+      ),
       atomicTouchDevice: await time(() =>
         store.atomic((s) => {
           const d = s.devices.find((x) => x.id === device);
@@ -388,6 +396,7 @@ try {
     console.log(
       `history=${n} jobs=${row.rows.jobs} commands=${row.rows.commands} events=${row.rows.events} db=${row.databaseMiB}MiB | ` +
         `atomic noop p50/p95=${timings.atomicNoop.p50}/${timings.atomicNoop.p95}ms ` +
+        `scoped=${timings.atomicScoped.p50}/${timings.atomicScoped.p95}ms ` +
         `touch=${timings.atomicTouchDevice.p50}/${timings.atomicTouchDevice.p95}ms ` +
         `snapshot=${timings.snapshot.p50}/${timings.snapshot.p95}ms ` +
         `api/state=${timings.apiState.p50}/${timings.apiState.p95}ms ` +

@@ -16,6 +16,7 @@ export class UpstreamRejectedError extends Error {
     this.body = body
     this.upstreamRequestId = correlation.requestId || null
     this.upstreamTraceId = correlation.traceId || null
+    if (correlation.rateLimit) this.rateLimit = correlation.rateLimit
   }
 }
 

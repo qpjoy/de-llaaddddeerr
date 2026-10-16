@@ -1,5 +1,5 @@
-import { isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
-import { circuitOpenError, ecommerceCapacityError } from './availability-errors.mjs'
+import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { circuitOpenError, ecommerceCapacityError, upstreamCapacityError } from './availability-errors.mjs'
 import { ConcurrencyAdmissionQueue, DEFAULT_CONCURRENCY_QUEUE, concurrencyBusy } from './concurrency-admission.mjs'
 import { WebSearchUpstreamError } from '../adapters/web-search.mjs'
 import { gatewayWebSearchRequest } from '../web-search/contract.mjs'
@@ -220,7 +220,9 @@ function publicFailure(error, { ecommerce = false } = {}) {
     const code = evidence.outcome === 'unknown' ? 'web_search_upstream_outcome_unknown'
       : evidence.outcome === 'succeeded_unusable' ? 'web_search_upstream_response_unusable' : evidence.errorCode
     return new AppError(evidence.errorCode === 'web_search_egress_unavailable' ? 503 : evidence.httpStatus === 429 ? 429 : 502,
-      code, 'Search request failed; reuse the same request identifier to verify its outcome', { outcome: evidence.outcome, retryable: false })
+      code, 'Search request failed; reuse the same request identifier to verify its outcome', {
+        ...(evidence.httpStatus === 429 ? upstreamCapacityError(evidence).details : {}),
+        outcome: evidence.outcome, retryable: false })
   }
   if (error instanceof RapidApiUpstreamError) {
     if (evidence.errorCode === 'social_egress_unavailable') return new AppError(503, 'social_egress_unavailable', 'Social data egress is unavailable; no business request was dispatched', { outcome: 'rejected', retryable: false })
@@ -228,7 +230,8 @@ function publicFailure(error, { ecommerce = false } = {}) {
     const code = unknown ? 'social_upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'social_upstream_response_unusable' : 'social_upstream_rejected'
     return new AppError(evidence.httpStatus === 429 ? 429 : 502, code,
       `External social data request failed (upstreamStatus: ${evidence.httpStatus ?? 'unknown'}${evidence.businessCode != null ? `, upstreamCode: ${evidence.businessCode}` : ''})`,
-      { upstreamStatus: evidence.httpStatus, ...(evidence.businessCode != null ? {upstreamCode:evidence.businessCode} : {}), outcome: evidence.outcome, retryable: false })
+      { ...(evidence.httpStatus === 429 ? upstreamCapacityError(evidence).details : {}),
+        upstreamStatus: evidence.httpStatus, ...(evidence.businessCode != null ? {upstreamCode:evidence.businessCode} : {}), outcome: evidence.outcome, retryable: false })
   }
   // Business capacity codes belong to JustOne. Other suppliers may reuse
   // those numbers in error metadata without reporting a capacity failure.
@@ -244,7 +247,7 @@ function publicFailure(error, { ecommerce = false } = {}) {
   }
   if (evidence.httpStatus === 429
     || (error instanceof JustOneUpstreamError && [302, 303].includes(evidence.businessCode))) {
-    return new AppError(429, 'external_platform_capacity_exceeded', 'External data capacity is temporarily exhausted')
+    return upstreamCapacityError(evidence)
   }
   if (error instanceof JustOneUpstreamError && [100, 600, 601, 602].includes(evidence.businessCode)) {
     return new AppError(503, 'external_platform_capacity_unavailable', 'External data capacity is unavailable')
@@ -347,6 +350,7 @@ export class ExternalPlatformGateway {
   }
 
   #enter(context) {
+    if (isHubRateLimitExempt(context)) return 'exempt'
     const consumerId = context.consumer.id
     const consumerActive = this.activeByConsumer.get(consumerId) || 0
     if (
@@ -358,7 +362,10 @@ export class ExternalPlatformGateway {
     return true
   }
 
-  #leave(consumerId) {
+  #leave(consumerId, admission = true) {
+    // Release the captured admission, not the current mutable Key setting.
+    // Exempt work neither occupies nor releases an ordinary caller's slot.
+    if (admission === 'exempt') return
     this.active = Math.max(0, this.active - 1)
     const next = Math.max(0, (this.activeByConsumer.get(consumerId) || 1) - 1)
     if (next === 0) this.activeByConsumer.delete(consumerId)
@@ -385,6 +392,7 @@ export class ExternalPlatformGateway {
 
   async #enterOrQueue(context, { lease, delivery, expiresAt, signal, platform, canWait, revalidate }) {
     if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+    if (isHubRateLimitExempt(context)) return 'exempt'
     if (!this.concurrencyQueue.entries.length && this.#enter(context)) return true
     if (!canWait) return false
     const policy = { ...DEFAULT_CONCURRENCY_QUEUE, ...this.config.concurrencyQueue }
@@ -400,9 +408,8 @@ export class ExternalPlatformGateway {
       // during first-acquisition waiting; the owned claim below still checks
       // new unknown/quarantine evidence without extending that lease.
       if (!ownedSearchDelivery) await this.platformStore.releaseDispatchLease(lease)
-      await this.concurrencyQueue.enter({ tryEnter: () => this.#enter(context), deadline,
+      await this.concurrencyQueue.enter({ tryEnter: () => (entered = this.#enter(context)), deadline,
         maxPending: policy.maxPending, signal })
-      entered = true
       context = await revalidate()
       if (!(this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context))
         && (this.activeByConsumer.get(context.consumer.id) || 0) > this.config.maxConsumerConcurrency) {
@@ -420,9 +427,9 @@ export class ExternalPlatformGateway {
       }
       if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
       if (this.admissionClock() >= deadline) throw concurrencyBusy('concurrency_queue_timeout')
-      return true
+      return entered
     } catch (cause) {
-      if (entered) this.#leave(context.consumer.id)
+      if (entered) this.#leave(context.consumer.id, entered)
       const error = cause.code === 'external_platform_busy' ? concurrencyBusy(cause.details?.reason, {
         ...cause.details, platform, operation: delivery.operation,
         activeConcurrency: this.active, maxConcurrency: this.config.maxConcurrency,
@@ -688,10 +695,11 @@ export class ExternalPlatformGateway {
         const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, platform)
         if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
           entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Account work exceeds the current Key entitlement')
+        context = current
         return current
       },
       enterCapacity: options => this.#enterOrQueue(context, { ...options, canWait: false }),
-      leaveCapacity: () => this.#leave(context.consumer.id), providerCostControl,
+      leaveCapacity: admission => this.#leave(context.consumer.id, admission), providerCostControl,
     } })
     return this.#deliver(context, prepared.input, prepared.plan)
   }
@@ -722,17 +730,21 @@ export class ExternalPlatformGateway {
         const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, platform)
         if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
           entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Content-search work exceeds the current Key entitlement')
+        context = current
         return current
       },
       enterCapacity: options => this.#enterOrQueue(context, { ...options, canWait: false }),
-      leaveCapacity: () => this.#leave(context.consumer.id), providerCostControl,
+      leaveCapacity: admission => this.#leave(context.consumer.id, admission), providerCostControl,
     } })
     return this.#deliver(context, prepared.input, prepared.plan)
   }
 
   async searchRaw(context, input, { policyStore = null, gateways = null, reservation = null, selection = null, fallbackUsed = false } = {}) {
-    const { normalized, body, idempotencyKey, dataSearch = null, signal } = input
+    const { normalized, body, idempotencyKey, retryOfRequestId, dataSearch = null, signal } = input
     const platform = normalized.platform
+    if (retryOfRequestId != null && !(platform === 'twitter' && dataSearch)) {
+      throw new AppError(400, 'invalid_uncertain_retry', 'Explicit Twitter retry requires the standard data search route')
+    }
     const strategy = platform === 'instagram' && policyStore && gateways
     const codec = (dataSearch ? createDataSearchCursorCodec : createRawSearchCursorCodec)(this.apiKeyPepper, `${context.consumer.id}:${context.apiKey.id}`)
     const cursor = dataSearch ? normalized.cursor : normalized.upstreamBody?.cursor
@@ -760,12 +772,13 @@ export class ExternalPlatformGateway {
       throw new AppError(503, 'raw_search_unavailable', 'Hub raw search is unavailable')
     }
     let request
-    return this.#deliver(context, { body, idempotencyKey, signal, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH }, {
+    return this.#deliver(context, { body, idempotencyKey, retryOfRequestId, signal, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH }, {
       operation: native ? `native.${nativeKey}` : 'social.content.search',
       authorizationPlatform: platform, platformSearch: true, meterKey: dataSearch ? platform : 'raw',
       datasetId: dataSearch ? 'night-all.search.v1' : RAW_SEARCH_DATASET, replayReleasedFailures: true,
       replayWindowMs: dataSearch?.replayWindowMs,
       dataSearch: Boolean(dataSearch), nativeForwarding: native, billingUnknown: !native,
+      twitterManualRetry: platform === 'twitter' && Boolean(dataSearch),
       reservation,
       normalize: ({ policy }) => {
         const historicalCodec = createNightAllCompatibilityCursorCodec(this.apiKeyPepper, context.consumer.id)
@@ -837,10 +850,11 @@ export class ExternalPlatformGateway {
             const maxPageSize = Math.min(currentPolicy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
               entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)
             if (request.pageSize > maxPageSize) throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
+            context = current
             return current
           },
           enterCapacity: options => this.#enterOrQueue(context, { ...options, delivery, platform: 'twitter' }),
-          leaveCapacity: () => this.#leave(context.consumer.id), providerCostControl,
+          leaveCapacity: admission => this.#leave(context.consumer.id, admission), providerCostControl,
           projectDelivery: input => projectTwitterSearchFillDelivery(input, request),
         })
       } : null,
@@ -942,7 +956,7 @@ export class ExternalPlatformGateway {
           resolveCredential: provider => gateways[provider].#resolvedCredential(),
           enterCapacity: (provider, options) => gateways[provider].#enterOrQueue(context,
             { ...options, delivery, platform: 'facebook' }),
-          leaveCapacity: provider => gateways[provider].#leave(context.consumer.id),
+          leaveCapacity: (provider, admission) => gateways[provider].#leave(context.consumer.id, admission),
           revalidateIdentity: async () => {
             const current = await this.#revalidateWaitingIdentity(context, 'facebook', {
               platformSearch: true, operation: FACEBOOK_OPERATION.operationKey })
@@ -952,6 +966,7 @@ export class ExternalPlatformGateway {
               entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) {
               throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
             }
+            context = current
             return current
           }, providerCostControl, persistedCallEvidence, publicFailure,
         })
@@ -975,7 +990,7 @@ export class ExternalPlatformGateway {
         return policy.mode === 'auto' && !request.provider ? { result: await next(reserved) } : null
       } : null,
       admit: rapid ? async (reserved, { revalidate, delivery, deadlineAt }) => {
-        admission = await waitForFacebookRapidAdmission({ policyStore, requestId: delivery.usageRequestId,
+        admission = await waitForFacebookRapidAdmission({ policyStore, rateLimitExempt: () => isHubRateLimitExempt(context), requestId: delivery.usageRequestId,
           deadlineAt, timeoutMs: this.config.timeoutMs || 30000, signal, revalidate, logger: this.logger })
         if (admission.allowed) return null
         const policy = await policyStore.facebook()
@@ -1147,36 +1162,48 @@ export class ExternalPlatformGateway {
       if (
         typeof retryOfRequestId !== 'string'
         || !UUID_PATTERN.test(retryOfRequestId.trim())
-        || normalized.deliveryMode !== 'refresh'
+        || (plan.twitterManualRetry ? !suppliedKey || normalized.restartRequired : normalized.deliveryMode !== 'refresh')
       ) {
         throw new AppError(
           400,
           'invalid_uncertain_retry',
-          'X-MX-Insight-Retry-Of requires a request UUID and deliveryMode refresh',
+          plan.twitterManualRetry ? 'Twitter retry requires a request UUID, current standard search and a new Idempotency-Key'
+            : 'X-MX-Insight-Retry-Of requires a request UUID and deliveryMode refresh',
         )
       }
       const candidateId = retryOfRequestId.trim()
-      const previous = await this.usageStore.getUsageRequestForRetry(candidateId, context.consumer.id)
-      if (
-        !previous
-        || previous.status !== 'unknown'
-        || previous.platform !== authorizationPlatform
-        || previous.fingerprint !== requestFingerprint
-        || previous.idempotencyKey === idempotencyKey
-      ) {
-        throw new AppError(
-          409,
-          'uncertain_retry_not_allowed',
-          'The referenced uncertain request cannot authorize this retry',
-        )
+      if (plan.twitterManualRetry) {
+        // Validate durable ownership after ordinary idempotency handling so an
+        // acknowledged successor can replay its immutable saved response.
+        validatedRetryOfRequestId = candidateId
+      } else {
+        const previous = await this.usageStore.getUsageRequestForRetry(candidateId, context.consumer.id)
+        if (
+          !previous
+          || previous.status !== 'unknown'
+          || previous.platform !== authorizationPlatform
+          || previous.fingerprint !== requestFingerprint
+          || previous.idempotencyKey === idempotencyKey
+        ) {
+          throw new AppError(
+            409,
+            'uncertain_retry_not_allowed',
+            'The referenced uncertain request cannot authorize this retry',
+          )
+        }
+        validatedRetryOfRequestId = candidateId
       }
-      validatedRetryOfRequestId = candidateId
     }
     const requestId = randomUUID()
     const effectiveKey = suppliedKey
       ? idempotencyKey
       : `auto:${context.apiKey.id}:${requestId}`
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
+    let replayWindowMs = plan.replayWindowMs ?? null
+    if (plan.twitterManualRetry && suppliedKey) {
+      const previous = await this.usageStore.getUsageRequestByIdempotencyKey(context.consumer.id, idempotencyKey)
+      if (validatedRetryOfRequestId || previous && await this.platformStore.twitterManualRetryOriginalFor(previous.id)) replayWindowMs = null
+    }
     const reservation = plan.reservation || await this.usageStore.reserve({
       requestId,
       idempotencyKey: effectiveKey,
@@ -1199,7 +1226,7 @@ export class ExternalPlatformGateway {
       // A caller-supplied key names one immutable delivery attempt. An omitted
       // key means this HTTP call is a new billable intent; only explicit key
       // reuse is idempotent.
-      replayWindowMs: plan.replayWindowMs ?? null,
+      replayWindowMs,
       // A definitive enterprise rejection releases the wallet hold, but the
       // same caller intent must still replay its saved error without dispatch.
       replayReleasedFailures: this.providerKey === 'qixin' || plan.replayReleasedFailures === true,
@@ -1218,6 +1245,11 @@ export class ExternalPlatformGateway {
       usageRequestId: reservation.request.id,
       operation: plan.operation,
       fingerprint: requestFingerprint,
+    }
+    if (plan.twitterManualRetry && validatedRetryOfRequestId && reservation.kind !== 'reserved') {
+      const owner = await this.platformStore.twitterManualRetryOwnerFor(validatedRetryOfRequestId)
+      if (owner !== delivery.usageRequestId && !(reservation.kind === 'in_progress' && owner == null)) throw new AppError(409, 'uncertain_retry_not_allowed',
+        'This Idempotency-Key does not identify the acknowledged Twitter retry')
     }
     if (reservation.kind === 'in_progress') {
       await this.platformStore.recordGatewayAttempt({
@@ -1271,6 +1303,11 @@ export class ExternalPlatformGateway {
     }
 
     const activeRequestId = reservation.request.id
+    if (plan.twitterManualRetry && validatedRetryOfRequestId) {
+      delivery.twitterManualRetry = { retryOfRequestId: validatedRetryOfRequestId,
+        ...(normalized.buffer ? { bufferCallId: normalized.buffer.callId } : {}) }
+      await this.platformStore.validateTwitterManualRetry({ ...delivery, ...delivery.twitterManualRetry, idempotencyKey })
+    }
     if (plan.assemble) {
       try {
         const assembled = await plan.assemble({ delivery, signal,
@@ -1357,7 +1394,7 @@ export class ExternalPlatformGateway {
 
     if (plan.resolveLiveRoute) normalized = await plan.resolveLiveRoute({ normalized, policy, codec })
     const sharedState = await this.platformStore.providerState(this.providerKey)
-    const state = this.providerKey === 'tikhub' ? internalCircuitState(this.usageStore, context, sharedState) : sharedState
+    const state = (this.providerKey === 'tikhub' || isHubRateLimitExempt(context)) ? internalCircuitState(this.usageStore, context, sharedState) : sharedState
     // Two breakers: the provider-wide one for upstream faults, and this
     // marketplace's own for responses the Hub could not normalize. A gap in our
     // contract for one marketplace must not suspend live dispatch for the rest.
@@ -1567,7 +1604,7 @@ export class ExternalPlatformGateway {
           throw error
         }
         const shared = await this.platformStore.providerState(this.providerKey)
-        const latest = this.providerKey === 'tikhub' ? internalCircuitState(this.usageStore, context, shared) : shared
+        const latest = (this.providerKey === 'tikhub' || isHubRateLimitExempt(context)) ? internalCircuitState(this.usageStore, context, shared) : shared
         const contract = await this.platformStore.contractCircuitState?.(this.providerKey, normalized.marketplace ?? null)
         if ([latest, contract].some(value => value?.circuitOpenUntil && Date.parse(value.circuitOpenUntil) > this.admissionClock())) {
           if (this.providerKey === 'justone' && authorizationPlatform === 'ecommerce'
@@ -1593,11 +1630,11 @@ export class ExternalPlatformGateway {
       // Only a dispatch-lease owner consumes scarce provider concurrency.
       // Equal requests suppressed by the shared lease must not crowd out a
       // different customer query before they return their 409/cache result.
-      if (!await this.#enterOrQueue(context, { lease: dispatchLease, delivery,
+      if (!(entered = await this.#enterOrQueue(context, { lease: dispatchLease, delivery,
         expiresAt: reservation.request.leaseExpiresAt, signal, platform: authorizationPlatform,
         canWait: !(allowStoredFallback && snapshot),
         revalidate: revalidateCapacity
-      })) {
+      }))) {
         if (allowStoredFallback && snapshot) {
           const responseBody = deliveryBody(snapshot.responseBody, {
             requestId: activeRequestId,
@@ -1627,7 +1664,6 @@ export class ExternalPlatformGateway {
         ownsReservation = false
         throw concurrencyBusy('concurrency_guard', { platform: authorizationPlatform, operation: plan.operation })
       }
-      entered = true
       if (waitedForCapacity && allowStoredFallback) {
         const fresh = await this.platformStore.snapshotFor({ consumerId: context.consumer.id,
           operation: plan.operation, fingerprint: requestFingerprint }, new Date())
@@ -1661,7 +1697,7 @@ export class ExternalPlatformGateway {
         costControls: [costControl],
       })
 
-      const rateLimit = this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context)
+      const rateLimit = isHubRateLimitExempt(context) || (this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context))
         ? { allowed: true, retryAfterMs: 0 }
         : typeof this.platformStore.acquireProviderRateLimit === 'function'
         ? await this.platformStore.acquireProviderRateLimit({
@@ -1993,7 +2029,7 @@ export class ExternalPlatformGateway {
           this.logger?.warn?.(`[external-platform] dispatch lease release failed: ${error.message}`)
         })
       }
-      if (entered) this.#leave(context.consumer.id)
+      if (entered) this.#leave(context.consumer.id, entered)
     }
     } catch (error) {
       if (ownsReservation && durableRequestId) {

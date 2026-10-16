@@ -3,6 +3,7 @@ import { ArrowClockwise, Clock, ShieldCheck, WarningCircle } from '@phosphor-ico
 import { adminApi } from './api.js'
 import { ErrorState, LoadingState, Modal, formatDate } from './components.jsx'
 import './admission-limits.css'
+import { canManageKeyHubLimits } from './key-hub-limits.jsx'
 
 const identity = row => [row.kind,row.target,row.scopeType,row.scopeKey].join(':')
 function remaining(until, now) {
@@ -77,6 +78,7 @@ export default function AdmissionLimits({ token, onUnauthorized, requestId = '' 
       <div className="mih-admission-context"><span>{data?.key ? `${data.key.name} · ${data.key.id} · ${data.key.status}` : '全部上游共享限制 · 选择 Key 后查看各层配额'}</span>
         <label><input type="checkbox" checked={auto} onChange={event => setAuto(event.target.checked)}/> 每 10 秒自动刷新</label></div>
       {data?.correlation ? <p>关联请求 <a href={`#/data-browser?view=diagnostics&requestId=${data.correlation.requestId}`}>{data.correlation.requestId}</a> · 下方是当前状态，历史请求结果不变。</p> : null}
+      {canManageKeyHubLimits({ kind: 'admin-token' }, data?.key) ? <p><a href={`#/api-keys?consumerId=${encodeURIComponent(data.key.consumerId)}`}>前往 API Keys 管理此 Key 的 Hub 限制开关 →</a></p> : null}
       {data?.keysTruncated ? <p>仅列出最近 200 个 Key；可粘贴其他 Key 的完整 ID。</p> : null}
     </div>
     {error ? <ErrorState error={error} onRetry={refresh}/> : null}

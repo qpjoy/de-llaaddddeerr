@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   beginCommand,
   completeCommand,
@@ -49,7 +50,7 @@ export class Engine {
   ) {
     this.store = store;
     this.workerId = workerId;
-    this.instanceId = instanceId;
+    this.instanceId = instanceId ?? randomUUID();
     this.call = call;
     this.simDelay = simDelay;
     this.realDelay = realDelay;
@@ -264,8 +265,14 @@ export class Engine {
   async #scan() {
     this.epoch = this.leadership ? await this.leadership.check() : null;
     const leader = !this.leadership || this.epoch != null;
-    await this.store.heartbeat(this.workerId, {
+    // With leadership, several instances may share a workerId (leader and
+    // standby); each reports its own heartbeat row.
+    const heartbeatId = this.leadership
+      ? `${this.workerId}/${this.instanceId}`
+      : this.workerId;
+    await this.store.heartbeat(heartbeatId, {
       role: "device-worker",
+      workerId: this.workerId,
       instanceId: this.instanceId,
       real: true,
       scheduler: leader ? "leader" : "standby",
@@ -364,8 +371,15 @@ export class Engine {
           (s, n) => {
             sweep(s, n, mode);
             const out = [];
+            // One plan per round; capacity-aware for this executor's slots.
+            const round = {};
+            const executorSlots =
+              mode === "sim" ? this.maxSimulationInflight : null;
             while (out.length < free) {
-              const work = claim(s, n, mode, this.workerId);
+              const work = claim(s, n, mode, this.workerId, {
+                round,
+                executorSlots,
+              });
               if (!work) break;
               out.push(work);
             }
