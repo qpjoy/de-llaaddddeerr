@@ -23,7 +23,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { RigError } from '../contracts/index.mjs'
-import { ProcedurePlayer, batchSummary } from './procedure.mjs'
+import { ProcedurePlayer, batchSummary, reportRun } from './procedure.mjs'
 
 export const STATION_ENGINES = Object.freeze(['rig-procedure'])
 export const STATION_SURFACES = Object.freeze(['web'])
@@ -150,9 +150,10 @@ export class ProcedureStation {
           { kind: 'case.finished', caseId: procedure.caseId, status, durationMs: result.durationMs }
         ])
         await this.#evidence(call, runId, index, result)
-        await call('POST', `/api/rig/v1/station/runs/${runId}/procedures/${procedure.id}/runs`, {
-          body: { run: { ...result, station: 'station' } }
-        }).catch((error) => this.log(`! 记录 ${procedure.id} 失败：${error.message}`))
+        await reportRun(
+          (run) => call('POST', `/api/rig/v1/station/runs/${runId}/procedures/${procedure.id}/runs`, { body: { run } }),
+          { ...result, station: 'station' }
+        ).catch((error) => this.log(`! 记录 ${procedure.id} 失败：${error.message}`))
         this.log(`  ${result.verdict === 'passed' ? '✓' : '✗'} ${procedure.title}${result.failure ? ` —— 第 ${result.failedStep + 1} 步：${result.failure.message}` : ''}`)
       }
       await events([{ kind: 'stage', stage: 'execute', status: 'ok' }])

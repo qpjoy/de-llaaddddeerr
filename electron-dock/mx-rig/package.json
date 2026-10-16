@@ -20,11 +20,14 @@
     "test": "node scripts/test.mjs",
     "test:kernel": "node scripts/test.mjs kernel",
     "eval": "node evals/run.mjs",
+    "eval:sensors": "node evals/sensors.mjs",
+    "proving-ground": "node test-packs/proving-ground/server.mjs",
     "check": "node scripts/check.mjs",
     "browser:install": "node scripts/browser-install.mjs",
     "package": "node scripts/package.mjs",
     "pack:cli": "node scripts/pack-cli.mjs",
     "test:desktop": "node scripts/desktop-smoke.mjs",
+    "record:tours": "node scripts/record-tours.mjs",
     "test:browser": "node scripts/browser-smoke.mjs",
     "migrate": "node apps/server/migrate.mjs",
     "design": "node scripts/design-assets.mjs",
@@ -34,6 +37,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
+    "@qpjoy/electron-launcher": "^2.3.19",
     "playwright": "1.58.2",
     "zod": "^4.6.5"
   },

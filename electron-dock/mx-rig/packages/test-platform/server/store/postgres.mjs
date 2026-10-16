@@ -13,12 +13,14 @@ function mapApp(row) {
     slug: row.slug,
     displayName: row.display_name,
     repoUrl: row.repo_url,
+    sourceDirectory: row.source_directory ?? null,
     defaultBranch: row.default_branch ?? null,
     latestPackage: row.latest_package ?? null,
     webhookSecret: row.webhook_secret ?? null,
     surfaces: row.surfaces ?? [],
     catalogGlob: row.catalog_glob,
     enabled: row.enabled,
+    access: row.project_access ?? null,
     createdAt: iso(row.created_at),
   }
 }
@@ -237,6 +239,7 @@ function mapRun(row) {
     runsOn: row.runs_on ?? null,
     assignedRunnerId: row.assigned_runner_id ?? null,
     caseFilter: row.case_filter ?? null,
+    workbench: row.workbench ?? null,
     runnerId: row.runner_id,
     runTokenSha256: row.run_token_sha256,
     cancellation: row.cancellation ?? null,
@@ -329,8 +332,8 @@ export class PostgresStore {
     try {
       const { rows } = await this.pool.query(
         `INSERT INTO mxt_apps
-           (id, slug, display_name, repo_url, default_branch, surfaces, catalog_glob)
-         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7) RETURNING *`,
+           (id, slug, display_name, repo_url, default_branch, surfaces, catalog_glob, source_directory, project_access)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9::jsonb) RETURNING *`,
         [
           id,
           input.slug,
@@ -339,6 +342,8 @@ export class PostgresStore {
           input.defaultBranch ?? null,
           JSON.stringify(input.surfaces ?? []),
           input.catalogGlob ?? null,
+          input.sourceDirectory ?? null,
+          input.access ? JSON.stringify(input.access) : null,
         ],
       )
       return mapApp(rows[0])
@@ -353,6 +358,23 @@ export class PostgresStore {
   async listApps() {
     const { rows } = await this.pool.query('SELECT * FROM mxt_apps ORDER BY slug')
     return rows.map(mapApp)
+  }
+
+  async changeProjectAccess(id, change) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const { rows } = await client.query('SELECT * FROM mxt_apps WHERE id = $1 FOR UPDATE', [id])
+      if (!rows[0]) throw new AppError(404, 'not_found', '项目不存在')
+      const { after, audit } = await change(mapApp(rows[0]))
+      await client.query('UPDATE mxt_apps SET project_access = $2::jsonb WHERE id = $1', [id, JSON.stringify(after)])
+      await this.createAuditEvent(audit, client)
+      await client.query('COMMIT')
+      return after
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
   }
 
   async getApp(id) {
@@ -764,13 +786,14 @@ export class PostgresStore {
   // -- runs ------------------------------------------------------------------
 
   async createRun(input) {
-    const id = newId('trun')
+    const id = input.id ?? newId('trun')
     const { rows } = await this.pool.query(
       `INSERT INTO mxt_runs
          (id, app_id, suite_id, task_id, profile, track, engine, status, trigger,
           target_url, source_ref, app_package, claim_deadline, created_by,
-          runs_on, assigned_runner_id, case_filter)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13,$14,$15,$16,$17) RETURNING *`,
+          runs_on, assigned_runner_id, case_filter, workbench)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13,$14,$15,$16,$17,$18::jsonb)
+       ON CONFLICT (id) DO NOTHING RETURNING *`,
       [
         id,
         input.appId,
@@ -789,9 +812,10 @@ export class PostgresStore {
         input.runsOn ?? null,
         input.assignedRunnerId ?? null,
         input.caseFilter ?? null,
+        input.workbench ? JSON.stringify(input.workbench) : null,
       ],
     )
-    return mapRun(rows[0])
+    return rows[0] ? mapRun(rows[0]) : this.getRun(id)
   }
 
   async getRun(id) {
@@ -807,14 +831,16 @@ export class PostgresStore {
     return rows[0] ? mapRun(rows[0]) : null
   }
 
-  async listRuns({ appId = null, taskId = null, status = null, limit = 50 } = {}) {
+  async listRuns({ appId = null, taskId = null, status = null, missionId = null, limit = 50, allowedAppIds = null } = {}) {
     const { rows } = await this.pool.query(
       `SELECT * FROM mxt_runs
         WHERE ($1::text IS NULL OR app_id = $1)
           AND ($2::text IS NULL OR task_id = $2)
           AND ($3::text IS NULL OR status = $3)
+          AND ($5::text IS NULL OR workbench->>'missionId' = $5)
+          AND ($6::text[] IS NULL OR app_id = ANY($6))
         ORDER BY queued_at DESC LIMIT $4`,
-      [appId, taskId, status, Math.min(limit, 200)],
+      [appId, taskId, status, Math.min(limit, 200), missionId, allowedAppIds],
     )
     return rows.map(mapRun)
   }
@@ -880,16 +906,16 @@ export class PostgresStore {
             -- the pin would be a suggestion, and the run record would name a
             -- machine that never touched it.
             AND (r.assigned_runner_id IS NULL OR r.assigned_runner_id = $4)
-            AND s.engine = ANY($1::text[])
-            AND s.surface = ANY($2::text[])
+            AND coalesce(r.workbench->'suite'->>'engine', s.engine) = ANY($1::text[])
+            AND coalesce(r.workbench->'suite'->>'surface', s.surface) = ANY($2::text[])
             AND (
               -- Containment rather than jsonb_array_length: PostgreSQL does not
               -- promise to short-circuit OR, and jsonb_array_length raises on a
               -- non-array. Containment and equality return false instead, so a
               -- malformed requirements blob cannot turn every claim into a 500.
-              NOT (s.requirements ? 'os')
-              OR s.requirements->'os' = '[]'::jsonb
-              OR s.requirements->'os' @> to_jsonb($3::text)
+              NOT (coalesce(r.workbench->'suite'->'requirements', s.requirements) ? 'os')
+              OR coalesce(r.workbench->'suite'->'requirements', s.requirements)->'os' = '[]'::jsonb
+              OR coalesce(r.workbench->'suite'->'requirements', s.requirements)->'os' @> to_jsonb($3::text)
             )
           ORDER BY r.queued_at
           FOR UPDATE OF r SKIP LOCKED
@@ -907,7 +933,7 @@ export class PostgresStore {
       const { rows: suiteRows } = await client.query('SELECT * FROM mxt_suites WHERE id = $1', [
         updated[0].suite_id,
       ])
-      return { run: mapRun(updated[0]), suite: mapSuite(suiteRows[0]) }
+      return { run: mapRun(updated[0]), suite: updated[0].workbench?.suite ?? mapSuite(suiteRows[0]) }
     })
   }
 
@@ -1643,8 +1669,8 @@ export class PostgresStore {
 
   // -- audit -----------------------------------------------------------------
 
-  async createAuditEvent(input) {
-    const { rows } = await this.pool.query(
+  async createAuditEvent(input, connection = this.pool) {
+    const { rows } = await connection.query(
       `INSERT INTO mxt_audit_events
          (id, actor_id, actor_name, action, resource_type, resource_id, app_id, before, after, source_ip)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10) RETURNING *`,

@@ -49,6 +49,7 @@ export function summaryOf(doc) {
           verdict: doc.runs[0].verdict,
           revision: doc.runs[0].revision,
           failedStep: doc.runs[0].failedStep,
+          signals: doc.runs[0].signals?.length ?? 0,
           at: doc.runs[0].finishedAt
         }
       : null,
@@ -268,7 +269,7 @@ export class FileProcedureStore {
   update(id, change) {
     const next = this.queue.then(async () => {
       const current = await this.get(id)
-      const doc = change(current)
+      const doc = await change(current)
       this.docs.set(id, doc)
       await this.#write(doc)
       return structuredClone(doc)
@@ -314,7 +315,7 @@ export class PgProcedureStore {
         [id]
       )
       if (!rows[0]) throw new RigError('not_found', '规程不存在', 404)
-      const doc = change(rows[0].doc)
+      const doc = await change(rows[0].doc)
       await client.query(
         `UPDATE rig_procedures
             SET app = $2, case_id = $3, status = $4, doc = $5::jsonb, version = version + 1, updated_at = now()

@@ -231,8 +231,9 @@ export function renderReport({ run, cases, artifacts, app, suite, redacted = fal
 <body class="qp-app qp-theme-neon-void qp-density--medium mxt-report">
 <header class="mxt-report__head">
   <div>
-    <p class="qp-caption qp-muted">${escapeHtml(brand ?? 'MX 测试平台')}</p>
+    <p class="qp-caption qp-muted">${escapeHtml(brand ?? 'MX Rig')}</p>
     <h1 class="qp-heading-1">${escapeHtml(app?.displayName ?? run.appId)} · 测试报告</h1>
+    ${run.workbench ? `<p class="qp-body-2">确认用例 v${escapeHtml(run.workbench.revision)} · ${escapeHtml(run.workbench.platform)} · 整套 Suite 执行，按确认范围核对覆盖${run.profile === 'mock' ? ' · 模拟环境，不代表真实环境验收' : ''}</p>` : ''}
     <p class="qp-body-2 qp-muted">
       ${escapeHtml(suite?.displayName ?? '')} ·
       ${escapeHtml(run.profile)} / ${escapeHtml(run.track)} ·

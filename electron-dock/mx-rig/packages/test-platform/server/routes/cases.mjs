@@ -29,6 +29,8 @@ export const AUTOMATION_STATES = [
   'blocked-prerequisite',
   'manual-only',
   'unsupported',
+  // Kept for what it meant to test, not run and not counted (docs/21 §5).
+  'reference',
 ]
 
 /** Cases written in the UI carry this instead of a repository file name. */
@@ -98,7 +100,7 @@ export function exportCatalog(app, cases) {
     application: app.slug,
     catalogFile: `testing/catalog/${app.slug}.json`,
     _comment:
-      '由 MX 测试平台导出。提交到仓库后，用 catalog:sync 回传，之后这些用例的真相就在 git 里。',
+      '由 MX Rig 导出。提交到仓库后，用 catalog:sync 回传，之后这些用例的真相就在 git 里。',
     cases: cases
       .filter((entry) => !entry.retiredAt)
       .map((entry) => ({

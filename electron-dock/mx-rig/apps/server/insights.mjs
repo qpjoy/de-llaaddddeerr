@@ -138,7 +138,9 @@ export function caseHealth(runCasesByRun, { minRuns = 2 } = {}) {
 
 /** What is登记 versus what a machine actually runs. */
 export function coverage(cases) {
-  const live = cases.filter((entry) => !entry.retiredAt)
+  // Reference cases (old cases kept for their intent, docs/21 §5) are neither
+  // automated nor a gap: they are out of the count until rewritten or retired.
+  const live = cases.filter((entry) => !entry.retiredAt && entry.automationState !== 'reference')
   const automated = live.filter((entry) => entry.automationState === 'implemented')
   const byPriority = (priority) => {
     const subset = live.filter((entry) => entry.priority === priority)
@@ -149,6 +151,7 @@ export function coverage(cases) {
   }
   return {
     total: live.length,
+    references: cases.filter((entry) => !entry.retiredAt && entry.automationState === 'reference').length,
     automated: automated.length,
     automationRate: rate(automated.length, live.length),
     byState: Object.fromEntries(
@@ -319,18 +322,23 @@ const RECENT = 10
  * judgement about a run; an assertion is a deterministic check on a page the
  * Agent happened to visit. Neither is a test result, and neither is folded
  * into the pass rate. `detail: false` gives counts only — the lists carry
- * mission goals and summaries, which a read-only member does not get to
- * browse across the whole team.
+ * mission goals and summaries. HTTP callers also supply `detailOwner` so a
+ * deployment role never bypasses the Mission's owner boundary via excerpts.
  */
 export function missionInsights(
   missions = [],
-  { windowDays = 14, now = new Date(), detail = true } = {}
+  { windowDays = 14, now = new Date(), detail = true, detailOwner } = {}
 ) {
   const from = now.getTime() - windowDays * 86_400_000
   const inWindow = missions.filter((row) => {
     const at = Date.parse(row.createdAt)
     return Number.isFinite(at) && at >= from && at <= now.getTime()
   })
+  const readable = new Set(
+    inWindow
+      .filter((row) => detailOwner === undefined || row.owner === detailOwner)
+      .map((row) => row.id)
+  )
   const bySurface = { internal: 0, desktop: 0 }
   for (const row of inWindow) bySurface[row.surface === 'desktop' ? 'desktop' : 'internal'] += 1
 
@@ -369,6 +377,7 @@ export function missionInsights(
       unverified,
       recent: detail
         ? findings
+            .filter((row) => readable.has(row.id))
             .map((row) => ({
               missionId: row.id,
               goal: row.goal,
@@ -393,7 +402,7 @@ export function missionInsights(
       passRate: rate(passed, assertions.length),
       recentFailures: detail
         ? assertions
-            .filter((entry) => entry.passed !== true)
+            .filter((entry) => entry.passed !== true && readable.has(entry.missionId))
             .sort(newest)
             .slice(0, RECENT)
             .map((entry) => ({
@@ -414,6 +423,9 @@ export function missionInsights(
       'Agent 结论是 Agent 对执行结果的判断，不是测试结论，不计入通过率；引用未核实的结论需要人工复核。',
       '页面断言只覆盖 Agent 在浏览器工位里实际走过的页面，是确定性检查，但不等于这些页面的完整回归。',
       '桌面端执行的任务在同步到服务之后才计入；服务最多读取窗口内最近 500 项任务。',
+      ...(detailOwner === undefined
+        ? []
+        : ['任务汇总统计覆盖本 Rig 服务；任务结论和失败断言明细仅显示当前账号有权查看的任务。']),
       '模型用量优先采用 Provider 上报的数字；未上报的调用按字数估算，只适合看趋势，不适合对账。'
     ]
   }

@@ -1,0 +1,262 @@
+{
+  "schemaVersion": 2,
+  "application": "luopan",
+  "catalogFile": "reference/public-48af490.json",
+  "suite": "compass-reference",
+  "executionMode": "reference",
+  "cases": [
+    {
+      "id": "LP-FE-AUTH-001",
+      "title": "未登录用户访问受保护页面时跳转登录并保留目标地址",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/smoke/auth.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-AUTH-002",
+      "title": "登录表单阻止空账号、空密码和未完成验证码的提交",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/smoke/auth.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-AUTH-003",
+      "title": "持久化登录态可进入首页并携带 Bearer Token",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/smoke/auth.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-AUTH-004",
+      "title": "业务接口返回 401 后清理登录态并跳转登录",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/smoke/auth.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-NAV-001",
+      "title": "主导航可进入社媒线索与群聊线索并同步查询参数",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/smoke/navigation.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-NAV-002",
+      "title": "灰度能力关闭时受控页面回退到 AI 对话",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/smoke/navigation.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-NAV-003",
+      "title": "未知路由展示 404 页面并可返回首页",
+      "priority": "P1",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/smoke/navigation.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-HOME-001",
+      "title": "首页展示加载态、固定热点、地区筛选和线索详情",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/smoke/home.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-HOME-002",
+      "title": "首页问题携带上下文交接到 AI 对话",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/smoke/home.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-HOME-003",
+      "title": "热点接口失败时首页保持可操作并展示真实空状态",
+      "priority": "P1",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/smoke/home.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-SOCIAL-001",
+      "title": "社媒线索汇总加载统计并切换内容、账号、评论 Tab",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/core/social-clues.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-SOCIAL-002",
+      "title": "统计接口失败时保留线索列表并提供重新加载入口",
+      "priority": "P1",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/core/social-clues.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-CLUE-001",
+      "title": "内容线索支持关键词筛选、请求契约和详情恢复参数",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/core/content-group-clues.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-CLUE-002",
+      "title": "群聊线索展示汇总、搜索请求和上下文详情",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/core/content-group-clues.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-ACCOUNT-001",
+      "title": "账户线索支持关键词筛选并查看发文与互动评论",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/core/account-comment-clues.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-COMMENT-001",
+      "title": "评论线索支持关键词筛选、原帖关联和详情参数",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/core/account-comment-clues.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-COMMENT-002",
+      "title": "评论列表接口失败时展示空状态且不泄漏旧数据",
+      "priority": "P1",
+      "tags": [
+        "参考",
+        "旧用例:frontend",
+        "旧实现:cypress/e2e/core/account-comment-clues.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-STRATEGY-001",
+      "title": "展示策略列表，并优先回填已有草稿",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:agents",
+        "旧实现:cypress/e2e/core/strategy.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-STRATEGY-002",
+      "title": "校验基本配置后保存新策略草稿",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:agents",
+        "旧实现:cypress/e2e/core/strategy.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-AI-001",
+      "title": "从历史列表恢复用户与助手消息",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:agents",
+        "旧实现:cypress/e2e/core/ai-chat.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-AI-002",
+      "title": "发送新问题并消费可控 SSE 流式回答",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:agents",
+        "旧实现:cypress/e2e/core/ai-chat.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-AGENT-001",
+      "title": "Agent 超市展示四类核心能力入口",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:agents",
+        "旧实现:cypress/e2e/core/agent-task-lifecycle.cy.ts"
+      ],
+      "automationState": "reference"
+    },
+    {
+      "id": "LP-FE-AGENT-002",
+      "title": "校验账号数边界，并完成创建、轮询到报告的状态转换",
+      "priority": "P0",
+      "tags": [
+        "参考",
+        "旧用例:agents",
+        "旧实现:cypress/e2e/core/agent-task-lifecycle.cy.ts"
+      ],
+      "automationState": "reference"
+    }
+  ]
+}

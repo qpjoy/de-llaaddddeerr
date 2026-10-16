@@ -61,6 +61,20 @@ export function resolvePlacement({ task, suite, now = new Date() }) {
  * later with no explanation.
  */
 export function assertPlacementPossible({ runsOn, suite, runner = null, runnerMatches = null }) {
+  // A workspace suite checks out the project's QA repository on the machine
+  // that holds it (docs/21 §5): any other machine would only come back blocked.
+  if (/^rig-workspace:\/\//u.test(suite.repoUrl ?? '') && runsOn !== 'pinned-runner') {
+    throw new AppError(400, 'placement_impossible', '这个执行方式用的是本机的测试项目工作区，只能指定持有工作区的那台电脑', {
+      hint: '在桌面端为项目建立快照后，选它托管的本机执行机。',
+    })
+  }
+  // Published test versions are fetched by a runner with its run token; the
+  // server's own containers clone Git remotes and cannot.
+  if (/^rig-published:\/\//u.test(suite.repoUrl ?? '') && runsOn === 'server') {
+    throw new AppError(400, 'placement_impossible', '已发布的测试版本要在执行机上跑', {
+      hint: '选「任意执行机」或指定一台；执行机会从服务器取这个项目已发布的测试版本。',
+    })
+  }
   if (runsOn === 'server' && suite.surface !== 'web' && suite.surface !== 'api') {
     throw new AppError(400, 'placement_impossible', '桌面端套件不能在服务器上跑', {
       hint: '服务器上没有 Windows 和 macOS，也没有可以启动的安装包。选一台执行机。',

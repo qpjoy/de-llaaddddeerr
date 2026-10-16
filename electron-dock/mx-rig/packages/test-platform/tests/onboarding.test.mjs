@@ -113,6 +113,8 @@ test('Admin onboarding creates the Compass Web configuration without starting a 
   assert.equal(response.body.electronConfigured, false)
   assert.equal(response.body.summary.created.length, 5)
   assert.match(response.body.message, /未启动测试/u)
+  assert.equal(response.body.acceptance.fullAcceptance, false)
+  assert.equal(response.body.acceptance.scope, 'legacy-regression-and-smoke')
 
   const apps = await runtime.store.listApps()
   const app = apps.find((entry) => entry.slug === 'luopan')

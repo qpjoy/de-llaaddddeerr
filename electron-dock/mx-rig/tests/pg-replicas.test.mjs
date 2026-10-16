@@ -1,6 +1,6 @@
 import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -13,6 +13,8 @@ import { SharedScheduleState } from '../apps/server/orchestration-schedule.mjs'
 import { DocumentConflict, PgDocument } from '../apps/server/state-documents.mjs'
 import { PgMissionStore } from '../apps/server/pg-missions.mjs'
 import { ProcedureStation, enrollStation } from '../packages/runtime/station.mjs'
+import { verifyProjectVisibility } from './fixtures/project-visibility.mjs'
+import { verifyProjectAccess } from './fixtures/project-access.mjs'
 
 // The control plane on a real PostgreSQL, with two service processes on one
 // database — which is what "more than one replica" means. Needs a server this
@@ -103,6 +105,16 @@ async function until(api, id, token, predicate, label, timeoutMs = 15_000) {
   throw new Error(`等待超时：${label}`)
 }
 
+test('accounts and project visibility agree across PG replicas without sharing private tasks', { skip }, async (t) => {
+  const a = await replica(t)
+  const b = await replica(t)
+  await verifyProjectVisibility(a.api, b.api)
+})
+
+test('project membership, nested resources and policy CAS agree across replicas', { skip }, async (t) => {
+  await verifyProjectAccess(await replica(t), await replica(t))
+})
+
 test('documents refuse a save made against a stale version', { skip }, async () => {
   const a = new PgDocument(pool, 'doc-cas')
   const b = new PgDocument(pool, 'doc-cas')
@@ -111,6 +123,85 @@ test('documents refuse a save made against a stale version', { skip }, async () 
   assert.equal(await b.save({ n: 2 }, 1), 2)
   await assert.rejects(a.save({ n: 3 }, 1), DocumentConflict)
   assert.deepEqual((await a.load()).value, { n: 2 })
+})
+
+test('project drafts and reviewed case versions survive replica changes without an execution claim', { skip }, async (t) => {
+  const a = await replica(t)
+  const b = await replica(t)
+  const slug = `cases-${randomUUID().slice(0, 8)}`
+  const app = await a.api('/api/v1/apps', { slug, displayName: 'Case workspace', sourceDirectory: '/readonly/project', surfaces: ['web'] })
+  assert.equal(app.status, 201)
+  assert.equal((await b.api('/api/v1/apps')).body.apps.find((entry) => entry.slug === slug).sourceDirectory, '/readonly/project')
+  const created = await a.api('/api/rig/v1/test-tasks', { app: slug, goal: 'Review cases first' })
+  assert.equal(created.status, 201, JSON.stringify(created.body))
+  const id = created.body.mission.id
+  const path = `/api/rig/v1/missions/${id}/cases`
+  const entry = { caseId: 'user-login-1', title: 'Login', steps: 'Sign in', expected: 'Home page' }
+  await b.runtime.missions.sweep()
+  assert.equal((await b.runtime.missions.get(id, 'service-admin')).status, 'draft')
+  const raced = await Promise.all([
+    a.api(path, { expectedRevision: 0, cases: [entry] }),
+    b.api(path, { expectedRevision: 0, cases: [{ ...entry, title: 'Other editor' }] })
+  ])
+  assert.deepEqual(raced.map((result) => result.status).sort(), [200, 409])
+  const saved = (await b.api(path)).body.book
+  assert.equal((await b.api(path + ':confirm', { expectedRevision: 1 })).status, 200)
+  assert.equal((await a.api(path)).body.book.confirmed, true)
+  assert.equal((await a.api(path, { expectedRevision: 1, cases: [{ ...entry, expected: 'Workspace' }] })).status, 200)
+  const historical = (await b.api(path + '?revision=1')).body.book
+  assert.equal(historical.confirmed, true)
+  assert.deepEqual(historical.cases, saved.cases)
+  assert.equal((await a.api(path)).body.book.confirmed, false)
+  // Only starting a conversation claims execution; merely saving or confirming cases never does.
+  const draft = await b.runtime.missions.get(id, 'service-admin')
+  draft.status = 'queued'
+  const other = await a.runtime.missions.get(id, 'service-admin')
+  other.status = 'queued'
+  assert.equal(await b.runtime.missions.claimFollowup(draft), true)
+  assert.equal(await a.runtime.missions.claimFollowup(other), false)
+  draft.status = 'completed'
+  await b.runtime.missions.save(draft)
+})
+
+test('reviewed executions are created once across replicas and keep their claim snapshot', { skip }, async (t) => {
+  const a = await replica(t)
+  const b = await replica(t)
+  const slug = `execution-${randomUUID().slice(0, 8)}`
+  await a.api('/api/v1/apps', { slug, displayName: 'Execution', surfaces: ['web'] })
+  const suite = (await a.api(`/api/v1/apps/${slug}/suites`, {
+    slug: 'web', displayName: 'Web', engine: 'playwright', surface: 'web', runnerKind: 'local',
+    targetMode: 'self', command: ['node', 'test.mjs']
+  })).body.suite
+  const task = (await a.api('/api/v1/tasks', { app: slug, suite: 'web', name: 'PG execution', profile: 'mock' })).body.task
+  const mission = (await a.api('/api/rig/v1/test-tasks', { app: slug, goal: 'Reviewed execution' })).body.mission
+  const path = `/api/rig/v1/missions/${mission.id}`
+  await a.api(path + '/cases', { expectedRevision: 0, cases: [{ caseId: 'user.login', title: 'Login', steps: 'Sign in', expected: 'Private expectation', specPath: 'tests/login.ts' }] })
+  await b.api(path + '/cases:confirm', { expectedRevision: 1 })
+  const selection = { expectedRevision: 1, taskId: task.id }
+  const planA = await a.api(path + '/executions:plan', selection)
+  const planB = await b.api(path + '/executions:plan', selection)
+  assert.equal(planA.status, 200, JSON.stringify(planA.body))
+  assert.equal(planA.body.planHash, planB.body.planHash)
+  const input = { ...selection, planHash: planA.body.planHash, requestId: randomUUID() }
+  const raced = await Promise.all([a.api(path + '/executions:dispatch', input), b.api(path + '/executions:dispatch', input)])
+  assert.ok(raced.every((result) => result.status === 202), JSON.stringify(raced))
+  const id = raced[0].body.run.id
+  assert.equal(raced[1].body.run.id, id)
+  assert.equal((await b.runtime.kernel.store.listRuns({ missionId: mission.id })).length, 1)
+  assert.equal((await b.api(path + '/executions')).body.runs[0].revision, 1)
+  await a.runtime.kernel.store.updateSuite(suite.id, { command: ['node', 'new.mjs'], engine: 'cypress', surface: 'electron', requirements: { os: ['windows'] } })
+  const registered = (await b.api('/runner/v1/runners:register', { name: slug, kind: 'local', os: 'macos', engines: ['playwright'], surfaces: ['web'] })).body
+  const claimed = await a.api('/runner/v1/runs:claim', {}, registered.token)
+  assert.equal(claimed.status, 200, JSON.stringify(claimed.body))
+  assert.equal(claimed.body.runId, id)
+  assert.deepEqual(claimed.body.command, ['node', 'test.mjs'])
+  const done = await b.api(`/runner/v1/runs/${id}:complete`, { exitCode: 0, summary: {
+    schemaVersion: 2, status: 'passed', totals: { tests: 1, passed: 1 }, cases: [{ caseId: 'OTHER-001', status: 'passed', spec: 'other.ts' }]
+  } }, registered.token)
+  assert.equal(done.status, 200, JSON.stringify(done.body))
+  assert.equal(done.body.run.status, 'blocked')
+  assert.equal((await a.api(path + '/executions')).body.runs[0].coverage[0].result.status, 'notRun')
+  assert.equal(JSON.stringify((await a.api(`/api/v1/runs/${id}`)).body).includes('Private expectation'), false)
 })
 
 test('two replicas agree on settings and see each other’s saves', { skip }, async () => {
@@ -350,6 +441,136 @@ test('missions left running by a vanished replica are closed as blocked', { skip
   // A paused mission holds nothing in memory; it stays approvable.
   assert.equal((await sweeper.get(paused.id, 'someone-else')).status, 'awaiting_approval')
 })
+
+test(
+  'a recovered execution cannot overwrite its replacement, even on the same replica',
+  { skip },
+  async () => {
+    const store = new PgMissionStore(pool, { instance: 'epoch-owner', staleAfterMs: 1 })
+    const old = await store.create('epoch-user', { goal: 'fencing', mode: 'agent' })
+    old.status = 'running'
+    await store.save(old)
+    await pool.query(
+      "UPDATE rig_missions SET heartbeat_at = now() - interval '1 minute' WHERE id = $1",
+      [old.id]
+    )
+    const sweeper = new PgMissionStore(pool, { instance: 'epoch-sweeper', staleAfterMs: 1 })
+    assert.ok((await sweeper.sweep()).includes(old.id))
+    assert.ok((await store.heartbeat()).includes(old.id), 'lost claims interrupt local work')
+    const next = await store.get(old.id, old.owner)
+    next.status = 'queued'
+    assert.equal(await store.claimFollowup(next), true)
+    old.status = 'completed'
+    await assert.rejects(store.save(old), { code: 'execution_claim_lost' })
+    await assert.rejects(store.saveStream(old), { code: 'execution_claim_lost' })
+    assert.equal(store.live.get(old.id), next, 'a stale save cannot remove the new live row')
+    assert.equal((await sweeper.get(old.id, old.owner)).status, 'queued')
+    next.status = 'completed'
+    await store.save(next)
+  }
+)
+
+test(
+  'approval hand-off fences a delayed final save from the paused execution',
+  { skip },
+  async () => {
+    const a = new PgMissionStore(pool, { instance: 'approval-old' })
+    const b = new PgMissionStore(pool, { instance: 'approval-new' })
+    const old = await a.create('approval-epoch-user', { goal: 'pause', mode: 'agent' })
+    old.status = 'awaiting_approval'
+    old.pending = { approvalId: 'epoch-approval' }
+    await a.save(old)
+    const resumed = await b.get(old.id, old.owner)
+    resumed.status = 'running'
+    resumed.pending = null
+    assert.equal(await b.claimApproval(resumed, 'epoch-approval'), true)
+    await assert.rejects(a.save(old), { code: 'execution_claim_lost' })
+    assert.equal((await a.get(old.id, old.owner)).status, 'running')
+    resumed.status = 'completed'
+    await b.save(resumed)
+  }
+)
+
+test(
+  'a continuation must use the observed generation, including after another continuation finishes',
+  { skip },
+  async () => {
+    const a = new PgMissionStore(pool, { instance: 'followup-a' })
+    const b = new PgMissionStore(pool, { instance: 'followup-b' })
+    const row = await a.create('followup-epoch-user', { goal: 'continue', mode: 'agent' })
+    row.status = 'completed'
+    await a.save(row)
+    const first = await a.get(row.id, row.owner)
+    const stale = await b.get(row.id, row.owner)
+    first.status = stale.status = 'queued'
+    assert.equal(await a.claimFollowup(first), true)
+    assert.equal(await b.claimFollowup(stale), false)
+    first.status = 'completed'
+    await a.save(first)
+    assert.equal(
+      await b.claimFollowup(stale),
+      false,
+      'an old read cannot restart a newer completed generation'
+    )
+    const fresh = await b.get(row.id, row.owner)
+    fresh.status = 'queued'
+    assert.equal(await b.claimFollowup(fresh), true)
+    fresh.status = 'completed'
+    await b.save(fresh)
+  }
+)
+
+test('concurrent continuations execute only once', { skip }, async () => {
+  const a = new PgMissionStore(pool, { instance: 'continue-race-a' })
+  const b = new PgMissionStore(pool, { instance: 'continue-race-b' })
+  const row = await a.create('continue-race-user', { goal: 'race', mode: 'agent' })
+  row.status = 'completed'
+  await a.save(row)
+  const candidates = await Promise.all([a.get(row.id, row.owner), b.get(row.id, row.owner)])
+  for (const candidate of candidates) candidate.status = 'queued'
+  const won = await Promise.all([a.claimFollowup(candidates[0]), b.claimFollowup(candidates[1])])
+  assert.deepEqual([...won].sort(), [false, true])
+  const winner = won.indexOf(true)
+  candidates[winner].status = 'completed'
+  await [a, b][winner].save(candidates[winner])
+})
+
+test(
+  'a heartbeat does not revoke a mission created while its query is in flight',
+  { skip },
+  async () => {
+    let release
+    let queried
+    const paused = new Promise((resolve) => {
+      release = resolve
+    })
+    const reached = new Promise((resolve) => {
+      queried = resolve
+    })
+    const delayedPool = {
+      async query(sql, args) {
+        const result = await pool.query(sql, args)
+        if (sql.includes('FROM unnest')) {
+          queried()
+          await paused
+        }
+        return result
+      }
+    }
+    const store = new PgMissionStore(delayedPool, { instance: 'heartbeat-race' })
+    const first = await store.create('heartbeat-first', { goal: 'first', mode: 'agent' })
+    const heartbeat = store.heartbeat()
+    await reached
+    const second = await store.create('heartbeat-second', { goal: 'second', mode: 'agent' })
+    release()
+    assert.deepEqual(await heartbeat, [])
+    assert.equal(store.live.get(second.id), second)
+    for (const row of [first, second]) {
+      row.status = 'completed'
+      await store.save(row)
+    }
+  }
+)
 
 test('a deployment switching to PostgreSQL keeps its file-based state', { skip }, async (t) => {
   // A separate database: the import runs once per database, on first start.
@@ -617,4 +838,36 @@ test('a procedure batch queued on one replica is taken and reported through the 
   assert.deepEqual([record.station, record.kernelRunId], ['station', runId])
   const overview = (await B.api('/api/rig/v1/procedure-tasks')).body
   assert.deepEqual(overview.tasks.map((entry) => entry.lastRun?.status), ['passed'])
+})
+
+test('implementation review uses shared CAS and retains the confirmed case version across replicas', { skip }, async (t) => {
+  const a = await replica(t)
+  const b = await replica(t)
+  const slug = `code-${randomUUID().slice(0, 8)}`
+  await a.api('/api/v1/apps', { slug, displayName: 'Implementation fixture' })
+  const mission = (await a.api('/api/rig/v1/test-tasks', { app: slug, goal: '审核测试实现' })).body.mission
+  const path = `/api/rig/v1/missions/${mission.id}`
+  const entry = { caseId: 'LOGIN-001', title: '登录', steps: '登录', expected: '工作区', platforms: ['web'] }
+  await a.api(path + '/cases', { expectedRevision: 0, cases: [entry] })
+  await b.api(path + '/cases:confirm', { expectedRevision: 1 })
+  const proposal = { summary: '登录', engine: 'playwright', platform: 'web', files: [{ path: 'tests/login.spec.ts', content: '// LOGIN-001 draft' }], mappings: [{ caseId: 'LOGIN-001', path: 'tests/login.spec.ts', assertion: '工作区可见' }] }
+  const sourceBaseline = { id: randomUUID(), kind: 'git', directory: '/fixture/checkout', repoUrl: 'https://example.invalid/app.git', ref: 'main', commit: 'a'.repeat(40), branch: null, dirty: false, statusHash: 'b'.repeat(64), capturedAt: new Date().toISOString(), observations: [{ operation: 'read', path: 'src/login.ts', hash: 'c'.repeat(64), fileHash: 'd'.repeat(64) }] }
+  const body = { expectedVersion: 0, caseRevision: 1, proposal, sourceBaseline }
+  const race = await Promise.all([a.api(path + '/implementation', body), b.api(path + '/implementation', body)])
+  assert.deepEqual(race.map((row) => row.status).sort(), [200, 409])
+  const first = (await b.api(path + '/implementation')).body.proposal
+  assert.equal((await a.api(path + '/implementation:approve', { expectedVersion: 1, hash: first.hash })).status, 200)
+  assert.ok((await b.api(path + '/implementation')).body.proposal.reviewedAt)
+  const { TestProjectWorkspace } = await import('../packages/runtime/test-project-workspace.mjs')
+  const exportRoot = await mkdtemp(join(tmpdir(), 'rig-pg-source-export-'))
+  t.after(() => rm(exportRoot, { recursive: true, force: true }))
+  const exported = await new TestProjectWorkspace(exportRoot).export(mission.id, (await b.api(path + '/implementation')).body, { version: 1, hash: first.hash })
+  assert.deepEqual(exported.manifest.sourceBaseline, sourceBaseline)
+  assert.equal((await b.api(path + '/implementation', { ...body, expectedVersion: 1, proposal: { ...proposal, summary: '修订' } })).status, 200)
+  const second = (await a.api(path + '/implementation')).body.proposal
+  assert.equal(second.reviewedAt, null)
+  assert.ok((await a.api(path + '/implementation?revision=1')).body.proposal.reviewedAt)
+  await b.api(path + '/cases', { expectedRevision: 1, cases: [{ ...entry, expected: '新的工作区' }] })
+  assert.equal((await a.api(path + '/implementation:approve', { expectedVersion: 2, hash: second.hash })).status, 409)
+  assert.equal((await b.api(path + '/implementation')).body.stale, true)
 })

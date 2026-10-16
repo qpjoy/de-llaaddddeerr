@@ -13,7 +13,7 @@
 //   mxt-runner status
 
 import { spawn } from 'node:child_process'
-import { createReadStream } from 'node:fs'
+import { createReadStream, existsSync } from 'node:fs'
 import { copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline/promises'
 import { homedir, hostname, platform, arch } from 'node:os'
@@ -302,9 +302,12 @@ async function uploadArtifacts(config, runId, runToken, dir, signal) {
  * The clone is cached per app under ~/.mxt/checkouts and updated in place:
  * a fresh clone of a large repository on every run is minutes of nothing.
  */
-async function prepareCheckout({ repoUrl, ref, appSlug, gitToken, signal }) {
+async function prepareCheckout({ repoUrl, ref, appSlug, gitToken, signal, config = null, runId = null, runToken = null }) {
   signal?.throwIfAborted()
   if (!repoUrl) return { dir: resolve(argValue('workdir') || process.cwd()), gitSha: null }
+  const published = await publishedRemote({ repoUrl, ref, config, runId, runToken, signal })
+  const remote = published?.remote ?? workspaceRemote(repoUrl)
+  if (published) ref = published.ref
 
   const dir = join(dataDir(), 'checkouts', appSlug || 'app')
   await mkdir(dir, { recursive: true })
@@ -325,7 +328,7 @@ async function prepareCheckout({ repoUrl, ref, appSlug, gitToken, signal }) {
     ])
   }
   await git(['remote', 'remove', 'origin'], true)
-  await git(['remote', 'add', 'origin', repoUrl])
+  await git(['remote', 'add', 'origin', remote ?? repoUrl])
   await git(['fetch', '-q', '--depth', '1', 'origin', ref || 'HEAD'])
   await git(['checkout', '-q', '-f', 'FETCH_HEAD'])
   // Anything left behind by a previous run would otherwise leak into this one.
@@ -338,7 +341,60 @@ async function prepareCheckout({ repoUrl, ref, appSlug, gitToken, signal }) {
   } catch {
     // Not fatal: the checkout succeeded, only the label for it is missing.
   }
-  return { dir, gitSha }
+  return { dir, gitSha, workspace: Boolean(remote), label: published?.label ?? null }
+}
+
+/**
+ * `rig-published://<app>` is the project's test versions as published to the
+ * service (docs/23 M7b). They are fetched with this run's token into a cache
+ * repository of this runner's own — bundles in order, skipping versions whose
+ * content a later full version already carries — and the run checks out the
+ * version it asked for, the latest by default. Null for any other address.
+ */
+async function publishedRemote({ repoUrl, ref, config, runId, runToken, signal }) {
+  const match = /^rig-published:\/\/([a-z0-9][a-z0-9-]{0,62})$/u.exec(repoUrl ?? '')
+  if (!match) return null
+  if (!config || !runId || !runToken) throw new Error('取已发布的测试版本需要本次执行的凭据')
+  const base = `/runner/v1/runs/${runId}/test-versions`
+  const listed = await api(config, 'GET', base, { token: runToken, signal })
+  const versions = [...(listed?.versions ?? [])].sort((a, b) => a.version - b.version)
+  if (!versions.length) throw new Error('这个项目还没有发布过测试版本')
+  const name = String(ref ?? '').replace(/^rig\//u, '')
+  const wanted = !name || name === 'latest' ? versions.at(-1) : versions.find((entry) => `v${entry.version}` === name || entry.commit === name)
+  if (!wanted) throw new Error(`没有测试版本 ${ref}`)
+  const dir = join(dataDir(), 'published', match[1])
+  await mkdir(dir, { recursive: true })
+  const git = (args) => runCommand(['git', ...args], { cwd: dir, env: process.env, quiet: true, signal })
+  if ((await git(['init', '-q', '.'])) !== 0) throw new Error('无法建立测试版本的本地缓存')
+  const has = async (commit) => (await git(['cat-file', '-e', `${commit}^{commit}`])) === 0
+  for (const entry of versions) {
+    if (entry.version > wanted.version) break
+    if (entry.pruned || (await has(entry.commit))) continue
+    const { bundle } = await api(config, 'GET', `${base}/${entry.version}/bundle`, { token: runToken, signal })
+    const file = join(dir, `.v${entry.version}.bundle`)
+    await writeFile(file, Buffer.from(bundle, 'base64'))
+    const code = await git(['fetch', '-q', '--no-tags', file, 'refs/rig/outgoing:refs/rig/incoming'])
+    await rm(file, { force: true })
+    if (code !== 0) throw new Error(`测试版本 v${entry.version} 接不上已有的版本`)
+  }
+  if (!(await has(wanted.commit))) throw new Error(`取到的测试版本里没有提交 ${wanted.commit.slice(0, 7)}`)
+  return { remote: pathToFileURL(dir).href, ref: wanted.commit, label: `rig/v${wanted.version}` }
+}
+
+/**
+ * `rig-workspace://<app>/qa` is the project's QA repository on this machine,
+ * kept by the desktop next to the source snapshot it tests (docs/21 §5). Null
+ * for an ordinary remote; an error when this machine holds no such workspace,
+ * which makes the run blocked rather than a test failure.
+ */
+export function workspaceRemote(repoUrl, root = process.env.MXT_PROJECT_WORKSPACES) {
+  const match = /^rig-workspace:\/\/([a-z0-9][a-z0-9-]{0,62})\/qa$/u.exec(repoUrl ?? '')
+  if (!match) return null
+  const qa = root ? join(resolve(root), match[1], 'qa') : null
+  if (!qa || !existsSync(join(qa, '.git'))) {
+    throw new Error(`这台电脑没有「${match[1]}」的测试项目工作区；对快照运行只能在持有快照的电脑上进行`)
+  }
+  return pathToFileURL(qa).href
 }
 
 /** One lockfile, one package manager — never cross-fall-back. */
@@ -920,6 +976,8 @@ export async function executeOnce(config) {
     let exitCode = 2
     let blockedReason = null
     let gitSha = null
+    let workspaceCheckout = false
+    let checkoutLabel = null
     try {
       await lease.ready
       signal.throwIfAborted()
@@ -933,8 +991,13 @@ export async function executeOnce(config) {
         appSlug: env.MXT_APP,
         gitToken: process.env.MXT_GIT_TOKEN,
         signal,
+        config,
+        runId,
+        runToken,
       })
       gitSha = checkout.gitSha
+      workspaceCheckout = checkout.workspace === true
+      checkoutLabel = checkout.label
       if (gitSha) say(`  检出 ${claimed.sourceRef ?? 'HEAD'} @ ${gitSha.slice(0, 12)}`)
       reporter.stage(
         'checkout',
@@ -1086,6 +1149,15 @@ export async function executeOnce(config) {
       // handed to testers, and "which commit is this 200 MB file" has to be
       // answerable. It was recorded as `{}`.
       body.sourceRef = { ref: claimed.sourceRef ?? null, gitSha }
+      // A workspace checkout is the QA repository, not the code under test:
+      // the suite names the source commit it ran against, and the QA commit
+      // goes alongside it as the version.
+      if (workspaceCheckout) {
+        // A published version says which one it is.
+        if (checkoutLabel) body.sourceRef.ref = checkoutLabel
+        const qa = { version: `QA ${gitSha.slice(0, 7)}` }
+        body.sourceRef = body.summary?.sourceRef?.gitSha ? { ...body.summary.sourceRef, ...qa } : { ...body.sourceRef, ...qa }
+      }
       if (body.summary)
         body.summary.sourceRef = { ...(body.summary.sourceRef || {}), ...body.sourceRef }
     }

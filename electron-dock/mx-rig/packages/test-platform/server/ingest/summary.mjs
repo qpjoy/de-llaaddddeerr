@@ -182,6 +182,11 @@ export function normalizeSummary(summary, exitCode) {
   for (const testCase of cases) {
     if (seen.has(testCase.caseId)) {
       duplicates.push(testCase.caseId)
+      // Preserve adverse evidence, even when the first occurrence was green.
+      const previous = uniqueCases.find((entry) => entry.caseId === testCase.caseId)
+      if (testCase.status === 'failed' || (testCase.status === 'flaky' && previous.status !== 'failed')) {
+        Object.assign(previous, testCase)
+      }
       continue
     }
     seen.add(testCase.caseId)
@@ -198,7 +203,7 @@ export function normalizeSummary(summary, exitCode) {
     durationMs: integer(summary.totals?.durationMs),
   }
 
-  const { status, blockedReason } = resolveStatus({ reported, exitCode, totals, summary })
+  const { status, blockedReason } = resolveStatus({ reported, exitCode, totals, summary, cases, duplicates })
   const catalog = schemaVersion === 1 ? catalogFromV1(summary) : normalizeCatalogV2(summary)
 
   return {
@@ -236,26 +241,48 @@ function normalizeCatalogV2(summary) {
  * established, and the one that keeps a misconfigured target from reading as a
  * clean sheet.
  */
-function resolveStatus({ reported, exitCode, totals, summary }) {
+function resolveStatus({ reported, exitCode, totals, summary, cases, duplicates }) {
   const code = Number.isInteger(exitCode) ? exitCode : null
   const declaredReason = summary.blockedReason ? redactText(summary.blockedReason, 1000) : null
 
   if (code !== null && code !== 0 && code !== 1) {
     return {
       status: 'blocked',
-      blockedReason: declaredReason || `runner exited with code ${code}`,
+      blockedReason: declaredReason || `runner exited with code ${code}`
     }
+  }
+  if (
+    code === 1 ||
+    reported === 'failed' ||
+    totals.failed > 0 ||
+    cases.some((entry) => entry.status === 'failed')
+  ) {
+    return { status: 'failed', blockedReason: null }
   }
   if (totals.tests === 0) {
     return { status: 'blocked', blockedReason: declaredReason || 'No tests were executed' }
   }
-  if (code === 1 || reported === 'failed' || totals.failed > 0) {
-    return { status: 'failed', blockedReason: null }
-  }
   if (reported === 'blocked') {
     return { status: 'blocked', blockedReason: declaredReason || 'Runner reported blocked' }
   }
-  return { status: totals.flaky > 0 ? 'flaky' : 'passed', blockedReason: null }
+  if (duplicates.length) {
+    return { status: 'blocked', blockedReason: 'Duplicate case executions require reconciliation' }
+  }
+  if (
+    cases.length
+      ? !cases.some((entry) => ['passed', 'flaky'].includes(entry.status))
+      : totals.skipped >= totals.tests
+  ) {
+    return {
+      status: 'blocked',
+      blockedReason: declaredReason || 'No tests were asserted (all skipped or notRun)'
+    }
+  }
+  return {
+    status:
+      totals.flaky > 0 || cases.some((entry) => entry.status === 'flaky') ? 'flaky' : 'passed',
+    blockedReason: null
+  }
 }
 
 /**

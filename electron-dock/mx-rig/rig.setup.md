@@ -8,4 +8,7 @@ bash scripts/manage.sh local down
 
 # 获取rig admin token
 bash scripts/manage.sh local token
+
+# 本地启动
+bash scripts/manage.sh local desktop
 ```

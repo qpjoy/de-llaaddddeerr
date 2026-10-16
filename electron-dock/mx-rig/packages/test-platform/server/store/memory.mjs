@@ -27,6 +27,7 @@ export class MemoryStore {
   #members = new Map()
   #localAccounts = new Map() // account -> local account
   #sessions = new Map() // sha256(token) -> session
+  #accessQueues = new Map()
 
   async close() {}
 
@@ -45,12 +46,14 @@ export class MemoryStore {
       slug: input.slug,
       displayName: input.displayName,
       repoUrl: input.repoUrl ?? null,
+      sourceDirectory: input.sourceDirectory ?? null,
       defaultBranch: input.defaultBranch ?? null,
       latestPackage: null,
       webhookSecret: null,
       surfaces: input.surfaces ?? [],
       catalogGlob: input.catalogGlob ?? null,
       enabled: true,
+      access: input.access ?? null,
       createdAt: new Date().toISOString(),
     }
     this.#apps.set(app.id, app)
@@ -59,6 +62,21 @@ export class MemoryStore {
 
   async listApps() {
     return clone([...this.#apps.values()].sort((a, b) => a.slug.localeCompare(b.slug)))
+  }
+
+  async changeProjectAccess(id, change) {
+    const next = (this.#accessQueues.get(id) ?? Promise.resolve()).then(async () => {
+      const app = this.#apps.get(id)
+      if (!app) throw new AppError(404, 'not_found', '项目不存在')
+      const { after, audit } = await change(clone(app))
+      await this.createAuditEvent(audit)
+      app.access = clone(after)
+      return clone(after)
+    })
+    const settled = next.catch(() => {})
+    this.#accessQueues.set(id, settled)
+    settled.then(() => { if (this.#accessQueues.get(id) === settled) this.#accessQueues.delete(id) })
+    return next
   }
 
   async getApp(id) {
@@ -362,6 +380,7 @@ export class MemoryStore {
   // -- runs ------------------------------------------------------------------
 
   async createRun(input) {
+    if (input.id && this.#runs.has(input.id)) return clone(this.#runs.get(input.id))
     const run = {
       id: newId('trun'),
       status: 'queued',
@@ -393,12 +412,14 @@ export class MemoryStore {
     return clone([...this.#runs.values()].find((run) => run.runTokenSha256 === hash)) ?? null
   }
 
-  async listRuns({ appId = null, taskId = null, status = null, limit = 50 } = {}) {
+  async listRuns({ appId = null, taskId = null, status = null, missionId = null, limit = 50, allowedAppIds = null } = {}) {
     return clone(
       [...this.#runs.values()]
         .filter((run) => !appId || run.appId === appId)
         .filter((run) => !taskId || run.taskId === taskId)
         .filter((run) => !status || run.status === status)
+        .filter((run) => !missionId || run.workbench?.missionId === missionId)
+        .filter((run) => !allowedAppIds || allowedAppIds.includes(run.appId))
         .sort((a, b) => b.queuedAt.localeCompare(a.queuedAt))
         .slice(0, limit),
     )
@@ -432,7 +453,7 @@ export class MemoryStore {
       .sort((a, b) => a.queuedAt.localeCompare(b.queuedAt))
 
     for (const run of candidates) {
-      const suite = this.#suites.get(run.suiteId)
+      const suite = run.workbench?.suite ?? this.#suites.get(run.suiteId)
       if (!suite || !runnerMatchesSuite(runner, suite)) continue
       run.status = 'running'
       run.runnerId = runner.id

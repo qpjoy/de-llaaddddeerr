@@ -7,11 +7,21 @@ export class RigClient {
     this.fetch = fetchImpl
   }
   async request(path, body, signal) {
+    return this.send(body === undefined ? 'GET' : 'POST', path, body, signal)
+  }
+
+  /**
+   * Any of the methods the member API uses. PUT, PATCH and DELETE are how the
+   * workbench sets a secret, changes a member or removes a runner (docs/21);
+   * a 204 is an empty answer, not a broken one.
+   */
+  async send(method, path, body, signal) {
+    if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) throw new RigError('invalid_method', '不允许的请求方法')
     // The one non-API route a member calls: registering this machine as a runner.
     if (!path.startsWith('/api/') && path !== '/runner/v1/runners:register')
       throw new RigError('invalid_path', '不允许的 API 路径')
     const response = await this.fetch(this.url + path, {
-      method: body === undefined ? 'GET' : 'POST',
+      method,
       headers: {
         authorization: `Bearer ${this.token}`,
         ...(body === undefined ? {} : { 'content-type': 'application/json' })
@@ -24,11 +34,13 @@ export class RigClient {
     })
     const chunks = []
     let size = 0
-    for await (const chunk of response.body) {
+    // A 204 has no body at all.
+    for await (const chunk of response.body ?? []) {
       size += chunk.length
       if (size > 2 * 1024 * 1024) throw new RigError('response_limit', '服务响应超过上限', 502)
       chunks.push(chunk)
     }
+    if (response.status === 204 && size === 0) return {}
     let payload
     try {
       payload = JSON.parse(Buffer.concat(chunks).toString())
@@ -128,11 +140,15 @@ function failure(response, payload) {
     model_busy: '模型服务忙，请稍后继续',
     forbidden: '当前账号没有执行权限，请联系管理员'
   }
+  // A refusal (4xx) says why in Rig's own words — 「账号已存在」「不能停用自己的
+  // 账号」 — and the desktop shows it as the web does. Server errors stay
+  // generic; the service already keeps their detail out of responses.
+  const said = response.status < 500 && typeof payload.error?.message === 'string' ? payload.error.message.slice(0, 300) : null
   return new RigError(
     code,
     response.status === 401
       ? '登录已失效，请重新登录'
-      : messages[code] || `服务拒绝请求 (${response.status})`,
+      : messages[code] || said || `服务拒绝请求 (${response.status})`,
     response.status
   )
 }

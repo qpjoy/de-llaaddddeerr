@@ -24,12 +24,14 @@ for (const file of await walk(root)) {
     file.includes(`${join('packages', 'runtime')}`)
   ) {
     const source = await readFile(file, 'utf8')
-    if (
-      /applyElectronLauncherStandaloneDataPlane|stopElectronLauncherStandaloneDataPlane|mx-h2i-runtime|exec\(.*(?:netsh|route)/.test(
-        source
-      )
-    )
+    // Rig owns exactly one network: its own Launcher product network (docs/25),
+    // in one module. Nothing anywhere drives another product's runtime or
+    // edits routes by hand.
+    const own = file.endsWith(join('apps', 'desktop', 'launcher-network.mjs'))
+    if (/mx-h2i-runtime|exec\(.*(?:netsh|route)/.test(source) || (!own && /applyElectronLauncherStandaloneDataPlane|stopElectronLauncherStandaloneDataPlane/.test(source)))
       throw new Error(`Network ownership coupling: ${file}`)
+    if (own && /['"`](?:mx-h2i|luopan|appcenter|h2o)['"`]/.test(source))
+      throw new Error(`Rig's product network names another product: ${file}`)
   }
 }
-console.log(`${count} JavaScript modules parse; runtime has no network-owner implementation.`)
+console.log(`${count} JavaScript modules parse; only Rig's own product network owns a data plane.`)

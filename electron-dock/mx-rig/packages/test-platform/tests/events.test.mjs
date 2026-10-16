@@ -260,6 +260,24 @@ test('finishing the run closes the stream and refuses later progress', async () 
   assert.deepEqual(tail.frames.map((frame) => frame.kind), ['step', 'run.finished', 'end'])
 })
 
+test('a polling client reads the same timeline as JSON, from where it left off', async () => {
+  const all = await api('GET', `/api/v1/runs/${runId}/progress`)
+  assert.equal(all.status, 200)
+  assert.equal(all.body.status, 'passed')
+  assert.equal(all.body.more, false)
+  assert.deepEqual(all.body.events.map((event) => event.seq), [1, 2, 3, 4, 5, 6])
+  assert.equal(all.body.events.at(-1).kind, 'run.finished')
+
+  const tail = await api('GET', `/api/v1/runs/${runId}/progress?afterSeq=4`)
+  assert.deepEqual(tail.body.events.map((event) => event.kind), ['step', 'run.finished'])
+  // A cursor that is not a number reads from the start rather than failing.
+  const odd = await api('GET', `/api/v1/runs/${runId}/progress?afterSeq=abc`)
+  assert.equal(odd.body.events.length, 6)
+
+  assert.equal((await api('GET', `/api/v1/runs/${runId}/progress`, { token: null })).status, 401)
+  assert.equal((await api('GET', '/api/v1/runs/trun_missing/progress')).status, 404)
+})
+
 test('the stream needs the same credentials the run does', async () => {
   const response = await fetch(`${base}/api/v1/runs/${runId}/events`)
   assert.equal(response.status, 401)

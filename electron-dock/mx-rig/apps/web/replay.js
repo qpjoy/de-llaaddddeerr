@@ -36,6 +36,10 @@ const BROWSER_TOOL = /^(browser_|electron_launch$)/
 // Steps that keep a screenshot without a caption of their own.
 const PLAIN = { browser_snapshot: '观察页面', browser_wait: '等待页面', browser_screenshot: '截图', electron_launch: '启动应用' }
 const plain = (tool) => PLAIN[tool] ?? tool
+// 自动检查项 (packages/runtime/sensors.mjs): the worst reading decides a step's colour.
+const SEVERITY_RANK = { error: 3, warn: 2, notice: 1 }
+const worstOf = (signals = []) =>
+  signals.reduce((worst, signal) => ((SEVERITY_RANK[signal.severity] ?? 0) > (SEVERITY_RANK[worst] ?? 0) ? signal.severity : worst), null)
 
 /**
  * A mission's browser steps as frames, read from its record: each tool
@@ -90,6 +94,7 @@ export function replayFrames(events = []) {
         viewport: frame.viewport ?? null,
         assertion: result.assertion ? Boolean(result.assertion.passed) : undefined,
         url: result.url ?? null,
+        signals: Array.isArray(result.signals) ? result.signals : [],
         at: event.at
       })
       last = result.screenshot
@@ -180,12 +185,41 @@ export function mountReplay(container, frames, { resolve = async (src) => src, a
             ? 'passed'
             : 'step'
     node.append(htmlNode('b', null, mark), htmlNode('span', null, frame.label ?? ''))
+    if (frame.signals?.length) {
+      const count = htmlNode('i', 'rig-replay__step-signals', String(frame.signals.length))
+      count.dataset.level = worstOf(frame.signals)
+      count.title = `自动检查项发现 ${frame.signals.length} 个线索`
+      node.append(count)
+    }
     node.addEventListener('click', () => go(index))
     item.append(node)
     steps.append(item)
     return node
   })
-  root.append(stage, bar, steps)
+  // 自动检查项: one cell per step on a track, and what the current step read.
+  // Leads beside the result, never the result: a step stays green.
+  const sensed = frames.some((frame) => frame.signals?.length)
+  const track = sensed ? htmlNode('div', 'rig-replay__track') : null
+  const readings = sensed ? htmlNode('ul', 'rig-replay__signals') : null
+  const ticks = []
+  if (track) {
+    track.setAttribute('role', 'group')
+    track.setAttribute('aria-label', '自动检查项')
+    track.append(htmlNode('span', 'rig-replay__track-label', '自动检查项'))
+    frames.forEach((frame, index) => {
+      const tick = htmlNode('button', 'rig-replay__tick')
+      tick.type = 'button'
+      tick.dataset.level = worstOf(frame.signals) ?? 'none'
+      tick.title = frame.signals?.length
+        ? `第 ${index + 1} 步：${frame.signals.map((signal) => signal.title).join('；')}`
+        : `第 ${index + 1} 步：没有发现问题`
+      tick.setAttribute('aria-label', tick.title)
+      tick.addEventListener('click', () => go(index))
+      track.append(tick)
+      ticks.push(tick)
+    })
+  }
+  root.append(stage, bar, ...(track ? [track, readings] : []), steps)
   container.append(root)
 
   const state = { index: 0, playing: false, speed: 1, token: 0, at: null, images: new Map() }
@@ -286,6 +320,19 @@ export function mountReplay(container, frames, { resolve = async (src) => src, a
     items[index]?.scrollIntoView?.({ block: 'nearest' })
     counter.textContent = `${index + 1} / ${frames.length}`
     caption.textContent = frames[index]?.label ?? ''
+    if (!readings) return
+    ticks.forEach((tick, position) => tick.classList.toggle('is-current', position === index))
+    const found = frames[index]?.signals ?? []
+    readings.replaceChildren(
+      ...(found.length
+        ? found.map((signal) => {
+            const line = htmlNode('li')
+            line.dataset.level = signal.severity
+            line.append(htmlNode('b', null, signal.label ?? signal.sensor), htmlNode('span', null, signal.title))
+            return line
+          })
+        : [htmlNode('li', 'rig-replay__signals-none', '这一步没有发现问题')])
+    )
   }
 
   async function show(index, token) {

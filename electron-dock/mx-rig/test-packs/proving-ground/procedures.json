@@ -1,0 +1,159 @@
+{
+  "schemaVersion": 1,
+  "note": "试验场的检查步骤（规程）。baseUrl 是默认端口，运行时替换成实际地址。大多数断言即使有缺陷也会通过：它们证明的是“传感器能发现断言没写到的问题”。",
+  "procedures": [
+    {
+      "key": "login",
+      "procedure": {
+        "title": "登录进入物资列表",
+        "app": "proving-ground",
+        "caseId": "PG-WEB-001",
+        "baseUrl": "http://127.0.0.1:4610",
+        "variables": { "user": "tester" },
+        "steps": [
+          { "do": "open", "url": "/login" },
+          { "do": "fill", "target": { "label": "用户名" }, "value": "{{user}}" },
+          { "do": "click", "target": { "role": "button", "name": "登录" } },
+          { "do": "wait", "text": "筛选结果" },
+          { "do": "assert", "kind": "url_contains", "expected": "/items" }
+        ]
+      }
+    },
+    {
+      "key": "list-filter",
+      "procedure": {
+        "title": "按状态和关键字筛选物资",
+        "app": "proving-ground",
+        "caseId": "PG-WEB-002",
+        "baseUrl": "http://127.0.0.1:4610",
+        "variables": { "user": "tester" },
+        "steps": [
+          { "do": "open", "url": "/login" },
+          { "do": "fill", "target": { "label": "用户名" }, "value": "{{user}}" },
+          { "do": "click", "target": { "role": "button", "name": "登录" } },
+          { "do": "wait", "text": "筛选结果" },
+          { "do": "fill", "target": { "label": "关键字" }, "value": "螺栓" },
+          { "do": "select", "target": { "label": "状态" }, "option": "已归档" },
+          { "do": "click", "target": { "role": "button", "name": "查询" } },
+          { "do": "wait", "text": "加载中", "state": "hidden", "note": "等查询结果回来" },
+          { "do": "assert", "kind": "text_visible", "expected": "筛选结果" }
+        ]
+      }
+    },
+    {
+      "key": "list-empty",
+      "procedure": {
+        "title": "搜索不存在的物资时提示没有结果",
+        "app": "proving-ground",
+        "caseId": "PG-WEB-003",
+        "baseUrl": "http://127.0.0.1:4610",
+        "variables": { "user": "tester" },
+        "steps": [
+          { "do": "open", "url": "/login" },
+          { "do": "fill", "target": { "label": "用户名" }, "value": "{{user}}" },
+          { "do": "click", "target": { "role": "button", "name": "登录" } },
+          { "do": "wait", "text": "筛选结果" },
+          { "do": "fill", "target": { "label": "关键字" }, "value": "不存在的物资" },
+          { "do": "click", "target": { "role": "button", "name": "查询" } },
+          { "do": "wait", "text": "没有找到匹配的物资", "timeoutMs": 3000 }
+        ]
+      }
+    },
+    {
+      "key": "item-detail",
+      "procedure": {
+        "title": "查看物资详情并收藏",
+        "app": "proving-ground",
+        "caseId": "PG-WEB-004",
+        "baseUrl": "http://127.0.0.1:4610",
+        "variables": { "user": "tester" },
+        "steps": [
+          { "do": "open", "url": "/login" },
+          { "do": "fill", "target": { "label": "用户名" }, "value": "{{user}}" },
+          { "do": "click", "target": { "role": "button", "name": "登录" } },
+          { "do": "wait", "text": "防水密封圈" },
+          { "do": "click", "target": { "role": "link", "name": "防水密封圈" } },
+          { "do": "wait", "text": "负责人" },
+          { "do": "assert", "kind": "text_visible", "expected": "防水密封圈" },
+          { "do": "click", "target": { "role": "button", "name": "收藏" } }
+        ]
+      }
+    },
+    {
+      "key": "create-once",
+      "procedure": {
+        "title": "新建物资时连点两次只创建一条",
+        "app": "proving-ground",
+        "caseId": "PG-WEB-005",
+        "baseUrl": "http://127.0.0.1:4610",
+        "variables": { "user": "tester" },
+        "steps": [
+          { "do": "open", "url": "/login" },
+          { "do": "fill", "target": { "label": "用户名" }, "value": "{{user}}" },
+          { "do": "click", "target": { "role": "button", "name": "登录" } },
+          { "do": "wait", "text": "筛选结果" },
+          { "do": "click", "target": { "role": "link", "name": "新建" } },
+          { "do": "fill", "target": { "label": "名称" }, "value": "试验场测试物资" },
+          { "do": "click", "target": { "role": "button", "name": "提交" }, "note": "第一次点击" },
+          { "do": "click", "target": { "role": "button", "name": "提交" }, "note": "保存还没完成时再点一次" },
+          { "do": "wait", "text": "保存完成", "timeoutMs": 6000 },
+          { "do": "assert", "kind": "text_visible", "expected": "本次共创建 1 条" }
+        ]
+      }
+    },
+    {
+      "key": "reports",
+      "procedure": {
+        "title": "查看报表并导出",
+        "app": "proving-ground",
+        "caseId": "PG-WEB-006",
+        "baseUrl": "http://127.0.0.1:4610",
+        "variables": { "user": "tester" },
+        "steps": [
+          { "do": "open", "url": "/login" },
+          { "do": "fill", "target": { "label": "用户名" }, "value": "{{user}}" },
+          { "do": "click", "target": { "role": "button", "name": "登录" } },
+          { "do": "wait", "text": "筛选结果" },
+          { "do": "click", "target": { "role": "link", "name": "报表" } },
+          { "do": "wait", "text": "本月出库", "timeoutMs": 6000 },
+          { "do": "assert", "kind": "text_visible", "expected": "本月出库" },
+          { "do": "click", "target": { "role": "button", "name": "导出报表" } }
+        ]
+      }
+    },
+    {
+      "key": "settings-english",
+      "procedure": {
+        "title": "切换到英文界面",
+        "app": "proving-ground",
+        "caseId": "PG-WEB-007",
+        "baseUrl": "http://127.0.0.1:4610",
+        "variables": { "user": "tester" },
+        "steps": [
+          { "do": "open", "url": "/login" },
+          { "do": "fill", "target": { "label": "用户名" }, "value": "{{user}}" },
+          { "do": "click", "target": { "role": "button", "name": "登录" } },
+          { "do": "wait", "text": "筛选结果" },
+          { "do": "click", "target": { "role": "link", "name": "设置" } },
+          { "do": "select", "target": { "label": "语言" }, "option": "English" },
+          { "do": "wait", "text": "Language" },
+          { "do": "assert", "kind": "text_visible", "expected": "Language" }
+        ]
+      }
+    },
+    {
+      "key": "session-expired",
+      "procedure": {
+        "title": "未登录访问列表时回到登录页",
+        "app": "proving-ground",
+        "caseId": "PG-WEB-008",
+        "baseUrl": "http://127.0.0.1:4610",
+        "steps": [
+          { "do": "open", "url": "/items" },
+          { "do": "wait", "text": "请先登录", "timeoutMs": 3000 },
+          { "do": "assert", "kind": "url_contains", "expected": "/login" }
+        ]
+      }
+    }
+  ]
+}

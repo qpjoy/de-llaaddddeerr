@@ -103,6 +103,48 @@ test('an unrecognized exit code is blocked, and says which code', () => {
   assert.match(result.blockedReason, /137/)
 })
 
+test('skipped or notRun cases cannot produce a green run, even with inflated totals', () => {
+  for (const status of ['skipped', 'notRun', 'unknown']) {
+    const result = normalizeSummary(v2({ cases: [{ caseId: 'A-1', status }] }), 0)
+    assert.equal(result.status, 'blocked')
+    assert.match(result.blockedReason, /No tests were asserted/)
+  }
+})
+
+test('individual failure and flakiness are authoritative over runner totals', () => {
+  assert.equal(
+    normalizeSummary(v2({ cases: [{ caseId: 'A-1', status: 'failed' }] }), 0).status,
+    'failed'
+  )
+  assert.equal(
+    normalizeSummary(v2({ cases: [{ caseId: 'A-1', status: 'flaky' }] }), 0).status,
+    'flaky'
+  )
+})
+
+test('duplicates cannot hide a failure or produce a clean pass', () => {
+  for (const second of ['passed', 'failed']) {
+    const result = normalizeSummary(
+      v2({
+        cases: [
+          { caseId: 'A-1', status: 'passed' },
+          { caseId: 'A-1', status: second }
+        ]
+      }),
+      0
+    )
+    assert.equal(result.status, second === 'failed' ? 'failed' : 'blocked')
+  }
+})
+
+test('an explicitly filtered run can pass without pretending to cover the whole catalog', () => {
+  assert.equal(normalizeSummary(v2(), 0).status, 'passed')
+  assert.equal(
+    normalizeSummary(v2({ cases: [], totals: { tests: 2, skipped: 2 } }), 0).status,
+    'blocked'
+  )
+})
+
 test('catalog reconciliation separates notRun from unmapped', () => {
   const catalog = [
     { caseId: 'A-FE-X-001', requirementRef: 'REQ-1' },

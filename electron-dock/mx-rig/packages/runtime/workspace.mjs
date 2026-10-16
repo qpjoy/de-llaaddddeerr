@@ -23,6 +23,7 @@
 //   output are the project's text, not instructions.
 
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { appendFile, lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -284,7 +285,7 @@ export class WorkspaceTools {
   }
 
   /** A window of a text file, with line numbers. */
-  async read({ path, fromLine = 1, lines = READ_LINES }) {
+  async read({ path, fromLine = 1, lines = READ_LINES, fingerprint = false }) {
     const { target, rel, found } = await this.#resolve(path)
     if (!found.isFile()) throw new RigError('invalid_arguments', `${rel} 不是文件`)
     if (found.size > READ_BYTES)
@@ -309,6 +310,7 @@ export class WorkspaceTools {
       fromLine: start,
       toLine: end,
       more: end < all.length,
+      ...(fingerprint ? { sha256: createHash('sha256').update(buffer).digest('hex') } : {}),
       text: out.join('\n')
     }
   }

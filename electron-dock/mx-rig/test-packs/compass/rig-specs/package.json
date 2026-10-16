@@ -1,0 +1,16 @@
+{
+  "name": "@qpjoy/compass-rig-specs",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "罗盘 Compass 的 rig-specs：对固定提交的源码快照运行，接口全部由用例自己的假后端应答。",
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.58.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,5 +1,11 @@
 import { renderGraph } from './graph-view.js'
+import { scheduledOrchestrations } from './plans.js'
+import { openRun, runDetail } from './run-detail.js'
+import { filterLabel } from './run-model.js'
 import { activityView, browserPane, live, stepLabel } from './activity.js'
+import { availableTours } from './tours.js'
+export { projects } from './projects.js'
+export { audit } from './audit.js'
 
 // -- dom helpers --------------------------------------------------------------
 // Everything is built as nodes with textContent. There is no HTML string
@@ -23,7 +29,7 @@ export function h(tag, props = {}, ...children) {
   return node
 }
 
-const panel = (title, ...body) =>
+export const panel = (title, ...body) =>
   h(
     'section',
     { class: 'qp-panel rig-section' },
@@ -40,7 +46,7 @@ const metric = (label, value, hint) =>
     hint && h('small', { class: 'qp-metric__hint', text: hint })
   )
 
-const empty = (text) => h('div', { class: 'rig-empty qp-body-2', text })
+export const empty = (text) => h('div', { class: 'rig-empty qp-body-2', text })
 
 const STATUS_TONE = {
   passed: 'success',
@@ -56,6 +62,7 @@ const STATUS_TONE = {
   cancelled: 'default'
 }
 const STATUS_TEXT = {
+  draft: '准备中',
   queued: '排队',
   running: '执行中',
   awaiting_approval: '等待确认',
@@ -68,19 +75,23 @@ const STATUS_TEXT = {
   expired: '已过期',
   'pending-runner': '等待执行机'
 }
-export const statusTag = (status, id) =>
+export const missionStatusText = (row) => row.workbench
+  ? ({ draft: '待讨论', queued: '对话排队', running: '正在分析', awaiting_approval: '对话待确认', completed: '本轮对话完成', failed: '对话失败', blocked: '对话受阻', cancelled: '对话已取消' }[row.status] ?? row.status)
+  : (STATUS_TEXT[row.status] ?? row.status)
+
+export const statusTag = (status, id, label) =>
   h('span', {
     class: 'qp-status',
     id,
     'data-status': STATUS_TONE[status] ?? 'default',
-    text: STATUS_TEXT[status] ?? status
+    text: label ?? STATUS_TEXT[status] ?? status
   })
 
 // Column widths live in style.css keyed by `data-layout`. The page is served
 // under `style-src 'self'`, which blocks inline style attributes outright —
 // including the ones the CSSOM would write — so layout has to be a class or an
 // attribute the stylesheet can respond to, never a string of CSS.
-const table = (columns, rows, { layout = 'default' } = {}) => {
+export const table = (columns, rows, { layout = 'default' } = {}) => {
   const wrap = h('div', { class: 'qp-data-table rig-table', 'data-layout': layout })
   wrap.append(
     h(
@@ -96,7 +107,7 @@ const table = (columns, rows, { layout = 'default' } = {}) => {
   return wrap
 }
 
-const ago = (iso) => {
+export const ago = (iso) => {
   if (!iso) return '—'
   const seconds = Math.round((Date.now() - new Date(iso).getTime()) / 1000)
   if (!Number.isFinite(seconds)) return '—'
@@ -135,7 +146,7 @@ export async function overview(ctx, mount) {
 
   const steps = [
     { done: apps.length > 0, title: '接入应用', text: '登记要测的 Compass Web / Electron' },
-    { done: tasks.length > 0, title: '建测试计划', text: '选套件与轨道，手动或定时执行' },
+    { done: tasks.length > 0, title: '建执行计划', text: '选套件与轨道，手动或定时执行' },
     { done: online > 0, title: '连接执行机', text: '没有执行机时测试只会排队' },
     { done: decided.length > 0, title: '看报告与录像', text: '从失败步骤跳到录像那一刻' },
     {
@@ -252,15 +263,15 @@ export async function overview(ctx, mount) {
               cell: (run) =>
                 h('button', {
                   class: 'qp-button qp-button--ghost qp-button--sm',
-                  text: '看报告 ↗',
-                  onclick: () => ctx.openPath(`/api/v1/runs/${run.id}/report`)
+                  text: '看详情',
+                  onclick: () => openRun(ctx, run.id, 'tests')
                 })
             }
           ],
           runs.slice(0, 8),
           { layout: 'runs' }
         )
-      : empty('还没有执行记录。先在「测试中心」选一个计划跑一次。')
+      : empty('还没有执行记录。先在项目的「执行计划」里选一个计划跑一次。')
   )
 
   const health = insights
@@ -301,12 +312,7 @@ export async function overview(ctx, mount) {
     )
   )
 
-  // Same data, ordered for whoever is looking.
-  const sections = {
-    tester: [inbox, onboarding, recent, health],
-    developer: [recent, health, inbox, onboarding],
-    lead: [health, onboarding, recent, inbox]
-  }[ctx.state.lens]
+  const sections = [inbox, onboarding, recent, health]
   for (const section of sections) if (section) mount.append(section)
 }
 
@@ -446,6 +452,16 @@ function trendChart(buckets) {
 // -- mission workspace ---------------------------------------------------------
 
 export async function missions(ctx, mount) {
+  mount.append(h('button', {
+    id: 'new-agent-mission', class: 'qp-button qp-button--outline', type: 'button', text: '新建 Agent 任务',
+    onclick: () => {
+      ctx.state.selected = null
+      ctx.state.agentKey = null
+      ctx.state.mode = 'agent'
+      ctx.state.draft = ''
+      ctx.render()
+    }
+  }))
   const selected = ctx.state.missions.find((row) => row.id === ctx.state.selected) ?? null
   const left = h('div', { class: 'rig-section' })
   const right = h('div', { class: 'rig-section' })
@@ -712,7 +728,7 @@ function usageLine(usage) {
   )} tokens${usage.estimated ? '（部分为按字数估算）' : ''}`
 }
 
-function missionDetail(ctx, row) {
+export function missionDetail(ctx, row) {
   const box = h('div', { class: 'rig-section' })
   box.append(
     h(
@@ -742,7 +758,7 @@ function missionDetail(ctx, row) {
             })
           : null
       ),
-      statusTag(row.status, 'mission-status')
+      statusTag(row.status, 'mission-status', missionStatusText(row))
     )
   )
   if (row.finding) box.append(findingCard(row.finding))
@@ -870,7 +886,7 @@ function missionDetail(ctx, row) {
           })
       })
     )
-  if (!['completed', 'failed', 'blocked', 'cancelled'].includes(row.status))
+  if (!['draft', 'completed', 'failed', 'blocked', 'cancelled'].includes(row.status))
     box.append(
       h('button', {
         class: 'qp-button qp-button--danger qp-button--sm',
@@ -924,8 +940,8 @@ function proposalPanel(ctx) {
     if (proposal.kind === 'workflow' && proposal.missing.includes('taskId')) {
       const select = h(
         'select',
-        { class: 'qp-select', 'aria-label': '测试计划' },
-        h('option', { value: '', text: '选择测试计划…' }),
+        { class: 'qp-select', 'aria-label': '执行计划' },
+        h('option', { value: '', text: '选择执行计划…' }),
         ...proposal.candidates.map((entry) => h('option', { value: entry.id, text: entry.label }))
       )
       select.onchange = () => {
@@ -986,7 +1002,7 @@ function proposalPanel(ctx) {
   return panel(
     '这句话可以这样执行',
     h('p', { class: 'qp-body-2 qp-muted', text: plan.note }),
-    ...(cards.length ? cards : [empty('没有候选。换个说法，或直接在下面选测试计划。')]),
+    ...(cards.length ? cards : [empty('没有候选。换个说法，或直接在下面选执行计划。')]),
     h('button', {
       class: 'qp-button qp-button--ghost qp-button--sm rig-inline-action',
       text: '收起解析结果',
@@ -995,11 +1011,11 @@ function proposalPanel(ctx) {
   )
 }
 
-function composer(ctx, selected) {
+export function composer(ctx, selected) {
   if (selected?.surface === 'desktop' && !ctx.state.native)
     return h('p', { class: 'qp-caption qp-muted', text: '桌面端任务只能在桌面端继续对话。' })
   const terminal =
-    !selected || ['completed', 'failed', 'blocked', 'cancelled'].includes(selected.status)
+    !selected || ['draft', 'completed', 'failed', 'blocked', 'cancelled'].includes(selected.status)
   if (!terminal)
     return h('p', { class: 'qp-caption qp-muted', text: '任务进行中，完成或停止后可以继续对话。' })
   const textarea = h('textarea', {
@@ -1007,7 +1023,7 @@ function composer(ctx, selected) {
     id: 'goal',
     rows: '3',
     maxlength: '8000',
-    placeholder: selected ? '继续这项任务……' : '描述任务目标，或选择一个测试计划直接派发……'
+    placeholder: selected ? '继续这项任务……' : '描述任务目标，或选择一个执行计划直接派发……'
   })
   textarea.value = ctx.state.draft ?? ''
   textarea.oninput = () => {
@@ -1028,7 +1044,7 @@ function composer(ctx, selected) {
     text: selected ? '继续对话 ↑' : ctx.state.mode === 'flight' ? '生成飞行计划 ✈' : '开始任务 ↑',
     disabled: !['operator', 'admin'].includes(ctx.state.principal?.role)
   })
-  const task = h('select', { class: 'qp-select', id: 'task', 'aria-label': '测试计划' })
+  const task = h('select', { class: 'qp-select', id: 'task', 'aria-label': '执行计划' })
   for (const entry of ctx.state.tasks)
     task.append(h('option', { value: entry.id, text: entry.name || entry.id }))
   if (ctx.state.pendingTask) task.value = ctx.state.pendingTask
@@ -1294,7 +1310,7 @@ function flightDraftPanel(ctx) {
 }
 
 /** Save text as a file, from both the browser and the desktop renderer. */
-function download(filename, text, type = 'text/plain') {
+export function download(filename, text, type = 'text/plain') {
   const url = URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` }))
   const link = h('a', { href: url, download: filename })
   document.body.append(link)
@@ -1303,7 +1319,7 @@ function download(filename, text, type = 'text/plain') {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-async function copyText(ctx, text) {
+export async function copyText(ctx, text) {
   try {
     await navigator.clipboard.writeText(text)
     ctx.notice('已复制到剪贴板。')
@@ -1462,217 +1478,717 @@ function exportPanel(ctx, row) {
 // -- tests ---------------------------------------------------------------------
 
 export async function tests(ctx, mount) {
+  if (ctx.state.runDetail) {
+    await runDetail(ctx, mount, ctx.state.runDetail)
+    return
+  }
   const [{ tasks = [] }, { runs = [] }, { apps = [] }] = await Promise.all([
     ctx.api('tasks'),
     ctx.api('runs'),
     ctx.api('apps').catch(() => ({ apps: [] }))
   ])
   ctx.state.tasks = tasks
-  // Each app's case catalogue, as the full test-management console lists it:
-  // what is to be verified, whether code implements it, how it last went.
-  const catalogues = await Promise.all(
-    apps.map((app) =>
-      ctx
-        .api('app-cases', { app: app.slug })
-        .then(({ cases = [] }) => ({ app, cases }))
-        .catch((error) => ({ app, cases: [], error: error.message }))
+  const appsById = new Map(apps.map((app) => [app.id, app]))
+  mount.append(
+    h('p', {
+      class: 'qp-body-2 qp-muted',
+      text: '这里汇总全部项目。每个项目的用例库、执行计划和执行记录，在「项目与任务」里按项目查看。'
+    }),
+    panel(
+      '执行计划',
+      tasks.length
+        ? planCards(ctx, tasks, { appsById })
+        : empty(
+            apps.length
+              ? '还没有执行计划。执行计划 = 执行方式 + 环境 + 范围 + 在哪跑 + 什么时候跑；新建入口正在迁入工作台，目前仍在旧管理台建立。'
+              : '还没有项目。先在「项目与任务」登记项目。'
+          )
+    ),
+    panel('最近执行', runs.length ? runsTable(ctx, runs, { appsById }) : empty('还没有执行记录。'))
+  )
+  const scheduled = scheduledOrchestrations(ctx)
+  if (scheduled) mount.append(scheduled)
+}
+
+const PLAN_RUNS_ON = { server: '服务器', 'any-runner': '任意执行机', 'pinned-runner': '指定执行机' }
+
+/**
+ * 执行计划: what runs, where and when — the kernel's `mxt_tasks`, called
+ * 测试任务 by the old console (docs/21 §3). With `appsById`, each card says
+ * which project it belongs to.
+ */
+export function planCards(ctx, tasks, { appsById = null } = {}) {
+  return h(
+    'div',
+    { class: 'rig-cards' },
+    ...tasks.map((task) =>
+      h(
+        'article',
+        { class: 'qp-panel qp-card rig-section', 'data-plan': task.id },
+        h('strong', { class: 'qp-body-1 qp-body-1--semibold', text: task.name || task.id }),
+        h('div', {
+          class: 'qp-caption qp-muted',
+          text: [appsById?.get(task.appId)?.displayName, task.id].filter(Boolean).join(' · ')
+        }),
+        h(
+          'div',
+          { class: 'rig-chips' },
+          h('span', { class: 'rig-chip', text: `${task.profile ?? '—'} / ${task.track ?? '—'}` }),
+          h('span', { class: 'rig-chip', text: PLAN_RUNS_ON[task.runsOn] ?? task.runsOn ?? '按执行方式默认' }),
+          h('span', {
+            class: 'rig-chip',
+            text: task.scheduleKind === 'cron' ? `定时 ${task.cronExpr ?? ''}` : task.scheduleKind === 'once' ? '定时一次' : '手动'
+          }),
+          task.caseFilter ? h('span', { class: 'rig-chip', text: filterLabel(task.caseFilter), title: task.caseFilter }) : null,
+          task.enabled === false ? h('span', { class: 'rig-chip', text: '已停用' }) : null
+        ),
+        h(
+          'div',
+          { class: 'qp-row' },
+          h('button', {
+            class: 'qp-button qp-button--outline qp-button--sm',
+            text: '创建测试工作流',
+            title: '在 Agent 会话里核对参数后派发这个执行计划',
+            disabled: task.enabled === false || !['operator', 'admin'].includes(ctx.state.principal?.role),
+            onclick: () => {
+              ctx.state.mode = 'workflow'
+              ctx.state.selected = null
+              ctx.state.draft = `派发执行计划：${task.name || task.id}`
+              ctx.state.pendingTask = task.id
+              ctx.go('missions')
+            }
+          }),
+          task.lastRunId
+            ? h('button', {
+                class: 'qp-button qp-button--ghost qp-button--sm',
+                text: '上次执行',
+                onclick: () => openRun(ctx, task.lastRunId)
+              })
+            : null
+        )
+      )
     )
   )
-  const casesOf = new Map(catalogues.map((entry) => [entry.app.slug, entry.cases]))
-  if (ctx.state.native && ['operator', 'admin'].includes(ctx.state.principal?.role))
-    mount.append(await localRunnerPanel(ctx))
+}
+
+/** Runs as a table; with `appsById`, a project column. Each row opens the run's detail (run-detail.js). */
+export function runsTable(ctx, runs, { appsById = null } = {}) {
+  return table(
+    [
+      { title: '状态', cell: (run) => statusTag(run.status) },
+      ...(appsById
+        ? [
+            {
+              title: '项目',
+              cell: (run) =>
+                h('span', { class: 'qp-body-2', text: appsById.get(run.appId)?.displayName ?? '—' })
+            }
+          ]
+        : []),
+      {
+        title: '结果',
+        cell: (run) =>
+          h('span', {
+            class: 'qp-body-2',
+            text: run.totals?.tests ? `通过 ${run.totals.passed ?? 0} / ${run.totals.tests}` : '—'
+          })
+      },
+      {
+        title: '轨道',
+        cell: (run) =>
+          h('span', { class: 'qp-body-2 qp-muted', text: `${run.profile ?? '—'} / ${run.track ?? '—'}` })
+      },
+      {
+        title: '时间',
+        cell: (run) => h('span', { class: 'qp-body-2 qp-muted', text: ago(run.finishedAt ?? run.queuedAt) })
+      },
+      {
+        title: '',
+        cell: (run) =>
+          h(
+            'span',
+            { class: 'qp-row rig-run-actions' },
+            h('button', {
+              class: 'qp-button qp-button--outline qp-button--sm',
+              text: '详情',
+              title: run.id,
+              'data-run-open': run.id,
+              onclick: () => openRun(ctx, run.id)
+            }),
+            h('button', {
+              class: 'qp-button qp-button--ghost qp-button--sm',
+              text: ctx.state.native ? '报告' : '报告 ↗',
+              onclick: () => ctx.openPath(`/api/v1/runs/${run.id}/report`)
+            })
+          )
+      }
+    ],
+    runs,
+    { layout: appsById ? 'test-runs-projects' : 'test-runs' }
+  )
+}
+
+// -- 执行机与工位 (docs/21 M1) ---------------------------------------------------
+
+/**
+ * Every machine that can run something for this Rig: personal computers and
+ * platform capacity running suites, and stations replaying procedures. Online
+ * is derived from the last check-in, never stored. Another computer joins
+ * with a one-time command; this desktop can also host a runner itself.
+ */
+export async function runners(ctx, mount) {
+  const role = ctx.state.principal?.role
+  const canEnroll = ['operator', 'admin'].includes(role)
+  const { runners: machines = [] } = await ctx.api('runners')
+  if (ctx.state.native && canEnroll) mount.append(await localRunnerPanel(ctx))
+  const enroll = h('div', { class: 'rig-enroll', id: 'enroll' })
+  if (ctx.state.enrollment) enroll.append(enrollmentCard(ctx, ctx.state.enrollment))
   mount.append(
     panel(
-      '已接入的应用',
-      apps.length
+      '执行机与工位',
+      h('p', {
+        class: 'qp-body-2 qp-muted',
+        text: '网页测试可以在服务器上跑；桌面应用测试需要一台真实的 Windows 或 Mac。规程工位只做规程回放，值守在「试验规程」页开关。'
+      }),
+      canEnroll
         ? h(
             'div',
-            { class: 'rig-cards' },
-            ...apps.map((app) =>
-              h(
-                'article',
-                { class: 'qp-panel qp-card' },
-                h('strong', {
-                  class: 'qp-body-1 qp-body-1--semibold',
-                  text: app.displayName || app.slug
-                }),
-                h('div', { class: 'qp-caption qp-muted', text: app.slug }),
-                h(
-                  'div',
-                  { class: 'rig-chips' },
-                  ...(app.surfaces ?? []).map((surface) =>
-                    h('span', { class: 'rig-chip', text: surface })
-                  ),
-                  h('span', { class: 'rig-chip', text: caseCount(casesOf.get(app.slug) ?? []) })
-                )
-              )
-            )
-          )
-        : empty(
-            '还没有接入应用。到完整测试管理台用「接入 / 对齐 Compass」登记 Web 与 Electron 两个 surface。'
-          )
-    ),
-    casesPanel(ctx, catalogues),
-    panel(
-      '测试计划',
-      tasks.length
-        ? h(
-            'div',
-            { class: 'rig-cards' },
-            ...tasks.map((task) =>
-              h(
-                'article',
-                { class: 'qp-panel qp-card rig-section' },
-                h('strong', { class: 'qp-body-1 qp-body-1--semibold', text: task.name || task.id }),
-                h('div', { class: 'qp-caption qp-muted', text: task.id }),
-                h(
-                  'div',
-                  { class: 'rig-chips' },
-                  h('span', { class: 'rig-chip', text: `profile ${task.profile ?? '—'}` }),
-                  h('span', { class: 'rig-chip', text: `track ${task.track ?? '—'}` }),
-                  h('span', { class: 'rig-chip', text: task.runsOn ?? 'any-runner' })
-                ),
-                h('button', {
-                  class: 'qp-button qp-button--outline qp-button--sm',
-                  text: '创建测试工作流',
-                  disabled:
-                    task.enabled === false ||
-                    !['operator', 'admin'].includes(ctx.state.principal?.role),
-                  onclick: () => {
-                    ctx.state.mode = 'workflow'
-                    ctx.state.selected = null
-                    ctx.state.draft = `执行测试计划：${task.name || task.id}`
-                    ctx.state.pendingTask = task.id
-                    ctx.go('missions')
-                  }
+            { class: 'qp-row' },
+            h('button', {
+              class: 'qp-button qp-button--primary',
+              id: 'enroll-start',
+              text: '接入另一台电脑',
+              onclick: () =>
+                ctx.run(async () => {
+                  const created = await ctx.api('machine-enroll')
+                  ctx.state.enrollment = { ...created, status: 'pending', os: /win/i.test(navigator.userAgent) ? 'windows' : 'unix' }
+                  await ctx.render()
+                  watchEnrollment(ctx)
                 })
-              )
-            )
+            })
           )
-        : empty('还没有测试计划。先在完整测试管理台建立套件与任务。')
-    ),
-    panel(
-      '最近执行',
-      runs.length
+        : null,
+      enroll,
+      machines.length
         ? table(
             [
-              { title: '状态', cell: (run) => statusTag(run.status) },
-              { title: 'Run ID', cell: (run) => h('span', { class: 'qp-caption', text: run.id }) },
               {
-                title: '轨道',
-                cell: (run) =>
-                  h('span', {
-                    class: 'qp-body-2 qp-muted',
-                    text: `${run.profile ?? '—'} / ${run.track ?? '—'}`
-                  })
+                title: '名称',
+                cell: (runner) =>
+                  h(
+                    'span',
+                    { class: 'qp-data-cell' },
+                    h('strong', { class: 'qp-body-2', text: runner.name }),
+                    runner.mine ? h('small', { class: 'qp-caption qp-muted', text: '我的' }) : null
+                  )
               },
               {
-                title: '时间',
-                cell: (run) =>
-                  h('span', {
-                    class: 'qp-body-2 qp-muted',
-                    text: ago(run.finishedAt ?? run.queuedAt)
+                title: '状态',
+                cell: (runner) =>
+                  !runner.online
+                    ? h('span', { class: 'qp-status', 'data-status': 'default', text: '离线' })
+                    : runner.status === 'busy'
+                      ? h('span', { class: 'qp-status', 'data-status': 'info', text: '正在跑' })
+                      : h('span', { class: 'qp-status', 'data-status': 'success', text: '在线' })
+              },
+              {
+                title: '能做什么',
+                cell: (runner) => {
+                  const engines = runner.capabilities?.engines ?? []
+                  const station = engines.length > 0 && engines.every((engine) => engine === 'rig-procedure')
+                  return h('span', {
+                    class: 'qp-body-2',
+                    text: `${station ? '规程工位' : runner.kind === 'server' ? '平台容量' : '个人电脑'} · ${
+                      [...engines, ...(runner.capabilities?.surfaces ?? [])].join('、') || '—'
+                    }`
                   })
+                }
+              },
+              {
+                title: '系统',
+                cell: (runner) =>
+                  h('span', { class: 'qp-body-2 qp-muted', text: `${runner.os ?? '—'}${runner.arch ? ` / ${runner.arch}` : ''}` })
+              },
+              {
+                title: '归属',
+                cell: (runner) => h('span', { class: 'qp-body-2 qp-muted', text: runner.ownerPrincipal ?? '—' })
+              },
+              {
+                title: '最近活跃',
+                cell: (runner) => h('span', { class: 'qp-body-2 qp-muted', text: ago(runner.lastSeenAt) })
               },
               {
                 title: '',
-                cell: (run) =>
-                  h('button', {
-                    class: 'qp-button qp-button--ghost qp-button--sm',
-                    text: '报告 ↗',
-                    onclick: () => ctx.openPath(`/api/v1/runs/${run.id}/report`)
-                  })
+                cell: (runner) =>
+                  runner.mine || role === 'admin'
+                    ? h('button', {
+                        class: 'qp-button qp-button--ghost qp-button--sm',
+                        text: '移除',
+                        'data-remove-runner': runner.id,
+                        onclick: () =>
+                          ctx.run(async () => {
+                            // Removing the row does not stop a runner that is still
+                            // running somewhere; it would come back on its next check-in.
+                            if (
+                              !window.confirm(
+                                `把「${runner.name}」从列表里移除？\n\n那台电脑上如果还在运行执行机，要在那边停掉，否则它下次报到会重新出现。`
+                              )
+                            )
+                              return
+                            await ctx.api('machine-remove', { id: runner.id })
+                            ctx.notice(`已移除「${runner.name}」`)
+                            await ctx.render()
+                          })
+                      })
+                    : null
               }
             ],
-            runs,
-            { layout: 'test-runs' }
+            machines,
+            { layout: 'runners' }
           )
-        : empty('还没有执行记录。')
+        : empty('还没有执行机。网页测试仍然可以在服务器上跑；桌面应用测试需要先接入一台电脑。')
     )
   )
 }
 
-const caseCount = (cases) => {
-  const pending = cases.filter((entry) => !entry.implemented).length
-  return `用例 ${cases.length} 条${pending ? `，${pending} 条待实现` : ''}`
+/** The one-time command for another computer, and where its enrolment stands. */
+function enrollmentCard(ctx, enrollment) {
+  const os = enrollment.os === 'windows' ? 'windows' : 'unix'
+  const command = enrollment.commands?.[os] ?? ''
+  const tab = (key, label) =>
+    h('button', {
+      type: 'button',
+      class: `qp-button qp-button--sm ${os === key ? 'qp-button--primary' : 'qp-button--outline'}`,
+      text: label,
+      onclick: () => {
+        ctx.state.enrollment = { ...ctx.state.enrollment, os: key }
+        ctx.render()
+      }
+    })
+  const status =
+    enrollment.status === 'claimed'
+      ? `已接入：${enrollment.runner?.name ?? '新执行机'}`
+      : enrollment.status === 'expired'
+        ? '接入码已过期，重新点「接入另一台电脑」即可。'
+        : '等那台电脑连上来……'
+  return h(
+    'section',
+    { class: 'qp-panel rig-section', 'data-enrollment': enrollment.status },
+    h('p', { class: 'qp-body-2', text: `在要接入的那台电脑上打开${os === 'windows' ? ' PowerShell' : '终端'}，粘贴这一条命令：` }),
+    h('div', { class: 'qp-row' }, tab('windows', 'Windows'), tab('unix', 'macOS / Linux')),
+    h('pre', { class: 'qp-code-block', id: 'enroll-command', text: command }),
+    h(
+      'div',
+      { class: 'qp-row' },
+      h('button', {
+        type: 'button',
+        class: 'qp-button qp-button--outline qp-button--sm',
+        text: '复制命令',
+        onclick: () => copyText(ctx, command)
+      }),
+      h('span', { class: 'qp-caption', id: 'enroll-status', text: status }),
+      h('button', {
+        type: 'button',
+        class: 'qp-button qp-button--ghost qp-button--sm',
+        text: '关闭',
+        onclick: () => {
+          ctx.state.enrollment = null
+          ctx.render()
+        }
+      })
+    ),
+    h('p', {
+      class: 'qp-caption qp-muted',
+      text: '接入码 15 分钟内有效，只能用一次。执行机装在用户目录下，不需要管理员权限；不用在那台电脑上输入密码。'
+    })
+  )
 }
 
+/** Poll the enrolment until the machine appears, the code expires, or the card is closed. */
+async function watchEnrollment(ctx) {
+  const id = ctx.state.enrollment?.enrollment?.id
+  while (id && ctx.state.enrollment?.enrollment?.id === id && ctx.state.enrollment.status === 'pending') {
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+    if (ctx.state.enrollment?.enrollment?.id !== id) return
+    const state = await ctx.api('machine-enrollment', { id }).catch(() => null)
+    if (!state || state.status === 'pending') continue
+    ctx.state.enrollment = { ...ctx.state.enrollment, status: state.status, runner: state.runner }
+    if (state.status === 'claimed') ctx.notice(`「${state.runner?.name ?? '新执行机'}」已接入`)
+    if (ctx.state.view === 'runners') await ctx.render()
+  }
+}
+
+// -- 通知渠道 (docs/21 M2) ---------------------------------------------------------
+
+const CHANNEL_KINDS = [
+  ['feishu', '飞书群机器人'],
+  ['wecom', '企业微信群机器人'],
+  ['webhook', 'Webhook']
+]
+const CHANNEL_EVENTS = [
+  ['failure', '失败'],
+  ['recovery', '恢复'],
+  ['blocked', '受阻'],
+  ['debrief', '讲评（钩子与飞行报告）']
+]
+
 /**
- * The case catalogue of every app. Read here; written in the full
- * test-management console (or drafted by an Agent and imported there).
+ * Where failures, recoveries and debriefs are pushed. A channel's address is
+ * shown only as its host: enough to tell two apart, not enough to post to one.
  */
-function casesPanel(ctx, catalogues) {
-  const edit = h('button', {
-    class: 'qp-button qp-button--ghost qp-button--sm',
-    type: 'button',
-    text: '在完整测试管理台写用例 ↗',
-    onclick: () => ctx.openPath('/test-center/')
-  })
-  const withCases = catalogues.filter((entry) => entry.cases.length || entry.error)
-  if (!withCases.length)
-    return panel(
-      '用例',
-      empty(
-        catalogues.length
-          ? '还没有用例。到完整测试管理台的「应用与用例」写一条，或者让 Agent 用 case_draft 起草后导入。'
-          : '还没有接入应用，所以也还没有用例。'
-      ),
-      edit
+export async function channels(ctx, mount) {
+  const admin = ctx.state.principal?.role === 'admin'
+  const [{ channels: list = [] }, { apps = [] }] = await Promise.all([
+    ctx.api('channels'),
+    ctx.api('apps').catch(() => ({ apps: [] }))
+  ])
+  const appsById = new Map(apps.map((app) => [app.id, app]))
+  const draft = (ctx.state.channelDraft ??= { name: '', kind: 'feishu', url: '', secret: '', app: '', events: ['failure', 'recovery', 'blocked', 'debrief'] })
+  const input = (key, props) => {
+    const node = h('input', { class: 'qp-input', ...props })
+    node.value = draft[key] ?? ''
+    node.oninput = () => {
+      draft[key] = node.value
+    }
+    return node
+  }
+  const kind = h('select', { class: 'qp-select', id: 'channel-kind', 'aria-label': '类型' }, ...CHANNEL_KINDS.map(([value, label]) => h('option', { value, text: label })))
+  kind.value = draft.kind
+  kind.onchange = () => {
+    draft.kind = kind.value
+  }
+  const scope = h(
+    'select',
+    { class: 'qp-select', id: 'channel-app', 'aria-label': '范围' },
+    h('option', { value: '', text: '全部项目' }),
+    ...apps.map((app) => h('option', { value: app.slug, text: app.displayName || app.slug }))
+  )
+  scope.value = draft.app
+  scope.onchange = () => {
+    draft.app = scope.value
+  }
+  const events = h(
+    'div',
+    { class: 'qp-row' },
+    ...CHANNEL_EVENTS.map(([value, label]) => {
+      const box = h('input', { type: 'checkbox', 'data-channel-event': value })
+      box.checked = draft.events.includes(value)
+      box.onchange = () => {
+        draft.events = box.checked ? [...new Set([...draft.events, value])] : draft.events.filter((entry) => entry !== value)
+      }
+      return h('label', { class: 'qp-choice qp-choice--checkbox' }, box, h('span', { class: 'qp-choice__control' }), h('span', { text: label }))
+    })
+  )
+  mount.append(
+    panel(
+      '通知渠道',
+      h('p', {
+        class: 'qp-body-2 qp-muted',
+        text: '执行失败、恢复、受阻，以及钩子和飞行计划的讲评，会推送到这里登记的渠道。地址只显示主机名；签名密钥只写不读。'
+      }),
+      admin
+        ? h(
+            'form',
+            {
+              class: 'rig-channel-form',
+              id: 'channel-form',
+              onsubmit: (event) => {
+                event.preventDefault()
+                ctx.run(async () => {
+                  await ctx.api('channel-create', {
+                    name: draft.name.trim(),
+                    kind: draft.kind,
+                    ...(draft.app ? { app: draft.app } : {}),
+                    events: draft.events,
+                    config: { url: draft.url.trim(), ...(draft.secret.trim() ? { secret: draft.secret.trim() } : {}) }
+                  })
+                  ctx.notice(`已登记通知渠道「${draft.name.trim()}」`)
+                  ctx.state.channelDraft = null
+                  await ctx.render()
+                })
+              }
+            },
+            h('div', { class: 'qp-row' }, input('name', { id: 'channel-name', placeholder: '名称，例如 测试群', required: true }), kind, scope),
+            h(
+              'div',
+              { class: 'qp-row' },
+              input('url', { id: 'channel-url', placeholder: '机器人 webhook 地址', required: true }),
+              input('secret', { id: 'channel-secret', type: 'password', placeholder: '签名密钥（可留空）', autocomplete: 'new-password' })
+            ),
+            events,
+            h('button', { type: 'submit', class: 'qp-button qp-button--primary qp-button--sm', text: '登记渠道' })
+          )
+        : h('p', { class: 'qp-caption qp-muted', text: '登记和删除渠道需要部署管理员。' }),
+      list.length
+        ? table(
+            [
+              {
+                title: '渠道',
+                cell: (channel) =>
+                  h('span', { class: 'qp-data-cell' }, h('strong', { class: 'qp-body-2', text: channel.name }), h('small', { class: 'qp-caption qp-muted', text: channel.config?.urlHost ?? '—' }))
+              },
+              { title: '类型', cell: (channel) => h('span', { class: 'qp-body-2', text: CHANNEL_KINDS.find(([value]) => value === channel.kind)?.[1] ?? channel.kind }) },
+              {
+                title: '范围',
+                cell: (channel) => h('span', { class: 'qp-body-2 qp-muted', text: channel.appId ? appsById.get(channel.appId)?.displayName ?? channel.appId : '全部项目' })
+              },
+              {
+                title: '事件',
+                cell: (channel) =>
+                  h('span', {
+                    class: 'qp-body-2 qp-muted',
+                    text: (channel.events ?? []).map((value) => CHANNEL_EVENTS.find(([key]) => key === value)?.[1] ?? value).join('、')
+                  })
+              },
+              { title: '签名', cell: (channel) => h('span', { class: 'qp-body-2 qp-muted', text: channel.config?.signed ? '有' : '无' }) },
+              {
+                title: '',
+                cell: (channel) =>
+                  admin
+                    ? h(
+                        'span',
+                        { class: 'qp-row' },
+                        h('button', {
+                          type: 'button',
+                          class: 'qp-button qp-button--ghost qp-button--sm',
+                          text: '发测试消息',
+                          'data-channel-test': channel.id,
+                          onclick: () =>
+                            ctx.run(async () => {
+                              const queued = await ctx.api('channel-test', { id: channel.id })
+                              ctx.notice(queued.note ?? '测试消息已入队')
+                            })
+                        }),
+                        h('button', {
+                          type: 'button',
+                          class: 'qp-button qp-button--ghost qp-button--sm',
+                          text: '删除',
+                          'data-channel-delete': channel.id,
+                          onclick: () =>
+                            ctx.run(async () => {
+                              if (!window.confirm(`删除通知渠道「${channel.name}」？`)) return
+                              await ctx.api('channel-delete', { id: channel.id })
+                              ctx.notice(`已删除通知渠道「${channel.name}」`)
+                              await ctx.render()
+                            })
+                        })
+                      )
+                    : null
+              }
+            ],
+            list,
+            { layout: 'channels' }
+          )
+        : empty('还没有通知渠道。')
     )
-  return panel(
-    '用例',
-    h('p', {
-      class: 'qp-body-2 qp-muted',
-      text: '每个应用要验证什么。「已实现」表示代码仓库里有对应的测试代码；没有实现的用例在报告里显示「未执行」。'
-    }),
-    ...withCases.map(({ app, cases, error }) =>
-      h(
-        'section',
-        { class: 'rig-section', 'data-app': app.slug },
-        h('h3', { class: 'qp-body-1 qp-body-1--semibold', text: `${app.displayName || app.slug} · ${caseCount(cases)}` }),
-        error
-          ? h('p', { class: 'qp-body-2 rig-warning-line', text: `读不到用例：${error}` })
-          : table(
-              [
-                { title: '编号', cell: (entry) => h('code', { class: 'qp-caption', text: entry.caseId }) },
-                { title: '标题', cell: (entry) => h('span', { class: 'qp-body-2', text: entry.title }) },
-                { title: '优先级', cell: (entry) => h('span', { class: 'qp-body-2', text: entry.priority ?? '—' }) },
-                {
-                  title: '实现',
-                  cell: (entry) =>
-                    h('span', {
-                      class: `qp-tag ${entry.implemented ? 'qp-tag--success' : 'qp-tag--warning'}`,
-                      text: entry.implemented ? '已实现' : '待实现'
-                    })
-                },
-                {
-                  title: '最近结果',
-                  cell: (entry) =>
-                    entry.lastRunId
-                      ? h(
-                          'button',
-                          {
-                            class: 'qp-button qp-button--ghost qp-button--sm',
-                            type: 'button',
-                            title: `执行 ${entry.lastRunId} 的报告`,
-                            onclick: () => ctx.openPath(`/api/v1/runs/${entry.lastRunId}/report`)
-                          },
-                          statusTag(entry.lastStatus)
-                        )
-                      : h('span', { class: 'qp-body-2 qp-muted', text: '—' })
-                },
-                {
-                  title: '来源',
-                  cell: (entry) =>
-                    h('span', { class: 'qp-body-2 qp-muted', text: entry.origin === 'platform' ? '界面登记' : '代码仓库' })
-                }
-              ],
-              cases,
-              { layout: 'case-catalog' }
-            )
+  )
+}
+
+// -- 账号与成员 (docs/21 M1) -----------------------------------------------------
+
+const ROLE_OPTIONS = [
+  ['viewer', '只读 —— 只能看'],
+  ['operator', '测试工程师 —— 写用例、建任务、跑测试'],
+  ['admin', '管理员 —— 还能登记项目、执行方式和账号']
+]
+
+/**
+ * The deployment's accounts: Rig's own, independent of any other system's
+ * login. A new or reset password is shown once — the service keeps only a
+ * hash — and is gone from this page as soon as the card is closed.
+ */
+export async function members(ctx, mount) {
+  if (ctx.state.principal?.role !== 'admin') {
+    mount.append(empty('账号与成员只对部署管理员开放。'))
+    return
+  }
+  const { members: list = [], federated } = await ctx.api('members')
+  const me = ctx.state.principal?.id
+  const secret = ctx.state.oneTimePassword
+  const account = h('input', { class: 'qp-input', id: 'new-member-account', autocomplete: 'off', maxlength: 40, required: true, placeholder: '例如 alice' })
+  const displayName = h('input', { class: 'qp-input', id: 'new-member-name', maxlength: 80, placeholder: '显示名（可留空）' })
+  const role = h(
+    'select',
+    { class: 'qp-select', id: 'new-member-role', 'aria-label': '权限' },
+    ...ROLE_OPTIONS.map(([value, label]) => h('option', { value, text: label }))
+  )
+  role.value = 'operator'
+  const create = h(
+    'form',
+    {
+      class: 'rig-member-create',
+      onsubmit: (event) => {
+        event.preventDefault()
+        const submit = event.submitter
+        if (submit) submit.disabled = true
+        ctx.run(async () => {
+          try {
+            const result = await ctx.api('member-create', {
+              account: account.value.trim(),
+              ...(displayName.value.trim() ? { displayName: displayName.value.trim() } : {}),
+              role: role.value
+            })
+            ctx.state.oneTimePassword = {
+              title: '账号已创建',
+              account: result.member?.local?.account ?? account.value.trim(),
+              password: result.initialPassword
+            }
+            await ctx.render()
+          } finally {
+            if (submit) submit.disabled = false
+          }
+        })
+      }
+    },
+    h('div', { class: 'qp-row' }, account, displayName, role, h('button', { class: 'qp-button qp-button--primary', type: 'submit', text: '新建账号' })),
+    h('p', { class: 'qp-caption qp-muted', text: '账号用 2–40 位小写字母、数字、点、- 和 _。创建后会给出一次性密码，对方首次登录后要改掉。' })
+  )
+  mount.append(
+    panel(
+      '账号与成员',
+      h('p', {
+        class: 'qp-body-2 qp-muted',
+        text: `Rig 账号由管理员在这里开通，不依赖任何其他系统的登录；权限只在这个 Rig 部署里生效。${
+          federated ? '已启用 Launcher 联邦登录，Launcher 账号首次登录默认只读。' : ''
+        }项目内的可见范围在项目的「成员与访问」里设置。`
+      }),
+      secret ? oneTimeCard(ctx, secret) : null,
+      create,
+      table(
+        [
+          {
+            title: '成员',
+            cell: (member) =>
+              h(
+                'span',
+                { class: 'qp-data-cell' },
+                h('strong', { class: 'qp-body-2', text: member.displayName || member.principalId }),
+                h('small', {
+                  class: 'qp-caption qp-muted',
+                  text: [
+                    member.principalId,
+                    member.local?.disabled ? '已停用' : member.local?.mustChangePassword ? '待改密码' : null
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')
+                })
+              )
+          },
+          {
+            title: '来源',
+            cell: (member) => h('span', { class: 'qp-body-2', text: member.source === 'local' ? 'Rig 账号' : 'Launcher' })
+          },
+          {
+            title: '权限',
+            cell: (member) => {
+              const select = h(
+                'select',
+                { class: 'qp-select', 'aria-label': `${member.principalId} 的权限`, 'data-member-role': member.principalId },
+                ...ROLE_OPTIONS.map(([value, label]) => h('option', { value, text: label }))
+              )
+              select.value = member.role
+              select.onchange = () => {
+                const previous = member.role
+                select.disabled = true
+                ctx.run(async () => {
+                  try {
+                    await ctx.api('member-update', { principalId: member.principalId, role: select.value })
+                    ctx.notice('权限已更新')
+                    // Lowering one's own role changes what this page may show.
+                    if (member.principalId === me) await ctx.refresh?.()
+                    await ctx.render()
+                  } catch (error) {
+                    select.value = previous
+                    throw error
+                  } finally {
+                    select.disabled = false
+                  }
+                })
+              }
+              return select
+            }
+          },
+          {
+            title: '最近登录',
+            cell: (member) => h('span', { class: 'qp-body-2 qp-muted', text: ago(member.lastSeenAt) })
+          },
+          {
+            title: '',
+            cell: (member) =>
+              member.local
+                ? h(
+                    'span',
+                    { class: 'qp-row' },
+                    h('button', {
+                      class: 'qp-button qp-button--ghost qp-button--sm',
+                      text: '重置密码',
+                      'data-member-reset': member.principalId,
+                      onclick: () =>
+                        ctx.run(async () => {
+                          if (!window.confirm(`重置 ${member.local.account} 的密码？该账号所有已登录的会话会立即失效。`)) return
+                          const result = await ctx.api('member-reset', { principalId: member.principalId })
+                          ctx.state.oneTimePassword = { title: '密码已重置', account: member.local.account, password: result.initialPassword }
+                          await ctx.render()
+                        })
+                    }),
+                    member.principalId === me
+                      ? null
+                      : h('button', {
+                          class: 'qp-button qp-button--ghost qp-button--sm',
+                          text: member.local.disabled ? '启用' : '停用',
+                          'data-member-disable': member.principalId,
+                          onclick: () =>
+                            ctx.run(async () => {
+                              const disable = !member.local.disabled
+                              if (disable && !window.confirm('停用后该账号立即退出，且无法再登录。确定？')) return
+                              await ctx.api('member-update', { principalId: member.principalId, disabled: disable })
+                              ctx.notice(disable ? '已停用' : '已启用')
+                              await ctx.render()
+                            })
+                        })
+                  )
+                : null
+          }
+        ],
+        list,
+        { layout: 'members' }
       )
-    ),
-    edit
+    )
+  )
+}
+
+/** Shown once, then forgotten: closing the card drops the password from this page's state. */
+function oneTimeCard(ctx, secret) {
+  return h(
+    'section',
+    { class: 'qp-panel qp-panel--active rig-section', id: 'one-time-password', role: 'status' },
+    h('h3', { class: 'qp-body-1 qp-body-1--semibold', text: secret.title }),
+    h('p', { class: 'qp-body-2', text: `账号 ${secret.account} 的一次性密码：` }),
+    h('pre', { class: 'qp-code-block', id: 'one-time-password-value', text: secret.password }),
+    h('p', {
+      class: 'qp-caption qp-muted',
+      text: '只显示这一次，服务端只保存它的哈希。请当面或私信交给本人；对方首次登录后应立即在左下角「修改密码」。'
+    }),
+    h(
+      'div',
+      { class: 'qp-row' },
+      h('button', {
+        type: 'button',
+        class: 'qp-button qp-button--outline qp-button--sm',
+        text: '复制密码',
+        onclick: () => copyText(ctx, secret.password)
+      }),
+      h('button', {
+        type: 'button',
+        class: 'qp-button qp-button--primary qp-button--sm',
+        id: 'one-time-password-done',
+        text: '我已交给本人，关闭',
+        onclick: () => {
+          ctx.state.oneTimePassword = null
+          ctx.render()
+        }
+      })
+    )
   )
 }
 
@@ -2667,7 +3183,7 @@ async function editorPanel(ctx, spec) {
     if (node.type === 'preflight')
       fields.push(
         textField(
-          '要核对的测试计划 ID（逗号分隔，可用 {{变量名}}）',
+          '要核对的执行计划 ID（逗号分隔，可用 {{变量名}}）',
           node.taskIds.join(', '),
           (value) => {
             node.taskIds = value
@@ -2713,7 +3229,7 @@ async function editorPanel(ctx, spec) {
           h(
             'label',
             { class: 'qp-field' },
-            h('span', { class: 'qp-field__label', text: '测试计划' }),
+            h('span', { class: 'qp-field__label', text: '执行计划' }),
             select(
               planOptions().some((option) => option.value === node.taskId) ? node.taskId : '',
               [{ value: '', label: '（选择，或在右侧填模板）' }, ...planOptions()],
@@ -3472,52 +3988,70 @@ function channelForm(ctx, profiles, activeId) {
 // -- guide ------------------------------------------------------------------------------
 
 export async function guide(ctx, mount) {
-  const steps = [
+  // 演示录像 (docs/24 M8c): recorded at release, so they show this interface.
+  const { videos = [] } = await ctx.api('tour-videos').catch(() => ({ videos: [] }))
+  // One guide (docs/21 M6): the old console's 新手指引 merged in, in today's words.
+  const sections = [
     {
-      title: '1 · 先看懂三个词',
+      title: '这个平台在做什么',
       body: [
-        '应用 = 要测的系统（Compass 有 Web 和 Electron 两个 surface）。',
-        '套件 = 一组用例怎么跑（cypress / playwright-electron、在哪台机器上）。',
-        '计划 = 一次可重复的执行（选套件 + profile + 轨道 functional/demo）。'
+        '它替你反复执行测试，把结果、报告和录像留下来，不用每次手动点一遍页面。',
+        'Agent 帮你写用例、起草测试代码、读执行结果；结论和放行仍然由人决定。'
       ]
     },
     {
-      title: '2 · 跑第一次',
+      title: '几个词',
       body: [
-        '到「测试中心」挑一个计划，点「创建测试工作流」。',
-        '回到任务工作台，核对 tests_run 的参数，点确认。',
-        '拿到 run ID，不代表通过——要去看它最后是什么状态。'
+        '项目 —— 要测的系统，比如罗盘。',
+        '用例库 —— 要验证的事，比如「未登录访问首页会被带到登录页」。在界面上直接写，不用写代码。',
+        '执行方式 —— 测试怎么跑：用什么引擎、代码从哪里来、执行什么命令。由管理员在项目「设置」里建。',
+        '执行计划 —— 跑什么、在哪跑、什么时候跑。可以立即执行，验证过后也可以定时。',
+        '执行 —— 计划跑的一次，产生结果、报告和录像。执行机是真正跑测试的那台电脑。',
+        '测试任务 —— 一次有目标的测试工作：Agent 帮你整理用例、起草测试实现，再选一个执行计划派发。'
       ]
     },
     {
-      title: '3 · 读结果，而不是猜',
+      title: '新项目：从登记到每晚自动跑',
       body: [
-        'passed / failed / flaky / blocked / expired / cancelled 都是不同的事。',
-        'blocked 常常是环境或执行机问题，不是产品缺陷。',
-        'demo 轨道会录像，functional 轨道追求快和稳定。'
+        '1. 在「项目与任务」登记项目；有验收包的产品（例如罗盘）直接「从验收包创建」。',
+        '2. 管理员在项目「设置」里建执行方式（有模板）；需要账号密码的，存成只写不读的密钥。',
+        '3. 在「用例库」写下要验证什么（建议，但不是必须）。',
+        '4. 在「执行计划」新建计划：新计划先是手动的。',
+        '5. 确认有执行机能接手：接入另一台电脑，或在桌面端托管本机。',
+        '6. 立即执行，在执行详情里确认结果是你期望的。',
+        '7. 验证通过后，再回到计划上开启定时。项目页顶部的「上手清单」会按真实状态打勾，并带你去下一步。'
       ]
     },
     {
-      title: '4 · 让 Agent 帮你读',
+      title: '最常做的三件事',
       body: [
-        '「结果分析师」把一次执行拆到用例与步骤级。',
-        '「失败定级员」给出产品缺陷 / 环境受阻 / 用例问题 / flaky 四选一，并要求给证据。',
-        'Agent 不会替你放行发布，也不能改测试结论。'
+        '写用例：项目 → 用例库 → 新建。写清楚每一步做什么、期望看到什么。',
+        '跑测试：项目 → 执行计划 → 立即执行。跑完点进执行详情看结果。',
+        '看失败：执行详情里失败的用例会自动展开，点步骤右边的时间，录像就跳到那一刻。'
       ]
     },
     {
-      title: '5 · 卡住了怎么办',
+      title: '三个容易误解的地方',
       body: [
-        '一直排队 → 去「出网与通道」和完整管理台的执行机页，先确认有没有在线执行机。',
-        'Agent 说受阻 → 看「工具与边界」，多半是工具没被允许。',
-        '模型不可用 → 「模型 Provider」做一次连通性检查。'
+        '「受阻」不等于「失败」：受阻是环境问题——地址打不开、浏览器起不来、一条用例都没跑。它永远不算通过，但也不说明产品有缺陷。',
+        '「未执行」很重要：用例登记了却没跑到，报告会单独标出来，否则删掉一条失败用例就能让结果变绿。',
+        '覆盖率有不同的分母：报告里分开列，不能互相替代，也都不等于产品需求覆盖率。'
+      ]
+    },
+    {
+      title: '卡住了怎么办',
+      body: [
+        '一直「等待执行机」→ 到「执行机与工位」接入一台电脑，或在桌面端托管本机执行机并启动。',
+        '执行「受阻」→ 打开执行详情，看流水卡在哪一段（检出、装依赖、启动、执行……）和详细输出。',
+        'Agent 说受阻 → 看「工具与边界」，多半是工具没被允许；模型不可用 → 「模型 Provider」做一次连通性检查。',
+        '旧管理台已改为只读，只用来查看历史；新建和修改都在这里。'
       ]
     }
   ]
   mount.append(
     h('p', {
       class: 'qp-body-2 qp-muted',
-      text: '给第一次用 MX Rig 的测试同学。按顺序做一遍，大约十分钟。'
+      text: '给第一次用 MX Rig 的同学。五到十分钟读完，够你独立跑通一次测试。'
     }),
     h(
       'section',
@@ -3525,27 +4059,40 @@ export async function guide(ctx, mount) {
       h('h2', { class: 'qp-heading-2', text: '想要一步步带着走？' }),
       h('p', {
         class: 'qp-body-2 qp-soft',
-        text: '这一页是一次读完的版本。「系统」把同样的内容拆成按版本更新的任务，每一项都按平台真实状态判定完成，并能直接跳到该去的页面。'
+        text: '这一页是一次读完的版本。每个项目页顶部有「上手清单」，按项目真实状态判断下一步；「系统」把平台功能拆成按版本更新的任务，也能直接跳到该去的页面。'
       }),
       h(
         'div',
         { class: 'qp-row' },
         h('button', {
           class: 'qp-button qp-button--primary qp-button--sm',
+          text: '去项目与任务',
+          onclick: () => ctx.go('projects')
+        }),
+        h('button', {
+          class: 'qp-button qp-button--outline qp-button--sm',
           text: '打开系统 ⬢',
           onclick: () => ctx.go('system')
         }),
         h('button', {
-          class: 'qp-button qp-button--outline qp-button--sm',
+          class: 'qp-button qp-button--ghost qp-button--sm',
           text: '开启常驻教学面板',
           onclick: () => ctx.toggleHud(true)
         })
       )
     ),
-    ...steps.map((step) =>
+    panel(
+      '演示一遍',
+      h('p', {
+        class: 'qp-body-2 qp-soft',
+        text: '在你自己的窗口里，光标带着你走一遍：可以跟着按，也可以看它替你按。演示只做到正式流程之前，最后一步由你来按；你在别处点一下或按 Esc 它就暂停。不想动手，先看录像也行。'
+      }),
+      tourEntries(ctx, { videos })
+    ),
+    ...sections.map((section) =>
       panel(
-        step.title,
-        h('ul', { class: 'qp-body-2 qp-soft' }, ...step.body.map((line) => h('li', { text: line })))
+        section.title,
+        h('ul', { class: 'qp-body-2 qp-soft' }, ...section.body.map((line) => h('li', { text: line })))
       )
     ),
     panel(
@@ -3812,7 +4359,7 @@ export async function settings(ctx, mount) {
         production,
         h('span', {
           class: 'qp-field__hint',
-          text: '飞行计划的预检会拒绝指向这些主机的测试计划；浏览器工位即使 origin 被误加入也不会打开它们。'
+          text: '飞行计划的预检会拒绝指向这些主机的执行计划；浏览器工位即使 origin 被误加入也不会打开它们。'
         })
       ),
       h(
@@ -4117,7 +4664,7 @@ async function localRunnerPanel(ctx) {
     rows.push(
       h('p', {
         class: 'qp-body-2 qp-muted',
-        text: '把这台电脑接入为执行机后，派给「任意执行机」或指定给它的测试计划会在这里运行（Cypress / Playwright / Electron）。注册使用你当前的登录，执行机凭据只保存在这台电脑上。'
+        text: '把这台电脑接入为执行机后，派给「任意执行机」或指定给它的执行计划会在这里运行（Cypress / Playwright / Electron）。注册使用你当前的登录，执行机凭据只保存在这台电脑上。'
       }),
       h(
         'div',
@@ -4328,8 +4875,8 @@ async function electronAppsPanel(ctx) {
  *
  * Deliberately its own panel, next to the test numbers and never inside them:
  * a finding is a judgement and an assertion covers only the pages an Agent
- * walked. Lists are present only for members who can run missions; a read-only
- * member sees the counts.
+ * walked. Lists contain only the caller's readable missions; a read-only
+ * member sees the counts. A readable task may belong to another workstation.
  */
 function agentSection(ctx, stats) {
   if (!stats) return null
@@ -4385,7 +4932,7 @@ function agentSection(ctx, stats) {
             ctx.go('missions')
           }
         })
-      : h('span', { class: 'qp-caption qp-muted', text: '他人任务' })
+      : h('span', { class: 'qp-caption qp-muted', text: '当前工作台未载入' })
   if (stats.findings.recent.length)
     body.push(
       h('h3', { class: 'qp-body-1 qp-body-1--semibold', text: '最近的结论' }),
@@ -4456,17 +5003,17 @@ function agentSection(ctx, stats) {
   return panel('Agent 结论与页面断言', ...body)
 }
 
-export const LENSES = {
-  // `short` is what fits the 256px rail; `title` is what a report header says.
-  tester: { short: '测试', title: '测试工程师', hint: '先看要我处理的：待确认、失败、受阻' },
-  developer: { short: '开发', title: '开发', hint: '先看哪些用例在挂、挂在哪一步' },
-  lead: { short: '负责人', title: '负责人 / PM', hint: '先看趋势、覆盖与风险，可以直接汇报' }
+export const REPORT_VIEWS = {
+  summary: { title: '摘要', order: ['trend', 'risks', 'agents', 'coverage', 'cases'] },
+  risks: { title: '风险', order: ['risks', 'agents', 'cases', 'trend', 'coverage'] },
+  cases: { title: '用例', order: ['cases', 'agents', 'risks', 'trend', 'coverage'] },
+  coverage: { title: '覆盖', order: ['coverage', 'risks', 'agents', 'cases', 'trend'] }
 }
 
 export async function report(ctx, mount) {
   const { insights, sampledRuns } = await ctx.api('insights', { window: ctx.state.window })
   ctx.state.insights = insights
-  const lens = ctx.state.lens
+  const reportView = REPORT_VIEWS[ctx.state.reportView] ?? REPORT_VIEWS.summary
   const v = insights.verdicts
 
   const windowPicker = h(
@@ -4483,6 +5030,13 @@ export async function report(ctx, mount) {
   )
 
   mount.append(
+    h('div', { class: 'rig-report-focus rig-print-hide' },
+    h('div', { class: 'qp-segmented', role: 'group', 'aria-label': '报告重点' },
+      ...Object.entries(REPORT_VIEWS).map(([key, meta]) => h('button', {
+        class: `qp-segmented__item ${ctx.state.reportView === key ? 'is-active' : ''}`,
+        type: 'button', text: meta.title, 'aria-pressed': ctx.state.reportView === key ? 'true' : 'false',
+        onclick: () => ctx.setReportView(key)
+      })))),
     h(
       'div',
       { class: 'qp-row qp-row--between rig-print-hide' },
@@ -4519,7 +5073,7 @@ export async function report(ctx, mount) {
       }),
       h('p', {
         class: 'qp-body-2 qp-muted',
-        text: `生成于 ${new Date(insights.window.to).toLocaleString()} · 视角：${LENSES[lens].title}`
+        text: `生成于 ${new Date(insights.window.to).toLocaleString()} · 重点：${reportView.title}`
       })
     ),
     h(
@@ -4623,7 +5177,7 @@ export async function report(ctx, mount) {
         h('dd', {
           text: `${insights.coverage.byState['manual-only']} / ${insights.coverage.byState['blocked-prerequisite']}`
         }),
-        h('dt', { text: '应用 · 测试计划' }),
+        h('dt', { text: '应用 · 执行计划' }),
         h('dd', { text: `${insights.assets.apps} · ${insights.assets.tasks}` }),
         h('dt', { text: '执行机' }),
         h('dd', { text: `在线 ${insights.fleet.online} / 已注册 ${insights.fleet.registered}` }),
@@ -4635,13 +5189,7 @@ export async function report(ctx, mount) {
     )
   }
 
-  // The same numbers, ordered by what this reader opens the page for.
-  const order = {
-    tester: ['risks', 'agents', 'cases', 'trend', 'coverage'],
-    developer: ['cases', 'agents', 'risks', 'trend', 'coverage'],
-    lead: ['trend', 'risks', 'agents', 'coverage', 'cases']
-  }[lens]
-  for (const key of order) if (sections[key]) mount.append(sections[key])
+  for (const key of reportView.order) if (sections[key]) mount.append(sections[key])
 
   mount.append(
     panel(
@@ -4708,6 +5256,23 @@ function questCard(ctx, quest, { compact = false } = {}) {
         onclick: () => ctx.go(jump)
       })
     )
+  // The first of the quest's tours this person can take here (docs/24).
+  const takeable = new Map(
+    availableTours({ native: Boolean(ctx.state.native), role: ctx.state.principal?.role })
+      .filter(({ blocked }) => !blocked)
+      .map(({ tour }) => [tour.id, tour])
+  )
+  const tour = (quest.tour ?? []).map((id) => takeable.get(id)).find(Boolean)
+  if (tour && quest.status === 'open')
+    actions.append(
+      h('button', {
+        class: 'qp-button qp-button--ghost qp-button--sm',
+        text: '演示一遍',
+        title: tour.title,
+        'data-quest-tour': quest.id,
+        onclick: () => startTour(ctx, tour.id)
+      })
+    )
   if (quest.status === 'claimable')
     actions.append(
       h('button', {
@@ -4770,6 +5335,91 @@ function questCard(ctx, quest, { compact = false } = {}) {
  * Deliberately one quest at a time. A panel that lists everything is a second
  * navigation menu; this one answers "what now" and gets out of the way.
  */
+/** 演示一遍 (docs/24): the tour runner is only loaded when one is started. */
+export function startTour(ctx, id) {
+  return ctx.run(async () => {
+    const { runTour } = await import('./tour.js')
+    runTour(ctx, id)
+  })
+}
+
+/**
+ * A tour's recording, when one was published: anyone can watch it, also where
+ * the tour itself cannot be taken (a desktop tour on the web).
+ */
+function tourVideo(ctx, video) {
+  if (!video) return null
+  const current = ctx.state.system?.version
+  const minutes = Math.max(1, Math.round(video.durationMs / 60_000))
+  return h(
+    'figure',
+    { class: 'rig-tour-video', 'data-tour-video': video.id },
+    h('video', {
+      controls: true,
+      preload: 'metadata',
+      // The desktop page holds no credential: its main process fetches the file.
+      src: ctx.state.native ? `rig-media://tour/${video.id}.webm` : `/api/rig/v1/tour-videos/${video.id}.webm`
+    }),
+    h('figcaption', {
+      class: 'qp-caption qp-muted',
+      text: [
+        `录像 · 约 ${minutes} 分钟 · ${video.version} 版界面，录于 ${new Date(video.recordedAt).toLocaleDateString()}`,
+        current && current !== video.version ? `（现在是 ${current}，界面可能已经变了）` : ''
+      ].join('')
+    })
+  )
+}
+
+/** Start buttons for the tours this person can take here; `compact` lists only those. */
+export function tourEntries(ctx, { compact = false, only = null, videos = [] } = {}) {
+  const rows = availableTours({ native: Boolean(ctx.state.native), role: ctx.state.principal?.role }).filter(
+    ({ tour, blocked }) => (!only || only.includes(tour.id)) && (!compact || !blocked)
+  )
+  if (!rows.length) return null
+  if (compact)
+    return h(
+      'div',
+      { class: 'rig-hud__tours' },
+      h('p', { class: 'qp-caption qp-muted', text: '演示一遍' }),
+      h(
+        'div',
+        { class: 'qp-row' },
+        ...rows.map(({ tour }) =>
+          h('button', {
+            type: 'button',
+            class: 'qp-button qp-button--outline qp-button--sm',
+            'data-tour-start': tour.id,
+            text: tour.title.split('：')[0],
+            title: tour.summary,
+            onclick: () => startTour(ctx, tour.id)
+          })
+        )
+      )
+    )
+  return h(
+    'div',
+    { class: 'rig-tour-list' },
+    ...rows.map(({ tour, blocked }) =>
+      h(
+        'article',
+        { class: 'qp-panel qp-card rig-section', 'data-tour-card': tour.id },
+        h('strong', { class: 'qp-body-1 qp-body-1--semibold', text: tour.title }),
+        h('p', { class: 'qp-body-2 qp-soft', text: tour.summary }),
+        tourVideo(ctx, videos.find((entry) => entry.id === tour.id)),
+        blocked
+          ? h('p', { class: 'qp-caption qp-muted', text: blocked })
+          : h('button', {
+              type: 'button',
+              class: 'qp-button qp-button--primary qp-button--sm',
+              'data-tour-start': tour.id,
+              text: '开始',
+              onclick: () => startTour(ctx, tour.id)
+            })
+      )
+    )
+  )
+}
+
 export function hudPanel(ctx) {
   const close = h('button', {
     class: 'qp-button qp-button--ghost qp-button--sm',
@@ -4782,7 +5432,8 @@ export function hudPanel(ctx) {
       'div',
       { class: 'rig-hud__inner' },
       h('div', { class: 'rig-hud__head' }, h('strong', { text: '⬢ 系统' }), close),
-      h('p', { class: 'qp-body-2 qp-muted', text: '系统状态还没有取到。刷新页面或稍后再看。' })
+      h('p', { class: 'qp-body-2 qp-muted', text: '系统状态还没有取到。刷新页面或稍后再看。' }),
+      tourEntries(ctx, { compact: true })
     )
   const quest =
     system.quests.find((entry) => entry.id === system.next) ??
@@ -4823,6 +5474,7 @@ export function hudPanel(ctx) {
           class: 'qp-body-2 qp-soft',
           text: '当前没有待完成的任务。下一个版本会发布新的系统任务。'
         }),
+    tourEntries(ctx, { compact: true }),
     h(
       'div',
       { class: 'qp-row' },
@@ -5077,7 +5729,7 @@ export async function procedures(ctx, mount) {
                             entry.lastRun.failedStep !== null
                               ? ` · 停在第 ${entry.lastRun.failedStep + 1} 步`
                               : ''
-                          }`
+                          }${entry.lastRun.signals ? ` · 自动检查项 ${entry.lastRun.signals} 个线索` : ''}`
                         })
                       )
                     : h('span', { class: 'qp-caption qp-muted', text: '还没有试车' })
@@ -5589,6 +6241,38 @@ async function procedureDetail(ctx, id) {
             },
             { title: '结果', cell: (run) => verdictTag(run.verdict) },
             {
+              // 自动检查项: leads read during the replay, beside its verdict.
+              title: '自动检查项',
+              cell: (run) => {
+                const found = run.signals ?? []
+                if (!found.length)
+                  return h('span', { class: 'qp-caption qp-muted', text: run.metrics ? '没有发现问题' : '—' })
+                const worst = found.some((signal) => signal.severity === 'error')
+                  ? 'danger'
+                  : found.some((signal) => signal.severity === 'warn')
+                    ? 'warning'
+                    : 'info'
+                const details = h('details', { class: 'qp-caption' })
+                details.append(
+                  h('summary', {}, tone(`${found.length} 个线索`, worst)),
+                  h(
+                    'ul',
+                    { class: 'rig-step-results' },
+                    ...found.map((signal) =>
+                      h('li', {
+                        'data-status': signal.severity === 'error' ? 'failed' : 'skipped',
+                        text: `${signal.step !== null && signal.step !== undefined ? `第 ${signal.step + 1} 步 · ` : ''}${signal.label}：${signal.title}${
+                          signal.count > 1 ? `（${signal.count} 次）` : ''
+                        }`
+                      })
+                    )
+                  ),
+                  h('small', { class: 'qp-muted', text: '线索不改变试车结果；需要人判断是否是问题。' })
+                )
+                return details
+              }
+            },
+            {
               title: '位置',
               cell: (run) => {
                 const cell = h('div', { class: 'qp-caption' })
@@ -5637,8 +6321,8 @@ async function procedureDetail(ctx, id) {
                   run.kernelRunId
                     ? h('button', {
                         class: 'qp-button qp-button--ghost qp-button--sm',
-                        text: '执行记录',
-                        onclick: () => ctx.openPath(`/test-center/#/runs/${run.kernelRunId}`)
+                        text: '执行报告',
+                        onclick: () => ctx.openPath(`/api/v1/runs/${run.kernelRunId}/report`)
                       })
                     : null,
                   writable &&
@@ -5810,7 +6494,9 @@ function proposalReview(ctx, procedure, proposal) {
 /** What a mission produced toward the test assets: drafts, a capture, a proposal. */
 function authoringPanel(ctx, row) {
   const parts = []
-  if (row.caseDrafts?.length) parts.push(caseDraftsCard(ctx, row))
+  if (row.caseDrafts?.length && !row.workbench) parts.push(caseDraftsCard(ctx, row))
+  if (row.caseDrafts?.length && row.workbench)
+    parts.push(h('p', { class: 'qp-caption qp-muted', text: 'Rig 已提出用例草稿。切到本任务的“用例”视图审阅、修正并采纳。' }))
   if (row.proposal) parts.push(repairCard(ctx, row))
   const capturable =
     row.status === 'completed' &&

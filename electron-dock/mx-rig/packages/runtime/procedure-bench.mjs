@@ -14,7 +14,7 @@
 
 import { randomBytes } from 'node:crypto'
 import { RigError } from '../contracts/index.mjs'
-import { ProcedurePlayer, describeStep, pickBody, procedureFromMission } from './procedure.mjs'
+import { ProcedurePlayer, describeStep, pickBody, procedureFromMission, reportRun } from './procedure.mjs'
 
 const runName = (kind) => `${kind}-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`
 const SETTLE_POLL_MS = 1_000
@@ -60,9 +60,10 @@ export class ProcedureBench {
       await this.browser.close()
       try {
         const result = await this.player.run(procedure, { policy, runId: runName('fire') })
-        return await this.client.request(`/api/rig/v1/procedures/${encodeURIComponent(id)}/runs`, {
-          run: { ...result, station: 'desktop' }
-        })
+        return await reportRun(
+          (run) => this.client.request(`/api/rig/v1/procedures/${encodeURIComponent(id)}/runs`, { run }),
+          { ...result, station: 'desktop' }
+        )
       } finally {
         await this.browser.close()
       }
@@ -306,19 +307,18 @@ export class ProcedureBench {
         await this.browser.close()
       }
     }
-    const posted = await this.client.request(
-      `/api/rig/v1/procedures/${encodeURIComponent(base.id)}/proposals`,
-      {
+    const send = (checked) =>
+      this.client.request(`/api/rig/v1/procedures/${encodeURIComponent(base.id)}/proposals`, {
         proposal: {
           baseRevision: base.revision,
           verdict: row.proposal.verdict,
           rationale: row.proposal.rationale,
           steps: row.proposal.steps,
           missionId,
-          validation
+          validation: checked
         }
-      }
-    )
+      })
+    const posted = validation ? await reportRun(send, validation) : await send(null)
     row.proposalPosted = true
     await this.runtime.event(
       row,

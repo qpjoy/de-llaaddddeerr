@@ -44,10 +44,12 @@ export const SIGNALS = [
   'opened_tools',
   'opened_egress',
   'dispatch_planned',
-  'lens_switched',
+  'lens_switched', // Historical completion credit.
+  'report_view_changed',
   'hud_opened',
   'desktop_login',
-  'saw_stream'
+  'saw_stream',
+  'tour_followed' // 演示一遍 taken in 跟做 to its last step (docs/24).
 ]
 
 export const LEVELS = [
@@ -111,36 +113,38 @@ export const QUESTS = [
     title: '接入一个被测应用',
     why: '测试资产挂在应用上。没有应用，套件、用例和计划都没有地方落。',
     steps: [
-      '右上角「完整测试管理台 ↗」打开同 origin 的测试中心。',
-      '用继承下来的「接入 / 对齐 Compass」入口，一次建好 Compass Web 与 Compass Electron 两条线。',
-      '回到 Rig 的「测试中心」，确认应用列表里能看到它们。'
+      '管理员在「项目与任务」→「接入新项目」登记：名称、本机目录或 Git 地址、被测端。',
+      '有验收包的产品（例如罗盘）用「从验收包创建」，执行方式、用例库和执行计划一次建好。',
+      '确认项目选择框里能看到它。不熟悉的话，「演示一遍」会带着你走。'
     ],
-    target: { view: 'tests' },
+    target: { view: 'projects' },
+    tour: ['new-project', 'compass-web-smoke'],
     reward: { xp: 60 },
     since: '0.6',
     evidence: 'platform',
     verify: (facts) => ({
       done: facts.apps > 0,
-      detail: count(facts.apps, '个应用', '测试中心还没有应用')
+      detail: count(facts.apps, '个项目', '还没有项目')
     })
   },
   {
     id: 'build-plan',
     chapter: 'ignition',
-    title: '建一个可重复执行的测试计划',
+    title: '建一个可重复执行的执行计划',
     why: '计划 = 套件 + profile + 轨道。它是唯一可以被派发、被定时、被编排引用的东西。',
     steps: [
-      '在测试管理台给某个套件建计划，选 functional（快）或 demo（录像）。',
-      '回到 Rig 的「测试中心」，计划会出现在可派发列表里。',
+      '在项目的「执行计划」页签「新建执行计划」：选执行方式、填被测地址。新计划先是手动的。',
+      '测试任务里也可以一步建好：「执行与结果」→「建立本机执行计划」。',
       '登记不会自动跑测试——这一步只是把"怎么跑"写下来。'
     ],
-    target: { view: 'tests' },
+    target: { view: 'projects' },
+    tour: ['new-project', 'compass-web-smoke'],
     reward: { xp: 60 },
     since: '0.6',
     evidence: 'platform',
     verify: (facts) => ({
       done: facts.tasks > 0,
-      detail: count(facts.tasks, '个测试计划', '还没有测试计划')
+      detail: count(facts.tasks, '个执行计划', '还没有执行计划')
     })
   },
   {
@@ -149,11 +153,11 @@ export const QUESTS = [
     title: '让至少一台执行机在线',
     why: '没有在线执行机时，派发只会产生一条永远排队的 Run。这不是测试失败，是环境没起来。',
     steps: [
-      '用迁入的 CLI 在目标机器上注册执行机（`mxt-runner`），或部署 K8s Job 执行机。',
-      '在测试管理台的执行机页确认它在线。',
-      '回到总览，「在线执行机」应该不再是 0。'
+      '桌面端：项目页「上手清单」里「在本机托管并启动执行机」一步完成。',
+      '其他电脑：「执行机与工位」→ 接入另一台电脑，按提示注册。',
+      '在「执行机与工位」确认它在线。'
     ],
-    target: { view: 'overview' },
+    target: { view: 'runners' },
     reward: { xp: 80 },
     since: '0.6',
     evidence: 'platform',
@@ -170,21 +174,22 @@ export const QUESTS = [
   {
     id: 'first-dispatch',
     chapter: 'ignition',
-    title: '亲手派发一次测试，并确认参数',
-    why: '派发是写动作。系统会把工具名和完整参数摊开等你确认——这一步就是感受那个暂停点。',
+    title: '亲手发起一次执行',
+    why: '执行是写动作，第一次要由你自己按：演示带你走到「立即执行」就停下，那一下算你的，别人替你按的不算。',
     steps: [
-      '「测试中心」里选一个计划，点「创建测试工作流」。',
-      '到「任务工作台」核对 tests_run 的参数，点「确认执行」。',
-      '拿到真实 Run ID。派发成功 ≠ 测试通过。'
+      '在项目「执行计划」页签对一个计划点「立即执行」；或者在测试任务的「执行与结果」里预览后派发。',
+      'Agent 会话里派发测试工作流也算：核对 tests_run 的参数，点「确认执行」。',
+      '拿到执行编号。派发成功 ≠ 测试通过。'
     ],
-    target: { view: 'tests' },
+    target: { view: 'projects' },
+    tour: ['compass-web-smoke', 'new-project'],
     reward: { xp: 100 },
     since: '0.6',
     evidence: 'platform',
-    verify: (facts) => ({
-      done: facts.dispatchedMissions > 0,
-      detail: count(facts.dispatchedMissions, '次派发（带真实 Run ID）', '你还没有派发过测试')
-    })
+    verify: (facts) => {
+      const mine = facts.myRuns + facts.dispatchedMissions
+      return { done: mine > 0, detail: count(mine, '次由你发起的执行', '你还没有亲手发起过执行') }
+    }
   },
   {
     id: 'first-verdict',
@@ -192,11 +197,12 @@ export const QUESTS = [
     title: '拿到第一个真实结论',
     why: 'passed / failed / flaky 才进通过率；blocked 不进分子也不进分母。第一次看见这套口径最好是在自己的数据上。',
     steps: [
-      '等执行结束，在总览的「最近执行」里看它最后是什么状态。',
-      '点「看报告 ↗」打开这次执行的报告。',
+      '等执行结束，打开它的执行详情，看它最后是什么状态。',
+      '失败的用例会自动展开：错误、步骤、截图和录像都在里面。',
       '如果是 blocked，先看执行机和环境，不要当成产品缺陷。'
     ],
-    target: { view: 'overview' },
+    target: { view: 'projects' },
+    tour: ['read-a-run'],
     reward: { xp: 80 },
     since: '0.6',
     evidence: 'platform',
@@ -218,11 +224,12 @@ export const QUESTS = [
     title: '打开一次执行的完整报告',
     why: '报告里有用例级结果、失败步骤和录像时刻。它是唯一能回答"到底哪一步坏了"的地方。',
     steps: [
-      '总览「最近执行」任一行点「看报告 ↗」。',
+      '任一次执行的执行详情里点「完整报告」。',
       '找到失败用例，看它停在哪一步。',
-      'demo 轨道有录像；functional 轨道追求快和稳定。'
+      '要发给项目外的人，用「对外版（脱敏）」。'
     ],
-    target: { view: 'overview' },
+    target: { view: 'projects' },
+    tour: ['read-a-run'],
     reward: { xp: 50 },
     since: '0.6',
     evidence: 'signal',
@@ -318,7 +325,7 @@ export const QUESTS = [
     why: 'Agent 是副驾：它读 run、用例、产物，给带依据的判断。它不会替你宣布测试通过。',
     steps: [
       '「Agent 市场」里选「结果分析师」或「失败定级员」。',
-      '在任务工作台描述目标，或直接用它的示例问题。',
+      '在「Agent 会话」描述目标，或直接用它的示例问题。',
       '每一步只允许一个工具调用；工具集是它的意图 ∩ Internal 允许列表。'
     ],
     target: { view: 'agents' },
@@ -414,7 +421,7 @@ export const QUESTS = [
     title: '跑一条内置编排',
     why: '编排把"先查执行机，有人接才派发"这类判断固定下来，不再依赖某个人记得先看一眼。',
     steps: [
-      '「编排中心」选「有人接才派发」，填测试计划。',
+      '「编排中心」选「有人接才派发」，填执行计划。',
       '它会先确认有在线执行机，再进入派发确认。',
       '没有执行机就直接说清楚，不制造一条永远排队的 Run。'
     ],
@@ -515,7 +522,7 @@ export const QUESTS = [
     title: '用一句话下一个任务',
     why: '对话式下任务不是让模型替你决定。系统把一句话解析成候选派发，写清匹配到什么、还缺什么，你确认后才执行。',
     steps: [
-      '在任务工作台的输入框写一句话，例如「跑一下 Compass Electron 的登录验收」。',
+      '在「Agent 会话」的输入框写一句话，例如「跑一下 Compass Electron 的登录验收」。',
       '点「解析成任务」，看它给出的候选、依据与缺失项。',
       '解析不调用模型；确认前什么都不会发生。'
     ],
@@ -533,16 +540,16 @@ export const QUESTS = [
   {
     id: 'try-lenses',
     chapter: 'side',
-    title: '换一次视角',
-    why: '视角只改变排版顺序，不改变任何人的权限。负责人先看趋势，测试先看要处理的。',
-    steps: ['侧栏顶部切换 测试 / 开发 / 负责人。', '看总览和质量报告的区块顺序确实变了。'],
-    target: { view: 'overview' },
+    title: '选择报告重点',
+    why: '按当前要回答的问题查看摘要、风险、用例或覆盖，不影响账号权限。',
+    steps: ['打开质量与资产中的质量报告。', '切换报告重点，查看对应的区块。'],
+    target: { view: 'report' },
     reward: { xp: 30 },
     since: '0.6',
     evidence: 'signal',
     verify: (facts) => ({
-      done: Boolean(facts.signals.lens_switched),
-      detail: facts.signals.lens_switched ? '已切换过视角' : '还没有换过视角'
+      done: Boolean(facts.signals.report_view_changed || facts.signals.lens_switched),
+      detail: facts.signals.report_view_changed || facts.signals.lens_switched ? '已完成（包含旧版视角任务）' : '还没有选择过报告重点'
     })
   },
   {
@@ -561,12 +568,32 @@ export const QUESTS = [
     })
   },
   {
+    id: 'follow-a-tour',
+    chapter: 'side',
+    title: '跟着演示亲手走一遍',
+    why: '演示指着，你来按：第一次就在自己的界面上找到每一个按钮。「演示」和「快速准备」替你按，不算——看别人点不如自己点记得住。',
+    steps: [
+      '在「⬢ 系统」面板或「新手引导」里选一个关卡，选「跟做」。',
+      '按高亮的地方，一直走到最后一步。',
+      '最后一步是正式流程，按不按由你：走到那里就算完成。'
+    ],
+    target: { view: 'guide' },
+    tour: ['new-project', 'read-a-run'],
+    reward: { xp: 40 },
+    since: PRODUCT_VERSION,
+    evidence: 'signal',
+    verify: (facts) => ({
+      done: Boolean(facts.signals.tour_followed),
+      detail: facts.signals.tour_followed ? '已经跟着走完过一个关卡' : '还没有用「跟做」走完过关卡'
+    })
+  },
+  {
     id: 'stop-a-mission',
     chapter: 'side',
     title: '停掉一个跑飞的任务',
     why: '停止只取消 Agent 的后续步骤，不会撤销已经提交的测试或其他外部副作用。知道这条边界比敢按那个按钮更重要。',
     steps: [
-      '在任务工作台对一个进行中的任务点「停止此任务」。',
+      '在「Agent 会话」对一个进行中的任务点「停止此任务」。',
       '看它变成"已取消"，以及事件里那条说明。',
       '已派发的测试要在测试平台那一侧单独取消。'
     ],
@@ -634,9 +661,12 @@ export const QUESTS = [
 export const CHANGELOG = [
   {
     version: PRODUCT_VERSION,
-    at: '2026-09-21',
-    title: '测试工具接口与执行可靠性',
+    at: '2026-10-08',
+    title: '测试工具接口、测试仓库与演示一遍',
     notes: [
+      '新增「演示一遍」：光标在你自己的窗口里带你走一遍（跟做、演示、快速准备），停在正式流程之前，最后一步由你来按。新增支线任务「跟着演示亲手走一遍」。',
+      '「亲手发起一次执行」现在也认你在执行计划上按的「立即执行」；第一章的任务说明改成了工作台里的入口，不再指向旧管理台。',
+      '测试仓库：本机一个项目一个 Git，验证通过的版本发布到服务器，团队执行机可以直接跑已发布版本。',
       '新增独立 MCP 入口，可由 Codex 调用测试查询、派发、等待与取消；所有操作仍受 Internal 策略和账号权限约束。',
       '取消记录区分请求与停止回执，等待超时保留原始执行状态，迟到结果不能覆盖取消状态。',
       '修复模型断流、结论引用自证、统计窗口和只读容器设计资源问题。'
@@ -660,7 +690,7 @@ export const CHANGELOG = [
     title: '系统上线：教学任务、一句话下任务、出网通道切换',
     notes: [
       '新增「系统」页与常驻面板：24 个任务分五章主线加一条支线，进度按平台真实状态判定。',
-      '任务工作台支持一句话解析成候选派发：不调用模型，确认后才执行。',
+      'Agent 会话支持一句话解析成候选派发：不调用模型，确认后才执行。',
       '出网观测从只读观测扩展为可切换通道，只作用于 Rig 自己的模型调用与隔离浏览器。'
     ],
     quests: QUESTS.filter((quest) => quest.since === '0.6').map((quest) => quest.id)
@@ -717,7 +747,8 @@ export function systemFacts({
   runners = [],
   missions = [],
   config = {},
-  signals = {}
+  signals = {},
+  principalId = null
 } = {}) {
   const events = (row) => (Array.isArray(row.events) ? row.events : [])
   const orchestrations = Array.isArray(config.orchestrations) ? config.orchestrations : []
@@ -730,6 +761,8 @@ export function systemFacts({
     judgedRuns: runs.filter((run) => ['passed', 'failed', 'flaky'].includes(run.status)).length,
     blockedRuns: runs.filter((run) => run.status === 'blocked').length,
     dispatchedMissions: missions.filter((row) => Boolean(row.testRunId)).length,
+    // Runs this member started by hand (立即执行, 只重跑这条): personal, like missions.
+    myRuns: principalId ? runs.filter((run) => run.createdBy === principalId && run.trigger === 'manual').length : 0,
     agentAnswers: missions.filter(
       (row) => row.mode === 'agent' && events(row).some((event) => event.kind === 'answer')
     ).length,
@@ -782,6 +815,7 @@ export function evaluateSystem({
       why: quest.why,
       steps: quest.steps,
       target: quest.target,
+      tour: quest.tour ?? [],
       reward: quest.reward,
       since: quest.since,
       evidence: quest.evidence,

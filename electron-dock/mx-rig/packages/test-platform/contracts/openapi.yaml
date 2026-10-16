@@ -5,13 +5,15 @@ info:
   description: |
     内部 e2e 测试平台。两个面：
 
-    - `/api/v1/*` 控制面 —— 人和脚本用。凭据是 mx-launcher 用户 token
-      （登录后由 httpOnly cookie 携带）或服务 admin token。
+    - `/api/v1/*` 控制面 —— 人和脚本用。凭据是 Rig 本地会话、可选 Launcher
+      联邦身份（浏览器由 httpOnly cookie 携带）或服务 admin token。
     - `/runner/v1/*` 执行面 —— 执行机用。两级凭据：runner token 只能认领，
       run token 只能操作自己那一次执行，且随执行结束立即失效。
 
     浏览器无法给 `<video src>` 加 Authorization 头，所以会话放在 cookie 里；
     把 token 塞进查询串会泄漏到访问日志、浏览器历史和 Referer。
+    人员接口按当前项目权限过滤关联资源；不可访问的项目和资源返回 404，
+    可见但无操作权限返回 403。执行机仍是可信部署基础设施，不提供多租户隔离。
 servers:
   - url: /
 security:
@@ -100,8 +102,54 @@ paths:
         "409": { description: 正在对齐，或已有任务指向冲突套件 }
 
   /api/v1/apps:
-    get: { summary: 应用列表, responses: { "200": { description: OK } } }
-    post: { summary: 注册应用（需要 admin）, responses: { "201": { description: 已创建 } } }
+    get: { summary: 当前账号有权查看的应用列表, responses: { "200": { description: OK } } }
+    post:
+      summary: 注册应用（需要 admin）
+      description: |
+        可选 visibility 为 private、members 或 legacy-shared。人员会话默认 private；
+        服务 token 省略此项时默认 legacy-shared，保留旧自动化合同。工作台显式提交 private。
+      responses: { "201": { description: 已创建 } }
+  /api/v1/apps/{app}/access:
+    parameters: [{ name: app, in: path, required: true, schema: { type: string } }]
+    get:
+      summary: 读取项目访问策略及当前用户的有效操作能力
+      description: 返回 access，含 revision、visibility、ownerId、members、canWrite、canManage；成员附 displayName。
+      responses:
+        "200": { description: OK }
+        "404": { description: 项目不存在或不可访问 }
+    post:
+      summary: 原子更新项目成员与范围（需要有效项目 admin）
+      description: |
+        项目角色不超过部署角色。仅所有者可更改已有共享范围；首次修改无所有者的旧项目时，
+        操作者成为所有者。成员必须是有效 Rig 账号，不能重复或包含所有者；private 的成员列表必须为空。
+        提交完整列表，权限版本不符返回 409；成功策略更新与审计同事务保存。不支持转移所有者。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedRevision, visibility, members]
+              properties:
+                expectedRevision: { type: integer, minimum: 0 }
+                visibility: { type: string, enum: [private, members, legacy-shared] }
+                members:
+                  type: array
+                  maxItems: 100
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [principalId, role]
+                    properties:
+                      principalId: { type: string, maxLength: 200 }
+                      role: { type: string, enum: [viewer, operator, admin] }
+      responses:
+        "200": { description: 返回更新后的 access }
+        "400": { description: 策略或成员无效 }
+        "403": { description: 没有成员管理或范围变更权限 }
+        "404": { description: 项目不存在或不可访问 }
+        "409": { description: 权限版本冲突，重新读取并核对后提交 }
   /api/v1/apps/{app}/suites:
     parameters: [{ name: app, in: path, required: true, schema: { type: string } }]
     get: { summary: 套件列表, responses: { "200": { description: OK } } }

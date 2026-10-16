@@ -57,7 +57,7 @@ export function stepLabel(tool, args = {}) {
     case 'browser_handoff':
       return `请你来：${clip(a.reason, 60)}`
     case 'tests_run':
-      return `派发测试计划 ${a.taskId ?? ''}`
+      return `派发执行计划 ${a.taskId ?? ''}`
     case 'tests_result':
     case 'tests_wait':
     case 'tests_case_results':

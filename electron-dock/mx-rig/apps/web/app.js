@@ -1,6 +1,7 @@
 import * as views from './views.js'
 import { h } from './views.js'
 import { live, pushFrame } from './activity.js'
+import { routeAction } from './routes.js'
 
 const $ = (id) => document.getElementById(id)
 const native = Boolean(window.mxRig?.desktop)
@@ -21,10 +22,12 @@ const GET_ROUTES = {
   tasks: '/api/v1/tasks',
   runs: '/api/v1/runs?limit=20',
   apps: '/api/v1/apps',
+  members: '/api/v1/members',
   runners: '/api/v1/runners',
   procedures: '/api/rig/v1/procedures',
   'procedure-tasks': '/api/rig/v1/procedure-tasks',
-  hooks: '/api/rig/v1/hooks'
+  hooks: '/api/rig/v1/hooks',
+  'tour-videos': '/api/rig/v1/tour-videos'
 }
 const POST_ROUTES = {
   login: '/api/rig/v1/login',
@@ -40,6 +43,8 @@ const POST_ROUTES = {
   'system-claim': '/api/rig/v1/system/claim',
   'system-seen': '/api/rig/v1/system/seen',
   start: '/api/rig/v1/missions',
+  'project-create': '/api/v1/apps',
+  'test-task-create': '/api/rig/v1/test-tasks',
   'procedure-create': '/api/rig/v1/procedures',
   'procedure-capture': '/api/rig/v1/procedures:capture',
   'procedure-task-create': '/api/rig/v1/procedure-tasks',
@@ -51,8 +56,15 @@ const MISSION_ACTIONS = ['approve', 'cancel', 'followup']
 
 const PAGES = [
   {
-    label: '工作台',
+    label: '项目与任务',
     items: [
+      {
+        id: 'projects',
+        glyph: '▣',
+        title: '项目与任务',
+        sub: '测试任务、用例库、计划与执行',
+        kicker: 'TEST WORKSPACE'
+      },
       {
         id: 'overview',
         glyph: '◉',
@@ -63,9 +75,9 @@ const PAGES = [
       {
         id: 'missions',
         glyph: '◈',
-        title: '任务工作台',
-        sub: 'Agent 对话与测试工作流',
-        kicker: 'AGENT WORKSPACE'
+        title: 'Agent 会话',
+        sub: '独立的 Agent 对话、测试工作流与编排',
+        kicker: 'AGENT SESSIONS'
       },
       {
         id: 'system',
@@ -89,9 +101,9 @@ const PAGES = [
       {
         id: 'tests',
         glyph: '▤',
-        title: '测试中心',
-        sub: '应用、用例、计划与执行',
-        kicker: 'QUALITY EVIDENCE'
+        title: '执行记录',
+        sub: '全部项目的执行计划与执行',
+        kicker: 'EXECUTIONS'
       },
       {
         id: 'procedures',
@@ -99,6 +111,13 @@ const PAGES = [
         title: '试验规程',
         sub: 'Agent 写、机器跑、失败时修正',
         kicker: 'TEST PROCEDURES'
+      },
+      {
+        id: 'runners',
+        glyph: '⌂',
+        title: '执行机与工位',
+        sub: '接入电脑、本机托管、在线状态',
+        kicker: 'RUNNERS & STATIONS'
       },
       {
         id: 'guide',
@@ -141,6 +160,13 @@ const PAGES = [
         kicker: 'HOOKS'
       },
       {
+        id: 'channels',
+        glyph: '✉',
+        title: '通知渠道',
+        sub: '飞书、企业微信与 Webhook',
+        kicker: 'NOTIFICATIONS'
+      },
+      {
         id: 'tools',
         glyph: '⌘',
         title: '工具与边界',
@@ -160,11 +186,25 @@ const PAGES = [
     label: '管理',
     items: [
       {
+        id: 'members',
+        glyph: '☺',
+        title: '账号与成员',
+        sub: '新建账号、重置密码、停用与权限',
+        kicker: 'ACCOUNTS'
+      },
+      {
         id: 'settings',
         glyph: '⚙',
         title: 'Internal 配置',
         sub: '策略、Provider 与 Agent',
         kicker: 'SOURCE OF TRUTH'
+      },
+      {
+        id: 'audit',
+        glyph: '⌕',
+        title: '审计',
+        sub: '谁在什么时候改了什么',
+        kicker: 'AUDIT TRAIL'
       }
     ]
   }
@@ -192,10 +232,11 @@ const state = {
   mode: 'agent',
   draft: '',
   pendingTask: null,
-  view: 'overview',
-  // Which reader this workspace is arranged for. A view preference only — it
-  // changes the order things appear in, never what anyone is allowed to do.
-  lens: 'tester',
+  view: 'projects',
+  // The run whose detail the current page shows (run-detail.js), or null.
+  runDetail: null,
+  reportView: 'summary',
+  navExpanded: {},
   window: 14,
   insights: null,
   // The system layer: quest states, level, and the floating panel's visibility.
@@ -207,12 +248,12 @@ const state = {
   scroll: {}
 }
 
-const LENS_KEY = 'mx-rig.lens'
+const REPORT_VIEW_KEY = 'mx-rig.report-view'
 const WINDOW_KEY = 'mx-rig.window'
 const HUD_KEY = 'mx-rig.hud'
 try {
-  const savedLens = localStorage.getItem(LENS_KEY)
-  if (savedLens && Object.hasOwn(views.LENSES, savedLens)) state.lens = savedLens
+  const savedView = localStorage.getItem(REPORT_VIEW_KEY)
+  if (savedView && Object.hasOwn(views.REPORT_VIEWS, savedView)) state.reportView = savedView
   const savedWindow = Number(localStorage.getItem(WINDOW_KEY))
   if ([7, 14, 30].includes(savedWindow)) state.window = savedWindow
   state.hud = localStorage.getItem(HUD_KEY) === 'on'
@@ -222,6 +263,31 @@ try {
 
 async function api(action, body) {
   if (native) return window.mxRig.request(action, body)
+  if (action === 'project-access' || action === 'project-access-save') {
+    const { app, ...input } = body
+    const path = `/api/v1/apps/${encodeURIComponent(app)}/access`
+    return action === 'project-access' ? request('GET', path) : request('POST', path, input)
+  }
+  if (['task-implementation', 'task-implementation-save', 'task-implementation-approve'].includes(action)) {
+    const { id, ...input } = body
+    const base = `/api/rig/v1/missions/${encodeURIComponent(id)}/implementation`
+    if (action === 'task-implementation') return request('GET', base + (input.revision ? `?revision=${encodeURIComponent(input.revision)}` : ''))
+    return request('POST', base + (action === 'task-implementation-approve' ? ':approve' : ''), input)
+  }
+  if (['task-executions', 'task-execution-plan', 'task-execution-dispatch'].includes(action)) {
+    const { id, ...input } = body
+    const base = `/api/rig/v1/missions/${encodeURIComponent(id)}/executions`
+    return action === 'task-executions' ? request('GET', base + (input.runId ? `?run=${encodeURIComponent(input.runId)}` : ''))
+      : request('POST', base + (action === 'task-execution-plan' ? ':plan' : ':dispatch'), input)
+  }
+  if (['task-cases', 'task-cases-save', 'task-cases-confirm'].includes(action)) {
+    const base = `/api/rig/v1/missions/${encodeURIComponent(body.id)}/cases`
+    if (action === 'task-cases') return request('GET', base + (body.revision ? `?revision=${encodeURIComponent(body.revision)}` : ''))
+    return request('POST', base + (action === 'task-cases-confirm' ? ':confirm' : ''), {
+      expectedRevision: body.expectedRevision,
+      ...(action === 'task-cases-save' ? { cases: body.cases } : {})
+    })
+  }
   if (action === 'orchestration-graph')
     return request('GET', `/api/rig/v1/graph?orchestration=${encodeURIComponent(body.key)}`)
   if (action === 'insights')
@@ -233,7 +299,9 @@ async function api(action, body) {
     )
   if (action === 'export')
     return request('GET', `/api/rig/v1/missions/${encodeURIComponent(body.id)}/export`)
-  if (action === 'app-cases') return request('GET', `/api/v1/apps/${encodeURIComponent(body.app)}/cases`)
+  // Project and administration actions: one table with the desktop (routes.js).
+  const routed = routeAction(action, body)
+  if (routed) return request(routed.method, routed.path, routed.method === 'GET' || routed.method === 'DELETE' ? undefined : routed.body)
   // 试验规程. Replays and repairs drive a browser, which only the desktop has.
   if (
     action === 'procedure-fire' ||
@@ -320,10 +388,11 @@ const ctx = {
   previewOrchestration,
   saveOrchestration,
   moveNode,
-  setLens,
+  setReportView,
   setWindow,
   copyReport,
   triageCase,
+  analyzeRun,
   signal,
   claimQuest,
   toggleHud,
@@ -342,10 +411,11 @@ function remember(key, value) {
   }
 }
 
-function setLens(lens) {
-  state.lens = lens
-  remember(LENS_KEY, lens)
-  signal('lens_switched')
+function setReportView(view) {
+  if (!Object.hasOwn(views.REPORT_VIEWS, view)) return
+  state.reportView = view
+  remember(REPORT_VIEW_KEY, view)
+  signal('report_view_changed')
   render()
 }
 
@@ -565,6 +635,27 @@ function triageCase(row) {
 }
 
 /**
+ * 让 Agent 分析这次执行 (docs/23 M7c): a finished run handed to the Agent
+ * that grades failures, or to the result analyst when nothing failed, with
+ * the release question asked outright. The draft waits for the person to start it.
+ */
+function analyzeRun(run, { app, task } = {}) {
+  const failing = ['failed', 'blocked', 'flaky'].includes(run.status)
+  state.agentKey = failing ? 'failure-triage' : 'result-analyst'
+  state.mode = 'agent'
+  state.selected = null
+  const source = run.sourceRef?.version ?? run.sourceRef?.ref ?? null
+  state.draft = [
+    `分析执行 ${run.id}（${app?.displayName ?? run.appId ?? '项目'}${task?.name ? `，计划「${task.name}」` : ''}${source ? `，测试版本 ${source}` : ''}）。`,
+    failing
+      ? '逐条看失败和受阻的用例：步骤、截图、录像和执行机日志，判断是产品缺陷、环境受阻、用例问题还是不稳定，附证据。'
+      : '确认每条用例的结论都有证据支撑，指出覆盖不到的地方。',
+    '最后单独给出「能不能上线」的建议和理由；拿不准的写明缺什么证据。只读取，不派发、不取消任何执行。'
+  ].join('\n')
+  go('missions')
+}
+
+/**
  * Pin one node where the author dropped it.
  *
  * Positions live on the draft, so a move is an unsaved edit like any other —
@@ -654,7 +745,6 @@ function renderNav() {
   const nav = $('nav')
   const signature = JSON.stringify([
     state.view,
-    state.lens,
     state.principal?.role,
     state.selected,
     state.missions.map((row) => `${row.id}:${row.status}:${row.goal}`)
@@ -662,56 +752,21 @@ function renderNav() {
   if (signature === navSignature && nav.childElementCount) return
   navSignature = signature
   nav.replaceChildren()
-  nav.append(
-    h('p', { class: 'rig-nav__label', text: '视角' }),
-    // The wrapper is load-bearing. `.qp-segmented` sets `overflow: hidden`,
-    // which zeroes a flex container's automatic minimum size; as a direct grid
-    // item its row then collapses to the two border pixels and the buttons
-    // spill over the nav beneath, unclickable.
-    h(
-      'div',
-      { class: 'rig-nav__lens' },
-      h(
-        'div',
-        { class: 'qp-segmented', role: 'group', 'aria-label': '视角' },
-        ...Object.entries(views.LENSES).map(([key, meta]) =>
-          h('button', {
-            class: `qp-segmented__item ${state.lens === key ? 'is-active' : ''}`,
-            type: 'button',
-            title: `${meta.title} · ${meta.hint}`,
-            text: meta.short,
-            onclick: () => setLens(key)
-          })
-        )
-      )
-    )
-  )
-  for (const group of PAGES) {
-    nav.append(h('p', { class: 'rig-nav__label', text: group.label }))
-    for (const item of group.items) {
-      if (item.id === 'settings' && state.principal?.role !== 'admin') continue
-      nav.append(
-        h(
-          'button',
-          {
-            class: `rig-nav__item ${state.view === item.id ? 'is-active' : ''}`,
-            type: 'button',
-            onclick: () => go(item.id)
-          },
-          h('span', { class: 'rig-nav__glyph', text: item.glyph }),
-          h(
-            'span',
-            {},
-            h('span', { text: item.title }),
-            h('span', { class: 'rig-nav__sub', text: item.sub })
-          ),
-          item.id === 'missions' && state.missions.some((row) => row.status === 'awaiting_approval')
-            ? h('span', { class: 'qp-tag qp-tag--danger', text: '待确认' })
-            : null
-        )
-      )
-    }
+  const pageButton = (id) => {
+    const item = PAGE_BY_ID.get(id)
+    return h('button', {
+      class: `rig-nav__item ${state.view === id ? 'is-active' : ''}`,
+      type: 'button',
+      'data-nav': id,
+      'aria-current': state.view === id ? 'page' : null,
+      onclick: () => {
+        state.runDetail = null
+        go(id)
+      }
+    }, h('span', { class: 'rig-nav__glyph', text: item.glyph }),
+    h('span', {}, h('span', { text: item.title }), h('span', { class: 'rig-nav__sub', text: item.sub })))
   }
+  nav.append(pageButton('projects'))
   nav.append(h('p', { class: 'rig-nav__label', text: '最近任务' }))
   const list = h('div', { class: 'rig-missions' })
   for (const row of state.missions.slice(0, 12))
@@ -723,13 +778,20 @@ function renderNav() {
           type: 'button',
           title: row.goal,
           onclick: () => {
+            if (state.selected === row.id && state.view === 'projects') return
             state.selected = row.id
-            go('missions')
+            if (row.workbench) {
+              state.projectSlug = row.workbench.appSlug
+              state.projectTask = row.id
+              state.projectTab = 'tasks'
+              state.testTab = 'cases'
+              go('projects')
+            } else go('missions')
           }
         },
         h('span', { text: row.goal }),
         h('small', {
-          text: `${row.surface === 'desktop' ? (row.client === 'terminal' ? '终端 · ' : '桌面 · ') : ''}${
+          text: `${row.workbench ? row.workbench.displayName + ' · ' : ''}${row.surface === 'desktop' ? (row.client === 'terminal' ? '终端 · ' : '桌面 · ') : ''}${
             row.mode === 'agent'
               ? 'AGENT'
               : row.mode === 'workflow'
@@ -737,18 +799,43 @@ function renderNav() {
                 : row.flight
                   ? 'FLIGHT'
                   : 'ORCHESTRATION'
-          } · ${row.status}`
+          } · ${views.missionStatusText(row)}`
         })
       )
     )
   nav.append(
     state.missions.length ? list : h('p', { class: 'qp-caption qp-muted', text: '还没有任务' })
   )
+  // docs/21 §4: projects first; quality across projects; capabilities; the
+  // deployment's own administration; help.
+  for (const group of [
+    { id: 'quality', title: '质量', pages: ['overview', 'report'] },
+    { id: 'execution', title: '执行', pages: ['tests', 'procedures', 'runners'] },
+    { id: 'capabilities', title: '能力与配置', pages: ['missions', 'agents', 'providers', 'orchestration', 'hooks', 'channels', 'tools', 'egress'] },
+    { id: 'admin', title: '管理', pages: ['members', 'settings', 'audit'] },
+    { id: 'help', title: '帮助', pages: ['guide', 'system'] }
+  ]) {
+    const adminOnly = new Set(['members', 'settings', 'audit'])
+    const pages = group.pages.filter((id) => !adminOnly.has(id) || state.principal?.role === 'admin')
+    if (!pages.length) continue
+    // Remembered on the click itself: `toggle` fires a task later, and a poll
+    // that redraws the nav in between would rebuild the group closed under
+    // the reader's hand.
+    const summary = h('summary', { text: group.title })
+    summary.onclick = () => { state.navExpanded[group.id] = !details.open }
+    const details = h('details', { class: 'rig-nav__group', 'data-nav-group': group.id }, summary, ...pages.map(pageButton))
+    details.open = pages.includes(state.view) || Boolean(state.navExpanded[group.id])
+    details.ontoggle = () => { state.navExpanded[group.id] = details.open }
+    nav.append(details)
+  }
+
 }
 
 function go(view) {
+  // A run's detail belongs to the page it was opened on.
+  if (view !== state.view) state.runDetail = null
   state.view = view
-  render()
+  return render()
 }
 
 let renderToken = 0
@@ -812,7 +899,11 @@ async function refresh() {
     const { missions } = await api('missions')
     const changed = JSON.stringify(missions) !== JSON.stringify(state.missions)
     state.missions = missions
-    if (changed) await render()
+    // Case forms retain the user's in-progress edits while the Agent updates its transcript.
+    if (changed) {
+      renderNav()
+      if (!(state.view === 'projects' && state.testTab !== 'conversation')) await render()
+    }
   } finally {
     state.polling = false
   }
@@ -826,7 +917,7 @@ async function enter(principal) {
   if (native) api('browser-status').then(showProvision).catch(() => {})
   $('member').textContent = principal.displayName || principal.id || principal.principalId || ''
   $('member-role').textContent =
-    { admin: '管理员', operator: '测试工程师', viewer: '只读' }[principal.role] ??
+    { admin: '管理员', operator: '操作员', viewer: '只读' }[principal.role] ??
     principal.role ??
     ''
   $('surface').textContent = native ? 'DESKTOP · 本地 Runtime' : 'INTERNAL · Web 工作台'
@@ -863,14 +954,62 @@ $('server-field').hidden = !native
 $('private-http-field').hidden = !native
 $('server').required = native
 // The address this build was made for, or the one that worked last time.
+// An asynchronous preference read must not replace what the person has typed.
+let serverEdited = false
+let privateHttpEdited = false
+$('server').addEventListener('input', () => { serverEdited = true })
+$('private-http').addEventListener('change', () => { privateHttpEdited = true })
 if (native)
   api('login-defaults')
     .then((defaults) => {
-      $('server').value = defaults.server
-      $('private-http').checked = defaults.privateHttp === true
+      if (!serverEdited) $('server').value = defaults.server
+      if (!privateHttpEdited) $('private-http').checked = defaults.privateHttp === true
       if (defaults.account && !$('account').value) $('account').value = defaults.account
+      if (defaults.launcher) showNetwork(defaults.launcher)
     })
     .catch(() => {})
+
+/**
+ * Launcher mode (docs/25 §3): the desktop's own product network. Signing in
+ * waits for it; the address is the product's VIP, so there is none to type.
+ */
+const NETWORK_BUSY = new Set(['resolving', 'enrolling', 'applying', 'disconnecting'])
+function showNetwork(snap) {
+  if (!snap) return
+  $('network-panel').hidden = false
+  $('server-field').hidden = true
+  $('private-http-field').hidden = true
+  $('server').required = false
+  if (snap.serverUrl) $('server').value = snap.serverUrl
+  $('login-hint').textContent = '用平台统一账号登录（和 MX-H2I、Hub 是同一个）。账号密码只经 MX Rig 自己的隧道交给服务端，不经过公网。'
+  const status = $('network-status')
+  status.textContent = snap.statusText
+  status.dataset.status = snap.status
+  $('network-message').textContent = snap.message || (snap.status === 'idle' ? '连上内网后才能登录。' : '')
+  $('network-first').hidden = snap.connectedOnce || snap.status !== 'idle'
+  const busy = NETWORK_BUSY.has(snap.status)
+  const connect = $('network-connect')
+  connect.hidden = snap.status === 'ready' || busy
+  connect.textContent = snap.status === 'idle' && !snap.connectedOnce ? '连接内网' : '重新连接'
+  $('network-disconnect').hidden = snap.status !== 'ready'
+  $('login-form').querySelector('button[type=submit]').disabled = snap.status !== 'ready' || snap.serverReachable === false
+  const chip = $('network-chip')
+  chip.hidden = false
+  chip.dataset.status = snap.status
+  chip.textContent = snap.status === 'ready' ? `内网 · ${snap.identity.kind === 'user' ? '用户网络' : '匿名'}` : `内网 · ${snap.statusText}`
+  chip.title = [snap.message, snap.leaseIp ? `本机地址 ${snap.leaseIp}` : null, snap.serviceVip ? `VIP ${snap.serviceVip}` : null].filter(Boolean).join('\n')
+}
+if (native && window.mxRig.onNetwork) window.mxRig.onNetwork(showNetwork)
+$('network-connect').addEventListener('click', () => {
+  $('network-connect').disabled = true
+  api('network-connect')
+    .then(showNetwork)
+    .catch((error) => { $('network-message').textContent = error.message })
+    .finally(() => { $('network-connect').disabled = false })
+})
+$('network-disconnect').addEventListener('click', () => {
+  api('network-disconnect').then(showNetwork).catch((error) => { $('network-message').textContent = error.message })
+})
 
 /**
  * The test browser on first use: nothing to say once it is there; while it
@@ -907,12 +1046,10 @@ function showProvision(info) {
   }
 }
 if (native) window.mxRig.onProvision?.(showProvision)
-$('console-link').hidden = false
-$('console-link').onclick = (event) => {
-  if (!native) return
-  event.preventDefault()
-  openPath('/test-center/')
-}
+// The old test-management console: everything it did is in the workbench
+// now (docs/21 M1–M3), so the desktop no longer offers it. The web keeps a
+// link while the console is being made read-only.
+$('console-link').hidden = native
 // Re-fetch, then redraw. Most pages load their own data during render, but
 // the workbench reads the mission list from state, so a plain redraw there
 // would show exactly what was already on screen.
@@ -922,17 +1059,26 @@ $('refresh').onclick = () =>
     await render()
   })
 $('hud-toggle').onclick = () => toggleHud()
-$('new-mission').onclick = () => {
+$('new-mission').onclick = () => run(async () => {
   state.selected = null
+  state.projectTask = null
   state.draft = ''
-  go('missions')
-}
+  await go('projects')
+  $('test-task-goal')?.focus()
+})
 $('logout').onclick = () =>
   run(async () => {
     await api('logout', {})
     state.principal = null
     state.missions = []
     state.selected = null
+    state.caseEdit = null
+    state.caseImport = ''
+    state.caseHistory = null
+    state.projectTask = null
+    state.testExecution = null
+    state.implementation = null
+    state.projectAccessEdits = {}
     $('login').hidden = false
     $('workspace').hidden = true
   })
@@ -996,7 +1142,7 @@ let ticks = 0
 setInterval(() => {
   if (!state.principal || document.hidden) return
   ticks += 1
-  const busy = state.missions.some((row) => !TERMINAL.has(row.status))
+  const busy = state.missions.some((row) => row.status !== 'draft' && !TERMINAL.has(row.status))
   if (!busy && state.view !== 'missions' && state.view !== 'overview') return
   const streaming = state.view === 'missions' && state.missions.some((row) => row.stream?.text)
   const every = streaming ? 1 : busy ? 4 : 16

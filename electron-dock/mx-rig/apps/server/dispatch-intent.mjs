@@ -175,8 +175,8 @@ export function planDispatch({
     ]
     proposals.push({
       kind: 'workflow',
-      title: best ? `派发测试计划：${best.task.name || best.task.id}` : '派发一个测试计划',
-      goal: sentence || `执行测试计划：${best?.task.name ?? ''}`.trim(),
+      title: best ? `派发执行计划：${best.task.name || best.task.id}` : '派发一个执行计划',
+      goal: sentence || `执行执行计划：${best?.task.name ?? ''}`.trim(),
       body: {
         mode: 'workflow',
         goal: sentence,
@@ -191,7 +191,7 @@ export function planDispatch({
           }))
         : tasks.slice(0, 8).map((task) => ({ id: task.id, label: task.name || task.id })),
       confidence: confident ? 'high' : best ? 'medium' : 'low',
-      blocked: tasks.length ? null : '还没有测试计划可派发；先在测试管理台建计划。',
+      blocked: tasks.length ? null : '还没有执行计划可派发；先在测试管理台建计划。',
       warnings: [...warnings],
       note: '派发是写动作：确认页会显示 tests_run 的完整参数，派发成功不代表测试通过。'
     })
@@ -303,6 +303,6 @@ export function planDispatch({
     verbs: Object.keys(verbs),
     note: proposals.length
       ? '解析不调用模型，也不会执行任何动作：选一个候选并确认后才真正派发。'
-      : '没能把这句话对上任何计划、编排或 Agent。可以直接选一个测试计划，或换成「跑 <计划名>」「分析 <run ID>」这样的说法。'
+      : '没能把这句话对上任何计划、编排或 Agent。可以直接选一个执行计划，或换成「跑 <计划名>」「分析 <run ID>」这样的说法。'
   }
 }

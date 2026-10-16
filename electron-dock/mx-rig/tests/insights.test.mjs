@@ -362,4 +362,23 @@ test('the quality report carries Agent work; a viewer sees counts only', async (
   assert.equal(seen.findings.total, 1)
   assert.deepEqual(seen.findings.recent, [])
   assert.deepEqual(seen.assertions.recentFailures, [])
+
+  // A broad deployment role is not permission to read another member's
+  // Mission. The same boundary applies to report excerpts and direct APIs.
+  for (const role of ['operator', 'admin']) {
+    const account = `other-${role}`
+    await call('/api/v1/members', { account, role, password: 'other-password-1' })
+    const login = await call('/api/rig/v1/native-login', {
+      account, password: 'other-password-1'
+    }, '')
+    assert.equal(login.status, 200)
+    const other = (await call('/api/rig/v1/insights?window=7', undefined, login.body.token))
+      .body.insights.missions
+    assert.equal(other.findings.total, 1, 'deployment statistics remain aggregate')
+    assert.equal(other.assertions.failed, 1)
+    assert.deepEqual(other.findings.recent, [], `${role} cannot read another owner's finding`)
+    assert.deepEqual(other.assertions.recentFailures, [])
+    assert.equal(JSON.stringify(other).includes('保存后没有提示'), false)
+    assert.equal(JSON.stringify(other).includes('已保存'), false)
+  }
 })

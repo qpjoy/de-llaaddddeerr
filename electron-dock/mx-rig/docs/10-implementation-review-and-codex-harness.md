@@ -6,6 +6,8 @@
 
 后续实现更新（2026-09-21）：本文保留初次走读时的事实与缺陷记录。已完成的 MCP 工具入口、有界等待及可靠性修复，以及尚未完成的 standalone/电脑操作能力，见 [工具接口与可靠性改进](11-tool-interface-and-reliability.md)。
 
+后续决策与实现（2026-10-02 索引）：[docs/12](12-self-contained-rig-and-flight-model.md) 已将 standalone 宿主和外部 Agent 引擎调整为远期可选项；Rig 当前使用自有账号与 Runtime，并已增加浏览器/Electron、macOS 原生预览、PG、计量和 [终端工作区](14-terminal-agent.md)。本文的旧缺口与优先级不应直接用于当前排期；新的源码走读和实施顺序见 [docs/19](19-test-workbench-plan.md)。
+
 ## 1. 结论
 
 MX Rig 已经具备一套有实际测试支撑的测试控制面、桌面工作台和受限 Agent Runtime。它最有价值的部分是测试资产、执行机调度、结果语义、证据归档和权限边界。

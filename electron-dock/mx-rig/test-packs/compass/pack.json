@@ -1,0 +1,96 @@
+{
+  "id": "compass",
+  "version": "1.0.0",
+  "title": "罗盘 Compass",
+  "description": "罗盘前端（po-frontend）的验收包：对固定提交的源码快照跑 Web 用例，接口全部由假后端应答；桌面端启动冒烟需在专用测试机上跑。",
+  "app": {
+    "slug": "luopan",
+    "displayName": "罗盘 Compass (po-frontend)",
+    "surfaces": [
+      "web",
+      "electron"
+    ]
+  },
+  "source": {
+    "repoUrl": "https://github.com/mingxiinfo/po-frontend",
+    "ref": "feat/yjj/hdo_v2",
+    "commit": "a4cc5de02177cf67b8a498836151297068d24575",
+    "subdir": "po-frontend"
+  },
+  "suites": [
+    {
+      "slug": "compass-web-snapshot",
+      "displayName": "罗盘 Web · 源码快照 + 假数据",
+      "engine": "playwright",
+      "surface": "web",
+      "runnerKind": "local",
+      "workspace": true,
+      "workingDir": "rig-specs",
+      "targetMode": "self",
+      "command": [
+        "node",
+        "run.mjs"
+      ],
+      "retryPolicy": {
+        "maxAttempts": 1
+      },
+      "writesData": false,
+      "requirements": {
+        "caseSelection": "case-id"
+      }
+    },
+    {
+      "slug": "compass-electron-smoke",
+      "displayName": "罗盘 Electron · 启动冒烟（专用测试机）",
+      "engine": "playwright-electron",
+      "surface": "electron",
+      "runnerKind": "local",
+      "workspace": true,
+      "workingDir": "rig-specs/electron",
+      "targetMode": "self",
+      "requirements": {
+        "os": [
+          "windows"
+        ]
+      },
+      "command": [
+        "pnpm",
+        "test"
+      ],
+      "secretRefs": [
+        "COMPASS_E2E_ACCOUNT",
+        "COMPASS_E2E_PASSWORD"
+      ],
+      "retryPolicy": {
+        "maxAttempts": 1
+      },
+      "writesData": false
+    }
+  ],
+  "plans": [
+    {
+      "suite": "compass-web-snapshot",
+      "name": "罗盘 Web · 主路径冒烟",
+      "profile": "mock",
+      "track": "functional",
+      "caseFilter": "CPS-WEB-AUTH-001,CPS-WEB-AUTH-002,CPS-WEB-AUTH-003,CPS-WEB-HOME-001,CPS-WEB-HOME-002,CPS-WEB-HOME-003,CPS-WEB-CHAT-001,CPS-WEB-CHAT-002,CPS-WEB-STRAT-001,CPS-WEB-STRAT-002"
+    },
+    {
+      "suite": "compass-web-snapshot",
+      "name": "罗盘 Web · 全部用例（含韧性）",
+      "profile": "mock",
+      "track": "functional"
+    }
+  ],
+  "catalogs": [
+    "rig-specs/web/case-catalog.web.json",
+    "rig-specs/electron/case-catalog.electron.json",
+    "reference/public-48af490/case-catalog.reference.json"
+  ],
+  "seed": [
+    "rig-specs",
+    "reference",
+    "README.md"
+  ],
+  "boundary": "快照 + 假数据的结果只说明「这个提交的前端在这些数据下的行为」，不等于线上通过；线上验收需要允许的测试账号和数据范围。"
+}

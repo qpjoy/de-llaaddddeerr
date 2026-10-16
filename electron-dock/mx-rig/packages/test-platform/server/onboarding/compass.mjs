@@ -2,8 +2,13 @@ import { readFileSync } from 'node:fs'
 
 export const DEFAULT_COMPASS_REPO = 'https://github.com/mingxiinfo/po-frontend'
 
+// One catalog for the Electron cases: the acceptance pack's own file, which
+// its run script also reads (docs/21 §5). There used to be a second copy here.
 const ELECTRON_CATALOG = JSON.parse(
-  readFileSync(new URL('./compass-electron.json', import.meta.url), 'utf8'),
+  readFileSync(
+    new URL('../../../../test-packs/compass/rig-specs/electron/case-catalog.electron.json', import.meta.url),
+    'utf8',
+  ),
 )
 
 function text(value, fallback = null) {

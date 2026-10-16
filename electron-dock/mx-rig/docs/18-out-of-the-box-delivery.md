@@ -128,6 +128,33 @@ bash scripts/manage.sh desktop --server http://10.0.0.5:8791 --private-http
 
 实测：Apple 芯片的 DMG 262 MB，应用里的 Chromium 解压后 358 MB。
 
+**Launcher 独立端**（docs/25）：
+
+```bash
+bash scripts/manage.sh desktop --launcher
+```
+
+- 打出来的应用是 Launcher 的独立产品 `mx-rig`：经自己的产品网络连 Rig 服务（VIP），登录用平台统一账号，没有服务地址要填。
+- 安装包带上目标平台的 WireGuard 引擎；`--bootstrap <地址,地址>` 可以改入口，默认先走公网中继 IP，再走 `h2i.minsight-ai.com`。
+- 第一次要先在 Launcher 那边登记：在 Internal 节点上运行 `scripts/manage.sh launcher plan` 看计划，`launcher apply` 写入（需要 `MX_LAUNCHER_OPS_TOKEN`），剩下两步按提示在 Launcher Admin 里做。
+
+**发版时顺手录演示录像**（docs/24 M8c）：「新手引导」里每个关卡都有一段录像，发版时重录，所以录像里就是这一版的界面。
+
+```bash
+npm run record:tours
+```
+
+```bash
+MX_RIG_URL=https://rig.example MX_RIG_ADMIN_TOKEN=… npm run record:tours -- --publish-only
+```
+
+- 第一条：起一个临时服务和一个干净的桌面端，用「演示」速度依次走完每个关卡并录屏，再剪成每个关卡一段。结果写到 `.runtime/tours/`，大约 3 分钟。
+- 第二条：把录好的上传到团队的服务器。只有管理员能发布；同一个关卡只保留最新一段。
+- 一步完成就用 `-- --publish`，录完直接上传。
+- 录像里只有替身数据：一个替身 po-frontend 仓库、内置试验场、一台叫「演示电脑」的执行机。临时目录不在任何人的主目录下，所以录像里没有个人路径和主机名。
+- 需要 Playwright 带的 ffmpeg（`npx playwright install ffmpeg`），或者用 `MX_RIG_FFMPEG` 指定。
+- 「新项目」录完后，脚本会真跑一次它停下的那次执行，好让「读懂一次执行」有真实结果可读。这一步要在本机装测试依赖，需要能访问 npm 源。
+
 ## 4. 同事第一次打开
 
 **macOS**：
