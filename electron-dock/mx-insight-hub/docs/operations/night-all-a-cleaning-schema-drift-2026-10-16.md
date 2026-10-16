@@ -25,7 +25,7 @@ sudo -u postgres psql -X -p 5432 -d agent_data_crawler_platform \
   -v ON_ERROR_STOP=1 -A -t -q \
   < scripts/night-all-a-batch-source-audit.sql
 
-kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c api -- \
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
   node --input-type=module - \
   < server/ops/diagnose-night-all-a-batches.mjs
 ```
@@ -44,7 +44,41 @@ sudo docker exec -i -e PYTHONDONTWRITEBYTECODE=1 \
 
 这是此前已上传的脚本；若文件已清理，从仓库同名文件重新上传。其环境候选不是运行进程engine的绝对证明；如仍有冲突，再核对platform/runtime的当前配置和实际保存路径。确定实际目标后，再在该数据库运行同一批次SQL，不能在未知目标上试用旧库凭据或先开放端口。
 
-本地验证：源库审计7项、Hub审计6项及organization-web映射5项，共18项通过；SQL查询体使用实际PGlite执行，Hub stdin入口与不完整报告的非零退出已验证。无原生psql，源脚本的psql分支仅静态验证。Hub顶层 `status=observed` 只表示各诊断section读取完整，`incomplete` 保留已取得结果并非零退出；两者都不是清洗验收结论。本轮尚无新的生产查询结果，没有改连接、账号、端口、业务数据或MX-H2I登录/联网。
+本地验证：源库审计7项、Hub审计6项及organization-web映射5项，共18项通过；SQL查询体使用实际PGlite执行，Hub stdin入口与不完整报告的非零退出已验证。无原生psql，本地对源脚本的psql分支仅静态验证。Hub顶层 `status=observed` 只表示各诊断section读取完整，`incomplete` 保留已取得结果并非零退出；两者都不是清洗验收结论。本会话未直接执行生产查询，也没有改连接、账号、端口、业务数据或MX-H2I登录/联网；用户随后提供的源库结果如下。
+
+### 用户返回的源库结果与Admin容器名修正
+
+2026-10-17 00:34:02.998436 +08:00 的只读快照确认此次所查 `agent_data_crawler_platform` 源库包含以下记录，schema通过，4个聚合组完整返回：
+
+| tag | source_type | connector_id | 记录数 | 本类别非空site_id数 |
+| --- | --- | --- | ---: | ---: |
+| maidanglao | news | organization-web | 3568 | 217 |
+| maidanglao | web | organization-web | 170 | 57 |
+| tasiting | news | china-news | 2746 | 0 |
+| tasiting | news | google-news | 325 | 0 |
+
+maidanglao共3738条，news/web最新last_seen_at分别为10月16日12:36:17.535783与12:32:57.559702（+08:00）；这是本次源库快照值，不是Hub已清洗数量或后续实时总数。站点数按类别分别去重，不能直接相加当作全局独立站点数，也不能据此断言325站全覆盖。tasiting的两个非组织站connector未提供site_id，不能据此判定缺数据。
+
+连接使用Unix socket，因此serverAddress/serverPort为null；cluster systemIdentifier为7526959857492830834。输出自身不包含执行主机名，仍不单独证明Hub实际路由或运行进程engine。已查到新旧批次同存于这个源库，不需先把已恢复的连接切至 `.1` 或开公网端口。
+
+用户首次Hub诊断未执行：kubectl报 `container api is not valid ... out of: admin`。Admin部署清单的容器名确为 `admin`，上面的命令已改为 `-c admin`。用户随后重跑第二条，已取得下述完整结果；该容器名问题已闭合，无需重复执行诊断或重新部署。
+
+### Hub返回结果：现有批次入库链路已跑通
+
+用户提供的Hub诊断于2026-10-17 00:39:55.253 +08:00完成，数据库快照为00:39:49.856；所有section均为read且未截断。与00:34源库快照对照：
+
+| 批次/connector | 分类 | 源库记录 | Hub原始记录 | 对应有效canonical | 缺失/已删/原始身份不匹配 |
+| --- | --- | ---: | ---: | ---: | --- |
+| maidanglao / organization-web | news | 3568 | 3568 | 3568 | 0 / 0 / 0 |
+| maidanglao / organization-web | web | 170 | 170 | 170 | 0 / 0 / 0 |
+| tasiting / china-news | news | 2746 | 2746 | 2746 | 0 / 0 / 0 |
+| tasiting / google-news | news | 325 | 325 | 325 | 0 / 0 / 0 |
+
+这证明maidanglao当前已在Hub原始层归档3738条且均有对应有效canonical，两个类别的恢复入库链路已工作，tasiting也保持对应。10条maidanglao样本的Hub原始rowId/lastSeenAt与canonical lineage一致；这些样本按Hub观察时间选取，与源库按last_seen_at选出的最新5条不必相同，不能冒充源到Hub的逐条全量内容对账。
+
+news/web任务均active、游标idle、hasSavedError=false、mapping v1，配置源库均为 `127.0.0.1:5432/agent_data_crawler_platform`，无profile/inline冲突。news最近成功导入在10月17日00:34:07.417完成，共10369条、拒绝0（这是类别总量，不是maidanglao批次数）；断点为10月16日15:11:49.639476+08/id31367，已越过该批次news最大last_seen_at。web最近成功导入在00:24:49.620完成170条、拒绝0；断点10月16日12:32:57.559702+08/id30750与源报告的末条一致。其游标updatedAt为00:36:06.420，不能把空拉取后游标刷新时间解释成另一次170条导入。
+
+报告database部分的 `192.168.224.120:5432/mx_insight_hub` 是Hub落地库，不是源连接被切换。此轮无需更换源host、开放远端5432、提供新密码、启用tender或重置checkpoint。此结论限定现有批次归档/有效canonical对应与数量对齐，未做源库全量key/内容逐行一致性、325站采集覆盖或搜索投影验收，也不消除前文已记录的源writer提交顺序限制。会话仅读取用户回执并更新文档，无运行代码或生产配置改动。
 
 ## Hub 迁移兼容实施状态
 

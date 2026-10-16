@@ -57,12 +57,12 @@ async function transaction(pool, work) {
 // Separate from supplier-specific stores: the native operation remains the
 // procurement identity, while this manifest owns one public search delivery.
 export class ContentSearchStateStore {
-  constructor(platformStore, { platform, operation, endpointKey, endpointVersion }) {
+  constructor(platformStore, { platform, operation, endpointKey, endpointVersion, endpointContractVersion = NATIVE_FORWARDING_VERSION }) {
     if (platformStore.providerKey !== 'tikhub') throw new TypeError('TikHub content-search store required')
     this.store = platformStore
     this.usage = platformStore.usageStore
     this.pool = platformStore.pool
-    Object.assign(this, { platform, operation, endpointKey, endpointVersion })
+    Object.assign(this, { platform, operation, endpointKey, endpointVersion, endpointContractVersion })
   }
 
   async readUsage(id, input, client = this.pool, lock = false) {
@@ -129,7 +129,7 @@ export class ContentSearchStateStore {
       archive = { bodyBytes: row.body_bytes, bodySize: Number(row.body_size), bodySha256: row.body_sha256, capturedAt: row.captured_at }
     }
     if (!call || call.providerKey !== 'tikhub' || call.operation !== this.operation || call.endpointKey !== this.endpointKey
-      || call.endpointVersion !== this.endpointVersion || call.contractVersion !== NATIVE_FORWARDING_VERSION
+      || call.endpointVersion !== this.endpointVersion || call.contractVersion !== this.endpointContractVersion
       || call.outcome !== 'succeeded' || call.httpStatus !== 200 || call.businessCode !== 200 || !age(call.completedAt)
       || ['tenantId', 'consumerId', 'apiKeyId'].some(key => call[key] !== input[key]) || !scopeMatches(usage, input, this.platform)
       || !(usage.status === 'committed' && usage.responseStatus === 200

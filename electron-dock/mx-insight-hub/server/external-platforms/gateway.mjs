@@ -42,6 +42,7 @@ import { normalizeHubDataSearch, projectDataSearch, projectTwitterSearchFillDeli
 import { runTwitterSearchFill } from './twitter-search-fill.mjs'
 import { contentSearchPlan } from './content-search.mjs'
 import { socialAccountPlan } from './social-account-delivery.mjs'
+import { youtubeCommentsPlan } from './youtube-comments-workflow.mjs'
 import { runFacebookSearchFill } from './facebook-search-fill.mjs'
 import { waitForFacebookRapidAdmission } from './facebook-rapid-admission.mjs'
 import { normalizeFacebookSearch, projectFacebookSearch, facebookJustOneArchives, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY } from '../contracts/facebook-search.mjs'
@@ -710,6 +711,24 @@ export class ExternalPlatformGateway {
     return this.#deliver(context, prepared.input, prepared.plan)
   }
 
+  async youtubeComments(context, input) {
+    const prepared = youtubeCommentsPlan({ gateway: this, context, input, dependencies: {
+      resolveCredential: () => this.#resolvedCredential(),
+      revalidateIdentity: async ({ totalLimit }) => {
+        const current = await this.#revalidateWaitingIdentity(context, 'youtube', { operation: 'social.comments.list' })
+        const policy = await this.usageStore.getPolicy(current.consumer.id, 'youtube')
+        const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, 'youtube')
+        if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+          entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Comment count exceeds the current Key entitlement')
+        context = current
+        return current
+      },
+      enterCapacity: options => this.#enterOrQueue(context, { ...options, canWait: false }),
+      leaveCapacity: admission => this.#leave(context.consumer.id, admission), providerCostControl,
+    } })
+    return this.#deliver(context, prepared.input, prepared.plan)
+  }
+
   async socialData(context, { operation, body, idempotencyKey, path, signal }) {
     const endpoint = HUB_SOCIAL_ENDPOINTS[operation]
     if (!endpoint || endpoint.path !== path || this.providerKey !== endpoint.provider) throw new AppError(404, 'not_found', 'Unknown Hub social endpoint')
@@ -726,21 +745,40 @@ export class ExternalPlatformGateway {
     })
   }
 
-  async searchContent(context, input) {
+  async searchContent(context, input, { finalizeXiaohongshu = null } = {}) {
     const platform = input.normalized.platform
+    const revalidateIdentity = async ({ operation, totalLimit }) => {
+      const current = await this.#revalidateWaitingIdentity(context, platform, { platformSearch: true, operation,
+        ...(platform === 'xiaohongshu' ? { requiredCapabilities: ['social.posts.search'] } : {}) })
+      const policy = await this.usageStore.getPolicy(current.consumer.id, platform)
+      const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, platform)
+      if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+        entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Content-search work exceeds the current Key entitlement')
+      context = current
+      return current
+    }
     const prepared = contentSearchPlan({ gateway: this, context, input, dependencies: {
       resolveCredential: () => this.#resolvedCredential(),
-      revalidateIdentity: async ({ operation, totalLimit }) => {
-        const current = await this.#revalidateWaitingIdentity(context, platform, { platformSearch: true, operation })
-        const policy = await this.usageStore.getPolicy(current.consumer.id, platform)
-        const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, platform)
-        if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
-          entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Content-search work exceeds the current Key entitlement')
-        context = current
-        return current
-      },
+      revalidateIdentity,
       enterCapacity: options => this.#enterOrQueue(context, { ...options, canWait: false }),
       leaveCapacity: admission => this.#leave(context.consumer.id, admission), providerCostControl,
+      finalizeResponse: platform === 'weibo' ? async ({ request, rowsByJob, responseBody, delivery, firstCallOrdinal, deadlineAt }) => {
+        const rows = structuredClone(rowsByJob.flat())
+        const credential = await this.#resolvedCredential()
+        const result = await enrichWeiboRawSearch({ gateway: this, context,
+          request: { enrichment: { enabled: true, all: false, maxItems: 20 } },
+          result: { items: rows, publicBody: { data: { raw_info: '[]', raw_data: JSON.stringify(rows),
+            page: { page: request.page, pageSize: request.pageSize, hasMore: responseBody.data.pageInfo.hasMore,
+              nextCursor: responseBody.data.pageInfo.nextCursor }, status: 'ok', meta: {} } } },
+          delivery, credential: { credential: credential.credential }, credentialRevision: credential.revision,
+          providerCostControl, deadlineAt, firstCallOrdinal, ingestDetails: true,
+          revalidateIdentity: () => revalidateIdentity({ operation: request.operation, totalLimit: request.totalLimit }) })
+        result.publicBody.data.meta.upstreamCallCount = firstCallOrdinal + result.publicBody.data.meta.enrichment.detailUpstreamCalls
+        const projected = projectDataSearch(result, request)
+        projected.data.warnings = [...responseBody.data.warnings.filter(row => row.code !== 'body_completeness_unknown'), ...projected.data.warnings]
+        projected.data.status = projected.data.warnings.length ? 'partial' : projected.data.status
+        return { ...projected, requestId: delivery.usageRequestId }
+      } : finalizeXiaohongshu,
     } })
     return this.#deliver(context, prepared.input, prepared.plan)
   }

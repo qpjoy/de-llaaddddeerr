@@ -879,18 +879,16 @@ by this live route; use `/data/stored/search` or `/data/canonical/search`.
 
 `query` must be non-blank and at most 500 characters after trimming. `cursor`, when present, must be a non-blank opaque string of at most 8,192 characters. Clients must return the cursor from the previous response unchanged rather than constructing or decoding it.
 
-For `platform=xiaohongshu`, omitting `pageSize` selects its default of 20, and
-the Hub-native direct connector is eligible only when `pageSize` is exactly 20.
-Compatible first-page requests switch only after an independent rollout gate;
-every cursor previously issued by a direct traversal remains on the same
-connector. Existing direct cursors use the `mxec2` domain. A request assigned to
-the historical compatibility path receives a Hub-encrypted `mxnc1` cursor rather
-than Night-All's provider cursor, and that traversal terminates after page 15.
-An older bare provider cursor cannot prove its page and returns
-`400 invalid_cursor`; restart without a cursor and use a new `Idempotency-Key`.
-Explicit non-20 page sizes remain on the historical compatibility path. The
-caller does not select or learn the external provider and must never move a
-cursor between routes, queries or page sizes.
+For `platform=xiaohongshu`, all valid page sizes use Hub acquisition with the
+existing `social.posts.search` grants, customer meter and operation controls.
+The default is 20; previously issued `mxec2` cursors stay on their connector.
+Other sizes use retained-page buffering. Disabled or Test Key requests never
+fall back to Night-All. TikTok and smaller Weibo standard pages also execute in
+Hub. Saved historical deliveries retain exact replay; new dispatch using an old
+`mxnc1` cursor returns `409 search_restart_required`. Restart explicitly from the
+first page with a new `Idempotency-Key`; never convert provider cursors or move
+cursors between paths, queries or page sizes. Legacy raw routes retain their
+original rollout rules. See [YouTube comments and standard-search migration](../integrations/youtube-comments-and-standard-search-migration.md).
 
 The direct Xiaohongshu search detects note bodies at the 60-character provider
 preview boundary using UTF-16, Unicode code-point and grapheme counts. It may

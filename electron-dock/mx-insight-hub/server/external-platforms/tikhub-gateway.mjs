@@ -24,6 +24,7 @@ import {
 } from '../contracts/tikhub-xiaohongshu.mjs'
 import {
   normalizeTikHubXiaohongshuSearchResponse,
+  needsXiaohongshuDetail,
   normalizeXiaohongshuSearchRequest,
   TikHubXiaohongshuSearchContractError,
   TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_KEY,
@@ -2214,6 +2215,22 @@ export class TikHubGateway {
     }
   }
 
+  // Standard buffered delivery shares the established detail workflow. Search
+  // acquisition still uses social.posts.search; no native grant or release can
+  // bypass its policy, and details retain their own original admission checks.
+  async enrichStandardSearchPage({ context, delivery, responseBody, firstCallOrdinal, deadlineAt, revalidateIdentity }) {
+    const revalidate = revalidateIdentity || (() => this.#revalidateWaitingIdentity(context, [XIAOHONGSHU_SEARCH_OPERATION]))
+    context = await revalidate()
+    const upstream = { publicBody: responseBody, detailCandidates: responseBody.data.items
+      .filter(item => needsXiaohongshuDetail(item.text)).map(item => ({ externalId: item.externalId, url: item.url })) }
+    const resolved = upstream.detailCandidates.length ? await this.#credential() : { value: null, revision: null }
+    const detail = await this.#enrichSearchNotes({ context, delivery, upstream, credential: resolved.value,
+      credentialRevision: resolved.revision, enrichmentPolicy: searchEnrichmentPolicy({}, this.config),
+      firstCallOrdinal, deadlineAt: deadlineAt - 15000, revalidateIdentity: revalidate })
+    return projectTikHubXiaohongshuSearch(upstream, { detailResults: detail.results,
+      detailFailureCount: detail.failureCount, providerCalls: responseBody.data.meta.providerCalls + detail.providerCalls }).publicBody
+  }
+
   async #enrichSearchNotes({
     context,
     delivery,
@@ -2223,6 +2240,7 @@ export class TikHubGateway {
     enrichmentPolicy,
     firstCallOrdinal,
     deadlineAt,
+    revalidateIdentity = null,
   }) {
     const allItems = upstream.publicBody?.data?.items || []
     const requested = enrichmentPolicy.mode === 'all'
@@ -2472,6 +2490,7 @@ export class TikHubGateway {
         }
         const costControl = detailCostControl
         try {
+          if (revalidateIdentity) context = await revalidateIdentity()
           call = await this.platformStore.beginProviderCall({
             tenantId: context.tenant.id,
             consumerId: context.consumer.id,

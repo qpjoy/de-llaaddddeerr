@@ -38,7 +38,7 @@ function searchPlatform(platform, { instagramPolicy, facebookPolicy }) {
     readOnlyReason: '关键词内容搜索由 Hub 执行已适配的固定 TikHub 合同，当前没有接入同一合同的第二供应商；不能仅改目录名称切换。账号内容与账号资料独立保留兼容链路。',
     routeSummary: 'data/search 与两个 raw 入口的关键词内容搜索、已声明筛选和关键词批量由 Hub 直连 TikHub；完整已采购页归档后按 Hub 游标交付，不再转交 Night-All。历史游标须遵循原回放及明确重启边界；crawl 和 user-info 的迁移状态分别显示。',
   }
-  if (['reddit', 'youtube'].includes(platform)) return {
+  if (['reddit', 'youtube', 'tiktok'].includes(platform)) return {
     ...row, migrationStatus: 'conditional',
     readOnlyReason: '标准内容搜索由 Hub 执行固定 TikHub 合同，当前没有已接入的第二供应商策略；两个 raw 兼容入口仍走原链路。操作状态、凭据和采购准入独立检查，目录不代表线上已经部署或实时可用。',
     routeSummary: 'POST /api/v1/data/search 的新内容搜索由 Hub 直连 TikHub，保留原标准请求与 items/pageInfo 合同，不转发或失败回退到 Night-All。POST /api/v1/search/raw 与 /api/v1/night-all/search/raw 继续原 Night-All 链路。已保存交付精确重放；旧 mxnc1 游标的新派发返回 409 search_restart_required，由调用方明确使用新 Idempotency-Key 从首页开始。新分页只回传本接口的 Hub 游标；账号内容和资料状态分别显示。',
@@ -50,13 +50,13 @@ function searchPlatform(platform, { instagramPolicy, facebookPolicy }) {
   }
   if (platform === 'weibo') return {
     ...row, migrationStatus: 'conditional',
-    readOnlyReason: '已迁移形状使用 TikHub；其余形状仍走兼容链路。尚无第二个已接入同一合同的供应商，不能仅通过修改默认名称切换。',
-    routeSummary: '已迁移的单关键词 raw 和 data/search（首请求 pageSize 至少 20 或已有 Hub 游标）由 Hub 直连 TikHub；其他兼容形状仍经 Night-All。',
+    readOnlyReason: '标准搜索使用 TikHub；复杂 raw 仍走兼容链路。尚无第二个已接入同一合同的供应商，不能仅通过修改默认名称切换。',
+    routeSummary: 'data/search 的所有有效页大小均由 Hub 直连 TikHub，小于20的页使用已采购余量缓冲。旧 mxnc1 先保留已有请求重放，新增请求返回 search_restart_required。raw 已迁移形状保持原规则，其他兼容形状仍经 Night-All。',
   }
   if (platform === 'xiaohongshu') return {
     ...row, migrationStatus: 'conditional',
-    readOnlyReason: '当前已接入的搜索形状使用 TikHub；其他形状仍遵循兼容路由。其他平台原生接口需完成参数、响应、分页及费用适配后才能作为本合同的可选供应商。',
-    routeSummary: '单关键词、每页 20 条等受支持形状在 Hub 操作启用且为正式 Key 时直连 TikHub；已有 Hub 游标保持该链路。其他形状、未启用直连或测试 Key 仍走 Night-All。',
+    readOnlyReason: '标准搜索使用 TikHub，沿用 social.posts.search 的授权、价格及启停；旧 raw 请求继续其兼容规则。其他供应商需适配本合同后才能成为可选来源。',
+    routeSummary: 'data/search 不再受旧迁移 gate 或测试 Key 分流，所有有效页大小都由 Hub 执行；20条及已签发 mxec2 保持既有链，其他页大小使用缓冲。停用直接拒绝，不回退 Night-All。已保存请求保持重放，旧 mxnc1 的新增请求须显式重开。raw 入口未改变。',
   }
   if (WECHAT_LEGACY_SEARCH_PLATFORMS.includes(platform)) return {
     ...row, migrationStatus: 'hub_native',

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
+import { YOUTUBE_COMMENTS_VERSION, YOUTUBE_COMMENT_PATHS } from '../contracts/youtube-comments.mjs'
 
 export const SOCIAL_SEARCH_STATE_VERSION = 'mx-insight-hub.social-compat.v1'
 
@@ -11,7 +12,7 @@ const age = value => value != null && Number.isFinite(Date.parse(value)) && Date
 const fail = () => new AppError(409, 'search_page_unavailable', 'The saved social-account traversal cannot be continued; restart explicitly')
 const paths = new Set(['/api/v1/data/social/crawl', '/api/v1/data/social/user-info'])
 const id = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && !value.includes('\0')
-const identityValid = value => value && ['tenantId', 'consumerId', 'apiKeyId'].every(key => uuid(value[key])) && paths.has(value.path)
+const identityValid = (value, allowedPaths = paths) => value && ['tenantId', 'consumerId', 'apiKeyId'].every(key => uuid(value[key])) && allowedPaths.has(value.path)
 const object = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 const expectedValid = value => object(value) && ['tikhub', 'rapidapi', 'justone'].includes(value.provider)
   && ['operation', 'endpointKey', 'endpointVersion', 'contractVersion'].every(key => id(value[key]))
@@ -68,7 +69,10 @@ async function transaction(pool, work) {
 // Separate from supplier-specific stores: the native operation remains the
 // procurement identity, while this manifest owns one public search delivery.
 export class SocialSearchStateStore {
-  constructor(platformStores, { platform }) {
+  constructor(platformStores, { platform, workflowKind = 'social-account' }) {
+    if (!['social-account', 'youtube-comments'].includes(workflowKind) || workflowKind === 'youtube-comments' && platform !== 'youtube') throw new TypeError('Unknown traversal kind')
+    this.paths = workflowKind === 'youtube-comments' ? new Set(Object.values(YOUTUBE_COMMENT_PATHS)) : paths
+    this.version = workflowKind === 'youtube-comments' ? YOUTUBE_COMMENTS_VERSION : SOCIAL_SEARCH_STATE_VERSION
     this.stores = platformStores instanceof Map ? Object.fromEntries(platformStores) : { ...platformStores }
     const entries = Object.entries(this.stores)
     if (!entries.length || !id(platform) || entries.some(([provider, store]) =>
@@ -95,7 +99,7 @@ export class SocialSearchStateStore {
   }
 
   async historyFor(input) {
-    if (!identityValid(input) || !sha(input.scopeHash) || !Number.isInteger(input.jobCount) || input.jobCount < 1 || input.jobCount > 50
+    if (!identityValid(input, this.paths) || !sha(input.scopeHash) || !Number.isInteger(input.jobCount) || input.jobCount < 1 || input.jobCount > 50
       || !Number.isInteger(input.totalLimit) || input.totalLimit < 1 || input.totalLimit > 1000) throw fail()
     const seenIds = Array.from({ length: input.jobCount }, () => new Set()), visited = new Set()
     let current = input.previousDeliveryId, state = null
@@ -105,7 +109,7 @@ export class SocialSearchStateStore {
       const row = await this.readUsage(current, input)
       const manifest = row?.acquisitionRequest?.socialSearch
       if (!scopeMatches(row, input, this.platform) || row.status !== 'committed' || row.responseStatus !== 200
-        || manifest?.version !== SOCIAL_SEARCH_STATE_VERSION || manifest.scopeHash !== input.scopeHash
+        || manifest?.version !== this.version || manifest.scopeHash !== input.scopeHash
         || !Array.isArray(manifest.deliveredIds) || manifest.deliveredIds.length !== input.jobCount
         || !Array.isArray(manifest.state?.jobs) || manifest.state.jobs.length !== input.jobCount
         || !manifest.state.jobs.every(jobValid)
@@ -124,7 +128,7 @@ export class SocialSearchStateStore {
   }
 
   async pageFor(input, client = this.pool, lock = false) {
-    if (!identityValid(input) || !uuid(input.callId) || !sha(input.scopeHash) || !expectedValid(input.expected)) return null
+    if (!identityValid(input, this.paths) || !uuid(input.callId) || !sha(input.scopeHash) || !expectedValid(input.expected)) return null
     const { expected } = input, providerStore = this.stores[expected.provider]
     if (!providerStore) return null
     let call, usage, archive
@@ -155,7 +159,7 @@ export class SocialSearchStateStore {
       || ['tenantId', 'consumerId', 'apiKeyId'].some(key => call[key] !== input[key]) || !scopeMatches(usage, input, this.platform)
       || !(usage.status === 'committed' && usage.responseStatus === 200
         || usage.id === input.ownUsageRequestId && usage.status === 'reserved')
-      || usage.id !== input.ownUsageRequestId && (usage.acquisitionRequest?.socialSearch?.version !== SOCIAL_SEARCH_STATE_VERSION
+      || usage.id !== input.ownUsageRequestId && (usage.acquisitionRequest?.socialSearch?.version !== this.version
         || usage.acquisitionRequest.socialSearch.scopeHash !== input.scopeHash
         || !age(usage.acquisitionRequest.socialSearch.capturedAt))) return null
     const page = verifiedArchive(archive, expected.provider)
@@ -163,7 +167,7 @@ export class SocialSearchStateStore {
   }
 
   async unknownFor(delivery, path) {
-    if (!uuid(delivery.usageRequestId) || !sha(delivery.fingerprint) || !identityValid({ ...delivery, path })) throw fail()
+    if (!uuid(delivery.usageRequestId) || !sha(delivery.fingerprint) || !identityValid({ ...delivery, path }, this.paths)) throw fail()
     if (!this.pool) return [...this.usage.requests.values()].some(row => scopeMatches(row, { ...delivery, path }, this.platform)
       && row.status === 'unknown' && row.fingerprint === delivery.fingerprint
       && Date.now() - Date.parse(row.reservedAt ?? row.createdAt ?? new Date().toISOString()) <= 86400000)
@@ -205,9 +209,9 @@ export class SocialSearchStateStore {
 
   async commitDelivery(input) {
     const { delivery, responseBody, manifest, sources, capturedAt, sourceMode, usageUnitsActual, latencyMs = 0 } = input
-    if (!identityValid(input) || !sha(input.scopeHash) || !uuid(delivery?.usageRequestId) || !sha(delivery.fingerprint)
+    if (!identityValid(input, this.paths) || !sha(input.scopeHash) || !uuid(delivery?.usageRequestId) || !sha(delivery.fingerprint)
       || ['tenantId', 'consumerId', 'apiKeyId'].some(key => delivery[key] !== input[key])
-      || manifest?.version !== SOCIAL_SEARCH_STATE_VERSION || manifest.scopeHash !== input.scopeHash
+      || manifest?.version !== this.version || manifest.scopeHash !== input.scopeHash
       || manifest.previousDeliveryId != null && !uuid(manifest.previousDeliveryId)
       || !Array.isArray(sources) || !sources.length || sources.length > 100
       || sources.some(source => !object(source) || !expectedValid(source.expected) || !this.stores[source.expected.provider]

@@ -32,6 +32,7 @@ export const PRODUCT_ACCESS = {
   '/data-products/topic-insights': { platform: 'topic_reports', docs: 'topic-reports' },
 }
 export function productAllowed(path, scopes = []) {
+  if (path === '/data-products/social-content' && scopes.some(scope => scope.platforms?.includes('youtube') && scope.capabilities?.includes('social.comments.list'))) return true
   if (path === '/data-products/web-search') return scopes.some(s=>s.platforms?.includes('web_search') && s.capabilities?.includes('web.search') && s.capabilities.some(c=>c.startsWith('web.search.provider.')))
 
   if (path === '/data-products/social-content' && scopes.some(scope => scope.platforms?.includes('twitter') && ['social.content.search', 'social.content.crawl', 'social.profile.get'].some(capability => scope.capabilities?.includes(capability)))) return true

@@ -668,10 +668,10 @@ function assertXiaohongshuSearchContract(document) {
     xiaohongshu: 'social.posts.search',
   })
   assert.match(operation.description, /xiaohongshu/i)
-  assert.match(operation.description, /exactly 20|page size is exactly 20/i)
+  assert.match(operation.description, /All valid standard page sizes use Hub-owned acquisition/i)
   assert.match(operation.description, /historical cursor/i)
   assert.match(operation.description, /bounded detail/i)
-  assert.match(operation.description, /independent rollout gate/i)
+  assert.match(operation.description, /disabled operation never falls back to Night-All/i)
   assert.match(operation.description, /never selects|never.*provider/i)
   assert.match(operation.description, /Twitter standard search[\s\S]*without a separate default per-request call-count cap/)
   assert.match(operation.description, /up to 10 seconds and 32 pending/)
@@ -699,7 +699,7 @@ function assertXiaohongshuSearchContract(document) {
   assert.equal(request.additionalProperties, false)
   assert.deepEqual(request.required, ['platform', 'query'])
   assert.equal(request.properties.pageSize.default, 20)
-  assert.match(request.properties.pageSize.description, /exactly 20/i)
+  assert.match(request.properties.pageSize.description, /supports all valid page sizes through Hub/i)
   assert.deepEqual(request.properties.type.enum, ['fresh', 'stable'])
   assert.equal(request.properties.type.default, 'fresh')
   assert.match(request.properties.cursor.description, /same path, platform, query and pageSize/i)
@@ -1895,6 +1895,8 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/social/search',
       '/data/social/crawl',
       '/data/social/user-info',
+      '/data/youtube/comments',
+      '/data/youtube/channel-comments',
       '/data/source-catalog',
       '/data/source-catalog/metadata',
       '/data/source-catalog/services',
@@ -2063,7 +2065,7 @@ test('static OpenAPI YAML mirrors dynamic Night-All and public data-product cont
   )
   assertNightAllPublicContract(document)
   assert.deepEqual(document.paths['/search/raw'], PUBLIC_OPENAPI_DOCUMENT.paths['/search/raw'])
-  for (const path of ['/data/search', '/data/aggregate/sources', '/data/aggregate/search']) {
+  for (const path of ['/data/search', '/data/aggregate/sources', '/data/aggregate/search', '/data/youtube/comments', '/data/youtube/channel-comments']) {
     assert.deepEqual(document.paths[path], PUBLIC_OPENAPI_DOCUMENT.paths[path], path)
   }
   assert.equal(document.paths['/search/{operation}'].post['x-mx-wechat-raw-operation'], '/data/wechat/search/search')
@@ -2126,7 +2128,7 @@ test('public curl guide defines the legacy matrix as Hub-pinned dispatch policy'
   assert.match(guide, /search_posts/)
   assert.match(guide, /search\.ready=true/)
   assert.match(guide, /不会把小红书从 `legacySearch` 移除/)
-  assert.match(guide, /pageSize[^。]*20[^。]*direct external-data connector/)
+  assert.match(guide, /所有有效页大小均由 Hub 执行/)
   assert.match(guide, /独立[^。]*rollout gate[^。]*首屏|首屏[^。]*独立 rollout gate/)
   assert.match(guide, /长度恰好为 60[^。]*内部详情补全/)
   assert.match(guide, /includeDetails:false[^。]*includeComments:false[^。]*no-op/)

@@ -4789,7 +4789,9 @@ export class HubService {
     if (platform === 'instagram' && path === '/api/v1/data/search' && !this.externalDataSearch) {
       throw new AppError(503, 'instagram_search_unavailable', 'Hub Instagram search is unavailable')
     }
-    if (path === '/api/v1/data/search' && directContentSearch) {
+    const retainedDirectXiaohongshu = platform === 'xiaohongshu' && pageSize === DIRECT_XIAOHONGSHU_PAGE_SIZE
+      && (!cursor || isDirectXiaohongshuCursor(cursor))
+    if (path === '/api/v1/data/search' && directContentSearch && !retainedDirectXiaohongshu) {
       assert(this.externalDataSearch, 503, 'content_search_unavailable', 'Hub content search is unavailable')
       return this.externalDataSearch(context, { body, normalized: upstreamBody, idempotencyKey,
         ...(signal ? { signal } : {}), dataSearch: { resultType, replayWindowMs: replayWindowFor(resultType) } })
@@ -4803,13 +4805,14 @@ export class HubService {
     if (
       platform === 'xiaohongshu'
       && pageSize === DIRECT_XIAOHONGSHU_PAGE_SIZE
-      && this.externalSocialSearch
+      && (path === '/api/v1/data/search' || this.externalSocialSearch)
       && (!cursor || isDirectXiaohongshuCursor(cursor))
       && (
-        isDirectXiaohongshuCursor(cursor)
+        path === '/api/v1/data/search' || isDirectXiaohongshuCursor(cursor)
         || ((await this.#externalSocialSearchEnabledFor(context)) && !isTestApiKey(context.apiKey))
       )
     ) {
+      assert(this.externalSocialSearch, 503, 'content_search_unavailable', 'Hub Xiaohongshu search is unavailable')
       return this.externalSocialSearch(context, {
         body: upstreamBody,
         ...(signal ? { signal } : {}),

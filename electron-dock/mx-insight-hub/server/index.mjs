@@ -554,11 +554,11 @@ export async function createRuntime(config = loadConfig()) {
       if (!selected.length) return {}
       const credential = await tikHubCredentialStore.describeCredential('tikhub')
       const readiness = await nativeSearchGateways[selected[0]].nativeReadiness({ ...options,
-        operationKeys: selected.map(platform => `native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`),
+        operationKeys: selected.map(platform => platform === 'xiaohongshu' ? 'social.posts.search' : `native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`),
         credentialConfigured: credential.credentialConfigured,
       })
       return Object.fromEntries(selected.map(platform => [platform, {
-        ready: readiness[`native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`] === true,
+        ready: readiness[platform === 'xiaohongshu' ? 'social.posts.search' : `native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`] === true,
       }]))
     },
     externalFacebookCapabilities: async options => {
@@ -587,7 +587,11 @@ export async function createRuntime(config = loadConfig()) {
       : (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
     externalDataSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
       : input.normalized.platform === 'instagram' ? instagramSearch(context, input)
-      : TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform] ? nativeSearchGateways[input.normalized.platform].searchContent(context, input)
+      : TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform]
+        && (input.normalized.platform !== 'weibo' || input.normalized.pageSize < 20 || input.normalized.cursor?.startsWith('mxnc1.'))
+        ? nativeSearchGateways[input.normalized.platform].searchContent(context, input, {
+          finalizeXiaohongshu: values => tikHubGateway.enrichStandardSearchPage(values),
+        })
       : (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
     // The gateway reads the audited operation policy on every dispatch; static
     // env flags must not prevent routing to a database-enabled operation.

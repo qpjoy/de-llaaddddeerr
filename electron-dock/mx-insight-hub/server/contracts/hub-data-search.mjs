@@ -9,12 +9,12 @@ import { facebookStandardMedia } from './facebook-search.mjs'
 export const isHubDataCursor = value => typeof value === 'string' && value.startsWith('mxds1.')
 export function canRouteDataSearch({ platform, pageSize, cursor }) {
   if (['facebook', 'twitter', 'instagram'].includes(platform)) return true
-  return platform === 'weibo' && (isHubDataCursor(cursor) || (!cursor && pageSize >= 20))
+  return platform === 'weibo'
 }
 
 export function normalizeHubDataSearch(body, codec, resultType, historicalCodec, { instagramProvider = 'tikhub', instagramStrategy = false } = {}) {
   const { platform, query, pageSize, cursor } = body
-  if ((platform === 'twitter' || platform === 'instagram' && (instagramProvider === 'justone' || instagramStrategy)) && cursor?.startsWith('mxnc1.')) {
+  if ((platform === 'twitter' || platform === 'weibo' || platform === 'instagram' && (instagramProvider === 'justone' || instagramStrategy)) && cursor?.startsWith('mxnc1.')) {
     // Decode only to preserve the old ledger identity. Replay/unknown checks
     // must run before refusing a new dispatch with a retired continuation.
     const historical = prepareNightAllCompatibilityTraversal({ operation: 'data-search',

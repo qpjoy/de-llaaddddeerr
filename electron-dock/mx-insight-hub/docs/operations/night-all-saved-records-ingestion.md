@@ -7,7 +7,7 @@ activate a task or grant a Public API platform.
 
 ## 2026-10-17：tasiting/maidanglao批次验证
 
-用户确认tasiting已恢复，maidanglao仍待验证。tag是原始批次标签、source_type是分类；同库新批次仍由news/web原任务读取，不能因为新tag改共享host或重置旧断点。新截图的公网数据库位置与此前文档/只读诊断不一致，需要当前数据证据。新增只读源库与Hub诊断脚本可直接运行，无需部署；按tag核对原始证据、完整canonical身份、断点和导入记录，不把active、计数相同或样本相符当作全量清洗完成。命令和证据边界见[按批次核对](night-all-a-cleaning-schema-drift-2026-10-16.md#2026-10-17按批次核对实际库与清洗结果)。18项本地回归通过，未操作生产或改MX-H2I。
+用户确认tasiting已恢复；随后00:34源库及00:39 Hub完整回执确认maidanglao现有news3568/web170在源库、Hub原始层与有效canonical数量一致，缺失/已删/身份不匹配均0。news/web最近导入成功、拒绝0，任务active且游标idle无错误；本次批次入库链路已跑通，tasiting对应数量也保持。源配置为127.0.0.1:5432/agent_data_crawler_platform，无需改远端host、账号或端口。tag仍是原始批次标签、source_type是分类，同库新tag由原news/web任务读取；tender不影响这批数据。当前证据不等同源库全量key/正文逐条校验、325站全部采集或搜索投影完成。源/Hub只读脚本与回执详见[按批次核对](night-all-a-cleaning-schema-drift-2026-10-16.md#2026-10-17按批次核对实际库与清洗结果)。18项本地工具回归通过，会话未操作生产或改MX-H2I。
 
 ## 2026-10-16：迁移兼容、组织网站与恢复限制
 

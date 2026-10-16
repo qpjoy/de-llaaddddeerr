@@ -28,6 +28,17 @@ const legacyEndpoints = snapshot.endpoints
     })
   })
 const legacyPaths = new Set(legacyEndpoints.map(row => `${row.provider}:${row.method}:${row.path}`))
+// The retained OpenAPI uses a $ref for CommentSortByAPI. Resolve this one
+// reviewed scalar enum without changing the immutable imported snapshot.
+const youtubeComments = official.endpoints.find(row => row.key === 't.api_4a6f21264dc0b4a1')
+const youtubeCommentEndpoints = [Object.freeze({
+  ...youtubeComments, id: youtubeComments.key, status: 'fixed_read_contract', reason: null,
+  operation: `native.${youtubeComments.key}`, endpointKey: `native.${youtubeComments.key}`,
+  hubPath: `/api/v1/data/native/${youtubeComments.key}`, schemaVersion: 'youtube-comments.2026-10-17',
+  parameters: Object.freeze(youtubeComments.parameters.map(parameter => Object.freeze(parameter.name === 'sort_by'
+    ? { ...parameter, type: 'string', enum: ['top', 'newest'] } : { ...parameter }))),
+  fixedQuery: Object.freeze({}),
+})]
 // Keep the released social keys/scopes intact. Ecommerce gets independently
 // granted operations over the same reviewed read contracts, not a product search.
 const kuaishouCommerce = [
@@ -45,6 +56,7 @@ const kuaishouCommerce = [
   })
 })
 export const NATIVE_FORWARDING_ENDPOINTS = Object.freeze([...legacyEndpoints,
+  ...youtubeCommentEndpoints,
   ...kuaishouCommerce,
   ...wechat.endpoints.map(row => Object.freeze({ ...row, operation: `native.${row.key}`, endpointKey: `native.${row.key}` })),
   ...official.endpoints.filter(row => row.status === 'fixed_read_contract' && !legacyPaths.has(`${row.provider}:${row.method}:${row.path}`))

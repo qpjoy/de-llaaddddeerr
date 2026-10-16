@@ -141,7 +141,9 @@ async function harness({ platform = 'weibo', detail = 'success', enabled = true,
   const gateway = new ExternalPlatformGateway({ usageStore: store, platformStore, adapter, config, providerKey,
     apiKeyPepper: PEPPER, reservationLeaseMs: 120000, operationControlStore: controls, logger: { warn(...args) { logs.push(args) } } })
   service.externalRawSearch = (context, input) => gateway.searchRaw(context, input)
-  service.externalDataSearch = (context, input) => gateway.searchRaw(context, input)
+  service.externalDataSearch = (context, input) => input.normalized.platform === 'weibo'
+    && (input.normalized.pageSize < 20 || input.normalized.cursor?.startsWith('mxnc1.'))
+    ? gateway.searchContent(context, input) : gateway.searchRaw(context, input)
   const invoke = (body = { ...BODY, platform }, idempotencyKey = 'raw-fixture-first') => service.nightAllCompatibilitySearch(context,
     { operation: 'raw', body, idempotencyKey, path: RAW_SEARCH_PATH })
   const invokeData = (body = { platform, query: '汽车', pageSize: 20 }, idempotencyKey = 'data-fixture-first') => service.search(context,
@@ -1773,16 +1775,16 @@ test('existing data-search requests replay original responses across cutover; fr
   }
 })
 
-test('Weibo historical small pages clean titles while preserving source payloads and profile names', async () => {
+test('Weibo small pages use Hub enrichment and historical continuations require an explicit restart', async () => {
   for (const platform of ['weibo']) {
     const h = await harness({ platform })
     const before = structuredClone(h.oldDataPayload)
     const result = await h.invokeData({ platform, query: '汽车', pageSize: 10 })
     assert.equal(result.body.data.items[0].title, null)
-    assert.equal(result.body.data.items[0].text, PREVIEW)
+    assert.equal(result.body.data.items[0].text, FULL)
     assert.deepEqual(h.oldDataPayload, before)
-    assert.equal(h.historical.length, 1)
-    assert.equal(h.calls.length, 0)
+    assert.equal(h.historical.length, 0)
+    assert.equal(h.calls.length, 2)
   }
   const h = await harness({ platform: 'weibo' })
   const body = { platform: 'weibo', query: '汽车', pageSize: 20 }
@@ -1791,12 +1793,9 @@ test('Weibo historical small pages clean titles while preserving source payloads
   const old = structuredClone(h.oldDataPayload)
   Object.assign(old.data.pageInfo, { hasMore: true, nextCursor: 'old-night-all-token', cursorType: 'opaque' })
   const wrapped = capNightAllDataSearchTraversal(old, { platform: 'weibo', page: 1, scope: traversal.scope, codec })
-  await h.invokeData({ ...body, cursor: wrapped.data.pageInfo.nextCursor })
-  assert.equal(h.historical[0].body.cursor, 'old-night-all-token')
+  await assert.rejects(h.invokeData({ ...body, cursor: wrapped.data.pageInfo.nextCursor }), error => error.code === 'search_restart_required')
+  assert.equal(h.historical.length, 0)
   assert.equal(h.calls.length, 0)
-  h.oldDataPayload.data.items[0].contentType = 'user_profile'
-  h.oldDataPayload.data.items[0].title = 'account name'
-  assert.equal((await h.invokeData({ ...body, pageSize: 10 }, 'data-profile-preserved')).body.data.items[0].title, 'account name')
 })
 
 test('Instagram list-only account results deliver zero posts without quarantining later searches or losing the paid receipt', async () => {

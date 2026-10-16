@@ -6,6 +6,7 @@ import { RAW_SEARCH_PATH, RAW_SEARCH_DATASET, RAW_SEARCH_VERSION } from '../cont
 import { createDataSearchCursorCodec, createRawSearchCursorCodec, createNightAllCompatibilityCursorCodec } from './cursor.mjs'
 import { prepareNightAllCompatibilityTraversal } from '../data/night-all-pagination.mjs'
 import { runContentSearch } from './content-search-workflow.mjs'
+import { xiaohongshuSearchOperation } from '../contracts/remaining-content-search.mjs'
 
 const hash = value => requestFingerprint({ method: 'POST', path: '/internal/tikhub-content-search/scope', body: value })
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)
@@ -93,12 +94,14 @@ export function contentSearchDeliveryBody(request, rowsByJob, state, { calls, wa
 export function contentSearchPlan({ gateway, context, input, dependencies }) {
   const { normalized, body, idempotencyKey, dataSearch = null, signal } = input
   const recipe = TIKHUB_CONTENT_SEARCH_RECIPES[normalized.platform], endpoint = nativeForwardingEndpoint(recipe?.key)
+  const xiaohongshu = normalized.platform === 'xiaohongshu'
   if (gateway.providerKey !== 'tikhub' || !endpoint || !gateway.operationControlStore) throw new AppError(503, 'content_search_unavailable', 'Hub content search is unavailable')
   const codec = (dataSearch ? createDataSearchCursorCodec : createRawSearchCursorCodec)(gateway.apiKeyPepper, `${context.consumer.id}:${context.apiKey.id}`)
   let request
   return { input: { body, idempotencyKey, signal, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH },
-    plan: { operation: endpoint.operation, authorizationPlatform: normalized.platform, platformSearch: true,
-      meterKey: dataSearch ? normalized.platform : 'raw', datasetId: dataSearch ? 'night-all.search.v1' : RAW_SEARCH_DATASET,
+    plan: { operation: xiaohongshu ? xiaohongshuSearchOperation.operation : endpoint.operation, authorizationPlatform: normalized.platform, platformSearch: true,
+      ...(xiaohongshu ? { requiredCapabilities: [xiaohongshuSearchOperation.operation] } : {}),
+      meterKey: xiaohongshu ? xiaohongshuSearchOperation.operation : dataSearch ? normalized.platform : 'raw', datasetId: dataSearch ? 'night-all.search.v1' : RAW_SEARCH_DATASET,
       nativeForwarding: true, dataSearch: Boolean(dataSearch), replayReleasedFailures: true, replayWindowMs: dataSearch?.replayWindowMs,
       normalize: ({ policy }) => {
         request = normalizeContentSearchDelivery(normalized, { dataSearch, codec,

@@ -5675,7 +5675,80 @@ paths:
       summary: Search one explicitly selected platform
       x-mx-required-capabilities-by-platform:
         xiaohongshu: social.posts.search
-      description: "Weibo first-page searches with pageSize 20–100 and Instagram (aliases ins/ig/insta) use Hub-native acquisition and retain the night-all.data-search.v1 envelope, original platform pricing, item usage and fresh/stable replay windows. Ordinary Twitter, Facebook, Weibo and Instagram posts have title=null and preserve their full text/caption; genuine video or article titles on other platforms are retained. Metrics use nullable counts: preserve available zero values and display null as unavailable. Historical or upstream default zeros alone do not prove an observed measurement. Media contains acquired references, keeps genuine mixed photo/video attachments and uses explicit poster evidence rather than guessing a poster from the first photo. Weibo previews receive bounded long-text detail enrichment; unresolved previews return partial and WEIBO_FULL_TEXT_INCOMPLETE. Instagram preserves compound continuation state and excludes keyword recommendations from posts. New opaque mxds1 cursors bind Key, platform, query, pageSize and type for at most 15 pages. Smaller Weibo pages and old Weibo mxnc1 cursors stay on historical acquisition with Hub title normalization. Retired Twitter mxnc1 and Instagram historical/untagged continuations require an explicit restart; saved deliveries retain their original replay. Instagram pages larger than pageSize are delivered across bounded Hub pages from the same saved response before advancing the upstream cursor. Instagram buffer-only pages report meta.providerCalls=0 and preserve per-request customer pricing and item usage. Twitter standard search pageSize 1–100 drains saved overflow, deduplicates previously delivered IDs and fills the remaining logical page without a separate default per-request call-count cap (at most 50 requested items per upstream page). Filling remains bounded by 15 upstream pages, 15 public pages, 24 hours, the original request deadline and retained-page byte limits. Unconsumed acquired rows are retained. Exhaustion may return a short page; bounded admission stops return partial with warnings and a safe nextCursor when available. One Hub request keeps one existing customer quote/settlement. Twitter standard requests with no acquired page wait for Hub concurrency before their first dispatch (default up to 10 seconds and 32 pending), within the original deadline. A full queue or timeout returns 503 external_platform_busy with a Hub reason, admissionMode=bounded_wait and a retryAfterMs backoff hint; this is not a quota error or a timed circuit breaker. Paid carry remains deliverable as a short page without waiting or another acquisition. Twitter raw/social/crawl contracts do not gain this fill behavior. Facebook standard search also drains saved overflow, deduplicates delivered IDs and fills without a separate default per-request call-count cap. The existing initial confirmed-429 fallback rule remains; actual upstream limits and failure protections still apply. It retains complete paid pages, has 15 upstream/public page and 24-hour limits, and settles one existing customer quote. Initial route selection follows the existing allowance policy; accepted pages and continuations remain on their original supplier. Facebook raw keeps its existing single-page contract. Facebook raw and standard search share a global FIFO allowance gate: up to 10 seconds and 32 pending, within the original deadline. Busy alone does not switch channels; queue full/timeout returns 503 external_platform_busy with a Hub reason. Included allowance counts each acquisition attempt, including fill pages, rather than returned posts; saved overflow and replay require no new acquisition. Ordinary billing observations can only tighten allowance. Existing demand-triggered recovery probes remain enabled and may incur a charge; only a reliable positive probe can establish renewal. An unreadable global allowance state returns 503 facebook_quota_state_unavailable without dispatch. Each continuation stays on its original route. Facebook date filters use params.startTime/endTime or params.startDate/endDate and resolve to date precision. Older unscoped Facebook cursors require restarting from page one. Unrecognized pages still fail with retained evidence; no truncation or automatic fallback. Cursors expire after 24 hours; a missing or changed saved page returns 409 search_page_unavailable without automatic reacquisition. WeChat platforms wechat_mp/wechat_search (aliases wechat/weixin) use /data/wechat/search/search directly and return its native contractVersion/endpoint/data/meta/requestId envelope. Requires social + native.wechat.search.search; platform-only grants do not authorize live search. Optional params follow the native schema. type=fresh/stable both use permanent native idempotent replay; a new acquisition requires a new Idempotency-Key. Old mxnc1 cursors are rejected. No Night-All dispatch or fallback. Bilibili, Douyin, Kuaishou and Zhihu keyword searches now execute fixed Hub-owned endpoints without historical-service dispatch or fallback, preserving platform grants, customer prices and the standard items/pageInfo envelope. Standard pages drain saved overflow, deduplicate and fill without a separate default per-request call-count cap; 15 upstream/public pages, 24 hours and the original resource/admission boundaries remain. Bilibili native like/review/favorites/play and stat aliases are mapped; absent modern counts remain null and genuine zeros remain zero. Native video/article titles and complete acquired body/media references are retained. Supported fixed-endpoint filters use params; callers do not select providers or endpoints. Explicit detail/comment enrichment flags are rejected before dispatch. Account posts/profile routes are unchanged. Saved historical deliveries replay first; old historical cursors require an explicit restart for new dispatch. Reddit and YouTube standard searches also use fixed Hub-owned endpoints while retaining the existing public fields, platform grants, customer prices, fresh/stable replay windows and night-all.data-search.v1 items/pageInfo envelope. Their params field is rejected even when empty; native filters, endpoint/provider selection and paid detail/comment options are not added to this public contract. Both platforms drain saved overflow, deduplicate and fill within the same 15 upstream/public page, 24-hour, deadline, retained-byte and admission limits; saved overflow does not dispatch again. Native content IDs are exposed as externalId with platform-prefixed item id; source.provider and source.endpointId remain null. Unknown metrics remain null and complete acquired title/text is retained. Operation activation, a usable credential and existing cost/admission checks are required before a new acquisition; there is no historical-service fallback after an unavailable, rejected or unknown direct outcome. Reddit and YouTube /search/raw and /night-all/search/raw retain their existing Night-All routes, parameters and responses. Existing settled standard requests replay their saved response under the original replay window. A not-yet-delivered continuation using an old mxnc1 cursor returns 409 search_restart_required before dispatch; restart explicitly from page one with the cursor removed and a new Idempotency-Key. New mxds1 continuations remain bound to the original Key, platform, query, pageSize and type and use a new Idempotency-Key for each page. Other platforms: one request targets one granted platform. For platform=telegram, Hub searches canonical stored messages. For platform=xiaohongshu, the API-key scope must also include social.posts.search; this is checked before direct or historical dispatch, and the default and only Hub-native page size is exactly 20. Compatible first-page requests use the governed direct external-data connector only after an independent rollout gate; previously issued opaque mxec2 direct cursors remain on that connector. The response keeps the night-all.data-search.v1 envelope. A non-20 pageSize stays on the historical compatibility path; that path now returns an encrypted, consumer/query/page-size-scoped mxnc1 nextCursor and terminates after page 15. Return that cursor unchanged with a new Idempotency-Key for each page. A pre-migration raw historical cursor returns 400 invalid_cursor and must restart from a cursor-less first page. Hub automatically attempts bounded detail enrichment only for note bodies at the provider preview boundary; it keeps a detail body only when it is strictly longer and reports unresolved enrichment as response warnings. public_opinion and every data_center_saved_records_* platform are Hub-stored and deliberately rejected by this live-compatible route; use the province feed, /data/stored/search or /data/canonical/search. The caller never selects an external provider; cursors cannot move between paths, queries or page sizes. Replay the same body with the same Idempotency-Key."
+      description: 'Weibo searches with pageSize 1–100 and Instagram (aliases ins/ig/insta) use Hub-native acquisition and retain
+        the night-all.data-search.v1 envelope, original platform pricing, item usage and fresh/stable replay windows. Ordinary
+        Twitter, Facebook, Weibo and Instagram posts have title=null and preserve their full text/caption; genuine video or
+        article titles on other platforms are retained. Metrics use nullable counts: preserve available zero values and display
+        null as unavailable. Historical or upstream default zeros alone do not prove an observed measurement. Media contains
+        acquired references, keeps genuine mixed photo/video attachments and uses explicit poster evidence rather than guessing
+        a poster from the first photo. Weibo previews receive bounded long-text detail enrichment; unresolved previews return
+        partial and WEIBO_FULL_TEXT_INCOMPLETE. Instagram preserves compound continuation state and excludes keyword recommendations
+        from posts. New opaque mxds1 cursors bind Key, platform, query, pageSize and type for at most 15 pages. Smaller Weibo
+        pages use retained-page buffering. Saved historical deliveries replay unchanged; new dispatch with old Weibo mxnc1 cursors
+        returns 409 search_restart_required. Retired Twitter mxnc1 and Instagram historical/untagged continuations require an
+        explicit restart; saved deliveries retain their original replay. Instagram pages larger than pageSize are delivered
+        across bounded Hub pages from the same saved response before advancing the upstream cursor. Instagram buffer-only pages
+        report meta.providerCalls=0 and preserve per-request customer pricing and item usage. Twitter standard search pageSize
+        1–100 drains saved overflow, deduplicates previously delivered IDs and fills the remaining logical page without a separate
+        default per-request call-count cap (at most 50 requested items per upstream page). Filling remains bounded by 15 upstream
+        pages, 15 public pages, 24 hours, the original request deadline and retained-page byte limits. Unconsumed acquired rows
+        are retained. Exhaustion may return a short page; bounded admission stops return partial with warnings and a safe nextCursor
+        when available. One Hub request keeps one existing customer quote/settlement. Twitter standard requests with no acquired
+        page wait for Hub concurrency before their first dispatch (default up to 10 seconds and 32 pending), within the original
+        deadline. A full queue or timeout returns 503 external_platform_busy with a Hub reason, admissionMode=bounded_wait and
+        a retryAfterMs backoff hint; this is not a quota error or a timed circuit breaker. Paid carry remains deliverable as
+        a short page without waiting or another acquisition. Twitter raw/social/crawl contracts do not gain this fill behavior.
+        Facebook standard search also drains saved overflow, deduplicates delivered IDs and fills without a separate default
+        per-request call-count cap. The existing initial confirmed-429 fallback rule remains; actual upstream limits and failure
+        protections still apply. It retains complete paid pages, has 15 upstream/public page and 24-hour limits, and settles
+        one existing customer quote. Initial route selection follows the existing allowance policy; accepted pages and continuations
+        remain on their original supplier. Facebook raw keeps its existing single-page contract. Facebook raw and standard search
+        share a global FIFO allowance gate: up to 10 seconds and 32 pending, within the original deadline. Busy alone does not
+        switch channels; queue full/timeout returns 503 external_platform_busy with a Hub reason. Included allowance counts
+        each acquisition attempt, including fill pages, rather than returned posts; saved overflow and replay require no new
+        acquisition. Ordinary billing observations can only tighten allowance. Existing demand-triggered recovery probes remain
+        enabled and may incur a charge; only a reliable positive probe can establish renewal. An unreadable global allowance
+        state returns 503 facebook_quota_state_unavailable without dispatch. Each continuation stays on its original route.
+        Facebook date filters use params.startTime/endTime or params.startDate/endDate and resolve to date precision. Older
+        unscoped Facebook cursors require restarting from page one. Unrecognized pages still fail with retained evidence; no
+        truncation or automatic fallback. Cursors expire after 24 hours; a missing or changed saved page returns 409 search_page_unavailable
+        without automatic reacquisition. WeChat platforms wechat_mp/wechat_search (aliases wechat/weixin) use /data/wechat/search/search
+        directly and return its native contractVersion/endpoint/data/meta/requestId envelope. Requires social + native.wechat.search.search;
+        platform-only grants do not authorize live search. Optional params follow the native schema. type=fresh/stable both
+        use permanent native idempotent replay; a new acquisition requires a new Idempotency-Key. Old mxnc1 cursors are rejected.
+        No Night-All dispatch or fallback. Bilibili, Douyin, Kuaishou and Zhihu keyword searches now execute fixed Hub-owned
+        endpoints without historical-service dispatch or fallback, preserving platform grants, customer prices and the standard
+        items/pageInfo envelope. Standard pages drain saved overflow, deduplicate and fill without a separate default per-request
+        call-count cap; 15 upstream/public pages, 24 hours and the original resource/admission boundaries remain. Bilibili native
+        like/review/favorites/play and stat aliases are mapped; absent modern counts remain null and genuine zeros remain zero.
+        Native video/article titles and complete acquired body/media references are retained. Supported fixed-endpoint filters
+        use params; callers do not select providers or endpoints. Explicit detail/comment enrichment flags are rejected before
+        dispatch. Account posts/profile routes are unchanged. Saved historical deliveries replay first; old historical cursors
+        require an explicit restart for new dispatch. Reddit, YouTube and TikTok standard searches also use fixed Hub-owned
+        endpoints while retaining the existing public fields, platform grants, customer prices, fresh/stable replay windows
+        and night-all.data-search.v1 items/pageInfo envelope. Their params field is rejected even when empty; native filters,
+        endpoint/provider selection and paid detail/comment options are not added to this public contract. Both platforms drain
+        saved overflow, deduplicate and fill within the same 15 upstream/public page, 24-hour, deadline, retained-byte and admission
+        limits; saved overflow does not dispatch again. Native content IDs are exposed as externalId with platform-prefixed
+        item id; source.provider and source.endpointId remain null. Unknown metrics remain null and complete acquired title/text
+        is retained. Operation activation, a usable credential and existing cost/admission checks are required before a new
+        acquisition; there is no historical-service fallback after an unavailable, rejected or unknown direct outcome. Reddit
+        and YouTube /search/raw and /night-all/search/raw retain their existing Night-All routes, parameters and responses.
+        Existing settled standard requests replay their saved response under the original replay window. A not-yet-delivered
+        continuation using an old mxnc1 cursor returns 409 search_restart_required before dispatch; restart explicitly from
+        page one with the cursor removed and a new Idempotency-Key. New mxds1 continuations remain bound to the original Key,
+        platform, query, pageSize and type and use a new Idempotency-Key for each page. Other platforms: one request targets
+        one granted platform. For platform=telegram, Hub searches canonical stored messages. For platform=xiaohongshu, the API-key
+        scope must also include social.posts.search. All valid standard page sizes use Hub-owned acquisition with the existing
+        operation policy, grants and customer meter; a disabled operation never falls back to Night-All. The default page size
+        is 20 and previously issued mxec2 direct cursors remain on their connector. Other page sizes use retained-page buffering
+        with at most 15 upstream/public pages. Saved historical deliveries replay unchanged; a new dispatch with mxnc1 requires
+        an explicit restart. The response keeps the night-all.data-search.v1 envelope. Legacy raw routes retain their original
+        rollout rules. Hub automatically attempts bounded detail enrichment only for note bodies at the provider preview boundary;
+        it keeps a detail body only when it is strictly longer and reports unresolved enrichment as response warnings. public_opinion
+        and every data_center_saved_records_* platform are Hub-stored and deliberately rejected by this live-compatible route;
+        use the province feed, /data/stored/search or /data/canonical/search. The caller never selects an external provider;
+        cursors cannot move between paths, queries or page sizes. Replay the same body with the same Idempotency-Key.'
       x-mx-error-codes:
         '400':
         - invalid_request
@@ -5759,9 +5832,9 @@ paths:
       - name: Idempotency-Key
         in: header
         required: true
-        description: The Idempotency-Key is global within one consumer and remains bound to the Hub API key that created
-          its usage record. Reuse it only with that same API key when retrying the exact same path and normalized
-          body; another API key, a new path, body or page requires a new Idempotency-Key.
+        description: The Idempotency-Key is global within one consumer and remains bound to the Hub API key that created its
+          usage record. Reuse it only with that same API key when retrying the exact same path and normalized body; another
+          API key, a new path, body or page requires a new Idempotency-Key.
         schema:
           type: string
           minLength: 8
@@ -5770,7 +5843,14 @@ paths:
       - name: X-MX-Insight-Retry-Of
         in: header
         required: false
-        description: Explicit manual retry for an unknown standard Twitter search only. Requires the original active API Key, the same saved normalized body (including type and cursor), and a different new Idempotency-Key. The UUID references the original request; Hub retains its unknown state and bill and may charge the new request again. One durable successor is allowed per original; retries of the latest unknown successor require a new explicit acknowledgement. Pending requests, unrelated unknowns, unusable-response quarantine, permissions, quotas, circuit and concurrency limits still block dispatch. Missing original evidence or invalid/expired cursors cannot authorize retry. A claimed successor keeps permanent idempotent replay, including type=fresh; never automatically resend after a lost response. No retry support is added to raw or account routes.
+        description: Explicit manual retry for an unknown standard Twitter search only. Requires the original active API Key,
+          the same saved normalized body (including type and cursor), and a different new Idempotency-Key. The UUID references
+          the original request; Hub retains its unknown state and bill and may charge the new request again. One durable successor
+          is allowed per original; retries of the latest unknown successor require a new explicit acknowledgement. Pending requests,
+          unrelated unknowns, unusable-response quarantine, permissions, quotas, circuit and concurrency limits still block
+          dispatch. Missing original evidence or invalid/expired cursors cannot authorize retry. A claimed successor keeps permanent
+          idempotent replay, including type=fresh; never automatically resend after a lost response. No retry support is added
+          to raw or account routes.
         schema:
           type: string
           format: uuid
@@ -5832,10 +5912,10 @@ paths:
                         - weixin_index
                         - ai_search
                         default: all
-                        description: 垂类字符串键（共 18 个）。**实测有结果**：综合 all / 公众号·服务号·视频号 account / 文章 article / 视频 video
-                          / 表情 sticker。其余键（underline / encyclopedia / live_stream / comment / listen / news / photos
-                          / book / moments / image / mini_game / weixin_index / ai_search）由微信服务端按账号与地区下发，当前实测恒返回空结果（count=0
-                          + no_more 文案，仍按一次正常调用计费）。当前账号真正可用的 tab 以综合搜索响应里的 categories 为准；传列表外的值直接报错（422）
+                        description: 垂类字符串键（共 18 个）。**实测有结果**：综合 all / 公众号·服务号·视频号 account / 文章 article / 视频 video / 表情 sticker。其余键（underline
+                          / encyclopedia / live_stream / comment / listen / news / photos / book / moments / image / mini_game
+                          / weixin_index / ai_search）由微信服务端按账号与地区下发，当前实测恒返回空结果（count=0 + no_more 文案，仍按一次正常调用计费）。当前账号真正可用的 tab
+                          以综合搜索响应里的 categories 为准；传列表外的值直接报错（422）
                       sort:
                         anyOf:
                         - type: integer
@@ -5945,8 +6025,8 @@ paths:
                   pageSize: 20
       responses:
         '200':
-          description: Stable provider-neutral data-search response. Xiaohongshu requests served by the Hub-native
-            connector also expose delivery-source and capture-age headers.
+          description: Stable provider-neutral data-search response. Xiaohongshu requests served by the Hub-native connector
+            also expose delivery-source and capture-age headers.
           headers:
             x-mx-insight-request-id:
               description: Durable request identifier for status lookup.
@@ -5961,8 +6041,8 @@ paths:
                 - 'true'
                 - 'false'
             x-mx-insight-source-mode:
-              description: Present when Hub has delivery-path evidence. stale is the historical compatibility snapshot
-                mode; the other cache/fallback values are Hub-native connector modes.
+              description: Present when Hub has delivery-path evidence. stale is the historical compatibility snapshot mode;
+                the other cache/fallback values are Hub-native connector modes.
               schema:
                 type: string
                 enum:
@@ -8908,6 +8988,716 @@ paths:
         '503':
           description: 请求失败；未知结果禁止自动重发。
 
+  /data/youtube/comments:
+    post:
+      tags:
+      - 社媒与内容数据
+      operationId: youtube_video_comments
+      summary: YouTube 按视频取评论
+      x-mx-required-platform: youtube
+      x-mx-required-capabilities:
+      - social.comments.list
+      x-mx-data-platform: youtube
+      x-mx-category: YouTube
+      x-mx-meter-key: social.comments.list
+      x-mx-doc-path: /docs/social-content
+      description: Hub 直接调用已审核的上游数据合同，不经过 Night-All。每个成功交付请求按 social.comments.list 结算一次；内部采购逐调用独立记账。maxComments 是整个响应的评论上限，不是每视频上限；全量已取得原始页归档、规范化入库，溢出评论保存在本轮分页状态中。一次遍历最多
+        15 个数据上游页和 15 个响应页，另允许一次频道解析；游标有效期 24 小时。hasMore=false 伴随 warnings 不证明供应商数据已耗尽。需要 youtube 平台、social.comments.list 能力及相关采购操作的凭据、价格和启用状态；不自动扩大授权。旧
+        Night-All/原生供应商游标不能混用，无故障回退或自动重试。
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+        description: 同一逻辑页重试保持原标识和请求体；下一页使用新标识。未知结果先查原请求，不能换标识盲重试。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              anyOf:
+              - required:
+                - videoId
+              - required:
+                - video_id
+              - required:
+                - postId
+              - required:
+                - post_id
+              - required:
+                - contentId
+              - required:
+                - content_id
+              - required:
+                - url
+              properties:
+                videoId:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                video_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                postId:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                post_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                contentId:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                content_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                url:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                platform:
+                  const: youtube
+                businessId:
+                  type: string
+                  description: 可省略；提交时须与当前消费者绑定值相同。
+                business_id:
+                  type: string
+                maxComments:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                  default: 50
+                  description: 本响应全部视频合计的评论上限，仍受 Key 页大小上限约束；不足不证明结束。
+                max_comments:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                count:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                pageSize:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                limit:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                sortBy:
+                  type: string
+                  enum:
+                  - top
+                  - newest
+                  default: top
+                sort_by:
+                  type: string
+                  enum:
+                  - top
+                  - newest
+                languageCode:
+                  type: string
+                  default: zh-CN
+                language_code:
+                  type: string
+                countryCode:
+                  type: string
+                  default: US
+                country_code:
+                  type: string
+                params:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    sortBy:
+                      type: string
+                      enum:
+                      - top
+                      - newest
+                      default: top
+                    sort_by:
+                      type: string
+                      enum:
+                      - top
+                      - newest
+                    languageCode:
+                      type: string
+                      default: zh-CN
+                    language_code:
+                      type: string
+                    countryCode:
+                      type: string
+                      default: US
+                    country_code:
+                      type: string
+                includeRaw:
+                  type: boolean
+                  default: false
+                  description: 只影响已声明的业务字段；不暴露原始供应商审计包或凭据。
+                cursor:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                  description: 原样使用 data.pageInfo.nextCursor；保持身份、参数、上限和 Key 不变。
+                page:
+                  type: integer
+                  minimum: 1
+                  maximum: 15
+                  default: 1
+              description: 多个同义字段同时出现必须等价；频道接口不接受视频 URL。params 仅支持排序、语言、地区，不能提交原生 continuation_token、provider 或上游路径。
+            example:
+              videoId: dQw4w9WgXcQ
+              maxComments: 50
+      responses:
+        '200':
+          description: 本页评论及 Hub 分页状态。频道 results 按视频分组，只含本页评论；顶层游标控制继续。partial 或 warnings 应保留展示，不能当作成功空列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - contractVersion
+                - data
+                - requestId
+                properties:
+                  contractVersion:
+                    const: mx-insight-hub.youtube-comments.v1
+                  requestId:
+                    type: string
+                    format: uuid
+                  data:
+                    type: object
+                    required:
+                    - platform
+                    - items
+                    - raw_data
+                    - page
+                    - pageInfo
+                    - status
+                    - warnings
+                    properties:
+                      platform:
+                        const: youtube
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                          description: 评论业务投影；videoId 关联所属视频。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
+                      comments:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                          description: 评论业务投影；videoId 关联所属视频。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
+                      raw_data:
+                        type: string
+                        description: 本页 items 的 JSON 字符串，兼容下游记录计数。
+                      raw_info:
+                        const: '[]'
+                      page:
+                        type: object
+                        required:
+                        - hasMore
+                        - nextCursor
+                        - returnedCount
+                        properties:
+                          page:
+                            type: integer
+                            minimum: 1
+                            maximum: 15
+                          pageSize:
+                            type: integer
+                            minimum: 1
+                            maximum: 100
+                          returnedCount:
+                            type: integer
+                            minimum: 0
+                          hasMore:
+                            type: boolean
+                          nextCursor:
+                            type:
+                            - string
+                            - 'null'
+                          providerCursor:
+                            type:
+                            - string
+                            - 'null'
+                            description: nextCursor 的兼容别名，仍是 Hub 游标。
+                        additionalProperties: true
+                      pageInfo:
+                        type: object
+                        required:
+                        - hasMore
+                        - nextCursor
+                        - returnedCount
+                        properties:
+                          page:
+                            type: integer
+                            minimum: 1
+                            maximum: 15
+                          pageSize:
+                            type: integer
+                            minimum: 1
+                            maximum: 100
+                          returnedCount:
+                            type: integer
+                            minimum: 0
+                          hasMore:
+                            type: boolean
+                          nextCursor:
+                            type:
+                            - string
+                            - 'null'
+                          providerCursor:
+                            type:
+                            - string
+                            - 'null'
+                            description: nextCursor 的兼容别名，仍是 Hub 游标。
+                        additionalProperties: true
+                      status:
+                        enum:
+                        - ok
+                        - partial
+                      warnings:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                      results:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                      meta:
+                        type: object
+                        additionalProperties: true
+                    additionalProperties: true
+        '400':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+        '401':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+        '402':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+        '403':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+        '409':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+        '429':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+        '502':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+        '503':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+  /data/youtube/channel-comments:
+    post:
+      tags:
+      - 社媒与内容数据
+      operationId: youtube_channel_comments
+      summary: YouTube 频道视频的评论
+      x-mx-required-platform: youtube
+      x-mx-required-capabilities:
+      - social.comments.list
+      x-mx-data-platform: youtube
+      x-mx-category: YouTube
+      x-mx-meter-key: social.comments.list
+      x-mx-doc-path: /docs/social-content
+      description: Hub 直接调用已审核的上游数据合同，不经过 Night-All。每个成功交付请求按 social.comments.list 结算一次；内部采购逐调用独立记账。maxComments 是整个响应的评论上限，不是每视频上限；全量已取得原始页归档、规范化入库，溢出评论保存在本轮分页状态中。一次遍历最多
+        15 个数据上游页和 15 个响应页，另允许一次频道解析；游标有效期 24 小时。hasMore=false 伴随 warnings 不证明供应商数据已耗尽。需要 youtube 平台、social.comments.list 能力及相关采购操作的凭据、价格和启用状态；不自动扩大授权。旧
+        Night-All/原生供应商游标不能混用，无故障回退或自动重试。
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+        description: 同一逻辑页重试保持原标识和请求体；下一页使用新标识。未知结果先查原请求，不能换标识盲重试。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              anyOf:
+              - required:
+                - channelId
+              - required:
+                - channel_id
+              - required:
+                - channelUrl
+              - required:
+                - channel_url
+              - required:
+                - url
+              properties:
+                channelId:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                channel_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                channelUrl:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                channel_url:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                url:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                platform:
+                  const: youtube
+                businessId:
+                  type: string
+                  description: 可省略；提交时须与当前消费者绑定值相同。
+                business_id:
+                  type: string
+                maxComments:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                  default: 50
+                  description: 本响应全部视频合计的评论上限，仍受 Key 页大小上限约束；不足不证明结束。
+                max_comments:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                count:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                pageSize:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                limit:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                maxVideos:
+                  type: integer
+                  minimum: 1
+                  maximum: 20
+                  default: 5
+                  description: 本轮选择的频道视频窗口，不是整个频道历史；每次续页保持不变。
+                max_videos:
+                  type: integer
+                  minimum: 1
+                  maximum: 20
+                sortBy:
+                  type: string
+                  enum:
+                  - top
+                  - newest
+                  default: top
+                sort_by:
+                  type: string
+                  enum:
+                  - top
+                  - newest
+                languageCode:
+                  type: string
+                  default: zh-CN
+                language_code:
+                  type: string
+                countryCode:
+                  type: string
+                  default: US
+                country_code:
+                  type: string
+                params:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    sortBy:
+                      type: string
+                      enum:
+                      - top
+                      - newest
+                      default: top
+                    sort_by:
+                      type: string
+                      enum:
+                      - top
+                      - newest
+                    languageCode:
+                      type: string
+                      default: zh-CN
+                    language_code:
+                      type: string
+                    countryCode:
+                      type: string
+                      default: US
+                    country_code:
+                      type: string
+                includeRaw:
+                  type: boolean
+                  default: false
+                  description: 只影响已声明的业务字段；不暴露原始供应商审计包或凭据。
+                cursor:
+                  type: string
+                  minLength: 1
+                  maxLength: 8192
+                  description: 原样使用 data.pageInfo.nextCursor；保持身份、参数、上限和 Key 不变。
+                page:
+                  type: integer
+                  minimum: 1
+                  maximum: 15
+                  default: 1
+              description: 多个同义字段同时出现必须等价；频道接口不接受视频 URL。params 仅支持排序、语言、地区，不能提交原生 continuation_token、provider 或上游路径。
+            example:
+              channelUrl: https://www.youtube.com/@example
+              maxVideos: 5
+              maxComments: 50
+      responses:
+        '200':
+          description: 本页评论及 Hub 分页状态。频道 results 按视频分组，只含本页评论；顶层游标控制继续。partial 或 warnings 应保留展示，不能当作成功空列表。
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - contractVersion
+                - data
+                - requestId
+                properties:
+                  contractVersion:
+                    const: mx-insight-hub.youtube-comments.v1
+                  requestId:
+                    type: string
+                    format: uuid
+                  data:
+                    type: object
+                    required:
+                    - platform
+                    - items
+                    - raw_data
+                    - page
+                    - pageInfo
+                    - status
+                    - warnings
+                    properties:
+                      platform:
+                        const: youtube
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                          description: 评论业务投影；videoId 关联所属视频。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
+                      comments:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                          description: 评论业务投影；videoId 关联所属视频。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
+                      raw_data:
+                        type: string
+                        description: 本页 items 的 JSON 字符串，兼容下游记录计数。
+                      raw_info:
+                        const: '[]'
+                      page:
+                        type: object
+                        required:
+                        - hasMore
+                        - nextCursor
+                        - returnedCount
+                        properties:
+                          page:
+                            type: integer
+                            minimum: 1
+                            maximum: 15
+                          pageSize:
+                            type: integer
+                            minimum: 1
+                            maximum: 100
+                          returnedCount:
+                            type: integer
+                            minimum: 0
+                          hasMore:
+                            type: boolean
+                          nextCursor:
+                            type:
+                            - string
+                            - 'null'
+                          providerCursor:
+                            type:
+                            - string
+                            - 'null'
+                            description: nextCursor 的兼容别名，仍是 Hub 游标。
+                        additionalProperties: true
+                      pageInfo:
+                        type: object
+                        required:
+                        - hasMore
+                        - nextCursor
+                        - returnedCount
+                        properties:
+                          page:
+                            type: integer
+                            minimum: 1
+                            maximum: 15
+                          pageSize:
+                            type: integer
+                            minimum: 1
+                            maximum: 100
+                          returnedCount:
+                            type: integer
+                            minimum: 0
+                          hasMore:
+                            type: boolean
+                          nextCursor:
+                            type:
+                            - string
+                            - 'null'
+                          providerCursor:
+                            type:
+                            - string
+                            - 'null'
+                            description: nextCursor 的兼容别名，仍是 Hub 游标。
+                        additionalProperties: true
+                      status:
+                        enum:
+                        - ok
+                        - partial
+                      warnings:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                      results:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                      meta:
+                        type: object
+                        additionalProperties: true
+                    additionalProperties: true
+        '400':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+        '401':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+        '402':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+        '403':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+        '409':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+        '429':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+        '502':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+        '503':
+          description: 稳定错误码和 requestId；失败或未知不自动重试，也不回退 Night-All。
+  /data/native/t.api_4a6f21264dc0b4a1:
+    post:
+      tags:
+      - 社媒与内容数据
+      operationId: native_t_api_4a6f21264dc0b4a1
+      summary: YouTube · 获取视频评论/Get video comments
+      x-mx-required-platform: social
+      x-mx-endpoint-key: t.api_4a6f21264dc0b4a1
+      x-mx-data-platform: youtube
+      x-mx-category: YouTube
+      x-mx-meter-key: native.t.api_4a6f21264dc0b4a1
+      x-mx-doc-path: /docs/social-content/native/t.api_4a6f21264dc0b4a1
+      x-mx-required-capabilities:
+      - native.t.api_4a6f21264dc0b4a1
+      description: 固定单接口原生数据查询，一次请求最多一次采集。需要独立操作授权与启用；data 完整保留业务字段，不归一化为搜索列表。仅 live_only，无自动分页、重试、补详情或存量回退。按接口参数显式翻页，每页使用新
+        Idempotency-Key；同页重试保持原请求和标识。不改变其他历史搜索合同。
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - params
+              properties:
+                deliveryMode:
+                  type: string
+                  enum:
+                  - live_only
+                  default: live_only
+                params:
+                  type: object
+                  additionalProperties: false
+                  required:
+                  - video_id
+                  properties:
+                    video_id:
+                      type: string
+                      description: 视频ID/Video ID
+                      minLength: 11
+                      maxLength: 11
+                    language_code:
+                      type: string
+                      description: 语言代码（如zh-CN, en-US等）/Language code
+                      default: zh-CN
+                    country_code:
+                      type: string
+                      description: 国家代码（如US, JP等）/Country code
+                      default: US
+                    sort_by:
+                      type: string
+                      description: 排序方式 | Sort by
+                      default: top
+                      enum:
+                      - top
+                      - newest
+                    continuation_token:
+                      type: string
+                      description: 翻页令牌/Pagination token
+                    need_format:
+                      type: boolean
+                      description: 是否需要清洗数据，提取关键内容，移除冗余数据/Whether to clean and format the data
+                      default: true
+      responses:
+        '200':
+          description: 原生 data、contractVersion、endpoint、requestId 与采集时间；没有推测的总数或 canonical 条目。
+        '400':
+          description: 请求失败；未知结果禁止自动重发。
+        '401':
+          description: 请求失败；未知结果禁止自动重发。
+        '402':
+          description: 请求失败；未知结果禁止自动重发。
+        '403':
+          description: 请求失败；未知结果禁止自动重发。
+        '409':
+          description: 请求失败；未知结果禁止自动重发。
+        '429':
+          description: 请求失败；未知结果禁止自动重发。
+        '502':
+          description: 请求失败；未知结果禁止自动重发。
+        '503':
+          description: 请求失败；未知结果禁止自动重发。
 components:
   securitySchemes:
     adminToken:
@@ -11653,7 +12443,7 @@ components:
       properties:
         platform: { type: string, pattern: "^(?![Aa][Ll][Ll]$|\\*$)[A-Za-z0-9_:-]+$", description: One explicit platform; `all` (case-insensitive) and `*` are forbidden., example: xiaohongshu }
         query: { type: string, minLength: 1, maxLength: 500, description: Non-blank search query; surrounding whitespace is trimmed. }
-        pageSize: {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Result ceiling, default 20; not a guarantee of a full page. Twitter, Facebook, Bilibili, Douyin, Kuaishou, Zhihu, Reddit and YouTube standard searches fill without a separate default per-request call-count cap; traversal, deadline, retained-page bytes and admission limits still apply. Xiaohongshu uses the Hub-native connector only when this value is exactly 20."}
+        pageSize: {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Result ceiling, default 20; not a guarantee of a full page. Twitter, Facebook, Bilibili, Douyin, Kuaishou, Zhihu, Reddit and YouTube standard searches fill without a separate default per-request call-count cap; traversal, deadline, retained-page bytes and admission limits still apply. Xiaohongshu supports all valid page sizes through Hub; 20 keeps the established direct connector and other sizes use retained-page buffering."}
         cursor: { type: string, minLength: 1, maxLength: 8192, description: "Non-blank opaque cursor returned by the previous page; send it unchanged with the same path, platform, query and pageSize." }
         params: {"type": "object", "additionalProperties": false, "description": "Platform-specific filters only for the listed platforms. Reddit and YouTube standard /data/search reject params, including an empty object; their raw compatibility endpoints retain their existing parameter contract. Facebook: startTime/endTime or startDate/endDate at date precision. Bilibili: order, duration, pubtime_begin_s/pubtime_end_s. Douyin: sort_type, publish_time, filter_duration, content_type. Kuaishou: sort_type, publish_time, duration. Zhihu: show_all_topics, search_source, sort. Fields belonging to another platform are rejected. Continue with the top-level signed Hub cursor; native offsets, sessions and endpoint/provider selection are not public pagination controls.", "properties": {"startTime": {"type": "string"}, "endTime": {"type": "string"}, "startDate": {"type": "string"}, "endDate": {"type": "string"}, "order": {"type": "string"}, "duration": {"anyOf": [{"type": "string"}, {"type": "integer", "minimum": 0}]}, "pubtime_begin_s": {"type": "integer", "minimum": 0}, "pubtime_end_s": {"type": "integer", "minimum": 0}, "sort_type": {"type": "string"}, "publish_time": {"type": "string"}, "filter_duration": {"type": "string"}, "content_type": {"type": "string"}, "show_all_topics": {"type": "integer", "minimum": 0}, "search_source": {"type": "string"}, "sort": {"type": "string"}}}
         type: { type: string, enum: [fresh, stable], default: fresh }

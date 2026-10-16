@@ -1,6 +1,7 @@
 import { AppError } from '../core/errors.mjs'
 import { normalizeNativeForwardingRequest } from './native-forwarding.mjs'
 import { normalizeSearchMedia } from './search-content.mjs'
+import { projectRemainingContentSearch, xiaohongshuSearchOperation } from './remaining-content-search.mjs'
 
 // These are the retained Night-All default keyword endpoints, not an editable
 // URL catalog. All execution, archives, leases and public cursor signing live
@@ -20,6 +21,13 @@ export const TIKHUB_CONTENT_SEARCH_RECIPES = Object.freeze(Object.fromEntries([
     ['query', 'search_type', 'sort', 'time_range', 'safe_search', 'allow_nsfw', 'after', 'need_format'], false, false],
   ['youtube', 'youtube_web_v2_get_general_search_v2', 'GET', '/api/v1/youtube/web_v2/get_general_search_v2', 'cursor',
     { sort_by: 'upload_date', continuation_token: '' }, ['keyword', 'continuation_token', 'upload_date', 'type', 'duration', 'features', 'sort_by'], false, false],
+  ['tiktok', 'tiktok_web_fetch_general_search', 'GET', '/api/v1/tiktok/web/fetch_general_search', 'compound',
+    { offset: 0, search_id: '' }, ['keyword', 'offset', 'search_id'], false, false],
+  ['weibo', 'weibo_web_v2_fetch_realtime_search', 'GET', '/api/v1/weibo/web_v2/fetch_realtime_search', 'page',
+    {}, ['query', 'page'], false, false],
+  ['xiaohongshu', 'xiaohongshu_app_v2_search_notes', 'GET', '/api/v1/xiaohongshu/app_v2/search_notes', 'compound',
+    { page: '1', sort_type: 'time_descending', note_type: '不限', time_filter: '不限', source: 'explore_feed', ai_mode: '0' },
+    ['keyword', 'page', 'sort_type', 'note_type', 'time_filter', 'search_id', 'search_session_id', 'source', 'ai_mode'], false, false],
 ].map(([platform, endpointId, method, path, pagination, defaults, parameterNames, rawCompatibility = true, publicParams = true]) => [platform, Object.freeze({
   platform, key: `t.${endpointId}`, endpointId, method, path, pagination,
   defaults: Object.freeze(defaults), parameterNames: Object.freeze(parameterNames), rawCompatibility, publicParams,
@@ -76,9 +84,11 @@ export function normalizeTikHubContentSearchRequest({ platform, query, pageSize 
   if (typeof query !== 'string' || !query.trim() || query.length > maxQueryLength || query.includes('\u0000')) throw new AppError(400, 'invalid_query', 'A bounded keyword is required')
   if (!object(params) || Object.keys(params).some(name => !recipe.parameterNames.includes(name))) throw new AppError(400, 'unsupported_fields', 'Unsupported content-search parameter')
   if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > maxPageSize) throw new AppError(400, 'invalid_page_size', 'Invalid content-search page or page size')
-  const nextNames = { bilibili: ['page'], douyin: ['cursor', 'search_id', 'backtrace'], kuaishou: ['pcursor'], zhihu: ['offset', 'search_hash_id'], reddit: ['after'], youtube: ['continuation_token'] }[platform]
+  const nextNames = { bilibili: ['page'], douyin: ['cursor', 'search_id', 'backtrace'], kuaishou: ['pcursor'], zhihu: ['offset', 'search_hash_id'], reddit: ['after'], youtube: ['continuation_token'], tiktok: ['offset', 'search_id'], weibo: ['page'], xiaohongshu: ['page', 'search_id', 'search_session_id'] }[platform]
   if (providerCursor != null && (!object(providerCursor) || Object.keys(providerCursor).some(name => !nextNames.includes(name)))) throw new AppError(400, 'invalid_cursor', 'Invalid platform continuation')
-  const upstream = { ...recipe.defaults, ...params, [platform === 'reddit' ? 'query' : 'keyword']: query.trim(), ...(providerCursor || {}) }
+  const upstream = { ...recipe.defaults, ...params, [['reddit', 'weibo'].includes(platform) ? 'query' : 'keyword']: query.trim(), ...(providerCursor || {}) }
+  if (platform === 'weibo') upstream.page = providerCursor?.page ?? page
+  if (platform === 'xiaohongshu') upstream.page = String(providerCursor?.page ?? page)
   if (platform === 'reddit' || platform === 'youtube') validateStandardOnlyParameters(platform, upstream)
   if (platform === 'bilibili') { upstream.page ??= page; upstream.page_size ??= pageSize }
   if (platform === 'zhihu') upstream.limit ??= String(pageSize)
@@ -86,7 +96,7 @@ export function normalizeTikHubContentSearchRequest({ platform, query, pageSize 
     if (upstream[name] != null && (typeof upstream[name] === 'boolean' || !Number.isSafeInteger(Number(upstream[name])) || Number(upstream[name]) < (name === 'page' || name === 'page_size' || name === 'limit' ? 1 : 0))) throw new AppError(400, 'invalid_parameter', `${name} must be a nonnegative integer`)
   }
   const native = normalizeNativeForwardingRequest(recipe.key, { params: upstream }, { maxPageSize })
-  return { ...native, platform, query: query.trim(), page, pageSize, providerCursor, recipeKey: recipe.key }
+  return { ...native, ...(platform === 'xiaohongshu' ? xiaohongshuSearchOperation : {}), platform, query: query.trim(), page, pageSize, providerCursor, recipeKey: recipe.key }
 }
 
 function validateStandardOnlyParameters(platform, input) {
@@ -542,6 +552,7 @@ export function projectTikHubContentSearch(result, request) {
   if (data.code != null && ![0, 200, '0', '200'].includes(data.code)) throw new Error('content_search_business_rejected')
   const capturedAt = timestamp(result.publicBody?.meta?.capturedAt)
   if (!capturedAt) throw new Error('invalid_content_search_capture_time')
+  if (['tiktok', 'xiaohongshu', 'weibo'].includes(request.platform)) return projectRemainingContentSearch(result, data, request, capturedAt)
   if (request.platform === 'reddit' || request.platform === 'youtube') return standardOnlyProjection(result, data, request, capturedAt)
   let entries = selectedArray(data, { bilibili: [['result'], ['data', 'result'], ['data']], douyin: [['business_data'], ['aweme_list'], ['data'], ['items']],
     kuaishou: [['mixFeeds'], ['feeds'], ['result', 'items'], ['items'], ['data']], zhihu: [['data'], ['items']] }[request.platform])
@@ -589,6 +600,7 @@ export function contentSearchLegacyRow(row) {
     profile_image_url: row.author_avatar_url || '', cover_url: row.cover_url || '', metadata: '{}' }
 }
 export function contentSearchDataItem(row) {
+  if (row.standard_item) return structuredClone(row.standard_item)
   const media = { coverUrl: row.cover_url || null, images: JSON.parse(row.image_urls), videos: JSON.parse(row.video_urls) }
   return { id: ['reddit', 'youtube'].includes(row.platform_name) ? `${row.platform_name}:${row.content_id}` : row.content_id, externalId: row.content_id, platform: row.platform_name, contentType: row.content_type || null,
     url: row.url || null, title: row.title || null, text: row.full_text || row.text || null,

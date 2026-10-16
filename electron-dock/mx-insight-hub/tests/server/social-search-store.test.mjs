@@ -4,6 +4,7 @@ import { randomUUID, createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { SocialSearchStateStore, SOCIAL_SEARCH_STATE_VERSION } from '../../server/external-platforms/social-search-store.mjs'
+import { YOUTUBE_COMMENTS_VERSION } from '../../server/contracts/youtube-comments.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { MemoryExternalPlatformStore, PostgresExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 
@@ -13,14 +14,14 @@ const digest = value => createHash('sha256').update(value).digest('hex')
 const clone = value => structuredClone(value)
 const scopeHash = 'a'.repeat(64), fingerprint = 'b'.repeat(64)
 
-async function fixture(t, postgres, provider = 'tikhub', path = '/api/v1/data/social/crawl') {
-  const platform = provider === 'rapidapi' ? 'twitter' : provider === 'justone' ? 'facebook' : 'weibo'
+async function fixture(t, postgres, provider = 'tikhub', path = '/api/v1/data/social/crawl', workflowKind = 'social-account') {
+  const platform = workflowKind === 'youtube-comments' ? 'youtube' : provider === 'rapidapi' ? 'twitter' : provider === 'justone' ? 'facebook' : 'weibo'
   const recipe = { operation: 'native.account.posts', endpointKey: 'native.account.posts', endpointVersion: 'v1' }
   const expected = { provider, ...recipe, contractVersion: 'fixture.native.v1' }
   const identity = { tenantId: randomUUID(), consumerId: randomUUID(), apiKeyId: randomUUID(), path, scopeHash }
   const sourceId = randomUUID(), targetId = randomUUID(), callId = randomUUID(), ownCallId = randomUUID(), accountId = randomUUID()
   const capturedAt = ago(1000)
-  const manifest = { version: SOCIAL_SEARCH_STATE_VERSION, scopeHash, previousDeliveryId: null, capturedAt,
+  const manifest = { version: workflowKind === 'youtube-comments' ? YOUTUBE_COMMENTS_VERSION : SOCIAL_SEARCH_STATE_VERSION, scopeHash, previousDeliveryId: null, capturedAt,
     state: { jobs: [{ query: 'fixture', providerPage: 1, providerCursor: null, done: true,
       started: true, upstreamPages: 1, buffer: null, resolvedIdentity: { userId: '42' }, profiles: [{ userId: '42', name: 'Fixture' }] }] }, deliveredIds: [['already-delivered']] }
   const source = { id: sourceId, ...identity, platform, status: 'committed', responseStatus: 200, fingerprint: 'c'.repeat(64),
@@ -102,7 +103,7 @@ async function fixture(t, postgres, provider = 'tikhub', path = '/api/v1/data/so
     providerStore.calls.set(callId, clone(call)); providerStore.calls.set(ownCallId, { ...clone(call), id: ownCallId, usageRequestId: targetId })
     for (const id of [callId, ownCallId]) providerStore.restrictedResponseArchives.set(id, clone(archive))
   }
-  const store = new SocialSearchStateStore(providerStores, { platform })
+  const store = new SocialSearchStateStore(providerStores, { platform, workflowKind })
   const setUsage = async (id, changes) => {
     if (!postgres) return Object.assign(usageStore.requests.get(id), clone(changes))
     await db.exec('ALTER TABLE usage_requests DISABLE TRIGGER usage_requests_settle_customer_charge')
@@ -132,6 +133,22 @@ async function fixture(t, postgres, provider = 'tikhub', path = '/api/v1/data/so
 for (const postgres of [false, true]) {
   const name = postgres ? 'PGlite' : 'Memory'
   const options = { skip: postgres && !modulePath ? 'Set MX_INSIGHT_TEST_PGLITE_MODULE to the local PGlite module' : false }
+  test(`${name} YouTube comment manifests keep their own path/version and settle one parent without rewriting source receipts`, options, async t => {
+    const f = await fixture(t, postgres, 'tikhub', '/api/v1/data/youtube/channel-comments', 'youtube-comments')
+    const before = await f.getUsage(f.source.id)
+    const saved = clone(f.saved)
+    saved.usageUnitsActual = 1
+    saved.manifest.state.jobs[0].resolvedIdentity = { channelId: 'UC' + 'a'.repeat(22), videos: [{ videoId: 'dQw4w9WgXcQ' }], discoveryDone: true }
+    await f.store.commitDelivery(saved)
+    const history = await f.store.historyFor({ ...f.identity, previousDeliveryId: f.target.id, jobCount: 1, totalLimit: 20 })
+    assert.equal(history.state.jobs[0].resolvedIdentity.videos[0].videoId, 'dQw4w9WgXcQ')
+    assert.deepEqual(await f.getUsage(f.source.id), before)
+    assert.equal((await f.counts()).captures, 1)
+    assert.equal((await f.counts()).charge, 'captured')
+    assert.equal(await f.store.pageFor({ ...f.identity, path: '/api/v1/data/youtube/comments', callId: f.callId, expected: f.expected }), null)
+    const accountStore = new SocialSearchStateStore(f.providerStores, { platform: 'youtube' })
+    await assert.rejects(accountStore.historyFor({ ...f.identity, previousDeliveryId: f.target.id, jobCount: 1, totalLimit: 20 }), { code: 'search_page_unavailable' })
+  })
   for (const provider of ['tikhub', 'rapidapi', 'justone']) {
     test(`${name} ${provider} social receipt checks scope, exact contract, outcome, original bytes and TTL without acquisition`, options, async t => {
       const f = await fixture(t, postgres, provider)

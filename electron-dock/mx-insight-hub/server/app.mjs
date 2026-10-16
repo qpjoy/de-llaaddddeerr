@@ -20,6 +20,7 @@ import { strategySearchUsageResponse, strategySearchUsageWindow } from './data/s
 import { strategySearchDataStatisticsResponse } from './data/strategy-search-data-statistics.mjs'
 import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSearchAlias } from './contracts/wechat-search-alias.mjs'
 import { hubSocialByPath } from './contracts/hub-social.mjs'
+import { YOUTUBE_COMMENT_PATHS } from './contracts/youtube-comments.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
 import { aggregateDiagnostics } from './data/aggregate-diagnostics.mjs'
 import { capabilityCatalog, syncCapabilityCatalog } from './data/capability-catalog.mjs'
@@ -5982,6 +5983,22 @@ export function createApp({
         if (request.method === 'GET') { sendJson(response,200,{data:await webSearchService.capabilities(context)},{'cache-control':'private, no-store'}); return }
         const result = await withAdmissionSignal(response, async signal => webSearchService.search(context,{signal,body:await readJson(request,64*1024),idempotencyKey:request.headers['idempotency-key'],baiduCompatible:pathname.endsWith('/compatible/baidu')}))
         sendJson(response,result.status,result.body,{'idempotent-replay':String(result.replay),'x-mx-insight-request-id':result.requestId,'x-mx-insight-source-mode':result.sourceMode})
+        return
+      }
+      const youtubeCommentsKind = request.method === 'POST'
+        ? Object.keys(YOUTUBE_COMMENT_PATHS).find(kind => YOUTUBE_COMMENT_PATHS[kind] === pathname) : null
+      if (youtubeCommentsKind) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'YouTube comments')
+        if (!socialAccountTikHubGateway) throw new AppError(503, 'external_platform_unavailable', 'YouTube comments are unavailable')
+        const result = await withAdmissionSignal(response, async signal => socialAccountTikHubGateway.youtubeComments(context, {
+          signal, kind: youtubeCommentsKind, body: await readJson(request, 64 * 1024), path: pathname,
+          idempotencyKey: request.headers['idempotency-key'],
+        }))
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+        })
         return
       }
       const socialEndpoint = request.method === 'POST' ? hubSocialByPath(pathname) : null

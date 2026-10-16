@@ -6,6 +6,8 @@ import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { TikHubAdapter } from '../../server/adapters/tikhub.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
+import { TikHubGateway } from '../../server/external-platforms/tikhub-gateway.mjs'
+import { xiaohongshuSearchOperation } from '../../server/contracts/remaining-content-search.mjs'
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
 import { nativeForwardingEndpoint, NATIVE_FORWARDING_VERSION } from '../../server/contracts/native-forwarding.mjs'
@@ -71,13 +73,15 @@ async function harness({ platform = 'bilibili', payload, fetchImpl, leaseMs = 12
   const tenant = await service.createTenant({ name: 'Offline content-search fixture' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Synthetic caller' })
   await store.setPlatformGrant(consumer.id, platform, true)
-  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Synthetic live identity', platforms: [platform], capabilities: [] })
+  const capabilities = platform === 'xiaohongshu' ? ['social.posts.search', 'social.posts.resolve'] : []
+  store.capabilityGrants.set(consumer.id, capabilities)
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Synthetic live identity', platforms: [platform], capabilities })
   const context = await service.authenticate(key.secret)
-  const recipe = TIKHUB_CONTENT_SEARCH_RECIPES[platform], endpoint = nativeForwardingEndpoint(recipe.key)
+  const recipe = TIKHUB_CONTENT_SEARCH_RECIPES[platform], endpoint = platform === 'xiaohongshu' ? xiaohongshuSearchOperation : nativeForwardingEndpoint(recipe.key)
   const config = { configured: true, contractVerified: true, dispatchEnabled: true, timeoutMs: 100,
     freshTtlMs: 60000, staleTtlMs: 86400000, maxConcurrency: 3, maxConsumerConcurrency: 3, maxRequestsPerMinute: 100, billing: {} }
   const controls = new MemoryExternalPlatformControlStore()
-  await controls.updatePolicy('tikhub', endpoint.operation, { expectedRevision: 1, desiredState: 'active', reason: 'Offline regression',
+  await controls.updatePolicy('tikhub', endpoint.operation, { expectedRevision: platform === 'xiaohongshu' ? 0 : 1, desiredState: 'active', reason: 'Offline regression',
     priceBook: { currency: 'USD', pricingAsOf: '2026-10-08T00:00:00Z', monthlyBudgetMinor: 100000,
       monthlySubsidyBudgetMinor: 100000, unitCostMinorByEndpoint: { [endpoint.endpointKey]: 12 } } },
   { runtime: { config, credentialConfigured: true } })
@@ -91,12 +95,17 @@ async function harness({ platform = 'bilibili', payload, fetchImpl, leaseMs = 12
   const gateway = new ExternalPlatformGateway({ usageStore: store, platformStore, adapter, config, providerKey: 'tikhub',
     apiKeyPepper: PEPPER, reservationLeaseMs: leaseMs, operationControlStore: controls, logger: { warn() {} } })
   service.externalRawSearch = (context, input) => gateway.searchContent(context, input)
-  service.externalDataSearch = (context, input) => gateway.searchContent(context, input)
+  const socialGateway = new TikHubGateway({ usageStore: store, platformStore, adapter, config,
+    apiKeyPepper: PEPPER, reservationLeaseMs: leaseMs, operationControlStore: controls, logger: { warn() {} } })
+  service.externalSocialSearch = (context, input) => socialGateway.searchNotes(context, input)
+  service.externalDataSearch = (context, input) => platform === 'weibo' && input.normalized.pageSize >= 20 && !input.normalized.cursor?.startsWith('mxnc1.')
+    ? gateway.searchRaw(context, input) : gateway.searchContent(context, input,
+      { finalizeXiaohongshu: values => socialGateway.enrichStandardSearchPage(values) })
   const invoke = (body = { platform, keyword: '城市', count: 20 }, idempotencyKey = 'content-raw-first', path = '/api/v1/night-all/search/raw') => service.nightAllCompatibilitySearch(context, { operation: 'raw', body, idempotencyKey,
     // app.mjs canonicalizes both public aliases before invoking the service.
     path: path.replace('/api/v1/search/', '/api/v1/night-all/search/') })
   const invokeData = (body = { platform, query: '城市', pageSize: 20 }, idempotencyKey = 'content-data-first') => service.search(context, { body, idempotencyKey, path: '/api/v1/data/search' })
-  return { store, service, platformStore, gateway, context, config, controls, recipe, calls, historical, invoke, invokeData }
+  return { store, service, platformStore, gateway, socialGateway, adapter, context, config, controls, recipe, calls, historical, invoke, invokeData }
 }
 
 test('all four platforms use fixed TikHub keyword endpoints for standard and both raw aliases, with immutable replay', async () => {
@@ -470,8 +479,8 @@ test('standard stable delivery retains its route, dataset and platform meter', a
 })
 
 test('historical standard signed cursor replays original committed body before restart and retains old stable failure', async () => {
-  for (const platform of ['bilibili', 'reddit', 'youtube']) for (const type of ['fresh', 'stable']) {
-    for (const responseStatus of [200, 502]) {
+  for (const platform of ['bilibili', 'reddit', 'youtube', 'tiktok', 'weibo', 'xiaohongshu']) for (const type of ['fresh', 'stable']) {
+    for (const responseStatus of [200, 400, 502]) {
       const h = await harness({ platform })
       const body = { platform, query: platform === 'bilibili' ? '城市' : '城'.repeat(500), pageSize: 20 }
       const codec = createNightAllCompatibilityCursorCodec(PEPPER, h.context.consumer.id)
@@ -487,7 +496,7 @@ test('historical standard signed cursor replays original committed body before r
         unitsReserved: 1, leaseExpiresAt: new Date(Date.now() + 120000), windowStart: new Date(Date.now() - 60000), maxRequests: 100 })
       await h.store.commitRequest(id, { responseStatus, responseBody: saved, unitsActual: 1 })
       if (responseStatus === 200) assert.deepEqual((await h.invokeData({ ...body, type, cursor }, 'historical-standard-page')).body, saved)
-      else await assert.rejects(h.invokeData({ ...body, type, cursor }, 'historical-standard-page'), error => error.code === 'old_upstream_failure' && error.status === 502)
+      else await assert.rejects(h.invokeData({ ...body, type, cursor }, 'historical-standard-page'), error => error.code === 'old_upstream_failure' && error.status === responseStatus)
       await assert.rejects(h.invokeData({ ...body, type, cursor }, 'historical-standard-new'), error => error.code === 'search_restart_required')
       assert.equal(h.calls.length, 0)
       assert.equal(h.historical.length, 0)
@@ -951,4 +960,318 @@ test('turning LCY exemption off between acquired pages restores capacity before 
   assert.equal(f.gateway.activeByConsumer.get(f.context.consumer.id), 2)
   assert.equal([...f.platformStore.calls.values()].length, 1)
   assert.equal([...f.store.requests.values()][0].status, 'committed')
+})
+
+const tiktokPage = (ids, next = null) => ({ data: ids.map(id => ({ type: 1, item: {
+  id, desc: '完整文本'.repeat(200), author: { id: '7111111111111111111', uniqueId: 'fixture', nickname: '作者' },
+  stats: { diggCount: 0, commentCount: 3 }, video: { playAddr: 'https://example.test/video.mp4?sig=a%2Fb', cover: 'https://example.test/cover.jpg' },
+} })), has_more: next != null ? 1 : 0, cursor: next ?? 0, search_id: 'fixture-session' })
+const xhsPage = (ids, page = 1, hasMore = false) => ({ page, next_page: hasMore ? page + 1 : null, data: {
+  items: ids.map(id => ({ model_type: 'note', note: { id, title: `标题${id}`, desc: '真实完整正文',
+    user: { user_id: 'fixture-author', nickname: '作者' }, interact_info: { liked_count: 0, comment_count: 4 } } })),
+} })
+const weiboPage = (ids, hasMore = false) => ({ parsed_data: { results: ids.map(id => ({ weibo_id: id,
+  content: '已获取的完整正文', user_id: '1234567890', interaction: { comment_count: 4, like_count: 0 } })),
+  pagination: { has_next_page: hasMore }, parse_success: true } })
+
+for (const platform of ['tiktok', 'weibo', 'xiaohongshu']) test(`${platform} standard small pages retain full acquired overflow and replay without another purchase`, async () => {
+  const ids = platform === 'xiaohongshu' ? ['675d277d000000000600e655', '675d277d000000000600e658', '675d277d000000000600e659']
+    : ['7111111111111111111', '7111111111111111112', '7111111111111111113']
+  const payload = platform === 'tiktok' ? tiktokPage(ids) : platform === 'weibo' ? weiboPage(ids) : xhsPage(ids)
+  const h = await harness({ platform, payload }), body = { platform, query: '城'.repeat(500), pageSize: 1 }
+  const first = await h.invokeData(body)
+  assert.equal(first.body.data.items.length, 1)
+  assert.equal(first.body.data.items[0].externalId, ids[0])
+  assert.equal(first.body.data.items[0].metrics.likes, 0)
+  assert.equal(first.body.data.items[0].metrics.comments, platform === 'tiktok' ? 3 : 4)
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.calls[0].options.method, 'GET')
+  assert.equal(h.calls[0].url.pathname, h.recipe.path)
+  assert.equal([...h.platformStore.calls.values()][0].itemCount, 3)
+  const archive = [...h.platformStore.restrictedResponseArchives.values()][0]
+  assert.deepEqual(JSON.parse(Buffer.from(archive.bodyBytes).toString()).data, payload)
+  assert.deepEqual((await h.invokeData(body)).body, first.body)
+  let last = first
+  for (let page = 2; page <= 3; page++) {
+    last = await h.invokeData({ ...body, cursor: last.body.data.pageInfo.nextCursor }, `remaining-buffer-page-${page}`)
+    assert.equal(last.body.data.items[0].externalId, ids[page - 1])
+    assert.equal(last.body.data.meta.providerCalls, 0)
+    assert.equal(h.calls.length, 1)
+  }
+  assert.equal(last.body.data.pageInfo.hasMore, false)
+  assert.equal(h.platformStore.ingestJobs.length, 1)
+  assert.equal(h.historical.length, 0)
+  if (platform === 'xiaohongshu') {
+    assert.equal([...h.platformStore.calls.values()][0].operation, 'social.posts.search')
+    assert.equal([...h.platformStore.calls.values()][0].endpointKey, xiaohongshuSearchOperation.endpointKey)
+    assert.equal([...h.store.requests.values()][0].billingMeterKey, 'social.posts.search')
+  }
+})
+
+test('TikTok fills advancing source pages and keeps video covers out of image media', async () => {
+  const h = await harness({ platform: 'tiktok', payload: (_call, n) => tiktokPage([`711111111111111111${n}`], n < 3 ? n * 10 : null) })
+  const result = await h.invokeData({ platform: 'tiktok', query: '城市', pageSize: 3 })
+  assert.equal(result.body.data.items.length, 3)
+  assert.deepEqual(h.calls.map(call => call.params.offset), ['0', '10', '20'])
+  assert.equal(h.calls[1].params.search_id, 'fixture-session')
+  assert.equal(result.body.data.items[0].text.length, 800)
+  assert.deepEqual(result.body.data.items[0].media.images, [])
+  assert.equal(result.body.data.items[0].media.coverUrl, 'https://example.test/cover.jpg')
+  assert.equal(result.body.data.items[0].metrics.views, null)
+  assert.equal([...h.store.requests.values()].length, 1)
+})
+
+test('Xiaohongshu non20 pages cannot bypass paused existing search operation or require native grant', async () => {
+  const h = await harness({ platform: 'xiaohongshu', payload: xhsPage([]) })
+  await h.controls.updatePolicy('tikhub', 'social.posts.search', { expectedRevision: 1, desiredState: 'paused', reason: 'Offline pause' },
+    { runtime: { config: h.config, credentialConfigured: true } })
+  await assert.rejects(h.invokeData({ platform: 'xiaohongshu', query: '城市', pageSize: 5 }), error => /operation_/.test(error.code))
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.historical.length, 0)
+})
+
+for (const platform of ['tiktok', 'weibo', 'xiaohongshu']) test(`${platform} historical unknown precedes retired-cursor restart even with a new idempotency key`, async () => {
+  const h = await harness({ platform }), body = { platform, query: '城市', pageSize: 1 }
+  const codec = createNightAllCompatibilityCursorCodec(PEPPER, h.context.consumer.id)
+  const traversal = prepareNightAllCompatibilityTraversal({ operation: 'data-search', platform, upstreamBody: body, codec })
+  const wrapped = capNightAllDataSearchTraversal({ data: { pageInfo: { pageIndex: 1, pageSize: 1, returnedCount: 0,
+    hasMore: true, nextCursor: 'old-native-token', cursorType: 'opaque' }, warnings: [] } }, { platform, page: 1, scope: traversal.scope, codec })
+  const id = randomUUID()
+  await h.store.reserve({ requestId: id, idempotencyKey: 'historical-unknown-page',
+    fingerprint: requestFingerprint({ method: 'POST', path: '/api/v1/data/search', body: { ...body, cursor: 'old-native-token', type: 'fresh' } }),
+    tenantId: h.context.tenant.id, consumerId: h.context.consumer.id, apiKeyId: h.context.apiKey.id, platform,
+    acquisitionRequest: { path: '/api/v1/data/search', body }, unitsReserved: 1,
+    leaseExpiresAt: new Date(Date.now() + 120000), windowStart: new Date(Date.now() - 60000), maxRequests: 100 })
+  await h.store.markRequestUnknown(id, 'offline_unknown')
+  await assert.rejects(h.invokeData({ ...body, cursor: wrapped.data.pageInfo.nextCursor }, 'historical-unknown-new'), error => error.code === 'request_outcome_unknown')
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.historical.length, 0)
+})
+
+test('Weibo buffered delivery enriches only delivered IDs, archives full text separately and never repurchases it on replay or buffer-only delivery', async () => {
+  const ids = ['7111111111111111111', '7111111111111111111', '7111111111111111112']
+  const source = weiboPage(ids)
+  source.parsed_data.results[0].content = source.parsed_data.results[1].content = '需要展开全文…'
+  const full = '详情完整正文'.repeat(100)
+  const h = await harness({ platform: 'weibo', payload: call => call.url.pathname.endsWith('/fetch_realtime_search') ? source
+    : { idstr: ids[0], user: { idstr: '1234567890' }, longText: { content: full } } })
+  const actualEndpoint = nativeForwardingEndpoint((await import('../../server/contracts/raw-search.mjs')).WEIBO_DETAIL_KEY)
+  assert.ok(actualEndpoint)
+  await h.controls.updatePolicy('tikhub', actualEndpoint.operation, { expectedRevision: 1, desiredState: 'active', reason: 'Offline detail',
+    priceBook: { currency: 'USD', pricingAsOf: '2026-10-08T00:00:00Z', monthlyBudgetMinor: 100000,
+      monthlySubsidyBudgetMinor: 100000, unitCostMinorByEndpoint: { [actualEndpoint.endpointKey]: 12 } } },
+  { runtime: { config: h.config, credentialConfigured: true } })
+  const body = { platform: 'weibo', query: '城市', pageSize: 1 }
+  const first = await h.invokeData(body)
+  assert.equal(first.body.data.items[0].text, full)
+  assert.equal(first.body.data.meta.providerCalls, 2)
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.platformStore.ingestJobs.length, 2)
+  assert.equal(h.platformStore.ingestJobs[1].payload.kind, 'external-platform-result')
+  assert.equal(h.platformStore.ingestJobs[1].payload.records[0].body, full)
+  assert.deepEqual((await h.invokeData(body)).body, first.body)
+  const next = await h.invokeData({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'weibo-detail-buffer-next')
+  assert.equal(next.body.data.items[0].externalId, ids[2])
+  assert.equal(next.body.data.meta.providerCalls, 0)
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.platformStore.ingestJobs.length, 2)
+  assert.equal(next.body.data.pageInfo.hasMore, false)
+})
+
+test('Xiaohongshu buffered preview uses existing detail workflow once and preserves enriched immutable replay', async () => {
+  const ids = ['675d277d000000000600e655', '675d277d000000000600e655', '675d277d000000000600e658']
+  const source = xhsPage(ids)
+  source.data.items[0].note.desc = source.data.items[1].note.desc = '文'.repeat(60)
+  const h = await harness({ platform: 'xiaohongshu', payload: source })
+  const { TIKHUB_XIAOHONGSHU_ENDPOINT_KEY } = await import('../../server/contracts/tikhub-xiaohongshu.mjs')
+  await h.controls.updatePolicy('tikhub', 'social.posts.resolve', { expectedRevision: 0, desiredState: 'active', reason: 'Offline detail',
+    priceBook: { currency: 'USD', pricingAsOf: '2026-10-08T00:00:00Z', monthlyBudgetMinor: 100000,
+      monthlySubsidyBudgetMinor: 100000, unitCostMinorByEndpoint: { [TIKHUB_XIAOHONGSHU_ENDPOINT_KEY]: 12 } } },
+  { runtime: { config: h.config, credentialConfigured: true } })
+  let detailCalls = 0
+  const full = '完整详情正文'.repeat(100)
+  h.adapter.getXiaohongshuPost = async () => {
+    detailCalls++
+    const capturedAt = new Date().toISOString()
+    return { publicBody: { contractVersion: 'mx-insight-hub.social-post.v1', data: { item: {
+      id: `xiaohongshu:${ids[0]}`, externalId: ids[0], platform: 'xiaohongshu', contentType: 'post',
+      url: `https://www.xiaohongshu.com/explore/${ids[0]}`, title: '详情标题', text: full, tags: [],
+      author: { id: 'fixture-author', name: '作者', avatarUrl: null },
+      metrics: { liked: 0, collected: null, comments: 4, shared: null }, media: [], publishedAt: null, collectedAt: capturedAt,
+    } }, meta: { capturedAt } }, records: [], archiveObjects: [],
+      responseArchive: { capturedAt, httpStatus: 200, businessCode: 200, contractState: 'accepted', payloadSha256: '2'.repeat(64), bodySize: 128, rawPayload: {} } }
+  }
+  const body = { platform: 'xiaohongshu', query: '城市', pageSize: 1 }
+  const first = await h.invokeData(body)
+  assert.equal(first.body.data.items[0].text, full)
+  assert.equal(first.body.data.meta.providerCalls, 2)
+  assert.equal(detailCalls, 1)
+  assert.deepEqual((await h.invokeData(body)).body, first.body)
+  const next = await h.invokeData({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'xiaohongshu-detail-buffer-next')
+  assert.equal(next.body.data.items[0].externalId, ids[2])
+  assert.equal(next.body.data.meta.providerCalls, 0)
+  assert.equal(detailCalls, 1)
+  assert.equal(h.calls.length, 1)
+})
+
+test('Xiaohongshu larger standard pages preserve provider session and buffer the final acquired remainder', async () => {
+  const h = await harness({ platform: 'xiaohongshu', payload: (_call, n) => ({ ...xhsPage(
+    Array.from({ length: 20 }, (_, i) => (0x675d277d000000000600e600n + BigInt(n * 20 + i)).toString(16)), n, n < 3),
+    search_id: 'fixture-search-id', search_session_id: 'fixture-search-session' }) })
+  const body = { platform: 'xiaohongshu', query: '城市', pageSize: 25 }
+  const first = await h.invokeData(body)
+  assert.equal(first.body.data.items.length, 25)
+  assert.equal(h.calls.length, 2)
+  assert.deepEqual(h.calls.map(call => call.params.page), ['1', '2'])
+  assert.equal(h.calls[1].params.search_id, 'fixture-search-id')
+  assert.equal(h.calls[1].params.search_session_id, 'fixture-search-session')
+  const second = await h.invokeData({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'xhs-large-second')
+  assert.equal(second.body.data.items.length, 25)
+  assert.equal(h.calls.length, 3)
+  const third = await h.invokeData({ ...body, cursor: second.body.data.pageInfo.nextCursor }, 'xhs-large-third')
+  assert.equal(third.body.data.items.length, 10)
+  assert.equal(third.body.data.meta.providerCalls, 0)
+  assert.equal(third.body.data.pageInfo.hasMore, false)
+  assert.equal(h.calls.length, 3)
+  assert.equal(new Set([...first.body.data.items, ...second.body.data.items, ...third.body.data.items].map(item => item.externalId)).size, 60)
+})
+
+test('Xiaohongshu standard20 always uses existing gateway, whose pause never falls back to Night-All', async () => {
+  const h = await harness({ platform: 'xiaohongshu', payload: xhsPage([]) })
+  h.service.externalSocialSearchEnabled = false
+  await h.controls.updatePolicy('tikhub', 'social.posts.search', { expectedRevision: 1, desiredState: 'paused', reason: 'Offline pause' },
+    { runtime: { config: h.config, credentialConfigured: true } })
+  await assert.rejects(h.invokeData({ platform: 'xiaohongshu', query: '城市', pageSize: 20 }), error => /operation_/.test(error.code))
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.historical.length, 0)
+})
+
+test('TikTok malformed content and unproven advancing continuation preserve paid failure without automatic repeat', async () => {
+  for (const payload of [
+    { data: [{ unrecognized: { secret: 'synthetic-field' } }], has_more: false },
+    { data: [{ item: { id: '7111111111111111111', desc: '正文' } }], has_more: true },
+    { data: [], status_code: 10000, has_more: false },
+  ]) {
+    const h = await harness({ platform: 'tiktok', payload })
+    await assert.rejects(h.invokeData(), error => error.code === 'external_platform_response_unusable')
+    const call = [...h.platformStore.calls.values()][0]
+    assert.equal(call.outcome, 'succeeded_unusable')
+    assert.equal(call.billed, true)
+    assert.deepEqual(JSON.parse(Buffer.from(h.platformStore.restrictedResponseArchives.get(call.id).bodyBytes).toString()).data, payload)
+    await assert.rejects(h.invokeData(), error => error.code === 'external_platform_response_unusable')
+    await assert.rejects(h.invokeData(undefined, 'tiktok-malformed-new-key'), error => error.code === 'external_platform_response_unusable')
+    assert.equal(h.calls.length, 1)
+  }
+})
+
+for (const [pageSize, finalCount] of [[100, 1], [15, 3]]) test(`Xiaohongshu source-page limit remains partial and survives the ${pageSize}-item delivery buffer`, async () => {
+  const h = await harness({ platform: 'xiaohongshu', payload: (_call, n) => xhsPage(
+    Array.from({ length: n === 15 ? finalCount : 1 }, (_, i) => (0x675d277d000000000600e600n + BigInt(n * 100 + i)).toString(16)), n, true) })
+  const body = { platform: 'xiaohongshu', query: '城市', pageSize }
+  const first = await h.invokeData(body)
+  assert.equal(h.calls.length, 15)
+  assert.equal(h.calls.at(-1).params.page, '15')
+  assert.equal(first.body.data.items.length, 15)
+  assert.equal(first.body.data.status, 'partial')
+  assert.ok(first.body.data.warnings.some(warning => warning.code === 'page_limit_reached'))
+  assert.equal(first.body.data.pageInfo.hasMore, finalCount > 1)
+  assert.deepEqual((await h.invokeData(body)).body, first.body)
+  if (finalCount > 1) {
+    const nextBody = { ...body, cursor: first.body.data.pageInfo.nextCursor }
+    const next = await h.invokeData(nextBody, 'xhs-limit-buffer-next')
+    assert.equal(next.body.data.items.length, 2)
+    assert.equal(next.body.data.status, 'partial')
+    assert.ok(next.body.data.warnings.some(warning => warning.code === 'page_limit_reached'))
+    assert.equal(next.body.data.pageInfo.hasMore, false)
+    assert.equal(next.body.data.meta.providerCalls, 0)
+    assert.deepEqual((await h.invokeData(nextBody, 'xhs-limit-buffer-next')).body, next.body)
+  }
+  assert.equal(h.calls.length, 15)
+  assert.equal(h.historical.length, 0)
+})
+
+for (const finalCount of [1, 6]) test(`Weibo source-page limit retains truncation evidence with ${finalCount} final source rows`, async () => {
+  const h = await harness({ platform: 'weibo', payload: (_call, n) => weiboPage(
+    Array.from({ length: n === 15 ? finalCount : 1 }, (_, i) => String(7111111111111111100n + BigInt(n * 100 + i))), true) })
+  const body = { platform: 'weibo', query: '城市', pageSize: 19 }
+  const first = await h.invokeData(body)
+  assert.equal(h.calls.length, 15)
+  assert.equal(h.calls.at(-1).params.page, '15')
+  assert.equal(first.body.data.items.length, finalCount === 1 ? 15 : 19)
+  assert.equal(first.body.data.status, 'partial')
+  assert.ok(first.body.data.warnings.some(warning => warning.code === 'page_limit_reached'))
+  assert.equal(first.body.data.pageInfo.hasMore, finalCount > 1)
+  assert.deepEqual((await h.invokeData(body)).body, first.body)
+  if (finalCount > 1) {
+    const next = await h.invokeData({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'weibo-limit-buffer-next')
+    assert.equal(next.body.data.items.length, 1)
+    assert.equal(next.body.data.status, 'partial')
+    assert.ok(next.body.data.warnings.some(warning => warning.code === 'page_limit_reached'))
+    assert.equal(next.body.data.pageInfo.hasMore, false)
+    assert.equal(next.body.data.meta.providerCalls, 0)
+  }
+  assert.equal(h.calls.length, 15)
+  assert.equal(h.historical.length, 0)
+})
+
+async function enableRemainingSearchDetail(h, platform) {
+  const endpoint = platform === 'weibo'
+    ? nativeForwardingEndpoint((await import('../../server/contracts/raw-search.mjs')).WEIBO_DETAIL_KEY)
+    : { operation: 'social.posts.resolve', endpointKey: (await import('../../server/contracts/tikhub-xiaohongshu.mjs')).TIKHUB_XIAOHONGSHU_ENDPOINT_KEY }
+  await h.controls.updatePolicy('tikhub', endpoint.operation, { expectedRevision: platform === 'weibo' ? 1 : 0,
+    desiredState: 'active', reason: 'Offline detail authorization boundary',
+    priceBook: { currency: 'USD', pricingAsOf: '2026-10-08T00:00:00Z', monthlyBudgetMinor: 100000,
+      monthlySubsidyBudgetMinor: 100000, unitCostMinorByEndpoint: { [endpoint.endpointKey]: 12 } } },
+  { runtime: { config: h.config, credentialConfigured: true } })
+}
+function revokeRemainingSearch(h, kind) {
+  if (kind === 'platform') h.store.grants.set(h.context.consumer.id, [])
+  else if (kind === 'key') h.store.apiKeys.get(h.context.apiKey.id).status = 'revoked'
+  else if (kind === 'capability') h.store.capabilityGrants.set(h.context.consumer.id, [])
+  else if (kind === 'plan') h.store.getConsumerPlan = async () => null
+  else if (kind === 'plan_version') h.store.getConsumerPlan = async () => ({ status: 'active', versionStatus: 'retired' })
+}
+function previewRemainingPage(platform) {
+  if (platform === 'weibo') {
+    const source = weiboPage(['7111111111111111111'])
+    source.parsed_data.results[0].content = '需要展开全文…'
+    return source
+  }
+  const source = xhsPage(['675d277d000000000600e655'])
+  source.data.items[0].note.desc = '文'.repeat(60)
+  return source
+}
+for (const platform of ['weibo', 'xiaohongshu']) test(`${platform} buffered finalization rechecks revoked Key, grants and active published plan after the paid search`, async () => {
+  for (const kind of ['platform', 'key', 'plan', 'plan_version', ...(platform === 'xiaohongshu' ? ['capability'] : [])]) {
+    let h
+    h = await harness({ platform, payload: () => { revokeRemainingSearch(h, kind); return previewRemainingPage(platform) } })
+    await enableRemainingSearchDetail(h, platform)
+    let detailCalls = 0
+    h.adapter.getXiaohongshuPost = async () => { detailCalls++; assert.fail('Revoked search cannot buy a detail') }
+    await assert.rejects(h.invokeData({ platform, query: '城市', pageSize: 1 }), error => error.code === 'request_outcome_unknown')
+    assert.equal(h.calls.length, 1)
+    assert.equal(detailCalls, 0)
+    assert.equal([...h.platformStore.calls.values()].length, 1)
+    assert.equal([...h.platformStore.calls.values()][0].outcome, 'succeeded')
+    assert.equal([...h.store.requests.values()][0].status, 'unknown')
+    assert.equal(h.historical.length, 0)
+  }
+})
+for (const platform of ['weibo', 'xiaohongshu']) test(`${platform} detail rechecks access after asynchronous admission immediately before another paid dispatch`, async () => {
+  const h = await harness({ platform, payload: previewRemainingPage(platform) })
+  await enableRemainingSearchDetail(h, platform)
+  const rate = h.platformStore.acquireProviderRateLimit.bind(h.platformStore)
+  let rateCalls = 0, detailCalls = 0
+  h.platformStore.acquireProviderRateLimit = async input => {
+    const result = await rate(input)
+    if (++rateCalls === 2) revokeRemainingSearch(h, 'key')
+    return result
+  }
+  h.adapter.getXiaohongshuPost = async () => { detailCalls++; assert.fail('Revoked key cannot buy a detail') }
+  await assert.rejects(h.invokeData({ platform, query: '城市', pageSize: 1 }), error => error.code === 'request_outcome_unknown')
+  assert.equal(rateCalls, 2)
+  assert.equal(h.calls.length, 1)
+  assert.equal(detailCalls, 0)
+  assert.equal([...h.platformStore.calls.values()].length, 1)
+  assert.equal([...h.store.requests.values()][0].status, 'unknown')
 })
