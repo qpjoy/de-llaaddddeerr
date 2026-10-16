@@ -27,6 +27,8 @@
     "test:site-slot-tunnel-cli": "node --test scripts/site-slot-refresh-tunnel-cli.test.mjs",
     "test:site-slot-worker": "node --test scripts/site-slot-worker-run.test.mjs",
     "test:internal-service-peer-observation": "node --test --import tsx src/modules/admin/internal-service-peer-observation.test.ts",
+    "test:launcher-service-vip-smoke": "node --test --import tsx src/modules/admin/launcher-service-vip-smoke.test.ts",
+    "test:launcher-service-vip-reconcile": "node --test --import tsx src/modules/admin/launcher-service-vip-reconcile.test.ts",
     "test:service-operations": "node --test --import tsx scripts/service-operations-agent.test.mjs scripts/service-operations-install.test.mjs ../scripts/manage-service-operations.test.mjs src/modules/admin/service-operations.controller.test.ts",
     "test:launcher-product-isolation": "node --test --import tsx src/modules/launcher-network/product-network-isolation.test.ts",
     "test:launcher-anonymous-policy": "node --test --import tsx src/modules/launcher-network/anonymous-enrollment-policy.test.ts src/modules/launcher-network/product-user-access.test.ts src/modules/launcher-network/app-user-deny.test.ts src/modules/launcher-network/product-user-access-backfill.test.ts",

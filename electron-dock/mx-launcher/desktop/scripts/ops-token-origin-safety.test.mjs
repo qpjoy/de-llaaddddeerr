@@ -35,6 +35,11 @@ function functionSource(source, name) {
   throw new Error(`${name} is not balanced`);
 }
 
+const gateHandlerStart = rendererSource.indexOf("document.getElementById('gate-token-form').addEventListener('submit',");
+const gateHandlerEnd = rendererSource.indexOf('\n});\nvoid boot();', gateHandlerStart);
+assert.ok(gateHandlerStart >= 0 && gateHandlerEnd > gateHandlerStart, 'the real gate Token handler must exist');
+const gateHandlerSource = rendererSource.slice(gateHandlerStart, gateHandlerEnd + '\n});'.length);
+
 const serverInput = { value: 'https://internal.example:443' };
 const opsTokenInput = { value: 'session-secret' };
 const opsTokenApply = { disabled: false, textContent: '应用' };
@@ -43,6 +48,30 @@ const requests = [];
 let requestResponse = Promise.resolve({ roles: [] });
 let refreshCount = 0;
 let refreshResult = true;
+let productRefreshCount = 0;
+let opsMode = async () => 'raw';
+let sessionAuthenticated = false;
+const sessionLogins = [];
+const adminSession = {
+  opsLoginMode: () => opsMode(),
+  signInWithOps: async token => {
+    sessionLogins.push({ path: '/auth/admin/ops-login', token });
+    sessionAuthenticated = true;
+  },
+  entry: () => sessionAuthenticated ? { authenticated: true, canManage: true } : null
+};
+let gateSubmit;
+const gateButton = { disabled: false };
+const gateToken = { value: '' };
+const gateFeedback = { textContent: '' };
+const gateServer = { value: serverInput.value };
+const gateDocument = { getElementById: id => ({
+  'gate-token-form': { addEventListener: (event, handler) => { assert.equal(event, 'submit'); gateSubmit = handler; } },
+  'gate-token': gateToken,
+  'gate-token-error': gateFeedback,
+  'gate-server': gateServer
+})[id] };
+const submitGate = () => gateSubmit({ preventDefault() {}, currentTarget: { querySelector: () => gateButton } });
 const security = Function(
   'serverInput',
   'opsTokenInput',
@@ -50,6 +79,9 @@ const security = Function(
   'opsTokenFeedback',
   'fetch',
   'refreshAdmin',
+  'adminSession',
+  'document',
+  'refreshProducts',
   `
 const LOCAL_SERVER_BASE_URL = 'http://127.0.0.1:18090';
 ${functionSource(rendererSource, 'isLocalStaticAdminBaseUrl')}
@@ -59,6 +91,7 @@ let opsTokenBinding = null;
 let verifiedOpsBinding = null;
 function renderLoginGate() {}
 function normalizedServerBase() { return serverInput.value; }
+function synchronizeLauncherNetworkServerScope() {}
 let drawerRenderCount = 0;
 function renderUserEditorDrawer() { drawerRenderCount += 1; }
 const state = { userCenter: {
@@ -77,8 +110,12 @@ async ${functionSource(rendererSource, 'applyOpsToken')}
 ${functionSource(rendererSource, 'bindOpsTokenToCurrentServer')}
 ${functionSource(rendererSource, 'clearOpsTokenIfServerBaseChanged')}
 ${functionSource(rendererSource, 'opsTokenForRequest')}
+${functionSource(rendererSource, 'setServerBaseInputValue')}
+${functionSource(rendererSource, 'managementSignedIn')}
+${gateHandlerSource}
 return {
   applyOpsToken,
+  clearOpsToken,
   bindOpsTokenToCurrentServer,
   clearOpsTokenIfServerBaseChanged,
   isOpsProtectedInternalRequest,
@@ -97,7 +134,7 @@ return {
 }, async () => {
   refreshCount += 1;
   return refreshResult;
-});
+}, adminSession, gateDocument, async () => { productRefreshCount += 1; });
 
 security.bindOpsTokenToCurrentServer();
 assert.deepEqual(security.binding(), {
@@ -311,6 +348,7 @@ refreshResult = true;
 let resolveVerification;
 requestResponse = new Promise((resolve) => { resolveVerification = resolve; });
 const pendingApply = security.applyOpsToken();
+await Promise.resolve(); // Login-mode discovery completes before raw verification starts.
 const requestCount = requests.length;
 assert.equal(opsTokenApply.disabled, true);
 await security.applyOpsToken();
@@ -332,5 +370,118 @@ serverInput.value = 'not a URL';
 opsTokenInput.value = 'invalid-endpoint-secret';
 await security.applyOpsToken();
 assert.equal(requests.length, requestCount, 'invalid server addresses do not send a token');
+
+function resetLoginFixture() {
+  security.clearOpsToken();
+  serverInput.value = 'https://launcher.example';
+  gateServer.value = serverInput.value;
+  gateToken.value = '';
+  gateFeedback.textContent = '';
+  sessionAuthenticated = false;
+  sessionLogins.length = 0;
+  requests.length = 0;
+  refreshCount = 0;
+  productRefreshCount = 0;
+  requestResponse = Promise.resolve({ roles: [] });
+  refreshResult = true;
+  opsMode = async () => 'raw';
+}
+
+resetLoginFixture();
+opsMode = async () => { throw Object.assign(new Error('账号服务暂不可用，请重试连接。'), { code: 'sso_unavailable' }); };
+gateToken.value = 'gate-secret-not-to-send';
+await submitGate();
+assert.deepEqual(requests, [], 'failed session discovery must not send the gate Token to raw roles');
+assert.deepEqual(sessionLogins, [], 'failed session discovery must not submit a session login either');
+assert.equal(security.binding(), null);
+assert.equal(gateToken.value, '', 'failed gate submissions clear the password field');
+assert.equal(gateButton.disabled, false, 'discovery failure can be retried');
+assert.match(gateFeedback.textContent, /重试连接/);
+assert.ok(!gateFeedback.textContent.includes('gate-secret-not-to-send'));
+assert.equal(productRefreshCount, 0);
+
+// The operator retries once discovery has recovered as public management.
+opsMode = async () => 'session';
+gateToken.value = 'recovered-public-secret';
+await submitGate();
+assert.deepEqual(requests, [], 'recovered public gate must never call raw roles');
+assert.deepEqual(sessionLogins, [{ path: '/auth/admin/ops-login', token: 'recovered-public-secret' }]);
+assert.equal(security.binding(), null, 'public gate must not create a raw Ops binding');
+assert.equal(gateToken.value, '');
+assert.equal(gateButton.disabled, false);
+assert.equal(productRefreshCount, 1);
+
+resetLoginFixture();
+opsMode = async () => { throw Object.assign(new Error('账号服务暂不可用，请重试连接。'), { code: 'sso_unavailable' }); };
+opsTokenInput.value = 'direct-secret-not-to-send';
+await security.applyOpsToken();
+assert.deepEqual(requests, [], 'direct apply must also stop before raw roles when discovery fails');
+assert.deepEqual(sessionLogins, []);
+assert.equal(opsTokenApply.disabled, false);
+assert.match(opsTokenFeedback.textContent, /重试连接/);
+assert.ok(!opsTokenFeedback.textContent.includes('direct-secret-not-to-send'));
+opsMode = async () => 'session';
+await security.applyOpsToken();
+assert.deepEqual(requests, [], 'direct public apply uses the session endpoint exclusively');
+assert.deepEqual(sessionLogins, [{ path: '/auth/admin/ops-login', token: 'direct-secret-not-to-send' }]);
+assert.equal(security.binding(), null, 'session login clears raw credentials');
+assert.equal(opsTokenInput.value, '');
+assert.equal(refreshCount, 1);
+
+resetLoginFixture();
+serverInput.value = 'http://private.example:18090';
+gateServer.value = 'http://selected-private.example:18090';
+opsMode = async () => {
+  // Session refresh rerenders the gate using the current server field. The
+  // submitted private target must survive this rerender.
+  gateServer.value = serverInput.value;
+  return 'raw';
+};
+gateToken.value = 'private-gate-secret';
+await submitGate();
+assert.deepEqual(requests, [{ path: '/internal/v1/user-center/roles', token: 'private-gate-secret' }]);
+assert.deepEqual(sessionLogins, [], 'known private emergency mode retains raw roles verification');
+assert.equal(security.binding().serverBase, 'http://selected-private.example:18090');
+assert.equal(refreshCount, 1);
+assert.equal(productRefreshCount, 1);
+assert.equal(gateFeedback.textContent, '');
+assert.equal(gateToken.value, '');
+
+resetLoginFixture();
+let resolveMode;
+opsMode = () => new Promise(resolve => { resolveMode = resolve; });
+opsTokenInput.value = 'old-origin-discovery-secret';
+const pendingModeApply = security.applyOpsToken();
+assert.equal(opsTokenApply.disabled, true);
+serverInput.value = 'https://new-origin.example';
+// Programmatic input changes need not dispatch an event; apply must notice the
+// changed endpoint itself after awaiting discovery.
+resolveMode('session');
+await pendingModeApply;
+assert.deepEqual(requests, []);
+assert.deepEqual(sessionLogins, [], 'old-origin mode discovery must not submit a Token to the new origin');
+assert.equal(refreshCount, 0);
+assert.equal(opsTokenInput.value, '');
+assert.equal(opsTokenApply.disabled, false);
+
+resetLoginFixture();
+let rejectGateMode;
+let gateModeCalls = 0;
+const pendingGateMode = new Promise((_resolve, reject) => { rejectGateMode = reject; });
+opsMode = () => { gateModeCalls += 1; return pendingGateMode; };
+gateToken.value = 'stale-gate-secret';
+const pendingGate = submitGate();
+assert.equal(gateButton.disabled, true);
+const duplicateGate = submitGate();
+assert.equal(gateModeCalls, 1, 'repeated gate submissions share the in-flight operation');
+serverInput.value = 'https://new-origin.example';
+rejectGateMode(new Error('连接地址已变化，请重新操作。'));
+await Promise.all([pendingGate, duplicateGate]);
+assert.deepEqual(requests, []);
+assert.deepEqual(sessionLogins, []);
+assert.equal(serverInput.value, 'https://new-origin.example', 'a rejected discovery must not restore the old gate address');
+assert.equal(gateToken.value, '');
+assert.equal(gateButton.disabled, false);
+assert.match(gateFeedback.textContent, /连接地址已变化/);
 
 console.log('OK Internal ops token stays bound to one protected Internal origin');

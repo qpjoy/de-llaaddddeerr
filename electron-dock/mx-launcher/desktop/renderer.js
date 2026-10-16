@@ -412,7 +412,7 @@ function renderLoginGate() {
   document.getElementById('gate-avatar').textContent = Array.from(account?.displayName || account?.account || 'M')[0].toLocaleUpperCase();
   const status = document.getElementById('gate-status');
   status.classList.toggle('login-reason', denied);
-  status.textContent = unavailable ? '暂时无法确认你的登录状态，请稍后重试。'
+  status.textContent = unavailable ? entry.errorMessage || '暂时无法确认你的登录状态，请稍后重试。'
     : entry?.bindingRequired ? '已完成统一登录，请关联已有的 Launcher 账号。'
       : denied ? '当前账号没有 MX Launcher 管理工作台的访问权限。请联系管理员授权，或切换有权限的账号。'
         : entry?.errorMessage || (entry?.enabled ? '使用你的 MX 账号，进入管理工作台。' : entry ? '统一登录暂未启用，可使用下方管理员入口。' : '正在确认登录状态…');
@@ -578,7 +578,7 @@ function renderWorkbench() {
   const count = shortcuts.length + apps.length + pending.length;
   if (workbenchSearchResult) workbenchSearchResult.textContent = query ? `${count} 个匹配入口` : '';
   const catalogStatus = currentAdminAccessError()?.message || (state.appCenterAppsError
-    ? '应用目录暂不可用。内置入口仍可打开，服务状态尚未确认。'
+    ? `应用目录刷新失败：${state.appCenterAppsError}。${state.workbenchCatalogLoadedAt ? '保留上次成功读取的目录，请重试刷新。' : '尚未读取到服务器目录，当前仅显示内置入口。'}`
     : state.workbenchCatalogLoadedAt
       ? `目录更新于 ${new Date(state.workbenchCatalogLoadedAt).toLocaleTimeString('zh-CN')}。目录登记不代表服务健康。`
       : '正在读取应用目录，服务状态尚未确认。');
@@ -966,16 +966,19 @@ document.getElementById('gate-token-form').addEventListener('submit', async even
   event.preventDefault();
   const button = event.currentTarget.querySelector('button'), input = document.getElementById('gate-token');
   const feedback = document.getElementById('gate-token-error');
+  if (button.disabled) return;
+  const selectedServer = document.getElementById('gate-server').value;
   button.disabled = true; feedback.textContent = '';
   try {
-    const entry = adminSession.entry();
-    if (entry?.enabled && entry.loginOrigin === location.origin) {
+    // Failed discovery does not establish that this is a private Ops endpoint.
+    const mode = await adminSession.opsLoginMode();
+    if (mode === 'session') {
       await adminSession.signInWithOps(input.value.trim());
     } else {
-      setServerBaseInputValue(document.getElementById('gate-server').value);
+      setServerBaseInputValue(selectedServer);
       opsTokenInput.value = input.value.trim(); bindOpsTokenToCurrentServer();
       await applyOpsToken();
-      if (!managementSignedIn()) throw new Error('Token 验证失败，请检查凭证与服务器地址。');
+      if (!managementSignedIn()) throw new Error(opsTokenFeedback?.textContent || 'Token 验证失败，请检查凭证与服务器地址。');
     }
     input.value = '';
     renderLoginGate();
@@ -1039,9 +1042,6 @@ serverInput.addEventListener('input', () => {
   if (synchronizeLauncherNetworkServerScope(serverInput.value)) {
     serviceOperationsPanel.reset();
     identityApplicationsPanel.reset();
-    state.appCenterApps = [];
-    state.appCenterAppsError = '连接地址已变化，请刷新应用目录。';
-    state.workbenchCatalogLoadedAt = null;
     renderAppNav();
     renderWorkbench();
   }
@@ -1477,6 +1477,16 @@ async function refreshProducts() {
   await refreshAppCenterNetwork();
 }
 
+function applyAppCenterRegistryPayloads(appPayload, productPayload) {
+  state.appCenterAppsError = appPayload.error || null;
+  if (!appPayload.error) {
+    state.appCenterApps = asArray(appPayload.apps);
+    state.workbenchCatalogLoadedAt = new Date().toISOString();
+  }
+  state.launcherProductsError = productPayload.error || null;
+  if (!productPayload.error) state.launcherProducts = asArray(productPayload.products);
+}
+
 async function refreshAppCenterNetwork() {
   const requestScope = captureLauncherNetworkRequestScope();
   const [appPayload, productPayload, leasePayload, productUserAccessPayload, dnsRoutesPayload, templatesPayload, serviceVipSmokePayload] = await Promise.all([
@@ -1489,15 +1499,11 @@ async function refreshAppCenterNetwork() {
     loadLauncherServiceVipSmokes()
   ]);
   if (!isLauncherNetworkRequestScopeCurrent(requestScope)) return;
-  state.appCenterApps = asArray(appPayload.apps);
-  state.appCenterAppsError = appPayload.error || null;
-  state.workbenchCatalogLoadedAt = appPayload.error ? null : new Date().toISOString();
+  applyAppCenterRegistryPayloads(appPayload, productPayload);
   state.appOnboardingTemplates = asArray(templatesPayload.templates);
   state.appOnboardingTemplatesError = templatesPayload.error || null;
   state.launcherServiceVipSmokes = asArray(serviceVipSmokePayload.smokes);
   state.launcherServiceVipSmokesError = serviceVipSmokePayload.error || null;
-  state.launcherProducts = asArray(productPayload.products);
-  state.launcherProductsError = productPayload.error || null;
   state.launcherLeases = asArray(leasePayload.leases);
   state.launcherLeasesError = leasePayload.error || null;
   applyLauncherProductUserAccessLists({
@@ -1587,15 +1593,11 @@ async function refreshAdmin() {
       state.userCenter.feedback = { kind: 'warning', message: `System subscriptions unavailable: ${userCenterPayload.systemSubscriptionsError}` };
     }
     state.awxProviders = asArray(dashboard.awxProviders);
-    state.appCenterApps = asArray(appCenterAppsPayload.apps);
-    state.appCenterAppsError = appCenterAppsPayload.error || null;
-    state.workbenchCatalogLoadedAt = appCenterAppsPayload.error ? null : new Date().toISOString();
+    applyAppCenterRegistryPayloads(appCenterAppsPayload, launcherProductsPayload);
     state.appOnboardingTemplates = asArray(appOnboardingTemplatesPayload.templates);
     state.appOnboardingTemplatesError = appOnboardingTemplatesPayload.error || null;
     state.launcherServiceVipSmokes = asArray(dashboard.launcherServiceVipSmokes);
     state.launcherServiceVipSmokesError = null;
-    state.launcherProducts = asArray(launcherProductsPayload.products);
-    state.launcherProductsError = launcherProductsPayload.error || null;
     state.launcherLeases = asArray(launcherLeasesPayload.leases);
     state.launcherLeasesError = launcherLeasesPayload.error || null;
     applyLauncherProductUserAccessLists({
@@ -1649,10 +1651,7 @@ async function refreshAdmin() {
     }
     state.dashboard = null;
     state.overseaOverview = null;
-    state.appCenterApps = [];
-    state.appCenterAppsError = error.message;
-    state.launcherProducts = [];
-    state.launcherProductsError = error.message;
+    applyAppCenterRegistryPayloads({ error: error.message }, { error: error.message });
     state.launcherLeases = [];
     state.launcherLeasesError = error.message;
     state.mxH2iProductUserAccess = null;
@@ -1691,7 +1690,8 @@ async function loadOverseaOverview() {
 async function loadLauncherProductNetworks() {
   try {
     const payload = await fetchJson('/internal/v1/launcher-network/products');
-    return { products: asArray(payload.products), error: null };
+    if (!Array.isArray(payload?.products)) throw new Error('ProductNetwork API returned an invalid products list');
+    return { products: payload.products, error: null };
   } catch (error) {
     return { products: [], error: error.message };
   }
@@ -1853,7 +1853,8 @@ function applyGatewayRuntimeConfig(config) {
 async function loadAppCenterApps() {
   try {
     const payload = await fetchJson('/internal/v1/app-center/apps');
-    return { apps: asArray(payload.apps), error: null };
+    if (!Array.isArray(payload?.apps)) throw new Error('AppCenter API returned an invalid apps list');
+    return { apps: payload.apps, error: null };
   } catch (error) {
     return { apps: [], error: error.message };
   }
@@ -4833,6 +4834,9 @@ function synchronizeLauncherNetworkServerScope(value) {
   state.launcherNetworkServerBase = next.base;
   state.launcherNetworkServerOrigin = next.origin;
   state.launcherNetworkRequestGeneration += 1;
+  state.appCenterApps = [];
+  state.appCenterAppsError = '连接地址已变化，请刷新应用目录。';
+  state.workbenchCatalogLoadedAt = null;
   state.launcherProducts = [];
   state.launcherProductsError = null;
   state.launcherLeases = [];
@@ -4883,6 +4887,16 @@ async function applyOpsToken() {
   opsTokenApply.textContent = '应用中';
   setOpsTokenFeedback('', '正在验证 Token…');
   try {
+    const mode = await adminSession.opsLoginMode();
+    if (opsTokenBinding !== binding || clearOpsTokenIfServerBaseChanged()) return;
+    if (mode === 'session') {
+      await adminSession.signInWithOps(binding.token);
+      if (opsTokenBinding !== binding || clearOpsTokenIfServerBaseChanged()) return;
+      clearOpsToken();
+      renderLoginGate();
+      await refreshAdmin();
+      return;
+    }
     const response = await fetch(`${normalizedServerBase()}/internal/v1/user-center/roles`, {
       headers: { 'x-mx-ops-token': binding.token }, redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(15000)
     });
@@ -4897,9 +4911,10 @@ async function applyOpsToken() {
       refreshed ? 'success' : 'error',
       refreshed ? 'Token 已应用，管理数据已刷新。' : 'Token 已验证，但管理数据刷新失败，请重试。'
     );
-  } catch {
+  } catch (error) {
     if (opsTokenBinding !== binding) return;
-    setOpsTokenFeedback('error', '应用失败，请检查 Token、MX Server 和网络后重试。');
+    setOpsTokenFeedback('error', error?.code === 'sso_unavailable'
+      ? error.message : '应用失败，请检查 Token、MX Server 和网络后重试。');
   } finally {
     opsTokenApply.disabled = false;
     opsTokenApply.textContent = '应用';
@@ -11125,11 +11140,35 @@ function filteredAppCenterApps() {
     });
 }
 
+function renderAppCenterRegistryRefreshError() {
+  const errors = [state.appCenterAppsError, state.launcherProductsError].filter(Boolean);
+  if (!errors.length) return '';
+  const snapshotHint = state.workbenchCatalogLoadedAt
+    ? '保留上次成功读取的目录和产品配置；当前显示可能不是最新状态。'
+    : '尚未完整读取应用目录和产品配置，请重试。';
+  return `<div class="feedback error" role="status">
+    <span>目录或产品配置刷新失败。${escapeHtml(snapshotHint)} ${escapeHtml([...new Set(errors)].join(' / '))}</span>
+    <button class="secondary-button" type="button" data-app-registry-refresh>重试刷新目录</button>
+  </div>`;
+}
+
+function bindAppCenterRegistryRefreshControls(root) {
+  for (const button of root.querySelectorAll('[data-app-registry-refresh]')) {
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        await refreshAppCenterNetwork();
+      } finally {
+        button.disabled = false;
+      }
+    });
+  }
+}
+
 function renderAppCatalogPanel() {
   if (!appProductsPanel) return;
   const apps = filteredAppCenterApps();
   const selectedId = activeAppCenterApp()?.appId || MX_H2I_PRODUCT_ID;
-  const error = state.appCenterAppsError || '';
   appProductsPanel.innerHTML = `
     <section class="app-catalog-card">
       <div class="app-catalog-toolbar">
@@ -11147,7 +11186,7 @@ function renderAppCatalogPanel() {
           <button class="primary-button" type="button" data-app-new>New App</button>
         </div>
       </div>
-      ${error ? `<div class="feedback error">${escapeHtml(error)}</div>` : ''}
+      ${renderAppCenterRegistryRefreshError()}
       ${state.appCatalogFeedback ? `<div class="feedback ${escapeHtml(state.appCatalogFeedback.kind || 'info')}">${escapeHtml(state.appCatalogFeedback.message || '')}</div>` : ''}
       <div class="app-table" role="table" aria-label="Launcher applications">
         <div class="app-table-row is-header" role="row">
@@ -11959,6 +11998,7 @@ function bindAppEditorDrawerControls() {
 
 function bindAppCatalogControls() {
   if (!appProductsPanel) return;
+  bindAppCenterRegistryRefreshControls(appProductsPanel);
   const search = appProductsPanel.querySelector('[data-app-filter="search"]');
   if (search) {
     search.addEventListener('input', () => {
@@ -14141,7 +14181,7 @@ function renderSelectedAppDetail() {
   ));
   const mxH2iSmokeLeases = launcherLeasesForProduct(MX_H2I_PRODUCT_ID);
   const latestLease = leases[0] || null;
-  const error = state.appCenterAppsError || state.launcherProductsError || state.launcherLeasesError || '';
+  const error = state.launcherLeasesError || '';
   const channels = asArray(app.channels).length ? asArray(app.channels) : ['shadow', 'beta', 'stable'];
   const capabilities = Array.from(new Set([
     ...asArray(app.requiredCapabilities),
@@ -14188,6 +14228,7 @@ function renderSelectedAppDetail() {
         </div>
       </header>
 
+      ${renderAppCenterRegistryRefreshError()}
       ${error ? `<div class="feedback error">${escapeHtml(error)}</div>` : ''}
 
       ${renderInsightHubOverviewCard(app)}
@@ -14321,6 +14362,7 @@ function renderSelectedAppDetail() {
     </section>
   `;
   bindRelayEnrollmentControls(appSelectedDetail);
+  bindAppCenterRegistryRefreshControls(appSelectedDetail);
   const launchButton = appSelectedDetail.querySelector('[data-selected-app-launch]');
   if (launchButton) launchButton.addEventListener('click', () => void launchHdiProduct());
   const editButton = appSelectedDetail.querySelector('[data-selected-app-edit]');
@@ -15012,6 +15054,11 @@ async function syncLauncherServiceVipDomesticCidrs(siteId, appId) {
       detail: [blockedReasons, `final ${finalCidrs}`, nextActions].filter(Boolean).join(' / ')
     };
     await refreshAppCenterNetwork();
+    const refreshError = state.appCenterAppsError || state.launcherProductsError;
+    if (refreshError) {
+      state.launcherServiceVipCidrSyncFeedback.kind = result.status === 'blocked' ? 'error' : 'warning';
+      state.launcherServiceVipCidrSyncFeedback.detail += ` / 目录刷新失败：${refreshError}。请重试刷新目录，无需重复同步 CIDRs。`;
+    }
   } catch (error) {
     state.launcherServiceVipCidrSyncFeedback = {
       appId,
