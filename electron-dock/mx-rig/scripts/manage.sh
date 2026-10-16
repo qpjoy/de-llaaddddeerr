@@ -3,7 +3,8 @@
 # Internal server. Both run the same image.
 #
 # This script only ever touches its own things: the compose project "mx-rig",
-# or the Kubernetes namespace "mx-rig" and its two PersistentVolumes. It never
+# its dedicated proxy builder/cache, or the Kubernetes namespace "mx-rig" and
+# its two PersistentVolumes. It never
 # reads or writes another product's namespace, Service, Secret, database or
 # volume, and it does not look for Launcher — Rig accounts are its own.
 set -Eeuo pipefail
@@ -28,6 +29,8 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
 kube() { kubectl -n "$NAMESPACE" "$@"; }
 rand_hex() { openssl rand -hex "$1" 2>/dev/null || od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
 b64() { base64 -w0 2>/dev/null || base64 | tr -d '\n'; }
+# shellcheck source=build-proxy.sh
+source "${ROOT_DIR}/scripts/build-proxy.sh"
 
 usage() {
   cat <<'EOF'
@@ -49,6 +52,8 @@ MX Rig
 
 Internal 服务器（Kubernetes，在节点上执行）
   scripts/manage.sh deploy                  构建镜像、导入 containerd、迁移、上线并验证
+  PROXY=http://127.0.0.1:7788 bash scripts/manage.sh deploy
+                                            Linux 节点：仅本次构建/下载走代理，不改系统或 Docker 代理
   scripts/manage.sh verify | status | logs [server|migrate|postgres] | admin-token
   scripts/manage.sh migrate                 只跑迁移
   scripts/manage.sh stop                    服务缩到 0；数据库、Secret 与数据目录保留
@@ -69,11 +74,21 @@ EOF
 }
 
 load_env() {
+  local build_proxy_set="${MX_RIG_BUILD_PROXY+x}" build_proxy="${MX_RIG_BUILD_PROXY-}"
+  local proxy_set="${PROXY+x}" proxy="${PROXY-}"
   if [ -f "$ENV_FILE" ]; then
     set -a
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     set +a
+  fi
+  # Explicit shell values (including empty to disable) win over .env.
+  if [ "$build_proxy_set" = x ]; then
+    MX_RIG_BUILD_PROXY="$build_proxy"
+  elif [ "$proxy_set" = x ]; then
+    MX_RIG_BUILD_PROXY="$proxy"
+  else
+    MX_RIG_BUILD_PROXY="${MX_RIG_BUILD_PROXY-${PROXY:-}}"
   fi
 }
 
@@ -427,9 +442,13 @@ build_local_image() {
   local network="${1:-}" tag="mx-rig-server:build-$$" id
   local -a args=(-f "${ROOT_DIR}/deploy/Dockerfile" -t "$tag")
   need docker
-  if [ "$network" = host ]; then args+=(--network host); fi
   say "building the server image"
-  docker build "${args[@]}" "$ELECTRON_DOCK_DIR"
+  if [ -n "${MX_RIG_BUILD_PROXY:-}" ]; then
+    rig_with_build_proxy rig_build_with_proxy "${args[@]}" "$ELECTRON_DOCK_DIR"
+  else
+    if [ "$network" = host ]; then args+=(--network host); fi
+    docker build "${args[@]}" "$ELECTRON_DOCK_DIR"
+  fi
   id="$(docker image inspect "$tag" --format '{{.Id}}')"
   [[ "${id#sha256:}" =~ ^[0-9a-f]{64}$ ]] || die "docker returned an invalid image id: ${id}"
   IMAGE="mx-rig.local/mx-rig-server:local-sha256-${id#sha256:}"
@@ -479,6 +498,9 @@ resolve_image() {
           # through a tunnel can stall npm on the bridge network's MTU.
           build_local_image host
           import_containerd_image
+          if [ -n "${MX_RIG_BUILD_PROXY:-}" ]; then
+            rig_with_build_proxy rig_proxy_postgres_image
+          fi
           ;;
         *) die "cannot import a local image into ${runtime:-an unknown runtime}; set MX_RIG_IMAGE to a registry digest" ;;
       esac

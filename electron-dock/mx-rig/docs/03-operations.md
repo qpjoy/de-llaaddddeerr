@@ -112,6 +112,19 @@ scripts/manage.sh verify | status | logs [server|migrate|postgres] | admin-token
 scripts/manage.sh stop          # 服务缩到 0；数据库、Secret、数据目录保留
 ```
 
+节点访问 Docker Hub 出现 `auth.docker.io ... EOF` 或基础镜像 metadata 下载失败时，可在 **Linux 部署节点**指定本机 HTTP 代理：
+
+```bash
+PROXY=http://127.0.0.1:7788 bash scripts/manage.sh deploy
+```
+
+- `127.0.0.1:7788` 必须是这台部署节点上可用的代理。需要本机 Docker Engine、Buildx 插件、`ctr` 和现有部署要求的 OpenSSL；无需宿主机 Node。root 可直接运行；非 root 需要免密 sudo，并允许 `sudo --preserve-env` 保留指定代理变量供 `ctr` 下载。
+- 代理覆盖 registry token、基础镜像层、`npm ci`，以及首次下载 BuildKit 和缺少的 PostgreSQL 镜像。只传 `--build-arg HTTP_PROXY` 不能解决基础镜像拉取阶段的问题。
+- 脚本使用 Rig 专属的 `mx-rig-proxy-<配置哈希>` BuildKit 容器和缓存卷，使用 host 网络访问本机代理；首次 BuildKit 镜像经 `ctr` 客户端下载到 `mx-rig-build-proxy` namespace，再加载到 Docker。containerd 2.x 使用 `--local`，避免下载重新落到未配置代理的 daemon。PostgreSQL 仅在已验证的单节点上、镜像缺失时预拉到 `k8s.io`。
+- 相同配置复用构建器和缓存；切换代理选用另一个构建器。通过 Docker 的[remote driver 本地容器连接](https://docs.docker.com/build/builders/drivers/remote/#example-remote-buildkit-in-docker-container)访问，不开放 BuildKit TCP 端口、不切换全局默认 builder。代理只在构建/下载子进程中设置，不写入应用镜像、Kubernetes Secret 或服务配置，也不修改/重启 Docker、containerd、Launcher 或 MX-H2I 的网络与认证服务。
+- 长期配置可在 `.env` 写 `MX_RIG_BUILD_PROXY=http://127.0.0.1:7788`。优先级为 shell `MX_RIG_BUILD_PROXY` → shell `PROXY` → `.env` `MX_RIG_BUILD_PROXY` → `.env` `PROXY`；显式空值可关闭，例如 `PROXY= bash scripts/manage.sh deploy`。可用 `MX_RIG_BUILD_NO_PROXY` 覆盖默认的本机、私网和集群域名直连列表，用 `MX_RIG_BUILDKIT_IMAGE` 指定 BuildKit 镜像。
+- 该入口用于 `deploy` / `migrate` 的本地构建和节点镜像预拉；`up` 的 Compose 构建、已有 `MX_RIG_IMAGE` 仓库镜像和后续测试执行机 Job 的拉取仍由原运行环境负责。
+
 - **命名空间与入口**：命名空间 `mx-rig`，自带 PostgreSQL（StatefulSet），NodePort 30891。访问地址默认是 `http://<节点 InternalIP>:30891`，可以用 `MX_RIG_PUBLIC_URL` 覆盖。
 - **镜像**：
   - kubeadm/containerd 节点：用 host 网络构建，按内容哈希打标签，再 `ctr -n k8s.io images import`（需要 root 或免密 sudo）。
