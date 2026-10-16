@@ -4,6 +4,48 @@
 
 Night-All-A应用位于 `100.127.0.1`；此前容器诊断中的数据库配置候选和实际只读连接均为 **Internal `100.127.0.6:5432 / agent_data_crawler_platform`**，应用服务器与数据库服务器分开。该快照仍使用 `public.saved_records` 父表及按 `source_type` 划分的 14 个分区，新增类别已确认是 tender。截图中的 `tag` 错误来自第 24 列与 Hub 旧源合同不兼容；游标索引仅 tender 分区缺失，原 13 类均合格。实际运行源码还确认 writer 自身没有保证跨记录的时间戳与提交顺序一致，不能仅修 schema/index 后确认 writer 合同并恢复无遗漏增量。
 
+## 2026-10-17：按批次核对实际库与清洗结果
+
+用户确认旧批次 `tag=tasiting` 已恢复；新批次为 `tag=maidanglao`，`source_type` 仍是分类。新截图声称325站数据在 `52.77.63.234` 的PostgreSQL。它与此前 `/tmp/docx/interface-service.md` 第4节和已收到的只读诊断不同：原文档明确源库为 `100.127.0.6:5432/agent_data_crawler_platform`，另将 `52.77.63.234` 列作Docker运行产物所在服务器。不能由任何一张说明截图认定现在迁了库，也不能推断公网地址与VPN地址必然对应同一台机器；需重新读取当前连接和批次记录。
+
+Hub按类别叶表增量读取，没有按tag过滤。若新旧批次确在同一库，maidanglao新闻和首页快照仍由现有news/web任务处理，不需因tag新增一套分类；tender暂停不阻碍这两个类别。`active`、源表核对通过及旧批次恢复均不是新批次清洗成功的证据。
+
+tag目前保留于Hub原始证据 `ingest.source_objects.raw_payload` 及原始版本，不进入canonical公开tags。核对必须限定外部source/stream/object_type和canonical的dataset/platform/object_type/external_id，不能仅凭同名record_key跨库或跨类别匹配。批次原始记录存在、canonical身份存在、内容/来源版本一致、搜索投影可用是不同层次；计数相等和最新5条样本匹配不能证明全量内容完整。
+
+源writer首次创建记录时才写入run.tag；重复身份不会自动改标签。因此tag能定位已落库的批次标记，不是完整的“计划遇见记录”关联表。325站采集覆盖还需另查各站任务、错误、pending与listing_resume，不应要求每站每天必有新记录，也不能把站点数等同记录数。
+
+已恢复的tasiting连接、映射和checkpoint应保持。若证实maidanglao在另一个独立同名库，先登记独立的来源身份和游标方案；现有固定流水线只表达一套来源，不能直接把共享host改成 `.1`、沿用旧checkpoint或将新库写入原canonical身份。远程连接只需在确认的源库VPN接口上允许Internal实际来源地址访问，并配置专用只读认证；不需要把5432开放到公网。监听地址、pg_hba和网络放行需分别核对，见[PostgreSQL连接认证文档](https://www.postgresql.org/docs/16/auth-pg-hba-conf.html)。本轮诊断不修改这些设置。
+
+### 当前只读核对命令
+
+同步这次脚本文件后，在Internal的 `mx-insight-hub` 目录执行，无需镜像更新、migrate或服务重启。第一条检查Internal本地5432的候选源库；第二条使用现有Admin Pod自己的Hub数据库配置，不需要复制密码，也不连接其他候选主机。
+
+```bash
+sudo -u postgres psql -X -p 5432 -d agent_data_crawler_platform \
+  -v ON_ERROR_STOP=1 -A -t -q \
+  < scripts/night-all-a-batch-source-audit.sql
+
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c api -- \
+  node --input-type=module - \
+  < server/ops/diagnose-night-all-a-batches.mjs
+```
+
+[源库脚本](../../scripts/night-all-a-batch-source-audit.sql)输出实际连接身份、权限允许时的cluster标识、两个tag按类别/connector的聚合，以及maidanglao组织站news/web各5条最新对账标识；不输出正文或URL。Unix socket的serverAddress/Port为null是正常情况，不能将其解读为连接失败。cluster标识相同还可能是副本/克隆，不能单独当作同一物理服务器的证明。查询超时或缺tag时必须按失败处理，不能当作0条。
+
+[Hub脚本](../../server/ops/diagnose-night-all-a-batches.mjs)输出当前登记连接的非凭据字段、分区状态与原断点、近期导入，以及news/web中两个tag的原始记录与canonical身份对应数量和各5条样本。每个section的 `state=unavailable` 或 `truncated=true` 都表示证据不完整。原始与canonical身份相符只证明存在对应记录，不证明正文/版本相同、源端全量读完、ES投影完成或325站全覆盖。
+
+若Internal已查到maidanglao且Hub登记的news/web也指向同一个源库，继续按当前类别的checkpoint、最新源记录与Hub原始记录对账，无需改主机或批次映射。若查不到，先在Night-All-A应用主机 `.1` 重跑已有 [runtime-audit](../../scripts/night-all-a-runtime-audit.py)，核对当前 `PLATFORM_DATABASE_URL` 候选及实际连接结果：
+
+```bash
+sudo docker exec -i -e PYTHONDONTWRITEBYTECODE=1 \
+  data-query-platform-platform-1 python -B - \
+  < /tmp/night-all-a-runtime-audit.py
+```
+
+这是此前已上传的脚本；若文件已清理，从仓库同名文件重新上传。其环境候选不是运行进程engine的绝对证明；如仍有冲突，再核对platform/runtime的当前配置和实际保存路径。确定实际目标后，再在该数据库运行同一批次SQL，不能在未知目标上试用旧库凭据或先开放端口。
+
+本地验证：源库审计7项、Hub审计6项及organization-web映射5项，共18项通过；SQL查询体使用实际PGlite执行，Hub stdin入口与不完整报告的非零退出已验证。无原生psql，源脚本的psql分支仅静态验证。Hub顶层 `status=observed` 只表示各诊断section读取完整，`incomplete` 保留已取得结果并非零退出；两者都不是清洗验收结论。本轮尚无新的生产查询结果，没有改连接、账号、端口、业务数据或MX-H2I登录/联网。
+
 ## Hub 迁移兼容实施状态
 
 用户进一步要求将兼容落实到上线流程。本地已补齐三层行为；用户部署尝试未完成，不能据此确认生产恢复：

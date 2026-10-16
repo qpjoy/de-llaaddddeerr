@@ -5,6 +5,10 @@ Migration `066_night_all_saved_records_sources.sql` registers the fixed inputs;
 it does not connect to the source database, read a row, approve a mapping,
 activate a task or grant a Public API platform.
 
+## 2026-10-17：tasiting/maidanglao批次验证
+
+用户确认tasiting已恢复，maidanglao仍待验证。tag是原始批次标签、source_type是分类；同库新批次仍由news/web原任务读取，不能因为新tag改共享host或重置旧断点。新截图的公网数据库位置与此前文档/只读诊断不一致，需要当前数据证据。新增只读源库与Hub诊断脚本可直接运行，无需部署；按tag核对原始证据、完整canonical身份、断点和导入记录，不把active、计数相同或样本相符当作全量清洗完成。命令和证据边界见[按批次核对](night-all-a-cleaning-schema-drift-2026-10-16.md#2026-10-17按批次核对实际库与清洗结果)。18项本地回归通过，未操作生产或改MX-H2I。
+
 ## 2026-10-16：迁移兼容、组织网站与恢复限制
 
 源端 migration `0022_collection_tags` 在原 `saved_records` 增加可空 `varchar tag`。
