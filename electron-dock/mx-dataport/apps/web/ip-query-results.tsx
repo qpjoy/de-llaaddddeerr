@@ -275,10 +275,12 @@ export function QueryResult({
               )}
             </section>
             <section className="dp-risk-advice risk-advice-summary">
-              <h3>
-                <Sparkles size={22} />
-                风险参考建议
-              </h3>
+              <div className="ai-advice-heading">
+                <span className="ai-advice-symbol">
+                  <Sparkles aria-hidden="true" />
+                </span>
+                <h3>风险参考建议</h3>
+              </div>
               <p>{riskAdvice(profile.risk_level)}</p>
               <small>
                 当前建议依据风险等级规则生成，AI

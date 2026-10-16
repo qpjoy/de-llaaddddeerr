@@ -3,6 +3,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { hasPermission, enterpriseUrl } from "./permissions";
 import { downloadExcel } from "./download";
 import { Input } from "@/components/ui/input";
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, Database } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -430,21 +431,34 @@ export function Commerce({
           <div className="parity-invoices">
             <section className="panel">
               <h3>公司开票信息</h3>
-              <form className="dp-form">
-                <label>
-                  公司抬头
-                  <Input disabled placeholder="填写公司完整名称" />
-                </label>
-                <label>
-                  纳税人识别号
-                  <Input disabled placeholder="15–20 位大写字母或数字" />
-                </label>
-                <label>
-                  收票邮箱
-                  <Input disabled placeholder="finance@example.com" />
-                </label>
+              <FieldGroup className="mt-6">
+                <Field data-disabled>
+                  <FieldLabel htmlFor="invoice-company">公司抬头</FieldLabel>
+                  <Input
+                    id="invoice-company"
+                    disabled
+                    placeholder="填写公司完整名称"
+                  />
+                </Field>
+                <Field data-disabled>
+                  <FieldLabel htmlFor="invoice-tax">纳税人识别号</FieldLabel>
+                  <Input
+                    id="invoice-tax"
+                    disabled
+                    placeholder="15–20 位大写字母或数字"
+                  />
+                </Field>
+                <Field data-disabled>
+                  <FieldLabel htmlFor="invoice-email">收票邮箱</FieldLabel>
+                  <Input
+                    id="invoice-email"
+                    type="email"
+                    disabled
+                    placeholder="finance@example.com"
+                  />
+                </Field>
                 <Button disabled>提交开票申请</Button>
-              </form>
+              </FieldGroup>
             </section>
             <section className="panel">
               <h3>申请记录</h3>

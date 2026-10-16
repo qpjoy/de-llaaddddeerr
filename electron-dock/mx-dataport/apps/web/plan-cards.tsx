@@ -77,7 +77,12 @@ export function PlanCards({
                   <li>
                     <Check aria-hidden="true" />
                     <span>
-                      <strong>{item.quota.toLocaleString("zh-CN")}</strong> 次
+                      {item.kind === "trial" ? (
+                        item.quota.toLocaleString("zh-CN")
+                      ) : (
+                        <strong>{item.quota.toLocaleString("zh-CN")}</strong>
+                      )}{" "}
+                      次
                       {item.kind === "trial"
                         ? "试用"
                         : item.months === 12

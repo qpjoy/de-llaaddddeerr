@@ -69,7 +69,7 @@
   background: #fff;
   color: #4e5969;
   font: inherit;
-  font-size: 0.8rem;
+  font-size: 13px;
   max-width: 100%;
 }
 .dp-form {
@@ -81,7 +81,7 @@
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
-  font-size: 0.85rem;
+  font-size: 13px;
 }
 .dp-form textarea {
   resize: vertical;
@@ -183,20 +183,6 @@
   height: 0.35rem;
   accent-color: #165dff;
 }
-.support-card {
-  white-space: normal !important;
-  height: auto !important;
-  justify-content: flex-start !important;
-  width: calc(100% - 1rem);
-  margin: 0.5rem !important;
-}
-.support-card small {
-  font-size: 0.7rem;
-  font-weight: 400;
-  color: #86909c;
-  display: block;
-  margin-top: 0.3rem;
-}
 .dp-batch-entry {
   display: flex;
   justify-content: center;
@@ -245,29 +231,6 @@
 .harbor-risk-tags span[data-neutral="true"] {
   color: #66738c !important;
   background: #eff3f8 !important;
-}
-.dp-risk-advice {
-  margin-top: 1.75rem;
-  border: 1px solid #e5eaf4;
-  border-radius: 0.75rem;
-  padding: 1.4rem;
-  background: linear-gradient(120deg, #f6f9ff, #fafbff);
-}
-.dp-risk-advice h3 {
-  display: flex;
-  gap: 0.65rem;
-  align-items: center;
-  font-size: 0.95rem;
-  color: #314b7a;
-}
-.dp-risk-advice p {
-  font-size: 0.85rem;
-  line-height: 1.9;
-  margin: 1rem 0 0.75rem;
-}
-.dp-risk-advice small {
-  font-size: 0.75rem;
-  color: #86909c;
 }
 .dp-legal-footer {
   display: flex;

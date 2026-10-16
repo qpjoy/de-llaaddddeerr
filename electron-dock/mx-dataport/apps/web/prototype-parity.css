@@ -23,11 +23,17 @@
   margin-bottom: 26px;
 }
 .harbor-console .page-heading h1 {
-  font-size: 26px;
+  font-size: 28px;
   line-height: 1.4;
 }
 .harbor-console .page-heading > div > p {
   display: none;
+}
+.harbor-console[data-page="keys"] .page-heading [data-slot="button"] {
+  height: 42px;
+  min-height: 42px;
+  padding: 9px 15px;
+  line-height: 1.5;
 }
 .harbor-console > .legal-footer {
   position: fixed;
@@ -44,23 +50,6 @@
 }
 .legal-footer-inner {
   width: 100%;
-}
-.harbor-shell .console-sidebar-footer .support-card {
-  width: 100%;
-  margin: 0;
-  padding: 12px;
-  border: 0;
-  height: 46px;
-  min-height: 46px;
-  background: #f7f8fc;
-  gap: 12px;
-  font-size: 13px;
-  font-weight: 400;
-  justify-content: flex-start;
-}
-.harbor-shell .support-card svg {
-  color: #395ff4;
-  flex-shrink: 0;
 }
 .harbor-console [data-slot="card"] {
   box-shadow: none;
@@ -125,14 +114,15 @@
   background: #f7f8fc;
 }
 .harbor-history [data-slot="table-cell"]:first-child {
-  font-weight: 600;
+  font-weight: 550;
 }
 .harbor-history [data-slot="table-cell"]:last-child,
 .harbor-history [data-slot="table-head"]:last-child {
   text-align: center;
 }
 .harbor-history [data-slot="table-cell"] [data-slot="button"] {
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 20px;
 }
 .harbor-history .harbor-pagination {
   margin-top: 24px;
@@ -152,7 +142,8 @@
 .harbor-pagination [data-slot="button"] {
   height: 32px;
   min-height: 32px;
-  font-size: 12px;
+  font-size: 14px;
+  line-height: 20px;
   padding: 0 12px;
   border-radius: 5px;
 }
@@ -161,8 +152,8 @@
 }
 .query-upload {
   height: 36px;
-  font-size: 12px;
-  color: #365bf5;
+  font-size: 13px;
+  color: var(--primary);
   padding: 0 8px;
 }
 .query-upload svg {
@@ -190,6 +181,13 @@
   display: none;
 }
 @media (max-width: 767px) {
+  .harbor-console .page-heading h1 {
+    font-size: 24px;
+  }
+  .harbor-console .harbor-history [data-slot="table-cell"] {
+    font-size: 12px;
+    line-height: calc(20 / 14);
+  }
   .harbor-console > .legal-footer {
     left: 0;
     padding-inline: 18px;
@@ -297,8 +295,11 @@
 .parity-invoices .panel h3 {
   margin-bottom: 24px;
 }
-.parity-invoices .dp-form {
-  gap: 24px;
+.harbor-console .parity-invoices [data-slot="input"] {
+  height: 36px;
+  border-color: var(--input);
+  border-radius: 6px;
+  box-shadow: 0 1px 2px #0000000d;
 }
 .parity-invoices .empty-state {
   min-height: 280px;
@@ -312,7 +313,7 @@
 }
 .parity-commerce .ip-pricing-heading h1 {
   font-size: 18px;
-  letter-spacing: 0;
+  letter-spacing: -0.025em;
 }
 .parity-commerce .ip-pricing-grid {
   gap: 16px;
@@ -388,6 +389,7 @@
 .overview-tools [data-slot="select-trigger"] {
   width: 160px;
   height: 40px;
+  font-size: 13px;
 }
 .harbor-console[data-page="overview"] > .usage-metrics .panel {
   margin-top: 0;
@@ -420,8 +422,8 @@
 }
 .parity-portrait .harbor-report-heading h2 {
   font-family: inherit;
-  font-size: 26px;
-  line-height: 1.4;
+  font-size: 24px;
+  line-height: 1.5;
 }
 .parity-portrait .harbor-report-heading > div {
   gap: 12px;
@@ -457,6 +459,13 @@
 .parity-portrait .harbor-profile-fields dd {
   font-size: 13px;
   line-height: 1.7;
+}
+.parity-portrait .harbor-profile-fields dt {
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+.parity-portrait .harbor-profile-fields dd {
+  color: var(--foreground);
 }
 .parity-portrait .harbor-location {
   align-self: stretch;
@@ -497,6 +506,7 @@
 }
 .parity-portrait .harbor-tag-section > h3 {
   font-size: 15px;
+  font-weight: 550;
   margin-bottom: 20px;
 }
 .parity-portrait .harbor-tag-groups {
@@ -513,11 +523,6 @@
 }
 .parity-portrait .dp-risk-advice {
   margin-top: 24px;
-}
-.parity-portrait .dp-risk-advice h3 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 .parity-portrait .harbor-record-details {
   font-size: 12px;
@@ -594,6 +599,11 @@
 }
 .parity-docs .panel > .section-title {
   margin-bottom: 20px;
+}
+.parity-docs .panel > .section-title h3 {
+  font-size: 15px;
+  font-weight: 550;
+  line-height: 1.5;
 }
 .parity-docs .table-sub {
   white-space: normal;
@@ -744,9 +754,6 @@
   color: #6d87b3;
   border-radius: 14px;
 }
-.harbor-console .parity-invoices .dp-form [data-slot="button"] {
-  width: 100%;
-}
 .parity-portrait .harbor-risk-tags .parity-tag-missing {
   padding: 0;
   border: 0;
@@ -782,9 +789,19 @@
   flex-shrink: 0;
 }
 .harbor-console .dp-team-summary h2 {
-  font-size: 15px;
-  font-weight: 500;
+  font-size: 14px;
+  font-weight: 400;
   margin: 6px 0 16px;
+}
+.harbor-console .dp-team-summary small {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.harbor-console .dp-team-summary p {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
 }
 .parity-batch-inline {
   text-align: left;
@@ -936,6 +953,10 @@
 .auth-legal-links a:hover {
   color: var(--primary);
 }
+.auth-dialog .auth-close svg {
+  width: 16px;
+  height: 16px;
+}
 .harbor-console .parity-portrait .dp-risk-advice {
   background: linear-gradient(110deg, #eff5ff, #f8f7ff 70%, #f3faff);
   border-color: #d9e4fa;
@@ -995,6 +1016,85 @@
 .dp-dialog[data-slot="dialog-content"] {
   max-height: calc(100dvh - 32px);
   overflow-y: auto;
+}
+/* Plain prototype tables differ from the query history's compact headers. */
+.harbor-console
+  :is(
+    .parity-members-panel,
+    .parity-audit-panel,
+    .parity-ticket-panel,
+    .usage-bottom .simple-data-table
+  )
+  [data-slot="table-head"] {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: normal;
+  color: var(--foreground);
+}
+.harbor-console
+  :is(
+    .parity-members-panel,
+    .parity-audit-panel,
+    .parity-ticket-panel,
+    .usage-bottom .simple-data-table
+  )
+  [data-slot="table-cell"] {
+  font-size: 13px;
+  line-height: 1.5;
+}
+.harbor-console .harbor-history [data-slot="table-head"] {
+  color: var(--text-secondary);
+}
+.parity-members-panel [data-slot="table-cell"] strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+.parity-members-panel .dp-account-id {
+  font-size: 11px;
+  line-height: 1.5;
+  margin-top: 4px;
+  color: var(--text-secondary);
+}
+.dp-form > label,
+.ticket-form > label {
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.dp-form :is(input, select, textarea),
+.ticket-form :is(input, select, textarea) {
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--foreground);
+  padding: 10px 12px;
+  border-color: var(--line-soft);
+  border-radius: 7px;
+  box-shadow: none;
+}
+.dp-form :is(input, select),
+.ticket-form :is(input, select) {
+  height: auto;
+  min-height: 41.5px;
+}
+.dp-form small,
+.ticket-form small {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.dp-key-form .field select {
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid #e1e5eb;
+  border-radius: 5px;
+  background: white;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
 }
 .risk-score[data-risk="unknown"] {
   color: #8a94a6;

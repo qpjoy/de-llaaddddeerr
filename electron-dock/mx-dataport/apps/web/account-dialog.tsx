@@ -287,10 +287,18 @@ function AccountDialogSession({
               </Button>
             </FieldGroup>
           </form>
-          <p className="auth-register-hint">
-            {register
-              ? "使用 DataPort 专用邀请码创建 MX 账号并开通数港。已有 MX 账号请在登录页使用邀请码开通。"
-              : "企业账号由管理员开通，员工账号由企业超管创建或邀请。忘记密码请联系管理员。"}
+          <p
+            className={register ? "auth-register-hint" : "managed-account-note"}
+          >
+            {register ? (
+              "使用 DataPort 专用邀请码创建 MX 账号并开通数港。已有 MX 账号请在登录页使用邀请码开通。"
+            ) : (
+              <>
+                账号由管理员统一开通
+                <br />
+                如需开通或重置密码，请联系管理员
+              </>
+            )}
           </p>
           <nav className="auth-legal-links" aria-label="登录法律信息">
             <a href="/terms">用户协议</a>

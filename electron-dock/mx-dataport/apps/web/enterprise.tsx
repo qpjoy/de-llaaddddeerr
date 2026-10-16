@@ -211,15 +211,28 @@ export function EnterpriseMembers(props: Props) {
         <div className="section-title">
           <h3>企业成员</h3>
           {hasPermission(session, tenant, "members.create") && (
-            <Button
-              onClick={() => {
-                setCommandId(crypto.randomUUID());
-                setOpen(true);
-              }}
-            >
-              <Plus size={16} />
-              新建子账号
-            </Button>
+            <div className="harbor-actions">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setOperation("invite");
+                  setCommandId(crypto.randomUUID());
+                  setOpen(true);
+                }}
+              >
+                关联已有账号
+              </Button>
+              <Button
+                onClick={() => {
+                  setOperation("create");
+                  setCommandId(crypto.randomUUID());
+                  setOpen(true);
+                }}
+              >
+                <Plus size={16} />
+                新建子账号
+              </Button>
+            </div>
           )}
         </div>
         <Table>
@@ -337,15 +350,19 @@ export function EnterpriseMembers(props: Props) {
           if (!write.busy) setOpen(v);
         }}
       >
-        <DialogContent className="dp-dialog">
+        <DialogContent className="dp-dialog dp-member-dialog">
           <DialogHeader>
-            <DialogTitle>创建或关联员工账号</DialogTitle>
+            <DialogTitle>
+              {operation === "create" ? "新建员工子账号" : "关联已有 MX 账号"}
+            </DialogTitle>
             <DialogDescription>
-              新账号使用统一 MX 认证；已有账号需本人确认加入企业。
+              {operation === "create"
+                ? "填写员工信息，为其创建独立登录账号。"
+                : "填写员工已有的 MX 账号，邀请其加入企业。"}
             </DialogDescription>
           </DialogHeader>
           <form
-            className="dp-form"
+            className="ticket-form"
             onSubmit={async (e) => {
               e.preventDefault();
               const values = Object.fromEntries(new FormData(e.currentTarget));
@@ -362,43 +379,43 @@ export function EnterpriseMembers(props: Props) {
               } catch {}
             }}
           >
-            <label>
-              开户方式
-              <select
-                value={operation}
-                onChange={(e) => {
-                  setOperation(e.target.value);
-                  setCommandId(crypto.randomUUID());
-                }}
-              >
-                <option value="create">新建 MX 员工账号</option>
-                <option value="invite">关联已有 MX 账号</option>
-              </select>
-            </label>
-            <label>
-              MX 账号
-              <Input
-                name="account"
-                required
-                maxLength={128}
-                autoComplete="off"
-                onChange={() => setCommandId(crypto.randomUUID())}
-              />
-            </label>
             {operation === "create" && (
               <label>
-                员工姓名
-                <Input
+                <span className="field-label-text">
+                  员工名称 <span className="required-mark">*</span>
+                </span>
+                <input
                   name="displayName"
                   required
                   maxLength={80}
+                  placeholder="填写员工姓名"
                   onChange={() => setCommandId(crypto.randomUUID())}
                 />
               </label>
             )}
             <label>
-              角色
+              <span className="field-label-text">
+                登录账号 <span className="required-mark">*</span>
+              </span>
+              <input
+                name="account"
+                required
+                maxLength={128}
+                autoComplete="off"
+                placeholder={
+                  operation === "create"
+                    ? "填写员工 MX 登录账号"
+                    : "填写已有 MX 账号"
+                }
+                onChange={() => setCommandId(crypto.randomUUID())}
+              />
+            </label>
+            <label>
+              <span className="field-label-text">
+                角色 <span className="required-mark">*</span>
+              </span>
               <select
+                required
                 value={roleId}
                 onChange={(e) => {
                   setRoleId(e.target.value);
@@ -414,13 +431,18 @@ export function EnterpriseMembers(props: Props) {
                   ))}
               </select>
             </label>
+            <small>
+              {operation === "create"
+                ? "初始密码自动生成，仅企业超管可在列表中查看和复制。"
+                : "邀请链接 24 小时有效，员工登录统一 MX 账号并确认后加入企业。"}
+            </small>
             {write.error && <p role="alert">{write.error}</p>}
             <Button disabled={write.busy}>
               {write.busy
                 ? "正在提交…"
                 : operation === "invite"
                   ? "生成邀请链接"
-                  : "创建账号"}
+                  : "创建子账号"}
             </Button>
           </form>
         </DialogContent>
@@ -771,13 +793,11 @@ export function Support(props: Props) {
       >
         <DialogContent className="dp-dialog">
           <DialogHeader>
-            <DialogTitle>提交工单</DialogTitle>
-            <DialogDescription>
-              问题将记录在企业工单中，供客服处理。
-            </DialogDescription>
+            <DialogTitle>新建工单</DialogTitle>
+            <DialogDescription>选择问题方向，填写具体问题。</DialogDescription>
           </DialogHeader>
           <form
-            className="dp-form"
+            className="dp-form ticket-form"
             onSubmit={async (e) => {
               e.preventDefault();
               try {
@@ -792,7 +812,9 @@ export function Support(props: Props) {
             }}
           >
             <label>
-              问题分类
+              <span className="field-label-text">
+                问题分类 <span className="required-mark">*</span>
+              </span>
               <select name="category">
                 {Object.entries(categories).map(([v, l]) => (
                   <option key={v} value={v}>
@@ -802,14 +824,18 @@ export function Support(props: Props) {
               </select>
             </label>
             <label>
-              优先级
+              <span className="field-label-text">
+                优先级 <span className="required-mark">*</span>
+              </span>
               <select name="priority">
                 <option value="normal">普通</option>
                 <option value="urgent">紧急</option>
               </select>
             </label>
             <label>
-              问题内容
+              <span className="field-label-text">
+                详细描述 <span className="required-mark">*</span>
+              </span>
               <textarea
                 name="content"
                 required
@@ -825,7 +851,8 @@ export function Support(props: Props) {
               <Input name="contact" maxLength={200} />
             </label>
             {write.error && <p role="alert">{write.error}</p>}
-            <Button disabled={write.busy}>提交工单</Button>
+            <Button disabled={write.busy}>新建工单</Button>
+            <small>工单会保存到平台，外部客服通知暂未接入。</small>
           </form>
         </DialogContent>
       </Dialog>
