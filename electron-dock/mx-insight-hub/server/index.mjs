@@ -695,6 +695,8 @@ export async function createRuntime(config = loadConfig()) {
     enterpriseGateway,
     socialAccountGateway,
     socialAccountTikHubGateway,
+    // Comments reserve usage in the YouTube domain, not account search's social domain.
+    youtubeCommentsGateway: socialAccountDataGateways.youtube,
     tikHubGateway,
     acquisitionHistory,
     segmenterConfig: config.common.segmenter,

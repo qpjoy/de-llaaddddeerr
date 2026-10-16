@@ -68,3 +68,38 @@ curl "$HUB_URL/api/v1/data/youtube/channel-comments" \
 po-infra 的17项离线适配测试已运行，真实网络运输被禁止；本机无 Django 环境，未运行 Django 全栈测试。目标环境可执行 `python manage.py test llm.tests_youtube_hub_migration --verbosity 2`。
 
 MX-H2I 登录、联网、Launcher SSO、支付实现及已有历史交付均不在本次代码改动范围。
+
+## 2026-10-17 评论入口授权域修复
+
+Luopan 人物画像经 Delta 调用频道评论返回 `409 external_platform_usage_scope_mismatch`，
+关联请求 `e8514090-4e50-47bf-992e-9f9042b9b381`，幂等键
+`delta-youtube-comments-997e09db-9181-4c65-9927-1b4c30736f0c`。
+源码确认生产组装将两个评论入口接到了 `socialAccountTikHubGateway`：其采购存储固定要求
+usage 平台为 `social`，而评论合同按正确的 `youtube` 平台预留 usage。
+两者不一致，在第一次采购费用预留时触发截图中的错误。
+原工作流单测直接创建 `youtube` 存储，因此未覆盖这个启动组装问题。
+
+修复仅将两个公开评论入口显式注入 `youtubeCommentsGateway`，复用已有的
+`socialAccountDataGateways.youtube`。凭据、代理、采购操作控制仍沿用既有 TikHub 配置，
+评论与该平台账号采集共享此网关的进程并发控制；账号搜索继续使用原 `social` 网关。
+缺少评论网关时返回503，不回退到授权域不符的网关。
+不修改存储的身份、平台、fingerprint、状态或租约校验，也不扩大客户权限。
+Delta 仅提交公开业务参数和幂等键，此次不需要修改 Luopan、Delta、Launcher 或 Pay。
+
+新增 `createRuntime → HTTP → 实际适配器` 回归，修复前两个入口均复现相同409且没有上游调用，
+修复后覆盖正常交付、全量归档、入库、幂等重放、无权限拒绝、缺少专用网关和原幂等键恢复。
+另用 Memory/PGlite 验证32项错误域、身份、状态及租约拒绝断言，并验证正确域的采购预留与调用。
+本轮上述新增测试及评论、账号、原生转发、Reddit/YouTube 搜索相关回归共108项通过，0跳过；
+类型检查通过。全部使用合成上游响应和隔离存储，不代表生产付费调用已经验证。
+
+本轮修复没有新增数据库迁移。将完整源码同步到服务器后，在 Hub 项目目录按现有流程发布：
+
+```bash
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh ops internal-production deploy
+kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-public --timeout=300s
+```
+
+该发布不联动 Launcher。这里记录的是本地修复；尚未取得本次生产发布或业务成功回执。
+旧请求状态和费用以账本为准：本缺陷的本地路径在派发前释放预留，未保存 HTTP 失败响应，
+显式重试原请求及原幂等键时可按既有逻辑重新预留；已保存失败响应仍按原规则重放，
+`unknown` 仍阻止重试。不要清账、改历史状态或自动换幂等键重跑人物画像。

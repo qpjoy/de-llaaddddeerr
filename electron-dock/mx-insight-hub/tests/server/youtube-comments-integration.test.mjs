@@ -90,7 +90,7 @@ test('both public comment routes authenticate, reject query injection and dispat
   await service.putCapabilityConfiguration(YOUTUBE_COMMENTS_CAPABILITY, { tenantId: tenant.id, consumerId: consumer.id, enabled: true })
   const key = await service.createApiKey({ consumerId: consumer.id, name: 'K', platforms: ['youtube'], capabilities: [YOUTUBE_COMMENTS_CAPABILITY] })
   const app = createApp({ service, store, adapter: {}, listenerMode: 'public', logger: { error() {} },
-    socialAccountTikHubGateway: { async youtubeComments(context, input) {
+    youtubeCommentsGateway: { async youtubeComments(context, input) {
       seen.push({ consumerId: context.consumer.id, kind: input.kind, path: input.path, body: input.body, idempotencyKey: input.idempotencyKey })
       return { status: 200, body: { data: { items: [] } }, replay: true, sourceMode: 'idempotent_replay', requestId: '11111111-1111-4111-8111-111111111111' }
     } },

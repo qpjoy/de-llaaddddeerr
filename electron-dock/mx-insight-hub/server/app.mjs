@@ -811,6 +811,7 @@ export function createApp({
   enterpriseGateway = null,
   socialAccountGateway = null,
   socialAccountTikHubGateway = null,
+  youtubeCommentsGateway = null,
   tikHubGateway = null,
   acquisitionHistory = null,
   admissionRecovery = null,
@@ -5990,8 +5991,8 @@ export function createApp({
       if (youtubeCommentsKind) {
         const context = await requirePublic(request)
         requireNoQuery(searchParams, 'YouTube comments')
-        if (!socialAccountTikHubGateway) throw new AppError(503, 'external_platform_unavailable', 'YouTube comments are unavailable')
-        const result = await withAdmissionSignal(response, async signal => socialAccountTikHubGateway.youtubeComments(context, {
+        if (!youtubeCommentsGateway) throw new AppError(503, 'external_platform_unavailable', 'YouTube comments are unavailable')
+        const result = await withAdmissionSignal(response, async signal => youtubeCommentsGateway.youtubeComments(context, {
           signal, kind: youtubeCommentsKind, body: await readJson(request, 64 * 1024), path: pathname,
           idempotencyKey: request.headers['idempotency-key'],
         }))
