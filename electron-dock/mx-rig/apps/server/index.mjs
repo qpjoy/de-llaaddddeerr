@@ -124,6 +124,22 @@ const COMPILE_PROBE = Object.freeze({
   nogo: async () => {}
 })
 const webRoot = fileURLToPath(new URL('../web/', import.meta.url))
+
+// Additional addresses that serve this Rig workbench, not CORS permissions or
+// the target sites a test browser may visit. Never infer them from request headers.
+function webOrigins(value) {
+  const origins = String(value ?? '').split(',').map((entry) => entry.trim()).filter(Boolean)
+  return [...new Set(origins.map((entry) => {
+    let url
+    try { url = new URL(entry) } catch { /* rejected below */ }
+    if (!url || !/^https?:\/\/[^/?#\\\s]+\/?$/i.test(entry) ||
+      !['http:', 'https:'].includes(url.protocol) || url.username || url.password ||
+      url.hostname.includes('*') || url.pathname !== '/' || url.search || url.hash)
+      throw new RigError('invalid_configuration', 'MX_RIG_ALLOWED_ORIGINS 必须是逗号分隔的 HTTP(S) 来源地址，不能包含通配符、账号、路径或查询参数', 500)
+    return url.origin
+  }))]
+}
+
 export function configuration(env = process.env) {
   const mapped = mapExternalEnvironment(env, {})
   mapped.MXT_HOST ||= '127.0.0.1'
@@ -137,7 +153,7 @@ export function configuration(env = process.env) {
       '必须配置 MX_RIG_ADMIN_TOKEN；本地体验使用 npm run dev',
       500
     )
-  return config
+  return { ...config, webOrigins: webOrigins(env.MX_RIG_ALLOWED_ORIGINS) }
 }
 
 export async function start(env = process.env, options = {}) {
@@ -929,12 +945,11 @@ export async function start(env = process.env, options = {}) {
     server.listen(config.port, config.host, yes)
   })
   origin = `http://127.0.0.1:${server.address().port}`
-  // The pages this server serves itself, under every name that reaches it:
-  // its public address, and this machine's loopback names on its own port —
-  // a service opened to the LAN is still opened as 127.0.0.1 on its own host.
-  // No other site can be served from these, so cross-site requests stay out.
+  // The configured public address, explicitly registered extra entrances, and
+  // this machine's loopback names on the server's own port. A reachable Host
+  // or forwarded header alone must not make an arbitrary Origin trusted.
   const own = new Set(
-    [config.publicUrl || origin, origin, `http://localhost:${server.address().port}`, `http://[::1]:${server.address().port}`].filter(
+    [config.publicUrl || origin, ...(config.webOrigins ?? []), origin, `http://localhost:${server.address().port}`, `http://[::1]:${server.address().port}`].filter(
       Boolean
     )
   )

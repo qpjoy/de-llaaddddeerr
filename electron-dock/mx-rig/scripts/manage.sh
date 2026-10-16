@@ -82,6 +82,7 @@ load_env() {
   local proxy_set="${PROXY+x}" proxy="${PROXY-}"
   local launcher_url_set="${MX_LAUNCHER_URL+x}" launcher_url="${MX_LAUNCHER_URL-}"
   local launcher_ops_set="${MX_LAUNCHER_OPS_TOKEN+x}" launcher_ops="${MX_LAUNCHER_OPS_TOKEN-}"
+  local allowed_origins_set="${MX_RIG_ALLOWED_ORIGINS+x}" allowed_origins="${MX_RIG_ALLOWED_ORIGINS-}"
   if [ -f "$ENV_FILE" ]; then
     set -a
     # shellcheck disable=SC1090
@@ -92,6 +93,8 @@ load_env() {
   # including an empty token when the caller intentionally disables writes.
   if [ "$launcher_url_set" = x ]; then export MX_LAUNCHER_URL="$launcher_url"; fi
   if [ "$launcher_ops_set" = x ]; then export MX_LAUNCHER_OPS_TOKEN="$launcher_ops"; fi
+  # Empty explicitly clears the extra browser origins, even if .env has a value.
+  if [ "$allowed_origins_set" = x ]; then export MX_RIG_ALLOWED_ORIGINS="$allowed_origins"; fi
   # Explicit shell values (including empty to disable) win over .env.
   if [ "$build_proxy_set" = x ]; then
     MX_RIG_BUILD_PROXY="$build_proxy"
@@ -150,6 +153,9 @@ ensure_compose_env() {
     MX_RIG_HTTP_PORT MX_RIG_SESSION_TTL_HOURS MX_RIG_LAUNCHER_URL MX_RIG_RUNNER_PLAYWRIGHT_VERSION; do
     if [ -n "${!name:-}" ]; then set_env_value "$name" "${!name}"; fi
   done
+  if [ "${MX_RIG_ALLOWED_ORIGINS+x}" = x ]; then
+    set_env_value MX_RIG_ALLOWED_ORIGINS "$MX_RIG_ALLOWED_ORIGINS"
+  fi
 }
 
 wait_ready() {
@@ -422,7 +428,7 @@ resolve_runner_cidrs() {
 }
 
 SECRET_KEYS=(MX_RIG_DATABASE_URL MX_RIG_POSTGRES_PASSWORD MX_RIG_ADMIN_TOKEN MX_RIG_SECRET_KEY
-  MX_RIG_PUBLIC_URL MX_RIG_INSECURE_COOKIES MX_RIG_MODEL_API_KEY MX_RIG_MODEL_API_KEY_2
+  MX_RIG_PUBLIC_URL MX_RIG_ALLOWED_ORIGINS MX_RIG_INSECURE_COOKIES MX_RIG_MODEL_API_KEY MX_RIG_MODEL_API_KEY_2
   MX_RIG_GIT_TOKEN MX_RIG_LAUNCHER_URL MX_RIG_RUNNER_TARGET_CIDRS)
 
 apply_secret() {
@@ -560,6 +566,11 @@ prepare_kubernetes() {
   for name in MX_RIG_INSECURE_COOKIES MX_RIG_MODEL_API_KEY MX_RIG_MODEL_API_KEY_2 MX_RIG_GIT_TOKEN; do
     resolve_sticky "$name"
   done
+  # Unlike other sticky settings, an explicitly empty list removes old origins.
+  if [ "${MX_RIG_ALLOWED_ORIGINS+x}" != x ]; then
+    MX_RIG_ALLOWED_ORIGINS="$(read_secret MX_RIG_ALLOWED_ORIGINS)"
+  fi
+  export MX_RIG_ALLOWED_ORIGINS
   resolve_launcher_url
   resolve_public_url
   resolve_data_root

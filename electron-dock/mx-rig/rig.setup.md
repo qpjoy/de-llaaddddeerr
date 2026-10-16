@@ -30,4 +30,12 @@ export MX_LAUNCHER_OPS_TOKEN="$(
 
 bash scripts/manage.sh launcher apply
 unset MX_LAUNCHER_OPS_TOKEN
+
+# rig注册到launcher
+# Sync Domestic CIDRs
+
+
+# launcher模式启动
+env -u ELECTRON_RUN_AS_NODE -u MX_RIG_SERVER_URL \
+  MX_RIG_LAUNCHER=1 npm run desktop
 ```

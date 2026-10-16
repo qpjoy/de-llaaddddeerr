@@ -115,6 +115,12 @@ spec:
                   name: mx-rig-secrets
                   key: MX_RIG_INSECURE_COOKIES
                   optional: true
+            - name: MX_RIG_ALLOWED_ORIGINS
+              valueFrom:
+                secretKeyRef:
+                  name: mx-rig-secrets
+                  key: MX_RIG_ALLOWED_ORIGINS
+                  optional: true
             # Model keys live only here. The name a Provider references in
             # the Agent center (apiKeyEnv) must match one of these.
             - name: MX_RIG_MODEL_API_KEY

@@ -114,6 +114,24 @@ scripts/manage.sh stop          # 服务缩到 0；数据库、Secret、数据�
 
 `deploy` 已自动调用 `verify`，不需要另开终端或常驻 port-forward。每次部署验证都新建一个临时回环转发，完成或失败后清理，重复执行不会保留上次的转发。正常业务访问使用 NodePort 或 Launcher VIP 网关路由，不依赖这条临时转发；单独执行 `verify` 只是部署后复查。
 
+网页能打开，但登录提示 **“请求来源不允许”** 时，拒绝发生在密码验证之前。核对浏览器的协议、主机和端口是否匹配当前部署入口：
+
+```bash
+kubectl -n mx-rig exec deployment/mx-rig-server -- printenv MX_RIG_PUBLIC_URL
+```
+
+例如主地址是 `http://192.168.1.2:30891`，而浏览器通过 `http://10.88.88.88:30891/rig/` 打开，两个 Origin 不同。能访问主地址时可直接使用它；需要保留多个入口时，在**部署节点的 mx-rig/.env** 配置：
+
+```bash
+MX_RIG_ALLOWED_ORIGINS=http://10.88.88.88:30891,http://10.88.100.6
+```
+
+**先同步包含该配置支持的服务端和部署脚本，再运行 `bash scripts/manage.sh deploy`。旧镜像不会识别这个新变量。** 只更新 Rig 服务，无需重新应用 Launcher 的 VIP、网关或认证服务。Kubernetes 把此字段保存在 `mx-rig/mx-rig-secrets` 并注入 Rig；Compose 也支持。未配置时保留上次值，显式 `MX_RIG_ALLOWED_ORIGINS=` 可以清空额外入口。
+
+填写完整的 `http(s)://主机[:端口]`，以逗号分隔，不带 `/rig/`、查询参数、账号密码或通配符。这是**同一个 Rig 工作台的额外浏览器入口**，不是开放跨域访问，也不是测试浏览器的目标站点策略。未知 Origin、不同端口及伪造 Host / 转发头仍被拒绝；本机回环入口和桌面主进程登录保持原行为。不要为放行第二个入口直接覆盖 `MX_RIG_PUBLIC_URL`，它还用于通知、下载链接、Cookie 策略和部署输出的反代上游。
+
+部署完成后刷新原页面，用账号 `admin`、`bash scripts/manage.sh admin-token` 输出的 **Rig** 管理员令牌登录；不要用 `local token` 或 Launcher Ops Token。HTTP 入口需要与部署的 Cookie 策略一致：该白名单不会为了 HTTP 别名自动降级原有 HTTPS Secure Cookie 设置。
+
 如果已经显示 `successfully rolled out`，随后却在 `port-forward` 验证阶段报错，先检查 `kubectl -n mx-rig get pods -o wide`，不要立即重新构建或跑迁移。Pod 为 Ready 表明 Kubernetes 的 `/readyz` 探针已通过；仍需区分本机转发失败和服务随后失去就绪状态。
 
 `verify` 会建立自己的回环转发，默认由 kubectl 分配空闲端口，确认监听成功后才发请求；本机 HTTP 检查绕过环境代理，每次请求最多 5 秒。转发退出会有限重试，失败时显示最后的转发与 HTTP 错误，结束时清理进程和临时文件。`MX_RIG_VERIFY_PORT` 可指定本机端口；端口被占用时会失败，不会借用已有监听进程。修复或同步脚本后单独运行 `bash scripts/manage.sh verify` 即可，不会重建镜像、迁移或重启服务。

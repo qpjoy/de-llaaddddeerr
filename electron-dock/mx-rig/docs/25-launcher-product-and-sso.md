@@ -1,4 +1,4 @@
-# 桌面交付：Launcher 产品化、统一账号登录与按需组网（方案，2026-10-16）
+# 桌面交付：Launcher 产品化、统一账号登录与按需组网（方案与交付记录，更新至 2026-10-17）
 
 ## 1. 你的要求
 
@@ -9,15 +9,15 @@
 
 这推翻了 2026-09-25 的决定（Rig 完全不依赖 Launcher 登录、不做 standalone，见 docs/12 §0）。同一天定下的底线不变：**任何改动不影响 MX-H2I 现有的用户登录和联网**。
 
-## 2. 现状
+## 2. 现状（2026-10-17，以当前实现为准）
 
 | 方面 | 现在 |
 | --- | --- |
 | 账号 | Rig 自有账号。服务端配置 `MX_RIG_LAUNCHER_URL` 后，Launcher 统一账号也能用账号密码登录：服务端代换 SDK token 并内省，首次登录是查看者。代码已有：`packages/test-platform/server/identity/launcher-client.mjs` |
-| 浏览器 SSO | 没有 |
-| 桌面端 | 独立的 Electron 应用（`dev.qpjoy.mx-rig`），只连 Rig 服务。不申请 lease，不碰网络 |
-| 更新 | 没有自动更新，要重新装包 |
-| 组网 | 没有。「出网与通道」只管 Rig 自己的模型调用和隔离浏览器 |
+| 浏览器 SSO | 尚未实现；统一账号密码登录不等于浏览器 OIDC SSO，见 P4 |
+| 桌面端 | 独立的 Electron 应用（`dev.qpjoy.mx-rig`）。Launcher 模式已实现匿名 lease、自己的 WireGuard 隧道和登录后的用户 lease；普通模式仍直接连接指定的 Rig 服务 |
+| 更新 | Launcher 安装包已接 Release Center 完整安装包更新；源码和 `--dir` 运行不自动更新。真实定向更新闭环仍待验收，见 §8 |
+| 组网 | Launcher 模式已有产品内网及按需海外通道；只管理 Rig 的网络和测试浏览器，真实桌面连接与海外线路仍待验收，见 §7、§9、§10 |
 
 可以参考的现成做法：
 
@@ -25,7 +25,7 @@
 - **范围**：所有服务端、网页端、桌面端和部署都在 mx-rig 里。旧的 `mx-launcher/demos/mx-autotest` 原型以后会废弃，Rig 不依赖它，也不以它为准。
 - **统一认证**（launcher docs/45–49）：Auth 基于 oidc-provider；应用后端用 `@qpjoy/mx-common/identity/sso` 接入，Hub 和 Pay 已经这样接了。
   - 应用在 Internal →「平台设置 → 统一认证 → 接入应用」登记；
-  - **回调只能是 `https://<应用域名>/auth/sso/callback`**，所以桌面端不能自己当 OIDC 客户端，要经过 Rig 服务。
+  - 当前平台的**公网应用登记合同**要求 `https://<应用域名>/auth/sso/callback`；Rig 计划通过自己的后端接入，再把登录结果安全交给桌面端。这是现有平台的接入方案，不是 OIDC 协议禁止原生客户端。
 
 ## 3. 决定（2026-10-16 与你确认）
 
@@ -57,7 +57,7 @@ Rig 服务           http://<Rig 的 VIP>          ← Internal 网关按 Host �
 
 - Rig 的 VIP 在 Launcher Admin 登记 ProductNetwork 时由平台分配。**桌面端不写死 VIP**：运行时向 Launcher 查自己的 ProductNetwork（`getProduct('mx-rig')`）得到。
 - Internal 网关按 Host 转发。罗盘生产环境的接口地址就是 `http://10.88.100.3`，靠的是一条 host 为该 VIP 的反代路由。Rig 也登记一条：host 为 Rig 的 VIP，目标为 Rig 服务在集群里的地址。
-- 以后绑域名（内网 `rig.mxinfo-inc.cn` 走 split DNS，或公网 `rig.minsight-ai.com` 经跳板机）只改配置和路由，不改代码。浏览器 SSO（原 L2）也等那时再做。
+- 以后可以绑域名（内网 `rig.mxinfo-inc.cn` 走 split DNS，或公网 `rig.minsight-ai.com` 经跳板机）。仅更换服务访问地址属于配置和路由工作；**浏览器 SSO 还需要实现 Rig 的回调、会话和桌面交接，不能只配 DNS / TLS 就获得免登录**，见 P4 和 §10.2。
 
 ### 3.3 连接与登录：登录一次
 
@@ -66,8 +66,8 @@ Rig 服务           http://<Rig 的 VIP>          ← Internal 网关按 Host �
 1. **打开桌面端**：经 bootstrap 申请匿名 lease，WireGuard 只路由 Rig 自己的 lease 段和 VIP，**不设系统 DNS / PAC / NRPT**。第一次连接要系统授权：macOS 上装 LaunchDaemon，Windows 上是 UAC。
 2. **VIP 通了以后**，Rig 服务已经能访问。登录页只要一个统一账号：
    - 账号密码**经隧道**发给 Rig 服务（`/api/rig/v1/native-login`）。Rig 服务用 Launcher 账号登录，这一步已经实现，见 §2。
-   - 同时经 VIP 向 User Center 换桌面端自己用的 token，用来换用户 lease，以后还要申请海外订阅。这个 token 不离开桌面端主进程，也不落盘。
-3. **换成用户 lease**，用户身份的网络策略和定向发版从这里生效。
+   - 业务登录和本地 Runtime 初始化完成后，主进程在后台经 VIP 向 User Center 再换桌面端自己用的 token，用来换用户 lease、申请海外订阅。用户只输入一次密码，但当前代码会验证两次；网络 token 不离开桌面端主进程，也不落盘。
+3. **后台换成用户 lease**，用户身份的网络策略和定向发版从这里生效。进入工作台和完成用户网络接管是两个验收点：当前 SDK 默认重新应用 Rig 隧道，可能与首屏请求重叠；待优化项见 §10.3。
 
 本地 Rig 账号保留：应急管理员，以及开发和局域网环境下「直接填服务地址」的模式。
 
@@ -129,7 +129,7 @@ unset MX_LAUNCHER_OPS_TOKEN
 - **桌面端 Launcher 模式**（`apps/desktop/launcher-network.mjs`），依赖 `@qpjoy/electron-launcher` 2.3.19：
   - 打开桌面端后先连接自己的产品网络：经 bootstrap 申请匿名 lease，WireGuard 只路由 Rig 自己的 lease 段和 VIP，不设系统 DNS / PAC / NRPT，然后确认 VIP 和 Rig 服务都能访问；
   - 登录页先显示「内网」状态：没有服务地址可填，网络通了才能登录；第一次连接前说明要装什么（系统授权）；连接过一次以后，启动时自动重连；
-  - 统一账号登录：账号密码经隧道交给 Rig 服务，同时经 VIP 换桌面端自己的 token，换成用户 lease。token 只在内存里；网络凭据用系统钥匙串加密存放；
+  - 统一账号登录：账号密码经隧道交给 Rig 服务，业务登录完成后在后台经 VIP 换桌面端自己的 token、切换用户 lease。token 只在内存里；网络凭据用系统钥匙串加密存放；
   - Rig 的本地账号仍可登录，网络保持匿名 lease；
   - 只有真正建立过隧道才会去停它。连接在建立隧道之前就失败了，退出时不碰系统，也就不会弹管理员授权。
   - 没有登记时给出明确提示，告诉管理员该做什么。
@@ -138,7 +138,7 @@ unset MX_LAUNCHER_OPS_TOKEN
 - **打包**：`scripts/manage.sh desktop --launcher` 打出 Launcher 独立端，带上目标平台的 WireGuard 引擎，放在 `Resources/wireguard/<平台>`。其他平台或架构的引擎会自动取一次。
 - **仓库自检**：`scripts/check.mjs` 原来禁止桌面端出现任何数据面代码，现在只允许 `launcher-network.mjs` 这一个文件，并且它不能出现别的产品的名字；驱动 MX-H2I runtime、手工改路由仍然在任何地方都禁止。
 
-按现有产品推算，Rig 会拿到 product index 3：VIP `10.88.100.5`，lease 段 `10.93.0.0/16`。实际以 `launcher plan` 读到的线上数据为准。
+最初方案曾推算 product index 3；2026-10-17 现场实际登记为 **product index 4、VIP `10.88.100.6`、lease 段 `10.94.0.0/16`**。其他环境仍以 `launcher plan` 读到的数据为准，桌面端继续动态查询，不硬编码这些地址。
 
 **验证**
 
@@ -156,15 +156,35 @@ unset MX_LAUNCHER_OPS_TOKEN
 - `npm run test:desktop` 新增：同一个应用以 Launcher 模式启动，连本地的替身入口：登录页先显示网络、没有地址输入框、未连接时不能登录；点「连接内网」走真实的 SDK，到「未登记」为止，提示管理员运行 `manage.sh launcher plan`。截图：`.runtime/qa/desktop-launcher-login.png`。这台开发机上没有装任何 WireGuard。
 - `npm run package -- --dir --launcher`：应用里带上了 WireGuard 引擎（`wg`、`wg-quick`、`wireguard-go`），SDK 和 Launcher 模式的默认配置都在。
 
-**还没有验证的**：真实 Launcher 上的连接。要先登记，再在一台装着 MX-H2I 的测试机上验收：
+**真实环境验收**：2026-10-17 用户已确认产品登记、网关发布，以及 Rig 的 `Sync & Apply Service VIP` 成功；桌面端连接、账号登录和用户网络接管仍需按 §10.1 验收。以下保留完整顺序，已完成的服务器步骤不必重复执行：
 
 1. 在 Internal 节点上 `scripts/manage.sh deploy`，确认打印了统一账号登录和网关路由；
 2. `scripts/manage.sh launcher plan` 看计划，`MX_LAUNCHER_OPS_TOKEN=… scripts/manage.sh launcher apply` 写入；
-3. 按 apply 的提示，在 Launcher Admin 里对齐 VIP，并登记网关路由；
+3. 按 apply 的实际 VIP 登记网关路由，保存、预览后执行 `Apply Gateway` 并等待网关就绪，再到 Rig 详情执行一次 `Sync & Apply Service VIP`。2026-10-17 的上线约束允许短暂中断，但要求自动恢复：这些动作会更新共享网关、重启共享 Internal service peer，必须验收 MX-H2I 恢复联网及 Rig 的端到端访问；当前没有覆盖所有失败情况的自动回滚，应用报错时先定位失败步骤，不重复点击或把“已触发 rollout”当作就绪；
 4. `scripts/manage.sh desktop --launcher` 打包，在测试机上安装；
 5. 打开 →「连接内网」→ 系统授权 → 已连接 → 用统一账号登录 → 「内网 · 用户网络」；
 6. 同时检查 MX-H2I：登录、已有连接、断开、退出都照常（Launcher 的并存检查 C1–C12）；
 7. 退出 MX Rig，隧道随之停止；再打开时自动重连，不再要授权。
+
+**Admin 排障（2026-10-17）**：点击 `Sync Domestic CIDRs` 后如只剩内置应用，先在工作台刷新应用目录。该同步接口只补 Domestic 配置网段，不删除应用；旧版界面的读取失败会清空本地目录，Launcher 的修复与回归见 `mx-launcher/docs/38-neon-void-admin-ui.md`。旧版 `Service VIP materialization` 只按 `mx-rig.mxinfo-inc.cn` 查找路由，新版检查优先识别 standalone 产品自身 VIP 的精确 Host 路由，并兼容原域名路由；embed 应用不会借用宿主 VIP 冒充自己的路由。未发布新版服务端时，`DNS route is missing` 仍可能出现，应到 DNS Routes 核对实际 VIP 的启用路由和 NodePort 上游，不为消除提示重复应用共享网络。
+
+网关应用后，在 Internal 服务器先验证共享网关恢复和 Rig Host 转发（地址以实际登记为准）：
+
+执行 VIP 应用前应先发布 2026-10-17 的 Launcher 安全修复：产品接入的 reconcile 强制保留已有 Domestic/Internal 密钥，材料缺失或生成配置未成功时停止，不继续应用共享运行时。旧版可能在缺失材料时自动生成新密钥，不符合既有连接短暂中断后恢复的要求。正常完整的已有密钥继续复用；这项检查不等于所有运行时错误都有自动回滚。
+
+```bash
+kubectl -n mx-internal-shadow rollout status daemonset/mx-internal-gateway --timeout=180s
+curl --noproxy '*' --connect-timeout 3 --max-time 8 -i http://192.168.1.2:30891/readyz
+curl --noproxy '*' --connect-timeout 3 --max-time 8 -i -H 'Host: 10.88.100.6' http://127.0.0.1/readyz
+```
+
+两个 HTTP 请求应返回 `200` 和 `{"status":"ready","store":"postgres"}`。如果 NodePort 正常而 80 端口失败，可用相同 Host 请求 `http://127.0.0.1:8008/readyz` 区分 Caddy 路由和端口 80 归属问题。Rig 客户端建立自身网络后还要验证 `http://10.88.100.6/readyz`；Launcher 的 `VIP:18090/healthz` 和网关 TCP 就绪探针都不能替代这项 Rig 检查。保留 MX-H2I 的既有连接观察其自动恢复，同时确认新登录和内网访问正常。
+
+**Internal nginx 入口**：现场确认 NodePort 与带 Rig Host 的 Caddy 8008 均返回 ready，而同 Host 的 80 返回 nginx 默认 404。此部署有意保留 nginx 占用 80（Launcher docs/50），VIP reconcile 不会把 HTTP 80 重定向到 8008。需要增加单独的 `server_name 10.88.100.6`，转发到 `127.0.0.1:8008` 并保留 Host。样例为 `deploy/nginx-vip.conf.example`，包含 WebSocket 转发和 SSE 禁用缓冲；其它集群须先替换为实际分配的 VIP。不要停止 nginx 或切换全局 Gateway 后端来修复这一条路由。
+
+安装到现有 nginx `http` include 的独立文件（本机惯例 `/etc/nginx/conf.d/mx-rig-vip.conf`）前，先运行 `nginx -t`，检查是否已有相同 `server_name`；已有文件先备份。安装后再次运行 `nginx -t`，出现同名 Host 冲突警告时也应恢复备份、停止发布。用 `nginx -T` 在服务器本地确认新文件被 include 后执行 `systemctl reload nginx`，再用上述 Host `/readyz` 检查 80 返回 ready；完整配置含身份网关凭据，不贴到聊天或日志。测试或 reload 失败时恢复原文件；首次新增则移走新文件，再验证原配置。2026-10-17 用户确认该步成功；本机没有安装 nginx，未代替现场执行验收。
+
+若 reload 后 Launcher 管理页显示账号服务不可用，先点击「重试连接」或强制刷新；排查的是 `/auth/admin/session`，不是公网被有意拒绝的 `/internal/v1/user-center/roles`。现场该 session 返回 200、`enabled:true`、`accessMode:"sso-only"`，用户刷新后恢复。无需因此回滚 Rig 路由或更换 Token，详细判断见 `mx-launcher/docs/41-public-identity-and-certificates.md`。恢复管理入口不等于 Rig VIP 已应用；该次排障时用户尚未执行 Rig 的 `Sync & Apply Service VIP`。
 
 ## 8. P2 交付记录（2026-10-16）：Release Center 自动更新
 
@@ -305,3 +325,70 @@ unset MX_LAUNCHER_OPS_TOKEN
 5. 退出登录时通道停止，进程和配置文件都不在了。
 
 Hysteria2 走 UDP 51288 端口。网络拦截 UDP 时，试访问会失败，卡片上会写明。
+
+## 10. VIP 应用成功后的验收与登录选择（2026-10-17）
+
+### 10.1 先验收现有桌面端，不等待域名 SSO
+
+当前起点：用户已确认 Launcher Admin 的 `Sync & Apply Service VIP` 成功。这证明该管理动作成功，还不能代替客户端建立隧道、登录和实际执行的验收。
+
+在开发 Mac 上运行当前源码，连接已部署的 Rig 服务：
+
+```bash
+cd /Users/qpjoy/workspace/qpjoy/de/de-llaaddddeerr/electron-dock/mx-rig
+# 首次运行或依赖发生变化时先执行 npm install；需要 Node.js 22 或更高版本。
+env -u ELECTRON_RUN_AS_NODE -u MX_RIG_SERVER_URL \
+  MX_RIG_LAUNCHER=1 npm run desktop
+```
+
+这里用环境变量开启 Launcher 模式，服务地址由自己的 ProductNetwork 决定。不使用 `manage.sh local desktop`，因为它会启动本地服务并指向本机；`npm run desktop -- --launcher` 也不是源码运行的模式开关。源码验收不覆盖安装包更新。
+
+按顺序记录结果；一步失败时先定位该步：
+
+| 步骤 | 操作 | 通过标准 |
+| --- | --- | --- |
+| 1. 产品内网 | 点「连接内网」，首次完成系统授权 | 状态已连接，Rig 服务可达；不只是 Launcher healthz 成功 |
+| 2. Rig 服务 | 在同一台已连接的 Mac 运行下方 readyz 检查 | HTTP 200，返回 PostgreSQL ready |
+| 3. 统一账号 | 用 Launcher 的普通统一账号密码登录 | 进入工作台、显示正确成员；随后网络显示「内网 · 用户网络」。只进入工作台但仍是匿名网络，不能算网络接管通过 |
+| 4. Rig 权限 | 检查当前角色及项目权限 | 首次统一账号默认 viewer。由 Rig 管理员在「管理 → 账号与成员」配置角色；执行还需项目执行权限。Launcher 管理员身份不会自动变成 Rig 管理员 |
+| 5. 实际执行 | 使用 Rig 管理员走「新项目：从用例到测试代码」新手关卡，选择内置试验场、准备本机测试仓库和执行机，再亲手点击最后的执行按钮 | 看见真实执行从排队进入运行、形成最终结果，并能打开步骤和报告制品。计划建好或任务派发成功不等于测试通过；该关卡使用预置实现，不要求先配置模型，详见 [docs/24 §8](24-guided-tours.md#8-m8b-交付记录2026-10-08) |
+| 6. 并存与恢复 | Rig 连接、登录、退出时观察原有 MX-H2I；再打开 Rig | MX-H2I 登录和网络正常；Rig 再打开可自动重连。当前不保存用户登录 token，自动重连不等于免登录 |
+| 7. 可选海外能力 | 用有海外权限的账号按 §9 开启测试浏览器通道 | 测试浏览器可访问目标，系统代理及 MX-H2I 状态正常 |
+
+步骤 2 在客户端隧道已连好后执行；当前现场 VIP 是 `10.88.100.6`：
+
+```bash
+curl --noproxy '*' --connect-timeout 3 --max-time 8 -i http://10.88.100.6/readyz
+```
+
+预期正文 `{"status":"ready","store":"postgres"}`。客户端尚未连接时访问该私网 VIP 失败，不能据此认定服务端部署失败。
+
+Mac 源码验证通过后，分别验收 macOS 的 DMG 和 Windows x64 的 NSIS 安装包，再做 §8 的旧版到新版定向更新。`scripts/manage.sh desktop --launcher --mac --arm64`、`--mac --x64`、`--win --x64` 对应各目标；安装、系统授权、重开和更新必须在对应平台实测，不能由源码冒烟代替。
+
+### 10.2 `rig.minsight-ai.com` 的作用
+
+**当前不需要先部署这个域名**：现有桌面端通过自己的 VIP 访问 Rig，支持统一账号密码登录。后续若接浏览器 SSO，建议用稳定 HTTPS 域名 `rig.minsight-ai.com` 作为 Rig 的入口和回调地址；统一身份提供方仍是 `auth.minsight-ai.com`，不是再建一套账号中心。
+
+P4 需要一整条接入链路：
+
+1. 配置域名、TLS 和反代，明确哪些入口需要公开可达；不因为接 SSO 就默认公开所有测试管理接口。
+2. 在 Launcher Internal 的统一认证接入应用中登记独立的 `mx-rig` 客户端及准确回调 `https://rig.minsight-ai.com/auth/sso/callback`。
+3. Rig 后端接入平台已有的 `@qpjoy/mx-common/identity/sso`，实现登录、回调、持久会话和退出，并接入 Rig 现有业务授权。以已验证的身份映射既有成员，保留项目权限；不能靠同名或同邮箱自动合并账号。
+4. 桌面端通过系统默认浏览器登录，再用绑定本次请求的一次性交接凭据完成桌面会话；不能把长期 bearer token 放进 URL。还要衔接用户 lease 和海外订阅的授权，浏览器会话本身不能直接替代当前网络 token。
+
+已有浏览器统一认证会话时，SSO 可以省掉重复输入密码；仍受身份平台的重新认证、授权等策略约束。只在 Launcher Admin 输入过 **Internal Ops Token**，不等于拥有个人账号的浏览器 SSO 会话。桌面端使用系统浏览器才能复用该浏览器的登录状态，Rig 的隔离测试浏览器不应借用个人登录 cookie。参见 [RFC 8252](https://www.rfc-editor.org/rfc/rfc8252)。
+
+SSO 不会自动缩短匿名入网、用户 lease 切换、peer 同步或 WireGuard 应用的耗时。它主要改善跨应用认证体验，不能据此承诺首次启动更快。
+
+### 10.3 现有登录可优化的部分（待实施）
+
+当前顺序已按代码核对：匿名组网 → Rig `native-login`（服务端向 Launcher 换 token 并内省）→ 主进程 `/me` 与 Runtime 初始化 → 显示工作台；与此同时，主进程在后台再次用密码换网络 token、申请用户 lease 并重新应用 Rig 隧道。参考 [main.mjs](../apps/desktop/main.mjs)、[launcher-network.mjs](../apps/desktop/launcher-network.mjs)、[identity](../packages/test-platform/server/identity/index.mjs)。
+
+优先处理以下几点，先采集阶段耗时，再对比改动前后结果：
+
+1. **避免网络切换干扰首屏。** 当前 SDK 默认 `action: restart`，Rig 用户网络接管会与工作台首屏 API 请求重叠。需要协调接管和依赖网络的请求，并研究同一 Rig owner 下的安全配置更新；不能直接省掉用户 lease 或借用 MX-H2I 的隧道。
+2. **缩短无响应的等待。** 为产品查询、enrollment、snapshot 等请求设置明确期限和取消能力；当前共用串行队列，一项悬挂会拖住后续连接或断开操作。避免把普通业务请求的 90 秒默认超时直接当作登录体验预算。
+3. **减少首屏串行加载。** config / graph / tools 已并行，但 missions、tasks、系统信息仍依次等待后才 render。可并行互不依赖的请求，把非首屏必需信息延后；参考 [app.js](../apps/web/app.js)。
+4. **减少重复密码校验。** Rig 业务登录与网络登录目前各验证一次。改为受控凭据交换或一次性桌面交接前，要明确 audience、scope、有效期和退出语义；不能直接混用业务 token、网络 token 或运维凭据。
+
+用户网络切换已经在后台，服务端 token 内省也已有缓存和并发合并，不能把它们当作尚未实现的优化。上述性能工作应先在 Rig 范围内完成；新增 SSO 接入独立验收，保留 MX-H2I 当前的登录与联网行为。
