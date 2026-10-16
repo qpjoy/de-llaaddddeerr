@@ -11,9 +11,11 @@
 
 ## 当前截图与测量
 
-- [原型桌面](screenshots/team-list-20261016/source-before.png)、[修改前](screenshots/team-list-20261016/actual-before.png)、[修改后](screenshots/team-list-20261016/actual-after.png)
-- [原型手机](screenshots/team-list-20261016/source-mobile.png)、[应用手机](screenshots/team-list-20261016/actual-mobile.png)、[滚动到操作区](screenshots/team-list-20261016/mobile-actions.png)
-- [成员详情](screenshots/team-list-20261016/member-detail.png)
+截图已迁至工作区本地目录 `/Users/lanan/Desktop/yjj/数港/screenshot/`，不随代码仓库分发；以下链接按当前工作区结构访问。
+
+- [原型桌面](../../../../screenshot/team-list-20261016/source-before.png)、[修改前](../../../../screenshot/team-list-20261016/actual-before.png)、[修改后](../../../../screenshot/team-list-20261016/actual-after.png)
+- [原型手机](../../../../screenshot/team-list-20261016/source-mobile.png)、[应用手机](../../../../screenshot/team-list-20261016/actual-mobile.png)、[滚动到操作区](../../../../screenshot/team-list-20261016/mobile-actions.png)
+- [成员详情](../../../../screenshot/team-list-20261016/member-detail.png)
 
 桌面视口 1440 × 1000：原型与应用的概览均为 141.5px 高、24px 内边距；表头 48px、成员行 69px、单元格内边距 14px；成员名称为 13px / 500，账号小字 11px / 400、行高 16.5px。
 
@@ -41,8 +43,8 @@
 
 以本地合成 BFF 的 16 字符账号和 128 字符账号分别验证，列位置不变。手机视口 390px 时页面宽度仍为 390px，308px 表格容器内滚动，键盘能将详情、停用按钮滚动到可视区域。
 
-- [原型桌面](screenshots/team-columns-20261016/source-before.png)、[修正前](screenshots/team-columns-20261016/actual-before.png)、[修正后](screenshots/team-columns-20261016/actual-after.png)
-- [1200px 原型](screenshots/team-columns-20261016/source-1200.png)、[1200px 应用](screenshots/team-columns-20261016/actual-1200.png)、[128 字符账号](screenshots/team-columns-20261016/actual-long-account.png)
-- [手机初始位置](screenshots/team-columns-20261016/actual-mobile.png)、[手机操作列](screenshots/team-columns-20261016/mobile-actions.png)
+- [原型桌面](../../../../screenshot/team-columns-20261016/source-before.png)、[修正前](../../../../screenshot/team-columns-20261016/actual-before.png)、[修正后](../../../../screenshot/team-columns-20261016/actual-after.png)
+- [1200px 原型](../../../../screenshot/team-columns-20261016/source-1200.png)、[1200px 应用](../../../../screenshot/team-columns-20261016/actual-1200.png)、[128 字符账号](../../../../screenshot/team-columns-20261016/actual-long-account.png)
+- [手机初始位置](../../../../screenshot/team-columns-20261016/actual-mobile.png)、[手机操作列](../../../../screenshot/team-columns-20261016/mobile-actions.png)
 
 本次 `npm run build`（包含 TypeScript 类型检查）通过；保留既有 chunk 大小提示。仅修改前端布局，无权限/接口变更，无真实查询或成员修改。原先 76 项边界测试的结果属于上轮验证，本次未重复运行。
