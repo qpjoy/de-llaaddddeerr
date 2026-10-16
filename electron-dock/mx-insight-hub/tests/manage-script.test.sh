@@ -1430,6 +1430,7 @@ if bash -c '
   exit 1
 fi
 grep -q 'source indexes failed through verified local peer auth' "$night_all_source_index_error"
+grep -q 'scripts/night-all-saved-records-index-status.sql' "$night_all_source_index_error"
 
 night_all_source_fallback_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-night-all-source-fallback-events.XXXXXX")"
 if NIGHT_ALL_SOURCE_FALLBACK_EVENTS="$night_all_source_fallback_events" \

@@ -2090,6 +2090,7 @@ ensure_night_all_saved_records_source_indexes() {
       if [ "$local_identity" = match ]; then
         say "reconciling supported Night-All saved-records source indexes through verified local PostgreSQL peer auth"
         if ! night_all_saved_records_local_psql -v ON_ERROR_STOP=1 <"$sql_file"; then
+          say "Inspect source indexes and blockers with scripts/night-all-saved-records-index-status.sql on this same source; completed index steps are retained." >&2
           die "Night-All saved-records source indexes failed through verified local peer auth"
         fi
         return 0
@@ -2118,6 +2119,7 @@ ensure_night_all_saved_records_source_indexes() {
     psql -X -w \
     -d "service=${service} dbname=agent_data_crawler_platform connect_timeout=10" \
     -v ON_ERROR_STOP=1 <"$sql_file"; then
+    say "Inspect source indexes and blockers with scripts/night-all-saved-records-index-status.sql through this same service; completed index steps are retained." >&2
     die "Night-All saved-records source indexes could not be reconciled through libpq service ${service}"
   fi
 }

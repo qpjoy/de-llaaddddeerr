@@ -104,6 +104,16 @@ provider、source key、凭据、原始数据、checkpoint，也不保证采集�
 
 ## 1. Scope and isolation
 
+Deployment topology confirmed on 2026-10-16: Internal/Hub runs on `100.127.0.6`,
+the Night-All-A application runs on `100.127.0.1`, and the separate Night-All HTTP
+service runs on Internal port `13141`. The supplied Night-All-A runtime audit's
+environment candidate and actual read-only connection both target
+`100.127.0.6:5432/agent_data_crawler_platform`. An application host is not its
+database host: do not redirect the cleaner to `.1` or to Night-All HTTP based on
+these service names. That audit does not independently verify the live application
+process or current Hub configuration; deploy still checks its registered source
+transport and local PostgreSQL identity.
+
 The initial pipeline reads the 13 LIST leaf partitions below from the existing
 `agent_data_crawler_platform` PostgreSQL database. It deliberately does not
 pull from the `public.saved_records` parent: each leaf owns an independent
@@ -175,11 +185,46 @@ partitions, and includes new canonically named single-value ordinary leaves.
 DEFAULT and multi-value partitions are reported but not maintained. It verifies
 the parent, leaf binding and non-null cursor types before building only missing
 indexes with `CREATE UNIQUE INDEX CONCURRENTLY`. Any already-valid exact index
-can be reused, regardless of name. A managed name occupied by an incompatible
-or invalid object stops maintenance; nothing is automatically dropped. Long
-source types use bounded hashed index names. Final catalog checks verify both
-index readiness and unchanged leaf identities. A uniqueness failure or interrupted
-invalid build requires operator review, not weakening the gate or automatic removal.
+can be reused, regardless of name. An interrupted build with the exact managed
+name, table and cursor definition can be repaired with `REINDEX INDEX CONCURRENTLY`
+only when it is invalid but live, a regular index, and not owned by a constraint
+or attached to an index partition tree. Repair also requires visibility of all
+builders (`pg_read_all_stats` or superuser) and no active builder on that leaf.
+Other managed-name conflicts and incomplete cursor indexes with other names
+(including failed REINDEX `_ccnew`/`_ccold` remnants) stop maintenance for review.
+No explicit DROP or session cancellation is issued. Long source types use bounded
+hashed index names. Final checks repeat the safety guards and verify readiness
+and unchanged leaf identities. Uniqueness failures are not bypassed.
+
+Catalog checks retain a 2-second lock timeout. Concurrent CREATE/REINDEX uses
+`lock_timeout=0` with a **30-minute statement timeout per index operation**, since
+waiting for existing transactions is part of concurrent index construction. The
+script prints its plan and each generated SQL command before executing it; any
+failure stops the deploy and leaves earlier completed operations in place. Do not
+run separate manual source DDL alongside this session: its advisory lock only
+coordinates other executions of this same script. See PostgreSQL's
+[concurrent index rules](https://www.postgresql.org/docs/16/sql-createindex.html)
+and [concurrent rebuild recovery](https://www.postgresql.org/docs/16/sql-reindex.html).
+
+For a blocked/failed build, stream the read-only status script into the **same
+verified source connection**. Run the following on **Internal `100.127.0.6`**
+in the Hub checkout after local-peer identity is verified, not on the Night-All-A
+application host `100.127.0.1`:
+
+```sh
+sudo -u postgres psql -X -w -p 5432 -d agent_data_crawler_platform \
+  -v ON_ERROR_STOP=1 -A -t -q \
+  < scripts/night-all-saved-records-index-status.sql
+```
+
+It reports catalog flags, index progress, related locks and blocker PIDs, without
+business rows, SQL text or connection secrets. It does not repair or cancel
+anything. A timed-out builder may already have disappeared, and missing statistics
+permissions can hide other sessions, so an empty progress list is not evidence
+that the original wait had no blocker. Deploy reaches this source-index step
+after Admin/Public rollout and before applying the ingest manifest; failure here
+is a partial deploy, not a rollback. Sync the fix and rerun the ordinary deploy;
+task recovery still requires the separate writer and checkpoint checks below.
 
 ## 4. Mapping and fixed cleaning
 

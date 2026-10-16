@@ -114,21 +114,30 @@ SELECT schema_name, table_name, partition_bound, 'unsupported_partition_skipped'
   FROM crawler_source_leaf_catalog WHERE source_type IS NULL;
 
 CREATE TEMP VIEW crawler_source_index_evidence AS
+WITH definitions AS (
 SELECT expected.table_oid, index_class.oid AS index_oid, index_class.relname AS index_name,
+       index_class.relkind, index_state.indisvalid, index_state.indisready, index_state.indislive,
        coalesce(
-         index_state.indisvalid AND index_state.indisready AND index_state.indislive
-         AND index_state.indisunique AND access_method.amname = 'btree'
+         index_state.indisunique AND access_method.amname = 'btree'
          AND index_state.indnkeyatts = 2 AND index_state.indnatts = 2
          AND index_state.indexprs IS NULL AND index_state.indpred IS NULL
          AND regexp_replace(pg_get_indexdef(index_class.oid, 1, true), '[()[:space:]"]', '', 'g') = 'last_seen_at'
          AND regexp_replace(pg_get_indexdef(index_class.oid, 2, true), '[()[:space:]"]', '', 'g') = 'id'
          AND index_state.indoption[0] = 0 AND index_state.indoption[1] = 0,
          false
-       ) AS contract_ready
+       ) AS exact_shape
   FROM crawler_source_index_expected expected
   LEFT JOIN pg_index index_state ON index_state.indrelid = expected.table_oid
   LEFT JOIN pg_class index_class ON index_class.oid = index_state.indexrelid
-  LEFT JOIN pg_am access_method ON access_method.oid = index_class.relam;
+  LEFT JOIN pg_am access_method ON access_method.oid = index_class.relam
+)
+SELECT definitions.*,
+       coalesce(exact_shape AND indisvalid AND indisready AND indislive, false) AS contract_ready,
+       coalesce(exact_shape AND NOT indisvalid AND indislive AND relkind = 'i'
+         AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conindid = index_oid)
+         AND NOT EXISTS (SELECT 1 FROM pg_inherits WHERE inhrelid = index_oid OR inhparent = index_oid),
+         false) AS repairable_invalid_build
+  FROM definitions;
 
 CREATE TEMP VIEW crawler_source_index_contract AS
 SELECT expected.*,
@@ -137,29 +146,77 @@ SELECT expected.*,
                WHERE evidence.table_oid = expected.table_oid AND evidence.index_oid = reserved.oid
                  AND evidence.contract_ready) AS managed_name_ready,
        EXISTS (SELECT 1 FROM crawler_source_index_evidence evidence
+               WHERE evidence.table_oid = expected.table_oid AND evidence.index_oid = reserved.oid
+                 AND evidence.repairable_invalid_build) AS managed_name_repairable,
+       EXISTS (SELECT 1 FROM crawler_source_index_evidence evidence
                WHERE evidence.table_oid = expected.table_oid AND evidence.contract_ready) AS contract_ready
   FROM crawler_source_index_expected expected
   LEFT JOIN pg_class reserved ON reserved.relnamespace = 'public'::regnamespace
                             AND reserved.relname = expected.index_name;
-DO $$
+CREATE FUNCTION pg_temp.assert_crawler_source_index_maintenance() RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+  conflict record;
 BEGIN
-  IF EXISTS (SELECT 1 FROM crawler_source_index_contract WHERE managed_name_exists AND NOT managed_name_ready) THEN
+  -- A failed concurrent REINDEX can leave _ccnew/_ccold (possibly truncated
+  -- or numbered). Never silently accumulate or remove these other indexes.
+  SELECT evidence.* INTO conflict
+    FROM crawler_source_index_evidence evidence
+    JOIN crawler_source_index_expected expected USING (table_oid)
+   WHERE evidence.exact_shape AND NOT evidence.contract_ready
+     AND evidence.index_name <> expected.index_name
+   ORDER BY evidence.index_name LIMIT 1;
+  IF FOUND THEN
+    RAISE EXCEPTION 'unmanaged incomplete cursor index % (valid %, ready %, live %); operator review required',
+      conflict.index_name, conflict.indisvalid, conflict.indisready, conflict.indislive;
+  END IF;
+  IF EXISTS (SELECT 1 FROM crawler_source_index_contract
+             WHERE managed_name_exists AND NOT managed_name_ready AND NOT managed_name_repairable) THEN
     RAISE EXCEPTION 'a managed cursor index name is occupied by an incompatible or invalid object; operator review required';
+  END IF;
+  IF EXISTS (SELECT 1 FROM crawler_source_index_contract WHERE managed_name_repairable) THEN
+    IF NOT pg_has_role(current_user, 'pg_read_all_stats', 'USAGE') THEN
+      RAISE EXCEPTION 'invalid cursor index repair requires visibility of all index builders (pg_read_all_stats or superuser)';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_stat_progress_create_index progress
+               JOIN crawler_source_index_contract expected ON expected.table_oid = progress.relid
+               WHERE expected.managed_name_repairable AND progress.pid <> pg_backend_pid()
+                 AND progress.datid = (SELECT oid FROM pg_database WHERE datname = current_database())) THEN
+      RAISE EXCEPTION 'an index builder is active on a cursor repair table; retry after it finishes';
+    END IF;
   END IF;
 END
 $$;
+SELECT pg_temp.assert_crawler_source_index_maintenance();
 -- END CATALOG PREFLIGHT
 
+SELECT table_name, index_name,
+       CASE WHEN managed_name_repairable THEN 'reindex_invalid_concurrently'
+            WHEN contract_ready THEN 'reuse_ready_index'
+            ELSE 'create_concurrently' END AS maintenance
+  FROM crawler_source_index_contract ORDER BY table_name;
+
+-- Concurrent builds legitimately wait for existing writers and old snapshots.
+-- Keep the per-statement 30 minute ceiling, not the catalog's 2 second lock cap.
+-- Do not run separate manual source DDL alongside this maintenance session.
+SET lock_timeout = '0';
+\echo 'concurrent source index maintenance: each statement is limited to 30 minutes'
+\set ECHO queries
 -- BEGIN CONCURRENT INDEX PLAN
-SELECT format('CREATE UNIQUE INDEX CONCURRENTLY %I ON public.%I (last_seen_at, id)', index_name, table_name)
+SELECT CASE WHEN managed_name_repairable
+            THEN format('REINDEX INDEX CONCURRENTLY public.%I', index_name)
+            ELSE format('CREATE UNIQUE INDEX CONCURRENTLY %I ON public.%I (last_seen_at, id)', index_name, table_name)
+       END
   FROM crawler_source_index_contract
- WHERE NOT contract_ready
+ WHERE managed_name_repairable OR NOT contract_ready
  ORDER BY table_name
 \gexec
 -- END CONCURRENT INDEX PLAN
+\set ECHO none
+SET lock_timeout = '2s';
 
 -- BEGIN FINAL VERIFICATION
 SELECT pg_temp.assert_crawler_source_leaves();
+SELECT pg_temp.assert_crawler_source_index_maintenance();
 DO $$
 BEGIN
   IF EXISTS (

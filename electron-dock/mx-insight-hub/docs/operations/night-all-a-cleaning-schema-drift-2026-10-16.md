@@ -1,15 +1,15 @@
 # Night-All-A 清洗任务字段漂移与恢复核对
 
-日期：2026-10-16。范围：用户提供的清洗任务截图、服务器容器发现输出、20:52:23 +08:00 的生产只读诊断结果、`/tmp/night-all-a-live-source.tgz`、`/tmp/night-all-a-website-source.tgz`、`/tmp/night-all-a-organization-web.tgz` 三包运行源码、`/tmp/docx/` 接口资料，以及本地 Night-All-A 与 Hub 源码。第一包 8 个文件的 SHA256 均与生产诊断一致；第三包包含完整 organization-web Python、manifest 和 sources，重叠的 adapter/collector 与前两包一致。新增文件的摘要单独记录于下文。尚未部署修复或执行源库 DDL，不把诊断通过当作线上恢复结果。
+日期：2026-10-16。范围：用户提供的清洗任务截图、服务器容器发现输出、20:52:23 +08:00 的生产只读诊断结果、`/tmp/night-all-a-live-source.tgz`、`/tmp/night-all-a-website-source.tgz`、`/tmp/night-all-a-organization-web.tgz` 三包运行源码、`/tmp/docx/` 接口资料，以及本地 Night-All-A 与 Hub 源码。第一包 8 个文件的 SHA256 均与生产诊断一致；第三包包含完整 organization-web Python、manifest 和 sources，重叠的 adapter/collector 与前两包一致。新增文件的摘要单独记录于下文。用户随后发起部署并在源索引维护阶段遇到锁超时，见下文；本会话未执行生产操作，也未取得清洗恢复证据。
 
-平台配置连接的实际数据库为 `100.127.0.6:5432 / agent_data_crawler_platform`，当前仍使用 `public.saved_records` 父表及按 `source_type` 划分的 14 个分区，新增类别已确认是 tender。截图中的 `tag` 错误来自第 24 列与 Hub 旧源合同不兼容；游标索引仅 tender 分区缺失，原 13 类均合格。实际运行源码还确认 writer 自身没有保证跨记录的时间戳与提交顺序一致，不能仅修 schema/index 后确认 writer 合同并恢复无遗漏增量。
+Night-All-A应用位于 `100.127.0.1`；此前容器诊断中的数据库配置候选和实际只读连接均为 **Internal `100.127.0.6:5432 / agent_data_crawler_platform`**，应用服务器与数据库服务器分开。该快照仍使用 `public.saved_records` 父表及按 `source_type` 划分的 14 个分区，新增类别已确认是 tender。截图中的 `tag` 错误来自第 24 列与 Hub 旧源合同不兼容；游标索引仅 tender 分区缺失，原 13 类均合格。实际运行源码还确认 writer 自身没有保证跨记录的时间戳与提交顺序一致，不能仅修 schema/index 后确认 writer 合同并恢复无遗漏增量。
 
 ## Hub 迁移兼容实施状态
 
-用户进一步要求将兼容落实到上线流程。本地已补齐三层行为，尚未发布或执行生产维护：
+用户进一步要求将兼容落实到上线流程。本地已补齐三层行为；用户部署尝试未完成，不能据此确认生产恢复：
 
 1. 保留23列/可选tag兼容及旧断点、身份、mapping v1；组织网站额外保留站点ID、名称、域名、智库/NGO/藏等来源分类、内容范围及版本/日期证据。新闻与首页仍分别属于news/web，目录分类不创建新权限类别。publisher缺省使用site_id/site_name，现有sourceCodes筛选可识别新清洗站点；发布者目录仍需已有精确匹配或后续审核。
-2. 部署源索引步骤由原13表扩展到目录中规范的新叶分区，包含tender；管理脚本核对全部已登记crawler连接，复用已有正确索引，拒绝错误/无效同名对象，不自动DROP。源DDL仍是独立psql并发维护，后台发现和Hub SQL migration不执行它。
+2. 部署源索引步骤由原13表扩展到目录中规范的新叶分区，包含tender；管理脚本核对全部已登记crawler连接，复用已有正确索引。锁超时修复后允许严格匹配的同名invalid索引并发重建，其他冲突仍拒绝，不执行显式DROP。源DDL仍是独立psql并发维护，后台发现和Hub SQL migration不执行它。
 3. 恢复入口清除failed/abandoned前重新检查schema/index、mapping、旧checkpoint及已存writer确认；失败保留原证据，手动暂停不启用，分类之间隔离。它不能自动证明writer提交顺序已经修复。
 
 本轮不需要新增Hub表或修改已执行SQL migration。`npm run migrate` 单独运行不足以发布运行时代码或补源索引；正常Hub部署需发布Admin/Public/ingest。远端源未配置 `MX_INSIGHT_NIGHT_ALL_DDL_SERVICE` 时源索引步骤会警告跳过，须独立补齐并复核，不能以Hub部署成功推断tender已就绪。
@@ -19,6 +19,34 @@
 新字段会在新清洗/重新读取时进入canonical并参与内容hash；raw证据与身份保持，历史记录不因migrate自动回填。生产恢复仍需解决源writer ordering并进行有范围的历史对账，不能通过重置checkpoint或勾选旧确认掩盖。
 
 本轮实现验证：清洗/动态类别/路由/新闻接口73项检查通过（含实际PGlite新闻读取）；source-contract与源索引SQL25项通过（17个真实目录语义场景）；部署脚本137项通过，shell语法与diff检查通过。HTTP测试最初因沙箱禁止127.0.0.1监听而失败，放行本地端口后通过，未访问生产。源索引测试在PGlite中移除CONCURRENTLY后创建内存索引，只验证目录/索引定义/前后校验，不证明真实PostgreSQL在线锁时序、psql执行或生产建索引成功。
+
+## 部署锁超时修复
+
+用户部署日志已经通过数据库身份、独占维护锁及14个分区目录检查，在并发建索引阶段报“由于锁超时，取消语句操作”。旧脚本将 `lock_timeout='2s'` 应用于整个会话；它会打断并发建索引等待现有事务的正常过程。截图没有打印生成的DDL，因此不能断定是哪一张表、哪个会话阻塞，也不能断定已留下invalid索引。此前tender缺索引只是候选依据。[PostgreSQL并发索引说明](https://www.postgresql.org/docs/16/sql-createindex.html)
+
+当前修复只在CREATE/REINDEX阶段设 `lock_timeout=0`，继续保留每条语句30分钟的总超时，最后恢复目录检查的2秒限制。会打印每张表的维护动作及真正执行的SQL。若上次留下预期名称、表和精确游标定义的invalid且live普通索引，只有不属于约束/索引继承树、统计可见性充分且本叶无活跃builder时才使用 `REINDEX INDEX CONCURRENTLY`。其他名称的未完成游标索引（包括重建失败可能产生的_ccnew/_ccold及编号/截断名称）、错误定义或dead对象均停止，交运维复核，不自动删除或终止会话。源库同时执行的手工DDL仍需避免；脚本锁只协调本维护流程。[PostgreSQL重建与失败恢复说明](https://www.postgresql.org/docs/16/sql-reindex.html)
+
+同步本次修改后，在 **Internal `100.127.0.6`** 的Hub目录重跑原部署：
+
+```bash
+MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 \
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 \
+bash scripts/manage.sh ops internal-production deploy
+```
+
+若仍有长时间等待或对象冲突，在 **Internal `100.127.0.6`** 的另一个终端使用同一已验证的本机源库连接运行只读诊断；不能在Night-All-A应用主机 `.1` 上照搬这条无host的peer命令：
+
+```bash
+sudo -u postgres psql -X -w -p 5432 -d agent_data_crawler_platform \
+  -v ON_ERROR_STOP=1 -A -t -q \
+  < scripts/night-all-saved-records-index-status.sql
+```
+
+诊断只输出目录状态、进度、锁、PID及事务年龄，不读取业务正文或会话SQL。超时后的builder可能已经退出，空进度不能证明没有发生阻塞。这个失败点在Admin/Public就绪之后、ingest应用之前，属于部分部署；已完成的索引不会整体回滚。部署成功也不会代替writer顺序验证或自动恢复所有清洗计划。
+
+本轮39项Node/PGlite检查、137项部署脚本检查通过，shell语法和diff检查通过。实际PGlite执行目录与诊断SQL，invalid状态由隔离测试中的目录fixture构造；验证生成的REINDEX计划和最终状态门槛，不把fixture修改当成实际重建成功。本机没有原生PostgreSQL工具且Docker daemon未运行，真实多会话锁等待与并发重建尚未执行。
+
+已增加 `tests/server/crawler-source-indexes-postgres.test.mjs`：找到本机PostgreSQL16+工具且使用非root账号时，只在/tmp创建独立cluster与私有Unix socket、关闭TCP，不接受已有DSN；验证旧2秒失败、新脚本等待后完成，以及真实invalid重建。使用 `node --test tests/server/crawler-source-indexes-postgres.test.mjs` 运行。本机结果为1项明确跳过，不能记为并发验收通过。
 
 ## 表和版本证据
 
@@ -37,7 +65,18 @@
 
 ## 已定位的服务器部署
 
-用户提供的服务器输出确认 Compose 项目为 `data-query-platform`，部署目录为 `/opt/data-query-platform`，当前 platform/runtime 同时使用 `docker-compose.yml` 和 `docker-compose.override.yml`。
+用户补充的拓扑与此前只读回执需分层理解：
+
+| 对象 | 地址 | 依据 |
+| --- | --- | --- |
+| Internal / Hub部署主机 | `100.127.0.6` | 用户明确补充 |
+| Night-All-A应用 | `100.127.0.1` | 用户明确补充；此前该主机监听8100 |
+| Night-All-A的saved_records源库 | `100.127.0.6:5432 / agent_data_crawler_platform` | 回执的 `candidateLocation` 与 `observedConnection` 一致 |
+| Night-All HTTP服务 | Internal `100.127.0.6:13141` | 用户明确补充；Hub Internal默认使用hostNetwork的 `127.0.0.1:13141` |
+
+回执的配置来源为 `PLATFORM_DATABASE_URL_environment_candidate`；`hubConfiguredDatabaseVerified=false`、`liveProcessDatabaseVerified=false`，因此它证明的是该候选连接实际到达 `.6`，不是对Hub当前配置或常驻应用进程配置的独立证明。部署日志中的verified local peer另行核对Hub登记连接与Internal本机socket/TCP进程身份。不能由应用在 `.1` 推断数据库也在 `.1`，也不能将Night-All的13141端口用于Night-All-A清洗源连接。本次补充不触发连接地址、网络或SSO的修改。
+
+用户提供的服务器输出确认 Night-All-A所在 **`100.127.0.1`** 的Compose项目为 `data-query-platform`，部署目录为 `/opt/data-query-platform`，当前 platform/runtime 同时使用 `docker-compose.yml` 和 `docker-compose.override.yml`。
 
 | 运行容器 | 镜像标签 | 镜像 ID |
 | --- | --- | --- |
@@ -46,7 +85,7 @@
 
 两个容器均显示 healthy。宿主机 `/opt/data-query-platform/collectors` 挂载到两个容器的 `/app/collectors`；后端代码未显示 bind mount，所以必须核对容器内后端文件，不能以宿主机 Git 提交代表运行代码。用户随后执行 Git 查询得到 `not a git repository`，部署目录没有可用的 Git 元数据。镜像标签是版本线索；招标分区和迁移头已由后续数据库诊断独立确认。
 
-`127.0.0.1:8100` 由 Docker 映射到 platform，`100.127.0.1:8100` 由 Nginx 监听。发现输出不含 Nginx 的实际转发配置，不能仅据此断言代理目标。平台配置目标与实际连接均指向 `100.127.0.6:5432`，不能根据本机存在 `data-query-platform-postgres-1` 而改查该容器。
+在Night-All-A主机 `.1` 上，`127.0.0.1:8100` 由 Docker 映射到 platform，`100.127.0.1:8100` 由 Nginx 监听。发现输出不含 Nginx 的实际转发配置，不能仅据此断言代理目标。平台环境配置候选与实际只读连接均指向Internal `100.127.0.6:5432`，不能根据 `.1` 存在 `data-query-platform-postgres-1` 而改查该容器。
 
 ## 生产只读诊断结果
 
@@ -205,7 +244,7 @@ Hub 本地 tag 兼容及 payload hash 回归已验证：相关清洗/发布/外�
 
 源表核对工具：[night-all-saved-records-source-audit.sql](../../scripts/night-all-saved-records-source-audit.sql)。在 **Hub 当前源连接所指向的数据库** 执行，避免把 Hub 自身数据库或源平台默认 Compose 数据库当成目标。脚本使用只读事务，只读取 PostgreSQL 目录；不扫描业务正文、不修改表、索引或任务。
 
-服务器初步核对可用单文件 [night-all-a-runtime-audit.py](../../scripts/night-all-a-runtime-audit.py)。将脚本上传至服务器 `/tmp/night-all-a-runtime-audit.py` 后，在 platform 容器运行：
+服务器初步核对可用单文件 [night-all-a-runtime-audit.py](../../scripts/night-all-a-runtime-audit.py)。将脚本上传至 **Night-All-A应用主机 `100.127.0.1`** 的 `/tmp/night-all-a-runtime-audit.py` 后，在 platform 容器运行：
 
 ```bash
 sudo docker exec -i -e PYTHONDONTWRITEBYTECODE=1 \

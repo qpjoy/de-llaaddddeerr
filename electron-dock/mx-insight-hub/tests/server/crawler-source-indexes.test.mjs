@@ -34,8 +34,21 @@ async function planned(db) {
 async function applyInMemory(db, statements) {
   // PGlite validates the actual generated index definitions. It cannot model
   // production concurrent builders or psql session/advisory-lock behavior.
-  for (const statement of statements) await db.exec(statement.replace(' CONCURRENTLY ', ' '))
+  for (const statement of statements) {
+    assert.ok(statement.startsWith('CREATE UNIQUE INDEX CONCURRENTLY '))
+    await db.exec(statement.replace(' CONCURRENTLY ', ' '))
+  }
 }
+
+test('only concurrent maintenance relaxes lock timeout, retains a bounded statement timeout and prints executed SQL', () => {
+  const before = sql.split('-- BEGIN CONCURRENT INDEX PLAN')[0]
+  const after = sql.split('-- END CONCURRENT INDEX PLAN')[1]
+  assert.deepEqual([...before.matchAll(/^SET lock_timeout = '([^']+)';/gmu)].map(match => match[1]), ['2s', '0'])
+  assert.deepEqual([...sql.matchAll(/^SET statement_timeout = '([^']+)';/gmu)].map(match => match[1]), ['30min'])
+  assert.match(before, /\\set ECHO queries\s*$/u)
+  assert.match(after, /^\s*\\set ECHO none\s*SET lock_timeout = '2s';/u)
+  assert.match(sql, /^\\set ON_ERROR_STOP on/mu)
+})
 
 test('actual source index SQL includes tender, reuses a valid differently named index and becomes idempotent', postgres, async t => {
   const db = await database(t)
@@ -110,7 +123,8 @@ for (const [name, setup, pattern] of [
 
 for (const [name, ddl] of [
   ['wrong definition', 'CREATE INDEX saved_records_news_last_seen_at_id_uidx ON public.saved_records_news(last_seen_at,id)'],
-  ['invalid build', 'CREATE UNIQUE INDEX saved_records_news_last_seen_at_id_uidx ON public.saved_records_news(last_seen_at,id); UPDATE pg_index SET indisvalid=false WHERE indexrelid=\'public.saved_records_news_last_seen_at_id_uidx\'::regclass'],
+  ['dead invalid build', 'CREATE UNIQUE INDEX saved_records_news_last_seen_at_id_uidx ON public.saved_records_news(last_seen_at,id); UPDATE pg_index SET indisvalid=false,indislive=false WHERE indexrelid=\'public.saved_records_news_last_seen_at_id_uidx\'::regclass'],
+  ['invalid constraint index', 'ALTER TABLE public.saved_records_news ADD CONSTRAINT saved_records_news_last_seen_at_id_uidx UNIQUE(last_seen_at,id); UPDATE pg_index SET indisvalid=false WHERE indexrelid=\'public.saved_records_news_last_seen_at_id_uidx\'::regclass'],
   ['same name on another table', 'CREATE UNIQUE INDEX saved_records_news_last_seen_at_id_uidx ON public.saved_records_forum(last_seen_at,id)'],
 ]) test(`source preflight refuses a managed index name with ${name}, even if another valid index exists`, postgres, async t => {
   const db = await database(t)
@@ -119,6 +133,67 @@ for (const [name, ddl] of [
   await db.exec(ddl)
   await assert.rejects(() => db.exec(preflight), /incompatible or invalid object/)
   assert.notEqual((await db.query("SELECT to_regclass('public.saved_records_news_last_seen_at_id_uidx') AS value")).rows[0].value, null)
+})
+
+for (const ready of [false, true]) test(`plans repair for an exact managed live invalid index (ready=${ready}) and requires a valid result`, postgres, async t => {
+  const db = await database(t)
+  await leaves(db)
+  await db.exec(`CREATE UNIQUE INDEX saved_records_news_last_seen_at_id_uidx ON public.saved_records_news(last_seen_at,id);
+    CREATE UNIQUE INDEX already_correct ON public.saved_records_news(last_seen_at,id);
+    UPDATE pg_index SET indisvalid=false,indisready=${ready} WHERE indexrelid='public.saved_records_news_last_seen_at_id_uidx'::regclass`)
+  // Synthetic catalog state: PGlite does not exercise actual failed CIC phases.
+  await db.exec(preflight)
+  const statements = await planned(db)
+  assert.deepEqual(statements.filter(value => value.includes('saved_records_news')), ['REINDEX INDEX CONCURRENTLY public.saved_records_news_last_seen_at_id_uidx'])
+  await applyInMemory(db, statements.filter(value => value.startsWith('CREATE ')))
+  await assert.rejects(() => db.exec(verify), /did not become ready/)
+  // Change only the synthetic catalog fixture to test postconditions. This
+  // does not validate REINDEX: PGlite cannot exercise its concurrent phases.
+  await db.exec(`UPDATE pg_index SET indisvalid=true,indisready=true
+    WHERE indexrelid='public.saved_records_news_last_seen_at_id_uidx'::regclass`)
+  await db.exec(verify)
+  assert.deepEqual(await planned(db), [])
+})
+
+for (const suffix of ['_ccnew', '_ccold2', '_other']) test(`an incomplete alternate index ${suffix} requires review even when the managed index is ready`, postgres, async t => {
+  const db = await database(t)
+  await leaves(db)
+  const name = `saved_records_news_last_seen_at_id_uidx${suffix}`
+  await db.exec(`CREATE UNIQUE INDEX saved_records_news_last_seen_at_id_uidx ON public.saved_records_news(last_seen_at,id);
+    CREATE UNIQUE INDEX ${name} ON public.saved_records_news(last_seen_at,id);
+    UPDATE pg_index SET indisvalid=false${suffix === '_ccold2' ? ',indislive=false' : ''} WHERE indexrelid='public.${name}'::regclass`)
+  await assert.rejects(() => db.exec(preflight), new RegExp(`unmanaged incomplete cursor index ${name}`))
+})
+
+test('an invalid attached index is never automatically rebuilt', postgres, async t => {
+  const db = await database(t)
+  await leaves(db)
+  await db.exec(`CREATE INDEX parent_cursor ON public.saved_records(last_seen_at,id);
+    ALTER INDEX public.saved_records_news_last_seen_at_id_idx RENAME TO saved_records_news_last_seen_at_id_uidx;
+    UPDATE pg_index SET indisunique=true,indisvalid=false WHERE indexrelid='public.saved_records_news_last_seen_at_id_uidx'::regclass`)
+  await assert.rejects(() => db.exec(preflight), /incompatible or invalid object/)
+})
+
+test('repair refuses hidden builder statistics and a visible active builder', postgres, async t => {
+  const db = await database(t)
+  await leaves(db)
+  await db.exec(`CREATE UNIQUE INDEX saved_records_news_last_seen_at_id_uidx ON public.saved_records_news(last_seen_at,id);
+    UPDATE pg_index SET indisvalid=false WHERE indexrelid='public.saved_records_news_last_seen_at_id_uidx'::regclass`)
+  await db.exec(preflight)
+  await db.exec('CREATE ROLE index_operator')
+  const grant = (await db.query("SELECT format('GRANT USAGE ON SCHEMA %I TO index_operator', nspname) AS sql FROM pg_namespace WHERE oid=pg_my_temp_schema()")).rows[0].sql
+  await db.exec(grant)
+  await db.exec(`GRANT SELECT ON crawler_source_index_contract, crawler_source_index_evidence, crawler_source_index_expected TO index_operator;
+    SET ROLE index_operator`)
+  await assert.rejects(() => db.exec('SELECT pg_temp.assert_crawler_source_index_maintenance()'), /requires visibility of all index builders/)
+  await db.exec(`RESET ROLE;
+    DROP VIEW pg_catalog.pg_stat_progress_create_index;
+    CREATE VIEW pg_catalog.pg_stat_progress_create_index AS SELECT pg_backend_pid()+1 AS pid,
+      'public.saved_records_news'::regclass::oid AS relid, 0::oid AS datid`)
+  await db.exec('SELECT pg_temp.assert_crawler_source_index_maintenance()')
+  await db.exec(`CREATE OR REPLACE VIEW pg_catalog.pg_stat_progress_create_index AS SELECT pg_backend_pid()+1 AS pid,
+    'public.saved_records_news'::regclass::oid AS relid, (SELECT oid FROM pg_database WHERE datname=current_database()) AS datid`)
+  await assert.rejects(() => db.exec('SELECT pg_temp.assert_crawler_source_index_maintenance()'), /index builder is active/)
 })
 
 test('final verification refuses a changed partition inventory and indexes not actually created', postgres, async t => {
