@@ -269,6 +269,12 @@ export function EnterpriseMembers(props: Props) {
           tabIndex={0}
         >
           <table className="simple-data-table">
+            <colgroup>
+              <col className="team-column-identity" />
+              <col className="team-column-type" />
+              <col className="team-column-status" />
+              <col className="team-column-actions" />
+            </colgroup>
             <thead>
               <tr>
                 <th scope="col">员工 / 登录账号</th>
