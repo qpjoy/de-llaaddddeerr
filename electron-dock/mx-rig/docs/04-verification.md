@@ -1,5 +1,13 @@
 # 验证记录
 
+## 2026-10-17：Internal 发布成功后，本机 port-forward 验证失败
+
+- 用户现场输出：Deployment 已 `successfully rolled out`，服务和 PostgreSQL Pod 都是 `1/1 Running`；单独转发到本机 18892，再用 `curl --noproxy '*'` 请求 `/readyz`，返回 `200` 和 `{"status":"ready","store":"postgres"}`。这证明该次手动检查的服务与数据库正常，不是前次镜像缺文件导致的启动崩溃。
+- 原验证脚本隐藏全部转发错误，固定检查 18891，HTTP 检查继承代理；还可能留下后台函数启动的 kubectl 子进程。现场输出不能确定这些因素中哪一个触发了原失败。
+- 修复：默认让 kubectl 分配空闲的回环端口，确认本次转发已监听才请求；三次 HTTP 检查都绕过代理并限制单次请求时间；有限重试，失败显示转发及 HTTP 诊断；退出清理实际 kubectl PID、日志和临时凭据文件。凭据文件清理同时修正 Bash 3 的 local/EXIT trap 兼容问题。只更新 Rig 运维脚本，不修改应用、数据库或其他产品网络。
+- 新增 `tests/manage-verify.test.mjs`：真实 curl 和回环 HTTP、模拟 kubectl。5 项覆盖代理污染、指定端口冲突且不向占用者发送凭据、持续 503、转发退出重试、身份接口 401；成功与失败均检查进程、临时文件清理以及凭据不进入输出。5 项通过；既有 `manage-release` 与 `build-proxy` 的 11 项也通过。`bash -n scripts/manage.sh`、`git diff --check` 通过。
+- 未连接实际集群执行修复后的 `verify`；服务器同步脚本后需单独运行该命令，不需要重建镜像或重跑迁移。此项不代表统一账号登录、客户端联网或 MX-H2I 共存验收完成。
+
 ## 2026-10-17：桌面端 P3，本机海外通道（Launcher 订阅 → 回环代理 → 测试浏览器）
 
 - `npm run check` 通过；仓库自检新增一条：桌面端和 Runtime 里出现设置系统代理的命令就报错。放一个临时文件试过，确实会报错。

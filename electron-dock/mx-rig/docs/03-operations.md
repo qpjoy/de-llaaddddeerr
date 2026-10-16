@@ -112,6 +112,18 @@ scripts/manage.sh verify | status | logs [server|migrate|postgres] | admin-token
 scripts/manage.sh stop          # 服务缩到 0；数据库、Secret、数据目录保留
 ```
 
+如果已经显示 `successfully rolled out`，随后却在 `port-forward` 验证阶段报错，先检查 `kubectl -n mx-rig get pods -o wide`，不要立即重新构建或跑迁移。Pod 为 Ready 表明 Kubernetes 的 `/readyz` 探针已通过；仍需区分本机转发失败和服务随后失去就绪状态。
+
+`verify` 会建立自己的回环转发，默认由 kubectl 分配空闲端口，确认监听成功后才发请求；本机 HTTP 检查绕过环境代理，每次请求最多 5 秒。转发退出会有限重试，失败时显示最后的转发与 HTTP 错误，结束时清理进程和临时文件。`MX_RIG_VERIFY_PORT` 可指定本机端口；端口被占用时会失败，不会借用已有监听进程。修复或同步脚本后单独运行 `bash scripts/manage.sh verify` 即可，不会重建镜像、迁移或重启服务。
+
+需要手动分层定位时，在一个终端运行：
+
+```bash
+kubectl -n mx-rig port-forward --address 127.0.0.1 service/mx-rig-server 18892:80
+```
+
+看到 `Forwarding` 后，在另一个终端运行 `curl --noproxy '*' --connect-timeout 3 --max-time 8 -i http://127.0.0.1:18892/readyz`。返回 `200` 和 `store: postgres` 说明这条转发上的服务及数据库响应正常；测试后用 Ctrl-C 停止手动转发。`verify` 还会检查管理员身份和测试内核 API，不代替统一账号、客户端联网和真实测试执行验收。
+
 节点访问 Docker Hub 出现 `auth.docker.io ... EOF` 或基础镜像 metadata 下载失败时，可在 **Linux 部署节点**指定本机 HTTP 代理：
 
 ```bash

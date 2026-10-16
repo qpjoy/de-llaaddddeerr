@@ -157,13 +157,14 @@ wait_ready() {
 
 # curl with a bearer token that never appears in process arguments.
 curl_bearer() (
-  local token="$1" header
+  local token="$1"
   shift
   umask 077
-  header="$(mktemp "${TMPDIR:-/tmp}/mx-rig-header.XXXXXX")"
-  trap 'rm -f -- "$header"' EXIT
-  printf 'authorization: Bearer %s\n' "$token" >"$header"
-  curl -fsS -H "@${header}" "$@"
+  # Bash 3 unwinds function locals before an EXIT trap on failure.
+  rig_bearer_header="$(mktemp "${TMPDIR:-/tmp}/mx-rig-header.XXXXXX")"
+  trap 'rm -f -- "$rig_bearer_header"' EXIT
+  printf 'authorization: Bearer %s\n' "$token" >"$rig_bearer_header"
+  curl -fsS -H "@${rig_bearer_header}" "$@"
 )
 
 enroll_compose_runner() {
@@ -605,26 +606,61 @@ cmd_migrate() {
 cmd_verify() (
   need kubectl
   need curl
-  local token port="${MX_RIG_VERIFY_PORT:-18891}"
+  local token port="" attempt=0 restarts=0 ready=0 deadline=$((SECONDS + 45))
   token="$(read_secret MX_RIG_ADMIN_TOKEN)"
   [ -n "$token" ] || die "no admin token in ${NAMESPACE}/mx-rig-secrets; deploy first"
-  local forward="" attempt=0 restarts=0
-  trap 'kill "$forward" 2>/dev/null || true' EXIT
-  # Right after a rollout the forward can land on the Pod being replaced and
-  # end with it; start it again rather than calling the deploy failed.
-  until curl -fsS -o /dev/null "http://127.0.0.1:${port}/readyz" 2>/dev/null; do
-    if [ -z "$forward" ] || ! kill -0 "$forward" 2>/dev/null; then
-      [ "$restarts" -lt 5 ] || die "port-forward keeps exiting; see: scripts/manage.sh status"
+  umask 077
+  # These live only in this subshell, but must survive Bash 3's local unwind.
+  rig_verify_forward=""
+  rig_verify_work="$(mktemp -d "${TMPDIR:-/tmp}/mx-rig-verify.XXXXXX")"
+  trap 'if [ -n "$rig_verify_forward" ]; then kill "$rig_verify_forward" 2>/dev/null || true; wait "$rig_verify_forward" 2>/dev/null || true; fi; rm -f -- "$rig_verify_work/forward.log" "$rig_verify_work/curl.log"; rmdir -- "$rig_verify_work"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  verify_failed() {
+    if [ -s "$rig_verify_work/forward.log" ]; then
+      say "port-forward diagnostic:" >&2
+      tail -n 12 "$rig_verify_work/forward.log" >&2
+    fi
+    if [ -s "$rig_verify_work/curl.log" ]; then
+      say "HTTP diagnostic:" >&2
+      tail -n 4 "$rig_verify_work/curl.log" >&2
+    fi
+    say "inspect: kubectl -n ${NAMESPACE} get pods -o wide" >&2
+    say "inspect: kubectl -n ${NAMESPACE} logs deployment/mx-rig-server --tail=80" >&2
+    die "$*; local verification failed, retry scripts/manage.sh verify without rebuilding"
+  }
+
+  # Let kubectl allocate an unused loopback port by default. Never probe an
+  # existing listener (or send it credentials) before our own forward is ready.
+  while [ "$attempt" -lt 45 ] && [ "$SECONDS" -lt "$deadline" ]; do
+    if [ -z "$rig_verify_forward" ] || ! kill -0 "$rig_verify_forward" 2>/dev/null; then
+      [ -z "$rig_verify_forward" ] || wait "$rig_verify_forward" 2>/dev/null || true
+      [ "$restarts" -lt 5 ] || verify_failed "port-forward keeps exiting"
       restarts=$((restarts + 1))
-      kube port-forward service/mx-rig-server "${port}:80" >/dev/null 2>&1 &
-      forward=$!
+      port=""
+      : >"$rig_verify_work/forward.log"
+      # Start kubectl directly: killing a background shell function can leave
+      # its kubectl child behind, holding the listening port open.
+      kubectl -n "$NAMESPACE" port-forward --address 127.0.0.1 \
+        service/mx-rig-server "${MX_RIG_VERIFY_PORT:-}:80" >"$rig_verify_work/forward.log" 2>&1 &
+      rig_verify_forward=$!
+    fi
+    port="$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) -> .*/\1/p' "$rig_verify_work/forward.log" | head -n 1)"
+    if [ -n "$port" ] && kill -0 "$rig_verify_forward" 2>/dev/null &&
+      curl -fsS --noproxy '*' --connect-timeout 3 --max-time 5 \
+        -o /dev/null "http://127.0.0.1:${port}/readyz" 2>"$rig_verify_work/curl.log"; then
+      ready=1
+      break
     fi
     attempt=$((attempt + 1))
-    [ "$attempt" -lt 45 ] || die "the server is not ready behind port-forward"
     sleep 1
   done
-  curl_bearer "$token" -o /dev/null "http://127.0.0.1:${port}/api/rig/v1/me" || die "admin sign-in check failed"
-  curl_bearer "$token" -o /dev/null "http://127.0.0.1:${port}/api/v1/runners" || die "test kernel check failed"
+  [ "$ready" = 1 ] || verify_failed "no ready response through this verification's port-forward"
+  curl_bearer "$token" --noproxy '*' --connect-timeout 3 --max-time 5 \
+    -o /dev/null "http://127.0.0.1:${port}/api/rig/v1/me" 2>"$rig_verify_work/curl.log" || verify_failed "admin sign-in check failed"
+  curl_bearer "$token" --noproxy '*' --connect-timeout 3 --max-time 5 \
+    -o /dev/null "http://127.0.0.1:${port}/api/v1/runners" 2>"$rig_verify_work/curl.log" || verify_failed "test kernel check failed"
   say "verified: ready, admin sign-in and test kernel respond"
 )
 
