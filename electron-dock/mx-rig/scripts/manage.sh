@@ -80,12 +80,18 @@ EOF
 load_env() {
   local build_proxy_set="${MX_RIG_BUILD_PROXY+x}" build_proxy="${MX_RIG_BUILD_PROXY-}"
   local proxy_set="${PROXY+x}" proxy="${PROXY-}"
+  local launcher_url_set="${MX_LAUNCHER_URL+x}" launcher_url="${MX_LAUNCHER_URL-}"
+  local launcher_ops_set="${MX_LAUNCHER_OPS_TOKEN+x}" launcher_ops="${MX_LAUNCHER_OPS_TOKEN-}"
   if [ -f "$ENV_FILE" ]; then
     set -a
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     set +a
   fi
+  # Explicit administrative credentials/endpoint override the saved file,
+  # including an empty token when the caller intentionally disables writes.
+  if [ "$launcher_url_set" = x ]; then export MX_LAUNCHER_URL="$launcher_url"; fi
+  if [ "$launcher_ops_set" = x ]; then export MX_LAUNCHER_OPS_TOKEN="$launcher_ops"; fi
   # Explicit shell values (including empty to disable) win over .env.
   if [ "$build_proxy_set" = x ]; then
     MX_RIG_BUILD_PROXY="$build_proxy"
@@ -747,11 +753,14 @@ cmd_launcher() {
   local action="${1:-plan}"
   shift || true
   case "$action" in plan | apply) ;; *) die "usage: scripts/manage.sh launcher plan|apply" ;; esac
+  load_env
+  if [ "$action" = apply ] && [ -z "${MX_LAUNCHER_OPS_TOKEN:-}" ]; then
+    die "launcher apply needs MX_LAUNCHER_OPS_TOKEN in the environment or mx-rig/.env (the existing Launcher's MX_INTERNAL_OPS_TOKEN, not the Rig admin token)"
+  fi
   local url status=0 out
   url="$(launcher_internal_url)"
   # The Rig service the VIP route points at: what deploy published.
   if [ -z "${MX_RIG_PUBLIC_URL:-}" ] && command -v kubectl >/dev/null 2>&1; then
-    load_env
     resolve_public_url 2>/dev/null || true
   fi
   # Known only with the cluster at hand; unknown means nothing is rotated.
@@ -777,6 +786,7 @@ cmd_launcher() {
 cmd_release() {
   need node
   [ $# -gt 0 ] || die "usage: scripts/manage.sh release status | publish <installer> --install-id <id> | approve <plan> --smoke passed | reject <plan> | promote <plan>"
+  load_env
   local key value
   MX_LAUNCHER_URL="$(launcher_internal_url)"
   export MX_LAUNCHER_URL

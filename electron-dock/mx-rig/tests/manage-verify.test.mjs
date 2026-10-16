@@ -28,7 +28,10 @@ if (args.includes('get') && args.includes('secret')) {
 }
 if (!args.includes('port-forward')) process.exit(1)
 const previous = fs.readFileSync(path.join(dir, 'forwards.jsonl'), 'utf8').trim()
-append('forwards.jsonl', { pid: process.pid, args })
+const previousAlive = (previous ? previous.split('\\n').map(JSON.parse) : []).filter(({ pid }) => {
+  try { process.kill(pid, 0); return true } catch { return false }
+}).map(({ pid }) => pid)
+append('forwards.jsonl', { pid: process.pid, args, previousAlive })
 if (process.env.FAKE_VERIFY_MODE === 'exit-first' && !previous) {
   console.error('error: lost connection to pod during rollout')
   process.exit(1)
@@ -106,8 +109,9 @@ async function fixture(t, mode = 'ready') {
   }
   delete env.MX_RIG_VERIFY_PORT
   delete env.MX_RIG_MANAGE_SOURCE_ONLY
-  const run = (extra = {}) => new Promise((resolve, reject) => {
-    const child = spawn('bash', [manage, 'verify'], { env: { ...env, ...extra } })
+  const run = (extra = {}, body = null) => new Promise((resolve, reject) => {
+    const args = body === null ? [manage, 'verify'] : ['-c', body, 'manage-verify-test', manage]
+    const child = spawn('bash', args, { env: { ...env, ...extra } })
     let stdout = ''
     let stderr = ''
     const timer = setTimeout(() => {
@@ -211,4 +215,41 @@ test('verify restarts a port-forward lost during rollout and cleans up the repla
   assert.deepEqual((await lines(join(f.dir, 'requests.jsonl'))).map((request) => request.url), [
     '/readyz', '/api/rig/v1/me', '/api/v1/runners'
   ])
+})
+
+test('deploy automatically verifies on every invocation with a temporary forward that is cleaned before the next deploy', async (t) => {
+  const f = await fixture(t)
+  const result = await f.run({
+    MX_RIG_MANAGE_SOURCE_ONLY: '1',
+    MX_RIG_PUBLIC_URL: 'http://127.0.0.1:8791',
+    MX_LAUNCHER_URL: 'http://127.0.0.1:1'
+  }, `
+source "$1"
+prepare_kubernetes() { :; }
+run_migration() { :; }
+apply_files() { :; }
+kube() {
+  case "$1" in
+    scale|rollout) return 0 ;;
+    *) kubectl -n "$NAMESPACE" "$@" ;;
+  esac
+}
+cmd_deploy
+cmd_deploy
+`)
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.equal((result.stdout.match(/verified: ready, admin sign-in and test kernel respond/g) ?? []).length, 2)
+  assert.equal((result.stdout.match(/\[mx-rig\] deployed:/g) ?? []).length, 2)
+  const forwards = await f.cleaned(result)
+  assert.equal(forwards.length, 2, 'each deployment must establish its own temporary forward')
+  assert.ok(forwards.every(({ args, previousAlive }) => args.includes(':80') && previousAlive.length === 0), 'previous verification must finish cleanup before another deployment')
+  const expected = [
+    { url: '/readyz', authorization: null },
+    { url: '/api/rig/v1/me', authorization: `Bearer ${token}` },
+    { url: '/api/v1/runners', authorization: `Bearer ${token}` }
+  ]
+  assert.deepEqual(await lines(join(f.dir, 'requests.jsonl')), [...expected, ...expected])
+  const calls = await lines(join(f.dir, 'calls.jsonl'))
+  assert.equal(calls.length, 4)
+  assert.ok(calls.every((args) => args.includes('mx-rig') && (args.includes('port-forward') || (args.includes('get') && args.includes('mx-rig-secrets')))), 'verification only reads the Rig secret and opens its temporary forward; it never writes Launcher resources')
 })

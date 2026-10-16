@@ -1,5 +1,11 @@
 # 验证记录
 
+## 2026-10-17：deploy 临时转发重复执行与 Launcher 管理配置
+
+- `deploy` 已调用 `verify`；新增连续调用两次 `cmd_deploy` 的测试，保留真实验证函数及回环 HTTP，只模拟集群部署步骤。两轮各自验证三个接口，第二轮开始时上一轮转发已退出，最终进程与临时文件清理完成。正常访问仍走 NodePort / VIP 网关，不需要常驻 port-forward。
+- 修复 `launcher` 条件读取 `.env`、以及先解析 Launcher 地址后加载文件的问题；`release` 也先读取文件。显式 shell 的 `MX_LAUNCHER_URL` / `MX_LAUNCHER_OPS_TOKEN` 优先，包括空 token。缺少 token 时 `apply` 在访问 Launcher 前给出配置指引，`plan` 仍无需凭据。
+- `node --test tests/manage-verify.test.mjs tests/manage-release.test.mjs tests/build-proxy.test.mjs tests/launcher-register.test.mjs`：24 项通过。新增覆盖文件 token 在公开地址已配置时仍生效、文件 URL、环境覆盖与空值、无 token 的只读 plan，以及 deploy 重复验证。`bash -n scripts/manage.sh` 与 `git diff --check` 通过。未读取真实 Ops Token，未执行现网登记或部署。
+
 ## 2026-10-17：Internal 发布成功后，本机 port-forward 验证失败
 
 - 用户现场输出：Deployment 已 `successfully rolled out`，服务和 PostgreSQL Pod 都是 `1/1 Running`；单独转发到本机 18892，再用 `curl --noproxy '*'` 请求 `/readyz`，返回 `200` 和 `{"status":"ready","store":"postgres"}`。这证明该次手动检查的服务与数据库正常，不是前次镜像缺文件导致的启动崩溃。

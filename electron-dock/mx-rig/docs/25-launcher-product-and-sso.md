@@ -82,6 +82,26 @@ Rig 服务           http://<Rig 的 VIP>          ← Internal 网关按 Host �
 
 登记清单和命令都在 mx-rig 里，和 Rig 的其他部署放在一起；Launcher 的代码和部署不动。
 
+`launcher plan` 不需要 Ops Token；`launcher apply` 才需要 `MX_LAUNCHER_OPS_TOKEN`。它的值是 **Launcher 已有的 `MX_INTERNAL_OPS_TOKEN`**，Kubernetes 中保存在 `mx-internal-shadow/mx-internal-ops` Secret 的 `token` 键，不是 Rig 的管理员密码，也不需要重新生成或轮换。
+
+可以写入部署节点的 `mx-rig/.env`（已忽略入库，设为 `chmod 600 .env`）：
+
+```bash
+MX_LAUNCHER_OPS_TOKEN='<现有 Launcher Ops Token>'
+```
+
+`launcher` 和 `release` 命令先读取 `.env`（可用 `MX_RIG_ENV_FILE` 指定文件），再解析地址和凭据。`MX_LAUNCHER_URL`、`MX_LAUNCHER_OPS_TOKEN` 的显式 shell 值优先于文件；显式空 token 也不会被文件补回。Ops Token 不写入 Rig 服务 Secret，也不打入桌面包。
+
+也可以只在当前终端提供，不落到 Rig 配置文件：
+
+```bash
+export MX_LAUNCHER_OPS_TOKEN="$(kubectl -n mx-internal-shadow get secret mx-internal-ops -o jsonpath='{.data.token}' | base64 -d)"
+bash scripts/manage.sh launcher apply
+unset MX_LAUNCHER_OPS_TOKEN
+```
+
+这只读取已有凭据；Rig 不自动读取或轮换 Launcher 的 Ops Secret。普通 `deploy` 不要求这个 token，后续 `release` 使用 Rig 自己的 Publisher / Approver 凭据。
+
 ## 4. 交付顺序
 
 | 阶段 | 内容 | 前置 | 验收 |

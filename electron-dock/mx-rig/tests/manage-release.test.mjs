@@ -59,7 +59,7 @@ async function launcher(t) {
       res.writeHead(status, { 'content-type': 'application/json' })
       res.end(JSON.stringify(value))
     }
-    seen.push({ method: req.method, url: req.url, body: body ? JSON.parse(body) : null })
+    seen.push({ method: req.method, url: req.url, body: body ? JSON.parse(body) : null, opsToken: req.headers['x-mx-ops-token'] })
     if (req.url === '/internal/v1/launcher-network/products') return json(200, { products: [] })
     if (req.url === '/internal/v1/app-center/apps/mx-rig' && req.method === 'GET') return json(404, {})
     if (req.url === '/internal/v1/dns/reverse-proxy/routes') return json(200, { routes: [] })
@@ -88,7 +88,7 @@ function sh(args, env) {
   })
 }
 
-test('launcher apply keeps the once-shown release secrets in their Secret; release reads them back through the environment', async (t) => {
+async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'mx-rig-manage-release-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   mkdirSync(join(dir, 'bin'))
@@ -110,6 +110,11 @@ test('launcher apply keeps the once-shown release secrets in their Secret; relea
     MX_LAUNCHER_OPS_TOKEN: 'ops-secret'
   }
   delete env.MX_RIG_RELEASE_HAVE
+  return { dir, center, env }
+}
+
+test('launcher apply keeps the once-shown release secrets in their Secret; release reads them back through the environment', async (t) => {
+  const { dir, center, env } = await fixture(t)
   const applied = await sh(['launcher', 'apply'], env)
   assert.equal(applied.status, 0, applied.stderr)
   assert.match(applied.stdout, /release credentials kept in mx-rig\/mx-rig-release/)
@@ -141,4 +146,52 @@ test('launcher apply keeps the once-shown release secrets in their Secret; relea
   assert.deepEqual([token.body.client_id, token.body.client_secret], ['svc_mx-rig_release_publisher', 'mxsa1.publisher-once'])
   assert.ok(!status.stdout.includes('mxsa1.') && !status.stderr.includes('mxsa1.'))
   assert.ok(existsSync(env.FAKE_KUBE_STATE))
+})
+
+test('launcher loads its endpoint and ops token from .env even when the public URL is already set; release also reads the file', async (t) => {
+  const { dir, center, env } = await fixture(t)
+  delete env.MX_LAUNCHER_URL
+  delete env.MX_LAUNCHER_OPS_TOKEN
+  writeFileSync(env.MX_RIG_ENV_FILE, `MX_LAUNCHER_URL='${center.url}'\nMX_LAUNCHER_OPS_TOKEN='file-ops-secret'\n`, { mode: 0o600 })
+  const applied = await sh(['launcher', 'apply'], env)
+  assert.equal(applied.status, 0, `${applied.stdout}\n${applied.stderr}`)
+  const writes = center.seen.filter((call) => call.method === 'POST')
+  assert.ok(writes.length > 0)
+  assert.ok(writes.every((call) => call.opsToken === 'file-ops-secret'))
+  assert.ok(!`${applied.stdout}\n${applied.stderr}`.includes('file-ops-secret'))
+  assert.ok(!readFileSync(env.FAKE_KUBE_STATE, 'utf8').includes(Buffer.from('file-ops-secret').toString('base64')), 'the ops token is not saved in Rig secrets')
+  assert.deepEqual(readdirSync(join(dir, 'tmp')), [])
+
+  const status = await sh(['release', 'status'], env)
+  assert.equal(status.status, 0, `${status.stdout}\n${status.stderr}`)
+  assert.match(status.stdout, /no plans yet/)
+  assert.ok(!`${status.stdout}\n${status.stderr}`.includes('file-ops-secret'))
+})
+
+test('explicit Launcher endpoint and ops token override .env, including an explicitly empty token', async (t) => {
+  const { center, env } = await fixture(t)
+  writeFileSync(env.MX_RIG_ENV_FILE, "MX_LAUNCHER_URL='http://127.0.0.1:1'\nMX_LAUNCHER_OPS_TOKEN='stale-file-token'\n", { mode: 0o600 })
+  const applied = await sh(['launcher', 'apply'], env)
+  assert.equal(applied.status, 0, `${applied.stdout}\n${applied.stderr}`)
+  const writes = center.seen.filter((call) => call.method === 'POST')
+  assert.ok(writes.length > 0)
+  assert.ok(writes.every((call) => call.opsToken === 'ops-secret'))
+  const before = center.seen.length
+  const denied = await sh(['launcher', 'apply'], { ...env, MX_LAUNCHER_OPS_TOKEN: '' })
+  assert.notEqual(denied.status, 0)
+  assert.match(denied.stderr, /MX_LAUNCHER_OPS_TOKEN.*environment or mx-rig\/\.env/)
+  assert.equal(center.seen.length, before, 'missing credentials fail before accessing Launcher')
+  assert.ok(!`${denied.stdout}\n${denied.stderr}`.includes('stale-file-token'))
+  assert.ok(!denied.stderr.includes('file://'), 'the user gets an actionable error instead of a Node stack')
+})
+
+test('launcher plan reads .env without an ops token and never writes to Launcher', async (t) => {
+  const { center, env } = await fixture(t)
+  delete env.MX_LAUNCHER_URL
+  delete env.MX_LAUNCHER_OPS_TOKEN
+  writeFileSync(env.MX_RIG_ENV_FILE, `MX_LAUNCHER_URL='${center.url}'\n`, { mode: 0o600 })
+  const result = await sh(['launcher', 'plan'], env)
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.ok(center.seen.length > 0)
+  assert.ok(center.seen.every((call) => call.method === 'GET'))
 })

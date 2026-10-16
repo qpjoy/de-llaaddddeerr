@@ -112,6 +112,8 @@ scripts/manage.sh verify | status | logs [server|migrate|postgres] | admin-token
 scripts/manage.sh stop          # 服务缩到 0；数据库、Secret、数据目录保留
 ```
 
+`deploy` 已自动调用 `verify`，不需要另开终端或常驻 port-forward。每次部署验证都新建一个临时回环转发，完成或失败后清理，重复执行不会保留上次的转发。正常业务访问使用 NodePort 或 Launcher VIP 网关路由，不依赖这条临时转发；单独执行 `verify` 只是部署后复查。
+
 如果已经显示 `successfully rolled out`，随后却在 `port-forward` 验证阶段报错，先检查 `kubectl -n mx-rig get pods -o wide`，不要立即重新构建或跑迁移。Pod 为 Ready 表明 Kubernetes 的 `/readyz` 探针已通过；仍需区分本机转发失败和服务随后失去就绪状态。
 
 `verify` 会建立自己的回环转发，默认由 kubectl 分配空闲端口，确认监听成功后才发请求；本机 HTTP 检查绕过环境代理，每次请求最多 5 秒。转发退出会有限重试，失败时显示最后的转发与 HTTP 错误，结束时清理进程和临时文件。`MX_RIG_VERIFY_PORT` 可指定本机端口；端口被占用时会失败，不会借用已有监听进程。修复或同步脚本后单独运行 `bash scripts/manage.sh verify` 即可，不会重建镜像、迁移或重启服务。
