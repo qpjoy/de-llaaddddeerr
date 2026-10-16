@@ -123,6 +123,24 @@ test('all four platforms use fixed TikHub keyword endpoints for standard and bot
   }
 })
 
+test('saved admission RPM is reread between standard content-search pages', async () => {
+  const { attachAdmissionPolicy } = await import('../fixtures/admission-policy.mjs')
+  let save
+  const h = await harness({ fetchImpl: async (_call, index) => {
+    if (index === 1) await save({ maxRequestsPerMinute: 39 })
+    return Response.json({ code: 200, data: biliPage([String(index)], index, 2) })
+  } })
+  ;({ save } = attachAdmissionPolicy(h.gateway))
+  await save({ maxRequestsPerMinute: 27 })
+  const rates = []
+  h.platformStore.acquireProviderRateLimit = async input => { rates.push(input.limit); return { allowed: true } }
+  const result = await h.invokeData({ platform: 'bilibili', query: '城市', pageSize: 2 })
+  assert.equal(result.body.data.items.length, 2)
+  assert.deepEqual(rates, [27, 39])
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.gateway.config.maxRequestsPerMinute, 100)
+})
+
 test('Douyin data.awemeId inside a type-6 wrapper remains a real video on standard and raw contracts', async () => {
   const payload = { data: [{ type: 6, card_type: 9, aweme_list: null, data: { awemeId: '7535855189035991057', desc: '完整视频正文'.repeat(300),
     author: { uid: 'author-1', nickname: 'fixture author' }, statistics: { digg_count: 0, comment_count: 2 },

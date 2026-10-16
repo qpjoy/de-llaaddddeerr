@@ -1,3 +1,4 @@
+import { refreshAdmissionLimits } from './admission-runtime.mjs'
 import { upstreamCapacityError } from './availability-errors.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
@@ -36,7 +37,7 @@ const uncertain = () => {
 const knownAdmission = error => error instanceof AppError && error.status !== 403 && (
   /^external_platform_(?:operation_|cost_)/u.test(error.code)
   || error.status === 409 && error.code === 'external_platform_response_unusable'
-  || ['external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
+  || ['external_admission_policy_unavailable', 'external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
     'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'content_search_deadline'].includes(error.code))
 
 export async function runContentSearch({ gateway, context, request, delivery, deadlineAt, signal,
@@ -202,7 +203,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           const cost = providerCostControl(control?.billing ? { billing: control.billing } : gateway.config, nativeRequest.endpointKey)
           costReservation = await store.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
           const rate = isInternalTraffic(gateway.usageStore, context) ? { allowed: true }
-            : await store.acquireProviderRateLimit({ limit: gateway.config.maxRequestsPerMinute ?? 90, windowMs: 60000 })
+            : await store.acquireProviderRateLimit({ limit: (await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90, windowMs: 60000 })
           if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Content-search rate limit is exhausted')
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           if (!enoughTime()) throw new AppError(503, 'content_search_deadline', 'Content-search deadline reached before dispatch')

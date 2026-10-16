@@ -102,7 +102,7 @@ export function extractSearchRows(body) {
 export function parseArgs(args) {
   if (args.length === 1 && args[0] === '--help') return { help: true }
   const options = { recent: 50, limit: 20 }
-  const keys = { '--platform': 'platform', '--author-id': 'authorId', '--text': 'text', '--request-id': 'requestId', '--recent': 'recent', '--limit': 'limit' }
+  const keys = { '--platform': 'platform', '--post-id': 'postId', '--author-id': 'authorId', '--text': 'text', '--request-id': 'requestId', '--recent': 'recent', '--limit': 'limit' }
   for (let i = 0; i < args.length; i += 2) {
     const key = keys[args[i]], value = args[i + 1]
     if (!key || !value || value.startsWith('--') || Object.hasOwn(options, key) && !['recent', 'limit'].includes(key)) throw new Error('invalid_arguments')
@@ -114,7 +114,8 @@ export function parseArgs(args) {
 
 function validate(options) {
   if (!PLATFORMS.has(options.platform)) throw new Error('invalid_platform')
-  if (!options.authorId && !options.text && !options.requestId) throw new Error('selector_required')
+  if (!options.postId && !options.authorId && !options.text && !options.requestId) throw new Error('selector_required')
+  if (options.postId && !identity(options.postId)) throw new Error('invalid_post_id')
   if (options.authorId && !identity(options.authorId)) throw new Error('invalid_author_id')
   if (options.text && (typeof options.text !== 'string' || options.text.trim().length < 3 || options.text.length > 300)) throw new Error('invalid_text')
   if (options.requestId && !UUID.test(options.requestId)) throw new Error('invalid_request_id')
@@ -122,7 +123,7 @@ function validate(options) {
 }
 
 export function diagnosticErrorReport(error, fallbackStage = 'arguments') {
-  const known = new Set(['invalid_arguments', 'invalid_platform', 'selector_required', 'invalid_author_id', 'invalid_text', 'invalid_request_id', 'invalid_limit', 'database_url_required'])
+  const known = new Set(['invalid_arguments', 'invalid_platform', 'selector_required', 'invalid_post_id', 'invalid_author_id', 'invalid_text', 'invalid_request_id', 'invalid_limit', 'database_url_required'])
   const stage = STAGES.has(error.diagnosticStage) ? error.diagnosticStage : STAGES.has(fallbackStage) ? fallbackStage : 'unknown'
   return { error: known.has(error.message) ? error.message : 'diagnostic_read_failed', stage,
     ...(Object.hasOwn(SQL_STATES, error.code || '') ? { sqlState: error.code, reason: SQL_STATES[error.code] } : {}) }
@@ -133,7 +134,8 @@ export function diagnosticErrorReport(error, fallbackStage = 'arguments') {
 export async function diagnoseSearchMedia(client, input) {
   const options = { recent: 50, limit: 20, ...input }
   validate(options)
-  const matches = row => (!options.authorId || authorId(row) === options.authorId) && (!options.text || text(row).includes(options.text))
+  const matches = row => (!options.postId || postId(row) === options.postId)
+    && (!options.authorId || authorId(row) === options.authorId) && (!options.text || text(row).includes(options.text))
   const results = [], sources = []
   let stage = 'begin_read_only'
   try {
@@ -167,14 +169,17 @@ export async function diagnoseSearchMedia(client, input) {
       }
     }
     // A request id alone does not prove a link to the current canonical version.
-    if (!options.requestId || options.authorId || options.text) {
+    if (!options.requestId || options.postId || options.authorId || options.text) {
       stage = 'select_canonical'
       const { rows: candidates } = await client.query(`SELECT id, collected_at,
         coalesce(event_time, collected_at, last_seen_at, first_seen_at) AS feed_time FROM core.canonical_records
         WHERE dataset_id=ANY($1::text[]) AND platform=$2 AND object_type='post' AND deleted_at IS NULL
           AND ($3::text IS NULL OR author_external_id=$3)
-        ORDER BY coalesce(event_time, collected_at, last_seen_at, first_seen_at) DESC, id DESC LIMIT $4`, [['night-all.search.v1', 'night-all.compat.v1'], options.platform, options.authorId || null, options.recent])
+          AND ($4::text IS NULL OR external_id=$4)
+        ORDER BY coalesce(event_time, collected_at, last_seen_at, first_seen_at) DESC, id DESC LIMIT $5`, [['night-all.search.v1', 'night-all.compat.v1'], options.platform, options.authorId || null, options.postId || null, options.recent])
       const summary = { source: 'canonical_current', windowOrder: 'event_time_then_collected_at_then_last_seen_at_then_first_seen_at',
+        selection: options.postId ? 'exact_external_id_within_search_datasets' : 'bounded_recent_window',
+        datasetIds: ['night-all.search.v1', 'night-all.compat.v1'],
         selected: candidates.length, inspected: 0, matched: 0, missingOrOversized: 0 }
       sources.push(summary)
       for (const entry of candidates) {
@@ -193,7 +198,7 @@ export async function diagnoseSearchMedia(client, input) {
     }
     stage = 'rollback'
     await client.query('ROLLBACK')
-    return { mode: 'stored_read_only', platform: options.platform, requestId: options.requestId || null,
+    return { mode: 'stored_read_only', platform: options.platform, postId: options.postId || null, requestId: options.requestId || null,
       scope: options.requestId ? 'exact_delivery_and_linked_snapshot; optional canonical selectors are independent' : 'bounded_recent_window; zero matches does not prove absence',
       recentPerSource: options.recent, resultLimit: options.limit, resultLimitReached: results.length >= options.limit,
       snapshotScope: 'only_snapshots_linked_from_selected_deliveries',
@@ -210,7 +215,7 @@ if (process.argv[1] === '-' || process.argv[1] && import.meta.url === pathToFile
   let stage = 'arguments'
   try {
     const options = parseArgs(process.argv.slice(2))
-    if (options.help) console.log('Usage: node server/ops/diagnose-search-media.mjs --platform douyin|reddit|twitter|facebook|weibo|instagram [--author-id ID] [--text TEXT] [--request-id UUID] [--recent 1..200] [--limit 1..50]\nAt least one selector is required. Selectors are ANDed. Stored reads only; no signed URLs or body text printed. No match in a bounded recent window does not prove absence.')
+    if (options.help) console.log('Usage: node server/ops/diagnose-search-media.mjs --platform douyin|reddit|twitter|facebook|weibo|instagram [--post-id ID] [--author-id ID] [--text TEXT] [--request-id UUID] [--recent 1..200] [--limit 1..50]\nAt least one selector is required. Selectors are ANDed. Post ID filters canonical external_id within night-all.search.v1/night-all.compat.v1; canonical lookup is independent of request ID. Deliveries still use a bounded recent window unless request ID is supplied. Stored reads only; no signed URLs or body text printed. No match in a bounded recent window does not prove absence.')
     else {
       if (!process.env.DATABASE_URL) throw new Error('database_url_required')
       stage = 'database_connection'

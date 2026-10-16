@@ -1,0 +1,6 @@
+.mih-diagnostics-center { display: grid; gap: 20px; min-width: 0; }
+.mih-diagnostics-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--qp-line); }
+.mih-diagnostics-tabs button { padding: 12px 4px; border: 0; border-bottom: 3px solid transparent; background: transparent; color: var(--qp-text-3); font: inherit; cursor: pointer; }
+.mih-diagnostics-tabs button[aria-pressed="true"] { border-color: var(--qp-primary); color: var(--qp-primary); font-weight: 600; }
+.mih-diagnostics-tabs button:focus-visible { outline: 2px solid var(--qp-primary); outline-offset: 3px; }
+@media (max-width: 700px) { .mih-diagnostics-center { gap: 14px; } }

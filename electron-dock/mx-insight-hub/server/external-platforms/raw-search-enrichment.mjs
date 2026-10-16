@@ -1,3 +1,4 @@
+import { refreshAdmissionLimits } from './admission-runtime.mjs'
 import { createHash } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { AppError } from '../core/errors.mjs'
@@ -71,7 +72,7 @@ export async function enrichWeiboRawSearch({ gateway, context, request, result, 
           usageRequestId: delivery.usageRequestId, fingerprint: delivery.fingerprint, costControls: [cost],
         })
         const rate = await acquireTikHubRateLimit(gateway.usageStore, context, gateway.platformStore,
-          { limit: gateway.config.maxRequestsPerMinute ?? 90, windowMs: 60_000 })
+          { limit: (await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90, windowMs: 60_000 })
         if (!rate.allowed) {
           waitMs = remainingWait(rate.retryAfterMs)
           if (waitMs) continue
@@ -129,6 +130,10 @@ export async function enrichWeiboRawSearch({ gateway, context, request, result, 
         // uncertainty must stop the parent; it is never another paid retry.
         if (call || error?.code === 'external_platform_call_persistence_unknown') throw error
         if (!(error instanceof AppError)) throw error
+        if (error.code === 'external_admission_policy_unavailable') {
+          skipRemaining(index, 'admission_policy_unavailable')
+          break rows
+        }
         if (!(error.code.startsWith('external_platform_operation_')
           || error.code.startsWith('external_platform_cost_')
           || error.code === 'external_platform_subsidy_budget_exhausted')) throw error

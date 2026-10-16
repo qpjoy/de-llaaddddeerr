@@ -125,3 +125,14 @@ pacing 接口的整机间隔为模拟 0–86400000、真机 2000–86400000 整�
 新增 `rule-definitions`、`strategy-definitions` 的 GET/POST/DELETE 版本化目录、`strategy-apply`、`workstation-demo`、`jobs/:id/assignment`、`jobs/:id/queue-cancel` 和 `devices/:id/sim-capabilities`。请求字段、版本校验、归档语义与默认策略行为见 [工作台 API 增量](workstation-strategies-2026-10-14.md#api-增量)。这些新增管理写接口仅在模拟域开放。读取页面/目录不会派发任务；人工指派不能迁移已领取任务。
 
 迁移 `008_scheduling_strategies.sql` 只新增规则/策略表与种子，保留旧机架、任务、App 冷却和既有循环策略。已运行真实设备仍沿用原接口与授权边界。
+
+## 账号池与策略 2.0（2026-10-15，V2-2）
+
+- `GET /api/accounts?mode=`：账号列表（绑定设备、24 小时次数、在途、冷却/退避、最近信号、累计），以及信号类型字典 `signals`。不进入轮询的 `/api/state`。
+- `POST /api/account-status`：`{id, status: active|limited|review|retired, reason, revision, confirmed?}`。版本不符返回 409；恢复为 `active` 需要 `confirmed:true`；`retired` 不能恢复；账号不存在返回 404。
+- `POST /api/account-signal`：`{id, kind: captcha|rate-limited|logged-out|risk-warning, detail?}`。账号转 `review`，退避 10 分钟起、按近期信号翻倍、最长 24 小时。
+- `POST /api/strategy-auto`：`{rack, revision, enabled, calmStrategyId, busyStrategyId, enterPressure, exitPressure, minDwellMs, maxSwitchesPerHour}`。要求 `exitPressure < enterPressure`、两个策略不同；启用时按当前压力立即应用对应策略。
+- `POST /api/strategy-shadow`：`{rack, strategyId}`。只读，返回 `current` 与 `candidate` 两份规划摘要。
+- `/api/state` 的 `scheduling.devices[].pacing`：每台设备的节奏解释（设备作用域与每个 App 的会话、账号作用域，含原语、来源和截止时间）。
+
+账号接口：测试令牌只能操作模拟域，真实域只接受管理员令牌。自动切换与影子评估当前仅限模拟域（真实域返回 403）。迁移 `011_accounts.sql`、`012_pacing_rules.sql` 只新增数据。详见 [V2-2 节奏账本](v2-2-pacing-ledger-2026-10-15.md)。

@@ -5,6 +5,39 @@ Migration `066_night_all_saved_records_sources.sql` registers the fixed inputs;
 it does not connect to the source database, read a row, approve a mapping,
 activate a task or grant a Public API platform.
 
+## 2026-10-16：迁移兼容、组织网站与恢复限制
+
+源端 migration `0022_collection_tags` 在原 `saved_records` 增加可空 `varchar tag`。
+Hub 现在兼容原 23 列和额外这一列，其他字段漂移仍阻断；批次标签保留在受限 raw
+证据中，不自动公开为 extensions。原 mapping version、身份及 checkpoint 保持不变。
+源端当前仍为 saved_records 父表及14个 source_type 分区，新增的是 tender。
+完整运行源码已核实，writer 仍不能满足强提交顺序保证，不能直接勾选确认恢复。
+见[源码核对、只读诊断及恢复顺序](night-all-a-cleaning-schema-drift-2026-10-16.md)。
+
+本轮兼容不需要新增 Hub 数据库表或改已执行 migration：`npm run migrate` 仍只处理
+Hub/mx-common 等原有迁移，不能代替发布新的 Admin/Public/ingest 代码，也不执行源库DDL。
+`scripts/manage.sh deploy` 的独立源索引维护步骤现在检查原13类及全部已登记动态任务的连接一致性，
+源SQL再按实际目录维护规范叶分区，覆盖 tender 和后续新增类别；后台每日发现仍只读。
+远端源库必须配置受控的 `MX_INSIGHT_NIGHT_ALL_DDL_SERVICE` 才会执行该维护步骤；未配置时部署
+只警告跳过，不能把部署成功当成源索引已补齐。
+
+325站不是325个清洗类别：266站走 news，59站走 web；同一 source_type 还可包含其他采集器。
+站点原始分类“智库/NGO/藏”可重叠，与 source_type 权限、内容主题和 Hub 发布者目录分开。
+仅 organization-web 新增白名单 `stableFields.website`：站点ID/名称/域名、来源分类、正文状态/范围、
+版本指纹和源日期证据。publisher.code/name 缺省使用站点ID/名称，已有新闻接口的 sourceCodes
+可筛选新清洗记录；已审核目录精确别名可沿现有规则绑定，未知站点保持待归类，不自动创建325个目录项。
+全文映射full_text、RSS摘要映射summary、首页/PDF/付费墙元数据映射reference，保留精细原状态，
+不新增公共枚举或把列表当文章全文。站点标签不进入授权类别或正文topics。
+
+上述元数据改变会在重新摄入时生成相应canonical修订，身份、mapping v1和raw证据算法不变；
+旧记录不会因migrate自动补齐。源日期只有date-only且published_at为空时，本轮只保留website日期证据，
+不扩大公共新闻日期推断。历史回填应单独采用有范围、可审计的幂等对账，不重置原checkpoint。
+
+恢复失败/遗留运行现在先检查已保存的基础及动态writer合同、固定source身份、原active mapping、
+实时schema/index和旧checkpoint，全部通过才保留原position并清失败；单类失败不阻塞其他类。
+该操作不新写确认、不自动启用手动暂停任务，也不直接入队。已存确认只证明摘要匹配，
+不能证明当前源端提交顺序；本次源端ordering问题仍是生产恢复前的独立阻碍。
+
 ## 2026-09-17：动态类别目录（取代下文固定 13 类的数量假设）
 
 本计划的来源是 **Night-All-A**，控制台显示“Night-All-A 数据清洗任务”。
@@ -25,8 +58,8 @@ activate a task or grant a Public API platform.
 - 数据集为 `data-center.saved-records.<source_type>.v1`，授权平台为
   `data_center_saved_records_<source_type>`；这些是下游类别索引，而非物理 ES 索引名。
 - 新增类别继承同一源程序已核对的 writer 语义，自动过程以 `system:category-discovery` 保存该类独立合同摘要和启用记录，不冒充人工审核。没有既有 writer 确认时阻断；自动启用核对同样的
-  23 列、单值分区、唯一 `(last_seen_at,id)` 索引、watermark/提交顺序/删除合同；
-  源索引仍由源程序/源库运维准备，发现不会对只读源库执行 DDL。原来的 13 表索引脚本只覆盖初始集合。通过检查即自动进入常规增量调度、canonical 入库和 outbox → ES 索引；阻断后下一轮自动重试，也可按“发现新类别”立即重试。人工暂停会取消自动启用意图，后续发现不会擅自重启。
+  23 个必需列及可选的可空 varchar `tag`、单值分区、唯一 `(last_seen_at,id)` 索引、watermark/提交顺序/删除合同；
+  源索引仍由源程序/源库运维准备，发现不会对只读源库执行 DDL。显式部署维护脚本已支持动态规范叶分区。通过检查即自动进入常规增量调度、canonical 入库和 outbox → ES 索引；阻断后下一轮自动重试，也可按“发现新类别”立即重试。人工暂停会取消自动启用意图，后续发现不会擅自重启。这里的writer检查是已存确认版本/摘要检查，不能代替源实现审核。
 - 新类别登记会检查现有 grant、活跃未过期 snapshot entitlement 及 dataset/platform 冲突；
   发现占用时显示阻断，不把已有授权静默变成新数据权限。自动启用清洗仍不代表对外授权；公开内容沿原有发布规则并独立授予 Key 权限。
 - 普通调度、手动单类/全类同步、进度、恢复、共享配置及 checkpoint 操作均从持久化目录取类别。
@@ -117,15 +150,15 @@ Every leaf needs one valid, ready, non-partial unique B-tree whose exact keys
 are `(last_seen_at, id)`. The parent primary key `(source_type, id)` does not
 prove the generic keyset puller's total-order contract.
 
-The Internal deploy reads only the 13 effective transport shapes from the Hub
-catalog. Once all 13 are configured consistently for
+The Internal deploy reads the original 13 plus all registered crawler transport
+shapes from the Hub catalog. Once all are configured consistently for
 `127.0.0.1:5432/agent_data_crawler_platform`, it runs the versioned script as a
 standalone `psql` operation through the host `postgres` peer identity, but only
 after matching the Unix-socket postmaster PID to the real IPv4 5432 listener.
 No source password is exported from the Hub catalog. A non-local or legacy
 `dsnEnv` source uses the root-managed libpq service named by
 `MX_INSIGHT_NIGHT_ALL_DDL_SERVICE`. Both paths disable password prompting and
-bound connection setup to 10 seconds; partial 13-task transport configuration
+bound connection setup to 10 seconds; partial or inconsistent task transport configuration
 is drift and stops deployment rather than being treated as unconfigured.
 
 An independently managed deployment can run the same operation directly,
@@ -137,11 +170,16 @@ psql -X "service=night_all_ddl dbname=agent_data_crawler_platform" \
   -f scripts/night-all-saved-records-source-indexes.sql
 ```
 
-The script uses `CREATE UNIQUE INDEX CONCURRENTLY`, checks the complete catalog
-contract for all 13 indexes and exits non-zero if any result is absent, invalid,
-not ready, partial, non-unique, incorrectly ordered or bound to the wrong leaf.
-Rerunning repairs an interrupted invalid build. A uniqueness failure is source
-contract evidence; investigate it rather than weakening the index.
+The script requires the original 13 leaves, inventories at most 500 direct
+partitions, and includes new canonically named single-value ordinary leaves.
+DEFAULT and multi-value partitions are reported but not maintained. It verifies
+the parent, leaf binding and non-null cursor types before building only missing
+indexes with `CREATE UNIQUE INDEX CONCURRENTLY`. Any already-valid exact index
+can be reused, regardless of name. A managed name occupied by an incompatible
+or invalid object stops maintenance; nothing is automatically dropped. Long
+source types use bounded hashed index names. Final catalog checks verify both
+index readiness and unchanged leaf identities. A uniqueness failure or interrupted
+invalid build requires operator review, not weakening the gate or automatic removal.
 
 ## 4. Mapping and fixed cleaning
 
@@ -198,7 +236,8 @@ Activation requires a human attestation of all of the following for every leaf:
 
 1. The source keeps its reviewed declarations: only `run_id`, `source_family`,
    `collection_mode`, `published_at` and `raw` may be nullable; the other 18
-   fixed columns are non-null. `id` is immutable and never reused within that
+   fixed columns are non-null. The optional `tag` column, when present, must be
+   nullable `varchar`. `id` is immutable and never reused within that
    fixed leaf/dataset lifetime. `record_key` is the stable canonical source
    identity.
 2. Each leaf contains only its declared `source_type`. Rebinding, replacing,
@@ -227,7 +266,8 @@ with `source_contract_mismatch` before canonical ingest when any item differs:
 
 - the persisted source still has the fixed dataset, platform, object type and
   leaf locator;
-- the leaf still has exactly the reviewed 23 columns and nullability. The
+- the leaf has the reviewed 23 columns and nullability, optionally plus the
+  reviewed nullable `varchar tag`; every other extra column is rejected. The
   PostgreSQL types are exact: `id`/`run_id` are `int4`; source descriptors and
   `published_at` use their reviewed `varchar` fields; `source_url` and `text`
   are `text`; evidence/author/metrics/media/attributes/raw are `jsonb`; and the

@@ -34,7 +34,15 @@ import {
 } from "./model.mjs";
 import { configurePacing } from "./pacing.mjs";
 import { controlResource, updatePlacement } from "./resources.mjs";
-import { schedulingSnapshot } from "./scheduling.mjs";
+import { schedulingSnapshot, placingSlots } from "./scheduling.mjs";
+import {
+  ACCOUNT_SIGNALS,
+  ACCOUNT_STATUSES,
+  accountView,
+  recordAccountSignal,
+  setAccountStatus,
+} from "./accounts.mjs";
+import { configureAutoProfile, shadowStrategy } from "./strategy-auto.mjs";
 import { Worker } from "node:worker_threads";
 import { POOL_SCENARIOS, simulationOptions } from "./pool-simulator.mjs";
 import { DEFAULT_POOL_POLICY } from "./pool-policy.mjs";
@@ -80,7 +88,8 @@ async function body(req) {
     throw new Fault("无效 JSON", 400);
   }
 }
-const summarize = (s) => ({
+// Accounts are served by /api/accounts; device pacing summaries are in scheduling.
+const summarize = ({ accounts, ...s }) => ({
   ...s,
   devices: s.devices.map(publicDevice),
   jobs: s.jobs.map(({ result, ...j }) => j),
@@ -223,6 +232,66 @@ export function createApp({ store, cfg, staticRoot = resolve("dist") }) {
           if (mode !== "sim") throw new Fault("调度池演练仅允许模拟模式", 403);
           const options = simulationOptions(await body(req));
           return json(res, 200, await benchmark(options));
+        }
+        if (path === "/api/accounts" && req.method === "GET") {
+          const state = await store.snapshot(mode);
+          const rank = { review: 0, limited: 1, active: 2, retired: 3 };
+          return json(res, 200, {
+            statuses: ACCOUNT_STATUSES,
+            signals: ACCOUNT_SIGNALS,
+            accounts: (state.accounts || [])
+              .map((a) => accountView(state, state.now, a))
+              .sort(
+                (a, b) =>
+                  rank[a.status] - rank[b.status] ||
+                  a.appId.localeCompare(b.appId) ||
+                  a.accountKey.localeCompare(b.accountKey),
+              ),
+          });
+        }
+        if (
+          ["/api/account-status", "/api/account-signal"].includes(path) &&
+          req.method === "POST"
+        ) {
+          const b = await body(req);
+          const id = str(b.id, "账号", 300);
+          const change =
+            path === "/api/account-status"
+              ? setAccountStatus
+              : recordAccountSignal;
+          return json(
+            res,
+            200,
+            await store.atomic(
+              (s, n) => accountView(s, n, change(s, n, mode, id, b)),
+              { mode },
+            ),
+          );
+        }
+        if (path === "/api/strategy-auto" && req.method === "POST") {
+          const b = await body(req);
+          return json(
+            res,
+            200,
+            await store.atomic((s, n) => configureAutoProfile(s, n, mode, b), {
+              mode,
+            }),
+          );
+        }
+        if (path === "/api/strategy-shadow" && req.method === "POST") {
+          const b = await body(req);
+          const state = await store.snapshot(mode);
+          return json(
+            res,
+            200,
+            shadowStrategy(
+              state,
+              state.now,
+              mode,
+              b,
+              placingSlots(state, state.now),
+            ),
+          );
         }
         if (path === "/api/state" && req.method === "GET") {
           const state = await store.snapshot(mode);

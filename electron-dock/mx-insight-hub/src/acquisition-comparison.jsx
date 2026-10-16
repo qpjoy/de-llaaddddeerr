@@ -1,3 +1,4 @@
+import { diagnosticHref } from './diagnostics-navigation.js'
 import { useRef, useSyncExternalStore } from 'react'
 import { adminApi, publicDataApi } from './api.js'
 import { ErrorState } from './components.jsx'
@@ -52,7 +53,7 @@ export function AcquisitionComparison({ token, original, onBusyChange, session, 
         ? `无法校验：${verified.rejected.message}`
         : '校验不通过：该 JSON 不是本次历史请求的参数。指纹不可逆，系统不会反推原参数。'}</p> : null}
     {error ? <ErrorState error={error} /> : null}
-    {diagnosticOnly ? <p>原参数已只读展示。请到<a href={`#/data-browser?view=diagnostics&requestId=${encodeURIComponent(original.requestId)}`}>请求诊断</a>准备并发送新请求；该页面会在切换页面后继续保留未确定请求的状态。</p>
+    {diagnosticOnly ? <p>原参数已只读展示。请到<a href={diagnosticHref(original.requestId)}>请求诊断</a>准备并发送新请求；该页面会在切换页面后继续保留未确定请求的状态。</p>
       : <button className="qp-button qp-button--primary" type="button" disabled={busy || verifying || unresolved || !bodyText.trim()} onClick={() => send()}>{busy ? '请求处理中…' : savedOnly ? '按原参数发送新请求（可能计费）' : '发送新请求并对比（可能计费）'}</button>}
     {unresolved ? <p role="alert">{instagram
       ? '未收到明确结果。请保留本次参数与幂等键，只读核查请求状态与账本。同键重发也可能再次采集和计费，此处不再发送业务请求。'
@@ -67,7 +68,7 @@ export function AcquisitionComparison({ token, original, onBusyChange, session, 
         <div><dt>原 → 新下游费用（分）</dt><dd>{original.customerCharge ? `${original.customerCharge.currency} ${original.customerCharge.chargedMinor} / ${original.customerCharge.status}` : '无记录'} → {attempt.history?.customerCharge ? `${attempt.history.customerCharge.currency} ${attempt.history.customerCharge.chargedMinor} / ${attempt.history.customerCharge.status}` : '尚无结算记录'}</dd></div>
         <div><dt>原 → 新 HTTP</dt><dd>{original.delivered?.responseStatus || '—'} → {attempt.delivered?.status || '—'}</dd></div>
       </dl>
-      {attempt.delivered?.evidence?.requestId ? <p><a href={`#/data-browser?view=diagnostics&requestId=${encodeURIComponent(attempt.delivered.evidence.requestId)}`}>查看这次新请求的诊断 →</a></p> : null}
+      {attempt.delivered?.evidence?.requestId ? <p><a href={diagnosticHref(attempt.delivered.evidence.requestId)}>查看这次新请求的诊断 →</a></p> : null}
       {attempt.delivered ? <p>{instagram && attempt.state === 'uncertain'
         ? '本次请求结果尚未确认，请只读核查诊断与账本。'
         : instagram && attempt.history?.status === 'committed'

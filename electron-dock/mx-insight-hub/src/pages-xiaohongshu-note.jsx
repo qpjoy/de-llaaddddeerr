@@ -245,7 +245,7 @@ function DeliveryEvidence({ evidence, error }) {
   )
 }
 
-export function XiaohongshuNotePage({ notify, token, session }) {
+export function XiaohongshuNotePage({ notify, token, session, onUnauthorized }) {
   const [apiKey] = useDemoApiKey()
   const accessIssues = useDemoAccess('social.posts.resolve')
   const [url, setUrl] = useState('')
@@ -386,7 +386,7 @@ export function XiaohongshuNotePage({ notify, token, session }) {
           )) : <p className="mih-xhs-history-empty">成功获取的笔记会出现在这里；Hub 的长期历史由异步 canonical ingest 保存。</p>}
         </aside>
       </div></details>
-      <XiaohongshuFeed token={token} session={session} apiKey={apiKey} NoteScroll={NoteScroll} DeliveryEvidence={DeliveryEvidence} />
+      <XiaohongshuFeed token={token} session={session} onUnauthorized={onUnauthorized} notify={notify} apiKey={apiKey} NoteScroll={NoteScroll} DeliveryEvidence={DeliveryEvidence} />
     </>
   )
 }

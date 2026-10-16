@@ -153,6 +153,7 @@ export class MemoryStore {
       events: [],
       resources: [],
       apps: [],
+      accounts: [],
       definitions: structuredClone(BUILTIN_DEFINITIONS),
       commandDefinitions: structuredClone(BUILTIN_COMMAND_DEFINITIONS),
       ruleDefinitions: structuredClone(BUILTIN_RULE_DEFINITIONS),
@@ -277,6 +278,7 @@ const ROW_TABLES = [
   ["resources", "resource_policies"],
   ["devices", "devices"],
   ["apps", "device_apps"],
+  ["accounts", "accounts"],
   ["jobs", "jobs"],
   ["attempts", "attempts"],
   ["commands", "execution_commands"],
@@ -333,6 +335,21 @@ const WRITERS = {
     update:
       "UPDATE mx_device.device_apps SET document=$2,version=version+1 WHERE id=$1 AND version=$3",
     updateArgs: (a, json, v) => [a.id, json, v],
+  },
+  accounts: {
+    insert:
+      "INSERT INTO mx_device.accounts(id,mode,app_id,account_key,status,document,version) VALUES($1,$2,$3,$4,$5,$6,1) ON CONFLICT(id) DO NOTHING",
+    insertArgs: (a, json) => [
+      a.id,
+      a.mode,
+      a.appId,
+      a.accountKey,
+      a.status,
+      json,
+    ],
+    update:
+      "UPDATE mx_device.accounts SET status=$2,document=$3,version=version+1 WHERE id=$1 AND version=$4",
+    updateArgs: (a, json, v) => [a.id, a.status, json, v],
   },
   jobs: {
     insert:
@@ -422,6 +439,7 @@ async function loadRealm(c, mode, { jobId, key, attemptId }) {
     ),
     resources: await all("resource_policies"),
     apps: await all("device_apps"),
+    accounts: await all("accounts"),
     definitions: await all("task_definitions", false),
     commandDefinitions: await all("command_definitions", false),
     loopPolicies: await all("loop_policies"),
@@ -465,6 +483,7 @@ async function loadScoped(c, mode, scope, { deviceId, attemptId, jobId }) {
     attempts: unloaded("attempts"),
     resources: unloaded("resources"),
     apps: unloaded("apps"),
+    accounts: unloaded("accounts"),
     definitions: unloaded("definitions"),
     commandDefinitions: [],
     loopPolicies: unloaded("loopPolicies"),
@@ -503,6 +522,14 @@ async function loadScoped(c, mode, scope, { deviceId, attemptId, jobId }) {
     "device_apps",
     "SELECT document,version FROM mx_device.device_apps WHERE mode=$1 AND device_id=$2 ORDER BY id FOR UPDATE",
     [mode, deviceId ?? null],
+    versions,
+  );
+  // The accounts of this device's Apps (charged at dispatch, settled at end).
+  rows.accounts = await select(
+    c,
+    "accounts",
+    "SELECT document,version FROM mx_device.accounts WHERE mode=$1 AND id=ANY($2::text[]) ORDER BY id FOR UPDATE",
+    [mode, rows.apps.map((a) => `${mode}/${a.appId}/${a.accountKey}`)],
     versions,
   );
   rows.loopPolicies = await select(
@@ -815,6 +842,7 @@ export class PgStore {
         strategyDefinitions,
         loopPolicies,
         commands,
+        accounts,
         clock,
       ] = [
         await client.query(
@@ -860,6 +888,10 @@ export class PgStore {
         ),
         await client.query(SQL.snapshotCommands, [mode]),
         await client.query(
+          "SELECT document FROM mx_device.accounts WHERE mode=$1 ORDER BY id",
+          [mode],
+        ),
+        await client.query(
           "SELECT (extract(epoch FROM clock_timestamp())*1000)::bigint AS now",
         ),
       ];
@@ -880,6 +912,7 @@ export class PgStore {
         strategyDefinitions: strategyDefinitions.rows.map((r) => r.document),
         loopPolicies: loopPolicies.rows.map((r) => r.document),
         commands: commands.rows.map((r) => restoreCommand(r.document, catalog)),
+        accounts: accounts.rows.map((r) => r.document),
         now: Number(clock.rows[0].now),
         workers: w.rows.map((r) => ({
           ...r.document,

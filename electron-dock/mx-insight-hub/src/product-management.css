@@ -1,0 +1,14 @@
+.mih-product-management-workspace, .mih-product-management-provider { display: grid; gap: 24px; min-width: 0; }
+.mih-product-management-workspace > *, .mih-product-management-provider > * { min-width: 0; }
+.mih-product-management-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
+.mih-product-management-heading h3 { margin: 0 0 10px; }
+.mih-product-management-heading p { margin-top: 0; color: var(--qp-text-muted); }
+.mih-product-management-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 18px; margin: 20px 0; padding: 0; border: 0; }
+.mih-product-management .qp-table small { display: block; margin-top: 6px; color: var(--qp-text-muted); }
+.mih-product-management code { overflow-wrap: anywhere; }
+.mih-product-management .qp-table { min-width: 640px; }
+.mih-product-management .qp-table-wrap { max-width: 100%; overflow-x: auto; }
+.mih-product-management-controls, .mih-product-management-notes { padding: 18px 0; }
+.mih-product-management-controls > summary, .mih-product-management-notes > summary { cursor: pointer; color: var(--qp-primary); font-weight: 600; margin-bottom: 16px; }
+.mih-product-management-fields .qp-field { min-width: 0; }
+@media (max-width: 640px) { .mih-product-management-heading { flex-direction: column; } .mih-product-management .qp-panel { padding: 18px; } }

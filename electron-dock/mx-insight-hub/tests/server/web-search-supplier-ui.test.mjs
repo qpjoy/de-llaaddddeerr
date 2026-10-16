@@ -16,7 +16,7 @@ function views() {
       contents: "export { ExternalProxyPanel } from './external-proxy-panel.jsx'; export { StructuredCredentialPanel } from './structured-credential-panel.jsx'; export { WebSearchManagement } from './web-search-management.jsx'",
       loader: 'js', resolveDir: fileURLToPath(new URL('../../src/', import.meta.url)),
     },
-    bundle: true, define: { 'import.meta.env': '{}' }, format: 'esm', jsx: 'automatic', platform: 'node', write: false,
+    bundle: true, loader: { '.css': 'empty' }, define: { 'import.meta.env': '{}' }, format: 'esm', jsx: 'automatic', platform: 'node', write: false,
     plugins: [{ name: 'shared-react', setup(builder) {
       builder.onResolve({ filter: /^react(?:-dom)?(?:\/.*)?$/ }, args => ({ path: pathToFileURL(require.resolve(args.path)).href, external: true }))
     } }],

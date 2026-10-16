@@ -357,7 +357,7 @@ The request is a strict object. Its complete field allowlist is `marketplace`,
 `query`, `deliveryMode`, `page`, `cursor`, `sort`, and `price`; any other field returns
 `400 unsupported_request_field`. In particular, there is no `pageSize` field:
 Hub owns the bounded result-size policy. `marketplace` is one of `taobao`,
-`tmall`, `jd`, `xiaohongshu_ec`, or `xianyu`. `query` is NFKC-normalized,
+`tmall`, `jd`, `xiaohongshu_ec`, `xianyu`, or `douyin_ec`. `query` is NFKC-normalized,
 trimmed, required, and limited to 200 characters. `page` is an integer from 1
 through 1,000 and defaults to 1.
 
@@ -373,6 +373,10 @@ compatibility. It is a delivery intent, never a provider selector:
 - `refresh` bypasses an exact fresh snapshot and permits one new acquisition. It
   requires a caller-supplied `Idempotency-Key`, and can still return
   `stored_fallback` after an attempted acquisition fails.
+- `live_only` bypasses the snapshot and returns the acquisition error when a
+  fresh read cannot complete. It requires a caller-supplied `Idempotency-Key`
+  and never uses stored fallback; an already committed key still replays its
+  original delivery.
 
 `X-MX-Insight-Retry-Of: <old requestId>` is a narrow uncertain-repeat signal.
 It is accepted only with `deliveryMode=refresh`, a new `Idempotency-Key`, and a
@@ -401,7 +405,9 @@ returned by Hub, return it unchanged, and keep `marketplace`, `query`, `sort`,
 and `price` identical. The cursor is authenticated-encrypted and consumer/scope
 bound; changing a bound field, tampering, or reusing it for another consumer
 returns `400 cursor_scope_mismatch` or `400 invalid_cursor`. Some marketplaces
-require an opaque continuation after page one, so clients must not synthesize a numeric next page.
+require an opaque continuation after page one: `xiaohongshu_ec` and `douyin_ec`
+reject a numeric page greater than one without their Hub cursor. Clients must
+not synthesize a numeric next page or send a provider search ID as the cursor.
 If `nextCursor` is null, stop. `hasMore=null` means the external response did not
 provide enough evidence for Hub to issue a safe continuation; it is not
 permission to guess another page.
@@ -415,10 +421,10 @@ Sort and price support are marketplace-specific:
   accepted; each value allows at most 12 integer and 8 fractional digits.
 - `xianyu` accepts `relevance`, `recent`, `seller_credit`, `price_asc`,
   `price_desc`, `price_drop`, and `newest`; the default is `relevance`.
-- `jd` and `xiaohongshu_ec` do not accept `sort`; neither accepts `price`.
+- `jd`, `xiaohongshu_ec`, and `douyin_ec` do not accept `sort` or `price`.
 
 `Idempotency-Key` is optional for `cache_only` and `cache_first`, but required
-for `refresh`; it remains strongly recommended for auditable replay control.
+for `refresh` and `live_only`; it remains strongly recommended for auditable replay control.
 Use the same `Idempotency-Key` only when retrying the exact same
 path and page body. The key permanently binds that request; reusing it with a
 different body returns `409 idempotency_conflict`. Every continuation has a
@@ -433,7 +439,7 @@ The response is provider-neutral:
 ```json
 {
   "contractVersion": "mx-insight-hub.ecommerce-products.v1",
-  "data": { "item": {
+  "data": {
     "items": [{
       "id": "product-id",
       "marketplace": "jd",
@@ -462,6 +468,13 @@ The response is provider-neutral:
   "requestId": "00000000-0000-4000-8000-000000000006"
 }
 ```
+
+For `douyin_ec`, the reviewed search response provides product IDs, titles,
+links and images. Shop fields and prices remain null when the source does not
+provide a verified value. The public source evidence is the item's
+`marketplace`, the response `requestId`, and `meta` timestamps/source mode;
+there is no public supplier identity field. Known-shop product listing is a
+separate operation requiring a real shop ID, not a keyword-search substitute.
 
 `meta.sourceMode` is always one of:
 

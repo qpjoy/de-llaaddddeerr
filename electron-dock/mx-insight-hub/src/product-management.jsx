@@ -1,5 +1,10 @@
+import { lazy, Suspense } from 'react'
+import { LoadingState } from './components.jsx'
+import './product-management.css'
 import { publicDocsHref } from './api.js'
 import { isProductAdmin, productManagementLinks } from '../shared/product-management.mjs'
+
+const ManagementPanel = lazy(() => import('./product-management-panel.jsx').then(module => ({ default: module.ProductManagementPanel })))
 
 export function ProductViewTabs({ label, value, onChange, session, debug = 'debug', product = 'product', guide = 'guide', management = 'management' }) {
   return <nav className="mih-source-section-tabs" aria-label={`${label}视图`}>
@@ -15,10 +20,11 @@ export function ProductIntegrationGuide({ label, docs, children }) {
   </section>
 }
 
-export function ProductManagement({ session, path, label }) {
+export function ProductManagement({ token, session, path, label, onUnauthorized, notify, providerKey, onSaved }) {
   if (!isProductAdmin(session)) return null
   return <section className="qp-panel mih-panel mih-product-management" aria-label={`${label}管理`}>
-    <h2>{label}管理</h2><p>从产品进入现有管理工具，查看配置与调用证据；每项修改沿用对应工具的权限和审核流程。</p>
+    <h2>{label}管理</h2><p>按产品查看接口、价格与运行配置；每项修改沿用现有权限和审核流程。</p>
+    {token ? <Suspense fallback={<LoadingState label="正在加载产品管理" />}><ManagementPanel key={`${token}:${path}`} {...{ token, path, label, onUnauthorized, notify, providerKey, onSaved }} /></Suspense> : <p>等待管理员身份后读取配置。</p>}
     <div className="mih-product-management-links">{productManagementLinks(path).map(link => <a key={link.label} className="qp-panel" href={link.href}><strong>{link.label} →</strong><span>{link.description}</span></a>)}</div>
   </section>
 }

@@ -1,3 +1,4 @@
+import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
 import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit } from '../core/internal-traffic-policy.mjs'
 import { circuitOpenError, upstreamCapacityError } from './availability-errors.mjs'
 import { DispatchQueue, DEFAULT_DETAIL_QUEUE, canRetryDetail } from './dispatch-queue.mjs'
@@ -555,6 +556,7 @@ export class TikHubGateway {
     apiKeyPepper,
     reservationLeaseMs,
     operationControlStore = null,
+    admissionPolicies = null,
     credentialStore = null,
     defaultPolicy = DEFAULT_POLICY,
     logger = console,
@@ -567,6 +569,7 @@ export class TikHubGateway {
     this.apiKeyPepper = apiKeyPepper
     this.reservationLeaseMs = reservationLeaseMs
     this.operationControlStore = operationControlStore
+    this.admissionPolicies = admissionPolicies
     this.credentialStore = credentialStore
     this.defaultPolicy = defaultPolicy
     this.logger = logger
@@ -583,11 +586,11 @@ export class TikHubGateway {
     if (isHubRateLimitExempt(context)) return 'exempt'
     const consumerId = context.consumer.id
     const consumerActive = this.activeByConsumer.get(consumerId) || 0
-    if (this.active >= this.config.maxConcurrency || (!isInternalTraffic(this.usageStore, context) && consumerActive >= this.config.maxConsumerConcurrency)) {
+    if (this.active >= currentAdmissionLimits(this).maxConcurrency || (!isInternalTraffic(this.usageStore, context) && consumerActive >= currentAdmissionLimits(this).maxConsumerConcurrency)) {
       return false
     }
-    const reserved = Math.min(this.config.maxConcurrency - 1, DEFAULT_CONCURRENCY_QUEUE.reservedForeground)
-    if (enrichment && (this.concurrencyQueue.entries.length || this.activeEnrichment >= this.config.maxConcurrency - reserved)) return false
+    const reserved = Math.min(currentAdmissionLimits(this).maxConcurrency - 1, DEFAULT_CONCURRENCY_QUEUE.reservedForeground)
+    if (enrichment && (this.concurrencyQueue.entries.length || this.activeEnrichment >= currentAdmissionLimits(this).maxConcurrency - reserved)) return false
     this.active += 1
     if (enrichment) this.activeEnrichment += 1
     this.activeByConsumer.set(consumerId, consumerActive + 1)
@@ -620,11 +623,12 @@ export class TikHubGateway {
   }
 
   async #enterOrQueue(context, { lease, delivery, expiresAt, signal, canWait = true, revalidate }) {
+    await refreshAdmissionLimits(this)
     if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
     if (isHubRateLimitExempt(context)) return 'exempt'
     if (!this.concurrencyQueue.entries.length && this.#enter(context)) return true
     if (!canWait) return false // An already permitted stored fallback is immediate.
-    const policy = { ...DEFAULT_CONCURRENCY_QUEUE, ...this.config.concurrencyQueue }
+    const policy = admissionQueuePolicy(this)
     const deadline = Math.min(this.admissionClock() + policy.maxWaitMs,
       new Date(expiresAt).getTime() - (this.config.timeoutMs || 30000) - 5000)
     let entered = false
@@ -635,8 +639,10 @@ export class TikHubGateway {
       await this.concurrencyQueue.enter({ tryEnter: () => (entered = this.#enter(context)), deadline,
         maxPending: policy.maxPending, signal, details: { platform: XIAOHONGSHU_PLATFORM, operation: delivery.operation } })
       context = await revalidate() || context
-      if (!isInternalTraffic(this.usageStore, context)
-        && (this.activeByConsumer.get(context.consumer.id) || 0) > this.config.maxConsumerConcurrency) {
+      await refreshAdmissionLimits(this)
+      if (entered !== 'exempt' && (this.active > currentAdmissionLimits(this).maxConcurrency
+        || (!isInternalTraffic(this.usageStore, context)
+          && (this.activeByConsumer.get(context.consumer.id) || 0) > currentAdmissionLimits(this).maxConsumerConcurrency))) {
         throw concurrencyBusy('consumer_concurrency_changed')
       }
       if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
@@ -657,7 +663,7 @@ export class TikHubGateway {
       if (entered) this.#leave(context.consumer.id, entered)
       if (error.code === 'external_platform_busy') error = concurrencyBusy(error.details?.reason, { ...error.details,
         platform: XIAOHONGSHU_PLATFORM, operation: delivery.operation,
-        activeConcurrency: this.active, maxConcurrency: this.config.maxConcurrency,
+        activeConcurrency: this.active, maxConcurrency: currentAdmissionLimits(this).maxConcurrency,
         queueDepth: this.concurrencyQueue.entries.length, maxPending: policy.maxPending })
       await this.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable',
         status: error.status || 503, errorCode: error.code || 'external_platform_unavailable' })
@@ -1261,13 +1267,15 @@ export class TikHubGateway {
           costControls: [costControl],
         })
         const rateLimit = await acquireTikHubRateLimit(this.usageStore, context, this.platformStore, {
-              limit: this.config.maxRequestsPerMinute ?? 120,
+              limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 120,
               tokens: 1,
               windowMs: 60_000,
             })
         if (!rateLimit.allowed) {
           throw new AppError(429, 'external_platform_rate_limited', 'External Xiaohongshu request rate is exhausted', {
             retryAfterMs: rateLimit.retryAfterMs,
+            ...(rateLimit.reason ? { layer: 'hub', upstreamDispatched: false, reason: rateLimit.reason,
+              requiredTokens: rateLimit.requiredTokens, maxRequestsPerMinute: rateLimit.maxRequestsPerMinute } : {}),
           })
         }
         const beginCall = (ordinal) => this.platformStore.beginProviderCall({
@@ -1342,7 +1350,7 @@ export class TikHubGateway {
                 expiresAt: reservation.request.leaseExpiresAt, signal, revalidate: revalidateQueuedAccess })
               costReservation = await this.platformStore.reserveProviderCostWorkflow({ tenantId: context.tenant.id, consumerId: context.consumer.id,
                 apiKeyId: context.apiKey.id, usageRequestId: activeRequestId, fingerprint: requestFingerprint, costControls: [costControl] })
-              const retryRate = await acquireTikHubRateLimit(this.usageStore, context, this.platformStore, { limit: this.config.maxRequestsPerMinute ?? 120, tokens: 1, windowMs: 60000 })
+              const retryRate = await acquireTikHubRateLimit(this.usageStore, context, this.platformStore, { limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 120, tokens: 1, windowMs: 60000 })
               if (!retryRate.allowed) throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: retryRate.retryAfterMs })
               call = await beginCall(1); callSettled = false; callDispatched = false
             }
@@ -1946,7 +1954,7 @@ export class TikHubGateway {
             costControls: [costControl],
           })
           const rateLimit = await acquireTikHubRateLimit(this.usageStore, context, this.platformStore, {
-                limit: this.config.maxRequestsPerMinute ?? 120,
+                limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 120,
                 windowMs: 60_000,
               })
           if (!rateLimit.allowed) {
@@ -1964,6 +1972,8 @@ export class TikHubGateway {
             ownsReservation = false
             throw new AppError(429, 'external_platform_rate_limited', 'External Xiaohongshu request rate is exhausted', {
               retryAfterMs: rateLimit.retryAfterMs,
+            ...(rateLimit.reason ? { layer: 'hub', upstreamDispatched: false, reason: rateLimit.reason,
+              requiredTokens: rateLimit.requiredTokens, maxRequestsPerMinute: rateLimit.maxRequestsPerMinute } : {}),
             })
           }
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
@@ -2447,12 +2457,13 @@ export class TikHubGateway {
           results.push({ publicBody: snapshot.responseBody })
           return
         }
+        await refreshAdmissionLimits(this)
         if (!(entered = this.#enter(context, true))) {
           failureCount += 1
           return
         }
         const rateLimit = await acquireTikHubRateLimit(this.usageStore, context, this.platformStore, {
-              limit: this.config.maxRequestsPerMinute ?? 120,
+              limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 120,
               windowMs: 60_000,
             })
         if (!rateLimit.allowed) {
@@ -2613,6 +2624,12 @@ export class TikHubGateway {
         } else {
           failureCount += 1
         }
+      } catch (error) {
+        if (!call && error instanceof AppError && error.code === 'external_admission_policy_unavailable') {
+          failureCount += 1
+          return
+        }
+        throw error
       } finally {
         if (ownsLease) {
           await this.platformStore.releaseDispatchLease({
@@ -3025,7 +3042,7 @@ export class TikHubGateway {
           costControls: [costControl],
         })
         const rateLimit = await acquireTikHubRateLimit(this.usageStore, context, this.platformStore, {
-              limit: this.config.maxRequestsPerMinute ?? 120,
+              limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 120,
               windowMs: 60_000,
             })
         if (!rateLimit.allowed) {

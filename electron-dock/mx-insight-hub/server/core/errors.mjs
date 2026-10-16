@@ -21,9 +21,17 @@ export class UpstreamRejectedError extends Error {
 }
 
 export class UpstreamAmbiguousError extends Error {
-  constructor(message, cause) {
+  constructor(message, cause, correlation = {}) {
     super(message, { cause })
     this.name = 'UpstreamAmbiguousError'
+    // These are observed response headers, never the correlation ID we sent.
+    const identifier = value => typeof value === 'string'
+      && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(value) ? value : null
+    this.upstreamRequestId = identifier(correlation.requestId)
+    this.upstreamTraceId = identifier(correlation.traceId)
+    // An observed HTTP status does not make the incomplete body a known outcome.
+    this.upstreamHttpStatus = Number.isInteger(correlation.httpStatus)
+      && correlation.httpStatus >= 100 && correlation.httpStatus <= 599 ? correlation.httpStatus : null
   }
 }
 

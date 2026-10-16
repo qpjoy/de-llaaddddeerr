@@ -1,3 +1,4 @@
+import { diagnosticHref } from './diagnostics-navigation.js'
 import { useSyncExternalStore } from 'react'
 import { adminApi, publicDataApi } from './api.js'
 import { ErrorState } from './components.jsx'
@@ -43,7 +44,7 @@ export function TwitterRequestRetry({ token, run, session }) {
       {attempt?.responseMismatch ? <p role="alert">浏览器响应与后续账本的请求 ID 或 HTTP 状态不一致。上方状态来自只读账本；下方保留收到的原始 HTTP 响应。</p> : null}
       {attempt?.dispatched ? <p className="mih-diagnostic-note">本次发送已记录。切换页面后继续保留状态，不自动重发；这里只读核对，不再创建第二笔请求。</p> : null}
       {attempt?.ledger?.responseStatus != null || successor?.responseStatus != null ? <p>账本响应 HTTP：{attempt?.ledger?.responseStatus ?? successor?.responseStatus}。已提交不代表采集成功。</p> : null}
-      {newRequestId ? <p><a href={`#/data-browser?view=diagnostics&requestId=${encodeURIComponent(newRequestId)}`}>查看新请求诊断与结算 →</a></p> : null}
+      {newRequestId ? <p><a href={diagnosticHref(newRequestId)}>查看新请求诊断与结算 →</a></p> : null}
       {attempt?.response ? <details><summary>本次 HTTP 响应 · {attempt.response.status}</summary><pre className="qp-code-block"><code>{JSON.stringify(attempt.response.body, null, 2)}</code></pre></details> : null}
     </article> : null}
   </section>

@@ -12,7 +12,7 @@ import './news-discovery.css'
 const dateText = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '未提供'
 const EXTENT = { full_text: '已存全文', summary: '仅摘要', reference: '文章线索', unknown: '正文完整性未知' }
 
-export function NewsDiscoveryPage({ session }) {
+export function NewsDiscoveryPage({ token, session, onUnauthorized, notify }) {
   const [key] = useDemoApiKey()
   const access = useDemoAccessSnapshot()
   const accessIssue = newsAccessIssue(access)
@@ -114,7 +114,7 @@ export function NewsDiscoveryPage({ session }) {
     </PageHeading>
     <ProductViewTabs label="新闻发现" value={tab} onChange={setTab} session={session} debug="api" product="list" />
     {tab === 'guide' ? <ProductIntegrationGuide label="新闻发现" docs="news-discovery"><p>仅查询已收录新闻；数据类别授权与数据源目录授权分别检查。来源统计不代表全库完整分布。</p></ProductIntegrationGuide> : null}
-    {tab === 'management' ? <ProductManagement session={session} path="/data-products/news" label="新闻发现" /> : null}
+    {tab === 'management' ? <ProductManagement {...{ token, session, onUnauthorized, notify }} path="/data-products/news" label="新闻发现" /> : null}
     <div hidden={!['api', 'list'].includes(tab)}>
     {!key || accessIssue ? <div className="mih-inline-warning" role="status"><div>
       <p>{!key ? (canSelectKey

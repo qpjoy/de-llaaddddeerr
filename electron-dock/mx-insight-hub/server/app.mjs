@@ -27,6 +27,7 @@ import { formatBrowserExport } from './data/browser-export.mjs'
 import { browseData, browserStatistics, exportBrowserData, parseBrowserQuery } from './data/browser.mjs'
 import { readKeyAccessLimits, saveKeyAccessLimit } from './stores/key-access-limits.mjs'
 import { readKeyHubLimits, saveKeyHubLimits } from './stores/key-hub-limits.mjs'
+import { readProductManagement } from './operations/product-management.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { extname, join, normalize } from 'node:path'
@@ -788,6 +789,7 @@ export function createApp({
   retrievalControl = null,
   embedding = null,
   externalPlatformAdmin = null,
+  externalAdmissionPolicies = null,
   platformSearchPolicyStore = null,
   ecommerceRoutingStore = null,
   strategySearchRoutingStore = null,
@@ -3065,6 +3067,18 @@ export function createApp({
         sendJson(response, 200, { data: await platformSearchPolicyStore.update(params.platform, await readJson(request, 4096)), requestId })
         return
       }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/data-products/management') {
+        requireSourceAdmin(principal)
+        if ([...searchParams.keys()].some(key => !['path', 'consumerId'].includes(key))
+          || searchParams.getAll('path').length !== 1 || searchParams.getAll('consumerId').length > 1) {
+          throw new AppError(400, 'invalid_product_management_query', 'Provide one product path and an optional consumer ID')
+        }
+        response.setHeader('Cache-Control', 'no-store')
+        const data = await readProductManagement({ path: searchParams.get('path'), consumerId: searchParams.get('consumerId'),
+          store, platformAdmin: externalPlatformAdmin, admissionPolicies: externalAdmissionPolicies })
+        sendJson(response, 200, { data, requestId }); return
+      }
+
       if (request.method === 'GET' && pathname === '/internal/v1/admin/external-platforms') {
         requireSourceAdmin(principal)
         if (!externalPlatformAdmin) {
@@ -3140,6 +3154,18 @@ export function createApp({
           } else throw new AppError(404, 'not_found', '批量开通接口不存在')
         }
         sendJson(response, 200, { data: result, requestId }, { 'cache-control': 'private, no-store' })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/admission-policy')
+      if (params && ['GET', 'PUT'].includes(request.method)) {
+        requireSourceAdmin(principal)
+        response.setHeader('Cache-Control', 'private, no-store')
+        requireNoQuery(searchParams, 'provider admission policy')
+        if (!externalAdmissionPolicies) throw new AppError(503, 'external_admission_policy_unavailable', 'Provider admission policy is unavailable')
+        const data = request.method === 'GET'
+          ? await externalAdmissionPolicies.read(params.provider)
+          : await externalAdmissionPolicies.save(params.provider, await readJson(request, 4096), { actor: 'admin-token', requestId })
+        sendJson(response, 200, { data, requestId })
         return
       }
       params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/pricing-template')

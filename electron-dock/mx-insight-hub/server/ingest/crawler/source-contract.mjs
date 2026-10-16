@@ -173,6 +173,11 @@ export const CRAWLER_SOURCE_COLUMN_CONTRACT = Object.freeze([
 export const CRAWLER_SOURCE_COLUMNS = Object.freeze(
   CRAWLER_SOURCE_COLUMN_CONTRACT.map((column) => column.name),
 )
+// The source added nullable business-batch metadata without changing its
+// identity or cursor contract. Older 23-column leaves remain compatible.
+const CRAWLER_OPTIONAL_TAG_COLUMN = Object.freeze({
+  name: 'tag', databaseType: 'varchar', nullable: true,
+})
 const ALLOWED_CONNECTION_FIELDS = new Set([
   'schema',
   'table',
@@ -242,11 +247,11 @@ export function crawlerColumnIssues(columns = []) {
   if (byName.size !== columns.length) {
     issues.push('crawler columns contain duplicate names')
   }
-  const expected = new Set(CRAWLER_SOURCE_COLUMNS)
+  const expected = new Set([...CRAWLER_SOURCE_COLUMNS, CRAWLER_OPTIONAL_TAG_COLUMN.name])
   for (const name of [...byName.keys()].filter((candidate) => !expected.has(candidate)).sort()) {
     issues.push(`unexpected crawler column ${name} requires mapping review`)
   }
-  for (const contract of CRAWLER_SOURCE_COLUMN_CONTRACT) {
+  for (const contract of [...CRAWLER_SOURCE_COLUMN_CONTRACT, CRAWLER_OPTIONAL_TAG_COLUMN]) {
     const column = byName.get(contract.name)
     if (!column) continue
     if (column.databaseType !== contract.databaseType) {

@@ -8,24 +8,41 @@ import { IpSearchEvents } from './ipsearch-events.mjs'
 import { IP_RISK_PLATFORM, IP_RISK_OPERATION, IP_RISK_VERSION, normalizeIpRiskRequest } from '../contracts/ip-risk.mjs'
 import { acquisitionRequestSnapshot } from '../acquisitions/request-snapshot.mjs'
 import { ConcurrencyAdmissionQueue, DEFAULT_CONCURRENCY_QUEUE, concurrencyBusy } from './concurrency-admission.mjs'
+import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
+
+export const IP_ADMISSION_CONFIG = Object.freeze({ maxConcurrency: 6, maxConsumerConcurrency: 6, maxRequestsPerMinute: 60 })
 
 export class IpRiskGateway {
-  constructor({ usageStore, platformStore, adapter, credentialStore = null, enabled = false, credentialConfigured = adapter.configured, reservationLeaseMs = 60000, providerKey = 'ipsearch', operation = IP_RISK_OPERATION, version = IP_RISK_VERSION, meterKey = operation, endpointVersion = providerKey === 'ipsearch' ? 'v2-sdk-0.1.0' : version, concurrencyPolicy = DEFAULT_CONCURRENCY_QUEUE, admissionRuntime = {} }) {
+  constructor({ usageStore, platformStore, adapter, credentialStore = null, enabled = false, credentialConfigured = adapter.configured, reservationLeaseMs = 60000, providerKey = 'ipsearch', operation = IP_RISK_OPERATION, version = IP_RISK_VERSION, meterKey = operation, endpointVersion = providerKey === 'ipsearch' ? 'v2-sdk-0.1.0' : version, concurrencyPolicy = DEFAULT_CONCURRENCY_QUEUE, admissionRuntime = {}, admissionPolicies = null, config = IP_ADMISSION_CONFIG }) {
     Object.assign(this, { usageStore, platformStore, adapter, credentialStore, enabled, credentialConfigured, reservationLeaseMs, providerKey, operation, version, meterKey, endpointVersion, concurrencyPolicy })
+    this.config = { ...config, concurrencyQueue: concurrencyPolicy }
+    this.admissionPolicies = admissionPolicies
     this.events = new IpSearchEvents(platformStore.pool)
     this.active = 0
+    this.activeByConsumer = new Map()
     this.admissionClock = admissionRuntime.clock || Date.now
     this.concurrencyQueue = new ConcurrencyAdmissionQueue({ clock: this.admissionClock })
     this.batch = new IpRiskBatch(this)
     this.history = new IpRiskHistory(this)
   }
   get dispatchBudgetMs() { return this.adapter.dispatchBudgetMs }
-  #enter() {
-    if (this.active >= 3) return false
+  #enter(context) {
+    if (isHubRateLimitExempt(context)) return 'exempt'
+    const limits = currentAdmissionLimits(this)
+    const consumerActive = this.activeByConsumer.get(context.consumer.id) || 0
+    if (this.active >= limits.maxConcurrency || consumerActive >= limits.maxConsumerConcurrency) return false
     this.active++
+    this.activeByConsumer.set(context.consumer.id, consumerActive + 1)
     return true
   }
-  #leave(admission = true) { if (admission === 'exempt') return; this.active = Math.max(0, this.active - 1); this.concurrencyQueue.drain() }
+  #leave(consumerId, admission = true) {
+    if (admission === 'exempt') return
+    this.active = Math.max(0, this.active - 1)
+    const remaining = Math.max(0, (this.activeByConsumer.get(consumerId) || 1) - 1)
+    if (remaining) this.activeByConsumer.set(consumerId, remaining)
+    else this.activeByConsumer.delete(consumerId)
+    this.concurrencyQueue.drain()
+  }
   async #revalidate(context) {
     const current = await this.usageStore.findApiKeyById(context.apiKey.id)
     if (!current || current.apiKey.status !== 'active' || current.consumer.id !== context.consumer.id || current.tenant.id !== context.tenant.id) {
@@ -51,30 +68,35 @@ export class IpRiskGateway {
     return apiKey
   }
   async #enterOrQueue(context, { lease, expiresAt, signal, revalidate }) {
+    await refreshAdmissionLimits(this)
     if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
     if (isHubRateLimitExempt(context)) return 'exempt'
-    if (!this.concurrencyQueue.entries.length && this.#enter()) return true
+    if (!this.concurrencyQueue.entries.length && this.#enter(context)) return true
     const budget = this.dispatchBudgetMs
     if (!Number.isFinite(budget) || budget <= 0) throw new AppError(503, 'ip_risk_unavailable', 'IP risk dispatch time budget is unavailable', { upstreamDispatched: false })
-    const policy = { ...DEFAULT_CONCURRENCY_QUEUE, ...this.concurrencyPolicy }
+    const policy = admissionQueuePolicy(this)
     const deadline = Math.min(this.admissionClock() + policy.maxWaitMs, new Date(expiresAt).getTime() - budget - 5000)
     let entered = false
     try {
       await this.platformStore.releaseDispatchLease(lease)
-      await this.concurrencyQueue.enter({ tryEnter: () => this.#enter(), deadline, maxPending: policy.maxPending, signal,
-        details: { platform: IP_RISK_PLATFORM, maxConcurrency: 3, maxPending: policy.maxPending } })
-      entered = true
+      await this.concurrencyQueue.enter({ tryEnter: () => (entered = this.#enter(context)), deadline, maxPending: policy.maxPending, signal,
+        details: { platform: IP_RISK_PLATFORM, maxConcurrency: currentAdmissionLimits(this).maxConcurrency, maxPending: policy.maxPending } })
       context = await this.#revalidate(context)
       await revalidate(context)
+      await refreshAdmissionLimits(this)
+      if (entered !== 'exempt' && (this.active > currentAdmissionLimits(this).maxConcurrency
+        || (this.activeByConsumer.get(context.consumer.id) || 0) > currentAdmissionLimits(this).maxConsumerConcurrency)) {
+        throw concurrencyBusy('consumer_concurrency_changed', { platform: IP_RISK_PLATFORM })
+      }
       if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
       if (this.admissionClock() >= deadline) throw concurrencyBusy('concurrency_queue_timeout', { platform: IP_RISK_PLATFORM })
       const acquired = await this.platformStore.acquireDispatchLease(lease)
       if (acquired.kind !== 'acquired') throw new AppError(409, 'ip_query_in_progress_or_unknown', 'An equal query is running or has an uncertain result', { upstreamDispatched: false })
       if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
       if (this.admissionClock() >= deadline) throw concurrencyBusy('concurrency_queue_timeout', { platform: IP_RISK_PLATFORM })
-      return true
+      return entered
     } catch (error) {
-      if (entered) this.#leave()
+      if (entered) this.#leave(context.consumer.id, entered)
       throw error
     }
   }
@@ -152,7 +174,7 @@ export class IpRiskGateway {
       lease = true
       slot = await this.#enterOrQueue(context, { lease: dispatchLease, expiresAt: reservation.request.leaseExpiresAt, signal,
         revalidate: async current => { context = current; apiKeyValue = await this.#credential(context) } })
-      const rate = isHubRateLimitExempt(context) ? { allowed: true } : await this.platformStore.acquireProviderRateLimit({ limit: 60 })
+      const rate = isHubRateLimitExempt(context) ? { allowed: true } : await this.platformStore.acquireProviderRateLimit({ limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute })
       if (!rate.allowed) throw new AppError(429, 'ip_query_rate_limited', 'IP query rate limit reached')
       if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
       call = await this.platformStore.beginProviderCall({ tenantId: tenant.id, consumerId: consumer.id, apiKeyId: apiKey.id, usageRequestId: requestId,
@@ -190,7 +212,7 @@ export class IpRiskGateway {
       throw error
     } finally {
       if (lease) await this.platformStore.releaseDispatchLease({ consumerId: consumer.id, operation: this.operation, fingerprint, ownerRequestId: requestId }).catch(() => {})
-      if (slot) this.#leave(slot)
+      if (slot) this.#leave(context.consumer.id, slot)
     }
   }
 }

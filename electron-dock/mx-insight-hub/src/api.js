@@ -539,6 +539,9 @@ export const adminApi = {
   nightAllADispatchStatus: (token, id) => request(token, `${ADMIN_ROOT}/external-platforms/night-all-a/dispatches/${encodeURIComponent(id)}`),
   nightAllADispatches: token => request(token, `${ADMIN_ROOT}/external-platforms/night-all-a/dispatches`),
   updateExternalPlatformProxy: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/proxy`, { method: 'PUT', body }),
+  productManagement: (token, query, options = {}) => request(token, `${ADMIN_ROOT}/data-products/management`, { ...options, query }),
+  externalPlatformAdmission: (token, key) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/admission-policy`),
+  saveExternalPlatformAdmission: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/admission-policy`, { method: 'PUT', body }),
   updateExternalPlatformEgressRelay: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/egress-relay`, { method: 'PUT', body }),
   externalPlatform: (token, key, query = {}) => request(
     token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}`, { query },

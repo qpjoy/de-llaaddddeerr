@@ -113,7 +113,7 @@ test(
       const versions = await store.pool.query(
         "SELECT name FROM mx_device.schema_migrations ORDER BY name",
       );
-      assert.equal(versions.rows.at(-1).name, "010_row_versions_leader.sql");
+      assert.equal(versions.rows.at(-1).name, "012_pacing_rules.sql");
       const now = Number(
         (
           await store.pool.query(

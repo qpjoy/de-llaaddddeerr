@@ -21,6 +21,7 @@ import {
 } from "./model.mjs";
 import { captureMobile } from "./mobile-agent.mjs";
 import { eventRetention } from "./retention.mjs";
+import { autoSwitchProfiles } from "./strategy-auto.mjs";
 import { inspectMobile } from "./mobile-status.mjs";
 import {
   callPoC,
@@ -369,6 +370,8 @@ export class Engine {
         // One realm transaction per round: sweep, then claim up to free slots.
         works = await this.store.atomic(
           (s, n) => {
+            // Traffic-driven strategy switches belong to the leader too.
+            if (mode === "sim") autoSwitchProfiles(s, n);
             sweep(s, n, mode);
             const out = [];
             // One plan per round; capacity-aware for this executor's slots.

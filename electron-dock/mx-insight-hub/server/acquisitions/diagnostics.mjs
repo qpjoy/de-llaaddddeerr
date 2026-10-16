@@ -1,5 +1,6 @@
 import { AppError } from '../core/errors.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
+import { analyzeRequestDiagnostic } from '../operations/request-diagnostic-analysis.mjs'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const LIMIT = 20
@@ -125,7 +126,7 @@ export async function lookupRequestDiagnostics(pool, input) {
       // later replay or a different error overwrite the original usage evidence.
       const gatewayStatus = request.status === 'released' && gateway?.error_code === request.error_code
         ? gateway.response_status : null
-      runs.push({
+      const run = {
         requestId: request.id, platform: text(request.platform), status: text(request.status),
         errorCode: text(request.error_code), responseStatus: request.response_status ?? gatewayStatus,
         responseStatusSource: request.response_status != null ? 'usage_request' : gatewayStatus != null ? 'gateway_request' : null,
@@ -148,7 +149,9 @@ export async function lookupRequestDiagnostics(pool, input) {
           currency: text(charges[0].currency), settledAt: charges[0].settled_at,
         } : null,
         guidance: advice(request, providers, connectors, gateway),
-      })
+      }
+      run.analysis = analyzeRequestDiagnostic(run)
+      runs.push(run)
     }
     await client.query('COMMIT')
     return { identifier, runs, truncated: matches.rows.length > LIMIT,

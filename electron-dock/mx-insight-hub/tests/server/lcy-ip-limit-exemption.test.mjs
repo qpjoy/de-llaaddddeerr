@@ -23,6 +23,7 @@ async function fixture(fetchImpl) {
   const platformStore = new MemoryExternalPlatformStore({ usageStore: store, providerKey: 'ipsearch', authorizationPlatform: 'ip_risk' })
   const adapter = new IpSearchAdapter({ apiKey: 'synthetic-upstream-key', fetchImpl })
   const gateway = new IpRiskGateway({ usageStore: store, platformStore, adapter, enabled: true,
+    config: { maxConcurrency: 3, maxConsumerConcurrency: 3, maxRequestsPerMinute: 60 },
     concurrencyPolicy: { maxWaitMs: 1, maxPending: 1 } })
   return { store, hub, key, context, platformStore, gateway }
 }

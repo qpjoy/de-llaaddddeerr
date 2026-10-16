@@ -1,3 +1,4 @@
+import { diagnosticHref } from './diagnostics-navigation.js'
 import { WebSearchAccess } from './web-search-access.jsx'
 import { matchesAccessSearch, normalizeAccessSearch } from './access-search.js'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
@@ -3490,7 +3491,7 @@ export function UsagePage({ token, session, query, setQuery, onUnauthorized, not
                     : charge.status === 'released' ? '已解冻' : '已扣费'
               return (
                 <tr key={request.id}>
-                  <td>{formatDate(request.createdAt)}<small>请求 {request.id.slice(0, 8)}…</small></td>
+                  <td>{formatDate(request.createdAt)}<small>{session?.kind === 'admin-token' && session?.platformAdmin ? <a href={diagnosticHref(request.id)} title={request.id} aria-label={`诊断请求 ${request.id}`}>请求 {request.id.slice(0, 8)}… · 诊断</a> : <>请求 {request.id.slice(0, 8)}…</>}</small></td>
                   <td><strong>{consumerNames.get(request.consumerId) || request.consumerId.slice(0, 8)}</strong><small>Key {request.apiKeyId.slice(0, 8)}…</small></td>
                   <td><strong>{billingMeterLabel(request.billingMeterKey || request.capability || request.platform)}</strong><small>{request.billingMeterKey || request.capability || request.platform}</small></td>
                   <td><StatusBadge status={request.status} label={({ committed: '成功', released: '已释放', unknown: '待对账', reserved: '处理中' })[request.status] || request.status} /></td>

@@ -15,6 +15,7 @@ import {
   crawlerReservedScopeIssue,
   crawlerSourceRowIssues,
   crawlerSourceContractIssues,
+  crawlerSourceSpec,
   isCrawlerSourceKey,
 } from '../../server/ingest/crawler/source-contract.mjs'
 
@@ -224,6 +225,33 @@ test('crawler probe fixes the reviewed 23-column types and nullability', () => {
   ])
 })
 
+test('crawler probes accept the old columns or one reviewed nullable varchar tag, including discovered leaves', () => {
+  const tag = { name: 'tag', databaseType: 'varchar', nullable: true }
+  for (const spec of [...CRAWLER_SOURCES, crawlerSourceSpec('tender')]) {
+    assert.deepEqual(crawlerProbeIssues({ columns: validColumns() }, spec), [])
+    assert.deepEqual(crawlerProbeIssues({ columns: [...validColumns(), tag] }, spec), [])
+  }
+
+  const spec = CRAWLER_SOURCES[0]
+  for (const databaseType of ['text', 'jsonb', 'int4']) {
+    assert.deepEqual(crawlerProbeIssues({
+      columns: [...validColumns(), { ...tag, databaseType }],
+    }, spec), ['crawler column tag must use PostgreSQL varchar'])
+  }
+  assert.deepEqual(crawlerProbeIssues({
+    columns: [...validColumns(), { ...tag, nullable: false }],
+  }, spec), ['crawler column tag must be nullable'])
+  assert.deepEqual(crawlerProbeIssues({
+    columns: [...validColumns(), tag, { name: 'other_tag', databaseType: 'varchar', nullable: true }],
+  }, spec), ['unexpected crawler column other_tag requires mapping review'])
+  assert.deepEqual(crawlerProbeIssues({
+    columns: [...validColumns(), tag, tag],
+  }, spec), ['crawler columns contain duplicate names'])
+  assert.deepEqual(crawlerProbeIssues({
+    columns: [...validColumns().filter(column => column.name !== 'record_key'), tag],
+  }, spec), ['required crawler column record_key is missing'])
+})
+
 test('crawler physical contract fixes leaf identity, cursor index, row values, and finite watermarks', () => {
   const spec = CRAWLER_SOURCES.find((candidate) => candidate.sourceType === 'news')
   const relation = {
@@ -329,43 +357,25 @@ test('migration 066 seeds only paused credential-free sources and unapproved nar
   assert.match(sql, /scripts\/night-all-saved-records-hub-indexes\.sql/u)
 })
 
-test('source index operation builds and verifies thirteen exact concurrent indexes', async () => {
-  const sql = await readFile(
-    new URL('../../scripts/night-all-saved-records-source-indexes.sql', import.meta.url),
-    'utf8',
-  )
-
-  assert.equal((sql.match(/^\s*CREATE UNIQUE INDEX CONCURRENTLY /gmu) || []).length, 13)
-  assert.doesNotMatch(sql, /^\s*(?:BEGIN|START TRANSACTION|COMMIT)\b/gimu)
-  assert.doesNotMatch(sql, /CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS/u)
+test('source index operation validates bounded leaves and plans online indexes without changing old identities', async () => {
+  const sql = await readFile(new URL('../../scripts/night-all-saved-records-source-indexes.sql', import.meta.url), 'utf8')
+  assert.doesNotMatch(sql.replace(/\$\$[\s\S]*?\$\$/gu, ''), /^\s*(?:BEGIN|START TRANSACTION|COMMIT)\b/gimu)
+  assert.doesNotMatch(sql, /DROP\s+INDEX|CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS/iu)
   assert.match(sql, /current_database\(\) = 'agent_data_crawler_platform'/u)
   assert.match(sql, /SHOW transaction_read_only/u)
   assert.match(sql, /pg_try_advisory_lock/u)
   assert.match(sql, /another Night-All saved_records source-index migration is running/u)
-  for (const spec of CRAWLER_SOURCES) {
-    const indexName = `${spec.locator.table}_last_seen_at_id_uidx`
-    assert.match(sql, new RegExp(
-      `CREATE UNIQUE INDEX CONCURRENTLY ${indexName}\\s+ON public\\.${spec.locator.table} \\(last_seen_at, id\\)`,
-      'u',
-    ))
-  }
+  for (const type of CRAWLER_SOURCE_TYPES) assert.ok(sql.includes(`'${type}'`), type)
   for (const evidence of [
-    'index_state.indisvalid',
-    'index_state.indisready',
-    'index_state.indislive',
-    'index_state.indisunique',
-    "access_method.amname = 'btree'",
-    'index_state.indnkeyatts = 2',
-    'index_state.indnatts = 2',
-    'index_state.indexprs IS NULL',
-    'index_state.indpred IS NULL',
-    'index_state.indoption[0] = 0',
-    'index_state.indoption[1] = 0',
-    'count(*) = 13 AND bool_and(contract_ready)',
+    'LIMIT 501', 'BETWEEN 13 AND 500', 'LIST(source_type)', 'source_type IS NOT NULL',
+    'index_state.indisvalid', 'index_state.indisready', 'index_state.indislive',
+    'index_state.indisunique', "access_method.amname = 'btree'",
+    'index_state.indnkeyatts = 2', 'index_state.indnatts = 2',
+    'index_state.indexprs IS NULL', 'index_state.indpred IS NULL',
+    'index_state.indoption[0] = 0', 'index_state.indoption[1] = 0',
+    'managed_name_exists AND NOT managed_name_ready', 'octet_length(index_name) <= 63',
+    'CREATE UNIQUE INDEX CONCURRENTLY %I ON public.%I (last_seen_at, id)',
   ]) assert.ok(sql.includes(evidence), evidence)
-  assert.match(sql, /DROP INDEX CONCURRENTLY IF EXISTS public\.%I/u)
-  assert.match(sql, /WHERE repairable_invalid_build/u)
-  assert.doesNotMatch(sql, /WHERE index_exists\s+AND NOT contract_ready/u)
 })
 
 test('Hub catalog index operation builds four exact online indexes outside migration 066', async () => {

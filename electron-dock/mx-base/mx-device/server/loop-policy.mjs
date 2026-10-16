@@ -92,6 +92,21 @@ export function configureLoops(s, now, mode, body) {
     row = { id: randomUUID(), mode, rack, revision: 0 };
     s.loopPolicies.push(row);
   }
+  // Sticky plans were chosen under the old scheduling objective; a new policy
+  // replans the rack's queued jobs from scratch instead of being held by them.
+  if (
+    config.scheduler &&
+    JSON.stringify(config.scheduler) !== JSON.stringify(row.scheduler)
+  ) {
+    const devices = new Set(
+      s.devices
+        .filter((d) => d.mode === mode && d.rack === rack)
+        .map((d) => d.id),
+    );
+    for (const job of s.jobs)
+      if (job.status === "queued" && devices.has(job.poolPlan?.deviceId))
+        delete job.poolPlan;
+  }
   Object.assign(row, config, { revision: row.revision + 1, updatedAt: now });
   s.events.push({
     id: randomUUID(),
@@ -101,105 +116,4 @@ export function configureLoops(s, now, mode, body) {
     message: `${rack} 更新循环策略：最多插入 ${config.maxInsertions} 个小任务；累计预算 ${config.maxDetourMs / 1000} 秒；已有大任务保留领取时的插入预算`,
   });
   return row;
-}
-export function recordLoopUsage(s, now, device, app, attempt) {
-  recordPoolFinish(s, now, device, attempt);
-  const loop = attempt.loop || "small";
-  app.recentRuns ||= [];
-  app.recentRuns.push({
-    jobId: attempt.jobId,
-    attemptId: attempt.id,
-    at: now,
-    loop,
-  });
-  app.recentRuns = app.recentRuns
-    .filter((r) => r.loop === loop)
-    .slice(-100)
-    .concat(app.recentRuns.filter((r) => r.loop !== loop).slice(-100));
-  const policy = loopPolicyFor(s, device);
-  if (!policy) return;
-  app.burstRuns = (app.burstRuns || []).filter(
-    (r) => r.at > now - policy.windowMs,
-  );
-  app.burstRuns.push({ at: now, loop });
-  const small = app.burstRuns.filter((r) => r.loop === "small").length,
-    large = app.burstRuns.filter((r) => r.loop === "large").length;
-  if (small < policy.smallLimit && large < policy.largeLimit) return;
-  const durationMs = randomInt(policy.cooldownMinMs, policy.cooldownMaxMs + 1);
-  app.rest = {
-    at: now,
-    until: now + durationMs,
-    durationMs,
-    small,
-    large,
-    policyRevision: policy.revision,
-    windowMs: policy.windowMs,
-  };
-  app.cooldownUntil = Math.max(app.cooldownUntil, app.rest.until);
-  app.totalRestMs = (app.totalRestMs || 0) + durationMs;
-  app.restHistory = [...(app.restHistory || []), app.rest].slice(-50);
-  app.burstRuns = [];
-  s.events.push({
-    id: randomUUID(),
-    mode: device.mode,
-    at: now,
-    type: "app-rest",
-    deviceId: device.id,
-    jobId: attempt.jobId,
-    message: `${device.name} ${app.appId} 窗口内 ${small} 小 / ${large} 大，生成冷却 ${(durationMs / 1000).toFixed(1)} 秒（已保存，不随刷新重抽）`,
-  });
-}
-
-// Reservation is charged once at dispatch, then replaced with measured service.
-// This ledger is persisted inside the existing device_app JSON document.
-export function recordPoolDispatch(s, now, device, attempt) {
-  const scheduler = loopPolicyFor(s, device)?.scheduler;
-  if (device.mode !== "sim" || !scheduler?.enabled) return;
-  const app = (s.apps || []).find(
-    (a) =>
-      a.mode === "sim" &&
-      a.deviceId === device.id &&
-      a.appId === (attempt.appId || "xhs"),
-  );
-  if (!app) return;
-  const policy = poolAppPolicy(scheduler, app.appId);
-  app.poolRuns = poolRunHistory(app, now, policy);
-  if (app.poolRuns.some((r) => r.attemptId === attempt.id)) return;
-  app.poolRuns.push({
-    attemptId: attempt.id,
-    at: now,
-    reservedServiceMs: attempt.estimatedDurationMs,
-    finishedAt: null,
-    policySnapshot: { ...policy },
-  });
-  app.poolRuns = app.poolRuns.slice(-10000);
-}
-export function recordPoolFinish(s, now, device, attempt) {
-  const app = (s.apps || []).find(
-    (a) =>
-      a.mode === "sim" &&
-      a.deviceId === device.id &&
-      a.appId === (attempt.appId || "xhs"),
-  );
-  const charge = app?.poolRuns?.find((r) => r.attemptId === attempt.id);
-  if (!charge || device.mode !== "sim") return;
-  charge.finishedAt = now;
-  charge.actualServiceMs = Math.max(0, now - charge.at);
-  const scheduler = loopPolicyFor(s, device)?.scheduler;
-  const policy =
-    charge.policySnapshot || (scheduler && poolAppPolicy(scheduler, app.appId));
-  if (!policy) return;
-  // Inspect the burst admitted at dispatch, before any window can expire while
-  // the task is running. Once earned, this rest survives policy edits/disable.
-  const usedMs = app.poolRuns.reduce(
-    (n, r) => n + (r.actualServiceMs ?? r.reservedServiceMs ?? 0),
-    0,
-  );
-  if (app.poolRuns.length >= policy.maxRuns || usedMs >= policy.maxServiceMs) {
-    app.poolRestUntil = Math.max(
-      app.poolRestUntil || 0,
-      now + policy.cooldownMs,
-    );
-    app.cooldownUntil = Math.max(app.cooldownUntil || 0, app.poolRestUntil);
-  }
 }

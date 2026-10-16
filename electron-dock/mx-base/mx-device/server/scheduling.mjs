@@ -10,6 +10,7 @@ import {
   jobApp,
 } from "./apps.mjs";
 import { planPool } from "./pool-planner.mjs";
+import { devicePacingBlockers, pacingSummary } from "./ledger.mjs";
 // Pure scheduling rules shared by claims and read-only explanations.
 export const matchesJob = (device, job) =>
   device.mode === job.mode &&
@@ -105,11 +106,8 @@ export function deviceBlockers(state, now, d, index) {
   else if (!["idle", "quarantined"].includes(d.state))
     add("unknown-state", "执行槽状态未知");
   if (d.connected === "offline") add("offline", "模拟设备离线");
-  if (d.cooldownUntil > now)
-    add(
-      "cooldown",
-      `设备冷却中，约 ${Math.ceil((d.cooldownUntil - now) / 1000)} 秒`,
-    );
+  // Device-scope pacing from the ledger (minimum gap, continuous rest, …).
+  reasons.push(...devicePacingBlockers(now, d));
   if (index && index.now === now) index.blockers.set(d.id, reasons);
   return reasons;
 }
@@ -240,6 +238,7 @@ export function schedulingSnapshot(
     return {
       deviceId: d.id,
       deviceIntervalMs: deviceInterval(d),
+      pacing: pacingSummary(state, now, d, deviceApps(state, d, index)),
       apps,
       commonBlockers: common,
       blockers:

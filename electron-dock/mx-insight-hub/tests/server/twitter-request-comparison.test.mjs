@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
-import { compareTwitterRequests, inspectTwitterRejectedArchive, projectTwitterSavedInput } from '../../server/ops/compare-twitter-requests.mjs'
+import { compareTwitterRequests, diagnoseTwitterRequest, inspectTwitterRejectedArchive, projectTwitterSavedInput } from '../../server/ops/compare-twitter-requests.mjs'
 import { normalizeHubDataSearch } from '../../server/contracts/hub-data-search.mjs'
 import { normalizeHubSocialRequest } from '../../server/contracts/hub-social.mjs'
 
@@ -150,6 +150,31 @@ test('comparison reads exactly three selected requests and distinguishes saved e
   for (const row of f.queries.filter(row => row.sql.includes('twitter-compare:'))) assert.match(row.sql, /(?:id|usage_request_id|provider_call_id)=\$1::uuid/u)
 })
 
+test('single request mode reads only that request and its verified 400 archive without inventing comparison roles', async () => {
+  const f = mockPool(), result = await diagnoseTwitterRequest(f.pool, ids.failedRequestId, normalizers)
+  assert.equal(result.diagnosticRevision, 'twitter-request-diagnostic.v1')
+  assert.equal(result.readOnly, true); assert.equal(result.businessCalls, 0)
+  assert.equal(result.request.requestId, ids.failedRequestId)
+  assert.equal(result.request.httpStatus, 502)
+  assert.equal(result.request.savedInput.path, '/api/v1/data/search')
+  assert.equal(result.request.savedInput.fields.query.value, query)
+  assert.equal(result.request.ownCalls[0].httpStatus, 400)
+  assert.equal(result.request.ownCalls[0].billed, null)
+  assert.equal(result.request.ownCalls[0].rejectedArchive.hashVerified, true)
+  assert.equal(result.request.ownCalls[0].rejectedArchive.messages.message.text, 'Invalid query syntax')
+  assert.equal(result.request.currentFirstCall.queryParameters.category, 'Top')
+  assert.equal(result.requests, undefined); assert.equal(result.comparisons, undefined)
+  assert.equal(f.queries.filter(row => row.sql.includes('twitter-compare:usage')).length, 1)
+  assert.equal(f.queries.filter(row => row.sql.includes('twitter-compare:calls')).length, 1)
+  assert.equal(f.queries.filter(row => row.sql.includes('twitter-compare:rejected-archive')).length, 1)
+  assert.equal(f.queries.at(-1).sql, 'ROLLBACK'); assert.equal(f.released, true)
+  const withoutInstalledContract = await diagnoseTwitterRequest(mockPool().pool, ids.failedRequestId)
+  assert.equal(withoutInstalledContract.request.currentFirstCall.state, 'installed_normalizer_unavailable')
+  assert.equal(withoutInstalledContract.request.ownCalls[0].rejectedArchive.hashVerified, true)
+  await assert.rejects(diagnoseTwitterRequest({ connect() { assert.fail('must validate before connecting') } }, 'not-a-uuid'),
+    { message: 'invalid_request_id' })
+})
+
 test('comparison bounds owned calls and safely closes failed queries or rollback without exposing errors', async () => {
   const f = mockPool({ callCount: 16 }), result = await compareTwitterRequests(f.pool, ids)
   assert.equal(result.requests.failed.ownCalls.length, 15)
@@ -174,7 +199,8 @@ test('comparison bounds owned calls and safely closes failed queries or rollback
 test('standalone CLI validates the selected UUIDs before pg import and emits only fixed errors', () => {
   const env = { ...process.env }; delete env.DATABASE_URL
   for (const [args, error] of [[[], 'invalid_arguments'], [['private-invalid'], 'invalid_arguments'],
-    [[...Object.values(ids), 'extra'], 'invalid_arguments'], [Object.values(ids), 'database_url_required']]) {
+    [[...Object.values(ids), 'extra'], 'invalid_arguments'], [Object.values(ids).slice(0, 2), 'invalid_arguments'],
+    [[ids.failedRequestId], 'database_url_required'], [Object.values(ids), 'database_url_required']]) {
     const result = spawnSync(process.execPath, ['--input-type=module', '-', ...args], { input: source, env, encoding: 'utf8' })
     assert.equal(result.status, 1); assert.equal(result.stdout, '')
     assert.deepEqual(JSON.parse(result.stderr), { error })
@@ -240,5 +266,14 @@ test('actual PostgreSQL comparison uses a readonly snapshot and reads only the s
   assert.equal(report.requests.failed.ownCalls[0].rejectedArchive.messages.message.text, 'Invalid query syntax')
   assert.equal(report.requests.success.returnedCount, 20)
   assert.doesNotMatch(JSON.stringify(report), /private-business|private-unrelated/u)
+  archiveIds.length = 0
+  const single = await diagnoseTwitterRequest(pool, ids.failedRequestId, normalizers)
+  assert.equal(single.request.owner.apiKeyId, key)
+  assert.equal(single.request.savedInput.fields.query.value, query)
+  assert.equal(single.request.ownCalls[0].rejectedArchive.sha256, receiptBytes.body_sha256)
+  assert.equal(single.request.ownCalls[0].rejectedArchive.messages.message.text, 'Invalid query syntax')
+  assert.deepEqual(archiveIds, [failedCall])
+  assert.doesNotMatch(JSON.stringify(single), /private-business|private-unrelated/u)
+  assert.equal(single.requests, undefined); assert.equal(single.comparisons, undefined)
   assert.equal((await db.query('SELECT count(*)::int AS n FROM usage_requests')).rows[0].n, 4)
 })

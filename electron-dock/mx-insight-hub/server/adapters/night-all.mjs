@@ -84,8 +84,12 @@ export class NightAllAdapter {
     keepRaw = false,
     token,
     timeoutMs,
+    requestId,
     redact = stripProviderMetadata,
   } = {}) {
+    if (requestId != null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)) {
+      throw new TypeError('Hub request correlation must be a UUID')
+    }
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs || this.timeoutMs)
     try {
@@ -95,6 +99,9 @@ export class NightAllAdapter {
           method,
           headers: {
             ...(body ? { 'content-type': 'application/json' } : {}),
+            // Night-All carries this Hub-owned identity into its logs/ledger,
+            // including when its response arrives after our deadline.
+            ...(requestId ? { 'x-request-id': requestId } : {}),
             ...(token || this.serviceToken
               ? { authorization: `Bearer ${token || this.serviceToken}` }
               : {}),
@@ -108,12 +115,14 @@ export class NightAllAdapter {
 
       const contentType = response.headers.get('content-type') || ''
       const correlation = { requestId: response.headers.get('x-request-id'), traceId: response.headers.get('x-trace-id'),
+        httpStatus: response.status,
         rateLimit: nightAllRateLimitEvidence(response.headers) }
       if (!contentType.toLowerCase().includes('application/json')) {
         if (response.ok) {
           throw new UpstreamAmbiguousError(
             'Night-All returned an unusable successful response; outcome is unknown',
             invalidUpstreamResponse('invalid_upstream_content_type'),
+            correlation,
           )
         }
         throw new UpstreamRejectedError(response.status, { code: 'invalid_upstream_content_type' }, correlation)
@@ -123,7 +132,7 @@ export class NightAllAdapter {
         payload = await response.json()
       } catch (error) {
         if (controller.signal.aborted || error?.name === 'AbortError') {
-          throw new UpstreamAmbiguousError('Night-All outcome is unknown', error)
+          throw new UpstreamAmbiguousError('Night-All outcome is unknown', error, correlation)
         }
         // Invalid JSON is a definite upstream contract failure. Other body
         // stream failures can happen after Night-All accepted the POST, so the
@@ -132,10 +141,11 @@ export class NightAllAdapter {
           throw new UpstreamAmbiguousError(
             'Night-All returned invalid JSON after accepting the request; outcome is unknown',
             invalidUpstreamResponse('invalid_upstream_json'),
+            correlation,
           )
         }
         if (error instanceof SyntaxError) payload = { code: 'invalid_upstream_json' }
-        else throw new UpstreamAmbiguousError('Night-All outcome is unknown', error)
+        else throw new UpstreamAmbiguousError('Night-All outcome is unknown', error, correlation)
       }
       if (!response.ok) throw new UpstreamRejectedError(response.status, payload, {
         ...correlation, rateLimit: nightAllRateLimitEvidence(response.headers, payload),
@@ -144,6 +154,7 @@ export class NightAllAdapter {
         throw new UpstreamAmbiguousError(
           'Night-All returned an invalid success envelope; outcome is unknown',
           invalidUpstreamResponse('invalid_upstream_contract'),
+          correlation,
         )
       }
       const redacted = redact(payload)
@@ -229,7 +240,7 @@ export class NightAllAdapter {
     )
   }
 
-  search({ body, businessId }) {
+  search({ body, businessId, requestId }) {
     assertWechatSearchNotRetired('raw', body)
     return this.#request(
       'POST',
@@ -240,11 +251,11 @@ export class NightAllAdapter {
         availabilityMode: 'ready_only',
       },
       isNightAllDataSearchV1Envelope,
-      { keepRaw: true, redact: redactNightAllDataSearchResponse },
+      { keepRaw: true, requestId, redact: redactNightAllDataSearchResponse },
     )
   }
 
-  legacySearch({ operation, body, businessId }) {
+  legacySearch({ operation, body, businessId, requestId }) {
     assertWechatSearchNotRetired(operation, body)
     if (!NIGHT_ALL_LEGACY_OPERATIONS.has(operation)) {
       throw new TypeError(`Unsupported Night-All legacy operation: ${operation}`)
@@ -256,7 +267,7 @@ export class NightAllAdapter {
       isNightAllLegacyEnvelope,
       // Compatibility responses intentionally retain Night-All's current data
       // fields. Hub-level masking is a separate, future serving policy.
-      { keepRaw: true, redact: (payload) => payload },
+      { keepRaw: true, requestId, redact: (payload) => payload },
     )
   }
 }

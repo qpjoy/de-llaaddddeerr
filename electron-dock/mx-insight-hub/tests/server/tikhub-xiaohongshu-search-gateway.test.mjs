@@ -378,6 +378,46 @@ function request(overrides = {}) {
   }
 }
 
+test('saved admission RPM is refreshed for the main XHS search and each enrichment dispatch', async () => {
+  const { attachAdmissionPolicy } = await import('../fixtures/admission-policy.mjs')
+  const adapter = adapterFor({ notes: [note(FIRST_NOTE_ID, '预'.repeat(60))],
+    detailById: new Map([[FIRST_NOTE_ID, detailResult(FIRST_NOTE_ID, '完整正文'.repeat(60))]]) })
+  const f = fixture(adapter)
+  const { save } = attachAdmissionPolicy(f.gateway)
+  await save({ maxRequestsPerMinute: 37 })
+  const rates = []
+  f.platformStore.acquireProviderRateLimit = async input => {
+    rates.push(input.limit)
+    if (rates.length === 1) await save({ maxRequestsPerMinute: 43 })
+    return { allowed: true }
+  }
+  const result = await f.gateway.searchNotes(f.context, request())
+  assert.equal(result.status, 200)
+  assert.deepEqual(rates, [37, 43])
+  assert.equal(adapter.calls.detail.length, 1)
+  assert.equal(f.gateway.active, 0)
+})
+
+test('admission policy unavailable before XHS enrichment preserves the paid search as partial', async () => {
+  const { attachAdmissionPolicy } = await import('../fixtures/admission-policy.mjs')
+  const { AppError } = await import('../../server/core/errors.mjs')
+  const adapter = adapterFor({ notes: [note(FIRST_NOTE_ID, '预'.repeat(60))] })
+  const f = fixture(adapter)
+  const { policies } = attachAdmissionPolicy(f.gateway)
+  const resolve = policies.resolve.bind(policies)
+  policies.resolve = async provider => {
+    if (adapter.calls.search.length) throw new AppError(503, 'external_admission_policy_unavailable', 'Offline database failure')
+    return resolve(provider)
+  }
+  const result = await f.gateway.searchNotes(f.context, request())
+  assert.equal(result.status, 200)
+  assert.equal(result.body.data.status, 'partial')
+  assert.equal(result.body.data.items.length, 1)
+  assert.equal(adapter.calls.detail.length, 0)
+  assert.equal(f.usageStore.unknown.length, 0)
+  assert.equal(f.gateway.active, 0)
+})
+
 test('search at capacity waits then dispatches exactly once with its original request identity', async () => {
   const adapter = adapterFor({ notes: [] })
   const original = adapter.searchXiaohongshuNotes.bind(adapter)

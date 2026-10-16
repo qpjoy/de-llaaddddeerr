@@ -89,7 +89,7 @@ class SearchAdminService extends ExternalPlatformAdminService {
     return detail
   }
 }
-export function createWebSearchRuntime({pool,store,controls,config}) {
+export function createWebSearchRuntime({pool,store,controls,config,admissionPolicies=null}) {
   const gateways=new Map(),admins=[]
   for(const provider of WEB_SEARCH_PROVIDERS){
     const credentialStore=new StructuredExternalPlatformCredentialStore({pool,providerKey:provider.key,fields:[{name:'apiKey',label:'API Key'}],pepper:config.apiKeyPepper})
@@ -97,7 +97,7 @@ export function createWebSearchRuntime({pool,store,controls,config}) {
     const proxyStore=pool?new ExternalPlatformProxyStore(pool,config.deploymentEgress,{providerKey:provider.key}):null
     const providerConfig={...rapidApiConfig(),freshTtlMs:0}
     const adapter=pool&&config.listenerMode!=='admin'?new WebSearchAdapter({fetchImpl:createWebSearchProxyFetch(proxyStore,provider.key)}):null
-    gateways.set(provider.key,new ExternalPlatformGateway({usageStore:store,platformStore,adapter,config:providerConfig,providerKey:provider.key,credentialStore,operationControlStore:controls,apiKeyPepper:config.apiKeyPepper,reservationLeaseMs:Math.max(60000,config.reservationLeaseMs)}))
+    gateways.set(provider.key,new ExternalPlatformGateway({admissionPolicies,usageStore:store,platformStore,adapter,config:providerConfig,providerKey:provider.key,credentialStore,operationControlStore:controls,apiKeyPepper:config.apiKeyPepper,reservationLeaseMs:Math.max(60000,config.reservationLeaseMs)}))
     admins.push(new SearchAdminService({store:platformStore,config:providerConfig,credentialStore,operationControlStore:controls,proxyStore,durable:!!pool,providerKey:provider.key,
       metadata:{key:provider.key,displayName:provider.label,description:'Hub 直连 Web Search 供应商；租户与 Key 独立授权和排序。',capabilities:['web.search'],capabilityMatrix:[],marketplaces:[{key:'web_search',label:'Web Search'}],adapterLabel:`${provider.label} HTTP`,adapterDescription:'单次请求，不自动重试、不转发 Night-All。',billingNote:'按审核采购价预留预算；供应商实际扣费保持未知。',freshnessNote:'每次新幂等标识获取一批结果；相同标识回放原交付。'}}))
   }

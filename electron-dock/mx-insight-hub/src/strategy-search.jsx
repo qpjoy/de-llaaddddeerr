@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { productForPath } from '../shared/product-workbenches.mjs'
 import { ProductApiConsole } from './product-workbench.jsx'
-import { ProductViewTabs, ProductIntegrationGuide } from './product-management.jsx'
+import { ProductViewTabs, ProductIntegrationGuide, ProductManagement } from './product-management.jsx'
 import { StrategySearchExperience, useStrategySearchState } from './strategy-search-experience.jsx'
 import { ArrowRight, MagnifyingGlass, User, Users } from '@phosphor-icons/react'
 import { adminApi, publicDocsHref } from './api.js'
@@ -61,7 +61,7 @@ export function StrategySearchPage({ token, session, query, setQuery, onUnauthor
         <p>接口调试保留统一接口与兼容入口，按当前权限展示文档。微信的 <code>/api/v1/night-all/search/raw</code> 已退役并返回 410；其他保留入口继续遵守各自合同，不能互换游标。</p>
       </ProductIntegrationGuide>
     </div>
-    {admin && (managementVisited || tab === 'management') ? <div hidden={tab !== 'management'}><StrategySearchManagement key={token} {...{ token, query, setQuery, onUnauthorized, notify }} /></div> : null}
+    {admin && (managementVisited || tab === 'management') ? <div hidden={tab !== 'management'}><StrategySearchManagement key={token} {...{ token, session, query, setQuery, onUnauthorized, notify }} /></div> : null}
   </div>
 }
 
@@ -97,7 +97,7 @@ function InstagramSearchPolicyForm({ token, row, notify, onSaved }) {
   </form>
 }
 
-function StrategySearchManagement({ token, query, setQuery, onUnauthorized, notify }) {
+function StrategySearchManagement({ token, session, query, setQuery, onUnauthorized, notify }) {
   const load = useCallback(() => adminApi.strategySearch(token), [token])
   const remote = useRemoteData(load, onUnauthorized)
   const interfaces = remote.data?.interfaces || []
@@ -146,6 +146,7 @@ function StrategySearchManagement({ token, query, setQuery, onUnauthorized, noti
           <td>{policy.title}</td><td>{migration(item.migrationStatus)}</td><td>{policy.editor ? <button className="qp-button qp-button--outline qp-button--sm" type="button" onClick={() => setQuery({ platform: item.platform })}>修改策略</button> : '只读'}</td><td>{item.routeSummary || '未提供'}</td></tr> })}</tbody>
       </table></div></section> : null}
     </> : null}
+    <ProductManagement {...{ token, session, onUnauthorized, notify }} path="/data-products/strategy-search" label="策略搜索" />
     <StrategySearchUsage {...{ token, onUnauthorized }} interfaceId={selected?.id || query.get('interface') || 'search'} />
     <StrategyDataStatistics {...{ token, onUnauthorized }} interfaceId={selected?.id || query.get('interface') || 'search'} />
   </div>

@@ -1,4 +1,5 @@
 import { isCrawlerSourceKey } from './source-contract.mjs'
+import { refreshMappedPayloadSha256 } from '../external/mapping.mjs'
 import { newsFields } from '../../data/news-record.mjs'
 import { PUBLISHER_CATALOG_KEYS } from '../../data/catalog-source-codes.mjs'
 
@@ -55,6 +56,33 @@ function normalizedTags(value) {
   }
   if (!Array.isArray(candidates)) return []
   return [...new Set(candidates.map(optionalValue).filter(Boolean))].slice(0, 50)
+}
+
+function organizationWebsiteFields(connectorId, attributes) {
+  if (connectorId !== 'organization-web') return null
+  const text = (value, max = 256) => typeof value === 'string'
+    && value.trim().length <= max ? value.trim() || null : null
+  const member = (value, allowed) => allowed.includes(value) ? value : null
+  // Website categories describe the publisher, not source_type authorization
+  // or article topics. Only project reviewed product metadata from attributes.
+  return {
+    contractVersion: 'organization-website.v1',
+    siteId: text(attributes.site_id),
+    siteName: text(attributes.site_name, 512),
+    siteDomain: text(attributes.site_domain),
+    sourceCategories: Array.isArray(attributes.source_categories)
+      ? [...new Set(attributes.source_categories.map(value => text(value, 200)).filter(Boolean))].slice(0, 50)
+      : [],
+    bodyStatus: member(attributes.body_status, [
+      'full_text', 'feed_summary', 'feed_metadata', 'homepage_snapshot', 'pdf_link_only', 'paywall_metadata',
+    ]),
+    contentExtent: member(attributes.content_extent, ['full_text', 'listing', 'summary', 'reference']),
+    editionVersion: typeof attributes.edition_version === 'string'
+      && /^[a-f0-9]{64}$/u.test(attributes.edition_version) ? attributes.edition_version : null,
+    dateUnknown: typeof attributes.date_unknown === 'boolean' ? attributes.date_unknown : null,
+    publishedAtRaw: text(attributes.published_at_raw, 128),
+    publishedAtPrecision: member(attributes.published_at_precision, ['unknown', 'date', 'timestamp']),
+  }
 }
 
 function catalogView(entry, sourceValue) {
@@ -314,14 +342,28 @@ function clearSourceUrlYear(value) {
  */
 export function enrichCrawlerRecord(record, raw, source, { classifyCatalog } = {}) {
   if (!record || !isCrawlerSourceKey(source?.sourceKey)) return record
+  // Existing approved mappings predate the business-batch tag column. Keep it
+  // in raw evidence, without promoting it to canonical/search extensions.
+  if (record.extensions && Object.hasOwn(record.extensions, 'tag')) {
+    record.extensions = { ...record.extensions }
+    delete record.extensions.tag
+    if (Object.hasOwn(record, 'payloadSha256')) {
+      // The existing enrichment digest includes the initial mapping digest.
+      // Rebuild only this new tag path as though the mapper had consumed tag.
+      const mapped = { ...record }
+      delete mapped.payloadSha256
+      record.payloadSha256 = refreshMappedPayloadSha256(mapped).payloadSha256
+    }
+  }
   const classify = typeof classifyCatalog === 'function'
     ? classifyCatalog
     : (values) => unresolvedCatalogView(firstValue(...(Array.isArray(values) ? values : [values])))
   const attributes = normalizedObject(raw?.attributes) || {}
   const connectorId = optionalValue(raw?.connector_id)
   const sourceFamily = optionalValue(raw?.source_family)
-  const providerCode = firstValue(raw?.provider_code, attributes.platform)
-  const providerName = firstValue(raw?.provider_name, attributes.platform_name)
+  const website = organizationWebsiteFields(connectorId, attributes)
+  const providerCode = firstValue(raw?.provider_code, attributes.platform, website?.siteId)
+  const providerName = firstValue(raw?.provider_name, attributes.platform_name, website?.siteName)
   const sourceSection = firstValue(raw?.source_section, attributes.section)
   const author = normalizedObject(raw?.author) || {}
   const authorName = optionalValue(author.name)
@@ -383,6 +425,7 @@ export function enrichCrawlerRecord(record, raw, source, { classifyCatalog } = {
   if (editedDate) record.editedAt = editedDate
   record.stableFields = {
     ...(record.stableFields || {}),
+    ...(website ? { website } : {}),
     author: {
       ...(normalizedObject(record.stableFields?.author) || {}),
       ...(authorName ? { name: authorName } : {}),

@@ -408,6 +408,14 @@ main {
 .sub-head .button-row {
   gap: 15px;
 }
+/* Account actions stay on one line; the table scrolls sideways instead. */
+.account-pool td .button-row {
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+.account-pool td .button-row button {
+  white-space: nowrap;
+}
 .table-scroll {
   overflow: auto;
   max-width: 100%;

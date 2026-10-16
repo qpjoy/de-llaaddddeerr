@@ -233,6 +233,7 @@ function fixture() {
     descriptions,
     calls,
     setAttestation(value) { attestation = value },
+    setSourceAttestation(key, value) { extraAttestations.set(key, value) },
     failLockOwnership(error = new Error('source lock ownership lost')) { guardError = error },
     failImportRunsFor(sourceId) { importRunFailure = sourceId },
     failProgressFor(sourceKey) { progressFailure = sourceKey },
@@ -338,6 +339,7 @@ test('crawler mutations recheck advisory-lock ownership immediately before commi
   assert.equal(activationSetup.calls.activations.length, 0)
 
   const resumeSetup = fixture()
+  resumeSetup.activateAll()
   const [failed] = CRAWLER_SOURCES
   resumeSetup.cursors.set(failed.sourceKey, {
     status: 'failed', position: {}, error: 'timeout', updatedAt: new Date().toISOString(),
@@ -396,6 +398,8 @@ test('crawler sync supports one leaf and isolates paused, running and unsafe lea
 
 test('crawler resume, progress and reset keep per-leaf evidence independent', async () => {
   const setup = fixture()
+  setup.activateAll()
+  for (const source of setup.sources.values()) source.status = 'paused'
   const [failed, healthy] = CRAWLER_SOURCES
   setup.cursors.set(failed.sourceKey, {
     status: 'failed', position: { cursor: '2026-09-09T00:00:00Z', lastId: 7 }, error: 'timeout',
@@ -424,6 +428,148 @@ test('crawler resume, progress and reset keep per-leaf evidence independent', as
   assert.equal(reset.resets.length, 13)
   assert.equal(setup.calls.reset[0].keys.length, 13)
   assert.equal(Object.keys(setup.calls.reset[0].options.mappingOverrides).length, 13)
+})
+
+test('crawler resume accepts nullable tag with the original mapping and checkpoint without enabling a paused source', async () => {
+  const setup = fixture()
+  setup.activateAll()
+  const spec = CRAWLER_SOURCES.find(source => source.sourceType === 'news')
+  setup.sources.get(spec.sourceKey).status = 'paused'
+  setup.descriptions.get(spec.sourceKey).columns.push({ name: 'tag', databaseType: 'varchar', nullable: true })
+  const position = {
+    contractHash: 'original-contract', mappingVersion: 1,
+    cursor: '2026-10-13 04:15:16.123456+00', lastId: '21049', importRunId: 'original-run',
+  }
+  setup.cursors.set(spec.sourceKey, {
+    status: 'failed', position, error: 'source_contract_mismatch', updatedAt: new Date().toISOString(),
+  })
+  const originalSources = structuredClone([...setup.sources.values()])
+  const originalMappings = structuredClone([...setup.activeMappings.values()])
+  setup.databasePuller.assertCheckpointCompatible = async (sourceKey, { mappingOverride }) => {
+    assert.equal(sourceKey, spec.sourceKey)
+    assert.deepEqual(mappingOverride, setup.activeMappings.get(spec.sourceKey))
+    assert.deepEqual(setup.cursors.get(sourceKey).position, position)
+    setup.calls.compatible.push(sourceKey)
+  }
+
+  const result = await setup.pipeline.resumeFailedTask(spec.sourceKey)
+
+  assert.equal(result.task.resumed, true)
+  assert.equal(result.task.clearedError, 'source_contract_mismatch')
+  assert.deepEqual(setup.cursors.get(spec.sourceKey).position, position)
+  assert.equal(setup.cursors.get(spec.sourceKey).status, 'idle')
+  assert.equal(setup.cursors.get(spec.sourceKey).error, null)
+  assert.deepEqual(setup.calls.describes, [spec.sourceKey])
+  assert.deepEqual(setup.calls.compatible, [spec.sourceKey])
+  assert.deepEqual([...setup.sources.values()], originalSources)
+  assert.deepEqual([...setup.activeMappings.values()], originalMappings)
+  assert.equal(setup.calls.activations.length, 0)
+  assert.equal(setup.calls.updates.length, 0)
+  assert.equal(setup.calls.enqueued.length, 0)
+  assert.equal(setup.calls.reset.length, 0)
+})
+
+test('crawler resume leaves tender failed when its cursor index is missing and recovers compatible siblings independently', async () => {
+  const setup = fixture()
+  setup.activateAll()
+  const news = CRAWLER_SOURCES.find(source => source.sourceType === 'news')
+  const tender = crawlerSourceSpec('tender')
+  await setup.store.registerCrawlerSource(tender, setup.sources.get(news.sourceKey))
+  setup.activeMappings.set(tender.sourceKey, { ...setup.mappings.get(tender.sourceKey), approvedAt: new Date().toISOString() })
+  const contract = crawlerWriterContractForSpec(tender)
+  setup.setSourceAttestation(contract.pipelineKey, { contractVersion: contract.version, contractDigest: contract.digest })
+  setup.descriptions.set(tender.sourceKey, {
+    columns: [...validColumns(), { name: 'tag', databaseType: 'varchar', nullable: true }],
+    issues: ['crawler source requires an exact live unique btree (last_seen_at, id) index'],
+  })
+  for (const spec of [news, tender]) setup.cursors.set(spec.sourceKey, {
+    status: 'failed', position: { cursor: '2026-10-13T00:00:00Z', lastId: '7' },
+    error: 'source_contract_mismatch', updatedAt: new Date().toISOString(),
+  })
+  const originalTenderCursor = structuredClone(setup.cursors.get(tender.sourceKey))
+
+  const result = await setup.pipeline.resumeFailedTasks()
+
+  assert.equal(result.tasks.find(task => task.sourceKey === news.sourceKey).resumed, true)
+  assert.equal(result.tasks.find(task => task.sourceKey === tender.sourceKey).resumed, false)
+  assert.equal(result.tasks.find(task => task.sourceKey === tender.sourceKey).error.code, 'source_probe_failed')
+  assert.deepEqual(setup.cursors.get(tender.sourceKey), originalTenderCursor)
+  assert.deepEqual(setup.calls.saved.map(cursor => cursor.id), [`external:${news.sourceKey}`])
+  assert.equal(setup.sources.get(tender.sourceKey).status, 'paused')
+  assert.equal(setup.calls.activations.length, 0)
+  assert.equal(setup.calls.enqueued.length, 0)
+})
+
+test('crawler resume preserves failed evidence when saved approval, source, mapping or checkpoint validation fails', async (t) => {
+  const cases = [
+    ['missing writer approval', 'writer_contract_attestation_required', setup => setup.setAttestation(null)],
+    ['stale writer approval', 'writer_contract_attestation_required', setup => setup.setAttestation({ contractVersion: 'old', contractDigest: 'old' })],
+    ['source drift', 'pipeline_source_contract_drift', (setup, spec) => { setup.sources.get(spec.sourceKey).datasetId = 'wrong-dataset' }],
+    ['mapping drift', 'builtin_mapping_conflict', (setup, spec) => { setup.activeMappings.get(spec.sourceKey).version = 2 }],
+    ['inactive mapping', 'builtin_mapping_not_active', (setup, spec) => { setup.activeMappings.delete(spec.sourceKey) }],
+    ['checkpoint mismatch', 'checkpoint_contract_mismatch', setup => {
+      setup.databasePuller.assertCheckpointCompatible = async () => {
+        throw Object.assign(new Error('checkpoint contract mismatch'), { code: 'checkpoint_contract_mismatch' })
+      }
+    }],
+  ]
+  for (const [name, code, mutate] of cases) await t.test(name, async () => {
+    const setup = fixture()
+    setup.activateAll()
+    const spec = CRAWLER_SOURCES[0]
+    setup.cursors.set(spec.sourceKey, {
+      status: 'failed', position: { cursor: '2026-10-13T00:00:00Z', lastId: '7' },
+      error: 'original_failure', updatedAt: new Date().toISOString(),
+    })
+    const original = structuredClone(setup.cursors.get(spec.sourceKey))
+    mutate(setup, spec)
+    await assert.rejects(() => setup.pipeline.resumeFailedTask(spec.sourceKey), error => error?.code === code)
+    assert.deepEqual(setup.cursors.get(spec.sourceKey), original)
+    assert.equal(setup.calls.saved.length, 0)
+    assert.equal(setup.calls.activations.length, 0)
+    assert.equal(setup.calls.enqueued.length, 0)
+  })
+})
+
+test('crawler resume requires the dynamic category approval in addition to the seed writer approval', async () => {
+  const setup = fixture()
+  setup.activateAll()
+  const spec = crawlerSourceSpec('tender')
+  await setup.store.registerCrawlerSource(spec, setup.sources.get(CRAWLER_SOURCES[0].sourceKey))
+  setup.cursors.set(spec.sourceKey, { status: 'failed', position: {}, error: 'original_failure' })
+  const original = structuredClone(setup.cursors.get(spec.sourceKey))
+  const contract = crawlerWriterContractForSpec(spec)
+  for (const approval of [null, { contractVersion: contract.version, contractDigest: 'old' }]) {
+    setup.setSourceAttestation(contract.pipelineKey, approval)
+    await assert.rejects(
+      () => setup.pipeline.resumeFailedTask(spec.sourceKey),
+      error => error?.code === 'writer_contract_attestation_required',
+    )
+    assert.deepEqual(setup.cursors.get(spec.sourceKey), original)
+  }
+  assert.equal(setup.calls.saved.length, 0)
+  assert.equal(setup.calls.activations.length, 0)
+  assert.equal(setup.calls.enqueued.length, 0)
+})
+
+test('crawler abandoned-run recovery also rechecks the source before clearing its cursor', async () => {
+  const setup = fixture()
+  setup.activateAll()
+  const spec = CRAWLER_SOURCES[0]
+  setup.cursors.set(spec.sourceKey, {
+    status: 'running', position: { cursor: '2026-10-13T00:00:00Z', lastId: '7', importRunId: 'original-run' },
+    error: null, updatedAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+  })
+  const original = structuredClone(setup.cursors.get(spec.sourceKey))
+  setup.descriptions.get(spec.sourceKey).issues = ['cursor index unavailable']
+  await assert.rejects(() => setup.pipeline.resumeFailedTask(spec.sourceKey), error => error?.code === 'source_probe_failed')
+  assert.deepEqual(setup.cursors.get(spec.sourceKey), original)
+  setup.descriptions.get(spec.sourceKey).issues = []
+  const result = await setup.pipeline.resumeFailedTask(spec.sourceKey)
+  assert.equal(result.task.from, 'abandoned_run')
+  assert.equal(result.task.resumed, true)
+  assert.deepEqual(setup.cursors.get(spec.sourceKey).position, original.position)
+  assert.equal(setup.calls.enqueued.length, 0)
 })
 
 

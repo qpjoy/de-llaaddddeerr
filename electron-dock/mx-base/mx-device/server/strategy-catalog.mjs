@@ -1,4 +1,8 @@
-import { DEFAULT_POOL_POLICY, normalizePoolPolicy } from "./pool-policy.mjs";
+import {
+  DEFAULT_POOL_POLICY,
+  normalizePacing,
+  normalizePoolPolicy,
+} from "./pool-policy.mjs";
 
 // Shared UI/server metadata. These are bounded simulation parameters, not
 // platform-approved rate limits or a claim of globally optimal scheduling.
@@ -60,6 +64,63 @@ export const RULE_OPTIONAL_DEFAULTS = Object.freeze({
     maxPlanMoves: DEFAULT_POOL_POLICY.maxPlanMoves,
     planFreezeMs: DEFAULT_POOL_POLICY.planFreezeMs,
   }),
+});
+
+// Pacing rule (phase 5, optional, at most one per strategy). Flat fields so the
+// rule editor can show them; compiled into scheduler.pacing. A zero limit turns
+// that part off. Defaults equal the legacy rack loop settings, so applying the
+// default rule changes no behavior.
+export const PACING_RULE_DEFAULTS = Object.freeze({
+  burstWindowMs: 60000,
+  smallLimit: 3,
+  largeLimit: 1,
+  burstRestMinMs: 4000,
+  burstRestMaxMs: 8000,
+  continuousCapMs: 0,
+  continuousRestMs: 0,
+  accountMinGapMs: 0,
+  accountWindowMs: 60000,
+  accountMaxRuns: 0,
+  accountMaxServiceMs: 0,
+  accountRestMs: 0,
+  accountDailyCap: 0,
+});
+export function compilePacing(c) {
+  return normalizePacing({
+    burst:
+      c.smallLimit > 0 && c.largeLimit > 0
+        ? {
+            windowMs: c.burstWindowMs,
+            smallLimit: c.smallLimit,
+            largeLimit: c.largeLimit,
+            restMinMs: c.burstRestMinMs,
+            restMaxMs: c.burstRestMaxMs,
+          }
+        : null,
+    continuous:
+      c.continuousCapMs > 0
+        ? { capMs: c.continuousCapMs, restMs: c.continuousRestMs }
+        : null,
+    account:
+      c.accountMinGapMs > 0 || c.accountMaxRuns > 0 || c.accountDailyCap > 0
+        ? {
+            minGapMs: c.accountMinGapMs,
+            windowMs: c.accountWindowMs,
+            maxRuns: c.accountMaxRuns,
+            maxServiceMs: c.accountMaxServiceMs,
+            restMs: c.accountRestMs,
+            dailyCap: c.accountDailyCap,
+          }
+        : null,
+  });
+}
+RULE_KINDS.push({
+  kind: "pacing",
+  name: "节奏账本",
+  phase: 5,
+  description:
+    "统一的冷却与预算：同 App 连续执行后的随机休息、整机连续服务上限、跨设备的账号间隔/窗口/24 小时上限。为 0 的上限表示关闭。",
+  defaults: { ...PACING_RULE_DEFAULTS },
 });
 
 export const HARD_SCHEDULING_CONSTRAINTS = [
@@ -142,12 +203,23 @@ export const BUILTIN_RULE_DEFINITIONS = [
     structuredClone(RULE_KINDS[3].defaults),
     "模拟参考：最多 2 个任务后休息 8 秒；不代表真实平台安全限额。",
   ),
+  // Added by migration 012.
+  seedRule(
+    "pacing.default",
+    "节奏账本 · 默认",
+    "pacing",
+    { ...PACING_RULE_DEFAULTS },
+    "同 App 60 秒内 3 个小任务或 1 个大任务后随机休息 4–8 秒；整机连续服务与账号预算关闭。与旧的机架循环默认值一致。",
+  ),
 ];
 
-// Seeds stay byte-identical to migration 008; later optional fields are
-// defaulted when a strategy is compiled or applied, not stored in the seed.
+// Migration 008 seeds stay byte-identical; later optional fields are defaulted
+// when a strategy is compiled or applied, not stored in those seeds.
 const seedPolicy = (policy) => {
-  for (const key of Object.values(RULE_OPTIONAL_DEFAULTS).flatMap(Object.keys))
+  for (const key of [
+    ...Object.values(RULE_OPTIONAL_DEFAULTS).flatMap(Object.keys),
+    "pacing",
+  ])
     delete policy[key];
   return policy;
 };
@@ -157,17 +229,20 @@ const seedStrategy = (
   placement,
   description,
   recommended = false,
+  extra = [],
 ) => {
-  const rules = [placement, "queue.bounded", "budget.default"].map((code) => {
-    const definition = BUILTIN_RULE_DEFINITIONS.find(
-      (row) => row.code === code,
-    );
-    return {
-      code,
-      version: definition.version,
-      definition: structuredClone(definition),
-    };
-  });
+  const rules = [placement, "queue.bounded", "budget.default", ...extra].map(
+    (code) => {
+      const definition = BUILTIN_RULE_DEFINITIONS.find(
+        (row) => row.code === code,
+      );
+      return {
+        code,
+        version: definition.version,
+        definition: structuredClone(definition),
+      };
+    },
+  );
   return {
     id: `sim:${code}:1`,
     mode: "sim",
@@ -178,13 +253,20 @@ const seedStrategy = (
     archived: false,
     recommended,
     rules,
-    policy: seedPolicy(
-      normalizePoolPolicy({
-        ...rules[0].definition.config,
-        ...rules[1].definition.config,
-        appDefaults: rules[2].definition.config,
-      }),
-    ),
+    policy: extra.length
+      ? normalizePoolPolicy({
+          ...rules[0].definition.config,
+          ...rules[1].definition.config,
+          appDefaults: rules[2].definition.config,
+          pacing: compilePacing(rules[3].definition.config),
+        })
+      : seedPolicy(
+          normalizePoolPolicy({
+            ...rules[0].definition.config,
+            ...rules[1].definition.config,
+            appDefaults: rules[2].definition.config,
+          }),
+        ),
     createdAt: 0,
   };
 };
@@ -207,6 +289,15 @@ export const BUILTIN_STRATEGY_DEFINITIONS = [
     "亲和聚合",
     "placement.affinity",
     "优先同 App 排队执行；聚合指设备与上下文复用，不会合并任务数据或完成回执。",
+  ),
+  // Added by migration 012.
+  seedStrategy(
+    "pool.paced",
+    "均衡 + 节奏账本",
+    "placement.adaptive",
+    "均衡自适应加统一节奏规则：随机休息由策略管理，可在节奏规则里开启整机连续服务上限和账号预算。",
+    false,
+    ["pacing.default"],
   ),
 ];
 

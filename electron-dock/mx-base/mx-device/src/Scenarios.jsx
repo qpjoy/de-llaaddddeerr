@@ -70,6 +70,7 @@ const phaseNames = {
   queue: "排队预算",
   "app-budget": "应用冷却",
   "app-override": "平台例外",
+  pacing: "节奏账本",
 };
 const strategyNames = {
   adaptive: "自适应",
@@ -218,6 +219,117 @@ const fieldGroups = {
   ],
   "app-budget": appFields,
   "app-override": appFields,
+  pacing: [
+    [
+      "burstWindowMs",
+      "连续执行统计窗口",
+      1000,
+      1,
+      86400,
+      "秒",
+      "统计同 App 连续执行次数的窗口。",
+    ],
+    [
+      "smallLimit",
+      "小任务次数",
+      1,
+      0,
+      1000,
+      "个",
+      "窗口内达到即随机休息；0 关闭随机休息。",
+    ],
+    [
+      "largeLimit",
+      "大任务次数",
+      1,
+      0,
+      1000,
+      "个",
+      "大任务计数单独累计；0 关闭随机休息。",
+    ],
+    [
+      "burstRestMinMs",
+      "随机休息下限",
+      1000,
+      0,
+      86400,
+      "秒",
+      "休息时长在下限与上限之间随机，生成后保存。",
+    ],
+    ["burstRestMaxMs", "随机休息上限", 1000, 0, 86400, "秒", "不小于下限。"],
+    [
+      "continuousCapMs",
+      "整机连续服务上限",
+      1000,
+      0,
+      86400,
+      "秒",
+      "设备不间断服务达到后强制休息；0 关闭。",
+    ],
+    [
+      "continuousRestMs",
+      "整机休息时长",
+      1000,
+      0,
+      86400,
+      "秒",
+      "间隔不足此时长不算中断。",
+    ],
+    [
+      "accountMinGapMs",
+      "账号间隔",
+      1000,
+      0,
+      86400,
+      "秒",
+      "同一账号两次会话的最小间隔，跨设备生效；0 关闭。",
+    ],
+    [
+      "accountWindowMs",
+      "账号预算窗口",
+      1000,
+      1,
+      86400,
+      "秒",
+      "账号窗口预算的统计窗口。",
+    ],
+    [
+      "accountMaxRuns",
+      "账号窗口次数",
+      1,
+      0,
+      100000,
+      "次",
+      "窗口内会话次数上限；0 关闭窗口预算。",
+    ],
+    [
+      "accountMaxServiceMs",
+      "账号窗口服务时长",
+      1000,
+      0,
+      864000,
+      "秒",
+      "窗口内累计服务时长上限；0 不限。",
+    ],
+    [
+      "accountRestMs",
+      "账号预算休息",
+      1000,
+      0,
+      86400,
+      "秒",
+      "窗口预算用完后账号休息。",
+    ],
+    [
+      "accountDailyCap",
+      "账号 24 小时上限",
+      1,
+      0,
+      100000,
+      "次",
+      "滚动 24 小时内的会话上限；0 关闭。",
+    ],
+  ],
 };
 // Fields added later are optional in stored rules; show and edit their defaults.
 const withOptional = (kind, config) => ({
@@ -232,6 +344,22 @@ function ruleSummary(rule) {
         ? `空闲 > ${c.idleSpreadThresholdPct}% 分散；亲和多等 ≤ ${secs(c.maxAffinityDelayMs)}`
         : `${strategyNames[c.strategy]} · 亲和多等 ≤ ${secs(c.maxAffinityDelayMs)}`
     }；App 切换计 ${secs(c.switchCostMs)}`;
+  if (rule.kind === "pacing")
+    return [
+      c.smallLimit > 0 && c.largeLimit > 0
+        ? `${secs(c.burstWindowMs)}内 ${c.smallLimit} 小 / ${c.largeLimit} 大后休息 ${secs(c.burstRestMinMs)}–${secs(c.burstRestMaxMs)}`
+        : "不设随机休息",
+      c.continuousCapMs > 0
+        ? `整机连续 ${secs(c.continuousCapMs)} 后休息 ${secs(c.continuousRestMs)}`
+        : null,
+      c.accountMinGapMs > 0 ? `账号间隔 ${secs(c.accountMinGapMs)}` : null,
+      c.accountMaxRuns > 0
+        ? `账号 ${secs(c.accountWindowMs)}内 ≤ ${c.accountMaxRuns} 次`
+        : null,
+      c.accountDailyCap > 0 ? `账号 24 小时 ≤ ${c.accountDailyCap} 次` : null,
+    ]
+      .filter(Boolean)
+      .join("；");
   if (rule.kind === "queue")
     return `计划等待 ≤ ${secs(c.maxQueueWaitMs)} · 单机 ≤ ${c.maxQueuePerDevice} 个 · 短任务 ≤ ${secs(c.shortTaskMs)}；改派需提前 ≥ ${secs(c.stickyGainMs)} 且 ≥ ${c.stickyGainPct}%，最多 ${c.maxPlanMoves} 次`;
   const p = rule.kind === "app-override" ? c.policy : c;
@@ -264,6 +392,25 @@ function PolicyReading({ policy: given, compact = false }) {
     ],
     [
       "04",
+      "节奏账本",
+      policy.pacing
+        ? policy.pacing.burst
+          ? `${policy.pacing.burst.smallLimit} 小 / ${policy.pacing.burst.largeLimit} 大后休息 ${secs(policy.pacing.burst.restMinMs)}–${secs(policy.pacing.burst.restMaxMs)}`
+          : "不设随机休息"
+        : "沿用机架循环设置",
+      policy.pacing
+        ? [
+            policy.pacing.continuous
+              ? `整机连续 ${secs(policy.pacing.continuous.capMs)} 后休息`
+              : "不限整机连续服务",
+            policy.pacing.account
+              ? `账号预算：${policy.pacing.account.dailyCap ? `24 小时 ≤ ${policy.pacing.account.dailyCap} 次` : ""}${policy.pacing.account.minGapMs ? ` 间隔 ${secs(policy.pacing.account.minGapMs)}` : ""}${policy.pacing.account.maxRuns ? ` 窗口 ≤ ${policy.pacing.account.maxRuns} 次` : ""}`
+              : "不设账号预算",
+          ].join("；")
+        : "账号状态（受限、复核、停用）仍为硬约束",
+    ],
+    [
+      "05",
       "计划稳定",
       `改派需提前 ≥ ${secs(policy.stickyGainMs)} 且 ≥ ${policy.stickyGainPct}%`,
       `每个任务最多改派 ${policy.maxPlanMoves} 次；开始前 ${secs(policy.planFreezeMs)} 冻结`,
@@ -544,7 +691,7 @@ function StrategyEditor({ initial, editing, rules, history, busy, onSubmit }) {
             升级到规则最新版本
           </button>
         </div>
-        {["placement", "queue", "app-budget"].map((kind, index) => {
+        {["placement", "queue", "app-budget", "pacing"].map((kind, index) => {
           const current = selected.find((r) => r.row.kind === kind)?.row;
           const options = rules.filter((r) => r.kind === kind);
           if (current && !options.some((r) => r.id === current.id))
@@ -555,12 +702,16 @@ function StrategyEditor({ initial, editing, rules, history, busy, onSubmit }) {
               <label>
                 {phaseNames[kind]}
                 <select
-                  required
+                  required={kind !== "pacing"}
                   aria-label={`${phaseNames[kind]}规则`}
                   value={current?.id || ""}
                   onChange={(e) => replace(kind, e.target.value)}
                 >
-                  <option value="">选择规则</option>
+                  <option value="">
+                    {kind === "pacing"
+                      ? "不使用（沿用机架循环设置）"
+                      : "选择规则"}
+                  </option>
                   {options.map((row) => (
                     <option key={row.id} value={row.id}>
                       {row.name} · v{row.version}

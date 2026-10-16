@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   DeviceMobile,
   Clock,
@@ -34,7 +34,7 @@ export const durationLabel = (ms) => {
       ? `${Math.ceil(n / 60)} 分钟`
       : `${(n / 3600).toFixed(1)} 小时`;
 };
-function PolicySummary({ policy }) {
+function PolicySummary({ policy, auto }) {
   if (!policy?.enabled)
     return <span>尚未启用调度池 · 可为此机架应用推荐策略</span>;
   return (
@@ -46,7 +46,219 @@ function PolicySummary({ policy }) {
           : "优先复用同 App 上下文"}
       <b>→</b> 同 App 额外等待最多 {durationLabel(policy.maxAffinityDelayMs)}
       <b>→</b> 单机串行，每机最多排 {policy.maxQueuePerDevice} 个任务
+      <b>→</b>
+      {policy.pacing
+        ? `节奏由策略管理${policy.pacing.account ? "（含账号预算）" : ""}`
+        : "节奏沿用机架循环设置"}
+      {auto?.enabled && (
+        <>
+          <b>→</b> 自动切换：当前{auto.current === "busy" ? "繁忙" : "平静"}
+          （压力 ≥ {auto.enterPressure} 进入，≤ {auto.exitPressure} 退出）
+        </>
+      )}
     </span>
+  );
+}
+const ms = (v) => durationLabel(v);
+// Shadow evaluation: the current queue planned under the current and a candidate strategy.
+function ShadowView({ mode, rack, strategy }) {
+  const [result, setResult] = useState(null),
+    [error, setError] = useState("");
+  useEffect(() => {
+    api("strategy-shadow", mode, { rack, strategyId: strategy.id }).then(
+      setResult,
+      (e) => setError(e.message),
+    );
+  }, [mode, rack, strategy.id]);
+  if (error)
+    return (
+      <div className="form">
+        <p className="error">{error}</p>
+      </div>
+    );
+  if (!result)
+    return (
+      <div className="form">
+        <p className="muted">正在按两种策略规划当前队列…</p>
+      </div>
+    );
+  const rows = [
+    ["可规划任务", (r) => r.assigned],
+    ["立即开始", (r) => r.startNow],
+    ["平均预计等待", (r) => ms(r.waitAvgMs)],
+    ["P95 预计等待", (r) => ms(r.waitP95Ms)],
+    ["队列预计清空", (r) => ms(r.lastFinishMs)],
+    ["App 切换", (r) => `${r.switches} 次 · ${ms(r.switchMs)}`],
+    [
+      "保留在中央队列",
+      (r) =>
+        Object.entries(r.blocked)
+          .map(([k, v]) => `${k} ${v}`)
+          .join("、") || "无",
+    ],
+  ];
+  const same = result.current?.id === result.strategy.id;
+  return (
+    <div className="form">
+      <p className="muted">
+        只读评估：用当前排队任务与设备状态各重新规划一次（不沿用已有计划），不应用策略、不改动任务
+        {result.executorSlots
+          ? `；执行器 ${result.executorSlots} 个模拟槽`
+          : ""}
+        。预计值不是承诺。
+      </p>
+      {same && (
+        <p className="notice">
+          候选与机架当前策略相同；先在「默认调度策略」中选择另一个策略再评估。
+        </p>
+      )}
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>指标</th>
+              <th>
+                {result.current
+                  ? `当前：${result.current.name}${result.current.version ? ` · v${result.current.version}` : ""}`
+                  : "当前（未启用调度池）"}
+              </th>
+              <th>
+                候选：{result.strategy.name} · v{result.strategy.version}
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(([label, get]) => (
+              <tr key={label}>
+                <td>{label}</td>
+                <td>{result.current ? get(result.current) : "—"}</td>
+                <td>{get(result.candidate)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+function AutoProfileForm({ loop, strategies, busy, onSubmit }) {
+  const auto = loop?.autoProfile || {};
+  const recommended = strategies.find((s) => s.recommended) || strategies[0];
+  return (
+    <form
+      className="form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const f = new FormData(e.currentTarget);
+        const enabled = f.get("enabled") === "on";
+        onSubmit(
+          enabled
+            ? {
+                rack: loop.rack,
+                revision: loop.revision,
+                enabled,
+                calmStrategyId: f.get("calm"),
+                busyStrategyId: f.get("busy"),
+                enterPressure: Number(f.get("enter")),
+                exitPressure: Number(f.get("exit")),
+                minDwellMs: Math.round(Number(f.get("dwell")) * 1000),
+                maxSwitchesPerHour: Number(f.get("max")),
+              }
+            : { rack: loop.rack, revision: loop.revision, enabled },
+        );
+      }}
+    >
+      <p className="muted">
+        排队压力 = 已可领取的排队任务数 ÷
+        可用设备数。进入与退出阈值不同（迟滞），切换后至少驻留一段时间，并限制每小时次数。只由单活调度器执行；在途会话和已生成冷却不受影响。
+      </p>
+      <label className="check">
+        <input type="checkbox" name="enabled" defaultChecked={auto.enabled} />
+        启用按流量自动切换
+      </label>
+      {[
+        [
+          "calm",
+          "平静时策略",
+          auto.calmStrategyId ||
+            (strategies.some((s) => s.id === loop?.strategySnapshot?.id)
+              ? loop.strategySnapshot.id
+              : recommended?.id),
+        ],
+        [
+          "busy",
+          "繁忙时策略",
+          auto.busyStrategyId ||
+            strategies.find((s) => s.code === "pool.affinity")?.id,
+        ],
+      ].map(([name, label, value]) => (
+        <label key={name}>
+          {label}
+          <select name={name} defaultValue={value}>
+            {strategies.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name} · v{s.version}
+              </option>
+            ))}
+          </select>
+        </label>
+      ))}
+      <div className="form-grid">
+        <label>
+          压力 ≥ 此值进入繁忙
+          <input
+            name="enter"
+            type="number"
+            step="0.1"
+            min="0.1"
+            max="100"
+            defaultValue={auto.enterPressure ?? 1.5}
+          />
+        </label>
+        <label>
+          压力 ≤ 此值回到平静
+          <input
+            name="exit"
+            type="number"
+            step="0.1"
+            min="0"
+            max="100"
+            defaultValue={auto.exitPressure ?? 0.5}
+          />
+        </label>
+        <label>
+          最短驻留（秒）
+          <input
+            name="dwell"
+            type="number"
+            min="5"
+            max="86400"
+            defaultValue={(auto.minDwellMs ?? 60000) / 1000}
+          />
+        </label>
+        <label>
+          每小时最多切换
+          <input
+            name="max"
+            type="number"
+            min="1"
+            max="60"
+            defaultValue={auto.maxSwitchesPerHour ?? 6}
+          />
+        </label>
+      </div>
+      {auto.lastSwitch && (
+        <p className="small muted">
+          上次切换 {time(auto.lastSwitch.at)}：
+          {auto.lastSwitch.from === "busy" ? "繁忙" : "平静"} →{" "}
+          {auto.lastSwitch.to === "busy" ? "繁忙" : "平静"}（压力{" "}
+          {auto.lastSwitch.pressure}）
+        </p>
+      )}
+      <button className="primary" type="submit" disabled={busy}>
+        保存
+      </button>
+    </form>
   );
 }
 function MiniScreen({ row }) {
@@ -621,13 +833,32 @@ export default function Workstation({
             </strong>
             {rack && (
               <>
-                <PolicySummary policy={loop?.scheduler} />
+                <PolicySummary
+                  policy={loop?.scheduler}
+                  auto={loop?.autoProfile}
+                />
                 <small>
-                  既有循环冷却仍生效；应用冷却相互独立，预计队列随可用资源动态变化。
+                  冷却与预算统一由节奏账本判定，截止时间只会延长；预计队列随可用资源动态变化。
                 </small>
               </>
             )}
           </div>
+          {rack && strategy && (
+            <button
+              className="text-link"
+              onClick={() => setModal({ type: "shadow" })}
+            >
+              影子评估「{strategy.name}」
+            </button>
+          )}
+          {rack && loop && (
+            <button
+              className="text-link"
+              onClick={() => setModal({ type: "auto" })}
+            >
+              自动切换
+            </button>
+          )}
           <button className="text-link" onClick={onScenarios}>
             场景与策略 <ArrowRight />
           </button>
@@ -822,7 +1053,14 @@ export default function Workstation({
       </section>
       {modal && (
         <Modal
-          title={modal.type === "submit" ? "提交模板任务" : "调整排队任务"}
+          title={
+            {
+              submit: "提交模板任务",
+              assign: "调整排队任务",
+              shadow: "影子评估",
+              auto: "按流量自动切换策略",
+            }[modal.type]
+          }
           onClose={() => setModal(null)}
         >
           {localError && (
@@ -830,7 +1068,23 @@ export default function Workstation({
               {localError}
             </p>
           )}
-          {modal.type === "submit" ? (
+          {modal.type === "shadow" ? (
+            <ShadowView mode={mode} rack={rack} strategy={strategy} />
+          ) : modal.type === "auto" ? (
+            <AutoProfileForm
+              loop={loop}
+              strategies={strategies}
+              busy={busy}
+              onSubmit={(body) =>
+                act(
+                  () => api("strategy-auto", mode, body),
+                  body.enabled
+                    ? "已启用自动切换；只影响尚未领取的任务"
+                    : "已停用自动切换；保留当前策略",
+                )
+              }
+            />
+          ) : modal.type === "submit" ? (
             <TemplateJobForm
               state={state}
               rack={rack}

@@ -2,6 +2,48 @@
 
 2026-10-08。沿用 `POST /api/v1/search/raw`，保留 `POST /api/v1/night-all/search/raw` 为同一入口。没有新增 `/api/v1/data/search/raw`。Delta 无需修改 URL；以后可只把 URL 改为 `/api/v1/search/raw`，请求体、Key 和同次请求的幂等键不变。
 
+## 2026-10-16：新帖 7697057660088752010 的封面反馈
+
+用户提供帖子 ID `7697057660088752010`，截图作者 ID 为 `1347360125364624`，正文包含“iPhoneduo溢价肯定很猛”。截图的 `image_urls` / `video_urls` 使用 `http://10.88.88.88:59202/media/data_hub_raw...`，而 `cover_url` 仍是抖音 CDN 地址。反馈“封面应放封面字段，不作为图片附件”的语义正确；当前 Hub raw 字段是单数 `cover_url`，现代字段是 `media.coverUrl`，没有 `cover_urls` 契约。仅凭截图不能认定 Hub 本次原始交付已经包含该重复图片。
+
+### 服务器只读回执：四次现代交付均无图片附件
+
+用户返回完整 JSON 回执（附件 SHA-256 `5337352ee30bbb0734285d189532e7931ecdb80d96ae3d06527b9a456dfe522e`）。最近 200 次成功已提交交付全部检查，匹配该帖及作者的 4 条结果均为现代 `format=data`，每条 `media.images` 数量为 0、独立封面描述数量为 1，`currentNormalization.mediaChanged=false`，媒体和结果均未截断。这里是读取已保存交付后的检查结果，并非新采集或由诊断临时删图。
+
+| Hub 请求 ID | 创建时间（2026-10-16，Asia/Shanghai） | 图片附件数 | 视频 URL 数 |
+| --- | --- | --- | --- |
+| `86604787-6fde-4d4d-acad-439b5cd79280` | 15:42:31.428 | 0 | 20 |
+| `0a6222a5-bccc-4497-a02b-d69bb4cbcf13` | 15:42:17.945 | 0 | 20 |
+| `0d62977f-c0f9-43c2-8cf9-31b275dff0bf` | 15:42:17.940 | 0 | 24 |
+| `3434148a-f1fb-4419-9b44-090816b96eb1` | 15:42:17.893 | 0 | 24 |
+
+所有封面描述 host 为 `p26-sign.douyinpic.com`，路径摘要相同、完整 URL 摘要不同；视频 URL 来自 `v3-search.douyinvod.com`、`v5-dy-ov-experiment.zjcdn.com`、`api-play.amemv.com`、`api.amemv.com`。视频数字仅表示地址数量，不能据此声称有 20/24 条独立视频，或未经源档案核对就更改视频选择。现代交付中其他 raw 别名计数为 0，也不证明它们实际作为空数组字段存在。
+
+结论限于这四次交付：Hub 保存的响应没有把封面作为图片附件。它们与截图的下游副本尚未按请求身份关联，不能据此排除更早交付或证明截图必然来自其中一次；结合下述本地已复现链路，应优先核对下游封面存储和输出，而非继续重复 Hub 最近交付扫描。
+
+本次链接兼容缓存候选为 0，指定 `night-all.search.v1` / `night-all.compat.v1`、post、未删除条件内 canonical 精确匹配也为 0；这不否定已保存交付的存在，不证明所有数据集无记录，也不足以归因为入库失败。原始供应商档案及下游保存副本均未读取。后续若需要线上闭环，应查询下游该帖的 RawMedia 角色/原始地址/本地地址与实际输出对应关系，不重新采集、不运行历史修复、不触碰计费、登录或联网。
+
+### 本地转换链复现与后续核对点
+
+本地只读追踪发现一条能重新制造重复的下游链路（尚非该帖的线上记录取证）：
+
+1. `po-infra/data_hub/services.py::_structured_media_items` 将现代 `media.coverUrl` 单独存成 `media_type=image`、`metadata.role=cover` 的 RawMedia；这一步保存封面本身是合理的。
+2. `media_storage.py` 下载后填写 `local_path`，同时保留 `original_url` 和媒体角色。
+3. `data_hub/migrations/0023_media_base_url_legacy_views.py` 的 `content_data.image_urls` 聚合所有 image/avatar，没有排除封面角色；优先使用本地媒体地址。当前本地迁移中未找到后续覆盖此谓词的定义。
+4. `api.py::_content_cover_url` 仍从原 payload 读取远程封面。Luopan `src/utils/mediaDisplay.js` 只按图片 URL 与明确封面 URL 完全相等过滤，无法识别本地副本与远程原图。
+
+离线执行实际 Python 纯函数，输入 `media={coverUrl, images:[], videos:[video]}`，得到一条 role=cover 的 image 和一条 video；代入上述视图谓词后封面会回到 `image_urls`。这是本地转换链复现，不是线上 SQL 查询结果。当前 Hub native cover-only 路径的既有回归通过：raw `image_urls='[]'`，modern `images=[]`，视频与封面保留（8 passed，2 个需要真实临时 PostgreSQL 的用例跳过）。没有调用供应商或修改业务运行时。
+
+确证该帖需分别核对 Hub 保存的交付/当前 canonical，以及下游 RawContent、RawMedia 与已部署兼容视图。Hub 管理界面的正文/作者检索未找到该帖，不能据此断言数据库不存在。新诊断参数 `--post-id` 在 canonical 查询中直接匹配 `external_id`，交付及链接缓存仍只检查最近有界窗口；它不会自动重采集或修复。同步诊断源文件后，在服务器 Hub checkout 执行：
+
+```bash
+kubectl -n mx-insight-hub exec -i deploy/mx-insight-hub-public -c api -- sh -c 'cd /app/server/ops && exec node --input-type=module - "$@"' sh --platform douyin --post-id 7697057660088752010 --recent 200 < server/ops/diagnose-search-media.mjs
+```
+
+诊断增强回归 10/10 通过，包含本地 PGlite 执行实际 SQL、逐次验证 `transaction_read_only=on`、帖子过滤先于 canonical 候选上限，以及组合选择器、限定数据集与平台的负例。独立服务器脚本可将同一源文件经 stdin 传入已有 Public Pod，无需重建镜像或重启；使用 Pod 内已有媒体规范化模块，报告的 `currentNormalization` 因而代表该 Pod 的代码。
+
+下游应以 `data_hub_rawcontent.platform='douyin' AND source_content_id='7697057660088752010'`（非 comment）关联 `data_hub_rawmedia.content_id`，核对 `metadata.role`、`original_url` 与原始封面是否相等、`local_path` 对应地址是否进入 `public.content_data.image_urls`。如果命中，应在生成图片附件列表时排除已证明的封面，并让独立封面字段指向对应本地地址；保留真实图片与视频，不按“有视频”清空全部图片，也不靠去除 CDN 签名猜测资产身份。下游实际部署及该帖保存副本尚未读取，本轮不发布、不改历史数据，不触碰 MX-H2I 登录或联网。
+
 ## 2026-10-13：重复媒体的补充诊断
 
 补齐一个已由本地回归复现的窄分支：抖音图片在 `media.images`、视频在同一行的 `video_urls`、明确封面在 `cover_url` 时，也按完整 URL 相等移除重复封面。保留视频、封面、真实图片、图集/混合类型以及不同 URL；不改原始证据、历史交付或下游已保存副本。此修复尚不能证明用户截图正好命中该分支。

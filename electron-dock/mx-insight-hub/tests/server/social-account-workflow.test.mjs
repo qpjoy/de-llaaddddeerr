@@ -113,6 +113,30 @@ test('Twitter screenshot-shaped nonnumeric ID and page_size=500 follows short pa
   assert.equal(h.platformStore.restrictedResponseArchives.size, 11)
 })
 
+test('admission policy unavailable between account pages preserves acquired rows and a partial continuation', async t => {
+  const { attachAdmissionPolicy } = await import('../fixtures/admission-policy.mjs')
+  const { AppError } = await import('../../server/core/errors.mjs')
+  let pages = 0
+  const h = await harness(t, { fetchImpl: call => {
+    if (!call.url.pathname.includes('/tweets')) return Response.json(profile())
+    pages++
+    return Response.json(timeline(['1'], 'next-page'))
+  } })
+  const { policies } = attachAdmissionPolicy(h.gateway)
+  const resolve = policies.resolve.bind(policies)
+  policies.resolve = async provider => {
+    if (pages) throw new AppError(503, 'external_admission_policy_unavailable', 'Offline database failure')
+    return resolve(provider)
+  }
+  const result = await h.invoke({ platform: 'twitter', userId: '42', count: 10 })
+  assert.equal(result.status, 200)
+  assert.equal(result.body.data.status, 'partial')
+  assert.equal(result.body.data.items.length, 1)
+  assert.equal(pages, 1)
+  assert.equal([...h.store.requests.values()][0].status, 'committed')
+  assert.equal(h.gateway.active, 0)
+})
+
 test('Twitter paid overflow yields all 24 rows across pages without repurchase or lost IDs', async t => {
   const h = await harness(t, { fetchImpl: call => Response.json(call.url.pathname.includes('/tweets')
     ? timeline(Array.from({ length: 24 }, (_, i) => String(i + 1))) : profile()) })
