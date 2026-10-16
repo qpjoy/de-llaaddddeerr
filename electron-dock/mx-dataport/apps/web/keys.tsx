@@ -199,7 +199,7 @@ export function ApiKeys({
             </DialogDescription>
           </DialogHeader>
           <form
-            className="dp-form"
+            className="dp-key-form"
             onSubmit={async (e) => {
               e.preventDefault();
               const data = new FormData(e.currentTarget);
@@ -215,11 +215,16 @@ export function ApiKeys({
               } catch {}
             }}
           >
-            <label>
-              名称
-              <Input name="name" required maxLength={80} />
+            <label className="field">
+              密钥名称
+              <input
+                name="name"
+                required
+                maxLength={80}
+                placeholder="例如：开发测试环境"
+              />
             </label>
-            <label>
+            <label className="field">
               有效期
               <select name="days">
                 <option value="30">30 天</option>
@@ -228,7 +233,17 @@ export function ApiKeys({
               </select>
             </label>
             {error && <p role="alert">{error}</p>}
-            <Button disabled={busy}>创建</Button>
+            <div className="dialog-actions">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy}
+                onClick={() => setOpen(false)}
+              >
+                取消
+              </Button>
+              <Button disabled={busy}>签发 API Key</Button>
+            </div>
           </form>
         </DialogContent>
       </Dialog>

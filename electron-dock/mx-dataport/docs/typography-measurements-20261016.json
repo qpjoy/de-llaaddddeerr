@@ -1,0 +1,178 @@
+[
+  {
+    "view": "query",
+    "text": "IP 风险画像",
+    "source": {
+      "size": "36px",
+      "weight": "620",
+      "line": "50.4px",
+      "spacing": "-0.9px"
+    },
+    "actual": {
+      "size": "36px",
+      "weight": "620",
+      "line": "50.4px",
+      "spacing": "-0.9px"
+    }
+  },
+  {
+    "view": "query",
+    "text": "查询 IP 风险画像，关联代理特征与网络归属",
+    "source": {
+      "size": "16px",
+      "weight": "400",
+      "line": "28.8px",
+      "spacing": "normal"
+    },
+    "actual": {
+      "size": "16px",
+      "weight": "400",
+      "line": "28.8px",
+      "spacing": "normal"
+    }
+  },
+  {
+    "view": "query",
+    "text": "IP 地址",
+    "source": {
+      "size": "14px",
+      "weight": "500",
+      "line": "19.25px",
+      "spacing": "normal"
+    },
+    "actual": {
+      "size": "14px",
+      "weight": "500",
+      "line": "19.25px",
+      "spacing": "normal"
+    }
+  },
+  {
+    "view": "query",
+    "text": "Excel 导入",
+    "source": {
+      "size": "13px",
+      "weight": "500",
+      "line": "18.5714px",
+      "spacing": "normal"
+    },
+    "actual": {
+      "size": "13px",
+      "weight": "500",
+      "line": "18.5714px",
+      "spacing": "normal"
+    }
+  },
+  {
+    "view": "query",
+    "text": "最近查询",
+    "source": {
+      "size": "18px",
+      "weight": "600",
+      "line": "27px",
+      "spacing": "normal"
+    },
+    "actual": {
+      "size": "18px",
+      "weight": "600",
+      "line": "27px",
+      "spacing": "normal"
+    }
+  },
+  {
+    "view": "query",
+    "text": "IP 地址",
+    "source": {
+      "size": "12px",
+      "weight": "500",
+      "line": "17.1429px",
+      "spacing": "0.24px"
+    },
+    "actual": {
+      "size": "12px",
+      "weight": "500",
+      "line": "17.1429px",
+      "spacing": "0.24px"
+    }
+  },
+  {
+    "view": "query",
+    "text": "192.0.2.1",
+    "source": {
+      "size": "13px",
+      "weight": "550",
+      "line": "18.5714px",
+      "spacing": "normal"
+    },
+    "actual": {
+      "size": "13px",
+      "weight": "550",
+      "line": "18.5714px",
+      "spacing": "normal"
+    }
+  },
+  {
+    "view": "dialog",
+    "text": "新建员工子账号",
+    "source": {
+      "size": "19px",
+      "weight": "600",
+      "line": "26.6px",
+      "spacing": "normal"
+    },
+    "actual": {
+      "size": "19px",
+      "weight": "600",
+      "line": "26.6px",
+      "spacing": "normal"
+    }
+  },
+  {
+    "view": "dialog",
+    "text": "填写员工信息，为其创建独立登录账号。",
+    "source": {
+      "size": "13px",
+      "weight": "400",
+      "line": "23.4px",
+      "spacing": "normal"
+    },
+    "actual": {
+      "size": "13px",
+      "weight": "400",
+      "line": "23.4px",
+      "spacing": "normal"
+    }
+  },
+  {
+    "view": "dialog",
+    "text": "员工名称 *",
+    "source": {
+      "size": "13px",
+      "weight": "400",
+      "line": "19.5px",
+      "spacing": "normal"
+    },
+    "actual": {
+      "size": "13px",
+      "weight": "400",
+      "line": "19.5px",
+      "spacing": "normal"
+    }
+  },
+  {
+    "view": "dialog",
+    "text": "创建子账号",
+    "source": {
+      "size": "14px",
+      "weight": "500",
+      "line": "20px",
+      "spacing": "normal"
+    },
+    "actual": {
+      "size": "14px",
+      "weight": "500",
+      "line": "20px",
+      "spacing": "normal"
+    }
+  }
+]

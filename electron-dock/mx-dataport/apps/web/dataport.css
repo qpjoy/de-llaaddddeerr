@@ -776,7 +776,7 @@
 }
 .harbor-console [data-slot="card-content"] {
   font-size: 0.875rem;
-  line-height: 1.8;
+  line-height: 1.5;
 }
 .harbor-console [data-slot="input"] {
   height: 2.625rem;

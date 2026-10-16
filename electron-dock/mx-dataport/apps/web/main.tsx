@@ -150,6 +150,22 @@ function ConsoleBrand({ go }: { go: (page: string) => void }) {
     </a>
   );
 }
+function SupportAction({ onClick }: { onClick: () => void }) {
+  const { setOpenMobile } = useSidebar();
+  return (
+    <button
+      type="button"
+      className="support-card"
+      onClick={() => {
+        onClick();
+        setOpenMobile(false);
+      }}
+    >
+      <Headphones size={23} />
+      <span>联系客服</span>
+    </button>
+  );
+}
 export function ConsoleShell({
   page,
   go,
@@ -194,14 +210,7 @@ export function ConsoleShell({
         <SidebarFooter className="console-sidebar-footer">
           {(session === undefined ||
             canOpenPage(session, tenant || "", "support")) && (
-            <Button
-              variant="ghost"
-              className="support-card"
-              onClick={() => go("support")}
-            >
-              <Headphones size={23} />
-              <span>联系客服</span>
-            </Button>
+            <SupportAction onClick={() => go("support")} />
           )}
           <SidebarAccountMenu
             name={name}
