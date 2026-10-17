@@ -69,8 +69,11 @@ Internal 服务器（Kubernetes，在节点上执行）
 开发
   scripts/manage.sh dev | test | eval [参数]
   scripts/manage.sh desktop [--dir] [--server <地址>] [--private-http] [--no-browser] [--launcher]
+                          [--mac|--win] [--arm64] [--x64] [--universal] [--all]
                                             打包桌面端：自带测试浏览器；--server 写入登录页的服务地址；
-                                            --launcher 打成 Launcher 独立端（自己的产品网络，带 WireGuard 引擎）
+                                            --launcher 打成 Launcher 独立端（自己的产品网络，带 WireGuard 引擎）；
+                                            --all 在 Mac 上一次出 arm64、x64、universal 三个包，在 Windows 上出 x64
+                                            打包总用已发布的 Launcher 包；开发时 npm run setup 切到本仓库的包（npm run setup:npm 切回）
 
 登录：账号 admin，密码是管理员令牌（token / admin-token 输出），之后在「成员」页开通个人账号。
 可选覆盖写在 .env（或 MX_RIG_ENV_FILE）：MX_RIG_MODEL_API_KEY、MX_RIG_PUBLIC_URL、

@@ -32,7 +32,10 @@
     "node_modules/playwright*/**"
   ],
   "nsis": {
-    "artifactName": "MX-Rig-${version}-${os}-${arch}.${ext}"
+    "artifactName": "MX-Rig-${version}-${os}-${arch}.${ext}",
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true
   },
   "win": {
     "target": [
