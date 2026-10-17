@@ -233,6 +233,13 @@ test('v2 public HTTP routes all four Luopan platforms, rejects unauthenticated c
     return `http://127.0.0.1:${server.address().port}`
   }
   const origin = await listen('public'), admin = await listen('admin')
+  const deploymentProbe = await fetch(`${origin}${DATA_SEARCH_V2_PATH}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', redirect: 'manual',
+  })
+  assert.equal(deploymentProbe.status, 401)
+  assert.equal((await deploymentProbe.json()).error.code, 'api_key_required')
+  assert.equal(acquired.length, 0)
+  assert.equal(store.requests.size, 0, 'deployment route probe must not reserve usage')
   const send = (base, platform, authorized = true) => fetch(`${base}${DATA_SEARCH_V2_PATH}`, { method: 'POST',
     headers: { 'content-type': 'application/json', 'idempotency-key': `http-${platform}-v2-key`, ...(authorized ? { authorization: `Bearer ${key.secret}` } : {}) }, body: JSON.stringify(body(platform)) })
   assert.equal((await send(origin, 'facebook', false)).status, 401)

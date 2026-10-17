@@ -39,10 +39,11 @@ function sendJson(response, status, body) {
   response.end(JSON.stringify(body))
 }
 
-test('smoke checks the configured Public ecommerce route with an exact side-effect-free OPTIONS 204', async () => {
+test('smoke checks Public ecommerce preflight and exact v2 authentication before claiming deployment success', async () => {
   const adminRequests = []
   const publicRequests = []
   let publicStatus = 204
+  let searchV2Failure = null
   const adminServer = createServer((request, response) => {
     adminRequests.push({ method: request.method, url: request.url, headers: request.headers })
     if (request.method === 'GET' && request.url === '/health/live') {
@@ -57,6 +58,22 @@ test('smoke checks the configured Public ecommerce route with an exact side-effe
   })
   const publicServer = createServer((request, response) => {
     publicRequests.push({ method: request.method, url: request.url, headers: request.headers })
+    if (request.method === 'POST' && request.url === '/api/v2/data/search') {
+      let body = ''
+      request.on('data', chunk => { body += chunk })
+      request.on('end', () => {
+        publicRequests.at(-1).body = body
+        if (searchV2Failure === 'nginx') {
+          response.writeHead(404, { 'content-type': 'text/html' })
+          response.end('<html>404 Not Found nginx</html>')
+        } else if (searchV2Failure === 'redirect') {
+          response.writeHead(302, { location: '/api/v1/data/search' })
+          response.end()
+        } else sendJson(response, searchV2Failure === 'stale' ? 404 : 401,
+          { error: { code: searchV2Failure === 'wrong-auth' ? 'invalid_api_key' : searchV2Failure === 'stale' ? 'not_found' : 'api_key_required' } })
+      })
+      return
+    }
     if (request.method !== 'OPTIONS' || request.url !== ecommerceSearchPath) {
       sendJson(response, 500, { error: { code: 'unexpected_public_request' } })
       return
@@ -90,13 +107,17 @@ test('smoke checks the configured Public ecommerce route with an exact side-effe
     assert.equal(adminRequests[1].headers['x-mx-insight-admin-token'], 'smoke-admin-token')
     assert.deepEqual(
       publicRequests.map(({ method, url }) => ({ method, url })),
-      [{ method: 'OPTIONS', url: ecommerceSearchPath }],
+      [{ method: 'OPTIONS', url: ecommerceSearchPath }, { method: 'POST', url: '/api/v2/data/search' }],
     )
     assert.equal(publicRequests[0].headers.authorization, undefined)
     assert.equal(publicRequests[0].headers['x-api-key'], undefined)
     assert.equal(publicRequests[0].headers['content-length'], undefined)
     assert.equal(publicRequests[0].headers['content-type'], undefined)
     assert.equal(publicRequests[0].headers['access-control-request-method'], 'POST')
+    assert.equal(publicRequests[1].headers.authorization, undefined)
+    assert.equal(publicRequests[1].headers['x-api-key'], undefined)
+    assert.equal(publicRequests[1].headers['idempotency-key'], undefined)
+    assert.equal(publicRequests[1].body, '{}')
 
     adminRequests.length = 0
     publicRequests.length = 0
@@ -111,6 +132,15 @@ test('smoke checks the configured Public ecommerce route with an exact side-effe
       publicRequests.map(({ method, url }) => ({ method, url })),
       [{ method: 'OPTIONS', url: ecommerceSearchPath }],
     )
+    publicStatus = 204
+    for (const failure of ['nginx', 'stale', 'wrong-auth', 'redirect']) {
+      publicRequests.length = 0
+      searchV2Failure = failure
+      const rejectedV2 = await runSmoke({ MX_SMOKE_BASE_URL: adminBase, MX_SMOKE_PUBLIC_BASE_URL: publicBase })
+      assert.notEqual(rejectedV2.code, 0, failure)
+      assert.match(rejectedV2.stderr, /expected HTTP 401 api_key_required/u)
+      assert.equal(publicRequests.length, 2, 'no redirect, downgrade or automatic retry')
+    }
   } finally {
     adminServer.closeAllConnections?.()
     publicServer.closeAllConnections?.()
