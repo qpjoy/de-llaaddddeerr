@@ -23,6 +23,101 @@ test('screenshot aliases preserve nonnumeric Twitter user_id as username and lar
   assert.equal(request('rednote').platform, 'xiaohongshu')
 })
 
+test('numeric Twitter handles keep their explicit identity through aliases, URLs and dispatch', () => {
+  for (const operation of ['crawl', 'user-info']) {
+    const expected = normalize(operation, { platform: 'twitter', username: '12345' })
+    for (const alias of [
+      { username: '12345' }, { username: '@12345' }, { usernames: ['12345'] },
+      { params: { screen_name: '12345' } }, { params: { screenName: '@12345' } },
+      { url: 'https://x.com/12345' }, { profileUrl: 'https://twitter.com/%31%32%33%34%35' },
+      { user_id: '@12345' },
+    ]) {
+      const actual = normalize(operation, { platform: 'twitter', ...alias })
+      assert.deepEqual(actual.jobs, expected.jobs, JSON.stringify(alias))
+      assert.deepEqual(actual.jobs[0].identity, { kind: 'username', value: '12345' })
+      const profile = dispatch(actual.jobs[0])
+      assert.equal(profile.endpointPath, '/user/by/username/12345')
+      assert.equal(profile.userId, null)
+      assert.deepEqual(profile.upstreamQuery, {})
+    }
+  }
+  const posts = dispatch(normalize('crawl', { platform: 'twitter', username: '12345' }).jobs[0], {
+    resolvedIdentity: resolved('username', '12345'), pageSize: 5,
+  })
+  assert.equal(posts.endpointPath, '/user/-1/tweets')
+  assert.deepEqual(posts.upstreamQuery, { count: 5, username: '12345' })
+})
+
+test('numeric Twitter IDs retain ID lookup and never deduplicate with an equal handle', () => {
+  for (const alias of [
+    { userId: '12345' }, { user_id: '12345' }, { uid: '12345' }, { userIds: ['12345'] },
+    { params: { rest_id: '12345' } },
+  ]) {
+    const job = normalize('user-info', { platform: 'twitter', ...alias }).jobs[0]
+    assert.deepEqual(job.identity, { kind: 'id', value: '12345' })
+    assert.equal(dispatch(job).endpointPath, '/user/users/by/ids')
+    assert.deepEqual(dispatch(job).upstreamQuery, { ids: '12345' })
+  }
+  const combined = normalize('user-info', { platform: 'twitter', username: '12345', userId: '12345' })
+  assert.deepEqual(combined.jobs.map(job => job.identity), [
+    { kind: 'id', value: '12345' }, { kind: 'username', value: '12345' },
+  ])
+  assert.notEqual(combined.jobs[0].id, combined.jobs[1].id)
+})
+
+test('Twitter handles retain official bounds and report specific input errors before dispatch', () => {
+  for (const username of ['a', 'A_1234567890123', '123456789012345']) {
+    assert.equal(normalize('crawl', { platform: 'twitter', username: `@${username}` }).jobs[0].identity.kind, 'username')
+  }
+  for (const username of ['mx_health_probe_202607', '1234567890123456']) {
+    assert.throws(() => normalize('crawl', { platform: 'twitter', username: `@${username}` }), error => {
+      assert.equal(error.status, 400)
+      assert.equal(error.code, 'invalid_social_request')
+      assert.match(error.message, new RegExp(`15-character.*received ${username.length} characters`))
+      assert.equal(error.message.includes(username), false)
+      assert.deepEqual(error.details, { platform: 'twitter', field: 'username', reason: 'username_too_long',
+        actualLength: username.length, maxLength: 15 })
+      return true
+    })
+  }
+  for (const username of ['Alice Smith', 'name-with-dash', '中文账号', '@']) {
+    assert.throws(() => normalize('crawl', { platform: 'twitter', username }), error => {
+      assert.equal(error.code, 'invalid_social_request')
+      assert.equal(error.details.reason, 'username_invalid_characters')
+      assert.match(error.message, /letters.*digits.*underscores/)
+      return true
+    })
+  }
+  const id = '1234567890123456789'
+  assert.deepEqual(normalize('crawl', { platform: 'twitter', userId: id }).jobs[0].identity, { kind: 'id', value: id })
+  assert.throws(() => normalize('crawl', { platform: 'twitter', username: 'valid', params: { screen_name: 'invalid name' } }),
+    { code: 'invalid_social_request' })
+})
+
+test('original Twitter contract uses the same actionable handle error without changing numeric handles', () => {
+  const numeric = normalizeHubSocialRequest('user-info', { platform: 'twitter', username: '12345' })
+  assert.equal(numeric.endpointPath, '/user/by/username/12345')
+  for (const username of ['mx_health_probe_202607', 'name-with-dash']) {
+    let expected
+    try { normalize('user-info', { platform: 'twitter', username }) } catch (error) { expected = error }
+    assert.throws(() => normalizeHubSocialRequest('user-info', { platform: 'twitter', username }), error => {
+      assert.equal(error.message, expected.message)
+      assert.deepEqual(error.details, expected.details)
+      return true
+    })
+  }
+})
+
+test('legacy numeric-handle normalization is only available to internal receipt verification', () => {
+  const body = { platform: 'twitter', username: '12345' }
+  const old = normalize('crawl', body, { legacyTwitterIdentity: true })
+  const id = normalize('crawl', { platform: 'twitter', userId: '12345' })
+  assert.deepEqual(old.fingerprintBody, id.fingerprintBody)
+  assert.notDeepEqual(normalize('crawl', body).fingerprintBody, old.fingerprintBody)
+  assert.throws(() => normalize('crawl', { ...body, legacyTwitterIdentity: true }), { code: 'unsupported_fields' })
+  assert.throws(() => normalize('crawl', { ...body, params: { legacyTwitterIdentity: true } }), { code: 'unsupported_fields' })
+})
+
 test('preserves identity lists and prevents hidden supplier work controls before a dispatch', () => {
   const input = normalize('crawl', { platform: 'twitter', userIds: ['42', 'ui_batch_019'], usernames: ['@ui_batch_019'], pageSize: 2 })
   assert.equal(input.jobs.length, 2)

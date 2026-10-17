@@ -9,6 +9,7 @@ import { nativeForwardingEndpoint, normalizeNativeForwardingRequest } from '../c
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
 import { HUB_SOCIAL_ENDPOINTS, normalizeHubSocialRequest } from '../contracts/hub-social.mjs'
+import { normalizeHubSocialCompatRequest } from '../contracts/hub-social-compat.mjs'
 import { normalizeXhsDiscoveryRequest, XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -690,6 +691,50 @@ export class ExternalPlatformGateway {
         let old
         try { old = normalizeHubSocialRequest(input.operation, input.body) } catch { /* New account aliases use the managed contract below. */ }
         if (old && saved.fingerprint === fingerprint({ method: 'POST', path: input.path, body: old.fingerprintBody })) return this.socialData(context, input)
+        let legacy, current
+        try {
+          legacy = normalizeHubSocialCompatRequest(input.operation, input.body, {
+            maxPageSize: 1000, businessId: context.consumer.businessId, legacyTwitterIdentity: true,
+          })
+        } catch { /* Invalid old requests cannot identify a historical delivery. */ }
+        try { current = normalizeHubSocialCompatRequest(input.operation, input.body, { maxPageSize: 1000, businessId: context.consumer.businessId }) }
+        catch { /* Old numeric usernames could exceed the corrected username limit. */ }
+        const legacyFingerprint = legacy && fingerprint({ method: 'POST', path: input.path, body: legacy.fingerprintBody })
+        const currentFingerprint = current && fingerprint({ method: 'POST', path: input.path, body: current.fingerprintBody })
+        const sameBody = saved.acquisitionRequest.body && canonicalJson(saved.acquisitionRequest.body) === canonicalJson(input.body)
+        if (saved.fingerprint === legacyFingerprint && !sameBody && saved.acquisitionRequest.body) {
+          let original
+          try { original = normalizeHubSocialCompatRequest(input.operation, saved.acquisitionRequest.body, { maxPageSize: 1000, businessId: context.consumer.businessId }) }
+          catch { /* A changed body cannot replay an old, now-invalid username. */ }
+          if (!original || !current || fingerprint({ method: 'POST', path: input.path, body: original.fingerprintBody }) !== currentFingerprint) {
+            throw new AppError(409, 'idempotency_conflict', 'Idempotency-Key was used with a different request')
+          }
+        }
+        if (legacy?.platform === 'twitter' && input.path === `/api/v1/data/social/${input.operation}`
+          && sameBody && saved.fingerprint === legacyFingerprint && saved.fingerprint !== currentFingerprint) {
+          const restart = () => { throw new AppError(409, 'search_restart_required', 'The saved request used the former Twitter identity interpretation; restart explicitly with a new Idempotency-Key and no cursor', { requestId: saved.id }) }
+          const kind = saved.responseBody != null && (saved.status === 'committed' || saved.status === 'released' && saved.responseStatus >= 400 && saved.responseStatus <= 599)
+            ? 'replay' : saved.status === 'reserved' ? 'in_progress' : saved.status === 'unknown' ? 'unknown' : null
+          // Require the original body as well as its former fingerprint so an
+          // explicit ID cannot become a username under the same receipt key.
+          // Freeze only this proven receipt. Never reserve or dispatch work with
+          // the former username-as-ID interpretation, even for a released row.
+          return this.#deliver(context, input, {
+            operation: input.operation === 'crawl' ? 'social.content.crawl' : 'social.profile.get', authorizationPlatform: 'twitter',
+            capabilityMessage: 'This Hub account operation is not granted for this API key',
+            reservation: { kind, request: saved },
+            normalize: ({ policy }) => {
+              const normalized = normalizeHubSocialCompatRequest(input.operation, input.body, {
+                maxPageSize: policy.maxPageSize, businessId: context.consumer.businessId, legacyTwitterIdentity: true,
+              })
+              const totalLimit = normalized.jobs.length * (input.operation === 'user-info' ? 1 : normalized.pageSize)
+              if (totalLimit > policy.maxPageSize || totalLimit > 1000) throw new AppError(400, 'work_budget_exceeded', 'Account work exceeds this Key entitlement')
+              if (!kind) restart()
+              return { ...normalized, deliveryMode: 'live_only' }
+            },
+            assemble: restart,
+          })
+        }
       }
     }
     const capability = input.operation === 'crawl' ? 'social.content.crawl' : 'social.profile.get'

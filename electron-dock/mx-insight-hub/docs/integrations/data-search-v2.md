@@ -51,6 +51,8 @@ v2 的 `mxds2` 加密游标绑定原 Key、查询、页大小、结果类型和�
 
 跨版本 unresolved 保护按同 tenant/consumer/Key/platform/query 保守阻断，日期、游标或 key 改变不解除。已有 v1 unknown 不因超过 24 小时自动消失；无法恢复查询归属的旧未知证据也不视为安全。v2 投影或持久化未知同样阻止降级为 v1。过期的未完成协议租约没有自动重启入口；需要先核对原请求。这个保护不会扩展任何平台权限或自动清除历史 unknown。
 
+上述跨版本范围是标准 `/api/v1/data/search` 与 `/api/v2/data/search`。旧 raw 兼容接口保持独立操作语义；已知 raw 路径原本就不参与标准搜索的历史路径检查。对于快照字段尚未引入时的记录，只有 usage 为 `unknown`、整个 acquisition 快照为空、capability 为空、计量项为 `raw`、指纹为合法 SHA256，且关联的**唯一一条** connector 也为 `raw/unknown`，consumer、平台、指纹逐项一致，才恢复其旧 raw 操作身份，排除缺路径导致的标准搜索扩大阻断。缺证据、矛盾证据、多个 connector、`reserved`、部分缺失的快照及标准搜索路径仍保守阻断。此判断不恢复 query、不改变旧 raw 的 unknown、不允许复用它的 key，也不跳过其他协议 binding、lease 或标准请求检查。
+
 `GET /api/v1/requests/by-idempotency-key` 与 `GET /api/v1/requests/{requestId}` 增加 `data.searchProtocol`（仅关联 v2 时）：
 
 ```json

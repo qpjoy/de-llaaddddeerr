@@ -422,6 +422,9 @@ export async function createRuntime(config = loadConfig()) {
     platform === 'twitter' ? hubSocialGateway : nativeSearchGateway(platform, platform === 'facebook' ? 'justone' : 'tikhub')]))
   const socialDataGateway = { socialData: (context, input) => {
     if (input.operation === 'search') return hubSocialGateway.socialData(context, input)
+    // Twitter owns receipt-aware validation: an old numeric username may need
+    // exact historical replay even when it fails today's username contract.
+    if (typeof input.body?.platform === 'string' && ['twitter', 'x', 'tw'].includes(input.body.platform.trim().toLowerCase())) return hubSocialGateway.socialAccountData(context, input)
     const normalized = normalizeHubSocialCompatRequest(input.operation, input.body, { businessId: context.consumer?.businessId })
     return socialAccountDataGateways[normalized.platform].socialAccountData(context, input)
   } }

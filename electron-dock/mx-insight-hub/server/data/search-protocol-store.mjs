@@ -19,6 +19,18 @@ const rowRecord = row => row && ({ consumerId: row.consumer_id, idempotencyKey: 
   body: row.request_body, state: row.state, ownerId: row.owner_id, leaseExpiresAt: row.lease_expires_at,
   result: row.result, error: row.error, usageRequestId: row.usage_request_id })
 
+// Pre-snapshot raw calls retain their operation in the usage meter and the
+// connector ledger. Recover only that identity, never their query or outcome.
+function verifiedLegacyRawRequest(store, request) {
+  if (request.status !== 'unknown' || request.acquisitionRequest != null
+    || request.capability != null && request.capability !== '' || request.billingMeterKey !== 'raw'
+    || typeof request.fingerprint !== 'string' || !/^[0-9a-f]{64}$/u.test(request.fingerprint)) return false
+  const calls = [...(store.connectorCalls?.values() || [])].filter(call => call.requestId === request.id)
+  return calls.length === 1 && calls[0].operation === 'raw' && calls[0].outcome === 'unknown'
+    && calls[0].consumerId === request.consumerId && calls[0].platform === request.platform
+    && calls[0].fingerprint === request.fingerprint
+}
+
 function memoryState(store) {
   if (!memory.has(store)) memory.set(store, { bindings: new Map(), leases: new Map(), tail: Promise.resolve() })
   return memory.get(store)
@@ -69,7 +81,7 @@ export class SearchProtocolStore {
       if (version === 2) {
         const usages = [...this.usage.requests.values()].filter(row => row.tenantId === input.tenantId && row.consumerId === input.consumerId
           && row.apiKeyId === input.apiKeyId && row.platform === input.platform
-          && (!row.acquisitionRequest?.path || row.acquisitionRequest.path === DATA_SEARCH_V1_PATH
+          && ((!row.acquisitionRequest?.path && !verifiedLegacyRawRequest(this.usage, row)) || row.acquisitionRequest?.path === DATA_SEARCH_V1_PATH
             && (typeof row.acquisitionRequest?.body?.query !== 'string' || !row.acquisitionRequest.body.query.trim()
               || row.acquisitionRequest.body.query.trim() === body.query.trim())))
         const unresolved = usages.find(row => row.status === 'unknown') || usages.find(row => row.status === 'reserved')
@@ -108,12 +120,21 @@ export class SearchProtocolStore {
         AND (state='unknown' OR (state='running' AND lease_expires_at<=now())) LIMIT 1`, args)).rows[0]
       if (unknown) throw blocked('request_outcome_unknown', unknown.usage_request_id)
       if (version === 2) {
-        const unresolved = (await client.query(`SELECT id,status FROM usage_requests
-          WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3 AND platform=$4
-          AND (acquisition_request->>'path' IS NULL OR (acquisition_request->>'path'=$5
-            AND (jsonb_typeof(acquisition_request->'body'->'query') IS DISTINCT FROM 'string'
-              OR btrim(acquisition_request->'body'->>'query',$7) IN ('',$6))))
-          AND status IN ('unknown','reserved') ORDER BY CASE WHEN status='unknown' THEN 0 ELSE 1 END LIMIT 1`,
+        const unresolved = (await client.query(`SELECT request.id,request.status FROM usage_requests request
+          WHERE request.tenant_id=$1 AND request.consumer_id=$2 AND request.api_key_id=$3 AND request.platform=$4
+          AND ((request.acquisition_request->>'path' IS NULL AND NOT COALESCE(
+            request.status='unknown' AND request.acquisition_request IS NULL
+            AND (request.capability IS NULL OR request.capability='') AND request.billing_meter_key='raw'
+            AND request.fingerprint ~ '^[0-9a-f]{64}$'
+            AND EXISTS (SELECT 1 FROM serving.connector_calls call WHERE call.usage_request_id=request.id
+              AND call.consumer_id=request.consumer_id AND call.platform=request.platform
+              AND call.request_fingerprint=request.fingerprint AND call.operation='raw' AND call.outcome='unknown'
+              AND NOT EXISTS (SELECT 1 FROM serving.connector_calls other
+                WHERE other.usage_request_id=request.id AND other.id<>call.id)), false))
+            OR (request.acquisition_request->>'path'=$5
+              AND (jsonb_typeof(request.acquisition_request->'body'->'query') IS DISTINCT FROM 'string'
+                OR btrim(request.acquisition_request->'body'->>'query',$7) IN ('',$6))))
+          AND request.status IN ('unknown','reserved') ORDER BY CASE WHEN request.status='unknown' THEN 0 ELSE 1 END LIMIT 1`,
         [...args.slice(0, 4), DATA_SEARCH_V1_PATH, body.query.trim(), QUERY_TRIM_CHARACTERS])).rows[0]
         if (unresolved) throw blocked(unresolved.status === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', unresolved.id)
       }

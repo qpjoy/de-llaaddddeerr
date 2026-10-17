@@ -1,6 +1,6 @@
 # Hub 账号内容与资料接入指南
 
-更新：2026-10-15。当前源码与离线验证说明；不表示生产已经发布。
+更新：2026-10-18。当前源码与离线验证说明；不表示生产已经发布。
 
 本轮接管 `/api/v1/data/social/crawl` 和 `/api/v1/data/social/user-info`，保留 `/api/v1/night-all/search/crawl|user-info` 及 `/api/v1/search/crawl|user-info` 原有转发行为。下游逐步切换前不删除旧入口，不改 `/data/search` 的既有供应链，也不扩展 Twitter 专用 `/data/social/search`。
 
@@ -15,6 +15,12 @@
 历史 `businessId/business_id` 可省略；保留该字段的旧调用方必须提交与当前认证消费者绑定的原值，不能用它切换消费者身份或跨租户查询。
 
 Twitter 的 `x/tw` 归一为 `twitter`，非数字 `userId/user_id/uid` 沿用用户名解释；例如 `ui_batch_019` 会按用户名解析，但它可能只是下游任务编号，不能由参数形状推断该平台账号存在。没有可确认账号时应返回明确失败，不把资料对象算成一条内容或把解析失败伪装成分页耗尽。
+
+Twitter 显式 `username/usernames`、`params.screen_name/screenName` 和主页 URL 中的账号名保持用户名类型，即使全部由数字组成。例如 `username: "12345"` 或 `url: "https://x.com/12345"` 查询用户名 `12345`；`userId: "12345"` 查询数字 ID `12345`，二者不会合并成同一个任务。ID 别名带 `@` 时按用户名解释。数字 ID 使用字符串传输，避免 JavaScript 数值精度丢失。
+
+用户名去掉 `@` 后仍须满足 `[A-Za-z0-9_]{1,15}`，与 [X 官方账号查询 API](https://docs.x.com/x-api/users/get-user-by-username) 一致；此规则不套用到显示名称或数字用户 ID。格式错误保留 HTTP 400 / `invalid_social_request`，消息说明长度或字符问题，`error.details` 返回 `platform: "twitter"`、`field: "username"`、`reason`、`actualLength`、`maxLength: 15`。其中 `reason` 为 `username_too_long` 或 `username_invalid_characters`，不会回显整个输入。以 22 字符账号为例，消息是 `Twitter username exceeds the 15-character limit (received 22 characters, excluding @)`。这是请求参数错误，不能按空数据或瞬时供应商故障处理。
+
+历史上被误判为 ID 的数字用户名请求，只能在原 Key、路径、原始请求体及旧指纹均匹配时回放已保存的回执，不会按旧规则重新调用供应商。旧 `mxds1` 游标不能用于修正身份后的新请求；调用方应先核对目标账号，再显式决定是否使用新幂等键从第一页重新查询，不能自动换键重跑。
 
 `count/pageSize/page_size/limit` 支持 1–500，仍受 Key entitlement 和批量总工作量限制。crawl 优先 `count > pageSize > page_size > limit`；user-info 优先 `limit > count > pageSize > page_size`。`pageSize` 与 `page_size` 同时提交须一致。`pageSize` 是每个工作项逻辑页上限，批量请求的总条数还受当前 Key 允许的工作量约束，不能用多账号绕开上限。
 

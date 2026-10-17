@@ -8735,7 +8735,7 @@ paths:
                 username:
                   type: string
                   maxLength: 16
-                  description: 用户名（可带 @），与 userId/uid 二选一。
+                  description: Twitter 用户名去掉 @ 后为 1–15 位英文字母、数字或下划线；纯数字用户名仍按用户名查询，数字 userId 按 ID 查询。
                 userId:
                   type: string
                   pattern: ^[0-9]{1,30}$
@@ -8797,7 +8797,7 @@ paths:
           description: contractVersion、data（items、raw_info、raw_data、page、pageInfo、meta、status）、requestId。status=partial
             表示丢弃了不能解析的内容；页内计数不是总数。data.meta.profileCompleteness=base_profile_without_about 表示仅基础资料。
         '400':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
+          description: 参数或游标错误。Twitter 用户名格式错误为 invalid_social_request；error.details 包含 platform、field、reason（username_too_long 或 username_invalid_characters）、actualLength、maxLength（15）。不回显整个输入，不自动重试。
         '401':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '402':
@@ -8855,7 +8855,7 @@ paths:
                 username:
                   type: string
                   maxLength: 16
-                  description: 用户名（可带 @），与 userId/uid 二选一。
+                  description: Twitter 用户名去掉 @ 后为 1–15 位英文字母、数字或下划线；纯数字用户名仍按用户名查询，数字 userId 按 ID 查询。
                 userId:
                   type: string
                   pattern: ^[0-9]{1,30}$
@@ -8896,7 +8896,7 @@ paths:
           description: contractVersion、data（items、raw_info、raw_data、page、pageInfo、meta、status）、requestId。status=partial
             表示丢弃了不能解析的内容；页内计数不是总数。data.meta.profileCompleteness=base_profile_without_about 表示仅基础资料。
         '400':
-          description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
+          description: 参数或游标错误。Twitter 用户名格式错误为 invalid_social_request；error.details 包含 platform、field、reason（username_too_long 或 username_invalid_characters）、actualLength、maxLength（15）。不回显整个输入，不自动重试。
         '401':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '402':

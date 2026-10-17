@@ -94,3 +94,44 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin \
 精确checkpoint的当前状态可被后续恢复更新，应以该Run保存的最终清单确认本次报告覆盖。
 未自动重跑该批任务、换幂等键或清除租约；诊断不发起供应商调用，不修改Hub运行时、
 MX-H2I登录或用户联网功能。
+
+## 2026-10-18 Twitter 身份类型与 Delta 体检样例修复
+
+操作者只读回执确认生产容器为 `mx_data-web-1`，Run `216057`
+（`d3e86d50-40d8-4c2f-a34c-fcc8d1bc6e64`）使用人物画像 Agent v50、
+UID `agent_health_check`，创建时间为北京时间 2026-10-18 00:00:00。
+选中的 `negative_low_data_cold_account` 输入及 checkpoint 均为
+`mx_health_probe_202607`，目标5条、已取0条。该用户名22字符，违反
+[X 官方查询 API 的 1–15 字符合同](https://docs.x.com/x-api/users/get-user-by-username)。
+截图中的 v7 是 data_query Skill 版本，不是人物画像版本；此故障在账号参数校验阶段发生。
+
+继续检查发现独立缺陷：旧归一化按字符串是否全数字覆盖输入类型，使
+`username: "12345"` 和 `url: "https://x.com/12345"` 都按用户 ID 查询。
+本次修复保留显式用户名及 URL 路径的类型；数字 ID 别名仍按 ID 查询，
+非数字 ID 别名继续保留旧用户名兼容。用户名上限仍为15字符。
+400错误增加长度或字符原因及 `error.details` 的实际长度、上限和字段，
+错误中不回显整个账号输入。
+
+数字用户名修正会改变该请求的规范化指纹。已有同消费者、同 Key、同路径、
+同原始请求体且匹配旧指纹的保存回执，仅沿原授权和重放流程返回历史结果；
+不会按旧身份规则再次采购。保留旧失败、in-progress和unknown状态。
+旧数字用户名 `mxds1` 游标不能用于新身份解释下的续页，新的幂等请求会明确拒绝；
+调用方不得自动换键、清除checkpoint或重跑。普通用户名、明确数字ID和原 `mxec2`
+合同继续沿既有规则处理。缺失原始请求体时不猜测旧身份或恢复采购。
+
+Delta 修改位于 `po-infra/llm/management/commands/sync_persona_health_check_case.py`：
+沿用常规体检基准账号 `sunwear_cn`，保留5条样本上限和原变体key，显示为“小样本画像”。
+这是样本限制测试，不再声称账号冷门或不存在，也不证明该账号当前可用。
+实际无数据时仍须说明证据不足。新增种子回归覆盖所有结构化Twitter用户名格式、
+5条样本配置和重复同步给持久层的修正内容。
+
+发布需分别更新 Hub 后端和 Delta 镜像。Delta 的现有发布脚本会调用
+`sync_default_agent_health_check_cases`，进而同步 Persona 种子；仅修改生产数据库而不更新
+镜像会被旧种子覆盖。同步命令本身也会更新该用例的其他默认配置，须沿现有部署流程使用。
+本次未执行生产部署、种子同步、付费调用或历史记录修改；不涉及 MX-H2I 登录、SSO、
+Internal/Domestic 路由、VPN、DNS或用户联网配置。
+
+离线验证：Hub 的 `hub-social-compat`、`hub-social`、`social-account-workflow`、
+`twitter-search-path-encoding`、`public-docs`、`tenant-docs` 共97项测试通过，
+供应商调用全部使用测试替身。Delta 的3项种子测试通过；本地缺少 PostgreSQL 驱动，
+使用真实 Django 和命令代码、模拟模型导入及持久层，未执行数据库集成验证。

@@ -2,6 +2,7 @@
 import ast
 from contextlib import redirect_stdout
 import copy
+import hashlib
 from datetime import datetime, timezone
 import io
 import json
@@ -115,6 +116,10 @@ class Query:
     def first(self):
         return next(iter(self), None)
 
+    def count(self):
+        self.connection.queries.append((self.model, "count", None))
+        return len(self.rows)
+
     def __iter__(self):
         return iter([{key: row[key] for key in self.fields} for row in self.rows])
 
@@ -135,11 +140,12 @@ def fixture(*, plan_exists=True, run_count=1, step_count=1):
              "_facebook_page_requests": {"version": 1, "streams": {PRIVATE: stream}}}
     runs = [{"id": index + 1, "public_key": RUN_ID, "plan_id": 7, "run_kind": "plan_collection",
              "status": "failed", "trigger_source": "cold_start", "platform_scope": copy.deepcopy(scope),
-             "created_at": NOW, "collected_count": 0, "spider_steps__spider_name": "data_query.raw",
+             "created_at": NOW, "collected_count": 0, "new_content_count": 0, "duplicate_count": 0, "actor_count": 0,
+             "spider_steps__spider_name": "data_query.raw",
              "spider_steps__params__platform": "facebook", "spider_steps__status": "failed"}
             for index in range(run_count)]
     steps = [{"id": index + 1, "public_key": STEP_ID, "run_id": run["id"], "spider_name": "data_query.raw",
-              "status": "failed", "created_at": NOW, "collected_count": 0,
+              "status": "failed", "created_at": NOW, "collected_count": 0, "new_content_count": 0, "duplicate_count": 0, "actor_count": 0,
               "error_message": PRIVATE + " request_outcome_unknown status=404",
               "params": {"platform": "facebook", "query": PRIVATE, "cursor": PRIVATE,
                          "_facebook_page_request_version": 1,
@@ -150,7 +156,7 @@ def fixture(*, plan_exists=True, run_count=1, step_count=1):
     plans = [{"id": 7, "public_key": PLAN_ID, "enabled": True}] if plan_exists else []
     models = SimpleNamespace(**{
         name: SimpleNamespace(objects=Query(connection, rows, model=name))
-        for name, rows in (("CollectionPlan", plans), ("CollectionRun", runs), ("CollectionRunSpiderStep", steps))
+        for name, rows in (("CollectionPlan", plans), ("CollectionRun", runs), ("CollectionRunSpiderStep", steps), ("CollectionItem", []))
     })
     return connection, models, runs, steps
 
@@ -164,6 +170,94 @@ def mock_modules(connection, models):
 
 
 class DiagnosticTest(unittest.TestCase):
+    def test_exact_run_keeps_plan_boundary_and_never_reads_other_runs_steps_or_items(self):
+        connection, models, runs, steps = fixture(run_count=3)
+        runs[1]["public_key"] = str(uuid4())
+        runs[2]["public_key"] = str(uuid4())
+        result = MODULE["inspect_delta"](connection, models, PLAN_ID, RUN_ID, REQUEST_ID)
+        self.assertTrue(result["selectedRunFound"])
+        self.assertEqual(result["selectedRunKey"], RUN_ID)
+        self.assertEqual(result["specifiedBlockerRequestId"], REQUEST_ID)
+        self.assertEqual(len(result["recentRuns"]), 1)
+        for name, action, filters in connection.queries:
+            if action == "filter" and name in {"CollectionRunSpiderStep", "CollectionItem"} and "run_id" in filters:
+                self.assertEqual(filters["run_id"], 1)
+        runs[0]["plan_id"] = 999
+        connection.commands.clear(); connection.queries.clear()
+        missing = MODULE["inspect_delta"](connection, models, PLAN_ID, RUN_ID)
+        self.assertFalse(missing["selectedRunFound"])
+        self.assertEqual(missing["recentRuns"], [])
+        self.assertEqual(missing["unknownRuns"], [])
+        self.assertFalse(any(name in {"CollectionRunSpiderStep", "CollectionItem"} for name, _, _ in connection.queries))
+        self.assertEqual(connection.commands[-1], "ROLLBACK")
+
+    def test_optional_identifiers_are_strict_and_missing_plan_cannot_be_bypassed(self):
+        for options, expected in (({"plan_key": None, "run_key": RUN_ID}, "valid_plan_key_required"),
+                ({"run_key": ""}, "valid_run_key_required"), ({"run_key": RUN_ID.replace("-", "")}, "valid_run_key_required"),
+                ({"run_key": "{" + RUN_ID + "}"}, "valid_run_key_required"),
+                ({"blocker_request_id": ""}, "valid_blocker_request_id_required"),
+                ({"blocker_request_id": PRIVATE}, "valid_blocker_request_id_required")):
+            connection, models, _, _ = fixture()
+            with self.subTest(options=options), self.assertRaisesRegex(ValueError, expected):
+                MODULE["inspect_delta"](connection, models, **{"plan_key": PLAN_ID, **options})
+            self.assertEqual(connection.commands, [])
+            self.assertEqual(connection.queries, [])
+
+    def test_payload_key_and_stream_digests_keep_exact_identity_without_private_values(self):
+        connection, models, runs, _ = fixture()
+        stream = next(iter(runs[0]["platform_scope"]["_facebook_page_requests"]["streams"].values()))
+        stream["payload"]["query"] = "台湾" + PRIVATE
+        result = MODULE["inspect_delta"](connection, models, PLAN_ID, RUN_ID)
+        entry = result["recentRuns"][0]["streams"][0]
+        digest = hashlib.sha256(PRIVATE.encode()).hexdigest()
+        self.assertEqual(entry["streamSha256"], digest)
+        self.assertEqual(entry["idempotencyKeySha256"], digest)
+        self.assertEqual(entry["payloadSha256"], hashlib.sha256(json.dumps(stream["payload"], ensure_ascii=False,
+            sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+        self.assertEqual(MODULE["payload_sha256"]({"b": 2, "a": 1}), MODULE["payload_sha256"]({"a": 1, "b": 2}))
+        self.assertNotEqual(entry["payloadSha256"], MODULE["payload_sha256"]({**stream["payload"], "cursor": "changed"}))
+        self.assertNotIn(PRIVATE, json.dumps(result)); self.assertNotIn("台湾", json.dumps(result, ensure_ascii=False))
+        self.assertIsNone(MODULE["payload_sha256"](PRIVATE))
+
+    def test_error_text_requires_fixed_message_status_code_and_exact_blocker_without_exposing_text(self):
+        _, _, _, steps = fixture()
+        step = steps[0]
+        base = f"{PRIVATE} status=409 request_outcome_unknown {MODULE['PROTOCOL_BLOCK_MESSAGE']} {REQUEST_ID}"
+        step["error_message"] = base
+        expected = {"exactMessagePresent": True, "mentions409": True, "specifiedBlockerIdPresent": True, "allRequiredTextPresent": True}
+        report = MODULE["summarize_step"](step, REQUEST_ID)
+        self.assertEqual(report["protocolBlockEvidence"], expected)
+        self.assertNotIn(PRIVATE, json.dumps(report))
+        self.assertNotIn(MODULE["PROTOCOL_BLOCK_MESSAGE"], json.dumps(report))
+        for error in (base.replace("status=409", "status=4090"), base.replace("request_outcome_unknown", "request_in_progress"),
+                      base.replace("request_outcome_unknown", "request_outcome_unknownish"),
+                      base.replace(MODULE["PROTOCOL_BLOCK_MESSAGE"], "A search outcome is unresolved"), base.replace(REQUEST_ID, str(uuid4())),
+                      base.replace(REQUEST_ID, REQUEST_ID + "0")):
+            step["error_message"] = error
+            self.assertFalse(MODULE["summarize_step"](step, REQUEST_ID)["protocolBlockEvidence"]["allRequiredTextPresent"])
+        step["error_message"] = base
+        self.assertIsNone(MODULE["summarize_step"](step)["protocolBlockEvidence"]["specifiedBlockerIdPresent"])
+        self.assertFalse(MODULE["summarize_step"](step)["protocolBlockEvidence"]["allRequiredTextPresent"])
+
+    def test_success_and_item_evidence_does_not_treat_unknown_or_truncated_lists_as_zero_coverage(self):
+        connection, models, runs, steps = fixture(step_count=3)
+        steps[0]["status"] = "succeeded"; steps[0]["collected_count"] = 4
+        steps[0]["new_content_count"] = 3; steps[0]["duplicate_count"] = 1
+        steps[0]["params"]["_collector"].update(pages_done=2, unique_rows=4, raw_row_count=5)
+        del steps[1]["params"]["_facebook_page_request_version"]
+        runs[0]["platform_scope"]["cold_start_paging"] = {"pages_completed": 2, "page_number": 3}
+        models.CollectionItem.objects.rows.extend([{"run_id": 1, "is_new_content": True, "body": PRIVATE},
+                                                  {"run_id": 1, "is_new_content": False, "body": PRIVATE},
+                                                  {"run_id": 999, "is_new_content": True, "body": PRIVATE}])
+        report = MODULE["inspect_delta"](connection, models, PLAN_ID, RUN_ID)["recentRuns"][0]
+        self.assertEqual(report["stepEvidenceCounts"], {"scope": "returned_search_steps_only", "complete": True,
+            "modernPageMarker": 2, "legacyOrMissingPageMarker": 1, "succeeded": 1, "positivePagesDone": 1, "positiveCollectedCount": 1})
+        self.assertEqual(report["pageEvidence"]["completedPages"], 2)
+        self.assertEqual(report["steps"][0]["uniqueRows"], 4)
+        self.assertEqual(report["steps"][0]["newContentCount"], 3)
+        self.assertEqual(report["storedItemEvidence"], {"itemCount": 2, "newContentItemCount": 1})
+        self.assertNotIn(PRIVATE, json.dumps(report))
+
     def test_read_only_snapshot_sanitizes_real_projection_and_rolls_back(self):
         connection, models, runs, steps = fixture()
         before = copy.deepcopy((runs, steps))
@@ -250,6 +344,8 @@ class DiagnosticTest(unittest.TestCase):
         self.assertTrue(run["streamsTruncated"])
         self.assertEqual(len(run["steps"]), LIMIT)
         self.assertTrue(run["stepsTruncated"])
+        self.assertFalse(run["stepEvidenceCounts"]["complete"])
+        self.assertFalse(run["pageEvidence"]["streamCountsComplete"])
         self.assertEqual(len(run["steps"][0]["requestIds"]), LIMIT)
         self.assertTrue(run["steps"][0]["requestIdsTruncated"])
         self.assertTrue(all(limit == LIMIT + 1 for _, limit in connection.slices))
@@ -303,10 +399,14 @@ class DiagnosticTest(unittest.TestCase):
             models.__file__ = str(root / "data_hub/models.py")
             output = io.StringIO()
             with patch.dict(sys.modules, mock_modules(connection, models)), \
-                    patch.dict(os.environ, {"MX_DIAGNOSTIC_PLAN_KEY": PLAN_ID}), redirect_stdout(output):
+                    patch.dict(os.environ, {"MX_DIAGNOSTIC_PLAN_KEY": PLAN_ID, "MX_DIAGNOSTIC_RUN_KEY": RUN_ID,
+                        "MX_DIAGNOSTIC_BLOCKER_REQUEST_ID": REQUEST_ID}), redirect_stdout(output):
                 runpy.run_path(str(SCRIPT), run_name="django.core.management.commands.shell")
             result = json.loads(output.getvalue())
             self.assertTrue(result["planFound"])
+            self.assertEqual(result["selectedRunKey"], RUN_ID)
+            self.assertTrue(result["selectedRunFound"])
+            self.assertEqual(result["specifiedBlockerRequestId"], REQUEST_ID)
             self.assertTrue(result["code"]["facebookPageRequests"]["modernStepGuardPresent"])
             self.assertTrue(result["code"]["dataQuery"]["available"])
             self.assertNotIn(PRIVATE, output.getvalue())
@@ -338,6 +438,19 @@ class DiagnosticTest(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()), {"error": "diagnostic_read_failed"})
         self.assertNotIn(PRIVATE, output.getvalue())
         self.assertEqual(connection.commands[-1], "ROLLBACK")
+
+    def test_main_missing_or_invalid_environment_identifiers_never_query(self):
+        for env, error in (({"MX_DIAGNOSTIC_RUN_KEY": RUN_ID}, "valid_plan_key_required"),
+                ({"MX_DIAGNOSTIC_PLAN_KEY": PLAN_ID, "MX_DIAGNOSTIC_RUN_KEY": ""}, "valid_run_key_required"),
+                ({"MX_DIAGNOSTIC_PLAN_KEY": PLAN_ID, "MX_DIAGNOSTIC_BLOCKER_REQUEST_ID": PRIVATE}, "valid_blocker_request_id_required")):
+            connection, models, _, _ = fixture()
+            output = io.StringIO()
+            with self.subTest(env=env), patch.dict(sys.modules, mock_modules(connection, models)), \
+                    patch.dict(os.environ, env, clear=True), redirect_stdout(output), self.assertRaises(SystemExit):
+                MODULE["main"]()
+            self.assertEqual(json.loads(output.getvalue()), {"error": error})
+            self.assertEqual(connection.commands, [])
+            self.assertEqual(connection.queries, [])
 
     def test_script_has_no_mutations_http_calls_or_task_dispatch(self):
         tree = ast.parse(SCRIPT.read_text())
