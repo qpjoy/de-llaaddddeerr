@@ -1,5 +1,25 @@
 # 验证记录
 
+## 2026-10-17：P4 浏览器统一认证（网页端、桌面端、部署）
+
+- `npm run check` 通过（291 个模块）。
+- `npm test`：809 项，784 通过，0 失败；跳过 25 项，其中 24 项是 PostgreSQL 测试。日志 `.runtime/p4-tests-2.log`。
+  - 第一次全量跑时，`terminal.test.mjs` 有一项在高负载下失败，单独跑通过，第二次全量跑也通过。
+  - 第二次全量跑多跳过的那一项是 `station.test.mjs`：它先启动一次 Chromium 来判断浏览器是否可用，高负载下启动没成功，就跳过了；单独跑通过。两者都和本次改动无关。
+- 新增的测试：
+  - `tests/browser-sso.test.mjs`（8 项）：真实的共享 SSO 模块对替身 OIDC 服务；
+  - `tests/manage-sso.test.mjs`（3 项）；
+  - `server-image` 测试增加了包可用性检查。
+- 调整了另一个会话留下的三个测试，以适应本次的登录拆分和新增的 Secret 读取；断言的含义没有变：
+  - `desktop-login`：新增的登录辅助函数移进它截取的源码范围；
+  - `manage-verify`：`kubectl` 调用计数加上 `mx-rig-sso` 的读取。
+- 修复过程中顺带发现并修了两处问题：
+  - 镜像里装不上 openid-client / undici：改为 mx-rig 的直接依赖；
+  - 桌面端在监听开始前点取消会无效，要等满 5 分钟才结束。
+- `npm run test:browser` 通过，截图 `.runtime/qa/web-login-sso.png`、`web-login-sso-only.png`，日志 `.runtime/p4-browser.log`。
+- `npm run test:desktop` 通过（含重构后的账号密码登录），日志 `.runtime/p4-desktop.log`。
+- 真实的统一认证、域名、网关和飞书都还没有验证，步骤见 [docs/25 §11](25-launcher-product-and-sso.md)。
+
 ## 2026-10-17：deploy 临时转发重复执行与 Launcher 管理配置
 
 - `deploy` 已调用 `verify`；新增连续调用两次 `cmd_deploy` 的测试，保留真实验证函数及回环 HTTP，只模拟集群部署步骤。两轮各自验证三个接口，第二轮开始时上一轮转发已退出，最终进程与临时文件清理完成。正常访问仍走 NodePort / VIP 网关，不需要常驻 port-forward。

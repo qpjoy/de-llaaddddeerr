@@ -121,7 +121,7 @@ npm run desktop
 
 测试浏览器不用另外安装：依次找安装包自带的、Playwright 缓存里的、下载过的、本机的 Chrome / Edge；都没有时自动下载，官方 CDN 不通就改用 npmmirror（`npm run browser:install` 也走这条路）。
 
-**Launcher 独立端**（docs/25）：`bash scripts/manage.sh desktop --launcher` 打出的桌面端是 Launcher 的独立产品 `mx-rig`，经自己的产品网络访问 Rig 服务，用平台统一账号登录，也会在 MX-H2I 的 AppCenter 里列出。它只路由 Rig 自己的地址，不改系统 DNS 和代理，可以和 MX-H2I 同时运行。Launcher 那边的登记用 `scripts/manage.sh launcher plan | apply`。装好以后经 Launcher 的 Release Center 自动更新，新版本用 `scripts/manage.sh release` 发布：先发给指定的安装 ID，验证后再推给所有人（docs/25 §8）。有海外权限的账号可以在「出网与通道」里开启本机海外通道，让测试浏览器从海外出网，系统代理不变（docs/25 §9）。
+**Launcher 独立端**（docs/25）：`bash scripts/manage.sh desktop --launcher` 打出的桌面端是 Launcher 的独立产品 `mx-rig`，经自己的产品网络访问 Rig 服务，用平台统一账号登录，也会在 MX-H2I 的 AppCenter 里列出。它只路由 Rig 自己的地址，不改系统 DNS 和代理，可以和 MX-H2I 同时运行。Launcher 那边的登记用 `scripts/manage.sh launcher plan | apply`。装好以后经 Launcher 的 Release Center 自动更新，新版本用 `scripts/manage.sh release` 发布：先发给指定的安装 ID，验证后再推给所有人（docs/25 §8）。有海外权限的账号可以在「出网与通道」里开启本机海外通道，让测试浏览器从海外出网，系统代理不变（docs/25 §9）。服务端在 Launcher 的统一认证登记后，网页端可以在 `https://rig.minsight-ai.com` 用统一认证或飞书登录，桌面端可以用系统浏览器登录（docs/25 §11）。
 
 下面说的是直接填服务地址的普通模式。桌面不要求 MX-H2I 运行；只要求能访问配置的 Rig 服务。非本机服务默认必须通过 HTTPS；内网测试服务器没有 TLS 时，在登录页勾选「内网测试服务器」，只放行私有网段的 IP，并提示连接未加密。桌面不会申请网络 lease，也不接管 VPN、DNS、PAC、NRPT 或已有网络 owner。需要私网连通性时，由管理员提供已有网络或后续明确注册的 Launcher 能力，而不是隐式依赖 MX-H2I 进程。
 

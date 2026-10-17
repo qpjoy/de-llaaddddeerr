@@ -780,11 +780,13 @@ export class MemoryStore {
     return clone(record)
   }
 
-  async createSession({ tokenHash, principalId, expiresAt, source }) {
+  async createSession({ tokenHash, principalId, expiresAt, source, auth = 'local', ssoRef = null }) {
     const session = {
       tokenHash,
       principalId,
       source: source ?? null,
+      auth,
+      ssoRef,
       createdAt: new Date().toISOString(),
       expiresAt,
       revokedAt: null,

@@ -63,7 +63,9 @@ const plan = launcherPlan({
   routes: routes.ok ? routes.payload?.routes ?? [] : [],
   rigUrl,
   resolved: resolved.ok ? resolved.payload?.identity ?? null : null,
-  credentials: kept ? { publisher: kept.has('publisher'), approver: kept.has('approver') } : null
+  credentials: kept ? { publisher: kept.has('publisher'), approver: kept.has('approver') } : null,
+  // Found by scripts/manage.sh: a host file from the registration, or the Secret.
+  ssoProfile: process.env.MX_RIG_SSO_PROFILE_FOUND || null
 })
 
 const MARK = { ok: '✓', create: '+', update: '~', manual: '!', 'manual-check': '?' }

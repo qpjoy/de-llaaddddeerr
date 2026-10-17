@@ -189,6 +189,9 @@ try {
   await page.waitForFunction((origin) => document.querySelector('#server').value === origin, server.origin)
   await page.locator('#account').fill('admin')
   await page.locator('#password').fill('desktop-test-secret')
+  // Browser SSO (docs/25 P4) is offered only by a service that has a profile; this one has none.
+  assert.deepEqual(await page.evaluate(() => window.mxRig.request('auth-methods', { url: document.querySelector('#server').value })), { sso: { enabled: false }, password: true })
+  assert.equal(await page.locator('#sso-panel').isVisible(), false)
   await page.locator('#login-form button[type=submit]').click()
   console.log('Submitted native login')
   await page.locator('#workspace').waitFor({ state: 'visible' })
@@ -883,11 +886,14 @@ try {
     assert.deepEqual([overseaWaiting.state, overseaWaiting.enabled], ['unavailable', true])
     assert.match(overseaWaiting.text, /统一账号登录/)
     assert.equal((await launched.evaluate(() => window.mxRig.request('oversea-stop'))).state, 'off')
+    // Nothing to ask about browser SSO until the service is reachable through the network.
+    assert.deepEqual(await launched.evaluate(() => window.mxRig.request('auth-methods', {})), { sso: { enabled: false }, password: true })
+    await assert.rejects(launched.evaluate(() => window.mxRig.request('browser-login', {})), /先连上内网/)
   } finally {
     entrance.close()
   }
   console.log(
-    'Desktop smoke passed: login, isolated renderer, runtime worker, exact approval, real test API dispatch, settings, the system layer over whitelisted IPC, one-line dispatch parsing, station duty (register, watch, polite stop, unregister), the in-app report window, accounts and machines over the main process, the run detail (live timeline over JSON, a recording played and seeked through rig-media:, the 对外版 saved as PDF), the read-only tour in 演示 (taken over, resumed, stopped at the step the person presses) and its published recording playing through rig-media:, a project from the Compass pack built by following its tour (which then counts in 系统) with its snapshot, QA repository and pinned plans (baseline updated, old snapshot kept, a release check pinning the branch tip and running every case), the test repository (an approved implementation written, its commit run, verified, merged and published as v1), a new project on the proving ground by following its tour up to the run, logout, and Launcher mode (the network first, an unregistered product explained, updates waiting for the network, the overseas channel waiting for a unified sign-in).'
+    'Desktop smoke passed: login, isolated renderer, runtime worker, exact approval, real test API dispatch, settings, the system layer over whitelisted IPC, one-line dispatch parsing, station duty (register, watch, polite stop, unregister), the in-app report window, accounts and machines over the main process, the run detail (live timeline over JSON, a recording played and seeked through rig-media:, the 对外版 saved as PDF), the read-only tour in 演示 (taken over, resumed, stopped at the step the person presses) and its published recording playing through rig-media:, a project from the Compass pack built by following its tour (which then counts in 系统) with its snapshot, QA repository and pinned plans (baseline updated, old snapshot kept, a release check pinning the branch tip and running every case), the test repository (an approved implementation written, its commit run, verified, merged and published as v1), a new project on the proving ground by following its tour up to the run, logout, and Launcher mode (the network first, an unregistered product explained, updates waiting for the network, the overseas channel waiting for a unified sign-in, browser sign-in waiting for the network).'
   )
 } catch (error) {
   console.error(error)

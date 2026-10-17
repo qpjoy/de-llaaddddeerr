@@ -2728,3 +2728,19 @@ details.rig-run-case > .rig-run-case__summary {
   flex-wrap: wrap;
   gap: var(--qp-space-2);
 }
+
+/* Browser SSO on the login page (docs/25 P4). */
+.rig-sso {
+  display: grid;
+  justify-items: center;
+  gap: var(--qp-space-2);
+}
+
+.rig-sso > .qp-button--lg {
+  width: 100%;
+}
+
+.rig-sso p {
+  margin: 0;
+  text-align: center;
+}

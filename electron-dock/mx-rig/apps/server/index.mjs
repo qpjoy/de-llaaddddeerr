@@ -83,6 +83,7 @@ import {
 import { importLegacyState } from './legacy-import.mjs'
 import { draftFlightPlan } from './flight-director.mjs'
 import { exportPlaywright } from '../../packages/runtime/export.mjs'
+import { createBrowserSso, loadSsoProfile, ssoStoreFor } from './browser-sso.mjs'
 
 // Server-side runtimes kept per member. They are cheap to rebuild — nothing a
 // paused or finished mission needs lives in them — so past this many, idle
@@ -101,6 +102,32 @@ const SERVICE_PRINCIPAL = Object.freeze({
 })
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
+
+// What the public HTTPS entrance (browser SSO, docs/25 §11) may reach: the
+// workbench, sign-in through Auth, and the APIs a signed-in person uses.
+// Password sign-in, runners, stations, webhooks, health and the old console
+// stay on the internal addresses — even if a gateway forwards more.
+export function publicPath(path) {
+  if (path === '/' || path === '/rig' || path.startsWith('/rig/') || path.startsWith('/auth/sso/') || path.startsWith('/auth/desktop/')) return true
+  if (['/api/rig/v1/login', '/api/rig/v1/native-login', '/api/v1/auth/login', '/api/v1/auth/password'].includes(path)) return false
+  if (path.startsWith('/api/rig/v1/station/')) return false
+  return path.startsWith('/api/rig/v1/') || path.startsWith('/api/v1/')
+}
+
+/** A failed browser sign-in step: a page to read for a navigation, JSON otherwise. */
+function sendAuthError(req, res, error) {
+  const status = Number.isInteger(error?.status) ? error.status : 500
+  const message = status < 500 || error?.code ? error.message : '统一认证暂不可用，请稍后重试'
+  if (req.method !== 'GET') return sendJson(res, status, { error: { code: error?.code ?? 'internal_error', message } })
+  const escape = (text) => String(text).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
+  res.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store',
+    'content-security-policy': "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    'x-content-type-options': 'nosniff'
+  })
+  res.end(`<!doctype html><meta charset="utf-8"><title>MX Rig 登录</title><h1>没有完成登录</h1><p>${escape(message)}</p><p><a href="/rig/">回到 MX Rig</a></p>`)
+}
 // Drawing a graph must never execute one. These handlers exist so a spec can
 // be compiled purely for its shape.
 const COMPILE_PROBE = Object.freeze({
@@ -166,6 +193,28 @@ export async function start(env = process.env, options = {}) {
   // Memory mode (local development, tests) keeps the single-process files.
   const shared = config.storeDriver === 'postgres'
   const pool = shared ? kernel.store.pool : null
+  // Browser SSO (docs/25 P4): on when the platform registration's profile is
+  // mounted (MX_RIG_SSO_PROFILE); password sign-in keeps working either way.
+  let ssoSettings = options.ssoSettings ?? null
+  if (!ssoSettings) {
+    // A profile that cannot be used turns SSO off; it must not take the
+    // service (and everyone's password sign-in) down with it.
+    try {
+      ssoSettings = loadSsoProfile(env.MX_RIG_SSO_PROFILE)
+    } catch (error) {
+      console.error(`统一认证配置无法使用，浏览器登录已关闭：${error.message}`)
+    }
+  }
+  const browserSso = ssoSettings
+    ? createBrowserSso({
+        settings: ssoSettings,
+        identity: kernel.identity,
+        store: options.ssoStore ?? ssoStoreFor({ settings: ssoSettings, pool }),
+        sessionTtlMs: config.sessionTtlMs,
+        oidcConfiguration: options.oidcConfiguration,
+        ...(options.ssoVerifyEveryMs !== undefined ? { verifyEveryMs: options.ssoVerifyEveryMs } : {})
+      })
+    : null
   const instance = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`
   if (shared) await importLegacyState({ pool, dataRoot })
   const settings = await new Settings(
@@ -312,6 +361,16 @@ export async function start(env = process.env, options = {}) {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost')
     const path = url.pathname
+    if (browserSso?.publicEntrance(req) && !publicPath(path))
+      return sendJson(res, 404, { error: { code: 'not_public', message: '这个入口不对外开放' } })
+    if (path.startsWith('/auth/')) {
+      try {
+        if (browserSso && (await browserSso.handle(req, res, url))) return
+        return sendJson(res, 404, { error: { code: 'not_found', message: '统一认证登录未开启' } })
+      } catch (error) {
+        return sendAuthError(req, res, error)
+      }
+    }
     if (path === '/') {
       res.writeHead(302, { location: '/rig/' })
       res.end()
@@ -402,6 +461,22 @@ export async function start(env = process.env, options = {}) {
       )
         throw new RigError('json_required', '请求需要 JSON', 415)
       const source = directClientAddress(req)
+      // What the login page offers: on the public entrance only SSO.
+      if (path === '/api/rig/v1/auth-methods' && req.method === 'GET') {
+        sendJson(res, 200, {
+          sso: browserSso ? { enabled: true, origin: browserSso.origin } : { enabled: false },
+          password: !browserSso?.publicEntrance(req)
+        })
+        return
+      }
+      // The desktop's browser sign-in: its one-time code and verifier.
+      if (path === '/api/rig/v1/desktop-login' && req.method === 'POST') {
+        if (req.headers.origin) throw new RigError('native_only', '只有桌面端可以使用这个入口', 403)
+        if (!browserSso) throw new RigError('sso_disabled', '统一认证登录未开启', 404)
+        const body = await readJson(req, 4_000)
+        sendJson(res, 200, await browserSso.redeemDesktop({ code: body?.code, verifier: body?.verifier }, source))
+        return
+      }
       if (path === '/api/rig/v1/login' && req.method === 'POST') {
         const body = parseBody(loginBody, await readJson(req, 16_000))
         const result = await kernel.identity.login({
@@ -866,11 +941,13 @@ export async function start(env = process.env, options = {}) {
         // session any more: one started from this browser keeps its state and
         // can be picked up after the next sign-in, from any workbench.
         await kernel.identity.logout(token)
+        // …and the shared module's browser session, when there is one.
+        const browserCookie = browserSso ? await browserSso.signOutBrowser(req) : null
         sendJson(
           res,
           200,
           { ok: true },
-          { 'set-cookie': clearSessionCookie({ secure: config.secureCookies }) }
+          { 'set-cookie': [clearSessionCookie({ secure: config.secureCookies }), browserCookie].filter(Boolean) }
         )
         return
       }
@@ -949,7 +1026,7 @@ export async function start(env = process.env, options = {}) {
   // this machine's loopback names on the server's own port. A reachable Host
   // or forwarded header alone must not make an arbitrary Origin trusted.
   const own = new Set(
-    [config.publicUrl || origin, ...(config.webOrigins ?? []), origin, `http://localhost:${server.address().port}`, `http://[::1]:${server.address().port}`].filter(
+    [config.publicUrl || origin, ...(config.webOrigins ?? []), browserSso?.origin, origin, `http://localhost:${server.address().port}`, `http://[::1]:${server.address().port}`].filter(
       Boolean
     )
   )

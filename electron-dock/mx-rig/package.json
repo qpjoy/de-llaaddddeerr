@@ -39,7 +39,9 @@
     "@modelcontextprotocol/server": "2.0.0",
     "@qpjoy/electron-core-mihomo": "0.1.2",
     "@qpjoy/electron-launcher": "^2.3.19",
+    "openid-client": "6.8.8",
     "playwright": "1.58.2",
+    "undici": "7.29.0",
     "yaml": "^2.9.1",
     "zod": "^4.6.5"
   },

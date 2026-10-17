@@ -43,7 +43,9 @@
           <div class="qp-row">
             <button id="network-connect" class="qp-button qp-button--primary qp-button--sm" type="button">连接内网</button>
             <button id="network-disconnect" class="qp-button qp-button--ghost qp-button--sm" type="button" hidden>断开</button>
+            <button id="network-recover" class="qp-button qp-button--ghost qp-button--sm" type="button" aria-describedby="network-recovery-hint" hidden>重新登记本机网络</button>
           </div>
+          <p id="network-recovery-hint" class="qp-caption qp-muted" hidden>仅备份并重新登记 MX Rig 本机网络身份；账号与测试数据保留。</p>
           <p id="update-line" class="qp-caption qp-muted rig-update-line" hidden>
             MX Rig <span id="update-version"></span>
             <button id="update-check" class="qp-button qp-button--ghost qp-button--sm" type="button">检查更新</button>
@@ -57,11 +59,11 @@
           ><input id="private-http" type="checkbox" /><span class="qp-choice__control"></span
           ><span class="qp-caption">内网测试服务器，允许私有 IP 的 HTTP（10.x / 172.16–31.x / 192.168.x / 100.64–127.x）</span></label
         >
-        <label class="qp-field"
+        <label id="account-field" class="qp-field"
           ><span class="qp-field__label">账号</span
           ><input id="account" class="qp-input" autocomplete="username" required
         /></label>
-        <label class="qp-field"
+        <label id="password-field" class="qp-field"
           ><span class="qp-field__label">密码</span
           ><input
             id="password"
@@ -73,6 +75,13 @@
         <button class="qp-button qp-button--primary qp-button--lg" type="submit">
           登录工作台 →
         </button>
+        <!-- Browser SSO through the platform's unified authentication (docs/25 P4). -->
+        <div id="sso-panel" class="rig-sso" hidden>
+          <span id="sso-or" class="qp-caption qp-muted">或者</span>
+          <button id="sso-login" class="qp-button qp-button--outline qp-button--lg" type="button">用浏览器登录（统一认证 · 飞书）</button>
+          <button id="sso-cancel" class="qp-button qp-button--ghost qp-button--sm" type="button" hidden>取消浏览器登录</button>
+          <p id="sso-hint" class="qp-caption qp-muted"></p>
+        </div>
         <p id="login-error" class="qp-body-2 rig-error" role="alert"></p>
         <p id="login-hint" class="qp-caption qp-muted">
           用管理员发给你的账号和一次性密码登录。本机体验：账号 admin，密码用 bash scripts/manage.sh local token 查看。凭据只在主进程与服务端处理。

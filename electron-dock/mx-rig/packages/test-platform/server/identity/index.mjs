@@ -36,6 +36,10 @@ const INVALID_CREDENTIALS = () => new AppError(401, 'invalid_credentials', '账�
 export function createIdentity({ store, config, logger = console }) {
   const launcher = new LauncherIdentityClient({ ...config.launcher, logger })
   const sessionTtlMs = config.sessionTtlMs ?? 12 * 3_600_000
+  // Browser SSO (mx-rig docs/25 P4), set by the server when a profile is
+  // mounted: verify(session) rechecks the upstream session behind a Rig
+  // session, forget(ref) drops it.
+  let sso = null
 
   async function memberFor(principal) {
     const existing = await store.getMember(principal.id)
@@ -108,6 +112,7 @@ export function createIdentity({ store, config, logger = console }) {
     if (!session || session.revokedAt || Date.parse(session.expiresAt) <= Date.now()) {
       throw new AppError(401, 'unauthorized', '登录已失效，请重新登录')
     }
+    if (session.auth === 'sso') return ssoPrincipal(session)
     const [member, record] = await Promise.all([
       store.getMember(session.principalId),
       store.getLocalAccountByPrincipal(session.principalId),
@@ -121,6 +126,36 @@ export function createIdentity({ store, config, logger = console }) {
       displayName: member.displayName,
       role: member.role,
       mustChangePassword: record.mustChangePassword,
+      sessionExpiresAt: session.expiresAt,
+    }
+  }
+
+  /**
+   * A session from browser SSO: the member Rig knows (same `user:<id>` a
+   * Launcher password sign-in resolves to), still valid upstream. Auth saying
+   * no ends the session here; Auth being unreachable does not.
+   */
+  async function ssoPrincipal(session) {
+    const member = await store.getMember(session.principalId)
+    if (!member) throw new AppError(401, 'unauthorized', '登录已失效，请重新登录')
+    if (member.role === 'disabled') throw new AppError(403, 'member_disabled', '该账号已被停用')
+    try {
+      if (!sso) throw new AppError(401, 'sso_disabled', '统一认证登录已关闭，请重新登录')
+      await sso.verify(session)
+    } catch (error) {
+      if (error?.status === 401) {
+        await store.revokeSession(session.tokenHash)
+        await sso?.forget(session.ssoRef).catch(() => {})
+      }
+      throw error
+    }
+    return {
+      kind: 'user',
+      id: member.principalId,
+      subject: member.principalId,
+      displayName: member.displayName,
+      role: member.role,
+      auth: 'sso',
       sessionExpiresAt: session.expiresAt,
     }
   }
@@ -187,7 +222,38 @@ export function createIdentity({ store, config, logger = console }) {
 
     /** Revoke a session Rig issued. Other tokens are not Rig's to revoke. */
     async logout(token) {
-      if (isSessionToken(token)) await store.revokeSession(sessionKey(token))
+      if (!isSessionToken(token)) return
+      const session = await store.getSession(sessionKey(token))
+      await store.revokeSession(sessionKey(token))
+      if (session?.auth === 'sso') await sso?.forget(session.ssoRef).catch(() => {})
+    },
+
+    /** Turn browser SSO on: `verifier` is { verify(session), forget(ref) }. */
+    useSso(verifier) {
+      sso = verifier
+    },
+
+    /**
+     * A Rig session for someone browser SSO verified. `principal` is the
+     * Launcher identity (`user:<userId>`); the member is the one a Launcher
+     * password sign-in would reach, first seen as a viewer like any other.
+     */
+    async issueSsoSession({ principal, ssoRef, source = null }) {
+      if (!sso) throw new AppError(503, 'sso_disabled', '统一认证登录未开启')
+      if (!/^user:[^\s]{1,200}$/.test(principal?.id ?? '')) throw new AppError(502, 'sso_identity_invalid', '统一身份标识无效')
+      const member = await memberFor(principal)
+      if (member.role === 'disabled') throw new AppError(403, 'member_disabled', '该账号已被停用')
+      const token = newSessionToken()
+      await store.pruneSessions?.()
+      await store.createSession({
+        tokenHash: sessionKey(token),
+        principalId: principal.id,
+        source,
+        auth: 'sso',
+        ssoRef,
+        expiresAt: new Date(Date.now() + sessionTtlMs).toISOString(),
+      })
+      return { token, expiresIn: Math.floor(sessionTtlMs / 1000), member: { ...member, kind: 'user', auth: 'sso' } }
     },
 
     /**

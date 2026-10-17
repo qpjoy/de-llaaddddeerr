@@ -36,9 +36,10 @@ function fixture({ product = { productId: PRODUCT_ID, mode: 'standalone', networ
           calls.connect.push(input)
           leases += 1
           const kind = input.identityKind
+          const leaseIp = kind === 'user' ? '10.120.1.7' : '10.120.0.7'
           return {
-            lease: { leaseId: `lease-${leases}`, capability: input.newLeaseCapability, productId: PRODUCT_ID, installId: options.installId, identityKind: kind, userId: input.userId ?? null, leaseIp: '10.120.0.7', serviceVip: VIP },
-            routePlan: { productId: routeProduct, leaseCidr: '10.120.0.0/16', serviceVip: VIP, routeCidrs: ['0.0.0.0/0'] },
+            lease: { leaseId: `lease-${leases}`, capability: input.newLeaseCapability, productId: PRODUCT_ID, installId: options.installId, identityKind: kind, userId: input.userId ?? null, leaseIp, serviceVip: VIP },
+            routePlan: { productId: routeProduct, leaseIp, leaseCidr: '10.120.0.0/16', serviceVip: VIP, routeCidrs: ['0.0.0.0/0'] },
             snapshot: { signatures: { digest: 'd' } }
           }
         }
@@ -56,7 +57,7 @@ function fixture({ product = { productId: PRODUCT_ID, mode: 'standalone', networ
   const fetchImpl = async (url, init = {}) => {
     calls.fetch.push({ url, init })
     const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
-    if (url.endsWith('/domestic-peer/sync')) return json(200, { ok: true })
+    if (url.endsWith('/domestic-peer/sync')) return json(200, { domesticPeerSync: { status: 'passed', execution: 'executed' } })
     if (url === `http://${VIP}:18090/healthz`) return json(200, { ok: true })
     if (url === `http://${VIP}/readyz`) return rigReady ? json(200, { ok: true }) : json(502, {})
     if (url.endsWith('/internal/v1/sdk/oauth/token')) {
@@ -166,5 +167,40 @@ test('disconnecting stops only this tunnel and releases the leases', async () =>
   assert.equal(f.calls.stop.length, 1)
   assert.match(f.calls.stop[0].ownerId, /^mx-rig:/)
   assert.ok(f.calls.fetch.some((call) => call.url.endsWith('/leases/lease-1/release')))
-  assert.equal(Object.keys(network.vault.leaseCredentials).length, 0)
+  assert.equal(network.vault.leaseCredentials['lease-1'].status, 'released', 'retain the anonymous renewal proof after release')
+})
+
+test('shutdown saves the stopped session before waiting for a remote lease release', async () => {
+  const f = fixture()
+  const fetchImpl = f.fetchImpl
+  let releaseStarted
+  let finishRelease
+  const started = new Promise((resolve) => { releaseStarted = resolve })
+  const deferred = new Promise((resolve) => { finishRelease = resolve })
+  f.fetchImpl = async (url, init) => {
+    const response = await fetchImpl(url, init)
+    if (url.endsWith('/release')) {
+      releaseStarted()
+      await deferred
+    }
+    return response
+  }
+  const network = await open(f)
+  await network.connect()
+  const closing = network.disconnect('shutdown')
+  await started
+  try {
+    const saved = JSON.parse(await readFile(join(network.dir, 'mx-rig-launcher.json'), 'utf8'))
+    const vault = JSON.parse(f.storage.decryptString(Buffer.from(saved.vault, 'base64')))
+    assert.equal(vault.activeSession, null, 'a hard exit during release must not leave an active session on disk')
+    assert.equal(network.snapshot().status, 'idle')
+    const reopened = await LauncherNetwork.open({ dir: network.dir, sdk: f.sdk, safeStorage: f.storage, fetchImpl })
+    assert.equal(reopened.session, null, 'the released lease must not become the previous side of a new handover')
+    assert.equal(reopened.applied, false)
+    assert.equal(reopened.snapshot().status, 'idle')
+  } finally {
+    finishRelease()
+    await closing
+  }
+  assert.equal(network.vault.leaseCredentials['lease-1'].status, 'released', 'the stopped lease remains a renewal proof, not an active session')
 })

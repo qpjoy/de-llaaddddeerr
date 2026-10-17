@@ -38,5 +38,13 @@
     "kinds": ["app-installer"],
     "publisher": "svc_mx-rig_release_publisher",
     "approver": "svc_mx-rig_release_approver"
+  },
+  "sso": {
+    "appId": "mx-rig",
+    "displayName": "MX Rig",
+    "entrance": "公网认证",
+    "origin": "https://rig.minsight-ai.com",
+    "audience": "mx-rig",
+    "callback": "https://rig.minsight-ai.com/auth/sso/callback"
   }
 }

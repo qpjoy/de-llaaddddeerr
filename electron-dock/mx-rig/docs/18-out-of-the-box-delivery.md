@@ -147,6 +147,7 @@ bash scripts/manage.sh desktop --launcher
   ```
 
   安装 ID 在桌面端点「检查更新」后显示。macOS 和 Windows 的包各发一次；只有 `--launcher` 打的包能发布。
+- 浏览器统一认证（docs/25 §11）：在 Launcher Internal 的「统一认证 → 接入应用」登记 `mx-rig` 之后，再运行一次 `scripts/manage.sh deploy`，它会自动带上档案，日志里出现 `browser SSO: on`。网页端在 `https://rig.minsight-ai.com` 用统一认证或飞书登录；桌面端用系统浏览器登录。域名和网关的要求见 [deploy/gateway/README.md](../deploy/gateway/README.md)。
 
 **发版时顺手录演示录像**（docs/24 M8c）：「新手引导」里每个关卡都有一段录像，发版时重录，所以录像里就是这一版的界面。
 

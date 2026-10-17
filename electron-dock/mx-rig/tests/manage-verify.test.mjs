@@ -250,6 +250,8 @@ cmd_deploy
   ]
   assert.deepEqual(await lines(join(f.dir, 'requests.jsonl')), [...expected, ...expected])
   const calls = await lines(join(f.dir, 'calls.jsonl'))
-  assert.equal(calls.length, 4)
-  assert.ok(calls.every((args) => args.includes('mx-rig') && (args.includes('port-forward') || (args.includes('get') && args.includes('mx-rig-secrets')))), 'verification only reads the Rig secret and opens its temporary forward; it never writes Launcher resources')
+  // Per deploy: the browser SSO profile's Secret is read (docs/25 P4; none here),
+  // then verification reads the admin token and opens its forward.
+  assert.equal(calls.length, 6)
+  assert.ok(calls.every((args) => args.includes('mx-rig') && (args.includes('port-forward') || (args.includes('get') && (args.includes('mx-rig-secrets') || args.includes('mx-rig-sso'))))), 'deploy only reads Rig secrets and opens its temporary forward; it never writes Launcher resources')
 })

@@ -90,6 +90,17 @@ try {
     },
     {
       schedule: false,
+      // Browser SSO configured (docs/25 P4): the login page offers it. No
+      // identity provider is contacted until someone clicks.
+      ssoSettings: {
+        appId: 'mx-rig',
+        origin: 'https://rig.example',
+        issuer: 'https://auth.example/identity',
+        clientId: 'mx-rig-web',
+        clientSecret: 'smoke-only',
+        audience: 'mx-rig',
+        sessionKey: Buffer.alloc(32, 7).toString('base64url')
+      },
       modelOptions: {
         environment: { MX_RIG_MODEL_API_KEY: 'fixture-key' },
         fetchImpl: async () => {
@@ -140,6 +151,22 @@ try {
   const errors = []
   page.on('pageerror', (e) => errors.push(e.message))
   await page.goto(server.origin + '/rig/')
+  // Inside, browser SSO sits beside the password form…
+  await page.locator('#sso-login').waitFor({ state: 'visible' })
+  assert.equal(await page.locator('#sso-or').isVisible(), true)
+  assert.equal(await page.locator('#account-field').isVisible(), true)
+  await page.screenshot({ path: join(qa, 'web-login-sso.png') })
+  // …and on the public entrance it is the only way in (the server says so; here
+  // its answer is stood in for, since this page is not on that host).
+  const outside = await browser.newPage({ viewport: { width: 1440, height: 960 } })
+  await outside.route('**/api/rig/v1/auth-methods', (route) => route.fulfill({ json: { sso: { enabled: true, origin: 'https://rig.example' }, password: false } }))
+  await outside.goto(server.origin + '/rig/')
+  await outside.locator('#sso-login').waitFor({ state: 'visible' })
+  for (const hidden of ['#account-field', '#password-field', '#login-form button[type=submit]', '#sso-or'])
+    assert.equal(await outside.locator(hidden).isVisible(), false, `${hidden} is not offered on the public entrance`)
+  assert.match(await outside.locator('#login-hint').textContent(), /不接受账号密码/)
+  await outside.screenshot({ path: join(qa, 'web-login-sso-only.png') })
+  await outside.close()
   await page.locator('#account').fill('admin')
   await page.locator('#password').fill('web-test-secret')
   await page.locator('#login-form button[type=submit]').click()
@@ -782,7 +809,7 @@ try {
 
   assert.deepEqual(errors, [])
   console.log(
-    'Browser tools and Web smoke passed: origin policy, real page fill/click, password refusal, screenshots, HttpOnly login, unconfigured model blocked, Internal settings, Agent market, quality report (empty rates read "—", report focus reorders sections), orchestration centre (compiled spec, draft preview, refused draft), egress observation, the desktop overseas channel card in each state, the system layer (signal vs platform evidence, claim, floating panel), one-line dispatch parsing (real plan id, no execution), switching Rig\'s own egress channel, streamed model output (a visible draft that the final answer replaces), a structured finding whose unread citation is marked, accounts (create, sign in with the one-time password, role, reset, disable), runners (enrol command, remove), the run detail (waiting for a runner, live pipeline, results with a seekable recording, rerun one case, cancel, an unstarted Agent analysis drafted from it, the read-only tour on the web, a quest offering it, a published tour recording playing in 新手引导), creating a project from the Compass acceptance pack (references shown, not counted), and M6 (scheduling only after a verified run, the setup checklist, the audit trail of a schedule change, registering an installer, the old console read-only), and the published versions of a test repository in the browser.'
+    'Browser tools and Web smoke passed: origin policy, real page fill/click, password refusal, screenshots, HttpOnly login, unconfigured model blocked, Internal settings, Agent market, quality report (empty rates read "—", report focus reorders sections), orchestration centre (compiled spec, draft preview, refused draft), egress observation, the desktop overseas channel card in each state, browser SSO on the login page (beside passwords inside, alone on the public entrance), the system layer (signal vs platform evidence, claim, floating panel), one-line dispatch parsing (real plan id, no execution), switching Rig\'s own egress channel, streamed model output (a visible draft that the final answer replaces), a structured finding whose unread citation is marked, accounts (create, sign in with the one-time password, role, reset, disable), runners (enrol command, remove), the run detail (waiting for a runner, live pipeline, results with a seekable recording, rerun one case, cancel, an unstarted Agent analysis drafted from it, the read-only tour on the web, a quest offering it, a published tour recording playing in 新手引导), creating a project from the Compass acceptance pack (references shown, not counted), and M6 (scheduling only after a verified run, the setup checklist, the audit trail of a schedule change, registering an installer, the old console read-only), and the published versions of a test repository in the browser.'
   )
 } finally {
   await tools.close()

@@ -40,6 +40,7 @@ export function freeStandaloneIndex(products) {
 }
 
 const RELEASE = MANIFEST.release
+const SSO = MANIFEST.sso
 
 /** The AppCenter entry as Release Center needs it: standalone, Rig's network, Rig's package, the channel. */
 function appMatches(app) {
@@ -59,9 +60,11 @@ function appMatches(app) {
  *
  * `resolved` is Release Center's answer for Rig's package name (null when it
  * has none); `credentials` says which release credentials this cluster
- * already keeps ({ publisher, approver }, or null when not known).
+ * already keeps ({ publisher, approver }, or null when not known);
+ * `ssoProfile` is where the browser SSO profile was found (a host file or
+ * the cluster's Secret), or null.
  */
-export function launcherPlan({ products = [], app = null, routes = [], rigUrl = null, resolved = null, credentials = null }) {
+export function launcherPlan({ products = [], app = null, routes = [], rigUrl = null, resolved = null, credentials = null, ssoProfile = null }) {
   const existing = products.find((product) => product.productId === PRODUCT_ID) ?? null
   const wanted = MANIFEST.productNetwork
   const shape = existing
@@ -138,6 +141,20 @@ export function launcherPlan({ products = [], app = null, routes = [], rigUrl = 
           credentialState === 'ok'
             ? 'kept in this cluster (Secret mx-rig/mx-rig-release) for scripts/manage.sh release'
             : `issued by Launcher once and kept in Secret mx-rig/mx-rig-release — never printed; one already issued but not kept here is rotated`
+      },
+      {
+        id: 'sso-application',
+        state: ssoProfile ? 'ok' : 'manual',
+        title: `Unified authentication client ${SSO.appId} (browser SSO, docs/25 P4)`,
+        detail: ssoProfile
+          ? `profile found (${ssoProfile}); scripts/manage.sh deploy keeps it in Secret mx-rig/mx-rig-sso`
+          : `Launcher Internal → 平台设置 → 统一认证 → 接入应用: ${SSO.entrance}, ${SSO.displayName}, ${SSO.appId}, ${SSO.origin}, Audience ${SSO.audience} → 校验配置 → 保存应用 → 前往 Launcher 发布, until 「Auth 已加载」; then scripts/manage.sh deploy`
+      },
+      {
+        id: 'sso-entrance',
+        state: 'manual',
+        title: `Public entrance ${SSO.origin}`,
+        detail: `DNS and a certificate for ${new URL(SSO.origin).host} on the Domestic gateway → WireGuard 10.88.88.88:80 → Internal Nginx → ${rigUrl ?? 'the Rig service'}, forwarding only the paths in deploy/gateway/README.md (docs/25 §11)`
       }
     ]
   }

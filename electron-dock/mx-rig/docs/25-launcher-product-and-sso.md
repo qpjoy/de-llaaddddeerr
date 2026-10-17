@@ -14,7 +14,7 @@
 | 方面 | 现在 |
 | --- | --- |
 | 账号 | Rig 自有账号。服务端配置 `MX_RIG_LAUNCHER_URL` 后，Launcher 统一账号也能用账号密码登录：服务端代换 SDK token 并内省，首次登录是查看者。代码已有：`packages/test-platform/server/identity/launcher-client.mjs` |
-| 浏览器 SSO | 尚未实现；统一账号密码登录不等于浏览器 OIDC SSO，见 P4 |
+| 浏览器 SSO | 代码已实现（§11）：网页端经统一认证登录，桌面端经系统浏览器登录；要等域名、证书、网关和统一认证登记都做完，才能在线上使用 |
 | 桌面端 | 独立的 Electron 应用（`dev.qpjoy.mx-rig`）。Launcher 模式已实现匿名 lease、自己的 WireGuard 隧道和登录后的用户 lease；普通模式仍直接连接指定的 Rig 服务 |
 | 更新 | Launcher 安装包已接 Release Center 完整安装包更新；源码和 `--dir` 运行不自动更新。真实定向更新闭环仍待验收，见 §8 |
 | 组网 | Launcher 模式已有产品内网及按需海外通道；只管理 Rig 的网络和测试浏览器，真实桌面连接与海外线路仍待验收，见 §7、§9、§10 |
@@ -66,8 +66,8 @@ Rig 服务           http://<Rig 的 VIP>          ← Internal 网关按 Host �
 1. **打开桌面端**：经 bootstrap 申请匿名 lease，WireGuard 只路由 Rig 自己的 lease 段和 VIP，**不设系统 DNS / PAC / NRPT**。第一次连接要系统授权：macOS 上装 LaunchDaemon，Windows 上是 UAC。
 2. **VIP 通了以后**，Rig 服务已经能访问。登录页只要一个统一账号：
    - 账号密码**经隧道**发给 Rig 服务（`/api/rig/v1/native-login`）。Rig 服务用 Launcher 账号登录，这一步已经实现，见 §2。
-   - 业务登录和本地 Runtime 初始化完成后，主进程在后台经 VIP 向 User Center 再换桌面端自己用的 token，用来换用户 lease、申请海外订阅。用户只输入一次密码，但当前代码会验证两次；网络 token 不离开桌面端主进程，也不落盘。
-3. **后台换成用户 lease**，用户身份的网络策略和定向发版从这里生效。进入工作台和完成用户网络接管是两个验收点：当前 SDK 默认重新应用 Rig 隧道，可能与首屏请求重叠；待优化项见 §10.3。
+   - 业务账号验证通过后，主进程经 VIP 向 User Center 再换桌面端自己用的 token，用来换用户 lease、申请海外订阅。用户只输入一次密码，但当前代码会验证两次；网络 token 不离开桌面端主进程，也不落盘。
+3. **先完成用户 lease 切换，再进入工作台**。主进程等待用户网络就绪并确认 Rig 服务可达，才初始化本地 Runtime、返回业务登录结果。用户身份的网络策略和定向发版从这里生效；切换失败留在登录页，显示网络错误，避免工作台首屏请求撞上隧道重启。两阶段切换及恢复边界见 §10.3。
 
 本地 Rig 账号保留：应急管理员，以及开发和局域网环境下「直接填服务地址」的模式。
 
@@ -109,7 +109,7 @@ unset MX_LAUNCHER_OPS_TOKEN
 | **P1** | 服务端：自动接 Launcher、网络策略、打印路由。桌面端：Launcher 模式（匿名 lease → WireGuard → VIP → 统一账号登录 → 用户 lease）、网络状态和断开 / 卸载、打包带上 WireGuard 引擎 | Launcher Admin 登记 ProductNetwork 和网关路由；一台装着 MX-H2I 的测试机做并存检查 | 测试机上装包 → 授权 → 登录 → 用 Rig；MX-H2I 照常（C1–C12） |
 | **P2** | Release Center 自动更新（完整安装包；热更新另议，见 §8）；Windows / macOS 两端的交付 | AppCenter 条目与发版账号（`launcher apply`）；证书（可选） | 装旧版后检查、下载、安装；定向 → 全量 |
 | **P3** | 外网：海外订阅 → 本机回环代理 → 测试浏览器的出网通道（见 §9） | 账号有海外订阅权限 | 测试浏览器经通道打开海外站点，系统代理不变 |
-| **P4** | 绑域名后的浏览器 SSO（网页端和桌面端） | 域名、Auth 登记 `mx-rig` | 浏览器已登录时一键进入，飞书可用 |
+| **P4** | 绑域名后的浏览器 SSO（网页端和桌面端，见 §11） | 域名与网关、统一认证登记 `mx-rig` | 浏览器已登录时一键进入，飞书可用 |
 
 ## 5. 不变的边界
 
@@ -129,7 +129,7 @@ unset MX_LAUNCHER_OPS_TOKEN
 - **桌面端 Launcher 模式**（`apps/desktop/launcher-network.mjs`），依赖 `@qpjoy/electron-launcher` 2.3.19：
   - 打开桌面端后先连接自己的产品网络：经 bootstrap 申请匿名 lease，WireGuard 只路由 Rig 自己的 lease 段和 VIP，不设系统 DNS / PAC / NRPT，然后确认 VIP 和 Rig 服务都能访问；
   - 登录页先显示「内网」状态：没有服务地址可填，网络通了才能登录；第一次连接前说明要装什么（系统授权）；连接过一次以后，启动时自动重连；
-  - 统一账号登录：账号密码经隧道交给 Rig 服务，业务登录完成后在后台经 VIP 换桌面端自己的 token、切换用户 lease。token 只在内存里；网络凭据用系统钥匙串加密存放；
+  - 统一账号登录：账号密码经隧道交给 Rig 服务，再经 VIP 换桌面端自己的 token、切换用户 lease。2026-10-17 修正为等待用户网络及 Rig 服务就绪后再进入工作台（§10.3）；token 只在内存里，网络凭据用系统钥匙串加密存放；
   - Rig 的本地账号仍可登录，网络保持匿名 lease；
   - 只有真正建立过隧道才会去停它。连接在建立隧道之前就失败了，退出时不碰系统，也就不会弹管理员授权。
   - 没有登记时给出明确提示，告诉管理员该做什么。
@@ -156,7 +156,7 @@ unset MX_LAUNCHER_OPS_TOKEN
 - `npm run test:desktop` 新增：同一个应用以 Launcher 模式启动，连本地的替身入口：登录页先显示网络、没有地址输入框、未连接时不能登录；点「连接内网」走真实的 SDK，到「未登记」为止，提示管理员运行 `manage.sh launcher plan`。截图：`.runtime/qa/desktop-launcher-login.png`。这台开发机上没有装任何 WireGuard。
 - `npm run package -- --dir --launcher`：应用里带上了 WireGuard 引擎（`wg`、`wg-quick`、`wireguard-go`），SDK 和 Launcher 模式的默认配置都在。
 
-**真实环境验收**：2026-10-17 用户已确认产品登记、网关发布，以及 Rig 的 `Sync & Apply Service VIP` 成功；桌面端连接、账号登录和用户网络接管仍需按 §10.1 验收。以下保留完整顺序，已完成的服务器步骤不必重复执行：
+**真实环境验收**：2026-10-17 用户已确认产品登记、网关发布，以及 Rig 的 `Sync & Apply Service VIP` 成功。随后桌面截图确认个人统一账号已登录 Rig，角色为管理员，但「内网 · 连接失败」，所以用户网络接管及实际执行仍未通过。修复后的桌面端需按 §10.1 复验。以下保留完整顺序，已完成的服务器步骤不必重复执行：
 
 1. 在 Internal 节点上 `scripts/manage.sh deploy`，确认打印了统一账号登录和网关路由；
 2. `scripts/manage.sh launcher plan` 看计划，`MX_LAUNCHER_OPS_TOKEN=… scripts/manage.sh launcher apply` 写入；
@@ -349,7 +349,7 @@ env -u ELECTRON_RUN_AS_NODE -u MX_RIG_SERVER_URL \
 | --- | --- | --- |
 | 1. 产品内网 | 点「连接内网」，首次完成系统授权 | 状态已连接，Rig 服务可达；不只是 Launcher healthz 成功 |
 | 2. Rig 服务 | 在同一台已连接的 Mac 运行下方 readyz 检查 | HTTP 200，返回 PostgreSQL ready |
-| 3. 统一账号 | 用 Launcher 的普通统一账号密码登录 | 进入工作台、显示正确成员；随后网络显示「内网 · 用户网络」。只进入工作台但仍是匿名网络，不能算网络接管通过 |
+| 3. 统一账号 | 用 Launcher 的普通统一账号密码登录 | 等待网络切换完成后进入工作台、显示正确成员，网络显示「内网 · 用户网络」，刷新无连接错误。只认证成功但网络失败，不能算通过 |
 | 4. Rig 权限 | 检查当前角色及项目权限 | 首次统一账号默认 viewer。由 Rig 管理员在「管理 → 账号与成员」配置角色；执行还需项目执行权限。Launcher 管理员身份不会自动变成 Rig 管理员 |
 | 5. 实际执行 | 使用 Rig 管理员走「新项目：从用例到测试代码」新手关卡，选择内置试验场、准备本机测试仓库和执行机，再亲手点击最后的执行按钮 | 看见真实执行从排队进入运行、形成最终结果，并能打开步骤和报告制品。计划建好或任务派发成功不等于测试通过；该关卡使用预置实现，不要求先配置模型，详见 [docs/24 §8](24-guided-tours.md#8-m8b-交付记录2026-10-08) |
 | 6. 并存与恢复 | Rig 连接、登录、退出时观察原有 MX-H2I；再打开 Rig | MX-H2I 登录和网络正常；Rig 再打开可自动重连。当前不保存用户登录 token，自动重连不等于免登录 |
@@ -380,15 +380,142 @@ P4 需要一整条接入链路：
 
 SSO 不会自动缩短匿名入网、用户 lease 切换、peer 同步或 WireGuard 应用的耗时。它主要改善跨应用认证体验，不能据此承诺首次启动更快。
 
-### 10.3 现有登录可优化的部分（待实施）
+### 10.3 用户网络切换修复与后续优化（2026-10-17）
 
-当前顺序已按代码核对：匿名组网 → Rig `native-login`（服务端向 Launcher 换 token 并内省）→ 主进程 `/me` 与 Runtime 初始化 → 显示工作台；与此同时，主进程在后台再次用密码换网络 token、申请用户 lease 并重新应用 Rig 隧道。参考 [main.mjs](../apps/desktop/main.mjs)、[launcher-network.mjs](../apps/desktop/launcher-network.mjs)、[identity](../packages/test-platform/server/identity/index.mjs)。
+现场截图显示个人账号和管理员角色已经识别，但用户网络连接失败。源码确认两个问题：旧版 peer 同步没有使用平台已有的 `prepare / commit / abort`，可能在本机仍使用旧 IP 时就让中继只允许新 IP；同时登录立即返回，工作台请求与 Rig 隧道重新应用重叠。截图本身不足以确定本次现场失败的具体接口，仍需结合网络状态提示复验。
 
-优先处理以下几点，先采集阶段耗时，再对比改动前后结果：
+当前主进程顺序：匿名组网 → Rig `native-login`（服务端向 Launcher 换 token 并内省）→ `/me` → 经 VIP 获取网络 token → 完成用户网络切换、确认 Rig 可达 → 初始化 Runtime → 进入工作台。参考 [main.mjs](../apps/desktop/main.mjs)、[launcher-network.mjs](../apps/desktop/launcher-network.mjs)、[identity](../packages/test-platform/server/identity/index.mjs)。本地 Rig 账号和应急管理员保留匿名网络，不要求 Launcher 用户切换。
 
-1. **避免网络切换干扰首屏。** 当前 SDK 默认 `action: restart`，Rig 用户网络接管会与工作台首屏 API 请求重叠。需要协调接管和依赖网络的请求，并研究同一 Rig owner 下的安全配置更新；不能直接省掉用户 lease 或借用 MX-H2I 的隧道。
-2. **缩短无响应的等待。** 为产品查询、enrollment、snapshot 等请求设置明确期限和取消能力；当前共用串行队列，一项悬挂会拖住后续连接或断开操作。避免把普通业务请求的 90 秒默认超时直接当作登录体验预算。
-3. **减少首屏串行加载。** config / graph / tools 已并行，但 missions、tasks、系统信息仍依次等待后才 render。可并行互不依赖的请求，把非首屏必需信息延后；参考 [app.js](../apps/web/app.js)。
-4. **减少重复密码校验。** Rig 业务登录与网络登录目前各验证一次。改为受控凭据交换或一次性桌面交接前，要明确 audience、scope、有效期和退出语义；不能直接混用业务 token、网络 token 或运维凭据。
+网络接管使用平台已有的持久化 transition 合同，不改 Launcher 服务端：
 
-用户网络切换已经在后台，服务端 token 内省也已有缓存和并发合并，不能把它们当作尚未实现的优化。上述性能工作应先在 Rig 范围内完成；新增 SSO 接入独立验收，保留 MX-H2I 当前的登录与联网行为。
+1. 保存原会话和新会话，以及 enrollment 返回的最新 lease capability；按路由计划同步所有必需的 Domestic / Internal peer。`prepare` 阶段允许同一设备密钥的新旧 IP 同时通过。
+2. 重新应用 Rig 自己的本机隧道，验证 Launcher VIP 和 Rig `/readyz` 都可达。
+3. `commit` 成功后只保留新 IP，再向界面报告 ready；HTTP 200 本身不算成功，还必须有 peer 执行成功结果。
+4. 在 commit 之前失败，尝试恢复旧本机配置并 `abort`。commit 响应不确定时保留新配置和接管记录，重试同一 transition；不立即回到可能已经释放的旧 lease。
+
+原、新会话及未完成的接管记录保存在系统钥匙串加密的 vault 中，用户 token 和密码不落盘；重开先处理已有 transition，不重复 enroll。退出时只停 Rig 隧道，未完成的两侧 lease 凭据会保留。恢复仍依赖 Rig VIP 可达及平台 transition 有效；过期、节点持续不可达或恢复失败时明确显示失败，不承诺所有情况都自动恢复。
+
+**已知平台恢复边界**：现有 Launcher 对非 abort 请求先检查 transition 的 deadline，已 committed 的幂等 commit 也受此限制。因此“服务端已经提交、最后响应丢失、客户端过期后重试”即使新 VIP 健康也可能持续被拒绝；Rig 会保留记录并要求管理员核对该 Rig 接管，不能靠反复登录解决。此处没有改动 Launcher 的状态机。此次客户端修复不要求重新部署 Launcher、再次 Sync VIP 或修改共享网关。
+
+本地回归覆盖同密钥双 IP 的切换顺序、capability 轮换、业务失败响应、apply / probe 失败回退、确认丢失后的重试、重开与退出保留记录，以及过期时不误报成功；另验证主进程等待网络后才初始化 Runtime、登录中的并发守卫和真实页面按钮状态。网络部分使用 SDK / HTTP 替身，界面部分使用拦截全部请求的本地 Chromium；这些检查不能替代真实 macOS / Windows WireGuard 和线上端到端验收。
+
+后续性能优化仍需采集阶段耗时，再对比改动前后结果：
+
+1. **缩短无响应的等待。** 为产品查询、enrollment、snapshot 等请求设置明确期限和取消能力；当前共用串行队列，一项悬挂会拖住后续连接或断开操作。避免把普通业务请求的 90 秒默认超时直接当作登录体验预算。
+2. **减少首屏串行加载。** config / graph / tools 已并行，但 missions、tasks、系统信息仍依次等待后才 render。可并行互不依赖的请求，把非首屏必需信息延后；参考 [app.js](../apps/web/app.js)。
+3. **减少重复密码校验。** Rig 业务登录与网络登录目前各验证一次。改为受控凭据交换或一次性桌面交接前，要明确 audience、scope、有效期和退出语义；不能直接混用业务 token、网络 token 或运维凭据。
+
+服务端 token 内省已有缓存和并发合并，不能把它们当作尚未实现的优化。上述性能工作应先在 Rig 范围内完成；新增 SSO 接入独立验收，保留 MX-H2I 当前的登录与联网行为。
+
+### 10.4 重开时联网 401：保留续接凭据与旧版本恢复（2026-10-17）
+
+另一处已确认的失败发生在账号登录之前：退出 Rig 后再次打开，申请匿名网络返回 `401 Unauthorized`。Launcher 即使已释放旧匿名 lease，仍要求原安装身份提供该 lease 的 capability；旧版 Rig 在释放和用户接管完成时删除了它。本机只读检查确认原 WireGuard 密钥还在，但原 lease capability 已不存在，只剩失败申请新生成的 pending capability。此时重新输入账号密码或重复 Sync VIP 无法补回旧证明。
+
+修复后的 Rig 在加密 vault 中保留最新匿名 lease 的续接证明，以及活动 lease 和未完成接管所需的证明；释放只记录状态，不立即删除。成功取得新匿名 lease 后才淘汰被替代的旧匿名记录。enroll 成功、后续 snapshot 失败时，也保留各身份的 pending capability，下一次申请可携带这些证明。保留集合有上界；必要证明过多时停止并提示核对，不静默丢弃。
+
+对旧版已经丢失证明的安装，更新源码或安装包后：
+
+1. 完全退出旧版 Rig，按 §10.1 启动更新后的源码，或打开包含修复的新安装包。仅重开原安装包不会获得源码修复。
+2. 若平台明确拒绝缺失续接证明，且本机没有活动会话、未完成接管或其他可用证明，登录页显示「重新登记本机网络」。普通 401、权限拒绝和首次登记失败不提供此入口。
+3. 点击该按钮。Rig 先停止自己的 WireGuard 服务，再将原网络状态文件逐字节备份为 `mx-rig-launcher.json.recovery-<时间>-<随机值>.bak`（权限 0600），最后换用新的 Rig 安装 ID、设备 ID 和密钥申请网络。备份仍为原加密内容；停止或备份失败时保留原身份。
+4. 等待匿名网络已连接、Rig 服务可达，再用个人统一账号登录，确认「内网 · 用户网络」。然后退出并重开一次，验证正常续接。
+
+macOS 源码默认状态目录是 `~/Library/Application Support/MX Rig/`。恢复只更换 Rig 本机网络身份，保留个人账号、项目、测试数据及其他应用的配置；不会清空 userData，也不会修改 MX-H2I 网络。安装 ID 随之改变，若使用过 Release Center 定向发布，后续应以新 ID 为准。每个恢复后的身份不会因反复 401 自动更换；若再次失败，应继续诊断具体原因。
+
+验证包括真实已安装 Launcher SDK 的 capability 请求头、释放后重开、用户接管后重开、snapshot 失败窗口，以及 24 轮切换后的保留上界；HTTP 和系统隧道调用均为替身。另覆盖恢复范围、原加密文件备份、停止或备份失败保留身份、普通拒绝不恢复、重复恢复不重建，以及登录期间的 IPC / 页面互斥。真实网络恢复仍须按上面步骤在 Mac 上验收。
+
+## 11. P4 交付记录（2026-10-17）：浏览器统一认证
+
+**做了什么**：Rig 接入平台的统一认证（Launcher 里基于 oidc-provider 的 Auth，例如 `auth.minsight-ai.com`）：
+
+- **网页端**：在 `https://rig.minsight-ai.com` 点「用浏览器登录」，或者浏览器里已经登录过统一认证，就直接进入工作台；也可以用飞书登录。
+- **桌面端**：点「用浏览器登录」后，在系统浏览器里完成认证，再回到 MX Rig。
+
+账号密码登录、Rig 本地账号和应急管理员都保留。
+
+**决定**
+
+- **用平台已有的部件**：
+  - OIDC 部分交给 `@qpjoy/mx-common/identity/sso`，包括授权码 + PKCE、state、nonce、签名和 UserInfo 校验，和 Hub、Pay 一样；
+  - 会话表用平台模板的结构，放在 Rig 自己的 `rig_auth` schema 里（迁移 027）；
+  - 配置档案由 Launcher Internal「统一认证 → 接入应用」生成，Rig 不自己造凭据。
+- **还是那个成员**：统一认证验证过的身份是 `user:<userId>`，和 Launcher 账号密码登录得到的完全一样，所以角色、项目权限都沿用。不按显示名或邮箱合并账号；首次登录的人是查看者。统一认证本身不授予任何 Rig 角色。
+- **每个 Rig 会话都要回统一认证复核**：SSO 登录得到的仍是普通的 Rig 会话（`rig_s1_`，标记为 `auth = sso`），并指向一份加密保存的上游会话。使用期间每分钟最多复核一次：
+  - 账号在统一认证那边被停用或撤销，下一次请求就退出；
+  - 统一认证暂时连不上时，10 分钟内复核成功过的会话继续可用，不会因此把所有人踢下线。
+- **公网入口只开必要的路径**：Host 是公网域名时，Rig 只接受工作台页面、`/auth/sso/*`、`/auth/desktop/*`，以及已登录的人用的 API。账号密码登录、执行机、工位、webhook、健康检查和旧管理台都返回 404，只能走内网地址。网关应该先按同样的清单过滤，Rig 自己是第二道。清单见 [deploy/gateway/README.md](../deploy/gateway/README.md)，有测试保证样例配置和 Rig 自己的判断一致。
+- **桌面端走 RFC 8252**：
+  1. 系统浏览器打开 Rig 的 `/auth/desktop/start`，带上 challenge（verifier 的 SHA-256）、本机端口和 state；
+  2. 统一认证完成后，浏览器被送到 `http://127.0.0.1:<端口>/callback`，带一次性 code，有效 2 分钟；
+  3. 只有持有 verifier 的桌面端进程，才能经 VIP 把 code 换成 Rig 会话。
+
+  URL 里从不出现长期 token；verifier 错一次，code 就作废。不用 Rig 的测试浏览器做这件事，也不借用个人的登录 cookie。
+- **浏览器登录不带网络凭据**：Launcher 的网络 token 只能用密码换（SDK token 接口只支持 password 和 client_credentials，没有 token 交换）。所以用浏览器登录桌面端时，内网保持匿名网络，海外通道不可用，界面会说明。需要用户网络或海外通道时，用账号密码登录。
+
+  MX-H2I 的飞书桌面登录用的是专门的飞书接口和固定的本机端口 17891，Rig 不复用。要让浏览器登录也能切到用户网络，需要平台提供受控的「SSO → 网络 token」交换。这属于 Launcher 的后续工作，Rig 不改 Launcher。
+
+**实现**
+
+- 服务端：
+  - [browser-sso.mjs](../apps/server/browser-sso.mjs)：接入共享 SSO 模块、复核会话、桌面端交接；
+  - `/api/rig/v1/auth-methods` 告诉登录页能用哪些方式：公网入口只给 SSO；
+  - `/api/rig/v1/desktop-login` 是桌面端换会话的接口，带 Origin 头的请求一律拒绝；
+  - 退出时，同时结束共享模块的浏览器会话；
+  - 档案无效时只关闭 SSO，服务照常启动，账号密码登录不受影响。
+- 身份：`issueSsoSession`、`useSso`。会话表增加 `auth`、`sso_ref` 两列（迁移 `027_browser_sso.sql`）。
+- 依赖：`openid-client`、`undici` 改为 mx-rig 的直接依赖，版本和 mx-common 一致。镜像里的 mx-common 只有源码，靠 mx-rig 的 node_modules 解析依赖；不加的话，开启 SSO 后服务端会在镜像里崩溃，而本机测试照样通过。`server-image` 测试现在也会检查这一点。
+- 桌面端：
+  - [browser-sign-in.mjs](../apps/desktop/browser-sign-in.mjs)：本机回调监听、打开系统浏览器、取消、超时；
+  - 主进程把登录拆成两部分：账号密码的部分（含用户网络切换），和登录后共用的 `startSession`；
+  - 新增 `browser-login`、`browser-login-cancel`、`auth-methods` 三个动作，和账号密码登录共用同一个并发锁。
+- 登录页：服务端开了 SSO，才显示「用浏览器登录（统一认证 · 飞书）」。公网入口只显示这一个按钮，桌面端还有取消按钮。
+- 部署：
+  - `scripts/manage.sh deploy` 会自动找主机上的 `/var/lib/mx-launcher/identity/applications/{public|private}/mx-rig.json`，用服务端同一个读取函数先校验（必须是私有文件、appId 必须是 `mx-rig`），再存进 Secret `mx-rig/mx-rig-sso`；
+  - 档案只挂载到服务端，权限 0440，任何地方都不打印；
+  - 档案变化会触发重新发布，主机上的文件不在了，就沿用 Secret 里已有的。
+- 登记：`scripts/manage.sh launcher plan` 多了两步，都要人在别处完成：
+  - 统一认证接入应用：给出要填的确切内容；
+  - 公网入口：域名、证书和网关。
+
+**上线要做的（都在 mx-rig 之外，由你或运维完成）**
+
+1. Launcher Internal → 平台设置 → 统一认证 → 接入应用，依次填：
+   - 认证入口：公网认证；
+   - 名称：MX Rig；
+   - 标识：`mx-rig`；
+   - 地址：`https://rig.minsight-ai.com`；
+   - Audience：`mx-rig`。
+
+   然后点「校验配置 → 保存应用 → 前往 Launcher 发布」，直到页面显示「Auth 已加载」。
+2. 在 Internal 节点上运行 `scripts/manage.sh deploy`：会输出 `browser SSO: on at https://rig.minsight-ai.com`。
+3. 配好 `rig.minsight-ai.com` 的证书和网关：Domestic TLS → WireGuard `10.88.88.88:80` → Internal Nginx → Rig 服务，只转发 [deploy/gateway/README.md](../deploy/gateway/README.md) 里列的路径。样例配置是 [internal-nginx.conf.example](../deploy/gateway/internal-nginx.conf.example)，做法同 de-mingxi 里的 Hub 和 Pay。
+4. 验收：
+   - 浏览器打开 `https://rig.minsight-ai.com`，只有「用浏览器登录」；
+   - 浏览器已登录统一认证时，一键进入；也可以用飞书登录；首次进入是查看者，由 Rig 管理员调整角色；
+   - 在统一认证那边停用这个账号，Rig 一分钟内要求重新登录；
+   - 桌面端点「用浏览器登录」，系统浏览器完成后回到 MX Rig；内网显示匿名，并提示海外通道需要用账号密码登录。
+
+**验证**
+
+- `tests/browser-sso.test.mjs`（8 项）：真实的共享 SSO 模块对着替身 OIDC 服务（RS256 签名的 ID Token、JWKS、PKCE 校验、带 `mx_identity` 的 UserInfo）：
+  - 网页端完整登录：会话 Cookie 是 HttpOnly + Secure；落到 `user:u-42`；管理员调整角色后立即生效；退出时两个会话都结束；
+  - 公网入口拒绝账号密码登录、执行机、webhook、健康检查和旧管理台；外站的写请求被拒；内网地址照常可以用密码登录；
+  - 桌面端交接：verifier 错误时 code 作废；code 只能用一次；带 Origin 的请求被拒；网页退出不影响桌面会话；非法的 start 和过期的 complete 被拒；
+  - 账号在统一认证被撤销后，下一次请求就退出，之后统一认证连不上也不会恢复；统一认证暂时连不上时，刚复核过的会话继续可用；
+  - 没有档案时不开 SSO，其他一切照旧；
+  - 桌面端模块端到端：测试代替系统浏览器跟着跳转走完整个流程，桌面端拿到会话；本机回调只认自己的 state，超时和取消都会结束，提前取消时不会打开浏览器；
+  - 网关样例和服务端自己的路径判断一致。
+- `tests/manage-sso.test.mjs`（3 项）：
+  - deploy 能发现档案、先校验、存进 Secret，任何地方都不出现 client secret；主机文件被删后沿用 Secret，不重新发布；
+  - 档案权限过宽、appId 不是 mx-rig、公网和内网两份同时存在时，deploy 停下；
+  - 服务端拿到不能用的档案时，只关闭 SSO，服务照常启动。
+- `tests/server-image.test.mjs`：镜像里能装上服务端用到的每一个包，包括经由 mx-common 引入的 openid-client。
+- `tests/launcher-register.test.mjs`：plan 里的两个 P4 步骤和要填的内容。
+- 另一个会话留下的 `desktop-login`、`gui-network-login`、`manage-verify` 三个测试，按新的登录拆分和 SSO 档案读取做了相应调整：把新函数放进它们截取的源码范围，`kubectl` 的调用计数加上 `mx-rig-sso` 的读取。断言的含义没有变。
+- `npm run test:browser`：登录页在内网显示账号密码和「用浏览器登录」，在公网入口只显示后者。截图 `.runtime/qa/web-login-sso.png`、`web-login-sso-only.png`。
+- `npm run test:desktop`：普通模式下服务端没有档案时，不显示 SSO；Launcher 模式下没连上内网时，浏览器登录会提示先连内网；账号密码登录（重构后）照常。
+
+**还没有验证的**：
+
+- 真实的统一认证、域名和网关，以及真实的飞书登录。
+- 真实系统浏览器跳回本机端口的过程。Chrome、Edge 对从公网页面跳到 `127.0.0.1` 的顶层导航目前是允许的，以后浏览器策略如果收紧，需要改用自定义协议，或者显示一个让用户手动点的页面。

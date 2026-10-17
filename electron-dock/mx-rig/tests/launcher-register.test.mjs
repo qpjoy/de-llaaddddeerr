@@ -34,8 +34,14 @@ test('a new standalone product takes the first range and VIP nobody uses', () =>
     'gateway-route': 'manual',
     'app-center': 'create',
     'release-identity': 'create',
-    'release-credentials': 'create'
+    'release-credentials': 'create',
+    'sso-application': 'manual',
+    'sso-entrance': 'manual'
   })
+  // Browser SSO (docs/25 P4): what to enter in Launcher Internal, word for word.
+  const sso = plan.steps.find((step) => step.id === 'sso-application')
+  assert.match(sso.detail, /统一认证 → 接入应用: 公网认证, MX Rig, mx-rig, https:\/\/rig\.minsight-ai\.com, Audience mx-rig/)
+  assert.match(plan.steps.find((step) => step.id === 'sso-entrance').detail, /10\.88\.88\.88:80 → Internal Nginx → http:\/\/10\.0\.0\.5:30891/)
   const product = plan.steps.find((step) => step.id === 'product-network')
   assert.deepEqual([product.body.mode, product.body.networkScope, product.body.productIndex], ['standalone', 'owner', 3])
   assert.match(plan.steps.find((step) => step.id === 'gateway-route').detail, /host 10\.88\.100\.5 → http:\/\/10\.0\.0\.5:30891/)
@@ -50,12 +56,13 @@ test('what is already registered as needed is left alone', () => {
     routes: [{ host: '10.88.100.5', targetUrl: 'http://10.0.0.5:30891/', enabled: true }],
     rigUrl: 'http://10.0.0.5:30891',
     resolved: { productId: 'mx-rig', packageName: '@qpjoy/mx-rig', channel: 'stable' },
-    credentials: { publisher: true, approver: true }
+    credentials: { publisher: true, approver: true },
+    ssoProfile: '/var/lib/mx-launcher/identity/applications/public/mx-rig.json'
   })
   const state = Object.fromEntries(plan.steps.map((step) => [step.id, step.state]))
   assert.deepEqual(
-    [state['product-network'], state['app-center'], state['gateway-route'], state['release-identity'], state['release-credentials']],
-    ['ok', 'ok', 'ok', 'ok', 'ok']
+    [state['product-network'], state['app-center'], state['gateway-route'], state['release-identity'], state['release-credentials'], state['sso-application']],
+    ['ok', 'ok', 'ok', 'ok', 'ok', 'ok']
   )
   // Updates find Rig by its package name: an entry with another one is corrected.
   const renamed = launcherPlan({ products, app: { ...app, packageName: 'mx-rig-desktop' } })

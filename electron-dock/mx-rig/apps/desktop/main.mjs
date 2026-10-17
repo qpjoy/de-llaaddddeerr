@@ -20,6 +20,7 @@ import { DEFAULT_BOOTSTRAP_URLS, LauncherNetwork } from './launcher-network.mjs'
 import { LauncherUpdates } from './launcher-updates.mjs'
 import { LauncherOversea } from './launcher-oversea.mjs'
 import { prepareEngine, shippedEngine } from './mihomo-engine.mjs'
+import { browserSignIn } from './browser-sign-in.mjs'
 import { existsSync, readdirSync } from 'node:fs'
 
 // Read actions the workbench may forward. An explicit table means the renderer
@@ -84,6 +85,7 @@ let window,
   projectWorkspaces = null,
   testRepositories = null,
   quitting = false,
+  loginPending = false,
   sequence = 0
 const pending = new Map()
 app.setAppUserModelId('dev.qpjoy.mx-rig')
@@ -232,22 +234,8 @@ function playwrightBrowsers() {
 }
 
 async function login(input) {
-  await stopWorker()
-  await Promise.allSettled([localRunner?.stop(), station?.stop()])
-  localRunner = null
-  station = null
-  projectWorkspaces = null
-  testRepositories = null
-  client = null
-  member = null
-  // Launcher mode: the service is behind this product's VIP, inside the tunnel.
-  const launched = network ? network.snapshot() : null
-  if (launched && (launched.status !== 'ready' || !launched.serverUrl))
-    throw new RigError('network_not_ready', '先连上内网再登录')
-  const privateHttp = Boolean(launched) || input.privateHttp === true || process.env.MX_RIG_ALLOW_PRIVATE_HTTP === '1'
-  const url = serviceUrl(launched?.serverUrl || input.url || process.env.MX_RIG_SERVER_URL || 'http://127.0.0.1:8791', {
-    privateHttp
-  })
+  await endSession()
+  const { url, privateHttp } = loginTarget(input)
   const next = new RigClient({ url, token: '', privateHttp })
   const result = await next.request('/api/rig/v1/native-login', {
     account: input.account,
@@ -255,6 +243,19 @@ async function login(input) {
   })
   next.token = result.token
   const { principal } = await next.request('/api/rig/v1/me')
+  // Finish the unified account's lease handover before starting anything
+  // that fetches from Rig. A tunnel restart must not race the first screen.
+  // Local accounts and the service admin keep their anonymous network.
+  if (network && !/^local:/.test(principal.id) && principal.id !== 'service-admin') {
+    const connected = await network.signIn({ account: input.account, password: input.password })
+    if (connected.status !== 'ready' || connected.identity.kind !== 'user' || connected.serverReachable !== true)
+      throw new RigError('network_not_ready', '账号已验证，但用户内网尚未就绪。请查看内网连接状态，恢复连接后重试登录。')
+  }
+  return startSession({ next, token: result.token, principal, url, privateHttp, account: input.account })
+}
+
+/** Everything that runs for a signed-in member, however they signed in. */
+async function startSession({ next, token, principal, url, privateHttp, account }) {
   const workspace = createHash('sha256')
     .update(`${url}\n${principal.id}`)
     .digest('hex')
@@ -295,7 +296,7 @@ async function login(input) {
   })
   await rpc('init', {
     url,
-    token: result.token,
+    token,
     owner: principal.id,
     root: join(app.getPath('userData'), 'workspaces', workspace),
     electronApps: await loadElectronApps(),
@@ -304,13 +305,9 @@ async function login(input) {
   })
   client = next
   member = principal
-  await rememberLogin({ server: url, privateHttp, account: input.account }).catch(() => {})
-  // A unified account also takes the network over to a user lease. Rig's own
-  // accounts and the service admin have no Launcher identity: the lease stays.
-  if (network && !/^local:/.test(principal.id) && principal.id !== 'service-admin')
-    void network.signIn({ account: input.account, password: input.password }).catch((error) => {
-      window?.webContents.send('mx-rig:network', { ...network.snapshot(), message: `已登录 Rig；网络仍是匿名的（${error.message}）` })
-    })
+  // A browser sign-in keeps the account last typed for the password form.
+  const remembered = account ?? (await readJson(lastLoginFile()))?.account ?? ''
+  await rememberLogin({ server: url, privateHttp, account: remembered }).catch(() => {})
   // Test projects' snapshots and QA repositories on this computer (docs/21 §5).
   projectWorkspaces = new ProjectWorkspaces(join(app.getPath('userData'), 'workspaces', workspace, 'project-workspaces'))
   // The same directory: a project's test repository is its workspace's qa/ (docs/23).
@@ -339,6 +336,78 @@ async function login(input) {
     cleartext:
       new URL(url).protocol === 'http:' &&
       !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(new URL(url).hostname)
+  }
+}
+
+// Whatever ran for the previous member stops before anyone signs in.
+async function endSession() {
+  await stopWorker()
+  await Promise.allSettled([localRunner?.stop(), station?.stop()])
+  localRunner = null
+  station = null
+  projectWorkspaces = null
+  testRepositories = null
+  client = null
+  member = null
+}
+
+// Which service a sign-in goes to. Launcher mode: the one behind this
+// product's VIP, inside the tunnel.
+function loginTarget(input = {}) {
+  const launched = network ? network.snapshot() : null
+  if (launched && (launched.status !== 'ready' || !launched.serverUrl))
+    throw new RigError('network_not_ready', '先连上内网再登录')
+  const privateHttp = Boolean(launched) || input.privateHttp === true || process.env.MX_RIG_ALLOW_PRIVATE_HTTP === '1'
+  const url = serviceUrl(launched?.serverUrl || input.url || process.env.MX_RIG_SERVER_URL || 'http://127.0.0.1:8791', {
+    privateHttp
+  })
+  return { url, privateHttp }
+}
+
+/** What the service's login page offers: browser SSO (docs/25 P4), passwords. */
+async function authMethods(input) {
+  let target
+  try {
+    target = loginTarget(input)
+  } catch {
+    return { sso: { enabled: false }, password: true }
+  }
+  return new RigClient({ ...target, token: '' }).request('/api/rig/v1/auth-methods').catch(() => ({ sso: { enabled: false }, password: true }))
+}
+
+// The browser sign-in waiting for its callback, so it can be cancelled.
+let browserSignInAbort = null
+
+/**
+ * Sign in through the system browser and the platform's unified
+ * authentication (browser-sign-in.mjs). Rig's session only: the product
+ * network stays anonymous and the overseas channel off, because the network
+ * token comes from a password grant (docs/25 §11).
+ */
+async function browserLogin(input) {
+  await endSession()
+  const { url, privateHttp } = loginTarget(input)
+  const next = new RigClient({ url, token: '', privateHttp })
+  const methods = await next.request('/api/rig/v1/auth-methods')
+  if (!methods.sso?.enabled) throw new RigError('sso_disabled', '这个 Rig 服务还没有开启统一认证登录')
+  browserSignInAbort = new AbortController()
+  let result
+  try {
+    result = await browserSignIn({
+      ssoOrigin: methods.sso.origin,
+      openExternal: (target) => shell.openExternal(target),
+      redeem: (body) => next.request('/api/rig/v1/desktop-login', body),
+      signal: browserSignInAbort.signal
+    })
+  } finally {
+    browserSignInAbort = null
+  }
+  next.token = result.token
+  const { principal } = await next.request('/api/rig/v1/me')
+  const started = await startSession({ next, token: result.token, principal, url, privateHttp, account: null })
+  return {
+    ...started,
+    ...(network ? { networkNote: '已用浏览器登录。内网仍是匿名网络，海外通道不可用；需要用户网络时，退出后用账号密码登录。' } : {})
   }
 }
 
@@ -472,17 +541,46 @@ app
       trusted(event)
       if (!input || typeof input.action !== 'string')
         throw new RigError('invalid_request', '请求无效')
-      if (input.action === 'login') return login(input.body || {})
+      if (input.action === 'login') {
+        if (loginPending) throw new RigError('login_pending', '正在登录，请稍候')
+        loginPending = true
+        try {
+          return await login(input.body || {})
+        } finally {
+          loginPending = false
+        }
+      }
+      if (input.action === 'browser-login') {
+        if (loginPending) throw new RigError('login_pending', '正在登录，请稍候')
+        loginPending = true
+        try {
+          return await browserLogin(input.body || {})
+        } finally {
+          loginPending = false
+        }
+      }
+      if (input.action === 'browser-login-cancel') {
+        browserSignInAbort?.abort()
+        return { cancelled: Boolean(browserSignInAbort) }
+      }
+      if (input.action === 'auth-methods') return authMethods(input.body || {})
       if (input.action === 'login-defaults') return loginDefaults()
       // The product network is there before anyone signs in: the login page needs it.
       if (input.action === 'network-status') return network ? network.snapshot() : null
       if (input.action === 'network-connect') {
         if (!network) throw new RigError('not_launcher', '这个安装包不是 Launcher 模式')
+        if (loginPending) throw new RigError('login_pending', '正在登录，请等待网络切换完成')
         return network.connect()
       }
       if (input.action === 'network-disconnect') {
         if (!network) throw new RigError('not_launcher', '这个安装包不是 Launcher 模式')
+        if (loginPending) throw new RigError('login_pending', '正在登录，请等待网络切换完成')
         return network.disconnect('manual')
+      }
+      if (input.action === 'network-recover') {
+        if (!network) throw new RigError('not_launcher', '这个安装包不是 Launcher 模式')
+        if (loginPending) throw new RigError('login_pending', '正在登录，请等待网络切换完成')
+        return network.recoverIdentity()
       }
       // The overseas channel follows the account's network, not the Rig login.
       if (input.action === 'oversea-status') return oversea ? oversea.snapshot() : null

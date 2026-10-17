@@ -22,6 +22,7 @@ NAMESPACE="mx-rig"
 NODE_PORT=30891
 IMAGE=""
 SECRET_CHECKSUM=""
+SSO_CHECKSUM="none"
 POLICY_CHECKSUM=""
 CLUSTER_CONTEXT=""
 
@@ -530,13 +531,14 @@ render() {
   for cidr in ${MX_RIG_RUNNER_TARGET_CIDRS//,/ }; do
     rules+="    - to:\n        - ipBlock:\n            cidr: ${cidr}\n"
   done
-  awk -v image="$IMAGE" -v secret="$SECRET_CHECKSUM" -v policy="$POLICY_CHECKSUM" \
+  awk -v image="$IMAGE" -v secret="$SECRET_CHECKSUM" -v policy="$POLICY_CHECKSUM" -v sso="$SSO_CHECKSUM" \
     -v root="$MX_RIG_DATA_ROOT" -v rules="$rules" '
     /# __MX_RIG_RUNNER_TARGET_EGRESS__/ { printf "%s", rules; next }
     {
       gsub(/mx-rig\.invalid\/mx-rig-server:managed-image-required/, image)
       gsub(/__MX_RIG_SECRET_CHECKSUM__/, secret)
       gsub(/__MX_RIG_POLICY_CHECKSUM__/, policy)
+      gsub(/__MX_RIG_SSO_CHECKSUM__/, sso)
       gsub(/__MX_RIG_DATA_ROOT__/, root)
       print
     }'
@@ -595,9 +597,52 @@ run_migration() {
   fi
 }
 
+# Browser SSO (docs/25 P4). Launcher Internal → 平台设置 → 统一认证 → 接入应用
+# writes the mx-rig profile on this host; deploy keeps it in the Secret
+# mx-rig/mx-rig-sso, which the server reads at /etc/mx-rig/sso/profile.json.
+# MX_RIG_SSO_SOURCE names the file; MX_RIG_SSO_AUTO_DISCOVER=0 stops looking.
+# The profile holds the client secret and session key: never printed.
+resolve_sso_profile() {
+  local source="${MX_RIG_SSO_SOURCE:-}" dir="${MX_RIG_LAUNCHER_IDENTITY_DIR:-/var/lib/mx-launcher/identity/applications}"
+  local candidate existing origin="" found=()
+  if [ -z "$source" ] && [ "${MX_RIG_SSO_AUTO_DISCOVER:-1}" != 0 ]; then
+    for candidate in "${dir}/public/mx-rig.json" "${dir}/private/mx-rig.json"; do
+      [ ! -e "$candidate" ] || found+=("$candidate")
+    done
+    [ "${#found[@]}" -le 1 ] || die "both ${found[*]} exist; choose one with MX_RIG_SSO_SOURCE"
+    source="${found[0]-}"
+  fi
+  if [ -z "$source" ]; then
+    existing="$(kube get secret mx-rig-sso --ignore-not-found -o 'jsonpath={.data.profile\.json}' 2>/dev/null || true)"
+    if [ -n "$existing" ]; then
+      SSO_CHECKSUM="$(printf '%s' "$existing" | openssl dgst -sha256 | awk '{ print $NF }')"
+      say "browser SSO: on, with the profile already in ${NAMESPACE}/mx-rig-sso"
+    else
+      say "browser SSO: off (no mx-rig profile yet: Launcher Internal → 平台设置 → 统一认证 → 接入应用, docs/25 §11)"
+    fi
+    return 0
+  fi
+  [ -r "$source" ] || die "cannot read the SSO profile ${source}; run deploy as its owner or set MX_RIG_SSO_SOURCE"
+  # Checked here with the server's own reader, so a bad file stops the deploy
+  # instead of the server.
+  if command -v node >/dev/null 2>&1; then
+    origin="$(node --input-type=module -e "
+      const { readApplicationSsoProfile } = await import(process.argv[1])
+      const profile = readApplicationSsoProfile(process.argv[2])
+      if (profile.appId !== 'mx-rig') throw new Error('the profile is for ' + profile.appId + ', not mx-rig')
+      process.stdout.write(profile.origin)" "${ELECTRON_DOCK_DIR}/mx-common/src/identity/profile.mjs" "$source")" ||
+      die "the SSO profile ${source} is not usable"
+  fi
+  kubectl create secret generic mx-rig-sso -n "$NAMESPACE" --from-file=profile.json="$source" --dry-run=client -o yaml |
+    kubectl apply -f - >/dev/null
+  SSO_CHECKSUM="$(b64 <"$source" | openssl dgst -sha256 | awk '{ print $NF }')"
+  say "browser SSO: on${origin:+ at ${origin}}; the profile from ${source} is kept in ${NAMESPACE}/mx-rig-sso"
+}
+
 cmd_deploy() {
   prepare_kubernetes
   run_migration
+  resolve_sso_profile
   # The server is applied only after migrations completed.
   apply_files 30-server.yaml 35-nodeport.yaml
   # `apply` keeps a live scale-to-zero from `stop`; coming back is explicit.
@@ -778,7 +823,14 @@ cmd_launcher() {
   if command -v kubectl >/dev/null 2>&1 && kubectl version --request-timeout=5s >/dev/null 2>&1; then
     MX_RIG_RELEASE_HAVE="$(release_kept)"
     export MX_RIG_RELEASE_HAVE
+    [ -z "$(kube get secret mx-rig-sso --ignore-not-found -o name 2>/dev/null)" ] || MX_RIG_SSO_PROFILE_FOUND="Secret mx-rig/mx-rig-sso"
   fi
+  # The browser SSO registration's profile on this host (docs/25 P4).
+  local sso_dir="${MX_RIG_LAUNCHER_IDENTITY_DIR:-/var/lib/mx-launcher/identity/applications}" sso_file
+  for sso_file in "${MX_RIG_SSO_SOURCE:-}" "${sso_dir}/public/mx-rig.json" "${sso_dir}/private/mx-rig.json"; do
+    if [ -n "$sso_file" ] && [ -e "$sso_file" ]; then MX_RIG_SSO_PROFILE_FOUND="$sso_file"; break; fi
+  done
+  [ -z "${MX_RIG_SSO_PROFILE_FOUND:-}" ] || export MX_RIG_SSO_PROFILE_FOUND
   if [ "$action" = plan ]; then
     node "${ROOT_DIR}/scripts/launcher-register.mjs" plan --url "$url" ${MX_RIG_PUBLIC_URL:+--rig-url "$MX_RIG_PUBLIC_URL"}
     return
