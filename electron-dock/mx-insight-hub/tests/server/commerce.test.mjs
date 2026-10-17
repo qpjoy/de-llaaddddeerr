@@ -83,6 +83,8 @@ async function fixture(t,{space=false,offers=false}={}){
     const client=await pool.connect();try{await client.query('BEGIN');await client.query(await readFile(new URL(file,dir),'utf8'));await client.query('COMMIT')}catch(e){await client.query('ROLLBACK');e.message=`${file}: ${e.message}`;throw e}finally{client.release()}
   }
   await runMigrations({connectionString:url.href,migrationsDir:migrationDir})
+  await pool.query(await readFile(new URL('../../migrations/149_dataport_enterprise.sql',import.meta.url),'utf8'))
+  await pool.query(await readFile(new URL('../../migrations/154_dataport_support.sql',import.meta.url),'utf8'))
   const tenant=randomUUID(),consumer=randomUUID(),keyId=randomUUID(),sourceId=randomUUID(),payments=new Map()
   await pool.query("INSERT INTO tenants(id,name) VALUES($1,'commerce fixture')",[tenant])
   await pool.query("INSERT INTO consumers(id,tenant_id,name,business_id) VALUES($1,$2,'buyer','fixture-buyer')",[consumer,tenant])
@@ -109,7 +111,7 @@ async function fixture(t,{space=false,offers=false}={}){
 const database={skip:!connectionString}
 test('DataPort HTTP delegates to the real product quota boundary without exposing keys and rechecks roles on every request',database,async t=>{
   const f=await fixture(t,{space:true}),order=await f.create(),paid=await f.eventFor(order);await f.service.commit(paid.source,paid.event,paid.payment)
-  await f.pool.query(await readFile(new URL('../../migrations/149_dataport_enterprise.sql',import.meta.url),'utf8'))
+
   const member=randomUUID();await f.pool.query("INSERT INTO iam.members(id,display_name) VALUES($1,'DataPort analyst')",[member]);await f.pool.query("INSERT INTO iam.tenant_memberships(id,tenant_id,member_id,role) VALUES($1,$2,$3,'viewer')",[randomUUID(),f.tenant,member]);await f.pool.query("INSERT INTO dataport.member_roles(tenant_id,member_id,role_id) VALUES($1,$2,'analyst')",[f.tenant,member])
   const store=new PostgresStore(f.pool),service=new HubService({store,adapter:{},apiKeyPepper:'dataport-integration-fixture-pepper-at-least-32'});let calls=0
   const gateway=new IpRiskGateway({usageStore:store,platformStore:new PostgresExternalPlatformStore({pool:f.pool,providerKey:'ipsearch',authorizationPlatform:'ip_risk'}),enabled:true,providerKey:'ipsearch',operation:'ip.risk.query',meterKey:'ip.risk.query',adapter:{configured:true,async query(){calls++;return {outcome:'succeeded',normalized:{status:'success',data:{risk_level:'中风险',risk_score:null,risk_tags:[]},warnings:[]},latencyMs:1}}}})

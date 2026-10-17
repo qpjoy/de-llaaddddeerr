@@ -1,3 +1,4 @@
+import { DataportSupport } from "./dataport-support.mjs";
 import { AppError } from "../core/errors.mjs";
 import {
   requireDataportAccess,
@@ -22,6 +23,7 @@ const endpoints = {
   ],
   POST: [
     "challenge",
+    "profile",
     "roles",
     "members",
     "tickets",
@@ -37,11 +39,17 @@ export function dataportRouteAllowed(method, path) {
     return ["GET", "POST"].includes(method);
   const match = /^\/enterprises\/([0-9a-f-]{36})\/(.+)$/.exec(path);
   if (!match || !uuid(match[1])) return false;
+  if (
+    method === "GET" &&
+    /^tickets\/[0-9a-f-]{36}$/.test(match[2]) &&
+    uuid(match[2].split("/")[1])
+  )
+    return true;
   return (
     endpoints[method]?.includes(match[2]) ||
     (method === "POST" &&
       uuid(match[2].split("/")[1]) &&
-      /^(?:members\/[0-9a-f-]{36}(?:\/initial-password)?|keys\/[0-9a-f-]{36}\/revoke|orders\/[0-9a-f-]{36}\/(?:checkout|refresh))$/.test(
+      /^(?:members\/[0-9a-f-]{36}(?:\/(?:initial-password|reset-password))?|keys\/[0-9a-f-]{36}\/revoke|orders\/[0-9a-f-]{36}\/(?:checkout|refresh))$/.test(
         match[2],
       ))
   );
@@ -163,7 +171,12 @@ export async function dataportRoute({
       subscriptions: data.subscriptions
         .filter((s) => s.channel === "product")
         .map((s) => ({
+          id: s.id,
           channel: s.channel,
+          product: s.product
+            ? { name: s.product.name, kind: s.product.kind }
+            : null,
+          preferred: s.preferred,
           quota: s.quota,
           used: s.used,
           held: s.held,
@@ -186,10 +199,26 @@ export async function dataportRoute({
             await readJson(request, 8192),
           )),
     );
+  if (resource === "profile")
+    return reply(
+      await dataport.renameEnterprise(
+        principal,
+        tenantId,
+        await readJson(request, 1024),
+      ),
+    );
+  if (/^tickets\//.test(resource))
+    return reply(
+      await new DataportSupport(dataport).detail(
+        principal,
+        tenantId,
+        resource.split("/")[1],
+      ),
+    );
   if (resource === "members")
     return reply(
       await (request.method === "GET"
-        ? dataport.members(principal, tenantId)
+        ? dataport.members(principal, tenantId, searchParams)
         : dataport.memberCommand(
             principal,
             tenantId,
@@ -201,19 +230,27 @@ export async function dataportRoute({
   if (resource.startsWith("members/")) {
     const [, memberId, action] = resource.split("/");
     return reply(
-      action
-        ? await dataport.initialPassword(
+      action === "reset-password"
+        ? await dataport.resetPassword(
             principal,
             tenantId,
             memberId,
+            await readJson(request, 1024),
             accounts,
           )
-        : await dataport.updateMember(
-            principal,
-            tenantId,
-            memberId,
-            await readJson(request, 2048),
-          ),
+        : action
+          ? await dataport.initialPassword(
+              principal,
+              tenantId,
+              memberId,
+              accounts,
+            )
+          : await dataport.updateMember(
+              principal,
+              tenantId,
+              memberId,
+              await readJson(request, 2048),
+            ),
     );
   }
   if (resource === "tickets")
@@ -279,7 +316,11 @@ export async function dataportRoute({
       return reply({ items: items.map(({ secret, ...item }) => item) });
     }
     const body = await readJson(request, 1024);
-    if (Object.keys(body).some((k) => !["name", "expiresInDays"].includes(k)))
+    if (
+      Object.keys(body).some(
+        (k) => !["name", "expiresInDays", "replaceFrom"].includes(k),
+      )
+    )
       throw new AppError(400, "invalid_key_request", "Key 参数无效。");
     const consumer = consumers.find(
       (c) =>
@@ -289,12 +330,36 @@ export async function dataportRoute({
     );
     if (!consumer)
       throw new AppError(409, "subscription_required", "请先开通企业订阅。");
+    const previous = body.replaceFrom
+      ? (await service.listApiKeys(consumer.id)).find(
+          (k) => k.id === body.replaceFrom,
+        )
+      : null;
+    if (
+      body.replaceFrom &&
+      (!previous ||
+        previous.status !== "active" ||
+        new Date(previous.expiresAt) <= new Date() ||
+        !Array.isArray(previous.platforms) ||
+        !Array.isArray(previous.capabilities))
+    )
+      throw new AppError(
+        409,
+        "replacement_key_unavailable",
+        "原 Key 已失效或不属于当前企业产品，请刷新后重试。",
+      );
     const key = await service.createApiKey({
       consumerId: consumer.id,
+      ...(previous
+        ? {
+            environment: previous.environment,
+            webSearchOrder: previous.webSearchOrder || [],
+          }
+        : {}),
       name: body.name,
       expiresInDays: body.expiresInDays,
-      platforms: ["ip_risk"],
-      capabilities: [IP_PRODUCT_CAPABILITY],
+      platforms: previous?.platforms || ["ip_risk"],
+      capabilities: previous?.capabilities || [IP_PRODUCT_CAPABILITY],
     });
     await dataport.event(tenantId, principal.memberId, "key.created", key.id);
     return reply(key, 201);
@@ -462,7 +527,7 @@ export function authorizeLegacyPortal(principal, method, path, search) {
     permission = "usage.read";
   else if (path === "/documentation") permission = "docs.read";
   else if (match) {
-    if (!/^\/messages(?:\/[1-9][0-9]*\/read)?$/.test(match[2]))
+    if (!/^\/messages(?:\/(?:[1-9][0-9]*\/read|read-all))?$/.test(match[2]))
       throw new AppError(
         404,
         "portal_route_unavailable",

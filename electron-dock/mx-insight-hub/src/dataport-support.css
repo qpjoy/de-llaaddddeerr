@@ -1,0 +1,70 @@
+.mih-dataport-admin {
+  min-width: 0;
+}
+.mih-dataport-admin > .mih-page-heading {
+  margin-bottom: 24px;
+}
+.mih-dataport-admin > .qp-panel {
+  margin-bottom: 24px;
+  min-width: 0;
+}
+.mih-dataport-filters {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) 180px;
+  gap: 16px;
+  align-items: end;
+}
+.mih-dataport-admin .qp-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin: 24px 0;
+}
+.mih-dataport-admin .qp-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+}
+.mih-dataport-admin .qp-table th,
+.mih-dataport-admin .qp-table td {
+  text-align: left;
+  padding: 14px;
+  border-bottom: 1px solid var(--qp-line-2);
+  vertical-align: top;
+  font-size: 13px;
+}
+.mih-dataport-admin .qp-table th {
+  color: var(--qp-text-3);
+  font-size: 12px;
+  font-weight: 600;
+}
+.mih-dataport-admin .qp-table td:first-child {
+  width: 48%;
+  overflow-wrap: anywhere;
+}
+.mih-dataport-admin .qp-table p {
+  margin: 8px 0;
+  line-height: 1.6;
+}
+.mih-dataport-admin .qp-table small {
+  color: var(--qp-text-3);
+}
+.mih-dataport-admin form {
+  display: grid;
+  gap: 20px;
+}
+.mih-dataport-admin article {
+  border: 1px solid var(--qp-line-2);
+  border-radius: 8px;
+  padding: 16px;
+  margin: 16px 0;
+}
+.mih-dataport-admin textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 120px;
+}
+@media (max-width: 760px) {
+  .mih-dataport-filters {
+    grid-template-columns: 1fr;
+  }
+}

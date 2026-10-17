@@ -10,7 +10,7 @@ export const portalPrincipal = Symbol('verified-harbor-principal')
 const reads = new Set(['/session','/me/usage','/documentation','/commerce/products','/payments/return-order'])
 export function harborRoute(method,path,searchParams) {
   const read=method==='GET'&&(reads.has(path)||/^\/commerce\/tenants\/[0-9a-f-]{36}\/messages$/.test(path))
-  const write=method==='POST'&&/^\/commerce\/tenants\/[0-9a-f-]{36}\/messages\/[1-9][0-9]{0,17}\/read$/.test(path)
+  const write=method==='POST'&&/^\/commerce\/tenants\/[0-9a-f-]{36}\/messages\/(?:[1-9][0-9]{0,17}\/read|read-all)$/.test(path)
   if(!read&&!write)throw new AppError(404,'portal_route_unavailable','此客户功能尚未开放。')
   if(write&&searchParams.size)throw new AppError(400,'invalid_query','此操作不接受查询参数。')
   if(path==='/documentation'&&(searchParams.size!==2||searchParams.getAll('tenantId').length!==1||!searchParams.get('tenantId')||searchParams.get('path')!=='/docs/openapi.json'))throw new AppError(404,'not_found','请使用数港接口文档。')

@@ -15,11 +15,11 @@ export function permittedCustomerRoute(method, path) {
   const enterprise = /^\/enterprises\/[0-9a-f-]{36}\/(.*)$/.exec(path);
   if (enterprise)
     return method === "GET"
-      ? /^(roles|members|tickets|audit|history|keys|subscriptions|billing|query-access)$/.test(
+      ? /^(roles|members|tickets|audit|history|keys|subscriptions|billing|query-access|tickets\/[0-9a-f-]{36})$/.test(
           enterprise[1],
         )
       : method === "POST" &&
-          /^(challenge|roles|members|tickets|query|keys|subscription-selection|orders|members\/[0-9a-f-]{36}(?:\/initial-password)?|keys\/[0-9a-f-]{36}\/revoke|orders\/[0-9a-f-]{36}\/(?:checkout|refresh))$/.test(
+          /^(challenge|profile|roles|members|tickets|query|keys|subscription-selection|orders|members\/[0-9a-f-]{36}(?:\/(?:initial-password|reset-password))?|keys\/[0-9a-f-]{36}\/revoke|orders\/[0-9a-f-]{36}\/(?:checkout|refresh))$/.test(
             enterprise[1],
           );
   if (/^\/joins\/[A-Za-z0-9_-]{43}$/.test(path))
@@ -29,7 +29,7 @@ export function permittedCustomerRoute(method, path) {
       (reads.has(path) ||
         /^\/commerce\/tenants\/[0-9a-f-]{36}\/messages$/.test(path))) ||
     (method === "POST" &&
-      /^\/commerce\/tenants\/[0-9a-f-]{36}\/messages\/[1-9][0-9]{0,17}\/read$/.test(
+      /^\/commerce\/tenants\/[0-9a-f-]{36}\/messages\/(?:[1-9][0-9]{0,17}\/read|read-all)$/.test(
         path,
       ))
   );

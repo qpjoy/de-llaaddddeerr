@@ -66,21 +66,28 @@ export class CustomerMessages {
     const [rows, count] = await Promise.all([
       this.pool.query(`SELECT m.id,m.kind,m.document,m.created_at AS "createdAt",r.read_at AS "readAt"
         FROM hub_commerce.messages m LEFT JOIN hub_commerce.message_reads r ON r.message_id=m.id AND r.member_id=$2
-        WHERE m.tenant_id=$1 AND ($3::bigint IS NULL OR m.id<$3) AND ($4='all' OR r.message_id IS NULL)
+        WHERE m.tenant_id=$1 AND (m.recipient_id IS NULL OR m.recipient_id=$2) AND ($3::bigint IS NULL OR m.id<$3) AND ($4='all' OR r.message_id IS NULL)
         ORDER BY m.id DESC LIMIT 21`,values),
       this.pool.query(`SELECT count(*)::integer AS unread FROM hub_commerce.messages m
-        WHERE m.tenant_id=$1 AND NOT EXISTS (
+        WHERE m.tenant_id=$1 AND (m.recipient_id IS NULL OR m.recipient_id=$2) AND NOT EXISTS (
           SELECT 1 FROM hub_commerce.message_reads r WHERE r.message_id=m.id AND r.member_id=$2)`,values.slice(0,2)),
     ])
     const items = rows.rows.slice(0,20)
     return { items, unread: count.rows[0].unread, nextBefore: rows.rows.length>20 ? items.at(-1).id : null }
+  }
+  async readAll(tenantId,memberId) {
+    this.requireStorage();
+    const result=await this.pool.query(`INSERT INTO hub_commerce.message_reads(message_id,member_id)
+      SELECT id,$2 FROM hub_commerce.messages WHERE tenant_id=$1 AND (recipient_id IS NULL OR recipient_id=$2)
+      ON CONFLICT(message_id,member_id) DO NOTHING`,[tenantId,memberId]);
+    return {read:result.rowCount};
   }
   async read(tenantId, memberId, id) {
     if (!validId(id)) throw new AppError(400,'invalid_message_id','消息编号不正确')
     this.requireStorage()
     // Even a guessed message ID cannot create a read receipt in another space.
     const result = await this.pool.query(`INSERT INTO hub_commerce.message_reads(message_id,member_id)
-      SELECT id,$2 FROM hub_commerce.messages WHERE tenant_id=$1 AND id=$3
+      SELECT id,$2 FROM hub_commerce.messages WHERE tenant_id=$1 AND id=$3 AND (recipient_id IS NULL OR recipient_id=$2)
       ON CONFLICT(message_id,member_id) DO UPDATE SET read_at=hub_commerce.message_reads.read_at
       RETURNING read_at AS "readAt"`,[tenantId,memberId,id])
     if (!result.rowCount) throw new AppError(404,'message_not_found','消息不存在')

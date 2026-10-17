@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DataportAccountsClient } from "../../server/portal/dataport-accounts.mjs";
 import pg from "pg";
+import { DataportSupport } from "../../server/portal/dataport-support.mjs";
+import { CustomerMessages } from "../../server/commerce/messages.mjs";
 import { DataportStore, digest } from "../../server/portal/dataport-store.mjs";
 import {
   BUILTIN_ROLES,
@@ -50,6 +52,10 @@ async function fixture(t) {
     );
   await pool.query(`CREATE SCHEMA external_platform; CREATE TABLE external_platform.ipsearch_batches(id uuid PRIMARY KEY,tenant_id uuid,consumer_id uuid,api_key_id uuid,idempotency_key text,response jsonb,created_at timestamptz DEFAULT now());
     CREATE SCHEMA hub_commerce;CREATE TABLE hub_commerce.orders(id uuid PRIMARY KEY,tenant_id uuid,consumer_id uuid,environment text DEFAULT 'live',intent jsonb,payment jsonb,payment_id uuid,receipt jsonb,created_at timestamptz DEFAULT now(),delivered_at timestamptz);`);
+  await pool.query(`CREATE TABLE hub_commerce.subscriptions(id uuid PRIMARY KEY);
+    CREATE FUNCTION hub_commerce.immutable() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'immutable'; END$$;`);
+  await pool.query(await readFile(new URL("../../migrations/144_customer_subscription_messages.sql",import.meta.url),"utf8"));
+  await pool.query(await readFile(new URL("../../migrations/154_dataport_support.sql",import.meta.url),"utf8"));
   const tenant = randomUUID(),
     other = randomUUID(),
     owner = randomUUID(),
@@ -783,3 +789,57 @@ test(
     });
   },
 );
+
+test("DataPort support closes the processing loop with tenant/self isolation, CAS, replay and private receipts", {skip:!connectionString},async t=>{
+ const f=await fixture(t),owner=await f.verified(),analyst=await f.principal(f.analyst),viewer=await f.principal(f.viewer),support=new DataportSupport(f.store),messages=new CustomerMessages(f.pool);
+ const ticket=await f.store.createTicket(analyst,f.tenant,{content:"Fixture request",category:"technical",priority:"normal"});
+ assert.equal((await support.detail(analyst,f.tenant,ticket.id)).status,"saved");
+ await assert.rejects(support.detail(viewer,f.tenant,ticket.id),{status:404});
+ await assert.rejects(support.detail(analyst,f.other,ticket.id),{status:403});
+ await assert.rejects(support.update(owner,f.tenant,ticket.id,{}),{code:"admin_token_required"});
+ const admin={kind:"admin-token"},command={commandId:randomUUID(),revision:1,status:"processing",reply:"We are reviewing this issue"};
+ await support.update(admin,f.tenant,ticket.id,command);
+ assert.equal((await support.update(admin,f.tenant,ticket.id,command)).replayed,true);
+ await assert.rejects(support.update(admin,f.tenant,ticket.id,{...command,reply:"changed"}),{code:"ticket_command_conflict"});
+ await assert.rejects(support.update(admin,f.tenant,ticket.id,{...command,commandId:randomUUID()}),{code:"ticket_revision_conflict"});
+ let detail=await support.detail(analyst,f.tenant,ticket.id);assert.equal(detail.revision,2);assert.equal(detail.replies.length,1);
+ assert.equal((await support.detail(owner,f.tenant,ticket.id)).replies[0].reply,command.reply);
+ const inbox=await messages.list(f.tenant,f.analyst);assert.equal(inbox.items[0].kind,"ticket_updated");assert.equal(inbox.unread,1);
+ assert.equal((await messages.list(f.tenant,f.viewer)).items.length,0);
+ await assert.rejects(messages.read(f.tenant,f.viewer,inbox.items[0].id),{status:404});
+ assert.equal((await messages.readAll(f.tenant,f.analyst)).read,1);assert.equal((await messages.list(f.tenant,f.analyst)).unread,0);
+ assert.equal((await messages.readAll(f.other,f.analyst)).read,0);
+ await support.update(admin,f.tenant,ticket.id,{commandId:randomUUID(),revision:2,status:"closed",reply:"Resolved"});
+ detail=await support.detail(owner,f.tenant,ticket.id);assert.equal(detail.status,"closed");assert.equal(detail.replies.length,2);
+ assert.equal((await support.list(admin,new URLSearchParams({tenantId:f.other}))).total,0);
+ assert.equal((await support.list(admin,new URLSearchParams({status:"closed"}))).total,1);
+});
+test("DataPort rename, member pagination, audit IP search and managed reset keep enterprise boundaries",{skip:!connectionString},async t=>{
+ const f=await fixture(t),owner=await f.verified(),analyst=await f.principal(f.analyst);
+ await f.store.renameEnterprise(owner,f.tenant,{name:"Renamed enterprise"});
+ await assert.rejects(f.store.renameEnterprise(analyst,f.tenant,{name:"Forbidden"}),{status:403});
+ await assert.rejects(f.store.renameEnterprise(owner,f.other,{name:"Forbidden"}),{status:403});
+ const list=await f.store.members(owner,f.tenant,new URLSearchParams({pageSize:"1"}));assert.equal(list.items.length,1);assert.equal(list.total,4);assert.equal(list.summary.employeeCount,3);
+ await f.store.event(f.tenant,f.owner,"query.executed",randomUUID(),200,{ip:"203.0.113.17"});
+ assert.equal((await f.store.audit(owner,f.tenant,new URLSearchParams({q:"203.0.113.17"}))).total,1);
+ await assert.rejects(f.store.resetPassword(analyst,f.tenant,f.viewer,{commandId:randomUUID()},{}),{status:403});
+ await assert.rejects(f.store.resetPassword(owner,f.tenant,f.viewer,{commandId:randomUUID()},{}),{code:"managed_account_required"});
+ await f.pool.query("INSERT INTO dataport.managed_accounts(tenant_id,member_id,user_id,account,managed) VALUES($1,$2,'usr_fixture','fixture',true)",[f.tenant,f.viewer]);
+ const calls=[],accounts={execute:async input=>{calls.push(input);return {reset:true};}},command={commandId:randomUUID()};
+ await f.store.resetPassword(owner,f.tenant,f.viewer,command,accounts);await f.store.resetPassword(owner,f.tenant,f.viewer,command,accounts);
+ assert.equal(calls.length,1);assert.equal(calls[0].operation,"reset-password");assert.equal(calls[0].tenantId,f.tenant);
+ await assert.rejects(f.store.resetPassword(owner,f.other,f.viewer,{commandId:randomUUID()},accounts),{status:403});
+ assert.ok(!(await f.pool.query("SELECT document FROM dataport.member_commands")).rows.some(r=>JSON.stringify(r).includes("passwordHash")));
+});
+
+test('replacement Key keeps its exact existing scopes and environment, with no automatic revocation',async()=>{
+ const tenant=randomUUID(),memberId=randomUUID(),keyId=randomUUID(),consumerId=randomUUID(),calls=[];
+ const principal={memberId,memberships:[{tenantId:tenant,role:'owner',dataport:{permissions:['keys.create'],ownerChallengeRequired:false}}]};
+ const old={id:keyId,status:'active',environment:'test',expiresAt:'2099-01-01',platforms:['ip_risk'],capabilities:[],webSearchOrder:[]};
+ const invoke=replaceFrom=>dataportRoute({request:{method:'POST',headers:{}},response:{},path:`/enterprises/${tenant}/keys`,searchParams:new URLSearchParams(),principal,
+  dataport:{available(){},event:async()=>{}},store:{listConsumers:async()=>[{id:consumerId,tenantId:tenant,businessId:`commerce:ip-risk:${tenant}`,status:'active'}]},
+  service:{listApiKeys:async()=>[old],createApiKey:async body=>{calls.push(body);return {id:randomUUID(),secret:'synthetic-only'}}},
+  readJson:async()=>({name:'replacement',expiresInDays:30,replaceFrom}),sendJson(){}});
+ await invoke(keyId);assert.deepEqual(calls[0].platforms,old.platforms);assert.deepEqual(calls[0].capabilities,[]);assert.equal(calls[0].environment,'test');
+ await assert.rejects(invoke(randomUUID()),{code:'replacement_key_unavailable'});assert.equal(calls.length,1);
+});

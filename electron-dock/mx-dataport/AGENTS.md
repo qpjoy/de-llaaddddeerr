@@ -1,3 +1,5 @@
+- 2026-10-17 复查修复：工单回复/状态/提交人通知和全部已读、超管托管子账号 Auth 重置、企业改名/成员分页/IP 日志检索及 UI 细节对齐；Hub 既有 Admin Token 提供数港工单和邀请码网页，未新增数港平台管理员角色。需要 Auth → Hub migration 154 → DataPort；不重复 enroll、不换密钥、不接真实供应商。见 [本轮修复与发布](docs/review-fixes-20261017.md)。截图与 QA 继续外置 screenshot/fix-20261017。
+
 - 2026-10-16 用户指定 UI 对齐截图及随附测量产物统一存放在 `/Users/lanan/Desktop/yjj/数港/screenshot/`，按日期/任务建子目录；不得再放入项目的 `docs/screenshots/` 或提交到代码仓库。
 
 - 2026-10-15 最新 UI 对齐：以工作区 `dataport` 原型为准，原型目录只读；同步设计 CSS / 侧栏，业务适配在 `apps/web/prototype-parity.css`。见 [逐页验收](docs/prototype-parity-20261015.md)。仅数港前端重新部署，无 Hub / Auth 变更和迁移；统一 MX、超管会话邀请码、既有企业权限及真实商品交付继续沿用。

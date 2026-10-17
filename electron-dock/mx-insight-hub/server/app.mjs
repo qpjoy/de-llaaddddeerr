@@ -2,6 +2,7 @@ import { workspaceRoute } from './portal/workspace.mjs'
 import {portalPrincipal, harborRoute} from './portal/harbor.mjs'
 import { DataportStore } from './portal/dataport-store.mjs'
 import { PaymentError } from '@qpjoy/mx-pay'
+import { DataportSupport } from './portal/dataport-support.mjs'
 import { dataportRoute, dataportRouteAllowed, authorizeLegacyPortal } from './portal/dataport-routes.mjs'
 import { IpRiskProduct } from './external-platforms/ip-risk-product.mjs'
 import { CommerceService } from './commerce/service.mjs'
@@ -1608,6 +1609,19 @@ export function createApp({
       let principal = null
       if (isAdminPath) {
         principal = await resolvePrincipal(request)
+      }
+      if (pathname==='/internal/v1/admin/dataport/tickets' || /^\/internal\/v1\/admin\/dataport\/tenants\/[^/]+\/tickets\/[^/]+$/.test(pathname)) {
+        const operationStore=Object.create(dataport);operationStore.requestId=requestId;
+        const support=new DataportSupport(operationStore);
+        support.requireAdmin(principal);
+        let data;
+        if (pathname.endsWith('/dataport/tickets') && request.method==='GET') data=await support.list(principal,searchParams);
+        else {
+          const match=/\/tenants\/([^/]+)\/tickets\/([^/]+)$/.exec(pathname);
+          if (!match || searchParams.size || !['GET','POST'].includes(request.method)) throw new AppError(400,'invalid_ticket_request','工单请求无效。');
+          data=request.method==='GET'?await support.adminDetail(principal,match[1],match[2]):await support.update(principal,match[1],match[2],await readJson(request,32768));
+        }
+        sendJson(response,200,{data,requestId},{'cache-control':'private, no-store'});return;
       }
       if(request.method==='POST'&&pathname==='/internal/v1/admin/dataport/owner-code') {
         if(principal?.kind!=='admin-token')throw new AppError(403,'admin_token_required','此操作仅允许平台管理员执行。')

@@ -5,7 +5,7 @@ import { downloadExcel } from "./download";
 import { Input } from "@/components/ui/input";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { useEffect, useRef, useState } from "react";
-import { ArrowRight, Database } from "lucide-react";
+import { ArrowRight, Database, Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -426,6 +426,7 @@ export function Commerce({
       {page === "orders" && invoiceTab === "invoices" && (
         <>
           <div className="notice">
+            <Info size={16} aria-hidden="true" />
             仅已确认付款的订单可申请发票。开票服务尚未接入，暂不接收公司信息。
           </div>
           <div className="parity-invoices">
@@ -792,8 +793,8 @@ export function Commerce({
                   <TableHeader>
                     <TableRow>
                       <TableHead>订单 / 产品</TableHead>
-                      <TableHead>金额</TableHead>
-                      <TableHead>创建时间</TableHead>
+                      <TableHead>结算金额</TableHead>
+                      <TableHead>支付方式</TableHead>
                       <TableHead>状态</TableHead>
                       <TableHead>
                         <span className="sr-only">操作</span>
@@ -805,16 +806,26 @@ export function Commerce({
                       <TableRow key={order.id}>
                         <TableCell>
                           <strong>{order.product.name}</strong>
+                          <small title={order.id}>
+                            {order.id.slice(0, 16)} ·{" "}
+                            {dateTime(order.createdAt)}
+                          </small>
+                        </TableCell>
+                        <TableCell className="harbor-order-amount">
+                          <strong>{money(order.product.amountMinor)}</strong>
                           <small>
                             {productTerm(order.product)} ·{" "}
                             {order.product.quota.toLocaleString()} 次调用
                           </small>
                         </TableCell>
-                        <TableCell className="harbor-order-amount">
-                          {money(order.product.amountMinor)}
-                        </TableCell>
                         <TableCell>
-                          <time>{dateTime(order.createdAt)}</time>
+                          {order.paymentStatus === "not_required"
+                            ? "无需付款"
+                            : order.paymentMethod === "alipay"
+                              ? "支付宝"
+                              : order.environment === "test"
+                                ? "测试支付"
+                                : "尚未确认"}
                         </TableCell>
                         <TableCell>
                           <span
@@ -882,41 +893,61 @@ export function Commerce({
           if (!open && !busy) setOrderDetail(null);
         }}
       >
-        <DialogContent className="harbor-checkout">
+        <DialogContent className="harbor-checkout parity-order-dialog">
           <DialogHeader>
             <DialogTitle>订单详情</DialogTitle>
-            <DialogDescription>{detailOrder?.product.name}</DialogDescription>
+            <DialogDescription>{detailOrder?.id}</DialogDescription>
           </DialogHeader>
           {detailOrder && (
             <>
-              <div className="harbor-order-summary">
-                <strong className="harbor-price">
-                  {money(detailOrder.product.amountMinor)}
-                </strong>
-                <span
-                  className="harbor-result-state"
-                  data-state={
-                    detailOrder.status === "active" ? "success" : "unknown"
-                  }
-                >
-                  {orderStatus(detailOrder)}
-                </span>
-              </div>
               <dl className="harbor-order-facts">
                 <div>
-                  <dt>订阅权益</dt>
+                  <dt>产品</dt>
+                  <dd>IP 风险画像</dd>
+                </div>
+                <div>
+                  <dt>套餐</dt>
+                  <dd>{detailOrder.product.name}</dd>
+                </div>
+                <div>
+                  <dt>订阅额度</dt>
+                  <dd>{detailOrder.product.quota.toLocaleString()} 次</dd>
+                </div>
+                <div>
+                  <dt>每日额度</dt>
                   <dd>
-                    {productTerm(detailOrder.product)} ·{" "}
-                    {detailOrder.product.quota.toLocaleString()} 次调用
+                    {detailOrder.product.dailyLimit == null
+                      ? "不另设每日上限"
+                      : `${detailOrder.product.dailyLimit.toLocaleString()} 次`}
                   </dd>
                 </div>
                 <div>
-                  <dt>创建时间</dt>
+                  <dt>有效期</dt>
+                  <dd>{productTerm(detailOrder.product)}</dd>
+                </div>
+                <div>
+                  <dt>申请时间</dt>
                   <dd>{dateTime(detailOrder.createdAt)}</dd>
                 </div>
                 <div>
-                  <dt>订单编号</dt>
-                  <dd>{detailOrder.id}</dd>
+                  <dt>人民币金额</dt>
+                  <dd>{money(detailOrder.product.amountMinor)}</dd>
+                </div>
+                <div>
+                  <dt>支付方式</dt>
+                  <dd>
+                    {detailOrder.paymentStatus === "not_required"
+                      ? "无需付款"
+                      : detailOrder.paymentMethod === "alipay"
+                        ? "支付宝"
+                        : detailOrder.environment === "test"
+                          ? "测试支付"
+                          : "尚未确认"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>订单状态</dt>
+                  <dd>{orderStatus(detailOrder)}</dd>
                 </div>
               </dl>
               {detailOrder.environment === "test" && (

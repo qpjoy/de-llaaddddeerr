@@ -5,8 +5,8 @@ import {
   Users,
   ShieldCheck,
   Download,
-  MessageCircle,
   RefreshCw,
+  Pencil,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
@@ -26,6 +26,13 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from "@/components/ui/select";
 import { request } from "./api";
 import {
   enterpriseUrl,
@@ -37,8 +44,13 @@ import { Pagination } from "./pagination";
 import { dateTime } from "./commerce-state";
 import { downloadExcel } from "./download";
 
-type Props = { tenant: string; session: any; csrf: string };
-function useEnterprise(tenant: string, path: string) {
+type Props = {
+  tenant: string;
+  session: any;
+  csrf: string;
+  reloadSession?: () => void;
+};
+function useEnterprise(tenant: string, path: string | null) {
   const [data, setData] = useState<any>(null),
     [error, setError] = useState(""),
     [version, setVersion] = useState(0);
@@ -46,6 +58,7 @@ function useEnterprise(tenant: string, path: string) {
     const c = new AbortController();
     setData(null);
     setError("");
+    if (!path) return () => c.abort();
     request(enterpriseUrl(tenant, path), { signal: c.signal })
       .then((v) => {
         if (!c.signal.aborted) setData(v.data);
@@ -152,8 +165,13 @@ export function OwnerChallenge({
   );
 }
 export function EnterpriseMembers(props: Props) {
+  const [page, setPage] = useState(1),
+    [memberSearch, setMemberSearch] = useState("");
   const { tenant, session } = props,
-    view = useEnterprise(tenant, "members"),
+    view = useEnterprise(
+      tenant,
+      `members?page=${page}&q=${encodeURIComponent(memberSearch)}`,
+    ),
     write = useWrite(props),
     owner = ownerOf(session, tenant);
   const [open, setOpen] = useState(false),
@@ -167,7 +185,12 @@ export function EnterpriseMembers(props: Props) {
     [editingDetails, setEditingDetails] = useState<"profile" | "role" | null>(
       null,
     ),
-    [statusMember, setStatusMember] = useState<any>(null);
+    [statusMember, setStatusMember] = useState<any>(null),
+    [resetMember, setResetMember] = useState<any>(null),
+    [resetCommand, setResetCommand] = useState(""),
+    [notice, setNotice] = useState(""),
+    [rename, setRename] = useState(false),
+    [enterpriseName, setEnterpriseName] = useState("");
   const roles = view.data?.roles || [],
     members = view.data?.items || [];
   const membership = membershipFor(session, tenant);
@@ -208,7 +231,22 @@ export function EnterpriseMembers(props: Props) {
           </span>
           <div>
             <span className="team-eyebrow">当前企业</span>
-            <h3>{membership?.tenantName}</h3>
+            <h3>
+              {membership?.tenantName}
+              {owner && (
+                <Button
+                  variant="ghost"
+                  className="enterprise-rename"
+                  aria-label="编辑企业名称"
+                  onClick={() => {
+                    setEnterpriseName(membership?.tenantName || "");
+                    setRename(true);
+                  }}
+                >
+                  <Pencil size={14} />
+                </Button>
+              )}
+            </h3>
           </div>
         </div>
         <div className="team-summary-meta">
@@ -221,7 +259,7 @@ export function EnterpriseMembers(props: Props) {
           </span>
           <span>
             {view.data
-              ? `${members.filter((m: any) => m.role !== "owner").length} 个员工子账号`
+              ? `${view.data.summary?.employeeCount ?? members.filter((m: any) => m.role !== "owner").length} 个员工子账号`
               : view.error
                 ? "成员数量暂不可用"
                 : "正在读取成员…"}
@@ -229,6 +267,11 @@ export function EnterpriseMembers(props: Props) {
           <span>{membership?.dataport?.roleName}</span>
         </div>
       </section>
+      {notice && (
+        <p role="status" className="harbor-hint">
+          {notice}
+        </p>
+      )}
       {(view.error || write.error) && (
         <p className="harbor-error" role="alert">
           {view.error || write.error}
@@ -262,6 +305,16 @@ export function EnterpriseMembers(props: Props) {
             </div>
           )}
         </div>
+        <Input
+          className="member-search"
+          aria-label="搜索企业成员"
+          placeholder="搜索员工名称或登录账号"
+          value={memberSearch}
+          onChange={(e) => {
+            setMemberSearch(e.target.value);
+            setPage(1);
+          }}
+        />
         <div
           className="dp-team-table-scroll"
           role="region"
@@ -356,6 +409,9 @@ export function EnterpriseMembers(props: Props) {
         ) : members.length === 0 ? (
           <p className="team-empty">暂无企业成员</p>
         ) : null}
+        {view.data?.total > 10 && (
+          <Pagination label="成员" {...view.data} onChange={setPage} />
+        )}
         <p className="team-summary-note">
           员工按分配的角色权限查询 IP
           风险画像、查看记录和新建工单；子账号与日志由企业超管管理。
@@ -666,6 +722,26 @@ export function EnterpriseMembers(props: Props) {
                     查看初始密码
                   </Button>
                 )}
+                {owner &&
+                  editingMember.managed &&
+                  editingMember.status === "active" && (
+                    <Button
+                      variant="outline"
+                      disabled={write.busy}
+                      onClick={() => {
+                        setResetMember(editingMember);
+                        setResetCommand(crypto.randomUUID());
+                        setEditingMember(null);
+                      }}
+                    >
+                      重置密码
+                    </Button>
+                  )}
+                {!editingMember.managed && (
+                  <p className="harbor-hint">
+                    已有 MX 账号忘记密码，请使用统一账号找回。
+                  </p>
+                )}
                 {write.error && <p role="alert">{write.error}</p>}
               </>
             ))}
@@ -691,6 +767,12 @@ export function EnterpriseMembers(props: Props) {
                 : "启用后该成员可按角色权限访问企业数据。"}
             </DialogDescription>
           </DialogHeader>
+          {statusMember?.status === "active" && (
+            <p className="harbor-hint">
+              企业 API Key 不会随成员停用自动失效。请检查该成员接触过的
+              Key，必要时签发替代 Key、完成客户端切换后撤销旧 Key。
+            </p>
+          )}
           {write.error && <p role="alert">{write.error}</p>}
           <div className="account-row-actions">
             <Button
@@ -721,6 +803,104 @@ export function EnterpriseMembers(props: Props) {
                 : statusMember?.status === "active"
                   ? "确认停用"
                   : "确认启用"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={rename}
+        onOpenChange={(v) => {
+          if (!write.busy) setRename(v);
+        }}
+      >
+        <DialogContent className="dp-dialog">
+          <DialogHeader>
+            <DialogTitle>编辑企业名称</DialogTitle>
+            <DialogDescription>
+              仅修改当前企业名称，不修改统一 MX 账号。
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            className="dp-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void write
+                .run("profile", { name: enterpriseName })
+                .then(() => {
+                  setRename(false);
+                  props.reloadSession?.();
+                  view.reload();
+                })
+                .catch(() => {});
+            }}
+          >
+            <label>
+              企业名称
+              <Input
+                required
+                maxLength={80}
+                value={enterpriseName}
+                onChange={(e) => setEnterpriseName(e.target.value)}
+              />
+            </label>
+            {write.error && <p role="alert">{write.error}</p>}
+            <div className="dialog-actions">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={write.busy}
+                onClick={() => setRename(false)}
+              >
+                取消
+              </Button>
+              <Button disabled={write.busy || !enterpriseName.trim()}>
+                保存
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={!!resetMember}
+        onOpenChange={(v) => {
+          if (!v && !write.busy) setResetMember(null);
+        }}
+      >
+        <DialogContent className="dp-dialog">
+          <DialogHeader>
+            <DialogTitle>重置托管子账号密码？</DialogTitle>
+            <DialogDescription>
+              {resetMember?.displayName}{" "}
+              的旧密码和登录会话将失效。重置后可从成员详情查看新初始密码，并交给员工修改。
+            </DialogDescription>
+          </DialogHeader>
+          {write.error && <p role="alert">{write.error}</p>}
+          <div className="dialog-actions">
+            <Button
+              autoFocus
+              variant="outline"
+              disabled={write.busy}
+              onClick={() => setResetMember(null)}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={write.busy}
+              onClick={() =>
+                void write
+                  .run(`members/${resetMember.id}/reset-password`, {
+                    commandId: resetCommand,
+                  })
+                  .then(() => {
+                    setResetMember(null);
+                    setNotice(
+                      "密码已重置，请从成员详情查看新初始密码并交给员工。",
+                    );
+                  })
+                  .catch(() => {})
+              }
+            >
+              {write.busy ? "正在重置…" : "确认重置"}
             </Button>
           </div>
         </DialogContent>
@@ -810,23 +990,43 @@ function RoleEditor(props: Props & { onClose: () => void }) {
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                 />
               </label>
-              <div className="dp-permission-grid">
-                {Object.entries(view.data?.catalog || {}).map(([id, label]) => (
-                  <label key={id}>
-                    <input
-                      type="checkbox"
-                      checked={draft.permissions.includes(id)}
-                      onChange={(e) =>
-                        setDraft({
-                          ...draft,
-                          permissions: e.target.checked
-                            ? [...draft.permissions, id]
-                            : draft.permissions.filter((p: string) => p !== id),
-                        })
-                      }
-                    />
-                    {String(label)}
-                  </label>
+              <div className="dp-permission-groups">
+                {Object.entries({
+                  查询与用量: ["query", "history", "usage"],
+                  凭证与文档: ["keys", "docs"],
+                  订阅与账单: ["subscriptions", "billing", "invoice"],
+                  企业成员: ["members"],
+                  审计与客服: ["audit", "support"],
+                }).map(([group, prefixes]) => (
+                  <fieldset key={group}>
+                    <legend>{group}</legend>
+                    <div className="dp-permission-grid">
+                      {Object.entries(view.data?.catalog || {})
+                        .filter(([id]) => prefixes.includes(id.split(".")[0]))
+                        .map(([id, label]) => (
+                          <label key={id}>
+                            <input
+                              type="checkbox"
+                              checked={draft.permissions.includes(id)}
+                              onChange={(e) =>
+                                setDraft({
+                                  ...draft,
+                                  permissions: e.target.checked
+                                    ? [...draft.permissions, id]
+                                    : draft.permissions.filter(
+                                        (p: string) => p !== id,
+                                      ),
+                                })
+                              }
+                            />
+                            {String(label)}
+                            {id === "invoice.request" && (
+                              <small>（待开放）</small>
+                            )}
+                          </label>
+                        ))}
+                    </div>
+                  </fieldset>
                 ))}
               </div>
               <div className="harbor-actions">
@@ -871,12 +1071,44 @@ export function Support(props: Props) {
     [open, setOpen] = useState(
       () => !!sessionStorage.getItem("dataport:report-error"),
     ),
-    [detail, setDetail] = useState<any>(null);
+    [detail, setDetail] = useState<any>(null),
+    [detailId, setDetailId] = useState(() => {
+      const id = sessionStorage.getItem("dataport:open-ticket") || "";
+      return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        id,
+      )
+        ? id
+        : "";
+    });
   const view = useEnterprise(
       props.tenant,
       `tickets?page=${page}&q=${encodeURIComponent(q)}&category=${category}&status=${status}`,
     ),
-    write = useWrite(props);
+    write = useWrite(props),
+    thread = useEnterprise(
+      props.tenant,
+      detailId ? `tickets/${detailId}` : null,
+    );
+  useEffect(() => {
+    const openTicket = () => {
+      const id = sessionStorage.getItem("dataport:open-ticket") || "";
+      sessionStorage.removeItem("dataport:open-ticket");
+      if (
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          id,
+        )
+      ) {
+        setDetail(null);
+        setDetailId(id);
+      }
+    };
+    openTicket();
+    window.addEventListener("dataport:open-ticket", openTicket);
+    return () => window.removeEventListener("dataport:open-ticket", openTicket);
+  }, []);
+  useEffect(() => {
+    if (detailId && thread.data?.id === detailId) setDetail(thread.data);
+  }, [detailId, thread.data]);
   return (
     <>
       <div className="page-heading">
@@ -885,12 +1117,10 @@ export function Support(props: Props) {
           <p>提交购买、接入或账户问题，查看工单记录。</p>
         </div>
         {hasPermission(props.session, props.tenant, "support.create") && (
-          <Button onClick={() => setOpen(true)}>
-            <MessageCircle size={16} />
-            新建工单
-          </Button>
+          <Button onClick={() => setOpen(true)}>新建工单</Button>
         )}
       </div>
+      {thread.error && <p role="alert">{thread.error}</p>}
       <Card className="harbor-table-panel parity-ticket-panel">
         <div className="dp-toolbar">
           <Input
@@ -927,6 +1157,8 @@ export function Support(props: Props) {
           >
             <option value="">全部状态</option>
             <option value="saved">已提交</option>
+            <option value="processing">处理中</option>
+            <option value="closed">已关闭</option>
           </select>
         </div>
         {view.error && <p role="alert">{view.error}</p>}
@@ -953,11 +1185,27 @@ export function Support(props: Props) {
                   {t.priority === "urgent" ? "紧急" : "普通"}
                 </TableCell>
                 <TableCell>
-                  <span className="status good">已提交</span>
+                  <span
+                    className={`status ${t.status === "closed" ? "" : "good"}`}
+                  >
+                    {(
+                      {
+                        saved: "已提交",
+                        processing: "处理中",
+                        closed: "已关闭",
+                      } as Record<string, string>
+                    )[t.status] || t.status}
+                  </span>
                 </TableCell>
                 <TableCell>{dateTime(t.created_at)}</TableCell>
                 <TableCell>
-                  <Button variant="link" onClick={() => setDetail(t)}>
+                  <Button
+                    variant="link"
+                    onClick={() => {
+                      setDetail(t);
+                      setDetailId(t.id);
+                    }}
+                  >
                     查看
                   </Button>
                 </TableCell>
@@ -994,31 +1242,44 @@ export function Support(props: Props) {
                 );
                 sessionStorage.removeItem("dataport:report-error");
                 setOpen(false);
+                setPage(1);
                 view.reload();
               } catch {}
             }}
           >
-            <label>
-              <span className="field-label-text">
-                问题分类 <span className="required-mark">*</span>
-              </span>
-              <select name="category">
-                {Object.entries(categories).map(([v, l]) => (
-                  <option key={v} value={v}>
-                    {l}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span className="field-label-text">
-                优先级 <span className="required-mark">*</span>
-              </span>
-              <select name="priority">
-                <option value="normal">普通</option>
-                <option value="urgent">紧急</option>
-              </select>
-            </label>
+            <div className="ticket-form-pair">
+              <label>
+                <span className="field-label-text">
+                  问题分类 <span className="required-mark">*</span>
+                </span>
+                <Select name="category" required>
+                  <SelectTrigger aria-label="问题分类">
+                    <SelectValue placeholder="请选择问题分类" />
+                  </SelectTrigger>
+                  <SelectContent position="popper">
+                    {Object.entries(categories).map(([v, l]) => (
+                      <SelectItem key={v} value={v}>
+                        {l}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </label>
+              <label>
+                <span className="field-label-text">
+                  优先级 <span className="required-mark">*</span>
+                </span>
+                <Select name="priority" required>
+                  <SelectTrigger aria-label="优先级">
+                    <SelectValue placeholder="请选择优先级" />
+                  </SelectTrigger>
+                  <SelectContent position="popper">
+                    <SelectItem value="normal">普通 · 常规问题</SelectItem>
+                    <SelectItem value="urgent">紧急 · 业务受阻</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+            </div>
             <label>
               <span className="field-label-text">
                 详细描述 <span className="required-mark">*</span>
@@ -1039,23 +1300,64 @@ export function Support(props: Props) {
             </label>
             {write.error && <p role="alert">{write.error}</p>}
             <Button disabled={write.busy}>新建工单</Button>
-            <small>工单会保存到平台，外部客服通知暂未接入。</small>
+            <small>
+              可在工单详情查看平台回复和处理状态，回复后会收到站内通知。
+            </small>
           </form>
         </DialogContent>
       </Dialog>
       <Dialog
         open={!!detail}
         onOpenChange={(v) => {
-          if (!v) setDetail(null);
+          if (!v) {
+            setDetail(null);
+            setDetailId("");
+          }
         }}
       >
         <DialogContent className="dp-dialog">
           <DialogHeader>
             <DialogTitle>工单详情</DialogTitle>
-            <DialogDescription>{detail?.id} · 已记录</DialogDescription>
+            <DialogDescription>
+              {detail?.id} ·{" "}
+              {(
+                {
+                  saved: "已提交",
+                  processing: "处理中",
+                  closed: "已关闭",
+                } as Record<string, string>
+              )[detail?.status] || detail?.status}
+            </DialogDescription>
           </DialogHeader>
           <p className="dp-prewrap">{detail?.content}</p>
           <p>联系方式：{detail?.contact || "未填写"}</p>
+          {thread.error && <p role="alert">{thread.error}</p>}
+          {!thread.error && detailId && thread.data?.id !== detailId && (
+            <p role="status">正在读取回复…</p>
+          )}
+          <div className="ticket-replies">
+            {detail?.replies?.map((r: any) => (
+              <article key={r.id}>
+                <strong>
+                  平台客服 ·{" "}
+                  {
+                    (
+                      {
+                        saved: "已提交",
+                        processing: "处理中",
+                        closed: "已关闭",
+                      } as Record<string, string>
+                    )[r.status]
+                  }
+                </strong>
+                <time>{dateTime(r.created_at)}</time>
+                {r.reply && <p className="dp-prewrap">{r.reply}</p>}
+              </article>
+            ))}
+          </div>
+          <Button variant="outline" onClick={thread.reload}>
+            刷新回复
+          </Button>
         </DialogContent>
       </Dialog>
     </>
@@ -1069,6 +1371,9 @@ export function Audit(props: Props) {
     "member.joined": "确认加入企业",
     "member.updated": "修改员工",
     "member.initial-password.viewed": "查看初始密码",
+    "member.password.reset": "重置托管子账号密码",
+    "ticket.updated": "处理工单",
+    "enterprise.renamed": "修改企业名称",
     "role.saved": "保存角色",
     "role.archived": "归档角色",
     "key.created": "创建 API Key",
@@ -1091,7 +1396,9 @@ export function Audit(props: Props) {
     const c = new AbortController();
     setActors([]);
     if (hasPermission(props.session, props.tenant, "members.read"))
-      request(enterpriseUrl(props.tenant, "members"), { signal: c.signal })
+      request(enterpriseUrl(props.tenant, "members?pageSize=100"), {
+        signal: c.signal,
+      })
         .then(({ data }) => {
           if (!c.signal.aborted) setActors(data.items || []);
         })
@@ -1111,6 +1418,7 @@ export function Audit(props: Props) {
         <div className="harbor-actions">
           <Button variant="outline" aria-label="刷新日志" onClick={view.reload}>
             <RefreshCw size={16} />
+            刷新
           </Button>
           {hasPermission(props.session, props.tenant, "audit.export") && (
             <Button
@@ -1137,7 +1445,9 @@ export function Audit(props: Props) {
                       dateTime(r.created_at),
                       r.actorName || "平台管理员",
                       actionNames[r.action] || r.action,
-                      r.target,
+                      r.action === "query.executed"
+                        ? r.detail?.ip || r.target
+                        : r.target,
                       r.status,
                       r.detail?.requestId || "",
                     ]),
@@ -1159,7 +1469,7 @@ export function Audit(props: Props) {
         <div className="dp-toolbar">
           <Input
             aria-label="搜索日志"
-            placeholder="搜索目标、操作者或请求编号"
+            placeholder="搜索 IP、目标、操作者或请求编号"
             value={q}
             onChange={(e) => {
               setQ(e.target.value);
@@ -1250,9 +1560,9 @@ export function Audit(props: Props) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>操作者</TableHead>
+              <TableHead>操作账号</TableHead>
               <TableHead>操作</TableHead>
-              <TableHead>目标</TableHead>
+              <TableHead>查询 / 操作对象</TableHead>
               <TableHead>结果</TableHead>
               <TableHead>操作时间</TableHead>
             </TableRow>
@@ -1261,11 +1571,20 @@ export function Audit(props: Props) {
             {view.data?.items.map((r: any) => (
               <TableRow key={r.id}>
                 <TableCell title={r.actor}>
-                  {r.actorName || (r.actor ? "未记录姓名" : "平台管理员")}
+                  <strong>
+                    {r.actorName || (r.actor ? "未记录姓名" : "平台管理员")}
+                  </strong>
+                  {r.actorAccount && (
+                    <small className="dp-account-id">{r.actorAccount}</small>
+                  )}
                 </TableCell>
                 <TableCell>{actionNames[r.action] || r.action}</TableCell>
                 <TableCell>
-                  <code>{r.target || "—"}</code>
+                  <code>
+                    {r.action === "query.executed"
+                      ? r.detail?.ip || r.target || "—"
+                      : r.target || "—"}
+                  </code>
                 </TableCell>
                 <TableCell>
                   {r.status < 400 ? "成功" : "失败"} · {r.status}

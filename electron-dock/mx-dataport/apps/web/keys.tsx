@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Plus, Copy, KeyRound, Info, Database } from "lucide-react";
+import { Plus, Copy, Info, Database } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -39,7 +39,9 @@ export function ApiKeys({
     [open, setOpen] = useState(false),
     [secret, setSecret] = useState(""),
     [revoke, setRevoke] = useState<any>(null),
-    [copied, setCopied] = useState(false);
+    [copied, setCopied] = useState(false),
+    [keyName, setKeyName] = useState(""),
+    [replacement, setReplacement] = useState<any>(null);
   const rows = useLocalPage(items, 10);
   useEffect(() => {
     const c = new AbortController();
@@ -89,7 +91,13 @@ export function ApiKeys({
           <p>管理企业接入凭证，Key 仍受独立授权、额度和订阅限制。</p>
         </div>
         {hasPermission(session, tenant, "keys.create") && (
-          <Button onClick={() => setOpen(true)}>
+          <Button
+            onClick={() => {
+              setReplacement(null);
+              setKeyName("");
+              setOpen(true);
+            }}
+          >
             <Plus size={16} />
             签发 API Key
           </Button>
@@ -107,35 +115,52 @@ export function ApiKeys({
           {error}
         </p>
       )}
-      <Card className="harbor-table-panel">
+      <Card className="harbor-table-panel parity-keys-panel">
         {items.length > 0 && (
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>名称</TableHead>
-                <TableHead>Key 标识</TableHead>
+                <TableHead>密钥名称</TableHead>
+                <TableHead>API Key</TableHead>
+                <TableHead>权限</TableHead>
+                <TableHead>创建时间</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead>到期时间</TableHead>
-                <TableHead />
+                <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {rows.items.map((k) => (
                 <TableRow key={k.id}>
                   <TableCell>
-                    <KeyRound size={15} />
-                    {k.name}
+                    <span className="key-name">{k.name}</span>
                   </TableCell>
                   <TableCell>
                     <code>{k.prefix || k.id}••••••</code>
                   </TableCell>
                   <TableCell>
                     <span
+                      title={[
+                        ...(k.platforms || []),
+                        ...(k.capabilities || []),
+                      ].join("、")}
+                    >
+                      {k.capabilities?.includes("ip.risk.query") ||
+                      k.platforms?.includes("ip_risk")
+                        ? "IP 风险画像"
+                        : k.capabilities?.length
+                          ? `${k.capabilities.length} 项能力`
+                          : "未授予能力"}
+                    </span>
+                  </TableCell>
+                  <TableCell>{dateTime(k.createdAt)}</TableCell>
+                  <TableCell>
+                    <span
                       className={`status ${(k.effectiveStatus || k.status) === "active" ? "good" : "pending"}`}
                     >
                       {(
                         {
-                          active: "正常",
+                          active: "有效",
                           revoked: "已撤销",
                           expired: "已到期",
                           suspended: "已停用",
@@ -145,12 +170,27 @@ export function ApiKeys({
                   </TableCell>
                   <TableCell>{dateTime(k.expiresAt)}</TableCell>
                   <TableCell>
-                    {hasPermission(session, tenant, "keys.revoke") &&
-                      (k.effectiveStatus || k.status) === "active" && (
-                        <Button variant="ghost" onClick={() => setRevoke(k)}>
-                          撤销
-                        </Button>
-                      )}
+                    <div className="key-row-actions">
+                      {hasPermission(session, tenant, "keys.create") &&
+                        (k.effectiveStatus || k.status) === "active" && (
+                          <Button
+                            variant="link"
+                            onClick={() => {
+                              setReplacement(k);
+                              setKeyName(k.name.slice(0, 70) + "（替代）");
+                              setOpen(true);
+                            }}
+                          >
+                            签发替代 Key
+                          </Button>
+                        )}
+                      {hasPermission(session, tenant, "keys.revoke") &&
+                        (k.effectiveStatus || k.status) === "active" && (
+                          <Button variant="ghost" onClick={() => setRevoke(k)}>
+                            撤销
+                          </Button>
+                        )}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -168,7 +208,13 @@ export function ApiKeys({
               <h3>签发你的第一把 API Key</h3>
               <p>密钥用于服务端请求鉴权，完整凭证只展示一次。</p>
               {hasPermission(session, tenant, "keys.create") && (
-                <Button onClick={() => setOpen(true)}>
+                <Button
+                  onClick={() => {
+                    setReplacement(null);
+                    setKeyName("");
+                    setOpen(true);
+                  }}
+                >
                   <Plus size={16} />
                   签发 API Key
                 </Button>
@@ -176,7 +222,7 @@ export function ApiKeys({
             </div>
           )
         )}
-        {items.length > 0 && (
+        {items.length > 10 && (
           <Pagination
             label="API Keys"
             {...rows.pagination}
@@ -194,10 +240,17 @@ export function ApiKeys({
           <DialogHeader>
             <DialogTitle>签发 API Key</DialogTitle>
             <DialogDescription>
-              新 Key 仅授权当前企业 IP
-              风险画像产品，完整凭证仅在创建成功后显示一次。
+              {replacement
+                ? "替代 Key 沿用原 Key 的授权范围，完整凭证仅在创建成功后显示一次。"
+                : "新 Key 仅授权当前企业 IP 风险画像产品，完整凭证仅在创建成功后显示一次。"}
             </DialogDescription>
           </DialogHeader>
+          {replacement && (
+            <p className="harbor-hint">
+              替代「{replacement.name}」，保持原 Key 的授权范围；旧 Key
+              将继续有效，请完成客户端切换后手动撤销。
+            </p>
+          )}
           <form
             className="dp-key-form"
             onSubmit={async (e) => {
@@ -206,6 +259,7 @@ export function ApiKeys({
               try {
                 const k = await post("keys", {
                   name: data.get("name"),
+                  ...(replacement ? { replaceFrom: replacement.id } : {}),
                   expiresInDays: Number(data.get("days")),
                 });
                 setSecret(k.secret);
@@ -219,6 +273,8 @@ export function ApiKeys({
               密钥名称
               <input
                 name="name"
+                value={keyName}
+                onChange={(e) => setKeyName(e.target.value)}
                 required
                 maxLength={80}
                 placeholder="例如：开发测试环境"
@@ -242,7 +298,7 @@ export function ApiKeys({
               >
                 取消
               </Button>
-              <Button disabled={busy}>签发 API Key</Button>
+              <Button disabled={busy || !keyName.trim()}>签发 API Key</Button>
             </div>
           </form>
         </DialogContent>

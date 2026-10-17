@@ -13,7 +13,8 @@ import {
 } from "@/components/ui/table";
 import { request } from "./api";
 import {
-  curlExample,
+  requestExample,
+  localResponseExample,
   documentOperations,
   resolveSchema,
 } from "./documentation-model";
@@ -25,7 +26,9 @@ export function Documentation({ tenant }: { tenant: string; session: any }) {
     [group, setGroup] = useState("all"),
     [selected, setSelected] = useState("");
   const [version, setVersion] = useState(0),
-    [copyState, setCopyState] = useState("");
+    [copyState, setCopyState] = useState(""),
+    [language, setLanguage] = useState("curl"),
+    [demo, setDemo] = useState(false);
   useEffect(() => {
     const controller = new AbortController();
     setSchema(null);
@@ -67,7 +70,9 @@ export function Documentation({ tenant }: { tenant: string; session: any }) {
     resolveSchema(schema, entry.operation.requestBody)?.content?.[
       "application/json"
     ];
-  const snippet = entry ? curlExample(schema, entry, location.origin) : "";
+  const snippet = entry
+    ? requestExample(schema, entry, location.origin, language)
+    : "";
   function download() {
     const url = URL.createObjectURL(
       new Blob([JSON.stringify(schema, null, 2)], { type: "application/json" }),
@@ -226,6 +231,25 @@ export function Documentation({ tenant }: { tenant: string; session: any }) {
                     此页展示接口定义与调用示例，不发送查询请求。实际调用受 API
                     Key 权限、订阅、额度和服务状态约束。
                   </div>
+                  <div className="local-example-actions">
+                    <Button
+                      variant="outline"
+                      onClick={() => setDemo((v) => !v)}
+                      aria-expanded={demo}
+                    >
+                      本地示例演示
+                    </Button>
+                    <small>不发送请求，不消耗额度</small>
+                  </div>
+                  {demo && (
+                    <pre aria-label="本地合成响应示例">
+                      {JSON.stringify(
+                        localResponseExample(schema, entry),
+                        null,
+                        2,
+                      )}
+                    </pre>
+                  )}
                   <h3>请求参数</h3>
                   {!parameters.length ? (
                     <p className="harbor-hint">
@@ -335,9 +359,17 @@ export function Documentation({ tenant }: { tenant: string; session: any }) {
                     <Copy size={15} />
                   </Button>
                 </div>
-                <Tabs value="curl">
+                <Tabs
+                  value={language}
+                  onValueChange={(v) => {
+                    setLanguage(v);
+                    setCopyState("");
+                  }}
+                >
                   <TabsList>
                     <TabsTrigger value="curl">cURL</TabsTrigger>
+                    <TabsTrigger value="javascript">JavaScript</TabsTrigger>
+                    <TabsTrigger value="python">Python</TabsTrigger>
                   </TabsList>
                 </Tabs>
                 <pre>{snippet || "请选择一个已授权接口。"}</pre>

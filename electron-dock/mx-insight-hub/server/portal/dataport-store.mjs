@@ -319,7 +319,7 @@ export class DataportStore {
       return saved;
     });
   }
-  async members(principal, tenantId) {
+  async members(principal, tenantId, search = new URLSearchParams()) {
     requireDataportAccess(principal, tenantId, "members.read");
     const permissions =
         requireDataportAccess(principal, tenantId).dataport?.permissions || [],
@@ -332,7 +332,27 @@ export class DataportStore {
           )
         ).rows,
       ];
+    const { page, pageSize, offset } = paging(search),
+      q = text(search.get("q"));
+    const summary = (
+      await this.pool.query(
+        `SELECT count(*)::int AS total,count(*) FILTER(WHERE role<>'owner')::int AS "employeeCount" FROM iam.tenant_memberships WHERE tenant_id=$1`,
+        [tenantId],
+      )
+    ).rows[0];
+    const filter =
+      " AND ($2='' OR position(lower($2) in lower(coalesce(mp.display_name,m.display_name)||' '||coalesce(ma.account,'')))>0)";
+    const total = (
+      await this.pool.query(
+        `SELECT count(*)::int AS total FROM iam.tenant_memberships tm JOIN iam.members m ON m.id=tm.member_id LEFT JOIN dataport.member_profiles mp ON mp.tenant_id=tm.tenant_id AND mp.member_id=tm.member_id LEFT JOIN dataport.managed_accounts ma ON ma.tenant_id=tm.tenant_id AND ma.member_id=tm.member_id WHERE tm.tenant_id=$1 ${filter}`,
+        [tenantId, q],
+      )
+    ).rows[0].total;
     return {
+      total,
+      page,
+      pageSize,
+      summary,
       roles: all
         .filter(
           (r) =>
@@ -348,8 +368,8 @@ export class DataportStore {
       LEFT JOIN dataport.member_roles a ON a.tenant_id=tm.tenant_id AND a.member_id=tm.member_id
       LEFT JOIN dataport.managed_accounts ma ON ma.tenant_id=tm.tenant_id AND ma.member_id=tm.member_id
       LEFT JOIN dataport.member_profiles mp ON mp.tenant_id=tm.tenant_id AND mp.member_id=tm.member_id
-      WHERE tm.tenant_id=$1 ORDER BY (tm.role='owner') DESC,m.display_name,m.id`,
-          [tenantId],
+      WHERE tm.tenant_id=$1 ${filter} ORDER BY (tm.role='owner') DESC,m.display_name,m.id LIMIT $3 OFFSET $4`,
+          [tenantId, q, pageSize, offset],
         )
       ).rows,
     };
@@ -496,6 +516,11 @@ export class DataportStore {
       q = text(search.get("q")),
       category = text(search.get("category"), 30),
       status = text(search.get("status"), 30);
+    if (
+      !["", "saved", "processing", "closed"].includes(status) ||
+      !["", "purchase", "technical", "account", "other"].includes(category)
+    )
+      problem(400, "invalid_ticket_filter", "工单筛选条件无效。");
     const args = [
       tenantId,
       permissions.includes("support.read.tenant") ? null : principal.memberId,
@@ -521,6 +546,20 @@ export class DataportStore {
   }
   async createTicket(principal, tenantId, body) {
     requireDataportAccess(principal, tenantId, "support.create");
+    if (
+      Object.keys(body).some(
+        (k) => !["content", "contact", "category", "priority"].includes(k),
+      ) ||
+      typeof body.content !== "string" ||
+      body.content.trim().length > 5000 ||
+      (body.contact !== undefined &&
+        (typeof body.contact !== "string" || body.contact.length > 200))
+    )
+      problem(
+        400,
+        "invalid_ticket",
+        "问题描述最多 5000 字，联系方式最多 200 字。",
+      );
     const content = text(body.content, 5000),
       contact = text(body.contact, 200),
       category = body.category || "technical",
@@ -577,16 +616,16 @@ export class DataportStore {
       problem(400, "invalid_audit_filter", "日志筛选条件无效。");
     const args = [tenantId, q, actor, action, status, from, to],
       where =
-        "e.tenant_id=$1 AND ($2='' OR position(lower($2) in lower(e.target||' '||coalesce(m.display_name,'')||' '||coalesce(e.detail->>'requestId','')))>0) AND ($3='' OR e.actor::text=$3) AND ($4='' OR e.action=$4) AND ($5='' OR ($5='success' AND e.status<400) OR ($5='failure' AND e.status>=400)) AND ($6::date IS NULL OR e.created_at >= $6::date) AND ($7::date IS NULL OR e.created_at<$7::date+interval '1 day')";
+        "e.tenant_id=$1 AND ($2='' OR position(lower($2) in lower(e.target||' '||coalesce(mp.display_name,m.display_name,'')||' '||coalesce(ma.account,'')||' '||coalesce(e.detail->>'requestId','')||' '||coalesce(e.detail->>'ip','')))>0) AND ($3='' OR e.actor::text=$3) AND ($4='' OR e.action=$4) AND ($5='' OR ($5='success' AND e.status<400) OR ($5='failure' AND e.status>=400)) AND ($6::date IS NULL OR e.created_at >= $6::date) AND ($7::date IS NULL OR e.created_at<$7::date+interval '1 day')";
     const total = (
       await this.pool.query(
-        `SELECT count(*)::int AS total FROM dataport.events e LEFT JOIN iam.members m ON m.id=e.actor WHERE ${where}`,
+        `SELECT count(*)::int AS total FROM dataport.events e LEFT JOIN iam.members m ON m.id=e.actor LEFT JOIN dataport.member_profiles mp ON mp.tenant_id=e.tenant_id AND mp.member_id=e.actor LEFT JOIN dataport.managed_accounts ma ON ma.tenant_id=e.tenant_id AND ma.member_id=e.actor WHERE ${where}`,
         args,
       )
     ).rows[0].total;
     const items = (
       await this.pool.query(
-        `SELECT e.*,m.display_name AS "actorName" FROM dataport.events e LEFT JOIN iam.members m ON m.id=e.actor WHERE ${where} ORDER BY e.created_at DESC,e.id DESC LIMIT $8 OFFSET $9`,
+        `SELECT e.*,coalesce(mp.display_name,m.display_name) AS "actorName",ma.account AS "actorAccount" FROM dataport.events e LEFT JOIN iam.members m ON m.id=e.actor LEFT JOIN dataport.member_profiles mp ON mp.tenant_id=e.tenant_id AND mp.member_id=e.actor LEFT JOIN dataport.managed_accounts ma ON ma.tenant_id=e.tenant_id AND ma.member_id=e.actor WHERE ${where} ORDER BY e.created_at DESC,e.id DESC LIMIT $8 OFFSET $9`,
         [...args, pageSize, offset],
       )
     ).rows;
@@ -869,6 +908,105 @@ export class DataportStore {
         );
       }
       return { joined: true, tenantId: join.tenant_id };
+    });
+  }
+  async renameEnterprise(principal, tenantId, body) {
+    requireOwner(principal, tenantId);
+    if (
+      Object.keys(body).length !== 1 ||
+      typeof body.name !== "string" ||
+      !body.name.trim() ||
+      body.name.trim().length > 80
+    )
+      problem(400, "invalid_enterprise_name", "企业名称需为 1–80 个字符。");
+    return withPgTransaction(this.pool, async (db) => {
+      const result = await db.query(
+        "UPDATE tenants SET name=$2,updated_at=now() WHERE id=$1 AND status='active' RETURNING name",
+        [tenantId, body.name.trim()],
+      );
+      if (!result.rowCount) problem(404, "tenant_not_found", "企业不存在。");
+      await this.event(
+        tenantId,
+        principal.memberId,
+        "enterprise.renamed",
+        tenantId,
+        200,
+        {},
+        db,
+      );
+      return result.rows[0];
+    });
+  }
+  async resetPassword(principal, tenantId, memberId, body, accounts) {
+    requireOwner(principal, tenantId);
+    if (
+      !uuid(memberId) ||
+      !uuid(body.commandId) ||
+      Object.keys(body).length !== 1
+    )
+      problem(400, "invalid_password_reset", "密码重置操作编号无效。");
+    return withPgTransaction(this.pool, async (db) => {
+      await db.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+        `dataport-members:${tenantId}`,
+      ]);
+      const managed = (
+        await db.query(
+          `SELECT ma.* FROM dataport.managed_accounts ma
+        JOIN iam.tenant_memberships tm ON tm.tenant_id=ma.tenant_id AND tm.member_id=ma.member_id
+        WHERE ma.tenant_id=$1 AND ma.member_id=$2 AND ma.managed AND tm.role<>'owner' AND tm.status='active'`,
+          [tenantId, memberId],
+        )
+      ).rows[0];
+      if (!managed || memberId === principal.memberId)
+        problem(
+          403,
+          "managed_account_required",
+          "仅可重置本企业有效托管子账号；已有 MX 账号请使用统一找回。",
+        );
+      const fingerprint = digest(
+        JSON.stringify([
+          tenantId,
+          principal.memberId,
+          memberId,
+          "reset-password",
+        ]),
+      );
+      const previous = (
+        await db.query(
+          "SELECT * FROM dataport.member_commands WHERE id=$1 FOR UPDATE",
+          [body.commandId],
+        )
+      ).rows[0];
+      if (
+        previous &&
+        (previous.tenant_id !== tenantId ||
+          previous.actor !== principal.memberId ||
+          previous.fingerprint !== fingerprint)
+      )
+        problem(409, "account_command_conflict", "操作编号已被使用。");
+      if (previous?.state === "completed") return previous.document;
+      const result = await accounts.execute({
+        operation: "reset-password",
+        requestId: body.commandId,
+        tenantId,
+        actor: principal.memberId,
+        userId: managed.user_id,
+      });
+      await db.query(
+        `INSERT INTO dataport.member_commands(id,tenant_id,actor,operation,fingerprint,document,state)
+        VALUES($1,$2,$3,'reset-password',$4,$5,'completed') ON CONFLICT(id) DO UPDATE SET document=excluded.document,state='completed'`,
+        [body.commandId, tenantId, principal.memberId, fingerprint, result],
+      );
+      await this.event(
+        tenantId,
+        principal.memberId,
+        "member.password.reset",
+        memberId,
+        200,
+        {},
+        db,
+      );
+      return result;
     });
   }
   async initialPassword(principal, tenantId, memberId, accounts) {

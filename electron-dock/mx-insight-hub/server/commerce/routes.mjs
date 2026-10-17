@@ -7,17 +7,17 @@ export async function commerceRoute({ commerce, service, productGateway, request
   if (!pathname.startsWith(`${root}/`)) return false
   const reply = (data,status=200) => { sendJson(response,status,{data,requestId},{'cache-control':'private, no-store'}); return true }
   try {
-    const message = new RegExp(`^${root}/tenants/([0-9a-f-]{36})/messages(?:/([1-9][0-9]{0,17})/read)?$`).exec(pathname)
+    const message = new RegExp(`^${root}/tenants/([0-9a-f-]{36})/messages(?:/([1-9][0-9]{0,17})/read|/(read-all))?$`).exec(pathname)
     if (message) {
       requireTenantCapability(principal,message[1],'billing.read')
       requirePayment(principal.kind==='launcher-user' && principal.memberId,'customer_identity_required','消息需要个人登录身份',403)
-      if (request.method==='GET' && !message[2]) {
+      if (request.method==='GET' && !message[2] && !message[3]) {
         if ([...searchParams.keys()].some(key=>searchParams.getAll(key).length!==1)) throw new AppError(400,'invalid_message_filter','消息筛选条件不正确')
         return reply(await commerce.messages.list(message[1],principal.memberId,Object.fromEntries(searchParams)))
       }
-      if (request.method==='POST' && message[2] && !searchParams.size) {
+      if (request.method==='POST' && (message[2] || message[3]) && !searchParams.size) {
         fields(await readJson(request,1024),[])
-        return reply(await commerce.messages.read(message[1],principal.memberId,message[2]))
+        return reply(await (message[3] ? commerce.messages.readAll(message[1],principal.memberId) : commerce.messages.read(message[1],principal.memberId,message[2])))
       }
       throw new AppError(400,'invalid_message_request','消息请求不正确')
     }
