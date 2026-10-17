@@ -13,6 +13,14 @@ const conflict = () => new AppError(409, 'idempotency_conflict', 'Idempotency-Ke
 const blocked = (code, requestId) => new AppError(409, code, code === 'request_outcome_unknown'
   ? 'A search outcome is unresolved; changing API version, key, window or cursor cannot authorize another acquisition'
   : 'A search using the other protocol version is still running', { ...(requestId ? { requestId } : {}), automaticRetryAllowed: false })
+// Only a new, unowned v2 page can be labelled safe to retry at admission.
+// This never settles the blocker or permits changing this page's identity.
+const admissionBlocked = (version, keyOwned, code, requestId) => version !== 2 || keyOwned
+  ? blocked(code, requestId)
+  : new AppError(409, 'search_admission_blocked',
+    'This search was not admitted; retry only the same request and Idempotency-Key after the blocking request is resolved',
+    { dispatchState: 'not_started', automaticRetryAllowed: true, retrySameRequest: true, retryAfterSeconds: 300,
+      ...(requestId ? { blockingRequestId: requestId } : {}) })
 const sameScope = (left, right) => ['tenantId', 'consumerId', 'apiKeyId', 'platform', 'queryHash'].every(key => left[key] === right[key])
 const rowRecord = row => row && ({ consumerId: row.consumer_id, idempotencyKey: row.idempotency_key, tenantId: row.tenant_id,
   apiKeyId: row.api_key_id, platform: row.platform, queryHash: row.query_hash, fingerprint: row.fingerprint,
@@ -75,9 +83,11 @@ export class SearchProtocolStore {
         && lease.idempotencyKey === idempotencyKey && (version === 2 || lease.version === 2))
       if (keyLease) throw blocked(Date.parse(keyLease.leaseExpiresAt) <= Date.now() ? 'request_outcome_unknown' : 'request_in_progress')
       if (version === 2 && !binding && original) throw conflict()
+      const keyOwned = Boolean(binding || original || this.usage.requestsByScope?.has(key)
+        || [...this.usage.requests.values()].some(row => row.consumerId === input.consumerId && row.idempotencyKey === idempotencyKey))
       const unknown = [...state.bindings.values()].find(row => sameScope(row, input) &&
         (row.state === 'unknown' || row.state === 'running' && Date.parse(row.leaseExpiresAt) <= Date.now()))
-      if (unknown) throw blocked('request_outcome_unknown', unknown.usageRequestId)
+      if (unknown) throw admissionBlocked(version, keyOwned, 'request_outcome_unknown', unknown.usageRequestId)
       if (version === 2) {
         const usages = [...this.usage.requests.values()].filter(row => row.tenantId === input.tenantId && row.consumerId === input.consumerId
           && row.apiKeyId === input.apiKeyId && row.platform === input.platform
@@ -85,10 +95,10 @@ export class SearchProtocolStore {
             && (typeof row.acquisitionRequest?.body?.query !== 'string' || !row.acquisitionRequest.body.query.trim()
               || row.acquisitionRequest.body.query.trim() === body.query.trim())))
         const unresolved = usages.find(row => row.status === 'unknown') || usages.find(row => row.status === 'reserved')
-        if (unresolved) throw blocked(unresolved.status === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', unresolved.id)
+        if (unresolved) throw admissionBlocked(version, keyOwned, unresolved.status === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', unresolved.id)
       }
       const other = [...state.leases.values()].find(lease => sameScope(lease, input) && (version === 2 || lease.version === 2))
-      if (other) throw blocked(Date.parse(other.leaseExpiresAt) <= Date.now() ? 'request_outcome_unknown' : 'request_in_progress')
+      if (other) throw admissionBlocked(version, keyOwned, Date.parse(other.leaseExpiresAt) <= Date.now() ? 'request_outcome_unknown' : 'request_in_progress')
       state.leases.set(input.ownerId, input)
       if (version === 2) state.bindings.set(key, { ...input, state: 'running', result: null, error: null, usageRequestId: binding?.usageRequestId || null })
       return { kind: 'acquired', input }
@@ -115,10 +125,19 @@ export class SearchProtocolStore {
       const args = [input.tenantId, input.consumerId, input.apiKeyId, input.platform, input.queryHash]
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`search-protocol-query:${args.join(':')}`])
       if (version === 2 && !binding && original) throw conflict()
+      const otherRequestBlocked = async (code, requestId) => {
+        // Old rows can lack a current idempotency binding (and vice versa).
+        // Missing joined data is not evidence that this key was never owned.
+        const keyOwned = binding || original || version === 2 && (await client.query(`SELECT
+          EXISTS(SELECT 1 FROM usage_requests WHERE consumer_id=$1 AND idempotency_key=$2)
+          OR EXISTS(SELECT 1 FROM usage_idempotency_bindings WHERE consumer_id=$1 AND idempotency_key=$2) AS owned`,
+        [input.consumerId, idempotencyKey])).rows[0]?.owned !== false
+        return admissionBlocked(version, Boolean(keyOwned), code, requestId)
+      }
       const unknown = (await client.query(`SELECT usage_request_id FROM control.data_search_protocol_bindings
         WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3 AND platform=$4 AND query_hash=$5
         AND (state='unknown' OR (state='running' AND lease_expires_at<=now())) LIMIT 1`, args)).rows[0]
-      if (unknown) throw blocked('request_outcome_unknown', unknown.usage_request_id)
+      if (unknown) throw await otherRequestBlocked('request_outcome_unknown', unknown.usage_request_id)
       if (version === 2) {
         const unresolved = (await client.query(`SELECT request.id,request.status FROM usage_requests request
           WHERE request.tenant_id=$1 AND request.consumer_id=$2 AND request.api_key_id=$3 AND request.platform=$4
@@ -136,11 +155,11 @@ export class SearchProtocolStore {
                 OR btrim(request.acquisition_request->'body'->>'query',$7) IN ('',$6))))
           AND request.status IN ('unknown','reserved') ORDER BY CASE WHEN request.status='unknown' THEN 0 ELSE 1 END LIMIT 1`,
         [...args.slice(0, 4), DATA_SEARCH_V1_PATH, body.query.trim(), QUERY_TRIM_CHARACTERS])).rows[0]
-        if (unresolved) throw blocked(unresolved.status === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', unresolved.id)
+        if (unresolved) throw await otherRequestBlocked(unresolved.status === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', unresolved.id)
       }
       const other = (await client.query(`SELECT expires_at FROM control.data_search_protocol_leases WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3
         AND platform=$4 AND query_hash=$5 AND ($6::int=2 OR version=2) LIMIT 1`, [...args, version])).rows[0]
-      if (other) throw blocked(Date.parse(other.expires_at) <= Date.now() ? 'request_outcome_unknown' : 'request_in_progress')
+      if (other) throw await otherRequestBlocked(Date.parse(other.expires_at) <= Date.now() ? 'request_outcome_unknown' : 'request_in_progress')
       await client.query(`INSERT INTO control.data_search_protocol_leases(owner_id,tenant_id,consumer_id,api_key_id,platform,query_hash,idempotency_key,version,expires_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [input.ownerId, ...args, idempotencyKey, version, input.leaseExpiresAt])
       if (version === 2) await client.query(`INSERT INTO control.data_search_protocol_bindings

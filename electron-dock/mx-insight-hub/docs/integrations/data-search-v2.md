@@ -53,6 +53,30 @@ v2 的 `mxds2` 加密游标绑定原 Key、查询、页大小、结果类型和�
 
 上述跨版本范围是标准 `/api/v1/data/search` 与 `/api/v2/data/search`。旧 raw 兼容接口保持独立操作语义；已知 raw 路径原本就不参与标准搜索的历史路径检查。对于快照字段尚未引入时的记录，只有 usage 为 `unknown`、整个 acquisition 快照为空、capability 为空、计量项为 `raw`、指纹为合法 SHA256，且关联的**唯一一条** connector 也为 `raw/unknown`，consumer、平台、指纹逐项一致，才恢复其旧 raw 操作身份，排除缺路径导致的标准搜索扩大阻断。缺证据、矛盾证据、多个 connector、`reserved`、部分缺失的快照及标准搜索路径仍保守阻断。此判断不恢复 query、不改变旧 raw 的 unknown、不允许复用它的 key，也不跳过其他协议 binding、lease 或标准请求检查。
 
+### 准入等待与结果未知
+
+`409 search_admission_blocked` 表示本次 v2 key 尚无任何请求归属，Hub 在采购前被其他未完成请求挡住。响应示例：
+
+```json
+{
+  "error": {
+    "code": "search_admission_blocked",
+    "details": {
+      "dispatchState": "not_started",
+      "automaticRetryAllowed": true,
+      "retrySameRequest": true,
+      "retryAfterSeconds": 300,
+      "blockingRequestId": "已有请求的 UUID（可选）"
+    }
+  },
+  "requestId": "本次 HTTP correlation ID"
+}
+```
+
+下游保留原 body、Idempotency-Key、版本、身份和游标，按建议间隔重试即可。该响应不代表原 blocker 已解决，也不允许更换请求条件。Hub 不为这次拒绝创建采购或页绑定；阻断消除后，原请求可正常执行，再次重试重放原交付。当前 key 已有 usage、binding 或 lease 时不会声明未开始采购，保留原冲突/running/unknown 语义。
+
+Delta 更新后由既有 beat 自动接续冷启动/增量的原 CollectionRun；无需逐条跑解锁脚本。旧版本误分类的拒绝只做一次同 key 核对，期间继续阻止新 Run 绕路；真实 unknown、超时和投影不确定仍保持保护。日报 Skill 仍按原页身份重试，不自动重跑整份历史报告。`blockingRequestId` 和顶层 HTTP `requestId` 均不等于本页新采购 ID。
+
 `GET /api/v1/requests/by-idempotency-key` 与 `GET /api/v1/requests/{requestId}` 增加 `data.searchProtocol`（仅关联 v2 时）：
 
 ```json

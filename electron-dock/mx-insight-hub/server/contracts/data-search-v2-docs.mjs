@@ -33,7 +33,7 @@ export const DATA_SEARCH_V2_OPENAPI = {
           } } } } } } },
       400: { description: 'Invalid explicit window, fields, key or version-bound cursor; no acquisition.' },
       401: { description: 'API-key authentication required.' }, 403: { description: 'Current platform/operation/Live-key grant required.' },
-      409: { description: 'idempotency_conflict, request_in_progress or request_outcome_unknown. Preserve original identity; never fall back to v1.' },
+      409: { description: 'search_admission_blocked permits delayed retry of the same body/key only when details dispatchState=not_started, automaticRetryAllowed=true and retrySameRequest=true. idempotency_conflict, request_in_progress and request_outcome_unknown retain their original protections; never fall back to v1.' },
       422: { description: 'search_v2_platform_unsupported; no fallback or silent omission of the window.' },
       429: { description: 'Existing quota, provider admission or financial limit.' },
       502: { description: 'Retained source failure; inspect the original request.' },
