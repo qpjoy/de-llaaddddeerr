@@ -19,6 +19,45 @@ migration + smoke。
 Docker Compose 适合把本地服务跑起来；K8s 适合把服务声明成“期望状态”，由集群持续
 对齐。`manage.sh` 做的事情，是把这些期望状态按安全顺序提交给 K8s。
 
+## API rollout 超时后已自行就绪
+
+`internal api rollout failed` 表示脚本等待 API 的本次窗口未成功结束，不会撤销已经提交的
+Deployment，也不自动回滚。当前 API 等待为 180 秒；脚本退出后 Kubernetes 仍会继续协调。
+先用原生只读命令确认现状，不立即重复部署：
+
+```bash
+kubectl -n mx-internal-shadow rollout status deployment/mx-launcher-internal --timeout=30s
+kubectl -n mx-internal-shadow get pods -o wide
+```
+
+2026-10-17 现场随后返回 rollout 成功，API、私网/公网 Identity、PostgreSQL 和 Gateway 均已
+就绪。新 API 的 restartCount 为 0，因此 `logs --previous` 返回不存在是正常结果；
+事件中的多次 Created/Started 可能分别属于 init container 和主容器，不能单凭这些事件判定
+主容器重启。迁移 Job 已完成时其 Pod 不再 Ready 也正常。旧 Pod 的 previous 日志不能用作
+本轮启动错误；PostgreSQL 的历史 `Unknown/255` 需结合终止时间分析，不能直接解释为 OOM
+或数据损坏。本次首次就绪延迟的具体原因尚未确认。
+
+脚本失败点之后的 Identity 检查、网关更新、host runner 配置及最终验收不会自动续跑。
+对已有部署，可先补以下只读验收，按实际失败项处理：
+
+```bash
+bash scripts/manage.sh ops identity check
+curl --noproxy '*' --connect-timeout 3 --max-time 10 -fsS http://127.0.0.1:18090/readyz
+curl --noproxy '*' --connect-timeout 5 --max-time 10 -fsS https://launcher.minsight-ai.com/auth/admin/session
+bash scripts/manage.sh ops site-slot native-host-runner status 19190
+```
+
+Identity check 验证私网 HTTPS 信任、发现和 SSO 配置；公网 session 应单独返回
+`enabled:true`、`accessMode:"sso-only"`，未携带 Cookie 时 `authenticated:false` 正常。
+host runner 的 status 可能吞掉健康检查失败的退出码，应核对输出是否 reachable/active，
+并确认 API 中已有 runner URL 正确。已有入口及配置全部通过时，不必为了让脚本重新打印成功而
+重复迁移或重启身份服务、网关。仍需浏览器管理登录、MX-H2I 原账号及既有联网的实际验收；
+新接入应用还需验证自身 Host/VIP 路由。
+
+严格只读排查优先使用上述原生命令；`gateway-smoke` 包装命令会调用带条件式控制器/镜像恢复
+逻辑的 rollout helper，不能当作无写操作的检查。`internal-production apply` 同样会重新应用
+数据库、迁移和身份配置，不是“接着等待”。
+
 ## Compose 到 K8s 的映射
 
 | Docker Compose | K8s | 在 MX Launcher 中 |
