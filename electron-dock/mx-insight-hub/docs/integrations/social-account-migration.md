@@ -69,6 +69,14 @@ Content-Type: application/json
 
 短页、空页或 `partial` 不代表耗尽；检查 `hasMore/nextCursor/warnings`。没有可用游标时停止自动续页；若同时出现 `pagination_completeness_unknown`，即使 `hasMore=false`、`nextCursor=null` 也只表示当前无法继续，不能确认数据耗尽。遇到服务限流或未知请求，保存原请求标识并先只读核对，不自动新建请求绕过保护。已有旧 Twitter `mxec2` 游标与精确旧幂等请求由原合同继续处理；新账号游标不与旧 Night-All、`data/search` 或其他操作互换。切换旧转发调用方时从第一页明确开始。
 
+`409 request_in_progress` 表示并发保护拒绝，不能解释为空结果或自动换键重试。
+`An equal request is already in progress` 来自同幂等键预留检查；
+`An equal account delivery is in progress` 来自同消费者、平台和请求指纹的账号交付锁，
+不同幂等键的相同账号/同页请求也会命中。后者错误里的 `requestId` 是被拒绝请求的账本ID，
+不是正在执行的锁持有者ID。先核对该请求的调用记录、同指纹请求和当前锁，再决定恢复方式；
+历史锁已释放时，当前查不到锁不表示过去没有并发。排查示例见
+[账号迁移运行记录](../operations/social-account-direct-migration-2026-10-15.md#2026-10-17-同批账号采集并发拒绝)。
+
 迁移不是旧 unknown 的自动重试授权。已有 `request_outcome_unknown` 的任务须保留原请求关联并先核对；不能因更换接口 URL、幂等键或 checkpoint 而自动重新采集。Twitter 的标准搜索人工重试能力不适用于旧账号 `crawl`。已确认的旧链路 30 秒超时案例见 [Twitter 账号采集故障](../operations/twitter-crawl-timeout-2026-10-16.md)。
 
 本轮保留平台与供应商的独立运行状态；没有执行线上付费探测或部署，也不根据离线 fixture 宣称所有平台实时可用。下游接入时应核对其原 Key 新能力授权、已启用操作及真实客户端解析；旧入口的删除需要等待迁移流量和请求证据验证。

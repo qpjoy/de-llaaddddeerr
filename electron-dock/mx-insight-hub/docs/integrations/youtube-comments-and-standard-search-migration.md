@@ -103,3 +103,17 @@ kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-public --time
 旧请求状态和费用以账本为准：本缺陷的本地路径在派发前释放预留，未保存 HTTP 失败响应，
 显式重试原请求及原幂等键时可按既有逻辑重新预留；已保存失败响应仍按原规则重放，
 `unknown` 仍阻止重试。不要清账、改历史状态或自动换幂等键重跑人物画像。
+
+同批另有 Delta `dev` 人物画像 Run34595，HTTP请求
+`63d10b02-4ca8-4ca6-a511-7687570be88f`，幂等键
+`delta-youtube-comments-b3575167-c965-469e-bc8b-a477d54491f4`，返回相同的
+`409 external_platform_usage_scope_mismatch` 和 `Cost reservation does not match its reserved usage request`。
+该消息定位到采购费用预留校验，与上述错误网关问题吻合；校验也会拒绝失效租约、非reserved状态、
+身份或fingerprint不一致，不能仅凭同码认定该历史请求的精确原因。
+
+Delta的 `dev` 标签来自自身环境名或公开地址，不表示使用独立的Hub；YouTube评论统一读取
+`DATA_QUERY_HUB_API_BASE_URL`，默认 `https://hub.minsight-ai.com`，不沿用旧Skill的base_url。
+评论网关修复提交 `6c20b2ed` 早于专题报告迁移156，完整发布最新代码应同时包含两项修复；
+156的生产数据库回执只证明数据库约束已更新，尚不能证明实际承接该评论请求的API代码版本。
+同批历史告警不代表修复后再次失败。下一步只读核对Public容器中的专用网关绑定；若当前代码已更新，
+通过原人物画像任务的恢复入口进行业务验收，保留原幂等语义，并记录新请求结果。

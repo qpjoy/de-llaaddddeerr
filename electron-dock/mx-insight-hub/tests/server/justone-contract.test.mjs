@@ -12,6 +12,7 @@ import {
   JustOneContractError,
   JustOneResponseContractError,
   classifyJustOneBusinessCode,
+  createJustOneCallArchiveObject,
   extractJustOneProductSearchItems,
   inspectJustOneEnvelope,
   normalizeJustOneProductSearchRequest,
@@ -19,6 +20,7 @@ import {
   normalizeJustOneProductSearchResponse,
   redactJustOnePrivateFields,
 } from '../../server/contracts/justone.mjs'
+import { normalizeNativeForwardingRequest } from '../../server/contracts/native-forwarding.mjs'
 
 const jdProductSearchV1Fixture = JSON.parse(readFileSync(
   new URL('../fixtures/justone/jd-product-search-v1.success.json', import.meta.url),
@@ -403,6 +405,31 @@ test('public response projects a fixed shape and drops private provider fields',
   assert.deepEqual(response.publicBody.data.page, {
     page: 1, returnedCount: 1, discardedCount: 0, hasMore: false, nextCursor: null,
   })
+})
+
+test('native and paged call archives survive JSONB serialization without changing their existing hashes', () => {
+  const raw = envelope({ business_data: [], cursor: null })
+  const options = { capturedAt: '2026-10-17T00:00:00Z', httpStatus: 200, businessCode: 0, billed: true,
+    contractState: 'accepted', bodySha256: 'c'.repeat(64), bodySize: 153, contentType: 'application/json' }
+  const native = normalizeNativeForwardingRequest('j.facebook_post_search_v1', {
+    params: { keyword: 'fixture', startDate: '2026-10-16', endDate: '2026-10-17' },
+  })
+  const paged = normalizeJustOneProductSearchRequest({ marketplace: 'jd', query: 'fixture' })
+  assert.equal(Object.hasOwn(native, 'page'), false)
+  // Frozen before the fix: canonicalJson already encodes undefined as null.
+  const cases = [
+    [native, null, '6c1ad80f3d7b41e0f8faecb9d7a5bc2ca0d73877f6f77157a12b733ee4f26b26'],
+    [paged, 1, '2f8e4d6b08fdcdc421aad80877971e4da6abe7eec4dc6b7303bf5b78def40e45'],
+  ]
+  for (const [request, page, originalHash] of cases) {
+    const archive = createJustOneCallArchiveObject(raw, request, options)
+    assert.equal(archive.rawPayload.request.page, page)
+    assert.deepEqual(JSON.parse(JSON.stringify(archive.rawPayload)), archive.rawPayload)
+    assert.deepEqual(JSON.parse(JSON.stringify(archive.rawItem)), archive.rawItem)
+    assert.equal(archive.payloadSha256, originalHash)
+    assert.equal(archive.rawPayloadSha256, originalHash)
+    assert.deepEqual(archive.rawPayload.response.envelope, raw)
+  }
 })
 
 test('every successful response keeps business evidence and removes only the exact request credential', () => {

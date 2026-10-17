@@ -129,7 +129,7 @@ kubectl -n mx-insight-hub logs deployment/mx-insight-hub-public -c api --since=2
 该约束 `convalidated=true`，定义仍为 `cardinality >= 1 AND cardinality <= 13`，
 `156_topic_report_dynamic_platforms.sql` 的迁移记录为空。已确认线上仍有这个数据库阻断，
 且本次迁移尚未应用；回执没有原请求的分类集合或堆栈，仍不能将它单独视为该历史500的精确归因。
-无需继续重复同一当前日志查询；下一步是发布已验证的修复。
+无需继续重复同一当前日志查询；按以下流程发布已验证的修复。
 
 同步包含新增156文件的完整代码，并在Hub目录运行既有发布流程以执行新迁移；
 仅重启旧镜像不会改数据库约束：
@@ -148,5 +148,11 @@ kubectl -n mx-insight-hub logs job/mx-insight-hub-migrate -c migrate
 预期该约束只保留 `cardinality(authorized_platforms) >= 1`，且156记录包含 `applied_at`。
 通过后再由操作者显式恢复原业务请求；HTTP202表示创建受理，报告最终成功仍需后续业务回执。
 
-本轮未执行生产迁移或任务重试。既有失败响应重放与unknown保护继续生效；保留原请求体和
-幂等键，不通过改历史状态、清账或新建幂等键绕过原请求证据。
+操作者后续回执时间为 `2026-10-16T20:22:32.764Z`（北京时间2026-10-17 04:22:32）：
+156的 `applied_at` 为 `2026-10-16T20:21:08.821Z`，该约束定义已变为
+`CHECK ((cardinality(authorized_platforms) >= 1))`，且 `convalidated=true`。
+已确认生产数据库迁移生效、13类上限解除；尚未收到原简报任务恢复或报告最终成功的业务回执，
+因此不能据此将原请求标记为已恢复。
+
+生产迁移由操作者执行，代理未执行线上任务重试。既有失败响应重放与unknown保护继续生效；
+保留原请求体和幂等键，不通过改历史状态、清账或新建幂等键绕过原请求证据。

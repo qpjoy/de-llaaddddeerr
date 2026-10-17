@@ -113,6 +113,52 @@ test('Twitter screenshot-shaped nonnumeric ID and page_size=500 follows short pa
   assert.equal(h.platformStore.restrictedResponseArchives.size, 11)
 })
 
+test('equal concurrent account deliveries reject the second intent without purchasing or releasing the first lease', async t => {
+  let releaseProfile, profileStarted
+  const profileGate = new Promise(resolve => { releaseProfile = resolve })
+  const started = new Promise(resolve => { profileStarted = resolve })
+  const h = await harness(t, { fetchImpl: async (call, ordinal) => {
+    if (ordinal === 1) { profileStarted(); await profileGate }
+    return Response.json(call.url.pathname.includes('/tweets') ? timeline(['1']) : profile())
+  } })
+  await h.service.setTenantBillingProfile(h.context.tenant.id, { mode: 'enforced', multiplierPpm: 1000000,
+    defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'offline-admin')
+  await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline concurrent account fixture' },
+    { idempotencyKey: 'social-concurrent-credit', actor: 'offline-admin' })
+  const body = { platform: 'twitter', username: 'ui_batch_019', count: 20 }
+  const first = h.invoke(body, 'social-concurrent-first')
+  first.catch(() => {})
+  try {
+    await Promise.race([started, first.then(() => assert.fail('The first delivery must pause at its profile request'))])
+    const firstUsage = [...h.store.requests.values()].find(row => row.idempotencyKey === 'social-concurrent-first')
+    const heldLeases = structuredClone([...h.platformStore.leases])
+    assert.ok(heldLeases.some(([key, lease]) => key.includes('social.search.twitter') && lease.ownerRequestId === firstUsage.id))
+    await assert.rejects(h.invoke(body, 'social-concurrent-second'), {
+      status: 409, code: 'request_in_progress', message: 'An equal account delivery is in progress',
+    })
+    const secondUsage = [...h.store.requests.values()].find(row => row.idempotencyKey === 'social-concurrent-second')
+    assert.equal(secondUsage.status, 'released')
+    assert.equal(h.store.customerCharges.get(secondUsage.id).status, 'released')
+    assert.equal([...h.platformStore.calls.values()].filter(call => call.usageRequestId === secondUsage.id).length, 0)
+    assert.equal([...h.platformStore.costReservations.values()].filter(row => row.usageRequestId === secondUsage.id).length, 0)
+    assert.deepEqual([...h.platformStore.leases], heldLeases)
+    assert.equal(firstUsage.status, 'reserved')
+    assert.equal(h.store.customerCharges.get(firstUsage.id).status, 'reserved')
+    assert.equal(h.calls.length, 1)
+  } finally { releaseProfile() }
+  const result = await first
+  assert.equal(result.status, 200)
+  assert.equal(result.body.data.items.length, 1)
+  assert.equal(h.calls.filter(call => call.url.pathname.includes('/tweets')).length, 1)
+  assert.equal(h.calls.filter(call => !call.url.pathname.includes('/tweets')).length, 1)
+  assert.equal(h.platformStore.leases.size, 0)
+  const captures = [...h.store.customerCharges.values()].filter(charge => charge.status === 'captured')
+  assert.equal(captures.length, 1)
+  assert.equal(captures[0].chargedMinor, 3)
+  assert.deepEqual((await h.invoke(body, 'social-concurrent-first')).body, result.body)
+  assert.equal(h.calls.length, 2)
+})
+
 test('admission policy unavailable between account pages preserves acquired rows and a partial continuation', async t => {
   const { attachAdmissionPolicy } = await import('../fixtures/admission-policy.mjs')
   const { AppError } = await import('../../server/core/errors.mjs')

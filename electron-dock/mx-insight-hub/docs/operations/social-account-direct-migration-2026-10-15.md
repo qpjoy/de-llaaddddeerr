@@ -29,3 +29,68 @@
 浏览器验证使用实际策略搜索组件和本地合成 API，涵盖账号内容续页、资料展示、零值与未知值，以及桌面和移动端布局。离线样本不能证明各供应商线上响应的全部变体都已覆盖；未知结构继续明确失败并保留响应证据。未部署、未执行生产迁移、未调用付费接口、未修改下游项目。
 
 相关回归共 236 项：235 通过，1 项既有真实 PostgreSQL 条件测试跳过。新工作流与存储的 41 项全部通过，存储测试使用临时 PGlite 和现有 056 结算触发器。最后调整关系账号的 `raw_info` 分页后，针对性复测 2/2 通过。TypeScript 检查、Vite 构建与 diff 格式检查通过；构建仍有既有的大 chunk 提示。
+
+## 2026-10-17 同批账号采集并发拒绝
+
+Delta prod「账号相似度比对」Run202742 的 `data_query` v7 报告：
+
+- requestId：`29d1a18c-c911-4e5a-b0a8-95dc3ba97569`。
+- `search_crawl / twitter`，checkpoint `hub-413b4c788a4b631be04c4db74c6651bb2c6138b1c2a439b5c4ccc56c124280d`，page1、target_count2。
+- HTTP409，`request_in_progress`，精确消息 `An equal account delivery is in progress`。
+- 截图同时显示 Agent 最终成功，不能由此推断这次账号采集成功或后来恢复。
+
+该消息仅来自 `runSocialAccountWorkflow` 的父交付锁检查。锁按消费者、
+`social.search.<platform>` 和规范化请求指纹互斥；指纹含路径、账号、页参数但不含幂等键。
+同客户不同幂等键的相同账号/页面并发会触发此保护。冲突分支在该请求派发前拒绝，
+外层释放该请求的预留；不会释放另一请求的锁。锁持有者在工作流结束时释放自己的锁，
+持久化结果不明时继续保留必要保护。没有证据支持删锁、扩并发或绕开unknown。
+
+源码中 Delta 的 checkpoint 首次请求没有取得数据时会记录失败并产生 `skill_failed`。
+本地 `account_similarity/v25/agent.py` 会捕获单账号采集异常，将原因写入结果manifest的warnings，
+并继续使用其余账号或上传数据；因此整体成功可以伴随真实的子调用失败，且报告覆盖可能不完整。
+仍须核对生产Run实际版本和结果manifest，不能仅凭本地版本认定该任务的完整执行路径。
+当前没有更改告警条件、自动重试、生产任务或业务锁；YouTube授权域修复和迁移156不处理此并发拒绝。
+
+新增合成并发回归（1项通过）：相同账号请求使用不同幂等键，首请求停在资料采购时，
+第二请求精确返回上述409，自己的客户预留释放、采购调用与成本预留均为0，首请求的锁不变；
+首请求随后完成正常的资料和内容各1次采购、1次客户结算，原幂等键重放不追加采购。
+这验证了该保护分支，不替代生产账本证据，也不能据此声称线上该请求未收费。
+
+只读工具 `server/ops/diagnose-social-account-conflict.mjs` 精确查询usage UUID：
+当前请求状态、自有采购调用、同消费者/指纹/平台/路径且预留时间前后10分钟内的候选请求，
+以及同消费者/指纹的当前dispatch leases与owner当前状态。各列表最多输出20行并标记截断；
+不输出业务请求体、账号、幂等键值或凭据。输出 `currentStateOnly=true`，候选请求不等于历史锁持有者。
+找不到UUID时返回 `found=false`，不把HTTP关联ID自动映射为其他请求。该工具不检查Delta结果manifest，
+因此仍不能凭Hub某请求成功认定整个比对报告数据完整。
+诊断的3项测试通过（其中2项使用真实PGlite执行SQL）：验证只读事务实际拒绝写入、查询前后三表
+状态一致、候选隔离、20行截断、缺失记录、stdin调用和错误脱敏。连同并发回归，本次新增4项测试通过。
+
+将新增脚本同步到服务器后，在Hub目录执行；脚本通过stdin运行，不需要重建或重启服务：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin \
+  -- node --input-type=module - 29d1a18c-c911-4e5a-b0a8-95dc3ba97569 \
+  < server/ops/diagnose-social-account-conflict.mjs
+```
+
+操作者返回生产回执，数据库检查时间为 `2026-10-16T21:02:55.956Z`（北京时间2026-10-17 05:02:55）：
+
+| 请求 | 预留至完成（UTC，2026-10-16） | 当前账本结果 | 自有采购调用数 |
+| --- | --- | --- | --- |
+| `29d1a18c-c911-4e5a-b0a8-95dc3ba97569` | 19:31:03.371–19:31:03.401 | released，external_platform_pre_dispatch_failed，未保存HTTP响应 | 0 |
+| `e55c9f85-0588-4daa-afb9-e7e4448cab69` | 19:31:01.301–19:31:05.562 | committed，HTTP200 | 2 |
+
+前后10分钟内仅有上述1个同消费者、指纹、平台、路径的候选请求，使用相同API Key、不同幂等键；
+所有列表均未截断。目标请求30毫秒的处理窗口完全位于成功候选的处理区间内，强烈支持同批相同
+账号/页面的并发保护拒绝。检查时 `currentLeaseCount=0`，没有匹配的残留锁，暂无修改Hub锁逻辑的依据。
+历史owner未持久记录，不能把候选ID单独宣称为已证实的历史锁持有者；工具未查询客户费用账本，
+也不能由released/无采购记录单独断言钱包扣费情况。
+
+此回执未证明成功交付已进入Run202742的分析结果。后续仅需在Delta原执行记录中核对失败checkpoint、
+实际Agent版本和结果manifest覆盖，确认是否缺少某个请求账号；无需重复查询同一Hub锁状态。
+本地v25保存的结果清单为 `water_army_manifest.json`：按 `requested_ids` 逐个匹配 `sources` 中的
+账号及其 `record_count`，并检查 `warnings`。`source_count` 可能包含上传源或空记录，不能单独
+代表所有指定账号已取得数据；例如要求2个账号但仅1个对应非空source，就是部分分析完成。
+精确checkpoint的当前状态可被后续恢复更新，应以该Run保存的最终清单确认本次报告覆盖。
+未自动重跑该批任务、换幂等键或清除租约；诊断不发起供应商调用，不修改Hub运行时、
+MX-H2I登录或用户联网功能。

@@ -658,6 +658,28 @@ test('Facebook later unknown acquisition never becomes a partial success or an a
   }
 })
 
+test('Facebook evidence persistence failures retain a diagnostic code and prevent a second acquisition', async () => {
+  for (const mode of ['rapidapi', 'justone']) for (const method of ['stageProviderEvidence', 'finishProviderStep']) {
+    const h = await harness({ mode })
+    h.stores[mode][method] = async () => { throw new Error('synthetic evidence persistence failure') }
+    const body = { platform: 'facebook', query: 'fixture', pageSize: 20, type: 'stable' }
+    const key = `fb-persist-unknown-${mode}-${method}`
+    await assert.rejects(invokeStandard(h, body, key), { code: 'request_outcome_unknown' })
+    const call = [...h.stores[mode].calls.values()][0]
+    const usage = h.usage.requests.get(call.usageRequestId)
+    assert.equal(call.outcome, 'unknown')
+    assert.equal(call.errorCode, 'external_platform_persistence_unknown')
+    assert.equal(usage.status, 'unknown')
+    assert.equal(usage.errorCode, 'external_platform_persistence_unknown')
+    assert.equal(h.stores[mode].responseArchives.get(call.id).httpStatus, 200)
+    assert.equal(h.stores[mode].restrictedResponseArchives.size, 1)
+    assert.equal(h.stores[mode].ingestJobs.length, 0)
+    await assert.rejects(invokeStandard(h, body, key), { code: 'request_outcome_unknown' })
+    await assert.rejects(invokeStandard(h, body, `${key}-new`), { code: 'request_outcome_unknown' })
+    assert.equal(h.calls.length, 1)
+  }
+})
+
 test('Facebook cancellation and Key revocation between fill steps prevent another procurement and retain paid evidence', async () => {
   for (const scenario of ['cancel', 'revoke']) {
     const h = await harness({ posts: fixturePosts(0, 5), hasMore: true, mode: 'rapidapi' })

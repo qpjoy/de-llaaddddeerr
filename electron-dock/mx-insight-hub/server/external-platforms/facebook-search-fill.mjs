@@ -270,7 +270,8 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
       } catch (error) {
         const target = gateways[provider]
         if (currentCall || error?.code === 'external_platform_call_persistence_unknown') {
-          if (currentCall) await target.platformStore.markPersistenceUnknown({ callId: currentCall.id, delivery, ...(evidence || {}) }).catch(() => {})
+          if (currentCall) await target.platformStore.markPersistenceUnknown({ callId: currentCall.id, delivery, ...(evidence || {}),
+            errorCode: evidence?.errorCode ?? 'external_platform_persistence_unknown' }).catch(() => {})
           await markUnknown()
           throw uncertain()
         }

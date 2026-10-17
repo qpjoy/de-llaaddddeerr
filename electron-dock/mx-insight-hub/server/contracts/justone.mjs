@@ -979,7 +979,8 @@ export function createJustOneCallArchiveObject(raw, request, {
       marketplace: request.marketplace,
       endpointKey: request.endpointKey,
       endpointVersion: request.endpointVersion,
-      page: request.page,
+      // Native contracts have no page; keep the archive identical after JSONB serialization.
+      page: request.page ?? null,
       fingerprintSha256: sha256(canonicalJson(request.fingerprintBody)),
     },
     response: {
