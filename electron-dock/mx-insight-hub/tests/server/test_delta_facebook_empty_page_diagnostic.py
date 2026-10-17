@@ -24,8 +24,11 @@ class Cursor:
         return False
 
     def execute(self, sql):
-        assert sql.startswith(("BEGIN TRANSACTION", "SET LOCAL", "ROLLBACK")), sql
+        assert sql.startswith(("BEGIN TRANSACTION", "SET LOCAL", "ROLLBACK", "SELECT current_database()")), sql
         self.connection.commands.append(sql)
+
+    def fetchone(self):
+        return (PRIVATE, "10.0.0.2", 5432, "2026-10-17T09:00:00Z")
 
 
 class Connection:
@@ -76,7 +79,7 @@ class Query:
         return list(self)[item]
 
 
-def fixture(*, found=True, plan=PLAN_ID):
+def fixture(*, found=True, plan=PLAN_ID, plan_exists=True):
     connection = Connection()
     group, run_id, task_id = str(uuid4()), str(uuid4()), str(uuid4())
     row = dict.fromkeys(MODULE["STEP_FIELDS"])
@@ -98,6 +101,7 @@ def fixture(*, found=True, plan=PLAN_ID):
     run = {"public_key": run_id, "plan_id": 7, "trigger_source": "cold_start", "platform_scope__cold_start_group_key": group,
            "status": "failed", "collected_count": 0}
     models = SimpleNamespace(
+        CollectionPlan=SimpleNamespace(objects=Query(connection, [{"id": 7, "public_key": PLAN_ID}] if plan_exists else [])),
         CollectionRunSpiderStep=SimpleNamespace(objects=Query(connection, [row, retry] if found else [])),
         CollectionPlanColdStartState=SimpleNamespace(objects=Query(connection, [state])),
         CollectionRun=SimpleNamespace(objects=Query(connection, [run])),
@@ -127,16 +131,35 @@ class DiagnosticTest(unittest.TestCase):
         self.assertEqual(json.dumps(row, sort_keys=True), before)
         self.assertEqual(connection.commands, ["BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
             "SET LOCAL statement_timeout = '5s'", "SET LOCAL lock_timeout = '1s'",
-            "SET LOCAL idle_in_transaction_session_timeout = '10s'", "ROLLBACK"])
+            "SET LOCAL idle_in_transaction_session_timeout = '10s'",
+            "SELECT current_database(), inet_server_addr()::text, inet_server_port(), now()", "ROLLBACK"])
         self.assertEqual(connection.queries[0], {"public_key": STEP_ID})
 
     def test_missing_and_wrong_plan_do_not_expand_queries(self):
-        for args in ({"found": False}, {"plan": str(uuid4())}):
+        for args in ({"found": False, "plan_exists": False}, {"plan": str(uuid4())}):
             connection, models, _ = fixture(**args)
             result = inspect_delta(connection, models)
-            self.assertEqual(len(connection.queries), 1)
+            self.assertEqual(len(connection.queries), 2 if args.get("found") is False else 1)
             self.assertNotIn("run", result)
             self.assertEqual(connection.commands[-1], "ROLLBACK")
+
+    def test_missing_step_distinguishes_plan_presence_without_guessing_deletion_or_leaking_db_config(self):
+        for exists in (False, True):
+            connection, models, _ = fixture(found=False, plan_exists=exists)
+            result = inspect_delta(connection, models, "prod")
+            self.assertFalse(result["found"])
+            self.assertEqual(result["configuredEnvironmentLabel"], "prod")
+            self.assertRegex(result["databaseIdentitySha256"], r"^[0-9a-f]{64}$")
+            self.assertNotIn(PRIVATE, json.dumps(result))
+            self.assertNotIn("10.0.0.2", json.dumps(result))
+            missing = result["missingStepContext"]
+            self.assertEqual(missing["expectedPlanFound"], exists)
+            self.assertEqual(missing["planRunCount"], 1 if exists else None)
+            self.assertEqual(missing["planStepCount"], 0 if exists else None)
+            self.assertFalse(missing["deletionHistoryChecked"])
+            self.assertEqual(connection.commands[-1], "ROLLBACK")
+        connection, models, _ = fixture(found=False)
+        self.assertIsNone(inspect_delta(connection, models, "postgres://user:password@host/db")["configuredEnvironmentLabel"])
 
     def test_missing_old_request_metadata_is_not_a_false_match_and_no_broker_check(self):
         connection, models, row = fixture()
@@ -160,7 +183,7 @@ class DiagnosticTest(unittest.TestCase):
         calls = {node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
         self.assertFalse(calls & {"save", "update", "create", "delete", "delay", "apply_async", "send_task", "inspect", "post"})
         imports = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
-        self.assertEqual(imports, {"datetime", "uuid", "django.db", "data_hub"})
+        self.assertEqual(imports, {"datetime", "uuid", "django.db", "django.conf", "data_hub"})
         connection.vendor = "sqlite"
         with self.assertRaisesRegex(ValueError, "postgresql_required"):
             inspect_delta(connection, models)

@@ -1843,7 +1843,11 @@ test('public OpenAPI document contains only implemented Open API paths', async (
 
     assert.equal(response.status, 200)
     assert.equal(document.openapi, '3.1.0')
+    assert.deepEqual(document.paths['/api/v2/data/search'].servers, [{ url: '/', description: 'Explicit v2 path; existing v1 operations retain their original base path.' }])
+    assert.equal(document.paths['/api/v2/data/search'].post.operationId, 'searchDataV2')
+    assert.equal(document.servers[0].url, '/api/v1')
     assert.deepEqual(paths.sort(), [
+      '/api/v2/data/search',
       ...NATIVE_FORWARDING_ENDPOINTS.map(row => row.hubPath.slice('/api/v1'.length)),
       ...QIXIN_CATALOG.apis.map(api => `/data/enterprise/${api.api_id}/query`),
       '/data/web-search/search',

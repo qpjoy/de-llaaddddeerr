@@ -1447,7 +1447,7 @@ export function createApp({
       }
       const { pathname, searchParams } = url
       const isAdminPath = pathname.startsWith('/internal/v1/admin/') || pathname.startsWith('/internal/v1/ops/') || pathname.startsWith('/auth/sso/')
-      const isPublicPath = pathname.startsWith('/api/v1/')
+      const isPublicPath = pathname.startsWith('/api/v1/') || pathname === '/api/v2/data/search'
       // Listener isolation must run before unauthenticated sign-in routes. The
       // public listener previously exposed both sign-in endpoints because their
       // handlers appeared before this guard.
@@ -6511,9 +6511,10 @@ export function createApp({
         })
         return
       }
-      if (request.method === 'POST' && pathname === '/api/v1/data/search') {
+      if (request.method === 'POST' && ['/api/v1/data/search', '/api/v2/data/search'].includes(pathname)) {
         const context = await requirePublic(request)
         const body = await readJson(request)
+        if (pathname === '/api/v2/data/search') requireNoQuery(searchParams, 'v2 content search')
         if (wechatSearchPlatform(body?.platform)) requireNoQuery(searchParams, 'WeChat search')
         const result = await withAdmissionSignal(response, signal => service.search(context, {
           signal,

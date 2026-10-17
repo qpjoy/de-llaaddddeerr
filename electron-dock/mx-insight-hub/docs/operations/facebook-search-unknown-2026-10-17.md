@@ -1,5 +1,11 @@
 # Facebook 冷启动被既有未知交付阻塞（2026-10-17）
 
+最新状态：操作者回执确认原Hub请求 `274d119a-27df-48de-a193-56211e926137`
+已于2026-10-17 17:58:44（北京时间）从原归档恢复交付，原冻结款0.01元已结算，
+新增供应商调用0次。后续Delta v2回执已将原Step和告警策略定位到dev，
+旧冷启动group及5个Run仍为failed，整月冷启动尚未恢复。
+下文按证据进展保留此前的预检和待执行状态；正式恢复回执见“Hub恢复已执行”。
+
 下游 Data Hub 报告 Facebook 冷启动第一页失败、完成0页、入库0条，策略Key为
 `bb9721db-95e5-44c1-abe4-6b031dfb19be`。错误中Hub请求ID为
 `76cb46bb-1bfe-4eec-a4d3-25048a763dda`，HTTP409，`request_outcome_unknown`，
@@ -191,8 +197,9 @@ Delta冷启动的普通重试会保留原Run和分页，但重新创建Step；�
 标准请求未传type，Hub默认fresh、回放窗口120秒；即使手工找回原key，过期后也可能再次采购。
 因此不能把普通重试当作无采购的恢复，也不能更改原请求为stable。
 
-无采购恢复应先精确关联原幂等键中的Step UUID→Delta Step→Run→策略
-`bb9721db-95e5-44c1-abe4-6b031dfb19be`，确认原页号/游标和当前Run/重试状态。
+将恢复响应接回Delta前，应精确关联原幂等键中的Step UUID→Delta Step→Run→策略，
+核对是否属于告警策略 `bb9721db-95e5-44c1-abe4-6b031dfb19be`，
+确认原页号/游标和当前Run/重试状态。该归属核对不阻塞独立恢复已核验的原Hub交付。
 Hub完成原交付的审计恢复后，可用原API Key通过只读
 `GET /api/v1/acquisitions/274d119a-27df-48de-a193-56211e926137`
 取得已保存的响应及hash，不受fresh回放TTL影响；随后才能审计接回Delta原失败页，
@@ -218,7 +225,8 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin \
 
 该脚本在只读一致性事务中查询，每类明细最多20条并标记截断；归档仅重新核对ID/SHA元数据绑定，
 不代替前述原始字节验证，也不将无财务阻塞当作恢复已获批准或整个流程已经可执行。
-任何正式恢复都还需重新核验完整证据、Delta归属/执行状态、并发状态以及操作者确认的具体变更。
+正式Hub恢复需重新核验完整证据、并发状态和具体结算变更；
+若进一步接回Delta，还需核验Delta归属和执行状态。
 
 该预检的3项真实PGlite回归全部通过，无跳过；覆盖原报价冻结/已扣款/已释放/退款、
 无账单及孤立流水、精确身份绑定、Delta Step解析、只读事务、输出脱敏和失败回滚。
@@ -249,7 +257,7 @@ Facebook平台、冷启动group、当前分页及同Run第一页的尝试记录�
 它不联系Celery broker；数据库中的task ID和Step数量不能证明没有运行中或延迟重试的任务。
 
 Delta当前仓库部署文档 `po-infra/docs/OnBoard.md` 记录正式Web容器为
-`mx_data-web-1`，Dockerfile工作目录为 `/app`；尚未核验线上容器状态。
+`mx_data-web-1`，Dockerfile工作目录为 `/app`；后续容器清单已确认该名称存在。
 将此脚本同步到运行Delta正式容器的服务器，按实际文件位置执行：
 
 ```bash
@@ -258,8 +266,39 @@ sudo docker exec -i -w /app mx_data-web-1 \
 ```
 
 这里使用的是Delta文档中的Docker命令，不能套用Hub的Kubernetes namespace或deployment。
-4项离线Python测试通过，执行真实脚本逻辑并模拟ORM边界；本机无Django，
+5项离线Python测试通过，执行真实脚本逻辑并模拟ORM边界；本机无Django，
 未将该结果当作真实Django/PostgreSQL或生产集成验证。
+
+### 实际预览通过，但Delta原Step尚未定位
+
+操作者返回原Hub恢复工具 `canApply=true`，预览摘要为
+`1d8c92f5fb957097760e13534aecadd0913317eff320169efdbd953ab1a124f4`。
+实际来源日期窗为2026-10-16至2026-10-17，`explicitDates=false`；
+拟保存HTTP200、第一页0条、无下一页，原冻结款CNY 1 minor转capture，
+不新增hold、不退款、不调用供应商、不创建入库队列。
+这是dry-run回执，`databaseWritesMade=0`，尚不能视为完成恢复或结算。
+
+Delta v1回执为 `found=false`，只证明所选数据库当时没有固定Step。
+Step来自原unknown候选 `274d119a-27df-48de-a193-56211e926137` 的幂等键，
+尚不能认定它与告警请求 `76cb46bb-1bfe-4eec-a4d3-25048a763dda` 属于同一个Run或环境。
+Hub的unknown保护按tenant/consumer/API key/请求指纹/path匹配，不包含Delta环境；
+若dev/prod实际共享这些维度，可能相互阻塞，但现有输出不能确认共享凭据。
+
+Delta确有删除策略后级联删除Run和Step的代码；没有本案删除执行证据，
+也没有找到可据以归因于mx-rig的本案清理记录。不能由 `found=false` 推断被清理。
+
+诊断升级为 `delta-facebook-empty-page.v2`：增加配置环境标签、数据库名称/服务地址/端口的
+SHA256摘要、数据库检查时间；Step缺失时，只查告警策略是否存在及其Run/Step数量。
+摘要不输出连接信息，也不构成环境认证或唯一集群标识。仍只读、无broker检查、无采集。
+同步脚本后，先用以下命令辨认实际prod/dev Web容器，再分别执行前述只读诊断：
+
+```bash
+sudo docker ps --format 'table {{.Names}}\t{{.Ports}}\t{{.Label "com.docker.compose.project"}}'
+```
+
+仓库文档记录prod为 `mx_data-web-1`、dev为 `delta_59202-web-1`，必须以线上实际名称为准。
+原Hub交付可以独立按下面的具体预览恢复；Delta Step仍缺失时不创建替身Step、
+不伪造成功、不自动结束整月冷启动，也不据此启动新采购。
 
 ### 显式恢复原Hub交付
 
@@ -306,16 +345,94 @@ kubectl -n mx-insight-hub exec deployment/mx-insight-hub-admin -c admin \
 与原归档落库复现组合共11项通过、无跳过。PGlite为单连接，未验证真实多连接锁竞争。
 恢复响应与正常HubService/Gateway/JustOne生成的空终页逐字段一致（仅请求ID归一）。
 
+### Hub恢复已执行
+
+操作者返回 `facebook-empty-page-recovery.v1`，`mode=applied`、`replay=false`，
+恢复时间 `2026-10-17T09:58:44.137Z`（北京时间17:58:44）。
+原request/call、预览摘要和响应摘要与已审阅预览一致：
+
+- 原请求：`274d119a-27df-48de-a193-56211e926137`。
+- 原调用：`5152ab7f-20c5-40f6-a094-b43e67c41341`。
+- 新成功交付事件：`053c085d-1446-41a8-b65e-efa9126e6bae`。
+- 原报价CNY 1 minor核销流水：`de1a0c3a-09cc-464f-8c06-0b314abb3d83`。
+- 结果HTTP200、第一页0条、`hasMore=false`、`nextCursor=null`。
+- `sourceMode=recovered_archive`、`supplierCallsMade=0`、历史供应商调用仍为1次。
+- `canonicalQueued=0`、`emptyNoIngestNeeded=true`：空页没有内容入库任务，符合预期。
+
+原usage/call及客户冻结款恢复完成，无需再执行apply或为此另发采购请求。
+回执只证明这次原Hub交付的恢复；不证明新Public/worker版本已全部发布，
+不表示Delta任务已经恢复，也不把原10月16日至17日空页扩大为整月结果。
+
+同次附件仅有Docker容器清单，没有Delta v2诊断JSON。清单确认
+`mx_data-web-1` / project `mx_data`（同项目gateway发布59201）和
+`delta_59202-web-1` / project `delta_59202`（同项目gateway发布59202）均存在，
+与仓库记录的prod/dev对应关系一致。另有 `delta_59201-web-1`，不能仅凭其名称替代正式容器。
+剩余只读检查是在明确的上述两个Web容器分别执行现有v2脚本，定位固定Step及策略。
+容器清单本身不能证明数据库归属、原Step存在或跨环境共享Hub凭据。
+
+### Delta v2已定位到dev的失败冷启动
+
+按操作者依次执行prod、dev命令的顺序，2026-10-17T10:09:38.436838Z第一份回执
+（数据库摘要 `318399a852a2fa4a34e0d7c0f2b4d364416c9f4922ccc9f11a14896fa3ce8df3`）
+中固定Step和告警策略均不存在；10:10:16.547544Z第二份回执
+（摘要 `5ff5e953e8f8cbc145ce079d1c5ccc0e647c994f8070627f89a4030af78161a5`）
+找到两者。两份环境配置标签都为null，环境归属依赖实际执行容器，不能由摘要认证。
+
+原Step `e09fc550-e30d-4098-aa6e-512e89042579` 精确属于策略
+`bb9721db-95e5-44c1-abe4-6b031dfb19be`、Run
+`19a935c0-7c4a-4b8e-8702-96426e11219a`、Facebook冷启动group
+`bf7fee1c-7390-4546-a3fe-68bc8577e399`。策略enabled；Step/Run/group均failed，
+第一页、完成0页、入库0条、无下一页游标，group完成时间为空。
+Run实际意图窗口为北京时间2026-09-17 00:00至2026-10-17 13:26:35.927808。
+原失败Step未记录Hub ID，与此前异常包装丢失结构化ID的缺陷一致；不回填推测值。
+
+同一Run有4个第一页失败Step，创建于05:26:36、05:26:52、05:27:22、05:28:24 UTC；
+不是已完成4页。间隔与 `run_collection_plan` 的10/30/60秒异常重试吻合。
+每次执行创建新Step，并用Step UUID构造新幂等键。回执没有逐次错误详情，
+不能声称4次错误码完全相同，也不能将4个Step直接当成4次供应商计费调用。
+同group共5个Run，全部failed/0条；只凭这份状态汇总不能归因为所有Run均有同一错误。
+
+现有Run“重跑”入口会恢复旧group中的失败Run并保留旧scope，因而仍缺少本案原请求日期绑定；
+策略 `/run/` 入口是增量采集。内部强制新冷启动会创建新group、按当前平台查询逐条新建Run，
+经日期修复后有固定日期绑定，但按执行时刻计算近30天，不等于重放原历史窗口，且会实际采购。
+因此不以Hub空页恢复结果伪造旧Step成功，不自动重跑旧group，也不在本次只读诊断后派发新采集。
+
+代码核对同时发现独立的重派发缺陷：冷启动任务原先对所有异常统一执行10/30/60秒重试，
+每次生成新Step/幂等键；全局或平台恢复、策略重新启用还可能再次恢复failed group。
+仅停止一次Celery重试不能覆盖后续恢复入口。
+
+本地修复对结构化Hub `error.code=request_outcome_unknown`（HTTP409或503）保存
+版本化 `cold_start_redispatch_block` 到原Run scope，并保留本次失败响应request ID。
+该ID可能是被guard释放的本次请求，不保证是原unknown owner，不用于自动解除标记。
+任务重投、旧group恢复以及强制新group入口均检查当前group的标记；恢复决策明确返回blocked，
+不把“无可恢复Run”当成另建group的理由。取消期间收到unknown也保留标记，
+晚到任务不改写已有终态；窗口、分页、查询及历史Step不重置。
+其他平台继续原流程，正在执行的其他查询不被主动暂停；普通in_progress及非unknown错误
+保留原有重试行为。本案旧记录不补写推测标记，没有新增解除接口或自动采购。
+这组改动需随Delta web与采集worker发布，无数据库迁移。
+
+人工“重跑”也保留明确失败语义：存在原Run或当前group标记时，服务抛专用异常，
+API返回409/`request_outcome_unknown`及可读原因；页面显示错误并返回原任务详情，
+不再把未派发的请求提示为“已创建重跑任务”。普通重跑入口保留原行为。
+
+组合离线回归25项全部通过，执行实际collector/task/恢复决策/API/View/日期构造函数，
+隔离ORM、Celery和HTTP；覆盖409/503 unknown、取消早退、任务重投、force恢复、
+直接创建group、跨平台范围、人工失败提示，以及日期绑定跨页/跨日恢复。
+组合时已补齐日期测试对新增真实保护函数的依赖。定向diff检查通过；
+本机无Django，未将离线回归当作数据库或生产全栈验证。
+本轮仅更新本地Delta代码与事故文档，没有发布、操作生产任务或新增供应商调用，
+未修改MX-H2I登录及联网代码。
+
 ### 冷启动日期窗不能由空终页推断完成
 
 Delta旧标准搜索迁移设计只在本地过滤日期，标准请求不发送Facebook日期params。
 当前Hub Facebook合同在缺省日期时只使用昨日到今日；这与整月冷启动意图不一致。
-因此本案 `sourceWindow` 若为缺省的2026-10-16至2026-10-17，合法空结果只说明
+本案恢复回执确认 `sourceWindow` 为缺省的2026-10-16至2026-10-17，合法空结果只说明
 这次实际请求范围为空，不能自动把Delta的2026-09-17起整月冷启动标为完成。
 
 Hub历史交付恢复与准确时间窗的新采集必须分别处理。不得改写原请求日期/指纹，
 也不得把新日期参数直接加到旧cursor，否则会改变Hub scope并可能触发下游重新采购。
-截至本次本地验证，没有执行Hub生产恢复、Delta任务恢复或新日期窗采集。
+Hub生产恢复现已由操作者完成；尚无Delta任务恢复或新日期窗采集的完成证据。
 
 Delta本地已补新任务的日期绑定：`data_hub/api.py` 创建Facebook冷启动Run时，
 以原窗口的北京时间日历保存版本1 `_facebook_hub_window`；`data_hub/tasks.py`

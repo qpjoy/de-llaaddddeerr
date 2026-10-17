@@ -23,7 +23,7 @@ function decodePart(value, expectedBytes = null) {
   return decoded
 }
 
-function createScopedCursorCodec(secret, consumerId, { prefix, aadLabel, keyLabel }) {
+function createScopedCursorCodec(secret, consumerId, { prefix, aadLabel, keyLabel, maxLength = MAX_CURSOR_LENGTH }) {
   if (typeof secret !== 'string' || !secret) throw new TypeError('cursor secret is required')
   if (typeof consumerId !== 'string' || !consumerId) throw new TypeError('consumerId is required')
   const aad = Buffer.from(`${prefix}\u0000${aadLabel}`, 'utf8')
@@ -40,12 +40,12 @@ function createScopedCursorCodec(secret, consumerId, { prefix, aadLabel, keyLabe
       const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()])
       const tag = cipher.getAuthTag()
       const cursor = `${prefix}.${iv.toString('base64url')}.${ciphertext.toString('base64url')}.${tag.toString('base64url')}`
-      if (cursor.length > MAX_CURSOR_LENGTH) throw new Error('invalid cursor')
+      if (cursor.length > maxLength) throw new Error('invalid cursor')
       return cursor
     },
     decode(value) {
       try {
-        if (typeof value !== 'string' || value.length > MAX_CURSOR_LENGTH) {
+        if (typeof value !== 'string' || value.length > maxLength) {
           throw new Error('invalid cursor')
         }
         const [encodedPrefix, encodedIv, encodedCiphertext, encodedTag, extra] = value.split('.')
@@ -102,6 +102,15 @@ export function createDataSearchCursorCodec(secret, identity) {
     prefix: 'mxds1',
     aadLabel: 'hub-data-search-cursor',
     keyLabel: 'hub-data-search-cursor-aes-gcm',
+  })
+}
+
+export function createDataSearchV2CursorCodec(secret, identity) {
+  return createScopedCursorCodec(secret, identity, {
+    prefix: 'mxds2',
+    aadLabel: 'hub-data-search-v2-cursor',
+    keyLabel: 'hub-data-search-v2-cursor-aes-gcm',
+    maxLength: 16384,
   })
 }
 

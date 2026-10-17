@@ -3,6 +3,9 @@ import { validateSearchOrder } from './web-search/contract.mjs'
 import { MAX_CAPABILITY_SCOPES, MAX_PLATFORM_SCOPES } from '../shared/access-limits.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { serviceCatalogPage } from './data/service-catalog.mjs'
+import { DATA_SEARCH_V1_PATH, DATA_SEARCH_V2_PATH, DATA_SEARCH_V2_PLATFORMS, normalizeDataSearchV2 } from './contracts/data-search-v2.mjs'
+import { executeDataSearchV2, guardDataSearchV1, publicSearchProtocolStatus } from './data/search-protocol.mjs'
+import { SearchProtocolStore } from './data/search-protocol-store.mjs'
 import { servicePriceDefinition, customerServiceQuote } from './contracts/service-pricing.mjs'
 import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate, aggregateLivePage, AGGREGATE_EXECUTION } from './data/aggregate-search.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS } from './contracts/native-forwarding.mjs'
@@ -4074,15 +4077,18 @@ export class HubService {
     await this.store.reapStaleReservations()
     const record = await this.store.getRequest(requiredUuid(requestId, 'requestId'), context.consumer.id)
     assert(record, 404, 'request_not_found', 'Request not found')
-    return publicRequestStatus(record)
+    const binding = await new SearchProtocolStore(this.store).bindingForUsage(context, requestId)
+    return { ...publicRequestStatus(record), ...(binding ? { searchProtocol: publicSearchProtocolStatus(binding) } : {}) }
   }
 
   async requestStatusByIdempotencyKey(context, idempotencyKey) {
     const key = requiredIdempotencyKey(idempotencyKey)
     await this.store.reapStaleReservations()
     const record = await this.store.getUsageRequestByIdempotencyKey(context.consumer.id, key)
-    assert(record, 404, 'request_not_found', 'Request not found')
-    return publicRequestStatus(record)
+    const binding = await new SearchProtocolStore(this.store).binding(context, key)
+    assert(record || binding, 404, 'request_not_found', 'Request not found')
+    return { ...(record ? publicRequestStatus(record) : { id: null, status: 'not_dispatched', units: null }),
+      ...(binding ? { searchProtocol: publicSearchProtocolStatus(binding) } : {}) }
   }
 
   #enterExternalMedia(consumerId) {
@@ -4687,7 +4693,33 @@ export class HubService {
     }
   }
 
-  async search(context, { body, idempotencyKey, path, liveOnly = false, responseFormat = 'data', signal, retryOfRequestId }) {
+  async search(context, input) {
+    if (input.path === DATA_SEARCH_V2_PATH) {
+      const body = normalizeDataSearchV2(input.body, canonicalPlatform)
+      const idempotencyKey = requiredIdempotencyKey(input.idempotencyKey)
+      assert(input.retryOfRequestId == null, 400, 'uncertain_retry_not_supported', 'v2 does not allow an unknown-result retry override')
+      assert(!isTestApiKey(context.apiKey), 403, 'test_key_not_supported', 'v2 acquisition requires a Live API key')
+      assert((await this.#effectivePlatformGrants(context)).includes(body.platform), 403, 'platform_not_granted', 'Platform is not granted')
+      if (body.platform === 'xiaohongshu') assert((await this.#effectiveCapabilityGrants(context)).includes(XIAOHONGSHU_SEARCH_OPERATION),
+        403, 'capability_not_granted', `${XIAOHONGSHU_SEARCH_OPERATION} is not granted`)
+      assert(body.pageSize <= (await this.#effectivePlatformPolicy(context, body.platform)).maxPageSize,
+        400, 'page_size_exceeded', 'pageSize exceeds current entitlement')
+      return executeDataSearchV2({ store: this.store, context, body, idempotencyKey, pepper: this.apiKeyPepper,
+        execute: upstream => this.#searchLegacy(context, { ...input, body: upstream, idempotencyKey, path: DATA_SEARCH_V1_PATH }) })
+    }
+    const platform = typeof input.body?.platform === 'string' ? canonicalPlatform(input.body.platform) : null
+    if (input.path === DATA_SEARCH_V1_PATH && typeof input.body?.cursor === 'string' && input.body.cursor.startsWith('mxds2.')) {
+      throw new AppError(400, 'invalid_cursor', 'A v2 continuation cannot be used on v1')
+    }
+    if (input.path === DATA_SEARCH_V1_PATH && DATA_SEARCH_V2_PLATFORMS.includes(platform)
+      && typeof input.body?.query === 'string' && input.body.query.trim() && typeof input.idempotencyKey === 'string') {
+      return guardDataSearchV1({ store: this.store, context, body: { ...input.body, platform }, idempotencyKey: input.idempotencyKey,
+        execute: () => this.#searchLegacy(context, input) })
+    }
+    return this.#searchLegacy(context, input)
+  }
+
+  async #searchLegacy(context, { body, idempotencyKey, path, liveOnly = false, responseFormat = 'data', signal, retryOfRequestId }) {
     if (retryOfRequestId != null) {
       assert(path === '/api/v1/data/search' && responseFormat === 'data'
         && typeof body?.platform === 'string' && canonicalPlatform(body.platform) === 'twitter',

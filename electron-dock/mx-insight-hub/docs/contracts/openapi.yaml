@@ -38,6 +38,72 @@ security:
   - bearerKey: []
   - apiKeyHeader: []
 paths:
+  /api/v2/data/search:
+    servers:
+      - url: /
+    post:
+      tags: [Search]
+      operationId: searchDataV2
+      summary: Search one platform with a frozen explicit time window
+      description: >-
+        Opt-in v2; existing v1 callers and cursors remain unchanged. Uses the
+        same Live key, grants, billing and procurement controls. Facebook maps
+        the window to Shanghai calendar dates and exactly filters delivered
+        publication timestamps. Other listed platforms have no verified native
+        time filter and disclose partial coverage. No complete-history promise.
+        All v2 keys permanently identify one attempt, including type=fresh.
+        New pages require new keys; same-page retry retains body and key.
+        Only mxds2 cursors are accepted, and an empty filtered page may continue.
+        Version/key/window/cursor changes cannot bypass an unresolved query.
+        Inspect searchProtocol.deliveryConfirmed in the existing request status
+        APIs; underlying acquisition committed alone is insufficient. Migration
+        158 and all Public instances must be released before enabling v2.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string, minLength: 8, maxLength: 128}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [platform, query, timeWindow]
+              properties:
+                platform:
+                  type: string
+                  enum: [facebook, twitter, instagram, reddit, weibo, bilibili, douyin, kuaishou, zhihu, youtube, tiktok, xiaohongshu]
+                query: {type: string, minLength: 1, maxLength: 500}
+                pageSize: {type: integer, minimum: 1, maximum: 100, default: 20}
+                type: {type: string, enum: [fresh, stable], default: fresh}
+                cursor: {type: string, maxLength: 16384, pattern: '^mxds2\.'}
+                timeWindow:
+                  type: object
+                  additionalProperties: false
+                  required: [from, to, timezone, boundary]
+                  properties:
+                    from: {type: string, format: date-time}
+                    to: {type: string, format: date-time}
+                    timezone: {type: string, example: Asia/Shanghai}
+                    boundary: {const: '[from,to)'}
+      responses:
+        '200':
+          description: >-
+            data.contractVersion=mx-insight-hub.data-search.v2; standard items
+            and pageInfo plus data.meta.requestedWindow/effectiveWindow/
+            capabilities/limitations. capabilities.coverageComplete=false;
+            missing publication times are excluded and disclosed. Original
+            source evidence and acquisition billing units remain unchanged.
+        '400': {description: Invalid window, fields, idempotency key or version-bound cursor}
+        '401': {description: API key required}
+        '403': {description: Existing Live key/platform/operation grants required}
+        '409': {description: 'idempotency_conflict, request_in_progress or request_outcome_unknown; never fall back to v1'}
+        '422': {description: search_v2_platform_unsupported}
+        '429': {description: Existing quota/admission/financial limit}
+        '502': {description: Retained source failure}
+        '503': {description: Capability/storage/provider unavailable}
   /data/news/source-options:
     get:
       tags:

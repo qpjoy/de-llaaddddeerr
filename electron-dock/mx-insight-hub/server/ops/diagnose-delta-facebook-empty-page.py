@@ -1,5 +1,6 @@
 """Incident-only Delta Django shell inspection; no tasks, HTTP, writes or recovery."""
 import json
+import hashlib
 from datetime import datetime
 from uuid import UUID
 
@@ -54,7 +55,7 @@ def mapping(value):
     return value if isinstance(value, dict) else {}
 
 
-def inspect_delta(connection, models):
+def inspect_delta(connection, models, environment_label=None):
     if connection.vendor != "postgresql":
         raise ValueError("postgresql_required")
     if connection.in_atomic_block or not connection.get_autocommit():
@@ -66,13 +67,31 @@ def inspect_delta(connection, models):
             cursor.execute("SET LOCAL statement_timeout = '5s'")
             cursor.execute("SET LOCAL lock_timeout = '1s'")
             cursor.execute("SET LOCAL idle_in_transaction_session_timeout = '10s'")
+            cursor.execute("SELECT current_database(), inet_server_addr()::text, inet_server_port(), now()")
+            database_name, server_address, server_port, checked_at = cursor.fetchone()
+            database_identity = hashlib.sha256(json.dumps(
+                [database_name, server_address, server_port], separators=(",", ":")
+            ).encode("utf-8")).hexdigest()
             row = models.CollectionRunSpiderStep.objects.using(alias).filter(public_key=STEP_ID).values(*STEP_FIELDS).first()
-            result = {"diagnosticRevision": "delta-facebook-empty-page.v1", "readOnly": True,
+            safe_label = environment_label if (isinstance(environment_label, str) and 0 < len(environment_label) <= 64
+                and all(char.isascii() and (char.isalnum() or char in "_.-") for char in environment_label)) else None
+            result = {"diagnosticRevision": "delta-facebook-empty-page.v2", "readOnly": True,
+                      "checkedAt": timestamp(checked_at), "configuredEnvironmentLabel": safe_label,
+                      "databaseIdentitySha256": database_identity,
+                      "databaseIdentityNote": "Hash of current database name/server address/port, not an environment attestation or unique cluster ID.",
                       "currentStateOnly": True, "expectedStepId": STEP_ID, "expectedPlanId": PLAN_ID,
                       "expectedHubRequestId": HUB_REQUEST_ID, "found": row is not None,
                       "brokerStateChecked": False, "hubDateWindowChecked": False,
                       "windowCoverageVerified": False, "providerCalls": 0}
             if row is None:
+                plan = models.CollectionPlan.objects.using(alias).filter(public_key=PLAN_ID).values("id").first()
+                result["missingStepContext"] = {
+                    "expectedPlanFound": plan is not None,
+                    "planRunCount": models.CollectionRun.objects.using(alias).filter(plan_id=plan["id"]).count() if plan else None,
+                    "planStepCount": models.CollectionRunSpiderStep.objects.using(alias).filter(run__plan_id=plan["id"]).count() if plan else None,
+                    "deletionHistoryChecked": False,
+                    "interpretation": "Absent in this database snapshot. Wrong environment, removal or another original caller remain possible; absence does not prove deletion.",
+                }
                 return result
             plan_matches = uuid_value(row["run__plan__public_key"]) == PLAN_ID
             result["association"] = {
@@ -159,8 +178,9 @@ def inspect_delta(connection, models):
 def main():
     try:
         from django.db import connection
+        from django.conf import settings
         from data_hub import models
-        print(json.dumps(inspect_delta(connection, models), ensure_ascii=False, indent=2))
+        print(json.dumps(inspect_delta(connection, models, getattr(settings, "MX_ENVIRONMENT_NAME", None)), ensure_ascii=False, indent=2))
     except Exception as error:
         known = {"postgresql_required", "dedicated_connection_required"}
         print(json.dumps({"error": str(error) if str(error) in known else "diagnostic_read_failed"}))
