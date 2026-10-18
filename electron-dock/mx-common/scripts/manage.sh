@@ -1361,10 +1361,12 @@ containerd_has_image() {
   local image="$1"
   local canonical
   canonical="$(canonical_image_ref "$image")"
+  # Read the complete list: grep -q can close the pipe after an early match,
+  # making ctr fail with SIGPIPE under pipefail and report a cached image missing.
   if [ "$(id -u)" -eq 0 ]; then
-    ctr -n k8s.io images ls -q 2>/dev/null | grep -Fqx -e "$canonical" -e "$image"
+    ctr -n k8s.io images ls -q 2>/dev/null | grep -Fx -e "$canonical" -e "$image" >/dev/null
   else
-    sudo -n ctr -n k8s.io images ls -q 2>/dev/null | grep -Fqx -e "$canonical" -e "$image"
+    sudo -n ctr -n k8s.io images ls -q 2>/dev/null | grep -Fx -e "$canonical" -e "$image" >/dev/null
   fi
 }
 
@@ -1431,6 +1433,7 @@ cmd_preload() {
       say "using cached Docker image: ${image}"
     fi
     # Stream to containerd: no second large archive on the root filesystem.
+    say "streaming ${image} from Docker into containerd; exporting and unpacking layers can take several minutes"
     if [ "$(id -u)" -eq 0 ]; then
       if ! docker image save "$image" | ctr -n k8s.io images import -; then
         failed=1; continue

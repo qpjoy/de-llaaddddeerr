@@ -92,3 +92,11 @@ UTC17:56:43与17:57:14两次采样中，scheduler均Ready=true、restart143不�
 离线 `tests/admin-freeze.test.sh` 覆盖控制器不观察、逐阶段收敛、Pod 已消失、Pod 仍终止中、缺省零副本状态、对象替换、外部重新扩容、无效状态、对象消失、API 持续失败及暂时失败；另以真实 `apply_k8s → die → EXIT` 路径验证同 UID 恢复、替换/扩容/读取失败拒绝写入、恢复 resourceVersion 冲突不重试、初次 scale 冲突/对象替换/响应未知不取得恢复权，以及保留失败退出码。既有 `tests/manage-script.test.sh` 同时验证失败前未执行迁移、原有诊断隐私边界及 Admin 恢复行为；新测试已接入该入口。
 
 Kubernetes 的 desired/current 分别描述目标和观察状态，scale 写入成功并不是停止完成：[Scale API](https://kubernetes.io/docs/reference/kubernetes-api/definitions/scale-v1-autoscaling/)。强制删除不等待实际进程停止，不能作为迁移写入冻结的证明：[kubectl delete](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_delete/)。
+
+## 发布续检：部署锁与镜像缓存
+
+恢复后的首次重试在取得部署进程锁前退出。随后操作者读取到锁文件设备号 `fd00`、inode `1614009922`，同次提供的内核锁表没有 `fd:00:1614009922`；只确认该次采样未见目标锁，不推断最初持锁者。未删除锁文件或终止部署进程。再次标准部署已通过锁与凭据连续性检查，进入 mx-common 预加载；最后输出 `using cached Docker image: docker.elastic.co/elasticsearch/elasticsearch:9.4.2`。该行之后是 `docker image save | ctr -n k8s.io images import -`，原脚本没有阶段进度，不能仅凭无输出判断进程卡死。
+
+本地确认缓存检测存在独立缺陷：`pipefail` 下的 `ctr images ls -q | grep -Fqx` 在长列表前部命中后提前关闭管道，生产者返回 SIGPIPE，导致已缓存镜像被误判为缺失。root/sudo 两分支均可复现。修复仅移除 grep 的 `-q` 并丢弃标准输出，让它消费完整列表；保留精确镜像引用匹配和实际 ctr 失败的非零退出码。真正需要导入时增加导出/解包阶段提示。新增回归在旧代码失败，修复后 storage-preflight 25/25 通过，语法与差异检查通过。此缺陷可导致重复导入，现场这一次是否由它触发尚待进程与缓存回执，不能归因于新的 ES 数据索引或供应商搜索。
+
+当前部署窗口继续保留，另一个终端只读查看 docker/ctr 状态及完整消费镜像列表。不要并发开始第二次部署或删除缓存。若后续考虑 `MX_COMMON_AUTO_PRELOAD=0`，先确认本机 containerd `k8s.io` 已有配置所需的目标镜像；它只影响下一次运行，ES API healthy 本身不是镜像引用齐备的证据。TG/向量后台暂停仍保持，应用发布成功尚未确认。
