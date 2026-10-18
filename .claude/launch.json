@@ -4,8 +4,63 @@
     {
       "name": "mx-insight-hub-ui",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "electron-dock/mx-insight-hub", "run", "dev", "--", "--port", "5173", "--strictPort"],
+      "runtimeArgs": [
+        "--prefix",
+        "electron-dock/mx-insight-hub",
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "5173",
+        "--strictPort"
+      ],
       "port": 5173
+    },
+    {
+      "name": "mx-device-sim",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "electron-dock/mx-base/mx-device",
+        "run",
+        "dev:sim",
+        "--",
+        "--port",
+        "5180"
+      ],
+      "port": 5180
+    },
+    {
+      "name": "mx-device-sim-load",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "electron-dock/mx-base/mx-device",
+        "run",
+        "dev:sim",
+        "--",
+        "--port",
+        "5181",
+        "--load"
+      ],
+      "port": 5181
+    },
+    {
+      "name": "mx-device-sim-hub",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "electron-dock/mx-base/mx-device",
+        "run",
+        "dev:sim",
+        "--",
+        "--port",
+        "5182",
+        "--hub",
+        "--hub-port",
+        "5192"
+      ],
+      "port": 5192
     }
   ]
 }
