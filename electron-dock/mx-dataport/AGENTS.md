@@ -1,3 +1,5 @@
+- 2026-10-19 日期修复发布复测：用户回执数港generation=observed37、updated/ready/available1，rollout成功、/ready200；线上main-DcgpAkIW.js已加载。但原跨午夜日志在10/19筛选0、10/18筛选1，后端链路仍旧行为，Hub是否同步并发布f7944f57/df3f5ad9待确认，不称修复通过或假定未部署。账单6/4/1/2状态及单日详情回归正常，午夜订单样本仍缺。无新业务写入，2次批量额度仍未确认。证据nonpayment-continuation-20261019/date-postdeploy，见docs/nonpayment-continuation-20261019.md。
+
 - 2026-10-19 非支付续验：仅history.read角色经确认创建/分配，真实员工8历史可回看、查询/导出/批量禁用、9个直达拒绝，旧通知工单失权拒绝；已恢复正常/分析员并归档临时角色。日志搜索补齐，67条分页遍历无重复。新发现跨午夜筛选P2：10/18错误包含显示10/19凌晨记录；Hub日志/账单改北京时间半开日界，DataPort格式化固定Asia/Shanghai。17项真实隔离PG、22项前端测试及构建通过，待Hub→DataPort部署复测，无新迁移/Launcher/Auth/Pay变化；不得记全量通过。外置证据nonpayment-continuation-20261019，批量2次额度仍待明确确认。见docs/nonpayment-continuation-20261019.md。
 
 - 2026-10-19 69bffa3b部署后复测：线上main-CSdFCrS6.js/main-tzC6ZT4h.css；390/767画像行距22px、资料单列/74px标签列、环居中及标题操作换行通过，768/1440双列和手机底部可达正常。根QA为passed，仅指本轮剩余UI修复；手机标题3px高度差为非阻塞P3，不称全量像素/功能一致。新增9原图/5组合图与测量外置ui-remaining-fixes-20261018/final-postdeploy并全部打开；无代码或生产业务提交，测试视口和临时标签恢复。历史身份503/认证状态/受控计量等仍未全量结案；前端上线不替代集群锁/迁移核验。见docs/ui-remaining-fixes-20261019.md。
