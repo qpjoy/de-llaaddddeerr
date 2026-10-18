@@ -1310,6 +1310,7 @@
   width: 8%;
 }
 .parity-ticket-panel td:first-child {
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 .parity-audit-panel table {
@@ -1589,4 +1590,35 @@
   height: auto;
   min-height: 36px;
   white-space: normal;
+}
+/* Keep every documentation category and audit filter readable on narrow screens. */
+.parity-doc-groups {
+  min-width: 0;
+}
+.parity-doc-groups > [data-slot="tabs-list"] {
+  max-width: 100%;
+  height: auto;
+  min-height: 36px;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+.parity-doc-groups [data-slot="tabs-trigger"] {
+  flex: 0 0 auto;
+  height: 34px;
+  min-height: 34px;
+}
+@media (max-width: 767px) {
+  .parity-extra-filters > .dp-toolbar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .parity-extra-filters .dp-toolbar > :is([data-slot="input"], select) {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+  .parity-audit-panel .parity-extra-filters input[type="date"] {
+    min-width: 0;
+    max-width: none;
+    width: 100%;
+  }
 }

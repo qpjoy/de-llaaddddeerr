@@ -7,6 +7,14 @@ export function riskBand(level: unknown) {
   if (["low", "低", "低风险"].includes(value)) return "low";
   return "unknown";
 }
+export function riskLevelLabel(level: unknown) {
+  return {
+    high: "高风险",
+    medium: "中风险",
+    low: "低风险",
+    unknown: "未知",
+  }[riskBand(level)];
+}
 export function riskAdvice(level: unknown) {
   if (riskBand(level) === "high")
     return "该 IP 存在较高风险线索。建议结合业务日志核验，并按业务策略增加验证、限制访问或临时封禁。";

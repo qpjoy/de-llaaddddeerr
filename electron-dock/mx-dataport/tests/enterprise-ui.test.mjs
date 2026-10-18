@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { canOpenPage,hasPermission } from '../apps/web/permissions.ts'
 import { parseIpWorkbook } from '../apps/web/batch-ips.ts'
 import { runBatchRows } from '../apps/web/batch-runner.ts'
-import { riskAdvice } from '../apps/web/risk-advice.ts'
+import { riskAdvice, riskLevelLabel } from '../apps/web/risk-advice.ts'
 
 const tenant=randomUUID(),session=permissions=>({memberships:[{tenantId:tenant,role:'viewer',dataport:{permissions}}]})
 test('page gates require current enterprise permissions, including direct/return destinations and pending owners',()=>{
@@ -39,3 +39,9 @@ test('ambiguous batch outcomes stop dispatch and explicit continuation never ret
   calls=0;await runBatchRows(rows(),async()=>{calls++;return {status:429,error:{code:'quota_exhausted'}}},()=>false,()=>{});assert.equal(calls,1)
 })
 test('reference advice preserves unrated and low-risk uncertainty',()=>{assert.match(riskAdvice(null),/未提供/);assert.match(riskAdvice('low'),/不代表绝对安全/);assert.match(riskAdvice('高风险'),/核验/);})
+test('missing and unrecognized risk levels cannot appear to mean no risk',()=>{
+  for(const level of [null,undefined,'','无','none','safe',0])assert.equal(riskLevelLabel(level),'未知')
+  assert.equal(riskLevelLabel(' HIGH '),'高风险')
+  assert.equal(riskLevelLabel('中风险'),'中风险')
+  assert.equal(riskLevelLabel('low'),'低风险')
+})

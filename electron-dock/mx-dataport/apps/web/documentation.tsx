@@ -112,7 +112,7 @@ export function Documentation({ tenant }: { tenant: string; session: any }) {
         <p className="harbor-empty">正在读取接口文档…</p>
       ) : (
         <>
-          <Tabs value={group} onValueChange={setGroup}>
+          <Tabs className="parity-doc-groups" value={group} onValueChange={setGroup}>
             <TabsList variant="line">
               <TabsTrigger value="all">全部接口</TabsTrigger>
               {groups.map((tag) => (
