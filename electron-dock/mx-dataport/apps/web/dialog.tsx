@@ -1,4 +1,10 @@
-import React, { Children, isValidElement, useLayoutEffect, useState } from "react";
+import React, {
+  Children,
+  isValidElement,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   DialogContent as BaseDialogContent,
   DialogHeader,
@@ -20,8 +26,11 @@ export function DialogContent({
   children,
   className = "",
   style,
+  onOpenAutoFocus,
+  onCloseAutoFocus,
   ...props
 }: React.ComponentProps<typeof BaseDialogContent>) {
+  const opener = useRef<HTMLElement | null>(null);
   const [viewport, setViewport] = useState<React.CSSProperties>({});
   useLayoutEffect(() => {
     const visible = window.visualViewport;
@@ -55,6 +64,29 @@ export function DialogContent({
       {...props}
       className={`dp-viewport-dialog ${className}`}
       style={{ ...viewport, ...style }}
+      onOpenAutoFocus={(event) => {
+        // Most business dialogs open through ordinary buttons rather than a
+        // Radix DialogTrigger, so Radix has no trigger ref to return focus to.
+        opener.current =
+          document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : null;
+        onOpenAutoFocus?.(event);
+      }}
+      onCloseAutoFocus={(event) => {
+        onCloseAutoFocus?.(event);
+        const target = opener.current;
+        if (
+          !event.defaultPrevented &&
+          target?.isConnected &&
+          target !== document.body &&
+          !target.matches(":disabled") &&
+          !target.closest('[inert], [role="dialog"][data-state="closed"]')
+        ) {
+          event.preventDefault();
+          target.focus({ preventScroll: true });
+        }
+      }}
     >
       {auth ? (
         children

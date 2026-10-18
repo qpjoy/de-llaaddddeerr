@@ -2,7 +2,7 @@ import { IpLocationMap } from "./ip-location-map";
 import { ipLocation } from "./ip-location";
 import { useState } from "react";
 import { ArrowRight, Clock3, Copy, Check, Sparkles, Info } from "lucide-react";
-import { riskAdvice, riskBand } from "./risk-advice";
+import { riskAdvice, riskBand, riskLevelLabel } from "./risk-advice";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import {
@@ -32,12 +32,7 @@ export function RiskLevel({ level }: { level: unknown }) {
       data-level={String(level || "")}
       data-band={riskBand(level)}
     >
-      {{
-        high: "高风险",
-        medium: "中风险",
-        low: "低风险",
-        unknown: valueText(level),
-      }[riskBand(level)] || valueText(level)}
+      {riskLevelLabel(level)}
     </span>
   );
 }
@@ -150,7 +145,7 @@ export function QueryResult({
                     data-risk={riskBand(profile.risk_level)}
                     data-display="level"
                     role="img"
-                    aria-label={`风险等级 ${valueText(profile.risk_level)}`}
+                    aria-label={`风险等级 ${riskLevelLabel(profile.risk_level)}`}
                   >
                     <svg viewBox="0 0 120 120" aria-hidden="true">
                       <circle
@@ -170,14 +165,7 @@ export function QueryResult({
                     </svg>
                     <div>
                       <strong>
-                        {
-                          {
-                            high: "高风险",
-                            medium: "中风险",
-                            low: "低风险",
-                            unknown: "未知",
-                          }[riskBand(profile.risk_level)]
-                        }
+                        {riskLevelLabel(profile.risk_level)}
                       </strong>
                       <span>风险等级</span>
                     </div>
