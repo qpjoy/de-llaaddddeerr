@@ -297,7 +297,7 @@ v6 固定比较下面的事件组，只有OR内部四个原子调换顺序：
 
 v6 联合检查64项通过、1项既有可选PGlite检查跳过。新增验证包括512组布尔真值、实际供应商URL中的原子置换、事件组及完整式的原native保护身份、固定历史拒绝、首次失败不执行完整式、超额响应离线观察、数据库时间异常时停止，以及冷却期内不创建完整式请求、期满后只发完整式的续接。未调用线上供应商或修改生产配置。
 
-### 当前步骤：先检查两个词对，再按失败证据拆到单词
+### v7 结果：词对和单词对照将失败缩小到 update 查询
 
 v7的 `event-terms` 先分别查询以下两个固定词对，保留原引号、排除词、Top/count20和路径形式：
 
@@ -312,15 +312,36 @@ v7的 `event-terms` 先分别查询以下两个固定词对，保留原引号、
 
 针对此前count20实际返回21条导致诊断中断的问题，v7仅在新探针的私有适配器中使用完整供应商单页解析，保留并归档供应商返回的整页；21或22条不会单因超过请求count20而被判为不可用。不跟进供应商游标，不启动标准搜索组页，也不把这份诊断采集等同于20条业务交付。生产raw接口的条数合同、正常解析错误、准入限制和unknown保护保持原样；旧探针的502与归档不会被改写。
 
-同步 `server/ops/verify-twitter-query-param.mjs` **v7** 与新增的同目录 `verify-twitter-query-terms.sh`，从Hub源码目录的宿主机终端执行一次：
+该步骤已完成，无需再运行terms入口。实际执行四次：第一个词对成功，第二个词对400，因此只拆分第二个词对。
 
-```sh
-bash server/ops/verify-twitter-query-terms.sh
-```
+| 查询 | 已保存请求 | 唯一供应商调用 | 结果 |
+| --- | --- | --- | --- |
+| `("statement" OR "response") -ad -marketing -repost` | `892f2db5-07c6-463d-9232-6b0ea694731c` | `a805b83a-6dc2-419f-8cc1-1dc9f2748413` | HTTP200，20条 |
+| `("clarification" OR "update") -ad -marketing -repost` | `09a576b4-8a04-436b-97cb-b2f94631c806` | `001287f4-8797-4ed1-88be-2636ec072fea` | HTTP400 |
+| `"clarification" -ad -marketing -repost` | `5083a1a0-c5f6-485e-8454-223abf9444a6` | `4daa0eed-3160-4ba0-b19e-06029eb4ff2f` | HTTP200，27条完整供应商页 |
+| `"update" -ad -marketing -repost` | `b552925a-6396-4e8e-b14c-92bf583835df` | `86a1bede-c6e6-4e7f-a5c2-502162048b5d` | HTTP400 |
 
-该入口自行调用kubectl并发送JavaScript，直接由宿主机Bash运行，不要外套Node。预期 `diagnosticRevision=twitter-query-param-check.v7`、`case=event-terms`、`maxAdapterCalls=6`。无需部署Hub或操作Delta。重复运行只检查已有结果；不得以换key或修改子式的方式绕过unknown。
+这确认31字符的update查询也能复现400；clarification的27条已由仅限新探针的整页解析正常保留，没有再次被count20限制阻断。英文主题组、statement/response词对和clarification均有成功结果，因此不能笼统解释为“英文不能搜”。仍不能仅凭这些回执认定update被永久屏蔽，或断言出站IP、WAF、语法就是供应商内部根因。未执行完整查询，未恢复原冷启动。
 
 v7联合检查76项通过、1项可选PGlite检查因未配置模块跳过，独立复审通过。覆盖实际适配器的2/4/6次调用、21/22条完整供应商页、旧raw超额502保持不变、原请求与固定历史证据、已保存探针只读、unknown/未确认失败停止、当前授权及v2保护，以及五个Bash入口的实际stdin和版本检查。本地验证使用离线响应，没有线上采购或部署；生产编译器与MX-H2I登录联网未修改。
+
+### 当前步骤：仅在诊断进程中对照宿主机7788代理
+
+v8的 `host-proxy` 保留同一供应商、查询原文、引号、排除词、Top/count20及路径形式，仅为这次诊断进程固定HTTP代理 `http://127.0.0.1:7788`。先查已失败的完整31字符子式 `"update" -ad -marketing -repost`；只有获得归属明确、已保存的HTTP200成功回执，才继续完整257字符业务候选式。最多两次新的供应商调用，可能消耗额度；不翻页、不删除update、不把中英文AND改OR。失败、unknown或证据不全即停止，已存在的固定探针身份只读，不重发。
+
+该代理地址必须属于**实际运行Hub Admin Pod的Kubernetes节点**，不能拿Delta Docker宿主机上的127.0.0.1代替。新入口先通过标签 `app.kubernetes.io/name=mx-insight-hub-admin` 读取Running Pod，要求恰好一个未终止的实例、Pod Ready、admin容器就绪且 `hostNetwork=true`，随后exec刚检查的同一个Pod名。没有实例、滚动更新期间多个运行实例、未就绪或未启用hostNetwork时，入口会在启动诊断前退出。宿主机仅需Bash和kubectl，不需要Node；Node在选定的Admin容器中运行。
+
+当前实际代理配置仍需本次运行确认，历史回执没有保存实际出站路由，不能将旧400描述为已经证明“直连”或“中国IP”。将本次请求明确交给7788，只能证明指定的代理入口被使用；它本身不能证明最终出口是国外IP。即使改路由后成功，也需要结合相同条件的保存回执判断，不能单凭一次结果确定IP地理位置是原因。[供应商错误说明](https://www.twittrapi.com/docs/helpful-infos/error-handling)和[X逻辑运算符文档](https://docs.x.com/x-api/posts/search/integrate/operators)仍是语法及错误解释的边界。
+
+同步 `server/ops/verify-twitter-query-param.mjs` **v8** 与新增的同目录 `verify-twitter-query-proxy.sh`，从Hub源码目录的宿主机终端执行：
+
+```sh
+bash server/ops/verify-twitter-query-proxy.sh
+```
+
+预期 `diagnosticRevision=twitter-query-param-check.v8`、`case=host-proxy`、`maxAdapterCalls=2`。入口自行选择并核验Admin Pod，直接由宿主机Bash运行，不要外套Node。无需部署Hub或操作Delta，不写全局代理配置，不改变其他Hub流量、MX-H2I登录、SSO或联网。新探针延续仅限诊断的完整供应商单页解析；子式成功或完整式首屏成功都不能替代原冷启动入库、业务时间窗及后续分页验收。
+
+v8联合验证113项通过、1项既有可选PGlite检查跳过：探针60项、入口20项、解析9项及1项跳过、代理24项。代理HTTP测试首次因沙箱禁止监听本地端口失败，取得本地监听权限后该24项全部通过。覆盖代理路径固定且不直连回退、一次无认证连通性探测后最多一次认证业务请求、旧400身份核验与unknown保护、update未成功不执行完整式、原查询不变、当前路由凭据脱敏，以及Pod就绪/hostNetwork核验和固定Pod执行。未调用线上供应商或部署，复审未发现阻塞问题。
 
 v5 联合验证51项通过、1项既有可选PGlite检查因未配置模块跳过，独立复审通过。覆盖旧主题归档21条、原502和归档不变、事件组最多一次、事件组同样超额时离线判断、缺失/损坏/非JSON/不可用归档停止、未知结果/身份不匹配不读归档、不清除现有隔离期、跨版本保护，以及三个入口的实际JavaScript stdin与v5版本检查。没有线上采购或部署，生产查询逻辑保持不变。
 
