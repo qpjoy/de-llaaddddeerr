@@ -52,9 +52,23 @@ UTC17:42:54 新回执确认 controller-manager 已续租至17:42:52.768944Z，�
 
 验收要点：TG两源paused、游标退出running；retrieval后台非retire任务的running归零。已开始的批次/embedding允许完成，删除投影、心跳和轮询仍继续；暂停不等于零I/O。Public/canonical/已有向量查询不读取此暂停开关，新TG数据和新向量的可见性会延后。恢复走Internal正常管理入口：TG保留源合同/映射校验，retrieval保留无预算持续处理的worker健康门槛及必要的等待队列唤醒；不提供无条件SQL反向切换，也不把原已paused的设置当成恢复授权。没有缩容ingest：其旧Night-All backfill在abort时可能跳过续接，与已有external-pull的持久化续接机制不同，不能承诺整体停止后全部自动恢复。
 
+操作者已执行上述暂停。TG POST和随后的独立GET均返回HTTP200、pipeline paused；chats/messages都为paused、cursor idle。retrieval原值为enabled=true、paused=false、max_concurrency=2、daily_token_budget=0（此处0表示不设日预算上限）；事务UPDATE1并COMMIT，updated_at=2026-10-18T17:51:14.930618Z，只把paused变为true。源批次已排空，向量在途任务数量和减载后的I/O/控制面状态仍待只读验收。不要因为这两步成功就声称线上故障已修复或自行恢复后台高负载。
+
+UTC17:53:58的减载验收：非retire的running embedding=0；该时刻Hub的pg_stat_activity无其他active行。nvme0写等待三次为0.98/70.98/0.16ms，队列0.76/52.41/0.09；仍有间歇写入波动。controller-manager/scheduler均Ready=false，累计重启138/143，Lease停在17:52:20；etcd17:53:45仍有1.247秒health、1.875秒peerserverlease等慢读。TG与向量暂停达到了排空目标，但未足以恢复控制面；瞬时无active会话不代表没有PG后台checkpoint或其他业务I/O，也不能证明硬件健康或排除所有Hub写入。
+
+随后主机最近10分钟的内核过滤命令未输出匹配的新NVMe timeout/reset/abort、I/O error、blocked或XFS错误；SMART当前温度67°C（此前71°C），传感器2为54°C，Critical Warning/介质错误/错误日志计数仍为0，历史warning温度时间仍5分钟。这只说明该采样窗口与过滤范围未看到新设备报错，不能替代etcd延迟和控制器持续续租验收。已请求间隔30秒的两轮Pod/Lease对照与etcd近期日志，应用部署仍暂缓。
+
+## 本轮控制面恢复回执
+
+UTC17:56:43与17:57:14两次采样中，scheduler均Ready=true、restart143不变，Lease由17:56:42推进至17:57:12；controller当时仍Ready=false/restart138，Lease17:52:20未动。同期最近一分钟的有限etcd日志过滤仅返回一条约117.98ms慢读，未返回此前秒级项。
+
+随后只读等待成功：controller-manager Ready=true、restart139、started17:57:48Z。主机UTC17:58:45时，controller/scheduler Lease分别为17:58:44.332374Z和17:58:44.997869Z。这确认了本轮controller已重新启动并工作、scheduler持续续租；不是NVMe硬件已经修复或长期负载稳定的保证。减载后的先前采样已确认TG游标idle、embedding running0。
+
+发布安排：保持TG与后台向量暂停，先同步已推送的Hub修复并走既有标准部署，继续设置 `MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0`。遇到控制面再次失租或存储超时就停止发布，不强行删除Pod或绕过冻结。应用部署及部署后的canonical/Luopan验收仍未执行；通过之后再逐项恢复后台任务，观察一次只增加一种负载，不同时恢复所有积压。历史设备I/O超时仍保留为后续主机维护线索。
+
 ## 当前恢复边界
 
-controller-manager已恢复本轮续租，scheduler仍未确认恢复；需两者持续续租、重启次数稳定，并且etcd不再持续出现秒级落盘/读延迟后再部署。已保留型号/固件和温度回执；若限定后台减载后仍持续超时，应进一步核对散热、驱动/固件与设备链路，不能继续仅靠放大数据库或部署超时。本次没有实施恢复旧数据、迁移业务盘、设备压测、固件更新或控制平面重启，不以备份核对作为这次热调与只读验收的前置流程。
+两项组件的本轮自动恢复已确认，后续持续负载稳定性仍需观察。已保留型号/固件和温度回执；若限定后台减载后仍持续超时，应进一步核对散热、驱动/固件与设备链路，不能继续仅靠放大数据库或部署超时。本次没有实施恢复旧数据、迁移业务盘、设备压测、固件更新或手工控制平面重启，不以备份核对作为这次热调与只读验收的前置流程。
 
 ## 本地部署脚本调整
 
