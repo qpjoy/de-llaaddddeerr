@@ -44,6 +44,27 @@ export type AccountOptions = {
   admissionRequired?: boolean;
   loginHint?: string;
 };
+
+// A fragment-only navigation does not remount App or reload its session. Login
+// has already set the cookie, so explicitly load a new document in that case.
+export function navigateAfterLogin(
+  redirect: string,
+  target: Pick<Location, "href" | "assign" | "reload"> = location,
+  navigation: Pick<History, "replaceState"> = history,
+) {
+  const current = new URL(target.href);
+  const destination = new URL(redirect, current);
+  if (
+    destination.origin === current.origin &&
+    destination.pathname === current.pathname &&
+    destination.search === current.search
+  ) {
+    navigation.replaceState(null, "", destination.href);
+    target.reload();
+  } else {
+    target.assign(destination.href);
+  }
+}
 export const startAccountSession = (register = false) =>
   request<{ redirect: string }>(
     `/auth/sso/start?view=${register ? "register" : "login"}`,

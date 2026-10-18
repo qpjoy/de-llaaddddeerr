@@ -1,6 +1,32 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadAccountForm } from "../apps/web/api.ts";
+import { loadAccountForm, navigateAfterLogin } from "../apps/web/api.ts";
+
+test("successful login reloads the session even when the target is the current hash route", () => {
+  for (const route of ["/#/intelligence", "/#/orders", "/"]) {
+    const events = [];
+    navigateAfterLogin("/#/intelligence", {
+      href: `https://dataport.example.test${route}`,
+      assign: () => assert.fail("same-document assignment would leave the anonymous session mounted"),
+      reload: () => events.push("reload"),
+    }, {
+      replaceState: (state, title, url) => events.push(url),
+    });
+    assert.deepEqual(events, ["https://dataport.example.test/#/intelligence", "reload"]);
+  }
+});
+
+test("login redirects that load another document retain the full authentication destination", () => {
+  for (const redirect of ["/?account=ready#/intelligence", "https://auth.example.test/authorize?flow=fixture", "/auth/sso/callback?code=fixture"]) {
+    let assigned;
+    navigateAfterLogin(redirect, {
+      href: "https://dataport.example.test/#/intelligence",
+      assign: url => { assigned = url; },
+      reload: () => assert.fail("must navigate to the authentication destination"),
+    }, { replaceState: () => assert.fail("must preserve cross-document navigation") });
+    assert.equal(assigned, new URL(redirect, "https://dataport.example.test").href);
+  }
+});
 
 const failure = (status, code) =>
   Object.assign(Error("fixture failure"), { status, code });

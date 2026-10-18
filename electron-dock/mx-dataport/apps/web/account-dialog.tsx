@@ -32,7 +32,7 @@ import {
   InputGroupButton,
 } from "@/components/ui/input-group";
 import { Spinner } from "@/components/ui/spinner";
-import { request, loadAccountForm, type AccountOptions } from "./api";
+import { request, loadAccountForm, navigateAfterLogin, type AccountOptions } from "./api";
 type AccountDialogProps = {
   open: boolean;
   onOpenChange: (value: boolean) => void;
@@ -122,7 +122,7 @@ function AccountDialogSession({
           method:"POST",signal:AbortSignal.timeout(15000),
           body:JSON.stringify({account:data.get("login"),password:data.get("password")}),
         });
-        location.assign(result.redirect);
+        navigateAfterLogin(result.redirect);
         return;
       }
       const result = await request<{ redirect: string }>("/auth/sso/form", {
@@ -136,7 +136,7 @@ function AccountDialogSession({
           ...Object.fromEntries(data),
         }),
       });
-      location.assign(result.redirect);
+      navigateAfterLogin(result.redirect);
     } catch (e) {
       setError(
         (e as Error).name === "TimeoutError"
