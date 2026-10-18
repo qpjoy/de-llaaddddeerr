@@ -49,9 +49,11 @@ v2 的 `mxds2` 加密游标绑定原 Key、查询、页大小、结果类型和�
 
 新增 `control.data_search_protocol_bindings` 保存协议归属、冻结请求、精确投影响应和底层 requestId，不复制或重建客户账单。新 `control.data_search_protocol_leases` 在查询维度允许多个 v1 并发、阻止 v1/v2 重叠；同 consumer/key 还有独立竞争保护，不会因换 query 绕过。v2 同查询的新请求也串行派发。协议与 key 不能跨 API Key 复用。
 
-跨版本 unresolved 保护按同 tenant/consumer/Key/platform/query 保守阻断，日期、游标或 key 改变不解除。已有 v1 unknown 不因超过 24 小时自动消失；无法恢复查询归属的旧未知证据也不视为安全。v2 投影或持久化未知同样阻止降级为 v1。过期的未完成协议租约没有自动重启入口；需要先核对原请求。这个保护不会扩展任何平台权限或自动清除历史 unknown。
+跨版本 unresolved 保护限定在能够确认的同 tenant/consumer/Key/platform/query。已有协议 binding 的 unknown、持久化未知或过期未完成租约仍保护两个版本，日期、游标或 key 改变不解除，也不因超过 24 小时自动清除。
 
-上述跨版本范围是标准 `/api/v1/data/search` 与 `/api/v2/data/search`。旧 raw 兼容接口保持独立操作语义；已知 raw 路径原本就不参与标准搜索的历史路径检查。对于快照字段尚未引入时的记录，只有 usage 为 `unknown`、整个 acquisition 快照为空、capability 为空、计量项为 `raw`、指纹为合法 SHA256，且关联的**唯一一条** connector 也为 `raw/unknown`，consumer、平台、指纹逐项一致，才恢复其旧 raw 操作身份，排除缺路径导致的标准搜索扩大阻断。缺证据、矛盾证据、多个 connector、`reserved`、部分缺失的快照及标准搜索路径仍保守阻断。此判断不恢复 query、不改变旧 raw 的 unknown、不允许复用它的 key，也不跳过其他协议 binding、lease 或标准请求检查。
+自 `SEARCH_ADMISSION_POLICY_REVISION=known-query.v1` 起，v2 检查旧 usage 时必须同时满足：保存路径为 `/api/v1/data/search`，query 为非空字符串，去除两端空白后与本次查询完全相等，且归属一致。这样的旧 `unknown/reserved` 仍阻止新 v2 请求。缺少路径、缺少有效 query 或已知属于其他操作的记录不再阻断整个平台的新查询，也不要求下游逐条核对这些无关历史才能调用。旧 v1 自身的重放与并发语义不变。
+
+这个放宽不修改历史状态、不认定旧请求未收费或已成功；原 key 归属仍然保留，包括缺少当前 binding 的孤立 usage，以及缺少 usage 的悬空幂等 binding，不能通过 v2 复用旧 key。历史 raw 及无快照记录无需再依赖 connector 表证明操作身份。权限、预算、同一查询的协议 binding/lease 检查照常执行。
 
 ### 准入等待与结果未知
 

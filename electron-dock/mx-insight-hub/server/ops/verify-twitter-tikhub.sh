@@ -7,8 +7,8 @@ if [[ $# -ne 0 ]]; then
 fi
 ops_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 probe_file="$ops_dir/verify-twitter-tikhub.mjs"
-if [[ ! -f "$probe_file" ]] || ! grep -Fqx "export const REVISION = 'twitter-tikhub-check.v1'" "$probe_file"; then
-  echo 'Sync verify-twitter-tikhub.mjs revision v1 beside this script; no cluster request was sent.' >&2
+if [[ ! -f "$probe_file" ]] || ! grep -Fqx "export const REVISION = 'twitter-tikhub-check.v2'" "$probe_file"; then
+  echo 'Sync verify-twitter-tikhub.mjs revision v2 beside this script; no cluster request was sent.' >&2
   exit 2
 fi
 exec kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \

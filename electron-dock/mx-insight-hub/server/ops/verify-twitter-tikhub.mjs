@@ -3,7 +3,8 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-export const REVISION = 'twitter-tikhub-check.v1'
+export const REVISION = 'twitter-tikhub-check.v2'
+const IDENTITY_REVISION = 'twitter-tikhub-check.v1'
 export const ORIGINAL_REQUEST_ID = 'b5906846-8564-4791-8b83-ef3ce97789bc'
 export const PROXY_RECEIPT = Object.freeze({ requestId: 'd6ffc7e8-d736-4b7e-999b-a8af15755ee0',
   callId: '87e933ba-85fd-47da-9717-77acb61482ff' })
@@ -16,7 +17,7 @@ const PROXY_QUERY = '"update" -ad -marketing -repost'
 const PROXY_KEY = 'ops-twitter-proxy-3a7cdb0328df2c647b90dbebe67b464389decda1b9a7e056'
 const digest = value => createHash('sha256').update(value).digest('hex')
 export const IDEMPOTENCY_KEY = 'ops-twitter-tikhub-' + digest(JSON.stringify([
-  REVISION, ORIGINAL_REQUEST_ID, PROXY_RECEIPT.requestId, NATIVE_KEY, QUERY, 'Top', 'single_native_page',
+  IDENTITY_REVISION, ORIGINAL_REQUEST_ID, PROXY_RECEIPT.requestId, NATIVE_KEY, QUERY, 'Top', 'single_native_page',
 ])).slice(0, 48)
 export const PROTOCOL_KEYS = Object.freeze({ original: `${IDEMPOTENCY_KEY}-original-guard`, native: `${IDEMPOTENCY_KEY}-native-guard` })
 const BODY = Object.freeze({ params: Object.freeze({ keyword: QUERY, search_type: 'Top' }), deliveryMode: 'live_only' })
@@ -162,6 +163,31 @@ async function appendSavedEvidence(pool, report, saved) {
   }
 }
 
+// Admission is not an acquisition. Identify only the owned blocker and never
+// expose its query, body or credentials, or turn missing evidence into a retry.
+async function appendBlockingEvidence(pool, report, original) {
+  if (!report.blockingRequestId) return
+  try {
+    const { rows } = await pool.query(`SELECT /* twitter-tikhub:blocker */ id,status,platform,acquisition_request,
+      reserved_at,completed_at FROM usage_requests
+      WHERE id=$1 AND tenant_id=$2 AND consumer_id=$3 AND api_key_id=$4 LIMIT 1`,
+    [report.blockingRequestId, original.tenant_id, original.consumer_id, original.api_key_id])
+    const row = rows[0]
+    if (!row) { report.blockingRequest = { state: 'not_found_or_unavailable' }; return }
+    const path = row.acquisition_request?.path
+    const query = path === NATIVE_PATH ? row.acquisition_request?.body?.params?.keyword : row.acquisition_request?.body?.query
+    const date = value => value != null && Number.isFinite(new Date(value).getTime()) ? new Date(value).toISOString() : null
+    report.blockingRequest = { state: 'owned_saved_request', requestId: safeId(row.id), status: state(row.status),
+      platform: row.platform === 'twitter' ? 'twitter' : 'other',
+      pathKind: path === '/api/v1/data/search' ? 'standard_v1' : path === '/api/v1/night-all/search/raw' ? 'legacy_raw'
+        : path === NATIVE_PATH ? 'tikhub_native' : path == null ? 'missing' : 'other',
+      queryPresent: typeof query === 'string' && Boolean(query.trim()),
+      queryEqualsOriginal: typeof query === 'string' ? query.trim() === original.acquisition_request.body.query.trim() : null,
+      queryEqualsNative: typeof query === 'string' ? query.trim() === QUERY : null,
+      reservedAt: date(row.reserved_at), completedAt: date(row.completed_at) }
+  } catch { report.blockingRequest = { state: 'not_found_or_unavailable' } }
+}
+
 export async function runTwitterTikHubProbe({ pool, execute = false, createRuntime }) {
   const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID, proxyRequestId: PROXY_RECEIPT.requestId,
     case: 'full-query-tikhub', mode: execute ? 'execute' : 'read_only', querySha256: digest(QUERY), queryLength: QUERY.length,
@@ -181,6 +207,7 @@ export async function runTwitterTikHubProbe({ pool, execute = false, createRunti
       return report
     }
     runtime = await createRuntime()
+    report.admissionPolicyRevision = runtime.admissionPolicyRevision || 'not_reported_by_installed_code'
     report.readiness = await runtime.inspectReadiness(initial.original)
     if (!execute) return report
     if (!report.readiness.ready) { report.errorCode = 'readiness_blocked'; return report }
@@ -192,11 +219,13 @@ export async function runTwitterTikHubProbe({ pool, execute = false, createRunti
     // spellings. A native/social unknown must remain visible to future v1/v2
     // Twitter search, even though it lives outside their usage-path scan.
     for (const [name, query] of [['original', initial.original.acquisition_request.body.query], ['native', QUERY]]) {
+      report.stage = `guard_${name}`
       const lease = await runtime.protocol.begin(context, { version: 2, body: { platform: 'twitter', query, pageSize: 20, type: 'stable' },
         idempotencyKey: PROTOCOL_KEYS[name] })
       requireValue(lease.kind === 'acquired', 'diagnostic_identity_already_used')
       leases.push(lease)
     }
+    report.stage = 'native_dispatch'
     const result = await gateway.forwardNative(context,
       { key: NATIVE_KEY, body: BODY, path: NATIVE_PATH, idempotencyKey: IDEMPOTENCY_KEY })
     report.httpStatus = integer(result.status)
@@ -204,7 +233,17 @@ export async function runTwitterTikHubProbe({ pool, execute = false, createRunti
   } catch (error) {
     report.errorCode = safeCode(error)
     report.httpStatus = integer(error?.status)
-    report.requestId = safeId(error?.details?.requestId)
+    const guarding = report.stage === 'guard_original' || report.stage === 'guard_native'
+    report.requestId = guarding ? null : safeId(error?.details?.requestId)
+    if (guarding) {
+      report.blockingRequestId = safeId(error?.details?.blockingRequestId || error?.details?.requestId)
+      report.admission = {
+        dispatchState: error?.details?.dispatchState === 'not_started' ? 'not_started' : 'not_started_by_this_probe',
+        retrySameRequest: error?.details?.retrySameRequest === true,
+        retryAfterSeconds: integer(error?.details?.retryAfterSeconds),
+      }
+      if (initial) await appendBlockingEvidence(pool, report, initial.original)
+    }
   }
   if (initial) try {
     const after = await readSnapshot(pool)
@@ -245,6 +284,7 @@ async function runtimeFromInstalledSources(pool) {
   const controlStore = controls.createExternalPlatformControlStore({ pool })
   const reservationLeaseMs = Math.max(60000, config.reservationLeaseMs)
   return { store, protocol: new protocol.SearchProtocolStore(store),
+    admissionPolicyRevision: protocol.SEARCH_ADMISSION_POLICY_REVISION,
     inspectReadiness: async original => {
       const row = (await pool.query(`SELECT /* twitter-tikhub:owner */ k.id,
         (k.status='active' AND k.expires_at>now() AND c.status='active' AND t.status='active') AS active,

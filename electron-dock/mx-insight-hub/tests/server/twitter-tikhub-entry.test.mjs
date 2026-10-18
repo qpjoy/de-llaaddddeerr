@@ -37,9 +37,9 @@ test('TikHub wrapper refuses arbitrary provider, query, mode or destination befo
   }
 })
 
-test('TikHub wrapper refuses missing or incompatible sibling source before starting a cluster process', t => {
+test('TikHub wrapper refuses missing or v1 sibling source before starting a cluster process', t => {
   const f = fixture(t), source = join(f.directory, 'verify-twitter-tikhub.mjs')
-  writeFileSync(source, "export const REVISION = 'old-diagnostic'\n")
+  writeFileSync(source, "export const REVISION = 'twitter-tikhub-check.v1'\n")
   for (const missing of [false, true]) {
     if (missing) rmSync(source)
     const result = f.run()

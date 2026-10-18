@@ -339,13 +339,13 @@ v8的 `host-proxy` 保留同一供应商、查询原文、引号、排除词、T
 
 v8联合验证113项通过、1项既有可选PGlite检查跳过：探针60项、入口20项、解析9项及1项跳过、代理24项。代理HTTP测试首次因沙箱禁止监听本地端口失败，取得本地监听权限后该24项全部通过。覆盖代理路径固定且不直连回退、一次无认证连通性探测后最多一次认证业务请求、旧400身份核验与unknown保护、update未成功不执行完整式、原查询不变、当前路由凭据脱敏，以及Pod就绪/hostNetwork核验和固定Pod执行。未调用线上供应商或部署，复审未发现阻塞问题。
 
-### 当前步骤：验证已有 TikHub 搜索是否能接受完整条件
+### TikHub 首次结果：配置就绪，尚未发送供应商请求
 
 继续使用原供应商更换路径、OR顺序或7788出口都没有找到可用路径，下一步通过Hub已经实现的TikHub原生入口验证完整257字符候选式。它保留原280字符业务式的全部布尔条件，没有移除update、引号、排除词或任何OR分支。
 
 [TikHub官方接口](https://docs.tikhub.io/215701673e0)为 `GET /api/v1/twitter/web/fetch_search_timeline`，现有Hub入口为 `POST /api/v1/data/native/t.twitter_web_fetch_search_timeline`，请求包含 `params.keyword` 和 `params.search_type="Top"`。供应商没有声明count参数，单页数量由供应商决定；不伪造count20、不翻页，也不把结果条数当作完整窗口覆盖。此次对照仍沿用原已保存请求中没有日期参数的条件，不代表原Run时间窗已经验证。
 
-新独立入口 `verify-twitter-tikhub.sh` / `verify-twitter-tikhub.mjs` 不要求更新v8文件或部署镜像。先读取当前配置和原调用身份；凭据未配置、操作未开放、原Key缺少现有原生接口权限时返回具体未就绪状态，零采购，不自动改授权或启用操作。具备条件时最多调用一次TikHub完整查询，可能消耗该供应商及Hub额度；已有固定诊断请求仅检查保存记录，不重新采购。调用经过现有TikHub网关、业务码检查、计费和归档；仅返回状态、条数与分页结构，不输出密钥、正文或游标。
+首次 v1 独立入口 `verify-twitter-tikhub.sh` / `verify-twitter-tikhub.mjs` 不要求更新v8文件或部署镜像。先读取当前配置和原调用身份；凭据未配置、操作未开放、原Key缺少现有原生接口权限时返回具体未就绪状态，零采购，不自动改授权或启用操作。具备条件时最多调用一次TikHub完整查询，可能消耗该供应商及Hub额度；已有固定诊断请求仅检查保存记录，不重新采购。调用经过现有TikHub网关、业务码检查、计费和归档；仅返回状态、条数与分页结构，不输出密钥、正文或游标。
 
 ```sh
 bash server/ops/verify-twitter-tikhub.sh
@@ -353,7 +353,31 @@ bash server/ops/verify-twitter-tikhub.sh
 
 诊断对原SQL查询与等价native查询都保留搜索协议保护。原生请求若unknown或结果无法确认，两种查询在后续v1/v2都不能借换接口绕过；明确结果以“诊断不是标准交付”的终态结束保护，不保存伪造的v2成功响应。它不清除历史unknown，不改原Run，不改全局代理，不修改MX-H2I登录联网。成功后还需要将经验证的供应商接入标准Twitter搜索，并验证原任务时间窗、分页与入库，当前不能宣布冷启动恢复。
 
-预期版本为 `twitter-tikhub-check.v1`、`case=full-query-tikhub`、`maxAdapterCalls=1`。本轮20项离线测试通过，JS/Bash语法检查与独立复审通过；覆盖实际TikHub适配器和网关、完整式及固定请求身份、业务码拒绝、已有回执只读、JSONB字段顺序、并发最多一次派发、双向v1/v2未知结果阻断，以及派发后证据读取或保护状态保存失败。没有线上采购、生产部署或路由切换。
+v1 的20项离线测试通过，JS/Bash语法检查与独立复审通过；覆盖实际TikHub适配器和网关、完整式及固定请求身份、业务码拒绝、已有回执只读、JSONB字段顺序、并发最多一次派发、双向v1/v2未知结果阻断，以及派发后证据读取或保护状态保存失败。
+
+操作人员已回传 v1：`readiness.ready=true`，数据库凭据 revision=1，原调用方原生权限已开放，operation/release revision=3；但 `adapterCalls=0`、`fullQueryAttempted=false`、`409 search_admission_blocked`、`requestId=null`。这证明调用在 Hub 搜索准入阶段停止，不能归因为 TikHub 语法错误，也不能认定它已经采购。v1 未输出阻塞请求 ID，尚不能从这份报告确定具体是哪条历史记录阻塞。
+
+### 当前修复：只按已知查询归属阻断，不扩大为平台禁用
+
+代码复核确认旧准入扫描有过宽条件：旧 usage 缺失路径或有效 query 时，会匹配当前调用方该平台的所有新 v2 查询。现改为明确保存标准 v1 路径、有效 query 且与本次 query 完全匹配才阻断。历史 unknown 不改写，原 key 继续保护；同一查询的协议 unknown/过期未完成租约仍保护 v1/v2。孤立 usage 和悬空幂等 binding 的 key 也不能复用。具体合同见 [搜索 v2](../integrations/data-search-v2.md)。这修复了已确认的扩大阻断规则，但尚未证明本次线上 blocker 一定属于这类旧记录。
+
+诊断更新为 `twitter-tikhub-check.v2`，报告 `admissionPolicyRevision`、`stage` 和独立的 `blockingRequestId`；可读取原调用方自己的阻塞记录，显示路径类别、状态以及 query 是否匹配，不输出查询正文。采购前阻塞的 `requestId` 仍为空，不把旧 blocker 冒充本次采购。诊断 key 及两个协议 key 与 v1 **完全不变**，升级脚本不会创建新的采购身份。
+
+本次涉及在线准入实现，需要同步完整 Hub 源码并重建部署 Admin/Public 镜像。只同步 stdin 诊断文件不会改变容器中的规则。从服务器 Hub 源码目录按既有流程执行：
+
+```bash
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh ops internal-production deploy
+kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-public
+kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-admin
+```
+
+此次没有数据库迁移，不要求操作或重新部署 Delta。Launcher 同步与付费数据 smoke 显式关闭；没有修改 MX-H2I 登录、SSO、联网或 nginx 路由。
+
+如需继续已经授权的同一完整查询对照，部署后运行同一个 `bash server/ops/verify-twitter-tikhub.sh`。预期 `diagnosticRevision=twitter-tikhub-check.v2`、`admissionPolicyRevision=known-query.v1`、`maxAdapterCalls=1`；没有旧采购时最多新增一次供应商调用，可能消耗额度，已有回执不重发。如果仍阻塞，报告给出具体阶段与阻塞身份，不清除 unknown 或自动换 key。
+
+按用户最新边界，Hub 不再继续拆词、换词序或代理来猜测检索式语法。若实际到达供应商后仍返回输入相关拒绝，保留原查询、上游状态及 requestId，将检索式兼容定位交给下游。供应商笼统的400本身不足以证明具体语法根因。当前没有切换生产供应商路由，也没有宣称原冷启动已采集成功。
+
+本轮准入回归35项通过（含真实 PGlite 与 HTTP，无跳过），TikHub诊断及入口25项通过；覆盖新请求不受无归属历史牵连、旧 key 不复用、已知同查询 unknown/reserved、跨版本保护、状态不变、诊断身份稳定、blocker 归属限制及原生查询字段识别。
 
 v5 联合验证51项通过、1项既有可选PGlite检查因未配置模块跳过，独立复审通过。覆盖旧主题归档21条、原502和归档不变、事件组最多一次、事件组同样超额时离线判断、缺失/损坏/非JSON/不可用归档停止、未知结果/身份不匹配不读归档、不清除现有隔离期、跨版本保护，以及三个入口的实际JavaScript stdin与v5版本检查。没有线上采购或部署，生产查询逻辑保持不变。
 
@@ -361,4 +385,4 @@ v4此前35项离线测试全部通过，包括两个精确出站URL、全部成�
 
 本地查询、路径和组页合同测试 17 项通过，其中包含 160 组布尔真值比较、实际 adapter 两页 mock HTTP、v2 内外游标往返。另有带 PGlite 的 v1/v2、跨版本 unknown、HTTP 重试边界 33 项通过。Python 验证脚本 24 项测试及 Delta 原生 v1/v2 请求构造联合检查通过。这些离线测试不能代替供应商接受完整查询和原冷启动入库验收。
 
-本次尚未部署。没有新增数据库迁移，没有修改 MX-H2I 登录、SSO、联网或 Domestic/Internal nginx。完整查询成功后再发布 Hub 适配并通过原 Run 的正常重试验证采集与分页；不需要清理旧历史或绕过 unknown。
+本地修复尚未代替线上部署与验收。准入变更按上面的 Hub-only 命令发布；没有新增数据库迁移，没有修改 MX-H2I 登录、SSO、联网或 Domestic/Internal nginx。完整查询尚无成功交付证据，原冷启动仍需正常采集与分页验收，不需要清理旧历史或绕过 unknown。

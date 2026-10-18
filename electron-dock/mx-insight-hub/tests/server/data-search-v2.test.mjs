@@ -210,18 +210,33 @@ for (const postgres of [false, true]) {
     await assert.rejects(() => protocol.begin(ctx, { version: 2, body: request, idempotencyKey: retryKey }), code('request_outcome_unknown'))
     const orphan = legacyRawUsage(ctx, { idempotencyKey: 'orphan-owned-key', status: 'committed', acquisitionRequest: { path: DATA_SEARCH_V1_PATH } })
     await fixture.addUsage(orphan); await fixture.forgetUsageBinding(orphan.idempotencyKey)
-    await assert.rejects(() => protocol.begin(ctx, { version: 2, body: request, idempotencyKey: orphan.idempotencyKey }), code('request_outcome_unknown'))
+    await assert.rejects(() => protocol.begin(ctx, { version: 2, body: request, idempotencyKey: orphan.idempotencyKey }), code('idempotency_conflict'))
     await fixture.danglingUsageBinding('dangling-binding-key')
-    await assert.rejects(() => protocol.begin(ctx, { version: 2, body: request, idempotencyKey: 'dangling-binding-key' }), code('request_outcome_unknown'))
+    await assert.rejects(() => protocol.begin(ctx, { version: 2, body: request, idempotencyKey: 'dangling-binding-key' }), code('idempotency_conflict'))
   })
-  test(`protocol ${postgres ? 'actual PGlite' : 'memory'} recovers only the old raw operation without clearing its outcome or key ownership`, options, async t => {
+  test(`protocol ${postgres ? 'actual PGlite' : 'memory'} orphan legacy ownership blocks key reuse without blocking unrelated new searches`, options, async t => {
+    const fixture = await protocolFixture(t, postgres), { ctx, protocol } = fixture
+    const request = body('twitter'), orphan = legacyRawUsage(ctx, { idempotencyKey: 'orphan-unknown-without-query' })
+    await fixture.addUsage(orphan); await fixture.forgetUsageBinding(orphan.idempotencyKey)
+    await fixture.danglingUsageBinding('dangling-without-request')
+    const before = await fixture.savedUsage(orphan.id)
+    for (const idempotencyKey of [orphan.idempotencyKey, 'dangling-without-request']) {
+      await assert.rejects(() => protocol.begin(ctx, { version: 2, body: request, idempotencyKey }), code('idempotency_conflict'))
+      assert.equal(await protocol.binding(ctx, idempotencyKey) ?? null, null)
+    }
+    const admitted = await protocol.begin(ctx, { version: 2, body: request, idempotencyKey: 'fresh-unrelated-key' })
+    assert.equal(admitted.kind, 'acquired')
+    await protocol.finish(admitted.input, { state: 'complete', result: result() })
+    assert.deepEqual(await fixture.savedUsage(orphan.id), before)
+  })
+  test(`protocol ${postgres ? 'actual PGlite' : 'memory'} isolates old raw requests without clearing their outcome or key ownership`, options, async t => {
     const { ctx, protocol, addUsage, addConnector, savedUsage } = await protocolFixture(t, postgres)
     const request = body('twitter')
     for (const path of [null, '/api/v1/night-all/search/raw', '/api/v1/search/raw']) {
       const usage = legacyRawUsage(ctx, { acquisitionRequest: path ? { path } : null })
       await addUsage(usage)
-      // The incident predates snapshots. Known raw routes already have this
-      // isolation without needing reconstructed query text or connector rows.
+      // A connector row may exist, but new searches do not need one to isolate
+      // a historical receipt whose standard-search identity is not known.
       if (!path) await addConnector(legacyRawConnector(usage))
       const before = await savedUsage(usage.id)
       await assert.rejects(() => protocol.begin(ctx, { version: 2, body: request, idempotencyKey: usage.idempotencyKey }), code('idempotency_conflict'))
@@ -239,7 +254,7 @@ for (const postgres of [false, true]) {
         timeWindow: { ...request.timeWindow, from: '2026-09-01T00:00:00.000Z' } }, idempotencyKey: `new-key-${version}` }), code(version === 2 ? 'search_admission_blocked' : 'request_outcome_unknown'))
     }
   })
-  test(`protocol ${postgres ? 'actual PGlite' : 'memory'} keeps incomplete or conflicting legacy raw evidence blocked`, options, async t => {
+  test(`protocol ${postgres ? 'actual PGlite' : 'memory'} incomplete legacy identities do not block new searches or release old keys`, options, async t => {
     const fixture = await protocolFixture(t, postgres)
     const cases = [
       { name: 'no connector', calls: [] },
@@ -247,11 +262,13 @@ for (const postgres of [false, true]) {
       { name: 'another capability', usage: { capability: 'social.content.search' } },
       { name: 'invalid fingerprint', usage: { fingerprint: 'not-a-sha256' } },
       { name: 'missing fingerprint', usage: { fingerprint: null } },
-      { name: 'reserved raw', usage: { status: 'reserved' }, code: 'request_in_progress' },
+      { name: 'reserved raw', usage: { status: 'reserved' } },
       { name: 'incomplete snapshot', usage: { acquisitionRequest: {} } },
       { name: 'null snapshot path', usage: { acquisitionRequest: { path: null } } },
-      { name: 'explicit standard path', usage: { acquisitionRequest: { path: DATA_SEARCH_V1_PATH, body: { query: body().query } } } },
+      { name: 'missing path with known query', usage: { acquisitionRequest: { body: { query: body().query } } } },
       { name: 'standard path missing query', usage: { acquisitionRequest: { path: DATA_SEARCH_V1_PATH } } },
+      ...[null, 123, [], {}, '', ' \n\u00a0\ufeff\t'].map(query => ({ name: `non-identifying query ${JSON.stringify(query)}`,
+        usage: { acquisitionRequest: { path: DATA_SEARCH_V1_PATH, body: { query } } } })),
       { name: 'different consumer', calls: [{ consumerId: randomUUID() }] },
       { name: 'different platform', calls: [{ platform: 'facebook' }] },
       { name: 'missing platform', calls: [{ platform: null }] },
@@ -262,25 +279,25 @@ for (const postgres of [false, true]) {
       { name: 'unrelated connector', calls: [{ requestId: randomUUID() }] },
       { name: 'multiple consistent connectors', calls: [{}, {}] },
       { name: 'mixed operations', calls: [{}, { operation: 'data-search' }] },
-      { name: 'crawl is outside this repair', usage: { billingMeterKey: 'crawl' }, calls: [{ operation: 'crawl' }] },
-      { name: 'user-info is outside this repair', usage: { billingMeterKey: 'user-info' }, calls: [{ operation: 'user-info' }] },
+      { name: 'unidentified crawl', usage: { billingMeterKey: 'crawl' }, calls: [{ operation: 'crawl' }] },
+      { name: 'unidentified user-info', usage: { billingMeterKey: 'user-info' }, calls: [{ operation: 'user-info' }] },
     ]
     for (const scenario of cases) {
-      // Isolate each root by API Key; all requests must stop before any new
-      // binding (and thus before any acquisition) can be inserted.
-      const ctx = { ...fixture.ctx, apiKey: { id: randomUUID() } }
+      const ctx = fixture.ctx
       const usage = legacyRawUsage(ctx, scenario.usage)
       await fixture.addUsage(usage)
       for (const patch of scenario.calls ?? [{}]) await fixture.addConnector(legacyRawConnector(usage, patch))
       const before = await fixture.savedUsage(usage.id), idempotencyKey = randomUUID()
-      await assert.rejects(() => fixture.protocol.begin(ctx, { version: 2, body: body('twitter'), idempotencyKey }),
-        error => error.code === 'search_admission_blocked' && error.details?.blockingRequestId === usage.id
-          && error.details.dispatchState === 'not_started' && error.details.automaticRetryAllowed === true, scenario.name)
-      assert.equal((await fixture.protocol.binding(ctx, idempotencyKey)) ?? null, null, scenario.name)
+      const admitted = await fixture.protocol.begin(ctx, { version: 2, body: body('twitter'), idempotencyKey })
+      assert.equal(admitted.kind, 'acquired', scenario.name)
+      await fixture.protocol.finish(admitted.input, { state: 'complete', result: result() })
+      await assert.rejects(() => fixture.protocol.begin(ctx, { version: 2, body: body('twitter'), idempotencyKey: usage.idempotencyKey }),
+        code('idempotency_conflict'), scenario.name)
+      assert.equal((await fixture.protocol.begin(ctx, { version: 1, body: body('twitter'), idempotencyKey: usage.idempotencyKey })).kind, 'legacy', scenario.name)
       assert.deepEqual(await fixture.savedUsage(usage.id), before, scenario.name)
     }
   })
-  test(`protocol ${postgres ? 'actual PGlite' : 'memory'} still finds another standard unknown after excluding a verified raw request`, options, async t => {
+  test(`protocol ${postgres ? 'actual PGlite' : 'memory'} still finds a matching standard unknown among unidentified receipts`, options, async t => {
     const { ctx, protocol, addUsage, addConnector, savedUsage } = await protocolFixture(t, postgres)
     const raw = legacyRawUsage(ctx), standard = legacyRawUsage(ctx, { billingMeterKey: 'twitter',
       acquisitionRequest: { path: DATA_SEARCH_V1_PATH, body: { platform: 'twitter', query: body().query } } })
@@ -290,14 +307,45 @@ for (const postgres of [false, true]) {
       error => error.code === 'search_admission_blocked' && error.details?.blockingRequestId === standard.id)
     assert.deepEqual(await savedUsage(raw.id), before)
   })
-  if (postgres) test('missing PostgreSQL connector evidence table never authorizes a legacy unknown acquisition', options, async t => {
+  test(`protocol ${postgres ? 'actual PGlite' : 'memory'} known legacy query protection matches its owner and exact trimmed text`, options, async t => {
+    const { ctx, protocol, addUsage, savedUsage } = await protocolFixture(t, postgres)
+    const request = body('twitter')
+    for (const patch of [{ tenantId: randomUUID() }, { consumerId: randomUUID() }, { apiKeyId: randomUUID() }, { platform: 'facebook' },
+      { acquisitionRequest: { path: DATA_SEARCH_V1_PATH, body: { query: `${request.query} another term` } } },
+      { acquisitionRequest: { path: '/api/v1/night-all/search/raw', body: { query: request.query } } }]) {
+      await addUsage(legacyRawUsage(ctx, { acquisitionRequest: { path: DATA_SEARCH_V1_PATH, body: { query: request.query } }, ...patch }))
+    }
+    const unrelated = await protocol.begin(ctx, { version: 2, body: request, idempotencyKey: randomUUID() })
+    assert.equal(unrelated.kind, 'acquired')
+    await protocol.finish(unrelated.input, { state: 'complete', result: result() })
+    for (const status of ['unknown', 'reserved']) {
+      const query = `${request.query} ${status}`, legacy = legacyRawUsage(ctx, { status,
+        acquisitionRequest: { path: DATA_SEARCH_V1_PATH, body: { query: `\n\u00a0${query}\ufeff\t` } } })
+      await addUsage(legacy)
+      const before = await savedUsage(legacy.id), idempotencyKey = randomUUID()
+      await assert.rejects(() => protocol.begin(ctx, { version: 2, body: { ...request, query }, idempotencyKey }), error => {
+        assert.equal(error.code, 'search_admission_blocked')
+        assert.equal(error.details.blockingRequestId, legacy.id)
+        assert.equal(error.details.dispatchState, 'not_started')
+        return true
+      })
+      assert.equal(await protocol.binding(ctx, idempotencyKey) ?? null, null)
+      assert.deepEqual(await savedUsage(legacy.id), before)
+    }
+  })
+  if (postgres) test('legacy search admission does not depend on the PostgreSQL connector evidence table', options, async t => {
     const { ctx, db, protocol, addUsage, savedUsage } = await protocolFixture(t, true)
     const usage = legacyRawUsage(ctx), idempotencyKey = randomUUID()
     await addUsage(usage)
     const before = await savedUsage(usage.id)
     await db.exec('DROP TABLE serving.connector_calls')
-    await assert.rejects(() => protocol.begin(ctx, { version: 2, body: body('twitter'), idempotencyKey }), code('42P01'))
-    assert.equal((await protocol.binding(ctx, idempotencyKey)) ?? null, null)
+    const admitted = await protocol.begin(ctx, { version: 2, body: body('twitter'), idempotencyKey })
+    assert.equal(admitted.kind, 'acquired')
+    await protocol.finish(admitted.input, { state: 'complete', result: result() })
+    const standard = legacyRawUsage(ctx, { acquisitionRequest: { path: DATA_SEARCH_V1_PATH, body: { query: body().query } } })
+    await addUsage(standard)
+    await assert.rejects(() => protocol.begin(ctx, { version: 2, body: body('twitter'), idempotencyKey: randomUUID() }),
+      error => error.code === 'search_admission_blocked' && error.details.blockingRequestId === standard.id)
     assert.deepEqual(await savedUsage(usage.id), before)
   })
   test(`protocol ${postgres ? 'actual PGlite' : 'memory'} preserves v1 concurrency and blocks cross-version/different-query key races`, options, async t => {
@@ -325,7 +373,9 @@ for (const postgres of [false, true]) {
     assert.equal((await protocol.begin(ctx, { version: 1, body: body(), idempotencyKey: 'legacy-unknown-key' })).kind, 'legacy')
     await addUsage({ id: randomUUID(), consumerId: ctx.consumer.id, apiKeyId: ctx.apiKey.id, tenantId: ctx.tenant.id, platform: 'facebook',
       idempotencyKey: 'legacy-missing-query', status: 'unknown', acquisitionRequest: { path: DATA_SEARCH_V1_PATH, body: { platform: 'facebook' } }, reservedAt: '2026-01-01T00:00:00Z' })
-    await assert.rejects(() => protocol.begin(ctx, { version: 2, body: { ...body(), query: 'cannot prove this is unrelated' }, idempotencyKey: 'missing-query-bypass' }), code('search_admission_blocked'))
+    const unrelated = await protocol.begin(ctx, { version: 2, body: { ...body(), query: 'a different search' }, idempotencyKey: 'new-unrelated-query' })
+    assert.equal(unrelated.kind, 'acquired')
+    await protocol.finish(unrelated.input, { state: 'complete', result: result() })
   })
   test(`protocol ${postgres ? 'actual PGlite' : 'memory'} stores exact delivery and rejects another API Key`, options, async t => {
     const { ctx, protocol } = await protocolFixture(t, postgres), response = result()
