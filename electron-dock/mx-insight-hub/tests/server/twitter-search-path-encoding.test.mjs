@@ -9,6 +9,7 @@ import { createExternalPlatformCursorCodec, createRawSearchCursorCodec, createDa
 
 const INCIDENT_QUERY = '("US semiconductor export" OR "semiconductor export controls" OR SMIC) AND #chipban'
 const INCIDENT_PATH = '/search/%28%22US%20semiconductor%20export%22%20OR%20%22semiconductor%20export%20controls%22%20OR%20SMIC%29%20AND%20%23chipban'
+const STANDARD_PATH = '/search/%28%22US%20semiconductor%20export%22%20OR%20%22semiconductor%20export%20controls%22%20OR%20SMIC%29%20%23chipban'
 const BODY = { platform: 'twitter', query: INCIDENT_QUERY, pageSize: 20 }
 const SECRET = 'twitter-path-encoding-fixture-only-pepper', IDENTITY = 'fixture-consumer:fixture-key'
 const CODECS = {
@@ -82,11 +83,11 @@ test('Twitter search encodes query data into one path segment without changing t
   }
 })
 
-test('standard fresh and stable searches use the same corrected upstream path and existing Top parameters', async () => {
+test('new standard fresh and stable searches compile Boolean AND with the same encoding and existing Top parameters', async () => {
   const seen = []
   const adapter = new RapidApiAdapter({ apiKey: 'synthetic-offline-provider-key', fetchImpl: async url => {
     seen.push(url.href)
-    assert.equal(url.pathname, INCIDENT_PATH)
+    assert.equal(url.pathname, STANDARD_PATH)
     assert.equal(url.hash, '')
     assert.deepEqual(Object.fromEntries(url.searchParams), { count: '20', category: 'Top', includeTimestamp: 'false' })
     return Response.json({ entries: [] })
@@ -94,7 +95,7 @@ test('standard fresh and stable searches use the same corrected upstream path an
   for (const type of ['fresh', 'stable']) {
     const request = normalizeHubDataSearch(BODY, CODECS.data, type)
     assert.equal(request.query, INCIDENT_QUERY)
-    assert.equal(request.providerRequest.endpointPath, INCIDENT_PATH)
+    assert.equal(request.providerRequest.endpointPath, STANDARD_PATH)
     assert.equal(request.providerRequest.standardSearch, true)
     await adapter.execute(request.providerRequest)
   }

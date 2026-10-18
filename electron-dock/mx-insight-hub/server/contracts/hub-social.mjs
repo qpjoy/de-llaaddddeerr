@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { compileTwitterSearchQuery, TWITTER_QUERY_DIALECT } from './twitter-search-query.mjs'
 
 export const HUB_SOCIAL_VERSION = 'mx-insight-hub.social-data.v1'
 export const HUB_SOCIAL_ENDPOINTS = Object.freeze(Object.fromEntries([
@@ -41,7 +42,7 @@ function alias(body, names) {
   return values[0]
 }
 
-export function normalizeHubSocialRequest(operation, body, { maxPageSize = 50, decodeCursor, now = Date.now() } = {}) {
+export function normalizeHubSocialRequest(operation, body, { maxPageSize = 50, decodeCursor, now = Date.now(), twitterQueryDialect = null } = {}) {
   const endpoint = HUB_SOCIAL_ENDPOINTS[operation]
   if (!endpoint) throw new AppError(404, 'not_found', 'Unknown social operation')
   if (!body || typeof body !== 'object' || Array.isArray(body)) fail('JSON object body is required')
@@ -84,10 +85,13 @@ export function normalizeHubSocialRequest(operation, body, { maxPageSize = 50, d
   const upstreamQuery = operation === 'search' ? { count, category: sort === 'top' ? 'Top' : 'Latest', includeTimestamp: 'false' }
     : operation === 'crawl' ? { count, ...(username ? { username } : {}) } : userId ? { ids: userId } : {}
   if (providerCursor) upstreamQuery.cursor = providerCursor
-  const endpointPath = operation === 'search' ? `/search/${encodeSearchTerm(query)}`
+  const compiled = operation === 'search' && twitterQueryDialect === TWITTER_QUERY_DIALECT
+    ? compileTwitterSearchQuery(query) : null
+  const endpointPath = operation === 'search' ? `/search/${encodeSearchTerm(compiled?.providerQuery ?? query)}`
     : operation === 'crawl' ? `/user/${userId || '-1'}/tweets`
       : userId ? '/user/users/by/ids' : `/user/by/username/${encodeURIComponent(username)}`
   return { ...identity, queryHash, page, expiresAt, providerCursor, endpointPath, upstreamQuery,
+    ...(compiled?.changed ? { queryDialect: compiled.dialect, providerQuery: compiled.providerQuery } : {}),
     endpointKey: endpoint.endpointKey, endpointVersion: 'twitter-aio.hub.v1', endpointContractVersion: HUB_SOCIAL_VERSION,
     marketplace: 'twitter', deliveryMode: 'live_only',
     fingerprintBody: { ...identity, cursor: body.cursor ?? null },

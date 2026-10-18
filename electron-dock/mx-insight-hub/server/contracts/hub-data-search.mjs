@@ -32,7 +32,8 @@ export function normalizeHubDataSearch(body, codec, resultType, historicalCodec,
     upstreamBody: { platform, query, count: providerPageSize, ...(cursor ? { cursor } : {}) } }, codec,
   { cursorScope: platform === 'twitter' ? { type: resultType, pageSize } : resultType,
     instagramProvider, instagramStrategy, historicalCodec,
-    ...(platform === 'twitter' ? { twitterSort: 'top', twitterBuffer: true, bufferPageSize: pageSize } : {}) })
+    ...(platform === 'twitter' ? { twitterSort: 'top', twitterBuffer: true, bufferPageSize: pageSize,
+      twitterQueryCompatibility: true } : {}) })
   if (platform === 'twitter') {
     normalized.providerRequest.standardSearch = true
     normalized.providerRequest.allowOverflow = true
