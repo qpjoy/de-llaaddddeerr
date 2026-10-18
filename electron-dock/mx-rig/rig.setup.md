@@ -38,4 +38,19 @@ unset MX_LAUNCHER_OPS_TOKEN
 # launcher模式启动
 env -u ELECTRON_RUN_AS_NODE -u MX_RIG_SERVER_URL \
   MX_RIG_LAUNCHER=1 npm run desktop
+
+#
+npm run setup
+npm run setup:npm
+npm run dev-mode
+
+# npm run make:mac
+# --mac --arm64 / --x64 / --universal
+bash scripts/manage.sh desktop --launcher --mac --all
+
+# npm run make:win
+bash scripts/manage.sh desktop --launcher --win
+
+# Chromium 走镜像
+MX_RIG_BROWSER_MIRROR_ONLY=1
 ```
