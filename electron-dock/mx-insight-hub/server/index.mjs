@@ -35,7 +35,7 @@ import { TikHubAdapter } from './adapters/tikhub.mjs'
 import { RapidApiAdapter } from './adapters/rapidapi.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
-import { createTwitterSearchRouter } from './data/twitter-search-routing.mjs'
+import { createTwitterSearchRouter, resolveTwitterSearchProvider } from './data/twitter-search-routing.mjs'
 import { normalizeHubSocialCompatRequest } from './contracts/hub-social-compat.mjs'
 import { HUB_SOCIAL_COMPAT_PLATFORMS } from '../shared/social-account-contract.mjs'
 import { RAPIDAPI_METADATA, rapidApiConfig } from './external-platforms/rapidapi-config.mjs'
@@ -428,16 +428,9 @@ export async function createRuntime(config = loadConfig()) {
     const readiness = await gateway.nativeReadiness({ ...options, operationKeys: [operation], credentialConfigured: credential.credentialConfigured })
     return { ready: readiness[operation] === true }
   }
-  const resolveTwitterSearchRoute = async options => {
-    if (twitterSearchProvider !== 'auto') return { provider: twitterSearchProvider,
-      ...await twitterProviderCapabilities(twitterSearchProvider, options) }
-    // Availability selection happens before any paid request. A rejection,
-    // unknown outcome or failed paid projection never triggers supplier retry.
-    const tikhub = await twitterProviderCapabilities('tikhub', options).catch(() => ({ ready: false }))
-    if (tikhub.ready) return { provider: 'tikhub', ready: true }
-    const rapidapi = await twitterProviderCapabilities('rapidapi', options).catch(() => ({ ready: false }))
-    return rapidapi.ready ? { provider: 'rapidapi', ready: true } : { provider: 'tikhub', ready: false }
-  }
+  const resolveTwitterSearchRoute = options => resolveTwitterSearchProvider({
+    provider: twitterSearchProvider, capabilities: twitterProviderCapabilities, options,
+  })
   const twitterSearchCapabilities = async options => ({ ready: (await resolveTwitterSearchRoute(options)).ready })
   const twitterSearch = createTwitterSearchRouter({ usageStore: store, rapidGateway: hubSocialGateway,
     tikHubGateway: nativeSearchGateways.twitter, apiKeyPepper: config.apiKeyPepper, provider: twitterSearchProvider,

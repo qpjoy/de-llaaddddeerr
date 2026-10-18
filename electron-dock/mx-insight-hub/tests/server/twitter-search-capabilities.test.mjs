@@ -116,8 +116,16 @@ test('auto routing and readiness use each consumer current supplier release with
     assert.equal((await service.capabilities(ctx)).data.platforms.find(row => row.platform === 'twitter').search.ready, true)
     assert.deepEqual(await store.listEffectiveCapabilityGrants(ctx.consumer.id, ctx.apiKey.id), [])
     assert.equal(await service.search(ctx, { path: '/api/v1/data/search',
-      body: { platform: 'twitter', query: 'unchanged query', pageSize: 20 }, idempotencyKey: `auto-caller-${index}` }), index ? 'rapidapi' : 'tikhub')
+      body: { platform: 'twitter', query: 'unchanged query', pageSize: 20 }, idempotencyKey: `auto-caller-${index}` }), 'rapidapi')
   }
+  // TikHub remains a consumer-scoped readiness fallback, not the primary
+  // merely because its canary release also permits this caller.
+  runtime.rapidApiCredentialStore.describeCredential = async () => ({ credentialConfigured: false })
+  assert.equal((await service.capabilities(contexts[0])).data.platforms.find(row => row.platform === 'twitter').search.ready, true)
+  assert.equal(await service.search(contexts[0], { path: '/api/v1/data/search',
+    body: { platform: 'twitter', query: 'unchanged query', pageSize: 20 }, idempotencyKey: 'auto-tikhub-readiness-backup' }), 'tikhub')
+  assert.equal((await service.capabilities(contexts[1])).data.platforms.find(row => row.platform === 'twitter').search.ready, false)
+  runtime.rapidApiCredentialStore.describeCredential = async () => ({ credentialConfigured: true })
   // The same caller also has a TikHub-only product. A bulk content capability
   // failure must not overwrite Twitter's independently available Rapid route.
   const ctx = contexts[0]

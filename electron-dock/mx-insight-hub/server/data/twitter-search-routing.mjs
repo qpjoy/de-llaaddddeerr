@@ -8,6 +8,16 @@ const TIKHUB_RECIPE = 't.twitter_web_fetch_search_timeline'
 const owned = (row, context) => row && row.tenantId === context.tenant.id
   && row.consumerId === context.consumer.id && row.apiKeyId === context.apiKey.id && row.platform === 'twitter'
 
+export async function resolveTwitterSearchProvider({ provider = 'auto', capabilities, options }) {
+  if (provider !== 'auto') return { provider, ...await capabilities(provider, options) }
+  // Prefer the original supplier before dispatch. TikHub is a readiness
+  // fallback, never an automatic retry of a paid or unresolved request.
+  const rapidapi = await capabilities('rapidapi', options).catch(() => ({ ready: false }))
+  if (rapidapi.ready) return { provider: 'rapidapi', ready: true }
+  const tikhub = await capabilities('tikhub', options).catch(() => ({ ready: false }))
+  return tikhub.ready ? { provider: 'tikhub', ready: true } : { provider: 'rapidapi', ready: false }
+}
+
 export function twitterSearchCursorProvider(cursor, { apiKeyPepper, context }) {
   if (!cursor) return null
   // The old gateway authenticates mxnc1 and preserves its original replay and
@@ -54,7 +64,7 @@ export function createTwitterSearchRouter({ usageStore, rapidGateway, tikHubGate
     const previous = owned(existing, context) ? existing : null
     const selected = previous ? await savedProvider(previous, { usageStore, rapidGateway, tikHubGateway })
       : input.retryOfRequestId != null ? 'rapidapi' : cursorProvider
-        || (provider === 'auto' ? await resolveProvider?.(context) ?? 'tikhub' : provider)
+        || (provider === 'auto' ? await resolveProvider?.(context) ?? 'rapidapi' : provider)
     if (!['rapidapi', 'tikhub'].includes(selected)) throw new AppError(503, 'twitter_search_unavailable', 'Twitter search routing is unavailable')
     if (selected === 'tikhub' && input.retryOfRequestId != null) {
       throw new AppError(400, 'uncertain_retry_not_supported', 'This search supplier does not support an unknown-result retry override')

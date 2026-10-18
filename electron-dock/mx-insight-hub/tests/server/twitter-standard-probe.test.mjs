@@ -48,7 +48,8 @@ async function harness({ empty = false, terminal = false, publishedAt, fail = fa
   const gateway = new ExternalPlatformGateway({ usageStore: store, platformStore, adapter, config, providerKey: 'tikhub',
     apiKeyPepper: pepper, reservationLeaseMs: 120000, operationControlStore: controls, logger: { warn() {} } })
   const rapid = { platformStore: { calls: new Map() }, searchRaw: () => { throw new Error('Unexpected supplier switch') } }
-  service.externalDataSearch = createTwitterSearchRouter({ usageStore: store, rapidGateway: rapid, tikHubGateway: gateway, apiKeyPepper: pepper })
+  service.externalDataSearch = createTwitterSearchRouter({ usageStore: store, rapidGateway: rapid, tikHubGateway: gateway,
+    apiKeyPepper: pepper, provider: 'tikhub' })
   const calls = () => [...platformStore.calls.values()].filter(call => KEYS.includes(store.requests.get(call.usageRequestId)?.idempotencyKey))
   const pool = { async query(sql, args = []) {
     if (sql.includes('twitter-standard:original')) return { rows: [structuredClone(original)] }
