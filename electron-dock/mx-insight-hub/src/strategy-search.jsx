@@ -119,13 +119,13 @@ export function TwitterSearchPolicyForm({ token, row, notify, onSaved }) {
     <div className="mih-external-two-column">
       <DropdownField label="策略方式" value={mode} disabled={busy || conflict} onChange={setMode}
         options={options.modes.map(value => ({ value, label: TWITTER_STRATEGY_MODE_LABELS[value] }))} />
-      <DropdownField label={mode === 'priority' ? '优先供应商（派发前可用保底）' : mode === 'paused' ? '保留的供应商设置' : '固定供应商（不启用保底）'} value={primaryProvider} disabled={busy || conflict} onChange={setPrimaryProvider}
+      <DropdownField label={mode === 'priority' ? '优先供应商' : mode === 'paused' ? '保留的供应商设置' : '固定供应商（不启用保底）'} value={primaryProvider} disabled={busy || conflict} onChange={setPrimaryProvider}
         options={options.providers.map(value => ({ value, label: supplier(value) }))} />
     </div>
-    {mode === 'priority' ? <p>保底供应商：<strong>{supplier(fallbackProvider)}</strong>。仅在新请求尚未派发、优先供应商凭据或操作策略未就绪时使用。400、超时和结果未知不触发自动切换。</p>
+    {mode === 'priority' ? <p>保底供应商：<strong>{supplier(fallbackProvider)}</strong>。{strategyPolicySummary('search', { ...row, policy: { ...row.policy, mode, primaryProvider, fallbackProvider } }).description}</p>
       : mode === 'paused' ? <p>暂停新的供应商采购，包括已有游标需要的后续采购。已完成响应的重放和已购缓冲数据仍可交付。</p>
         : <p>新搜索只使用 {supplier(primaryProvider)}；未就绪时返回对应原因，不自动切换供应商。</p>}
-    <p>保存后对后续选路生效，无需重启。已绑定的请求与分页继续使用原供应商；原有价格、历史账本及未知结果保护保持不变。</p>
+    <p>保存后对后续选路生效，无需重启。已完成请求按原结果重放，已有游标继续原供应商；保底不改变检索条件，原有价格、历史账本及未知结果保护保持不变。</p>
     <Field label="修改原因"><input className="qp-input" required maxLength={1000} value={reason} disabled={busy || conflict} onChange={event => setReason(event.target.value)} placeholder="记录此次策略调整的原因" /></Field>
     {error ? <ErrorState error={error} /> : null}
     {conflict ? <p role="alert">策略已被其他管理员修改，本次未覆盖。<button className="qp-button qp-button--outline" type="button" onClick={onSaved}>刷新策略并重新填写</button></p> : null}

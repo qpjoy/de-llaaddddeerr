@@ -47,7 +47,7 @@ function searchPlatform(platform, { instagramPolicy, facebookPolicy, twitterPoli
     platform, label: LABELS[platform], editable: true, migrationStatus: 'conditional',
     providers: ['rapidapi', 'tikhub'], allowedModes: ['fixed', 'priority', 'paused'],
     policy: twitterPolicy == null ? null : structuredClone(twitterPolicy),
-    routeSummary: '策略仅适用于 POST /api/v1/data/search 与 /api/v2/data/search 的新内容搜索；默认 RapidAPI 优先，采购前未就绪时使用 TikHub 保底。历史请求与分页绑定原供应商，400、超时和未知结果不会自动切换重发。data/social/search 与 raw 保持原 RapidAPI 路由及 Night-All 兼容规则，账号内容与资料不受此策略影响。',
+    routeSummary: '策略仅适用于 POST /api/v1/data/search 与 /api/v2/data/search 的新内容搜索；默认 RapidAPI 优先，采购前未就绪时使用 TikHub 保底。该优先策略下，无游标且尚未取得成功源页的搜索遇到 RapidAPI 明确 HTTP 400，也可原条件转 TikHub 一次。固定模式或 TikHub 优先不启用此400保底。历史请求按原结果重放，已有分页绑定原供应商；超时、未知结果、成功响应不可用及其他错误不触发自动切换。data/social/search 与 raw 保持原 RapidAPI 路由及 Night-All 兼容规则，账号内容与资料不受此策略影响。',
   }
   if (platform === 'weibo') return {
     ...row, migrationStatus: 'conditional',

@@ -97,6 +97,19 @@ test('pause explains purchased-buffer replay and does not pretend to cancel prev
   assert.equal(environment.sends[0][1].fallbackProvider, null)
 })
 
+test('Twitter form limits definitive 400 fallback to RapidAPI priority and preserves replay and cursor boundaries', async () => {
+  const h = await fixture()
+  assert.match(text(h.render()), /无游标.*尚未取得成功源页.*RapidAPI 明确返回 HTTP 400.*原条件转 TikHub 一次/)
+  assert.match(text(h.render()), /超时、未知结果、成功响应不可用及其他错误不会触发自动切换/)
+  assert.match(text(h.render()), /已完成请求按原结果重放，已有游标继续原供应商/)
+  h.select('优先供应商', 'tikhub')
+  assert.match(text(h.render()), /TikHub 的400、超时、未知结果及成功响应不可用均不触发自动切换/)
+  assert.doesNotMatch(text(h.render()), /原条件转 TikHub 一次/)
+  h.select('策略方式', 'fixed')
+  assert.match(text(h.render()), /新搜索只使用 TikHub.*不自动切换供应商/)
+  assert.equal(environment.sends.length, 0)
+})
+
 test('Twitter admin helper sends the audited policy to its own management endpoint', async () => {
   const { outputFiles } = await build({ entryPoints: [fileURLToPath(new URL('../../src/api.js', import.meta.url))],
     bundle: true, format: 'esm', platform: 'node', write: false, define: { 'import.meta.env': '{}' } })

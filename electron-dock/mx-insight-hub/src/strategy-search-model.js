@@ -116,7 +116,9 @@ export function strategyPolicySummary(interfaceId, row) {
     const policy = row.policy, { providers, modes } = twitterStrategyOptions(row)
     const primary = providerLabel(policy.primaryProvider), fallback = providerLabel(policy.fallbackProvider)
     const current = policy.mode === 'priority'
-      ? { title: `优先 ${primary} → 保底 ${fallback}`, mode: '优先与保底', description: '仅在新请求尚未派发、优先供应商凭据或操作策略未就绪时使用已就绪的保底供应商；400、超时和未知结果不会触发自动切换。' }
+      ? { title: `优先 ${primary} → 保底 ${fallback}`, mode: '优先与保底', description: policy.primaryProvider === 'rapidapi'
+        ? '优先供应商凭据或操作策略未就绪时使用保底；无游标的新搜索在尚未取得成功源页、RapidAPI 明确返回 HTTP 400 时，也可原条件转 TikHub 一次。超时、未知结果、成功响应不可用及其他错误不会触发自动切换。'
+        : '仅在新请求尚未派发、优先供应商凭据或操作策略未就绪时使用已就绪的保底供应商；TikHub 的400、超时、未知结果及成功响应不可用均不触发自动切换。' }
       : policy.mode === 'paused'
         ? { title: '暂停 Twitter 新采购', mode: '暂停', description: '暂停新供应商采购，包括已有游标需要的后续采购；已完成响应的重放与已购缓冲数据仍可交付。' }
         : { title: `固定 ${primary}`, mode: '固定供应商', description: `新搜索仅使用 ${primary}。该供应商未就绪时返回具体原因，不自动转到其他供应商。` }

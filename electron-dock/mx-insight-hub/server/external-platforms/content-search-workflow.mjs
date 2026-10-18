@@ -43,7 +43,8 @@ const knownAdmission = error => error instanceof AppError && error.status !== 40
     'strategy_search_paused', 'strategy_search_route_unavailable'].includes(error.code))
 
 export async function runContentSearch({ gateway, context, request, delivery, deadlineAt, signal,
-  resolveCredential, revalidateIdentity, enterCapacity, leaveCapacity, providerCostControl, buildResponse, finalizeResponse, assertSearchDispatchAllowed }, { clock = Date.now } = {}) {
+  resolveCredential, revalidateIdentity, enterCapacity, leaveCapacity, providerCostControl, buildResponse, finalizeResponse, assertSearchDispatchAllowed,
+  inheritedTwitterLease = null, firstCallOrdinal = 0 }, { clock = Date.now } = {}) {
   // Protect equal historical requests even when a different Idempotency-Key is
   // supplied. A retired cursor is only a restart boundary after this check.
   const store = gateway.platformStore, stateStore = new ContentSearchStateStore(store, request)
@@ -154,8 +155,13 @@ export async function runContentSearch({ gateway, context, request, delivery, de
     }
   }
   try {
-    if (!await stateStore.acquireDeliveryLease(parentLease)) throw new AppError(409, 'request_in_progress', 'An equal content-search delivery is in progress')
-    ownsParent = true
+    if (inheritedTwitterLease) {
+      if (request.platform !== 'twitter' || !request.standard || request.page !== 1 || firstCallOrdinal !== 1) throw unavailable()
+      await inheritedTwitterLease()
+    } else {
+      if (!await stateStore.acquireDeliveryLease(parentLease)) throw new AppError(409, 'request_in_progress', 'An equal content-search delivery is in progress')
+      ownsParent = true
+    }
     if (request.standard && request.platform === 'twitter') await assertTwitterSearchAvailable({
       usageStore: gateway.usageStore, context, query: request.queries[0], excludeRequestIds: [delivery.usageRequestId],
     })
@@ -222,8 +228,8 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           phase = 'begin_call'
           currentCall = await store.beginProviderCall({ ...delivery, operation: nativeRequest.operation,
             contractVersion: nativeRequest.endpointContractVersion, endpointKey: nativeRequest.endpointKey,
-            endpointVersion: nativeRequest.endpointVersion, marketplace: request.platform, callOrdinal: calls,
-            callRole: calls ? 'enrichment' : 'primary', dispatchFingerprint: delivery.fingerprint,
+            endpointVersion: nativeRequest.endpointVersion, marketplace: request.platform, callOrdinal: firstCallOrdinal + calls,
+            callRole: firstCallOrdinal + calls ? 'enrichment' : 'primary', dispatchFingerprint: delivery.fingerprint,
             costControl: cost.costMinor === 0 ? null : cost, costReservationId: costReservation.id, operationControl: control })
           calls++; job.upstreamPages++; job.started = true; tokens.add(token)
           const callStart = performance.now()
@@ -292,7 +298,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
     }
     if (!sources.length) throw new AppError(503, 'content_search_unavailable', 'No content page could be acquired within the bounded request')
     phase = 'build_delivery'
-    let responseBody = buildResponse({ rowsByJob, state, calls, warnings })
+    let responseBody = buildResponse({ rowsByJob, state, calls: firstCallOrdinal + calls, warnings })
     if (['xiaohongshu', 'weibo'].includes(request.platform)) {
       // Buffer identity hashes always describe the unmodified acquired page.
       // Enrich only this page's deduplicated delivered notes. Exact response

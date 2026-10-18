@@ -790,7 +790,7 @@ export class ExternalPlatformGateway {
     })
   }
 
-  async searchContent(context, input, { finalizeXiaohongshu = null, assertSearchDispatchAllowed = null } = {}) {
+  async searchContent(context, input, { finalizeXiaohongshu = null, assertSearchDispatchAllowed = null, twitterFallback = null } = {}) {
     const platform = input.normalized.platform
     const revalidateIdentity = async ({ operation, totalLimit }) => {
       const current = await this.#revalidateWaitingIdentity(context, platform, { platformSearch: true, operation,
@@ -804,6 +804,8 @@ export class ExternalPlatformGateway {
     }
     const prepared = contentSearchPlan({ gateway: this, context, input, dependencies: {
       assertSearchDispatchAllowed: platform === 'twitter' && input.dataSearch ? assertSearchDispatchAllowed : null,
+      inheritedTwitterLease: twitterFallback?.assertParentLease,
+      firstCallOrdinal: twitterFallback ? 1 : 0,
       resolveCredential: () => this.#resolvedCredential(),
       revalidateIdentity,
       enterCapacity: options => this.#enterOrQueue(context, { ...options, canWait: false }),
@@ -826,10 +828,23 @@ export class ExternalPlatformGateway {
         return { ...projected, requestId: delivery.usageRequestId }
       } : finalizeXiaohongshu,
     } })
+    if (twitterFallback) {
+      // Internal handoff only: the RapidAPI workflow still owns this reservation
+      // and parent lease. Do not reserve, reap, quote or settle a second intent.
+      if (platform !== 'twitter' || !input.dataSearch || input.normalized.cursor || input.retryOfRequestId) {
+        throw new AppError(409, 'twitter_fallback_invalid', 'This search cannot switch suppliers')
+      }
+      const normalized = prepared.plan.normalize({ policy: { maxPageSize: input.normalized.pageSize } })
+      if (fingerprint({ method: 'POST', path: prepared.input.path, body: normalized.fingerprintBody }) !== twitterFallback.delivery.fingerprint) {
+        throw new AppError(409, 'idempotency_conflict', 'Search fallback must preserve the original request')
+      }
+      return prepared.plan.assemble({ delivery: { ...twitterFallback.delivery, operation: prepared.plan.operation },
+        deadlineAt: twitterFallback.deadlineAt, signal: input.signal })
+    }
     return this.#deliver(context, prepared.input, prepared.plan)
   }
 
-  async searchRaw(context, input, { policyStore = null, gateways = null, reservation = null, selection = null, fallbackUsed = false, assertSearchDispatchAllowed = null } = {}) {
+  async searchRaw(context, input, { policyStore = null, gateways = null, reservation = null, selection = null, fallbackUsed = false, assertSearchDispatchAllowed = null, rejectedFallback = null } = {}) {
     const { normalized, body, idempotencyKey, retryOfRequestId, dataSearch = null, signal } = input
     const platform = normalized.platform
     if (retryOfRequestId != null && !(platform === 'twitter' && dataSearch)) {
@@ -931,7 +946,7 @@ export class ExternalPlatformGateway {
         if (request.restartRequired) throw new AppError(409, 'search_restart_required',
           'Twitter search now runs in Hub; restart from page 1 with a new Idempotency-Key.')
         return runTwitterSearchFill({ gateway: this, context, delivery, request, deadlineAt, signal,
-          assertSearchDispatchAllowed,
+          assertSearchDispatchAllowed, rejectedFallback,
           resolveCredential: () => this.#resolvedCredential(),
           revalidateIdentity: async () => {
             const current = await this.#revalidateWaitingIdentity(context, 'twitter', {

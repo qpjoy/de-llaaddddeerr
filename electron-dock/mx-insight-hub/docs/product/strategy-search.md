@@ -141,7 +141,9 @@ Bilibili 点赞 like/stat.like、评论 review/stat.reply、收藏 favorites/sta
 
 Twitter 标准内容搜索支持 `fixed / priority / paused`，供应商为 RapidAPI、TikHub。入口为**数据产品 → 策略搜索 → 管理 → 内容搜索 → Twitter / X**。迁移160默认 RapidAPI 优先、TikHub 保底，无需配置 `MX_INSIGHT_TWITTER_SEARCH_PROVIDER`；旧环境变量不覆盖数据库策略。新选路即时读取已保存策略，无需重启；保存原因、修订冲突和审计与 Instagram 共用现有机制。
 
-Twitter 保底仅用于新请求派发前的凭据或操作发布策略未就绪，不自动重试已派发的400、超时或 unknown。固定供应商或调整优先级不改变已绑定请求和游标；暂停仅阻止新采购，已完成响应重放与已购缓冲继续交付。仅影响标准 `/api/v1/data/search` 和 `/api/v2/data/search`，raw、social和账号接口保持原路由。详见 [Twitter 标准搜索供应商兼容](../integrations/twitter-standard-provider-routing.md)。
+Twitter 保底适用于新请求派发前的凭据或操作发布策略未就绪；**RapidAPI 优先 → TikHub 保底**另支持首次确定400：无游标且尚未取得成功源页时，RapidAPI 明确返回上游 HTTP 400，Hub 保持原检索条件转 TikHub 一次。固定 RapidAPI、TikHub 优先、其他错误、成功响应不可用、超时和 unknown 不适用此分支。两次供应商调用各自保留采购证据，客户仍为同一个请求、按现有规则结算一次；无须下游改接口或参数。
+
+历史已完成请求按原结果重放，已有游标不跨供应商；TikHub 保底成功后，其缓冲和后续游标保持 TikHub。暂停仅阻止新采购，已完成响应重放与已购缓冲继续交付。仅影响标准 `/api/v1/data/search` 和 `/api/v2/data/search`，raw、social和账号接口保持原路由。详见 [Twitter 标准搜索供应商兼容](../integrations/twitter-standard-provider-routing.md)。
 
 Instagram 内容搜索支持：
 

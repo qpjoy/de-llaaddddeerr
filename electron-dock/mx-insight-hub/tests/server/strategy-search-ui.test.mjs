@@ -133,14 +133,16 @@ test('Twitter management distinguishes standard-search choices, purchased buffer
   const summary = strategyPolicySummary('search', twitterRow)
   assert.equal(summary.title, '优先 RapidAPI → 保底 TikHub')
   assert.match(summary.description, /凭据或操作策略未就绪/)
-  assert.match(summary.description, /400、超时和未知结果不会触发自动切换/)
-  assert.equal(strategyPolicySummary('search', { ...twitterRow, policy: { ...twitterRow.policy, primaryProvider: 'tikhub', fallbackProvider: 'rapidapi' } }).title,
-    '优先 TikHub → 保底 RapidAPI')
+  assert.match(summary.description, /无游标.*尚未取得成功源页.*RapidAPI 明确返回 HTTP 400.*原条件转 TikHub 一次/)
+  assert.match(summary.description, /超时、未知结果、成功响应不可用及其他错误不会触发自动切换/)
+  const reverse = strategyPolicySummary('search', { ...twitterRow, policy: { ...twitterRow.policy, primaryProvider: 'tikhub', fallbackProvider: 'rapidapi' } })
+  assert.equal(reverse.title, '优先 TikHub → 保底 RapidAPI')
+  assert.match(reverse.description, /TikHub 的400、超时、未知结果及成功响应不可用均不触发自动切换/)
   for (const mode of ['fixed', 'paused']) {
     const current = strategyPolicySummary('search', { ...twitterRow, policy: { ...twitterRow.policy, mode, fallbackProvider: null } })
     assert.equal(current.editor, 'twitter')
     if (mode === 'paused') assert.match(current.description, /已有游标.*已购缓冲数据仍可交付/)
-    else assert.equal(current.title, '固定 RapidAPI')
+    else { assert.equal(current.title, '固定 RapidAPI'); assert.match(current.description, /不自动转到其他供应商/) }
   }
   for (const interfaceId of ['crawl', 'user-info']) {
     const account = strategyPolicySummary(interfaceId, twitterRow)

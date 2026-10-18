@@ -3,6 +3,7 @@ import { RAW_SEARCH_VERSION } from '../contracts/raw-search.mjs'
 import { TIKHUB_CONTENT_SEARCH_VERSION } from '../contracts/tikhub-content-search.mjs'
 import { createDataSearchCursorCodec } from '../external-platforms/cursor.mjs'
 import { assertTwitterSearchAvailable } from './twitter-search-availability.mjs'
+import { pinTwitterSearchFallback, assertTwitterSearchFallback } from '../external-platforms/twitter-search-fallback.mjs'
 
 const TIKHUB_RECIPE = 't.twitter_web_fetch_search_timeline'
 const owned = (row, context) => row && row.tenantId === context.tenant.id
@@ -13,8 +14,8 @@ export async function resolveTwitterSearchProvider({ provider = 'auto', policy =
     primaryProvider: provider === 'auto' ? 'rapidapi' : provider, fallbackProvider: 'tikhub' }
   if (route.mode === 'paused') return { provider: route.primaryProvider, ready: false }
   if (route.mode === 'fixed') return { provider: route.primaryProvider, ...await capabilities(route.primaryProvider, options) }
-  // Apply the saved priority before dispatch. The backup is a readiness
-  // fallback, never an automatic retry of a paid or unresolved request.
+  // Initial selection uses readiness. A definitive first-page RapidAPI 400
+  // has a separate, receipt-backed handoff within the same delivery below.
   const primary = await capabilities(route.primaryProvider, options).catch(() => ({ ready: false }))
   if (primary.ready) return { provider: route.primaryProvider, ready: true }
   const fallback = await capabilities(route.fallbackProvider, options).catch(() => ({ ready: false }))
@@ -84,7 +85,26 @@ export function createTwitterSearchRouter({ usageStore, rapidGateway, tikHubGate
     // are validated by their original gateway before any new dispatch. For a
     // new intent, check all known standard-query outcomes across suppliers.
     if (!previous && input.retryOfRequestId == null) await assertTwitterSearchAvailable({ usageStore, context, query: input.normalized.query })
+    let fallbackPolicy = null
+    const permitsRejectedFallback = policy => policy?.mode === 'priority'
+      && policy.primaryProvider === 'rapidapi' && policy.fallbackProvider === 'tikhub'
+    const providerStores = [rapidGateway.platformStore, tikHubGateway.platformStore]
+    const rejectedFallback = selected === 'rapidapi' && !cursorProvider && !input.retryOfRequestId && policyStore ? {
+      // Capture only when a new acquisition begins. Saved replies must not
+      // depend on current strategy availability or acquire another quote.
+      begin: async () => { fallbackPolicy = await policyStore.get('search', 'twitter') },
+      allowed: async () => {
+        const current = await policyStore.get('search', 'twitter')
+        return permitsRejectedFallback(fallbackPolicy) && permitsRejectedFallback(current) && current.revision === fallbackPolicy.revision
+      },
+      prepare: ({ delivery, callId }) => pinTwitterSearchFallback({ usageStore, rapidStore: rapidGateway.platformStore, providerStores, delivery, callId }),
+      run: async ({ delivery, deadlineAt }) => {
+        return tikHubGateway.searchContent(context, input, { assertSearchDispatchAllowed,
+          twitterFallback: { delivery, deadlineAt, assertParentLease: () => assertTwitterSearchFallback({
+            usageStore, rapidStore: rapidGateway.platformStore, providerStores, delivery }) } })
+      },
+    } : null
     return selected === 'tikhub' ? tikHubGateway.searchContent(context, input, { assertSearchDispatchAllowed })
-      : rapidGateway.searchRaw(context, input, { assertSearchDispatchAllowed })
+      : rapidGateway.searchRaw(context, input, { assertSearchDispatchAllowed, rejectedFallback })
   }
 }
