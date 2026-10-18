@@ -3,11 +3,13 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-export const REVISION = 'twitter-tikhub-check.v2'
+export const REVISION = 'twitter-tikhub-check.v3'
 const IDENTITY_REVISION = 'twitter-tikhub-check.v1'
 export const ORIGINAL_REQUEST_ID = 'b5906846-8564-4791-8b83-ef3ce97789bc'
 export const PROXY_RECEIPT = Object.freeze({ requestId: 'd6ffc7e8-d736-4b7e-999b-a8af15755ee0',
   callId: '87e933ba-85fd-47da-9717-77acb61482ff' })
+export const SUCCESS_RECEIPT = Object.freeze({ requestId: 'dcc086fa-469a-4237-a435-e427b7e70f3a',
+  callId: '6c6177d6-4065-499c-aabb-50217f355780' })
 export const NATIVE_KEY = 't.twitter_web_fetch_search_timeline'
 export const NATIVE_PATH = `/api/v1/data/native/${NATIVE_KEY}`
 export const OPERATION = `native.${NATIVE_KEY}`
@@ -38,7 +40,7 @@ const SAFE_CODES = new Set(['invalid_arguments', 'database_url_required', 'origi
   'external_platform_upstream_rejected', 'external_platform_operation_blocked', 'external_platform_operation_disabled',
   'external_platform_operation_shadow', 'external_platform_operation_paused', 'external_platform_operation_canary',
   'external_platform_control_unavailable', 'external_platform_credential_store_unavailable', 'diagnostic_identity_already_used',
-  'diagnostic_guard_persistence_unknown'])
+  'diagnostic_guard_persistence_unknown', 'saved_receipt_unavailable', 'saved_success_unverified'])
 const safeCode = error => SAFE_CODES.has(error?.code) ? error.code : SAFE_CODES.has(error?.message) ? error.message : 'probe_unavailable'
 const owned = (a, b) => ['tenant_id', 'consumer_id', 'api_key_id'].every(key => a?.[key] === b?.[key])
 const state = value => ['reserved', 'committed', 'released', 'unknown'].includes(value) ? value : 'other'
@@ -123,7 +125,74 @@ export function oneShotTikHubAdapter(adapter, onDispatch = () => {}) {
   } }
 }
 
-async function appendSavedEvidence(pool, report, saved) {
+// Structural evidence only. No field values, IDs, text, media URLs or cursor
+// tokens leave this projection; unknown field names are represented by a hash.
+const IDENTITY_FIELDS = new Set(['id', 'id_str', 'rest_id', 'tweet_id', 'tweetId', 'status_id', 'content_id', 'user_id', 'userId', 'author_id', 'conversation_id'])
+const TIME_FIELDS = new Set(['created_at', 'createdAt', 'published_at', 'publishedAt', 'timestamp', 'timestamp_ms', 'date', 'created_time', 'created'])
+const CONTAINERS = new Set(['data', 'result', 'tweet', 'tweet_results', 'legacy', 'core', 'user', 'author', 'user_info',
+  'user_results', 'content', 'itemContent', 'item', 'entities', 'extended_entities', 'media', 'photos', 'videos', 'variants',
+  'video_info', 'note_tweet', 'note_tweet_results', 'hashtags', 'urls', 'items', 'photo', 'video', 'images',
+  'profile', 'retweet', 'quoted_tweet', 'retweeted_status', 'quoted_status'])
+const KNOWN_FIELDS = new Set([...IDENTITY_FIELDS, ...TIME_FIELDS, ...CONTAINERS, 'type', '__typename', 'text', 'full_text',
+  'note_text', 'description', 'name', 'screen_name', 'username', 'lang', 'url', 'expanded_url', 'display_url',
+  'media_url', 'media_url_https', 'profile_image_url', 'profile_image_url_https', 'avatar', 'avatar_url',
+  'favorite_count', 'favourites_count', 'like_count', 'reply_count', 'retweet_count', 'quote_count', 'bookmark_count',
+  'view_count', 'views', 'count', 'favorites', 'bookmarks', 'quotes', 'replies', 'retweets', 'bitrate', 'content_type',
+  'next_cursor', 'cursor', 'possibly_sensitive', 'verified', 'is_blue_verified', 'tweet_url', 'video_url',
+  'thumbnail_url', 'thumb', 'preview_image_url', 'width', 'height', 'duration', 'source'])
+const valueType = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
+
+export function summarizeTikHubTimeline(payload) {
+  const rows = payload?.timeline
+  if (!Array.isArray(rows)) return { state: 'timeline_array_missing', entryCount: null, inspectedCount: 0, groups: [], truncated: false }
+  let nodes = 0, truncated = false
+  const group = (values, depth, limit = 24) => {
+    const grouped = new Map()
+    let inspectedCount = 0
+    for (let index = 0; index < values.length; index++) {
+      if (nodes >= 10000) { truncated = true; break }
+      const shape = describe(values[index], depth), signature = JSON.stringify(shape)
+      let found = grouped.get(signature)
+      if (!found && grouped.size >= limit) { truncated = true; continue }
+      if (!found) { found = { count: 0, sampleIndexes: [], shape }; grouped.set(signature, found) }
+      found.count++; if (found.sampleIndexes.length < 3) found.sampleIndexes.push(index)
+      inspectedCount++
+    }
+    return { inspectedCount, groups: [...grouped.values()] }
+  }
+  const describe = (value, depth) => {
+    nodes++
+    const type = valueType(value)
+    if (type !== 'object' && type !== 'array') return { type }
+    if (depth >= 10) { truncated = true; return { type, depthLimited: true } }
+    if (type === 'array') return { type, length: value.length, ...group(value, depth + 1, 8) }
+    const fields = {}, keys = Object.keys(value).sort(), unknownKeys = keys.filter(key => !KNOWN_FIELDS.has(key))
+    for (const name of keys.filter(key => KNOWN_FIELDS.has(key))) {
+      if (nodes >= 10000) { truncated = true; break }
+      const field = value[name]
+      const description = CONTAINERS.has(name) ? describe(field, depth + 1) : { type: valueType(field) }
+      if (IDENTITY_FIELDS.has(name)) {
+        description.nonemptyBoundedString = typeof field === 'string' && !!field.trim() && field.length <= 256 && !field.includes('\u0000')
+        description.positiveDecimalString = typeof field === 'string' && /^[1-9][0-9]*$/.test(field)
+        description.positiveSafeInteger = Number.isSafeInteger(field) && field > 0
+      }
+      if (TIME_FIELDS.has(name)) {
+        const numeric = typeof field === 'number' || typeof field === 'string' && /^\d+(?:\.\d+)?$/.test(field)
+        const candidate = numeric ? Number(field) * (Number(field) < 1e12 ? 1000 : 1) : typeof field === 'string' && field.trim() ? field : NaN
+        description.parseable = Number.isFinite(new Date(candidate).getTime())
+        description.representation = numeric ? Number(field) < 1e12 ? 'epoch_seconds' : 'epoch_milliseconds' : typeof field === 'string' ? 'date_string' : 'other'
+      }
+      fields[name] = description
+    }
+    return { type, fields, unknownKeyCount: unknownKeys.length, ...(unknownKeys.length ? { unknownKeysSha256: digest(JSON.stringify(unknownKeys)) } : {}) }
+  }
+  const summary = group(rows, 0)
+  return { state: 'structural_evidence_only', entryCount: rows.length, ...summary, nodesInspected: nodes, truncated,
+    limits: { maxNodes: 10000, maxDepth: 10, maxRootGroups: 24, maxNestedGroups: 8, maxSampleIndexes: 3 },
+    interpretation: 'Array elements and field shapes only; no post mapping, content validation or standard-search delivery is established.' }
+}
+
+async function appendSavedEvidence(pool, report, saved, expectedReceipt = null) {
   report.saved = receiptSummary(saved)
   const calls = (await pool.query(`SELECT /* twitter-tikhub:probe-calls */ ${callFields} FROM external_platform.provider_calls WHERE usage_request_id=$1 ORDER BY started_at LIMIT 2`, [saved.id])).rows
   report.providerCalls = calls.map(call => ({ callId: safeId(call.id), httpStatus: integer(call.http_status),
@@ -136,6 +205,8 @@ async function appendSavedEvidence(pool, report, saved) {
     && calls[0].endpoint_version === 'night-all-source-snapshot.2026-09-26'
     && calls[0].contract_version === 'mx-insight-hub.native-forwarding.v1'
     && calls[0].call_ordinal === 0 && calls[0].call_role === 'primary'
+  if (expectedReceipt) requireValue(saved.id === expectedReceipt.requestId && calls.length === 1
+    && calls[0].id === expectedReceipt.callId && verified, 'saved_success_unverified')
   report.ownedNativeReceiptVerified = verified
   report.definitiveNativeOutcome = verified && ['committed', 'released'].includes(saved.status)
     && (calls[0].outcome === 'rejected' && Number.isInteger(calls[0].http_status)
@@ -145,6 +216,7 @@ async function appendSavedEvidence(pool, report, saved) {
     && saved.response_body?.contractVersion === 'mx-insight-hub.native-forwarding.v1'
     && saved.response_body.endpoint === NATIVE_KEY && saved.response_body.requestId === saved.id
     && Object.hasOwn(saved.response_body, 'data') ? 'native_success' : null
+  if (expectedReceipt) requireValue(report.savedOutcomeVerified === 'native_success', 'saved_success_unverified')
   if (report.savedOutcomeVerified !== 'native_success') return
   const sourceRoot = process.argv[1] === '-' ? pathToFileURL(`${process.cwd()}/server/`) : new URL('../', import.meta.url)
   try {
@@ -158,6 +230,7 @@ async function appendSavedEvidence(pool, report, saved) {
     const data = saved.response_body.data
     const names = ['data', 'entries', 'instructions', 'search_by_raw_query', 'search_timeline', 'timeline', 'timeline_v2', 'result', 'items', 'tweets', 'cursor', 'next_cursor']
     report.projection = { state: 'native_payload_requires_mapping', source: 'saved_native_payload', deliveryEstablished: false,
+      timelineSummary: summarizeTikHubTimeline(data),
       shape: Object.fromEntries(names.filter(name => data && Object.hasOwn(data, name)).map(name =>
         [name, Array.isArray(data[name]) ? { type: 'array', length: data[name].length } : { type: data[name] == null ? 'null' : typeof data[name] }])) }
   }
@@ -188,19 +261,29 @@ async function appendBlockingEvidence(pool, report, original) {
   } catch { report.blockingRequest = { state: 'not_found_or_unavailable' } }
 }
 
-export async function runTwitterTikHubProbe({ pool, execute = false, createRuntime }) {
+export async function runTwitterTikHubProbe({ pool, execute = false, readSavedOnly = false, createRuntime }) {
   const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID, proxyRequestId: PROXY_RECEIPT.requestId,
-    case: 'full-query-tikhub', mode: execute ? 'execute' : 'read_only', querySha256: digest(QUERY), queryLength: QUERY.length,
+    case: 'full-query-tikhub', mode: readSavedOnly ? 'read_saved_only' : execute ? 'execute' : 'read_only', querySha256: digest(QUERY), queryLength: QUERY.length,
     provider: 'tikhub', endpoint: NATIVE_KEY, category: 'Top', idempotencyKey: IDEMPOTENCY_KEY,
-    adapterCalls: 0, maxAdapterCalls: 1, automaticRetryAllowed: false, deliveryEstablished: false,
+    adapterCalls: 0, maxAdapterCalls: readSavedOnly ? 0 : 1, automaticRetryAllowed: false, deliveryEstablished: false,
     countMeaning: 'Adapter attempts, not all HTTP requests; normal provider routing may make an unauthenticated connectivity probe.',
     acquisitionScope: 'diagnostic_provider_page', fullQueryAttempted: false,
     interpretation: 'One complete original native predicate, without dropping terms. Native acceptance is not standard-search delivery or full-window cold-start coverage. No cursor follow or automatic provider fallback.' }
   let initial, runtime
   const leases = []
+  if (readSavedOnly) Object.assign(report, { readOnly: true, businessCalls: 0, savedRequestId: SUCCESS_RECEIPT.requestId,
+    countMeaning: 'No HTTP or adapter invocation; only saved database evidence is inspected.' })
   try {
+    requireValue(!(execute && readSavedOnly), 'invalid_arguments')
     initial = await readSnapshot(pool)
     report.historicalRejectionsVerified = true
+    if (readSavedOnly) {
+      requireValue(initial.existing?.id === SUCCESS_RECEIPT.requestId, 'saved_receipt_unavailable')
+      report.existing = receiptSummary(initial.existing)
+      await appendSavedEvidence(pool, report, initial.existing, SUCCESS_RECEIPT)
+      report.originalUnchanged = true
+      return report
+    }
     if (initial.existing) {
       report.existing = receiptSummary(initial.existing)
       await appendSavedEvidence(pool, report, initial.existing)
@@ -245,6 +328,7 @@ export async function runTwitterTikHubProbe({ pool, execute = false, createRunti
       if (initial) await appendBlockingEvidence(pool, report, initial.original)
     }
   }
+  if (readSavedOnly) return report
   if (initial) try {
     const after = await readSnapshot(pool)
     requireValue(after.historyDigest === initial.historyDigest, 'historical_receipt_changed')
@@ -257,6 +341,9 @@ export async function runTwitterTikHubProbe({ pool, execute = false, createRunti
     const definitive = report.definitiveNativeOutcome === true && !report.verificationError
     const finalState = definitive ? 'failed' : unsent ? 'retryable' : 'unknown'
     report.protocolGuardState = finalState
+    report.protocolGuardReason = definitive ? 'diagnostic_not_standard_delivery' : unsent ? 'no_supplier_dispatch' : 'request_outcome_unknown'
+    report.protocolGuardMeaning = definitive ? 'This private diagnostic guard is closed; failed does not describe the supplier outcome.'
+      : 'This private diagnostic guard does not represent a standard-search delivery.'
     // Never mark native bytes as a completed standard v2 delivery. Definitive
     // diagnostic outcomes stop owning the query; uncertain calls keep blocking.
     for (const lease of leases) try {
@@ -315,11 +402,11 @@ async function runtimeFromInstalledSources(pool) {
 export async function main(args = process.argv.slice(2), env = process.env) {
   let pool
   try {
-    requireValue(args.length === 0 || args.length === 1 && args[0] === '--execute', 'invalid_arguments')
+    requireValue(args.length === 0 || args.length === 1 && ['--execute', '--read-saved-only'].includes(args[0]), 'invalid_arguments')
     requireValue(typeof env.DATABASE_URL === 'string' && env.DATABASE_URL.trim(), 'database_url_required')
     const { Pool } = await import('pg')
     pool = new Pool({ connectionString: env.DATABASE_URL, max: 4, application_name: REVISION })
-    const report = await runTwitterTikHubProbe({ pool, execute: args.length === 1, createRuntime: () => runtimeFromInstalledSources(pool) })
+    const report = await runTwitterTikHubProbe({ pool, execute: args[0] === '--execute', readSavedOnly: args[0] === '--read-saved-only', createRuntime: () => runtimeFromInstalledSources(pool) })
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
     if (report.errorCode || report.verificationError) process.exitCode = 1
   } catch (error) { process.stdout.write(`${JSON.stringify({ diagnosticRevision: REVISION, errorCode: safeCode(error) })}\n`); process.exitCode = 1 }

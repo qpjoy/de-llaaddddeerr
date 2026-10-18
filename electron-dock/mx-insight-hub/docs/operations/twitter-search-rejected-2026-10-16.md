@@ -357,7 +357,7 @@ v1 的20项离线测试通过，JS/Bash语法检查与独立复审通过；覆�
 
 操作人员已回传 v1：`readiness.ready=true`，数据库凭据 revision=1，原调用方原生权限已开放，operation/release revision=3；但 `adapterCalls=0`、`fullQueryAttempted=false`、`409 search_admission_blocked`、`requestId=null`。这证明调用在 Hub 搜索准入阶段停止，不能归因为 TikHub 语法错误，也不能认定它已经采购。v1 未输出阻塞请求 ID，尚不能从这份报告确定具体是哪条历史记录阻塞。
 
-### 当前修复：只按已知查询归属阻断，不扩大为平台禁用
+### 已发布准入修复：只按已知查询归属阻断，不扩大为平台禁用
 
 代码复核确认旧准入扫描有过宽条件：旧 usage 缺失路径或有效 query 时，会匹配当前调用方该平台的所有新 v2 查询。现改为明确保存标准 v1 路径、有效 query 且与本次 query 完全匹配才阻断。历史 unknown 不改写，原 key 继续保护；同一查询的协议 unknown/过期未完成租约仍保护 v1/v2。孤立 usage 和悬空幂等 binding 的 key 也不能复用。具体合同见 [搜索 v2](../integrations/data-search-v2.md)。这修复了已确认的扩大阻断规则，但尚未证明本次线上 blocker 一定属于这类旧记录。
 
@@ -379,10 +379,30 @@ kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-admin
 
 本轮准入回归35项通过（含真实 PGlite 与 HTTP，无跳过），TikHub诊断及入口25项通过；覆盖新请求不受无归属历史牵连、旧 key 不复用、已知同查询 unknown/reserved、跨版本保护、状态不变、诊断身份稳定、blocker 归属限制及原生查询字段识别。
 
+### 当前结果：完整候选式被 TikHub 接受，保存响应待标准映射
+
+用户回传 `twitter-tikhub-check.v2`：策略版本 `known-query.v1` 已生效，`adapterCalls=1`、`fullQueryAttempted=true`，请求 `dcc086fa-469a-4237-a435-e427b7e70f3a` 已保存为 committed/200。唯一调用 `6c6177d6-4065-499c-aabb-50217f355780` 为 HTTP200、businessCode=200、succeeded，且原生回执归属校验通过。这确认完整257字符 native 候选式在 TikHub 被接受；原280字符 SQL 式没有直接发送。此前 RapidAPI 的400不能再被笼统归为“这个完整业务条件无法搜索”。没有证据证明具体 RapidAPI 内部拒绝机制。
+
+本次 `timeline` 是长度19的数组，`next_cursor` 是字符串。19是容器元素数，尚未验证每项都能映射为有效帖子。现有 Hub Twitter 解析器处理 GraphQL `entries/instructions`，不接受这个数组结构；Night-All只提供通用字段猜测，并会在缺ID时生成哈希，不能据此生成标准帖子。`protocolGuardState=failed` 是私有诊断以 `diagnostic_not_standard_delivery` 结束保护的内部状态，表示未形成标准交付；它不表示供应商失败，也不改变已经保存的原生200。原 `b590...` 的502仍保持不变。
+
+不再重复付费查询。v3新增固定已保存响应的只读检查：仅接受上述成功请求及其唯一调用，检查现有 timeline 的字段类型、原生身份和时间字段状态；不输出正文、URL、ID或游标值。读取缺失或不匹配时直接结束，不创建供应商运行时、不发HTTP、不修改协议状态。诊断采购key和两个协议key继续保持v1身份。
+
+同步 `server/ops/verify-twitter-tikhub.mjs`（v3）及同目录 `inspect-twitter-tikhub-saved.sh`，无需重新部署，从有kubectl权限的宿主机执行：
+
+```bash
+bash server/ops/inspect-twitter-tikhub-saved.sh
+```
+
+预期 `diagnosticRevision=twitter-tikhub-check.v3`、`mode=read_saved_only`、`adapterCalls=0`，并返回已保存数据的结构摘要。此次只读数据来自已保存的原生交付，不冒充原始上游字节归档的重新哈希校验；既有回执仍通过原调用归属及合同检查。
+
+v3相关35项离线测试通过，覆盖19项全页结构、明确的分组/节点/深度截断、内容及未知字段脱敏、固定成功回执、缺失或错误回执时零运行时/零HTTP/零状态写入，以及两个Bash入口的参数、版本和stdin内容。独立复审、JS/Bash语法及diff检查通过。本轮仅修改诊断、测试和本文，没有切换标准搜索生产路由。
+
+完成字段确认后，标准接入复用现有 TikHub content-search 的整页存档、溢出缓冲、去重和分页，不要求下游新增social/native授权；客户沿用twitter平台权限及计量，采购使用现有TikHub操作。仅新的标准搜索选择新供应商，旧Rapid游标仍由原供应商处理，原raw/social接口与已保存重放不变。复用现有等价Boolean转换并保留原查询指纹，不继续新增语法改写。v2原时间窗和交付过滤保持不变；供应商成功返回第一页不代表完整历史窗口覆盖。
+
 v5 联合验证51项通过、1项既有可选PGlite检查因未配置模块跳过，独立复审通过。覆盖旧主题归档21条、原502和归档不变、事件组最多一次、事件组同样超额时离线判断、缺失/损坏/非JSON/不可用归档停止、未知结果/身份不匹配不读归档、不清除现有隔离期、跨版本保护，以及三个入口的实际JavaScript stdin与v5版本检查。没有线上采购或部署，生产查询逻辑保持不变。
 
 v4此前35项离线测试全部通过，包括两个精确出站URL、全部成功/400组合、历史9b15/4fa2证据与原key校验、unknown/缺证据停止、重复读取零派发、跨版本running/unknown保护，以及三个固定入口实际发送JavaScript stdin。
 
 本地查询、路径和组页合同测试 17 项通过，其中包含 160 组布尔真值比较、实际 adapter 两页 mock HTTP、v2 内外游标往返。另有带 PGlite 的 v1/v2、跨版本 unknown、HTTP 重试边界 33 项通过。Python 验证脚本 24 项测试及 Delta 原生 v1/v2 请求构造联合检查通过。这些离线测试不能代替供应商接受完整查询和原冷启动入库验收。
 
-本地修复尚未代替线上部署与验收。准入变更按上面的 Hub-only 命令发布；没有新增数据库迁移，没有修改 MX-H2I 登录、SSO、联网或 Domestic/Internal nginx。完整查询尚无成功交付证据，原冷启动仍需正常采集与分页验收，不需要清理旧历史或绕过 unknown。
+准入修复及一次原生供应商成功已由用户回执确认；标准响应映射、标准路由接入和原冷启动的采集分页仍待完成。当前只读检查无需部署、采购或Delta操作；没有新增数据库迁移，没有修改MX-H2I登录、SSO、联网或Domestic/Internal nginx，不清理旧历史或绕过unknown。
