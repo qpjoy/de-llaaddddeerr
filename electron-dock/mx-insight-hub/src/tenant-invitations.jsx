@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Buildings, Copy, Moon, Plus, Sun } from '@phosphor-icons/react'
+import { Buildings, Moon, Plus, Sun } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
 import { hubLoginUrl, hubUiPath } from '../shared/account-navigation.mjs'
 import { DropdownField, ErrorState, Field, LoadingState, Modal, PageHeading, useRemoteData } from './components.jsx'
 import { ROLES, ROLE_HINTS } from './tenant-memberships.jsx'
+import { InvitationLink } from './invitation-link.jsx'
 
 const roleName = role => ROLES.find(item => item.value===role)?.label || role
 const stamp = value => new Date(value).toLocaleString('zh-CN')
@@ -22,7 +23,7 @@ export function TenantInvitationsPanel({ token, session, tenants, onCreated }) {
   const tenantId = allowed.some(t => t.id===selected) ? selected : allowed[0]?.id || ''
   const [rows,setRows] = useState([]), [error,setError] = useState(null), [loading,setLoading] = useState(false)
   const [revision,setRevision] = useState(0), [form,setForm] = useState(null), [result,setResult] = useState(null)
-  const [busy,setBusy] = useState(false), [revoking,setRevoking] = useState(null), [copied,setCopied] = useState(false)
+  const [busy,setBusy] = useState(false), [revoking,setRevoking] = useState(null)
   useEffect(() => {
     if (!tenantId || !session.tenantInvitationsEnabled) { setRows([]); return }
     let active=true; setLoading(true); setError(null)
@@ -31,7 +32,7 @@ export function TenantInvitationsPanel({ token, session, tenants, onCreated }) {
   },[token,tenantId,revision,session.tenantInvitationsEnabled])
   if (!session.tenantInvitationsEnabled || (!session.platformAdmin && !allowed.length)) return null
   const open = () => {
-    setError(null);setResult(null);setCopied(false)
+    setError(null);setResult(null)
     setForm({requestId:crypto.randomUUID(),tenantId:tenantId || '__new__',tenantName:'',label:'',role:tenantId ? 'viewer' : 'owner',days:7,allowRegistration:true})
   }
   const update = patch => setForm(value => ({...value,...patch,requestId:crypto.randomUUID()}))
@@ -59,7 +60,7 @@ export function TenantInvitationsPanel({ token, session, tenants, onCreated }) {
     {loading ? <LoadingState /> : <div className="mih-invitations__list">{rows.map(row=><article key={row.id}><div><strong>{row.label}</strong><small>{roleName(row.role)} · {row.allowRegistration?'可注册新账号':'仅已有账号'}</small><small>{row.acceptedAt ? `接受于 ${stamp(row.acceptedAt)}` : `有效至 ${stamp(row.expiresAt)}`}</small></div><span className="qp-tag">{statusName[row.status]}</span>{row.status==='pending' ? <button className={button} onClick={()=>{setError(null);setRevoking(row)}}>撤回</button> : null}</article>)}{tenantId && !rows.length ? <p>此租户暂无邀请记录。</p> : null}</div>}
     <small>每条链接只能由一个账号接受。链接仅在创建成功后显示，请只发给目标成员。最近显示 100 条记录。</small>
     {form ? <Modal title={result?'邀请已生成':'邀请成员'} busy={busy} closeOnBackdrop={false} onClose={close} footer={result ? <button className={button} onClick={close}>完成</button> : <><button className={button} disabled={busy} onClick={close}>取消</button><button className="qp-button qp-button--primary" type="submit" form="create-tenant-invitation" disabled={busy}>{busy?'正在生成…':'生成邀请链接'}</button></>}>
-      {result ? <div className="mih-invitations__result"><p><strong>{result.tenantName}</strong> · {roleName(result.role)}</p><Field label="一次性邀请链接"><textarea className="qp-input" rows={4} value={result.url} readOnly onFocus={e=>e.target.select()} /></Field><button className={button} onClick={async()=>{try{await navigator.clipboard.writeText(result.url);setCopied(true)}catch{setCopied(false)}}}><Copy size={16} aria-hidden="true" />{copied?'已复制':'复制链接'}</button><p>有效至 {stamp(result.expiresAt)}。对方登录并确认接受后，即可进入此租户。</p></div> : <form id="create-tenant-invitation" onSubmit={create} className="mih-invitations__form">
+      {result ? <div className="mih-invitations__result"><p><strong>{result.tenantName}</strong> · {roleName(result.role)}</p><InvitationLink value={result.url} /><p>有效至 {stamp(result.expiresAt)}。对方登录并确认接受后，即可进入此租户。</p></div> : <form id="create-tenant-invitation" onSubmit={create} className="mih-invitations__form">
         <DropdownField label="加入租户" value={form.tenantId} disabled={busy} onChange={id=>update({tenantId:id,...(id==='__new__'?{role:'owner'}:{})})} options={[...allowed.filter(t=>t.status==='active').map(t=>({value:t.id,label:t.name})),...(session.platformAdmin?[{value:'__new__',label:'新建企业租户并邀请'}]:[])]} />
         {form.tenantId==='__new__' ? <Field label="企业租户名称"><input className="qp-input" required maxLength={120} value={form.tenantName} disabled={busy} onChange={e=>update({tenantName:e.target.value})} /></Field> : null}
         <Field label="邀请备注" hint="例如：张三 · 研发团队。备注不用于匹配账号。"><input className="qp-input" required maxLength={80} value={form.label} disabled={busy} onChange={e=>update({label:e.target.value})} /></Field>
