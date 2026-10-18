@@ -99,4 +99,4 @@ Kubernetes 的 desired/current 分别描述目标和观察状态，scale 写入�
 
 本地确认缓存检测存在独立缺陷：`pipefail` 下的 `ctr images ls -q | grep -Fqx` 在长列表前部命中后提前关闭管道，生产者返回 SIGPIPE，导致已缓存镜像被误判为缺失。root/sudo 两分支均可复现。修复仅移除 grep 的 `-q` 并丢弃标准输出，让它消费完整列表；保留精确镜像引用匹配和实际 ctr 失败的非零退出码。真正需要导入时增加导出/解包阶段提示。新增回归在旧代码失败，修复后 storage-preflight 25/25 通过，语法与差异检查通过。此缺陷可导致重复导入，现场这一次是否由它触发尚待进程与缓存回执，不能归因于新的 ES 数据索引或供应商搜索。
 
-当前部署窗口继续保留，另一个终端只读查看 docker/ctr 状态及完整消费镜像列表。不要并发开始第二次部署或删除缓存。若后续考虑 `MX_COMMON_AUTO_PRELOAD=0`，先确认本机 containerd `k8s.io` 已有配置所需的目标镜像；它只影响下一次运行，ES API healthy 本身不是镜像引用齐备的证据。TG/向量后台暂停仍保持，应用发布成功尚未确认。
+后续操作者确认等待后本轮部署已完成；同期 `ps -C docker,ctr` 只返回列头，containerd 列表明确包含 `docker.io/pgvector/pgvector:pg16` 与 `docker.elastic.co/elasticsearch/elasticsearch:9.4.2`。这支持本轮镜像导入已经结束，不再诊断部署锁或并发启动第二轮。没有强制终止导入、删除缓存或跳过预加载。缓存检测修复已推送 `18e6e5cd`，不要求只为这项主机脚本修复再滚动发布应用；以后同步代码并启动新部署时生效。操作者报告发布完成与搜索性能验收分别记录：canonical/Luopan 部署后耗时、504 是否消失仍待业务回执，TG/向量后台暂停继续保留。若以后考虑 `MX_COMMON_AUTO_PRELOAD=0`，仍须确认配置所需的目标镜像全部存在；ES API healthy 本身不是镜像引用齐备的证据。
