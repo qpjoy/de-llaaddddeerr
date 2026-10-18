@@ -10,8 +10,8 @@ fi
 
 ops_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 probe_file="$ops_dir/verify-twitter-query-param.mjs"
-if [[ ! -f "$probe_file" ]] || ! grep -Fqx "export const REVISION = 'twitter-query-param-check.v4'" "$probe_file"; then
-  echo 'Sync verify-twitter-query-param.mjs revision v4 beside this script; no cluster request was sent.' >&2
+if [[ ! -f "$probe_file" ]] || ! grep -Fqx "export const REVISION = 'twitter-query-param-check.v6'" "$probe_file"; then
+  echo 'Sync verify-twitter-query-param.mjs revision v6 beside this script; no cluster request was sent.' >&2
   exit 2
 fi
 

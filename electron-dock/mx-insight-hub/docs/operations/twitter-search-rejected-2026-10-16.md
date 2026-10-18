@@ -245,9 +245,9 @@ v3 的 `english-and` 对照先保持英文所有条件不变，只将两个 OR �
 
 本轮 27 项离线检查全部通过，包含旧 native 400 后新 AND key 的真实适配器 URL 对照、原词/引号/排除不丢失、英文拒绝/unknown 不进入完整式、回放零派发、跨版本 unknown 阻断、固定入口参数与实际 JavaScript stdin 内容；未调用线上供应商。
 
-### 当前步骤：英文两个正向组分别对照
+### 英文两个正向组对照与 HTTP 200 解析失败
 
-下一步分别查询英文主题组与事件组，保留各组内部原文、引号、OR 及全部三个排除词，保持 Top/count20 与路径形式：
+v4 将英文主题组与事件组分别作为诊断查询，保留各组内部原文、引号、OR 及全部三个排除词，保持 Top/count20 与路径形式：
 
 ```text
 主题组：("diplomacy" OR "foreign policy" OR "diplomatic relations") -ad -marketing -repost
@@ -258,15 +258,54 @@ v3 的 `english-and` 对照先保持英文所有条件不变，只将两个 OR �
 
 v4 在派发前核对原失败、两半回执和上述精确显式AND拒绝（包括原 key、输入、所有权及唯一调用）。最多顺序两次、每项一页；第一项只有保存的成功或明确400才继续第二项，unknown、缺证据、其他失败停止。旧诊断 key 不变，已有记录只读取，不重新采购；不改生产编译器、分页方言、Delta 或原Run，不清除unknown。
 
-同步 `server/ops/verify-twitter-query-param.mjs` **v4** 与同目录新增 `verify-twitter-query-groups.sh` 后，从 Hub 源码目录的**宿主机终端**直接执行：
+用户已执行 `verify-twitter-query-groups.sh`，返回 `twitter-query-param-check.v4 / english-groups`。只执行了第一项 `english_topics`：
 
-```sh
-bash server/ops/verify-twitter-query-groups.sh
+- 请求 `f89f7c4c-6fee-416c-8917-58970e78215e`，保存为 committed/502，错误为 `social_upstream_response_unusable`。
+- 唯一供应商调用 `315bed17-f844-4346-8819-e0bfad1e4968` 返回 **HTTP 200**，Hub 记录为 `succeeded_unusable`；这不是新的供应商400，也不是可交付成功。
+- 主题组82字符，SHA `3999e9f44235eb90fb3a356fa531ea8bcdb2ed42f0fa953af183ff81462f813a`；固定 key `ops-twitter-group-34bef51fbabafecb50b9a0ac505c123e9584ea7ce6693b59`。
+- `savedOutcomeVerified=null`，在主题组停止，事件组尚未执行。不得将这个结果解释为英文组、完整业务式或冷启动已成功。
+
+随后现有只读脚本 `diagnose-twitter-search.mjs` 已核实同一归档：196012字节，SHA `a1b6584bf6fa39d0db9ba4f5c26a699c74003c167e83af844d715edb592dbedd`，固定结构中有21个Tweet结果（含一个可见性包装、一个双项模块），存在Bottom游标，无根级错误，当前解析器明确报 `upstream_page_exceeds_requested_count`。不需要重复这项诊断。
+
+这是raw诊断合同的count20限制，不是本次主题组供应商400；标准搜索已有超额页缓冲。不能因此放宽所有raw响应或宣称原完整式400已修复。脚本的 `mapping.category=Latest` 来自保存输入的默认映射，本次探测通过私有适配器使用Top，该字段不代表实际历史出站参数。
+
+### v5 结果：主题组可解析，事件组仍被拒绝
+
+v5 修正诊断流程，生产解析器与raw合同不变：主题组只读取已有记录，不再发送请求；归档须通过原调用所有权、固定输入、唯一调用、committed/502、succeeded_unusable/HTTP200、错误类型、长度与SHA核对。离线严格解析必须仍得到同一超额错误，允许超额的解析必须成功，才记录独立的 `archiveObservation.state=valid_overflow_response`。保留原 `savedOutcomeVerified=null`、502与所有历史记录，不生成新交付或向Delta入库。unknown、其他解析错误、归档缺失或损坏均不允许继续。
+
+v5 仅执行此前未完成的事件组，最多新增一次供应商请求；若事件组也返回超额页，使用相同离线归档判断，不重新采购。重复运行只读取已有事件组记录；主题组缺失时停止，绝不补发。`archiveValidatedGroups` 单独列出归档可解析的组，不混入 `succeededGroups`。这些观察仍不能代替完整查询或冷启动验收。
+
+该步骤已完成，无需再次执行groups入口。用户返回 `twitter-query-param-check.v5 / english-groups`：主题组adapterCalls=0，原196012字节归档SHA一致，离线解析21条、overflowCount=1、hasMore=true，原502不变。事件组adapterCalls=1，请求 `6f52fed6-ccfa-4f87-82b0-cb530d94363d` committed/502，唯一调用 `bde0fce4-bb51-49a6-8977-bc6e4dfac71a` rejected/400，上游ID `e44b76b1b25f17834482cac1b27d42266dff544c0b2fabdcd2bd0ac4b0b6f2e6`。事件组81字符，SHA `b79f0655a1b710c7be1e3a9631eee80b95663fad0694d6dc290eddd71a10b552`，固定key `ops-twitter-group-4ab63c1b8204c5c155156ca674661666f587e5b362c21abb`。
+
+因此失败已在较短的事件组单独复现；主题组的成功证明这些引号、OR及共同排除词并非普遍不可用，但不能定位某个词，也不能断言是WAF、长度限制或供应商内部复杂度。完整式的400与冷启动恢复仍未解决。
+
+### 当前步骤：保留条件的 OR 顺序对照
+
+v6 固定比较下面的事件组，只有OR内部四个原子调换顺序：
+
+```text
+("update" OR "clarification" OR "response" OR "statement") -ad -marketing -repost
 ```
 
-入口内部包含 kubectl 并传入正确 `.mjs`，不要外套 `kubectl ... node` 或把 `.sh` 重定向给Node。无需部署镜像或操作Delta；最多两次供应商调用，可能消耗额度。预期 `diagnosticRevision=twitter-query-param-check.v4`、`case=english-groups`；这项线上结果尚待执行。
+[X逻辑运算符文档](https://docs.x.com/x-api/posts/search/integrate/operators)定义OR、空格合取、括号和负词。该对照保留相同布尔条件、引号与排除词，不承诺供应商结果排序相同。[供应商错误说明](https://www.twittrapi.com/docs/helpful-infos/error-handling)也允许400来自未能归类的X错误，因此不能仅凭状态码判定词或语法不受支持。
 
-本轮35项离线测试全部通过，包括两个精确出站URL、全部成功/400组合、历史9b15/4fa2证据与原key校验、unknown/缺证据停止、重复读取零派发、跨版本running/unknown保护，以及三个固定入口实际发送JavaScript stdin。没有线上采购或部署，生产查询逻辑保持不变。
+先验证这个81字符的等价事件组；仅有已保存成功或校验通过的超额归档，才执行完整257字符式的同一改写。完整式其余部分逐字保留，不删词、不将AND改OR、不拆成多路采集。最多两次新的供应商调用，不翻页；拒绝、unknown、证据不符或其他不可用结果均停止后续。必须先核验上述6f52/bde0的精确拒绝及原key、所有权、输入和唯一调用；原native查询继续用于跨版本保护，新固定诊断key同时绑定原查询与发送形式，已有记录只读不重发。
+
+若新事件组仍触发raw超额错误，其归档可离线确认，但短暂隔离期仍生效。脚本按数据库时间保守等待满5分钟的条件检查，在此之前返回 `event_order_full_query_deferred` 和 `continuationNotBefore`，不会创建完整式请求或消耗它的固定身份；到时执行同一入口只读事件组，再继续完整式。它不清除隔离期，实际执行仍经过所有现有准入检查。
+
+同步 `server/ops/verify-twitter-query-param.mjs` **v6** 和新增的同目录 `verify-twitter-query-order.sh`，从Hub源码目录的宿主机终端执行：
+
+```sh
+bash server/ops/verify-twitter-query-order.sh
+```
+
+该入口包含kubectl，不要外套Node。预期 `diagnosticRevision=twitter-query-param-check.v6`、`case=event-order`、`maxAdapterCalls=2`。可能消耗最多两次供应商额度，无需部署Hub或操作Delta。此改写尚未在线验证，不改变生产编译器、旧游标、原Run、历史回执、登录或联网。即使完整式首屏通过，也仍需后续原冷启动及窗口、分页验收。
+
+v6 联合检查64项通过、1项既有可选PGlite检查跳过。新增验证包括512组布尔真值、实际供应商URL中的原子置换、事件组及完整式的原native保护身份、固定历史拒绝、首次失败不执行完整式、超额响应离线观察、数据库时间异常时停止，以及冷却期内不创建完整式请求、期满后只发完整式的续接。未调用线上供应商或修改生产配置。
+
+v5 联合验证51项通过、1项既有可选PGlite检查因未配置模块跳过，独立复审通过。覆盖旧主题归档21条、原502和归档不变、事件组最多一次、事件组同样超额时离线判断、缺失/损坏/非JSON/不可用归档停止、未知结果/身份不匹配不读归档、不清除现有隔离期、跨版本保护，以及三个入口的实际JavaScript stdin与v5版本检查。没有线上采购或部署，生产查询逻辑保持不变。
+
+v4此前35项离线测试全部通过，包括两个精确出站URL、全部成功/400组合、历史9b15/4fa2证据与原key校验、unknown/缺证据停止、重复读取零派发、跨版本running/unknown保护，以及三个固定入口实际发送JavaScript stdin。
 
 本地查询、路径和组页合同测试 17 项通过，其中包含 160 组布尔真值比较、实际 adapter 两页 mock HTTP、v2 内外游标往返。另有带 PGlite 的 v1/v2、跨版本 unknown、HTTP 重试边界 33 项通过。Python 验证脚本 24 项测试及 Delta 原生 v1/v2 请求构造联合检查通过。这些离线测试不能代替供应商接受完整查询和原冷启动入库验收。
 
