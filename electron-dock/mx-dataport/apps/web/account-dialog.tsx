@@ -36,6 +36,7 @@ import { request, loadAccountForm, navigateAfterLogin, type AccountOptions } fro
 type AccountDialogProps = {
   open: boolean;
   onOpenChange: (value: boolean) => void;
+  onAuthenticated?: () => void;
   preview?: boolean;
 };
 export function AccountDialog(props: AccountDialogProps) {
@@ -46,6 +47,7 @@ export function AccountDialog(props: AccountDialogProps) {
 function AccountDialogSession({
   open,
   onOpenChange,
+  onAuthenticated,
   preview = false,
 }: AccountDialogProps) {
   const [options, setOptions] = useState<AccountOptions | null>(null),
@@ -122,7 +124,7 @@ function AccountDialogSession({
           method:"POST",signal:AbortSignal.timeout(15000),
           body:JSON.stringify({account:data.get("login"),password:data.get("password")}),
         });
-        navigateAfterLogin(result.redirect);
+        navigateAfterLogin(result.redirect, location, history, onAuthenticated);
         return;
       }
       const result = await request<{ redirect: string }>("/auth/sso/form", {

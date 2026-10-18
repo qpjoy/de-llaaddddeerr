@@ -731,7 +731,18 @@ function App() {
           />
         </DialogContent>
       </Dialog>
-      <AccountDialog open={auth} onOpenChange={setAuth} />
+      <AccountDialog
+        open={auth}
+        onOpenChange={setAuth}
+        onAuthenticated={() => {
+          setAuth(false);
+          setBoot(emptySession);
+          setTenant("");
+          setPage(location.hash.slice(2) || "intelligence");
+          setChecking(true);
+          retrySession();
+        }}
+      />
     </AccessContext.Provider>
   );
 }

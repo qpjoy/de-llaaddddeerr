@@ -3,6 +3,29 @@ import assert from "node:assert/strict";
 import { loadHarborSession } from "../apps/web/session.ts";
 import { request } from "../apps/web/api.ts";
 
+test("identity and permissions share a bounded refresh; timeouts preserve the right authentication state and retry diagnostics", async () => {
+  const signals = [];
+  const timeout = () => { throw new DOMException("fixture timeout", "TimeoutError"); };
+  const failedIdentity = await loadHarborSession(async (path, options) => {
+    assert.ok(options.signal instanceof AbortSignal);
+    timeout();
+  });
+  assert.equal(failedIdentity.active, null);
+  assert.equal(failedIdentity.issue.code, "session_timeout");
+  assert.match(failedIdentity.issue.message, /重试连接/);
+  const failedPermissions = await loadHarborSession(async (path, options) => {
+    signals.push(options.signal);
+    if (path === "/auth/sso/session") return { active: true, csrf: "fresh-csrf" };
+    timeout();
+  });
+  assert.equal(signals.length, 2);
+  assert.equal(signals[0], signals[1]);
+  assert.equal(failedPermissions.active, true);
+  assert.equal(failedPermissions.csrf, "fresh-csrf");
+  assert.equal(failedPermissions.customer, null);
+  assert.equal(failedPermissions.issue.code, "session_timeout");
+});
+
 test("a registered SSO identity stays signed in when the customer session route is missing", async () => {
   const calls = [];
   const state = await loadHarborSession(async (path) => {

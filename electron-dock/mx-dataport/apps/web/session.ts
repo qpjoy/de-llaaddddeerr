@@ -16,19 +16,24 @@ export const emptySession: HarborSession = {
   issue: null,
 };
 const issueFor = (error: any): SessionIssue => ({
-  message: error.message || "服务暂不可用，请稍后重试。",
-  code: error.code,
+  message: error.name === "TimeoutError"
+    ? "登录状态确认超时，请重试连接。"
+    : error.message || "服务暂不可用，请稍后重试。",
+  code: error.name === "TimeoutError" ? "session_timeout" : error.code,
   requestId: error.requestId,
 });
 
 // Authentication and customer permissions are separate reads. A customer
 // service outage must not turn a verified identity into an anonymous visitor.
 export async function loadHarborSession(
-  read: (path: string) => Promise<any>,
+  read: (path: string, options?: RequestInit) => Promise<any>,
 ): Promise<HarborSession> {
+  // Bound the entire identity + permissions refresh, including refreshes after
+  // local login. A stalled read must resolve to the existing retry UI.
+  const signal = AbortSignal.timeout(15000);
   let identity;
   try {
-    identity = await read("/auth/sso/session");
+    identity = await read("/auth/sso/session", { signal });
     if (typeof identity.active !== "boolean") throw Error("登录状态响应无效。");
   } catch (error) {
     return { ...emptySession, issue: issueFor(error) };
@@ -40,7 +45,7 @@ export async function loadHarborSession(
   };
   if (!identity.active) return result;
   try {
-    const { data, requestId } = await read("/bff/v1/session");
+    const { data, requestId } = await read("/bff/v1/session", { signal });
     if (
       !data ||
       !Array.isArray(data.tenantIds) ||

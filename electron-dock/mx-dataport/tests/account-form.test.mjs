@@ -2,6 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { loadAccountForm, navigateAfterLogin } from "../apps/web/api.ts";
 
+test("same-document local login refreshes App immediately without another document request or login replay", () => {
+  const events = [];
+  navigateAfterLogin("/#/intelligence", {
+    href: "https://dataport.example.test/#/orders",
+    assign: () => assert.fail("must not wait for another document"),
+    reload: () => assert.fail("App owns the session refresh"),
+  }, {
+    replaceState: (state, title, url) => events.push(url),
+  }, () => events.push("refresh-session"));
+  assert.deepEqual(events, ["https://dataport.example.test/#/intelligence", "refresh-session"]);
+});
+
 test("successful login reloads the session even when the target is the current hash route", () => {
   for (const route of ["/#/intelligence", "/#/orders", "/"]) {
     const events = [];

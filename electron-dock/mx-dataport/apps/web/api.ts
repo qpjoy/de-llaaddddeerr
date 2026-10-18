@@ -46,11 +46,13 @@ export type AccountOptions = {
 };
 
 // A fragment-only navigation does not remount App or reload its session. Login
-// has already set the cookie, so explicitly load a new document in that case.
+// has already set the cookie: let App refresh it without waiting for a document
+// navigation, with a full reload as a fallback for standalone consumers.
 export function navigateAfterLogin(
   redirect: string,
   target: Pick<Location, "href" | "assign" | "reload"> = location,
   navigation: Pick<History, "replaceState"> = history,
+  refreshSession?: () => void,
 ) {
   const current = new URL(target.href);
   const destination = new URL(redirect, current);
@@ -60,7 +62,8 @@ export function navigateAfterLogin(
     destination.search === current.search
   ) {
     navigation.replaceState(null, "", destination.href);
-    target.reload();
+    if (refreshSession) refreshSession();
+    else target.reload();
   } else {
     target.assign(destination.href);
   }
