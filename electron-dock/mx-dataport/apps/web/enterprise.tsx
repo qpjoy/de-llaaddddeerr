@@ -43,6 +43,7 @@ import {
 import { Pagination } from "./pagination";
 import { dateTime } from "./commerce-state";
 import { downloadExcel } from "./download";
+import { memberUpdateUnconfirmedMessage } from "./member-write-state";
 
 type Props = {
   tenant: string;
@@ -76,6 +77,7 @@ function useWrite({ tenant, csrf }: Props) {
   return {
     busy,
     error,
+    setError,
     run: async (path: string, body: any) => {
       setBusy(true);
       setError("");
@@ -182,6 +184,7 @@ export function EnterpriseMembers(props: Props) {
     [password, setPassword] = useState<string | null>(null),
     [roleEditor, setRoleEditor] = useState(false),
     [editingMember, setEditingMember] = useState<any>(null),
+    [memberUpdateUnconfirmed, setMemberUpdateUnconfirmed] = useState(false),
     [editingDetails, setEditingDetails] = useState<"profile" | "role" | null>(
       null,
     ),
@@ -200,6 +203,16 @@ export function EnterpriseMembers(props: Props) {
       : roles.find((role: any) => role.id === member.roleId)?.name ||
         roleNames[member.roleId] ||
         (member.roleId ? "自定义角色" : `原有 ${member.role} 角色`);
+  function closeMemberEditor() {
+    if (write.busy) return;
+    setEditingMember(null);
+    if (memberUpdateUnconfirmed) {
+      setMemberUpdateUnconfirmed(false);
+      write.setError("");
+      setNotice("上次修改的结果尚未确认，请打开员工详情核对当前设置后再操作。");
+      view.reload();
+    }
+  }
   return (
     <>
       <div className="page-heading">
@@ -375,6 +388,8 @@ export function EnterpriseMembers(props: Props) {
                           variant="link"
                           disabled={write.busy}
                           onClick={() => {
+                            setMemberUpdateUnconfirmed(false);
+                            write.setError("");
                             setEditingDetails(null);
                             setEditingMember(m);
                           }}
@@ -574,7 +589,7 @@ export function EnterpriseMembers(props: Props) {
       <Dialog
         open={!!editingMember}
         onOpenChange={(v) => {
-          if (!v && !write.busy) setEditingMember(null);
+          if (!v) closeMemberEditor();
         }}
       >
         <DialogContent className="dp-dialog dp-member-details">
@@ -600,6 +615,7 @@ export function EnterpriseMembers(props: Props) {
                 className="ticket-form"
                 onSubmit={async (e) => {
                   e.preventDefault();
+                  if (write.busy || memberUpdateUnconfirmed) return;
                   const values = new FormData(e.currentTarget),
                     patch: Record<string, string> = {};
                   if (
@@ -617,7 +633,13 @@ export function EnterpriseMembers(props: Props) {
                     await write.run(`members/${editingMember.id}`, patch);
                     setEditingMember(null);
                     view.reload();
-                  } catch {}
+                  } catch (error) {
+                    const warning = memberUpdateUnconfirmedMessage(error);
+                    if (warning) {
+                      setMemberUpdateUnconfirmed(true);
+                      write.setError(warning);
+                    }
+                  }
                 }}
               >
                 {editingDetails === "profile" &&
@@ -628,6 +650,7 @@ export function EnterpriseMembers(props: Props) {
                         name="displayName"
                         required
                         maxLength={80}
+                        disabled={write.busy || memberUpdateUnconfirmed}
                         defaultValue={editingMember.displayName || ""}
                       />
                     </label>
@@ -639,6 +662,7 @@ export function EnterpriseMembers(props: Props) {
                       <select
                         name="roleId"
                         required
+                        disabled={write.busy || memberUpdateUnconfirmed}
                         defaultValue={editingMember.roleId || ""}
                       >
                         <option value="" disabled>
@@ -660,11 +684,12 @@ export function EnterpriseMembers(props: Props) {
                     type="button"
                     variant="outline"
                     disabled={write.busy}
-                    onClick={() => setEditingDetails(null)}
+                    onClick={() => memberUpdateUnconfirmed
+                      ? closeMemberEditor() : setEditingDetails(null)}
                   >
-                    取消
+                    {memberUpdateUnconfirmed ? "关闭并核对" : "取消"}
                   </Button>
-                  <Button disabled={write.busy}>保存</Button>
+                  <Button disabled={write.busy || memberUpdateUnconfirmed}>保存</Button>
                 </div>
               </form>
             ) : (

@@ -49,8 +49,15 @@ export function SidebarAccountMenu({
     [quota, setQuota] = useState<any>(null),
     [loading, setLoading] = useState(false),
     [quotaError, setQuotaError] = useState("");
+  const canReadUsage = hasPermission(session, tenant || "", "usage.read");
   useEffect(() => {
-    if (!open || !hasPermission(session, tenant || "", "usage.read")) return;
+    if (!canReadUsage) {
+      setQuota(null);
+      setLoading(false);
+      setQuotaError("");
+      return;
+    }
+    if (!open) return;
     const c = new AbortController();
     setQuota(null);
     setLoading(true);
@@ -67,7 +74,7 @@ export function SidebarAccountMenu({
         if (!c.signal.aborted) setLoading(false);
       });
     return () => c.abort();
-  }, [open, tenant, session]);
+  }, [open, tenant, session, canReadUsage]);
   const { isMobile, setOpenMobile } = useSidebar();
   const navigating = useRef(false);
   function select(next: string) {
@@ -121,17 +128,19 @@ export function SidebarAccountMenu({
               <div>
                 <strong title={name}>{name}</strong>
                 <span>
-                  {loading
-                    ? "加载中…"
-                    : quotaError
-                      ? "套餐暂不可用"
-                      : quota
-                        ? quota.product?.name || "企业订阅"
-                        : "尚未订阅"}
+                  {!canReadUsage
+                    ? "无额度查看权限"
+                    : loading
+                      ? "加载中…"
+                      : quotaError
+                        ? "套餐暂不可用"
+                        : quota
+                          ? quota.product?.name || "企业订阅"
+                          : "尚未订阅"}
                 </span>
               </div>
             </DropdownMenuLabel>
-            {hasPermission(session, tenant || "", "usage.read") && (
+            {canReadUsage && (
               <div className="account-plan-summary" aria-live="polite">
                 {loading ? (
                   <p>正在读取额度…</p>
