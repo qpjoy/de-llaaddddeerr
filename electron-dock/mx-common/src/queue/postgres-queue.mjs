@@ -211,7 +211,8 @@ export class PostgresQueue {
  * Poll-and-process loop.
  *
  * Backs off to `idleDelayMs` when a queue is empty so an idle worker does not
- * hammer PostgreSQL, and drains at full speed while work exists.
+ * hammer PostgreSQL. Optional post-batch pacing releases completed jobs before
+ * yielding the worker; it limits this loop only, not other worker replicas.
  */
 export function runWorker({
   queue,
@@ -219,15 +220,22 @@ export function runWorker({
   handler,
   concurrency = 4,
   idleDelayMs = 1_000,
+  postBatchDelayMs = 0,
   reclaimIntervalMs = 30_000,
   logger = console,
   signal,
 }) {
+  if (!Number.isInteger(postBatchDelayMs) || postBatchDelayMs < 0) {
+    throw new TypeError('postBatchDelayMs must be a non-negative integer')
+  }
+  const waiting = new AbortController()
   let stopped = false
   const stop = () => {
     stopped = true
+    waiting.abort()
   }
   signal?.addEventListener('abort', stop, { once: true })
+  if (signal?.aborted) stop()
 
   const reclaimTimer = setInterval(() => {
     queue.reclaimExpired().catch((error) => logger?.error?.(`[mx-common] reclaim failed: ${error.message}`))
@@ -244,11 +252,11 @@ export function runWorker({
         jobs = await queue.claim(name, concurrency)
       } catch (error) {
         logger?.error?.(`[mx-common] claim failed on ${name}: ${error.message}`)
-        await delay(idleDelayMs)
+        await delay(idleDelayMs, waiting.signal)
         continue
       }
       if (jobs.length === 0) {
-        await delay(idleDelayMs)
+        await delay(idleDelayMs, waiting.signal)
         continue
       }
       await Promise.all(
@@ -262,16 +270,25 @@ export function runWorker({
           }
         }),
       )
+      if (postBatchDelayMs > 0 && !stopped) await delay(postBatchDelayMs, waiting.signal)
     }
     clearInterval(reclaimTimer)
+    signal?.removeEventListener('abort', stop)
   })()
 
   return { stop, done: loop }
 }
 
-function delay(ms) {
+function delay(ms, signal) {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms)
+    const finish = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', finish)
+      resolve()
+    }
+    const timer = setTimeout(finish, ms)
     timer.unref?.()
+    signal?.addEventListener('abort', finish, { once: true })
+    if (signal?.aborted) finish()
   })
 }

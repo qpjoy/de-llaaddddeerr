@@ -3,6 +3,49 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { randomUUID } from 'node:crypto'
 import { RetrievalJobs, RetrievalControl } from '../../server/retrieval/control.mjs'
+
+test('lease validation is read-only and rejects expired, replaced or inactive ownership', { skip: !process.env.MX_RETRIEVAL_TEST_PGLITE }, async () => {
+  const { PGlite } = await import(process.env.MX_RETRIEVAL_TEST_PGLITE)
+  const db = new PGlite()
+  const query = async (sql, args) => {
+    const result = await db.query(sql, args)
+    return { ...result, rowCount: result.affectedRows }
+  }
+  const jobs = new RetrievalJobs({ query })
+  const job = { record_id: randomUUID(), lease_token: randomUUID() }
+  try {
+    await db.exec(`CREATE SCHEMA retrieval;
+      CREATE TABLE retrieval.jobs(record_id uuid PRIMARY KEY,lease_token uuid,status text,lease_until timestamptz);`)
+    await query(`INSERT INTO retrieval.jobs VALUES($1,$2,'running',now()+interval '3 minutes')`, [job.record_id, job.lease_token])
+    const before = (await query('SELECT * FROM retrieval.jobs')).rows[0]
+    await query('BEGIN READ ONLY')
+    try {
+      await jobs.assertLease(job)
+      await jobs.assertLease(job)
+      await assert.rejects(jobs.assertLease({ ...job, record_id: randomUUID() }), { code: 'retrieval_lease_lost' })
+      await assert.rejects(jobs.assertLease({ ...job, lease_token: randomUUID() }), { code: 'retrieval_lease_lost' })
+    } finally {
+      await query('ROLLBACK')
+    }
+    assert.deepEqual((await query('SELECT * FROM retrieval.jobs')).rows[0], before)
+    await query("UPDATE retrieval.jobs SET lease_until=now()-interval '1 second'")
+    await assert.rejects(jobs.assertLease(job), { code: 'retrieval_lease_lost' })
+    await assert.rejects(jobs.heartbeat(job), { code: 'retrieval_lease_lost' })
+    await query("UPDATE retrieval.jobs SET lease_until=now()+interval '1 minute',lease_token=$1", [randomUUID()])
+    await assert.rejects(jobs.assertLease(job), { code: 'retrieval_lease_lost' })
+    for (const status of ['pending', 'done', 'dead']) {
+      await query('UPDATE retrieval.jobs SET lease_token=$1,status=$2', [job.lease_token, status])
+      await assert.rejects(jobs.assertLease(job), { code: 'retrieval_lease_lost' })
+    }
+    await query("UPDATE retrieval.jobs SET status='running'")
+    const previousExpiry = (await query('SELECT lease_until FROM retrieval.jobs')).rows[0].lease_until
+    await jobs.heartbeat(job)
+    assert.ok((await query('SELECT lease_until FROM retrieval.jobs')).rows[0].lease_until > previousExpiry)
+    await jobs.assertLease(job)
+  } finally {
+    await db.close()
+  }
+})
 // Optional isolated PostgreSQL engine, never a production database.
 // MX_RETRIEVAL_TEST_PGLITE points to an installed @electric-sql/pglite entry.
 test(

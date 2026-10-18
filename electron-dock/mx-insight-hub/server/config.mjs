@@ -394,6 +394,24 @@ export function loadConfig(environment = process.env) {
         1_000,
         'MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE',
       ),
+      pageDelayMs: boundedNonNegativeInteger(
+        environment.MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS,
+        1_000,
+        'MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS',
+        60_000,
+      ),
+      workerDelayMs: boundedNonNegativeInteger(
+        environment.MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS,
+        1_000,
+        'MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS',
+        60_000,
+      ),
+      telegramMonitorPageDelayMs: boundedNonNegativeInteger(
+        environment.MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS,
+        1_000,
+        'MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS',
+        60_000,
+      ),
       telegramSqlitePageDelayMs: boundedNonNegativeInteger(
         environment.MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS,
         1_000,

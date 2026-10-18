@@ -2317,16 +2317,16 @@ grep -q 'must be a valid server-file root JSON object' "$invalid_roots_error"
 rm -f -- "$invalid_roots_error"
 printf 'ok - malformed server-file root JSON fails before ConfigMap mutation\n'
 
-# Reject an invalid SQLite page delay before kubectl can overwrite the last
+# Reject invalid source page delays before kubectl can overwrite the last
 # known-good ConfigMap. The server validates this too, but deploy must fail
 # before mutating cluster state.
+for page_delay_name in MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS MX_INSIGHT_PROVINCE_PAGE_DELAY_MS; do
 for invalid_page_delay in -1 60001 1.5 invalid; do
   invalid_delay_kubectl_marker="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-delay.XXXXXX")"
   invalid_delay_error="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-invalid-delay-error.XXXXXX")"
   rm -f -- "$invalid_delay_kubectl_marker"
   if INVALID_DELAY_KUBECTL_MARKER="$invalid_delay_kubectl_marker" \
-    MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS="$invalid_page_delay" \
-    bash -c '
+    env "$page_delay_name=$invalid_page_delay" bash -c '
       set -euo pipefail
       source "$1/scripts/manage.sh"
       export MX_INSIGHT_DATABASE_URL="postgres://hub:hub-secret@hub-db/hub"
@@ -2336,17 +2336,18 @@ for invalid_page_delay in -1 60001 1.5 invalid; do
       kubectl() { : >"$INVALID_DELAY_KUBECTL_MARKER"; }
       create_runtime_config
     ' _ "$ROOT_DIR" >/dev/null 2>"$invalid_delay_error"; then
-    printf 'not ok - invalid SQLite page delay %q was accepted\n' "$invalid_page_delay" >&2
+    printf 'not ok - %s=%q was accepted\n' "$page_delay_name" "$invalid_page_delay" >&2
     exit 1
   fi
   if [ -e "$invalid_delay_kubectl_marker" ]; then
-    printf 'not ok - invalid SQLite page delay %q reached kubectl\n' "$invalid_page_delay" >&2
+    printf 'not ok - %s=%q reached kubectl\n' "$page_delay_name" "$invalid_page_delay" >&2
     exit 1
   fi
-  grep -q 'MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS must be an integer from 0 to 60000' "$invalid_delay_error"
+  grep -q "$page_delay_name must be an integer from 0 to 60000" "$invalid_delay_error"
   rm -f -- "$invalid_delay_error"
 done
-printf 'ok - invalid SQLite page delays fail before ConfigMap mutation\n'
+done
+printf 'ok - invalid source page delays fail before ConfigMap mutation\n'
 
 # Deployment runs this preflight on the host after building the image. Keep it
 # independent of npm-installed packages: those packages exist inside the image,
@@ -2422,6 +2423,9 @@ RUNTIME_SECRET_ARGV="$runtime_secret_argv" \
 RUNTIME_SECRET_PATHS="$runtime_secret_paths" \
 RUNTIME_CONFIG_ORDER="$runtime_config_order" \
 MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS=30000 \
+MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS=0 \
+MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS=0 \
+MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS=60000 \
 MX_INSIGHT_JUSTONE_TOKEN="$runtime_secret_value" \
 MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
 MX_INSIGHT_JUSTONE_BILLING_JSON="$VALID_JUSTONE_BILLING_JSON" \
@@ -2471,6 +2475,10 @@ assert_eq $'secret\nconfig' "$(cat "$runtime_config_order")" \
   'runtime Secret is accepted before an enabled JustOne ConfigMap'
 grep -Fxq -- '--from-literal=MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS=30000' "$runtime_secret_argv"
 printf 'ok - configured news timeout is rendered into the runtime ConfigMap\n'
+grep -Fxq -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS=0' "$runtime_secret_argv"
+grep -Fxq -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS=0' "$runtime_secret_argv"
+grep -Fxq -- '--from-literal=MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS=60000' "$runtime_secret_argv"
+printf 'ok - explicit source page delay bounds survive ConfigMap rendering\n'
 if grep -Fq "$runtime_secret_value" "$runtime_secret_argv"; then
   printf 'not ok - runtime Secret value entered kubectl argv\n' >&2
   exit 1
@@ -2930,6 +2938,10 @@ printf 'ok - failed search bootstrap prevents projector startup\n'
 
 grep -q 'MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS.*60000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE.*1000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+for page_delay_name in MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS; do
+  assert_eq 2 "$(grep -c "$page_delay_name.*1000" "$ROOT_DIR/deploy/compose/docker-compose.yml")" \
+    "$page_delay_name reaches both Compose runtimes"
+done
 grep -q 'MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS.*1000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_PROVINCE_PAGE_DELAY_MS.*2000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'mx_common: ../../../mx-common' "$ROOT_DIR/deploy/compose/docker-compose.yml"
@@ -2959,6 +2971,9 @@ printf 'ok - optional local search lifecycle wires the outbox projector without 
 printf 'ok - local Compose supplies the mx-common named build context\n'
 grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE=' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS=' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS=' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_PROVINCE_PAGE_DELAY_MS=' "$ROOT_DIR/scripts/manage.sh"
 printf 'ok - internal runtime ConfigMap wires external-pull scheduling controls\n'

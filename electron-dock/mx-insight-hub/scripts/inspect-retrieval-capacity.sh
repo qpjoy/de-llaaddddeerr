@@ -77,6 +77,53 @@ import { loadConfig } from './server/config.mjs'
 import { createSearch } from './server/search/index.mjs'
 import { chunkRecord } from './server/embedding/chunker.mjs'
 
+// Fixed metadata/statistics GETs only. Keep this block in sync with the standalone
+// shell probe so an operator can collect the same evidence before a new image.
+// ES v9 APIs: /operation-indices-stats, /operation-nodes-stats and
+// /operation-indices-get-settings under https://www.elastic.co/docs/api/doc/elasticsearch/v9
+export const ES_CAPACITY_ENDPOINTS = Object.freeze({
+  version: '/?filter_path=version.number',
+  allocation: '/_cat/allocation?format=json&bytes=b&h=node,shards,disk.indices,disk.used,disk.avail,disk.total,disk.percent',
+  indices: '/_cat/indices/mx-insight-hub*?format=json&bytes=b&h=index,health,docs.count,pri,rep,store.size,pri.store.size',
+  watermarks: '/_cluster/settings?include_defaults=true&filter_path=persistent.cluster.routing.allocation.disk,transient.cluster.routing.allocation.disk,defaults.cluster.routing.allocation.disk',
+  vectorMappings: '/mx-insight-hub*chunk*/_mapping?filter_path=*.mappings.properties.embedding,*.mappings._source',
+  aliases: '/_cat/aliases/mx-insight-hub*?format=json&h=alias,index,is_write_index',
+  indexSettings: '/mx-insight-hub*/_settings/index.refresh_interval,index.number_of_shards,index.number_of_replicas?include_defaults=true&filter_path=*.settings.index.refresh_interval,*.settings.index.number_of_shards,*.settings.index.number_of_replicas,*.defaults.index.refresh_interval,*.defaults.index.number_of_shards,*.defaults.index.number_of_replicas',
+  indexStats: '/mx-insight-hub*/_stats/indexing,search,merge,refresh?level=indices&filter_path=_shards.total,_shards.successful,_shards.failed,indices.*.uuid,indices.*.primaries.indexing,indices.*.primaries.search,indices.*.primaries.merges,indices.*.primaries.refresh,indices.*.total.indexing,indices.*.total.search,indices.*.total.merges,indices.*.total.refresh',
+  nodeStats: '/_nodes/stats/jvm,fs,thread_pool,indexing_pressure?timeout=10s&filter_path=_nodes.total,_nodes.successful,_nodes.failed,nodes.*.timestamp,nodes.*.jvm.uptime_in_millis,nodes.*.jvm.mem.heap_used_in_bytes,nodes.*.jvm.mem.heap_used_percent,nodes.*.jvm.mem.heap_max_in_bytes,nodes.*.jvm.gc.collectors.*.collection_count,nodes.*.jvm.gc.collectors.*.collection_time_in_millis,nodes.*.fs.total.*_in_bytes,nodes.*.fs.io_stats.total,nodes.*.thread_pool.write,nodes.*.thread_pool.write_coordination,nodes.*.indexing_pressure.memory',
+})
+
+function flattenDiskSettings(settings, prefix = 'cluster.routing.allocation.disk') {
+  return Object.fromEntries(Object.entries(settings || {}).flatMap(([key, value]) => {
+    const path = `${prefix}.${key}`
+    return value !== null && typeof value === 'object'
+      ? Object.entries(flattenDiskSettings(value, path))
+      : [[path, value]]
+  }))
+}
+
+export async function inspectElasticsearchCapacity(client) {
+  const report = {
+    observedAt: new Date().toISOString(),
+    limits: 'Index settings/stats target mx-insight-hub*; settings override defaults. Aliases match alias names mx-insight-hub*, not every cluster reference to these indices; an absent alias is not evidence that an index is safe to delete. Node stats cover all workloads on each node, not just Hub. Totals/time/rejections/GC/IO are cumulative counters: compare spaced samples with node uptime and index UUID, allowing for restarts, relocations and resets; one sample does not establish a bottleneck. Index total includes replicas; primaries does not. Missing fields are unavailable, not zero. GETs are sequential, not an atomic snapshot.',
+  }
+  for (const [name, path] of Object.entries(ES_CAPACITY_ENDPOINTS)) {
+    try {
+      const value = await client.request('GET', path, undefined, { timeoutMs: 10000 })
+      report[name] = name === 'watermarks'
+        // Preserve the original flat report shape without fetching all settings.
+        ? Object.fromEntries(['persistent', 'transient', 'defaults'].map((scope) => [scope,
+          flattenDiskSettings(value[scope]?.cluster?.routing?.allocation?.disk)]))
+        : value
+    } catch (error) {
+      // Errors can include request URLs, credentials or node addresses.
+      report[name] = { unavailable: true, status: Number.isInteger(error?.status) ? error.status : null }
+    }
+  }
+  report.completedAt = new Date().toISOString()
+  return report
+}
+
 export function summarizeSample(rows, approximateRows, dimensions) {
   let eligible = 0, chunks = 0, tokens = 0, clipped = 0
   for (const row of rows) {
@@ -133,23 +180,7 @@ export async function inspectCapacity({ probeHanlp = false } = {}) {
     } finally { client.release() }
     const search = createSearch({ pool, config: config.common, logger: { warn() {}, error() {} } })
     if (search.client) {
-      report.elasticsearch = {}
-      for (const [name, path] of Object.entries({
-        version: '/?filter_path=version.number',
-        allocation: '/_cat/allocation?format=json&bytes=b',
-        indices: '/_cat/indices/mx-insight-hub*?format=json&bytes=b&h=index,health,docs.count,pri,rep,store.size,pri.store.size',
-        watermarks: '/_cluster/settings?include_defaults=true&flat_settings=true',
-        vectorMappings: '/mx-insight-hub*chunk*/_mapping?filter_path=*.mappings.properties.embedding,*.mappings._source',
-      })) {
-        try {
-          const value = await search.client.request('GET', path)
-          report.elasticsearch[name] = name === 'watermarks'
-            ? Object.fromEntries(['persistent','transient','defaults'].map((scope) => [scope,
-              Object.fromEntries(Object.entries(value[scope] || {}).filter(([key]) => key.startsWith('cluster.routing.allocation.disk.')))]))
-            : value
-        }
-        catch (error) { report.elasticsearch[name] = { unavailable: true, status: error.status || null } }
-      }
+      report.elasticsearch = await inspectElasticsearchCapacity(search.client)
     }
     report.hanlpClient = { batchSize: search.segmenterBatchSize, rebuildConcurrency: search.segmenterConcurrency }
     if (probeHanlp) {

@@ -8,6 +8,7 @@ function fixture() {
     calls,
     jobs: {
       pool: { query: async () => ({ rows: [] }) },
+      assertLease: async () => calls.push('assertLease'),
       heartbeat: async () => calls.push('heartbeat'),
       complete: async () => calls.push('complete'),
       fail: async (j, e) => calls.push(e.code),
@@ -48,7 +49,7 @@ test('quarantined chunks keep job failed rather than falsely completing', async 
 })
 test('lost lease prevents model and projection writes', async () => {
   const f = fixture()
-  f.jobs.heartbeat = async () => {
+  f.jobs.assertLease = async () => {
     throw Object.assign(Error('lost'), { code: 'retrieval_lease_lost' })
   }
   await processRetrievalJob(f)
@@ -73,7 +74,7 @@ test('resource pressure stops costly work before token reservation but still per
   const f = fixture()
   f.admission = { check: async () => { throw Object.assign(Error('pressure'), { code: 'retrieval_resource_pressure' }) }, failed: () => false }
   await processRetrievalJob(f)
-  assert.deepEqual(f.calls, ['heartbeat', 'retrieval_resource_pressure'])
+  assert.deepEqual(f.calls, ['assertLease', 'retrieval_resource_pressure'])
   f.calls.length = 0
   f.job.retire = true
   await processRetrievalJob(f)
@@ -103,4 +104,91 @@ test('dependency 429 preserves the job for automatic retry rather than exhaustin
   f.pipeline.embedPending = async () => { throw Object.assign(Error('busy'), { status: 429 }) }
   await processRetrievalJob(f)
   assert.ok(f.calls.includes('retrieval_dependency_backoff'))
+})
+
+test('short successful work validates every stage without renewing the lease on each stage', async () => {
+  const f = fixture()
+  let embedded = false, projected = false
+  f.pipeline.embedPending = async ({ beforeEmbed }) => {
+    if (embedded) return { embedded: 0 }
+    await beforeEmbed(['正文'])
+    embedded = true
+    f.calls.push('model')
+    return { embedded: 1 }
+  }
+  f.pipeline.projectPending = async () => {
+    if (projected) return { projected: 0 }
+    projected = true
+    return { projected: 1 }
+  }
+  await processRetrievalJob(f)
+  assert.equal(f.calls.filter((call) => call === 'heartbeat').length, 0)
+  assert.equal(f.calls.filter((call) => call === 'assertLease').length, 7)
+  assert.ok(f.calls.indexOf('budget') < f.calls.indexOf('model'))
+  assert.ok(f.calls.includes('complete'))
+})
+
+test('ownership is checked again immediately before a paid embedding request', async () => {
+  const f = fixture()
+  f.pipeline.embedPending = async ({ beforeEmbed }) => {
+    f.jobs.assertLease = async () => {
+      throw Object.assign(Error('lost'), { code: 'retrieval_lease_lost' })
+    }
+    await beforeEmbed(['正文'])
+    f.calls.push('model')
+    return { embedded: 1 }
+  }
+  await processRetrievalJob(f)
+  assert.ok(f.calls.includes('retrieval_lease_lost'))
+  assert.equal(f.calls.includes('budget'), false)
+  assert.equal(f.calls.includes('model'), false)
+  assert.equal(f.calls.includes('complete'), false)
+})
+
+test('long work still renews every 30 seconds and stops the timer after completion', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const f = fixture()
+  let release, entered
+  const gate = new Promise((resolve) => { release = resolve })
+  const started = new Promise((resolve) => { entered = resolve })
+  f.pipeline.materializeChunks = async () => { entered(); await gate }
+  const running = processRetrievalJob(f)
+  await started
+  t.mock.timers.tick(29_999)
+  await new Promise(setImmediate)
+  assert.equal(f.calls.filter((call) => call === 'heartbeat').length, 0)
+  t.mock.timers.tick(1)
+  await new Promise(setImmediate)
+  assert.equal(f.calls.filter((call) => call === 'heartbeat').length, 1)
+  t.mock.timers.tick(30_000)
+  await new Promise(setImmediate)
+  assert.equal(f.calls.filter((call) => call === 'heartbeat').length, 2)
+  release()
+  await running
+  t.mock.timers.tick(30_000)
+  await new Promise(setImmediate)
+  assert.equal(f.calls.filter((call) => call === 'heartbeat').length, 2)
+  assert.ok(f.calls.includes('complete'))
+})
+
+test('periodic renewal failure stops the next costly stage', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const f = fixture()
+  let release, entered
+  const gate = new Promise((resolve) => { release = resolve })
+  const started = new Promise((resolve) => { entered = resolve })
+  f.pipeline.materializeChunks = async () => { entered(); await gate }
+  f.jobs.heartbeat = async () => {
+    throw Object.assign(Error('lost'), { code: 'retrieval_lease_lost' })
+  }
+  f.pipeline.embedPending = async () => { f.calls.push('model'); return { embedded: 0 } }
+  const running = processRetrievalJob(f)
+  await started
+  t.mock.timers.tick(30_000)
+  await new Promise(setImmediate)
+  release()
+  await running
+  assert.ok(f.calls.includes('retrieval_lease_lost'))
+  assert.equal(f.calls.includes('model'), false)
+  assert.equal(f.calls.includes('complete'), false)
 })
