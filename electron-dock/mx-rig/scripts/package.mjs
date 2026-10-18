@@ -218,6 +218,10 @@ async function buildOne(arch) {
     if (process.platform === 'darwin' && !process.env.CSC_LINK && !process.env.CSC_NAME) {
       config.mac = { ...config.mac, identity: null }
       config.afterPack = async ({ appOutDir, packager }) => {
+        // A universal build packs an x64 and an arm64 half first, then merges
+        // them: a signature in a half differs per architecture and the merge
+        // refuses it. Only the merged app is signed (this hook runs for it too).
+        if (/-(x64|arm64)-temp$/.test(appOutDir)) return
         const app = join(appOutDir, `${packager.appInfo.productFilename}.app`)
         const signed = spawnSync('codesign', ['--force', '--deep', '--sign', '-', app], { stdio: 'inherit' })
         if (signed.status !== 0) throw new Error(`ad-hoc signing ${app} failed`)

@@ -1303,6 +1303,86 @@ rm -f -- "$migration_cleanup_events" "$migration_cleanup_failure_events" \
   "$migration_cleanup_failure_error"
 printf 'ok - migration deadline is single-attempt and cleanup stops the Job before Admin restore\n'
 
+admin_stop_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-admin-stop-events.XXXXXX")"
+admin_stop_output="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-admin-stop-output.XXXXXX")"
+if ADMIN_STOP_EVENTS="$admin_stop_events" bash -c '
+  source "$1/scripts/manage.sh"
+  trap cleanup_deploy_runtime EXIT
+  kubectl() {
+    printf "%s\n" "$*" >>"$ADMIN_STOP_EVENTS"
+    case "$*" in
+      *"wait --for=delete pod"*) return 1 ;;
+      *"get deployment/mx-insight-hub-admin"*"custom-columns="*)
+        printf "NAME GENERATION OBSERVED DESIRED CURRENT READY AVAILABLE\nadmin-snapshot 9 9 0 1 1 1\n"
+        ;;
+      *"get pods"*"custom-columns="*)
+        printf "NAME NODE PHASE DELETING\n"
+        for index in {1..30}; do printf "admin-pod-%02d node Running 2026-10-18T10:00:00Z\n" "$index"; done
+        ;;
+      *"describe"*|*"logs"*) printf "UNSAFE_PRIVATE_CONTENT\n" ;;
+    esac
+  }
+  docker() { :; }
+  disable_projector_startup_rebuild_for_deploy() { :; }
+  validate_existing_runtime_secret() { :; }
+  preserve_existing_justone_runtime_config() { :; }
+  preserve_existing_tikhub_runtime_config() { :; }
+  preserve_existing_peripheral_runtime_config() { :; }
+  preserve_existing_news_runtime_config() { :; }
+  discover_hanlp_url() { :; }
+  create_runtime_config() { :; }
+  create_model_key_secret() { :; }
+  sync_launcher_secret() { :; }
+  warn_local_postgres_present() { :; }
+  ensure_acquisition_history_indexes() { :; }
+  terminate_active_migration_job() { printf "migration-reached\n" >>"$ADMIN_STOP_EVENTS"; }
+  render_file() { printf "render:%s\n" "$*" >>"$ADMIN_STOP_EVENTS"; }
+  apply_k8s
+' _ "$ROOT_DIR" >"$admin_stop_output" 2>&1; then
+  printf 'not ok - failed Admin freeze continued deployment\n' >&2
+  exit 1
+fi
+grep -Fq 'Hub Admin did not stop before the staged rollout' "$admin_stop_output"
+grep -Fq 'Admin stop diagnostics (metadata only; at most 20 Pods)' "$admin_stop_output"
+grep -Fq 'admin-snapshot 9 9 0 1 1 1' "$admin_stop_output"
+grep -Fq 'admin-pod-20 ' "$admin_stop_output"
+if grep -Eq 'admin-pod-(21|30)|UNSAFE_PRIVATE_CONTENT' "$admin_stop_output" \
+  || grep -Eq 'migration-reached|20-migration-job|describe| logs |\.env|\.message| -o (json|yaml)|mx-launcher' "$admin_stop_events"; then
+  printf 'not ok - failed Admin freeze launched migration or exposed unbounded/private diagnostics\n' >&2
+  exit 1
+fi
+assert_eq 2 "$(grep -c -- '--request-timeout=10s' "$admin_stop_events")" 'Admin stop metadata requests have bounded timeouts'
+grep -Fq -- '-n mx-insight-hub get pods -l app.kubernetes.io/name=mx-insight-hub-admin' "$admin_stop_events"
+grep -Fq -- 'scale deployment/mx-insight-hub-admin --replicas=1' "$admin_stop_events"
+rm -f -- "$admin_stop_events" "$admin_stop_output"
+printf 'ok - failed Admin freeze emits bounded metadata only and aborts before migration\n'
+
+admin_restore_output="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-admin-restore-output.XXXXXX")"
+if bash -c '
+  source "$1/scripts/manage.sh"
+  DEPLOY_FROZEN_ADMIN=1
+  kubectl() { printf "UNSAFE_PRIVATE_ERROR\n" >&2; return 23; }
+  docker() { :; }
+  # Failed diagnostic reads and failed restoration must preserve the original
+  # deploy exit code; neither is evidence that Admin is ready.
+  k8s_admin_stop_diagnostics
+  set +e
+  (exit 7)
+  cleanup_deploy_runtime
+' _ "$ROOT_DIR" >"$admin_restore_output" 2>&1; then
+  printf 'not ok - failed Admin restoration changed deployment failure to success\n' >&2
+  exit 1
+else
+  assert_eq 7 "$?" 'Admin restoration failure preserves the original deployment exit code'
+fi
+grep -Fq 'WARNING: Hub Admin replica restoration failed; Admin availability is unconfirmed.' "$admin_restore_output"
+if grep -Eq 'UNSAFE_PRIVATE_ERROR|Admin (is )?ready|restoration succeeded' "$admin_restore_output"; then
+  printf 'not ok - failed Admin restoration exposed raw output or claimed readiness\n' >&2
+  exit 1
+fi
+rm -f -- "$admin_restore_output"
+printf 'ok - failed Admin restoration is visible without masking the deploy failure\n'
+
 acquisition_index_stdin="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-acquisition-index-stdin.XXXXXX")"
 acquisition_index_argv="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-acquisition-index-argv.XXXXXX")"
 ACQUISITION_INDEX_STDIN="$acquisition_index_stdin" \
@@ -1944,6 +2024,28 @@ launcher_cli_override="$(bash -c '
   ops_action internal-production status
 ' _ "$ROOT_DIR")"
 assert_eq '00' "$launcher_cli_override" 'explicit Hub-only deploy flag overrides a persisted Launcher sync setting'
+
+smoke_env_dir="$(mktemp -d "${TMPDIR:-/tmp}/mx-insight-hub-smoke-env.XXXXXX")"
+printf 'MX_SMOKE_DATA=1\n' >"${smoke_env_dir}/.env.internal"
+for smoke_mode in cli-off saved; do
+  smoke_effective="$(SMOKE_ENV_DIR="$smoke_env_dir" SMOKE_MODE="$smoke_mode" bash -c '
+    source "$1/scripts/manage.sh"
+    ROOT_DIR="$SMOKE_ENV_DIR"
+    unset MX_SMOKE_DATA
+    if [ "$SMOKE_MODE" = cli-off ]; then export MX_SMOKE_DATA=0; fi
+    need() { :; }
+    # Check the exported value seen by child processes after real env loading.
+    kubectl() { node -e "process.stdout.write(process.env.MX_SMOKE_DATA || \"unset\")"; }
+    ops_action internal-production status
+  ' _ "$ROOT_DIR")"
+  if [ "$smoke_mode" = cli-off ]; then
+    assert_eq '00' "$smoke_effective" 'explicit data-smoke disable survives persisted MX_SMOKE_DATA=1'
+  else
+    assert_eq '11' "$smoke_effective" 'omitted data-smoke choice retains persisted MX_SMOKE_DATA=1'
+  fi
+done
+rm -f -- "${smoke_env_dir}/.env.internal"
+rmdir -- "$smoke_env_dir"
 
 # ---------------------------------------------------------------------------
 # Database provisioning

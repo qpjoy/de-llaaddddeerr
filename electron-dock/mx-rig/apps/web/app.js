@@ -775,6 +775,11 @@ function renderNav() {
     h('span', {}, h('span', { text: item.title }), h('span', { class: 'rig-nav__sub', text: item.sub })))
   }
   nav.append(pageButton('projects'))
+  nav.append(h('button', {
+    class: 'rig-nav__item', type: 'button',
+    onclick: () => run(openConversationPreview)
+  }, h('span', { class: 'rig-nav__glyph', text: '◇' }),
+  h('span', {}, h('span', { text: '对话工作台 · 预览' }), h('span', { class: 'rig-nav__sub', text: '新导航与测试流程对比' }))))
   nav.append(h('p', { class: 'rig-nav__label', text: '最近任务' }))
   const list = h('div', { class: 'rig-missions' })
   for (const row of state.missions.slice(0, 12))
@@ -837,6 +842,34 @@ function renderNav() {
     nav.append(details)
   }
 
+}
+
+async function openConversationPreview() {
+  if (document.getElementById('rig-conversation-preview')) return
+  // An overlay works in both Web and Electron without relaxing native
+  // navigation rules or touching the existing login/network lifecycle.
+  const { mountConversationPreview } = await import('./conversation-preview.js')
+  if (document.getElementById('rig-conversation-preview')) return
+  const previousFocus = document.activeElement
+  const host = h('div', { id: 'rig-conversation-preview' })
+  document.body.append(host)
+  const workspace = $('workspace')
+  workspace.inert = true
+  const close = () => {
+    host.remove()
+    workspace.inert = false
+    if (previousFocus?.isConnected) previousFocus.focus()
+  }
+  try {
+    mountConversationPreview(host, {
+      onExit: close,
+      onLegacy: (view) => { close(); go(view) }
+    })
+  } catch (error) {
+    close()
+    throw error
+  }
+  host.querySelector('button')?.focus()
 }
 
 function go(view) {

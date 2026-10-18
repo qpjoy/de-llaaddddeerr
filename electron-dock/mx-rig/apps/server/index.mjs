@@ -380,6 +380,10 @@ export async function start(env = process.env, options = {}) {
       const files = {
         '/rig': 'index.html',
         '/rig/': 'index.html',
+        '/rig/conversation-preview.html': 'conversation-preview.html',
+        '/rig/conversation-preview.css': 'conversation-preview.css',
+        '/rig/conversation-preview.js': 'conversation-preview.js',
+        '/rig/conversation-preview-model.js': 'conversation-preview-model.js',
         '/rig/app.js': 'app.js',
         '/rig/views.js': 'views.js',
         '/rig/graph-view.js': 'graph-view.js',
