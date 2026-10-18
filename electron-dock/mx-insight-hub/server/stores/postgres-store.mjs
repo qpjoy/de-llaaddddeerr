@@ -35,6 +35,14 @@ function iso(value) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString()
 }
 
+function usageAdmissionUnavailable(cause, stage) {
+  const error = new AppError(503, 'usage_admission_unavailable',
+    'Hub request admission is temporarily unavailable; check the same idempotency key before retrying',
+    { stage })
+  error.cause = cause
+  return error
+}
+
 // Written in the same INSERT as the reservation, so the parameters of a paid
 // request exist before any upstream work and can never be rewritten by a later
 // replay of the same Idempotency-Key.
@@ -118,6 +126,7 @@ function adminTelegramChatSelector(chatId, sourceScope = 'all') {
   const qualified = /^(monitor|sqlite):([0-9a-f-]{36})$/i.exec(chatId)
   return {
     value: qualified?.[2] ?? chatId,
+    canonicalId: Boolean(qualified && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(qualified[2])),
     datasets: adminTelegramDatasets(qualified?.[1]?.toLowerCase() ?? sourceScope, 'chats'),
   }
 }
@@ -1102,11 +1111,41 @@ export class PostgresStore {
   }
 
   async reapStaleReservations() {
-    const { rows } = await this.pool.query(
-      `WITH reaped AS (
+    try {
+      return await withPgTransaction(this.pool, async client => {
+        await client.query("SET LOCAL lock_timeout = '500ms'")
+        await client.query("SET LOCAL statement_timeout = '5s'")
+        const candidates = await client.query(`SELECT id FROM usage_requests
+          WHERE status = 'reserved' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()
+          ORDER BY lease_expires_at, id LIMIT 100`)
+        const ids = candidates.rows.map(row => row.id)
+        if (!ids.length) return 0
+        // Settlement locks its call before its usage row. Follow that order,
+        // skipping active settlements instead of making every new request wait
+        // for unrelated recovery. A usage row is eligible only when all of its
+        // visible pending calls were locked by this transaction.
+        const external = await client.query(`SELECT call.id FROM external_platform.provider_calls call
+          WHERE call.usage_request_id = ANY($1::uuid[]) AND call.outcome = 'pending'
+          ORDER BY call.id FOR UPDATE OF call SKIP LOCKED`, [ids])
+        const connectors = await client.query(`SELECT call.id FROM serving.connector_calls call
+          WHERE call.usage_request_id = ANY($1::uuid[]) AND call.outcome IS NULL
+          ORDER BY call.id FOR UPDATE OF call SKIP LOCKED`, [ids])
+        const { rows } = await client.query(
+      `WITH eligible AS MATERIALIZED (
+         SELECT request.id FROM usage_requests request
+          WHERE request.id = ANY($1::uuid[]) AND request.status = 'reserved'
+            AND request.lease_expires_at IS NOT NULL AND request.lease_expires_at <= now()
+            AND NOT EXISTS (SELECT 1 FROM external_platform.provider_calls call
+              WHERE call.usage_request_id = request.id AND call.outcome = 'pending'
+                AND NOT (call.id = ANY($2::uuid[])))
+            AND NOT EXISTS (SELECT 1 FROM serving.connector_calls call
+              WHERE call.usage_request_id = request.id AND call.outcome IS NULL
+                AND NOT (call.id = ANY($3::uuid[])))
+          ORDER BY request.id FOR UPDATE OF request SKIP LOCKED
+       ), reaped AS (
          UPDATE usage_requests SET
            status = 'unknown', error_code = 'reservation_lease_expired', completed_at = now()
-         WHERE status = 'reserved' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()
+         WHERE id IN (SELECT id FROM eligible)
          RETURNING id
        ), closed_calls AS (
          UPDATE serving.connector_calls call SET
@@ -1124,8 +1163,16 @@ export class PostgresStore {
          RETURNING call.id
        )
        SELECT count(*)::integer AS reaped FROM reaped`,
-    )
-    return Number(rows[0]?.reaped || 0)
+          [ids, external.rows.map(row => row.id), connectors.rows.map(row => row.id)],
+        )
+        return Number(rows[0]?.reaped || 0)
+      }, { outcomeUnknownCode: 'usage_recovery_persistence_unknown' })
+    } catch (error) {
+      if (['55P03', '57014', '40P01'].includes(error?.code)) {
+        throw usageAdmissionUnavailable(error, 'recovery')
+      }
+      throw error
+    }
   }
 
   async createTenant({ name, status = 'active' }) {
@@ -2422,9 +2469,19 @@ export class PostgresStore {
     }
     const authorizationScopes = requiredAuthorizationScopes(input)
     const legacySingleScope = input.requiredAuthorizationScopes == null
-    const client = await this.pool.connect()
+    let client
+    try { client = await this.pool.connect() }
+    catch (error) { throw usageAdmissionUnavailable(error, 'connection') }
+    let commitStarted = false
+    let releaseError = null
+    let reservationId = input.requestId
     try {
       await client.query('BEGIN')
+      // Bound database-side waits before a durable request exists. These are
+      // transaction-local so stored reads, ingest and identity keep their own
+      // policies; PostgreSQL cancels the statement before we roll it back.
+      await client.query("SET LOCAL lock_timeout = '5s'")
+      await client.query("SET LOCAL statement_timeout = '15s'")
       // Recovery shares this lock. Inserts use wall-clock reservation time below,
       // so a transaction queued before recovery still counts in the new window.
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
@@ -2470,6 +2527,7 @@ export class PostgresStore {
       )
       const existing = requestRecord(rows[0])
       if (existing) {
+        reservationId = existing.id
         let kind
         // Keep read-only status recovery consumer-scoped, while ensuring a
         // mutable usage row can never be rebound to a different API key.
@@ -2483,6 +2541,7 @@ export class PostgresStore {
         } else if (existing.status === 'reserved') kind = 'in_progress'
         else if (existing.status === 'unknown') kind = 'unknown'
         else {
+          reservationId = input.requestId
           await this.#assertQuota(client, quotaInput)
           const inserted = await client.query(
             `INSERT INTO usage_requests
@@ -2513,9 +2572,11 @@ export class PostgresStore {
              WHERE consumer_id = $1 AND idempotency_key = $2`,
             [input.consumerId, input.idempotencyKey, input.requestId],
           )
+          commitStarted = true
           await client.query('COMMIT')
           return { kind: 'reserved', request: requestRecord(inserted.rows[0]) }
         }
+        commitStarted = true
         await client.query('COMMIT')
         return { kind, request: existing }
       }
@@ -2557,10 +2618,24 @@ export class PostgresStore {
           input.requestId,
         ],
       )
+      commitStarted = true
       await client.query('COMMIT')
       return { kind: 'reserved', request: requestRecord(inserted.rows[0]) }
     } catch (error) {
-      await client.query('ROLLBACK')
+      if (commitStarted) {
+        releaseError = error
+        const unknown = new AppError(503, 'usage_reservation_persistence_unknown',
+          'The reservation outcome is unknown; check the same idempotency key before retrying',
+          { requestId: reservationId, stage: 'reservation_commit' })
+        unknown.cause = error
+        unknown.preserveReservation = true
+        throw unknown
+      }
+      try { await client.query('ROLLBACK') }
+      catch (rollbackError) { releaseError = rollbackError }
+      if (['55P03', '57014', '40P01'].includes(error?.code)) {
+        throw usageAdmissionUnavailable(error, 'reservation')
+      }
       if (error?.code === 'P0001' && error?.message === 'insufficient_credit') {
         throw new AppError(402, 'insufficient_credit', 'Tenant credit is insufficient for this request')
       }
@@ -2569,7 +2644,7 @@ export class PostgresStore {
       }
       throw error
     } finally {
-      client.release()
+      client.release(releaseError)
     }
   }
 
@@ -4114,7 +4189,10 @@ export class PostgresStore {
     const { rows } = await this.pool.query(
       `SELECT id, dataset_id, external_id, object_type, content_type, url, title, body,
               author_external_id, author_name, event_time, collected_at,
-              stable_fields, current_revision, event_time AS sort_time
+              stable_fields, current_revision,
+              ${platform === 'telegram'
+                ? `to_char(event_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
+                : 'event_time'} AS sort_time
          FROM core.canonical_records
         WHERE dataset_id = $1
           AND platform = $2
@@ -4672,7 +4750,8 @@ export class PostgresStore {
               chat.content_type, chat.url, chat.title, chat.body,
               chat.author_external_id, chat.author_name, chat.event_time,
               chat.collected_at, chat.stable_fields, chat.current_revision,
-              coalesce(chat.event_time, chat.collected_at, chat.first_seen_at) AS sort_time
+              to_char(coalesce(chat.event_time, chat.collected_at, chat.first_seen_at)
+                AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS sort_time
          FROM core.canonical_records chat
         WHERE chat.dataset_id = ANY($1::text[])
           AND chat.platform = 'telegram'
@@ -4702,17 +4781,18 @@ export class PostgresStore {
               chat.content_type, chat.url, chat.title, chat.body,
               chat.author_external_id, chat.author_name, chat.event_time,
               chat.collected_at, chat.stable_fields, chat.current_revision,
-              coalesce(chat.event_time, chat.collected_at, chat.first_seen_at) AS sort_time
+              to_char(coalesce(chat.event_time, chat.collected_at, chat.first_seen_at)
+                AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS sort_time
          FROM core.canonical_records chat
         WHERE chat.dataset_id = ANY($2::text[])
           AND chat.platform = 'telegram'
           AND chat.object_type = 'chat'
           AND chat.deleted_at IS NULL
-          AND (
+          AND ${selector.canonicalId ? 'chat.id = $1::uuid' : `(
             chat.id::text = $1
             OR chat.external_id = $1
             OR ltrim(chat.stable_fields #>> '{attributes,username}', '@') = ltrim($1, '@')
-          )
+          )`}
         ORDER BY (chat.dataset_id = 'telegram.monitor.chats.v1') DESC, chat.id DESC
         LIMIT 1`,
       [selector.value, selector.datasets],
@@ -4735,36 +4815,56 @@ export class PostgresStore {
       cursor?.sortTime ?? null,
       cursor?.id ?? null,
     ]
-    const sortExpression = 'coalesce(message.event_time, message.collected_at, message.first_seen_at)'
-    const predicates = [
-      'message.dataset_id = ANY($1::text[])',
-      "message.platform = 'telegram'",
-      "message.object_type = 'message'",
-      'message.deleted_at IS NULL',
-      "($2::text IS NULL OR message.stable_fields #>> '{relations,chatId}' = $2)",
-      `(
-        $3::timestamptz IS NULL
-        OR (${sortExpression}, message.id) < ($3::timestamptz, $4::uuid)
-      )`,
-    ]
     const parameter = (value) => {
       values.push(value)
       return `$${values.length}`
     }
-    if (from) predicates.push(`${sortExpression} >= ${parameter(from)}::timestamptz`)
-    if (to) predicates.push(`${sortExpression} <= ${parameter(to)}::timestamptz`)
+    const fromParameter = from ? parameter(from) : null
+    const toParameter = to ? parameter(to) : null
     const limit = parameter(pageSize + 1)
+    // The existing per-dataset chat/time indexes order by event_time. Keep the
+    // missing-event-time rows in separate branches so their fallback does
+    // not force every dated message in a large chat through a sort. All four
+    // possible branches select only IDs/time; bodies are read after the page is
+    // bounded in this same snapshot.
+    const branches = datasets.flatMap(datasetId => [false, true].map(missingEventTime => {
+      const sortExpression = missingEventTime
+        ? 'coalesce(message.collected_at, message.first_seen_at)'
+        : 'message.event_time'
+      const predicates = [
+        `message.dataset_id = '${datasetId}'`,
+        'message.dataset_id = ANY($1::text[])',
+        "message.platform = 'telegram'",
+        "message.object_type = 'message'",
+        'message.deleted_at IS NULL',
+        `message.event_time IS ${missingEventTime ? '' : 'NOT '}NULL`,
+        "($2::text IS NULL OR message.stable_fields #>> '{relations,chatId}' = $2)",
+        `($3::timestamptz IS NULL OR (${sortExpression}, message.id) < ($3::timestamptz, $4::uuid))`,
+      ]
+      if (fromParameter) predicates.push(`${sortExpression} >= ${fromParameter}::timestamptz`)
+      if (toParameter) predicates.push(`${sortExpression} <= ${toParameter}::timestamptz`)
+      return `(SELECT message.id, ${sortExpression} AS sort_time
+                 FROM core.canonical_records message
+                WHERE ${predicates.join('\n                  AND ')}
+                ORDER BY ${sortExpression} DESC, message.id DESC
+                LIMIT ${limit})`
+    }))
     const { rows } = await this.pool.query(
-      `SELECT message.id, message.dataset_id, message.external_id,
+      `WITH page AS MATERIALIZED (
+         SELECT id, sort_time
+           FROM (${branches.join('\n           UNION ALL\n           ')}) candidates
+          ORDER BY sort_time DESC, id DESC
+          LIMIT ${limit}
+       )
+       SELECT message.id, message.dataset_id, message.external_id,
               message.object_type, message.content_type, message.url,
               message.title, message.body, message.author_external_id,
               message.author_name, message.event_time, message.collected_at,
               message.stable_fields, message.current_revision,
-              ${sortExpression} AS sort_time
-         FROM core.canonical_records message
-        WHERE ${predicates.join('\n          AND ')}
-        ORDER BY ${sortExpression} DESC, message.id DESC
-        LIMIT ${limit}`,
+              to_char(page.sort_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS sort_time
+         FROM page
+         JOIN core.canonical_records message ON message.id = page.id
+        ORDER BY page.sort_time DESC, page.id DESC`,
       values,
     )
     return rows
@@ -4785,7 +4885,8 @@ export class PostgresStore {
               message.title, message.body, message.author_external_id,
               message.author_name, message.event_time, message.collected_at,
               message.stable_fields, message.current_revision,
-              coalesce(message.event_time, message.collected_at, message.first_seen_at) AS sort_time,
+              to_char(coalesce(message.event_time, message.collected_at, message.first_seen_at)
+                AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS sort_time,
               CASE
                 WHEN lower(coalesce(message.body, '')) = lower($2) THEN 1.0
                 ELSE 0.5
@@ -4817,9 +4918,9 @@ export class PostgresStore {
             )
           )
           AND (
-            message.body ILIKE '%' || $2 || '%'
-            OR message.title ILIKE '%' || $2 || '%'
-            OR message.author_name ILIKE '%' || $2 || '%'
+            message.body ILIKE $8
+            OR message.title ILIKE $8
+            OR message.author_name ILIKE $8
           )
           AND (
             $5::timestamptz IS NULL
@@ -4830,6 +4931,7 @@ export class PostgresStore {
       [
         messageDatasets, query, chatExternalId, kind,
         cursor?.sortTime ?? null, cursor?.id ?? null, pageSize + 1,
+        `%${query.replace(/[\\%_]/g, '\\$&')}%`,
       ],
     )
     return rows
@@ -9449,7 +9551,7 @@ export async function withPgTransaction(pool, fn, {
       unknown.cause = error
       throw unknown
     }
-    await client.query('ROLLBACK').catch(() => {})
+    await client.query('ROLLBACK').catch(error => { releaseError = error })
     throw error
   } finally {
     if (!sessionClient) client.release(releaseError)
@@ -9695,7 +9797,7 @@ function summarizeRequestMetering(rows) {
   return { byMeter }
 }
 
-export async function createPostgresStore({ internalTraffic, ...options }) {
-  const { Pool } = await import('pg')
-  return new PostgresStore(new Pool(options), { internalTraffic })
+export async function createPostgresStore({ internalTraffic, logger, ...options }) {
+  const { createHubPostgresPool } = await import('../core/postgres-pool.mjs')
+  return new PostgresStore(createHubPostgresPool(options, { logger }), { internalTraffic })
 }

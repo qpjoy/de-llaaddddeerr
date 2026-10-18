@@ -16,6 +16,7 @@ import { savedRecordCategoryCatalog } from './data/saved-record-categories.mjs'
 import { normalizeNewsQuery, newsCatalog, NEWS_CONTRACT, NEWS_METER } from './data/news-discovery.mjs'
 import { compileBillingComponents } from '../shared/billing-composition.mjs'
 import { sealApiKey, openApiKey } from './core/key-vault.mjs'
+import { cursorTimestampOrderKey } from './core/cursor-time.mjs'
 import { issueDemoCredential, readDemoCredentialClaims } from './core/demo-credential.mjs'
 import { storedEcommerceQuery } from './contracts/ecommerce-stored.mjs'
 import { randomUUID } from 'node:crypto'
@@ -379,6 +380,10 @@ function publicRequestStatus(record) {
     ...(record.capturedAt ? { capturedAt: record.capturedAt } : {}),
     reservedAt: record.reservedAt,
     completedAt: record.completedAt,
+    ...(record.status === 'reserved' && record.leaseExpiresAt ? {
+      leaseExpiresAt: record.leaseExpiresAt,
+      leaseExpired: Date.parse(record.leaseExpiresAt) <= Date.now(),
+    } : {}),
   }
 }
 
@@ -2399,7 +2404,7 @@ export class HubService {
             rows = [...new Map(
               pages.flat()
                 .sort((left, right) => {
-                  const time = new Date(right.sort_time).getTime() - new Date(left.sort_time).getTime()
+                  const time = cursorTimestampOrderKey(right.sort_time).localeCompare(cursorTimestampOrderKey(left.sort_time))
                   return time || String(right.id).localeCompare(String(left.id))
                 })
                 .map((row) => [row.id, row]),
@@ -4076,7 +4081,8 @@ export class HubService {
   }
 
   async requestStatus(context, requestId) {
-    await this.store.reapStaleReservations()
+    // Status recovery must not queue behind global cleanup writes. Preserve the
+    // saved state; an expired lease is not evidence that procurement never ran.
     const record = await this.store.getRequest(requiredUuid(requestId, 'requestId'), context.consumer.id)
     assert(record, 404, 'request_not_found', 'Request not found')
     const binding = await new SearchProtocolStore(this.store).bindingForUsage(context, requestId)
@@ -4085,7 +4091,6 @@ export class HubService {
 
   async requestStatusByIdempotencyKey(context, idempotencyKey) {
     const key = requiredIdempotencyKey(idempotencyKey)
-    await this.store.reapStaleReservations()
     const record = await this.store.getUsageRequestByIdempotencyKey(context.consumer.id, key)
     const binding = await new SearchProtocolStore(this.store).binding(context, key)
     assert(record || binding, 404, 'request_not_found', 'Request not found')
@@ -4722,13 +4727,14 @@ export class HubService {
   }
 
   async #searchLegacy(context, { body, idempotencyKey, path, liveOnly = false, responseFormat = 'data', signal, retryOfRequestId }) {
+    const dedicatedTelegramSearch = path === '/api/v1/data/telegram/search'
     if (retryOfRequestId != null) {
       assert(path === '/api/v1/data/search' && responseFormat === 'data'
         && typeof body?.platform === 'string' && canonicalPlatform(body.platform) === 'twitter',
       400, 'uncertain_retry_not_supported', 'Manual retry is only supported for standard Twitter search')
     }
     if (responseFormat === 'raw') return this.#nightAllCompatibilitySearch(context, { operation: 'raw', body, idempotencyKey, path, signal })
-    if (wechatSearchPlatform(body?.platform)) {
+    if (!dedicatedTelegramSearch && wechatSearchPlatform(body?.platform)) {
       const mapped = normalizeWechatDataSearch(body)
       assert(this.externalWechatSearch, 503, 'external_platform_unavailable', 'WeChat data service is unavailable')
       return this.externalWechatSearch(context, { ...mapped, idempotencyKey })
@@ -4741,8 +4747,7 @@ export class HubService {
       'Idempotency-Key must contain 8-128 safe characters',
     )
     assert(body && typeof body === 'object' && !Array.isArray(body), 400, 'invalid_request', 'JSON object body is required')
-    const dedicatedTelegramSearch = path === '/api/v1/data/telegram/search'
-    const requestedPlatform = canonicalPlatform(body.platform)
+    const requestedPlatform = dedicatedTelegramSearch ? 'telegram' : canonicalPlatform(body.platform)
     const facebookSearch = requestedPlatform === 'facebook'
     const directContentSearch = Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, requestedPlatform)
     const contentSearchParams = directContentSearch && TIKHUB_CONTENT_SEARCH_RECIPES[requestedPlatform].publicParams !== false
@@ -4779,7 +4784,7 @@ export class HubService {
     )
 
     const policy = await this.#effectivePlatformPolicy(context, platform)
-    const pageSize = positiveInteger(body.pageSize, 'pageSize', 20)
+    const pageSize = positiveInteger(body.pageSize, 'pageSize', dedicatedTelegramSearch ? Math.min(50, policy.maxPageSize) : 20)
     assert(
       pageSize <= policy.maxPageSize,
       400,

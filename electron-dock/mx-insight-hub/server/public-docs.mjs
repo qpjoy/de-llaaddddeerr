@@ -3239,7 +3239,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
           from: { type: 'string', format: 'date-time' },
           to: { type: 'string', format: 'date-time' },
           sourceScope: { type: 'string', enum: ['all', 'monitor', 'sqlite'], default: 'monitor' },
-          matchMode: { type: 'string', enum: ['full_text'], default: 'full_text' },
+          matchMode: { type: 'string', enum: ['full_text'], default: 'full_text', description: 'Natural text using the balanced search profile; AND/OR/NOT, parentheses, wildcards and fuzzy suffixes are not a public query language.' },
           pageSize: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
           cursor: { type: 'string', minLength: 1, maxLength: 8192, description: 'HMAC-signed version-3 cursor bound to query, filters and bounded first-page analysis state; return unchanged.' },
         },
@@ -5101,6 +5101,8 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
               capturedAt: { type: 'string', format: 'date-time' },
               errorCode: { type: ['string', 'null'] }, reservedAt: { type: 'string', format: 'date-time' },
               completedAt: { type: ['string', 'null'], format: 'date-time' },
+              leaseExpiresAt: { type: 'string', format: 'date-time', description: 'Present for a reserved request with a recorded lease.' },
+              leaseExpired: { type: 'boolean', description: 'An expired reservation is still unresolved. Status reads do not run cleanup or authorize another acquisition.' },
             },
           },
           requestId: { type: 'string' },
@@ -6499,7 +6501,10 @@ curl -sS -G "$HUB_URL/api/v1/data/canonical/items/&lt;search-item-id&gt;/timelin
       <tr><td>4. 向上滚动</td><td>回传 <code>pageInfo.older.cursor</code>，按 canonical ID 去重后 prepend；记录插入前后 scroll height 差值并补偿 <code>scrollTop</code>，保持用户当前视口。</td></tr>
       <tr><td>5. 向下/实时跟随</td><td>回传 <code>pageInfo.newer.cursor</code>，去重后 append；到达底部后可继续用返回的新 newer cursor 轮询。</td></tr>
     </tbody></table>
-    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/entities/search?query=example&amp;pageSize=20</code></div><p>模糊匹配作者名称/用户名和会话标题/用户名。</p></div>
+    <h3>下游关键词策略与分页</h3>
+    <p>Telegram 专用搜索的 <code>matchMode</code> 当前只接受 <code>full_text</code>：自然文本使用默认 balanced 策略，不解析输入中的 AND、OR、NOT、括号或模糊后缀。需要分词 AND 或短语时，使用 canonical search 的 <code>canonical.terms-all.v1</code> / <code>canonical.phrase.v1</code>；它不接受 Telegram 专用的 chatId、authorId、from/to。多关键词 OR 应逐词独立分页，再按 canonical UUID 合并去重；各词游标独立，不能合成一个全局相关度排名或相加总数。</p>
+    <p>建议显式传 <code>pageSize=20</code>，按需继续下一页；定位会话时优先用带 chatId 和时间窗的 Telegram 专用搜索，它不等待精确总数。GET history 的 chatId 可以是 chatKey；POST search 的 chatId 使用原始规范化聊天 ID。每个搜索新页面使用新幂等键，同页重试保留原键与原请求；PIT 每页续期两分钟，过期需明确重开。严格关键词策略遇到降级告警应暂停确认或将结果标为待复核。</p>
+    <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/telegram/entities/search?query=example&amp;pageSize=20</code></div><p>模糊匹配 Monitor 作者名称/用户名和会话标题/用户名，仅返回有界候选；不支持 cursor/sourceScope，也不代表支持消息正文的 fuzzy 查询。</p></div>
     <div class="notice">如果搜索响应包含 <code>search_projection_degraded</code>，代表当前页面由 PostgreSQL 检索托底。Canonical 接口还会以 <code>search.appliedProfile=postgres.substring.v1</code> 和 <code>search_profile_degraded</code> 明示策略变化；Telegram/Stored 兼容响应只保留投影告警。若 Elasticsearch 仍在线但 HanLP 查询降级，三个接口都会返回 <code>search_profile_degraded</code>。已有 Elasticsearch 游标会签名并复用首屏分词状态，不会中途切换模式或重新分词。</div>
     </section>
 

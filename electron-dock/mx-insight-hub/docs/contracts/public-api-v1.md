@@ -1698,6 +1698,17 @@ other granted platforms apply the publication predicate only to
 
 ## Telegram stored data
 
+Downstream handoff: [Telegram integration and keyword strategy rules](../integrations/telegram-downstream-guide.md).
+The public query is natural text, not a Boolean expression parser: do not join
+keywords with literal AND/OR/NOT or fuzzy suffixes. The dedicated Telegram
+search accepts only `matchMode=full_text`; canonical search offers the explicit
+`canonical.terms-all.v1` and `canonical.phrase.v1` profiles. Those canonical
+profiles do not accept Telegram-specific chat/author/time filters. Independent
+keyword searches can be unioned by canonical UUID, retaining separate cursors
+and reporting incomplete branches; their scores and totals cannot be combined
+as one globally ranked result. Entity fuzzy lookup is a bounded Monitor-only
+candidate lookup, not fuzzy message-body search or a paged export.
+
 ### History
 
 ```http
@@ -1775,7 +1786,7 @@ The query allowlist is resource-specific:
 | `kind` | Chats only: `all|channel|group|unknown`, default `all`. |
 | `query` | Chats only: bounded search across the safe title/username/identifier projection. |
 | `chatId` | Messages only: optional non-blank stable chat key/normalized identifier, at most 256 characters. |
-| `from` | Messages only: optional complete RFC3339/ISO date-time with `T`, seconds and `Z` or a numeric offset; `eventTime` is inclusive. Date-only and space-separated forms are rejected. |
+| `from` | Messages only: optional complete RFC3339/ISO date-time with `T`, seconds and `Z` or a numeric offset; inclusive. Legacy Monitor history uses `eventTime`; explicit source-aware history uses `effectiveSortTime` (event time, then collected/first-seen fallback). Date-only and space-separated forms are rejected. |
 | `to` | Messages only: same complete date-time form; `eventTime` is inclusive and may not precede `from`. |
 | `pageSize` | Positive integer. Default is 50 or the consumer's lower policy limit; the effective maximum is the consumer's `telegram.maxPageSize`, never above the server default of 100. |
 | `cursor` | Return `pageInfo.nextCursor` unchanged. Legacy Monitor-only cursors are at most 1,024 characters; additive signed source/filter cursors are at most 2,048. |
@@ -2469,6 +2480,17 @@ that intent; there is no separate checkbox, UUID field or ownership-review actio
 `reserved`, lookup failure and contract-version mismatch never qualify.
 `released` proves that reservation is no longer holding an outcome; a later
 provider-capable acquisition is a new intent and requires a fresh key.
+
+Status lookups read the persisted record without running global reservation
+cleanup or updating other requests. A reserved record with a lease includes
+`leaseExpiresAt` and `leaseExpired`; expiration alone does not prove that a
+supplier call never happened and does not authorize a new POST. Cleanup may
+subsequently persist `unknown`; until then the saved status remains `reserved`.
+HTTP 504, a lost connection, a `hub_database_unavailable` response, or a failed
+status lookup likewise does not prove a free or undispatched request. Retain
+the original page body/key, query its status, and retrieve a committed delivery
+through the read-only acquisition route below. A committed record can contain
+an error response; check `delivered.responseStatus` and its original body.
 
 If the client persisted its original idempotency key but did not receive the
 request UUID, use the consumer-scoped lookup instead:

@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { cursorTimestamp } from '../core/cursor-time.mjs'
 import { normalizeChinaProvince } from './china-provinces.mjs'
 import {
   DEFAULT_SEARCH_PROFILE,
@@ -263,7 +264,7 @@ function validSearchAfter(mode, value) {
     if (value.length !== 2 || !UUID_PATTERN.test(value[1] || '')) return false
     if (value[0] === null) return true
     if (typeof value[0] !== 'string' || value[0].length > 128) return false
-    return new Date(value[0]).toISOString() === value[0]
+    return cursorTimestamp(value[0]) === value[0]
   }
   // PIT appends _shard_doc to both supported sorts: time/id (3 values)
   // and score/time/id (4 values). Keep the existing signed cursor format so

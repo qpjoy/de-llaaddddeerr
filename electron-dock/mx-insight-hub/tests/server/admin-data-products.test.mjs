@@ -765,7 +765,7 @@ test('PostgreSQL Telegram plans merge both datasets without a public-chat gate',
   const chatSql = calls[0].sql
   assert.match(chatSql, /chat\.dataset_id = ANY\(\$1::text\[\]\)/)
   assert.doesNotMatch(chatSql, /joinchat|t[.]me/)
-  assert.match(chatSql, /coalesce\(chat\.event_time, chat\.collected_at, chat\.first_seen_at\) AS sort_time/)
+  assert.match(chatSql, /to_char\(coalesce\(chat\.event_time, chat\.collected_at, chat\.first_seen_at\)\s+AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'\) AS sort_time/)
   assert.match(chatSql, /\(coalesce\(chat\.event_time, chat\.collected_at, chat\.first_seen_at\), chat\.id\) < \(\$4::timestamptz, \$5::uuid\)/)
   assert.match(chatSql, /ORDER BY coalesce\(chat\.event_time, chat\.collected_at, chat\.first_seen_at\) DESC, chat\.id DESC/)
   assert.doesNotMatch(chatSql, /last_seen_at/)
@@ -778,10 +778,14 @@ test('PostgreSQL Telegram plans merge both datasets without a public-chat gate',
   const historySql = calls[1].sql
   assert.doesNotMatch(historySql, /JOIN core\.canonical_records chat/)
   assert.match(historySql, /message\.dataset_id = ANY\(\$1::text\[\]\)/)
-  assert.doesNotMatch(historySql, /message\.event_time IS NOT NULL/)
-  assert.match(historySql, /coalesce\(message\.event_time, message\.collected_at, message\.first_seen_at\) AS sort_time/)
-  assert.match(historySql, /\(coalesce\(message\.event_time, message\.collected_at, message\.first_seen_at\), message\.id\) < \(\$3::timestamptz, \$4::uuid\)/)
-  assert.match(historySql, /ORDER BY coalesce\(message\.event_time, message\.collected_at, message\.first_seen_at\) DESC, message\.id DESC/)
+  assert.match(historySql, /message\.event_time IS NOT NULL/)
+  assert.match(historySql, /message\.event_time IS NULL/)
+  assert.match(historySql, /\(message\.event_time, message\.id\) < \(\$3::timestamptz, \$4::uuid\)/)
+  assert.match(historySql, /\(coalesce\(message\.collected_at, message\.first_seen_at\), message\.id\) < \(\$3::timestamptz, \$4::uuid\)/)
+  assert.match(historySql, /ORDER BY message\.event_time DESC, message\.id DESC/)
+  assert.match(historySql, /ORDER BY page\.sort_time DESC, page\.id DESC/)
+  assert.match(historySql, /WITH page AS MATERIALIZED/)
+  assert.ok(historySql.indexOf('LIMIT') < historySql.indexOf('message.body'))
   assert.doesNotMatch(historySql, /last_seen_at/)
   assert.doesNotMatch(historySql, /coalesce\(message\.event_time, message\.collected_at\) IS NOT NULL/)
   assert.deepEqual(calls[1].values, [
@@ -796,7 +800,7 @@ test('PostgreSQL Telegram plans merge both datasets without a public-chat gate',
   assert.doesNotMatch(searchSql, /JOIN core\.canonical_records chat/)
   assert.match(searchSql, /message\.dataset_id = ANY\(\$1::text\[\]\)/)
   assert.doesNotMatch(searchSql, /message\.event_time IS NOT NULL/)
-  assert.match(searchSql, /coalesce\(message\.event_time, message\.collected_at, message\.first_seen_at\) AS sort_time/)
+  assert.match(searchSql, /to_char\(coalesce\(message\.event_time, message\.collected_at, message\.first_seen_at\)\s+AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'\) AS sort_time/)
   assert.match(searchSql, /EXISTS \(\s*SELECT 1\s*FROM core\.canonical_records chat/)
   assert.match(searchSql, /chat\.external_id = message\.stable_fields #>> '\{relations,chatId\}'/)
   assert.match(searchSql, /message\.dataset_id = 'telegram\.monitor\.messages\.v1'\s+AND chat\.dataset_id = 'telegram\.monitor\.chats\.v1'/)
@@ -813,6 +817,7 @@ test('PostgreSQL Telegram plans merge both datasets without a public-chat gate',
     null,
     null,
     11,
+    '%keyword%',
   ])
 
   await store.listAdminPublicOpinionRecords({
@@ -850,6 +855,8 @@ test('PostgreSQL Telegram chatKey and source scopes bind dataset-qualified selec
   })
 
   assert.deepEqual(calls[0].values, [id, ['telegram.sqlite.chats.v1']])
+  assert.match(calls[0].sql, /chat\.id = \$1::uuid/)
+  assert.doesNotMatch(calls[0].sql, /chat\.id::text/)
   assert.deepEqual(calls[1].values, [id, ['telegram.monitor.messages.v1']])
   assert.deepEqual(calls[2].values, [
     ['telegram.sqlite.messages.v1'], '-1004001', null, null, 6,

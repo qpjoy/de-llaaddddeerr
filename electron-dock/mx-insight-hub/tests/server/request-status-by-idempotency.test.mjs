@@ -152,7 +152,7 @@ test('idempotency-key status lookup is consumer-scoped, safe-projected, and crea
   })
 })
 
-test('idempotency-key status lookup reuses stale-reservation convergence without retrying upstream', async () => {
+test('status recovery reads an expired reservation without global cleanup, state changes, or upstream calls', async () => {
   await withFixture(async ({ store, tenant, owner, ownerKey, call, upstreamCalls }) => {
     const idempotencyKey = 'status-key-expired-0001'
     const seeded = await reserve(store, {
@@ -163,14 +163,18 @@ test('idempotency-key status lookup reuses stale-reservation convergence without
       leaseExpiresAt: new Date(Date.now() - 1_000),
     })
     const usageCount = store.requests.size
+    store.reapStaleReservations = async () => { assert.fail('receipt GET must not wait for global cleanup writes') }
 
-    const found = await call({ secret: ownerKey.secret, idempotencyKey })
-    assert.equal(found.response.status, 200)
-    assert.equal(found.payload.data.id, seeded.id)
-    assert.equal(found.payload.data.status, 'unknown')
-    assert.equal(found.payload.data.errorCode, 'reservation_lease_expired')
-    assert.equal(found.payload.data.units, null)
-    assert.ok(found.payload.data.completedAt)
+    for (const path of [LOOKUP_PATH, `/api/v1/requests/${seeded.id}`]) {
+      const found = await call({ secret: ownerKey.secret, idempotencyKey, path })
+      assert.equal(found.response.status, 200)
+      assert.equal(found.payload.data.id, seeded.id)
+      assert.equal(found.payload.data.status, 'reserved')
+      assert.equal(found.payload.data.leaseExpired, true)
+      assert.ok(found.payload.data.leaseExpiresAt)
+      assert.equal(found.payload.data.units, null)
+      assert.equal(found.payload.data.completedAt, null)
+    }
     assert.equal(store.requests.size, usageCount)
     assert.equal(upstreamCalls(), 0)
   })

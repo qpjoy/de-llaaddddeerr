@@ -1,6 +1,7 @@
 import { toPresegmentedText } from '@qpjoy/mx-common/segmenter'
 import { ElasticsearchError, ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
 import { AppError } from '../core/errors.mjs'
+import { cursorTimestamp } from '../core/cursor-time.mjs'
 import {
   buildContentSearchPlan,
   CONTENT_INDEX_SCHEMA,
@@ -197,6 +198,10 @@ function postgresCrawlerPublicationPredicate(visibility) {
 
 function wildcardSubstring(term) {
   return `*${String(term).replace(/[\\*?]/g, '\\$&')}*`
+}
+
+function literalSubstring(term) {
+  return String(term).replace(/[\\%_]/g, '\\$&')
 }
 
 function boundedQueryAnalysis(metadata, tokens, {
@@ -1112,7 +1117,8 @@ export class SearchQueries {
       `WITH matching AS (
          SELECT id, dataset_id, platform, object_type, external_id, url, title, body,
                 author_external_id, author_name,
-                event_time, collected_at, stable_fields
+                event_time, collected_at, stable_fields,
+                to_char(event_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS event_time_cursor
                 ${publicationSelect}
                 ${includeTotal ? ', count(*) OVER () AS total_count' : ''}
            FROM core.canonical_records
@@ -1158,7 +1164,7 @@ export class SearchQueries {
         LIMIT $13
         ${offset != null ? 'OFFSET $14' : ''}`,
       [
-        query, platform, datasetId, datasetIds, objectType, authorExternalId, chatId,
+        literalSubstring(query), platform, datasetId, datasetIds, objectType, authorExternalId, chatId,
         fromTime, toTime, cursor?.searchAfter?.[1] ?? null, cursor?.searchAfter?.[0] ?? null,
         Array.isArray(platforms) && platforms.length > 0 ? platforms : null,
         offset == null ? limit + 1 : limit,
@@ -1194,7 +1200,7 @@ export class SearchQueries {
       nextCursor: hasMore && offset == null ? {
         mode: 'postgres',
         pitId: null,
-        searchAfter: [last.event_time ? new Date(last.event_time).toISOString() : null, last.id],
+        searchAfter: [cursorTimestamp(last.event_time_cursor ?? last.event_time), last.id],
       } : null,
       searchExecution: searchExecution({
         requestedProfile,
@@ -1294,7 +1300,7 @@ export class SearchQueries {
           ${publicationPredicate}
           ${facetPredicate}`,
       [
-        query, platform, datasetId, datasetIds, objectType, authorExternalId,
+        literalSubstring(query), platform, datasetId, datasetIds, objectType, authorExternalId,
         chatId, fromTime, toTime,
         Array.isArray(platforms) && platforms.length > 0 ? platforms : null,
         ...(publicOpinionVisibility ? [JSON.stringify(publicOpinionVisibility)] : []),

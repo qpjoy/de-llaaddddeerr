@@ -1981,7 +1981,7 @@ async function transaction(pool, operation) {
     return result
   } catch (error) {
     if (commitStarted && !committed) releaseError = error
-    else await client.query('ROLLBACK').catch(() => {})
+    else await client.query('ROLLBACK').catch(error => { releaseError = error })
     throw error
   } finally {
     client.release(releaseError)
@@ -3100,11 +3100,24 @@ export class PostgresExternalPlatformStore {
     }
   }
 
-  async releaseProviderCostWorkflow({ reservationId, usageRequestId }) {
+  async releaseProviderCostWorkflow({ reservationId, usageRequestId, bestEffortRelease = false }) {
     return transaction(this.pool, async (client) => {
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-        `external-platform-cost:${this.providerKey}`,
-      ])
+      // Only the Twitter fill cleanup opts in. Its already-acquired page must
+      // not wait behind a provider-wide budget calculation merely to release
+      // unused procurement headroom. A missed release stays conservatively
+      // active; no customer hold or paid-call cost is changed here.
+      if (bestEffortRelease === true && this.providerKey === 'rapidapi') {
+        await client.query("SET LOCAL lock_timeout = '500ms'")
+        await client.query("SET LOCAL statement_timeout = '5s'")
+        const { rows } = await client.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired', [
+          `external-platform-cost:${this.providerKey}`,
+        ])
+        if (rows[0]?.acquired !== true) return false
+      } else {
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+          `external-platform-cost:${this.providerKey}`,
+        ])
+      }
       const released = await client.query(
         `UPDATE external_platform.provider_cost_reservations
             SET status = 'released', released_at = now()

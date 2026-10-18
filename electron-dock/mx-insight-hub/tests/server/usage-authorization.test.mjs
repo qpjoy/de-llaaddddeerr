@@ -209,8 +209,9 @@ function postgresHarness({ deniedScope = null, derived = false, keyLimit = null 
       const normalized = sql.trim().replace(/\s+/gu, ' ')
       calls.push({ sql: normalized, values })
       if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(normalized)
+        || normalized.startsWith('SET LOCAL ')
         || normalized.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [], rowCount: 0 }
-      if (normalized.startsWith('SELECT id FROM api_keys')) {
+      if (normalized.includes('FROM api_keys WHERE id = $1') && normalized.endsWith('FOR SHARE')) {
         return { rows: [{ id: values[0] }], rowCount: 1 }
       }
       if (normalized.includes('FROM api_keys api_key_record')) {
@@ -315,7 +316,7 @@ test('Postgres reserve locks and inserts the immutable authorization snapshot at
     `${owner.consumer.id}:authorization:capability:${OPERATION}`,
     `${owner.consumer.id}:idempotency:${input.idempotencyKey}`,
   ])
-  const ownerLock = harness.calls.find((call) => call.sql.startsWith('SELECT id FROM api_keys'))
+  const ownerLock = harness.calls.find((call) => call.sql.includes('FROM api_keys WHERE id = $1') && call.sql.endsWith('FOR SHARE'))
   assert.match(ownerLock.sql, /FOR SHARE$/u)
   assert.doesNotMatch(ownerLock.sql, /FOR KEY SHARE/u)
 
