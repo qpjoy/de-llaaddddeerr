@@ -19,7 +19,7 @@ function historicalPlatform(platform, operation) {
   }
 }
 
-function searchPlatform(platform, { instagramPolicy, facebookPolicy }) {
+function searchPlatform(platform, { instagramPolicy, facebookPolicy, twitterPolicy }) {
   const row = historicalPlatform(platform, 'raw')
   if (platform === 'instagram') return {
     platform, label: LABELS[platform], editable: true, migrationStatus: 'hub_native',
@@ -44,9 +44,10 @@ function searchPlatform(platform, { instagramPolicy, facebookPolicy }) {
     routeSummary: 'POST /api/v1/data/search 的新内容搜索由 Hub 直连 TikHub，保留原标准请求与 items/pageInfo 合同，不转发或失败回退到 Night-All。POST /api/v1/search/raw 与 /api/v1/night-all/search/raw 继续原 Night-All 链路。已保存交付精确重放；旧 mxnc1 游标的新派发返回 409 search_restart_required，由调用方明确使用新 Idempotency-Key 从首页开始。新分页只回传本接口的 Hub 游标；账号内容和资料状态分别显示。',
   }
   if (platform === 'twitter') return {
-    ...row, migrationStatus: 'conditional',
-    readOnlyReason: 'Twitter 当前固定使用 RapidAPI，尚无接入此业务合同的第二供应商。统一入口已直连，复杂 raw 仍可能经过 Night-All；两种执行路径不等于两个可切换供应商。',
-    routeSummary: 'data/search 和 data/social/search 由 Hub 直连 RapidAPI。raw 的单关键词、每页不超过 50 条等已迁移形状由 Hub 执行；批量、复杂参数及历史兼容形状仍经 Night-All，默认同为 RapidAPI。',
+    platform, label: LABELS[platform], editable: true, migrationStatus: 'conditional',
+    providers: ['rapidapi', 'tikhub'], allowedModes: ['fixed', 'priority', 'paused'],
+    policy: twitterPolicy == null ? null : structuredClone(twitterPolicy),
+    routeSummary: '策略仅适用于 POST /api/v1/data/search 与 /api/v2/data/search 的新内容搜索；默认 RapidAPI 优先，采购前未就绪时使用 TikHub 保底。该优先策略下，无游标且尚未取得成功源页的搜索遇到 RapidAPI 明确 HTTP 400，也可原条件转 TikHub 一次。固定模式或 TikHub 优先不启用此400保底。历史请求按原结果重放，已有分页绑定原供应商；超时、未知结果、成功响应不可用及其他错误不触发自动切换。data/social/search 与 raw 保持原 RapidAPI 路由及 Night-All 兼容规则，账号内容与资料不受此策略影响。',
   }
   if (platform === 'weibo') return {
     ...row, migrationStatus: 'conditional',
@@ -87,17 +88,17 @@ function accountPlatform(platform, operation) {
 // This is an Admin product/routing inventory, not a readiness declaration.
 // The compatibility sets deliberately exclude unsupported operation/platform
 // pairs; provider credential state and paid dispatch remain in their gateways.
-export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy = null } = {}) {
+export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy = null, twitterPolicy = null } = {}) {
   return {
     interfaces: [
       {
         id: 'search', label: '内容搜索',
-        paths: ['/api/v1/data/search', '/api/v1/search/raw', '/api/v1/night-all/search/raw',
+        paths: ['/api/v1/data/search', '/api/v2/data/search', '/api/v1/search/raw', '/api/v1/night-all/search/raw',
           '/api/v1/data/social/search', '/api/v1/data/canonical/search',
           '/api/v1/data/telegram/search', '/api/v1/data/wechat/search/search'],
         description: '按关键词检索平台内容。路径是本组入口合集，各平台适用范围见路由说明；兼容路径名称不代表一定由 Night-All 执行。本机已核查的 po-infra 源码使用兼容入口，线上已保存的 Instagram 故障请求使用 data/search；不能由本机源码推定生产已全量迁移或仍全走旧路径。',
         platforms: [...NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS.raw, ...WECHAT_LEGACY_SEARCH_PLATFORMS, 'telegram']
-          .map(platform => searchPlatform(platform, { instagramPolicy, facebookPolicy })),
+          .map(platform => searchPlatform(platform, { instagramPolicy, facebookPolicy, twitterPolicy })),
       },
       {
         id: 'crawl', label: '账号内容',

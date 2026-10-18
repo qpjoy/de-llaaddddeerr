@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createTwitterSearchRouter, twitterSearchCursorProvider } from '../../server/data/twitter-search-routing.mjs'
+import { createTwitterSearchRouter, resolveTwitterSearchProvider, twitterSearchCursorProvider } from '../../server/data/twitter-search-routing.mjs'
 import { createDataSearchCursorCodec, createRawSearchCursorCodec } from '../../server/external-platforms/cursor.mjs'
 import { RAW_SEARCH_VERSION } from '../../server/contracts/raw-search.mjs'
 import { TIKHUB_CONTENT_SEARCH_VERSION } from '../../server/contracts/tikhub-content-search.mjs'
@@ -25,6 +25,107 @@ const input = extras => ({ normalized: { platform: 'twitter', query: 'unchanged 
   idempotencyKey: 'routing-test-key', ...extras })
 const row = extras => ({ id: 'saved-request', tenantId: 'tenant', consumerId: 'consumer', apiKeyId: 'key', platform: 'twitter',
   status: 'committed', acquisitionRequest: { path: '/api/v1/data/search', body: { query: 'unchanged query' } }, ...extras })
+
+test('automatic supplier readiness prefers RapidAPI and does not inspect TikHub when RapidAPI is ready', async () => {
+  const calls = [], options = { context, operation: 'search_posts' }
+  const resolved = await resolveTwitterSearchProvider({ options, capabilities: async (provider, receivedOptions) => {
+    calls.push(provider)
+    assert.strictEqual(receivedOptions, options)
+    return { ready: true }
+  } })
+  assert.deepEqual(resolved, { provider: 'rapidapi', ready: true })
+  assert.deepEqual(calls, ['rapidapi'])
+})
+
+test('automatic supplier readiness uses TikHub only when RapidAPI is unavailable or its readiness check fails', async () => {
+  for (const rapidUnavailable of [async () => ({ ready: false }), async () => { throw new Error('readiness lookup failed') }]) {
+    const calls = [], options = { context, operation: 'search_posts' }
+    const resolved = await resolveTwitterSearchProvider({ provider: 'auto', options,
+      capabilities: async (provider, receivedOptions) => {
+        calls.push(provider)
+        assert.strictEqual(receivedOptions, options)
+        return provider === 'rapidapi' ? rapidUnavailable() : { ready: true }
+      } })
+    assert.deepEqual(resolved, { provider: 'tikhub', ready: true })
+    assert.deepEqual(calls, ['rapidapi', 'tikhub'])
+  }
+})
+
+test('automatic supplier readiness keeps RapidAPI unavailable when neither supplier is ready', async () => {
+  for (const unavailable of [async () => ({ ready: false }), async () => { throw new Error('readiness lookup failed') }]) {
+    const calls = []
+    assert.deepEqual(await resolveTwitterSearchProvider({ capabilities: async provider => {
+      calls.push(provider)
+      return unavailable()
+    } }), { provider: 'rapidapi', ready: false })
+    assert.deepEqual(calls, ['rapidapi', 'tikhub'])
+  }
+})
+
+test('fixed supplier readiness forwards options and preserves unavailable results without fallback', async () => {
+  for (const provider of ['rapidapi', 'tikhub']) {
+    const calls = [], options = { context, operation: 'search_posts' }
+    assert.deepEqual(await resolveTwitterSearchProvider({ provider, options,
+      capabilities: async (selected, receivedOptions) => {
+        calls.push(selected)
+        assert.strictEqual(receivedOptions, options)
+        return { ready: false, reason: 'operation_disabled' }
+      } }), { provider, ready: false, reason: 'operation_disabled' })
+    assert.deepEqual(calls, [provider])
+  }
+})
+
+test('fixed supplier readiness propagates the original error without inspecting another supplier', async () => {
+  for (const provider of ['rapidapi', 'tikhub']) {
+    const calls = [], error = new Error('fixed provider readiness failed')
+    await assert.rejects(resolveTwitterSearchProvider({ provider, capabilities: async selected => {
+      calls.push(selected)
+      throw error
+    } }), received => received === error)
+    assert.deepEqual(calls, [provider])
+  }
+})
+
+test('the router defaults new requests to RapidAPI when no readiness resolver is installed', async () => {
+  const h = harness(), request = input(), original = structuredClone(request)
+  const route = createTwitterSearchRouter({ usageStore: h.usageStore, rapidGateway: h.rapidGateway,
+    tikHubGateway: h.tikHubGateway, apiKeyPepper: pepper })
+  assert.equal(await route(context, request), 'rapidapi')
+  assert.deepEqual(request, original)
+  assert.strictEqual(h.calls[0][2], request)
+})
+
+test('automatic readiness fallback preserves the request and leaves existing TikHub cursors and replay pinned', async () => {
+  const h = harness(), checks = [], options = { context, operation: 'search_posts' }
+  let rapidReady = false
+  const route = createTwitterSearchRouter({ usageStore: h.usageStore, rapidGateway: h.rapidGateway,
+    tikHubGateway: h.tikHubGateway, apiKeyPepper: pepper,
+    resolveProvider: async ctx => {
+      assert.strictEqual(ctx, context)
+      return (await resolveTwitterSearchProvider({ options, capabilities: async (provider, receivedOptions) => {
+        checks.push(provider)
+        assert.strictEqual(receivedOptions, options)
+        return { ready: provider === 'rapidapi' ? rapidReady : true }
+      } })).provider
+    } })
+  const request = input(), original = structuredClone(request)
+  assert.equal(await route(context, request), 'tikhub')
+  assert.deepEqual(request, original)
+  assert.strictEqual(h.calls[0][2], request)
+  assert.deepEqual(checks, ['rapidapi', 'tikhub'])
+
+  rapidReady = true
+  const continuation = input({ normalized: { ...input().normalized, cursor: codec.encode(nativeState) } })
+  assert.equal(await route(context, continuation), 'tikhub')
+  h.requests.set('routing-test-key', row({ acquisitionRequest: {
+    searchProvider: 'tikhub', searchContractVersion: TIKHUB_CONTENT_SEARCH_VERSION } }))
+  assert.equal(await route(context, request), 'tikhub')
+  assert.deepEqual(checks, ['rapidapi', 'tikhub'], 'recovered RapidAPI readiness cannot move an existing TikHub page')
+
+  h.requests.clear()
+  assert.equal(await route(context, input({ idempotencyKey: 'new-after-rapidapi-recovery' })), 'rapidapi')
+  assert.deepEqual(checks, ['rapidapi', 'tikhub', 'rapidapi'])
+})
 
 test('new standard searches use the selected Hub supplier without mutating any public conditions', async () => {
   for (const provider of ['tikhub', 'rapidapi']) {

@@ -1,6 +1,6 @@
 # 策略搜索
 
-更新：2026-10-15。本文件描述本轮源码和已保存事故证据；不表示已经发布或所有平台已恢复。
+更新：2026-10-18。本文件描述本轮源码和已保存事故证据；不表示已经发布或所有平台已恢复。
 
 ## 产品边界
 
@@ -10,7 +10,7 @@
 - **账号内容**：按已知账号获取其内容，即 `crawl`。
 - **账号资料**：按已知账号获取资料，即 `user-info`，不是关键词搜索账号。
 
-管理端可以查看各平台的迁移范围；本轮仅开放 Instagram 内容搜索与既有 Facebook 内容搜索策略编辑。其他平台和操作只展示已核实的路由，不因为出现在目录中就支持切换供应商。客户指南位于 `/docs/strategy-search`，只展示当前有效 scope 对应的平台与操作，不展示供应商品牌、采购价格、凭据或内部配置。
+管理端可以查看各平台的迁移范围；开放 Twitter 标准内容搜索、Instagram 内容搜索与既有 Facebook 内容搜索策略编辑。其他平台和操作只展示已核实的路由，不因为出现在目录中就支持切换供应商。客户指南位于 `/docs/strategy-search`，只展示当前有效 scope 对应的平台与操作，不展示供应商品牌、采购价格、凭据或内部配置。
 
 查看目录、保存策略、发布本轮代码均不自动新增业务授权、Key scope、套餐或价格。调用继续遵循原平台、操作授权和现有计费规则。MX-H2I 用户登录、联网、Launcher 服务不在本轮修改范围。
 
@@ -18,7 +18,7 @@
 
 页面统一为接口调试、产品展示、接入指南、管理。调试器读取当前身份可见的 OpenAPI 固定接口，包含 `/data/social/crawl` 和 `/data/social/user-info`。产品展示可选择内容搜索、账号内容、账号资料：内容搜索调用 `/api/v1/data/search`，账号查询调用相应 social 入口。展示完整正文、作者、互动、图片、账号资料及来源链接，保留缺失值与零的区别。微信按既有专项响应呈现，不把分类导航当作内容；其余微信与 TikTok 系列接口继续保留，详见 [统一搜索兼容说明](../integrations/unified-strategy-search.md)。
 
-只有 Admin Token 平台管理会话看到管理标签；原迁移状态、Instagram/Facebook 策略与每日调用统计都在此处。旧 `view=routing/interfaces` 链接仍映射到管理/接入指南。页面内状态按原 Key 身份隔离，临时凭据刷新、标签切换和路由往返保留请求标识；调试与展示共享进行中/未知结果锁，核对只读，不自动重发。内容搜索展示的新查询使用 `stable`，账号展示沿用账号接口的原请求幂等规则；下一页保留原请求合同与游标，明确新建相同查询才产生新的请求标识。
+只有 Admin Token 平台管理会话看到管理标签；原迁移状态、Twitter/Instagram/Facebook 策略与每日调用统计都在此处。旧 `view=routing/interfaces` 链接仍映射到管理/接入指南。页面内状态按原 Key 身份隔离，临时凭据刷新、标签切换和路由往返保留请求标识；调试与展示共享进行中/未知结果锁，核对只读，不自动重发。内容搜索展示的新查询使用 `stable`，账号展示沿用账号接口的原请求幂等规则；下一页保留原请求合同与游标，明确新建相同查询才产生新的请求标识。
 
 完整响应已改为保留全文、自动换行并在限定高度内滚动；长标识不再撑开页面。Facebook `photo.php` 落地页显示原始链接，明确的视频封面与真实混合图片在新标准投影中分开；旧 raw 与 canonical 入库投影不重写。Bilibili 的原生指标修复已移入 Hub 关键词搜索投影，新标准保留缺失 null 与真实 0，兼容 raw 默认值保留。Facebook 标准搜索已加入自动补页；本轮取消默认每请求 3 次的补页调用上限，保留独立的遍历与资源边界。完整字段、接口文档与旧游标兼容边界见 [本轮核查](../operations/strategy-search-contract-audit-2026-10-15.md) 及 [本轮补页调整](../operations/youtube-search-fill-2026-10-15.md)。
 
@@ -51,7 +51,7 @@ Telegram 在本机 po-infra 中单独使用 Hub `/api/v1/data/canonical/search`�
 
 | 用途 | Hub 路径 | 响应与范围 |
 | --- | --- | --- |
-| 标准内容搜索 | `POST /api/v1/data/search` | 普通内容平台返回 `data.items`、`data.pageInfo`；微信是独立原生合同例外 |
+| 标准内容搜索 | `POST /api/v1/data/search`、`POST /api/v2/data/search` | 普通内容平台返回 `data.items`、`data.pageInfo`；微信是独立原生合同例外 |
 | 兼容内容搜索 | `POST /api/v1/search/raw`、`POST /api/v1/night-all/search/raw` | 普通平台 `data.raw_data`、`data.raw_info` 是 JSON 字符串，分页在 `data.page`；微信路径例外见下文 |
 | 兼容账号内容 | `POST /api/v1/search/crawl`、`POST /api/v1/night-all/search/crawl` | 账号与内容原始结构；只支持下表 C 列列出的平台 |
 | 兼容账号资料 | `POST /api/v1/search/user-info`、`POST /api/v1/night-all/search/user-info` | 已知账号资料；只支持下表 U 列列出的平台 |
@@ -65,7 +65,7 @@ S=内容搜索，C/U 为**旧 `/search` 与 `/night-all/search` 账号转发入�
 
 | 平台 | S：供应商与执行位置 | C：供应商与执行位置 | U：供应商与执行位置 |
 | --- | --- | --- | --- |
-| Twitter / X | 标准/social 由 Hub 直连 RapidAPI；raw 部分形状仍经 Night-All，默认 RapidAPI | 旧兼容入口经 Night-All → RapidAPI | 同 C |
+| Twitter / X | 标准 v1/v2 由 Hub 按数据库策略选择 RapidAPI / TikHub；social 保持 RapidAPI；raw 部分形状仍经 Night-All，默认 RapidAPI | 旧兼容入口经 Night-All → RapidAPI | 同 C |
 | Facebook | Hub → RapidAPI / JustOne，沿用月额度策略 | Night-All → JustOne | Night-All → JustOne |
 | Instagram | Hub → JustOne / TikHub，本轮可配置 | Night-All → TikHub | Night-All → TikHub |
 | 微博 | 合规单关键词形状 Hub → TikHub；其他形状经 Night-All | Night-All → TikHub | Night-All → TikHub |
@@ -83,7 +83,7 @@ S=内容搜索，C/U 为**旧 `/search` 与 `/night-all/search` 账号转发入�
 
 具体边界：
 
-- Twitter raw 首次请求只迁移单关键词、每页不超过 50 条且无不兼容复杂参数等形状；标准 `/data/search` 已有独立迁移分支。Twitter 的供应商规则保持 RapidAPI，其他平台不能借此走 RapidAPI。
+- Twitter raw 首次请求只迁移单关键词、每页不超过 50 条且无不兼容复杂参数等形状；标准 `/data/search` 已有独立迁移分支。Twitter raw 的供应商规则保持 RapidAPI，标准 v1/v2 的可配置策略不扩展 raw 或账号路由。
 - 微博首个标准请求 `pageSize >= 20` 或已有 Hub 游标才进入已迁移分支；raw 还需符合单关键词等约束。
 - Reddit、YouTube 本轮只迁移标准 `/api/v1/data/search` 的内部执行；两个 raw 兼容路径仍按原路转发，因此管理目录标记“部分已迁移”。旧已保存交付先按原规则重放；旧 `mxnc1` 下一页的新派发返回 `409 search_restart_required`，调用方明确使用新幂等键、去掉游标后从首页重启。不能承诺旧供应链游标无缝转换为新 Hub 游标。
 - 小红书搜索直连要求单关键词、每页 20 条及相容参数；crawl 要求单一标识、posts、每页 20 条等；user-info 要求单一受支持标识。首次直连还受操作状态和正式 Key 条件约束，已有 Hub 游标保持原链路。原操作 capability 仍必须满足。
@@ -139,6 +139,12 @@ Bilibili 点赞 like/stat.like、评论 review/stat.reply、收藏 favorites/sta
 
 ## 可配置策略与失败边界
 
+Twitter 标准内容搜索支持 `fixed / priority / paused`，供应商为 RapidAPI、TikHub。入口为**数据产品 → 策略搜索 → 管理 → 内容搜索 → Twitter / X**。迁移160默认 RapidAPI 优先、TikHub 保底，无需配置 `MX_INSIGHT_TWITTER_SEARCH_PROVIDER`；旧环境变量不覆盖数据库策略。新选路即时读取已保存策略，无需重启；保存原因、修订冲突和审计与 Instagram 共用现有机制。
+
+Twitter 保底适用于新请求派发前的凭据或操作发布策略未就绪；**RapidAPI 优先 → TikHub 保底**另支持首次确定400：无游标且尚未取得成功源页时，RapidAPI 明确返回上游 HTTP 400，Hub 保持原检索条件转 TikHub 一次。固定 RapidAPI、TikHub 优先、其他错误、成功响应不可用、超时和 unknown 不适用此分支。两次供应商调用各自保留采购证据，客户仍为同一个请求、按现有规则结算一次；无须下游改接口或参数。
+
+历史已完成请求按原结果重放，已有游标不跨供应商；TikHub 保底成功后，其缓冲和后续游标保持 TikHub。暂停仅阻止新采购，已完成响应重放与已购缓冲继续交付。仅影响标准 `/api/v1/data/search` 和 `/api/v2/data/search`，raw、social和账号接口保持原路由。详见 [Twitter 标准搜索供应商兼容](../integrations/twitter-standard-provider-routing.md)。
+
 Instagram 内容搜索支持：
 
 - `fixed`：固定 JustOne 或 TikHub。
@@ -159,15 +165,15 @@ Facebook 沿用独立策略和配额证据：`auto / rapidapi / justone / paused
 
 本轮新增 `migrations/150_strategy_search_routes.sql`，创建 `control.strategy_search_routes` 和 `control.strategy_search_route_events`。仅种入 Instagram search 的 `fixed / justone` 既有默认值，Facebook 继续使用原策略表；SQL 不修改凭据、价格、授权、订单或历史消费。数据库运行缺少或损坏该策略记录时会明确失败，不临时猜选供应商。
 
-这区别于此前“固定切换 JustOne”补丁不需要新迁移的说明：**此次可配置策略版本需要迁移 150**。正常 Hub 发布流程先执行迁移 Job，成功后再滚动相关服务；不要先启用新策略代码而跳过数据库迁移。
+2026-10-18 新增 `160_twitter_strategy_search.sql`，扩展现有表的约束并仅在缺失时初始化 Twitter 的 RapidAPI 优先/TikHub 保底策略及审计。重复部署不覆盖已保存配置，不改 Facebook 独立策略，也不修改历史请求、凭据、价格或授权。**完整可配置策略版本需要迁移150和160**。正常 Hub 发布流程先执行迁移 Job，成功后再滚动相关服务；不要先启用新策略代码而跳过数据库迁移。
 
 在服务器同步本轮完整代码，在 `electron-dock/mx-insight-hub` 目录由操作者执行：
 
 ```bash
-MX_INSIGHT_SYNC_LAUNCHER=0 bash scripts/manage.sh ops internal-production deploy
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh ops internal-production deploy
 ```
 
-该命令限定 Hub 发布，不同步 Launcher。检查迁移 Job 已应用 `150_strategy_search_routes.sql`，然后用 Admin 只读确认数据服务中的策略搜索目录、Instagram 默认值和已有 Facebook 配额信息。租户指南只应显示其原有权限范围。保存策略是显式管理操作；浏览、检查目录与发布不应发起业务搜索。验收本轮使用本地 mock、纯合同和隔离数据库测试，不附加生产付费探测，也不声称已验证线上成功或真实下一页。
+该命令限定 Hub 发布，不同步 Launcher。迁移 Job 自动应用 `150_strategy_search_routes.sql` 和 `160_twitter_strategy_search.sql`；成功后再升级服务，不能只部署前端或直接替换 Public 镜像。随后用 Admin 只读确认数据产品中的策略搜索目录、Twitter 初始优先级、Instagram 已保存策略和已有 Facebook 配额信息。租户指南只应显示其原有权限范围。保存策略是显式管理操作；浏览、检查目录与发布不应发起业务搜索。验收本轮使用本地 mock、纯合同和隔离数据库测试，不附加生产付费探测，也不声称已验证线上成功或真实下一页。
 
 ## 每日接口请求统计（2026-10-15）
 

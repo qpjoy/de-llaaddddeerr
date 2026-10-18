@@ -35,7 +35,7 @@ import { TikHubAdapter } from './adapters/tikhub.mjs'
 import { RapidApiAdapter } from './adapters/rapidapi.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
-import { createTwitterSearchRouter } from './data/twitter-search-routing.mjs'
+import { createTwitterSearchRouter, resolveTwitterSearchProvider } from './data/twitter-search-routing.mjs'
 import { normalizeHubSocialCompatRequest } from './contracts/hub-social-compat.mjs'
 import { HUB_SOCIAL_COMPAT_PLATFORMS } from '../shared/social-account-contract.mjs'
 import { RAPIDAPI_METADATA, rapidApiConfig } from './external-platforms/rapidapi-config.mjs'
@@ -419,7 +419,6 @@ export async function createRuntime(config = loadConfig()) {
   }
   const nativeSearchGateways = Object.fromEntries(['weibo', ...Object.keys(TIKHUB_CONTENT_SEARCH_RECIPES)]
     .map(platform => [platform, nativeSearchGateway(platform, 'tikhub')]))
-  const twitterSearchProvider = config.twitterSearchProvider ?? 'auto'
   const twitterProviderCapabilities = async (provider, options) => {
     const tikhub = provider === 'tikhub'
     const credential = await (tikhub ? tikHubCredentialStore : rapidApiCredentialStore).describeCredential(provider)
@@ -428,19 +427,12 @@ export async function createRuntime(config = loadConfig()) {
     const readiness = await gateway.nativeReadiness({ ...options, operationKeys: [operation], credentialConfigured: credential.credentialConfigured })
     return { ready: readiness[operation] === true }
   }
-  const resolveTwitterSearchRoute = async options => {
-    if (twitterSearchProvider !== 'auto') return { provider: twitterSearchProvider,
-      ...await twitterProviderCapabilities(twitterSearchProvider, options) }
-    // Availability selection happens before any paid request. A rejection,
-    // unknown outcome or failed paid projection never triggers supplier retry.
-    const tikhub = await twitterProviderCapabilities('tikhub', options).catch(() => ({ ready: false }))
-    if (tikhub.ready) return { provider: 'tikhub', ready: true }
-    const rapidapi = await twitterProviderCapabilities('rapidapi', options).catch(() => ({ ready: false }))
-    return rapidapi.ready ? { provider: 'rapidapi', ready: true } : { provider: 'tikhub', ready: false }
-  }
+  const resolveTwitterSearchRoute = async options => resolveTwitterSearchProvider({
+    policy: await strategySearchRoutingStore.get('search', 'twitter'), capabilities: twitterProviderCapabilities, options,
+  })
   const twitterSearchCapabilities = async options => ({ ready: (await resolveTwitterSearchRoute(options)).ready })
   const twitterSearch = createTwitterSearchRouter({ usageStore: store, rapidGateway: hubSocialGateway,
-    tikHubGateway: nativeSearchGateways.twitter, apiKeyPepper: config.apiKeyPepper, provider: twitterSearchProvider,
+    tikHubGateway: nativeSearchGateways.twitter, apiKeyPepper: config.apiKeyPepper, policyStore: strategySearchRoutingStore,
     resolveProvider: async context => (await resolveTwitterSearchRoute({ consumerId: context.consumer.id })).provider })
   const socialAccountDataGateways = Object.fromEntries(HUB_SOCIAL_COMPAT_PLATFORMS.map(platform => [platform,
     platform === 'twitter' ? hubSocialGateway : nativeSearchGateway(platform, platform === 'facebook' ? 'justone' : 'tikhub')]))
@@ -743,7 +735,7 @@ export async function createRuntime(config = loadConfig()) {
     externalPlatformControlStore, externalAdmissionPolicies, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     hubSocialGateway, rapidApiStore, rapidApiCredentialStore, rapidApiProxyStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
-    nativeSearchGateways, socialAccountDataGateways, socialDataGateway,
+    nativeSearchGateways, socialAccountDataGateways, socialDataGateway, strategySearchRoutingStore,
   }
 }
 

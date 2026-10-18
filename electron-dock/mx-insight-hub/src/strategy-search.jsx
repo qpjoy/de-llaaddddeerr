@@ -8,8 +8,8 @@ import { adminApi, publicDocsHref } from './api.js'
 import { DropdownField, ErrorState, Field, LoadingState, PageHeading, useRemoteData } from './components.jsx'
 import { StrategyDataStatistics } from './strategy-data-statistics.jsx'
 import { FacebookSearchPolicyForm } from './platform-search-policy.jsx'
-import { STRATEGY_SEARCH_INTERFACES, STRATEGY_PROVIDER_LABELS, INSTAGRAM_STRATEGY_MODE_LABELS,
-  STRATEGY_MIGRATION_LABELS, instagramStrategyOptions, instagramStrategyUpdate, strategyPolicySummary } from './strategy-search-model.js'
+import { STRATEGY_SEARCH_INTERFACES, STRATEGY_PROVIDER_LABELS, INSTAGRAM_STRATEGY_MODE_LABELS, TWITTER_STRATEGY_MODE_LABELS,
+  STRATEGY_MIGRATION_LABELS, instagramStrategyOptions, instagramStrategyUpdate, twitterStrategyOptions, twitterStrategyUpdate, strategyPolicySummary } from './strategy-search-model.js'
 import { recordStrategyAttempt } from './strategy-search-experience-model.js'
 import './strategy-search.css'
 
@@ -97,6 +97,42 @@ function InstagramSearchPolicyForm({ token, row, notify, onSaved }) {
   </form>
 }
 
+export function TwitterSearchPolicyForm({ token, row, notify, onSaved }) {
+  const [mode, setMode] = useState(row.policy.mode)
+  const [primaryProvider, setPrimaryProvider] = useState(row.policy.primaryProvider)
+  const [reason, setReason] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState(null)
+  const options = twitterStrategyOptions(row)
+  const fallbackProvider = options.providers.find(value => value !== primaryProvider)
+  const conflict = error?.status === 409
+  const valid = options.modes.includes(mode) && options.providers.includes(primaryProvider)
+  async function save(event) {
+    event.preventDefault()
+    if (busy || conflict) return
+    setBusy(true); setError(null)
+    try {
+      await adminApi.updateTwitterSearchStrategy(token, twitterStrategyUpdate(row, { mode, primaryProvider, reason }))
+      onSaved(); notify?.('Twitter 标准搜索策略已保存')
+    } catch (failure) { setError(failure) } finally { setBusy(false) }
+  }
+  return <form className="mih-strategy-policy-form" onSubmit={save}>
+    <p>适用范围：Twitter 的 <code>/api/v1/data/search</code> 与 <code>/api/v2/data/search</code>。raw 搜索、社交账号内容和账号资料接口保留原路由。</p>
+    <div className="mih-external-two-column">
+      <DropdownField label="策略方式" value={mode} disabled={busy || conflict} onChange={setMode}
+        options={options.modes.map(value => ({ value, label: TWITTER_STRATEGY_MODE_LABELS[value] }))} />
+      <DropdownField label={mode === 'priority' ? '优先供应商' : mode === 'paused' ? '保留的供应商设置' : '固定供应商（不启用保底）'} value={primaryProvider} disabled={busy || conflict} onChange={setPrimaryProvider}
+        options={options.providers.map(value => ({ value, label: supplier(value) }))} />
+    </div>
+    {mode === 'priority' ? <p>保底供应商：<strong>{supplier(fallbackProvider)}</strong>。{strategyPolicySummary('search', { ...row, policy: { ...row.policy, mode, primaryProvider, fallbackProvider } }).description}</p>
+      : mode === 'paused' ? <p>暂停新的供应商采购，包括已有游标需要的后续采购。已完成响应的重放和已购缓冲数据仍可交付。</p>
+        : <p>新搜索只使用 {supplier(primaryProvider)}；未就绪时返回对应原因，不自动切换供应商。</p>}
+    <p>保存后对后续选路生效，无需重启。已完成请求按原结果重放，已有游标继续原供应商；保底不改变检索条件，原有价格、历史账本及未知结果保护保持不变。</p>
+    <Field label="修改原因"><input className="qp-input" required maxLength={1000} value={reason} disabled={busy || conflict} onChange={event => setReason(event.target.value)} placeholder="记录此次策略调整的原因" /></Field>
+    {error ? <ErrorState error={error} /> : null}
+    {conflict ? <p role="alert">策略已被其他管理员修改，本次未覆盖。<button className="qp-button qp-button--outline" type="button" onClick={onSaved}>刷新策略并重新填写</button></p> : null}
+    <div><button className="qp-button qp-button--primary" disabled={busy || conflict || !valid || !reason.trim()}>{busy ? '保存中…' : '保存 Twitter 搜索策略'}</button><span className="qp-muted"> 当前修订 #{row.policy.revision}</span></div>
+  </form>
+}
+
 function StrategySearchManagement({ token, session, query, setQuery, onUnauthorized, notify }) {
   const load = useCallback(() => adminApi.strategySearch(token), [token])
   const remote = useRemoteData(load, onUnauthorized)
@@ -134,6 +170,7 @@ function StrategySearchManagement({ token, session, query, setQuery, onUnauthori
         {summary.editor ? <div className="mih-strategy-editor">
           <header><h3>修改 {row.label || row.platform} 搜索策略</h3><p>以下为待保存配置；填写修改原因并保存后生效。可用方式：{summary.modes.join('；')}。</p></header>
           {summary.editor === 'instagram' ? <InstagramSearchPolicyForm key={`${selected.id}:${row.platform}:${row.policy.revision}`} {...{ token, row, notify }} onSaved={remote.refresh} />
+            : summary.editor === 'twitter' ? <TwitterSearchPolicyForm key={`${selected.id}:${row.platform}:${row.policy.revision}`} {...{ token, row, notify }} onSaved={remote.refresh} />
             : <FacebookSearchPolicyForm key={`${row.platform}:${row.policy.revision}`} {...{ token, notify }} row={row.policy} allowedModes={row.allowedModes} onSaved={remote.refresh} />}
         </div> : <div className="mih-strategy-readonly"><strong>{row.editable ? '策略尚未就绪' : '当前未开放供应商切换'}</strong><p>{row.readOnlyReason || summary.description}</p><p>供应商目录、凭据或某个平台的其他接口已接入，并不代表当前业务接口具有可切换的兼容适配器。</p></div>}
         <details className="mih-strategy-route-details"><summary>接口范围与执行路由</summary><p>{row.routeSummary || '尚未提供当前路由信息。'}</p><p>{selected.description}</p><div className="mih-strategy-paths">{selected.paths.map(path => <code key={path}>{path}</code>)}</div></details>

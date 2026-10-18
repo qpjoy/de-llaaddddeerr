@@ -20,7 +20,8 @@ const uncertain = message => {
 const knownAdmission = error => error instanceof AppError && error.status !== 403 && (
   /^external_platform_(?:operation_|cost_)/u.test(error.code)
   || ['external_admission_policy_unavailable', 'external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
-    'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'twitter_fill_deadline'].includes(error.code))
+    'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'twitter_fill_deadline',
+    'strategy_search_paused', 'strategy_search_route_unavailable'].includes(error.code))
 
 function archiveObjects(result, request, callId) {
   if (result.archiveObjects?.length) return result.archiveObjects
@@ -44,7 +45,7 @@ function upstreamFailure(error) {
 // A single customer intent owns all acquisition steps. Every paid receipt is
 // durable before another dispatch; only the final delivery settles the hold.
 export async function runTwitterSearchFill({ gateway,context,delivery,request,deadlineAt,signal,
-  resolveCredential,enterCapacity,leaveCapacity,revalidateIdentity,providerCostControl,projectDelivery }, { clock=Date.now }={}) {
+  resolveCredential,enterCapacity,leaveCapacity,revalidateIdentity,providerCostControl,projectDelivery,assertSearchDispatchAllowed,rejectedFallback }, { clock=Date.now }={}) {
   const store=gateway.platformStore, started=performance.now()
   if(await store.twitterFillUnknownFor(delivery)) throw new AppError(409,'request_outcome_unknown','A previous equal delivery has an unknown outcome')
   const identity={ tenantId:context.tenant.id,consumerId:context.consumer.id,apiKeyId:context.apiKey.id,
@@ -83,6 +84,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
       ? (await store.validateTwitterManualRetry(dispatchLease.twitterManualRetry)).ancestorRequestIds : []
     await assertTwitterSearchAvailable({usageStore:gateway.usageStore,context,query:request.query,
       excludeRequestIds:[delivery.usageRequestId,...excluded]})
+    await assertSearchDispatchAllowed?.()
     const shared=await store.providerState('rapidapi')
     const state=isHubRateLimitExempt(context)?internalCircuitState(gateway.usageStore,context,shared):shared
     const contract=await store.contractCircuitState?.('rapidapi','twitter')
@@ -127,6 +129,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
     }
   }
   try {
+    await rejectedFallback?.begin()
     // Delivery-only arbitration protects cached finalization without treating
     // provider quarantine or missing credentials as a reason to lose paid data.
     const claim=await store.acquireTwitterFillDeliveryLease(dispatchLease)
@@ -195,6 +198,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         delete step.upstreamQuery.cursor
         if(inputCursor) step.upstreamQuery.cursor=inputCursor
         currentEvidence=null
+        await assertSearchDispatchAllowed?.()
         currentCall=await store.beginProviderCall({ ...delivery,apiKeyId:context.apiKey.id,
           contractVersion:step.endpointContractVersion,endpointKey:step.endpointKey,endpointVersion:step.endpointVersion,
           marketplace:'twitter',callOrdinal:calls,callRole:calls?'enrichment':'primary',dispatchFingerprint:delivery.fingerprint,
@@ -214,6 +218,54 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
             errorCode:error.evidence.errorCode,affectsCircuit:error.evidence.affectsCircuit!==false,
             responseArchive:error.responseArchive,restrictedResponseArchive:error.restrictedResponseArchive,
             upstreamEvidence:error.upstreamEvidence,archiveObjects:archiveObjects(error,step,currentCall.id) }
+          const canHandoff = rejectedFallback && error.evidence.outcome === 'rejected' && error.evidence.httpStatus === 400
+            && calls === 1 && !sources.length && !request.providerCursor && !request.buffer && !request.fill
+            && request.page === 1 && !delivery.twitterManualRetry
+            && await rejectedFallback.allowed().catch(() => false)
+          if (canHandoff) {
+            // Preserve the rejected procurement receipt, but keep the original
+            // customer hold open for one final TikHub delivery. The parent lease
+            // remains owned until both suppliers have a durable outcome.
+            await store.finishProviderStep(currentEvidence)
+            const callId = currentCall.id
+            currentCall = null
+            settledFailure = true
+            try {
+              await store.releaseProviderCostWorkflow({ reservationId: currentCost.id, usageRequestId: delivery.usageRequestId })
+              currentCost = null
+              if (entered) { leaveCapacity(entered); entered = false }
+              await rejectedFallback.prepare({ delivery, callId })
+            } catch {
+              await markUnknown()
+              throw uncertain('The supplier handoff could not be confirmed; verify the saved request before retrying')
+            }
+            try { return await rejectedFallback.run({ delivery, deadlineAt }) }
+            catch (fallbackError) {
+              // The TikHub workflow owns any dispatched outcome. If it stopped
+              // before dispatch, save that failure once rather than purchasing
+              // RapidAPI again on a same-key retry.
+              let saved
+              try { saved = await gateway.usageStore.getRequest(delivery.usageRequestId, delivery.consumerId) }
+              catch { await markUnknown(); throw uncertain('The search outcome could not be confirmed') }
+              if (saved?.status === 'reserved') {
+                if (!(fallbackError instanceof AppError) || fallbackError.preserveReservation
+                  || /unknown|persistence/u.test(fallbackError.code || '')) {
+                  await markUnknown()
+                  throw uncertain('The fallback search outcome is unknown; verify the saved request before retrying')
+                }
+                try {
+                  await gateway.usageStore.commitRequest(delivery.usageRequestId, {
+                    responseStatus: fallbackError.status,
+                    responseBody: { error: { code: fallbackError.code, message: fallbackError.message,
+                      details: { ...fallbackError.details, requestId: delivery.usageRequestId } }, requestId: delivery.usageRequestId },
+                    unitsActual: 0, upstreamLatencyMs: Math.round(performance.now() - started),
+                    deliverySourceMode: 'live', capturedAt: new Date().toISOString(),
+                  })
+                } catch { await markUnknown(); throw uncertain('The fallback delivery could not be confirmed') }
+              }
+              throw fallbackError
+            }
+          }
           await store.finishFailure({ ...currentEvidence,failureResponseStatus:mapped.status,
             failureResponseBody:{ error:{code:mapped.code,message:mapped.message,details:{...mapped.details,requestId:delivery.usageRequestId}},requestId:delivery.usageRequestId } })
           currentCall=null
