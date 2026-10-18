@@ -22,8 +22,10 @@ const LEGACY = {
           status IN ('queued','running') OR
           id IN (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status NOT IN ('queued','running') ORDER BY created_at DESC,id DESC LIMIT 100) OR
           id::text IN (SELECT document->>'sourceJobId' FROM mx_device.jobs WHERE mode=$1 AND status='queued'))`,
+  // Live attempts, the latest 100 finished, and (V2-4, lane timeline) every
+  // finished attempt started in the last 3 minutes, capped at 4000.
   snapshotAttempts:
-    "SELECT document - 'result' - 'lateEvidence' - 'checkpoints' AS document FROM mx_device.attempts WHERE mode=$1 AND status IN ('running','yielded') UNION ALL (SELECT document - 'result' - 'lateEvidence' - 'checkpoints' FROM mx_device.attempts WHERE mode=$1 AND status NOT IN ('running','yielded') ORDER BY created_at DESC LIMIT 100)",
+    "SELECT document - 'result' - 'lateEvidence' - 'checkpoints' AS document FROM mx_device.attempts WHERE mode=$1 AND status IN ('running','yielded') UNION ALL (SELECT document - 'result' - 'lateEvidence' - 'checkpoints' FROM mx_device.attempts WHERE mode=$1 AND status NOT IN ('running','yielded') AND (id IN (SELECT id FROM mx_device.attempts WHERE mode=$1 AND status NOT IN ('running','yielded') ORDER BY created_at DESC LIMIT 100) OR id IN (SELECT id FROM mx_device.attempts WHERE mode=$1 AND status NOT IN ('running','yielded') AND created_at >= (extract(epoch FROM clock_timestamp())*1000)::bigint - 180000 ORDER BY created_at DESC LIMIT 4000)))",
   snapshotCommands:
     "SELECT document - 'receipt' - 'lateEvidence' AS document FROM mx_device.execution_commands WHERE mode=$1 AND (status='running' OR job_id IN (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status='running')) UNION ALL (SELECT document - 'receipt' - 'lateEvidence' FROM mx_device.execution_commands WHERE mode=$1 AND status<>'running' AND job_id NOT IN (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status='running') ORDER BY created_at DESC LIMIT 400)",
 };
@@ -195,9 +197,10 @@ test(
             `${key} ${mode}`,
           );
       // Spot-check sizes so the comparison exercised the limits.
-      assert.equal(
-        (await rows(store.pool, SQL.snapshotAttempts, ["sim"])).length,
-        101,
+      // Everything here was created just now, so the 3-minute window adds rows
+      // beyond the latest 100.
+      assert(
+        (await rows(store.pool, SQL.snapshotAttempts, ["sim"])).length > 101,
       );
       assert.equal(
         (await rows(store.pool, SQL.snapshotCommands, ["sim"])).length,

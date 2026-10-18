@@ -310,3 +310,23 @@
     align-items: start;
   }
 }
+.lease-info {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 8px;
+  font-size: 12.5px;
+}
+.lease-info dl {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0;
+}
+.lease-info dt {
+  color: var(--muted);
+}
+.lease-info dd {
+  margin: 0;
+}

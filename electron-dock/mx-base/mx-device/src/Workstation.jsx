@@ -1,21 +1,55 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   DeviceMobile,
   Clock,
   WarningCircle,
-  Queue,
+  Warning,
+  PlayCircle,
+  ListBullets,
   SquaresFour,
   List,
   Plus,
   Sliders,
   ArrowRight,
+  CaretRight,
+  Info,
+  Timer,
+  PauseCircle,
+  WifiSlash,
+  Lock,
+  Rows,
+  FlowArrow,
+  Question,
 } from "@phosphor-icons/react";
 import { api, appName, jobTitle, time } from "./data.js";
 import { requestId } from "./request-id.mjs";
 import { Modal } from "./Forms.jsx";
 import { strategyStatus } from "../server/strategy-catalog.mjs";
 import { latestCatalog, workstationView } from "./workstation-view.mjs";
+import LaneChart from "./LaneChart.jsx";
+import FlowView from "./FlowView.jsx";
+import ExplainPanel from "./ExplainPanel.jsx";
+import { liveLanes, liveTicks } from "./timeline-model.mjs";
 import "./workstation.css";
+
+// Render a tile's mini screen only near the viewport (100 devices stay cheap).
+function useVisible(ref) {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver !== "function") {
+      setVisible(true);
+      return;
+    }
+    const io = new IntersectionObserver(
+      ([entry]) => setVisible(entry.isIntersecting),
+      { rootMargin: "300px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [ref]);
+  return visible;
+}
 
 const statusNames = {
   idle: "空闲",
@@ -25,6 +59,7 @@ const statusNames = {
   quarantined: "待核验",
   offline: "离线",
   reserved: "会话预留",
+  suspect: "失联待确认",
 };
 export const durationLabel = (ms) => {
   const n = Math.max(0, Math.ceil(ms / 1000));
@@ -34,31 +69,50 @@ export const durationLabel = (ms) => {
       ? `${Math.ceil(n / 60)} 分钟`
       : `${(n / 3600).toFixed(1)} 小时`;
 };
-function PolicySummary({ policy, auto }) {
-  if (!policy?.enabled)
-    return <span>尚未启用调度池 · 可为此机架应用推荐策略</span>;
+// One-line reading of the rack's scheduling policy for the strategy bar.
+function policyParts(policy, auto) {
+  if (!policy?.enabled) return ["尚未启用调度池，可为此机架应用推荐策略"];
+  return [
+    policy.strategy === "adaptive"
+      ? `空闲 ≥ ${policy.idleSpreadThresholdPct}% → 分散执行`
+      : policy.strategy === "spread"
+        ? "优先最早完成，分散负载"
+        : "优先复用同 App 上下文",
+    `${policy.strategy === "adaptive" ? "否则" : ""}同 App 最多等待 ${durationLabel(policy.maxAffinityDelayMs)}`,
+    "单机串行",
+    policy.pacing
+      ? `节奏由策略管理${policy.pacing.account ? "（含账号预算）" : ""}`
+      : "节奏沿用机架循环设置",
+    auto?.enabled &&
+      `自动切换：当前${auto.current === "busy" ? "繁忙" : "平静"}（≥ ${auto.enterPressure} 进入，≤ ${auto.exitPressure} 退出）`,
+  ].filter(Boolean);
+}
+const APP_ICONS = {
+  xhs: ["小红书", "#ff2442", "#fff"],
+  weibo: ["微博", "#ff8200", "#fff"],
+  xianyu: ["闲鱼", "#ffda00", "#3b3000"],
+  pdd: ["拼多多", "#e02e24", "#fff"],
+};
+function AppIcon({ appId }) {
+  const [label, bg, fg] = APP_ICONS[appId] || [
+    appName(appId),
+    "#5f7a8f",
+    "#fff",
+  ];
   return (
-    <span>
-      {policy.strategy === "adaptive"
-        ? `空闲超过 ${policy.idleSpreadThresholdPct}% 时分散`
-        : policy.strategy === "spread"
-          ? "优先预计最早完成，分散负载"
-          : "优先复用同 App 上下文"}
-      <b>→</b> 同 App 额外等待最多 {durationLabel(policy.maxAffinityDelayMs)}
-      <b>→</b> 单机串行，每机最多排 {policy.maxQueuePerDevice} 个任务
-      <b>→</b>
-      {policy.pacing
-        ? `节奏由策略管理${policy.pacing.account ? "（含账号预算）" : ""}`
-        : "节奏沿用机架循环设置"}
-      {auto?.enabled && (
-        <>
-          <b>→</b> 自动切换：当前{auto.current === "busy" ? "繁忙" : "平静"}
-          （压力 ≥ {auto.enterPressure} 进入，≤ {auto.exitPressure} 退出）
-        </>
-      )}
+    <span className="ws-app-icon" style={{ background: bg, color: fg }}>
+      {label}
     </span>
   );
 }
+// Priority 1 is the most urgent; the default is 5.
+const priorityLevel = (p = 5) =>
+  p <= 3 ? ["高", "high"] : p <= 6 ? ["中", "mid"] : ["低", "low"];
+const taskTitle = (job) =>
+  job.workflow?.name ||
+  `${appName(job.appId)} · ${job.operation === "search" ? "搜索" : job.sourceJobId ? "详情" : "笔记详情"}`;
+const keywordOf = (job) => job.input?.keyword || job.input?.target || "";
+const CLIENT_CLASS = { interactive: "交互", standard: "标准", batch: "批量" };
 const ms = (v) => durationLabel(v);
 // Shadow evaluation: the current queue planned under the current and a candidate strategy.
 function ShadowView({ mode, rack, strategy }) {
@@ -261,40 +315,104 @@ function AutoProfileForm({ loop, strategies, busy, onSubmit }) {
     </form>
   );
 }
-function MiniScreen({ row }) {
+function MiniScreen({ row, now }) {
   const { device: d, job, command, status } = row,
     p = d.projection;
   if (d.mode === "real")
     return (
       <div className="ws-phone ws-phone-real">
-        <DeviceMobile size={30} />
-        <strong>真实设备</strong>
-        <span>打开工作台查看画面</span>
-        <small>不会自动连接手机</small>
+        <div className="ws-phone-state">
+          <DeviceMobile size={28} />
+          <strong>真实设备</strong>
+          <span>打开工作台查看画面</span>
+        </div>
       </div>
     );
+  const appId = job?.appId || p?.appId || row.coolingApps[0]?.appId;
+  const cooldownUntil = Math.max(
+    d.cooldownUntil || 0,
+    ...row.coolingApps.map((a) => a.cooldownUntil),
+  );
+  const state =
+    status === "quarantined"
+      ? {
+          tone: "danger",
+          icon: <WarningCircle size={34} weight="fill" />,
+          title: "需人工核验",
+          note: "执行结果待核验 · 已隔离",
+        }
+      : status === "suspect"
+        ? {
+            tone: "warn",
+            icon: <WifiSlash size={32} />,
+            title: "失联待确认",
+            note: "Agent 心跳中断，宽限期内等待证据",
+          }
+        : status === "cooling"
+          ? {
+              tone: "warn",
+              icon: <Timer size={32} />,
+              title: d.cooldownUntil > now ? "设备休息中" : "App 冷却中",
+              note: `剩余 ${durationLabel(cooldownUntil - now)}`,
+            }
+          : status === "paused"
+            ? {
+                icon: <PauseCircle size={32} />,
+                title: "已暂停",
+                note: "不领取新任务",
+              }
+            : status === "offline"
+              ? {
+                  icon: <WifiSlash size={32} />,
+                  title: "离线",
+                  note: "等待重新连接",
+                }
+              : status === "reserved"
+                ? {
+                    icon: <Lock size={30} />,
+                    title: "会话预留",
+                    note: "等待当前工作收尾",
+                  }
+                : status !== "running"
+                  ? {
+                      icon: <DeviceMobile size={30} />,
+                      title: "等待任务",
+                      note: "空闲中",
+                    }
+                  : !p || p.jobId !== job?.id
+                    ? {
+                        icon: <AppIcon appId={appId} />,
+                        title: appName(appId),
+                        note:
+                          command?.definition?.name ||
+                          command?.code ||
+                          "等待指令回执",
+                        splash: true,
+                      }
+                    : null;
   return (
     <div className={`ws-phone ${command ? "ws-phone-active" : ""}`}>
-      <div className="ws-phone-top">
-        <span>{appName(p?.appId || job?.appId || d.simApps?.[0])}</span>
-        <i />
-      </div>
-      {status === "quarantined" ? (
-        <div className="ws-phone-empty">
-          <WarningCircle size={27} />
-          <strong>执行结果待核验</strong>
-          <span>已隔离，等待处理</span>
+      <i className="ws-notch" />
+      {d.agentId && (
+        <span className="ws-agent-tag" title="由宿主机 Agent 按租约执行">
+          Agent
+        </span>
+      )}
+      {state ? (
+        <div className={`ws-phone-state ${state.tone || ""}`}>
+          {state.icon}
+          <strong>{state.title}</strong>
+          <span>{state.note}</span>
+          {appId && status !== "idle" && !state.splash && (
+            <small>{appName(appId)}</small>
+          )}
         </div>
-      ) : p ? (
+      ) : (
         <div className="ws-phone-content">
-          <strong>
-            {p.detail
-              ? "正文详情"
-              : p.keyword ||
-                (p.page
-                  ? `搜索结果 · 第 ${p.page} 页`
-                  : p.status || "模拟页面")}
-          </strong>
+          <strong className="ws-phone-app">{appName(p.appId || appId)}</strong>
+          {p.keyword && (
+            <span className="ws-phone-query">搜索：{p.keyword}</span>
+          )}
           {p.detail ? (
             <p>
               {typeof p.detail === "string"
@@ -305,33 +423,24 @@ function MiniScreen({ row }) {
                   p.detail.body ||
                   "详情内容已返回"}
             </p>
-          ) : (
-            (p.items || []).slice(0, 3).map((item, i) => (
-              <div className="ws-result" key={item.id || i}>
-                <i>{i + 1}</i>
-                <span>
+          ) : p.items?.length ? (
+            <ol>
+              {p.items.slice(0, 3).map((item, i) => (
+                <li key={item.id || i}>
                   {item.title || item.name || "模拟结果"}
-                  <small>{item.price || item.description || "合成数据"}</small>
-                </span>
-              </div>
-            ))
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p>{p.subtitle || p.status || "应用已就绪，等待下一条指令"}</p>
           )}
-          {!p.detail && !p.items?.length && (
-            <p>{p.subtitle || "应用已就绪，等待下一条指令"}</p>
-          )}
-        </div>
-      ) : (
-        <div className="ws-phone-empty">
-          <DeviceMobile size={30} />
-          <strong>{statusNames[status]}</strong>
-          <span>{status === "idle" ? "等待任务到达" : "暂无已确认页面"}</span>
         </div>
       )}
-      <div className="ws-phone-bottom">
-        {command?.definition?.name ||
-          command?.code ||
-          (status === "running" ? "等待指令回执" : "合成投影 · 非实时屏幕")}
-      </div>
+      {command && !state && (
+        <div className="ws-phone-command">
+          {command.definition?.name || command.code}
+        </div>
+      )}
     </div>
   );
 }
@@ -353,42 +462,67 @@ function AppChips({ row, now }) {
     </div>
   );
 }
+function tileTask(row) {
+  const app = appName(
+    row.job?.appId || row.device.projection?.appId || row.coolingApps[0]?.appId,
+  );
+  if (row.job) return taskTitle(row.job);
+  return (
+    {
+      cooling: `${app} · 冷却等待`,
+      quarantined: `${app} · 待人工核验`,
+      paused: "已暂停",
+      offline: "离线",
+      reserved: "会话预留",
+    }[row.status] || "空闲"
+  );
+}
 function DeviceTile({ row, now, onOpen }) {
   const completed = row.job?.workflow?.nextStep || 0,
     total = row.job?.workflow?.plan?.length || 0;
+  const ref = useRef(null),
+    visible = useVisible(ref);
   return (
     <button
+      ref={ref}
       className={`ws-device ws-device-${row.status}`}
-      onClick={() => onOpen(row.device)}
-      aria-label={`打开 ${row.device.name} 手机工作台`}
+      onClick={() => onOpen?.(row.device)}
+      aria-label={
+        onOpen ? `打开 ${row.device.name} 手机工作台` : row.device.name
+      }
     >
       <div className="ws-device-heading">
+        <i className={`ws-dot ws-dot-${row.status}`} />
         <strong>{row.device.name}</strong>
         <span className={`ws-state ws-state-${row.status}`}>
           {statusNames[row.status]}
         </span>
       </div>
-      <MiniScreen row={row} />
-      <div className="ws-device-task">
-        {row.job
-          ? jobTitle(row.job)
-          : row.status === "idle"
-            ? "执行槽空闲"
-            : statusNames[row.status]}
+      {visible ? (
+        <MiniScreen row={row} now={now} />
+      ) : (
+        <div className="ws-phone ws-phone-placeholder" />
+      )}
+      <div className="ws-device-task" title={row.job ? jobTitle(row.job) : ""}>
+        {tileTask(row)}
       </div>
-      <div className="ws-device-progress">
+      <div className="ws-progress">
+        <i
+          style={{
+            width: `${total ? Math.round((Math.min(completed, total) / total) * 100) : row.status === "running" ? 15 : 0}%`,
+          }}
+        />
+      </div>
+      <div className="ws-device-foot">
         <span>
           {total
-            ? `步骤 ${Math.min(completed + 1, total)} / ${total}`
-            : row.command
-              ? "指令执行中"
-              : "—"}
+            ? `${Math.min(completed, total)} / ${total} 步`
+            : row.status === "running"
+              ? "执行中"
+              : "0 / 0 步"}
         </span>
-        <span>
-          预计队列 <b>{row.queue.length}</b>
-        </span>
+        <span>队列 {row.queue.length}</span>
       </div>
-      <AppChips row={row} now={now} />
     </button>
   );
 }
@@ -401,32 +535,20 @@ function QueueRows({
   onInspect,
   onAssign,
   onCancel,
+  onExplain,
+  readOnly = false,
 }) {
   return (
     <div className="ws-queue-list">
       {rows.length ? (
         rows
           .slice(0, 12)
-          .map(({ job, planned, assignment, deviceId, binding }) => (
-            <article className="ws-queue-job" key={job.id}>
-              <div className="ws-queue-title">
-                <button className="text-link" onClick={() => onInspect(job)}>
-                  {jobTitle(job)}
-                </button>
-                <span>P{job.priority}</span>
-              </div>
-              <div className="ws-queue-meta">
-                <span>等待 {durationLabel(now - job.createdAt)}</span>
-                <span className={binding === "指定设备" ? "ws-bound" : ""}>
-                  {binding}
-                </span>
-              </div>
-              <div className="ws-queue-target">
-                <ArrowRight size={14} />
-                {devicesById.get(deviceId)?.name || "中央任务池"}
-              </div>
-              <p>
-                {[
+          .map(({ job, planned, assignment, deviceId, binding }) => {
+            const target = devicesById.get(deviceId)?.name,
+              [level, tone] = priorityLevel(job.priority),
+              keyword = keywordOf(job),
+              reason =
+                [
                   assignment?.reason,
                   assignment?.switchMs
                     ? `含 App 切换约 ${Math.round(assignment.switchMs / 1000)} 秒`
@@ -437,33 +559,162 @@ function QueueRows({
                   ...(planned?.reasons || []).map((r) => r.message),
                 ]
                   .filter(Boolean)
-                  .join("；") || "等待可用执行槽"}
-              </p>
-              <div className="ws-queue-actions">
-                {mode === "sim" && (
-                  <button disabled={busy} onClick={() => onAssign(job)}>
-                    指派 / 回池
-                  </button>
-                )}
-                <button disabled={busy} onClick={() => onCancel(job)}>
-                  取消排队
-                </button>
-              </div>
-            </article>
-          ))
+                  .join("；") || "等待可用设备";
+            return (
+              <article className="ws-queue-job" key={job.id}>
+                <div className="ws-queue-head">
+                  <AppIcon appId={job.appId} />
+                  <div className="ws-queue-name">
+                    {readOnly ? (
+                      <strong>{taskTitle(job)}</strong>
+                    ) : (
+                      <button
+                        className="text-link"
+                        onClick={() => onInspect(job)}
+                      >
+                        {taskTitle(job)}
+                      </button>
+                    )}
+                    {job.client && (
+                      <small className="ws-client-tag">
+                        {job.client.name} · {CLIENT_CLASS[job.client.class]}
+                      </small>
+                    )}
+                    {keyword && <small>“{keyword}”</small>}
+                  </div>
+                  <span
+                    className={`ws-badge ${target ? "ws-badge-planned" : "ws-badge-waiting"}`}
+                  >
+                    {target
+                      ? `${binding === "指定设备" ? "指定" : "预计到"} ${target}`
+                      : "待分配"}
+                  </span>
+                </div>
+                <div className="ws-queue-body">
+                  <dl>
+                    <dt>优先级</dt>
+                    <dd className={`ws-priority-${tone}`}>
+                      {level} · P{job.priority}
+                    </dd>
+                    <dt>预计到</dt>
+                    <dd>{target || "—"}</dd>
+                    <dt>等待时间</dt>
+                    <dd>{durationLabel(now - job.createdAt)}</dd>
+                    <dt>原因</dt>
+                    <dd className="ws-queue-reason" title={reason}>
+                      {reason}
+                    </dd>
+                  </dl>
+                  <div className="ws-queue-actions">
+                    {mode === "sim" && !readOnly && (
+                      <button
+                        className="primary"
+                        disabled={busy}
+                        onClick={() => onAssign(job)}
+                      >
+                        指派
+                      </button>
+                    )}
+                    {!readOnly && (
+                      <button disabled={busy} onClick={() => onCancel(job)}>
+                        取消
+                      </button>
+                    )}
+                    <button
+                      className="ws-why"
+                      onClick={() => onExplain(job.id)}
+                      title="为什么在这里、为什么还在等、计划历史"
+                    >
+                      <Question size={14} />
+                      解释
+                    </button>
+                  </div>
+                </div>
+              </article>
+            );
+          })
       ) : (
         <div className="ws-empty">
-          <Queue size={32} />
+          <ListBullets size={32} />
           <strong>队列已清空</strong>
           <p>任务领取后会显示在对应设备中。</p>
         </div>
       )}
       {rows.length > 12 && (
-        <p className="small muted">
+        <p className="small muted ws-queue-more">
           显示前 12 个任务，共 {rows.length} 个；完整记录见任务中心。
         </p>
       )}
     </div>
+  );
+}
+// Event types shown in the flow table: label and tone.
+const FLOW = {
+  queued: ["已入池", "warn"],
+  claimed: ["已分配", "ok"],
+  checkpoint: ["回执确认", "ok"],
+  succeeded: ["已完成", "ok"],
+  failed: ["失败", "danger"],
+  unknown: ["待核验", "danger"],
+  late: ["迟到回执", "muted"],
+  cancelled: ["已取消", "muted"],
+  "app-rest": ["App 冷却", "warn"],
+  "device-rest": ["设备休息", "warn"],
+  "job-assignment": ["人工指派", "info"],
+  "strategy-applied": ["策略应用", "info"],
+  "profile-switch": ["策略切换", "info"],
+  "profile-auto": ["自动切换", "info"],
+  "loop-policy": ["循环策略", "info"],
+  "account-status": ["账号状态", "info"],
+  "account-signal": ["平台信号", "danger"],
+};
+function FlowTable({ events, devicesById, jobsById, onMore }) {
+  return (
+    <section className="panel ws-flow">
+      <div className="ws-flow-head">
+        {onMore ? (
+          <button className="text-link" onClick={onMore}>
+            最新流转 <CaretRight size={14} />
+          </button>
+        ) : (
+          <strong>最新流转</strong>
+        )}
+        <span>提交 → 动态分配 → 单机串行执行 → 回执确认 → 独立冷却</span>
+      </div>
+      {events.length ? (
+        <div className="table-wrap">
+          <table>
+            <tbody>
+              {events.map((e) => {
+                const [label, tone] = FLOW[e.type] || ["事件", "muted"],
+                  job = e.jobId && jobsById.get(e.jobId),
+                  device = e.deviceId && devicesById.get(e.deviceId);
+                return (
+                  <tr key={e.id}>
+                    <td className="ws-flow-time">
+                      <i className={`ws-flow-dot ${tone}`} />
+                      {time(e.at)}
+                    </td>
+                    <td className="ws-flow-label">{label}</td>
+                    <td className="ws-flow-subject">
+                      {device?.name || (job ? "中央队列" : "—")}
+                    </td>
+                    <td className="ws-flow-task">
+                      {job ? taskTitle(job) : "—"}
+                    </td>
+                    <td className="ws-flow-message">{e.message || e.type}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="muted ws-flow-empty">
+          暂无活动。读取工作台不会派发任务。
+        </p>
+      )}
+    </section>
   );
 }
 function AssignmentForm({ job, state, busy, onSubmit }) {
@@ -656,8 +907,11 @@ export default function Workstation({
   onInspect,
   onScenarios,
   onRackManage,
+  onJobs,
   onAdd,
   onRealSubmit,
+  // Embedded ops view (V2-5): everything visible, nothing writable.
+  readOnly = false,
 }) {
   const [view, setView] = useState("screens"),
     [filter, setFilter] = useState("all"),
@@ -665,6 +919,18 @@ export default function Workstation({
     [modal, setModal] = useState(null),
     [localError, setLocalError] = useState("");
   const model = useMemo(() => workstationView(state, rack), [state, rack]);
+  const [explain, setExplain] = useState(null);
+  // Server time advances locally between pushes so the timeline keeps moving.
+  const received = useRef({ at: Date.now(), now: model.now });
+  if (received.current.now !== model.now)
+    received.current = { at: Date.now(), now: model.now };
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!["lanes", "flow"].includes(view)) return;
+    const timer = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(timer);
+  }, [view]);
+  const liveNow = model.now + (Date.now() - received.current.at);
   const racks = [...new Set(state.devices.map((d) => d.rack))].sort(),
     strategies = latestCatalog(state.strategyDefinitions);
   const loop = state.loopPolicies.find((p) => p.rack === rack),
@@ -682,6 +948,13 @@ export default function Workstation({
       shown.map((d) => JSON.stringify([d.device.rack, d.device.host])),
     ),
   ];
+  const timeline =
+    view === "lanes"
+      ? liveLanes(state, {
+          now: liveNow,
+          devices: shown.map((row) => row.device),
+        })
+      : null;
   const act = async (fn, message) => {
     setLocalError("");
     const result = await run(async () => {
@@ -694,63 +967,89 @@ export default function Workstation({
     }, message);
     if (result) setModal(null);
   };
-  const events = state.events
-    .filter(
-      (e) =>
-        !rack ||
-        !e.deviceId ||
-        model.devices.some((d) => d.device.id === e.deviceId),
+  // Latest flow, newest first: at most three receipts (one per device), so
+  // command receipts do not crowd out claims, completions and cooldowns.
+  const events = [],
+    receipts = new Set();
+  for (let i = state.events.length - 1; i >= 0 && events.length < 8; i--) {
+    const e = state.events[i];
+    if (
+      rack &&
+      e.deviceId &&
+      !model.devices.some((d) => d.device.id === e.deviceId)
     )
-    .slice(-8)
-    .reverse();
+      continue;
+    if (e.type === "checkpoint") {
+      if (receipts.has(e.deviceId) || receipts.size >= 3) continue;
+      receipts.add(e.deviceId);
+    }
+    events.push(e);
+  }
+  const hosts = [...new Set(shown.map((d) => d.device.host))];
+  const jobsById = new Map(state.jobs.map((j) => [j.id, j]));
   return (
     <div className="workstation">
       <div className="ws-metrics">
         {[
           {
-            title: "设备总数",
             value: model.metrics.total,
-            unit: "台",
-            icon: DeviceMobile,
+            label: "台设备",
+            icon: <DeviceMobile size={26} />,
+            tone: "blue",
+            filter: "all",
           },
           {
-            title: "正在执行",
             value: model.metrics.running,
-            unit: "台",
-            icon: SquaresFour,
+            label: "执行中",
+            icon: <PlayCircle size={30} weight="fill" />,
+            tone: "teal",
+            filter: "running",
           },
           {
-            title: "等待领取",
             value: model.metrics.queued,
-            unit: "个任务",
-            icon: Queue,
+            label: "排队任务",
+            icon: <ListBullets size={24} weight="bold" />,
+            tone: "violet",
+            filter: "queue",
           },
           {
-            title: "App 冷却",
             value: model.metrics.cooling,
-            unit: "个应用槽",
-            icon: Clock,
+            label: "App 冷却",
+            icon: <Clock size={30} weight="fill" />,
+            tone: "amber",
+            filter: "cooling",
           },
           {
-            title: "待核验",
             value: model.metrics.quarantined,
-            unit: "台",
-            icon: WarningCircle,
+            label: "待核验",
+            icon: <Warning size={30} weight="fill" />,
+            tone: "red",
+            filter: "quarantined",
           },
         ].map((m) => (
-          <div className="ws-metric" key={m.title}>
-            <m.icon size={20} />
-            <span>{m.title}</span>
-            <strong>
-              {m.value}
-              <small>{m.unit}</small>
-            </strong>
-          </div>
+          <button
+            className={`ws-metric ws-tone-${m.tone}${filter === m.filter ? " selected" : ""}`}
+            key={m.label}
+            title={m.filter === "queue" ? "查看中央队列" : "按此状态筛选设备"}
+            onClick={() =>
+              m.filter === "queue"
+                ? document
+                    .querySelector(".ws-central-queue")
+                    ?.scrollIntoView({ behavior: "smooth", block: "start" })
+                : setFilter(m.filter)
+            }
+          >
+            <span className="ws-metric-icon">{m.icon}</span>
+            <div>
+              <strong>{m.value}</strong>
+              <span>{m.label}</span>
+            </div>
+          </button>
         ))}
       </div>
       <section className="panel ws-toolbar">
         <label>
-          机架
+          <span>机架</span>
           <select
             aria-label="查看机架"
             value={rack}
@@ -765,10 +1064,10 @@ export default function Workstation({
             ))}
           </select>
         </label>
-        {mode === "sim" && (
+        {mode === "sim" && !readOnly && (
           <>
             <label className="ws-strategy-select">
-              默认调度策略
+              <span>默认策略</span>
               <select
                 aria-label="默认调度策略"
                 value={strategy?.id || ""}
@@ -783,7 +1082,7 @@ export default function Workstation({
               </select>
             </label>
             <button
-              className="outline"
+              className="primary"
               disabled={busy || !rack || !strategy}
               onClick={() =>
                 run(
@@ -797,7 +1096,7 @@ export default function Workstation({
                 )
               }
             >
-              应用到机架
+              应用策略
             </button>
           </>
         )}
@@ -808,7 +1107,7 @@ export default function Workstation({
             onClick={() => setView("screens")}
           >
             <SquaresFour size={18} />
-            屏幕墙
+            屏幕
           </button>
           <button
             className={view === "list" ? "selected" : ""}
@@ -818,64 +1117,93 @@ export default function Workstation({
             <List size={18} />
             列表
           </button>
+          <button
+            className={view === "lanes" ? "selected" : ""}
+            aria-pressed={view === "lanes"}
+            onClick={() => setView("lanes")}
+          >
+            <Rows size={18} />
+            泳道
+          </button>
+          <button
+            className={view === "flow" ? "selected" : ""}
+            aria-pressed={view === "flow"}
+            onClick={() => setView("flow")}
+          >
+            <FlowArrow size={18} />
+            流转
+          </button>
         </div>
       </section>
       {mode === "sim" && (
-        <div className="ws-policy-strip">
-          <Sliders size={18} />
-          <div>
-            <strong>
-              {rack
-                ? status.snapshot
-                  ? `${status.snapshot.name} · v${status.snapshot.version}${status.state === "modified" ? " · 参数已有手动调整" : ""}`
-                  : "此机架尚未绑定策略库"
-                : "选择一个机架，查看和设置默认策略"}
-            </strong>
-            {rack && (
+        <div className="ws-policy-line">
+          <Info
+            size={18}
+            alt="冷却与预算统一由节奏账本判定，截止时间只会延长；预计队列随可用资源动态变化。"
+          />
+          <p>
+            {rack ? (
               <>
-                <PolicySummary
-                  policy={loop?.scheduler}
-                  auto={loop?.autoProfile}
-                />
-                <small>
-                  冷却与预算统一由节奏账本判定，截止时间只会延长；预计队列随可用资源动态变化。
-                </small>
+                {status.snapshot && (
+                  <strong>
+                    {status.snapshot.name} · v{status.snapshot.version}
+                  </strong>
+                )}
+                {status.state === "modified" && (
+                  <em className="ws-modified">参数已手动调整</em>
+                )}
+                {policyParts(loop?.scheduler, loop?.autoProfile).join(" · ")}
               </>
+            ) : (
+              `选择一个机架，查看${readOnly ? "" : "和设置"}默认策略`
             )}
-          </div>
-          {rack && strategy && (
-            <button
-              className="text-link"
-              onClick={() => setModal({ type: "shadow" })}
-            >
-              影子评估「{strategy.name}」
-            </button>
+          </p>
+          {!readOnly && (
+            <div className="ws-policy-links">
+              {rack && strategy && (
+                <button
+                  className="text-link"
+                  onClick={() => setModal({ type: "shadow" })}
+                >
+                  影子评估
+                </button>
+              )}
+              {rack && loop && (
+                <button
+                  className="text-link"
+                  onClick={() => setModal({ type: "auto" })}
+                >
+                  自动切换
+                </button>
+              )}
+              <button className="text-link" onClick={onScenarios}>
+                场景与策略 <ArrowRight size={14} />
+              </button>
+            </div>
           )}
-          {rack && loop && (
-            <button
-              className="text-link"
-              onClick={() => setModal({ type: "auto" })}
-            >
-              自动切换
-            </button>
-          )}
-          <button className="text-link" onClick={onScenarios}>
-            场景与策略 <ArrowRight />
-          </button>
         </div>
       )}
       <div className="ws-main-grid">
         <section className="panel ws-rack">
           <div className="ws-section-head">
-            <div>
+            <div className="ws-rack-title">
               <h2>{rack || "全部机架"}</h2>
-              <p>
-                {mode === "sim"
-                  ? "模拟画面随已确认指令变化 · 点击手机查看完整工作台"
-                  : "设备执行状态总览 · 打开手机工作台查看画面"}
-              </p>
+              <span>
+                {shown.length} 台
+                {hosts.length === 1
+                  ? ` · ${hosts[0]}`
+                  : hosts.length
+                    ? ` · ${hosts.length} 台宿主机`
+                    : ""}
+              </span>
             </div>
             <div className="ws-rack-tools">
+              {mode === "sim" && (
+                <span className="ws-synthetic">
+                  <Info size={16} />
+                  合成投影 · 非真实截图
+                </span>
+              )}
               <select
                 aria-label="设备状态筛选"
                 value={filter}
@@ -888,16 +1216,71 @@ export default function Workstation({
                   </option>
                 ))}
               </select>
-              <button
-                className="icon-button"
-                aria-label="管理机架资源"
-                onClick={onRackManage}
-              >
-                <Sliders size={20} />
-              </button>
+              {!readOnly && (
+                <button
+                  className="icon-button"
+                  aria-label="管理机架资源"
+                  title="管理机架资源"
+                  onClick={onRackManage}
+                >
+                  <Sliders size={20} />
+                </button>
+              )}
             </div>
           </div>
-          {shown.length ? (
+          {view === "lanes" && shown.length ? (
+            <div className="ws-host">
+              <LaneChart
+                lanes={timeline.lanes}
+                start={timeline.start}
+                end={timeline.end}
+                now={timeline.now}
+                ticks={liveTicks(timeline.now)}
+                clock={time}
+                compact={timeline.lanes.length > 24}
+                onBlock={(b) => setExplain(b.jobId)}
+                onLane={readOnly ? undefined : (lane) => onOpenDevice(lane.id)}
+                onDropPlan={
+                  mode === "sim" && !readOnly
+                    ? (jobId, lane) => {
+                        const job = state.jobs.find((j) => j.id === jobId);
+                        if (!job || job.status !== "queued") return;
+                        void run(
+                          () =>
+                            api(`jobs/${jobId}/assignment`, mode, {
+                              revision: job.revision || 0,
+                              deviceId: lane.id,
+                            }),
+                          `已指派到 ${lane.name}；不影响其他任务`,
+                        );
+                      }
+                    : undefined
+                }
+              />
+              <p className="ws-lane-note">
+                {readOnly
+                  ? "实色是已执行或执行中，虚线框是可变的软计划，细带是冷却与休息。点色块看解释。"
+                  : "实色是已执行或执行中，虚线框是可变的软计划（可拖到其他泳道指派），细带是冷却与休息。点色块看解释，点设备名打开手机工作台。"}
+              </p>
+            </div>
+          ) : view === "flow" ? (
+            <div className="ws-host">
+              <FlowView
+                state={state}
+                rack={rack}
+                now={liveNow}
+                onStage={(stage) =>
+                  stage === "running"
+                    ? (setView("screens"), setFilter("running"))
+                    : ["queued", "planned", "accepted"].includes(stage)
+                      ? document
+                          .querySelector(".ws-central-queue")
+                          ?.scrollIntoView({ behavior: "smooth" })
+                      : null
+                }
+              />
+            </div>
+          ) : shown.length ? (
             groups.map((key) => {
               const [r, h] = JSON.parse(key),
                 rows = shown.filter(
@@ -905,12 +1288,14 @@ export default function Workstation({
                 );
               return (
                 <div className="ws-host" key={key}>
-                  <div className="ws-host-heading">
-                    <strong>
-                      {r} <span>/ {h}</span>
-                    </strong>
-                    <span>{rows.length} 台</span>
-                  </div>
+                  {groups.length > 1 && (
+                    <div className="ws-host-heading">
+                      <strong>
+                        {r} <span>/ {h}</span>
+                      </strong>
+                      <span>{rows.length} 台</span>
+                    </div>
+                  )}
                   {view === "screens" ? (
                     <div className="ws-screen-grid">
                       {rows.map((row) => (
@@ -918,7 +1303,7 @@ export default function Workstation({
                           key={row.device.id}
                           row={row}
                           now={model.now}
-                          onOpen={onOpenDevice}
+                          onOpen={readOnly ? null : onOpenDevice}
                         />
                       ))}
                     </div>
@@ -938,17 +1323,24 @@ export default function Workstation({
                           {rows.map((row) => (
                             <tr key={row.device.id}>
                               <td>
-                                <button
-                                  className="text-link"
-                                  onClick={() => onOpenDevice(row.device)}
-                                >
-                                  {row.device.name}
-                                </button>
+                                {readOnly ? (
+                                  row.device.name
+                                ) : (
+                                  <button
+                                    className="text-link"
+                                    onClick={() => onOpenDevice(row.device)}
+                                  >
+                                    {row.device.name}
+                                  </button>
+                                )}
                               </td>
                               <td>
                                 <span
                                   className={`ws-state ws-state-${row.status}`}
                                 >
+                                  <i
+                                    className={`ws-dot ws-dot-${row.status}`}
+                                  />
                                   {statusNames[row.status]}
                                 </span>
                               </td>
@@ -975,46 +1367,58 @@ export default function Workstation({
               <h3>
                 {filter === "all" ? "还没有可展示的设备" : "此筛选下没有设备"}
               </h3>
-              <p>从场景创建独立模拟机架，或添加已有设备。</p>
-              <div className="row-actions">
-                {mode === "sim" && (
-                  <button className="primary" onClick={onScenarios}>
-                    选择演练场景
-                  </button>
-                )}
-                <button className="outline" onClick={onAdd}>
-                  添加设备
-                </button>
-              </div>
+              {!readOnly && (
+                <>
+                  <p>从场景创建独立模拟机架，或添加已有设备。</p>
+                  <div className="row-actions">
+                    {mode === "sim" && (
+                      <button className="primary" onClick={onScenarios}>
+                        选择演练场景
+                      </button>
+                    )}
+                    <button className="outline" onClick={onAdd}>
+                      添加设备
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           )}
         </section>
         <aside className="panel ws-central-queue">
           <div className="ws-section-head">
-            <div>
-              <h2>
-                中央任务队列 <span>{model.queue.length}</span>
-              </h2>
-              <p>未领取可重新指派；预计分配不是执行锁。</p>
-            </div>
+            <h2>
+              中央任务队列 <span>{model.queue.length}</span>
+            </h2>
+            {!readOnly && (
+              <button
+                className="primary ws-submit"
+                onClick={() => {
+                  setLocalError("");
+                  mode === "sim"
+                    ? setModal({ type: "submit" })
+                    : onRealSubmit();
+                }}
+              >
+                <Plus size={16} />
+                提交任务
+              </button>
+            )}
           </div>
-          <button
-            className="outline ws-submit"
-            onClick={() => {
-              setLocalError("");
-              mode === "sim" ? setModal({ type: "submit" }) : onRealSubmit();
-            }}
-          >
-            <Plus size={16} />
-            提交任务
-          </button>
+          <p className="ws-queue-note">
+            {readOnly
+              ? "只读视图：指派、取消与暂停请在设备中心管理台进行。"
+              : "未领取可重新指派；预计分配不是执行锁。"}
+          </p>
           <QueueRows
             rows={model.queue}
             devicesById={model.devicesById}
             now={model.now}
             mode={mode}
             busy={busy}
+            readOnly={readOnly}
             onInspect={onInspect}
+            onExplain={setExplain}
             onAssign={(job) => {
               setLocalError("");
               setModal({ type: "assign", job });
@@ -1033,24 +1437,25 @@ export default function Workstation({
           />
         </aside>
       </div>
-      <section className="panel ws-events">
-        <div className="ws-section-head">
-          <div>
-            <h2>最近调度活动</h2>
-            <p>提交 → 动态分配 → 单机串行执行 → 回执确认 → 独立冷却</p>
-          </div>
-        </div>
-        {events.length ? (
-          events.map((e) => (
-            <div className="ws-event" key={e.id}>
-              <time>{time(e.at)}</time>
-              <span>{e.message || e.type}</span>
-            </div>
-          ))
-        ) : (
-          <p className="muted">暂无活动。读取工作台不会派发任务。</p>
-        )}
-      </section>
+      <FlowTable
+        events={events}
+        devicesById={model.devicesById}
+        jobsById={jobsById}
+        onMore={readOnly ? null : onJobs}
+      />
+      {mode === "sim" && (
+        <p className="ws-footnote">合成投影，不是真实截图。</p>
+      )}
+      {explain && (
+        <ExplainPanel
+          state={state}
+          mode={mode}
+          jobId={explain}
+          now={liveNow}
+          onClose={() => setExplain(null)}
+          onOpenDevice={readOnly ? null : (id) => onOpenDevice(id)}
+        />
+      )}
       {modal && (
         <Modal
           title={

@@ -99,6 +99,15 @@ export function normalizePacing(input) {
     invalid("pacing.burst 休息下限不能大于上限");
   return Object.values(out).some(Boolean) ? out : null;
 }
+// Policies in state are replaced, never edited in place, so the normalized
+// form is cached per object (planning calls this per device and task).
+const NORMALIZED = new WeakMap();
+export function normalizedPolicy(input) {
+  if (!input || typeof input !== "object") return normalizePoolPolicy(input);
+  let policy = NORMALIZED.get(input);
+  if (!policy) NORMALIZED.set(input, (policy = normalizePoolPolicy(input)));
+  return policy;
+}
 export function normalizePoolPolicy(input = {}) {
   object(input, "scheduler");
   for (const key of Object.keys(input))

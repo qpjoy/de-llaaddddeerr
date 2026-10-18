@@ -39,18 +39,35 @@ export function initialApp(device, appId) {
 
 export const appKey = (mode, deviceId, appId) =>
   `${mode}\u0000${deviceId}\u0000${appId}`;
+// App rows by device id then App id, cached per array (rebuilt when rows are
+// added; rows are never replaced in place). The first row wins, like find().
+const APP_INDEX = new WeakMap();
+function appsByDevice(state) {
+  const rows = state.apps || [];
+  let hit = APP_INDEX.get(rows);
+  if (!hit || hit.length !== rows.length) {
+    const map = new Map();
+    for (const a of rows) {
+      let apps = map.get(a.deviceId);
+      if (!apps) map.set(a.deviceId, (apps = new Map()));
+      if (!apps.has(a.appId)) apps.set(a.appId, a);
+    }
+    APP_INDEX.set(rows, (hit = { length: rows.length, map }));
+  }
+  return hit.map;
+}
+/** The App row of a device, or undefined. */
+export function appRowOf(state, device, appId) {
+  const row = appsByDevice(state).get(device.id)?.get(appId);
+  return row?.mode === device.mode ? row : undefined;
+}
 // index (optional): a read-only schedulingIndex built for this state; results are identical.
 export function deviceApps(state, device, index) {
   return supportedApps(device).map(
     (id) =>
       (index
         ? index.apps.get(appKey(device.mode, device.id, id))
-        : (state.apps || []).find(
-            (a) =>
-              a.mode === device.mode &&
-              a.deviceId === device.id &&
-              a.appId === id,
-          )) || initialApp(device, id),
+        : appRowOf(state, device, id)) || initialApp(device, id),
   );
 }
 

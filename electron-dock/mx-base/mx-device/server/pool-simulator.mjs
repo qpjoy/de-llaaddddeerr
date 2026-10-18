@@ -185,6 +185,8 @@ function execute(options, jobs, baseline = false, experiment = {}) {
     peak = 0,
     totalCapacityMs = 0,
     rounds = 0;
+  // Per-device sessions for replay (bounded): jobId -> block.
+  const blocks = new Map();
   const note = (type, message, extra = {}) => {
     if (timeline.length < 1200)
       timeline.push({ at: now - START, type, message, ...extra });
@@ -308,6 +310,16 @@ function execute(options, jobs, baseline = false, experiment = {}) {
     switchTimeMs += switchMs;
     active.set(work.device.id, { work, command, end: now + duration });
     if (command.stepIndex === 0) {
+      if (blocks.size < 3000)
+        blocks.set(work.job.id, {
+          deviceId: work.device.id,
+          jobId: label(work.job),
+          appId: work.job.appId,
+          label: `${label(work.job)} · ${work.job.workflow.name}`,
+          start: now - START,
+          end: null,
+          status: "running",
+        });
       if (
         previousApp.has(work.device.id) &&
         previousApp.get(work.device.id) !== work.job.appId
@@ -338,6 +350,9 @@ function execute(options, jobs, baseline = false, experiment = {}) {
         failed = true;
       }
       completeCommand(state, now, work.attempt, command, receipt);
+      const block = blocks.get(work.job.id);
+      if (block && ["succeeded", "unknown", "failed"].includes(work.job.status))
+        Object.assign(block, { end: now - START, status: work.job.status });
       if (work.job.status === "unknown")
         note("quarantine", "回执无法确认，隔离设备；禁止自动重试此任务", {
           jobId: label(work.job),
@@ -488,6 +503,15 @@ function execute(options, jobs, baseline = false, experiment = {}) {
       realTransportCalls: 0,
     },
     timeline,
+    // Replay lanes: each device's sessions in virtual time (ms from start).
+    lanes: state.devices.map((d) => ({
+      id: d.name,
+      name: d.name,
+      rack: d.host,
+      blocks: [...blocks.values()]
+        .filter((b) => b.deviceId === d.id)
+        .map(({ deviceId, ...b }) => ({ ...b, end: b.end ?? duration })),
+    })),
     devices: state.devices.map((d) => ({
       id: d.name,
       name: d.name,
@@ -523,6 +547,7 @@ export function runPoolSimulation(body, experiment = {}) {
     simulated: true,
     ...current,
     baseline: baseline.summary,
+    baselineLanes: baseline.lanes,
     baselineName: "spread（相同预算与工作负载）",
     invariantChecks: [
       "单机指令互斥",

@@ -136,3 +136,50 @@ pacing 接口的整机间隔为模拟 0–86400000、真机 2000–86400000 整�
 - `/api/state` 的 `scheduling.devices[].pacing`：每台设备的节奏解释（设备作用域与每个 App 的会话、账号作用域，含原语、来源和截止时间）。
 
 账号接口：测试令牌只能操作模拟域，真实域只接受管理员令牌。自动切换与影子评估当前仅限模拟域（真实域返回 403）。迁移 `011_accounts.sql`、`012_pacing_rules.sql` 只新增数据。详见 [V2-2 节奏账本](v2-2-pacing-ledger-2026-10-15.md)。
+
+## 宿主机 Agent（2026-10-18，V2-3）
+
+管理接口（登录会话或管理员令牌；测试令牌仅模拟域；目前 Agent 只接入模拟域）：
+
+- `GET /api/agents?mode=sim`：Agent 列表（在线、最近心跳、时钟偏差、缓冲条数、托管设备、在途租约、待登记序列号），不含凭证摘要。`/api/state` 也带同样的 `agents` 列表。
+- `POST /api/agents`：`{name, host}`，返回 `{agent, token}`，凭证只返回这一次。
+- `POST /api/agents/:id`：`{action: disable|enable|rotate, revision}`；`rotate` 返回新凭证，旧凭证立即失效。
+- `POST /api/agents/:id/adopt`：`{serial, name?, rack, host?, simApps?}`，把 Agent 上报的待登记序列号登记为由它托管的模拟设备。
+- `POST /api/attempts/:id/stop`：`{reason}`，请求 Agent 在下一个安全点停止；停在检查点的会话由中心直接取消。
+
+Agent 接口（`Authorization: Bearer <agentId.secret>`，JSON，请求体最大 1 MB）：
+
+- `POST /agent/v1/hello`：`{protocol, instanceId, version, driver, capabilities, devices:[{serial, apps, commands}], leases:[{attemptId, token}]}`，返回心跳间隔、租约与宽限时长、已登记设备、待登记序列号。
+- `POST /agent/v1/heartbeat`：`{instanceId, clockMs, buffered, leases}`，返回每个租约的状态（ok 并续期 / revoked / expired / 已结束），以及是否请求停止；实例变化时返回 409，Agent 应重新 hello。
+- `POST /agent/v1/poll`：`{waitMs ≤ 25000}`，返回 `{grants:[lease.grant], controls:[attempt.stop]}`。
+- `POST /agent/v1/report`：`{messages:[…] ≤ 100}`，每条消息独立处理并返回 `{ok, directive}`；`directive.action` 为 run / wait / yield / stop / done / drop。消息可以重复投递。
+
+协议语义与故障行为见 [V2-3 宿主机 Agent](v2-3-host-agent-2026-10-18.md)。
+
+## Job API v1 与嵌入（2026-10-18，V2-5）
+
+调用方接口（`Authorization: Bearer <API 密钥>`，JSON；只开放模拟模式；只能读写本调用方的数据）：
+
+- `GET /v1/templates`：可用模板（各取最新未归档版本），带 `params` 与 `resultSchema`，以及允许的 `classes`。
+- `POST /v1/jobs`：`{clientRequestId, template, version?, params:{keyword?, target?}, class?: interactive|standard|batch, deadlineAt? | ttlMs?, rack?, callback?:{url}}`。返回 202 和任务视图；同一 `clientRequestId` 重放返回 200（`replayed: true`），内容不同返回 409；超出作用域返回 403；配额超限返回 429 和 `Retry-After`；截止时间不可行返回 422 和 `predictedFinishAt`（不入队）；`freshnessMs` / `shareable` 暂返回 400。
+- `GET /v1/jobs?status=active&limit=`：本调用方最近的任务。
+- `GET /v1/jobs/:id`：任务视图 `{jobId, clientRequestId, template, class, status, final, predicted, blockers, queuePosition, progress, reason, result}`；结果为 `mx-device.result.v1`。
+- `GET /v1/jobs/:id/wait?timeout=25`：任务结束或超时即返回，另带 `waitedMs`、`timedOut`。
+- `GET /v1/jobs/:id/result?offset=&limit=`：大结果分页。
+- `POST /v1/jobs/:id/cancel`：`{status: cancelled | stopping}`。
+- `GET /v1/stream?scope=client|ops`、`GET /v1/state?scope=`：作用域状态流（SSE，与 `/api/stream` 同格式）与轮询；`ops` 需要调用方的嵌入范围为 ops。
+
+回调：`POST <callback.url>`，请求头 `X-MX-Delivery-Id`、`X-MX-Event: job.finished`、`X-MX-Timestamp`、`X-MX-Signature: v1=<hex HMAC-SHA256(回调密钥, "<timestamp>.<deliveryId>.<body>")>`；任何 2xx 算送达，否则指数退避重试，12 次后放弃。接收方按投递 ID 去重。
+
+嵌入（供 Hub 后端反向代理，只读，只接受 GET / HEAD）：`/embed/`（页面与静态资源）、`/embed/api/session`、`/embed/api/state`、`/embed/api/stream`、`/embed/api/jobs/:id`、`/embed/api/explain`（仅 ops）。请求头：`Authorization: Bearer <API 密钥>`、`X-MX-Embed-Scope: client|ops`、`X-MX-Embed-User: <URL 编码的显示名>`。
+
+管理接口（登录会话或管理员令牌，`mode=sim`）：`GET/POST /api/clients`（创建时返回只显示一次的 `key` 与 `callbackSecret`）、`POST /api/clients/:id`（`revision`；配置、`status`、`rotateKey`、`rotateCallbackSecret`）、`GET /api/clients/:id/deliveries`、`POST /api/outbox/:id/retry`。
+
+语义、公平算法与安全边界见 [V2-5 调用方契约](v2-5-caller-contract-2026-10-18.md)。
+
+## 实时状态流与解释（2026-10-18，V2-4）
+
+- `GET /api/stream?mode=`（登录会话或令牌）：Server-Sent Events。先发 `event: snapshot`，`data` 为 `{v, state}`，`state` 与 `/api/state` 相同；之后每有变化发 `event: patch`，`data` 为 `{v, set?, del?, order?, put?}`，可用 `server/state-patch.mjs` 的 `applyPatch` 应用。每 15 秒发一次心跳注释；请求带 `Accept-Encoding: gzip` 时事件流会压缩。
+- `GET /api/state?mode=`：与事件流共用同一份缓存（约 1 秒），本进程的写操作会立即使其失效。实时数据经过瘦身：任务不带每步指令定义、回执、策略快照和计划历史；`scheduling.queue` 只带前 300 项，另有 `scheduling.queueSummary` 给出总数；`scheduling.poolPlans[].assignments` 只带每台设备未来 3 分钟内的前 5 项。大于 64 KB 的响应会压缩。
+- `GET /api/explain?mode=&jobId=`：单个任务最新的完整计划项（含备选设备、稳定性门槛、候选数）、阻塞原因和计划历史。
+- `POST /api/pool-simulate` 的报告新增 `lanes`、`baselineLanes`（每台设备的会话起止，用于回放）。

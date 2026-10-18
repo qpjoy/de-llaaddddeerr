@@ -4,12 +4,13 @@ import { commandDefinitions } from "./command-registry.mjs";
 import {
   deviceBlockers,
   effectivePriority,
-  compareJobs,
   policiesFor,
   matchesJob,
   schedulingIndex,
 } from "./scheduling.mjs";
 import { starved } from "./queue-order.mjs";
+import { orderJobs, chargeClient } from "./fairness.mjs";
+import { clientBlockers } from "./client-limits.mjs";
 
 import {
   APP_NAMES,
@@ -19,6 +20,7 @@ import {
   appBlockers,
 } from "./apps.mjs";
 import { pacingDispatch, pacingSettle, pacingVerifiedStop } from "./ledger.mjs";
+import { grantToAgent, leaseGrace } from "./agent-lease.mjs";
 
 import {
   defaultDurationMs,
@@ -142,6 +144,9 @@ export function noteLink(value, appId = "xhs") {
 }
 const event = (s, mode, at, type, message, more = {}) =>
   s.events.push({ id: randomUUID(), mode, at, type, message, ...more });
+// Active (queued or running) jobs per realm. Simulation is sized for the 2.0
+// target of 100 devices / 2000 tasks; real devices keep the first-release cap.
+export const ACTIVE_LIMIT = { sim: 2000, real: 200 };
 const bump = (d) => {
   d.revision++;
 };
@@ -346,8 +351,9 @@ export function addJob(s, now, mode, body) {
       400,
     );
   requireThat(
-    s.jobs.filter((j) => j.mode === mode && active(j)).length < 200,
-    "任务池已满（200）",
+    s.jobs.filter((j) => j.mode === mode && active(j)).length <
+      ACTIVE_LIMIT[mode],
+    `任务池已满（${ACTIVE_LIMIT[mode]}）`,
     429,
   );
   if (deviceId) {
@@ -542,53 +548,126 @@ export function recordProbe(s, now, mode, id, revision, observation) {
 }
 export function sweep(s, now, mode) {
   for (const a of s.attempts.filter(
-    (a) => a.mode === mode && a.status === "running" && a.leaseUntil <= now,
-  )) {
-    const j = s.jobs.find((j) => j.id === a.jobId),
-      d = findDevice(s, mode, a.deviceId);
-    a.status = "unknown";
-    a.completedAt = now;
-    a.error = "执行租约过期，结果未知";
-    if (j) {
-      j.status = "unknown";
-      j.reason = a.error;
-      j.completedAt = now;
-    }
-    d.enabled = false;
-    d.state = "quarantined";
-    d.recoveryAfter = a.leaseUntil;
-    bump(d);
-    event(
-      s,
-      mode,
-      now,
-      "unknown",
-      "租约过期：隔离设备；未派发任务仍在池中，不盲目重试",
-      { jobId: a.jobId, deviceId: d.id },
-    );
-  }
+    (a) =>
+      a.mode === mode &&
+      a.status === "running" &&
+      a.leaseUntil + leaseGrace(a) <= now,
+  ))
+    expireLease(s, now, a, "执行租约过期，结果未知");
   cleanWorkflowFaults(s, now);
   sweepSessions(s, now, mode);
+  expireClientJobs(s, now, mode);
+}
+/** A client job still unbound at its deadline is not started any more. */
+function expireClientJobs(s, now, mode) {
+  for (const j of s.jobs)
+    if (
+      j.mode === mode &&
+      j.status === "queued" &&
+      j.client?.deadlineAt != null &&
+      j.client.deadlineAt <= now
+    ) {
+      j.status = "expired";
+      j.completedAt = now;
+      j.reason = "截止时间前未开始，已过期；未操作手机";
+      event(
+        s,
+        mode,
+        now,
+        "expired",
+        `${j.workflow?.name || "任务"}：${j.reason}`,
+        {
+          jobId: j.id,
+        },
+      );
+    }
+}
+/** Settles a running attempt whose lease is gone. An Agent lease under which
+ * no command was issued has no physical effect: its job returns to the queue
+ * (or a yielded session is parked again). Anything else is unknown, and the
+ * device is quarantined; nothing is retried. */
+export function expireLease(s, now, a, reason) {
+  const j = s.jobs.find((j) => j.id === a.jobId),
+    d = findDevice(s, a.mode, a.deviceId);
+  if (a.executor === "agent" && !a.leaseIssued) {
+    returnLease(s, now, a, `${reason}；未发出任何指令`);
+    return;
+  }
+  a.status = "unknown";
+  a.completedAt = now;
+  a.error = reason;
+  if (j) {
+    j.status = "unknown";
+    j.reason = a.error;
+    j.completedAt = now;
+  }
+  d.enabled = false;
+  d.state = "quarantined";
+  d.recoveryAfter = a.leaseUntil;
+  bump(d);
+  event(
+    s,
+    a.mode,
+    now,
+    "unknown",
+    `${reason}：隔离设备；未派发任务仍在池中，不盲目重试`,
+    { jobId: a.jobId, deviceId: d.id },
+  );
+}
+/** Ends an Agent lease that issued nothing: the work goes back where it was.
+ * pause: the device needs a look before it takes work again. */
+export function returnLease(s, now, a, reason, { pause = false } = {}) {
+  const j = s.jobs.find((j) => j.id === a.jobId),
+    d = findDevice(s, a.mode, a.deviceId);
+  if (d.workflowAttemptId === a.id && a.dispatchedAt != null) {
+    // A parked large session: earlier steps ran; keep it yielded on the device.
+    a.status = "yielded";
+    a.agentState = "lapsed";
+    j.reason = `${reason}；大循环保留在检查点`;
+  } else {
+    a.status = "expired";
+    a.completedAt = now;
+    a.error = reason;
+    j.status = "queued";
+    j.reason = `${reason}；任务回到队列`;
+    if (d.workflowAttemptId === a.id) delete d.workflowAttemptId;
+    d.state = a.parentAttemptId ? "running" : "idle";
+  }
+  if (pause) d.enabled = false;
+  bump(d);
+  event(s, a.mode, now, "lease-returned", `${d.name}：${j.reason}`, {
+    jobId: j.id,
+    deviceId: d.id,
+    attemptId: a.id,
+  });
 }
 // reference: true decides without the read-only index (equivalence tests).
 // round: an object shared by the claims of one transaction (same state and
 // instant); pool plans are computed once per round, not once per claim.
 // executorSlots: the claiming executor's simulation slots (capacity-aware plans).
+// executor: "agent" claims only Agent-hosted devices, "local" only the others.
 export function claim(
   s,
   now,
   mode,
   workerId,
-  { reference = false, round = null, executorSlots = null } = {},
+  {
+    reference = false,
+    round = null,
+    executorSlots = null,
+    executor = null,
+  } = {},
 ) {
+  const runs = (d) => !executor || (executor === "agent") === !!d.agentId;
   sweep(s, now, mode);
   // Built after sweep; the decision below only mutates state once it returns.
   const index = reference ? undefined : schedulingIndex(s, now);
-  const continued = claimContinuation(s, now, mode, workerId, index);
+  const continued = claimContinuation(s, now, mode, workerId, index, runs);
   if (continued) return continued;
   const devices = s.devices.filter(
     (d) =>
       d.mode === mode &&
+      runs(d) &&
       deviceBlockers(s, now, d, index).length === 0 &&
       (mode === "sim" || d.workerId === workerId),
   );
@@ -598,10 +677,18 @@ export function claim(
       a.name.localeCompare(b.name) ||
       a.id.localeCompare(b.id),
   );
-  const pending = s.jobs.filter(
-    (j) => j.mode === mode && j.status === "queued" && j.notBefore <= now,
-  );
-  pending.sort(compareJobs(now));
+  // The queue is ordered once per round (same state, same instant); later
+  // claims of the round skip what was taken. The fair merge already advances
+  // each client's virtual time for its earlier picks, so the order stays
+  // valid for the rest of the round.
+  const eligible = (j) =>
+    j.mode === mode && j.status === "queued" && j.notBefore <= now;
+  let pending;
+  if (round?.order) pending = round.order.filter(eligible);
+  else {
+    pending = orderJobs(s, now, s.jobs.filter(eligible));
+    if (round) round.order = [...pending];
+  }
   let poolPlans = round?.plans;
   if (!poolPlans) {
     // Planned even when no device is free, so every round records the plan
@@ -646,6 +733,7 @@ export function claim(
         continue;
       }
     }
+    if (clientBlockers(s, j).length) continue;
     const d = devices.find(
       (d) =>
         matchesJob(d, j) &&
@@ -685,6 +773,11 @@ export function claim(
       leaseUntil: now + 180000,
       dispatchedAt: null,
       checkpoints: [],
+      // Display label and size for timelines (no job lookup needed).
+      label:
+        j.workflow?.name || `${j.operation === "search" ? "搜索" : "详情"}`,
+      steps: j.workflow?.plan.length ?? null,
+      queuedMs: now - j.createdAt,
     };
     s.attempts.push(a);
     j.status = "running";
@@ -697,6 +790,8 @@ export function claim(
     d.lastClaimedAt = now;
     app.lastClaimedAt = now;
     startWorkflow(s, now, d, j, a);
+    chargeClient(s, now, j, a);
+    if (d.agentId) grantToAgent(d, a, now);
     bump(d);
     event(s, mode, now, "claimed", `${d.name} 领取任务；${j.reason}`, {
       jobId: j.id,
@@ -714,7 +809,7 @@ export function owned(s, now, a) {
     current?.status === "running" &&
     current.epoch === a.epoch &&
     current.executionGeneration === a.executionGeneration &&
-    current.leaseUntil > now &&
+    current.leaseUntil + leaseGrace(current) > now &&
     d?.epoch === a.epoch
   );
 }
@@ -835,6 +930,60 @@ export function finish(s, now, a, outcome) {
     deviceId: d.id,
     attemptId: a.id,
   });
+}
+/** Ends a session that has no command in flight (stopped at a safe point or
+ * parked at a checkpoint): the job is cancelled, the device freed. */
+export function cancelSession(s, now, a, reason) {
+  const j = s.jobs.find((j) => j.id === a.jobId),
+    d = s.devices.find((d) => d.id === a.deviceId);
+  a.status = "cancelled";
+  a.completedAt = now;
+  a.error = reason;
+  j.status = "cancelled";
+  j.completedAt = now;
+  j.reason = reason;
+  if (d.workflowAttemptId === a.id) delete d.workflowAttemptId;
+  d.state = a.parentAttemptId ? "running" : "idle";
+  if (a.dispatchedAt != null) pacingSettle(s, now, d, a);
+  bump(d);
+  event(s, a.mode, now, "cancelled", `${d.name}：${reason}`, {
+    jobId: j.id,
+    deviceId: d.id,
+    attemptId: a.id,
+  });
+}
+/** Caller cancel (Job API v1): a queued job is cancelled at once; a session
+ * parked at a checkpoint ends now; a running one stops at its next safe point
+ * (after the command in flight) — never by interrupting a command. */
+export function stopJob(s, now, mode, id, reason) {
+  const j = s.jobs.find((j) => j.mode === mode && j.id === id);
+  requireThat(j, "任务不存在", 404);
+  if (j.status === "queued") {
+    j.status = "cancelled";
+    j.completedAt = now;
+    j.reason = reason;
+    event(s, mode, now, "cancelled", `取消未派发任务：${reason}`, {
+      jobId: id,
+    });
+    return { status: "cancelled" };
+  }
+  const a = s.attempts.find(
+    (a) => a.jobId === id && ["running", "yielded"].includes(a.status),
+  );
+  if (j.status !== "running" || !a) return { status: j.status, final: true };
+  if (a.status === "yielded") {
+    cancelSession(s, now, a, `${reason}：会话停在检查点，没有在途指令`);
+    return { status: "cancelled" };
+  }
+  if (a.executor === "agent") a.agentStop ??= { at: now, reason };
+  else a.stopRequest ??= { at: now, reason };
+  j.stopRequestedAt ??= now;
+  event(s, mode, now, "stop-requested", `请求在下一个安全点停止：${reason}`, {
+    jobId: id,
+    deviceId: a.deviceId,
+    attemptId: a.id,
+  });
+  return { status: "stopping" };
 }
 export function cancel(s, now, mode, id) {
   const j = s.jobs.find((j) => j.mode === mode && j.id === id);

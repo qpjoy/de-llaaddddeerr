@@ -9,7 +9,8 @@
 // account under review and backs it off; only an operator returns it to active.
 import { randomUUID } from "node:crypto";
 import { appName } from "./apps.mjs";
-import { normalizePoolPolicy } from "./pool-policy.mjs";
+import { normalizedPolicy } from "./pool-policy.mjs";
+import { appRowOf } from "./apps.mjs";
 
 export const ACCOUNT_STATUSES = ["active", "limited", "review", "retired"];
 export const ACCOUNT_SIGNALS = {
@@ -50,17 +51,29 @@ export function initialAccount(mode, appId, accountKey, now = 0) {
     lastFinishedAt: null,
   };
 }
-const appRow = (state, device, appId) =>
-  (state.apps || []).find(
-    (a) =>
-      a.mode === device.mode && a.deviceId === device.id && a.appId === appId,
-  );
+const appRow = appRowOf;
+// The account id of an App row (rows are replaced, never edited in place).
+const ACCOUNT_IDS = new WeakMap();
+// Accounts by id, cached per array (rebuilt when rows are added).
+const ACCOUNT_INDEX = new WeakMap();
+function accountsById(state) {
+  const rows = state.accounts || [];
+  let hit = ACCOUNT_INDEX.get(rows);
+  if (!hit || hit.length !== rows.length) {
+    const map = new Map();
+    for (const a of rows) if (!map.has(a.id)) map.set(a.id, a);
+    ACCOUNT_INDEX.set(rows, (hit = { length: rows.length, map }));
+  }
+  return hit.map;
+}
 // Read-only lookup; returns null when the account row does not exist yet.
 export function findAccount(state, device, appId) {
   const app = appRow(state, device, appId);
   if (!app) return null;
-  const id = accountId(device.mode, appId, app.accountKey);
-  return (state.accounts || []).find((a) => a.id === id) || null;
+  let id = ACCOUNT_IDS.get(app);
+  if (!id)
+    ACCOUNT_IDS.set(app, (id = accountId(device.mode, appId, app.accountKey)));
+  return accountsById(state).get(id) || null;
 }
 export const ensureAccountFor = (state, device, app) =>
   ensureAccount(state, 0, device, app);
@@ -81,7 +94,7 @@ export function accountPolicy(state, device, appId) {
     (p) => p.mode === device.mode && p.rack === device.rack,
   )?.scheduler;
   if (device.mode !== "sim" || !scheduler?.enabled) return null;
-  const account = normalizePoolPolicy(scheduler).pacing?.account;
+  const account = normalizedPolicy(scheduler).pacing?.account;
   return account ? { ...account, appId, source: "strategy" } : null;
 }
 

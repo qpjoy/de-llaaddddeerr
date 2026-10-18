@@ -80,21 +80,33 @@ export function workstationView(state, rack = "") {
       // nextAllowedAt also includes the whole-device interval; it must not
       // inflate the count of App-specific cooldowns.
       const coolingApps = apps.filter((a) => a.cooldownUntil > now);
+      // Agent-hosted: a running lease past its deadline is suspect (grace
+      // period before it is settled); an unreachable Agent means offline.
+      const agent =
+        device.agentId &&
+        (state.agents || []).find((x) => x.id === device.agentId);
       const status =
         device.state === "quarantined"
           ? "quarantined"
-          : device.connected === "offline"
-            ? "offline"
-            : attempt || device.state === "running"
-              ? "running"
-              : ["waiting", "held"].includes(device.session?.status)
-                ? "reserved"
-                : !device.enabled
-                  ? "paused"
-                  : device.cooldownUntil > now ||
-                      (apps.length && coolingApps.length === apps.length)
-                    ? "cooling"
-                    : "idle";
+          : attempt?.executor === "agent" &&
+              attempt.status === "running" &&
+              attempt.leaseUntil <= now
+            ? "suspect"
+            : device.connected === "offline" ||
+                (agent &&
+                  !attempt &&
+                  (!agent.online || agent.status !== "active"))
+              ? "offline"
+              : attempt || device.state === "running"
+                ? "running"
+                : ["waiting", "held"].includes(device.session?.status)
+                  ? "reserved"
+                  : !device.enabled
+                    ? "paused"
+                    : device.cooldownUntil > now ||
+                        (apps.length && coolingApps.length === apps.length)
+                      ? "cooling"
+                      : "idle";
       return {
         device,
         attempt,

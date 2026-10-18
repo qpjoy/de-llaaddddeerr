@@ -1,16 +1,31 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import {
   Archive,
   ArrowClockwise,
   ArrowRight,
+  ArrowsClockwise,
+  CaretRight,
   ChartBar,
+  ChartLineUp,
   Check,
   Copy,
+  Database,
+  DownloadSimple,
+  FileText,
+  HardDrives,
+  Info,
+  ListBullets,
+  PaperPlaneTilt,
   PencilSimple,
   PlayCircle,
   Plus,
+  ShieldCheck,
   SlidersHorizontal,
+  Snowflake,
+  SquaresFour,
   Stack,
+  Timer,
+  TreeStructure,
 } from "@phosphor-icons/react";
 import { api, appName } from "./data.js";
 import { Modal } from "./Forms.jsx";
@@ -20,45 +35,54 @@ import {
   RULE_OPTIONAL_DEFAULTS,
 } from "../server/strategy-catalog.mjs";
 import { DEFAULT_POOL_POLICY } from "../server/pool-policy.mjs";
+import ReplayView from "./ReplayView.jsx";
 import "./scenarios.css";
 
 const scenarioDetails = {
   mixed: {
+    icon: TreeStructure,
     label: "日常流量",
     example: "长搜索占用一台设备，短详情由其他设备并行处理。",
     shape: [3, 7, 4, 8, 5, 9, 4, 6],
   },
   affinity: {
+    icon: SquaresFour,
     label: "连续短任务",
     example: "同 App 任务可短暂排队；空闲设备充足时分流。",
     shape: [2, 3, 5, 6, 6, 7, 8, 8],
   },
   cooldown: {
+    icon: Snowflake,
     label: "应用预算",
     example: "小红书进入冷却，设备仍可接收其他 App 的任务。",
     shape: [8, 8, 3, 2, 2, 5, 7, 8],
   },
   burst: {
+    icon: ChartLineUp,
     label: "突发请求",
     example: "大量请求先进入全局池，按容量和优先级逐批领取。",
     shape: [2, 2, 9, 9, 4, 8, 8, 3],
   },
   capabilities: {
+    icon: Database,
     label: "能力变化",
     example: "第 8 秒补充设备指令能力，未领取任务重新匹配。",
     shape: [3, 3, 3, 5, 7, 7, 9, 9],
   },
   failure: {
+    icon: ShieldCheck,
     label: "故障隔离",
     example: "错误回执使设备隔离；排队任务继续寻找可用设备。",
     shape: [6, 7, 3, 3, 4, 6, 7, 8],
   },
   scale: {
+    icon: ChartBar,
     label: "渐进扩容",
     example: "先用 2 台设备，第 8 秒扩至所选规模。",
     shape: [2, 2, 2, 4, 6, 7, 9, 9],
   },
   "policy-change": {
+    icon: ArrowsClockwise,
     label: "策略替换",
     example: "第 8 秒切换分散优先，执行中的任务继续原会话。",
     shape: [4, 5, 4, 5, 7, 8, 7, 8],
@@ -364,6 +388,48 @@ function ruleSummary(rule) {
     return `计划等待 ≤ ${secs(c.maxQueueWaitMs)} · 单机 ≤ ${c.maxQueuePerDevice} 个 · 短任务 ≤ ${secs(c.shortTaskMs)}；改派需提前 ≥ ${secs(c.stickyGainMs)} 且 ≥ ${c.stickyGainPct}%，最多 ${c.maxPlanMoves} 次`;
   const p = rule.kind === "app-override" ? c.policy : c;
   return `${rule.kind === "app-override" ? `${appName(c.appId)} · ` : ""}${secs(p?.windowMs)}内 ≤ ${p?.maxRuns ?? "—"} 个 / ${secs(p?.maxServiceMs)}，冷却 ${secs(p?.cooldownMs)}`;
+}
+// Rule chain shown in the configuration: placement, queue, App budget, and
+// the pacing ledger when the strategy carries a pacing rule.
+const chainOf = (policy) =>
+  [
+    ["分配", PaperPlaneTilt],
+    ["排队", ListBullets],
+    ["冷却", Snowflake],
+    policy?.pacing && ["节奏", Timer],
+  ].filter(Boolean);
+function policySentence(given) {
+  if (!given) return "";
+  const policy = { ...DEFAULT_POOL_POLICY, ...given };
+  return `${[
+    policy.strategy === "adaptive"
+      ? `空闲达到 ${policy.idleSpreadThresholdPct}% 优先分散`
+      : policy.strategy === "spread"
+        ? "优先最早完成、分散负载"
+        : "优先复用同 App 上下文",
+    `同 App 最多等待 ${secs(policy.maxAffinityDelayMs)}`,
+    `每台预计队列 ≤ ${policy.maxQueuePerDevice} 个`,
+    policy.pacing && "节奏由策略的节奏规则管理",
+  ]
+    .filter(Boolean)
+    .join("；")}。`;
+}
+// Saves the last comparison as a JSON file on the viewer's machine.
+function exportReport(result) {
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(result, null, 2)], { type: "application/json" }),
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `策略对照-${result.scenario}-${result.deviceCount}台-seed${result.seed}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+// A rack name not used yet: demos always create a fresh rack.
+function nextRackName(racks, base = "场景演练机架") {
+  const taken = new Set(racks);
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) if (!taken.has(`${base} ${n}`)) return `${base} ${n}`;
 }
 function PolicyReading({ policy: given, compact = false }) {
   if (!given) return null;
@@ -824,8 +890,11 @@ export default function Scenarios({ state, mode, busy, run, onOpenRack }) {
   const [deviceCount, setDeviceCount] = useState(10);
   const [seed, setSeed] = useState(42);
   const [strategyId, setStrategyId] = useState("");
-  const [rack, setRack] = useState("场景演练机架");
+  const [rack, setRack] = useState(() =>
+    nextRackName(state.devices.map((d) => d.rack)),
+  );
   const [result, setResult] = useState(null);
+  const [replay, setReplay] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
@@ -915,7 +984,11 @@ export default function Scenarios({ state, mode, busy, run, onOpenRack }) {
       });
       return launched;
     }, "场景任务已加入模拟工作台，策略已应用到所选机架");
-    if (ok) onOpenRack?.(launched?.rack || rack.trim());
+    if (ok) {
+      const used = launched?.rack || rack.trim();
+      setRack(nextRackName([...state.devices.map((d) => d.rack), used]));
+      onOpenRack?.(used);
+    }
   }
   function open(action, row = null) {
     setModal({ action, row, type: tab === "rules" ? "rule" : "strategy" });
@@ -953,20 +1026,10 @@ export default function Scenarios({ state, mode, busy, run, onOpenRack }) {
       : [];
   return (
     <div className="scenarios-page">
-      <div className="scenario-page-heading">
-        <div>
-          <span className="scenario-eyebrow">
-            SCENARIOS / SCHEDULING POLICY
-          </span>
-          <h2>把调度决策变成可验证的场景</h2>
-          <p>场景提供任务流量，策略组合规则，设备工作台呈现执行过程。</p>
-        </div>
-        <span className="scenario-mode-label">模拟环境</span>
-      </div>
       <div className="scenario-tabs" aria-label="场景目录分类">
         {[
-          ["scenarios", "演练场景", PlayCircle],
-          ["strategies", "调度策略", SlidersHorizontal],
+          ["scenarios", "场景演练", PlayCircle],
+          ["strategies", "策略库", SlidersHorizontal],
           ["rules", "规则库", Stack],
         ].map(([id, label, Icon]) => (
           <button
@@ -1005,68 +1068,80 @@ export default function Scenarios({ state, mode, busy, run, onOpenRack }) {
       ) : tab === "scenarios" ? (
         <>
           <div className="scenario-selection-layout">
-            <section className="scenario-gallery" aria-label="选择演练场景">
-              {scenarios.map((row, index) => {
-                const detail = scenarioDetails[row.id];
+            <section
+              className="panel scenario-gallery"
+              aria-label="选择演练场景"
+            >
+              {scenarios.map((row) => {
+                const detail = scenarioDetails[row.id],
+                  Icon = detail?.icon || ChartBar,
+                  selected = scenario === row.id;
                 return (
                   <button
-                    className={`scenario-choice${scenario === row.id ? " selected" : ""}`}
+                    className={`scenario-choice${selected ? " selected" : ""}`}
                     key={row.id}
-                    aria-pressed={scenario === row.id}
+                    aria-pressed={selected}
                     onClick={() => setScenario(row.id)}
                   >
-                    <div className="scenario-choice-top">
-                      <span>
-                        {String(index + 1).padStart(2, "0")} / {detail?.label}
-                      </span>
-                      {scenario === row.id ? (
-                        <Check size={18} weight="bold" />
-                      ) : (
-                        <ArrowRight size={18} />
-                      )}
-                    </div>
-                    <strong>{row.name}</strong>
-                    <p>{detail?.example || row.description}</p>
-                    <div className="scenario-choice-foot">
-                      <span className="scenario-spark" aria-hidden="true">
-                        {detail?.shape.map((height, n) => (
-                          <i key={n} style={{ height: `${height * 2}px` }} />
-                        ))}
-                      </span>
+                    <span className="scenario-choice-icon">
+                      <Icon size={24} />
+                    </span>
+                    <span className="scenario-choice-text">
+                      <strong>{row.name}</strong>
+                      <span>{detail?.example || row.description}</span>
                       <small>
+                        {detail?.label} ·{" "}
                         {liveScenarios.has(row.id)
                           ? "支持工作台演示"
                           : "虚拟时钟验证"}
                       </small>
-                    </div>
+                    </span>
+                    {selected ? (
+                      <Check size={18} weight="bold" />
+                    ) : (
+                      <CaretRight size={18} />
+                    )}
                   </button>
                 );
               })}
             </section>
             <section className="panel scenario-configuration">
-              <div className="section-head">
+              <div className="scenario-config-head">
+                <FileText size={22} />
                 <div>
-                  <span className="scenario-eyebrow">演练配置</span>
-                  <h3>{scenarioRow?.name || "选择场景"}</h3>
+                  <h3>演练配置</h3>
+                  <p>{scenarioRow?.name || "选择场景"}</p>
                 </div>
               </div>
               <fieldset disabled={disabled}>
-                <label>
-                  设备池规模
-                  <div className="scenario-size-options">
-                    {[2, 10, 20, 50, 100].map((n) => (
-                      <button
-                        key={n}
-                        type="button"
-                        aria-pressed={deviceCount === n}
-                        onClick={() => setDeviceCount(n)}
-                      >
-                        {n}
-                        <small>台</small>
-                      </button>
-                    ))}
-                  </div>
-                </label>
+                <div className="scenario-config-row">
+                  <label>
+                    设备池大小
+                    <select
+                      aria-label="设备池大小"
+                      value={deviceCount}
+                      onChange={(e) => setDeviceCount(Number(e.target.value))}
+                    >
+                      {[2, 10, 20, 50, 100].map((n) => (
+                        <option key={n} value={n}>
+                          {n} 台
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    随机种子
+                    <input
+                      aria-label="场景随机种子"
+                      type="number"
+                      min={0}
+                      max={2147483647}
+                      step={1}
+                      value={seed}
+                      onChange={(e) => setSeed(Number(e.target.value))}
+                    />
+                  </label>
+                </div>
                 <label>
                   调度策略
                   <select
@@ -1082,99 +1157,119 @@ export default function Scenarios({ state, mode, busy, run, onOpenRack }) {
                     ))}
                   </select>
                 </label>
-                <p className="small muted">{chosen?.description}</p>
-                <label>
-                  随机种子
-                  <input
-                    aria-label="场景随机种子"
-                    type="number"
-                    min={0}
-                    max={2147483647}
-                    step={1}
-                    value={seed}
-                    onChange={(e) => setSeed(Number(e.target.value))}
-                  />
-                </label>
-                <small className="muted">
-                  对照使用同一批任务、同一逐指令耗时。推荐是均衡初始值，结果随负载变化。
-                </small>
-                <button
-                  className="primary"
-                  disabled={
-                    !chosen ||
-                    !Number.isInteger(seed) ||
-                    seed < 0 ||
-                    seed > 2147483647
-                  }
-                  onClick={benchmark}
-                >
-                  <ChartBar size={19} />
-                  {pending ? "正在处理…" : "运行策略对照"}
-                </button>
-                <p className="scenario-operation-note">
-                  虚拟时钟独立运行，不向工作台提交任务。
+                <div className="scenario-chain-block">
+                  <span>规则链路</span>
+                  <div className="scenario-chain">
+                    {chainOf(chosen?.policy).map(([label, Icon], i) => (
+                      <Fragment key={label}>
+                        {i > 0 && <ArrowRight size={16} />}
+                        <span className="scenario-chain-step">
+                          <Icon size={18} />
+                          {label}
+                        </span>
+                      </Fragment>
+                    ))}
+                  </div>
+                </div>
+                <p className="scenario-summary">
+                  {policySentence(chosen?.policy)}
                 </p>
-                <div className="scenario-live-launch">
-                  <label>
-                    工作台机架名
-                    <input
-                      aria-label="场景机架名称"
-                      value={rack}
-                      maxLength={80}
-                      onChange={(e) => setRack(e.target.value)}
-                    />
-                  </label>
+                <div className="scenario-actions">
+                  <button
+                    className="primary"
+                    disabled={
+                      !chosen ||
+                      !Number.isInteger(seed) ||
+                      seed < 0 ||
+                      seed > 2147483647
+                    }
+                    onClick={benchmark}
+                  >
+                    <PlayCircle size={19} />
+                    {pending ? "正在处理…" : "运行策略对照"}
+                  </button>
                   <button
                     disabled={
                       !liveScenarios.has(scenario) || !chosen || !rack.trim()
                     }
                     onClick={launch}
                   >
-                    <PlayCircle size={19} />
-                    加入工作台演示
+                    <HardDrives size={19} />
+                    加入设备工作台
                   </button>
-                  <small className="muted">
-                    {liveScenarios.has(scenario)
-                      ? "创建模拟设备并提交一批任务，按所选策略实际流转。现场 Worker 最多同时执行 10 台。"
-                      : "此场景包含故障、能力变更或时钟事件，目前仅支持上方虚拟时钟验证。"}
-                  </small>
                 </div>
+                <label className="scenario-rack-name">
+                  工作台机架名
+                  <input
+                    aria-label="场景机架名称"
+                    value={rack}
+                    maxLength={80}
+                    onChange={(e) => setRack(e.target.value)}
+                  />
+                </label>
+                <p className="scenario-operation-note">
+                  <Info size={16} />
+                  {liveScenarios.has(scenario)
+                    ? "虚拟时钟对照不创建现场任务；加入工作台会创建独立模拟机架，现场 Worker 最多同时执行 10 台。"
+                    : "此场景包含故障、能力变更或时钟事件，目前仅支持虚拟时钟对照。"}
+                </p>
+                <details className="scenario-policy-details">
+                  <summary>查看规则细节</summary>
+                  <PolicyReading policy={chosen?.policy} />
+                </details>
               </fieldset>
             </section>
           </div>
-          <PolicyReading policy={chosen?.policy} />
-          {result ? (
-            <section className="panel scenario-report">
-              <div className="section-head">
+          <section className="panel scenario-report">
+            <div className="section-head">
+              <div className="scenario-report-title">
+                <ChartBar size={22} />
                 <div>
-                  <span className="scenario-eyebrow">
-                    对照结果 · 隔离虚拟时钟
-                  </span>
-                  <h3>
-                    {result.name} / {result.deviceCount} 台
-                  </h3>
-                  <p className="small muted">
-                    {result.strategyName} · seed {result.seed}
-                    {!currentReport
-                      ? " · 当前配置已变化，重新运行以更新报告"
-                      : ""}
-                  </p>
+                  <h3>策略对照结果</h3>
+                  {result && (
+                    <p className="small muted">
+                      {result.name} / {result.deviceCount} 台 ·{" "}
+                      {result.strategyName} · seed {result.seed}
+                      {!currentReport
+                        ? " · 当前配置已变化，重新运行以更新报告"
+                        : ""}
+                    </p>
+                  )}
                 </div>
-                <span
-                  className={`scenario-result-status${result.summary.invariantViolations ? " warning" : ""}`}
-                >
-                  {result.summary.invariantViolations
-                    ? `${result.summary.invariantViolations} 项违规`
-                    : "调度约束通过"}
-                </span>
               </div>
+              <div className="scenario-report-tools">
+                {result && (
+                  <span
+                    className={`scenario-result-status${result.summary.invariantViolations ? " warning" : ""}`}
+                  >
+                    {result.summary.invariantViolations
+                      ? `${result.summary.invariantViolations} 项违规`
+                      : "调度约束通过"}
+                  </span>
+                )}
+                <button
+                  className={replay ? "selected-outline" : ""}
+                  disabled={!result?.lanes}
+                  aria-pressed={replay}
+                  onClick={() => setReplay((r) => !r)}
+                >
+                  <PlayCircle size={18} />
+                  回放与对照
+                </button>
+                <button disabled={!result} onClick={() => exportReport(result)}>
+                  <DownloadSimple size={18} />
+                  导出报告
+                </button>
+              </div>
+            </div>
+            <div className={`scenario-report-body${result ? "" : " empty"}`}>
               <div className="scenario-table-wrap">
                 <table className="scenario-table">
                   <thead>
                     <tr>
                       <th>指标</th>
                       <th>所选策略</th>
-                      <th>分散优先对照</th>
+                      <th>空闲分散基线</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1205,38 +1300,45 @@ export default function Scenarios({ state, mode, busy, run, onOpenRack }) {
                     ].map(([label, format]) => (
                       <tr key={label}>
                         <th>{label}</th>
-                        <td>{format(result.summary)}</td>
-                        <td>{format(result.baseline)}</td>
+                        <td>{result ? format(result.summary) : "—"}</td>
+                        <td>{result ? format(result.baseline) : "—"}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-              <p className="scenario-report-note">
-                对照只改变放置方式，预算与工作负载保持一致。等待分位数只统计已开始任务，请同时查看积压。
-              </p>
-              <details className="scenario-report-events">
-                <summary>
-                  事件轨迹 · 最近 {Math.min(60, result.timeline.length)} /{" "}
-                  {result.timeline.length} 条
-                </summary>
-                <ol>
-                  {result.timeline.slice(-60).map((event, n) => (
-                    <li key={n}>
-                      <time>{secs(event.at)}</time>
-                      <span>{event.message}</span>
-                      <small>{event.type}</small>
-                    </li>
-                  ))}
-                </ol>
-              </details>
-            </section>
-          ) : (
-            <div className="scenario-report-placeholder">
-              <ChartBar size={24} />
-              <p>运行对照后，在这里比较吞吐、等待、利用率与任务积压。</p>
+              {!result && (
+                <div className="scenario-report-empty">
+                  <FileText size={46} />
+                  <p>尚未运行，选择场景后生成报告。</p>
+                  <small>运行后将在此显示各项指标的对照结果。</small>
+                </div>
+              )}
             </div>
-          )}
+            {result?.lanes && replay && <ReplayView result={result} />}
+            {result && (
+              <>
+                <p className="scenario-report-note">
+                  对照只改变放置方式，预算与工作负载保持一致。等待分位数只统计已开始任务，请同时查看积压。
+                </p>
+                <details className="scenario-report-events">
+                  <summary>
+                    事件轨迹 · 最近 {Math.min(60, result.timeline.length)} /{" "}
+                    {result.timeline.length} 条
+                  </summary>
+                  <ol>
+                    {result.timeline.slice(-60).map((event, n) => (
+                      <li key={n}>
+                        <time>{secs(event.at)}</time>
+                        <span>{event.message}</span>
+                        <small>{event.type}</small>
+                      </li>
+                    ))}
+                  </ol>
+                </details>
+              </>
+            )}
+          </section>
         </>
       ) : (
         <section className="panel scenario-catalog">

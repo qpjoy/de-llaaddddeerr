@@ -378,10 +378,23 @@ export class Engine {
             const round = {};
             const executorSlots =
               mode === "sim" ? this.maxSimulationInflight : null;
+            // Grants to Agent-hosted devices take no local slot: the Agent
+            // pulls and executes them. Each claim occupies a device.
+            if (mode === "sim")
+              for (let grants = 0; grants < 200; grants++)
+                if (
+                  !claim(s, n, mode, this.workerId, {
+                    round,
+                    executorSlots,
+                    executor: "agent",
+                  })
+                )
+                  break;
             while (out.length < free) {
               const work = claim(s, n, mode, this.workerId, {
                 round,
                 executorSlots,
+                executor: "local",
               });
               if (!work) break;
               out.push(work);

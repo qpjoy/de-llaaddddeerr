@@ -15,6 +15,7 @@ export default function Projection({
   availability,
   now,
   onPacing,
+  lease,
   ...controls
 }) {
   const [tab, setTab] = useState("screen");
@@ -70,6 +71,7 @@ export default function Projection({
         </>
       )}
       <DeviceControls device={device} {...controls} />
+      {device && <LeaseInfo device={device} now={now} {...lease} />}
       {device && (
         <AppPacing
           device={device}
@@ -86,5 +88,55 @@ export default function Projection({
         <ControlSession key={device.id} device={device} onRefresh={onRefresh} />
       )}
     </aside>
+  );
+}
+const left = (ms) => (ms > 0 ? `${Math.ceil(ms / 1000)} 秒` : "已到期");
+/** Who executes this device and under which lease (token, seq, deadline). */
+function LeaseInfo({ device, attempt, agent, now }) {
+  return (
+    <section className="lease-info" aria-label="执行与租约">
+      <strong>执行与租约</strong>
+      <dl>
+        <dt>执行方</dt>
+        <dd>
+          {device.agentId
+            ? `宿主机 Agent「${agent?.name || "未知"}」${agent ? (agent.online ? " · 在线" : " · 离线") : ""}`
+            : device.mode === "sim"
+              ? "中心进程（模拟执行器）"
+              : `宿主机 Worker ${device.workerId}`}
+        </dd>
+        {agent && (
+          <>
+            <dt>Agent 心跳</dt>
+            <dd>
+              {agent.lastSeenAt ? time(agent.lastSeenAt) : "从未连接"}
+              {agent.clockOffsetMs != null
+                ? ` · 时钟偏差 ${agent.clockOffsetMs} 毫秒`
+                : ""}
+              {agent.buffered ? ` · 缓冲 ${agent.buffered} 条` : ""}
+            </dd>
+          </>
+        )}
+        {device.agentId && (
+          <>
+            <dt>设备令牌</dt>
+            <dd>{device.leaseToken || 0}</dd>
+          </>
+        )}
+        <dt>当前租约</dt>
+        <dd>
+          {!attempt
+            ? "无"
+            : attempt.status === "yielded"
+              ? "大任务停在检查点，未持有租约"
+              : [
+                  attempt.executor === "agent"
+                    ? `token ${attempt.token} · seq ${attempt.seq || 0} · ${attempt.agentState === "granted" ? "待确认" : "已确认"}`
+                    : "中心执行",
+                  `剩余 ${left(attempt.leaseUntil - now)}`,
+                ].join(" · ")}
+        </dd>
+      </dl>
+    </section>
   );
 }

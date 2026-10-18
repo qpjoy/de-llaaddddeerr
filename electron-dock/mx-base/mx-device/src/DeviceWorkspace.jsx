@@ -271,6 +271,14 @@ export default function DeviceWorkspace({
         history={history}
         availability={availability}
         now={now}
+        lease={{
+          attempt: state.attempts.find(
+            (a) =>
+              a.deviceId === device.id &&
+              ["running", "yielded"].includes(a.status),
+          ),
+          agent: (state.agents || []).find((a) => a.id === device.agentId),
+        }}
         busy={busy}
         onLive={onLive}
         onConfigure={onConfigure}
