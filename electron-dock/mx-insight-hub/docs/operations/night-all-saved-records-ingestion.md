@@ -5,6 +5,62 @@ Migration `066_night_all_saved_records_sources.sql` registers the fixed inputs;
 it does not connect to the source database, read a row, approve a mapping,
 activate a task or grant a Public API platform.
 
+## 2026-10-18：标准化字段新增兼容
+
+用户新截图显示14个类别已登记且映射已批准，但源表核对报
+`source_contract_mismatch`。本次新增的14列为：`content_kind`、`content_status`、
+`fetch_transport`、`has_full_text`、`published_at_precision`、`published_at_status`、
+`published_at_utc`、`published_date`、`publisher_name`、`source_key`、`source_name`、
+`standardization_warnings`、`storage_schema_version`、`summary`。
+旧Hub只接纳原23列和可选的`tag`，所以这些列会使各分区停止读取。
+
+本地Night-All-A checkout仍为2026-10-15的`b6f02c8`，没有这些新列的迁移或模型定义。
+用户随后返回Internal源库`agent_data_crawler_platform`的只读目录结果，确认原23列及`tag`
+的类型、可空性均未变，父表共38列。新增14列按该回执接纳，类型与可空性必须精确匹配：
+
+| 字段 | PostgreSQL 类型 | 可空 |
+| --- | --- | --- |
+| `storage_schema_version` | `int4` | 否 |
+| `source_key`、`source_name`、`publisher_name`、`summary` | `text` | 是 |
+| `content_kind`、`content_status`、`published_at_precision`、`published_at_status`、`fetch_transport` | `varchar` | 是 |
+| `has_full_text` | `bool` | 是 |
+| `published_at_utc` | `timestamptz` | 是 |
+| `published_date` | `date` | 是 |
+| `standardization_warnings` | `jsonb` | 是 |
+
+新增列在旧版本源库中可以缺省；一旦存在，仍严格检查类型和可空性，其他未知列继续阻断。
+源表检查、运行时每页检查、独立SQL与运行环境审计使用一致的接纳范围，恢复时仍逐类
+检查实际叶表、索引、来源身份和checkpoint。父表目录回执本身不代表所有任务已恢复。
+
+上述列和`tag`不自动进入canonical extensions、公开摘要或检索字段；原始记录及raw hash
+完整保留，现有已审核映射与canonical内容不变。新元数据单独变化不会改动canonical摘要、
+时间、发布者或内容hash。后续使用这些字段应另行审核映射，不能由字段名推断语义。
+
+checkpoint合同哈希不含源列清单，原固定映射与writer摘要也无需因附加列变更。
+本次修复保留原映射、断点和既有门禁；不能通过清空checkpoint、重新批准映射或新增writer
+确认来绕过当前漂移。原有writer提交顺序问题不因接纳新列而得到证明。
+
+此次代码修复不需要新增Hub migration、源表DDL或重建索引，**尚未发布或取得线上恢复回执**。
+在Internal同步代码后，沿现有Hub部署流程发布：
+
+```bash
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh ops internal-production deploy
+```
+
+该命令须从Hub目录执行；它是完整Hub发布，仍会执行原有迁移与源索引维护检查，并非
+只更新两个进程的无DDL发布。当前脚本没有独立的Admin/ingest发布或跳过源索引维护选项。
+ingest有90秒优雅退出窗口并保留持久化分页任务与checkpoint；正在清洗的TG会短暂停顿后
+续跑，无需手动暂停、恢复或重置其任务。保持Launcher同步关闭，不更改MX-H2I登录和联网。
+
+发布完成后，在Night-All-A控制页先点“重新核对”；以14类实际结果为准，通过后点一次
+“恢复失败任务”，再点“立即同步全部”。原本手动暂停的类别仍保留暂停；其他受阻项应按
+具体错误处理。以新游标处理数、错误状态和对应队列任务验证恢复，不以旧“最近运行”时间
+或HTTP200单独宣称成功。
+
+本地验证：79项相关检查通过，覆盖实际PGlite目录SQL、14个分区、原23列/含tag/38列
+兼容、旧checkpoint分页续读、失败恢复及未知列/类型/可空性拒绝；类型检查和生产构建
+通过。上述是本地验证，仍需发布后的任务游标与队列回执确认生产恢复。
+
 ## 2026-10-17：tasiting/maidanglao批次验证
 
 用户确认tasiting已恢复；随后00:34源库及00:39 Hub完整回执确认maidanglao现有news3568/web170在源库、Hub原始层与有效canonical数量一致，缺失/已删/身份不匹配均0。news/web最近导入成功、拒绝0，任务active且游标idle无错误；本次批次入库链路已跑通，tasiting对应数量也保持。源配置为127.0.0.1:5432/agent_data_crawler_platform，无需改远端host、账号或端口。tag仍是原始批次标签、source_type是分类，同库新tag由原news/web任务读取；tender不影响这批数据。当前证据不等同源库全量key/正文逐条校验、325站全部采集或搜索投影完成。源/Hub只读脚本与回执详见[按批次核对](night-all-a-cleaning-schema-drift-2026-10-16.md#2026-10-17按批次核对实际库与清洗结果)。18项本地工具回归通过，会话未操作生产或改MX-H2I。

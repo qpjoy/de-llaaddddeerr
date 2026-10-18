@@ -7,6 +7,7 @@ import {
 import { DatabaseSourcePuller } from '../../server/ingest/external/database-source.mjs'
 import {
   CRAWLER_FIELD_MAP,
+  CRAWLER_OPTIONAL_SOURCE_COLUMN_CONTRACT,
   CRAWLER_SOURCE_COLUMN_CONTRACT,
   CRAWLER_WRITER_CONTRACT_DIGEST,
   CRAWLER_WRITER_CONTRACT_VERSION,
@@ -19,15 +20,17 @@ import {
 
 const CRAWLER_SOURCE = { sourceKey: 'night-all-saved-records-news' }
 
-function crawlerDatabaseColumns(transform = (column) => column) {
+function crawlerDatabaseColumns(transform = (column) => column, contract = CRAWLER_SOURCE_COLUMN_CONTRACT) {
   const dataTypes = {
     int4: 'integer',
     varchar: 'character varying',
     text: 'text',
     jsonb: 'jsonb',
     timestamptz: 'timestamp with time zone',
+    bool: 'boolean',
+    date: 'date',
   }
-  return CRAWLER_SOURCE_COLUMN_CONTRACT.map((column, index) => {
+  return contract.map((column, index) => {
     const value = transform({ ...column }, index)
     return {
       column_name: value.name,
@@ -439,6 +442,80 @@ test('crawler batch tags stay in raw evidence under existing mappings without ch
   assert.equal(unrelated.extensions.tag, 'private-batch-label')
 })
 
+test('crawler additive storage metadata stays raw-only without changing approved mapping, identity or canonical digest', () => {
+  const source = crawlerPullSource()
+  const originalMapping = structuredClone(CRAWLER_FIELD_MAP)
+  const original = rawFixture()
+  original.attributes.summary = 'Existing reviewed summary'
+  original.attributes.body_status = 'full_text'
+  const metadata = {
+    content_kind: 'private-kind',
+    content_status: 'private-status',
+    fetch_transport: 'private-transport',
+    has_full_text: false,
+    published_at_precision: 'private-precision',
+    published_at_status: 'private-date-status',
+    published_at_utc: new Date('2040-01-01T00:00:00.000Z'),
+    published_date: '2040-01-01',
+    publisher_name: 'private-publisher',
+    source_key: 'private-source-key',
+    source_name: 'private-source-name',
+    standardization_warnings: ['private-warning'],
+    storage_schema_version: 0,
+    summary: 'private-unreviewed-summary',
+  }
+  const map = raw => applyMapping(raw, CRAWLER_FIELD_MAP, {
+    platform: source.platform, objectType: source.objectType,
+  }).record
+  const enrich = (record, raw) => {
+    enrichCrawlerRecord(record, raw, source)
+    return refreshMappedPayloadSha256(record)
+  }
+  const canonical = ({ rawItem, rawPayloadSha256, ...record }) => record
+  const baseline = enrich(map(original), original)
+  // Exercise each new name individually as well as the complete source shape.
+  for (const additions of [...Object.entries(metadata).map(([key, value]) => ({ [key]: value })), metadata]) {
+    const raw = { ...original, ...additions }
+    const before = structuredClone(raw)
+    const record = map(raw)
+    const mappedExtensions = record.extensions
+    const rawHash = record.rawPayloadSha256
+    enrich(record, raw)
+
+    assert.deepEqual(canonical(record), canonical(baseline))
+    assert.equal(record.rawItem, raw)
+    assert.deepEqual(raw, before)
+    assert.equal(record.rawPayloadSha256, rawHash)
+    assert.notEqual(record.rawPayloadSha256, baseline.rawPayloadSha256)
+    for (const [name, value] of Object.entries(additions)) {
+      assert.equal(Object.hasOwn(record.extensions, name), false, name)
+      assert.deepEqual(record.rawItem[name], value, name)
+      assert.deepEqual(mappedExtensions[name], value, name)
+    }
+    assert.equal(record.stableFields.news.summary, original.attributes.summary)
+    assert.equal(record.stableFields.news.contentExtent, 'full_text')
+    assert.equal(record.title, original.title)
+    assert.equal(record.body, original.text)
+    assert.equal(record.externalId, original.record_key)
+    assert.equal(JSON.stringify(canonical(record)).includes('private-'), false)
+  }
+
+  const updatedRaw = { ...original, ...metadata, has_full_text: true, storage_schema_version: 2,
+    summary: 'private-revised-summary', standardization_warnings: ['private-revised-warning'] }
+  const first = enrich(map({ ...original, ...metadata }), { ...original, ...metadata })
+  const updated = enrich(map(updatedRaw), updatedRaw)
+  assert.equal(updated.payloadSha256, first.payloadSha256)
+  assert.notEqual(updated.rawPayloadSha256, first.rawPayloadSha256)
+  assert.deepEqual(CRAWLER_FIELD_MAP, originalMapping)
+
+  const unrelated = map(updatedRaw)
+  const before = structuredClone(unrelated)
+  enrichCrawlerRecord(unrelated, updatedRaw, { sourceKey: 'warehouse-events' })
+  assert.deepEqual(unrelated, before)
+  assert.equal(unrelated.extensions.source_key, metadata.source_key)
+  assert.equal(unrelated.extensions.summary, updatedRaw.summary)
+})
+
 test('crawler enrichment keeps date-only and semantic anomalies without inventing publication instants', () => {
   const classifyCatalog = createCrawlerCatalogClassifier([BAIJIA])
   const record = {
@@ -676,9 +753,35 @@ test('database crawler pull enriches from one governed catalog snapshot and refr
   assert.ok(cursorWrites.length >= 2)
 })
 
-test('adding the optional tag resumes the existing crawler checkpoint and preserves raw evidence', async () => {
+for (const fullSchema of [false, true]) test(`adding ${fullSchema ? 'the reviewed storage metadata' : 'the optional tag'} resumes the existing crawler checkpoint and preserves raw evidence`, async () => {
   const source = crawlerPullSource()
   const mapping = { ...crawlerPullMapping(source), fieldMap: CRAWLER_FIELD_MAP }
+  const originalMapping = structuredClone(mapping)
+  const attestation = {
+    contractVersion: CRAWLER_WRITER_CONTRACT_VERSION,
+    contractDigest: CRAWLER_WRITER_CONTRACT_DIGEST,
+  }
+  const originalAttestation = structuredClone(attestation)
+  const optionalColumns = CRAWLER_OPTIONAL_SOURCE_COLUMN_CONTRACT.filter(column => fullSchema || column.name === 'tag')
+  const metadata = {
+    tag: 'private-batch-label',
+    ...(fullSchema ? {
+      storage_schema_version: 2,
+      source_key: 'private-source-key',
+      source_name: 'private-source-name',
+      publisher_name: 'private-publisher',
+      content_kind: 'private-kind',
+      content_status: 'private-status',
+      has_full_text: false,
+      summary: 'private-unreviewed-summary',
+      published_at_utc: new Date('2040-01-01T00:00:00.000Z'),
+      published_date: '2040-01-01',
+      published_at_precision: 'private-precision',
+      published_at_status: 'private-date-status',
+      fetch_transport: 'private-transport',
+      standardization_warnings: ['private-warning'],
+    } : {}),
+  }
   const ingested = []
   const pageQueries = []
   let tagged = false
@@ -689,10 +792,7 @@ test('adding the optional tag resumes the existing crawler checkpoint and preser
     store: {
       getExternalSource: async () => source,
       getActiveMapping: async () => mapping,
-      getLatestPipelineWriterContractAttestation: async () => ({
-        contractVersion: CRAWLER_WRITER_CONTRACT_VERSION,
-        contractDigest: CRAWLER_WRITER_CONTRACT_DIGEST,
-      }),
+      getLatestPipelineWriterContractAttestation: async () => attestation,
       listSourceCatalogEntries: async () => [NEWS_WEBSITE, THE_PAPER],
       startImportRun: async () => ({ id: `crawler-tag-run-${ingested.length}`, duplicateOf: null }),
       finishImportRun: async () => {},
@@ -710,10 +810,10 @@ test('adding the optional tag resumes the existing crawler checkpoint and preser
     },
     poolFactory: () => ({
       async query(sql, parameters) {
-        if (sql.includes('information_schema.columns')) return { rows: [
-          ...crawlerDatabaseColumns(),
-          ...(tagged ? [{ column_name: 'tag', data_type: 'character varying', udt_name: 'varchar', is_nullable: 'YES', ordinal_position: 24 }] : []),
-        ] }
+        if (sql.includes('information_schema.columns')) return { rows: crawlerDatabaseColumns(column => column, [
+          ...CRAWLER_SOURCE_COLUMN_CONTRACT,
+          ...(tagged ? optionalColumns : []),
+        ]) }
         if (sql.includes('c.relkind AS relation_kind')) return { rows: [crawlerLeafRelation()] }
         if (sql.includes('i.indislive AS live')) return { rows: [crawlerCursorIndex()] }
         if (sql.includes('AS minimum_cursor') && sql.includes('AS maximum_cursor')) {
@@ -724,7 +824,7 @@ test('adding the optional tag resumes the existing crawler checkpoint and preser
         pageQueries.push({ sql, parameters })
         return { rows: [{
           ...rawFixture(),
-          ...(tagged ? { tag: 'private-batch-label', last_seen_at: new Date('2026-09-09T03:06:00Z') } : {}),
+          ...(tagged ? { ...metadata, last_seen_at: new Date('2026-09-09T03:06:00Z') } : {}),
           [alias]: tagged ? nextCursor : oldCursor,
         }] }
       },
@@ -761,10 +861,30 @@ test('adding the optional tag resumes the existing crawler checkpoint and preser
   assert.equal(ingested[1].sourceId, ingested[0].sourceId)
   assert.equal(ingested[1].datasetId, ingested[0].datasetId)
   assert.equal(updated.externalId, original.externalId)
-  assert.equal(updated.rawItem.tag, 'private-batch-label')
   assert.notEqual(updated.rawPayloadSha256, original.rawPayloadSha256)
-  assert.equal(Object.hasOwn(updated.extensions, 'tag'), false)
-  assert.deepEqual(mapping.fieldMap, CRAWLER_FIELD_MAP)
+  for (const [name, value] of Object.entries(metadata)) {
+    assert.deepEqual(updated.rawItem[name], value, name)
+    assert.equal(Object.hasOwn(updated.extensions, name), false, name)
+  }
+  // The advancing watermark is the only canonical change. Compare against
+  // that same source update with none of the newly observed storage metadata.
+  const baselineRaw = { ...rawFixture(), last_seen_at: new Date('2026-09-09T03:06:00Z') }
+  const baseline = applyMapping(baselineRaw, mapping.fieldMap, {
+    platform: source.platform,
+    objectType: source.objectType,
+    source: { origin: 'database', sourceKey: source.sourceKey },
+  }).record
+  enrichCrawlerRecord(baseline, baselineRaw, source, {
+    classifyCatalog: createCrawlerCatalogClassifier([NEWS_WEBSITE, THE_PAPER]),
+  })
+  refreshMappedPayloadSha256(baseline)
+  assert.equal(updated.payloadSha256, baseline.payloadSha256)
+  assert.deepEqual(updated.stableFields, baseline.stableFields)
+  assert.deepEqual(updated.extensions, baseline.extensions)
+  const { rawItem, rawPayloadSha256, ...canonical } = updated
+  assert.equal(JSON.stringify(canonical).includes('private-'), false)
+  assert.deepEqual(mapping, originalMapping)
+  assert.deepEqual(attestation, originalAttestation)
 })
 
 test('every crawler pull rechecks its fixed logical source contract before opening PostgreSQL', async () => {
@@ -916,6 +1036,40 @@ test('every crawler pull rejects any drift in its complete 23-column type and nu
     assert.equal(state.pageReads, 0)
     assert.equal(state.importStarts, 0)
   }
+})
+
+test('reviewed crawler metadata does not permit unknown columns or incompatible metadata types during pull', async (t) => {
+  const contract = [...CRAWLER_SOURCE_COLUMN_CONTRACT, ...CRAWLER_OPTIONAL_SOURCE_COLUMN_CONTRACT]
+  const cases = [
+    ['unknown column', [...contract, { name: 'unreviewed_metadata', databaseType: 'jsonb', nullable: true }],
+      'unexpected crawler column unreviewed_metadata requires mapping review'],
+    ['wrong optional type', contract.map(column => column.name === 'has_full_text'
+      ? { ...column, databaseType: 'text' } : column),
+    'crawler column has_full_text must use PostgreSQL bool'],
+    ['wrong optional nullability', contract.map(column => column.name === 'storage_schema_version'
+      ? { ...column, nullable: true } : column),
+    'crawler column storage_schema_version must be non-null'],
+  ]
+  for (const [name, columns, issue] of cases) await t.test(name, async () => {
+    const position = {}
+    const { puller, source, state } = crawlerRuntimeContractHarness({
+      columns: crawlerDatabaseColumns(column => column, columns),
+      position,
+    })
+    const compatible = await puller.assertCheckpointCompatible(source.sourceKey)
+    Object.assign(position, { contractHash: compatible.contractHash, mappingVersion: compatible.mappingVersion,
+      cursor: '2026-09-09 03:05:00+00', lastId: '7' })
+    const originalPosition = structuredClone(position)
+    await assert.rejects(() => puller.pullBatch(source.sourceKey, { batchSize: 10 }), error => (
+      error?.code === 'source_contract_mismatch' && error?.details?.issues?.includes(issue)
+    ))
+    assert.equal(state.pageReads, 0)
+    assert.equal(state.importStarts, 0)
+    assert.deepEqual(state.cursorWrites, [{
+      position: originalPosition, options: { status: 'failed', error: 'source_contract_mismatch' },
+    }])
+    assert.deepEqual(position, originalPosition)
+  })
 })
 
 test('every crawler pull rechecks exact leaf-partition and unique cursor-index evidence', async () => {

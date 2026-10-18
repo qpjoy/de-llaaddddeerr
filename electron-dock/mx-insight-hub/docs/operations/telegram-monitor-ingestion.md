@@ -103,6 +103,7 @@ All endpoints in this section require the platform Admin Token specifically.
 | `GET, PUT` | `/internal/v1/admin/pipelines/telegram-monitor` | Read or atomically configure the one shared TG connection and interval. |
 | `POST` | `/internal/v1/admin/pipelines/telegram-monitor/status` | Activate or safely pause both fixed inputs. |
 | `POST` | `/internal/v1/admin/pipelines/telegram-monitor/sync` | Enqueue both active inputs with one operator action. |
+| `POST` | `/internal/v1/admin/pipelines/telegram-monitor/resume` | Recheck source readiness and both checkpoints, then clear recoverable stopped cursor states without resetting their positions. |
 | `GET` | `/internal/v1/admin/pipelines/telegram-monitor/progress` | Explicit exact source counts/checkpoint-relative progress and blockers. |
 | `GET, POST` | `/internal/v1/admin/pipelines/telegram-monitor/source/prepare` | Inspect, then explicitly install/repair the fixed source-side watermark, triggers, guards and indexes. |
 | `POST` | `/internal/v1/admin/pipelines/telegram-monitor/checkpoints/reset` | Confirm and atomically reset both paused TG checkpoints against the fixed mapping contract. |
@@ -227,9 +228,16 @@ weaken the Admin preview route into a data-export endpoint.
 ### 3.1 Prepare or repair the source-side cursor contract
 
 Saving the connection does not grant the long-lived `mx_data` reader DDL
-rights and does not silently alter `night_all`. With both child tasks paused
-and drained, open **一键准备 / 修复 TG 源库**, inspect the current evidence, type
-`telegram-monitor`, and execute the explicit preparation action. Stop the
+rights and does not silently alter `night_all`. The `GET` inspection is read-only
+and may run while the pipeline is enabled, including when a failed cursor has
+stopped scheduling. It holds the paired source locks while collecting source
+and checkpoint evidence; an active batch owning a lock can return `source_busy`.
+Inspection never pauses, prepares, resumes or resets the pipeline. A failed
+inspection means readiness is unknown, not that a schema repair is proven.
+
+Before the `POST` preparation action, safely pause both child tasks and wait
+for running batches to drain. Then open **一键准备 / 修复 TG 源库**, inspect the
+current evidence, type `telegram-monitor`, and execute preparation. Stop the
 upstream collector for this short maintenance window: the core migration takes
 an `ACCESS EXCLUSIVE` lock on both fixed tables with a bounded lock timeout and
 fails safely instead of racing an active writer.
@@ -295,6 +303,64 @@ generation changes and the old checkpoint becomes incompatible. Review the
 incident, then use the separate confirmed **统一重置双表 Checkpoint** action to
 perform a full replay. An already-ready idempotent recheck keeps the same
 generation and does not require replay.
+
+### 3.2 Recover a stopped pair without resetting checkpoints
+
+The 2026-10-18 operator snapshot found both cursors failed with
+`source_contract_mismatch` since 2026-10-14 07:21 Asia/Shanghai, with no referenced
+import run or outstanding queue job. A direct read-only inspection at 21:38
+Asia/Shanghai then verified both tables, all managed infrastructure, indexes
+and triggers; the stored installation generations matched the source and
+`sourceIdentityChanged` was false. This evidence does **not** justify source
+DDL or checkpoint reset. It establishes current readiness, not the exact
+historical reason for the failure. The operator then executed recovery and
+sync from the saved checkpoints. The fresh receipt at 21:53:16 Asia/Shanghai
+confirmed that ingestion had resumed:
+
+- Chats were `idle` with no error and a cumulative processed count of 20,413,
+  up 32 from the earlier snapshot; the cursor was updated at 21:46:45.
+- Messages were `running` with no error and a cumulative processed count of
+  1,791,665, up 11,000; the cursor was updated at 21:53:16. The five preceding
+  page jobs completed on their first attempt without errors, and the next
+  page was running.
+
+These are increases in processed-row counts, not proof of the same number of
+new unique canonical records. They establish continued progress from the
+saved checkpoints, not that the backlog has finished. Let the running pages
+continue; no repeated recovery, source repair or checkpoint reset is needed
+on this evidence. The remote SQLite API connection failure remains separate.
+
+A PostgreSQL scan finding zero new rows does not create an import run. It
+updates the cursor to `idle`, clears its error and updates `updated_at`, while
+preserving the durable position and cumulative count. The previous import
+timestamp therefore stays unchanged. The UI labels this **最近导入批次** and
+shows **游标状态更新** separately; recovery and failures also update cursor time,
+so that timestamp alone is not evidence of successful ingestion. Verify the
+post-sync idle/no-error cursor together with the corresponding queue/log
+evidence. A queue job marked `done` alone is also insufficient: the worker can
+finish a contract-failure job while retaining the failed cursor.
+
+The pipeline can remain enabled while one or both cursors are `failed`; the
+scheduler waits for the pair rather than repeatedly submitting a known failure.
+`source_contract_mismatch` alone does not identify the failed component: the
+runtime also uses it when contract evidence cannot be read. Recheck the source
+preparation evidence before deciding whether source maintenance is necessary.
+
+The **恢复卡住的任务** action checks for queued/running jobs, verifies the saved
+shared connection, managed source contract and installation generation, then
+checks both source schemas and checkpoint compatibility before clearing either
+cursor. An unrepaired source contract returns `source_prepare_required` with
+the current preparation steps; schema/checkpoint failures retain their specific
+codes. These refusals leave both positions and failure states intact. A missing
+or unreadable probe never authorizes recovery.
+
+Once the checks pass, recovery clears only failed or sufficiently silent
+running cursor states. It preserves committed positions, mapping versions,
+import-run references and manual pause state, and does not enqueue a sync
+itself. Enabled tasks can continue through normal scheduling; paused tasks
+still require their separate activation gates. Do not reset checkpoints merely
+to clear a failure: a changed installation identity requires a separate review
+and the explicit reset workflow described above.
 
 ## 4. Verified source schema and canonical mapping
 

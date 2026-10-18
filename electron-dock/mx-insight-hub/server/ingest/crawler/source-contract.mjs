@@ -173,11 +173,30 @@ export const CRAWLER_SOURCE_COLUMN_CONTRACT = Object.freeze([
 export const CRAWLER_SOURCE_COLUMNS = Object.freeze(
   CRAWLER_SOURCE_COLUMN_CONTRACT.map((column) => column.name),
 )
-// The source added nullable business-batch metadata without changing its
-// identity or cursor contract. Older 23-column leaves remain compatible.
-const CRAWLER_OPTIONAL_TAG_COLUMN = Object.freeze({
-  name: 'tag', databaseType: 'varchar', nullable: true,
-})
+// Reviewed against the source catalog on 2026-10-18. Each addition is optional
+// for older leaves, but must retain its exact type/nullability when present.
+// Source metadata stays in restricted raw evidence until its public mapping is
+// reviewed; the approved mapping, identity and cursor contract stay unchanged.
+export const CRAWLER_OPTIONAL_SOURCE_COLUMN_CONTRACT = Object.freeze([
+  ['tag', 'varchar', true],
+  ['storage_schema_version', 'int4', false],
+  ['source_key', 'text', true],
+  ['source_name', 'text', true],
+  ['publisher_name', 'text', true],
+  ['content_kind', 'varchar', true],
+  ['content_status', 'varchar', true],
+  ['has_full_text', 'bool', true],
+  ['summary', 'text', true],
+  ['published_at_utc', 'timestamptz', true],
+  ['published_date', 'date', true],
+  ['published_at_precision', 'varchar', true],
+  ['published_at_status', 'varchar', true],
+  ['fetch_transport', 'varchar', true],
+  ['standardization_warnings', 'jsonb', true],
+].map(([name, databaseType, nullable]) => Object.freeze({ name, databaseType, nullable })))
+export const CRAWLER_RAW_ONLY_COLUMNS = Object.freeze(
+  CRAWLER_OPTIONAL_SOURCE_COLUMN_CONTRACT.map(column => column.name),
+)
 const ALLOWED_CONNECTION_FIELDS = new Set([
   'schema',
   'table',
@@ -247,11 +266,11 @@ export function crawlerColumnIssues(columns = []) {
   if (byName.size !== columns.length) {
     issues.push('crawler columns contain duplicate names')
   }
-  const expected = new Set([...CRAWLER_SOURCE_COLUMNS, CRAWLER_OPTIONAL_TAG_COLUMN.name])
+  const expected = new Set([...CRAWLER_SOURCE_COLUMNS, ...CRAWLER_RAW_ONLY_COLUMNS])
   for (const name of [...byName.keys()].filter((candidate) => !expected.has(candidate)).sort()) {
     issues.push(`unexpected crawler column ${name} requires mapping review`)
   }
-  for (const contract of [...CRAWLER_SOURCE_COLUMN_CONTRACT, CRAWLER_OPTIONAL_TAG_COLUMN]) {
+  for (const contract of [...CRAWLER_SOURCE_COLUMN_CONTRACT, ...CRAWLER_OPTIONAL_SOURCE_COLUMN_CONTRACT]) {
     const column = byName.get(contract.name)
     if (!column) continue
     if (column.databaseType !== contract.databaseType) {

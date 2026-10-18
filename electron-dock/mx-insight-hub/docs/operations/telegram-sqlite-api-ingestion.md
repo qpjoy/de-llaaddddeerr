@@ -1,6 +1,6 @@
 # Telegram SQLite read-API ingestion
 
-Last reviewed: 2026-08-28.
+Last reviewed: 2026-10-18.
 
 This runbook covers the fixed `telegram-sqlite` pipeline that reads the
 Telegram collector's SQLite fallback through its GET-only HTTP API. It is a
@@ -296,6 +296,65 @@ marks and late historical captures require the explicit full-alignment action,
 or preferably an upstream monotonic change cursor.
 
 ## Failure diagnosis
+
+### 2026-10-18 operator evidence
+
+The operator's read-only Hub snapshot shows both SQLite cursors active/failed
+with `sqlite_api_unavailable`, retaining their open `importRunId`. The latest
+failed jobs ended at 20:45 Asia/Shanghai after all five attempts. Earlier jobs
+repeat about every 54 minutes, consistent with the existing 50-minute stalled
+recovery threshold plus retry time. No pending/running external-pull job was
+present in that snapshot. This establishes that automatic scheduling and
+recovery were running while source requests continued to fail; it does not
+establish the remote host's exact fault.
+
+At 21:37 Asia/Shanghai, an unauthenticated health probe from the ingest Pod to
+the saved origin `http://54.151.151.135:8780` failed with
+`UND_ERR_CONNECT_TIMEOUT` after 10520 ms. This confirms a connection-establishment
+failure before HTTP; distinguishing the remote listener, host firewall/security
+group and network path would require source-host evidence. Do not assume this separate
+Telegram collector is the Night-All or Night-All-A application, or restart
+those services to fix it.
+
+The follow-up Internal-host curl also timed out after 5001 ms, while the
+operator reported HTTP 200 from the source server's local port 8780. This
+narrows the next check to listener exposure and the path between hosts; it
+does not prove a particular firewall or cloud rule is responsible.
+
+The operator accepted the external-access limitation as sufficient for now
+and explicitly deferred further investigation. Remote API ingestion remains
+unresolved; no further listener, firewall or cloud-rule checks are pending
+under the current request. Existing task configuration, checkpoints and open
+import runs remain unchanged; this deferral does not pause the scheduler.
+If investigation is resumed, inspect `ss -lntp 'sport = :8780'` on the source
+before changing a service binding or ingress rule. Preserve existing H2I
+routes and do not reset the SQLite sweep to resolve a connection failure.
+
+`sqlite_api_unavailable` means fetch failed before receiving HTTP response
+headers. An authentication response would instead use
+`sqlite_api_unauthorized`; do not rotate the token or reset checkpoints on this
+evidence. Check the saved URL's `/v1/health` from the **ingest** Pod, with a
+bounded timeout and without logging authorization or response content. A health
+HTTP status establishes reachability only; validate the documented health JSON
+and authenticated read contract before declaring ingestion restored.
+
+The plan's latest import timestamp can belong to an open, resumable sweep;
+it is not the latest retry time. Compare cursor `updated_at` and queue attempts
+with `ingest.import_runs` rather than treating that UI timestamp as proof that
+the scheduler has stopped. The parallel PostgreSQL monitor has a separate
+`source_contract_mismatch` failure and must be diagnosed independently.
+
+For future metadata-only snapshots, from the Hub checkout use:
+
+```bash
+kubectl -n mx-insight-hub exec -i deploy/mx-insight-hub-admin -c admin \
+  -- sh -c 'cd /app && node --input-type=module -' \
+  < server/ops/diagnose-telegram-ingestion.mjs
+```
+
+This script opens only a read-only Hub database snapshot; it does not contact
+either upstream, run migrations, recover tasks or reset checkpoints. Its
+runtime hashes describe the selected Admin container, not the ingest worker.
 
 The source is not part of Hub readiness and cannot block login or the public
 API. A temporary source timeout fails only that job attempt, keeps the running

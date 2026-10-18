@@ -2,12 +2,54 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
-import { CRAWLER_SOURCE_COLUMN_CONTRACT, CRAWLER_SOURCE_TYPES,
+import { CRAWLER_SOURCE_COLUMN_CONTRACT, CRAWLER_OPTIONAL_SOURCE_COLUMN_CONTRACT, CRAWLER_SOURCE_TYPES,
   crawlerCursorIndexIssues, crawlerColumnIssues, crawlerSourceSpec } from '../../server/ingest/crawler/source-contract.mjs'
 
 const sql = readFileSync(new URL('../../scripts/night-all-saved-records-source-audit.sql', import.meta.url), 'utf8')
 const modulePath = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
 const postgres = { skip: modulePath ? false : 'Set MX_INSIGHT_TEST_PGLITE_MODULE to a local PGlite module' }
+
+// Independent source-catalog receipt from 2026-10-18, including the 14 additions.
+const liveColumns = [
+  ['id', 'int4', false],
+  ['source_type', 'varchar', false],
+  ['connector_id', 'varchar', false],
+  ['run_id', 'int4', true],
+  ['source_family', 'varchar', true],
+  ['collection_mode', 'varchar', true],
+  ['evidence', 'jsonb', false],
+  ['quality_status', 'varchar', false],
+  ['record_type', 'varchar', false],
+  ['source_id', 'varchar', false],
+  ['record_key', 'varchar', false],
+  ['source_url', 'text', false],
+  ['title', 'varchar', false],
+  ['text', 'text', false],
+  ['author', 'jsonb', false],
+  ['published_at', 'varchar', true],
+  ['metrics', 'jsonb', false],
+  ['media', 'jsonb', false],
+  ['attributes', 'jsonb', false],
+  ['raw', 'jsonb', true],
+  ['first_seen_at', 'timestamptz', false],
+  ['last_seen_at', 'timestamptz', false],
+  ['created_at', 'timestamptz', false],
+  ['tag', 'varchar', true],
+  ['storage_schema_version', 'int4', false],
+  ['source_key', 'text', true],
+  ['source_name', 'text', true],
+  ['publisher_name', 'text', true],
+  ['content_kind', 'varchar', true],
+  ['content_status', 'varchar', true],
+  ['has_full_text', 'bool', true],
+  ['summary', 'text', true],
+  ['published_at_utc', 'timestamptz', true],
+  ['published_date', 'date', true],
+  ['published_at_precision', 'varchar', true],
+  ['published_at_status', 'varchar', true],
+  ['fetch_transport', 'varchar', true],
+  ['standardization_warnings', 'jsonb', true],
+].map(([name, databaseType, nullable]) => ({ name, databaseType, nullable }))
 
 async function database(t) {
   const { PGlite } = await import(pathToFileURL(modulePath).href)
@@ -27,10 +69,9 @@ async function audit(db) {
   return report
 }
 
-async function parent(db, { tag = false } = {}) {
-  const columns = CRAWLER_SOURCE_COLUMN_CONTRACT.map(column =>
-    `"${column.name}" ${column.databaseType}${column.nullable ? '' : ' NOT NULL'}`)
-  if (tag) columns.push('tag varchar(128)')
+async function parent(db, { live = false } = {}) {
+  const columns = (live ? liveColumns : CRAWLER_SOURCE_COLUMN_CONTRACT).map(column =>
+    `"${column.name}" ${column.name === 'tag' ? 'varchar(128)' : column.databaseType}${column.nullable ? '' : ' NOT NULL'}`)
   await db.exec(`CREATE TABLE public.saved_records (${columns.join(',')}) PARTITION BY LIST (source_type)`)
 }
 
@@ -46,9 +87,16 @@ test('source audit is standalone catalog SQL with a read-only transaction and bo
   assert.doesNotMatch(sql, /(?:FROM|JOIN)\s+(?:public\.)?saved_records\b/iu)
 })
 
-test('actual source audit discovers 13 leaves plus tender, nullable tag and exact cursor index evidence without reading or changing records', postgres, async t => {
+test('runtime audit embeds the same catalog SQL and optional column contract', () => {
+  const runtime = readFileSync(new URL('../../scripts/night-all-a-runtime-audit.py', import.meta.url), 'utf8')
+  const embedded = runtime.match(/SOURCE_AUDIT_SQL = r"""([\s\S]*?)"""/u)?.[1]
+  assert.ok(embedded)
+  assert.equal(embedded.trim(), sql.replace(/\s*ROLLBACK;\s*$/u, '').trim())
+})
+
+test('actual source audit accepts the live 38-column schema on all 14 leaves and matches runtime contracts without reading or changing records', postgres, async t => {
   const db = await database(t)
-  await parent(db, { tag: true })
+  await parent(db, { live: true })
   for (const type of [...CRAWLER_SOURCE_TYPES, 'tender']) {
     await db.exec(`CREATE TABLE public.saved_records_${type} PARTITION OF public.saved_records FOR VALUES IN ('${type}')`)
   }
@@ -58,7 +106,7 @@ test('actual source audit discovers 13 leaves plus tender, nullable tag and exac
     CREATE UNIQUE INDEX social_desc ON public.saved_records_social(last_seen_at DESC, id);
     CREATE UNIQUE INDEX web_partial ON public.saved_records_web(last_seen_at, id) WHERE id > 0;
     CREATE UNIQUE INDEX media_include ON public.saved_records_media(last_seen_at, id) INCLUDE(title);`)
-  const values = Object.fromEntries(CRAWLER_SOURCE_COLUMN_CONTRACT.map(column => [column.name,
+  const values = Object.fromEntries(liveColumns.map(column => [column.name,
     column.nullable ? null : column.databaseType === 'int4' ? 1 : column.databaseType === 'jsonb' ? {} :
       column.databaseType === 'timestamptz' ? '2026-10-16T00:00:00Z' : 'private-business-body']))
   values.source_type = 'news'
@@ -81,7 +129,15 @@ test('actual source audit discovers 13 leaves plus tender, nullable tag and exac
   assert.equal(report.parent.tag.declaredType, 'character varying(128)')
   assert.equal(report.parent.tag.nullable, true)
   assert.equal(report.expectedColumnContract.filter(column => !column.optional).length, 23)
+  assert.equal(report.expectedColumnContract.filter(column => column.optional).length, 15)
+  const expectedContract = liveColumns.map((column, index) => ({ ...column, optional: index >= 23 }))
+    .sort((left, right) => left.name.localeCompare(right.name))
+  assert.deepEqual(report.expectedColumnContract, expectedContract)
+  assert.deepEqual([...CRAWLER_SOURCE_COLUMN_CONTRACT, ...CRAWLER_OPTIONAL_SOURCE_COLUMN_CONTRACT], liveColumns)
   for (const relation of [report.parent, ...report.partitions]) {
+    assert.equal(relation.columnCount, 38)
+    assert.equal(relation.columnsComplete, true)
+    assert.deepEqual(relation.columns.map(({ name, databaseType, nullable }) => ({ name, databaseType, nullable })), liveColumns)
     assert.deepEqual(relation.missingColumns, [])
     assert.deepEqual(relation.unexpectedColumns, [])
     assert.deepEqual(relation.columnMismatches, [])
@@ -102,6 +158,57 @@ test('actual source audit discovers 13 leaves plus tender, nullable tag and exac
   assert.notEqual(byType.social.indexes[0].firstOption, 0)
   assert.equal(byType.web.indexes[0].noPredicate, false)
   assert.equal(byType.media.indexes[0].totalColumns, 3)
+})
+
+test('actual source audit and runtime both reject optional-column type, nullability and unknown-column drift on all 14 leaves', postgres, async t => {
+  const db = await database(t)
+  await parent(db, { live: true })
+  for (const type of [...CRAWLER_SOURCE_TYPES, 'tender']) {
+    await db.exec(`CREATE TABLE public.saved_records_${type} PARTITION OF public.saved_records FOR VALUES IN ('${type}')`)
+  }
+  const cases = [
+    {
+      change: 'ALTER TABLE public.saved_records ALTER COLUMN storage_schema_version TYPE bigint',
+      restore: 'ALTER TABLE public.saved_records ALTER COLUMN storage_schema_version TYPE int4',
+      mismatches: [{ name: 'storage_schema_version', expectedType: 'int4', actualType: 'int8',
+        actualTypeSchema: 'pg_catalog', expectedNullable: false, actualNullable: false }],
+      unexpected: [],
+      issues: ['crawler column storage_schema_version must use PostgreSQL int4'],
+    },
+    {
+      change: `ALTER TABLE public.saved_records ALTER COLUMN storage_schema_version DROP NOT NULL;
+        ALTER TABLE public.saved_records ALTER COLUMN has_full_text SET NOT NULL`,
+      restore: `ALTER TABLE public.saved_records ALTER COLUMN storage_schema_version SET NOT NULL;
+        ALTER TABLE public.saved_records ALTER COLUMN has_full_text DROP NOT NULL`,
+      mismatches: [
+        { name: 'has_full_text', expectedType: 'bool', actualType: 'bool',
+          actualTypeSchema: 'pg_catalog', expectedNullable: true, actualNullable: false },
+        { name: 'storage_schema_version', expectedType: 'int4', actualType: 'int4',
+          actualTypeSchema: 'pg_catalog', expectedNullable: false, actualNullable: true },
+      ],
+      unexpected: [],
+      issues: ['crawler column has_full_text must be nullable', 'crawler column storage_schema_version must be non-null'],
+    },
+    {
+      change: 'ALTER TABLE public.saved_records ADD COLUMN extra_review_required text',
+      restore: 'ALTER TABLE public.saved_records DROP COLUMN extra_review_required',
+      mismatches: [],
+      unexpected: ['extra_review_required'],
+      issues: ['unexpected crawler column extra_review_required requires mapping review'],
+    },
+  ]
+  for (const scenario of cases) {
+    await db.exec(scenario.change)
+    const report = await audit(db)
+    assert.equal(report.partitions.length, 14)
+    for (const relation of [report.parent, ...report.partitions]) {
+      assert.deepEqual(relation.missingColumns, [], relation.table)
+      assert.deepEqual(relation.columnMismatches, scenario.mismatches, relation.table)
+      assert.deepEqual(relation.unexpectedColumns, scenario.unexpected, relation.table)
+      assert.deepEqual(crawlerColumnIssues(relation.columns).sort(), scenario.issues, relation.table)
+    }
+    await db.exec(scenario.restore)
+  }
 })
 
 test('actual source audit distinguishes missing parent and legacy schema from column drift', postgres, async t => {
