@@ -116,6 +116,37 @@ cmd_ensure`);
   assert.match(result.stdout, /READY deployment mx-common-hanlp/);
 });
 
+for (const uid of [0, 1000]) test(`cached image near the start of a long containerd list skips import (uid ${uid})`, () => {
+  const result = bash(`
+need() { :; }; images_in_use() { echo pgvector/pgvector:pg16; }; id() { echo ${uid}; }
+sudo() { [ "$1" = -n ] || return 91; shift; "$@"; }
+ctr() {
+  [ "$*" = '-n k8s.io images ls -q' ] || return 92
+  printf '%s\\n' docker.io/pgvector/pgvector:pg16
+  awk 'BEGIN { for (i=0; i<20000; i++) printf "registry.example.test/filler-%08d:latest\\n", i }'
+}
+docker() { echo UNEXPECTED_DOCKER >&2; return 93; }
+cmd_preload`);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /already imported: pgvector\/pgvector:pg16/);
+  assert.doesNotMatch(result.stderr, /UNEXPECTED_DOCKER/);
+});
+
+test('image cache lookup keeps exact matching and propagates containerd listing failures', () => {
+  for (const [listed, producerStatus, expected] of [
+    ['redis:7.4-alpine', 0, 0],
+    ['docker.io/library/redis:7.4-alpine', 0, 0],
+    ['docker.io/library/redis:7.4-alpine-other', 0, 1],
+    ['docker.io/library/redis:7.4-alpine', 42, 42],
+  ]) {
+    const result = bash(`
+id() { echo 0; }
+ctr() { printf '%s\\n' '${listed}'; return ${producerStatus}; }
+containerd_has_image redis:7.4-alpine`);
+    assert.equal(result.status, expected, `${listed}/${producerStatus}: ${result.stderr}`);
+  }
+});
+
 test('preload imports cached Docker image without network pull and catches pipeline failure', () => {
   for (const failed of [false, true]) {
     const result = bash(`

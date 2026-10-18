@@ -498,10 +498,12 @@ export class SearchQueries {
     }
   }
 
-  async #assertProfileIndexReady(profile) {
+  async #assertProfileIndexReady(profile, inspectedIndexSchema = undefined) {
     const requiredIndexSchema = searchProfileRequiredIndexSchema(profile)
     if (!requiredIndexSchema) return
-    const activeIndexSchema = await this.#activeContentIndexSchema()
+    const activeIndexSchema = inspectedIndexSchema === undefined
+      ? await this.#activeContentIndexSchema()
+      : inspectedIndexSchema
     if (!searchIndexSchemaSatisfies(activeIndexSchema, requiredIndexSchema)) {
       throw new AppError(
         503,
@@ -510,11 +512,6 @@ export class SearchQueries {
         { searchProfile: profile.id, requiredIndexSchema, activeIndexSchema },
       )
     }
-  }
-
-  async #publicationVisibilityIndexReady() {
-    const activeIndexSchema = await this.#activeContentIndexSchema()
-    return activeIndexSchema === CONTENT_INDEX_SCHEMA
   }
 
   /**
@@ -794,8 +791,13 @@ export class SearchQueries {
       const requiresPublicationVisibility = Boolean(
         publicOpinionVisibility || crawlerPublicationVisibility,
       )
+      // Reuse this request's visibility inspection for profile readiness. Do
+      // not cache across requests: an alias swap must still be observed live.
+      const inspectedIndexSchema = requiresPublicationVisibility
+        ? await this.#activeContentIndexSchema()
+        : undefined
       if (requiresPublicationVisibility && (
-        !await this.#publicationVisibilityIndexReady() ||
+        inspectedIndexSchema !== CONTENT_INDEX_SCHEMA ||
         (cursor?.mode === 'elasticsearch' && cursor.analysisState?.indexSchema !== CONTENT_INDEX_SCHEMA)
       )) {
         if (cursor?.mode === 'elasticsearch') {
@@ -819,7 +821,7 @@ export class SearchQueries {
         return oneShot ? { ...result, nextCursor: null } : result
       }
       if (!pitId) {
-        await this.#assertProfileIndexReady(requestedProfile)
+        await this.#assertProfileIndexReady(requestedProfile, inspectedIndexSchema)
       }
       const restoredAnalysis = restoreAnalysisState(cursor?.analysisState, requestedProfile)
       let segmentMetadata = null
@@ -1113,13 +1115,12 @@ export class SearchQueries {
       : ''
     const facetValues = objectTypes?.length || tags?.length || marketplaces?.length ? [JSON.stringify({ objectTypes: objectTypes || [], tags: tags || [], marketplaces: marketplaces || [] })] : []
     const facetPredicate = facetValues.length ? aggregateFacetPredicate(visibilityParameter + (publicOpinionVisibility ? 1 : 0)) : ''
+    // Exact totals still inspect the complete authorized match set, but the
+    // window/sort must not retain every full body and JSON payload. Hydrate
+    // only the selected identities, within the same PostgreSQL snapshot.
     const { rows } = await this.pool.query(
       `WITH matching AS (
-         SELECT id, dataset_id, platform, object_type, external_id, url, title, body,
-                author_external_id, author_name,
-                event_time, collected_at, stable_fields,
-                to_char(event_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS event_time_cursor
-                ${publicationSelect}
+         SELECT id, event_time
                 ${includeTotal ? ', count(*) OVER () AS total_count' : ''}
            FROM core.canonical_records
            ${publicationJoin}
@@ -1141,7 +1142,7 @@ export class SearchQueries {
             ${crawlerPublicationPredicate}
             ${publicationPredicate}
             ${facetPredicate}
-       )
+       ), page AS MATERIALIZED (
        SELECT *
          FROM matching
         WHERE (
@@ -1162,7 +1163,17 @@ export class SearchQueries {
           )
         ORDER BY event_time DESC NULLS LAST, id DESC
         LIMIT $13
-        ${offset != null ? 'OFFSET $14' : ''}`,
+        ${offset != null ? 'OFFSET $14' : ''}
+       )
+       SELECT core.canonical_records.id, dataset_id, platform, object_type, external_id, url, title, body,
+              author_external_id, author_name, core.canonical_records.event_time, collected_at, stable_fields,
+              to_char(page.event_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS event_time_cursor
+              ${publicationSelect}
+              ${includeTotal ? ', page.total_count' : ''}
+         FROM page
+         JOIN core.canonical_records ON core.canonical_records.id = page.id
+         ${publicationJoin}
+        ORDER BY page.event_time DESC NULLS LAST, page.id DESC`,
       [
         literalSubstring(query), platform, datasetId, datasetIds, objectType, authorExternalId, chatId,
         fromTime, toTime, cursor?.searchAfter?.[1] ?? null, cursor?.searchAfter?.[0] ?? null,

@@ -1254,10 +1254,12 @@ MIGRATION_CLEANUP_EVENTS="$migration_cleanup_events" bash -c '
   source "$1/scripts/manage.sh"
   DEPLOY_MIGRATION_JOB_ACTIVE=1
   DEPLOY_FROZEN_ADMIN=1
+  DEPLOY_FROZEN_ADMIN_UID=admin-uid
   kubectl() {
     printf "%s\n" "$*" >>"$MIGRATION_CLEANUP_EVENTS"
     case "$*" in
       *"get pods"*) printf "pod/mx-insight-hub-migrate-test\n" ;;
+      *"jsonpath={.metadata.uid}|{.spec.replicas}"*) printf "admin-uid|0|1234" ;;
     esac
   }
   docker() { :; }
@@ -1311,7 +1313,9 @@ if ADMIN_STOP_EVENTS="$admin_stop_events" bash -c '
   kubectl() {
     printf "%s\n" "$*" >>"$ADMIN_STOP_EVENTS"
     case "$*" in
-      *"wait --for=delete pod"*) return 1 ;;
+      *"--ignore-not-found"*"jsonpath={.metadata.uid}|{.metadata.resourceVersion}"*) printf "admin-uid|900" ;;
+      *"jsonpath={.metadata.uid}|{.spec.replicas}"*) printf "admin-uid|0|1234" ;;
+      *"jsonpath={.metadata.uid}|"*) printf "admin-uid|9|8|0|1|1" ;;
       *"get deployment/mx-insight-hub-admin"*"custom-columns="*)
         printf "NAME GENERATION OBSERVED DESIRED CURRENT READY AVAILABLE\nadmin-snapshot 9 9 0 1 1 1\n"
         ;;
@@ -1323,6 +1327,7 @@ if ADMIN_STOP_EVENTS="$admin_stop_events" bash -c '
     esac
   }
   docker() { :; }
+  sleep() { SECONDS=$((SECONDS + 120)); }
   disable_projector_startup_rebuild_for_deploy() { :; }
   validate_existing_runtime_secret() { :; }
   preserve_existing_justone_runtime_config() { :; }
@@ -1347,11 +1352,11 @@ grep -Fq 'Admin stop diagnostics (metadata only; at most 20 Pods)' "$admin_stop_
 grep -Fq 'admin-snapshot 9 9 0 1 1 1' "$admin_stop_output"
 grep -Fq 'admin-pod-20 ' "$admin_stop_output"
 if grep -Eq 'admin-pod-(21|30)|UNSAFE_PRIVATE_CONTENT' "$admin_stop_output" \
-  || grep -Eq 'migration-reached|20-migration-job|describe| logs |\.env|\.message| -o (json|yaml)|mx-launcher' "$admin_stop_events"; then
+  || grep -Eq 'migration-reached|20-migration-job|describe| logs |\.env|\.message| -o (json|yaml)( |$)|mx-launcher' "$admin_stop_events"; then
   printf 'not ok - failed Admin freeze launched migration or exposed unbounded/private diagnostics\n' >&2
   exit 1
 fi
-assert_eq 2 "$(grep -c -- '--request-timeout=10s' "$admin_stop_events")" 'Admin stop metadata requests have bounded timeouts'
+assert_eq 2 "$(grep 'custom-columns=' "$admin_stop_events" | grep -c -- '--request-timeout=10s')" 'Admin stop diagnostic metadata requests have bounded timeouts'
 grep -Fq -- '-n mx-insight-hub get pods -l app.kubernetes.io/name=mx-insight-hub-admin' "$admin_stop_events"
 grep -Fq -- 'scale deployment/mx-insight-hub-admin --replicas=1' "$admin_stop_events"
 rm -f -- "$admin_stop_events" "$admin_stop_output"
@@ -3082,3 +3087,5 @@ assert_eq \
   "1" \
   "$(printf '%s' "$dockerfile_source" | grep -Fc "import('./server/index.mjs')")" \
   "runtime image imports the full server entrypoint before deployment"
+
+bash "$ROOT_DIR/tests/admin-freeze.test.sh"
