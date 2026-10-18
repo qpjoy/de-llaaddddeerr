@@ -20,7 +20,8 @@ function fixture(t, entryName) {
 }
 
 for (const [entryName, caseName] of [['verify-twitter-query-halves.sh', 'halves'], ['verify-twitter-query-and.sh', 'english-and'],
-  ['verify-twitter-query-groups.sh', 'english-groups'], ['verify-twitter-query-order.sh', 'event-order']]) {
+  ['verify-twitter-query-groups.sh', 'english-groups'], ['verify-twitter-query-order.sh', 'event-order'],
+  ['verify-twitter-query-terms.sh', 'event-terms']]) {
 test(`${caseName} entry selects its fixed case and sends JavaScript stdin from any cwd`, t => {
   const f = fixture(t, entryName), result = f.run([])
   assert.equal(result.status, 0, result.stderr)
@@ -43,7 +44,7 @@ test(`${caseName} entry rejects alternate selections and extra flags before kube
 
 test(`${caseName} entry rejects missing or older sibling source before kubectl`, t => {
   const f = fixture(t, entryName), source = join(f.directory, 'verify-twitter-query-param.mjs')
-  writeFileSync(source, "export const REVISION = 'twitter-query-param-check.v5'\n")
+  writeFileSync(source, "export const REVISION = 'twitter-query-param-check.v6'\n")
   for (const missing of [false, true]) {
     if (missing) rmSync(source)
     const result = f.run([])
