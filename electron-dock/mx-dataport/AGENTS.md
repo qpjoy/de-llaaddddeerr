@@ -1,3 +1,5 @@
+- 2026-10-18 部署锁诊断：operations.mjs 在锁创建处隐藏 kubectl stderr，复用 enroll 的固定安全错误类别并标出 mx-harbor/mx-harbor-deploy-lock 与默认只读 recover-lock 入口；不输出原始 stderr/Secret，不自动删锁，不改恢复、迁移和 UID 约束。用户回执确认 processes=[]、迁移 Job terminal、Pod Succeeded，已指导先显式 --confirm-idle 成功后再部署；不以锁龄替代状态核验。仅数港运维脚本修改，无 Hub/Auth/业务变更。
+
 - 2026-10-18 原型已恢复4288，原目录只读；用户要求继续对齐，已改手机业务弹窗标题/说明居中、套餐卡片外层padding与gap、页面标题顶部对齐。类型/生产构建、8项相关测试通过；用户明确暂不允许本地预览，未取得修改后截图，不可宣称视觉通过。仅发布DataPort后线上复测；根目录design-qa.md为blocked，证据外置screenshot/ui-alignment-fix-20261018。此前4277阻塞描述为历史，不得继续声称原型无法访问。
 
 - 2026-10-18 全量UI复查：生产桌面/矮窗口/手机主要页面及弹窗已留70张证据；修复工单长标题串列、文档分类窄屏裁切、日志结果筛选过窄及法律页独立子账号技术说明。构建、8项既有测试及6张本地真实组件合成数据截图通过，仍待发布DataPort后复测。原型4277浏览器权限仍拒绝、当前认证阶段截图待补、线上统一身份依赖间歇失败未定位，不能称全量通过/原型一致。见 docs/ui-acceptance-20261018.md；截图外置 screenshot/ui-full-acceptance-20261018，原型目录未改，无业务提交。

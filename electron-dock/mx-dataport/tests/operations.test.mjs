@@ -22,6 +22,7 @@ function fixture(t, { fresh = false } = {}) {
   for (const path of [
     "scripts/manage.sh",
     "scripts/operations.mjs",
+    "scripts/enroll.mjs",
     "scripts/bootstrap.mjs",
     "deploy/k8s/render.mjs",
     "apps/server/config.mjs",
@@ -93,7 +94,11 @@ if(cmd==='kubectl'){
  else if(a[0]==='get'&&a[1]==='node')out({metadata:{labels:{'kubernetes.io/hostname':os.hostname()}},spec:{},status:{conditions:[{type:'Ready',status:'True'}]}});
  else if(key==='get namespace mx-harbor'){if(!process.env.HARBOR_TEST_FRESH||fs.existsSync(dir+'/namespace'))out({metadata:{name:'mx-harbor'}})}
  else if(key==='create namespace mx-harbor')fs.writeFileSync(dir+'/namespace','created');
- else if(key==='create configmap mx-harbor-deploy-lock'){fs.writeFileSync(dir+'/lock','fixture-lock-uid',{flag:'wx'});out({metadata:{uid:'fixture-lock-uid'}});}
+ else if(key==='create configmap mx-harbor-deploy-lock'){
+  if(process.env.HARBOR_TEST_LOCK_FAILURE){process.stderr.write('Error from server ('+process.env.HARBOR_TEST_LOCK_FAILURE+'): private-sensitive-payload');process.exit(1)}
+  if(fs.existsSync(dir+'/lock')){process.stderr.write('Error from server (AlreadyExists): private-sensitive-payload');process.exit(1)}
+  fs.writeFileSync(dir+'/lock','fixture-lock-uid',{flag:'wx'});out({metadata:{uid:'fixture-lock-uid'}});
+ }
  else if(key==='get secret mx-harbor-runtime'){
   if(process.env.HARBOR_TEST_SECRET_DENIED)process.exit(1);
   if(fs.existsSync(dir+'/runtime.json')){out(JSON.parse(fs.readFileSync(dir+'/runtime.json')));process.exit(0)}
@@ -102,7 +107,7 @@ if(cmd==='kubectl'){
   const data={'profile.json':JSON.stringify(profile),MX_HARBOR_DATABASE_URL:'postgres://test:test@pg.internal/mx_harbor',MX_HARBOR_GATEWAY_TOKEN:'g'.repeat(43),MX_HARBOR_HUB_ADMIN_ORIGIN:'http://hub.internal:18151',MX_HARBOR_SSO_PROFILE:'/run/harbor/profile.json'};out({data:Object.fromEntries(Object.entries(data).map(([k,v])=>[k,Buffer.from(v).toString('base64')]))});
  }
  else if(key==='get deployment mx-harbor'){if(fs.existsSync(dir+'/deployment.json'))out(JSON.parse(fs.readFileSync(dir+'/deployment.json')))}
- else if(a[0]==='apply'){const doc=JSON.parse(stdin);if(doc.kind==='Secret')fs.writeFileSync(dir+'/runtime.json',JSON.stringify({data:Object.fromEntries(Object.entries(doc.stringData).map(([k,v])=>[k,Buffer.from(v).toString('base64')]))}));if(doc.kind==='Deployment')fs.writeFileSync(dir+'/deployment.json',stdin);}
+ else if(a[0]==='apply'){const doc=JSON.parse(stdin);if(process.env.HARBOR_TEST_SECRET_APPLY_FAILURE&&doc.kind==='Secret'){process.stderr.write('Error from server (Forbidden): '+stdin);process.exit(1)}if(doc.kind==='Secret')fs.writeFileSync(dir+'/runtime.json',JSON.stringify({data:Object.fromEntries(Object.entries(doc.stringData).map(([k,v])=>[k,Buffer.from(v).toString('base64')]))}));if(doc.kind==='Deployment')fs.writeFileSync(dir+'/deployment.json',stdin);}
  else if(a[0]==='rollout'&&process.env.HARBOR_TEST_ROLLOUT_FAILURE)process.exit(1);
  else if(a[0]==='wait'&&process.env.HARBOR_TEST_MIGRATION_FAILURE)process.exit(1);
  else if(a[0]==='delete'&&a[1]?.startsWith('job/')&&process.env.HARBOR_TEST_DELETE_FAILURE)process.exit(1);
@@ -388,6 +393,29 @@ test("failed migration never deploys; unconfirmed termination retains the deploy
       hostname(),
     );
   }
+});
+test("lock acquisition reports a safe cause and never removes an existing lock or starts a build", (t) => {
+  for (const category of ["AlreadyExists", "Forbidden", "Unauthorized"]) {
+    const f = fixture(t);
+    writeFileSync(join(f.dir, "lock"), "another-task-lock");
+    const result = f.run("deploy", {HARBOR_TEST_LOCK_FAILURE:category});
+    assert.notEqual(result.status,0);
+    assert.ok(result.stderr.includes(category),result.stderr);
+    assert.match(result.stderr,/获取部署锁 mx-harbor\/mx-harbor-deploy-lock/);
+    assert.ok(!result.stderr.includes("private-sensitive-payload"));
+    assert.equal(readFileSync(join(f.dir,"lock"),"utf8"),"another-task-lock");
+    assert.ok(!f.calls().some(c=>c.cmd==="docker"||c.args.includes("delete")||c.args.includes("apply")));
+    if(category==="AlreadyExists")assert.match(result.stderr,/recover-lock（默认只读）/);
+  }
+});
+test("deploy diagnostics never echo a rejected Secret manifest or credentials", (t) => {
+  const f=fixture(t,{fresh:true});
+  const result=f.run("deploy",{HARBOR_TEST_SECRET_APPLY_FAILURE:"1"});
+  assert.notEqual(result.status,0);
+  assert.match(result.stderr,/Forbidden/);
+  const output=result.stdout+result.stderr;
+  for(const privateValue of ["postgres://test:test@pg.internal/mx_harbor",'"stringData"',"g".repeat(43),"s".repeat(43)])assert.ok(!output.includes(privateValue));
+  assert.ok(!f.calls().some(c=>c.stdin.includes('"kind":"Deployment"')));
 });
 test("unlock failure still removes temporary private configuration", (t) => {
   const f = fixture(t),

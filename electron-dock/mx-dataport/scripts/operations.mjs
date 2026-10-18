@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { workload } from "../deploy/k8s/render.mjs";
 import { readConfig } from "../apps/server/config.mjs";
+import { commandFailure } from "./enroll.mjs";
 import {
   operationSettings,
   saveOperationSettings,
@@ -36,10 +37,12 @@ const run = (
     maxBuffer: 16 * 1024 * 1024,
     stdio: inherit ? "inherit" : ["pipe", "pipe", "pipe"],
   });
-  if (result.status !== 0 && !optional)
-    throw Error(
-      `${cmd} failed (${result.status}); inspect the operation locally`,
-    );
+  if ((result.error || result.status !== 0) && !optional) {
+    // kubectl errors can contain the Secret submitted on stdin. Only share
+    // recognized categories, never raw stderr, stdout, environment or arguments.
+    if (cmd === "kubectl") throw commandFailure(cmd, result);
+    throw Error(`${cmd} failed (${result.status}); inspect the operation locally`);
+  }
   return result;
 };
 let settings, discovered;
@@ -152,8 +155,9 @@ const ns = read(["get", "namespace", namespace, "--ignore-not-found"]);
 if (!ns) {
   kube(["create", "namespace", namespace]);
 }
-const lock = JSON.parse(
-    kube([
+const lock = (() => {
+  try {
+    return JSON.parse(kube([
       "create",
       "configmap",
       "mx-harbor-deploy-lock",
@@ -162,8 +166,14 @@ const lock = JSON.parse(
       `--from-literal=ownerPid=${process.pid}`,
       "-o",
       "json",
-    ]).stdout,
-  ),
+    ]).stdout);
+  } catch (error) {
+    const reason = error instanceof SyntaxError
+      ? "部署锁响应无法解析；请先只读核对锁状态，不要重复部署。"
+      : error.message;
+    throw Error(`获取部署锁 ${namespace}/mx-harbor-deploy-lock 失败。${reason}${reason.includes("AlreadyExists") ? " 请先运行 bash scripts/manage.sh ops internal-production recover-lock（默认只读）。" : ""}`);
+  }
+})(),
   temp = mkdtempSync(join(tmpdir(), "mx-harbor-deploy-"));
 let job = "",
   release = true;
