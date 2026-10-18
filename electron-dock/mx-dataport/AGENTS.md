@@ -1,3 +1,5 @@
+- 2026-10-19 Hub重新部署后：线上main-DcgpAkIW.js，原10/19 01:06:39日志在19日命中1、18日0，单边日期/刷新/清空恢复72条正常；AUDIT-03通过。账单单日+已开通及0元详情/焦点通过，缺午夜与跨页样本，BILL-01部分通过；不称全量通过。Hub管理页仍被保存的网站权限拒绝，未绕过；控制面/etcd稳定性未结案。本轮无业务写入/查询/付款。证据外置nonpayment-continuation-20261019/hub-redeploy，见docs/nonpayment-continuation-20261019.md。
+
 - 2026-10-19 日期修复发布复测：用户回执数港generation=observed37、updated/ready/available1，rollout成功、/ready200；线上main-DcgpAkIW.js已加载。但原跨午夜日志在10/19筛选0、10/18筛选1，后端链路仍旧行为，Hub是否同步并发布f7944f57/df3f5ad9待确认，不称修复通过或假定未部署。账单6/4/1/2状态及单日详情回归正常，午夜订单样本仍缺。无新业务写入，2次批量额度仍未确认。证据nonpayment-continuation-20261019/date-postdeploy，见docs/nonpayment-continuation-20261019.md。
 
 - 2026-10-19 非支付续验：仅history.read角色经确认创建/分配，真实员工8历史可回看、查询/导出/批量禁用、9个直达拒绝，旧通知工单失权拒绝；已恢复正常/分析员并归档临时角色。日志搜索补齐，67条分页遍历无重复。新发现跨午夜筛选P2：10/18错误包含显示10/19凌晨记录；Hub日志/账单改北京时间半开日界，DataPort格式化固定Asia/Shanghai。17项真实隔离PG、22项前端测试及构建通过，待Hub→DataPort部署复测，无新迁移/Launcher/Auth/Pay变化；不得记全量通过。外置证据nonpayment-continuation-20261019，批量2次额度仍待明确确认。见docs/nonpayment-continuation-20261019.md。
