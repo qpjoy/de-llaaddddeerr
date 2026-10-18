@@ -157,7 +157,7 @@ export function commandFailure(cmd, result) {
     Unauthorized: "Unauthorized：Kubernetes 登录凭据无效或已过期。",
     NotFound: "NotFound：目标资源或 namespace 不存在，请确认前置部署已完成。",
     Conflict:
-      "Conflict：资源已被其他任务修改；待其他任务完成后重新运行 enroll。",
+      "Conflict：资源已被其他任务修改；待其他任务完成后重试原操作。",
     Invalid:
       "Invalid：API Server 拒绝资源内容或字段，请检查目标资源的配置约束。",
     BadRequest:
