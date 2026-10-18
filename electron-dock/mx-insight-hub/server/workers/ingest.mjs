@@ -30,6 +30,7 @@ import {
   TELEGRAM_SQLITE_SOURCE_KEYS,
   TelegramSQLitePipeline,
 } from '../ingest/telegram/sqlite-pipeline.mjs'
+import { isTelegramMonitorSourceKey } from '../ingest/telegram/monitor-pipeline.mjs'
 import { createPostgresStore } from '../stores/postgres-store.mjs'
 
 // Ingest worker: drains queued search results and runs Night-All backfills.
@@ -42,6 +43,15 @@ import { createPostgresStore } from '../stores/postgres-store.mjs'
 const logger = console
 const INGEST_QUEUE = 'ingest'
 const BACKFILL_QUEUE = 'backfill'
+
+// A ready continuation releases its worker slot until runAt; source checkpoints
+// and batch identities remain unchanged while other sources can make progress.
+export function externalPullPageDelayMs(sourceKey, config) {
+  if (isProvinceOpinionSourceKey(sourceKey)) return config.externalPull.provincePageDelayMs
+  if (TELEGRAM_SQLITE_SOURCE_KEYS.has(sourceKey)) return config.externalPull.telegramSqlitePageDelayMs
+  if (isTelegramMonitorSourceKey(sourceKey)) return config.externalPull.telegramMonitorPageDelayMs
+  return config.externalPull.pageDelayMs
+}
 
 export function classifyExternalPlatformIngest(payload) {
   const enterprise = payload?.providerKey === 'qixin' && payload.datasetId === 'enterprise.responses.v1' && payload.platform === 'enterprise'
@@ -217,11 +227,7 @@ async function main() {
       job,
       signal: controller.signal,
       logger,
-      continuationDelayMs: isProvinceOpinionSourceKey(payload?.sourceKey)
-        ? config.externalPull.provincePageDelayMs
-        : TELEGRAM_SQLITE_SOURCE_KEYS.has(payload?.sourceKey)
-          ? config.externalPull.telegramSqlitePageDelayMs
-          : 0,
+      continuationDelayMs: externalPullPageDelayMs(payload?.sourceKey, config),
     })
   }
 
@@ -233,7 +239,7 @@ async function main() {
     startLoop(queue, BACKFILL_QUEUE, handleBackfill, controller.signal, 1),
     // Foreign-table scans are bulk I/O just like backfill. One at a time keeps
     // them from competing with latency-sensitive search-result ingestion.
-    startLoop(queue, EXTERNAL_PULL_QUEUE, handleExternalPull, controller.signal, 1),
+    startLoop(queue, EXTERNAL_PULL_QUEUE, handleExternalPull, controller.signal, 1, config.externalPull.workerDelayMs),
     runCrawlerDiscovery({ pipeline: crawlerPipeline, store, signal: controller.signal, logger }),
     runExternalPullScheduler({
       store,
@@ -254,8 +260,8 @@ async function main() {
   logger.log('[ingest] stopped')
 }
 
-function startLoop(queue, name, handler, signal, concurrency = 4) {
-  return startWorker(queue, { name, handler, concurrency, signal, logger }).done
+export function startLoop(queue, name, handler, signal, concurrency = 4, postBatchDelayMs = 0) {
+  return startWorker(queue, { name, handler, concurrency, postBatchDelayMs, signal, logger }).done
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -366,6 +366,13 @@ export class RetrievalJobs {
       client.release()
     }
   }
+  async assertLease(job) {
+    const { rows } = await this.pool.query(
+      `SELECT 1 FROM retrieval.jobs WHERE record_id=$1 AND lease_token=$2 AND status='running' AND lease_until>now()`,
+      [job.record_id, job.lease_token],
+    )
+    if (rows.length !== 1) throw new AppError(409, 'retrieval_lease_lost', 'Retrieval lease lost')
+  }
   async heartbeat(job) {
     const { rowCount } = await this.pool.query(
       `UPDATE retrieval.jobs SET lease_until=now()+interval '3 minutes' WHERE record_id=$1 AND lease_token=$2 AND status='running' AND lease_until>now()`,

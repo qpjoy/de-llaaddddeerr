@@ -1400,6 +1400,30 @@ create_runtime_config() {
     ' "${ROOT_DIR}/server/ingest/external/server-files.mjs" >/dev/null 2>&1; then
     die "MX_INSIGHT_SERVER_FILE_ROOTS must be a valid server-file root JSON object"
   fi
+  local external_pull_page_delay_ms="${MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS:-1000}"
+  if ! MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS_VALUE="$external_pull_page_delay_ms" \
+    node -e '
+      const value = Number(process.env.MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS_VALUE)
+      if (!Number.isInteger(value) || value < 0 || value > 60_000) process.exit(1)
+    '; then
+    die "MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS must be an integer from 0 to 60000"
+  fi
+  local external_pull_worker_delay_ms="${MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS:-1000}"
+  if ! MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS_VALUE="$external_pull_worker_delay_ms" \
+    node -e '
+      const value = Number(process.env.MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS_VALUE)
+      if (!Number.isInteger(value) || value < 0 || value > 60_000) process.exit(1)
+    '; then
+    die "MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS must be an integer from 0 to 60000"
+  fi
+  local telegram_monitor_page_delay_ms="${MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS:-1000}"
+  if ! MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS_VALUE="$telegram_monitor_page_delay_ms" \
+    node -e '
+      const value = Number(process.env.MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS_VALUE)
+      if (!Number.isInteger(value) || value < 0 || value > 60_000) process.exit(1)
+    '; then
+    die "MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS must be an integer from 0 to 60000"
+  fi
   local telegram_sqlite_page_delay_ms="${MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS:-1000}"
   if ! MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS_VALUE="$telegram_sqlite_page_delay_ms" \
     node -e '
@@ -1520,6 +1544,9 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_BACKFILL_PLATFORMS="${MX_INSIGHT_BACKFILL_PLATFORMS:-xiaohongshu,douyin,twitter}" \
     --from-literal=MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS="${MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS:-60000}" \
     --from-literal=MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE="${MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE:-1000}" \
+    --from-literal=MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS="$external_pull_page_delay_ms" \
+    --from-literal=MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS="$external_pull_worker_delay_ms" \
+    --from-literal=MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS="$telegram_monitor_page_delay_ms" \
     --from-literal=MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS="$telegram_sqlite_page_delay_ms" \
     --from-literal=MX_INSIGHT_PROVINCE_PAGE_DELAY_MS="$province_page_delay_ms" \
     --from-literal=MX_INSIGHT_AGENT_PROVIDERS="${MX_INSIGHT_AGENT_PROVIDERS:-}" \

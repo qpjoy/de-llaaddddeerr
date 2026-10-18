@@ -25,7 +25,9 @@ export async function processRetrievalJob({ jobs, pipeline, job, signal, admissi
   const check = async () => {
     if (lost) throw lost
     abort.signal.throwIfAborted()
-    await jobs.heartbeat(job)
+    // Every stage verifies ownership on the primary; only the periodic timer
+    // renews it, avoiding several indexed lease UPDATEs for each short record.
+    await jobs.assertLease(job)
     if (!job.retire) await admission?.check()
   }
   try {
