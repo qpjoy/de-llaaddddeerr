@@ -614,18 +614,30 @@ export class DataportStore {
       )
     )
       problem(400, "invalid_audit_filter", "日志筛选条件无效。");
-    const args = [tenantId, q, actor, action, status, from, to],
-      where =
-        "e.tenant_id=$1 AND ($2='' OR position(lower($2) in lower(e.target||' '||coalesce(mp.display_name,m.display_name,'')||' '||coalesce(ma.account,'')||' '||coalesce(e.detail->>'requestId','')||' '||coalesce(e.detail->>'ip','')))>0) AND ($3='' OR e.actor::text=$3) AND ($4='' OR e.action=$4) AND ($5='' OR ($5='success' AND e.status<400) OR ($5='failure' AND e.status>=400)) AND ($6::date IS NULL OR e.created_at >= $6::date) AND ($7::date IS NULL OR e.created_at<$7::date+interval '1 day')";
+    // Old events retained only the Portal request ID. Join their tenant-bound
+    // query receipt for tracing without rewriting immutable historical events.
+    const queryRequestId =
+        "coalesce(e.detail->>'queryRequestId',qr.payload#>>'{response,requestId}',qr.payload->>'requestId','')",
+      batchId = "coalesce(e.detail->>'batchId',qr.payload->>'batchId','')",
+      source = `dataport.events e LEFT JOIN iam.members m ON m.id=e.actor
+        LEFT JOIN dataport.member_profiles mp ON mp.tenant_id=e.tenant_id AND mp.member_id=e.actor
+        LEFT JOIN dataport.managed_accounts ma ON ma.tenant_id=e.tenant_id AND ma.member_id=e.actor
+        LEFT JOIN dataport.queries qr ON e.action='query.executed' AND qr.tenant_id=e.tenant_id
+          AND qr.id=CASE WHEN e.target ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN e.target::uuid END`,
+      args = [tenantId, q, actor, action, status, from, to],
+      where = `e.tenant_id=$1 AND ($2='' OR position(lower($2) in lower(e.target||' '||coalesce(mp.display_name,m.display_name,'')||' '||coalesce(ma.account,'')||' '||coalesce(e.detail->>'requestId','')||' '||coalesce(e.detail->>'ip','')||' '||${queryRequestId}||' '||${batchId}))>0) AND ($3='' OR e.actor::text=$3) AND ($4='' OR e.action=$4) AND ($5='' OR ($5='success' AND e.status<400) OR ($5='failure' AND e.status>=400)) AND ($6::date IS NULL OR e.created_at >= $6::date) AND ($7::date IS NULL OR e.created_at<$7::date+interval '1 day')`;
     const total = (
       await this.pool.query(
-        `SELECT count(*)::int AS total FROM dataport.events e LEFT JOIN iam.members m ON m.id=e.actor LEFT JOIN dataport.member_profiles mp ON mp.tenant_id=e.tenant_id AND mp.member_id=e.actor LEFT JOIN dataport.managed_accounts ma ON ma.tenant_id=e.tenant_id AND ma.member_id=e.actor WHERE ${where}`,
+        `SELECT count(*)::int AS total FROM ${source} WHERE ${where}`,
         args,
       )
     ).rows[0].total;
     const items = (
       await this.pool.query(
-        `SELECT e.*,coalesce(mp.display_name,m.display_name) AS "actorName",ma.account AS "actorAccount" FROM dataport.events e LEFT JOIN iam.members m ON m.id=e.actor LEFT JOIN dataport.member_profiles mp ON mp.tenant_id=e.tenant_id AND mp.member_id=e.actor LEFT JOIN dataport.managed_accounts ma ON ma.tenant_id=e.tenant_id AND ma.member_id=e.actor WHERE ${where} ORDER BY e.created_at DESC,e.id DESC LIMIT $8 OFFSET $9`,
+        `SELECT e.*,e.detail || jsonb_strip_nulls(jsonb_build_object(
+          'queryRequestId',nullif(${queryRequestId},''),'queryId',qr.id,'batchId',nullif(${batchId},'')
+        )) AS detail,coalesce(mp.display_name,m.display_name) AS "actorName",ma.account AS "actorAccount"
+        FROM ${source} WHERE ${where} ORDER BY e.created_at DESC,e.id DESC LIMIT $8 OFFSET $9`,
         [...args, pageSize, offset],
       )
     ).rows;
@@ -1143,7 +1155,14 @@ export class DataportStore {
       "query.executed",
       id,
       status,
-      { ip: body.ip },
+      {
+        ip: body.ip,
+        queryId: id,
+        queryRequestId:
+          text(payload.response?.requestId || payload.requestId, 128) ||
+          undefined,
+        batchId: text(payload.batchId, 128) || undefined,
+      },
     );
     return { ...payload, id };
   }

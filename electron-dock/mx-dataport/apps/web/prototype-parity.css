@@ -252,6 +252,14 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
+.parity-audit-panel [data-slot="table-cell"],
+.parity-audit-panel .audit-target {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.audit-target {
+  display: block;
+}
 .parity-audit-panel .dp-toolbar {
   gap: 10px;
 }
@@ -1249,8 +1257,18 @@
   white-space: nowrap;
 }
 .key-name {
+  display: block;
+  white-space: normal;
   overflow-wrap: anywhere;
   font-weight: 550;
+}
+.key-masked-value {
+  display: block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.key-row-actions {
+  flex-wrap: wrap;
 }
 .harbor-console .harbor-history table {
   table-layout: fixed;

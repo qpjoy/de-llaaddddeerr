@@ -215,18 +215,38 @@ export function createHarborApp({
             "客户服务响应异常，请稍后重试。",
           );
         }
-        if (!upstream.ok)
+        if (!upstream.ok) {
+          const code =
+            payload.error?.code || payload.code || "customer_service_error";
+          // Fixed, public-safe diagnostics. Never forward arbitrary 5xx bodies.
+          const accountMessages = {
+            dataport_accounts_not_configured:
+              "员工账号服务尚未就绪，请联系管理员完成配置。",
+            dataport_accounts_invalid_config:
+              "托管子账号凭据配置无效，请联系管理员检查。",
+            dataport_accounts_unconfirmed:
+              "账号操作结果尚未确认，请保留当前表单，核对员工列表后重试原操作。",
+            dataport_accounts_unavailable:
+              "员工账号服务暂不可用，请联系管理员检查。",
+          };
+          const accountMessage =
+            upstream.status >= 500 &&
+            typeof code === "string" &&
+            Object.hasOwn(accountMessages, code)
+              ? accountMessages[code]
+              : undefined;
           return json(upstream.status, {
-            code:
-              payload.error?.code || payload.code || "customer_service_error",
-            message:
-              upstream.status >= 500
+            code,
+            message: accountMessage
+              ? `${accountMessage}（请求编号：${id}）`
+              : upstream.status >= 500
                 ? "客户服务暂不可用，请稍后重试。"
                 : payload.error?.message ||
                   payload.message ||
                   "无权访问此服务。",
             requestId: id,
           });
+        }
         if (path === "/documentation" && payload.data?.schema) {
           payload.data.schema = {
             ...payload.data.schema,

@@ -133,10 +133,14 @@ export function ApiKeys({
               {rows.items.map((k) => (
                 <TableRow key={k.id}>
                   <TableCell>
-                    <span className="key-name">{k.name}</span>
+                    <span className="key-name" title={k.name}>
+                      {k.name}
+                    </span>
                   </TableCell>
                   <TableCell>
-                    <code>{k.prefix || k.id}••••••</code>
+                    <code className="key-masked-value">
+                      {k.prefix || k.id}••••••
+                    </code>
                   </TableCell>
                   <TableCell>
                     <span

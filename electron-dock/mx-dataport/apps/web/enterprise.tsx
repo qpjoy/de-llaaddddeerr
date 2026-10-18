@@ -1372,6 +1372,7 @@ export function Audit(props: Props) {
     "member.updated": "修改员工",
     "member.initial-password.viewed": "查看初始密码",
     "member.password.reset": "重置托管子账号密码",
+    "ticket.created": "提交工单",
     "ticket.updated": "处理工单",
     "enterprise.renamed": "修改企业名称",
     "role.saved": "保存角色",
@@ -1440,7 +1441,17 @@ export function Audit(props: Props) {
                   }
                   await downloadExcel(
                     "数港审计日志",
-                    ["时间", "操作者", "操作", "目标", "状态", "请求编号"],
+                    [
+                      "时间",
+                      "操作者",
+                      "操作",
+                      "目标",
+                      "状态",
+                      "请求编号",
+                      "页面请求编号",
+                      "查询记录编号",
+                      "批次编号",
+                    ],
                     rows.map((r) => [
                       dateTime(r.created_at),
                       r.actorName || "平台管理员",
@@ -1449,7 +1460,10 @@ export function Audit(props: Props) {
                         ? r.detail?.ip || r.target
                         : r.target,
                       r.status,
+                      r.detail?.queryRequestId || r.detail?.requestId || "",
                       r.detail?.requestId || "",
+                      r.detail?.queryId || "",
+                      r.detail?.batchId || "",
                     ]),
                   );
                 } catch (e) {
@@ -1580,7 +1594,7 @@ export function Audit(props: Props) {
                 </TableCell>
                 <TableCell>{actionNames[r.action] || r.action}</TableCell>
                 <TableCell>
-                  <code>
+                  <code className="audit-target">
                     {r.action === "query.executed"
                       ? r.detail?.ip || r.target || "—"
                       : r.target || "—"}
@@ -1591,10 +1605,32 @@ export function Audit(props: Props) {
                 </TableCell>
                 <TableCell>
                   {dateTime(r.created_at)}
-                  {r.detail?.requestId && (
+                  {(r.detail?.requestId ||
+                    r.detail?.queryRequestId ||
+                    r.detail?.queryId ||
+                    r.detail?.batchId) && (
                     <details className="audit-request-id">
-                      <summary>请求编号</summary>
-                      <code>{r.detail.requestId}</code>
+                      <summary>追踪编号</summary>
+                      {r.detail.queryRequestId && (
+                        <p>
+                          画像请求编号：<code>{r.detail.queryRequestId}</code>
+                        </p>
+                      )}
+                      {r.detail.requestId && (
+                        <p>
+                          页面请求编号：<code>{r.detail.requestId}</code>
+                        </p>
+                      )}
+                      {r.detail.queryId && (
+                        <p>
+                          查询记录编号：<code>{r.detail.queryId}</code>
+                        </p>
+                      )}
+                      {r.detail.batchId && (
+                        <p>
+                          批次编号：<code>{r.detail.batchId}</code>
+                        </p>
+                      )}
                     </details>
                   )}
                 </TableCell>

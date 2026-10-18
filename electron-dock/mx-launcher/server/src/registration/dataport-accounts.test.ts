@@ -5,6 +5,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { loadConfig } from "../config.js";
 import { createPlatformDataSource } from "../db/data-source.js";
 import { IdentityRepository } from "../identity/repository.js";
@@ -16,6 +18,122 @@ import { RegistrationRepository } from "./repository.js";
 import { canAccessIdentityApplication } from "../identity/application-access.js";
 
 const databaseUrl = process.env.MX_SSO_TEST_DATABASE_URL;
+test(
+  "Hub HTTP bridge reaches the actual Auth controller and reuses one managed identity",
+  { skip: !databaseUrl },
+  async () => {
+    const url = new URL(databaseUrl!);
+    assert.ok(["localhost", "127.0.0.1"].includes(url.hostname) && url.pathname.includes("sso_test"));
+    const environment = `dataport-http-${randomUUID()}`;
+    const config = {
+      ...loadConfig(),
+      environment,
+      databaseUrl: databaseUrl!,
+      storeDriver: "postgres" as const,
+    };
+    const db = createPlatformDataSource(config);
+    const dir = await mkdtemp(join(tmpdir(), "dataport-http-"));
+    const names = [
+      "MX_DATAPORT_ACCOUNT_TOKEN_FILE",
+      "MX_DATAPORT_CREDENTIAL_KEY_FILE",
+      "MX_DATAPORT_ACCOUNT_ORIGIN",
+    ];
+    const previous = names.map((name) => process.env[name]);
+    const controller = new DataportAccountsController(config);
+    const server = createServer(async (req, res) => {
+      try {
+        assert.equal(req.url, "/internal/v1/dataport/accounts");
+        assert.equal(req.method, "POST");
+        let text = "";
+        for await (const part of req) text += part;
+        const result = await controller.command(
+          req.headers["x-mx-dataport-account"] as string,
+          JSON.parse(text),
+        );
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify(result));
+      } catch (e: any) {
+        res.writeHead(e.getStatus?.() || 500, {
+          "content-type": "application/json",
+        });
+        res.end(JSON.stringify(e.getResponse?.() || { code: "fixture_error" }));
+      }
+    });
+    try {
+      await db.initialize();
+      await db.runMigrations();
+      await writeFile(
+        join(dir, "token"),
+        randomBytes(32).toString("base64url"),
+      );
+      await writeFile(join(dir, "key"), randomBytes(32).toString("hex"));
+      process.env.MX_DATAPORT_ACCOUNT_TOKEN_FILE = join(dir, "token");
+      process.env.MX_DATAPORT_CREDENTIAL_KEY_FILE = join(dir, "key");
+      await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+      process.env.MX_DATAPORT_ACCOUNT_ORIGIN = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const { DataportAccountsClient } = await import(
+        new URL(
+          "../../../../mx-insight-hub/server/portal/dataport-accounts.mjs",
+          import.meta.url,
+        ).href
+      );
+      const client = new DataportAccountsClient(),
+        input = {
+          operation: "create",
+          requestId: randomUUID(),
+          tenantId: randomUUID(),
+          actor: randomUUID(),
+          account: "BridgeEmployee",
+          displayName: "HTTP fixture",
+        };
+      const created = await client.execute(input);
+      assert.ok(created.userId);
+      assert.deepEqual(await client.execute(input), created);
+      assert.equal(
+        (
+          await db.query(
+            "SELECT count(*)::int AS count FROM mx_platform_records WHERE environment=$1 AND kind='iam-user'",
+            [environment],
+          )
+        )[0].count,
+        1,
+      );
+      const plain = await client.execute({
+        operation: "initial-password",
+        requestId: randomUUID(),
+        tenantId: input.tenantId,
+        actor: input.actor,
+        userId: created.userId,
+      });
+      assert.ok(plain.password.length >= 20);
+      assert.ok(
+        !JSON.stringify(
+          await db.query(
+            "SELECT data FROM mx_platform_records WHERE environment=$1",
+            [environment],
+          ),
+        ).includes(plain.password),
+      );
+    } finally {
+      await new Promise<void>((r) => {
+        server.close(() => r());
+        server.closeAllConnections();
+      });
+      await controller.onModuleDestroy();
+      if (db.isInitialized) {
+        await db.query("DELETE FROM mx_platform_records WHERE environment=$1", [
+          environment,
+        ]);
+        await db.destroy();
+      }
+      names.forEach((name, i) => {
+        if (previous[i] === undefined) delete process.env[name];
+        else process.env[name] = previous[i];
+      });
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
 test(
   "DataPort managed accounts use MX identity, encrypt initial credentials, recover commands and preserve existing users",
   { skip: !databaseUrl },
@@ -236,10 +354,17 @@ test("DataPort internal account endpoint accepts only its dedicated credential a
       controller.command("platform-operator-token", {} as any),
       (e: any) => e.getStatus() === 401,
     );
+    await writeFile(keyFile, "ab".repeat(32) + "invalid-suffix");
+    await assert.rejects(
+      controller.command("fixture-dedicated-dataport-token-123456", {} as any),
+      (e: any) =>
+        e.getStatus() === 503 &&
+        e.getResponse().code === "dataport_accounts_invalid_config",
+    );
     delete process.env.MX_DATAPORT_ACCOUNT_TOKEN_FILE;
     await assert.rejects(
       controller.command("fixture-dedicated-dataport-token-123456", {} as any),
-      (e: any) => e.getStatus() === 503,
+      (e: any) => e.getStatus() === 503 && e.getResponse().code === "dataport_accounts_not_configured",
     );
   } finally {
     if (oldToken === undefined)

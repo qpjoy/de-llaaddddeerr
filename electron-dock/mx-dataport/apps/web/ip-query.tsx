@@ -251,7 +251,7 @@ export function IpQuery({
               onReport={() => {
                 sessionStorage.setItem(
                   "dataport:report-error",
-                  `IP：${result.ip}\n查询编号：${result.id || result.batchId || ""}\n问题描述：`,
+                  `IP：${result.ip}\n查询编号：${result.id || "未返回"}\n请求编号：${result.response?.requestId || result.batchId || "未返回"}\n问题描述：`,
                 );
                 go("support");
               }}

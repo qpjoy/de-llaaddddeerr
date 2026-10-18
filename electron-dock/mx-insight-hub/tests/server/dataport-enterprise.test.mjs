@@ -705,6 +705,146 @@ test("account bridge configuration accepts only dedicated credentials and fixed 
 });
 
 test(
+  "audit finds new and legacy query receipts by both request IDs without rewriting events or crossing tenants",
+  { skip: !connectionString },
+  async (t) => {
+    const f = await fixture(t),
+      owner = await f.verified(),
+      upstreamId = randomUUID(),
+      batchId = randomUUID();
+    const result = await f.store.query(
+      owner,
+      f.tenant,
+      { ip: "203.0.113.18" },
+      randomUUID(),
+      async () => ({
+        status: 200,
+        body: {
+          batchId,
+          data: [
+            {
+              ip: "203.0.113.18",
+              status: 200,
+              response: {
+                requestId: upstreamId,
+                data: { privateField: "not-an-audit-field" },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    const event = (
+      await f.pool.query(
+        "SELECT * FROM dataport.events WHERE action='query.executed' AND target=$1",
+        [result.id],
+      )
+    ).rows[0];
+    assert.equal(event.detail.requestId, "fixture-request");
+    assert.equal(event.detail.queryRequestId, upstreamId);
+    assert.equal(event.detail.queryId, result.id);
+    assert.equal(event.detail.batchId, batchId);
+    await f.pool.query(
+      "INSERT INTO dataport.events(tenant_id,actor,action,target,status,detail) VALUES($1,$2,'query.executed',$3,200,$4)",
+      [
+        f.tenant,
+        f.owner,
+        result.id,
+        { ip: "203.0.113.18", requestId: "old-portal-request" },
+      ],
+    );
+    const legacy = (
+      await f.pool.query(
+        "SELECT id,detail FROM dataport.events WHERE detail->>'requestId'='old-portal-request'",
+      )
+    ).rows[0];
+    await f.store.event(f.tenant, f.owner, "query.executed", "legacy-non-uuid-target", 503, {});
+    for (const q of [upstreamId, batchId, result.id, "203.0.113.18"]) {
+      const audit = await f.store.audit(
+        owner,
+        f.tenant,
+        new URLSearchParams({ q, action: "query.executed" }),
+      );
+      assert.equal(audit.total, 2);
+      assert.ok(
+        audit.items.every(
+          (r) =>
+            r.detail.queryRequestId === upstreamId &&
+            r.detail.queryId === result.id,
+        ),
+      );
+      assert.doesNotMatch(
+        JSON.stringify(audit),
+        /not-an-audit-field|privateField/,
+      );
+    }
+    assert.equal(
+      (
+        await f.store.audit(
+          owner,
+          f.tenant,
+          new URLSearchParams({ q: "old-portal-request" }),
+        )
+      ).total,
+      1,
+    );
+    assert.deepEqual(
+      (
+        await f.pool.query("SELECT detail FROM dataport.events WHERE id=$1", [
+          legacy.id,
+        ])
+      ).rows[0].detail,
+      legacy.detail,
+    );
+    await f.store.event(f.other, f.owner, "query.executed", result.id, 200, {
+      ip: "198.51.100.2",
+    });
+    // Same textual target in another enterprise must not borrow A's receipt.
+    const adminPrincipal = {
+      ...owner,
+      tenantIds: [f.other],
+      memberships: [
+        {
+          tenantId: f.other,
+          status: "active",
+          role: "owner",
+          dataport: { permissions: ["audit.read"], ownerVerified: true },
+        },
+      ],
+    };
+    assert.equal(
+      (
+        await f.store.audit(
+          adminPrincipal,
+          f.other,
+          new URLSearchParams({ q: upstreamId }),
+        )
+      ).total,
+      0,
+    );
+    assert.equal(
+      (await f.store.audit(adminPrincipal, f.other, new URLSearchParams()))
+        .items[0].detail.queryRequestId,
+      undefined,
+    );
+    await assert.rejects(
+      f.store.audit(owner, f.other, new URLSearchParams({ q: upstreamId })),
+      { status: 403 },
+    );
+    assert.equal(
+      (
+        await f.store.audit(
+          owner,
+          f.tenant,
+          new URLSearchParams({ q: upstreamId }),
+        )
+      ).total,
+      2,
+    );
+  },
+);
+
+test(
   "custom buyers can resume their own purchases without reading enterprise billing or other buyers orders",
   { skip: !connectionString },
   async (t) => {

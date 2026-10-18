@@ -476,9 +476,9 @@ export function Commerce({
         className="commerce-records"
         hidden={page === "orders" && invoiceTab === "invoices"}
       >
-        {loading ? (
+        {loading && page !== "orders" ? (
           <p role="status">正在读取服务…</p>
-        ) : loadFailed ? null : page === "market" ? (
+        ) : loadFailed && page !== "orders" ? null : page === "market" ? (
           <>
             {latestEnd && (
               <div className="harbor-subscription-notice" role="status">
@@ -746,7 +746,7 @@ export function Commerce({
                   {hasPermission(session, tenant, "billing.export") && (
                     <Button
                       variant="outline"
-                      disabled={exporting}
+                      disabled={exporting || loading || loadFailed}
                       onClick={async () => {
                         setExporting(true);
                         try {
@@ -789,87 +789,99 @@ export function Commerce({
                   )}
                 </div>
 
-                <Table className="harbor-orders-table">
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>订单 / 产品</TableHead>
-                      <TableHead>结算金额</TableHead>
-                      <TableHead>支付方式</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>
-                        <span className="sr-only">操作</span>
-                      </TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {purchases.orders.map((order) => (
-                      <TableRow key={order.id}>
-                        <TableCell>
-                          <strong>{order.product.name}</strong>
-                          <small title={order.id}>
-                            {order.id.slice(0, 16)} ·{" "}
-                            {dateTime(order.createdAt)}
-                          </small>
-                        </TableCell>
-                        <TableCell className="harbor-order-amount">
-                          <strong>{money(order.product.amountMinor)}</strong>
-                          <small>
-                            {productTerm(order.product)} ·{" "}
-                            {order.product.quota.toLocaleString()} 次调用
-                          </small>
-                        </TableCell>
-                        <TableCell>
-                          {order.paymentStatus === "not_required"
-                            ? "无需付款"
-                            : order.paymentMethod === "alipay"
-                              ? "支付宝"
-                              : order.environment === "test"
-                                ? "测试支付"
-                                : "尚未确认"}
-                        </TableCell>
-                        <TableCell>
-                          <span
-                            className="harbor-result-state"
-                            data-state={
-                              order.status === "active" ? "success" : "unknown"
-                            }
-                          >
-                            {orderStatus(order)}
-                          </span>
-                        </TableCell>
-                        <TableCell>
-                          <Button
-                            variant="link"
-                            size="sm"
-                            onClick={() => setOrderDetail(order.id)}
-                          >
-                            {!order.deliveredAt &&
-                            order.paymentStatus !== "paid" &&
-                            canPay
-                              ? "去付款"
-                              : "查看详情"}
-                            <ArrowRight aria-hidden="true" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-                {purchases.pagination && (
-                  <Pagination
-                    label="订单"
-                    {...purchases.pagination.orders}
-                    busy={busy || loading}
-                    onChange={setOrdersPage}
-                  />
-                )}
-                {!purchases.orders.length && (
-                  <div className="harbor-empty">
-                    <p>暂无订单</p>
-                    <Button variant="link" onClick={() => go("market")}>
-                      浏览数据服务
-                    </Button>
-                  </div>
+                {loading ? (
+                  <p className="harbor-empty" role="status">
+                    正在读取订单…
+                  </p>
+                ) : loadFailed ? null : (
+                  <>
+                    <Table className="harbor-orders-table">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>订单 / 产品</TableHead>
+                          <TableHead>结算金额</TableHead>
+                          <TableHead>支付方式</TableHead>
+                          <TableHead>状态</TableHead>
+                          <TableHead>
+                            <span className="sr-only">操作</span>
+                          </TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {purchases.orders.map((order) => (
+                          <TableRow key={order.id}>
+                            <TableCell>
+                              <strong>{order.product.name}</strong>
+                              <small title={order.id}>
+                                {order.id.slice(0, 16)} ·{" "}
+                                {dateTime(order.createdAt)}
+                              </small>
+                            </TableCell>
+                            <TableCell className="harbor-order-amount">
+                              <strong>
+                                {money(order.product.amountMinor)}
+                              </strong>
+                              <small>
+                                {productTerm(order.product)} ·{" "}
+                                {order.product.quota.toLocaleString()} 次调用
+                              </small>
+                            </TableCell>
+                            <TableCell>
+                              {order.paymentStatus === "not_required"
+                                ? "无需付款"
+                                : order.paymentMethod === "alipay"
+                                  ? "支付宝"
+                                  : order.environment === "test"
+                                    ? "测试支付"
+                                    : "尚未确认"}
+                            </TableCell>
+                            <TableCell>
+                              <span
+                                className="harbor-result-state"
+                                data-state={
+                                  order.status === "active"
+                                    ? "success"
+                                    : "unknown"
+                                }
+                              >
+                                {orderStatus(order)}
+                              </span>
+                            </TableCell>
+                            <TableCell>
+                              <Button
+                                variant="link"
+                                size="sm"
+                                onClick={() => setOrderDetail(order.id)}
+                              >
+                                {!order.deliveredAt &&
+                                order.paymentStatus !== "paid" &&
+                                canPay
+                                  ? "去付款"
+                                  : "查看详情"}
+                                <ArrowRight aria-hidden="true" />
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                    {purchases.pagination && (
+                      <Pagination
+                        label="订单"
+                        {...purchases.pagination.orders}
+                        busy={busy || loading}
+                        onChange={setOrdersPage}
+                      />
+                    )}
+                    {!purchases.orders.length && (
+                      <div className="harbor-empty">
+                        <p>暂无订单</p>
+                        <Button variant="link" onClick={() => go("market")}>
+                          浏览数据服务
+                        </Button>
+                      </div>
+                    )}
+                  </>
                 )}
               </Card>
             )}
