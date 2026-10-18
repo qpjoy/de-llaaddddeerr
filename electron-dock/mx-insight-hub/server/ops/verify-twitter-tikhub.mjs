@@ -1,0 +1,290 @@
+// Explicit, bounded alternative-provider diagnosis. No production routing change,
+// credential/grant enablement, Delta mutation, retry, pagination or delivery repair.
+import { createHash } from 'node:crypto'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+export const REVISION = 'twitter-tikhub-check.v1'
+export const ORIGINAL_REQUEST_ID = 'b5906846-8564-4791-8b83-ef3ce97789bc'
+export const PROXY_RECEIPT = Object.freeze({ requestId: 'd6ffc7e8-d736-4b7e-999b-a8af15755ee0',
+  callId: '87e933ba-85fd-47da-9717-77acb61482ff' })
+export const NATIVE_KEY = 't.twitter_web_fetch_search_timeline'
+export const NATIVE_PATH = `/api/v1/data/native/${NATIVE_KEY}`
+export const OPERATION = `native.${NATIVE_KEY}`
+export const QUERY = '("外交" OR "外交部" OR "外交政策" OR "外交关系" OR "外交动态" OR "外交表态" OR "外交事件" OR "外交议题" OR "外交回应" OR "外交澄清") -"广告" -"营销" -"重复搬运" ("diplomacy" OR "foreign policy" OR "diplomatic relations") ("statement" OR "response" OR "clarification" OR "update") -ad -marketing -repost'
+const ORIGINAL_SHA = 'f8f3da5a20307fa43713d737199766faa376498fe825ea69889b171f72a37386'
+const PROXY_QUERY = '"update" -ad -marketing -repost'
+const PROXY_KEY = 'ops-twitter-proxy-3a7cdb0328df2c647b90dbebe67b464389decda1b9a7e056'
+const digest = value => createHash('sha256').update(value).digest('hex')
+export const IDEMPOTENCY_KEY = 'ops-twitter-tikhub-' + digest(JSON.stringify([
+  REVISION, ORIGINAL_REQUEST_ID, PROXY_RECEIPT.requestId, NATIVE_KEY, QUERY, 'Top', 'single_native_page',
+])).slice(0, 48)
+export const PROTOCOL_KEYS = Object.freeze({ original: `${IDEMPOTENCY_KEY}-original-guard`, native: `${IDEMPOTENCY_KEY}-native-guard` })
+const BODY = Object.freeze({ params: Object.freeze({ keyword: QUERY, search_type: 'Top' }), deliveryMode: 'live_only' })
+const matchesBody = body => body && Object.keys(body).sort().join(',') === 'deliveryMode,params'
+  && body.deliveryMode === 'live_only' && body.params && Object.keys(body.params).sort().join(',') === 'keyword,search_type'
+  && body.params.keyword === QUERY && body.params.search_type === 'Top'
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+const safeId = value => typeof value === 'string' && UUID.test(value) ? value : null
+const integer = value => Number.isSafeInteger(value) ? value : null
+const requireValue = (condition, code) => { if (!condition) throw new Error(code) }
+const SAFE_CODES = new Set(['invalid_arguments', 'database_url_required', 'original_rejection_unverified',
+  'proxy_rejection_unverified', 'historical_receipt_changed', 'original_owner_unavailable', 'probe_identity_conflict',
+  'probe_call_limit', 'probe_request_mismatch', 'readiness_blocked', 'api_key_required', 'platform_not_granted',
+  'capability_not_granted', 'test_key_not_supported', 'idempotency_conflict', 'request_outcome_unknown',
+  'request_in_progress', 'search_admission_blocked', 'external_platform_not_configured', 'external_platform_unavailable',
+  'external_platform_contract_unverified', 'external_platform_circuit_open', 'external_platform_rate_limited',
+  'external_platform_busy', 'external_platform_response_unusable', 'external_platform_outcome_unknown',
+  'external_platform_upstream_rejected', 'external_platform_operation_blocked', 'external_platform_operation_disabled',
+  'external_platform_operation_shadow', 'external_platform_operation_paused', 'external_platform_operation_canary',
+  'external_platform_control_unavailable', 'external_platform_credential_store_unavailable', 'diagnostic_identity_already_used',
+  'diagnostic_guard_persistence_unknown'])
+const safeCode = error => SAFE_CODES.has(error?.code) ? error.code : SAFE_CODES.has(error?.message) ? error.message : 'probe_unavailable'
+const owned = (a, b) => ['tenant_id', 'consumer_id', 'api_key_id'].every(key => a?.[key] === b?.[key])
+const state = value => ['reserved', 'committed', 'released', 'unknown'].includes(value) ? value : 'other'
+const receiptSummary = row => ({ requestId: safeId(row.id), status: state(row.status), httpStatus: integer(row.response_status) })
+const fields = 'id,tenant_id,consumer_id,api_key_id,idempotency_key,platform,status,response_status,response_body,acquisition_request,fingerprint'
+const callFields = 'id,tenant_id,consumer_id,api_key_id,provider_key,operation,endpoint_key,endpoint_version,contract_version,call_ordinal,call_role,outcome,http_status,business_code'
+
+function rejectedRapid(row, calls, expectedPath, query, callId) {
+  const error = row?.response_body?.error, body = row?.acquisition_request?.body
+  return row?.status === 'committed' && row.platform === 'twitter' && row.response_status === 502
+    && error?.code === 'social_upstream_rejected' && error?.details?.upstreamStatus === 400
+    && error.details.outcome === 'rejected' && error.details.retryable === false
+    && row.acquisition_request?.method === 'POST' && row.acquisition_request.path === expectedPath
+    && body?.platform === 'twitter' && body.query === query && body.pageSize === 20 && !body.cursor
+    && calls.length === 1 && owned(calls[0], row) && (!callId || calls[0].id === callId)
+    && calls[0].provider_key === 'rapidapi' && calls[0].operation === 'social.content.search'
+    && calls[0].endpoint_key === 'twitter-aio.search' && calls[0].endpoint_version === 'twitter-aio.hub.v1'
+    && calls[0].contract_version === 'mx-insight-hub.social-data.v1' && calls[0].call_ordinal === 0
+    && calls[0].call_role === 'primary' && calls[0].outcome === 'rejected' && calls[0].http_status === 400
+}
+
+async function readSnapshot(pool) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    await client.query("SET LOCAL statement_timeout = '5s'")
+    const original = (await client.query(`SELECT /* twitter-tikhub:original */ ${fields} FROM usage_requests WHERE id=$1`, [ORIGINAL_REQUEST_ID])).rows[0]
+    const calls = (await client.query(`SELECT /* twitter-tikhub:original-calls */ ${callFields} FROM external_platform.provider_calls WHERE usage_request_id=$1 LIMIT 2`, [ORIGINAL_REQUEST_ID])).rows
+    const query = original?.acquisition_request?.body?.query
+    requireValue(typeof query === 'string' && digest(query) === ORIGINAL_SHA
+      && [original.tenant_id, original.consumer_id, original.api_key_id].every(safeId)
+      && rejectedRapid(original, calls, '/api/v1/data/search', query), 'original_rejection_unverified')
+    const proxy = (await client.query(`SELECT /* twitter-tikhub:proxy */ ${fields} FROM usage_requests WHERE id=$1`, [PROXY_RECEIPT.requestId])).rows[0]
+    const proxyCalls = (await client.query(`SELECT /* twitter-tikhub:proxy-calls */ ${callFields} FROM external_platform.provider_calls WHERE usage_request_id=$1 LIMIT 2`, [PROXY_RECEIPT.requestId])).rows
+    requireValue(proxy?.idempotency_key === PROXY_KEY && owned(proxy, original)
+      && rejectedRapid(proxy, proxyCalls, '/api/v1/night-all/search/raw', PROXY_QUERY, PROXY_RECEIPT.callId), 'proxy_rejection_unverified')
+    const existing = (await client.query(`SELECT /* twitter-tikhub:existing */ ${fields} FROM usage_requests WHERE consumer_id=$1 AND idempotency_key=$2 ORDER BY reserved_at LIMIT 2`,
+      [original.consumer_id, IDEMPOTENCY_KEY])).rows
+    requireValue(existing.length <= 1 && existing.every(row => owned(row, original)), 'probe_identity_conflict')
+    return { original, existing: existing[0] || null, historyDigest: digest(JSON.stringify([original, calls, proxy, proxyCalls])) }
+  } finally { await client.query('ROLLBACK').catch(() => {}); client.release() }
+}
+
+// Metadata and reviewed controls only: no secret read, key telemetry update,
+// reservation, provider probe or policy mutation belongs in readiness.
+export async function inspectTikHubReadiness({ owner, credentialStore, controlStore, config }) {
+  const blockers = []
+  if (!owner?.active) blockers.push('original_owner_unavailable')
+  if (owner?.testKey) blockers.push('test_key_not_supported')
+  if (!owner?.platformGranted) blockers.push('platform_not_granted')
+  if (!owner?.capabilityGranted) blockers.push('capability_not_granted')
+  const metadata = await credentialStore.describeCredential('tikhub')
+  const credential = { configured: metadata.credentialConfigured === true,
+    source: ['database', 'environment'].includes(metadata.source) ? metadata.source : 'other', revision: integer(metadata.revision) }
+  if (!credential.configured) blockers.push('credential_missing')
+  let operation = null
+  try {
+    const policy = await controlStore.authorizeDispatch('tikhub', OPERATION, { config, consumerId: owner?.consumerId,
+      credentialConfigured: credential.configured, credentialRevision: credential.revision })
+    operation = { authorized: true, policyRevision: integer(policy.policyRevision), releaseRevision: integer(policy.releaseRevision),
+      priceBookVersion: integer(policy.priceBookVersion), state: ['active', 'canary'].includes(policy.desiredState) ? policy.desiredState : 'other' }
+  } catch (error) {
+    const code = safeCode(error)
+    blockers.push(code)
+    const known = new Set(['provider_configuration_invalid', 'deployment_gate_closed', 'reservation_lease_too_short',
+      'credential_missing', 'release_not_active', 'price_control_incomplete', 'database_price_book_required', 'canary_allowlist_empty'])
+    operation = { authorized: false, errorCode: code,
+      blockers: (error?.details?.blockers || []).map(row => known.has(row.code) ? row.code : 'other') }
+  }
+  return { ready: blockers.length === 0, blockers: [...new Set(blockers)], credential, operation,
+    requiredPlatform: 'social', requiredCapability: OPERATION,
+    scope: 'Read-only current credential metadata, owner grants and operation policy; budget, circuit and concurrency are rechecked at dispatch.' }
+}
+
+export function oneShotTikHubAdapter(adapter, onDispatch = () => {}) {
+  let calls = 0
+  return { resolveCredential: () => adapter.resolveCredential(), forwardNative: async (key, body, options) => {
+    requireValue(calls === 0, 'probe_call_limit')
+    requireValue(key === NATIVE_KEY && matchesBody(body), 'probe_request_mismatch')
+    calls++; onDispatch()
+    return adapter.forwardNative(key, body, options)
+  } }
+}
+
+async function appendSavedEvidence(pool, report, saved) {
+  report.saved = receiptSummary(saved)
+  const calls = (await pool.query(`SELECT /* twitter-tikhub:probe-calls */ ${callFields} FROM external_platform.provider_calls WHERE usage_request_id=$1 ORDER BY started_at LIMIT 2`, [saved.id])).rows
+  report.providerCalls = calls.map(call => ({ callId: safeId(call.id), httpStatus: integer(call.http_status),
+    businessCode: integer(call.business_code), outcome: ['succeeded', 'rejected', 'unknown', 'succeeded_unusable', 'pending'].includes(call.outcome) ? call.outcome : 'other' }))
+  const verified = saved.platform === 'social' && saved.idempotency_key === IDEMPOTENCY_KEY
+    && saved.acquisition_request?.method === 'POST' && saved.acquisition_request.path === NATIVE_PATH
+    && matchesBody(saved.acquisition_request.body)
+    && calls.length === 1 && owned(calls[0], saved) && calls[0].provider_key === 'tikhub'
+    && calls[0].operation === OPERATION && calls[0].endpoint_key === OPERATION
+    && calls[0].endpoint_version === 'night-all-source-snapshot.2026-09-26'
+    && calls[0].contract_version === 'mx-insight-hub.native-forwarding.v1'
+    && calls[0].call_ordinal === 0 && calls[0].call_role === 'primary'
+  report.ownedNativeReceiptVerified = verified
+  report.definitiveNativeOutcome = verified && ['committed', 'released'].includes(saved.status)
+    && (calls[0].outcome === 'rejected' && Number.isInteger(calls[0].http_status)
+      || ['succeeded', 'succeeded_unusable'].includes(calls[0].outcome) && calls[0].http_status === 200 && calls[0].business_code === 200)
+  report.savedOutcomeVerified = verified && saved.status === 'committed' && saved.response_status === 200
+    && calls[0].http_status === 200 && calls[0].business_code === 200 && calls[0].outcome === 'succeeded'
+    && saved.response_body?.contractVersion === 'mx-insight-hub.native-forwarding.v1'
+    && saved.response_body.endpoint === NATIVE_KEY && saved.response_body.requestId === saved.id
+    && Object.hasOwn(saved.response_body, 'data') ? 'native_success' : null
+  if (report.savedOutcomeVerified !== 'native_success') return
+  const sourceRoot = process.argv[1] === '-' ? pathToFileURL(`${process.cwd()}/server/`) : new URL('../', import.meta.url)
+  try {
+    const { normalizeTwitterResponse, normalizeHubSocialRequest } = await import(new URL('contracts/hub-social.mjs', sourceRoot))
+    const projected = normalizeTwitterResponse(saved.response_body.data,
+      normalizeHubSocialRequest('search', { platform: 'twitter', query: QUERY, count: 20, sort: 'top' }),
+      { capturedAt: saved.response_body.meta.capturedAt, allowOverflow: true, encodeCursor: () => 'offline-not-a-cursor' })
+    report.projection = { state: 'supported_twitter_timeline', acquiredCount: projected.data.items.length,
+      hasMore: projected.data.page.hasMore, source: 'saved_native_payload', deliveryEstablished: false }
+  } catch {
+    const data = saved.response_body.data
+    const names = ['data', 'entries', 'instructions', 'search_by_raw_query', 'search_timeline', 'timeline', 'timeline_v2', 'result', 'items', 'tweets', 'cursor', 'next_cursor']
+    report.projection = { state: 'native_payload_requires_mapping', source: 'saved_native_payload', deliveryEstablished: false,
+      shape: Object.fromEntries(names.filter(name => data && Object.hasOwn(data, name)).map(name =>
+        [name, Array.isArray(data[name]) ? { type: 'array', length: data[name].length } : { type: data[name] == null ? 'null' : typeof data[name] }])) }
+  }
+}
+
+export async function runTwitterTikHubProbe({ pool, execute = false, createRuntime }) {
+  const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID, proxyRequestId: PROXY_RECEIPT.requestId,
+    case: 'full-query-tikhub', mode: execute ? 'execute' : 'read_only', querySha256: digest(QUERY), queryLength: QUERY.length,
+    provider: 'tikhub', endpoint: NATIVE_KEY, category: 'Top', idempotencyKey: IDEMPOTENCY_KEY,
+    adapterCalls: 0, maxAdapterCalls: 1, automaticRetryAllowed: false, deliveryEstablished: false,
+    countMeaning: 'Adapter attempts, not all HTTP requests; normal provider routing may make an unauthenticated connectivity probe.',
+    acquisitionScope: 'diagnostic_provider_page', fullQueryAttempted: false,
+    interpretation: 'One complete original native predicate, without dropping terms. Native acceptance is not standard-search delivery or full-window cold-start coverage. No cursor follow or automatic provider fallback.' }
+  let initial, runtime
+  const leases = []
+  try {
+    initial = await readSnapshot(pool)
+    report.historicalRejectionsVerified = true
+    if (initial.existing) {
+      report.existing = receiptSummary(initial.existing)
+      await appendSavedEvidence(pool, report, initial.existing)
+      return report
+    }
+    runtime = await createRuntime()
+    report.readiness = await runtime.inspectReadiness(initial.original)
+    if (!execute) return report
+    if (!report.readiness.ready) { report.errorCode = 'readiness_blocked'; return report }
+    const context = await runtime.store.findApiKeyById(initial.original.api_key_id)
+    requireValue(context?.tenant?.id === initial.original.tenant_id && context.consumer?.id === initial.original.consumer_id
+      && context.apiKey?.id === initial.original.api_key_id, 'original_owner_unavailable')
+    const gateway = await runtime.createGateway(() => { report.adapterCalls++; report.fullQueryAttempted = true })
+    // Durable v2 guards cover both historical SQL-like and compiled native
+    // spellings. A native/social unknown must remain visible to future v1/v2
+    // Twitter search, even though it lives outside their usage-path scan.
+    for (const [name, query] of [['original', initial.original.acquisition_request.body.query], ['native', QUERY]]) {
+      const lease = await runtime.protocol.begin(context, { version: 2, body: { platform: 'twitter', query, pageSize: 20, type: 'stable' },
+        idempotencyKey: PROTOCOL_KEYS[name] })
+      requireValue(lease.kind === 'acquired', 'diagnostic_identity_already_used')
+      leases.push(lease)
+    }
+    const result = await gateway.forwardNative(context,
+      { key: NATIVE_KEY, body: BODY, path: NATIVE_PATH, idempotencyKey: IDEMPOTENCY_KEY })
+    report.httpStatus = integer(result.status)
+    report.requestId = safeId(result.requestId)
+  } catch (error) {
+    report.errorCode = safeCode(error)
+    report.httpStatus = integer(error?.status)
+    report.requestId = safeId(error?.details?.requestId)
+  }
+  if (initial) try {
+    const after = await readSnapshot(pool)
+    requireValue(after.historyDigest === initial.historyDigest, 'historical_receipt_changed')
+    report.originalUnchanged = true
+    if (after.existing) await appendSavedEvidence(pool, report, after.existing)
+  } catch (error) { report.verificationError = safeCode(error) }
+  if (leases.length) {
+    const unsent = report.adapterCalls === 0 && !report.verificationError
+      && !['unknown', 'reserved'].includes(report.saved?.status)
+    const definitive = report.definitiveNativeOutcome === true && !report.verificationError
+    const finalState = definitive ? 'failed' : unsent ? 'retryable' : 'unknown'
+    report.protocolGuardState = finalState
+    // Never mark native bytes as a completed standard v2 delivery. Definitive
+    // diagnostic outcomes stop owning the query; uncertain calls keep blocking.
+    for (const lease of leases) try {
+      await runtime.protocol.finish(lease.input, { state: finalState, usageRequestId: report.saved?.requestId || null,
+        error: { status: finalState === 'unknown' ? 409 : 422,
+          code: finalState === 'unknown' ? 'request_outcome_unknown' : 'diagnostic_not_standard_delivery',
+          message: 'This private diagnostic is not a standard-search delivery', details: { automaticRetryAllowed: false } } })
+    } catch { report.verificationError = 'diagnostic_guard_persistence_unknown' }
+  }
+  return report
+}
+
+async function runtimeFromInstalledSources(pool) {
+  const source = path => import(new URL(path, pathToFileURL(`${process.cwd()}/`)))
+  const [configModule, usageModule, platformModule, credentials, controls, proxy, adapterModule, gatewayModule, admission, limits, protocol] = await Promise.all([
+    source('server/config.mjs'), source('server/stores/postgres-store.mjs'), source('server/external-platforms/store.mjs'),
+    source('server/external-platforms/credentials-store.mjs'), source('server/external-platforms/control-store.mjs'),
+    source('server/external-platforms/proxy.mjs'), source('server/adapters/tikhub.mjs'), source('server/external-platforms/gateway.mjs'),
+    source('server/external-platforms/admission-policy.mjs'), source('server/external-platforms/admission-runtime.mjs'), source('server/data/search-protocol-store.mjs'),
+  ])
+  const config = configModule.loadConfig(), provider = config.tikHub
+  requireValue(config.storeDriver === 'postgres', 'database_url_required')
+  const store = new usageModule.PostgresStore(pool, { internalTraffic: config.internalTraffic })
+  const credentialStore = credentials.createExternalPlatformCredentialStore({ pool, providerKey: 'tikhub', environmentConfigured: provider.configured })
+  const controlStore = controls.createExternalPlatformControlStore({ pool })
+  const reservationLeaseMs = Math.max(60000, config.reservationLeaseMs)
+  return { store, protocol: new protocol.SearchProtocolStore(store),
+    inspectReadiness: async original => {
+      const row = (await pool.query(`SELECT /* twitter-tikhub:owner */ k.id,
+        (k.status='active' AND k.expires_at>now() AND c.status='active' AND t.status='active') AS active,
+        (k.environment='test' OR k.key_prefix LIKE 'mih_test_%') AS test_key
+        FROM api_keys k JOIN consumers c ON c.id=k.consumer_id JOIN tenants t ON t.id=k.tenant_id
+        WHERE k.id=$1 AND k.consumer_id=$2 AND k.tenant_id=$3`, [original.api_key_id, original.consumer_id, original.tenant_id])).rows[0]
+      const [platforms, capabilities] = await Promise.all([store.listEffectiveGrants(original.consumer_id, original.api_key_id),
+        store.listEffectiveCapabilityGrants(original.consumer_id, original.api_key_id)])
+      return inspectTikHubReadiness({ owner: { active: row?.active === true, testKey: row?.test_key === true,
+        consumerId: original.consumer_id, platformGranted: platforms.includes('social'), capabilityGranted: capabilities.includes(OPERATION) },
+      credentialStore, controlStore, config: { ...provider, reservationLeaseMs } })
+    },
+    createGateway: onDispatch => new gatewayModule.ExternalPlatformGateway({ usageStore: store, providerKey: 'tikhub', config: provider,
+      credentialStore, operationControlStore: controlStore, apiKeyPepper: config.apiKeyPepper, reservationLeaseMs,
+      platformStore: platformModule.createExternalPlatformStore({ pool, usageStore: store, providerKey: 'tikhub', authorizationPlatform: 'social',
+        rateLimitBurst: provider.rateLimitBurst, circuitFailureThreshold: provider.circuitFailureThreshold,
+        circuitOpenMs: provider.circuitOpenMs, uncertainCooldownMs: provider.unknownFingerprintCooldownMs,
+        responseQuarantineCooldownMs: provider.responseQuarantineCooldownMs }),
+      adapter: oneShotTikHubAdapter(new adapterModule.TikHubAdapter({ apiKey: provider.apiKey,
+        credentialResolver: () => credentialStore.readCredential('tikhub'), baseUrl: provider.baseUrl, timeoutMs: provider.timeoutMs,
+        fetchImpl: proxy.createTikHubProxyFetch(new proxy.ExternalPlatformProxyStore(pool, config.deploymentEgress, { providerKey: 'tikhub' })) }), onDispatch),
+      admissionPolicies: new admission.ExternalAdmissionPolicyStore({ pool, defaultsByProvider: { tikhub: limits.deploymentAdmissionLimits(provider) } }),
+      logger: { warn() {} },
+    }),
+  }
+}
+
+export async function main(args = process.argv.slice(2), env = process.env) {
+  let pool
+  try {
+    requireValue(args.length === 0 || args.length === 1 && args[0] === '--execute', 'invalid_arguments')
+    requireValue(typeof env.DATABASE_URL === 'string' && env.DATABASE_URL.trim(), 'database_url_required')
+    const { Pool } = await import('pg')
+    pool = new Pool({ connectionString: env.DATABASE_URL, max: 4, application_name: REVISION })
+    const report = await runTwitterTikHubProbe({ pool, execute: args.length === 1, createRuntime: () => runtimeFromInstalledSources(pool) })
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    if (report.errorCode || report.verificationError) process.exitCode = 1
+  } catch (error) { process.stdout.write(`${JSON.stringify({ diagnosticRevision: REVISION, errorCode: safeCode(error) })}\n`); process.exitCode = 1 }
+  finally { await pool?.end().catch(() => {}) }
+}
+
+const stdinEntry = process.argv[1] === '-' && fileURLToPath(import.meta.url) === `${process.cwd()}/[eval1]`
+if (stdinEntry || process.argv[1] && process.argv[1] !== '-' && import.meta.url === pathToFileURL(process.argv[1]).href) await main()
