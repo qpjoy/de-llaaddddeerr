@@ -59,7 +59,12 @@ export const money = (amount: number) =>
     maximumFractionDigits: 2,
   }).format(amount / 100);
 export const dateTime = (value?: string) =>
-  value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
+  value
+    ? new Date(value).toLocaleString("zh-CN", {
+        hour12: false,
+        timeZone: "Asia/Shanghai",
+      })
+    : "—";
 export function purchaseIntent(
   storage: Pick<Storage, "getItem" | "setItem">,
   signature: string,

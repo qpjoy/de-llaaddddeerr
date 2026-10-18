@@ -670,6 +670,52 @@ test(
   },
 );
 
+test("audit and billing calendar filters use Beijing midnight independent of database timezone", { skip: !connectionString }, async (t) => {
+  const f = await fixture(t), owner = await f.verified();
+  const dates = [
+    "2026-10-17T15:59:59.999Z", // Just before Oct 18 in Beijing.
+    "2026-10-17T16:00:00Z",
+    "2026-10-18T15:59:59.999999Z",
+    "2026-10-18T16:00:00Z", // Oct 19 must not appear in Oct 18.
+  ];
+  const ids = dates.map(() => randomUUID());
+  for (const tenant of [f.tenant, f.other]) {
+    for (let n = 0; n < dates.length; n++) {
+      await f.pool.query("INSERT INTO dataport.events(tenant_id,actor,action,target,status,created_at) VALUES($1,$2,'boundary',$3,200,$4)", [tenant, f.owner, `boundary:${n}`, dates[n]]);
+      await f.pool.query("INSERT INTO hub_commerce.orders(id,tenant_id,intent,payment,created_at) VALUES($1,$2,$3,$4,$5)", [tenant === f.tenant ? ids[n] : randomUUID(), tenant, { product: { name: `boundary:${n}`, amountMinor: 100 } }, { status: "paid" }, dates[n]]);
+    }
+  }
+  const client = await f.pool.connect();
+  try {
+    const scopedStore = new DataportStore(client);
+    for (const zone of ["UTC", "Asia/Shanghai", "America/Los_Angeles"]) {
+      await client.query("SELECT set_config('TimeZone',$1,false)", [zone]);
+      for (const [range, expected] of [
+        ["from=2026-10-18&to=2026-10-18", [1, 2]],
+        ["from=2026-10-18", [1, 2, 3]],
+        ["to=2026-10-18", [0, 1, 2]],
+        ["from=2026-10-19&to=2026-10-19", [3]],
+      ]) {
+        const audit = await scopedStore.audit(owner, f.tenant, new URLSearchParams(`q=boundary&${range}`));
+        assert.deepEqual(audit.items.map(r => Number(r.target.split(":")[1])).sort(), expected, `audit ${zone} ${range}`);
+        assert.equal(audit.total, expected.length);
+        let billing;
+        await dataportRoute({
+          request: { method: "GET" }, response: {},
+          path: `/enterprises/${f.tenant}/billing`,
+          searchParams: new URLSearchParams(`q=boundary&${range}`),
+          principal: owner, dataport: scopedStore,
+          sendJson(_r, _s, payload) { billing = payload.data; },
+        });
+        assert.deepEqual(billing.orders.map(r => r.id).sort(), expected.map(n => ids[n]).sort(), `billing ${zone} ${range}`);
+        assert.equal(billing.pagination.orders.total, expected.length);
+      }
+    }
+  } finally {
+    client.release();
+  }
+});
+
 test("account bridge configuration accepts only dedicated credentials and fixed secure/internal origins", async (t) => {
   const folder = await mkdtemp(join(tmpdir(), "dataport-bridge-")),
     previousOrigin = process.env.MX_DATAPORT_ACCOUNT_ORIGIN,

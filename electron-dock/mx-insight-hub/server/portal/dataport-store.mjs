@@ -632,8 +632,9 @@ export class DataportStore {
         LEFT JOIN dataport.managed_accounts ma ON ma.tenant_id=e.tenant_id AND ma.member_id=e.actor
         LEFT JOIN dataport.queries qr ON e.action='query.executed' AND qr.tenant_id=e.tenant_id
           AND qr.id=CASE WHEN e.target ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' THEN e.target::uuid END`,
+      // Interpret date-only bounds in the same Beijing timezone as the UI.
       args = [tenantId, q, actor, action, status, from, to],
-      where = `e.tenant_id=$1 AND ($2='' OR position(lower($2) in lower(e.target||' '||coalesce(mp.display_name,m.display_name,'')||' '||coalesce(ma.account,'')||' '||coalesce(e.detail->>'requestId','')||' '||coalesce(e.detail->>'ip','')||' '||${queryRequestId}||' '||${batchId}))>0) AND ($3='' OR e.actor::text=$3) AND ($4='' OR e.action=$4) AND ($5='' OR ($5='success' AND e.status<400) OR ($5='failure' AND e.status>=400)) AND ($6::date IS NULL OR e.created_at >= $6::date) AND ($7::date IS NULL OR e.created_at<$7::date+interval '1 day')`;
+      where = `e.tenant_id=$1 AND ($2='' OR position(lower($2) in lower(e.target||' '||coalesce(mp.display_name,m.display_name,'')||' '||coalesce(ma.account,'')||' '||coalesce(e.detail->>'requestId','')||' '||coalesce(e.detail->>'ip','')||' '||${queryRequestId}||' '||${batchId}))>0) AND ($3='' OR e.actor::text=$3) AND ($4='' OR e.action=$4) AND ($5='' OR ($5='success' AND e.status<400) OR ($5='failure' AND e.status>=400)) AND ($6::date IS NULL OR e.created_at >= ($6::date::timestamp AT TIME ZONE 'Asia/Shanghai')) AND ($7::date IS NULL OR e.created_at < (($7::date+1)::timestamp AT TIME ZONE 'Asia/Shanghai'))`;
     const total = (
       await this.pool.query(
         `SELECT count(*)::int AS total FROM ${source} WHERE ${where}`,

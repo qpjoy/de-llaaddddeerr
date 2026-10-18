@@ -1560,6 +1560,7 @@ export function Audit(props: Props) {
             <input
               type="date"
               aria-label="日志开始日期"
+              title="按北京时间（UTC+8）筛选"
               value={from}
               onChange={(e) => {
                 setFrom(e.target.value);
@@ -1569,6 +1570,7 @@ export function Audit(props: Props) {
             <input
               type="date"
               aria-label="日志结束日期"
+              title="按北京时间（UTC+8）筛选"
               value={to}
               onChange={(e) => {
                 setTo(e.target.value);

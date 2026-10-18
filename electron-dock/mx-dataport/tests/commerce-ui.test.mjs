@@ -10,7 +10,23 @@ import {
   paymentReturnTrade,
   queryIntent,
   portraitState,
+  dateTime,
 } from "../apps/web/commerce-state.ts";
+
+test("business timestamps stay on Beijing calendar days in other browser timezones", () => {
+  const previous = process.env.TZ;
+  try {
+    for (const zone of ["UTC", "America/Los_Angeles", "Asia/Shanghai"]) {
+      process.env.TZ = zone;
+      assert.equal(dateTime("2026-10-18T16:00:00Z"), "2026/10/19 00:00:00");
+      assert.equal(dateTime("2026-10-18T15:59:59Z"), "2026/10/18 23:59:59");
+      assert.equal(dateTime(), "—");
+    }
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
+});
 
 test("renewal hints distinguish current, expiring and already purchased future terms", () => {
   const now = Date.parse("2026-10-11T00:00:00Z");

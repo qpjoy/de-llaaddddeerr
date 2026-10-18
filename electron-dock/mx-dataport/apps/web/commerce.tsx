@@ -728,6 +728,7 @@ export function Commerce({
                   <input
                     type="date"
                     aria-label="开始日期"
+                    title="按北京时间（UTC+8）筛选"
                     value={billFrom}
                     onChange={(e) => {
                       setBillFrom(e.target.value);
@@ -737,6 +738,7 @@ export function Commerce({
                   <input
                     type="date"
                     aria-label="结束日期"
+                    title="按北京时间（UTC+8）筛选"
                     value={billTo}
                     onChange={(e) => {
                       setBillTo(e.target.value);
