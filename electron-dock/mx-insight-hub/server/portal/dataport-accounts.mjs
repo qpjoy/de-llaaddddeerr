@@ -36,7 +36,7 @@ export class DataportAccountsClient {
     } catch {
       throw new AppError(
         503,
-        "dataport_accounts_unavailable",
+        "dataport_accounts_not_configured",
         "员工账号服务尚未配置。",
       );
     }
@@ -64,7 +64,7 @@ export class DataportAccountsClient {
     } catch {
       throw new AppError(
         503,
-        "dataport_accounts_unavailable",
+        "dataport_accounts_unconfirmed",
         "账号操作结果暂未确认，请使用原操作编号重试。",
       );
     }

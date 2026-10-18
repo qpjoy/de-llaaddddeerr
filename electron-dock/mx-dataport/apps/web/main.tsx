@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import {
   Dialog,
   DialogContent,
@@ -272,7 +273,14 @@ function RemotePanel({
       </Card>
     );
   if (page === "team")
-    return <EnterpriseMembers tenant={tenant} session={session} csrf={csrf} />;
+    return (
+      <EnterpriseMembers
+        tenant={tenant}
+        session={session}
+        csrf={csrf}
+        reloadSession={reloadSession}
+      />
+    );
   if (page === "audit")
     return <Audit tenant={tenant} session={session} csrf={csrf} />;
   if (page === "support")
@@ -632,6 +640,8 @@ function App() {
               csrf={csrf}
               onVerified={retrySession}
             />
+          ) : session?.mustChangePassword ? (
+            <AccountSecurity />
           ) : session ? (
             <RemotePanel
               key={`${page}:${tenant}:${queryRevision}`}
@@ -704,7 +714,7 @@ function App() {
           <DialogHeader>
             <DialogTitle>消息通知</DialogTitle>
             <DialogDescription className="sr-only">
-              企业订阅动态与到期提醒
+              企业订阅动态、到期提醒与工单更新
             </DialogDescription>
           </DialogHeader>
           <Messages
@@ -725,5 +735,15 @@ function App() {
     </AccessContext.Provider>
   );
 }
-if (document.getElementById("root") && !location.pathname.startsWith("/demos/"))
-  createRoot(document.getElementById("root")!).render(<App />);
+// Preserve one React root when Vite invalidates this entry during UI edits.
+if (
+  document.getElementById("root") &&
+  !location.pathname.startsWith("/demos/")
+) {
+  const root =
+    (import.meta.hot?.data.dataportRoot as
+      ReturnType<typeof createRoot> | undefined) ||
+    createRoot(document.getElementById("root")!);
+  if (import.meta.hot) import.meta.hot.data.dataportRoot = root;
+  root.render(<App />);
+}

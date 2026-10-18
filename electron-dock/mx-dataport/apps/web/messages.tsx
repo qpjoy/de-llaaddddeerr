@@ -7,8 +7,17 @@ import { dateTime } from "./commerce-state";
 
 type Message = {
   id: string;
-  kind: "scheduled" | "active" | "expiring_7d" | "expiring_1d" | "expired";
+  kind:
+    | "scheduled"
+    | "active"
+    | "expiring_7d"
+    | "expiring_1d"
+    | "expired"
+    | "ticket_updated";
   document: {
+    ticketId?: string;
+    status?: string;
+    hasReply?: boolean;
     productName: string;
     startsAt: string;
     endsAt: string;
@@ -20,6 +29,7 @@ type Message = {
 };
 type Inbox = { items: Message[]; unread: number; nextBefore: string | null };
 const titles = {
+  ticket_updated: "工单处理有更新",
   scheduled: "续订已开通，等待生效",
   active: "订阅已生效",
   expiring_7d: "订阅将在 7 天内到期",
@@ -133,8 +143,36 @@ export function Messages({
         ) : (
           <div>
             <h1>消息通知</h1>
-            <p>订阅动态与到期提醒{inbox ? ` · ${inbox.unread} 条未读` : ""}</p>
+            <p>
+              订阅动态、到期提醒与工单更新
+              {inbox ? ` · ${inbox.unread} 条未读` : ""}
+            </p>
           </div>
+        )}
+        {enabled && (
+          <Button
+            variant="ghost"
+            disabled={busy || !inbox?.unread}
+            onClick={() =>
+              act(async () => {
+                await request(
+                  `/bff/v1/commerce/tenants/${tenant}/messages/read-all`,
+                  {
+                    method: "POST",
+                    headers: { "x-mx-csrf": csrf },
+                    body: "{}",
+                  },
+                );
+                setFirstPage(null);
+                setOlder([]);
+                setNext(undefined);
+                await reload();
+              })
+            }
+          >
+            <Check size={14} />
+            全部已读
+          </Button>
         )}
         {enabled && (
           <Button
@@ -154,7 +192,7 @@ export function Messages({
         )}
       </div>
       {!enabled ? (
-        <p className="harbor-empty">请使用有当前空间账单查看权限的账号。</p>
+        <p className="harbor-empty">请先登录并选择当前企业。</p>
       ) : (
         <>
           {(error || actionError) && (
@@ -170,7 +208,7 @@ export function Messages({
             <Card className="harbor-empty">
               <Bell aria-hidden="true" />
               <h2>暂无消息</h2>
-              <p>订阅开通及到期提醒会显示在这里。</p>
+              <p>订阅提醒与本人工单更新会显示在这里。</p>
             </Card>
           )}
           {items.map((message) => (
@@ -187,29 +225,75 @@ export function Messages({
                   <h2>{titles[message.kind]}</h2>
                   <span>{message.readAt ? "已读" : "未读"}</span>
                 </div>
-                <p>{message.document.productName}</p>
-                <p>
-                  有效期：{dateTime(message.document.startsAt)} —{" "}
-                  {dateTime(message.document.endsAt)}
-                </p>
-                <p>
-                  {message.document.quota.toLocaleString()} 次调用 ·{" "}
-                  {message.document.scope === "tenant"
-                    ? "空间共享"
-                    : "指定调用者"}
-                </p>
-                {message.kind.startsWith("expiring") && (
-                  <p>
-                    可在订阅期内继续购买。已购续订与当前可用服务请在「我的订阅」查看。
-                  </p>
-                )}
-                {message.kind === "expired" && (
-                  <p>此订阅已到期，其他可用订阅不受影响。查询记录仍可回看。</p>
+                {message.kind === "ticket_updated" ? (
+                  <>
+                    <p>
+                      {message.document.hasReply
+                        ? "平台客服已回复你的工单。"
+                        : "你的工单处理状态已更新。"}
+                    </p>
+                    <p>
+                      工单编号：{message.document.ticketId} ·{" "}
+                      {(
+                        {
+                          saved: "已提交",
+                          processing: "处理中",
+                          closed: "已关闭",
+                        } as Record<string, string>
+                      )[message.document.status || ""] || "已更新"}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p>{message.document.productName}</p>
+                    <p>
+                      有效期：{dateTime(message.document.startsAt)} —{" "}
+                      {dateTime(message.document.endsAt)}
+                    </p>
+                    <p>
+                      {message.document.quota.toLocaleString()} 次调用 ·{" "}
+                      {message.document.scope === "tenant"
+                        ? "空间共享"
+                        : "指定调用者"}
+                    </p>
+                    {message.kind.startsWith("expiring") && (
+                      <p>
+                        可在订阅期内继续购买。已购续订与当前可用服务请在「我的订阅」查看。
+                      </p>
+                    )}
+                    {message.kind === "expired" && (
+                      <p>
+                        此订阅已到期，其他可用订阅不受影响。查询记录仍可回看。
+                      </p>
+                    )}
+                  </>
                 )}
                 <time>{dateTime(message.createdAt)}</time>
                 <div className="harbor-actions">
-                  <Button variant="link" onClick={() => go("services")}>
-                    查看订阅 <ArrowRight />
+                  <Button
+                    variant="link"
+                    onClick={() => {
+                      if (
+                        message.kind === "ticket_updated" &&
+                        message.document.ticketId
+                      ) {
+                        sessionStorage.setItem(
+                          "dataport:open-ticket",
+                          message.document.ticketId,
+                        );
+                        window.dispatchEvent(new Event("dataport:open-ticket"));
+                      }
+                      go(
+                        message.kind === "ticket_updated"
+                          ? "support"
+                          : "services",
+                      );
+                    }}
+                  >
+                    {message.kind === "ticket_updated"
+                      ? "查看工单"
+                      : "查看订阅"}{" "}
+                    <ArrowRight />
                   </Button>
                   {!message.readAt && (
                     <Button

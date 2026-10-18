@@ -252,6 +252,14 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
+.parity-audit-panel [data-slot="table-cell"],
+.parity-audit-panel .audit-target {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.audit-target {
+  display: block;
+}
 .parity-audit-panel .dp-toolbar {
   gap: 10px;
 }
@@ -1126,3 +1134,356 @@
 .parity-portrait .harbor-location-map {
   height: 120px;
 }
+/* 2026-10-17 review: stable columns and form rhythm, preserving enterprise features. */
+.ticket-form-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.ticket-form-pair label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  min-width: 0;
+}
+.ticket-form-pair select {
+  width: 100%;
+}
+.ticket-replies {
+  display: grid;
+  gap: 16px;
+}
+.ticket-replies article {
+  padding: 16px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+.ticket-replies time {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 6px 0;
+}
+.enterprise-rename[data-slot="button"] {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  margin-left: 6px;
+  padding: 5px;
+  color: var(--text-secondary);
+}
+.member-search {
+  margin-top: 20px;
+  max-width: 360px;
+}
+.dp-owner-challenge {
+  width: 100%;
+  max-width: 528px;
+}
+.dp-permission-groups {
+  display: grid;
+  gap: 16px;
+}
+.dp-permission-groups fieldset {
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  min-width: 0;
+}
+.dp-permission-groups legend {
+  padding: 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.dp-permission-groups input[type="checkbox"] {
+  min-height: 0;
+  height: 16px;
+  width: 16px;
+  padding: 0;
+  flex-shrink: 0;
+}
+.dp-permission-groups label small {
+  font-size: 11px;
+}
+.dp-role-layout form > .harbor-actions {
+  position: sticky;
+  bottom: -24px;
+  background: var(--background);
+  padding: 14px 0 0;
+  border-top: 1px solid var(--line-soft);
+  z-index: 1;
+}
+.key-name,
+.key-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.key-name svg {
+  flex-shrink: 0;
+}
+.parity-keys-panel [data-slot="table"] {
+  min-width: 1000px;
+  table-layout: fixed;
+}
+.parity-keys-panel [data-slot="table-head"]:nth-child(1) {
+  width: 16%;
+}
+.parity-keys-panel [data-slot="table-head"]:nth-child(2) {
+  width: 19%;
+}
+.parity-keys-panel [data-slot="table-head"]:nth-child(3) {
+  width: 12%;
+}
+.parity-keys-panel [data-slot="table-head"]:nth-child(4) {
+  width: 15%;
+}
+.parity-keys-panel [data-slot="table-head"]:nth-child(5) {
+  width: 8%;
+}
+.parity-keys-panel [data-slot="table-head"]:nth-child(6) {
+  width: 15%;
+}
+.parity-keys-panel [data-slot="table-head"]:nth-child(7) {
+  width: 15%;
+}
+.key-row-actions [data-slot="button"] {
+  padding: 0;
+  font-size: 12px;
+  height: auto;
+  min-height: 28px;
+  white-space: nowrap;
+}
+.key-name {
+  display: block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-weight: 550;
+}
+.key-masked-value {
+  display: block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.key-row-actions {
+  flex-wrap: wrap;
+}
+.harbor-console .harbor-history table {
+  table-layout: fixed;
+  min-width: 620px;
+}
+.harbor-history th:nth-child(1) {
+  width: 21%;
+}
+.harbor-history th:nth-child(2) {
+  width: 20%;
+}
+.harbor-history th:nth-child(3) {
+  width: 17%;
+}
+.harbor-history th:nth-child(4) {
+  width: 30%;
+}
+.harbor-history th:nth-child(5) {
+  width: 12%;
+}
+.parity-ticket-panel table {
+  table-layout: fixed;
+  min-width: 800px;
+}
+.parity-ticket-panel th:nth-child(1) {
+  width: 40%;
+}
+.parity-ticket-panel th:nth-child(2) {
+  width: 14%;
+}
+.parity-ticket-panel th:nth-child(3) {
+  width: 9%;
+}
+.parity-ticket-panel th:nth-child(4) {
+  width: 10%;
+}
+.parity-ticket-panel th:nth-child(5) {
+  width: 19%;
+}
+.parity-ticket-panel th:nth-child(6) {
+  width: 8%;
+}
+.parity-ticket-panel td:first-child {
+  overflow-wrap: anywhere;
+}
+.parity-audit-panel table {
+  table-layout: fixed;
+  min-width: 800px;
+}
+.parity-audit-panel th:nth-child(1) {
+  width: 24%;
+}
+.parity-audit-panel th:nth-child(2) {
+  width: 19%;
+}
+.parity-audit-panel th:nth-child(3) {
+  width: 24%;
+}
+.parity-audit-panel th:nth-child(4) {
+  width: 11%;
+}
+.parity-audit-panel th:nth-child(5) {
+  width: 22%;
+}
+.parity-audit-panel td {
+  overflow-wrap: anywhere;
+}
+.parity-audit-panel .dp-account-id {
+  margin-top: 4px;
+}
+.harbor-console .usage-bottom .simple-data-table {
+  margin-top: 24px;
+  border: 0;
+  border-radius: 0;
+}
+.harbor-console .usage-bottom [data-slot="table-container"] {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+}
+.harbor-console .usage-bottom .simple-data-table [data-slot="table-container"] {
+  margin-top: 0;
+}
+.harbor-console .parity-invoices .empty-state {
+  min-height: 244px;
+}
+.harbor-checkout.parity-order-dialog[data-slot="dialog-content"] {
+  width: calc(100% - 32px);
+  max-width: 512px;
+  padding: 24px;
+  gap: 16px;
+}
+.parity-order-dialog .harbor-order-facts {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  font-size: 13px;
+}
+.parity-order-dialog .harbor-order-facts > div {
+  margin: 0;
+  padding: 0;
+  gap: 16px;
+}
+.parity-order-dialog .harbor-order-facts dd {
+  max-width: 70%;
+  font-weight: 500;
+}
+.harbor-orders-table {
+  table-layout: fixed;
+  min-width: 760px;
+}
+.harbor-orders-table th:nth-child(1) {
+  width: 36%;
+}
+.harbor-orders-table th:nth-child(2) {
+  width: 22%;
+}
+.harbor-orders-table th:nth-child(3) {
+  width: 14%;
+}
+.harbor-orders-table th:nth-child(4) {
+  width: 14%;
+}
+.harbor-orders-table th:nth-child(5) {
+  width: 14%;
+}
+.risk-category-help {
+  display: inline-flex;
+  margin-left: 6px;
+  vertical-align: middle;
+  color: var(--text-secondary);
+  cursor: help;
+}
+.local-example-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0;
+}
+.local-example-actions small {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+@media (max-width: 520px) {
+  .ticket-form-pair {
+    grid-template-columns: 1fr;
+  }
+  .dp-permission-grid {
+    grid-template-columns: 1fr;
+  }
+  .member-search {
+    width: 100%;
+  }
+  .local-example-actions {
+    flex-wrap: wrap;
+  }
+}
+.harbor-console .parity-keys-panel [data-slot="table-container"] {
+  margin-top: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+}
+.harbor-console .parity-keys-panel [data-slot="table-head"] {
+  height: 44px;
+  padding: 12px 14px;
+}
+.harbor-console .parity-keys-panel [data-slot="table-cell"] {
+  height: 54px;
+  padding: 12px 14px;
+}
+.parity-order-dialog .harbor-order-facts {
+  padding: 18px;
+  background: #f8f9fb;
+  border-radius: 6px;
+  margin-block: 20px;
+}
+.parity-order-dialog .harbor-order-facts > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.parity-order-dialog .harbor-order-facts dd {
+  text-align: right;
+}
+.parity-order-dialog > .harbor-actions [data-slot="button"] {
+  flex: 1;
+}
+.harbor-console .usage-bottom > .panel > h3 {
+  margin-bottom: 0;
+}
+.harbor-console .usage-bottom [data-slot="table-container"] {
+  margin-top: 0;
+}
+.dp-permission-groups fieldset {
+  margin: 0;
+}
+.dp-permission-groups legend {
+  margin: 0 0 4px;
+}
+
+.parity-order-dialog .harbor-order-facts dt {
+  color: #526075;
+}
+.parity-order-dialog .harbor-order-facts dd {
+  color: #4e5969;
+}
+.ticket-form-pair [data-slot="select-trigger"] {
+  width: 100%;
+  height: 42px;
+  background: #fff;
+  box-shadow: none;
+  font-size: 14px;
+}
+.key-row-actions [data-slot="button"][data-variant="ghost"] {
+  color: #e5484d;
+}
+.auth-login-modes { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0; }
+.auth-login-modes > button { flex: 1; min-width: 136px; }

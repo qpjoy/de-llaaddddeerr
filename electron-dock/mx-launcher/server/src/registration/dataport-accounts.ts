@@ -48,7 +48,7 @@ const fail = (status: number, code: string, message: string): never => {
   throw new RegistrationError(status, code, message);
 };
 export interface DataportAccountCommand {
-  operation: "create" | "invite" | "initial-password";
+  operation: "create" | "invite" | "initial-password" | "reset-password";
   requestId: string;
   tenantId: string;
   actor: string;
@@ -66,7 +66,7 @@ interface ManagedPassword {
 }
 
 /** Dedicated DataPort account writer. It cannot change roles, other app grants,
- * existing passwords, networking, subscriptions or platform operator rights. */
+ * passwords of existing MX accounts, networking, subscriptions or platform operator rights. */
 export class DataportAccounts {
   private db: DataSource;
   private initializing?: Promise<DataSource>;
@@ -126,7 +126,9 @@ export class DataportAccounts {
   async execute(input: DataportAccountCommand) {
     if (
       !input ||
-      !["create", "invite", "initial-password"].includes(input.operation) ||
+      !["create", "invite", "initial-password", "reset-password"].includes(
+        input.operation,
+      ) ||
       !/^[0-9a-f-]{36}$/i.test(input.tenantId || "") ||
       !/^[0-9a-f-]{36}$/i.test(input.actor || "") ||
       !/^[0-9a-f-]{36}$/i.test(input.requestId || "") ||
@@ -221,6 +223,83 @@ export class DataportAccounts {
             decipher.final(),
           ]).toString("utf8"),
         };
+      } else if (input.operation === "reset-password") {
+        const managed = await this.read<ManagedPassword>(
+          db,
+          "dataport-managed-password",
+          input.userId || "",
+        );
+        const user = await this.read<UserCenterUser>(
+          db,
+          "iam-user",
+          input.userId || "",
+        );
+        const old = await this.read<UserCenterUserCredential>(
+          db,
+          "iam-user-credential",
+          input.userId || "",
+        );
+        if (
+          !managed ||
+          managed.tenantId !== input.tenantId ||
+          !user ||
+          user.status !== "active" ||
+          !old ||
+          user.appAccess.registeredByAppId !== "mx-harbor" ||
+          !user.appAccess.allowedAppIds.includes("mx-harbor") ||
+          user.appAccess.deniedAppIds.includes("mx-harbor") ||
+          user.roleIds.some((r) => r !== "mx-user") ||
+          user.appAccess.allowedAppIds.some((app) => app !== "mx-harbor")
+        )
+          fail(
+            403,
+            "managed_account_required",
+            "仅可重置本企业托管的数港子账号，其他 MX 账号请使用统一找回。",
+          );
+        const password = randomBytes(18).toString("base64url"),
+          now = new Date().toISOString();
+        const credential = createUserCenterUserCredential(
+          user!.userId,
+          password,
+          {
+            requestedBy: `dataport:${input.actor}`,
+            requestId: input.requestId,
+          },
+          old!,
+          now,
+        );
+        const iv = randomBytes(12),
+          cipher = createCipheriv("aes-256-gcm", this.key, iv);
+        cipher.setAAD(Buffer.from(`${input.tenantId}:${input.userId}`));
+        const ciphertext = Buffer.concat([
+          cipher.update(password, "utf8"),
+          cipher.final(),
+        ]);
+        await this.write(db, "iam-user-credential", user!.userId, credential);
+        await this.write(db, "iam-user", user!.userId, {
+          ...user!,
+          updatedAt: now,
+          credential: userCredentialSummary(credential),
+          webSessionsInvalidBefore: now,
+        });
+        await this.write(db, "dataport-managed-password", user!.userId, {
+          tenantId: input.tenantId,
+          userId: user!.userId,
+          fingerprint: credentialFingerprint(credential),
+          iv: iv.toString("base64"),
+          tag: cipher.getAuthTag().toString("base64"),
+          ciphertext: ciphertext.toString("base64"),
+        });
+        await db.query(
+          `UPDATE mx_platform_records SET data=jsonb_set(data,'{revokedAt}',to_jsonb($3::text)),updated_at=now()
+          WHERE environment=$1 AND kind='iam-token' AND data->>'subjectKind'='user' AND data->>'subjectId'=$2 AND COALESCE(data->>'revokedAt','')=''`,
+          [this.environment, user!.userId, now],
+        );
+        result = { reset: true };
+        await this.write(db, "dataport-account-command", commandId, {
+          fingerprint,
+          result,
+        });
       } else {
         const account = String(input.account || "").trim();
         if (!/^[A-Za-z][A-Za-z0-9_.@+-]{2,127}$/.test(account))

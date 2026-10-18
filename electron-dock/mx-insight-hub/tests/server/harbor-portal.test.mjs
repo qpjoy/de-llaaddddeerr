@@ -91,7 +91,7 @@ test('optional Portal config is loaded at request time and missing/corrupt enrol
  writeFileSync(profileFile,JSON.stringify(profile),{mode:0o600});writeFileSync(tokenFile,'g'.repeat(43),{mode:0o600})
  await assert.rejects(portal.resolve({headers:{'x-mx-harbor-gateway':'wrong'}}),{status:401,code:'portal_auth_required'})
  await assert.rejects(portal.resolve({headers:{'x-mx-harbor-gateway':'wrong'}},{catalogOnly:true}),{status:401,code:'portal_auth_required'})
- assert.equal(await portal.resolve({headers:{'x-mx-harbor-gateway':'g'.repeat(43)}},{catalogOnly:true}),null)
+ assert.deepEqual(await portal.resolve({headers:{'x-mx-harbor-gateway':'g'.repeat(43)}},{catalogOnly:true}),{portalOrigin:profile.origin,portalAudience:hubSettings.audience})
  await assert.rejects(portal.resolve({headers:{'x-mx-harbor-gateway':'g'.repeat(43)}}),{status:401,code:'portal_session_required'})
  writeFileSync(tokenFile,'n'.repeat(43))
  await assert.rejects(portal.resolve({headers:{'x-mx-harbor-gateway':'g'.repeat(43)}}),{status:401,code:'portal_auth_required'})

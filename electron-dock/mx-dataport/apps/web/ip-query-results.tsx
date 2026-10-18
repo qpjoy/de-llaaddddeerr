@@ -1,7 +1,7 @@
 import { IpLocationMap } from "./ip-location-map";
 import { ipLocation } from "./ip-location";
 import { useState } from "react";
-import { ArrowRight, Clock3, Copy, Check, Sparkles } from "lucide-react";
+import { ArrowRight, Clock3, Copy, Check, Sparkles, Info } from "lucide-react";
 import { riskAdvice, riskBand } from "./risk-advice";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
@@ -229,7 +229,17 @@ export function QueryResult({
                 <div className="harbor-tag-groups risk-tag-groups">
                   {Object.entries(tags).map(([category, values]) => (
                     <section key={category}>
-                      <h4>{category}</h4>
+                      <h4>
+                        {category}
+                        <span
+                          className="risk-category-help"
+                          tabIndex={0}
+                          aria-label={`${category}说明：仅展示接口已返回的标签，未返回不代表无风险。`}
+                          title="仅展示接口已返回的标签，未返回不代表无风险。"
+                        >
+                          <Info size={13} />
+                        </span>
+                      </h4>
                       <div className="harbor-risk-tags">
                         {!values.length && (
                           <span
@@ -293,7 +303,7 @@ export function QueryResult({
             本次没有可用画像，不代表无风险。
           </p>
         )}
-        <details className="harbor-record-details">
+        <details className="harbor-record-details parity-record-details">
           <summary>查询详情</summary>
           <p>查询时间：{dateTime(result.response?.meta?.capturedAt)}</p>
           <p>

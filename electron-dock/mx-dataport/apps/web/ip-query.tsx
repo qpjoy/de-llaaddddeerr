@@ -16,7 +16,12 @@ import { PublicIpSearch } from "./public-ip-search";
 import { QueryResult, RiskLevel } from "./ip-query-results";
 import { BatchQuery } from "./batch-query";
 import { request } from "./api";
-import { dateTime, portraitState, queryIntent } from "./commerce-state";
+import {
+  dateTime,
+  portraitState,
+  queryIntent,
+  currentSubscription,
+} from "./commerce-state";
 import { enterpriseUrl, hasPermission } from "./permissions";
 import { Pagination } from "./pagination";
 import { downloadExcel } from "./download";
@@ -52,6 +57,22 @@ export function IpQuery({
   const canQuery = hasPermission(session, tenant, "query.execute"),
     canRead = hasPermission(session, tenant, "history.read"),
     canExport = hasPermission(session, tenant, "history.export");
+  const [quota, setQuota] = useState<any>(null);
+  useEffect(() => {
+    const c = new AbortController();
+    setQuota(null);
+    if (hasPermission(session, tenant, "usage.read"))
+      request(enterpriseUrl(tenant, "query-access"), { signal: c.signal })
+        .then((v) => {
+          if (!c.signal.aborted)
+            setQuota(currentSubscription(v.data.subscriptions));
+        })
+        .catch(() => {});
+    return () => c.abort();
+  }, [tenant, session, version]);
+  const remaining = quota
+    ? Math.max(0, quota.quota - quota.used - quota.held)
+    : null;
   useEffect(() => {
     live.current = true;
     return () => {
@@ -173,7 +194,9 @@ export function IpQuery({
         busyLabel="查询中"
         hint={
           canQuery
-            ? "与企业共享订阅次数；查看历史不消耗次数。"
+            ? remaining !== null
+              ? `${quota?.product?.kind === "trial" ? "试用" : "当前订阅"}剩余 ${remaining.toLocaleString()} 次${quota.dailyLimit == null ? "" : ` · 本日剩余 ${Math.max(0, quota.dailyLimit - (quota.dailyUsed || 0) - (quota.dailyHeld || 0)).toLocaleString()} 次`} · 企业共享，查看历史不消耗次数。`
+              : "与企业共享订阅次数；查看历史不消耗次数。"
             : "当前角色仅可查看已授权的历史记录。"
         }
         tools={
@@ -228,7 +251,7 @@ export function IpQuery({
               onReport={() => {
                 sessionStorage.setItem(
                   "dataport:report-error",
-                  `IP：${result.ip}\n查询编号：${result.id || result.batchId || ""}\n问题描述：`,
+                  `IP：${result.ip}\n查询编号：${result.id || "未返回"}\n请求编号：${result.response?.requestId || result.batchId || "未返回"}\n问题描述：`,
                 );
                 go("support");
               }}

@@ -4,6 +4,7 @@ import { randomUUID, createHmac } from "node:crypto";
 import { createApplicationSso } from "@qpjoy/mx-common/identity/sso";
 import { PostgresSsoStore } from "@qpjoy/mx-common/identity/postgres";
 import { SsoError, equal, readSsoJson } from "@qpjoy/mx-common/identity/http";
+import { createLocalAuth, localToken, localOrigin } from "./local-auth.mjs";
 const reads = new Set([
   "/session",
   "/me/usage",
@@ -15,11 +16,11 @@ export function permittedCustomerRoute(method, path) {
   const enterprise = /^\/enterprises\/[0-9a-f-]{36}\/(.*)$/.exec(path);
   if (enterprise)
     return method === "GET"
-      ? /^(roles|members|tickets|audit|history|keys|subscriptions|billing|query-access)$/.test(
+      ? /^(roles|members|tickets|audit|history|keys|subscriptions|billing|query-access|tickets\/[0-9a-f-]{36})$/.test(
           enterprise[1],
         )
       : method === "POST" &&
-          /^(challenge|roles|members|tickets|query|keys|subscription-selection|orders|members\/[0-9a-f-]{36}(?:\/initial-password)?|keys\/[0-9a-f-]{36}\/revoke|orders\/[0-9a-f-]{36}\/(?:checkout|refresh))$/.test(
+          /^(challenge|profile|roles|members|tickets|query|keys|subscription-selection|orders|members\/[0-9a-f-]{36}(?:\/(?:initial-password|reset-password))?|keys\/[0-9a-f-]{36}\/revoke|orders\/[0-9a-f-]{36}\/(?:checkout|refresh))$/.test(
             enterprise[1],
           );
   if (/^\/joins\/[A-Za-z0-9_-]{43}$/.test(path))
@@ -29,7 +30,7 @@ export function permittedCustomerRoute(method, path) {
       (reads.has(path) ||
         /^\/commerce\/tenants\/[0-9a-f-]{36}\/messages$/.test(path))) ||
     (method === "POST" &&
-      /^\/commerce\/tenants\/[0-9a-f-]{36}\/messages\/[1-9][0-9]{0,17}\/read$/.test(
+      /^\/commerce\/tenants\/[0-9a-f-]{36}\/messages\/(?:[1-9][0-9]{0,17}\/read|read-all)$/.test(
         path,
       ))
   );
@@ -42,6 +43,7 @@ export function createHarborApp({
   fetch: fetcher = fetch,
   staticRoot = resolve("dist/web"),
 }) {
+  const localAuth = createLocalAuth(fetcher);
   let cachedSso, cachedProfile;
   function ssoFor(integration) {
     if (config.preview) return null;
@@ -73,6 +75,7 @@ export function createHarborApp({
     };
     try {
       const url = new URL(req.url, "http://localhost");
+      if (!config.preview && await localAuth.handle(req,res,url,resolveDependencies(),json)) return;
       if (
         req.method === "GET" &&
         url.pathname === "/bff/v1/catalog" &&
@@ -134,16 +137,18 @@ export function createHarborApp({
         const path = url.pathname.slice("/bff/v1".length);
         if (!permittedCustomerRoute(req.method, path))
           throw new SsoError(404, "not_found", "此客户功能尚未开放。");
-        const integration = resolveDependencies(),
-          sso = ssoFor(integration);
-        if (!sso)
+        const integration = resolveDependencies();
+        const token = localToken(req);
+        const sso = token ? null : ssoFor(integration);
+        if (!sso && !token)
           throw new SsoError(503, "service_unavailable", "客户服务尚未配置。");
-        const session = await sso.sessionFor(req);
+        const localSession = token ? await localAuth.session(integration,req) : null;
+        const session = localSession ? { csrf:localSession.csrf,subject:`dataport:${localSession.account}` } : await sso.sessionFor(req);
         if (!session) throw new SsoError(401, "login_required", "请先登录。");
-        await sso.verifySession(session, true);
+        if (!token) await sso.verifySession(session, true);
         let body;
         if (req.method === "POST") {
-          sso.checkOrigin(req);
+          if (token) localOrigin(req,integration); else sso.checkOrigin(req);
           if (!session.csrf || !equal(session.csrf, req.headers["x-mx-csrf"]))
             throw new SsoError(
               403,
@@ -180,8 +185,7 @@ export function createHarborApp({
               path.endsWith("/query") ? 120000 : 15000,
             ),
             headers: {
-              authorization: `Bearer ${session.accessToken}`,
-              "x-mx-harbor-subject": session.subject,
+              ...(token ? {"x-mx-dataport-local-session":token,"x-mx-csrf":session.csrf} : {authorization:`Bearer ${session.accessToken}`,"x-mx-harbor-subject":session.subject}),
               "x-mx-harbor-gateway": integration.gatewayToken,
               "x-mx-dataport-session": createHmac(
                 "sha256",
@@ -215,18 +219,38 @@ export function createHarborApp({
             "客户服务响应异常，请稍后重试。",
           );
         }
-        if (!upstream.ok)
+        if (!upstream.ok) {
+          const code =
+            payload.error?.code || payload.code || "customer_service_error";
+          // Fixed, public-safe diagnostics. Never forward arbitrary 5xx bodies.
+          const accountMessages = {
+            dataport_accounts_not_configured:
+              "员工账号服务尚未就绪，请联系管理员完成配置。",
+            dataport_accounts_invalid_config:
+              "托管子账号凭据配置无效，请联系管理员检查。",
+            dataport_accounts_unconfirmed:
+              "账号操作结果尚未确认，请保留当前表单，核对员工列表后重试原操作。",
+            dataport_accounts_unavailable:
+              "员工账号服务暂不可用，请联系管理员检查。",
+          };
+          const accountMessage =
+            upstream.status >= 500 &&
+            typeof code === "string" &&
+            Object.hasOwn(accountMessages, code)
+              ? accountMessages[code]
+              : undefined;
           return json(upstream.status, {
-            code:
-              payload.error?.code || payload.code || "customer_service_error",
-            message:
-              upstream.status >= 500
+            code,
+            message: accountMessage
+              ? `${accountMessage}（请求编号：${id}）`
+              : upstream.status >= 500
                 ? "客户服务暂不可用，请稍后重试。"
                 : payload.error?.message ||
                   payload.message ||
                   "无权访问此服务。",
             requestId: id,
           });
+        }
         if (path === "/documentation" && payload.data?.schema) {
           payload.data.schema = {
             ...payload.data.schema,

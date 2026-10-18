@@ -163,6 +163,18 @@ test(
           ?.userId,
         created.userId,
       );
+      const resetInput={operation:"reset-password" as const,requestId:randomUUID(),tenantId:input.tenantId,actor:input.actor,userId:created.userId};
+      await assert.rejects(repo.execute({...resetInput,tenantId:randomUUID()}),{code:"managed_account_required"});
+      await assert.rejects(repo.execute({...resetInput,userId:"usr_existing_mx"}),{code:"managed_account_required"});
+      assert.deepEqual(await repo.execute(resetInput),{reset:true});
+      const afterReset=await repo.execute({...resetInput,operation:"initial-password",requestId:randomUUID()});
+      assert.notEqual(afterReset.password,plain.password);
+      assert.equal((await identity.authenticate(input.account,afterReset.password))?.userId,created.userId);
+      assert.equal(await identity.authenticate(input.account,"NewEmployeePassword123!"),undefined);
+      assert.deepEqual(await repo.execute(resetInput),{reset:true});
+      assert.equal((await repo.execute({...resetInput,operation:"initial-password",requestId:randomUUID()})).password,afterReset.password);
+      const savedResetUser=await identity.account(created.userId);assert.ok(savedResetUser?.webSessionsInvalidBefore);
+      assert.ok(!JSON.stringify((await db.query("SELECT data FROM mx_platform_records WHERE environment=$1",[environment]))).includes(afterReset.password));
       const source = {
         issuer: "https://auth.example.test/identity",
         clientId: "harbor",

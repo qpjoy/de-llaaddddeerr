@@ -10,7 +10,7 @@ export const portalPrincipal = Symbol('verified-harbor-principal')
 const reads = new Set(['/session','/me/usage','/documentation','/commerce/products','/payments/return-order'])
 export function harborRoute(method,path,searchParams) {
   const read=method==='GET'&&(reads.has(path)||/^\/commerce\/tenants\/[0-9a-f-]{36}\/messages$/.test(path))
-  const write=method==='POST'&&/^\/commerce\/tenants\/[0-9a-f-]{36}\/messages\/[1-9][0-9]{0,17}\/read$/.test(path)
+  const write=method==='POST'&&/^\/commerce\/tenants\/[0-9a-f-]{36}\/messages\/(?:[1-9][0-9]{0,17}\/read|read-all)$/.test(path)
   if(!read&&!write)throw new AppError(404,'portal_route_unavailable','此客户功能尚未开放。')
   if(write&&searchParams.size)throw new AppError(400,'invalid_query','此操作不接受查询参数。')
   if(path==='/documentation'&&(searchParams.size!==2||searchParams.getAll('tenantId').length!==1||!searchParams.get('tenantId')||searchParams.get('path')!=='/docs/openapi.json'))throw new AppError(404,'not_found','请使用数港接口文档。')
@@ -25,9 +25,14 @@ function configuredPortal({pool,store,settings,token,hubSettings,oidcConfigurati
   const sessions=new SsoStore(pool,settings.sessionKey)
   const verifier=createApplicationSso({settings,store:sessions,oidcConfiguration,ErrorClass:AppError,validateIdentity(value){if(value.mxIdentity.issuer!==hubSettings.legacyIssuer)throw new AppError(401,'invalid_identity','统一身份来源不匹配。')}})
   return {
-    async resolve(request, {catalogOnly=false}={}) {
+    async resolve(request, {catalogOnly=false,localAccounts}={}) {
       if(!secureEqual(request.headers['x-mx-harbor-gateway'],token))throw new AppError(401,'portal_auth_required','客户服务认证失败。')
-      if(catalogOnly)return null
+      const metadata={portalOrigin:settings.origin,portalAudience:hubSettings.audience}
+      if(catalogOnly)return metadata
+      if(request.headers['x-mx-dataport-local-session']) {
+        if(!localAccounts)throw new AppError(401,'portal_session_required','请重新登录。')
+        return localAccounts.principal(request.headers['x-mx-dataport-local-session'],metadata)
+      }
       const accessToken=/^Bearer ([^\s]+)$/.exec(String(request.headers.authorization||''))?.[1],subject=request.headers['x-mx-harbor-subject']
       if(!accessToken||typeof subject!=='string'||subject.length>160)throw new AppError(401,'portal_session_required','请重新登录。')
       const verified=await verifier.verifySession({accessToken,subject,issuer:settings.issuer},true)

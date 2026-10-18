@@ -2,6 +2,7 @@ import { workspaceRoute } from './portal/workspace.mjs'
 import {portalPrincipal, harborRoute} from './portal/harbor.mjs'
 import { DataportStore } from './portal/dataport-store.mjs'
 import { PaymentError } from '@qpjoy/mx-pay'
+import { DataportSupport } from './portal/dataport-support.mjs'
 import { dataportRoute, dataportRouteAllowed, authorizeLegacyPortal } from './portal/dataport-routes.mjs'
 import { IpRiskProduct } from './external-platforms/ip-risk-product.mjs'
 import { CommerceService } from './commerce/service.mjs'
@@ -852,7 +853,7 @@ export function createApp({
   })
 
   const commerce = new CommerceService(store, recharge)
-  const dataport = new DataportStore(store.pool)
+  const dataport = new DataportStore(store.pool, {credentialPepper:service?.apiKeyPepper})
   ipRiskProduct ??= ipRiskChannels ? new IpRiskProduct(ipRiskChannels,commerce) : null
   if (recharge) recharge.commerce = commerce
   const payments = new PaymentService(store)
@@ -1421,11 +1422,34 @@ export function createApp({
           return
         }
         const portalPath=url.pathname.slice('/internal/v1/portal'.length)
-        const dedicated=dataportRouteAllowed(request.method,portalPath)
-        const target=dedicated?null:harborRoute(request.method,portalPath,url.searchParams)
-        let customer=await harborPortal.resolve(request)
         const customerDataport=Object.create(dataport)
         customerDataport.requestId=requestId
+        customerDataport.localAccounts=Object.assign(Object.create(dataport.localAccounts),{dataport:customerDataport})
+        if (portalPath.startsWith('/local/')) {
+          const metadata=await harborPortal.resolve(request,{catalogOnly:true})
+          if(url.search)throw new AppError(400,'invalid_query','此账号操作不接受查询参数。')
+          const token=request.headers['x-mx-dataport-local-session']
+          let value
+          if(portalPath==='/local/login' && request.method==='POST') {
+            value=await customerDataport.localAccounts.login(await readJson(request,2048))
+          } else if (['/local/session','/local/account'].includes(portalPath) && request.method==='GET') {
+            value=await customerDataport.localAccounts.account(token,metadata)
+          } else if (['/local/logout','/local/account'].includes(portalPath) && request.method==='POST') {
+            const principal=await dataport.localAccounts.principal(token,metadata)
+            if(!secureEqual(principal.localCsrf,request.headers['x-mx-csrf']))throw new AppError(403,'sso_csrf','页面会话已变化，请刷新重试。')
+            const body=await readJson(request,4096)
+            value=portalPath==='/local/logout' ? await customerDataport.localAccounts.logout(token) : await customerDataport.localAccounts.account(token,metadata,body)
+          } else throw new AppError(404,'not_found','接口不存在。')
+          sendJson(response,200,{data:value,requestId},{'cache-control':'private, no-store'})
+          return
+        }
+        const dedicated=dataportRouteAllowed(request.method,portalPath)
+        const target=dedicated?null:harborRoute(request.method,portalPath,url.searchParams)
+        let customer=await harborPortal.resolve(request,{localAccounts:dataport.localAccounts})
+        if(customer.kind==='dataport-user') {
+          if(request.method!=='GET' && !secureEqual(customer.localCsrf,request.headers['x-mx-csrf']))throw new AppError(403,'sso_csrf','页面会话已变化，请刷新重试。')
+          if(customer.mustChangePassword && portalPath!=='/session')throw new AppError(403,'password_change_required','请先修改初始密码。')
+        }
         if(store.pool)customer=await customerDataport.enrich(customer,request.headers['x-mx-dataport-session'])
         if(dedicated) {
           try {await dataportRoute({request,response,path:portalPath,searchParams:url.searchParams,principal:customer,dataport:customerDataport,store,commerce,service,product:ipRiskProduct,readJson,sendJson,requestId,audience:customer.portalAudience||launcherAudience})}
@@ -1439,7 +1463,7 @@ export function createApp({
         }
         if(portalPath==='/session') {
           const memberships=customer.memberships.map(m=>m.dataport?.ownerChallengeRequired?{...m,capabilities:[],dataport:{...m.dataport,permissions:[]}}:m)
-          sendJson(response,200,{data:{kind:customer.kind,memberId:customer.memberId,displayName:customer.displayName,platformAdmin:false,scoped:true,tenantIds:customer.tenantIds,capabilities:[],memberships,identityProvider:'mx-launcher',tenantInvitationsEnabled:false,canOpenPersonalAccount:false,publicApiBaseUrl:customer.portalOrigin},requestId},{'cache-control':'private, no-store'})
+          sendJson(response,200,{data:{kind:customer.kind,memberId:customer.memberId,displayName:customer.displayName,platformAdmin:false,scoped:true,tenantIds:customer.tenantIds,capabilities:[],memberships,identityProvider:customer.kind==='dataport-user'?'dataport-local':'mx-launcher',mustChangePassword:customer.mustChangePassword===true,tenantInvitationsEnabled:false,canOpenPersonalAccount:false,publicApiBaseUrl:customer.portalOrigin},requestId},{'cache-control':'private, no-store'})
           return
         }
         request[portalPrincipal]=authorizeLegacyPortal(customer,request.method,portalPath,url.searchParams)
@@ -1612,6 +1636,19 @@ export function createApp({
       let principal = null
       if (isAdminPath) {
         principal = await resolvePrincipal(request)
+      }
+      if (pathname==='/internal/v1/admin/dataport/tickets' || /^\/internal\/v1\/admin\/dataport\/tenants\/[^/]+\/tickets\/[^/]+$/.test(pathname)) {
+        const operationStore=Object.create(dataport);operationStore.requestId=requestId;
+        const support=new DataportSupport(operationStore);
+        support.requireAdmin(principal);
+        let data;
+        if (pathname.endsWith('/dataport/tickets') && request.method==='GET') data=await support.list(principal,searchParams);
+        else {
+          const match=/\/tenants\/([^/]+)\/tickets\/([^/]+)$/.exec(pathname);
+          if (!match || searchParams.size || !['GET','POST'].includes(request.method)) throw new AppError(400,'invalid_ticket_request','工单请求无效。');
+          data=request.method==='GET'?await support.adminDetail(principal,match[1],match[2]):await support.update(principal,match[1],match[2],await readJson(request,32768));
+        }
+        sendJson(response,200,{data,requestId},{'cache-control':'private, no-store'});return;
       }
       if(request.method==='POST'&&pathname==='/internal/v1/admin/dataport/owner-code') {
         if(principal?.kind!=='admin-token')throw new AppError(403,'admin_token_required','此操作仅允许平台管理员执行。')
