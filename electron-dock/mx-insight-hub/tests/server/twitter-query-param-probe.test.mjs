@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
-import { PROBE_CASES, HALF_CASES, ORIGINAL_REQUEST_ID, QUERY_PARAM_REQUEST_ID, CANDIDATE_REQUEST_IDS, runTwitterQueryParamProbe, queryParamAdapter } from '../../server/ops/verify-twitter-query-param.mjs'
+import { PROBE_CASES, HALF_CASES, HALF_RECEIPTS, AND_CASES, ORIGINAL_REQUEST_ID, QUERY_PARAM_REQUEST_ID, CANDIDATE_REQUEST_IDS, runTwitterQueryParamProbe, queryParamAdapter } from '../../server/ops/verify-twitter-query-param.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
@@ -41,6 +41,13 @@ async function fixture({ grant = true, enabled = true, outcome = 'success' } = {
     acquisition_request: { ...structuredClone(original.acquisition_request),
       path: id === QUERY_PARAM_REQUEST_ID ? '/api/v1/night-all/search/raw' : '/api/v1/data/search', body: { platform: 'twitter', query: PROBE_CASES.candidate.query, pageSize: 20 } } }))
   const knownCalls = knownIds.map(id => ({ ...structuredClone(originalCall), id: id === QUERY_PARAM_REQUEST_ID ? '38e539e4-eeb8-497a-bbee-b5f6c681a2bf' : randomUUID() }))
+  const knownHalves = HALF_RECEIPTS.map(receipt => ({ ...structuredClone(original), id: receipt.requestId,
+    response_status: receipt.outcome === 'success' ? 200 : 502,
+    response_body: receipt.outcome === 'success' ? { data: { items: [] } } : structuredClone(original.response_body),
+    acquisition_request: { method: 'POST', path: '/api/v1/night-all/search/raw',
+      body: { platform: 'twitter', query: HALF_CASES[receipt.caseName].query, pageSize: 20 } } }))
+  const halfCalls = HALF_RECEIPTS.map(receipt => ({ ...structuredClone(originalCall), id: receipt.callId,
+    outcome: receipt.outcome === 'success' ? 'succeeded' : 'rejected', http_status: receipt.outcome === 'success' ? 200 : 400 }))
   const controls = new MemoryExternalPlatformControlStore(), config = { ...rapidApiConfig(), configured: true, timeoutMs: 50 }
   if (enabled) await controls.updatePolicy('rapidapi', 'social.content.search', { expectedRevision: 1, desiredState: 'active', reason: 'Offline only',
     priceBook: { currency: 'USD', pricingAsOf: '2026-10-18T00:00:00Z', monthlyBudgetMinor: 100000,
@@ -50,6 +57,8 @@ async function fixture({ grant = true, enabled = true, outcome = 'success' } = {
   const sent = [], sql = []
   const query = async (text, values) => {
     sql.push(text)
+    if (text.includes('twitter-query-param:known-half-calls')) return { rows: [structuredClone(halfCalls[HALF_RECEIPTS.findIndex(row => row.requestId === values[0])])] }
+    if (text.includes('twitter-query-param:known-half')) return { rows: knownHalves.filter(row => row.id === values[0]).map(row => structuredClone(row)) }
     if (text.includes('twitter-query-param:known-candidate-calls')) return { rows: [structuredClone(knownCalls[knownIds.indexOf(values[0])])] }
     if (text.includes('twitter-query-param:known-candidate')) return { rows: knownCandidates.filter(row => row.id === values[0]).map(row => structuredClone(row)) }
     if (text.includes('twitter-query-param:original-calls')) return { rows: [structuredClone(originalCall)] }
@@ -86,7 +95,7 @@ async function fixture({ grant = true, enabled = true, outcome = 'success' } = {
       platformStore: platform, adapter, config, providerKey: 'rapidapi', apiKeyPepper: PEPPER,
       operationControlStore: controls, reservationLeaseMs: 60000, logger: { warn() {} } }) }
   }
-  return { pool, createGatewayRuntime, original, originalCall, knownCandidates, knownCalls, context, usage, platform, sent, sql,
+  return { pool, createGatewayRuntime, original, originalCall, knownCandidates, knownCalls, knownHalves, halfCalls, context, usage, platform, sent, sql,
     creations: () => runtimeCreations, run: options => runTwitterQueryParamProbe({ pool, createGatewayRuntime, ...options }) }
 }
 
@@ -297,6 +306,168 @@ test('halves require the exact saved query-param refusal and retain standard v2 
   assert.equal(result.reports.length, 1)
 })
 
+test('explicit AND retains every atom and prior key, and dry-run validates both fixed half receipts without runtime creation', async () => {
+  assert.equal(HALF_CASES.chinese_half.idempotencyKey, 'ops-twitter-half-ba496ab3ee690016e7b56b830d8d68dc359838fc291fcefd')
+  assert.equal(HALF_CASES.english_half.idempotencyKey, 'ops-twitter-half-940ac241b29f66f738cecc8169f57ab282ed704ed3fd75d7')
+  assert.equal(AND_CASES.english_and.query, HALF_CASES.english_half.query)
+  assert.equal(AND_CASES.english_and.providerQuery, '("diplomacy" OR "foreign policy" OR "diplomatic relations") AND ("statement" OR "response" OR "clarification" OR "update") -ad -marketing -repost')
+  assert.equal(AND_CASES.candidate_and.query, PROBE_CASES.candidate.query)
+  assert.equal(AND_CASES.candidate_and.providerQuery, '("外交" OR "外交部" OR "外交政策" OR "外交关系" OR "外交动态" OR "外交表态" OR "外交事件" OR "外交议题" OR "外交回应" OR "外交澄清") AND ("diplomacy" OR "foreign policy" OR "diplomatic relations") AND ("statement" OR "response" OR "clarification" OR "update") -"广告" -"营销" -"重复搬运" -ad -marketing -repost')
+  const f = await fixture(), report = await f.run({ caseName: 'english-and' })
+  assert.equal(report.mode, 'read_only')
+  assert.equal(report.reports.length, 2)
+  assert.equal(report.adapterCalls, 0)
+  assert.equal(f.creations(), 0)
+  assert.equal(f.sent.length, 0)
+  assert.equal(f.usage.requests.size, 0)
+  assert.ok(report.reports.every(row => row.knownHalfOutcomes.length === 2))
+  assert.deepEqual(report.reports.map(row => row.providerQueryLength), [145, 265])
+  assert.ok(report.reports.every(row => /not historical outgoing URL/u.test(row.providerQueryEvidence)
+    && row.preparedProviderQuery === undefined))
+  assert.match(report.deliveryScope, /no Delta mutation or cold-start delivery/u)
+})
+
+test('explicit AND reaches the actual wire and full query follows only the saved English success, with replay of both receipts', async () => {
+  const f = await fixture(), report = await f.run({ caseName: 'english-and', execute: true })
+  assert.equal(report.errorCode, undefined)
+  assert.equal(report.adapterCalls, 2)
+  assert.deepEqual(report.reports.map(row => row.savedOutcomeVerified), ['success', 'success'])
+  for (const [index, name] of ['english_and', 'candidate_and'].entries()) {
+    const sent = f.sent[index], selected = AND_CASES[name]
+    assert.equal(decodeURIComponent(sent.pathname.slice('/search/'.length)), selected.providerQuery)
+    assert.equal((decodeURIComponent(sent.pathname).match(/ AND /gu) || []).length, index + 1)
+    assert.deepEqual(Object.fromEntries(sent.searchParams), { count: '20', category: 'Top', includeTimestamp: 'false' })
+    const saved = [...f.usage.requests.values()].find(row => row.id === report.reports[index].requestId)
+    assert.equal(saved.acquisitionRequest.body.query, selected.query)
+    assert.equal(report.reports[index].providerCalls.length, 1)
+    assert.equal(report.reports[index].preparedProviderQuery.querySha256, report.reports[index].providerQuerySha256)
+  }
+  assert.equal(f.platform.calls.size, 2)
+  assert.equal(f.platform.restrictedResponseArchives.size, 2)
+  const again = await f.run({ caseName: 'english-and', execute: true })
+  assert.equal(again.adapterCalls, 0)
+  assert.deepEqual(again.reports.map(row => row.savedOutcomeVerified), ['success', 'success'])
+  assert.equal(f.sent.length, 2)
+  assert.ok(again.reports.every(row => row.preparedProviderQuery === undefined))
+  assert.doesNotMatch(JSON.stringify(report), new RegExp(`${SECRET}|${POST}|do-not-follow`))
+})
+
+test('a previous native half refusal is not replayed as an explicit-AND result despite sharing the raw fingerprint', async () => {
+  const f = await fixture({ outcome: name => name === 'english_half' ? 'rejected' : 'success' })
+  const before = await f.run({ caseName: 'halves', execute: true })
+  assert.equal(before.reports[1].savedOutcomeVerified, 'rejected400')
+  const oldEnglish = [...f.usage.requests.values()].find(row => row.id === before.reports[1].requestId)
+  const after = await f.run({ caseName: 'english-and', execute: true })
+  const newEnglish = [...f.usage.requests.values()].find(row => row.id === after.reports[0].requestId)
+  assert.equal(newEnglish.fingerprint, oldEnglish.fingerprint)
+  assert.notEqual(newEnglish.id, oldEnglish.id)
+  assert.notEqual(newEnglish.idempotencyKey, oldEnglish.idempotencyKey)
+  assert.equal(after.adapterCalls, 2)
+  assert.deepEqual(after.reports.map(row => row.savedOutcomeVerified), ['success', 'success'])
+  assert.equal(f.sent.length, 4)
+  assert.equal(decodeURIComponent(f.sent[2].pathname.slice('/search/'.length)), AND_CASES.english_and.providerQuery)
+  assert.equal(decodeURIComponent(f.sent[3].pathname.slice('/search/'.length)), AND_CASES.candidate_and.providerQuery)
+})
+
+test('English explicit-AND rejection, unknown or other failure never reaches the full query, including later invocations', async () => {
+  for (const outcome of ['rejected', 'unknown', 'other-rejection']) {
+    const f = await fixture({ outcome }), report = await f.run({ caseName: 'english-and', execute: true })
+    assert.equal(report.adapterCalls, 1)
+    assert.equal(report.reports.length, 1)
+    assert.equal(report.stoppedAfter, 'english_and')
+    assert.ok(report.errorCode)
+    const again = await f.run({ caseName: 'english-and', execute: true })
+    assert.equal(again.adapterCalls, 0)
+    assert.equal(again.reports.length, 1)
+    assert.equal(again.stoppedAfter, 'english_and')
+    assert.equal(f.sent.length, 1)
+  }
+  const f = await fixture({ outcome: name => name === 'candidate_and' ? 'rejected' : 'success' })
+  const report = await f.run({ caseName: 'english-and', execute: true })
+  assert.equal(report.adapterCalls, 2)
+  assert.equal(report.stoppedAfter, 'candidate_and')
+  assert.equal((await f.run({ caseName: 'english-and', execute: true })).adapterCalls, 0)
+  assert.equal(f.sent.length, 2)
+})
+
+test('both selected half receipts require exact owned input and call identity before explicit-AND dispatch', async () => {
+  for (const index of [0, 1]) for (const mutate of [
+    f => { f.knownHalves[index].status = 'unknown' },
+    f => { f.knownHalves[index].api_key_id = randomUUID() },
+    f => { f.knownHalves[index].acquisition_request.body.query = 'different' },
+    f => { f.knownHalves[index].acquisition_request.body.cursor = 'old-page' },
+    f => { f.knownHalves[index].acquisition_request.body.pageSize = 10 },
+    f => { f.knownHalves[index].acquisition_request.path = '/api/v1/data/search' },
+    f => { f.halfCalls[index].id = randomUUID() },
+    f => { f.halfCalls[index].outcome = 'unknown' },
+    f => { f.halfCalls[index].api_key_id = randomUUID() },
+    f => { f.knownHalves.splice(index, 1) },
+  ]) {
+    const f = await fixture(); mutate(f)
+    const report = await f.run({ caseName: 'english-and', execute: true })
+    assert.equal(report.errorCode, 'known_half_outcome_unverified')
+    assert.equal(report.stoppedAfter, 'english_and')
+    assert.equal(f.creations(), 0)
+    assert.equal(f.sent.length, 0)
+  }
+})
+
+test('full explicit-AND dispatch requires a saved English sole owned success, not just a returned 200', async () => {
+  for (const corrupt of [
+    f => { [...f.usage.requests.values()][0].status = 'unknown' },
+    f => { [...f.usage.requests.values()][0].status = 'released' },
+    f => { [...f.usage.requests.values()][0].acquisitionRequest.body.query = 'different' },
+    f => { [...f.platform.calls.values()][0].outcome = 'unknown' },
+    f => { [...f.platform.calls.values()][0].apiKeyId = randomUUID() },
+    f => { f.platform.calls.set(randomUUID(), { ...[...f.platform.calls.values()][0], id: randomUUID() }) },
+    f => { f.platform.calls.clear() },
+  ]) {
+    const f = await fixture()
+    const create = f.createGatewayRuntime
+    const createGatewayRuntime = async (...args) => {
+      const runtime = await create(...args), searchRaw = runtime.gateway.searchRaw.bind(runtime.gateway)
+      runtime.gateway.searchRaw = async (...queryArgs) => { const result = await searchRaw(...queryArgs); corrupt(f); return result }
+      return runtime
+    }
+    const report = await runTwitterQueryParamProbe({ pool: f.pool, createGatewayRuntime, caseName: 'english-and', execute: true })
+    assert.equal(report.reports[0].httpStatus, 200)
+    assert.equal(report.reports[0].savedOutcomeVerified, null)
+    assert.equal(report.adapterCalls, 1)
+    assert.equal(report.stoppedAfter, 'english_and')
+    const again = await f.run({ caseName: 'english-and', execute: true })
+    assert.equal(again.adapterCalls, 0)
+    assert.equal(again.reports.length, 1)
+    assert.equal(f.sent.length, 1)
+  }
+})
+
+test('explicit-AND adaptation retains the native query guard and cannot bypass its running or unknown v2 request', async () => {
+  for (const state of ['running', 'unknown']) {
+    const f = await fixture(), protocol = new SearchProtocolStore(f.usage)
+    const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'original-english-v2-identity', body: {
+      platform: 'twitter', query: HALF_CASES.english_half.query, pageSize: 20, type: 'stable',
+      timeWindow: { from: '2026-10-17T00:00:00.000Z', to: '2026-10-18T00:00:00.000Z', timezone: 'Asia/Shanghai', boundary: '[from,to)' },
+    } })
+    if (state === 'unknown') await protocol.finish(lease.input, { state, usageRequestId: randomUUID() })
+    const report = await f.run({ caseName: 'english-and', execute: true })
+    assert.equal(report.errorCode, state === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress')
+    assert.equal(report.adapterCalls, 0)
+    assert.equal(report.reports.length, 1)
+    assert.equal(f.sent.length, 0)
+  }
+})
+
+test('explicit-AND wire override rejects mismatched normal input, cursor, endpoint or parameters before dispatch', async () => {
+  for (const change of [request => { request.query = 'different' }, request => { request.endpointPath = '/search/different' },
+    request => { request.providerCursor = 'cursor' }, request => { request.page = 2 },
+    request => { request.upstreamQuery.count = 10 }, request => { request.upstreamQuery.category = 'Top' }]) {
+    const adapter = queryParamAdapter({ execute: async () => assert.fail('must not dispatch') }, 'english_and')
+    const request = normalizeHubSocialRequest('search', { platform: 'twitter', query: AND_CASES.english_and.query, count: 20, sort: 'latest' })
+    change(request)
+    await assert.rejects(adapter.execute(request), /probe_request_mismatch/u)
+  }
+})
+
 test('CLI requires an explicit reviewed case before importing database modules or reading credentials', () => {
   const file = fileURLToPath(new URL('../../server/ops/verify-twitter-query-param.mjs', import.meta.url))
   for (const args of [['--execute'], ['--case=arbitrary', '--execute'], ['--case=control', '--case=candidate']]) {
@@ -314,7 +485,7 @@ test('stdin import is pure while the actual stdin script remains executable', ()
   const imported = spawnSync(process.execPath, ['--input-type=module', '-'], { encoding: 'utf8', env,
     input: `const m = await import(${JSON.stringify(url.href)}); console.log(m.REVISION);` })
   assert.equal(imported.status, 0)
-  assert.equal(imported.stdout.trim(), 'twitter-query-param-check.v2')
+  assert.equal(imported.stdout.trim(), 'twitter-query-param-check.v3')
   assert.equal(imported.stderr, '')
   const entry = spawnSync(process.execPath, ['--input-type=module', '-', '--execute'], { encoding: 'utf8', env,
     input: readFileSync(url, 'utf8') })
