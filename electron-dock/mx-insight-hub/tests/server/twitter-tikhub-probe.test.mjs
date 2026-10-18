@@ -21,8 +21,16 @@ const CURSOR = 'private-opaque-cursor-do-not-follow'
 const PEPPER = 'offline-tikhub-probe-pepper-long-enough'
 const SHA = value => createHash('sha256').update(value).digest('hex')
 
+test('diagnostic v2 retains the issued v1 acquisition and protocol identities', () => {
+  assert.equal(REVISION, 'twitter-tikhub-check.v2')
+  const originalKey = 'ops-twitter-tikhub-fd667b275888b95fa712ae694c024f890084a69881d47dc2'
+  assert.equal(IDEMPOTENCY_KEY, originalKey)
+  assert.deepEqual(PROTOCOL_KEYS, { original: `${originalKey}-original-guard`, native: `${originalKey}-native-guard` })
+})
+
 async function fixture({ grant = true, platformGrant = true, credential = true, enabled = true, outcome = 'success',
-  postDispatchLookupFailure = false, protocolFinishFailure = false } = {}) {
+  postDispatchLookupFailure = false, protocolFinishFailure = false,
+  admissionPolicyRevision = 'offline-admission-policy.v2' } = {}) {
   const endpoint = nativeForwardingEndpoint(NATIVE_KEY)
   const usage = new MemoryStore(), service = new HubService({ store: usage, adapter: {}, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Offline TikHub probe' })
@@ -57,7 +65,7 @@ async function fixture({ grant = true, platformGrant = true, credential = true, 
   { runtime: { config, credentialConfigured: true } })
   const credentials = new MemoryExternalPlatformCredentialStore({ providerKey: 'tikhub', environmentConfigured: credential })
   const platform = new MemoryExternalPlatformStore({ usageStore: usage, providerKey: 'tikhub', authorizationPlatform: endpoint.authorizationPlatform })
-  const sent = [], sql = [], alteredRows = { existing: null, calls: null }
+  const sent = [], sql = [], blockerRows = [], alteredRows = { existing: null, calls: null }
   const usageRow = row => ({ id: row.id, tenant_id: row.tenantId, consumer_id: row.consumerId, api_key_id: row.apiKeyId,
     platform: row.platform, status: row.status, response_status: row.responseStatus, response_body: structuredClone(row.responseBody),
     acquisition_request: structuredClone(row.acquisitionRequest), idempotency_key: row.idempotencyKey, fingerprint: row.fingerprint })
@@ -78,6 +86,12 @@ async function fixture({ grant = true, platformGrant = true, credential = true, 
     }
     if (text.includes('twitter-tikhub:probe-calls')) return { rows: alteredRows.calls ?? [...platform.calls.values()]
       .filter(row => row.usageRequestId === values[0]).map(callRow) }
+    if (text.includes('twitter-tikhub:blocker')) {
+      assert.match(text, /WHERE id=\$1 AND tenant_id=\$2 AND consumer_id=\$3 AND api_key_id=\$4 LIMIT 1/u)
+      assert.deepEqual(values.slice(1), [tenant.id, consumer.id, context.apiKey.id])
+      return { rows: blockerRows.filter(row => row.id === values[0] && row.tenant_id === values[1]
+        && row.consumer_id === values[2] && row.api_key_id === values[3]).map(row => structuredClone(row)) }
+    }
     assert.match(text, /^(BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY|ROLLBACK|SET LOCAL statement_timeout)/u)
     return { rows: [] }
   }
@@ -87,7 +101,7 @@ async function fixture({ grant = true, platformGrant = true, credential = true, 
   let runtimeCreations = 0, gatewayCreations = 0
   const createRuntime = async () => {
     runtimeCreations++
-    return { store: usage, protocol,
+    return { store: usage, protocol, admissionPolicyRevision,
       inspectReadiness: async () => {
         const current = usage.apiKeys.get(context.apiKey.id), liveConsumer = usage.consumers.get(consumer.id), liveTenant = usage.tenants.get(tenant.id)
         return inspectTikHubReadiness({ owner: { active: current.status === 'active' && liveConsumer.status === 'active' && liveTenant.status === 'active',
@@ -110,7 +124,7 @@ async function fixture({ grant = true, platformGrant = true, credential = true, 
           providerKey: 'tikhub', apiKeyPepper: PEPPER, operationControlStore: control, reservationLeaseMs: 150000, logger: { warn() {} } })
       } }
   }
-  return { original, originalCall, proxy, proxyCall, usage, platform, control, credentials, config, context, endpoint, key, sent, sql, alteredRows,
+  return { original, originalCall, proxy, proxyCall, usage, platform, control, credentials, config, context, endpoint, key, sent, sql, blockerRows, protocol, alteredRows,
     creations: () => ({ runtimeCreations, gatewayCreations }), run: options => runTwitterTikHubProbe({ pool, createRuntime, ...options }) }
 }
 
@@ -121,6 +135,7 @@ test('read-only readiness uses metadata and reviewed controls without credential
   const result = await f.run()
   assert.equal(result.diagnosticRevision, REVISION)
   assert.equal(result.mode, 'read_only')
+  assert.equal(result.admissionPolicyRevision, 'offline-admission-policy.v2')
   assert.equal(result.adapterCalls, 0)
   assert.equal(result.readiness.ready, true)
   assert.equal(f.creations().gatewayCreations, 0)
@@ -134,6 +149,7 @@ test('real TikHub native gateway sends every query atom exactly once without cur
   const f = await fixture(), before = structuredClone([f.original, f.proxy])
   const result = await f.run({ execute: true })
   assert.equal(result.httpStatus, 200, JSON.stringify(result))
+  assert.equal(result.stage, 'native_dispatch')
   assert.equal(result.adapterCalls, 1)
   assert.equal(result.savedOutcomeVerified, 'native_success')
   assert.equal(result.deliveryEstablished, false)
@@ -208,17 +224,102 @@ test('native HTTP 200 with a business rejection does not establish successful al
 test('unresolved standard-search identities block both original and native spellings before supplier dispatch', async () => {
   for (const query of [ORIGINAL_QUERY, QUERY]) for (const state of ['running', 'unknown']) {
     const f = await fixture(), protocol = new SearchProtocolStore(f.usage)
+    const blockerId = randomUUID()
+    f.blockerRows.push({ ...structuredClone(f.original), id: blockerId, status: state === 'unknown' ? 'unknown' : 'reserved',
+      acquisition_request: { method: 'POST', path: '/api/v1/data/search', body: { platform: 'twitter', query } },
+      reserved_at: '2026-10-17T00:00:00.000Z', completed_at: '2026-10-17T00:00:01.000Z' })
     const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'existing-v2-search-page', body: {
       platform: 'twitter', query, pageSize: 20, type: 'stable',
       timeWindow: { from: '2026-10-17T00:00:00.000Z', to: '2026-10-18T00:00:00.000Z', timezone: 'Asia/Shanghai', boundary: '[from,to)' },
     } })
-    if (state === 'unknown') await protocol.finish(lease.input, { state, usageRequestId: randomUUID() })
+    if (state === 'unknown') await protocol.finish(lease.input, { state, usageRequestId: blockerId })
     const result = await f.run({ execute: true })
     assert.equal(result.errorCode, 'search_admission_blocked', JSON.stringify(result))
+    assert.equal(result.admissionPolicyRevision, 'offline-admission-policy.v2')
+    assert.equal(result.stage, query === ORIGINAL_QUERY ? 'guard_original' : 'guard_native')
+    assert.equal(result.requestId, null)
+    assert.equal(result.blockingRequestId, state === 'unknown' ? blockerId : null)
+    assert.deepEqual(result.admission, { dispatchState: 'not_started', retrySameRequest: true, retryAfterSeconds: 300 })
+    assert.equal(result.automaticRetryAllowed, false)
+    if (state === 'unknown') assert.deepEqual(result.blockingRequest, {
+      state: 'owned_saved_request', requestId: blockerId, status: 'unknown', platform: 'twitter', pathKind: 'standard_v1',
+      queryPresent: true, queryEqualsOriginal: query === ORIGINAL_QUERY, queryEqualsNative: query === QUERY,
+      reservedAt: '2026-10-17T00:00:00.000Z', completedAt: '2026-10-17T00:00:01.000Z',
+    })
+    const first = await protocol.binding(f.context, PROTOCOL_KEYS.original)
+    assert.equal(query === ORIGINAL_QUERY ? first : first.state, query === ORIGINAL_QUERY ? null : 'retryable')
+    assert.equal(await protocol.binding(f.context, PROTOCOL_KEYS.native), null)
     assert.equal(result.adapterCalls, 0)
     assert.equal(f.sent.length, 0)
     assert.equal(f.usage.requests.size, 0)
   }
+})
+
+test('an owned diagnostic guard reports its blocker separately from a nonexistent acquisition', async () => {
+  const f = await fixture(), blockerId = randomUUID()
+  const binding = await f.protocol.begin(f.context, { version: 2, idempotencyKey: PROTOCOL_KEYS.original,
+    body: { platform: 'twitter', query: ORIGINAL_QUERY, pageSize: 20, type: 'stable' } })
+  await f.protocol.finish(binding.input, { state: 'unknown', usageRequestId: blockerId })
+  const result = await f.run({ execute: true })
+  assert.equal(result.errorCode, 'request_outcome_unknown')
+  assert.equal(result.stage, 'guard_original')
+  assert.equal(result.requestId, null)
+  assert.equal(result.blockingRequestId, blockerId)
+  assert.deepEqual(result.blockingRequest, { state: 'not_found_or_unavailable' })
+  assert.deepEqual(result.admission, { dispatchState: 'not_started_by_this_probe', retrySameRequest: false, retryAfterSeconds: null })
+  assert.equal(result.adapterCalls, 0)
+  assert.equal(f.sent.length, 0)
+  assert.equal((await f.protocol.binding(f.context, PROTOCOL_KEYS.original)).state, 'unknown')
+  assert.equal(f.usage.requests.size, 0)
+})
+
+test('blocker metadata lookup is scoped to the original owner and never exposes another caller query or receipt', async () => {
+  const f = await fixture(), blockerId = randomUUID()
+  f.blockerRows.push({ ...structuredClone(f.original), id: blockerId, tenant_id: randomUUID(), status: 'unknown',
+    acquisition_request: { path: '/private/foreign-owner-path', body: { query: 'foreign-private-query-do-not-print', token: SECRET } } })
+  const binding = await f.protocol.begin(f.context, { version: 2, idempotencyKey: 'another-unknown-page',
+    body: { platform: 'twitter', query: ORIGINAL_QUERY, pageSize: 20, type: 'stable' } })
+  await f.protocol.finish(binding.input, { state: 'unknown', usageRequestId: blockerId })
+  const result = await f.run({ execute: true })
+  assert.equal(result.blockingRequestId, blockerId)
+  assert.deepEqual(result.blockingRequest, { state: 'not_found_or_unavailable' })
+  assert.equal(result.requestId, null)
+  assert.equal(result.adapterCalls, 0)
+  assert.equal(f.sent.length, 0)
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(`foreign-private-query|foreign-owner-path|${SECRET}`))
+})
+
+test('native blocker metadata reads keyword only for the fixed TikHub path and never prints its query', async () => {
+  for (const { path, body, expected } of [
+    { path: NATIVE_PATH, body: { params: { keyword: QUERY }, query: 'ignored-top-level-query' },
+      expected: { pathKind: 'tikhub_native', queryPresent: true, queryEqualsOriginal: false, queryEqualsNative: true } },
+    { path: '/api/v1/data/search', body: { query: ORIGINAL_QUERY, params: { keyword: QUERY } },
+      expected: { pathKind: 'standard_v1', queryPresent: true, queryEqualsOriginal: true, queryEqualsNative: false } },
+    { path: '/api/v1/data/native/other', body: { params: { keyword: QUERY } },
+      expected: { pathKind: 'other', queryPresent: false, queryEqualsOriginal: null, queryEqualsNative: null } },
+  ]) {
+    const f = await fixture(), blockerId = randomUUID()
+    f.blockerRows.push({ ...structuredClone(f.original), id: blockerId, status: 'unknown',
+      platform: path === NATIVE_PATH ? 'social' : 'twitter', acquisition_request: { method: 'POST', path, body } })
+    const binding = await f.protocol.begin(f.context, { version: 2, idempotencyKey: 'native-unknown-blocker',
+      body: { platform: 'twitter', query: ORIGINAL_QUERY, pageSize: 20, type: 'stable' } })
+    await f.protocol.finish(binding.input, { state: 'unknown', usageRequestId: blockerId })
+    const result = await f.run({ execute: true })
+    for (const [key, value] of Object.entries(expected)) assert.equal(result.blockingRequest[key], value)
+    assert.equal(result.blockingRequest.state, 'owned_saved_request')
+    assert.equal(result.requestId, null)
+    assert.equal(result.blockingRequestId, blockerId)
+    assert.equal(result.adapterCalls, 0)
+    assert.equal(f.sent.length, 0)
+    assert.equal(JSON.stringify(result).includes(JSON.stringify(QUERY)), false)
+    assert.doesNotMatch(JSON.stringify(result), /ignored-top-level-query/u)
+  }
+})
+
+test('older installed admission code is reported explicitly instead of claiming the new policy is deployed', async () => {
+  const older = await fixture({ admissionPolicyRevision: null })
+  assert.equal((await older.run()).admissionPolicyRevision, 'not_reported_by_installed_code')
+  assert.equal(older.sent.length, 0)
 })
 
 test('original and forced-proxy evidence must retain exact owned definitive rejections', async () => {

@@ -5,6 +5,7 @@ import { DATA_SEARCH_V1_PATH, DATA_SEARCH_V2_PATH, dataSearchQueryHash } from '.
 
 const memory = new WeakMap()
 const LEASE_MS = 300000
+export const SEARCH_ADMISSION_POLICY_REVISION = 'known-query.v1'
 // Match String.prototype.trim used by the actual public query normalizers.
 // PostgreSQL btrim's default removes only ASCII spaces, allowing a historical
 // newline/NBSP spelling of the same dispatched query to evade the v2 guard.
@@ -26,18 +27,6 @@ const rowRecord = row => row && ({ consumerId: row.consumer_id, idempotencyKey: 
   apiKeyId: row.api_key_id, platform: row.platform, queryHash: row.query_hash, fingerprint: row.fingerprint,
   body: row.request_body, state: row.state, ownerId: row.owner_id, leaseExpiresAt: row.lease_expires_at,
   result: row.result, error: row.error, usageRequestId: row.usage_request_id })
-
-// Pre-snapshot raw calls retain their operation in the usage meter and the
-// connector ledger. Recover only that identity, never their query or outcome.
-function verifiedLegacyRawRequest(store, request) {
-  if (request.status !== 'unknown' || request.acquisitionRequest != null
-    || request.capability != null && request.capability !== '' || request.billingMeterKey !== 'raw'
-    || typeof request.fingerprint !== 'string' || !/^[0-9a-f]{64}$/u.test(request.fingerprint)) return false
-  const calls = [...(store.connectorCalls?.values() || [])].filter(call => call.requestId === request.id)
-  return calls.length === 1 && calls[0].operation === 'raw' && calls[0].outcome === 'unknown'
-    && calls[0].consumerId === request.consumerId && calls[0].platform === request.platform
-    && calls[0].fingerprint === request.fingerprint
-}
 
 function memoryState(store) {
   if (!memory.has(store)) memory.set(store, { bindings: new Map(), leases: new Map(), tail: Promise.resolve() })
@@ -82,18 +71,22 @@ export class SearchProtocolStore {
       const keyLease = [...state.leases.values()].find(lease => lease.consumerId === input.consumerId
         && lease.idempotencyKey === idempotencyKey && (version === 2 || lease.version === 2))
       if (keyLease) throw blocked(Date.parse(keyLease.leaseExpiresAt) <= Date.now() ? 'request_outcome_unknown' : 'request_in_progress')
-      if (version === 2 && !binding && original) throw conflict()
       const keyOwned = Boolean(binding || original || this.usage.requestsByScope?.has(key)
         || [...this.usage.requests.values()].some(row => row.consumerId === input.consumerId && row.idempotencyKey === idempotencyKey))
+      if (version === 2 && !binding && keyOwned) throw conflict()
       const unknown = [...state.bindings.values()].find(row => sameScope(row, input) &&
         (row.state === 'unknown' || row.state === 'running' && Date.parse(row.leaseExpiresAt) <= Date.now()))
       if (unknown) throw admissionBlocked(version, keyOwned, 'request_outcome_unknown', unknown.usageRequestId)
       if (version === 2) {
+        // A legacy receipt can block this query only when its saved identity
+        // establishes the same standard search. Missing snapshots do not turn
+        // one unresolved request into a platform-wide ban; its own key remains
+        // protected above and no historical outcome is changed here.
         const usages = [...this.usage.requests.values()].filter(row => row.tenantId === input.tenantId && row.consumerId === input.consumerId
           && row.apiKeyId === input.apiKeyId && row.platform === input.platform
-          && ((!row.acquisitionRequest?.path && !verifiedLegacyRawRequest(this.usage, row)) || row.acquisitionRequest?.path === DATA_SEARCH_V1_PATH
-            && (typeof row.acquisitionRequest?.body?.query !== 'string' || !row.acquisitionRequest.body.query.trim()
-              || row.acquisitionRequest.body.query.trim() === body.query.trim())))
+          && row.acquisitionRequest?.path === DATA_SEARCH_V1_PATH
+          && typeof row.acquisitionRequest?.body?.query === 'string' && row.acquisitionRequest.body.query.trim()
+          && row.acquisitionRequest.body.query.trim() === body.query.trim())
         const unresolved = usages.find(row => row.status === 'unknown') || usages.find(row => row.status === 'reserved')
         if (unresolved) throw admissionBlocked(version, keyOwned, unresolved.status === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', unresolved.id)
       }
@@ -124,16 +117,14 @@ export class SearchProtocolStore {
       if (keyLease) throw blocked(Date.parse(keyLease.expires_at) <= Date.now() ? 'request_outcome_unknown' : 'request_in_progress')
       const args = [input.tenantId, input.consumerId, input.apiKeyId, input.platform, input.queryHash]
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`search-protocol-query:${args.join(':')}`])
-      if (version === 2 && !binding && original) throw conflict()
-      const otherRequestBlocked = async (code, requestId) => {
-        // Old rows can lack a current idempotency binding (and vice versa).
-        // Missing joined data is not evidence that this key was never owned.
-        const keyOwned = binding || original || version === 2 && (await client.query(`SELECT
-          EXISTS(SELECT 1 FROM usage_requests WHERE consumer_id=$1 AND idempotency_key=$2)
-          OR EXISTS(SELECT 1 FROM usage_idempotency_bindings WHERE consumer_id=$1 AND idempotency_key=$2) AS owned`,
-        [input.consumerId, idempotencyKey])).rows[0]?.owned !== false
-        return admissionBlocked(version, Boolean(keyOwned), code, requestId)
-      }
+      // Old rows can lack a current idempotency binding (and vice versa).
+      // Key ownership remains protected even when no other query blocks entry.
+      const keyOwned = Boolean(binding || original || version === 2 && (await client.query(`SELECT
+        EXISTS(SELECT 1 FROM usage_requests WHERE consumer_id=$1 AND idempotency_key=$2)
+        OR EXISTS(SELECT 1 FROM usage_idempotency_bindings WHERE consumer_id=$1 AND idempotency_key=$2) AS owned`,
+      [input.consumerId, idempotencyKey])).rows[0]?.owned !== false)
+      if (version === 2 && !binding && keyOwned) throw conflict()
+      const otherRequestBlocked = (code, requestId) => admissionBlocked(version, keyOwned, code, requestId)
       const unknown = (await client.query(`SELECT usage_request_id FROM control.data_search_protocol_bindings
         WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3 AND platform=$4 AND query_hash=$5
         AND (state='unknown' OR (state='running' AND lease_expires_at<=now())) LIMIT 1`, args)).rows[0]
@@ -141,18 +132,10 @@ export class SearchProtocolStore {
       if (version === 2) {
         const unresolved = (await client.query(`SELECT request.id,request.status FROM usage_requests request
           WHERE request.tenant_id=$1 AND request.consumer_id=$2 AND request.api_key_id=$3 AND request.platform=$4
-          AND ((request.acquisition_request->>'path' IS NULL AND NOT COALESCE(
-            request.status='unknown' AND request.acquisition_request IS NULL
-            AND (request.capability IS NULL OR request.capability='') AND request.billing_meter_key='raw'
-            AND request.fingerprint ~ '^[0-9a-f]{64}$'
-            AND EXISTS (SELECT 1 FROM serving.connector_calls call WHERE call.usage_request_id=request.id
-              AND call.consumer_id=request.consumer_id AND call.platform=request.platform
-              AND call.request_fingerprint=request.fingerprint AND call.operation='raw' AND call.outcome='unknown'
-              AND NOT EXISTS (SELECT 1 FROM serving.connector_calls other
-                WHERE other.usage_request_id=request.id AND other.id<>call.id)), false))
-            OR (request.acquisition_request->>'path'=$5
-              AND (jsonb_typeof(request.acquisition_request->'body'->'query') IS DISTINCT FROM 'string'
-                OR btrim(request.acquisition_request->'body'->>'query',$7) IN ('',$6))))
+          AND request.acquisition_request->>'path'=$5
+          AND jsonb_typeof(request.acquisition_request->'body'->'query')='string'
+          AND btrim(request.acquisition_request->'body'->>'query',$7)<>''
+          AND btrim(request.acquisition_request->'body'->>'query',$7)=$6
           AND request.status IN ('unknown','reserved') ORDER BY CASE WHEN request.status='unknown' THEN 0 ELSE 1 END LIMIT 1`,
         [...args.slice(0, 4), DATA_SEARCH_V1_PATH, body.query.trim(), QUERY_TRIM_CHARACTERS])).rows[0]
         if (unresolved) throw await otherRequestBlocked(unresolved.status === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', unresolved.id)
