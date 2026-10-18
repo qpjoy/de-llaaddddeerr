@@ -190,7 +190,7 @@ test(
           password: "FixturePassword123!",
           source,
         }),
-        { code: "dataport_managed_accounts" },
+        { code: "registration_closed" },
       );
       assert.equal((await registration.policy(source)).mode, "closed");
       await repo.close();

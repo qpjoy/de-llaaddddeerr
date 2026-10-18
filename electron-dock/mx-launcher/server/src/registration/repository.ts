@@ -16,7 +16,7 @@ export function validateRegistrationSource(source: RegistrationSource | undefine
   } catch { fail(400,'invalid_registration_source','注册来源无效，请从应用重新发起。'); }
 }
 function effectivePolicy(policy: RegistrationPolicy, source?: RegistrationSource): RegistrationPolicy {
-  return { ...policy, mode: source?.appId === 'mx-harbor' ? 'closed' : policy.mode === 'closed' ? 'closed' : source?.appId === 'mx-insight-hub' && policy.hubMode && policy.hubMode !== 'inherit' ? policy.hubMode : policy.mode };
+  return { ...policy, mode: policy.mode === 'closed' ? 'closed' : source?.appId === 'mx-harbor' ? (policy.applicationModes?.['mx-harbor'] === 'invite_code' ? 'invite_code' : 'closed') : source?.appId === 'mx-insight-hub' && policy.hubMode && policy.hubMode !== 'inherit' ? policy.hubMode : policy.mode };
 }
 export interface EnterpriseInvitation { issuer: string; clientId: string; invitationId: string; expiresAt: string }
 export interface RegistrationInput { transactionId: string; clientId: string; policyVersion: number; account: string; password: string; inviteCode?: string; verifiedFeishuSubject?: string; enterpriseInvitation?: EnterpriseInvitation; source?: RegistrationSource }
@@ -221,7 +221,7 @@ export class RegistrationRepository {
   }
   async register(input: RegistrationInput) {
     validateRegistrationSource(input.source);
-    if (input.source?.appId === 'mx-harbor') fail(403, 'dataport_managed_accounts', '数港账号由平台管理员开户，员工账号由企业超管创建或邀请。');
+    if (input.source?.appId === 'mx-harbor' && (input.verifiedFeishuSubject || input.enterpriseInvitation)) fail(403, 'invalid_registration_source', '企业超管须使用 DataPort 专用邀请码注册。');
     const account = typeof input.account === 'string' ? input.account.trim() : '';
     if (input.clientId !== this.clientId || !/^[A-Za-z0-9_-]{16,128}$/.test(input.transactionId ?? '')
       || !Number.isSafeInteger(input.policyVersion)) fail(400, 'invalid_transaction', '注册请求已失效，请重新打开登录页。');

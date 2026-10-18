@@ -81,7 +81,7 @@ function AccountDialogSession({
           }
           setOptions(value.options);
           setUnavailable(false);
-          setRegister(false);
+          if (!retry) setRegister(value.options.view === "register" && value.options.policy?.mode === "invite_code");
         }
       })
       .catch((error) => {
@@ -192,12 +192,18 @@ function AccountDialogSession({
           </div>
           <DialogHeader>
             <DialogTitle>{register ? "受邀加入数港" : "登录数港"}</DialogTitle>
-            <DialogDescription>{employee ? "使用企业超管创建的数港子账号登录。" : "企业超管使用统一 MX 账号登录。"}</DialogDescription>
+            <DialogDescription>{employee ? "使用企业超管创建的数港子账号登录。" : "企业超管使用统一 MX 账号，首次开通需 DataPort 专用邀请。"}</DialogDescription>
           </DialogHeader>
           <div className="auth-login-modes" role="group" aria-label="登录方式">
             <Button type="button" variant={employee ? "outline" : "default"} disabled={busy} onClick={() => {setEmployee(false);setError("");}}>企业超管 · MX 登录</Button>
             <Button type="button" variant={employee ? "default" : "outline"} disabled={busy} onClick={() => {setEmployee(true);setRegister(false);setError("");}}>子账号登录</Button>
           </div>
+          {!employee && options?.policy?.mode === "invite_code" && (
+            <div className="auth-owner-actions" role="group" aria-label="超管登录或注册">
+              <Button type="button" variant={!register ? "secondary" : "ghost"} disabled={busy || checking} onClick={() => {setRegister(false);setError("");}}>已有 MX 账号登录</Button>
+              <Button type="button" variant={register ? "secondary" : "ghost"} disabled={busy || checking} onClick={() => {setRegister(true);setError("");}}>邀请码注册</Button>
+            </div>
+          )}
           <form onSubmit={submit} aria-busy={busy || checking}>
             <FieldGroup>
               <Field>
@@ -265,6 +271,15 @@ function AccountDialogSession({
                   </InputGroup>
                 </Field>
               )}
+              {!employee && (
+                <Field>
+                  <FieldLabel htmlFor="auth-invite">{register ? "DataPort 专用邀请码" : "DataPort 专用邀请码（首次开通时填写）"}</FieldLabel>
+                  <InputGroup>
+                    <InputGroupInput id="auth-invite" name="inviteCode" required={register} maxLength={128} autoComplete="off" placeholder="输入 Launcher 提供的 DataPort 专用邀请码" disabled={busy} aria-describedby="auth-invite-help" />
+                  </InputGroup>
+                  <FieldDescription id="auth-invite-help">已开通数港的 MX 账号可留空。此处用于开通数港，企业超管身份仍需后续校验。</FieldDescription>
+                </Field>
+              )}
               {register &&
               options &&
               options?.policy?.mode !== "invite_code" &&
@@ -310,7 +325,7 @@ function AccountDialogSession({
               "使用 DataPort 专用邀请码创建 MX 账号并开通数港。已有 MX 账号请在登录页使用邀请码开通。"
             ) : (
               <>
-                账号由管理员统一开通
+                {employee ? "子账号由企业超管创建" : "专用邀请由 Launcher 用户中心签发"}
                 <br />
                 如需开通或重置密码，请联系管理员
               </>

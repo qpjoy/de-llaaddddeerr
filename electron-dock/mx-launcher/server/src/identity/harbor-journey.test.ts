@@ -1,16 +1,14 @@
 import 'reflect-metadata';
 import test from 'node:test';import assert from 'node:assert/strict';
 import {randomUUID,generateKeyPairSync,createHash} from 'node:crypto';
-import {DataportAccounts} from '../registration/dataport-accounts.js';
 import {RegistrationClientError} from '../registration/backchannel.js';
 import {createServer,request} from 'node:http';
 import {createPlatformDataSource} from '../db/data-source.js';import {loadConfig} from '../config.js';
 import {IdentityRepository} from './repository.js';import {RegistrationRepository} from '../registration/repository.js';import {createIdentityProvider} from './provider.js';
 const databaseUrl=process.env.MX_SSO_TEST_DATABASE_URL;
-test('Harbor hosted and native OIDC: managed MX accounts use hosted and native login and revocation invalidates old tokens',{skip:!databaseUrl},async t=>{
+test('Harbor hosted and native OIDC: dedicated invites admit MX owners and revocation invalidates old tokens',{skip:!databaseUrl},async t=>{
  const target=new URL(databaseUrl!);assert.ok(['localhost','127.0.0.1'].includes(target.hostname)&&target.pathname.includes('sso_test'));
  const environment=`harbor-journey-${randomUUID()}`,db=createPlatformDataSource({...loadConfig(),databaseUrl:databaseUrl!,environment,storeDriver:'postgres'});await db.initialize();await db.runMigrations();
- const managed=new DataportAccounts(databaseUrl!,environment,'test',Buffer.alloc(32,5));
  const accounts=new IdentityRepository(databaseUrl!,environment,environment,'test-rate');await accounts.initialize();const registration=new RegistrationRepository(databaseUrl!,environment,'launcher','test');
  const origin='https://auth.example.test',app={appId:'mx-harbor',origin:'https://harbor.example.test',clientId:'harbor',clientSecret:'h'.repeat(43),audience:'mx-harbor'};
  const hub={issuer:origin+'/identity',appId:'mx-insight-hub',clientId:'hub',appOrigin:'https://hub.example.test'};
@@ -18,7 +16,7 @@ test('Harbor hosted and native OIDC: managed MX accounts use hosted and native l
  const users=[];for(const account of ['HostedUser','NativeUser'])users.push(await registration.register({transactionId:randomUUID(),clientId:'launcher',source:hub,account,password:'OriginalPassword123!',policyVersion:policy.version}));
  const application=createIdentityProvider({origin,adminOrigin:'https://launcher.example.test',issuer:origin+'/identity',clientId:'launcher',clientSecret:'s'.repeat(43),cookieKeys:['a'.repeat(43)],applications:[app],jwks:{keys:[{...generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({format:'jwk'}),kid:'test',alg:'RS256',use:'sig'}]}},accounts,name=>accounts.adapter(name),{policy:source=>registration.policy(source),register:input=>registration.register({...input,clientId:'launcher'}),redeemAdmission:async input=>{try{return await registration.redeemAdmission(input)}catch(error:any){throw new RegistrationClientError(error.status,error.message)}},feishu:async()=>({enabled:true})});
  const server=createServer((req,res)=>{req.headers['x-forwarded-proto']='https';void application.handle(req,res)});await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
- t.after(async()=>{server.closeAllConnections();await new Promise(r=>server.close(r));await managed.close();await registration.close();await accounts.close();await db.query('DELETE FROM mx_platform_records WHERE environment=$1',[environment]);await db.query('DELETE FROM mx_identity_records WHERE scope=$1',[environment]);await db.destroy()});
+ t.after(async()=>{server.closeAllConnections();await new Promise(r=>server.close(r));await registration.close();await accounts.close();await db.query('DELETE FROM mx_platform_records WHERE environment=$1',[environment]);await db.query('DELETE FROM mx_identity_records WHERE scope=$1',[environment]);await db.destroy()});
  const jar=new Map<string,string>();
  const call=(path:string,options:{method?:string;headers?:Record<string,string>;body?:string}={})=>new Promise<{status:number;text:string;location:string}>((resolve,reject)=>{const url=new URL(path,origin),req=request({hostname:'127.0.0.1',port:(server.address() as {port:number}).port,path:url.pathname+url.search,method:options.method||'GET',headers:{host:'auth.example.test',cookie:[...jar].map(([k,v])=>`${k}=${v}`).join('; '),...options.headers}},res=>{for(const raw of res.headers['set-cookie']||[]){const [k,v]=raw.split(';')[0].split('=');jar.set(k,v)}let text='';res.on('data',c=>text+=c);res.on('end',()=>resolve({status:res.statusCode!,text,location:res.headers.location||''}))});req.on('error',reject);req.end(options.body)});
  const basic=`Basic ${Buffer.from(`${app.clientId}:${app.clientSecret}`).toString('base64')}`,verifier='v'.repeat(43);
@@ -32,13 +30,15 @@ test('Harbor hosted and native OIDC: managed MX accounts use hosted and native l
  const unknown=await call(auth(true).replace('client_id=harbor','client_id=unknown'));
  assert.equal(unknown.status,400);assert.doesNotMatch(unknown.text,/MX Launcher|Insight Hub|mx-pay|应用入口|前往其他应用/);
  for(const [index,native] of [false,true].entries()){
-  jar.clear();await managed.execute({operation:'invite',requestId:randomUUID(),tenantId:randomUUID(),actor:randomUUID(),account:index?'NativeUser':'HostedUser'});
+  jar.clear();const invite=await registration.createInvitation({label:native?'Native owner':'Hosted owner',maxUses:1,days:1,admissionAppId:'mx-harbor'});
   let step=await call(auth(native));assert.equal(step.status,303,step.text);const interaction=step.location;step=await call(interaction);const login=index?'NativeUser':'HostedUser';
   if(native){assert.equal(step.status,303,step.text);const flow=new URL(step.location).searchParams.get('flow');assert.ok(flow);const account=(action:string,extra={})=>call('/identity/app-account',{method:'POST',headers:{authorization:basic,'content-type':'application/json'},body:JSON.stringify({action,input:{flow,...extra}})});
-   const options=JSON.parse((await account('options')).text);assert.equal(options.admissionRequired,false);assert.equal(options.policy.mode,'closed');assert.equal(options.feishu,false);assert.equal((await account('feishu')).status,403);
-   assert.equal((await account('register',{login:'NoPublicSignup',password:'OriginalPassword123!'})).status,403);
-   const completed=await account('login',{login,password:'OriginalPassword123!'});assert.equal(completed.status,200,completed.text);step=await call(JSON.parse(completed.text).redirect);
-  }else{assert.equal(step.status,200,step.text);assert.doesNotMatch(step.text,/首次进入|使用飞书登录/);const csrf=/name="csrf" value="([^"]+)"/.exec(step.text)![1];step=await call(interaction,{method:'POST',headers:{origin,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({csrf,login,password:'OriginalPassword123!'}).toString()});}
+   const options=JSON.parse((await account('options')).text);assert.equal(options.admissionRequired,true);assert.equal(options.policy.mode,'invite_code');assert.equal(options.feishu,false);assert.equal((await account('feishu')).status,403);
+   assert.equal((await account('register',{login:'NoPublicSignup',password:'OriginalPassword123!',passwordConfirm:'OriginalPassword123!'})).status,400);
+   assert.equal((await account('login',{login,password:'OriginalPassword123!'})).status,400);
+   const completed=await account('login',{login,password:'OriginalPassword123!',inviteCode:invite.code});assert.equal(completed.status,200,completed.text);step=await call(JSON.parse(completed.text).redirect);
+  }else{assert.equal(step.status,200,step.text);assert.match(step.text,/首次进入/);assert.doesNotMatch(step.text,/使用飞书登录/);const csrf=/name="csrf" value="([^"]+)"/.exec(step.text)![1];step=await call(interaction,{method:'POST',headers:{origin,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({csrf,login,password:'OriginalPassword123!',inviteCode:invite.code}).toString()});}
+  assert.equal((await registration.invitations()).find(i=>i.id===invite.invitation.id)!.uses,1);
   for(let i=0;i<8&&!step.location.startsWith(app.origin);i++){assert.ok(step.location,step.text);step=await call(step.location)}
   assert.ok(step.location.startsWith(app.origin),step.text);const code=new URL(step.location).searchParams.get('code');assert.ok(code);
   const token=await call('/identity/token',{method:'POST',headers:{authorization:basic,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',code:code!,code_verifier:verifier,redirect_uri:app.origin+'/auth/sso/callback'}).toString()});assert.equal(token.status,200,token.text);

@@ -1577,3 +1577,16 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+/* Invited MX owner onboarding stays separate from independent employee login. */
+.risk-auth-dialog .auth-owner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-block: 12px;
+}
+.risk-auth-dialog .auth-owner-actions > button {
+  flex: 1 1 140px;
+  height: auto;
+  min-height: 36px;
+  white-space: normal;
+}

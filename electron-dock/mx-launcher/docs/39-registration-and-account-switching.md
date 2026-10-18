@@ -1,5 +1,7 @@
 # 账号切换与统一注册：第一批交付
 
+2026-10-18 DataPort 边界更新：企业超管继续使用用户中心签发的 DataPort 专用邀请码注册或为已有 MX 账号首次开通；员工使用 Hub 管理的数港独立子账号。专用邀请不赋予 Hub 企业关系或管理角色，缺省关闭和显式禁用继续生效。发布顺序为 Launcher Internal API/Auth → DataPort，见 [超管专用邀请说明](../../mx-dataport/docs/owner-invitations-20261018.md)。
+
 2026-10-03 后续实现更新见 [40-hub-sso-and-feishu-web.md](./40-hub-sso-and-feishu-web.md)：Hub SSO 与飞书 Web 绑定已在本地实现验收；本文末尾“下一验收批”保留为当时规划，公网入口仍待确定。
 
 日期：2026-10-03。接续文档 33、35、37。本批代码尚未部署生产；现有私网 issuer、证书、账号、Hub 租户及 H2I/Luopan 登录和联网配置保留。

@@ -284,6 +284,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
           const user = await accounts.account(entry.id);
           if (user) choices.push({ reference: hints.reference(user.userId), account: user.account, name: user.displayName,
             current: current?.userId === user.userId, available: Boolean(allowed(user, clientId)),
+            ...(source.appId === 'mx-harbor' && user.status === 'active' && !user.appAccess?.deniedAppIds?.includes('mx-harbor') && !allowed(user, clientId) ? { admissionRequired: true } : {}),
           });
         }
         const selected = choices.find(entry => entry.reference === query.get('account'));
@@ -335,7 +336,7 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
           // Preserve same-origin provenance without allowing cross-site refs.
           res.setHeader('Referrer-Policy', 'same-origin');
           res.setHeader('Content-Type', 'text/html; charset=utf-8');
-          res.end(page(path, csrfFor(interaction.uid), message, policy, registering && Boolean(policy && policy.mode !== 'closed'), { enabled: feishuEnabled, pending: Boolean(proof), enterprise: Boolean(enterprise), appName, returnUrl, loginHint: selected?.account, choosing }));
+          res.end(page(path, csrfFor(interaction.uid), message, policy, registering && Boolean(policy && policy.mode !== 'closed'), { admissionRequired: source.appId === 'mx-harbor', enabled: feishuEnabled, pending: Boolean(proof), enterprise: Boolean(enterprise), appName, returnUrl, loginHint: selected?.account, choosing }));
         };
         if (req.method === 'GET') {
           if (invitationHandle && invitationApp && policy?.mode !== 'closed') {
@@ -408,7 +409,11 @@ export function createIdentityProvider(settings: IdentitySettings, accounts: Ide
         let user = await accounts.authenticate(login, password);
         if (!user) return render('账号或密码不正确，或账号不可用。', 401);
         if (source.appId === 'mx-harbor' && !allowed(user, clientId)) {
-          return render('此 MX 账号尚未开通数港，请联系平台管理员或企业超管。',403);
+          try {
+            if (!registration?.redeemAdmission) return render('DataPort 邀请服务需要更新，请稍后重试。', 503);
+            await registration.redeemAdmission({ userId: user.userId, source, inviteCode: body.get('inviteCode') ?? '' });
+            user = await accounts.account(user.userId);
+          } catch (error) { return render(error instanceof RegistrationClientError ? error.message : '邀请暂不可用，请稍后重试。', error instanceof RegistrationClientError ? error.status : 503); }
         }
         if (!user || !allowed(user, clientId)) return render('此账号已被禁止访问该应用，请联系管理员。', 403);
         console.info(JSON.stringify({ event: 'identity.password-login', userId: user.userId }));
