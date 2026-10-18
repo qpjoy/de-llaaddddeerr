@@ -25,7 +25,7 @@ import {
   DialogHeader,
   DialogTitle,
   DialogDescription,
-} from "@/components/ui/dialog";
+} from "./dialog";
 import {
   Select,
   SelectTrigger,
@@ -577,7 +577,7 @@ export function EnterpriseMembers(props: Props) {
           if (!v && !write.busy) setEditingMember(null);
         }}
       >
-        <DialogContent className="dp-dialog">
+        <DialogContent className="dp-dialog dp-member-details">
           <DialogHeader>
             <DialogTitle>
               {editingDetails === "role"
@@ -689,54 +689,56 @@ export function EnterpriseMembers(props: Props) {
                     </strong>
                   </div>
                 </div>
-                {hasPermission(session, tenant, "members.update") && (
-                  <Button
-                    variant="outline"
-                    onClick={() => setEditingDetails("profile")}
-                  >
-                    编辑员工资料
-                  </Button>
-                )}
-                {hasPermission(session, tenant, "members.assign") && (
-                  <Button
-                    variant="outline"
-                    onClick={() => setEditingDetails("role")}
-                  >
-                    分配角色
-                  </Button>
-                )}
-                {owner && editingMember.managed && (
-                  <Button
-                    disabled={write.busy}
-                    onClick={() =>
-                      void write
-                        .run(`members/${editingMember.id}/initial-password`, {})
-                        .then((v) => {
-                          setEditingMember(null);
-                          setPassword(v.password);
-                        })
-                        .catch(() => {})
-                    }
-                  >
-                    <Copy size={16} />
-                    查看初始密码
-                  </Button>
-                )}
-                {owner &&
-                  editingMember.managed &&
-                  editingMember.status === "active" && (
+                <div className="dp-member-actions">
+                  {hasPermission(session, tenant, "members.update") && (
                     <Button
                       variant="outline"
-                      disabled={write.busy}
-                      onClick={() => {
-                        setResetMember(editingMember);
-                        setResetCommand(crypto.randomUUID());
-                        setEditingMember(null);
-                      }}
+                      onClick={() => setEditingDetails("profile")}
                     >
-                      重置密码
+                      编辑员工资料
                     </Button>
                   )}
+                  {hasPermission(session, tenant, "members.assign") && (
+                    <Button
+                      variant="outline"
+                      onClick={() => setEditingDetails("role")}
+                    >
+                      分配角色
+                    </Button>
+                  )}
+                  {owner && editingMember.managed && (
+                    <Button
+                      disabled={write.busy}
+                      onClick={() =>
+                        void write
+                          .run(`members/${editingMember.id}/initial-password`, {})
+                          .then((v) => {
+                            setEditingMember(null);
+                            setPassword(v.password);
+                          })
+                          .catch(() => {})
+                      }
+                    >
+                      <Copy size={16} />
+                      查看初始密码
+                    </Button>
+                  )}
+                  {owner &&
+                    editingMember.managed &&
+                    editingMember.status === "active" && (
+                      <Button
+                        variant="outline"
+                        disabled={write.busy}
+                        onClick={() => {
+                          setResetMember(editingMember);
+                          setResetCommand(crypto.randomUUID());
+                          setEditingMember(null);
+                        }}
+                      >
+                        重置密码
+                      </Button>
+                    )}
+                </div>
                 {!editingMember.managed && (
                   <p className="harbor-hint">
                     已有 MX 账号忘记密码，请使用统一账号找回。

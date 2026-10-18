@@ -6,16 +6,19 @@
 }
 .harbor-console.content {
   display: flex;
+  flex: 1 1 0;
   flex-direction: column;
   align-items: stretch;
   gap: 0;
   width: 100%;
+  height: auto;
+  max-height: none;
   min-height: 0;
   overflow: auto;
   position: relative;
-  padding-bottom: 72px;
+  padding-bottom: 32px;
 }
-.harbor-console.content > :not(.legal-footer) {
+.harbor-console.content > * {
   flex-shrink: 0;
 }
 .harbor-console .page-heading {
@@ -35,16 +38,15 @@
   padding: 9px 15px;
   line-height: 1.5;
 }
-.harbor-console > .legal-footer {
-  position: fixed;
-  left: 224px;
-  right: 0;
-  bottom: 0;
+.harbor-shell .app-main > .legal-footer {
+  position: static;
+  flex: none;
   width: auto;
-  height: 56px;
+  min-height: 56px;
+  height: auto;
   z-index: 15;
   margin: 0;
-  padding: 0 32px;
+  padding: 12px 32px calc(12px + env(safe-area-inset-bottom, 0px));
   background: transparent;
   border: 0;
 }
@@ -188,12 +190,8 @@
     font-size: 12px;
     line-height: calc(20 / 14);
   }
-  .harbor-console > .legal-footer {
-    left: 0;
+  .harbor-shell .app-main > .legal-footer {
     padding-inline: 18px;
-  }
-  .harbor-console.content {
-    padding-bottom: 88px;
   }
   .harbor-history > [data-slot="card-header"] {
     padding: 18px;
@@ -1487,3 +1485,95 @@
 }
 .auth-login-modes { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0; }
 .auth-login-modes > button { flex: 1; min-width: 136px; }
+
+/* All business dialogs share a bounded frame; only their body scrolls. */
+.dp-viewport-dialog[data-slot="dialog-content"] {
+  top: var(--dp-dialog-center-y, 50%);
+  max-height: calc(var(--dp-dialog-viewport-height, 100dvh) - 32px);
+}
+.dp-viewport-dialog[data-slot="dialog-content"]:not(.auth-dialog) {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+  padding: 0;
+  --dp-dialog-padding: 24px;
+}
+.dp-viewport-dialog.harbor-checkout:not(.parity-order-dialog) {
+  --dp-dialog-padding: 32px;
+}
+.dp-viewport-dialog.notification-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+.dp-viewport-dialog > [data-slot="dialog-header"] {
+  flex: none;
+  padding: var(--dp-dialog-padding) calc(var(--dp-dialog-padding) + 24px) 16px
+    var(--dp-dialog-padding);
+  text-align: left;
+}
+.dp-dialog-body {
+  display: grid;
+  grid-auto-rows: max-content;
+  gap: 16px;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scroll-padding-block: 16px;
+  padding: 0 var(--dp-dialog-padding) var(--dp-dialog-padding);
+}
+.dp-dialog-body > * {
+  min-width: 0;
+}
+.dp-viewport-dialog > [data-slot="dialog-close"] {
+  z-index: 2;
+  background: var(--background);
+}
+.dp-viewport-dialog .harbor-messages {
+  max-height: none;
+  overflow: visible;
+}
+.dp-viewport-dialog.auth-dialog .auth-form-panel {
+  max-height: calc(var(--dp-dialog-viewport-height, 100dvh) - 32px);
+}
+.dp-member-details .credential-success {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.dp-member-details .credential-field:nth-child(-n + 2) {
+  grid-column: 1 / -1;
+}
+.dp-member-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.dp-member-actions [data-slot="button"] {
+  min-width: 0;
+  height: auto;
+  min-height: 36px;
+  white-space: normal;
+}
+.harbor-shell .legal-footer-inner {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+.public-site {
+  padding-bottom: 0;
+}
+.public-site > .public-footer {
+  position: static;
+  flex: none;
+  height: auto;
+  min-height: 56px;
+  padding-block: 12px calc(12px + env(safe-area-inset-bottom, 0px));
+}
+.public-site .legal-footer-inner {
+  row-gap: 6px;
+}
+@media (max-width: 767px) {
+  .dp-role-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

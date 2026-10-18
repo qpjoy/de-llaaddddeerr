@@ -5,7 +5,7 @@ import {
   DialogHeader,
   DialogTitle,
   DialogDescription,
-} from "@/components/ui/dialog";
+} from "./dialog";
 import { PublicPricing } from "./public-pricing";
 import { UsageOverview } from "./workspace";
 import { Documentation } from "./documentation";
@@ -236,8 +236,8 @@ export function ConsoleShell({
             aria-label="展开导航"
           />
           {children}
-          <LegalFooter inConsole />
         </main>
+        <LegalFooter inConsole />
       </div>
     </SidebarProvider>
   );
