@@ -49,6 +49,7 @@ function AccountDialogSession({
   preview = false,
 }: AccountDialogProps) {
   const [options, setOptions] = useState<AccountOptions | null>(null),
+    [employee, setEmployee] = useState(!new URLSearchParams(location.search).has("account")),
     [register, setRegister] = useState(false),
     [error, setError] = useState(""),
     [unavailable, setUnavailable] = useState(false),
@@ -58,6 +59,7 @@ function AccountDialogSession({
     [show, setShow] = useState(false);
   useEffect(() => {
     if (!open || preview) return;
+    if (employee) { setChecking(false); setUnavailable(false); setError(""); return; }
     let active = true;
     setChecking(true);
     setOptions(null);
@@ -98,7 +100,7 @@ function AccountDialogSession({
     return () => {
       active = false;
     };
-  }, [open, preview, retry]);
+  }, [open, preview, retry, employee]);
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (checking) return;
@@ -110,19 +112,27 @@ function AccountDialogSession({
       setError("组件预览不创建账号或提交登录。");
       return;
     }
-    if (!options) return;
+    if (!employee && !options) return;
     const data = new FormData(event.currentTarget);
     setBusy(true);
     setError("");
     try {
+      if (employee) {
+        const result = await request<{redirect:string}>("/auth/local/login", {
+          method:"POST",signal:AbortSignal.timeout(15000),
+          body:JSON.stringify({account:data.get("login"),password:data.get("password")}),
+        });
+        location.assign(result.redirect);
+        return;
+      }
       const result = await request<{ redirect: string }>("/auth/sso/form", {
         method: "POST",
         signal: AbortSignal.timeout(15000),
-        headers: { "x-mx-csrf": options.csrf },
+        headers: { "x-mx-csrf": options!.csrf },
         body: JSON.stringify({
           action: register ? "register" : "login",
-          formId: options.formId,
-          policyVersion: options.policy?.version,
+          formId: options!.formId,
+          policyVersion: options!.policy?.version,
           ...Object.fromEntries(data),
         }),
       });
@@ -142,7 +152,7 @@ function AccountDialogSession({
   }
   return (
     <Dialog
-      open={open && (preview || !!options || unavailable)}
+      open={open && (employee || preview || !!options || unavailable || checking)}
       onOpenChange={(value) => {
         if (!busy) {
           onOpenChange(value);
@@ -180,12 +190,16 @@ function AccountDialogSession({
           </div>
           <DialogHeader>
             <DialogTitle>{register ? "受邀加入数港" : "登录数港"}</DialogTitle>
-            <DialogDescription>使用统一 MX 账号登录数港。</DialogDescription>
+            <DialogDescription>{employee ? "使用企业超管创建的数港子账号登录。" : "企业超管使用统一 MX 账号登录。"}</DialogDescription>
           </DialogHeader>
+          <div className="auth-login-modes" role="group" aria-label="登录方式">
+            <Button type="button" variant={employee ? "outline" : "default"} disabled={busy} onClick={() => {setEmployee(false);setError("");}}>企业超管 · MX 登录</Button>
+            <Button type="button" variant={employee ? "default" : "outline"} disabled={busy} onClick={() => {setEmployee(true);setRegister(false);setError("");}}>子账号登录</Button>
+          </div>
           <form onSubmit={submit} aria-busy={busy || checking}>
             <FieldGroup>
               <Field>
-                <FieldLabel htmlFor="auth-login">MX 账号</FieldLabel>
+                <FieldLabel htmlFor="auth-login">{employee ? "数港子账号" : "MX 账号"}</FieldLabel>
                 <InputGroup>
                   <InputGroupInput
                     id="auth-login"
@@ -194,7 +208,7 @@ function AccountDialogSession({
                     maxLength={64}
                     autoComplete="username"
                     defaultValue={options?.loginHint || ""}
-                    placeholder="输入你的 MX 账号"
+                    placeholder={employee ? "输入企业超管分配的子账号" : "输入你的 MX 账号"}
                     disabled={busy}
                   />
                   <InputGroupAddon>

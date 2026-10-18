@@ -162,6 +162,11 @@ export function SidebarAccountMenu({
               </div>
             )}
             <DropdownMenuGroup>
+              {session?.identityProvider === "dataport-local" && (
+                <DropdownMenuItem onSelect={() => select("account")}>
+                  <Users />账户安全
+                </DropdownMenuItem>
+              )}
               {(session === undefined ||
                 canOpenPage(session, tenant || "", "services")) && (
                 <DropdownMenuItem

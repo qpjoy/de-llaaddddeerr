@@ -4,6 +4,7 @@ import { randomUUID, createHmac } from "node:crypto";
 import { createApplicationSso } from "@qpjoy/mx-common/identity/sso";
 import { PostgresSsoStore } from "@qpjoy/mx-common/identity/postgres";
 import { SsoError, equal, readSsoJson } from "@qpjoy/mx-common/identity/http";
+import { createLocalAuth, localToken, localOrigin } from "./local-auth.mjs";
 const reads = new Set([
   "/session",
   "/me/usage",
@@ -42,6 +43,7 @@ export function createHarborApp({
   fetch: fetcher = fetch,
   staticRoot = resolve("dist/web"),
 }) {
+  const localAuth = createLocalAuth(fetcher);
   let cachedSso, cachedProfile;
   function ssoFor(integration) {
     if (config.preview) return null;
@@ -73,6 +75,7 @@ export function createHarborApp({
     };
     try {
       const url = new URL(req.url, "http://localhost");
+      if (!config.preview && await localAuth.handle(req,res,url,resolveDependencies(),json)) return;
       if (
         req.method === "GET" &&
         url.pathname === "/bff/v1/catalog" &&
@@ -134,16 +137,18 @@ export function createHarborApp({
         const path = url.pathname.slice("/bff/v1".length);
         if (!permittedCustomerRoute(req.method, path))
           throw new SsoError(404, "not_found", "此客户功能尚未开放。");
-        const integration = resolveDependencies(),
-          sso = ssoFor(integration);
-        if (!sso)
+        const integration = resolveDependencies();
+        const token = localToken(req);
+        const sso = token ? null : ssoFor(integration);
+        if (!sso && !token)
           throw new SsoError(503, "service_unavailable", "客户服务尚未配置。");
-        const session = await sso.sessionFor(req);
+        const localSession = token ? await localAuth.session(integration,req) : null;
+        const session = localSession ? { csrf:localSession.csrf,subject:`dataport:${localSession.account}` } : await sso.sessionFor(req);
         if (!session) throw new SsoError(401, "login_required", "请先登录。");
-        await sso.verifySession(session, true);
+        if (!token) await sso.verifySession(session, true);
         let body;
         if (req.method === "POST") {
-          sso.checkOrigin(req);
+          if (token) localOrigin(req,integration); else sso.checkOrigin(req);
           if (!session.csrf || !equal(session.csrf, req.headers["x-mx-csrf"]))
             throw new SsoError(
               403,
@@ -180,8 +185,7 @@ export function createHarborApp({
               path.endsWith("/query") ? 120000 : 15000,
             ),
             headers: {
-              authorization: `Bearer ${session.accessToken}`,
-              "x-mx-harbor-subject": session.subject,
+              ...(token ? {"x-mx-dataport-local-session":token,"x-mx-csrf":session.csrf} : {authorization:`Bearer ${session.accessToken}`,"x-mx-harbor-subject":session.subject}),
               "x-mx-harbor-gateway": integration.gatewayToken,
               "x-mx-dataport-session": createHmac(
                 "sha256",

@@ -88,14 +88,6 @@ spec:
                 name: mx-insight-hub-model-keys
                 optional: true
           env:
-            - name: MX_DATAPORT_ACCOUNT_TOKEN_FILE
-              value: /run/mx-dataport-accounts/account-token
-            - name: MX_DATAPORT_ACCOUNT_ORIGIN
-              valueFrom:
-                secretKeyRef:
-                  name: mx-dataport-accounts
-                  key: account-origin
-                  optional: true
             # Optional Harbor enrollment is discovered from projected files at runtime.
             - name: MX_INSIGHT_HARBOR_SSO_PROFILE
               value: /run/harbor-portal/profile.json
@@ -171,9 +163,6 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
-            - name: dataport-accounts
-              mountPath: /run/mx-dataport-accounts
-              readOnly: true
             - name: harbor-portal
               mountPath: /run/harbor-portal
               readOnly: true
@@ -186,11 +175,6 @@ spec:
               mountPath: /shared_dir
               readOnly: true
       volumes:
-        - name: dataport-accounts
-          secret:
-            secretName: mx-dataport-accounts
-            optional: true
-            defaultMode: 288
         - name: harbor-portal
           secret:
             secretName: mx-harbor-portal

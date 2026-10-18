@@ -15,6 +15,7 @@ import {
   HttpException,
   Inject,
   Post,
+  ServiceUnavailableException,
   UnauthorizedException,
   type OnModuleDestroy,
 } from "@nestjs/common";
@@ -427,24 +428,21 @@ export class DataportAccountsController implements OnModuleDestroy {
     @Headers("x-mx-dataport-account") supplied: string | undefined,
     @Body() body: DataportAccountCommand,
   ) {
-    let token: string, encodedKey: string;
+    let token: string, key: Buffer;
     try {
       token = readFileSync(
         process.env.MX_DATAPORT_ACCOUNT_TOKEN_FILE!,
         "utf8",
       ).trim();
-      encodedKey = readFileSync(
-        process.env.MX_DATAPORT_CREDENTIAL_KEY_FILE!,
-        "utf8",
-      ).trim();
-    } catch {
-      throw new HttpException(
-        {
-          code: "dataport_accounts_not_configured",
-          message: "数港账号服务尚未配置。",
-        },
-        503,
+      key = Buffer.from(
+        readFileSync(
+          process.env.MX_DATAPORT_CREDENTIAL_KEY_FILE!,
+          "utf8",
+        ).trim(),
+        "hex",
       );
+    } catch {
+      throw new ServiceUnavailableException("数港账号服务尚未配置。");
     }
     if (
       token.length < 32 ||
@@ -456,32 +454,20 @@ export class DataportAccountsController implements OnModuleDestroy {
     if (
       !this.config.databaseUrl ||
       this.config.storeDriver !== "postgres" ||
-      !/^[a-f0-9]{64}$/i.test(encodedKey)
+      key.length !== 32
     )
-      throw new HttpException(
-        {
-          code: "dataport_accounts_invalid_config",
-          message: "数港账号服务配置无效。",
-        },
-        503,
-      );
+      throw new ServiceUnavailableException("数港账号服务配置无效。");
     try {
       return await (this.repository ??= new DataportAccounts(
         this.config.databaseUrl,
         this.config.environment,
         this.config.siteId,
-        Buffer.from(encodedKey, "hex"),
+        key,
       )).execute(body);
     } catch (e) {
       if (e instanceof RegistrationError)
         throw new HttpException({ code: e.code, message: e.message }, e.status);
-      throw new HttpException(
-        {
-          code: "dataport_accounts_unavailable",
-          message: "数港账号服务暂不可用。",
-        },
-        503,
-      );
+      throw new ServiceUnavailableException("数港账号服务暂不可用。");
     }
   }
 }

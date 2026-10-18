@@ -25,17 +25,11 @@ async function fixture(t) {
   return {store,a,b,other,member,colleague,ca,cb,get,setRole:value=>{role=value}}
 }
 
-test('workspace roster is selected-tenant only with authoritative role capabilities and no global identity metadata', async t => {
-  const f=await fixture(t),res=await f.get(`/me/workspace?tenantId=${f.a.id}`)
-  assert.equal(res.status,200);const {data}=await res.json()
-  assert.equal(data.role,'owner');assert.equal(data.members.length,2)
-  assert.deepEqual(data.roles.find(r=>r.role==='admin').capabilities,capabilitiesForRole('admin'))
-  assert.ok(data.members.every(m=>Object.keys(m).sort().join(',')==='displayName,id,memberStatus,role,status'))
-  assert.ok(!JSON.stringify(data).includes(f.other.id))
-  assert.equal((await f.get(`/me/workspace?tenantId=${f.other.id}`)).status,403)
-  assert.equal((await f.get('/me/workspace')).status,400)
-  assert.equal((await f.get(`/me/workspace?tenantId=${f.a.id}&tenantId=${f.b.id}`)).status,400)
-  f.setRole('billing');assert.equal((await f.get(`/me/workspace?tenantId=${f.a.id}`)).status,200)
+test('retired workspace roster cannot bypass enterprise-specific member permissions', async t => {
+  const f=await fixture(t)
+  for(const path of [`/me/workspace?tenantId=${f.a.id}`,`/me/workspace?tenantId=${f.other.id}`,'/me/workspace',`/me/workspace?tenantId=${f.a.id}&tenantId=${f.b.id}`])
+    assert.equal((await f.get(path)).status,404)
+  f.setRole('billing');assert.equal((await f.get(`/me/workspace?tenantId=${f.a.id}`)).status,404)
 })
 
 test('usage has complete daily aggregates, strict date ranges and selected-tenant capability enforcement', async t => {

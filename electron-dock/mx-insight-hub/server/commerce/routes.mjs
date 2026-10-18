@@ -10,7 +10,7 @@ export async function commerceRoute({ commerce, service, productGateway, request
     const message = new RegExp(`^${root}/tenants/([0-9a-f-]{36})/messages(?:/([1-9][0-9]{0,17})/read|/(read-all))?$`).exec(pathname)
     if (message) {
       requireTenantCapability(principal,message[1],'billing.read')
-      requirePayment(principal.kind==='launcher-user' && principal.memberId,'customer_identity_required','消息需要个人登录身份',403)
+      requirePayment((principal.kind==='launcher-user' || (principal.kind==='dataport-user' && principal.portalOrigin)) && principal.memberId,'customer_identity_required','消息需要个人登录身份',403)
       if (request.method==='GET' && !message[2] && !message[3]) {
         if ([...searchParams.keys()].some(key=>searchParams.getAll(key).length!==1)) throw new AppError(400,'invalid_message_filter','消息筛选条件不正确')
         return reply(await commerce.messages.list(message[1],principal.memberId,Object.fromEntries(searchParams)))

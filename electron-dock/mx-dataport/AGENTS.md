@@ -1,3 +1,5 @@
+- 2026-10-18 最新用户决定替代下文历史认证边界：企业超管继续统一 MX SSO/邀请码；新员工是 DataPort 独立子账号，密码与会话仅在 Hub `dataport` 业务 schema，BFF 使用独立 HttpOnly cookie，不为其建立 MX/Hub 登录绑定。旧托管 MX 员工保留原记录，超管重置可显式转换，只阻止该企业的旧 MX 数港登录，不修改 MX 密码/其他应用。新建/重置/初始密码均不调用 Auth；关联已有 MX 邀请保留旧兼容路径。撤回上一轮 Launcher 三文件及专用 Secret 挂载/初始化 CLI，保留所有生产旧数据/密钥。发布只需 Hub migration159 → 数港，详见[独立子账号](docs/local-employee-accounts.md)。浏览器权限仍阻塞，不将本地 HTTP 验证称为页面验收。
+
 - 2026-10-18 线上验收修复：账单加载保留筛选DOM，Key/审计长文本限制在列内；审计按同租户查询回执补充新旧画像/页面/查询/批次ID，不改写历史。账号503发现默认Auth/Hub清单未挂载专用配置，新增可选Secret和 `accounts status|configure [--initialize]`，只创建缺失值、首次初始化须只读核实无既有账号状态/凭证文件，已有密钥绝不轮换；需要Auth→Hub→DataPort发布，无新迁移。见[本轮修复与发布](docs/review-fixes-20261018.md)。本地测试不代表线上恢复；截图和复测证据外置screenshot/fix-20261018。
 
 - 2026-10-17 复查修复：工单回复/状态/提交人通知和全部已读、超管托管子账号 Auth 重置、企业改名/成员分页/IP 日志检索及 UI 细节对齐；Hub 既有 Admin Token 提供数港工单和邀请码网页，未新增数港平台管理员角色。需要 Auth → Hub migration 154 → DataPort；不重复 enroll、不换密钥、不接真实供应商。见 [本轮修复与发布](docs/review-fixes-20261017.md)。截图与 QA 继续外置 screenshot/fix-20261017。

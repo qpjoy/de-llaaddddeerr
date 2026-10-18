@@ -130,12 +130,6 @@ spec:
                 name: mx-release-oss
                 optional: true
           env:
-            # Optional, dedicated DataPort account bridge. Missing configuration
-            # disables only managed accounts; it must not gate SSO/readiness.
-            - name: MX_DATAPORT_ACCOUNT_TOKEN_FILE
-              value: /run/mx-dataport-accounts/account-token
-            - name: MX_DATAPORT_CREDENTIAL_KEY_FILE
-              value: /run/mx-dataport-accounts/credential-key
             - name: MX_SERVICE_OPERATIONS_URL
               valueFrom:
                 secretKeyRef:
@@ -248,9 +242,6 @@ spec:
               memory: 1Gi
               ephemeral-storage: 1Gi
           volumeMounts:
-            - name: dataport-accounts
-              mountPath: /run/mx-dataport-accounts
-              readOnly: true
             - name: identity-ca
               mountPath: /run/mx-identity-ca
               readOnly: true
@@ -261,11 +252,6 @@ spec:
             - name: site-slots
               mountPath: /app/runtime-artifacts/site-slots
       volumes:
-        - name: dataport-accounts
-          secret:
-            secretName: mx-dataport-accounts
-            optional: true
-            defaultMode: 288
         - name: identity-ca
           secret:
             secretName: mx-identity-ca

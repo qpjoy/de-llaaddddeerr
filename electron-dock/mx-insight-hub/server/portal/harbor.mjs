@@ -25,9 +25,14 @@ function configuredPortal({pool,store,settings,token,hubSettings,oidcConfigurati
   const sessions=new SsoStore(pool,settings.sessionKey)
   const verifier=createApplicationSso({settings,store:sessions,oidcConfiguration,ErrorClass:AppError,validateIdentity(value){if(value.mxIdentity.issuer!==hubSettings.legacyIssuer)throw new AppError(401,'invalid_identity','统一身份来源不匹配。')}})
   return {
-    async resolve(request, {catalogOnly=false}={}) {
+    async resolve(request, {catalogOnly=false,localAccounts}={}) {
       if(!secureEqual(request.headers['x-mx-harbor-gateway'],token))throw new AppError(401,'portal_auth_required','客户服务认证失败。')
-      if(catalogOnly)return null
+      const metadata={portalOrigin:settings.origin,portalAudience:hubSettings.audience}
+      if(catalogOnly)return metadata
+      if(request.headers['x-mx-dataport-local-session']) {
+        if(!localAccounts)throw new AppError(401,'portal_session_required','请重新登录。')
+        return localAccounts.principal(request.headers['x-mx-dataport-local-session'],metadata)
+      }
       const accessToken=/^Bearer ([^\s]+)$/.exec(String(request.headers.authorization||''))?.[1],subject=request.headers['x-mx-harbor-subject']
       if(!accessToken||typeof subject!=='string'||subject.length>160)throw new AppError(401,'portal_session_required','请重新登录。')
       const verified=await verifier.verifySession({accessToken,subject,issuer:settings.issuer},true)

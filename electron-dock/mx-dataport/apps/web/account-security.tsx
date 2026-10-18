@@ -11,7 +11,7 @@ export function AccountSecurity() {
     [busy, setBusy] = useState(false);
   const load = () =>
     request("/auth/sso/account")
-      .then(setData)
+      .then(value => {setData(value); if(value.mustChangePassword)setSection("password");})
       .catch((e) => setError(e.message));
   useEffect(() => {
     void load();
@@ -71,7 +71,7 @@ export function AccountSecurity() {
     <div className="harbor-account">
       <div className="page-heading">
         <h1>账户安全</h1>
-        <p>管理你的统一 MX 账号资料与登录安全。</p>
+        <p>{data?.identityProvider === "dataport-local" ? (data.mustChangePassword ? "请先修改初始密码，完成后重新登录数港。" : "管理你的数港子账号资料与登录安全。") : "管理你的统一 MX 账号资料与登录安全。"}</p>
       </div>
       {error && (
         <p role="alert" className="harbor-error">
@@ -100,6 +100,11 @@ export function AccountSecurity() {
               variant="outline"
               onClick={async () => {
                 try {
+                  if (data.identityProvider === "dataport-local") {
+                    await request("/auth/sso/logout",{method:"POST",headers:{"x-mx-csrf":data.csrf},body:"{}"});
+                    location.assign("/?signedOut=1");
+                    return;
+                  }
                   const result = await startAccountSession();
                   location.assign(result.redirect);
                 } catch (e) {
@@ -111,7 +116,7 @@ export function AccountSecurity() {
             </Button>
           </div>
           <div className="harbor-settings">
-            {sections.map(({ id, title, detail, Icon }) => (
+            {sections.filter(s => !data.mustChangePassword || s.id === "password").map(({ id, title, detail, Icon }) => (
               <section className="harbor-setting" key={id}>
                 <button
                   className="harbor-setting-heading"
@@ -153,7 +158,7 @@ export function AccountSecurity() {
                         <>
                           <input type="hidden" name="target" value="all" />
                           <p>
-                            撤销后需要重新登录。此操作使用统一账号服务的会话撤销规则。
+                            撤销后需要重新登录。{data.identityProvider === "dataport-local" ? "仅撤销此数港子账号的会话。" : "此操作使用统一账号服务的会话撤销规则。"}
                           </p>
                         </>
                       )}
@@ -174,7 +179,7 @@ export function AccountSecurity() {
                               name="password"
                               type="password"
                               autoComplete="new-password"
-                              minLength={8}
+                              minLength={data.identityProvider === "dataport-local" ? 12 : 8}
                               maxLength={128}
                               required
                             />
@@ -185,7 +190,7 @@ export function AccountSecurity() {
                               name="confirmPassword"
                               type="password"
                               autoComplete="new-password"
-                              minLength={8}
+                              minLength={data.identityProvider === "dataport-local" ? 12 : 8}
                               maxLength={128}
                               required
                             />

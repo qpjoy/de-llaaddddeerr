@@ -18,6 +18,7 @@ import {
 } from "./dataport-policy.mjs";
 import { identityLock } from "../identity/sso-store.mjs";
 import { capabilitiesForRole } from "../identity/index.mjs";
+import { DataportLocalAccounts } from "./dataport-local-accounts.mjs";
 
 export const uuid = (value) =>
   typeof value === "string" &&
@@ -57,8 +58,9 @@ const problem = (status, code, message) => {
 };
 
 export class DataportStore {
-  constructor(pool) {
+  constructor(pool, { credentialPepper } = {}) {
     this.pool = pool;
+    this.localAccounts = new DataportLocalAccounts(this, credentialPepper);
   }
   available() {
     if (!this.pool)
@@ -95,8 +97,11 @@ export class DataportStore {
     for (let membership of principal.memberships || []) {
       const current = (
         await this.pool.query(
-          "SELECT tm.role FROM iam.tenant_memberships tm JOIN tenants t ON t.id=tm.tenant_id JOIN iam.members m ON m.id=tm.member_id WHERE tm.tenant_id=$1 AND tm.member_id=$2 AND tm.status='active' AND t.status='active' AND m.status='active'",
-          [membership.tenantId, principal.memberId],
+          `SELECT tm.role FROM iam.tenant_memberships tm JOIN tenants t ON t.id=tm.tenant_id JOIN iam.members m ON m.id=tm.member_id
+          LEFT JOIN dataport.managed_accounts ma ON ma.tenant_id=tm.tenant_id AND ma.member_id=tm.member_id
+          WHERE tm.tenant_id=$1 AND tm.member_id=$2 AND tm.status='active' AND t.status='active' AND m.status='active'
+          AND ($3='dataport-user' OR coalesce(ma.auth_mode,'mx')<>'local')`,
+          [membership.tenantId, principal.memberId, principal.kind],
         )
       ).rows[0];
       if (!current) continue;
@@ -364,7 +369,7 @@ export class DataportStore {
       items: (
         await this.pool.query(
           `SELECT m.id,coalesce(mp.display_name,m.display_name) AS "displayName",tm.role,tm.status,
-      a.role_id AS "roleId",a.revision,ma.account,coalesce(ma.managed,false) AS managed FROM iam.tenant_memberships tm JOIN iam.members m ON m.id=tm.member_id
+      a.role_id AS "roleId",a.revision,ma.account,ma.auth_mode AS "authMode",coalesce(ma.managed,false) AS managed FROM iam.tenant_memberships tm JOIN iam.members m ON m.id=tm.member_id
       LEFT JOIN dataport.member_roles a ON a.tenant_id=tm.tenant_id AND a.member_id=tm.member_id
       LEFT JOIN dataport.managed_accounts ma ON ma.tenant_id=tm.tenant_id AND ma.member_id=tm.member_id
       LEFT JOIN dataport.member_profiles mp ON mp.tenant_id=tm.tenant_id AND mp.member_id=tm.member_id
@@ -471,6 +476,9 @@ export class DataportStore {
           "UPDATE iam.tenant_memberships SET status=$3,updated_at=now() WHERE tenant_id=$1 AND member_id=$2",
           [tenantId, memberId, body.status],
         );
+        if (body.status === "suspended")
+          await db.query(`DELETE FROM dataport.local_sessions s USING dataport.local_credentials c
+            WHERE s.member_id=c.member_id AND c.tenant_id=$1 AND s.member_id=$2`, [tenantId, memberId]);
       } else if (
         typeof body.displayName === "string" &&
         body.displayName.trim() &&
@@ -679,6 +687,8 @@ export class DataportStore {
     const fingerprint = digest(
       JSON.stringify({ operation, account, displayName, roleId }),
     );
+    if (operation === "create")
+      return this.localAccounts.create(principal, tenantId, body);
     await this.pool.query(
       `INSERT INTO dataport.member_commands(id,tenant_id,actor,operation,fingerprint,document) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
       [
@@ -770,29 +780,6 @@ export class DataportStore {
           consumed: !!join.consumed_by,
         };
       }
-      const memberId = await this.bindManaged(
-        db,
-        tenantId,
-        identity,
-        audience,
-        roleId,
-        principal.memberId,
-        true,
-      );
-      await db.query(
-        "UPDATE dataport.member_commands SET state='completed' WHERE id=$1",
-        [commandId],
-      );
-      await this.event(
-        tenantId,
-        principal.memberId,
-        "member.created",
-        memberId,
-        201,
-        { roleId },
-        db,
-      );
-      return { memberId, account: identity.account };
     });
   }
   async bindManaged(db, tenantId, identity, audience, roleId, actor, managed) {
@@ -957,98 +944,10 @@ export class DataportStore {
       Object.keys(body).length !== 1
     )
       problem(400, "invalid_password_reset", "密码重置操作编号无效。");
-    return withPgTransaction(this.pool, async (db) => {
-      await db.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
-        `dataport-members:${tenantId}`,
-      ]);
-      const managed = (
-        await db.query(
-          `SELECT ma.* FROM dataport.managed_accounts ma
-        JOIN iam.tenant_memberships tm ON tm.tenant_id=ma.tenant_id AND tm.member_id=ma.member_id
-        WHERE ma.tenant_id=$1 AND ma.member_id=$2 AND ma.managed AND tm.role<>'owner' AND tm.status='active'`,
-          [tenantId, memberId],
-        )
-      ).rows[0];
-      if (!managed || memberId === principal.memberId)
-        problem(
-          403,
-          "managed_account_required",
-          "仅可重置本企业有效托管子账号；已有 MX 账号请使用统一找回。",
-        );
-      const fingerprint = digest(
-        JSON.stringify([
-          tenantId,
-          principal.memberId,
-          memberId,
-          "reset-password",
-        ]),
-      );
-      const previous = (
-        await db.query(
-          "SELECT * FROM dataport.member_commands WHERE id=$1 FOR UPDATE",
-          [body.commandId],
-        )
-      ).rows[0];
-      if (
-        previous &&
-        (previous.tenant_id !== tenantId ||
-          previous.actor !== principal.memberId ||
-          previous.fingerprint !== fingerprint)
-      )
-        problem(409, "account_command_conflict", "操作编号已被使用。");
-      if (previous?.state === "completed") return previous.document;
-      const result = await accounts.execute({
-        operation: "reset-password",
-        requestId: body.commandId,
-        tenantId,
-        actor: principal.memberId,
-        userId: managed.user_id,
-      });
-      await db.query(
-        `INSERT INTO dataport.member_commands(id,tenant_id,actor,operation,fingerprint,document,state)
-        VALUES($1,$2,$3,'reset-password',$4,$5,'completed') ON CONFLICT(id) DO UPDATE SET document=excluded.document,state='completed'`,
-        [body.commandId, tenantId, principal.memberId, fingerprint, result],
-      );
-      await this.event(
-        tenantId,
-        principal.memberId,
-        "member.password.reset",
-        memberId,
-        200,
-        {},
-        db,
-      );
-      return result;
-    });
+    return this.localAccounts.reset(principal, tenantId, memberId, body.commandId);
   }
   async initialPassword(principal, tenantId, memberId, accounts) {
-    requireOwner(principal, tenantId);
-    const managed = (
-      await this.pool.query(
-        "SELECT * FROM dataport.managed_accounts WHERE tenant_id=$1 AND member_id=$2 AND managed",
-        [tenantId, memberId],
-      )
-    ).rows[0];
-    if (!managed)
-      problem(
-        404,
-        "initial_password_unavailable",
-        "此账号没有可查看的初始密码。",
-      );
-    const result = await accounts.execute({
-      operation: "initial-password",
-      requestId: randomUUID(),
-      tenantId,
-      actor: principal.memberId,
-      userId: managed.user_id,
-    });
-    await this.event(
-      tenantId,
-      principal.memberId,
-      "member.initial-password.viewed",
-      memberId,
-    );
-    return result;
+    return this.localAccounts.initial(principal, tenantId, memberId);
   }
   async query(principal, tenantId, body, intent, execute) {
     requireDataportAccess(

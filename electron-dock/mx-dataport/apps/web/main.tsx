@@ -640,6 +640,8 @@ function App() {
               csrf={csrf}
               onVerified={retrySession}
             />
+          ) : session?.mustChangePassword ? (
+            <AccountSecurity />
           ) : session ? (
             <RemotePanel
               key={`${page}:${tenant}:${queryRevision}`}

@@ -205,7 +205,7 @@ export function EnterpriseMembers(props: Props) {
       <div className="page-heading">
         <div>
           <h1>企业账号</h1>
-          <p>统一 MX 账号 · 企业成员与角色权限</p>
+          <p>企业超管统一 MX 登录 · 员工使用数港独立子账号</p>
         </div>
         <div className="harbor-actions">
           <Button
@@ -477,7 +477,7 @@ export function EnterpriseMembers(props: Props) {
                 autoComplete="off"
                 placeholder={
                   operation === "create"
-                    ? "填写员工 MX 登录账号"
+                    ? "填写数港子账号，3–64 位，以字母开头"
                     : "填写已有 MX 账号"
                 }
                 onChange={() => setCommandId(crypto.randomUUID())}
@@ -506,7 +506,7 @@ export function EnterpriseMembers(props: Props) {
             </label>
             <small>
               {operation === "create"
-                ? "初始密码自动生成，仅企业超管可在详情中查看和复制。"
+                ? "初始密码自动生成，48 小时有效；首次登录须修改密码。仅企业超管可在详情中查看和复制。"
                 : "邀请链接 24 小时有效，员工登录统一 MX 账号并确认后加入企业。"}
             </small>
             {write.error && <p role="alert">{write.error}</p>}
@@ -590,7 +590,7 @@ export function EnterpriseMembers(props: Props) {
               {editingDetails === "role"
                 ? "为该员工选择企业角色，页面和操作按角色权限开放。"
                 : editingDetails
-                  ? "修改该员工在本企业的显示名称，统一 MX 账号资料由员工本人维护。"
+                  ? "修改该员工在本企业的显示名称。"
                   : "查看员工的登录账号、企业角色和当前状态。"}
             </DialogDescription>
           </DialogHeader>
@@ -871,7 +871,7 @@ export function EnterpriseMembers(props: Props) {
             <DialogTitle>重置托管子账号密码？</DialogTitle>
             <DialogDescription>
               {resetMember?.displayName}{" "}
-              的旧密码和登录会话将失效。重置后可从成员详情查看新初始密码，并交给员工修改。
+              {resetMember?.authMode === "local" ? "的数港旧密码和登录会话将失效。" : "将转为数港独立登录，原 MX 密码保持不变，该企业不再接受其 MX 登录。"}重置后可从成员详情查看 48 小时内有效的新初始密码，并交给员工修改。
             </DialogDescription>
           </DialogHeader>
           {write.error && <p role="alert">{write.error}</p>}
@@ -893,6 +893,7 @@ export function EnterpriseMembers(props: Props) {
                   })
                   .then(() => {
                     setResetMember(null);
+                    view.reload();
                     setNotice(
                       "密码已重置，请从成员详情查看新初始密码并交给员工。",
                     );
@@ -1372,6 +1373,10 @@ export function Audit(props: Props) {
     "member.updated": "修改员工",
     "member.initial-password.viewed": "查看初始密码",
     "member.password.reset": "重置托管子账号密码",
+    "member.login": "子账号登录",
+    "member.password.changed": "修改子账号密码",
+    "member.profile.updated": "修改个人资料",
+    "member.sessions.revoked": "撤销子账号会话",
     "ticket.created": "提交工单",
     "ticket.updated": "处理工单",
     "enterprise.renamed": "修改企业名称",

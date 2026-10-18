@@ -1485,3 +1485,5 @@
 .key-row-actions [data-slot="button"][data-variant="ghost"] {
   color: #e5484d;
 }
+.auth-login-modes { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0; }
+.auth-login-modes > button { flex: 1; min-width: 136px; }
