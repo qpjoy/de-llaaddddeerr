@@ -541,7 +541,7 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
-@media (max-width: 700px) {
+@media (max-width: 767px) {
   .harbor-console .parity-portrait {
     padding: 18px;
   }
@@ -551,6 +551,9 @@
   .parity-portrait .harbor-profile-fields {
     grid-template-columns: 1fr;
     gap: 16px;
+  }
+  .parity-portrait .harbor-profile-fields > div {
+    grid-template-columns: 74px minmax(0, 1fr);
   }
   .parity-portrait .harbor-risk-summary {
     border: 0;
@@ -786,6 +789,34 @@
 }
 .parity-notifications .notification-toolbar {
   margin-bottom: 16px;
+}
+.parity-notifications .harbor-message {
+  padding: 18px 12px;
+  margin: 0;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 8px;
+  box-shadow: none;
+  background: transparent;
+}
+.parity-notifications .harbor-message[data-unread="true"] {
+  background: #f3f7ff;
+}
+.parity-notifications .harbor-message-icon {
+  display: none;
+}
+.parity-notifications .harbor-message-heading h2 {
+  font-size: 14px;
+}
+.parity-notifications .harbor-message p {
+  font-size: 13px;
+  line-height: 1.7;
+  margin: 10px 0;
+  color: var(--text-secondary);
+}
+.parity-notifications .harbor-message time {
+  font-size: 11px;
+  color: var(--text-secondary);
 }
 .parity-notifications .harbor-empty {
   padding: 40px 20px;

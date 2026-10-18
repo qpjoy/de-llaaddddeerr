@@ -277,7 +277,11 @@ function AccountDialogSession({
                   <InputGroup>
                     <InputGroupInput id="auth-invite" name="inviteCode" required={register} maxLength={128} autoComplete="off" placeholder="输入 Launcher 提供的 DataPort 专用邀请码" disabled={busy} aria-describedby="auth-invite-help" />
                   </InputGroup>
-                  <FieldDescription id="auth-invite-help">已开通数港的 MX 账号可留空。此处用于开通数港，企业超管身份仍需后续校验。</FieldDescription>
+                  <FieldDescription id="auth-invite-help">
+                    {register
+                      ? "注册新 MX 账号必须填写有效的 DataPort 专用邀请码。已有 MX 账号请切换到登录。"
+                      : "已开通数港的 MX 账号可留空。此处用于开通数港，企业超管身份仍需后续校验。"}
+                  </FieldDescription>
                 </Field>
               )}
               {register &&
