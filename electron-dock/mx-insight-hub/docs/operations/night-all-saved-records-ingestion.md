@@ -40,8 +40,9 @@ checkpoint合同哈希不含源列清单，原固定映射与writer摘要也无�
 本次修复保留原映射、断点和既有门禁；不能通过清空checkpoint、重新批准映射或新增writer
 确认来绕过当前漂移。原有writer提交顺序问题不因接纳新列而得到证明。
 
-此次代码修复不需要新增Hub migration、源表DDL或重建索引，**尚未发布或取得线上恢复回执**。
-在Internal同步代码后，沿现有Hub部署流程发布：
+此次代码修复不需要新增Hub migration、源表DDL或重建索引，**发布尚未完成，未取得线上恢复回执**。
+本次部署在等待Admin退出时失败；后续回执确认Admin可用且Deployment已处理最新配置。
+同步本地部署诊断补丁后，可沿现有Hub部署流程重试一次并保留结果：
 
 ```bash
 MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh ops internal-production deploy
@@ -60,6 +61,40 @@ ingest有90秒优雅退出窗口并保留持久化分页任务与checkpoint；�
 本地验证：79项相关检查通过，覆盖实际PGlite目录SQL、14个分区、原23列/含tag/38列
 兼容、旧checkpoint分页续读、失败恢复及未知列/类型/可空性拒绝；类型检查和生产构建
 通过。上述是本地验证，仍需发布后的任务游标与队列回执确认生产恢复。
+
+### 同日部署受阻：Admin Pod退出等待超时
+
+用户截图显示acquisition-history三个索引已就绪，随后Admin缩容到0，等待
+`mx-insight-hub-admin-d6b5db4c7-qzbqv`删除超过120秒。失败发生在启动新migration Job、
+Public/Admin更新及ingest更新之前；不能视作本次字段修复已上线。
+清理日志中的“restoring”仅说明尝试恢复Admin副本数，不证明Pod已经Ready；新shadow镜像
+此前已导入，重建出的Admin也不能直接认定为旧镜像回滚。
+
+后续用户回执确认Admin Deployment的desired/current/ready/available均为1；上述同名Pod
+仍为Running且Ready，deletionTimestamp和finalizers均为空，终止宽限30秒，节点为
+`mx-internal-server`。因此当前Admin可用，不能把本次超时直接归因为应用卡在退出；
+最终副本数为1也可能仅由脚本EXIT恢复产生，尚不能认定有其他控制器回写。
+第二份回执显示当前ReplicaSet `mx-insight-hub-admin-d6b5db4c7`的generation/observed均为1，
+desired/current/ready均为1；历史10个ReplicaSet均为0副本。Hub没有HPA，查询时未返回Admin
+相关事件；事件为空不能证明此前没有发生操作。标签查询未包含Deployment，因为现有清单
+只在Pod模板与Service上声明该标签，Deployment自身没有，不能因查询漏行认为其不存在。
+后续按名称直接读取确认Deployment generation=observedGeneration=414，desired/current/
+ready均为1，未暂停，condition原因是MinimumReplicasAvailable和NewReplicaSetAvailable。
+当前状态已收敛，但不能还原失败当时的缩容过程，也未证明此次超时根因已解决。
+不再仅靠事后Ready状态反复推断历史；同步下述诊断补丁后，执行一次正常deploy重试。
+若再失败，保留恢复副本前的快照，按实际desired/observed/Pod删除状态继续定位；不要连续
+盲目重试。标准deploy会重新构建并导入对应源码镜像；apply路径不校验现存shadow镜像与
+源码一致，不能仅为节省构建时间就替换成apply。发布成功后仍须核对Night-All-A任务恢复。
+不以增加超时或强删Pod代替停止证据。
+强制删除API对象不保证节点上的进程已退出，见[Kubernetes Pod终止说明](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#forced-pod-termination)。
+
+本地部署脚本已在Admin停止超时、EXIT恢复之前输出有界元数据（Deployment及最多20个Pod，
+每次请求10秒），诊断失败仍保留原始部署失败，且不启动迁移；恢复副本失败会明确告警。
+显式`MX_SMOKE_DATA=0`现与Launcher开关一样优先于`.env.internal`，避免一次正常部署重试
+被旧配置重新启用业务数据冒烟；未显式设置时仍保留原配置行为。两种情况均有回归覆盖。
+完整部署脚本测试、Shell语法及diff检查通过，并经独立复核。这是失败诊断修复，
+不是线上缩容故障已解决的证明。本次不调整源字段合同、checkpoint、TG任务、共享存储
+或MX-H2I登录/联网配置。
 
 ## 2026-10-17：tasiting/maidanglao批次验证
 

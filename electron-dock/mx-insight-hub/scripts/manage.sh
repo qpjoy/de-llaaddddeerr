@@ -177,8 +177,10 @@ cleanup_deploy_runtime() {
   if [ "$status" -ne 0 ] && [ "$DEPLOY_FROZEN_ADMIN" = 1 ] \
     && command -v kubectl >/dev/null 2>&1; then
     say "restoring the Hub Admin replica after an interrupted staged rollout" >&2
-    kubectl -n mx-insight-hub scale deployment/mx-insight-hub-admin --replicas=1 \
-      >/dev/null 2>&1 || true
+    if ! kubectl -n mx-insight-hub scale deployment/mx-insight-hub-admin --replicas=1 \
+      >/dev/null 2>&1; then
+      say "WARNING: Hub Admin replica restoration failed; Admin availability is unconfirmed." >&2
+    fi
     DEPLOY_FROZEN_ADMIN=0
   fi
   if [ -n "$DEPLOY_PORT_FORWARD_PID" ]; then
@@ -1820,6 +1822,20 @@ k8s_api_diagnostics() {
   kubectl -n mx-insight-hub get events --sort-by=.lastTimestamp | tail -n 80 || true
 }
 
+k8s_admin_stop_diagnostics() {
+  say "Admin stop diagnostics (metadata only; at most 20 Pods)" >&2
+  # Never dump describe/logs/Pod specs here: they may contain credentials or
+  # request data. These reads are bounded and must not replace the deploy error.
+  kubectl -n mx-insight-hub get deployment/mx-insight-hub-admin \
+    --request-timeout=10s \
+    -o 'custom-columns=NAME:.metadata.name,GENERATION:.metadata.generation,OBSERVED:.status.observedGeneration,DESIRED:.spec.replicas,CURRENT:.status.replicas,READY:.status.readyReplicas,AVAILABLE:.status.availableReplicas' \
+    2>/dev/null | head -n 2 >&2 || true
+  kubectl -n mx-insight-hub get pods \
+    -l app.kubernetes.io/name=mx-insight-hub-admin --request-timeout=10s --chunk-size=0 \
+    -o 'custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase,DELETING:.metadata.deletionTimestamp,DELETE_GRACE:.metadata.deletionGracePeriodSeconds,STOP_GRACE:.spec.terminationGracePeriodSeconds,FINALIZERS:.metadata.finalizers,OWNER_KIND:.metadata.ownerReferences[*].kind,OWNER_NAME:.metadata.ownerReferences[*].name,WAIT_REASON:.status.containerStatuses[*].state.waiting.reason,EXIT_REASON:.status.containerStatuses[*].state.terminated.reason,EXIT_CODE:.status.containerStatuses[*].state.terminated.exitCode' \
+    2>/dev/null | head -n 21 >&2 || true
+}
+
 k8s_projector_diagnostics() {
   say "projector diagnostics"
   kubectl -n mx-insight-hub get deployment,pod \
@@ -2296,6 +2312,7 @@ apply_k8s() {
     kubectl -n "$namespace" scale deployment/mx-insight-hub-admin --replicas=0
     if ! kubectl -n "$namespace" wait --for=delete pod \
       -l app.kubernetes.io/name=mx-insight-hub-admin --timeout=120s; then
+      k8s_admin_stop_diagnostics
       die "Hub Admin did not stop before the staged rollout"
     fi
   fi
@@ -2998,6 +3015,8 @@ ops_action() {
   local build_proxy_override="${MX_INSIGHT_BUILD_PROXY-}"
   local sync_launcher_override_set=0
   local sync_launcher_override=""
+  local smoke_data_override_set=0
+  local smoke_data_override=""
   local justone_token_override_set=0
   local justone_token_override=""
   local justone_contract_override_set=0
@@ -3025,6 +3044,10 @@ ops_action() {
   if [ "${MX_INSIGHT_SYNC_LAUNCHER+x}" = x ]; then
     sync_launcher_override_set=1
     sync_launcher_override="$MX_INSIGHT_SYNC_LAUNCHER"
+  fi
+  if [ "${MX_SMOKE_DATA+x}" = x ]; then
+    smoke_data_override_set=1
+    smoke_data_override="$MX_SMOKE_DATA"
   fi
   if [ "${MX_INSIGHT_JUSTONE_TOKEN+x}" = x ]; then
     justone_token_override_set=1
@@ -3086,6 +3109,12 @@ ops_action() {
     MX_INSIGHT_SYNC_LAUNCHER=0
   fi
   export MX_INSIGHT_SYNC_LAUNCHER
+  # A one-shot request to omit live data probes must survive the saved config.
+  # Without an explicit choice, retain the existing .env.internal behavior.
+  if [ "$smoke_data_override_set" = 1 ]; then
+    MX_SMOKE_DATA="$smoke_data_override"
+    export MX_SMOKE_DATA
+  fi
   if [ "$justone_token_override_set" = 1 ]; then
     MX_INSIGHT_JUSTONE_TOKEN="$justone_token_override"
     export MX_INSIGHT_JUSTONE_TOKEN
