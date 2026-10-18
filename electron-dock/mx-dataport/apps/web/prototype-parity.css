@@ -547,10 +547,11 @@
   }
   .parity-portrait .harbor-profile-overview {
     grid-template-columns: 1fr;
+    padding-block: 22px;
   }
   .parity-portrait .harbor-profile-fields {
     grid-template-columns: 1fr;
-    gap: 16px;
+    gap: 22px 24px;
   }
   .parity-portrait .harbor-profile-fields > div {
     grid-template-columns: 74px minmax(0, 1fr);
@@ -558,6 +559,7 @@
   .parity-portrait .harbor-risk-summary {
     border: 0;
     padding: 0;
+    justify-content: center;
   }
   .parity-portrait .harbor-tag-groups {
     grid-template-columns: 1fr;
@@ -1149,9 +1151,22 @@
   font-weight: 500;
   color: var(--foreground);
 }
-@media (max-width: 700px) {
+@media (max-width: 767px) {
   .harbor-console .parity-portrait[data-slot="card"] {
+    padding: 0 0 24px;
+  }
+  .parity-portrait > [data-slot="card-header"] {
     padding: 18px;
+    gap: 14px;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .parity-portrait > [data-slot="card-content"] {
+    padding-inline: 18px;
+  }
+  .parity-portrait .harbor-report-heading > [data-slot="button"] {
+    height: 32px;
+    padding: 0 12px;
   }
 }
 .harbor-console .harbor-table-panel [data-slot="table-container"] {
