@@ -26,6 +26,18 @@ import { enterpriseUrl, hasPermission } from "./permissions";
 import { Pagination } from "./pagination";
 import { downloadExcel } from "./download";
 
+function historyStatusLabel(state: string) {
+  return (
+    ({
+      success: "成功",
+      partial: "部分数据",
+      no_data: "暂无数据",
+      unknown: "待确认",
+      error: "失败",
+    } as Record<string, string>)[state] || "待确认"
+  );
+}
+
 export function IpQuery({
   tenant,
   session,
@@ -171,7 +183,7 @@ export function IpQuery({
           i.ip,
           riskLevelLabel(i.payload?.response?.data?.data?.risk_level),
           dateTime(i.createdAt),
-          i.payload ? portraitState(i.payload) : "待确认",
+          historyStatusLabel(i.payload ? portraitState(i.payload) : "unknown"),
           riskAdvice(i.payload?.response?.data?.data?.risk_level),
         ]),
       );
@@ -332,16 +344,7 @@ export function IpQuery({
                         const state = i.payload
                           ? portraitState(i.payload)
                           : "unknown";
-                        const label =
-                          (
-                            {
-                              success: "成功",
-                              partial: "部分数据",
-                              no_data: "暂无数据",
-                              unknown: "待确认",
-                              error: "失败",
-                            } as Record<string, string>
-                          )[state] || "待确认";
+                        const label = historyStatusLabel(state);
                         return (
                           <TableRow key={i.id}>
                             <TableCell>{i.ip}</TableCell>
