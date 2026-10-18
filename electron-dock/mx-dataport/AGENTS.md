@@ -1,3 +1,5 @@
+- 2026-10-18 部署后原型复测：main-V9zTbDK5.js已上线；手机套餐padding/gap、工单/Key/员工弹窗居中、关闭焦点及矮窗口长表单滚动通过，前轮工单/文档/日志/账号说明修复已生效。手机标题仍低3.203125px，原因是后面的commerce标题规则覆盖；补充手机选择器优先级，构建和8项相关测试通过，新补丁待仅DataPort部署后截图确认。17张原图、6张并排图外置screenshot/ui-alignment-fix-20261018/postdeploy；QA仍blocked，不称全量通过；未访问被拒绝的本地预览，无查询/付款/账号/权限变更。
+
 - 2026-10-18 部署锁诊断：operations.mjs 在锁创建处隐藏 kubectl stderr，复用 enroll 的固定安全错误类别并标出 mx-harbor/mx-harbor-deploy-lock 与默认只读 recover-lock 入口；不输出原始 stderr/Secret，不自动删锁，不改恢复、迁移和 UID 约束。用户回执确认 processes=[]、迁移 Job terminal、Pod Succeeded，已指导先显式 --confirm-idle 成功后再部署；不以锁龄替代状态核验。仅数港运维脚本修改，无 Hub/Auth/业务变更。
 
 - 2026-10-18 原型已恢复4288，原目录只读；用户要求继续对齐，已改手机业务弹窗标题/说明居中、套餐卡片外层padding与gap、页面标题顶部对齐。类型/生产构建、8项相关测试通过；用户明确暂不允许本地预览，未取得修改后截图，不可宣称视觉通过。仅发布DataPort后线上复测；根目录design-qa.md为blocked，证据外置screenshot/ui-alignment-fix-20261018。此前4277阻塞描述为历史，不得继续声称原型无法访问。
