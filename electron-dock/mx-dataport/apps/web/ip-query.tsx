@@ -1,4 +1,4 @@
-import { riskAdvice } from "./risk-advice";
+import { riskAdvice, riskLevelLabel } from "./risk-advice";
 import { useEffect, useRef, useState } from "react";
 import { Search, Download, Clock3, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -169,7 +169,7 @@ export function IpQuery({
         ["IP", "风险等级", "查询时间", "状态", "风险参考建议"],
         items.map((i) => [
           i.ip,
-          i.payload?.response?.data?.data?.risk_level || "未提供",
+          riskLevelLabel(i.payload?.response?.data?.data?.risk_level),
           dateTime(i.createdAt),
           i.payload ? portraitState(i.payload) : "待确认",
           riskAdvice(i.payload?.response?.data?.data?.risk_level),
