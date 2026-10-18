@@ -183,6 +183,9 @@
   display: none;
 }
 @media (max-width: 767px) {
+  .harbor-console .page-heading {
+    align-items: flex-start;
+  }
   .harbor-console .page-heading h1 {
     font-size: 24px;
   }
@@ -862,7 +865,8 @@
 }
 @media (max-width: 767px) {
   .harbor-console .parity-commerce .ip-pricing-card[data-slot="card"] {
-    padding: 24px 0;
+    padding: 24px 20px;
+    gap: 20px;
   }
   .parity-audit-panel .dp-toolbar select {
     flex: 1;
@@ -1511,6 +1515,12 @@
   padding: var(--dp-dialog-padding) calc(var(--dp-dialog-padding) + 24px) 16px
     var(--dp-dialog-padding);
   text-align: left;
+}
+@media (max-width: 639px) {
+  .dp-viewport-dialog:not(.auth-dialog) > [data-slot="dialog-header"] {
+    padding-right: var(--dp-dialog-padding);
+    text-align: center;
+  }
 }
 .dp-dialog-body {
   display: grid;
