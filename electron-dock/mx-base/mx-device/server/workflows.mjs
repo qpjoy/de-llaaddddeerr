@@ -9,6 +9,8 @@ import {
   markDispatch,
   finish,
   checkpoint,
+  cancelSession,
+  ACTIVE_LIMIT,
 } from "./model.mjs";
 import {
   commandByCode,
@@ -35,9 +37,11 @@ import {
 import { APP_NAMES } from "./apps.mjs";
 import { normalizePoolPolicy } from "./pool-policy.mjs";
 import { sessionWaitUntil } from "./ledger.mjs";
+import { agentOnline, grantToAgent } from "./agent-lease.mjs";
+import { orderJobs, chargeClient } from "./fairness.mjs";
+import { clientBlockers } from "./client-limits.mjs";
 import { deviceApps, appBlockers, ensureApps } from "./apps.mjs";
 import {
-  compareJobs,
   matchesJob,
   policiesFor,
   insertionCost,
@@ -292,8 +296,8 @@ function enqueueWorkflow(s, now, mode, body, def) {
   requireThat(
     s.jobs.filter(
       (j) => j.mode === mode && ["queued", "running"].includes(j.status),
-    ).length < 200,
-    "任务池已满（200）",
+    ).length < ACTIVE_LIMIT[mode],
+    `任务池已满（${ACTIVE_LIMIT[mode]}）`,
     429,
   );
   if (deviceId) {
@@ -417,6 +421,14 @@ function yieldedSession(s, now, d, ignoreCooldown = false) {
     return null;
   if (s.attempts.some((a) => a.deviceId === d.id && a.status === "running"))
     return null;
+  if (
+    d.agentId &&
+    !agentOnline(
+      s.agents.find((x) => x.id === d.agentId),
+      now,
+    )
+  )
+    return null;
   const w = j.workflow,
     p = w.policySnapshot;
   if (!ignoreCooldown && d.cooldownUntil > now) return null;
@@ -450,27 +462,37 @@ function resumeSession(s, now, d, { a, j, w }, workerId) {
     : "从已确认检查点继续";
   return { device: d, job: j, attempt: a };
 }
-export function claimContinuation(s, now, mode, workerId, index) {
+export function claimContinuation(
+  s,
+  now,
+  mode,
+  workerId,
+  index,
+  runs = () => true,
+) {
   if (mode !== "sim") return null;
   for (const d of s.devices.filter(
-    (d) => d.mode === mode && d.workflowAttemptId,
+    (d) => d.mode === mode && d.workflowAttemptId && runs(d),
   )) {
     const session = yieldedSession(s, now, d);
     if (!session) continue;
     const { a, j, w, p, canInsert } = session;
     const children = canInsert
-      ? s.jobs
-          .filter(
+      ? orderJobs(
+          s,
+          now,
+          s.jobs.filter(
             (c) =>
               c.mode === mode &&
               c.status === "queued" &&
               c.notBefore <= now &&
               c.workflow?.loop === "small" &&
               matchesJob(d, c) &&
+              !clientBlockers(s, c).length &&
               !appBlockers(s, now, d, c, index).length &&
               !insertionBlockers(s, now, d, c, index).length,
-          )
-          .sort(compareJobs(now))
+          ),
+        )
       : [];
     const child = children[0];
     if (child) {
@@ -490,6 +512,9 @@ export function claimContinuation(s, now, mode, workerId, index) {
         dispatchedAt: null,
         checkpoints: [],
         loop: "small",
+        label: child.workflow.name,
+        steps: child.workflow.plan.length,
+        queuedMs: now - child.createdAt,
         parentAttemptId: a.id,
         estimatedDurationMs: child.estimatedDurationMs,
         executionModel: child.executionModel,
@@ -508,6 +533,8 @@ export function claimContinuation(s, now, mode, workerId, index) {
       d.lastClaimedAt = now;
       binding.lastClaimedAt = now;
       startWorkflow(s, now, d, child, ca);
+      chargeClient(s, now, child, ca);
+      if (d.agentId) grantToAgent(d, ca, now);
       event(
         s,
         now,
@@ -521,7 +548,10 @@ export function claimContinuation(s, now, mode, workerId, index) {
       j.reason = `检查点等待 ${j.appId} 冷却，保留原插槽`;
       continue;
     }
-    return resumeSession(s, now, d, session, workerId);
+    const resumed = resumeSession(s, now, d, session, workerId);
+    // A parked Agent session continues under a new grant (next token).
+    if (d.agentId) grantToAgent(d, resumed.attempt, now);
+    return resumed;
   }
   return null;
 }
@@ -552,6 +582,17 @@ export function beginCommand(s, now, a) {
   if (!owned(s, now, a)) return null;
   const j = s.jobs.find((j) => j.id === a.jobId),
     w = j.workflow;
+  // A requested stop takes effect here, between commands (nothing in flight).
+  const current = s.attempts.find((x) => x.id === a.id);
+  if (current.stopRequest) {
+    cancelSession(
+      s,
+      now,
+      current,
+      `${current.stopRequest.reason}：已在安全点停止`,
+    );
+    return null;
+  }
   requireThat(j.mode === "sim" && w, "真实组合执行未启用", 403);
   requireThat(
     !(s.commands || []).some(

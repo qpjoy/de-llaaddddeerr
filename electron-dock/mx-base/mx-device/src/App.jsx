@@ -5,6 +5,8 @@ import Workstation from "./Workstation.jsx";
 import Scenarios from "./Scenarios.jsx";
 import DeviceWorkspace from "./DeviceWorkspace.jsx";
 import AccountPool from "./AccountPool.jsx";
+import AgentPanel from "./AgentPanel.jsx";
+import Clients from "./Clients.jsx";
 import { useState, useCallback, useEffect } from "react";
 import {
   Desktop,
@@ -19,6 +21,7 @@ import {
   Code,
   Stack,
   IdentificationCard,
+  PlugsConnected,
 } from "@phosphor-icons/react";
 import { api, useSnapshot } from "./data.js";
 import { Modal, DeviceForm, JobForm, ObserverForm } from "./Forms.jsx";
@@ -101,6 +104,18 @@ export default function App() {
     <Login onLogin={() => setLogged(true)} />
   );
 }
+// Page title and one-line purpose, shown in the page header.
+const PAGES = {
+  workbench: ["设备工作台", "统一查看机架、队列与执行"],
+  scenarios: ["场景与策略", "用同一负载比较分配、等待与冷却"],
+  racks: ["机架管理", "机架、宿主机与设备的资源和限额"],
+  jobs: ["任务中心", "任务从提交、排队到执行的完整记录"],
+  catalog: ["指令与任务库", "平台指令与可复用的任务模板，按版本管理"],
+  accounts: ["账号池", "账号状态、预算与风控信号跟随账号，不随设备重置"],
+  clients: ["调用方", "Job API v1 的密钥、配额、公平权重、回调与嵌入"],
+  settings: ["连接设置", "设备连接、执行器与观察通道"],
+  lab: ["经典十槽实验", "检查点插入与大、小循环演示"],
+};
 function Workspace({ onExpired }) {
   const [mode, setMode] = useState("sim"),
     [page, setPage] = useState("workbench"),
@@ -117,10 +132,16 @@ function Workspace({ onExpired }) {
     [placement, setPlacement] = useState(null),
     [pacing, setPacing] = useState(null),
     [definitionSeed, setDefinitionSeed] = useState(null);
-  const { state, error, refresh } = useSnapshot(mode, onExpired);
+  const { state, error, refresh, live } = useSnapshot(mode, onExpired);
   useEffect(() => {
     window.scrollTo(0, 0);
   }, [page, mode]);
+  // Success messages fade after a few seconds; errors stay until the next action.
+  useEffect(() => {
+    if (!notice || failure) return;
+    const timer = setTimeout(() => setNotice(""), 5000);
+    return () => clearTimeout(timer);
+  }, [notice, failure]);
   const device =
     state.devices.find((d) => d.id === selectedId) || state.devices[0];
   const workspaceDevice = state.devices.find((d) => d.id === workspaceDeviceId);
@@ -197,13 +218,17 @@ function Workspace({ onExpired }) {
     ["jobs", "任务中心", FileText],
     ["catalog", "指令与任务库", Code],
     ["accounts", "账号池", IdentificationCard],
+    ["clients", "调用方", PlugsConnected],
     ["settings", "连接设置", Gear],
   ];
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          MX Device<span>设备中心</span>
+          <span className="brand-mark" aria-hidden="true">
+            M
+          </span>
+          MX Device
         </div>
         <nav aria-label="主导航">
           {nav.map(([key, label, Icon]) => (
@@ -223,79 +248,80 @@ function Workspace({ onExpired }) {
         </div>
       </aside>
       <div className="workspace">
-        <header className="topbar">
-          <span>
-            设备中心 <span className="slash">/</span>{" "}
-            {nav.find((n) => n[0] === page)?.[1] || "经典十槽实验"}
-          </span>
-          <div className="button-row">
-            <label className={`mode-select ${mode === "real" ? "real" : ""}`}>
-              <PlayCircle size={19} />
-              <span className="sr-only">运行模式</span>
-              <select
-                aria-label="运行模式"
-                value={mode}
-                onChange={(e) => {
-                  setMode(e.target.value);
-                  setSelectedId(null);
-                  setWorkspaceDeviceId(null);
-                  setRack("");
-                  setHistory(null);
-                  setNotice("");
-                  setModal(null);
+        <main>
+          <header className="page-header">
+            <div className="page-title">
+              <h1>{(PAGES[page] || PAGES.lab)[0]}</h1>
+              <p>{(PAGES[page] || PAGES.lab)[1]}</p>
+            </div>
+            <div className="page-actions">
+              <span
+                className={`live-status live-${live}`}
+                title={
+                  live === "stream"
+                    ? "实时推送：服务端变化约 1 秒内送达"
+                    : live === "poll"
+                      ? "实时推送不可用，每 1.5 秒拉取一次"
+                      : "正在连接"
+                }
+              >
+                <i />
+                {live === "stream"
+                  ? "实时"
+                  : live === "poll"
+                    ? "轮询"
+                    : "连接中"}
+              </span>
+              <label
+                className={`mode-select ${mode === "real" ? "real" : ""}`}
+                title={
+                  mode === "sim"
+                    ? "模拟演练：不会连接真实手机"
+                    : "真实设备：默认暂停，只有显式操作才检查或调度手机"
+                }
+              >
+                <PlayCircle size={19} />
+                <span className="sr-only">运行模式</span>
+                <select
+                  aria-label="运行模式"
+                  value={mode}
+                  onChange={(e) => {
+                    setMode(e.target.value);
+                    setSelectedId(null);
+                    setWorkspaceDeviceId(null);
+                    setRack("");
+                    setHistory(null);
+                    setNotice("");
+                    setModal(null);
+                  }}
+                >
+                  <option value="sim">模拟演练</option>
+                  <option value="real">真实设备</option>
+                </select>
+              </label>
+              <button className="primary" onClick={() => setModal("device")}>
+                <Plus size={18} />
+                添加设备
+              </button>
+              <button
+                className="icon-button logout"
+                aria-label="退出"
+                title="退出"
+                onClick={async () => {
+                  await api("logout", null, {});
+                  onExpired();
                 }}
               >
-                <option value="sim">模拟演练</option>
-                <option value="real">真实设备</option>
-              </select>
-            </label>
-            <button
-              className="text-button logout"
-              onClick={async () => {
-                await api("logout", null, {});
-                onExpired();
-              }}
-            >
-              <SignOut size={21} />
-              退出
-            </button>
-          </div>
-        </header>
-        <main>
-          <div className="page-heading">
-            <div>
-              <h1>
-                {page === "lab"
-                  ? "让调度过程可观测、可控制"
-                  : page === "workbench"
-                    ? "机架运行，一眼掌握"
-                    : page === "scenarios"
-                      ? "场景、规则与调度策略"
-                      : page === "racks"
-                        ? "机架与设备资源"
-                        : page === "catalog"
-                          ? "平台指令与任务模板"
-                          : page === "jobs"
-                            ? "让任务有序流向设备"
-                            : page === "accounts"
-                              ? "账号状态与节奏，跟随账号"
-                              : "让每一次执行都有据可查"}
-              </h1>
-              <p>单机串行，多机协作。真实执行与模拟演练严格分离。</p>
+                <SignOut size={20} />
+              </button>
             </div>
-            <button className="primary" onClick={() => setModal("device")}>
-              <Plus size={19} />
-              添加设备
-            </button>
-          </div>
-          <div
-            className={`notice mode-notice ${mode === "real" ? "real" : ""}`}
-          >
-            <Info size={20} />
-            {mode === "sim"
-              ? "当前为模拟演练 · 不会连接真实手机"
-              : "真实设备 · 默认暂停 · 只有显式操作才检查或调度手机"}
-          </div>
+          </header>
+          {mode === "real" && (
+            <div className="notice mode-notice real">
+              <Info size={20} />
+              真实设备 · 默认暂停 · 只有显式操作才检查或调度手机
+            </div>
+          )}
           {(notice || error) && (
             <div
               className={`feedback ${failure || error ? "error" : "success"}`}
@@ -316,6 +342,7 @@ function Workspace({ onExpired }) {
               onInspect={inspect}
               onScenarios={() => setPage("scenarios")}
               onRackManage={() => setPage("racks")}
+              onJobs={() => setPage("jobs")}
               onAdd={() => setModal("device")}
               onRealSubmit={() => setModal("real-demo")}
             />
@@ -409,20 +436,34 @@ function Workspace({ onExpired }) {
             />
           ) : page === "accounts" ? (
             <AccountPool key={mode} mode={mode} busy={busy} run={run} />
+          ) : page === "clients" ? (
+            mode === "sim" ? (
+              <Clients busy={busy} run={run} />
+            ) : (
+              <section className="panel clients-page">
+                <p className="muted clients-empty">
+                  调用方与 Job API v1 目前只开放模拟模式；切回“模拟演练”查看。
+                </p>
+              </section>
+            )
           ) : page === "settings" ? (
-            <Connections
-              state={state}
-              onAdd={() => setModal("device")}
-              onConnectReal={() => {
-                setMode("real");
-                setSelectedId(null);
-                setWorkspaceDeviceId(null);
-                setRack("");
-                setHistory(null);
-                setNotice("");
-                setModal("device");
-              }}
-            />
+            <>
+              <Connections
+                state={state}
+                onConnectReal={() => {
+                  setMode("real");
+                  setSelectedId(null);
+                  setWorkspaceDeviceId(null);
+                  setRack("");
+                  setHistory(null);
+                  setNotice("");
+                  setModal("device");
+                }}
+              />
+              {mode === "sim" && (
+                <AgentPanel state={state} busy={busy} run={run} />
+              )}
+            </>
           ) : null}
         </main>
       </div>

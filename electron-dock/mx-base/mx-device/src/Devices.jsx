@@ -160,14 +160,11 @@ export function DeviceControls({ device: d, onControl, onProbe, busy }) {
     </div>
   );
 }
-export function Connections({ state, onAdd, onConnectReal }) {
+export function Connections({ state, onConnectReal }) {
   return (
     <section className="panel settings">
       <div className="section-head">
-        <h2>连接设置</h2>
-        <button className="primary" onClick={onAdd}>
-          添加设备
-        </button>
+        <h2>设备连接与执行器</h2>
       </div>
       <div className="panel-body">
         <h3>服务器现有 mobile-agent</h3>
@@ -212,7 +209,9 @@ export function Connections({ state, onAdd, onConnectReal }) {
                     </td>
                     <td>
                       {w.scheduler === "leader"
-                        ? `模拟调度领导者 · epoch ${w.epoch}`
+                        ? w.epoch == null
+                          ? "模拟调度（单实例）"
+                          : `模拟调度领导者 · epoch ${w.epoch}`
                         : w.scheduler === "standby"
                           ? "备用（只执行真实设备与已领取工作）"
                           : "—"}

@@ -16,7 +16,7 @@
 import { randomInt, randomUUID } from "node:crypto";
 import { appName, deviceInterval, ensureApps, jobApp } from "./apps.mjs";
 import {
-  normalizePoolPolicy,
+  normalizedPolicy,
   poolAppPolicy,
   poolRunHistory,
 } from "./pool-policy.mjs";
@@ -45,7 +45,7 @@ const secs = (ms) => Math.ceil(ms / 1000);
 export function pacingFor(state, device, appId) {
   const loop = rackPolicy(state, device);
   const scheduler = enabledScheduler(state, device);
-  const pacing = scheduler ? normalizePoolPolicy(scheduler).pacing : null;
+  const pacing = scheduler ? normalizedPolicy(scheduler).pacing : null;
   const app = (state.apps || []).find(
     (a) =>
       a.mode === device.mode && a.deviceId === device.id && a.appId === appId,

@@ -11,6 +11,21 @@ const CONNECTION = Object.freeze({
   username: 'mx_data', password: 'private', sslMode: 'disable',
 })
 
+test('failed read-only source inspection does not claim the pipeline was paused or expose connection errors', async () => {
+  const preparer = new TelegramMonitorSourcePreparer({
+    poolFactory: () => ({
+      connect: async () => { throw new Error('private connection details') },
+      end: async () => {},
+    }),
+  })
+  await assert.rejects(() => preparer.inspect(CONNECTION), (error) => {
+    assert.equal(error.code, 'source_inspection_failed')
+    assert.equal(error.message.includes('paused'), false)
+    assert.equal(error.message.includes('private'), false)
+    return true
+  })
+})
+
 test('Telegram source SQL serializes contract installation and bulk writes without per-row watermark updates', async () => {
   const root = new URL('../../server/ingest/telegram/sql/', import.meta.url)
   const sql = await readFile(new URL('prepare-source-v1.sql', root), 'utf8')

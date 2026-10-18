@@ -609,6 +609,137 @@ function preparedSource(generation = '0123456789abcdef0123456789abcdef') {
   }
 }
 
+function telegramRecoveryFixture() {
+  const fixture = telegramPipelineFixture()
+  for (const source of fixture.sources.values()) {
+    source.status = 'active'
+    source.connection.sourceContractId = preparedSource().contract.generation
+  }
+  for (const [id, cursor] of fixture.cursors) {
+    cursor.status = 'failed'
+    cursor.error = 'source_contract_mismatch'
+    cursor.position = { cursor: '2026-10-13T00:00:00.000Z', lastId: id, importRunId: `run-${id}` }
+  }
+  fixture.sourcePreparer = {
+    inspect: async () => {
+      fixture.calls.push(['inspectPreparation'])
+      return preparedSource()
+    },
+  }
+  fixture.queue.hasOutstandingJob = async () => false
+  fixture.queue.saveCursor = async (id, position, options) => {
+    fixture.calls.push(['saveCursor', id])
+    fixture.cursors.set(id, { ...fixture.cursors.get(id), position: structuredClone(position), ...options })
+  }
+  return fixture
+}
+
+test('Telegram source inspection remains read-only while enabled or between running batches; preparation still requires pause and drain', async () => {
+  const fixture = telegramRecoveryFixture()
+  const pipeline = new TelegramMonitorPipeline(fixture)
+  const before = structuredClone([...fixture.cursors])
+  assert.equal((await pipeline.inspectSourcePreparation()).ready, true)
+  assert.deepEqual([...fixture.cursors], before)
+  await assert.rejects(
+    () => pipeline.prepareSource({ confirmPipelineKey: 'telegram-monitor' }),
+    (error) => error.code === 'source_pause_required',
+  )
+  fixture.cursors.get('external:telegram-monitor-messages').status = 'running'
+  assert.equal((await pipeline.inspectSourcePreparation()).ready, true)
+  for (const source of fixture.sources.values()) source.status = 'paused'
+  await assert.rejects(
+    () => pipeline.prepareSource({ confirmPipelineKey: 'telegram-monitor' }),
+    (error) => error.code === 'source_draining',
+  )
+  assert.equal(fixture.calls.some(([kind]) => kind === 'saveCursor' || kind === 'updateBatch'), false)
+})
+
+test('Telegram recovery validates the source pair before preserving checkpoints and manual pause state', async () => {
+  const fixture = telegramRecoveryFixture()
+  fixture.sources.get('telegram-monitor-chats').status = 'paused'
+  const positions = [...fixture.cursors.values()].map((cursor) => structuredClone(cursor.position))
+  const result = await new TelegramMonitorPipeline(fixture).resumeFailedTasks()
+  assert.equal(result.tasks.every((task) => task.resumed), true)
+  assert.deepEqual([...fixture.cursors.values()].map((cursor) => cursor.position), positions)
+  assert.equal([...fixture.cursors.values()].every((cursor) => cursor.status === 'idle' && cursor.error === null), true)
+  assert.equal(fixture.sources.get('telegram-monitor-chats').status, 'paused')
+  assert.equal(fixture.sources.get('telegram-monitor-messages').status, 'active')
+  const checks = fixture.calls.filter(([kind]) => ['inspectPreparation', 'describe', 'checkpoint', 'saveCursor'].includes(kind))
+  assert.deepEqual(checks.map(([kind]) => kind), ['inspectPreparation', 'describe', 'checkpoint', 'describe', 'checkpoint', 'saveCursor', 'saveCursor'])
+})
+
+test('Telegram recovery does not clear either failure when source contract, generation, schema or checkpoint checks fail', async () => {
+  const cases = [
+    ['source_prepare_required', (fixture) => {
+      fixture.sourcePreparer.inspect = async () => ({ ...preparedSource(), ready: false, steps: [{ key: 'triggers', status: 'needed' }] })
+    }],
+    ['source_prepare_required', (fixture) => {
+      fixture.sourcePreparer.inspect = async () => preparedSource('fedcba9876543210fedcba9876543210')
+    }],
+    ['source_prepare_required', (fixture) => {
+      fixture.sourcePreparer.inspect = async () => ({ ...preparedSource(), sourceIdentityChanged: true })
+    }],
+    ['source_probe_failed', (fixture) => {
+      fixture.databasePuller.describe = async (key) => ({ issues: key.endsWith('messages') ? ['missing cursor index'] : [] })
+    }],
+    ['checkpoint_contract_mismatch', (fixture) => {
+      fixture.databasePuller.assertCheckpointCompatible = async (key) => {
+        if (key.endsWith('messages')) throw new AppError(409, 'checkpoint_contract_mismatch', 'saved contract differs')
+      }
+    }],
+  ]
+  for (const [code, arrange] of cases) {
+    const fixture = telegramRecoveryFixture()
+    const before = structuredClone([...fixture.cursors])
+    arrange(fixture)
+    await assert.rejects(() => new TelegramMonitorPipeline(fixture).resumeFailedTasks(), (error) => error.code === code)
+    assert.deepEqual([...fixture.cursors], before, code)
+    assert.equal(fixture.calls.some(([kind]) => kind === 'saveCursor' || kind === 'updateBatch'), false, code)
+  }
+})
+
+test('Telegram recovery refuses pending paired jobs and lost locks without clearing failures', async () => {
+  const pending = telegramRecoveryFixture()
+  pending.queue.hasOutstandingJob = async (_queue, { sourceKey }) => sourceKey.endsWith('chats')
+  await assert.rejects(
+    () => new TelegramMonitorPipeline(pending).resumeFailedTasks(),
+    (error) => error.code === 'source_recovery_pending',
+  )
+  assert.equal(pending.calls.some(([kind]) => kind === 'inspectPreparation' || kind === 'saveCursor'), false)
+
+  const lost = telegramRecoveryFixture()
+  lost.databasePuller.withSourceLocks = async (_keys, operation) => operation(async () => {
+    throw new AppError(409, 'source_lock_lost', 'lock lost')
+  })
+  await assert.rejects(
+    () => new TelegramMonitorPipeline(lost).resumeFailedTasks(),
+    (error) => error.code === 'source_lock_lost',
+  )
+  assert.equal(lost.calls.some(([kind]) => kind === 'saveCursor'), false)
+})
+
+test('Telegram recovery remains a no-op with idle cursors and no source inspection', async () => {
+  const fixture = telegramPipelineFixture()
+  const result = await new TelegramMonitorPipeline(fixture).resumeFailedTasks()
+  assert.equal(result.tasks.every((task) => task.resumed === false), true)
+  assert.equal(fixture.calls.some(([kind]) => ['resolveConnection', 'describe', 'checkpoint'].includes(kind)), false)
+})
+
+test('Telegram recovery preserves both failures when queue evidence is unavailable', async () => {
+  for (const unavailable of ['missing', 'query-error']) {
+    const fixture = telegramRecoveryFixture()
+    const before = structuredClone([...fixture.cursors])
+    if (unavailable === 'missing') delete fixture.queue.hasOutstandingJob
+    else fixture.queue.hasOutstandingJob = async () => { throw new AppError(503, 'queue_unavailable', 'queue unavailable') }
+    await assert.rejects(
+      () => new TelegramMonitorPipeline(fixture).resumeFailedTasks(),
+      (error) => error.code === (unavailable === 'missing' ? 'source_recovery_unavailable' : 'queue_unavailable'),
+    )
+    assert.deepEqual([...fixture.cursors], before)
+    assert.equal(fixture.calls.some(([kind]) => kind === 'inspectPreparation' || kind === 'saveCursor'), false)
+  }
+})
+
 test('Telegram monitor pipeline exposes one consistent connection and fixed task contracts', async () => {
   const fixture = telegramPipelineFixture()
   const pipeline = new TelegramMonitorPipeline(fixture)
@@ -1173,6 +1304,17 @@ test('Telegram source prepare routes are Admin-Token-only and never return one-t
     const inspected = await call(baseUrl, path, { headers })
     assert.equal(inspected.response.status, 200)
     assert.equal(inspected.payload.data.ready, true)
+
+    for (const source of fixture.sources.values()) source.status = 'active'
+    const activeInspection = await call(baseUrl, path, { headers })
+    assert.equal(activeInspection.response.status, 200)
+    assert.equal(activeInspection.payload.data.ready, true)
+    const activePreparation = await call(baseUrl, path, {
+      method: 'POST', headers, body: { confirmPipelineKey: 'telegram-monitor' },
+    })
+    assert.equal(activePreparation.response.status, 409)
+    assert.equal(activePreparation.payload.error.code, 'source_pause_required')
+    for (const source of fixture.sources.values()) source.status = 'paused'
 
     const prepared = await call(baseUrl, path, {
       method: 'POST', headers,

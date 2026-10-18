@@ -1,10 +1,11 @@
 import { estimatedDuration } from "./task-contract.mjs";
-import { compareJobs } from "./queue-order.mjs";
+import { orderJobs } from "./fairness.mjs";
+import { clientRunning } from "./client-limits.mjs";
 import { calibratedDuration } from "./command-timing.mjs";
 import { windowAdmission } from "./ledger.mjs";
 import { accountBlockers, findAccount } from "./accounts.mjs";
 import {
-  normalizePoolPolicy,
+  normalizedPolicy,
   poolAppPolicy,
   poolRunHistory,
 } from "./pool-policy.mjs";
@@ -124,7 +125,7 @@ export function planPool(
   const configured = (state.loopPolicies || []).find(
     (p) => p.mode === "sim" && p.rack === rack,
   )?.scheduler;
-  const policy = normalizePoolPolicy(suppliedPolicy || configured || {});
+  const policy = normalizedPolicy(suppliedPolicy || configured || {});
   const result = {
     at: now,
     mode: "sim",
@@ -143,11 +144,14 @@ export function planPool(
   const resources = (state.resources || []).filter((r) => r.mode === "sim");
   const reservations = [];
   const jobsById = new Map(state.jobs.map((j) => [j.id, j]));
-  // Sessions of other racks share the executor's slots.
-  const simDevices = state.devices.filter((d) => d.mode === "sim");
+  // Sessions of other racks share the executor's slots; Agent-hosted devices
+  // run on their own host and do not.
+  const simDevices = state.devices.filter(
+    (d) => d.mode === "sim" && !d.agentId,
+  );
   const executor =
     Number.isInteger(executorSlots) && executorSlots < simDevices.length
-      ? { maxConcurrent: executorSlots, contains: () => true }
+      ? { maxConcurrent: executorSlots, contains: (d) => !d.agentId }
       : null;
   if (executor)
     for (const d of simDevices)
@@ -217,14 +221,23 @@ export function planPool(
         devices.length) *
       100
     : 0;
-  const queue = state.jobs
-    .filter(
+  const queue = orderJobs(
+    state,
+    now,
+    state.jobs.filter(
       (j) =>
         j.mode === "sim" &&
         j.status === "queued" &&
         allDevices.some((d) => matches(d, j)),
-    )
-    .sort(compareJobs(now));
+    ),
+  );
+  // Per-client concurrency caps: running sessions plus those planned here.
+  const clientLoad = clientRunning(state),
+    clientCaps = new Map(
+      (state.clients || [])
+        .filter((c) => c.quotas?.maxInflight != null)
+        .map((c) => [c.id, c]),
+    );
   for (const job of queue) {
     if (job.notBefore > now) {
       result.blocked.push({
@@ -240,6 +253,18 @@ export function planPool(
         jobId: job.id,
         code: "dependency",
         reason: "等待来源任务成功；依赖关系不参与设备绑定",
+      });
+      continue;
+    }
+    const client = job.client && clientCaps.get(job.client.id);
+    if (
+      client &&
+      (clientLoad.get(client.id) || 0) >= client.quotas.maxInflight
+    ) {
+      result.blocked.push({
+        jobId: job.id,
+        code: "client-inflight",
+        reason: `调用方「${client.name}」并发已达上限（${client.quotas.maxInflight}），其余任务等待`,
       });
       continue;
     }
@@ -317,7 +342,8 @@ export function planPool(
       let startAt = ready.at;
       for (let n = 0; n < 20 && Number.isFinite(startAt); n++) {
         const local = capacityStart(startAt, span, slot.permits, reservations);
-        const global = executor ? executorStart(local, span) : local;
+        const global =
+          executor && !d.agentId ? executorStart(local, span) : local;
         if (global === startAt) break;
         startAt = global;
       }
@@ -404,7 +430,8 @@ export function planPool(
     const previous = fresh ? null : job.poolPlan;
     const moves = previous?.moves || 0;
     let moved = false,
-      forced = false;
+      forced = false,
+      sticky = null;
     if (previous?.deviceId && previous.deviceId !== chosen.slot.device.id) {
       const kept = candidates.find(
         (c) => c.slot.device.id === previous.deviceId,
@@ -428,6 +455,8 @@ export function planPool(
               : gain < threshold
                 ? "sticky-gain"
                 : null;
+        // Explanation: what moving would gain against the stability bar.
+        sticky = { gainMs: gain, thresholdMs: threshold, kept: !!stay };
         if (stay) {
           chosen = kept;
           reasonCode = stay;
@@ -444,6 +473,7 @@ export function planPool(
       switchMs,
       affinity,
     } = chosen;
+    if (client) clientLoad.set(client.id, (clientLoad.get(client.id) || 0) + 1);
     result.assignments.push({
       jobId: job.id,
       deviceId: slot.device.id,
@@ -463,6 +493,19 @@ export function planPool(
       moved,
       forced,
       moves: moves + (moved && !forced ? 1 : 0),
+      sticky,
+      // The next-best devices, for "why here" explanations.
+      alternatives: candidates
+        .filter((c) => c !== chosen)
+        .slice(0, 3)
+        .map((c) => ({
+          deviceId: c.slot.device.id,
+          startAt: c.startAt,
+          finishAt: c.finishAt,
+          switchMs: c.switchMs,
+          affinity: c.affinity,
+        })),
+      candidates: candidates.length,
       mutable: true,
     });
     app.poolRuns = poolRunHistory(app, startAt, appPolicy);
@@ -489,6 +532,17 @@ export function recordPlans(state, now, plans) {
       const job = jobs.get(a.jobId);
       if (!job || job.status !== "queued") continue;
       if (job.poolPlan?.deviceId === a.deviceId) continue;
+      // Bounded plan history for explanations: when, from where, and why.
+      job.planHistory = [
+        ...(job.planHistory || []),
+        {
+          at: now,
+          from: job.poolPlan?.deviceId ?? null,
+          to: a.deviceId,
+          reason: a.reason,
+          gainMs: a.sticky?.gainMs ?? null,
+        },
+      ].slice(-6);
       job.poolPlan = { deviceId: a.deviceId, moves: a.moves, since: now };
     }
 }

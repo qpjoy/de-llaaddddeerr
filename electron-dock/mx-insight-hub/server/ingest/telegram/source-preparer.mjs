@@ -61,8 +61,16 @@ function directConnectionOptions(connection) {
   }
 }
 
-function safePrepareError(error, details = undefined) {
+function safePrepareError(error, details = undefined, { inspection = false } = {}) {
   if (error instanceof AppError) return error
+  if (inspection) {
+    return new AppError(
+      error?.code === '42501' ? 403 : 503,
+      'source_inspection_failed',
+      'Telegram source inspection failed; no source or pipeline state was changed',
+      details,
+    )
+  }
   if (error?.code === '42501') {
     return new AppError(
       403,
@@ -621,7 +629,7 @@ export class TelegramMonitorSourcePreparer {
     try {
       return await this.#withClient(connection, { writable: false }, (client) => this.#inspect(client))
     } catch (error) {
-      throw safePrepareError(error)
+      throw safePrepareError(error, undefined, { inspection: true })
     }
   }
 

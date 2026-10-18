@@ -6,6 +6,7 @@ import {
   CRAWLER_MAPPING_VERSION,
   CRAWLER_PIPELINE_KEY,
   CRAWLER_SOURCES,
+  CRAWLER_OPTIONAL_SOURCE_COLUMN_CONTRACT,
   CRAWLER_SOURCE_COLUMN_CONTRACT,
   CRAWLER_FIELD_MAP,
   crawlerSourceSpec,
@@ -524,12 +525,13 @@ test('crawler bulk recovery isolates a busy leaf and a failed probe while contin
   assert.ok(retried.tasks.every(task => !task.error))
 })
 
-test('crawler resume accepts nullable tag with the original mapping and checkpoint without enabling a paused source', async () => {
+for (const fullSchema of [false, true]) test(`crawler resume accepts ${fullSchema ? 'reviewed storage metadata' : 'nullable tag'} with the original mapping and checkpoint without enabling a paused source`, async () => {
   const setup = fixture()
   setup.activateAll()
   const spec = CRAWLER_SOURCES.find(source => source.sourceType === 'news')
   setup.sources.get(spec.sourceKey).status = 'paused'
-  setup.descriptions.get(spec.sourceKey).columns.push({ name: 'tag', databaseType: 'varchar', nullable: true })
+  setup.descriptions.get(spec.sourceKey).columns.push(...CRAWLER_OPTIONAL_SOURCE_COLUMN_CONTRACT
+    .filter(column => fullSchema || column.name === 'tag').map(column => ({ ...column })))
   const position = {
     contractHash: 'original-contract', mappingVersion: 1,
     cursor: '2026-10-13 04:15:16.123456+00', lastId: '21049', importRunId: 'original-run',
@@ -539,6 +541,7 @@ test('crawler resume accepts nullable tag with the original mapping and checkpoi
   })
   const originalSources = structuredClone([...setup.sources.values()])
   const originalMappings = structuredClone([...setup.activeMappings.values()])
+  const originalAttestation = await setup.store.getLatestPipelineWriterContractAttestation(CRAWLER_PIPELINE_KEY)
   setup.databasePuller.assertCheckpointCompatible = async (sourceKey, { mappingOverride }) => {
     assert.equal(sourceKey, spec.sourceKey)
     assert.deepEqual(mappingOverride, setup.activeMappings.get(spec.sourceKey))
@@ -557,10 +560,48 @@ test('crawler resume accepts nullable tag with the original mapping and checkpoi
   assert.deepEqual(setup.calls.compatible, [spec.sourceKey])
   assert.deepEqual([...setup.sources.values()], originalSources)
   assert.deepEqual([...setup.activeMappings.values()], originalMappings)
+  assert.deepEqual(await setup.store.getLatestPipelineWriterContractAttestation(CRAWLER_PIPELINE_KEY), originalAttestation)
   assert.equal(setup.calls.activations.length, 0)
   assert.equal(setup.calls.updates.length, 0)
   assert.equal(setup.calls.enqueued.length, 0)
   assert.equal(setup.calls.reset.length, 0)
+})
+
+test('crawler recovery retains failed cursors and manual pauses when reviewed metadata drifts or unknown columns appear', async (t) => {
+  const cases = [
+    ['unknown column', columns => [...columns, { name: 'unreviewed_metadata', databaseType: 'jsonb', nullable: true }]],
+    ['wrong type', columns => columns.map(column => column.name === 'published_date'
+      ? { ...column, databaseType: 'varchar' } : column)],
+    ['wrong nullability', columns => columns.map(column => column.name === 'storage_schema_version'
+      ? { ...column, nullable: true } : column)],
+  ]
+  for (const [name, mutate] of cases) await t.test(name, async () => {
+    const setup = fixture()
+    setup.activateAll()
+    const spec = CRAWLER_SOURCES.find(source => source.sourceType === 'news')
+    setup.sources.get(spec.sourceKey).status = 'paused'
+    setup.descriptions.get(spec.sourceKey).columns = mutate([
+      ...validColumns(), ...CRAWLER_OPTIONAL_SOURCE_COLUMN_CONTRACT.map(column => ({ ...column })),
+    ])
+    setup.cursors.set(spec.sourceKey, {
+      status: 'failed', error: 'source_contract_mismatch',
+      position: { contractHash: 'original-contract', mappingVersion: 1,
+        cursor: '2026-10-13 04:15:16.123456+00', lastId: '21049', importRunId: 'original-run' },
+    })
+    const original = structuredClone(setup.cursors.get(spec.sourceKey))
+    const originalMapping = structuredClone(setup.activeMappings.get(spec.sourceKey))
+    const originalAttestation = await setup.store.getLatestPipelineWriterContractAttestation(CRAWLER_PIPELINE_KEY)
+    await assert.rejects(() => setup.pipeline.resumeFailedTask(spec.sourceKey), error => error?.code === 'source_probe_failed')
+    assert.deepEqual(setup.cursors.get(spec.sourceKey), original)
+    assert.equal(setup.sources.get(spec.sourceKey).status, 'paused')
+    assert.deepEqual(setup.activeMappings.get(spec.sourceKey), originalMapping)
+    assert.deepEqual(await setup.store.getLatestPipelineWriterContractAttestation(CRAWLER_PIPELINE_KEY), originalAttestation)
+    assert.equal(setup.calls.saved.length, 0)
+    assert.equal(setup.calls.activations.length, 0)
+    assert.equal(setup.calls.updates.length, 0)
+    assert.equal(setup.calls.enqueued.length, 0)
+    assert.equal(setup.calls.reset.length, 0)
+  })
 })
 
 test('crawler resume leaves tender failed when its cursor index is missing and recovers compatible siblings independently', async () => {

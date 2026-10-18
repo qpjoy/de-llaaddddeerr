@@ -33,7 +33,21 @@ expected_columns(name, database_type, nullable, optional) AS (
     ('first_seen_at', 'timestamptz', false, false),
     ('last_seen_at', 'timestamptz', false, false),
     ('created_at', 'timestamptz', false, false),
-    ('tag', 'varchar', true, true)
+    ('tag', 'varchar', true, true),
+    ('storage_schema_version', 'int4', false, true),
+    ('source_key', 'text', true, true),
+    ('source_name', 'text', true, true),
+    ('publisher_name', 'text', true, true),
+    ('content_kind', 'varchar', true, true),
+    ('content_status', 'varchar', true, true),
+    ('has_full_text', 'bool', true, true),
+    ('summary', 'text', true, true),
+    ('published_at_utc', 'timestamptz', true, true),
+    ('published_date', 'date', true, true),
+    ('published_at_precision', 'varchar', true, true),
+    ('published_at_status', 'varchar', true, true),
+    ('fetch_transport', 'varchar', true, true),
+    ('standardization_warnings', 'jsonb', true, true)
 ),
 parent AS MATERIALIZED (
   SELECT c.oid, n.nspname AS schema_name, c.relname AS table_name,

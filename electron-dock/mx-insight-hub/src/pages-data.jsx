@@ -722,7 +722,7 @@ function TelegramPipelineCard({ pipeline, loading, error, onOpen, onRetry }) {
             <div><dt>数据库</dt><dd><code>{pipeline?.connection?.database || '—'}</code></dd></div>
             <div><dt>输入任务</dt><dd>{tasks.length || 2} 个固定表</dd></div>
             <div><dt>同步周期</dt><dd>{telegramScheduleConsistent(pipeline) ? `${formatNumber(pipeline?.syncIntervalSeconds || 300)} 秒` : '待统一'}</dd></div>
-            <div><dt>最近运行</dt><dd>{latestRunAt ? formatDate(latestRunAt) : '尚未运行'}</dd></div>
+            <div><dt>最近导入批次</dt><dd>{latestRunAt ? formatDate(latestRunAt) : '尚无导入批次'}</dd></div>
           </dl>
           <div className="mih-telegram-card__actions">
             {!telegramConnectionConsistent(pipeline) || !telegramScheduleConsistent(pipeline) ? <span className="mih-telegram-card__alert"><Warning size={15} />双表连接或周期不一致，需重新统一保存</span> : null}
@@ -819,7 +819,7 @@ function TelegramSqlitePipelineCard({ pipeline, loading, error, onOpen, onRetry 
             <div><dt>访问凭据</dt><dd>{pipeline?.connection?.tokenConfigured ? 'Bearer Token 已配置' : 'Token 待配置'}</dd></div>
             <div><dt>输入任务</dt><dd>{tasks.length || 2} 个固定资源</dd></div>
             <div><dt>同步周期</dt><dd>{formatNumber(pipeline?.syncIntervalSeconds || 300)} 秒</dd></div>
-            <div><dt>最近运行</dt><dd>{latestRunAt ? formatDate(latestRunAt) : '尚未运行'}</dd></div>
+            <div><dt>最近导入批次</dt><dd>{latestRunAt ? formatDate(latestRunAt) : '尚无导入批次'}</dd></div>
           </dl>
           <div className="mih-telegram-card__actions">
             {warnings.length > 0 ? <span className="mih-telegram-card__alert"><Warning size={15} />{warnings[0]}</span> : null}
@@ -2412,6 +2412,10 @@ function TelegramSqliteTaskCard({ task, progress, configured }) {
         <div><dt>下次调度</dt><dd>{formatDate(task.nextDueAt)}</dd></div>
       </dl>
       <div className="mih-telegram-task__checkpoint"><span>Checkpoint</span><code>{compactCheckpoint(task.cursor?.position)}</code></div>
+      <div className="mih-telegram-progress">
+        <div><span>游标状态更新</span><strong>{formatDate(task.cursor?.updated_at || task.cursor?.updatedAt)}</strong></div>
+        <small>当前游标：{task.cursor?.status || '未建立'}。恢复、失败和 Checkpoint 变更都会更新时间，不代表成功同步。</small>
+      </div>
       <div className="mih-telegram-task__run">
         <span>最近批次</span>
         <dl>
@@ -2429,7 +2433,7 @@ function TelegramSqliteTaskCard({ task, progress, configured }) {
           : diagnostic?.summary || diagnostic?.message || '正常运行读取 2 小时重叠增量；凌晨只对上一日窗口，换库时人工全量对齐。'}</small>
       </div>
       <footer>
-        <span>最近运行：{latest ? formatDate(latest.finishedAt || latest.startedAt || latest.createdAt) : '尚未运行'}</span>
+        <span>最近导入批次：{latest ? formatDate(latest.finishedAt || latest.startedAt || latest.createdAt) : '尚无导入批次'}</span>
         <code>最终一致</code>
       </footer>
     </article>
@@ -2751,7 +2755,7 @@ function TelegramSourcePreparationPanel({
     () => configured
       ? adminApi.telegramMonitorSourcePreparation(token)
       : Promise.resolve({ status: 'needs_prepare', ready: false, tables: [], warnings: [] }),
-    [configured, connectionFingerprint, token],
+    [configured, connectionFingerprint, pipeline.status, running, token],
   )
   const preparation = useRemoteData(load, onUnauthorized)
   const [confirmation, setConfirmation] = useState('')
@@ -2759,7 +2763,9 @@ function TelegramSourcePreparationPanel({
   const [migrationPassword, setMigrationPassword] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [prepareError, setPrepareError] = useState(null)
-  const data = preparation.data || {}
+  // A failed or in-flight probe does not establish the current source contract.
+  const displayedError = prepareError || preparation.error
+  const data = !displayedError && !preparation.loading ? preparation.data || {} : {}
   const tables = telegramPreparationTables(data)
   const steps = telegramPreparationSteps(data)
   const issues = telegramPreparationIssues(data)
@@ -2767,7 +2773,6 @@ function TelegramSourcePreparationPanel({
   const pausedAndDrained = pipeline.status === 'paused' && !running
   const credentialsIncomplete = Boolean(migrationUsername.trim()) !== Boolean(migrationPassword)
   const canPrepare = configured && connectionConsistent && pausedAndDrained && !disabled && !submitting
-  const displayedError = prepareError || preparation.error
 
   const refreshPreparation = () => {
     setPrepareError(null)
@@ -2808,14 +2813,14 @@ function TelegramSourcePreparationPanel({
   return (
     <Panel
       title="一键准备 / 修复 TG 源库"
-      subtitle="可重复执行的源库迁移：补齐 updated_at，安装数据库触发器、游标索引和硬删除保护"
+      subtitle="可在启用时只读探测；修复前需安全暂停，以补齐 updated_at、触发器、游标索引和硬删除保护"
       actions={<button className="qp-button qp-button--ghost" type="button" disabled={!configured || preparation.loading || submitting} onClick={refreshPreparation}><ArrowClockwise size={16} />重新探测</button>}
     >
       <div className="mih-telegram-prepare__summary">
         <div>
           <StatusBadge
             status={ready ? 'ready' : data.status === 'needs_prepare' ? 'not_ready' : data.status || 'unknown'}
-            label={!configured ? '连接待配置' : ready ? '源库合同已就绪' : preparation.loading ? '正在探测' : '需要准备或修复'}
+            label={!configured ? '连接待配置' : preparation.loading ? '正在探测' : displayedError ? '探测未完成' : ready ? '源库合同已就绪' : data.ready === false ? '需要准备或修复' : '待探测'}
           />
           {data.applied ? <StatusBadge status="ready" label="本次已应用迁移" /> : null}
           {data.migrationAccountUsed ? <StatusBadge status="ready" label="本次使用一次性迁移账号" /> : null}
@@ -2980,6 +2985,11 @@ function TelegramTaskCard({ task, progress, configured, onOpenAdvanced }) {
         <div><dt>下次调度</dt><dd>{formatDate(task.nextDueAt)}</dd></div>
       </dl>
       <div className="mih-telegram-task__checkpoint"><span>Checkpoint</span><code>{compactCheckpoint(task.cursor?.position)}</code></div>
+      <div className="mih-telegram-progress">
+        <div><span>游标状态更新</span><strong>{formatDate(task.cursor?.updated_at || task.cursor?.updatedAt)}</strong></div>
+        <small>当前游标：{task.cursor?.status || '未建立'}。恢复、失败和 Checkpoint 变更都会更新时间，不代表成功同步。</small>
+        <small>无新增数据的扫描不会创建导入批次；请结合游标和队列状态判断任务是否推进。</small>
+      </div>
       <div className="mih-telegram-task__run">
         <span>最近批次</span>
         <dl>
@@ -3000,7 +3010,7 @@ function TelegramTaskCard({ task, progress, configured, onOpenAdvanced }) {
           : configured ? '该统计只在打开窗口或手动点击时读取源库，不参与高频轮询。' : '保存共享连接后才能读取源库总量与剩余量。'}</small>
       </div>
       <footer>
-        <span>最近运行：{latest ? formatDate(latest.finishedAt || latest.startedAt || latest.createdAt) : '尚未运行'}</span>
+        <span>最近导入批次：{latest ? formatDate(latest.finishedAt || latest.startedAt || latest.createdAt) : '尚无导入批次'}</span>
         <button className="qp-button qp-button--ghost" type="button" disabled={!task.source && !sourceKey} onClick={onOpenAdvanced}>只读诊断</button>
       </footer>
     </article>

@@ -56,7 +56,10 @@ export function Tasks({ jobs, devices, scheduling, onInspect, onCancel }) {
                 {queue.has(j.id) && (
                   <small className="task-reason">
                     排序 #{queue.get(j.id).order} · 已等待{" "}
-                    {Math.floor(queue.get(j.id).waitMs / 1000)} 秒
+                    {Math.floor(
+                      ((scheduling?.at ?? Date.now()) - j.createdAt) / 1000,
+                    )}{" "}
+                    秒
                   </small>
                 )}
               </td>

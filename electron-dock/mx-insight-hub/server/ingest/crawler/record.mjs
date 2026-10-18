@@ -1,4 +1,4 @@
-import { isCrawlerSourceKey } from './source-contract.mjs'
+import { CRAWLER_RAW_ONLY_COLUMNS, isCrawlerSourceKey } from './source-contract.mjs'
 import { refreshMappedPayloadSha256 } from '../external/mapping.mjs'
 import { newsFields } from '../../data/news-record.mjs'
 import { PUBLISHER_CATALOG_KEYS } from '../../data/catalog-source-codes.mjs'
@@ -342,14 +342,14 @@ function clearSourceUrlYear(value) {
  */
 export function enrichCrawlerRecord(record, raw, source, { classifyCatalog } = {}) {
   if (!record || !isCrawlerSourceKey(source?.sourceKey)) return record
-  // Existing approved mappings predate the business-batch tag column. Keep it
-  // in raw evidence, without promoting it to canonical/search extensions.
-  if (record.extensions && Object.hasOwn(record.extensions, 'tag')) {
+  // Existing approved mappings predate these additive storage columns. Keep
+  // them in raw evidence until their canonical/search meanings are reviewed.
+  if (record.extensions && CRAWLER_RAW_ONLY_COLUMNS.some(name => Object.hasOwn(record.extensions, name))) {
     record.extensions = { ...record.extensions }
-    delete record.extensions.tag
+    for (const name of CRAWLER_RAW_ONLY_COLUMNS) delete record.extensions[name]
     if (Object.hasOwn(record, 'payloadSha256')) {
       // The existing enrichment digest includes the initial mapping digest.
-      // Rebuild only this new tag path as though the mapper had consumed tag.
+      // Rebuild only this additive path as though the mapper consumed them.
       const mapped = { ...record }
       delete mapped.payloadSha256
       record.payloadSha256 = refreshMappedPayloadSha256(mapped).payloadSha256

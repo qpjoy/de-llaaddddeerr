@@ -366,13 +366,9 @@ export class TelegramMonitorPipeline {
     const keys = TELEGRAM_MONITOR_INPUTS.map((input) => input.sourceKey)
     return this.#withLocks(keys, async () => {
       const sources = await this.#sources()
-      if (sources.some((source) => source.status !== 'paused')) {
-        throw new AppError(409, 'source_pause_required', 'Pause the Telegram monitor pipeline before inspecting source preparation')
-      }
-      const cursors = await Promise.all(keys.map((key) => this.#cursor(key)))
-      if (cursors.some((cursor) => cursor?.status === 'running')) {
-        throw new AppError(409, 'source_draining', 'Wait for both Telegram monitor tasks to reach a checkpoint')
-      }
+      // Inspection uses a read-only source session. The paired locks keep the
+      // checkpoint evidence stable without requiring an operator to pause a
+      // failed (but still enabled) pipeline merely to learn what broke.
       const configuration = await this.#configuration(sources)
       if (configuration.issues.length > 0 || !isConfigured(configuration.effectiveConnection)) {
         throw new AppError(409, 'pipeline_configuration_required', 'Save one consistent Telegram source connection before preparing it')
@@ -746,7 +742,7 @@ export class TelegramMonitorPipeline {
    */
   async resumeFailedTasks() {
     const keys = TELEGRAM_MONITOR_INPUTS.map((input) => input.sourceKey)
-    return this.#withLocks(keys, async () => {
+    return this.#withLocks(keys, async (assertOwned = async () => {}) => {
       const sources = await this.#sources()
       const cursors = await Promise.all(keys.map((key) => this.#cursor(key)))
       // Same bar as the SQLite pipeline: a live batch is untouchable, a run that
@@ -764,6 +760,66 @@ export class TelegramMonitorPipeline {
           { sourceKeys: draining.map(({ source }) => source.sourceKey) },
         )
       }
+      const candidates = sources.filter((source, index) => (
+        cursors[index]?.status === 'failed'
+        || (cursors[index]?.status === 'running' && abandonedRun(source, cursors[index]))
+      ))
+      if (candidates.length > 0) {
+        if (typeof this.queue?.hasOutstandingJob !== 'function') {
+          throw new AppError(503, 'source_recovery_unavailable', 'Telegram recovery requires queued and running job evidence')
+        }
+        const outstanding = []
+        for (const source of sources) {
+          if (await this.queue.hasOutstandingJob(EXTERNAL_PULL_QUEUE, { sourceKey: source.sourceKey })) {
+            outstanding.push(source.sourceKey)
+          }
+        }
+        if (outstanding.length > 0) {
+          throw new AppError(
+            409,
+            'source_recovery_pending',
+            'Wait for queued or running Telegram monitor jobs before recovering cursors',
+            { sourceKeys: outstanding },
+          )
+        }
+        const configuration = await this.#configuration(sources)
+        if (configuration.issues.length > 0 || !isConfigured(configuration.effectiveConnection)) {
+          throw new AppError(409, 'pipeline_configuration_drift', 'Verify the shared Telegram source connection before recovery', {
+            issues: configuration.issues,
+          })
+        }
+        this.#requireSourcePreparer()
+        const preparation = await this.sourcePreparer.inspect(configuration.effectiveConnection)
+        const generation = preparation.contract?.generation
+        const generationMatches = typeof generation === 'string' && sources.every((source) => (
+          source.connection?.sourceContractId === generation
+        ))
+        if (!preparation.ready || preparation.sourceIdentityChanged || !generationMatches) {
+          throw new AppError(
+            409,
+            'source_prepare_required',
+            'Pause and repair the Telegram source contract before recovering tasks; existing checkpoints were preserved',
+            {
+              steps: preparation.steps,
+              warnings: preparation.warnings,
+              sourceIdentityChanged: preparation.sourceIdentityChanged === true,
+              generationMatches,
+            },
+          )
+        }
+        // Check the whole pair before clearing either failure. A schema or
+        // checkpoint fault will otherwise just freeze the pair again.
+        for (const source of sources) {
+          const description = await this.databasePuller.describe(source.sourceKey)
+          if (description.issues.length > 0) {
+            throw new AppError(409, 'source_probe_failed', `Source schema is not safe for recovery: ${source.sourceKey}`, {
+              sourceKey: source.sourceKey,
+              issues: description.issues,
+            })
+          }
+          await this.databasePuller.assertCheckpointCompatible(source.sourceKey)
+        }
+      }
       const resumed = []
       for (const [index, source] of sources.entries()) {
         const cursor = cursors[index]
@@ -772,6 +828,7 @@ export class TelegramMonitorPipeline {
           resumed.push({ sourceKey: source.sourceKey, status: cursor?.status ?? 'idle', resumed: false })
           continue
         }
+        await assertOwned()
         await this.queue.saveCursor(
           `external:${source.sourceKey}`,
           cursor.position ?? {},

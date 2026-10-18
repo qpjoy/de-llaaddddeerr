@@ -1,5 +1,8 @@
 import { estimatedDuration, taskLane } from "./task-contract.mjs";
-import { compareJobs, effectivePriority } from "./queue-order.mjs";
+import { agentOnline } from "./agent-lease.mjs";
+import { effectivePriority } from "./queue-order.mjs";
+import { orderJobs, fairContext, clientLevel } from "./fairness.mjs";
+import { clientBlockers, clientRunning } from "./client-limits.mjs";
 export { compareJobs, effectivePriority } from "./queue-order.mjs";
 import { DEFAULT_LOOP_POLICY, loopPolicyFor } from "./loop-policy.mjs";
 import {
@@ -14,6 +17,8 @@ import { devicePacingBlockers, pacingSummary } from "./ledger.mjs";
 // Pure scheduling rules shared by claims and read-only explanations.
 export const matchesJob = (device, job) =>
   device.mode === job.mode &&
+  // Agent-hosted devices run versioned task templates only (V2-3).
+  (!device.agentId || !!job.workflow) &&
   (!device.workstationDemo ||
     job.runId === device.workstationDemo.runId ||
     job.deviceId === device.id ||
@@ -106,6 +111,13 @@ export function deviceBlockers(state, now, d, index) {
   else if (!["idle", "quarantined"].includes(d.state))
     add("unknown-state", "执行槽状态未知");
   if (d.connected === "offline") add("offline", "模拟设备离线");
+  if (d.agentId) {
+    const agent = (state.agents || []).find((x) => x.id === d.agentId);
+    if (agent?.status !== "active")
+      add("agent-disabled", "宿主机 Agent 已停用");
+    else if (!agentOnline(agent, now))
+      add("agent-offline", "宿主机 Agent 离线，不签发新租约");
+  }
   // Device-scope pacing from the ledger (minimum gap, continuous rest, …).
   reasons.push(...devicePacingBlockers(now, d));
   if (index && index.now === now) index.blockers.set(d.id, reasons);
@@ -218,9 +230,11 @@ export function schedulingSnapshot(
   const index = reference ? undefined : schedulingIndex(state, now);
   const devices = state.devices.filter((d) => d.mode === mode);
   const jobs = state.jobs.filter((j) => j.mode === mode);
-  const queue = jobs
-    .filter((j) => j.status === "queued")
-    .sort(compareJobs(now));
+  const queue = orderJobs(
+    state,
+    now,
+    jobs.filter((j) => j.status === "queued"),
+  );
   const availability = devices.map((d) => {
     const common = [
       ...deviceBlockers(state, now, d, index),
@@ -280,8 +294,10 @@ export function schedulingSnapshot(
   );
   const allAssignments = group(poolPlans.flatMap((p) => p.assignments));
   const allBlocked = group(poolPlans.flatMap((p) => p.blocked));
+  const clientCounts = clientRunning(state),
+    fair = queue.some((j) => j.client) ? fairContext(state, now) : null;
   const waiting = queue.map((j, i) => {
-    const reasons = [];
+    const reasons = [...clientBlockers(state, j, clientCounts)];
     if (j.notBefore > now)
       reasons.push({
         code: "not-before",
@@ -355,7 +371,9 @@ export function schedulingSnapshot(
       jobId: j.id,
       poolAssignment: poolAssignment || null,
       order: i + 1,
-      effectivePriority: effectivePriority(j, now),
+      effectivePriority: j.client
+        ? clientLevel(j, now, fair.batchStarved)
+        : effectivePriority(j, now),
       estimatedDurationMs: estimatedDuration(j),
       lane: taskLane(j),
       waitMs: Math.max(0, now - j.createdAt),

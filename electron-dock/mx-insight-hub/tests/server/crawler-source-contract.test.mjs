@@ -252,6 +252,56 @@ test('crawler probes accept the old columns or one reviewed nullable varchar tag
   }, spec), ['required crawler column record_key is missing'])
 })
 
+test('crawler probes accept the observed 38-column source while rejecting metadata drift', () => {
+  // Independent fixture from the 2026-10-18 Internal catalog receipt.
+  const additions = [
+    ['tag', 'varchar', true],
+    ['storage_schema_version', 'int4', false],
+    ['source_key', 'text', true],
+    ['source_name', 'text', true],
+    ['publisher_name', 'text', true],
+    ['content_kind', 'varchar', true],
+    ['content_status', 'varchar', true],
+    ['has_full_text', 'bool', true],
+    ['summary', 'text', true],
+    ['published_at_utc', 'timestamptz', true],
+    ['published_date', 'date', true],
+    ['published_at_precision', 'varchar', true],
+    ['published_at_status', 'varchar', true],
+    ['fetch_transport', 'varchar', true],
+    ['standardization_warnings', 'jsonb', true],
+  ].map(([name, databaseType, nullable]) => ({ name, databaseType, nullable }))
+  const columns = [...validColumns(), ...additions]
+  assert.equal(columns.length, 38)
+  for (const spec of [...CRAWLER_SOURCES, crawlerSourceSpec('tender')]) {
+    assert.deepEqual(crawlerProbeIssues({ columns }, spec), [], spec.sourceType)
+    assert.deepEqual(crawlerProbeIssues({ columns: validColumns() }, spec), [], spec.sourceType)
+  }
+
+  const spec = crawlerSourceSpec('news')
+  for (const column of additions) {
+    assert.deepEqual(crawlerProbeIssues({
+      columns: [...validColumns(), { ...column, databaseType: column.databaseType === 'text' ? 'jsonb' : 'text' }],
+    }, spec), [`crawler column ${column.name} must use PostgreSQL ${column.databaseType}`])
+    assert.deepEqual(crawlerProbeIssues({
+      columns: [...validColumns(), { ...column, nullable: !column.nullable }],
+    }, spec), [`crawler column ${column.name} must be ${column.nullable ? 'nullable' : 'non-null'}`])
+  }
+  assert.deepEqual(crawlerProbeIssues({ columns: [
+    ...columns, { name: 'unreviewed_metadata', databaseType: 'jsonb', nullable: true },
+  ] }, spec), ['unexpected crawler column unreviewed_metadata requires mapping review'])
+  assert.deepEqual(crawlerProbeIssues({ columns: [...columns, additions[1]] }, spec), [
+    'crawler columns contain duplicate names',
+  ])
+  assert.deepEqual(crawlerProbeIssues({ columns: columns.filter(column => column.name !== 'last_seen_at') }, spec), [
+    'required crawler column last_seen_at is missing',
+  ])
+  assert.deepEqual(crawlerProbeIssues({ columns: columns.map(column => column.name === 'last_seen_at'
+    ? { ...column, databaseType: 'timestamp' } : column) }, spec), [
+    'crawler column last_seen_at must use PostgreSQL timestamptz',
+  ])
+})
+
 test('crawler physical contract fixes leaf identity, cursor index, row values, and finite watermarks', () => {
   const spec = CRAWLER_SOURCES.find((candidate) => candidate.sourceType === 'news')
   const relation = {

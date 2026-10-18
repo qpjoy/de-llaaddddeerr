@@ -8,5 +8,8 @@ export default defineConfig({
       "/health": "http://127.0.0.1:18891",
     },
   },
+  // Relative asset URLs: the same build serves / and the embedded workbench
+  // behind a Hub reverse proxy prefix (/device-center/ → /embed/).
+  base: "./",
   build: { sourcemap: false },
 });

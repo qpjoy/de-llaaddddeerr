@@ -7,11 +7,21 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import pg from "pg";
 
+// Project-local binaries (git-ignored), e.g. an unpacked embedded-postgres
+// package at .runtime/postgres-17/package/native/bin.
+const runtime = fileURLToPath(new URL("../.runtime/", import.meta.url));
 const candidates = () => {
   const dirs = [];
   if (process.env.MX_DEVICE_PG_BIN) dirs.push(process.env.MX_DEVICE_PG_BIN);
+  if (existsSync(runtime))
+    for (const name of readdirSync(runtime)
+      .filter((n) => /^postgres(-\d+)?$/.test(n))
+      .sort()
+      .reverse())
+      dirs.push(join(runtime, name, "package", "native", "bin"));
   for (const dir of (process.env.PATH || "").split(delimiter)) dirs.push(dir);
   for (const root of ["/opt/homebrew/opt", "/usr/local/opt"])
     if (existsSync(root))
@@ -36,7 +46,7 @@ export function findPostgres() {
   );
   if (!bin)
     throw Error(
-      "找不到 PostgreSQL 的 initdb/postgres。请安装（例如 brew install postgresql@17），或设置 MX_DEVICE_PG_BIN=<包含 initdb 和 postgres 的目录>",
+      "找不到 PostgreSQL 的 initdb/postgres。请安装（例如 brew install postgresql@17），解压到 .runtime/postgres-17，或设置 MX_DEVICE_PG_BIN=<包含 initdb 和 postgres 的目录>",
     );
   const version = spawnSync(join(bin, "postgres"), ["--version"], {
     encoding: "utf8",

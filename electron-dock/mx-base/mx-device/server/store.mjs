@@ -8,6 +8,8 @@ import {
 } from "./strategy-catalog.mjs";
 import pg from "pg";
 import { readFile, readdir } from "node:fs/promises";
+import { foldUsage } from "./fairness.mjs";
+import { priorStatuses, settleClients } from "./client-settlement.mjs";
 import { createHash } from "node:crypto";
 
 const clone = (value) => structuredClone(value);
@@ -48,14 +50,20 @@ export const SQL = {
       UNION (SELECT id FROM mx_device.jobs WHERE mode=$1 AND status NOT IN ('queued','running') ORDER BY created_at DESC,id DESC LIMIT 100)
       UNION SELECT (document->>'sourceJobId')::uuid FROM mx_device.jobs WHERE mode=$1 AND status='queued' AND ${SOURCE_ID}
     )) ORDER BY created_at, id`,
-  // Pick the latest 100 finished attempts from the index first; trimming large
+  // Finished attempts: the latest 100, plus all started in the last 3 minutes
+  // (capped) for the lane timeline. Picked from the index first; trimming large
   // documents before the LIMIT used to detoast every attempt ever recorded.
   snapshotAttempts: `(SELECT document - 'result' - 'lateEvidence' - 'checkpoints' AS document
       FROM mx_device.attempts WHERE mode=$1 AND status IN ('running','yielded'))
     UNION ALL
     (SELECT a.document - 'result' - 'lateEvidence' - 'checkpoints' FROM (
-      SELECT id, created_at FROM mx_device.attempts
-      WHERE mode=$1 AND status NOT IN ('running','yielded') ORDER BY created_at DESC LIMIT 100
+      (SELECT id, created_at FROM mx_device.attempts
+        WHERE mode=$1 AND status NOT IN ('running','yielded') ORDER BY created_at DESC LIMIT 100)
+      UNION
+      (SELECT id, created_at FROM mx_device.attempts
+        WHERE mode=$1 AND status NOT IN ('running','yielded')
+          AND created_at >= (extract(epoch FROM clock_timestamp())*1000)::bigint - 180000
+        ORDER BY created_at DESC LIMIT 4000)
     ) r JOIN mx_device.attempts a ON a.id=r.id ORDER BY r.created_at DESC)`,
   snapshotCommands: `(SELECT document - 'receipt' - 'lateEvidence' AS document FROM mx_device.execution_commands
       WHERE mode=$1 AND id = ANY(ARRAY(
@@ -154,6 +162,11 @@ export class MemoryStore {
       resources: [],
       apps: [],
       accounts: [],
+      agents: [],
+      clients: [],
+      // Not part of transaction state in PgStore: append-only side tables.
+      outbox: [],
+      clientUsage: [],
       definitions: structuredClone(BUILTIN_DEFINITIONS),
       commandDefinitions: structuredClone(BUILTIN_COMMAND_DEFINITIONS),
       ruleDefinitions: structuredClone(BUILTIN_RULE_DEFINITIONS),
@@ -173,10 +186,29 @@ export class MemoryStore {
     });
     await prev;
     try {
-      const state = clone(this.state);
-      const result = fn(state, this.clock());
+      const state = clone(this.state),
+        now = this.clock();
+      state.clients ||= [];
+      state.outbox ||= [];
+      state.clientUsage ||= [];
+      // Every MemoryStore transaction sees the realm: fold usage at once.
+      if (state.clientUsage.length) {
+        foldUsage(state, now, state.clientUsage);
+        state.clientUsage = [];
+      }
+      const prior = priorStatuses(state);
+      const result = fn(state, now);
       if (result?.then)
         throw Error("Async work inside transaction is forbidden");
+      const { outbox, usage } = settleClients(state, now, prior);
+      state.clientUsage.push(...usage);
+      for (const row of outbox)
+        if (
+          !state.outbox.some(
+            (o) => o.jobId === row.jobId && o.event === row.event,
+          )
+        )
+          state.outbox.push(row);
       this.state = state;
       if (frame && result === true)
         this.frames.set(frame.deviceId, clone(frame));
@@ -186,9 +218,10 @@ export class MemoryStore {
     }
   }
   async snapshot(mode) {
+    const { outbox, clientUsage, ...state } = clone(this.state);
     return {
       ...Object.fromEntries(
-        Object.entries(clone(this.state)).map(([k, rows]) => [
+        Object.entries(state).map(([k, rows]) => [
           k,
           rows.filter((r) => r.mode === mode),
         ]),
@@ -207,6 +240,90 @@ export class MemoryStore {
         commands: (this.state.commands || []).filter((c) => c.jobId === id),
       })
     );
+  }
+  // ---- Job API v1 reads and the callback outbox (outside transactions) ----
+  async client(id) {
+    return clone(this.state.clients.find((c) => c.id === id) || null);
+  }
+  async jobStatuses(mode, ids) {
+    const wanted = new Set(ids);
+    return new Map(
+      this.state.jobs
+        .filter((j) => j.mode === mode && wanted.has(j.id))
+        .map((j) => [j.id, j.status]),
+    );
+  }
+  async clientJobs(mode, clientId, { limit = 50, active = false } = {}) {
+    return clone(
+      this.state.jobs
+        .filter(
+          (j) =>
+            j.mode === mode &&
+            j.client?.id === clientId &&
+            (!active || ["queued", "running"].includes(j.status)),
+        )
+        .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))
+        .slice(0, limit)
+        .map(({ result, ...j }) => j),
+    );
+  }
+  async clientJobCounts(mode) {
+    const counts = {};
+    for (const j of this.state.jobs)
+      if (j.mode === mode && j.client) {
+        counts[j.client.id] ||= {};
+        counts[j.client.id][j.status] =
+          (counts[j.client.id][j.status] || 0) + 1;
+      }
+    return counts;
+  }
+  async claimDeliveries({ limit = 20, lockMs = 30000 } = {}) {
+    const now = this.clock();
+    const due = this.state.outbox
+      .filter(
+        (o) =>
+          o.status === "pending" && o.nextAt <= now && o.lockedUntil <= now,
+      )
+      .sort((a, b) => a.nextAt - b.nextAt)
+      .slice(0, limit);
+    for (const o of due) o.lockedUntil = now + lockMs;
+    return due.map((o) => ({
+      delivery: clone(o),
+      client: clone(this.state.clients.find((c) => c.id === o.clientId)),
+    }));
+  }
+  async settleDelivery(id, { status, attempts, nextAt, last }) {
+    const o = this.state.outbox.find((x) => x.id === id);
+    if (!o) return;
+    Object.assign(o, { status, attempts, nextAt, lockedUntil: 0, last });
+  }
+  async deliveries(mode, { clientId = null, limit = 50 } = {}) {
+    return clone(
+      this.state.outbox
+        .filter(
+          (o) => o.mode === mode && (!clientId || o.clientId === clientId),
+        )
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, limit),
+    );
+  }
+  async pruneOutbox({ retentionMs }) {
+    const before = this.state.outbox.length,
+      floor = this.clock() - retentionMs;
+    this.state.outbox = this.state.outbox.filter(
+      (o) => o.status === "pending" || o.createdAt >= floor,
+    );
+    return before - this.state.outbox.length;
+  }
+  async retryDelivery(mode, id) {
+    const o = this.state.outbox.find((x) => x.id === id && x.mode === mode);
+    if (!o || o.status === "delivered") return null;
+    Object.assign(o, {
+      status: "pending",
+      nextAt: this.clock(),
+      lockedUntil: 0,
+    });
+    return clone(o);
   }
   async heartbeat(id, doc) {
     this.workers = this.workers.filter((w) => w.id !== id);
@@ -248,6 +365,15 @@ export class MemoryStore {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Columns are authoritative for delivery state; the document holds the rest.
+const outboxRow = (r) => ({
+  ...r.document,
+  status: r.status,
+  attempts: r.attempts,
+  nextAt: Number(r.next_at),
+  lockedUntil: Number(r.locked_until),
+  createdAt: Number(r.created_at),
+});
 class Conflict extends Error {
   constructor(table) {
     super(`并发写入冲突：${table}`);
@@ -268,12 +394,16 @@ const schedulable = (table, row) =>
     ? `${row.state}|${row.enabled}|${row.connected}|${row.session?.status}`
     : table === "jobs" || table === "attempts"
       ? row.status
-      : null;
+      : table === "agents"
+        ? `${row.status}|${row.instanceId}`
+        : null;
 // Version conflicts, deadlocks, lock timeouts and concurrent inserts re-run fn.
 const RETRYABLE = new Set(["MXCONFLICT", "40001", "40P01", "55P03", "23505"]);
 
 // Mutable rows, in foreign-key write order.
 const ROW_TABLES = [
+  ["clients", "clients"],
+  ["agents", "agents"],
   ["loopPolicies", "loop_policies"],
   ["resources", "resource_policies"],
   ["devices", "devices"],
@@ -297,6 +427,22 @@ const stored = (table, row, catalog) =>
       ? storedCommand(row, catalog)
       : row;
 const WRITERS = {
+  clients: {
+    insert:
+      "INSERT INTO mx_device.clients(id,mode,status,document,version) VALUES($1,$2,$3,$4,1) ON CONFLICT(id) DO NOTHING",
+    insertArgs: (c, json) => [c.id, c.mode, c.status, json],
+    update:
+      "UPDATE mx_device.clients SET status=$2,document=$3,version=version+1 WHERE id=$1 AND version=$4",
+    updateArgs: (c, json, v) => [c.id, c.status, json, v],
+  },
+  agents: {
+    insert:
+      "INSERT INTO mx_device.agents(id,mode,status,document,version) VALUES($1,$2,$3,$4,1) ON CONFLICT(id) DO NOTHING",
+    insertArgs: (a, json) => [a.id, a.mode, a.status, json],
+    update:
+      "UPDATE mx_device.agents SET status=$2,document=$3,version=version+1 WHERE id=$1 AND version=$4",
+    updateArgs: (a, json, v) => [a.id, a.status, json, v],
+  },
   loop_policies: {
     insert:
       "INSERT INTO mx_device.loop_policies(id,mode,rack,document,version) VALUES($1,$2,$3,$4,1) ON CONFLICT(id) DO NOTHING",
@@ -422,6 +568,8 @@ async function loadRealm(c, mode, { jobId, key, attemptId }) {
   const all = (name, versioned = true) =>
     select(c, name, byMode({ name, versioned }), [mode], versions);
   const rows = {
+    clients: await all("clients"),
+    agents: await all("agents"),
     devices: await all("devices"),
     jobs: await select(
       c,
@@ -453,15 +601,39 @@ async function loadRealm(c, mode, { jobId, key, attemptId }) {
       versions,
     ),
   };
-  return { rows, versions };
+  // Measured-service corrections appended since the last realm transaction;
+  // folded into client rows by this one (rolled back with it on failure).
+  const usage = (
+    await c.query(
+      "DELETE FROM mx_device.client_usage WHERE mode=$1 RETURNING document",
+      [mode],
+    )
+  ).rows.map((r) => r.document);
+  return { rows, versions, usage };
 }
 
 // One device and the live work on it, locked FOR UPDATE in a fixed order:
 // device, attempts, jobs, commands, apps.
-async function loadScoped(c, mode, scope, { deviceId, attemptId, jobId }) {
-  if (!["attempt", "device"].includes(scope))
+async function loadScoped(
+  c,
+  mode,
+  scope,
+  { deviceId, attemptId, jobId, agentId },
+) {
+  if (!["attempt", "device", "agent"].includes(scope))
     throw new Error(`未知事务作用域：${scope}`);
   const versions = new Map();
+  // The Agent row a message is authenticated against (read, never locked here).
+  const agents = agentId
+    ? await select(
+        c,
+        "agents",
+        `SELECT document,version FROM mx_device.agents WHERE id=$1 AND mode=$2${scope === "agent" ? " FOR UPDATE" : ""}`,
+        [agentId, mode],
+        versions,
+      )
+    : unloaded("agents");
+  if (scope === "agent") return loadAgent(c, mode, agentId, agents, versions);
   if (!deviceId && attemptId)
     deviceId = (
       await c.query("SELECT device_id FROM mx_device.attempts WHERE id=$1", [
@@ -478,6 +650,8 @@ async function loadScoped(c, mode, scope, { deviceId, attemptId, jobId }) {
       )
     : [];
   const rows = {
+    clients: unloaded("clients"),
+    agents,
     devices,
     jobs: unloaded("jobs"),
     attempts: unloaded("attempts"),
@@ -554,6 +728,58 @@ async function loadScoped(c, mode, scope, { deviceId, attemptId, jobId }) {
     versions,
   );
   return { rows, versions };
+}
+
+// One Agent and the live work on its devices: heartbeats renew these leases
+// and polls read the grants. Only the Agent row and the attempts are locked.
+async function loadAgent(c, mode, agentId, agents, versions) {
+  const devices = await select(
+    c,
+    "devices",
+    "SELECT document,version FROM mx_device.devices WHERE mode=$1 AND document->>'agentId'=$2 ORDER BY id",
+    [mode, agentId],
+    versions,
+  );
+  const attempts = await select(
+    c,
+    "attempts",
+    "SELECT document,version FROM mx_device.attempts WHERE mode=$1 AND device_id=ANY($2::uuid[]) AND status IN ('running','yielded') ORDER BY id FOR UPDATE",
+    [mode, devices.map((d) => d.id)],
+    versions,
+  );
+  const jobs = await select(
+    c,
+    "jobs",
+    "SELECT document,version FROM mx_device.jobs WHERE mode=$1 AND id=ANY($2::uuid[]) ORDER BY id",
+    [mode, [...new Set(attempts.map((a) => a.jobId))]],
+    versions,
+  );
+  const commandDefinitions = await select(
+    c,
+    "command_definitions",
+    byMode({ name: "command_definitions", versioned: false }),
+    [mode],
+    versions,
+  );
+  return {
+    rows: {
+      clients: unloaded("clients"),
+      agents,
+      devices,
+      jobs,
+      attempts,
+      commandDefinitions,
+      resources: unloaded("resources"),
+      apps: unloaded("apps"),
+      accounts: unloaded("accounts"),
+      definitions: unloaded("definitions"),
+      loopPolicies: unloaded("loopPolicies"),
+      ruleDefinitions: unloaded("ruleDefinitions"),
+      strategyDefinitions: unloaded("strategyDefinitions"),
+      commands: unloaded("commands"),
+    },
+    versions,
+  };
 }
 
 export class PgStore {
@@ -704,6 +930,7 @@ export class PgStore {
       scope = null,
       deviceId = null,
       epoch = null,
+      agentId = null,
     },
   ) {
     const c = await this.pool.connect();
@@ -735,7 +962,12 @@ export class PgStore {
         ).rows[0].now,
       );
       const loaded = scope
-        ? await loadScoped(c, mode, scope, { deviceId, attemptId, jobId })
+        ? await loadScoped(c, mode, scope, {
+            deviceId,
+            attemptId,
+            jobId,
+            agentId,
+          })
         : await loadRealm(c, mode, { jobId, key, attemptId });
       const { rows, versions } = loaded;
       const catalog = snapshotCatalog(rows.commandDefinitions);
@@ -762,9 +994,12 @@ export class PgStore {
           for (const row of rows[name])
             catalogsBefore.set(`${table}:${row.id}`, JSON.stringify(row));
 
+      if (loaded.usage?.length) foldUsage(state, now, loaded.usage);
+      const prior = priorStatuses(state);
       const result = fn(state, now);
       if (result?.then)
         throw new Error("Async work inside transaction is forbidden");
+      const settled = settleClients(state, now, prior);
 
       // Append-only catalogs: new versions are inserted; existing ones never change.
       for (const [name, table] of CATALOG_TABLES) {
@@ -805,6 +1040,34 @@ export class PgStore {
           "INSERT INTO mx_device.events(mode,at,document) VALUES($1,$2,$3)",
           [mode, e.at, e],
         );
+      for (const u of settled.usage)
+        await c.query(
+          "INSERT INTO mx_device.client_usage(mode,client_id,at,document) VALUES($1,$2,$3,$4)",
+          [u.mode, u.clientId, u.at, u],
+        );
+      // One delivery per job event, even if the job row is written twice.
+      for (const o of settled.outbox)
+        await c.query(
+          "INSERT INTO mx_device.outbox(id,mode,client_id,job_id,event,status,attempts,next_at,locked_until,created_at,document) VALUES($1,$2,$3,$4,$5,'pending',0,$6,0,$7,$8) ON CONFLICT(job_id,event) DO NOTHING",
+          [
+            o.id,
+            o.mode,
+            o.clientId,
+            o.jobId,
+            o.event,
+            o.nextAt,
+            o.createdAt,
+            {
+              id: o.id,
+              mode: o.mode,
+              clientId: o.clientId,
+              jobId: o.jobId,
+              event: o.event,
+              url: o.url,
+              payload: o.payload,
+            },
+          ],
+        );
       if (frame && result === true) {
         await c.query(
           "INSERT INTO mx_device.latest_frames(device_id,capture_id,config_version,received_at,png) VALUES($1,$2,$3,$4,$5) ON CONFLICT(device_id) DO UPDATE SET capture_id=excluded.capture_id,config_version=excluded.config_version,received_at=excluded.received_at,png=excluded.png",
@@ -843,6 +1106,8 @@ export class PgStore {
         loopPolicies,
         commands,
         accounts,
+        agents,
+        clients,
         clock,
       ] = [
         await client.query(
@@ -859,11 +1124,11 @@ export class PgStore {
         ),
         await client.query(SQL.snapshotAttempts, [mode]),
         await client.query(
-          "SELECT document FROM mx_device.resource_policies WHERE mode=$1",
+          "SELECT document FROM mx_device.resource_policies WHERE mode=$1 ORDER BY id",
           [mode],
         ),
         await client.query(
-          "SELECT document FROM mx_device.device_apps WHERE mode=$1",
+          "SELECT document FROM mx_device.device_apps WHERE mode=$1 ORDER BY id",
           [mode],
         ),
         await client.query(
@@ -883,12 +1148,20 @@ export class PgStore {
           [mode],
         ),
         await client.query(
-          "SELECT document FROM mx_device.loop_policies WHERE mode=$1",
+          "SELECT document FROM mx_device.loop_policies WHERE mode=$1 ORDER BY id",
           [mode],
         ),
         await client.query(SQL.snapshotCommands, [mode]),
         await client.query(
           "SELECT document FROM mx_device.accounts WHERE mode=$1 ORDER BY id",
+          [mode],
+        ),
+        await client.query(
+          "SELECT document FROM mx_device.agents WHERE mode=$1 ORDER BY id",
+          [mode],
+        ),
+        await client.query(
+          "SELECT document FROM mx_device.clients WHERE mode=$1 ORDER BY id",
           [mode],
         ),
         await client.query(
@@ -913,6 +1186,8 @@ export class PgStore {
         loopPolicies: loopPolicies.rows.map((r) => r.document),
         commands: commands.rows.map((r) => restoreCommand(r.document, catalog)),
         accounts: accounts.rows.map((r) => r.document),
+        agents: agents.rows.map((r) => r.document),
+        clients: clients.rows.map((r) => r.document),
         now: Number(clock.rows[0].now),
         workers: w.rows.map((r) => ({
           ...r.document,
@@ -926,6 +1201,118 @@ export class PgStore {
     } finally {
       client.release();
     }
+  }
+  // ---- Job API v1 reads and the callback outbox (outside transactions) ----
+  async client(id) {
+    const { rows } = await this.pool.query(
+      "SELECT document FROM mx_device.clients WHERE id=$1",
+      [id],
+    );
+    return rows[0]?.document || null;
+  }
+  async jobStatuses(mode, ids) {
+    if (!ids.length) return new Map();
+    const { rows } = await this.pool.query(
+      "SELECT id,status FROM mx_device.jobs WHERE mode=$1 AND id=ANY($2::uuid[])",
+      [mode, ids],
+    );
+    return new Map(rows.map((r) => [r.id, r.status]));
+  }
+  async #catalog(mode) {
+    return snapshotCatalog(
+      (
+        await this.pool.query(
+          "SELECT document FROM mx_device.command_definitions WHERE mode=$1",
+          [mode],
+        )
+      ).rows.map((r) => r.document),
+    );
+  }
+  async clientJobs(mode, clientId, { limit = 50, active = false } = {}) {
+    const { rows } = await this.pool.query(
+      `SELECT document - 'result' AS document FROM mx_device.jobs
+        WHERE mode=$1 AND document ? 'client' AND document->'client'->>'id'=$2
+        ${active ? "AND status IN ('queued','running')" : ""}
+        ORDER BY created_at DESC, id DESC LIMIT $3`,
+      [mode, clientId, limit],
+    );
+    const catalog = await this.#catalog(mode);
+    return rows.map((r) => restoreJob(r.document, catalog));
+  }
+  async clientJobCounts(mode) {
+    const { rows } = await this.pool.query(
+      `SELECT document->'client'->>'id' AS client_id, status, count(*)::int AS n
+        FROM mx_device.jobs WHERE mode=$1 AND document ? 'client'
+        GROUP BY 1, 2`,
+      [mode],
+    );
+    const counts = {};
+    for (const r of rows) (counts[r.client_id] ||= {})[r.status] = r.n;
+    return counts;
+  }
+  /** Due deliveries, locked for lockMs so another API replica skips them. */
+  async claimDeliveries({ limit = 20, lockMs = 30000 } = {}) {
+    const { rows } = await this.pool.query(
+      `WITH due AS (
+         SELECT id FROM mx_device.outbox
+         WHERE status='pending'
+           AND next_at <= (extract(epoch FROM clock_timestamp())*1000)::bigint
+           AND locked_until <= (extract(epoch FROM clock_timestamp())*1000)::bigint
+         ORDER BY next_at LIMIT $1 FOR UPDATE SKIP LOCKED)
+       UPDATE mx_device.outbox o
+         SET locked_until=(extract(epoch FROM clock_timestamp())*1000)::bigint + $2
+         FROM due WHERE o.id=due.id
+       RETURNING o.*`,
+      [limit, lockMs],
+    );
+    if (!rows.length) return [];
+    const clients = new Map(
+      (
+        await this.pool.query(
+          "SELECT id,document FROM mx_device.clients WHERE id=ANY($1::uuid[])",
+          [[...new Set(rows.map((r) => r.client_id))]],
+        )
+      ).rows.map((r) => [r.id, r.document]),
+    );
+    return rows.map((r) => ({
+      delivery: outboxRow(r),
+      client: clients.get(r.client_id) || null,
+    }));
+  }
+  async settleDelivery(id, { status, attempts, nextAt, last }) {
+    await this.pool.query(
+      `UPDATE mx_device.outbox SET status=$2, attempts=$3, next_at=$4, locked_until=0,
+        document=jsonb_set(document, '{last}', $5::jsonb) WHERE id=$1`,
+      [id, status, attempts, nextAt, JSON.stringify(last ?? null)],
+    );
+  }
+  async deliveries(mode, { clientId = null, limit = 50 } = {}) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM mx_device.outbox WHERE mode=$1 AND ($2::uuid IS NULL OR client_id=$2)
+        ORDER BY created_at DESC LIMIT $3`,
+      [mode, clientId, limit],
+    );
+    return rows.map(outboxRow);
+  }
+  /** Settled deliveries older than retentionMs, in small batches. */
+  async pruneOutbox({ retentionMs, batchSize = 5000 }) {
+    const { rowCount } = await this.pool.query(
+      `DELETE FROM mx_device.outbox WHERE id IN (
+        SELECT id FROM mx_device.outbox WHERE status IN ('delivered','dead')
+          AND created_at < (extract(epoch FROM clock_timestamp())*1000)::bigint - $1
+        ORDER BY created_at LIMIT $2)`,
+      [retentionMs, batchSize],
+    );
+    return rowCount;
+  }
+  async retryDelivery(mode, id) {
+    const { rows } = await this.pool.query(
+      `UPDATE mx_device.outbox SET status='pending', locked_until=0,
+         next_at=(extract(epoch FROM clock_timestamp())*1000)::bigint
+       WHERE id=$1 AND mode=$2 AND status<>'delivered' RETURNING *`,
+      [id, mode],
+    );
+    return rows[0] ? outboxRow(rows[0]) : null;
   }
   async frame(deviceId, captureId) {
     const { rows } = await this.pool.query(
