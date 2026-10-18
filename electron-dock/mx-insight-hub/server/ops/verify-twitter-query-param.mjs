@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-export const REVISION = 'twitter-query-param-check.v5'
+export const REVISION = 'twitter-query-param-check.v6'
 // Receipt keys issued by v1 are immutable even as this diagnostic grows.
 const QUERY_PARAM_KEY_REVISION = 'twitter-query-param-check.v1'
 export const ORIGINAL_REQUEST_ID = 'b5906846-8564-4791-8b83-ef3ce97789bc'
@@ -48,11 +48,24 @@ export const GROUP_CASES = Object.freeze(Object.fromEntries(Object.entries({
 }).map(([name, query]) => [name, Object.freeze({ query, idempotencyKey: 'ops-twitter-group-' + createHash('sha256')
   .update(JSON.stringify(['twitter-english-groups-path-check.v1', ORIGINAL_REQUEST_ID, ENGLISH_AND_RECEIPT.requestId,
     name, query, 20, 'Top'])).digest('hex').slice(0, 48) })])))
+export const EVENT_RECEIPT = Object.freeze({ requestId: '6f52fed6-ccfa-4f87-82b0-cb530d94363d',
+  callId: 'bde0fce4-bb51-49a6-8977-bc6e4dfac71a' })
+// Fixed Boolean-equivalent comparison, not a production canonicalization rule.
+// Keep every atom, quote, exclusion and conjunction; only permute one OR group.
+const reorderedEvents = '("update" OR "clarification" OR "response" OR "statement")' + englishNegations
+export const ORDER_CASES = Object.freeze(Object.fromEntries(Object.entries({
+  events_order: { query: GROUP_CASES.english_events.query, providerQuery: reorderedEvents },
+  candidate_order: { query: PROBE_CASES.candidate.query,
+    providerQuery: PROBE_CASES.candidate.query.replace(GROUP_CASES.english_events.query, reorderedEvents) },
+}).map(([name, value]) => [name, Object.freeze({ ...value, idempotencyKey: 'ops-twitter-order-' + createHash('sha256')
+  .update(JSON.stringify(['twitter-event-order-path-check.v1', ORIGINAL_REQUEST_ID, EVENT_RECEIPT.requestId,
+    name, value.query, value.providerQuery, 20, 'Top'])).digest('hex').slice(0, 48) })])))
 const ORIGINAL_QUERY_SHA256 = 'f8f3da5a20307fa43713d737199766faa376498fe825ea69889b171f72a37386'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const ERRORS = new Set(['original_rejection_unverified', 'original_provider_evidence_unverified', 'original_request_changed',
   'original_owner_unavailable', 'known_candidate_rejection_unverified', 'known_candidate_provider_evidence_unverified', 'known_candidate_changed',
   'known_half_outcome_unverified', 'known_half_changed', 'known_english_and_unverified', 'known_english_and_changed',
+  'known_event_unverified', 'known_event_changed',
   'probe_request_mismatch', 'probe_call_limit', 'invalid_arguments', 'database_url_required',
   'api_key_required', 'platform_not_granted', 'capability_not_granted', 'test_key_not_supported', 'idempotency_conflict',
   'request_outcome_unknown', 'request_in_progress', 'search_admission_blocked', 'social_upstream_rejected',
@@ -88,7 +101,7 @@ function savedOutcome(saved, calls, query, expectedCallId) {
   return null
 }
 
-// Diagnose an already-paid group page without changing its failed raw receipt
+// Diagnose an already-paid probe page without changing its failed raw receipt
 // or fetching it again. This is a parser observation, never a delivery repair.
 async function inspectProbeOverflowArchive(archive, query) {
   const maxBytes = 4 * 1024 * 1024
@@ -115,7 +128,7 @@ async function inspectProbeOverflowArchive(archive, query) {
     return { state: 'valid_overflow_response', hashVerified: true, bodySize: bytes.length, bodySha256: archive.body_sha256,
       strictReason, acquiredCount, overflowCount: acquiredCount - 20,
       hasMore: result.data.page.hasMore, deliveryEstablished: false,
-      evidence: 'Offline installed-parser observation of the saved group archive; original raw 502 remains unchanged. No delivery or full-query coverage is established.' }
+      evidence: 'Offline installed-parser observation of the saved probe archive; original raw 502 remains unchanged. No delivery or full-query coverage is established.' }
   } catch { return unverified }
 }
 
@@ -145,7 +158,8 @@ async function readSnapshot(pool, idempotencyKey, caseName) {
       && call.outcome === 'rejected' && call.http_status === 400 && call.call_ordinal === 0 && call.call_role === 'primary'),
     'original_provider_evidence_unverified')
     const knownCandidates = []
-    const explicitAnd = Object.hasOwn(AND_CASES, caseName), englishGroup = Object.hasOwn(GROUP_CASES, caseName)
+    const explicitAnd = Object.hasOwn(AND_CASES, caseName), ordered = Object.hasOwn(ORDER_CASES, caseName)
+    const englishGroup = Object.hasOwn(GROUP_CASES, caseName) || ordered
     if (caseName === 'candidate' || Object.hasOwn(HALF_CASES, caseName) || explicitAnd || englishGroup) {
       // This fixed comparison has two known earlier path-form attempts. Check
       // their saved refusals explicitly; never use a new endpoint alias to
@@ -205,12 +219,26 @@ async function readSnapshot(pool, idempotencyKey, caseName) {
       knownEnglishAnd = { ...ENGLISH_AND_RECEIPT, querySha256: digest(AND_CASES.english_and.query), savedOutcomeVerified: 'rejected400',
         evidence: 'Exact fixed probe key, native saved input and sole owned refusal; no historical wire text retained.' }
     }
+    let knownEvent = null
+    if (ordered) {
+      const known = (await client.query(`SELECT /* twitter-query-param:known-event */ id,tenant_id,consumer_id,api_key_id,
+        idempotency_key,platform,status,response_status,response_body,acquisition_request
+        FROM usage_requests WHERE id=$1`, [EVENT_RECEIPT.requestId])).rows[0]
+      const calls = (await client.query(`SELECT /* twitter-query-param:known-event-calls */ id,tenant_id,consumer_id,api_key_id,
+        provider_key,operation,endpoint_key,endpoint_version,contract_version,outcome,http_status,call_ordinal,call_role
+        FROM external_platform.provider_calls WHERE usage_request_id=$1 LIMIT 2`, [EVENT_RECEIPT.requestId])).rows
+      requireValue(known?.id === EVENT_RECEIPT.requestId && known.idempotency_key === GROUP_CASES.english_events.idempotencyKey
+        && ['tenant_id', 'consumer_id', 'api_key_id'].every(key => known[key] === row[key])
+        && savedOutcome(known, calls, GROUP_CASES.english_events.query, EVENT_RECEIPT.callId) === 'rejected400',
+      'known_event_unverified')
+      knownEvent = { ...EVENT_RECEIPT, querySha256: digest(GROUP_CASES.english_events.query), savedOutcomeVerified: 'rejected400' }
+    }
     const existing = (await client.query(`SELECT /* twitter-query-param:existing */ id,tenant_id,consumer_id,api_key_id,
       platform,status,response_status,response_body,acquisition_request FROM usage_requests WHERE consumer_id=$1 AND idempotency_key=$2 ORDER BY reserved_at LIMIT 2`,
     [row.consumer_id, idempotencyKey])).rows
     requireValue(existing.length <= 1 && existing.every(entry => ['tenant_id', 'consumer_id', 'api_key_id']
       .every(key => entry[key] === row[key])), 'original_owner_unavailable')
-    return { original: row, existing: existing[0] || null, knownCandidates, knownHalves, knownEnglishAnd,
+    return { original: row, existing: existing[0] || null, knownCandidates, knownHalves, knownEnglishAnd, knownEvent,
       originalDigest: digest(JSON.stringify([row.status, row.response_status, row.response_body, row.acquisition_request, row.fingerprint])) }
   } finally { await client.query('ROLLBACK').catch(() => {}); client.release() }
 }
@@ -220,9 +248,9 @@ async function readSnapshot(pool, idempotencyKey, caseName) {
 // the original failed request while comparing the documented transport alias.
 // The original adapter still sends, parses and archives the HTTP response.
 export function queryParamAdapter(adapter, caseName, onDispatch = () => {}) {
-  const selected = PROBE_CASES[caseName] || HALF_CASES[caseName] || AND_CASES[caseName] || GROUP_CASES[caseName]
+  const selected = PROBE_CASES[caseName] || HALF_CASES[caseName] || AND_CASES[caseName] || GROUP_CASES[caseName] || ORDER_CASES[caseName]
   requireValue(Object.hasOwn(PROBE_CASES, caseName) || Object.hasOwn(HALF_CASES, caseName)
-    || Object.hasOwn(AND_CASES, caseName) || Object.hasOwn(GROUP_CASES, caseName), 'invalid_arguments')
+    || Object.hasOwn(AND_CASES, caseName) || Object.hasOwn(GROUP_CASES, caseName) || Object.hasOwn(ORDER_CASES, caseName), 'invalid_arguments')
   let calls = 0
   return {
     resolveCredential: () => adapter.resolveCredential(),
@@ -237,7 +265,8 @@ export function queryParamAdapter(adapter, caseName, onDispatch = () => {}) {
       'probe_request_mismatch')
       // Half expressions use the same path transport as the proven OpenAI
       // control. They are diagnostics, never replacement business queries.
-      const pathForm = Object.hasOwn(HALF_CASES, caseName) || Object.hasOwn(AND_CASES, caseName) || Object.hasOwn(GROUP_CASES, caseName)
+      const pathForm = Object.hasOwn(HALF_CASES, caseName) || Object.hasOwn(AND_CASES, caseName)
+        || Object.hasOwn(GROUP_CASES, caseName) || Object.hasOwn(ORDER_CASES, caseName)
       // Keep the acquisition/guard identity on the original native query. Only
       // this private adapter changes the wire text, after validating the exact
       // normalized request; production compilation could erase explicit AND.
@@ -256,7 +285,7 @@ async function appendSavedEvidence(report, pool, saved, selected) {
     httpStatus: integer(saved.response_status) }
   const calls = (await pool.query(`SELECT /* twitter-query-param:probe-calls */ id,tenant_id,consumer_id,api_key_id,
     provider_key,operation,endpoint_key,endpoint_version,contract_version,call_ordinal,call_role,outcome,http_status,
-    upstream_request_id FROM external_platform.provider_calls WHERE usage_request_id=$1 ORDER BY started_at LIMIT 2`,
+    upstream_request_id,completed_at,now() AS observed_at FROM external_platform.provider_calls WHERE usage_request_id=$1 ORDER BY started_at LIMIT 2`,
   [saved.id])).rows
   report.providerCalls = calls.map(call => ({ callId: safeId(call.id),
     outcome: choice(call.outcome, ['succeeded', 'rejected', 'unknown', 'succeeded_unusable', 'pending']),
@@ -264,7 +293,8 @@ async function appendSavedEvidence(report, pool, saved, selected) {
       && /^[A-Za-z0-9_.:-]{1,128}$/u.test(call.upstream_request_id) ? call.upstream_request_id : null }))
   report.savedOutcomeVerified = savedOutcome(saved, calls, selected.query)
   const error = saved.response_body?.error
-  if (Object.values(GROUP_CASES).includes(selected) && isOwnedProbeReceipt(saved, calls, selected.query)
+  if ((Object.values(GROUP_CASES).includes(selected) || Object.values(ORDER_CASES).includes(selected))
+    && isOwnedProbeReceipt(saved, calls, selected.query)
     && Object.keys(saved.acquisition_request.body).sort().join(',') === 'pageSize,platform,query'
     && saved.response_status === 502 && error?.code === 'social_upstream_response_unusable'
     && error.details?.upstreamStatus === 200 && error.details.outcome === 'succeeded_unusable'
@@ -273,19 +303,33 @@ async function appendSavedEvidence(report, pool, saved, selected) {
       CASE WHEN body_size <= $2 AND octet_length(body_bytes) <= $2 THEN body_bytes END AS body_bytes
       FROM control.external_platform_restricted_raw_responses WHERE provider_call_id=$1 LIMIT 2`, [calls[0].id, 4 * 1024 * 1024])
     report.archiveObservation = await inspectProbeOverflowArchive(rows.length === 1 ? rows[0] : null, selected.query)
+    if (Object.values(ORDER_CASES).includes(selected) && report.archiveObservation.state === 'valid_overflow_response') {
+      // This diagnostic runtime leaves responseQuarantineCooldownMs at its
+      // default min(uncertainCooldownMs, 5 minutes). Wait conservatively using
+      // database timestamps before reserving a full-query identity; the normal
+      // gateway still checks all live admission/unknown/circuit state afterward.
+      const completed = calls[0].completed_at == null ? NaN : new Date(calls[0].completed_at).getTime()
+      const observed = calls[0].observed_at == null ? NaN : new Date(calls[0].observed_at).getTime()
+      const until = completed + 5 * 60_000
+      report.archiveObservation.overflowCooldownUntil = Number.isFinite(until) ? new Date(until).toISOString() : null
+      report.archiveObservation.overflowCooldownElapsed = Number.isFinite(observed) && Number.isFinite(until) && observed >= until
+    }
   }
 }
 
 async function runSingleProbe({ pool, execute = false, caseName, createGatewayRuntime }) {
-  const selected = PROBE_CASES[caseName] || HALF_CASES[caseName] || AND_CASES[caseName] || GROUP_CASES[caseName]
+  const selected = PROBE_CASES[caseName] || HALF_CASES[caseName] || AND_CASES[caseName] || GROUP_CASES[caseName] || ORDER_CASES[caseName]
   const half = Object.hasOwn(HALF_CASES, caseName), explicitAnd = Object.hasOwn(AND_CASES, caseName), englishGroup = Object.hasOwn(GROUP_CASES, caseName)
+  const ordered = Object.hasOwn(ORDER_CASES, caseName)
   const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID,
     case: caseName, querySha256: digest(selected.query), queryLength: selected.query.length,
-    endpointVariant: half || explicitAnd || englishGroup ? 'GET /search/{searchItem}' : 'GET /search?searchItem', category: 'Top', count: 20,
-    ...(explicitAnd ? { providerQuerySha256: digest(selected.providerQuery), providerQueryLength: selected.providerQuery.length,
+    endpointVariant: half || explicitAnd || englishGroup || ordered ? 'GET /search/{searchItem}' : 'GET /search?searchItem', category: 'Top', count: 20,
+    ...(explicitAnd || ordered ? { providerQuerySha256: digest(selected.providerQuery), providerQueryLength: selected.providerQuery.length,
       providerQueryEvidence: 'Fixed expected diagnostic wire text; saved usage retains the native query. This is not historical outgoing URL evidence.',
-      wireSyntax: 'Explicit AND between positive OR groups; every original atom and negation retained.',
-      queryScope: caseName === 'english_and' ? 'English subexpression only; not the full business query.'
+      wireSyntax: ordered ? 'Only the four event OR atoms are permuted; every original atom, quote, negation and conjunction is retained.'
+        : 'Explicit AND between positive OR groups; every original atom and negation retained.',
+      queryScope: caseName === 'events_order' ? 'Same complete event-group predicate with a different OR order; not the full business query.'
+        : caseName === 'english_and' ? 'English subexpression only; not the full business query.'
         : 'Semantically equivalent full candidate; diagnostic page only, not a cold-start delivery.' } : {}),
     ...(half ? { queryScope: 'Proper subexpression of the original AND; diagnostic only, not equivalent to the full business query.' } : {}),
     ...(englishGroup ? { queryScope: 'One original English OR group with every original English exclusion; diagnostic only, not a full business result.' } : {}),
@@ -298,8 +342,9 @@ async function runSingleProbe({ pool, execute = false, caseName, createGatewayRu
     initial = await readSnapshot(pool, selected.idempotencyKey, caseName)
     report.originalRejectionVerified = true
     report.knownCandidateRejections = initial.knownCandidates
-    if (explicitAnd || englishGroup) report.knownHalfOutcomes = initial.knownHalves
-    if (englishGroup) report.knownEnglishAnd = initial.knownEnglishAnd
+    if (explicitAnd || englishGroup || ordered) report.knownHalfOutcomes = initial.knownHalves
+    if (englishGroup || ordered) report.knownEnglishAnd = initial.knownEnglishAnd
+    if (ordered) report.knownEvent = initial.knownEvent
     report.evidenceScope = 'Fixed original receipt, listed candidate refusals, this probe key and standard v2 query guard; not an exhaustive historical v1 scan.'
     if (initial.existing) report.existing = { requestId: safeId(initial.existing.id),
       status: choice(initial.existing.status, ['reserved', 'committed', 'released', 'unknown']),
@@ -312,7 +357,7 @@ async function runSingleProbe({ pool, execute = false, caseName, createGatewayRu
     }
     const runtime = await createGatewayRuntime(prepared => {
       report.adapterCalls++
-      if (explicitAnd || englishGroup) report.preparedProviderQuery = prepared
+      if (explicitAnd || englishGroup || ordered) report.preparedProviderQuery = prepared
     }, caseName)
     const context = await runtime.store.findApiKeyById(initial.original.api_key_id)
     requireValue(context?.tenant?.id === initial.original.tenant_id && context.consumer?.id === initial.original.consumer_id
@@ -344,6 +389,7 @@ async function runSingleProbe({ pool, execute = false, caseName, createGatewayRu
       requireValue(JSON.stringify(after.knownCandidates) === JSON.stringify(initial.knownCandidates), 'known_candidate_changed')
       requireValue(JSON.stringify(after.knownHalves) === JSON.stringify(initial.knownHalves), 'known_half_changed')
       requireValue(JSON.stringify(after.knownEnglishAnd) === JSON.stringify(initial.knownEnglishAnd), 'known_english_and_changed')
+      requireValue(JSON.stringify(after.knownEvent) === JSON.stringify(initial.knownEvent), 'known_event_changed')
       report.originalUnchanged = true
       if (after.existing) await appendSavedEvidence(report, pool, after.existing, selected)
     } catch (error) { report.verificationError = safeCode(error) }
@@ -352,8 +398,35 @@ async function runSingleProbe({ pool, execute = false, caseName, createGatewayRu
 }
 
 export async function runTwitterQueryParamProbe({ pool, execute = false, caseName, createGatewayRuntime }) {
-  requireValue((!execute && caseName == null) || ['halves', 'english-and', 'english-groups'].includes(caseName) || Object.hasOwn(PROBE_CASES, caseName), 'invalid_arguments')
+  requireValue((!execute && caseName == null) || ['halves', 'english-and', 'english-groups', 'event-order'].includes(caseName) || Object.hasOwn(PROBE_CASES, caseName), 'invalid_arguments')
   caseName ??= 'control'
+  if (caseName === 'event-order') {
+    const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID, case: caseName,
+      mode: execute ? 'execute' : 'read_only', adapterCalls: 0, maxAdapterCalls: 2, automaticRetryAllowed: false,
+      deliveryScope: 'Fixed OR-order compatibility diagnosis; no Delta mutation or cold-start delivery.',
+      continuation: 'Inspect the equivalent event expression first; only a saved success or verified overflow archive permits the full equivalent query. Normal admission still applies.', reports: [] }
+    for (const part of ['events_order', 'candidate_order']) {
+      const result = await runSingleProbe({ pool, execute, caseName: part, createGatewayRuntime })
+      report.reports.push(result)
+      report.adapterCalls += result.adapterCalls
+      const observed = result.savedOutcomeVerified === 'success' || result.archiveObservation?.state === 'valid_overflow_response'
+      if (result.verificationError || execute && !observed || !execute && result.errorCode) {
+        report.stoppedAfter = part
+        report.errorCode = result.errorCode || result.verificationError || 'event_order_outcome_unverified'
+        break
+      }
+      if (execute && part === 'events_order' && result.archiveObservation?.state === 'valid_overflow_response'
+        && !result.archiveObservation.overflowCooldownElapsed) {
+        report.stoppedAfter = part
+        report.errorCode = 'event_order_full_query_deferred'
+        report.continuationNotBefore = result.archiveObservation.overflowCooldownUntil
+        report.fullQueryAttempted = false
+        break
+      }
+    }
+    report.interpretation = 'Even a full-query first page does not establish cold-start delivery or full-window coverage. An order comparison alone does not prove the supplier rejection mechanism.'
+    return report
+  }
   if (caseName === 'english-and') {
     const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID, case: caseName,
       mode: execute ? 'execute' : 'read_only', adapterCalls: 0, maxAdapterCalls: 2, automaticRetryAllowed: false,
@@ -443,7 +516,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     const cases = args.filter(arg => arg.startsWith('--case=')), executeFlags = args.filter(arg => arg === '--execute')
     requireValue(cases.length <= 1 && executeFlags.length <= 1 && args.length === cases.length + executeFlags.length, 'invalid_arguments')
     const caseName = cases[0]?.slice('--case='.length), execute = executeFlags.length === 1 || env.MX_TWITTER_QUERY_PARAM_VERIFY === '1'
-    requireValue((!execute && caseName == null) || ['halves', 'english-and', 'english-groups'].includes(caseName) || Object.hasOwn(PROBE_CASES, caseName), 'invalid_arguments')
+    requireValue((!execute && caseName == null) || ['halves', 'english-and', 'english-groups', 'event-order'].includes(caseName) || Object.hasOwn(PROBE_CASES, caseName), 'invalid_arguments')
     requireValue(typeof env.DATABASE_URL === 'string' && env.DATABASE_URL.trim(), 'database_url_required')
     const { Pool } = await import('pg')
     pool = new Pool({ connectionString: env.DATABASE_URL, max: 4, application_name: REVISION })

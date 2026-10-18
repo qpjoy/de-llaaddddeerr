@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
-import { PROBE_CASES, HALF_CASES, HALF_RECEIPTS, AND_CASES, ENGLISH_AND_RECEIPT, GROUP_CASES, ORIGINAL_REQUEST_ID, QUERY_PARAM_REQUEST_ID, CANDIDATE_REQUEST_IDS, runTwitterQueryParamProbe, queryParamAdapter } from '../../server/ops/verify-twitter-query-param.mjs'
+import { PROBE_CASES, HALF_CASES, HALF_RECEIPTS, AND_CASES, ENGLISH_AND_RECEIPT, GROUP_CASES, EVENT_RECEIPT, ORDER_CASES, ORIGINAL_REQUEST_ID, QUERY_PARAM_REQUEST_ID, CANDIDATE_REQUEST_IDS, runTwitterQueryParamProbe, queryParamAdapter } from '../../server/ops/verify-twitter-query-param.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
@@ -20,7 +20,7 @@ const ORIGINAL_QUERY = '("外交" OR "外交部" OR "外交政策" OR "外交关
 const SECRET = 'offline-provider-secret-do-not-print'
 const POST = 'private supplier post must not enter the report'
 const PEPPER = 'twitter-query-param-offline-fixture-pepper'
-async function fixture({ grant = true, enabled = true, outcome = 'success' } = {}) {
+async function fixture({ grant = true, enabled = true, outcome = 'success', observedAt = () => new Date().toISOString() } = {}) {
   const usage = new MemoryStore(), service = new HubService({ store: usage, adapter: {}, apiKeyPepper: PEPPER })
   const tenant = await service.createTenant({ name: 'Offline query-param tenant' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Offline query-param caller' })
@@ -53,6 +53,11 @@ async function fixture({ grant = true, enabled = true, outcome = 'success' } = {
     acquisition_request: { method: 'POST', path: '/api/v1/night-all/search/raw',
       body: { platform: 'twitter', query: AND_CASES.english_and.query, pageSize: 20 } } }
   const englishAndCalls = [{ ...structuredClone(originalCall), id: ENGLISH_AND_RECEIPT.callId }]
+  const knownEvent = { ...structuredClone(original), id: EVENT_RECEIPT.requestId,
+    idempotency_key: GROUP_CASES.english_events.idempotencyKey,
+    acquisition_request: { method: 'POST', path: '/api/v1/night-all/search/raw',
+      body: { platform: 'twitter', query: GROUP_CASES.english_events.query, pageSize: 20 } } }
+  const eventCalls = [{ ...structuredClone(originalCall), id: EVENT_RECEIPT.callId }]
   const controls = new MemoryExternalPlatformControlStore(), config = { ...rapidApiConfig(), configured: true, timeoutMs: 50 }
   if (enabled) await controls.updatePolicy('rapidapi', 'social.content.search', { expectedRevision: 1, desiredState: 'active', reason: 'Offline only',
     priceBook: { currency: 'USD', pricingAsOf: '2026-10-18T00:00:00Z', monthlyBudgetMinor: 100000,
@@ -62,6 +67,8 @@ async function fixture({ grant = true, enabled = true, outcome = 'success' } = {
   const sent = [], sql = []
   const query = async (text, values) => {
     sql.push(text)
+    if (text.includes('twitter-query-param:known-event-calls')) return { rows: structuredClone(eventCalls) }
+    if (text.includes('twitter-query-param:known-event')) return { rows: [structuredClone(knownEvent)].filter(row => row.id === values[0]) }
     if (text.includes('twitter-query-param:known-english-and-calls')) return { rows: structuredClone(englishAndCalls) }
     if (text.includes('twitter-query-param:known-english-and')) return { rows: [structuredClone(knownEnglishAnd)].filter(row => row.id === values[0]) }
     if (text.includes('twitter-query-param:known-half-calls')) return { rows: [structuredClone(halfCalls[HALF_RECEIPTS.findIndex(row => row.requestId === values[0])])] }
@@ -77,6 +84,7 @@ async function fixture({ grant = true, enabled = true, outcome = 'success' } = {
     if (text.includes('twitter-query-param:probe-calls')) return { rows: [...platform.calls.values()]
       .filter(row => row.usageRequestId === values[0]).map(row => ({ id: row.id, outcome: row.outcome,
         http_status: row.httpStatus, upstream_request_id: row.upstreamRequestId,
+        completed_at: row.completedAt, observed_at: observedAt(),
         tenant_id: row.tenantId, consumer_id: row.consumerId, api_key_id: row.apiKeyId, provider_key: row.providerKey,
         operation: row.operation, endpoint_key: row.endpointKey, endpoint_version: row.endpointVersion, contract_version: row.contractVersion,
         call_ordinal: row.callOrdinal, call_role: row.callRole })) }
@@ -112,7 +120,7 @@ async function fixture({ grant = true, enabled = true, outcome = 'success' } = {
       platformStore: platform, adapter, config, providerKey: 'rapidapi', apiKeyPepper: PEPPER,
       operationControlStore: controls, reservationLeaseMs: 60000, logger: { warn() {} } }) }
   }
-  return { pool, createGatewayRuntime, original, originalCall, knownCandidates, knownCalls, knownHalves, halfCalls, knownEnglishAnd, englishAndCalls, context, usage, platform, sent, sql,
+  return { pool, createGatewayRuntime, original, originalCall, knownCandidates, knownCalls, knownHalves, halfCalls, knownEnglishAnd, englishAndCalls, knownEvent, eventCalls, context, usage, platform, sent, sql,
     creations: () => runtimeCreations, run: options => runTwitterQueryParamProbe({ pool, createGatewayRuntime, ...options }) }
 }
 
@@ -802,6 +810,265 @@ test('overflow compatibility is observation-only for English groups and leaves t
   assert.equal(f.sent.length, 1)
 })
 
+test('event ordering preserves exact atoms, Boolean meaning and old keys without dispatching in dry-run', async () => {
+  const ordered = '("update" OR "clarification" OR "response" OR "statement") -ad -marketing -repost'
+  assert.equal(ORDER_CASES.events_order.query, GROUP_CASES.english_events.query)
+  assert.equal(ORDER_CASES.events_order.providerQuery, ordered)
+  assert.equal(ORDER_CASES.candidate_order.query, PROBE_CASES.candidate.query)
+  assert.equal(ORDER_CASES.candidate_order.providerQuery, PROBE_CASES.candidate.query.replace(
+    '("statement" OR "response" OR "clarification" OR "update")',
+    '("update" OR "clarification" OR "response" OR "statement")'))
+  assert.equal(ORDER_CASES.candidate_order.providerQuery.length, 257)
+  const atoms = query => (query.match(/-?"[^"]+"|-[a-z]+/gu) || []).sort()
+  for (const selected of Object.values(ORDER_CASES)) {
+    assert.deepEqual(atoms(selected.providerQuery), atoms(selected.query))
+    assert.notEqual(selected.idempotencyKey, GROUP_CASES.english_events.idempotencyKey)
+    assert.notEqual(selected.idempotencyKey, PROBE_CASES.candidate.idempotencyKey)
+  }
+  const evaluate = (query, present) => [...query.matchAll(/\(([^()]*)\)|(-"[^"]+"|-[a-z]+)/gu)].every(match =>
+    match[1] ? [...match[1].matchAll(/"([^"]+)"/gu)].some(atom => present.has(atom[1]))
+      : !present.has(match[2].slice(1).replace(/^"|"$/gu, '')))
+  const terms = ['statement', 'response', 'clarification', 'update', 'ad', 'marketing', 'repost']
+  for (let bits = 0; bits < 2 ** terms.length; bits++) for (const chinese of [false, true]) for (const topic of [false, true]) {
+    const present = new Set(terms.filter((_term, index) => bits & (1 << index)))
+    if (chinese) present.add('外交')
+    if (topic) present.add('diplomacy')
+    for (const selected of Object.values(ORDER_CASES)) assert.equal(evaluate(selected.query, present), evaluate(selected.providerQuery, present))
+  }
+  assert.equal(GROUP_CASES.english_events.idempotencyKey, 'ops-twitter-group-4ab63c1b8204c5c155156ca674661666f587e5b362c21abb')
+  const f = await fixture(), report = await f.run({ caseName: 'event-order' })
+  assert.equal(report.case, 'event-order')
+  assert.equal(report.mode, 'read_only')
+  assert.equal(report.maxAdapterCalls, 2)
+  assert.equal(report.adapterCalls, 0)
+  assert.equal(report.reports.length, 2)
+  assert.equal(f.creations(), 0)
+  assert.equal(f.usage.requests.size, 0)
+  assert.ok(report.reports.every(row => row.knownEvent.requestId === EVENT_RECEIPT.requestId
+    && row.knownEvent.savedOutcomeVerified === 'rejected400'))
+})
+
+test('event-order dispatch pins both wire queries while retaining native saved identity and durable replay', async () => {
+  const f = await fixture(), original = structuredClone(f.original), knownEvent = structuredClone(f.knownEvent)
+  const report = await f.run({ caseName: 'event-order', execute: true })
+  assert.equal(report.errorCode, undefined)
+  assert.equal(report.adapterCalls, 2)
+  assert.deepEqual(report.reports.map(row => row.savedOutcomeVerified), ['success', 'success'])
+  for (const [index, name] of ['events_order', 'candidate_order'].entries()) {
+    const selected = ORDER_CASES[name], result = report.reports[index]
+    assert.equal(decodeURIComponent(f.sent[index].pathname.slice('/search/'.length)), selected.providerQuery)
+    assert.deepEqual(Object.fromEntries(f.sent[index].searchParams), { count: '20', category: 'Top', includeTimestamp: 'false' })
+    const saved = [...f.usage.requests.values()].find(row => row.id === result.requestId)
+    assert.equal(saved.acquisitionRequest.body.query, selected.query)
+    assert.equal(result.preparedProviderQuery.querySha256, createHash('sha256').update(selected.providerQuery).digest('hex'))
+    assert.equal(result.providerCalls.length, 1)
+  }
+  assert.equal(f.platform.calls.size, 2)
+  const receipts = structuredClone([...f.usage.requests.values()]), calls = structuredClone([...f.platform.calls.values()])
+  const again = await f.run({ caseName: 'event-order', execute: true })
+  assert.equal(again.adapterCalls, 0)
+  assert.deepEqual(again.reports.map(row => row.savedOutcomeVerified), ['success', 'success'])
+  assert.equal(f.sent.length, 2)
+  assert.deepEqual([...f.usage.requests.values()], receipts)
+  assert.deepEqual([...f.platform.calls.values()], calls)
+  assert.deepEqual(f.original, original)
+  assert.deepEqual(f.knownEvent, knownEvent)
+  assert.doesNotMatch(JSON.stringify(report), new RegExp(`${SECRET}|${POST}|do-not-follow`))
+})
+
+test('event-order continuation stops for an event refusal, unknown or other failure and never retries it', async () => {
+  for (const outcome of ['rejected', 'unknown', 'other-rejection']) {
+    const f = await fixture({ outcome }), report = await f.run({ caseName: 'event-order', execute: true })
+    assert.equal(report.adapterCalls, 1)
+    assert.equal(report.reports.length, 1)
+    assert.equal(report.stoppedAfter, 'events_order')
+    assert.ok(report.errorCode)
+    const again = await f.run({ caseName: 'event-order', execute: true })
+    assert.equal(again.adapterCalls, 0)
+    assert.equal(again.stoppedAfter, 'events_order')
+    assert.equal(f.sent.length, 1)
+  }
+  const f = await fixture({ outcome: name => name === 'candidate_order' ? 'rejected' : 'success' })
+  const report = await f.run({ caseName: 'event-order', execute: true })
+  assert.equal(report.adapterCalls, 2)
+  assert.equal(report.stoppedAfter, 'candidate_order')
+  assert.equal(report.reports[1].savedOutcomeVerified, 'rejected400')
+  assert.equal((await f.run({ caseName: 'event-order', execute: true })).adapterCalls, 0)
+  assert.equal(f.sent.length, 2)
+})
+
+test('event-order requires the exact original event refusal, including its owner, key, body and sole call', async () => {
+  for (const mutate of [
+    f => { f.knownEvent.id = randomUUID() },
+    f => { f.knownEvent.idempotency_key = 'different-key' },
+    f => { f.knownEvent.status = 'unknown' },
+    f => { f.knownEvent.response_body.error.details.retryable = true },
+    f => { f.knownEvent.api_key_id = randomUUID() },
+    f => { f.knownEvent.acquisition_request.body.query = ORDER_CASES.events_order.providerQuery },
+    f => { f.knownEvent.acquisition_request.body.cursor = 'next-page' },
+    f => { f.knownEvent.acquisition_request.body.pageSize = 10 },
+    f => { f.knownEvent.acquisition_request.path = '/api/v1/data/search' },
+    f => { f.eventCalls[0].id = randomUUID() },
+    f => { f.eventCalls[0].api_key_id = randomUUID() },
+    f => { f.eventCalls[0].http_status = 200 },
+    f => { f.eventCalls[0].outcome = 'unknown' },
+    f => { f.eventCalls.push({ ...f.eventCalls[0], id: randomUUID() }) },
+    f => { f.eventCalls.length = 0 },
+  ]) {
+    const f = await fixture(); mutate(f)
+    const report = await f.run({ caseName: 'event-order', execute: true })
+    assert.equal(report.errorCode, 'known_event_unverified')
+    assert.equal(report.stoppedAfter, 'events_order')
+    assert.equal(report.adapterCalls, 0)
+    assert.equal(f.creations(), 0)
+    assert.equal(f.sent.length, 0)
+  }
+})
+
+test('event-order cannot bypass running or unknown v2 bindings of either original native query', async () => {
+  for (const selected of ['events_order', 'candidate_order']) for (const state of ['running', 'unknown']) {
+    const f = await fixture(), protocol = new SearchProtocolStore(f.usage)
+    const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'original-order-native-identity', body: {
+      platform: 'twitter', query: ORDER_CASES[selected].query, pageSize: 20, type: 'stable',
+      timeWindow: { from: '2026-10-17T00:00:00.000Z', to: '2026-10-18T00:00:00.000Z', timezone: 'Asia/Shanghai', boundary: '[from,to)' },
+    } })
+    if (state === 'unknown') await protocol.finish(lease.input, { state, usageRequestId: randomUUID() })
+    const report = await f.run({ caseName: 'event-order', execute: true })
+    assert.equal(report.errorCode, state === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress')
+    assert.equal(report.stoppedAfter, selected)
+    assert.equal(report.adapterCalls, selected === 'events_order' ? 0 : 1)
+    assert.equal(f.sent.length, selected === 'events_order' ? 0 : 1)
+  }
+})
+
+test('event-order wire override rejects altered source conditions before HTTP dispatch', async () => {
+  for (const name of ['events_order', 'candidate_order']) for (const change of [
+    request => { request.query = ORDER_CASES[name].providerQuery },
+    request => { request.endpointPath = '/search/different' },
+    request => { request.providerCursor = 'cursor' },
+    request => { request.upstreamQuery.count = 10 },
+  ]) {
+    const adapter = queryParamAdapter({ execute: async () => assert.fail('must not dispatch') }, name)
+    const request = normalizeHubSocialRequest('search', { platform: 'twitter', query: ORDER_CASES[name].query, count: 20, sort: 'latest' })
+    change(request)
+    await assert.rejects(adapter.execute(request), /probe_request_mismatch/u)
+  }
+})
+
+test('event-order observes fresh overflow without changing raw failures or bypassing endpoint quarantine', async () => {
+  const f = await fixture({ outcome: 'overflow' })
+  const first = await f.run({ caseName: 'event-order', execute: true })
+  assert.equal(first.reports[0].archiveObservation.state, 'valid_overflow_response')
+  assert.equal(first.reports[0].saved.httpStatus, 502)
+  assert.equal(first.reports[0].savedOutcomeVerified, null)
+  assert.equal(first.reports[0].archiveObservation.deliveryEstablished, false)
+  assert.equal(first.reports[0].archiveObservation.overflowCooldownElapsed, false)
+  assert.ok(Number.isFinite(Date.parse(first.reports[0].archiveObservation.overflowCooldownUntil)))
+  assert.equal(first.stoppedAfter, 'events_order')
+  assert.equal(first.errorCode, 'event_order_full_query_deferred')
+  assert.equal(first.adapterCalls, 1)
+  assert.equal(f.sent.length, 1)
+  assert.equal(f.usage.requests.size, 1)
+  assert.equal(f.creations(), 1)
+  const saved = structuredClone([...f.usage.requests.values()])
+  assert.equal((await f.run({ caseName: 'event-order', execute: true })).adapterCalls, 0)
+  assert.deepEqual([...f.usage.requests.values()], saved)
+  assert.equal(f.sent.length, 1)
+  // The first phase did not consume the full-query key while quarantined.
+  const eventCall = [...f.platform.calls.values()][0]
+  eventCall.completedAt = new Date(Date.now() - 6 * 60_000).toISOString()
+  const resumed = await f.run({ caseName: 'event-order', execute: true })
+  assert.equal(resumed.adapterCalls, 1)
+  assert.equal(resumed.reports.length, 2)
+  assert.equal(resumed.reports[0].adapterCalls, 0)
+  assert.equal(resumed.reports[0].archiveObservation.overflowCooldownElapsed, true)
+  assert.equal(resumed.reports[1].archiveObservation.state, 'valid_overflow_response')
+  assert.equal(f.usage.requests.size, 2)
+  assert.equal(f.sent.length, 2)
+  assert.deepEqual([...f.usage.requests.values()][0], saved[0])
+})
+
+test('event-order can use an aged overflow archive for eligibility before the first full-query attempt', async () => {
+  const f = await fixture({ outcome: 'overflow' })
+  const runtime = await f.createGatewayRuntime(() => {}, 'events_order')
+  const body = { platform: 'twitter', query: ORDER_CASES.events_order.query, pageSize: 20 }
+  await assert.rejects(runtime.gateway.searchRaw(f.context, { body,
+    normalized: { platform: 'twitter', upstreamBody: body, pageSize: 20 },
+    idempotencyKey: ORDER_CASES.events_order.idempotencyKey }), { code: 'social_upstream_response_unusable' })
+  const eventCall = [...f.platform.calls.values()][0]
+  // Model an earlier event-only probe after its normal quarantine has expired.
+  // The test does not delete a failed full-query receipt or alter its key.
+  eventCall.completedAt = new Date(Date.now() - 6 * 60_000).toISOString()
+  const eventUsage = structuredClone([...f.usage.requests.values()][0])
+  const second = await f.run({ caseName: 'event-order', execute: true })
+  assert.equal(second.adapterCalls, 1)
+  assert.equal(second.reports.length, 2)
+  assert.equal(second.reports[0].adapterCalls, 0)
+  for (const row of second.reports) {
+    assert.equal(row.archiveObservation.state, 'valid_overflow_response')
+    assert.equal(row.savedOutcomeVerified, null)
+    assert.equal(row.saved.httpStatus, 502)
+    assert.equal(row.archiveObservation.acquiredCount, 21)
+    assert.equal(row.archiveObservation.deliveryEstablished, false)
+  }
+  assert.deepEqual([...f.usage.requests.values()][0], eventUsage)
+  const saved = structuredClone([...f.usage.requests.values()])
+  assert.equal((await f.run({ caseName: 'event-order', execute: true })).adapterCalls, 0)
+  assert.deepEqual([...f.usage.requests.values()], saved)
+  assert.equal(f.sent.length, 2)
+})
+
+test('event-order does not promote a corrupted or unknown overflow receipt to full-query eligibility', async () => {
+  for (const corrupt of [
+    f => { f.platform.restrictedResponseArchives.clear() },
+    f => { [...f.platform.restrictedResponseArchives.values()][0].bodySha256 = '0'.repeat(64) },
+    f => { [...f.usage.requests.values()][0].status = 'unknown' },
+    f => { [...f.platform.calls.values()][0].apiKeyId = randomUUID() },
+  ]) {
+    const f = await fixture({ outcome: 'overflow' })
+    const createGatewayRuntime = async (...args) => {
+      const runtime = await f.createGatewayRuntime(...args), searchRaw = runtime.gateway.searchRaw.bind(runtime.gateway)
+      runtime.gateway.searchRaw = async (...queryArgs) => {
+        try { return await searchRaw(...queryArgs) } finally { corrupt(f) }
+      }
+      return runtime
+    }
+    const report = await runTwitterQueryParamProbe({ pool: f.pool, createGatewayRuntime, caseName: 'event-order', execute: true })
+    assert.equal(report.stoppedAfter, 'events_order')
+    assert.equal(report.adapterCalls, 1)
+    assert.equal(report.reports.length, 1)
+    assert.notEqual(report.reports[0].archiveObservation?.state, 'valid_overflow_response')
+    assert.equal((await f.run({ caseName: 'event-order', execute: true })).adapterCalls, 0)
+    assert.equal(f.sent.length, 1)
+  }
+})
+
+test('event-order overflow delay requires both valid completion time and database observation time', async () => {
+  for (const observedAt of [() => null, () => 'invalid-date', () => '2026-01-01T00:00:00Z']) {
+    const f = await fixture({ outcome: 'overflow', observedAt })
+    const report = await f.run({ caseName: 'event-order', execute: true })
+    assert.equal(report.reports[0].archiveObservation.state, 'valid_overflow_response')
+    assert.equal(report.reports[0].archiveObservation.overflowCooldownElapsed, false)
+    assert.equal(report.errorCode, 'event_order_full_query_deferred')
+    assert.equal(report.reports.length, 1)
+    assert.equal(f.sent.length, 1)
+    assert.equal(f.usage.requests.size, 1)
+  }
+  for (const completedAt of [null, 'invalid-date']) {
+    const f = await fixture({ outcome: 'overflow' })
+    await f.run({ caseName: 'event-order', execute: true })
+    const call = [...f.platform.calls.values()][0]
+    call.completedAt = completedAt
+    const report = await f.run({ caseName: 'event-order', execute: true })
+    assert.equal(report.reports[0].archiveObservation.overflowCooldownElapsed, false)
+    assert.equal(report.errorCode, 'event_order_full_query_deferred')
+    assert.equal(report.adapterCalls, 0)
+    assert.equal(report.reports.length, 1)
+    assert.equal(f.sent.length, 1)
+    assert.equal(f.usage.requests.size, 1)
+  }
+})
+
 test('CLI requires an explicit reviewed case before importing database modules or reading credentials', () => {
   const file = fileURLToPath(new URL('../../server/ops/verify-twitter-query-param.mjs', import.meta.url))
   for (const args of [['--execute'], ['--case=arbitrary', '--execute'], ['--case=control', '--case=candidate']]) {
@@ -819,7 +1086,7 @@ test('stdin import is pure while the actual stdin script remains executable', ()
   const imported = spawnSync(process.execPath, ['--input-type=module', '-'], { encoding: 'utf8', env,
     input: `const m = await import(${JSON.stringify(url.href)}); console.log(m.REVISION);` })
   assert.equal(imported.status, 0)
-  assert.equal(imported.stdout.trim(), 'twitter-query-param-check.v5')
+  assert.equal(imported.stdout.trim(), 'twitter-query-param-check.v6')
   assert.equal(imported.stderr, '')
   const entry = spawnSync(process.execPath, ['--input-type=module', '-', '--execute'], { encoding: 'utf8', env,
     input: readFileSync(url, 'utf8') })
