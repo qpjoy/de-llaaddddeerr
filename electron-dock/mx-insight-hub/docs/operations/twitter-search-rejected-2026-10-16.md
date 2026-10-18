@@ -93,3 +93,134 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 - 在线对照必须是明确发起的新业务请求，可能消耗额度；本次没有自动重试、切换供应商、修改幂等身份、清理失败记录或解锁采集检查点。
 
 **本次只补充事故证据与处理建议，未确认线上恢复。** MX-H2I 登录、联网及 Hub/Pay 账务配置保持原状。
+
+## 2026-10-18 新告警：b5906846 的上游 400
+
+用户回传请求 `b5906846-8564-4791-8b83-ef3ce97789bc`，计划 `c4298858-948a-434b-bef6-d4d3b2c30ea4`、Run `8a61e985-ece8-4127-a97e-b80e73499337`。错误为 Hub HTTP 502、`social_upstream_rejected`，details 明确 `upstreamStatus=400`、`outcome=rejected`、`retryable=false`。这证明请求取得了上游拒绝响应，不是网关 HTML 404、准入等待或 unknown。
+
+用户已执行现有单 UUID 诊断并返回完整回执，下面的命令只作留档，无需重复执行：
+
+```sh
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - b5906846-8564-4791-8b83-ef3ce97789bc \
+  < server/ops/compare-twitter-requests.mjs
+```
+
+回执确认本请求在 **2026-10-18 13:00:11.640–13:00:13.215 Asia/Shanghai** 发生 live 调用。唯一供应商调用 `98828234-9aa4-4f1a-88ac-f7db09f54b1e` 是 RapidAPI `twitter-aio.search` primary，1267ms 后 rejected/HTTP400，`billed=null`。归档长度 30 bytes、SHA `0e549ec31befa83d4c6b3ea1b60dcba2ba34cb5a7dc600decc8c1e20d762b3e3` 已校验，仅含 `400, bad request`。上游 requestId 为 `74e8c579cae4bcf8a8abfbd73c57b80d1826cb0fcaad5b8bc295fca9fb9e66f7`，可供供应商进一步定位；本次没有代发消息。
+
+`committed` 表示该 502 已保存，不能解释为采集成功。记录确认当时发生了新上游调用，但后续告警仍可能重放该失败。v2 内部采购也可能保存 `/api/v1/data/search` acquisition 快照；此诊断未读外层 protocol binding，不能仅凭该路径判定 Delta 没有升级 v2。`billed=null` 也不能证明免费。
+
+原保存 query 的 SHA `f8f3da5a20307fa43713d737199766faa376498fe825ea69889b171f72a37386` 与离线截图转录样本一致：280 字符、370 UTF-8 bytes。实际 normalizer → RapidAPI adapter 的离线往返逐字一致，没有截断或 fragment，完整 URL 为 915 字符；四份本地文件 SHA 与本次 Admin 诊断回执一致。这是当前代码验证，仍不是历史 Public 出站 URL 证据。查询低于 Hub 500 字符上限，没有已确认的供应商长度上限或 Boolean 拒绝原因，不按猜测修改查询、日期或供应商。供应商仅返回泛化 400，继续读取同一归档不能补出其未返回的内部原因。
+
+另已在 Delta 实际 collector/task 函数中离线复现并修复一处独立错误：`retryable=false` 在 HTTP 包装层被丢弃，冷启动因此仍调度 10/30/60 秒重试。标准 v1/v2 仅在结构化 `social_upstream_rejected/outcome=rejected/retryable=false` 时保留不可重试标识，collector 透传并停止冷启动短重试；不把拒绝改成 unknown，不清失败记录或改页身份。标准 v1 非 Facebook 旧任务可能按新 Step 生成新 key，测试已覆盖这一差异，不能笼统承诺旧重复尝试都使用同 key。
+
+5 项新增回归与既有 unknown、准入等待、v1/v2、日报测试合跑 **95/95 通过**；Hub 路径编码回归 **5/5 通过**。这些均为本地离线验证，无供应商采购或线上修改。发布 Delta Web/beat/workers 后可停止这类无效重试，**不代表本请求的供应商 400 已解决或冷启动已恢复**。Hub 本轮未修改运行时、路由、配额或 MX-H2I 登录联网。
+
+## 2026-10-18 继续修复：Twitter 原生查询语法
+
+用户进一步要求修复实际采集，不能只停止重试。以下是本次新增的合同证据与实现，前面的只读结论保留为历史记录。
+
+### 供应商合同与生成链路
+
+[Twitter AIO 官方 Search 文档](https://www.twittrapi.com/docs/reference/search)明确说明沿用 X 搜索框语法，`GET /search?searchItem=...` 和 `GET /search/{searchItem}` 使用相同处理器，并推荐新代码使用查询参数形式。这不证明两种形式在 RapidAPI 网关经过完全相同的路径处理，需用同一完整查询作对照，不能预先认定切换必然有效。文档给出组合查询与过滤条件的 512 **字符**限制，不是 UTF-8 字节限制。本次原式 280 字符，不支持“长度超限”归因。
+
+[供应商查询示例](https://www.twittrapi.com/blog/search-twitter-without-developer-account)使用空格连接必选条件、`OR` 连接备选词、`-` 排除词；[X 查询文档](https://docs.x.com/x-api/posts/search/integrate/build-a-query)也说明逐词排除，不能把 `NOT (a OR b)` 直接当作原生语法。供应商[错误说明](https://www.twittrapi.com/docs/helpful-infos/error-handling)中，400 也可能表示未分类的 X 错误，因此原响应的泛化 `400, bad request` 仍不足以单独证明唯一原因。
+
+本地 Delta `data_hub/keyword_config.py` 的 `keyword_expression` 生成通用 `AND/NOT` 规则，`bind_keyword_queries` 再与平台查询组合；`platform_query_llm.py` 允许模型生成平台原生表达式。这能解释当前混合语法的生成路径。本次不改下游已冻结的查询或页身份，在 Hub 的供应商适配边界处理。
+
+### 已实现的兼容行为
+
+`server/contracts/twitter-search-query.mjs` 对明确的布尔子集进行有界解析，不做全局字符串替换：
+
+```text
+a AND b                → a b
+a AND NOT (b OR c)     → a -b -c
+(a OR b) AND (c OR d)  → (a OR b) (c OR d)
+```
+
+本次完整查询编译后为 257 字符，保留全部正向组、全部排除词及中英文组之间的交集：
+
+```text
+("外交" OR "外交部" OR "外交政策" OR "外交关系" OR "外交动态" OR "外交表态" OR "外交事件" OR "外交议题" OR "外交回应" OR "外交澄清") -"广告" -"营销" -"重复搬运" ("diplomacy" OR "foreign policy" OR "diplomatic relations") ("statement" OR "response" OR "clarification" OR "update") -ad -marketing -repost
+```
+
+- 标准 `/api/v1/data/search` 及 v2 的新 Twitter 首次采购使用兼容结果。原 query、业务指纹、页大小、Top 排序、时间窗、供应商端点合同不变；已有原生语法逐字透传。
+- 新分页的签名内层游标签入 `queryDialect=twitter.boolean.v1`，第二页与后续页固定此语法。旧无标记游标继续原语法；未知版本不能换语法继续。v2 外层游标保留原时间窗及内层标记。
+- 引号内文本、原生字段不作为 SQL 运算符。无法证明等价的形状（例如未加引号的 `url:example.com/a(b)`、否定的合取组或负向 OR 分支）在标准入口原样透传，不静默拓宽条件，也不因新增验证挡住旧交付重放。
+- 不变更原失败回执、幂等键、账务和 unknown 保护。相同旧 key 仍可能重放已保存的 502；不能把部署新编译器等同于原 Run 已恢复。原始 raw/social 兼容入口保持原语义。
+
+### 已完成的真实验证
+
+| 查询与方式 | Hub requestId | 结果 |
+| --- | --- | --- |
+| 原混合语法、路径参数 | `b5906846-8564-4791-8b83-ef3ce97789bc` | 上游 400，Hub 502 |
+| 完整等价原生语法、路径参数 | `e5c6fddf-eb56-4d9b-afef-38727910a072` | 上游 400，Hub 502 |
+| 原计划简单词对照，输出却仍为 candidate | `9faad699-5178-4d00-8af5-bcab5d2867ba` | 上游 400，Hub 502；不能算作简单词对照 |
+| 明确指定 `OpenAI`、路径参数、stable | `888b6a78-dd8e-4c3b-b82d-bebc443abe39` | HTTP 200，20 条，hasMore=true，providerCalls=1，dataStatus=ok |
+| 完整等价原生语法、查询参数 | `22e3c544-db09-461f-be46-550bda290c73` | 上游 400，Hub 502；一次明确拒绝，原请求不变 |
+
+最后一次输出 `twitter-query-compat-check.v2`、`case=control`、`requestType=stable`，query SHA 为 `8b7d1a3187ab355dc31bc683aaa71ab5ed217940c12196a9cd5f4ca984babfa4`。这证明当前链路、认证和 Top/count20 的基本搜索可用；完整查询的 400 仍未解决，不能把简单词的结果替换为业务冷启动成功。窗口未传入该旧 v1 请求，coverageComplete=null。
+
+完整候选 SHA 为 `1f56dcc7e0521efdb6bed09df10ff0c72ab2615940a880b45b963ccfd852e215`。原 Run 确认为 `/api/v1/data/search`、没有 v2 contract 或持久化页 ledger；验证没有修改原任务。SQL 布尔语法转换不足以解决当前 400，**上述兼容实现尚不是已验证的事故修复**。RequestsDependencyWarning 也不能解释已收到的供应商 400。
+
+第三次结果仍选择 candidate 的具体原因尚未确认。另需纠正此前“固定 key 可防重复采购”的描述：旧 v1 默认 fresh 仅有 120 秒回放窗口，超过窗口后可能产生新采购；不能只靠固定 key 保证永久回放，也不能仅凭顶层 requestId 变化判断采购。真实 unknown 不会因窗口过期放开。
+
+### 当前验证脚本与重复执行边界
+
+`server/ops/verify-twitter-query-compat.py` 修订为 v2，默认只预览；已经失败的完整 candidate 禁止再次执行。control 显式写入最终 HTTP 请求的 `type=stable`，固定新验证 key `delta-twitter-compat-cb68cde0557eb3c1c3365995c6f4f062a00abee4`，遵循 Hub 稳定回放。该保留模式调整只用于独立诊断，供应商 Top/count20 和原任务均不变。
+
+已使用以下命令取得上面的成功回执，**无需再次执行**：
+
+```sh
+docker exec -i delta_59202-worker-1 python manage.py shell -c 'import sys; n={"__name__":"twitter_compat_payload"}; exec(compile(sys.stdin.read(),"<twitter-query-check>","exec"),n); n.get("REVISION")=="twitter-query-compat-check.v2" or sys.exit("Outdated diagnostic; no HTTP sent"); n["main"](case="control",execute=True)' < server/ops/verify-twitter-query-compat.py
+```
+
+这最多发一条 Hub HTTP；Hub 内部可能多次调用供应商组页，本次实际为 1 次。不跟进下一页、不自动换网络重发、不写 Delta 业务状态、不清除 unknown。成功首页不能证明完整时间窗覆盖或原冷启动入库完成。
+
+### 下一步与验证状态
+
+Night-All 旧 `_request_search` 与 Hub 的路径编码、count、Top、includeTimestamp=false 已再次核对一致，未发现这些参数差异。接下来仅对照官方推荐的 `GET /search?searchItem=...`，仍使用完整 257 字符候选查询，不拆组、不减少条件、不改变中英文交集。
+
+`server/ops/verify-twitter-query-param.mjs` 的完整 candidate 查询参数对照已经执行，历史回执修订号为 `twitter-query-param-check.v1`、case=candidate、endpointVariant=`GET /search?searchItem`。该案例不再需要执行，当前入口见下方固定 halves 命令。`adapterCalls` 仅表示进入适配器的次数，是否真正到达供应商以保存的 `providerCalls` 回执为准。
+
+该独立诊断使用现有 raw 单页网关、原 Twitter 平台授权、数据库凭据、代理和计费归档，不要求新增 capability。为了与已失败的标准搜索对照，诊断明确把 raw 默认 Latest 钉回 Top。它不改变生产 raw 合同，也不代表标准搜索的组页交付或 Delta 冷启动恢复。
+
+派发前核验 b590 原请求和 e5c6/9faad 两个已知候选的相同 owner、完整查询、已保存的明确 400；缺失或 unknown 则停止。固定探针 key 一旦已有任意状态的 usage 即只读返回，不重新派发；仍保留同查询 v2 binding/lease 阻断。这是本次固定样本的保护范围，不宣称完成了所有历史 v1 请求的全库 unknown 排查。初版 8 项离线测试通过，并经独立复审。
+
+用户已返回 `twitter-query-param-check.v1`：完整候选仍为 HTTP 502 / `social_upstream_rejected`，唯一调用 `38e539e4-eeb8-497a-bbee-b5f6c681a2bf` 保存 rejected/HTTP400，上游 requestId 为 `9477759c4bcc19bf7c6cfc8957779492782da853e51426603d75db74056e3eee`。原请求未改变。`command terminated with exit code 1` 是脚本有意报告失败，不是 kubectl 没运行成功。无需再次执行该完整候选对照，也不能将切换传输形式作为有效修复发布。
+
+### 查询结构与下一步分解
+
+完整原生式含 17 个正向词、6 个排除词、14 个 OR、3 个括号组；257 字符、347 UTF-8 字节。当前结构已经因式分解，展开为全部组合会产生 120 个分支；不能贸然引入自动分拆采购。没有公开证据证明存在 256 字符或特定 OR 数量限制。
+
+[X 网页搜索帮助](https://help.x.com/en/using-x/advanced-xpro-features)明确示范多组 OR 使用 AND 连接，[X 运算符文档](https://docs.x.com/x-api/posts/search/integrate/operators)也示范带引号的排除短语。显式 AND、多个组或负向引号本身不能被定为此次根因。普通词与引号短语的匹配不同，也不能把“外交”是其他中文词的字串前缀当作删词依据。
+
+只读核查 Delta 实际 `bind_keyword_queries` 和 `clean_queries` 能重建原 280 字表达式及相同 SHA，重复绑定不会继续加层。`keyword_config` 在现有合同和测试里是硬条件，平台查询以 AND 绑定；改中英文 AND 为 OR 会改变业务。未传配置时共享自动生成与逐平台生成的差异是另一项生成质量问题，尚未证实本事故配置来源，不修改已冻结任务。
+
+下一个有界诊断将原式分为恰好由 AND 连接的两个部分，仍保留各自原有引号与排除词：
+
+```text
+CN（115字符）：
+("外交" OR "外交部" OR "外交政策" OR "外交关系" OR "外交动态" OR "外交表态" OR "外交事件" OR "外交议题" OR "外交回应" OR "外交澄清") -"广告" -"营销" -"重复搬运"
+
+EN（141字符）：
+("diplomacy" OR "foreign policy" OR "diplomatic relations") ("statement" OR "response" OR "clarification" OR "update") -ad -marketing -repost
+```
+
+使用已成功简单词对照的路径形式，保持 Top/count20。每个子式最多一页、一次 adapter 调用；子式成功不能替代完整业务交付，更不能把两个首屏的交集当完整结果。若只有一个部分被拒，后续只定位该部分；若都成功，说明拒绝与完整组合有关，但仍不能确定内部复杂度阈值或具体原因。
+
+用户后续返回的是修订号 v2 的 `case=candidate`，`adapterCalls=0`，读取既有 `22e3...` 失败回执；这不是新的 400，也不是 halves 结果。核查 CLI 后，没有将 `--case=halves` 转成 candidate 的分支；环境变量也不选择 case，具体执行或复制差异无法由输出确认。文档移除已完成的 candidate 执行命令，避免误选。
+
+新增无参数入口 `server/ops/verify-twitter-query-halves.sh`，固定 `--case=halves --execute`。请将它与同目录 `verify-twitter-query-param.mjs` v2 一起同步；从 Hub 源码目录只执行：
+
+```sh
+bash server/ops/verify-twitter-query-halves.sh
+```
+
+这是显式的真实验证入口，最多顺序派发两次，可能消耗两次供应商额度。入口拒绝所有额外参数，并在调用集群前检查同目录源文件修订号；不需要部署镜像。先核验完整候选的三次明确拒绝，只有第一子式已有保存的成功或明确 400 回执，才继续第二子式；unknown、缺失证据或其他状态停止。已经有记录的子式不再派发，v1 已发出的 candidate/control key 保持原样。输出 `diagnosticRevision=twitter-query-param-check.v2`、`case=halves`、`maxAdapterCalls=2`、两个 `reports`；如果有 `stoppedAfter`，以该项错误为准。
+
+这仍是独立诊断，没有新生产接口或 Delta 操作，也没有变更原失败任务。合计 16 项离线测试通过，覆盖最多两次、重复执行无采购、第一项 unknown 阻止第二项、原回执核对、原 key 不变、原平台授权、stdin 导入无执行副作用，以及 shell 入口固定参数、任意工作目录、缺失/旧文件提前停止。Shell 测试使用假的 kubectl，未访问集群。尚待线上子式回执。
+
+本地查询、路径和组页合同测试 17 项通过，其中包含 160 组布尔真值比较、实际 adapter 两页 mock HTTP、v2 内外游标往返。另有带 PGlite 的 v1/v2、跨版本 unknown、HTTP 重试边界 33 项通过。Python 验证脚本 24 项测试及 Delta 原生 v1/v2 请求构造联合检查通过。这些离线测试不能代替供应商接受完整查询和原冷启动入库验收。
+
+本次尚未部署。没有新增数据库迁移，没有修改 MX-H2I 登录、SSO、联网或 Domestic/Internal nginx。完整查询成功后再发布 Hub 适配并通过原 Run 的正常重试验证采集与分页；不需要清理旧历史或绕过 unknown。

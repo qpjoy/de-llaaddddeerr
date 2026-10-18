@@ -8,6 +8,7 @@ import { INSTAGRAM_SEARCH_KEY } from './instagram-search.mjs'
 import { JUSTONE_INSTAGRAM_SEARCH_KEY } from './instagram-justone-search.mjs'
 import { normalizeSearchContent } from './search-content.mjs'
 import { prepareNightAllCompatibilityTraversal } from '../data/night-all-pagination.mjs'
+import { compileTwitterSearchQuery, TWITTER_QUERY_DIALECT } from './twitter-search-query.mjs'
 
 export const RAW_SEARCH_VERSION = 'mx-insight-hub.raw-search.v1'
 export const RAW_SEARCH_PATH = '/api/v1/night-all/search/raw'
@@ -45,7 +46,7 @@ const justOneCursor = value => typeof value === 'string' && value.trim().length 
   && value.length <= 2048 && !value.includes('\u0000')
 
 export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort, twitterBuffer = false, bufferPageSize,
-  instagramProvider = 'tikhub', instagramStrategy = false, historicalCodec } = {}) {
+  twitterQueryCompatibility = false, instagramProvider = 'tikhub', instagramStrategy = false, historicalCodec } = {}) {
   const { platform, upstreamBody: body, pageSize } = normalized
   const justone = platform === 'instagram' && instagramProvider === 'justone'
   if (platform === 'instagram' && !['tikhub', 'justone'].includes(instagramProvider)) {
@@ -69,6 +70,7 @@ export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort
     includeDetails: body.includeDetails === true, disableAutoDetails: body.disableAutoDetails === true,
     maxEnrichItems: body.maxEnrichItems ?? 20, ...(cursorScope ? { cursorScope } : {}) })).digest('hex')
   let page = 1, providerCursor = null, buffer = null, fill = null, expiresAt = Date.now() + 24 * 60 * 60_000
+  let queryDialect = null
   let cursorProvider = justone ? 'justone' : 'tikhub'
   let taggedProvider = false
   if (body.cursor) {
@@ -79,6 +81,8 @@ export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort
         || (platform === 'twitter' && (!(twitterBuffer && state.buffer && state.providerCursor == null)
           && (typeof state.providerCursor !== 'string' || !state.providerCursor || state.providerCursor.length > 4096)))
         || (platform === 'twitter' && state.provider != null && state.provider !== 'rapidapi')
+        || (Object.hasOwn(state, 'queryDialect') && (platform !== 'twitter' || !twitterQueryCompatibility
+          || state.queryDialect !== TWITTER_QUERY_DIALECT))
         || (state.fill != null && (platform !== 'twitter' || !twitterBuffer || state.provider !== 'rapidapi'
           || !state.fill || typeof state.fill !== 'object' || Array.isArray(state.fill)
           || Object.keys(state.fill).some(key => !['version', 'previousDeliveryId', 'upstreamPages'].includes(key))
@@ -99,11 +103,20 @@ export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort
           || Object.keys(state.providerCursor).some(key => !['next_max_id', 'rank_token'].includes(key))
           || (state.providerCursor.rank_token != null && (typeof state.providerCursor.rank_token !== 'string' || state.providerCursor.rank_token.length > 2048))))) throw new Error('cursor')
       ;({ page, providerCursor = null, buffer = null, fill = null, expiresAt } = state)
+      queryDialect = state.queryDialect ?? null
+      if (queryDialect && compileTwitterSearchQuery(query).dialect !== queryDialect) throw new Error('query_dialect')
       if (platform === 'instagram') {
         cursorProvider = state.provider || 'tikhub'
         taggedProvider = Boolean(state.provider)
       }
     } catch { throw new AppError(400, 'invalid_cursor', 'Cursor is invalid, expired or belongs to another query/Key') }
+  }
+  if (platform === 'twitter' && twitterQueryCompatibility && !body.cursor) {
+    // Normalization precedes durable replay. A newly rejected grammar must not
+    // prevent an old receipt from replaying. Compile only a proven subset;
+    // leave other queries on their original provider semantics.
+    try { queryDialect = compileTwitterSearchQuery(query).dialect }
+    catch (error) { if (!(error instanceof AppError) || error.code !== 'invalid_twitter_query') throw error }
   }
   if ((justone && cursorProvider !== 'justone') || (platform === 'instagram' && instagramStrategy && body.cursor && !taggedProvider)) {
     // Preserve the exact old ledger identity before the gateway refuses a new
@@ -118,7 +131,8 @@ export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort
       ? normalizeNativeForwardingRequest(JUSTONE_INSTAGRAM_SEARCH_KEY, { params: { keyword: query,
         ...(providerCursor ? { paginationToken: providerCursor } : {}) } })
       : normalizeNativeForwardingRequest(INSTAGRAM_SEARCH_KEY, { params: { query, enable_metadata: true, ...providerCursor } })
-      : normalizeHubSocialRequest('search', { platform, query, count: pageSize, ...(twitterSort ? { sort: twitterSort } : {}) })
+      : normalizeHubSocialRequest('search', { platform, query, count: pageSize, ...(twitterSort ? { sort: twitterSort } : {}) },
+        { twitterQueryDialect: queryDialect })
   if (platform === 'twitter') {
     providerRequest.page = page
     providerRequest.expiresAt = expiresAt
@@ -132,6 +146,7 @@ export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort
     return codec.encode({ version: RAW_SEARCH_VERSION, scope, expiresAt,
       ...(platform === 'instagram' && (justone || instagramStrategy) ? { provider: instagramProvider } : {}),
       ...(platform === 'twitter' && twitterBuffer ? { provider: 'rapidapi' } : {}),
+      ...(queryDialect ? { queryDialect } : {}),
       page: state.page, ...(state.providerCursor ? { providerCursor: state.providerCursor } : {}),
       ...(state.buffer ? { buffer: state.buffer } : {}),
       ...(platform === 'twitter' && twitterBuffer && state.fill ? { fill: state.fill } : {}) })
