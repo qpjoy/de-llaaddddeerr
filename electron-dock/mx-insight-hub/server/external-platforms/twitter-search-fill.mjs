@@ -58,9 +58,10 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
   let providerCursor=request.providerCursor ?? null, buffer=null, stopReason=null, capturedAt=null
   let ownsLease=false, entered=false, currentCall=null, currentEvidence=null, currentCost=null, settledFailure=false, retainLease=false
   let phase='admission', unknownLogged=false
-  const logUnknown=error=>{
+  const logUnknown=async error=>{
     if(unknownLogged) return
     unknownLogged=true
+    let diagnostic
     try {
       const classes=['Error','TypeError','RangeError','SyntaxError','AppError','RapidApiUpstreamError']
       let cause=error, sqlState=null
@@ -69,10 +70,16 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
       for(let depth=0;cause && depth<3;depth++,cause=cause.cause) {
         if(typeof cause.code==='string' && /^[0-9A-Z]{5}$/u.test(cause.code)) { sqlState=cause.code;break }
       }
-      gateway.logger?.warn?.({event:'twitter_search_outcome_unknown',requestId:delivery.usageRequestId,
-        callId:currentCall?.id ?? null,phase,errorClass:classes.includes(error?.name)?error.name:'Error',sqlState},
+      diagnostic={callId:currentCall?.id ?? null,phase,errorClass:classes.includes(error?.name)?error.name:'Error',sqlState}
+      gateway.logger?.warn?.({event:'twitter_search_outcome_unknown',requestId:delivery.usageRequestId,...diagnostic},
       'Twitter search outcome is unknown')
     } catch { /* Logging cannot change an unknown outcome or its retained hold. */ }
+    // Keep the first failure independently of container log retention. Neither
+    // this bounded write nor its failure changes the request or billing state.
+    if(diagnostic) {
+      try { await gateway.usageStore.recordRequestFailure(delivery.usageRequestId,diagnostic) }
+      catch { /* The original log and existing unknown settlement remain authoritative. */ }
+    }
   }
   const dispatchLease={ consumerId:context.consumer.id,operation:delivery.operation,fingerprint:delivery.fingerprint,
     endpointKey:request.providerRequest.endpointKey,contractVersion:request.providerRequest.endpointContractVersion,
@@ -258,7 +265,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
               if (entered) { leaveCapacity(entered); entered = false }
               await rejectedFallback.prepare({ delivery, callId })
             } catch(error) {
-              logUnknown(error)
+              await logUnknown(error)
               await markUnknown()
               throw uncertain('The supplier handoff could not be confirmed; verify the saved request before retrying')
             }
@@ -320,7 +327,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         consume(result.publicBody,{callId,bodySize:receipt.bodySize,bodySha256:receipt.bodySha256,capturedAt:receipt.capturedAt},inputCursor)
       } catch(error) {
         if(currentCall || error?.code==='external_platform_call_persistence_unknown') {
-          logUnknown(error)
+          await logUnknown(error)
           if(currentCall) await store.markPersistenceUnknown({callId:currentCall.id,delivery,...(currentEvidence||{})}).catch(()=>{})
           await markUnknown()
           throw uncertain('The search outcome is unknown; verify the saved request before retrying')
@@ -354,7 +361,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         latencyMs:Math.round(performance.now()-started),...identity,
         lineage:{version:'twitter-fill.v1',scopeHash:request.scopeHash,previousDeliveryId:history.previousDeliveryId,upstreamPages},sources})
     } catch(error) {
-      logUnknown(error)
+      await logUnknown(error)
       await markUnknown()
       throw uncertain('The search delivery outcome is unknown; verify the saved request before retrying')
     }
@@ -362,7 +369,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
       staleAgeSeconds:Math.max(0,Math.floor((clock()-Date.parse(capturedAt))/1000))}
   } catch(error) {
     if(calls && !settledFailure) {
-      logUnknown(error)
+      await logUnknown(error)
       await markUnknown()
       if(error.preserveReservation!==true) throw uncertain('The search outcome is unknown; verify the saved request before retrying')
     }

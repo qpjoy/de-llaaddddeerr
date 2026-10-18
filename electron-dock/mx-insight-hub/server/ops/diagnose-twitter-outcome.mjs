@@ -29,6 +29,9 @@ const TRANSPORT_CODES = ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET',
   'proxy_route_unavailable', 'proxy_routes_unreachable', '08000', '08001', '08003', '08004',
   '08006', '08007', '08P01', '42501', '42703', '42P01', '53300', '53400', '57P01', '57P02', '57P03']
 const FAILURES = ['invalid_arguments', 'invalid_request_id', 'database_url_required', 'request_not_found', 'request_not_twitter_search']
+const FAILURE_PHASES = ['admission', 'begin_call', 'provider_request', 'finish_step', 'supplier_handoff',
+  'finish_failure', 'project_response', 'stage_evidence', 'assemble_page', 'build_delivery', 'commit_delivery']
+const FAILURE_CLASSES = ['Error', 'TypeError', 'RangeError', 'SyntaxError', 'AppError', 'RapidApiUpstreamError']
 const choice = (value, values) => value == null ? null : values.includes(value) ? value : 'other'
 const uuid = value => typeof value === 'string' && UUID.test(value) ? value : null
 const hash = value => typeof value === 'string' && SHA.test(value) ? value : null
@@ -151,6 +154,20 @@ async function readLegacyConnectorCalls(client, requestId) {
     interpretation: 'Connector evidence records a Hub-to-Night-All attempt, not its downstream supplier billing. Its schema retains no request path, body or query; a fingerprint cannot reconstruct them. Missing calls do not authorize retry.' }
 }
 
+async function readRequestFailure(client, requestId) {
+  const { rows: [tables] } = await client.query(`SELECT /* twitter-failure:table */
+    to_regclass('public.usage_request_failures') IS NOT NULL AS failures`)
+  const tablePresent = tables?.failures === true
+  const row = tablePresent ? (await client.query(`SELECT /* twitter-failure:record */
+    request_id, phase, sql_state, call_id, error_class, recorded_at
+    FROM public.usage_request_failures WHERE request_id = $1::uuid`, [requestId])).rows[0] : null
+  return { tablePresent, present: Boolean(row), record: row ? {
+    requestId: uuid(row.request_id), phase: choice(row.phase, FAILURE_PHASES),
+    sqlState: typeof row.sql_state === 'string' && /^[0-9A-Z]{5}$/u.test(row.sql_state) ? row.sql_state : null,
+    callId: uuid(row.call_id), errorClass: choice(row.error_class, FAILURE_CLASSES), recordedAt: time(row.recorded_at),
+  } : null, interpretation: 'First saved failure metadata only. Missing evidence may predate collection or reflect a failed diagnostic write; it does not authorize retry.' }
+}
+
 export async function diagnoseTwitterOutcome(pool, requestId, { compareQuery = null } = {}) {
   if (!uuid(requestId)) throw new Error('invalid_request_id')
   if (!validComparison(compareQuery)) throw new Error('invalid_arguments')
@@ -201,7 +218,8 @@ export async function diagnoseTwitterOutcome(pool, requestId, { compareQuery = n
       ORDER BY created_at, id LIMIT 21`, [requestId])
     const searchProtocol = await readSearchProtocol(client, requestId)
     const legacyConnector = await readLegacyConnectorCalls(client, requestId)
-    return { diagnosticRevision: 'twitter-outcome-diagnostic.v3', requestId, platform: 'twitter',
+    const failureDiagnostic = await readRequestFailure(client, requestId)
+    return { diagnosticRevision: 'twitter-outcome-diagnostic.v4', requestId, platform: 'twitter',
       status: choice(request.status, ['reserved', 'committed', 'released', 'unknown']),
       errorCode: choice(request.error_code, ERRORS), savedHttpStatus: http(request.response_status),
       billingMeterKey: choice(request.billing_meter_key, METERS), capability: choice(request.capability, METERS),
@@ -235,7 +253,7 @@ export async function diagnoseTwitterOutcome(pool, requestId, { compareQuery = n
         sourceMode: choice(row.source_mode, ['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay', 'duplicate_suppressed', 'circuit_rejected', 'unavailable']),
         succeeded: boolean(row.succeeded), httpStatus: http(row.response_status), errorCode: choice(row.error_code, ERRORS), createdAt: time(row.created_at) })),
       rowLimit: LIMIT, ownCallsTruncated: calls.length > LIMIT, gatewaysTruncated: gateways.length > LIMIT,
-      searchProtocol, legacyConnector,
+      searchProtocol, legacyConnector, failureDiagnostic,
       interpretation: 'Missing HTTP/archives does not prove no dispatch or no charge; historical transport detail may not have been retained.' }
   } catch (error) { throw failure(error) }
   finally {
