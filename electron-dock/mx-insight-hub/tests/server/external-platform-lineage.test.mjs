@@ -424,10 +424,16 @@ test('external-platform migration pins ingest runs to one provider call', async 
 test('reservation reaping closes pending external-platform calls in the same statement', async () => {
   let statement
   const store = new PostgresStore({
-    async query(sql) {
-      statement = sql
-      return { rows: [{ reaped: 2 }] }
-    },
+    async connect() { return {
+      async query(sql) {
+        if (sql.includes('closed_external_platform_calls AS')) {
+          statement = sql
+          return { rows: [{ reaped: 2 }] }
+        }
+        return { rows: sql.includes('SELECT id FROM usage_requests') ? [{ id: randomUUID() }] : [] }
+      },
+      release() {},
+    } },
   })
 
   assert.equal(await store.reapStaleReservations(), 2)

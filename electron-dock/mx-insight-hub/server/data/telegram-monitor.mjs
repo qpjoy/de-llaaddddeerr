@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { cursorTimestamp } from '../core/cursor-time.mjs'
 
 // Stable public resources backed by the two server-side Telegram monitor
 // tables. Dataset ids are Hub-owned names: neither the upstream database nor
@@ -159,7 +160,8 @@ export function telegramMonitorResource(name) {
 }
 
 export function encodeTelegramCursor({ sortTime, id }) {
-  return Buffer.from(JSON.stringify({ v: 1, t: new Date(sortTime).toISOString(), id }), 'utf8').toString('base64url')
+  const timestamp = cursorTimestamp(sortTime) ?? new Date(sortTime).toISOString()
+  return Buffer.from(JSON.stringify({ v: 1, t: timestamp, id }), 'utf8').toString('base64url')
 }
 
 export function decodeTelegramCursor(value) {
@@ -168,7 +170,7 @@ export function decodeTelegramCursor(value) {
     const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
     const date = new Date(parsed?.t)
     if (parsed?.v !== 1 || Number.isNaN(date.getTime()) || !UUID_PATTERN.test(parsed?.id || '')) throw new Error('bad cursor')
-    return { sortTime: date.toISOString(), id: parsed.id }
+    return { sortTime: cursorTimestamp(parsed.t) ?? date.toISOString(), id: parsed.id }
   } catch {
     throw new AppError(400, 'invalid_cursor', 'cursor is invalid; return the previous page cursor unchanged')
   }
@@ -201,7 +203,7 @@ function encodeTelegramProductCursor({ sortTime, id }, binding, secret) {
   const payload = {
     v: PRODUCT_CURSOR_VERSION,
     q: binding,
-    t: new Date(sortTime).toISOString(),
+    t: cursorTimestamp(sortTime) ?? new Date(sortTime).toISOString(),
     id,
   }
   if (!UUID_PATTERN.test(id || '')) {
@@ -227,7 +229,7 @@ function decodeTelegramProductCursor(value, binding, secret) {
     const validKeys = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
       && Object.keys(parsed).sort().join(',') === 'id,q,s,t,v'
     const validSortTime = typeof parsed?.t === 'string'
-      && new Date(parsed.t).toISOString() === parsed.t
+      && cursorTimestamp(parsed.t) === parsed.t
     if (
       !validKeys
       || parsed.v !== PRODUCT_CURSOR_VERSION
@@ -365,7 +367,7 @@ export function decodeTelegramSearchCursor(value, binding, secret) {
     const id = parsed?.a?.[parsed?.m === 'elasticsearch' ? 2 : 1]
     const validTime = parsed?.m === 'elasticsearch'
       ? sortTime === null || Number.isFinite(sortTime) || (typeof sortTime === 'string' && sortTime.length <= 128)
-      : sortTime === null || (typeof sortTime === 'string' && new Date(sortTime).toISOString() === sortTime)
+      : sortTime === null || (typeof sortTime === 'string' && cursorTimestamp(sortTime) === sortTime)
     if (
       !validKeys || parsed?.v !== SEARCH_CURSOR_VERSION || !validMode || !validPit ||
       !validSort || !validTime ||

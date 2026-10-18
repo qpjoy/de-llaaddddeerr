@@ -19,7 +19,8 @@ import { createServer } from 'node:http'
 import { PlatformSearchPolicyStore } from './external-platforms/platform-search-policy.mjs'
 import { EcommerceRoutingStore } from './external-platforms/ecommerce-routing.mjs'
 import { StrategySearchRoutingStore } from './external-platforms/strategy-search-routing.mjs'
-import { createPool, createQueue } from '@qpjoy/mx-common'
+import { createQueue } from '@qpjoy/mx-common'
+import { createHubPostgresPool } from './core/postgres-pool.mjs'
 import { createSegmenter } from '@qpjoy/mx-common/segmenter'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -111,7 +112,11 @@ export async function createRuntime(config = loadConfig()) {
   // The queue is only reachable with a real database. Without one the admin
   // backfill routes report unavailable rather than pretending to schedule work.
   const pool = config.storeDriver === 'postgres'
-    ? createPool(config.common.postgres, { applicationName: 'mx-insight-hub-api' })
+    ? createHubPostgresPool({ connectionString: config.common.postgres.url,
+      max: config.common.postgres.maxConnections ?? 10,
+      application_name: 'mx-insight-hub-api',
+      statement_timeout: config.common.postgres.statementTimeoutMs ?? 30000,
+      idleTimeoutMillis: 30000 })
     : null
   const acquisitionHistory = pool ? new PostgresAcquisitionHistoryStore(pool, { apiKeyPepper: config.apiKeyPepper }) : null
   const topicReports = pool ? new TopicReportStore(pool) : null

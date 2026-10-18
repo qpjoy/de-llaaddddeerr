@@ -1,4 +1,5 @@
 import { workspaceRoute } from './portal/workspace.mjs'
+import { hubDatabaseFailure } from './core/postgres-pool.mjs'
 import {portalPrincipal, harborRoute} from './portal/harbor.mjs'
 import { DataportStore } from './portal/dataport-store.mjs'
 import { PaymentError } from '@qpjoy/mx-pay'
@@ -6638,10 +6639,14 @@ export function createApp({
       throw new AppError(404, 'not_found', 'Route not found')
     } catch (error) {
       if (response.destroyed || response.writableEnded) return
+      const databaseFailure = error instanceof AppError ? null : hubDatabaseFailure(error)
       const appError = error instanceof AppError
         ? error
-        : new AppError(500, 'internal_error', 'Internal server error')
-      if (!(error instanceof AppError)) logger.error?.({ requestId, error }, 'request failed')
+        : databaseFailure
+          ? new AppError(503, 'hub_database_unavailable', 'Hub database is temporarily unavailable; check the original request status before retrying a data acquisition', { layer: 'hub', stage: 'database' })
+          : new AppError(500, 'internal_error', 'Internal server error')
+      if (databaseFailure) logger.error?.({ requestId, event: 'hub_database_request_failed', ...databaseFailure })
+      else if (!(error instanceof AppError)) logger.error?.({ requestId, error }, 'request failed')
       if ([429, 503].includes(appError.status) && Number.isFinite(appError.details?.retryAfterMs)) {
         response.setHeader('retry-after', String(Math.max(1, Math.ceil(appError.details.retryAfterMs / 1000))))
       }

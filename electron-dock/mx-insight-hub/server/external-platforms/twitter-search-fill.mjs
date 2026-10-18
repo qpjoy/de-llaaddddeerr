@@ -57,6 +57,23 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
   let calls=0, bytes=0, duplicateCount=0, discardedCount=0, sourcePartial=false
   let providerCursor=request.providerCursor ?? null, buffer=null, stopReason=null, capturedAt=null
   let ownsLease=false, entered=false, currentCall=null, currentEvidence=null, currentCost=null, settledFailure=false, retainLease=false
+  let phase='admission', unknownLogged=false
+  const logUnknown=error=>{
+    if(unknownLogged) return
+    unknownLogged=true
+    try {
+      const classes=['Error','TypeError','RangeError','SyntaxError','AppError','RapidApiUpstreamError']
+      let cause=error, sqlState=null
+      // Persistence wrappers may carry the database failure as a cause. Never
+      // copy its message, stack, detail, SQL or parameters into ordinary logs.
+      for(let depth=0;cause && depth<3;depth++,cause=cause.cause) {
+        if(typeof cause.code==='string' && /^[0-9A-Z]{5}$/u.test(cause.code)) { sqlState=cause.code;break }
+      }
+      gateway.logger?.warn?.({event:'twitter_search_outcome_unknown',requestId:delivery.usageRequestId,
+        callId:currentCall?.id ?? null,phase,errorClass:classes.includes(error?.name)?error.name:'Error',sqlState},
+      'Twitter search outcome is unknown')
+    } catch { /* Logging cannot change an unknown outcome or its retained hold. */ }
+  }
   const dispatchLease={ consumerId:context.consumer.id,operation:delivery.operation,fingerprint:delivery.fingerprint,
     endpointKey:request.providerRequest.endpointKey,contractVersion:request.providerRequest.endpointContractVersion,
     ownerRequestId:delivery.usageRequestId,expiresAt:new Date(deadlineAt),
@@ -155,6 +172,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
       if(bytes+MAX_PAGE_BYTES>MAX_BYTES) { stopReason='archive_byte_limit'; break }
       if(!enoughTime()) { stopReason='deadline'; break }
       try {
+        phase='admission'
         if(signal?.aborted) throw new AppError(499,'request_cancelled','Request cancelled before dispatch')
         let acquisition=await authorizeAcquisition()
         const lease=await store.acquireDispatchLease({...dispatchLease,ownedDeliveryLease:true})
@@ -199,6 +217,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         if(inputCursor) step.upstreamQuery.cursor=inputCursor
         currentEvidence=null
         await assertSearchDispatchAllowed?.()
+        phase='begin_call'
         currentCall=await store.beginProviderCall({ ...delivery,apiKeyId:context.apiKey.id,
           contractVersion:step.endpointContractVersion,endpointKey:step.endpointKey,endpointVersion:step.endpointVersion,
           marketplace:'twitter',callOrdinal:calls,callRole:calls?'enrichment':'primary',dispatchFingerprint:delivery.fingerprint,
@@ -208,6 +227,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         if(inputCursor) tokens.add(inputCursor)
         const callStarted=performance.now()
         let result
+        phase='provider_request'
         try { result=await gateway.adapter.execute(step,{credential:credential.credential,encodeCursor:()=>null}) }
         catch(error) {
           if(!(error instanceof RapidApiUpstreamError)) throw error
@@ -226,16 +246,19 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
             // Preserve the rejected procurement receipt, but keep the original
             // customer hold open for one final TikHub delivery. The parent lease
             // remains owned until both suppliers have a durable outcome.
+            phase='finish_step'
             await store.finishProviderStep(currentEvidence)
             const callId = currentCall.id
             currentCall = null
             settledFailure = true
+            phase='supplier_handoff'
             try {
               await store.releaseProviderCostWorkflow({ reservationId: currentCost.id, usageRequestId: delivery.usageRequestId })
               currentCost = null
               if (entered) { leaveCapacity(entered); entered = false }
               await rejectedFallback.prepare({ delivery, callId })
-            } catch {
+            } catch(error) {
+              logUnknown(error)
               await markUnknown()
               throw uncertain('The supplier handoff could not be confirmed; verify the saved request before retrying')
             }
@@ -266,12 +289,14 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
               throw fallbackError
             }
           }
+          phase='finish_failure'
           await store.finishFailure({ ...currentEvidence,failureResponseStatus:mapped.status,
             failureResponseBody:{ error:{code:mapped.code,message:mapped.message,details:{...mapped.details,requestId:delivery.usageRequestId}},requestId:delivery.usageRequestId } })
           currentCall=null
           settledFailure=true
           throw mapped
         }
+        phase='project_response'
         const receipt=result.restrictedResponseArchive
         currentEvidence={callId:currentCall.id,delivery,outcome:'succeeded',httpStatus:200,businessCode:null,billed:null,
           costMinor:cost.costMinor,costKind:cost.costKind,currency:cost.currency,
@@ -282,16 +307,20 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         bytes+=receipt.bodySize
         const projected=projectTwitterDataSearch(result)
         const records=rawSearchRecords(projected.publicBody,'twitter','rapidapi')
+        phase='stage_evidence'
         await store.stageProviderEvidence(currentEvidence)
+        phase='finish_step'
         await store.finishProviderStep({...currentEvidence,ingestJob:{payload:{kind:'external-platform-result',providerKey:'rapidapi',
           consumerId:context.consumer.id,datasetId:'night-all.search.v1',platform:'twitter',requestId:delivery.usageRequestId,
           queryFingerprint:delivery.fingerprint,providerCallId:currentCall.id,records},
         dedupeKey:`external-platform:rapidapi:${currentCall.id}`,priority:100}})
         const callId=currentCall.id
         currentCall=null
+        phase='assemble_page'
         consume(result.publicBody,{callId,bodySize:receipt.bodySize,bodySha256:receipt.bodySha256,capturedAt:receipt.capturedAt},inputCursor)
       } catch(error) {
         if(currentCall || error?.code==='external_platform_call_persistence_unknown') {
+          logUnknown(error)
           if(currentCall) await store.markPersistenceUnknown({callId:currentCall.id,delivery,...(currentEvidence||{})}).catch(()=>{})
           await markUnknown()
           throw uncertain('The search outcome is unknown; verify the saved request before retrying')
@@ -299,20 +328,33 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         if(knownAdmission(error) && sources.length) { stopReason=error.code; break }
         throw error
       } finally {
-        if(currentCost) await store.releaseProviderCostWorkflow({reservationId:currentCost.id,usageRequestId:delivery.usageRequestId}).catch(()=>{})
+        if(currentCost) {
+          const released=await store.releaseProviderCostWorkflow({reservationId:currentCost.id,
+            usageRequestId:delivery.usageRequestId,bestEffortRelease:true}).catch(()=>false)
+          // Do not enter another budget admission behind the very same busy
+          // provider lock. Keep purchased content and its continuation; a full
+          // page, buffered overflow or exhausted cursor needs no degradation.
+          if(released===false && sources.length && items.length<request.pageSize && !buffer && providerCursor) {
+            stopReason='cost_release_pending'
+          }
+        }
         currentCost=null
       }
+      if(stopReason==='cost_release_pending') break
     }
     if(!sources.length) throw new AppError(503,'twitter_fill_deadline','The bounded search could not acquire a page before its limit')
+    phase='build_delivery'
     const result=projectDelivery({items,capturedAt,buffer,providerCursor,upstreamPages,upstreamCallCount:calls,
       stopReason,duplicateCount,discardedCount,sourcePartial,previousDeliveryId:delivery.usageRequestId})
     const responseBody={data:result.publicBody.data,requestId:delivery.usageRequestId}
     const sourceMode=calls?'live':clock()-Date.parse(capturedAt)<=gateway.config.freshTtlMs?'fresh_cache':'stored_fallback'
     try {
+      phase='commit_delivery'
       await store.commitTwitterFillDelivery({delivery,responseBody,capturedAt,usageUnitsActual:items.length,sourceMode,
         latencyMs:Math.round(performance.now()-started),...identity,
         lineage:{version:'twitter-fill.v1',scopeHash:request.scopeHash,previousDeliveryId:history.previousDeliveryId,upstreamPages},sources})
-    } catch {
+    } catch(error) {
+      logUnknown(error)
       await markUnknown()
       throw uncertain('The search delivery outcome is unknown; verify the saved request before retrying')
     }
@@ -320,6 +362,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
       staleAgeSeconds:Math.max(0,Math.floor((clock()-Date.parse(capturedAt))/1000))}
   } catch(error) {
     if(calls && !settledFailure) {
+      logUnknown(error)
       await markUnknown()
       if(error.preserveReservation!==true) throw uncertain('The search outcome is unknown; verify the saved request before retrying')
     }
