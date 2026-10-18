@@ -43,7 +43,7 @@ test(`${caseName} entry rejects alternate selections and extra flags before kube
 
 test(`${caseName} entry rejects missing or older sibling source before kubectl`, t => {
   const f = fixture(t, entryName), source = join(f.directory, 'verify-twitter-query-param.mjs')
-  writeFileSync(source, "export const REVISION = 'twitter-query-param-check.v3'\n")
+  writeFileSync(source, "export const REVISION = 'twitter-query-param-check.v4'\n")
   for (const missing of [false, true]) {
     if (missing) rmSync(source)
     const result = f.run([])

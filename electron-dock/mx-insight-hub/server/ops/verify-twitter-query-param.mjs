@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-export const REVISION = 'twitter-query-param-check.v4'
+export const REVISION = 'twitter-query-param-check.v5'
 // Receipt keys issued by v1 are immutable even as this diagnostic grows.
 const QUERY_PARAM_KEY_REVISION = 'twitter-query-param-check.v1'
 export const ORIGINAL_REQUEST_ID = 'b5906846-8564-4791-8b83-ef3ce97789bc'
@@ -66,21 +66,57 @@ const integer = value => Number.isSafeInteger(value) ? value : null
 const choice = (value, allowed) => allowed.includes(value) ? value : value == null ? null : 'other'
 const digest = value => createHash('sha256').update(value).digest('hex')
 
-function savedOutcome(saved, calls, query, expectedCallId) {
+function isOwnedProbeReceipt(saved, calls, query, expectedCallId) {
   const ownedCall = calls.length === 1 && calls.every(call => ['tenant_id', 'consumer_id', 'api_key_id'].every(key => call[key] === saved[key])
     && call.provider_key === 'rapidapi' && call.operation === 'social.content.search' && call.endpoint_key === 'twitter-aio.search'
     && call.endpoint_version === 'twitter-aio.hub.v1' && call.contract_version === 'mx-insight-hub.social-data.v1'
     && call.call_ordinal === 0 && call.call_role === 'primary' && (!expectedCallId || call.id === expectedCallId))
-  const body = saved.acquisition_request?.body, error = saved.response_body?.error
+  const body = saved.acquisition_request?.body
   const verifiedInput = saved.platform === 'twitter' && saved.acquisition_request?.method === 'POST'
     && saved.acquisition_request?.path === '/api/v1/night-all/search/raw' && body?.platform === 'twitter'
     && body.query === query && body.pageSize === 20 && !body.cursor
-  if (saved.status !== 'committed' || !ownedCall || !verifiedInput) return null
+  return saved.status === 'committed' && ownedCall && verifiedInput
+}
+
+function savedOutcome(saved, calls, query, expectedCallId) {
+  if (!isOwnedProbeReceipt(saved, calls, query, expectedCallId)) return null
+  const error = saved.response_body?.error
   if (saved.response_status === 200 && calls[0].outcome === 'succeeded' && calls[0].http_status === 200) return 'success'
   if (saved.response_status === 502 && error?.code === 'social_upstream_rejected' && error?.details?.upstreamStatus === 400
     && error.details.outcome === 'rejected' && error.details.retryable === false
     && calls[0].outcome === 'rejected' && calls[0].http_status === 400) return 'rejected400'
   return null
+}
+
+// Diagnose an already-paid group page without changing its failed raw receipt
+// or fetching it again. This is a parser observation, never a delivery repair.
+async function inspectProbeOverflowArchive(archive, query) {
+  const maxBytes = 4 * 1024 * 1024
+  const bytes = archive?.body_bytes instanceof Uint8Array ? Buffer.from(archive.body_bytes) : null
+  const date = archive?.captured_at == null ? null : new Date(archive.captured_at)
+  const unverified = { state: 'archive_unverified', deliveryEstablished: false }
+  if (!bytes || !bytes.length || bytes.length > maxBytes || bytes.length !== archive.body_size
+    || digest(bytes) !== archive.body_sha256 || !date || !Number.isFinite(date.getTime())) return unverified
+  const sourceRoot = process.argv[1] === '-' ? pathToFileURL(`${process.cwd()}/server/`) : new URL('../', import.meta.url)
+  const [{ normalizeHubSocialRequest, normalizeTwitterResponse }, { isPostgresSafeJsonValue }] = await Promise.all([
+    import(new URL('contracts/hub-social.mjs', sourceRoot)), import(new URL('core/postgres-json.mjs', sourceRoot)),
+  ])
+  try {
+    const payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, ''))
+    if (!isPostgresSafeJsonValue(payload)) return unverified
+    const request = normalizeHubSocialRequest('search', { platform: 'twitter', query, count: 20, sort: 'top' })
+    const options = { capturedAt: date.toISOString(), encodeCursor: () => 'offline-not-a-cursor' }
+    let strictReason
+    try { normalizeTwitterResponse(payload, request, options) } catch (error) { strictReason = error.message }
+    if (strictReason !== 'upstream_page_exceeds_requested_count') return unverified
+    const result = normalizeTwitterResponse(payload, request, { ...options, allowOverflow: true })
+    const acquiredCount = result.data.items.length
+    if (acquiredCount <= 20) return unverified
+    return { state: 'valid_overflow_response', hashVerified: true, bodySize: bytes.length, bodySha256: archive.body_sha256,
+      strictReason, acquiredCount, overflowCount: acquiredCount - 20,
+      hasMore: result.data.page.hasMore, deliveryEstablished: false,
+      evidence: 'Offline installed-parser observation of the saved group archive; original raw 502 remains unchanged. No delivery or full-query coverage is established.' }
+  } catch { return unverified }
 }
 
 async function readSnapshot(pool, idempotencyKey, caseName) {
@@ -227,6 +263,17 @@ async function appendSavedEvidence(report, pool, saved, selected) {
     httpStatus: integer(call.http_status), upstreamRequestId: typeof call.upstream_request_id === 'string'
       && /^[A-Za-z0-9_.:-]{1,128}$/u.test(call.upstream_request_id) ? call.upstream_request_id : null }))
   report.savedOutcomeVerified = savedOutcome(saved, calls, selected.query)
+  const error = saved.response_body?.error
+  if (Object.values(GROUP_CASES).includes(selected) && isOwnedProbeReceipt(saved, calls, selected.query)
+    && Object.keys(saved.acquisition_request.body).sort().join(',') === 'pageSize,platform,query'
+    && saved.response_status === 502 && error?.code === 'social_upstream_response_unusable'
+    && error.details?.upstreamStatus === 200 && error.details.outcome === 'succeeded_unusable'
+    && error.details.retryable === false && calls[0].outcome === 'succeeded_unusable' && calls[0].http_status === 200) {
+    const { rows } = await pool.query(`SELECT /* twitter-query-param:probe-archive */ body_size,body_sha256,captured_at,
+      CASE WHEN body_size <= $2 AND octet_length(body_bytes) <= $2 THEN body_bytes END AS body_bytes
+      FROM control.external_platform_restricted_raw_responses WHERE provider_call_id=$1 LIMIT 2`, [calls[0].id, 4 * 1024 * 1024])
+    report.archiveObservation = await inspectProbeOverflowArchive(rows.length === 1 ? rows[0] : null, selected.query)
+  }
 }
 
 async function runSingleProbe({ pool, execute = false, caseName, createGatewayRuntime }) {
@@ -327,19 +374,21 @@ export async function runTwitterQueryParamProbe({ pool, execute = false, caseNam
   if (!['halves', 'english-groups'].includes(caseName)) return runSingleProbe({ pool, execute, caseName, createGatewayRuntime })
   const groups = caseName === 'english-groups'
   const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID, queryParamRequestId: QUERY_PARAM_REQUEST_ID,
-    case: caseName, mode: execute ? 'execute' : 'read_only', adapterCalls: 0, maxAdapterCalls: 2,
+    case: caseName, mode: execute ? 'execute' : 'read_only', adapterCalls: 0, maxAdapterCalls: groups ? 1 : 2,
     countMeaning: 'Adapter attempts only; not proof of HTTP dispatch, supplier charge or billed calls.',
     deliveryScope: 'Two proper subexpressions for diagnosis only. Neither result is a full-query result or cold-start recovery.',
     combination: groups ? 'english_topics AND english_events equals the English half; original English exclusions occur in both. Pages are not merged or delivered to Delta.'
       : 'chinese_half AND english_half equals the full candidate; the two result pages are not merged or delivered to Delta.',
-    fullQuerySha256: digest(PROBE_CASES.candidate.query), automaticRetryAllowed: false, reports: [] }
+    fullQuerySha256: digest(PROBE_CASES.candidate.query), automaticRetryAllowed: false,
+    ...(groups ? { continuation: 'Read the existing topic receipt and archive only; at most one new event-group request. Never reacquire the topic group.' } : {}), reports: [] }
   for (const part of groups ? ['english_topics', 'english_events'] : ['chinese_half', 'english_half']) {
-    const result = await runSingleProbe({ pool, execute, caseName: part, createGatewayRuntime })
+    const result = await runSingleProbe({ pool, execute: execute && !(groups && part === 'english_topics'), caseName: part, createGatewayRuntime })
     report.reports.push(result)
     report.adapterCalls += result.adapterCalls
     // Do not move to another query after an unresolved dispatch, failed proof
     // or an unconfirmed refusal. Re-running inspects each existing fixed key.
-    if (result.verificationError || execute && !['success', 'rejected400'].includes(result.savedOutcomeVerified)
+    const verifiedOverflow = groups && result.archiveObservation?.state === 'valid_overflow_response'
+    if (result.verificationError || execute && !['success', 'rejected400'].includes(result.savedOutcomeVerified) && !verifiedOverflow
       || !execute && result.errorCode) {
       report.stoppedAfter = part
       report.errorCode = result.errorCode || result.verificationError || 'subexpression_outcome_unverified'
@@ -349,6 +398,7 @@ export async function runTwitterQueryParamProbe({ pool, execute = false, caseNam
   if (groups) {
     report.rejectedGroups = report.reports.filter(row => row.savedOutcomeVerified === 'rejected400').map(row => row.case)
     report.succeededGroups = report.reports.filter(row => row.savedOutcomeVerified === 'success').map(row => row.case)
+    report.archiveValidatedGroups = report.reports.filter(row => row.archiveObservation?.state === 'valid_overflow_response').map(row => row.case)
     report.interpretation = 'Only these saved group outcomes are established. The reason the combined query was rejected remains unproven; no cold-start recovery is implied.'
   }
   return report

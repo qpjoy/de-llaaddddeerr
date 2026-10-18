@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
@@ -80,6 +80,11 @@ async function fixture({ grant = true, enabled = true, outcome = 'success' } = {
         tenant_id: row.tenantId, consumer_id: row.consumerId, api_key_id: row.apiKeyId, provider_key: row.providerKey,
         operation: row.operation, endpoint_key: row.endpointKey, endpoint_version: row.endpointVersion, contract_version: row.contractVersion,
         call_ordinal: row.callOrdinal, call_role: row.callRole })) }
+    if (text.includes('twitter-query-param:probe-archive')) {
+      const archive = platform.restrictedResponseArchives.get(values[0])
+      return { rows: archive ? [{ body_bytes: archive.bodyBytes, body_size: archive.bodySize,
+        body_sha256: archive.bodySha256, captured_at: archive.capturedAt }] : [] }
+    }
     assert.match(text, /^(BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY|ROLLBACK|SET LOCAL statement_timeout)/u)
     return { rows: [] }
   }
@@ -93,6 +98,11 @@ async function fixture({ grant = true, enabled = true, outcome = 'success' } = {
       if (selectedOutcome === 'unknown') throw new Error(SECRET)
       if (selectedOutcome === 'rejected') return Response.json({ message: '400, bad request' }, { status: 400 })
       if (selectedOutcome === 'other-rejection') return Response.json({ message: 'service temporarily unavailable' }, { status: 503 })
+      if (selectedOutcome === 'overflow') return Response.json({ entries: [{ type: 'TimelineAddEntries', entries: [
+        ...Array.from({ length: 21 }, (_, index) => ({ content: { itemContent: { tweet_results: { result: {
+          rest_id: String(index + 1), legacy: { full_text: POST },
+        } } } } })), { content: { cursorType: 'Bottom', value: 'do-not-follow' } },
+      ] }] }, { headers: { 'x-rapidapi-request-id': 'synthetic-upstream-overflow' } })
       return Response.json({ entries: [{ content: { itemContent: { tweet_results: { result: {
         rest_id: '1', legacy: { full_text: POST },
       } } } } }, { content: { cursorType: 'Bottom', value: 'do-not-follow' } }] },
@@ -104,6 +114,28 @@ async function fixture({ grant = true, enabled = true, outcome = 'success' } = {
   }
   return { pool, createGatewayRuntime, original, originalCall, knownCandidates, knownCalls, knownHalves, halfCalls, knownEnglishAnd, englishAndCalls, context, usage, platform, sent, sql,
     creations: () => runtimeCreations, run: options => runTwitterQueryParamProbe({ pool, createGatewayRuntime, ...options }) }
+}
+
+// Model the already recorded v4 topic probe through the real raw gateway.
+// The v5 diagnostic may inspect this receipt but must never send it again.
+async function seedGroupTopic(f, { historical = true } = {}) {
+  const runtime = await f.createGatewayRuntime(() => {}, 'english_topics')
+  const body = { platform: 'twitter', query: GROUP_CASES.english_topics.query, pageSize: 20 }
+  try {
+    await runtime.gateway.searchRaw(f.context, { body,
+      normalized: { platform: 'twitter', upstreamBody: body, pageSize: 20 },
+      idempotencyKey: GROUP_CASES.english_topics.idempotencyKey })
+  } catch (error) {
+    assert.match(error.code, /^social_upstream_(?:rejected|response_unusable|outcome_unknown)$/u)
+  }
+  assert.equal(f.usage.requests.size, 1)
+  assert.equal(f.platform.calls.size, 1)
+  const row = { usage: [...f.usage.requests.values()][0], call: [...f.platform.calls.values()][0],
+    archive: [...f.platform.restrictedResponseArchives.values()][0] }
+  // A real earlier receipt has already aged past the endpoint quarantine.
+  // Keep that governance intact; tests never disable its configured duration.
+  if (historical) row.call.completedAt = new Date(Date.now() - 6 * 60_000).toISOString()
+  return row
 }
 
 test('dry-run checks the fixed original rejection without constructing a credentialed gateway or creating usage', async () => {
@@ -497,12 +529,14 @@ test('English groups retain exact terms, exclusions and all old keys; dry-run ch
   assert.deepEqual(report.succeededGroups, [])
 })
 
-test('English groups send two exact independent path queries after confirmed 200 or 400, never full query, and reuse receipts without redispatch', async () => {
+test('English groups inspect the existing topic then send only the event query after confirmed 200 or 400, with durable replay', async () => {
   for (const rejected of ['english_topics', 'english_events', 'both', 'neither']) {
     const f = await fixture({ outcome: name => rejected === 'both' || name === rejected ? 'rejected' : 'success' })
+    await seedGroupTopic(f)
     const report = await f.run({ caseName: 'english-groups', execute: true })
     assert.equal(report.errorCode, undefined)
-    assert.equal(report.adapterCalls, 2)
+    assert.equal(report.adapterCalls, 1)
+    assert.equal(report.maxAdapterCalls, 1)
     assert.equal(report.reports.length, 2)
     assert.equal(f.creations(), 2)
     assert.equal(f.sent.length, 2)
@@ -515,7 +549,8 @@ test('English groups send two exact independent path queries after confirmed 200
       const sent = f.sent[index]
       assert.equal(decodeURIComponent(sent.pathname.slice('/search/'.length)), GROUP_CASES[name].query)
       assert.deepEqual(Object.fromEntries(sent.searchParams), { count: '20', category: 'Top', includeTimestamp: 'false' })
-      assert.equal(report.reports[index].preparedProviderQuery.querySha256, report.reports[index].querySha256)
+      if (index) assert.equal(report.reports[index].preparedProviderQuery.querySha256, report.reports[index].querySha256)
+      else assert.equal(report.reports[index].preparedProviderQuery, undefined)
       assert.equal(report.reports[index].providerCalls.length, 1)
     }
     assert.match(report.deliveryScope, /Neither result is a full-query result/u)
@@ -531,8 +566,10 @@ test('English groups send two exact independent path queries after confirmed 200
 
 test('English group unknown, other rejection or missing evidence stops later requests, including repeated execution', async () => {
   for (const outcome of ['unknown', 'other-rejection']) {
-    const f = await fixture({ outcome }), report = await f.run({ caseName: 'english-groups', execute: true })
-    assert.equal(report.adapterCalls, 1)
+    const f = await fixture({ outcome })
+    await seedGroupTopic(f)
+    const report = await f.run({ caseName: 'english-groups', execute: true })
+    assert.equal(report.adapterCalls, 0)
     assert.equal(report.reports.length, 1)
     assert.equal(report.stoppedAfter, 'english_topics')
     assert.ok(report.errorCode)
@@ -542,23 +579,21 @@ test('English group unknown, other rejection or missing evidence stops later req
     assert.equal(f.sent.length, 1)
   }
   const f = await fixture({ outcome: name => name === 'english_events' ? 'unknown' : 'rejected' })
+  await seedGroupTopic(f)
   const report = await f.run({ caseName: 'english-groups', execute: true })
-  assert.equal(report.adapterCalls, 2)
+  assert.equal(report.adapterCalls, 1)
   assert.equal(report.stoppedAfter, 'english_events')
   assert.deepEqual(report.rejectedGroups, ['english_topics'])
   assert.equal((await f.run({ caseName: 'english-groups', execute: true })).adapterCalls, 0)
   assert.equal(f.sent.length, 2)
-  const missing = await fixture(), create = missing.createGatewayRuntime
-  const createGatewayRuntime = async (...args) => {
-    const runtime = await create(...args), searchRaw = runtime.gateway.searchRaw.bind(runtime.gateway)
-    runtime.gateway.searchRaw = async (...queryArgs) => { const result = await searchRaw(...queryArgs); missing.platform.calls.clear(); return result }
-    return runtime
-  }
-  const unverified = await runTwitterQueryParamProbe({ pool: missing.pool, createGatewayRuntime, caseName: 'english-groups', execute: true })
-  assert.equal(unverified.reports[0].httpStatus, 200)
+  const missing = await fixture()
+  await seedGroupTopic(missing)
+  missing.platform.calls.clear()
+  const unverified = await missing.run({ caseName: 'english-groups', execute: true })
+  assert.equal(unverified.reports[0].saved.httpStatus, 200)
   assert.equal(unverified.reports[0].savedOutcomeVerified, null)
   assert.equal(unverified.stoppedAfter, 'english_topics')
-  assert.equal(unverified.adapterCalls, 1)
+  assert.equal(unverified.adapterCalls, 0)
   assert.equal((await missing.run({ caseName: 'english-groups', execute: true })).adapterCalls, 0)
   assert.equal(missing.sent.length, 1)
 })
@@ -603,17 +638,168 @@ test('English groups retain original and half proof checks plus running and unkn
   }
   for (const state of ['running', 'unknown']) {
     const f = await fixture(), protocol = new SearchProtocolStore(f.usage)
+    await seedGroupTopic(f)
     const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'same-group-v2-identity', body: {
-      platform: 'twitter', query: GROUP_CASES.english_topics.query, pageSize: 20, type: 'stable',
+      platform: 'twitter', query: GROUP_CASES.english_events.query, pageSize: 20, type: 'stable',
       timeWindow: { from: '2026-10-17T00:00:00.000Z', to: '2026-10-18T00:00:00.000Z', timezone: 'Asia/Shanghai', boundary: '[from,to)' },
     } })
     if (state === 'unknown') await protocol.finish(lease.input, { state, usageRequestId: randomUUID() })
     const report = await f.run({ caseName: 'english-groups', execute: true })
     assert.equal(report.errorCode, state === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress')
     assert.equal(report.adapterCalls, 0)
-    assert.equal(report.reports.length, 1)
-    assert.equal(f.sent.length, 0)
+    assert.equal(report.reports.length, 2)
+    assert.equal(report.stoppedAfter, 'english_events')
+    assert.equal(f.sent.length, 1)
   }
+})
+
+test('group continuation cannot acquire a missing topic receipt', async () => {
+  const f = await fixture(), report = await f.run({ caseName: 'english-groups', execute: true })
+  assert.equal(report.maxAdapterCalls, 1)
+  assert.equal(report.adapterCalls, 0)
+  assert.equal(report.stoppedAfter, 'english_topics')
+  assert.equal(report.reports.length, 1)
+  assert.equal(f.creations(), 0)
+  assert.equal(f.sent.length, 0)
+  assert.equal(f.usage.requests.size, 0)
+})
+
+test('an archived overflow topic permits only the event probe without changing its saved raw failure or original receipt', async () => {
+  const f = await fixture({ outcome: name => name === 'english_topics' ? 'overflow' : 'success' })
+  const topic = await seedGroupTopic(f), before = structuredClone(topic), original = structuredClone(f.original)
+  assert.equal(topic.usage.responseStatus, 502)
+  assert.equal(topic.call.outcome, 'succeeded_unusable')
+  const report = await f.run({ caseName: 'english-groups', execute: true })
+  assert.equal(report.errorCode, undefined)
+  assert.equal(report.adapterCalls, 1)
+  assert.equal(report.maxAdapterCalls, 1)
+  assert.equal(report.reports.length, 2)
+  assert.equal(report.reports[0].adapterCalls, 0)
+  assert.equal(report.reports[0].saved.httpStatus, 502)
+  assert.equal(report.reports[0].savedOutcomeVerified, null)
+  assert.equal(report.reports[0].archiveObservation.state, 'valid_overflow_response')
+  assert.equal(report.reports[0].archiveObservation.acquiredCount, 21)
+  assert.equal(report.reports[0].archiveObservation.overflowCount, 1)
+  assert.equal(report.reports[0].archiveObservation.deliveryEstablished, false)
+  assert.deepEqual(report.archiveValidatedGroups, ['english_topics'])
+  assert.deepEqual(report.succeededGroups, ['english_events'])
+  assert.deepEqual(report.rejectedGroups, [])
+  assert.deepEqual(structuredClone(topic), before)
+  assert.deepEqual(f.original, original)
+  assert.equal(f.sent.length, 2)
+  assert.equal(decodeURIComponent(f.sent[1].pathname.slice('/search/'.length)), GROUP_CASES.english_events.query)
+  assert.doesNotMatch(JSON.stringify(report), new RegExp(`${SECRET}|${POST}|do-not-follow`))
+  const again = await f.run({ caseName: 'english-groups', execute: true })
+  assert.equal(again.adapterCalls, 0)
+  assert.deepEqual(again.archiveValidatedGroups, ['english_topics'])
+  assert.equal(f.sent.length, 2)
+  assert.deepEqual(structuredClone(topic), before)
+})
+
+test('a newly acquired event overflow is observed offline and replayed without pretending either raw failure was delivered', async () => {
+  const f = await fixture({ outcome: 'overflow' })
+  await seedGroupTopic(f)
+  const report = await f.run({ caseName: 'english-groups', execute: true })
+  assert.equal(report.errorCode, undefined)
+  assert.equal(report.adapterCalls, 1)
+  assert.deepEqual(report.archiveValidatedGroups, ['english_topics', 'english_events'])
+  assert.deepEqual(report.succeededGroups, [])
+  assert.deepEqual(report.rejectedGroups, [])
+  assert.equal(report.reports[1].errorCode, 'social_upstream_response_unusable')
+  for (const row of report.reports) {
+    assert.equal(row.saved.httpStatus, 502)
+    assert.equal(row.savedOutcomeVerified, null)
+    assert.equal(row.archiveObservation.acquiredCount, 21)
+    assert.equal(row.archiveObservation.deliveryEstablished, false)
+  }
+  const saved = structuredClone([...f.usage.requests.values()]), calls = structuredClone([...f.platform.calls.values()])
+  assert.equal((await f.run({ caseName: 'english-groups', execute: true })).adapterCalls, 0)
+  assert.deepEqual([...f.usage.requests.values()], saved)
+  assert.deepEqual([...f.platform.calls.values()], calls)
+  assert.equal(f.sent.length, 2)
+})
+
+test('an active endpoint quarantine still blocks the event even after topic archive overflow is verified', async () => {
+  const f = await fixture({ outcome: 'overflow' })
+  await seedGroupTopic(f, { historical: false })
+  const report = await f.run({ caseName: 'english-groups', execute: true })
+  assert.equal(report.errorCode, 'external_platform_response_unusable')
+  assert.equal(report.stoppedAfter, 'english_events')
+  assert.deepEqual(report.archiveValidatedGroups, ['english_topics'])
+  assert.equal(report.adapterCalls, 0)
+  assert.equal(f.sent.length, 1)
+})
+
+test('archive verification fails closed for missing, damaged, excessive, malformed or non-overflow responses', async () => {
+  const replacePayload = (archive, payload) => {
+    archive.bodyBytes = Buffer.from(payload)
+    archive.bodySize = archive.bodyBytes.length
+    archive.bodySha256 = createHash('sha256').update(archive.bodyBytes).digest('hex')
+  }
+  for (const corrupt of [
+    (f) => { f.platform.restrictedResponseArchives.clear() },
+    (_f, row) => { row.archive.bodySha256 = '0'.repeat(64) },
+    (_f, row) => { row.archive.bodySize++ },
+    (_f, row) => { row.archive.bodySize = 4 * 1024 * 1024 + 1 },
+    (_f, row) => { row.archive.bodyBytes = null },
+    (_f, row) => { row.archive.capturedAt = 'invalid-date' },
+    (_f, row) => { replacePayload(row.archive, '{invalid json') },
+    (_f, row) => { replacePayload(row.archive, '{"errors":[{"message":"supplier error"}],"entries":[]}') },
+    (_f, row) => { replacePayload(row.archive, '{"entries":[]}') },
+    (_f, row) => { replacePayload(row.archive, '{"entries":[],"unsafe":"\\u0000"}') },
+    (_f, row) => { replacePayload(row.archive, '{"unrecognized":[]}') },
+  ]) {
+    const f = await fixture({ outcome: 'overflow' }), topic = await seedGroupTopic(f)
+    corrupt(f, topic)
+    const report = await f.run({ caseName: 'english-groups', execute: true })
+    assert.equal(report.adapterCalls, 0)
+    assert.equal(report.stoppedAfter, 'english_topics')
+    assert.equal(report.reports[0].savedOutcomeVerified, null)
+    assert.notEqual(report.reports[0].archiveObservation?.state, 'valid_overflow_response')
+    assert.deepEqual(report.archiveValidatedGroups, [])
+    assert.equal(f.sent.length, 1)
+  }
+})
+
+test('archive overflow never overrides an unknown, mismatched input, ownership, call identity or different saved failure', async () => {
+  for (const corrupt of [
+    row => { row.usage.status = 'unknown' },
+    row => { row.usage.status = 'released' },
+    row => { row.usage.apiKeyId = randomUUID() },
+    row => { row.usage.acquisitionRequest.body.query = 'different' },
+    row => { row.usage.acquisitionRequest.body.pageSize = 21 },
+    row => { row.usage.acquisitionRequest.body.cursor = 'cursor' },
+    row => { row.usage.acquisitionRequest.body.params = { cursor: 'cursor' } },
+    row => { row.usage.acquisitionRequest.path = '/api/v1/data/search' },
+    row => { row.usage.responseBody.error.details.retryable = true },
+    row => { row.usage.responseBody.error.details.outcome = 'unknown' },
+    row => { row.usage.responseBody.error.details.upstreamStatus = 400 },
+    row => { row.call.outcome = 'unknown' },
+    row => { row.call.httpStatus = 400 },
+    row => { row.call.apiKeyId = randomUUID() },
+    row => { row.call.endpointVersion = 'unexpected' },
+    (row, f) => { f.platform.calls.set(randomUUID(), { ...row.call, id: randomUUID() }) },
+  ]) {
+    const f = await fixture({ outcome: 'overflow' }), topic = await seedGroupTopic(f)
+    corrupt(topic, f)
+    const report = await f.run({ caseName: 'english-groups', execute: true })
+    assert.equal(report.adapterCalls, 0)
+    assert.equal(report.stoppedAfter, 'english_topics')
+    assert.deepEqual(report.archiveValidatedGroups, [])
+    assert.equal(f.sent.length, 1)
+    assert.equal(f.sql.some(text => text.includes('twitter-query-param:probe-archive')), false)
+  }
+})
+
+test('overflow compatibility is observation-only for English groups and leaves the ordinary raw route strict', async () => {
+  const f = await fixture({ outcome: 'overflow' }), result = await f.run({ caseName: 'control', execute: true })
+  assert.equal(result.errorCode, 'social_upstream_response_unusable')
+  assert.equal(result.httpStatus, 502)
+  assert.equal(result.savedOutcomeVerified, null)
+  assert.equal(result.archiveObservation, undefined)
+  assert.equal(result.providerCalls[0].outcome, 'succeeded_unusable')
+  assert.equal(f.sql.some(text => text.includes('twitter-query-param:probe-archive')), false)
+  assert.equal(f.sent.length, 1)
 })
 
 test('CLI requires an explicit reviewed case before importing database modules or reading credentials', () => {
@@ -633,7 +819,7 @@ test('stdin import is pure while the actual stdin script remains executable', ()
   const imported = spawnSync(process.execPath, ['--input-type=module', '-'], { encoding: 'utf8', env,
     input: `const m = await import(${JSON.stringify(url.href)}); console.log(m.REVISION);` })
   assert.equal(imported.status, 0)
-  assert.equal(imported.stdout.trim(), 'twitter-query-param-check.v4')
+  assert.equal(imported.stdout.trim(), 'twitter-query-param-check.v5')
   assert.equal(imported.stderr, '')
   const entry = spawnSync(process.execPath, ['--input-type=module', '-', '--execute'], { encoding: 'utf8', env,
     input: readFileSync(url, 'utf8') })
