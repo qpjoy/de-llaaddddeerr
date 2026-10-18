@@ -8317,6 +8317,71 @@ paths:
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
+  /data/telegram/semantic-search:
+    post:
+      tags:
+      - Telegram
+      operationId: semanticSearchTelegram
+      summary: RAG 语义检索已向量化的 Telegram 消息
+      description: 'Requires the telegram grant and Idempotency-Key. Retrieves bounded semantic candidates
+        from existing Monitor/SQLite message embeddings, without live collection or answer generation. sourceScope
+        defaults to all. Filters combine with AND; from/to apply inclusive eventTime bounds. chatId is post-filtered
+        within at most 100 vector candidates, so fewer than topK may remain and this is not exhaustive per-chat
+        ranking. topK is limited by the current grant. Returns top-K evidence, not exhaustive cursor pagination;
+        coverage is unknown. Similarity is cosine similarity, not a probability. The query embedding can
+        incur model cost and the request is metered under the current Telegram policy. A committed request
+        is permanently bound to its original idempotency key and replays that saved response; a deliberate
+        new query needs a new key. Execution or response-delivery uncertainty may return 502/503 semantic_search_outcome_unknown:
+        retain the original key and inspect request status, do not automatically generate a new key or repeat
+        the model call; manual review may be needed. Send manually; changing tabs must not dispatch a query.
+        Unavailable vector service returns 503 without silently falling back to full-text search.'
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        description: The Idempotency-Key is global within one consumer and remains bound to the Hub API
+          key that created its usage record. Reuse it only with that same API key when retrying the exact
+          same path and normalized body; another API key, a new path, body or page requires a new Idempotency-Key.
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TelegramSemanticSearchRequest'
+            example:
+              query: 领导人
+              sourceScope: all
+              topK: 20
+      responses:
+        '200':
+          description: Bounded Telegram semantic evidence; no answer generation or continuation cursor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TelegramSemanticSearchEnvelope'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '410':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/Error'
+        '502':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
   /data/telegram/entities/search:
     get:
       operationId: searchTelegramEntities
@@ -13163,6 +13228,339 @@ components:
             degraded: { type: boolean }
             errorCode: { type: [string, "null"] }
         requestId: { type: string, format: uuid }
+    TelegramSemanticSearchRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - query
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Natural-language meaning to retrieve, for example 领导人. No Boolean expression grammar.
+        sourceScope:
+          type: string
+          enum:
+          - all
+          - monitor
+          - sqlite
+          default: all
+        chatId:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Exact external chat id, not a qualified chatKey.
+        authorId:
+          type: string
+          minLength: 1
+          maxLength: 256
+        from:
+          type: string
+          format: date-time
+          description: Inclusive eventTime lower bound; requires an explicit timezone.
+        to:
+          type: string
+          format: date-time
+          description: Inclusive eventTime upper bound; requires an explicit timezone.
+        topK:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 20
+          description: Maximum returned candidates, also bounded by the current grant maxPageSize; default
+            min(20, grant limit). Not a page size for cursor traversal.
+        minSimilarity:
+          type: number
+          minimum: -1
+          maximum: 1
+          description: Optional cosine similarity lower bound for the active embedding model, not a relevance
+            probability.
+    TelegramSemanticSearchEnvelope:
+      type: object
+      additionalProperties: false
+      required:
+      - data
+      - requestId
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required:
+          - contractVersion
+          - platform
+          - query
+          - status
+          - items
+          - retrieval
+          - pageInfo
+          - meta
+          properties:
+            contractVersion:
+              type: string
+              const: mx-insight-hub.telegram-semantic.v1
+            platform:
+              type: string
+              const: telegram
+            query:
+              type: string
+            status:
+              type: string
+              const: ok
+            meta:
+              type: object
+              additionalProperties: false
+              required:
+              - durationMs
+              properties:
+                durationMs:
+                  type: number
+                  minimum: 0
+            items:
+              type: array
+              maxItems: 50
+              items:
+                $ref: '#/components/schemas/TelegramSemanticSearchItem'
+            retrieval:
+              type: object
+              additionalProperties: false
+              required:
+              - mode
+              - similarityMetric
+              - similarityIsProbability
+              - embeddingSpace
+              - minSimilarity
+              - candidateLimit
+              - numCandidates
+              - candidateChunks
+              - candidateLimitReached
+              - validatedChunks
+              - validatedRecords
+              - discardedCandidates
+              - chatFilter
+              - exhaustive
+              - coverage
+              - consistency
+              - textLimit
+              - snippetLimit
+              - warnings
+              properties:
+                mode:
+                  type: string
+                  const: semantic
+                exhaustive:
+                  type: boolean
+                  const: false
+                coverage:
+                  type: string
+                  const: unknown
+                similarityMetric:
+                  type: string
+                  const: cosine
+                similarityIsProbability:
+                  type: boolean
+                  const: false
+                embeddingSpace:
+                  type: string
+                  description: Model and dimension compatibility identity, not credentials or provider configuration.
+                candidateLimit:
+                  type: integer
+                  const: 100
+                numCandidates:
+                  type: integer
+                  const: 200
+                candidateChunks:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+                candidateLimitReached:
+                  type: boolean
+                validatedChunks:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+                validatedRecords:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+                discardedCandidates:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+                chatFilter:
+                  type: string
+                  enum:
+                  - post_filter_candidates
+                  - not_requested
+                consistency:
+                  type: string
+                  const: current-canonical-revalidated
+                textLimit:
+                  type: integer
+                  const: 12000
+                snippetLimit:
+                  type: integer
+                  const: 1600
+                minSimilarity:
+                  type:
+                  - number
+                  - 'null'
+                  minimum: -1
+                  maximum: 1
+                warnings:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                    - code
+                    - message
+                    properties:
+                      code:
+                        type: string
+                      message:
+                        type: string
+            pageInfo:
+              type: object
+              additionalProperties: false
+              required:
+              - paginationMode
+              - returnedCount
+              - topK
+              - nextCursor
+              - cursorType
+              properties:
+                topK:
+                  type: integer
+                  minimum: 1
+                  maximum: 50
+                returnedCount:
+                  type: integer
+                  minimum: 0
+                  maximum: 50
+                nextCursor:
+                  type: 'null'
+                cursorType:
+                  type: string
+                  const: none
+                paginationMode:
+                  type: string
+                  const: top_k
+        requestId:
+          type: string
+          format: uuid
+    TelegramSemanticSearchItem:
+      type: object
+      additionalProperties: false
+      required:
+      - canonicalId
+      - id
+      - externalId
+      - platform
+      - objectType
+      - contentType
+      - datasetId
+      - sourceScope
+      - chatId
+      - title
+      - titleTruncated
+      - text
+      - textTruncated
+      - snippet
+      - snippetTruncated
+      - url
+      - author
+      - eventTime
+      - revision
+      - semanticSimilarity
+      properties:
+        id:
+          type: string
+          format: uuid
+        canonicalId:
+          type: string
+          format: uuid
+          description: Use for stored context and timeline reads.
+        externalId:
+          type: string
+        platform:
+          type: string
+          const: telegram
+        objectType:
+          type: string
+          const: message
+        contentType:
+          type:
+          - string
+          - 'null'
+        datasetId:
+          type: string
+          enum:
+          - telegram.monitor.messages.v1
+          - telegram.sqlite.messages.v1
+        sourceScope:
+          type: string
+          enum:
+          - monitor
+          - sqlite
+        title:
+          type:
+          - string
+          - 'null'
+          maxLength: 500
+        titleTruncated:
+          type: boolean
+        text:
+          type:
+          - string
+          - 'null'
+          maxLength: 12000
+        textTruncated:
+          type: boolean
+        snippet:
+          type: string
+          maxLength: 1600
+        snippetTruncated:
+          type: boolean
+        url:
+          type:
+          - string
+          - 'null'
+        author:
+          type: object
+          additionalProperties: false
+          required:
+          - id
+          - name
+          - username
+          properties:
+            id:
+              type:
+              - string
+              - 'null'
+            name:
+              type:
+              - string
+              - 'null'
+            username:
+              type:
+              - string
+              - 'null'
+        chatId:
+          type:
+          - string
+          - 'null'
+        eventTime:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        revision:
+          type: integer
+          minimum: 1
+        semanticSimilarity:
+          type: number
+          minimum: -1
+          maximum: 1
     TelegramSearchRequest:
       type: object
       additionalProperties: false

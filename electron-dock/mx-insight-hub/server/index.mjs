@@ -1,4 +1,6 @@
 import {createHarborPortal} from './portal/harbor.mjs'
+import { TelegramSemanticSearch } from './retrieval/telegram-semantic.mjs'
+import { createTelegramSemanticProxy } from './retrieval/telegram-semantic-proxy.mjs'
 import { IpRiskProduct } from './external-platforms/ip-risk-product.mjs'
 import { CommerceService } from './commerce/service.mjs'
 import { CustomerMessages } from './commerce/messages.mjs'
@@ -173,6 +175,9 @@ export async function createRuntime(config = loadConfig()) {
   const retrievalPool = pool && config.listenerMode !== 'public'
     ? createRetrievalPool(config.common.postgres) : null
   const advancedSearch = retrievalPool ? new AdvancedSearch({ pool: retrievalPool, search, agent }) : null
+  const telegramSemantic = advancedSearch ? new TelegramSemanticSearch({ pool: retrievalPool, advancedSearch }) : null
+  const telegramSemanticProxy = config.listenerMode === 'public'
+    ? createTelegramSemanticProxy({ baseUrl: config.telegramSemanticInternalUrl }) : null
   const retrievalControl = retrievalPool ? new RetrievalControl({ pool: retrievalPool, search, agent }) : null
   const searchReindex = search && config.listenerMode !== 'public'
     ? new AdminSearchReindex({ search, segmenterConfig: config.common.segmenter })
@@ -529,6 +534,8 @@ export async function createRuntime(config = loadConfig()) {
     apiKeyPepper: config.apiKeyPepper,
     reservationLeaseMs: config.reservationLeaseMs,
     searchQueries: search?.queries ?? null,
+    telegramSemantic,
+    telegramSemanticConfigured: Boolean(telegramSemantic || telegramSemanticProxy),
     segmenter,
     externalNativeCapabilities: async options => {
       const results = await Promise.allSettled([
@@ -699,6 +706,7 @@ export async function createRuntime(config = loadConfig()) {
     search,
     searchReindex,
     advancedSearch,
+    telegramSemanticProxy,
     retrievalControl,
     embedding,
     externalPlatformAdmin,

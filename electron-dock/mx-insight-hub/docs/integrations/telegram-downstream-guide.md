@@ -4,7 +4,7 @@
 
 **本次接入前必须发布 TG 专用搜索修复**：旧实现先校验并未列入该接口白名单的 `platform`，可能使按合同发出的请求直接返回 400。本次由专用路由固定 `telegram`，并统一默认页大小。下游不要通过给专用请求添加 `platform` 绕过问题；按本文 body 联调修复后的服务。
 
-推荐链路是：发现授权能力 → 按来源、会话、作者和时间窗搜索 → 用游标逐页保存 → 只对需要阅读的命中拉取上下文或双向时间线。以下接口均读取 Hub 已收录数据，不在查询时请求 Telegram、Night-All 或供应商。不要把其他平台的实时采购搜索规则套到这些接口。
+推荐链路是：发现授权能力 → 按来源、会话、作者和时间窗搜索 → 全文用游标逐页保存／语义保存 Top-K 候选 → 只对需要阅读的命中拉取上下文或双向时间线。以下接口均读取 Hub 已收录数据，不在查询时触发 Telegram、Night-All 或数据供应商采集。语义检索会调用模型生成查询向量，可能产生模型成本。不要把其他平台的实时采购搜索规则套到这些接口。
 
 ## 1. 选择接口
 
@@ -14,6 +14,7 @@
 | 浏览／筛选会话目录 | `GET /api/v1/data/telegram/chats` | `sourceScope`、`kind`、`query`；支持历史游标 |
 | 获取会话已有消息，不要求命中关键词 | `GET /api/v1/data/telegram/messages` | `sourceScope`、`chatId`、`from`、`to`；支持历史游标 |
 | 有关键词和 TG 策略过滤条件 | `POST /api/v1/data/telegram/search` | 首选；支持来源、对象、会话、作者、时间窗；当前仅 `matchMode=full_text` |
+| 按主题／含义找相关内容，例如“领导人” | `POST /api/v1/data/telegram/semantic-search` | 仅已向量化消息；返回 Top-K 语义候选，无 cursor，不生成回答 |
 | 选择短语／全词等受控检索模式 | `POST /api/v1/data/canonical/search` | 指定 `platform=telegram`、`objectType=message`；支持 `searchProfile`，不支持 TG 会话／作者／时间过滤 |
 | 命中附近有限消息 | `GET /api/v1/data/canonical/items/{id}/context` | 固定前后窗口，无续页 |
 | 命中后持续向前／向后阅读 | `GET /api/v1/data/canonical/items/{id}/timeline` | 双向签名游标；`newer` 可轮询；不是变更订阅 |
@@ -37,7 +38,7 @@ Authorization: Bearer <Hub Public API Key>
 
 POST 搜索必须传 `Idempotency-Key`：8–128 字符，匹配 `^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`。约定每个“策略版本 + 查询轮次 + 子查询 + 页”有一个标识；重试原页保留原路径、body、Key 和标识，下一页换标识。不要在两个并发页之间共用标识，也不要更换 API Key 接管原请求。
 
-专用 TG 搜索只支持默认 `fresh`，**不能传 `type`**；已提交响应默认回放窗口为 120 秒，超过窗口不能再把同一标识当作永久去重记录。Canonical 搜索接受 `type=fresh|stable`，`stable` 可保持已存响应的重放，但不会延长搜索 PIT 的寿命。下游应持久化已成功交付的页和消费状态。
+专用 TG 全文搜索只支持默认 `fresh`，**不能传 `type`**；已提交响应默认回放窗口为 120 秒，超过窗口不能再把同一标识当作永久去重记录。Canonical 搜索接受 `type=fresh|stable`，`stable` 可保持已存响应的重放，但不会延长搜索 PIT 的寿命。下游应持久化已成功交付的页和消费状态。
 
 安全 GET 不要求幂等键，每次请求／重试独立计量。TG 历史、实体、上下文、时间线按现行平台规则计量；搜索同样受到授权、策略和用量规则约束。零供应商请求不等于免计量。用量单位和最终价格不是同一个概念，以当前 Key 与套餐为准。
 
@@ -160,10 +161,40 @@ function matchesLiteralGroups(item, rule) {
 
 客户端建议限制每组最多 8 个召回词、每策略最多 4 组、同时运行至多 2 个子查询作为起点；这些是下游资源预算建议，不是 Hub 服务端承诺的上限。超过预算将策略标记待细化，不自动展开大量组合。每个子查询的 cursor 链顺序消费。该方案明确最终命中的业务含义，但不证明 ES 分词召回覆盖全部 literal 匹配；多查询各自有 PIT，不提供跨子查询同一原子快照。并集不保留全局相关度，也不能把各子查询 totalCount 相加成唯一结果数。
 
+### RAG 语义检索：相关候选，不是全量关键词扫描
+
+`POST /api/v1/data/telegram/semantic-search` 适用于“领导人”“政策变化”等概念检索；消息无需包含同一字面词才可能被召回。返回供下游 RAG 使用的证据，本接口不生成回答，也不保证每个语义近邻都符合下游策略。
+
+| 字段 | 规则 |
+| --- | --- |
+| `query` | 必填自然语言，trim 后 1–500 字符，不解析 AND / OR 表达式 |
+| `sourceScope` | `all`（默认）、`monitor`、`sqlite`，固定只查消息 |
+| `chatId`、`authorId` | 可选原始规范化 ID，各不超过 256 字符；不要发送 `monitor:UUID` chatKey |
+| `from`、`to` | 可选完整 RFC3339，必须有时区，小数秒最多 6 位；按 `eventTime` 包含边界过滤 |
+| `topK` | 默认 `min(20, 当前授权 maxPageSize)`，1–50 且不超过当前授权上限 |
+| `minSimilarity` | 可选 -1 到 1 的余弦相似度下限；默认不设，不是概率，不同模型之间不可直接比较 |
+
+未知字段拒绝。不要发送 `platform`、`scope`、`matchMode`、`kind`、`pageSize`、`cursor`、`type` 或模型配置。需要已获 Telegram 授权的 Live API Key，Test Key 不支持；沿用配额和计量规则。语义接口的已提交结果固定绑定原幂等键，之后回放原响应，不因 120 秒过去而重新计算。新一轮查询显式使用新幂等键，原查询重试保留原键与完整 body。请求会生成查询向量，不能把没有新采集误认为没有模型调用或费用。
+
+```bash
+# 新查询生成一次并保存；同一查询重试时保留这个值
+TG_SEMANTIC_KEY="tg-semantic-$(uuidgen)"
+curl -sS -X POST 'https://hub.minsight-ai.com/api/v1/data/telegram/semantic-search' \
+  -H "Authorization: Bearer ${HUB_API_KEY}" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: ${TG_SEMANTIC_KEY}" \
+  --data-raw '{"query":"领导人","sourceScope":"all","topK":20}'
+```
+
+响应 `data.contractVersion=mx-insight-hub.telegram-semantic.v1`；`items[].canonicalId` 可接 context/timeline，`semanticSimilarity` 表示语义相似度。`pageInfo.paginationMode=top_k`、`nextCursor=null`；`retrieval.exhaustive=false`、`coverage=unknown` 明确它不是全量命中清单。新执行时，服务端从至多 100 个向量候选中验证当前记录版本、删除状态和过滤条件，再按 canonical UUID 去重；`chatId` 在该有界候选集合上后过滤，可能不足 `topK`，不能据此认定某会话没有相关内容或已找到其全库最佳消息。来源、作者和时间条件可在向量候选阶段收窄。
+
+历史 TG 是否完成向量化必须看运行环境的处理状态和对应 dataset 覆盖；已入库总量、向量化开关、全平台 RAG 有结果均不证明 TG 历史已全部完成。空结果只表示本次有界候选未命中，不能判定全库无相关消息。模型／向量服务不可用时返回 503，绝不静默改为全文。执行或回程不确定可能返回 `502/503 semantic_search_outcome_unknown`：保留原幂等键，使用 `GET /api/v1/requests/by-idempotency-key`（原值放请求头）或已有 requestId 查询状态；不得自动换键重新调用模型，未知结果可能需要人工核对。已提交重放的是原交付证据，不是对当前版本重新检索。下游需要字面命中或完整分页时，明确调用 `/telegram/search` 并将两类证据分别标识。需要生成回答时，由下游基于选中的候选与上下文生成并保留引用。
+
 ## 5. 游标、时效与一致性
 
 | 接口 | 分页方式 | 时效和一致性 |
 | --- | --- | --- |
+| TG semantic-search | Top-K 候选；无 cursor | 不保证全量召回；覆盖未知；同键固定回放已提交结果，新轮次显式换键 |
 | TG / Canonical 搜索，ES 模式 | PIT + `search_after`，查询 `pageSize+1` 判断后页 | PIT 每次实际搜索续期 2 分钟；属于本轮索引视图，不等于源数据完整；继续页固定同一后端及首屏分析状态 |
 | TG / Canonical 搜索，PG 模式 | `event_time DESC NULLS LAST, id DESC` 的 keyset | 无固定快照，无 cursor 内 TTL；当前数据可能变化；不得切换后端续页 |
 | chats/messages GET，显式来源／新过滤 | 签名 v2 keyset，排序时间 + canonical UUID | 无 cursor 内 TTL；当前存储视图；cursor 绑定 resource、来源、过滤、页大小 |

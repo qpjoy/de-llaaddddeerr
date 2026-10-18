@@ -40,7 +40,7 @@ const searchResult = (text, cursor = null) => ({ items: [{ canonicalId: text, te
 
 async function fixture() {
   const { TelegramPage } = await view
-  const hooks = [], directoryCalls = [], messageCalls = [], searchCalls = []
+  const hooks = [], directoryCalls = [], messageCalls = [], searchCalls = [], semanticCalls = []
   let index = 0, effects = [], dirty = true, tree
   const same = (left, right) => left && right && left.length === right.length && left.every((item, i) => Object.is(item, right[i]))
   environment.useState = initial => {
@@ -65,13 +65,15 @@ async function fixture() {
     effects.push(() => { cleanup?.(); hooks[i].cleanup = fn() })
   }
   const controls = {
-    directory: async query => ({ items: [{ chatKey: `${query.sourceScope}:chat-${query.cursor ? 2 : 1}`, kind: 'group', title: `${query.sourceScope} chat` }], pageInfo: pageInfo(query.cursor ? null : 'directory-next') }),
+    directory: async query => ({ items: [{ chatKey: `${query.sourceScope}:chat-${query.cursor ? 2 : 1}`, externalId: '-100123', sourceScope: query.sourceScope === 'all' ? 'monitor' : query.sourceScope, kind: 'group', title: `${query.sourceScope} chat` }], pageInfo: pageInfo(query.cursor ? null : 'directory-next') }),
     search: async body => searchResult(`${body.query}-${body.cursor || 'first'}`, body.cursor ? null : 'search-next'),
+    semantic: async () => ({ items: [{ canonicalId: 'semantic-hit', text: '相关领导活动', semanticSimilarity: 0.82, chatId: '-100123' }], pageInfo: { returnedCount: 1, nextCursor: null, paginationMode: 'top_k' }, retrieval: { mode: 'semantic', coverage: 'unknown', exhaustive: false } }),
   }
   environment.api = {
     dataProductTelegramChats: (_token, query) => { directoryCalls.push(query); return controls.directory(query) },
-    dataProductTelegramMessages: async (_token, chatId, query) => { messageCalls.push({ chatId, ...query }); return { items: [], pageInfo: pageInfo() } },
+    dataProductTelegramMessages: async (_token, chatId, query) => { messageCalls.push({ chatId, ...query }); return { items: [{ canonicalId: 'stored-message', text: 'stored transcript' }], pageInfo: pageInfo() } },
     searchDataProductTelegram: (_token, body) => { searchCalls.push(body); return controls.search(body) },
+    telegramSemanticSearch: (_token, body) => { semanticCalls.push(body); return controls.semantic(body) },
   }
   const query = new URLSearchParams()
   const render = () => {
@@ -94,7 +96,7 @@ async function fixture() {
   const searchPager = () => nodes(render()).find(node => node.props?.onNext && node.props?.loading === false && node !== directoryPager())
   const directoryPager = () => nodes(render()).find(node => node.props?.onNext)
   await flush()
-  return { render, flush, draft, submit, controls, directoryCalls, messageCalls, searchCalls, searchPager, directoryPager }
+  return { render, flush, draft, submit, controls, directoryCalls, messageCalls, searchCalls, semanticCalls, searchPager, directoryPager }
 }
 
 test('Telegram initial reading is bounded and search continuation freezes the submitted conditions', async () => {
@@ -179,4 +181,43 @@ test('changing kind also discards a pending global search when the directory has
   pending.resolve(searchResult('STALE_KIND_RESULT')); await h.flush()
   assert.doesNotMatch(label(h.render()), /STALE_KIND_RESULT|当前条件：alpha/)
   assert.equal(h.searchPager(), undefined)
+})
+
+test('Telegram RAG is manual bounded retrieval with source filters and no cursor controls', async () => {
+  const h = await fixture()
+  button(h.render(), 'RAG 语义').props.onClick(); await h.flush()
+  assert.equal(h.semanticCalls.length, 0, 'mode selection does not dispatch a model query')
+  assert.ok(nodes(h.render()).some(node => node.props?.item?.text === 'stored transcript'), 'switching search mode preserves already loaded history')
+  await h.submit('领导人')
+  assert.deepEqual(h.semanticCalls, [{ query: '领导人', sourceScope: 'all', topK: 20 }])
+  assert.equal(h.searchCalls.length, 0)
+  assert.equal(h.searchPager(), undefined)
+  assert.match(label(h.render()), /相关领导活动/)
+  assert.match(label(h.render()), /相似度 0\.820/)
+  assert.match(label(h.render()), /覆盖率未知/)
+  assert.match(label(h.render()), /不是概率/)
+  assert.match(label(h.render()), /向量检索不可用时返回错误，不自动回退全文/)
+  assert.doesNotMatch(label(h.render()), /ES 不可用时允许退化到 PG/)
+  button(h.render(), '当前会话').props.onClick(); await h.flush()
+  nodes(h.render()).find(node => node.type === 'form' && node.props.className === 'mih-tg-search').props.onSubmit({ preventDefault() {} })
+  await h.flush()
+  assert.deepEqual(h.semanticCalls.at(-1), { query: '领导人', chatId: '-100123', sourceScope: 'monitor', topK: 20 })
+})
+
+test('Telegram search mode changes discard stale RAG responses and never silently use literal search', async () => {
+  const h = await fixture()
+  const pending = deferred()
+  h.controls.semantic = () => pending.promise
+  button(h.render(), 'RAG 语义').props.onClick(); await h.flush()
+  await h.submit('领导人')
+  button(h.render(), '包含查找').props.onClick(); await h.flush()
+  pending.resolve(searchResult('STALE_SEMANTIC')); await h.flush()
+  assert.doesNotMatch(label(h.render()), /STALE_SEMANTIC/)
+  assert.equal(h.searchCalls.length, 0)
+  h.controls.semantic = async () => { throw new Error('vector unavailable') }
+  button(h.render(), 'RAG 语义').props.onClick(); await h.flush()
+  await h.submit('领导人')
+  assert.ok(nodes(h.render()).some(node => node.props?.error?.message === 'vector unavailable'))
+  assert.match(label(h.render()), /结果未确认/)
+  assert.equal(h.searchCalls.length, 0)
 })

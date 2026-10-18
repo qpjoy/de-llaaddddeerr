@@ -1,4 +1,5 @@
 import { parseInternalTrafficPolicy } from './core/internal-traffic-policy.mjs'
+import { telegramSemanticInternalUrl } from './retrieval/telegram-semantic-proxy.mjs'
 import { loadCommonConfig } from '@qpjoy/mx-common'
 import { nightAllAConfig } from './external-platforms/night-all-a.mjs'
 import { AppError } from './core/errors.mjs'
@@ -337,6 +338,7 @@ export function loadConfig(environment = process.env) {
     host: environment.MX_INSIGHT_HOST || '0.0.0.0',
     port: positiveInteger(environment.MX_INSIGHT_PORT, 18_180, 'MX_INSIGHT_PORT'),
     listenerMode,
+    telegramSemanticInternalUrl: telegramSemanticInternalUrl(environment),
     internalTraffic: parseInternalTrafficPolicy(environment),
     ipSearch: {
       enabled: environment.MX_INSIGHT_IPSEARCH_ENABLED === '1',

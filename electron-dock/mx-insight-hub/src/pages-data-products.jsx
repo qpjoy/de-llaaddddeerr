@@ -168,6 +168,7 @@ function TelegramDirectoryPage({ kind = 'all', query, setQuery, token, onUnautho
   const [messageLoadMoreError, setMessageLoadMoreError] = useState(null)
   const [searchDraft, setSearchDraft] = useState('')
   const [searchTarget, setSearchTarget] = useState('all')
+  const [searchMode, setSearchMode] = useState('literal')
   const [searchData, setSearchData] = useState(null)
   const [searchRequest, setSearchRequest] = useState(null)
   const [searchCursors, setSearchCursors] = useState([null])
@@ -357,7 +358,7 @@ function TelegramDirectoryPage({ kind = 'all', query, setQuery, token, onUnautho
     setDirectoryQuery(directoryDraft.trim())
   }
 
-  const loadSearchPage = async (request, page, cursors) => {
+  const loadSearchPage = async (request, page, cursors, mode = 'literal') => {
     if (!request) return
     const activeChatId = activeChatIdRef.current
     const generation = interactionGenerationRef.current + 1
@@ -374,10 +375,12 @@ function TelegramDirectoryPage({ kind = 'all', query, setQuery, token, onUnautho
     setContextData(null)
     setContextError(null)
     try {
-      const data = await adminApi.searchDataProductTelegram(token, {
-        ...request,
-        ...(cursors[page] ? { cursor: cursors[page] } : {}),
-      })
+      const data = mode === 'semantic'
+        ? await adminApi.telegramSemanticSearch(token, request)
+        : await adminApi.searchDataProductTelegram(token, {
+          ...request,
+          ...(cursors[page] ? { cursor: cursors[page] } : {}),
+        })
       if (generation !== interactionGenerationRef.current || activeChatIdRef.current !== activeChatId) return
       setSearchData(data)
       setSearchPage(page)
@@ -396,20 +399,23 @@ function TelegramDirectoryPage({ kind = 'all', query, setQuery, token, onUnautho
   const submitSearch = (event) => {
     event.preventDefault()
     const query = searchDraft.trim()
-    const chatId = searchTarget === 'chat' ? activeChatIdRef.current : null
+    const chatId = searchTarget === 'chat'
+      ? (searchMode === 'semantic' ? selectedChat?.externalId : activeChatIdRef.current) : null
     if (!query || (searchTarget === 'chat' && !chatId)) return
     const request = {
       query,
       ...(chatId ? { chatId } : {}),
-      sourceScope,
-      ...(searchTarget === 'all' ? { kind: kindFilter } : {}),
-      pageSize: 20,
+      sourceScope: searchMode === 'semantic' && chatId ? selectedChat.sourceScope : sourceScope,
+      ...(searchMode === 'semantic' ? { topK: 20 } : {
+        ...(searchTarget === 'all' ? { kind: kindFilter } : {}),
+        pageSize: 20,
+      }),
     }
     setSearchRequest(request)
     setSearchData(null)
     setSearchPage(0)
     setSearchCursors([null])
-    void loadSearchPage(request, 0, [null])
+    void loadSearchPage(request, 0, [null], searchMode)
   }
 
   const openContext = async (item) => {
@@ -452,6 +458,7 @@ function TelegramDirectoryPage({ kind = 'all', query, setQuery, token, onUnautho
   const demoMode = Boolean(directoryData?.demoMode || messages.data?.demoMode)
   const warningList = [
     ...(searchData?.warnings || []),
+    ...(searchData?.retrieval?.warnings || []),
     ...(contextData?.warnings || []),
   ]
   const globalSearchActive = searchTarget === 'all' && Boolean(searching || searchData || searchError || contextData)
@@ -459,7 +466,7 @@ function TelegramDirectoryPage({ kind = 'all', query, setQuery, token, onUnautho
     ? (contextData ? `上下文 · 会话 ${contextData.stream?.id || '待识别'}` : '全部 Telegram 会话检索')
     : (selectedChat?.title || '选择一个会话')
   const conversationDescription = globalSearchActive
-    ? `${telegramSourceLabel(sourceScope)} · ${telegramKindLabel(kindFilter)} · 结果可能来自左侧当前会话之外`
+    ? `${telegramSourceLabel(sourceScope)} · ${searchMode === 'semantic' ? '已向量化消息' : telegramKindLabel(kindFilter)} · 结果可能来自左侧当前会话之外`
     : (selectedChat
       ? `${selectedChat.sourceDataset || selectedChat.sourceScope || 'unknown'} · ${telegramKindLabel(selectedChat.kind || 'unknown')} · ${visibilityEvidenceText(selectedChat.visibilityEvidence)}`
       : '从左侧目录开始')
@@ -534,7 +541,25 @@ function TelegramDirectoryPage({ kind = 'all', query, setQuery, token, onUnautho
               }}>{label}</button>
           ))}
         </div></div>
-        <small>全部会话检索会覆盖当前来源与类型；当前会话用于精确核对单个聊天。</small>
+        <div><span>搜索模式</span><div className="mih-command-segmented">
+          {[['literal', '包含查找'], ['semantic', 'RAG 语义']].map(([value, label]) => (
+            <button type="button" key={value} aria-pressed={searchMode === value} onClick={() => {
+              if (value === searchMode) return
+              interactionGenerationRef.current += 1
+              setSearching(false)
+              setSearchData(null)
+              setSearchError(null)
+              setContextLoading(false)
+              setContextAnchor(null)
+              setContextData(null)
+              setContextError(null)
+              setSearchMode(value)
+            }}>{label}</button>
+          ))}
+        </div></div>
+        <small className={searchMode === 'semantic' ? 'is-semantic' : undefined}>{searchMode === 'semantic'
+          ? 'RAG 只检索已向量化消息，返回前 20 条候选，不提供全量分页。会话类型仅筛选左侧目录。'
+          : '全部会话检索会覆盖当前来源与类型；当前会话用于精确核对单个聊天。'}</small>
       </section>
 
       <section className="mih-product-kpis" aria-label="Telegram 当前窗口概览">
@@ -597,7 +622,8 @@ function TelegramDirectoryPage({ kind = 'all', query, setQuery, token, onUnautho
           <form className="mih-tg-search" onSubmit={submitSearch}>
             <MagnifyingGlass size={17} aria-hidden="true" />
             <input value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)}
-              placeholder={searchTarget === 'chat' ? '在当前会话的已归档消息中包含查找' : '在当前来源与类型的全部消息中包含查找'}
+              placeholder={searchMode === 'semantic' ? '按语义寻找相关消息，例如：领导人' : searchTarget === 'chat' ? '在当前会话的已归档消息中包含查找' : '在当前来源与类型的全部消息中包含查找'}
+              maxLength={searchMode === 'semantic' ? 500 : undefined}
               disabled={searchTarget === 'chat' && !selectedChatId}
               aria-label={searchTarget === 'chat' ? '搜索当前会话消息' : '搜索全部 Telegram 消息'} />
             <button className="qp-button qp-button--outline qp-button--sm" type="submit"
@@ -617,24 +643,27 @@ function TelegramDirectoryPage({ kind = 'all', query, setQuery, token, onUnautho
           {searchError ? <div className="mih-tg-inline-state"><ErrorState error={searchError} /></div> : null}
           {searchData ? (
             <section className="mih-tg-search-results">
-              <header><strong>{searchRequest?.chatId ? '当前会话检索结果' : `${telegramKindLabel(searchRequest?.kind)}全局检索结果`}</strong><span>{searchData.pageInfo?.returnedCount || 0} 条 · {searchData.searchMode || 'unknown'}</span></header>
-              <small>当前展示页按输入文本包含查找；AND / OR 不作为运算符。当前条件：{searchRequest?.query}</small>
+              <header><strong>{searchRequest?.chatId ? '当前会话检索结果' : searchMode === 'semantic' ? 'RAG 全局检索结果' : `${telegramKindLabel(searchRequest?.kind)}全局检索结果`}</strong><span>{searchData.pageInfo?.returnedCount || 0} 条 · {searchMode === 'semantic' ? 'RAG 语义' : searchData.searchMode || 'unknown'}</span></header>
+              <small>{searchMode === 'semantic'
+                ? '仅返回已向量化消息的相关候选；覆盖率未知，不代表全部内容。相似度是余弦相似度，不是概率；本接口不生成回答。'
+                : '当前展示页按输入文本包含查找；AND / OR 不作为运算符。'}当前条件：{searchRequest?.query}</small>
+              {searchMode === 'semantic' && searchRequest?.chatId ? <small>当前会话在最多 100 个向量候选中后筛选，可能少于 20 条；空结果不能证明该会话没有相关内容。</small> : null}
               {(searchData.items || []).length ? searchData.items.map((item) => (
                 <button type="button" key={item.canonicalId || item.id} disabled={searching} onClick={() => openContext(item)}>
                   <span><strong>{item.author?.name || '未知发送者'}</strong><time>{formatDateTime(item.eventTime)}</time></span>
                   <p>{telegramText(item) || `[${item.contentType || '非文本消息'}]`}</p>
-                  <small>{item.sourceDataset || item.sourceScope || 'telegram'} · 会话 {item.relations?.chatId || '未知'} · 查看前 {beforeCount} / 后 {afterCount} 条已存上下文</small>
+                  <small>{item.sourceDataset || item.datasetId || item.sourceScope || 'telegram'} · 会话 {item.relations?.chatId || item.chatId || '未知'}{Number.isFinite(item.semanticSimilarity) ? ` · 相似度 ${item.semanticSimilarity.toFixed(3)}` : ''} · 查看前 {beforeCount} / 后 {afterCount} 条已存上下文</small>
                 </button>
               )) : <EmptyState icon={MagnifyingGlass} title="没有命中已归档消息"
-                description={searchRequest?.chatId ? '当前会话没有命中；可切换为全部会话继续检索。' : '可调整关键词、来源或会话类型；空结果不是接口故障。'} />}
-              <CursorControls page={searchPage + 1} noun="页" loading={searching}
+                description={searchMode === 'semantic' ? '当前已向量化范围内没有候选；这不能证明全部 TG 内容都无相关消息，可调整描述或来源。' : searchRequest?.chatId ? '当前会话没有命中；可切换为全部会话继续检索。' : '可调整关键词、来源或会话类型；空结果不是接口故障。'} />}
+              {searchMode !== 'semantic' ? <CursorControls page={searchPage + 1} noun="页" loading={searching}
                 hasMore={Boolean(searchData.pageInfo?.hasMore && searchData.pageInfo?.nextCursor)}
                 onPrevious={() => void loadSearchPage(searchRequest, searchPage - 1, searchCursors)}
                 onNext={() => {
                   const next = searchData.pageInfo?.nextCursor
                   if (!next) return
                   void loadSearchPage(searchRequest, searchPage + 1, [...searchCursors.slice(0, searchPage + 1), next])
-                }} />
+                }} /> : null}
             </section>
           ) : null}
           <div ref={transcriptRef} className="mih-tg-transcript qp-scrollbar" aria-label="会话消息窗口"
@@ -718,8 +747,8 @@ function TelegramDirectoryPage({ kind = 'all', query, setQuery, token, onUnautho
           </section>
           <section>
             <span>检索后端</span>
-            <strong>{searchData?.searchMode || '未执行'}</strong>
-            <small>ES 不可用时允许退化到 PG</small>
+            <strong>{searchMode === 'semantic' && searchError ? '结果未确认' : searchData?.retrieval?.mode === 'semantic' ? 'RAG 语义' : searchData?.searchMode || '未执行'}</strong>
+            <small>{searchMode === 'semantic' ? '向量检索不可用时返回错误，不自动回退全文' : 'ES 不可用时允许退化到 PG'}</small>
           </section>
           {warningList.map((warning) => <div className="mih-product-warning" key={warning.code || warning.message}>
             <Warning size={16} weight="fill" /><span><strong>{warning.code || 'warning'}</strong><small>{warning.message}</small></span>

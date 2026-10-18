@@ -8043,6 +8043,15 @@ button.mih-catalog-status {
   font-size: var(--qp-font-caption-1);
 }
 
+.mih-tg-search-results > small {
+  display: block;
+  padding: 4px 12px;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .mih-tg-transcript {
   grid-row: 4;
   min-height: 0;
@@ -8282,6 +8291,12 @@ button.mih-catalog-status {
   margin-left: auto;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.mih-tg-scopebar > small.is-semantic {
+  min-width: 160px;
+  white-space: normal;
+  line-height: 1.5;
 }
 
 .mih-opinion-funnel {

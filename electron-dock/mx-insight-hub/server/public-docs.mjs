@@ -2632,6 +2632,31 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
         responses: { 200: searchResponse, ...publicErrors },
       },
     },
+    '/data/telegram/semantic-search': {
+      post: {
+        tags: ['Telegram'],
+        operationId: 'semanticSearchTelegram',
+        summary: 'RAG 语义检索已向量化的 Telegram 消息',
+        description: 'Requires the telegram grant and Idempotency-Key. Retrieves bounded semantic candidates from existing Monitor/SQLite message embeddings, without live collection or answer generation. sourceScope defaults to all. Filters combine with AND; from/to apply inclusive eventTime bounds. chatId is post-filtered within at most 100 vector candidates, so fewer than topK may remain and this is not exhaustive per-chat ranking. topK is limited by the current grant. Returns top-K evidence, not exhaustive cursor pagination; coverage is unknown. Similarity is cosine similarity, not a probability. The query embedding can incur model cost and the request is metered under the current Telegram policy. A committed request is permanently bound to its original idempotency key and replays that saved response; a deliberate new query needs a new key. Execution or response-delivery uncertainty may return 502/503 semantic_search_outcome_unknown: retain the original key and inspect request status, do not automatically generate a new key or repeat the model call; manual review may be needed. Send manually; changing tabs must not dispatch a query. Unavailable vector service returns 503 without silently falling back to full-text search.',
+        parameters: [idempotencyParameter],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/TelegramSemanticSearchRequest' },
+              example: { query: '领导人', sourceScope: 'all', topK: 20 },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'Bounded Telegram semantic evidence; no answer generation or continuation cursor.',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/TelegramSemanticSearchEnvelope' } } },
+          },
+          ...publicErrors,
+        },
+      },
+    },
     '/data/telegram/entities/search': {
       get: {
         tags: ['Telegram'],
@@ -3225,6 +3250,99 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             type: 'string', minLength: 1, maxLength: 4096,
             description: 'Must contain at least one Unicode letter or number; control characters are rejected.',
           },
+        },
+      },
+      TelegramSemanticSearchRequest: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['query'],
+        properties: {
+          query: { type: 'string', minLength: 1, maxLength: 500, description: 'Natural-language meaning to retrieve, for example 领导人. No Boolean expression grammar.' },
+          sourceScope: { type: 'string', enum: ['all', 'monitor', 'sqlite'], default: 'all' },
+          chatId: { type: 'string', minLength: 1, maxLength: 256, description: 'Exact external chat id, not a qualified chatKey.' },
+          authorId: { type: 'string', minLength: 1, maxLength: 256 },
+          from: { type: 'string', format: 'date-time', description: 'Inclusive eventTime lower bound; requires an explicit timezone.' },
+          to: { type: 'string', format: 'date-time', description: 'Inclusive eventTime upper bound; requires an explicit timezone.' },
+          topK: { type: 'integer', minimum: 1, maximum: 50, default: 20, description: 'Maximum returned candidates, also bounded by the current grant maxPageSize; default min(20, grant limit). Not a page size for cursor traversal.' },
+          minSimilarity: { type: 'number', minimum: -1, maximum: 1, description: 'Optional cosine similarity lower bound for the active embedding model, not a relevance probability.' },
+        },
+      },
+      TelegramSemanticSearchEnvelope: {
+        type: 'object', additionalProperties: false, required: ['data', 'requestId'],
+        properties: {
+          data: {
+            type: 'object', additionalProperties: false, required: ['contractVersion', 'platform', 'query', 'status', 'items', 'retrieval', 'pageInfo', 'meta'],
+            properties: {
+              contractVersion: { type: 'string', const: 'mx-insight-hub.telegram-semantic.v1' },
+              platform: { type: 'string', const: 'telegram' },
+              query: { type: 'string' },
+              status: { type: 'string', const: 'ok' },
+              meta: { type: 'object', additionalProperties: false, required: ['durationMs'], properties: { durationMs: { type: 'number', minimum: 0 } } },
+              items: { type: 'array', maxItems: 50, items: { $ref: '#/components/schemas/TelegramSemanticSearchItem' } },
+              retrieval: {
+                type: 'object', additionalProperties: false,
+                required: ['mode', 'similarityMetric', 'similarityIsProbability', 'embeddingSpace', 'minSimilarity', 'candidateLimit', 'numCandidates', 'candidateChunks', 'candidateLimitReached', 'validatedChunks', 'validatedRecords', 'discardedCandidates', 'chatFilter', 'exhaustive', 'coverage', 'consistency', 'textLimit', 'snippetLimit', 'warnings'],
+                properties: {
+                  mode: { type: 'string', const: 'semantic' },
+                  exhaustive: { type: 'boolean', const: false },
+                  coverage: { type: 'string', const: 'unknown' },
+                  similarityMetric: { type: 'string', const: 'cosine' },
+                  similarityIsProbability: { type: 'boolean', const: false },
+                  embeddingSpace: { type: 'string', description: 'Model and dimension compatibility identity, not credentials or provider configuration.' },
+                  candidateLimit: { type: 'integer', const: 100 },
+                  numCandidates: { type: 'integer', const: 200 },
+                  candidateChunks: { type: 'integer', minimum: 0, maximum: 100 },
+                  candidateLimitReached: { type: 'boolean' },
+                  validatedChunks: { type: 'integer', minimum: 0, maximum: 100 },
+                  validatedRecords: { type: 'integer', minimum: 0, maximum: 100 },
+                  discardedCandidates: { type: 'integer', minimum: 0, maximum: 100 },
+                  chatFilter: { type: 'string', enum: ['post_filter_candidates', 'not_requested'] },
+                  consistency: { type: 'string', const: 'current-canonical-revalidated' },
+                  textLimit: { type: 'integer', const: 12000 },
+                  snippetLimit: { type: 'integer', const: 1600 },
+                  minSimilarity: { type: ['number', 'null'], minimum: -1, maximum: 1 },
+                  warnings: { type: 'array', items: { type: 'object', required: ['code', 'message'], properties: { code: { type: 'string' }, message: { type: 'string' } } } },
+                },
+              },
+              pageInfo: {
+                type: 'object', additionalProperties: false, required: ['paginationMode', 'returnedCount', 'topK', 'nextCursor', 'cursorType'],
+                properties: {
+                  topK: { type: 'integer', minimum: 1, maximum: 50 },
+                  returnedCount: { type: 'integer', minimum: 0, maximum: 50 },
+                  nextCursor: { type: 'null' },
+                  cursorType: { type: 'string', const: 'none' },
+                  paginationMode: { type: 'string', const: 'top_k' },
+                },
+              },
+            },
+          },
+          requestId: { type: 'string', format: 'uuid' },
+        },
+      },
+      TelegramSemanticSearchItem: {
+        type: 'object', additionalProperties: false,
+        required: ['canonicalId', 'id', 'externalId', 'platform', 'objectType', 'contentType', 'datasetId', 'sourceScope', 'chatId', 'title', 'titleTruncated', 'text', 'textTruncated', 'snippet', 'snippetTruncated', 'url', 'author', 'eventTime', 'revision', 'semanticSimilarity'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          canonicalId: { type: 'string', format: 'uuid', description: 'Use for stored context and timeline reads.' },
+          externalId: { type: 'string' },
+          platform: { type: 'string', const: 'telegram' },
+          objectType: { type: 'string', const: 'message' },
+          contentType: { type: ['string', 'null'] },
+          datasetId: { type: 'string', enum: ['telegram.monitor.messages.v1', 'telegram.sqlite.messages.v1'] },
+          sourceScope: { type: 'string', enum: ['monitor', 'sqlite'] },
+          title: { type: ['string', 'null'], maxLength: 500 },
+          titleTruncated: { type: 'boolean' },
+          text: { type: ['string', 'null'], maxLength: 12000 },
+          textTruncated: { type: 'boolean' },
+          snippet: { type: 'string', maxLength: 1600 },
+          snippetTruncated: { type: 'boolean' },
+          url: { type: ['string', 'null'] },
+          author: { type: 'object', additionalProperties: false, required: ['id', 'name', 'username'], properties: { id: { type: ['string', 'null'] }, name: { type: ['string', 'null'] }, username: { type: ['string', 'null'] } } },
+          chatId: { type: ['string', 'null'] },
+          eventTime: { type: ['string', 'null'], format: 'date-time' },
+          revision: { type: 'integer', minimum: 1 },
+          semanticSimilarity: { type: 'number', minimum: -1, maximum: 1 },
         },
       },
       TelegramSearchRequest: {
@@ -6455,6 +6573,7 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
       <tr><td>Monitor 消息历史</td><td><code>GET /data/telegram/messages</code></td><td><code>telegram.monitor.messages.v1</code></td></tr>
       <tr><td>Monitor 会话目录</td><td><code>GET /data/telegram/chats</code></td><td><code>telegram.monitor.chats.v1</code></td></tr>
       <tr><td>Monitor 高级检索</td><td><code>POST /data/telegram/search</code></td><td>固定的 <code>telegram.monitor.*</code></td></tr>
+      <tr><td>RAG 语义候选</td><td><code>POST /data/telegram/semantic-search</code></td><td>默认合并 Monitor + SQLite 已向量化消息；Top-K，无 cursor</td></tr>
       <tr><td>Monitor + SQLite 统一检索</td><td><code>POST /data/canonical/search</code></td><td>授权范围内全部 Telegram canonical dataset</td></tr>
       <tr><td>Monitor + SQLite 会话/消息还原</td><td><code>GET /data/telegram/chats|messages?sourceScope=all</code></td><td>相容响应中增加来源与 canonical 定位</td></tr>
       <tr><td>命中消息的前后文</td><td><code>GET /data/canonical/items/{id}/context</code></td><td>命中项所在 dataset + chat；默认前后各 10 条</td></tr>
@@ -6481,6 +6600,17 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
     <div class="notice">当前 Monitor 的 <code>upstreamCompleteness.status</code> 为 <code>unknown</code>；SQLite 导入为 <code>bounded</code>。这不会阻止读取 Hub 已提交的上下文，但调用方不得把列表头尾解释成 Telegram 上游历史的绝对头尾。</div>
     <pre><code>curl -sS "$HUB_URL/api/v1/data/canonical/items/&lt;search-item-id&gt;/context?before=10&amp;after=10" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" | jq</code></pre>
+    <h3>Telegram RAG 语义检索</h3>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/data/telegram/semantic-search</code></div><p>按主题或含义召回已向量化消息，例如“领导人”可召回不含相同字面词的相关内容。接口只返回供 RAG 使用的证据，不生成回答，也不会触发新采集。查询向量需要模型调用，可能产生成本；现有 Telegram 授权、额度和计量规则仍适用。</p></div>
+    <pre><code>TG_SEMANTIC_KEY="tg-semantic-$(uuidgen)"
+curl -sS -X POST "$HUB_URL/api/v1/data/telegram/semantic-search" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -H "Idempotency-Key: $TG_SEMANTIC_KEY" \\
+  -d '{"query":"领导人","sourceScope":"all","topK":20}' | jq</code></pre>
+    <p>接受 <code>query</code>（最多 500 字符）、<code>sourceScope=all|monitor|sqlite</code>（默认 all）、原始规范化 <code>chatId</code>/<code>authorId</code>、按消息 eventTime 包含边界的 <code>from</code>/<code>to</code>、<code>topK</code>（默认 min(20, 授权上限)，最多 50）和可选 <code>minSimilarity</code>（-1 到 1）。相似度是当前模型的余弦相似度，不是概率。不要发送 scope、matchMode、kind、pageSize、cursor、type 或模型配置。原请求重试保留上面保存的幂等键和完整 body；已提交结果固定回放原响应，不因 120 秒过去而重新计算。需要新一轮查询时显式使用新键。</p>
+    <div class="notice"><code>data.contractVersion=mx-insight-hub.telegram-semantic.v1</code>；<code>pageInfo.paginationMode=top_k</code>、<code>nextCursor=null</code>，<code>retrieval.exhaustive=false</code>、<code>coverage=unknown</code>。最多 100 个向量候选经过当前版本／删除状态验证和去重后返回；chatId 在此候选集合上后过滤，可能不足 topK，不能视作该会话全量最优结果。向量化开关、已入库总量或全平台 RAG 有结果都不能证明 TG 历史已经全部向量化。空结果不能证明全部 TG 无相关内容。服务不可用返回 503，不静默改为全文；需要完整关键词分页时请显式调用普通 search。</div>
+    <p>执行或回程不确定可能返回 <code>502/503 semantic_search_outcome_unknown</code>：保留原幂等键，通过 <code>GET /api/v1/requests/by-idempotency-key</code> 或已有 requestId 查询状态；不得自动换键重新调用模型，未知结果可能需要人工核对。不会自动回退全文。取 <code>items[].canonicalId</code> 读取 context/timeline，可在下游生成回答并保留证据引用。页面打开和模式切换不发送语义查询，需手动提交。</p>
     <h3>搜索命中后的双向时间线</h3>
     <div class="endpoint"><div class="endpoint-head"><span class="method">GET</span><code class="path">/api/v1/data/canonical/items/{id}/timeline?before=10&amp;after=10</code></div><p>正式的双向分页合同。首屏返回升序 <code>items</code>、数字 <code>anchorIndex</code>，以及 <code>pageInfo.older/newer</code>；续页只发送其中一个不透明 <code>cursor</code>，此时 <code>anchorIndex=null</code>，未请求方向的页信息也为 <code>null</code>。<code>before=0</code> 或 <code>after=0</code> 只省略该侧首屏数据；返回的该侧游标使用受 grant 上限约束的默认页大小。路径 <code>id</code>、dataset、chat、方向、排他边界、page size、consumer 授权范围和合同版本都由 HMAC 绑定。</p></div>
     <pre><code>TIMELINE=$(curl -sS -G "$HUB_URL/api/v1/data/canonical/items/&lt;search-item-id&gt;/timeline" \\

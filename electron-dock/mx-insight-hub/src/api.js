@@ -743,6 +743,9 @@ export const adminApi = {
   searchDataProductTelegram: (token, body) => request(
     token, `${ADMIN_ROOT}/data-products/telegram/search`, { method: 'POST', body },
   ),
+  telegramSemanticSearch: (token, body) => request(
+    token, `${ADMIN_ROOT}/data-products/telegram/semantic-search`, { method: 'POST', body },
+  ),
   dataProductTelegramContext: (token, id, query = {}) => request(
     token,
     `${ADMIN_ROOT}/data-products/telegram/items/${encodeURIComponent(id)}/context`,
