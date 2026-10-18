@@ -16,7 +16,7 @@ import {
   DialogTitle,
   DialogDescription,
   DialogClose,
-} from "@/components/ui/dialog";
+} from "./dialog";
 import { Button } from "@/components/ui/button";
 import {
   Field,

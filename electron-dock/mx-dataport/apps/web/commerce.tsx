@@ -22,7 +22,7 @@ import {
   DialogHeader,
   DialogTitle,
   DialogDescription,
-} from "@/components/ui/dialog";
+} from "./dialog";
 import { request } from "./api";
 import { Pagination, type PageInfo } from "./pagination";
 import {
