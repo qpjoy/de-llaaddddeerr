@@ -35,6 +35,7 @@ import { TikHubAdapter } from './adapters/tikhub.mjs'
 import { RapidApiAdapter } from './adapters/rapidapi.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
+import { createTwitterSearchRouter } from './data/twitter-search-routing.mjs'
 import { normalizeHubSocialCompatRequest } from './contracts/hub-social-compat.mjs'
 import { HUB_SOCIAL_COMPAT_PLATFORMS } from '../shared/social-account-contract.mjs'
 import { RAPIDAPI_METADATA, rapidApiConfig } from './external-platforms/rapidapi-config.mjs'
@@ -418,6 +419,29 @@ export async function createRuntime(config = loadConfig()) {
   }
   const nativeSearchGateways = Object.fromEntries(['weibo', ...Object.keys(TIKHUB_CONTENT_SEARCH_RECIPES)]
     .map(platform => [platform, nativeSearchGateway(platform, 'tikhub')]))
+  const twitterSearchProvider = config.twitterSearchProvider ?? 'auto'
+  const twitterProviderCapabilities = async (provider, options) => {
+    const tikhub = provider === 'tikhub'
+    const credential = await (tikhub ? tikHubCredentialStore : rapidApiCredentialStore).describeCredential(provider)
+    const operation = tikhub ? 'native.t.twitter_web_fetch_search_timeline' : 'social.content.search'
+    const gateway = tikhub ? nativeSearchGateways.twitter : hubSocialGateway
+    const readiness = await gateway.nativeReadiness({ ...options, operationKeys: [operation], credentialConfigured: credential.credentialConfigured })
+    return { ready: readiness[operation] === true }
+  }
+  const resolveTwitterSearchRoute = async options => {
+    if (twitterSearchProvider !== 'auto') return { provider: twitterSearchProvider,
+      ...await twitterProviderCapabilities(twitterSearchProvider, options) }
+    // Availability selection happens before any paid request. A rejection,
+    // unknown outcome or failed paid projection never triggers supplier retry.
+    const tikhub = await twitterProviderCapabilities('tikhub', options).catch(() => ({ ready: false }))
+    if (tikhub.ready) return { provider: 'tikhub', ready: true }
+    const rapidapi = await twitterProviderCapabilities('rapidapi', options).catch(() => ({ ready: false }))
+    return rapidapi.ready ? { provider: 'rapidapi', ready: true } : { provider: 'tikhub', ready: false }
+  }
+  const twitterSearchCapabilities = async options => ({ ready: (await resolveTwitterSearchRoute(options)).ready })
+  const twitterSearch = createTwitterSearchRouter({ usageStore: store, rapidGateway: hubSocialGateway,
+    tikHubGateway: nativeSearchGateways.twitter, apiKeyPepper: config.apiKeyPepper, provider: twitterSearchProvider,
+    resolveProvider: async context => (await resolveTwitterSearchRoute({ consumerId: context.consumer.id })).provider })
   const socialAccountDataGateways = Object.fromEntries(HUB_SOCIAL_COMPAT_PLATFORMS.map(platform => [platform,
     platform === 'twitter' ? hubSocialGateway : nativeSearchGateway(platform, platform === 'facebook' ? 'justone' : 'tikhub')]))
   const socialDataGateway = { socialData: (context, input) => {
@@ -544,25 +568,20 @@ export async function createRuntime(config = loadConfig()) {
         ...(await ipRiskProduct.capabilities().catch(()=>({operations:{'ip.risk.subscription.query':{ready:false}}}))).operations, 'enterprise.query': { ready: enterpriseReady } } }
     },
     externalPostCapabilities,
-    externalTwitterCapabilities: async options => {
-      const credential = await rapidApiCredentialStore.describeCredential('rapidapi')
-      const readiness = await hubSocialGateway.nativeReadiness({ ...options,
-        operationKeys: ['social.content.search'], credentialConfigured: credential.credentialConfigured,
-      })
-      return { ready: readiness['social.content.search'] === true }
-    },
+    externalTwitterCapabilities: twitterSearchCapabilities,
     externalContentSearchCapabilities: async options => {
       const selected = Object.keys(TIKHUB_CONTENT_SEARCH_RECIPES)
         .filter(platform => !Array.isArray(options?.platforms) || options.platforms.includes(platform))
       if (!selected.length) return {}
-      const credential = await tikHubCredentialStore.describeCredential('tikhub')
-      const readiness = await nativeSearchGateways[selected[0]].nativeReadiness({ ...options,
-        operationKeys: selected.map(platform => platform === 'xiaohongshu' ? 'social.posts.search' : `native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`),
+      const content = selected.filter(platform => platform !== 'twitter')
+      const credential = content.length ? await tikHubCredentialStore.describeCredential('tikhub') : null
+      const readiness = content.length ? await nativeSearchGateways[content[0]].nativeReadiness({ ...options,
+        operationKeys: content.map(platform => platform === 'xiaohongshu' ? 'social.posts.search' : `native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`),
         credentialConfigured: credential.credentialConfigured,
-      })
-      return Object.fromEntries(selected.map(platform => [platform, {
+      }) : {}
+      return { ...Object.fromEntries(content.map(platform => [platform, {
         ready: readiness[platform === 'xiaohongshu' ? 'social.posts.search' : `native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`] === true,
-      }]))
+      }])), ...(selected.includes('twitter') ? { twitter: await twitterSearchCapabilities(options) } : {}) }
     },
     externalFacebookCapabilities: async options => {
       const policy = await platformSearchPolicyStore.facebook()
@@ -585,11 +604,13 @@ export async function createRuntime(config = loadConfig()) {
     externalWechatSearch: (context, input) => socialAccountTikHubGateway.forwardNative(context, input),
     externalRawSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
       : input.normalized.platform === 'instagram' ? instagramSearch(context, input)
+      : input.normalized.platform === 'twitter' ? hubSocialGateway.searchRaw(context, input)
       : TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform]?.rawCompatibility !== false
         && TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform] ? nativeSearchGateways[input.normalized.platform].searchContent(context, input)
       : (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
     externalDataSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
       : input.normalized.platform === 'instagram' ? instagramSearch(context, input)
+      : input.normalized.platform === 'twitter' ? twitterSearch(context, input)
       : TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform]
         && (input.normalized.platform !== 'weibo' || input.normalized.pageSize < 20 || input.normalized.cursor?.startsWith('mxnc1.'))
         ? nativeSearchGateways[input.normalized.platform].searchContent(context, input, {

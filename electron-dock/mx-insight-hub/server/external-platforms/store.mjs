@@ -10,6 +10,7 @@ import { HUB_SOCIAL_VERSION } from '../contracts/hub-social.mjs'
 import { canonicalPlatform } from '../hub-service.mjs'
 import * as facebookSearchStore from './facebook-search-store.mjs'
 import * as twitterRetryStore from './twitter-manual-retry.mjs'
+import { twitterDeliveryLeases } from './twitter-delivery-leases.mjs'
 
 const clone = (value) => value == null ? value : structuredClone(value)
 const iso = (value = new Date()) => new Date(value).toISOString()
@@ -22,6 +23,8 @@ const ownedSearchDelivery = (provider, operation) => provider === 'rapidapi'
 const twitterRetryInput = input => ({ ...input,
   retryOfRequestId: input.twitterManualRetry.retryOfRequestId,
   bufferCallId: input.twitterManualRetry.bufferCallId })
+const memoryDispatchLeases = (store, operation) => store.usageStore && store.providerKey === 'rapidapi' && operation === 'social.content.search'
+  ? twitterDeliveryLeases(store.usageStore) : store.leases
 
 const instagramOperation = provider => provider === 'tikhub' ? `native.${INSTAGRAM_SEARCH_KEY}`
   : provider === 'justone' ? `native.${JUSTONE_INSTAGRAM_SEARCH_KEY}` : null
@@ -746,9 +749,9 @@ export class MemoryExternalPlatformStore {
     if(this.providerKey!=='rapidapi' || input.operation!=='social.content.search'
       || !twitterPageIdentity(input.ownerRequestId) || !twitterPageIdentity(input.consumerId)
       || !SHA256_PATTERN.test(input.fingerprint || '') || new Date(input.expiresAt).getTime()<=Date.now()) throw twitterHistoryError()
-    const key=snapshotKey(input),current=this.leases.get(key)
+    const leases=memoryDispatchLeases(this,input.operation),key=snapshotKey(input),current=leases.get(key)
     if(current && new Date(current.expiresAt).getTime()>Date.now()) return {kind:'busy',blockedUntil:current.expiresAt}
-    this.leases.set(key,{ownerRequestId:input.ownerRequestId,expiresAt:iso(input.expiresAt)})
+    leases.set(key,{ownerRequestId:input.ownerRequestId,expiresAt:iso(input.expiresAt)})
     return {kind:'acquired'}
   }
 
@@ -893,19 +896,21 @@ export class MemoryExternalPlatformStore {
       }
     }
     const key = snapshotKey({ consumerId, operation, fingerprint })
-    const current = this.leases.get(key)
+    const leases = memoryDispatchLeases(this, operation)
+    const current = leases.get(key)
     if (current && new Date(current.expiresAt).getTime() > now) {
       if(ownedDeliveryLease && ownedSearchDelivery(this.providerKey, operation)
         && current.ownerRequestId===ownerRequestId && current.expiresAt===iso(expiresAt)) return {kind:'acquired'}
       return { kind: 'busy', blockedUntil: current.expiresAt }
     }
-    this.leases.set(key, { ownerRequestId, expiresAt: iso(expiresAt) })
+    leases.set(key, { ownerRequestId, expiresAt: iso(expiresAt) })
     return { kind: 'acquired' }
   }
 
   async releaseDispatchLease({ consumerId, operation, fingerprint, ownerRequestId }) {
     const key = snapshotKey({ consumerId, operation, fingerprint })
-    if (this.leases.get(key)?.ownerRequestId === ownerRequestId) this.leases.delete(key)
+    const leases = memoryDispatchLeases(this, operation)
+    if (leases.get(key)?.ownerRequestId === ownerRequestId) leases.delete(key)
   }
 
   async providerState(providerKey = this.providerKey) {

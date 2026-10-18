@@ -1444,6 +1444,7 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_JUSTONE_CIRCUIT_FAILURES="${MX_INSIGHT_JUSTONE_CIRCUIT_FAILURES:-3}" \
     --from-literal=MX_INSIGHT_JUSTONE_CIRCUIT_OPEN_MS="${MX_INSIGHT_JUSTONE_CIRCUIT_OPEN_MS:-60000}" \
     --from-literal=MX_INSIGHT_JUSTONE_BILLING_JSON="$justone_billing_json" \
+    --from-literal=MX_INSIGHT_TWITTER_SEARCH_PROVIDER="${MX_INSIGHT_TWITTER_SEARCH_PROVIDER:-auto}" \
     --from-literal=MX_INSIGHT_TIKHUB_CONFIGURED="$tikhub_configured" \
     --from-literal=MX_INSIGHT_TIKHUB_CONTRACT_VERIFIED="$tikhub_contract_verified" \
     --from-literal=MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED="$tikhub_search_contract_verified" \

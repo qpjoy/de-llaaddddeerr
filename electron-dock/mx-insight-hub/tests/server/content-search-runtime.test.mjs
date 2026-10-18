@@ -23,7 +23,8 @@ test('runtime binds supported search entry points to each platform-owned TikHub 
     assert.equal(gateway.platformStore.authorizationPlatform, platform)
     const calls = []
     gateway.searchContent = async (context, input) => { calls.push({ context, input }); return platform }
-    const context = { fixture: platform }, input = { normalized: { platform, pageSize: 1 }, body: { fixture: true } }
+    const context = { tenant: { id: 'fixture-tenant' }, consumer: { id: 'fixture-consumer' }, apiKey: { id: 'fixture-key' } },
+      input = { normalized: { platform, pageSize: 1 }, body: { fixture: true } }
     const rawSupported = TIKHUB_CONTENT_SEARCH_RECIPES[platform].rawCompatibility !== false
     if (rawSupported) assert.equal(await runtime.service.externalRawSearch(context, input), platform)
     assert.equal(await runtime.service.externalDataSearch(context, input), platform)
@@ -33,7 +34,9 @@ test('runtime binds supported search entry points to each platform-owned TikHub 
   runtime.hubSocialGateway.searchRaw = async () => 'twitter-original-route'
   assert.equal(await runtime.service.externalRawSearch({}, { normalized: { platform: 'weibo' } }), 'weibo-original-route')
   assert.equal(await runtime.service.externalDataSearch({}, { normalized: { platform: 'weibo', pageSize: 20 } }), 'weibo-original-route')
-  assert.equal(await runtime.service.externalDataSearch({}, { normalized: { platform: 'twitter' } }), 'twitter-original-route')
+  assert.equal(await runtime.service.externalRawSearch({}, { normalized: { platform: 'twitter' } }), 'twitter-original-route')
+  const context = { tenant: { id: 'fixture-tenant' }, consumer: { id: 'fixture-consumer' }, apiKey: { id: 'fixture-key' } }
+  assert.equal(await runtime.service.externalDataSearch(context, { normalized: { platform: 'twitter' } }), 'twitter')
 })
 
 async function capabilityHarness(t) {

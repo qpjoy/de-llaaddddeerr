@@ -1612,7 +1612,9 @@ export class HubService {
       const row = payload.data.platforms.find(row => row.platform === 'twitter')
       if (row) row.search = { ready, source: 'hub', servingMode: 'live_only', contractVersion: 'night-all.data-search.v1' }
     }
-    const directContentPlatforms = canonicalGrants.filter(platform => Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, platform))
+    // Twitter resolves its selected supplier above. A metadata failure for an
+    // unrelated TikHub platform must not overwrite an available Rapid route.
+    const directContentPlatforms = canonicalGrants.filter(platform => platform !== 'twitter' && Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, platform))
     if (directContentPlatforms.length && this.externalContentSearchCapabilities) {
       let states = {}
       try { if (!isTestApiKey(context.apiKey)) states = await this.externalContentSearchCapabilities({ consumerId: context.consumer.id, platforms: directContentPlatforms }) }
@@ -4823,7 +4825,7 @@ export class HubService {
     }
     const retainedDirectXiaohongshu = platform === 'xiaohongshu' && pageSize === DIRECT_XIAOHONGSHU_PAGE_SIZE
       && (!cursor || isDirectXiaohongshuCursor(cursor))
-    if (path === '/api/v1/data/search' && directContentSearch && !retainedDirectXiaohongshu) {
+    if (path === '/api/v1/data/search' && directContentSearch && platform !== 'twitter' && !retainedDirectXiaohongshu) {
       assert(this.externalDataSearch, 503, 'content_search_unavailable', 'Hub content search is unavailable')
       return this.externalDataSearch(context, { body, normalized: upstreamBody, idempotencyKey,
         ...(signal ? { signal } : {}), dataSearch: { resultType, replayWindowMs: replayWindowFor(resultType) } })

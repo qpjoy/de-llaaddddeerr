@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { randomUUID, createHash } from 'node:crypto'
 import { REVISION, ORIGINAL_REQUEST_ID, PROXY_RECEIPT, QUERY, NATIVE_KEY, NATIVE_PATH, IDEMPOTENCY_KEY, PROTOCOL_KEYS,
-  runTwitterTikHubProbe, inspectTikHubReadiness, oneShotTikHubAdapter } from '../../server/ops/verify-twitter-tikhub.mjs'
+  runTwitterTikHubProbe, inspectTikHubReadiness, oneShotTikHubAdapter, SUCCESS_RECEIPT, summarizeTikHubTimeline } from '../../server/ops/verify-twitter-tikhub.mjs'
 import { PROXY_CASES } from '../../server/ops/verify-twitter-query-param.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { HubService } from '../../server/hub-service.mjs'
@@ -21,15 +21,15 @@ const CURSOR = 'private-opaque-cursor-do-not-follow'
 const PEPPER = 'offline-tikhub-probe-pepper-long-enough'
 const SHA = value => createHash('sha256').update(value).digest('hex')
 
-test('diagnostic v2 retains the issued v1 acquisition and protocol identities', () => {
-  assert.equal(REVISION, 'twitter-tikhub-check.v2')
+test('diagnostic v4 retains the issued v1 acquisition and protocol identities', () => {
+  assert.equal(REVISION, 'twitter-tikhub-check.v4')
   const originalKey = 'ops-twitter-tikhub-fd667b275888b95fa712ae694c024f890084a69881d47dc2'
   assert.equal(IDEMPOTENCY_KEY, originalKey)
   assert.deepEqual(PROTOCOL_KEYS, { original: `${originalKey}-original-guard`, native: `${originalKey}-native-guard` })
 })
 
 async function fixture({ grant = true, platformGrant = true, credential = true, enabled = true, outcome = 'success',
-  postDispatchLookupFailure = false, protocolFinishFailure = false,
+  postDispatchLookupFailure = false, protocolFinishFailure = false, savedLookupFailure = false,
   admissionPolicyRevision = 'offline-admission-policy.v2' } = {}) {
   const endpoint = nativeForwardingEndpoint(NATIVE_KEY)
   const usage = new MemoryStore(), service = new HubService({ store: usage, adapter: {}, apiKeyPepper: PEPPER })
@@ -80,7 +80,7 @@ async function fixture({ grant = true, platformGrant = true, credential = true, 
     if (text.includes('twitter-tikhub:proxy-calls')) return { rows: [structuredClone(proxyCall)] }
     if (text.includes('twitter-tikhub:proxy')) return { rows: [structuredClone(proxy)] }
     if (text.includes('twitter-tikhub:existing')) {
-      if (postDispatchLookupFailure && sent.length) throw new Error('synthetic receipt read unavailable')
+      if (savedLookupFailure || postDispatchLookupFailure && sent.length) throw new Error('synthetic receipt read unavailable')
       return { rows: alteredRows.existing ?? [...usage.requests.values()]
         .filter(row => row.consumerId === values[0] && row.idempotencyKey === IDEMPOTENCY_KEY).map(usageRow) }
     }
@@ -152,6 +152,9 @@ test('real TikHub native gateway sends every query atom exactly once without cur
   assert.equal(result.stage, 'native_dispatch')
   assert.equal(result.adapterCalls, 1)
   assert.equal(result.savedOutcomeVerified, 'native_success')
+  assert.equal(result.protocolGuardState, 'failed')
+  assert.equal(result.protocolGuardReason, 'diagnostic_not_standard_delivery')
+  assert.match(result.protocolGuardMeaning, /failed does not describe the supplier outcome/u)
   assert.equal(result.deliveryEstablished, false)
   assert.equal(QUERY.length, 257)
   assert.equal(SHA(QUERY), '1f56dcc7e0521efdb6bed09df10ff0c72ab2615940a880b45b963ccfd852e215')
@@ -472,4 +475,221 @@ test('blocked second query binding releases the unsent first guard and allows ex
   assert.equal(resumed.savedOutcomeVerified, 'native_success', JSON.stringify(resumed))
   assert.equal(resumed.adapterCalls, 1)
   assert.equal(f.sent.length, 1)
+})
+
+
+const PRIVATE_ITEM_ID = 'private-tweet-unique-id-do-not-print'
+const PRIVATE_NATIVE_ID = '1979366117396988012'
+const PRIVATE_URL = 'https://private.example.invalid/a-path?secret=never-print'
+const PRIVATE_NAME = 'private-author-name-do-not-print'
+function savedTimelineFixture(f, { entries = 19, data } = {}) {
+  const payload = data || { timeline: Array.from({ length: entries }, (_, i) => ({
+    id: PRIVATE_ITEM_ID, tweet_id: String(BigInt(PRIVATE_NATIVE_ID) + BigInt(i)),
+    text: POST, full_text: POST, created_at: 'Sun Oct 18 08:00:00 +0000 2026',
+    user_info: { rest_id: '1899000000000000001', name: PRIVATE_NAME, screen_name: 'example', avatar: PRIVATE_URL },
+    favorites: i === entries - 1 ? 8 : 0, replies: 1, retweets: 2, bookmarks: null,
+    views: i === entries - 1 ? '10' : null,
+    media: i === entries - 1 ? { photo: [{ media_url_https: PRIVATE_URL }] } : [],
+    url: PRIVATE_URL, author: { id: PRIVATE_ITEM_ID, name: PRIVATE_NAME },
+    user: { id: PRIVATE_ITEM_ID, screen_name: PRIVATE_NAME },
+    ...(i === entries - 1 ? { favorite_count: 8 } : {}),
+    ['private-field-name-do-not-print']: SECRET,
+  })), next_cursor: CURSOR }
+  const saved = { ...structuredClone(f.original), id: SUCCESS_RECEIPT.requestId,
+    platform: 'social', idempotency_key: IDEMPOTENCY_KEY, status: 'committed', response_status: 200,
+    acquisition_request: { method: 'POST', path: NATIVE_PATH,
+      body: { params: { keyword: QUERY, search_type: 'Top' }, deliveryMode: 'live_only' } },
+    response_body: { contractVersion: 'mx-insight-hub.native-forwarding.v1', endpoint: NATIVE_KEY,
+      requestId: SUCCESS_RECEIPT.requestId, data: payload, meta: { capturedAt: '2026-10-18T12:00:00.000Z' } } }
+  const call = { ...structuredClone(f.originalCall), id: SUCCESS_RECEIPT.callId,
+    provider_key: 'tikhub', operation: `native.${NATIVE_KEY}`, endpoint_key: `native.${NATIVE_KEY}`,
+    endpoint_version: 'night-all-source-snapshot.2026-09-26', contract_version: 'mx-insight-hub.native-forwarding.v1',
+    outcome: 'succeeded', http_status: 200, business_code: 200 }
+  f.alteredRows.existing = [saved]
+  f.alteredRows.calls = [call]
+  return { saved, call, payload }
+}
+
+function assertNoBusinessActivity(f) {
+  assert.deepEqual(f.creations(), { runtimeCreations: 0, gatewayCreations: 0 })
+  assert.equal(f.sent.length, 0)
+  assert.equal(f.usage.requests.size, 0)
+  assert.equal(f.platform.calls.size, 0)
+  assert.equal(f.platform.restrictedResponseArchives.size, 0)
+  assert.ok(f.sql.every(sql => /^(SELECT|BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY|ROLLBACK|SET LOCAL statement_timeout)/u.test(sql)), 'only read SQL is allowed')
+}
+
+function assertNoPayloadDisclosure(result) {
+  const output = JSON.stringify(result)
+  for (const value of [SECRET, POST, CURSOR, PRIVATE_ITEM_ID, PRIVATE_NATIVE_ID, PRIVATE_URL, PRIVATE_NAME, 'private-field-name-do-not-print']) {
+    assert.equal(output.includes(value), false, `must not disclose ${value}`)
+  }
+}
+
+test('fixed saved-native inspection maps all 19 items through installed standard and canonical code with no business activity', async () => {
+  const f = await fixture(), before = savedTimelineFixture(f)
+  const expected = structuredClone(before)
+  const result = await f.run({ readSavedOnly: true })
+  assert.equal(result.mode, 'read_saved_only')
+  assert.equal(result.readOnly, true)
+  assert.equal(result.maxAdapterCalls, 0)
+  assert.equal(result.adapterCalls, 0)
+  assert.equal(result.businessCalls, 0)
+  assert.equal(result.fullQueryAttempted, false)
+  assert.equal(result.deliveryEstablished, false)
+  assert.equal(result.savedOutcomeVerified, 'native_success')
+  assert.equal(result.saved.requestId, SUCCESS_RECEIPT.requestId)
+  assert.equal(result.projection.state, 'mapped_saved_native_page', JSON.stringify(result))
+  assert.equal(result.projection.acquiredCount, 19)
+  assert.equal(result.projection.standardItemCount, 19)
+  assert.equal(result.projection.canonicalRecordCount, 19)
+  assert.equal(result.projection.postgresProjectionSafe, true)
+  assert.equal(result.projection.hasMore, true)
+  assert.equal(result.projection.nextCursorPresent, true)
+  assert.equal(result.projection.timelineSummary, undefined)
+  assert.deepEqual(result.projection.metrics.likes, { knownCount: 19, zeroCount: 18, unknownCount: 0 })
+  assert.deepEqual(result.projection.metrics.views, { knownCount: 1, zeroCount: 0, unknownCount: 18 })
+  assert.deepEqual(result.projection.media, { imagePostCount: 1, videoPostCount: 0, coverPostCount: 1 })
+  assert.deepEqual(before, expected)
+  assertNoBusinessActivity(f)
+  assertNoPayloadDisclosure(result)
+})
+
+test('old installed images report needs_deploy without procurement or a new structure dump', async () => {
+  const f = await fixture(); savedTimelineFixture(f)
+  const result = await f.run({ readSavedOnly: true, loadMapping: async () => {
+    throw Object.assign(new Error(SECRET), { code: 'ERR_MODULE_NOT_FOUND' })
+  } })
+  assert.equal(result.savedOutcomeVerified, 'native_success')
+  assert.equal(result.projection.state, 'needs_deploy')
+  assert.equal(result.projection.reason, 'installed_twitter_mapping_unavailable')
+  assert.equal(result.projection.timelineSummary, undefined)
+  assert.equal(result.projection.procurementCalls, 0)
+  assertNoBusinessActivity(f); assertNoPayloadDisclosure(result)
+})
+
+test('a mapping failure reports a bounded reason without changing the saved success or reacquiring', async () => {
+  for (const mutate of [
+    ({ payload }) => { payload.timeline[18].tweet_id = null },
+    ({ payload }) => { payload.timeline[18].text = '\0' },
+    ({ payload }) => { payload.next_cursor = {} },
+  ]) {
+    const f = await fixture(), receipt = savedTimelineFixture(f)
+    mutate(receipt)
+    const before = structuredClone(receipt), result = await f.run({ readSavedOnly: true })
+    assert.equal(result.savedOutcomeVerified, 'native_success')
+    assert.equal(result.projection.state, 'saved_native_mapping_failed')
+    assert.ok(['invalid_content_search_identity', 'invalid_content_search_projection', 'invalid_content_search_continuation'].includes(result.projection.reason))
+    assert.equal(result.projection.timelineSummary, undefined)
+    assert.deepEqual(receipt, before)
+    assertNoBusinessActivity(f); assertNoPayloadDisclosure(result)
+  }
+})
+
+test('fixed saved-native mode fails closed when the receipt is absent or cannot be read', async () => {
+  for (const options of [{}, { savedLookupFailure: true }]) {
+    const f = await fixture(options)
+    const result = await f.run({ readSavedOnly: true })
+    assert.ok(result.errorCode)
+    assert.notEqual(result.savedOutcomeVerified, 'native_success')
+    assert.equal(result.maxAdapterCalls, 0)
+    assert.equal(result.adapterCalls, 0)
+    assertNoBusinessActivity(f)
+    assertNoPayloadDisclosure(result)
+  }
+})
+
+test('read-saved mode is incompatible with execute and sends no SQL or supplier request', async () => {
+  const f = await fixture(), result = await f.run({ readSavedOnly: true, execute: true })
+  assert.equal(result.errorCode, 'invalid_arguments')
+  assert.equal(result.adapterCalls, 0)
+  assert.equal(f.sql.length, 0)
+  assertNoBusinessActivity(f)
+})
+
+test('read-saved mode verifies exact selected receipt, call, owner and successful native envelope', async () => {
+  for (const mutate of [
+    ({ saved }) => { saved.id = '11111111-1111-4111-8111-111111111111' },
+    ({ call }) => { call.id = '22222222-2222-4222-8222-222222222222' },
+    ({ saved }) => { saved.status = 'unknown' },
+    ({ saved }) => { saved.consumer_id = randomUUID() },
+    ({ saved }) => { saved.response_body.requestId = randomUUID() },
+    ({ call }) => { call.tenant_id = randomUUID() },
+    ({ call }) => { call.business_code = 400 },
+    ({ call }) => { call.outcome = 'succeeded_unusable' },
+  ]) {
+    const f = await fixture(), rows = savedTimelineFixture(f)
+    mutate(rows)
+    const result = await f.run({ readSavedOnly: true })
+    assert.ok(result.errorCode, JSON.stringify(result))
+    assert.equal(result.projection?.timelineSummary, undefined)
+    assert.equal(result.adapterCalls, 0)
+    assertNoBusinessActivity(f)
+    assertNoPayloadDisclosure(result)
+  }
+})
+
+
+test('timeline summary reports fixed field shapes and validity without exposing unknown names or acquired values', () => {
+  const payload = { timeline: [{
+    id: PRIVATE_ITEM_ID, id_str: '1234567890123456789', tweet_id: 123,
+    full_text: POST, url: PRIVATE_URL, created_at: 'Sun Oct 18 08:00:00 +0000 2026',
+    timestamp: 1792300000, published_at: 'invalid-private-date',
+    user: { id: PRIVATE_ITEM_ID, name: PRIVATE_NAME, ['private-field-name-do-not-print']: SECRET },
+    ['private-field-name-do-not-print']: SECRET,
+  }, null, POST, [PRIVATE_ITEM_ID]], next_cursor: CURSOR }
+  const before = structuredClone(payload), result = summarizeTikHubTimeline(payload)
+  assert.equal(result.entryCount, 4)
+  assert.equal(result.inspectedCount, 4)
+  assert.equal(result.truncated, false)
+  const shape = result.groups.find(group => group.sampleIndexes.includes(0)).shape
+  assert.equal(shape.unknownKeyCount, 1)
+  assert.equal(shape.fields.id.nonemptyBoundedString, true)
+  assert.equal(shape.fields.id.positiveDecimalString, false)
+  assert.equal(shape.fields.id_str.positiveDecimalString, true)
+  assert.equal(shape.fields.tweet_id.positiveSafeInteger, true)
+  assert.deepEqual(shape.fields.full_text, { type: 'string' })
+  assert.deepEqual(shape.fields.url, { type: 'string' })
+  assert.equal(shape.fields.created_at.parseable, true)
+  assert.equal(shape.fields.published_at.parseable, false)
+  assert.equal(shape.fields.timestamp.representation, 'epoch_seconds')
+  assert.deepEqual(payload, before)
+  assertNoPayloadDisclosure(result)
+  assert.equal(JSON.stringify(result).includes('1234567890123456789'), false)
+  assert.equal(JSON.stringify(result).includes('invalid-private-date'), false)
+})
+
+test('timeline structure limits are explicit and never report truncated data as complete inspection', () => {
+  const fieldNames = ['text', 'full_text', 'description', 'name', 'url']
+  const distinct = Array.from({ length: 25 }, (_, index) => Object.fromEntries(fieldNames
+    .filter((_, bit) => index & 1 << bit).map(name => [name, POST])))
+  const groups = summarizeTikHubTimeline({ timeline: distinct })
+  assert.deepEqual(groups.limits, { maxNodes: 10000, maxDepth: 10, maxRootGroups: 24, maxNestedGroups: 8, maxSampleIndexes: 3 })
+  assert.equal(groups.entryCount, 25)
+  assert.equal(groups.inspectedCount, 24)
+  assert.equal(groups.groups.length, 24)
+  assert.equal(groups.truncated, true)
+  const nodes = summarizeTikHubTimeline({ timeline: Array(10001).fill(POST) })
+  assert.equal(nodes.entryCount, 10001)
+  assert.equal(nodes.inspectedCount, 10000)
+  assert.equal(nodes.nodesInspected, 10000)
+  assert.equal(nodes.truncated, true)
+  let nested = { id: PRIVATE_ITEM_ID }
+  for (let i = 0; i < 12; i++) nested = { user: nested }
+  const depth = summarizeTikHubTimeline({ timeline: [nested] })
+  assert.equal(depth.truncated, true)
+  assert.match(JSON.stringify(depth), /depthLimited/u)
+  assertNoPayloadDisclosure({ groups, nodes, depth })
+})
+
+test('missing timeline and empty timelines are distinct structural observations, neither claims delivered posts', () => {
+  const missing = summarizeTikHubTimeline({ timeline: { text: POST }, next_cursor: CURSOR })
+  assert.equal(missing.state, 'timeline_array_missing')
+  assert.equal(missing.entryCount, null)
+  assert.equal(missing.inspectedCount, 0)
+  const empty = summarizeTikHubTimeline({ timeline: [], next_cursor: CURSOR })
+  assert.equal(empty.entryCount, 0)
+  assert.equal(empty.inspectedCount, 0)
+  assert.equal(empty.truncated, false)
+  assertNoPayloadDisclosure({ missing, empty })
 })

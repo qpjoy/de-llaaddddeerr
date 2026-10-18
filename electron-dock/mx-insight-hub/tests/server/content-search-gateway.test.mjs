@@ -1275,3 +1275,92 @@ for (const platform of ['weibo', 'xiaohongshu']) test(`${platform} detail rechec
   assert.equal([...h.platformStore.calls.values()].length, 1)
   assert.equal([...h.store.requests.values()][0].status, 'unknown')
 })
+
+// Synthetic values follow the 19-item saved TikHub timeline schema; they are
+// not a copy of the private receipt or evidence of live cold-start delivery.
+const twitterPage = (ids, cursor = '', date = '2026-10-17T10:00:00Z') => ({
+  timeline: ids.map(id => ({ tweet_id: String(id), text: `完整正文 ${id} <literal>`, created_at: date,
+    user_info: { rest_id: '123456789012345678', name: 'Fixture', screen_name: 'fixture', avatar: 'https://example.test/avatar.jpg' },
+    favorites: 0, replies: 3, retweets: 2, views: null, quotes: 1, bookmarks: 0,
+    media: { photo: [{ media_url_https: 'https://example.test/photo.jpg?signature=a%2Fb' }] } })), next_cursor: cursor,
+})
+
+test('Twitter standard keeps original Boolean query, fills 19+8 and buffers every paid overflow item', async () => {
+  const ids = Array.from({ length: 27 }, (_, i) => String(8000000000000000000n + BigInt(i)))
+  const h = await harness({ platform: 'twitter', payload: (_call, index) => index === 1
+    ? twitterPage(ids.slice(0, 19), 'native-opaque+token=') : twitterPage(ids.slice(19)) })
+  const body = { platform: 'twitter', query: '("diplomacy" OR "foreign policy") AND ("statement" OR "update") AND NOT ("ad" OR "marketing")', pageSize: 20, type: 'stable' }
+  const first = await h.invokeData(body, 'twitter-first')
+  assert.equal(first.body.data.query, body.query)
+  assert.equal(first.body.data.contractVersion, 'night-all.data-search.v1')
+  assert.deepEqual(first.body.data.items.map(row => row.id), ids.slice(0, 20))
+  assert.equal(first.body.data.items[0].text, `完整正文 ${ids[0]} <literal>`)
+  assert.deepEqual(first.body.data.items[0].metrics, { likes: 0, comments: 3, shares: 2, views: null, bookmarks: 0 })
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.calls[0].params.keyword, '("diplomacy" OR "foreign policy") ("statement" OR "update") -"ad" -"marketing"')
+  assert.equal(h.calls[1].params.cursor, 'native-opaque+token=')
+  assert.ok(h.calls.every(call => call.params.search_type === 'Top' && !('count' in call.params) && !('page_size' in call.params)))
+  assert.deepEqual([...h.platformStore.calls.values()].map(call => call.itemCount), [19, 8])
+  assert.equal(h.platformStore.ingestJobs.length, 2)
+  assert.equal(h.store.requests.get(first.requestId).acquisitionRequest.searchProvider, 'tikhub')
+  assert.deepEqual((await h.invokeData(body, 'twitter-first')).body, first.body)
+  assert.equal(h.calls.length, 2)
+  const secondBody = { ...body, cursor: first.body.data.pageInfo.nextCursor }
+  const second = await h.invokeData(secondBody, 'twitter-next')
+  assert.deepEqual(second.body.data.items.map(row => row.id), ids.slice(20))
+  assert.equal(second.body.data.pageInfo.hasMore, false)
+  assert.deepEqual((await h.invokeData(secondBody, 'twitter-next')).body, second.body)
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.historical.length, 0)
+  assert.deepEqual(h.context.apiKey.platforms, ['twitter'])
+})
+
+test('Twitter v2 filters exact time locally and continues an empty filtered page without losing native overflow', async () => {
+  const h = await harness({ platform: 'twitter', payload: (_call, index) => index === 1
+    ? twitterPage(['8000000000000000001'], 'second', '2026-10-16T15:59:59Z')
+    : twitterPage(['8000000000000000002'], '', '2026-10-17T10:00:00Z') })
+  const body = { platform: 'twitter', query: 'fixture', pageSize: 1, timeWindow: {
+    from: '2026-10-16T16:00:00Z', to: '2026-10-17T16:00:00Z', timezone: 'Asia/Shanghai', boundary: '[from,to)' } }
+  const invoke = (body, key) => h.service.search(h.context, { path: '/api/v2/data/search', body, idempotencyKey: key })
+  const first = await invoke(body, 'twitter-v2-first')
+  assert.equal(first.body.data.items.length, 0)
+  assert.equal(first.body.data.pageInfo.hasMore, true)
+  assert.match(first.body.data.pageInfo.nextCursor, /^mxds2\./)
+  assert.equal(first.body.data.meta.effectiveWindow.deliveryFiltering, 'exact')
+  assert.equal(first.body.data.meta.capabilities.coverageComplete, false)
+  assert.deepEqual((await invoke(body, 'twitter-v2-first')).body, first.body)
+  assert.equal(h.calls.length, 1)
+  const second = await invoke({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'twitter-v2-next')
+  assert.deepEqual(second.body.data.items.map(row => row.id), ['8000000000000000002'])
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.calls[1].params.cursor, 'second')
+  await assert.rejects(h.invokeData({ platform: 'twitter', query: 'fixture', pageSize: 1 }, 'twitter-v2-first'), { code: 'idempotency_conflict' })
+  assert.equal(h.calls.length, 2)
+})
+
+test('Twitter keeps empty native cursor pages and repeated-cursor results without inventing exhaustion from count', async () => {
+  const h = await harness({ platform: 'twitter', payload: (_call, n) => n === 1
+    ? twitterPage([], 'opaque') : twitterPage(['8000000000000000003'], 'opaque') })
+  const result = await h.invokeData({ platform: 'twitter', query: 'empty-first-page', pageSize: 20 })
+  assert.equal(h.calls.length, 2)
+  assert.equal(result.body.data.items.length, 1)
+  assert.equal(result.body.data.pageInfo.hasMore, false)
+  assert.ok(result.body.data.warnings.some(row => row.code === 'content_search_repeated_cursor'))
+})
+
+test('Twitter standard persists exact unrelated unsafe metadata while delivering safe posts and replaying overflow', async () => {
+  const payload = twitterPage(['8000000000000000005', '8000000000000000006'])
+  payload.unused_metadata = { nul: '\u0000', lone_surrogate: '\ud800' }
+  payload.timeline[0].unused_nested = '\u0000'
+  const h = await harness({ platform: 'twitter', payload })
+  const body = { platform: 'twitter', query: 'safe projection', pageSize: 1, type: 'stable' }
+  const first = await h.invokeData(body, 'twitter-safe-projection')
+  assert.equal(first.body.data.items[0].id, '8000000000000000005')
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+  const second = await h.invokeData({ ...body, cursor: first.body.data.pageInfo.nextCursor }, 'twitter-safe-buffer')
+  assert.equal(second.body.data.items[0].id, '8000000000000000006')
+  assert.equal(h.calls.length, 1)
+  assert.ok(isPostgresSafeJsonValue(first.body))
+  assert.ok(isPostgresSafeJsonValue(second.body))
+})

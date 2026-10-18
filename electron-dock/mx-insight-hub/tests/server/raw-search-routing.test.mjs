@@ -6,6 +6,7 @@ import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
+import { twitterDeliveryLeases } from '../../server/external-platforms/twitter-delivery-leases.mjs'
 import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
 import { StrategySearchRoutingStore } from '../../server/external-platforms/strategy-search-routing.mjs'
 import { TikHubAdapter } from '../../server/adapters/tikhub.mjs'
@@ -1052,7 +1053,7 @@ test('Twitter standard third request waits for a consumer slot without buying ca
     const pending = [...h.store.requests.values()].find(row => row.idempotencyKey === 'twitter-queue-three')
     assert.equal(pending.status, 'reserved')
     assert.equal([...h.store.customerCharges.values()].find(row => row.usageRequestId === pending.id).status, 'reserved')
-    const heldLease = [...h.platformStore.leases.values()].find(row => row.ownerRequestId === pending.id)
+    const heldLease = [...twitterDeliveryLeases(h.store).values()].find(row => row.ownerRequestId === pending.id)
     assert.ok(heldLease, 'delivery arbitration remains held while waiting')
     assert.equal(heldLease.expiresAt, pending.leaseExpiresAt)
     assert.equal(h.platformStore.calls.size, 2)
@@ -1070,7 +1071,7 @@ test('Twitter standard third request waits for a consumer slot without buying ca
   } finally { finish.forEach(resolve => resolve()); await Promise.allSettled([one, two, three]) }
   assert.equal(h.gateway.active, 0)
   assert.equal(h.gateway.activeByConsumer.size, 0)
-  assert.equal(h.platformStore.leases.size, 0)
+  assert.equal(twitterDeliveryLeases(h.store).size, 0)
   assert.equal(h.gateway.concurrencyQueue.entries.length, 0)
 })
 
@@ -1099,7 +1100,7 @@ test('Twitter queued admission rechecks current access, operation, circuit and u
     assert.equal(h.calls.length, 0)
     assert.equal(h.gateway.active, 0)
     assert.equal(h.gateway.activeByConsumer.size, 0)
-    assert.equal(h.platformStore.leases.size, 0)
+    assert.equal(twitterDeliveryLeases(h.store).size, 0)
     assert.equal([...h.store.requests.values()][0].status, 'released')
   })
 })
@@ -1129,7 +1130,7 @@ test('Twitter admission bounds full queues, cancellation and the original settle
   })
   assert.equal(h.gateway.active, h.config.maxConcurrency, 'rejected requests do not release another owner capacity')
   assert.equal(h.platformStore.calls.size, 0)
-  assert.equal(h.platformStore.leases.size, 0)
+  assert.equal(twitterDeliveryLeases(h.store).size, 0)
   assert.ok([...h.store.requests.values()].every(row => row.status === 'released'))
 })
 
@@ -1278,14 +1279,14 @@ test('Twitter uncertain cached commit preserves its customer hold and lease when
   assert.equal(pending.status, 'reserved')
   assert.equal(charge.status, 'reserved')
   assert.equal(releaseCalls.length, 0, 'outer cleanup cannot release a hold whose outcome is unconfirmed')
-  assert.ok([...h.platformStore.leases.values()].some(lease => lease.ownerRequestId === pending.id))
+  assert.ok([...twitterDeliveryLeases(h.store).values()].some(lease => lease.ownerRequestId === pending.id))
   await assert.rejects(h.invokeData(continuation, 'twitter-retained-before-expiry'), { code: 'request_in_progress' })
   assert.equal(pending.status, 'reserved')
   assert.equal(charge.status, 'reserved')
   h.store.markRequestUnknown = originalMark
   h.store.getRequest = originalGet
   pending.leaseExpiresAt = new Date(Date.now() - 1000).toISOString()
-  for (const lease of h.platformStore.leases.values()) if (lease.ownerRequestId === pending.id) lease.expiresAt = pending.leaseExpiresAt
+  for (const lease of twitterDeliveryLeases(h.store).values()) if (lease.ownerRequestId === pending.id) lease.expiresAt = pending.leaseExpiresAt
   await h.store.reapStaleReservations()
   assert.equal(pending.status, 'unknown')
   assert.equal(charge.status, 'unknown')

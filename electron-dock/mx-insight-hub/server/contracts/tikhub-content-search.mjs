@@ -2,12 +2,16 @@ import { AppError } from '../core/errors.mjs'
 import { normalizeNativeForwardingRequest } from './native-forwarding.mjs'
 import { normalizeSearchMedia } from './search-content.mjs'
 import { projectRemainingContentSearch, xiaohongshuSearchOperation } from './remaining-content-search.mjs'
+import { projectTikHubTwitterSearch } from './tikhub-twitter-search.mjs'
+import { compileTwitterSearchQuery } from './twitter-search-query.mjs'
 
 // These are the retained Night-All default keyword endpoints, not an editable
 // URL catalog. All execution, archives, leases and public cursor signing live
 // in the gateway. No Night-All module is used at runtime.
 export const TIKHUB_CONTENT_SEARCH_VERSION = 'mx-insight-hub.tikhub-content-search.v1'
 export const TIKHUB_CONTENT_SEARCH_RECIPES = Object.freeze(Object.fromEntries([
+  ['twitter', 'twitter_web_fetch_search_timeline', 'GET', '/api/v1/twitter/web/fetch_search_timeline', 'cursor',
+    { search_type: 'Top' }, ['keyword', 'search_type', 'cursor'], false, false],
   ['bilibili', 'bilibili_web_fetch_general_search', 'GET', '/api/v1/bilibili/web/fetch_general_search', 'page',
     { order: 'pubdate', duration: 0, pubtime_begin_s: 0, pubtime_end_s: 0 }, ['keyword', 'order', 'page', 'page_size', 'duration', 'pubtime_begin_s', 'pubtime_end_s']],
   ['douyin', 'douyin_search_fetch_video_search_v1', 'POST', '/api/v1/douyin/search/fetch_video_search_v1', 'compound',
@@ -81,18 +85,28 @@ const urlLists = value => object(value) ? array(value.url_list) : []
 export function normalizeTikHubContentSearchRequest({ platform, query, pageSize = 20, params = {}, page = 1, providerCursor = null, maxPageSize = 1000, maxQueryLength = 500 }) {
   const recipe = TIKHUB_CONTENT_SEARCH_RECIPES[platform]
   if (!recipe) throw new AppError(400, 'invalid_platform', 'Unsupported content-search platform')
+  if (platform === 'twitter' && (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100)) throw new AppError(400, 'page_size_exceeded', 'Twitter pageSize must be between 1 and 100')
   if (typeof query !== 'string' || !query.trim() || query.length > maxQueryLength || query.includes('\u0000')) throw new AppError(400, 'invalid_query', 'A bounded keyword is required')
   if (!object(params) || Object.keys(params).some(name => !recipe.parameterNames.includes(name))) throw new AppError(400, 'unsupported_fields', 'Unsupported content-search parameter')
   if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > maxPageSize) throw new AppError(400, 'invalid_page_size', 'Invalid content-search page or page size')
-  const nextNames = { bilibili: ['page'], douyin: ['cursor', 'search_id', 'backtrace'], kuaishou: ['pcursor'], zhihu: ['offset', 'search_hash_id'], reddit: ['after'], youtube: ['continuation_token'], tiktok: ['offset', 'search_id'], weibo: ['page'], xiaohongshu: ['page', 'search_id', 'search_session_id'] }[platform]
+  const nextNames = { twitter: ['cursor'], bilibili: ['page'], douyin: ['cursor', 'search_id', 'backtrace'], kuaishou: ['pcursor'], zhihu: ['offset', 'search_hash_id'], reddit: ['after'], youtube: ['continuation_token'], tiktok: ['offset', 'search_id'], weibo: ['page'], xiaohongshu: ['page', 'search_id', 'search_session_id'] }[platform]
   if (providerCursor != null && (!object(providerCursor) || Object.keys(providerCursor).some(name => !nextNames.includes(name)))) throw new AppError(400, 'invalid_cursor', 'Invalid platform continuation')
   const upstream = { ...recipe.defaults, ...params, [['reddit', 'weibo'].includes(platform) ? 'query' : 'keyword']: query.trim(), ...(providerCursor || {}) }
+  if (platform === 'twitter') {
+    // Reuse the existing semantics-preserving Boolean compiler; identities and
+    // saved caller conditions retain the original query. No supplier count is
+    // invented: this endpoint returns a native page which Hub buffers in full.
+    upstream.keyword = compileTwitterSearchQuery(query.trim()).providerQuery
+    if (!['Top', 'Latest'].includes(upstream.search_type)) throw new AppError(400, 'invalid_parameter', 'Invalid Twitter search type')
+    if (upstream.cursor != null && (typeof upstream.cursor !== 'string' || !upstream.cursor.trim() || upstream.cursor.length > 4096 || upstream.cursor.includes('\u0000'))) throw new AppError(400, 'invalid_cursor', 'Invalid Twitter continuation')
+  }
   if (platform === 'weibo') upstream.page = providerCursor?.page ?? page
   if (platform === 'xiaohongshu') upstream.page = String(providerCursor?.page ?? page)
   if (platform === 'reddit' || platform === 'youtube') validateStandardOnlyParameters(platform, upstream)
   if (platform === 'bilibili') { upstream.page ??= page; upstream.page_size ??= pageSize }
   if (platform === 'zhihu') upstream.limit ??= String(pageSize)
   for (const name of ['page', 'page_size', 'offset', 'cursor', 'limit', 'pubtime_begin_s', 'pubtime_end_s']) {
+    if (platform === 'twitter' && name === 'cursor') continue
     if (upstream[name] != null && (typeof upstream[name] === 'boolean' || !Number.isSafeInteger(Number(upstream[name])) || Number(upstream[name]) < (name === 'page' || name === 'page_size' || name === 'limit' ? 1 : 0))) throw new AppError(400, 'invalid_parameter', `${name} must be a nonnegative integer`)
   }
   const native = normalizeNativeForwardingRequest(recipe.key, { params: upstream }, { maxPageSize })
@@ -552,6 +566,7 @@ export function projectTikHubContentSearch(result, request) {
   if (data.code != null && ![0, 200, '0', '200'].includes(data.code)) throw new Error('content_search_business_rejected')
   const capturedAt = timestamp(result.publicBody?.meta?.capturedAt)
   if (!capturedAt) throw new Error('invalid_content_search_capture_time')
+  if (request.platform === 'twitter') return projectTikHubTwitterSearch(result, request)
   if (['tiktok', 'xiaohongshu', 'weibo'].includes(request.platform)) return projectRemainingContentSearch(result, data, request, capturedAt)
   if (request.platform === 'reddit' || request.platform === 'youtube') return standardOnlyProjection(result, data, request, capturedAt)
   let entries = selectedArray(data, { bilibili: [['result'], ['data', 'result'], ['data']], douyin: [['business_data'], ['aweme_list'], ['data'], ['items']],
@@ -594,8 +609,8 @@ export function contentSearchLegacyRow(row) {
   return { ...row, url: row.url || '', original_url: row.original_url || row.url || '',
     published_at: row.created_at || null, source: '',
     like_count: row.like_count ?? 0, reply_count: row.reply_count ?? 0,
-    forward_count: row.forward_count ?? 0, bookmark_count: row.bookmark_count ?? 0, quote_count: 0,
-    lang: '', is_forward: false, author_id: row.author_id || '', user_name: row.author_name || '',
+    forward_count: row.forward_count ?? 0, bookmark_count: row.bookmark_count ?? 0, quote_count: row.platform_name === 'twitter' ? row.quote_count ?? 0 : 0,
+    lang: row.platform_name === 'twitter' ? row.lang || '' : '', is_forward: false, author_id: row.author_id || '', user_name: row.author_name || '',
     author_name: row.author_name || '', author_avatar_url: row.author_avatar_url || '',
     profile_image_url: row.author_avatar_url || '', cover_url: row.cover_url || '', metadata: '{}' }
 }

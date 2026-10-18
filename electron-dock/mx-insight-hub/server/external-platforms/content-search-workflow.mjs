@@ -8,6 +8,7 @@ import { normalizeTikHubContentSearchRequest, projectTikHubContentSearch, conten
 import { rawSearchRecords, RAW_SEARCH_DATASET } from '../contracts/raw-search.mjs'
 import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { ContentSearchStateStore } from './content-search-store.mjs'
+import { assertTwitterSearchAvailable } from '../data/twitter-search-availability.mjs'
 
 // Validate every persisted/served projection before a paid page is classified
 // as succeeded. The complete raw receipt may contain unused JSONB-unsafe data.
@@ -154,6 +155,9 @@ export async function runContentSearch({ gateway, context, request, delivery, de
   try {
     if (!await stateStore.acquireDeliveryLease(parentLease)) throw new AppError(409, 'request_in_progress', 'An equal content-search delivery is in progress')
     ownsParent = true
+    if (request.standard && request.platform === 'twitter') await assertTwitterSearchAvailable({
+      usageStore: gateway.usageStore, context, query: request.queries[0], excludeRequestIds: [delivery.usageRequestId],
+    })
     if (await stateStore.unknownFor(delivery, identity.path)) throw new AppError(409, 'request_outcome_unknown', 'A previous equal search has an unknown outcome')
     for (const [index, job] of state.jobs.entries()) {
       // Only an already saved incomplete page can be continued explicitly.
@@ -224,7 +228,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           try {
             phase = 'provider_request'
             result = await gateway.adapter.forwardNative(request.recipe.key, { params: nativeRequest.upstreamQuery }, { credential: credential.credential,
-              contentSearchProjection: request.standard && request.platform === 'kuaishou' })
+              contentSearchProjection: request.standard && ['kuaishou', 'twitter'].includes(request.platform) })
             phase = 'project_response'
             try { ({ projected, records } = projectContentPage(result, nativeRequest)) }
             catch { throw new TikHubUpstreamError('Content-search response could not be normalized', {
