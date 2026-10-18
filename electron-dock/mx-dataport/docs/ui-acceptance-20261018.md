@@ -1,6 +1,6 @@
 # 2026-10-18 UI 验收修复
 
-后续状态：原型在4288的临时副本运行，原目录源码只读。部署版已完成本轮截图复测，手机套餐与弹窗修复通过，但标题对齐需追加CSS优先级补丁。类型/生产构建和8项相关测试通过，追加补丁尚待部署；见根目录 [design-qa.md](../design-qa.md) 与外置证据 `screenshot/ui-alignment-fix-20261018/`。下文4277权限阻塞是历史记录。
+后续状态：提交2c7e360f已部署，手机标题top108px与4288原型一致，之前3.203125px偏移消失。手机套餐padding/gap、业务弹窗居中、标题对齐三项修复回归通过，桌面回归与关闭焦点正常，无本轮前端error。仅本轮修复范围passed；全量有数据状态对照/认证截图/功能矩阵仍有缺项。见根[design-qa.md](../design-qa.md)及外置ui-alignment-fix-20261018/heading-postdeploy。下文待部署和4277权限描述均为前期历史。
 
 已在生产 goodmorning 企业检查主要控制台页面、弹窗、1440×668 矮窗口及390×844手机视口。证据外置：`/Users/lanan/Desktop/yjj/数港/screenshot/ui-full-acceptance-20261018/report.md`，70张生产截图与6张本地合成数据回归截图分开记录。
 
