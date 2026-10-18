@@ -2390,7 +2390,11 @@ export class PostgresStore {
         WHERE binding.consumer_id = $1 AND binding.idempotency_key = $2`,
       [consumerId, idempotencyKey],
     )
-    return requestRecord(rows[0]) || null
+    // Internal lookup: retain the persisted supplier/continuation evidence.
+    // A buffered delivery has no provider call of its own, so dropping this
+    // snapshot would incorrectly send its replay to the legacy supplier.
+    // Keep it out of the shared/public requestRecord projection.
+    return rows[0] ? { ...requestRecord(rows[0]), acquisitionRequest: rows[0].acquisition_request ?? null } : null
   }
 
   // Internal-only projection used by the external-platform retry guard. The

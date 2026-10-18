@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
 import { runStandardVerification, countSupplierCalls, ORIGINAL_REQUEST_ID, KEYS, TIME_WINDOW } from '../../server/ops/verify-twitter-standard.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
+import { PostgresStore } from '../../server/stores/postgres-store.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { AppError } from '../../server/core/errors.mjs'
 import { TikHubAdapter } from '../../server/adapters/tikhub.mjs'
@@ -170,6 +171,41 @@ test('duplicate delivered identity and mismatched supplier evidence cannot claim
 })
 
 const pgliteModule = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
+test('standard verification replays buffered deliveries when its internal identity lookup uses the real PostgreSQL mapper',
+  { skip: !pgliteModule && 'Set MX_INSIGHT_TEST_PGLITE_MODULE to the local PGlite module' }, async t => {
+    const { PGlite } = await import(pathToFileURL(pgliteModule).href)
+    const db = new PGlite(); t.after(() => db.close())
+    await db.exec(`CREATE TABLE usage_requests(id uuid,tenant_id uuid,consumer_id uuid,api_key_id uuid,idempotency_key text,
+      platform text,status text,fingerprint text,acquisition_request jsonb,response_status int,response_body jsonb);
+      CREATE TABLE usage_idempotency_bindings(consumer_id uuid,idempotency_key text,current_request_id uuid);`)
+    const h = await harness(), postgres = new PostgresStore(db)
+    // All search/gateway state still belongs to the offline fixture. Only the
+    // internal lookup crosses a real JSONB round-trip and production row mapper,
+    // which is the boundary the earlier all-Memory acceptance test missed.
+    h.store.getUsageRequestByIdempotencyKey = async (consumerId, key) => {
+      await db.exec('TRUNCATE usage_requests,usage_idempotency_bindings')
+      for (const row of h.store.requests.values()) {
+        await db.query('INSERT INTO usage_requests VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
+          [row.id, row.tenantId, row.consumerId, row.apiKeyId, row.idempotencyKey, row.platform, row.status,
+            row.fingerprint, JSON.stringify(row.acquisitionRequest), row.responseStatus, JSON.stringify(row.responseBody ?? null)])
+      }
+      for (const [scope, id] of h.store.requestsByScope) {
+        const colon = scope.indexOf(':')
+        await db.query('INSERT INTO usage_idempotency_bindings VALUES($1,$2,$3)', [scope.slice(0, colon), scope.slice(colon + 1), id])
+      }
+      return postgres.getUsageRequestByIdempotencyKey(consumerId, key)
+    }
+    const first = await h.run()
+    assert.equal(first.errorCode, undefined, JSON.stringify(first))
+    assert.equal(first.standardDeliveryVerified, true)
+    assert.equal(first.paginationVerified, true)
+    assert.ok(first.versions.every(version => version.pages[1].bufferedContinuationVerified))
+    const calls = h.http(), repeated = await h.run()
+    assert.equal(repeated.errorCode, undefined, JSON.stringify(repeated))
+    assert.equal(repeated.adapterCalls, 0)
+    assert.equal(h.http(), calls)
+  })
+
 test('PostgreSQL budget query counts all historical attempts and validates both request and call ownership',
   { skip: !pgliteModule && 'Set MX_INSIGHT_TEST_PGLITE_MODULE to the local PGlite module' }, async t => {
     const { PGlite } = await import(pathToFileURL(pgliteModule).href)
