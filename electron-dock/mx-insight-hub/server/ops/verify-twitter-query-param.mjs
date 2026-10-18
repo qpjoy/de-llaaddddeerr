@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-export const REVISION = 'twitter-query-param-check.v3'
+export const REVISION = 'twitter-query-param-check.v4'
 // Receipt keys issued by v1 are immutable even as this diagnostic grows.
 const QUERY_PARAM_KEY_REVISION = 'twitter-query-param-check.v1'
 export const ORIGINAL_REQUEST_ID = 'b5906846-8564-4791-8b83-ef3ce97789bc'
@@ -39,11 +39,21 @@ export const AND_CASES = Object.freeze(Object.fromEntries(Object.entries({
 }).map(([name, value]) => [name, Object.freeze({ ...value, idempotencyKey: 'ops-twitter-and-' + createHash('sha256')
   .update(JSON.stringify(['twitter-explicit-and-path-check.v1', ORIGINAL_REQUEST_ID,
     HALF_RECEIPTS.map(row => row.requestId), name, value.query, value.providerQuery, 20, 'Top'])).digest('hex').slice(0, 48) })])))
+export const ENGLISH_AND_RECEIPT = Object.freeze({ requestId: '9b15c0e6-5ca7-4ff9-9a3f-5c418e3afa06',
+  callId: '4fa2fa1c-2889-4238-9370-25802866c877' })
+const englishGroupBoundary = HALF_CASES.english_half.query.indexOf(') (') + 1
+export const GROUP_CASES = Object.freeze(Object.fromEntries(Object.entries({
+  english_topics: HALF_CASES.english_half.query.slice(0, englishGroupBoundary) + englishNegations,
+  english_events: HALF_CASES.english_half.query.slice(englishGroupBoundary + 1),
+}).map(([name, query]) => [name, Object.freeze({ query, idempotencyKey: 'ops-twitter-group-' + createHash('sha256')
+  .update(JSON.stringify(['twitter-english-groups-path-check.v1', ORIGINAL_REQUEST_ID, ENGLISH_AND_RECEIPT.requestId,
+    name, query, 20, 'Top'])).digest('hex').slice(0, 48) })])))
 const ORIGINAL_QUERY_SHA256 = 'f8f3da5a20307fa43713d737199766faa376498fe825ea69889b171f72a37386'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const ERRORS = new Set(['original_rejection_unverified', 'original_provider_evidence_unverified', 'original_request_changed',
   'original_owner_unavailable', 'known_candidate_rejection_unverified', 'known_candidate_provider_evidence_unverified', 'known_candidate_changed',
-  'known_half_outcome_unverified', 'known_half_changed', 'probe_request_mismatch', 'probe_call_limit', 'invalid_arguments', 'database_url_required',
+  'known_half_outcome_unverified', 'known_half_changed', 'known_english_and_unverified', 'known_english_and_changed',
+  'probe_request_mismatch', 'probe_call_limit', 'invalid_arguments', 'database_url_required',
   'api_key_required', 'platform_not_granted', 'capability_not_granted', 'test_key_not_supported', 'idempotency_conflict',
   'request_outcome_unknown', 'request_in_progress', 'search_admission_blocked', 'social_upstream_rejected',
   'social_upstream_outcome_unknown', 'social_upstream_response_unusable', 'external_platform_not_configured',
@@ -99,12 +109,12 @@ async function readSnapshot(pool, idempotencyKey, caseName) {
       && call.outcome === 'rejected' && call.http_status === 400 && call.call_ordinal === 0 && call.call_role === 'primary'),
     'original_provider_evidence_unverified')
     const knownCandidates = []
-    const explicitAnd = Object.hasOwn(AND_CASES, caseName)
-    if (caseName === 'candidate' || Object.hasOwn(HALF_CASES, caseName) || explicitAnd) {
+    const explicitAnd = Object.hasOwn(AND_CASES, caseName), englishGroup = Object.hasOwn(GROUP_CASES, caseName)
+    if (caseName === 'candidate' || Object.hasOwn(HALF_CASES, caseName) || explicitAnd || englishGroup) {
       // This fixed comparison has two known earlier path-form attempts. Check
       // their saved refusals explicitly; never use a new endpoint alias to
       // get around a pending/unknown outcome. This is not a general v1 scan.
-      for (const requestId of [...CANDIDATE_REQUEST_IDS, ...(Object.hasOwn(HALF_CASES, caseName) || explicitAnd ? [QUERY_PARAM_REQUEST_ID] : [])]) {
+      for (const requestId of [...CANDIDATE_REQUEST_IDS, ...(Object.hasOwn(HALF_CASES, caseName) || explicitAnd || englishGroup ? [QUERY_PARAM_REQUEST_ID] : [])]) {
         const expectedPath = requestId === QUERY_PARAM_REQUEST_ID ? '/api/v1/night-all/search/raw' : '/api/v1/data/search'
         const known = (await client.query(`SELECT /* twitter-query-param:known-candidate */ id,tenant_id,consumer_id,api_key_id,
           platform,status,response_status,response_body,acquisition_request,fingerprint
@@ -132,7 +142,7 @@ async function readSnapshot(pool, idempotencyKey, caseName) {
       }
     }
     const knownHalves = []
-    if (explicitAnd) for (const receipt of HALF_RECEIPTS) {
+    if (explicitAnd || englishGroup) for (const receipt of HALF_RECEIPTS) {
       const known = (await client.query(`SELECT /* twitter-query-param:known-half */ id,tenant_id,consumer_id,api_key_id,
         platform,status,response_status,response_body,acquisition_request FROM usage_requests WHERE id=$1`, [receipt.requestId])).rows[0]
       const calls = (await client.query(`SELECT /* twitter-query-param:known-half-calls */ id,tenant_id,consumer_id,api_key_id,
@@ -144,12 +154,27 @@ async function readSnapshot(pool, idempotencyKey, caseName) {
       knownHalves.push({ requestId: receipt.requestId, callId: receipt.callId, case: receipt.caseName,
         querySha256: digest(HALF_CASES[receipt.caseName].query), savedOutcomeVerified: receipt.outcome })
     }
+    let knownEnglishAnd = null
+    if (englishGroup) {
+      const known = (await client.query(`SELECT /* twitter-query-param:known-english-and */ id,tenant_id,consumer_id,api_key_id,
+        idempotency_key,platform,status,response_status,response_body,acquisition_request
+        FROM usage_requests WHERE id=$1`, [ENGLISH_AND_RECEIPT.requestId])).rows[0]
+      const calls = (await client.query(`SELECT /* twitter-query-param:known-english-and-calls */ id,tenant_id,consumer_id,api_key_id,
+        provider_key,operation,endpoint_key,endpoint_version,contract_version,outcome,http_status,call_ordinal,call_role
+        FROM external_platform.provider_calls WHERE usage_request_id=$1 LIMIT 2`, [ENGLISH_AND_RECEIPT.requestId])).rows
+      requireValue(known?.id === ENGLISH_AND_RECEIPT.requestId && known.idempotency_key === AND_CASES.english_and.idempotencyKey
+        && ['tenant_id', 'consumer_id', 'api_key_id'].every(key => known[key] === row[key])
+        && savedOutcome(known, calls, AND_CASES.english_and.query, ENGLISH_AND_RECEIPT.callId) === 'rejected400',
+      'known_english_and_unverified')
+      knownEnglishAnd = { ...ENGLISH_AND_RECEIPT, querySha256: digest(AND_CASES.english_and.query), savedOutcomeVerified: 'rejected400',
+        evidence: 'Exact fixed probe key, native saved input and sole owned refusal; no historical wire text retained.' }
+    }
     const existing = (await client.query(`SELECT /* twitter-query-param:existing */ id,tenant_id,consumer_id,api_key_id,
       platform,status,response_status,response_body,acquisition_request FROM usage_requests WHERE consumer_id=$1 AND idempotency_key=$2 ORDER BY reserved_at LIMIT 2`,
     [row.consumer_id, idempotencyKey])).rows
     requireValue(existing.length <= 1 && existing.every(entry => ['tenant_id', 'consumer_id', 'api_key_id']
       .every(key => entry[key] === row[key])), 'original_owner_unavailable')
-    return { original: row, existing: existing[0] || null, knownCandidates, knownHalves,
+    return { original: row, existing: existing[0] || null, knownCandidates, knownHalves, knownEnglishAnd,
       originalDigest: digest(JSON.stringify([row.status, row.response_status, row.response_body, row.acquisition_request, row.fingerprint])) }
   } finally { await client.query('ROLLBACK').catch(() => {}); client.release() }
 }
@@ -159,8 +184,9 @@ async function readSnapshot(pool, idempotencyKey, caseName) {
 // the original failed request while comparing the documented transport alias.
 // The original adapter still sends, parses and archives the HTTP response.
 export function queryParamAdapter(adapter, caseName, onDispatch = () => {}) {
-  const selected = PROBE_CASES[caseName] || HALF_CASES[caseName] || AND_CASES[caseName]
-  requireValue(Object.hasOwn(PROBE_CASES, caseName) || Object.hasOwn(HALF_CASES, caseName) || Object.hasOwn(AND_CASES, caseName), 'invalid_arguments')
+  const selected = PROBE_CASES[caseName] || HALF_CASES[caseName] || AND_CASES[caseName] || GROUP_CASES[caseName]
+  requireValue(Object.hasOwn(PROBE_CASES, caseName) || Object.hasOwn(HALF_CASES, caseName)
+    || Object.hasOwn(AND_CASES, caseName) || Object.hasOwn(GROUP_CASES, caseName), 'invalid_arguments')
   let calls = 0
   return {
     resolveCredential: () => adapter.resolveCredential(),
@@ -175,7 +201,7 @@ export function queryParamAdapter(adapter, caseName, onDispatch = () => {}) {
       'probe_request_mismatch')
       // Half expressions use the same path transport as the proven OpenAI
       // control. They are diagnostics, never replacement business queries.
-      const pathForm = Object.hasOwn(HALF_CASES, caseName) || Object.hasOwn(AND_CASES, caseName)
+      const pathForm = Object.hasOwn(HALF_CASES, caseName) || Object.hasOwn(AND_CASES, caseName) || Object.hasOwn(GROUP_CASES, caseName)
       // Keep the acquisition/guard identity on the original native query. Only
       // this private adapter changes the wire text, after validating the exact
       // normalized request; production compilation could erase explicit AND.
@@ -204,17 +230,18 @@ async function appendSavedEvidence(report, pool, saved, selected) {
 }
 
 async function runSingleProbe({ pool, execute = false, caseName, createGatewayRuntime }) {
-  const selected = PROBE_CASES[caseName] || HALF_CASES[caseName] || AND_CASES[caseName]
-  const half = Object.hasOwn(HALF_CASES, caseName), explicitAnd = Object.hasOwn(AND_CASES, caseName)
+  const selected = PROBE_CASES[caseName] || HALF_CASES[caseName] || AND_CASES[caseName] || GROUP_CASES[caseName]
+  const half = Object.hasOwn(HALF_CASES, caseName), explicitAnd = Object.hasOwn(AND_CASES, caseName), englishGroup = Object.hasOwn(GROUP_CASES, caseName)
   const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID,
     case: caseName, querySha256: digest(selected.query), queryLength: selected.query.length,
-    endpointVariant: half || explicitAnd ? 'GET /search/{searchItem}' : 'GET /search?searchItem', category: 'Top', count: 20,
+    endpointVariant: half || explicitAnd || englishGroup ? 'GET /search/{searchItem}' : 'GET /search?searchItem', category: 'Top', count: 20,
     ...(explicitAnd ? { providerQuerySha256: digest(selected.providerQuery), providerQueryLength: selected.providerQuery.length,
       providerQueryEvidence: 'Fixed expected diagnostic wire text; saved usage retains the native query. This is not historical outgoing URL evidence.',
       wireSyntax: 'Explicit AND between positive OR groups; every original atom and negation retained.',
       queryScope: caseName === 'english_and' ? 'English subexpression only; not the full business query.'
         : 'Semantically equivalent full candidate; diagnostic page only, not a cold-start delivery.' } : {}),
     ...(half ? { queryScope: 'Proper subexpression of the original AND; diagnostic only, not equivalent to the full business query.' } : {}),
+    ...(englishGroup ? { queryScope: 'One original English OR group with every original English exclusion; diagnostic only, not a full business result.' } : {}),
     idempotencyKey: selected.idempotencyKey, mode: execute ? 'execute' : 'read_only', adapterCalls: 0,
     countMeaning: 'Adapter attempts only; not proof of HTTP dispatch, supplier charge or billed calls.',
     deliveryScope: 'Independent raw single-page diagnostic; not a standard search delivery or cold-start recovery.',
@@ -224,7 +251,8 @@ async function runSingleProbe({ pool, execute = false, caseName, createGatewayRu
     initial = await readSnapshot(pool, selected.idempotencyKey, caseName)
     report.originalRejectionVerified = true
     report.knownCandidateRejections = initial.knownCandidates
-    if (explicitAnd) report.knownHalfOutcomes = initial.knownHalves
+    if (explicitAnd || englishGroup) report.knownHalfOutcomes = initial.knownHalves
+    if (englishGroup) report.knownEnglishAnd = initial.knownEnglishAnd
     report.evidenceScope = 'Fixed original receipt, listed candidate refusals, this probe key and standard v2 query guard; not an exhaustive historical v1 scan.'
     if (initial.existing) report.existing = { requestId: safeId(initial.existing.id),
       status: choice(initial.existing.status, ['reserved', 'committed', 'released', 'unknown']),
@@ -237,7 +265,7 @@ async function runSingleProbe({ pool, execute = false, caseName, createGatewayRu
     }
     const runtime = await createGatewayRuntime(prepared => {
       report.adapterCalls++
-      if (explicitAnd) report.preparedProviderQuery = prepared
+      if (explicitAnd || englishGroup) report.preparedProviderQuery = prepared
     }, caseName)
     const context = await runtime.store.findApiKeyById(initial.original.api_key_id)
     requireValue(context?.tenant?.id === initial.original.tenant_id && context.consumer?.id === initial.original.consumer_id
@@ -268,6 +296,7 @@ async function runSingleProbe({ pool, execute = false, caseName, createGatewayRu
       requireValue(after.originalDigest === initial.originalDigest, 'original_request_changed')
       requireValue(JSON.stringify(after.knownCandidates) === JSON.stringify(initial.knownCandidates), 'known_candidate_changed')
       requireValue(JSON.stringify(after.knownHalves) === JSON.stringify(initial.knownHalves), 'known_half_changed')
+      requireValue(JSON.stringify(after.knownEnglishAnd) === JSON.stringify(initial.knownEnglishAnd), 'known_english_and_changed')
       report.originalUnchanged = true
       if (after.existing) await appendSavedEvidence(report, pool, after.existing, selected)
     } catch (error) { report.verificationError = safeCode(error) }
@@ -276,7 +305,7 @@ async function runSingleProbe({ pool, execute = false, caseName, createGatewayRu
 }
 
 export async function runTwitterQueryParamProbe({ pool, execute = false, caseName, createGatewayRuntime }) {
-  requireValue((!execute && caseName == null) || ['halves', 'english-and'].includes(caseName) || Object.hasOwn(PROBE_CASES, caseName), 'invalid_arguments')
+  requireValue((!execute && caseName == null) || ['halves', 'english-and', 'english-groups'].includes(caseName) || Object.hasOwn(PROBE_CASES, caseName), 'invalid_arguments')
   caseName ??= 'control'
   if (caseName === 'english-and') {
     const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID, case: caseName,
@@ -295,14 +324,16 @@ export async function runTwitterQueryParamProbe({ pool, execute = false, caseNam
     }
     return report
   }
-  if (caseName !== 'halves') return runSingleProbe({ pool, execute, caseName, createGatewayRuntime })
+  if (!['halves', 'english-groups'].includes(caseName)) return runSingleProbe({ pool, execute, caseName, createGatewayRuntime })
+  const groups = caseName === 'english-groups'
   const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID, queryParamRequestId: QUERY_PARAM_REQUEST_ID,
-    case: 'halves', mode: execute ? 'execute' : 'read_only', adapterCalls: 0, maxAdapterCalls: 2,
+    case: caseName, mode: execute ? 'execute' : 'read_only', adapterCalls: 0, maxAdapterCalls: 2,
     countMeaning: 'Adapter attempts only; not proof of HTTP dispatch, supplier charge or billed calls.',
     deliveryScope: 'Two proper subexpressions for diagnosis only. Neither result is a full-query result or cold-start recovery.',
-    combination: 'chinese_half AND english_half equals the full candidate; the two result pages are not merged or delivered to Delta.',
+    combination: groups ? 'english_topics AND english_events equals the English half; original English exclusions occur in both. Pages are not merged or delivered to Delta.'
+      : 'chinese_half AND english_half equals the full candidate; the two result pages are not merged or delivered to Delta.',
     fullQuerySha256: digest(PROBE_CASES.candidate.query), automaticRetryAllowed: false, reports: [] }
-  for (const part of ['chinese_half', 'english_half']) {
+  for (const part of groups ? ['english_topics', 'english_events'] : ['chinese_half', 'english_half']) {
     const result = await runSingleProbe({ pool, execute, caseName: part, createGatewayRuntime })
     report.reports.push(result)
     report.adapterCalls += result.adapterCalls
@@ -314,6 +345,11 @@ export async function runTwitterQueryParamProbe({ pool, execute = false, caseNam
       report.errorCode = result.errorCode || result.verificationError || 'subexpression_outcome_unverified'
       break
     }
+  }
+  if (groups) {
+    report.rejectedGroups = report.reports.filter(row => row.savedOutcomeVerified === 'rejected400').map(row => row.case)
+    report.succeededGroups = report.reports.filter(row => row.savedOutcomeVerified === 'success').map(row => row.case)
+    report.interpretation = 'Only these saved group outcomes are established. The reason the combined query was rejected remains unproven; no cold-start recovery is implied.'
   }
   return report
 }
@@ -357,7 +393,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     const cases = args.filter(arg => arg.startsWith('--case=')), executeFlags = args.filter(arg => arg === '--execute')
     requireValue(cases.length <= 1 && executeFlags.length <= 1 && args.length === cases.length + executeFlags.length, 'invalid_arguments')
     const caseName = cases[0]?.slice('--case='.length), execute = executeFlags.length === 1 || env.MX_TWITTER_QUERY_PARAM_VERIFY === '1'
-    requireValue((!execute && caseName == null) || ['halves', 'english-and'].includes(caseName) || Object.hasOwn(PROBE_CASES, caseName), 'invalid_arguments')
+    requireValue((!execute && caseName == null) || ['halves', 'english-and', 'english-groups'].includes(caseName) || Object.hasOwn(PROBE_CASES, caseName), 'invalid_arguments')
     requireValue(typeof env.DATABASE_URL === 'string' && env.DATABASE_URL.trim(), 'database_url_required')
     const { Pool } = await import('pg')
     pool = new Pool({ connectionString: env.DATABASE_URL, max: 4, application_name: REVISION })

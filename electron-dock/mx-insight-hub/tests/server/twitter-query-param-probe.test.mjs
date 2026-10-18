@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
-import { PROBE_CASES, HALF_CASES, HALF_RECEIPTS, AND_CASES, ORIGINAL_REQUEST_ID, QUERY_PARAM_REQUEST_ID, CANDIDATE_REQUEST_IDS, runTwitterQueryParamProbe, queryParamAdapter } from '../../server/ops/verify-twitter-query-param.mjs'
+import { PROBE_CASES, HALF_CASES, HALF_RECEIPTS, AND_CASES, ENGLISH_AND_RECEIPT, GROUP_CASES, ORIGINAL_REQUEST_ID, QUERY_PARAM_REQUEST_ID, CANDIDATE_REQUEST_IDS, runTwitterQueryParamProbe, queryParamAdapter } from '../../server/ops/verify-twitter-query-param.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
@@ -48,6 +48,11 @@ async function fixture({ grant = true, enabled = true, outcome = 'success' } = {
       body: { platform: 'twitter', query: HALF_CASES[receipt.caseName].query, pageSize: 20 } } }))
   const halfCalls = HALF_RECEIPTS.map(receipt => ({ ...structuredClone(originalCall), id: receipt.callId,
     outcome: receipt.outcome === 'success' ? 'succeeded' : 'rejected', http_status: receipt.outcome === 'success' ? 200 : 400 }))
+  const knownEnglishAnd = { ...structuredClone(original), id: ENGLISH_AND_RECEIPT.requestId,
+    idempotency_key: AND_CASES.english_and.idempotencyKey,
+    acquisition_request: { method: 'POST', path: '/api/v1/night-all/search/raw',
+      body: { platform: 'twitter', query: AND_CASES.english_and.query, pageSize: 20 } } }
+  const englishAndCalls = [{ ...structuredClone(originalCall), id: ENGLISH_AND_RECEIPT.callId }]
   const controls = new MemoryExternalPlatformControlStore(), config = { ...rapidApiConfig(), configured: true, timeoutMs: 50 }
   if (enabled) await controls.updatePolicy('rapidapi', 'social.content.search', { expectedRevision: 1, desiredState: 'active', reason: 'Offline only',
     priceBook: { currency: 'USD', pricingAsOf: '2026-10-18T00:00:00Z', monthlyBudgetMinor: 100000,
@@ -57,6 +62,8 @@ async function fixture({ grant = true, enabled = true, outcome = 'success' } = {
   const sent = [], sql = []
   const query = async (text, values) => {
     sql.push(text)
+    if (text.includes('twitter-query-param:known-english-and-calls')) return { rows: structuredClone(englishAndCalls) }
+    if (text.includes('twitter-query-param:known-english-and')) return { rows: [structuredClone(knownEnglishAnd)].filter(row => row.id === values[0]) }
     if (text.includes('twitter-query-param:known-half-calls')) return { rows: [structuredClone(halfCalls[HALF_RECEIPTS.findIndex(row => row.requestId === values[0])])] }
     if (text.includes('twitter-query-param:known-half')) return { rows: knownHalves.filter(row => row.id === values[0]).map(row => structuredClone(row)) }
     if (text.includes('twitter-query-param:known-candidate-calls')) return { rows: [structuredClone(knownCalls[knownIds.indexOf(values[0])])] }
@@ -95,7 +102,7 @@ async function fixture({ grant = true, enabled = true, outcome = 'success' } = {
       platformStore: platform, adapter, config, providerKey: 'rapidapi', apiKeyPepper: PEPPER,
       operationControlStore: controls, reservationLeaseMs: 60000, logger: { warn() {} } }) }
   }
-  return { pool, createGatewayRuntime, original, originalCall, knownCandidates, knownCalls, knownHalves, halfCalls, context, usage, platform, sent, sql,
+  return { pool, createGatewayRuntime, original, originalCall, knownCandidates, knownCalls, knownHalves, halfCalls, knownEnglishAnd, englishAndCalls, context, usage, platform, sent, sql,
     creations: () => runtimeCreations, run: options => runTwitterQueryParamProbe({ pool, createGatewayRuntime, ...options }) }
 }
 
@@ -468,6 +475,147 @@ test('explicit-AND wire override rejects mismatched normal input, cursor, endpoi
   }
 })
 
+test('English groups retain exact terms, exclusions and all old keys; dry-run checks historical receipts without creating a runtime', async () => {
+  assert.equal(GROUP_CASES.english_topics.query, '("diplomacy" OR "foreign policy" OR "diplomatic relations") -ad -marketing -repost')
+  assert.equal(GROUP_CASES.english_events.query, '("statement" OR "response" OR "clarification" OR "update") -ad -marketing -repost')
+  assert.equal(AND_CASES.english_and.idempotencyKey, 'ops-twitter-and-f67d5a195990ece97be8ee72e0e01c17f5f360db708d25f9')
+  assert.equal(AND_CASES.candidate_and.idempotencyKey, 'ops-twitter-and-18a90c05ecf4c9a6638b37ff9568f19be25bfab9fd2af4b9')
+  const f = await fixture(), report = await f.run({ caseName: 'english-groups' })
+  assert.equal(report.case, 'english-groups')
+  assert.equal(report.mode, 'read_only')
+  assert.equal(report.reports.length, 2)
+  assert.equal(report.adapterCalls, 0)
+  assert.equal(f.creations(), 0)
+  assert.equal(f.sent.length, 0)
+  assert.equal(f.usage.requests.size, 0)
+  assert.deepEqual(report.reports.map(row => row.queryLength), [82, 81])
+  assert.ok(report.reports.every(row => row.knownHalfOutcomes.length === 2
+    && row.knownCandidateRejections.length === 3
+    && row.knownEnglishAnd.requestId === ENGLISH_AND_RECEIPT.requestId))
+  assert.match(report.interpretation, /reason.*remains unproven/u)
+  assert.deepEqual(report.rejectedGroups, [])
+  assert.deepEqual(report.succeededGroups, [])
+})
+
+test('English groups send two exact independent path queries after confirmed 200 or 400, never full query, and reuse receipts without redispatch', async () => {
+  for (const rejected of ['english_topics', 'english_events', 'both', 'neither']) {
+    const f = await fixture({ outcome: name => rejected === 'both' || name === rejected ? 'rejected' : 'success' })
+    const report = await f.run({ caseName: 'english-groups', execute: true })
+    assert.equal(report.errorCode, undefined)
+    assert.equal(report.adapterCalls, 2)
+    assert.equal(report.reports.length, 2)
+    assert.equal(f.creations(), 2)
+    assert.equal(f.sent.length, 2)
+    assert.equal(f.platform.calls.size, 2)
+    assert.equal(f.platform.restrictedResponseArchives.size, 2)
+    const expectedRejected = rejected === 'both' ? ['english_topics', 'english_events'] : rejected === 'neither' ? [] : [rejected]
+    assert.deepEqual(report.rejectedGroups, expectedRejected)
+    assert.equal(report.succeededGroups.length, 2 - expectedRejected.length)
+    for (const [index, name] of ['english_topics', 'english_events'].entries()) {
+      const sent = f.sent[index]
+      assert.equal(decodeURIComponent(sent.pathname.slice('/search/'.length)), GROUP_CASES[name].query)
+      assert.deepEqual(Object.fromEntries(sent.searchParams), { count: '20', category: 'Top', includeTimestamp: 'false' })
+      assert.equal(report.reports[index].preparedProviderQuery.querySha256, report.reports[index].querySha256)
+      assert.equal(report.reports[index].providerCalls.length, 1)
+    }
+    assert.match(report.deliveryScope, /Neither result is a full-query result/u)
+    assert.match(report.interpretation, /no cold-start recovery/u)
+    const again = await f.run({ caseName: 'english-groups', execute: true })
+    assert.equal(again.adapterCalls, 0)
+    assert.deepEqual(again.rejectedGroups, expectedRejected)
+    assert.equal(f.sent.length, 2)
+    assert.ok(again.reports.every(row => row.preparedProviderQuery === undefined))
+    assert.doesNotMatch(JSON.stringify(report), new RegExp(`${SECRET}|${POST}|do-not-follow`))
+  }
+})
+
+test('English group unknown, other rejection or missing evidence stops later requests, including repeated execution', async () => {
+  for (const outcome of ['unknown', 'other-rejection']) {
+    const f = await fixture({ outcome }), report = await f.run({ caseName: 'english-groups', execute: true })
+    assert.equal(report.adapterCalls, 1)
+    assert.equal(report.reports.length, 1)
+    assert.equal(report.stoppedAfter, 'english_topics')
+    assert.ok(report.errorCode)
+    const again = await f.run({ caseName: 'english-groups', execute: true })
+    assert.equal(again.adapterCalls, 0)
+    assert.equal(again.reports.length, 1)
+    assert.equal(f.sent.length, 1)
+  }
+  const f = await fixture({ outcome: name => name === 'english_events' ? 'unknown' : 'rejected' })
+  const report = await f.run({ caseName: 'english-groups', execute: true })
+  assert.equal(report.adapterCalls, 2)
+  assert.equal(report.stoppedAfter, 'english_events')
+  assert.deepEqual(report.rejectedGroups, ['english_topics'])
+  assert.equal((await f.run({ caseName: 'english-groups', execute: true })).adapterCalls, 0)
+  assert.equal(f.sent.length, 2)
+  const missing = await fixture(), create = missing.createGatewayRuntime
+  const createGatewayRuntime = async (...args) => {
+    const runtime = await create(...args), searchRaw = runtime.gateway.searchRaw.bind(runtime.gateway)
+    runtime.gateway.searchRaw = async (...queryArgs) => { const result = await searchRaw(...queryArgs); missing.platform.calls.clear(); return result }
+    return runtime
+  }
+  const unverified = await runTwitterQueryParamProbe({ pool: missing.pool, createGatewayRuntime, caseName: 'english-groups', execute: true })
+  assert.equal(unverified.reports[0].httpStatus, 200)
+  assert.equal(unverified.reports[0].savedOutcomeVerified, null)
+  assert.equal(unverified.stoppedAfter, 'english_topics')
+  assert.equal(unverified.adapterCalls, 1)
+  assert.equal((await missing.run({ caseName: 'english-groups', execute: true })).adapterCalls, 0)
+  assert.equal(missing.sent.length, 1)
+})
+
+test('English groups require the exact owned explicit-AND key, body and sole saved 400 call', async () => {
+  for (const mutate of [
+    f => { f.knownEnglishAnd.id = randomUUID() },
+    f => { f.knownEnglishAnd.idempotency_key = 'other-key' },
+    f => { f.knownEnglishAnd.status = 'unknown' },
+    f => { f.knownEnglishAnd.response_status = 200 },
+    f => { f.knownEnglishAnd.response_body.error.details.retryable = true },
+    f => { f.knownEnglishAnd.api_key_id = randomUUID() },
+    f => { f.knownEnglishAnd.acquisition_request.body.query = AND_CASES.english_and.providerQuery },
+    f => { f.knownEnglishAnd.acquisition_request.body.cursor = 'cursor' },
+    f => { f.knownEnglishAnd.acquisition_request.body.pageSize = 10 },
+    f => { f.knownEnglishAnd.acquisition_request.path = '/api/v1/data/search' },
+    f => { f.englishAndCalls[0].id = randomUUID() },
+    f => { f.englishAndCalls[0].api_key_id = randomUUID() },
+    f => { f.englishAndCalls[0].http_status = 200 },
+    f => { f.englishAndCalls[0].outcome = 'unknown' },
+    f => { f.englishAndCalls.push({ ...f.englishAndCalls[0], id: randomUUID() }) },
+    f => { f.englishAndCalls.length = 0 },
+  ]) {
+    const f = await fixture(); mutate(f)
+    const report = await f.run({ caseName: 'english-groups', execute: true })
+    assert.equal(report.errorCode, 'known_english_and_unverified')
+    assert.equal(report.stoppedAfter, 'english_topics')
+    assert.equal(report.adapterCalls, 0)
+    assert.equal(f.creations(), 0)
+    assert.equal(f.sent.length, 0)
+  }
+})
+
+test('English groups retain original and half proof checks plus running and unknown v2 protections', async () => {
+  for (const mutate of [f => { f.knownCandidates[2].status = 'unknown' }, f => { f.halfCalls[0].id = randomUUID() },
+    f => { f.knownHalves[1].acquisition_request.body.query = 'different' }]) {
+    const f = await fixture(); mutate(f)
+    const report = await f.run({ caseName: 'english-groups', execute: true })
+    assert.ok(report.errorCode)
+    assert.equal(f.creations(), 0)
+    assert.equal(f.sent.length, 0)
+  }
+  for (const state of ['running', 'unknown']) {
+    const f = await fixture(), protocol = new SearchProtocolStore(f.usage)
+    const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'same-group-v2-identity', body: {
+      platform: 'twitter', query: GROUP_CASES.english_topics.query, pageSize: 20, type: 'stable',
+      timeWindow: { from: '2026-10-17T00:00:00.000Z', to: '2026-10-18T00:00:00.000Z', timezone: 'Asia/Shanghai', boundary: '[from,to)' },
+    } })
+    if (state === 'unknown') await protocol.finish(lease.input, { state, usageRequestId: randomUUID() })
+    const report = await f.run({ caseName: 'english-groups', execute: true })
+    assert.equal(report.errorCode, state === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress')
+    assert.equal(report.adapterCalls, 0)
+    assert.equal(report.reports.length, 1)
+    assert.equal(f.sent.length, 0)
+  }
+})
+
 test('CLI requires an explicit reviewed case before importing database modules or reading credentials', () => {
   const file = fileURLToPath(new URL('../../server/ops/verify-twitter-query-param.mjs', import.meta.url))
   for (const args of [['--execute'], ['--case=arbitrary', '--execute'], ['--case=control', '--case=candidate']]) {
@@ -485,7 +633,7 @@ test('stdin import is pure while the actual stdin script remains executable', ()
   const imported = spawnSync(process.execPath, ['--input-type=module', '-'], { encoding: 'utf8', env,
     input: `const m = await import(${JSON.stringify(url.href)}); console.log(m.REVISION);` })
   assert.equal(imported.status, 0)
-  assert.equal(imported.stdout.trim(), 'twitter-query-param-check.v3')
+  assert.equal(imported.stdout.trim(), 'twitter-query-param-check.v4')
   assert.equal(imported.stderr, '')
   const entry = spawnSync(process.execPath, ['--input-type=module', '-', '--execute'], { encoding: 'utf8', env,
     input: readFileSync(url, 'utf8') })
