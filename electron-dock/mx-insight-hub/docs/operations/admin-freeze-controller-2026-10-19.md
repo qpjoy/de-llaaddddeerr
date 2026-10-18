@@ -18,7 +18,7 @@
 
 同批 `pidstat` 可见若干 PostgreSQL 进程写入，其中一个单秒样本约 560056 kB/s，其他样本约 5 MB/s 和 6–12 MB/s；尚未建立各进程的数据目录、挂载设备与 I/O 时间对应关系，不能据此认定某个 PostgreSQL 进程导致了 etcd 设备超时。
 
-后续进程归属回执把突发写入 PID 64327 与 PID 64982、720960 关联到同一个 Kubernetes Pod UID `7022a2b6-7c56-4f8d-9fe2-b1d9c6e60c60`、同一容器，工作目录均为 `/var/lib/postgresql/data/pgdata`；另一个 PID 716800 已退出。这确认了几项写入样本的共同容器归属，随后 Pod UID 已确认为 `mx-common/mx-common-postgres-0`，即 Hub 使用的共享数据库。其数据目录的宿主机设备映射仍待核对，不能仅据 Pod 身份推断与 etcd 同盘。
+后续进程归属回执把突发写入 PID 64327 与 PID 64982、720960 关联到同一个 Kubernetes Pod UID `7022a2b6-7c56-4f8d-9fe2-b1d9c6e60c60`、同一容器，工作目录均为 `/var/lib/postgresql/data/pgdata`；另一个 PID 716800 已退出。这确认了几项写入样本的共同容器归属，随后 Pod UID 已确认为 `mx-common/mx-common-postgres-0`，即 Hub 使用的共享数据库。当时其数据目录的宿主机设备映射尚待核对，后续同盘证据见下文“共享 PostgreSQL 观测”。
 
 后续 SMART 回执为 PASS，Critical Warning、Media/Data Integrity Errors、Error Information Log Entries 均为 0，Available Spare 100%，Percentage Used 2%；当前温度为 71°C，Warning Composite Temperature Time 累计 5 分钟。该报告没有给出可据以判断本次事件的温度阈值及降频时间对应关系，不能直接认定 71°C 导致了超时。SMART 未报告上述介质/关键健康错误，也不能推翻内核已经记录的 I/O 超时；smartmontools 的 NVMe PASS 判定来自 Critical Warning 字段，不能解释为整个 I/O 路径正常的保证。[smartmontools NVMe 状态输出实现](https://www.smartmontools.org/static/doxygen/nvmeprint_8cpp_source.html)
 
@@ -32,18 +32,29 @@
 
 ## 共享 PostgreSQL 观测
 
-UTC 17:32:15 的只读统计显示共享 PG 于 16:09:09 启动；Hub 17 个会话均为 idle/ClientRead，另有 Harbor 1 个 idle。后台 checkpointer 当时为 CheckpointWriteDelay。Hub 累计临时文件 8 个、124MB，不是该时刻正在产生 124MB 临时写入的证据。bgwriter 自 16:08:43 起累计 timed/requested checkpoints 6/19，checkpoint_write_time 4074765ms、sync_time 57962ms；写入时间包含主动分摊等待，不能全部解释为 I/O 阻塞。max_wal_size=1024MB、checkpoint_timeout=300s、completion_target=0.9、work_mem=32MB、track_io_timing=off。随后已确认该 PV 为 hostPath、位于 `/data` 的同一 nvme0n1p1 XFS；日志多次 `checkpoint starting: wal`，并在 17:15:59 报告 checkpoints 过于频繁（25 秒）。因此存在可处理的同盘 WAL/checkpoint 写放大；这不等于 PostgreSQL 引发了 NVMe 底层超时。已提供操作者热加载命令：仅原值仍为 1024MB/300s 且非命令行强制配置时设置 max_wal_size=4GB、checkpoint_timeout=10min，保留 completion_target=0.9 和全部持久性设置；改动持久化在 PGDATA 的 postgresql.auto.conf，不需要数据库重启。代价为更多 WAL 保留及可能更长的异常恢复时间，max_wal_size 是软限制。回退为 1GB/5min 后 reload。操作结果与后续 I/O/控制器稳定性仍待回执，不能称 NVMe 已修好。[PG16 WAL 配置](https://www.postgresql.org/docs/16/wal-configuration.html)
+UTC 17:32:15 的只读统计显示共享 PG 于 16:09:09 启动；Hub 17 个会话均为 idle/ClientRead，另有 Harbor 1 个 idle。后台 checkpointer 当时为 CheckpointWriteDelay。Hub 累计临时文件 8 个、124MB，不是该时刻正在产生 124MB 临时写入的证据。bgwriter 自 16:08:43 起累计 timed/requested checkpoints 6/19，checkpoint_write_time 4074765ms、sync_time 57962ms；写入时间包含主动分摊等待，不能全部解释为 I/O 阻塞。max_wal_size=1024MB、checkpoint_timeout=300s、completion_target=0.9、work_mem=32MB、track_io_timing=off。随后已确认该 PV 为 hostPath、位于 `/data` 的同一 nvme0n1p1 XFS；日志多次 `checkpoint starting: wal`，并在 17:15:59 报告 checkpoints 过于频繁（25 秒）。因此确认同盘 WAL 触发的 checkpoint 过频，存在可降低的 checkpoint 写入压力；这不等于 PostgreSQL 引发了 NVMe 底层超时。已提供操作者热加载命令：仅原值仍为 1024MB/300s 且非命令行强制配置时设置 max_wal_size=4GB、checkpoint_timeout=10min，保留 completion_target=0.9 和全部持久性设置；改动持久化在 PGDATA 的 postgresql.auto.conf，不需要数据库重启。代价为更多 WAL 保留及可能更长的异常恢复时间，max_wal_size 是软限制。回退为 1GB/5min 后 reload。操作者已执行并返回成功：两项 ALTER SYSTEM 完成、pg_reload_conf=true；新连接确认 max_wal_size=4096MB、checkpoint_timeout=600s、source=configuration file、pending_restart=false，completion_target仍为0.9。热调整已生效且无需重启；后续 I/O/控制器稳定性仍待回执，不能称 NVMe 已修好。[PG16 WAL 配置](https://www.postgresql.org/docs/16/wal-configuration.html)
 
-## 下一步最小只读检查
+## 热调整后的首轮观测
 
-补充设备型号、固件、温度阈值和热管理计数即可，无需重复全盘容量/Pod 枚举或运行压力测试。以下只打印固定字段，不打印序列号；字段缺失代表设备/工具未提供，不能当作零：
+调整后约 2–3 分钟的四个 1 秒间隔样本：nvme0n1 w_await=4.32/2.84/6.07/3.19ms，aqu-sz=5.54/2.95/5.84/3.58；相较调整前数百至两千毫秒的等待明显降低。该变化是短时前后采样，不是硬件故障已消除或长期 p95 的证明，利用率仍约 76–83%。
 
-```bash
-sudo env LC_ALL=C smartctl -x /dev/nvme0 |
-  awk '/^(Model Number:|Firmware Version:|Warning Comp\. Temp\. Threshold:|Critical Comp\. Temp\. Threshold:|Temperature:|Temperature Sensor [0-9]+:|Warning Comp\. Temperature Time:|Critical Comp\. Temperature Time:|Thermal Temp\.)/ { print }'
-```
+此时 scheduler Ready=true、restart139、Lease 17:37:33Z；controller-manager Ready=false、restart136、上次退出17:35:07Z、Lease仍17:34:57Z。API Server/etcd为Ready。控制器尚未恢复，不能重试Hub部署；已请求只读等待其自动恢复并确认新Lease，不删除Pod、不手工重启控制平面。
 
-同时确认最新可恢复的 etcd、Launcher 及支付数据库备份是否位于该 NVMe 之外；只需报告是否存在、时间、目的地类型及最近恢复验证情况，不提供数据库内容、凭据或备份密钥。后续只有设备身份/阈值、当前 I/O 状态和备份边界明确后，才制定具体设备修复与服务恢复步骤。当前没有执行设备自检、写入压测、固件更新、迁移、批量重启或备份作业。
+## 后续回执：短时改善未持续
+
+只读等待 controller-manager Ready 的 180 秒命令超时，但紧接的状态读取为 Ready=true、restart137、started17:41:21Z；当时它的 Lease 仍为17:34:57Z，scheduler Lease为17:39:17Z。等待截止后才启动并不矛盾，也不能仅凭 Ready 判断已接任。
+
+UTC17:42:54 新回执确认 controller-manager 已续租至17:42:52.768944Z，缓存同步完成；scheduler Lease仍为17:39:17.977184Z，其日志明确17:39:18因失去租约退出。etcd同窗口仍记录6.827秒读请求和17:42:53的1.021秒 WAL fdatasync。因此热调虽已生效且有短时改善，控制面存储延迟尚未稳定，不能恢复Hub部署。
+
+约17:46的Hub只读状态显示 telegram-monitor-messages active/running、processed_count=1864169，chats active/idle、20484；14个Night-All已存记录源及province-opinion-results当次均为idle。PG当次ingest、retrieval和api出现WALWrite等待，retrieval另有WALInitSync。这支持优先减少正在发生的Hub后台写入、观察共享WAL等待是否缓解；不能据此把NVMe底层超时单独归罪于TG或向量处理。准备使用现有源暂停机制在批次边界停止后续TG同步，并窄范围暂停后台向量化；尚未收到暂停执行回执。
+
+已提供操作者两步限定减载：在Admin容器内以已有Admin凭据调用本机 `POST /internal/v1/admin/pipelines/telegram-monitor/status {status:paused}`，随后只读GET核对；以及有1秒锁等待、5秒语句上限的事务，仅将 `retrieval.settings` 单行的 `paused=false` 改成true并返回其他设置。凭据不输出，不改enabled、并发、预算、checkpoint、任务结果或账务。向量管理接口当前configure还会准备ES索引和唤醒预算等待队列，故暂停仅使用这个已有worker实时识别的开关。
+
+验收要点：TG两源paused、游标退出running；retrieval后台非retire任务的running归零。已开始的批次/embedding允许完成，删除投影、心跳和轮询仍继续；暂停不等于零I/O。Public/canonical/已有向量查询不读取此暂停开关，新TG数据和新向量的可见性会延后。恢复走Internal正常管理入口：TG保留源合同/映射校验，retrieval保留无预算持续处理的worker健康门槛及必要的等待队列唤醒；不提供无条件SQL反向切换，也不把原已paused的设置当成恢复授权。没有缩容ingest：其旧Night-All backfill在abort时可能跳过续接，与已有external-pull的持久化续接机制不同，不能承诺整体停止后全部自动恢复。
+
+## 当前恢复边界
+
+controller-manager已恢复本轮续租，scheduler仍未确认恢复；需两者持续续租、重启次数稳定，并且etcd不再持续出现秒级落盘/读延迟后再部署。已保留型号/固件和温度回执；若限定后台减载后仍持续超时，应进一步核对散热、驱动/固件与设备链路，不能继续仅靠放大数据库或部署超时。本次没有实施恢复旧数据、迁移业务盘、设备压测、固件更新或控制平面重启，不以备份核对作为这次热调与只读验收的前置流程。
 
 ## 本地部署脚本调整
 
