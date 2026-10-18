@@ -14,7 +14,7 @@ import { request, validIpv4 } from "./api";
 import { enterpriseUrl, hasPermission } from "./permissions";
 import { runBatchRows, type BatchRow } from "./batch-runner";
 import { downloadExcel } from "./download";
-import { riskAdvice } from "./risk-advice";
+import { riskAdvice, riskLevelLabel } from "./risk-advice";
 export function BatchQuery({
   tenant,
   session,
@@ -141,8 +141,14 @@ export function BatchQuery({
                     rows.map((r) => [
                       r.ip,
                       r.status,
-                      r.result?.response?.data?.data?.risk_level || "未提供",
-                      riskAdvice(r.result?.response?.data?.data?.risk_level),
+                      r.result
+                        ? riskLevelLabel(
+                            r.result.response?.data?.data?.risk_level,
+                          )
+                        : "—",
+                      r.result
+                        ? riskAdvice(r.result.response?.data?.data?.risk_level)
+                        : "",
                       r.error || r.result?.error?.message || "",
                     ]),
                   ).catch((e) => setError(e.message))
@@ -224,7 +230,11 @@ export function BatchQuery({
                         {r.error && <small>{r.error}</small>}
                       </TableCell>
                       <TableCell>
-                        {r.result?.response?.data?.data?.risk_level || "—"}
+                        {r.result
+                          ? riskLevelLabel(
+                              r.result.response?.data?.data?.risk_level,
+                            )
+                          : "—"}
                       </TableCell>
                     </TableRow>
                   ))}
