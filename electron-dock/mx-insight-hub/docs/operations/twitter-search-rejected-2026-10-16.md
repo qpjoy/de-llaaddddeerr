@@ -1,6 +1,6 @@
 # Twitter 搜索 554b85cb 上游 400 核查
 
-最新处理见 [Twitter 标准搜索的供应商兼容](../integrations/twitter-standard-provider-routing.md)：已接入标准 v1/v2，历史排查命令与中间结论保留在下文。部署后使用文末 v4 只读映射验证。
+最新处理见 [Twitter 标准搜索的供应商兼容](../integrations/twitter-standard-provider-routing.md)：已接入标准 v1/v2，用户返回的 v4 只读验证已确认19条真实归档正确映射、游标保留、零新增采购。下一步执行其中的 `verify-twitter-standard.sh`，验收 Public 标准服务的双版本交付、重放和缓冲续页（最多累计2条供应商调用）；历史排查命令与中间结论保留在下文。
 
 2026-10-16 用户提供下游策略告警。此次先核对已保存请求，不重发采集。
 

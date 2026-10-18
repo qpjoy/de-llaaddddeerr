@@ -25,6 +25,8 @@ v1 请求不添加新的日期限制。v2 沿用原精确半开时间窗交付�
 
 已购原生请求 `dcc086fa-469a-4237-a435-e427b7e70f3a`、唯一调用 `6c6177d6-4065-499c-aabb-50217f355780` 为 HTTP200/business200/succeeded。原280字符SQL式的等价257字符 native 式被 TikHub 接受。v3归档结构检查覆盖全部19项且未截断；本轮离线测试使用相同字段结构的合成数据，不冒充原始帖子字节。
 
+用户随后返回 v4 实际归档映射：`mapped_saved_native_page`，19条全部成为标准项和 canonical 记录，身份、作者、正文和发布时间齐全，PostgreSQL投影安全；保留下一页游标。views有1条未知，其余指标真实0未被当成缺失。此项已在线只读验证通过，零新增采购；验证范围是 Admin 诊断容器的归档映射。
+
 部署 Hub 新镜像后，在 Hub 源码目录执行：
 
 ```bash
@@ -39,10 +41,26 @@ bash server/ops/inspect-twitter-tikhub-saved.sh
 MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh ops internal-production deploy
 ```
 
-无需 Delta/罗盘/Java 升级或额外数据库迁移。标准链路验收使用一个正常的新搜索及其返回游标，沿用同一查询/窗口/页大小，同页重试保持同 key、下一页用新 key；检查实际结果、采购条数、归档与回放。小量真实采购已获用户授权，但本地不能连接线上集群，本轮不把合成测试宣称为线上冷启动已恢复。
+无需 Delta/罗盘/Java 升级或额外数据库迁移。小量真实采购已获用户授权；标准链路验收入口已补齐，在有 kubectl 权限的宿主机同步下列两个同目录文件后执行：
+
+```bash
+bash server/ops/verify-twitter-standard.sh
+```
+
+入口读取同目录 `verify-twitter-standard.mjs`，以 stdin 在 **Public/api** 容器执行，不需要把诊断脚本重新打入镜像。使用已部署的 `createRuntime()` 和 `service.search()`，不启动第二个监听器或后台任务；检查的是 Public 镜像中的实际标准服务链路，不是公网 nginx/HTTP 认证入口。当前原调用方身份和授权仍在正常服务内检查，不读取/展示客户明文 Key，不新增权限或修改供应商策略。
+
+- 保留原280字符完整查询，分别验证标准 v1/v2：首个小页、同 key 重放、原游标的下一页和再次重放。`pageSize=1`用于低采购量验收，不修改客户任务的20条页大小；全量供应商页仍由 Hub 保存并缓冲。
+- v1没有新日期条件；v2明确使用固定诊断窗 `2026-09-18T00:00:00Z` 至 `2026-10-19T00:00:00Z`（Asia/Shanghai、半开区间），不声称重建旧请求丢失的时间窗。过滤后0条和有效游标可同时成立。
+- 固定4个 `ops-twitter-standard-b5906846-*` key，`type=stable`。最多累计2条供应商调用记录，包含历史执行；不因重跑命令恢复额度。独占锁和实际派发前的预算检查仅作用于诊断进程，正常服务的客户额度与行为不变。已有缓冲页和重放可在额度用尽后继续读取；未知结果继续由原协议保护。
+- 预期 `diagnosticRevision=twitter-standard-check.v1`、`standardDeliveryVerified=true`、`paginationVerified=true`、`originalUnchanged=true`。报告列出实际供应商及回执；页2的 `bufferedContinuationVerified=true`表示未新增供应商调用而完成缓冲续页。若源已耗尽，没有第二页则分页验收保持未确认。
+- 这会按正常服务流程生成独立 usage/供应商回执和 Hub 入库队列任务，可能消耗供应商和客户额度；不写 Delta，不改原失败回执，不把诊断结果塞入旧冷启动。两次额度耗尽/拒绝/unknown时停止，保留结果供判断。
+
+本地不能连接线上集群，标准服务验收仍需用户返回该命令结果；小页通过也不等于整月覆盖或旧 Delta 冷启动已经入库。
 
 原请求 `b5906846-8564-4791-8b83-ef3ce97789bc` 的400/502回执不可改写为成功。对该旧 key 的重试仍返回原结果；旧失败任务若坚持复用该 key，需通过原业务提供的新搜索/重建入口形成新任务。Hub 不自动清空 unknown，也不把独立诊断页灌入旧冷启动任务。
 
 ## 本地验证记录
 
 447项相关回归通过，无跳过，包含本地HTTP接口、真实PGlite的跨供应商租约/unknown校验、标准v1/v2、原raw/social和聚合计费、分页缓冲、映射、手动重试与只读诊断。独立复核已完成。额外检查发现旧 `content-search-aggregate.test.mjs:35` 的Weibo能力预期在本轮之前的HEAD也失败，已独立快照复现，未改动该平台行为。线上标准交付及旧任务恢复不包含在离线通过结论内。
+
+本次62项相关测试通过、无跳过。新增验收脚本回归使用实际 HubService/路由/网关/适配器和合成供应商响应，覆盖双版本交付、缓冲和重放、跨执行预算、未知保护、空页、旧回执不变、JSONB对象键顺序、回执归属和固定命令入口，并用真实PGlite校验历史调用计数SQL。未增加生产服务限制，MX-H2I登录与联网代码无改动。
