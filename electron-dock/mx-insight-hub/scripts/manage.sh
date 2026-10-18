@@ -28,6 +28,7 @@ DEPLOY_LOCK_DIR=""
 DEPLOY_LOCK_FD_OPEN=0
 DEPLOY_K8S_NODE_NAME=""
 DEPLOY_FROZEN_ADMIN=0
+DEPLOY_FROZEN_ADMIN_UID=""
 DEPLOY_MIGRATION_JOB_ACTIVE=0
 
 say() { printf '[mx-insight-hub] %s\n' "$*"; }
@@ -163,6 +164,28 @@ api_key_rotation_decision() {
     ' <<<"$key_list_json"
 }
 
+restore_frozen_admin() {
+  local state uid desired resource_version
+  [ -n "$DEPLOY_FROZEN_ADMIN_UID" ] || return 1
+  if ! state="$(kubectl -n mx-insight-hub get deployment/mx-insight-hub-admin \
+    --request-timeout=10s \
+    -o 'jsonpath={.metadata.uid}|{.spec.replicas}|{.metadata.resourceVersion}' 2>/dev/null)"; then
+    return 1
+  fi
+  IFS='|' read -r uid desired resource_version <<<"$state"
+  if [ "$uid" != "$DEPLOY_FROZEN_ADMIN_UID" ] || [ "$desired" != 0 ] \
+    || ! [[ "$resource_version" =~ ^[0-9]+$ ]]; then
+    say "Admin restoration skipped: Deployment identity or scale intent changed/unavailable." >&2
+    return 1
+  fi
+  say "restoring the Hub Admin replica after an interrupted staged rollout" >&2
+  # The resource-version precondition protects the read/write gap: a replaced
+  # Deployment or somebody else's scale must not be overwritten by cleanup.
+  kubectl -n mx-insight-hub scale deployment/mx-insight-hub-admin --replicas=1 \
+    --current-replicas=0 --resource-version="$resource_version" --request-timeout=10s \
+    >/dev/null 2>&1
+}
+
 cleanup_deploy_runtime() {
   local status=$?
   local lock_owner=""
@@ -176,12 +199,11 @@ cleanup_deploy_runtime() {
   fi
   if [ "$status" -ne 0 ] && [ "$DEPLOY_FROZEN_ADMIN" = 1 ] \
     && command -v kubectl >/dev/null 2>&1; then
-    say "restoring the Hub Admin replica after an interrupted staged rollout" >&2
-    if ! kubectl -n mx-insight-hub scale deployment/mx-insight-hub-admin --replicas=1 \
-      >/dev/null 2>&1; then
+    if ! restore_frozen_admin; then
       say "WARNING: Hub Admin replica restoration failed; Admin availability is unconfirmed." >&2
     fi
     DEPLOY_FROZEN_ADMIN=0
+    DEPLOY_FROZEN_ADMIN_UID=""
   fi
   if [ -n "$DEPLOY_PORT_FORWARD_PID" ]; then
     kill "$DEPLOY_PORT_FORWARD_PID" >/dev/null 2>&1 || true
@@ -1836,6 +1858,94 @@ k8s_admin_stop_diagnostics() {
     2>/dev/null | head -n 21 >&2 || true
 }
 
+# A successful scale request only changes the desired state. Wait for the
+# Deployment controller to observe it as well as for the old writer Pods to
+# disappear. Keep one 120s budget for both phases; do not extend Pod grace or
+# force deletion when the controller has not processed the scale request.
+k8s_wait_for_admin_stop() {
+  local expected_uid="$1" deadline=$((SECONDS + 120))
+  local state confirmation uid generation observed desired current ready pods phase last_phase=""
+  local remaining request_timeout pause
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || break
+    request_timeout=5
+    [ "$remaining" -ge "$request_timeout" ] || request_timeout="$remaining"
+    if ! state="$(kubectl -n mx-insight-hub get deployment/mx-insight-hub-admin \
+      --request-timeout="${request_timeout}s" \
+      -o 'jsonpath={.metadata.uid}|{.metadata.generation}|{.status.observedGeneration}|{.spec.replicas}|{.status.replicas}|{.status.readyReplicas}' \
+      2>/dev/null)"; then
+      phase=deployment_read_unavailable
+    else
+      IFS='|' read -r uid generation observed desired current ready <<<"$state"
+      observed="${observed:-0}"
+      current="${current:-0}"
+      ready="${ready:-0}"
+      if [ "$uid" != "$expected_uid" ] \
+        || ! [[ "$generation" =~ ^[1-9][0-9]*$ && "$observed" =~ ^[0-9]+$ \
+          && "$desired" =~ ^[0-9]+$ && "$current" =~ ^[0-9]+$ && "$ready" =~ ^[0-9]+$ ]]; then
+        say "Admin freeze refused: Deployment identity or status is unavailable/changed." >&2
+        return 1
+      fi
+      if [ "$desired" -ne 0 ]; then
+        say "Admin freeze refused: desired replicas changed away from zero." >&2
+        return 1
+      fi
+      if [ "$observed" -lt "$generation" ]; then
+        phase=controller_observation
+      elif [ "$current" -ne 0 ] || [ "$ready" -ne 0 ]; then
+        phase=replica_scale_down
+      else
+        phase=pod_termination
+        remaining=$((deadline - SECONDS))
+        [ "$remaining" -gt 0 ] || break
+        request_timeout=5
+        [ "$remaining" -ge "$request_timeout" ] || request_timeout="$remaining"
+        if pods="$(kubectl -n mx-insight-hub get pods \
+          -l app.kubernetes.io/name=mx-insight-hub-admin --request-timeout="${request_timeout}s" \
+          -o name 2>/dev/null)"; then
+          if [ -z "$pods" ] && [ "$SECONDS" -lt "$deadline" ]; then
+            # Check the intent again after the Pod read, so a concurrent scale
+            # or Deployment replacement during that read cannot confirm freeze.
+            remaining=$((deadline - SECONDS))
+            [ "$remaining" -gt 0 ] || break
+            request_timeout=5
+            [ "$remaining" -ge "$request_timeout" ] || request_timeout="$remaining"
+            if confirmation="$(kubectl -n mx-insight-hub get deployment/mx-insight-hub-admin \
+              --request-timeout="${request_timeout}s" \
+              -o 'jsonpath={.metadata.uid}|{.metadata.generation}|{.status.observedGeneration}|{.spec.replicas}|{.status.replicas}|{.status.readyReplicas}' \
+              2>/dev/null)"; then
+              if [ "$confirmation" = "$state" ] && [ "$SECONDS" -lt "$deadline" ]; then
+                say "Hub Admin freeze confirmed: controller observed scale-to-zero and no writer Pods remain."
+                return 0
+              fi
+              phase=deployment_changed_during_confirmation
+            else
+              phase=deployment_read_unavailable
+            fi
+          fi
+        else
+          phase=pod_read_unavailable
+        fi
+      fi
+    fi
+    if [ "$phase" != "$last_phase" ]; then
+      say "waiting for Hub Admin freeze: phase=${phase}" >&2
+      last_phase="$phase"
+    fi
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || break
+    pause=2
+    [ "$remaining" -ge "$pause" ] || pause="$remaining"
+    sleep "$pause"
+  done
+  say "Admin freeze timed out after 120s: phase=${phase:-unconfirmed}; migration has not started." >&2
+  if [ "${phase:-}" = controller_observation ]; then
+    say "The Deployment controller has not observed scale-to-zero; inspect control-plane health and leader-lease renewal before retrying." >&2
+  fi
+  return 1
+}
+
 k8s_projector_diagnostics() {
   say "projector diagnostics"
   kubectl -n mx-insight-hub get deployment,pod \
@@ -2306,12 +2416,28 @@ apply_k8s() {
   # are upgraded. This closes the mixed-version window in which an old Admin
   # could issue a legacy-dynamic key, or a new snapshot key could hit an old
   # Public pod. Launcher and MX-H2I are separate workloads and stay online.
-  if kubectl -n "$namespace" get deployment/mx-insight-hub-admin >/dev/null 2>&1; then
-    DEPLOY_FROZEN_ADMIN=1
+  local admin_state admin_uid admin_resource_version
+  if ! admin_state="$(kubectl -n "$namespace" get deployment/mx-insight-hub-admin \
+    --ignore-not-found --request-timeout=10s \
+    -o 'jsonpath={.metadata.uid}|{.metadata.resourceVersion}' 2>/dev/null)"; then
+    die "could not inspect Hub Admin before the staged rollout"
+  fi
+  if [ -n "$admin_state" ]; then
+    IFS='|' read -r admin_uid admin_resource_version <<<"$admin_state"
+    if [ -z "$admin_uid" ] || ! [[ "$admin_resource_version" =~ ^[0-9]+$ ]]; then
+      die "could not verify Hub Admin identity before the staged rollout"
+    fi
     say "temporarily freezing Hub Admin writes for the API-key schema rollout"
-    kubectl -n "$namespace" scale deployment/mx-insight-hub-admin --replicas=0
-    if ! kubectl -n "$namespace" wait --for=delete pod \
-      -l app.kubernetes.io/name=mx-insight-hub-admin --timeout=120s; then
+    if ! kubectl -n "$namespace" scale deployment/mx-insight-hub-admin --replicas=0 \
+      --resource-version="$admin_resource_version" --request-timeout=10s >/dev/null 2>&1; then
+      k8s_admin_stop_diagnostics
+      die "Hub Admin scale-to-zero was not confirmed; inspect its state before retrying. No migration or automatic replica restoration was started."
+    fi
+    # A conflict or lost scale acknowledgement gives us no confirmed ownership
+    # to restore. Never undo another operator's change after that outcome.
+    DEPLOY_FROZEN_ADMIN_UID="$admin_uid"
+    DEPLOY_FROZEN_ADMIN=1
+    if ! k8s_wait_for_admin_stop "$admin_uid"; then
       k8s_admin_stop_diagnostics
       die "Hub Admin did not stop before the staged rollout"
     fi
@@ -2358,6 +2484,7 @@ apply_k8s() {
     die "Hub Admin API did not become ready"
   fi
   DEPLOY_FROZEN_ADMIN=0
+  DEPLOY_FROZEN_ADMIN_UID=""
 
   # A large concurrent source-index build must never lengthen the Hub writer
   # freeze or interrupt Launcher/MX-H2I login. It still completes before the

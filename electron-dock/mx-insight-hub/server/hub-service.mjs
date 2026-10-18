@@ -3540,10 +3540,36 @@ export class HubService {
     if (aggregate?.mode !== 'refresh' && !this.searchQueries?.searchContent) {
       throw new AppError(503, 'canonical_search_unavailable', 'Canonical search requires the PostgreSQL search layer')
     }
-    const policies = await Promise.all(grants.map((name) => this.#effectivePlatformPolicy(context, name)))
-    const keyEntitlements = typeof this.store.getApiKeyPlatformEntitlement === 'function'
-      ? await Promise.all(grants.map((name) => this.store.getApiKeyPlatformEntitlement(context.apiKey.id, name)))
-      : policies
+    // Read each current policy collection once. A broad Key previously issued
+    // four reads per platform, including the same plan and entitlement twice.
+    // This is request-local only; reserve still revalidates authorization and
+    // quotas transactionally, including when a grant changes during this read.
+    const readsKeyEntitlements = typeof this.store.getApiKeyPlatformEntitlement === 'function'
+    const [consumerPolicies, entitlements, plan] = await Promise.all([
+      typeof this.store.listPolicies === 'function'
+        ? this.store.listPolicies(context.consumer.id)
+        : Promise.all(grants.map(async platform => ({ ...(await this.store.getPolicy(context.consumer.id, platform)), platform }))),
+      readsKeyEntitlements
+        ? typeof this.store.listApiKeyPlatformEntitlements === 'function'
+          ? this.store.listApiKeyPlatformEntitlements(context.apiKey.id)
+          : Promise.all(grants.map(async platform => {
+              const entitlement = await this.store.getApiKeyPlatformEntitlement(context.apiKey.id, platform)
+              return entitlement ? { ...entitlement, platform } : null
+            }))
+        : [],
+      typeof this.store.getConsumerPlan === 'function' ? this.store.getConsumerPlan(context.consumer.id) : null,
+    ])
+    const policiesByPlatform = new Map(consumerPolicies.map(entry => [entry.platform, entry]))
+    const entitlementsByPlatform = new Map(entitlements.filter(Boolean).map(entry => [entry.platform, entry]))
+    const policies = grants.map(platform => {
+      const consumerPolicy = { ...this.defaultPolicy, ...(policiesByPlatform.get(platform) || {}) }
+      const entitlement = entitlementsByPlatform.get(platform)
+      const planPageSize = plan?.limits?.maxPageSize || Number.POSITIVE_INFINITY
+      return { ...consumerPolicy, maxPageSize: entitlement
+        ? Math.min(consumerPolicy.maxPageSize, entitlement.maxPageSize, planPageSize)
+        : Math.min(consumerPolicy.maxPageSize, planPageSize) }
+    })
+    const keyEntitlements = readsKeyEntitlements ? grants.map(platform => entitlementsByPlatform.get(platform)) : policies
     // A unified read needs one stable, conservative quota policy. Its separate
     // usage bucket always applies the strictest request/page limit and longest
     // window across the consumer's complete current grant set. Using the same
