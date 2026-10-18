@@ -7,6 +7,7 @@ import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
 import { normalizeTwitterResponse } from '../contracts/hub-social.mjs'
 import { projectTwitterDataSearch } from '../contracts/hub-data-search.mjs'
 import { rawSearchRecords } from '../contracts/raw-search.mjs'
+import { assertTwitterSearchAvailable } from '../data/twitter-search-availability.mjs'
 
 const MAX_UPSTREAM_PAGES = 15, MAX_BYTES = 12 * 1024 * 1024, MAX_PAGE_BYTES = 4 * 1024 * 1024
 const hash = items => createHash('sha256').update(JSON.stringify(items)).digest('hex')
@@ -74,6 +75,14 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
   const authorizeAcquisition=async()=>{
     context=await revalidateIdentity()
     if(await store.twitterFillUnknownFor(delivery)) throw new AppError(409,'request_outcome_unknown','A previous equal delivery has an unknown outcome')
+    // Historical fresh keys may leave replay and purchase again after their
+    // TTL. Preserve that behavior while checking the same cross-supplier
+    // query boundary as a new TikHub request, after owning the parent lease.
+    // A manual retry exempts only the ancestors its existing protocol verifies.
+    const excluded=delivery.twitterManualRetry
+      ? (await store.validateTwitterManualRetry(dispatchLease.twitterManualRetry)).ancestorRequestIds : []
+    await assertTwitterSearchAvailable({usageStore:gateway.usageStore,context,query:request.query,
+      excludeRequestIds:[delivery.usageRequestId,...excluded]})
     const shared=await store.providerState('rapidapi')
     const state=isHubRateLimitExempt(context)?internalCircuitState(gateway.usageStore,context,shared):shared
     const contract=await store.contractCircuitState?.('rapidapi','twitter')

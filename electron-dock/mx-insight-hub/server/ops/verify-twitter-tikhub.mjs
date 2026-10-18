@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-export const REVISION = 'twitter-tikhub-check.v3'
+export const REVISION = 'twitter-tikhub-check.v4'
 const IDENTITY_REVISION = 'twitter-tikhub-check.v1'
 export const ORIGINAL_REQUEST_ID = 'b5906846-8564-4791-8b83-ef3ce97789bc'
 export const PROXY_RECEIPT = Object.freeze({ requestId: 'd6ffc7e8-d736-4b7e-999b-a8af15755ee0',
@@ -192,7 +192,58 @@ export function summarizeTikHubTimeline(payload) {
     interpretation: 'Array elements and field shapes only; no post mapping, content validation or standard-search delivery is established.' }
 }
 
-async function appendSavedEvidence(pool, report, saved, expectedReceipt = null) {
+async function installedSavedMapping() {
+  const sourceRoot = process.argv[1] === '-' ? pathToFileURL(`${process.cwd()}/server/`) : new URL('../', import.meta.url)
+  const [workflow, contract, twitter] = await Promise.all([
+    import(new URL('external-platforms/content-search-workflow.mjs', sourceRoot)),
+    import(new URL('contracts/tikhub-content-search.mjs', sourceRoot)),
+    import(new URL('contracts/tikhub-twitter-search.mjs', sourceRoot)),
+  ])
+  requireValue(typeof workflow.projectContentPage === 'function' && typeof twitter.projectTikHubTwitterSearch === 'function'
+    && contract.TIKHUB_CONTENT_SEARCH_RECIPES?.twitter?.key === NATIVE_KEY, 'installed_twitter_mapping_unavailable')
+  return { projectContentPage: workflow.projectContentPage, contentSearchDataItem: contract.contentSearchDataItem }
+}
+
+export async function inspectSavedTikHubMapping(saved, loadMapping = installedSavedMapping) {
+  const base = { source: 'saved_native_payload', implementation: 'installed_hub_content_search',
+    deliveryEstablished: false, procurementCalls: 0 }
+  let mapping
+  try { mapping = await loadMapping() }
+  catch {
+    return { ...base, state: 'needs_deploy', reason: 'installed_twitter_mapping_unavailable',
+      action: 'Deploy the updated Hub Admin/Public image; syncing the stdin diagnostic alone does not install the mapper. No procurement was attempted.' }
+  }
+  try {
+    const { projected, records } = mapping.projectContentPage({ publicBody: { data: saved.response_body.data,
+      meta: { capturedAt: saved.response_body.meta?.capturedAt } } }, {
+      platform: 'twitter', query: QUERY, page: 1, pageSize: 20, upstreamQuery: { keyword: QUERY, search_type: 'Top' } })
+    const items = projected.acquiredItems.map(mapping.contentSearchDataItem)
+    return { ...base, state: 'mapped_saved_native_page', acquiredCount: projected.acquiredItems.length,
+      standardItemCount: items.length, canonicalRecordCount: records.length,
+      duplicateCount: projected.duplicateCount, nonPostCount: projected.nonPostCount,
+      hasMore: projected.providerPage.hasMore, nextCursorPresent: Boolean(projected.providerPage.nextParams?.cursor),
+      postgresProjectionSafe: true,
+      identity: { externalIdPresentCount: items.filter(item => item.externalId).length,
+        authorIdPresentCount: items.filter(item => item.author?.id).length },
+      content: { textPresentCount: items.filter(item => item.text).length,
+        publishedAtPresentCount: items.filter(item => item.publishedAt).length },
+      metrics: Object.fromEntries(['likes', 'comments', 'shares', 'views', 'bookmarks'].map(name => [name, {
+        knownCount: items.filter(item => item.metrics?.[name] != null).length,
+        zeroCount: items.filter(item => item.metrics?.[name] === 0).length,
+        unknownCount: items.filter(item => item.metrics?.[name] == null).length,
+      }])),
+      media: { imagePostCount: items.filter(item => item.media.images.length).length,
+        videoPostCount: items.filter(item => item.media.videos.length).length,
+        coverPostCount: items.filter(item => item.media.coverUrl).length },
+      interpretation: 'Offline mapping of one owned saved page only; no standard delivery, cursor follow, historical-window coverage or Delta ingestion is established.' }
+  } catch (error) {
+    const known = new Set(['invalid_content_search_shape', 'invalid_content_search_identity', 'invalid_content_search_capture_time',
+      'invalid_content_search_projection', 'invalid_content_search_continuation', 'content_search_page_too_large', 'content_search_business_rejected'])
+    return { ...base, state: 'saved_native_mapping_failed', reason: known.has(error?.message) ? error.message : 'mapping_unavailable' }
+  }
+}
+
+async function appendSavedEvidence(pool, report, saved, expectedReceipt = null, loadMapping) {
   report.saved = receiptSummary(saved)
   const calls = (await pool.query(`SELECT /* twitter-tikhub:probe-calls */ ${callFields} FROM external_platform.provider_calls WHERE usage_request_id=$1 ORDER BY started_at LIMIT 2`, [saved.id])).rows
   report.providerCalls = calls.map(call => ({ callId: safeId(call.id), httpStatus: integer(call.http_status),
@@ -218,22 +269,7 @@ async function appendSavedEvidence(pool, report, saved, expectedReceipt = null) 
     && Object.hasOwn(saved.response_body, 'data') ? 'native_success' : null
   if (expectedReceipt) requireValue(report.savedOutcomeVerified === 'native_success', 'saved_success_unverified')
   if (report.savedOutcomeVerified !== 'native_success') return
-  const sourceRoot = process.argv[1] === '-' ? pathToFileURL(`${process.cwd()}/server/`) : new URL('../', import.meta.url)
-  try {
-    const { normalizeTwitterResponse, normalizeHubSocialRequest } = await import(new URL('contracts/hub-social.mjs', sourceRoot))
-    const projected = normalizeTwitterResponse(saved.response_body.data,
-      normalizeHubSocialRequest('search', { platform: 'twitter', query: QUERY, count: 20, sort: 'top' }),
-      { capturedAt: saved.response_body.meta.capturedAt, allowOverflow: true, encodeCursor: () => 'offline-not-a-cursor' })
-    report.projection = { state: 'supported_twitter_timeline', acquiredCount: projected.data.items.length,
-      hasMore: projected.data.page.hasMore, source: 'saved_native_payload', deliveryEstablished: false }
-  } catch {
-    const data = saved.response_body.data
-    const names = ['data', 'entries', 'instructions', 'search_by_raw_query', 'search_timeline', 'timeline', 'timeline_v2', 'result', 'items', 'tweets', 'cursor', 'next_cursor']
-    report.projection = { state: 'native_payload_requires_mapping', source: 'saved_native_payload', deliveryEstablished: false,
-      timelineSummary: summarizeTikHubTimeline(data),
-      shape: Object.fromEntries(names.filter(name => data && Object.hasOwn(data, name)).map(name =>
-        [name, Array.isArray(data[name]) ? { type: 'array', length: data[name].length } : { type: data[name] == null ? 'null' : typeof data[name] }])) }
-  }
+  report.projection = await inspectSavedTikHubMapping(saved, loadMapping)
 }
 
 // Admission is not an acquisition. Identify only the owned blocker and never
@@ -261,7 +297,7 @@ async function appendBlockingEvidence(pool, report, original) {
   } catch { report.blockingRequest = { state: 'not_found_or_unavailable' } }
 }
 
-export async function runTwitterTikHubProbe({ pool, execute = false, readSavedOnly = false, createRuntime }) {
+export async function runTwitterTikHubProbe({ pool, execute = false, readSavedOnly = false, createRuntime, loadMapping }) {
   const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID, proxyRequestId: PROXY_RECEIPT.requestId,
     case: 'full-query-tikhub', mode: readSavedOnly ? 'read_saved_only' : execute ? 'execute' : 'read_only', querySha256: digest(QUERY), queryLength: QUERY.length,
     provider: 'tikhub', endpoint: NATIVE_KEY, category: 'Top', idempotencyKey: IDEMPOTENCY_KEY,
@@ -280,13 +316,13 @@ export async function runTwitterTikHubProbe({ pool, execute = false, readSavedOn
     if (readSavedOnly) {
       requireValue(initial.existing?.id === SUCCESS_RECEIPT.requestId, 'saved_receipt_unavailable')
       report.existing = receiptSummary(initial.existing)
-      await appendSavedEvidence(pool, report, initial.existing, SUCCESS_RECEIPT)
+      await appendSavedEvidence(pool, report, initial.existing, SUCCESS_RECEIPT, loadMapping)
       report.originalUnchanged = true
       return report
     }
     if (initial.existing) {
       report.existing = receiptSummary(initial.existing)
-      await appendSavedEvidence(pool, report, initial.existing)
+      await appendSavedEvidence(pool, report, initial.existing, null, loadMapping)
       return report
     }
     runtime = await createRuntime()
@@ -333,7 +369,7 @@ export async function runTwitterTikHubProbe({ pool, execute = false, readSavedOn
     const after = await readSnapshot(pool)
     requireValue(after.historyDigest === initial.historyDigest, 'historical_receipt_changed')
     report.originalUnchanged = true
-    if (after.existing) await appendSavedEvidence(pool, report, after.existing)
+    if (after.existing) await appendSavedEvidence(pool, report, after.existing, null, loadMapping)
   } catch (error) { report.verificationError = safeCode(error) }
   if (leases.length) {
     const unsent = report.adapterCalls === 0 && !report.verificationError
@@ -408,7 +444,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     pool = new Pool({ connectionString: env.DATABASE_URL, max: 4, application_name: REVISION })
     const report = await runTwitterTikHubProbe({ pool, execute: args[0] === '--execute', readSavedOnly: args[0] === '--read-saved-only', createRuntime: () => runtimeFromInstalledSources(pool) })
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
-    if (report.errorCode || report.verificationError) process.exitCode = 1
+    if (report.errorCode || report.verificationError || ['needs_deploy', 'saved_native_mapping_failed'].includes(report.projection?.state)) process.exitCode = 1
   } catch (error) { process.stdout.write(`${JSON.stringify({ diagnosticRevision: REVISION, errorCode: safeCode(error) })}\n`); process.exitCode = 1 }
   finally { await pool?.end().catch(() => {}) }
 }

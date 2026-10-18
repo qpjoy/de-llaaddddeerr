@@ -47,7 +47,9 @@ export function aggregateSourceCatalog(grants, capabilities, crawlerSpecs = [], 
           operation: WECHAT_SEARCH_OPERATION, objectType, label: labels[platform] }] : [] }
     }
     if (execution === 'hub_only') {
-      if (Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, platform)) return [{
+      // Twitter's opt-in aggregate route predates standard supplier routing:
+      // retain its social capability, child meter and signed continuations.
+      if (platform !== 'twitter' && Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, platform)) return [{
         platform, label: labels[platform], stored: true, refresh: true, objectTypes: ['post'],
         routes: [{ id: `hub-content:${platform}`, platform, kind: 'hub_content', operation: 'data.search', objectType: 'post', label: labels[platform] }],
       }]

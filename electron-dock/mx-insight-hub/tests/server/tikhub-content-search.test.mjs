@@ -10,6 +10,7 @@ import { isPostgresSafeJsonValue } from '../../server/core/postgres-json.mjs'
 
 const capturedAt = '2026-10-15T04:00:00.000Z'
 const fixtures = { ...originalFixtures,
+  twitter: { timeline: [{ tweet_id: '7111111111111111111', text: '完整正文', created_at: '2026-10-15T03:00:00Z', replies: 3, favorites: 0 }], next_cursor: '' },
   tiktok: { data: [{ item: { id: '7111111111111111111', desc: '完整正文', stats: { diggCount: 0, commentCount: 3 } } }], has_more: false },
   weibo: { parsed_data: { results: [{ weibo_id: '7111111111111111111', longText: { content: '完整正文' }, interaction: { comments: 3 } }], pagination: { has_next_page: false } } },
   xiaohongshu: { page: 1, next_page: null, data: { items: [{ model_type: 'note', note: { id: '675d277d000000000600e655', desc: '完整正文' } }] } },

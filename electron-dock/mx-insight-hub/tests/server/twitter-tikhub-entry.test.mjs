@@ -51,7 +51,7 @@ test('TikHub wrapper refuses missing or v2 sibling source before starting a clus
 })
 
 
-test('saved-native wrapper streams the fixed v3 source with only the no-acquisition flag from any directory', t => {
+test('saved-native wrapper streams the fixed v4 source with only the no-acquisition flag from any directory', t => {
   const f = fixture(t, 'inspect-twitter-tikhub-saved.sh'), result = f.run()
   assert.equal(result.status, 0, result.stderr)
   assert.equal(result.stderr, '')

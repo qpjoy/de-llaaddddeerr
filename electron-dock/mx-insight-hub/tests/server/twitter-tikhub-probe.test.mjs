@@ -21,8 +21,8 @@ const CURSOR = 'private-opaque-cursor-do-not-follow'
 const PEPPER = 'offline-tikhub-probe-pepper-long-enough'
 const SHA = value => createHash('sha256').update(value).digest('hex')
 
-test('diagnostic v3 retains the issued v1 acquisition and protocol identities', () => {
-  assert.equal(REVISION, 'twitter-tikhub-check.v3')
+test('diagnostic v4 retains the issued v1 acquisition and protocol identities', () => {
+  assert.equal(REVISION, 'twitter-tikhub-check.v4')
   const originalKey = 'ops-twitter-tikhub-fd667b275888b95fa712ae694c024f890084a69881d47dc2'
   assert.equal(IDEMPOTENCY_KEY, originalKey)
   assert.deepEqual(PROTOCOL_KEYS, { original: `${originalKey}-original-guard`, native: `${originalKey}-native-guard` })
@@ -479,11 +479,17 @@ test('blocked second query binding releases the unsent first guard and allows ex
 
 
 const PRIVATE_ITEM_ID = 'private-tweet-unique-id-do-not-print'
+const PRIVATE_NATIVE_ID = '1979366117396988012'
 const PRIVATE_URL = 'https://private.example.invalid/a-path?secret=never-print'
 const PRIVATE_NAME = 'private-author-name-do-not-print'
 function savedTimelineFixture(f, { entries = 19, data } = {}) {
   const payload = data || { timeline: Array.from({ length: entries }, (_, i) => ({
-    id: PRIVATE_ITEM_ID, text: POST, full_text: POST, created_at: 'Sun Oct 18 08:00:00 +0000 2026',
+    id: PRIVATE_ITEM_ID, tweet_id: String(BigInt(PRIVATE_NATIVE_ID) + BigInt(i)),
+    text: POST, full_text: POST, created_at: 'Sun Oct 18 08:00:00 +0000 2026',
+    user_info: { rest_id: '1899000000000000001', name: PRIVATE_NAME, screen_name: 'example', avatar: PRIVATE_URL },
+    favorites: i === entries - 1 ? 8 : 0, replies: 1, retweets: 2, bookmarks: null,
+    views: i === entries - 1 ? '10' : null,
+    media: i === entries - 1 ? { photo: [{ media_url_https: PRIVATE_URL }] } : [],
     url: PRIVATE_URL, author: { id: PRIVATE_ITEM_ID, name: PRIVATE_NAME },
     user: { id: PRIVATE_ITEM_ID, screen_name: PRIVATE_NAME },
     ...(i === entries - 1 ? { favorite_count: 8 } : {}),
@@ -515,12 +521,12 @@ function assertNoBusinessActivity(f) {
 
 function assertNoPayloadDisclosure(result) {
   const output = JSON.stringify(result)
-  for (const value of [SECRET, POST, CURSOR, PRIVATE_ITEM_ID, PRIVATE_URL, PRIVATE_NAME, 'private-field-name-do-not-print']) {
+  for (const value of [SECRET, POST, CURSOR, PRIVATE_ITEM_ID, PRIVATE_NATIVE_ID, PRIVATE_URL, PRIVATE_NAME, 'private-field-name-do-not-print']) {
     assert.equal(output.includes(value), false, `must not disclose ${value}`)
   }
 }
 
-test('fixed saved-native inspection reads all 19 timeline elements without runtime, business calls or writes', async () => {
+test('fixed saved-native inspection maps all 19 items through installed standard and canonical code with no business activity', async () => {
   const f = await fixture(), before = savedTimelineFixture(f)
   const expected = structuredClone(before)
   const result = await f.run({ readSavedOnly: true })
@@ -533,16 +539,51 @@ test('fixed saved-native inspection reads all 19 timeline elements without runti
   assert.equal(result.deliveryEstablished, false)
   assert.equal(result.savedOutcomeVerified, 'native_success')
   assert.equal(result.saved.requestId, SUCCESS_RECEIPT.requestId)
-  assert.equal(result.projection.state, 'native_payload_requires_mapping')
-  const summary = result.projection.timelineSummary
-  assert.equal(summary.entryCount, 19)
-  assert.equal(summary.inspectedCount, 19)
-  assert.equal(summary.truncated, false)
-  assert.equal(summary.groups.reduce((n, group) => n + group.count, 0), 19)
-  assert.ok(summary.groups.some(group => group.sampleIndexes.includes(18)), 'last element must be inspected')
+  assert.equal(result.projection.state, 'mapped_saved_native_page', JSON.stringify(result))
+  assert.equal(result.projection.acquiredCount, 19)
+  assert.equal(result.projection.standardItemCount, 19)
+  assert.equal(result.projection.canonicalRecordCount, 19)
+  assert.equal(result.projection.postgresProjectionSafe, true)
+  assert.equal(result.projection.hasMore, true)
+  assert.equal(result.projection.nextCursorPresent, true)
+  assert.equal(result.projection.timelineSummary, undefined)
+  assert.deepEqual(result.projection.metrics.likes, { knownCount: 19, zeroCount: 18, unknownCount: 0 })
+  assert.deepEqual(result.projection.metrics.views, { knownCount: 1, zeroCount: 0, unknownCount: 18 })
+  assert.deepEqual(result.projection.media, { imagePostCount: 1, videoPostCount: 0, coverPostCount: 1 })
   assert.deepEqual(before, expected)
   assertNoBusinessActivity(f)
   assertNoPayloadDisclosure(result)
+})
+
+test('old installed images report needs_deploy without procurement or a new structure dump', async () => {
+  const f = await fixture(); savedTimelineFixture(f)
+  const result = await f.run({ readSavedOnly: true, loadMapping: async () => {
+    throw Object.assign(new Error(SECRET), { code: 'ERR_MODULE_NOT_FOUND' })
+  } })
+  assert.equal(result.savedOutcomeVerified, 'native_success')
+  assert.equal(result.projection.state, 'needs_deploy')
+  assert.equal(result.projection.reason, 'installed_twitter_mapping_unavailable')
+  assert.equal(result.projection.timelineSummary, undefined)
+  assert.equal(result.projection.procurementCalls, 0)
+  assertNoBusinessActivity(f); assertNoPayloadDisclosure(result)
+})
+
+test('a mapping failure reports a bounded reason without changing the saved success or reacquiring', async () => {
+  for (const mutate of [
+    ({ payload }) => { payload.timeline[18].tweet_id = null },
+    ({ payload }) => { payload.timeline[18].text = '\0' },
+    ({ payload }) => { payload.next_cursor = {} },
+  ]) {
+    const f = await fixture(), receipt = savedTimelineFixture(f)
+    mutate(receipt)
+    const before = structuredClone(receipt), result = await f.run({ readSavedOnly: true })
+    assert.equal(result.savedOutcomeVerified, 'native_success')
+    assert.equal(result.projection.state, 'saved_native_mapping_failed')
+    assert.ok(['invalid_content_search_identity', 'invalid_content_search_projection', 'invalid_content_search_continuation'].includes(result.projection.reason))
+    assert.equal(result.projection.timelineSummary, undefined)
+    assert.deepEqual(receipt, before)
+    assertNoBusinessActivity(f); assertNoPayloadDisclosure(result)
+  }
 })
 
 test('fixed saved-native mode fails closed when the receipt is absent or cannot be read', async () => {

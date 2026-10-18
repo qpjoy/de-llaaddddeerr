@@ -867,10 +867,10 @@ export class TikHubAdapter {
 
   async forwardNative(key, body, { capturedAt = null, credential: suppliedCredential, contentSearchProjection = false } = {}) {
     if (nativeForwardingEndpoint(key)?.provider !== 'tikhub') throw new TypeError('Unsupported native endpoint')
-    // Only the standard Kuaishou workflow consumes a validated post projection.
+    // Standard Kuaishou/Twitter workflows consume a validated post projection.
     // Its exact receipt remains authoritative even when unrelated raw fields
     // cannot be stored as JSONB. Native/raw APIs keep their full-payload guard.
-    if (contentSearchProjection && key !== 't.kuaishou_app_search_comprehensive') throw new TypeError('Unsupported content projection endpoint')
+    if (contentSearchProjection && !['t.kuaishou_app_search_comprehensive', 't.twitter_web_fetch_search_timeline'].includes(key)) throw new TypeError('Unsupported content projection endpoint')
     const request = normalizeNativeForwardingRequest(key, body)
     const resolvedCredential = suppliedCredential === undefined ? await this.resolveCredential() : credential(suppliedCredential)
     if (!resolvedCredential) throw new TypeError('TikHub credential is unavailable')

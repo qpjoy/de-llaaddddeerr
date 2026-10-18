@@ -203,6 +203,8 @@ export function parsePublicUrl(value) {
 }
 
 export function loadConfig(environment = process.env) {
+  const twitterSearchProvider = environment.MX_INSIGHT_TWITTER_SEARCH_PROVIDER?.trim() || 'auto'
+  if (!['auto', 'tikhub', 'rapidapi'].includes(twitterSearchProvider)) throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_TWITTER_SEARCH_PROVIDER must be auto, tikhub or rapidapi')
   const listenerMode = environment.MX_INSIGHT_LISTENER_MODE || 'combined'
   if (!['combined', 'public', 'admin'].includes(listenerMode)) {
     throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_LISTENER_MODE must be combined, public, or admin')
@@ -368,6 +370,7 @@ export function loadConfig(environment = process.env) {
     justOne,
     tikHub,
     rapidApi: rapidApiConfig(environment),
+    twitterSearchProvider,
     externalMedia,
     backfill: {
       // Platforms the Hub will backfill. Restricted by default to the three

@@ -46,8 +46,10 @@ export function implementedRoutes(sources = []) {
   for (const recipe of Object.values(TIKHUB_CONTENT_SEARCH_RECIPES).filter(row => row.platform !== 'xiaohongshu')) rows.push(route(`content-search-${recipe.platform}`, {
     platform: recipe.platform, catalogKeys: [catalogKey(recipe.platform)].filter(Boolean), provider: 'tikhub', product: '跨平台内容',
     operation: recipe.operation || `native.${recipe.key}`, path: '/api/v1/data/search', keywordSearch: true, datasets: ['night-all.search.v1'],
-    defaultRule: 'Hub 固定内容搜索合同；按客户平台计费，完整已取得页归档、缓冲续页与规范化入库。无 Night-All 回退；历史旧游标先保持重放，再要求显式重开。',
-    evidence: 'server/contracts/tikhub-content-search.mjs',
+    defaultRule: recipe.platform === 'twitter'
+      ? 'Twitter 标准搜索的 T 平台候选渠道；Hub 默认在采购前按授权和就绪状态优先选择 T 平台，否则选择 RapidAPI，也可由运维固定渠道。历史幂等请求与已签名分页继续原渠道；raw/social 保留原语义，发送后不自动切换。此清单不代表当前调用方已选中该渠道。'
+      : 'Hub 固定内容搜索合同；按客户平台计费，完整已取得页归档、缓冲续页与规范化入库。无 Night-All 回退；历史旧游标先保持重放，再要求显式重开。',
+    evidence: recipe.platform === 'twitter' ? 'server/data/twitter-search-routing.mjs' : 'server/contracts/tikhub-content-search.mjs',
   }))
   for (const endpoint of Object.values(HUB_SOCIAL_ENDPOINTS)) rows.push(route(`hub-social-${endpoint.key}`, {
     platform: endpoint.platform, catalogKeys: [catalogKey(endpoint.platform)], provider: endpoint.provider,

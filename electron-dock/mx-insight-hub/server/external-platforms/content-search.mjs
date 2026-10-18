@@ -100,6 +100,7 @@ export function contentSearchPlan({ gateway, context, input, dependencies }) {
   let request
   return { input: { body, idempotencyKey, signal, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH },
     plan: { operation: xiaohongshu ? xiaohongshuSearchOperation.operation : endpoint.operation, authorizationPlatform: normalized.platform, platformSearch: true,
+      ...(normalized.platform === 'twitter' && dataSearch ? { searchProvider: 'tikhub', searchContractVersion: TIKHUB_CONTENT_SEARCH_VERSION } : {}),
       ...(xiaohongshu ? { requiredCapabilities: [xiaohongshuSearchOperation.operation] } : {}),
       meterKey: xiaohongshu ? xiaohongshuSearchOperation.operation : dataSearch ? normalized.platform : 'raw', datasetId: dataSearch ? 'night-all.search.v1' : RAW_SEARCH_DATASET,
       nativeForwarding: true, dataSearch: Boolean(dataSearch), replayReleasedFailures: true, replayWindowMs: dataSearch?.replayWindowMs,

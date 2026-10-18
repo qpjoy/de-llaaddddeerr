@@ -7,6 +7,7 @@ import { ExternalPlatformGateway } from '../../server/external-platforms/gateway
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
 import { RapidApiAdapter } from '../../server/adapters/rapidapi.mjs'
+import { requestFingerprint } from '../../server/core/crypto.mjs'
 
 const BODY = { platform: 'twitter', query: 'fixture #chipban', pageSize: 2, type: 'stable' }
 const timeline = (ids, next = null) => ({ entries: [
@@ -120,6 +121,22 @@ test('Twitter retry does not exclude unrelated unknown parents or pending/unusab
     await assert.rejects(f.invoke(BODY, `blocked-${blocker}-manual`, old.id), error => ['request_outcome_unknown', 'request_in_progress', 'external_platform_response_unusable'].includes(error.code), blocker)
     assert.equal(f.calls(), 1); assert.equal(f.store.twitterManualRetries?.size ?? 0, 0)
   }
+})
+
+test('Twitter manual retry excludes verified ancestors only, not a same-query TikHub unknown with different page conditions', async () => {
+  const f = await fixture(), old = await f.original()
+  const body = { ...BODY, pageSize: 40, type: 'fresh' }, id = randomUUID()
+  const blocker = { ...structuredClone(old), id, idempotencyKey: 'unrelated-tikhub-query-unknown',
+    fingerprint: requestFingerprint({ method: 'POST', path: '/api/v1/data/search', body }),
+    acquisitionRequest: { method: 'POST', path: '/api/v1/data/search', body, searchProvider: 'tikhub' } }
+  f.usage.requests.set(id, blocker)
+  f.reply(async () => timeline([1, 2]))
+  await assert.rejects(f.invoke(BODY, 'manual-cross-supplier-retry', old.id),
+    error => error.code === 'request_outcome_unknown' && error.details.blockingRequestId === id)
+  assert.equal(f.calls(), 1)
+  assert.equal(f.store.twitterManualRetries?.size ?? 0, 0)
+  assert.equal(f.usage.requests.get(old.id).status, 'unknown')
+  assert.equal(f.usage.requests.get(id).status, 'unknown')
 })
 
 test('Twitter preflight refusal consumes no manual retry edge', async () => {

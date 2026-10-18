@@ -329,6 +329,9 @@ test('new cursors bind query, count, Key and operation; valid continuation works
 
 test('aggregate opt-in uses the same gateway with separate child billing and bound continuation', async () => {
   const h = await harness()
+  const platformOnly = aggregateSourceCatalog(['twitter'], [], [], 'hub_only')[0]
+  assert.equal(platformOnly.refresh, false, 'adding a standard Twitter supplier must not grant the existing social aggregate route')
+  assert.deepEqual(platformOnly.routes, [])
   const source = await h.service.aggregateSources(h.context, 'hub_only')
   assert.deepEqual(source.sources[0].routes.map(row => row.kind), ['hub_social'])
   assert.deepEqual((await h.service.aggregateSources(h.context)).sources[0].routes.map(row => row.kind), ['posts'])

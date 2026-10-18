@@ -3,6 +3,7 @@ import { AppError } from '../core/errors.mjs'
 import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
 import { NATIVE_FORWARDING_VERSION } from '../contracts/native-forwarding.mjs'
 import { TIKHUB_CONTENT_SEARCH_VERSION } from '../contracts/tikhub-content-search.mjs'
+import { twitterDeliveryLeases } from './twitter-delivery-leases.mjs'
 
 const clone = value => structuredClone(value)
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)
@@ -139,7 +140,7 @@ export class ContentSearchStateStore {
     // unrelated raw metadata need not have a JSONB representation. The workflow
     // still validates delivered/ingested items and continuation state separately.
     // Other platforms and legacy raw traversal keep their strict full-root gate.
-    const page = verifiedArchive(archive, this.platform === 'kuaishou' && input.path === '/api/v1/data/search')
+    const page = verifiedArchive(archive, ['kuaishou', 'twitter'].includes(this.platform) && input.path === '/api/v1/data/search')
     return page ? { ...page, sourceUsageRequestId: usage.id } : null
   }
 
@@ -155,14 +156,18 @@ export class ContentSearchStateStore {
   }
 
   async acquireDeliveryLease(input) {
-    const operation = `content.search.${this.platform}`
+    // Keep the existing RapidAPI standard-search mutex during rolling upgrades;
+    // supplier-native child operations still have their own procurement leases.
+    const operation = this.platform === 'twitter' ? 'social.content.search' : `content.search.${this.platform}`
     if (!uuid(input.consumerId) || !uuid(input.ownerRequestId) || !sha(input.fingerprint)
       || !Number.isFinite(Date.parse(input.expiresAt)) || Date.parse(input.expiresAt) <= Date.now()) throw fail()
     if (!this.pool) {
-      const key = `${input.consumerId}:${operation}:${input.fingerprint}`
-      const previous = this.store.leases.get(key)
+      const leases = this.platform === 'twitter' ? twitterDeliveryLeases(this.usage) : this.store.leases
+      const separator = this.platform === 'twitter' ? '\u0000' : ':'
+      const key = [input.consumerId, operation, input.fingerprint].join(separator)
+      const previous = leases.get(key)
       if (previous && Date.parse(previous.expiresAt) > Date.now()) return false
-      this.store.leases.set(key, { ownerRequestId: input.ownerRequestId, expiresAt: new Date(input.expiresAt).toISOString() })
+      leases.set(key, { ownerRequestId: input.ownerRequestId, expiresAt: new Date(input.expiresAt).toISOString() })
       return true
     }
     const rows = (await this.pool.query(`INSERT INTO external_platform.dispatch_leases
@@ -174,13 +179,15 @@ export class ContentSearchStateStore {
   }
 
   async releaseDeliveryLease(input) {
-    const operation = `content.search.${this.platform}`
+    const operation = this.platform === 'twitter' ? 'social.content.search' : `content.search.${this.platform}`
     if (this.pool) await this.pool.query(`DELETE FROM external_platform.dispatch_leases WHERE consumer_id=$1
       AND operation=$2 AND request_fingerprint=$3 AND owner_request_id=$4`,
     [input.consumerId, operation, input.fingerprint, input.ownerRequestId])
     else {
-      const key = `${input.consumerId}:${operation}:${input.fingerprint}`
-      if (this.store.leases.get(key)?.ownerRequestId === input.ownerRequestId) this.store.leases.delete(key)
+      const leases = this.platform === 'twitter' ? twitterDeliveryLeases(this.usage) : this.store.leases
+      const separator = this.platform === 'twitter' ? '\u0000' : ':'
+      const key = [input.consumerId, operation, input.fingerprint].join(separator)
+      if (leases.get(key)?.ownerRequestId === input.ownerRequestId) leases.delete(key)
     }
   }
 

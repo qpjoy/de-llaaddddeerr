@@ -1,5 +1,7 @@
 # Twitter 搜索 554b85cb 上游 400 核查
 
+最新处理见 [Twitter 标准搜索的供应商兼容](../integrations/twitter-standard-provider-routing.md)：已接入标准 v1/v2，历史排查命令与中间结论保留在下文。部署后使用文末 v4 只读映射验证。
+
 2026-10-16 用户提供下游策略告警。此次先核对已保存请求，不重发采集。
 
 ## 已知事实
@@ -379,7 +381,7 @@ kubectl -n mx-insight-hub rollout status deployment/mx-insight-hub-admin
 
 本轮准入回归35项通过（含真实 PGlite 与 HTTP，无跳过），TikHub诊断及入口25项通过；覆盖新请求不受无归属历史牵连、旧 key 不复用、已知同查询 unknown/reserved、跨版本保护、状态不变、诊断身份稳定、blocker 归属限制及原生查询字段识别。
 
-### 当前结果：完整候选式被 TikHub 接受，保存响应待标准映射
+### 已确认结果：完整候选式被 TikHub 接受，保存响应待标准映射
 
 用户回传 `twitter-tikhub-check.v2`：策略版本 `known-query.v1` 已生效，`adapterCalls=1`、`fullQueryAttempted=true`，请求 `dcc086fa-469a-4237-a435-e427b7e70f3a` 已保存为 committed/200。唯一调用 `6c6177d6-4065-499c-aabb-50217f355780` 为 HTTP200、businessCode=200、succeeded，且原生回执归属校验通过。这确认完整257字符 native 候选式在 TikHub 被接受；原280字符 SQL 式没有直接发送。此前 RapidAPI 的400不能再被笼统归为“这个完整业务条件无法搜索”。没有证据证明具体 RapidAPI 内部拒绝机制。
 
@@ -405,4 +407,18 @@ v4此前35项离线测试全部通过，包括两个精确出站URL、全部成�
 
 本地查询、路径和组页合同测试 17 项通过，其中包含 160 组布尔真值比较、实际 adapter 两页 mock HTTP、v2 内外游标往返。另有带 PGlite 的 v1/v2、跨版本 unknown、HTTP 重试边界 33 项通过。Python 验证脚本 24 项测试及 Delta 原生 v1/v2 请求构造联合检查通过。这些离线测试不能代替供应商接受完整查询和原冷启动入库验收。
 
-准入修复及一次原生供应商成功已由用户回执确认；标准响应映射、标准路由接入和原冷启动的采集分页仍待完成。当前只读检查无需部署、采购或Delta操作；没有新增数据库迁移，没有修改MX-H2I登录、SSO、联网或Domestic/Internal nginx，不清理旧历史或绕过unknown。
+准入修复及一次原生供应商成功已由用户回执确认；上述 v3 阶段尚未形成标准响应映射或原冷启动交付，没有新增数据库迁移或修改 MX-H2I 登录、SSO、联网及 Domestic/Internal nginx。
+
+### v4：用已保存成功页验证实际标准映射
+
+操作人员的 v3 回执检查完整19项、没有结构截断：原生 `tweet_id`、正文、可解析的 `created_at`、`user_info` 身份和作者字段、互动指标及照片/视频附件已有结构证据。接入的新映射保留整页、原生字符串ID、完整正文、真实零值和未知指标，照片与视频封面分开；供应商返回超过请求条数时交给既有整页缓冲，不重新采购。空页仍有 `next_cursor` 时继续保留分页可能性。
+
+更新后的 `inspect-twitter-tikhub-saved.sh`（同目录 `verify-twitter-tikhub.mjs` 为 `twitter-tikhub-check.v4`）仍只读取固定 `dcc086fa-469a-4237-a435-e427b7e70f3a` 和唯一调用 `6c6177d6-4065-499c-aabb-50217f355780`。这次使用**容器已安装的** `projectContentPage`，验证真实 Twitter 标准分支、现代输出、canonical 记录和 PostgreSQL 安全，不再生成字段类型大段摘要。结果仅给映射条数、游标是否存在、指标已知/零值/未知计数及媒体覆盖计数，不输出帖子正文、ID、媒体URL或游标值。
+
+本轮映射属于运行代码，先正常发布新的 Hub Admin/Public 镜像；只同步 stdin 脚本不会安装映射。旧镜像缺模块或 Twitter recipe 时报告 `projection.state=needs_deploy`，不启动任何补采。发布后运行同一个只读入口：
+
+```bash
+bash server/ops/inspect-twitter-tikhub-saved.sh
+```
+
+预期 `diagnosticRevision=twitter-tikhub-check.v4`、`mode=read_saved_only`、`adapterCalls=0`、`maxAdapterCalls=0`；成功时 `projection.state=mapped_saved_native_page`，提供 `acquiredCount/standardItemCount/canonicalRecordCount` 与 `postgresProjectionSafe=true`。映射失败仅报告已知原因，不改变原生200或原始502、不清除unknown、不重新采购，也不操作Delta。固定采购key及两个协议key仍沿用v1身份。此次离线映射不等同于正式标准交付、完整日期窗口覆盖、已签发可继续使用的游标或冷启动入库完成。

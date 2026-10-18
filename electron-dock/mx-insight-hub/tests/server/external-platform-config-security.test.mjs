@@ -697,3 +697,11 @@ test('an oversized provider token fails closed without preventing Hub startup', 
     await closeRuntime(runtime)
   }
 })
+
+test('Twitter deployment strategy accepts auto and both supported providers without changing caller configuration', () => {
+  assert.equal(loadConfig(BASE).twitterSearchProvider, 'auto')
+  for (const provider of ['auto', 'tikhub', 'rapidapi']) {
+    assert.equal(loadConfig({ ...BASE, MX_INSIGHT_TWITTER_SEARCH_PROVIDER: provider }).twitterSearchProvider, provider)
+  }
+  assert.throws(() => loadConfig({ ...BASE, MX_INSIGHT_TWITTER_SEARCH_PROVIDER: 'arbitrary' }), { code: 'invalid_configuration' })
+})

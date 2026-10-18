@@ -1302,7 +1302,12 @@ export class ExternalPlatformGateway {
       apiKeyId: context.apiKey.id,
       platform: authorizationPlatform,
       meterKey: plan.meterKey || plan.operation,
-      acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
+      acquisitionRequest: plan.searchProvider ? { ...acquisitionRequestSnapshot({ method: 'POST', path, body }),
+        // Trusted internal route evidence is recorded with the reservation,
+        // before credentials, admission or HTTP. It is not a caller field and
+        // does not alter the original fingerprint or historical replay body.
+        searchProvider: plan.searchProvider, searchContractVersion: plan.searchContractVersion,
+      } : acquisitionRequestSnapshot({ method: 'POST', path, body }),
       requiredAuthorizationScopes: [
         { type: 'platform', key: authorizationPlatform },
         ...(!plan.platformSearch ? [{ type: 'capability', key: plan.capability || plan.operation }] : []),
