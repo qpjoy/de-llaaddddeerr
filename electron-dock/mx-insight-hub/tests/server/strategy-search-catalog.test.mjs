@@ -12,7 +12,7 @@ import { assertWechatSearchNotRetired } from '../../server/contracts/wechat-sear
 const interfaceById = (catalog, id) => catalog.interfaces.find(row => row.id === id)
 const platformById = (catalog, id, platform) => interfaceById(catalog, id).platforms.find(row => row.platform === platform)
 
-test('strategy catalog separates supported operation sets and exposes only the two implemented policy editors', () => {
+test('strategy catalog separates supported operation sets and exposes the implemented policy editors', () => {
   const catalog = strategySearchCatalog()
   for (const id of ['crawl', 'user-info']) {
     const group = interfaceById(catalog, id)
@@ -23,7 +23,7 @@ test('strategy catalog separates supported operation sets and exposes only the t
   assert.equal(platformById(catalog, 'search', 'linkedin'), undefined)
   assert.equal(platformById(catalog, 'user-info', 'reddit').migrationStatus, 'hub_native')
   const editable = catalog.interfaces.flatMap(group => group.platforms.filter(row => row.editable).map(row => `${group.id}:${row.platform}`))
-  assert.deepEqual(editable.sort(), ['search:facebook', 'search:instagram'])
+  assert.deepEqual(editable.sort(), ['search:facebook', 'search:instagram', 'search:twitter'])
   for (const row of catalog.interfaces.flatMap(group => group.platforms)) {
     assert(row.label && row.routeSummary)
     if (!row.editable) assert(row.readOnlyReason)
@@ -34,7 +34,8 @@ test('strategy catalog separates supported operation sets and exposes only the t
 test('policy rows preserve provider-specific saved shape without mutating it or inventing a policy', () => {
   const instagramPolicy = { mode: 'priority', primaryProvider: 'justone', fallbackProvider: 'tikhub', revision: 3 }
   const facebookPolicy = { mode: 'auto', monthly_limit: 1000, billing_day: 27, next_recovery_check_at: '2026-10-27T00:00:00Z', revision: 4 }
-  const catalog = strategySearchCatalog({ instagramPolicy, facebookPolicy })
+  const twitterPolicy = { mode: 'priority', primaryProvider: 'rapidapi', fallbackProvider: 'tikhub', revision: 7 }
+  const catalog = strategySearchCatalog({ instagramPolicy, facebookPolicy, twitterPolicy })
   const instagram = platformById(catalog, 'search', 'instagram')
   const facebook = platformById(catalog, 'search', 'facebook')
   assert.deepEqual(instagram.providers, ['justone', 'tikhub'])
@@ -47,6 +48,12 @@ test('policy rows preserve provider-specific saved shape without mutating it or 
   assert.equal(facebookPolicy.monthly_limit, 1000)
   assert.equal(instagramPolicy.primaryProvider, 'justone')
   assert.equal(platformById(strategySearchCatalog(), 'search', 'instagram').policy, null)
+  const twitter = platformById(catalog, 'search', 'twitter')
+  assert.deepEqual(twitter.policy, twitterPolicy)
+  assert.deepEqual(twitter.allowedModes, ['fixed', 'priority', 'paused'])
+  twitter.policy.primaryProvider = 'tikhub'
+  assert.equal(twitterPolicy.primaryProvider, 'rapidapi')
+  assert.equal(platformById(strategySearchCatalog(), 'search', 'twitter').policy, null)
 })
 
 test('Twitter catalog acknowledges the actual split between migrated standard search and complex raw/account compatibility', () => {
@@ -57,9 +64,15 @@ test('Twitter catalog acknowledges the actual split between migrated standard se
   for (const id of ['search', 'crawl', 'user-info']) {
     const row = platformById(catalog, id, 'twitter')
     assert.equal(row.migrationStatus, id === 'search' ? 'conditional' : 'hub_native')
-    assert.deepEqual(row.providers, ['rapidapi'])
+    assert.deepEqual(row.providers, id === 'search' ? ['rapidapi', 'tikhub'] : ['rapidapi'])
     assert.match(row.routeSummary, /Night-All/)
   }
+  const twitter = platformById(catalog, 'search', 'twitter')
+  assert.equal(twitter.editable, true)
+  assert.match(twitter.routeSummary, /仅适用于 POST \/api\/v1\/data\/search 与 \/api\/v2\/data\/search/)
+  assert.match(twitter.routeSummary, /data\/social\/search 与 raw 保持原 RapidAPI/)
+  assert.match(twitter.routeSummary, /历史请求与分页绑定原供应商/)
+  assert(interfaceById(catalog, 'search').paths.includes('/api/v2/data/search'))
   assert.throws(() => normalizeHubSocialRequest('crawl', { platform: 'instagram', username: 'example' }), error => error.code === 'social_platform_not_implemented')
   assert.equal(normalizeHubSocialCompatRequest('crawl', { platform: 'instagram', username: 'example' }).platform, 'instagram')
   assert.equal(platformById(catalog, 'crawl', 'instagram').migrationStatus, 'hub_native')

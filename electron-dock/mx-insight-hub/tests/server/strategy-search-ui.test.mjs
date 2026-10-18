@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { STRATEGY_SEARCH_PATH, STRATEGY_SEARCH_INTERFACES, strategySearchLink,
-  instagramStrategyOptions, instagramStrategyUpdate } from '../../src/strategy-search-model.js'
+  instagramStrategyOptions, instagramStrategyUpdate, twitterStrategyOptions, twitterStrategyUpdate, strategyPolicySummary, strategyPolicyEditor } from '../../src/strategy-search-model.js'
 import { productCategory } from '../../shared/product-navigation.mjs'
 import { productForPath, productForDocs } from '../../shared/product-workbenches.mjs'
 import { productAllowed } from '../../shared/product-access.mjs'
@@ -16,7 +16,8 @@ test('strategy search has its own data-services product and reciprocal documenta
   assert.equal(productForDocs('/docs/strategy-search').path, STRATEGY_SEARCH_PATH)
   assert.notEqual(productForPath('/data-products/search'), productForPath(STRATEGY_SEARCH_PATH))
   assert.deepEqual(STRATEGY_SEARCH_INTERFACES.map(item => item.id), ['search', 'crawl', 'user-info'])
-  assert.ok(STRATEGY_SEARCH_INTERFACES.every(item => item.paths.every(path => path.startsWith('/api/v1/'))))
+  assert.ok(STRATEGY_SEARCH_INTERFACES.every(item => item.paths.every(path => /^\/api\/v[12]\//.test(path))))
+  assert.ok(STRATEGY_SEARCH_INTERFACES.find(item => item.id === 'search').paths.includes('/api/v2/data/search'))
 })
 
 test('strategy search visibility covers account-only platforms without granting unrelated data products', () => {
@@ -86,7 +87,7 @@ test('current strategy explains Instagram fixed/priority separately from Faceboo
 test('unverified pairs and missing policy evidence never expose simulated supplier switches', async () => {
   const { strategyPolicySummary, strategyPolicyEditor } = await import('../../src/strategy-search-model.js')
   assert.equal(strategyPolicyEditor('crawl', row), null)
-  assert.equal(strategyPolicySummary('search', { platform: 'twitter', providers: ['rapidapi'], editable: false }).title, '仅 RapidAPI')
+  assert.equal(strategyPolicySummary('search', { platform: 'twitter', providers: ['rapidapi'], editable: false }).title, '已登记供应商：RapidAPI')
   for (const platform of ['twitter', 'douyin', 'tiktok', 'weibo', 'wechat_search']) {
     const summary = strategyPolicySummary('search', { ...row, platform, editable: false, providers: [platform === 'twitter' ? 'rapidapi' : 'tikhub'] })
     assert.equal(summary.editor, null)
@@ -95,4 +96,57 @@ test('unverified pairs and missing policy evidence never expose simulated suppli
   assert.equal(strategyPolicySummary('search', { ...row, policy: null }).mode, '策略尚未就绪')
   assert.equal(strategyPolicySummary('search', { platform: 'telegram', migrationStatus: 'local', providers: [] }).title, 'Hub 已收录数据')
   assert.equal(strategyPolicyEditor('search', { platform: 'facebook', editable: true, providers: ['rapidapi', 'justone'], allowedModes: ['auto'], policy: { mode: 'priority', revision: 2 } }), null)
+})
+
+const twitterRow = { platform: 'twitter', editable: true, providers: ['rapidapi', 'tikhub'], allowedModes: ['fixed', 'priority', 'paused'],
+  policy: { mode: 'priority', primaryProvider: 'rapidapi', fallbackProvider: 'tikhub', revision: 9 } }
+
+test('Twitter strategies use the saved revision, preserve both priority orders and clear unused fallback', () => {
+  assert.deepEqual(twitterStrategyOptions(twitterRow), { providers: ['rapidapi', 'tikhub'], modes: ['fixed', 'priority', 'paused'] })
+  for (const primaryProvider of ['rapidapi', 'tikhub']) {
+    for (const mode of ['fixed', 'priority', 'paused']) {
+      assert.deepEqual(twitterStrategyUpdate(twitterRow, { mode, primaryProvider, reason: '  已核实供应商状态  ', fallbackProvider: 'stale' }), {
+        mode, primaryProvider, fallbackProvider: mode === 'priority' ? (primaryProvider === 'rapidapi' ? 'tikhub' : 'rapidapi') : null,
+        expectedRevision: 9, reason: '已核实供应商状态',
+      })
+    }
+  }
+})
+
+test('Twitter editor requires a valid saved policy and does not invent provider choices', () => {
+  const draft = { mode: 'priority', primaryProvider: 'rapidapi', reason: 'Reviewed' }
+  for (const invalid of [{ ...twitterRow, editable: false }, { ...twitterRow, platform: 'instagram' },
+    { ...twitterRow, policy: null }, { ...twitterRow, policy: { ...twitterRow.policy, revision: 0 } },
+    { ...twitterRow, providers: ['rapidapi'] }, { ...twitterRow, allowedModes: [] }]) {
+    assert.throws(() => twitterStrategyUpdate(invalid, draft), /不允许/)
+  }
+  for (const invalidDraft of [{ ...draft, mode: 'retry_on_400' }, { ...draft, primaryProvider: 'justone' }]) {
+    assert.throws(() => twitterStrategyUpdate(twitterRow, invalidDraft), /不允许/)
+  }
+  for (const reason of ['', '  ', 'x'.repeat(1001)]) assert.throws(() => twitterStrategyUpdate(twitterRow, { ...draft, reason }), /修改原因/)
+  assert.equal(strategyPolicyEditor('search', twitterRow), 'twitter')
+  assert.equal(strategyPolicyEditor('search', { ...twitterRow, policy: { ...twitterRow.policy, fallbackProvider: 'rapidapi' } }), null)
+  assert.equal(strategyPolicyEditor('search', { ...twitterRow, policy: { ...twitterRow.policy, mode: 'automatic_retry' } }), null)
+})
+
+test('Twitter management distinguishes standard-search choices, purchased buffers and read-only account routes', () => {
+  const summary = strategyPolicySummary('search', twitterRow)
+  assert.equal(summary.title, '优先 RapidAPI → 保底 TikHub')
+  assert.match(summary.description, /凭据或操作策略未就绪/)
+  assert.match(summary.description, /400、超时和未知结果不会触发自动切换/)
+  assert.equal(strategyPolicySummary('search', { ...twitterRow, policy: { ...twitterRow.policy, primaryProvider: 'tikhub', fallbackProvider: 'rapidapi' } }).title,
+    '优先 TikHub → 保底 RapidAPI')
+  for (const mode of ['fixed', 'paused']) {
+    const current = strategyPolicySummary('search', { ...twitterRow, policy: { ...twitterRow.policy, mode, fallbackProvider: null } })
+    assert.equal(current.editor, 'twitter')
+    if (mode === 'paused') assert.match(current.description, /已有游标.*已购缓冲数据仍可交付/)
+    else assert.equal(current.title, '固定 RapidAPI')
+  }
+  for (const interfaceId of ['crawl', 'user-info']) {
+    const account = strategyPolicySummary(interfaceId, twitterRow)
+    assert.equal(account.editor, null)
+    assert.equal(account.title, '仅 RapidAPI')
+    assert.match(account.description, /不受标准内容搜索策略控制/)
+  }
+  assert.doesNotMatch(strategyPolicySummary('search', { ...twitterRow, policy: null }).description, /仅使用 RapidAPI/)
 })

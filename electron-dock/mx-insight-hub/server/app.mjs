@@ -3075,11 +3075,12 @@ export function createApp({
       if (request.method === 'GET' && pathname === '/internal/v1/admin/strategy-search') {
         requireSourceAdmin(principal)
         requireNoQuery(searchParams, 'strategy search inventory')
-        const [instagramPolicy, facebookPolicies] = await Promise.all([
+        const [instagramPolicy, twitterPolicy, facebookPolicies] = await Promise.all([
           strategySearchRoutingStore?.get('search', 'instagram') ?? null,
+          strategySearchRoutingStore?.get('search', 'twitter') ?? null,
           platformSearchPolicyStore?.list() ?? [],
         ])
-        sendJson(response, 200, { data: strategySearchCatalog({ instagramPolicy,
+        sendJson(response, 200, { data: strategySearchCatalog({ instagramPolicy, twitterPolicy,
           facebookPolicy: facebookPolicies.find(row => row.platform === 'facebook') || null }), requestId })
         return
       }

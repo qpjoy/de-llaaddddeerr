@@ -790,7 +790,7 @@ export class ExternalPlatformGateway {
     })
   }
 
-  async searchContent(context, input, { finalizeXiaohongshu = null } = {}) {
+  async searchContent(context, input, { finalizeXiaohongshu = null, assertSearchDispatchAllowed = null } = {}) {
     const platform = input.normalized.platform
     const revalidateIdentity = async ({ operation, totalLimit }) => {
       const current = await this.#revalidateWaitingIdentity(context, platform, { platformSearch: true, operation,
@@ -803,6 +803,7 @@ export class ExternalPlatformGateway {
       return current
     }
     const prepared = contentSearchPlan({ gateway: this, context, input, dependencies: {
+      assertSearchDispatchAllowed: platform === 'twitter' && input.dataSearch ? assertSearchDispatchAllowed : null,
       resolveCredential: () => this.#resolvedCredential(),
       revalidateIdentity,
       enterCapacity: options => this.#enterOrQueue(context, { ...options, canWait: false }),
@@ -828,7 +829,7 @@ export class ExternalPlatformGateway {
     return this.#deliver(context, prepared.input, prepared.plan)
   }
 
-  async searchRaw(context, input, { policyStore = null, gateways = null, reservation = null, selection = null, fallbackUsed = false } = {}) {
+  async searchRaw(context, input, { policyStore = null, gateways = null, reservation = null, selection = null, fallbackUsed = false, assertSearchDispatchAllowed = null } = {}) {
     const { normalized, body, idempotencyKey, retryOfRequestId, dataSearch = null, signal } = input
     const platform = normalized.platform
     if (retryOfRequestId != null && !(platform === 'twitter' && dataSearch)) {
@@ -930,6 +931,7 @@ export class ExternalPlatformGateway {
         if (request.restartRequired) throw new AppError(409, 'search_restart_required',
           'Twitter search now runs in Hub; restart from page 1 with a new Idempotency-Key.')
         return runTwitterSearchFill({ gateway: this, context, delivery, request, deadlineAt, signal,
+          assertSearchDispatchAllowed,
           resolveCredential: () => this.#resolvedCredential(),
           revalidateIdentity: async () => {
             const current = await this.#revalidateWaitingIdentity(context, 'twitter', {

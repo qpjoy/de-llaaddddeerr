@@ -8,14 +8,17 @@ const TIKHUB_RECIPE = 't.twitter_web_fetch_search_timeline'
 const owned = (row, context) => row && row.tenantId === context.tenant.id
   && row.consumerId === context.consumer.id && row.apiKeyId === context.apiKey.id && row.platform === 'twitter'
 
-export async function resolveTwitterSearchProvider({ provider = 'auto', capabilities, options }) {
-  if (provider !== 'auto') return { provider, ...await capabilities(provider, options) }
-  // Prefer the original supplier before dispatch. TikHub is a readiness
+export async function resolveTwitterSearchProvider({ provider = 'auto', policy = null, capabilities, options }) {
+  const route = policy ?? { mode: provider === 'auto' ? 'priority' : 'fixed',
+    primaryProvider: provider === 'auto' ? 'rapidapi' : provider, fallbackProvider: 'tikhub' }
+  if (route.mode === 'paused') return { provider: route.primaryProvider, ready: false }
+  if (route.mode === 'fixed') return { provider: route.primaryProvider, ...await capabilities(route.primaryProvider, options) }
+  // Apply the saved priority before dispatch. The backup is a readiness
   // fallback, never an automatic retry of a paid or unresolved request.
-  const rapidapi = await capabilities('rapidapi', options).catch(() => ({ ready: false }))
-  if (rapidapi.ready) return { provider: 'rapidapi', ready: true }
-  const tikhub = await capabilities('tikhub', options).catch(() => ({ ready: false }))
-  return tikhub.ready ? { provider: 'tikhub', ready: true } : { provider: 'rapidapi', ready: false }
+  const primary = await capabilities(route.primaryProvider, options).catch(() => ({ ready: false }))
+  if (primary.ready) return { provider: route.primaryProvider, ready: true }
+  const fallback = await capabilities(route.fallbackProvider, options).catch(() => ({ ready: false }))
+  return fallback.ready ? { provider: route.fallbackProvider, ready: true } : { provider: route.primaryProvider, ready: false }
 }
 
 export function twitterSearchCursorProvider(cursor, { apiKeyPepper, context }) {
@@ -55,8 +58,13 @@ async function savedProvider(row, { usageStore, rapidGateway, tikHubGateway }) {
   return 'rapidapi'
 }
 
-export function createTwitterSearchRouter({ usageStore, rapidGateway, tikHubGateway, apiKeyPepper, provider = 'auto', resolveProvider = null }) {
+export function createTwitterSearchRouter({ usageStore, rapidGateway, tikHubGateway, apiKeyPepper, provider = 'auto', resolveProvider = null, policyStore = null }) {
   if (!['auto', 'rapidapi', 'tikhub'].includes(provider)) throw new AppError(500, 'invalid_configuration', 'Invalid Twitter search supplier')
+  const assertSearchDispatchAllowed = policyStore ? async () => {
+    if ((await policyStore.get('search', 'twitter')).mode === 'paused') {
+      throw new AppError(503, 'strategy_search_paused', 'Twitter search is paused')
+    }
+  } : null
   return async (context, input) => {
     const cursorProvider = twitterSearchCursorProvider(input.normalized.cursor, { apiKeyPepper, context })
     const existing = input.idempotencyKey
@@ -76,6 +84,7 @@ export function createTwitterSearchRouter({ usageStore, rapidGateway, tikHubGate
     // are validated by their original gateway before any new dispatch. For a
     // new intent, check all known standard-query outcomes across suppliers.
     if (!previous && input.retryOfRequestId == null) await assertTwitterSearchAvailable({ usageStore, context, query: input.normalized.query })
-    return selected === 'tikhub' ? tikHubGateway.searchContent(context, input) : rapidGateway.searchRaw(context, input)
+    return selected === 'tikhub' ? tikHubGateway.searchContent(context, input, { assertSearchDispatchAllowed })
+      : rapidGateway.searchRaw(context, input, { assertSearchDispatchAllowed })
   }
 }

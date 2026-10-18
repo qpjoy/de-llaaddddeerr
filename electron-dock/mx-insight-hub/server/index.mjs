@@ -419,7 +419,6 @@ export async function createRuntime(config = loadConfig()) {
   }
   const nativeSearchGateways = Object.fromEntries(['weibo', ...Object.keys(TIKHUB_CONTENT_SEARCH_RECIPES)]
     .map(platform => [platform, nativeSearchGateway(platform, 'tikhub')]))
-  const twitterSearchProvider = config.twitterSearchProvider ?? 'auto'
   const twitterProviderCapabilities = async (provider, options) => {
     const tikhub = provider === 'tikhub'
     const credential = await (tikhub ? tikHubCredentialStore : rapidApiCredentialStore).describeCredential(provider)
@@ -428,12 +427,12 @@ export async function createRuntime(config = loadConfig()) {
     const readiness = await gateway.nativeReadiness({ ...options, operationKeys: [operation], credentialConfigured: credential.credentialConfigured })
     return { ready: readiness[operation] === true }
   }
-  const resolveTwitterSearchRoute = options => resolveTwitterSearchProvider({
-    provider: twitterSearchProvider, capabilities: twitterProviderCapabilities, options,
+  const resolveTwitterSearchRoute = async options => resolveTwitterSearchProvider({
+    policy: await strategySearchRoutingStore.get('search', 'twitter'), capabilities: twitterProviderCapabilities, options,
   })
   const twitterSearchCapabilities = async options => ({ ready: (await resolveTwitterSearchRoute(options)).ready })
   const twitterSearch = createTwitterSearchRouter({ usageStore: store, rapidGateway: hubSocialGateway,
-    tikHubGateway: nativeSearchGateways.twitter, apiKeyPepper: config.apiKeyPepper, provider: twitterSearchProvider,
+    tikHubGateway: nativeSearchGateways.twitter, apiKeyPepper: config.apiKeyPepper, policyStore: strategySearchRoutingStore,
     resolveProvider: async context => (await resolveTwitterSearchRoute({ consumerId: context.consumer.id })).provider })
   const socialAccountDataGateways = Object.fromEntries(HUB_SOCIAL_COMPAT_PLATFORMS.map(platform => [platform,
     platform === 'twitter' ? hubSocialGateway : nativeSearchGateway(platform, platform === 'facebook' ? 'justone' : 'tikhub')]))
@@ -736,7 +735,7 @@ export async function createRuntime(config = loadConfig()) {
     externalPlatformControlStore, externalAdmissionPolicies, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     hubSocialGateway, rapidApiStore, rapidApiCredentialStore, rapidApiProxyStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
-    nativeSearchGateways, socialAccountDataGateways, socialDataGateway,
+    nativeSearchGateways, socialAccountDataGateways, socialDataGateway, strategySearchRoutingStore,
   }
 }
 

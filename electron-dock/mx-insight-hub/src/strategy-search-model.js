@@ -1,7 +1,7 @@
 export const STRATEGY_SEARCH_PATH = '/data-products/strategy-search'
 export const STRATEGY_SEARCH_INTERFACES = [
   { id: 'search', label: '关键词搜索', description: '按关键词和目标平台获取内容，使用统一条目或兼容 raw 响应。',
-    paths: ['/api/v1/data/search', '/api/v1/search/raw', '/api/v1/night-all/search/raw'],
+    paths: ['/api/v1/data/search', '/api/v2/data/search', '/api/v1/search/raw', '/api/v1/night-all/search/raw'],
     input: '统一接口使用 platform、query、pageSize 和可选 cursor；raw 入口保留既有请求合同。',
     output: '统一接口交付 items、pageInfo、status 和 warnings；raw 入口保留 raw_info / raw_data。',
     boundary: '每次查询针对一个目标平台。路由策略属于业务接口，修改搜索策略不会更改账号内容或账号资料接口。' },
@@ -19,6 +19,7 @@ export const STRATEGY_SEARCH_INTERFACES = [
 
 export const STRATEGY_PROVIDER_LABELS = { justone: 'JustOne', tikhub: 'TikHub', rapidapi: 'RapidAPI', 'night-all': 'Night-All' }
 export const INSTAGRAM_STRATEGY_MODE_LABELS = { fixed: '固定供应商', priority: '优先与保底', paused: '暂停新搜索' }
+export const TWITTER_STRATEGY_MODE_LABELS = { fixed: '固定供应商', priority: '优先与保底', paused: '暂停新采购' }
 export const STRATEGY_MIGRATION_LABELS = { hub_native: 'Hub 直连', conditional: '部分已迁移', night_all: '仍经 Night-All', local: '本地数据' }
 
 export function strategySearchLink(platform, interfaceId = 'search') {
@@ -46,6 +47,25 @@ export function instagramStrategyUpdate(row, draft) {
     expectedRevision: row.policy.revision, reason }
 }
 
+export function twitterStrategyOptions(row) {
+  if (row?.platform !== 'twitter' || row.editable !== true || !row.policy
+    || !Number.isSafeInteger(row.policy.revision) || row.policy.revision < 1) return { providers: [], modes: [] }
+  const providers = ['rapidapi', 'tikhub'].filter(value => row.providers?.includes(value))
+  const modes = Object.keys(TWITTER_STRATEGY_MODE_LABELS).filter(value => row.allowedModes?.includes(value)
+    && (value !== 'priority' || providers.length === 2))
+  return { providers, modes }
+}
+
+export function twitterStrategyUpdate(row, draft) {
+  const { providers, modes } = twitterStrategyOptions(row)
+  if (!modes.includes(draft.mode) || !providers.includes(draft.primaryProvider)) throw new Error('当前接口不允许此供应商策略，请刷新后重试。')
+  const reason = String(draft.reason || '').trim()
+  if (!reason || reason.length > 1000) throw new Error('请填写 1–1000 字的修改原因。')
+  return { mode: draft.mode, primaryProvider: draft.primaryProvider,
+    fallbackProvider: draft.mode === 'priority' ? providers.find(value => value !== draft.primaryProvider) : null,
+    expectedRevision: row.policy.revision, reason }
+}
+
 export const FACEBOOK_STRATEGY_MODE_LABELS = {
   auto: '额度优先：RapidAPI → JustOne', rapidapi: '固定：仅 RapidAPI', justone: '固定：仅 JustOne', paused: '暂停新搜索',
 }
@@ -54,6 +74,10 @@ export function strategyPolicyEditor(interfaceId, row) {
   if (interfaceId !== 'search') return null
   const instagram = instagramStrategyOptions(row)
   if (instagram.providers.length && instagram.modes.length) return 'instagram'
+  const twitter = twitterStrategyOptions(row)
+  if (twitter.providers.includes(row?.policy?.primaryProvider) && twitter.modes.includes(row?.policy?.mode)
+    && (row.policy.mode !== 'priority' || twitter.providers.includes(row.policy.fallbackProvider)
+      && row.policy.fallbackProvider !== row.policy.primaryProvider)) return 'twitter'
   if (row?.platform === 'facebook' && row.editable === true && row.policy
     && Number.isSafeInteger(row.policy.revision) && row.policy.revision > 0
     && Object.hasOwn(FACEBOOK_STRATEGY_MODE_LABELS, row.policy.mode)
@@ -63,7 +87,7 @@ export function strategyPolicyEditor(interfaceId, row) {
 }
 
 // A registered route and a configurable strategy are different facts. Only the
-// two reviewed search policy editors can expose writes; inventory is read-only.
+// reviewed search policy editors can expose writes; inventory is read-only.
 export function strategyPolicySummary(interfaceId, row) {
   const editor = strategyPolicyEditor(interfaceId, row)
   const providerLabel = provider => STRATEGY_PROVIDER_LABELS[provider] || provider || '未提供'
@@ -88,8 +112,18 @@ export function strategyPolicySummary(interfaceId, row) {
     return { ...current, editor, providers: ['rapidapi', 'justone'],
       modes: row.allowedModes.filter(mode => Object.hasOwn(FACEBOOK_STRATEGY_MODE_LABELS, mode)).map(mode => FACEBOOK_STRATEGY_MODE_LABELS[mode]), revision: policy.revision }
   }
-  if (row.platform === 'twitter') return { title: '仅 RapidAPI', mode: '已登记路由 · 只读',
-    description: 'Twitter 仅使用 RapidAPI。兼容入口的迁移状态独立展示，当前没有已接入的可切换供应商。', providers: ['rapidapi'], modes: [], editor: null }
+  if (editor === 'twitter') {
+    const policy = row.policy, { providers, modes } = twitterStrategyOptions(row)
+    const primary = providerLabel(policy.primaryProvider), fallback = providerLabel(policy.fallbackProvider)
+    const current = policy.mode === 'priority'
+      ? { title: `优先 ${primary} → 保底 ${fallback}`, mode: '优先与保底', description: '仅在新请求尚未派发、优先供应商凭据或操作策略未就绪时使用已就绪的保底供应商；400、超时和未知结果不会触发自动切换。' }
+      : policy.mode === 'paused'
+        ? { title: '暂停 Twitter 新采购', mode: '暂停', description: '暂停新供应商采购，包括已有游标需要的后续采购；已完成响应的重放与已购缓冲数据仍可交付。' }
+        : { title: `固定 ${primary}`, mode: '固定供应商', description: `新搜索仅使用 ${primary}。该供应商未就绪时返回具体原因，不自动转到其他供应商。` }
+    return { ...current, editor, providers, modes: modes.map(mode => TWITTER_STRATEGY_MODE_LABELS[mode]), revision: policy.revision }
+  }
+  if (row.platform === 'twitter' && interfaceId !== 'search') return { title: '仅 RapidAPI', mode: '已登记路由 · 只读',
+    description: 'Twitter 账号接口保留原 RapidAPI 路由，不受标准内容搜索策略控制。兼容入口的迁移状态独立展示。', providers: ['rapidapi'], modes: [], editor: null }
   if (row.migrationStatus === 'local') return { title: 'Hub 已收录数据', mode: '本地检索 · 只读',
     description: '读取已采集数据，不选择付费搜索供应商。', providers: [], modes: [], editor: null }
   return { title: row.providers?.length === 1 ? `已登记供应商：${providerLabel(row.providers[0])}` : '沿用当前路由',

@@ -4,9 +4,17 @@
 
 ## 供应商选择与历史兼容
 
-`MX_INSIGHT_TWITTER_SEARCH_PROVIDER=auto` 是默认部署策略：按用户确认的原业务优先级，新搜索在采购前优先选已就绪 RapidAPI；其凭据或操作发布策略未就绪时，使用已就绪 TikHub 保底。两者均未就绪时报告不可用，不采购。也可以设置 `tikhub` 或 `rapidapi` 固定新搜索的供应商。这里的就绪检查不是额度、并发或网络成功承诺；当前操作权限、预算、并发及平台授权仍由各供应商原网关在实际派发前检查。收到400等拒绝、超时或 unknown 后不自动换供应商重发，不把历史400永久当作查询黑名单。
+策略由数据库统一管理，**无需在 `.env` 设置 `MX_INSIGHT_TWITTER_SEARCH_PROVIDER=auto`**。迁移 `160_twitter_strategy_search.sql` 只在策略缺失时初始化 `priority / rapidapi / tikhub`：新搜索在采购前优先选已就绪 RapidAPI；其凭据或操作发布策略未就绪时，使用已就绪 TikHub 保底。两者均未就绪时报告不可用，不采购。这里的就绪检查不是额度、并发或网络成功承诺；当前操作权限、预算、并发及平台授权仍由各供应商原网关在实际派发前检查。收到400等拒绝、超时或 unknown 后不自动换供应商重发，不把历史400永久当作查询黑名单。
 
-此优先级在 Hub 发布后对未固定供应商的新标准请求生效，下游无需升级。部署配置保持 `auto` 才有 TikHub 保底；显式 `rapidapi` 表示固定 RapidAPI。已经固定为 TikHub 的配置不会被部署强行覆盖，已有请求和游标也不随默认顺序变化。Twitter raw 搜索仍走 RapidAPI，Facebook 的 RapidAPI 额度优先/JustOne 保底策略不变。
+管理入口为 **数据产品 → 策略搜索 → 管理 → 内容搜索 → Twitter / X**，仅 Admin Token 会话可编辑：
+
+- `fixed`：固定 RapidAPI 或 TikHub。
+- `priority`：选择优先供应商，另一个作为派发前未就绪时的保底；默认 RapidAPI 优先。
+- `paused`：暂停新的采购，包括原游标需要的后续采购；原重放窗口内的已完成响应和已购缓冲仍可交付。补页中途暂停保留已取得的结果及后续游标。
+
+保存需要当前修订号和修改原因，并写入审计；并发修改返回冲突，刷新后重新填写。每次新选路和实际采购前读取策略，无需重启。迁移、重复部署均不覆盖已有数据库策略。旧环境变量仍接受合法值以兼容既有部署文件，但不再覆盖数据库；从旧环境变量固定模式升级时，以本次迁移初始化的 RapidAPI 优先为准，需要其他模式可在界面保存。
+
+此优先级在 Hub 发布后对未固定供应商的新标准请求生效，下游无需升级。已有请求和游标不随默认顺序变化。Twitter raw 搜索仍走 RapidAPI，Facebook 的 RapidAPI 额度优先/JustOne 保底策略不变。
 
 本次顺序调整的223项相关回归通过、无跳过，覆盖真实运行时的调用方策略、RapidAPI优先及未就绪时TikHub保底、原TikHub缓冲页重放、双版本unknown及幂等保护；其中4项本地HTTP测试解除沙箱监听限制后补跑通过。零线上采购，尚未替用户部署。
 
@@ -45,7 +53,9 @@ bash server/ops/inspect-twitter-tikhub-saved.sh
 MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh ops internal-production deploy
 ```
 
-无需 Delta/罗盘/Java 升级或额外数据库迁移。小量真实采购已获用户授权；标准链路验收入口已补齐，在有 kubectl 权限的宿主机同步下列两个同目录文件后执行：
+无需 Delta/罗盘/Java 升级。此次可配置策略需要迁移160，完整 Hub 部署入口会在升级服务前自动执行；不要仅更新前端或跳过迁移替换 Public 镜像。迁移不修改凭据、价格、授权、历史请求或账单，查看和保存策略不会采购数据。
+
+小量真实采购已获用户授权；标准链路验收入口已补齐，在有 kubectl 权限的宿主机同步下列两个同目录文件后执行：
 
 ```bash
 bash server/ops/verify-twitter-standard.sh
@@ -72,6 +82,8 @@ bash server/ops/verify-twitter-standard.sh
 原请求 `b5906846-8564-4791-8b83-ef3ce97789bc` 的400/502回执不可改写为成功。对该旧 key 的重试仍返回原结果；旧失败任务若坚持复用该 key，需通过原业务提供的新搜索/重建入口形成新任务。Hub 不自动清空 unknown，也不把独立诊断页灌入旧冷启动任务。
 
 ## 本地验证记录
+
+数据库策略与管理界面本轮整合回归389项通过、0失败、0跳过，包含真实PGlite迁移重复应用不覆盖配置、CAS及审计回滚、Admin权限、表单保存和冲突、运行时策略热更新、暂停后重放/缓冲及补页恢复、v1/v2幂等和unknown、raw及其他平台回归。类型检查和生产构建通过。本轮零线上采购、尚未部署；本地浏览器控制在Work设置中关闭，未完成真实浏览器视觉验收，组件处理函数已离线验证。
 
 447项相关回归通过，无跳过，包含本地HTTP接口、真实PGlite的跨供应商租约/unknown校验、标准v1/v2、原raw/social和聚合计费、分页缓冲、映射、手动重试与只读诊断。独立复核已完成。额外检查发现旧 `content-search-aggregate.test.mjs:35` 的Weibo能力预期在本轮之前的HEAD也失败，已独立快照复现，未改动该平台行为。线上标准交付及旧任务恢复不包含在离线通过结论内。
 

@@ -39,10 +39,11 @@ const knownAdmission = error => error instanceof AppError && error.status !== 40
   /^external_platform_(?:operation_|cost_)/u.test(error.code)
   || error.status === 409 && error.code === 'external_platform_response_unusable'
   || ['external_admission_policy_unavailable', 'external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
-    'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'content_search_deadline'].includes(error.code))
+    'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'content_search_deadline',
+    'strategy_search_paused', 'strategy_search_route_unavailable'].includes(error.code))
 
 export async function runContentSearch({ gateway, context, request, delivery, deadlineAt, signal,
-  resolveCredential, revalidateIdentity, enterCapacity, leaveCapacity, providerCostControl, buildResponse, finalizeResponse }, { clock = Date.now } = {}) {
+  resolveCredential, revalidateIdentity, enterCapacity, leaveCapacity, providerCostControl, buildResponse, finalizeResponse, assertSearchDispatchAllowed }, { clock = Date.now } = {}) {
   // Protect equal historical requests even when a different Idempotency-Key is
   // supplied. A retired cursor is only a restart boundary after this check.
   const store = gateway.platformStore, stateStore = new ContentSearchStateStore(store, request)
@@ -190,6 +191,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           phase = 'admission'
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           context = await revalidateIdentity({ operation: nativeRequest.operation, totalLimit: request.totalLimit })
+          await assertSearchDispatchAllowed?.()
           const states = await Promise.all([store.providerState('tikhub'), store.contractCircuitState?.('tikhub', request.platform)])
           states[0] = internalCircuitState(gateway.usageStore, context, states[0])
           if (states.some(row => row?.circuitOpenUntil && Date.parse(row.circuitOpenUntil) > clock())) throw new AppError(503, 'external_platform_circuit_open', 'The content-search supplier circuit is open')
@@ -216,6 +218,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           if (!enoughTime()) throw new AppError(503, 'content_search_deadline', 'Content-search deadline reached before dispatch')
           currentEvidence = null
+          await assertSearchDispatchAllowed?.()
           phase = 'begin_call'
           currentCall = await store.beginProviderCall({ ...delivery, operation: nativeRequest.operation,
             contractVersion: nativeRequest.endpointContractVersion, endpointKey: nativeRequest.endpointKey,

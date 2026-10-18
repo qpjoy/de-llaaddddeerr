@@ -1,13 +1,17 @@
 import { AppError } from '../core/errors.mjs'
 
-export const STRATEGY_SEARCH_PROVIDERS = Object.freeze(['justone', 'tikhub'])
+export const STRATEGY_SEARCH_PROVIDERS = Object.freeze(['justone', 'tikhub', 'rapidapi'])
 export const STRATEGY_SEARCH_MODES = Object.freeze(['fixed', 'priority', 'paused'])
+const PROVIDERS_BY_PLATFORM = Object.freeze({
+  instagram: Object.freeze(['justone', 'tikhub']),
+  twitter: Object.freeze(['rapidapi', 'tikhub']),
+})
 
-const editable = (interfaceId, platform) => interfaceId === 'search' && platform === 'instagram'
+const editable = (interfaceId, platform) => interfaceId === 'search' && Object.hasOwn(PROVIDERS_BY_PLATFORM, platform)
 const validRoute = row => row && editable(row.interface_key, row.platform)
-  && STRATEGY_SEARCH_MODES.includes(row.mode) && STRATEGY_SEARCH_PROVIDERS.includes(row.primary_provider)
+  && STRATEGY_SEARCH_MODES.includes(row.mode) && PROVIDERS_BY_PLATFORM[row.platform].includes(row.primary_provider)
   && (row.mode === 'priority'
-    ? STRATEGY_SEARCH_PROVIDERS.includes(row.fallback_provider) && row.fallback_provider !== row.primary_provider
+    ? PROVIDERS_BY_PLATFORM[row.platform].includes(row.fallback_provider) && row.fallback_provider !== row.primary_provider
     : row.fallback_provider === null)
   && Number.isSafeInteger(row.revision) && row.revision >= 1
 
@@ -24,6 +28,9 @@ export class StrategySearchRoutingStore {
     this.policies = new Map([['search/instagram', {
       interface_key: 'search', platform: 'instagram', mode: 'fixed', primary_provider: 'justone',
       fallback_provider: null, revision: 1, reason: 'initial_route', updated_at: null,
+    }], ['search/twitter', {
+      interface_key: 'search', platform: 'twitter', mode: 'priority', primary_provider: 'rapidapi',
+      fallback_provider: 'tikhub', revision: 1, reason: 'initial_route', updated_at: null,
     }]])
     this.events = []
   }

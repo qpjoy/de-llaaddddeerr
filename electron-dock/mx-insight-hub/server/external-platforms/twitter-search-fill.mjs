@@ -20,7 +20,8 @@ const uncertain = message => {
 const knownAdmission = error => error instanceof AppError && error.status !== 403 && (
   /^external_platform_(?:operation_|cost_)/u.test(error.code)
   || ['external_admission_policy_unavailable', 'external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
-    'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'twitter_fill_deadline'].includes(error.code))
+    'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'twitter_fill_deadline',
+    'strategy_search_paused', 'strategy_search_route_unavailable'].includes(error.code))
 
 function archiveObjects(result, request, callId) {
   if (result.archiveObjects?.length) return result.archiveObjects
@@ -44,7 +45,7 @@ function upstreamFailure(error) {
 // A single customer intent owns all acquisition steps. Every paid receipt is
 // durable before another dispatch; only the final delivery settles the hold.
 export async function runTwitterSearchFill({ gateway,context,delivery,request,deadlineAt,signal,
-  resolveCredential,enterCapacity,leaveCapacity,revalidateIdentity,providerCostControl,projectDelivery }, { clock=Date.now }={}) {
+  resolveCredential,enterCapacity,leaveCapacity,revalidateIdentity,providerCostControl,projectDelivery,assertSearchDispatchAllowed }, { clock=Date.now }={}) {
   const store=gateway.platformStore, started=performance.now()
   if(await store.twitterFillUnknownFor(delivery)) throw new AppError(409,'request_outcome_unknown','A previous equal delivery has an unknown outcome')
   const identity={ tenantId:context.tenant.id,consumerId:context.consumer.id,apiKeyId:context.apiKey.id,
@@ -83,6 +84,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
       ? (await store.validateTwitterManualRetry(dispatchLease.twitterManualRetry)).ancestorRequestIds : []
     await assertTwitterSearchAvailable({usageStore:gateway.usageStore,context,query:request.query,
       excludeRequestIds:[delivery.usageRequestId,...excluded]})
+    await assertSearchDispatchAllowed?.()
     const shared=await store.providerState('rapidapi')
     const state=isHubRateLimitExempt(context)?internalCircuitState(gateway.usageStore,context,shared):shared
     const contract=await store.contractCircuitState?.('rapidapi','twitter')
@@ -195,6 +197,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         delete step.upstreamQuery.cursor
         if(inputCursor) step.upstreamQuery.cursor=inputCursor
         currentEvidence=null
+        await assertSearchDispatchAllowed?.()
         currentCall=await store.beginProviderCall({ ...delivery,apiKeyId:context.apiKey.id,
           contractVersion:step.endpointContractVersion,endpointKey:step.endpointKey,endpointVersion:step.endpointVersion,
           marketplace:'twitter',callOrdinal:calls,callRole:calls?'enrichment':'primary',dispatchFingerprint:delivery.fingerprint,

@@ -10,6 +10,8 @@ async function harness(t, provider = 'tikhub') {
     MX_INSIGHT_API_KEY_PEPPER: 'twitter-readiness-synthetic-pepper-at-least-32',
   }), twitterSearchProvider: provider })
   t.after(async () => { runtime.agent.close(); await runtime.store.close() })
+  await runtime.strategySearchRoutingStore.update('search', 'twitter', { mode: 'fixed', primaryProvider: provider,
+    fallbackProvider: null, expectedRevision: 1, reason: 'Offline fixed supplier policy' })
   const { service, store, externalPlatformControlStore: controls } = runtime
   const credentials = provider === 'tikhub' ? runtime.tikHubCredentialStore : runtime.rapidApiCredentialStore
   const gateway = provider === 'tikhub' ? runtime.nativeSearchGateways.twitter : runtime.hubSocialGateway
@@ -88,7 +90,7 @@ test('Twitter readiness fails closed without blocking capabilities or exposing p
 test('auto routing and readiness use each consumer current supplier release without adding native grants', async t => {
   const network = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Readiness cannot dispatch') })
   const runtime = await createRuntime({ ...loadConfig({ MX_INSIGHT_STORE: 'memory', MX_INSIGHT_LISTENER_MODE: 'public',
-    MX_INSIGHT_API_KEY_PEPPER: 'auto-twitter-capability-fixture-with-32-characters' }), twitterSearchProvider: 'auto' })
+    MX_INSIGHT_API_KEY_PEPPER: 'auto-twitter-capability-fixture-with-32-characters' }), twitterSearchProvider: 'tikhub' })
   t.after(async () => { runtime.agent.close(); await runtime.store.close(); assert.equal(network.mock.callCount(), 0) })
   const { service, store, externalPlatformControlStore: controls } = runtime
   const tenant = await service.createTenant({ name: 'Offline auto supplier fixture' }), contexts = []
@@ -126,6 +128,14 @@ test('auto routing and readiness use each consumer current supplier release with
     body: { platform: 'twitter', query: 'unchanged query', pageSize: 20 }, idempotencyKey: 'auto-tikhub-readiness-backup' }), 'tikhub')
   assert.equal((await service.capabilities(contexts[1])).data.platforms.find(row => row.platform === 'twitter').search.ready, false)
   runtime.rapidApiCredentialStore.describeCredential = async () => ({ credentialConfigured: true })
+  // Saved policy is authoritative even when a previous deployment had a
+  // conflicting environment override; changing it is visible without restart.
+  await runtime.strategySearchRoutingStore.update('search', 'twitter', { mode: 'priority', primaryProvider: 'tikhub',
+    fallbackProvider: 'rapidapi', expectedRevision: 1, reason: 'Offline reverse-priority save' })
+  assert.equal(await service.search(contexts[0], { path: '/api/v1/data/search',
+    body: { platform: 'twitter', query: 'same original conditions', pageSize: 20 }, idempotencyKey: 'db-policy-changed' }), 'tikhub')
+  await runtime.strategySearchRoutingStore.update('search', 'twitter', { mode: 'priority', primaryProvider: 'rapidapi',
+    fallbackProvider: 'tikhub', expectedRevision: 2, reason: 'Restore default priority' })
   // The same caller also has a TikHub-only product. A bulk content capability
   // failure must not overwrite Twitter's independently available Rapid route.
   const ctx = contexts[0]
