@@ -1,10 +1,10 @@
-// Fixed, one-page comparison of the supplier's documented query-param alias.
+// Fixed, single-page comparisons for the original rejected Twitter query.
 // Dry run by default. Execute only after review: this can consume supplier
 // quota. No deployment, Delta mutation, retry, cursor follow or unknown reset.
 import { createHash } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-export const REVISION = 'twitter-query-param-check.v6'
+export const REVISION = 'twitter-query-param-check.v8'
 // Receipt keys issued by v1 are immutable even as this diagnostic grows.
 const QUERY_PARAM_KEY_REVISION = 'twitter-query-param-check.v1'
 export const ORIGINAL_REQUEST_ID = 'b5906846-8564-4791-8b83-ef3ce97789bc'
@@ -60,12 +60,37 @@ export const ORDER_CASES = Object.freeze(Object.fromEntries(Object.entries({
 }).map(([name, value]) => [name, Object.freeze({ ...value, idempotencyKey: 'ops-twitter-order-' + createHash('sha256')
   .update(JSON.stringify(['twitter-event-order-path-check.v1', ORIGINAL_REQUEST_ID, EVENT_RECEIPT.requestId,
     name, value.query, value.providerQuery, 20, 'Top'])).digest('hex').slice(0, 48) })])))
+export const ORDER_RECEIPT = Object.freeze({ requestId: '019601cf-dc6d-42ad-b2b5-e30f46935816',
+  callId: 'd4edacaa-6068-434e-bfe7-1020de91dfe8' })
+// Adaptive bisection of the rejected event group. Each probe keeps its exact
+// quoted atoms and all exclusions; no result replaces the business predicate.
+export const TERM_CASES = Object.freeze(Object.fromEntries(Object.entries({
+  events_pair_a: '("statement" OR "response")',
+  events_pair_b: '("clarification" OR "update")',
+  event_statement: '"statement"', event_response: '"response"',
+  event_clarification: '"clarification"', event_update: '"update"',
+}).map(([name, expression]) => {
+  const query = expression + englishNegations
+  return [name, Object.freeze({ query, idempotencyKey: 'ops-twitter-terms-' + createHash('sha256')
+    .update(JSON.stringify(['twitter-event-terms-whole-page.v1', ORIGINAL_REQUEST_ID, ORDER_RECEIPT.requestId,
+      name, query, 20, 'Top'])).digest('hex').slice(0, 48) })]
+})))
+export const UPDATE_RECEIPT = Object.freeze({ requestId: 'b552925a-6396-4e8e-b14c-92bf583835df',
+  callId: '86a1bede-c6e6-4e7f-a5c2-502162048b5d' })
+export const HOST_PROXY_URL = 'http://127.0.0.1:7788'
+export const PROXY_CASES = Object.freeze(Object.fromEntries(Object.entries({
+  update_proxy: TERM_CASES.event_update.query, candidate_proxy: PROBE_CASES.candidate.query,
+}).map(([name, query]) => [name, Object.freeze({ query, idempotencyKey: 'ops-twitter-proxy-' + createHash('sha256')
+  .update(JSON.stringify(['twitter-host-proxy-whole-page.v1', ORIGINAL_REQUEST_ID, UPDATE_RECEIPT.requestId,
+    HOST_PROXY_URL, name, query, 20, 'Top'])).digest('hex').slice(0, 48) })])))
 const ORIGINAL_QUERY_SHA256 = 'f8f3da5a20307fa43713d737199766faa376498fe825ea69889b171f72a37386'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const ERRORS = new Set(['original_rejection_unverified', 'original_provider_evidence_unverified', 'original_request_changed',
   'original_owner_unavailable', 'known_candidate_rejection_unverified', 'known_candidate_provider_evidence_unverified', 'known_candidate_changed',
   'known_half_outcome_unverified', 'known_half_changed', 'known_english_and_unverified', 'known_english_and_changed',
   'known_event_unverified', 'known_event_changed',
+  'known_order_unverified', 'known_order_changed',
+  'known_update_unverified', 'known_update_changed',
   'probe_request_mismatch', 'probe_call_limit', 'invalid_arguments', 'database_url_required',
   'api_key_required', 'platform_not_granted', 'capability_not_granted', 'test_key_not_supported', 'idempotency_conflict',
   'request_outcome_unknown', 'request_in_progress', 'search_admission_blocked', 'social_upstream_rejected',
@@ -159,7 +184,8 @@ async function readSnapshot(pool, idempotencyKey, caseName) {
     'original_provider_evidence_unverified')
     const knownCandidates = []
     const explicitAnd = Object.hasOwn(AND_CASES, caseName), ordered = Object.hasOwn(ORDER_CASES, caseName)
-    const englishGroup = Object.hasOwn(GROUP_CASES, caseName) || ordered
+    const proxy = Object.hasOwn(PROXY_CASES, caseName), term = Object.hasOwn(TERM_CASES, caseName) || proxy
+    const englishGroup = Object.hasOwn(GROUP_CASES, caseName) || ordered || term
     if (caseName === 'candidate' || Object.hasOwn(HALF_CASES, caseName) || explicitAnd || englishGroup) {
       // This fixed comparison has two known earlier path-form attempts. Check
       // their saved refusals explicitly; never use a new endpoint alias to
@@ -220,7 +246,7 @@ async function readSnapshot(pool, idempotencyKey, caseName) {
         evidence: 'Exact fixed probe key, native saved input and sole owned refusal; no historical wire text retained.' }
     }
     let knownEvent = null
-    if (ordered) {
+    if (ordered || term) {
       const known = (await client.query(`SELECT /* twitter-query-param:known-event */ id,tenant_id,consumer_id,api_key_id,
         idempotency_key,platform,status,response_status,response_body,acquisition_request
         FROM usage_requests WHERE id=$1`, [EVENT_RECEIPT.requestId])).rows[0]
@@ -233,12 +259,40 @@ async function readSnapshot(pool, idempotencyKey, caseName) {
       'known_event_unverified')
       knownEvent = { ...EVENT_RECEIPT, querySha256: digest(GROUP_CASES.english_events.query), savedOutcomeVerified: 'rejected400' }
     }
+    let knownOrder = null
+    if (term) {
+      const known = (await client.query(`SELECT /* twitter-query-param:known-order */ id,tenant_id,consumer_id,api_key_id,
+        idempotency_key,platform,status,response_status,response_body,acquisition_request
+        FROM usage_requests WHERE id=$1`, [ORDER_RECEIPT.requestId])).rows[0]
+      const calls = (await client.query(`SELECT /* twitter-query-param:known-order-calls */ id,tenant_id,consumer_id,api_key_id,
+        provider_key,operation,endpoint_key,endpoint_version,contract_version,outcome,http_status,call_ordinal,call_role
+        FROM external_platform.provider_calls WHERE usage_request_id=$1 LIMIT 2`, [ORDER_RECEIPT.requestId])).rows
+      requireValue(known?.id === ORDER_RECEIPT.requestId && known.idempotency_key === ORDER_CASES.events_order.idempotencyKey
+        && ['tenant_id', 'consumer_id', 'api_key_id'].every(key => known[key] === row[key])
+        && savedOutcome(known, calls, ORDER_CASES.events_order.query, ORDER_RECEIPT.callId) === 'rejected400',
+      'known_order_unverified')
+      knownOrder = { ...ORDER_RECEIPT, querySha256: digest(ORDER_CASES.events_order.query), savedOutcomeVerified: 'rejected400' }
+    }
+    let knownUpdate = null
+    if (proxy) {
+      const known = (await client.query(`SELECT /* twitter-query-param:known-update */ id,tenant_id,consumer_id,api_key_id,
+        idempotency_key,platform,status,response_status,response_body,acquisition_request
+        FROM usage_requests WHERE id=$1`, [UPDATE_RECEIPT.requestId])).rows[0]
+      const calls = (await client.query(`SELECT /* twitter-query-param:known-update-calls */ id,tenant_id,consumer_id,api_key_id,
+        provider_key,operation,endpoint_key,endpoint_version,contract_version,outcome,http_status,call_ordinal,call_role
+        FROM external_platform.provider_calls WHERE usage_request_id=$1 LIMIT 2`, [UPDATE_RECEIPT.requestId])).rows
+      requireValue(known?.id === UPDATE_RECEIPT.requestId && known.idempotency_key === TERM_CASES.event_update.idempotencyKey
+        && ['tenant_id', 'consumer_id', 'api_key_id'].every(key => known[key] === row[key])
+        && savedOutcome(known, calls, TERM_CASES.event_update.query, UPDATE_RECEIPT.callId) === 'rejected400',
+      'known_update_unverified')
+      knownUpdate = { ...UPDATE_RECEIPT, querySha256: digest(TERM_CASES.event_update.query), savedOutcomeVerified: 'rejected400' }
+    }
     const existing = (await client.query(`SELECT /* twitter-query-param:existing */ id,tenant_id,consumer_id,api_key_id,
       platform,status,response_status,response_body,acquisition_request FROM usage_requests WHERE consumer_id=$1 AND idempotency_key=$2 ORDER BY reserved_at LIMIT 2`,
     [row.consumer_id, idempotencyKey])).rows
     requireValue(existing.length <= 1 && existing.every(entry => ['tenant_id', 'consumer_id', 'api_key_id']
       .every(key => entry[key] === row[key])), 'original_owner_unavailable')
-    return { original: row, existing: existing[0] || null, knownCandidates, knownHalves, knownEnglishAnd, knownEvent,
+    return { original: row, existing: existing[0] || null, knownCandidates, knownHalves, knownEnglishAnd, knownEvent, knownOrder, knownUpdate,
       originalDigest: digest(JSON.stringify([row.status, row.response_status, row.response_body, row.acquisition_request, row.fingerprint])) }
   } finally { await client.query('ROLLBACK').catch(() => {}); client.release() }
 }
@@ -248,9 +302,10 @@ async function readSnapshot(pool, idempotencyKey, caseName) {
 // the original failed request while comparing the documented transport alias.
 // The original adapter still sends, parses and archives the HTTP response.
 export function queryParamAdapter(adapter, caseName, onDispatch = () => {}) {
-  const selected = PROBE_CASES[caseName] || HALF_CASES[caseName] || AND_CASES[caseName] || GROUP_CASES[caseName] || ORDER_CASES[caseName]
+  const selected = PROBE_CASES[caseName] || HALF_CASES[caseName] || AND_CASES[caseName] || GROUP_CASES[caseName] || ORDER_CASES[caseName] || TERM_CASES[caseName] || PROXY_CASES[caseName]
   requireValue(Object.hasOwn(PROBE_CASES, caseName) || Object.hasOwn(HALF_CASES, caseName)
-    || Object.hasOwn(AND_CASES, caseName) || Object.hasOwn(GROUP_CASES, caseName) || Object.hasOwn(ORDER_CASES, caseName), 'invalid_arguments')
+    || Object.hasOwn(AND_CASES, caseName) || Object.hasOwn(GROUP_CASES, caseName) || Object.hasOwn(ORDER_CASES, caseName)
+    || Object.hasOwn(TERM_CASES, caseName) || Object.hasOwn(PROXY_CASES, caseName), 'invalid_arguments')
   let calls = 0
   return {
     resolveCredential: () => adapter.resolveCredential(),
@@ -266,7 +321,7 @@ export function queryParamAdapter(adapter, caseName, onDispatch = () => {}) {
       // Half expressions use the same path transport as the proven OpenAI
       // control. They are diagnostics, never replacement business queries.
       const pathForm = Object.hasOwn(HALF_CASES, caseName) || Object.hasOwn(AND_CASES, caseName)
-        || Object.hasOwn(GROUP_CASES, caseName) || Object.hasOwn(ORDER_CASES, caseName)
+        || Object.hasOwn(GROUP_CASES, caseName) || Object.hasOwn(ORDER_CASES, caseName) || Object.hasOwn(TERM_CASES, caseName) || Object.hasOwn(PROXY_CASES, caseName)
       // Keep the acquisition/guard identity on the original native query. Only
       // this private adapter changes the wire text, after validating the exact
       // normalized request; production compilation could erase explicit AND.
@@ -274,6 +329,10 @@ export function queryParamAdapter(adapter, caseName, onDispatch = () => {}) {
       calls++; onDispatch({ querySha256: digest(wireQuery), queryLength: wireQuery.length,
         evidence: 'Current adapter handoff only; not proof of HTTP dispatch, supplier receipt or historical wire text.' })
       return adapter.execute({ ...request, query: wireQuery,
+        // New diagnostic identities acquire the complete single provider page.
+        // count=20 is a supplier hint. No auto-fill, truncation or pagination;
+        // existing raw cases keep their original strict-count interpretation.
+        ...(Object.hasOwn(TERM_CASES, caseName) || Object.hasOwn(PROXY_CASES, caseName) ? { standardSearch: true, allowOverflow: true } : {}),
         endpointPath: pathForm ? `/search/${encodeURIComponent(wireQuery).replace(/[!'()*]/gu, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)}` : '/search',
         upstreamQuery: { ...request.upstreamQuery, category: 'Top', ...(!pathForm ? { searchItem: wireQuery } : {}) } }, options)
     },
@@ -292,6 +351,9 @@ async function appendSavedEvidence(report, pool, saved, selected) {
     httpStatus: integer(call.http_status), upstreamRequestId: typeof call.upstream_request_id === 'string'
       && /^[A-Za-z0-9_.:-]{1,128}$/u.test(call.upstream_request_id) ? call.upstream_request_id : null }))
   report.savedOutcomeVerified = savedOutcome(saved, calls, selected.query)
+  if ((Object.values(TERM_CASES).includes(selected) || Object.values(PROXY_CASES).includes(selected)) && report.savedOutcomeVerified === 'success') {
+    report.acquiredCount = Array.isArray(saved.response_body?.data?.items) ? saved.response_body.data.items.length : null
+  }
   const error = saved.response_body?.error
   if ((Object.values(GROUP_CASES).includes(selected) || Object.values(ORDER_CASES).includes(selected))
     && isOwnedProbeReceipt(saved, calls, selected.query)
@@ -318,12 +380,13 @@ async function appendSavedEvidence(report, pool, saved, selected) {
 }
 
 async function runSingleProbe({ pool, execute = false, caseName, createGatewayRuntime }) {
-  const selected = PROBE_CASES[caseName] || HALF_CASES[caseName] || AND_CASES[caseName] || GROUP_CASES[caseName] || ORDER_CASES[caseName]
+  const selected = PROBE_CASES[caseName] || HALF_CASES[caseName] || AND_CASES[caseName] || GROUP_CASES[caseName] || ORDER_CASES[caseName] || TERM_CASES[caseName] || PROXY_CASES[caseName]
   const half = Object.hasOwn(HALF_CASES, caseName), explicitAnd = Object.hasOwn(AND_CASES, caseName), englishGroup = Object.hasOwn(GROUP_CASES, caseName)
-  const ordered = Object.hasOwn(ORDER_CASES, caseName)
+  const ordered = Object.hasOwn(ORDER_CASES, caseName), proxy = Object.hasOwn(PROXY_CASES, caseName)
+  const term = Object.hasOwn(TERM_CASES, caseName) || proxy
   const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID,
     case: caseName, querySha256: digest(selected.query), queryLength: selected.query.length,
-    endpointVariant: half || explicitAnd || englishGroup || ordered ? 'GET /search/{searchItem}' : 'GET /search?searchItem', category: 'Top', count: 20,
+    endpointVariant: half || explicitAnd || englishGroup || ordered || term ? 'GET /search/{searchItem}' : 'GET /search?searchItem', category: 'Top', count: 20,
     ...(explicitAnd || ordered ? { providerQuerySha256: digest(selected.providerQuery), providerQueryLength: selected.providerQuery.length,
       providerQueryEvidence: 'Fixed expected diagnostic wire text; saved usage retains the native query. This is not historical outgoing URL evidence.',
       wireSyntax: ordered ? 'Only the four event OR atoms are permuted; every original atom, quote, negation and conjunction is retained.'
@@ -333,6 +396,12 @@ async function runSingleProbe({ pool, execute = false, caseName, createGatewayRu
         : 'Semantically equivalent full candidate; diagnostic page only, not a cold-start delivery.' } : {}),
     ...(half ? { queryScope: 'Proper subexpression of the original AND; diagnostic only, not equivalent to the full business query.' } : {}),
     ...(englishGroup ? { queryScope: 'One original English OR group with every original English exclusion; diagnostic only, not a full business result.' } : {}),
+    ...(term ? { queryScope: proxy ? caseName === 'update_proxy'
+      ? 'Exact previously rejected update subexpression through the fixed host proxy; diagnostic only.'
+      : 'Full native business candidate through the fixed host proxy; diagnostic page only, not cold-start delivery.'
+      : 'Fixed event pair or quoted atom with all original English exclusions; diagnostic only.',
+      acquisitionScope: 'diagnostic_provider_page', deliveryEstablished: false,
+      requestCountMeaning: 'Supplier count hint; the entire acquired page may contain more than 20 items.' } : {}),
     idempotencyKey: selected.idempotencyKey, mode: execute ? 'execute' : 'read_only', adapterCalls: 0,
     countMeaning: 'Adapter attempts only; not proof of HTTP dispatch, supplier charge or billed calls.',
     deliveryScope: 'Independent raw single-page diagnostic; not a standard search delivery or cold-start recovery.',
@@ -342,9 +411,11 @@ async function runSingleProbe({ pool, execute = false, caseName, createGatewayRu
     initial = await readSnapshot(pool, selected.idempotencyKey, caseName)
     report.originalRejectionVerified = true
     report.knownCandidateRejections = initial.knownCandidates
-    if (explicitAnd || englishGroup || ordered) report.knownHalfOutcomes = initial.knownHalves
-    if (englishGroup || ordered) report.knownEnglishAnd = initial.knownEnglishAnd
-    if (ordered) report.knownEvent = initial.knownEvent
+    if (explicitAnd || englishGroup || ordered || term) report.knownHalfOutcomes = initial.knownHalves
+    if (englishGroup || ordered || term) report.knownEnglishAnd = initial.knownEnglishAnd
+    if (ordered || term) report.knownEvent = initial.knownEvent
+    if (term) report.knownOrder = initial.knownOrder
+    if (proxy) report.knownUpdate = initial.knownUpdate
     report.evidenceScope = 'Fixed original receipt, listed candidate refusals, this probe key and standard v2 query guard; not an exhaustive historical v1 scan.'
     if (initial.existing) report.existing = { requestId: safeId(initial.existing.id),
       status: choice(initial.existing.status, ['reserved', 'committed', 'released', 'unknown']),
@@ -357,8 +428,9 @@ async function runSingleProbe({ pool, execute = false, caseName, createGatewayRu
     }
     const runtime = await createGatewayRuntime(prepared => {
       report.adapterCalls++
-      if (explicitAnd || englishGroup || ordered) report.preparedProviderQuery = prepared
+      if (explicitAnd || englishGroup || ordered || term) report.preparedProviderQuery = prepared
     }, caseName)
+    if (proxy) report.transport = runtime.diagnosticTransport
     const context = await runtime.store.findApiKeyById(initial.original.api_key_id)
     requireValue(context?.tenant?.id === initial.original.tenant_id && context.consumer?.id === initial.original.consumer_id
       && context.apiKey?.id === initial.original.api_key_id, 'original_owner_unavailable')
@@ -373,8 +445,11 @@ async function runSingleProbe({ pool, execute = false, caseName, createGatewayRu
         idempotencyKey: selected.idempotencyKey }) })
     report.httpStatus = integer(result.status)
     report.requestId = safeId(result.requestId)
-    report.itemCount = Array.isArray(result.body?.data?.items) ? result.body.data.items.length : null
-    report.hasMore = typeof result.body?.data?.page?.hasMore === 'boolean' ? result.body.data.page.hasMore : null
+    if (term) report.acquiredCount = Array.isArray(result.body?.data?.items) ? result.body.data.items.length : null
+    else {
+      report.itemCount = Array.isArray(result.body?.data?.items) ? result.body.data.items.length : null
+      report.hasMore = typeof result.body?.data?.page?.hasMore === 'boolean' ? result.body.data.page.hasMore : null
+    }
   } catch (error) {
     report.errorCode = safeCode(error)
     report.httpStatus = integer(error?.status)
@@ -390,6 +465,8 @@ async function runSingleProbe({ pool, execute = false, caseName, createGatewayRu
       requireValue(JSON.stringify(after.knownHalves) === JSON.stringify(initial.knownHalves), 'known_half_changed')
       requireValue(JSON.stringify(after.knownEnglishAnd) === JSON.stringify(initial.knownEnglishAnd), 'known_english_and_changed')
       requireValue(JSON.stringify(after.knownEvent) === JSON.stringify(initial.knownEvent), 'known_event_changed')
+      requireValue(JSON.stringify(after.knownOrder) === JSON.stringify(initial.knownOrder), 'known_order_changed')
+      requireValue(JSON.stringify(after.knownUpdate) === JSON.stringify(initial.knownUpdate), 'known_update_changed')
       report.originalUnchanged = true
       if (after.existing) await appendSavedEvidence(report, pool, after.existing, selected)
     } catch (error) { report.verificationError = safeCode(error) }
@@ -398,8 +475,56 @@ async function runSingleProbe({ pool, execute = false, caseName, createGatewayRu
 }
 
 export async function runTwitterQueryParamProbe({ pool, execute = false, caseName, createGatewayRuntime }) {
-  requireValue((!execute && caseName == null) || ['halves', 'english-and', 'english-groups', 'event-order'].includes(caseName) || Object.hasOwn(PROBE_CASES, caseName), 'invalid_arguments')
+  requireValue((!execute && caseName == null) || ['halves', 'english-and', 'english-groups', 'event-order', 'event-terms', 'host-proxy'].includes(caseName) || Object.hasOwn(PROBE_CASES, caseName), 'invalid_arguments')
   caseName ??= 'control'
+  if (caseName === 'host-proxy') {
+    const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID, case: caseName,
+      mode: execute ? 'execute' : 'read_only', adapterCalls: 0, maxAdapterCalls: 2, automaticRetryAllowed: false,
+      selectedProxy: HOST_PROXY_URL, acquisitionScope: 'diagnostic_provider_page', deliveryEstablished: false,
+      fullQueryAttempted: false, reports: [],
+      continuation: 'Exact update predicate first through host port 7788; only an owned saved success permits the full native candidate. No global proxy changes or direct fallback.',
+      interpretation: 'Earlier English successes disprove a blanket English-search failure. Historical egress was not retained; this local proxy address does not establish the public exit IP or geography.' }
+    for (const part of ['update_proxy', 'candidate_proxy']) {
+      const result = await runSingleProbe({ pool, execute, caseName: part, createGatewayRuntime })
+      report.reports.push(result)
+      report.adapterCalls += result.adapterCalls
+      if (part === 'candidate_proxy') report.fullQueryAttempted = result.adapterCalls > 0 || Boolean(result.existing)
+      if (result.verificationError || execute && result.savedOutcomeVerified !== 'success' || !execute && result.errorCode) {
+        report.stoppedAfter = part
+        report.errorCode = result.verificationError || result.errorCode || 'host_proxy_outcome_unverified'
+        break
+      }
+    }
+    return report
+  }
+  if (caseName === 'event-terms') {
+    const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID, case: caseName,
+      mode: execute ? 'execute' : 'read_only', adapterCalls: 0, maxAdapterCalls: 6, automaticRetryAllowed: false,
+      acquisitionScope: 'diagnostic_provider_page', deliveryEstablished: false, fullQueryAttempted: false,
+      deliveryScope: 'Adaptive event-predicate diagnosis only; no Delta mutation or cold-start delivery.',
+      continuation: 'Two fixed pairs first; split only a pair with an owned saved 400. Stop on any unconfirmed outcome. Never send the full query.',
+      reports: [], rejectedCases: [], acceptedCases: [] }
+    const pairs = { events_pair_a: ['event_statement', 'event_response'], events_pair_b: ['event_clarification', 'event_update'] }
+    const queue = Object.keys(pairs)
+    for (const part of queue) {
+      const result = await runSingleProbe({ pool, execute, caseName: part, createGatewayRuntime })
+      report.reports.push(result)
+      report.adapterCalls += result.adapterCalls
+      const outcome = result.savedOutcomeVerified
+      if (result.verificationError || execute && !['success', 'rejected400'].includes(outcome) || !execute && result.errorCode) {
+        report.stoppedAfter = part
+        report.errorCode = result.verificationError || result.errorCode || 'event_terms_outcome_unverified'
+        break
+      }
+      if (outcome === 'success') report.acceptedCases.push(part)
+      if (outcome === 'rejected400') {
+        report.rejectedCases.push(part)
+        if (execute && pairs[part]) queue.push(...pairs[part])
+      }
+    }
+    report.interpretation = 'These are saved outcomes for exact subexpressions, not proof of a permanent word restriction or a repaired full query. No business condition is removed.'
+    return report
+  }
   if (caseName === 'event-order') {
     const report = { diagnosticRevision: REVISION, originalRequestId: ORIGINAL_REQUEST_ID, case: caseName,
       mode: execute ? 'execute' : 'read_only', adapterCalls: 0, maxAdapterCalls: 2, automaticRetryAllowed: false,
@@ -477,6 +602,22 @@ export async function runTwitterQueryParamProbe({ pool, execute = false, caseNam
   return report
 }
 
+// Private, process-local route. Normal provider/global/deployment bindings are
+// read for comparison only; neither the shared proxy store nor dispatcher is
+// changed. The production fetch wrapper keeps TLS verification and probes the
+// fixed provider origin without credentials before one authenticated request.
+export async function prepareHostProxyTransport(proxyModule, proxyStore) {
+  const current = await proxyStore.route()
+  const diagnosticTransport = { scope: 'diagnostic_process_only', selectedProxy: HOST_PROXY_URL,
+    directFallback: false, maxConnectivityProbes: 1,
+    currentConfiguredRoute: { source: choice(current.source, ['system', 'override', 'provider', 'global', 'global-system', 'docker-no-proxy', 'docker-daemon']),
+      proxyEndpoints: current.proxyUrls.map(url => proxyModule.proxyEndpointLabel(url)), directFallback: current.directFallback === true },
+    comparisonLimit: 'Current configuration only, not historical dispatch evidence. A local proxy endpoint does not prove public exit IP or geography.' }
+  const fixedStore = { route: async () => ({ proxyUrls: [HOST_PROXY_URL], directFallback: false,
+    fingerprint: 'twitter-host-proxy-diagnostic.v1', probePolicy: { timeoutMs: 15_000, attempts: 1, cacheTtlMs: 0 } }) }
+  return { diagnosticTransport, fetchImpl: proxyModule.createRapidApiProxyFetch(fixedStore) }
+}
+
 async function runtimeFromInstalledSources(pool, onDispatch, caseName) {
   // Resolve from the Hub project cwd so this exact file also runs over stdin.
   const root = pathToFileURL(`${process.cwd()}/`)
@@ -494,8 +635,10 @@ async function runtimeFromInstalledSources(pool, onDispatch, caseName) {
   const store = new usageModule.PostgresStore(pool, { internalTraffic: config.internalTraffic })
   const credentialStore = credentialModule.createExternalPlatformCredentialStore({ pool, providerKey: 'rapidapi', environmentConfigured: rapid.configured })
   const proxyStore = new proxyModule.ExternalPlatformProxyStore(pool, config.deploymentEgress, { providerKey: 'rapidapi' })
+  const transport = Object.hasOwn(PROXY_CASES, caseName) ? await prepareHostProxyTransport(proxyModule, proxyStore)
+    : { fetchImpl: proxyModule.createRapidApiProxyFetch(proxyStore) }
   const adapter = queryParamAdapter(new adapterModule.RapidApiAdapter({ apiKey: rapid.apiKey,
-    fetchImpl: proxyModule.createRapidApiProxyFetch(proxyStore), timeoutMs: rapid.timeoutMs }), caseName, onDispatch)
+    fetchImpl: transport.fetchImpl, timeoutMs: rapid.timeoutMs }), caseName, onDispatch)
   const gateway = new gatewayModule.ExternalPlatformGateway({ usageStore: store,
     platformStore: platformModule.createExternalPlatformStore({ pool, usageStore: store, providerKey: 'rapidapi',
       authorizationPlatform: 'twitter', circuitFailureThreshold: rapid.circuitFailureThreshold,
@@ -507,7 +650,7 @@ async function runtimeFromInstalledSources(pool, onDispatch, caseName) {
     apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: Math.max(60000, config.reservationLeaseMs),
     logger: { warn() {} },
   })
-  return { store, gateway, guardDataSearchV1: protocolModule.guardDataSearchV1 }
+  return { store, gateway, guardDataSearchV1: protocolModule.guardDataSearchV1, diagnosticTransport: transport.diagnosticTransport }
 }
 
 export async function main(args = process.argv.slice(2), env = process.env) {
@@ -516,7 +659,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     const cases = args.filter(arg => arg.startsWith('--case=')), executeFlags = args.filter(arg => arg === '--execute')
     requireValue(cases.length <= 1 && executeFlags.length <= 1 && args.length === cases.length + executeFlags.length, 'invalid_arguments')
     const caseName = cases[0]?.slice('--case='.length), execute = executeFlags.length === 1 || env.MX_TWITTER_QUERY_PARAM_VERIFY === '1'
-    requireValue((!execute && caseName == null) || ['halves', 'english-and', 'english-groups', 'event-order'].includes(caseName) || Object.hasOwn(PROBE_CASES, caseName), 'invalid_arguments')
+    requireValue((!execute && caseName == null) || ['halves', 'english-and', 'english-groups', 'event-order', 'event-terms', 'host-proxy'].includes(caseName) || Object.hasOwn(PROBE_CASES, caseName), 'invalid_arguments')
     requireValue(typeof env.DATABASE_URL === 'string' && env.DATABASE_URL.trim(), 'database_url_required')
     const { Pool } = await import('pg')
     pool = new Pool({ connectionString: env.DATABASE_URL, max: 4, application_name: REVISION })

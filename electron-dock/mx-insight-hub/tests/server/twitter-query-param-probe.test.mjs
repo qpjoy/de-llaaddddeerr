@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
-import { PROBE_CASES, HALF_CASES, HALF_RECEIPTS, AND_CASES, ENGLISH_AND_RECEIPT, GROUP_CASES, EVENT_RECEIPT, ORDER_CASES, ORIGINAL_REQUEST_ID, QUERY_PARAM_REQUEST_ID, CANDIDATE_REQUEST_IDS, runTwitterQueryParamProbe, queryParamAdapter } from '../../server/ops/verify-twitter-query-param.mjs'
+import { PROBE_CASES, HALF_CASES, HALF_RECEIPTS, AND_CASES, ENGLISH_AND_RECEIPT, GROUP_CASES, EVENT_RECEIPT, ORDER_CASES, ORDER_RECEIPT, TERM_CASES, UPDATE_RECEIPT, PROXY_CASES, HOST_PROXY_URL, ORIGINAL_REQUEST_ID, QUERY_PARAM_REQUEST_ID, CANDIDATE_REQUEST_IDS, runTwitterQueryParamProbe, queryParamAdapter, prepareHostProxyTransport } from '../../server/ops/verify-twitter-query-param.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
@@ -15,6 +15,7 @@ import { rapidApiConfig } from '../../server/external-platforms/rapidapi-config.
 import { guardDataSearchV1 } from '../../server/data/search-protocol.mjs'
 import { SearchProtocolStore } from '../../server/data/search-protocol-store.mjs'
 import { normalizeHubSocialRequest } from '../../server/contracts/hub-social.mjs'
+import { createRapidApiProxyFetch, proxyEndpointLabel } from '../../server/external-platforms/proxy.mjs'
 
 const ORIGINAL_QUERY = '("外交" OR "外交部" OR "外交政策" OR "外交关系" OR "外交动态" OR "外交表态" OR "外交事件" OR "外交议题" OR "外交回应" OR "外交澄清") AND NOT ("广告" OR "营销" OR "重复搬运") AND (("diplomacy" OR "foreign policy" OR "diplomatic relations") AND ("statement" OR "response" OR "clarification" OR "update") -ad -marketing -repost)'
 const SECRET = 'offline-provider-secret-do-not-print'
@@ -58,6 +59,16 @@ async function fixture({ grant = true, enabled = true, outcome = 'success', obse
     acquisition_request: { method: 'POST', path: '/api/v1/night-all/search/raw',
       body: { platform: 'twitter', query: GROUP_CASES.english_events.query, pageSize: 20 } } }
   const eventCalls = [{ ...structuredClone(originalCall), id: EVENT_RECEIPT.callId }]
+  const knownOrder = { ...structuredClone(original), id: ORDER_RECEIPT.requestId,
+    idempotency_key: ORDER_CASES.events_order.idempotencyKey,
+    acquisition_request: { method: 'POST', path: '/api/v1/night-all/search/raw',
+      body: { platform: 'twitter', query: ORDER_CASES.events_order.query, pageSize: 20 } } }
+  const orderCalls = [{ ...structuredClone(originalCall), id: ORDER_RECEIPT.callId }]
+  const knownUpdate = { ...structuredClone(original), id: UPDATE_RECEIPT.requestId,
+    idempotency_key: TERM_CASES.event_update.idempotencyKey,
+    acquisition_request: { method: 'POST', path: '/api/v1/night-all/search/raw',
+      body: { platform: 'twitter', query: TERM_CASES.event_update.query, pageSize: 20 } } }
+  const updateCalls = [{ ...structuredClone(originalCall), id: UPDATE_RECEIPT.callId }]
   const controls = new MemoryExternalPlatformControlStore(), config = { ...rapidApiConfig(), configured: true, timeoutMs: 50 }
   if (enabled) await controls.updatePolicy('rapidapi', 'social.content.search', { expectedRevision: 1, desiredState: 'active', reason: 'Offline only',
     priceBook: { currency: 'USD', pricingAsOf: '2026-10-18T00:00:00Z', monthlyBudgetMinor: 100000,
@@ -67,6 +78,10 @@ async function fixture({ grant = true, enabled = true, outcome = 'success', obse
   const sent = [], sql = []
   const query = async (text, values) => {
     sql.push(text)
+    if (text.includes('twitter-query-param:known-update-calls')) return { rows: structuredClone(updateCalls) }
+    if (text.includes('twitter-query-param:known-update')) return { rows: [structuredClone(knownUpdate)].filter(row => row.id === values[0]) }
+    if (text.includes('twitter-query-param:known-order-calls')) return { rows: structuredClone(orderCalls) }
+    if (text.includes('twitter-query-param:known-order')) return { rows: [structuredClone(knownOrder)].filter(row => row.id === values[0]) }
     if (text.includes('twitter-query-param:known-event-calls')) return { rows: structuredClone(eventCalls) }
     if (text.includes('twitter-query-param:known-event')) return { rows: [structuredClone(knownEvent)].filter(row => row.id === values[0]) }
     if (text.includes('twitter-query-param:known-english-and-calls')) return { rows: structuredClone(englishAndCalls) }
@@ -106,8 +121,9 @@ async function fixture({ grant = true, enabled = true, outcome = 'success', obse
       if (selectedOutcome === 'unknown') throw new Error(SECRET)
       if (selectedOutcome === 'rejected') return Response.json({ message: '400, bad request' }, { status: 400 })
       if (selectedOutcome === 'other-rejection') return Response.json({ message: 'service temporarily unavailable' }, { status: 503 })
-      if (selectedOutcome === 'overflow') return Response.json({ entries: [{ type: 'TimelineAddEntries', entries: [
-        ...Array.from({ length: 21 }, (_, index) => ({ content: { itemContent: { tweet_results: { result: {
+      if (selectedOutcome === 'unusable') return Response.json({ unexpected: 'not a timeline' })
+      if (['overflow', 'overflow22', 'overflow27'].includes(selectedOutcome)) return Response.json({ entries: [{ type: 'TimelineAddEntries', entries: [
+        ...Array.from({ length: selectedOutcome === 'overflow27' ? 27 : selectedOutcome === 'overflow22' ? 22 : 21 }, (_, index) => ({ content: { itemContent: { tweet_results: { result: {
           rest_id: String(index + 1), legacy: { full_text: POST },
         } } } } })), { content: { cursorType: 'Bottom', value: 'do-not-follow' } },
       ] }] }, { headers: { 'x-rapidapi-request-id': 'synthetic-upstream-overflow' } })
@@ -116,11 +132,15 @@ async function fixture({ grant = true, enabled = true, outcome = 'success', obse
       } } } } }, { content: { cursorType: 'Bottom', value: 'do-not-follow' } }] },
       { headers: { 'x-rapidapi-request-id': 'synthetic-upstream-1' } })
     } }), caseName, onDispatch)
-    return { store: usage, guardDataSearchV1, gateway: new ExternalPlatformGateway({ usageStore: usage,
+    return { store: usage, guardDataSearchV1,
+      ...(Object.hasOwn(PROXY_CASES, caseName) ? { diagnosticTransport: { scope: 'diagnostic_process_only', selectedProxy: HOST_PROXY_URL,
+        currentConfiguredRoute: { source: 'system', proxyEndpoints: [], directFallback: true },
+        comparisonLimit: 'Historical route not retained; synthetic test route observation only.' } } : {}),
+      gateway: new ExternalPlatformGateway({ usageStore: usage,
       platformStore: platform, adapter, config, providerKey: 'rapidapi', apiKeyPepper: PEPPER,
       operationControlStore: controls, reservationLeaseMs: 60000, logger: { warn() {} } }) }
   }
-  return { pool, createGatewayRuntime, original, originalCall, knownCandidates, knownCalls, knownHalves, halfCalls, knownEnglishAnd, englishAndCalls, knownEvent, eventCalls, context, usage, platform, sent, sql,
+  return { pool, createGatewayRuntime, original, originalCall, knownCandidates, knownCalls, knownHalves, halfCalls, knownEnglishAnd, englishAndCalls, knownEvent, eventCalls, knownOrder, orderCalls, knownUpdate, updateCalls, context, usage, platform, sent, sql,
     creations: () => runtimeCreations, run: options => runTwitterQueryParamProbe({ pool, createGatewayRuntime, ...options }) }
 }
 
@@ -1069,6 +1089,409 @@ test('event-order overflow delay requires both valid completion time and databas
   }
 })
 
+test('event-term probes preserve exact atoms and exclusions with distinct keys, and dry-run never constructs a runtime', async () => {
+  assert.deepEqual(Object.keys(TERM_CASES), ['events_pair_a', 'events_pair_b', 'event_statement', 'event_response', 'event_clarification', 'event_update'])
+  assert.deepEqual(Object.values(TERM_CASES).map(row => row.query), [
+    '("statement" OR "response") -ad -marketing -repost',
+    '("clarification" OR "update") -ad -marketing -repost',
+    '"statement" -ad -marketing -repost', '"response" -ad -marketing -repost',
+    '"clarification" -ad -marketing -repost', '"update" -ad -marketing -repost',
+  ])
+  const oldKeys = Object.values({ ...PROBE_CASES, ...HALF_CASES, ...AND_CASES, ...GROUP_CASES, ...ORDER_CASES }).map(row => row.idempotencyKey)
+  const keys = Object.values(TERM_CASES).map(row => row.idempotencyKey)
+  assert.equal(new Set(keys).size, 6)
+  assert.ok(keys.every(key => !oldKeys.includes(key)))
+  assert.equal(ORDER_CASES.events_order.idempotencyKey, 'ops-twitter-order-cd4d17e0dc1d9988d65482334578ed273b33d358067d7641')
+  const f = await fixture(), report = await f.run({ caseName: 'event-terms' })
+  assert.equal(report.case, 'event-terms')
+  assert.equal(report.mode, 'read_only')
+  assert.equal(report.maxAdapterCalls, 6)
+  assert.deepEqual(report.reports.map(row => row.case), ['events_pair_a', 'events_pair_b'])
+  assert.equal(report.adapterCalls, 0)
+  assert.equal(f.creations(), 0)
+  assert.equal(f.usage.requests.size, 0)
+  assert.ok(report.reports.every(row => row.knownOrder.requestId === ORDER_RECEIPT.requestId
+    && row.knownOrder.savedOutcomeVerified === 'rejected400'))
+})
+
+test('event-term matrix uses two, four or six acquisitions and splits only confirmed rejected pairs without full-query dispatch', async () => {
+  for (const rejectedPairs of [[], ['events_pair_a'], ['events_pair_b'], ['events_pair_a', 'events_pair_b']]) {
+    const f = await fixture({ outcome: name => rejectedPairs.includes(name) ? 'rejected' : 'success' })
+    const original = structuredClone(f.original), order = structuredClone(f.knownOrder)
+    const report = await f.run({ caseName: 'event-terms', execute: true })
+    const expected = ['events_pair_a', 'events_pair_b',
+      ...(rejectedPairs.includes('events_pair_a') ? ['event_statement', 'event_response'] : []),
+      ...(rejectedPairs.includes('events_pair_b') ? ['event_clarification', 'event_update'] : [])]
+    assert.equal(report.errorCode, undefined)
+    assert.equal(report.adapterCalls, expected.length)
+    assert.equal(report.maxAdapterCalls, 6)
+    assert.deepEqual(report.reports.map(row => row.case), expected)
+    assert.equal(f.sent.length, expected.length)
+    assert.equal(f.platform.calls.size, expected.length)
+    assert.equal(f.platform.restrictedResponseArchives.size, expected.length)
+    for (const [index, name] of expected.entries()) {
+      const row = report.reports[index]
+      assert.equal(decodeURIComponent(f.sent[index].pathname.slice('/search/'.length)), TERM_CASES[name].query)
+      assert.deepEqual(Object.fromEntries(f.sent[index].searchParams), { count: '20', category: 'Top', includeTimestamp: 'false' })
+      assert.equal(row.savedOutcomeVerified, rejectedPairs.includes(name) ? 'rejected400' : 'success')
+      assert.equal(row.acquisitionScope, 'diagnostic_provider_page')
+      assert.equal(row.deliveryEstablished, false)
+      assert.equal(row.hasMore, undefined)
+      assert.equal(row.itemCount, undefined)
+      assert.equal(row.nextCursor, undefined)
+      if (!rejectedPairs.includes(name)) assert.equal(row.acquiredCount, 1)
+    }
+    const receipts = structuredClone([...f.usage.requests.values()]), calls = structuredClone([...f.platform.calls.values()])
+    const repeated = await f.run({ caseName: 'event-terms', execute: true })
+    assert.equal(repeated.adapterCalls, 0)
+    assert.deepEqual(repeated.reports.map(row => row.case), expected)
+    assert.equal(f.sent.length, expected.length)
+    assert.deepEqual([...f.usage.requests.values()], receipts)
+    assert.deepEqual([...f.platform.calls.values()], calls)
+    assert.deepEqual(f.original, original)
+    assert.deepEqual(f.knownOrder, order)
+    assert.doesNotMatch(JSON.stringify(report), new RegExp(`${SECRET}|${POST}|do-not-follow`))
+  }
+})
+
+test('confirmed single-word refusals remain diagnostic evidence and do not exceed the six-call matrix', async () => {
+  const f = await fixture({ outcome: 'rejected' }), report = await f.run({ caseName: 'event-terms', execute: true })
+  assert.equal(report.errorCode, undefined)
+  assert.equal(report.adapterCalls, 6)
+  assert.equal(report.reports.length, 6)
+  assert.ok(report.reports.every(row => row.savedOutcomeVerified === 'rejected400'))
+  assert.equal((await f.run({ caseName: 'event-terms', execute: true })).adapterCalls, 0)
+  assert.equal(f.sent.length, 6)
+})
+
+test('new event-term diagnostics accept whole 21 and 22 item provider pages without quarantining the subsequent probe', async () => {
+  const f = await fixture({ outcome: name => name === 'events_pair_a' ? 'overflow' : 'overflow22' })
+  const report = await f.run({ caseName: 'event-terms', execute: true })
+  assert.equal(report.errorCode, undefined)
+  assert.equal(report.adapterCalls, 2)
+  assert.deepEqual(report.reports.map(row => row.acquiredCount), [21, 22])
+  assert.deepEqual(report.reports.map(row => row.savedOutcomeVerified), ['success', 'success'])
+  assert.ok(report.reports.every(row => row.saved.httpStatus === 200 && row.hasMore === undefined
+    && row.itemCount === undefined && row.deliveryEstablished === false))
+  assert.ok([...f.platform.calls.values()].every(call => call.outcome === 'succeeded'))
+  assert.equal(f.platform.restrictedResponseArchives.size, 2)
+  const again = await f.run({ caseName: 'event-terms', execute: true })
+  assert.equal(again.adapterCalls, 0)
+  assert.deepEqual(again.reports.map(row => row.acquiredCount), [21, 22])
+  assert.equal(f.sent.length, 2)
+  const raw = await fixture({ outcome: 'overflow' })
+  const old = await raw.run({ caseName: 'control', execute: true })
+  assert.equal(old.httpStatus, 502)
+  assert.equal(old.errorCode, 'social_upstream_response_unusable')
+  assert.equal(old.providerCalls[0].outcome, 'succeeded_unusable')
+})
+
+test('only new event-term and proxy adapter handoffs enable full-page parsing, with original wire count and a one-call bound', async () => {
+  for (const name of [...Object.keys(TERM_CASES), ...Object.keys(PROXY_CASES), 'control', 'english_topics', 'events_order']) {
+    const selected = TERM_CASES[name] || PROXY_CASES[name] || PROBE_CASES[name] || GROUP_CASES[name] || ORDER_CASES[name]
+    const sent = [], adapter = queryParamAdapter({ execute: async request => { sent.push(request); return {} } }, name)
+    const request = normalizeHubSocialRequest('search', { platform: 'twitter', query: selected.query, count: 20, sort: 'latest' })
+    await adapter.execute(request)
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].standardSearch === true, Object.hasOwn(TERM_CASES, name) || Object.hasOwn(PROXY_CASES, name))
+    assert.equal(sent[0].allowOverflow === true, Object.hasOwn(TERM_CASES, name) || Object.hasOwn(PROXY_CASES, name))
+    assert.equal(sent[0].upstreamQuery.count, 20)
+    assert.equal(sent[0].upstreamQuery.category, 'Top')
+    await assert.rejects(adapter.execute(request), /probe_call_limit/u)
+    assert.equal(sent.length, 1)
+  }
+})
+
+test('event-term diagnostics stop unknown, 5xx and unusable pages at either pair or single term without redispatching them', async () => {
+  for (const outcome of ['unknown', 'other-rejection', 'unusable']) for (const stopAt of ['events_pair_a', 'events_pair_b', 'event_statement']) {
+    const f = await fixture({ outcome: name => name === stopAt ? outcome : name === 'events_pair_a' ? 'rejected' : 'success' })
+    const report = await f.run({ caseName: 'event-terms', execute: true })
+    const expectedCount = ['events_pair_a', 'events_pair_b', 'event_statement'].indexOf(stopAt) + 1
+    assert.equal(report.stoppedAfter, stopAt)
+    assert.ok(report.errorCode)
+    assert.equal(report.adapterCalls, expectedCount)
+    assert.equal(report.reports.length, expectedCount)
+    const repeated = await f.run({ caseName: 'event-terms', execute: true })
+    assert.equal(repeated.adapterCalls, 0)
+    assert.equal(repeated.stoppedAfter, stopAt)
+    assert.equal(f.sent.length, expectedCount)
+  }
+})
+
+test('event-term diagnostics require the owned order-refusal receipt and cannot infer permission from missing or mismatched evidence', async () => {
+  for (const mutate of [
+    f => { f.knownOrder.id = randomUUID() }, f => { f.knownOrder.status = 'unknown' },
+    f => { f.knownOrder.idempotency_key = 'different-key' }, f => { f.knownOrder.api_key_id = randomUUID() },
+    f => { f.knownOrder.acquisition_request.body.query = ORDER_CASES.events_order.providerQuery },
+    f => { f.knownOrder.acquisition_request.body.cursor = 'old-cursor' },
+    f => { f.knownOrder.acquisition_request.body.pageSize = 50 },
+    f => { f.knownOrder.response_body.error.details.retryable = true },
+    f => { f.orderCalls[0].id = randomUUID() }, f => { f.orderCalls[0].api_key_id = randomUUID() },
+    f => { f.orderCalls[0].outcome = 'unknown' }, f => { f.orderCalls[0].http_status = 200 },
+    f => { f.orderCalls.length = 0 }, f => { f.orderCalls.push({ ...f.orderCalls[0], id: randomUUID() }) },
+  ]) {
+    const f = await fixture(); mutate(f)
+    const report = await f.run({ caseName: 'event-terms', execute: true })
+    assert.equal(report.errorCode, 'known_order_unverified')
+    assert.equal(report.adapterCalls, 0)
+    assert.equal(report.stoppedAfter, 'events_pair_a')
+    assert.equal(f.creations(), 0)
+    assert.equal(f.sent.length, 0)
+  }
+})
+
+test('event-term diagnostics retain current grant, policy and running or unknown v2 protection for their exact selected query', async () => {
+  for (const options of [{ grant: false }, { enabled: false }]) {
+    const f = await fixture(options), report = await f.run({ caseName: 'event-terms', execute: true })
+    assert.ok(report.errorCode)
+    assert.equal(report.adapterCalls, 0)
+    assert.equal(f.sent.length, 0)
+  }
+  for (const state of ['running', 'unknown']) for (const name of ['events_pair_a', 'events_pair_b', 'event_statement']) {
+    const f = await fixture({ outcome: part => part === 'events_pair_a' ? 'rejected' : 'success' })
+    const protocol = new SearchProtocolStore(f.usage)
+    const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'existing-term-identity', body: {
+      platform: 'twitter', query: TERM_CASES[name].query, pageSize: 20, type: 'stable',
+      timeWindow: { from: '2026-10-17T00:00:00.000Z', to: '2026-10-18T00:00:00.000Z', timezone: 'Asia/Shanghai', boundary: '[from,to)' },
+    } })
+    if (state === 'unknown') await protocol.finish(lease.input, { state, usageRequestId: randomUUID() })
+    const report = await f.run({ caseName: 'event-terms', execute: true })
+    assert.equal(report.errorCode, state === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress')
+    assert.equal(report.stoppedAfter, name)
+    assert.equal(report.adapterCalls, ['events_pair_a', 'events_pair_b', 'event_statement'].indexOf(name))
+  }
+})
+
+test('a returned 200 without an owned confirmed single-call receipt never advances the event-term matrix', async () => {
+  for (const corrupt of [
+    f => { [...f.usage.requests.values()][0].status = 'unknown' },
+    f => { [...f.usage.requests.values()][0].acquisitionRequest.body.query = 'different' },
+    f => { [...f.platform.calls.values()][0].outcome = 'unknown' },
+    f => { [...f.platform.calls.values()][0].apiKeyId = randomUUID() },
+    f => { f.platform.calls.clear() },
+  ]) {
+    const f = await fixture()
+    const createGatewayRuntime = async (...args) => {
+      const runtime = await f.createGatewayRuntime(...args), searchRaw = runtime.gateway.searchRaw.bind(runtime.gateway)
+      runtime.gateway.searchRaw = async (...queryArgs) => { const result = await searchRaw(...queryArgs); corrupt(f); return result }
+      return runtime
+    }
+    const report = await runTwitterQueryParamProbe({ pool: f.pool, createGatewayRuntime, caseName: 'event-terms', execute: true })
+    assert.equal(report.reports[0].httpStatus, 200)
+    assert.equal(report.reports[0].savedOutcomeVerified, null)
+    assert.equal(report.stoppedAfter, 'events_pair_a')
+    assert.equal(report.adapterCalls, 1)
+    assert.equal((await f.run({ caseName: 'event-terms', execute: true })).adapterCalls, 0)
+    assert.equal(f.sent.length, 1)
+  }
+})
+
+test('host proxy cases preserve update and full candidate predicates with new keys and no dry-run network', async () => {
+  assert.equal(HOST_PROXY_URL, 'http://127.0.0.1:7788')
+  assert.equal(PROXY_CASES.update_proxy.query, '"update" -ad -marketing -repost')
+  assert.equal(PROXY_CASES.update_proxy.query, TERM_CASES.event_update.query)
+  assert.equal(PROXY_CASES.candidate_proxy.query, PROBE_CASES.candidate.query)
+  const oldKeys = Object.values({ ...PROBE_CASES, ...HALF_CASES, ...AND_CASES, ...GROUP_CASES, ...ORDER_CASES, ...TERM_CASES }).map(row => row.idempotencyKey)
+  assert.ok(Object.values(PROXY_CASES).every(row => !oldKeys.includes(row.idempotencyKey)))
+  assert.notEqual(PROXY_CASES.update_proxy.idempotencyKey, PROXY_CASES.candidate_proxy.idempotencyKey)
+  const f = await fixture(), report = await f.run({ caseName: 'host-proxy' })
+  assert.equal(report.mode, 'read_only')
+  assert.equal(report.maxAdapterCalls, 2)
+  assert.equal(report.adapterCalls, 0)
+  assert.deepEqual(report.reports.map(row => row.case), ['update_proxy', 'candidate_proxy'])
+  assert.ok(report.reports.every(row => row.knownUpdate.requestId === UPDATE_RECEIPT.requestId
+    && row.knownUpdate.savedOutcomeVerified === 'rejected400'))
+  assert.equal(f.creations(), 0)
+  assert.equal(f.sent.length, 0)
+  assert.equal(f.usage.requests.size, 0)
+})
+
+test('host proxy accepts update before sending the unchanged full predicate, retains whole paid pages and replays without runtime creation', async () => {
+  for (const outcome of ['success', 'overflow27']) {
+    const f = await fixture({ outcome }), before = structuredClone(f.original), update = structuredClone(f.knownUpdate)
+    const report = await f.run({ caseName: 'host-proxy', execute: true })
+    assert.equal(report.errorCode, undefined)
+    assert.equal(report.adapterCalls, 2)
+    assert.equal(report.maxAdapterCalls, 2)
+    assert.deepEqual(report.reports.map(row => row.savedOutcomeVerified), ['success', 'success'])
+    for (const [index, name] of ['update_proxy', 'candidate_proxy'].entries()) {
+      const row = report.reports[index]
+      assert.equal(decodeURIComponent(f.sent[index].pathname.slice('/search/'.length)), PROXY_CASES[name].query)
+      assert.deepEqual(Object.fromEntries(f.sent[index].searchParams), { count: '20', category: 'Top', includeTimestamp: 'false' })
+      assert.equal(row.acquisitionScope, 'diagnostic_provider_page')
+      assert.equal(row.deliveryEstablished, false)
+      assert.equal(row.acquiredCount, outcome === 'overflow27' ? 27 : 1)
+      assert.equal(row.hasMore, undefined)
+      assert.equal(row.itemCount, undefined)
+      assert.equal(row.nextCursor, undefined)
+      assert.equal(row.transport.scope, 'diagnostic_process_only')
+      assert.equal(row.transport.selectedProxy, HOST_PROXY_URL)
+      const saved = [...f.usage.requests.values()].find(usage => usage.id === row.requestId)
+      assert.equal(saved.acquisitionRequest.body.query, PROXY_CASES[name].query)
+    }
+    assert.equal(f.platform.calls.size, 2)
+    assert.equal(f.platform.restrictedResponseArchives.size, 2)
+    const calls = structuredClone([...f.platform.calls.values()]), usages = structuredClone([...f.usage.requests.values()])
+    const again = await f.run({ caseName: 'host-proxy', execute: true })
+    assert.equal(again.adapterCalls, 0)
+    assert.equal(f.creations(), 2)
+    assert.equal(f.sent.length, 2)
+    assert.ok(again.reports.every(row => row.transport === undefined))
+    assert.deepEqual(again.reports.map(row => row.acquiredCount), [outcome === 'overflow27' ? 27 : 1, outcome === 'overflow27' ? 27 : 1])
+    assert.deepEqual([...f.platform.calls.values()], calls)
+    assert.deepEqual([...f.usage.requests.values()], usages)
+    assert.deepEqual(f.original, before)
+    assert.deepEqual(f.knownUpdate, update)
+    assert.doesNotMatch(JSON.stringify(report), new RegExp(`${SECRET}|${POST}|do-not-follow`))
+  }
+})
+
+test('host proxy refuses to send the full query after rejected, unknown or unparseable update and never retries saved results', async () => {
+  for (const outcome of ['rejected', 'unknown', 'other-rejection', 'unusable']) {
+    const f = await fixture({ outcome }), report = await f.run({ caseName: 'host-proxy', execute: true })
+    assert.equal(report.stoppedAfter, 'update_proxy')
+    assert.ok(report.errorCode)
+    assert.equal(report.adapterCalls, 1)
+    assert.equal(report.reports.length, 1)
+    const again = await f.run({ caseName: 'host-proxy', execute: true })
+    assert.equal(again.adapterCalls, 0)
+    assert.equal(again.stoppedAfter, 'update_proxy')
+    assert.equal(f.creations(), 1)
+    assert.equal(f.sent.length, 1)
+  }
+  const f = await fixture({ outcome: name => name === 'candidate_proxy' ? 'unknown' : 'success' })
+  const report = await f.run({ caseName: 'host-proxy', execute: true })
+  assert.equal(report.stoppedAfter, 'candidate_proxy')
+  assert.equal(report.adapterCalls, 2)
+  assert.equal(report.reports[1].saved.status, 'unknown')
+  assert.equal((await f.run({ caseName: 'host-proxy', execute: true })).adapterCalls, 0)
+  assert.equal(f.sent.length, 2)
+})
+
+test('host proxy requires exact original update refusal, owner, key and sole owned provider call', async () => {
+  for (const mutate of [
+    f => { f.knownUpdate.id = randomUUID() }, f => { f.knownUpdate.idempotency_key = 'different-key' },
+    f => { f.knownUpdate.status = 'unknown' }, f => { f.knownUpdate.api_key_id = randomUUID() },
+    f => { f.knownUpdate.acquisition_request.body.query = 'update' },
+    f => { f.knownUpdate.acquisition_request.body.cursor = 'cursor' },
+    f => { f.knownUpdate.acquisition_request.body.pageSize = 50 },
+    f => { f.knownUpdate.response_body.error.details.retryable = true },
+    f => { f.knownUpdate.response_body.error.details.upstreamStatus = 500 },
+    f => { f.updateCalls[0].id = randomUUID() }, f => { f.updateCalls[0].api_key_id = randomUUID() },
+    f => { f.updateCalls[0].outcome = 'unknown' }, f => { f.updateCalls[0].http_status = 200 },
+    f => { f.updateCalls.length = 0 }, f => { f.updateCalls.push({ ...f.updateCalls[0], id: randomUUID() }) },
+  ]) {
+    const f = await fixture(); mutate(f)
+    const report = await f.run({ caseName: 'host-proxy', execute: true })
+    assert.equal(report.errorCode, 'known_update_unverified')
+    assert.equal(report.stoppedAfter, 'update_proxy')
+    assert.equal(report.adapterCalls, 0)
+    assert.equal(f.creations(), 0)
+    assert.equal(f.sent.length, 0)
+  }
+})
+
+test('changing proxy cannot bypass running or unknown v2 identity for update or the full query', async () => {
+  for (const state of ['running', 'unknown']) for (const name of ['update_proxy', 'candidate_proxy']) {
+    const f = await fixture(), protocol = new SearchProtocolStore(f.usage)
+    const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'preexisting-proxy-comparison-identity', body: {
+      platform: 'twitter', query: PROXY_CASES[name].query, pageSize: 20, type: 'stable',
+      timeWindow: { from: '2026-10-17T00:00:00.000Z', to: '2026-10-18T00:00:00.000Z', timezone: 'Asia/Shanghai', boundary: '[from,to)' },
+    } })
+    if (state === 'unknown') await protocol.finish(lease.input, { state, usageRequestId: randomUUID() })
+    const report = await f.run({ caseName: 'host-proxy', execute: true })
+    assert.equal(report.errorCode, state === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress')
+    assert.equal(report.stoppedAfter, name)
+    assert.equal(report.adapterCalls, name === 'update_proxy' ? 0 : 1)
+    assert.equal(f.sent.length, name === 'update_proxy' ? 0 : 1)
+  }
+  for (const options of [{ grant: false }, { enabled: false }]) {
+    const f = await fixture(options), report = await f.run({ caseName: 'host-proxy', execute: true })
+    assert.ok(report.errorCode)
+    assert.equal(report.adapterCalls, 0)
+    assert.equal(f.sent.length, 0)
+  }
+})
+
+test('the host-proxy full-query continuation requires an owned saved update success instead of just a returned 200', async () => {
+  for (const corrupt of [
+    f => { [...f.usage.requests.values()][0].status = 'unknown' },
+    f => { [...f.usage.requests.values()][0].acquisitionRequest.body.query = 'different' },
+    f => { [...f.platform.calls.values()][0].outcome = 'unknown' },
+    f => { [...f.platform.calls.values()][0].apiKeyId = randomUUID() },
+    f => { f.platform.calls.clear() },
+  ]) {
+    const f = await fixture()
+    const createGatewayRuntime = async (...args) => {
+      const runtime = await f.createGatewayRuntime(...args), searchRaw = runtime.gateway.searchRaw.bind(runtime.gateway)
+      runtime.gateway.searchRaw = async (...queryArgs) => { const result = await searchRaw(...queryArgs); corrupt(f); return result }
+      return runtime
+    }
+    const report = await runTwitterQueryParamProbe({ pool: f.pool, createGatewayRuntime, caseName: 'host-proxy', execute: true })
+    assert.equal(report.reports[0].httpStatus, 200)
+    assert.equal(report.reports[0].savedOutcomeVerified, null)
+    assert.equal(report.stoppedAfter, 'update_proxy')
+    assert.equal(report.adapterCalls, 1)
+    assert.equal((await f.run({ caseName: 'host-proxy', execute: true })).adapterCalls, 0)
+    assert.equal(f.sent.length, 1)
+  }
+})
+
+test('host-proxy preparation reads normal routing once, redacts credentials and fixes only its private fetch to 7788', async () => {
+  let routeReads = 0, selectedRoute, factoryCalls = 0
+  const route = { source: 'override', proxyUrls: ['http://user:private-proxy-password@other-proxy:7890'], directFallback: true,
+    fingerprint: 'normal-route', probePolicy: { attempts: 5 } }
+  const original = structuredClone(route)
+  const fetchImpl = () => assert.fail('preparation cannot send network requests')
+  const result = await prepareHostProxyTransport({ proxyEndpointLabel, createRapidApiProxyFetch: store => {
+    factoryCalls++
+    selectedRoute = store.route()
+    return fetchImpl
+  } }, { route: async () => { routeReads++; return route }, update: () => assert.fail('no binding write allowed') })
+  assert.equal(routeReads, 1)
+  assert.equal(factoryCalls, 1)
+  assert.equal(result.fetchImpl, fetchImpl)
+  const pinned = await selectedRoute
+  assert.deepEqual(pinned.proxyUrls, [HOST_PROXY_URL])
+  assert.equal(pinned.directFallback, false)
+  assert.deepEqual(pinned.probePolicy, { attempts: 1, timeoutMs: 15000, cacheTtlMs: 0 })
+  assert.equal(result.diagnosticTransport.scope, 'diagnostic_process_only')
+  assert.equal(result.diagnosticTransport.selectedProxy, HOST_PROXY_URL)
+  assert.deepEqual(result.diagnosticTransport.currentConfiguredRoute, { source: 'override', proxyEndpoints: ['http://other-proxy:7890'], directFallback: true })
+  assert.match(result.diagnosticTransport.comparisonLimit, /historical/i)
+  assert.doesNotMatch(JSON.stringify(result.diagnosticTransport), /user|private-proxy-password/u)
+  assert.deepEqual(route, original)
+})
+
+test('fixed host-proxy transport sends an unauthenticated reachability probe and at most one credentialed business call, with no fallback', async () => {
+  for (const outcome of ['success', 'refusal', 'transport-error', 'probe-failure']) {
+    const requests = [], agents = []
+    const prepared = await prepareHostProxyTransport({ proxyEndpointLabel,
+      createRapidApiProxyFetch: store => createRapidApiProxyFetch(store, {
+        makeAgent: url => { const agent = { url, close: async () => {} }; agents.push(agent); return agent },
+        fetchImpl: async (url, init) => {
+          const target = new URL(url); requests.push({ target, init })
+          if (target.pathname === '/') return Response.json({}, { status: outcome === 'probe-failure' ? 503 : 401 })
+          if (outcome === 'transport-error') throw new Error('synthetic transport error')
+          return Response.json({}, { status: outcome === 'refusal' ? 400 : 200 })
+        },
+      }) }, { route: async () => ({ source: 'system', proxyUrls: [], directFallback: true }) })
+    const request = prepared.fetchImpl('https://twitter-aio.p.rapidapi.com/search/%22update%22', {
+      method: 'GET', redirect: 'error', headers: { 'x-rapidapi-key': SECRET, 'x-rapidapi-host': 'twitter-aio.p.rapidapi.com' },
+    })
+    if (outcome === 'transport-error' || outcome === 'probe-failure') await assert.rejects(request)
+    else assert.equal((await request).status, outcome === 'refusal' ? 400 : 200)
+    assert.equal(requests.length, outcome === 'probe-failure' ? 1 : 2)
+    assert.equal(requests[0].target.href, 'https://twitter-aio.p.rapidapi.com/')
+    assert.equal(requests[0].init.headers, undefined)
+    assert.equal(requests[0].init.redirect, 'error')
+    if (outcome !== 'probe-failure') assert.equal(requests[1].init.headers['x-rapidapi-key'], SECRET)
+    assert.ok(requests.every(row => row.init.dispatcher.url === HOST_PROXY_URL))
+    assert.equal(agents.length, 1)
+    assert.doesNotMatch(JSON.stringify(prepared.diagnosticTransport), new RegExp(SECRET))
+  }
+})
+
 test('CLI requires an explicit reviewed case before importing database modules or reading credentials', () => {
   const file = fileURLToPath(new URL('../../server/ops/verify-twitter-query-param.mjs', import.meta.url))
   for (const args of [['--execute'], ['--case=arbitrary', '--execute'], ['--case=control', '--case=candidate']]) {
@@ -1086,7 +1509,7 @@ test('stdin import is pure while the actual stdin script remains executable', ()
   const imported = spawnSync(process.execPath, ['--input-type=module', '-'], { encoding: 'utf8', env,
     input: `const m = await import(${JSON.stringify(url.href)}); console.log(m.REVISION);` })
   assert.equal(imported.status, 0)
-  assert.equal(imported.stdout.trim(), 'twitter-query-param-check.v6')
+  assert.equal(imported.stdout.trim(), 'twitter-query-param-check.v8')
   assert.equal(imported.stderr, '')
   const entry = spawnSync(process.execPath, ['--input-type=module', '-', '--execute'], { encoding: 'utf8', env,
     input: readFileSync(url, 'utf8') })
