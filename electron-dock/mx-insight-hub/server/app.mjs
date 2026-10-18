@@ -21,6 +21,7 @@ import { strategySearchUsageResponse, strategySearchUsageWindow } from './data/s
 import { strategySearchDataStatisticsResponse } from './data/strategy-search-data-statistics.mjs'
 import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSearchAlias } from './contracts/wechat-search-alias.mjs'
 import { hubSocialByPath } from './contracts/hub-social.mjs'
+import { YOUTUBE_COMMENT_PATHS } from './contracts/youtube-comments.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
 import { aggregateDiagnostics } from './data/aggregate-diagnostics.mjs'
 import { capabilityCatalog, syncCapabilityCatalog } from './data/capability-catalog.mjs'
@@ -28,6 +29,7 @@ import { formatBrowserExport } from './data/browser-export.mjs'
 import { browseData, browserStatistics, exportBrowserData, parseBrowserQuery } from './data/browser.mjs'
 import { readKeyAccessLimits, saveKeyAccessLimit } from './stores/key-access-limits.mjs'
 import { readKeyHubLimits, saveKeyHubLimits } from './stores/key-hub-limits.mjs'
+import { readProductManagement } from './operations/product-management.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { extname, join, normalize } from 'node:path'
@@ -789,6 +791,7 @@ export function createApp({
   retrievalControl = null,
   embedding = null,
   externalPlatformAdmin = null,
+  externalAdmissionPolicies = null,
   platformSearchPolicyStore = null,
   ecommerceRoutingStore = null,
   strategySearchRoutingStore = null,
@@ -809,6 +812,7 @@ export function createApp({
   enterpriseGateway = null,
   socialAccountGateway = null,
   socialAccountTikHubGateway = null,
+  youtubeCommentsGateway = null,
   tikHubGateway = null,
   acquisitionHistory = null,
   admissionRecovery = null,
@@ -1444,7 +1448,7 @@ export function createApp({
       }
       const { pathname, searchParams } = url
       const isAdminPath = pathname.startsWith('/internal/v1/admin/') || pathname.startsWith('/internal/v1/ops/') || pathname.startsWith('/auth/sso/')
-      const isPublicPath = pathname.startsWith('/api/v1/')
+      const isPublicPath = pathname.startsWith('/api/v1/') || pathname === '/api/v2/data/search'
       // Listener isolation must run before unauthenticated sign-in routes. The
       // public listener previously exposed both sign-in endpoints because their
       // handlers appeared before this guard.
@@ -3079,6 +3083,18 @@ export function createApp({
         sendJson(response, 200, { data: await platformSearchPolicyStore.update(params.platform, await readJson(request, 4096)), requestId })
         return
       }
+      if (request.method === 'GET' && pathname === '/internal/v1/admin/data-products/management') {
+        requireSourceAdmin(principal)
+        if ([...searchParams.keys()].some(key => !['path', 'consumerId'].includes(key))
+          || searchParams.getAll('path').length !== 1 || searchParams.getAll('consumerId').length > 1) {
+          throw new AppError(400, 'invalid_product_management_query', 'Provide one product path and an optional consumer ID')
+        }
+        response.setHeader('Cache-Control', 'no-store')
+        const data = await readProductManagement({ path: searchParams.get('path'), consumerId: searchParams.get('consumerId'),
+          store, platformAdmin: externalPlatformAdmin, admissionPolicies: externalAdmissionPolicies })
+        sendJson(response, 200, { data, requestId }); return
+      }
+
       if (request.method === 'GET' && pathname === '/internal/v1/admin/external-platforms') {
         requireSourceAdmin(principal)
         if (!externalPlatformAdmin) {
@@ -3154,6 +3170,18 @@ export function createApp({
           } else throw new AppError(404, 'not_found', '批量开通接口不存在')
         }
         sendJson(response, 200, { data: result, requestId }, { 'cache-control': 'private, no-store' })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/admission-policy')
+      if (params && ['GET', 'PUT'].includes(request.method)) {
+        requireSourceAdmin(principal)
+        response.setHeader('Cache-Control', 'private, no-store')
+        requireNoQuery(searchParams, 'provider admission policy')
+        if (!externalAdmissionPolicies) throw new AppError(503, 'external_admission_policy_unavailable', 'Provider admission policy is unavailable')
+        const data = request.method === 'GET'
+          ? await externalAdmissionPolicies.read(params.provider)
+          : await externalAdmissionPolicies.save(params.provider, await readJson(request, 4096), { actor: 'admin-token', requestId })
+        sendJson(response, 200, { data, requestId })
         return
       }
       params = routeMatch(pathname, '/internal/v1/admin/external-platforms/:provider/pricing-template')
@@ -5972,6 +6000,22 @@ export function createApp({
         sendJson(response,result.status,result.body,{'idempotent-replay':String(result.replay),'x-mx-insight-request-id':result.requestId,'x-mx-insight-source-mode':result.sourceMode})
         return
       }
+      const youtubeCommentsKind = request.method === 'POST'
+        ? Object.keys(YOUTUBE_COMMENT_PATHS).find(kind => YOUTUBE_COMMENT_PATHS[kind] === pathname) : null
+      if (youtubeCommentsKind) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'YouTube comments')
+        if (!youtubeCommentsGateway) throw new AppError(503, 'external_platform_unavailable', 'YouTube comments are unavailable')
+        const result = await withAdmissionSignal(response, async signal => youtubeCommentsGateway.youtubeComments(context, {
+          signal, kind: youtubeCommentsKind, body: await readJson(request, 64 * 1024), path: pathname,
+          idempotencyKey: request.headers['idempotency-key'],
+        }))
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+        })
+        return
+      }
       const socialEndpoint = request.method === 'POST' ? hubSocialByPath(pathname) : null
       if (socialEndpoint) {
         const context = await requirePublic(request)
@@ -6481,9 +6525,10 @@ export function createApp({
         })
         return
       }
-      if (request.method === 'POST' && pathname === '/api/v1/data/search') {
+      if (request.method === 'POST' && ['/api/v1/data/search', '/api/v2/data/search'].includes(pathname)) {
         const context = await requirePublic(request)
         const body = await readJson(request)
+        if (pathname === '/api/v2/data/search') requireNoQuery(searchParams, 'v2 content search')
         if (wechatSearchPlatform(body?.platform)) requireNoQuery(searchParams, 'WeChat search')
         const result = await withAdmissionSignal(response, signal => service.search(context, {
           signal,

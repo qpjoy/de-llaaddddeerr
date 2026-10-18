@@ -977,13 +977,14 @@ Facebook 标准搜索同样自动补页，最多 3 次实际派发，首次 429 
 必填 body 字段为 `platform` 和 `query`。可选字段包括 `pageSize`（`1..100`，policy
 可能进一步降低）、opaque `cursor`（最多 8192 字符）和 `type`。一次请求只能指定
 一个已授权平台，`all` 和 `*` 无效。`platform=telegram` 时搜索 Hub 已存 canonical
-message。`platform=xiaohongshu` 且 `pageSize` 恰好为默认值 20 时，兼容的首屏请求只有在
-独立 rollout gate 开启后才会无感使用受治理的 direct external-data connector；调用方不选择
-或获知 provider。省略 `pageSize` 等价于 20。此前由 direct traversal 签发的 opaque cursor
-使用 `mxec2` 域，仍留在同一路径，并且必须连同相同 query 和 pageSize 原样回传；历史
-执行路径改为发放 Hub 加密的 `mxnc1` cursor，最多走到第 15 页。升级前的裸 provider
-cursor 无法证明页数，会返回 `400 invalid_cursor`；删除 cursor、换新的
-`Idempotency-Key` 并从首页重启。非 20 pageSize 继续使用历史兼容路径，不能跨路径交换 cursor。
+message。`platform=xiaohongshu` 的所有有效页大小均由 Hub 执行，沿用
+`social.posts.search` 的权限、价格与运行开关，停用时拒绝请求，不回退 Night-All。
+省略 `pageSize` 等价于 20；此前签发的 `mxec2` 游标保持原链，非 20 页大小使用 Hub 缓冲。
+TikTok 标准搜索、微博小页也已由 Hub 接管。已保存的历史成功或失败仍按原规则重放；
+旧 `mxnc1` 的新派发返回 `409 search_restart_required`，由调用方明确删除 cursor、
+换新的 `Idempotency-Key` 从首页重开。参数和页大小必须保持不变，不能跨合同交换 cursor。
+旧 raw/crawl/user-info 入口的兼容规则未改变。YouTube 按帖子或频道取评论见
+[评论与剩余标准搜索迁移](integrations/youtube-comments-and-standard-search-migration.md)。
 `public_opinion` 与 `data_center_saved_records_*` 是 Hub-stored 数据平台，在此兼容路径固定返回
 `400 platform_operation_unsupported`；应改用 stored/canonical search，且不会进入历史
 外部 dispatch。

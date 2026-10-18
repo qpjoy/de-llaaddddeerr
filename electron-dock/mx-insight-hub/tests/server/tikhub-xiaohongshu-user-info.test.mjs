@@ -609,6 +609,26 @@ function queuedUserRequest(suffix, userId = 'aaaaaaaaaaaaaaaaaaaaaaaa') {
     idempotencyKey: `xhs-user-queue-${suffix}`, path: '/api/v1/search/user-info' }
 }
 
+test('saved admission below an atomic XHS profile workflow rejects locally without a TypeError or paid call', async () => {
+  const { attachAdmissionPolicy } = await import('../fixtures/admission-policy.mjs')
+  let calls = 0
+  const f = await gatewayFixture(async () => { calls++; throw new Error('must not dispatch') })
+  const { save } = attachAdmissionPolicy(f.gateway)
+  await save({ maxRequestsPerMinute: 1 })
+  await assert.rejects(f.gateway.legacyUserInfo(f.context, { ...queuedUserRequest('policy'),
+    body: { platform: 'xiaohongshu', username: 'fixture_account', count: 20 } }), error => {
+    assert.equal(error.code, 'external_platform_rate_limited')
+    assert.equal(error.status, 429)
+    assert.equal(error.details.reason, 'workflow_exceeds_provider_rate')
+    assert.equal(error.details.upstreamDispatched, false)
+    return true
+  })
+  assert.equal(calls, 0)
+  assert.equal(f.platformStore.calls.size, 0)
+  assert.equal([...f.usageStore.requests.values()][0].status, 'released')
+  assert.equal(f.gateway.active, 0)
+})
+
 async function occupiedUserGateway(t, options = {}) {
   const started = Promise.withResolvers()
   const release = Promise.withResolvers()

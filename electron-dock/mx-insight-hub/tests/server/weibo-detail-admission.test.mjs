@@ -41,13 +41,13 @@ async function fixture({ count = 1, rpm = 50, internal = false, remainingMs = 12
     assert.equal(leases.size, 0, 'waiting must not retain a dispatch lease')
     waits.push(ms); now += ms
   } }
-  const run = () => enrichWeiboRawSearch({ gateway, context, result,
+  const run = ({ revalidateIdentity = null } = {}) => enrichWeiboRawSearch({ gateway, context, result,
     request: { enrichment: { enabled: true, all: false, maxItems: count } },
     delivery: { usageRequestId: 'request', fingerprint: 'parent' }, credential: {}, credentialRevision: 1,
     providerCostControl: () => ({ costMinor: 12, currency: 'USD', costKind: 'estimated' }),
-    deadlineAt: start + remainingMs,
+    deadlineAt: start + remainingMs, revalidateIdentity,
   }, runtime)
-  return { gateway, result, run, calls, receipts, waits, logs, holds, leases, runtime, start,
+  return { gateway, context, result, run, calls, receipts, waits, logs, holds, leases, runtime, start,
     advance(ms) { now += ms } }
 }
 
@@ -163,5 +163,31 @@ test('waiting never retries an already sent detail, including rate rejection and
     assert.equal(h.receipts.length, 1)
     assert.equal(h.receipts[0].billed, null)
     assert.deepEqual(h.waits, [1200])
+  }
+})
+
+test('new buffered search revalidates withdrawn identity after the full bounded local wait without buying a detail', async () => {
+  for (const [kind, status, code] of [['platform', 403, 'capability_not_granted'], ['key', 403, 'capability_not_granted'],
+    ['plan', 503, 'plan_assignment_unavailable']]) {
+    const h = await fixture({ remainingMs: 180000 })
+    h.gateway.platformStore.providerState = async () => ({ lastErrorCode: 'upstream_rate_limited',
+      circuitOpenUntil: new Date(h.start + 60000).toISOString() })
+    let revoked = false, validations = 0
+    const wait = h.runtime.wait
+    h.runtime.wait = async ms => {
+      await wait(ms)
+      if (h.waits.reduce((sum, duration) => sum + duration, 0) >= 60000) revoked = true
+    }
+    await assert.rejects(h.run({ revalidateIdentity: async () => {
+      validations++
+      if (revoked) throw new AppError(status, code, `Synthetic ${kind} revocation`)
+      return h.context
+    } }), error => error.code === code)
+    assert.equal(h.waits.reduce((sum, duration) => sum + duration, 0), 60000)
+    assert.ok(validations > 1)
+    assert.equal(h.calls.length, 0)
+    assert.equal(h.receipts.length, 0)
+    assert.equal(h.holds.size, 0)
+    assert.equal(h.leases.size, 0)
   }
 })

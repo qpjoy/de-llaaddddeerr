@@ -19,8 +19,11 @@ test('ingest worker accepts Twitter standard and compatibility search under Rapi
     for (const providerKey of ['tikhub', 'justone', 'night-all', 'qixin', '']) {
       assert.throws(() => classifyExternalPlatformIngest({ ...payload, providerKey }), /pinned contract/)
     }
-    for (const platform of ['facebook', 'weibo', 'instagram', 'xiaohongshu', 'x', '']) {
+    for (const platform of ['weibo', 'instagram', 'xiaohongshu', 'x', '']) {
       assert.throws(() => classifyExternalPlatformIngest({ ...payload, platform }), /pinned contract/)
+    }
+    if (datasetId === NIGHT_ALL_COMPAT_DATASET_ID) {
+      assert.throws(() => classifyExternalPlatformIngest({ ...payload, platform: 'facebook' }), /pinned contract/)
     }
     for (const records of [undefined, null, {}, '[]']) {
       assert.throws(() => classifyExternalPlatformIngest({ ...payload, records }), /pinned contract/)
@@ -57,8 +60,11 @@ test('Instagram JustOne search ingestion accepts only its standard/raw datasets 
     for (const providerKey of ['justone', 'tikhub']) assert.deepEqual(classifyExternalPlatformIngest(job(providerKey, 'instagram', datasetId)), {
       enterprise: false, justOne: false, tikHubXiaohongshu: false, hubRaw: true,
     })
-    for (const platform of ['twitter', 'weibo', 'facebook']) {
+    for (const platform of ['twitter', 'weibo']) {
       assert.throws(() => classifyExternalPlatformIngest(job('justone', platform, datasetId)), /pinned contract/)
+    }
+    if (datasetId === NIGHT_ALL_COMPAT_DATASET_ID) {
+      assert.throws(() => classifyExternalPlatformIngest(job('justone', 'facebook', datasetId)), /pinned contract/)
     }
   }
   for (const datasetId of ['social.data.v1', 'ecommerce.products.v1', '']) {

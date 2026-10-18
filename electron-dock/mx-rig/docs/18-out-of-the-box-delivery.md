@@ -135,8 +135,46 @@ bash scripts/manage.sh desktop --launcher
 ```
 
 - 打出来的应用是 Launcher 的独立产品 `mx-rig`：经自己的产品网络连 Rig 服务（VIP），登录用平台统一账号，没有服务地址要填。
-- 安装包带上目标平台的 WireGuard 引擎；`--bootstrap <地址,地址>` 可以改入口，默认先走公网中继 IP，再走 `h2i.minsight-ai.com`。
-- 第一次要先在 Launcher 那边登记：在 Internal 节点上运行 `scripts/manage.sh launcher plan` 看计划，`launcher apply` 写入（需要 `MX_LAUNCHER_OPS_TOKEN`），剩下两步按提示在 Launcher Admin 里做。
+- 安装包带上目标平台的 WireGuard 引擎，以及海外通道用的 Mihomo 引擎（docs/25 §9，压缩后约 16 MB，第一次使用时解压）；`--bootstrap <地址,地址>` 可以改入口，默认先走公网中继 IP，再走 `h2i.minsight-ai.com`。
+- 第一次要先在 Launcher 那边登记：在 Internal 节点上运行 `scripts/manage.sh launcher plan` 看计划，`launcher apply` 写入（需要 `MX_LAUNCHER_OPS_TOKEN`），剩下两步按提示在 Launcher Admin 里做。`apply` 同时开通两个发版账号，凭据只存进 Secret `mx-rig/mx-rig-release`。
+- 安装包叫 `MX-Rig-<版本>-<mac|win>-<架构>.<dmg|exe>`，旁边有一个同名的 `.json` 发布清单（版本、平台、架构、大小、SHA-256）。
+- 装好的 Launcher 独立端会自己更新（docs/25 §8）：新版本经 Release Center 发布，先发给指定的安装 ID，验证后再推给所有人。把安装包和 `.json` 拷到 Internal 节点上：
+
+  ```bash
+  scripts/manage.sh release publish MX-Rig-0.9.0-mac-arm64.dmg --install-id <安装 ID> --notes notes.md
+  scripts/manage.sh release approve <plan> --smoke passed   # 在测试机上亲手装过之后
+  scripts/manage.sh release promote <plan>                  # 定向更新走通之后，再 approve 一次
+  ```
+
+  安装 ID 在桌面端点「检查更新」后显示。macOS 和 Windows 的包各发一次；只有 `--launcher` 打的包能发布。
+- 浏览器统一认证（docs/25 §11）：在 Launcher Internal 的「统一认证 → 接入应用」登记 `mx-rig` 之后，再运行一次 `scripts/manage.sh deploy`，它会自动带上档案，日志里出现 `browser SSO: on`。网页端在 `https://rig.minsight-ai.com` 用统一认证或飞书登录；桌面端用系统浏览器登录。域名和网关的要求见 [deploy/gateway/README.md](../deploy/gateway/README.md)。
+
+**开发用本地包，打包用发布的包**（参考 MX-H2I 的 `setup` / `setup:npm`）：
+
+Rig 运行时用到 Launcher 仓库里的两个包：`@qpjoy/electron-launcher`（网络、更新）和 `@qpjoy/electron-core-mihomo`（海外通道）。
+
+| 命令 | 作用 |
+| --- | --- |
+| `npm run setup` | 开发：先构建本仓库里的这两个包（需要 pnpm），再让 mx-rig 用它们。改了 Launcher 的代码，`npm run desktop` 就能直接试 |
+| `npm run setup:npm` | 切回 `package-lock.json` 锁定的已发布版本，并核对版本是否一致 |
+| `npm run dev-mode` | 显示现在用的是哪一份，以及锁定版本和仓库版本 |
+
+- 切换只改 `node_modules` 指向哪里：本地模式是链接，npm 的那份放在一边，切回来时直接还原，不用重新下载。`package.json` 和 `package-lock.json` 不会变，所以提交的永远是发布配置。
+- 打包时不用手动切：`npm run package` 和 `manage.sh desktop` 会自己切到已发布的包，打完再切回本地模式。安装包永远只用发布过的版本。
+- 仓库里的 Launcher 包比锁定版本新时，打包会提醒：新代码不会进安装包，要先发布，再更新 `package.json`。
+
+**两个平台的安装包**：
+
+| 命令 | 产物 |
+| --- | --- |
+| `bash scripts/manage.sh desktop --launcher --mac --all`（等同 `npm run make:mac`） | `MX-Rig-<版本>-mac-arm64.dmg`、`…-mac-x64.dmg`、`…-mac-universal.dmg` |
+| `--mac --arm64`、`--mac --x64`、`--mac --universal` | 只出其中一个，也可以任意组合 |
+| `bash scripts/manage.sh desktop --launcher --win`（等同 `npm run make:win`，必须在 Windows 上） | `MX-Rig-<版本>-win-x64.exe` |
+
+- **universal 包**：一个 DMG 两种芯片都能装。里面带两份 Chromium 和两套网络引擎，所以大约是单架构包的两倍，运行时各取自己架构的那份。
+- **x64 包**：在 Apple 芯片的 Mac 上也能打，第一次会下载 x64 的 Chromium 和引擎，存在 `.runtime/` 里。官方 CDN 不通时（2026-10-17 在这台机器上就是这样），加 `MX_RIG_BROWSER_MIRROR_ONLY=1` 直接走 npmmirror。
+- **Windows 安装程序**：和 MX-H2I 一样，安装时可以选择目录，按用户安装，不需要管理员权限；第一次连接内网时才会弹 UAC。
+- **Windows 打包机**：要克隆整个仓库（打包依赖同级的 `mx-common` 和 `mx-launcher/ui-design`），然后先运行 `node electron-dock/mx-launcher/ui-design/scripts/build.mjs`，再在 mx-rig 里 `npm install`。
 
 **发版时顺手录演示录像**（docs/24 M8c）：「新手引导」里每个关卡都有一段录像，发版时重录，所以录像里就是这一版的界面。
 

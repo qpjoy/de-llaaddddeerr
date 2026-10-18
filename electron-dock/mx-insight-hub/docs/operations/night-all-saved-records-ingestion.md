@@ -5,6 +5,61 @@ Migration `066_night_all_saved_records_sources.sql` registers the fixed inputs;
 it does not connect to the source database, read a row, approve a mapping,
 activate a task or grant a Public API platform.
 
+## 2026-10-17：tasiting/maidanglao批次验证
+
+用户确认tasiting已恢复；随后00:34源库及00:39 Hub完整回执确认maidanglao现有news3568/web170在源库、Hub原始层与有效canonical数量一致，缺失/已删/身份不匹配均0。news/web最近导入成功、拒绝0，任务active且游标idle无错误；本次批次入库链路已跑通，tasiting对应数量也保持。源配置为127.0.0.1:5432/agent_data_crawler_platform，无需改远端host、账号或端口。tag仍是原始批次标签、source_type是分类，同库新tag由原news/web任务读取；tender不影响这批数据。当前证据不等同源库全量key/正文逐条校验、325站全部采集或搜索投影完成。源/Hub只读脚本与回执详见[按批次核对](night-all-a-cleaning-schema-drift-2026-10-16.md#2026-10-17按批次核对实际库与清洗结果)。18项本地工具回归通过，会话未操作生产或改MX-H2I。
+
+## 2026-10-16：迁移兼容、组织网站与恢复限制
+
+源端 migration `0022_collection_tags` 在原 `saved_records` 增加可空 `varchar tag`。
+Hub 现在兼容原 23 列和额外这一列，其他字段漂移仍阻断；批次标签保留在受限 raw
+证据中，不自动公开为 extensions。原 mapping version、身份及 checkpoint 保持不变。
+源端当前仍为 saved_records 父表及14个 source_type 分区，新增的是 tender。
+完整运行源码已核实，writer 仍不能满足强提交顺序保证，不能直接勾选确认恢复。
+见[源码核对、只读诊断及恢复顺序](night-all-a-cleaning-schema-drift-2026-10-16.md)。
+
+本轮兼容不需要新增 Hub 数据库表或改已执行 migration：`npm run migrate` 仍只处理
+Hub/mx-common 等原有迁移，不能代替发布新的 Admin/Public/ingest 代码，也不执行源库DDL。
+`scripts/manage.sh deploy` 的独立源索引维护步骤现在检查原13类及全部已登记动态任务的连接一致性，
+源SQL再按实际目录维护规范叶分区，覆盖 tender 和后续新增类别；后台每日发现仍只读。
+远端源库必须配置受控的 `MX_INSIGHT_NIGHT_ALL_DDL_SERVICE` 才会执行该维护步骤；未配置时部署
+只警告跳过，不能把部署成功当成源索引已补齐。
+
+325站不是325个清洗类别：266站走 news，59站走 web；同一 source_type 还可包含其他采集器。
+站点原始分类“智库/NGO/藏”可重叠，与 source_type 权限、内容主题和 Hub 发布者目录分开。
+仅 organization-web 新增白名单 `stableFields.website`：站点ID/名称/域名、来源分类、正文状态/范围、
+版本指纹和源日期证据。publisher.code/name 缺省使用站点ID/名称，已有新闻接口的 sourceCodes
+可筛选新清洗记录；已审核目录精确别名可沿现有规则绑定，未知站点保持待归类，不自动创建325个目录项。
+全文映射full_text、RSS摘要映射summary、首页/PDF/付费墙元数据映射reference，保留精细原状态，
+不新增公共枚举或把列表当文章全文。站点标签不进入授权类别或正文topics。
+
+上述元数据改变会在重新摄入时生成相应canonical修订，身份、mapping v1和raw证据算法不变；
+旧记录不会因migrate自动补齐。源日期只有date-only且published_at为空时，本轮只保留website日期证据，
+不扩大公共新闻日期推断。历史回填应单独采用有范围、可审计的幂等对账，不重置原checkpoint。
+
+恢复失败/遗留运行现在先检查已保存的基础及动态writer合同、固定source身份、原active mapping、
+实时schema/index和旧checkpoint，全部通过才保留原position并清失败；单类失败不阻塞其他类。
+该操作不新写确认、不自动启用手动暂停任务，也不直接入队。已存确认只证明摘要匹配，
+不能证明当前源端提交顺序；本次源端ordering问题仍是生产恢复前的独立阻碍。
+
+### 核对、恢复与人工确认的区别
+
+- “重新核对”只读取各分区的源表、索引和断点状态，不读取复选框、不清除失败标记、不启用任务。已通过源表检查的分区仍可能显示历史运行“需恢复”。
+- “恢复失败任务”检查服务器已保存的确认及当前来源，逐类清除符合条件的失败状态，保留原checkpoint和暂停状态。HTTP200可包含部分失败；以每类 `resumed` / `error` 为准。原本启用的任务恢复后可重新进入调度。
+- writer复选框只改变本页选择，点击“启用”时才提交人工确认；勾选本身不检查或修复源程序，也不会补写“恢复失败任务”所需的旧确认。只有实际验证写入顺序和删除语义后才能确认。之前已清洗过数据不是这些保证的证据。
+
+本轮UI修复增加“正在核对”、完成时间、通过/受阻/缺失数量及逐类结果；重查中和失败时保留的旧结果明确标为“上次核对”。恢复HTTP200部分失败会显示准确计数、每类错误码和消息，不再统一提示全成功；恢复/同步动作返回值也不再短暂覆盖完整连接与任务配置。此改动不执行恢复、启用、重置或生产配置修改，需发布前端后生效。
+
+验证：33项反馈/UI/恢复逻辑测试通过，Vite构建通过；桌面1440px及窄屏390px使用实际页面和全量mock接口完成浏览器检查，覆盖首次核对、重查、部分缺失、失败保留上次结果、HTTP200部分恢复及延迟刷新期间配置保留。复选框勾选/取消均零请求，未调用生产接口；这些验证不能证明线上任务已经恢复。
+
+### 批量恢复的总锁冲突修复
+
+随后用户截图显示汽车恢复成功，其余13类均因总key `night-all-saved-records` 报 `source_busy`。旧实现通过 `Promise.allSettled` 并发恢复，各项又分别申请同一总任务的非等待锁，导致批次内部互相阻塞。现在按类别顺序执行，每项独立捕获错误；总锁、分区锁和原有门禁检查全部保留。真实运行中的分区仍可报告占锁，一项受阻不会阻止后续类别检查。
+
+修复只清除符合条件的失败状态，保留checkpoint、mapping和手动暂停状态，不提交writer确认、不直接入队。已恢复且仍为idle的汽车项再次恢复会返回无需恢复；active项可照原调度运行。该问题需发布Hub后端，刷新前端或勾选writer无效；本次代码修复不解决此前发现的源writer提交顺序缺口，也不代表线上清洗已恢复。
+
+验证：使用实际 `DatabaseSourcePuller` 进程内互斥路径，修复前精确复现1成功/13总锁冲突，修复后14类（含tender）全部恢复。另覆盖外部总锁、外部分区锁、单类probe失败后继续、解锁重试及重复恢复不写游标；相关恢复/反馈/Store锁/调度/本地mock路由共55项通过。Store锁测试使用模拟PG会话，本轮未运行真实PostgreSQL或生产恢复。
+
 ## 2026-09-17：动态类别目录（取代下文固定 13 类的数量假设）
 
 本计划的来源是 **Night-All-A**，控制台显示“Night-All-A 数据清洗任务”。
@@ -25,8 +80,8 @@ activate a task or grant a Public API platform.
 - 数据集为 `data-center.saved-records.<source_type>.v1`，授权平台为
   `data_center_saved_records_<source_type>`；这些是下游类别索引，而非物理 ES 索引名。
 - 新增类别继承同一源程序已核对的 writer 语义，自动过程以 `system:category-discovery` 保存该类独立合同摘要和启用记录，不冒充人工审核。没有既有 writer 确认时阻断；自动启用核对同样的
-  23 列、单值分区、唯一 `(last_seen_at,id)` 索引、watermark/提交顺序/删除合同；
-  源索引仍由源程序/源库运维准备，发现不会对只读源库执行 DDL。原来的 13 表索引脚本只覆盖初始集合。通过检查即自动进入常规增量调度、canonical 入库和 outbox → ES 索引；阻断后下一轮自动重试，也可按“发现新类别”立即重试。人工暂停会取消自动启用意图，后续发现不会擅自重启。
+  23 个必需列及可选的可空 varchar `tag`、单值分区、唯一 `(last_seen_at,id)` 索引、watermark/提交顺序/删除合同；
+  源索引仍由源程序/源库运维准备，发现不会对只读源库执行 DDL。显式部署维护脚本已支持动态规范叶分区。通过检查即自动进入常规增量调度、canonical 入库和 outbox → ES 索引；阻断后下一轮自动重试，也可按“发现新类别”立即重试。人工暂停会取消自动启用意图，后续发现不会擅自重启。这里的writer检查是已存确认版本/摘要检查，不能代替源实现审核。
 - 新类别登记会检查现有 grant、活跃未过期 snapshot entitlement 及 dataset/platform 冲突；
   发现占用时显示阻断，不把已有授权静默变成新数据权限。自动启用清洗仍不代表对外授权；公开内容沿原有发布规则并独立授予 Key 权限。
 - 普通调度、手动单类/全类同步、进度、恢复、共享配置及 checkpoint 操作均从持久化目录取类别。
@@ -70,6 +125,16 @@ provider、source key、凭据、原始数据、checkpoint，也不保证采集�
 部署只需 Hub migration/API/UI/ingest worker，不涉及 Launcher、MX-H2I、VPN、DNS 或用户登录。
 
 ## 1. Scope and isolation
+
+Deployment topology confirmed on 2026-10-16: Internal/Hub runs on `100.127.0.6`,
+the Night-All-A application runs on `100.127.0.1`, and the separate Night-All HTTP
+service runs on Internal port `13141`. The supplied Night-All-A runtime audit's
+environment candidate and actual read-only connection both target
+`100.127.0.6:5432/agent_data_crawler_platform`. An application host is not its
+database host: do not redirect the cleaner to `.1` or to Night-All HTTP based on
+these service names. That audit does not independently verify the live application
+process or current Hub configuration; deploy still checks its registered source
+transport and local PostgreSQL identity.
 
 The initial pipeline reads the 13 LIST leaf partitions below from the existing
 `agent_data_crawler_platform` PostgreSQL database. It deliberately does not
@@ -117,15 +182,15 @@ Every leaf needs one valid, ready, non-partial unique B-tree whose exact keys
 are `(last_seen_at, id)`. The parent primary key `(source_type, id)` does not
 prove the generic keyset puller's total-order contract.
 
-The Internal deploy reads only the 13 effective transport shapes from the Hub
-catalog. Once all 13 are configured consistently for
+The Internal deploy reads the original 13 plus all registered crawler transport
+shapes from the Hub catalog. Once all are configured consistently for
 `127.0.0.1:5432/agent_data_crawler_platform`, it runs the versioned script as a
 standalone `psql` operation through the host `postgres` peer identity, but only
 after matching the Unix-socket postmaster PID to the real IPv4 5432 listener.
 No source password is exported from the Hub catalog. A non-local or legacy
 `dsnEnv` source uses the root-managed libpq service named by
 `MX_INSIGHT_NIGHT_ALL_DDL_SERVICE`. Both paths disable password prompting and
-bound connection setup to 10 seconds; partial 13-task transport configuration
+bound connection setup to 10 seconds; partial or inconsistent task transport configuration
 is drift and stops deployment rather than being treated as unconfigured.
 
 An independently managed deployment can run the same operation directly,
@@ -137,11 +202,51 @@ psql -X "service=night_all_ddl dbname=agent_data_crawler_platform" \
   -f scripts/night-all-saved-records-source-indexes.sql
 ```
 
-The script uses `CREATE UNIQUE INDEX CONCURRENTLY`, checks the complete catalog
-contract for all 13 indexes and exits non-zero if any result is absent, invalid,
-not ready, partial, non-unique, incorrectly ordered or bound to the wrong leaf.
-Rerunning repairs an interrupted invalid build. A uniqueness failure is source
-contract evidence; investigate it rather than weakening the index.
+The script requires the original 13 leaves, inventories at most 500 direct
+partitions, and includes new canonically named single-value ordinary leaves.
+DEFAULT and multi-value partitions are reported but not maintained. It verifies
+the parent, leaf binding and non-null cursor types before building only missing
+indexes with `CREATE UNIQUE INDEX CONCURRENTLY`. Any already-valid exact index
+can be reused, regardless of name. An interrupted build with the exact managed
+name, table and cursor definition can be repaired with `REINDEX INDEX CONCURRENTLY`
+only when it is invalid but live, a regular index, and not owned by a constraint
+or attached to an index partition tree. Repair also requires visibility of all
+builders (`pg_read_all_stats` or superuser) and no active builder on that leaf.
+Other managed-name conflicts and incomplete cursor indexes with other names
+(including failed REINDEX `_ccnew`/`_ccold` remnants) stop maintenance for review.
+No explicit DROP or session cancellation is issued. Long source types use bounded
+hashed index names. Final checks repeat the safety guards and verify readiness
+and unchanged leaf identities. Uniqueness failures are not bypassed.
+
+Catalog checks retain a 2-second lock timeout. Concurrent CREATE/REINDEX uses
+`lock_timeout=0` with a **30-minute statement timeout per index operation**, since
+waiting for existing transactions is part of concurrent index construction. The
+script prints its plan and each generated SQL command before executing it; any
+failure stops the deploy and leaves earlier completed operations in place. Do not
+run separate manual source DDL alongside this session: its advisory lock only
+coordinates other executions of this same script. See PostgreSQL's
+[concurrent index rules](https://www.postgresql.org/docs/16/sql-createindex.html)
+and [concurrent rebuild recovery](https://www.postgresql.org/docs/16/sql-reindex.html).
+
+For a blocked/failed build, stream the read-only status script into the **same
+verified source connection**. Run the following on **Internal `100.127.0.6`**
+in the Hub checkout after local-peer identity is verified, not on the Night-All-A
+application host `100.127.0.1`:
+
+```sh
+sudo -u postgres psql -X -w -p 5432 -d agent_data_crawler_platform \
+  -v ON_ERROR_STOP=1 -A -t -q \
+  < scripts/night-all-saved-records-index-status.sql
+```
+
+It reports catalog flags, index progress, related locks and blocker PIDs, without
+business rows, SQL text or connection secrets. It does not repair or cancel
+anything. A timed-out builder may already have disappeared, and missing statistics
+permissions can hide other sessions, so an empty progress list is not evidence
+that the original wait had no blocker. Deploy reaches this source-index step
+after Admin/Public rollout and before applying the ingest manifest; failure here
+is a partial deploy, not a rollback. Sync the fix and rerun the ordinary deploy;
+task recovery still requires the separate writer and checkpoint checks below.
 
 ## 4. Mapping and fixed cleaning
 
@@ -198,7 +303,8 @@ Activation requires a human attestation of all of the following for every leaf:
 
 1. The source keeps its reviewed declarations: only `run_id`, `source_family`,
    `collection_mode`, `published_at` and `raw` may be nullable; the other 18
-   fixed columns are non-null. `id` is immutable and never reused within that
+   fixed columns are non-null. The optional `tag` column, when present, must be
+   nullable `varchar`. `id` is immutable and never reused within that
    fixed leaf/dataset lifetime. `record_key` is the stable canonical source
    identity.
 2. Each leaf contains only its declared `source_type`. Rebinding, replacing,
@@ -227,7 +333,8 @@ with `source_contract_mismatch` before canonical ingest when any item differs:
 
 - the persisted source still has the fixed dataset, platform, object type and
   leaf locator;
-- the leaf still has exactly the reviewed 23 columns and nullability. The
+- the leaf has the reviewed 23 columns and nullability, optionally plus the
+  reviewed nullable `varchar tag`; every other extra column is rejected. The
   PostgreSQL types are exact: `id`/`run_id` are `int4`; source descriptors and
   `published_at` use their reviewed `varchar` fields; `source_url` and `text`
   are `text`; evidence/author/metrics/media/attributes/raw are `jsonb`; and the

@@ -43,7 +43,13 @@
           <div class="qp-row">
             <button id="network-connect" class="qp-button qp-button--primary qp-button--sm" type="button">连接内网</button>
             <button id="network-disconnect" class="qp-button qp-button--ghost qp-button--sm" type="button" hidden>断开</button>
+            <button id="network-recover" class="qp-button qp-button--ghost qp-button--sm" type="button" aria-describedby="network-recovery-hint" hidden>重新登记本机网络</button>
           </div>
+          <p id="network-recovery-hint" class="qp-caption qp-muted" hidden>仅备份并重新登记 MX Rig 本机网络身份；账号与测试数据保留。</p>
+          <p id="update-line" class="qp-caption qp-muted rig-update-line" hidden>
+            MX Rig <span id="update-version"></span>
+            <button id="update-check" class="qp-button qp-button--ghost qp-button--sm" type="button">检查更新</button>
+          </p>
         </section>
         <label id="server-field" class="qp-field"
           ><span class="qp-field__label">Internal 服务地址</span
@@ -53,11 +59,11 @@
           ><input id="private-http" type="checkbox" /><span class="qp-choice__control"></span
           ><span class="qp-caption">内网测试服务器，允许私有 IP 的 HTTP（10.x / 172.16–31.x / 192.168.x / 100.64–127.x）</span></label
         >
-        <label class="qp-field"
+        <label id="account-field" class="qp-field"
           ><span class="qp-field__label">账号</span
           ><input id="account" class="qp-input" autocomplete="username" required
         /></label>
-        <label class="qp-field"
+        <label id="password-field" class="qp-field"
           ><span class="qp-field__label">密码</span
           ><input
             id="password"
@@ -69,6 +75,13 @@
         <button class="qp-button qp-button--primary qp-button--lg" type="submit">
           登录工作台 →
         </button>
+        <!-- Browser SSO through the platform's unified authentication (docs/25 P4). -->
+        <div id="sso-panel" class="rig-sso" hidden>
+          <span id="sso-or" class="qp-caption qp-muted">或者</span>
+          <button id="sso-login" class="qp-button qp-button--outline qp-button--lg" type="button">用浏览器登录（统一认证 · 飞书）</button>
+          <button id="sso-cancel" class="qp-button qp-button--ghost qp-button--sm" type="button" hidden>取消浏览器登录</button>
+          <p id="sso-hint" class="qp-caption qp-muted"></p>
+        </div>
         <p id="login-error" class="qp-body-2 rig-error" role="alert"></p>
         <p id="login-hint" class="qp-caption qp-muted">
           用管理员发给你的账号和一次性密码登录。本机体验：账号 admin，密码用 bash scripts/manage.sh local token 查看。凭据只在主进程与服务端处理。
@@ -112,6 +125,7 @@
           <div class="qp-row">
             <span id="surface" class="qp-tag"></span>
             <span id="network-chip" class="qp-tag rig-network-chip" hidden></span>
+            <button id="update-chip" class="qp-button qp-button--ghost qp-button--sm rig-update-chip rig-print-hide" type="button" hidden></button>
             <button
               id="hud-toggle"
               class="qp-button qp-button--ghost qp-button--sm rig-print-hide"
@@ -142,6 +156,27 @@
            across pages and survives every redraw. -->
       <aside id="hud" class="rig-hud rig-print-hide" aria-label="系统面板" hidden></aside>
     </div>
+    <!-- Launcher mode (docs/25 P2): a new version from Release Center. Outside
+         the login page and the workbench, so both show it. -->
+    <section id="update-banner" class="qp-panel rig-update rig-print-hide" role="status" aria-live="polite" hidden>
+      <div class="rig-update__head">
+        <strong class="qp-body-2">客户端更新</strong>
+        <button id="update-close" class="qp-button qp-button--ghost qp-button--sm" type="button" aria-label="收起">×</button>
+      </div>
+      <p id="update-text" class="qp-body-2"></p>
+      <progress id="update-progress" class="rig-update__progress" max="100" hidden></progress>
+      <details id="update-notes-box" hidden>
+        <summary class="qp-caption">更新说明</summary>
+        <pre id="update-notes" class="qp-caption rig-update__notes"></pre>
+      </details>
+      <p id="update-install-id" class="qp-caption qp-muted rig-update__id" hidden></p>
+      <div id="update-actions" class="qp-row">
+        <button id="update-download" class="qp-button qp-button--primary qp-button--sm" type="button" hidden>下载</button>
+        <button id="update-install" class="qp-button qp-button--primary qp-button--sm" type="button" hidden>关闭并安装</button>
+        <button id="update-cancel" class="qp-button qp-button--ghost qp-button--sm" type="button" hidden>取消</button>
+        <button id="update-retry" class="qp-button qp-button--ghost qp-button--sm" type="button" hidden>重新检查</button>
+      </div>
+    </section>
     <dialog id="password-dialog" class="qp-dialog rig-dialog" aria-labelledby="password-title">
       <form id="password-form" class="rig-dialog__form" method="dialog">
         <h2 id="password-title" class="qp-heading-2">修改密码</h2>

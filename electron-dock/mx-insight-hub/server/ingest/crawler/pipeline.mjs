@@ -633,7 +633,7 @@ export class CrawlerSavedRecordsPipeline {
     return this.setStatus(status, { ...options, sourceKey })
   }
 
-  async #syncCandidate(spec, { allowPaused }) {
+  async #assertSpecAttestation(spec) {
     if (!CRAWLER_SOURCE_TYPES.includes(spec.sourceType)) {
       const contract = crawlerWriterContractForSpec(spec)
       const attestation = await this.store.getLatestPipelineWriterContractAttestation?.(contract.pipelineKey)
@@ -641,7 +641,9 @@ export class CrawlerSavedRecordsPipeline {
         throw new AppError(409, 'writer_contract_attestation_required', '新增类别需要独立确认 writer 合同')
       }
     }
-    const source = await this.#source(spec)
+  }
+
+  #assertSourceContract(spec, source) {
     const contractIssues = crawlerSourceContractIssues(source, spec)
     if (contractIssues.length > 0) {
       throw new AppError(409, 'pipeline_source_contract_drift', `Crawler source contract has drifted: ${spec.sourceKey}`, {
@@ -649,17 +651,9 @@ export class CrawlerSavedRecordsPipeline {
         issues: contractIssues,
       })
     }
-    if (source.status !== 'active') {
-      if (allowPaused) return { task: { sourceKey: spec.sourceKey, status: 'paused', scheduled: false }, job: null }
-      throw new AppError(409, 'pipeline_paused', `Activate the crawler task before scheduling sync: ${spec.sourceKey}`)
-    }
-    const cursor = await this.#cursor(spec.sourceKey)
-    if (cursor?.status === 'running') {
-      return {
-        task: { sourceKey: spec.sourceKey, status: 'running', jobId: null, alreadyScheduled: true },
-        job: null,
-      }
-    }
+  }
+
+  async #assertMappingAndCheckpoint(spec, source) {
     const mappingResult = await this.#builtInMapping(spec, source)
     if (!mappingResult.active) {
       throw new AppError(409, 'builtin_mapping_not_active', `Activate the fixed mapping before syncing ${spec.sourceKey}`)
@@ -677,6 +671,24 @@ export class CrawlerSavedRecordsPipeline {
     await this.databasePuller.assertCheckpointCompatible(spec.sourceKey, {
       mappingOverride: mappingResult.builtIn,
     })
+  }
+
+  async #syncCandidate(spec, { allowPaused }) {
+    await this.#assertSpecAttestation(spec)
+    const source = await this.#source(spec)
+    this.#assertSourceContract(spec, source)
+    if (source.status !== 'active') {
+      if (allowPaused) return { task: { sourceKey: spec.sourceKey, status: 'paused', scheduled: false }, job: null }
+      throw new AppError(409, 'pipeline_paused', `Activate the crawler task before scheduling sync: ${spec.sourceKey}`)
+    }
+    const cursor = await this.#cursor(spec.sourceKey)
+    if (cursor?.status === 'running') {
+      return {
+        task: { sourceKey: spec.sourceKey, status: 'running', jobId: null, alreadyScheduled: true },
+        job: null,
+      }
+    }
+    await this.#assertMappingAndCheckpoint(spec, source)
     return { task: null, source, job: { sourceKey: spec.sourceKey } }
   }
 
@@ -798,6 +810,12 @@ export class CrawlerSavedRecordsPipeline {
       if (cursor?.status !== 'failed' && !abandoned) {
         return { sourceKey: spec.sourceKey, status: cursor?.status ?? 'idle', resumed: false }
       }
+      // Recheck the saved approval and current source before clearing failure.
+      // A matching attestation does not prove the writer still orders commits.
+      await this.#assertCurrentAttestation()
+      await this.#assertSpecAttestation(spec)
+      this.#assertSourceContract(spec, source)
+      await this.#assertMappingAndCheckpoint(spec, source)
       await assertOwned()
       await this.queue.saveCursor(
         `external:${spec.sourceKey}`,
@@ -822,12 +840,19 @@ export class CrawlerSavedRecordsPipeline {
   async resumeFailedTasks(identifier = null) {
     const specs = await listCrawlerSpecs(this.store)
     if (identifier) return this.resumeFailedTask(identifier)
-    const settled = await Promise.allSettled(specs.map((spec) => this.#resumeSpec(spec)))
+    const tasks = []
+    // Every leaf also takes the shared pipeline try-lock. Recover sequentially
+    // so this batch does not report its own siblings as source_busy.
+    for (const spec of specs) {
+      try {
+        tasks.push(await this.#resumeSpec(spec))
+      } catch (error) {
+        tasks.push({ sourceKey: spec.sourceKey, resumed: false, error: taskError(error) })
+      }
+    }
     return {
       pipelineKey: CRAWLER_PIPELINE_KEY,
-      tasks: settled.map((result, index) => result.status === 'fulfilled'
-        ? result.value
-        : { sourceKey: specs[index].sourceKey, resumed: false, error: taskError(result.reason) }),
+      tasks,
     }
   }
 

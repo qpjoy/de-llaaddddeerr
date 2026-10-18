@@ -33,6 +33,7 @@ those paths retire one operation at a time and are not the target architecture.
 
 ## 下游接入与演示
 
+- [Hub 新闻与组织网站数据接口接入指南](integrations/organization-web-data-api.md)：下游可交付文档；新闻发现的授权、来源筛选、分页、详情、统计及 cURL 示例，明确 maidanglao 批次筛选和首页快照尚未开放，接口实现与线上验收分开。
 - [Web Search 当前实现与开通指南](integrations/web-search.md)：Hub 直连八家 HTTP 搜索、默认关闭、租户和 Key 范围与排序、逐供应商凭据/代理、迁移 119 与验收边界。
 - [Web Search、百度接入与多供应商路由规划](integrations/web-search-plan-2026-09-30.md)：独立数据服务、百度目录关联、Admin Key 管理、搜索 Sequence、逐供应商代理、Domestic/Internal 链路、下游合同与分期验收；原始规划，当前落地范围见下项。
 

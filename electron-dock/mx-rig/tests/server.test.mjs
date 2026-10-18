@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { start, configuration } from '../apps/server/index.mjs'
 
-async function fixture(t) {
+async function fixture(t, environment = {}) {
   const root = await mkdtemp(join(tmpdir(), 'mx-rig-api-'))
   const runtime = await start(
     {
@@ -14,7 +14,8 @@ async function fixture(t) {
       MX_RIG_PORT: '0',
       MX_RIG_STORE: 'memory',
       MX_RIG_STATE_DIR: root,
-      MX_RIG_ARTIFACTS_DIR: join(root, 'artifacts')
+      MX_RIG_ARTIFACTS_DIR: join(root, 'artifacts'),
+      ...environment
     },
     { schedule: false }
   )
@@ -218,4 +219,57 @@ test('a service opened to the LAN still takes its own loopback page, and no othe
   assert.equal(await login(`http://localhost:${port}`), 200, 'this machine, as localhost')
   assert.equal(await login('https://evil.example'), 403)
   assert.equal(await login(`http://127.0.0.1:${Number(port) + 1}`), 403, 'another server on this machine')
+})
+
+test('explicit Rig browser entrances can sign in without changing the upstream or trusting Host headers', async (t) => {
+  const { api, runtime } = await fixture(t, {
+    MX_RIG_PUBLIC_URL: 'http://192.168.1.2:30891',
+    MX_RIG_ALLOWED_ORIGINS: 'http://10.88.88.88:30891,http://10.88.100.6'
+  })
+  const credentials = { account: 'admin', password: 'test-only-rig-secret' }
+  for (const origin of ['http://192.168.1.2:30891', 'http://10.88.88.88:30891', 'http://10.88.100.6', runtime.origin]) {
+    const login = await api('/api/rig/v1/login', credentials, { origin })
+    assert.equal(login.status, 200, origin)
+    assert.equal(login.body.member.principalId, 'service-admin')
+    assert.equal(login.body.token, undefined)
+    assert.match(login.headers.get('set-cookie'), /HttpOnly/)
+    assert.doesNotMatch(login.headers.get('set-cookie'), /; Secure/i)
+    const cookie = login.headers.get('set-cookie').split(';')[0]
+    const me = await api('/api/rig/v1/me', undefined, { origin, cookie })
+    assert.equal(me.status, 200)
+    assert.equal(me.body.principal.role, 'admin')
+  }
+  for (const origin of ['http://10.88.88.88:30892', 'http://10.88.100.60', 'https://10.88.100.6', 'https://evil.example', 'null']) {
+    const denied = await api('/api/rig/v1/login', credentials, {
+      origin,
+      host: '10.88.100.6',
+      'x-forwarded-host': '10.88.100.6',
+      'x-forwarded-proto': 'http'
+    })
+    assert.equal(denied.status, 403, origin)
+    assert.equal(denied.body.error.code, 'origin_denied')
+    assert.equal(denied.headers.get('set-cookie'), null)
+  }
+  const nativeFromBrowser = await api('/api/rig/v1/native-login', credentials, { origin: 'http://10.88.100.6' })
+  assert.equal(nativeFromBrowser.status, 403)
+  assert.equal(nativeFromBrowser.body.error.code, 'native_only')
+  assert.equal((await api('/api/rig/v1/native-login', credentials, {})).status, 200)
+})
+
+test('browser entrance configuration accepts exact origins and does not downgrade secure cookies', () => {
+  const base = { MX_RIG_ADMIN_TOKEN: 'test-only-rig-secret', MX_RIG_PUBLIC_URL: 'https://rig.example' }
+  const config = configuration({
+    ...base,
+    MX_RIG_ALLOWED_ORIGINS: ' http://10.88.100.6/,https://RIG.EXAMPLE:443,http://10.88.100.6 '
+  })
+  assert.deepEqual(config.webOrigins, ['http://10.88.100.6', 'https://rig.example'])
+  assert.equal(config.publicUrl, base.MX_RIG_PUBLIC_URL)
+  assert.equal(config.secureCookies, true)
+  assert.deepEqual(configuration({ ...base, MX_RIG_ALLOWED_ORIGINS: '' }).webOrigins, [])
+  assert.deepEqual(configuration(base).webOrigins, [])
+  for (const value of ['*', 'null', 'https://*.example', 'ftp://rig.example', 'http://rig.example/rig/', 'http://user:secret@rig.example', 'http://rig.example?x=1', 'http://rig.example#x', 'http://rig.example\\evil', 'http://rig.example https://other.example']) {
+    assert.throws(() => configuration({ ...base, MX_RIG_ALLOWED_ORIGINS: value }), {
+      code: 'invalid_configuration'
+    }, value)
+  }
 })

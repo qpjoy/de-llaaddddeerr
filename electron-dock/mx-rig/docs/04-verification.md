@@ -1,5 +1,76 @@
 # 验证记录
 
+## 2026-10-17：P4 浏览器统一认证（网页端、桌面端、部署）
+
+- `npm run check` 通过（291 个模块）。
+- `npm test`：809 项，784 通过，0 失败；跳过 25 项，其中 24 项是 PostgreSQL 测试。日志 `.runtime/p4-tests-2.log`。
+  - 第一次全量跑时，`terminal.test.mjs` 有一项在高负载下失败，单独跑通过，第二次全量跑也通过。
+  - 第二次全量跑多跳过的那一项是 `station.test.mjs`：它先启动一次 Chromium 来判断浏览器是否可用，高负载下启动没成功，就跳过了；单独跑通过。两者都和本次改动无关。
+- 新增的测试：
+  - `tests/browser-sso.test.mjs`（8 项）：真实的共享 SSO 模块对替身 OIDC 服务；
+  - `tests/manage-sso.test.mjs`（3 项）；
+  - `server-image` 测试增加了包可用性检查。
+- 调整了另一个会话留下的三个测试，以适应本次的登录拆分和新增的 Secret 读取；断言的含义没有变：
+  - `desktop-login`：新增的登录辅助函数移进它截取的源码范围；
+  - `manage-verify`：`kubectl` 调用计数加上 `mx-rig-sso` 的读取。
+- 修复过程中顺带发现并修了两处问题：
+  - 镜像里装不上 openid-client / undici：改为 mx-rig 的直接依赖；
+  - 桌面端在监听开始前点取消会无效，要等满 5 分钟才结束。
+- `npm run test:browser` 通过，截图 `.runtime/qa/web-login-sso.png`、`web-login-sso-only.png`，日志 `.runtime/p4-browser.log`。
+- `npm run test:desktop` 通过（含重构后的账号密码登录），日志 `.runtime/p4-desktop.log`。
+- 真实的统一认证、域名、网关和飞书都还没有验证，步骤见 [docs/25 §11](25-launcher-product-and-sso.md)。
+
+## 2026-10-17：deploy 临时转发重复执行与 Launcher 管理配置
+
+- `deploy` 已调用 `verify`；新增连续调用两次 `cmd_deploy` 的测试，保留真实验证函数及回环 HTTP，只模拟集群部署步骤。两轮各自验证三个接口，第二轮开始时上一轮转发已退出，最终进程与临时文件清理完成。正常访问仍走 NodePort / VIP 网关，不需要常驻 port-forward。
+- 修复 `launcher` 条件读取 `.env`、以及先解析 Launcher 地址后加载文件的问题；`release` 也先读取文件。显式 shell 的 `MX_LAUNCHER_URL` / `MX_LAUNCHER_OPS_TOKEN` 优先，包括空 token。缺少 token 时 `apply` 在访问 Launcher 前给出配置指引，`plan` 仍无需凭据。
+- `node --test tests/manage-verify.test.mjs tests/manage-release.test.mjs tests/build-proxy.test.mjs tests/launcher-register.test.mjs`：24 项通过。新增覆盖文件 token 在公开地址已配置时仍生效、文件 URL、环境覆盖与空值、无 token 的只读 plan，以及 deploy 重复验证。`bash -n scripts/manage.sh` 与 `git diff --check` 通过。未读取真实 Ops Token，未执行现网登记或部署。
+
+## 2026-10-17：Internal 发布成功后，本机 port-forward 验证失败
+
+- 用户现场输出：Deployment 已 `successfully rolled out`，服务和 PostgreSQL Pod 都是 `1/1 Running`；单独转发到本机 18892，再用 `curl --noproxy '*'` 请求 `/readyz`，返回 `200` 和 `{"status":"ready","store":"postgres"}`。这证明该次手动检查的服务与数据库正常，不是前次镜像缺文件导致的启动崩溃。
+- 原验证脚本隐藏全部转发错误，固定检查 18891，HTTP 检查继承代理；还可能留下后台函数启动的 kubectl 子进程。现场输出不能确定这些因素中哪一个触发了原失败。
+- 修复：默认让 kubectl 分配空闲的回环端口，确认本次转发已监听才请求；三次 HTTP 检查都绕过代理并限制单次请求时间；有限重试，失败显示转发及 HTTP 诊断；退出清理实际 kubectl PID、日志和临时凭据文件。凭据文件清理同时修正 Bash 3 的 local/EXIT trap 兼容问题。只更新 Rig 运维脚本，不修改应用、数据库或其他产品网络。
+- 新增 `tests/manage-verify.test.mjs`：真实 curl 和回环 HTTP、模拟 kubectl。5 项覆盖代理污染、指定端口冲突且不向占用者发送凭据、持续 503、转发退出重试、身份接口 401；成功与失败均检查进程、临时文件清理以及凭据不进入输出。5 项通过；既有 `manage-release` 与 `build-proxy` 的 11 项也通过。`bash -n scripts/manage.sh`、`git diff --check` 通过。
+- 未连接实际集群执行修复后的 `verify`；服务器同步脚本后需单独运行该命令，不需要重建镜像或重跑迁移。此项不代表统一账号登录、客户端联网或 MX-H2I 共存验收完成。
+
+## 2026-10-17：桌面端 P3，本机海外通道（Launcher 订阅 → 回环代理 → 测试浏览器）
+
+- `npm run check` 通过；仓库自检新增一条：桌面端和 Runtime 里出现设置系统代理的命令就报错。放一个临时文件试过，确实会报错。
+- `npm test`：731 项，707 通过，0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/p3-tests.log`。新增：
+  - `tests/launcher-oversea.test.mjs`（10 项），其中一项用真实的 Mihomo 1.19.28，只在回环地址上运行；
+  - `tests/launcher-network.test.mjs` 增加了 scope 和 `overseaSession()` 的断言。
+- 用真实的 Mihomo 单独核对过：
+  - 订阅原样使用时，要先从 GitHub 下载 GeoIP / GeoSite，用了 83 秒；
+  - 用平台编译器编译、去掉 geo 规则后，配置检查 8 ms 通过，不下载任何东西；
+  - 运行时只监听在 `127.0.0.1:<端口>`，经代理访问本机页面返回 200。
+- `npm run test:desktop` 通过：Launcher 模式下，海外通道在没有统一账号时会等待，并记住开启；这一路经过真实 Electron 主进程的 IPC。日志 `.runtime/p3-desktop.log`。
+- `npm run test:browser` 通过：画出海外通道卡片的三种状态，核对按钮和动作。截图 `.runtime/qa/web-oversea-panel.png`，日志 `.runtime/p3-browser.log`。
+- `npm run package -- --dir --launcher`：`Resources/mihomo/darwin-arm64/mihomo.gz` 在包里（16 MB）；引擎包没有进 app.asar，编译器和 yaml 在；`--dir` 包的发行形态是 portable。日志 `.runtime/p3-package.log`。
+- 真实的海外订阅和线路还没有验证，步骤见 [docs/25 §9](25-launcher-product-and-sso.md)。
+
+## 2026-10-16：桌面端 P2，经 Release Center 自动更新（完整安装包）
+
+- `npm run check` 通过。
+- `npm test`：721 项，697 通过，0 失败；24 项 PostgreSQL 测试跳过。日志在 `.runtime/p2-tests.log`。新增：
+  - `tests/launcher-updates.test.mjs`（7 项，真实的 SDK 控制器对替身 Release Center）；
+  - `tests/release-publish.test.mjs`（3 项）；
+  - `tests/manage-release.test.mjs`（1 项，假的 kubectl）；
+  - `tests/launcher-register.test.mjs` 增加 1 项，原有项也做了扩充。
+- `npm run test:desktop` 通过：Launcher 模式的登录页显示版本；未连接时「检查更新」说明要先连内网，并显示安装 ID。截图 `.runtime/qa/desktop-launcher-login.png`，日志 `.runtime/p2-desktop.log`。
+- `npm run test:browser` 通过（网页端没有更新入口）。日志 `.runtime/p2-browser.log`。
+- `npm run package -- --launcher`（Apple 芯片）：得到 `dist/MX-Rig-0.8.0-mac-arm64.dmg`（265 MB）和同名 `.json` 发布清单，发布命令的核对通过；应用里的 defaults 是 `distribution: installed`，SDK 的更新控制器和 `launcher-updates.mjs` 都打进去了。日志 `.runtime/p2-package.log`。
+- 修了 `tests/build-proxy.test.mjs` 的 9 项失败：`npm test` 把临时文件放在本仓库（ESM 包）里，Node 22.21 把没有扩展名的假工具当 ES 模块加载。和本次改动无关；在假工具的目录里放 `{"type":"commonjs"}` 就好了。
+- 真实 Release Center 上的完整一轮还没有验证，步骤见 [docs/25 §8](25-launcher-product-and-sso.md)。
+
+## 2026-10-16：Internal 集群部署时服务端反复崩溃（镜像里缺 test-packs）
+
+- **现象**：`scripts/manage.sh deploy` 报 `deployment "mx-rig-server" exceeded its progress deadline`，Pod 处于 `CrashLoopBackOff`。日志显示启动时找不到 `/app/mx-rig/test-packs/compass/rig-specs/electron/case-catalog.electron.json`。
+- **原因**：M5 起，内核在加载时读取验收包里的罗盘用例目录（`onboarding/compass.mjs`），从验收包创建项目也要读 `test-packs/`；但服务端镜像从来没有复制这个目录。本机和测试都直接在仓库里运行，所以一直没暴露。
+- **修复**：`deploy/Dockerfile` 加上 `COPY mx-rig/test-packs ./test-packs`，约 240 KB，`node_modules` 已被构建上下文排除。
+- **防回归**：新增 `tests/server-image.test.mjs`。它从 `apps/server/index.mjs` 出发，沿相对路径的 import 和 `new URL(…, import.meta.url)` 读取的文件走一遍，检查每一个都在 Dockerfile 复制的目录里。去掉这行 COPY 时，测试失败并指出缺的就是这个文件。
+- 在本机用和容器相同的方式启动服务端（生产模式、设置 Launcher 地址），`/readyz` 和新接口返回 200。镜像要在 Internal 节点上重新构建部署才能验证。
+
 ## 2026-10-16：桌面端 Launcher 独立端 P1（自己的产品网络、统一账号、登记命令）
 
 - `npm run check` 通过：仓库自检只允许 `apps/desktop/launcher-network.mjs` 一个文件带数据面代码。

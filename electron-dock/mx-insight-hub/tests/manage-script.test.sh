@@ -1430,6 +1430,7 @@ if bash -c '
   exit 1
 fi
 grep -q 'source indexes failed through verified local peer auth' "$night_all_source_index_error"
+grep -q 'scripts/night-all-saved-records-index-status.sql' "$night_all_source_index_error"
 
 night_all_source_fallback_events="$(mktemp "${TMPDIR:-/tmp}/mx-insight-hub-night-all-source-fallback-events.XXXXXX")"
 if NIGHT_ALL_SOURCE_FALLBACK_EVENTS="$night_all_source_fallback_events" \
@@ -1469,8 +1470,8 @@ local_identity_body="$(sed -n '/^night_all_saved_records_local_identity() {/,/^}
 source_index_helper_body="$(sed -n '/^ensure_night_all_saved_records_source_indexes() {/,/^}/p' "$ROOT_DIR/scripts/manage.sh")"
 grep -q "connection ->> 'dsnEnv'" <<<"$source_mode_body"
 grep -q "'require'" <<<"$source_mode_body"
-grep -q 'WHEN direct_count = 0 AND dsn_count = 0 THEN' <<<"$source_mode_body"
-grep -q 'WHEN direct_count <> 13 OR direct_transport_count <> 1 THEN' <<<"$source_mode_body"
+grep -q 'WHEN configured_count = 0 THEN' <<<"$source_mode_body"
+grep -q 'WHEN direct_count <> expected_count OR direct_transport_count <> 1 THEN' <<<"$source_mode_body"
 grep -q 'postmaster.pid' <<<"$local_identity_body"
 grep -q 'ss -H -4 -ltnp' <<<"$local_identity_body"
 grep -q 'pid=${postmaster_pid}' <<<"$local_identity_body"

@@ -49,6 +49,7 @@
     "native.j.facebook_post_search_v1",
     "native.j.facebook_get_profile_id_v1",
     "native.j.facebook_get_profile_posts_v1",
+    "native.t.api_4a6f21264dc0b4a1",
     "native.wechat.channels.channel-info",
     "native.wechat.channels.channel-id-to-username",
     "native.wechat.channels.user-videos",

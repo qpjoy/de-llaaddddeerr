@@ -17,6 +17,8 @@ export const DEFAULT_POOL_POLICY = Object.freeze({
   stickyGainPct: 20,
   maxPlanMoves: 3,
   planFreezeMs: 1000,
+  // Strategy pacing (rule kind "pacing"); null keeps the rack's legacy settings.
+  pacing: null,
   appDefaults: Object.freeze({
     windowMs: 60000,
     maxRuns: 3,
@@ -53,6 +55,50 @@ function normalizeApp(value, defaults, label) {
   bounds(result, appLimits, label);
   return result;
 }
+// Each part is optional (null = not governed by the strategy). Zero caps mean
+// "no limit" where noted: account maxRuns/maxServiceMs/dailyCap.
+const PACING_LIMITS = {
+  burst: {
+    windowMs: [1000, 86400000],
+    smallLimit: [1, 1000],
+    largeLimit: [1, 1000],
+    restMinMs: [0, 86400000],
+    restMaxMs: [0, 86400000],
+  },
+  continuous: { capMs: [1000, 86400000], restMs: [0, 86400000] },
+  account: {
+    minGapMs: [0, 86400000],
+    windowMs: [1000, 86400000],
+    maxRuns: [0, 100000],
+    maxServiceMs: [0, 864000000],
+    restMs: [0, 86400000],
+    dailyCap: [0, 100000],
+  },
+};
+export function normalizePacing(input) {
+  if (input == null) return null;
+  object(input, "pacing");
+  for (const key of Object.keys(input))
+    if (!Object.hasOwn(PACING_LIMITS, key)) invalid(`pacing.${key} 未知`);
+  const out = {};
+  for (const [part, limits] of Object.entries(PACING_LIMITS)) {
+    const value = input[part];
+    if (value == null) {
+      out[part] = null;
+      continue;
+    }
+    object(value, `pacing.${part}`);
+    for (const key of Object.keys(value))
+      if (!Object.hasOwn(limits, key)) invalid(`pacing.${part}.${key} 未知`);
+    bounds(value, limits, `pacing.${part}`);
+    out[part] = Object.fromEntries(
+      Object.keys(limits).map((k) => [k, value[k]]),
+    );
+  }
+  if (out.burst && out.burst.restMinMs > out.burst.restMaxMs)
+    invalid("pacing.burst 休息下限不能大于上限");
+  return Object.values(out).some(Boolean) ? out : null;
+}
 export function normalizePoolPolicy(input = {}) {
   object(input, "scheduler");
   for (const key of Object.keys(input))
@@ -80,6 +126,7 @@ export function normalizePoolPolicy(input = {}) {
     },
     "scheduler",
   );
+  policy.pacing = normalizePacing(input.pacing ?? null);
   policy.appDefaults = normalizeApp(
     input.appDefaults === undefined ? {} : input.appDefaults,
     DEFAULT_POOL_POLICY.appDefaults,

@@ -14,11 +14,57 @@ import { StructuredExternalPlatformCredentialStore, QIXIN_CREDENTIAL_FIELDS } fr
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { publicDocsHtmlForPath, tenantOpenApiDocument } from '../../server/public-docs.mjs'
+import { attachAdmissionPolicy } from '../fixtures/admission-policy.mjs'
 
 const pepper = 'enterprise-test-pepper-at-least-32-characters'
 const credentials = { appkey: 'synthetic-app-key', secret_key: 'synthetic-secret-key' }
 const payload = { status: '200', message: '成功', sign: 'business-data-sign', data: { total: 1, items: [{ name: '示例企业', id: 'ent-1', token: 'business-token', url: 'https://example.com/file?sign=business' }] } }
 const request = { apiId: '1.31', body: { query: { keyword: '示例企业' } }, idempotencyKey: 'enterprise-test-0001', path: '/api/v1/data/enterprise/1.31/query' }
+
+test('saved admission concurrency and queue policy affect the next enterprise request without changing procurement', async t => {
+  const started = Promise.withResolvers(), release = Promise.withResolvers()
+  let calls = 0
+  const f = await enterpriseFixture({ fetchImpl: async () => {
+    if (++calls === 1) { started.resolve(); await release.promise }
+    return Response.json(payload)
+  } })
+  const { save } = attachAdmissionPolicy(f.gateway)
+  await save({ maxConcurrency: 1, maxConsumerConcurrency: 1, maxWaitMs: 10, maxPending: 1 })
+  const input = n => ({ ...request, idempotencyKey: `enterprise-policy-${n}`, body: { query: { keyword: `policy-${n}` } } })
+  const first = f.gateway.queryEnterprise(f.context, input(1))
+  t.after(async () => { release.resolve(); await first })
+  await started.promise
+  await assert.rejects(f.gateway.queryEnterprise(f.context, input(2)), error => error.code === 'external_platform_busy'
+    && error.details.reason === 'concurrency_queue_timeout' && error.details.upstreamDispatched === false)
+  assert.equal(calls, 1)
+  await save({ maxConcurrency: 2, maxConsumerConcurrency: 2 })
+  assert.equal((await f.gateway.queryEnterprise(f.context, input(3))).status, 200)
+  assert.equal(calls, 2)
+  assert.equal(f.gateway.active, 1)
+  assert.equal(f.gateway.config, QIXIN_CONFIG)
+  release.resolve(); await first
+  assert.equal(f.gateway.active, 0)
+  assert.equal(f.gateway.activeByConsumer.size, 0)
+  assert.equal([...f.platformStore.calls.values()].every(call => call.costMinor === 1), true)
+})
+
+test('saved admission RPM affects the shared enterprise bucket without resetting consumed tokens', async () => {
+  let calls = 0
+  const f = await enterpriseFixture({ fetchImpl: async () => { calls++; return Response.json(payload) } })
+  const { save } = attachAdmissionPolicy(f.gateway)
+  await save({ maxRequestsPerMinute: 1 })
+  const input = n => ({ ...request, idempotencyKey: `enterprise-rpm-${n}`, body: { query: { keyword: `rpm-${n}` } } })
+  await f.gateway.queryEnterprise(f.context, input(1))
+  await assert.rejects(f.gateway.queryEnterprise(f.context, input(2)), { code: 'external_platform_rate_limited' })
+  const bucket = f.platformStore.rateBuckets.get('qixin')
+  const before = structuredClone(bucket)
+  await save({ maxRequestsPerMinute: 120 })
+  assert.deepEqual(bucket, before, 'saving policy must not refill or reset live rate state')
+  bucket.refilledAtMs -= 1000
+  assert.equal((await f.gateway.queryEnterprise(f.context, input(3))).status, 200)
+  assert.equal(f.platformStore.rateBuckets.get('qixin').capacity, 120)
+  assert.equal(calls, 2)
+})
 
 export async function enterpriseFixture({ fetchImpl = async () => new Response(JSON.stringify(payload)), activate = true, store = new MemoryStore(), platformStore, control, credentialStore } = {}) {
   const hub = new HubService({ store, adapter: {}, apiKeyPepper: pepper })

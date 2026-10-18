@@ -43,6 +43,22 @@ test('all eight direct adapters issue one request and preserve restricted eviden
   const out=await adapter.execute(gatewayWebSearchRequest(normalizeWebSearch({query:'AI'}),provider,100));assert.equal(calls,1);assert.equal(out.publicBody.data.items.length,1);assert.equal(out.publicBody.meta.fullText,false);assert(out.restrictedResponseArchive.bodyBytes.length>0);assert(!JSON.stringify(out).includes(SECRET))
  }
 })
+
+test('saved admission RPM is used by every Web Search provider without changing the shared deployment object', async () => {
+ const { attachAdmissionPolicy } = await import('../fixtures/admission-policy.mjs')
+ const h = await harness({ providers: WEB_SEARCH_PROVIDERS.map(provider => provider.key) })
+ for (const provider of WEB_SEARCH_PROVIDERS) {
+  const gateway = h.search.gateways.get(provider.key)
+  const { save } = attachAdmissionPolicy(gateway)
+  await save({ maxRequestsPerMinute: 17 })
+  const rates = []
+  gateway.platformStore.acquireProviderRateLimit = async input => { rates.push(input.limit); return { allowed: true } }
+  assert.equal((await h.search.search(h.context, { body: { query: 'Saved admission', provider: provider.key }, idempotencyKey: `web-policy-${provider.key}` })).status, 200)
+  assert.deepEqual(rates, [17])
+  assert.equal(gateway.config.maxRequestsPerMinute, 60)
+ }
+ assert.equal(h.calls.length, WEB_SEARCH_PROVIDERS.length)
+})
 test('empty recognized rows succeed; unknown shape, unsafe URL and business errors do not become empty success',()=>{
  const p=webSearchProvider('baidu'),q=normalizeWebSearch({query:'AI'})
  assert.equal(normalizeSearchResponse({references:[]},p,q,new Date().toISOString()).meta.empty,true)

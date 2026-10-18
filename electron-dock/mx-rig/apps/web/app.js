@@ -10,6 +10,7 @@ const native = Boolean(window.mxRig?.desktop)
 // request, the desktop hands the same action to the main process, which owns
 // the bearer token. The renderer never sees a credential either way.
 const GET_ROUTES = {
+  'auth-methods': '/api/rig/v1/auth-methods',
   me: '/api/rig/v1/me',
   config: '/api/rig/v1/config',
   tools: '/api/rig/v1/tools',
@@ -245,7 +246,9 @@ const state = {
   // A parsed one-liner waiting to be confirmed. Never executed on its own.
   plan: null,
   polling: false,
-  scroll: {}
+  scroll: {},
+  // Launcher mode: the desktop's overseas channel (docs/25 P3), or null.
+  oversea: null
 }
 
 const REPORT_VIEW_KEY = 'mx-rig.report-view'
@@ -400,6 +403,11 @@ const ctx = {
   clearPlan,
   activateEgress,
   saveEgress,
+  oversea: async (action, body) => {
+    state.oversea = await api(action, body)
+    paintNetworkChip()
+    if (state.view === 'egress') await render()
+  },
   canRun: () => ['operator', 'admin'].includes(state.principal?.role)
 }
 
@@ -966,6 +974,8 @@ if (native)
       if (!privateHttpEdited) $('private-http').checked = defaults.privateHttp === true
       if (defaults.account && !$('account').value) $('account').value = defaults.account
       if (defaults.launcher) showNetwork(defaults.launcher)
+      // What this service's login page offers (browser SSO, docs/25 P4).
+      refreshAuthMethods()
     })
     .catch(() => {})
 
@@ -974,6 +984,20 @@ if (native)
  * waits for it; the address is the product's VIP, so there is none to type.
  */
 const NETWORK_BUSY = new Set(['resolving', 'enrolling', 'applying', 'disconnecting'])
+let loginPending = false
+let networkActionPending = false
+let lastNetwork = null
+function loginBlocked() {
+  return loginPending || networkActionPending || Boolean(lastNetwork && (lastNetwork.status !== 'ready' || lastNetwork.serverReachable === false))
+}
+function updateLoginControls() {
+  $('login-form').querySelector('button[type=submit]').disabled = loginBlocked()
+  $('sso-login').disabled = loginBlocked()
+  const networkBusy = loginPending || networkActionPending || NETWORK_BUSY.has(lastNetwork?.status)
+  $('network-connect').disabled = networkBusy
+  $('network-disconnect').disabled = networkBusy
+  $('network-recover').disabled = networkBusy || lastNetwork?.recoveryAvailable !== true
+}
 function showNetwork(snap) {
   if (!snap) return
   $('network-panel').hidden = false
@@ -989,26 +1013,125 @@ function showNetwork(snap) {
   $('network-first').hidden = snap.connectedOnce || snap.status !== 'idle'
   const busy = NETWORK_BUSY.has(snap.status)
   const connect = $('network-connect')
-  connect.hidden = snap.status === 'ready' || busy
+  connect.hidden = (snap.status === 'ready' && snap.serverReachable !== false) || busy
   connect.textContent = snap.status === 'idle' && !snap.connectedOnce ? '连接内网' : '重新连接'
   $('network-disconnect').hidden = snap.status !== 'ready'
-  $('login-form').querySelector('button[type=submit]').disabled = snap.status !== 'ready' || snap.serverReachable === false
+  $('network-recover').hidden = snap.recoveryAvailable !== true
+  $('network-recovery-hint').hidden = snap.recoveryAvailable !== true
+  const becameReady = snap.status === 'ready' && lastNetwork?.status !== 'ready'
+  lastNetwork = snap
+  updateLoginControls()
+  paintNetworkChip()
+  // The service is reachable now: ask what its login page offers.
+  if (becameReady) refreshAuthMethods()
+}
+function paintNetworkChip() {
+  const snap = lastNetwork
+  if (!snap) return
   const chip = $('network-chip')
   chip.hidden = false
   chip.dataset.status = snap.status
-  chip.textContent = snap.status === 'ready' ? `内网 · ${snap.identity.kind === 'user' ? '用户网络' : '匿名'}` : `内网 · ${snap.statusText}`
-  chip.title = [snap.message, snap.leaseIp ? `本机地址 ${snap.leaseIp}` : null, snap.serviceVip ? `VIP ${snap.serviceVip}` : null].filter(Boolean).join('\n')
+  const overseas = state.oversea?.usingBrowser ? ' · 海外' : ''
+  chip.textContent = snap.status === 'ready' ? `内网 · ${snap.identity.kind === 'user' ? '用户网络' : '匿名'}${overseas}` : `内网 · ${snap.statusText}`
+  chip.title = [snap.message, snap.leaseIp ? `本机地址 ${snap.leaseIp}` : null, snap.serviceVip ? `VIP ${snap.serviceVip}` : null, state.oversea ? state.oversea.text : null]
+    .filter(Boolean)
+    .join('\n')
 }
+// The overseas channel, as it changes: the chip, and the page that shows it.
+function showOversea(snap) {
+  if (!snap) return
+  const changed = JSON.stringify(snap) !== JSON.stringify(state.oversea)
+  state.oversea = snap
+  paintNetworkChip()
+  if (changed && state.principal && state.view === 'egress') render()
+}
+if (native) api('oversea-status').then(showOversea).catch(() => {})
+if (native && window.mxRig.onOversea) window.mxRig.onOversea(showOversea)
 if (native && window.mxRig.onNetwork) window.mxRig.onNetwork(showNetwork)
-$('network-connect').addEventListener('click', () => {
-  $('network-connect').disabled = true
-  api('network-connect')
-    .then(showNetwork)
-    .catch((error) => { $('network-message').textContent = error.message })
-    .finally(() => { $('network-connect').disabled = false })
+async function changeNetwork(action) {
+  if (loginPending || networkActionPending || NETWORK_BUSY.has(lastNetwork?.status)) return
+  if (action === 'network-recover' && lastNetwork?.recoveryAvailable !== true) return
+  networkActionPending = true
+  updateLoginControls()
+  try {
+    showNetwork(await api(action))
+  } catch (error) {
+    $('network-message').textContent = error.message
+  } finally {
+    networkActionPending = false
+    updateLoginControls()
+  }
+}
+$('network-connect').addEventListener('click', () => changeNetwork('network-connect'))
+$('network-disconnect').addEventListener('click', () => changeNetwork('network-disconnect'))
+$('network-recover').addEventListener('click', () => changeNetwork('network-recover'))
+
+/**
+ * Launcher mode (docs/25 P2): versions from Release Center. The card comes up
+ * by itself only for what can be acted on; what a person asked for (检查更新)
+ * is answered even when there is nothing to do. Closed, it stays closed until
+ * the state changes.
+ */
+const UPDATE_ACTIONABLE = new Set(['available', 'downloading', 'verifying', 'staged', 'ready', 'installing'])
+let updateState = null
+let updateClosed = null
+const updateKey = (state) => `${state.phase}:${state.targetVersion ?? ''}`
+function showUpdate(state) {
+  if (!state) return
+  updateState = state
+  const actionable = UPDATE_ACTIONABLE.has(state.phase)
+  $('update-line').hidden = false
+  $('update-version').textContent = state.currentVersion
+  $('update-check').disabled = !state.actions.check
+  const chip = $('update-chip')
+  chip.hidden = false
+  chip.dataset.phase = state.phase
+  chip.textContent = actionable ? (state.phase === 'ready' ? '更新已就绪' : `新版本 ${state.targetVersion ?? ''}`) : `v${state.currentVersion}`
+  chip.title = actionable ? '查看更新' : '检查更新'
+  $('update-banner').hidden = !(actionable || state.origin === 'user') || updateClosed === updateKey(state)
+  $('update-text').textContent = state.text
+  const bar = $('update-progress')
+  bar.hidden = !state.progress
+  // An unknown total is an indeterminate bar, never 0%.
+  if (state.progress?.percent != null) bar.value = state.progress.percent
+  else bar.removeAttribute('value')
+  $('update-notes-box').hidden = !state.notes
+  $('update-notes').textContent = state.notes ?? ''
+  // Asked for by hand: the install ID, for a targeted validation plan.
+  const id = $('update-install-id')
+  id.hidden = !(state.origin === 'user' && state.installId)
+  id.textContent = state.installId ? `安装 ID：${state.installId}（定向验证新版本时发给管理员）` : ''
+  $('update-download').hidden = !state.actions.download
+  $('update-install').hidden = !state.actions.install
+  $('update-cancel').hidden = !state.actions.cancel
+  $('update-retry').hidden = !['error', 'cancelled'].includes(state.phase)
+  $('update-actions').hidden = [...$('update-actions').children].every((button) => button.hidden)
+}
+function updateAction(action) {
+  updateClosed = null
+  return api(action)
+    .then(showUpdate)
+    .catch((error) => {
+      $('update-text').textContent = error.message
+      $('update-banner').hidden = false
+    })
+}
+if (native) api('update-status').then(showUpdate).catch(() => {})
+if (native && window.mxRig.onUpdate) window.mxRig.onUpdate(showUpdate)
+$('update-check').addEventListener('click', () => updateAction('update-check'))
+$('update-retry').addEventListener('click', () => updateAction('update-check'))
+$('update-download').addEventListener('click', () => updateAction('update-download'))
+$('update-cancel').addEventListener('click', () => updateAction('update-cancel'))
+$('update-install').addEventListener('click', () => updateAction('update-install'))
+$('update-close').addEventListener('click', () => {
+  if (updateState) updateClosed = updateKey(updateState)
+  $('update-banner').hidden = true
 })
-$('network-disconnect').addEventListener('click', () => {
-  api('network-disconnect').then(showNetwork).catch((error) => { $('network-message').textContent = error.message })
+$('update-chip').addEventListener('click', () => {
+  if (updateState && UPDATE_ACTIONABLE.has(updateState.phase)) {
+    updateClosed = null
+    $('update-banner').hidden = false
+  } else updateAction('update-check')
 })
 
 /**
@@ -1110,8 +1233,9 @@ $('password-form').onsubmit = async (event) => {
 }
 $('login-form').onsubmit = async (event) => {
   event.preventDefault()
-  const button = event.submitter
-  button.disabled = true
+  if (loginBlocked()) return
+  loginPending = true
+  updateLoginControls()
   $('login-error').textContent = ''
   try {
     const result = await api('login', {
@@ -1128,7 +1252,8 @@ $('login-form').onsubmit = async (event) => {
     $('login').hidden = false
     $('workspace').hidden = true
   } finally {
-    button.disabled = false
+    loginPending = false
+    updateLoginControls()
   }
 }
 
@@ -1176,3 +1301,72 @@ if (!native)
   api('me')
     .then(({ principal }) => enter(principal))
     .catch(() => {})
+
+/**
+ * Browser SSO (docs/25 P4): the platform's unified authentication, Feishu
+ * included. On the web it is a link to /auth/sso/login, and on the public
+ * entrance the only way in. The desktop opens the system browser and waits for
+ * it; its product network stays anonymous (no network token without a password).
+ */
+function showAuthMethods(methods) {
+  const sso = methods?.sso?.enabled === true
+  const passwords = methods?.password !== false
+  $('sso-panel').hidden = !sso
+  $('sso-or').hidden = !passwords
+  $('account-field').hidden = !passwords
+  $('password-field').hidden = !passwords
+  $('account').required = passwords
+  $('password').required = passwords
+  $('login-form').querySelector('button[type=submit]').hidden = !passwords
+  // Alone, it is the main action.
+  $('sso-login').classList.toggle('qp-button--primary', !passwords)
+  $('sso-login').classList.toggle('qp-button--outline', passwords)
+  if (!passwords) $('login-hint').textContent = '用平台统一账号登录，也可以用飞书。这个入口不接受账号密码。'
+  $('sso-hint').textContent = !sso
+    ? ''
+    : native && lastNetwork
+      ? '在系统浏览器里完成登录。这样登录时内网保持匿名网络，海外通道需要用账号密码登录。'
+      : '在统一认证页面登录，已经登录过的浏览器可以直接进入。'
+}
+function refreshAuthMethods() {
+  api('auth-methods', native ? { url: $('server').value, privateHttp: $('private-http').checked } : undefined)
+    .then(showAuthMethods)
+    .catch(() => {})
+}
+if (!native) {
+  // Back from Auth: the address need not keep saying so.
+  if (new URLSearchParams(location.search).has('sso')) history.replaceState(null, '', `${location.pathname}${location.hash}`)
+  refreshAuthMethods()
+} else {
+  let serverTimer = null
+  $('server').addEventListener('input', () => {
+    clearTimeout(serverTimer)
+    serverTimer = setTimeout(refreshAuthMethods, 600)
+  })
+}
+$('sso-login').addEventListener('click', async () => {
+  if (!native) {
+    location.assign('/auth/sso/login?ui=%2Frig%2F')
+    return
+  }
+  if (loginBlocked()) return
+  loginPending = true
+  updateLoginControls()
+  $('sso-cancel').hidden = false
+  $('login-error').textContent = ''
+  try {
+    const result = await api('browser-login', { url: $('server').value, privateHttp: $('private-http').checked })
+    await enter(result.member)
+    if (result.networkNote) notice(result.networkNote)
+    else if (result.cleartext) notice('当前连接是内网 HTTP，未加密：只在可信的内网或 WireGuard 隧道里使用。')
+  } catch (error) {
+    $('login-error').textContent = error.message
+    $('login').hidden = false
+    $('workspace').hidden = true
+  } finally {
+    loginPending = false
+    $('sso-cancel').hidden = true
+    updateLoginControls()
+  }
+})
+$('sso-cancel').addEventListener('click', () => api('browser-login-cancel').catch(() => {}))

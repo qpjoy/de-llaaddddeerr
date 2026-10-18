@@ -34,6 +34,95 @@ const facebookResponse = (provider, posts, cursor = null, status = 200) => provi
     data: { business_data: posts, cursor } }, { status })
 const invokeStandard = (h, body, idempotencyKey, signal) => h.service.search(h.context,
   { body, idempotencyKey, signal, path: '/api/v1/data/search' })
+const invokeV2 = (h, body, idempotencyKey) => h.service.search(h.context,
+  { body, idempotencyKey, path: '/api/v2/data/search' })
+const v2FacebookBody = () => ({ platform: 'facebook', query: 'v2 exact window', pageSize: 20,
+  timeWindow: { from: '2026-10-16T16:00:00.000Z', to: '2026-10-17T16:00:00.000Z', timezone: 'Asia/Shanghai', boundary: '[from,to)' } })
+
+test('v2 Facebook uses the real acquisition/archive pipeline, filters only delivery, and permanently replays one paid attempt', async () => {
+  const input = v2FacebookBody(), h = await harness({ posts: [
+    { ...post, post_id: 'from', timestamp: Date.parse(input.timeWindow.from) / 1000 },
+    { ...post, post_id: 'to', timestamp: Date.parse(input.timeWindow.to) / 1000 },
+    { ...post, post_id: 'missing', timestamp: null },
+  ] })
+  const first = await invokeV2(h, input, 'v2-facebook-first-key')
+  assert.deepEqual(first.body.data.items.map(item => item.id), ['from'])
+  assert.equal(h.calls[0].url.searchParams.get('start_date'), '2026-10-17')
+  assert.equal(h.calls[0].url.searchParams.get('end_date'), '2026-10-18')
+  const saved = await h.usage.getUsageRequestByIdempotencyKey(h.context.consumer.id, 'v2-facebook-first-key')
+  assert.equal(saved.responseBody.data.items.length, 3)
+  assert.equal(saved.acquisitionRequest.body.type, 'stable')
+  assert.equal(saved.responseBody.data.contractVersion, 'night-all.data-search.v1')
+  assert.equal(first.body.data.contractVersion, 'mx-insight-hub.data-search.v2')
+  h.usage.requests.get(saved.id).completedAt = '2026-01-01T00:00:00Z'
+  const replay = await invokeV2(h, input, 'v2-facebook-first-key')
+  assert.deepEqual(replay.body, first.body)
+  assert.equal(replay.replay, true)
+  assert.equal(h.calls.length, 1)
+  await assert.rejects(() => invokeStandard(h, { platform: 'facebook', query: input.query, pageSize: 20,
+    params: { startDate: '2026-10-17', endDate: '2026-10-18' }, type: 'stable' }, 'v2-facebook-first-key'), error => error.code === 'idempotency_conflict')
+  const status = await h.service.requestStatus(h.context, saved.id)
+  assert.equal(status.status, 'committed')
+  assert.equal(status.searchProtocol.deliveryConfirmed, true)
+})
+
+test('v2 Facebook continues an empty filtered page from the same paid archive and rejects either cross-version cursor', async () => {
+  const input = v2FacebookBody(), posts = fixturePosts(0, 25).map((item, index) => ({ ...item,
+    timestamp: Date.parse(index < 20 ? '2026-10-01T00:00:00Z' : input.timeWindow.from) / 1000 }))
+  const h = await harness({ posts })
+  const first = await invokeV2(h, input, 'v2-buffer-first-key')
+  assert.equal(first.body.data.items.length, 0)
+  assert.equal(first.body.data.pageInfo.hasMore, true)
+  const cursor = first.body.data.pageInfo.nextCursor
+  assert.ok(cursor.startsWith('mxds2.'))
+  await assert.rejects(() => invokeStandard(h, { platform: 'facebook', query: input.query, cursor }, 'v1-wrong-cursor-key'), error => error.code === 'invalid_cursor')
+  const second = await invokeV2(h, { ...input, cursor }, 'v2-buffer-second-key')
+  assert.equal(second.body.data.items.length, 5)
+  assert.equal(second.body.data.pageInfo.hasMore, false)
+  assert.equal(h.calls.length, 1)
+  const firstRaw = await h.usage.getUsageRequestByIdempotencyKey(h.context.consumer.id, 'v2-buffer-first-key')
+  await assert.rejects(() => invokeV2(h, { ...input, cursor: firstRaw.responseBody.data.pageInfo.nextCursor }, 'v2-v1-cursor-key'), error => error.code === 'invalid_cursor')
+  const replay = await invokeV2(h, { ...input, cursor }, 'v2-buffer-second-key')
+  assert.deepEqual(replay.body, second.body)
+  assert.equal(h.calls.length, 1)
+})
+
+test('an old v1 Facebook unknown cannot become a v2 acquisition by changing key, dates or age', async () => {
+  const input = v2FacebookBody(), h = await harness({ rapidStatus: 'timeout' })
+  await assert.rejects(() => invokeStandard(h, { platform: 'facebook', query: input.query, pageSize: 20 }, 'old-v1-unknown-key'))
+  for (const row of h.usage.requests.values()) row.reservedAt = '2026-01-01T00:00:00Z'
+  await assert.rejects(() => invokeV2(h, input, 'new-v2-bypass-key'), error => error.code === 'request_outcome_unknown')
+  await assert.rejects(() => invokeV2(h, { ...input, timeWindow: { ...input.timeWindow, from: '2026-09-01T00:00:00Z' } }, 'new-v2-other-window'), error => error.code === 'request_outcome_unknown')
+  assert.equal(h.calls.length, 1)
+})
+
+test('a v2 Facebook unknown blocks v1 and v2 new keys without changing the original usage evidence', async () => {
+  const input = v2FacebookBody(), h = await harness({ rapidStatus: 'timeout' })
+  await assert.rejects(() => invokeV2(h, input, 'first-v2-unknown-key'))
+  const old = structuredClone([...h.usage.requests.values()][0])
+  await assert.rejects(() => invokeStandard(h, { platform: 'facebook', query: input.query }, 'v1-downgrade-key'), error => error.code === 'request_outcome_unknown')
+  await assert.rejects(() => invokeV2(h, input, 'v2-new-bypass-key'), error => error.code === 'request_outcome_unknown')
+  assert.deepEqual(h.usage.requests.get(old.id), old)
+  assert.equal(h.calls.length, 1)
+  const status = await h.service.requestStatusByIdempotencyKey(h.context, 'first-v2-unknown-key')
+  assert.equal(status.searchProtocol.state, 'unknown')
+  assert.equal(status.searchProtocol.deliveryConfirmed, false)
+})
+
+test('v2 Facebook projection failure reports unresolved delivery while original acquisition remains committed', async () => {
+  const input = v2FacebookBody(), h = await harness()
+  const original = h.service.externalDataSearch
+  h.service.externalDataSearch = async (...args) => {
+    const result = await original(...args)
+    return { ...result, body: { ...result.body, data: { ...result.body.data, pageInfo: null } } }
+  }
+  await assert.rejects(() => invokeV2(h, input, 'v2-projection-lost-key'), error => error.code === 'request_outcome_unknown')
+  const status = await h.service.requestStatusByIdempotencyKey(h.context, 'v2-projection-lost-key')
+  assert.equal(status.status, 'committed')
+  assert.equal(status.searchProtocol.state, 'unknown')
+  await assert.rejects(() => invokeV2(h, input, 'v2-projection-lost-key'), error => error.code === 'request_outcome_unknown')
+  assert.equal(h.calls.length, 1)
+})
 
 // Independent pre-calibration fixture. Do not generate a legacy cursor hash
 // from the current projector: old paid buffers bind the exact v1 row JSON.
@@ -655,6 +744,28 @@ test('Facebook later unknown acquisition never becomes a partial success or an a
       await assert.rejects(invokeStandard(h, body, `fb-unknown-new-${mode}-${type}`), { code: 'request_outcome_unknown' })
       assert.equal(h.calls.length, 2)
     }
+  }
+})
+
+test('Facebook evidence persistence failures retain a diagnostic code and prevent a second acquisition', async () => {
+  for (const mode of ['rapidapi', 'justone']) for (const method of ['stageProviderEvidence', 'finishProviderStep']) {
+    const h = await harness({ mode })
+    h.stores[mode][method] = async () => { throw new Error('synthetic evidence persistence failure') }
+    const body = { platform: 'facebook', query: 'fixture', pageSize: 20, type: 'stable' }
+    const key = `fb-persist-unknown-${mode}-${method}`
+    await assert.rejects(invokeStandard(h, body, key), { code: 'request_outcome_unknown' })
+    const call = [...h.stores[mode].calls.values()][0]
+    const usage = h.usage.requests.get(call.usageRequestId)
+    assert.equal(call.outcome, 'unknown')
+    assert.equal(call.errorCode, 'external_platform_persistence_unknown')
+    assert.equal(usage.status, 'unknown')
+    assert.equal(usage.errorCode, 'external_platform_persistence_unknown')
+    assert.equal(h.stores[mode].responseArchives.get(call.id).httpStatus, 200)
+    assert.equal(h.stores[mode].restrictedResponseArchives.size, 1)
+    assert.equal(h.stores[mode].ingestJobs.length, 0)
+    await assert.rejects(invokeStandard(h, body, key), { code: 'request_outcome_unknown' })
+    await assert.rejects(invokeStandard(h, body, `${key}-new`), { code: 'request_outcome_unknown' })
+    assert.equal(h.calls.length, 1)
   }
 })
 

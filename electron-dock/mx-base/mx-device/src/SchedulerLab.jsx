@@ -688,6 +688,11 @@ function LoopPolicyForm({ policy, busy, onSubmit }) {
         的大小任务阈值后抽取一次冷却，保存截止时间并开启下一轮计数。当前冷却不会清零；机架成员共用策略，各
         App / 账号分别计数。
       </p>
+      {policy.scheduler?.enabled && policy.scheduler.pacing?.burst && (
+        <p className="notice">
+          此机架的策略含节奏规则：随机休息由策略管理，下面的窗口与随机冷却设置不再生效（插入预算与指令时间仍生效）。
+        </p>
+      )}
       <div className="form-grid">
         {fields.map(([key, label, scale, min, max]) => (
           <label key={key}>

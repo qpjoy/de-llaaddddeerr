@@ -261,11 +261,13 @@ export class AdminController {
     const materialize = await this.materializeDomesticWireGuard(siteId, plan, secret, {
       publicEndpoint: secret.publicEndpoint,
       listenPort: secret.listenPort,
+      preserveExistingKeys: true,
       requestedBy,
       requestId: `${requestId}-materialize`
     });
     secret = materialize.secret ?? secret;
-    const domesticRuntimeApply = booleanValue(body.applyDomesticRuntime) === false
+    const materializePassed = materialize.result.status === 'passed';
+    const domesticRuntimeApply = !materializePassed || booleanValue(body.applyDomesticRuntime) === false
       ? null
       : await this.adminDomesticRuntimeConfigApplyResult(siteId, {
         siteId,
@@ -275,7 +277,7 @@ export class AdminController {
         requestedBy,
         requestId: `${requestId}-domestic-runtime-apply`
       });
-    const internalServicePeerApply = booleanValue(body.applyInternalServicePeer) === false
+    const internalServicePeerApply = !materializePassed || booleanValue(body.applyInternalServicePeer) === false
       ? null
       : await adminInternalServicePeerApplyResult(siteId, plan, secret, {
         siteId,
@@ -284,7 +286,7 @@ export class AdminController {
         requestedBy,
         requestId: `${requestId}-internal-service-peer-apply`
       }, this.store);
-    const domesticPeerKeySync = booleanValue(body.syncDomesticPeerKey) === false
+    const domesticPeerKeySync = !materializePassed || booleanValue(body.syncDomesticPeerKey) === false
       ? null
       : await this.adminInternalServicePeerDomesticKeySyncResult(siteId, plan, secret, {
         siteId,
@@ -9033,8 +9035,11 @@ function buildLauncherServiceVipSmoke(input: {
     && appManifest?.network?.scope === 'broker-session'
     && manifestChannelProductId === channelProductId
     && Boolean(manifestRuntimeContractVersion);
-  const dnsHost = normalizeDomain(`${app.appId}.${MX_DEFAULT_APP_DNS_ZONE}`);
-  const dnsRoute = findLauncherServiceDnsRoute(input.dnsRoutes, dnsHost);
+  const appDnsHost = normalizeDomain(`${app.appId}.${MX_DEFAULT_APP_DNS_ZONE}`);
+  const dnsRoute = findLauncherServiceDnsRoute(input.dnsRoutes, appDnsHost, mode === 'standalone' ? serviceVip : null);
+  const dnsHost = mode === 'standalone' && serviceVip && normalizeDomain(dnsRoute?.host ?? '') === normalizeDomain(serviceVip)
+    ? normalizeDomain(serviceVip)
+    : appDnsHost;
   const domesticSiteId = product?.defaultDomesticSiteId || channelProduct?.defaultDomesticSiteId || 'domestic-main';
   const domesticSecret = input.domesticSecrets.find((secret) => secret.siteId === domesticSiteId)
     ?? input.domesticSecrets[0]
@@ -9215,7 +9220,17 @@ function buildLauncherServiceVipSmoke(input: {
   };
 }
 
-function findLauncherServiceDnsRoute(routes: DnsReverseProxyRoute[], dnsHost: string): DnsReverseProxyRoute | null {
+function findLauncherServiceDnsRoute(
+  routes: DnsReverseProxyRoute[],
+  dnsHost: string,
+  serviceVip: string | null
+): DnsReverseProxyRoute | null {
+  // Standalone clients may address their own VIP directly, without a DNS lookup.
+  // Keep disabled VIP routes visible instead of hiding them behind a hostname route.
+  if (serviceVip) {
+    const vipRoute = routes.find((route) => normalizeDomain(route.host) === normalizeDomain(serviceVip));
+    if (vipRoute) return vipRoute;
+  }
   const normalized = normalizeDomain(dnsHost);
   return routes.find((route) => normalizeDomain(route.host) === normalized || route.routeId === `rp_${normalized}`) ?? null;
 }

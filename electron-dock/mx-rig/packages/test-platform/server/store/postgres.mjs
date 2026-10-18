@@ -182,6 +182,10 @@ function mapSession(row) {
     tokenHash: row.token_hash,
     principalId: row.principal_id,
     source: row.source ?? null,
+    // 'sso' for a session from browser SSO (migration 027); its upstream
+    // record is ssoRef.
+    auth: row.auth ?? 'local',
+    ssoRef: row.sso_ref ?? null,
     createdAt: iso(row.created_at),
     expiresAt: iso(row.expires_at),
     revokedAt: iso(row.revoked_at),
@@ -1368,11 +1372,11 @@ export class PostgresStore {
     return rows[0] ? mapLocalAccount(rows[0]) : null
   }
 
-  async createSession({ tokenHash, principalId, expiresAt, source }) {
+  async createSession({ tokenHash, principalId, expiresAt, source, auth = 'local', ssoRef = null }) {
     const { rows } = await this.pool.query(
-      `INSERT INTO mxt_sessions (token_hash, principal_id, source, expires_at)
-       VALUES ($1,$2,$3,$4) RETURNING *`,
-      [tokenHash, principalId, source ?? null, expiresAt],
+      `INSERT INTO mxt_sessions (token_hash, principal_id, source, expires_at, auth, sso_ref)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [tokenHash, principalId, source ?? null, expiresAt, auth, ssoRef],
     )
     return mapSession(rows[0])
   }

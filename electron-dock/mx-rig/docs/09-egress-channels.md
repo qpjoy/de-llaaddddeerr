@@ -55,9 +55,22 @@ Node 22 的全局 `fetch` 根本不读代理环境变量，`NODE_USE_ENV_PROXY` 
 
 只有管理员能增删与切换（`POST /api/rig/v1/admin/egress:activate`）。`/api/rig/v1/config` 只给通道 ID，不给地址；桌面 Runtime 需要地址才能启动浏览器，所以地址只在 operator 起步的 `/api/rig/v1/execution-config` 里下发。
 
+## 本机海外通道（Launcher 模式，2026-10-17）
+
+Launcher 模式的桌面端多了一条只属于这台电脑的通道，详见 [docs/25 §9](25-launcher-product-and-sso.md)：
+
+- 用平台统一账号的海外订阅，在回环地址上运行 Mihomo，端口随机；
+- 选择后，桌面端把它叠加到 Runtime 读取的策略里，作为 `browserProxy`。
+
+服务端的通道不受影响：页面上的「隔离浏览器」读数改成「本机海外通道」，环境观测照旧。策略版本号会变成 `<服务端版本>+launcher-oversea`，所以本节「切换的语义」同样适用：浏览器在下一步重开，待确认的动作失效。Runtime 只接受 `http://127.0.0.1:<端口>` 形式的本机通道。
+
 ## 仍然不做的事
 
-不设置系统代理、路由表、DNS、PAC、NRPT；不接管其他应用的网络归属；不申请网络 lease；不碰 MX-H2I 的登录与联网。需要私网连通性时，仍由管理员在部署层提供，或通过 standalone launcher 的既有能力接入。`scripts/check.mjs` 依然会因为 Runtime 里出现 `netsh` / `route` 之类的调用而失败。
+不设置系统代理、路由表、DNS、PAC、NRPT；不接管其他应用的网络归属；不碰 MX-H2I 的登录与联网。
+
+Launcher 模式下，桌面端只申请 Rig 自己的网络 lease，只路由 Rig 自己的网段（docs/25 §7）。海外通道只是本机回环地址上的一个代理，只给 Rig 的测试浏览器用。
+
+`scripts/check.mjs` 依然会因为 Runtime 里出现 `netsh` / `route` 之类的调用而失败；从 P3 起，设置系统代理的命令也会让它失败。
 
 ## 未验证
 

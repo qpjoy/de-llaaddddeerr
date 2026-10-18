@@ -9,6 +9,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite --host 127.0.0.1",
+    "dev:sim": "node scripts/dev-sim.mjs",
     "start": "node server/index.mjs",
     "worker": "node server/worker.mjs",
     "migrate": "node server/migrate.mjs",

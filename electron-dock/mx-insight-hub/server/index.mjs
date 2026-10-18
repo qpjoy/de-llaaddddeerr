@@ -25,7 +25,10 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { NightAllAdapter } from './adapters/night-all.mjs'
 import { IpSearchAdapter } from './adapters/ipsearch.mjs'
-import { IpRiskGateway } from './external-platforms/ip-risk-gateway.mjs'
+import { IpRiskGateway, IP_ADMISSION_CONFIG } from './external-platforms/ip-risk-gateway.mjs'
+import { AdmissionPolicyStore } from './external-platforms/admission-policy.mjs'
+import { deploymentAdmissionLimits } from './external-platforms/admission-runtime.mjs'
+import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { IpSearchAdminService } from './external-platforms/ipsearch-admin.mjs'
 import { JustOneAdapter } from './adapters/justone.mjs'
 import { TikHubAdapter } from './adapters/tikhub.mjs'
@@ -229,6 +232,11 @@ export async function createRuntime(config = loadConfig()) {
   // in legacy mode so an existing env=1 deployment does not switch off.
   const externalPlatformControlStore = createExternalPlatformControlStore({ pool })
   const rapidConfig = config.rapidApi || rapidApiConfig()
+  const externalAdmissionPolicies = new AdmissionPolicyStore({ pool, defaultsByProvider: Object.fromEntries([
+    ['justone', config.justOne], ['tikhub', config.tikHub], ['rapidapi', rapidConfig], ['qixin', QIXIN_CONFIG],
+    ['ipsearch', IP_ADMISSION_CONFIG], ['baidu-ip', IP_ADMISSION_CONFIG],
+    ...WEB_SEARCH_PROVIDERS.map(provider => [provider.key, rapidApiConfig()]),
+  ].map(([provider, providerConfig]) => [provider, deploymentAdmissionLimits(providerConfig)])) })
   const rapidApiProxyStore = pool ? new ExternalPlatformProxyStore(pool, config.deploymentEgress, { providerKey: 'rapidapi' }) : null
   const rapidApiCredentialStore = createExternalPlatformCredentialStore({ pool, providerKey: 'rapidapi', environmentConfigured: rapidConfig.configured })
   const rapidApiStore = createExternalPlatformStore({ pool, usageStore: store, providerKey: 'rapidapi', authorizationPlatform: 'twitter',
@@ -237,7 +245,7 @@ export async function createRuntime(config = loadConfig()) {
   const rapidApiAdapter = pool && config.listenerMode !== 'admin' && !rapidConfig.configurationError
     ? new RapidApiAdapter({ apiKey: rapidConfig.apiKey, fetchImpl: createRapidApiProxyFetch(rapidApiProxyStore), credentialResolver: async () => (await rapidApiCredentialStore.readCredentialSnapshot('rapidapi')).source === 'database'
       ? await rapidApiCredentialStore.readCredential('rapidapi') : rapidConfig.apiKey, timeoutMs: rapidConfig.timeoutMs }) : null
-  const hubSocialGateway = new ExternalPlatformGateway({ usageStore: store, platformStore: rapidApiStore,
+  const hubSocialGateway = new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies, usageStore: store, platformStore: rapidApiStore,
     adapter: rapidApiAdapter, config: rapidConfig, providerKey: 'rapidapi', credentialStore: rapidApiCredentialStore,
     operationControlStore: externalPlatformControlStore, apiKeyPepper: config.apiKeyPepper,
     reservationLeaseMs: Math.max(60000, config.reservationLeaseMs) })
@@ -264,7 +272,7 @@ export async function createRuntime(config = loadConfig()) {
   const facebookGateways = Object.fromEntries([
     ['rapidapi', rapidApiAdapter, rapidConfig, rapidApiCredentialStore],
     ['justone', justOneAdapter, config.justOne, externalPlatformCredentialStore],
-  ].map(([providerKey, adapter, providerConfig, credentialStore]) => [providerKey, new ExternalPlatformGateway({
+  ].map(([providerKey, adapter, providerConfig, credentialStore]) => [providerKey, new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies,
     usageStore: store, platformStore: createExternalPlatformStore({ pool, usageStore: store, providerKey,
       authorizationPlatform: 'facebook', circuitFailureThreshold: providerConfig.circuitFailureThreshold,
       circuitOpenMs: providerConfig.circuitOpenMs, uncertainCooldownMs: providerConfig.unknownFingerprintCooldownMs }),
@@ -302,7 +310,7 @@ export async function createRuntime(config = loadConfig()) {
     providerKey: 'tikhub',
   })
   const ipSearchCredentialStore = createExternalPlatformCredentialStore({ pool, providerKey: 'ipsearch', environmentConfigured: config.ipSearch?.configured })
-  const ipRiskGateway = new IpRiskGateway({ usageStore: store, credentialStore: ipSearchCredentialStore,
+  const ipRiskGateway = new IpRiskGateway({ admissionPolicies: externalAdmissionPolicies, usageStore: store, credentialStore: ipSearchCredentialStore,
     platformStore: createExternalPlatformStore({ pool, usageStore: store, providerKey: 'ipsearch', authorizationPlatform: 'ip_risk' }),
     adapter: new IpSearchAdapter({ apiKey: config.ipSearch?.apiKey || '' }),
     enabled: config.ipSearch?.enabled === true,
@@ -310,7 +318,7 @@ export async function createRuntime(config = loadConfig()) {
     reservationLeaseMs: Math.max(60000, config.reservationLeaseMs),
   })
   const baiduIpAdapter = new BaiduIpRiskAdapter({pool})
-  const ipRiskV2Gateway = new IpRiskGateway({ usageStore: store,
+  const ipRiskV2Gateway = new IpRiskGateway({ admissionPolicies: externalAdmissionPolicies, usageStore: store,
     platformStore: createExternalPlatformStore({pool,usageStore:store,providerKey:'baidu-ip',authorizationPlatform:'ip_risk'}),
     adapter:baiduIpAdapter,enabled:true,providerKey:'baidu-ip',operation:'ip.risk.query.v2',version:'mx-insight-hub.ip-risk.v2',meterKey:'ip.risk.subscription.v2' })
   const ipRiskChannels = new IpRiskChannels(ipRiskGateway,ipRiskV2Gateway)
@@ -323,7 +331,7 @@ export async function createRuntime(config = loadConfig()) {
   const qixinEgressRelayStore = pool
     ? new ExternalPlatformEgressRelayStore(pool, { providerKey: 'qixin', environmentFallback: config.enterpriseEgressBase })
     : null
-  const enterpriseGateway = new ExternalPlatformGateway({ usageStore: store, platformStore: qixinPlatformStore,
+  const enterpriseGateway = new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies, usageStore: store, platformStore: qixinPlatformStore,
     adapter: config.listenerMode === 'admin' || !pool
       ? null
       : new QixinAdapter({ fetchImpl: createQixinProxyFetch(qixinProxyStore, {
@@ -331,7 +339,7 @@ export async function createRuntime(config = loadConfig()) {
       }) }), config: QIXIN_CONFIG,
     providerKey: 'qixin', credentialStore: qixinCredentialStore, operationControlStore: externalPlatformControlStore,
     apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: Math.max(60000, config.reservationLeaseMs) })
-  const webSearch = createWebSearchRuntime({pool,store,controls:externalPlatformControlStore,config})
+  const webSearch = createWebSearchRuntime({pool,store,controls:externalPlatformControlStore,config,admissionPolicies:externalAdmissionPolicies})
   const externalPlatformAdmin = new MultiExternalPlatformAdminService([
     ...webSearch.admins,
     new ExternalPlatformAdminService({ store: rapidApiStore, config: rapidConfig, credentialStore: rapidApiCredentialStore,
@@ -347,7 +355,7 @@ export async function createRuntime(config = loadConfig()) {
     new NightAllPlatformAdminService({ store, config: config.nightAll }),
     nightAllA,
   ])
-  const externalPlatformGateway = new ExternalPlatformGateway({
+  const externalPlatformGateway = new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies,
     ecommerceRoutingStore,
     usageStore: store,
     platformStore: externalPlatformStore,
@@ -364,12 +372,12 @@ export async function createRuntime(config = loadConfig()) {
     uncertainCooldownMs: config.justOne.unknownFingerprintCooldownMs,
     responseQuarantineCooldownMs: config.justOne.responseQuarantineCooldownMs,
   })
-  const xiaohongshuHotNotesGateway = new ExternalPlatformGateway({
+  const xiaohongshuHotNotesGateway = new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies,
     usageStore: store, platformStore: xiaohongshuHotNotesStore, adapter: justOneAdapter, config: config.justOne,
     apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: config.reservationLeaseMs,
     operationControlStore: externalPlatformControlStore, credentialStore: externalPlatformCredentialStore,
   })
-  const socialAccountGateway = new ExternalPlatformGateway({
+  const socialAccountGateway = new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies,
     usageStore: store,
     platformStore: socialAccountPlatformStore,
     adapter: justOneAdapter,
@@ -379,7 +387,7 @@ export async function createRuntime(config = loadConfig()) {
     operationControlStore: externalPlatformControlStore,
     credentialStore: externalPlatformCredentialStore,
   })
-  const socialAccountTikHubGateway = new ExternalPlatformGateway({
+  const socialAccountTikHubGateway = new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies,
     usageStore: store,
     platformStore: socialAccountTikHubStore,
     adapter: tikHubAdapter,
@@ -393,7 +401,7 @@ export async function createRuntime(config = loadConfig()) {
   const nativeSearchGateway = (platform, providerKey) => {
     const justone = providerKey === 'justone'
     const providerConfig = justone ? config.justOne : config.tikHub
-    return new ExternalPlatformGateway({
+    return new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies,
       usageStore: store,
       platformStore: createExternalPlatformStore({ pool, usageStore: store,
         providerKey, authorizationPlatform: platform,
@@ -414,6 +422,9 @@ export async function createRuntime(config = loadConfig()) {
     platform === 'twitter' ? hubSocialGateway : nativeSearchGateway(platform, platform === 'facebook' ? 'justone' : 'tikhub')]))
   const socialDataGateway = { socialData: (context, input) => {
     if (input.operation === 'search') return hubSocialGateway.socialData(context, input)
+    // Twitter owns receipt-aware validation: an old numeric username may need
+    // exact historical replay even when it fails today's username contract.
+    if (typeof input.body?.platform === 'string' && ['twitter', 'x', 'tw'].includes(input.body.platform.trim().toLowerCase())) return hubSocialGateway.socialAccountData(context, input)
     const normalized = normalizeHubSocialCompatRequest(input.operation, input.body, { businessId: context.consumer?.businessId })
     return socialAccountDataGateways[normalized.platform].socialAccountData(context, input)
   } }
@@ -421,7 +432,7 @@ export async function createRuntime(config = loadConfig()) {
   const instagramSearch = (context, input) => instagramSearchGateways.justone.searchRaw(context, input, {
     policyStore: strategySearchRoutingStore, gateways: instagramSearchGateways,
   })
-  const tikHubGateway = new TikHubGateway({
+  const tikHubGateway = new TikHubGateway({ admissionPolicies: externalAdmissionPolicies,
     usageStore: store,
     platformStore: tikHubPlatformStore,
     adapter: tikHubAdapter,
@@ -431,7 +442,7 @@ export async function createRuntime(config = loadConfig()) {
     operationControlStore: externalPlatformControlStore,
     credentialStore: tikHubCredentialStore,
   })
-  const tikHubUserInfoGateway = new TikHubUserInfoGateway({
+  const tikHubUserInfoGateway = new TikHubUserInfoGateway({ admissionPolicies: externalAdmissionPolicies,
     usageStore: store,
     platformStore: tikHubPlatformStore,
     adapter: tikHubAdapter,
@@ -546,11 +557,11 @@ export async function createRuntime(config = loadConfig()) {
       if (!selected.length) return {}
       const credential = await tikHubCredentialStore.describeCredential('tikhub')
       const readiness = await nativeSearchGateways[selected[0]].nativeReadiness({ ...options,
-        operationKeys: selected.map(platform => `native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`),
+        operationKeys: selected.map(platform => platform === 'xiaohongshu' ? 'social.posts.search' : `native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`),
         credentialConfigured: credential.credentialConfigured,
       })
       return Object.fromEntries(selected.map(platform => [platform, {
-        ready: readiness[`native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`] === true,
+        ready: readiness[platform === 'xiaohongshu' ? 'social.posts.search' : `native.${TIKHUB_CONTENT_SEARCH_RECIPES[platform].key}`] === true,
       }]))
     },
     externalFacebookCapabilities: async options => {
@@ -579,7 +590,11 @@ export async function createRuntime(config = loadConfig()) {
       : (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
     externalDataSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
       : input.normalized.platform === 'instagram' ? instagramSearch(context, input)
-      : TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform] ? nativeSearchGateways[input.normalized.platform].searchContent(context, input)
+      : TIKHUB_CONTENT_SEARCH_RECIPES[input.normalized.platform]
+        && (input.normalized.platform !== 'weibo' || input.normalized.pageSize < 20 || input.normalized.cursor?.startsWith('mxnc1.'))
+        ? nativeSearchGateways[input.normalized.platform].searchContent(context, input, {
+          finalizeXiaohongshu: values => tikHubGateway.enrichStandardSearchPage(values),
+        })
       : (nativeSearchGateways[input.normalized.platform] || hubSocialGateway).searchRaw(context, input),
     // The gateway reads the audited operation policy on every dispatch; static
     // env flags must not prevent routing to a database-enabled operation.
@@ -635,6 +650,7 @@ export async function createRuntime(config = loadConfig()) {
   const peripherals = createPeripheralRuntime(config)
   const harborPortal = config.listenerMode === 'public' ? null : createHarborPortal({pool,store,profileFile:process.env.MX_INSIGHT_HARBOR_SSO_PROFILE,token:process.env.MX_INSIGHT_HARBOR_GATEWAY_TOKEN,tokenFile:process.env.MX_INSIGHT_HARBOR_GATEWAY_TOKEN_FILE,hubSettings:readSsoProfile(process.env.MX_INSIGHT_SSO_PROFILE)})
   const app = createApp({
+    externalAdmissionPolicies,
     harborPortal,
     platformSearchPolicyStore,
     ecommerceRoutingStore,
@@ -682,6 +698,8 @@ export async function createRuntime(config = loadConfig()) {
     enterpriseGateway,
     socialAccountGateway,
     socialAccountTikHubGateway,
+    // Comments reserve usage in the YouTube domain, not account search's social domain.
+    youtubeCommentsGateway: socialAccountDataGateways.youtube,
     tikHubGateway,
     acquisitionHistory,
     segmenterConfig: config.common.segmenter,
@@ -701,7 +719,7 @@ export async function createRuntime(config = loadConfig()) {
     acquisitionHistory, topicReports,
     externalPlatformCredentialStore, externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
     xiaohongshuHotNotesGateway, xiaohongshuHotNotesStore,
-    externalPlatformControlStore, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
+    externalPlatformControlStore, externalAdmissionPolicies, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     hubSocialGateway, rapidApiStore, rapidApiCredentialStore, rapidApiProxyStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
     nativeSearchGateways, socialAccountDataGateways, socialDataGateway,

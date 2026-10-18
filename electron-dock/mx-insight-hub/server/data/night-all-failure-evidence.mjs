@@ -121,7 +121,7 @@ export function nightAllFailureEvidence(error) {
     for (const key of ['error', 'details', 'cause', 'errors', 'endpointTrace', 'attempts']) walk(node[key], `${path}.${key}`, depth + 1)
   }
   walk(body, '$', 0)
-  return projectNightAllFailureEvidence({ version: 1, httpStatus: error?.status,
+  return projectNightAllFailureEvidence({ version: 1, httpStatus: error?.status ?? error?.upstreamHttpStatus,
     requestId: identifier(body?.requestId) || identifier(error?.upstreamRequestId),
     traceId: identifier(body?.traceId) || identifier(error?.upstreamTraceId), errors, truncated,
     rateLimit: error?.rateLimit })

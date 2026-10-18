@@ -154,7 +154,7 @@ function Comment({ comment }) {
   return <article className="qp-panel"><strong>{comment.author?.name || '匿名用户'}</strong><small> · 点赞 {comment.liked ?? '未提供'} · 回复 {comment.replyCount ?? '未提供'}</small><p style={{ whiteSpace: 'pre-wrap' }}>{comment.text}</p>{comment.replies?.map(reply => <Comment key={reply.id} comment={reply} />)}</article>
 }
 
-export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEvidence }) {
+export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEvidence, onUnauthorized, notify }) {
   const identity = useDemoIdentity()
   const details = useRef({ identity, notes: new Map() })
   if (details.current.identity !== identity) details.current = { identity, notes: new Map() }
@@ -276,7 +276,7 @@ export function XiaohongshuFeed({ token, session, apiKey, NoteScroll, DeliveryEv
   return <section className={`mih-commerce-manager mih-xhs-browser ${view === 'list' ? 'mih-xhs-list-view' : ''}`}>
     <div className="mih-xhs-view-tabs"><ProductViewTabs label="小红书笔记画卷" value={['list', 'mobile'].includes(view) ? 'list' : view} onChange={changeView} session={session} debug="api" product="list" /></div>
     {view === 'guide' ? <div style={{ gridColumn: '1 / -1' }}><ProductIntegrationGuide label="小红书笔记画卷" docs="xiaohongshu-note" /></div> : null}
-    {view === 'management' ? <div style={{ gridColumn: '1 / -1' }}><ProductManagement session={session} path="/data-products/xiaohongshu-note" label="小红书笔记画卷" /></div> : null}
+    {view === 'management' ? <div style={{ gridColumn: '1 / -1' }}><ProductManagement {...{ token, session, onUnauthorized, notify }} path="/data-products/xiaohongshu-note" label="小红书笔记画卷" /></div> : null}
     {['list', 'mobile'].includes(view) ? <nav className="mih-source-section-tabs mih-xhs-view-tabs" aria-label="笔记展示方式"><button type="button" aria-pressed={view === 'list'} onClick={() => changeView('list')}>列表视图</button><button type="button" aria-pressed={view === 'mobile'} onClick={() => changeView('mobile')}>Mobile 视图</button></nav> : null}
     <div className="mih-api-console-tab" hidden={view !== 'api'}><XiaohongshuConsole apiKey={apiKey} admin={session?.platformAdmin === true} /></div>
     <aside className="qp-panel mih-commerce-filters" style={!['list', 'mobile'].includes(view) ? { display: 'none' } : undefined}>

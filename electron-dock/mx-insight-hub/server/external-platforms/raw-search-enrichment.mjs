@@ -1,15 +1,17 @@
+import { refreshAdmissionLimits } from './admission-runtime.mjs'
 import { createHash } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { AppError } from '../core/errors.mjs'
 import { internalCircuitState, acquireTikHubRateLimit } from '../core/internal-traffic-policy.mjs'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { normalizeNativeForwardingRequest } from '../contracts/native-forwarding.mjs'
-import { WEIBO_DETAIL_KEY, mergeWeiboDetail } from '../contracts/raw-search.mjs'
+import { WEIBO_DETAIL_KEY, mergeWeiboDetail, rawSearchRecords } from '../contracts/raw-search.mjs'
 
 // Child calls share the search's usage/wallet identity, but each has its own
 // operation policy, procurement hold, rate admission and immutable receipt.
 export async function enrichWeiboRawSearch({ gateway, context, request, result, delivery,
-  credential, credentialRevision, providerCostControl, deadlineAt }, { clock = Date.now, wait = sleep } = {}) {
+  credential, credentialRevision, providerCostControl, deadlineAt, firstCallOrdinal = 2, ingestDetails = false,
+  revalidateIdentity = null }, { clock = Date.now, wait = sleep } = {}) {
   const rows = result.items
   const candidates = rows.filter(row => request.enrichment.all || row.body_completeness === 'provider_preview')
   const unique = [...new Map(candidates.map(row => [row.content_id, row])).values()]
@@ -42,6 +44,7 @@ export async function enrichWeiboRawSearch({ gateway, context, request, result, 
       let waitMs = 0
       let call, costReservation, ownsLease = false, evidence = null
       try {
+        if (revalidateIdentity) context = await revalidateIdentity()
         const providerState = internalCircuitState(gateway.usageStore, context,
           await gateway.platformStore.providerState(gateway.providerKey))
         const circuitDelay = Date.parse(providerState?.circuitOpenUntil) - clock()
@@ -71,7 +74,7 @@ export async function enrichWeiboRawSearch({ gateway, context, request, result, 
           usageRequestId: delivery.usageRequestId, fingerprint: delivery.fingerprint, costControls: [cost],
         })
         const rate = await acquireTikHubRateLimit(gateway.usageStore, context, gateway.platformStore,
-          { limit: gateway.config.maxRequestsPerMinute ?? 90, windowMs: 60_000 })
+          { limit: (await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90, windowMs: 60_000 })
         if (!rate.allowed) {
           waitMs = remainingWait(rate.retryAfterMs)
           if (waitMs) continue
@@ -82,12 +85,15 @@ export async function enrichWeiboRawSearch({ gateway, context, request, result, 
           skipRemaining(index, 'deadline')
           break rows
         }
+        // A local rate/circuit wait never preserves an authorization decision.
+        // Recheck at the paid boundary after all asynchronous admission work.
+        if (revalidateIdentity) context = await revalidateIdentity()
         call = await gateway.platformStore.beginProviderCall({
           tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
           usageRequestId: delivery.usageRequestId, operation: detail.operation,
           contractVersion: detail.endpointContractVersion, endpointKey: detail.endpointKey,
           endpointVersion: detail.endpointVersion, marketplace: 'weibo', fingerprint: delivery.fingerprint,
-          dispatchFingerprint, callOrdinal: calls + 2, callRole: 'enrichment',
+          dispatchFingerprint, callOrdinal: calls + firstCallOrdinal, callRole: 'enrichment',
           costControl: cost, costReservationId: costReservation.id, operationControl: control,
         })
         calls++
@@ -111,14 +117,20 @@ export async function enrichWeiboRawSearch({ gateway, context, request, result, 
           upstreamEvidence: source?.upstreamEvidence, archiveObjects: source?.archiveObjects || [],
         }
         if (source?.restrictedResponseArchive) await gateway.platformStore.stageProviderEvidence(evidence)
-        await gateway.platformStore.finishProviderStep(evidence)
-        call = null
+        const completedRows = []
         if (!failure) {
           for (const candidate of rows.filter(candidate => candidate.content_id === row.content_id)) {
-            try { if (mergeWeiboDetail(candidate, upstream)) repaired++ }
+            try { if (mergeWeiboDetail(candidate, upstream)) { repaired++; completedRows.push(candidate) } }
             catch { /* An unusable detail stays archived; the preview is explicitly incomplete. */ }
           }
         }
+        await gateway.platformStore.finishProviderStep({ ...evidence,
+          ...(ingestDetails && completedRows.length ? { ingestJob: {
+            payload: { kind: 'external-platform-result', platform: 'weibo', datasetId: 'night-all.search.v1', providerKey: gateway.providerKey,
+              consumerId: context.consumer.id, requestId: delivery.usageRequestId, queryFingerprint: delivery.fingerprint,
+              providerCallId: call.id, records: rawSearchRecords({ data: { raw_info: '[]', raw_data: JSON.stringify(completedRows) } }, 'weibo', gateway.providerKey) },
+            dedupeKey: `external-platform:${gateway.providerKey}:${call.id}`, priority: 100 } } : {}) })
+        call = null
         if (failure && evidence.outcome === 'unknown') {
           skipRemaining(index + 1, 'previous_detail_unknown')
           break rows
@@ -129,6 +141,10 @@ export async function enrichWeiboRawSearch({ gateway, context, request, result, 
         // uncertainty must stop the parent; it is never another paid retry.
         if (call || error?.code === 'external_platform_call_persistence_unknown') throw error
         if (!(error instanceof AppError)) throw error
+        if (error.code === 'external_admission_policy_unavailable') {
+          skipRemaining(index, 'admission_policy_unavailable')
+          break rows
+        }
         if (!(error.code.startsWith('external_platform_operation_')
           || error.code.startsWith('external_platform_cost_')
           || error.code === 'external_platform_subsidy_budget_exhausted')) throw error

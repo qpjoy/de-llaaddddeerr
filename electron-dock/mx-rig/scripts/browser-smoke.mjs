@@ -90,6 +90,17 @@ try {
     },
     {
       schedule: false,
+      // Browser SSO configured (docs/25 P4): the login page offers it. No
+      // identity provider is contacted until someone clicks.
+      ssoSettings: {
+        appId: 'mx-rig',
+        origin: 'https://rig.example',
+        issuer: 'https://auth.example/identity',
+        clientId: 'mx-rig-web',
+        clientSecret: 'smoke-only',
+        audience: 'mx-rig',
+        sessionKey: Buffer.alloc(32, 7).toString('base64url')
+      },
       modelOptions: {
         environment: { MX_RIG_MODEL_API_KEY: 'fixture-key' },
         fetchImpl: async () => {
@@ -140,6 +151,22 @@ try {
   const errors = []
   page.on('pageerror', (e) => errors.push(e.message))
   await page.goto(server.origin + '/rig/')
+  // Inside, browser SSO sits beside the password form…
+  await page.locator('#sso-login').waitFor({ state: 'visible' })
+  assert.equal(await page.locator('#sso-or').isVisible(), true)
+  assert.equal(await page.locator('#account-field').isVisible(), true)
+  await page.screenshot({ path: join(qa, 'web-login-sso.png') })
+  // …and on the public entrance it is the only way in (the server says so; here
+  // its answer is stood in for, since this page is not on that host).
+  const outside = await browser.newPage({ viewport: { width: 1440, height: 960 } })
+  await outside.route('**/api/rig/v1/auth-methods', (route) => route.fulfill({ json: { sso: { enabled: true, origin: 'https://rig.example' }, password: false } }))
+  await outside.goto(server.origin + '/rig/')
+  await outside.locator('#sso-login').waitFor({ state: 'visible' })
+  for (const hidden of ['#account-field', '#password-field', '#login-form button[type=submit]', '#sso-or'])
+    assert.equal(await outside.locator(hidden).isVisible(), false, `${hidden} is not offered on the public entrance`)
+  assert.match(await outside.locator('#login-hint').textContent(), /不接受账号密码/)
+  await outside.screenshot({ path: join(qa, 'web-login-sso-only.png') })
+  await outside.close()
   await page.locator('#account').fill('admin')
   await page.locator('#password').fill('web-test-secret')
   await page.locator('#login-form button[type=submit]').click()
@@ -191,6 +218,35 @@ try {
   await openNav(page, '出网与通道')
   await page.locator('.rig-table[data-layout="egress"]').waitFor({ state: 'visible' })
   await page.screenshot({ path: join(qa, 'web-egress.png') })
+  // The desktop's overseas channel card (docs/25 P3) exists only in the
+  // Launcher-mode desktop; here it is drawn from its states with the page's
+  // own styles, to see what each says and offers.
+  const oversea = await page.evaluate(async () => {
+    const { overseaPanel } = await import(new URL('views.js', location.href).href)
+    const calls = []
+    const ctx = { run: (work) => work(), oversea: async (action, body) => calls.push([action, body ?? null]) }
+    const base = { channelId: 'launcher-oversea', enabled: false, browser: false, usingBrowser: false, verified: null, latencyMs: null, sites: [], busy: false }
+    const states = [
+      { ...base, state: 'unavailable', enabled: true, text: '用平台统一账号登录、连上内网后才能开启。' },
+      { ...base, state: 'ready', enabled: true, browser: true, usingBrowser: true, verified: true, latencyMs: 286, text: '海外通道已就绪（试访问 286 ms）。' },
+      { ...base, state: 'error', enabled: true, text: '这个账号没有海外权限，请联系管理员开通。' }
+    ]
+    const box = document.createElement('div')
+    box.id = 'oversea-preview'
+    box.className = 'rig-oversea-preview'
+    for (const snap of states) box.append(overseaPanel(ctx, snap))
+    document.querySelector('#view').prepend(box)
+    const buttons = [...box.querySelectorAll('#oversea-toggle')].map((button) => button.textContent)
+    box.querySelectorAll('#oversea-toggle')[1].click()
+    box.querySelectorAll('#oversea-browser')[1].click()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    return { buttons, calls, statuses: [...box.querySelectorAll('#oversea-state')].map((node) => node.dataset.status) }
+  })
+  assert.deepEqual(oversea.buttons, ['开启海外通道', '关闭海外通道', '重试'])
+  assert.deepEqual(oversea.statuses, ['default', 'success', 'danger'])
+  assert.deepEqual(oversea.calls, [['oversea-stop', null], ['oversea-browser', { on: false }]])
+  await page.locator('#oversea-preview').screenshot({ path: join(qa, 'web-oversea-panel.png') })
+  await page.evaluate(() => document.querySelector('#oversea-preview').remove())
 
   // The orchestration centre: open a saved spec, break it, see the compiler
   // refuse it by name, repair it, and watch the draft preview come back.
@@ -753,7 +809,7 @@ try {
 
   assert.deepEqual(errors, [])
   console.log(
-    'Browser tools and Web smoke passed: origin policy, real page fill/click, password refusal, screenshots, HttpOnly login, unconfigured model blocked, Internal settings, Agent market, quality report (empty rates read "—", report focus reorders sections), orchestration centre (compiled spec, draft preview, refused draft), egress observation, the system layer (signal vs platform evidence, claim, floating panel), one-line dispatch parsing (real plan id, no execution), switching Rig\'s own egress channel, streamed model output (a visible draft that the final answer replaces), a structured finding whose unread citation is marked, accounts (create, sign in with the one-time password, role, reset, disable), runners (enrol command, remove), the run detail (waiting for a runner, live pipeline, results with a seekable recording, rerun one case, cancel, an unstarted Agent analysis drafted from it, the read-only tour on the web, a quest offering it, a published tour recording playing in 新手引导), creating a project from the Compass acceptance pack (references shown, not counted), and M6 (scheduling only after a verified run, the setup checklist, the audit trail of a schedule change, registering an installer, the old console read-only), and the published versions of a test repository in the browser.'
+    'Browser tools and Web smoke passed: origin policy, real page fill/click, password refusal, screenshots, HttpOnly login, unconfigured model blocked, Internal settings, Agent market, quality report (empty rates read "—", report focus reorders sections), orchestration centre (compiled spec, draft preview, refused draft), egress observation, the desktop overseas channel card in each state, browser SSO on the login page (beside passwords inside, alone on the public entrance), the system layer (signal vs platform evidence, claim, floating panel), one-line dispatch parsing (real plan id, no execution), switching Rig\'s own egress channel, streamed model output (a visible draft that the final answer replaces), a structured finding whose unread citation is marked, accounts (create, sign in with the one-time password, role, reset, disable), runners (enrol command, remove), the run detail (waiting for a runner, live pipeline, results with a seekable recording, rerun one case, cancel, an unstarted Agent analysis drafted from it, the read-only tour on the web, a quest offering it, a published tour recording playing in 新手引导), creating a project from the Compass acceptance pack (references shown, not counted), and M6 (scheduling only after a verified run, the setup checklist, the audit trail of a schedule change, registering an installer, the old console read-only), and the published versions of a test repository in the browser.'
   )
 } finally {
   await tools.close()

@@ -86,6 +86,23 @@ bash certificates/manage.sh install-timer
 
 配套 de-mingxi 新增仓库根目录/compass/deploy 的 `scripts/manage.sh cert ...` 统一入口、`internal-identity-install` 及 Auth/Launcher 内网参考模板。模板不含真实凭据，不可直接当生产配置安装。公网启用脚本在改变配置前先检查内网 discovery 和 SSO session，回源未就绪时停止。
 
+### 管理页提示账号服务不可用，Token 验证请求返回 404
+
+先检查真正的会话入口，不据 `/internal/v1/user-center/roles` 的 404 判断 Token 失效。公网本来就不代理原始 Internal API。下面的请求不携带 Cookie 或 Token：
+
+```bash
+curl --noproxy '*' --connect-timeout 5 --max-time 10 -sS \
+  -w '\nHTTP %{http_code}\n' https://launcher.minsight-ai.com/auth/admin/session
+```
+
+正常未登录应返回 HTTP 200，包含 `enabled:true`、`accessMode:"sso-only"`、`authenticated:false`。此结果表示请求所经过的会话入口正常；它不验证管理员凭据，也不能替代浏览器自身的连通性检查。页面可点击「重试连接」，必要时强制刷新 `/admin/`，恢复后再登录。
+
+2026-10-17 现场在增加 Rig 独立 nginx VIP 站点并 reload 后出现上述界面；服务器 session 检查正常，用户重试或强制刷新后恢复管理入口。首次请求失败的原因尚未确定，不能据此认定 Rig 站点覆盖了 Launcher 域名，也无需因此重新登记 Identity、轮换 Token 或开放公网 `/internal/`。
+
+前端修复覆盖首次会话发现失败后的 Token 提交：先重新确认登录方式；仍未知或不可用时显示连接错误及可用的 HTTP 状态，不发送 Token。已确认的同源登录通过 `/auth/admin/ops-login` 建立 Cookie；明确允许的私网应急模式与 Electron 指定 Internal 地址继续兼容。只重试会话读取，不自动重放登录或管理写操作。
+
+本地 Desktop build 已通过，包括 17 项会话测试，以及实际登录表单/Token 应用函数的失败恢复、地址切换和私网兼容回归。该修复尚未部署，需随原 Launcher 发布流程更新管理静态资源；无需修改身份配置或重新登记域名。
+
 
 ## 2026-10-04 登录入口与 30 天会话更新
 

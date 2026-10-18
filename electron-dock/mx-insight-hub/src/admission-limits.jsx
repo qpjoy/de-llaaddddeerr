@@ -1,3 +1,4 @@
+import { diagnosticHref } from './diagnostics-navigation.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ArrowClockwise, Clock, ShieldCheck, WarningCircle } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
@@ -77,7 +78,7 @@ export default function AdmissionLimits({ token, onUnauthorized, requestId = '' 
       </form>
       <div className="mih-admission-context"><span>{data?.key ? `${data.key.name} · ${data.key.id} · ${data.key.status}` : '全部上游共享限制 · 选择 Key 后查看各层配额'}</span>
         <label><input type="checkbox" checked={auto} onChange={event => setAuto(event.target.checked)}/> 每 10 秒自动刷新</label></div>
-      {data?.correlation ? <p>关联请求 <a href={`#/data-browser?view=diagnostics&requestId=${data.correlation.requestId}`}>{data.correlation.requestId}</a> · 下方是当前状态，历史请求结果不变。</p> : null}
+      {data?.correlation ? <p>关联请求 <a href={diagnosticHref(data.correlation.requestId)}>{data.correlation.requestId}</a> · 下方是当前状态，历史请求结果不变。</p> : null}
       {canManageKeyHubLimits({ kind: 'admin-token' }, data?.key) ? <p><a href={`#/api-keys?consumerId=${encodeURIComponent(data.key.consumerId)}`}>前往 API Keys 管理此 Key 的 Hub 限制开关 →</a></p> : null}
       {data?.keysTruncated ? <p>仅列出最近 200 个 Key；可粘贴其他 Key 的完整 ID。</p> : null}
     </div>
@@ -103,7 +104,7 @@ export default function AdmissionLimits({ token, onUnauthorized, requestId = '' 
         {row.limit != null ? <div className="mih-admission-usage"><span>已用 {Math.ceil(row.used).toLocaleString()} / {row.limit.toLocaleString()}{row.windowSeconds ? ` · ${row.windowSeconds} 秒窗口` : ''}</span><progress max={Math.max(1,row.limit)} value={Math.min(row.limit,row.used)} /></div> : null}
         {row.active && row.until && row.startedAt ? <progress aria-label="冷却经过时间" max="100" value={Math.min(100,Math.max(0,(now-Date.parse(row.startedAt))/Math.max(1,Date.parse(row.until)-Date.parse(row.startedAt))*100))}/> : null}
         <dl><dt>影响范围</dt><dd>{row.scope}</dd>{row.errorCode ? <><dt>触发原因</dt><dd><code>{row.errorCode}</code></dd></> : null}
-          {row.apiKeyId ? <><dt>关联 Key</dt><dd>{row.apiKeyId}</dd></> : null}{row.requestId ? <><dt>关联请求</dt><dd><a href={`#/data-browser?view=diagnostics&requestId=${row.requestId}`}>{row.requestId}</a></dd></> : null}</dl>
+          {row.apiKeyId ? <><dt>关联 Key</dt><dd>{row.apiKeyId}</dd></> : null}{row.requestId ? <><dt>关联请求</dt><dd><a href={diagnosticHref(row.requestId)}>{row.requestId}</a></dd></> : null}</dl>
         {row.selectedKeyEffect ? <p>{row.selectedKeyEffect}{row.selectedKeyUntil && Date.parse(row.selectedKeyUntil) > now ? ` 当前 Key 还需等待 ${remaining(row.selectedKeyUntil,now)}` : ''}</p> : null}
         <footer><p>{row.note}</p>{row.recoverable ? <button className="qp-button qp-button--secondary" disabled={!row.active || stale || busy || saving || (row.until && Date.parse(row.until)<=now)} onClick={() => { setSelection(row); setReason(''); setError(null) }}>手动恢复</button>
           : ['key_total','plan_month'].includes(row.kind) ? <a href={row.kind === 'key_total' ? '#/keys' : '#/plans'}>调整额度</a> : null}</footer>

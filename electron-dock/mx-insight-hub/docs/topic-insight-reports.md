@@ -95,3 +95,64 @@ items/page/limit/hasMore。topic 匹配报告主题，keyword 匹配主题或保
 
 Hub 页面支持动态类别多选、自定义时间、关键词匹配模式与报告搜索分页。
 所有改动限定 Hub 专题链路；MX-H2I 登录、网络及 Launcher 身份路径不变。
+
+## 动态类别数据库约束修复（2026-10-17）
+
+Delta 今日政治简报报告 `news_topic_search / hub_topic_report` 返回500，关联 HTTP 请求
+`54920019-fc63-4536-a77a-c8772677cd46`，耗时516ms。新查询先读 `/data/platforms`，
+再用全部已授权类别创建报告；已有报告恢复则直接读取报告。`hub_topic_report` 是调用方的
+通用阶段名称，单凭截图不能区分目录读取、创建或已有报告读取失败。
+
+本地已确认并复现一个数据库缺陷：动态类别的请求校验允许14类以上，但 migration067的
+`topic_reports_authorized_platforms_check` 仍要求 `cardinality(authorized_platforms) BETWEEN 1 AND 13`。
+真实报告 INSERT 因而抛出 PostgreSQL `23514`，HTTP层返回截图同形的 `500 internal_error`。
+原测试仅检查动态类别参数，HTTP测试使用内存报告替身，没有实际执行此约束。
+
+新增 migration `156_topic_report_dynamic_platforms.sql`，只将该约束改为至少一类；
+不另设14类上限，不截断已授权平台，不修改历史报告、权限、计费、身份或联网。
+18项相关回归通过、0跳过，包含真实PGlite约束与HTTP创建链路：迁移前14类500，迁移后202，
+完整授权集合保留，同幂等键重试保留原失败记录，成功重放不重复创建，未授权和跨consumer访问仍拒绝。
+Delta另有15项离线适配测试通过。本地验证不代表该生产请求已经归因或恢复。
+
+最初尝试按原请求读取日志，Public容器名为 `api`：
+
+```bash
+kubectl -n mx-insight-hub logs deployment/mx-insight-hub-public -c api --since=24h --timestamps=true --tail=-1 \
+  | grep -F -B 2 -A 30 '54920019-fc63-4536-a77a-c8772677cd46'
+```
+
+该未处理异常响应中的 `requestId` 是HTTP关联ID，未必等于 `usage_requests.id`。
+日志应检查真实 error/code/constraint，不能用查不到同UUID的usage记录推断没有创建尝试。
+
+操作者反馈上述当前Public日志查询无输出。随后返回的只读数据库回执时间为
+`2026-10-16T20:14:32.391Z`（北京时间2026-10-17 04:14:32）：报告表和迁移表都存在，
+该约束 `convalidated=true`，定义仍为 `cardinality >= 1 AND cardinality <= 13`，
+`156_topic_report_dynamic_platforms.sql` 的迁移记录为空。已确认线上仍有这个数据库阻断，
+且本次迁移尚未应用；回执没有原请求的分类集合或堆栈，仍不能将它单独视为该历史500的精确归因。
+无需继续重复同一当前日志查询；按以下流程发布已验证的修复。
+
+同步包含新增156文件的完整代码，并在Hub目录运行既有发布流程以执行新迁移；
+仅重启旧镜像不会改数据库约束：
+
+```bash
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh ops internal-production deploy
+```
+
+发布后查看迁移Job日志，应出现 `applied 156_topic_report_dynamic_platforms.sql`：
+
+```bash
+kubectl -n mx-insight-hub logs job/mx-insight-hub-migrate -c migrate
+```
+
+随后复用只读数据库检查，
+预期该约束只保留 `cardinality(authorized_platforms) >= 1`，且156记录包含 `applied_at`。
+通过后再由操作者显式恢复原业务请求；HTTP202表示创建受理，报告最终成功仍需后续业务回执。
+
+操作者后续回执时间为 `2026-10-16T20:22:32.764Z`（北京时间2026-10-17 04:22:32）：
+156的 `applied_at` 为 `2026-10-16T20:21:08.821Z`，该约束定义已变为
+`CHECK ((cardinality(authorized_platforms) >= 1))`，且 `convalidated=true`。
+已确认生产数据库迁移生效、13类上限解除；尚未收到原简报任务恢复或报告最终成功的业务回执，
+因此不能据此将原请求标记为已恢复。
+
+生产迁移由操作者执行，代理未执行线上任务重试。既有失败响应重放与unknown保护继续生效；
+保留原请求体和幂等键，不通过改历史状态、清账或新建幂等键绕过原请求证据。

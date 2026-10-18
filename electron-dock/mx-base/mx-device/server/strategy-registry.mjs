@@ -6,6 +6,8 @@ import {
   BUILTIN_STRATEGY_DEFINITIONS,
   RULE_KINDS,
   RULE_OPTIONAL_DEFAULTS,
+  PACING_RULE_DEFAULTS,
+  compilePacing,
 } from "./strategy-catalog.mjs";
 export { strategyStatus } from "./strategy-catalog.mjs";
 
@@ -142,6 +144,7 @@ function normalizeRule(kind, input) {
     queue: ["maxQueueWaitMs", "maxQueuePerDevice", "shortTaskMs"],
     "app-budget": ["windowMs", "maxRuns", "maxServiceMs", "cooldownMs"],
     "app-override": ["appId", "policy"],
+    pacing: Object.keys(PACING_RULE_DEFAULTS),
   }[kind];
   // Added after rules were first stored: optional, defaulted when absent, so
   // existing rule versions and migration seeds keep compiling unchanged.
@@ -158,6 +161,16 @@ function normalizeRule(kind, input) {
   }
   if (kind === "app-budget")
     return normalizePoolPolicy({ appDefaults: input }).appDefaults;
+  if (kind === "pacing") {
+    for (const key of required)
+      check(
+        Number.isInteger(input[key]) && input[key] >= 0,
+        `规则配置 ${key} 须为非负整数`,
+      );
+    // Validates bounds of the enabled parts.
+    compilePacing(input);
+    return Object.fromEntries(required.map((key) => [key, input[key]]));
+  }
   const appId = text(input.appId, "App", 60);
   check(
     /^[a-z][a-z0-9_.-]{0,59}$/.test(appId) &&
@@ -197,8 +210,8 @@ export function saveRule(state, now, mode, body) {
 }
 export function compileStrategyRules(rules) {
   check(
-    Array.isArray(rules) && rules.length >= 3 && rules.length <= 35,
-    "策略须包含分配、队列、App 通用预算，可附加最多 32 个 App 覆盖",
+    Array.isArray(rules) && rules.length >= 3 && rules.length <= 36,
+    "策略须包含分配、队列、App 通用预算，可附加一条节奏规则和最多 32 个 App 覆盖",
   );
   const seen = new Set(),
     overrides = {},
@@ -221,6 +234,8 @@ export function compileStrategyRules(rules) {
     check(!seen.has(key), "同阶段规则冲突或 App 覆盖重复；请替换已有规则");
     seen.add(key);
     if (definition.kind === "app-budget") policy.appDefaults = config;
+    else if (definition.kind === "pacing")
+      policy.pacing = compilePacing(config);
     else if (definition.kind === "app-override")
       overrides[config.appId] = config.policy;
     else Object.assign(policy, config);

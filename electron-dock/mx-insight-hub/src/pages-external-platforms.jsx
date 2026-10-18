@@ -502,7 +502,7 @@ function normalizeEndpointPrices(priceBook = {}) {
   ]))
 }
 
-function normalizeOperations(root, fallback = {}) {
+export function normalizeOperations(root, fallback = {}) {
   return firstArray(root.operations, fallback.operations).map((row, index) => {
     const release = firstRecord(row.release)
     const priceBook = firstRecord(row.priceBook, row.pricing)
@@ -1754,7 +1754,7 @@ function ExternalPlatformOperationRow({
   )
 }
 
-function ExternalPlatformOperationControlPanel({
+export function ExternalPlatformOperationControlPanel({
   token,
   provider,
   operations,
@@ -2249,7 +2249,7 @@ function IpSearchPlatformDetail({ token, range, setQuery, onUnauthorized, notify
   </div>
 }
 
-function BaiduIpPlatformDetail({token,range,setQuery,onUnauthorized,notify}) {
+export function BaiduIpPlatformDetail({token,range = '24h',setQuery,onUnauthorized,notify,embedded = false}) {
   const load=useCallback(()=>adminApi.externalPlatform(token,'baidu-ip',{range}),[token,range])
   const state=useRemoteData(load,onUnauthorized)
   const [form,setForm]=useState(null),[busy,setBusy]=useState(false),[error,setError]=useState(null)
@@ -2258,7 +2258,7 @@ function BaiduIpPlatformDetail({token,range,setQuery,onUnauthorized,notify}) {
     await adminApi.updateExternalPlatformOperationPolicy(token,'baidu-ip','ip.risk.query.v2',{revision:form.revision,enabled:form.enabled,dailyLimit:Number(form.daily_limit),spacingMs:Number(form.spacing_ms)})
     state.refresh();notify?.('IP v2 渠道配置已保存')
   }catch(e){setError(e)}finally{setBusy(false)}}
-  return <div className="mih-page"><button className="qp-button qp-button--outline" onClick={()=>setQuery({provider:null,range})}>返回供应商总览</button><h1>百度 · IP 风险画像 v2</h1>
+  return <div className={embedded ? "mih-product-ip-policy" : "mih-page"}>{!embedded ? <><button className="qp-button qp-button--outline" onClick={()=>setQuery({provider:null,range})}>返回供应商总览</button><h1>百度 · IP 风险画像 v2</h1></> : <h3>百度 IP v2 · 专用渠道设置</h3>}
     {state.error||error?<ErrorState error={error||state.error}/>:null}
     {!form?<p>正在加载…</p>:<section className="qp-panel mih-panel"><h2>API 与运行策略</h2><p>{state.data.notes.connection}</p><p>{state.data.notes.budget}</p>
       <form onSubmit={save}><label><input type="checkbox" checked={form.enabled} disabled={busy} onChange={e=>setForm({...form,enabled:e.target.checked})}/>启用 IP v2 查询和商品购买</label>

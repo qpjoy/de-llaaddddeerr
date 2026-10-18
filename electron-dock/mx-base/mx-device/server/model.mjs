@@ -17,10 +17,8 @@ import {
   appName,
   ensureApps,
   appBlockers,
-  recordAppDispatch,
-  recordAppFinish,
-  deviceInterval,
 } from "./apps.mjs";
+import { pacingDispatch, pacingSettle, pacingVerifiedStop } from "./ledger.mjs";
 
 import {
   defaultDurationMs,
@@ -469,17 +467,7 @@ export function control(s, now, mode, id, body) {
     d.state = "idle";
     d.enabled = false;
     d.epoch++;
-    d.cooldownUntil = Math.max(
-      d.cooldownUntil || 0,
-      now + Math.max(2000, deviceInterval(d)),
-    );
-    d.lastVerifiedStoppedAt = now;
-    for (const app of ensureApps(s, d).filter(
-      (a) => a.lastDispatchedAt != null,
-    )) {
-      app.cooldownUntil = Math.max(app.cooldownUntil, now + app.cooldownMs);
-      app.lastVerifiedStoppedAt = now;
-    }
+    pacingVerifiedStop(s, now, d);
   } else if (body.action === "disconnect") {
     requireThat(mode === "sim", "断线注入只允许模拟设备", 400);
     d.connected = "offline";
@@ -734,7 +722,7 @@ export function markDispatch(s, now, a) {
   if (!owned(s, now, a)) return false;
   const row = s.attempts.find((x) => x.id === a.id);
   row.dispatchedAt ??= now;
-  recordAppDispatch(
+  pacingDispatch(
     s,
     now,
     s.devices.find((d) => d.id === a.deviceId),
@@ -823,7 +811,7 @@ export function finish(s, now, a, outcome) {
     j.completedAt = now;
     j.reason = outcome.error;
     d.state = "idle";
-    recordAppFinish(s, now, d, row);
+    pacingSettle(s, now, d, row);
   } else if (outcome.error) {
     row.status = "unknown";
     j.status = "unknown";
@@ -839,7 +827,7 @@ export function finish(s, now, a, outcome) {
     j.completedAt = now;
     j.reason = "全部已确认步骤完成";
     d.state = "idle";
-    recordAppFinish(s, now, d, row);
+    pacingSettle(s, now, d, row);
   }
   bump(d);
   event(s, a.mode, now, row.status, `${d.name}：${j.reason}`, {

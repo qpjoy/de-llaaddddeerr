@@ -1,5 +1,6 @@
+import { diagnosticHref } from './diagnostics-navigation.js'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { MagnifyingGlass } from '@phosphor-icons/react'
+import { DownloadSimple, MagnifyingGlass } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
 import { ErrorState } from './components.jsx'
 import { AcquisitionComparison } from './acquisition-comparison.jsx'
@@ -13,6 +14,30 @@ const statuses = { committed: '已提交响应', released: '已释放', unknown:
 const stateName = value => statuses[value] || shown(value)
 function Facts({ entries }) {
   return <dl className="mih-diagnostic-facts">{entries.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{shown(value)}</dd></div>)}</dl>
+}
+function EvidenceAnalysis({ analysis }) {
+  if (!analysis) return null
+  return <section className="mih-diagnostic-analysis" aria-label="已存证据分析">
+    <header><h4>已存证据分析</h4><p>依据保存的记录与固定诊断规则整理；未调用模型、实时日志或上游接口。</p></header>
+    <p><strong>{analysis.summary}</strong></p>
+    <div className="mih-diagnostic-findings">{analysis.findings.map((finding, index) => <article key={`${finding.code}-${index}`} className={`mih-diagnostic-finding is-${finding.certainty}`}>
+      <h5><span>{finding.certainty === 'confirmed' ? '已确认' : '待核对'}</span>{finding.title}</h5>
+      <p>{finding.detail}</p>
+      {finding.evidenceRefs?.length ? <details><summary>证据位置</summary><ul>{finding.evidenceRefs.map(ref => <li key={ref}><code>{ref}</code></li>)}</ul></details> : null}
+    </article>)}</div>
+    {analysis.nextSteps.length ? <><h5>建议下一步（只读核对）</h5><ol>{analysis.nextSteps.map(step => <li key={step}>{step}</li>)}</ol></> : null}
+    {analysis.semanticRelevance === 'not_assessed' ? <p className="mih-diagnostic-note">此分析不评判搜索内容与关键词的相关性；HTTP 成功不等于搜索质量已验证。</p> : null}
+  </section>
+}
+
+function exportDiagnostics(data) {
+  // Export only the Admin diagnostic DTO, never browser credentials or validation input.
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `hub-diagnostics-${data.identifier.replace(/[^A-Za-z0-9_.-]/g, '_')}.json`
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 function Call({ call, provider }) {
   return <article className="mih-diagnostic-call">
@@ -86,7 +111,7 @@ export default function RequestDiagnostics({ token, onUnauthorized, session, set
     const controller = new AbortController()
     active.current = controller
     setBusy(true)
-    update({ identifier, data: null, error: null })
+    update({ identifier, routeIdentifier: autoIdentifier, data: null, error: null })
     try {
       const data = await adminApi.requestDiagnostics(token, identifier, { signal: controller.signal })
       if (!controller.signal.aborted) update({ data, error: null })
@@ -118,12 +143,12 @@ export default function RequestDiagnostics({ token, onUnauthorized, session, set
     <div aria-live="polite" aria-busy={busy}>
       {current.error ? <ErrorState error={current.error}/> : null}
       {current.data ? <>
-        <p>查询 ID：<code>{current.data.identifier}</code> · {current.data.runs.length} 条关联请求 · {formatDate(current.data.checkedAt)}</p>
+        <div className="mih-diagnostic-result-heading"><p>查询 ID：<code>{current.data.identifier}</code> · {current.data.runs.length} 条关联请求 · {formatDate(current.data.checkedAt)}</p><button type="button" className="qp-button qp-button--secondary" onClick={() => exportDiagnostics(current.data)}><DownloadSimple/>导出诊断证据</button></div>
         {!current.data.runs.length ? <div className="mih-diagnostic-empty"><h3>未找到关联记录</h3><p>请核对环境、ID 类型与保留期。上游 ID 只有已被 Hub 保存才可反查；未匹配不代表请求成功，也不能证明上游未执行。</p></div> : null}
         {current.data.truncated ? <p role="status">关联请求超过 20 条，仅显示前 20 条；请使用具体 Hub requestId 查询。</p> : null}
         {current.data.runs.map(run => <article className="mih-diagnostic-run" key={run.requestId}>
           <h3>Hub 请求 <code>{run.requestId}</code></h3>
-          <p><a href={`#/data-browser?view=limits&requestId=${run.requestId}`}>查看当前限制与恢复倒计时 →</a></p>
+          <p><a href={diagnosticHref(run.requestId, 'limits')}>查看当前限制与恢复倒计时 →</a></p>
           <Facts entries={[
             ['平台', run.platform], ['Hub 状态', stateName(run.status)], ['响应 HTTP', run.responseStatus],
             ['Hub 错误码', run.errorCode], ['交付来源', run.sourceMode],
@@ -132,6 +157,7 @@ export default function RequestDiagnostics({ token, onUnauthorized, session, set
             ['请求时间', formatDate(run.reservedAt)], ['完成时间', formatDate(run.completedAt)],
           ]}/>
           <p className="mih-diagnostic-guidance">{run.guidance}</p>
+          <EvidenceAnalysis analysis={run.analysis}/>
           <RequestValidation token={token} run={run} onUnauthorized={onUnauthorized} session={acquisitionComparisonSessionFor(comparisonSessions || localComparisonSessions, token, run.requestId)}/>
           <h4>客户结算</h4>
           {run.customerCharge ? <Facts entries={[

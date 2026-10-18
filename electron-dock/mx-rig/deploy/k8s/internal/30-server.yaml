@@ -29,6 +29,8 @@ spec:
         # and of the resource policy: changing either rolls the Pod.
         mx-rig.qpjoy.dev/secret-checksum: __MX_RIG_SECRET_CHECKSUM__
         mx-rig.qpjoy.dev/resource-policy-checksum: __MX_RIG_POLICY_CHECKSUM__
+        # The browser SSO profile (docs/25 P4): a new registration rolls the Pod.
+        mx-rig.qpjoy.dev/sso-checksum: __MX_RIG_SSO_CHECKSUM__
     spec:
       terminationGracePeriodSeconds: 30
       serviceAccountName: mx-rig-server
@@ -115,6 +117,12 @@ spec:
                   name: mx-rig-secrets
                   key: MX_RIG_INSECURE_COOKIES
                   optional: true
+            - name: MX_RIG_ALLOWED_ORIGINS
+              valueFrom:
+                secretKeyRef:
+                  name: mx-rig-secrets
+                  key: MX_RIG_ALLOWED_ORIGINS
+                  optional: true
             # Model keys live only here. The name a Provider references in
             # the Agent center (apiKeyEnv) must match one of these.
             - name: MX_RIG_MODEL_API_KEY
@@ -143,6 +151,11 @@ spec:
               value: MX_RIG_GIT_TOKEN
             - name: NODE_EXTRA_CA_CERTS
               value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+            # Browser SSO through Launcher's unified authentication (docs/25
+            # P4). The Secret is optional: without it the file is absent and
+            # only password sign-in is offered.
+            - name: MX_RIG_SSO_PROFILE
+              value: /etc/mx-rig/sso/profile.json
           envFrom:
             - configMapRef:
                 name: mx-rig-resource-policy
@@ -155,6 +168,9 @@ spec:
               mountPath: /data/control
             - name: tmp
               mountPath: /tmp
+            - name: sso
+              mountPath: /etc/mx-rig/sso
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /readyz
@@ -192,6 +208,15 @@ spec:
         - name: artifacts
           persistentVolumeClaim:
             claimName: mx-rig-artifacts
+        # 0440 with fsGroup: private enough for the profile reader, readable by the server.
+        - name: sso
+          secret:
+            secretName: mx-rig-sso
+            optional: true
+            defaultMode: 0440
+            items:
+              - key: profile.json
+                path: profile.json
         - name: control
           emptyDir:
             sizeLimit: 64Mi

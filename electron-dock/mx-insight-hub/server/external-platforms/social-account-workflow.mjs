@@ -1,3 +1,4 @@
+import { refreshAdmissionLimits } from './admission-runtime.mjs'
 import { upstreamCapacityError } from './availability-errors.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
@@ -10,6 +11,7 @@ import { JustOneUpstreamError } from '../adapters/justone.mjs'
 import { buildHubSocialCompatDispatch, projectHubSocialCompatResponse } from '../contracts/hub-social-compat.mjs'
 import { normalizeNightAllLegacyPayload } from '../ingest/legacy-night-all.mjs'
 import { SocialSearchStateStore } from './social-search-store.mjs'
+import { YOUTUBE_COMMENTS_TRAVERSAL } from '../contracts/youtube-comments.mjs'
 
 const VERSION = 'mx-insight-hub.social-compat.v1'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -21,7 +23,7 @@ const uncertain = () => {
 }
 const knownAdmission = error => error instanceof AppError && error.status !== 403 && (
   /^external_platform_(?:operation_|cost_)/u.test(error.code)
-  || ['external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
+  || ['external_admission_policy_unavailable', 'external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
     'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'social_search_deadline'].includes(error.code))
 const descriptor = request => ({ provider: request.provider, operation: request.operationKey || request.procurementOperation || request.operation,
   endpointKey: request.endpointKey, endpointVersion: request.endpointVersion, contractVersion: request.endpointContractVersion })
@@ -61,11 +63,12 @@ function persistedEvidence(source) {
   } : null) }
 }
 
-function projectPage(payload, step, operation, capturedAt) {
-  const projected = projectHubSocialCompatResponse(payload, step, { capturedAt })
+function projectPage(payload, step, operation, capturedAt, traversal = null) {
+  const custom = traversal?.projectPage(payload, step, { capturedAt })
+  const projected = custom?.projected ?? projectHubSocialCompatResponse(payload, step, { capturedAt })
   if (!isPostgresSafeJsonValue(projected) || !Array.isArray(projected.acquiredItems) || !Array.isArray(projected.profiles)
     || sourceRows(projected, operation).some(row => typeof rowId(row, operation) !== 'string' || !rowId(row, operation))) throw new Error('invalid_social_projection')
-  const records = normalizeNightAllLegacyPayload({ data: { raw_info: JSON.stringify(projected.profiles),
+  const records = custom?.records ?? normalizeNightAllLegacyPayload({ data: { raw_info: JSON.stringify(projected.profiles),
     raw_data: JSON.stringify(projected.acquiredItems.filter(row => row.objectType !== 'user')), page: {}, meta: {} } }, step.platform, operation,
     { connectorId: `external-platform:${step.provider}`, parserVersion: VERSION }).records
   if (!records.every(record => Object.entries(record).every(([name, value]) => isPostgresSafeJsonValue(
@@ -77,11 +80,14 @@ function projectPage(payload, step, operation, capturedAt) {
 // Account traversal uses the same acquisition rules as data/search: a durable
 // receipt per paid call, a bounded fill, archived overflow, and one final hold.
 export async function runSocialAccountWorkflow({ gateway, context, request, delivery, deadlineAt, signal,
-  resolveCredential, revalidateIdentity, enterCapacity, leaveCapacity, providerCostControl, buildResponse }, { clock = Date.now } = {}) {
+  resolveCredential, revalidateIdentity, enterCapacity, leaveCapacity, providerCostControl, buildResponse,
+  workflowKind = 'social-account' }, { clock = Date.now } = {}) {
+  if (!['social-account', 'youtube-comments'].includes(workflowKind)) throw new TypeError('Unknown traversal kind')
+  const traversal = workflowKind === 'youtube-comments' ? YOUTUBE_COMMENTS_TRAVERSAL : null
   const store = gateway.platformStore, provider = gateway.providerKey
-  const stateStore = new SocialSearchStateStore({ [provider]: store }, { platform: request.platform })
+  const stateStore = new SocialSearchStateStore({ [provider]: store }, { platform: request.platform, workflowKind })
   const identity = { tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
-    path: `/api/v1/data/social/${request.operation}`, scopeHash: request.scopeHash }
+    path: traversal ? request.path : `/api/v1/data/social/${request.operation}`, scopeHash: request.scopeHash }
   if (await stateStore.unknownFor(delivery, identity.path)) throw new AppError(409, 'request_outcome_unknown', 'A previous equal account request has an unknown outcome')
   const history = await stateStore.historyFor({ ...identity, previousDeliveryId: request.previousDeliveryId,
     jobCount: request.jobs.length, totalLimit: request.totalLimit })
@@ -103,7 +109,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
       retainLease = true
     }
   }
-  const buildStep = (index, job, buffer = null) => buildHubSocialCompatDispatch(request.jobs[index], {
+  const buildStep = (index, job, buffer = null) => traversal ? traversal.buildStep(request, job, buffer) : buildHubSocialCompatDispatch(request.jobs[index], {
     page: buffer?.providerPage ?? job.providerPage, nextParams: buffer ? buffer.providerCursor : job.providerCursor,
     resolvedIdentity: job.resolvedIdentity, pageSize: request.pageSize,
   })
@@ -120,13 +126,17 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
     if (step.socialCompat.stage === 'resolve') {
       if (!projected.resolvedIdentity || hash(projected.resolvedIdentity) === hash(job.resolvedIdentity)) throw unavailable()
       job.resolvedIdentity = structuredClone(projected.resolvedIdentity)
+      if (traversal?.resolvedDone(job)) job.done = true
       return 0
     }
     let position = offset, added = 0
     const limit = request.operation === 'user-info' ? 1 : request.pageSize
     while (position < rows.length && rowsByJob[index].length < limit) {
       const row = rows[position++], id = rowId(row, request.operation)
-      if (seen[index].has(id)) continue
+      if (seen[index].has(id)) {
+        if (traversal) job.duplicateCount = (job.duplicateCount || 0) + 1
+        continue
+      }
       seen[index].add(id); rowsByJob[index].push(row); added++
     }
     if (position < rows.length) job.buffer = { callId: source.callId, offset: position, hash: rowsHash,
@@ -135,7 +145,8 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
     else {
       job.buffer = null
       const next = projected.providerPage
-      if (next.stopReason) warn('upstream_pagination_stopped', 'The upstream continuation did not advance; acquired rows were retained. Restart explicitly to traverse again.')
+      if (next.stopReason === 'continuation_unproven' && traversal) warn('pagination_completeness_unknown', 'The upstream response did not prove comment continuation; acquired rows were retained.')
+      else if (next.stopReason) warn('upstream_pagination_stopped', 'The upstream continuation did not advance; acquired rows were retained. Restart explicitly to traverse again.')
       job.done = request.operation === 'user-info' || next.hasMore === false || !next.nextParams || job.upstreamPages >= 15
       job.providerCursor = structuredClone(next.nextParams ?? null)
       job.providerPage = next.nextPage || job.providerPage + 1
@@ -158,6 +169,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
     ownsParent = true
     if (await stateStore.unknownFor(delivery, identity.path)) throw new AppError(409, 'request_outcome_unknown', 'A previous equal account request has an unknown outcome')
     for (const [index, job] of state.jobs.entries()) {
+      if (traversal) job.duplicateCount = 0
       job.manualContinuation = false
       job.dispatchedTokens ||= []
       if (job.buffer) {
@@ -166,7 +178,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
         if (!page) throw unavailable()
         if (bytes + page.bodySize > 12582912) { stop('archive_byte_limit'); break }
         bytes += page.bodySize
-        const { projected } = projectPage(page.payload, step, request.operation, page.capturedAt)
+        const { projected } = projectPage(page.payload, step, request.operation, page.capturedAt, traversal)
         // Acquired public projections exclude credential echoes. A raw replay
         // that differs anywhere (including profiles) cannot serve that buffer.
         if (hash(projected) !== job.buffer.projectionHash) throw unavailable()
@@ -182,7 +194,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
         const callDelivery = { ...delivery, operation: expected.operation }
         const token = hash({ endpoint: step.endpointKey, cursor: job.providerCursor, identity: job.resolvedIdentity })
         if (tokens.has(token)) { job.done = true; warn('repeated_cursor', 'The upstream repeated its continuation; restart explicitly.'); break }
-        if (step.socialCompat.stage === 'resolve' && ++resolves > 3) throw unavailable()
+        if (step.socialCompat.stage === 'resolve' && ++resolves > (traversal?.maxResolves ?? 3)) throw unavailable()
         try {
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           context = await revalidateIdentity({ totalLimit: request.totalLimit })
@@ -206,7 +218,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           const cost = providerCostControl(control?.billing ? { billing: control.billing } : gateway.config, expected.endpointKey)
           costReservation = await store.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
           const rate = isHubRateLimitExempt(context) || (provider === 'tikhub' && isInternalTraffic(gateway.usageStore, context)) ? { allowed: true }
-            : await store.acquireProviderRateLimit({ limit: gateway.config.maxRequestsPerMinute ?? 90, windowMs: 60000 })
+            : await store.acquireProviderRateLimit({ limit: (await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90, windowMs: 60000 })
           if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Account acquisition rate limit is exhausted')
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           if (!enoughTime()) throw new AppError(503, 'social_search_deadline', 'Account acquisition deadline reached before dispatch')
@@ -217,7 +229,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             dispatchFingerprint: delivery.fingerprint, costControl: cost.costMinor === 0 ? null : cost,
             costReservationId: costReservation.id, operationControl: control })
           calls++; job.started = true; tokens.add(token); job.dispatchedTokens.push(token)
-          if (step.socialCompat.stage !== 'resolve') job.upstreamPages++
+          if (traversal ? traversal.countsAsPage(step) : step.socialCompat.stage !== 'resolve') job.upstreamPages++
           const callStart = performance.now()
           let result, projected, records
           const businessCode = provider === 'rapidapi' ? null : provider === 'justone' ? 0 : 200
@@ -228,7 +240,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
               : await gateway.adapter.forwardNative(step.key, { params: step.upstreamQuery }, { credential: credential.credential })
             const receipt = result.restrictedResponseArchive
             const payload = receipt?.bodyBytes ? JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(receipt.bodyBytes).replace(/^\uFEFF/u, '')) : null
-            try { ({ projected, records } = projectPage(publicPayload(payload, credential.credential), step, request.operation, receipt?.capturedAt)) }
+            try { ({ projected, records } = projectPage(publicPayload(payload, credential.credential), step, request.operation, receipt?.capturedAt, traversal)) }
             catch {
               const evidence = { outcome: 'succeeded_unusable', billed, httpStatus: 200, businessCode, errorCode: 'invalid_social_contract', affectsCircuit: true }
               if (provider === 'rapidapi') throw new RapidApiUpstreamError(evidence, result)
@@ -255,7 +267,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           if (!receipt || receipt.bodySize > 8388608) throw unavailable()
           await store.stageProviderEvidence(currentEvidence)
           await store.finishProviderStep({ ...currentEvidence, ingestJob: { payload: { kind: 'external-platform-result', providerKey: provider,
-            consumerId: context.consumer.id, datasetId: 'night-all.search.v1', platform: request.platform,
+            consumerId: context.consumer.id, datasetId: traversal?.datasetId ?? 'night-all.search.v1', platform: request.platform,
             requestId: delivery.usageRequestId, queryFingerprint: delivery.fingerprint, providerCallId: currentCall.id, records },
           dedupeKey: `external-platform:${provider}:${currentCall.id}`, priority: 100 } })
           bytes += receipt.bodySize
@@ -286,7 +298,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
     const sourceMode = calls ? 'live' : clock() - Date.parse(capturedAt) <= gateway.config.freshTtlMs ? 'fresh_cache' : 'stored_fallback'
     try {
       await stateStore.commitDelivery({ ...identity, delivery, responseBody, sources, capturedAt, sourceMode,
-        usageUnitsActual: 1, latencyMs: Math.round(performance.now() - started), manifest: { version: VERSION,
+        usageUnitsActual: 1, latencyMs: Math.round(performance.now() - started), manifest: { version: traversal?.version ?? VERSION,
           scopeHash: request.scopeHash, previousDeliveryId: history.previousDeliveryId, state,
           deliveredIds: rowsByJob.map(rows => rows.map(row => rowId(row, request.operation))) } })
     } catch { await markUnknown(); throw uncertain() }

@@ -1,3 +1,4 @@
+import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
 import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { circuitOpenError, ecommerceCapacityError, upstreamCapacityError } from './availability-errors.mjs'
 import { ConcurrencyAdmissionQueue, DEFAULT_CONCURRENCY_QUEUE, concurrencyBusy } from './concurrency-admission.mjs'
@@ -8,6 +9,7 @@ import { nativeForwardingEndpoint, normalizeNativeForwardingRequest } from '../c
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
 import { HUB_SOCIAL_ENDPOINTS, normalizeHubSocialRequest } from '../contracts/hub-social.mjs'
+import { normalizeHubSocialCompatRequest } from '../contracts/hub-social-compat.mjs'
 import { normalizeXhsDiscoveryRequest, XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -41,6 +43,7 @@ import { normalizeHubDataSearch, projectDataSearch, projectTwitterSearchFillDeli
 import { runTwitterSearchFill } from './twitter-search-fill.mjs'
 import { contentSearchPlan } from './content-search.mjs'
 import { socialAccountPlan } from './social-account-delivery.mjs'
+import { youtubeCommentsPlan } from './youtube-comments-workflow.mjs'
 import { runFacebookSearchFill } from './facebook-search-fill.mjs'
 import { waitForFacebookRapidAdmission } from './facebook-rapid-admission.mjs'
 import { normalizeFacebookSearch, projectFacebookSearch, facebookJustOneArchives, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY } from '../contracts/facebook-search.mjs'
@@ -320,6 +323,7 @@ export class ExternalPlatformGateway {
     apiKeyPepper,
     reservationLeaseMs,
     operationControlStore = null,
+    admissionPolicies = null,
     credentialStore = null,
     ecommerceRoutingStore = null,
     // Everything in this class is provider-shaped rather than provider-specific:
@@ -339,6 +343,7 @@ export class ExternalPlatformGateway {
     this.apiKeyPepper = apiKeyPepper
     this.reservationLeaseMs = reservationLeaseMs
     this.operationControlStore = operationControlStore
+    this.admissionPolicies = admissionPolicies
     this.credentialStore = credentialStore
     this.ecommerceRoutingStore = ecommerceRoutingStore
     this.defaultPolicy = defaultPolicy
@@ -354,8 +359,8 @@ export class ExternalPlatformGateway {
     const consumerId = context.consumer.id
     const consumerActive = this.activeByConsumer.get(consumerId) || 0
     if (
-      this.active >= this.config.maxConcurrency
-      || (!(this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context)) && consumerActive >= this.config.maxConsumerConcurrency)
+      this.active >= currentAdmissionLimits(this).maxConcurrency
+      || (!(this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context)) && consumerActive >= currentAdmissionLimits(this).maxConsumerConcurrency)
     ) return false
     this.active += 1
     this.activeByConsumer.set(consumerId, consumerActive + 1)
@@ -391,11 +396,12 @@ export class ExternalPlatformGateway {
   }
 
   async #enterOrQueue(context, { lease, delivery, expiresAt, signal, platform, canWait, revalidate }) {
+    await refreshAdmissionLimits(this)
     if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
     if (isHubRateLimitExempt(context)) return 'exempt'
     if (!this.concurrencyQueue.entries.length && this.#enter(context)) return true
     if (!canWait) return false
-    const policy = { ...DEFAULT_CONCURRENCY_QUEUE, ...this.config.concurrencyQueue }
+    const policy = admissionQueuePolicy(this)
     const deadline = Math.min(this.admissionClock() + policy.maxWaitMs,
       new Date(expiresAt).getTime() - (this.config.timeoutMs || 30000) - 5000)
     const ownedSearchDelivery = this.providerKey === 'rapidapi' && ['twitter', 'facebook'].includes(platform) && lease?.ownedDeliveryLease === true
@@ -411,8 +417,10 @@ export class ExternalPlatformGateway {
       await this.concurrencyQueue.enter({ tryEnter: () => (entered = this.#enter(context)), deadline,
         maxPending: policy.maxPending, signal })
       context = await revalidate()
-      if (!(this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context))
-        && (this.activeByConsumer.get(context.consumer.id) || 0) > this.config.maxConsumerConcurrency) {
+      await refreshAdmissionLimits(this)
+      if (entered !== 'exempt' && (this.active > currentAdmissionLimits(this).maxConcurrency
+        || (!(this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context))
+          && (this.activeByConsumer.get(context.consumer.id) || 0) > currentAdmissionLimits(this).maxConsumerConcurrency))) {
         throw concurrencyBusy('consumer_concurrency_changed')
       }
       if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
@@ -432,9 +440,9 @@ export class ExternalPlatformGateway {
       if (entered) this.#leave(context.consumer.id, entered)
       const error = cause.code === 'external_platform_busy' ? concurrencyBusy(cause.details?.reason, {
         ...cause.details, platform, operation: delivery.operation,
-        activeConcurrency: this.active, maxConcurrency: this.config.maxConcurrency,
+        activeConcurrency: this.active, maxConcurrency: currentAdmissionLimits(this).maxConcurrency,
         consumerActiveConcurrency: this.activeByConsumer.get(context.consumer.id) || 0,
-        maxConsumerConcurrency: this.config.maxConsumerConcurrency,
+        maxConsumerConcurrency: currentAdmissionLimits(this).maxConsumerConcurrency,
         queueDepth: this.concurrencyQueue.entries.length, maxPending: policy.maxPending,
       }) : cause
       if (ownedSearchDelivery && error.code === 'external_platform_busy') {
@@ -683,6 +691,50 @@ export class ExternalPlatformGateway {
         let old
         try { old = normalizeHubSocialRequest(input.operation, input.body) } catch { /* New account aliases use the managed contract below. */ }
         if (old && saved.fingerprint === fingerprint({ method: 'POST', path: input.path, body: old.fingerprintBody })) return this.socialData(context, input)
+        let legacy, current
+        try {
+          legacy = normalizeHubSocialCompatRequest(input.operation, input.body, {
+            maxPageSize: 1000, businessId: context.consumer.businessId, legacyTwitterIdentity: true,
+          })
+        } catch { /* Invalid old requests cannot identify a historical delivery. */ }
+        try { current = normalizeHubSocialCompatRequest(input.operation, input.body, { maxPageSize: 1000, businessId: context.consumer.businessId }) }
+        catch { /* Old numeric usernames could exceed the corrected username limit. */ }
+        const legacyFingerprint = legacy && fingerprint({ method: 'POST', path: input.path, body: legacy.fingerprintBody })
+        const currentFingerprint = current && fingerprint({ method: 'POST', path: input.path, body: current.fingerprintBody })
+        const sameBody = saved.acquisitionRequest.body && canonicalJson(saved.acquisitionRequest.body) === canonicalJson(input.body)
+        if (saved.fingerprint === legacyFingerprint && !sameBody && saved.acquisitionRequest.body) {
+          let original
+          try { original = normalizeHubSocialCompatRequest(input.operation, saved.acquisitionRequest.body, { maxPageSize: 1000, businessId: context.consumer.businessId }) }
+          catch { /* A changed body cannot replay an old, now-invalid username. */ }
+          if (!original || !current || fingerprint({ method: 'POST', path: input.path, body: original.fingerprintBody }) !== currentFingerprint) {
+            throw new AppError(409, 'idempotency_conflict', 'Idempotency-Key was used with a different request')
+          }
+        }
+        if (legacy?.platform === 'twitter' && input.path === `/api/v1/data/social/${input.operation}`
+          && sameBody && saved.fingerprint === legacyFingerprint && saved.fingerprint !== currentFingerprint) {
+          const restart = () => { throw new AppError(409, 'search_restart_required', 'The saved request used the former Twitter identity interpretation; restart explicitly with a new Idempotency-Key and no cursor', { requestId: saved.id }) }
+          const kind = saved.responseBody != null && (saved.status === 'committed' || saved.status === 'released' && saved.responseStatus >= 400 && saved.responseStatus <= 599)
+            ? 'replay' : saved.status === 'reserved' ? 'in_progress' : saved.status === 'unknown' ? 'unknown' : null
+          // Require the original body as well as its former fingerprint so an
+          // explicit ID cannot become a username under the same receipt key.
+          // Freeze only this proven receipt. Never reserve or dispatch work with
+          // the former username-as-ID interpretation, even for a released row.
+          return this.#deliver(context, input, {
+            operation: input.operation === 'crawl' ? 'social.content.crawl' : 'social.profile.get', authorizationPlatform: 'twitter',
+            capabilityMessage: 'This Hub account operation is not granted for this API key',
+            reservation: { kind, request: saved },
+            normalize: ({ policy }) => {
+              const normalized = normalizeHubSocialCompatRequest(input.operation, input.body, {
+                maxPageSize: policy.maxPageSize, businessId: context.consumer.businessId, legacyTwitterIdentity: true,
+              })
+              const totalLimit = normalized.jobs.length * (input.operation === 'user-info' ? 1 : normalized.pageSize)
+              if (totalLimit > policy.maxPageSize || totalLimit > 1000) throw new AppError(400, 'work_budget_exceeded', 'Account work exceeds this Key entitlement')
+              if (!kind) restart()
+              return { ...normalized, deliveryMode: 'live_only' }
+            },
+            assemble: restart,
+          })
+        }
       }
     }
     const capability = input.operation === 'crawl' ? 'social.content.crawl' : 'social.profile.get'
@@ -695,6 +747,24 @@ export class ExternalPlatformGateway {
         const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, platform)
         if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
           entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Account work exceeds the current Key entitlement')
+        context = current
+        return current
+      },
+      enterCapacity: options => this.#enterOrQueue(context, { ...options, canWait: false }),
+      leaveCapacity: admission => this.#leave(context.consumer.id, admission), providerCostControl,
+    } })
+    return this.#deliver(context, prepared.input, prepared.plan)
+  }
+
+  async youtubeComments(context, input) {
+    const prepared = youtubeCommentsPlan({ gateway: this, context, input, dependencies: {
+      resolveCredential: () => this.#resolvedCredential(),
+      revalidateIdentity: async ({ totalLimit }) => {
+        const current = await this.#revalidateWaitingIdentity(context, 'youtube', { operation: 'social.comments.list' })
+        const policy = await this.usageStore.getPolicy(current.consumer.id, 'youtube')
+        const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, 'youtube')
+        if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+          entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Comment count exceeds the current Key entitlement')
         context = current
         return current
       },
@@ -720,21 +790,40 @@ export class ExternalPlatformGateway {
     })
   }
 
-  async searchContent(context, input) {
+  async searchContent(context, input, { finalizeXiaohongshu = null } = {}) {
     const platform = input.normalized.platform
+    const revalidateIdentity = async ({ operation, totalLimit }) => {
+      const current = await this.#revalidateWaitingIdentity(context, platform, { platformSearch: true, operation,
+        ...(platform === 'xiaohongshu' ? { requiredCapabilities: ['social.posts.search'] } : {}) })
+      const policy = await this.usageStore.getPolicy(current.consumer.id, platform)
+      const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, platform)
+      if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+        entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Content-search work exceeds the current Key entitlement')
+      context = current
+      return current
+    }
     const prepared = contentSearchPlan({ gateway: this, context, input, dependencies: {
       resolveCredential: () => this.#resolvedCredential(),
-      revalidateIdentity: async ({ operation, totalLimit }) => {
-        const current = await this.#revalidateWaitingIdentity(context, platform, { platformSearch: true, operation })
-        const policy = await this.usageStore.getPolicy(current.consumer.id, platform)
-        const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, platform)
-        if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
-          entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Content-search work exceeds the current Key entitlement')
-        context = current
-        return current
-      },
+      revalidateIdentity,
       enterCapacity: options => this.#enterOrQueue(context, { ...options, canWait: false }),
       leaveCapacity: admission => this.#leave(context.consumer.id, admission), providerCostControl,
+      finalizeResponse: platform === 'weibo' ? async ({ request, rowsByJob, responseBody, delivery, firstCallOrdinal, deadlineAt }) => {
+        const rows = structuredClone(rowsByJob.flat())
+        const credential = await this.#resolvedCredential()
+        const result = await enrichWeiboRawSearch({ gateway: this, context,
+          request: { enrichment: { enabled: true, all: false, maxItems: 20 } },
+          result: { items: rows, publicBody: { data: { raw_info: '[]', raw_data: JSON.stringify(rows),
+            page: { page: request.page, pageSize: request.pageSize, hasMore: responseBody.data.pageInfo.hasMore,
+              nextCursor: responseBody.data.pageInfo.nextCursor }, status: 'ok', meta: {} } } },
+          delivery, credential: { credential: credential.credential }, credentialRevision: credential.revision,
+          providerCostControl, deadlineAt, firstCallOrdinal, ingestDetails: true,
+          revalidateIdentity: () => revalidateIdentity({ operation: request.operation, totalLimit: request.totalLimit }) })
+        result.publicBody.data.meta.upstreamCallCount = firstCallOrdinal + result.publicBody.data.meta.enrichment.detailUpstreamCalls
+        const projected = projectDataSearch(result, request)
+        projected.data.warnings = [...responseBody.data.warnings.filter(row => row.code !== 'body_completeness_unknown'), ...projected.data.warnings]
+        projected.data.status = projected.data.warnings.length ? 'partial' : projected.data.status
+        return { ...projected, requestId: delivery.usageRequestId }
+      } : finalizeXiaohongshu,
     } })
     return this.#deliver(context, prepared.input, prepared.plan)
   }
@@ -1701,7 +1790,7 @@ export class ExternalPlatformGateway {
         ? { allowed: true, retryAfterMs: 0 }
         : typeof this.platformStore.acquireProviderRateLimit === 'function'
         ? await this.platformStore.acquireProviderRateLimit({
-            limit: this.config.maxRequestsPerMinute ?? 90,
+            limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 90,
             windowMs: 60_000,
           })
         : { allowed: true, retryAfterMs: 0 }

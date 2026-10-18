@@ -25,6 +25,11 @@
     "check": "node scripts/check.mjs",
     "browser:install": "node scripts/browser-install.mjs",
     "package": "node scripts/package.mjs",
+    "setup": "node scripts/dev-mode.mjs local",
+    "setup:npm": "node scripts/dev-mode.mjs npm",
+    "dev-mode": "node scripts/dev-mode.mjs status",
+    "make:mac": "npm run package -- --launcher --mac --all",
+    "make:win": "npm run package -- --launcher --win --x64",
     "pack:cli": "node scripts/pack-cli.mjs",
     "test:desktop": "node scripts/desktop-smoke.mjs",
     "record:tours": "node scripts/record-tours.mjs",
@@ -37,8 +42,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
+    "@qpjoy/electron-core-mihomo": "0.1.2",
     "@qpjoy/electron-launcher": "^2.3.19",
+    "openid-client": "6.8.8",
     "playwright": "1.58.2",
+    "undici": "7.29.0",
+    "yaml": "^2.9.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {
@@ -48,5 +57,12 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "optionalDependencies": {
+    "@qpjoy/electron-plugin-tunnel-engine-darwin-arm64": "0.1.6",
+    "@qpjoy/electron-plugin-tunnel-engine-darwin-x64": "0.1.6",
+    "@qpjoy/electron-plugin-tunnel-engine-linux-arm64": "0.1.6",
+    "@qpjoy/electron-plugin-tunnel-engine-linux-x64": "0.1.6",
+    "@qpjoy/electron-plugin-tunnel-engine-win32-x64": "0.1.6"
   }
 }

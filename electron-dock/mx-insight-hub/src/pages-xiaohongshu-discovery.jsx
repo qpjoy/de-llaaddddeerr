@@ -38,12 +38,12 @@ function DiscoveryResults({ payload, inspiration }) {
   </>
 }
 
-export function XiaohongshuDiscoveryPage({ session, routePath }) {
+export function XiaohongshuDiscoveryPage({ token, session, routePath, onUnauthorized, notify }) {
   const product = XHS_DISCOVERY_PRODUCTS.find(item => routePath === `/data-products/${item.key}`) || XHS_DISCOVERY_PRODUCTS[0]
-  return <DiscoveryWorkbench key={product.id} product={product} session={session} admin={session?.kind === 'admin-token' && session.platformAdmin === true} />
+  return <DiscoveryWorkbench key={product.id} product={product} {...{ token, session, onUnauthorized, notify }} admin={session?.kind === 'admin-token' && session.platformAdmin === true} />
 }
 
-function DiscoveryWorkbench({ product, session, admin }) {
+function DiscoveryWorkbench({ product, token, session, admin, onUnauthorized, notify }) {
   const [apiKey] = useDemoApiKey()
   const access = useDemoAccessSnapshot()
   const issues = demoAccessIssues(access, product.operation)
@@ -82,7 +82,7 @@ function DiscoveryWorkbench({ product, session, admin }) {
     <PageHeading eyebrow="DATA PRODUCT / XIAOHONGSHU" title={product.label} description={product.description}><a className="qp-button qp-button--outline" href={publicDocsHref(`/docs/${product.key}`)}>接口文档</a><a className="qp-button qp-button--outline" href="#/plans">合同费率</a></PageHeading>
     <ProductViewTabs label={product.label} value={view} onChange={setView} session={session} product="board" />
     {view === 'guide' ? <ProductIntegrationGuide label={product.label} docs={product.key} /> : null}
-    {view === 'management' ? <ProductManagement session={session} path={`/data-products/${product.key}`} label={product.label} /> : null}
+    {view === 'management' ? <ProductManagement {...{ token, session, onUnauthorized, notify }} path={`/data-products/${product.key}`} label={product.label} /> : null}
     <div hidden={!['debug', 'board'].includes(view)}>
     <section className="qp-panel mih-panel mih-xhs-discovery-query"><header><div><h2>{view === 'debug' ? '请求参数' : product.id === 'hot_notes' ? '发现热门内容' : '热点创作灵感'}</h2>{admin ? <small>内部来源：{provider === 'justone' ? 'JustOne' : 'TikHub'} · 独立操作与调用记录</small> : null}</div><span className="mih-api-method">POST</span></header>
       {view === 'debug' ? <code className="mih-xhs-discovery-path">{product.path}</code> : null}

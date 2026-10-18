@@ -1,3 +1,4 @@
+import { refreshAdmissionLimits } from './admission-runtime.mjs'
 import { isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
@@ -19,7 +20,7 @@ const uncertain = () => {
 }
 const knownAdmission = error => error instanceof AppError && error.status !== 403 && (
   /^external_platform_(?:operation_|cost_)/u.test(error.code)
-  || ['external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
+  || ['external_admission_policy_unavailable', 'external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
     'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'facebook_search_paused',
     'facebook_search_capacity_unavailable', 'search_restart_required'].includes(error.code))
 
@@ -162,7 +163,7 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         }
         let { credential, control, cost } = authorization
         costReservation = cost.costMinor === 0 ? null : await target.platformStore.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
-        const rate = isHubRateLimitExempt(context) ? { allowed: true } : await target.platformStore.acquireProviderRateLimit({ limit: target.config.maxRequestsPerMinute ?? 90, windowMs: 60000 })
+        const rate = isHubRateLimitExempt(context) ? { allowed: true } : await target.platformStore.acquireProviderRateLimit({ limit: (await refreshAdmissionLimits(target)).maxRequestsPerMinute ?? 90, windowMs: 60000 })
         if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Facebook supplier rate limit is exhausted')
         if (provider === 'rapidapi') {
           admission = await waitForFacebookRapidAdmission({ policyStore, rateLimitExempt: () => isHubRateLimitExempt(context), requestId: delivery.usageRequestId,
@@ -269,7 +270,8 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
       } catch (error) {
         const target = gateways[provider]
         if (currentCall || error?.code === 'external_platform_call_persistence_unknown') {
-          if (currentCall) await target.platformStore.markPersistenceUnknown({ callId: currentCall.id, delivery, ...(evidence || {}) }).catch(() => {})
+          if (currentCall) await target.platformStore.markPersistenceUnknown({ callId: currentCall.id, delivery, ...(evidence || {}),
+            errorCode: evidence?.errorCode ?? 'external_platform_persistence_unknown' }).catch(() => {})
           await markUnknown()
           throw uncertain()
         }

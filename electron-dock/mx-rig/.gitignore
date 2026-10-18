@@ -12,3 +12,6 @@ apps/web/vendor/
 
 # Written by scripts/package.mjs --server for one build; never committed.
 apps/desktop/defaults.json
+
+# scripts/dev-mode.mjs: which packages this checkout uses (local / npm).
+.dev-mode.json

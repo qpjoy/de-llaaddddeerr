@@ -52,7 +52,13 @@ export function classifyExternalPlatformIngest(payload) {
     && [TIKHUB_XIAOHONGSHU_DATASET_ID, NIGHT_ALL_COMPAT_DATASET_ID, 'social.comments.v1']
       .includes(payload.datasetId)
     && payload.platform === 'xiaohongshu'
-  const hubRaw = ['night-all.search.v1', NIGHT_ALL_COMPAT_DATASET_ID].includes(payload?.datasetId)
+  const hubRaw = (payload?.providerKey === 'tikhub' && payload.platform === 'youtube' && payload.datasetId === 'social.comments.v1')
+    || (['justone', 'rapidapi'].includes(payload?.providerKey)
+      && payload.platform === 'facebook' && payload.datasetId === 'night-all.search.v1')
+    || (payload?.providerKey === 'tikhub'
+      && ['bilibili', 'douyin', 'kuaishou', 'zhihu', 'reddit', 'youtube', 'tiktok'].includes(payload.platform)
+      && payload.datasetId === 'night-all.search.v1')
+    || ['night-all.search.v1', NIGHT_ALL_COMPAT_DATASET_ID].includes(payload?.datasetId)
     && ((payload.providerKey === 'tikhub' && ['weibo', 'instagram'].includes(payload.platform))
       || (payload.providerKey === 'justone' && payload.platform === 'instagram')
       || (payload.providerKey === 'rapidapi' && payload.platform === 'twitter'))

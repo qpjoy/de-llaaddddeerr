@@ -31,6 +31,12 @@
 
 `026_project_access.sql` 为 App 增加 `project_access` JSON 策略（所有者、范围、成员和权限版本）。NULL 表示历史部署共享，迁移不推断所有者、不公开私人 Mission。旧项目首次修改权限时由获授权的管理员取得所有者身份；新工作台项目显式创建为 private。策略采用项目行锁与 revision CAS，权限变更和审计同事务提交。先迁移，再统一升级全部 HTTP/Agent 服务及桌面客户端，之后启用私人项目和成员管理；旧服务不检查项目权限，不能在启用后继续接收请求。策略权限由应用层执行，迁移本身不提供数据库 RLS、多租户隔离或 Runner 隔离；长期机器凭据仍需作为可信执行基础设施管理。暂不支持删除包含规程历史的项目，避免规程失去项目关联后扩大可见范围。
 
+`027_browser_sso.sql` 为浏览器统一认证（mx-rig docs/25 P4）做两件事：
+- 给 `mxt_sessions` 增加 `auth`（默认 `local`）和 `sso_ref` 两列；
+- 在 Rig 自己的 `rig_auth` schema 里，按 `@qpjoy/mx-common/identity/schema.sql` 的结构建 `browser_sso_records` 表。
+
+已有会话自动成为 `local`，行为不变。先迁移，再升级服务端；旧服务端写会话时不带新列，同样得到 `local`，所以可以短暂混跑。没有挂载 SSO 档案时，新表一直是空的。
+
 ## 已经不同步了怎么办
 
 先弄清楚差在哪：库里的实际 schema 和文件说的是不是一回事。

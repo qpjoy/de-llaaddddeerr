@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import fixtures from '../fixtures/tikhub-content-search.json' with { type: 'json' }
+import originalFixtures from '../fixtures/tikhub-content-search.json' with { type: 'json' }
 import { TIKHUB_CONTENT_SEARCH_RECIPES, normalizeTikHubContentSearchRequest,
   projectTikHubContentSearch, contentSearchLegacyRow, contentSearchDataItem,
   isKuaishouRelatedSearchesCard, kuaishouRelatedSearchesCardCoverage } from '../../server/contracts/tikhub-content-search.mjs'
@@ -9,6 +9,11 @@ import { rawSearchRecords } from '../../server/contracts/raw-search.mjs'
 import { isPostgresSafeJsonValue } from '../../server/core/postgres-json.mjs'
 
 const capturedAt = '2026-10-15T04:00:00.000Z'
+const fixtures = { ...originalFixtures,
+  tiktok: { data: [{ item: { id: '7111111111111111111', desc: '完整正文', stats: { diggCount: 0, commentCount: 3 } } }], has_more: false },
+  weibo: { parsed_data: { results: [{ weibo_id: '7111111111111111111', longText: { content: '完整正文' }, interaction: { comments: 3 } }], pagination: { has_next_page: false } } },
+  xiaohongshu: { page: 1, next_page: null, data: { items: [{ model_type: 'note', note: { id: '675d277d000000000600e655', desc: '完整正文' } }] } },
+}
 const request = (platform, options = {}) => normalizeTikHubContentSearchRequest({ platform, query: '城市', ...options })
 const result = (payload, req) => projectTikHubContentSearch({ publicBody: { data: payload, meta: { capturedAt } },
   restrictedResponseArchive: { sha256: 'immutable-archive' } }, req)
@@ -20,7 +25,7 @@ test('fixed recipes reuse retained native endpoints and former defaults without 
     assert.equal(endpoint.path, recipe.path)
     assert.equal(normalized.endpointPath, recipe.path)
     assert.equal(normalized.method, recipe.method)
-    assert.equal(normalized.upstreamQuery[platform === 'reddit' ? 'query' : 'keyword'], '城市')
+    assert.equal(normalized.upstreamQuery[['reddit', 'weibo'].includes(platform) ? 'query' : 'keyword'], '城市')
     assert.deepEqual(Object.keys(normalized.upstreamQuery).filter(key => !recipe.parameterNames.includes(key)), [])
   }
   assert.equal(request('douyin').key, 't.douyin_search_fetch_video_search_v1')

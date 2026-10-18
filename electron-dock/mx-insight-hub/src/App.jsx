@@ -65,6 +65,8 @@ import {
 import { AgentPage, BackfillPage, RetrievalPage, SourcesPage } from './pages-data.jsx'
 import { DatabaseConnectionsPage } from './pages-database-connections.jsx'
 import { DataBrowserPage } from './pages-data-browser.jsx'
+import { DiagnosticsPage } from './pages-diagnostics.jsx'
+import { legacyDiagnosticRedirect } from './diagnostics-navigation.js'
 import { DataCenterPage } from './pages-catalog.jsx'
 import {
   PublicOpinionPage,
@@ -427,6 +429,7 @@ const ROUTES = [
   { path: '/agent/studio', label: 'Agent Studio', description: '开发、编译与管理 Agent', icon: Graph, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentStudioRoute, capability: 'membership.write', platformAdmin: true },
   { path: '/agent/runtime', label: '原中心 Agent', description: '原有管线、断言与处理边界', icon: Pulse, group: '数据平面', navParent: AGENT_CENTER_NAV_KEY, component: AgentRuntimeRoute, capability: 'membership.write', platformAdmin: true },
   { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage, capability: 'usage.read' },
+  { path: '/diagnostics', label: '诊断中心', description: '请求证据、限制与恢复', icon: MagnifyingGlass, group: '可观测性', component: DiagnosticsPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/notifications', label: '通知中心', description: '告警分类、处理与追溯', icon: Pulse, group: '可观测性', component: NotificationsPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/dataport/owners', label: '数港超管邀请码', description: '配置已有企业超管的专属邀请码', icon: Key, group: '平台管理', component: DataportOwnersPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/dataport/support', label: '数港服务工单', description: '企业工单、客服回复与状态', icon: Users, group: '平台管理', component: DataportSupportPage, platformAdmin: true, adminTokenOnly: true },
@@ -505,10 +508,11 @@ function readLocation({ canonicalize = false } = {}) {
   const separator = raw.indexOf('?')
   let candidatePath = separator === -1 ? raw : raw.slice(0, separator)
   const query = new URLSearchParams(separator === -1 ? '' : raw.slice(separator + 1))
-  const legacyRedirect = LEGACY_ROUTE_REDIRECTS.get(candidatePath)
+  const legacyRedirect = legacyDiagnosticRedirect(candidatePath, query) || LEGACY_ROUTE_REDIRECTS.get(candidatePath)
   if (legacyRedirect) {
     candidatePath = legacyRedirect.path
     if (legacyRedirect.kind) query.set('kind', legacyRedirect.kind)
+    if (legacyRedirect.view) query.set('view', legacyRedirect.view)
     if (canonicalize) {
       const search = query.toString()
       window.history.replaceState(

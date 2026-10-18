@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { lookupRequestDiagnostics } from '../../server/acquisitions/diagnostics.mjs'
+import { UpstreamAmbiguousError } from '../../server/core/errors.mjs'
+import { nightAllFailureEvidence } from '../../server/data/night-all-failure-evidence.mjs'
 
 const id = 'a227f54a-0ac6-43f5-9d23-687fc369f2ae'
 function fixture({ status = 'released', responseStatus = 502, errorCode = 'enterprise_query_rejected', hasResponseBody = true, gateway = null, providers, connectors = [], matches = [{ id }], fail } = {}) {
@@ -137,6 +139,26 @@ test('diagnostics exposes a projected connector error chain without raw fields f
   assert.equal(run.connectorCalls[0].failureEvidence.errors[0].code, 'TIKHUB_ALL_ENDPOINTS_FAILED')
   assert.match(run.guidance, /结构化错误链/)
   assert.doesNotMatch(JSON.stringify(run), /SECRET|rawBody|headers/)
+})
+
+test('Admin diagnostics preserves observed headers without treating an incomplete HTTP 200 as success', async () => {
+  const error = new UpstreamAmbiguousError('private-message', new Error('private-cause'), {
+    requestId: 'req_observed', traceId: 'trace_observed', httpStatus: 200,
+  })
+  const f = fixture({ status: 'unknown', errorCode: 'night_all_outcome_unknown', responseStatus: null,
+    hasResponseBody: false, providers: [], connectors: [{ id: 'connector', outcome: 'unknown',
+      http_status: 200, failure_kind: 'timeout', error_code: 'night_all_outcome_unknown',
+      upstream_request_id: error.upstreamRequestId, upstream_trace_id: error.upstreamTraceId,
+      failure_evidence: nightAllFailureEvidence(error) }] })
+  const run = (await lookupRequestDiagnostics(f.pool, id)).runs[0]
+  assert.equal(run.status, 'unknown')
+  assert.equal(run.replayAvailable, false)
+  assert.equal(run.responseStatus, null)
+  assert.equal(run.connectorCalls[0].httpStatus, 200)
+  assert.equal(run.connectorCalls[0].upstreamRequestId, 'req_observed')
+  assert.equal(run.connectorCalls[0].failureEvidence.traceId, 'trace_observed')
+  assert.match(run.guidance, /未知调用结果/)
+  assert.doesNotMatch(JSON.stringify(run), /private-message|private-cause/)
 })
 
 test('missing records return empty results, and both match and call limits disclose truncation', async () => {

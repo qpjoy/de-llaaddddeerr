@@ -1,6 +1,8 @@
 import { estimatedDuration } from "./task-contract.mjs";
 import { compareJobs } from "./queue-order.mjs";
 import { calibratedDuration } from "./command-timing.mjs";
+import { windowAdmission } from "./ledger.mjs";
+import { accountBlockers, findAccount } from "./accounts.mjs";
 import {
   normalizePoolPolicy,
   poolAppPolicy,
@@ -36,8 +38,6 @@ const supports = (d, j) =>
     (j.workflow?.plan || []).every((step) =>
       d.simCommandCodes.includes(step.code),
     ));
-const service = (row) =>
-  row.actualServiceMs ?? row.reservedServiceMs ?? row.serviceMs ?? 0;
 
 // Find the earliest interval with a spare permit. A permit is a rack/host
 // concurrency limit or the executor's slot count; running reservations and every
@@ -78,27 +78,6 @@ function capacityStart(start, duration, permits, reservations) {
   }
   return Infinity;
 }
-function appStart(app, start, duration, policy) {
-  if (duration > policy.maxServiceMs) return { code: "app-service-budget" };
-  let at = Math.max(start, app.cooldownUntil || 0);
-  let history = poolRunHistory(app, at, policy);
-  if (
-    history.length >= policy.maxRuns ||
-    history.reduce((n, r) => n + service(r), 0) + duration > policy.maxServiceMs
-  ) {
-    const last = Math.max(
-      ...history.map((r) => r.finishedAt ?? r.at + service(r)),
-    );
-    at = Math.max(at, last + policy.cooldownMs);
-    history = poolRunHistory(app, at, policy);
-  }
-  if (
-    history.length >= policy.maxRuns ||
-    history.reduce((n, r) => n + service(r), 0) + duration > policy.maxServiceMs
-  )
-    return { code: "app-budget-unresolved" };
-  return { at, history };
-}
 // Estimated end of the session holding device d (state "running"), or now.
 function busyUntil(state, now, d, jobsById) {
   const active = (state.attempts || []).find(
@@ -134,12 +113,13 @@ const REASONS = {
  * often; a device that can start it now always wins (uncounted). A running
  * Attempt never migrates. finishAt includes the App switch on a device whose
  * warm App differs. executorSlots (optional) caps concurrent sessions across all
- * racks. Estimates are empirical; claim still checks current hard safety guards.
+ * racks. fresh ignores previous plans (strategy comparison). Estimates are
+ * empirical; claim still checks current hard safety guards.
  */
 export function planPool(
   state,
   now,
-  { rack, policy: suppliedPolicy, executorSlots = null } = {},
+  { rack, policy: suppliedPolicy, executorSlots = null, fresh = false } = {},
 ) {
   const configured = (state.loopPolicies || []).find(
     (p) => p.mode === "sim" && p.rack === rack,
@@ -301,11 +281,31 @@ export function planPool(
         app = slot.apps.get(appId),
         appPolicy = poolAppPolicy(policy, appId);
       const duration = durationFor(d, job);
+      // Account scope (ledger): status and budgets are hard; a deadline delays.
+      const account = findAccount(state, d, appId);
+      if (account) {
+        const blocked = accountBlockers(state, now, d, appId).find(
+          (b) => b.code !== "account-cooldown",
+        );
+        if (blocked) {
+          codes.add(
+            blocked.primitive === "status"
+              ? "account-status"
+              : "account-budget",
+          );
+          continue;
+        }
+      }
       // Device time to bring a non-warm App forward; not App service budget.
       const switchMs = slot.warmApp === appId ? 0 : policy.switchCostMs;
-      const ready = appStart(
+      const ready = windowAdmission(
         app,
-        Math.max(now, slot.freeAt, job.notBefore || 0),
+        Math.max(
+          now,
+          slot.freeAt,
+          job.notBefore || 0,
+          account?.cooldownUntil || 0,
+        ),
         duration,
         appPolicy,
       );
@@ -351,6 +351,8 @@ export function planPool(
         "queue-wait-budget": "预计排队时间超过软队列等待预算",
         "no-device": "没有可规划的模拟设备",
         "app-budget-unresolved": "历史派发尚未完成核验，App 预算保留",
+        "account-status": "账号受限、待复核或已停用",
+        "account-budget": "账号预算已用完",
       };
       result.blocked.push({
         jobId: job.id,
@@ -399,7 +401,7 @@ export function planPool(
         ? "bounded-affinity"
         : "earliest-finish";
     // Plan stability: keep the previously planned device unless moving pays off.
-    const previous = job.poolPlan;
+    const previous = fresh ? null : job.poolPlan;
     const moves = previous?.moves || 0;
     let moved = false,
       forced = false;

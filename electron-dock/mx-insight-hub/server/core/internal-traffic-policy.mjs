@@ -75,5 +75,11 @@ export async function acquireTikHubRateLimit(store, context, platformStore, opti
   if (isInternalTraffic(store, context) || typeof platformStore.acquireProviderRateLimit !== 'function') {
     return { allowed: true, retryAfterMs: 0 }
   }
+  // A live policy may be lower than an atomic multi-call workflow. Reject the
+  // whole workflow before dispatch rather than throwing a storage TypeError.
+  if (Number.isSafeInteger(options.tokens) && options.tokens > options.limit) {
+    return { allowed: false, retryAfterMs: null, reason: 'workflow_exceeds_provider_rate',
+      requiredTokens: options.tokens, maxRequestsPerMinute: options.limit }
+  }
   return platformStore.acquireProviderRateLimit(options)
 }

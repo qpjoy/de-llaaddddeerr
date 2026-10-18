@@ -16,6 +16,16 @@ export const HUB_SOCIAL_OPERATIONS = Object.values(HUB_SOCIAL_ENDPOINTS).map(row
   contractVersion: HUB_SOCIAL_VERSION, endpointKeys: [row.endpointKey],
 }))
 const fail = message => { throw new AppError(400, 'invalid_social_request', message) }
+export function validateTwitterUsername(value) {
+  if (/^[A-Za-z0-9_]{1,15}$/.test(value)) return
+  const tooLong = value.length > 15
+  throw new AppError(400, 'invalid_social_request', tooLong
+    ? `Twitter username exceeds the 15-character limit (received ${value.length} characters, excluding @)`
+    : 'Twitter username must contain 1 to 15 letters (A-Z), digits (0-9), or underscores, excluding @', {
+    platform: 'twitter', field: 'username', reason: tooLong ? 'username_too_long' : 'username_invalid_characters',
+    actualLength: value.length, maxLength: 15,
+  })
+}
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 // Search text is one opaque path segment. Match Night-All's quote(safe=''):
 // encodeURIComponent alone leaves !'()* literal, which can affect provider routing.
@@ -52,10 +62,10 @@ export function normalizeHubSocialRequest(operation, body, { maxPageSize = 50, d
     sort = body.sort ?? 'latest'
     if (!['latest', 'top'].includes(sort)) fail('sort must be latest or top')
   } else {
-    username = body.username === undefined ? undefined : scalar(body.username, 'username', 16).replace(/^@/, '')
+    username = body.username === undefined ? undefined : scalar(body.username, 'username', 2048).replace(/^@/, '')
     userId = alias(body, ['userId', 'user_id', 'uid'])
     if (!!username === !!userId) fail('Provide exactly one username or userId/uid')
-    if (username && !/^[A-Za-z0-9_]{1,15}$/.test(username)) fail('Invalid Twitter username')
+    if (username) validateTwitterUsername(username)
     if (userId && !/^[0-9]{1,30}$/.test(userId)) fail('userId must be a numeric string')
   }
   const identity = { version: HUB_SOCIAL_VERSION, operation, platform: 'twitter', query: query ?? null,

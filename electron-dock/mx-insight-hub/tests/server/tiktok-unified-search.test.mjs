@@ -6,6 +6,11 @@ import { createApp } from '../../server/app.mjs'
 import { isNightAllDataSearchV1Envelope } from '../../server/contracts/night-all-data-search.mjs'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
+import { TikHubAdapter } from '../../server/adapters/tikhub.mjs'
+import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
+import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
+import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
+import { nativeForwardingEndpoint } from '../../server/contracts/native-forwarding.mjs'
 
 const DATA_PATH = '/api/v1/data/search'
 const RAW_PATH = '/api/v1/night-all/search/raw'
@@ -49,6 +54,29 @@ async function harness(t, { grant = true, unknown = false } = {}) {
     return Response.json(path === DATA_PATH ? standardPage(body) : legacyPage())
   } })
   const service = new HubService({ store, adapter, apiKeyPepper: 'tiktok-unified-test-fixture-pepper-long-enough' })
+  const endpoint = nativeForwardingEndpoint('t.tiktok_web_fetch_general_search')
+  const config = { configured: true, contractVerified: true, dispatchEnabled: true, timeoutMs: 100,
+    freshTtlMs: 60000, staleTtlMs: 86400000, maxConcurrency: 3, maxConsumerConcurrency: 3, maxRequestsPerMinute: 100, billing: {} }
+  const controls = new MemoryExternalPlatformControlStore()
+  await controls.updatePolicy('tikhub', endpoint.operation, { expectedRevision: 1, desiredState: 'active', reason: 'Offline migration fixture',
+    priceBook: { currency: 'USD', pricingAsOf: '2026-10-08T00:00:00Z', monthlyBudgetMinor: 100000,
+      monthlySubsidyBudgetMinor: 100000, unitCostMinorByEndpoint: { [endpoint.endpointKey]: 12 } } },
+  { runtime: { config, credentialConfigured: true } })
+  const directAdapter = new TikHubAdapter({ apiKey: 'fixture-secret', timeoutMs: 100, fetchImpl: async url => {
+    const parsed = new URL(url), body = Object.fromEntries(parsed.searchParams)
+    calls.push({ path: parsed.pathname, body })
+    if (unknown) throw new TypeError('Synthetic transport outcome unknown')
+    const first = body.offset === '0'
+    return Response.json({ code: 200, data: { data: [{ item: { id: first ? '9223372036854775807' : '9223372036854775808', desc: TEXT,
+      author: { id: '9223372036854775806', nickname: 'author', uniqueId: 'author' },
+      stats: { diggCount: 0, shareCount: 3, playCount: 0 }, video: { playAddr: 'https://example.test/video.mp4', cover: 'https://example.test/cover.jpg' } } }],
+      has_more: first, cursor: 10, search_id: 'tiktok-native-standard-continuation' } })
+  } })
+  const platformStore = new MemoryExternalPlatformStore({ usageStore: store, providerKey: 'tikhub', authorizationPlatform: 'tiktok' })
+  const gateway = new ExternalPlatformGateway({ usageStore: store, platformStore, adapter: directAdapter, config,
+    providerKey: 'tikhub', apiKeyPepper: 'tiktok-unified-test-fixture-pepper-long-enough', reservationLeaseMs: 120000,
+    operationControlStore: controls, logger: { warn() {} } })
+  service.externalDataSearch = (context, input) => gateway.searchContent(context, input)
   const tenant = await service.createTenant({ name: 'TikTok fixture' })
   const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'TikTok caller' })
   if (grant) await store.setPlatformGrant(consumer.id, 'tiktok', true)
@@ -71,7 +99,7 @@ test('TikTok unified search preserves the standard contract and charges once per
   await h.service.setTenantBillingProfile(h.tenant.id, { mode: 'enforced', defaultUnitPriceMinor: 7, defaultCurrency: 'CNY' }, 'test-admin')
   await h.service.addTenantCredit(h.tenant.id, { amountMinor: 14, currency: 'CNY', reason: 'Synthetic TikTok credit' },
     { idempotencyKey: 'tiktok-fixture-credit', actor: 'test-admin' })
-  const input = { platform: 'tiktok', query: QUERY, pageSize: 20, type: 'stable' }
+  const input = { platform: 'tiktok', query: QUERY, pageSize: 1, type: 'stable' }
   const first = await h.request(DATA_PATH, input, 'tiktok-standard-first')
   assert.equal(first.response.status, 200)
   assert.equal(isNightAllDataSearchV1Envelope(first.body), true)
@@ -82,9 +110,9 @@ test('TikTok unified search preserves the standard contract and charges once per
   assert.deepEqual(first.body.data.items[0].source, { provider: null, endpointId: null })
   assert.equal(first.body.data.raw_data, undefined)
   assert.doesNotMatch(JSON.stringify(first.body), /private-upstream-operation|tiktok-native-standard-continuation/)
-  assert.match(first.body.data.pageInfo.nextCursor, /^mxnc1\./)
-  assert.equal(h.calls[0].path, DATA_PATH)
-  assert.equal(h.calls[0].body.businessId, h.consumer.businessId)
+  assert.match(first.body.data.pageInfo.nextCursor, /^mxds1\./)
+  assert.equal(h.calls[0].path, '/api/v1/tiktok/web/fetch_general_search')
+  assert.equal(h.calls[0].body.keyword, QUERY)
   const replay = await h.request(DATA_PATH, input, 'tiktok-standard-first')
   assert.equal(replay.response.headers.get('idempotent-replay'), 'true')
   assert.deepEqual(replay.body, first.body)
@@ -100,14 +128,15 @@ test('TikTok unified search preserves the standard contract and charges once per
   assert.equal(next.response.status, 200)
   assert.equal(next.body.data.pageInfo.pageIndex, 2)
   assert.equal(next.body.data.pageInfo.hasMore, false)
-  assert.equal(h.calls[1].body.cursor, 'tiktok-native-standard-continuation')
+  assert.equal(h.calls[1].body.search_id, 'tiktok-native-standard-continuation')
+  assert.equal(h.calls[1].body.offset, '10')
   assert.equal(h.calls.length, 2)
   assert.equal(h.store.customerCharges.size, 2)
   assert.equal(h.store.creditAccounts.get(h.tenant.id).availableMinor, 0)
 })
 
 test('TikTok legacy aliases retain raw strings and cannot consume a standard-search cursor', async t => {
-  const h = await harness(t), input = { platform: 'tiktok', query: QUERY, pageSize: 20 }
+  const h = await harness(t), input = { platform: 'tiktok', query: QUERY, pageSize: 1 }
   const standard = await h.request(DATA_PATH, input, 'tiktok-mixed-standard')
   const badCursor = await h.request(RAW_PATH, { platform: 'tiktok', keyword: QUERY, count: 20,
     cursor: standard.body.data.pageInfo.nextCursor }, 'tiktok-mixed-invalid')

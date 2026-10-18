@@ -3,6 +3,9 @@ import { validateSearchOrder } from './web-search/contract.mjs'
 import { MAX_CAPABILITY_SCOPES, MAX_PLATFORM_SCOPES } from '../shared/access-limits.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { serviceCatalogPage } from './data/service-catalog.mjs'
+import { DATA_SEARCH_V1_PATH, DATA_SEARCH_V2_PATH, DATA_SEARCH_V2_PLATFORMS, normalizeDataSearchV2 } from './contracts/data-search-v2.mjs'
+import { executeDataSearchV2, guardDataSearchV1, publicSearchProtocolStatus } from './data/search-protocol.mjs'
+import { SearchProtocolStore } from './data/search-protocol-store.mjs'
 import { servicePriceDefinition, customerServiceQuote } from './contracts/service-pricing.mjs'
 import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate, aggregateLivePage, AGGREGATE_EXECUTION } from './data/aggregate-search.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS } from './contracts/native-forwarding.mjs'
@@ -4074,15 +4077,18 @@ export class HubService {
     await this.store.reapStaleReservations()
     const record = await this.store.getRequest(requiredUuid(requestId, 'requestId'), context.consumer.id)
     assert(record, 404, 'request_not_found', 'Request not found')
-    return publicRequestStatus(record)
+    const binding = await new SearchProtocolStore(this.store).bindingForUsage(context, requestId)
+    return { ...publicRequestStatus(record), ...(binding ? { searchProtocol: publicSearchProtocolStatus(binding) } : {}) }
   }
 
   async requestStatusByIdempotencyKey(context, idempotencyKey) {
     const key = requiredIdempotencyKey(idempotencyKey)
     await this.store.reapStaleReservations()
     const record = await this.store.getUsageRequestByIdempotencyKey(context.consumer.id, key)
-    assert(record, 404, 'request_not_found', 'Request not found')
-    return publicRequestStatus(record)
+    const binding = await new SearchProtocolStore(this.store).binding(context, key)
+    assert(record || binding, 404, 'request_not_found', 'Request not found')
+    return { ...(record ? publicRequestStatus(record) : { id: null, status: 'not_dispatched', units: null }),
+      ...(binding ? { searchProtocol: publicSearchProtocolStatus(binding) } : {}) }
   }
 
   #enterExternalMedia(consumerId) {
@@ -4481,6 +4487,7 @@ export class HubService {
         operation,
         body: traversal.upstreamBody,
         businessId: context.consumer.businessId,
+        requestId: activeRequestId,
       })
       const traversedBody = capNightAllCompatibilityTraversal(upstream.payload, {
         operation,
@@ -4549,7 +4556,9 @@ export class HubService {
       }
     } catch (error) {
       const failureLatency = Math.round(performance.now() - startedAt)
-      if (error instanceof UpstreamRejectedError && this.store.recordConnectorFailureEvidence) {
+      if ((error instanceof UpstreamRejectedError
+        || (error instanceof UpstreamAmbiguousError && error.upstreamHttpStatus != null))
+        && this.store.recordConnectorFailureEvidence) {
         // Diagnostic persistence must not alter paid dispatch, fallback or settlement.
         await this.store.recordConnectorFailureEvidence(call.id, nightAllFailureEvidence(error)).catch(() => {})
       }
@@ -4565,14 +4574,14 @@ export class HubService {
           const evidence = compatibilityUpstreamEvidence(error)
           await this.store.finishConnectorCall(call.id, {
             outcome: evidence.outcome === 'unknown' ? 'unknown' : 'failed',
-            httpStatus: error instanceof UpstreamRejectedError ? error.status : null,
+            httpStatus: error instanceof UpstreamRejectedError ? error.status : error.upstreamHttpStatus ?? null,
             businessStatus: evidence.outcome === 'unknown' ? 'unknown' : 'failed',
             upstreamLatencyMs: failureLatency,
             errorCode: evidence.errorCode,
             failureKind: compatibilityFailureKind(error),
             sourceMode: 'live',
-            nightAllRequestId: error instanceof UpstreamRejectedError ? error.body?.requestId ?? error.upstreamRequestId ?? null : null,
-            nightAllTraceId: error instanceof UpstreamRejectedError ? error.body?.traceId ?? error.upstreamTraceId ?? null : null,
+            nightAllRequestId: error.body?.requestId ?? error.upstreamRequestId ?? null,
+            nightAllTraceId: error.body?.traceId ?? error.upstreamTraceId ?? null,
           }).catch(() => {})
           if (error instanceof UpstreamAmbiguousError) {
             await this.store.markRequestUnknown(activeRequestId, 'night_all_outcome_unknown').catch(() => {})
@@ -4592,14 +4601,14 @@ export class HubService {
           const staleAgeSeconds = staleSnapshotAgeSeconds(snapshot)
           commitEvidence = {
             outcome: evidence.outcome === 'unknown' ? 'unknown' : 'failed',
-            httpStatus: error instanceof UpstreamRejectedError ? error.status : null,
+            httpStatus: error instanceof UpstreamRejectedError ? error.status : error.upstreamHttpStatus ?? null,
             businessStatus: evidence.outcome === 'unknown' ? 'unknown' : 'failed',
             upstreamLatencyMs,
             errorCode: evidence.errorCode,
             failureKind: compatibilityFailureKind(error),
             sourceMode: 'live',
-            nightAllRequestId: error instanceof UpstreamRejectedError ? error.body?.requestId ?? error.upstreamRequestId ?? null : null,
-            nightAllTraceId: error instanceof UpstreamRejectedError ? error.body?.traceId ?? error.upstreamTraceId ?? null : null,
+            nightAllRequestId: error.body?.requestId ?? error.upstreamRequestId ?? null,
+            nightAllTraceId: error.body?.traceId ?? error.upstreamTraceId ?? null,
           }
           commitAttempted = true
           try {
@@ -4642,14 +4651,14 @@ export class HubService {
         const evidence = compatibilityUpstreamEvidence(error)
         await this.store.finishConnectorCall(call.id, {
           outcome: error instanceof UpstreamAmbiguousError ? 'unknown' : 'failed',
-          httpStatus: error instanceof UpstreamRejectedError ? error.status : null,
+          httpStatus: error instanceof UpstreamRejectedError ? error.status : error.upstreamHttpStatus ?? null,
           businessStatus: error instanceof UpstreamAmbiguousError ? 'unknown' : 'failed',
           upstreamLatencyMs: failureLatency,
           errorCode: evidence.errorCode,
           failureKind: compatibilityFailureKind(error),
           sourceMode: 'live',
-          nightAllRequestId: error instanceof UpstreamRejectedError ? error.body?.requestId ?? error.upstreamRequestId ?? null : null,
-          nightAllTraceId: error instanceof UpstreamRejectedError ? error.body?.traceId ?? error.upstreamTraceId ?? null : null,
+          nightAllRequestId: error.body?.requestId ?? error.upstreamRequestId ?? null,
+          nightAllTraceId: error.body?.traceId ?? error.upstreamTraceId ?? null,
         }).catch(() => {})
       }
       if (error instanceof UpstreamRejectedError) {
@@ -4684,7 +4693,33 @@ export class HubService {
     }
   }
 
-  async search(context, { body, idempotencyKey, path, liveOnly = false, responseFormat = 'data', signal, retryOfRequestId }) {
+  async search(context, input) {
+    if (input.path === DATA_SEARCH_V2_PATH) {
+      const body = normalizeDataSearchV2(input.body, canonicalPlatform)
+      const idempotencyKey = requiredIdempotencyKey(input.idempotencyKey)
+      assert(input.retryOfRequestId == null, 400, 'uncertain_retry_not_supported', 'v2 does not allow an unknown-result retry override')
+      assert(!isTestApiKey(context.apiKey), 403, 'test_key_not_supported', 'v2 acquisition requires a Live API key')
+      assert((await this.#effectivePlatformGrants(context)).includes(body.platform), 403, 'platform_not_granted', 'Platform is not granted')
+      if (body.platform === 'xiaohongshu') assert((await this.#effectiveCapabilityGrants(context)).includes(XIAOHONGSHU_SEARCH_OPERATION),
+        403, 'capability_not_granted', `${XIAOHONGSHU_SEARCH_OPERATION} is not granted`)
+      assert(body.pageSize <= (await this.#effectivePlatformPolicy(context, body.platform)).maxPageSize,
+        400, 'page_size_exceeded', 'pageSize exceeds current entitlement')
+      return executeDataSearchV2({ store: this.store, context, body, idempotencyKey, pepper: this.apiKeyPepper,
+        execute: upstream => this.#searchLegacy(context, { ...input, body: upstream, idempotencyKey, path: DATA_SEARCH_V1_PATH }) })
+    }
+    const platform = typeof input.body?.platform === 'string' ? canonicalPlatform(input.body.platform) : null
+    if (input.path === DATA_SEARCH_V1_PATH && typeof input.body?.cursor === 'string' && input.body.cursor.startsWith('mxds2.')) {
+      throw new AppError(400, 'invalid_cursor', 'A v2 continuation cannot be used on v1')
+    }
+    if (input.path === DATA_SEARCH_V1_PATH && DATA_SEARCH_V2_PLATFORMS.includes(platform)
+      && typeof input.body?.query === 'string' && input.body.query.trim() && typeof input.idempotencyKey === 'string') {
+      return guardDataSearchV1({ store: this.store, context, body: { ...input.body, platform }, idempotencyKey: input.idempotencyKey,
+        execute: () => this.#searchLegacy(context, input) })
+    }
+    return this.#searchLegacy(context, input)
+  }
+
+  async #searchLegacy(context, { body, idempotencyKey, path, liveOnly = false, responseFormat = 'data', signal, retryOfRequestId }) {
     if (retryOfRequestId != null) {
       assert(path === '/api/v1/data/search' && responseFormat === 'data'
         && typeof body?.platform === 'string' && canonicalPlatform(body.platform) === 'twitter',
@@ -4786,7 +4821,9 @@ export class HubService {
     if (platform === 'instagram' && path === '/api/v1/data/search' && !this.externalDataSearch) {
       throw new AppError(503, 'instagram_search_unavailable', 'Hub Instagram search is unavailable')
     }
-    if (path === '/api/v1/data/search' && directContentSearch) {
+    const retainedDirectXiaohongshu = platform === 'xiaohongshu' && pageSize === DIRECT_XIAOHONGSHU_PAGE_SIZE
+      && (!cursor || isDirectXiaohongshuCursor(cursor))
+    if (path === '/api/v1/data/search' && directContentSearch && !retainedDirectXiaohongshu) {
       assert(this.externalDataSearch, 503, 'content_search_unavailable', 'Hub content search is unavailable')
       return this.externalDataSearch(context, { body, normalized: upstreamBody, idempotencyKey,
         ...(signal ? { signal } : {}), dataSearch: { resultType, replayWindowMs: replayWindowFor(resultType) } })
@@ -4800,13 +4837,14 @@ export class HubService {
     if (
       platform === 'xiaohongshu'
       && pageSize === DIRECT_XIAOHONGSHU_PAGE_SIZE
-      && this.externalSocialSearch
+      && (path === '/api/v1/data/search' || this.externalSocialSearch)
       && (!cursor || isDirectXiaohongshuCursor(cursor))
       && (
-        isDirectXiaohongshuCursor(cursor)
+        path === '/api/v1/data/search' || isDirectXiaohongshuCursor(cursor)
         || ((await this.#externalSocialSearchEnabledFor(context)) && !isTestApiKey(context.apiKey))
       )
     ) {
+      assert(this.externalSocialSearch, 503, 'content_search_unavailable', 'Hub Xiaohongshu search is unavailable')
       return this.externalSocialSearch(context, {
         body: upstreamBody,
         ...(signal ? { signal } : {}),
@@ -4912,6 +4950,7 @@ export class HubService {
         : await this.adapter.search({
             body: historicalUpstreamBody,
             businessId: context.consumer.businessId,
+            requestId: activeRequestId,
           })
       const responsePayload = localTelegram
         ? await this.#searchStoredTelegram(telegramQuery, startedAt)
@@ -4977,18 +5016,20 @@ export class HubService {
 
       return { status: 200, body: responseBody, requestId: activeRequestId, replay: false }
     } catch (error) {
-      if (nightAllCall && error instanceof UpstreamRejectedError && typeof this.store.recordConnectorFailureEvidence === 'function') {
+      if (nightAllCall && (error instanceof UpstreamRejectedError
+        || (error instanceof UpstreamAmbiguousError && error.upstreamHttpStatus != null))
+        && typeof this.store.recordConnectorFailureEvidence === 'function') {
         try { await this.store.recordConnectorFailureEvidence(nightAllCall.id, nightAllFailureEvidence(error)) } catch { /* Best-effort bounded diagnostics. */ }
       }
       if (error instanceof UpstreamRejectedError || error instanceof UpstreamAmbiguousError) {
         const evidence = compatibilityUpstreamEvidence(error)
         await finishNightAllCall({ outcome: error instanceof UpstreamRejectedError ? 'failed' : 'unknown',
-          httpStatus: error instanceof UpstreamRejectedError ? error.status : null,
+          httpStatus: error instanceof UpstreamRejectedError ? error.status : error.upstreamHttpStatus ?? null,
           businessStatus: error instanceof UpstreamRejectedError ? 'failed' : 'unknown',
           upstreamLatencyMs: Math.round(performance.now() - startedAt), errorCode: evidence.errorCode,
           failureKind: compatibilityFailureKind(error), sourceMode: 'live',
-          nightAllRequestId: error instanceof UpstreamRejectedError ? error.body?.requestId ?? error.upstreamRequestId ?? null : null,
-          nightAllTraceId: error instanceof UpstreamRejectedError ? error.body?.traceId ?? error.upstreamTraceId ?? null : null })
+          nightAllRequestId: error.body?.requestId ?? error.upstreamRequestId ?? null,
+          nightAllTraceId: error.body?.traceId ?? error.upstreamTraceId ?? null })
       }
       if (error instanceof UpstreamRejectedError) {
         await this.store.releaseRequest(activeRequestId, `night_all_http_${error.status}`)

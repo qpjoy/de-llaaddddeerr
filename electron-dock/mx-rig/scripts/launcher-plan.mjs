@@ -39,12 +39,32 @@ export function freeStandaloneIndex(products) {
   throw new Error('no free standalone product index is left in Launcher')
 }
 
+const RELEASE = MANIFEST.release
+const SSO = MANIFEST.sso
+
+/** The AppCenter entry as Release Center needs it: standalone, Rig's network, Rig's package, the channel. */
+function appMatches(app) {
+  const wanted = MANIFEST.appCenterApp
+  return (
+    app.launcherMode === 'standalone' &&
+    app.productNetworkId === PRODUCT_ID &&
+    String(app.packageName ?? '').toLowerCase() === wanted.packageName.toLowerCase() &&
+    (!Array.isArray(app.channels) || app.channels.includes(RELEASE.channel))
+  )
+}
+
 /**
  * The plan: each registration with its state — `ok` (already as needed),
  * `create` / `update` (the command can do it, with Launcher's ops token), or
  * `manual` (only Launcher Admin can, and the plan says exactly what to enter).
+ *
+ * `resolved` is Release Center's answer for Rig's package name (null when it
+ * has none); `credentials` says which release credentials this cluster
+ * already keeps ({ publisher, approver }, or null when not known);
+ * `ssoProfile` is where the browser SSO profile was found (a host file or
+ * the cluster's Secret), or null.
  */
-export function launcherPlan({ products = [], app = null, routes = [], rigUrl = null }) {
+export function launcherPlan({ products = [], app = null, routes = [], rigUrl = null, resolved = null, credentials = null, ssoProfile = null }) {
   const existing = products.find((product) => product.productId === PRODUCT_ID) ?? null
   const wanted = MANIFEST.productNetwork
   const shape = existing
@@ -55,7 +75,14 @@ export function launcherPlan({ products = [], app = null, routes = [], rigUrl = 
     : existing.mode === wanted.mode && existing.networkScope === wanted.networkScope && existing.enabled !== false
       ? 'ok'
       : 'update'
-  const appState = !app ? 'create' : app.launcherMode === 'standalone' && app.productNetworkId === PRODUCT_ID ? 'ok' : 'update'
+  const appState = !app ? 'create' : appMatches(app) ? 'ok' : 'update'
+  const identityState =
+    resolved?.productId === PRODUCT_ID && String(resolved.packageName ?? '').toLowerCase() === RELEASE.packageName.toLowerCase()
+      ? 'ok'
+      : appState === 'ok'
+        ? 'manual'
+        : 'create'
+  const credentialState = credentials?.publisher && credentials?.approver ? 'ok' : 'create'
   const route = routes.find((entry) => entry.host === shape.serviceVip && entry.enabled !== false) ?? null
   const origin = (url) => {
     try {
@@ -98,10 +125,36 @@ export function launcherPlan({ products = [], app = null, routes = [], rigUrl = 
         body: MANIFEST.appCenterApp
       },
       {
-        id: 'release-center',
-        state: 'later',
-        title: `Release Center components ${MANIFEST.releaseComponents.join(' / ')}`,
-        detail: 'needed for automatic updates (docs/25 P2); not for connecting'
+        id: 'release-identity',
+        state: identityState,
+        title: `Release Center identity ${RELEASE.packageName} → ${PRODUCT_ID} (${RELEASE.channel})`,
+        detail:
+          identityState === 'manual'
+            ? `the AppCenter entry is there but Release Center does not resolve ${RELEASE.packageName} to ${PRODUCT_ID}: look for another app registering the same package name`
+            : 'comes with the AppCenter entry; the desktop finds its updates by this package name (docs/25 P2)'
+      },
+      {
+        id: 'release-credentials',
+        state: credentialState,
+        title: `Release credentials ${RELEASE.publisher} / ${RELEASE.approver}`,
+        detail:
+          credentialState === 'ok'
+            ? 'kept in this cluster (Secret mx-rig/mx-rig-release) for scripts/manage.sh release'
+            : `issued by Launcher once and kept in Secret mx-rig/mx-rig-release — never printed; one already issued but not kept here is rotated`
+      },
+      {
+        id: 'sso-application',
+        state: ssoProfile ? 'ok' : 'manual',
+        title: `Unified authentication client ${SSO.appId} (browser SSO, docs/25 P4)`,
+        detail: ssoProfile
+          ? `profile found (${ssoProfile}); scripts/manage.sh deploy keeps it in Secret mx-rig/mx-rig-sso`
+          : `Launcher Internal → 平台设置 → 统一认证 → 接入应用: ${SSO.entrance}, ${SSO.displayName}, ${SSO.appId}, ${SSO.origin}, Audience ${SSO.audience} → 校验配置 → 保存应用 → 前往 Launcher 发布, until 「Auth 已加载」; then scripts/manage.sh deploy`
+      },
+      {
+        id: 'sso-entrance',
+        state: 'manual',
+        title: `Public entrance ${SSO.origin}`,
+        detail: `DNS and a certificate for ${new URL(SSO.origin).host} on the Domestic gateway → WireGuard 10.88.88.88:80 → Internal Nginx → ${rigUrl ?? 'the Rig service'}, forwarding only the paths in deploy/gateway/README.md (docs/25 §11)`
       }
     ]
   }

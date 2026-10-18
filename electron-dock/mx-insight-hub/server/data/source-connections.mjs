@@ -1,6 +1,8 @@
 import { WEB_SEARCH_PROVIDERS, WEB_SEARCH_PATH } from '../../shared/web-search.mjs'
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from '../contracts/hub-social.mjs'
+import { YOUTUBE_COMMENT_PATHS, YOUTUBE_COMMENTS_CAPABILITY } from '../contracts/youtube-comments.mjs'
+import { TIKHUB_CONTENT_SEARCH_RECIPES } from '../contracts/tikhub-content-search.mjs'
 import { providerMigrationSnapshot } from './provider-migration.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS } from '../contracts/native-forwarding.mjs'
 import { WECHAT_LEGACY_SEARCH_PLATFORMS, WECHAT_SEARCH_PATH, WECHAT_SEARCH_KEY } from '../contracts/wechat-search-alias.mjs'
@@ -35,6 +37,18 @@ function route(id, fields) {
 
 export function implementedRoutes(sources = []) {
   const rows = WEB_SEARCH_PROVIDERS.map(p=>route(`web-search-${p.key}`,{provider:p.key,providerLabel:p.label,product:'Web Search',operation:'web.search',platform:'web_search',path:WEB_SEARCH_PATH,catalogKeys:p.key==='baidu'?['source-catalog-0135']:[],keywordSearch:true,defaultRule:'按租户与 Key 的渠道范围和顺序选择；发送后不切换，不转发 Night-All。',evidence:'server/web-search/contract.mjs'}))
+  for (const [kind, path] of Object.entries(YOUTUBE_COMMENT_PATHS)) rows.push(route(`youtube-comments-${kind}`, {
+    platform: 'youtube', catalogKeys: [catalogKey('youtube')], provider: 'tikhub', product: '社媒与内容数据',
+    operation: YOUTUBE_COMMENTS_CAPABILITY, path, datasets: ['social.comments.v1'], procurementOperation: false,
+    defaultRule: 'Hub 固定合同直接采集；单视频或限定频道视频窗口，maxComments 限制整个响应。归档、入库及不透明游标续页，不经过 Night-All。',
+    evidence: 'server/contracts/youtube-comments.mjs',
+  }))
+  for (const recipe of Object.values(TIKHUB_CONTENT_SEARCH_RECIPES).filter(row => row.platform !== 'xiaohongshu')) rows.push(route(`content-search-${recipe.platform}`, {
+    platform: recipe.platform, catalogKeys: [catalogKey(recipe.platform)].filter(Boolean), provider: 'tikhub', product: '跨平台内容',
+    operation: recipe.operation || `native.${recipe.key}`, path: '/api/v1/data/search', keywordSearch: true, datasets: ['night-all.search.v1'],
+    defaultRule: 'Hub 固定内容搜索合同；按客户平台计费，完整已取得页归档、缓冲续页与规范化入库。无 Night-All 回退；历史旧游标先保持重放，再要求显式重开。',
+    evidence: 'server/contracts/tikhub-content-search.mjs',
+  }))
   for (const endpoint of Object.values(HUB_SOCIAL_ENDPOINTS)) rows.push(route(`hub-social-${endpoint.key}`, {
     platform: endpoint.platform, catalogKeys: [catalogKey(endpoint.platform)], provider: endpoint.provider,
     product: '社媒与内容数据', operation: endpoint.operation, path: endpoint.path, keywordSearch: endpoint.key === 'search',
@@ -94,15 +108,8 @@ export function implementedRoutes(sources = []) {
     platform: 'xiaohongshu', catalogKeys: [catalogKey('xiaohongshu')], provider: 'tikhub',
     product: '小红书笔记画卷', operation: 'social.posts.search', path: '/api/v1/data/search',
     datasets: ['social.posts.v1'], keywordSearch: true,
-    defaultRule: '符合直连条件的新搜索走 T 平台；历史 mxnc1 游标与未迁移形状保持原路由。',
+    defaultRule: '新版标准搜索全部由 Hub 直连 T 平台；非20页大小使用缓冲。旧 mxnc1 仅保留已有幂等重放，新增请求需显式从第一页重新开始。',
     evidence: 'server/hub-service.mjs',
-  }))
-  rows.push(route('data-search-adapter', {
-    platform: '按 /api/v1/data/capabilities 返回的平台', provider: 'night-all',
-    product: '跨平台内容', operation: 'data.search', path: '/api/v1/data/search',
-    keywordSearch: true, mode: 'compatibility',
-    defaultRule: '非已迁移直连形状委托内部数据服务，微信实时搜索除外（已停用）；此看板不请求上游能力目录，支持范围与健康不作静态推断。',
-    evidence: 'server/adapters/night-all.mjs',
   }))
   for (const { key: operation, path, label } of XIAOHONGSHU_CAPABILITIES.filter(row => row.key !== 'social.posts.search')) rows.push(route(`xiaohongshu-${operation}`, {
     platform: 'xiaohongshu', catalogKeys: [catalogKey('xiaohongshu')], provider: 'tikhub',

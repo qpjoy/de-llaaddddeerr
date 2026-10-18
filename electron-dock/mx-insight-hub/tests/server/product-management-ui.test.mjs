@@ -11,7 +11,7 @@ import { productManagementLinks } from '../../shared/product-management.mjs'
 const require = createRequire(import.meta.url)
 const views = build({
   stdin: { contents: "export * from './product-management.jsx'", loader: 'js', resolveDir: fileURLToPath(new URL('../../src/', import.meta.url)) },
-  bundle: true, define: { 'import.meta.env': '{}' }, format: 'esm', jsx: 'automatic', platform: 'node', write: false,
+  bundle: true, loader: { '.css': 'empty' }, define: { 'import.meta.env': '{}' }, format: 'esm', jsx: 'automatic', platform: 'node', write: false,
   plugins: [{ name: 'shared-react', setup(builder) {
     builder.onResolve({ filter: /^react(?:-dom)?(?:\/.*)?$/ }, args => ({ path: pathToFileURL(require.resolve(args.path)).href, external: true }))
   } }],
@@ -28,7 +28,7 @@ test('management tab and body are absent for tenants, SSO admins and incomplete 
   }
 })
 
-test('all products have navigable governed management without credentials or mutation forms', async () => {
+test('all product shells retain governed links and wait for an Admin identity before rendering configuration', async () => {
   const { ProductViewTabs, ProductManagement } = await views
   const session = { kind: 'admin-token', platformAdmin: true }
   for (const product of PRODUCT_WORKBENCHES.filter(row => row.path.startsWith('/data-products/'))) {

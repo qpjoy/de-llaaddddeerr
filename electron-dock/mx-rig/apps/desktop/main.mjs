@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ipcMain, dialog, net, protocol, safeStorage } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, dialog, net, protocol, safeStorage, shell } from 'electron'
 import { execFile, fork } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
@@ -17,6 +17,10 @@ import { LocalRunner, localStation } from './local-runner.mjs'
 import { replayDocument } from '../../packages/runtime/replay.mjs'
 import { firstRun } from './first-run.mjs'
 import { DEFAULT_BOOTSTRAP_URLS, LauncherNetwork } from './launcher-network.mjs'
+import { LauncherUpdates } from './launcher-updates.mjs'
+import { LauncherOversea } from './launcher-oversea.mjs'
+import { prepareEngine, shippedEngine } from './mihomo-engine.mjs'
+import { browserSignIn } from './browser-sign-in.mjs'
 import { existsSync, readdirSync } from 'node:fs'
 
 // Read actions the workbench may forward. An explicit table means the renderer
@@ -81,6 +85,7 @@ let window,
   projectWorkspaces = null,
   testRepositories = null,
   quitting = false,
+  loginPending = false,
   sequence = 0
 const pending = new Map()
 app.setAppUserModelId('dev.qpjoy.mx-rig')
@@ -145,6 +150,17 @@ async function readJson(file) {
 // defaults, or MX_RIG_LAUNCHER=1 from source. The desktop then reaches the Rig
 // service through its own product network instead of an address typed in.
 let network = null
+// …and in Launcher mode its versions come from Launcher's Release Center (docs/25 P2).
+let updates = null
+// …and the account's overseas subscription can become a channel for the test browser (P3).
+let oversea = null
+
+// The Runtime takes the overseas channel with its policy; a Runtime started
+// later gets it at init.
+function syncLocalEgress() {
+  if (!worker?.connected || !client) return
+  rpc('local-egress', { channel: oversea?.browserProxy() ?? null }).catch(() => {})
+}
 async function launcherSettings() {
   const packaged = (await readJson(join(root, 'apps/desktop/defaults.json'))) ?? {}
   const enabled = process.env.MX_RIG_LAUNCHER === '1' || (process.env.MX_RIG_LAUNCHER !== '0' && packaged.launcher?.enabled === true)
@@ -152,8 +168,23 @@ async function launcherSettings() {
   const fromEnv = String(process.env.MX_RIG_BOOTSTRAP_URLS ?? '').split(',').map((url) => url.trim()).filter(Boolean)
   return {
     bootstrapUrls: fromEnv.length ? fromEnv : packaged.launcher?.bootstrapUrls?.length ? packaged.launcher.bootstrapUrls : DEFAULT_BOOTSTRAP_URLS,
-    serverUrl: process.env.MX_RIG_SERVER_URL || packaged.launcher?.serverUrl || null
+    serverUrl: process.env.MX_RIG_SERVER_URL || packaged.launcher?.serverUrl || null,
+    distribution: updateDistribution(packaged.launcher?.distribution)
   }
+}
+
+// Only an installed copy updates itself: from source it is 'development', a
+// --dir build is 'portable'. MX_RIG_UPDATE_DISTRIBUTION=installed is the test
+// entry for exercising updates from source; a packaged app ignores it.
+function updateDistribution(packaged) {
+  if (!app.isPackaged) return process.env.MX_RIG_UPDATE_DISTRIBUTION === 'installed' ? 'installed' : 'development'
+  return packaged === 'portable' ? 'portable' : 'installed'
+}
+
+// The version Release Center compares: package.json's, the same from source
+// (where Electron would report its own) and packaged.
+async function appVersion() {
+  return (await readJson(join(root, 'package.json')))?.version ?? app.getVersion()
 }
 
 async function loginDefaults() {
@@ -203,22 +234,8 @@ function playwrightBrowsers() {
 }
 
 async function login(input) {
-  await stopWorker()
-  await Promise.allSettled([localRunner?.stop(), station?.stop()])
-  localRunner = null
-  station = null
-  projectWorkspaces = null
-  testRepositories = null
-  client = null
-  member = null
-  // Launcher mode: the service is behind this product's VIP, inside the tunnel.
-  const launched = network ? network.snapshot() : null
-  if (launched && (launched.status !== 'ready' || !launched.serverUrl))
-    throw new RigError('network_not_ready', '先连上内网再登录')
-  const privateHttp = Boolean(launched) || input.privateHttp === true || process.env.MX_RIG_ALLOW_PRIVATE_HTTP === '1'
-  const url = serviceUrl(launched?.serverUrl || input.url || process.env.MX_RIG_SERVER_URL || 'http://127.0.0.1:8791', {
-    privateHttp
-  })
+  await endSession()
+  const { url, privateHttp } = loginTarget(input)
   const next = new RigClient({ url, token: '', privateHttp })
   const result = await next.request('/api/rig/v1/native-login', {
     account: input.account,
@@ -226,6 +243,19 @@ async function login(input) {
   })
   next.token = result.token
   const { principal } = await next.request('/api/rig/v1/me')
+  // Finish the unified account's lease handover before starting anything
+  // that fetches from Rig. A tunnel restart must not race the first screen.
+  // Local accounts and the service admin keep their anonymous network.
+  if (network && !/^local:/.test(principal.id) && principal.id !== 'service-admin') {
+    const connected = await network.signIn({ account: input.account, password: input.password })
+    if (connected.status !== 'ready' || connected.identity.kind !== 'user' || connected.serverReachable !== true)
+      throw new RigError('network_not_ready', '账号已验证，但用户内网尚未就绪。请查看内网连接状态，恢复连接后重试登录。')
+  }
+  return startSession({ next, token: result.token, principal, url, privateHttp, account: input.account })
+}
+
+/** Everything that runs for a signed-in member, however they signed in. */
+async function startSession({ next, token, principal, url, privateHttp, account }) {
   const workspace = createHash('sha256')
     .update(`${url}\n${principal.id}`)
     .digest('hex')
@@ -266,21 +296,18 @@ async function login(input) {
   })
   await rpc('init', {
     url,
-    token: result.token,
+    token,
     owner: principal.id,
     root: join(app.getPath('userData'), 'workspaces', workspace),
     electronApps: await loadElectronApps(),
-    privateHttp
+    privateHttp,
+    localEgress: oversea?.browserProxy() ?? null
   })
   client = next
   member = principal
-  await rememberLogin({ server: url, privateHttp, account: input.account }).catch(() => {})
-  // A unified account also takes the network over to a user lease. Rig's own
-  // accounts and the service admin have no Launcher identity: the lease stays.
-  if (network && !/^local:/.test(principal.id) && principal.id !== 'service-admin')
-    void network.signIn({ account: input.account, password: input.password }).catch((error) => {
-      window?.webContents.send('mx-rig:network', { ...network.snapshot(), message: `已登录 Rig；网络仍是匿名的（${error.message}）` })
-    })
+  // A browser sign-in keeps the account last typed for the password form.
+  const remembered = account ?? (await readJson(lastLoginFile()))?.account ?? ''
+  await rememberLogin({ server: url, privateHttp, account: remembered }).catch(() => {})
   // Test projects' snapshots and QA repositories on this computer (docs/21 §5).
   projectWorkspaces = new ProjectWorkspaces(join(app.getPath('userData'), 'workspaces', workspace, 'project-workspaces'))
   // The same directory: a project's test repository is its workspace's qa/ (docs/23).
@@ -309,6 +336,78 @@ async function login(input) {
     cleartext:
       new URL(url).protocol === 'http:' &&
       !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(new URL(url).hostname)
+  }
+}
+
+// Whatever ran for the previous member stops before anyone signs in.
+async function endSession() {
+  await stopWorker()
+  await Promise.allSettled([localRunner?.stop(), station?.stop()])
+  localRunner = null
+  station = null
+  projectWorkspaces = null
+  testRepositories = null
+  client = null
+  member = null
+}
+
+// Which service a sign-in goes to. Launcher mode: the one behind this
+// product's VIP, inside the tunnel.
+function loginTarget(input = {}) {
+  const launched = network ? network.snapshot() : null
+  if (launched && (launched.status !== 'ready' || !launched.serverUrl))
+    throw new RigError('network_not_ready', '先连上内网再登录')
+  const privateHttp = Boolean(launched) || input.privateHttp === true || process.env.MX_RIG_ALLOW_PRIVATE_HTTP === '1'
+  const url = serviceUrl(launched?.serverUrl || input.url || process.env.MX_RIG_SERVER_URL || 'http://127.0.0.1:8791', {
+    privateHttp
+  })
+  return { url, privateHttp }
+}
+
+/** What the service's login page offers: browser SSO (docs/25 P4), passwords. */
+async function authMethods(input) {
+  let target
+  try {
+    target = loginTarget(input)
+  } catch {
+    return { sso: { enabled: false }, password: true }
+  }
+  return new RigClient({ ...target, token: '' }).request('/api/rig/v1/auth-methods').catch(() => ({ sso: { enabled: false }, password: true }))
+}
+
+// The browser sign-in waiting for its callback, so it can be cancelled.
+let browserSignInAbort = null
+
+/**
+ * Sign in through the system browser and the platform's unified
+ * authentication (browser-sign-in.mjs). Rig's session only: the product
+ * network stays anonymous and the overseas channel off, because the network
+ * token comes from a password grant (docs/25 §11).
+ */
+async function browserLogin(input) {
+  await endSession()
+  const { url, privateHttp } = loginTarget(input)
+  const next = new RigClient({ url, token: '', privateHttp })
+  const methods = await next.request('/api/rig/v1/auth-methods')
+  if (!methods.sso?.enabled) throw new RigError('sso_disabled', '这个 Rig 服务还没有开启统一认证登录')
+  browserSignInAbort = new AbortController()
+  let result
+  try {
+    result = await browserSignIn({
+      ssoOrigin: methods.sso.origin,
+      openExternal: (target) => shell.openExternal(target),
+      redeem: (body) => next.request('/api/rig/v1/desktop-login', body),
+      signal: browserSignInAbort.signal
+    })
+  } finally {
+    browserSignInAbort = null
+  }
+  next.token = result.token
+  const { principal } = await next.request('/api/rig/v1/me')
+  const started = await startSession({ next, token: result.token, principal, url, privateHttp, account: null })
+  return {
+    ...started,
+    ...(network ? { networkNote: '已用浏览器登录。内网仍是匿名网络，海外通道不可用；需要用户网络时，退出后用账号密码登录。' } : {})
   }
 }
 
@@ -442,17 +541,65 @@ app
       trusted(event)
       if (!input || typeof input.action !== 'string')
         throw new RigError('invalid_request', '请求无效')
-      if (input.action === 'login') return login(input.body || {})
+      if (input.action === 'login') {
+        if (loginPending) throw new RigError('login_pending', '正在登录，请稍候')
+        loginPending = true
+        try {
+          return await login(input.body || {})
+        } finally {
+          loginPending = false
+        }
+      }
+      if (input.action === 'browser-login') {
+        if (loginPending) throw new RigError('login_pending', '正在登录，请稍候')
+        loginPending = true
+        try {
+          return await browserLogin(input.body || {})
+        } finally {
+          loginPending = false
+        }
+      }
+      if (input.action === 'browser-login-cancel') {
+        browserSignInAbort?.abort()
+        return { cancelled: Boolean(browserSignInAbort) }
+      }
+      if (input.action === 'auth-methods') return authMethods(input.body || {})
       if (input.action === 'login-defaults') return loginDefaults()
       // The product network is there before anyone signs in: the login page needs it.
       if (input.action === 'network-status') return network ? network.snapshot() : null
       if (input.action === 'network-connect') {
         if (!network) throw new RigError('not_launcher', '这个安装包不是 Launcher 模式')
+        if (loginPending) throw new RigError('login_pending', '正在登录，请等待网络切换完成')
         return network.connect()
       }
       if (input.action === 'network-disconnect') {
         if (!network) throw new RigError('not_launcher', '这个安装包不是 Launcher 模式')
+        if (loginPending) throw new RigError('login_pending', '正在登录，请等待网络切换完成')
         return network.disconnect('manual')
+      }
+      if (input.action === 'network-recover') {
+        if (!network) throw new RigError('not_launcher', '这个安装包不是 Launcher 模式')
+        if (loginPending) throw new RigError('login_pending', '正在登录，请等待网络切换完成')
+        return network.recoverIdentity()
+      }
+      // The overseas channel follows the account's network, not the Rig login.
+      if (input.action === 'oversea-status') return oversea ? oversea.snapshot() : null
+      if (input.action.startsWith('oversea-')) {
+        if (!oversea) throw new RigError('not_launcher', '这个安装包不是 Launcher 模式')
+        if (input.action === 'oversea-start') return oversea.start()
+        if (input.action === 'oversea-stop') return oversea.stop()
+        if (input.action === 'oversea-browser') return oversea.setBrowser(input.body?.on === true)
+        throw new RigError('invalid_action', '未知动作')
+      }
+      // Updates too: a client too old to sign in can still be updated.
+      if (input.action === 'update-status') return updates ? updates.status() : null
+      if (input.action.startsWith('update-')) {
+        if (!updates) throw new RigError('not_launcher', '这个安装包不是 Launcher 模式')
+        if (input.action === 'update-check') return updates.check()
+        if (input.action === 'update-download') return updates.download()
+        if (input.action === 'update-install') return updates.install()
+        if (input.action === 'update-cancel') return updates.cancel()
+        throw new RigError('invalid_action', '未知动作')
       }
       if (input.action === 'me') return { principal: member }
       if (!client) throw new RigError('login_required', '请先登录')
@@ -957,17 +1104,59 @@ app
       }
     })
     const launcher = await launcherSettings()
-    if (launcher)
+    if (launcher) {
+      const version = await appVersion()
       network = await LauncherNetwork.open({
         dir: app.getPath('userData'),
         sdk: await import('@qpjoy/electron-launcher'),
         safeStorage,
         config: launcher,
-        appVersion: app.getVersion(),
+        appVersion: version,
         onChange: (snapshot) => {
           if (window && !window.isDestroyed()) window.webContents.send('mx-rig:network', snapshot)
+          updates?.networkChanged(snapshot)
+          oversea?.networkChanged(snapshot)
         }
       })
+      oversea = await LauncherOversea.open({
+        dir: app.getPath('userData'),
+        network,
+        sdk: await import('@qpjoy/electron-launcher'),
+        compiler: await import('@qpjoy/electron-core-mihomo'),
+        engine: () =>
+          prepareEngine({
+            shipped: shippedEngine({ packaged: app.isPackaged, resourcesPath: process.resourcesPath }),
+            cacheDir: join(app.getPath('userData'), 'mihomo-engine')
+          }),
+        onChange: (snapshot) => {
+          if (window && !window.isDestroyed()) window.webContents.send('mx-rig:oversea', snapshot)
+          syncLocalEgress()
+        }
+      })
+      updates = new LauncherUpdates({
+        sdk: await import('@qpjoy/electron-launcher/application-updater'),
+        network,
+        baseDir: app.getPath('userData'),
+        appVersion: version,
+        distribution: launcher.distribution,
+        openInstaller: async (filePath) => {
+          const message = await shell.openPath(filePath)
+          if (message) throw new Error(`无法打开安装程序：${message}`)
+        },
+        // The installer is open: stop what this app started, as on quit, then
+        // leave (app.exit skips before-quit, so it is done here).
+        cleanup: async () => {
+          quitting = true
+          await stopEverything()
+        },
+        exit: (code) => app.exit(code),
+        onChange: (state) => {
+          if (window && !window.isDestroyed()) window.webContents.send('mx-rig:update', state)
+        },
+        // The raw reason stays in this process's log.
+        log: (state) => console.info(`[mx-rig update] ${state.phase}${state.reason ? `: ${state.reason}` : ''}`)
+      })
+    }
     window = new BrowserWindow({
       width: 1440,
       height: 960,
@@ -1000,13 +1189,16 @@ app
     app.quit()
   })
 app.on('window-all-closed', () => app.quit())
+// Everything this app started, stopped: on quit, and before an installer
+// takes over.
+function stopEverything() {
+  // The tunnel lives as long as the app: it stops with it (at most 15 s).
+  const tunnel = network ? Promise.race([network.disconnect('shutdown'), new Promise((resolve) => setTimeout(resolve, 15_000))]) : null
+  return Promise.allSettled([stopWorker(), localRunner?.stop(10_000), station?.stop(10_000), provingGround?.close(), oversea?.shutdown(), tunnel])
+}
 app.on('before-quit', (event) => {
   if (quitting) return
   event.preventDefault()
   quitting = true
-  // The tunnel lives as long as the app: it stops with it (at most 15 s).
-  const tunnel = network ? Promise.race([network.disconnect('shutdown'), new Promise((resolve) => setTimeout(resolve, 15_000))]) : null
-  Promise.allSettled([stopWorker(), localRunner?.stop(10_000), station?.stop(10_000), provingGround?.close(), tunnel]).finally(() =>
-    app.quit()
-  )
+  stopEverything().finally(() => app.quit())
 })

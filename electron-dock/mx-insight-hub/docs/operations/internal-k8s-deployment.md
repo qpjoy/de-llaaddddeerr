@@ -209,6 +209,19 @@ before authentication, usage reservation, cache lookup or external-platform
 dispatch, so it cannot call JustOne. A failure therefore identifies Public-origin,
 listener or exact-path routing rather than provider availability.
 
+The same smoke now sends `POST /api/v2/data/search` with `{}` and **no credentials
+or idempotency key** to that configured origin. It requires `401` with JSON
+`error.code=api_key_required`, refuses redirects, and never acquires data. This
+checks the actual v2 handler: a generic `OPTIONS 204` alone cannot prove that a
+stale application has it. The Hub image and migration are insufficient when the
+external gateway still only allows `/api/v1/`. Publish the generic
+`/api/v2/` prefix location in both Domestic
+`compass/deploy/nginx/conf.d/40-hub.conf` and Internal
+`compass/deploy/internal-nginx/hub.minsight-ai.com.conf` in the `de-mingxi`
+repository; its `compass/deploy/HUB-SEARCH-V2.md` describes the two independent
+reloads. Do not change the request URI to v1 or clear old idempotency/unknown
+records. Existing login, SSO and MX-H2I routing are separate unchanged blocks.
+
 For a browser POST, inspect the JSON error code rather than treating every HTTP
 404 as a missing route:
 

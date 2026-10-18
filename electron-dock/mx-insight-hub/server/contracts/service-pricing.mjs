@@ -1,10 +1,12 @@
 import { nativeForwardingByPath } from './native-forwarding.mjs'
 import { hubSocialByPath } from './hub-social.mjs'
+import { YOUTUBE_COMMENT_PATHS, YOUTUBE_COMMENTS_CAPABILITY } from './youtube-comments.mjs'
 import { QIXIN_CATALOG } from './enterprise.mjs'
 import { customerRequestPrice } from '../billing/contracts.mjs'
 import { XIAOHONGSHU_ANALYTICS_METERS } from '../../shared/product-catalog.mjs'
 const enterprises = new Set(QIXIN_CATALOG.apis.map(api => api.api_id))
 export function servicePriceDefinition(path) {
+  if (Object.values(YOUTUBE_COMMENT_PATHS).includes(path)) return { platform: 'youtube', capabilities: [YOUTUBE_COMMENTS_CAPABILITY], meterKey: YOUTUBE_COMMENTS_CAPABILITY }
   const analytics = XIAOHONGSHU_ANALYTICS_METERS.find(entry => entry.path === path)
   if (analytics) return { platform: 'xiaohongshu', capabilities: ['social.posts.analytics'], meterKey: analytics.key }
   const social = hubSocialByPath(path)

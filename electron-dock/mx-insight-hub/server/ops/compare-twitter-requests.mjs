@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
-// Explicit comparison of three operator-selected requests. No business API,
+// Read one operator-selected request, or compare three. No business API,
 // status reaper, credential read, provider dispatch or history mutation.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const PATHS = ['/api/v1/data/search', '/api/v1/search/raw', '/api/v1/night-all/search/raw', '/api/v1/data/social/search']
@@ -130,8 +130,7 @@ function compare(left, right) {
       ? JSON.stringify(left.currentFirstCall) === JSON.stringify(right.currentFirstCall) : null }
 }
 
-export async function compareTwitterRequests(pool, { originalRequestId, failedRequestId, successRequestId }, normalizers = {}) {
-  const selected = { original: originalRequestId, failed: failedRequestId, success: successRequestId }
+async function readTwitterRequests(pool, selected, normalizers) {
   if (!Object.values(selected).every(id => typeof id === 'string' && UUID.test(id))) throw new Error('invalid_request_id')
   let client
   try {
@@ -182,9 +181,7 @@ export async function compareTwitterRequests(pool, { originalRequestId, failedRe
         savedInput: projectTwitterSavedInput(row.acquisition_request), currentFirstCall: reconstructedInput(row.acquisition_request, normalizers),
         ownCalls, callsTruncated: calls.length > CALL_LIMIT }
     }
-    return { diagnosticRevision: 'twitter-request-comparison.v1', requests,
-      comparisons: { originalVsRetry: compare(requests.original, requests.failed), retryVsSuccess: compare(requests.failed, requests.success) },
-      interpretation: 'Exact operator-selected requests. HTTP 400 is a saved upstream refusal, unlike an unknown transport outcome. Query differences or current-code reconstruction alone do not prove its cause. No dispatch, credential read or settlement change.' }
+    return requests
   } catch (error) { throw new Error(safeFailure(error)) }
   finally {
     if (client) {
@@ -196,11 +193,25 @@ export async function compareTwitterRequests(pool, { originalRequestId, failedRe
   }
 }
 
+export async function compareTwitterRequests(pool, { originalRequestId, failedRequestId, successRequestId }, normalizers = {}) {
+  const requests = await readTwitterRequests(pool,
+    { original: originalRequestId, failed: failedRequestId, success: successRequestId }, normalizers)
+  return { diagnosticRevision: 'twitter-request-comparison.v1', requests,
+    comparisons: { originalVsRetry: compare(requests.original, requests.failed), retryVsSuccess: compare(requests.failed, requests.success) },
+    interpretation: 'Exact operator-selected requests. HTTP 400 is a saved upstream refusal, unlike an unknown transport outcome. Query differences or current-code reconstruction alone do not prove its cause. No dispatch, credential read or settlement change.' }
+}
+
+export async function diagnoseTwitterRequest(pool, requestId, normalizers = {}) {
+  const { request } = await readTwitterRequests(pool, { request: requestId }, normalizers)
+  return { diagnosticRevision: 'twitter-request-diagnostic.v1', readOnly: true, businessCalls: 0, request,
+    interpretation: 'One exact operator-selected request and its own calls only. HTTP 400 is a saved upstream refusal; projected error text is the supplier statement, not independent proof of its cause. Current-code reconstruction is not the historical outgoing URL. No dispatch, credential read or settlement change.' }
+}
+
 if (process.argv[1] === '-' || process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   let pool
   try {
-    const [originalRequestId, failedRequestId, successRequestId, extra] = process.argv.slice(2)
-    if (extra || ![originalRequestId,failedRequestId,successRequestId].every(id => UUID.test(id || ''))) throw new Error('invalid_arguments')
+    const requestIds = process.argv.slice(2)
+    if (![1, 3].includes(requestIds.length) || !requestIds.every(id => UUID.test(id))) throw new Error('invalid_arguments')
     if (!process.env.DATABASE_URL) throw new Error('database_url_required')
     const root = process.argv[1] === '-' ? pathToFileURL(`${process.cwd()}/`) : new URL('../../', import.meta.url)
     let normalizers = {}
@@ -213,7 +224,10 @@ if (process.argv[1] === '-' || process.argv[1] && import.meta.url === pathToFile
     const sources = files.map(file => { try { return { file, sha256: sha(readFileSync(new URL(file, root))) } } catch { return { file, sha256: null } } })
     const { default: pg } = await import('pg')
     pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000, query_timeout: 6000 })
-    console.log(JSON.stringify({ ...await compareTwitterRequests(pool, { originalRequestId,failedRequestId,successRequestId }, normalizers),
+    const [originalRequestId, failedRequestId, successRequestId] = requestIds
+    const report = requestIds.length === 1 ? await diagnoseTwitterRequest(pool, originalRequestId, normalizers)
+      : await compareTwitterRequests(pool, { originalRequestId, failedRequestId, successRequestId }, normalizers)
+    console.log(JSON.stringify({ ...report,
       runtime: { scope: 'diagnostic_container_only_not_public_serving_version', installedSources: sources } }, null, 2))
   } catch (error) { console.error(JSON.stringify({ error: safeFailure(error) })); process.exitCode = 1 }
   finally { await pool?.end() }

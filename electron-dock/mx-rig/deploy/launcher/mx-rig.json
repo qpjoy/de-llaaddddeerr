@@ -11,6 +11,7 @@
     "displayName": "MX Rig",
     "fullName": "MX Rig 测试工作台",
     "packageName": "@qpjoy/mx-rig",
+    "channels": ["stable"],
     "category": "custom",
     "description": "Standalone test workbench: projects, cases, test repositories, runners and evidence. Reaches its own service through its own product network.",
     "launcherMode": "standalone",
@@ -30,5 +31,20 @@
     },
     "updatePolicy": "launcher-managed"
   },
-  "releaseComponents": ["mx-rig", "mx-rig-renderer"]
+  "release": {
+    "packageName": "@qpjoy/mx-rig",
+    "channel": "stable",
+    "componentId": "mx-rig",
+    "kinds": ["app-installer"],
+    "publisher": "svc_mx-rig_release_publisher",
+    "approver": "svc_mx-rig_release_approver"
+  },
+  "sso": {
+    "appId": "mx-rig",
+    "displayName": "MX Rig",
+    "entrance": "公网认证",
+    "origin": "https://rig.minsight-ai.com",
+    "audience": "mx-rig",
+    "callback": "https://rig.minsight-ai.com/auth/sso/callback"
+  }
 }

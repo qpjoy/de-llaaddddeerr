@@ -34,6 +34,7 @@ import {
 } from "./workflow-input.mjs";
 import { APP_NAMES } from "./apps.mjs";
 import { normalizePoolPolicy } from "./pool-policy.mjs";
+import { sessionWaitUntil } from "./ledger.mjs";
 import { deviceApps, appBlockers, ensureApps } from "./apps.mjs";
 import {
   compareJobs,
@@ -432,7 +433,7 @@ function yieldedSession(s, now, d, ignoreCooldown = false) {
 // A task's own dispatch reservation does not block its next step. Another task's rest does.
 function sessionAppCooldown(s, d, { a, j }) {
   const app = deviceApps(s, d).find((x) => x.appId === j.appId);
-  return app && app.lastAttemptId !== a.id ? app.cooldownUntil || 0 : 0;
+  return sessionWaitUntil({ cooldownUntil: 0 }, app, a.id);
 }
 function resumeSession(s, now, d, { a, j, w }, workerId) {
   if (w.detourStartedAt != null) {

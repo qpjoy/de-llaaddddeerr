@@ -23,10 +23,10 @@ test('Data Center offers an admin-only exact-delivery acquisition history lookup
   assert.match(api, /acquisitionHistory: \(token, requestId\) => request\([\s\S]*?\/acquisitions\/\$\{encodeURIComponent\(requestId\)\}/u)
 })
 
-test('request-validation sessions belong to the authenticated App and survive a Data Browser unmount', async () => {
+test('request-validation sessions belong to the authenticated App and survive a Diagnostics Center unmount', async () => {
   const [app, page, diagnostics] = await Promise.all([
     readFile(new URL('../../src/App.jsx', import.meta.url), 'utf8'),
-    readFile(new URL('../../src/pages-data-browser.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/pages-diagnostics.jsx', import.meta.url), 'utf8'),
     readFile(new URL('../../src/request-diagnostics.jsx', import.meta.url), 'utf8'),
   ])
   assert.match(app, /const diagnosticComparisonSession = useMemo\(\(\) => \(\{ current: null \}\), \[token\]\)/u)

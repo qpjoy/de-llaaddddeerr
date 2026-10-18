@@ -2658,3 +2658,89 @@ details.rig-run-case > .rig-run-case__summary {
 .rig-network-chip[data-status='error'] {
   color: var(--qp-danger);
 }
+
+/* Launcher mode (docs/25 P2): a new version from Release Center. Docked at the
+   bottom right, over both the login page and the workbench; the tour panel
+   (bottom centre, z-index 61) keeps the middle. */
+.rig-update {
+  position: fixed;
+  right: var(--qp-space-4);
+  bottom: var(--qp-space-4);
+  z-index: 62;
+  width: min(380px, calc(100vw - 2 * var(--qp-space-4)));
+  max-height: 60vh;
+  overflow-y: auto;
+  display: grid;
+  gap: var(--qp-space-2);
+  padding: var(--qp-space-4);
+  border: 1px solid var(--qp-primary);
+  border-radius: var(--qp-radius-md);
+  background: var(--qp-bg-2);
+}
+
+.rig-update p {
+  margin: 0;
+}
+
+.rig-update__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--qp-space-2);
+}
+
+.rig-update__progress {
+  width: 100%;
+  accent-color: var(--qp-primary);
+}
+
+.rig-update__notes {
+  margin: var(--qp-space-1) 0 0;
+  max-height: 12rem;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  font-family: inherit;
+}
+
+.rig-update__id {
+  user-select: all;
+  word-break: break-all;
+}
+
+.rig-update-line {
+  display: flex;
+  align-items: center;
+  gap: var(--qp-space-2);
+}
+
+.rig-update-chip[data-phase='available'],
+.rig-update-chip[data-phase='downloading'],
+.rig-update-chip[data-phase='verifying'],
+.rig-update-chip[data-phase='ready'] {
+  color: var(--qp-primary);
+}
+
+/* Launcher mode (docs/25 P3): the desktop's overseas channel on 出网与通道. */
+.rig-oversea__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--qp-space-2);
+}
+
+/* Browser SSO on the login page (docs/25 P4). */
+.rig-sso {
+  display: grid;
+  justify-items: center;
+  gap: var(--qp-space-2);
+}
+
+.rig-sso > .qp-button--lg {
+  width: 100%;
+}
+
+.rig-sso p {
+  margin: 0;
+  text-align: center;
+}

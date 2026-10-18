@@ -189,6 +189,9 @@ try {
   await page.waitForFunction((origin) => document.querySelector('#server').value === origin, server.origin)
   await page.locator('#account').fill('admin')
   await page.locator('#password').fill('desktop-test-secret')
+  // Browser SSO (docs/25 P4) is offered only by a service that has a profile; this one has none.
+  assert.deepEqual(await page.evaluate(() => window.mxRig.request('auth-methods', { url: document.querySelector('#server').value })), { sso: { enabled: false }, password: true })
+  assert.equal(await page.locator('#sso-panel').isVisible(), false)
   await page.locator('#login-form button[type=submit]').click()
   console.log('Submitted native login')
   await page.locator('#workspace').waitFor({ state: 'visible' })
@@ -842,7 +845,14 @@ try {
   try {
     desktop = await _electron.launch({
       ...launch,
-      env: { ...env, MX_RIG_LAUNCHER: '1', MX_RIG_BOOTSTRAP_URLS: `http://127.0.0.1:${entrance.address().port}`, MX_RIG_USER_DATA_DIR: join(state, 'launcher-profile') },
+      env: {
+        ...env,
+        MX_RIG_LAUNCHER: '1',
+        MX_RIG_BOOTSTRAP_URLS: `http://127.0.0.1:${entrance.address().port}`,
+        MX_RIG_USER_DATA_DIR: join(state, 'launcher-profile'),
+        // Updates as an installed copy would have them (docs/25 P2).
+        MX_RIG_UPDATE_DISTRIBUTION: 'installed'
+      },
       timeout: 30_000
     })
     const launched = await desktop.firstWindow()
@@ -854,12 +864,36 @@ try {
     await launched.locator('#network-connect').click()
     await launched.locator('#network-message', { hasText: 'scripts/manage.sh launcher plan' }).waitFor()
     assert.equal(await launched.locator('#network-status').getAttribute('data-status'), 'error')
+    // Updates (docs/25 P2) come from Release Center behind the product VIP:
+    // the version is shown, and 检查更新 without the network says so, with the
+    // install ID a targeted plan is made for. Nothing reaches the page but text.
+    const { version } = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
+    await launched.locator('#update-version', { hasText: version }).waitFor()
+    assert.equal(await launched.locator('#update-banner').isVisible(), false, 'no card before there is something to say')
+    await launched.locator('#update-check').click()
+    await launched.locator('#update-text', { hasText: '连上内网后才能检查更新' }).waitFor()
+    assert.match(await launched.locator('#update-install-id').textContent(), /^安装 ID：[0-9a-f-]{36}/)
+    assert.equal(await launched.locator('#update-download').isVisible(), false)
+    assert.equal(await launched.locator('#update-install').isVisible(), false)
     await launched.screenshot({ path: join(qa, 'desktop-launcher-login.png') })
+    await launched.locator('#update-close').click()
+    assert.equal(await launched.locator('#update-banner').isVisible(), false)
+    // The overseas channel (docs/25 P3) follows the account's network: without
+    // a unified sign-in it waits, remembers that it was asked for, and turns off.
+    const overseaOff = await launched.evaluate(() => window.mxRig.request('oversea-status'))
+    assert.deepEqual([overseaOff.state, overseaOff.enabled, overseaOff.usingBrowser], ['off', false, false])
+    const overseaWaiting = await launched.evaluate(() => window.mxRig.request('oversea-start'))
+    assert.deepEqual([overseaWaiting.state, overseaWaiting.enabled], ['unavailable', true])
+    assert.match(overseaWaiting.text, /统一账号登录/)
+    assert.equal((await launched.evaluate(() => window.mxRig.request('oversea-stop'))).state, 'off')
+    // Nothing to ask about browser SSO until the service is reachable through the network.
+    assert.deepEqual(await launched.evaluate(() => window.mxRig.request('auth-methods', {})), { sso: { enabled: false }, password: true })
+    await assert.rejects(launched.evaluate(() => window.mxRig.request('browser-login', {})), /先连上内网/)
   } finally {
     entrance.close()
   }
   console.log(
-    'Desktop smoke passed: login, isolated renderer, runtime worker, exact approval, real test API dispatch, settings, the system layer over whitelisted IPC, one-line dispatch parsing, station duty (register, watch, polite stop, unregister), the in-app report window, accounts and machines over the main process, the run detail (live timeline over JSON, a recording played and seeked through rig-media:, the 对外版 saved as PDF), the read-only tour in 演示 (taken over, resumed, stopped at the step the person presses) and its published recording playing through rig-media:, a project from the Compass pack built by following its tour (which then counts in 系统) with its snapshot, QA repository and pinned plans (baseline updated, old snapshot kept, a release check pinning the branch tip and running every case), the test repository (an approved implementation written, its commit run, verified, merged and published as v1), a new project on the proving ground by following its tour up to the run, logout, and Launcher mode (the network first, an unregistered product explained).'
+    'Desktop smoke passed: login, isolated renderer, runtime worker, exact approval, real test API dispatch, settings, the system layer over whitelisted IPC, one-line dispatch parsing, station duty (register, watch, polite stop, unregister), the in-app report window, accounts and machines over the main process, the run detail (live timeline over JSON, a recording played and seeked through rig-media:, the 对外版 saved as PDF), the read-only tour in 演示 (taken over, resumed, stopped at the step the person presses) and its published recording playing through rig-media:, a project from the Compass pack built by following its tour (which then counts in 系统) with its snapshot, QA repository and pinned plans (baseline updated, old snapshot kept, a release check pinning the branch tip and running every case), the test repository (an approved implementation written, its commit run, verified, merged and published as v1), a new project on the proving ground by following its tour up to the run, logout, and Launcher mode (the network first, an unregistered product explained, updates waiting for the network, the overseas channel waiting for a unified sign-in, browser sign-in waiting for the network).'
   )
 } catch (error) {
   console.error(error)

@@ -1,4 +1,5 @@
-import { recordLoopUsage, recordPoolDispatch } from "./loop-policy.mjs";
+import { pacingBlockers } from "./ledger.mjs";
+import { ensureAccountFor } from "./accounts.mjs";
 // Scheduling metadata only. An App entry never creates another physical slot.
 export const APP_NAMES = {
   xhs: "小红书",
@@ -56,7 +57,11 @@ export function deviceApps(state, device, index) {
 export function ensureApps(state, device) {
   state.apps ||= [];
   for (const app of deviceApps(state, device))
-    if (!state.apps.some((a) => a.id === app.id)) state.apps.push(app);
+    if (!state.apps.some((a) => a.id === app.id)) {
+      state.apps.push(app);
+      // Every App row names an account; it joins the account pool at once.
+      ensureAccountFor(state, device, app);
+    }
   return deviceApps(state, device);
 }
 
@@ -83,49 +88,6 @@ export function appBlockers(state, now, device, job, index) {
         message: "此设备尚未迁入任务所需的全部指令",
       },
     ];
-  if (app.cooldownUntil > now)
-    return [
-      {
-        code: "app-cooldown",
-        appId,
-        until: app.cooldownUntil,
-        message: `${appName(appId)}账号冷却中，约 ${Math.ceil((app.cooldownUntil - now) / 1000)} 秒；其他 App 可独立匹配`,
-      },
-    ];
-  return [];
-}
-
-export function recordAppDispatch(state, now, device, attempt) {
-  const app = ensureApps(state, device).find(
-    (a) => a.appId === jobApp(attempt),
-  );
-  if (!app) return;
-  recordPoolDispatch(state, now, device, attempt);
-  app.lastDispatchedAt = now;
-  app.lastAttemptId = attempt.id;
-  // Charge even when the subsequent response is lost. Completion may extend this.
-  app.cooldownUntil = Math.max(app.cooldownUntil, now + app.cooldownMs);
-  device.lastDispatchedAt = now;
-  device.cooldownUntil = Math.max(
-    device.cooldownUntil || 0,
-    now + deviceInterval(device),
-  );
-}
-
-export function recordAppFinish(state, now, device, attempt) {
-  const app = ensureApps(state, device).find(
-    (a) => a.appId === jobApp(attempt),
-  );
-  if (!app) return;
-  app.lastFinishedAt = now;
-  app.lastSucceededAt = now;
-  recordLoopUsage(state, now, device, app, attempt);
-  app.lastAttemptId = attempt.id;
-  app.cooldownUntil = Math.max(app.cooldownUntil, now + app.cooldownMs);
-  device.lastFinishedAt = now;
-  device.lastSucceededAt = now;
-  device.cooldownUntil = Math.max(
-    device.cooldownUntil || 0,
-    now + deviceInterval(device),
-  );
+  // Session and account pacing come from the ledger (scope, primitive, until).
+  return pacingBlockers(state, now, device, job, app);
 }

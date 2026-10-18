@@ -41,6 +41,19 @@ await checkStatus(ecommerceSearchPath, 204, {
   },
 }, publicBase)
 
+// Both external nginx hops must explicitly publish the new contract. An
+// OPTIONS-only check can pass a generic CORS handler on a stale application;
+// an unauthenticated POST must reach Hub's exact v2 route and fail before any
+// usage reservation, input interpretation or supplier dispatch.
+const searchV2Response = await fetch(`${publicBase}/api/v2/data/search`, {
+  method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(15_000),
+  headers: { 'content-type': 'application/json' }, body: '{}',
+})
+const searchV2Payload = await searchV2Response.json().catch(() => null)
+if (searchV2Response.status !== 401 || searchV2Payload?.error?.code !== 'api_key_required') {
+  throw new Error(`POST ${publicBase}/api/v2/data/search: expected HTTP 401 api_key_required, got HTTP ${searchV2Response.status}; check both Hub nginx routes and the Public image`)
+}
+
 if (process.env.MX_SMOKE_DATA === '1') {
   const keyFile = process.env.MX_INSIGHT_API_KEY_FILE || '.runtime/local-api-key'
   const apiKey = (process.env.MX_INSIGHT_API_KEY || await readFile(keyFile, 'utf8')).trim()

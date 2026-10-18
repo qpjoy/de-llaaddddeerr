@@ -479,10 +479,14 @@ test("applying a strategy preserves running attempts and earned cooldowns; manua
 });
 
 test("migration seeds match memory catalogs and never apply strategies or create real rules", async () => {
-  const sql = await readFile(
-    new URL("../migrations/008_scheduling_strategies.sql", import.meta.url),
-    "utf8",
-  );
+  // Seeds span migration 008 and the pacing seeds of 012.
+  const sql = (
+    await Promise.all(
+      ["008_scheduling_strategies.sql", "012_pacing_rules.sql"].map((name) =>
+        readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"),
+      ),
+    )
+  ).join("\n");
   const documents = [...sql.matchAll(/'((?:[^']|'')*)'::jsonb/g)].map((match) =>
     JSON.parse(match[1].replaceAll("''", "'")),
   );

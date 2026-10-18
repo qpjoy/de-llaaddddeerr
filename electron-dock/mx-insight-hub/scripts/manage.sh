@@ -1893,7 +1893,7 @@ SQL
 
 # Report whether the fixed saved-records pipeline is unconfigured, points at
 # this host's PostgreSQL, or needs an explicitly named deploy-time libpq
-# service. The query compares all 13 effective transports without returning a
+# service. The query compares all registered crawler transports without returning a
 # password or any other connection value to the shell.
 night_all_saved_records_source_mode() {
   kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
@@ -1904,8 +1904,12 @@ WITH expected(source_key) AS (
       'automotive', 'finance', 'forum', 'hotspot', 'local_news', 'media',
       'news', 'other', 'recruitment', 'research', 'social', 'technology', 'web'
     ]::text[]) AS source_type
+  UNION
+  SELECT source_key FROM catalog.external_sources
+   WHERE source_key LIKE 'night-all-saved-records-%'
 ), effective AS (
-  SELECT source.source_key,
+  SELECT source.source_key, source.source_kind,
+         source.connection AS locator,
          coalesce(profile.connection, source.connection) AS connection
     FROM expected
     LEFT JOIN catalog.external_sources AS source
@@ -1913,7 +1917,25 @@ WITH expected(source_key) AS (
     LEFT JOIN catalog.database_connections AS profile
       ON profile.id = source.database_connection_id
 ), inspected AS (
-  SELECT count(source_key) AS source_count,
+  SELECT count(*) AS expected_count, count(source_key) AS source_count,
+         count(*) FILTER (
+           WHERE source_kind IS DISTINCT FROM 'database'
+              OR (nullif(connection ->> 'database', '') IS NOT NULL
+                  AND connection ->> 'database' <> 'agent_data_crawler_platform')
+              OR source_key !~ '^night-all-saved-records-[a-z][a-z0-9]*(-[a-z0-9]+)*$'
+              OR length(substring(source_key FROM 25)) > 38
+              OR coalesce(locator ->> 'schema', '') <> 'public'
+              OR coalesce(locator ->> 'table', '') <> 'saved_records_' || replace(substring(source_key FROM 25), '-', '_')
+              OR coalesce(locator ->> 'cursorColumn', '') <> 'last_seen_at'
+              OR coalesce(locator ->> 'idColumn', '') <> 'id'
+         ) AS invalid_source_count,
+         count(*) FILTER (
+           WHERE nullif(connection ->> 'host', '') IS NOT NULL
+              OR nullif(connection ->> 'database', '') IS NOT NULL
+              OR nullif(connection ->> 'username', '') IS NOT NULL
+              OR nullif(connection ->> 'password', '') IS NOT NULL
+              OR nullif(connection ->> 'dsnEnv', '') IS NOT NULL
+         ) AS configured_count,
          count(*) FILTER (
            WHERE nullif(connection ->> 'host', '') IS NOT NULL
              AND nullif(connection ->> 'database', '') IS NOT NULL
@@ -1949,10 +1971,10 @@ WITH expected(source_key) AS (
     FROM effective
 )
 SELECT CASE
-         WHEN source_count <> 13 THEN 'drift'
-         WHEN direct_count = 0 AND dsn_count = 0 THEN 'unconfigured'
-         WHEN dsn_count = 13 AND dsn_transport_count = 1 THEN 'external'
-         WHEN direct_count <> 13 OR direct_transport_count <> 1 THEN 'drift'
+         WHEN expected_count > 500 OR source_count <> expected_count OR invalid_source_count > 0 THEN 'drift'
+         WHEN configured_count = 0 THEN 'unconfigured'
+         WHEN dsn_count = expected_count AND dsn_transport_count = 1 THEN 'external'
+         WHEN direct_count <> expected_count OR direct_transport_count <> 1 THEN 'drift'
          WHEN host = '127.0.0.1'
           AND port = '5432'
           AND database = 'agent_data_crawler_platform' THEN 'local'
@@ -2043,7 +2065,7 @@ SQL
   printf 'mismatch\n'
 }
 
-# Reconcile the 13 source cursor indexes after the new Admin is Ready but
+# Reconcile supported source cursor indexes after the new Admin is Ready but
 # before the ingest worker is rolled out. A local 127.0.0.1 source uses the
 # host PostgreSQL operator through peer auth. A remote source must name a root-
 # managed libpq service; its password stays in that service's passfile rather
@@ -2066,8 +2088,9 @@ ensure_night_all_saved_records_source_indexes() {
       local local_identity="unavailable"
       local_identity="$(night_all_saved_records_local_identity)" || local_identity="unavailable"
       if [ "$local_identity" = match ]; then
-        say "reconciling 13 Night-All saved-records source indexes through verified local PostgreSQL peer auth"
+        say "reconciling supported Night-All saved-records source indexes through verified local PostgreSQL peer auth"
         if ! night_all_saved_records_local_psql -v ON_ERROR_STOP=1 <"$sql_file"; then
+          say "Inspect source indexes and blockers with scripts/night-all-saved-records-index-status.sql on this same source; completed index steps are retained." >&2
           die "Night-All saved-records source indexes failed through verified local peer auth"
         fi
         return 0
@@ -2090,12 +2113,13 @@ ensure_night_all_saved_records_source_indexes() {
     *[!A-Za-z0-9_.-]*) die "MX_INSIGHT_NIGHT_ALL_DDL_SERVICE contains unsupported characters" ;;
   esac
   need psql
-  say "reconciling 13 Night-All saved-records source indexes through libpq service ${service}"
+  say "reconciling supported Night-All saved-records source indexes through libpq service ${service}"
   if ! env -u PGOPTIONS -u PGHOST -u PGPORT -u PGDATABASE -u PGUSER \
     -u PGPASSWORD -u PGSERVICE -u PGCONNECT_TIMEOUT \
     psql -X -w \
     -d "service=${service} dbname=agent_data_crawler_platform connect_timeout=10" \
     -v ON_ERROR_STOP=1 <"$sql_file"; then
+    say "Inspect source indexes and blockers with scripts/night-all-saved-records-index-status.sql through this same service; completed index steps are retained." >&2
     die "Night-All saved-records source indexes could not be reconciled through libpq service ${service}"
   fi
 }

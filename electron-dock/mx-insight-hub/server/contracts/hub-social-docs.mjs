@@ -58,11 +58,11 @@ function accountOperation(row) {
     platform: { type: 'string', enum: accountPlatforms(row.key), description: '一次请求只选择一个平台；已发布的平台别名继续兼容，响应使用规范平台名。' },
     businessId: { type: 'string', deprecated: true, description: '历史兼容字段；可省略。提交时必须等于当前认证消费者绑定的值，不能改变调用身份。' },
     business_id: { type: 'string', deprecated: true, description: 'businessId 的历史别名；同样受当前认证身份绑定。' },
-    username: { ...identifier, description: '平台用户名；Twitter 支持 @ 前缀。与平台账号 ID 的含义不同。' },
-    usernames: identifiers,
+    username: { ...identifier, description: '平台用户名；Twitter 去掉 @ 后为 1–15 位英文字母、数字或下划线。纯数字用户名仍按用户名查询，与数字 userId 不同。' },
+    usernames: { ...identifiers, description: '平台用户名列表；Twitter 每个用户名去掉 @ 后为 1–15 位英文字母、数字或下划线，纯数字值仍是用户名。' },
     userId: { ...identifier, description: '平台账号 ID。Twitter 非数字兼容值按用户名解析；Hub 内部任务 ID 不能保证存在对应平台账号。' },
     userIds: identifiers, user_id: identifier, uid: identifier,
-    url: identifier, urls: identifiers, profileUrl: identifier, profile_url: identifier,
+    url: { ...identifier, description: '平台主页 URL；Twitter 路径中的账号名按用户名解析，包括纯数字账号名。' }, urls: identifiers, profileUrl: identifier, profile_url: identifier,
     channelId: identifier, channel_id: identifier, channelUrl: identifier, channel_url: identifier,
     count: { type: 'integer', minimum: 1, maximum: 500, default: 20, description: `逻辑页上限，仍受当前 Key 页大小上限约束。兼容优先级 ${row.key === 'crawl' ? 'count > pageSize > page_size > limit' : 'limit > count > pageSize > page_size'}；pageSize 与 page_size 同时出现须相同。不足一页不代表没有后续。` },
     pageSize: { type: 'integer', minimum: 1, maximum: 500 }, page_size: { type: 'integer', minimum: 1, maximum: 500 }, limit: { type: 'integer', minimum: 1, maximum: 500 },
@@ -87,6 +87,7 @@ function accountOperation(row) {
     responses: Object.fromEntries([200, 400, 401, 402, 403, 409, 429, 502, 503].map(status => [String(status), {
       description: status === 200 ? 'contractVersion、data（platform、items、raw_info、raw_data、page、pageInfo、meta、status、warnings）与 requestId。raw_info/raw_data 是 JSON 字符串；items 是数组，posts 等为内容条目，followers/following 和账号资料为账号条目。page/pageInfo 的 hasMore 与 nextCursor 同步。returnedCount 只描述本页，不代表账号总内容数。' : '稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。',
       ...(status === 200 ? { content: { 'application/json': { schema: accountResponseSchema(row.key) } } } : {}),
+      ...(status === 400 ? { description: '参数或游标错误。Twitter 用户名格式错误为 invalid_social_request；error.details 包含 platform、field、reason（username_too_long 或 username_invalid_characters）、actualLength、maxLength（15）。不回显整个输入，不自动重试。' } : {}),
     }])),
   }
 }

@@ -14,7 +14,9 @@ const routes = implementedRoutes()
 export const PROVISIONING_OPERATIONS = Object.entries(EXTERNAL_PLATFORM_OPERATION_CATALOG).filter(([provider]) => provider !== 'baidu-ip').flatMap(([provider, definitions]) => definitions.map(definition => {
   const operation = definition.operationKey
   const endpoint = native.get(operation)
-  const matches = routes.filter(row => row.provider === provider && row.operation === operation)
+  // Composed business routes may share a customer meter with another product;
+  // their child native operations, not that meter, own procurement controls.
+  const matches = routes.filter(row => row.procurementOperation !== false && row.provider === provider && row.operation === operation)
   const enterprise = provider === 'qixin'
   const platform = (operation==='web.search'?'web_search':null) || endpoint?.authorizationPlatform || Object.values(HUB_SOCIAL_ENDPOINTS).find(row => row.operation === operation)?.platform || (enterprise ? 'enterprise' : operation.startsWith('ecommerce.') ? 'ecommerce' : operation === 'social.accounts.search' ? 'social' : 'xiaohongshu')
   return { id: `${provider}:${operation}`, provider, operation, label: definition.label,

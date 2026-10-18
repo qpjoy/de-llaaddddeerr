@@ -30,6 +30,7 @@ async function occupiedGateway(t) {
     return Response.json(payload)
   } })
   const gateway = new IpRiskGateway({ usageStore: store, platformStore, adapter, enabled: true,
+    config: { maxConcurrency: 3, maxConsumerConcurrency: 3, maxRequestsPerMinute: 60 },
     concurrencyPolicy: { maxWaitMs: 1000, maxPending: 2 } })
   const originalEnter = gateway.concurrencyQueue.enter.bind(gateway.concurrencyQueue)
   gateway.concurrencyQueue.enter = input => { const result = originalEnter(input); queued.resolve(); return result }
@@ -48,6 +49,24 @@ test('IP adapters declare the full original workflow budget including both Baidu
   assert.equal(new IpSearchAdapter({ timeoutMs: 12000 }).dispatchBudgetMs, 12000)
   assert.equal(new BaiduIpRiskAdapter().dispatchBudgetMs, 40000)
   assert.equal(new BaiduIpRiskAdapter({ timeoutMs: 12000 }).dispatchBudgetMs, 44000)
+})
+
+test('saved admission IP consumer capacity and wait policy apply while earlier calls remain active', async t => {
+  const { attachAdmissionPolicy } = await import('../fixtures/admission-policy.mjs')
+  const f = await occupiedGateway(t)
+  const { save } = attachAdmissionPolicy(f.gateway)
+  await save({ maxConcurrency: 4, maxConsumerConcurrency: 3, maxWaitMs: 10 })
+  await assert.rejects(f.gateway.query(f.context, request(4)), error => error.code === 'external_platform_busy'
+    && error.details.reason === 'concurrency_queue_timeout')
+  assert.equal(f.calls.length, 3)
+  await save({ maxConsumerConcurrency: 4 })
+  assert.equal((await f.gateway.query(f.context, request(5))).status, 200)
+  assert.equal(f.calls.length, 4)
+  assert.equal(f.gateway.active, 3)
+  assert.equal(f.gateway.activeByConsumer.get(f.context.consumer.id), 3)
+  f.release(); await Promise.all(f.active)
+  assert.equal(f.gateway.active, 0)
+  assert.equal(f.gateway.activeByConsumer.size, 0)
 })
 
 test('fourth IP query waits for the existing three slots without consuming supplier capacity and replays once', async (t) => {

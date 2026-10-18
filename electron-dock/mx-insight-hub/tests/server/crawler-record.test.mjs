@@ -6,6 +6,7 @@ import {
 } from '../../server/ingest/external/mapping.mjs'
 import { DatabaseSourcePuller } from '../../server/ingest/external/database-source.mjs'
 import {
+  CRAWLER_FIELD_MAP,
   CRAWLER_SOURCE_COLUMN_CONTRACT,
   CRAWLER_WRITER_CONTRACT_DIGEST,
   CRAWLER_WRITER_CONTRACT_VERSION,
@@ -395,6 +396,49 @@ test('crawler enrichment keeps identity and lineage while separating collector a
   assert.equal(safeEnrichment.includes('must-not-leak'), false)
 })
 
+test('crawler batch tags stay in raw evidence under existing mappings without changing canonical identity', () => {
+  const source = crawlerPullSource()
+  const map = raw => applyMapping(raw, CRAWLER_FIELD_MAP, {
+    platform: source.platform, objectType: source.objectType,
+  }).record
+  const original = rawFixture()
+  const tagged = { ...rawFixture(), tag: 'private-batch-label' }
+  const baseline = map(original)
+  const record = map(tagged)
+  const rawHash = record.rawPayloadSha256
+  assert.equal(record.extensions.tag, tagged.tag)
+  const mappedExtensions = record.extensions
+
+  enrichCrawlerRecord(baseline, original, source)
+  enrichCrawlerRecord(record, tagged, source)
+  refreshMappedPayloadSha256(baseline)
+  refreshMappedPayloadSha256(record)
+
+  assert.deepEqual(record.extensions, baseline.extensions)
+  assert.deepEqual(record.stableFields, baseline.stableFields)
+  assert.equal(record.payloadSha256, baseline.payloadSha256)
+  assert.equal(record.externalId, baseline.externalId)
+  assert.equal(record.rawItem, tagged)
+  assert.equal(record.rawItem.tag, 'private-batch-label')
+  assert.equal(record.rawPayloadSha256, rawHash)
+  assert.notEqual(record.rawPayloadSha256, baseline.rawPayloadSha256)
+  assert.equal(mappedExtensions.tag, 'private-batch-label')
+  assert.equal(JSON.stringify(record.stableFields).includes('private-batch-label'), false)
+
+  const nullTag = { ...rawFixture(), tag: null }
+  const nullRecord = map(nullTag)
+  enrichCrawlerRecord(nullRecord, nullTag, source)
+  refreshMappedPayloadSha256(nullRecord)
+  assert.equal(nullRecord.payloadSha256, baseline.payloadSha256)
+  assert.equal(nullRecord.rawItem.tag, null)
+
+  const unrelated = map(tagged)
+  const before = structuredClone(unrelated)
+  assert.equal(enrichCrawlerRecord(unrelated, tagged, { sourceKey: 'warehouse-events' }), unrelated)
+  assert.deepEqual(unrelated, before)
+  assert.equal(unrelated.extensions.tag, 'private-batch-label')
+})
+
 test('crawler enrichment keeps date-only and semantic anomalies without inventing publication instants', () => {
   const classifyCatalog = createCrawlerCatalogClassifier([BAIJIA])
   const record = {
@@ -630,6 +674,97 @@ test('database crawler pull enriches from one governed catalog snapshot and refr
   }).record.payloadSha256
   assert.notEqual(record.payloadSha256, beforeEnrichment)
   assert.ok(cursorWrites.length >= 2)
+})
+
+test('adding the optional tag resumes the existing crawler checkpoint and preserves raw evidence', async () => {
+  const source = crawlerPullSource()
+  const mapping = { ...crawlerPullMapping(source), fieldMap: CRAWLER_FIELD_MAP }
+  const ingested = []
+  const pageQueries = []
+  let tagged = false
+  let saved = { position: {}, status: 'idle', processed: 0 }
+  const oldCursor = '2026-09-09 03:05:00+00'
+  const nextCursor = '2026-09-09 03:06:00+00'
+  const puller = new DatabaseSourcePuller({
+    store: {
+      getExternalSource: async () => source,
+      getActiveMapping: async () => mapping,
+      getLatestPipelineWriterContractAttestation: async () => ({
+        contractVersion: CRAWLER_WRITER_CONTRACT_VERSION,
+        contractDigest: CRAWLER_WRITER_CONTRACT_DIGEST,
+      }),
+      listSourceCatalogEntries: async () => [NEWS_WEBSITE, THE_PAPER],
+      startImportRun: async () => ({ id: `crawler-tag-run-${ingested.length}`, duplicateOf: null }),
+      finishImportRun: async () => {},
+      ingestExternalRecords: async input => {
+        ingested.push(input)
+        return { ingested: input.records.length, changed: input.records.length }
+      },
+    },
+    queue: {
+      getCursor: async () => saved,
+      saveCursor: async (_id, position, options) => {
+        saved = { position, status: options.status, processed: saved.processed + (options.processedDelta || 0) }
+        return saved
+      },
+    },
+    poolFactory: () => ({
+      async query(sql, parameters) {
+        if (sql.includes('information_schema.columns')) return { rows: [
+          ...crawlerDatabaseColumns(),
+          ...(tagged ? [{ column_name: 'tag', data_type: 'character varying', udt_name: 'varchar', is_nullable: 'YES', ordinal_position: 24 }] : []),
+        ] }
+        if (sql.includes('c.relkind AS relation_kind')) return { rows: [crawlerLeafRelation()] }
+        if (sql.includes('i.indislive AS live')) return { rows: [crawlerCursorIndex()] }
+        if (sql.includes('AS minimum_cursor') && sql.includes('AS maximum_cursor')) {
+          return { rows: [{ minimum_cursor: oldCursor, maximum_cursor: tagged ? nextCursor : oldCursor }] }
+        }
+        const alias = sql.match(/"last_seen_at"::text AS "([^"]+)"/u)?.[1]
+        assert.ok(alias, sql)
+        pageQueries.push({ sql, parameters })
+        return { rows: [{
+          ...rawFixture(),
+          ...(tagged ? { tag: 'private-batch-label', last_seen_at: new Date('2026-09-09T03:06:00Z') } : {}),
+          [alias]: tagged ? nextCursor : oldCursor,
+        }] }
+      },
+      async end() {},
+    }),
+  })
+
+  await puller.pullBatch(source.sourceKey, { batchSize: 10 })
+  const oldPosition = structuredClone(saved.position)
+  assert.equal(oldPosition.cursor, oldCursor)
+  assert.equal(oldPosition.lastId, '1')
+  assert.equal(oldPosition.mappingVersion, 1)
+  assert.match(oldPosition.contractHash, /^[a-f0-9]{64}$/u)
+  assert.equal(saved.processed, 1)
+
+  tagged = true
+  const compatible = await puller.assertCheckpointCompatible(source.sourceKey)
+  assert.equal(compatible.contractHash, oldPosition.contractHash)
+  assert.deepEqual(saved.position, oldPosition)
+  const result = await puller.pullBatch(source.sourceKey, { batchSize: 10 })
+  assert.equal(result.pulled, 1)
+  assert.equal(result.done, true)
+  assert.deepEqual(pageQueries[1].parameters, [oldPosition.cursor, oldPosition.lastId, 10])
+  assert.match(pageQueries[1].sql, /\("last_seen_at", "id"\) > \(\$1::timestamptz, \$2::integer\)/u)
+  assert.deepEqual(ingested[1].batch.cursorStart, oldPosition)
+  assert.equal(saved.position.contractHash, oldPosition.contractHash)
+  assert.equal(saved.position.mappingVersion, 1)
+  assert.equal(saved.position.cursor, nextCursor)
+  assert.equal(saved.position.lastId, oldPosition.lastId)
+  assert.equal(saved.processed, 2)
+  assert.equal(saved.status, 'idle')
+  const original = ingested[0].records[0]
+  const updated = ingested[1].records[0]
+  assert.equal(ingested[1].sourceId, ingested[0].sourceId)
+  assert.equal(ingested[1].datasetId, ingested[0].datasetId)
+  assert.equal(updated.externalId, original.externalId)
+  assert.equal(updated.rawItem.tag, 'private-batch-label')
+  assert.notEqual(updated.rawPayloadSha256, original.rawPayloadSha256)
+  assert.equal(Object.hasOwn(updated.extensions, 'tag'), false)
+  assert.deepEqual(mapping.fieldMap, CRAWLER_FIELD_MAP)
 })
 
 test('every crawler pull rechecks its fixed logical source contract before opening PostgreSQL', async () => {

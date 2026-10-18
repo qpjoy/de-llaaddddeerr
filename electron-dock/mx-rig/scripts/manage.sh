@@ -3,9 +3,12 @@
 # Internal server. Both run the same image.
 #
 # This script only ever touches its own things: the compose project "mx-rig",
-# or the Kubernetes namespace "mx-rig" and its two PersistentVolumes. It never
-# reads or writes another product's namespace, Service, Secret, database or
-# volume, and it does not look for Launcher — Rig accounts are its own.
+# its dedicated proxy builder/cache, or the Kubernetes namespace "mx-rig" and
+# its two PersistentVolumes. It never writes another product's namespace,
+# Service, Secret, database or volume. Of Launcher it reads only where its
+# Service is (for unified sign-in and the desktop's Launcher mode), and it
+# writes to Launcher only through Launcher's own API, with an ops token the
+# operator passes in (launcher apply).
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,6 +22,7 @@ NAMESPACE="mx-rig"
 NODE_PORT=30891
 IMAGE=""
 SECRET_CHECKSUM=""
+SSO_CHECKSUM="none"
 POLICY_CHECKSUM=""
 CLUSTER_CONTEXT=""
 
@@ -28,6 +32,8 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
 kube() { kubectl -n "$NAMESPACE" "$@"; }
 rand_hex() { openssl rand -hex "$1" 2>/dev/null || od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
 b64() { base64 -w0 2>/dev/null || base64 | tr -d '\n'; }
+# shellcheck source=build-proxy.sh
+source "${ROOT_DIR}/scripts/build-proxy.sh"
 
 usage() {
   cat <<'EOF'
@@ -49,18 +55,25 @@ MX Rig
 
 Internal 服务器（Kubernetes，在节点上执行）
   scripts/manage.sh deploy                  构建镜像、导入 containerd、迁移、上线并验证
+  PROXY=http://127.0.0.1:7788 bash scripts/manage.sh deploy
+                                            Linux 节点：仅本次构建/下载走代理，不改系统或 Docker 代理
   scripts/manage.sh verify | status | logs [server|migrate|postgres] | admin-token
   scripts/manage.sh migrate                 只跑迁移
   scripts/manage.sh stop                    服务缩到 0；数据库、Secret 与数据目录保留
   scripts/manage.sh launcher plan | apply   桌面端 Launcher 模式要在 Launcher 登记的内容（docs/25）：
-                                            plan 只读；apply 写入产品网络和 AppCenter 条目（需要 MX_LAUNCHER_OPS_TOKEN），
-                                            并列出只能在 Launcher Admin 里做的步骤
+                                            plan 只读；apply 写入产品网络、AppCenter 条目和两个发版账号（需要 MX_LAUNCHER_OPS_TOKEN），
+                                            发版凭据只存进 mx-rig/mx-rig-release，不打印；并列出只能在 Launcher Admin 里做的步骤
+  scripts/manage.sh release status | publish <安装包> --install-id <ID> | approve <plan> --smoke passed | reject <plan> | promote <plan>
+                                            经 Release Center 发布桌面端新版本（docs/25 P2）：先定向、手动验证后批准，再推给所有人
 
 开发
   scripts/manage.sh dev | test | eval [参数]
   scripts/manage.sh desktop [--dir] [--server <地址>] [--private-http] [--no-browser] [--launcher]
+                          [--mac|--win] [--arm64] [--x64] [--universal] [--all]
                                             打包桌面端：自带测试浏览器；--server 写入登录页的服务地址；
-                                            --launcher 打成 Launcher 独立端（自己的产品网络，带 WireGuard 引擎）
+                                            --launcher 打成 Launcher 独立端（自己的产品网络，带 WireGuard 引擎）；
+                                            --all 在 Mac 上一次出 arm64、x64、universal 三个包，在 Windows 上出 x64
+                                            打包总用已发布的 Launcher 包；开发时 npm run setup 切到本仓库的包（npm run setup:npm 切回）
 
 登录：账号 admin，密码是管理员令牌（token / admin-token 输出），之后在「成员」页开通个人账号。
 可选覆盖写在 .env（或 MX_RIG_ENV_FILE）：MX_RIG_MODEL_API_KEY、MX_RIG_PUBLIC_URL、
@@ -69,11 +82,30 @@ EOF
 }
 
 load_env() {
+  local build_proxy_set="${MX_RIG_BUILD_PROXY+x}" build_proxy="${MX_RIG_BUILD_PROXY-}"
+  local proxy_set="${PROXY+x}" proxy="${PROXY-}"
+  local launcher_url_set="${MX_LAUNCHER_URL+x}" launcher_url="${MX_LAUNCHER_URL-}"
+  local launcher_ops_set="${MX_LAUNCHER_OPS_TOKEN+x}" launcher_ops="${MX_LAUNCHER_OPS_TOKEN-}"
+  local allowed_origins_set="${MX_RIG_ALLOWED_ORIGINS+x}" allowed_origins="${MX_RIG_ALLOWED_ORIGINS-}"
   if [ -f "$ENV_FILE" ]; then
     set -a
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     set +a
+  fi
+  # Explicit administrative credentials/endpoint override the saved file,
+  # including an empty token when the caller intentionally disables writes.
+  if [ "$launcher_url_set" = x ]; then export MX_LAUNCHER_URL="$launcher_url"; fi
+  if [ "$launcher_ops_set" = x ]; then export MX_LAUNCHER_OPS_TOKEN="$launcher_ops"; fi
+  # Empty explicitly clears the extra browser origins, even if .env has a value.
+  if [ "$allowed_origins_set" = x ]; then export MX_RIG_ALLOWED_ORIGINS="$allowed_origins"; fi
+  # Explicit shell values (including empty to disable) win over .env.
+  if [ "$build_proxy_set" = x ]; then
+    MX_RIG_BUILD_PROXY="$build_proxy"
+  elif [ "$proxy_set" = x ]; then
+    MX_RIG_BUILD_PROXY="$proxy"
+  else
+    MX_RIG_BUILD_PROXY="${MX_RIG_BUILD_PROXY-${PROXY:-}}"
   fi
 }
 
@@ -125,6 +157,9 @@ ensure_compose_env() {
     MX_RIG_HTTP_PORT MX_RIG_SESSION_TTL_HOURS MX_RIG_LAUNCHER_URL MX_RIG_RUNNER_PLAYWRIGHT_VERSION; do
     if [ -n "${!name:-}" ]; then set_env_value "$name" "${!name}"; fi
   done
+  if [ "${MX_RIG_ALLOWED_ORIGINS+x}" = x ]; then
+    set_env_value MX_RIG_ALLOWED_ORIGINS "$MX_RIG_ALLOWED_ORIGINS"
+  fi
 }
 
 wait_ready() {
@@ -138,13 +173,14 @@ wait_ready() {
 
 # curl with a bearer token that never appears in process arguments.
 curl_bearer() (
-  local token="$1" header
+  local token="$1"
   shift
   umask 077
-  header="$(mktemp "${TMPDIR:-/tmp}/mx-rig-header.XXXXXX")"
-  trap 'rm -f -- "$header"' EXIT
-  printf 'authorization: Bearer %s\n' "$token" >"$header"
-  curl -fsS -H "@${header}" "$@"
+  # Bash 3 unwinds function locals before an EXIT trap on failure.
+  rig_bearer_header="$(mktemp "${TMPDIR:-/tmp}/mx-rig-header.XXXXXX")"
+  trap 'rm -f -- "$rig_bearer_header"' EXIT
+  printf 'authorization: Bearer %s\n' "$token" >"$rig_bearer_header"
+  curl -fsS -H "@${rig_bearer_header}" "$@"
 )
 
 enroll_compose_runner() {
@@ -396,7 +432,7 @@ resolve_runner_cidrs() {
 }
 
 SECRET_KEYS=(MX_RIG_DATABASE_URL MX_RIG_POSTGRES_PASSWORD MX_RIG_ADMIN_TOKEN MX_RIG_SECRET_KEY
-  MX_RIG_PUBLIC_URL MX_RIG_INSECURE_COOKIES MX_RIG_MODEL_API_KEY MX_RIG_MODEL_API_KEY_2
+  MX_RIG_PUBLIC_URL MX_RIG_ALLOWED_ORIGINS MX_RIG_INSECURE_COOKIES MX_RIG_MODEL_API_KEY MX_RIG_MODEL_API_KEY_2
   MX_RIG_GIT_TOKEN MX_RIG_LAUNCHER_URL MX_RIG_RUNNER_TARGET_CIDRS)
 
 apply_secret() {
@@ -427,9 +463,13 @@ build_local_image() {
   local network="${1:-}" tag="mx-rig-server:build-$$" id
   local -a args=(-f "${ROOT_DIR}/deploy/Dockerfile" -t "$tag")
   need docker
-  if [ "$network" = host ]; then args+=(--network host); fi
   say "building the server image"
-  docker build "${args[@]}" "$ELECTRON_DOCK_DIR"
+  if [ -n "${MX_RIG_BUILD_PROXY:-}" ]; then
+    rig_with_build_proxy rig_build_with_proxy "${args[@]}" "$ELECTRON_DOCK_DIR"
+  else
+    if [ "$network" = host ]; then args+=(--network host); fi
+    docker build "${args[@]}" "$ELECTRON_DOCK_DIR"
+  fi
   id="$(docker image inspect "$tag" --format '{{.Id}}')"
   [[ "${id#sha256:}" =~ ^[0-9a-f]{64}$ ]] || die "docker returned an invalid image id: ${id}"
   IMAGE="mx-rig.local/mx-rig-server:local-sha256-${id#sha256:}"
@@ -479,6 +519,9 @@ resolve_image() {
           # through a tunnel can stall npm on the bridge network's MTU.
           build_local_image host
           import_containerd_image
+          if [ -n "${MX_RIG_BUILD_PROXY:-}" ]; then
+            rig_with_build_proxy rig_proxy_postgres_image
+          fi
           ;;
         *) die "cannot import a local image into ${runtime:-an unknown runtime}; set MX_RIG_IMAGE to a registry digest" ;;
       esac
@@ -491,13 +534,14 @@ render() {
   for cidr in ${MX_RIG_RUNNER_TARGET_CIDRS//,/ }; do
     rules+="    - to:\n        - ipBlock:\n            cidr: ${cidr}\n"
   done
-  awk -v image="$IMAGE" -v secret="$SECRET_CHECKSUM" -v policy="$POLICY_CHECKSUM" \
+  awk -v image="$IMAGE" -v secret="$SECRET_CHECKSUM" -v policy="$POLICY_CHECKSUM" -v sso="$SSO_CHECKSUM" \
     -v root="$MX_RIG_DATA_ROOT" -v rules="$rules" '
     /# __MX_RIG_RUNNER_TARGET_EGRESS__/ { printf "%s", rules; next }
     {
       gsub(/mx-rig\.invalid\/mx-rig-server:managed-image-required/, image)
       gsub(/__MX_RIG_SECRET_CHECKSUM__/, secret)
       gsub(/__MX_RIG_POLICY_CHECKSUM__/, policy)
+      gsub(/__MX_RIG_SSO_CHECKSUM__/, sso)
       gsub(/__MX_RIG_DATA_ROOT__/, root)
       print
     }'
@@ -527,6 +571,11 @@ prepare_kubernetes() {
   for name in MX_RIG_INSECURE_COOKIES MX_RIG_MODEL_API_KEY MX_RIG_MODEL_API_KEY_2 MX_RIG_GIT_TOKEN; do
     resolve_sticky "$name"
   done
+  # Unlike other sticky settings, an explicitly empty list removes old origins.
+  if [ "${MX_RIG_ALLOWED_ORIGINS+x}" != x ]; then
+    MX_RIG_ALLOWED_ORIGINS="$(read_secret MX_RIG_ALLOWED_ORIGINS)"
+  fi
+  export MX_RIG_ALLOWED_ORIGINS
   resolve_launcher_url
   resolve_public_url
   resolve_data_root
@@ -551,9 +600,52 @@ run_migration() {
   fi
 }
 
+# Browser SSO (docs/25 P4). Launcher Internal → 平台设置 → 统一认证 → 接入应用
+# writes the mx-rig profile on this host; deploy keeps it in the Secret
+# mx-rig/mx-rig-sso, which the server reads at /etc/mx-rig/sso/profile.json.
+# MX_RIG_SSO_SOURCE names the file; MX_RIG_SSO_AUTO_DISCOVER=0 stops looking.
+# The profile holds the client secret and session key: never printed.
+resolve_sso_profile() {
+  local source="${MX_RIG_SSO_SOURCE:-}" dir="${MX_RIG_LAUNCHER_IDENTITY_DIR:-/var/lib/mx-launcher/identity/applications}"
+  local candidate existing origin="" found=()
+  if [ -z "$source" ] && [ "${MX_RIG_SSO_AUTO_DISCOVER:-1}" != 0 ]; then
+    for candidate in "${dir}/public/mx-rig.json" "${dir}/private/mx-rig.json"; do
+      [ ! -e "$candidate" ] || found+=("$candidate")
+    done
+    [ "${#found[@]}" -le 1 ] || die "both ${found[*]} exist; choose one with MX_RIG_SSO_SOURCE"
+    source="${found[0]-}"
+  fi
+  if [ -z "$source" ]; then
+    existing="$(kube get secret mx-rig-sso --ignore-not-found -o 'jsonpath={.data.profile\.json}' 2>/dev/null || true)"
+    if [ -n "$existing" ]; then
+      SSO_CHECKSUM="$(printf '%s' "$existing" | openssl dgst -sha256 | awk '{ print $NF }')"
+      say "browser SSO: on, with the profile already in ${NAMESPACE}/mx-rig-sso"
+    else
+      say "browser SSO: off (no mx-rig profile yet: Launcher Internal → 平台设置 → 统一认证 → 接入应用, docs/25 §11)"
+    fi
+    return 0
+  fi
+  [ -r "$source" ] || die "cannot read the SSO profile ${source}; run deploy as its owner or set MX_RIG_SSO_SOURCE"
+  # Checked here with the server's own reader, so a bad file stops the deploy
+  # instead of the server.
+  if command -v node >/dev/null 2>&1; then
+    origin="$(node --input-type=module -e "
+      const { readApplicationSsoProfile } = await import(process.argv[1])
+      const profile = readApplicationSsoProfile(process.argv[2])
+      if (profile.appId !== 'mx-rig') throw new Error('the profile is for ' + profile.appId + ', not mx-rig')
+      process.stdout.write(profile.origin)" "${ELECTRON_DOCK_DIR}/mx-common/src/identity/profile.mjs" "$source")" ||
+      die "the SSO profile ${source} is not usable"
+  fi
+  kubectl create secret generic mx-rig-sso -n "$NAMESPACE" --from-file=profile.json="$source" --dry-run=client -o yaml |
+    kubectl apply -f - >/dev/null
+  SSO_CHECKSUM="$(b64 <"$source" | openssl dgst -sha256 | awk '{ print $NF }')"
+  say "browser SSO: on${origin:+ at ${origin}}; the profile from ${source} is kept in ${NAMESPACE}/mx-rig-sso"
+}
+
 cmd_deploy() {
   prepare_kubernetes
   run_migration
+  resolve_sso_profile
   # The server is applied only after migrations completed.
   apply_files 30-server.yaml 35-nodeport.yaml
   # `apply` keeps a live scale-to-zero from `stop`; coming back is explicit.
@@ -579,26 +671,61 @@ cmd_migrate() {
 cmd_verify() (
   need kubectl
   need curl
-  local token port="${MX_RIG_VERIFY_PORT:-18891}"
+  local token port="" attempt=0 restarts=0 ready=0 deadline=$((SECONDS + 45))
   token="$(read_secret MX_RIG_ADMIN_TOKEN)"
   [ -n "$token" ] || die "no admin token in ${NAMESPACE}/mx-rig-secrets; deploy first"
-  local forward="" attempt=0 restarts=0
-  trap 'kill "$forward" 2>/dev/null || true' EXIT
-  # Right after a rollout the forward can land on the Pod being replaced and
-  # end with it; start it again rather than calling the deploy failed.
-  until curl -fsS -o /dev/null "http://127.0.0.1:${port}/readyz" 2>/dev/null; do
-    if [ -z "$forward" ] || ! kill -0 "$forward" 2>/dev/null; then
-      [ "$restarts" -lt 5 ] || die "port-forward keeps exiting; see: scripts/manage.sh status"
+  umask 077
+  # These live only in this subshell, but must survive Bash 3's local unwind.
+  rig_verify_forward=""
+  rig_verify_work="$(mktemp -d "${TMPDIR:-/tmp}/mx-rig-verify.XXXXXX")"
+  trap 'if [ -n "$rig_verify_forward" ]; then kill "$rig_verify_forward" 2>/dev/null || true; wait "$rig_verify_forward" 2>/dev/null || true; fi; rm -f -- "$rig_verify_work/forward.log" "$rig_verify_work/curl.log"; rmdir -- "$rig_verify_work"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  verify_failed() {
+    if [ -s "$rig_verify_work/forward.log" ]; then
+      say "port-forward diagnostic:" >&2
+      tail -n 12 "$rig_verify_work/forward.log" >&2
+    fi
+    if [ -s "$rig_verify_work/curl.log" ]; then
+      say "HTTP diagnostic:" >&2
+      tail -n 4 "$rig_verify_work/curl.log" >&2
+    fi
+    say "inspect: kubectl -n ${NAMESPACE} get pods -o wide" >&2
+    say "inspect: kubectl -n ${NAMESPACE} logs deployment/mx-rig-server --tail=80" >&2
+    die "$*; local verification failed, retry scripts/manage.sh verify without rebuilding"
+  }
+
+  # Let kubectl allocate an unused loopback port by default. Never probe an
+  # existing listener (or send it credentials) before our own forward is ready.
+  while [ "$attempt" -lt 45 ] && [ "$SECONDS" -lt "$deadline" ]; do
+    if [ -z "$rig_verify_forward" ] || ! kill -0 "$rig_verify_forward" 2>/dev/null; then
+      [ -z "$rig_verify_forward" ] || wait "$rig_verify_forward" 2>/dev/null || true
+      [ "$restarts" -lt 5 ] || verify_failed "port-forward keeps exiting"
       restarts=$((restarts + 1))
-      kube port-forward service/mx-rig-server "${port}:80" >/dev/null 2>&1 &
-      forward=$!
+      port=""
+      : >"$rig_verify_work/forward.log"
+      # Start kubectl directly: killing a background shell function can leave
+      # its kubectl child behind, holding the listening port open.
+      kubectl -n "$NAMESPACE" port-forward --address 127.0.0.1 \
+        service/mx-rig-server "${MX_RIG_VERIFY_PORT:-}:80" >"$rig_verify_work/forward.log" 2>&1 &
+      rig_verify_forward=$!
+    fi
+    port="$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) -> .*/\1/p' "$rig_verify_work/forward.log" | head -n 1)"
+    if [ -n "$port" ] && kill -0 "$rig_verify_forward" 2>/dev/null &&
+      curl -fsS --noproxy '*' --connect-timeout 3 --max-time 5 \
+        -o /dev/null "http://127.0.0.1:${port}/readyz" 2>"$rig_verify_work/curl.log"; then
+      ready=1
+      break
     fi
     attempt=$((attempt + 1))
-    [ "$attempt" -lt 45 ] || die "the server is not ready behind port-forward"
     sleep 1
   done
-  curl_bearer "$token" -o /dev/null "http://127.0.0.1:${port}/api/rig/v1/me" || die "admin sign-in check failed"
-  curl_bearer "$token" -o /dev/null "http://127.0.0.1:${port}/api/v1/runners" || die "test kernel check failed"
+  [ "$ready" = 1 ] || verify_failed "no ready response through this verification's port-forward"
+  curl_bearer "$token" --noproxy '*' --connect-timeout 3 --max-time 5 \
+    -o /dev/null "http://127.0.0.1:${port}/api/rig/v1/me" 2>"$rig_verify_work/curl.log" || verify_failed "admin sign-in check failed"
+  curl_bearer "$token" --noproxy '*' --connect-timeout 3 --max-time 5 \
+    -o /dev/null "http://127.0.0.1:${port}/api/v1/runners" 2>"$rig_verify_work/curl.log" || verify_failed "test kernel check failed"
   say "verified: ready, admin sign-in and test kernel respond"
 )
 
@@ -633,6 +760,51 @@ cmd_stop() {
 
 # -- development -----------------------------------------------------------------
 
+# Launcher Internal as this node reaches it: an explicit MX_LAUNCHER_URL, or
+# its Service's ClusterIP.
+launcher_internal_url() {
+  local found
+  if [ -n "${MX_LAUNCHER_URL:-}" ]; then printf '%s' "$MX_LAUNCHER_URL"; return 0; fi
+  need kubectl
+  found="$(kubectl -n mx-internal-shadow get service mx-launcher-internal \
+    -o 'jsonpath={.spec.clusterIP}:{.spec.ports[?(@.name=="http")].port}' 2>/dev/null || true)"
+  [ -n "$found" ] && [ "$found" != ":" ] || die "Launcher Internal is not in this cluster; set MX_LAUNCHER_URL"
+  printf 'http://%s' "$found"
+}
+
+# Rig's release credentials (docs/25 P2) live in their own Secret, apart from
+# the server's: the server never needs them.
+RELEASE_SECRET=mx-rig-release
+read_release_secret() {
+  local encoded
+  encoded="$(kube get secret "$RELEASE_SECRET" --ignore-not-found -o "jsonpath={.data.$1}" 2>/dev/null || true)"
+  [ -z "$encoded" ] || printf '%s' "$encoded" | base64 -d
+}
+# Which of the two this cluster keeps: "publisher,approver", a part, or "".
+release_kept() {
+  local kept=()
+  [ -z "$(read_release_secret MX_RIG_RELEASE_CLIENT_SECRET)" ] || kept+=(publisher)
+  [ -z "$(read_release_secret MX_RIG_RELEASE_APPROVER_CLIENT_SECRET)" ] || kept+=(approver)
+  local IFS=,
+  printf '%s' "${kept[*]+"${kept[*]}"}"
+}
+# A credential Launcher issued is shown once: merged into the Secret, and the
+# file it came in is removed only once it is stored.
+keep_release_secret() {
+  local file="$1"
+  [ -s "$file" ] || { rm -f "$file"; return 0; }
+  if kubectl apply -f "${K8S_DIR}/00-namespace.yaml" >/dev/null 2>&1 &&
+    { kube get secret "$RELEASE_SECRET" >/dev/null 2>&1 || kube create secret generic "$RELEASE_SECRET" >/dev/null; } &&
+    kube patch secret "$RELEASE_SECRET" --type merge --patch-file "$file" >/dev/null; then
+    rm -f "$file"
+    say "release credentials kept in ${NAMESPACE}/${RELEASE_SECRET}"
+  else
+    say "WARNING: could not store the release credentials; they are in ${file} (mode 600). Store them with:"
+    say "  kubectl -n ${NAMESPACE} patch secret ${RELEASE_SECRET} --type merge --patch-file ${file}"
+    return 1
+  fi
+}
+
 # What the desktop's Launcher mode needs registered in Launcher (docs/25 §3.4).
 # Run on the Internal node: both services are found in the cluster.
 cmd_launcher() {
@@ -640,20 +812,58 @@ cmd_launcher() {
   local action="${1:-plan}"
   shift || true
   case "$action" in plan | apply) ;; *) die "usage: scripts/manage.sh launcher plan|apply" ;; esac
-  local url="${MX_LAUNCHER_URL:-}" found
-  if [ -z "$url" ]; then
-    need kubectl
-    found="$(kubectl -n mx-internal-shadow get service mx-launcher-internal \
-      -o 'jsonpath={.spec.clusterIP}:{.spec.ports[?(@.name=="http")].port}' 2>/dev/null || true)"
-    [ -n "$found" ] && [ "$found" != ":" ] || die "Launcher Internal is not in this cluster; set MX_LAUNCHER_URL"
-    url="http://${found}"
+  load_env
+  if [ "$action" = apply ] && [ -z "${MX_LAUNCHER_OPS_TOKEN:-}" ]; then
+    die "launcher apply needs MX_LAUNCHER_OPS_TOKEN in the environment or mx-rig/.env (the existing Launcher's MX_INTERNAL_OPS_TOKEN, not the Rig admin token)"
   fi
+  local url status=0 out
+  url="$(launcher_internal_url)"
   # The Rig service the VIP route points at: what deploy published.
   if [ -z "${MX_RIG_PUBLIC_URL:-}" ] && command -v kubectl >/dev/null 2>&1; then
-    load_env
     resolve_public_url 2>/dev/null || true
   fi
-  node "${ROOT_DIR}/scripts/launcher-register.mjs" "$action" --url "$url" ${MX_RIG_PUBLIC_URL:+--rig-url "$MX_RIG_PUBLIC_URL"}
+  # Known only with the cluster at hand; unknown means nothing is rotated.
+  if command -v kubectl >/dev/null 2>&1 && kubectl version --request-timeout=5s >/dev/null 2>&1; then
+    MX_RIG_RELEASE_HAVE="$(release_kept)"
+    export MX_RIG_RELEASE_HAVE
+    [ -z "$(kube get secret mx-rig-sso --ignore-not-found -o name 2>/dev/null)" ] || MX_RIG_SSO_PROFILE_FOUND="Secret mx-rig/mx-rig-sso"
+  fi
+  # The browser SSO registration's profile on this host (docs/25 P4).
+  local sso_dir="${MX_RIG_LAUNCHER_IDENTITY_DIR:-/var/lib/mx-launcher/identity/applications}" sso_file
+  for sso_file in "${MX_RIG_SSO_SOURCE:-}" "${sso_dir}/public/mx-rig.json" "${sso_dir}/private/mx-rig.json"; do
+    if [ -n "$sso_file" ] && [ -e "$sso_file" ]; then MX_RIG_SSO_PROFILE_FOUND="$sso_file"; break; fi
+  done
+  [ -z "${MX_RIG_SSO_PROFILE_FOUND:-}" ] || export MX_RIG_SSO_PROFILE_FOUND
+  if [ "$action" = plan ]; then
+    node "${ROOT_DIR}/scripts/launcher-register.mjs" plan --url "$url" ${MX_RIG_PUBLIC_URL:+--rig-url "$MX_RIG_PUBLIC_URL"}
+    return
+  fi
+  out="$(umask 077 && mktemp "${TMPDIR:-/tmp}/mx-rig-release.XXXXXX")"
+  node "${ROOT_DIR}/scripts/launcher-register.mjs" apply --url "$url" --secret-out "$out" \
+    ${MX_RIG_PUBLIC_URL:+--rig-url "$MX_RIG_PUBLIC_URL"} || status=$?
+  # Whatever was issued before a failure is kept too.
+  keep_release_secret "$out" || status=1
+  return "$status"
+}
+
+# Publishing a desktop build (docs/25 P2), on the Internal node with the
+# installer and its .json manifest copied here. The credentials go to the
+# command through its environment, never its arguments.
+cmd_release() {
+  need node
+  [ $# -gt 0 ] || die "usage: scripts/manage.sh release status | publish <installer> --install-id <id> | approve <plan> --smoke passed | reject <plan> | promote <plan>"
+  load_env
+  local key value
+  MX_LAUNCHER_URL="$(launcher_internal_url)"
+  export MX_LAUNCHER_URL
+  if command -v kubectl >/dev/null 2>&1; then
+    for key in MX_RIG_RELEASE_CLIENT_ID MX_RIG_RELEASE_CLIENT_SECRET MX_RIG_RELEASE_APPROVER_CLIENT_ID MX_RIG_RELEASE_APPROVER_CLIENT_SECRET; do
+      [ -z "${!key:-}" ] || continue
+      value="$(read_release_secret "$key")"
+      [ -z "$value" ] || export "${key}=${value}"
+    done
+  fi
+  node "${ROOT_DIR}/scripts/release-publish.mjs" "$@"
 }
 
 cmd_desktop() {
@@ -719,6 +929,7 @@ if [ "${MX_RIG_MANAGE_SOURCE_ONLY:-0}" != "1" ]; then
     eval) need npm; npm --prefix "$ROOT_DIR" run eval -- "$@" ;;
     desktop) cmd_desktop "$@" ;;
     launcher) cmd_launcher "$@" ;;
+    release) cmd_release "$@" ;;
     local) cmd_local "$@" ;;
     help | -h | --help) usage ;;
     *) usage; exit 1 ;;

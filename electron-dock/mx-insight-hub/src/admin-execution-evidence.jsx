@@ -1,3 +1,4 @@
+import { diagnosticHref } from './diagnostics-navigation.js'
 import { useEffect, useState } from 'react'
 import { adminApi } from './api.js'
 import { useAdminExecution } from './demo-credentials.jsx'
@@ -17,7 +18,7 @@ export function AdminExecutionEvidence({ requestId, aggregate = false }) {
   if (!admin || !requestId) return null
   const rows = aggregate ? data?.sources : data?.runs
   return <details className="qp-panel mih-panel mih-admin-evidence" open><summary>Admin 调用证据 · 上游、费用与目录</summary>
-    <p>请求 {requestId} · <a href={`#/data-browser?view=diagnostics&requestId=${encodeURIComponent(requestId)}`}>请求诊断</a></p>
+    <p>请求 {requestId} · <a href={diagnosticHref(requestId)}>请求诊断</a></p>
     {error ? <ErrorState error={error} /> : !data ? <p role="status">正在读取已记录的调用证据…</p> : <>
       <p>{data.note || '显示已记录的采购成本与客户结算；未知金额不会按零处理。'}</p>
       {aggregate ? <p>聚合父请求：{data.parent?.billing === 'non_billable_aggregate_parent' ? '不另计费，各来源分别结算。' : data.parent?.customerCharge ? `${data.parent.customerCharge.status} · ${amount(data.parent.customerCharge.chargedMinor, data.parent.customerCharge.currency)}` : '已收录检索，暂无客户结算凭证。'}</p> : null}

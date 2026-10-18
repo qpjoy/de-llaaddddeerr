@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS, normalizeNativeForwardingRequest } from './native-forwarding.mjs'
-import { normalizeTwitterResponse, HUB_SOCIAL_VERSION } from './hub-social.mjs'
+import { normalizeTwitterResponse, validateTwitterUsername, HUB_SOCIAL_VERSION } from './hub-social.mjs'
 import { facebookRow } from './facebook-search.mjs'
 import { normalizeNightAllSocialItem } from './night-all-social-fields.mjs'
 import { HUB_SOCIAL_COMPAT_PLATFORMS } from '../../shared/social-account-contract.mjs'
@@ -111,11 +111,15 @@ function list(body, fields) {
     return values.map(value => { const normalized = id(value); if (!normalized) fail('invalid_social_request', `${field} is invalid`); return normalized })
   })
 }
-function normalizeIdentity(platform, kind, value) {
+function normalizeIdentity(platform, kind, value, legacyTwitterIdentity = false) {
   if (platform === 'twitter' && kind !== 'url') {
+    const handlePrefix = value.startsWith('@')
     value = value.replace(/^@+/, '')
-    kind = /^\d+$/.test(value) ? 'id' : 'username'
-    if (kind === 'username' && !/^[A-Za-z0-9_]{1,15}$/.test(value)) fail('invalid_social_request', 'Invalid Twitter username')
+    // Explicit handles (including URL paths) keep their type even when numeric.
+    // Only legacy ID aliases infer a username from a nonnumeric value or @.
+    if (legacyTwitterIdentity) kind = /^\d+$/.test(value) ? 'id' : 'username'
+    else if (kind === 'id' && (handlePrefix || !/^\d+$/.test(value))) kind = 'username'
+    if (kind === 'username') validateTwitterUsername(value)
     if (kind === 'id' && !/^\d{1,30}$/.test(value)) fail('invalid_social_request', 'Invalid Twitter user ID')
     if (kind === 'username') value = value.toLowerCase()
   }
@@ -138,7 +142,7 @@ function normalizeIdentity(platform, kind, value) {
     if (token) {
       let decoded
       try { decoded = decodeURIComponent(token) } catch { fail('invalid_social_request', 'Invalid account URL encoding') }
-      return normalizeIdentity(platform, ['twitter', 'instagram', 'reddit', 'tiktok'].includes(platform) ? 'username' : 'id', decoded)
+      return normalizeIdentity(platform, ['twitter', 'instagram', 'reddit', 'tiktok'].includes(platform) ? 'username' : 'id', decoded, legacyTwitterIdentity)
     }
   }
   if (platform === 'youtube' && kind === 'username') return { kind: 'url', value: `https://www.youtube.com/@${value}` }
@@ -146,7 +150,8 @@ function normalizeIdentity(platform, kind, value) {
   if (['reddit', 'zhihu'].includes(platform) && kind === 'id') kind = 'username'
   return { kind, value }
 }
-export function normalizeHubSocialCompatRequest(operation, body, { maxPageSize = 500, businessId = null } = {}) {
+// legacyTwitterIdentity is internal replay verification only, never a request field.
+export function normalizeHubSocialCompatRequest(operation, body, { maxPageSize = 500, businessId = null, legacyTwitterIdentity = false } = {}) {
   if (!['crawl', 'user-info'].includes(operation)) fail('invalid_social_request', 'Unknown social account operation')
   if (!object(body)) fail('invalid_social_request', 'JSON object body is required')
   const allowed = new Set([...COMMON, ...(operation === 'crawl' ? ['activityTypes'] : [])])
@@ -175,7 +180,7 @@ export function normalizeHubSocialCompatRequest(operation, body, { maxPageSize =
   }
   const identities = new Map()
   for (const source of [body, params]) for (const [kind, aliases] of [['id', ID_ALIASES], ['username', USER_ALIASES], ['url', URL_ALIASES]]) {
-    for (const value of list(source, aliases)) { const identity = normalizeIdentity(platform, kind, value); identities.set(`${identity.kind}:${identity.value}`, identity) }
+    for (const value of list(source, aliases)) { const identity = normalizeIdentity(platform, kind, value, legacyTwitterIdentity); identities.set(`${identity.kind}:${identity.value}`, identity) }
   }
   if (!identities.size) fail('invalid_social_request', 'An account identifier is required')
   for (const key of [...ID_ALIASES, ...USER_ALIASES, ...URL_ALIASES]) delete params[key]

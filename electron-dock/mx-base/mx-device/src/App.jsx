@@ -4,6 +4,7 @@ import SchedulerLab from "./SchedulerLab.jsx";
 import Workstation from "./Workstation.jsx";
 import Scenarios from "./Scenarios.jsx";
 import DeviceWorkspace from "./DeviceWorkspace.jsx";
+import AccountPool from "./AccountPool.jsx";
 import { useState, useCallback, useEffect } from "react";
 import {
   Desktop,
@@ -17,6 +18,7 @@ import {
   HardDrives,
   Code,
   Stack,
+  IdentificationCard,
 } from "@phosphor-icons/react";
 import { api, useSnapshot } from "./data.js";
 import { Modal, DeviceForm, JobForm, ObserverForm } from "./Forms.jsx";
@@ -194,6 +196,7 @@ function Workspace({ onExpired }) {
     ["racks", "机架管理", HardDrives],
     ["jobs", "任务中心", FileText],
     ["catalog", "指令与任务库", Code],
+    ["accounts", "账号池", IdentificationCard],
     ["settings", "连接设置", Gear],
   ];
   return (
@@ -274,7 +277,9 @@ function Workspace({ onExpired }) {
                           ? "平台指令与任务模板"
                           : page === "jobs"
                             ? "让任务有序流向设备"
-                            : "让每一次执行都有据可查"}
+                            : page === "accounts"
+                              ? "账号状态与节奏，跟随账号"
+                              : "让每一次执行都有据可查"}
               </h1>
               <p>单机串行，多机协作。真实执行与模拟演练严格分离。</p>
             </div>
@@ -402,6 +407,8 @@ function Workspace({ onExpired }) {
               busy={busy}
               run={run}
             />
+          ) : page === "accounts" ? (
+            <AccountPool key={mode} mode={mode} busy={busy} run={run} />
           ) : page === "settings" ? (
             <Connections
               state={state}

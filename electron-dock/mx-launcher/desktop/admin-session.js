@@ -40,19 +40,44 @@ export function createAdminSessionUi({ serverBase, root = document, onChange = (
   };
   const request = async (path, body) => {
     if (!sameOrigin()) throw new Error('请在 MX Server 同源的 /admin/ 页面使用个人登录。');
-    const response = await fetch(path, {
-      credentials: 'same-origin', cache: 'no-store', redirect: 'error',
-      signal: AbortSignal.timeout(body ? 15000 : 5000),
-      ...(body ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-mx-admin-csrf': session?.csrf || '' }, body: JSON.stringify(body) } : {})
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.message || '个人登录请求失败');
-    return payload;
+    const label = path === '/auth/admin/ops-login' ? 'Token 验证失败' : '个人登录请求失败';
+    let response;
+    try {
+      response = await fetch(path, {
+        credentials: 'same-origin', cache: 'no-store', redirect: 'error',
+        signal: AbortSignal.timeout(body ? 15000 : 5000),
+        ...(body ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-mx-admin-csrf': session?.csrf || '' }, body: JSON.stringify(body) } : {})
+      });
+    } catch {
+      throw new Error(`${label}（网络错误或请求超时）。`);
+    }
+    if (!response.ok) {
+      let message = label;
+      if (path !== '/auth/admin/session' && path !== '/auth/admin/ops-login') {
+        try {
+          const payload = await response.json();
+          if (typeof payload?.message === 'string' && payload.message.trim()) message = payload.message.trim();
+        } catch { /* Proxy responses may not be JSON. */ }
+      }
+      throw Object.assign(new Error(`${message}（HTTP ${response.status}）。`), { status: response.status });
+    }
+    try {
+      return await response.json();
+    } catch {
+      throw Object.assign(new Error(`${label}（HTTP ${response.status}，响应不是有效 JSON）。`), { status: response.status });
+    }
   };
+  const rawOpsAllowed = () => !sameOrigin()
+    || session?.accessMode === 'sso-or-ops'
+    || (session?.enabled === false && !session.unavailable && session.accessMode == null);
+  const unavailableError = () => Object.assign(
+    new Error(session?.errorMessage || '个人登录状态暂不可用，请重试连接。'),
+    { code: 'sso_unavailable', status: session?.errorStatus || 503 }
+  );
   const accessError = (hasOpsToken = false) => {
-    if (!sameOrigin() || secureEntry() || (hasOpsToken && session?.accessMode !== 'sso-only')) return null;
-    if (session?.unavailable) return Object.assign(new Error('个人登录状态暂不可用，请刷新页面重试。'), { code: 'sso_unavailable', status: 503 });
-    if (!session?.enabled) return null;
+    if (!sameOrigin() || (secureEntry() && rawOpsAllowed()) || (hasOpsToken && rawOpsAllowed())) return null;
+    if (!session || session.unavailable || typeof session.enabled !== 'boolean' || secureEntry()) return unavailableError();
+    if (!session.enabled) return rawOpsAllowed() ? null : unavailableError();
     if (!session.authenticated) return Object.assign(new Error('请先在右上角登录个人账号，再读取管理数据。'), { code: 'session_required', status: 401 });
     if (session.bindingRequired) return Object.assign(new Error('请先关联已有 MX 账号，再读取管理数据。'), { code: 'binding_required', status: 401 });
     if (!session.canManage) return Object.assign(new Error('已登录；此账号尚未获得 Launcher 管理权限。'), { code: 'management_forbidden', status: 403 });
@@ -72,7 +97,7 @@ export function createAdminSessionUi({ serverBase, root = document, onChange = (
       else sessionsLink.removeAttribute('href');
     }
     if (!sameOrigin()) status.textContent = '个人登录请打开服务器的 /admin/ 管理入口';
-    else if (session?.unavailable) status.textContent = '个人登录状态暂不可用，请刷新页面重试';
+    else if (session?.unavailable) status.textContent = session.errorMessage || '个人登录状态暂不可用，请刷新页面重试';
     else if (!session?.enabled) status.textContent = '个人 SSO 待启用';
     else if (secureEntry()) status.textContent = '个人登录已就绪，请使用 HTTPS 管理入口';
     else if (!session.authenticated) status.textContent = '登录个人账号，使用已获授权的管理功能';
@@ -89,8 +114,12 @@ export function createAdminSessionUi({ serverBase, root = document, onChange = (
     try {
       const value = await request('/auth/admin/session');
       if (current !== revision || !sameOrigin()) return;
+      if (typeof value?.enabled !== 'boolean') throw new Error('个人登录请求失败（会话状态格式无效）。');
       session = value;
-    } catch { if (current === revision) session = { ...session, authenticated: false, unavailable: true }; }
+    } catch (error) {
+      if (current === revision) session = { ...session, authenticated: false, unavailable: true,
+        errorMessage: error.message, errorStatus: error.status || null };
+    }
     if (current === revision) render();
   }
   function refresh() {
@@ -142,6 +171,19 @@ export function createAdminSessionUi({ serverBase, root = document, onChange = (
     },
     reset() { revision++; session = null; refreshing = null; dialog?.close(); render(); },
     entry() { return sameOrigin() ? session : null; },
+    async opsLoginMode() {
+      if (!sameOrigin()) return 'raw';
+      const previousBase = serverBase();
+      if (!session || refreshing || session.unavailable) {
+        const pending = refresh(), expectedRevision = revision;
+        await pending;
+        if (revision !== expectedRevision) throw new Error('连接地址已变化，请重新操作。');
+      }
+      if (!sameOrigin() || serverBase() !== previousBase) throw new Error('连接地址已变化，请重新操作。');
+      if (session?.enabled && !session.unavailable && session.loginOrigin === location.origin) return 'session';
+      if (rawOpsAllowed()) return 'raw';
+      throw unavailableError();
+    },
     async signInWithOps(token) { await request('/auth/admin/ops-login', { token }); await refresh(); },
     accessError,
     async prepare(url, headers, hasOpsToken) {
@@ -156,7 +198,7 @@ export function createAdminSessionUi({ serverBase, root = document, onChange = (
       if (error) throw error;
       // Public management never falls back to the raw Internal API, including
       // after logout/expiry or when an emergency token was entered by mistake.
-      if (session?.enabled && !secureEntry() && (!hasOpsToken || session.accessMode === 'sso-only')) {
+      if (session?.enabled && !secureEntry() && (!hasOpsToken || !rawOpsAllowed())) {
         url.pathname = `/admin-api${url.pathname}`;
         for (const name of Object.keys(headers)) if (name.toLowerCase() === 'x-mx-ops-token') delete headers[name];
         headers['x-mx-admin-csrf'] = session.csrf;

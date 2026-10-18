@@ -17,6 +17,7 @@ import {
   Warning,
 } from '@phosphor-icons/react'
 import { adminApi } from './api.js'
+import { crawlerCheckFeedback, crawlerRecoveryFeedback, isCrawlerPipelineSnapshot } from './crawler-feedback.mjs'
 import {
   DropdownField,
   EmptyState,
@@ -504,7 +505,7 @@ export function SourcesPage({ token, onUnauthorized, notify }) {
           onClose={() => setNightAllSavedRecordsOpen(false)}
           onRefresh={nightAllSavedRecordsPipeline.refresh}
           onPipelineChanged={(updated) => {
-            if (updated?.tasks || updated?.status) nightAllSavedRecordsPipeline.setData(updated)
+            if (isCrawlerPipelineSnapshot(updated)) nightAllSavedRecordsPipeline.setData(updated)
             nightAllSavedRecordsPipeline.refresh()
             state.refresh()
           }}
@@ -1050,6 +1051,7 @@ function NightAllSavedRecordsPipelineModal({
   const [actionError, setActionError] = useState(null)
   const [writerContractConfirmed, setWriterContractConfirmed] = useState(false)
   const [resetConfirmation, setResetConfirmation] = useState('')
+  const [recoveryReport, setRecoveryReport] = useState(null)
   const loadProgress = useCallback(
     () => configured
       ? adminApi.nightAllSavedRecordsPipelineProgress(token)
@@ -1058,6 +1060,8 @@ function NightAllSavedRecordsPipelineModal({
   )
   const progress = useRemoteData(loadProgress, onUnauthorized)
   const progressTasks = asList(progress.data?.tasks)
+  const sourceKeys = tasks.map(telegramTaskSourceKey)
+  const checkReport = crawlerCheckFeedback(sourceKeys, progress.data)
   const configurationIssues = sqlitePipelineIssueMessages(pipeline.configurationIssues)
   const progressIssues = progressTasks.flatMap((task) => sqlitePipelineIssueMessages(
     task.error, task.blocker, task.issues, task.configurationIssues,
@@ -1073,12 +1077,17 @@ function NightAllSavedRecordsPipelineModal({
   const mutate = async (action, request, successMessage) => {
     setBusyAction(action)
     setActionError(null)
+    if (action === 'resume') setRecoveryReport(null)
     try {
       const updated = await request()
-      if (updated?.tasks || updated?.status) onPipelineChanged(updated)
+      if (isCrawlerPipelineSnapshot(updated)) onPipelineChanged(updated)
       else onRefresh()
       progress.refresh()
-      notify?.(successMessage, 'success')
+      if (action === 'resume') {
+        const report = crawlerRecoveryFeedback(sourceKeys, updated)
+        setRecoveryReport(report)
+        notify?.(report.message, report.tone)
+      } else notify?.(successMessage, 'success')
       return updated
     } catch (error) {
       if (error?.status === 401) onUnauthorized?.(error)
@@ -1152,7 +1161,6 @@ function NightAllSavedRecordsPipelineModal({
   const resumeFailed = () => mutate(
     'resume',
     () => adminApi.resumeNightAllSavedRecordsPipeline(token),
-    '失败任务已从各自 checkpoint 恢复，未重置已提交批次',
   )
 
   const resetCheckpoints = (event) => {
@@ -1211,6 +1219,16 @@ function NightAllSavedRecordsPipelineModal({
       </div>
 
       {actionError ? <div className="mih-telegram-card__error"><ErrorState error={actionError} /></div> : null}
+
+      {recoveryReport ? <Panel title="本次恢复结果">
+        <p role="status">{recoveryReport.message}。已恢复分区保留原 checkpoint；手动暂停状态不变。</p>
+        <ul>
+          {recoveryReport.rows.map(row => <li key={row.sourceKey}>
+            <strong>{nightAllSavedRecordTypeLabel(nightAllSavedRecordTaskType(tasks.find(task => telegramTaskSourceKey(task) === row.sourceKey) || row))}</strong>（<code>{row.sourceKey}</code>）：
+            {row.status === 'resumed' ? '已清除失败状态，保留原断点' : row.status === 'unchanged' ? '无需恢复，状态未改动' : `${row.status === 'missing' ? '未确认' : '恢复受阻'}：${row.issues.join('；')}`}
+          </li>)}
+        </ul>
+      </Panel> : null}
 
       <Panel title="类别自动发现" subtitle="Ingest worker 每天核对分区目录；新增类别通过合同检查后自动启用、入库并建立索引"
         actions={<button className="qp-button qp-button--ghost" type="button" disabled={Boolean(busyAction) || !configured}
@@ -1278,13 +1296,19 @@ function NightAllSavedRecordsPipelineModal({
             onChange={(event) => setWriterContractConfirmed(event.target.checked)} />
           <span>
             <strong>我已逐项验证当前 {tasks.length} 个分区的 writer、提交顺序与删除合同</strong>
-            <small>合同 {writerContractVersion || '待加载'} · 摘要 {writerContractDigest?.slice(0, 12) || '待加载'}… · 确认会写入审计记录</small>
+            <small>仅在点击“启用”时提交人工确认；勾选不会执行检查、修复或恢复。合同 {writerContractVersion || '待加载'} · 摘要 {writerContractDigest?.slice(0, 12) || '待加载'}…</small>
           </span>
         </label>
       </Panel>
 
       <Panel title={`${tasks.length} 个独立输入任务`} subtitle="父表不直接读取；一个分区失败不会回滚或阻塞其他分区"
-        actions={<button className="qp-button qp-button--ghost" type="button" disabled={!configured || progress.loading} onClick={progress.refresh}><ArrowClockwise size={16} />重新核对</button>}>
+        actions={<button className="qp-button qp-button--ghost" type="button" disabled={!configured || progress.loading} onClick={progress.refresh}><ArrowClockwise size={16} />{progress.loading ? '正在核对…' : '重新核对'}</button>}>
+        <div role="status" aria-live="polite" aria-busy={progress.loading}>
+          {progress.loading ? <p>正在核对 {tasks.length} 个分区的源表、索引与断点…</p> : null}
+          {progress.error ? <p>{progress.data ? '本次核对失败，下方保留上次结果。' : '本次核对失败，尚未取得分区结果。'}</p> : null}
+          {progress.data ? <p>{progress.loading || progress.error ? '上次核对' : '核对完成'}：{formatDate(checkReport.checkedAt)} · 源表检查通过 {checkReport.passed}/{checkReport.total}，需处理 {checkReport.blocked} 个，结果缺失 {checkReport.missing} 个。</p> : null}
+          <p>重新核对无需勾选 Writer 确认，也不会清除“需恢复”状态。源表检查通过不代表写入顺序和删除规则已验证。</p>
+        </div>
         <div className="mih-telegram-task-grid">
           {tasks.map((task) => {
             const sourceType = nightAllSavedRecordTaskType(task)
@@ -1292,6 +1316,7 @@ function NightAllSavedRecordsPipelineModal({
             const spec = task.spec || task.fixedInput || {}
             const sourceKey = telegramTaskSourceKey(task) || `night-all-saved-records-${sourceType.replaceAll('_', '-')}`
             const diagnostic = progressTasks.find((item) => nightAllSavedRecordTaskType(item) === sourceType)
+            const checked = checkReport.rows.find(row => row.sourceKey === sourceKey)
             const issues = sqlitePipelineIssueMessages(
               diagnostic?.error,
               diagnostic?.issues,
@@ -1320,6 +1345,7 @@ function NightAllSavedRecordsPipelineModal({
                   <div><dt>Checkpoint</dt><dd><code>{compactCheckpoint(task.cursor?.position)}</code></dd></div>
                   <div><dt>最近运行</dt><dd>{formatDate(task.latestRun?.finishedAt || task.latestRun?.startedAt)}</dd></div>
                 </dl>
+                {progress.data && checked ? <p role="status">{progress.loading || progress.error ? '上次源表核对' : '源表核对'}：{checked.passed ? '通过' : checked.issues.join('；')}</p> : null}
                 {issues.length > 0 ? <ul className="mih-source-issues mih-source-issues--warning">
                   {issues.map((issue, index) => <li key={`${issue}-${index}`}>{issue}</li>)}
                 </ul> : null}

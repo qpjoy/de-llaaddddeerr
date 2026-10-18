@@ -1,3 +1,4 @@
+import { refreshAdmissionLimits } from './admission-runtime.mjs'
 import { upstreamCapacityError } from './availability-errors.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
@@ -36,13 +37,20 @@ const uncertain = () => {
 const knownAdmission = error => error instanceof AppError && error.status !== 403 && (
   /^external_platform_(?:operation_|cost_)/u.test(error.code)
   || error.status === 409 && error.code === 'external_platform_response_unusable'
-  || ['external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
+  || ['external_admission_policy_unavailable', 'external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
     'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'content_search_deadline'].includes(error.code))
 
 export async function runContentSearch({ gateway, context, request, delivery, deadlineAt, signal,
-  resolveCredential, revalidateIdentity, enterCapacity, leaveCapacity, providerCostControl, buildResponse }, { clock = Date.now } = {}) {
+  resolveCredential, revalidateIdentity, enterCapacity, leaveCapacity, providerCostControl, buildResponse, finalizeResponse }, { clock = Date.now } = {}) {
+  // Protect equal historical requests even when a different Idempotency-Key is
+  // supplied. A retired cursor is only a restart boundary after this check.
+  const store = gateway.platformStore, stateStore = new ContentSearchStateStore(store, request)
+  const identity = { tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
+    path: request.standard ? '/api/v1/data/search' : '/api/v1/night-all/search/raw', scopeHash: request.scopeHash }
+  if (await stateStore.unknownFor(delivery, identity.path)) throw new AppError(409, 'request_outcome_unknown', 'A previous equal search has an unknown outcome')
   if (request.restartRequired) throw new AppError(409, 'search_restart_required', 'This platform now searches directly in Hub; restart from page 1 with a new Idempotency-Key. Historical cursors cannot be converted.')
   if (request.unsupportedNativeCursor) throw new AppError(400, 'content_search_pagination_unsupported', 'Native continuation parameters cannot replace the signed Hub cursor; restart explicitly')
+  if (request.platform === 'xiaohongshu' && typeof finalizeResponse !== 'function') throw new AppError(503, 'content_search_unavailable', 'Xiaohongshu search enrichment is unavailable')
   if (request.body.params != null && (typeof request.body.params !== 'object' || Array.isArray(request.body.params))) {
     throw new AppError(400, 'unsupported_fields', 'Content-search params must be an object')
   }
@@ -67,10 +75,6 @@ export async function runContentSearch({ gateway, context, request, delivery, de
   }
   const sample = normalizeTikHubContentSearchRequest({ platform: request.platform, query: request.queries[0],
     pageSize: request.pageSize, params: request.params, maxQueryLength: request.standard ? 500 : 2048 })
-  const store = gateway.platformStore, stateStore = new ContentSearchStateStore(store, sample)
-  const identity = { tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
-    path: request.standard ? '/api/v1/data/search' : '/api/v1/night-all/search/raw', scopeHash: request.scopeHash }
-  if (await stateStore.unknownFor(delivery, identity.path)) throw new AppError(409, 'request_outcome_unknown', 'A previous equal search has an unknown outcome')
   const history = await stateStore.historyFor({ ...identity, previousDeliveryId: request.previousDeliveryId,
     jobCount: request.queries.length, totalLimit: request.totalLimit })
   const state = history.state || { jobs: request.queries.map(query => ({ query, providerCursor: null,
@@ -83,7 +87,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
     ownerRequestId: delivery.usageRequestId, expiresAt: new Date(deadlineAt).toISOString() }
   const childLease = { ...parentLease, operation: sample.operation, endpointKey: sample.endpointKey, contractVersion: sample.endpointContractVersion }
   let calls = 0, bytes = 0, capturedAt = null, ownsParent = false, ownsChild = false, entered = false
-  let currentCall = null, currentEvidence = null, costReservation = null, settledFailure = false, retainLease = false, stopped = false
+  let currentCall = null, currentEvidence = null, costReservation = null, settledFailure = false, retainLease = false, stopped = false, finalizing = false
   let phase = 'admission'
   const logUnknown = error => {
     try {
@@ -122,6 +126,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
       rowsByJob[index].push(row)
     }
     if (projected.nonPostCount) warn('non_post_items_excluded', 'The provider returned non-content entries; these were excluded from content results.')
+    for (const warning of projected.providerPage.warnings || []) warn(warning.code, warning.message)
     if (projected.providerPage.stopReason === 'repeated_cursor') warn('content_search_repeated_cursor', 'The supplier repeated its continuation; acquired content was retained and further acquisition stopped.')
     if (rows.some(row => ['provider_preview', 'title_only'].includes(row.body_completeness))) {
       warn('body_completeness_unknown', 'Some returned content is a provider preview; full text was not independently acquired.')
@@ -202,7 +207,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           const cost = providerCostControl(control?.billing ? { billing: control.billing } : gateway.config, nativeRequest.endpointKey)
           costReservation = await store.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
           const rate = isInternalTraffic(gateway.usageStore, context) ? { allowed: true }
-            : await store.acquireProviderRateLimit({ limit: gateway.config.maxRequestsPerMinute ?? 90, windowMs: 60000 })
+            : await store.acquireProviderRateLimit({ limit: (await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90, windowMs: 60000 })
           if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Content-search rate limit is exhausted')
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           if (!enoughTime()) throw new AppError(503, 'content_search_deadline', 'Content-search deadline reached before dispatch')
@@ -280,8 +285,19 @@ export async function runContentSearch({ gateway, context, request, delivery, de
     }
     if (!sources.length) throw new AppError(503, 'content_search_unavailable', 'No content page could be acquired within the bounded request')
     phase = 'build_delivery'
-    const responseBody = buildResponse({ rowsByJob, state, calls, warnings })
-    const sourceMode = calls ? 'live' : clock() - Date.parse(capturedAt) <= gateway.config.freshTtlMs ? 'fresh_cache' : 'stored_fallback'
+    let responseBody = buildResponse({ rowsByJob, state, calls, warnings })
+    if (['xiaohongshu', 'weibo'].includes(request.platform)) {
+      // Buffer identity hashes always describe the unmodified acquired page.
+      // Enrich only this page's deduplicated delivered notes. Exact response
+      // replay bypasses this workflow, and later buffer pages carry other IDs.
+      if (entered) { leaveCapacity(entered); entered = false }
+      context = await revalidateIdentity({ operation: request.operation, totalLimit: request.totalLimit })
+      finalizing = true
+      responseBody = await finalizeResponse({ context, request, rowsByJob, delivery, responseBody, firstCallOrdinal: calls, deadlineAt,
+        revalidateIdentity: () => revalidateIdentity({ operation: request.operation, totalLimit: request.totalLimit }) })
+      finalizing = false
+    }
+    const sourceMode = calls || responseBody.data.meta.providerCalls ? 'live' : clock() - Date.parse(capturedAt) <= gateway.config.freshTtlMs ? 'fresh_cache' : 'stored_fallback'
     try {
       phase = 'commit_delivery'
       await stateStore.commitDelivery({ ...identity, delivery, responseBody, sources, capturedAt, sourceMode,
@@ -292,7 +308,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
     } catch (error) { logUnknown(error); await markUnknown(); throw uncertain() }
     return { status: 200, body: responseBody, requestId: delivery.usageRequestId, replay: false, sourceMode, capturedAt }
   } catch (error) {
-    if (calls && !settledFailure) {
+    if ((calls || finalizing) && !settledFailure) {
       if (!error.preserveReservation) logUnknown(error)
       await markUnknown()
       if (!error.preserveReservation) throw uncertain()

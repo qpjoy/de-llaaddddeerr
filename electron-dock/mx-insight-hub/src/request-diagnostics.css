@@ -13,6 +13,19 @@
 .mih-diagnostic-call h4 { margin-top: 0; }
 .mih-diagnostic-guidance { padding: 16px; border-left: 3px solid var(--qp-accent, #15caba); line-height: 1.7; background: var(--qp-bg-2); }
 .mih-diagnostic-empty { padding: 28px 0; color: var(--qp-text-3); line-height: 1.7; }
+.mih-diagnostic-result-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.mih-diagnostic-result-heading p { min-width: 0; }
+.mih-diagnostic-analysis { margin: 20px 0; padding: 20px; border: 1px solid var(--qp-line); border-radius: 12px; line-height: 1.7; }
+.mih-diagnostic-analysis h4 { margin-top: 0; }
+.mih-diagnostic-analysis h5 { margin: 0 0 8px; font-size: 14px; }
+.mih-diagnostic-analysis ol { padding-left: 22px; }
+.mih-diagnostic-findings { display: grid; gap: 12px; margin: 16px 0; }
+.mih-diagnostic-finding { padding: 14px; border-left: 3px solid var(--qp-primary); background: var(--qp-bg-2); }
+.mih-diagnostic-finding.is-unresolved { border-left-color: var(--qp-text-3); }
+.mih-diagnostic-finding h5 span { display: inline-block; margin-right: 10px; color: var(--qp-text-3); font-size: 12px; }
+.mih-diagnostic-finding p { margin: 0; }
+.mih-diagnostic-finding details { margin-top: 8px; color: var(--qp-text-3); font-size: 12px; }
+.mih-diagnostic-finding li { overflow-wrap: anywhere; }
 .mih-twitter-retry { padding: 18px; }
 .mih-twitter-retry > h4 { margin-top: 0; }
 .mih-twitter-retry-actions { display: flex; flex-wrap: wrap; gap: 10px; }
@@ -20,6 +33,7 @@
   .mih-request-diagnostics { padding: 16px; }
   .mih-diagnostic-form { flex-direction: column; align-items: stretch; }
   .mih-diagnostic-facts { grid-template-columns: minmax(0, 1fr); }
+  .mih-diagnostic-analysis { padding: 14px; }
   .mih-twitter-retry { padding: 14px; }
   .mih-twitter-retry-actions { flex-direction: column; align-items: stretch; }
 }

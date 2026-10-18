@@ -1,3 +1,4 @@
+import { currentAdmissionLimits, refreshAdmissionLimits } from './admission-runtime.mjs'
 import { upstreamCapacityError } from './availability-errors.mjs'
 import { isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash } from 'node:crypto'
@@ -17,7 +18,7 @@ const uncertain = message => {
 }
 const knownAdmission = error => error instanceof AppError && error.status !== 403 && (
   /^external_platform_(?:operation_|cost_)/u.test(error.code)
-  || ['external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
+  || ['external_admission_policy_unavailable', 'external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
     'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'twitter_fill_deadline'].includes(error.code))
 
 function archiveObjects(result, request, callId) {
@@ -161,20 +162,20 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
               return context
             }}))) {
             const active=gateway.active, consumerActive=gateway.activeByConsumer.get(context.consumer.id) || 0
-            const reason=active>=gateway.config.maxConcurrency ? 'hub_concurrency_exhausted'
-              : consumerActive>=gateway.config.maxConsumerConcurrency ? 'consumer_concurrency_exhausted' : 'concurrency_queue_pending'
+            const reason=active>=currentAdmissionLimits(gateway).maxConcurrency ? 'hub_concurrency_exhausted'
+              : consumerActive>=currentAdmissionLimits(gateway).maxConsumerConcurrency ? 'consumer_concurrency_exhausted' : 'concurrency_queue_pending'
             if(!sources.length) await store.rejectWithoutDispatch({delivery,sourceMode:'unavailable',status:503,errorCode:'external_platform_busy'})
             throw new AppError(503,'external_platform_busy','Hub Twitter 数据采集并发名额暂不可用，本次尚未发起采集，请稍后重试。',{
               platform:'twitter',layer:'hub',stage:'concurrency_admission',reason,upstreamDispatched:false,
-              retryAfterMs:1000,admissionMode:'immediate',activeConcurrency:active,maxConcurrency:gateway.config.maxConcurrency,
-              consumerActiveConcurrency:consumerActive,maxConsumerConcurrency:gateway.config.maxConsumerConcurrency,
+              retryAfterMs:1000,admissionMode:'immediate',activeConcurrency:active,maxConcurrency:currentAdmissionLimits(gateway).maxConcurrency,
+              consumerActiveConcurrency:consumerActive,maxConsumerConcurrency:currentAdmissionLimits(gateway).maxConsumerConcurrency,
               queueDepth:gateway.concurrencyQueue.entries.length,
             })
           }
         }
         const {credential,control,cost}=acquisition
         currentCost=await store.reserveProviderCostWorkflow({ ...delivery,apiKeyId:context.apiKey.id,costControls:[cost] })
-        const rate=isHubRateLimitExempt(context)?{allowed:true}:await store.acquireProviderRateLimit({ limit:gateway.config.maxRequestsPerMinute ?? 90,windowMs:60000 })
+        const rate=isHubRateLimitExempt(context)?{allowed:true}:await store.acquireProviderRateLimit({ limit:(await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90,windowMs:60000 })
         if(!rate.allowed) throw new AppError(429,'external_platform_rate_limited','External data rate limit is exhausted')
         if(!enoughTime()) throw new AppError(503,'twitter_fill_deadline','The bounded search deadline has been reached')
         if(signal?.aborted) throw new AppError(499,'request_cancelled','Request cancelled before dispatch')
