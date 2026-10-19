@@ -31,6 +31,8 @@ assert.deepEqual(args.slice(0, 2), ['-n', 'mx-rig'])
 if (args[2] === 'rollout') process.exit(0)
 // The OnDelete database is awaited through its Pod.
 if (args[2] === 'wait' || (args[2] === 'get' && args[3] === 'pod/mx-rig-postgres-0')) process.exit(0)
+// Strategy read before applying the database manifest; empty = not yet created.
+if (args[2] === 'get' && args[3] === 'statefulset' && args[4] === 'mx-rig-postgres') process.exit(0)
 assert.deepEqual(args.slice(2, 5), ['get', 'secret', 'mx-rig-secrets'])
 const key = /\\.data\\.(MX_RIG_[A-Z0-9_]+)/.exec(args.at(-1))[1]
 process.stdout.write(JSON.parse(fs.readFileSync(file, 'utf8'))[key] ?? '')

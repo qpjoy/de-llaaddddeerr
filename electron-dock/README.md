@@ -121,7 +121,7 @@ bash scripts/manage.sh db apply launcher    # 应用；无变化时不做任何�
 
 Launcher、mx-common、Rig 的 PostgreSQL StatefulSet 改为 `updateStrategy: OnDelete`（Pay 原本就是）。因此修改数据库模板后，`deploy` 不会再滚动重启数据库：CPU／内存由上面的原地调整生效，其他模板变化（镜像、启动参数、探针等）在 `db status` 里显示为“模板有新版本尚未作用于 Pod”，需在维护窗口手动删除该 Pod 才生效。`kubectl rollout status` 不支持 OnDelete，各项目的数据库等待已改为等待 Pod Ready。
 
-首次带着 OnDelete 的清单部署时，更新策略和模板在同一次写入生效，不会触发滚动。原地调整资源需要 Kubernetes 1.33+（当前集群 1.36）；更早的版本只会得到“resize-rejected”报告。
+已有的 StatefulSet 原来是默认的 RollingUpdate，带着默认的 `rollingUpdate` 字段，直接 `kubectl apply` OnDelete 清单会被 API 拒绝（2026-10-19 Launcher 部署即因此在 PG 一步退出，未改动任何资源）。现在各部署在应用清单前先用 JSON patch 只替换 `spec.updateStrategy`，不改 Pod 模板，因此不会触发滚动；之后再应用模板。原地调整资源需要 Kubernetes 1.33+（当前集群 1.36）；更早的版本只会得到“resize-rejected”报告。
 
 ## 锁与结果记录
 

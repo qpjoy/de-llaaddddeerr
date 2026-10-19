@@ -2500,6 +2500,20 @@ k8s_rollout_status() {
 # Database StatefulSets use OnDelete so template changes never restart the
 # running database, and `rollout status` rejects that strategy. Wait for the Pod
 # itself instead; other strategies keep the original rollout wait.
+# A StatefulSet created with the default RollingUpdate keeps a defaulted
+# `rollingUpdate` block. `kubectl apply` of an OnDelete manifest merges both and
+# the API rejects the result, so switch the strategy alone first. The pod
+# template is untouched, so no Pod restarts.
+k8s_postgres_switch_to_ondelete() {
+  local ns="$1" name="$2" strategy
+  strategy="$(kubectl --request-timeout=15s -n "$ns" get statefulset "$name" --ignore-not-found \
+    -o jsonpath='{.spec.updateStrategy.type}')" || return 1
+  [ -n "$strategy" ] && [ "$strategy" != OnDelete ] || return 0
+  say "switch $name update strategy $strategy -> OnDelete before applying its template (no Pod restart)"
+  kubectl --request-timeout=15s -n "$ns" patch statefulset "$name" --type=json \
+    -p '[{"op":"replace","path":"/spec/updateStrategy","value":{"type":"OnDelete"}}]' >/dev/null
+}
+
 k8s_postgres_ready() {
   local ns="$1" name="$2" timeout="${3:-180}" strategy waited=0
   strategy="$(kubectl --request-timeout=15s -n "$ns" get statefulset "$name" -o jsonpath='{.spec.updateStrategy.type}' 2>/dev/null || true)"
@@ -2825,6 +2839,8 @@ k8s_apply() {
   say "ensure local persistent volumes; preserve existing sources and bindings"
   k8s_local_pvs ensure "$dir"
   say "apply postgres service/statefulset"
+  k8s_postgres_switch_to_ondelete "$ns" mx-internal-postgres \
+    || die "could not switch the PostgreSQL StatefulSet to OnDelete; nothing was applied"
   if [ "${K8S_PRODUCTION_RECOVERY:-0}" = 1 ]; then
     k8s_production_recovery_state checkpoint
     # Recheck immediately before applying the workload; mounts may have changed

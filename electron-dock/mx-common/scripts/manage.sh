@@ -667,8 +667,23 @@ render_manifest() {
       "$1"
 }
 
+# See mx-launcher k8s_postgres_switch_to_ondelete: an existing RollingUpdate
+# StatefulSet keeps a defaulted `rollingUpdate` block that makes `kubectl apply`
+# of the OnDelete manifest invalid. Switching the strategy alone restarts nothing.
+switch_postgres_to_ondelete() {
+  local strategy
+  strategy="$(kubectl -n "$NAMESPACE" get statefulset mx-common-postgres --ignore-not-found \
+    -o jsonpath='{.spec.updateStrategy.type}')" || return 1
+  [ -n "$strategy" ] && [ "$strategy" != OnDelete ] || return 0
+  say "switching mx-common-postgres update strategy ${strategy} -> OnDelete (no Pod restart)"
+  kubectl -n "$NAMESPACE" patch statefulset mx-common-postgres --type=json \
+    -p '[{"op":"replace","path":"/spec/updateStrategy","value":{"type":"OnDelete"}}]' >/dev/null
+}
+
 apply_manifests() {
   local file
+  switch_postgres_to_ondelete \
+    || die "could not switch mx-common-postgres to OnDelete; no manifest was applied"
   while IFS= read -r file; do
     render_manifest "$file" | kubectl apply -f - >/dev/null
   done < <(manifest_list)

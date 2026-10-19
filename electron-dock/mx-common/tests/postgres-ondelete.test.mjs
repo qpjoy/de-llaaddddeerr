@@ -55,3 +55,29 @@ test('the shared database manifest is OnDelete and readiness uses the strategy-a
   assert.match(fn('wait_ready'), /if workload_ready "\$kind" "\$name"; then/)
   assert.doesNotMatch(manage, /rollout status statefulset\/mx-common-postgres/)
 })
+
+function switchStrategy(state, getFails = false) {
+  return spawnSync('bash', ['-c', `set -Eeuo pipefail
+NAMESPACE=mx-common
+say() { echo "$*"; }
+${fn('switch_postgres_to_ondelete')}
+kubectl() {
+  echo "CALL $*" >&2
+  case "$*" in
+    *' get statefulset mx-common-postgres '*) ${getFails ? 'return 1' : `printf '%s' "${state}"`} ;;
+    *' patch statefulset mx-common-postgres --type=json '*) ;;
+    *) return 37 ;;
+  esac
+}
+switch_postgres_to_ondelete
+`], { encoding: 'utf8', timeout: 10000 })
+}
+
+test('apply_manifests first switches an existing RollingUpdate database to OnDelete without touching its template', () => {
+  const switched = switchStrategy('RollingUpdate')
+  assert.equal(switched.status, 0, switched.stderr)
+  assert.match(switched.stderr, /patch statefulset mx-common-postgres --type=json -p \[\{"op":"replace","path":"\/spec\/updateStrategy","value":\{"type":"OnDelete"\}\}\]/)
+  for (const state of ['OnDelete', '']) assert.doesNotMatch(switchStrategy(state).stderr, /patch/)
+  assert.equal(switchStrategy('', true).status, 1)
+  assert.match(fn('apply_manifests'), /switch_postgres_to_ondelete \\\n\s+\|\| die/)
+})

@@ -472,3 +472,15 @@ bash scripts/manage.sh db apply launcher
 
 Launcher PG 的模板已改为 4 CPU／4Gi 和 `updateStrategy: OnDelete`。下一次 `deploy mx-launcher` 写入这个模板时不会滚动数据库，部署成功后会自动执行一次 `db apply launcher`：原地调整 Pod 资源并热加载参数。mx-common（Hub／DataPort 共享库，16 CPU／48Gi）同理。`db status` 会列出仍需计划重启才生效的项（如 `shared_buffers` 或模板中的其他变化），这些项不会被自动执行。说明见 [electron-dock/README.md](../../README.md#数据库运行配置db-apply)。
 
+### 12.8 首次带 OnDelete 的 Launcher 部署失败（已修复，未上线）
+
+`PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-launcher` 在 “apply postgres service/statefulset” 以 `PostgreSQL recovery apply failed: kubectl failed` 退出（205.3 秒，退出码 1）。原因是 12.7 的清单：现有 `mx-internal-postgres` 由默认 RollingUpdate 创建，保留默认的 `updateStrategy.rollingUpdate.partition=0`；`kubectl apply` 把 OnDelete 与它合并后，API 以 “rollingUpdate only allowed for updateStrategy RollingUpdate” 拒绝。被拒绝的写入没有改变 StatefulSet，部署也没有进入迁移、identity、API 与网关步骤，Launcher 继续运行原版本，数据库未动。同一次输出里 `mx-internal-coredns configured` 并完成 rollout 发生在此之前，是 Launcher 原有步骤，与此无关。
+
+修复：Launcher、mx-common、Rig 在应用 PG 清单前，若现有策略不是 OnDelete，先用 JSON patch 只替换 `spec.updateStrategy` 为 `{"type":"OnDelete"}`，不改 Pod 模板、不滚动；随后照常应用模板。同步代码后可只读确认原因：
+
+```bash
+kubectl --kubeconfig=/etc/kubernetes/admin.conf -n mx-internal-shadow get statefulset mx-internal-postgres -o jsonpath='{.spec.updateStrategy}{"\n"}'
+```
+
+预期显示 `{"rollingUpdate":{"partition":0},"type":"RollingUpdate"}`。随后重跑同一条 deploy，日志会出现 `switch mx-internal-postgres update strategy RollingUpdate -> OnDelete before applying its template (no Pod restart)`；完成后 `db apply launcher` 自动执行。部署前后 `mx-internal-postgres-0` 的重启次数应不变。
+

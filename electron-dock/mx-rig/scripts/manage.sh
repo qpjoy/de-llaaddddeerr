@@ -32,6 +32,18 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
 kube() { kubectl -n "$NAMESPACE" "$@"; }
 # The database StatefulSet is OnDelete and `rollout status` rejects that
 # strategy; its Pod being Ready is the signal.
+# An existing RollingUpdate StatefulSet keeps a defaulted `rollingUpdate` block
+# that makes `kubectl apply` of the OnDelete manifest invalid. Switching the
+# strategy alone does not touch the pod template, so nothing restarts.
+switch_postgres_to_ondelete() {
+  local strategy
+  strategy="$(kube get statefulset mx-rig-postgres --ignore-not-found -o jsonpath='{.spec.updateStrategy.type}')" || return 1
+  [ -n "$strategy" ] && [ "$strategy" != OnDelete ] || return 0
+  say "switching mx-rig-postgres update strategy ${strategy} -> OnDelete (no Pod restart)"
+  kube patch statefulset mx-rig-postgres --type=json \
+    -p '[{"op":"replace","path":"/spec/updateStrategy","value":{"type":"OnDelete"}}]' >/dev/null
+}
+
 wait_postgres_pod() {
   local waited=0
   until kube get pod/mx-rig-postgres-0 >/dev/null 2>&1; do
@@ -592,6 +604,7 @@ prepare_kubernetes() {
   resolve_data_root
   resolve_runner_cidrs
   apply_secret
+  switch_postgres_to_ondelete || die "could not switch mx-rig-postgres to OnDelete; nothing was applied"
   apply_files 05-serviceaccount.yaml 08-resource-policy.yaml 10-artifacts-pvc.yaml 15-postgres.yaml \
     40-network-policy.yaml
   say "waiting for PostgreSQL"

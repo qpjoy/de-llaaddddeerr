@@ -60,3 +60,37 @@ test('the manifest keeps the database across template changes and lifts the 1 CP
   assert.match(manifest, /limits:\n\s+cpu: "4"\n\s+memory: 4Gi/);
   assert.match(manage, /if ! k8s_postgres_ready "\$ns" mx-internal-postgres 180; then/);
 });
+
+function switchStrategy(strategy, getFails = false) {
+  const temp = mkdtempSync(join(tmpdir(), 'mx-pg-switch-'));
+  try {
+    const result = spawnSync('bash', ['-c', `set -Eeuo pipefail
+say() { echo "$*"; }
+${fn('k8s_postgres_switch_to_ondelete')}
+kubectl() {
+  printf '%s\\n' "$*" >> "$CALLS"
+  case "$*" in
+    *' get statefulset mx-internal-postgres '*) ${getFails ? 'return 1' : `printf '%s' "${strategy}"`} ;;
+    *' patch statefulset mx-internal-postgres --type=json '*) ;;
+    *) return 37 ;;
+  esac
+}
+k8s_postgres_switch_to_ondelete mx-internal-shadow mx-internal-postgres
+`], { encoding: 'utf8', env: { ...process.env, CALLS: join(temp, 'calls') }, timeout: 10000 });
+    return { status: result.status, calls: readFileSync(join(temp, 'calls'), 'utf8') };
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+}
+
+test('an existing RollingUpdate database switches only its strategy before the template is applied', () => {
+  const result = switchStrategy('RollingUpdate');
+  assert.equal(result.status, 0);
+  assert.match(result.calls, /patch statefulset mx-internal-postgres --type=json -p \[\{"op":"replace","path":"\/spec\/updateStrategy","value":\{"type":"OnDelete"\}\}\]/);
+  assert.doesNotMatch(result.calls, /apply|delete|rollout|template/);
+  for (const strategy of ['OnDelete', '']) {
+    const untouched = switchStrategy(strategy);
+    assert.equal(untouched.status, 0);
+    assert.doesNotMatch(untouched.calls, /patch/);
+  }
+  assert.equal(switchStrategy('', true).status, 1);
+  assert.match(manage, /k8s_postgres_switch_to_ondelete "\$ns" mx-internal-postgres \\\n\s+\|\| die/);
+});
