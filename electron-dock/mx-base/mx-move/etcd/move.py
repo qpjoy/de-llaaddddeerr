@@ -19,6 +19,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -63,6 +64,47 @@ def digest(raw):
 
 def log(message):
     print(message, flush=True)
+
+
+@contextlib.contextmanager
+def progress(label, interval=15):
+    """Report only fixed stage labels, without exposing command output.
+
+    A heartbeat observes elapsed time only. It does not probe the host or alter
+    subprocess timeouts. stderr keeps plan/status stdout usable as JSON.
+    """
+    started = time.monotonic()
+    stopped = threading.Event()
+
+    def report(state):
+        try:
+            print('[{}] {}：{}（已用 {:.1f} 秒）'.format(
+                time.strftime('%H:%M:%S'), label, state, time.monotonic() - started),
+                file=sys.stderr, flush=True)
+        except (OSError, ValueError):
+            # A closed log pipe must not interrupt a storage transaction.
+            pass
+
+    def heartbeat():
+        while not stopped.wait(interval):
+            report('仍在执行')
+
+    report('开始')
+    worker = threading.Thread(target=heartbeat, name='mx-move-progress', daemon=True)
+    try:
+        worker.start()
+    except RuntimeError:
+        worker = None
+        report('周期提示不可用，继续执行')
+    completed = False
+    try:
+        yield
+        completed = True
+    finally:
+        stopped.set()
+        if worker is not None:
+            worker.join()
+        report('完成' if completed else '未完成')
 
 
 def run(args, timeout=60, input_data=None):
@@ -694,29 +736,35 @@ class Move:
                  phase='preparing', may_write=False)
         self.j = j
         log('本次备份与事务目录：' + str(run_dir))
-        for src, dest in [(MANIFEST, run_dir / 'etcd.yaml'), (FSTAB, run_dir / 'fstab.before')]:
-            shutil.copy2(str(src), str(dest))
-            os.chmod(str(dest), 0o600)
-        atomic(run_dir / 'fstab.after', change_fstab((run_dir / 'fstab.before').read_bytes(), target))
-        # Copy matching tool from the running image before its container exits.
-        shutil.copyfile(self.host.etcdctl, str(run_dir / 'etcdctl'))
-        os.chmod(str(run_dir / 'etcdctl'), 0o700)
-        self.host.etcdctl = str(run_dir / 'etcdctl')
-        run([self.host.etcdctl, 'version'])
-        self.host.helper('prepare', j)
-        shutil.copytree('/etc/kubernetes/pki', str(run_dir / 'pki'))
+        with progress('备份配置、证书与 Launcher 恢复记录'):
+            for src, dest in [(MANIFEST, run_dir / 'etcd.yaml'), (FSTAB, run_dir / 'fstab.before')]:
+                shutil.copy2(str(src), str(dest))
+                os.chmod(str(dest), 0o600)
+            atomic(run_dir / 'fstab.after', change_fstab((run_dir / 'fstab.before').read_bytes(), target))
+            # Copy matching tool from the running image before its container exits.
+            shutil.copyfile(self.host.etcdctl, str(run_dir / 'etcdctl'))
+            os.chmod(str(run_dir / 'etcdctl'), 0o700)
+            self.host.etcdctl = str(run_dir / 'etcdctl')
+            run([self.host.etcdctl, 'version'])
+            self.host.helper('prepare', j)
+            shutil.copytree('/etc/kubernetes/pki', str(run_dir / 'pki'))
         # Private parent protects original key modes; backup never enters logs.
         log('保存在线 etcd snapshot 并校验 SHA256；此阶段不暂停 etcd。')
-        self.host.ctl('snapshot', 'save', str(run_dir / 'snapshot.db'))
+        with progress('保存在线 etcd snapshot'):
+            self.host.ctl('snapshot', 'save', str(run_dir / 'snapshot.db'))
         os.chmod(str(run_dir / 'snapshot.db'), 0o600)
-        j['snapshot_sha256'] = verify_snapshot(run_dir / 'snapshot.db')
-        j['etcd'] = self.host.etcd_status()
-        j['business'] = sorted(c['id'] for c in self.host.containers() if c.get('state') == 'CONTAINER_RUNNING' and c.get('metadata', {}).get('name') != 'etcd')
-        j['leases'] = self.host.leases()
-        j['launcher'] = self.host.launcher_check()
-        self.guard_record('source')
-        self.boot_guard()
-        run(['sync', '-f', str(run_dir)], 180)
+        with progress('校验 snapshot SHA256'):
+            j['snapshot_sha256'] = verify_snapshot(run_dir / 'snapshot.db')
+        with progress('记录集群、容器与 Launcher 登录配置基线'):
+            j['etcd'] = self.host.etcd_status()
+            j['business'] = sorted(c['id'] for c in self.host.containers() if c.get('state') == 'CONTAINER_RUNNING' and c.get('metadata', {}).get('name') != 'etcd')
+            j['leases'] = self.host.leases()
+            j['launcher'] = self.host.launcher_check()
+        with progress('安装并验证启动保护'):
+            self.guard_record('source')
+            self.boot_guard()
+        with progress('备份落盘'):
+            run(['sync', '-f', str(run_dir)], 180)
         self.persist('prepared')
 
     def boot_guard(self):
@@ -794,8 +842,9 @@ class Move:
             fsync_dir(held.parent)
         else:
             require(held.exists() and held.read_bytes() == backup.read_bytes(), '无法验证已暂停的 manifest')
-        wait_for(self.host.stopped, 150, 'etcd 未停止，未执行复制或卸载')
-        require(self.host.stopped(), 'etcd 仍在运行')
+        with progress('等待 etcd 容器和进程停止'):
+            wait_for(self.host.stopped, 150, 'etcd 未停止，未执行复制或卸载')
+            require(self.host.stopped(), 'etcd 仍在运行')
 
     def manifest_in(self):
         side = 'target' if self.j['may_write'] else 'source'
@@ -851,8 +900,9 @@ class Move:
         self.host.same_mount(source)
         self.host.active_identity(self.j['source_identity'], self.j['source_disk'])
         self.host.no_child_mounts([source, DATA])
-        size = tree_bytes(DATA)
-        capacity(target.parent, size + GIB)
+        with progress('复查冷拷贝数据大小与目标空间'):
+            size = tree_bytes(DATA)
+            capacity(target.parent, size + GIB)
         require(not target.exists(), '冷拷贝目标必须是全新 generation')
         self.persist('copying')
         with self.host.storage(target.parent, self.j['target_parent_identity']) as parent:
@@ -862,10 +912,13 @@ class Move:
                 log('etcd 已暂停，复制完整 member/WAL；原目录保留。')
                 # DATA is the existing, root-protected bind. Do not reread the
                 # mutable /data pathname after validating the live DB inode.
-                run(['rsync', '-aHAX', '--numeric-ids', str(DATA) + '/', destination.proc_path + '/'], 900)
-                require(not run(['rsync', '-aHAXnci', '--numeric-ids', str(DATA) + '/', destination.proc_path + '/'], 900).strip(), '冷拷贝内容或元数据校验失败')
-                require(tree_bytes(Path(destination.proc_path)) == size, '冷拷贝文件大小不一致')
-                run(['sync', '-f', destination.proc_path], 180)
+                with progress('冷拷贝完整 member/WAL（{:.1f} MiB）'.format(size / 1024 ** 2)):
+                    run(['rsync', '-aHAX', '--numeric-ids', str(DATA) + '/', destination.proc_path + '/'], 900)
+                with progress('校验冷副本内容与元数据'):
+                    require(not run(['rsync', '-aHAXnci', '--numeric-ids', str(DATA) + '/', destination.proc_path + '/'], 900).strip(), '冷拷贝内容或元数据校验失败')
+                    require(tree_bytes(Path(destination.proc_path)) == size, '冷拷贝文件大小不一致')
+                with progress('冷副本落盘'):
+                    run(['sync', '-f', destination.proc_path], 180)
                 parent.assert_current()
                 destination.assert_current()
                 self.host.active_identity(self.j['source_identity'], self.j['source_disk'])
@@ -873,39 +926,47 @@ class Move:
         self.persist('copied')
 
     def finish(self):
-        status = wait_for(lambda: self.host.health(self.j), 180, 'etcd/API 未恢复健康；保留当前权威副本，请运行 status/resume')
-        self.host.helper('reconcile', self.j)
+        with progress('等待 etcd、Kubernetes API 与原节点恢复健康'):
+            status = wait_for(lambda: self.host.health(self.j), 180, 'etcd/API 未恢复健康；保留当前权威副本，请运行 status/resume')
+        with progress('核对 Launcher 恢复身份'):
+            self.host.helper('reconcile', self.j)
         def leases_renewed():
             current = self.host.leases()
             return all(current[name] > value for name, value in self.j['leases'].items())
-        wait_for(leases_renewed, 90, '控制器 lease 未继续更新；保持当前副本，请运行 resume')
-        require(self.host.launcher_check() == self.j['launcher'], 'Launcher 凭据/登录配置/只读认证验收变化；保持当前副本，核查后 resume')
-        active = {c['id'] for c in self.host.containers() if c.get('state') == 'CONTAINER_RUNNING'}
+        with progress('等待 controller-manager 与 scheduler 续租'):
+            wait_for(leases_renewed, 90, '控制器 lease 未继续更新；保持当前副本，请运行 resume')
+        with progress('验收 Launcher 登录配置与凭据，核对原有容器'):
+            require(self.host.launcher_check() == self.j['launcher'], 'Launcher 凭据/登录配置/只读认证验收变化；保持当前副本，核查后 resume')
+            active = {c['id'] for c in self.host.containers() if c.get('state') == 'CONTAINER_RUNNING'}
         lost = sorted(set(self.j['business']) - active)
         # Record rather than automatically restart or revert business workloads.
         self.persist('complete', final_etcd=status, changed_business_containers=lost)
         log('完成。原始目录、snapshot、冷副本和事务记录均保留：' + self.j['run'])
         if lost:
-            log('注意：有 {} 个原业务容器 ID 已变化，请核查现有登录/联网；脚本未重启它们。'.format(len(lost)))
+            log('注意：有 {} 个原有非 etcd 容器 ID 已不在运行列表中（统计包含控制平面）。'
+                '请用 status 查看 ID 并核查对应服务及登录/联网；脚本未主动重启这些容器。'.format(len(lost)))
 
     def switch(self):
         # Snapshot preparation can take time. Recheck the selected source before
         # removing the manifest, so a changed shared path need not interrupt etcd.
-        self.host.persistent_mount(self.j['source'])
-        with self.host.storage(self.j['source'], self.j['source_identity']):
-            self.host.active_identity(self.j['source_identity'], self.j['source_disk'])
+        with progress('暂停前复查源目录与持久挂载'):
+            self.host.persistent_mount(self.j['source'])
+            with self.host.storage(self.j['source'], self.j['source_identity']):
+                self.host.active_identity(self.j['source_identity'], self.j['source_disk'])
         self.manifest_out()
         self.cold_copy()
         self.persist('switching')
-        self.guard_record('source', 'target')
-        self.fstab_to(True)
-        self.mount_to(self.j['target'], self.j['target_disk'])
-        self.host.helper('reconcile', self.j)
+        with progress('切换 etcd 挂载并更新恢复身份'):
+            self.guard_record('source', 'target')
+            self.fstab_to(True)
+            self.mount_to(self.j['target'], self.j['target_disk'])
+            self.host.helper('reconcile', self.j)
         # Critical write-ahead boundary. Even a failure of rename/fsync afterwards
         # must never cause an old, stale directory to become authoritative.
-        self.persist('starting', may_write=True)
-        self.guard_record('target')
-        self.manifest_in()
+        with progress('提交新副本写入状态并恢复 etcd manifest'):
+            self.persist('starting', may_write=True)
+            self.guard_record('target')
+            self.manifest_in()
         self.finish()
 
     def recover(self):
@@ -914,33 +975,38 @@ class Move:
         if self.j['may_write']:
             # The running etcd might already have written. Do NOT stop/copy or
             # fall back to the old data when merely retrying acceptance checks.
-            self.host.same_mount(self.j['target'])
-            self.host.active_identity(self.j['target_identity'], self.j['target_disk'])
-            self.fstab_to(True)
-            self.host.helper('reconcile', self.j)
-            self.guard_record('target')
-            self.manifest_in()
+            with progress('恢复已提交的新副本配置与 manifest'):
+                self.host.same_mount(self.j['target'])
+                self.host.active_identity(self.j['target_identity'], self.j['target_disk'])
+                self.fstab_to(True)
+                self.host.helper('reconcile', self.j)
+                self.guard_record('target')
+                self.manifest_in()
             self.finish()
         else:
             log('尚未允许新副本写入，恢复原始活动目录。')
             if self.j['phase'] in ('prepared', 'stopping'):
                 # A kubelet stop timeout is not permission to leave its manifest
                 # missing forever. No copy/mount/identity changes happened yet.
-                self.host.same_mount(self.j['source'])
-                require(FSTAB.read_bytes() == (Path(self.j['run']) / 'fstab.before').read_bytes(), 'fstab 在暂停阶段被修改')
-                self.guard_record('source')
-                self.manifest_in()
-                wait_for(lambda: self.host.health(self.j), 180, '恢复原 manifest 后 etcd 未就绪，请运行 resume')
+                with progress('恢复暂停前的 etcd manifest'):
+                    self.host.same_mount(self.j['source'])
+                    require(FSTAB.read_bytes() == (Path(self.j['run']) / 'fstab.before').read_bytes(), 'fstab 在暂停阶段被修改')
+                    self.guard_record('source')
+                    self.manifest_in()
+                with progress('等待原 etcd 恢复健康'):
+                    wait_for(lambda: self.host.health(self.j), 180, '恢复原 manifest 后 etcd 未就绪，请运行 resume')
                 self.persist('aborted')
                 return
             self.manifest_out()
-            self.guard_record(*(['source', 'target'] if 'target_identity' in self.j else ['source']))
-            self.fstab_to(False)
-            self.mount_to(self.j['source'], self.j['source_disk'])
-            self.host.helper('reconcile', self.j)
-            self.guard_record('source')
-            self.manifest_in()
-            wait_for(lambda: self.host.health(self.j), 180, '原 etcd 未恢复健康；保留记录，请运行 resume')
+            with progress('恢复原活动挂载、恢复身份与 manifest'):
+                self.guard_record(*(['source', 'target'] if 'target_identity' in self.j else ['source']))
+                self.fstab_to(False)
+                self.mount_to(self.j['source'], self.j['source_disk'])
+                self.host.helper('reconcile', self.j)
+                self.guard_record('source')
+                self.manifest_in()
+            with progress('等待原 etcd 恢复健康'):
+                wait_for(lambda: self.host.health(self.j), 180, '原 etcd 未恢复健康；保留记录，请运行 resume')
             self.persist('aborted')
             log('已回到本事务开始前的数据，失败副本和备份保留。')
 
@@ -999,20 +1065,23 @@ def main(argv=None):
         print(json.dumps({k: j.get(k) for k in ['direction', 'phase', 'may_write', 'source', 'target', 'origin', 'run', 'changed_business_containers']}, ensure_ascii=False, indent=2))
         return
     if args.action == 'plan':
-        facts = move.plan('migrate', args.target_root)
+        with progress('只读检查迁移条件'):
+            facts = move.plan('migrate', args.target_root)
         print(json.dumps(facts, ensure_ascii=False, indent=2))
         return
     with locks():
         if args.action == 'resume':
-            move.load()
-            host.runtime()
-            require(host.endpoint == move.j['endpoint'], 'CRI endpoint 已变化，拒绝恢复')
+            with progress('读取中断事务并核对容器运行时'):
+                move.load()
+                host.runtime()
+                require(host.endpoint == move.j['endpoint'], 'CRI endpoint 已变化，拒绝恢复')
             if move.j['phase'] in ('complete', 'aborted'):
                 log('事务已结束；无需 resume。')
             else:
                 move.recover()
         else:
-            facts = move.plan(args.action, args.target_root)
+            with progress('检查迁移条件' if args.action == 'migrate' else '检查回滚条件'):
+                facts = move.plan(args.action, args.target_root)
             log('{}: {} → {}，预留空间 {} GiB。'.format(args.action, facts['source'], facts['target_root'], facts['space']['reserve_gib']))
             move.execute(facts)
 

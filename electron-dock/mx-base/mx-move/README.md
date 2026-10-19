@@ -22,6 +22,17 @@ bash scripts/manage.sh etcd resume    # 按事务记录恢复中断操作
 
 `migrate` 和 `rollback` 各自是一个命令，不需要手工停服务、复制文件或改 `fstab`。`migrate` 本身会重新执行检查，不依赖之前运行过 `plan`。
 
+耗时步骤会显示阶段名称、开始/完成/未完成和已耗时；同一阶段每 15 秒输出一次“仍在执行”。复制、校验、落盘、挂载切换、等待 etcd/API 恢复、控制器续租和 Launcher 验收各自有提示；`rollback`、`resume` 与失败后的自动恢复也使用这些提示。示例（不代表本次现场耗时）：
+
+```text
+[18:20:00] 冷拷贝完整 member/WAL（382.3 MiB）：开始（已用 0.0 秒）
+[18:20:15] 冷拷贝完整 member/WAL（382.3 MiB）：仍在执行（已用 15.0 秒）
+[18:20:19] 冷拷贝完整 member/WAL（382.3 MiB）：完成（已用 19.0 秒）
+[18:20:19] 校验冷副本内容与元数据：开始（已用 0.0 秒）
+```
+
+阶段提示写入 stderr，`plan` / `status` 的 stdout 保持 JSON。心跳只报告阶段及经过时间，不增加磁盘扫描或 API 探测，不输出凭据和子进程原文，也不提供未经测量的百分比或剩余时间。旧版在“复制完整 member/WAL”后还会继续校验、落盘和等待恢复，因此旧日志的一段静默不能用于判断具体耗时环节。
+
 可为 `plan` / `migrate` 指定目标父目录，但仍必须位于已验证的独立根盘：
 
 ```bash
@@ -84,7 +95,7 @@ Internal 的实测布局为：`/data` 是 `1003:1003 755`，`/data/mx-runtime`�
 5. 只修改 etcd 对应的 `fstab` 条目，将 `/var/lib/etcd` bind mount 切到新目录，核验挂载身份。若存在 Launcher 恢复记录，仅更新其中的 etcd 挂载身份及校验和，保留其他字段和原始备份。
 6. 先持久化“新副本可能开始写入”的事务状态，再恢复原 manifest。等待 etcd、API 和原节点健康，确认 cluster/member ID、集群 UID 不变且 revision 没有倒退，并确认 controller-manager 和 scheduler 的 lease 继续更新。
 
-原 `/var/lib/etcd` 路径、etcd 配置和集群身份保持延续，不使用 snapshot restore 创建新 member。原业务容器 ID 会在切换前后比较；发现变化会记录并提示核查，不自动重启业务。
+原 `/var/lib/etcd` 路径、etcd 配置和集群身份保持延续，不使用 snapshot restore 创建新 member。原有非 etcd 容器 ID 会在切换前后比较，统计包含 kube-apiserver、controller-manager、scheduler 等控制平面容器；发现 ID 已不在运行列表时会记录并提示核查，不自动重启业务。旧版将这项统计称为“业务容器”，出现变化不能直接确定是 MX-H2I 容器重启。用 `status` 的 `changed_business_containers` 与 `crictl ps -a` 的 ID 对照定位；已被运行时回收的旧容器可能无法再查询。
 
 存在 Launcher Internal 部署时，迁移前后还会读取角色接口验证 Ops 鉴权、比较飞书登录配置与 `mx-*` Secret 内容摘要。凭据通过标准输入传递，不显示在日志中。这些检查不代替真实用户登录和客户端联网验收。
 
