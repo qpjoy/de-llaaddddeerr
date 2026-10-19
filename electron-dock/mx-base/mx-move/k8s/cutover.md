@@ -67,6 +67,14 @@ bash mx-move/scripts/manage.sh k8s prepare-check
 
 此命令重新预检，在独立的 root 私有目录备份身份、配置、etcdctl 和在线 etcd 快照，并校验原登录配置基线；会占用少量备份空间，但不暂停工作负载、不复制业务数据、不修改挂载、NAS 或当前事务指针。它要求当前没有未恢复的迁移事务，成功摘要为 `phase=preparation-checked / execution_started=false / service_changes=false`，失败则输出具体的 `preparation_diagnostics`，仅含步骤、固定分类、退出码或 errno、工具源码位置；凭据和原始错误仍隐藏。独立记录留在输出所指目录；`status` 仍指向之前的正式事务。失败不需要对这次准备检查运行 `resume`。成功后再在维护窗口运行 `migrate`，正式迁移会重新检查并生成自己的备份。
 
+现场 `prepare-check` 随后明确失败于 `kubernetes-backup / copy_failed`，即 `/etc/kubernetes` 目录复制，尚未进入 etcd 快照。`shutil.Error` 是多项复制错误的聚合，顶层 `errno=null` 不代表子错误没有编号。新版 `k8s/cutover.py` 会额外输出 `copy_errors`（最多 20 项）、总数和截断标记；每项只含经过路径校验的相对路径、数字 errno 和固定原因，未知路径显示 `unknown`，不输出目标路径、原始错误、链接目标或文件内容。诊断仅投影已有异常，不为生成报告执行 stat/readlink 或访问 NAS。不要为了通过检查而启用忽略坏链接、跳过未知文件或忽略复制错误。
+
+可先用以下只读命令盘点特殊文件；不读取文件内容，不跟随符号链接，不跨文件系统。若发现链接或挂载到外部存储，先核对其用途，再决定备份方式。
+
+```bash
+find -P /etc/kubernetes -xdev ! -type f ! -type d -printf 'type=%y path=%p\n'
+```
+
 **仅在已安排的维护窗口执行：**
 
 ```bash

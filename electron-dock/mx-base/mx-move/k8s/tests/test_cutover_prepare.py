@@ -115,7 +115,10 @@ class PrepareTests(unittest.TestCase):
             case.host.prepare(case.data)
         message = str(caught.exception)
         report = json.loads(message.split('preparation_diagnostics=', 1)[1])
-        self.assertEqual(set(report), {'schema_version', 'step', 'reason', 'exit_code', 'errno', 'locations'})
+        fields = {'schema_version', 'step', 'reason', 'exit_code', 'errno', 'locations'}
+        if step == 'kubernetes-backup' and reason == 'copy_failed':
+            fields.update(('copy_errors', 'copy_error_count', 'copy_errors_truncated'))
+        self.assertEqual(set(report), fields)
         self.assertEqual(report['schema_version'], 1)
         self.assertEqual(report['step'], step)
         self.assertEqual(report['reason'], reason)
@@ -153,7 +156,11 @@ class PrepareTests(unittest.TestCase):
                 Path(destination).mkdir(mode=0o700)
                 raise shutil.Error([('/private-source', '/private-target', 'private-copy-error')])
             case.trees.side_effect = fail_copy
-            self.failed(case, 'kubernetes-backup', 'copy_failed')
+            report = self.failed(case, 'kubernetes-backup', 'copy_failed')
+            self.assertEqual(report['copy_errors'], [{'path': 'unknown', 'errno': None,
+                                                       'reason': 'unclassified_copy_error'}])
+            self.assertEqual(report['copy_error_count'], 1)
+            self.assertFalse(report['copy_errors_truncated'])
             self.assertTrue((case.run / 'etcdctl').is_file())
             self.assertTrue((case.run / 'kubernetes.before').is_dir())
             self.assertFalse((case.run / 'snapshot.db').exists())

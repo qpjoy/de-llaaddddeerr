@@ -55,6 +55,38 @@ PREPARATION_STEPS = ('endpoint-check', 'identity-backup', 'config-backup', 'endp
                      'etcd-snapshot-verify', 'launcher-baseline', 'startup-plan', 'flush')
 
 
+def kubernetes_copy_diagnostics(error):
+    """Project copytree's aggregate without reading paths or exposing raw errors."""
+    entries = error.args[0] if error.args and isinstance(error.args[0], (list, tuple)) else [None]
+    failures = []
+    for entry in entries[:20]:
+        path, number = 'unknown', None
+        if isinstance(entry, (list, tuple)) and len(entry) == 3:
+            source, _, message = entry
+            # Never normalize traversal into an allowed path. This is lexical
+            # validation only: realpath/stat could follow a source link to NAS.
+            if type(source) is str and source == '/etc/kubernetes':
+                path = '.'
+            elif type(source) is str and source.startswith('/etc/kubernetes/'):
+                relative = source[len('/etc/kubernetes/'):]
+                if (len(relative) <= 512 and all(part not in ('.', '..') and
+                        re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', part)
+                        for part in relative.split('/'))):
+                    path = relative
+            if type(message) is str:
+                match = re.match(r'^\[Errno ([1-9][0-9]{0,3})\](?: |$)', message)
+                if match:
+                    number = int(match.group(1))
+        reason = {1: 'permission_denied', 2: 'missing_path', 5: 'io_error',
+                  13: 'permission_denied', 20: 'not_directory', 21: 'is_directory',
+                  28: 'no_space', 30: 'read_only_filesystem', 36: 'name_too_long',
+                  40: 'symlink_loop', 95: 'unsupported_operation'}.get(
+                      number, 'filesystem_error' if number is not None else 'unclassified_copy_error')
+        failures.append({'path': path, 'errno': number, 'reason': reason})
+    return {'copy_errors': failures, 'copy_error_count': len(entries),
+            'copy_errors_truncated': len(entries) > 20}
+
+
 def preparation_diagnostic(error, step, backend):
     """Keep only fixed categories and tool source locations, never exception text."""
     reason, exit_code, error_number = 'unexpected_error', None, None
@@ -80,8 +112,11 @@ def preparation_diagnostic(error, step, backend):
         if module:
             locations.append({'module': module, 'line': frame.tb_lineno})
         frame = frame.tb_next
-    return {'schema_version': 1, 'step': step if step in PREPARATION_STEPS else 'unknown',
-            'reason': reason, 'exit_code': exit_code, 'errno': error_number, 'locations': locations[-3:]}
+    result = {'schema_version': 1, 'step': step if step in PREPARATION_STEPS else 'unknown',
+              'reason': reason, 'exit_code': exit_code, 'errno': error_number, 'locations': locations[-3:]}
+    if isinstance(error, shutil.Error) and step == 'kubernetes-backup':
+        result.update(kubernetes_copy_diagnostics(error))
+    return result
 
 
 def identity_diagnostic(stderr):
