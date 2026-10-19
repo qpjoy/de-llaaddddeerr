@@ -37,6 +37,8 @@ bash mx-move/scripts/manage.sh k8s cutover-check
 
 若旧版工具报 `产品运行时入口未同步完整适配：mx-rig/scripts/manage.sh`，可能是预检未识别 Rig 的共用解析器：`manage.sh` 加载 `build-proxy.sh` 并调用其中的 `rig_managed_runtime_value`，解析器路径只定义在后者。先同步 `k8s/cutover.py` 的修复，再重跑同一预检；新版会核对调用入口与共用脚本，仍拒绝缺失或未适配的文件。此修复不需要重新部署 Rig、重启服务或重新导入镜像。
 
+若旧版工具报 `Kubernetes storage identity mismatch; raw values hidden`，已知一个发生在数据库核验之前的误判：systemd 将 Launcher 挂载单元中的连字符编码为文件名中的字面量 `\x2d`，旧检查使用数据目录规则而拒绝该文件名。同步 `k8s/storage_ops.py` 后重跑预检。修复仅允许固定 generator 目录下由五个已选挂载路径推导出的单元文件，仍检查父目录、普通文件类型、root 所有者、写权限和单元内容；数据路径与 PostgreSQL 身份规则保持原样。若仍报错，保留现场并回传输出，不根据这条通用错误修改数据库或目录权限。
+
 **仅在已安排的维护窗口执行：**
 
 ```bash

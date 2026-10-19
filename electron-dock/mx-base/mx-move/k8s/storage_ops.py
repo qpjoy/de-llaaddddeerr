@@ -228,8 +228,15 @@ class Storage:
             fragment = '/run/systemd/generator/' + unit
             require(fields['LoadState'] == 'loaded' and fields['FragmentPath'] == fragment and
                     fields['SourcePath'] == str(FSTAB), 'selected mount must be generated solely from fstab')
-            guard.path_info(fragment)
-            validate_mount_unit(Path(fragment).read_bytes(), logical, rows[logical][1][0])
+            # The allowlisted unit name can contain literal systemd escapes
+            # (e.g. mx\x2dlauncher). Keep data-path canonicalization strict;
+            # validate the fixed parent and the derived unit file separately.
+            unit_path = Path(fragment)
+            guard.path_info(unit_path.parent)
+            info = unit_path.lstat()
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+                    'generated mount unit must be a root-owned regular file without group/other write access: ' + logical)
+            validate_mount_unit(unit_path.read_bytes(), logical, rows[logical][1][0])
 
     def no_children(self, path):
         require(not any(m['target'] != path and within(m['target'], path) for m in self.host.mounts()),

@@ -4,7 +4,9 @@ import contextlib
 import copy
 import hashlib
 from pathlib import Path
+import stat
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -426,9 +428,17 @@ class MountUnitTests(unittest.TestCase):
         return host, values, files
 
     @contextlib.contextmanager
-    def files(self, files, existing=()):
+    def files(self, files, existing=(), overrides=None):
+        # Keep the real path validator: bypassing it hid the escaped systemd
+        # filename being rejected by the stricter data-directory rules.
+        metadata = {}
+        for file in files:
+            metadata[file] = SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0)
+            for parent in Path(file).parents:
+                metadata[str(parent)] = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+        metadata.update(overrides or {})
         with mock.patch.object(ops.os.path, 'lexists', side_effect=lambda p: p in existing), \
-                mock.patch.object(ops.guard, 'path_info'), \
+                mock.patch.object(ops.Path, 'lstat', lambda p: metadata[str(p)]), \
                 mock.patch.object(ops.Path, 'read_bytes', lambda p: files[str(p)]):
             yield
 
@@ -446,6 +456,25 @@ class MountUnitTests(unittest.TestCase):
         self.assertEqual(ops.mount_unit_name('/data/mx-pay/mx-pay/postgres'), r'data-mx\x2dpay-mx\x2dpay-postgres.mount')
         with self.assertRaises(ops.StorageError):
             ops.mount_unit_name('/var/lib/docker')
+
+    def test_generated_units_and_parents_keep_permission_and_symlink_guards(self):
+        fragment = '/run/systemd/generator/' + ops.mount_unit_name('/var/lib/mx-launcher')
+        for path in ('/run/systemd/generator', fragment):
+            kind = stat.S_IFREG if path == fragment else stat.S_IFDIR
+            for mode, uid in ((kind | 0o664, 0), (kind | 0o644, 1000), (stat.S_IFLNK | 0o777, 0)):
+                host, values, files = self.fixture()
+                changed = {path: SimpleNamespace(st_mode=mode, st_uid=uid)}
+                with self.subTest(path=path, mode=mode, uid=uid), self.files(files, overrides=changed):
+                    with self.assertRaises(ops.StorageError):
+                        ops.Storage(host).verify_mount_units(FSTAB)
+        host, values, files = self.fixture()
+        changed = {fragment: SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)}
+        with self.files(files, overrides=changed), self.assertRaises(ops.StorageError):
+            ops.Storage(host).verify_mount_units(FSTAB)
+
+    def test_escaped_unit_names_are_not_accepted_as_data_paths(self):
+        with self.assertRaises(ops.StorageError):
+            ops.guard.canonical(r'/data/mx\x2drig')
 
     def test_native_or_masked_unit_and_dropin_are_refused_even_if_not_loaded(self):
         unit = ops.mount_unit_name('/data/mx-rig')
