@@ -22,6 +22,8 @@ import sys
 import time
 import uuid
 
+from storage_paths import StoragePathError, pinned_directory
+
 GIB = 1024 ** 3
 STATE = Path('/var/lib/mx-move')
 DATA = Path('/var/lib/etcd')
@@ -166,6 +168,12 @@ def save_json(path, value):
 
 def read_json(path):
     return json.loads(Path(path).read_text())
+
+
+def directory_identity(path):
+    info = Path(path).stat()
+    require(stat.S_ISDIR(info.st_mode), '数据入口必须是目录')
+    return {'device': info.st_dev, 'inode': info.st_ino}
 
 
 def parse_fstab(raw):
@@ -322,6 +330,31 @@ class Host:
         m = self.mount(DATA)
         require(m['target'] == str(DATA) and os.path.samefile(str(source), str(DATA)), '活动 etcd bind mount 与记录不一致')
 
+    @contextlib.contextmanager
+    def storage(self, path, expected=None):
+        # /data can belong to its existing storage administrator. This exception
+        # applies only to a verified filesystem root, never to data/state dirs.
+        m = self.mount(path)
+        boundary = Path(m['target'])
+        shared = boundary if boundary != Path('/') and boundary != Path(path) and m['fsroot'] == '/' else None
+        try:
+            with pinned_directory(path, shared_mount=shared, expected=expected) as handle:
+                device = '{}:{}'.format(os.major(handle.identity['device']), os.minor(handle.identity['device']))
+                require(device == m['maj:min'], '目录在打开期间换到了其他文件系统')
+                handle.assert_current()
+                yield handle
+        except StoragePathError as error:
+            raise Refuse(str(error)) from None
+
+    def storage_identity(self, path):
+        with self.storage(path) as handle:
+            return handle.identity
+
+    def active_identity(self, expected, disk):
+        m = self.mount(DATA)
+        require(m['target'] == str(DATA) and m['uuid'] == disk['uuid'] and
+                directory_identity(DATA) == expected, '活动 etcd 目录 inode/文件系统与事务记录不一致')
+
     def no_child_mounts(self, paths):
         result = json.loads(run(['findmnt', '--json', '--list', '--output', 'TARGET']))
         targets = [entry['target'] for entry in result.get('filesystems', [])]
@@ -443,10 +476,13 @@ let input=''; process.stdin.on('data', c=>input+=c); process.stdin.on('end',asyn
         require(any(c['type'] == 'Ready' and c['status'] == 'True' for c in node['status']['conditions']), '节点尚未 Ready')
         cluster_uid = json.loads(self.kubectl('get', 'namespace', 'kube-system', '-o', 'json'))['metadata']['uid']
         _, fields = parse_fstab(FSTAB.read_bytes())
-        source = safe_path(Path(fields[0]))
-        self.same_mount(source)
+        source = Path(fields[0])
+        with self.storage(source) as handle:
+            self.same_mount(handle.proc_path)
+            source_identity = handle.identity
+        source_parent_identity = self.storage_identity(source.parent)
         self.no_child_mounts([source, DATA])
-        size = tree_bytes(source)
+        size = tree_bytes(DATA)
         running = self.etcd_containers()
         require(len(running) == 1 and running[0].get('labels', {}).get('io.kubernetes.pod.namespace') == 'kube-system', 'etcd 容器身份不明确')
         inspect = self.cri_json('inspect', '-o', 'json', running[0]['id'])
@@ -467,9 +503,14 @@ let input=''; process.stdin.on('data', c=>input+=c); process.stdin.on('end',asyn
         require(status['version'].startswith(('3.5.', '3.6.')), '仅支持 etcd 3.5/3.6')
         version = run([self.etcdctl, 'version']).decode()
         require(status['version'] in version, 'etcdctl 与运行中 etcd 版本不同')
-        return {'node': node['metadata']['name'], 'cluster_uid': cluster_uid, 'source': str(source), 'source_disk': self.disk(source), 'size': size, 'etcd': status, 'endpoint': self.endpoint}
+        self.active_identity(source_identity, self.disk(source))
+        return {'node': node['metadata']['name'], 'cluster_uid': cluster_uid, 'source': str(source),
+                'source_identity': source_identity, 'source_parent_identity': source_parent_identity,
+                'source_disk': self.disk(source), 'size': size, 'etcd': status, 'endpoint': self.endpoint}
 
     def health(self, journal):
+        side = 'target' if journal['may_write'] else 'source'
+        self.active_identity(journal[side + '_identity'], journal[side + '_disk'])
         self.same_mount(journal['target'] if journal['may_write'] else journal['source'])
         status = self.etcd_status()
         for key in ['cluster_id', 'member_id']:
@@ -534,6 +575,8 @@ class Move:
             require(facts['source'] == active and facts['etcd']['cluster_id'] == old['etcd']['cluster_id'], '当前数据不是本次迁移的活动数据')
             root = Path(old['origin']).parent
             origin, origin_disk = old['origin'], old['origin_disk']
+            require('origin_parent_identity' in old, '旧记录缺少原盘父目录身份，需人工核验后才能回滚')
+            origin_parent_identity = old['origin_parent_identity']
         else:
             if self.current_file.exists():
                 previous = self.load()
@@ -543,9 +586,14 @@ class Move:
                         '仍在迁移目标上运行；无需 migrate，失败回滚可重试 rollback')
             root = Path(target_root)
             origin, origin_disk = facts['source'], facts['source_disk']
+            origin_parent_identity = facts['source_parent_identity']
         require(re.fullmatch(r'/[A-Za-z0-9_./-]+', str(root)) is not None and '..' not in root.parts,
                 '目标必须是没有空白、转义或 .. 的绝对路径')
-        safe_path(root)
+        if mode == 'rollback':
+            with self.host.storage(root, origin_parent_identity):
+                pass
+        else:
+            safe_path(root)
         existing = root
         while not existing.exists():
             existing = existing.parent
@@ -562,7 +610,9 @@ class Move:
         if target_disk != state_disk:
             capacity(state_existing, facts['size'] + GIB)
         facts.update({'target_root': str(root), 'target_disk': target_disk, 'origin': origin,
-                      'origin_disk': origin_disk, 'space': budget, 'direction': mode})
+                      'origin_disk': origin_disk, 'origin_parent_identity': origin_parent_identity,
+                      'target_parent_identity': self.host.storage_identity(root) if root.exists() else None,
+                      'space': budget, 'direction': mode})
         self.host.etcdctl = current_tool
         return facts
 
@@ -574,6 +624,8 @@ class Move:
         # On rollback the source parent belongs to the existing data layout.
         if not root.exists():
             private_dir(root)
+        with self.host.storage(root, facts['target_parent_identity']) as parent:
+            facts['target_parent_identity'] = parent.identity
         target = root / ('mx-etcd-' + run_dir.name)
         require(not target.exists(), '目标 generation 已存在')
         held = MANIFEST.parent.parent / ('mx-move-etcd-' + run_dir.name + '.yaml')
@@ -601,6 +653,7 @@ class Move:
         j['business'] = sorted(c['id'] for c in self.host.containers() if c.get('state') == 'CONTAINER_RUNNING' and c.get('metadata', {}).get('name') != 'etcd')
         j['leases'] = self.host.leases()
         j['launcher'] = self.host.launcher_check()
+        self.guard_record('source')
         self.boot_guard()
         run(['sync', '-f', str(run_dir)], 180)
         self.persist('prepared')
@@ -614,14 +667,60 @@ class Move:
         guard = directory / '90-mx-move-etcd.conf'
         mountpoint, test = shutil.which('mountpoint'), shutil.which('test')
         require(mountpoint and test, '缺少 mountpoint/test 启动保护工具')
-        raw = ('# Managed by mx-base/mx-move; kept on rollback.\n[Unit]\nRequiresMountsFor=/var/lib/etcd\n'
+        legacy = ('# Managed by mx-base/mx-move; kept on rollback.\n[Unit]\nRequiresMountsFor=/var/lib/etcd\n'
                '[Service]\nExecStartPre={} -q /var/lib/etcd\nExecStartPre={} -s /var/lib/etcd/member/snap/db\n'.format(mountpoint, test)).encode()
+        installed = self.state / 'boot-guard.py'
+        safe_path(installed)
+        atomic(installed, Path(__file__).with_name('boot_guard.py').read_bytes())
+        # Keep the boot dependency independent of this repository's checkout.
+        # Prefer the system Python so activating Conda is not a boot dependency.
+        python = (Path('/usr/bin/python3') if Path('/usr/bin/python3').is_file() else Path(sys.executable)).resolve()
+        safe_path(python)
+        run([python, '-I', '-c', 'import sys; assert sys.version_info >= (3, 6)'])
+        self.j['guard_python'] = str(python)
+        self.check_boot_guard()
+
+        def unit(arguments):
+            command = ' '.join('"' + str(p).replace('\\', '\\\\').replace('"', '\\"') + '"'
+                               for p in arguments)
+            return ('# Managed by mx-base/mx-move; kept on rollback.\n[Unit]\nRequiresMountsFor=/var/lib/etcd\n'
+                    '[Service]\nExecStartPre=' + command + '\n').encode()
+
+        raw = unit(self.boot_guard_command())
+        previous = unit([python, installed, '--record', self.state / 'active-etcd.json'])
         safe_path(guard)
         if guard.exists():
-            require(guard.read_bytes() == raw, '已有不同的 mx-move kubelet 启动保护，请人工核查')
-        else:
+            require(guard.read_bytes() in (raw, previous, legacy), '已有不同的 mx-move kubelet 启动保护，请人工核查')
+            atomic(Path(self.j['run']) / 'boot-guard.before', guard.read_bytes())
+        if not guard.exists() or guard.read_bytes() != raw:
             atomic(guard, raw)
         run(['systemctl', 'daemon-reload'])
+
+    def boot_guard_command(self):
+        python = self.j.get('guard_python')
+        require(isinstance(python, str) and Path(python).is_absolute(),
+                '事务缺少已验证的启动保护 Python 路径，拒绝恢复 manifest')
+        safe_path(Path(python))
+        installed = self.state / 'boot-guard.py'
+        safe_path(installed)
+        return [python, '-I', installed, '--record', self.state / 'active-etcd.json']
+
+    def check_boot_guard(self):
+        # Run the same isolated command used by systemd, including on resume.
+        # A failed guard must leave the etcd manifest outside the watched path.
+        command = self.boot_guard_command()
+        try:
+            run(command)
+        except CommandFailed:
+            raise Refuse('etcd 启动保护检查失败（原始输出已隐藏）；只读复查：' +
+                         ' '.join(shlex.quote(str(arg)) for arg in command)) from None
+
+    def guard_record(self, *sides):
+        allowed = []
+        for side in sides:
+            require(side + '_identity' in self.j, '事务缺少目录身份，拒绝猜测数据位置')
+            allowed.append({'uuid': self.j[side + '_disk']['uuid'], 'inode': self.j[side + '_identity']['inode']})
+        save_json(self.state / 'active-etcd.json', {'version': 1, 'data': str(DATA), 'allowed': allowed})
 
     def manifest_out(self):
         held = Path(self.j['held'])
@@ -638,6 +737,9 @@ class Move:
         require(self.host.stopped(), 'etcd 仍在运行')
 
     def manifest_in(self):
+        side = 'target' if self.j['may_write'] else 'source'
+        self.host.active_identity(self.j[side + '_identity'], self.j[side + '_disk'])
+        self.check_boot_guard()
         held = Path(self.j['held'])
         backup = Path(self.j['run']) / 'etcd.yaml'
         if MANIFEST.exists():
@@ -663,32 +765,48 @@ class Move:
     def mount_to(self, path, expected_disk):
         require(self.host.stopped() and not MANIFEST.exists(), 'etcd 未证实停止，禁止切换挂载')
         path = Path(path)
-        require(self.host.disk(path) == expected_disk and (path / 'member/snap/db').is_file(), '目录/磁盘身份变化，拒绝挂载')
-        current = self.host.mount(DATA)
-        if current['target'] == str(DATA):
-            require(any(os.path.samefile(str(DATA), p) for p in [self.j['source'], self.j['target']] if Path(p).exists()), '检测到第三方 etcd 挂载，拒绝卸载')
-            if os.path.samefile(str(DATA), str(path)):
-                return
-            run(['umount', str(DATA)])
-        # An unmounted underlying directory is never used for an etcd start.
-        run(['mount', '--bind', str(path), str(DATA)])
-        self.host.same_mount(path)
+        side = 'source' if str(path) == self.j['source'] else 'target'
+        require(str(path) == self.j[side] and side + '_identity' in self.j, '缺少待挂载目录身份')
+        with self.host.storage(path, self.j[side + '_identity']) as handle:
+            require(self.host.disk(path) == expected_disk and (Path(handle.proc_path) / 'member/snap/db').is_file(), '目录/磁盘身份变化，拒绝挂载')
+            current = self.host.mount(DATA)
+            if current['target'] == str(DATA):
+                identity = directory_identity(DATA)
+                require(identity in [self.j.get('source_identity'), self.j.get('target_identity')], '检测到第三方 etcd 挂载，拒绝卸载')
+                if identity == handle.identity:
+                    handle.assert_current()
+                    return
+                run(['umount', str(DATA)])
+            # The directory FD remains valid even if a shared ancestor is moved.
+            run(['mount', '--bind', handle.proc_path, str(DATA), '--no-canonicalize'])
+            handle.assert_current()
+            self.host.active_identity(handle.identity, expected_disk)
 
     def cold_copy(self):
         source, target = Path(self.j['source']), Path(self.j['target'])
         require(self.host.stopped() and not MANIFEST.exists(), '禁止复制仍在运行的 etcd')
         self.host.same_mount(source)
+        self.host.active_identity(self.j['source_identity'], self.j['source_disk'])
         self.host.no_child_mounts([source, DATA])
-        size = tree_bytes(source)
+        size = tree_bytes(DATA)
         capacity(target.parent, size + GIB)
         require(not target.exists(), '冷拷贝目标必须是全新 generation')
         self.persist('copying')
-        target.mkdir(mode=0o700)
-        log('etcd 已暂停，复制完整 member/WAL；原目录保留。')
-        run(['rsync', '-aHAX', '--numeric-ids', str(source) + '/', str(target) + '/'], 900)
-        require(not run(['rsync', '-aHAXnci', '--numeric-ids', str(source) + '/', str(target) + '/'], 900).strip(), '冷拷贝内容或元数据校验失败')
-        require(tree_bytes(target) == size, '冷拷贝文件大小不一致')
-        run(['sync', '-f', str(target)], 180)
+        with self.host.storage(target.parent, self.j['target_parent_identity']) as parent:
+            os.mkdir(target.name, mode=0o700, dir_fd=parent.fd)
+            with parent.open_child(target.name) as destination:
+                self.persist(target_identity=destination.identity)
+                log('etcd 已暂停，复制完整 member/WAL；原目录保留。')
+                # DATA is the existing, root-protected bind. Do not reread the
+                # mutable /data pathname after validating the live DB inode.
+                run(['rsync', '-aHAX', '--numeric-ids', str(DATA) + '/', destination.proc_path + '/'], 900)
+                require(not run(['rsync', '-aHAXnci', '--numeric-ids', str(DATA) + '/', destination.proc_path + '/'], 900).strip(), '冷拷贝内容或元数据校验失败')
+                require(tree_bytes(Path(destination.proc_path)) == size, '冷拷贝文件大小不一致')
+                run(['sync', '-f', destination.proc_path], 180)
+                parent.assert_current()
+                destination.assert_current()
+                self.host.active_identity(self.j['source_identity'], self.j['source_disk'])
+                self.host.same_mount(source)
         self.persist('copied')
 
     def finish(self):
@@ -708,15 +826,21 @@ class Move:
             log('注意：有 {} 个原业务容器 ID 已变化，请核查现有登录/联网；脚本未重启它们。'.format(len(lost)))
 
     def switch(self):
+        # Snapshot preparation can take time. Recheck the selected source before
+        # removing the manifest, so a changed shared path need not interrupt etcd.
+        with self.host.storage(self.j['source'], self.j['source_identity']):
+            self.host.active_identity(self.j['source_identity'], self.j['source_disk'])
         self.manifest_out()
         self.cold_copy()
         self.persist('switching')
+        self.guard_record('source', 'target')
         self.fstab_to(True)
         self.mount_to(self.j['target'], self.j['target_disk'])
         self.host.helper('reconcile', self.j)
         # Critical write-ahead boundary. Even a failure of rename/fsync afterwards
         # must never cause an old, stale directory to become authoritative.
         self.persist('starting', may_write=True)
+        self.guard_record('target')
         self.manifest_in()
         self.finish()
 
@@ -727,8 +851,10 @@ class Move:
             # The running etcd might already have written. Do NOT stop/copy or
             # fall back to the old data when merely retrying acceptance checks.
             self.host.same_mount(self.j['target'])
+            self.host.active_identity(self.j['target_identity'], self.j['target_disk'])
             self.fstab_to(True)
             self.host.helper('reconcile', self.j)
+            self.guard_record('target')
             self.manifest_in()
             self.finish()
         else:
@@ -738,14 +864,17 @@ class Move:
                 # missing forever. No copy/mount/identity changes happened yet.
                 self.host.same_mount(self.j['source'])
                 require(FSTAB.read_bytes() == (Path(self.j['run']) / 'fstab.before').read_bytes(), 'fstab 在暂停阶段被修改')
+                self.guard_record('source')
                 self.manifest_in()
                 wait_for(lambda: self.host.health(self.j), 180, '恢复原 manifest 后 etcd 未就绪，请运行 resume')
                 self.persist('aborted')
                 return
             self.manifest_out()
+            self.guard_record(*(['source', 'target'] if 'target_identity' in self.j else ['source']))
             self.fstab_to(False)
             self.mount_to(self.j['source'], self.j['source_disk'])
             self.host.helper('reconcile', self.j)
+            self.guard_record('source')
             self.manifest_in()
             wait_for(lambda: self.host.health(self.j), 180, '原 etcd 未恢复健康；保留记录，请运行 resume')
             self.persist('aborted')

@@ -39,15 +39,25 @@ bash scripts/manage.sh etcd migrate --target-root /var/lib/mx-move/etcd-data
 - kubeadm 静态 Pod 配置位于 `/etc/kubernetes/manifests/etcd.yaml`，管理员配置为 `/etc/kubernetes/admin.conf`。
 - etcd 数据和 WAL 均在 `/var/lib/etcd` 内；使用 kubeadm 的本机 TLS endpoint 与 `/etc/kubernetes/pki/etcd/` 证书。外置 WAL、自定义配置文件、多 member 拓扑会被拒绝。
 - `/etc/fstab` 恰有一条 `/var/lib/etcd` 的读写 bind mount，源目录与当前活动挂载一致；该条目不能包含 `nofail`、`noauto` 或 `ro`。
-- 源、目标是可验证 UUID 的本地 XFS / ext4 文件系统，物理父盘彼此独立。数据目录不能含符号链接、嵌套挂载或特殊文件；路径须由 root 持有且不能被其他用户写入。
+- 源、目标是可验证 UUID 的本地 XFS / ext4 文件系统，物理父盘彼此独立。数据目录不能含符号链接、嵌套挂载或特殊文件；数据目录及其父目录须由 root 持有，不能被组或其他用户写入。唯一的所有权例外是经核实的共享文件系统挂载根，见下文 `/data` 说明；状态、备份和配置路径不使用此例外。
 
 目标主机需要 Bash、Python 3.6+、Node.js，以及 `kubectl`、`crictl`、`rsync`、`findmnt`、`lsblk`、`mount`、`umount`、`mountpoint`、外部 `test` 命令、`sync` 和 `systemctl`。Node.js 需能运行仓库现有的 Launcher 恢复脚本；保留 `mx-base` 与 `mx-launcher` 的相对目录关系，不要只复制 `mx-move` 一个目录到服务器。
 
 工具从**当前运行的 etcd 容器镜像**读取并保存匹配版本的 `etcdctl`，不自动下载二进制或安装依赖。检查失败时输出停止原因，不自动重建集群或改用另一套数据。
 
-若旧版 `plan` 只报 `crictl 返回失败（输出已隐藏）`，先同步更新 `etcd/move.py`。旧版错误地调用了 `crictl version -o json`；[官方 version 命令](https://github.com/kubernetes-sigs/cri-tools/blob/v1.31.1/cmd/crictl/version.go)只输出文本，不支持该参数。修复版解析文本中的运行时名称，`ps` / `inspect` 仍使用它们支持的 JSON 输出，并将 runtime/image 两个 endpoint 都固定为 kubelet 实际使用的 socket。无需因此重启 containerd 或 etcd。
+更新时同步整个 `mx-move` 模块，尤其是 `etcd/move.py`、`etcd/storage_paths.py` 和 `etcd/boot_guard.py`；只更新入口文件会缺少新依赖。
+
+若旧版 `plan` 只报 `crictl 返回失败（输出已隐藏）`，先同步更新模块。旧版错误地调用了 `crictl version -o json`；[官方 version 命令](https://github.com/kubernetes-sigs/cri-tools/blob/v1.31.1/cmd/crictl/version.go)只输出文本，不支持该参数。修复版解析文本中的运行时名称，`ps` / `inspect` 仍使用它们支持的 JSON 输出，并将 runtime/image 两个 endpoint 都固定为 kubelet 实际使用的 socket。无需因此重启 containerd 或 etcd。
 
 新版 CRI 调用失败时会显示调用阶段、退出码、socket、错误类别及一条只读复查命令，避免把容器环境变量和原始 `inspect` 内容显示到终端。`plan` 在此失败尚未进入备份、停机或挂载切换阶段；更新后重新执行 `bash scripts/manage.sh etcd plan`。
+
+### 共享 `/data` 的所有权
+
+Internal 的实测布局为：`/data` 是 `1003:1003 755`，`/data/mx-runtime`、`/data/mx-runtime/etcd` 和 `/var/lib/etcd` 均为 `root:root 755`；活动挂载是 `/dev/nvme0n1p1[/mx-runtime/etcd]`。旧版对整条路径统一要求 root 所有，因此在 `/data` 停止；这条报错本身不表示 etcd 数据损坏。
+
+新版允许**经 findmnt 核实、FSROOT 为 `/` 的共享挂载根**由存储管理员持有，但仍拒绝组/其他用户可写、符号链接以及非 root 的 etcd 数据目录和中间目录。工具不修改 `/data` 或现有数据目录的所有者与权限。
+
+由于共享挂载根的所有者能重命名其子目录，工具会记录数据目录和目标父目录的设备/inode，复制时从当前 `/var/lib/etcd` 挂载读取，以打开的目录描述符固定写入和 bind mount 对象，操作后再次核对路径。路径被替换时会停止；不会因为同名目录还存在就把它当作原数据。回滚也会验证最初记录的父目录身份。缺少该身份的旧迁移记录不能自动用于新版回滚。
 
 迁移期间持有 `mx-move` 与 Launcher 发布锁；仓库存在 Hub 的运行目录时也获取其发布锁。独立于这些锁的手工运维或其他发布脚本不受此锁约束，迁移期间不要并行修改 etcd、挂载和恢复状态。
 
@@ -64,7 +74,9 @@ bash scripts/manage.sh etcd migrate --target-root /var/lib/mx-move/etcd-data
 
 存在 Launcher Internal 部署时，迁移前后还会读取角色接口验证 Ops 鉴权、比较飞书登录配置与 `mx-*` Secret 内容摘要。凭据通过标准输入传递，不显示在日志中。这些检查不代替真实用户登录和客户端联网验收。
 
-准备阶段会增加 `/etc/systemd/system/kubelet.service.d/90-mx-move-etcd.conf`，在未来启动 kubelet 前要求 etcd 挂载就绪且数据库文件非空，避免挂载失败后误用底层空目录初始化。仅执行 `systemctl daemon-reload`，不重启当前 kubelet。回滚后保留此启动保护；若该同名文件已有不同配置，工具会停止并要求核查。
+准备阶段会增加 `/etc/systemd/system/kubelet.service.d/90-mx-move-etcd.conf`，并把独立启动检查程序安装到 `/var/lib/mx-move/boot-guard.py`。未来启动 kubelet 时，检查实际 etcd 挂载的 UUID、目录 inode 与 `active-etcd.json` 中的当前选择一致，以及数据库文件存在、非空且权限符合要求，避免挂载失败后误用底层目录或旧副本。启动检查优先使用系统 Python，不依赖仓库目录或 Conda 激活；安装后会在暂停 etcd 前实际运行检查。
+
+切换挂载时，manifest 已在监视目录外，身份记录暂时允许本事务的源和目标；恢复 manifest 前收窄到唯一权威目录并再次检查。仅执行 `systemctl daemon-reload`，不重启当前 kubelet。回滚后保留启动保护；可识别的旧版工具配置会备份升级，同名文件若是其他配置则停止核查。
 
 ## 对 MX-H2I、Docker 和 Hub 的影响
 
@@ -113,6 +125,8 @@ bash scripts/manage.sh etcd resume
 ```text
 /var/lib/mx-move/
   current.json                    最近事务指针/记录
+  active-etcd.json                启动保护使用的当前数据目录身份
+  boot-guard.py                   独立于仓库的只读启动检查程序
   runs/<时间>-<随机标识>/          单次事务、快照及配置备份
     journal.json
     snapshot.db

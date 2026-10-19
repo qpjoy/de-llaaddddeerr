@@ -5,17 +5,20 @@ manifest renames and fstab, with an in-memory mount/container model. No root,
 Kubernetes, Docker, etcd or Linux mounts are required.
 """
 import copy
+import contextlib
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
 
+sys.path.insert(0, str(Path(__file__).parents[1]))
 SPEC = importlib.util.spec_from_file_location('mx_move_etcd_tested', Path(__file__).parents[1] / 'move.py')
 move = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(move)
@@ -271,6 +274,32 @@ class PureFunctions(unittest.TestCase):
                     self.assertEqual(result['required_gib'], 3)
 
 
+class FakeHandle:
+    """Real directory fd with portable command paths for the offline runner.
+
+    The production helper's ownership/no-follow and /proc FD behavior has its
+    own tests. These transaction fixtures model identity changes and anchoring
+    while allowing ordinary unprivileged temporary directories on macOS.
+    """
+    def __init__(self, path, fd):
+        self.path, self.fd = Path(path), fd
+        info = os.fstat(fd)
+        self.identity = {'device': info.st_dev, 'inode': info.st_ino}
+        self.proc_path = str(path)
+
+    def assert_current(self):
+        move.require(move.directory_identity(self.path) == self.identity,
+                     'offline canonical directory identity differs')
+
+    @contextlib.contextmanager
+    def open_child(self, name):
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.fd)
+        try:
+            yield FakeHandle(self.path / name, fd)
+        finally:
+            os.close(fd)
+
+
 class FakeHost:
     def __init__(self, fixture):
         self.fixture = fixture
@@ -284,8 +313,31 @@ class FakeHost:
         self.same_mount(self.active)
         return {'node': 'original-node', 'cluster_uid': 'original-uid',
                 'source': str(self.active), 'source_disk': self.disk(self.active),
+                'source_identity': self.storage_identity(self.active),
+                'source_parent_identity': self.storage_identity(self.active.parent),
                 'size': move.tree_bytes(self.active), 'etcd': self.etcd_status(),
                 'endpoint': self.endpoint}
+
+    @contextlib.contextmanager
+    def storage(self, path, expected=None):
+        fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            handle = FakeHandle(path, fd)
+            move.require(expected is None or handle.identity == expected,
+                         'offline stored directory identity differs')
+            handle.assert_current()
+            yield handle
+        finally:
+            os.close(fd)
+
+    def storage_identity(self, path):
+        with self.storage(path) as handle:
+            return handle.identity
+
+    def active_identity(self, expected, disk):
+        move.require(self.active is not None and self.disk(self.active) == disk and
+                     move.directory_identity(move.DATA) == expected,
+                     'offline active directory identity differs')
 
     def disk(self, path):
         path = Path(path)
@@ -297,7 +349,8 @@ class FakeHost:
         return {'target': str(move.DATA) if self.active is not None else '/', 'uuid': self.disk(self.active or '/')['uuid']}
 
     def same_mount(self, path):
-        move.require(self.active is not None and Path(path) == self.active, 'offline mount identity differs')
+        move.require(self.active is not None and os.path.samefile(str(path), str(self.active)),
+                     'offline mount identity differs')
 
     def stopped(self):
         return not move.MANIFEST.exists()
@@ -380,6 +433,17 @@ class TransactionTests(unittest.TestCase):
         self.patch('capacity', lambda *args: {'free_gib': 300, 'required_gib': 1, 'reserve_gib': 100})
         self.patch('log', mock.Mock())
         self.patch('wait_for', self.wait_once)
+        original_identity = move.directory_identity
+        original_tree_bytes = move.tree_bytes
+
+        def active_path(path):
+            if Path(path) == self.data:
+                move.require(self.host.active is not None, 'offline data is not mounted')
+                return self.host.active
+            return path
+
+        self.patch('directory_identity', lambda path: original_identity(active_path(path)))
+        self.patch('tree_bytes', lambda path: original_tree_bytes(active_path(path)))
         # SELinux metadata is a Linux production concern; fixtures have no xattrs.
         patcher = mock.patch.object(move.os, 'listxattr', return_value=[], create=True)
         patcher.start()
@@ -408,6 +472,11 @@ class TransactionTests(unittest.TestCase):
         patcher = mock.patch.object(move.Move, 'boot_guard')
         patcher.start()
         self.addCleanup(patcher.stop)
+        # The installed guard and interpreter validation have separate tests;
+        # this fixture only models its durable allowed-directory record.
+        patcher = mock.patch.object(move.Move, 'check_boot_guard')
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.transaction = move.Move(self.host, self.state)
 
     def patch(self, name, value):
@@ -426,6 +495,8 @@ class TransactionTests(unittest.TestCase):
         self.commands.append(args)
         if args[0] == 'rsync':
             source, target = Path(args[-2]), Path(args[-1])
+            if source == self.data:
+                source = self.host.active
             if args[1] == '-aHAX':
                 if self.fail_copy:
                     raise move.Refuse('injected copy failure')
@@ -475,6 +546,159 @@ class TransactionTests(unittest.TestCase):
                 self.facts()
         self.assertFalse(self.state.exists())
         self.assertFalse(self.commands)
+
+    def test_prepare_rejects_target_parent_replaced_after_plan(self):
+        self.target_root.mkdir(parents=True)
+        facts = self.facts()
+        original_parent = self.target_root.with_name('original-parent-retained')
+        self.target_root.rename(original_parent)
+        self.target_root.mkdir()
+        with self.assertRaisesRegex(move.Refuse, 'directory identity differs'):
+            self.transaction.prepare(facts)
+        self.assertTrue(self.manifest.exists())
+        self.assertEqual(self.host.active, self.origin)
+        self.assertEqual(self.fstab.read_bytes(), self.original_fstab)
+        self.assertFalse(self.commands)
+        self.assertEqual(list(original_parent.iterdir()), [])
+
+    def test_cold_copy_rejects_target_parent_replaced_after_prepare(self):
+        self.transaction.prepare(self.facts())
+        self.transaction.manifest_out()
+        self.target_root.rename(self.target_root.with_name('original-parent-retained'))
+        self.target_root.mkdir()
+        before = len(self.commands)
+        with self.assertRaisesRegex(move.Refuse, 'directory identity differs'):
+            self.transaction.cold_copy()
+        self.assertEqual(len(self.commands), before)
+        self.assertEqual(list(self.target_root.iterdir()), [])
+        self.assertEqual(self.host.active, self.origin)
+        self.transaction.recover()
+        self.assertTrue(self.manifest.exists())
+        self.assertEqual(self.transaction.j['phase'], 'aborted')
+
+    def test_source_path_rename_during_copy_cannot_substitute_replacement_data(self):
+        self.transaction.prepare(self.facts())
+        self.transaction.manifest_out()
+        moved_source = self.origin.with_name('original-directory-renamed')
+        real_run = self.fake_run
+        renamed = [False]
+
+        def rename_before_copy(args, timeout=60):
+            if args[:2] == ['rsync', '-aHAX'] and not renamed[0]:
+                renamed[0] = True
+                self.assertEqual(Path(args[-2]), self.data)
+                self.origin.rename(moved_source)
+                # Model the established bind remaining attached to its inode.
+                self.host.active = moved_source
+                write_data(self.origin, 999, ['replacement-must-never-be-copied'])
+            return real_run(args, timeout)
+
+        with mock.patch.object(move, 'run', side_effect=rename_before_copy):
+            with self.assertRaisesRegex(move.Refuse, 'mount identity differs'):
+                self.transaction.cold_copy()
+        copied = Path(self.transaction.j['target'])
+        self.assertEqual(read_data(copied), read_data(moved_source))
+        self.assertEqual(read_data(copied)['revision'], 10)
+        self.assertEqual(read_data(self.origin)['revision'], 999)
+        self.assertEqual(self.host.active, moved_source)
+        self.assertFalse(self.manifest.exists())
+        self.assertFalse([args for args in self.commands if args[0] in ['mount', 'umount']])
+        # Recovery must refuse that same pathname now pointing at another inode.
+        with self.assertRaisesRegex(move.Refuse, 'directory identity differs'):
+            self.transaction.recover()
+        self.assertFalse(self.manifest.exists())
+
+    def test_source_replaced_after_snapshot_is_rejected_before_stopping_etcd(self):
+        self.transaction.prepare(self.facts())
+        before_manifest = self.manifest.read_bytes()
+        moved_source = self.origin.with_name('original-running-directory')
+        self.origin.rename(moved_source)
+        # Existing bind and running etcd retain the original inode while the
+        # canonical fstab source now names a replacement directory.
+        self.host.active = moved_source
+        write_data(self.origin, 999, ['replacement-after-online-snapshot'])
+        before_commands = len(self.commands)
+        with mock.patch.object(self.transaction, 'manifest_out', wraps=self.transaction.manifest_out) as stop:
+            with self.assertRaisesRegex(move.Refuse, 'directory identity differs'):
+                self.transaction.switch()
+            stop.assert_not_called()
+        self.assertEqual(self.manifest.read_bytes(), before_manifest)
+        self.assertFalse(Path(self.transaction.j['held']).exists())
+        self.assertFalse(Path(self.transaction.j['target']).exists())
+        self.assertEqual(self.transaction.j['phase'], 'prepared')
+        self.assertFalse(self.transaction.j['may_write'])
+        self.assertEqual(len(self.commands), before_commands)
+        self.assertEqual(self.fstab.read_bytes(), self.original_fstab)
+        self.assertEqual(read_data(self.host.active)['revision'], 10)
+        self.assertEqual(read_data(self.origin)['revision'], 999)
+        self.assertTrue((Path(self.transaction.j['run']) / 'snapshot.db').is_file())
+
+    def assert_guard_allows_only(self, side):
+        journal = self.transaction.j
+        record = move.read_json(self.state / 'active-etcd.json')
+        self.assertEqual(record['data'], str(self.data))
+        self.assertEqual(record['allowed'], [{'uuid': journal[side + '_disk']['uuid'],
+                                             'inode': journal[side + '_identity']['inode']}])
+
+    def test_manifest_start_has_only_target_authorized_by_boot_guard(self):
+        real_manifest_in = self.transaction.manifest_in
+        starts = []
+
+        def guarded_start():
+            self.assertTrue(self.transaction.j['may_write'])
+            self.assert_guard_allows_only('target')
+            self.assertFalse(self.manifest.exists())
+            starts.append('target')
+            real_manifest_in()
+
+        with mock.patch.object(self.transaction, 'manifest_in', side_effect=guarded_start):
+            self.transaction.execute(self.facts())
+        self.assertEqual(starts, ['target'])
+        self.assert_guard_allows_only('target')
+
+    def test_abort_restores_only_source_in_boot_guard_before_manifest_start(self):
+        self.fail_verify = True
+        real_manifest_in = self.transaction.manifest_in
+        starts = []
+
+        def guarded_start():
+            self.assertFalse(self.transaction.j['may_write'])
+            self.assert_guard_allows_only('source')
+            self.assertFalse(self.manifest.exists())
+            starts.append('source')
+            real_manifest_in()
+
+        with mock.patch.object(self.transaction, 'manifest_in', side_effect=guarded_start):
+            with self.assertRaises(move.Refuse):
+                self.transaction.execute(self.facts())
+        self.assertEqual(starts, ['source'])
+        self.assertEqual(self.transaction.j['phase'], 'aborted')
+        self.assert_guard_allows_only('source')
+
+    def test_guard_write_failure_after_commit_does_not_start_or_revert_old_data(self):
+        real_save = move.save_json
+        failed = [False]
+
+        def fail_target_guard(path, value):
+            if (Path(path).name == 'active-etcd.json' and self.transaction.j.get('may_write')
+                    and len(value['allowed']) == 1 and not failed[0]):
+                failed[0] = True
+                raise OSError('injected guard update failure')
+            return real_save(path, value)
+
+        with mock.patch.object(move, 'save_json', side_effect=fail_target_guard):
+            with self.assertRaisesRegex(OSError, 'guard update failure'):
+                self.transaction.execute(self.facts())
+        target = self.host.active
+        self.assertNotEqual(target, self.origin)
+        self.assertTrue(self.transaction.j['may_write'])
+        self.assertFalse(self.manifest.exists())
+        resumed = self.reload()
+        resumed.recover()
+        self.assertEqual(self.host.active, target)
+        self.assertEqual(resumed.j['phase'], 'complete')
+        self.assertTrue(self.manifest.exists())
+        self.assert_guard_allows_only('target')
 
     def test_mount_to_rejects_live_process_or_existing_manifest_before_any_command(self):
         self.transaction.prepare(self.facts())
@@ -785,6 +1009,40 @@ class TransactionTests(unittest.TestCase):
         self.assertTrue(migrated.exists())
         self.assertTrue((Path(rollback.j['run']) / 'snapshot.db').exists())
         self.assertTrue((Path(retry.j['run']) / 'snapshot.db').exists())
+
+    def test_rollback_after_failed_switch_recopies_new_writes_into_a_fresh_generation(self):
+        self.transaction.execute(self.facts())
+        migrated = self.host.active
+        write_data(migrated, 20, ['written-on-one-tb'])
+        rollback = move.Move(self.host, self.state)
+        real_helper = self.host.helper
+        failed = [False]
+
+        def fail_after_rollback_mount(action, journal):
+            if (action == 'reconcile' and not failed[0] and
+                    self.host.disk(self.host.active)['uuid'] == 'disk-two-uuid'):
+                failed[0] = True
+                raise move.Refuse('injected rollback acceptance before write')
+            return real_helper(action, journal)
+
+        with mock.patch.object(self.host, 'helper', side_effect=fail_after_rollback_mount):
+            with self.assertRaisesRegex(move.Refuse, 'rollback acceptance before write'):
+                rollback.execute(rollback.plan('rollback', str(self.target_root)))
+        failed_generation = Path(rollback.j['target'])
+        self.assertEqual(rollback.j['phase'], 'aborted')
+        self.assertEqual(self.host.active, migrated)
+        self.assertEqual(read_data(failed_generation)['revision'], 20)
+        write_data(migrated, 27, ['written-on-one-tb', 'written-after-failed-switch'])
+        retry = move.Move(self.host, self.state)
+        retry.execute(retry.plan('rollback', str(self.target_root)))
+        self.assertEqual(retry.j['phase'], 'complete')
+        self.assertEqual(read_data(self.host.active)['revision'], 27)
+        self.assertEqual(read_data(failed_generation)['revision'], 20)
+        self.assertEqual(read_data(self.origin)['revision'], 10)
+        self.assertNotIn(self.host.active, [failed_generation, self.origin, migrated])
+        record = move.read_json(self.state / 'active-etcd.json')
+        self.assertEqual(record['allowed'], [{'uuid': 'disk-two-uuid',
+                                             'inode': retry.j['target_identity']['inode']}])
 
     def test_concurrent_fstab_edit_is_never_overwritten(self):
         self.transaction.prepare(self.facts())
