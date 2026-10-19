@@ -259,36 +259,44 @@ class PureFunctions(unittest.TestCase):
                 with self.assertRaisesRegex(move.Refuse, '环境变量覆盖'):
                     move.validate_manifest(pod)
 
-    def test_capacity_preserves_larger_of_twenty_gib_or_ten_percent(self):
-        for total_gib, reserve_gib in [(100, 20), (1000, 100)]:
+    def test_capacity_preserves_fixed_fifty_gib_plus_copy_budget(self):
+        for total_gib in [100, 1000]:
             with self.subTest(total_gib=total_gib):
                 needed = 3 * move.GIB
-                info = mock.Mock(f_bavail=reserve_gib * move.GIB + needed - 1,
+                info = mock.Mock(f_bavail=50 * move.GIB + needed - 1,
                                  f_frsize=1, f_blocks=total_gib * move.GIB)
                 with mock.patch.object(move.os, 'statvfs', return_value=info):
                     with self.assertRaisesRegex(move.Refuse, '空间不足'):
                         move.capacity(self.root, needed)
                     info.f_bavail += 1
                     result = move.capacity(self.root, needed)
-                    self.assertEqual(result['reserve_gib'], reserve_gib)
+                    self.assertEqual(result['reserve_gib'], 50)
                     self.assertEqual(result['required_gib'], 3)
 
+    def test_capacity_accepts_internal_root_volume_with_fixed_reserve(self):
+        # Latest plan reports rounded GiB values; reproduce that capacity and
+        # the existing file-only copy/snapshot estimate without a live disk.
+        info = mock.Mock(f_bavail=int(96.13 * move.GIB) // 4096,
+                         f_frsize=4096, f_blocks=1098974756864 // 4096)
+        with mock.patch.object(move.os, 'statvfs', return_value=info):
+            result = move.capacity(Path('/var/lib'), 3 * 400841731 + move.GIB)
+        self.assertEqual(result['reserve_gib'], 50)
+        self.assertEqual(result['required_gib'], 2.12)
+
     def test_capacity_explains_internal_root_volume_shortfall(self):
-        # Server df -B1 values; du's apparent-size estimate includes directory
-        # metadata, so the real file-only migration budget can be slightly less.
-        info = mock.Mock(f_bavail=102774824960 // 4096,
+        info = mock.Mock(f_bavail=int(43.13 * move.GIB) // 4096,
                          f_frsize=4096, f_blocks=1098974756864 // 4096)
         with mock.patch.object(move.os, 'statvfs', return_value=info):
             with self.assertRaises(move.Refuse) as error:
                 move.capacity(Path('/var/lib'), 3 * 400841731 + move.GIB)
         message = str(error.exception)
-        for expected in ['/var/lib', '总容量 1023.50 GiB', '可用 95.72 GiB',
-                         '预算 2.12 GiB', '预留 102.35 GiB', '需要 104.47 GiB',
+        for expected in ['/var/lib', '总容量 1023.50 GiB', '可用 43.13 GiB',
+                         '预算 2.12 GiB', '预留 50.00 GiB（固定预留）', '需要 52.12 GiB',
                          '释放至少 9 GiB']:
             self.assertIn(expected, message)
 
     def test_capacity_never_rounds_a_positive_shortfall_to_zero(self):
-        info = mock.Mock(f_bavail=21 * move.GIB - 1, f_frsize=1, f_blocks=100 * move.GIB)
+        info = mock.Mock(f_bavail=51 * move.GIB - 1, f_frsize=1, f_blocks=100 * move.GIB)
         with mock.patch.object(move.os, 'statvfs', return_value=info):
             with self.assertRaisesRegex(move.Refuse, '释放至少 1 GiB'):
                 move.capacity(self.root, move.GIB)
@@ -454,7 +462,7 @@ class TransactionTests(unittest.TestCase):
         self.patch('run', self.fake_run)
         self.patch('safe_path', lambda path, private=False: Path(path))
         self.patch('private_dir', lambda path: Path(path).mkdir(mode=0o700, parents=True, exist_ok=True))
-        self.patch('capacity', lambda *args: {'free_gib': 300, 'required_gib': 1, 'reserve_gib': 100})
+        self.patch('capacity', lambda *args: {'free_gib': 300, 'required_gib': 1, 'reserve_gib': 50})
         self.patch('log', mock.Mock())
         self.patch('wait_for', self.wait_once)
         original_identity = move.directory_identity

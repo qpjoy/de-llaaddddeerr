@@ -280,11 +280,11 @@ def tree_bytes(path):
 def capacity(path, needed):
     info = os.statvfs(str(path))
     free, size = info.f_bavail * info.f_frsize, info.f_blocks * info.f_frsize
-    reserve = max(20 * GIB, size // 10)
+    reserve = 50 * GIB
     if free < needed + reserve:
         deficit_gib = (needed + reserve - free + GIB - 1) // GIB
         raise Refuse('文件系统空间不足（检查路径：{}）：总容量 {:.2f} GiB，可用 {:.2f} GiB；'
-                     '本轮副本/备份预算 {:.2f} GiB，安全预留 {:.2f} GiB（20 GiB 与总容量 10% 中较大者）；'
+                     '本轮副本/备份预算 {:.2f} GiB，安全预留 {:.2f} GiB（固定预留）；'
                      '合计至少需要 {:.2f} GiB 可用，还需释放至少 {} GiB（向上取整）。'.format(
                          path, size / GIB, free / GIB, needed / GIB, reserve / GIB,
                          (needed + reserve) / GIB, deficit_gib))
