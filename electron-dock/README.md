@@ -82,11 +82,11 @@ Hub 总入口强制 `MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0`；如果调用�
 | 项目 | 当前支持与部署影响 |
 | --- | --- |
 | Launcher | 发布原 Internal 栈；涉及登录／网络相关组件，原地址恢复与身份保护保留，地址变化可能触发控制面修复 |
-| Hub | 迁移及发布 Hub；原流程会 ensure mx-common，模板变化可能更新共享 PostgreSQL／ES |
+| Hub | 迁移及发布 Hub；原流程会 ensure mx-common：共享 PostgreSQL 为 OnDelete，模板变化不重启数据库，ES 模板变化仍会滚动 |
 | DataPort | 迁移及单副本 Recreate 发布，可能短暂不可用；不执行 enroll |
 | Device | Compose 发布，排空自身 Worker 后更新 API／Worker；已有 PostgreSQL 使用 `--no-recreate` |
 | Pay | 原迁移及 API／console 发布流程，保留已有 PostgreSQL；原 checkout 暂停／恢复行为保留 |
-| Rig | Kubernetes 发布；PG 模板变化可能滚动重建数据库 Pod，需按 Rig 文档备份并安排维护窗口 |
+| Rig | Kubernetes 发布；PG 为 OnDelete，模板变化不重建数据库 Pod |
 | mx-common | 仅 `status`／`doctor`；不提供独立 deploy/ensure |
 | etcd | 仅将 `etcd status` 转交 mx-move；迁移／回滚仍使用专用工具 |
 
@@ -95,6 +95,33 @@ Hub 总入口强制 `MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0`；如果调用�
 这些结果只反映**当前选择的集群**，不能证明它就是各产品保留配置中的目标，也不代表业务登录、联网、支付或数据请求验收通过。`doctor` 另外检查 API readyz（包含 etcd 就绪）、节点 Ready／压力条件，并显示 `/`、`/data`、`/var/lib/etcd` 中实际存在路径的空间；它不会做磁盘延迟测试或自动清理。查询失败显示 `UNKNOWN` 并返回非零。
 
 Kubernetes 项目 deploy 前会检查当前集群 API／节点状态，随后子项目仍按自己的目标与身份规则执行；总入口尚未实现统一安装清单和跨项目目标绑定。
+
+## 数据库运行配置（db apply）
+
+数据库的声明式运行配置在 `scripts/postgres-runtime.json`，由 `scripts/pg_runtime.py` 应用。它**从不删除、重启或重建数据库 Pod，也不修改 StatefulSet**，只做两件事：
+
+1. **CPU／内存**：以各自 StatefulSet 模板为准。运行中的 Pod 与模板不同时，先 server dry-run，再用 Kubernetes Pod resize 原地调整（容器不重启）；随后确认 kubelet 已分配、重启次数未变。被拒绝或节点资源不足时只报告。
+2. **参数**：只写可热加载的参数（`ALTER SYSTEM` + `pg_reload_conf()`），只在与上次写入值不同时才写；枚举参数可写成偏好列表（如 `["lz4","pglz"]`）。需要重启的参数、被启动参数固定的参数只报告，不应用。
+
+```bash
+bash scripts/manage.sh db status            # 所有项目，只读
+bash scripts/manage.sh db status launcher   # 单个项目，只读
+bash scripts/manage.sh db apply launcher    # 应用；无变化时不做任何写入
+```
+
+`deploy` 的子项目脚本成功后会自动执行一次 `db apply <项目>`，结果写进部署记录的 `postgresRuntime`；它失败不会改变部署退出码，只提示稍后重跑。`MX_DB_RUNTIME=0` 跳过这一步。
+
+| 项目 | 数据库 | 声明内容 |
+| --- | --- | --- |
+| Launcher | `mx-internal-shadow/mx-internal-postgres` | 模板 4 CPU／4Gi；WAL/检查点、压缩、I/O 计时与锁等待日志 |
+| Hub、DataPort | `mx-common/mx-common-postgres` | 模板 16 CPU／48Gi；同类参数（与 `mx-common/scripts/postgres-burst-tuning.sql` 一致） |
+| Pay | `mx-pay/mx-pay-postgres` | 只核对资源与状态，不推参数 |
+| Rig | `mx-rig/mx-rig-postgres` | 只核对资源与状态，不推参数 |
+| Device | Compose | 不在范围内（原流程使用 `--no-recreate`） |
+
+Launcher、mx-common、Rig 的 PostgreSQL StatefulSet 改为 `updateStrategy: OnDelete`（Pay 原本就是）。因此修改数据库模板后，`deploy` 不会再滚动重启数据库：CPU／内存由上面的原地调整生效，其他模板变化（镜像、启动参数、探针等）在 `db status` 里显示为“模板有新版本尚未作用于 Pod”，需在维护窗口手动删除该 Pod 才生效。`kubectl rollout status` 不支持 OnDelete，各项目的数据库等待已改为等待 Pod Ready。
+
+首次带着 OnDelete 的清单部署时，更新策略和模板在同一次写入生效，不会触发滚动。原地调整资源需要 Kubernetes 1.33+（当前集群 1.36）；更早的版本只会得到“resize-rejected”报告。
 
 ## 锁与结果记录
 

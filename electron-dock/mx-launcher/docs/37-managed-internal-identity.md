@@ -102,6 +102,8 @@ bash scripts/manage.sh ops identity check
 
 ### 身份发布长时间等待（2026-10-19）
 
+跨项目现场、etcd 迁移后的实际状态、磁盘/进程证据与下一步排查统一见 [Internal 服务器故障交接记录](51-internal-server-storage-deploy-incident-2026-10-19.md)。该问题尚未结案；本节保留身份发布的具体实现说明。
+
 统一入口的每 15 秒提示是整次 Launcher 部署的累计时间。旧版 `identity-deploy.mjs` 捕获了 `kubectl rollout status` 的输出，导致生成 Internal Nginx 回源配置后看起来没有进展。该配置生成只写本机文件，不 reload Nginx，也不等待外部网关。
 
 目前身份发布会逐项显示资源应用、阶段完成／未确认完成及耗时，并直接显示内网／公网身份 Deployment 的 rollout 进度。Secret 读取／写入及原始 stderr 仍不打印。原顺序保持：应用运行时 Secret、CA、内网和公网身份 Deployment；已配置公网入口时先等公网就绪，再等内网就绪，最后应用管理员 SSO Secret。两个 rollout 各等待 `180s`，失败停止后续 API 发布，不自动重试、回滚或修改身份档案。

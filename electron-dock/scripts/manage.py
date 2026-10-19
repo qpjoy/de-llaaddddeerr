@@ -14,6 +14,8 @@ from urllib.parse import urlsplit
 import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
+DB_RUNTIME = ROOT / "scripts" / "pg_runtime.py"
+DB_PROFILES = ROOT / "scripts" / "postgres-runtime.json"
 PROJECTS = {
     "mx-launcher": ("mx-launcher", "mx-internal-shadow", "MX_LAUNCHER_BUILD_PROXY"),
     "mx-insight-hub": ("mx-insight-hub", "mx-insight-hub", "MX_INSIGHT_BUILD_PROXY"),
@@ -25,12 +27,12 @@ PROJECTS = {
 }
 ALIASES = dict(zip(("launcher", "hub", "dataport", "device", "pay", "rig", "common"), PROJECTS))
 EFFECTS = {
-    "mx-launcher": "发布 Internal 登录/网络相关组件；保留原恢复检查，地址变化可能触发控制面修复。",
-    "mx-insight-hub": "执行 Hub 迁移及发布；原流程会 ensure mx-common，模板变化可能更新共享 PG/ES；不启用 Launcher 同步或测试数据。",
+    "mx-launcher": "发布 Internal 登录/网络相关组件；保留原恢复检查，地址变化可能触发控制面修复。PG 为 OnDelete，模板变化不重启数据库；完成后 db apply 原地调整资源和参数。",
+    "mx-insight-hub": "执行 Hub 迁移及发布；原流程会 ensure mx-common：共享 PG 为 OnDelete 不重启，ES 模板变化仍会滚动；完成后 db apply 原地调整共享 PG；不启用 Launcher 同步或测试数据。",
     "mx-dataport": "执行 DataPort 迁移及单副本 Recreate 发布，可能短暂不可用；不执行 enroll。",
     "mx-device": "排空自身 Worker、迁移并替换 API/Worker；已有 PostgreSQL 使用 --no-recreate。",
     "mx-pay": "执行 Pay 自身迁移和 API/console 发布；按原流程暂停/恢复新 checkout；保留已有 PG。",
-    "mx-rig": "执行 Rig Kubernetes 发布；PG 模板变化会滚动重建数据库 Pod，需核对备份及维护窗口。",
+    "mx-rig": "执行 Rig Kubernetes 发布；PG 为 OnDelete，模板变化不重建数据库 Pod，CPU/内存由 db apply 原地调整。",
 }
 HELP = """MX 统一管理入口（在目标服务器的 electron-dock 目录执行）
   bash scripts/manage.sh list
@@ -39,6 +41,8 @@ HELP = """MX 统一管理入口（在目标服务器的 electron-dock 目录执�
   bash scripts/manage.sh status [项目]     # 查询当前选择的集群/Compose
   bash scripts/manage.sh doctor [项目]     # 只读检查 API、节点、空间和资源
   bash scripts/manage.sh etcd status       # 已有 mx-move 事务状态
+  bash scripts/manage.sh db status [项目]  # 数据库参数/资源与声明是否一致（只读）
+  bash scripts/manage.sh db apply <项目>   # 热加载参数、Pod 原地调整资源；从不重启数据库
 
 项目：mx-launcher / mx-insight-hub / mx-dataport / mx-device / mx-pay / mx-rig
 短名：launcher / hub / dataport / device / pay / rig；mx-common 仅支持只读检查。
@@ -46,6 +50,7 @@ PROXY 支持 host:port 或 http(s)://host:port；* 是主机占位，不能原�
 显式 PROXY 优先；空值清空本次专用构建代理，未设置时沿用各项目配置。
 不会配置系统代理或 MX-H2I 用户代理。不支持全量 deploy、通用 restart/restore。
 原项目命令继续可用。总入口锁仅保护经它发起的同用户、同主机部署。
+deploy 成功后自动执行一次 db apply（scripts/postgres-runtime.json）；MX_DB_RUNTIME=0 可跳过。
 """
 
 
@@ -267,6 +272,49 @@ def child_run(command, cwd, env, lock_fd):
             signal.signal(number, handler)
 
 
+def db_projects():
+    try:
+        return json.loads(DB_PROFILES.read_text()).get("projects") or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def db_runtime(action, names, summary=None):
+    command = [sys.executable, "-I", str(DB_RUNTIME), action] + names
+    if summary:
+        command += ["--summary", str(summary)]
+    return subprocess.call(command, cwd=str(ROOT), env=kube_env(os.environ))
+
+
+def post_deploy_db(name, state):
+    """Bring the project's databases to the declared runtime state; never restarts them."""
+    if os.environ.get("MX_DB_RUNTIME", "1") == "0":
+        say("按 MX_DB_RUNTIME=0 跳过数据库运行配置")
+        return {"skipped": True}
+    say("应用数据库运行配置：参数热加载、Pod 原地调整资源；不重启、不重建数据库")
+    summary = state / ("db-runtime-" + uuid.uuid4().hex + ".json")
+    result = {}
+    try:
+        result["exitCode"] = db_runtime("apply", [name], summary)
+        data = json.loads(summary.read_text())
+        result["targets"] = [{
+            "target": item.get("target"),
+            "resources": (item.get("resources") or {}).get("status"),
+            "settings": (item.get("settings") or {}).get("status"),
+            "changed": [change.get("name") for change in (item.get("settings") or {}).get("changed", [])],
+            "templatePending": item.get("templatePending"),
+            "errors": item.get("errors"),
+        } for item in data.get("targets", [])]
+    except (OSError, ValueError):
+        result.setdefault("exitCode", 1)
+    finally:
+        if summary.exists():
+            summary.unlink()
+    if result.get("exitCode"):
+        say("数据库运行配置未全部完成；项目发布结果不变。可稍后执行 bash scripts/manage.sh db apply " + name)
+    return result
+
+
 def deploy(name):
     cwd, command, env, overrides = deployment(name)
     if not (cwd / "scripts/manage.sh").is_file():
@@ -297,6 +345,9 @@ def deploy(name):
             say("开始执行原项目部署脚本")
             code = child_run(command, cwd, env, fd)
             record["phase"] = "child_succeeded" if code == 0 else "child_failed"
+            if code == 0 and name in db_projects():
+                write_record(receipt, record)
+                record["postgresRuntime"] = post_deploy_db(name, state)
         except (Stop, OSError) as error:
             say(str(error) if isinstance(error, Stop) else "无法启动子项目命令")
             code = 1
@@ -319,6 +370,15 @@ def main(args):
             print("{}\t{}\t{}".format(name, "k8s:" + namespace if namespace else "compose", "deploy/status/doctor" if proxy_key else "status/doctor"))
         print("etcd\tmx-move\tstatus")
         return 0
+    if len(args) in (2, 3) and args[0] == "db" and args[1] in ("status", "apply"):
+        names = [project_name(args[2])] if len(args) == 3 else []
+        if args[1] == "apply" and not names:
+            raise Stop("db apply 需要指定项目")
+        targets = db_projects()
+        names = [n for n in (names or list(PROJECTS)) if n in targets]
+        if not names:
+            raise Stop("该项目没有声明数据库运行配置")
+        return db_runtime(args[1], names)
     if args == ["etcd", "status"]:
         script = ROOT / "mx-base/mx-move/scripts/manage.sh"
         return subprocess.call(["bash", str(script), "etcd", "status"], cwd=str(script.parent.parent))

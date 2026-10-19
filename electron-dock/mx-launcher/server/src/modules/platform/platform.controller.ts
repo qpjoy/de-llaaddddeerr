@@ -1,12 +1,16 @@
 import { Body, Controller, Get, Inject, Post, ServiceUnavailableException } from '@nestjs/common';
 
 import { asRecord, numberRecord, stringArray, stringValue } from '../../lib/http.js';
+import { ReadinessGate } from '../../lib/readiness-gate.js';
 import type { PlatformStore } from '../../store/platform-store.js';
 import { PLATFORM_STORE, RUNTIME_CONFIG } from '../../tokens.js';
 import type { RuntimeConfig, SiteRole } from '../../types.js';
 
 @Controller()
 export class PlatformController {
+  // The kubelet readiness probe allows 3 seconds; answer well inside it.
+  private readonly readiness = new ReadinessGate(() => this.store.ready(), { waitMs: 1000, graceMs: 60_000 });
+
   constructor(
     @Inject(PLATFORM_STORE) private readonly store: PlatformStore,
     @Inject(RUNTIME_CONFIG) private readonly config: RuntimeConfig
@@ -19,13 +23,11 @@ export class PlatformController {
 
   @Get('readyz')
   async readyz() {
-    try {
-      await this.store.ready();
-    } catch {
-      throw new ServiceUnavailableException('Platform store is unavailable');
-    }
+    const { ready, degraded } = await this.readiness.state();
+    if (!ready) throw new ServiceUnavailableException('Platform store is unavailable');
     return {
       ok: true,
+      ...(degraded ? { degraded: true } : {}),
       environment: this.config.environment,
       siteId: this.config.siteId,
       siteRole: this.config.siteRole,

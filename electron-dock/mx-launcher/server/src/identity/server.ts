@@ -4,6 +4,7 @@ import { createServer } from 'node:https';
 import { request, createServer as createHttpServer, type RequestListener } from 'node:http';
 import { createIdentityProvider, type IdentitySettings } from './provider.js';
 import type { IdentityRepository } from './repository.js';
+import { ReadinessGate } from '../lib/readiness-gate.js';
 import { createRegistrationClient } from '../registration/backchannel.js';
 
 export function createIdentityServer({ settings, repository, cert, key, upstream }: {
@@ -14,6 +15,8 @@ export function createIdentityServer({ settings, repository, cert, key, upstream
     createRegistrationClient(upstream, settings.clientId, settings.clientSecret));
   const admin = new URL(settings.adminOrigin ?? settings.origin);
   const publicEntry = Boolean(settings.adminOrigin);
+  // /healthz backs startup and readiness probes (Kubernetes default 1 s timeout).
+  const readiness = new ReadinessGate(() => repository.ready(), { waitMs: 500, graceMs: 60_000 });
   const handler: RequestListener = async (req, res) => {
     try {
       if (req.headers.host !== origin.host && (!publicEntry || req.headers.host !== admin.host)) { res.writeHead(421).end(); return; }
@@ -25,7 +28,11 @@ export function createIdentityServer({ settings, repository, cert, key, upstream
         delete req.headers.forwarded;
       }
       const path = (req.url ?? '').split('?')[0];
-      if (path === '/healthz') { await repository.ready(); res.end('ok'); return; }
+      if (path === '/healthz') {
+        if ((await readiness.state()).ready) res.end('ok');
+        else res.writeHead(503).end('unavailable');
+        return;
+      }
       if (publicEntry) {
         const supplied = Buffer.from(String(req.headers['x-mx-identity-gateway'] ?? ''));
         const expected = Buffer.from(settings.ingressToken ?? '');

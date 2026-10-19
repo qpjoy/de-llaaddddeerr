@@ -2497,6 +2497,25 @@ k8s_rollout_status() {
   return 1
 }
 
+# Database StatefulSets use OnDelete so template changes never restart the
+# running database, and `rollout status` rejects that strategy. Wait for the Pod
+# itself instead; other strategies keep the original rollout wait.
+k8s_postgres_ready() {
+  local ns="$1" name="$2" timeout="${3:-180}" strategy waited=0
+  strategy="$(kubectl --request-timeout=15s -n "$ns" get statefulset "$name" -o jsonpath='{.spec.updateStrategy.type}' 2>/dev/null || true)"
+  if [ "$strategy" != OnDelete ]; then
+    k8s_rollout_status "$ns" statefulset "$name" "${timeout}s"
+    return
+  fi
+  until kubectl --request-timeout=15s -n "$ns" get "pod/${name}-0" >/dev/null 2>&1; do
+    [ "$waited" -lt "$timeout" ] || return 1
+    sleep 2
+    waited=$((waited + 2))
+  done
+  kubectl --request-timeout="$((timeout + 20))s" -n "$ns" wait --for=condition=Ready \
+    "pod/${name}-0" --timeout="$((timeout - waited > 10 ? timeout - waited : 10))s"
+}
+
 k8s_cleanup_retired_internal_dns_edge() {
   local pods pod timeout
   timeout="${MX_K8S_RETIRED_DNS_EDGE_DELETE_TIMEOUT:-60s}"
@@ -2819,7 +2838,7 @@ k8s_apply() {
   say "apply host runner rbac"
   kubectl apply --validate=false -f "$dir/27-host-runner-rbac.yaml"
   say "wait postgres rollout"
-  if ! k8s_rollout_status "$ns" statefulset mx-internal-postgres 180s; then
+  if ! k8s_postgres_ready "$ns" mx-internal-postgres 180; then
     k8s_postgres_diagnostics "$ns"
     die "postgres rollout failed"
   fi

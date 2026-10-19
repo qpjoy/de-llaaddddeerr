@@ -413,7 +413,7 @@ EOF
   kubectl -n "$NAMESPACE" scale deployment mx-common-redis --replicas=1 >/dev/null 2>&1 || true
 
   say "  waiting for the shared data plane to come back"
-  kubectl -n "$NAMESPACE" rollout status statefulset/mx-common-postgres --timeout=300s >/dev/null \
+  wait_workload statefulset mx-common-postgres 300 \
     || die "PostgreSQL did not become ready on the new volume; the old data is still at ${HOST_DATA_ROOT_ORIGINAL}"
   kubectl -n "$NAMESPACE" rollout status statefulset/mx-common-elasticsearch --timeout=600s >/dev/null \
     || die "Elasticsearch did not become ready on the new volume; the old data is still at ${HOST_DATA_ROOT_ORIGINAL}"
@@ -779,12 +779,35 @@ pod_progress() {
 # meant up to five minutes of total silence — indistinguishable from a hang.
 # Pulling a 1.3GB image over a slow link is a legitimate reason to wait; being
 # unable to tell that apart from a crash loop is not.
+# OnDelete StatefulSets (the shared database) never roll on a template change,
+# and `rollout status` rejects them; all replicas Ready is their signal.
+workload_ready() {
+  local kind="$1" name="$2" strategy ready replicas
+  if [ "$kind" = statefulset ]; then
+    IFS='|' read -r strategy ready replicas <<<"$(kubectl -n "$NAMESPACE" get statefulset "$name" \
+      -o jsonpath='{.spec.updateStrategy.type}|{.status.readyReplicas}|{.spec.replicas}' 2>/dev/null || true)"
+    if [ "$strategy" = OnDelete ]; then
+      [ "${replicas:-0}" -gt 0 ] && [ "${ready:-0}" = "$replicas" ]
+      return
+    fi
+  fi
+  kubectl -n "$NAMESPACE" rollout status "$kind/$name" --timeout=3s >/dev/null 2>&1
+}
+
+wait_workload() {
+  local kind="$1" name="$2" seconds="$3" started=$SECONDS
+  until workload_ready "$kind" "$name"; do
+    [ $((SECONDS - started)) -lt "$seconds" ] || return 1
+    sleep 5
+  done
+}
+
 wait_ready() {
   local kind="$1" name="$2" required="${3:-required}"
   local waited=0 started=$SECONDS interval=5 reason progress last_progress=""
 
   while [ "$waited" -lt "$WAIT_TIMEOUT" ]; do
-    if kubectl -n "$NAMESPACE" rollout status "$kind/$name" --timeout=3s >/dev/null 2>&1; then
+    if workload_ready "$kind" "$name"; then
       say "${name} is ready (${waited}s)"
       return 0
     fi

@@ -81,3 +81,22 @@ test('memory store readiness needs no database and the overview endpoint retains
   assert.equal(typeof overview.auditEvents, 'number');
   assert.equal(typeof overview.appCenterApps, 'number');
 });
+
+test('a previously ready API stays in rotation while one database check is slow', async () => {
+  let checks = 0;
+  let releaseSlow!: () => void;
+  const store = {
+    ready: () => {
+      checks += 1;
+      if (checks === 1) return Promise.resolve();
+      return new Promise<void>((resolve) => { releaseSlow = resolve; });
+    }
+  } as unknown as PlatformStore;
+  const controller = new PlatformController(store, config);
+  assert.equal((await controller.readyz()).ok, true);
+  const slow = await controller.readyz();
+  assert.equal(slow.ok, true);
+  assert.equal((slow as { degraded?: boolean }).degraded, true);
+  assert.equal(checks, 2);
+  releaseSlow();
+});

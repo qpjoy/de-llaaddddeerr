@@ -303,6 +303,8 @@ export function loadConfig(environment = process.env) {
     timeoutMs: positiveInteger(environment.MX_INSIGHT_LAUNCHER_TIMEOUT_MS, 3_000, 'MX_INSIGHT_LAUNCHER_TIMEOUT_MS'),
     // Bounds how long a revoked Launcher token can still be accepted here.
     cacheTtlMs: positiveInteger(environment.MX_INSIGHT_LAUNCHER_CACHE_TTL_MS, 30_000, 'MX_INSIGHT_LAUNCHER_CACHE_TTL_MS'),
+    // Only while Launcher is unavailable; 0 disables the bridge.
+    staleGraceMs: boundedNonNegativeInteger(environment.MX_INSIGHT_LAUNCHER_STALE_GRACE_MS, 120_000, 'MX_INSIGHT_LAUNCHER_STALE_GRACE_MS', 600_000),
     // Launcher scopes that confer Hub platform-admin. Empty by default: nobody
     // becomes a Hub administrator merely by holding a Launcher account, and the
     // list is operator configuration rather than something a token can assert.

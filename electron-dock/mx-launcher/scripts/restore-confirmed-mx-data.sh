@@ -271,5 +271,10 @@ findmnt -T "$MX_RESTORE_TARGET" -o TARGET,SOURCE,FSTYPE
 
 MX_RESTORE_PHASE=start-postgres
 mxk scale statefulset/mx-internal-postgres --current-replicas=0 --replicas=1
-kubectl --request-timeout=260s -n "$MX_RESTORE_NS" rollout status statefulset/mx-internal-postgres --timeout=240s
+# The StatefulSet is OnDelete; `rollout status` rejects it. Wait for the Pod.
+for _ in $(seq 1 60); do
+  kubectl --request-timeout=15s -n "$MX_RESTORE_NS" get pod/mx-internal-postgres-0 >/dev/null 2>&1 && break
+  sleep 2
+done
+kubectl --request-timeout=260s -n "$MX_RESTORE_NS" wait --for=condition=Ready pod/mx-internal-postgres-0 --timeout=240s
 mx_finish_restore
