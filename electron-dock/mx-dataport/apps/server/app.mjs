@@ -20,7 +20,7 @@ export function permittedCustomerRoute(method, path) {
           enterprise[1],
         )
       : method === "POST" &&
-          /^(challenge|profile|roles|members|tickets|query|keys|subscription-selection|orders|members\/[0-9a-f-]{36}(?:\/(?:initial-password|reset-password))?|keys\/[0-9a-f-]{36}\/revoke|orders\/[0-9a-f-]{36}\/(?:checkout|refresh))$/.test(
+          /^(profile|roles|members|tickets|query|keys|subscription-selection|orders|members\/[0-9a-f-]{36}(?:\/(?:initial-password|reset-password))?|keys\/[0-9a-f-]{36}\/revoke|orders\/[0-9a-f-]{36}\/(?:checkout|refresh))$/.test(
             enterprise[1],
           );
   if (/^\/joins\/[A-Za-z0-9_-]{43}$/.test(path))

@@ -20,6 +20,10 @@
 
 # DataPort 发布与域名迁移
 
+## 取消企业超管专属码校验（2026-10-19，当前要求）
+
+用户要求移除登录后的“验证企业超管身份”。已取消前后端门禁及 Hub 专属码配置入口/接口。MX 登录、DataPort 专用邀请首次应用准入、企业有效成员和角色检查继续执行，独立员工首次改密保留。先部署 Hub，再部署 DataPort，无新增迁移。详见[变更与部署说明](docs/remove-owner-challenge-20261019.md)。下文涉及超管专属码的旧部署要求已失效。
+
 页面与业务验收见 [数港系统页面与功能测试流程](docs/system-functional-test-flow.md)，包含测试准备、逐角色/逐页面操作、跨端闭环、异常恢复及执行记录模板。
 
 ## 撤回数港独立平台管理员方案（2026-10-15）
@@ -40,7 +44,7 @@ MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 \
 bash scripts/manage.sh ops internal-production status
 ```
 
-新版会话中的每个企业须返回 `dataport.permissions` 字符串数组及 `dataport.ownerChallengeRequired` 布尔值。未通过专属邀请码校验的超管应显示验证表单，而不是“当前角色没有权限”。需在原 Hub Admin Token 通道为该企业超管配置专属邀请码，具体接口见 [企业权限上线配置](docs/alignment-and-enterprise.md)。不要以旧 capabilities 或 role 在浏览器推导完整新权限来绕过超管验证。
+新版会话中的每个企业须返回 `dataport.permissions` 字符串数组。Hub 暂保留 `dataport.ownerChallengeRequired: false` 兼容旧前端；新版数港不再依赖该字段。权限结构仍须校验，不以旧 capabilities 或 role 在浏览器推导完整权限。
 
 数港现已校验新会话协议：缺字段、权限结构错误或租户无法匹配成员时保留登录态，显示“企业权限服务尚未就绪”，诊断码为 `customer_permissions_unavailable`，不加载私有业务或消息。后台会话恢复时同步当前企业选择，避免已取得新权限仍匹配空企业而误报无权访问。真实的空权限仍按无权访问处理；无企业成员的账号仍可走邀请确认。此提示修复需要另行提交、同步并发布数港；不会自动更新线上 Hub 或配置邀请码。
 

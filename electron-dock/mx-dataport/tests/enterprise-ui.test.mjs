@@ -8,13 +8,14 @@ import { runBatchRows } from '../apps/web/batch-runner.ts'
 import { riskAdvice, riskLevelLabel } from '../apps/web/risk-advice.ts'
 
 const tenant=randomUUID(),session=permissions=>({memberships:[{tenantId:tenant,role:'viewer',dataport:{permissions}}]})
-test('page gates require current enterprise permissions, including direct/return destinations and pending owners',()=>{
+test('page gates require current enterprise permissions, including direct/return destinations without a second owner challenge',()=>{
   const viewer=session(['history.read','usage.read','docs.read']);
   for(const page of ['intelligence','overview','docs-ip'])assert.equal(canOpenPage(viewer,tenant,page),true)
   for(const page of ['keys','orders','market','services','team','audit','unknown'])assert.equal(canOpenPage(viewer,tenant,page),false)
   assert.equal(canOpenPage(viewer,randomUUID(),'intelligence'),false);assert.equal(hasPermission(viewer,tenant,'history.export'),false)
   const pending=session(['query.execute','billing.read']);pending.memberships[0].role='owner';pending.memberships[0].dataport.ownerChallengeRequired=true
-  for(const page of ['intelligence','orders','messages','account'])assert.equal(canOpenPage(pending,tenant,page),false)
+  for(const page of ['intelligence','orders','messages','account'])assert.equal(canOpenPage(pending,tenant,page),true)
+  for(const page of ['team','keys','audit'])assert.equal(canOpenPage(pending,tenant,page),false)
   assert.equal(canOpenPage(null,tenant,'intelligence'),false)
 })
 function workbook(rows,type='xlsx') {const book=utils.book_new();utils.book_append_sheet(book,utils.aoa_to_sheet(rows),'IPs');return write(book,{type:'array',bookType:type})}

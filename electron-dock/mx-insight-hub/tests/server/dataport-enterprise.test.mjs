@@ -12,6 +12,7 @@ import { DataportStore, digest } from "../../server/portal/dataport-store.mjs";
 import {
   BUILTIN_ROLES,
   requireDataportAccess,
+  requireOwner,
   validatePermissions,
 } from "../../server/portal/dataport-policy.mjs";
 import {
@@ -58,6 +59,7 @@ async function fixture(t) {
     );
   await pool.query(`CREATE SCHEMA external_platform; CREATE TABLE external_platform.ipsearch_batches(id uuid PRIMARY KEY,tenant_id uuid,consumer_id uuid,api_key_id uuid,idempotency_key text,response jsonb,created_at timestamptz DEFAULT now());
     CREATE SCHEMA hub_commerce;CREATE TABLE hub_commerce.orders(id uuid PRIMARY KEY,tenant_id uuid,consumer_id uuid,environment text DEFAULT 'live',intent jsonb,payment jsonb,payment_id uuid,receipt jsonb,created_at timestamptz DEFAULT now(),delivered_at timestamptz);`);
+  await pool.query("ALTER TABLE public.usage_requests ADD COLUMN IF NOT EXISTS acquisition_request jsonb");
   await pool.query(`CREATE TABLE hub_commerce.subscriptions(id uuid PRIMARY KEY);
     CREATE FUNCTION hub_commerce.immutable() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'immutable'; END$$;`);
   await pool.query(await readFile(new URL("../../migrations/144_customer_subscription_messages.sql",import.meta.url),"utf8"));
@@ -116,20 +118,6 @@ async function fixture(t) {
       session,
     );
   }
-  async function verified() {
-    await store.configureOwnerCode(
-      tenant,
-      owner,
-      "Fixture-owner-code-123",
-      "test-operator",
-    );
-    await store.ownerChallenge(
-      await principal(),
-      tenant,
-      "Fixture-owner-code-123",
-    );
-    return principal();
-  }
   return {
     pool,
     store,
@@ -140,7 +128,6 @@ async function fixture(t) {
     adminMember,
     viewer,
     principal,
-    verified,
   };
 }
 
@@ -181,7 +168,7 @@ test("fixed roles and exact customer routes preserve independent billing, query 
       "/payments/return-order",
       new URLSearchParams(),
     ).tenantIds,
-    [billing],
+    [billing, pending],
   );
   for (const path of [
     `/enterprises/${id}/roles`,
@@ -192,64 +179,56 @@ test("fixed roles and exact customer routes preserve independent billing, query 
   for (const path of [
     `/enterprises/${id}/keys/${id}/reveal`,
     `/enterprises/${id}/runtime`,
+    `/enterprises/${id}/challenge`,
     `/enterprises/${id}/members/owner`,
     "/runtime",
   ])
     assert.ok(!dataportRouteAllowed("POST", path));
 });
 
+test("retired owner codes do not gate tenant permissions or grant employee ownership", () => {
+  const tenant = randomUUID(), other = randomUUID();
+  const owner = { memberships: [{ tenantId: tenant, role: "owner", status: "active",
+    dataport: { permissions: ["members.read"], ownerChallengeRequired: true } }] };
+  assert.doesNotThrow(() => requireOwner(owner, tenant));
+  assert.doesNotThrow(() => requireDataportAccess(owner, tenant, "members.read"));
+  assert.throws(() => requireDataportAccess(owner, other), { code: "tenant_not_permitted" });
+  assert.throws(() => requireDataportAccess(owner, tenant, "keys.create"), { code: "insufficient_permission" });
+  const employee = { memberships: [{ ...owner.memberships[0], role: "analyst" }] };
+  assert.throws(() => requireOwner(employee, tenant), { code: "owner_required" });
+  const suspended = { memberships: [{ ...owner.memberships[0], status: "suspended" }] };
+  assert.throws(() => requireOwner(suspended, tenant), { code: "tenant_not_permitted" });
+});
+
 test(
-  "owner permit is session-bound, rotated and rate-limited across sessions",
+  "MX owners enter without codes across sessions; live tenant/member checks and legacy data remain intact",
   { skip: !connectionString },
   async (t) => {
     const f = await fixture(t);
-    let owner = await f.principal();
-    assert.throws(
-      () => requireDataportAccess(owner, f.tenant, "query.execute"),
-      { code: "owner_challenge_required" },
-    );
-    owner = await f.verified();
-    assert.doesNotThrow(() =>
-      requireDataportAccess(owner, f.tenant, "query.execute"),
-    );
-    assert.equal(
-      (await f.principal(f.owner, digest("new-login"))).memberships[0].dataport
-        .ownerChallengeRequired,
-      true,
-    );
-    await f.store.configureOwnerCode(
-      f.tenant,
-      f.owner,
-      "Rotated-owner-code-123",
-      "operator",
-    );
-    assert.equal(
-      (await f.principal()).memberships[0].dataport.ownerChallengeRequired,
-      true,
-    );
-    const pending = await f.principal();
-    for (let i = 0; i < 5; i++)
-      await assert.rejects(
-        f.store.ownerChallenge(
-          { ...pending, dataportSession: digest(`session${i}`) },
-          f.tenant,
-          "wrong-code",
-        ),
-        { status: 403 },
-      );
-    await assert.rejects(
-      f.store.ownerChallenge(pending, f.tenant, "Rotated-owner-code-123"),
-      { status: 429 },
-    );
-    const codes = (
-      await f.pool.query("SELECT digest FROM dataport.owner_codes")
-    ).rows;
-    assert.ok(!codes[0].digest.includes("Rotated"));
-    assert.ok(
-      !(await f.pool.query("SELECT detail FROM dataport.events")).rows.some(
-        (r) => JSON.stringify(r).includes("wrong-code"),
-      ),
-    );
+    for (const session of [undefined, "", digest("session-A"), digest("new-login")]) {
+      const owner = await f.principal(f.owner, session);
+      assert.equal(owner.memberships[0].dataport.ownerChallengeRequired, false);
+      assert.doesNotThrow(() => requireDataportAccess(owner, f.tenant, "query.execute"));
+      assert.doesNotThrow(() => requireOwner(owner, f.tenant));
+      assert.throws(() => requireDataportAccess(owner, f.other), { code: "tenant_not_permitted" });
+    }
+    assert.equal((await f.pool.query("SELECT count(*)::int AS n FROM dataport.owner_codes")).rows[0].n, 0);
+    assert.equal((await f.pool.query("SELECT count(*)::int AS n FROM dataport.owner_sessions")).rows[0].n, 0);
+    await f.pool.query("INSERT INTO dataport.owner_codes(tenant_id,member_id,digest) VALUES($1,$2,'retained-legacy-digest')", [f.tenant,f.owner]);
+    const before = await f.pool.query("SELECT * FROM dataport.owner_codes");
+    const current = await f.principal();
+    requireOwner(current, f.tenant);
+    assert.deepEqual((await f.pool.query("SELECT * FROM dataport.owner_codes")).rows, before.rows);
+    const employee = await f.principal(f.analyst);
+    assert.throws(() => requireOwner(employee, f.tenant), { code: "owner_required" });
+    await f.pool.query("UPDATE iam.tenant_memberships SET status='suspended' WHERE tenant_id=$1 AND member_id=$2", [f.tenant,f.owner]);
+    assert.deepEqual((await f.principal()).memberships, []);
+    await f.pool.query("UPDATE iam.tenant_memberships SET status='active' WHERE tenant_id=$1 AND member_id=$2", [f.tenant,f.owner]);
+    await f.pool.query("UPDATE tenants SET status='suspended' WHERE id=$1", [f.tenant]);
+    assert.deepEqual((await f.principal()).memberships, []);
+    await f.pool.query("UPDATE tenants SET status='active' WHERE id=$1", [f.tenant]);
+    await f.pool.query("UPDATE iam.members SET status='suspended' WHERE id=$1", [f.owner]);
+    assert.deepEqual((await f.principal()).memberships, []);
   },
 );
 
@@ -258,7 +237,7 @@ test(
   { skip: !connectionString },
   async (t) => {
     const f = await fixture(t),
-      owner = await f.verified(),
+      owner = await f.principal(),
       admin = await f.principal(f.adminMember);
     const role = await f.store.saveRole(owner, f.tenant, {
       name: "API 集成",
@@ -472,7 +451,7 @@ test(
   { skip: !connectionString },
   async (t) => {
     const f = await fixture(t),
-      owner = await f.verified(),
+      owner = await f.principal(),
       records = new Map();
     let commands = 0;
     const accounts = {
@@ -615,7 +594,7 @@ test(
   { skip: !connectionString },
   async (t) => {
     const f = await fixture(t),
-      owner = await f.verified(),
+      owner = await f.principal(),
       p = await f.principal(f.analyst),
       v = await f.principal(f.viewer);
     await f.store.createTicket(p, f.tenant, { content: "Technical issue" });
@@ -671,7 +650,7 @@ test(
 );
 
 test("audit and billing calendar filters use Beijing midnight independent of database timezone", { skip: !connectionString }, async (t) => {
-  const f = await fixture(t), owner = await f.verified();
+  const f = await fixture(t), owner = await f.principal();
   const dates = [
     "2026-10-17T15:59:59.999Z", // Just before Oct 18 in Beijing.
     "2026-10-17T16:00:00Z",
@@ -762,7 +741,7 @@ test(
   { skip: !connectionString },
   async (t) => {
     const f = await fixture(t),
-      owner = await f.verified(),
+      owner = await f.principal(),
       upstreamId = randomUUID(),
       batchId = randomUUID();
     const result = await f.store.query(
@@ -902,7 +881,7 @@ test(
   { skip: !connectionString },
   async (t) => {
     const f = await fixture(t),
-      owner = await f.verified(),
+      owner = await f.principal(),
       role = await f.store.saveRole(owner, f.tenant, {
         name: "Purchaser",
         permissions: ["subscriptions.buy"],
@@ -984,7 +963,7 @@ test(
 );
 
 test("DataPort support closes the processing loop with tenant/self isolation, CAS, replay and private receipts", {skip:!connectionString},async t=>{
- const f=await fixture(t),owner=await f.verified(),analyst=await f.principal(f.analyst),viewer=await f.principal(f.viewer),support=new DataportSupport(f.store),messages=new CustomerMessages(f.pool);
+ const f=await fixture(t),owner=await f.principal(),analyst=await f.principal(f.analyst),viewer=await f.principal(f.viewer),support=new DataportSupport(f.store),messages=new CustomerMessages(f.pool);
  const ticket=await f.store.createTicket(analyst,f.tenant,{content:"Fixture request",category:"technical",priority:"normal"});
  assert.equal((await support.detail(analyst,f.tenant,ticket.id)).status,"saved");
  await assert.rejects(support.detail(viewer,f.tenant,ticket.id),{status:404});
@@ -1008,7 +987,7 @@ test("DataPort support closes the processing loop with tenant/self isolation, CA
  assert.equal((await support.list(admin,new URLSearchParams({status:"closed"}))).total,1);
 });
 test("DataPort rename, member pagination, audit IP search and managed reset keep enterprise boundaries",{skip:!connectionString},async t=>{
- const f=await fixture(t),owner=await f.verified(),analyst=await f.principal(f.analyst);
+ const f=await fixture(t),owner=await f.principal(),analyst=await f.principal(f.analyst);
  await f.store.renameEnterprise(owner,f.tenant,{name:"Renamed enterprise"});
  await assert.rejects(f.store.renameEnterprise(analyst,f.tenant,{name:"Forbidden"}),{status:403});
  await assert.rejects(f.store.renameEnterprise(owner,f.other,{name:"Forbidden"}),{status:403});
@@ -1038,7 +1017,7 @@ test('replacement Key keeps its exact existing scopes and environment, with no a
 });
 
 test('local employee credentials, sessions and first password change never create MX bindings', {skip:!connectionString}, async t => {
-  const f=await fixture(t), owner=await f.verified(), local=f.store.localAccounts;
+  const f=await fixture(t), owner=await f.principal(), local=f.store.localAccounts;
   const body={operation:'create',commandId:randomUUID(),account:'LocalEmployee',displayName:'Local employee',roleId:'analyst'};
   const created=await f.store.memberCommand(owner,f.tenant,body,{execute(){throw Error('MX must not be called')}},'mx-insight-hub');
   const initial=await local.initial(owner,f.tenant,created.memberId);
@@ -1079,7 +1058,7 @@ test('local employee credentials, sessions and first password change never creat
 });
 
 test('legacy managed MX conversion is explicit, tenant-scoped and idempotent; existing MX members cannot be reset', {skip:!connectionString}, async t=>{
-  const f=await fixture(t),owner=await f.verified(),local=f.store.localAccounts;
+  const f=await fixture(t),owner=await f.principal(),local=f.store.localAccounts;
   const before=(await f.pool.query('SELECT * FROM iam.members WHERE id=$1',[f.viewer])).rows[0];
   await f.pool.query("INSERT INTO dataport.managed_accounts(tenant_id,member_id,user_id,account,managed) VALUES($1,$2,'original-mx-user','LegacyEmployee',true)",[f.tenant,f.viewer]);
   const command={commandId:randomUUID()};
@@ -1108,7 +1087,7 @@ test('legacy managed MX conversion is explicit, tenant-scoped and idempotent; ex
 });
 
 test('local account names do not merge identities; commands are atomic and password attempts are limited', {skip:!connectionString}, async t=>{
-  const f=await fixture(t),owner=await f.verified(),local=f.store.localAccounts;
+  const f=await fixture(t),owner=await f.principal(),local=f.store.localAccounts;
   const body={operation:'create',commandId:randomUUID(),account:'AtomicEmployee',displayName:'Atomic',roleId:'analyst'};
   f.pool.options.max=2; // A queued command must not need another pooled connection to recheck authority.
   const pair=await Promise.all([f.store.memberCommand(owner,f.tenant,body,{},''),f.store.memberCommand(owner,f.tenant,body,{},'')]);
@@ -1129,8 +1108,66 @@ async function listen(t,app) {
   t.after(()=>new Promise(r=>{server.close(r);server.closeAllConnections()}));
   return `http://127.0.0.1:${server.address().port}`;
 }
+
+test('enterprise history reads old Hub v1/v2 batches and standalone deliveries without copying or dispatching', {skip:!connectionString}, async t => {
+  const f=await fixture(t), viewer=await f.principal(f.viewer), consumer=randomUUID(), key=randomUUID();
+  await f.pool.query("INSERT INTO consumers(id,tenant_id,name,business_id) VALUES($1,$2,'Legacy fixture',$3)",[consumer,f.tenant,consumer]);
+  await f.pool.query("INSERT INTO api_keys(id,tenant_id,consumer_id,name,key_digest,key_prefix,last_four) VALUES($1,$2,$3,'Legacy fixture',$4,'fixture','0000')",[key,f.tenant,consumer,'a'.repeat(64)]);
+  const envelope=ip=>({contractVersion:'mx-insight-hub.ip-risk.v1',requestId:randomUUID(),data:{ip,status:'success',data:{risk_level:'高风险'}}});
+  const batch1=randomUUID(),batch2=randomUUID();
+  for(const [id,version,ips] of [[batch1,'v1',['198.51.100.1','198.51.100.1']],[batch2,'v2',['198.51.100.2']]]) {
+    await f.pool.query('INSERT INTO external_platform.ipsearch_batches(id,tenant_id,consumer_id,api_key_id,response) VALUES($1,$2,$3,$4,$5)',[id,f.tenant,consumer,key,{contractVersion:`mx-insight-hub.ip-risk.${version}`,data:ips.map(ip=>({ip,status:200,response:envelope(ip)}))}]);
+  }
+  const singles=[];
+  for(const [ip,status,response,platform,intent] of [
+    ['198.51.100.3','committed',envelope('198.51.100.3'),'ip_risk','standalone-success'],
+    ['198.51.100.4','unknown',null,'ip_risk','standalone-unknown'],
+    ['198.51.100.2','committed',envelope('198.51.100.2'),'ip_risk',`ip-batch-${batch2}-0`],
+    ['198.51.100.5','committed',envelope('198.51.100.5'),'facebook','unrelated-platform'],
+  ]) {
+    const id=randomUUID();singles.push(id);
+    await f.pool.query('INSERT INTO usage_requests(id,tenant_id,consumer_id,api_key_id,idempotency_key,fingerprint,platform,status,response_status,response_body,acquisition_request) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',[id,f.tenant,consumer,key,intent,'b'.repeat(64),platform,status,response?200:null,response,{body:{ip}}]);
+  }
+  await f.pool.query('INSERT INTO external_platform.ipsearch_batches(id,tenant_id,response) VALUES($1,$2,$3)',[randomUUID(),f.other,{contractVersion:'mx-insight-hub.ip-risk.v1',data:[{ip:'198.51.100.99',status:200,response:envelope('198.51.100.99')}]}]);
+  const before=(await f.pool.query('SELECT id,status,response_body FROM usage_requests ORDER BY id')).rows;
+  const history=await f.store.history(viewer,f.tenant,new URLSearchParams('pageSize=100'));
+  assert.equal(history.total,5);
+  assert.equal(history.items.filter(r=>r.ip==='198.51.100.1').length,2,'repeated inputs remain separate original deliveries');
+  assert.equal(history.items.filter(r=>r.ip==='198.51.100.2').length,1,'batch child is not duplicated');
+  assert.equal(history.items.find(r=>r.ip==='198.51.100.3').payload.response.data.data.risk_level,'高风险');
+  assert.equal(history.items.find(r=>r.ip==='198.51.100.4').payload.error.code,'query_outcome_unknown');
+  assert.ok(history.items.every(r=>r.ip!=='198.51.100.99'&&r.ip!=='198.51.100.5'));
+  const filtered=await f.store.history(viewer,f.tenant,new URLSearchParams('q=198.51.100.3'));
+  assert.equal(filtered.total,1);assert.equal(filtered.items[0].id,singles[0]);
+  await assert.rejects(f.store.history(viewer,f.other,new URLSearchParams()),{status:403});
+  await assert.rejects(f.store.history(viewer,f.tenant,new URLSearchParams('export=1')),{status:403});
+  assert.deepEqual((await f.pool.query('SELECT id,status,response_body FROM usage_requests ORDER BY id')).rows,before);
+  assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM dataport.queries')).rows[0].n,0);
+});
+
+test('history projects the exact original batch completion over a stale uncertain query without rewriting its record', {skip:!connectionString}, async t => {
+  const f=await fixture(t), p=await f.principal(f.analyst), ip='223.160.165.241';
+  const record=await f.store.query(p,f.tenant,{ip},randomUUID(),async()=>{throw Error('fixture transport interruption')});
+  assert.equal(record.error.code,'query_outcome_unknown');
+  const before=(await f.pool.query('SELECT * FROM dataport.queries WHERE id=$1',[record.id])).rows;
+  const response={contractVersion:'mx-insight-hub.ip-risk.subscription.v1',data:[{ip,status:200,response:{requestId:randomUUID(),data:{ip,status:'success',data:{risk_level:'高风险'}}}}]};
+  await f.pool.query('INSERT INTO external_platform.ipsearch_batches(id,tenant_id,idempotency_key,response) VALUES($1,$2,$3,$4)',[randomUUID(),f.other,`dataport-${record.id}`,response]);
+  let history=await f.store.history(p,f.tenant,new URLSearchParams());
+  assert.equal(history.items[0].payload.error.code,'query_outcome_unknown','other tenant evidence cannot settle this record');
+  await f.pool.query('INSERT INTO external_platform.ipsearch_batches(id,tenant_id,idempotency_key,response) VALUES($1,$2,$3,$4)',[randomUUID(),f.tenant,`dataport-${record.id}`,response]);
+  history=await f.store.history(p,f.tenant,new URLSearchParams());
+  assert.equal(history.total,1);assert.equal(history.items[0].status,200);
+  assert.equal(history.items[0].payload.response.data.status,'success');
+  assert.equal(history.items[0].payload.response.data.data.risk_level,'高风险');
+  assert.equal(history.items[0].payload.error,undefined);
+  assert.deepEqual((await f.pool.query('SELECT * FROM dataport.queries WHERE id=$1',[record.id])).rows,before);
+  const settled=await f.store.query(p,f.tenant,{ip:'198.51.100.20'},randomUUID(),async()=>({status:200,body:{data:[{ip:'198.51.100.20',status:200,response:{data:{status:'success',data:{risk_level:'低风险'}}}}]}}));
+  await f.pool.query('INSERT INTO external_platform.ipsearch_batches(id,tenant_id,idempotency_key,response) VALUES($1,$2,$3,$4)',[randomUUID(),f.tenant,`dataport-${settled.id}`,{contractVersion:'mx-insight-hub.ip-risk.subscription.v1',data:[{ip:'198.51.100.20',status:409,error:{code:'query_pending'}}]}]);
+  const stable=await f.store.history(p,f.tenant,new URLSearchParams('q=198.51.100.20'));
+  assert.equal(stable.items[0].payload.response.data.status,'success','a less certain batch cannot downgrade a settled original result');
+});
 test('real BFF + Portal + local PG login enforces gateway, origin, CSRF, password gate and public-listener isolation without Auth', {skip:!connectionString}, async t=>{
-  const f=await fixture(t),owner=await f.verified(),pepper='local-fixture-retained-pepper-32-characters';
+  const f=await fixture(t),owner=await f.principal(),pepper='local-fixture-retained-pepper-32-characters';
   const child=await f.store.memberCommand(owner,f.tenant,{operation:'create',commandId:randomUUID(),account:'HttpEmployee',displayName:'HTTP',roleId:'analyst'},{},'');
   const initial=await f.store.initialPassword(owner,f.tenant,child.memberId,{});
   const root=await mkdtemp(join(tmpdir(),'dataport-local-http-'));t.after(()=>rm(root,{recursive:true,force:true}));
@@ -1174,4 +1211,35 @@ test('real BFF + Portal + local PG login enforces gateway, origin, CSRF, passwor
   assert.equal((await post('/auth/sso/logout',{}, {cookie:nextCookie,'x-mx-csrf':identity2.csrf})).status,200);
   assert.equal((await fetch(bff+history,{headers:{cookie:nextCookie}})).status,401);
   assert.equal(ssoCalls,0);assert.ok(calls.every(c=>c.url.startsWith(hub)));assert.ok(calls.every(c=>!c.headers.authorization));
+});
+
+test("verified MX Portal owner receives usable permissions without a code; retired endpoints cannot write", {skip:!connectionString}, async t => {
+  const f = await fixture(t);
+  const store = new MemoryStore(); store.pool = f.pool;
+  const service = new HubService({store, adapter:{}, apiKeyPepper:"local-fixture-retained-pepper-32-characters"});
+  // Stand in for the existing MX verifier; real tenant/role enrichment and routes run below.
+  const portal = { resolve: async request => {
+    assert.equal(request.headers["x-mx-harbor-gateway"], "fixture-verified-gateway");
+    return f.principal();
+  } };
+  const hub = await listen(t, createApp({store,service,adapter:{},listenerMode:"admin",harborPortal:portal,adminToken:"fixture-admin-token"}));
+  const headers = {"x-mx-harbor-gateway":"fixture-verified-gateway"};
+  const session = await fetch(hub+"/internal/v1/portal/session", {headers});
+  assert.equal(session.status,200);
+  const owner = (await session.json()).data;
+  assert.equal(owner.memberships[0].dataport.ownerChallengeRequired,false);
+  assert.ok(owner.memberships[0].dataport.permissions.includes("members.read"));
+  for (const resource of ["members","roles","history"]) {
+    assert.equal((await fetch(hub+`/internal/v1/portal/enterprises/${f.tenant}/${resource}`, {headers})).status,200);
+  }
+  assert.equal((await fetch(hub+`/internal/v1/portal/enterprises/${f.other}/members`, {headers})).status,403);
+  for (const [path, auth] of [
+    [`/internal/v1/portal/enterprises/${f.tenant}/challenge`, headers],
+    ["/internal/v1/admin/dataport/owner-code", {"x-mx-insight-admin-token":"fixture-admin-token"}],
+  ]) {
+    const response = await fetch(hub+path, {method:"POST",headers:{...auth,"content-type":"application/json"},body:JSON.stringify({tenantId:f.tenant,memberId:f.owner,code:"retired-fixture-code"})});
+    assert.equal(response.status,404);
+  }
+  assert.equal((await f.pool.query("SELECT count(*)::int AS n FROM dataport.owner_codes")).rows[0].n,0);
+  assert.equal((await f.pool.query("SELECT count(*)::int AS n FROM dataport.owner_sessions")).rows[0].n,0);
 });

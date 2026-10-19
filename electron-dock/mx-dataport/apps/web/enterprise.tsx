@@ -105,67 +105,6 @@ const roleNames: Record<string, string> = {
   billing: "财务",
   viewer: "只读成员",
 };
-export function OwnerChallenge({
-  tenant,
-  csrf,
-  onVerified,
-}: {
-  tenant: string;
-  csrf: string;
-  onVerified: () => void;
-}) {
-  const [code, setCode] = useState(""),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
-  return (
-    <Card className="dp-owner-challenge">
-      <CardHeader>
-        <ShieldCheck size={30} />
-        <CardTitle>验证企业超管身份</CardTitle>
-        <p>每次新登录后，请输入平台管理员提供的专属邀请码。</p>
-      </CardHeader>
-      <CardContent>
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            setBusy(true);
-            setError("");
-            try {
-              await request(enterpriseUrl(tenant, "challenge"), {
-                method: "POST",
-                headers: { "x-mx-csrf": csrf },
-                body: JSON.stringify({ code }),
-              });
-              setCode("");
-              onVerified();
-            } catch (e) {
-              setError((e as Error).message);
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          <label htmlFor="owner-code">专属邀请码</label>
-          <Input
-            id="owner-code"
-            type="password"
-            autoComplete="off"
-            required
-            maxLength={128}
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
-          />
-          {error && (
-            <p role="alert" className="harbor-error">
-              {error}
-            </p>
-          )}
-          <Button disabled={busy}>{busy ? "正在验证…" : "验证并进入"}</Button>
-        </form>
-      </CardContent>
-    </Card>
-  );
-}
 export function EnterpriseMembers(props: Props) {
   const [page, setPage] = useState(1),
     [memberSearch, setMemberSearch] = useState("");

@@ -49,14 +49,13 @@ import { SidebarAccountMenu } from "./sidebar-account-menu";
 import { request } from "./api";
 import {
   EnterpriseMembers,
-  OwnerChallenge,
   Support,
   Audit,
   JoinEnterprise,
 } from "./enterprise";
 import { ApiKeys } from "./keys";
 import { LegalDocument, LegalFooter } from "./legal";
-import { canOpenPage, membershipFor } from "./permissions";
+import { canOpenPage } from "./permissions";
 import { AccountSecurity } from "./account-security";
 import { Commerce } from "./commerce";
 import { IpQuery } from "./ip-query";
@@ -632,13 +631,6 @@ function App() {
                 go("intelligence");
                 retrySession();
               }}
-            />
-          ) : membershipFor(session, tenant)?.dataport
-              ?.ownerChallengeRequired ? (
-            <OwnerChallenge
-              tenant={tenant}
-              csrf={csrf}
-              onVerified={retrySession}
             />
           ) : session?.mustChangePassword ? (
             <AccountSecurity />

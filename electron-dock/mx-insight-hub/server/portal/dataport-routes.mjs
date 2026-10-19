@@ -22,7 +22,6 @@ const endpoints = {
     "query-access",
   ],
   POST: [
-    "challenge",
     "profile",
     "roles",
     "members",
@@ -106,7 +105,6 @@ export async function dataportRoute({
     const eligible = [],
       billing = [];
     for (const m of principal.memberships) {
-      if (m.dataport?.ownerChallengeRequired) continue;
       const permissions = m.dataport?.permissions || legacyPermissions(m);
       if (permissions.includes("billing.read")) billing.push(m.tenantId);
       if (
@@ -155,14 +153,6 @@ export async function dataportRoute({
     );
   }
   const [, tenantId, resource] = /^\/enterprises\/([^/]+)\/(.+)$/.exec(path);
-  if (resource === "challenge")
-    return reply(
-      await dataport.ownerChallenge(
-        principal,
-        tenantId,
-        (await readJson(request, 1024)).code,
-      ),
-    );
   requireDataportAccess(principal, tenantId);
   if (resource === "query-access") {
     requireDataportAccess(principal, tenantId, "usage.read");

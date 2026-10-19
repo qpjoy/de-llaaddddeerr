@@ -8,7 +8,6 @@ export const hasPermission = (
   const member = membershipFor(session, tenant);
   return (
     !!member &&
-    !member.dataport?.ownerChallengeRequired &&
     member.dataport?.permissions?.includes(permission) === true
   );
 };
@@ -27,8 +26,6 @@ export const pagePermission: Record<string, string> = {
   support: "support.read.self",
 };
 export function canOpenPage(session: any, tenant: string, page: string) {
-  if (membershipFor(session, tenant)?.dataport?.ownerChallengeRequired)
-    return false;
   if (page === "intelligence")
     return (
       hasPermission(session, tenant, "query.execute") ||

@@ -372,6 +372,7 @@ export function IpQuery({
                                   setResult({
                                     ...i.payload,
                                     id: i.id,
+                                    createdAt: i.createdAt,
                                     historical: true,
                                   });
                                   setSearch((s) => ({

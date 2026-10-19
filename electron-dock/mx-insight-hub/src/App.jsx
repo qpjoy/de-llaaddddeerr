@@ -7,7 +7,7 @@ import { productCategory, productNavigationOrder } from '../shared/product-navig
 import { ProvisioningPage } from './pages-provisioning.jsx'
 import { PRODUCT_ACCESS, productAllowed } from '../shared/product-access.mjs'
 import { SocialContentOverview } from './product-workbench.jsx'
-import { DataportSupportPage, DataportOwnersPage } from './dataport-support.jsx'
+import { DataportSupportPage } from './dataport-support.jsx'
 import { TenantCatalogPage, TenantProductPage } from './tenant-products.jsx'
 import { TenantPresentation } from './components.jsx'
 import { TenantInvitationPage, TenantTeamPage } from './tenant-invitations.jsx'
@@ -431,7 +431,6 @@ const ROUTES = [
   { path: '/usage', label: '使用记录', description: '计量与对账证据', icon: ChartLine, group: '可观测性', component: UsagePage, capability: 'usage.read' },
   { path: '/diagnostics', label: '诊断中心', description: '请求证据、限制与恢复', icon: MagnifyingGlass, group: '可观测性', component: DiagnosticsPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/notifications', label: '通知中心', description: '告警分类、处理与追溯', icon: Pulse, group: '可观测性', component: NotificationsPage, platformAdmin: true, adminTokenOnly: true },
-  { path: '/dataport/owners', label: '数港超管邀请码', description: '配置已有企业超管的专属邀请码', icon: Key, group: '平台管理', component: DataportOwnersPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/dataport/support', label: '数港服务工单', description: '企业工单、客服回复与状态', icon: Users, group: '平台管理', component: DataportSupportPage, platformAdmin: true, adminTokenOnly: true },
   { path: '/settings/payments', label: '支付接入', description: '支付中心连接与正式接入', icon: Coins, group: '平台管理', navParent: SYSTEM_SETTINGS_NAV_KEY, component: PaymentConnectionSettingsPage, platformAdmin: true },
   { path: '/settings/peripherals', label: '外设', description: '手机接入、任务与安全调度', icon: DeviceMobile, group: '平台管理', navParent: SYSTEM_SETTINGS_NAV_KEY, component: PeripheralSettingsPage, platformAdmin: true, adminTokenOnly: true },

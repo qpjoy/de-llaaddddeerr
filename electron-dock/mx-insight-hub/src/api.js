@@ -388,7 +388,6 @@ export async function signInWithLauncher({ username, password }) {
 }
 
 export const adminApi = {
-  dataportOwnerCode: (token,body) => request(token, `${ADMIN_ROOT}/dataport/owner-code`, {method:"POST",body}),
   dataportTickets: (token,options) => request(token, `${ADMIN_ROOT}/dataport/tickets`, options),
   dataportTicket: (token,tenant,id,options) => request(token, `${ADMIN_ROOT}/dataport/tenants/${encodeURIComponent(tenant)}/tickets/${encodeURIComponent(id)}`, options),
   peripherals: (token, options) => request(token, `${ADMIN_ROOT}/peripherals`, options),

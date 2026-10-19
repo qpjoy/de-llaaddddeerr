@@ -127,7 +127,7 @@ export function QueryResult({
             <h3>{states[state]}</h3>
             <p>
               {state === "unknown"
-                ? "本次查询仍待确认，请保留原查询，在最近查询中查看后续结果。"
+                ? "尚未取得可确认的查询回执，暂时无法判断是否完成。请保留查询记录编号，稍后刷新最近查询核对，避免重复发起新查询。"
                 : "本次未取得可用画像，请查看查询详情。"}
             </p>
           </div>
@@ -293,9 +293,10 @@ export function QueryResult({
         )}
         <details className="harbor-record-details parity-record-details">
           <summary>查询详情</summary>
-          <p>查询时间：{dateTime(result.response?.meta?.capturedAt)}</p>
+          <p>查询时间：{dateTime(result.createdAt || result.response?.meta?.capturedAt)}</p>
+          {result.id && <p>查询记录编号：{result.id}</p>}
           <p>
-            请求编号：{result.response?.requestId || result.batchId || "未返回"}
+            请求编号：{result.response?.requestId || result.requestId || result.batchId || "未返回"}
           </p>
           {issue && (
             <p>
