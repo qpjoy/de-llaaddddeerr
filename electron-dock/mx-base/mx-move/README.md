@@ -39,6 +39,7 @@ bash scripts/manage.sh etcd migrate --target-root /var/lib/mx-move/etcd-data
 - kubeadm 静态 Pod 配置位于 `/etc/kubernetes/manifests/etcd.yaml`，管理员配置为 `/etc/kubernetes/admin.conf`。
 - etcd 数据和 WAL 均在 `/var/lib/etcd` 内；使用 kubeadm 的本机 TLS endpoint 与 `/etc/kubernetes/pki/etcd/` 证书。外置 WAL、自定义配置文件、多 member 拓扑会被拒绝。
 - `/etc/fstab` 恰有一条 `/var/lib/etcd` 的读写 bind mount，源目录与当前活动挂载一致；该条目不能包含 `nofail`、`noauto` 或 `ro`。
+- `var-lib-etcd.mount` 必须来自 `/run/systemd/generator/`、`SourcePath=/etc/fstab`，无原生 mount unit 或 drop-in 覆盖，且配置已被 systemd 加载。工具只管理 fstab，不接管其他挂载配置。
 - 源、目标是可验证 UUID 的本地 XFS / ext4 文件系统，物理父盘彼此独立。数据目录不能含符号链接、嵌套挂载或特殊文件；数据目录及其父目录须由 root 持有，不能被组或其他用户写入。唯一的所有权例外是经核实的共享文件系统挂载根，见下文 `/data` 说明；状态、备份和配置路径不使用此例外。
 
 目标主机需要 Bash、Python 3.6+、Node.js，以及 `kubectl`、`crictl`、`rsync`、`findmnt`、`lsblk`、`mount`、`umount`、`mountpoint`、外部 `test` 命令、`sync` 和 `systemctl`。Node.js 需能运行仓库现有的 Launcher 恢复脚本；保留 `mx-base` 与 `mx-launcher` 的相对目录关系，不要只复制 `mx-move` 一个目录到服务器。
@@ -50,6 +51,19 @@ bash scripts/manage.sh etcd migrate --target-root /var/lib/mx-move/etcd-data
 若旧版 `plan` 只报 `crictl 返回失败（输出已隐藏）`，先同步更新模块。旧版错误地调用了 `crictl version -o json`；[官方 version 命令](https://github.com/kubernetes-sigs/cri-tools/blob/v1.31.1/cmd/crictl/version.go)只输出文本，不支持该参数。修复版解析文本中的运行时名称，`ps` / `inspect` 仍使用它们支持的 JSON 输出，并将 runtime/image 两个 endpoint 都固定为 kubelet 实际使用的 socket。无需因此重启 containerd 或 etcd。
 
 新版 CRI 调用失败时会显示调用阶段、退出码、socket、错误类别及一条只读复查命令，避免把容器环境变量和原始 `inspect` 内容显示到终端。`plan` 在此失败尚未进入备份、停机或挂载切换阶段；更新后重新执行 `bash scripts/manage.sh etcd plan`。
+
+### 持久挂载核验
+
+`plan` 会只读核验挂载配置；迁移还会在暂停 etcd 前、更新 fstab 并 `daemon-reload` 后，以及恢复 manifest 前再次核验。生成文件中的源目录必须与 fstab 和本事务选择一致。发现覆盖配置、尚未重新加载或生成结果仍指向旧目录时，工具停止，不会删除原生 unit/drop-in，也不会为通过检查自动重启服务。
+
+只读复查命令：
+
+```bash
+systemctl show var-lib-etcd.mount -p LoadState -p FragmentPath -p SourcePath -p DropInPaths -p NeedDaemonReload
+systemctl cat var-lib-etcd.mount
+```
+
+2026-10-19 的现场配置为 fstab 生成、无 drop-in，`[Mount]` 中 `What=/data/mx-runtime/etcd`、`Where=/var/lib/etcd`、`Options=bind`。活动挂载的 `systemctl show What` 返回 `/dev/nvme0n1p1`，不能据此判断下次开机使用哪个目录。工具读取经过来源核验的生成文件；[systemd 说明](https://www.freedesktop.org/software/systemd/man/latest/systemd.mount.html#fstab)中 `/etc` 下原生 mount unit 可以覆盖 fstab，不能只验证 fstab 文本。
 
 ### 共享 `/data` 的所有权
 
@@ -144,6 +158,10 @@ bash scripts/manage.sh etcd resume
 空间检查采用保守预算：迁移到根盘时，按当前 etcd 目录大小的 3 倍加 1GiB 估算本轮副本与备份需要，并要求额外保留 **20GiB 与文件系统容量 10% 中较大者**。回滚分别检查原盘和存放快照的根盘；复制前还会复查可用空间。以实际 `plan` 检查为准，空出 300G 不代表所有布局都满足条件。
 
 空间不足时，报错会显示检查路径、总容量、当前可用、复制/备份预算、安全预留、合计需要的可用空间，以及向上取整的释放缺口。2026-10-19 的实测根分区为 1023.50 GiB、可用 95.72 GiB，etcd 约 382 MiB：本轮预算约 2.12 GiB，加上 102.35 GiB 安全预留，至少需约 104.47 GiB 可用，缺口约 8.75 GiB。释放空间后重新执行 `plan`，以当时实际值为准；工具不会自动清理或降低预留线。`/home` 是独立文件系统，清理 `/home` 不会增加 `/` 的可用空间。
+
+同日补充的现场采样：`/` 使用率 91%、可用 97G，`/data` 使用率 30%，`/var/lib/etcd` 约 383M。etcd 在 3 秒进程 I/O 采样中约写入 15 KB/s，多组 PostgreSQL 和 Celery 写入更明显；该短采样不能将进程直接归属到具体业务或物理盘。
+
+两块 NVMe 的 SMART 均报告 `critical_warning=0`、`media_errors=0`、`num_err_log_entries=0`。数据盘 nvme0 温度 60°C、寿命消耗估计 2%、历史警告温度时间 5 分钟；系统盘 nvme1 温度 44°C、寿命消耗估计 30%、历史警告温度时间为 0。[NVMe SMART 字段定义](https://github.com/linux-nvme/libnvme/blob/master/doc/rst/types.rst)中的 `percentage_used` 是厂商估算的耐久度消耗，不是文件系统使用率或精确的剩余寿命。此次 SMART 输出未报告介质错误，不能据此否定此前内核记录的 nvme0 I/O timeout，也不能仅凭 60°C 判定降速原因。迁移前仍须通过最新 `plan` 与根盘空间预检。
 
 etcd 不存放 Docker 镜像、PostgreSQL 表或 ES 索引，其增长主要来自 Kubernetes 对象和相关历史数据；这些业务数据不会随本次迁移进入 1T 盘。etcd 数据、事务快照和保留目录仍会增长，反复迁移也会累积副本。工具没有自动清理、压缩或碎片整理行为；后续稳定后再单独规划清理，当前活动目录必须保留。
 

@@ -372,6 +372,10 @@ class FakeHost:
         move.require(self.active is not None and os.path.samefile(str(path), str(self.active)),
                      'offline mount identity differs')
 
+    def persistent_mount(self, source):
+        _, fields = move.parse_fstab(move.FSTAB.read_bytes())
+        move.require(fields[0] == str(source), 'offline persistent mount differs')
+
     def stopped(self):
         return not move.MANIFEST.exists()
 
@@ -1071,6 +1075,57 @@ class TransactionTests(unittest.TestCase):
         with self.assertRaisesRegex(move.Refuse, '其他进程修改'):
             self.transaction.fstab_to(True)
         self.assertEqual(self.fstab.read_bytes(), modified)
+
+    def test_mount_override_after_prepare_is_rejected_before_stopping_etcd(self):
+        self.transaction.prepare(self.facts())
+        before = len(self.commands)
+        with mock.patch.object(self.host, 'persistent_mount', side_effect=move.Refuse('mount override')):
+            with self.assertRaisesRegex(move.Refuse, 'mount override'):
+                self.transaction.switch()
+        self.assertTrue(self.manifest.exists())
+        self.assertEqual(self.host.active, self.origin)
+        self.assertEqual(self.fstab.read_bytes(), self.original_fstab)
+        self.assertEqual(len(self.commands), before)
+
+    def test_failed_generated_mount_update_restores_source_before_allowing_writes(self):
+        real_check = self.host.persistent_mount
+
+        def reject_target(source):
+            real_check(source)
+            if str(source) != str(self.origin):
+                raise move.Refuse('generator retained old source')
+
+        with mock.patch.object(self.host, 'persistent_mount', side_effect=reject_target):
+            with self.assertRaisesRegex(move.Refuse, 'generator retained old source'):
+                self.transaction.execute(self.facts())
+        self.assertEqual(self.transaction.j['phase'], 'aborted')
+        self.assertFalse(self.transaction.j['may_write'])
+        self.assertEqual(self.host.active, self.origin)
+        self.assertTrue(self.manifest.exists())
+        self.assertEqual(self.fstab.read_bytes(), self.original_fstab)
+        self.assertFalse(any(command[0] == 'umount' for command in self.commands))
+
+    def test_mount_check_failure_after_write_boundary_never_returns_to_old_data(self):
+        real_check = self.host.persistent_mount
+
+        def reject_release(source):
+            real_check(source)
+            if self.transaction.j['may_write']:
+                raise move.Refuse('new mount override before manifest release')
+
+        with mock.patch.object(self.host, 'persistent_mount', side_effect=reject_release):
+            with self.assertRaisesRegex(move.Refuse, 'new mount override'):
+                self.transaction.execute(self.facts())
+        target = Path(self.transaction.j['target'])
+        self.assertEqual(self.host.active, target)
+        self.assertTrue(self.transaction.j['may_write'])
+        self.assertFalse(self.manifest.exists())
+        write_data(target, 25, ['latest-target-state'])
+        self.reload().recover()
+        self.assertEqual(self.host.active, target)
+        self.assertEqual(read_data(target)['revision'], 25)
+        self.assertEqual(read_data(self.origin)['revision'], 10)
+        self.assertTrue(self.manifest.exists())
 
 
 if __name__ == '__main__':

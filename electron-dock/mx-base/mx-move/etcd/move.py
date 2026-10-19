@@ -29,6 +29,8 @@ STATE = Path('/var/lib/mx-move')
 DATA = Path('/var/lib/etcd')
 MANIFEST = Path('/etc/kubernetes/manifests/etcd.yaml')
 FSTAB = Path('/etc/fstab')
+MOUNT_UNIT = 'var-lib-etcd.mount'
+GENERATED_MOUNT = Path('/run/systemd/generator') / MOUNT_UNIT
 KUBECONFIG = '/etc/kubernetes/admin.conf'
 HELPER = Path(__file__).with_name('launcher-identity.mjs')
 TLS = ['--endpoints=https://127.0.0.1:2379',
@@ -201,6 +203,32 @@ def change_fstab(raw, source):
     return ''.join(lines).encode()
 
 
+def validate_mount_unit(raw, source):
+    # Only the simple fstab-generated unit is supported. Do not interpret an
+    # administrator's native unit or silently discard its overrides.
+    expected = {('Unit', 'SourcePath'): str(FSTAB),
+                ('Mount', 'What'): str(source), ('Mount', 'Where'): str(DATA)}
+    values, section = {}, None
+    for line in raw.decode().splitlines():
+        line = line.strip()
+        if not line or line.startswith(('#', ';')):
+            continue
+        require(not line.endswith('\\'), 'etcd 生成挂载配置含续行，无法安全核验')
+        if line.startswith('[') and line.endswith(']'):
+            section = line[1:-1]
+            continue
+        key, separator, value = line.partition('=')
+        field = (section, key.strip())
+        if separator and (field in expected or field == ('Mount', 'Options')):
+            require(field not in values, 'etcd 生成挂载配置含重复字段')
+            values[field] = value.strip()
+    require(all(values.get(key) == value for key, value in expected.items()),
+            'etcd 生成挂载配置与 fstab/预期源目录不一致；请检查 systemctl cat var-lib-etcd.mount')
+    options = set(values.get(('Mount', 'Options'), '').split(','))
+    require('bind' in options and not options & {'nofail', 'noauto', 'ro'},
+            'etcd 生成挂载配置不是启动必需的读写 bind mount')
+
+
 def physical_disks(tree, major_minor):
     found = set()
 
@@ -336,6 +364,32 @@ class Host:
         m = self.mount(DATA)
         require(m['target'] == str(DATA) and os.path.samefile(str(source), str(DATA)), '活动 etcd bind mount 与记录不一致')
 
+    def persistent_mount(self, source):
+        _, fields = parse_fstab(FSTAB.read_bytes())
+        require(fields[0] == str(source), 'fstab 的 etcd 源目录与预期不一致')
+        properties = ['LoadState', 'FragmentPath', 'SourcePath', 'DropInPaths', 'NeedDaemonReload']
+        command = ['systemctl', 'show', '--no-pager']
+        for name in properties:
+            command.extend(['--property', name])
+        command.append(MOUNT_UNIT)
+        raw = run(command, 30)
+        values = {}
+        for line in raw.decode().splitlines():
+            name, separator, value = line.partition('=')
+            if separator and name in properties:
+                require(name not in values, 'systemd 挂载检查返回重复字段')
+                values[name] = value
+        require(set(values) == set(properties), 'systemd 挂载检查缺少字段；请检查 systemctl show var-lib-etcd.mount')
+        require(values['LoadState'] == 'loaded' and values['FragmentPath'] == str(GENERATED_MOUNT) and
+                values['SourcePath'] == str(FSTAB) and not values['DropInPaths'],
+                'etcd 挂载必须仅由 /etc/fstab 生成，不能有原生 mount unit 或 drop-in 覆盖；请检查 systemctl cat var-lib-etcd.mount')
+        require(values['NeedDaemonReload'] == 'no',
+                'etcd 挂载配置尚未被 systemd 重新加载；请核查配置后执行 daemon-reload，再运行 plan')
+        # For an active bind, systemctl show What/Options reflect the live block
+        # device, not the next-boot source. Read the verified fragment instead.
+        safe_path(GENERATED_MOUNT)
+        validate_mount_unit(GENERATED_MOUNT.read_bytes(), source)
+
     @contextlib.contextmanager
     def storage(self, path, expected=None):
         # /data can belong to its existing storage administrator. This exception
@@ -469,6 +523,9 @@ let input=''; process.stdin.on('data', c=>input+=c); process.stdin.on('end',asyn
             require(shutil.which(name), '缺少依赖: ' + name)
         for path in [MANIFEST, FSTAB, Path(KUBECONFIG), DATA, STATE.parent]:
             safe_path(path)
+        _, fields = parse_fstab(FSTAB.read_bytes())
+        source = Path(fields[0])
+        self.persistent_mount(source)
         self.runtime()
         pod = json.loads(self.kubectl('create', '--dry-run=client', '--validate=false', '-f', str(MANIFEST), '-o', 'json'))
         validate_manifest(pod)
@@ -481,8 +538,6 @@ let input=''; process.stdin.on('data', c=>input+=c); process.stdin.on('end',asyn
         node = nodes[0]
         require(any(c['type'] == 'Ready' and c['status'] == 'True' for c in node['status']['conditions']), '节点尚未 Ready')
         cluster_uid = json.loads(self.kubectl('get', 'namespace', 'kube-system', '-o', 'json'))['metadata']['uid']
-        _, fields = parse_fstab(FSTAB.read_bytes())
-        source = Path(fields[0])
         with self.storage(source) as handle:
             self.same_mount(handle.proc_path)
             source_identity = handle.identity
@@ -745,6 +800,7 @@ class Move:
     def manifest_in(self):
         side = 'target' if self.j['may_write'] else 'source'
         self.host.active_identity(self.j[side + '_identity'], self.j[side + '_disk'])
+        self.host.persistent_mount(self.j[side])
         self.check_boot_guard()
         held = Path(self.j['held'])
         backup = Path(self.j['run']) / 'etcd.yaml'
@@ -767,6 +823,7 @@ class Move:
             atomic(FSTAB, desired, reference=FSTAB)
         # Update generated mount units; does not restart kubelet or any runtime.
         run(['systemctl', 'daemon-reload'])
+        self.host.persistent_mount(self.j['target'] if after else self.j['source'])
 
     def mount_to(self, path, expected_disk):
         require(self.host.stopped() and not MANIFEST.exists(), 'etcd 未证实停止，禁止切换挂载')
@@ -834,6 +891,7 @@ class Move:
     def switch(self):
         # Snapshot preparation can take time. Recheck the selected source before
         # removing the manifest, so a changed shared path need not interrupt etcd.
+        self.host.persistent_mount(self.j['source'])
         with self.host.storage(self.j['source'], self.j['source_identity']):
             self.host.active_identity(self.j['source_identity'], self.j['source_disk'])
         self.manifest_out()

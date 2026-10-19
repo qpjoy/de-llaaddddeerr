@@ -32,6 +32,7 @@ class BootInstallTests(unittest.TestCase):
         self.transaction = move.Move(self.host, self.state)
         self.transaction.j = {
             'run': str(self.run_dir), 'guard_python': str(self.python), 'may_write': True,
+            'source': '/old/etcd', 'target': '/new/etcd',
             'source_identity': {'device': 1, 'inode': 2}, 'source_disk': {'uuid': 'source'},
             'target_identity': {'device': 3, 'inode': 4}, 'target_disk': {'uuid': 'target'}}
 
