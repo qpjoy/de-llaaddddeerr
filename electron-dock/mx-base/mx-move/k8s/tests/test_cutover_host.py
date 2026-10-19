@@ -10,6 +10,7 @@ import sys
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+from test_docker_compare import snapshot as docker_snapshot
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 try:
@@ -262,12 +263,12 @@ class MainDispatchTests(unittest.TestCase):
             finally:
                 lock['held'] = False
         def read_private(file):
-            if action != 'status':
+            if action not in ('status', 'docker-check'):
                 self.assertTrue(lock['held'], 'CURRENT read before acquiring migration lock')
             self.assertEqual(file, cutover.CURRENT)
             return {'transaction': TRANSACTION}
         def read(path_value):
-            if action != 'status':
+            if action not in ('status', 'docker-check'):
                 self.assertTrue(lock['held'], 'journal read before acquiring migration lock')
             self.assertEqual(path_value, path)
             return cutover.raw_json(data)
@@ -306,6 +307,40 @@ class MainDispatchTests(unittest.TestCase):
             resume.assert_not_called()
             host.verify.assert_not_called()
             host.run.assert_not_called()
+
+    def test_docker_check_reads_retained_baseline_without_service_or_journal_writes(self):
+        for changed in (False, True):
+            with self.subTest(changed=changed), ExitStack() as stack:
+                host, data, lock = self.fixture(stack, 'docker-check')
+                data.update(phase='aborted', may_write=False, docker_before=docker_snapshot())
+                current = docker_snapshot()
+                for mounts in current['mounts'].values():
+                    mounts.reverse()
+                if changed:
+                    current['info']['root'] = '/private-new-docker-root'
+                host.docker_snapshot.return_value = current
+                persist = stack.enter_context(mock.patch.object(cutover.Move, 'persist'))
+                resume = stack.enter_context(mock.patch.object(cutover.Move, 'resume'))
+                output = io.StringIO()
+                stack.enter_context(contextlib.redirect_stdout(output))
+                if changed:
+                    with self.assertRaises(SystemExit) as caught:
+                        cutover.main(['docker-check'])
+                    self.assertEqual(caught.exception.code, 2)
+                else:
+                    cutover.main(['docker-check'])
+                result = json.loads(output.getvalue())
+                self.assertEqual(result['equivalent'], not changed)
+                self.assertEqual(result['transaction'], data['transaction'])
+                self.assertFalse(result['service_changes'])
+                self.assertFalse(result['historical_failure_reconstructed'])
+                self.assertNotIn('/private-new-docker-root', output.getvalue())
+                host.docker_snapshot.assert_called_once_with()
+                persist.assert_not_called()
+                resume.assert_not_called()
+                host.verify.assert_not_called()
+                host.run.assert_not_called()
+                self.assertFalse(lock['held'])
 
     def test_new_journal_is_durable_before_publishing_current_pointer(self):
         data = journal()
@@ -452,13 +487,16 @@ class HostVerificationTests(unittest.TestCase):
         host.etcd.etcd_status.return_value = {'cluster_id': 'same-cluster', 'member_id': 'same-member', 'revision': 101}
         host.etcd.launcher_check.return_value = {'credentials_digest': 'unchanged'}
         host.runtime.tasks.side_effect = lambda address, namespace='k8s.io': ['docker-task'] if namespace == 'moby' else []
-        host.docker_snapshot = mock.Mock(return_value={'complete': True, 'mounts': {}})
+        current_docker = docker_snapshot()
+        for mounts in current_docker['mounts'].values():
+            mounts.reverse()
+        host.docker_snapshot = mock.Mock(return_value=current_docker)
         data = journal()
         data['cluster']['objects'] = {'nodes': [{'metadata': {}}]}
         data.update(kubelet_launch={}, dropin=base64.b64encode(b'fstab').decode(), crictl_after=base64.b64encode(b'fstab').decode())
         data.update(etcd={'etcd': {'cluster_id': 'same-cluster', 'member_id': 'same-member', 'revision': 100}},
                     launcher_before={'credentials_digest': 'unchanged'}, moby_before=['docker-task'],
-                    docker_before={'complete': True, 'mounts': {}})
+                    docker_before=docker_snapshot())
         data['storage']['entries'] = [{'key': 'pay-postgres', 'logical': cutover.storage_ops.ROOTS['pay-postgres'],
                                       'target_fsroot': '/var/lib/mx-move/k8s-data/' + TRANSACTION + '/pay-postgres'}]
         with mock.patch.object(cutover.candidate_guard, 'verify'), mock.patch.object(cutover.storage_guard, 'verify'), \

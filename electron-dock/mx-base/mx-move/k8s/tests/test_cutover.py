@@ -24,6 +24,13 @@ TRANSACTION = 'mx-k8s-20261020-010000-1234abcd'
 JOURNAL_PATH = Path('/fixture/transactions/' + TRANSACTION + '/journal.json')
 
 
+def docker_snapshot():
+    return {'complete': True, 'containers_complete': True,
+            'info': {'root': '/data/docker', 'live_restore': False, 'name': 'node', 'swarm_state': 'inactive'},
+            'containers': [], 'mounts': {}, 'diagnostics': [],
+            'total': 0, 'inspected_total': 0, 'running': 0, 'paused': 0}
+
+
 class InjectedFailure(RuntimeError):
     pass
 
@@ -91,7 +98,7 @@ class FakeHost:
         self.event('quiesce')
 
     def docker_snapshot(self):
-        return {'unchanged': True}
+        return docker_snapshot()
 
     def release_kubelet_bindings(self, journal):
         assert self.original_writers and not self.blocked, 'kubelet was stopped before releasing application binds'
@@ -164,7 +171,7 @@ def journal():
         target = cutover.storage_guard.DATA_BASE + '/' + TRANSACTION + '/' + key
         entries.append({'key': key, 'logical': logical, 'target': target, 'target_fsroot': target})
     return {'schema_version': 1, 'phase': 'preparing', 'transaction': TRANSACTION,
-            'run': str(JOURNAL_PATH.parent), 'may_write': False, 'cluster': {}, 'docker_before': {'unchanged': True},
+            'run': str(JOURNAL_PATH.parent), 'may_write': False, 'cluster': {}, 'docker_before': docker_snapshot(),
             'storage': {'schema_version': 1, 'transaction': TRANSACTION,
                         'hostname': 'fixture', 'root_uuid': cutover.ROOT_UUID, 'entries': entries}}
 
@@ -220,6 +227,26 @@ class CutoverTransactionsTests(unittest.TestCase):
         self.assertNotIn('block-startup', self.host.events)
         self.assertNotIn('stop-old', self.host.events)
         self.assertNotIn('unmount-children', self.host.events)
+        self.assertFalse(self.host.copied)
+        self.assertTrue(self.host.original_writers)
+        self.assertEqual(self.durable.read()['phase'], 'aborted')
+
+    def test_real_docker_change_is_saved_before_recovery_and_never_starts_copy(self):
+        current = docker_snapshot()
+        current['info']['root'] = '/private-new-docker-root'
+        self.host.docker_snapshot = lambda: current
+        abort = self.host.abort
+        def inspect_abort(value):
+            detail = self.durable.read()['docker_change_diagnostics']
+            self.assertFalse(detail['equivalent'])
+            self.assertIn('root', detail['changes']['info_fields'])
+            self.assertNotIn('/private-new-docker-root', json.dumps(detail))
+            abort(value)
+        self.host.abort = inspect_abort
+        with self.assertRaisesRegex(cutover.prep.Refuse, 'docker_change_diagnostics='):
+            self.move.execute(journal())
+        self.assertNotIn('block-startup', self.host.events)
+        self.assertNotIn('stop-old', self.host.events)
         self.assertFalse(self.host.copied)
         self.assertTrue(self.host.original_writers)
         self.assertEqual(self.durable.read()['phase'], 'aborted')

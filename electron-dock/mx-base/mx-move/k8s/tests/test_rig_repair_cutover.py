@@ -99,7 +99,7 @@ class RigRepairCutoverTests(unittest.TestCase):
             resume.assert_called_once_with()
 
     def test_flag_on_other_actions_rejected_before_host_access(self):
-        for action in ('status', 'migrate', 'verify', 'cutover-check', 'prepare-check'):
+        for action in ('status', 'migrate', 'verify', 'cutover-check', 'prepare-check', 'docker-check'):
             with self.subTest(action=action), mock.patch.object(cutover, 'Host') as host, \
                     contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
                 cutover.main([action, '--repair-rig-init'])

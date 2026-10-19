@@ -1,8 +1,8 @@
 # Internal Kubernetes 数据切换
 
-当前现场已回传 `candidate-ready`：172 个镜像引用、71 个 CRI 镜像、候选工作负载 0。独立服务为 `mx-k8s-containerd.service`，socket 为 `/run/mx-k8s-containerd/containerd.sock`。**保留现有预备目录和归档，不重新导出或导入。配置备份检查已通过；随后正式迁移停写成功，但恢复原业务时 Rig PostgreSQL 初始化失败，当前先恢复业务，不重跑 `migrate`。**
+当前现场已回传 `candidate-ready`：172 个镜像引用、71 个 CRI 镜像、候选工作负载 0。独立服务为 `mx-k8s-containerd.service`，socket 为 `/run/mx-k8s-containerd/containerd.sock`。**保留现有预备目录和归档，不重新导出或导入。正式迁移已退出，Rig 初始化权限修复后原业务恢复，MX-H2I 原用户登录和联网已确认正常；下一步先运行 `docker-check` 核对迁移阻断。**
 
-当前正式事务为 `mx-k8s-20261020-045344-8a34e06b`，最后回传 `phase=quiescing / may_write=false`、`es_snapshot_phase=verified / quiesced=true`；尚未进入冷复制或挂载切换。数据库 Pod 随后重新出现，Rig 卡在初始化，符合自动恢复原服务的路径；触发恢复的最初异常仍须核对原迁移终端。业务恢复和真实用户验收尚未完成。
+当前正式事务为 `mx-k8s-20261020-045344-8a34e06b`，最新回传 `phase=aborted / may_write=false / recovery_status=restored`。原终端已确认触发恢复的异常为 `停写期间 Docker 状态或挂载发生变化`，发生在 ES 快照与停写成功之后、冷复制与挂载切换之前。`automatic_checks_passed=false` 表示迁移后的自动验收尚未执行，不否定此次原业务恢复。
 
 ## 维护前同步
 
@@ -24,6 +24,22 @@
 ## 执行命令
 
 以下命令均以 **root** 在服务器的 **`electron-dock/mx-base` 目录**执行。若已在 `mx-move` 目录，只将入口改为 `bash scripts/manage.sh`。
+
+### 当前 Docker 比较阻断
+
+旧程序直接比较整份 Docker 盘点记录，包含每个容器原序的 `.Mounts` 和成功重试后留下的 `diagnostics`。Moby 的旧实现从映射生成挂载列表，返回顺序可能变化，见[官方排序修复](https://github.com/moby/moby/commit/ff0b471f2091c7b7be351cee44c2a013fb6914d7)。这两项非业务差异会造成误报，但旧事务未保存失败当时的后快照，不能据此认定本次没有真实 Docker 状态变化。
+
+同步新增 `k8s/docker_compare.py`、更新后的 `k8s/cutover.py` 和入口 `scripts/manage.sh`，执行：
+
+```bash
+bash mx-move/scripts/manage.sh k8s docker-check
+```
+
+查询只读当前 Docker 和最近事务的私有预检记录，不停止服务、不修改事务或挂载，也不读取 NAS 文件。先验证盘点完整性、数量与 ID 对应关系，再统一列表顺序并排除成功采集的诊断提示；Docker 根目录、容器集合、运行/暂停状态、重启策略、停止信号及每个挂载的全部字段仍严格比较。未知字段也保留比较，公开摘要只使用固定字段名与合法容器 ID，不显示挂载路径、容器名称或配置值。
+
+`equivalent=true` 表示当前实质内容与预检基线一致；若同时 `raw_equal=false`，`ignored_differences` 会说明 `mount_order`、`container_order` 或 `probe_diagnostics` 差异。`equivalent=false` 时查看 `changes` 并回传摘要，不直接重跑迁移。退出码 0 表示一致，2 表示发现真实差异，1 表示无法完成核验。`historical_failure_reconstructed=false` 明确表示此刻查询没有重建过去的失败现场。后续正式迁移遇到真实差异，会在恢复前记录并输出脱敏差异，原始基线保持不变。
+
+只读核对通过后仍需完整预检，并在维护窗口内执行正式迁移。
 
 先运行不停止业务的检查：
 

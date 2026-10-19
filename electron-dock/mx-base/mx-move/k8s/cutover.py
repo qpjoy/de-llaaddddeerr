@@ -27,6 +27,7 @@ import uuid
 import candidate_guard
 import cluster_ops
 import cutover_runtime
+import docker_compare
 import endpoint_config
 import rig_init_repair
 import runtime_install
@@ -69,7 +70,7 @@ FAILURE_REASONS = ('interrupted', 'cluster_guard_rejected', 'guard_rejected',
 FAILURE_MODULES = ('k8s/cutover.py', 'k8s/cluster_ops.py', 'k8s/cutover_runtime.py',
                    'k8s/storage_ops.py', 'k8s/storage_guard.py', 'k8s/candidate_guard.py',
                    'k8s/endpoint_config.py', 'k8s/runtime_prepare.py', 'k8s/runtime_install.py',
-                   'k8s/runtime_resolver.py', 'k8s/rig_init_repair.py', 'etcd/move.py')
+                   'k8s/runtime_resolver.py', 'k8s/rig_init_repair.py', 'k8s/docker_compare.py', 'etcd/move.py')
 RECOVERY_STATUSES = ('restoring-original', 'restored', 'incomplete')
 
 
@@ -78,7 +79,7 @@ def failure_diagnostic(error, phase):
     reason, exit_code, number = 'unexpected_error', None, None
     if isinstance(error, (KeyboardInterrupt, SystemExit)):
         reason = 'interrupted'
-    elif isinstance(error, (cluster_ops.ClusterError, rig_init_repair.Error)):
+    elif isinstance(error, (cluster_ops.ClusterError, rig_init_repair.Error, docker_compare.Error)):
         reason = 'cluster_guard_rejected'
     elif isinstance(error, (prep.Refuse, candidate_guard.GuardError, storage_guard.StorageError,
                             endpoint_config.EndpointError, runtime_resolver.Refuse)):
@@ -121,6 +122,20 @@ def public_failure_diagnostic(value):
             return None
     return {key: ([dict(item) for item in value[key]] if key == 'locations' else value[key])
             for key in ('schema_version', 'phase', 'reason', 'exit_code', 'errno', 'locations')}
+
+
+def require_docker_unchanged(before, after, message, on_change=None):
+    detail = docker_compare.compare(before, after)
+    if detail['equivalent']:
+        return
+    if on_change is not None:
+        on_change(detail)
+    error = message + '；docker_change_diagnostics=' + json.dumps(detail, ensure_ascii=True, separators=(',', ':'))
+    try:
+        prep.stage(error)
+    except BaseException:
+        pass
+    raise prep.Refuse(error)
 
 
 def kubernetes_backup_links(root):
@@ -730,7 +745,8 @@ class Host:
         require(self.etcd.launcher_check() == journal['launcher_before'], 'Launcher 凭据或登录配置基线变化')
         require(not self.runtime.tasks(cutover_runtime.OLD) and
                 self.runtime.tasks(cutover_runtime.OLD, 'moby') == journal['moby_before'], '旧运行时或 Docker task 集合变化')
-        require(self.docker_snapshot() == journal['docker_before'], 'Docker 状态或挂载在维护窗口内发生变化')
+        require_docker_unchanged(journal['docker_before'], self.docker_snapshot(),
+                                 'Docker 状态或挂载在维护窗口内发生变化')
 
     def repair_rig_init(self, journal, persist):
         require(journal['phase'] == 'quiescing' and journal['may_write'] is False,
@@ -852,7 +868,9 @@ class Move:
             # Kubelet must remain running until its local PV/config binds have
             # disappeared with the stopped Pods. Never unmount those ourselves.
             self.host.release_kubelet_bindings(journal)
-            require(self.host.docker_snapshot() == journal['docker_before'], '停写期间 Docker 状态或挂载发生变化')
+            require_docker_unchanged(journal['docker_before'], self.host.docker_snapshot(),
+                                     '停写期间 Docker 状态或挂载发生变化',
+                                     lambda detail: self.record_recovery(docker_change_diagnostics=detail))
             # Save exact blocked bytes and intended drop-in before installation.
             journal['blocked_record'] = base64.b64encode(raw_json(storage_ops.guard_record(journal['storage']))).decode()
             self.persist('blocking')
@@ -956,7 +974,7 @@ def load_move(host):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='本机 Kubernetes 业务存储切换；仅维护窗口执行 migrate，Docker 数据不迁移')
-    parser.add_argument('action', choices=('cutover-check', 'prepare-check', 'migrate', 'status', 'resume', 'verify'))
+    parser.add_argument('action', choices=('cutover-check', 'prepare-check', 'migrate', 'status', 'resume', 'verify', 'docker-check'))
     parser.add_argument('--repair-rig-init', action='store_true',
                         help='仅用于 resume：受控修复已确认的 Rig 初始化权限故障，再恢复原服务')
     args = parser.parse_args(argv)
@@ -965,6 +983,17 @@ def main(argv=None):
     require(sys.platform.startswith('linux') and os.geteuid() == 0, '请以 root 在 Internal Linux 主机执行')
     os.umask(0o077)
     host = Host()
+    if args.action == 'docker-check':
+        move = load_move(host)
+        with prep.progress('只读比较当前 Docker 与最近事务基线；不停止业务'):
+            detail = docker_compare.compare(move.journal['docker_before'], host.docker_snapshot())
+        result = dict(detail, phase='docker-checked', transaction=move.journal['transaction'],
+                      comparison='current-vs-retained-preflight', service_changes=False,
+                      historical_failure_reconstructed=False)
+        print(json.dumps(result, ensure_ascii=True, indent=2))
+        if not detail['equivalent']:
+            raise SystemExit(2)
+        return
     if args.action in ('status', 'resume', 'verify'):
         if args.action == 'status':
             move = load_move(host)
@@ -1024,6 +1053,6 @@ if __name__ == '__main__':
         if isinstance(error, SystemExit):
             raise
         known = (prep.Refuse, candidate_guard.GuardError, storage_guard.StorageError, cluster_ops.ClusterError,
-                 endpoint_config.EndpointError, rig_init_repair.Error)
+                 endpoint_config.EndpointError, rig_init_repair.Error, docker_compare.Error)
         prep.stage(str(error) if isinstance(error, known) else '迁移未完成；原始错误已隐藏。请运行 k8s status，按事务使用 k8s resume')
         sys.exit(1)
