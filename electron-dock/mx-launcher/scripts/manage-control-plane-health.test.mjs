@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'manage.sh'), 'utf8');
+const controlPlane = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'k8s-control-plane.sh'), 'utf8');
 function shellFunction(name) {
   const body = source.match(new RegExp(`^${name}\\(\\) \\{\\n[\\s\\S]*?^\\}`, 'm'))?.[0];
   assert.ok(body, `missing function ${name}`);
@@ -25,6 +26,7 @@ need_kubectl() { :; }
 k8s_detect_lan_ip() { echo 192.168.1.2; }
 k8s_apiserver_failure_diagnostics() { echo diagnostics >> "$MX_TEST_DIR/actions"; }
 kubectl() {
+  if [ "$1" = config ]; then echo https://192.168.1.2:6443; return 0; fi
   printf '%s\\n' "$*" >> "$MX_TEST_DIR/calls"
   case "$*" in
     *'--raw=/version'*) echo version; return 0 ;;
@@ -52,8 +54,9 @@ ${script}`], {
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }
 
-const healthFunctions = `${shellFunction('k8s_apiserver_endpoint_healthy')}
-${shellFunction('k8s_require_apiserver_ready')}`;
+const healthFunctions = `${controlPlane}
+${shellFunction('k8s_apiserver_endpoint_healthy')}
+k8s_control_plane_failure_diagnostics() { echo diagnostics >> "$MX_TEST_DIR/actions"; }`;
 
 const repairFunctions = `${healthFunctions}
 ${shellFunction('k8s_repair_kubeadm_endpoint')}

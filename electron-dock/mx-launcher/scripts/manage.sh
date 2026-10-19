@@ -18,6 +18,7 @@ die() { printf '✗ %s\n' "$*" >&2; exit 1; }
 
 source "$SCRIPT_DIR/launcher-build-proxy.sh"
 source "$SCRIPT_DIR/k8s-production-recovery.sh"
+source "$SCRIPT_DIR/k8s-control-plane.sh"
 
 MX_MANAGE_SENSITIVE_TEMP_DIR=""
 manage_cleanup_sensitive_temp_dir() {
@@ -99,7 +100,7 @@ Usage:
   bash scripts/manage.sh ops awx-provider list|upsert [provider-id] [base-url]|check <provider-id>
   bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down
   bash scripts/manage.sh ops insight-hub plan|deploy|status|smoke|logs|down
-  bash scripts/manage.sh ops internal-production plan|predeploy|deploy|apply|status|gateway-smoke [gateway-url]|reinit-kubeadm|repair-network|repair-cni|down
+  bash scripts/manage.sh ops internal-production plan|predeploy|deploy|apply|status|gateway-smoke [gateway-url]|control-plane-preflight|reinit-kubeadm|repair-network|repair-cni|down
   bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures [--apply]
   bash scripts/manage.sh ops identity on [https://private-ip:18443]
   bash scripts/manage.sh ops identity ingress
@@ -250,43 +251,6 @@ k8s_detect_lan_ip() {
   if command -v hostname >/dev/null 2>&1; then
     hostname -I 2>/dev/null | awk '{print $1; exit}'
   fi
-}
-
-k8s_append_no_proxy_entries() {
-  local current="$1"
-  local entries="$2"
-  local result entry
-  local parts=()
-  result="$current"
-  IFS=',' read -r -a parts <<<"$entries"
-  for entry in "${parts[@]}"; do
-    [ -n "$entry" ] || continue
-    case ",$result," in
-      *",$entry,"*) ;;
-      *)
-        if [ -n "$result" ]; then
-          result="$result,$entry"
-        else
-          result="$entry"
-        fi
-        ;;
-    esac
-  done
-  printf '%s\n' "$result"
-}
-
-k8s_configure_proxy_bypass() {
-  [ "${MX_K8S_CONFIGURE_NO_PROXY:-1}" = "1" ] || return 0
-  local current_ip pod_cidr service_cidr entries
-  current_ip="$(k8s_detect_lan_ip | head -n 1)"
-  k8s_is_usable_lan_ip "$current_ip" || return 0
-  pod_cidr="${MX_K8S_POD_CIDR:-${POD_CIDR:-${K8S_POD_CIDR:-}}}"
-  service_cidr="${MX_K8S_SERVICE_CIDR:-${SERVICE_CIDR:-${K8S_SERVICE_CIDR:-}}}"
-  entries="localhost,127.0.0.1,::1,$current_ip,$pod_cidr,$service_cidr,192.168.0.0/16,.svc,.cluster.local,kubernetes.default.svc,kubernetes.default.svc.cluster.local"
-  export NO_PROXY no_proxy
-  NO_PROXY="$(k8s_append_no_proxy_entries "${NO_PROXY:-}" "$entries")"
-  no_proxy="$(k8s_append_no_proxy_entries "${no_proxy:-}" "$entries")"
-  say "NO_PROXY includes kube-apiserver $current_ip and Kubernetes local ranges"
 }
 
 k8s_is_usable_lan_ip() {
@@ -713,6 +677,8 @@ k8s_wait_apiserver_after_endpoint_repair() {
   local current_ip="$1"
   local attempts="${MX_K8S_APISERVER_REPAIR_WAIT_ATTEMPTS:-60}"
   local i
+  # Endpoint repair may have changed kubeconfig after the initial proxy setup.
+  k8s_configure_proxy_bypass
   say "wait kube-apiserver on $current_ip:6443"
   for i in $(seq 1 "$attempts"); do
     if k8s_apiserver_endpoint_healthy; then
@@ -757,25 +723,6 @@ k8s_apiserver_failure_diagnostics() {
     say "recent kubelet logs"
     journalctl -u kubelet -n 120 --no-pager || true
   fi
-}
-
-k8s_require_apiserver_ready() {
-  local current_ip attempts timeout i
-  need_kubectl
-  current_ip="$(k8s_detect_lan_ip | head -n 1)"
-  attempts="${MX_K8S_APISERVER_PREFLIGHT_ATTEMPTS:-6}"
-  timeout="${MX_K8S_APISERVER_PREFLIGHT_TIMEOUT:-5s}"
-  say "preflight kube-apiserver on $current_ip:6443"
-  for i in $(seq 1 "$attempts"); do
-    if kubectl --request-timeout="$timeout" get --raw=/readyz >/dev/null 2>&1; then
-      say "kube-apiserver preflight OK"
-      return 0
-    fi
-    [ "$i" = "$attempts" ] || sleep 2
-  done
-  k8s_apiserver_failure_diagnostics
-  kubectl --request-timeout="$timeout" get --raw='/readyz?verbose' || true
-  die "kube-apiserver $current_ip:6443 is not ready after NO_PROXY setup; check etcd/storage and kubelet/static-pod status before building or applying MX"
 }
 
 k8s_restart_static_pod_containers() {
@@ -2918,9 +2865,11 @@ k8s_apply() {
     kubectl -n "$ns" rollout restart deployment/mx-launcher-internal
     K8S_INTERNAL_API_RESTARTED=1
   fi
-  say "wait internal api rollout"
-  if ! k8s_rollout_status "$ns" deployment mx-launcher-internal 180s; then
+  say "wait internal api rollout (timeout ${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s})"
+  if ! k8s_rollout_status "$ns" deployment mx-launcher-internal "${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s}"; then
     k8s_workload_diagnostics "$ns" deployment mx-launcher-internal
+    say "A Ready API Pod alone does not confirm rollout completion; old replicas must also retire."
+    say "Recheck without restarting: kubectl -n $ns rollout status deployment/mx-launcher-internal --timeout=${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s}"
     die "internal api rollout failed"
   fi
   if [ "$target" = "internal-shadow" ]; then
@@ -2975,7 +2924,7 @@ k8s_remote_runner() {
     "SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=$value" \
     "SITE_SLOT_WORKER_REMOTE_SSH=$value" \
     "SITE_SLOT_CONFIRM_REMOTE_EXECUTION=$value"
-  k8s_rollout_status "$ns" deployment mx-launcher-internal 180s
+  k8s_rollout_status "$ns" deployment mx-launcher-internal "${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s}"
 }
 
 k8s_ssh_bootstrap() {
@@ -2997,7 +2946,7 @@ k8s_ssh_bootstrap() {
   need_kubectl
   say "set SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED=$value on Internal API deployment"
   kubectl -n "$ns" set env deployment/mx-launcher-internal "SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED=$value"
-  k8s_rollout_status "$ns" deployment mx-launcher-internal 180s
+  k8s_rollout_status "$ns" deployment mx-launcher-internal "${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s}"
 }
 
 k8s_readonly_probe() {
@@ -3019,7 +2968,7 @@ k8s_readonly_probe() {
   need_kubectl
   say "set SITE_SLOT_SSH_READONLY_PROBE_EXECUTE=$value on Internal API deployment"
   kubectl -n "$ns" set env deployment/mx-launcher-internal "SITE_SLOT_SSH_READONLY_PROBE_EXECUTE=$value"
-  k8s_rollout_status "$ns" deployment mx-launcher-internal 180s
+  k8s_rollout_status "$ns" deployment mx-launcher-internal "${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s}"
 }
 
 k8s_db_summary() {
@@ -3718,7 +3667,7 @@ ops_local_platform_apply_native_host_runner_url() {
   kubectl -n "$namespace" set env deployment/mx-launcher-internal \
     MX_INTERNAL_HOST_RUNNER_URL="$url" \
     MX_INTERNAL_HOST_RUNNER_NATIVE_URL="$url" >/dev/null
-  k8s_rollout_status "$namespace" deployment mx-launcher-internal 180s
+  k8s_rollout_status "$namespace" deployment mx-launcher-internal "${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s}"
 }
 
 ops_local_platform() {
@@ -5636,7 +5585,7 @@ k8s_restart_internal_api() {
   ns="$(k8s_namespace "$target")"
   need_kubectl
   kubectl -n "$ns" rollout restart deployment/mx-launcher-internal
-  k8s_rollout_status "$ns" deployment mx-launcher-internal 180s
+  k8s_rollout_status "$ns" deployment mx-launcher-internal "${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s}"
 }
 
 k8s_apply_internal_gateway() {
@@ -5803,6 +5752,7 @@ Gateway:
 
 Commands:
   bash scripts/manage.sh ops internal-production predeploy
+  bash scripts/manage.sh ops internal-production control-plane-preflight
   bash scripts/manage.sh ops internal-production deploy
   bash scripts/manage.sh ops internal-production status
   bash scripts/manage.sh ops internal-production gateway-smoke
@@ -5831,6 +5781,9 @@ Notes:
   - qpjoy/mx-launcher-server:shadow is local-only. Deploy does not push it to
     Docker Hub; it imports and verifies the image in containerd k8s.io after
     Docker build.
+  - Internal API rollout waits up to 600s per attempt, including old replica
+    retirement. Override with MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT=900s on slow
+    hosts. A Ready Pod alone does not mark an incomplete rollout successful.
   - On an existing single-node Linux host, deploy verifies original mounts and
     PostgreSQL identity, starts inactive host services, repairs invalid kubelet
     client credentials against the existing CA, and restores missing Secrets
@@ -6068,7 +6021,7 @@ ops_internal_production() {
   local action="$1"
   shift || true
   case "$action" in
-    plan|predeploy) ;;
+    plan|predeploy|deploy|cycle|reinit-kubeadm|reinit) ;;
     *) k8s_configure_proxy_bypass ;;
   esac
   case "$action" in
@@ -6086,6 +6039,7 @@ ops_internal_production() {
       launcher_with_build_proxy internal_production_predeploy_gate
       export MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS="${MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS:-local-password,feishu}"
       k8s_prepare_production_host
+      k8s_configure_proxy_bypass
       k8s_repair_kubeadm_endpoint
       k8s_require_apiserver_ready
       k8s_recover_production_node
@@ -6174,6 +6128,10 @@ ops_internal_production() {
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production repair-cni"
       ops_internal_production_repair_cni
       ;;
+    control-plane-preflight)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production control-plane-preflight"
+      k8s_require_apiserver_ready
+      ;;
     repair-network)
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production repair-network"
       k8s_repair_kubeadm_endpoint
@@ -6188,7 +6146,7 @@ ops_internal_production() {
       k8s_down internal-shadow
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops internal-production plan|predeploy|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|repair-network|repair-cni|down"
+      die "Usage: bash scripts/manage.sh ops internal-production plan|predeploy|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|control-plane-preflight|reinit-kubeadm|repair-network|repair-cni|down"
       ;;
   esac
 }
@@ -6827,7 +6785,7 @@ case "$cmd" in
         fi
         ;;
       internal-production)
-        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|predeploy|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|repair-cni|down"
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|predeploy|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|control-plane-preflight|reinit-kubeadm|repair-cni|down"
         ops_internal_production "$@"
         ;;
       *)

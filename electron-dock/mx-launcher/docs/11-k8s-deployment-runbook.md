@@ -14,6 +14,21 @@ migration + smoke。
 完整事故归纳、命令、停止条件与备份要求见
 [Internal 搬迁与重启恢复](./31-internal-reboot-recovery.md)。
 
+Launcher 与 Hub 部署都依赖 kubeconfig 指定的 Kubernetes API Server；本环境的
+`192.168.1.2:6443` 是该控制面地址，不是 Launcher SSO 端口。
+两项目共用 `scripts/k8s-control-plane.sh` 的进程内代理绕过及有限 `/readyz` 检查，
+可以在任一项目目录独立运行：
+
+```bash
+bash scripts/manage.sh ops internal-production control-plane-preflight
+```
+
+该命令使用当前 kubeconfig，不切换集群、不修改应用，也不触发主机服务或静态 Pod 重启。
+Hub 的 `MX_INSIGHT_SYNC_LAUNCHER=0` 仍禁止其同步/重启 Launcher，但不会跳过共享控制面检查。
+Hub 首次读取节点前及构建后均检查；持续失败不会进入后续配置应用、Admin 冻结和迁移。
+同步两个项目的脚本后再执行部署，现场排查步骤见
+[Hub 部署档案](../../mx-insight-hub/mx-insight.deploy.md)。
+
 ## 一句话
 
 Docker Compose 适合把本地服务跑起来；K8s 适合把服务声明成“期望状态”，由集群持续
@@ -22,11 +37,14 @@ Docker Compose 适合把本地服务跑起来；K8s 适合把服务声明成“�
 ## API rollout 超时后已自行就绪
 
 `internal api rollout failed` 表示脚本等待 API 的本次窗口未成功结束，不会撤销已经提交的
-Deployment，也不自动回滚。当前 API 等待为 180 秒；脚本退出后 Kubernetes 仍会继续协调。
+Deployment，也不自动回滚。API 每次等待默认 600 秒，可通过
+`MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT=900s` 调整（原来固定为 180 秒）；脚本退出后
+Kubernetes 仍会继续协调。新 Pod `Ready=True` 或 Deployment `Available=True` 不等于
+滚动更新完成，还需要旧副本退出；脚本仍以 `kubectl rollout status` 的成功结果为准。
 先用原生只读命令确认现状，不立即重复部署：
 
 ```bash
-kubectl -n mx-internal-shadow rollout status deployment/mx-launcher-internal --timeout=30s
+kubectl -n mx-internal-shadow rollout status deployment/mx-launcher-internal --timeout=600s
 kubectl -n mx-internal-shadow get pods -o wide
 ```
 
@@ -36,6 +54,13 @@ kubectl -n mx-internal-shadow get pods -o wide
 主容器重启。迁移 Job 已完成时其 Pod 不再 Ready 也正常。旧 Pod 的 previous 日志不能用作
 本轮启动错误；PostgreSQL 的历史 `Unknown/255` 需结合终止时间分析，不能直接解释为 OOM
 或数据损坏。本次首次就绪延迟的具体原因尚未确认。
+
+2026-10-19 的诊断也显示新 API 已就绪且没有重启，但仍有旧副本；旧 API 的 `/readyz`
+和 PostgreSQL 探针存在大量超时。该输出未包含最初的 rollout 错误，不能据此认定唯一根因。
+代码排查发现 `/readyz` 原先每次执行完整平台统计的 31 条计数查询，现改为单条 `SELECT 1`，
+失败返回 HTTP 503；平台统计仍由 `/internal/v1/platform/overview` 提供。
+API startupProbe 的启动预算从 60 秒扩大到 300 秒，避免慢节点启动接近原阈值时被重启。
+这些改动需要重新构建并部署 API 镜像；仅修改本地脚本不会更新正在运行的探针实现。
 
 脚本失败点之后的 Identity 检查、网关更新、host runner 配置及最终验收不会自动续跑。
 对已有部署，可先补以下只读验收，按实际失败项处理：

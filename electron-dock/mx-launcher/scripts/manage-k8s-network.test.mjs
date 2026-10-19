@@ -7,8 +7,9 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'manage.sh'), 'utf8');
+const controlPlane = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'k8s-control-plane.sh'), 'utf8');
 function shellFunction(name) {
-  const body = source.match(new RegExp(`^${name}\\(\\) \\{\\n[\\s\\S]*?^\\}`, 'm'))?.[0];
+  const body = `${source}\n${controlPlane}`.match(new RegExp(`^${name}\\(\\) \\{\\n[\\s\\S]*?^\\}`, 'm'))?.[0];
   assert.ok(body, `missing function ${name}`);
   // The tests run on a desktop. Simulate the local kubeadm host marker without
   // creating or altering /etc/kubernetes or the caller's kubeconfig.

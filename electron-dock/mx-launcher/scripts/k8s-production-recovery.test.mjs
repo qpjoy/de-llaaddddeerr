@@ -93,7 +93,7 @@ test('production host/identity/credential gates precede network, images and migr
   }
   for (const failedStage of ['k8s_prepare_production_host', 'k8s_recover_production_node', 'k8s_production_recovery_state', 'k8s_production_disk_preflight']) {
     const prefix = deploy.slice(0, deploy.indexOf('      MX_SHADOW_REFRESH_QP_TUNNEL_CLI_STRICT='));
-    const mocks = ['ops_internal_production_plan', 'launcher_with_build_proxy', 'k8s_prepare_production_host',
+    const mocks = ['ops_internal_production_plan', 'launcher_with_build_proxy', 'k8s_prepare_production_host', 'k8s_configure_proxy_bypass',
       'k8s_repair_kubeadm_endpoint', 'k8s_require_apiserver_ready', 'k8s_recover_production_node', 'k8s_production_recovery_state',
       'k8s_preflight_secret_bundle', 'k8s_release_oss_secret_dry_run', 'k8s_local_pvs', 'k8s_recover_cluster_network',
       'k8s_require_production_node_ready', 'k8s_production_disk_preflight', 'k8s_namespace', 'k8s_manifest_dir']

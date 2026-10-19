@@ -366,9 +366,19 @@ run_ctr() {
   fi
 }
 
+require_control_plane_ready() {
+  local helper="${ELECTRON_DOCK_DIR}/mx-launcher/scripts/k8s-control-plane.sh"
+  [ -r "$helper" ] \
+    || die "Kubernetes preflight helper is missing at ${helper}; restore the sibling mx-launcher scripts before deploying Hub"
+  # Load only the shared read-only checks, never the Launcher deploy entrypoint.
+  # Keep proxy bypass exports in this process for subsequent kubectl commands.
+  source "$helper"
+  k8s_require_apiserver_ready
+}
+
 require_single_k8s_node() {
   local nodes count
-  nodes="$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
+  nodes="$(kubectl --request-timeout=10s get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
   count="$(printf '%s\n' "$nodes" | awk 'NF { count += 1 } END { print count + 0 }')"
   [ "$count" -eq 1 ] \
     || die "internal-production local images and hostPath storage require exactly one Kubernetes node; found $count"
@@ -390,6 +400,8 @@ Optional local search (independent from Hub startup):
 Internal Kubernetes:
   bash scripts/manage.sh deploy          # 全量幂等部署（= ops internal-production deploy）
   bash scripts/manage.sh verify          # 冒烟（= ops internal-production smoke）
+  bash scripts/manage.sh ops internal-production control-plane-preflight
+                                         # 只读检查 Kubernetes API，无需 Hub 凭据
   bash scripts/manage.sh reindex-search  # 用当前 HanLP/jieba 重建可再生搜索投影
   bash scripts/manage.sh verify-data-path [api-key]
                                          # 端到端：search -> PG -> outbox -> ES
@@ -2495,6 +2507,9 @@ restore_worker_replicas() {
 
 apply_k8s() {
   local namespace="mx-insight-hub"
+  # Image builds/imports can outlast a healthy control-plane observation.
+  # Recheck before changing database settings, resources, or Admin replicas.
+  require_control_plane_ready
   # Disable before changing any Hub resource. Repeat immediately before the
   # projector rollout in case an operator toggled the setting mid-deploy.
   disable_projector_startup_rebuild_for_deploy
@@ -3418,6 +3433,9 @@ ops_action() {
     unset MX_INSIGHT_CLEAR_TIKHUB_ENV_KEY
   fi
   case "$action" in
+    control-plane-preflight)
+      require_control_plane_ready
+      ;;
     plan)
       for file in 00-namespace.yaml 05-serviceaccount.yaml 20-migration-job.yaml 30-public-api.yaml 31-admin-api.yaml 32-projector.yaml 33-ingest.yaml 34-classifier.yaml 35-retrieval.yaml 40-network-policy.yaml; do
         render_file "${K8S_DIR}/${file}"
@@ -3427,6 +3445,7 @@ ops_action() {
       require_production_env
       need docker
       need ctr
+      require_control_plane_ready
       require_single_k8s_node
       init_deploy_runtime
       acquire_deploy_lock
@@ -3456,6 +3475,7 @@ ops_action() {
       require_production_env
       need docker
       need ctr
+      require_control_plane_ready
       require_single_k8s_node
       init_deploy_runtime
       acquire_deploy_lock

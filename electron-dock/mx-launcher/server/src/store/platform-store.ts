@@ -221,6 +221,7 @@ export interface PlatformOverview {
 }
 
 export interface PlatformStore {
+  ready(): MaybePromise<void>;
   overview(): MaybePromise<PlatformOverview>;
   upsertSiteHeartbeat(
     heartbeat: Omit<SiteHeartbeat, 'environment' | 'lastSeenAt' | 'siteRole'> & { siteRole?: SiteRole }

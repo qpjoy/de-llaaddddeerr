@@ -113,7 +113,7 @@ grep -q 'phase=pod_read_unavailable' "$TEST_DIR/pod_read_failure/output"
 # a failed inspection cannot bypass the freeze and reach the migration writer.
 if CASE_DIR="$TEST_DIR" bash -c '
   source "$1/scripts/manage.sh"
-  for helper in disable_projector_startup_rebuild_for_deploy validate_existing_runtime_secret \
+  for helper in require_control_plane_ready disable_projector_startup_rebuild_for_deploy validate_existing_runtime_secret \
     preserve_existing_justone_runtime_config preserve_existing_tikhub_runtime_config \
     preserve_existing_peripheral_runtime_config preserve_existing_news_runtime_config \
     discover_hanlp_url create_runtime_config create_model_key_secret sync_launcher_secret \
@@ -155,7 +155,7 @@ for mode in owned initial_three initial_zero transient_restore_read replaced res
       fi
     }
     docker() { :; }
-    for helper in disable_projector_startup_rebuild_for_deploy validate_existing_runtime_secret \
+    for helper in require_control_plane_ready disable_projector_startup_rebuild_for_deploy validate_existing_runtime_secret \
       preserve_existing_justone_runtime_config preserve_existing_tikhub_runtime_config \
       preserve_existing_peripheral_runtime_config preserve_existing_news_runtime_config \
       discover_hanlp_url create_runtime_config create_model_key_secret sync_launcher_secret \

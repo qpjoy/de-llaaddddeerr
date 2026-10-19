@@ -466,6 +466,10 @@ export class PostgresStore implements PlatformStore {
     return store;
   }
 
+  async ready(): Promise<void> {
+    await this.dataSource.query('SELECT 1');
+  }
+
   async overview(): Promise<PlatformOverview> {
     const [
       sites,

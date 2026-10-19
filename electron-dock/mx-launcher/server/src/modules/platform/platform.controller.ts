@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Post } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Post, ServiceUnavailableException } from '@nestjs/common';
 
 import { asRecord, numberRecord, stringArray, stringValue } from '../../lib/http.js';
 import type { PlatformStore } from '../../store/platform-store.js';
@@ -19,7 +19,21 @@ export class PlatformController {
 
   @Get('readyz')
   async readyz() {
-    return { ok: true, ...await this.store.overview() };
+    try {
+      await this.store.ready();
+    } catch {
+      throw new ServiceUnavailableException('Platform store is unavailable');
+    }
+    return {
+      ok: true,
+      environment: this.config.environment,
+      siteId: this.config.siteId,
+      siteRole: this.config.siteRole,
+      enabledModules: this.config.enabledModules,
+      storeDriver: this.config.storeDriver,
+      publicBaseUrl: this.config.publicBaseUrl,
+      internalBaseUrl: this.config.internalBaseUrl
+    };
   }
 
   @Get('internal/v1/platform/overview')
