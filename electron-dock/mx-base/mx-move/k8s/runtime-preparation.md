@@ -4,6 +4,10 @@
 
 当前实现针对已回传的 Internal：Linux、root、Python 3.6+、containerd 1.6.32、配置 v2、overlayfs、单一 runc v2 handler、SystemdCgroup=true。沿用当前二进制，不下载或升级组件。其他版本、未知插件、外置运行时写入目录或未核验的监听配置会停止预备，输出脱敏错误。
 
+## 本次预备已成功
+
+用户已回传 `phase=artifacts-prepared`：目录 `/var/lib/mx-move/k8s-runtime-prep/mx-k8s-20261019-183524-ef985186`，172 个镜像引用，归档 11,727,453,184 bytes，SHA256 `62cf0ab4f2d96bd097316284292f7e24f81c1c2cbbdb8390767c6676f065f7cc`。保留此目录与归档，无需重复导出。下一步使用[候选安装命令](runtime-installation.md)复用这些文件；候选会启动独立服务，但不会切换 kubelet 或业务数据。
+
 ## 执行
 
 同步整个 `mx-move` 模块，保留目录结构。以 root 在服务器的 **`electron-dock/mx-base`** 目录执行：
@@ -38,10 +42,12 @@ bash scripts/manage.sh k8s prepare-runtime
 
 containerd 1.6 的 `config dump` 会把主配置本身列入 Imports；因此原文件 `imports=[]`、dump 报 present 可以同时成立。若直接复制 dump 而不清空该字段，新实例可能重新导入旧配置，覆盖隔离路径。[官方 LoadConfig 实现](https://github.com/containerd/containerd/blob/release/1.6/services/server/config/config.go)
 
-镜像导出固定旧 socket 和 `k8s.io`，指定本机平台，生成 OCI 归档。检查包括选定摘要覆盖、blob SHA256、本机平台可达 manifest/config/layers，以及落盘后整体 SHA256；完成后再次核对源运行时和镜像集合。它仍标记 `import_verified=false`：导入新实例、CRI 按 digest 可见及实际启动验证属于后续阶段。[官方 export 命令](https://github.com/containerd/containerd/blob/v1.6.32/cmd/ctr/commands/images/export.go)
+镜像导出固定旧 socket 和 `k8s.io`，指定本机平台，生成 OCI 归档。检查包括选定摘要覆盖、blob SHA256、本机平台可达 manifest/config/layers，以及落盘后整体 SHA256；完成后再次核对源运行时和镜像集合。它仍标记 `import_verified=false`：`install-runtime` 负责后续导入、新 daemon 启动和 CRI image ID/引用覆盖验证；真实 Pod 启动与业务联网仍须在正式切换后验收。[官方 export 命令](https://github.com/containerd/containerd/blob/v1.6.32/cmd/ctr/commands/images/export.go)
 
 ## 中断与后续
 
 失败或 Ctrl-C 保留本次私有文件，不生成成功回执，也不影响原容器；重跑会创建另一个目录。当前不自动删除旧的或不完整归档，重跑前需注意这些文件占用的根卷空间。工具不提供强行忽略校验失败的参数。
 
-`artifacts-prepared` 不代表可以手工启动新 containerd 或修改 kubelet。正式切换仍需完成[各项目部署入口适配](runtime-consumers.md)、业务停写与备份、存储身份同步、kubelet 子挂载处理、旧 `k8s.io` 任务退出核验，以及新实例镜像导入/CRI 验证。然后才能按事务执行挂载切换、恢复原数据库并验收 MX-H2I 登录、联网、SSO 与 Pay。原共享 containerd 和 Docker 数据继续保留。
+`artifacts-prepared` 不代表可以手工启动新 containerd 或修改 kubelet。现在可用 [`install-runtime --prepared <成功目录>`](runtime-installation.md) 受控安装候选实例，复用同一归档完成导入和 CRI 检查。候选安装中断后使用同一命令核验续跑；不要把 `prepare-runtime` 的“另建预备目录”与安装器续跑混为一谈。
+
+中性 helper 和[各项目部署入口适配](runtime-consumers.md)已实现，但完整切换执行器仍未实现。业务停写与备份、存储身份及 guards 同步、kubelet 子挂载处理、原 `k8s.io` 任务退出核验必须先完成，然后才能按事务切换挂载和 kubelet、恢复原数据库并验收 MX-H2I 登录、联网、SSO 与 Pay。原共享 containerd 和 Docker 数据继续保留。

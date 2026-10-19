@@ -1,6 +1,12 @@
-# Kubernetes 数据迁移：盘点与运行时预备
+# Kubernetes 数据迁移：盘点、预备与候选实例
 
-这组命令用于核对 Internal 上的 Kubernetes 数据位置、使用者、挂载和目标空间，为从 `/data` 迁到根逻辑卷准备可审查的方案。当前实现包括**只读清单、容量计划以及离线运行时预备**，没有 `k8s migrate`、`k8s rollback` 或 `k8s resume`。`inventory`、`plan`、`runtime-check` 只读；新增 `prepare-runtime` 会写入根卷私有目录，生成隔离配置与 Kubernetes 镜像归档，但不会停服务、启动新运行时、复制数据库、修改挂载或更新存储身份。
+这组命令用于核对 Internal 上的 Kubernetes 数据位置、使用者、挂载和目标空间，并逐步准备从 `/data` 迁到根逻辑卷。当前提供只读盘点、离线运行时预备，以及**独立候选 containerd 的安装、镜像导入和 CRI 验证**。没有 `k8s migrate`、`k8s rollback` 或 `k8s resume`，完整业务切换仍未实现。
+
+| 命令 | 当前执行范围 |
+| --- | --- |
+| `inventory` / `plan` / `runtime-check` | 只读盘点与报告。 |
+| `prepare-runtime` | 写入根卷私有隔离配置和 K8s 镜像归档，不启动服务。 |
+| `install-runtime --prepared <目录>` | 复用成功归档，安装并启动独立候选服务，导入 `k8s.io` 镜像并核对 CRI；不切换 kubelet、复制数据库、改挂载、发布 active 描述或设置开机启用。 |
 
 维护窗口已允许，但现有用户、密码、SSO 密钥和注册、网络配置必须保留。搬迁 Launcher 数据库和运行时会涉及服务中断，不能承诺窗口内登录、DNS 或联网持续可用。具体停启范围和执行命令须依据服务器报告确定，不能只从 `df` 和 `fstab` 推断全部数据位置。
 
@@ -8,9 +14,16 @@
 
 Kubernetes 独占的业务目录和 kubelet 目录可保持逻辑路径，通过根卷新副本切换。若将 Kubernetes 镜像和容器运行时数据一并迁入根卷，方案是创建独立 containerd 实例，通过镜像 API 导出/导入所需镜像，再切换 kubelet 的实际 CRI endpoint；保留 Docker 的服务、socket、原共享运行时及构建 namespace。不能直接 rsync 某个 `k8s.io` 子目录，namespace 不是完整独立的数据目录。
 
-这一分离还须处理 Hub、mx-common、Pay、Rig 的镜像导入及 Launcher 的运行时启动、CNI 修复和磁盘检查入口，确保后续发布连接 Kubernetes 使用的实例。当前没有执行器或切换命令；不会为了绕过此依赖而重置集群或停用存储保护。
+Launcher、Hub、mx-common、Pay、Rig 的镜像导入和相关修复入口已增加中性运行时解析适配；只有正式生效描述存在时才选择受验证的新实例。当前候选安装不创建该描述，所以普通发布继续使用原运行时。后续仍需完整停写/复制/身份更新事务和实际切换验收，不能重置集群或停用存储保护来绕过这些要求。
 
-2026-10-20 02:08 的补充报告已经确认共享 socket、运行时版本和基础配置。下一步可运行 [`prepare-runtime`](runtime-preparation.md) 准备隔离配置与镜像文件；[部署入口适配清单](runtime-consumers.md)仍是正式切换前必须完成的工作。
+用户已回传成功预备：172 个镜像引用、11,727,453,184 bytes，目录为 `/var/lib/mx-move/k8s-runtime-prep/mx-k8s-20261019-183524-ef985186`。下一步以 root 在 **`electron-dock/mx-base` 目录**执行：
+
+```bash
+bash mx-move/scripts/manage.sh k8s install-runtime \
+  --prepared /var/lib/mx-move/k8s-runtime-prep/mx-k8s-20261019-183524-ef985186
+```
+
+若已进入 **`electron-dock/mx-base/mx-move` 目录**，只把入口改成 `bash scripts/manage.sh`，后面的参数不变。详见[候选安装与续跑](runtime-installation.md)、[预备结果](runtime-preparation.md)和[调用者适配状态](runtime-consumers.md)。只贴终端摘要，不贴私有配置；保留原归档。
 
 ## 执行只读检查
 
@@ -103,15 +116,15 @@ mx-common 旧 `migrate-storage` 会删除并重建 PV/PVC，不是本次整体�
 
 ## 后续切换与恢复约束
 
-收到报告后才能确定最终目录分组、容量预算、写入者及服务顺序，并生成正式执行命令。维护窗口方案至少需要覆盖：
+盘点和预备报告已收到，候选安装命令已提供；以下完整业务切换事务尚未实现，不能用手工命令替代。维护窗口方案至少需要覆盖：
 
 1. 记录节点/集群、PV/PVC、数据库及挂载身份；保存 etcd、各数据库和必要私有配置备份，并核对可恢复性。
-2. 保留原副本，使用新的目标目录；停止已识别的全部写入者，确认数据库退出以及相关容器、shim、嵌套挂载状态，不能对仍在写入的数据库做普通文件复制。
+2. 保留原副本，使用新的目标目录；停止已识别的全部写入者，确认数据库退出以及原 `k8s.io` tasks/sandboxes 全部退出，处理 kubelet 的活动子挂载、相关容器和 shim；不能对仍在写入的数据库做普通文件复制。
 3. 保留 UID/GID、权限、ACL、扩展属性及硬链接，校验副本和落盘结果，再更新受管挂载、存储身份及启动保护。不得改变网络接口、路由、DNS、VPN 或账户配置。
 4. 在允许目标接收写入前持久记录切换状态；恢复服务后核对原数据库身份、数据连续性、凭据、SSO、MX-H2I 现有用户登录及联网，并单独验收 Pay。
 
 **新副本一旦可能写入，就不能直接挂回旧目录。**恢复应继续使用已提交的新副本；如需迁回原盘，应再次停写并把最新数据复制到原盘的新目录后切换。多个数据库可能形成不同时间点的业务状态，不能只因文件复制成功就宣布整体回滚安全。
 
-当前命令不会执行上述切换，也不提供通用灾难恢复。开发机测试和计划通过不能替代生产迁移、整机重启或真实用户登录/联网验收；现有 etcd 的启动保护应一直保留。
+当前 `install-runtime` 只启动无工作负载的候选运行时，不执行上述业务切换，也不提供通用灾难恢复。开发机测试和计划通过不能替代生产迁移、整机重启或真实用户登录/联网验收；现有 etcd 的启动保护应一直保留。
 
 只读与脱敏回归测试：`python3 -B -m unittest discover -s k8s/tests -p 'test_*.py'`。技术依据：[Kubernetes 卷](https://kubernetes.io/docs/concepts/storage/volumes/)、[节点维护](https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/)、[containerd 容器生命周期](https://github.com/containerd/containerd/blob/main/docs/historical/design/lifecycle.md)。

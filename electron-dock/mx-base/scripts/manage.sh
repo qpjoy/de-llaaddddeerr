@@ -3,10 +3,10 @@
 set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATIC_DIR="$ROOT_DIR/mx-static"
-# Storage inspection/offline preparation is not an <action> <application> command.
+# Storage inspection/runtime preparation is not an <action> <application> command.
 # Leave all other invocations in the existing application dispatch.
 case "${1:-} ${2:-}" in
-  'k8s inventory'|'k8s plan'|'k8s runtime-check'|'k8s prepare-runtime'|'k8s -h'|'k8s --help')
+  'k8s inventory'|'k8s plan'|'k8s runtime-check'|'k8s prepare-runtime'|'k8s install-runtime'|'k8s -h'|'k8s --help')
     exec bash "$ROOT_DIR/mx-move/scripts/manage.sh" "$@"
     ;;
 esac
@@ -31,6 +31,7 @@ mx-base — 独立基础设施应用管理（在目标 Internal 主机执行）
   bash scripts/manage.sh k8s plan --measure # 只读容量草案，不执行迁移
   bash scripts/manage.sh k8s runtime-check # 只读核对共享运行时与 K8s 独立运行时的条件
   bash scripts/manage.sh k8s prepare-runtime # 根卷预备隔离配置与 K8s 镜像归档；不切换服务
+  bash scripts/manage.sh k8s install-runtime --prepared <目录> # 安装候选实例并导入；不切换 kubelet/数据库
   bash scripts/manage.sh deploy           # 交互选择一个应用；不会默认全量部署
   bash scripts/manage.sh deploy mx-static # 准备目录/密钥，构建并等待健康
   bash scripts/manage.sh deploy mx-pay    # 独立支付：迁移成功后滚动更新并验收

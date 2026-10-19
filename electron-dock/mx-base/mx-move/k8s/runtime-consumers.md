@@ -1,78 +1,64 @@
-# 独立 Kubernetes containerd 的调用者兼容审计
+# 独立 Kubernetes containerd 的调用者适配
 
-审计日期：2026-10-20。**以下是待实现的切换前要求，不表示应用调用者已经适配。** `prepare-runtime` 只准备隔离配置、校验回执和 Kubernetes 镜像归档，不安装或启动服务，不修改 kubelet endpoint，也不完成本页的兼容改造。
+更新日期：2026-10-20。**中性解析器和下表产品 wrapper 已实现，尚未进行正式切换后的生产验收。** `install-runtime` 会安装解析器并启动候选实例，但不发布 active 描述、不切换 kubelet；因此这些适配不会把当前普通发布提前导向候选实例。完整业务迁移执行器仍未实现。
 
-目标是仅迁移 Kubernetes：Docker 数据、卷及原共享 containerd 保持原位。新 K8s 实例使用独立 root、state、socket、配置和 systemd service。仅把镜像导入新实例仍不足以完成迁移；后续普通发布、诊断、恢复必须继续连接 kubelet 实际使用的实例。
+目标仍是仅迁 Kubernetes：Docker 数据、卷与原共享 containerd 保留原位。曾经存在的默认 socket 调用会使“镜像导入旧 `k8s.io` 并验证成功，但新 kubelet 看不到镜像”；适配为各入口显式使用经过验证的 K8s endpoint。
 
-## 必须修改的入口
+## 已实现的入口
 
-下表路径相对仓库的 `electron-dock/`；行号为审计时位置，函数名是后续定位依据。
+下表路径相对仓库的 `electron-dock/`；用函数名定位，避免后续增行导致历史行号失效。
 
-| 产品 / 入口 | 文件与行号 | 当前行为与最小改造 |
+| 产品 | 文件 / 入口 | 已实现行为 |
 | --- | --- | --- |
-| Launcher 地址发现 | `mx-launcher/scripts/k8s-production-recovery.sh:32`，`k8s_resolve_containerd_address` | 已支持 `MX_K8S_CONTAINERD_ADDRESS` 与发现值一致性检查，但只由生产 `deploy/cycle` 的准备过程调用（`manage.sh:6076`）。提取无恢复副作用的地址发现，覆盖所有 K8s wrapper。 |
-| Launcher 镜像操作 | `mx-launcher/scripts/k8s-production-recovery.sh:74`，`k8s_ctr` | 默认旧 socket。`manage.sh:1393/:1418/:1467` 的导入、缓存检查和打标都经过此处。统一显式传递经验证的 K8s 地址。 |
-| Launcher CRI 操作 | `mx-launcher/scripts/manage.sh:225`，`k8s_crictl` | 默认旧 socket，找不到 socket 时裸调用 crictl。影响 `:702/:718/:734/:741` 的静态 Pod 日志、诊断和停启。迁移节点必须显式设置 runtime/image endpoint，不能静默回退。 |
-| Launcher 服务恢复 | `mx-launcher/scripts/k8s-production-recovery.sh:21` | 固定启动 `containerd kubelet docker`，不能启动新的 K8s runtime service。应先取得目标服务身份；Docker 启动仍是构建需要，与 K8s runtime 分开。 |
-| Launcher CNI 修复 | `mx-launcher/scripts/manage.sh:5983`，`ops_internal_production_repair_cni` | `:5998` 固定重启旧 containerd；`:6003/:6016` 裸调用 crictl。迁移后会干扰 Docker 且未重启目标 K8s runtime。改用目标服务和 endpoint，核对对应 CNI 路径。 |
-| Launcher 磁盘检查 | `mx-launcher/scripts/k8s-production-recovery.sh:94/:108/:113` | 固定检查 `/var/lib/containerd`，迁移后检查的是旧实例磁盘。改为目标 K8s runtime root。 |
-| Hub 镜像操作 | `mx-insight-hub/scripts/manage.sh:360`，`run_ctr` | `:1693/:1707` 的缓存查询、镜像导入集中经过此处；只需在 wrapper 内明确选择目标 endpoint，无须扩大 Hub 修改范围。 |
-| common 镜像操作 | `mx-common/scripts/manage.sh:1405/:1407`、`:1476/:1481`、`:1663/:1667` | root/sudo 分支直接调用默认 ctr，覆盖数据库镜像和 HanLP。抽取统一 K8s wrapper 后替换这些调用。 |
-| common 容量检查 | `mx-common/scripts/manage.sh:1739` | 已有 `MX_COMMON_CONTAINERD_ROOT`，仅用于容量检查。需与 endpoint 来自同一实例，不能只修改 root。 |
-| Rig 镜像导入 | `mx-rig/scripts/manage.sh:481`，`run_ctr` | `:506/:512/:513` 的可达性、导入和验证使用旧地址。调整集中 wrapper。 |
-| Rig PostgreSQL 预取 | `mx-rig/scripts/build-proxy.sh:127`，`rig_proxy_postgres_image` | `:132/:135` 的 `k8s.io` 缓存查询与拉取必须使用新实例；不能把整个 proxy ctr 函数无差别切换。 |
-| Pay 节点镜像交付 | `mx-base/mx-pay/scripts/runtime.mjs:210`，`ctrCommand` / `ctrScript` | `imagePlan` 的 `:221`、`importImage` 的 `:238/:241` 覆盖本地和 SSH 目标节点。应在每个目标节点解析 endpoint，不能把部署发起机的地址传给所有节点。保留普通 k3s 节点分支。 |
-| Pay PostgreSQL 预取 | `mx-base/mx-pay/scripts/build-proxy.sh:97`，`pay_proxy_postgres_image` | `:103/:106` 的缓存查询与 `k8s.io` 拉取改用新实例。 |
-| Launcher kubeadm 恢复 | `mx-launcher/scripts/install-k8s-centos.sh:13`、`:593/:639/:788` | 已有 `CRI_SOCKET`，默认旧地址。`manage.sh:5975` 的 reinit 调用未传实际地址，迁移后可能把 kubelet 指回旧实例。必须使用受验证的目标 socket。 |
-| Launcher runtime 重配 | `mx-launcher/scripts/install-k8s-centos.sh:361`，`configure_containerd`；`:925`，`restart_runtime_after_cni` | 固定写旧 `/etc/containerd/config.toml`、重启旧服务。生产 reinit 默认禁用这两项，但新安装/显式开启仍需防护：迁移节点拒绝默认重配，或显式选择已验证的新实例。 |
+| Launcher 镜像与 CRI | `mx-launcher/scripts/k8s-production-recovery.sh` 的 `k8s_containerd_address`、`k8s_ctr`；`manage.sh` 的 `k8s_crictl` | 每次 managed 调用解析并显式指定 K8s 地址；`MX_K8S_CONTAINERD_ADDRESS` 与描述不一致即拒绝。镜像导入、缓存检查、静态 Pod 日志/诊断/停启使用同一入口。 |
+| Launcher 服务与容量 | `k8s-production-recovery.sh` 的 `k8s_containerd_service`、`k8s_containerd_root`、`k8s_prepare_production_host`、`k8s_production_disk_preflight` | 启动所选 K8s 服务后恢复 kubelet；容量检查使用该实例 root。构建需要时仍可启动原 Docker，但不把其服务作为 K8s runtime 重启。 |
+| Launcher CNI 修复 | `mx-launcher/scripts/manage.sh` 的 `ops_internal_production_repair_cni` | 重启所选 K8s runtime 和 kubelet，通过匹配的 CRI 检查；managed 场景不重启旧 containerd/Docker。 |
+| Launcher kubeadm 恢复 | `manage.sh` 的 `ops_internal_production_reinit_kubeadm`；`install-k8s-centos.sh` 的 `configure_runtime_selection`、`configure_containerd`、`restart_runtime_after_cni` | reinit 显式传入受验证的 CRI_SOCKET；无法验证运行实例时停止。安装器在主机改动前拒绝 managed 节点默认重写 Docker containerd；CNI reload 使用所选服务。这不是本次迁移命令，不应通过 reinit 迁移。 |
+| Hub | `mx-insight-hub/scripts/manage.sh` 的 `run_ctr` | 缓存查询、镜像导入统一传入 managed endpoint；无标记时保留旧节点行为。 |
+| common | `mx-common/scripts/manage.sh` 的 `common_ctr`、`common_containerd_root` | 数据库与 HanLP 镜像查询/导入采用统一地址；容量检查取同一实例 root，拒绝冲突的 `MX_COMMON_CONTAINERD_ROOT`。 |
+| Rig | `mx-rig/scripts/manage.sh` 的 `run_ctr`；`build-proxy.sh` 的 `rig_proxy_namespace_ctr`、`rig_proxy_postgres_image` | 服务器镜像导入及 PostgreSQL 的 `k8s.io` 预取选择 K8s 实例；Docker BuildKit namespace 保持旧实例。 |
+| Pay | `mx-base/mx-pay/scripts/runtime.mjs` 的 `ctrCommand` / `ctrScript`；`build-proxy.sh` 的 `pay_proxy_namespace_ctr`、`pay_proxy_postgres_image` | 本地与 SSH 交付在目标节点解析地址，避免把部署发起机的 socket 传给其他节点；未迁移节点保留 k3s 适配。PostgreSQL 预取和 Docker bootstrap 按用途分开。 |
 
-上述默认 ctr 调用可能在旧 `k8s.io` 中“导入成功、检查也成功”，而新 kubelet 仍看不到镜像。因此不能把命令退出码或旧实例的镜像列表当作迁移验收。
+没有修改登录、SSO、数据库用户或网络配置来实现这些选择。离线回归覆盖 managed/未迁移节点、缺失或无效解析结果、sudo/远端交付和 Docker bootstrap 分流；这些测试不能代替生产 Pod、CNI 和用户功能验收。
 
-次要诊断也应随后修正：`mx-launcher/scripts/k8s-control-plane.sh:70/:79` 固定检查旧服务并提示裸 crictl；`mx-launcher/scripts/k8s-database-inventory.mjs:207` 只有旧 runtime 路径候选。旧 `mx-launcher/scripts/k8s.migrate.sh` 整体搬动共享 containerd，不适用于本次迁移。
+## 中性主机描述协议
 
-## 现有 Launcher 解析的陷阱
+正式激活标记固定为 `/etc/mx-k8s-runtime/active.json`，解析器固定为 `/usr/local/lib/mx-k8s-runtime/resolve.py`，由 `python3` 调用。标记存在或是悬空符号链接时，都进入 managed 分支；描述无效、helper 缺失或检查失败时不得回退旧共享 socket。Pay 不依赖 Launcher 源码或 mx-move 仓库位置。
 
-可复用“显式覆盖值必须与 kubelet 实际 CRI 一致”的原则，但不应直接 source 整个生产恢复模块。
+当前描述 schema 版本为 1，phase 必须为 `active`，字段包括 hostname、根文件系统 UUID、address/root/state/service、config_path/config_sha256、kubelet_config_path。它不含凭据；描述须为 root 所有的 0644 普通文件，目标 TOML 为私有 0600，祖先路径受保护。工具把文件作为数据解析，不 `source` 执行。**候选 `candidate.json` 与 prepared 回执不等于 active 描述；本轮工具不会发布 active.json，不能手工伪造来提前激活。**
 
-- 当前先读 `/var/lib/kubelet/config.yaml`，再读 `instance-config.yaml`，后者会覆盖前者；instance-config 是 kubeadm 实例信息，不能无条件压过 kubelet 实际配置。
-- 当前读取固定 config 路径，未跟随运行进程的 `--config`。应先读取运行 kubelet 的完整参数，CLI `--container-runtime-endpoint` 优先，再读取其实际配置文件。
-- 当前用 `pgrep -xo kubelet` 选进程。应核对预期 systemd unit 的 MainPID、进程身份与配置，避免多个 kubelet 时选错。
-- socket 存在且 `ctr version` 成功，只证明某个 containerd 可达；还需要 kubelet endpoint 一致性和显式 CRI 查询。用于停启的 service、用于容量检查的 root 也必须与同一实例绑定。
-- kubelet 停止时不应猜测新旧实例。使用受保护的迁移回执及配置验证；信息冲突即停止依赖操作，不能回退旧共享 socket。
+解析器提供 `address`、`root`、`service`、`cri-endpoint` 四个字段；返回前核对描述、配置摘要和有效路径、根卷身份、服务进程/参数，以及 kubelet 实际使用的 socket。地址不是仅凭“文件存在”或 `ctr version` 成功就被采纳。
 
-## 建议的中性主机描述协议（尚未实现）
+`--allow-stopped-kubelet` 仅用于 `service` / `root` 的启动恢复。停止的服务仍须满足配置与身份约束，运行中的进程仍需核验；它不允许跳过 endpoint 核验取得 address，也不允许旧实例回退。没有标记时保留各产品原有环境适配，不安装全局 ctr 替身，不改变 Docker 默认 socket。
 
-由 mx-move 在正式切换事务中原子发布 root-owned 描述文件和只读 helper；具体路径在实现时固定，不要求 Pay 或其他产品依赖 Launcher。`prepare-runtime` 的候选配置不是生效描述。
+Launcher 停止服务后的恢复若带有显式 `MX_K8S_CONTAINERD_ADDRESS`，会提示先 `unset MX_K8S_CONTAINERD_ADDRESS`，再由受保护描述选择实例。普通在线调用仍核对显式值与已验证地址一致。
 
-描述至少包含 schema 版本、阶段（prepared / active）、节点与集群身份、K8s runtime address/root/state/systemd service、有效配置摘要及迁移回执标识。仅正式切换并验证完成的 active 描述可供普通应用使用。文件及父目录不得由普通用户写入，作为数据解析，不通过 `source` 执行。
+## Launcher 旧解析问题的处理
 
-应用仍保留现有业务 wrapper，只把 K8s runtime 选择委托给中性 helper：
+未迁移节点的发现顺序现为：运行 kubelet 的 `--container-runtime-endpoint`，其次其实际 `--config` 文件，最后才是 kubeadm `instance-config.yaml` 的回退。后者不再覆盖已发现的 kubelet 配置。优先读取 systemd MainPID；保留旧节点所需的进程发现回退。
 
-1. 有 active 描述时，验证描述、目标配置、运行 kubelet endpoint 一致；显式传入 `ctr --address ... -n k8s.io` 或 crictl 两个 endpoint。
-2. 显式 `MX_K8S_CONTAINERD_ADDRESS` 不能绕过一致性检查。服务和 root 必须来自同一描述，不能各自独立猜测。
-3. 描述存在但不完整、不一致、socket 不可用或 helper 缺失时，迁移节点失败退出，不回退旧实例。
-4. 未迁移节点维持现有环境适配，包括 k3s；Pay 通过 SSH 在目标节点执行发现和检查。
-5. 不在全局 PATH 放置 ctr 替身，不更改全局 containerd 默认 socket；避免把 Docker 的工具调用一并重定向。
+managed 节点使用中性解析器核对 systemd 服务、进程和 socket 身份，不依赖上述固定路径猜测。配置/CLI 冲突、描述异常或缺盘不能用默认 socket 掩盖。辅助的历史数据库目录探测等入口不属于切换依据，实际迁移仍以本机盘点和事务记录为准。
 
-## Docker BuildKit 必须继续使用旧实例
+## Docker BuildKit 保留旧实例
 
-以下调用先在独立 namespace 拉镜像，再 `docker load`，属于 Docker 构建流程：
+以下拉取后 `docker load` 的构建流程继续使用旧运行时：
 
-| 入口 | 保留的 namespace |
+| 文件 / 函数 | namespace |
 | --- | --- |
-| `mx-launcher/scripts/launcher-build-proxy.sh:72/:79/:81` | `mx-launcher-build-proxy` |
-| `mx-base/mx-pay/scripts/build-proxy.sh:46/:47` | `mx-pay-build-proxy` |
-| `mx-rig/scripts/build-proxy.sh:81/:82` | `mx-rig-build-proxy` |
+| `mx-launcher/scripts/launcher-build-proxy.sh` 的 bootstrap 拉取/导出 | `mx-launcher-build-proxy` |
+| `mx-base/mx-pay/scripts/build-proxy.sh` 的 `pay_proxy_bootstrap_image` | `mx-pay-build-proxy` |
+| `mx-rig/scripts/build-proxy.sh` 的 `rig_proxy_bootstrap_image` | `mx-rig-build-proxy` |
 
-Pay/Rig 的 proxy ctr 通用函数同时服务 Docker bootstrap 和 K8s PostgreSQL，需按用途选择实例；不能全局追加新 K8s 地址。Docker root、卷和既有 namespace 均不搬迁。
+Pay/Rig 仅把 `k8s.io` 调用导向 managed 实例。Docker root、卷和原 namespace 都不搬迁；不能对整个 proxy ctr 函数或全局 PATH 无差别替换地址。
 
-`mx-launcher/scripts/k8s-recovery-state.mjs:54` 对旧 `/var/lib/containerd` 的身份记录继续保留，因为旧实例确实不动。新 K8s runtime 增加独立身份记录；不得把旧记录无条件替换为新路径而掩盖 Docker 存储变化。
+Launcher `k8s-recovery-state.mjs` 对旧 `/var/lib/containerd` 的身份记录继续保留，因为旧实例确实不动。新 K8s runtime 使用独立记录；不能通过删除旧身份文件或停用保护绕过检查。旧 `mx-launcher/scripts/k8s.migrate.sh` 会整体移动共享 containerd，不适用于本次迁移。
 
-## 正式切换前后的验收要求
+## 切换后的验收仍待完成
 
-- 自动化覆盖默认节点、新独立 socket、CLI/config 冲突、kubelet 停止、描述损坏、sudo 参数传递、Pay 远端节点解析及 k3s 兼容。
-- 用各产品的普通发布入口验证镜像交付；在新实例导入后，通过 kubelet 对应 CRI 验证镜像并确认 Pod 实际启动。仅查 ctr 列表不算通过。
-- 镜像导入后的镜像 GC / 磁盘检查指向新 root；旧共享 runtime 的 namespace 与 Docker 卷保持不变。
-- `repair-cni` 的测试应证明只选择新 K8s service 与 endpoint，不重启旧 containerd 或 Docker；验证后节点和网络恢复 Ready。
-- 保留并核对 Launcher、common、Pay、Rig 的数据库身份、PV/PVC UID、Secret 和用户凭据；完成 MX-H2I 原用户登录与联网回归。
-- 这些兼容改造和验收完成前，不能把“prepare-runtime 成功”视为允许执行完整切换。
+- 各产品普通发布应在新实例导入镜像，并通过 kubelet 对应 CRI 核对 image ID/引用及实际 Pod 启动；仅查 ctr 名称列表不算通过。
+- 检查容量/镜像 GC 使用新 root，同时旧共享 runtime 的 namespace、Docker 容器和卷保持原身份。
+- 在维护范围内验收 `repair-cni` 的服务选择、节点 Ready、DNS 和联网；离线“不重启旧服务”断言不能替代现场验证。
+- 完整切换前必须实现各数据库备份和停写、原 `k8s.io` tasks/sandboxes 归零、kubelet 子挂载处理、数据副本校验、Launcher/common/Pay 身份与启动保护同步，以及允许新数据写入前的事务记录。
+- 切换后核对数据库 system ID、PV/PVC UID、Secret 和用户凭据连续性，并实测 MX-H2I 原用户登录、联网、SSO 与 Pay。不得以候选 `candidate-ready` 替代这些结果。
+
+当前可执行的下一步是[安装无业务工作负载的候选实例](runtime-installation.md)；完整业务 cutover、回迁及灾难恢复没有因此自动完成。
