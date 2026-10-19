@@ -260,7 +260,7 @@ def child_run(command, cwd, env, lock_fd):
                 code = child.wait(timeout=15)
                 break
             except subprocess.TimeoutExpired:
-                say("子项目仍在执行，已耗时 {} 秒；未自动重试".format(int(time.monotonic() - started)))
+                say("本次项目部署仍在执行，总耗时 {} 秒（非当前阶段耗时）；未自动重试".format(int(time.monotonic() - started)))
         return 128 + received[0] if received else (128 - code if code < 0 else code)
     finally:
         for number, handler in previous.items():
