@@ -263,12 +263,12 @@ class MainDispatchTests(unittest.TestCase):
             finally:
                 lock['held'] = False
         def read_private(file):
-            if action not in ('status', 'docker-check'):
+            if action not in ('status', 'docker-check', 'workload-check'):
                 self.assertTrue(lock['held'], 'CURRENT read before acquiring migration lock')
             self.assertEqual(file, cutover.CURRENT)
             return {'transaction': TRANSACTION}
         def read(path_value):
-            if action not in ('status', 'docker-check'):
+            if action not in ('status', 'docker-check', 'workload-check'):
                 self.assertTrue(lock['held'], 'journal read before acquiring migration lock')
             self.assertEqual(path_value, path)
             return cutover.raw_json(data)
@@ -336,6 +336,38 @@ class MainDispatchTests(unittest.TestCase):
                 self.assertFalse(result['historical_failure_reconstructed'])
                 self.assertNotIn('/private-new-docker-root', output.getvalue())
                 host.docker_snapshot.assert_called_once_with()
+                persist.assert_not_called()
+                resume.assert_not_called()
+                host.verify.assert_not_called()
+                host.run.assert_not_called()
+                self.assertFalse(lock['held'])
+
+    def test_workload_check_reports_committed_drift_without_changing_transaction_or_services(self):
+        for changed in (False, True):
+            with self.subTest(changed=changed), ExitStack() as stack:
+                host, data, lock = self.fixture(stack, 'workload-check')
+                data.update(phase='committed', may_write=True)
+                detail = {'schema_version': 1, 'workload_set_equal': not changed,
+                          'equivalent': not changed, 'differences': []}
+                host.cluster.workload_changes.return_value = detail
+                before = copy.deepcopy(data)
+                persist = stack.enter_context(mock.patch.object(cutover.Move, 'persist'))
+                resume = stack.enter_context(mock.patch.object(cutover.Move, 'resume'))
+                output = io.StringIO()
+                stack.enter_context(contextlib.redirect_stdout(output))
+                if changed:
+                    with self.assertRaises(SystemExit) as caught:
+                        cutover.main(['workload-check'])
+                    self.assertEqual(caught.exception.code, 2)
+                else:
+                    cutover.main(['workload-check'])
+                result = json.loads(output.getvalue())
+                self.assertEqual(result['equivalent'], not changed)
+                self.assertEqual(result['transaction_phase'], 'committed')
+                self.assertTrue(result['may_write'])
+                self.assertFalse(result['service_changes'])
+                self.assertEqual(data, before)
+                host.cluster.workload_changes.assert_called_once_with(data['cluster'])
                 persist.assert_not_called()
                 resume.assert_not_called()
                 host.verify.assert_not_called()

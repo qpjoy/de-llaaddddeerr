@@ -5,6 +5,7 @@ move storage, stop runtimes, restore Secrets, deploy manifests or initialize DBs
 Host.run must return bytes and hide subprocess output on failure.
 """
 import copy
+import datetime
 import hashlib
 import json
 import re
@@ -49,6 +50,66 @@ HOST_PATHS = {'/run/flannel', '/opt/cni/bin', '/etc/cni/net.d', '/run/xtables.lo
               '/etc/ssl/certs', '/etc/pki/ca-trust', '/etc/pki/tls/certs',
               '/etc/kubernetes/controller-manager.conf', '/etc/kubernetes/scheduler.conf'}
 VOLUME_KINDS = {'hostPath', 'persistentVolumeClaim', 'secret', 'configMap', 'projected', 'emptyDir', 'downwardAPI'}
+WORKLOAD_REPORT_KINDS = ('deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs', 'hpa')
+
+
+def _workload_report_time(value):
+    if value is None:
+        return None
+    require(isinstance(value, str), 'invalid workload report timestamp; raw values hidden')
+    match = re.fullmatch(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))', value)
+    require(match is not None, 'invalid workload report timestamp; raw values hidden')
+    try:
+        datetime.datetime.strptime(match.group(1), '%Y-%m-%dT%H:%M:%S')
+    except ValueError:
+        raise ClusterError('invalid workload report timestamp; raw values hidden') from None
+    require(match.group(2) is None or int(match.group(2)) <= 23 and int(match.group(3)) <= 59,
+            'invalid workload report timestamp; raw values hidden')
+    return value
+
+
+def _workload_report_summary(kind, obj):
+    """Project only validated object identities and bounded Job lifecycle fields."""
+    require(isinstance(obj, dict) and isinstance(obj.get('metadata'), dict),
+            'invalid workload report metadata; raw values hidden')
+    metadata = obj['metadata']
+    namespace, name, uid = (metadata.get(field) for field in ('namespace', 'name', 'uid'))
+    label = r'[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?'
+    require(isinstance(namespace, str) and re.fullmatch(label, namespace) is not None and
+            isinstance(name, str) and len(name) <= 253 and
+            all(re.fullmatch(label, part) is not None for part in name.split('.')) and
+            isinstance(uid, str) and re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', uid) is not None,
+            'invalid workload report identity; raw values hidden')
+    result = {'namespace': namespace, 'name': name, 'uid': uid}
+    if kind == 'jobs':
+        spec, status = obj.get('spec', {}), obj.get('status', {})
+        require(isinstance(spec, dict) and isinstance(status, dict),
+                'invalid workload report Job fields; raw values hidden')
+        conditions = status.get('conditions', [])
+        require(isinstance(conditions, list) and all(isinstance(c, dict) for c in conditions),
+                'invalid workload report Job fields; raw values hidden')
+        terminal = {c.get('type') for c in conditions
+                    if c.get('type') in ('Complete', 'Failed') and c.get('status') == 'True'}
+        active, ttl = status.get('active', 0), spec.get('ttlSecondsAfterFinished')
+        require(len(terminal) <= 1 and type(active) is int and active >= 0 and
+                (ttl is None or type(ttl) is int and ttl >= 0),
+                'invalid workload report Job fields; raw values hidden')
+        result.update({'terminal': next(iter(terminal)) if terminal else None,
+                       'active': active > 0, 'ttl_seconds_after_finished': ttl,
+                       'completion_time': _workload_report_time(status.get('completionTime')),
+                       'deleting': bool(metadata.get('deletionTimestamp'))})
+    return result
+
+
+def _workload_report_index(kind, items):
+    require(isinstance(items, list), 'invalid workload report inventory; raw values hidden')
+    result = {}
+    for obj in items:
+        summary = _workload_report_summary(kind, obj)
+        identity = (summary['namespace'], summary['name'])
+        require(identity not in result, 'duplicate workload report identity; raw values hidden')
+        result[identity] = summary
+    return result
 
 
 def key(obj):
@@ -346,6 +407,25 @@ class Cluster:
                 return state
             require(time.monotonic() < deadline, 'Elasticsearch snapshot is still running; databases were not stopped')
             time.sleep(5)
+
+    def workload_changes(self, plan):
+        """Read-only set/UID diagnostics; this does not replace migration guards."""
+        require(isinstance(plan, dict) and isinstance(plan.get('objects'), dict),
+                'invalid workload report baseline; raw values hidden')
+        differences, same_set = [], True
+        for kind in WORKLOAD_REPORT_KINDS:
+            before = _workload_report_index(kind, plan['objects'].get(kind))
+            after = _workload_report_index(kind, self.listing(kind))
+            missing = [before[k] for k in sorted(set(before) - set(after))]
+            added = [after[k] for k in sorted(set(after) - set(before))]
+            replaced = [{'before': before[k], 'after': after[k]}
+                        for k in sorted(set(before) & set(after)) if before[k]['uid'] != after[k]['uid']]
+            if missing or added:
+                same_set = False
+            if missing or added or replaced:
+                differences.append({'kind': kind, 'missing': missing, 'added': added, 'replaced': replaced})
+        return {'schema_version': 1, 'workload_set_equal': same_set,
+                'equivalent': not differences, 'differences': differences}
 
     def assert_workloads(self, plan, pay_mount_root=None):
         """Refuse concurrent controllers or templates outside this transaction."""

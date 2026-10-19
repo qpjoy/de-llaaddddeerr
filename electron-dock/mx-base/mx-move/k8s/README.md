@@ -12,6 +12,7 @@
 | `migrate` | 维护窗口内停写、备份、冷复制五个数据根、切换挂载和 kubelet，再恢复原工作负载并验收。 |
 | `status` / `verify` | 分别只读最近事务、只读核验已提交的新副本。 |
 | `docker-check` | 只读比较当前 Docker 与最近事务预检基线，输出字段级脱敏差异，不停止服务。 |
+| `workload-check` | 只读列出工作负载集合增删、同名 UID 替换及 Job 生命周期摘要，不修改对象或基线。 |
 | `resume` | 提交前恢复原副本；提交后只继续恢复新副本。当前不提供 K8s `rollback`。 |
 | `resume --repair-rig-init` | 仅在已确认的停写后恢复故障中，受控补充 Rig 初始化容器权限，再恢复原业务。 |
 
@@ -23,13 +24,13 @@ Kubernetes 独占的业务目录和 kubelet 目录可保持逻辑路径，通过
 
 Launcher、Hub、mx-common、Pay、Rig 的镜像导入和相关修复入口已增加中性运行时解析适配；只有正式生效描述存在时才选择受验证的新实例。候选安装不创建该描述，所以普通发布继续使用原运行时。正式切换执行器在提交后发布该描述；不能重置集群或停用存储保护来绕过检查。
 
-用户已回传 `candidate-ready`：172 个镜像引用、71 个 CRI 镜像、工作负载 0，预备目录为 `/var/lib/mx-move/k8s-runtime-prep/mx-k8s-20261019-183524-ef985186`。正式事务 `mx-k8s-20261020-045344-8a34e06b` 在停写后因 Docker 比较不一致而退出；Rig 初始化权限修复后已为 `aborted / may_write=false / recovery_status=restored`，用户确认原 MX-H2I 登录、联网正常。业务数据尚未复制或切换，原归档和服务器身份配置继续保留。同步新增 `k8s/docker_compare.py`、更新后的 `k8s/cutover.py` 和 `scripts/manage.sh`，先以 root 在 **`electron-dock/mx-base` 目录**执行：
+上一事务退出并恢复原业务后，Docker 只读比较确认为 `equivalent=true`，差异仅 `mount_order`。用户随后执行的新一轮迁移已完成冷复制、提交并启用新副本；在最终验收的工作负载集合检查处报告 `workload set changed during migration`，事务仍为 `committed`。用户确认新副本上 MX-H2I 原账号登录、联网及 Pay 访问均正常，但自动验收尚未完成。**保留新副本作为权威数据，不挂回旧目录、不重跑 `migrate`。** 同步 `k8s/cluster_ops.py`、`k8s/cutover.py` 和 `scripts/manage.sh` 后，以 root 在 **`electron-dock/mx-base` 目录**执行：
 
 ```bash
-bash mx-move/scripts/manage.sh k8s docker-check
+bash mx-move/scripts/manage.sh k8s workload-check
 ```
 
-若已进入 **`electron-dock/mx-base/mx-move` 目录**，只把入口改成 `bash scripts/manage.sh`。先回传只读比较摘要，核对是否仅为列表顺序或成功重试提示差异，再安排下一次迁移。该查询不能重建历史失败现场，也不替代完整预检。具体步骤见[正式切换说明](cutover.md)。只贴终端摘要，不贴私有配置；不要重新导出/导入现有归档。
+若已进入 **`electron-dock/mx-base/mx-move` 目录**，只把入口改成 `bash scripts/manage.sh`。先回传工作负载差异摘要，确认具体变化后再向前完成验收。该查询不读取 Secret 或输出工作负载模板，不停止服务，也不替代完整验收。具体步骤见[正式切换说明](cutover.md)。只贴终端摘要，不贴私有配置；不要重新导出/导入现有归档。
 
 ## 执行只读检查
 

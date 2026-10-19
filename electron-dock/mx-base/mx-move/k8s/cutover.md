@@ -1,8 +1,8 @@
 # Internal Kubernetes 数据切换
 
-当前现场已回传 `candidate-ready`：172 个镜像引用、71 个 CRI 镜像、候选工作负载 0。独立服务为 `mx-k8s-containerd.service`，socket 为 `/run/mx-k8s-containerd/containerd.sock`。**保留现有预备目录和归档，不重新导出或导入。正式迁移已退出，Rig 初始化权限修复后原业务恢复，MX-H2I 原用户登录和联网已确认正常；下一步先运行 `docker-check` 核对迁移阻断。**
+最新一轮迁移已完成冷复制并提交新副本，独立服务为 `mx-k8s-containerd.service`，socket 为 `/run/mx-k8s-containerd/containerd.sock`。**当前为 `committed`，最终工作负载集合验收未通过；用户确认新副本上 MX-H2I 原用户登录、联网和 Pay 访问正常。保留新副本，不挂回旧目录、不重跑 `migrate`，先运行 `workload-check`。**
 
-当前正式事务为 `mx-k8s-20261020-045344-8a34e06b`，最新回传 `phase=aborted / may_write=false / recovery_status=restored`。原终端已确认触发恢复的异常为 `停写期间 Docker 状态或挂载发生变化`，发生在 ES 快照与停写成功之后、冷复制与挂载切换之前。`automatic_checks_passed=false` 表示迁移后的自动验收尚未执行，不否定此次原业务恢复。
+历史事务 `mx-k8s-20261020-045344-8a34e06b` 已为 `aborted / may_write=false / recovery_status=restored`；随后 Docker 查询回传 `equivalent=true / ignored_differences=[mount_order]`。最新迁移的错误为 `phase=committed / workload set changed during migration`，位置 `Host.verify → Cluster.assert_workloads`；此前数据库和应用副本、网络就绪等待已返回。当前新事务 ID 由 `status` 或 `workload-check` 输出，不能继续使用旧 aborted 事务 ID。
 
 ## 维护前同步
 
@@ -25,7 +25,19 @@
 
 以下命令均以 **root** 在服务器的 **`electron-dock/mx-base` 目录**执行。若已在 `mx-move` 目录，只将入口改为 `bash scripts/manage.sh`。
 
-### 当前 Docker 比较阻断
+### 当前已提交事务的工作负载验收
+
+在服务器同步 `k8s/cluster_ops.py`、`k8s/cutover.py` 和 `scripts/manage.sh` 后运行：
+
+```bash
+bash mx-move/scripts/manage.sh k8s workload-check
+```
+
+命令只读六类控制器：Deployment、StatefulSet、DaemonSet、Job、CronJob、HPA，比较最近事务记录和当前对象集合、UID。输出只包含 namespace/name/UID 和固定的 Job 终态、活动标记、TTL、完成时间、删除标记；不输出模板、环境变量、Secret、日志、注解或完整 API 对象，不改基线、不创建或删除 Job。`differences` 列出缺失、新增、同名替换对象；`workload_set_equal` 只判断集合，`equivalent` 还核对 UID。退出码 0 表示集合和 UID 一致，2 表示有差异，1 表示检查无法完成。
+
+已完成 Job 的 TTL 清理是候选原因，恢复后的应用创建新 Job 也是候选；必须先核对实际差异，不能直接忽略所有 Job 或以当前集合覆盖原基线。此命令只定位集合和 UID 变化，不代表模板、凭据、数据库或整体迁移验收已经通过。原因处理后使用 `resume` 在新副本上向前完成恢复与验收；提交后的 `resume` 不重复冷复制，也不退回旧副本。
+
+### 历史 Docker 比较阻断
 
 旧程序直接比较整份 Docker 盘点记录，包含每个容器原序的 `.Mounts` 和成功重试后留下的 `diagnostics`。Moby 的旧实现从映射生成挂载列表，返回顺序可能变化，见[官方排序修复](https://github.com/moby/moby/commit/ff0b471f2091c7b7be351cee44c2a013fb6914d7)。这两项非业务差异会造成误报，但旧事务未保存失败当时的后快照，不能据此认定本次没有真实 Docker 状态变化。
 

@@ -16,6 +16,7 @@ mx-move k8s — Internal Kubernetes 存储迁移（保留 Docker 数据与现有
   migrate                               维护窗口：停写、冷复制、切换和验收
   status                                读取最近事务摘要
   docker-check                          只读比较当前 Docker 与最近事务基线
+  workload-check                        只读列出工作负载增删及 UID 替换差异
   resume                                提交前恢复原副本；提交后向前恢复
   resume --repair-rig-init              修复已确认的 Rig 初始化权限故障，再恢复原服务
   verify                                只读核验已提交的新副本
@@ -25,7 +26,7 @@ mx-move k8s — Internal Kubernetes 存储迁移（保留 Docker 数据与现有
 HELP
       exit 0
       ;;
-    cutover-check|prepare-check|migrate|status|resume|verify|docker-check)
+    cutover-check|prepare-check|migrate|status|resume|verify|docker-check|workload-check)
       exec python3 -B "$SCRIPT_DIR/../k8s/cutover.py" "$@"
       ;;
   esac

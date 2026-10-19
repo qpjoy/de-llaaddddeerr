@@ -974,7 +974,7 @@ def load_move(host):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='本机 Kubernetes 业务存储切换；仅维护窗口执行 migrate，Docker 数据不迁移')
-    parser.add_argument('action', choices=('cutover-check', 'prepare-check', 'migrate', 'status', 'resume', 'verify', 'docker-check'))
+    parser.add_argument('action', choices=('cutover-check', 'prepare-check', 'migrate', 'status', 'resume', 'verify', 'docker-check', 'workload-check'))
     parser.add_argument('--repair-rig-init', action='store_true',
                         help='仅用于 resume：受控修复已确认的 Rig 初始化权限故障，再恢复原服务')
     args = parser.parse_args(argv)
@@ -983,6 +983,18 @@ def main(argv=None):
     require(sys.platform.startswith('linux') and os.geteuid() == 0, '请以 root 在 Internal Linux 主机执行')
     os.umask(0o077)
     host = Host()
+    if args.action == 'workload-check':
+        move = load_move(host)
+        with prep.progress('只读比较当前工作负载集合与最近事务基线；不修改业务'):
+            detail = host.cluster.workload_changes(move.journal['cluster'])
+        result = dict(detail, phase='workloads-checked', transaction=move.journal['transaction'],
+                      transaction_phase=move.journal['phase'], may_write=move.journal['may_write'],
+                      comparison='current-vs-retained-preflight', service_changes=False,
+                      historical_failure_reconstructed=False)
+        print(json.dumps(result, ensure_ascii=True, indent=2))
+        if not detail['equivalent']:
+            raise SystemExit(2)
+        return
     if args.action == 'docker-check':
         move = load_move(host)
         with prep.progress('只读比较当前 Docker 与最近事务基线；不停止业务'):
