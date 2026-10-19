@@ -81,6 +81,43 @@ class DockerSnapshotTests(unittest.TestCase):
                     self.assertRaises(cutover.prep.Refuse):
                 host.docker_snapshot()
 
+    def test_incomplete_probe_exposes_only_diagnostic_fields_and_counts(self):
+        host, report, commands, values = self.fixture(complete=False)
+        report.update(total=2, inspected_total=1, containers_complete=False,
+                      diagnostics=[{'stage': 'inspect container command', 'reason': 'object_not_found',
+                                    'container_id': IDS[1], 'exit_code': 1, 'stderr': 'private-stderr'}])
+        report['info']['name'] = 'private-host-name'
+        report['containers'][0]['name'] = 'private-container-name'
+        with mock.patch.object(cutover.prep.probe.RuntimeInspector, 'docker_local', return_value=report):
+            with self.assertRaises(cutover.prep.Refuse) as caught:
+                host.docker_snapshot()
+        message = str(caught.exception)
+        summary = json.loads(message.split('docker_diagnostics=', 1)[1])
+        self.assertEqual(summary, {'info_available': True, 'total': 2, 'inspected_total': 1,
+                                   'containers_complete': False, 'diagnostics': [
+                                       {'stage': 'inspect container command', 'reason': 'object_not_found',
+                                        'container_id': IDS[1], 'exit_code': 1}]})
+        self.assertNotIn('private-', message)
+        self.assertNotIn('/data/docker', message)
+        self.assertFalse(commands)
+
+    def test_real_probe_timeout_categories_reach_cutover_without_raw_output(self):
+        host, report, commands, values = self.fixture()
+        probe = cutover.prep.probe
+        timeout = probe.subprocess.TimeoutExpired('private-command', 30, output=b'private-output', stderr=b'private-stderr')
+        with mock.patch.object(probe.subprocess, 'run', side_effect=timeout) as run:
+            with self.assertRaises(cutover.prep.Refuse) as caught:
+                host.docker_snapshot()
+        message = str(caught.exception)
+        summary = json.loads(message.split('docker_diagnostics=', 1)[1])
+        self.assertEqual(summary, {'info_available': False, 'total': None, 'inspected_total': 0,
+                                   'containers_complete': False, 'diagnostics': [
+                                       {'stage': 'info command', 'reason': 'timeout'},
+                                       {'stage': 'list command', 'reason': 'timeout'}]})
+        self.assertEqual(run.call_count, 2)
+        self.assertNotIn('private-', message)
+        self.assertFalse(commands)
+
 
 class PayPatchTests(unittest.TestCase):
     def test_only_patch_array_is_written_and_empty_wrapper_does_not_patch(self):

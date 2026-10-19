@@ -188,7 +188,16 @@ class Host:
 
     def docker_snapshot(self):
         docker = prep.probe.RuntimeInspector().docker_local()
-        require(docker.get('complete') is True, 'Docker 本机消费者盘点不完整')
+        if docker.get('complete') is not True:
+            # docker_local already classifies failures without command output.
+            # Project only its diagnostic fields, never info/container payloads.
+            diagnostics = [{key: item[key] for key in ('stage', 'reason', 'exit_code', 'container_id', 'retry')
+                            if key in item} for item in docker.get('diagnostics', [])]
+            summary = {'info_available': docker.get('info') is not None,
+                       'total': docker.get('total'), 'inspected_total': docker.get('inspected_total'),
+                       'containers_complete': docker.get('containers_complete'), 'diagnostics': diagnostics}
+            raise prep.Refuse('Docker 本机消费者盘点不完整；docker_diagnostics=' +
+                              json.dumps(summary, ensure_ascii=True, separators=(',', ':')))
         command = ['docker', '--host=unix:///var/run/docker.sock']
         ids = sorted(self.run(command + ['ps', '-aq', '--no-trunc']).decode().split())
         require(ids == sorted(v['id'] for v in docker['containers']), 'Docker 容器集合在盘点期间变化')

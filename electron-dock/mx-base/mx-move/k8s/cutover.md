@@ -41,6 +41,14 @@ bash mx-move/scripts/manage.sh k8s cutover-check
 
 若报 `stacked mounts are unsupported`，表示全机挂载清单存在重复的挂载点路径，单凭旧报错无法判断它是否涉及迁移目录。新版 `k8s/storage_ops.py` 在同一报错的 `duplicate_targets` 中输出全部重复路径和层数，不输出挂载源或选项。回传此摘要后再确认范围；工具继续拒绝自动去重或卸载挂载层，因为这可能改变可见的数据目录。
 
+也可在服务器执行下面的只读命令列出重复挂载点；`--raw` 已提供无树形前缀的输出，无需叠加 `--list`（部分版本会报参数互斥，见 [findmnt 文档](https://kernel.googlesource.com/pub/scm/utils/util-linux/util-linux/+/refs/tags/v2.28.1/misc-utils/findmnt.8)）。
+
+```bash
+findmnt --raw --noheadings --output TARGET | sort | uniq -cd
+```
+
+若报 `Docker 本机消费者盘点不完整`，同步 `k8s/cutover.py` 后重跑预检并回传 `docker_diagnostics`。它显示 Docker info 是否取得、容器总数/已核验数，以及失败阶段、原因分类、退出码和相关容器 ID；不输出完整 inspect、环境变量或命令原始错误。`timeout` 表示该条 Docker 命令触及 30 秒上限，`daemon_unavailable` 表示连接失败，`template_error` 或 `invalid_or_incomplete_response` 需要检查 CLI 返回兼容性。总体预检已运行 60 秒不等于 Docker 命令必定超时；在完整盘点前仍拒绝切换，不重启 Docker 或迁移其数据。
+
 **仅在已安排的维护窗口执行：**
 
 ```bash
