@@ -102,12 +102,27 @@ def properties(run):
     require(isinstance(raw, bytes) and len(raw) <= 1024 * 1024)
     require(not any(flag in raw for flag in FORBIDDEN),
             'effective kubelet environment or command contains an endpoint/root override')
-    values = {}
+    values, environment_rows, environment_key = {}, [], None
     for line in raw.decode('utf-8').splitlines():
         key, separator, value = line.partition('=')
+        if separator and key in ('EnvironmentFile', 'EnvironmentFiles'):
+            # systemd prints this array once per file, using the singular
+            # name in v219 and the plural name in v239/v252. Preserve order:
+            # later environment files may override earlier assignments.
+            require(environment_key in (None, key), 'systemctl mixed environment file property formats')
+            environment_key = key
+            environment_rows.append(value)
+            continue
         require(separator and key in PROPERTIES and key not in values,
                 'systemctl returned an ambiguous kubelet configuration')
         values[key] = value
+    require(len(environment_rows) <= 1 or all(environment_rows),
+            'systemctl mixed empty and repeated environment file entries')
+    for row in environment_rows:
+        environment_files(row)  # Never join incomplete entries across rows.
+    # An empty EnvironmentFiles array produces no row, even with --all.
+    # All scalar properties below must still be present exactly once.
+    values['EnvironmentFiles'] = ' '.join(environment_rows)
     require(set(values) == set(PROPERTIES) and values['LoadState'] == 'loaded')
     canonical(values['FragmentPath'])
     dropins = values['DropInPaths'].split()

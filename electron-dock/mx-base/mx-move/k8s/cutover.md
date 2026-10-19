@@ -33,6 +33,8 @@ bash mx-move/scripts/manage.sh k8s cutover-check
 
 预期摘要为 `phase=preflight-passed`、`execution_started=false`。检查当前节点/集群、候选与旧运行时、产品入口、全部挂载、Docker 消费者、原数据库/卷/凭据身份及目标空间；不建立正式迁移事务或修改服务。检查可使用私有临时请求文件和操作锁，它们不是业务迁移。
 
+若旧版工具在此时报 `systemctl returned an ambiguous kubelet configuration`，先同步 `k8s/endpoint_config.py` 的兼容修复，再重跑同一预检，无需重启服务、执行 `daemon-reload` 或重新导入镜像。[systemd v219](https://raw.githubusercontent.com/systemd/systemd/v219/src/systemctl/systemctl.c) 会将环境文件逐条输出为 `EnvironmentFile=…`，[v239](https://raw.githubusercontent.com/systemd/systemd/v239/src/systemctl/systemctl.c) 和 [v252](https://raw.githubusercontent.com/systemd/systemd/v252/src/systemctl/systemctl-show.c) 使用逐条 `EnvironmentFiles=…`；空数组可能完全省略该字段。解析器现按原顺序统一这些格式，仍拒绝重复路径、重复标量属性、多个启动命令和端点覆盖。
+
 **仅在已安排的维护窗口执行：**
 
 ```bash

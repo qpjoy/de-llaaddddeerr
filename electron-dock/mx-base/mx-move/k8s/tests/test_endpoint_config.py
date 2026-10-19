@@ -149,6 +149,64 @@ class ReceiptTests(unittest.TestCase):
         with self.assertRaises(config.EndpointError):
             config.properties(lambda args: fixture.run(args) + b'Environment=ambiguous\n')
 
+    def test_systemd_environment_file_rows_normalize_to_the_same_receipt(self):
+        fixture = Fixture()
+        expected = fixture.snapshot()
+        raw = fixture.run([])
+        combined = ('EnvironmentFiles=' + fixture.values['EnvironmentFiles'] + '\n').encode()
+        for key in ('EnvironmentFile', 'EnvironmentFiles'):
+            rows = ('{key}={flags} (ignore_errors=no)\n{key}={optional} (ignore_errors=yes)\n'
+                    .format(key=key, flags=FLAGS, optional=OPTIONAL)).encode()
+            observed = raw.replace(combined, rows)
+            with self.subTest(key=key), mock.patch.object(config, 'protected_file', side_effect=fixture.protected):
+                receipt = config.snapshot(lambda args: observed)
+                self.assertEqual(receipt, expected)
+                self.assertEqual(config.verify(fixture.run, receipt), receipt)
+                self.assertEqual(config.verify(lambda args: observed, expected), expected)
+
+    def test_systemd_empty_environment_array_may_be_omitted_even_with_all(self):
+        fixture = Fixture()
+        fixture.values['EnvironmentFiles'] = ''
+        raw = fixture.run([])
+        expected = fixture.snapshot()
+        self.assertEqual(set(expected['files']), {FRAGMENT, DROPIN})
+        for replacement in (b'', b'EnvironmentFile=\n', b'EnvironmentFiles=\n'):
+            observed = raw.replace(b'EnvironmentFiles=\n', replacement)
+            with self.subTest(replacement=replacement), mock.patch.object(config, 'protected_file', side_effect=fixture.protected):
+                self.assertEqual(config.snapshot(lambda args: observed), expected)
+
+    def test_repeated_environment_file_rows_preserve_order_and_ignore_errors(self):
+        fixture = Fixture()
+        expected = fixture.snapshot()
+        raw = fixture.run([])
+        combined = ('EnvironmentFiles=' + fixture.values['EnvironmentFiles'] + '\n').encode()
+        changes = [
+            ('EnvironmentFile={optional} (ignore_errors=yes)\nEnvironmentFile={flags} (ignore_errors=no)\n'),
+            ('EnvironmentFile={flags} (ignore_errors=yes)\nEnvironmentFile={optional} (ignore_errors=yes)\n'),
+        ]
+        for changed in changes:
+            observed = raw.replace(combined, changed.format(flags=FLAGS, optional=OPTIONAL).encode())
+            with self.subTest(changed=changed), self.assertRaises(config.EndpointError):
+                config.verify(lambda args: observed, expected)
+
+    def test_array_compatibility_does_not_accept_ambiguous_or_missing_scalar_properties(self):
+        fixture = Fixture()
+        raw = fixture.run([])
+        combined = ('EnvironmentFiles=' + fixture.values['EnvironmentFiles'] + '\n').encode()
+        file_row = ('EnvironmentFile=' + FLAGS + ' (ignore_errors=no)\n').encode()
+        invalid = [
+            raw + b'LoadState=loaded\n', raw + ('ExecStart=' + COMMAND + '\n').encode(),
+            raw + b'UnknownField=private-value-must-not-leak\n', raw.replace(b'LoadState=loaded\n', b''),
+            raw.replace(combined, file_row * 2), raw.replace(combined, file_row + b'EnvironmentFile=\n'),
+            raw.replace(combined, file_row + ('EnvironmentFiles=' + OPTIONAL + ' (ignore_errors=yes)\n').encode()),
+            raw.replace(combined, b'EnvironmentFile=/path (ignore_errors=maybe)\n'),
+            raw.replace(combined, b'EnvironmentFile=/path\nEnvironmentFile=(ignore_errors=yes)\n'),
+        ]
+        for observed in invalid:
+            with self.subTest(observed=observed), self.assertRaises(config.EndpointError) as error:
+                config.properties(lambda args: observed)
+            self.assertNotIn('private-value-must-not-leak', str(error.exception))
+
 
 class ProtectedFileTests(unittest.TestCase):
     def fixture(self, stack, raw=b'KUBELET_EXTRA_ARGS=\n', inode=10, device=1):
