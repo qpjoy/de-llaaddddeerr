@@ -59,6 +59,7 @@ async function fixture(t) {
     );
   await pool.query(`CREATE SCHEMA external_platform; CREATE TABLE external_platform.ipsearch_batches(id uuid PRIMARY KEY,tenant_id uuid,consumer_id uuid,api_key_id uuid,idempotency_key text,response jsonb,created_at timestamptz DEFAULT now());
     CREATE SCHEMA hub_commerce;CREATE TABLE hub_commerce.orders(id uuid PRIMARY KEY,tenant_id uuid,consumer_id uuid,environment text DEFAULT 'live',intent jsonb,payment jsonb,payment_id uuid,receipt jsonb,created_at timestamptz DEFAULT now(),delivered_at timestamptz);`);
+  await pool.query("ALTER TABLE public.usage_requests ADD COLUMN IF NOT EXISTS acquisition_request jsonb");
   await pool.query(`CREATE TABLE hub_commerce.subscriptions(id uuid PRIMARY KEY);
     CREATE FUNCTION hub_commerce.immutable() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'immutable'; END$$;`);
   await pool.query(await readFile(new URL("../../migrations/144_customer_subscription_messages.sql",import.meta.url),"utf8"));
@@ -1107,6 +1108,64 @@ async function listen(t,app) {
   t.after(()=>new Promise(r=>{server.close(r);server.closeAllConnections()}));
   return `http://127.0.0.1:${server.address().port}`;
 }
+
+test('enterprise history reads old Hub v1/v2 batches and standalone deliveries without copying or dispatching', {skip:!connectionString}, async t => {
+  const f=await fixture(t), viewer=await f.principal(f.viewer), consumer=randomUUID(), key=randomUUID();
+  await f.pool.query("INSERT INTO consumers(id,tenant_id,name,business_id) VALUES($1,$2,'Legacy fixture',$3)",[consumer,f.tenant,consumer]);
+  await f.pool.query("INSERT INTO api_keys(id,tenant_id,consumer_id,name,key_digest,key_prefix,last_four) VALUES($1,$2,$3,'Legacy fixture',$4,'fixture','0000')",[key,f.tenant,consumer,'a'.repeat(64)]);
+  const envelope=ip=>({contractVersion:'mx-insight-hub.ip-risk.v1',requestId:randomUUID(),data:{ip,status:'success',data:{risk_level:'高风险'}}});
+  const batch1=randomUUID(),batch2=randomUUID();
+  for(const [id,version,ips] of [[batch1,'v1',['198.51.100.1','198.51.100.1']],[batch2,'v2',['198.51.100.2']]]) {
+    await f.pool.query('INSERT INTO external_platform.ipsearch_batches(id,tenant_id,consumer_id,api_key_id,response) VALUES($1,$2,$3,$4,$5)',[id,f.tenant,consumer,key,{contractVersion:`mx-insight-hub.ip-risk.${version}`,data:ips.map(ip=>({ip,status:200,response:envelope(ip)}))}]);
+  }
+  const singles=[];
+  for(const [ip,status,response,platform,intent] of [
+    ['198.51.100.3','committed',envelope('198.51.100.3'),'ip_risk','standalone-success'],
+    ['198.51.100.4','unknown',null,'ip_risk','standalone-unknown'],
+    ['198.51.100.2','committed',envelope('198.51.100.2'),'ip_risk',`ip-batch-${batch2}-0`],
+    ['198.51.100.5','committed',envelope('198.51.100.5'),'facebook','unrelated-platform'],
+  ]) {
+    const id=randomUUID();singles.push(id);
+    await f.pool.query('INSERT INTO usage_requests(id,tenant_id,consumer_id,api_key_id,idempotency_key,fingerprint,platform,status,response_status,response_body,acquisition_request) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',[id,f.tenant,consumer,key,intent,'b'.repeat(64),platform,status,response?200:null,response,{body:{ip}}]);
+  }
+  await f.pool.query('INSERT INTO external_platform.ipsearch_batches(id,tenant_id,response) VALUES($1,$2,$3)',[randomUUID(),f.other,{contractVersion:'mx-insight-hub.ip-risk.v1',data:[{ip:'198.51.100.99',status:200,response:envelope('198.51.100.99')}]}]);
+  const before=(await f.pool.query('SELECT id,status,response_body FROM usage_requests ORDER BY id')).rows;
+  const history=await f.store.history(viewer,f.tenant,new URLSearchParams('pageSize=100'));
+  assert.equal(history.total,5);
+  assert.equal(history.items.filter(r=>r.ip==='198.51.100.1').length,2,'repeated inputs remain separate original deliveries');
+  assert.equal(history.items.filter(r=>r.ip==='198.51.100.2').length,1,'batch child is not duplicated');
+  assert.equal(history.items.find(r=>r.ip==='198.51.100.3').payload.response.data.data.risk_level,'高风险');
+  assert.equal(history.items.find(r=>r.ip==='198.51.100.4').payload.error.code,'query_outcome_unknown');
+  assert.ok(history.items.every(r=>r.ip!=='198.51.100.99'&&r.ip!=='198.51.100.5'));
+  const filtered=await f.store.history(viewer,f.tenant,new URLSearchParams('q=198.51.100.3'));
+  assert.equal(filtered.total,1);assert.equal(filtered.items[0].id,singles[0]);
+  await assert.rejects(f.store.history(viewer,f.other,new URLSearchParams()),{status:403});
+  await assert.rejects(f.store.history(viewer,f.tenant,new URLSearchParams('export=1')),{status:403});
+  assert.deepEqual((await f.pool.query('SELECT id,status,response_body FROM usage_requests ORDER BY id')).rows,before);
+  assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM dataport.queries')).rows[0].n,0);
+});
+
+test('history projects the exact original batch completion over a stale uncertain query without rewriting its record', {skip:!connectionString}, async t => {
+  const f=await fixture(t), p=await f.principal(f.analyst), ip='223.160.165.241';
+  const record=await f.store.query(p,f.tenant,{ip},randomUUID(),async()=>{throw Error('fixture transport interruption')});
+  assert.equal(record.error.code,'query_outcome_unknown');
+  const before=(await f.pool.query('SELECT * FROM dataport.queries WHERE id=$1',[record.id])).rows;
+  const response={contractVersion:'mx-insight-hub.ip-risk.subscription.v1',data:[{ip,status:200,response:{requestId:randomUUID(),data:{ip,status:'success',data:{risk_level:'高风险'}}}}]};
+  await f.pool.query('INSERT INTO external_platform.ipsearch_batches(id,tenant_id,idempotency_key,response) VALUES($1,$2,$3,$4)',[randomUUID(),f.other,`dataport-${record.id}`,response]);
+  let history=await f.store.history(p,f.tenant,new URLSearchParams());
+  assert.equal(history.items[0].payload.error.code,'query_outcome_unknown','other tenant evidence cannot settle this record');
+  await f.pool.query('INSERT INTO external_platform.ipsearch_batches(id,tenant_id,idempotency_key,response) VALUES($1,$2,$3,$4)',[randomUUID(),f.tenant,`dataport-${record.id}`,response]);
+  history=await f.store.history(p,f.tenant,new URLSearchParams());
+  assert.equal(history.total,1);assert.equal(history.items[0].status,200);
+  assert.equal(history.items[0].payload.response.data.status,'success');
+  assert.equal(history.items[0].payload.response.data.data.risk_level,'高风险');
+  assert.equal(history.items[0].payload.error,undefined);
+  assert.deepEqual((await f.pool.query('SELECT * FROM dataport.queries WHERE id=$1',[record.id])).rows,before);
+  const settled=await f.store.query(p,f.tenant,{ip:'198.51.100.20'},randomUUID(),async()=>({status:200,body:{data:[{ip:'198.51.100.20',status:200,response:{data:{status:'success',data:{risk_level:'低风险'}}}}]}}));
+  await f.pool.query('INSERT INTO external_platform.ipsearch_batches(id,tenant_id,idempotency_key,response) VALUES($1,$2,$3,$4)',[randomUUID(),f.tenant,`dataport-${settled.id}`,{contractVersion:'mx-insight-hub.ip-risk.subscription.v1',data:[{ip:'198.51.100.20',status:409,error:{code:'query_pending'}}]}]);
+  const stable=await f.store.history(p,f.tenant,new URLSearchParams('q=198.51.100.20'));
+  assert.equal(stable.items[0].payload.response.data.status,'success','a less certain batch cannot downgrade a settled original result');
+});
 test('real BFF + Portal + local PG login enforces gateway, origin, CSRF, password gate and public-listener isolation without Auth', {skip:!connectionString}, async t=>{
   const f=await fixture(t),owner=await f.principal(),pepper='local-fixture-retained-pepper-32-characters';
   const child=await f.store.memberCommand(owner,f.tenant,{operation:'create',commandId:randomUUID(),account:'HttpEmployee',displayName:'HTTP',roleId:'analyst'},{},'');

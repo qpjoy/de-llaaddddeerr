@@ -944,13 +944,32 @@ export class DataportStore {
     );
     const { page, pageSize, offset } = paging(search, 5),
       q = text(search.get("q"), 128);
-    const source = `WITH history AS (
-      SELECT q.id::text,q.ip::text,q.actor,q.status,coalesce(q.payload,CASE WHEN b.response IS NOT NULL THEN b.response->'data'->0||jsonb_build_object('batchId',b.id) END) AS payload,q.created_at
-        FROM dataport.queries q LEFT JOIN external_platform.ipsearch_batches b ON b.tenant_id=q.tenant_id AND b.idempotency_key='dataport-'||q.id::text WHERE q.tenant_id=$1
-      UNION ALL SELECT b.id::text||':'||e.n,e.item->>'ip',NULL::uuid,(e.item->>'status')::int,e.item||jsonb_build_object('batchId',b.id),b.created_at
-        FROM external_platform.ipsearch_batches b CROSS JOIN LATERAL jsonb_array_elements(b.response->'data') WITH ORDINALITY e(item,n)
-        WHERE b.tenant_id=$1 AND b.response->>'contractVersion'='mx-insight-hub.ip-risk.subscription.v1'
-        AND NOT EXISTS(SELECT 1 FROM dataport.queries q WHERE q.tenant_id=$1 AND b.idempotency_key='dataport-'||q.id::text)
+    // Read immutable deliveries from every supported IP channel in this tenant.
+    // No copying, grants, supplier dispatch or metering takes place on history reads.
+    const source = `WITH scoped_batches AS (
+      SELECT * FROM external_platform.ipsearch_batches WHERE tenant_id=$1
+        AND response->>'contractVersion' IN ('mx-insight-hub.ip-risk.subscription.v1','mx-insight-hub.ip-risk.v1','mx-insight-hub.ip-risk.v2')
+    ), query_records AS (
+      SELECT q.id::text,q.ip::text,q.actor,
+        CASE WHEN b.response#>>'{data,0,response,data,status}' IN ('success','partial','no_data')
+          THEN b.response->'data'->0||jsonb_build_object('batchId',b.id)
+          ELSE coalesce(q.payload,CASE WHEN b.response->'data'->0 IS NOT NULL THEN b.response->'data'->0||jsonb_build_object('batchId',b.id) END) END AS payload,
+        q.status,q.created_at
+      FROM dataport.queries q LEFT JOIN scoped_batches b ON b.idempotency_key='dataport-'||q.id::text WHERE q.tenant_id=$1
+    ), history AS (
+      SELECT id,ip,actor,CASE WHEN payload->>'status' ~ '^[0-9]{3}$' THEN (payload->>'status')::int ELSE status END AS status,payload,created_at FROM query_records
+      UNION ALL SELECT b.id::text||':'||e.n,e.item->>'ip',NULL::uuid,CASE WHEN e.item->>'status' ~ '^[0-9]{3}$' THEN (e.item->>'status')::int END,e.item||jsonb_build_object('batchId',b.id),b.created_at
+        FROM scoped_batches b CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(b.response->'data')='array' THEN b.response->'data' ELSE '[]'::jsonb END) WITH ORDINALITY e(item,n)
+        WHERE NOT EXISTS(SELECT 1 FROM dataport.queries q WHERE q.tenant_id=$1 AND b.idempotency_key='dataport-'||q.id::text)
+      UNION ALL SELECT r.id::text,coalesce(r.response_body#>>'{data,ip}',r.acquisition_request#>>'{body,ip}'),NULL::uuid,r.response_status,
+        jsonb_build_object('ip',coalesce(r.response_body#>>'{data,ip}',r.acquisition_request#>>'{body,ip}'),'status',r.response_status,'requestId',r.id,'response',r.response_body)
+        || CASE WHEN r.response_body IS NULL THEN jsonb_build_object('error',jsonb_build_object('code',coalesce(r.error_code,CASE WHEN r.status='reserved' THEN 'query_pending' WHEN r.status='unknown' THEN 'query_outcome_unknown' ELSE 'query_failed' END))) ELSE '{}'::jsonb END,
+        r.created_at
+        FROM public.usage_requests r WHERE r.tenant_id=$1 AND r.platform='ip_risk'
+        AND NOT EXISTS(SELECT 1 FROM external_platform.ipsearch_batches b
+          WHERE b.tenant_id=$1 AND b.consumer_id=r.consumer_id AND b.api_key_id=r.api_key_id
+          AND b.id=substring(r.idempotency_key from '^ip-batch-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-[0-9]+$')::uuid
+          AND (b.response IS NOT NULL OR EXISTS(SELECT 1 FROM dataport.queries q WHERE q.tenant_id=$1 AND b.idempotency_key='dataport-'||q.id::text)))
     )`,
       where = "($2='' OR ip LIKE '%'||$2||'%')";
     const total = (
