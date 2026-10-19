@@ -18,6 +18,25 @@ from inventory import (Inspector, InspectionError, local_path, mount_for,
                        mount_summary, runtime_flags, stage)
 
 
+class CommandFailure(InspectionError):
+    """A fixed error category, never a command's possibly sensitive output."""
+    def __init__(self, reason, exit_code=None):
+        super().__init__('command failed; raw output hidden')
+        self.reason, self.exit_code = reason, exit_code
+
+
+def command_failure_reason(stderr):
+    value = stderr.decode('utf-8', errors='replace').lower()
+    for reason, fragments in (
+            ('template_error', ('template parsing error', 'template execution error', 'executing "', 'map has no entry for key')),
+            ('object_not_found', ('no such object', 'no such container')),
+            ('permission_denied', ('permission denied', 'operation not permitted')),
+            ('daemon_unavailable', ('cannot connect to the docker daemon', 'connection refused', 'error during connect'))):
+        if any(fragment in value for fragment in fragments):
+            return reason
+    return 'command_failed'
+
+
 def run(args):
     # An inherited Docker context must not silently inspect another machine.
     env = {k: v for k, v in os.environ.items() if not k.startswith('DOCKER_')}
@@ -26,10 +45,14 @@ def run(args):
         result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 timeout=30, env=env)
         if result.returncode:
-            raise InspectionError('command failed; raw output hidden')
+            raise CommandFailure(command_failure_reason(result.stderr), result.returncode)
         return result.stdout.decode('utf-8')
-    except (OSError, subprocess.TimeoutExpired, UnicodeError):
-        raise InspectionError('command unavailable; raw output hidden') from None
+    except subprocess.TimeoutExpired:
+        raise CommandFailure('timeout') from None
+    except OSError:
+        raise CommandFailure('command_unavailable') from None
+    except UnicodeError:
+        raise CommandFailure('invalid_encoding') from None
 
 
 def scalar(raw):
@@ -246,11 +269,33 @@ def docker_info(raw):
 
 
 def docker_container(value):
-    if not re.fullmatch('[a-f0-9]{64}', value.get('id', '')) or any(type(value.get(k)) is not bool for k in ('running', 'paused')):
+    if (not isinstance(value, dict) or not isinstance(value.get('id'), str) or
+            not re.fullmatch('[a-f0-9]{64}', value['id']) or
+            any(type(value.get(k)) is not bool for k in ('running', 'paused')) or
+            not isinstance(value.get('name'), str) or
+            (value.get('stop_signal') is not None and not isinstance(value['stop_signal'], str))):
         raise ValueError('invalid Docker state')
+    policy = value.get('restart_policy')
+    if (not isinstance(policy, dict) or policy.get('Name') not in ('', 'no', 'always', 'on-failure', 'unless-stopped') or
+            type(policy.get('MaximumRetryCount')) is not int or policy['MaximumRetryCount'] < 0):
+        raise ValueError('invalid Docker restart policy')
     result = {key: value.get(key) for key in ('id', 'name', 'running', 'paused', 'stop_signal')}
-    result['restart_policy'] = {key: value['restart_policy'].get(key) for key in ('Name', 'MaximumRetryCount')}
+    result['restart_policy'] = {key: policy[key] for key in ('Name', 'MaximumRetryCount')}
     return result
+
+
+def docker_ids(raw):
+    ids = raw.split()
+    if len(ids) != len(set(ids)) or any(not re.fullmatch('[a-f0-9]{64}', value) for value in ids):
+        raise ValueError('invalid Docker container IDs')
+    return ids
+
+
+def docker_rows(raw, ids):
+    rows = [docker_container(json.loads(line)) for line in raw.splitlines() if line.strip()]
+    if sorted(c['id'] for c in rows) != sorted(ids):
+        raise ValueError('Docker container set changed')
+    return rows
 
 
 class RuntimeInspector(Inspector):
@@ -317,20 +362,59 @@ class RuntimeInspector(Inspector):
 
     def docker_local(self):
         base = ['docker', '--host', 'unix:///var/run/docker.sock']
+        output = {'info': None, 'containers': [], 'total': None, 'inspected_total': 0,
+                  'running': None, 'paused': None, 'complete': False,
+                  'containers_complete': False, 'diagnostics': []}
+
+        def attempt(stage_name, function, container_id=None, recoverable=False):
+            try:
+                return function()
+            except (InspectionError, OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+                diagnostic = {'stage': stage_name, 'reason': getattr(exc, 'reason', 'invalid_or_incomplete_response')}
+                if isinstance(exc, CommandFailure) and exc.exit_code is not None:
+                    diagnostic['exit_code'] = exc.exit_code
+                if container_id:
+                    diagnostic['container_id'] = container_id
+                if recoverable:
+                    diagnostic['retry'] = 'per-container'
+                output['diagnostics'].append(diagnostic)
+                if not recoverable:
+                    self.errors.append('local Docker ' + stage_name + ': unavailable/incomplete (raw output hidden)')
+                return None
+
         template = '{"root":{{json .DockerRootDir}},"live_restore":{{json .LiveRestoreEnabled}},"name":{{json .Name}},"swarm_state":{{json .Swarm.LocalNodeState}}}'
-        output = {'info': self.attempt('local Docker info', lambda: docker_info(run(base + ['info', '--format', template])))}
-        ids = run(base + ['ps', '--all', '--quiet', '--no-trunc']).split()
-        if any(not re.fullmatch('[a-f0-9]{64}', value) for value in ids):
-            raise ValueError('invalid Docker container IDs')
+        raw = attempt('info command', lambda: run(base + ['info', '--format', template]))
+        if raw is not None:
+            output['info'] = attempt('info response', lambda: docker_info(raw))
+        raw = attempt('list command', lambda: run(base + ['ps', '--all', '--quiet', '--no-trunc']))
+        ids = attempt('list response', lambda: docker_ids(raw)) if raw is not None else None
+        if ids is None:
+            return output
+        output['total'] = len(ids)
         containers = []
-        template = '{"id":{{json .Id}},"name":{{json .Name}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"restart_policy":{{json .HostConfig.RestartPolicy}},"stop_signal":{{json .Config.StopSignal}}}'
+        # Docker's raw-map template fallback uses missingkey=error. StopSignal
+        # is omitted for the default signal; index tolerates that missing key.
+        # Project each field in the CLI too: never request whole Config/inspect.
+        template = '{"id":{{json .Id}},"name":{{json .Name}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"restart_policy":{"Name":{{json .HostConfig.RestartPolicy.Name}},"MaximumRetryCount":{{json .HostConfig.RestartPolicy.MaximumRetryCount}}},"stop_signal":{{json (index .Config "StopSignal")}}}'
         for offset in range(0, len(ids), 50):
-            rows = [docker_container(json.loads(line)) for line in run(base + ['inspect', '--format', template] + ids[offset:offset + 50]).splitlines() if line.strip()]
-            if sorted(c['id'] for c in rows) != sorted(ids[offset:offset + 50]):
-                raise ValueError('Docker container set changed')
+            batch = ids[offset:offset + 50]
+            raw = attempt('inspect batch command', lambda: run(base + ['inspect', '--type', 'container', '--format', template] + batch), recoverable=True)
+            rows = attempt('inspect batch response', lambda: docker_rows(raw, batch), recoverable=True) if raw is not None else None
+            if rows is None:
+                # A container removed between ps and inspect must not discard
+                # the successful state of every other container in its batch.
+                rows = []
+                for container_id in batch:
+                    raw = attempt('inspect container command', lambda: run(base + ['inspect', '--type', 'container', '--format', template, container_id]), container_id)
+                    item = attempt('inspect container response', lambda: docker_rows(raw, [container_id]), container_id) if raw is not None else None
+                    if item is not None:
+                        rows.extend(item)
             containers.extend(rows)
-        output.update(containers=containers, total=len(containers),
-                      running=sum(c['running'] for c in containers), paused=sum(c['paused'] for c in containers))
+        complete = len(containers) == len(ids)
+        output.update(containers=containers, inspected_total=len(containers),
+                      running=sum(c['running'] for c in containers) if complete else None,
+                      paused=sum(c['paused'] for c in containers) if complete else None,
+                      containers_complete=complete, complete=output['info'] is not None and complete)
         return output
 
     def shared_dir(self, mounts):

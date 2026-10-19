@@ -19,6 +19,18 @@ finally:
 
 SECRET = 'credential-value-must-not-be-reported'
 CONTAINER_ID = 'a' * 64
+OTHER_CONTAINER_ID = 'b' * 64
+
+
+def docker_row(container_id=CONTAINER_ID, **overrides):
+    value = {'id': container_id, 'name': '/app', 'running': True, 'paused': False,
+             'restart_policy': {'Name': 'unless-stopped', 'MaximumRetryCount': 0}}
+    value.update(overrides)
+    return json.dumps(value)
+
+
+DOCKER_INFO = json.dumps({'root': '/data/docker', 'live_restore': False,
+                         'name': 'internal', 'swarm_state': 'inactive'})
 DUMP = '''version = 2
 root = "/data/mx-runtime/containerd"
 state = "/run/containerd"
@@ -144,8 +156,132 @@ class ParsingTests(unittest.TestCase):
         self.assertNotIn(SECRET, json.dumps([info, container]))
         self.assertEqual(container['restart_policy'], {'Name': 'unless-stopped', 'MaximumRetryCount': 0})
 
+    def test_default_stop_signal_may_be_missing_or_null(self):
+        for row in (docker_row(), docker_row(stop_signal=None), docker_row(stop_signal='')):
+            result = probe.docker_container(json.loads(row))
+            self.assertIn(result['stop_signal'], (None, ''))
+        self.assertEqual(probe.docker_container(json.loads(docker_row(stop_signal='SIGQUIT')))['stop_signal'], 'SIGQUIT')
+
+    def test_invalid_docker_restart_state_is_not_accepted_as_a_baseline(self):
+        for value in (None, [], {'Name': 'on-failure', 'MaximumRetryCount': -1},
+                      {'Name': 'always', 'MaximumRetryCount': True}, {'Name': SECRET, 'MaximumRetryCount': 0}):
+            with self.assertRaises(ValueError):
+                probe.docker_container(json.loads(docker_row(restart_policy=value)))
+        with self.assertRaises(ValueError):
+            probe.docker_ids(CONTAINER_ID + '\n' + CONTAINER_ID)
+
 
 class ProbeTests(unittest.TestCase):
+    def test_docker_missing_stop_signal_uses_optional_map_lookup(self):
+        commands = []
+        def command(args):
+            commands.append(args)
+            self.assertEqual(args[:3], ['docker', '--host', 'unix:///var/run/docker.sock'])
+            if args[3] == 'info':
+                return DOCKER_INFO
+            if args[3] == 'ps':
+                return CONTAINER_ID
+            self.assertEqual(args[3:7], ['inspect', '--type', 'container', '--format'])
+            template = args[7]
+            self.assertIn('{{json (index .Config "StopSignal")}}', template)
+            self.assertNotIn('{{json .Config}}', template)
+            self.assertNotIn('{{json .HostConfig}}', template)
+            return docker_row(stop_signal=None)
+        inspector = probe.RuntimeInspector()
+        with mock.patch.object(probe, 'run', side_effect=command):
+            result = inspector.docker_local()
+        self.assertTrue(result['complete'])
+        self.assertIsNone(result['containers'][0]['stop_signal'])
+        self.assertEqual(result['total'], 1)
+        self.assertEqual(result['inspected_total'], 1)
+        self.assertEqual(result['running'], 1)
+        self.assertFalse(inspector.errors)
+
+    def test_docker_inspect_batch_failure_preserves_other_containers(self):
+        inspector = probe.RuntimeInspector()
+        with mock.patch.object(probe, 'run', side_effect=[DOCKER_INFO, CONTAINER_ID + '\n' + OTHER_CONTAINER_ID,
+                probe.CommandFailure('object_not_found', 1), docker_row(), probe.CommandFailure('object_not_found', 1)]):
+            result = inspector.docker_local()
+        self.assertEqual(result['info']['root'], '/data/docker')
+        self.assertEqual(result['total'], 2)
+        self.assertEqual(result['inspected_total'], 1)
+        self.assertEqual(result['containers'][0]['id'], CONTAINER_ID)
+        self.assertIsNone(result['running'])
+        self.assertFalse(result['containers_complete'])
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['diagnostics'][-1], {'stage': 'inspect container command', 'reason': 'object_not_found',
+                                                    'exit_code': 1, 'container_id': OTHER_CONTAINER_ID})
+        self.assertEqual(len(inspector.errors), 1)
+
+    def test_docker_malformed_batch_retries_each_and_preserves_stopped_state(self):
+        inspector = probe.RuntimeInspector()
+        with mock.patch.object(probe, 'run', side_effect=[DOCKER_INFO, CONTAINER_ID + '\n' + OTHER_CONTAINER_ID,
+                SECRET, docker_row(), docker_row(OTHER_CONTAINER_ID, running=False)]):
+            result = inspector.docker_local()
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['total'], 2)
+        self.assertEqual(result['running'], 1)
+        self.assertFalse(result['containers'][1]['running'])
+        self.assertEqual(result['diagnostics'][0]['stage'], 'inspect batch response')
+        self.assertFalse(inspector.errors)
+        self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_docker_malformed_single_container_does_not_drop_other_results(self):
+        inspector = probe.RuntimeInspector()
+        with mock.patch.object(probe, 'run', side_effect=[DOCKER_INFO, CONTAINER_ID + '\n' + OTHER_CONTAINER_ID,
+                SECRET, docker_row(), docker_row(OTHER_CONTAINER_ID, restart_policy=None)]):
+            result = inspector.docker_local()
+        self.assertEqual(result['inspected_total'], 1)
+        self.assertEqual(result['containers'][0]['id'], CONTAINER_ID)
+        self.assertFalse(result['complete'])
+        self.assertIsNone(result['running'])
+        self.assertEqual(result['diagnostics'][-1]['stage'], 'inspect container response')
+        self.assertEqual(result['diagnostics'][-1]['container_id'], OTHER_CONTAINER_ID)
+        self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_docker_list_failure_preserves_info_and_is_distinct_from_empty(self):
+        for response, stage in ((probe.CommandFailure('daemon_unavailable', 1), 'list command'),
+                                 (SECRET, 'list response')):
+            inspector = probe.RuntimeInspector()
+            with mock.patch.object(probe, 'run', side_effect=[DOCKER_INFO, response]):
+                result = inspector.docker_local()
+            self.assertEqual(result['info']['root'], '/data/docker')
+            self.assertIsNone(result['total'])
+            self.assertIsNone(result['running'])
+            self.assertFalse(result['complete'])
+            self.assertEqual(result['diagnostics'][0]['stage'], stage)
+            self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_docker_info_failure_does_not_discard_container_state(self):
+        inspector = probe.RuntimeInspector()
+        with mock.patch.object(probe, 'run', side_effect=[probe.CommandFailure('permission_denied', 1), CONTAINER_ID,
+                                                         docker_row(running=False)]):
+            result = inspector.docker_local()
+        self.assertIsNone(result['info'])
+        self.assertTrue(result['containers_complete'])
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['running'], 0)
+        self.assertEqual(result['diagnostics'][0]['stage'], 'info command')
+
+    def test_zero_docker_containers_is_complete_without_inspect(self):
+        inspector = probe.RuntimeInspector()
+        with mock.patch.object(probe, 'run', side_effect=[DOCKER_INFO, '']) as command:
+            result = inspector.docker_local()
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['total'], 0)
+        self.assertEqual(command.call_count, 2)
+
+    def test_docker_template_error_is_diagnosed_without_leaking_stderr(self):
+        inspector = probe.RuntimeInspector()
+        failure = types.SimpleNamespace(returncode=1, stdout=SECRET.encode(),
+                    stderr=('template parsing error: map has no entry for key "StopSignal" ' + SECRET).encode())
+        with mock.patch.object(probe.subprocess, 'run', return_value=failure):
+            result = inspector.docker_local()
+        self.assertEqual(result['diagnostics'][0]['reason'], 'template_error')
+        self.assertEqual(result['diagnostics'][0]['exit_code'], 1)
+        self.assertNotIn(SECRET, json.dumps([result, inspector.errors]))
+        self.assertNotIn('StopSignal', json.dumps(result))
+
     def test_socket_identity_resolves_alias_without_confusing_regular_files(self):
         sock = types.SimpleNamespace(st_mode=stat.S_IFSOCK, st_dev=1, st_ino=22)
         regular = types.SimpleNamespace(st_mode=stat.S_IFREG, st_dev=1, st_ino=23)
@@ -207,7 +343,7 @@ class ProbeTests(unittest.TestCase):
                 if args[3] == 'ps':
                     self.assertEqual(args[4:], ['--all', '--quiet', '--no-trunc'])
                     return CONTAINER_ID
-                self.assertEqual(args[3:5], ['inspect', '--format'])
+                self.assertEqual(args[3:7], ['inspect', '--type', 'container', '--format'])
                 self.assertEqual(args[-1], CONTAINER_ID)
                 return json.dumps({'id': CONTAINER_ID, 'name': '/app', 'running': True, 'paused': False,
                                    'stop_signal': '', 'restart_policy': {'Name': 'always', 'MaximumRetryCount': 0}, 'environment': SECRET})

@@ -1,6 +1,6 @@
-# Kubernetes 数据迁移：先核对现场
+# Kubernetes 数据迁移：盘点与运行时预备
 
-这组命令用于核对 Internal 上的 Kubernetes 数据位置、使用者、挂载和目标空间，为从 `/data` 迁到根逻辑卷准备可审查的方案。当前实现是**只读清单与计划**，没有 `k8s migrate`、`k8s rollback` 或 `k8s resume`；运行计划不会停服务、复制业务数据、修改挂载或更新任何存储身份。
+这组命令用于核对 Internal 上的 Kubernetes 数据位置、使用者、挂载和目标空间，为从 `/data` 迁到根逻辑卷准备可审查的方案。当前实现包括**只读清单、容量计划以及离线运行时预备**，没有 `k8s migrate`、`k8s rollback` 或 `k8s resume`。`inventory`、`plan`、`runtime-check` 只读；新增 `prepare-runtime` 会写入根卷私有目录，生成隔离配置与 Kubernetes 镜像归档，但不会停服务、启动新运行时、复制数据库、修改挂载或更新存储身份。
 
 维护窗口已允许，但现有用户、密码、SSO 密钥和注册、网络配置必须保留。搬迁 Launcher 数据库和运行时会涉及服务中断，不能承诺窗口内登录、DNS 或联网持续可用。具体停启范围和执行命令须依据服务器报告确定，不能只从 `df` 和 `fstab` 推断全部数据位置。
 
@@ -9,6 +9,8 @@
 Kubernetes 独占的业务目录和 kubelet 目录可保持逻辑路径，通过根卷新副本切换。若将 Kubernetes 镜像和容器运行时数据一并迁入根卷，方案是创建独立 containerd 实例，通过镜像 API 导出/导入所需镜像，再切换 kubelet 的实际 CRI endpoint；保留 Docker 的服务、socket、原共享运行时及构建 namespace。不能直接 rsync 某个 `k8s.io` 子目录，namespace 不是完整独立的数据目录。
 
 这一分离还须处理 Hub、mx-common、Pay、Rig 的镜像导入及 Launcher 的运行时启动、CNI 修复和磁盘检查入口，确保后续发布连接 Kubernetes 使用的实例。当前没有执行器或切换命令；不会为了绕过此依赖而重置集群或停用存储保护。
+
+2026-10-20 02:08 的补充报告已经确认共享 socket、运行时版本和基础配置。下一步可运行 [`prepare-runtime`](runtime-preparation.md) 准备隔离配置与镜像文件；[部署入口适配清单](runtime-consumers.md)仍是正式切换前必须完成的工作。
 
 ## 执行只读检查
 
@@ -63,7 +65,7 @@ cat "$report"
 
 贴回该 JSON 和检查失败时的简短提示即可；不要附上 Secret、环境文件、恢复快照、证书私钥或完整容器 `inspect` 输出。采集失败、权限不足或未测量都属于待核实项，不代表相关服务或数据不存在。
 
-退出码 `0` 仅表示采集未报告错误；`2` 表示报告已输出但有采集缺项；`1` 表示未能完成报告。报告中的 `execution_supported` 固定为 `false`。容量按 UUID + 文件系统内路径合并 bind 别名和父子目录，默认留出 **100 GiB + 已测数据量的 25% 增长空间**，数据库备份另算；`required_bytes_lower_bound` 与 `lower_bound_fits` 只是已测量部分的下限，不是“可以迁移”的结论。完整性、实际物理盘、未来增长、未发现的外置路径和停写后容量仍需复查。
+上述只读命令退出码 `0` 仅表示采集未报告错误；`2` 表示报告已输出但有采集缺项；`1` 表示未能完成报告。报告中的 `execution_supported` 固定为 `false`。容量按 UUID + 文件系统内路径合并 bind 别名和父子目录，默认留出 **100 GiB + 已测数据量的 25% 增长空间**，数据库备份另算；`required_bytes_lower_bound` 与 `lower_bound_fits` 只是已测量部分的下限，不是“可以迁移”的结论。完整性、实际物理盘、未来增长、未发现的外置路径和停写后容量仍需复查。
 
 新版保留 `capacity` 作为与首份报告对照的全路径统计；`migration_scope` 明确排除共享运行时，`kubernetes_data_capacity` 才是此次业务数据及 kubelet 的复制预算草案，尚不含专用运行时、镜像转换或备份预算。包含共享运行时的父目录，以及与 Docker 数据根重叠的路径和 bind 别名，也会排除并标为待核实，不能通过复制上层目录带走 Docker 数据。位于根卷的符号链接也必须核实目标，不能仅因链接自身在根卷就当作数据已经迁移。
 
