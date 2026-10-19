@@ -1,4 +1,4 @@
-import { AppError } from '../core/errors.mjs'
+import { AppError, SearchAdmissionNotStartedError } from '../core/errors.mjs'
 import { RAW_SEARCH_VERSION } from '../contracts/raw-search.mjs'
 import { TIKHUB_CONTENT_SEARCH_VERSION } from '../contracts/tikhub-content-search.mjs'
 import { createDataSearchCursorCodec } from '../external-platforms/cursor.mjs'
@@ -84,7 +84,19 @@ export function createTwitterSearchRouter({ usageStore, rapidGateway, tikHubGate
     // Historical same-key replies and explicit RapidAPI retry acknowledgements
     // are validated by their original gateway before any new dispatch. For a
     // new intent, check all known standard-query outcomes across suppliers.
-    if (!previous && input.retryOfRequestId == null) await assertTwitterSearchAvailable({ usageStore, context, query: input.normalized.query })
+    if (!previous && input.retryOfRequestId == null) {
+      try { await assertTwitterSearchAvailable({ usageStore, context, query: input.normalized.query,
+        excludeRequestIds:input.acknowledgedRequestIds || [] }) }
+      catch (error) {
+        // This check precedes either supplier's gateway and usage reserve.
+        // Preserve the old blocker while explicitly identifying this attempt
+        // as unstarted; other database/transport errors remain uncertain.
+        if (error instanceof AppError && ['request_outcome_unknown', 'request_in_progress'].includes(error.code)) {
+          throw new SearchAdmissionNotStartedError(error.status, error.code, error.message, error.details)
+        }
+        throw error
+      }
+    }
     let fallbackPolicy = null
     const permitsRejectedFallback = policy => policy?.mode === 'priority'
       && policy.primaryProvider === 'rapidapi' && policy.fallbackProvider === 'tikhub'

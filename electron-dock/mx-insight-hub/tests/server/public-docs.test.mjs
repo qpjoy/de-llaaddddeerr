@@ -1921,6 +1921,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/night-all/search/{operation}',
       '/requests/by-idempotency-key',
       '/requests/{requestId}',
+      '/requests/{requestId}/search-recovery',
       '/search/raw',
       '/search/{operation}',
       '/tools/tokenize',

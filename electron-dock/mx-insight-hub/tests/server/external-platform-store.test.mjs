@@ -360,21 +360,30 @@ for (const settle of ['commitLiveDelivery', 'finishProviderStep']) {
 }
 
 test('Postgres provider token bucket is one atomic PostgreSQL-clock-driven admission', async () => {
-  let statement
-  const store = new PostgresExternalPlatformStore({
-    pool: {
-      async query(sql, values) {
-        statement = { sql, values }
-        return { rows: [{ allowed: false, remaining: '0', retry_after_ms: '1234' }] }
-      },
+  const statements = []
+  let released = 0
+  const client = {
+    async query(sql, values) {
+      statements.push({ sql, values })
+      return /provider_rate_buckets/u.test(sql)
+        ? { rows: [{ allowed: false, remaining: '0', retry_after_ms: '1234' }] }
+        : { rows: [] }
     },
-  })
+    release() { released += 1 },
+  }
+  const store = new PostgresExternalPlatformStore({ pool: { connect: async () => client } })
 
   assert.deepEqual(await store.acquireProviderRateLimit({ limit: 90, windowMs: 60_000 }), {
     allowed: false,
     remaining: 0,
     retryAfterMs: 1234,
   })
+  // The hot per-provider row must not stay locked across a WAL flush.
+  assert.deepEqual(statements.map(({ sql }) => sql.trim().split(/\s+/u).slice(0, 2).join(' ')),
+    ['BEGIN', 'SET LOCAL', 'WITH db_clock', 'COMMIT'])
+  assert.match(statements[1].sql, /synchronous_commit TO off/u)
+  assert.equal(released, 1)
+  const statement = statements[2]
   assert.deepEqual(statement.values, ['justone', 90, 60_000, 1, 90])
   assert.match(statement.sql, /SELECT clock_timestamp\(\) AS observed_at/u)
   assert.match(statement.sql, /INSERT INTO external_platform\.provider_rate_buckets/u)
@@ -1647,6 +1656,7 @@ test('Postgres workflow admission serializes and inserts only a cost hold', asyn
       statements.push({ sql, values })
       if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
       if (/pg_advisory_xact_lock/u.test(sql)) return { rows: [] }
+      if (sql === 'SET LOCAL synchronous_commit TO off') return { rows: [] }
       if (/^\s*SELECT request\.id/u.test(sql)) return { rows: [{ id: input.usageRequestId }] }
       if (/AS known_cost_minor/u.test(sql)) {
         return { rows: [{
@@ -1695,6 +1705,11 @@ test('Postgres workflow admission serializes and inserts only a cost hold', asyn
   assert.equal(reservation.reservedCostMinor, 12)
   assert.equal(reservation.reservedSubsidyMinor, 12)
   assert.equal(statements.filter(({ sql }) => /pg_advisory_xact_lock/u.test(sql)).length, 2)
+  // Pre-dispatch hold: the provider lock is released at COMMIT without
+  // waiting for the WAL flush (the call's synchronous commit flushes it).
+  assert.deepEqual(statements.slice(1, 3).map(({ sql }) => sql), [
+    'SELECT pg_advisory_xact_lock(hashtext($1))', 'SET LOCAL synchronous_commit TO off',
+  ])
   const usageLock = statements.find(({ sql }) => /^\s*SELECT request\.id/u.test(sql))
   assert.match(usageLock.sql, /request\.status = 'reserved'[\s\S]*FOR UPDATE/u)
   const inserted = statements.find(
@@ -1718,6 +1733,7 @@ test('Postgres billed workflow bypasses zero cost caps with separate-currency ac
       statements.push({ sql, values })
       if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
       if (/pg_advisory_xact_lock/u.test(sql)) return { rows: [] }
+      if (sql === 'SET LOCAL synchronous_commit TO off') return { rows: [] }
       if (/^\s*SELECT request\.id/u.test(sql)) return { rows: [{ id: input.usageRequestId }] }
       if (/AS known_cost_minor/u.test(sql)) {
         return { rows: [{
@@ -1791,6 +1807,7 @@ test('Postgres rejected workflow admission leaves no reservation or provider cal
       statements.push({ sql, values })
       if (sql === 'BEGIN' || sql === 'ROLLBACK') return { rows: [] }
       if (/pg_advisory_xact_lock/u.test(sql)) return { rows: [] }
+      if (sql === 'SET LOCAL synchronous_commit TO off') return { rows: [] }
       if (/^\s*SELECT request\.id/u.test(sql)) return { rows: [{ id: input.usageRequestId }] }
       if (/AS known_cost_minor/u.test(sql)) {
         return { rows: [{
@@ -1860,6 +1877,9 @@ test('Postgres reserved workflow begins real calls from held headroom without do
       statements.push({ sql, values })
       if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
       if (/pg_advisory_xact_lock/u.test(sql)) return { rows: [] }
+      if (/FROM external_platform\.provider_cost_reservations[\s\S]*FOR UPDATE/u.test(sql)) {
+        return { rows: [{ '?column?': 1 }] }
+      }
       if (/AS known_cost_minor/u.test(sql)) {
         return { rows: [{
           known_cost_minor: '6',
@@ -1904,6 +1924,11 @@ test('Postgres reserved workflow begins real calls from held headroom without do
   const budget = statements.find(({ sql }) => /AS known_cost_minor/u.test(sql))
   assert.deepEqual(budget.values, ['justone', 'USD', input.usageRequestId, reservationId])
   assert.ok(statements.some(({ sql }) => /INSERT INTO external_platform\.provider_calls/u.test(sql)))
+  // Consuming its own reservation serializes on that row, not on the
+  // provider lock that would stay held through this synchronous COMMIT.
+  assert.equal(statements.some(({ sql }) => /pg_advisory_xact_lock/u.test(sql)), false)
+  assert.deepEqual(statements[1].values, [reservationId, 'justone', input.usageRequestId])
+  assert.ok(statements.indexOf(budget) > 1)
 })
 
 test('Postgres provider-call cost admission locks and checks the UTC monthly ledger before insert', async () => {

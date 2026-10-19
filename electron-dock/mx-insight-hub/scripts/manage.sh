@@ -1414,6 +1414,9 @@ create_runtime_config() {
       const value = Number(process.env[key] || fallback)
       if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error(key + " is out of range")
     }
+    if (!["", "on", "off"].includes(process.env.MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT || "")) {
+      throw new Error("MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT must be on or off")
+    }
   ' "${ROOT_DIR}/server/core/data-admission.mjs"; then
     die "Invalid Hub data pressure configuration"
   fi
@@ -1567,6 +1570,7 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_INGEST_WORKER_CONCURRENCY="${MX_INSIGHT_INGEST_WORKER_CONCURRENCY:-1}" \
     --from-literal=MX_INSIGHT_INGEST_WORKER_DELAY_MS="${MX_INSIGHT_INGEST_WORKER_DELAY_MS:-100}" \
     --from-literal=MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS="${MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS:-250}" \
+    --from-literal=MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT="${MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT:-off}" \
     --from-literal=MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS="$external_pull_page_delay_ms" \
     --from-literal=MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS="$external_pull_worker_delay_ms" \
     --from-literal=MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS="$telegram_monitor_page_delay_ms" \

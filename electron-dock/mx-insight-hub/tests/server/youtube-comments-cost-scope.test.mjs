@@ -36,7 +36,8 @@ async function fixture(t, postgres) {
     CREATE TABLE billing.credit_ledger_entries (charge_id uuid,usage_request_id uuid,account_id uuid,tenant_id uuid,
       kind text,amount_minor bigint,available_delta_minor bigint,held_delta_minor bigint,currency char(3));`)
   for (const migration of ['051_external_platform_gateway.sql', '053_external_platform_uncertain_retry.sql',
-    '055_external_platform_multi_call_rate_limit.sql', '057_external_platform_cost_reservations.sql']) {
+    '055_external_platform_multi_call_rate_limit.sql', '057_external_platform_cost_reservations.sql',
+    '163_provider_cost_ledger.sql']) {
     await db.exec(await readFile(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'))
   }
   await db.query('INSERT INTO tenants VALUES ($1)', [usage.tenantId])

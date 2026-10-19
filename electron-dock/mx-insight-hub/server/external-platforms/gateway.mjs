@@ -885,6 +885,7 @@ export class ExternalPlatformGateway {
       replayWindowMs: dataSearch?.replayWindowMs,
       dataSearch: Boolean(dataSearch), nativeForwarding: native, billingUnknown: !native,
       twitterManualRetry: platform === 'twitter' && Boolean(dataSearch),
+      acknowledgedRequestIds: platform === 'twitter' && dataSearch ? input.acknowledgedRequestIds || [] : [],
       reservation,
       normalize: ({ policy }) => {
         const historicalCodec = createNightAllCompatibilityCursorCodec(this.apiKeyPepper, context.consumer.id)
@@ -1362,6 +1363,7 @@ export class ExternalPlatformGateway {
       usageRequestId: reservation.request.id,
       operation: plan.operation,
       fingerprint: requestFingerprint,
+      ...(plan.acknowledgedRequestIds?.length ? { acknowledgedRequestIds:plan.acknowledgedRequestIds } : {}),
     }
     if (plan.twitterManualRetry && validatedRetryOfRequestId && reservation.kind !== 'reserved') {
       const owner = await this.platformStore.twitterManualRetryOwnerFor(validatedRetryOfRequestId)

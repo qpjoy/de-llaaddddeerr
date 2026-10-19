@@ -58,11 +58,25 @@ paths:
         Inspect searchProtocol.deliveryConfirmed in the existing request status
         APIs; underlying acquisition committed alone is insufficient. Migration
         158 and all Public instances must be released before enabling v2.
+        Twitter unknown results may use the explicit manual retry header after
+        acknowledging possible duplicate charges. Exact original v2 parameters,
+        window, cursor and API Key are required; one permanent successor intent
+        is saved before procurement. This does not change the original unknown.
       parameters:
         - name: Idempotency-Key
           in: header
           required: true
           schema: {type: string, minLength: 8, maxLength: 128}
+        - name: X-MX-Insight-Retry-Of
+          in: header
+          required: false
+          schema: {type: string, format: uuid}
+          description: >-
+            Manual acknowledgement for an unknown Twitter v2 request only;
+            another charge may occur. Use the original active API Key and exact
+            normalized v2 body/window/cursor, with one new permanent key. Keep
+            this successor key after lost responses; never allocate another
+            retry automatically. Migration 162 and current evidence required.
       requestBody:
         required: true
         content:
@@ -104,6 +118,35 @@ paths:
         '429': {description: Existing quota/admission/financial limit}
         '502': {description: Retained source failure}
         '503': {description: Capability/storage/provider unavailable}
+  /requests/{requestId}/search-recovery:
+    get:
+      tags: [Search]
+      operationId: readSearchRecovery
+      summary: Read an owned saved Twitter v2 delivery or its linked manual retry
+      description: >-
+        GET-only; no procurement, reservation, projection rewrite or reaper.
+        Use the original active API Key. Returns the exact original normalized
+        v2 request, original state, durable successor metadata and a complete
+        saved v2 delivery, or delivery=null. Inner usage committed alone is not
+        delivery confirmation. Missing evidence never authorizes a new POST.
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: >-
+            data.contractVersion=mx-insight-hub.data-search-recovery.v1;
+            originalRequestId, platform=twitter, state, original request,
+            successor and delivery. A complete delivery includes its own
+            requestId, saved HTTP status and exact saved v2 response body.
+        '400': {description: Invalid UUID or unexpected query parameters}
+        '401': {description: Original active API Key required}
+        '403': {description: Current authorization required}
+        '404': {description: Matching owned Twitter v2 request not found}
+        '409': {description: Saved evidence or linkage cannot establish recovery}
+        '503': {description: Required schema or storage unavailable; no acquisition}
   /data/news/source-options:
     get:
       tags:

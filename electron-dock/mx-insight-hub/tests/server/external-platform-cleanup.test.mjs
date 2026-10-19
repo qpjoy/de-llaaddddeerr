@@ -73,7 +73,10 @@ test('strict pre-dispatch cost release retains blocking admission even when the 
   assert.equal(await f.store.releaseProviderCostWorkflow({ ...f.cost, bestEffortRelease: false }), true)
   assert.equal(f.connects(), 1)
   assert.equal(f.queries[1].sql, 'SELECT pg_advisory_xact_lock(hashtext($1))')
-  assert.ok(f.queries.every(row => !row.sql.includes('SET LOCAL') && !row.sql.includes('pg_try_advisory')))
+  assert.ok(f.queries.every(row => !/SET LOCAL (lock_timeout|statement_timeout)/.test(row.sql)
+    && !row.sql.includes('pg_try_advisory')))
+  // The provider lock is released at COMMIT without waiting for the WAL flush.
+  assert.equal(f.queries[2].sql, 'SET LOCAL synchronous_commit TO off')
 })
 
 test('post-delivery cleanup faults roll back and discard connections when rollback is lost', async () => {
@@ -201,7 +204,8 @@ test('native PG skips post-delivery pool pressure without entering the connectio
   assert.equal(await f.store.releaseDispatchLease(f.lease), false)
   assert.ok(performance.now() - started < 250)
   assert.equal(f.pool.waitingCount, 0)
-  assert.equal(f.pool.getPressureSnapshot().waitingHighWatermark, 1)
+  // The held checkout found an idle client and the cleanups never queued.
+  assert.equal(f.pool.getPressureSnapshot().waitingHighWatermark, 0)
 })
 
 test('native PG skips busy budget and lease row locks while preserving both durable guards', native, async t => {

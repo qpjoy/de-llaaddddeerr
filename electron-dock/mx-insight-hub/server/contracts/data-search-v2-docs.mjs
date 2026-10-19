@@ -10,7 +10,9 @@ export const DATA_SEARCH_V2_OPENAPI = {
     tags: ['Search'], operationId: 'searchDataV2', summary: 'Search one platform with a frozen explicit time window',
     description: 'Opt-in content search using the same Live API key, platform/operation grants, limits, customer pricing and procurement controls as v1. Requires a nonempty [from,to) timeWindow with timezone-aware timestamps (millisecond precision) and an IANA timezone. Facebook uses Shanghai calendar-date parameters followed by exact delivery filtering; source date-boundary inclusivity is unverified. Other listed platforms currently filter only delivered items and report upstreamFiltering=unsupported and partial coverage. No source guarantees complete historical coverage. Missing publication timestamps are excluded and disclosed; complete acquired evidence and existing acquisition billing units are preserved. mxds2 cursors bind Key/query/pageSize/type/window and the original inner cursor; never exchange v1/v2 cursors. An empty filtered page may still have continuation. At most 15 public pages and 24 hours. Each next page uses a new key; retries keep the original body/key. All v2 keys permanently identify one attempt, including type=fresh; fresh never authorizes re-purchase with the same key. Same-key version changes conflict. Unresolved outcomes cannot be bypassed by changing version/key/window/cursor for the same caller/platform/query. v1-v1 concurrency and historical v1 bodies/cursors remain. Request status lookups expose searchProtocol.deliveryConfirmed; acquisition status=committed alone does not prove v2 delivery. Deploy the additive migration and every Public instance before enabling v2.',
     parameters: [{ name: 'Idempotency-Key', in: 'header', required: true,
-      schema: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$' } }],
+      schema: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$' } },
+    { name: 'X-MX-Insight-Retry-Of', in: 'header', required: false, schema: { type: 'string', format: 'uuid' },
+      description: 'Explicit manual acknowledgement for an unknown Twitter v2 request only; another charge may occur. Use the original active API Key, exact saved normalized v2 body/window/cursor and a new permanent Idempotency-Key. The original unknown and charges remain. One durable successor intent is allowed; retain that new key across lost responses and never automatically create another retry. Missing evidence, a running request, another platform/supplier or committed acquisition with uncertain projection cannot authorize re-purchase. GET /api/v1/requests/{requestId}/search-recovery reads the exact saved v2 delivery without acquisition.' }],
     requestBody: { required: true, content: { 'application/json': { schema: {
       type: 'object', additionalProperties: false, required: ['platform', 'query', 'timeWindow'],
       properties: { platform: { type: 'string', enum: DATA_SEARCH_V2_PLATFORMS }, query: { type: 'string', minLength: 1, maxLength: 500 },
@@ -38,6 +40,37 @@ export const DATA_SEARCH_V2_OPENAPI = {
       429: { description: 'Existing quota, provider admission or financial limit.' },
       502: { description: 'Retained source failure; inspect the original request.' },
       503: { description: 'Search capability, storage, provider or admission unavailable.' },
+    },
+  },
+}
+
+export const DATA_SEARCH_RECOVERY_OPENAPI = {
+  get: {
+    tags: ['Search'], operationId: 'readSearchRecovery', summary: 'Read a saved Twitter v2 delivery or its linked manual retry',
+    description: 'Read-only recovery for the original API Key and tenant/consumer scope. Never reserves, dispatches, reaps, projects or purchases. The original request stays unchanged. Returns the original saved normalized v2 request and only a durably linked successor; delivery is present only when a complete exact v2 result has been saved. Inner usage committed alone is insufficient. A missing or pending delivery never authorizes another POST or a new key.',
+    parameters: [{ name: 'requestId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+    responses: {
+      200: { description: 'Owned recovery metadata; delivery=null until a verified v2 delivery is complete.',
+        content: { 'application/json': { schema: { type: 'object', required: ['data', 'requestId'], properties: {
+          requestId: { type: 'string', format: 'uuid' },
+          data: { type: 'object', required: ['contractVersion', 'originalRequestId', 'platform', 'state', 'request', 'successor', 'delivery'], properties: {
+            contractVersion: { const: 'mx-insight-hub.data-search-recovery.v1' },
+            originalRequestId: { type: 'string', format: 'uuid' }, platform: { const: 'twitter' },
+            state: { type: 'string', enum: ['running', 'retryable', 'complete', 'failed', 'unknown'] },
+            request: { type: 'object', required: ['method', 'path', 'body'], properties: {
+              method: { const: 'POST' }, path: { const: '/api/v2/data/search' }, body: { type: 'object' } } },
+            successor: { type: ['object', 'null'], properties: {
+              requestId: { type: ['string', 'null'], format: 'uuid' }, idempotencyKey: { type: 'string' }, state: { type: 'string' } } },
+            delivery: { type: ['object', 'null'], properties: {
+              requestId: { type: 'string', format: 'uuid' }, status: { type: 'integer' }, body: { type: 'object' } } },
+          } },
+        } } } } },
+      400: { description: 'Invalid request UUID or unexpected query parameters.' },
+      401: { description: 'Original active API Key required.' },
+      403: { description: 'Current authorization required.' },
+      404: { description: 'No matching owned Twitter v2 request.' },
+      409: { description: 'Saved evidence or retry linkage cannot establish a safe recovery.' },
+      503: { description: 'Required migration or storage is unavailable; no acquisition is attempted.' },
     },
   },
 }

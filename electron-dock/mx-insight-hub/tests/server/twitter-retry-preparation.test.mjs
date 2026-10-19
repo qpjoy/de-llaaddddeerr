@@ -7,14 +7,27 @@ import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { normalizeHubDataSearch } from '../../server/contracts/hub-data-search.mjs'
 import { createDataSearchCursorCodec } from '../../server/external-platforms/cursor.mjs'
+import { DATA_SEARCH_V2_PATH, DATA_SEARCH_V2_VERSION, dataSearchV2Scope, normalizeDataSearchV2, prepareDataSearchV2 } from '../../server/contracts/data-search-v2.mjs'
+import { createDataSearchV2CursorCodec } from '../../server/external-platforms/cursor.mjs'
 
 const PATH = '/api/v1/data/search', PEPPER = 'twitter-retry-test-pepper-at-least-32-bytes'
-function fixture({ status = 'unknown', body = { platform: 'twitter', query: 'SMIC #chipban', pageSize: 20 }, snapshot, successor = null, contract = {}, fail = null } = {}) {
+function fixture({ status = 'unknown', body = { platform: 'twitter', query: 'SMIC #chipban', pageSize: 20 }, snapshot, successor = null, contract = {}, fail = null,
+  v2 = null, bindingPatch = {}, intent = null, intentSchema = true, resumeProof = true } = {}) {
   const root = { id: randomUUID(), tenant_id: randomUUID(), consumer_id: randomUUID(), api_key_id: randomUUID(),
     platform: 'twitter', status, idempotency_key: 'original-idempotency',
     acquisition_request: snapshot === undefined ? { method: 'POST', path: PATH, body } : snapshot,
     fingerprint: requestFingerprint({ method: 'POST', path: PATH, body: { ...body, type: body.type ?? 'fresh' } }),
     api_key_prefix: 'mih_live_', api_key_last_four: '4321' }
+  const protocolBody = v2 && normalizeDataSearchV2(v2)
+  let binding = null
+  if (protocolBody) {
+    const codec = createDataSearchV2CursorCodec(PEPPER, `${root.consumer_id}:${root.api_key_id}`)
+    root.acquisition_request = { method: 'POST', path: PATH, body: prepareDataSearchV2(protocolBody, codec).upstream }
+    root.fingerprint = requestFingerprint(root.acquisition_request)
+    binding = { usage_request_id: root.id, tenant_id: root.tenant_id, consumer_id: root.consumer_id,
+      api_key_id: root.api_key_id, platform: 'twitter', state: 'unknown', idempotency_key: root.idempotency_key,
+      request_body: protocolBody, fingerprint: requestFingerprint({ method: 'POST', path: DATA_SEARCH_V2_PATH, body: protocolBody }), ...bindingPatch }
+  }
   const call = { provider_key: 'rapidapi', operation: 'social.content.search', contract_version: 'mx-insight-hub.social-data.v1',
     endpoint_key: 'twitter-aio.search', endpoint_version: 'twitter-aio.hub.v1', tenant_id: root.tenant_id,
     consumer_id: root.consumer_id, api_key_id: root.api_key_id, outcome: 'unknown', ...contract }
@@ -22,6 +35,13 @@ function fixture({ status = 'unknown', body = { platform: 'twitter', query: 'SMI
     queries.push({ sql, values })
     assert.doesNotMatch(sql, /\b(INSERT|UPDATE|DELETE|TRUNCATE)\b/u)
     if (sql.includes('twitter-retry:root')) return { rows: [root] }
+    if (sql.includes('twitter-v2-retry:resume-proof')) return { rows: [{ allowed: resumeProof }] }
+    if (sql.includes("to_regclass('control.data_search_protocol_bindings')")) return { rows: [{ present: Boolean(binding) }] }
+    if (sql.includes("to_regclass('control.data_search_protocol_retries')")) return { rows: [{ present: intentSchema }] }
+    if (sql.includes('FROM control.data_search_protocol_retries')) return { rows: intent ? [{
+      successor_idempotency_key: 'new-v2-retry-key', api_key_id: root.api_key_id, state: 'running', usage_request_id: null, ...intent,
+    }] : [] }
+    if (sql.includes('FROM control.data_search_protocol_bindings')) return { rows: binding ? [binding] : [] }
     if (sql.includes('twitter_manual_retries')) {
       if (fail) throw Object.assign(new Error('private database connection detail'), { code: fail })
       return { rows: sql.includes('original_usage_request_id=$1') && successor ? [{ successor_usage_request_id: successor.id }] : [] }
@@ -34,8 +54,98 @@ function fixture({ status = 'unknown', body = { platform: 'twitter', query: 'SMI
     assert.fail(`Unexpected SQL: ${sql}`)
   } }
   const pool = { query: (...args) => client.query(...args), connect: async () => client }
-  return { root, queries, history: new PostgresAcquisitionHistoryStore(pool, { apiKeyPepper: PEPPER }) }
+  return { root, binding, queries, history: new PostgresAcquisitionHistoryStore(pool, { apiKeyPepper: PEPPER }) }
 }
+
+const v2Body = { platform: 'twitter', query: 'SMIC #chipban', pageSize: 20, type: 'fresh',
+  timeWindow: { from: '2026-10-01T00:00:00.000Z', to: '2026-10-19T00:00:00.000Z', timezone: 'Asia/Shanghai', boundary: '[from,to)' } }
+
+test('v2 preparation returns only the validated original public window/body and original API Key', async () => {
+  const f = fixture({ v2: v2Body }), before = structuredClone(f.root)
+  const result = await f.history.getAdminTwitterRetryPreparation(f.root.id)
+  assert.equal(result.eligibility.allowed, true)
+  assert.equal(result.requestEvidence.contractVersion, 'mx-insight-hub.data-search.v2')
+  assert.deepEqual(result.requestEvidence.request, { method: 'POST', path: DATA_SEARCH_V2_PATH, body: normalizeDataSearchV2(v2Body) })
+  assert.equal(result.owner.apiKeyId, f.root.api_key_id)
+  assert.deepEqual(f.root, before)
+  assert.equal(result.retryIntent, null)
+  assert.match(f.queries[0].sql, /READ ONLY/u)
+})
+
+test('v2 preparation rejects mismatched binding, projection-only unknown and missing original evidence', async () => {
+  for (const overrides of [{ status: 'committed' }, { bindingPatch: { state: 'complete' } },
+    { bindingPatch: { api_key_id: randomUUID() } }, { bindingPatch: { usage_request_id: randomUUID() } },
+    { bindingPatch: { fingerprint: 'a'.repeat(64) } }, { bindingPatch: { request_body: { ...v2Body, timeWindow: null } } }]) {
+    const f = fixture({ v2: v2Body, ...overrides })
+    const result = await f.history.getAdminTwitterRetryPreparation(f.root.id)
+    assert.equal(result.eligibility.allowed, false)
+    assert.equal(result.requestEvidence.request, null)
+  }
+})
+
+test('a v2 intent before procurement blocks another retry and retains its stable key for read-only checks', async () => {
+  const f = fixture({ v2: v2Body, intent: {} })
+  const result = await f.history.getAdminTwitterRetryPreparation(f.root.id)
+  assert.equal(result.eligibility.allowed, false)
+  assert.equal(result.successor, null)
+  assert.deepEqual(result.retryIntent, { idempotencyKey: 'new-v2-retry-key', apiKeyId: f.root.api_key_id,
+    state: 'running', requestId: null, usageStatus: null, resumeAllowed: false })
+  assert.equal(result.requestEvidence.request.path, DATA_SEARCH_V2_PATH)
+  assert.equal(f.queries.some(({ sql }) => /\b(INSERT|UPDATE|DELETE)\b/u.test(sql)), false)
+})
+
+test('v2 preparation exposes protocol outcome separately from a committed successor usage', async () => {
+  const successor = { id: randomUUID(), status: 'committed', idempotency_key: 'new-v2-retry-key', api_key_id: null, response_status: 200 }
+  const f = fixture({ v2: v2Body, successor, intent: { state: 'unknown', usage_request_id: successor.id } })
+  successor.api_key_id = f.root.api_key_id
+  const result = await f.history.getAdminTwitterRetryPreparation(f.root.id)
+  assert.equal(result.eligibility.allowed, false)
+  assert.equal(result.retryIntent.state, 'unknown')
+  assert.equal(result.successor.status, 'committed')
+  assert.equal(result.retryIntent.requestId, result.successor.requestId)
+})
+
+test('v2 preparation requires the permanent retry-intent migration before offering another paid request', async () => {
+  const f = fixture({ v2: v2Body, intentSchema: false })
+  await assert.rejects(f.history.getAdminTwitterRetryPreparation(f.root.id), error => error.status === 503)
+})
+
+test('v2 same-key resume requires a retryable intent and positive no-procurement evidence', async () => {
+  for (const [intent, resumeProof, expected] of [
+    [{ state: 'retryable' }, true, true],
+    [{ state: 'retryable' }, false, false],
+    [{ state: 'retryable', usage_request_id: randomUUID(), usage_status: 'released' }, true, true],
+    ...['running', 'unknown', 'complete', 'failed'].map(state => [{ state }, true, false]),
+    ...['reserved', 'unknown', 'committed'].map(usage_status => [{ state: 'retryable', usage_request_id: randomUUID(), usage_status }, true, false]),
+  ]) {
+    const f = fixture({ v2: v2Body, intent, resumeProof })
+    const result = await f.history.getAdminTwitterRetryPreparation(f.root.id)
+    assert.equal(result.eligibility.allowed, false)
+    assert.equal(result.retryIntent.resumeAllowed, expected)
+  }
+})
+
+test('an expired original v2 cursor still permits read-only inspection of its existing retry intent', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  const f = fixture({ v2: v2Body, intent: { state: 'retryable' } })
+  const scope = `${f.root.consumer_id}:${f.root.api_key_id}`
+  const innerCodec = createDataSearchCursorCodec(PEPPER, scope)
+  const inner = normalizeHubDataSearch({ platform: 'twitter', query: v2Body.query, pageSize: v2Body.pageSize }, innerCodec, 'stable')
+  const cursor = inner.encodeNext({ page: 2, providerCursor: 'original-next-cursor' })
+  const outerCodec = createDataSearchV2CursorCodec(PEPPER, scope)
+  const originalBody = { ...normalizeDataSearchV2(v2Body), cursor: outerCodec.encode({ version: DATA_SEARCH_V2_VERSION,
+    scope: dataSearchV2Scope(v2Body), expiresAt: Date.now() + 60_000, page: 2, cursor }) }
+  f.binding.request_body = originalBody
+  f.binding.fingerprint = requestFingerprint({ method: 'POST', path: DATA_SEARCH_V2_PATH, body: originalBody })
+  f.root.acquisition_request.body = prepareDataSearchV2(originalBody, outerCodec).upstream
+  f.root.fingerprint = requestFingerprint(f.root.acquisition_request)
+  t.mock.timers.tick(61_000)
+  const result = await f.history.getAdminTwitterRetryPreparation(f.root.id)
+  assert.equal(result.eligibility.allowed, false)
+  assert.equal(result.retryIntent.idempotencyKey, 'new-v2-retry-key')
+  assert.equal(result.retryIntent.resumeAllowed, false)
+  assert.deepEqual(result.requestEvidence.request.body, originalBody)
+})
 
 test('Twitter retry preparation is READ ONLY, accepts missing transport evidence and returns original parameters without secrets', async () => {
   const f = fixture(), before = structuredClone(f.root)

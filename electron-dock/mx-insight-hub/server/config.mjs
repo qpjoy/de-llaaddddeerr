@@ -174,6 +174,16 @@ function boundedNonNegativeInteger(value, fallback, name, maximum) {
   return parsed
 }
 
+// Only for workers whose PG writes are re-derivable bookkeeping. `on` restores
+// the server default (wait for the WAL flush on every COMMIT).
+function synchronousCommitSetting(value, fallback, name) {
+  if (value == null || value === '') return fallback
+  if (!['on', 'off'].includes(value)) {
+    throw new AppError(500, 'invalid_configuration', `${name} must be on or off`)
+  }
+  return value
+}
+
 function required(environment, name) {
   const value = environment[name]?.trim()
   if (!value) throw new AppError(500, 'invalid_configuration', `${name} is required`)
@@ -367,6 +377,7 @@ export function loadConfig(environment = process.env) {
     },
     projectorWorker: {
       postBatchDelayMs: boundedNonNegativeInteger(environment.MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS, 250, 'MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS', 60000),
+      synchronousCommit: synchronousCommitSetting(environment.MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT, 'off', 'MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT'),
     },
     paymentReporting: listenerMode==='public' ? null : reportingConfig(environment),
     paymentDeliverySources: listenerMode==='public' ? '' : environment.MX_INSIGHT_PAYMENT_DELIVERY_SOURCES || '',

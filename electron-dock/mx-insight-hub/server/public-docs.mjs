@@ -1,5 +1,5 @@
 import { ipRiskProductPaths, ipRiskProductGuide } from './contracts/ip-risk-product-docs.mjs'
-import { DATA_SEARCH_V2_OPENAPI } from './contracts/data-search-v2-docs.mjs'
+import { DATA_SEARCH_V2_OPENAPI, DATA_SEARCH_RECOVERY_OPENAPI } from './contracts/data-search-v2-docs.mjs'
 import { DATA_SEARCH_V2_PLATFORMS } from './contracts/data-search-v2.mjs'
 import { ipRiskV2Paths, ipRiskV2Guide, ipRiskSubscriptionPaths } from './contracts/ip-risk-v2-docs.mjs'
 import { webSearchPaths, webSearchGuide } from './web-search/docs.mjs'
@@ -1816,6 +1816,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
       },
     },
     '/api/v2/data/search': DATA_SEARCH_V2_OPENAPI,
+    '/requests/{requestId}/search-recovery': DATA_SEARCH_RECOVERY_OPENAPI,
     '/data/search': {
       post: {
         tags: ['Search'],
@@ -6680,6 +6681,7 @@ const TENANT_HIDDEN_DOCS = new Set(['search', 'night-all', 'tools', 'discovery']
 export function tenantDocumentPathAllowed(path, scopes) {
   if (scopes == null) return true
   if (path === '/api/v2/data/search') return scopes.some(scope => scope.platforms.some(platform => DATA_SEARCH_V2_PLATFORMS.includes(platform)))
+  if (path === '/requests/{requestId}/search-recovery') return scopes.some(scope => scope.platforms.includes('twitter'))
   if (['/data/social/crawl', '/data/social/user-info'].includes(path)) return hubSocialAccountPlatforms(path.split('/').at(-1), scopes).length > 0
   if (path === '/data/ip/risk/subscription') return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query.v2') || s.capabilities.includes('ip.risk.subscription.query')))
   if (path.startsWith('/data/ip/risk/history')) return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query') || s.capabilities.includes('ip.risk.query.v2') || s.capabilities.includes('ip.risk.subscription.query')))

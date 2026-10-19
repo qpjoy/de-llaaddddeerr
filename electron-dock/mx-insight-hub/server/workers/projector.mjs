@@ -2,6 +2,7 @@ import { AgentSettingsStore } from '../agent/settings-store.mjs'
 import process from 'node:process'
 import { createPool, runCommonMigrations } from '@qpjoy/mx-common'
 import { loadConfig } from '../config.mjs'
+import { relaxDerivedCommits } from '../core/postgres-pool.mjs'
 import {
   createSearch,
   ensureSearchIndices,
@@ -31,6 +32,9 @@ async function main() {
   }
 
   const pool = createPool(config.common.postgres, { applicationName: 'mx-insight-hub-projector' })
+  // Its writes are only outbox claims/acks and run bookkeeping; see
+  // relaxDerivedCommits for why a lost suffix is simply projected again.
+  relaxDerivedCommits(pool, config.projectorWorker.synchronousCommit, { logger })
   const embeddingSetting = await new AgentSettingsStore(pool).loadSetting('embedding')
   if (embeddingSetting.source === 'database' && embeddingSetting.lockedEmbeddingDimensions) {
     Object.assign(config.common.embedding, {

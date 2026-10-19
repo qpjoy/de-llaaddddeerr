@@ -1,7 +1,7 @@
 import { workspaceRoute } from './portal/workspace.mjs'
 import { TELEGRAM_SEMANTIC_PATH, TELEGRAM_SEMANTIC_INTERNAL_PATH } from './retrieval/telegram-semantic-proxy.mjs'
 import { normalizeTelegramSemanticQuery } from './retrieval/telegram-semantic.mjs'
-import { hubDatabaseFailure } from './core/postgres-pool.mjs'
+import { currentDatabaseLane, enterAdmissionLane, hubDatabaseFailure, runWithDatabaseLane } from './core/postgres-pool.mjs'
 import {portalPrincipal, harborRoute} from './portal/harbor.mjs'
 import { DataportStore } from './portal/dataport-store.mjs'
 import { PaymentError } from '@qpjoy/mx-pay'
@@ -1416,7 +1416,13 @@ export function createApp({
     }
   }
 
-  return async function app(request, response) {
+  // Each HTTP request owns one database lane holder (core/postgres-pool.mjs):
+  // data work that has not reserved anything yields PG checkouts to work that has.
+  return function app(request, response) {
+    return runWithDatabaseLane(() => handleRequest(request, response))
+  }
+
+  async function handleRequest(request, response) {
     const requestId = request.headers['x-request-id'] || randomUUID()
     response.setHeader('x-request-id', requestId)
     let releaseDataSlot
@@ -1531,6 +1537,7 @@ export function createApp({
       if (dataLane) {
         releaseDataSlot = await withAdmissionSignal(response, signal => dataAdmission.acquire(dataLane, { signal }))
         if (response.destroyed) return
+        enterAdmissionLane()
         request[bodyReadTimeoutMs] = 10000
       }
 
@@ -6657,6 +6664,15 @@ export function createApp({
         })
         return
       }
+      params = routeMatch(pathname, '/api/v1/requests/:requestId/search-recovery')
+      if (request.method === 'GET' && params) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'search recovery lookup')
+        sendJson(response, 200, {
+          data: await service.twitterSearchRecovery(context, params.requestId), requestId,
+        }, { 'cache-control': 'private, no-store' })
+        return
+      }
       params = routeMatch(pathname, '/api/v1/requests/:id')
       if (request.method === 'GET' && params) {
         const context = await requirePublic(request)
@@ -6709,7 +6725,12 @@ export function createApp({
       const appError = error instanceof AppError
         ? error
         : databaseFailure
-          ? new AppError(503, 'hub_database_unavailable', 'Hub database is temporarily unavailable; check the original request status before retrying a data acquisition', { layer: 'hub', stage: 'database' })
+          ? new AppError(503, 'hub_database_unavailable', 'Hub database is temporarily unavailable; check the original request status before retrying a data acquisition', {
+            layer: 'hub', stage: 'database',
+            // Still in the admission lane: this attempt reserved nothing and so
+            // dispatched nothing. Same-key retries remain idempotent.
+            ...(currentDatabaseLane() === 'admission' ? { currentAttemptStarted: false, retryAfterMs: 1000 } : {}),
+          })
           : new AppError(500, 'internal_error', 'Internal server error')
       if (databaseFailure) logger.error?.({ requestId, event: 'hub_database_request_failed', ...databaseFailure })
       else if (!(error instanceof AppError)) logger.error?.({ requestId, error }, 'request failed')

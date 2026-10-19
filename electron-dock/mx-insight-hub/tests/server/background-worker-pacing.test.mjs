@@ -16,7 +16,11 @@ const flush = () => new Promise(setImmediate)
 test('background worker configuration has conservative defaults and bounded explicit overrides', () => {
   const defaults = loadConfig(base)
   assert.deepEqual(defaults.ingestWorker, { concurrency: 1, postBatchDelayMs: 100 })
-  assert.deepEqual(defaults.projectorWorker, { postBatchDelayMs: 250 })
+  assert.deepEqual(defaults.projectorWorker, { postBatchDelayMs: 250, synchronousCommit: 'off' })
+  assert.equal(loadConfig({ ...base, MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT: 'on' }).projectorWorker.synchronousCommit, 'on')
+  for (const value of ['ON', 'local', 'true']) {
+    assert.throws(() => loadConfig({ ...base, MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT: value }), /must be on or off/)
+  }
   for (const concurrency of ['1', '4']) {
     assert.equal(loadConfig({ ...base, MX_INSIGHT_INGEST_WORKER_CONCURRENCY: concurrency }).ingestWorker.concurrency, Number(concurrency))
   }
@@ -114,7 +118,7 @@ test('stopping ingest during a transaction settles the leased job and leaves the
 test('projector pauses only after a full batch settles and does not claim the next backlog early', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const config = loadConfig(base).projectorWorker
-  assert.deepEqual(config, { postBatchDelayMs: 250 })
+  assert.deepEqual(config, { postBatchDelayMs: 250, synchronousCommit: 'off' })
   const controller = new AbortController()
   let batches = 0, settled = 0, release
   const gate = new Promise((resolve) => { release = resolve })

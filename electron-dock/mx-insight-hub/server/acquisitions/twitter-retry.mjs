@@ -1,6 +1,7 @@
 import { AppError } from '../core/errors.mjs'
 import { normalizeHubDataSearch } from '../contracts/hub-data-search.mjs'
 import { createDataSearchCursorCodec } from '../external-platforms/cursor.mjs'
+import { twitterV2RetryPreparation } from '../data/twitter-v2-retry.mjs'
 import {
   normalizedTwitterRetryBody, validateTwitterManualRetry, twitterManualRetryOwnerFor,
 } from '../external-platforms/twitter-manual-retry.mjs'
@@ -26,16 +27,24 @@ export async function prepareTwitterRetry(client, requestId, { apiKeyPepper = nu
       eligibility: { allowed: false, reasonCode: 'uncertain_retry_not_allowed',
         message: '仅支持保留完整原参数及当前 Twitter 标准搜索调用证据的未知结果请求。' },
       successor: null,
+      retryIntent: null,
     }
     if (root.platform !== 'twitter') return result
     let normalized
     try {
+      const protocol = await twitterV2RetryPreparation(client, root, { apiKeyPepper })
       normalized = normalizedTwitterRetryBody(root.acquisition_request)
-      result.requestEvidence.request = root.acquisition_request
+      result.requestEvidence.request = protocol
+        ? { method: 'POST', path: '/api/v2/data/search', body: protocol.body }
+        : root.acquisition_request
+      if (protocol) {
+        result.requestEvidence.contractVersion = 'mx-insight-hub.data-search.v2'
+        result.retryIntent = protocol.retryIntent
+      }
     } catch (error) {
-      if (!(error instanceof AppError)) throw error
+      if (!(error instanceof AppError) || error.status >= 500) throw error
       result.eligibility.reasonCode = 'twitter_retry_evidence_unavailable'
-      result.eligibility.message = '未保留可验证的 Twitter 标准搜索原参数，不能从此记录重试。'
+      result.eligibility.message = '未保留可验证的 Twitter 标准搜索原参数或完整 v2 绑定，不能从此记录重试。'
       return result
     }
     const store = { pool: client, providerKey: 'rapidapi' }
@@ -52,6 +61,11 @@ export async function prepareTwitterRetry(client, requestId, { apiKeyPepper = nu
         responseStatus: successor.response_status }
       result.eligibility = { allowed: false, reasonCode: 'twitter_retry_already_claimed',
         message: '此原请求已有后续重试，请查看后续请求及结算；这里不会再发起另一笔请求。' }
+      return result
+    }
+    if (result.retryIntent) {
+      result.eligibility = { allowed: false, reasonCode: 'twitter_retry_already_claimed',
+        message: '此原请求已登记 v2 重试意图，请保留后续幂等键并只读核对；不会再创建另一笔请求。' }
       return result
     }
     try {

@@ -180,6 +180,7 @@ services:
     image: ${MX_INSIGHT_IMAGE:-mx-insight-hub:local}
     environment:
       MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS: ${MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS:-250}
+      MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT: ${MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT:-off}
       MX_INSIGHT_LISTENER_MODE: public
       MX_INSIGHT_STORE: postgres
       DATABASE_URL: postgres://mx_insight:${MX_INSIGHT_POSTGRES_PASSWORD:-local-postgres-change-me}@postgres:5432/mx_insight_hub

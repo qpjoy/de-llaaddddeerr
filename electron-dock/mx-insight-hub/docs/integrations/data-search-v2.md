@@ -19,7 +19,7 @@
 }
 ```
 
-`Idempotency-Key` 必填。起止时间必须有明确时区，精度最多毫秒且起点早于终点；`timezone` 必须是有效 IANA 时区。Hub 统一为 UTC 瞬时比较，不采用服务器本地时区。供应商坐标、`params`、隐式日期默认值、`X-MX-Insight-Retry-Of` 不属于 v2 输入。
+`Idempotency-Key` 必填。起止时间必须有明确时区，精度最多毫秒且起点早于终点；`timezone` 必须是有效 IANA 时区。Hub 统一为 UTC 瞬时比较，不采用服务器本地时区。供应商坐标、`params` 和隐式日期默认值不属于 v2 输入。只有下述 Twitter 人工安全重试可以使用 `X-MX-Insight-Retry-Of`；其他平台仍拒绝未知结果重购 override。
 
 支持 Facebook、Twitter、Instagram、Reddit、Weibo、Bilibili、Douyin、Kuaishou、Zhihu、YouTube、TikTok、Xiaohongshu 标准内容搜索。现有平台及操作权限继续生效，平台可调用仍取决于其原运行开关、凭据和财务准入。微信、账号、支付和其他独立合同不纳入此入口，未支持平台明确返回 422，不退回 v1 或忽略时间。
 
@@ -94,9 +94,25 @@ Delta 更新后由既有 beat 自动接续冷启动/增量的原 CollectionRun�
 
 原采集 `status=committed` 只说明底层采购交付已记录；外层 `searchProtocol.state=complete` / `deliveryConfirmed=true` 才说明 v2 精确投影已记录。投影丢失不授权新 key、v1 或新窗口再采购。若还未取得 usage UUID，按原 key 查询协议状态；不会伪造一个 usage requestId。
 
+## Twitter unknown 的人工安全重试
+
+先在 Hub Internal「数据浏览中心 → 请求诊断」查询原 requestId，选择「准备按原参数重试 Twitter」。准备只读保存的原请求、v2 时间窗/游标、原 Key 和资格，不采集。满足条件后明确点击「确认按当前链路重试（可能再次计费）」，才发起一次新的关联请求。原 unknown 和原账单不改写，新请求独立结算。
+
+公开合同复用 `POST /api/v2/data/search` 和 `X-MX-Insight-Retry-Of: <原 usage UUID>`，使用同一有效 API Key、原规范化 v2 body（包括 `type`、精确时间窗和原游标）及一个新的永久 `Idempotency-Key`。只允许具有完整 v2 归属、原 usage unknown 和当前 RapidAPI Twitter 调用证据的请求；缺参数、身份不符、处理中、游标失效、其他供应商、其他未决请求以及底层 committed 但 v2 投影未知，不得据此重购。
+
+迁移 162 在进入新 usage/采购前就持久绑定原请求和后续幂等键。双击、并行页面、刷新或响应丢失不能换键创建另一笔重试；即使尚无新 usage UUID，也展示已登记的重试意图。断线后保留新键、只读核对，不自动重发采购。后续再次 unknown 时，保留该后续请求，后续人工重试须继续其已验证的单线关联，不能从旧祖先分叉。
+
+若服务端能证明该意图没有任何采购调用、没有未决 usage、协议为 `retryable` 且游标仍有效，准备回执才给出 `retryIntent.resumeAllowed=true`。面板经人工确认可继续已登记的同一键；unknown、运行中、已取得采购证据或仅响应丢失均不能据此继续发送。
+
+`GET /api/v1/requests/{原 usage UUID}/search-recovery` 使用原 API Key，返回 `mx-insight-hub.data-search-recovery.v1` 的只读回执：原请求、原协议状态、已绑定的后续请求以及 `delivery`。只有完整保存的 v2 结果才能出现在 `delivery`；底层 usage 的 committed 不够。此 GET 不做过期清理、预留、采购、重新投影或账务写入，`delivery=null` 也不证明没有采购。
+
+成功重试签发的后续游标只能继承服务端已验证的原 unknown 关联，继续同一时间窗遍历；客户端不能自行提交 ancestor UUID 来绕过其他未决请求。旧 unknown 不因此被改为成功。
+
+Delta 使用该只读回执恢复政情报告原页：核对原持久键对应的原 usage、原 body/window/cursor 和 Hub 保存的关联结果后，仅为指定页保存恢复指针，原页幂等键及原请求 ID 保留。恢复命令不发采购、不推进游标，也不标记入库成功；原 Run 正常接续时 GET 已确认的 v2 结果，沿既有幂等入库与 `_finish_page` 完成，再按原游标继续。具体命令和验证记录见本次运维记录。
+
 ## 发布与统一验收
 
-1. 先应用 `158_data_search_v2_protocol.sql`，再统一发布所有 Hub Public 实例及带新文档的 Admin/UI。新表仅新增协议状态，不修改既有任务、账本、用户、权限、登录或网络。未迁移时 v2 不可用，旧 v1 继续原链路。
+1. 先应用 `158_data_search_v2_protocol.sql`；人工安全重试还需要迁移 162，再统一发布所有 Hub Public 实例及带新文档的 Admin/UI。新表仅新增协议状态，不修改既有任务、账本、用户、权限、登录或网络。未迁移时 v2 重试不可用，旧 v1 继续原链路。
 2. 不允许旧、新 Public 实例混用后就开启 v2：旧二进制不了解跨版本门禁。完整 Hub 发布后再启用下游新任务 v2。
 3. Delta Web、采集 worker、日报/Agent worker 必须同时具有新请求构造器、绑定及 unknown 保护；新日报版本需要按其原发布机制激活，旧版本包不修改。新任务固定版本，旧任务继续 v1。
 4. 罗盘和更新后的 Java 源码一同发布，使时间范围、时区、固定截止点/请求意图一路传到 Delta。不能只换全局 Hub URL。
