@@ -145,7 +145,7 @@ test("old Hub owner sessions are service failures, retain diagnostics and recove
 });
 
 test("incomplete permission contracts fail closed while real empty permissions and join-only sessions remain valid", async () => {
-  for (const dataport of [null, {}, { permissions: [] }, { permissions: [null], ownerChallengeRequired: false }, { permissions: ["history.read"], ownerChallengeRequired: "false" }]) {
+  for (const dataport of [null, {}, { permissions: [null], ownerChallengeRequired: false }]) {
     const result = await loadHarborSession(async path => path === "/auth/sso/session"
       ? { active: true }
       : { data: { tenantIds: ["space"], memberships: [{ tenantId: "space", role: "owner", dataport }] } });
@@ -192,4 +192,15 @@ test("request errors retain only diagnostic identifiers and handle HTML gateway 
       error.requestId === "gateway-request" &&
       !error.message.includes("private-upstream"),
   );
+});
+
+test("MX owner permission sessions no longer require the retired challenge contract", async () => {
+  for (const legacyFlag of [undefined, false, true]) {
+    const customer = { tenantIds: ["space"], memberships: [{ tenantId: "space", role: "owner",
+      dataport: { permissions: ["history.read", "members.read"], ...(legacyFlag === undefined ? {} : { ownerChallengeRequired: legacyFlag }) } }] };
+    const state = await loadHarborSession(async path => path === "/auth/sso/session"
+      ? { active: true, csrf: "fixture-csrf" } : { data: customer });
+    assert.equal(state.issue, null);
+    assert.deepEqual(state.customer, customer);
+  }
 });

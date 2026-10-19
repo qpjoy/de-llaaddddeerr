@@ -142,12 +142,6 @@ export function requireDataportAccess(principal, tenantId, permission) {
   );
   if (!membership)
     throw new AppError(403, "tenant_not_permitted", "无权访问此企业。");
-  if (membership.dataport?.ownerChallengeRequired)
-    throw new AppError(
-      403,
-      "owner_challenge_required",
-      "请先验证企业超管邀请码。",
-    );
   const permissions =
     membership.dataport?.permissions || legacyPermissions(membership);
   if (permission && !permissions.includes(permission))

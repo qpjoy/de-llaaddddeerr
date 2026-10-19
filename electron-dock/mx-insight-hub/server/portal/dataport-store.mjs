@@ -1,9 +1,6 @@
 import {
   createHash,
-  randomBytes,
   randomUUID,
-  scryptSync,
-  timingSafeEqual,
 } from "node:crypto";
 import { AppError } from "../core/errors.mjs";
 import { withPgTransaction } from "../stores/postgres-store.mjs";
@@ -27,16 +24,6 @@ export const uuid = (value) =>
   );
 export const digest = (value) =>
   createHash("sha256").update(String(value)).digest("hex");
-export function hashCode(code) {
-  const salt = randomBytes(16).toString("hex");
-  return `${salt}:${scryptSync(code, salt, 32).toString("hex")}`;
-}
-export function verifyCode(code, encoded) {
-  const [salt, hash] = String(encoded || "").split(":");
-  if (!/^[a-f0-9]{32}$/.test(salt || "") || !/^[a-f0-9]{64}$/.test(hash || ""))
-    return false;
-  return timingSafeEqual(scryptSync(code, salt, 32), Buffer.from(hash, "hex"));
-}
 export function paging(search, defaultSize = 10) {
   const page = Number(search.get("page") || 1),
     pageSize = Number(search.get("pageSize") || defaultSize);
@@ -124,20 +111,6 @@ export class DataportStore {
             : null;
       let permissions =
         role?.permissions || (assignment ? [] : legacyPermissions(membership));
-      let ownerChallengeRequired = false;
-      if (membership.role === "owner") {
-        const authorized =
-          /^[a-f0-9]{64}$/.test(sessionDigest || "") &&
-          (
-            await this.pool.query(
-              `SELECT 1 FROM dataport.owner_sessions s JOIN dataport.owner_codes c
-          ON c.tenant_id=s.tenant_id AND c.member_id=s.member_id AND c.revision=s.code_revision
-          WHERE s.tenant_id=$1 AND s.member_id=$2 AND s.session_digest=$3 AND s.expires_at>now()`,
-              [membership.tenantId, principal.memberId, sessionDigest],
-            )
-          ).rowCount > 0;
-        ownerChallengeRequired = !authorized;
-      }
       memberships.push({
         ...membership,
         dataport: {
@@ -145,7 +118,8 @@ export class DataportStore {
           roleName: role?.name || `原有${membership.role}角色`,
           permissions,
           revision: assignment?.revision || 0,
-          ownerChallengeRequired,
+          // Compatibility for cached DataPort clients during the Hub-first rollout.
+          ownerChallengeRequired: false,
         },
       });
     }
@@ -155,110 +129,6 @@ export class DataportStore {
       memberships,
       dataportSession: sessionDigest,
     };
-  }
-  async configureOwnerCode(tenantId, memberId, code, actor) {
-    this.available();
-    if (
-      !uuid(tenantId) ||
-      !uuid(memberId) ||
-      typeof code !== "string" ||
-      code.length < 12 ||
-      code.length > 128
-    )
-      problem(400, "invalid_owner_code", "邀请码须为 12–128 位。");
-    return withPgTransaction(this.pool, async (db) => {
-      const owner = await db.query(
-        "SELECT 1 FROM iam.tenant_memberships WHERE tenant_id=$1 AND member_id=$2 AND role='owner' AND status='active' FOR UPDATE",
-        [tenantId, memberId],
-      );
-      if (!owner.rowCount) problem(404, "owner_not_found", "企业超管不存在。");
-      await db.query(
-        `INSERT INTO dataport.owner_codes(tenant_id,member_id,digest) VALUES($1,$2,$3)
-        ON CONFLICT(tenant_id,member_id) DO UPDATE SET digest=excluded.digest,revision=dataport.owner_codes.revision+1`,
-        [tenantId, memberId, hashCode(code)],
-      );
-      await db.query(
-        "DELETE FROM dataport.owner_sessions WHERE tenant_id=$1 AND member_id=$2",
-        [tenantId, memberId],
-      );
-      await this.event(
-        tenantId,
-        null,
-        "owner.code.configured",
-        memberId,
-        200,
-        { operator: actor },
-        db,
-      );
-      return { configured: true };
-    });
-  }
-  async ownerChallenge(principal, tenantId, code) {
-    const m = principal.memberships.find((m) => m.tenantId === tenantId);
-    if (
-      !m ||
-      m.role !== "owner" ||
-      !/^[a-f0-9]{64}$/.test(principal.dataportSession || "")
-    )
-      problem(403, "owner_required", "企业超管会话无效。");
-    if (typeof code !== "string" || code.length > 128)
-      problem(400, "invalid_owner_code", "请填写专属邀请码。");
-    // Failed attempts commit before returning an error; the lock covers all browser sessions.
-    const result = await withPgTransaction(this.pool, async (db) => {
-      await db.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
-        `dataport-owner:${tenantId}:${principal.memberId}`,
-      ]);
-      const failures = (
-        await db.query(
-          "SELECT count(*)::int AS n FROM dataport.events WHERE tenant_id=$1 AND actor=$2 AND action='owner.verify' AND status=403 AND created_at>now()-interval '15 minutes'",
-          [tenantId, principal.memberId],
-        )
-      ).rows[0].n;
-      if (failures >= 5)
-        return {
-          status: 429,
-          code: "owner_code_rate_limited",
-          message: "尝试次数过多，请在 15 分钟后重试。",
-        };
-      const stored = (
-        await db.query(
-          "SELECT digest,revision FROM dataport.owner_codes WHERE tenant_id=$1 AND member_id=$2",
-          [tenantId, principal.memberId],
-        )
-      ).rows[0];
-      const valid = stored && verifyCode(code, stored.digest);
-      await this.event(
-        tenantId,
-        principal.memberId,
-        "owner.verify",
-        "",
-        valid ? 200 : 403,
-        {},
-        db,
-      );
-      if (!valid)
-        return {
-          status: 403,
-          code: stored ? "owner_code_invalid" : "owner_code_not_configured",
-          message: stored
-            ? "邀请码不正确。"
-            : "此超管的邀请码尚未配置，请联系平台管理员。",
-        };
-      await db.query(
-        `INSERT INTO dataport.owner_sessions(tenant_id,member_id,session_digest,code_revision,expires_at)
-        VALUES($1,$2,$3,$4,now()+interval '30 days') ON CONFLICT(tenant_id,member_id,session_digest)
-        DO UPDATE SET code_revision=excluded.code_revision,expires_at=excluded.expires_at`,
-        [
-          tenantId,
-          principal.memberId,
-          principal.dataportSession,
-          stored.revision,
-        ],
-      );
-      return { verified: true };
-    });
-    if (result.status) problem(result.status, result.code, result.message);
-    return result;
   }
   async roles(principal, tenantId) {
     requireOwner(principal, tenantId);

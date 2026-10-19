@@ -1463,7 +1463,7 @@ export function createApp({
           return
         }
         if(portalPath==='/session') {
-          const memberships=customer.memberships.map(m=>m.dataport?.ownerChallengeRequired?{...m,capabilities:[],dataport:{...m.dataport,permissions:[]}}:m)
+          const memberships=customer.memberships
           sendJson(response,200,{data:{kind:customer.kind,memberId:customer.memberId,displayName:customer.displayName,platformAdmin:false,scoped:true,tenantIds:customer.tenantIds,capabilities:[],memberships,identityProvider:customer.kind==='dataport-user'?'dataport-local':'mx-launcher',mustChangePassword:customer.mustChangePassword===true,tenantInvitationsEnabled:false,canOpenPersonalAccount:false,publicApiBaseUrl:customer.portalOrigin},requestId},{'cache-control':'private, no-store'})
           return
         }
@@ -1651,14 +1651,6 @@ export function createApp({
         }
         sendJson(response,200,{data,requestId},{'cache-control':'private, no-store'});return;
       }
-      if(request.method==='POST'&&pathname==='/internal/v1/admin/dataport/owner-code') {
-        if(principal?.kind!=='admin-token')throw new AppError(403,'admin_token_required','此操作仅允许平台管理员执行。')
-        const body=await readJson(request,2048)
-        const operationStore=Object.create(dataport);operationStore.requestId=requestId
-        sendJson(response,200,{data:await operationStore.configureOwnerCode(body.tenantId,body.memberId,body.code,'admin-token'),requestId},{'cache-control':'private, no-store'})
-        return
-      }
-
       if (await peripheralRoute({ service: peripherals, request, response, pathname, searchParams, principal, requestId })) return
 
       if (await workspaceRoute({ request, response, pathname, searchParams, principal, store, commerce, sendJson, requestId })) return

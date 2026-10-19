@@ -54,14 +54,13 @@ export async function loadHarborSession(
       throw Error("空间权限响应无效，请重试。");
     // Older Hub sessions contain tenant roles/capabilities but no DataPort
     // permissions. Treat an incomplete deployment as a dependency failure,
-    // never as a denied role or as permission to bypass the owner challenge.
+    // never fabricate customer permissions from a verified identity alone.
     if (
       data.memberships.some((member: any) =>
         !member ||
         typeof member.tenantId !== "string" ||
         !Array.isArray(member.dataport?.permissions) ||
-        !member.dataport.permissions.every((permission: unknown) => typeof permission === "string") ||
-        typeof member.dataport.ownerChallengeRequired !== "boolean"
+        !member.dataport.permissions.every((permission: unknown) => typeof permission === "string")
       ) ||
       data.tenantIds.some((tenant: unknown) =>
         typeof tenant !== "string" ||
