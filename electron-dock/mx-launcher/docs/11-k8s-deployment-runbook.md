@@ -109,6 +109,59 @@ scope；身份读取失败仍报错。发放/撤销 token、修改密码等原�
 `ops internal-production deploy` 会执行完整部署并刷新网关；不要把 `apply/deploy` 当作
 仅重启 API 的命令，也不要在仅更新 API 后遗漏网关核对。
 
+本次现场已确认 `192.168.241.51` 是 `mx-launcher-internal` 的 ClusterIP，
+实际 Pod IP 为 `192.168.224.25`，节点为 `mx-internal-server`。因此这台单节点主机可在
+**仓库根目录**同步 `pro` 后，用下面步骤只构建并滚动 API 镜像。它探测 kubelet 的实际
+containerd socket，验证 CRI 可见的镜像 ID，再同时更新 init container 和 API container；
+不运行完整生产恢复、数据库迁移 Job、SSO 配置更新或网关修改。
+
+```bash
+git pull --ff-only origin pro
+```
+
+```bash
+git merge-base --is-ancestor e367349d HEAD && sudo bash <<'BASH'
+set -Eeuo pipefail
+say() { printf '%s\n' "$*"; }
+die() { printf '%s\n' "$*" >&2; exit 1; }
+source electron-dock/mx-launcher/scripts/k8s-production-recovery.sh
+source electron-dock/mx-launcher/scripts/k8s-control-plane.sh
+k8s_crictl() {
+  crictl --runtime-endpoint="unix://${MX_K8S_CONTAINERD_ADDRESS}" \
+    --image-endpoint="unix://${MX_K8S_CONTAINERD_ADDRESS}" "$@"
+}
+export KUBECONFIG=/etc/kubernetes/admin.conf
+exec 9>/run/mx-launcher-deploy.lock
+flock -n 9 || die "另一个 Launcher 部署正在运行"
+k8s_resolve_containerd_address
+K8S_PRODUCTION_RECOVERY=1
+k8s_require_apiserver_ready
+
+MX_SHADOW_IMAGE_CLEANUP=0 \
+  bash electron-dock/mx-launcher/scripts/manage.sh shadow build
+
+image="docker.io/qpjoy/mx-launcher-server:auth-audit-e367349d-$(date -u +%Y%m%d%H%M%S)"
+docker tag qpjoy/mx-launcher-server:shadow "$image"
+archive="$(mktemp /tmp/mx-launcher-api-image.XXXXXX)"
+trap 'rm -f -- "$archive"' EXIT
+docker save "$image" -o "$archive"
+k8s_ctr images import "$archive"
+k8s_verify_cri_image "$image"
+k8s_require_apiserver_ready
+
+kubectl --request-timeout=30s -n mx-internal-shadow \
+  set image deployment/mx-launcher-internal \
+  internal-api="$image" seed-site-slot-artifacts="$image"
+kubectl -n mx-internal-shadow \
+  rollout status deployment/mx-launcher-internal --timeout=600s
+say "Launcher API 已更新：$image"
+BASH
+```
+
+这里的 `K8S_PRODUCTION_RECOVERY=1` 只用于启用镜像 ID 校验，未调用主机恢复函数。
+API 启动仍执行自身既有的迁移检查与 bootstrap。若镜像更新请求或 rollout 超时，
+先读取 Deployment 当前镜像和 rollout 状态，确认结果；不要立即重复构建或执行整套部署。
+
 上线后可先用无效诊断 token 检查接口延迟和拒绝行为（不要把真实 token 贴入日志或工单）：
 
 ```bash
