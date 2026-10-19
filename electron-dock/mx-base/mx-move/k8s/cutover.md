@@ -57,6 +57,16 @@ findmnt --raw --noheadings --output TARGET | sort | uniq -cd
 
 NAS 明确排除：不迁移其数据，不更改或卸载 `/mnt/nas`，不更改 NAS 的 fstab 行。历史盘点记录过 Docker 容器绑定 `/mnt/nas/pgsql/data` 及验证码目录，因此按已使用的存储保护，不能按“看起来没数据”处理。任何未核验的 NFS/CIFS/CSI 或其他 kubelet 子挂载仍阻止迁移；检查不读取 NAS 文件内容。
 
+若 `migrate` 只输出通用隐藏错误，先用 `status` 确认提交状态。现场事务 `mx-k8s-20261020-043136-47c1e44e` 已为 `aborted / may_write=false`，6 个配置文件已保存，但未保存 `snapshot_sha256`；etcdctl 和 `kubernetes.before` 存在，`snapshot.db` 不存在。这将失败范围缩小到配置备份或在线快照保存附近，尚不能确定具体原因。原版本没有记录错误细节，不从这些痕迹推断数据库故障。
+
+同步 `k8s/cutover.py` 和模块入口 `scripts/manage.sh` 后，可先独立验证准备步骤：
+
+```bash
+bash mx-move/scripts/manage.sh k8s prepare-check
+```
+
+此命令重新预检，在独立的 root 私有目录备份身份、配置、etcdctl 和在线 etcd 快照，并校验原登录配置基线；会占用少量备份空间，但不暂停工作负载、不复制业务数据、不修改挂载、NAS 或当前事务指针。它要求当前没有未恢复的迁移事务，成功摘要为 `phase=preparation-checked / execution_started=false / service_changes=false`，失败则输出具体的 `preparation_diagnostics`，仅含步骤、固定分类、退出码或 errno、工具源码位置；凭据和原始错误仍隐藏。独立记录留在输出所指目录；`status` 仍指向之前的正式事务。失败不需要对这次准备检查运行 `resume`。成功后再在维护窗口运行 `migrate`，正式迁移会重新检查并生成自己的备份。
+
 **仅在已安排的维护窗口执行：**
 
 ```bash

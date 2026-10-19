@@ -6,7 +6,7 @@ STATIC_DIR="$ROOT_DIR/mx-static"
 # Kubernetes storage commands are not <action> <application> commands.
 # Leave all other invocations in the existing application dispatch.
 case "${1:-} ${2:-}" in
-  'k8s inventory'|'k8s plan'|'k8s runtime-check'|'k8s prepare-runtime'|'k8s install-runtime'|'k8s cutover-check'|'k8s migrate'|'k8s status'|'k8s resume'|'k8s verify'|'k8s -h'|'k8s --help')
+  'k8s inventory'|'k8s plan'|'k8s runtime-check'|'k8s prepare-runtime'|'k8s install-runtime'|'k8s cutover-check'|'k8s prepare-check'|'k8s migrate'|'k8s status'|'k8s resume'|'k8s verify'|'k8s -h'|'k8s --help')
     exec bash "$ROOT_DIR/mx-move/scripts/manage.sh" "$@"
     ;;
 esac
@@ -33,6 +33,7 @@ mx-base — 独立基础设施应用管理（在目标 Internal 主机执行）
   bash scripts/manage.sh k8s prepare-runtime # 根卷预备隔离配置与 K8s 镜像归档；不切换服务
   bash scripts/manage.sh k8s install-runtime --prepared <目录> # 安装候选实例并导入；不切换 kubelet/数据库
   bash scripts/manage.sh k8s cutover-check # 正式迁移前只读检查；不停止业务
+  bash scripts/manage.sh k8s prepare-check # 验证私有备份准备；不停止业务或切换服务
   bash scripts/manage.sh k8s migrate     # 维护窗口：迁移 Kubernetes 数据，保留 Docker/etcd
   bash scripts/manage.sh k8s status      # 最近迁移事务摘要
   bash scripts/manage.sh k8s resume      # 提交前恢复原副本；提交后向前恢复

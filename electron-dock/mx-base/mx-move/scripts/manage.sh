@@ -12,6 +12,7 @@ mx-move k8s — Internal Kubernetes 存储迁移（保留 Docker 数据与现有
   prepare-runtime                       预备隔离配置和镜像归档
   install-runtime --prepared <目录>     安装候选运行时；不切换 kubelet/数据库
   cutover-check                         正式切换前只读核验；不停止业务
+  prepare-check                         验证私有备份准备；不停止业务或切换服务
   migrate                               维护窗口：停写、冷复制、切换和验收
   status                                读取最近事务摘要
   resume                                提交前恢复原副本；提交后向前恢复
@@ -22,7 +23,7 @@ mx-move k8s — Internal Kubernetes 存储迁移（保留 Docker 数据与现有
 HELP
       exit 0
       ;;
-    cutover-check|migrate|status|resume|verify)
+    cutover-check|prepare-check|migrate|status|resume|verify)
       exec python3 -B "$SCRIPT_DIR/../k8s/cutover.py" "$@"
       ;;
   esac

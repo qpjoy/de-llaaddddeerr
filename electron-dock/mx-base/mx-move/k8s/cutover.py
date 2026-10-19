@@ -50,6 +50,38 @@ REPO = Path(__file__).resolve().parents[3]
 IDENTITY_HELPER = Path(__file__).with_name('storage-identities.mjs')
 IDENTITY_ACTIONS = ('check', 'prepare', 'update', 'restore', 'patches', 'restore-patches',
                     'verify', 'verify-restored', 'verify-local', 'verify-local-restored')
+PREPARATION_STEPS = ('endpoint-check', 'identity-backup', 'config-backup', 'endpoint-plan',
+                     'etcd-tool-backup', 'kubernetes-backup', 'etcd-snapshot-save',
+                     'etcd-snapshot-verify', 'launcher-baseline', 'startup-plan', 'flush')
+
+
+def preparation_diagnostic(error, step, backend):
+    """Keep only fixed categories and tool source locations, never exception text."""
+    reason, exit_code, error_number = 'unexpected_error', None, None
+    if isinstance(error, backend.CommandFailed):
+        reason = {'exit': 'command_exit', 'exec': 'command_unavailable', 'timeout': 'command_timeout'}.get(error.kind, 'command_failed')
+        exit_code = error.returncode if type(error.returncode) is int else None
+    elif isinstance(error, backend.Refuse):
+        reason = 'etcd_guard_rejected'
+    elif isinstance(error, shutil.Error):
+        reason = 'copy_failed'
+    elif isinstance(error, OSError):
+        reason = 'filesystem_error'
+        error_number = error.errno if type(error.errno) is int else None
+    elif isinstance(error, (prep.Refuse, candidate_guard.GuardError, storage_guard.StorageError, endpoint_config.EndpointError)):
+        reason = 'guard_rejected'
+    elif isinstance(error, (ValueError, TypeError, KeyError, AttributeError)):
+        reason = 'invalid_data_or_api'
+    sources = {str(Path(__file__).resolve()): 'k8s/cutover.py',
+               str(Path(__file__).resolve().parents[1] / 'etcd/move.py'): 'etcd/move.py'}
+    locations, frame = [], error.__traceback__
+    while frame is not None:
+        module = sources.get(os.path.abspath(frame.tb_frame.f_code.co_filename))
+        if module:
+            locations.append({'module': module, 'line': frame.tb_lineno})
+        frame = frame.tb_next
+    return {'schema_version': 1, 'step': step if step in PREPARATION_STEPS else 'unknown',
+            'reason': reason, 'exit_code': exit_code, 'errno': error_number, 'locations': locations[-3:]}
 
 
 def identity_diagnostic(stderr):
@@ -353,9 +385,26 @@ class Host:
                 time.sleep(3)
 
     def prepare(self, journal):
+        try:
+            self._prepare(journal)
+        except Exception as error:
+            detail = preparation_diagnostic(error, journal.get('preparation_step'), self.etcd_module)
+            # execute() persists this safe projection when marking the attempt
+            # aborted. No raw error or command output enters the journal here.
+            journal['preparation_failure'] = detail
+            known = (prep.Refuse, candidate_guard.GuardError, storage_guard.StorageError, endpoint_config.EndpointError)
+            if isinstance(error, known):
+                raise
+            raise prep.Refuse('迁移准备失败；preparation_diagnostics=' +
+                              json.dumps(detail, ensure_ascii=True, separators=(',', ':'))) from None
+
+    def _prepare(self, journal):
         run = Path(journal['run'])
+        journal['preparation_step'] = 'endpoint-check'
         endpoint_config.verify(self.run, journal['kubelet_launch'])
+        journal['preparation_step'] = 'identity-backup'
         self.identities('prepare', journal)
+        journal['preparation_step'] = 'config-backup'
         files = [Path('/etc/fstab'), runtime_install.RECORD, runtime_install.UNIT,
                  Path('/var/lib/kubelet/config.yaml')]
         for optional in ('/var/lib/kubelet/instance-config.yaml', '/var/lib/kubelet/kubeadm-flags.env'):
@@ -366,6 +415,7 @@ class Host:
             candidate_guard.safe(str(path))
             raw = path.read_bytes()
             journal['files'][str(path)] = base64.b64encode(raw).decode()
+        journal['preparation_step'] = 'endpoint-plan'
         replace_endpoint = cutover_runtime.replace_endpoint
         replace_endpoint(Path('/var/lib/kubelet/config.yaml').read_bytes())
         flags = Path('/var/lib/kubelet/kubeadm-flags.env')
@@ -375,19 +425,25 @@ class Host:
             if file in journal['files']:
                 replace_endpoint(base64.b64decode(journal['files'][file]))
         # Match the already running etcd binary and retain keys privately.
+        journal['preparation_step'] = 'etcd-tool-backup'
         shutil.copyfile(self.etcd.etcdctl, str(run / 'etcdctl'))
         (run / 'etcdctl').chmod(0o700)
         self.etcd.etcdctl = str(run / 'etcdctl')
+        journal['preparation_step'] = 'kubernetes-backup'
         shutil.copytree('/etc/kubernetes', str(run / 'kubernetes.before'))
         with prep.progress('保存并校验在线 etcd 快照和原用户配置基线'):
+            journal['preparation_step'] = 'etcd-snapshot-save'
             self.etcd.ctl('snapshot', 'save', str(run / 'snapshot.db'))
             (run / 'snapshot.db').chmod(0o600)
+            journal['preparation_step'] = 'etcd-snapshot-verify'
             journal['snapshot_sha256'] = self.etcd_module.verify_snapshot(run / 'snapshot.db')
+            journal['preparation_step'] = 'launcher-baseline'
             journal['launcher_before'] = self.etcd.launcher_check()
             require(journal['launcher_before'] and journal['launcher_before']['namespace'] == 'mx-internal-shadow',
                     'Launcher 登录基线不属于已盘点的 Internal 实例')
         # Compute every file mutation intent now. execute persists these bytes
         # before installing a guard, changing a unit or changing a mount.
+        journal['preparation_step'] = 'startup-plan'
         python = os.path.realpath(sys.executable)
         candidate_guard.safe(python)
         require(re.fullmatch(r'/[A-Za-z0-9_./-]+', python), 'Python 路径不适于 systemd')
@@ -404,6 +460,7 @@ class Host:
         journal['unit_after'] = base64.b64encode(after).decode()
         candidate_before = base64.b64decode(journal['files'][str(runtime_install.RECORD)])
         journal['candidate_after'] = base64.b64encode(raw_json(dict(json.loads(candidate_before), unit_sha256=digest(after)))).decode()
+        journal['preparation_step'] = 'flush'
         self.run(['sync', '-f', run], 180)
 
     def block_startup(self, journal):
@@ -650,12 +707,15 @@ def locks():
 
 
 def summary(journal):
-    return {'phase': journal['phase'], 'transaction': journal['transaction'], 'may_write': journal['may_write'],
+    result = {'phase': journal['phase'], 'transaction': journal['transaction'], 'may_write': journal['may_write'],
             'run_directory': journal['run'], 'data_roots': [v['logical'] for v in journal['storage']['entries']],
             'docker_data_moved': False, 'etcd_data_moved_again': False,
             'automatic_checks_passed': journal.get('automatic_checks_passed', False),
             'capacity': journal.get('capacity'),
             'user_login_and_network_validation': 'required', 'historical_data_deleted': False}
+    if journal.get('preparation_step') in PREPARATION_STEPS:
+        result['preparation_step'] = journal['preparation_step']
+    return result
 
 
 def load_move(host):
@@ -674,7 +734,7 @@ def load_move(host):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='本机 Kubernetes 业务存储切换；仅维护窗口执行 migrate，Docker 数据不迁移')
-    parser.add_argument('action', choices=('cutover-check', 'migrate', 'status', 'resume', 'verify'))
+    parser.add_argument('action', choices=('cutover-check', 'prepare-check', 'migrate', 'status', 'resume', 'verify'))
     args = parser.parse_args(argv)
     require(sys.platform.startswith('linux') and os.geteuid() == 0, '请以 root 在 Internal Linux 主机执行')
     os.umask(0o077)
@@ -706,6 +766,19 @@ def main(argv=None):
         move = Move(host, Path(journal['run']) / 'journal.json')
         move.journal = journal
         move.persist()
+        if args.action == 'prepare-check':
+            # Exercise backup preparation without publishing CURRENT or calling
+            # execute(), which is the only route into workload quiescence.
+            prep.stage('仅检查备份准备，不停止业务；私有记录目录：' + journal['run'])
+            try:
+                host.prepare(journal)
+            except BaseException:
+                move.persist('preparation-failed')
+                raise
+            move.persist('preparation-checked')
+            print(json.dumps(dict(summary(journal), execution_started=False, service_changes=False),
+                             ensure_ascii=False, indent=2))
+            return
         before = CURRENT.read_bytes() if CURRENT.exists() else None
         replace_file(CURRENT, raw_json({'transaction': transaction}), before)
         move.execute(journal)
