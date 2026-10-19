@@ -62,13 +62,33 @@ rig_proxy_ctr() {
   fi
 }
 
+rig_managed_runtime_value() {
+  if [ "$(id -u)" -eq 0 ]; then
+    python3 /usr/local/lib/mx-k8s-runtime/resolve.py "$1" 2>/dev/null || { printf '%s\n' 'Managed Kubernetes runtime verification failed; refusing the legacy containerd endpoint.' >&2; return 1; }
+  else
+    sudo -n python3 /usr/local/lib/mx-k8s-runtime/resolve.py "$1" 2>/dev/null || { printf '%s\n' 'Managed Kubernetes runtime verification failed; refusing the legacy containerd endpoint.' >&2; return 1; }
+  fi
+}
+
+rig_proxy_namespace_ctr() {
+  local namespace="$1" address
+  shift
+  if [ "$namespace" = k8s.io ] && { [ -e /etc/mx-k8s-runtime/active.json ] || [ -L /etc/mx-k8s-runtime/active.json ]; }; then
+    address="$(rig_managed_runtime_value address)" || return 1
+    [ -n "$address" ] || return 1
+    rig_proxy_ctr --address "$address" --namespace "$namespace" "$@"
+  else
+    rig_proxy_ctr --namespace "$namespace" "$@"
+  fi
+}
+
 rig_proxy_ctr_pull() {
   local namespace="$1" ref="$2" help
-  help="$(rig_proxy_ctr --namespace "$namespace" images pull --help)"
+  help="$(rig_proxy_namespace_ctr "$namespace" images pull --help)" || return 1
   set -- --platform "$MX_RIG_PROXY_PLATFORM" "$ref"
   # containerd 2.x otherwise delegates downloads to the unconfigured daemon.
   if [[ "$help" == *--local* ]]; then set -- --local "$@"; fi
-  rig_proxy_ctr --namespace "$namespace" --timeout 10m images pull "$@"
+  rig_proxy_namespace_ctr "$namespace" --timeout 10m images pull "$@"
 }
 
 rig_proxy_bootstrap_image() (
@@ -129,7 +149,7 @@ rig_proxy_postgres_image() {
   rig_require_local_docker
   ref="$(awk '$1 == "image:" { print $2; exit }' "${K8S_DIR}/15-postgres.yaml")"
   ref="$(rig_image_reference "$ref")"
-  images="$(rig_proxy_ctr --namespace k8s.io images list -q)"
+  images="$(rig_proxy_namespace_ctr k8s.io images list -q)" || return 1
   if printf '%s\n' "$images" | grep -Fxq -- "$ref"; then return; fi
   say 'preloading PostgreSQL through the selected proxy on the Rig node'
   rig_proxy_ctr_pull k8s.io "$ref"

@@ -10,7 +10,7 @@ K8S_IMAGE_REPOSITORY="${K8S_IMAGE_REPOSITORY:-registry.k8s.io}"
 K8S_PAUSE_VERSION="${K8S_PAUSE_VERSION:-3.10.2}"
 POD_CIDR="${POD_CIDR:-192.168.224.0/20}"
 SERVICE_CIDR="${SERVICE_CIDR:-192.168.240.0/20}"
-CRI_SOCKET="${CRI_SOCKET:-unix:///run/containerd/containerd.sock}"
+CRI_SOCKET="${CRI_SOCKET:-}"
 K8S_APISERVER_ADVERTISE_ADDRESS="${K8S_APISERVER_ADVERTISE_ADDRESS:-}"
 K8S_FLANNEL_URL="${K8S_FLANNEL_URL:-https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml}"
 K8S_FLANNEL_IMAGE_REPOSITORY="${K8S_FLANNEL_IMAGE_REPOSITORY:-}"
@@ -47,6 +47,22 @@ MX_ROOT="$ROOT"
 
 say() { printf '▸ %s\n' "$*"; }
 die() { printf '✗ %s\n' "$*" >&2; exit 1; }
+
+source "$SCRIPT_DIR/k8s-production-recovery.sh"
+
+configure_runtime_selection() {
+  local address
+  if k8s_managed_runtime; then
+    [ "$K8S_CONFIGURE_CONTAINERD" = 0 ] \
+      || die "managed Kubernetes runtime: set K8S_CONFIGURE_CONTAINERD=0; the installer must not rewrite Docker containerd"
+    address="$(k8s_containerd_address)" || return 1
+    [ -z "$CRI_SOCKET" ] || [ "$CRI_SOCKET" = "unix://$address" ] \
+      || die "CRI_SOCKET does not match the managed Kubernetes runtime"
+    CRI_SOCKET="unix://$address"
+  else
+    CRI_SOCKET="${CRI_SOCKET:-unix:///run/containerd/containerd.sock}"
+  fi
+}
 
 usage() {
   cat <<'EOF'
@@ -363,6 +379,9 @@ configure_containerd() {
   if [ "$K8S_CONFIGURE_CONTAINERD" = "0" ]; then
     say "skip containerd configure/restart because K8S_CONFIGURE_CONTAINERD=0"
     return 0
+  fi
+  if k8s_managed_runtime; then
+    die "managed Kubernetes runtime: refusing to rewrite or restart Docker containerd"
   fi
   pm="$(package_manager)"
   if ! command -v containerd >/dev/null 2>&1; then
@@ -923,10 +942,12 @@ wait_for_cni_installation() {
 }
 
 restart_runtime_after_cni() {
+  local runtime_service
   [ "$SKIP_INIT" = "0" ] || return 0
   [ "$K8S_RESTART_RUNTIME_AFTER_CNI" = "1" ] || return 0
-  say "restart containerd and kubelet after CNI files are installed"
-  run_allow_fail systemctl restart containerd
+  runtime_service="$(k8s_containerd_service --allow-stopped-kubelet)" || return 1
+  say "restart $runtime_service and kubelet after CNI files are installed"
+  run_allow_fail systemctl restart "$runtime_service"
   run_allow_fail systemctl restart kubelet
 }
 
@@ -951,13 +972,15 @@ cluster_bootstrap_diagnostics() {
   ls -la /opt/cni/bin 2>/dev/null || true
   ls -la /run/flannel 2>/dev/null || true
   [ -f /run/flannel/subnet.env ] && cat /run/flannel/subnet.env || true
-  say "diagnostics: containerd"
-  systemctl status containerd --no-pager || true
-  journalctl -u containerd -n 160 --no-pager || true
-  if [ -f /etc/containerd/config.toml ]; then
+  local runtime_service
+  runtime_service="$(k8s_containerd_service --allow-stopped-kubelet)" || return 1
+  say "diagnostics: $runtime_service"
+  systemctl status "$runtime_service" --no-pager || true
+  journalctl -u "$runtime_service" -n 160 --no-pager || true
+  if ! k8s_managed_runtime && [ -f /etc/containerd/config.toml ]; then
     grep -nE 'disabled_plugins|SystemdCgroup|sandbox_image|conf_dir|bin_dir|root =' /etc/containerd/config.toml || true
   fi
-  command -v crictl >/dev/null 2>&1 && crictl info || true
+  command -v crictl >/dev/null 2>&1 && crictl --runtime-endpoint="$CRI_SOCKET" --image-endpoint="$CRI_SOCKET" info || true
   say "diagnostics: kubelet"
   systemctl status kubelet --no-pager || true
   journalctl -u kubelet -n 160 --no-pager || true
@@ -970,7 +993,7 @@ cni_runtime_cache_stale() {
   cni_plugins_ready || return 1
   [ -s /run/flannel/subnet.env ] || return 1
   command -v crictl >/dev/null 2>&1 || return 1
-  crictl_status="$(crictl info 2>/dev/null || true)"
+  crictl_status="$(crictl --runtime-endpoint="$CRI_SOCKET" --image-endpoint="$CRI_SOCKET" info 2>/dev/null || true)"
   case "$crictl_status" in
     *'cni plugin not initialized'*)
       return 0
@@ -1042,6 +1065,7 @@ deploy_mx() {
 main() {
   require_root
   detect_rhel_family
+  configure_runtime_selection
   say "Kubernetes repo version: $K8S_VERSION"
   say "Kubernetes image repository: $K8S_IMAGE_REPOSITORY"
   say "Pod CIDR: $POD_CIDR"

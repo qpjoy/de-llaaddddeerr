@@ -6,7 +6,7 @@
 
 ## 本次复用的预备结果
 
-用户已回传 `prepare-runtime` 成功摘要，以下是已生成的文件身份；**尚不表示候选实例已在服务器安装成功**。
+用户先回传 `prepare-runtime` 成功，随后已回传 `candidate-ready`：172 个镜像引用、71 个 CRI 镜像，候选工作负载 0，根卷剩余 930,353,958,912 bytes。**本现场候选安装已经成功，不必再次执行本页安装命令；下一步按[正式切换说明](cutover.md)同步全部适配并运行 `cutover-check`。** 以下保留归档身份与安装器的操作边界。
 
 | 项目 | 已回传结果 |
 | --- | --- |
@@ -19,7 +19,7 @@
 
 ## 执行命令
 
-先同步完整 `mx-move` 模块。以 root 在服务器的 **`electron-dock/mx-base` 目录**执行，首选此入口，避免旧父级管理脚本把子命令误认成应用名：
+以下用于尚未完成安装或安装中断后的续跑；本现场已完成。先同步完整 `mx-move` 模块。以 root 在服务器的 **`electron-dock/mx-base` 目录**执行，首选此入口，避免旧父级管理脚本把子命令误认成应用名：
 
 ```bash
 bash mx-move/scripts/manage.sh k8s install-runtime \
@@ -63,14 +63,16 @@ bash scripts/manage.sh k8s install-runtime \
 - `active_descriptor_published`
 - `cutover_supported`
 
+这些字段描述 `install-runtime` 自身的执行范围；新版独立的 `migrate` 命令负责后续业务切换，不能通过手工修改候选回执提前切换。
+
 只贴回终端摘要 JSON；失败时贴简短错误。不要贴 `containerd.toml`、环境文件、候选记录、证书、镜像归档或原始容器配置。
 
 中断或失败时保留全部候选文件；原服务没有切换。新候选服务可能已启动，不能因为命令失败就把它当成不存在。修复已报告的问题后，可用**相同 `--prepared` 路径和同一条命令**续跑，工具先核对原记录、文件与源实例，再继续。已到 `ready` 的事务重新核验后跳过导入；其他可恢复阶段可能重新导入同一归档。
 
 若已安装的 helper、unit、环境、二进制或预备内容发生变化，续跑会拒绝，不会自动覆盖或删除。保留记录并贴回简短提示；不要手工改记录、移动目录或执行旧迁移脚本来绕过校验。
 
-## 完整业务切换仍未实现
+## 候选完成后的正式切换
 
-当前已经实现候选安装、启动保护、中性解析器以及 Launcher、Hub、mx-common、Pay、Rig 的运行时调用适配；这些适配仍待正式切换后的生产验收。候选成功尚不足以安全切换 kubelet 或挂载。
+当前已实现候选安装、启动保护、中性解析器、Launcher/Hub/mx-common/Pay/Rig 调用适配和正式切换事务；正式业务切换尚未在生产执行。候选成功尚不足以手工切换 kubelet 或挂载。
 
-完整切换执行器还需实现并验证：各数据库及私有配置备份与停写、原 `k8s.io` tasks/sandboxes 全部退出、kubelet 子挂载处理、数据复制与校验、Launcher/common/Pay 存储身份和启动保护同步，以及在允许新副本写入前持久化事务状态。之后才能切换 kubelet、挂载及 active 描述，并验收数据库身份、MX-H2I 原用户登录/联网、SSO 和 Pay。原共享 containerd 与 Docker 数据始终保留。详见[全量迁移约束](README.md)和[调用者适配状态](runtime-consumers.md)。
+同步完整变更后先执行 `k8s cutover-check`，在维护窗口执行 `k8s migrate`。执行器负责停写、etcd/ES 快照和私有配置备份、原 `k8s.io` tasks/sandboxes 退出、kubelet 子挂载处理、冷复制校验、Launcher/common/Pay 身份同步与持久提交；原共享 containerd 与 Docker 数据始终保留。中断恢复按 `may_write` 区分原副本和新副本。步骤及业务验收见[正式切换说明](cutover.md)。

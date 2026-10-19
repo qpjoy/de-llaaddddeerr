@@ -3,10 +3,10 @@
 set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATIC_DIR="$ROOT_DIR/mx-static"
-# Storage inspection/runtime preparation is not an <action> <application> command.
+# Kubernetes storage commands are not <action> <application> commands.
 # Leave all other invocations in the existing application dispatch.
 case "${1:-} ${2:-}" in
-  'k8s inventory'|'k8s plan'|'k8s runtime-check'|'k8s prepare-runtime'|'k8s install-runtime'|'k8s -h'|'k8s --help')
+  'k8s inventory'|'k8s plan'|'k8s runtime-check'|'k8s prepare-runtime'|'k8s install-runtime'|'k8s cutover-check'|'k8s migrate'|'k8s status'|'k8s resume'|'k8s verify'|'k8s -h'|'k8s --help')
     exec bash "$ROOT_DIR/mx-move/scripts/manage.sh" "$@"
     ;;
 esac
@@ -32,6 +32,11 @@ mx-base — 独立基础设施应用管理（在目标 Internal 主机执行）
   bash scripts/manage.sh k8s runtime-check # 只读核对共享运行时与 K8s 独立运行时的条件
   bash scripts/manage.sh k8s prepare-runtime # 根卷预备隔离配置与 K8s 镜像归档；不切换服务
   bash scripts/manage.sh k8s install-runtime --prepared <目录> # 安装候选实例并导入；不切换 kubelet/数据库
+  bash scripts/manage.sh k8s cutover-check # 正式迁移前只读检查；不停止业务
+  bash scripts/manage.sh k8s migrate     # 维护窗口：迁移 Kubernetes 数据，保留 Docker/etcd
+  bash scripts/manage.sh k8s status      # 最近迁移事务摘要
+  bash scripts/manage.sh k8s resume      # 提交前恢复原副本；提交后向前恢复
+  bash scripts/manage.sh k8s verify      # 只读核验已提交的新副本
   bash scripts/manage.sh deploy           # 交互选择一个应用；不会默认全量部署
   bash scripts/manage.sh deploy mx-static # 准备目录/密钥，构建并等待健康
   bash scripts/manage.sh deploy mx-pay    # 独立支付：迁移成功后滚动更新并验收

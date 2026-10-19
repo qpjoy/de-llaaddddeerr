@@ -27,6 +27,7 @@ ${fn('k8s_verify_cri_image')}
 docker() { echo sha256:expected; }
 k8s_crictl() { echo '{"status":{"id":"sha256:${visible ? 'expected' : 'wrong'}"}}'; }
 df() { :; }
+k8s_containerd_root() { echo /var/lib/containerd; }
 k8s_verify_cri_image postgres:16-alpine
 `, { K8S_PRODUCTION_RECOVERY: '1' });
     assert.equal(result.status, visible ? 0 : 1);

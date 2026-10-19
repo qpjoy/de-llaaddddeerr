@@ -1,6 +1,6 @@
 # 独立 Kubernetes containerd 的调用者适配
 
-更新日期：2026-10-20。**中性解析器和下表产品 wrapper 已实现，尚未进行正式切换后的生产验收。** `install-runtime` 会安装解析器并启动候选实例，但不发布 active 描述、不切换 kubelet；因此这些适配不会把当前普通发布提前导向候选实例。完整业务迁移执行器仍未实现。
+更新日期：2026-10-20。**中性解析器、下表产品 wrapper 和正式切换事务已实现，尚未进行业务切换后的生产验收。** `install-runtime` 已回传候选成功，但不发布 active 描述、不切换 kubelet；因此这些适配不会把当前普通发布提前导向候选实例。后续 `migrate` 在持久提交之后才正式激活；执行步骤见[正式切换说明](cutover.md)。
 
 目标仍是仅迁 Kubernetes：Docker 数据、卷与原共享 containerd 保留原位。曾经存在的默认 socket 调用会使“镜像导入旧 `k8s.io` 并验证成功，但新 kubelet 看不到镜像”；适配为各入口显式使用经过验证的 K8s endpoint。
 
@@ -25,7 +25,7 @@
 
 正式激活标记固定为 `/etc/mx-k8s-runtime/active.json`，解析器固定为 `/usr/local/lib/mx-k8s-runtime/resolve.py`，由 `python3` 调用。标记存在或是悬空符号链接时，都进入 managed 分支；描述无效、helper 缺失或检查失败时不得回退旧共享 socket。Pay 不依赖 Launcher 源码或 mx-move 仓库位置。
 
-当前描述 schema 版本为 1，phase 必须为 `active`，字段包括 hostname、根文件系统 UUID、address/root/state/service、config_path/config_sha256、kubelet_config_path。它不含凭据；描述须为 root 所有的 0644 普通文件，目标 TOML 为私有 0600，祖先路径受保护。工具把文件作为数据解析，不 `source` 执行。**候选 `candidate.json` 与 prepared 回执不等于 active 描述；本轮工具不会发布 active.json，不能手工伪造来提前激活。**
+当前描述 schema 版本为 1，phase 必须为 `active`，字段包括 hostname、根文件系统 UUID、address/root/state/service、config_path/config_sha256、kubelet_config_path。它不含凭据；描述须为 root 所有的 0644 普通文件，目标 TOML 为私有 0600，祖先路径受保护。工具把文件作为数据解析，不 `source` 执行。**候选 `candidate.json` 与 prepared 回执不等于 active 描述；只有正式切换事务提交后才发布 active.json，不能手工伪造来提前激活。**
 
 解析器提供 `address`、`root`、`service`、`cri-endpoint` 四个字段；返回前核对描述、配置摘要和有效路径、根卷身份、服务进程/参数，以及 kubelet 实际使用的 socket。地址不是仅凭“文件存在”或 `ctr version` 成功就被采纳。
 
@@ -58,7 +58,7 @@ Launcher `k8s-recovery-state.mjs` 对旧 `/var/lib/containerd` 的身份记录�
 - 各产品普通发布应在新实例导入镜像，并通过 kubelet 对应 CRI 核对 image ID/引用及实际 Pod 启动；仅查 ctr 名称列表不算通过。
 - 检查容量/镜像 GC 使用新 root，同时旧共享 runtime 的 namespace、Docker 容器和卷保持原身份。
 - 在维护范围内验收 `repair-cni` 的服务选择、节点 Ready、DNS 和联网；离线“不重启旧服务”断言不能替代现场验证。
-- 完整切换前必须实现各数据库备份和停写、原 `k8s.io` tasks/sandboxes 归零、kubelet 子挂载处理、数据副本校验、Launcher/common/Pay 身份与启动保护同步，以及允许新数据写入前的事务记录。
+- 正式切换事务必须通过各数据库停写、etcd/ES 快照和私有备份、原 `k8s.io` tasks/sandboxes 归零、kubelet 子挂载处理、冷副本校验、Launcher/common/Pay 身份与启动保护同步，以及允许新副本写入前的持久记录。
 - 切换后核对数据库 system ID、PV/PVC UID、Secret 和用户凭据连续性，并实测 MX-H2I 原用户登录、联网、SSO 与 Pay。不得以候选 `candidate-ready` 替代这些结果。
 
-当前可执行的下一步是[安装无业务工作负载的候选实例](runtime-installation.md)；完整业务 cutover、回迁及灾难恢复没有因此自动完成。
+候选安装已经成功，本现场下一步是[正式切换预检](cutover.md)，维护窗口再执行 `migrate`；业务迁移、真实用户验收、最新数据回迁及灾难恢复并未因候选成功自动完成。

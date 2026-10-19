@@ -358,7 +358,21 @@ acquire_deploy_lock() {
 }
 
 run_ctr() {
-  if [ "$(id -u)" -eq 0 ]; then
+  local address
+  if [ -e /etc/mx-k8s-runtime/active.json ] || [ -L /etc/mx-k8s-runtime/active.json ]; then
+    # The managed descriptor is authoritative; a missing/invalid helper must
+    # never redirect Kubernetes images back into Docker's shared runtime.
+    if [ "$(id -u)" -eq 0 ]; then
+      address="$(python3 /usr/local/lib/mx-k8s-runtime/resolve.py address 2>/dev/null)" || { printf '%s\n' 'Managed Kubernetes runtime verification failed; refusing the legacy containerd endpoint.' >&2; return 1; }
+      [ -n "$address" ] || return 1
+      ctr --address "$address" -n k8s.io "$@"
+    else
+      need sudo
+      address="$(sudo -n python3 /usr/local/lib/mx-k8s-runtime/resolve.py address 2>/dev/null)" || { printf '%s\n' 'Managed Kubernetes runtime verification failed; refusing the legacy containerd endpoint.' >&2; return 1; }
+      [ -n "$address" ] || return 1
+      sudo -n ctr --address "$address" -n k8s.io "$@"
+    fi
+  elif [ "$(id -u)" -eq 0 ]; then
     ctr -n k8s.io "$@"
   else
     need sudo

@@ -479,7 +479,14 @@ single_node() {
 }
 
 run_ctr() {
-  if [ "$(id -u)" -eq 0 ]; then ctr -n k8s.io "$@"; else sudo -n ctr -n k8s.io "$@"; fi
+  local address
+  if [ -e /etc/mx-k8s-runtime/active.json ] || [ -L /etc/mx-k8s-runtime/active.json ]; then
+    address="$(rig_managed_runtime_value address)" || return 1
+    [ -n "$address" ] || return 1
+    if [ "$(id -u)" -eq 0 ]; then ctr --address "$address" -n k8s.io "$@"
+    else sudo -n ctr --address "$address" -n k8s.io "$@"; fi
+  elif [ "$(id -u)" -eq 0 ]; then ctr -n k8s.io "$@"
+  else sudo -n ctr -n k8s.io "$@"; fi
 }
 
 build_local_image() {

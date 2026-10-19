@@ -223,11 +223,13 @@ need_kubectl() {
 }
 
 k8s_crictl() {
+  local address
   command -v crictl >/dev/null 2>&1 || return 127
-  if [ -S "${MX_K8S_CONTAINERD_ADDRESS:-/run/containerd/containerd.sock}" ]; then
+  address="$(k8s_containerd_address)" || return 1
+  if k8s_managed_runtime || [ -S "$address" ]; then
     crictl \
-      --runtime-endpoint="unix://${MX_K8S_CONTAINERD_ADDRESS:-/run/containerd/containerd.sock}" \
-      --image-endpoint="unix://${MX_K8S_CONTAINERD_ADDRESS:-/run/containerd/containerd.sock}" \
+      --runtime-endpoint="unix://$address" \
+      --image-endpoint="unix://$address" \
       "$@"
     return
   fi
@@ -5941,7 +5943,7 @@ ops_internal_production_repair_kubeadm_endpoint_if_requested() {
 }
 
 ops_internal_production_reinit_kubeadm() {
-  local current_ip node_name host_name configure_containerd restart_runtime_after_cni
+  local current_ip node_name host_name configure_containerd restart_runtime_after_cni cri_socket
   current_ip="$(k8s_detect_lan_ip | head -n 1)"
   if ! k8s_is_usable_lan_ip "$current_ip"; then
     die "cannot detect usable LAN IP; set MX_K8S_APISERVER_ADVERTISE_ADDRESS=<current-lan-ip>"
@@ -5960,6 +5962,12 @@ ops_internal_production_reinit_kubeadm() {
   [ -n "$node_name" ] || node_name="mx-internal-server"
   configure_containerd="${MX_K8S_CONFIGURE_CONTAINERD:-0}"
   restart_runtime_after_cni="${MX_K8S_RESTART_RUNTIME_AFTER_CNI:-0}"
+  cri_socket="${CRI_SOCKET:-unix:///run/containerd/containerd.sock}"
+  if k8s_managed_runtime; then
+    cri_socket="unix://$(k8s_containerd_address)" || return 1
+    [ -z "${CRI_SOCKET:-}" ] || [ "$CRI_SOCKET" = "$cri_socket" ] \
+      || die "CRI_SOCKET does not match the managed Kubernetes runtime"
+  fi
   say "validate recoverable PostgreSQL credentials before kubeadm reinit"
   k8s_require_db_recovery_env "$(k8s_namespace internal-shadow)"
   if kubectl --request-timeout=5s -n "$(k8s_namespace internal-shadow)" \
@@ -5972,7 +5980,8 @@ ops_internal_production_reinit_kubeadm() {
   fi
   say "reinit kubeadm at $current_ip with node=$node_name"
   say "preserve /var/lib/mx-launcher; K8S_CONFIGURE_CONTAINERD=$configure_containerd K8S_RESTART_RUNTIME_AFTER_CNI=$restart_runtime_after_cni"
-  K8S_APISERVER_ADVERTISE_ADDRESS="$current_ip" \
+  CRI_SOCKET="$cri_socket" \
+    K8S_APISERVER_ADVERTISE_ADDRESS="$current_ip" \
     K8S_NODE_NAME="$node_name" \
     K8S_REINIT=1 \
     K8S_CONFIGURE_CONTAINERD="$configure_containerd" \
@@ -5981,7 +5990,8 @@ ops_internal_production_reinit_kubeadm() {
 }
 
 ops_internal_production_repair_cni() {
-  local timeout crictl_status
+  local timeout crictl_status runtime_service
+  runtime_service="$(k8s_containerd_service --allow-stopped-kubelet)" || return 1
   timeout="${MX_K8S_NODE_READY_RETRY_TIMEOUT:-180s}"
   [ -d /etc/cni/net.d ] || die "missing /etc/cni/net.d; run reinit-kubeadm or repair Flannel first"
   if ! find /etc/cni/net.d -maxdepth 1 -type f \
@@ -5994,13 +6004,13 @@ ops_internal_production_repair_cni() {
   done
   [ -s /run/flannel/subnet.env ] || die "missing /run/flannel/subnet.env; Flannel has not created a subnet lease"
 
-  say "CNI files are present; restart containerd so CRI reloads /etc/cni/net.d"
-  systemctl restart containerd
-  say "restart kubelet after containerd CNI reload"
+  say "CNI files are present; restart $runtime_service so CRI reloads /etc/cni/net.d"
+  systemctl restart "$runtime_service"
+  say "restart kubelet after Kubernetes runtime CNI reload"
   systemctl restart kubelet
 
   if command -v crictl >/dev/null 2>&1; then
-    crictl_status="$(crictl info 2>/dev/null || true)"
+    crictl_status="$(k8s_crictl info 2>/dev/null || true)"
     case "$crictl_status" in
       *'"NetworkReady"'*)
       printf '%s\n' "$crictl_status" \
@@ -6013,7 +6023,7 @@ ops_internal_production_repair_cni() {
   if ! kubectl wait --for=condition=Ready node --all --timeout="$timeout"; then
     kubectl get nodes -o wide || true
     kubectl describe nodes || true
-    command -v crictl >/dev/null 2>&1 && crictl info || true
+    command -v crictl >/dev/null 2>&1 && k8s_crictl info || true
     die "Kubernetes node did not become Ready after CNI repair"
   fi
   kubectl get nodes -o wide

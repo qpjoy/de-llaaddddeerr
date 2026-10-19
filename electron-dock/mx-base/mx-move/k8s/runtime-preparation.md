@@ -6,11 +6,11 @@
 
 ## 本次预备已成功
 
-用户已回传 `phase=artifacts-prepared`：目录 `/var/lib/mx-move/k8s-runtime-prep/mx-k8s-20261019-183524-ef985186`，172 个镜像引用，归档 11,727,453,184 bytes，SHA256 `62cf0ab4f2d96bd097316284292f7e24f81c1c2cbbdb8390767c6676f065f7cc`。保留此目录与归档，无需重复导出。下一步使用[候选安装命令](runtime-installation.md)复用这些文件；候选会启动独立服务，但不会切换 kubelet 或业务数据。
+用户已回传 `phase=artifacts-prepared`：目录 `/var/lib/mx-move/k8s-runtime-prep/mx-k8s-20261019-183524-ef985186`，172 个镜像引用，归档 11,727,453,184 bytes，SHA256 `62cf0ab4f2d96bd097316284292f7e24f81c1c2cbbdb8390767c6676f065f7cc`。随后候选安装也已回传 `candidate-ready`，71 个 CRI 镜像、工作负载 0。保留目录与归档，无需重复导出或导入；本现场下一步是[正式切换预检](cutover.md)。
 
 ## 执行
 
-同步整个 `mx-move` 模块，保留目录结构。以 root 在服务器的 **`electron-dock/mx-base`** 目录执行：
+以下保留尚未完成预备时的命令，本现场不必重跑。同步整个 `mx-move` 模块，保留目录结构。以 root 在服务器的 **`electron-dock/mx-base`** 目录执行：
 
 ```bash
 bash mx-move/scripts/manage.sh k8s prepare-runtime
@@ -50,4 +50,4 @@ containerd 1.6 的 `config dump` 会把主配置本身列入 Imports；因此原
 
 `artifacts-prepared` 不代表可以手工启动新 containerd 或修改 kubelet。现在可用 [`install-runtime --prepared <成功目录>`](runtime-installation.md) 受控安装候选实例，复用同一归档完成导入和 CRI 检查。候选安装中断后使用同一命令核验续跑；不要把 `prepare-runtime` 的“另建预备目录”与安装器续跑混为一谈。
 
-中性 helper 和[各项目部署入口适配](runtime-consumers.md)已实现，但完整切换执行器仍未实现。业务停写与备份、存储身份及 guards 同步、kubelet 子挂载处理、原 `k8s.io` 任务退出核验必须先完成，然后才能按事务切换挂载和 kubelet、恢复原数据库并验收 MX-H2I 登录、联网、SSO 与 Pay。原共享 containerd 和 Docker 数据继续保留。
+中性 helper、[各项目部署入口适配](runtime-consumers.md)和[正式切换事务](cutover.md)已实现，生产业务切换尚未执行。后续须先 `cutover-check`，维护窗口内由 `migrate` 完成停写与备份、存储身份和 guards 同步、kubelet 子挂载处理与原 K8s 任务退出核验，再恢复数据库并验收 MX-H2I 登录、联网、SSO 与 Pay。原共享 containerd 和 Docker 数据继续保留。

@@ -1,15 +1,14 @@
 # mx-move：Kubernetes 存储迁移
 
-`mx-move` 集中放置 Kubernetes 存储迁移工具。`etcd/` 已实现单节点 kubeadm etcd 的迁移、验收及最新数据回迁；`k8s/` 提供全量 Kubernetes 存储的只读盘点、容量草案、独立运行时预备，以及复用归档的候选实例安装/CRI 验证；完整业务切换仍待实现。工具保留原目录、快照和每次复制的数据，不提供删除命令。
+`mx-move` 集中放置 Kubernetes 存储迁移工具。`etcd/` 已实现单节点 kubeadm etcd 的迁移、验收及最新数据回迁；`k8s/` 提供全量盘点、独立运行时预备，以及已盘点 Internal 的停写、冷复制、挂载/运行时切换和中断恢复。工具保留原目录、快照和每次复制的数据，不提供删除命令。
 
-**2026-10-20 全量迁移准备：** etcd 已在根卷上，无需重复迁移。扣除共享 containerd 后已测业务数据约 130.99 GiB。**只迁 Kubernetes 数据**；Docker 数据、卷与原共享 containerd 整树保留原位，允许同一窗口短暂停机不改变这一边界。必须保留全部用户、凭据与联网配置。用户已成功预备 172 个镜像引用的归档；下一步从 `electron-dock/mx-base` 目录运行：
+**2026-10-20 全量迁移准备：** etcd 已在根卷上，无需重复迁移。扣除共享 containerd 后已测业务数据约 130.99 GiB。**只迁 Kubernetes 数据**；Docker 数据、卷与原共享 containerd 整树保留原位。必须保留全部用户、凭据与联网配置。用户已回传 `candidate-ready`：172 个镜像引用、71 个 CRI 镜像，候选工作负载 0；无需重新导出或导入。同步全部运行时适配文件后，下一步从 `electron-dock/mx-base` 目录运行：
 
 ```bash
-bash mx-move/scripts/manage.sh k8s install-runtime \
-  --prepared /var/lib/mx-move/k8s-runtime-prep/mx-k8s-20261019-183524-ef985186
+bash mx-move/scripts/manage.sh k8s cutover-check
 ```
 
-这会启动独立候选 containerd、导入现有归档并核验 CRI；**不切换 kubelet，不复制数据库或 Docker 数据，不改挂载，不发布 active 描述，也不开机启用**。归档保留，同命令可经核验续跑；已有内容或摘要不符时拒绝覆盖。命令目录层级、实际写入范围及摘要字段见[候选运行时安装](k8s/runtime-installation.md)。中性 helper 和各产品调用适配已实现，正式切换和现有用户登录/联网验收尚未执行。下文停启范围、50 GiB 预留和 `migrate/rollback` 均仅适用于 **etcd**。
+该命令不停止业务。检查通过后，仅在维护窗口执行 `bash mx-move/scripts/manage.sh k8s migrate`；中断用 `k8s status` / `k8s resume`，完成后用只读 `k8s verify`。具体同步范围、五个数据根、提交前恢复原副本/提交后仅向前恢复，以及用户验收见 [K8s 正式切换说明](k8s/cutover.md)。**生产正式切换和现有用户登录/联网验收尚未执行。** 下文停启范围、50 GiB 预留和 `migrate/rollback` 均仅适用于 **etcd**，不要与 `k8s` 子命令混用。
 
 这次实现针对 Internal 当前的布局：`/var/lib/etcd` 通过 bind mount 使用数据盘上的目录，目标是另一块系统盘上的根文件系统。2026-10-19 的 `lsblk` 确认两块物理盘均约 2TB；此前所称的“1T 盘”实际是系统盘上的 `cl-root` 逻辑卷，同一系统盘另有 `cl-home`。工具读取实际挂载、文件系统 UUID 和物理父盘验证布局，不根据 `nvme0` / `nvme1` 名字或标称容量猜盘。默认目标是根文件系统上的 `/var/lib/mx-move/etcd-data/`；源、目标若位于同一物理盘，检查会拒绝迁移。下文的“1T”均指这个根逻辑卷。
 
