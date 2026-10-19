@@ -1,6 +1,8 @@
 # mx-move：Kubernetes 存储迁移
 
-`mx-move` 集中放置 Kubernetes 存储迁移工具。目前只实现 `etcd/`：将现有单节点 kubeadm 集群的 etcd 从业务数据盘迁移到独立根盘，并支持把最新数据迁回原盘。它保留原目录、快照和每次复制的数据，不提供删除命令。
+`mx-move` 集中放置 Kubernetes 存储迁移工具。`etcd/` 已实现单节点 kubeadm etcd 的迁移、验收及最新数据回迁；新增的 `k8s/` 提供全量 Kubernetes 存储的只读盘点和容量草案，正式切换还需根据服务器报告实现。工具保留原目录、快照和每次复制的数据，不提供删除命令。
+
+**2026-10-20 全量迁移准备：** etcd 已在根卷上，无需重复迁移。当前 fstab 中 containerd、kubelet、Launcher 仍指向 `/data`，mx-common、Pay、Rig 等还须从实时 PV/hostPath 核对。已允许维护窗口，但必须保留全部用户、凭据与联网配置。先运行 `bash scripts/manage.sh k8s plan --measure` 并回传报告，详见 [Kubernetes 数据迁移说明](k8s/README.md)。此命令不执行迁移；下文停启范围、50 GiB 预留和 `migrate/rollback` 均仅适用于 **etcd**。
 
 这次实现针对 Internal 当前的布局：`/var/lib/etcd` 通过 bind mount 使用数据盘上的目录，目标是另一块系统盘上的根文件系统。2026-10-19 的 `lsblk` 确认两块物理盘均约 2TB；此前所称的“1T 盘”实际是系统盘上的 `cl-root` 逻辑卷，同一系统盘另有 `cl-home`。工具读取实际挂载、文件系统 UUID 和物理父盘验证布局，不根据 `nvme0` / `nvme1` 名字或标称容量猜盘。默认目标是根文件系统上的 `/var/lib/mx-move/etcd-data/`；源、目标若位于同一物理盘，检查会拒绝迁移。下文的“1T”均指这个根逻辑卷。
 
