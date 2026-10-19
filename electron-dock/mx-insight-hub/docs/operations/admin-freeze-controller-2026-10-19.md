@@ -100,3 +100,22 @@ Kubernetes 的 desired/current 分别描述目标和观察状态，scale 写入�
 本地确认缓存检测存在独立缺陷：`pipefail` 下的 `ctr images ls -q | grep -Fqx` 在长列表前部命中后提前关闭管道，生产者返回 SIGPIPE，导致已缓存镜像被误判为缺失。root/sudo 两分支均可复现。修复仅移除 grep 的 `-q` 并丢弃标准输出，让它消费完整列表；保留精确镜像引用匹配和实际 ctr 失败的非零退出码。真正需要导入时增加导出/解包阶段提示。新增回归在旧代码失败，修复后 storage-preflight 25/25 通过，语法与差异检查通过。此缺陷可导致重复导入，现场这一次是否由它触发尚待进程与缓存回执，不能归因于新的 ES 数据索引或供应商搜索。
 
 后续操作者确认等待后本轮部署已完成；同期 `ps -C docker,ctr` 只返回列头，containerd 列表明确包含 `docker.io/pgvector/pgvector:pg16` 与 `docker.elastic.co/elasticsearch/elasticsearch:9.4.2`。这支持本轮镜像导入已经结束，不再诊断部署锁或并发启动第二轮。没有强制终止导入、删除缓存或跳过预加载。缓存检测修复已推送 `18e6e5cd`，不要求只为这项主机脚本修复再滚动发布应用；以后同步代码并启动新部署时生效。操作者报告发布完成与搜索性能验收分别记录：canonical/Luopan 部署后耗时、504 是否消失仍待业务回执，TG/向量后台暂停继续保留。若以后考虑 `MX_COMMON_AUTO_PRELOAD=0`，仍须确认配置所需的目标镜像全部存在；ES API healthy 本身不是镜像引用齐备的证据。
+
+## 再次部署：API 失联与 Admin 恢复（10 月 19 日后续）
+
+新截图在 `controller_observation` 与 `deployment_read_unavailable` 间切换，120 秒后失败，明确 `migration has not started`。随后诊断只输出 Pod 表头，EXIT 清理报告恢复失败。单凭这一截图不能判定 Pod 卡住、迁移 162/163/164 失败，或新的数据库优化引起此次故障。
+
+操作者只读回执随后确认：Admin UID 为 `da18a49c-59a5-4eb8-b19c-378f11768c22`，resourceVersion `3595333`，generation/observedGeneration 均为 `446`，desired 为 `0`，current/ready 缺省，选择器下没有 Pod。这说明失败后控制器最终处理了缩容，不能据此倒推 120 秒等待期限内也已完成。当次 Lease 命令只取得 scheduler `07:39:28.133415Z` 的一行，另有 context deadline exceeded，不能把部分输出解释为 controller Lease 不存在。
+
+使用这份明确回执的 resourceVersion 和 `--current-replicas=0` 前置条件，仅发送一次 Admin 恢复为部署设定 1 副本的 scale。服务器返回 `scaled`；独立读取为 RV `3595400`、generation `447`、observed `446`、desired `1`，current/ready 缺省。目标已恢复，但控制器当时尚未观察新一代，不能称 Admin 已恢复服务。后续 rollout、Pod、Lease 三类只读请求均超时，没有确认 Ready；不重复 scale、不绕过冻结继续迁移，不重启共享服务。此时转为主机本地的 crictl 容器状态、iostat 与有限内核错误检查，不依赖失联的 API。新的磁盘和容器回执尚待核对，不能把历史 NVMe 超时直接当作本次根因。
+
+本地脚本修复限定为：
+
+- EXIT 恢复在总计 30 秒预算内仅重试元数据读取，每次不超过剩余预算或 10 秒；验证同一 UID、仍为 0 及新的 resourceVersion 后，最多发送一次条件 scale。写冲突或响应未知不重发，迁移 Job 未确认终止仍不恢复。
+- 冻结前保存原副本数，失败恢复原值；原来就是 0 时保持 0。恢复写成功只报告已受理，不宣称 Pod Ready。
+- 超时保留最后成功观察的 generation/observed/副本数，并注明可能过时。最后一次 API 失败不会掩盖此前控制器落后的线索。
+- 元数据读取失败与空 Pod 列表分别明确输出。诊断消费完整输出但只展示最多 20 个 Pod，避免截断管道产生 SIGPIPE；不输出原始 API 错误、Pod spec、凭据或日志。
+
+冻结等待总预算仍为 120 秒，停止写入的确认条件不变。修复不操作 Delta、Launcher、MX-H2I 登录/联网、Pay 或共享控制面，也不部署新的 Hub 应用。生产恢复与重新发布仍须等待当前控制面回执。
+
+后续完整 shell 回归 **178/178** 通过，包含冻结/恢复/诊断专项 **30/30**；语法、差异格式和独立复核通过。轮询预算限制下一次读取及其 HTTP 请求时限，不对异常系统调度或 kubectl 内部多次 HTTP 请求提供进程级强制终止保证。测试使用离线 kubectl fixture，不证明生产控制面已恢复。

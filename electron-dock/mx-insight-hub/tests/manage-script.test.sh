@@ -1255,6 +1255,7 @@ MIGRATION_CLEANUP_EVENTS="$migration_cleanup_events" bash -c '
   DEPLOY_MIGRATION_JOB_ACTIVE=1
   DEPLOY_FROZEN_ADMIN=1
   DEPLOY_FROZEN_ADMIN_UID=admin-uid
+  DEPLOY_FROZEN_ADMIN_REPLICAS=1
   kubectl() {
     printf "%s\n" "$*" >>"$MIGRATION_CLEANUP_EVENTS"
     case "$*" in
@@ -1313,7 +1314,7 @@ if ADMIN_STOP_EVENTS="$admin_stop_events" bash -c '
   kubectl() {
     printf "%s\n" "$*" >>"$ADMIN_STOP_EVENTS"
     case "$*" in
-      *"--ignore-not-found"*"jsonpath={.metadata.uid}|{.metadata.resourceVersion}"*) printf "admin-uid|900" ;;
+      *"--ignore-not-found"*"jsonpath={.metadata.uid}|{.metadata.resourceVersion}"*) printf "admin-uid|900|1" ;;
       *"jsonpath={.metadata.uid}|{.spec.replicas}"*) printf "admin-uid|0|1234" ;;
       *"jsonpath={.metadata.uid}|"*) printf "admin-uid|9|8|0|1|1" ;;
       *"get deployment/mx-insight-hub-admin"*"custom-columns="*)
