@@ -14,6 +14,14 @@ bash scripts/manage.sh k8s inventory
 bash scripts/manage.sh k8s plan --measure
 ```
 
+若当前目录是 **`electron-dock/mx-base`**，可直接使用带模块名的路径（无需更新父级入口）：
+
+```bash
+bash mx-move/scripts/manage.sh k8s plan --measure
+```
+
+新版 `mx-base/scripts/manage.sh` 也支持转发 `k8s inventory` / `k8s plan`。旧版父级入口会把 `plan` 当应用名并报 `[mx-base] ERROR: 未知应用：plan`，此时尚未调用盘点程序；使用上述模块路径即可。
+
 `inventory` 用于快速获取清单；`plan --measure` 额外测量目录大小，可能耗时并产生磁盘读取负载。它使用低优先级 `du`，每个目录默认最多 30 秒，存在嵌套挂载的目录不扫描；大小未知会保留为 `null`。省略 `--measure` 可先检查路径和阻塞项，但不能据此确认容量足够。JSON 写入 stdout，阶段提示写入 stderr。
 
 需要 `kubectl`、`findmnt`、`lsblk`、`systemctl`，测量还需 GNU `du`；有 Docker 时只读列出容器挂载消费者。报告包含实际 kubelet/containerd 参数中的路径字段、Pay 存储 ConfigMap 的允许字段、PG 控制文件标识及外置 WAL/表空间链接；不会打印完整配置或命令。`--node` 仍须通过本机 hostname/systemUUID 核对，不能用于强行查询其他节点的本地数据。
