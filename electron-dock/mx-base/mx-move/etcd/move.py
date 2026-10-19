@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -39,6 +40,14 @@ class Refuse(RuntimeError):
     pass
 
 
+class CommandFailed(Refuse):
+    """Keep raw output private; callers may classify it but must not echo it."""
+    def __init__(self, program, returncode=None, output=b'', kind='exit'):
+        self.returncode, self.output, self.kind = returncode, output, kind
+        message = '返回失败' if kind == 'exit' else '执行失败/超时'
+        super().__init__('{} {}（输出已隐藏）'.format(Path(str(program)).name, message))
+
+
 def require(ok, message):
     if not ok:
         raise Refuse(message)
@@ -57,10 +66,48 @@ def run(args, timeout=60, input_data=None):
     try:
         result = subprocess.run([str(x) for x in args], stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, timeout=timeout, input=input_data)
-    except (OSError, subprocess.TimeoutExpired):
-        raise Refuse('{} 执行失败/超时（输出已隐藏）'.format(Path(str(args[0])).name))
-    require(result.returncode == 0, '{} 返回失败（输出已隐藏）'.format(Path(str(args[0])).name))
+    except subprocess.TimeoutExpired:
+        raise CommandFailed(args[0], kind='timeout') from None
+    except OSError:
+        raise CommandFailed(args[0], kind='exec') from None
+    if result.returncode != 0:
+        raise CommandFailed(args[0], result.returncode, result.stderr + b'\n' + result.stdout)
     return result.stdout
+
+
+def parse_cri_version(raw):
+    # crictl version has no --output/-o flag; its four labels are stable across
+    # cri-tools releases. ps/inspect have separate JSON output flags.
+    labels = {'Version', 'RuntimeName', 'RuntimeVersion', 'RuntimeApiVersion'}
+    values = {}
+    for line in raw.decode('utf-8', errors='replace').splitlines():
+        label, separator, value = line.partition(':')
+        label, value = label.strip(), value.strip()
+        if separator and label in labels:
+            require(label not in values and value, 'crictl version 响应字段重复或为空（原始输出已隐藏）')
+            values[label] = value
+    require(set(values) == labels, 'crictl version 响应缺少运行时版本字段（原始输出已隐藏）')
+    return values
+
+
+def cri_failure_reason(error):
+    if error.kind == 'timeout':
+        return '执行超时'
+    if error.kind == 'exec':
+        return '无法启动 crictl，请检查程序路径和执行权限'
+    output = error.output.decode('utf-8', errors='replace').lower()
+    for markers, reason in [
+        (['flag provided but not defined', 'unknown flag', 'incorrect usage'], '当前 crictl 不支持所用参数'),
+        (['permission denied'], 'CRI socket 权限不足'),
+        (['connection refused'], 'CRI socket 拒绝连接'),
+        (['no such file or directory'], 'CRI socket 或依赖路径不存在'),
+        (['deadline exceeded', 'i/o timeout'], 'CRI 请求超时'),
+        (['unknown service', 'unimplemented'], 'CRI API 不兼容或服务未提供'),
+        (['failed to connect', 'transport: error while dialing'], 'CRI 连接失败'),
+    ]:
+        if any(marker in output for marker in markers):
+            return reason
+    return '运行时请求失败（原始输出已隐藏）'
 
 
 def fsync_dir(path):
@@ -239,6 +286,28 @@ class Host:
     def kubectl(self, *args):
         return run(['kubectl', '--kubeconfig=' + KUBECONFIG, '--request-timeout=15s'] + list(args), 45)
 
+    def cri(self, command, *args):
+        require(command in ('version', 'ps', 'inspect'), '不支持的 CRI 检查命令')
+        # ps also opens an image service connection. Pin both services to the
+        # verified kubelet socket instead of inheriting a stale crictl.yaml.
+        options = ['--runtime-endpoint=' + self.endpoint, '--image-endpoint=' + self.endpoint, '--timeout=10s']
+        try:
+            return run(['crictl'] + options + [command] + list(args), 30)
+        except CommandFailed as error:
+            hint = ' '.join(shlex.quote(arg) for arg in ['crictl'] + options + ['version'])
+            raise Refuse('crictl {} 失败（{}；退出码 {}）。CRI endpoint={}。只读复查：{}'.format(
+                command, cri_failure_reason(error), error.returncode if error.returncode is not None else '无',
+                self.endpoint, hint)) from None
+
+    def cri_json(self, command, *args):
+        raw = self.cri(command, *args)
+        try:
+            value = json.loads(raw)
+        except (ValueError, UnicodeError):
+            raise Refuse('crictl {} 未返回有效 JSON（原始输出已隐藏）'.format(command)) from None
+        require(isinstance(value, dict), 'crictl {} JSON 结构不匹配（原始输出已隐藏）'.format(command))
+        return value
+
     def mount(self, path):
         value = json.loads(run(['findmnt', '--json', '--target', str(path), '--output', 'TARGET,SOURCE,UUID,FSROOT,FSTYPE,OPTIONS,MAJ:MIN']))['filesystems'][0]
         require(value.get('uuid') and value['fstype'] in ('xfs', 'ext4') and 'rw' in value['options'].split(','), '仅支持可验证 UUID 的读写 xfs/ext4 本地文件系统')
@@ -280,11 +349,13 @@ class Host:
         require(watched and Path(watched) == MANIFEST.parent and not flag(cmd, '--manifest-url'), 'kubelet 实际监视目录不是预期静态 Pod 目录')
         require(endpoint and endpoint.startswith('unix:///') and Path(endpoint[7:]).is_socket(), '无法确定 kubelet 正在使用的本机 CRI socket')
         self.endpoint = endpoint
-        info = json.loads(run(['crictl', '--runtime-endpoint=' + endpoint, '--timeout=10s', 'version', '-o', 'json']))
-        require(info.get('runtimeName') == 'containerd', '此迁移工具仅支持 containerd CRI')
+        info = parse_cri_version(self.cri('version'))
+        require(info['RuntimeName'] == 'containerd', '此迁移工具仅支持 containerd CRI')
 
     def containers(self):
-        return json.loads(run(['crictl', '--runtime-endpoint=' + self.endpoint, '--timeout=10s', 'ps', '-a', '-o', 'json']))['containers']
+        result = self.cri_json('ps', '-a', '-o', 'json')
+        require(isinstance(result.get('containers'), list), 'crictl ps JSON 缺少 containers 列表（原始输出已隐藏）')
+        return result['containers']
 
     def etcd_containers(self):
         return [c for c in self.containers() if c.get('metadata', {}).get('name') == 'etcd' and c.get('state') == 'CONTAINER_RUNNING']
@@ -378,8 +449,10 @@ let input=''; process.stdin.on('data', c=>input+=c); process.stdin.on('end',asyn
         size = tree_bytes(source)
         running = self.etcd_containers()
         require(len(running) == 1 and running[0].get('labels', {}).get('io.kubernetes.pod.namespace') == 'kube-system', 'etcd 容器身份不明确')
-        inspect = json.loads(run(['crictl', '--runtime-endpoint=' + self.endpoint, '--timeout=10s', 'inspect', running[0]['id']]))
-        pid = int(inspect['info']['pid'])
+        inspect = self.cri_json('inspect', '-o', 'json', running[0]['id'])
+        details = inspect.get('info')
+        pid = details.get('pid') if isinstance(details, dict) else None
+        require(type(pid) is int and pid > 0, 'crictl inspect 未返回有效的 containerd etcd PID（原始输出已隐藏）')
         proc = Path('/proc') / str(pid)
         require((proc / 'comm').read_text().strip() == 'etcd' and os.path.samefile(str(proc / 'root/var/lib/etcd/member/snap/db'), str(DATA / 'member/snap/db')), 'etcd 进程没有使用预期数据')
         require(not any(v.startswith(b'ETCD_') for v in (proc / 'environ').read_bytes().split(b'\0')), 'etcd 进程有环境配置覆盖，不支持自动搬迁')

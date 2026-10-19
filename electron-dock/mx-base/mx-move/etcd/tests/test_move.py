@@ -34,6 +34,112 @@ def read_data(directory):
     return json.loads((Path(directory) / 'member/snap/db').read_text())
 
 
+class CriCompatibilityTests(unittest.TestCase):
+    # Exact labels/spacing printed by cri-tools v1.31.1 cmd/crictl/version.go.
+    VERSION = b'Version:  0.1.0\nRuntimeName:  containerd\nRuntimeVersion:  1.7.22\nRuntimeApiVersion:  v1\n'
+
+    def setUp(self):
+        self.host = move.Host()
+        self.host.endpoint = 'unix:///run/containerd/containerd.sock'
+
+    def test_runtime_uses_text_version_and_the_actual_kubelet_socket(self):
+        with tempfile.TemporaryDirectory(prefix='mx-move-cri-') as directory:
+            proc = Path(directory) / 'proc/123'
+            proc.mkdir(parents=True)
+            config = Path(directory) / 'kubelet.yaml'
+            config.write_text('staticPodPath: /etc/kubernetes/manifests\ncontainerRuntimeEndpoint: unix:///stale.sock\n')
+            (proc / 'comm').write_text('kubelet\n')
+            (proc / 'cmdline').write_bytes(('kubelet\0--config={}\0--container-runtime-endpoint={}\0'.format(
+                config, self.host.endpoint)).encode())
+
+            def crictl(args, **kwargs):
+                # Reproduce the real CLI contract: -o json is NOT a version flag.
+                if args[-1] != 'version':
+                    return move.subprocess.CompletedProcess(args, 1, b'', b'flag provided but not defined: -o')
+                return move.subprocess.CompletedProcess(args, 0, self.VERSION, b'')
+
+            with mock.patch.object(move.Path, 'glob', return_value=[proc]), \
+                    mock.patch.object(move.Path, 'is_socket', return_value=True), \
+                    mock.patch.object(move, 'safe_path'), \
+                    mock.patch.object(move.subprocess, 'run', side_effect=crictl) as execute:
+                self.host.runtime()
+            command = execute.call_args[0][0]
+            self.assertEqual(command, ['crictl', '--runtime-endpoint=' + self.host.endpoint,
+                                      '--image-endpoint=' + self.host.endpoint, '--timeout=10s', 'version'])
+            self.assertNotIn('-o', command)
+
+    def test_version_parses_text_spacing_and_crlf(self):
+        parsed = move.parse_cri_version(self.VERSION.replace(b'\n', b'\r\n'))
+        self.assertEqual(parsed['RuntimeName'], 'containerd')
+        self.assertEqual(parsed['RuntimeVersion'], '1.7.22')
+        self.assertEqual(parsed['RuntimeApiVersion'], 'v1')
+
+    def test_version_rejects_missing_duplicate_or_empty_identity_without_echoing_output(self):
+        for raw in [b'sensitive-token-value', self.VERSION.replace(b'RuntimeName:  containerd\n', b''),
+                    self.VERSION + b'RuntimeName: containerd\n',
+                    self.VERSION.replace(b'RuntimeName:  containerd', b'RuntimeName:  ')]:
+            with self.subTest(raw=raw):
+                with self.assertRaises(move.Refuse) as error:
+                    move.parse_cri_version(raw)
+                self.assertNotIn('sensitive-token-value', str(error.exception))
+
+    def test_ps_pins_image_socket_and_keeps_supported_json_output(self):
+        response = {'containers': [{'id': 'live-etcd', 'metadata': {'name': 'etcd'}, 'state': 'CONTAINER_RUNNING'}]}
+        completed = move.subprocess.CompletedProcess([], 0, json.dumps(response).encode(), b'')
+        with mock.patch.object(move.subprocess, 'run', return_value=completed) as execute:
+            self.assertEqual(self.host.etcd_containers(), response['containers'])
+        self.assertEqual(execute.call_args[0][0][-4:], ['ps', '-a', '-o', 'json'])
+        self.assertIn('--image-endpoint=' + self.host.endpoint, execute.call_args[0][0])
+
+    def test_cri_failures_name_stage_socket_and_category_without_exposing_output(self):
+        cases = [(b'flag provided but not defined: -o', '不支持所用参数'),
+                 (b'dial unix socket: connection refused', '拒绝连接'),
+                 (b'context deadline exceeded', '请求超时'),
+                 (b'unknown service runtime.v1.RuntimeService', 'API 不兼容'),
+                 (b'permission denied', '权限不足'),
+                 (b'no such file or directory', '路径不存在'),
+                 (b'other error', '运行时请求失败')]
+        for stderr, reason in cases:
+            with self.subTest(reason=reason):
+                response = move.subprocess.CompletedProcess([], 1, b'sensitive-stdout', stderr + b' sensitive-stderr')
+                with mock.patch.object(move.subprocess, 'run', return_value=response):
+                    with self.assertRaises(move.Refuse) as error:
+                        self.host.cri('inspect', '-o', 'json', 'etcd-id')
+                message = str(error.exception)
+                self.assertIn('crictl inspect', message)
+                self.assertIn('退出码 1', message)
+                self.assertIn(self.host.endpoint, message)
+                self.assertIn(reason, message)
+                self.assertIn('只读复查：crictl', message)
+                self.assertNotIn('sensitive-', message)
+
+    def test_process_timeout_and_execution_failure_remain_private(self):
+        cases = [(move.subprocess.TimeoutExpired('crictl', 30, output=b'sensitive-token'), '执行超时'),
+                 (OSError('sensitive-path'), '无法启动 crictl')]
+        for failure, reason in cases:
+            with self.subTest(reason=reason), mock.patch.object(move.subprocess, 'run', side_effect=failure):
+                with self.assertRaises(move.Refuse) as error:
+                    self.host.cri('version')
+                self.assertIn(reason, str(error.exception))
+                self.assertNotIn('sensitive-', str(error.exception))
+
+    def test_invalid_inspect_json_is_not_echoed(self):
+        for raw in [b'sensitive-not-json', b'[]', b'null']:
+            with self.subTest(raw=raw), mock.patch.object(move.subprocess, 'run', return_value=
+                    move.subprocess.CompletedProcess([], 0, raw, b'')):
+                with self.assertRaises(move.Refuse) as error:
+                    self.host.cri_json('inspect', '-o', 'json', 'etcd-id')
+                self.assertIn('crictl inspect', str(error.exception))
+                self.assertNotIn('sensitive-', str(error.exception))
+
+    def test_non_cri_errors_still_hide_raw_output(self):
+        with mock.patch.object(move.subprocess, 'run', return_value=
+                move.subprocess.CompletedProcess([], 1, b'sensitive-secret', b'sensitive-stderr')):
+            with self.assertRaises(move.Refuse) as error:
+                move.run(['kubectl', 'get', 'secret'])
+        self.assertEqual(str(error.exception), 'kubectl 返回失败（输出已隐藏）')
+
+
 class PureFunctions(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='mx-move-pure-')

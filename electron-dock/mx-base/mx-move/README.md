@@ -45,6 +45,10 @@ bash scripts/manage.sh etcd migrate --target-root /var/lib/mx-move/etcd-data
 
 工具从**当前运行的 etcd 容器镜像**读取并保存匹配版本的 `etcdctl`，不自动下载二进制或安装依赖。检查失败时输出停止原因，不自动重建集群或改用另一套数据。
 
+若旧版 `plan` 只报 `crictl 返回失败（输出已隐藏）`，先同步更新 `etcd/move.py`。旧版错误地调用了 `crictl version -o json`；[官方 version 命令](https://github.com/kubernetes-sigs/cri-tools/blob/v1.31.1/cmd/crictl/version.go)只输出文本，不支持该参数。修复版解析文本中的运行时名称，`ps` / `inspect` 仍使用它们支持的 JSON 输出，并将 runtime/image 两个 endpoint 都固定为 kubelet 实际使用的 socket。无需因此重启 containerd 或 etcd。
+
+新版 CRI 调用失败时会显示调用阶段、退出码、socket、错误类别及一条只读复查命令，避免把容器环境变量和原始 `inspect` 内容显示到终端。`plan` 在此失败尚未进入备份、停机或挂载切换阶段；更新后重新执行 `bash scripts/manage.sh etcd plan`。
+
 迁移期间持有 `mx-move` 与 Launcher 发布锁；仓库存在 Hub 的运行目录时也获取其发布锁。独立于这些锁的手工运维或其他发布脚本不受此锁约束，迁移期间不要并行修改 etcd、挂载和恢复状态。
 
 ## 复制和切换过程
