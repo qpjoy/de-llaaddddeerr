@@ -53,18 +53,26 @@ VOLUME_KINDS = {'hostPath', 'persistentVolumeClaim', 'secret', 'configMap', 'pro
 WORKLOAD_REPORT_KINDS = ('deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs', 'hpa')
 
 
-def _workload_report_time(value):
+def _workload_time_epoch(value):
     if value is None:
         return None
     require(isinstance(value, str), 'invalid workload report timestamp; raw values hidden')
-    match = re.fullmatch(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))', value)
+    match = re.fullmatch(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(?:Z|([+-])(\d{2}):(\d{2}))', value)
     require(match is not None, 'invalid workload report timestamp; raw values hidden')
     try:
-        datetime.datetime.strptime(match.group(1), '%Y-%m-%dT%H:%M:%S')
+        parsed = datetime.datetime.strptime(match.group(1), '%Y-%m-%dT%H:%M:%S')
     except ValueError:
         raise ClusterError('invalid workload report timestamp; raw values hidden') from None
-    require(match.group(2) is None or int(match.group(2)) <= 23 and int(match.group(3)) <= 59,
+    require(match.group(3) is None or int(match.group(4)) <= 23 and int(match.group(5)) <= 59,
             'invalid workload report timestamp; raw values hidden')
+    offset = (int(match.group(4)) * 3600 + int(match.group(5)) * 60) if match.group(3) else 0
+    if match.group(3) == '-':
+        offset = -offset
+    return parsed.replace(tzinfo=datetime.timezone.utc).timestamp() - offset + float('0.' + (match.group(2) or '0'))
+
+
+def _workload_report_time(value):
+    _workload_time_epoch(value)
     return value
 
 
@@ -432,8 +440,14 @@ class Cluster:
         items = {(i['kind'], i['namespace'], i['name']): i for i in plan['replicas']}
         for kind in ('deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs', 'hpa'):
             before, after = index(plan['objects'][kind]), index(self.listing(kind))
-            require(set(before) == set(after), 'workload set changed during migration')
+            missing = set(before) - set(after)
+            require(not (set(after) - set(before)) and (not missing or kind == 'jobs'),
+                    'workload set changed during migration')
+            if missing:
+                self._assert_expired_jobs([before[k] for k in sorted(missing)], plan['objects']['pods'])
             for identity, original in before.items():
+                if identity in missing:
+                    continue
                 current = after[identity]
                 require(current['metadata'].get('uid') == original['metadata']['uid'] and
                         not current['metadata'].get('deletionTimestamp'), 'workload UID changed during migration')
@@ -447,6 +461,44 @@ class Cluster:
                             any(c.get('type') in ('Complete', 'Failed') and c.get('status') == 'True'
                                 for c in current.get('status', {}).get('conditions', [])),
                             'a Job became active during migration')
+
+    def _assert_expired_jobs(self, jobs, retained_pods):
+        """Allow completed TTL cleanup without changing or recreating the baseline."""
+        now = time.time()
+        for job in jobs:
+            summary = _workload_report_summary('jobs', job)
+            status = job['status']
+            complete = [c for c in status.get('conditions', [])
+                        if c.get('type') == 'Complete' and c.get('status') == 'True']
+            terminating = status.get('terminating', 0)
+            require(summary['terminal'] == 'Complete' and len(complete) == 1 and
+                    not summary['active'] and not summary['deleting'] and
+                    type(terminating) is int and terminating == 0 and
+                    summary['ttl_seconds_after_finished'] is not None,
+                    'missing Job is not a completed TTL cleanup candidate')
+            completed = _workload_time_epoch(summary['completion_time'])
+            transitioned = _workload_time_epoch(complete[0].get('lastTransitionTime'))
+            # Kubernetes TTL starts at the terminal condition transition. Also
+            # require completionTime to have expired, conservatively taking both.
+            require(completed is not None and transitioned is not None and
+                    max(completed, transitioned) + summary['ttl_seconds_after_finished'] <= now,
+                    'missing Job completion or TTL expiry could not be verified')
+        pods = retained_pods + self.listing('pods')
+        for job in jobs:
+            uid = job['metadata']['uid']
+            for pod in pods:
+                metadata = pod['metadata']
+                owners, labels = metadata.get('ownerReferences', []), metadata.get('labels', {})
+                if not (any(r.get('uid') == uid for r in owners) or
+                        any(labels.get(k) == uid for k in ('batch.kubernetes.io/controller-uid', 'controller-uid'))):
+                    continue
+                status = pod.get('status', {})
+                require(metadata.get('namespace') == job['metadata']['namespace'] and
+                        status.get('phase') in ('Succeeded', 'Failed') and
+                        not any('running' in c.get('state', {}) or 'waiting' in c.get('state', {})
+                                for field in ('initContainerStatuses', 'containerStatuses', 'ephemeralContainerStatuses')
+                                for c in status.get(field, [])),
+                        'missing TTL Job still has a nonterminal or ambiguous Pod')
 
     def quiesce(self, plan, persist):
         self.assert_workloads(plan)

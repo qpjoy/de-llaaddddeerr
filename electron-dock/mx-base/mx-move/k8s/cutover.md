@@ -1,8 +1,8 @@
 # Internal Kubernetes 数据切换
 
-最新一轮迁移已完成冷复制并提交新副本，独立服务为 `mx-k8s-containerd.service`，socket 为 `/run/mx-k8s-containerd/containerd.sock`。**当前为 `committed`，最终工作负载集合验收未通过；用户确认新副本上 MX-H2I 原用户登录、联网和 Pay 访问正常。保留新副本，不挂回旧目录、不重跑 `migrate`，先运行 `workload-check`。**
+最新事务 `mx-k8s-20261020-053718-a8d8c128` 已完成冷复制并提交新副本，独立服务为 `mx-k8s-containerd.service`，socket 为 `/run/mx-k8s-containerd/containerd.sock`。**当前为 `committed`，最终验收被一个已完成 Job 的缺失阻断；用户确认新副本上 MX-H2I 原用户登录、联网和 Pay 访问正常。保留新副本，不挂回旧目录、不重跑 `migrate`；同步 TTL 兼容修复后使用 `resume` 完成验收。**
 
-历史事务 `mx-k8s-20261020-045344-8a34e06b` 已为 `aborted / may_write=false / recovery_status=restored`；随后 Docker 查询回传 `equivalent=true / ignored_differences=[mount_order]`。最新迁移的错误为 `phase=committed / workload set changed during migration`，位置 `Host.verify → Cluster.assert_workloads`；此前数据库和应用副本、网络就绪等待已返回。当前新事务 ID 由 `status` 或 `workload-check` 输出，不能继续使用旧 aborted 事务 ID。
+历史事务 `mx-k8s-20261020-045344-8a34e06b` 已为 `aborted / may_write=false / recovery_status=restored`；随后 Docker 查询回传 `equivalent=true / ignored_differences=[mount_order]`。最新迁移的错误为 `phase=committed / workload set changed during migration`，位置 `Host.verify → Cluster.assert_workloads`；此前数据库和应用副本、网络就绪等待已返回。后续操作沿用当前 committed 事务，不能使用旧 aborted 事务 ID。
 
 ## 维护前同步
 
@@ -27,7 +27,19 @@
 
 ### 当前已提交事务的工作负载验收
 
-在服务器同步 `k8s/cluster_ops.py`、`k8s/cutover.py` 和 `scripts/manage.sh` 后运行：
+现场 `workload-check` 已确认只有 `mx-harbor/mx-harbor-migrate-256cfbfe` 缺失，原 UID 为 `7d914a1b-a9cc-4a55-8f3d-88f25de7d4d4`；基线终态为 `Complete`、无活动实例、TTL 为 86400 秒、完成时间为 `2026-10-18T21:54:26Z`。按完成时间计算，到期时刻为北京时间 2026-10-20 05:54:26，落在迁移期间。没有新增或同名替换工作负载；这些证据符合 TTL 清理，但不能单凭摘要确认删除操作者。
+
+在服务器同步本次更新的 `mx-move/k8s/cluster_ops.py` 后运行：
+
+```bash
+bash mx-move/scripts/manage.sh k8s resume
+```
+
+新版守卫仅允许缺失的基线 Job 同时满足：唯一 `Complete=True`、无 `Failed=True`、无活动或正在终止的实例、无删除标记、TTL 为有效非负整数、完成时间与完成条件转换时间均有效且 TTL 已到期。Kubernetes 使用完成条件的 `lastTransitionTime` 起算 TTL，工具保守取它与 `completionTime` 的较晚值，依据见 [TTL 控制器实现](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/ttlafterfinished/ttlafterfinished_controller.go)。基线和现场中通过 owner UID 或 controller UID 标签关联的 Pod 都必须已终止，且没有运行或等待中的容器。其余缺失、新增、同名 UID 替换，以及现存对象的配置变化仍拒绝；原基线不修改，也不重建 Job。
+
+提交后的 `resume` 不重复冷复制，也不退回旧副本；已经运行的服务使用 `start` 保持运行，已恢复的副本数不重复修改。成功摘要应为 `phase=services-restored`、`may_write=true`、`automatic_checks_passed=true`，仍需服务器实际回传才能确认本次验收完成。
+
+需要继续只读定位集合差异时可运行：
 
 ```bash
 bash mx-move/scripts/manage.sh k8s workload-check
@@ -35,7 +47,7 @@ bash mx-move/scripts/manage.sh k8s workload-check
 
 命令只读六类控制器：Deployment、StatefulSet、DaemonSet、Job、CronJob、HPA，比较最近事务记录和当前对象集合、UID。输出只包含 namespace/name/UID 和固定的 Job 终态、活动标记、TTL、完成时间、删除标记；不输出模板、环境变量、Secret、日志、注解或完整 API 对象，不改基线、不创建或删除 Job。`differences` 列出缺失、新增、同名替换对象；`workload_set_equal` 只判断集合，`equivalent` 还核对 UID。退出码 0 表示集合和 UID 一致，2 表示有差异，1 表示检查无法完成。
 
-已完成 Job 的 TTL 清理是候选原因，恢复后的应用创建新 Job 也是候选；必须先核对实际差异，不能直接忽略所有 Job 或以当前集合覆盖原基线。此命令只定位集合和 UID 变化，不代表模板、凭据、数据库或整体迁移验收已经通过。原因处理后使用 `resume` 在新副本上向前完成恢复与验收；提交后的 `resume` 不重复冷复制，也不退回旧副本。
+该查询始终显示原始集合差异，因此已放行的 TTL 清理仍会报告 `equivalent=false` 和退出码 2；迁移是否完成以 `resume` 的完整验收摘要为准。它只定位集合和 UID 变化，不代表模板、凭据、数据库或整体迁移验收已经通过。
 
 ### 历史 Docker 比较阻断
 

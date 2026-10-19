@@ -1,6 +1,6 @@
 # Kubernetes 数据迁移：盘点、预备与正式切换
 
-这组命令将已盘点 Internal 的 Kubernetes 数据从 `/data` 迁到根逻辑卷，提供盘点、独立 containerd 预备，以及**维护窗口内的停写、冷复制、挂载/运行时切换和中断恢复**。用户已回传候选实例和备份准备检查成功；业务数据尚未切换。完整执行顺序见[正式切换说明](cutover.md)。
+这组命令将已盘点 Internal 的 Kubernetes 数据从 `/data` 迁到根逻辑卷，提供盘点、独立 containerd 预备，以及**维护窗口内的停写、冷复制、挂载/运行时切换和中断恢复**。现场新副本已提交并恢复业务，当前待完成最终自动验收。完整执行顺序见[正式切换说明](cutover.md)。
 
 | 命令 | 当前执行范围 |
 | --- | --- |
@@ -24,13 +24,13 @@ Kubernetes 独占的业务目录和 kubelet 目录可保持逻辑路径，通过
 
 Launcher、Hub、mx-common、Pay、Rig 的镜像导入和相关修复入口已增加中性运行时解析适配；只有正式生效描述存在时才选择受验证的新实例。候选安装不创建该描述，所以普通发布继续使用原运行时。正式切换执行器在提交后发布该描述；不能重置集群或停用存储保护来绕过检查。
 
-上一事务退出并恢复原业务后，Docker 只读比较确认为 `equivalent=true`，差异仅 `mount_order`。用户随后执行的新一轮迁移已完成冷复制、提交并启用新副本；在最终验收的工作负载集合检查处报告 `workload set changed during migration`，事务仍为 `committed`。用户确认新副本上 MX-H2I 原账号登录、联网及 Pay 访问均正常，但自动验收尚未完成。**保留新副本作为权威数据，不挂回旧目录、不重跑 `migrate`。** 同步 `k8s/cluster_ops.py`、`k8s/cutover.py` 和 `scripts/manage.sh` 后，以 root 在 **`electron-dock/mx-base` 目录**执行：
+当前事务 `mx-k8s-20261020-053718-a8d8c128` 已完成冷复制并提交新副本，用户确认 MX-H2I 原账号登录、联网及 Pay 访问均正常。最终工作负载检查发现唯一差异：已完成且配置 24 小时 TTL 的 Harbor Job 消失，符合到期清理；自动验收尚未完成。新版检查仅兼容可验证的已完成、已到期 Job 缺失，并核对其遗留 Pod 已结束；其他集合、UID、模板与凭据检查保留。**新副本继续作为权威数据，不重跑 `migrate`。** 在服务器同步本次更新的 `mx-move/k8s/cluster_ops.py` 后，以 root 在 **`electron-dock/mx-base` 目录**执行：
 
 ```bash
-bash mx-move/scripts/manage.sh k8s workload-check
+bash mx-move/scripts/manage.sh k8s resume
 ```
 
-若已进入 **`electron-dock/mx-base/mx-move` 目录**，只把入口改成 `bash scripts/manage.sh`。先回传工作负载差异摘要，确认具体变化后再向前完成验收。该查询不读取 Secret 或输出工作负载模板，不停止服务，也不替代完整验收。具体步骤见[正式切换说明](cutover.md)。只贴终端摘要，不贴私有配置；不要重新导出/导入现有归档。
+若已进入 **`electron-dock/mx-base/mx-move` 目录**，只把入口改成 `bash scripts/manage.sh`。提交后的 `resume` 继续恢复与验收，不重复复制数据；副本数已恢复时不会再次缩容。预期最终摘要为 `phase=services-restored`、`may_write=true`、`automatic_checks_passed=true`，实际以服务器回传为准。`workload-check` 仍按原始集合报告差异，不会因 TTL 兼容而改写基线。具体边界见[正式切换说明](cutover.md)。只贴终端摘要，不贴私有配置。
 
 ## 执行只读检查
 
