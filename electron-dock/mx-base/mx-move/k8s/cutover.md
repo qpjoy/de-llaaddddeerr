@@ -39,6 +39,8 @@ bash mx-move/scripts/manage.sh k8s cutover-check
 
 若旧版工具报 `Kubernetes storage identity mismatch; raw values hidden`，已知一个发生在数据库核验之前的误判：systemd 将 Launcher 挂载单元中的连字符编码为文件名中的字面量 `\x2d`，旧检查使用数据目录规则而拒绝该文件名。同步 `k8s/storage_ops.py` 后重跑预检。修复仅允许固定 generator 目录下由五个已选挂载路径推导出的单元文件，仍检查父目录、普通文件类型、root 所有者、写权限和单元内容；数据路径与 PostgreSQL 身份规则保持原样。若仍报错，保留现场并回传输出，不根据这条通用错误修改数据库或目录权限。
 
+若报 `stacked mounts are unsupported`，表示全机挂载清单存在重复的挂载点路径，单凭旧报错无法判断它是否涉及迁移目录。新版 `k8s/storage_ops.py` 在同一报错的 `duplicate_targets` 中输出全部重复路径和层数，不输出挂载源或选项。回传此摘要后再确认范围；工具继续拒绝自动去重或卸载挂载层，因为这可能改变可见的数据目录。
+
 **仅在已安排的维护窗口执行：**
 
 ```bash

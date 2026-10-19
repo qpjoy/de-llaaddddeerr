@@ -3,6 +3,7 @@ import base64
 import contextlib
 import copy
 import hashlib
+import json
 from pathlib import Path
 import stat
 import sys
@@ -95,6 +96,37 @@ class Host:
                 self.current = dict(self.entry['source_mount'], source='/dev/fixture', options='rw')
                 self.current_identity = self.entry['source_identity']
         return b''
+
+
+class MountInventoryTests(unittest.TestCase):
+    def inspect(self, mounts):
+        host = ops.Host()
+        host.run = mock.Mock(return_value=json.dumps({'filesystems': mounts}).encode())
+        result = host.mounts()
+        host.run.assert_called_once_with(['findmnt', '--json', '--list', '--output', ops.MOUNT_COLUMNS])
+        return result
+
+    def test_unique_mounts_are_preserved_including_shared_backing_devices(self):
+        mounts = [mount('/', ROOT_UUID), mount('/data', SOURCE_UUID),
+                  mount('/var/lib/kubelet', SOURCE_UUID, '/mx-runtime/kubelet')]
+        self.assertEqual(self.inspect(mounts), mounts)
+
+    def test_all_stacked_targets_are_reported_without_source_or_options(self):
+        mounts = [mount('/var/lib/kubelet', SOURCE_UUID), mount('/run/example', ROOT_UUID)]
+        rows = mounts + [dict(m, source='private-source', options='rw,password=private-value') for m in mounts]
+        with self.assertRaises(ops.StorageError) as caught:
+            self.inspect(rows)
+        message = str(caught.exception)
+        self.assertTrue(message.startswith('stacked mounts are unsupported; duplicate_targets='))
+        self.assertEqual(json.loads(message.split('duplicate_targets=', 1)[1]),
+                         [{'target': '/run/example', 'count': 2}, {'target': '/var/lib/kubelet', 'count': 2}])
+        self.assertNotIn('private-source', message)
+        self.assertNotIn('private-value', message)
+
+    def test_identical_rows_are_not_silently_deduplicated(self):
+        item = mount('/var/lib/kubelet', SOURCE_UUID)
+        with self.assertRaisesRegex(ops.StorageError, '"count":3'):
+            self.inspect([item, item, item])
 
 
 class FstabTests(unittest.TestCase):

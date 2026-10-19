@@ -167,7 +167,14 @@ class Host:
         require(isinstance(raw, dict) and isinstance(raw.get('filesystems'), list))
         mounts = raw['filesystems']
         require(all(isinstance(m, dict) and isinstance(m.get('target'), str) for m in mounts))
-        require(len({m['target'] for m in mounts}) == len(mounts), 'stacked mounts are unsupported')
+        counts = {}
+        for mount in mounts:
+            counts[mount['target']] = counts.get(mount['target'], 0) + 1
+        duplicates = [{'target': path, 'count': count} for path, count in sorted(counts.items()) if count > 1]
+        # Do not collapse identical rows: a repeated mount can hide another
+        # layer. Report only locations/counts, never sources or mount options.
+        require(not duplicates, 'stacked mounts are unsupported; duplicate_targets=' +
+                json.dumps(duplicates, ensure_ascii=True, separators=(',', ':')))
         return mounts
 
     def identity(self, path):
