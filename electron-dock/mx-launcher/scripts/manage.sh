@@ -727,7 +727,7 @@ k8s_wait_apiserver_after_endpoint_repair() {
 
 k8s_apiserver_endpoint_healthy() {
   command -v kubectl >/dev/null 2>&1 || return 1
-  kubectl --request-timeout=5s get --raw=/version >/dev/null 2>&1
+  kubectl --request-timeout=5s get --raw=/readyz >/dev/null 2>&1
 }
 
 k8s_static_pod_logs() {
@@ -767,15 +767,15 @@ k8s_require_apiserver_ready() {
   timeout="${MX_K8S_APISERVER_PREFLIGHT_TIMEOUT:-5s}"
   say "preflight kube-apiserver on $current_ip:6443"
   for i in $(seq 1 "$attempts"); do
-    if kubectl --request-timeout="$timeout" get --raw=/version >/dev/null 2>&1; then
+    if kubectl --request-timeout="$timeout" get --raw=/readyz >/dev/null 2>&1; then
       say "kube-apiserver preflight OK"
       return 0
     fi
     [ "$i" = "$attempts" ] || sleep 2
   done
   k8s_apiserver_failure_diagnostics
-  kubectl --request-timeout="$timeout" get --raw=/version || true
-  die "kube-apiserver $current_ip:6443 is unreachable after NO_PROXY setup; check kubelet/static-pod status before building or applying MX"
+  kubectl --request-timeout="$timeout" get --raw='/readyz?verbose' || true
+  die "kube-apiserver $current_ip:6443 is not ready after NO_PROXY setup; check etcd/storage and kubelet/static-pod status before building or applying MX"
 }
 
 k8s_restart_static_pod_containers() {
@@ -1122,12 +1122,8 @@ k8s_repair_kubeadm_endpoint() {
   fi
   if [ -z "$old_ips" ] && [ "$cert_repair_needed" != "1" ] && [ "$kubelet_identity_repair_needed" != "1" ]; then
     if ! k8s_apiserver_endpoint_healthy; then
-      say "kubeadm endpoint is current, but kube-apiserver is unavailable; recycle control-plane static pods once"
-      if command -v systemctl >/dev/null 2>&1; then
-        systemctl restart kubelet || say "kubelet restart failed; waiting for static pod reconciliation anyway"
-      fi
-      k8s_restart_static_pod_containers etcd kube-apiserver kube-controller-manager kube-scheduler || true
-      k8s_wait_apiserver_after_endpoint_repair "$current_ip"
+      say "kubeadm endpoint is current, but kube-apiserver is not ready; retry read-only checks without restarting the control plane"
+      k8s_require_apiserver_ready
     fi
     return 0
   fi
@@ -2338,56 +2334,116 @@ k8s_local_pvs() {
 k8s_job_diagnostics() {
   local ns="$1"
   local job="$2"
-  local selector pod_selector pods pod uid
+  local selector pod_selector pods pod uid job_summary
   say "$job diagnostics: job"
-  kubectl -n "$ns" get job "$job" -o wide || true
-  kubectl -n "$ns" describe job "$job" || true
-  uid="$(kubectl -n "$ns" get job "$job" -o go-template='{{ index .spec.selector.matchLabels "batch.kubernetes.io/controller-uid" }}' 2>/dev/null || true)"
+  if ! job_summary="$(kubectl --request-timeout=5s -n "$ns" get job "$job" -o wide 2>&1)"; then
+    printf '%s\n' "$job_summary"
+    say "$job status cannot be read; skipping further Kubernetes diagnostics and collecting host evidence"
+    k8s_apiserver_failure_diagnostics
+    return 0
+  fi
+  printf '%s\n' "$job_summary"
+  kubectl --request-timeout=5s -n "$ns" describe job "$job" || true
+  uid="$(kubectl --request-timeout=5s -n "$ns" get job "$job" -o go-template='{{ index .spec.selector.matchLabels "batch.kubernetes.io/controller-uid" }}' 2>/dev/null || true)"
   if [ -n "$uid" ]; then
     pod_selector="batch.kubernetes.io/controller-uid=$uid"
   else
     pod_selector="job-name=$job"
   fi
   say "$job diagnostics: pods"
-  kubectl -n "$ns" get pods -l "$pod_selector" -o wide || true
-  pods="$(kubectl -n "$ns" get pods -l "$pod_selector" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+  kubectl --request-timeout=5s -n "$ns" get pods -l "$pod_selector" -o wide || true
+  pods="$(kubectl --request-timeout=5s -n "$ns" get pods -l "$pod_selector" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+  pods="$(printf '%s\n' "$pods" | awk 'NF && ++n <= 3')"
   for pod in $pods; do
     say "$job diagnostics: pod detail $pod"
-    kubectl -n "$ns" describe pod "$pod" || true
+    kubectl --request-timeout=5s -n "$ns" describe pod "$pod" || true
     say "$job diagnostics: logs $pod"
-    kubectl -n "$ns" logs "$pod" --all-containers --tail=200 || true
+    kubectl --request-timeout=5s -n "$ns" logs "$pod" --all-containers --tail=200 || true
     say "$job diagnostics: previous logs $pod"
-    kubectl -n "$ns" logs "$pod" --all-containers --previous --tail=200 || true
+    kubectl --request-timeout=5s -n "$ns" logs "$pod" --all-containers --previous --tail=200 || true
   done
-  selector="$(kubectl -n "$ns" get job "$job" -o jsonpath='{.spec.selector.matchLabels}' 2>/dev/null || true)"
+  selector="$(kubectl --request-timeout=5s -n "$ns" get job "$job" -o jsonpath='{.spec.selector.matchLabels}' 2>/dev/null || true)"
   [ -n "$pod_selector" ] && say "$job diagnostics: pod selector $pod_selector"
   [ -n "$selector" ] && say "$job diagnostics: selector $selector"
   say "$job diagnostics: postgres service and endpoints"
-  kubectl -n "$ns" get service,endpoints,endpointslices -l app.kubernetes.io/name=mx-internal-postgres -o wide || true
-  kubectl -n "$ns" get service mx-internal-postgres -o wide || true
-  kubectl -n "$ns" get endpoints mx-internal-postgres -o wide || true
-  kubectl -n kube-system get service kube-dns -o wide || true
-  kubectl -n kube-system get pods -l k8s-app=kube-dns -o wide || true
+  kubectl --request-timeout=5s -n "$ns" get service,endpoints,endpointslices -l app.kubernetes.io/name=mx-internal-postgres -o wide || true
+  kubectl --request-timeout=5s -n "$ns" get service mx-internal-postgres -o wide || true
+  kubectl --request-timeout=5s -n "$ns" get endpoints mx-internal-postgres -o wide || true
+  kubectl --request-timeout=5s -n kube-system get service kube-dns -o wide || true
+  kubectl --request-timeout=5s -n kube-system get pods -l k8s-app=kube-dns -o wide || true
   say "$job diagnostics: recent namespace events"
-  kubectl -n "$ns" get events --sort-by=.lastTimestamp || true
+  kubectl --request-timeout=5s -n "$ns" get events --sort-by=.lastTimestamp || true
 }
 
 k8s_wait_job_complete() {
   local ns="$1"
   local job="$2"
   local attempts="${3:-90}"
+  local expected_uid="${4:-}"
   local conditions i
+  K8S_JOB_WAIT_STATE=unobserved
   for i in $(seq 1 "$attempts"); do
-    conditions="$(kubectl -n "$ns" get job "$job" -o jsonpath='{range .status.conditions[*]}{.type}{"="}{.status}{"\n"}{end}' 2>/dev/null || true)"
-    if printf '%s\n' "$conditions" | grep -Fxq 'Complete=True'; then
-      return 0
+    if conditions="$(kubectl --request-timeout=5s -n "$ns" get job "$job" -o jsonpath='{.metadata.uid}{"\n"}{range .status.conditions[*]}{.type}{"="}{.status}{"\n"}{end}' 2>/dev/null)"; then
+      if [ -n "$expected_uid" ] && [ "${conditions%%$'\n'*}" != "$expected_uid" ]; then
+        K8S_JOB_WAIT_STATE=replaced
+        return 2
+      fi
+      K8S_JOB_WAIT_STATE=pending
+      if printf '%s\n' "$conditions" | grep -Fxq 'Complete=True'; then
+        K8S_JOB_WAIT_STATE=complete
+        return 0
+      fi
+      if printf '%s\n' "$conditions" | grep -Fxq 'Failed=True'; then
+        K8S_JOB_WAIT_STATE=failed
+        return 1
+      fi
+    else
+      K8S_JOB_WAIT_STATE=unreadable
     fi
-    if printf '%s\n' "$conditions" | grep -Fxq 'Failed=True'; then
-      return 1
-    fi
-    sleep 2
+    [ "$i" = "$attempts" ] || sleep 2
   done
-  return 1
+  # No terminal condition was observed. An API failure or wait timeout does
+  # not establish whether the migration ran, failed, or committed successfully.
+  return 2
+}
+
+k8s_run_migration() {
+  local ns="$1" manifest="$2" existing uid rv
+  local job=mx-launcher-migrate
+  if ! existing="$(kubectl --request-timeout=5s -n "$ns" get job "$job" --ignore-not-found -o jsonpath='{.metadata.uid}{"\n"}{.metadata.resourceVersion}{"\n"}{range .status.conditions[*]}{.type}{"="}{.status}{"\n"}{end}')"; then
+    die "cannot read existing migration job; no migration was submitted; inspect $ns/$job before retrying"
+  fi
+  if [ -n "$existing" ] && ! printf '%s\n' "$existing" | grep -Eq '^(Complete|Failed)=True$'; then
+    die "existing migration outcome is not confirmed; preserving $ns/$job; inspect its status and logs before retrying"
+  fi
+  if [ -n "$existing" ]; then
+    uid="${existing%%$'\n'*}"
+    rv="$(printf '%s\n' "$existing" | awk 'NR == 2 {print}')"
+    [[ "$uid" =~ ^[a-zA-Z0-9-]+$ ]] && [[ "$rv" =~ ^[0-9]+$ ]] \
+      || die "migration identity is invalid; preserving $ns/$job"
+    # Delete exactly the terminal object observed above. A competing deploy
+    # must not cause us to delete its replacement or overwrite it with apply.
+    if ! printf '{"apiVersion":"v1","kind":"DeleteOptions","propagationPolicy":"Foreground","preconditions":{"uid":"%s","resourceVersion":"%s"}}\n' "$uid" "$rv" \
+      | kubectl --request-timeout=10s delete --raw="/apis/batch/v1/namespaces/$ns/jobs/$job" -f - >/dev/null; then
+      die "migration job deletion is unconfirmed; no replacement was submitted; inspect $ns/$job before retrying"
+    fi
+    if ! kubectl --request-timeout=10s -n "$ns" wait --for=delete "job/$job" --timeout=60s; then
+      die "migration job deletion did not complete; no replacement was submitted; inspect $ns/$job before retrying"
+    fi
+  fi
+  if ! uid="$(kubectl --request-timeout=10s -n "$ns" create --validate=false -f "$manifest" -o jsonpath='{.metadata.uid}')"; then
+    k8s_job_diagnostics "$ns" "$job"
+    die "migration submission outcome is not confirmed; retain $ns/$job and inspect it before retrying"
+  fi
+  [[ "$uid" =~ ^[a-zA-Z0-9-]+$ ]] || die "migration submission identity is unconfirmed; inspect $ns/$job before retrying"
+  if k8s_wait_job_complete "$ns" "$job" "${MX_K8S_MIGRATION_WAIT_ATTEMPTS:-90}" "$uid"; then
+    return 0
+  fi
+  k8s_job_diagnostics "$ns" "$job"
+  if [ "$K8S_JOB_WAIT_STATE" = failed ]; then
+    die "migration job reported Failed=True; inspect $ns/$job logs for the cause"
+  fi
+  die "migration outcome is not confirmed (last observation: $K8S_JOB_WAIT_STATE); retain $ns/$job and inspect it after API recovery; deployment stopped"
 }
 
 k8s_workload_diagnostics() {
@@ -2839,12 +2895,7 @@ k8s_apply() {
   fi
 
   say "run migration job"
-  kubectl -n "$ns" delete job mx-launcher-migrate --ignore-not-found
-  kubectl apply --validate=false -f "$dir/30-migration-job.yaml"
-  if ! k8s_wait_job_complete "$ns" mx-launcher-migrate "${MX_K8S_MIGRATION_WAIT_ATTEMPTS:-90}"; then
-    k8s_job_diagnostics "$ns" mx-launcher-migrate
-    die "migration job failed"
-  fi
+  k8s_run_migration "$ns" "$dir/30-migration-job.yaml"
 
   if [ "$target" = "internal-shadow" ]; then
     say "ensure configured identity service before enabling personal login"

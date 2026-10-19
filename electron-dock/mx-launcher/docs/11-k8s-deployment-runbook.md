@@ -652,7 +652,7 @@ node --test scripts/k8s-kube-proxy-endpoint.test.mjs \
 
 ```bash
 curl --noproxy '*' -kfsS --connect-timeout 3 https://192.168.1.2:6443/livez
-kubectl --request-timeout=5s get --raw=/version
+kubectl --request-timeout=5s get --raw='/readyz?verbose'
 ss -lntp | egrep ':(6443|2379|2380)\b' || true
 crictl --runtime-endpoint=unix:///run/containerd/containerd.sock \
   ps -a --name 'kube-apiserver|etcd' || true
@@ -661,11 +661,33 @@ crictl --runtime-endpoint=unix:///run/containerd/containerd.sock \
 第一条直连成功、第二条仍走代理失败时，检查当前 shell 的 `NO_PROXY/no_proxy`；两条都
 失败且 6443 没有监听时，问题在 kubelet/static Pod 或 etcd，不应继续重试 Flannel。
 
-当 endpoint、证书和 kubelet identity 已经是目标值，但 6443 仍不可达时，后续
-`internal-production deploy` 会自动回收一次 etcd、kube-apiserver、controller-manager 和
-scheduler static pod。这覆盖了上一次 endpoint/certificate repair 已落盘、但控制面容器
-仍加载旧证书或停在 CrashLoop 的恢复场景。若回收后仍失败，命令会直接输出显式
-containerd endpoint 下的 apiserver/etcd 最近日志以及 kubelet journal，不再只显示容器表。
+当 endpoint、证书和 kubelet identity 已经是目标值，但 API 不可达或未就绪时，
+`internal-production deploy` 仅做有限的只读重试，不再因一次超时重启 kubelet 或回收
+etcd、kube-apiserver、controller-manager、scheduler。持续失败会输出本机控制面诊断并停止。
+确有 endpoint/certificate/identity 配置变化时，仍保留原有备份、修复和重启流程。
+直连预检与修复后的等待统一使用 `/readyz`；`/version` 可返回不代表 etcd 已就绪。
+参见 [Kubernetes API health endpoints](https://kubernetes.io/docs/reference/using-api/health-checks/)。
+
+迁移等待每次 API 读取最多 5 秒，仅当前提交 UID 的 `Complete=True` 才允许继续发布。
+`Failed=True` 表示 Job 确认失败；API 读取失败、等待耗尽或同名 Job 被替换都表示结果尚未确认，
+脚本保留任务并停止，不把未知结果报成 SQL 失败。Job 诊断首读失败时转本机诊断，避免连续
+请求不可用的 API。重新部署前会读取已有 Job；非终态或读取失败时不删除、不提交。清理已终态
+Job 使用服务端 UID/resourceVersion 前置条件，等待删除完成后仅 `create` 一次，防止覆盖
+并发创建的任务。提交响应丢失时不会自动重复提交，需待 API 恢复后核实。
+
+2026-10-19 现场证据：`mx-launcher-migrate`（UID `fab3f78e-f932-492b-960c-80249deef3c2`）
+实际已 `Complete=True`，日志 `ok: true`、`migrations: []`；原部署尾部的失败信息来自控制面
+失联。etcd 位于 `/dev/nvme0n1p1[/mx-runtime/etcd]`，同期 WAL `fdatasync` 达 4.677 秒，
+内核报告 nvme0 I/O timeout，kubelet 明确记录 apiserver liveness probe 失败后重启。
+这说明应先处理存储延迟/超时，不能靠延长迁移等待、反复完整 deploy 或重建集群解决。
+一次 `/readyz` 通过不足以确认稳定恢复；修复脚本也不会修复磁盘本身。
+
+以上回归检查不连接生产集群：
+
+```bash
+node --test scripts/manage-control-plane-health.test.mjs scripts/manage-migration-outcome.test.mjs
+```
+
 若 `/etc/kubernetes/pki/apiserver.crt` 或对应 key 缺失、而原 CA 的 cert/key 仍在，deploy
 会使用原 CA 重新签发 apiserver 证书；它不会自动创建或替换 CA。CA 材料也缺失时必须从
 迁移前备份恢复，或者明确执行 `reinit-kubeadm`。
