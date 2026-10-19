@@ -119,6 +119,37 @@ class DockerSnapshotTests(unittest.TestCase):
         self.assertFalse(commands)
 
 
+class KubeletReleaseWaitTests(unittest.TestCase):
+    def host(self, results):
+        host = host_without_initialization()
+        host.storage = mock.Mock()
+        host.storage.kubelet_bindings_released.side_effect = results
+        return host
+
+    def test_waits_for_natural_release_without_mutating_services(self):
+        host = self.host([False, True])
+        data = {'storage': {'entries': []}}
+        with mock.patch.object(cutover.prep, 'progress'), \
+                mock.patch.object(cutover.time, 'monotonic', return_value=0), \
+                mock.patch.object(cutover.time, 'sleep') as sleep:
+            host.release_kubelet_bindings(data)
+        self.assertEqual(host.storage.mock_calls, [mock.call.kubelet_bindings_released(data['storage'])] * 2)
+        sleep.assert_called_once_with(3)
+
+    def test_inspection_error_is_immediate_and_pending_bind_times_out(self):
+        error = cutover.storage_ops.StorageError('reviewed bind changed')
+        for results, ticks, expected in (([error], [0], type(error)), ([False], [0, 121], cutover.prep.Refuse)):
+            with self.subTest(error=expected):
+                host = self.host(results)
+                with mock.patch.object(cutover.prep, 'progress'), \
+                        mock.patch.object(cutover.time, 'monotonic', side_effect=ticks), \
+                        mock.patch.object(cutover.time, 'sleep') as sleep:
+                    with self.assertRaises(expected):
+                        host.release_kubelet_bindings({'storage': {}})
+                sleep.assert_not_called()
+                self.assertEqual(len(host.storage.mock_calls), 1)
+
+
 class PayPatchTests(unittest.TestCase):
     def test_only_patch_array_is_written_and_empty_wrapper_does_not_patch(self):
         host = host_without_initialization()
@@ -332,6 +363,7 @@ class CandidatePreflightTests(unittest.TestCase):
         self.assertFalse(result['may_write'])
         host.check_identities.assert_called_once_with(result)
         self.assertEqual(set(host.storage.snapshot.call_args.kwargs['protected_paths']), {'/data/docker', '/data/docker-consumer'})
+        self.assertIs(host.storage.snapshot.call_args.kwargs['objects'], result['cluster']['objects'])
 
     def test_missing_changed_candidate_reference_or_changed_source_refuses_before_storage(self):
         changes = ('missing', 'digest', 'source')

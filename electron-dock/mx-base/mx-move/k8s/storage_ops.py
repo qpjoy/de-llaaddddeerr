@@ -17,6 +17,7 @@ import stat
 import subprocess
 import uuid
 
+import kubelet_bindings
 import storage_guard as guard
 
 ROOTS = guard.ROOTS
@@ -268,7 +269,7 @@ class Storage:
         require(not any(m['target'] != path and within(m['target'], path) for m in self.mounts(trees=(path,))),
                 'unexpected nested storage mount')
 
-    def snapshot(self, transaction, root_uuid, source_uuid, protected_paths=PROTECTED):
+    def snapshot(self, transaction, root_uuid, source_uuid, protected_paths=PROTECTED, objects=None):
         require(re.fullmatch(r'mx-k8s-[0-9]{8}-[0-9]{6}-[a-f0-9]{8}', transaction))
         root, source = self.host.mount('/'), self.host.mount('/data')
         require(root['target'] == '/' and root['fsroot'] == '/' and root['uuid'] == root_uuid and
@@ -310,9 +311,18 @@ class Storage:
                              (within(backing(logical, current), physical) or within(physical, backing(logical, current)))),
                         'selected data overlaps Docker, runtime, etcd or remote storage')
             children = [m for m in mounts if m['target'] != logical and within(m['target'], logical)]
+            managed_bindings = []
             if key == 'kubelet':
+                temporary = []
                 for child in children:
-                    self.check_kubelet_child(child)
+                    try:
+                        self.check_kubelet_child(child)
+                    except StorageError:
+                        kubelet_bindings.verify(child, objects, source_uuid, current)
+                        managed_bindings.append(child)
+                    else:
+                        temporary.append(child)
+                children = temporary
             else:
                 require(not children, 'selected application data contains a nested mount')
             entry = {'key': key, 'logical': logical, 'source': source_path,
@@ -321,7 +331,8 @@ class Storage:
                      'target': guard.DATA_BASE + '/' + transaction + '/' + key,
                      'target_fsroot': guard.DATA_BASE + '/' + transaction + '/' + key,
                      'target_uuid': root_uuid,
-                     'kubelet_children': children if key == 'kubelet' else []}
+                     'kubelet_children': children if key == 'kubelet' else [],
+                     'kubelet_managed_bindings': managed_bindings}
             if key in guard.PG_PATHS:
                 entry['postgres'] = guard.pg_identity(Path(logical) / guard.PG_PATHS[key])
             entries.append(entry)
@@ -335,9 +346,30 @@ class Storage:
         require(re.fullmatch(r'/var/lib/kubelet/pods/[a-f0-9-]{36}/volumes/kubernetes.io~(?:projected|secret)/[A-Za-z0-9_.-]+',
                              mount.get('target', '')) is not None and
                 mount.get('fstype') == 'tmpfs' and mount.get('source') == 'tmpfs' and mount.get('fsroot') == '/',
-                'unsupported kubelet submount; never unmount NAS or application storage automatically')
+                'unsupported kubelet submount; never unmount NAS or application storage automatically; submount=' +
+                json.dumps({key: mount.get(key) for key in ('target', 'fstype')}, ensure_ascii=True, separators=(',', ':')))
+
+    def kubelet_bindings_released(self, snapshot):
+        """Observe kubelet's normal teardown; never unmount application binds."""
+        entry = next(e for e in snapshot['entries'] if e['key'] == 'kubelet')
+        trees = (entry['logical'], entry['source'], entry['target'])
+        managed = entry.get('kubelet_managed_bindings', [])
+        check_mount_stacks(entry['kubelet_children'] + managed, trees=trees)
+        expected = {m['target']: m for m in managed}
+        pending = False
+        for child in self.mounts(trees=trees):
+            if child['target'] == entry['logical'] or not within(child['target'], entry['logical']):
+                continue
+            if child['target'] in expected:
+                require(child == expected[child['target']], 'reviewed kubelet application bind changed; refusing teardown')
+                pending = True
+            else:
+                self.check_kubelet_child(child)
+        return not pending
 
     def unmount_kubelet_children(self, snapshot, assert_stopped):
+        require(self.kubelet_bindings_released(snapshot),
+                'kubelet application binds remain; wait for kubelet teardown, never unmount them manually')
         entry = next(e for e in snapshot['entries'] if e['key'] == 'kubelet')
         trees = (entry['logical'], entry['source'], entry['target'])
         check_mount_stacks(entry['kubelet_children'], trees=trees)

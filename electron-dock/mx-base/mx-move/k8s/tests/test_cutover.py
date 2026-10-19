@@ -93,6 +93,10 @@ class FakeHost:
     def docker_snapshot(self):
         return {'unchanged': True}
 
+    def release_kubelet_bindings(self, journal):
+        assert self.original_writers and not self.blocked, 'kubelet was stopped before releasing application binds'
+        self.event('release-bindings')
+
     def block_startup(self, journal):
         stored = self.durable.read()
         assert not stored['may_write']
@@ -193,7 +197,7 @@ class CutoverTransactionsTests(unittest.TestCase):
         self.assertTrue(all(value['may_write'] for value in self.durable.revisions[first_commit:]))
 
     def test_each_precommit_failure_restores_old_side_without_starting_new_writers(self):
-        failures = ('prepare', 'quiesce', 'block-startup', 'stop-old', 'unmount-children',
+        failures = ('prepare', 'quiesce', 'release-bindings', 'block-startup', 'stop-old', 'unmount-children',
                     'check-cold', 'copy-kubelet', 'copy-common', 'install-configuration')
         for failure in failures:
             with self.subTest(failure=failure):
@@ -208,6 +212,17 @@ class CutoverTransactionsTests(unittest.TestCase):
                 self.assertEqual(host.events.count('abort'), 1)
                 self.assertEqual(self.durable.read()['phase'], 'aborted')
                 self.assertFalse(self.durable.read()['may_write'])
+
+    def test_binding_release_failure_recovers_before_stopping_kubelet_or_copying(self):
+        self.host.fail_at = 'release-bindings'
+        with self.assertRaises(InjectedFailure):
+            self.move.execute(journal())
+        self.assertNotIn('block-startup', self.host.events)
+        self.assertNotIn('stop-old', self.host.events)
+        self.assertNotIn('unmount-children', self.host.events)
+        self.assertFalse(self.host.copied)
+        self.assertTrue(self.host.original_writers)
+        self.assertEqual(self.durable.read()['phase'], 'aborted')
 
     def test_source_changes_during_copy_prevent_configuration_switch_and_commit(self):
         self.host.cold_checks_change = True

@@ -266,7 +266,8 @@ class Host:
             for mount in mounts:
                 if mount['Source'].startswith('/'):
                     protected += [mount['Source'], os.path.realpath(mount['Source'])]
-        storage = self.storage.snapshot(transaction, ROOT_UUID, SOURCE_UUID, protected_paths=protected)
+        storage = self.storage.snapshot(transaction, ROOT_UUID, SOURCE_UUID, protected_paths=protected,
+                                        objects=cluster['objects'])
         sizes = {}
         for entry in storage['entries']:
             raw = self.run(['du', '-sHx', '--apparent-size', '--block-size=1', '--', entry['source']], 1800)
@@ -285,6 +286,16 @@ class Host:
                 'capacity': {'estimated_copy_bytes': sum(sizes.values()), 'root_free_bytes': free, 'reserve_bytes': prep.RESERVE}}
         self.check_identities(journal)
         return journal
+
+    def release_kubelet_bindings(self, journal):
+        label = '等待 kubelet 正常释放 Pay/ES 本地绑定（不执行手工卸载）'
+        with prep.progress(label):
+            end = time.monotonic() + 120
+            while not self.storage.kubelet_bindings_released(journal['storage']):
+                # Only unchanged, reviewed binds are pending. Inspection errors
+                # and new/unexpected mounts abort immediately with their cause.
+                require(time.monotonic() < end, label + '超时；拒绝停止 kubelet 或复制数据')
+                time.sleep(3)
 
     def prepare(self, journal):
         run = Path(journal['run'])
@@ -514,6 +525,9 @@ class Move:
             with prep.progress('停止业务写入并校验 Elasticsearch 快照'):
                 self.host.cluster.quiesce(journal['cluster'], lambda value: self.persist())
             self.host.cluster.assert_quiesced(journal['cluster'])
+            # Kubelet must remain running until its local PV/config binds have
+            # disappeared with the stopped Pods. Never unmount those ourselves.
+            self.host.release_kubelet_bindings(journal)
             require(self.host.docker_snapshot() == journal['docker_before'], '停写期间 Docker 状态或挂载发生变化')
             # Save exact blocked bytes and intended drop-in before installation.
             journal['blocked_record'] = base64.b64encode(raw_json(storage_ops.guard_record(journal['storage']))).decode()

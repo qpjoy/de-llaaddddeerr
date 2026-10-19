@@ -49,6 +49,10 @@ findmnt --raw --noheadings --output TARGET | sort | uniq -cd
 
 若报 `Docker 本机消费者盘点不完整`，同步 `k8s/cutover.py` 后重跑预检并回传 `docker_diagnostics`。它显示 Docker info 是否取得、容器总数/已核验数，以及失败阶段、原因分类、退出码和相关容器 ID；不输出完整 inspect、环境变量或命令原始错误。`timeout` 表示该条 Docker 命令触及 30 秒上限，`daemon_unavailable` 表示连接失败，`template_error` 或 `invalid_or_incomplete_response` 需要检查 CLI 返回兼容性。总体预检已运行 60 秒不等于 Docker 命令必定超时；在完整盘点前仍拒绝切换，不重启 Docker 或迁移其数据。
 
+若报 `unsupported kubelet submount`，不要手工卸载，也不要把所有 XFS 子挂载加入卸载白名单。现场已确认两项来自原 `/data` 盘：Pay 的 `mx-pay-postgres-data` local PV，及 ES 的只读 `elasticsearch.yml` ConfigMap subPath。新版同时需要 `k8s/cutover.py`、`k8s/storage_ops.py`、`k8s/kubelet_bindings.py`：在线预检将它们与当前 Pod/PV/PVC/配置卷关系、文件系统 UUID、实际目录或文件身份核对，单独登记为由 kubelet 管理的绑定。维护时先正常停止对应 Pod，保持 kubelet 运行并等待它释放绑定，最多 120 秒；完成后才停止运行时并冷复制。若绑定残留或变化，拒绝继续并尝试恢复原业务，绝不以手工 `umount` 兜底。手工清理仍仅限已记录且身份未变的 projected/secret tmpfs。
+
+NAS 明确排除：不迁移其数据，不更改或卸载 `/mnt/nas`，不更改 NAS 的 fstab 行。历史盘点记录过 Docker 容器绑定 `/mnt/nas/pgsql/data` 及验证码目录，因此按已使用的存储保护，不能按“看起来没数据”处理。任何未核验的 NFS/CIFS/CSI 或其他 kubelet 子挂载仍阻止迁移；检查不读取 NAS 文件内容。
+
 **仅在已安排的维护窗口执行：**
 
 ```bash
