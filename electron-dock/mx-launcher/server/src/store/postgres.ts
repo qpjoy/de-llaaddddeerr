@@ -3,10 +3,12 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 import type { DataSource, EntityManager, Repository } from 'typeorm';
+import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity.js';
 
 import { createPlatformDataSource } from '../db/data-source.js';
 import { accountWriteLock } from '../registration/repository.js';
 import { PlatformRecordEntity, type PlatformRecordRow } from '../db/entities.js';
+import { ObservationalAuditQueue } from '../lib/observational-audit.js';
 import {
   consumeFixedWindowRateLimit,
   type AuthenticationRateLimitDecision,
@@ -442,11 +444,29 @@ type RecordKind =
   | 'log-entry';
 
 export class PostgresStore implements PlatformStore {
+  private readonly observationalAuditQueue: ObservationalAuditQueue;
+
   private constructor(
     private readonly config: RuntimeConfig,
     private readonly dataSource: DataSource,
     private readonly records: Repository<PlatformRecordRow>
-  ) {}
+  ) {
+    this.observationalAuditQueue = new ObservationalAuditQueue((events) => this.records.insert(
+      events.map((event) => ({
+        kind: 'audit-event',
+        id: event.eventId,
+        environment: event.environment,
+        siteId: event.siteId,
+        data: event as unknown as QueryDeepPartialEntity<PlatformRecordRow>['data'],
+        createdAt: new Date(event.createdAt),
+        updatedAt: new Date(event.createdAt)
+      }))
+    ));
+  }
+
+  onModuleDestroy(): void {
+    this.observationalAuditQueue.close();
+  }
 
   static async create(config: RuntimeConfig): Promise<PostgresStore> {
     const dataSource = createPlatformDataSource(config);
@@ -2377,7 +2397,7 @@ export class PostgresStore implements PlatformStore {
       ? await this.getUserCenterUserIdentity(record.subjectId) : null;
     const result = introspectUserCenterToken(this.config, input, record, principal, user)
       ?? introspectShadowToken(this.config, input);
-    await this.recordAudit({
+    this.recordObservation({
       eventType: 'auth.token.introspected',
       actorKind: result.principal?.kind ?? 'unknown',
       userId: result.principal?.userId ?? null,
@@ -2405,7 +2425,7 @@ export class PostgresStore implements PlatformStore {
     });
     const boundPrincipal = input.userId ? await this.principalForSubject('user', input.userId) : null;
     const context = resolvePrincipalContext(this.config, input, enrollment, auth, boundPrincipal);
-    await this.recordAudit({
+    this.recordObservation({
       eventType: 'identity.context.resolved',
       actorKind: context.principal.kind,
       userId: context.principal.userId,
@@ -2452,7 +2472,7 @@ export class PostgresStore implements PlatformStore {
         reason: `SDK route scope accepted but app access denied: ${appAccess.reason}`
       }
       : { ...routeDecision, appAccess };
-    await this.recordAudit({
+    this.recordObservation({
       eventType: 'sdk.gateway.access.evaluated',
       actorKind: decision.principal?.kind ?? 'unknown',
       userId: decision.principal?.userId ?? null,
@@ -3877,7 +3897,17 @@ export class PostgresStore implements PlatformStore {
     records: Repository<PlatformRecordRow>,
     input: AuditEventInput
   ): Promise<AuditEvent> {
-    const row: AuditEvent = {
+    const row = this.createAuditEvent(input);
+    await this.saveRecordTo(records, 'audit-event', row.eventId, row, row.siteId);
+    return row;
+  }
+
+  private recordObservation(input: AuditEventInput): void {
+    this.observationalAuditQueue.enqueue(this.createAuditEvent(input));
+  }
+
+  private createAuditEvent(input: AuditEventInput): AuditEvent {
+    return {
       provenance: input.provenance === undefined ? 'server' : input.provenance,
       eventId: `aud_${randomUUID()}`,
       eventType: input.eventType ?? 'unknown',
@@ -3896,8 +3926,6 @@ export class PostgresStore implements PlatformStore {
       metadata: input.metadata ?? null,
       createdAt: new Date().toISOString()
     };
-    await this.saveRecordTo(records, 'audit-event', row.eventId, row, row.siteId);
-    return row;
   }
 
   async recordLogs(entries: LogEntryInput[]): Promise<{ accepted: number; sinks: RuntimeConfig['observabilitySinks'] }> {

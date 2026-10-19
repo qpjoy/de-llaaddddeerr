@@ -83,6 +83,46 @@ host runner 的 status 可能吞掉健康检查失败的退出码，应核对输
 逻辑的 rollout helper，不能当作无写操作的检查。`internal-production apply` 同样会重新应用
 数据库、迁移和身份配置，不是“接着等待”。
 
+## 认证 introspection 被审计写库拖慢
+
+2026-10-19 现场报告：Compass 无鉴权请求约 1 ms，Launcher
+`/internal/v1/sdk/identity/introspect` 需 2.2–6.2 秒，而 TCP 建连约 0.2 ms；
+数据库同时出现 `WALWrite/WALSync` 等待。代码确认 token 校验完成后仍同步写一条审计；
+principal context 和 SDK access evaluation 还会各追加一次同步写入。
+这说明认证路径受数据库写延迟拖累，不能仅据此认定 SSO 配置或账号密码错误。
+等待事件含义见 [PostgreSQL 监控文档](https://www.postgresql.org/docs/16/monitoring-stats.html)。
+
+Postgres store 现在仅将 `auth.token.introspected`、`identity.context.resolved`、
+`sdk.gateway.access.evaluated` 三类查询观测改为后台批量 INSERT：每批最多 100 条，
+通常间隔 250 ms，单批执行；包含执行中批次在内最多 1000 条、2 MiB 序列化负载，
+单条上限 16 KiB。数据库写入挂起时不会开启第二批。失败批次不自动重试，
+下一批至少等待 5 秒；队列满、超大事件或写入失败会丢弃对应观测，最多每分钟记录一次
+`audit.observation.degraded` 累计计数告警，不记录请求内容、token 或原始数据库错误。
+这些观测不再保证立即可见；进程退出也可能丢失尚未持久化的观测。
+
+每次认证仍读取当前 token、主体、角色及应用准入，校验撤销、过期、audience、禁用状态和
+scope；身份读取失败仍报错。发放/撤销 token、修改密码等原有关键审计不进入此队列。
+本修复不改变 PostgreSQL 的 `fsync` 或提交持久化配置，也不能消除磁盘故障导致的读延迟。
+
+需要重新构建并部署 Launcher API 镜像，拉取源码不会改变运行中的 Pod；本修复无 schema
+变更。上线前核对 18090 网关 upstream：如果使用直接 Pod IP，滚动后必须刷新 upstream。
+`ops internal-production deploy` 会执行完整部署并刷新网关；不要把 `apply/deploy` 当作
+仅重启 API 的命令，也不要在仅更新 API 后遗漏网关核对。
+
+上线后可先用无效诊断 token 检查接口延迟和拒绝行为（不要把真实 token 贴入日志或工单）：
+
+```bash
+curl --noproxy '*' --connect-timeout 3 --max-time 10 -sS \
+  -H 'Content-Type: application/json' \
+  --data '{"token":"mx-v1-diagnostic-invalid","audience":"mx-sdk"}' \
+  -w '\nHTTP=%{http_code} connect=%{time_connect}s first_byte=%{time_starttransfer}s total=%{time_total}s\n' \
+  http://127.0.0.1:18090/internal/v1/sdk/identity/introspect
+```
+
+应返回 HTTP 200 且 `introspection.active=false`；这只验证无效 token 路径，还需使用正常
+Compass 会话确认实际业务延迟、503 是否消失，并检查员工密码/飞书及 MX-H2I 原有登录联网。
+若仍慢，继续对照数据库读取等待、连接池和 NVMe I/O 延迟；不要通过关闭鉴权来绕过问题。
+
 ## Compose 到 K8s 的映射
 
 | Docker Compose | K8s | 在 MX Launcher 中 |

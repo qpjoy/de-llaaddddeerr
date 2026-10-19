@@ -21,7 +21,7 @@
     "smoke:oversea-failover": "node --import tsx scripts/oversea-failover-smoke.ts",
     "smoke:user-lifecycle": "pnpm run build && node dist/scripts/user-lifecycle-smoke.js",
     "smoke:feishu-network": "pnpm run build && node dist/scripts/feishu-network-smoke.js",
-    "test:sdk-auth": "node --test --import tsx src/modules/app-center/app-center-credential.test.ts src/modules/sdk-gateway/feishu-auth.service.test.ts src/modules/sdk-gateway/sdk-gateway-rate-limit.test.ts src/modules/sdk-gateway/sdk-gateway-password.test.ts src/modules/release/release-sdk-publisher.test.ts",
+    "test:sdk-auth": "node --test --import tsx src/lib/observational-audit.test.ts src/store/postgres-auth-audit.test.ts src/modules/app-center/app-center-credential.test.ts src/modules/sdk-gateway/feishu-auth.service.test.ts src/modules/sdk-gateway/sdk-gateway-rate-limit.test.ts src/modules/sdk-gateway/sdk-gateway-password.test.ts src/modules/release/release-sdk-publisher.test.ts",
     "test:k8s-secret-ensure": "node --test scripts/internal-k8s-secret-ensure.test.mjs scripts/release-oss-secret-env.test.mjs",
     "test:site-slot-artifact-seed": "node --test scripts/seed-site-slot-artifacts.test.mjs",
     "test:site-slot-tunnel-cli": "node --test scripts/site-slot-refresh-tunnel-cli.test.mjs",
