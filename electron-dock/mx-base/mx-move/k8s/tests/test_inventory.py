@@ -191,6 +191,67 @@ class MountAndCapacityTests(unittest.TestCase):
     def plan(self, paths):
         return inventory.capacity_plan(paths, '/var/lib/mx-move/k8s-data', self.mounts)
 
+    def test_kubernetes_scope_excludes_shared_runtime_and_its_bind_alias(self):
+        paths = [path_evidence('/var/lib/containerd', 4096, self.alias),
+                 path_evidence('/data/mx-runtime/containerd', 4096, self.data),
+                 path_evidence('/data/database', 2048, self.data)]
+        runtime = {'containerd': {'top_level_paths': {'root': '/var/lib/containerd'}},
+                   'docker': {'flags': {'--containerd': '/run/containerd/containerd.sock'}}}
+        scope, selected = inventory.runtime_scope(runtime, {'containers': [{'running': True}, {'running': False}]}, paths)
+        self.assertEqual([p['path'] for p in selected], ['/data/database'])
+        self.assertFalse(scope['docker_data_migration'])
+        self.assertFalse(scope['existing_containerd_tree_migration'])
+        self.assertEqual(scope['docker_running_count'], 1)
+        self.assertEqual(scope['docker_configured_containerd_endpoint'], '/run/containerd/containerd.sock')
+
+    def test_missing_runtime_mount_is_unknown_not_a_scope_parser_crash(self):
+        path = path_evidence('/var/lib/containerd', None)
+        path['mount'] = None
+        scope, selected = inventory.runtime_scope({}, {}, [path])
+        self.assertFalse(selected)
+        self.assertEqual(scope['excluded_runtime_paths'], ['/var/lib/containerd'])
+
+    def test_parent_directory_or_bind_alias_cannot_include_shared_runtime(self):
+        alias_parent = dict(self.data, target='/runtime-parent', fsroot='/mx-runtime')
+        paths = [path_evidence('/var/lib/containerd', 4096, self.alias),
+                 path_evidence('/data/mx-runtime', 8192, self.data),
+                 path_evidence('/runtime-parent', 8192, alias_parent),
+                 path_evidence('/data/database', 2048, self.data)]
+        scope, selected = inventory.runtime_scope({}, {}, paths)
+        self.assertEqual([p['path'] for p in selected], ['/data/database'])
+        self.assertEqual(scope['overlapping_runtime_parent_paths'], ['/data/mx-runtime', '/runtime-parent'])
+
+    def test_runtime_descendant_is_excluded_even_without_mount_identity(self):
+        paths = [dict(path_evidence('/var/lib/containerd/content', None), mount=None),
+                 dict(path_evidence('/var/lib', None), mount=None)]
+        scope, selected = inventory.runtime_scope({}, {}, paths)
+        self.assertFalse(selected)
+        self.assertEqual(scope['overlapping_runtime_parent_paths'], ['/var/lib'])
+
+    def test_docker_data_parent_descendant_and_alias_are_not_copy_candidates(self):
+        alias = dict(self.data, target='/docker-volume', fsroot='/docker/volumes/db')
+        paths = [path_evidence('/data/docker', 4096, self.data),
+                 path_evidence('/data/docker/volumes/db', 2048, self.data),
+                 path_evidence('/data', 8192, self.data),
+                 path_evidence('/docker-volume', 2048, alias),
+                 path_evidence('/data/database', 2048, self.data)]
+        scope, selected = inventory.runtime_scope({}, {'root': '/data/docker'}, paths, self.mounts + [alias])
+        self.assertEqual([p['path'] for p in selected], ['/data/database'])
+        self.assertEqual(scope['overlapping_docker_data_paths'],
+                         ['/data/docker', '/data/docker/volumes/db', '/data', '/docker-volume'])
+
+    def test_docker_alias_detected_when_root_is_not_itself_a_kubernetes_path(self):
+        alias = dict(self.data, target='/docker-volume', fsroot='/docker/volumes/db')
+        paths = [path_evidence('/docker-volume', 2048, alias)]
+        scope, selected = inventory.runtime_scope({}, {'root': '/data/docker'}, paths, self.mounts + [alias])
+        self.assertFalse(selected)
+        self.assertEqual(scope['overlapping_docker_data_paths'], ['/docker-volume'])
+
+    def test_symlink_on_root_is_not_mistaken_for_data_already_migrated(self):
+        plan = self.plan([path_evidence('/shared_dir', None, self.root, symlink=True)])
+        self.assertFalse(plan['complete'])
+        self.assertTrue(any('symlink target' in issue for issue in plan['unknown']))
+
     def test_bind_aliases_and_descendants_count_once(self):
         paths = [path_evidence('/data/mx-runtime/containerd', 4096, self.data),
                  path_evidence('/var/lib/containerd', 4096, self.alias),
@@ -408,6 +469,14 @@ class IdentityAndRuntimeTests(unittest.TestCase):
         self.assertEqual(result['containerd']['top_level_paths'],
                          {'root': '/data/containerd', 'state': '/run/containerd'})
         self.assertTrue(result['containerd']['has_imports'])
+
+    def test_empty_containerd_imports_do_not_claim_external_overrides(self):
+        inspector = inventory.Inspector(args())
+        with mock.patch.object(inventory.Path, 'read_bytes', return_value=b'containerd\0'), \
+                mock.patch.object(inventory.Path, 'is_file', return_value=True), \
+                mock.patch.object(inventory.Path, 'read_text', return_value='root = "/var/lib/containerd"\nimports = [] # defaults\n'):
+            result = inspector.runtime({'containerd': {'MainPID': '123'}})
+        self.assertFalse(result['containerd']['has_imports'])
 
     def test_kubernetes_collection_reads_only_required_resource_types(self):
         inspector = inventory.Inspector(args())

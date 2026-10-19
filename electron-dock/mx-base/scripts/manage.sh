@@ -3,6 +3,13 @@
 set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATIC_DIR="$ROOT_DIR/mx-static"
+# Read-only storage inspection is not an <action> <application> command.
+# Leave all other invocations in the existing application dispatch.
+case "${1:-} ${2:-}" in
+  'k8s inventory'|'k8s plan'|'k8s runtime-check'|'k8s -h'|'k8s --help')
+    exec bash "$ROOT_DIR/mx-move/scripts/manage.sh" "$@"
+    ;;
+esac
 source "$ROOT_DIR/scripts/deploy-confirm.sh"
 say() { printf '[mx-base] %s\n' "$*"; }
 die() { say "ERROR: $*" >&2; exit 1; }
@@ -20,6 +27,9 @@ mx-base — 独立基础设施应用管理（在目标 Internal 主机执行）
   bash scripts/manage.sh                  # 交互式应用/操作选择（非终端显示帮助）
   bash scripts/manage.sh status           # 所有应用的实际状态和当前上下文
   bash scripts/manage.sh gpu [编号或UUID] # 只读查看 GPU PID、显存、进程、容器和服务归属
+  bash scripts/manage.sh k8s inventory   # 只读盘点 Kubernetes 存储（转发 mx-move）
+  bash scripts/manage.sh k8s plan --measure # 只读容量草案，不执行迁移
+  bash scripts/manage.sh k8s runtime-check # 只读核对共享运行时与 K8s 独立运行时的条件
   bash scripts/manage.sh deploy           # 交互选择一个应用；不会默认全量部署
   bash scripts/manage.sh deploy mx-static # 准备目录/密钥，构建并等待健康
   bash scripts/manage.sh deploy mx-pay    # 独立支付：迁移成功后滚动更新并验收

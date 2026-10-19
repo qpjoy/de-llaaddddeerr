@@ -94,6 +94,54 @@ def runtime_flags(argv, names):
     return result
 
 
+def runtime_scope(runtime, docker, paths, mounts=None):
+    """Never treat an unverified/shared containerd tree as Kubernetes-only data."""
+    configured = runtime.get('containerd', {})
+    root = configured.get('flags', {}).get('--root') or configured.get('top_level_paths', {}).get('root') or '/var/lib/containerd'
+    runtime_roots = (root, '/var/lib/containerd')
+    docker_roots = sorted(set(p for p in (docker.get('root'), runtime.get('docker', {}).get('flags', {}).get('--data-root'),
+                                         '/var/lib/docker') if local_path(p)))
+
+    def identities(roots):
+        found = []
+        for path in roots:
+            mount = mount_for(path, mounts) if mounts is not None else next((p.get('mount') for p in paths if p['path'] == path), None)
+            found.append(((mount or {}).get('uuid'), backing_path(path, mount)))
+        return found
+
+    runtime_ids, docker_ids = identities(runtime_roots), identities(docker_roots)
+    excluded, selected, mixed_parents, docker_excluded = [], [], [], []
+    for p in paths:
+        mount = p.get('mount') or {}
+        backing = backing_path(p['path'], mount)
+        is_runtime = any(within(p['path'], r) for r in runtime_roots) or any(
+            uuid and uuid == mount.get('uuid') and prefix and backing and within(backing, prefix)
+            for uuid, prefix in runtime_ids)
+        contains_runtime = not is_runtime and (any(within(r, p['path']) for r in runtime_roots) or any(
+            uuid and uuid == mount.get('uuid') and prefix and backing and within(prefix, backing)
+            for uuid, prefix in runtime_ids))
+        overlaps_docker = any(within(p['path'], r) or within(r, p['path']) for r in docker_roots) or any(
+            uuid and uuid == mount.get('uuid') and prefix and backing and (within(backing, prefix) or within(prefix, backing))
+            for uuid, prefix in docker_ids)
+        if contains_runtime:
+            mixed_parents.append(p['path'])
+        if is_runtime or contains_runtime:
+            excluded.append(p['path'])
+        if overlaps_docker:
+            docker_excluded.append(p['path'])
+        if not (is_runtime or contains_runtime or overlaps_docker):
+            selected.append(p)
+    docker_endpoint = runtime.get('docker', {}).get('flags', {}).get('--containerd')
+    return {'docker_data_migration': False, 'existing_containerd_tree_migration': False,
+            'containerd_root': root, 'docker_configured_containerd_endpoint': docker_endpoint,
+            'docker_running_count': sum(bool(c.get('running')) for c in docker.get('containers', [])),
+            'excluded_runtime_paths': excluded,
+            'overlapping_runtime_parent_paths': mixed_parents,
+            'protected_docker_roots': docker_roots, 'overlapping_docker_data_paths': docker_excluded,
+            'runtime_isolation_required_before_k8s_runtime_move': True,
+            'note': 'docker_overlap covers bind paths only; an empty list does not prove runtime isolation.'}, selected
+
+
 def volume_summary(volume):
     result = {'name': volume.get('name')}
     if 'hostPath' in volume:
@@ -287,6 +335,9 @@ def capacity_plan(paths, target, mounts, reserve_gib=100):
             if p.get('exists') is None or any(x.startswith(('PV/', 'Pod/')) for x in p['origins']):
                 unknown.append(p['path'] + ': referenced path missing')
             continue
+        if p.get('symlink'):
+            unknown.append(p['path'] + ': symlink target requires separate scope review')
+            continue
         if not m or not m.get('fstype'):
             unknown.append(p['path'] + ': mount identity unavailable')
             continue
@@ -366,6 +417,9 @@ class Inspector:
                       symlink=os.path.realpath(path) != path, uid=st.st_uid, gid=st.st_gid,
                       mode=oct(stat.S_IMODE(st.st_mode)), device=st.st_dev, inode=st.st_ino,
                       mount=mount_for(path, mounts))
+        if result['symlink']:
+            result['resolved_path'] = os.path.realpath(path)
+            result['resolved_mount'] = mount_for(result['resolved_path'], mounts)
         children = [m for m in mounts if m.get('target') != path and within(m.get('target', ''), path)]
         result['nested_mount_count'] = len(children)
         result['nested_mount_sample'] = children[:4]
@@ -448,7 +502,8 @@ class Inspector:
                             match = re.search(r'''(?m)^\s*{}\s*=\s*["'](/[^"'\n]*)["']\s*(?:#.*)?$'''.format(key), header)
                             if match:
                                 result['top_level_paths'][key] = match.group(1)
-                        result['has_imports'] = bool(re.search(r'(?m)^\s*imports\s*=', text))
+                        imports = re.search(r'(?m)^\s*imports\s*=\s*(.*)$', header)
+                        result['has_imports'] = bool(imports and not re.fullmatch(r'\[\s*\]\s*(?:#.*)?', imports.group(1)))
                 return result
             output[name] = self.attempt('runtime flags ' + name, read, {'status': 'unavailable'})
         return output
@@ -545,11 +600,23 @@ class Inspector:
         root_mount = mount_for('/', mounts)
         space = self.attempt('target free space', lambda: os.statvfs(str(ancestor)))
         capacity = capacity_plan(evidence, target, mounts, self.args.reserve_gib)
+        scope, data_evidence = runtime_scope(runtime, docker, evidence, mounts)
+        data_capacity = capacity_plan(data_evidence, target, mounts, self.args.reserve_gib)
+        data_capacity['unknown'] += [p + ': contains excluded shared runtime; split scope before copying'
+                                     for p in scope['overlapping_runtime_parent_paths']]
+        data_capacity['unknown'] += [p + ': overlaps Docker data; resolve shared consumer without migrating Docker data'
+                                     for p in scope['overlapping_docker_data_paths']]
         capacity['target_available_bytes'] = space.f_bavail * space.f_frsize if space else None
         capacity['target_total_bytes'] = space.f_blocks * space.f_frsize if space else None
         capacity['lower_bound_fits'] = (capacity['target_available_bytes'] >= capacity['required_bytes_lower_bound']) if space else None
         capacity['complete'] = capacity['complete'] and not unresolved and not self.errors
-        blockers = list(unresolved) + self.errors + capacity['unknown']
+        data_capacity['complete'] = not data_capacity['unknown'] and not unresolved and not self.errors
+        # Keep the original all-path measurements for comparison with old reports.
+        # Only the second estimate obeys the user's Kubernetes-only copy scope;
+        # a future dedicated runtime's image/storage budget is not known yet.
+        data_capacity['dedicated_runtime_budget_included'] = False
+        data_capacity['target_available_bytes'] = capacity['target_available_bytes']
+        blockers = list(unresolved) + self.errors + capacity['unknown'] + data_capacity['unknown']
         if not target_mount or not root_mount or not root_mount.get('uuid') or target_mount.get('uuid') != root_mount.get('uuid') or target_mount.get('fstype') not in LOCAL_FS or not target_mount.get('writable'):
             blockers.append('target must be on the writable, UUID-identified local root filesystem')
         if os.path.realpath(str(ancestor)) != str(ancestor):
@@ -570,6 +637,7 @@ class Inspector:
         if overlap:
             blockers.append('Docker also consumes migration data; coordinate its writers separately')
         blockers += ['maintenance window and application-specific shutdown/backup/acceptance steps required',
+                     'existing containerd tree is excluded: preserve Docker; isolate Kubernetes runtime before moving its images/state',
                      'Launcher/mx-common/Pay storage guards must be reconciled without changing credentials',
                      'runtime flags, nested mounts, external writers and physical backing disks require review',
                      'backup destination/budget and latest-data rollback are not yet established']
@@ -581,6 +649,7 @@ class Inspector:
                 'total_mount_count': len(mounts), 'fstab': fstab, 'block_devices': disks, 'services': services,
                 'runtime': runtime, 'pay_storage_configmaps': pay, 'postgres_data': postgres,
                 'docker': docker, 'docker_overlap': overlap, 'storage_receipts': receipts,
+                'migration_scope': scope, 'kubernetes_data_capacity': data_capacity,
                 'paths': evidence, 'target_root': target, 'capacity': capacity,
                 'blockers': sorted(set(blockers)), 'collection_errors': self.errors,
                 'notes': ['Live sizes are estimates, not a consistent database backup.',

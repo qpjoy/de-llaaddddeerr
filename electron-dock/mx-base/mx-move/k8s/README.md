@@ -4,6 +4,12 @@
 
 维护窗口已允许，但现有用户、密码、SSO 密钥和注册、网络配置必须保留。搬迁 Launcher 数据库和运行时会涉及服务中断，不能承诺窗口内登录、DNS 或联网持续可用。具体停启范围和执行命令须依据服务器报告确定，不能只从 `df` 和 `fstab` 推断全部数据位置。
 
+**当前范围：只迁移 Kubernetes 数据。** 用户允许同一窗口短暂停 Docker，但明确不迁移 Docker 数据。2026-10-20 的[现场报告分析](server-2026-10-20.md)确认 Docker 使用现有 containerd，因而 `/data/docker`、Docker 卷以及现有共享 `/var/lib/containerd` 整树都不属于直接复制范围。`docker_overlap=[]` 仅指没有发现数据路径重叠，不代表运行时不共用。
+
+Kubernetes 独占的业务目录和 kubelet 目录可保持逻辑路径，通过根卷新副本切换。若将 Kubernetes 镜像和容器运行时数据一并迁入根卷，方案是创建独立 containerd 实例，通过镜像 API 导出/导入所需镜像，再切换 kubelet 的实际 CRI endpoint；保留 Docker 的服务、socket、原共享运行时及构建 namespace。不能直接 rsync 某个 `k8s.io` 子目录，namespace 不是完整独立的数据目录。
+
+这一分离还须处理 Hub、mx-common、Pay、Rig 的镜像导入及 Launcher 的运行时启动、CNI 修复和磁盘检查入口，确保后续发布连接 Kubernetes 使用的实例。当前没有执行器或切换命令；不会为了绕过此依赖而重置集群或停用存储保护。
+
 ## 执行只读检查
 
 在 Internal 控制平面 Linux 主机以 root 执行，需要 Python 3.6+；保留仓库模块目录结构。先同步整个 `mx-move` 模块，然后在仓库根目录运行：
@@ -21,6 +27,14 @@ bash mx-move/scripts/manage.sh k8s plan --measure
 ```
 
 新版 `mx-base/scripts/manage.sh` 也支持转发 `k8s inventory` / `k8s plan`。旧版父级入口会把 `plan` 当应用名并报 `[mx-base] ERROR: 未知应用：plan`，此时尚未调用盘点程序；使用上述模块路径即可。
+
+全量报告已取得后，补充运行时专用短报告；从 **mx-base 目录**执行：
+
+```bash
+bash mx-move/scripts/manage.sh k8s runtime-check
+```
+
+该命令只读读取实际进程参数、合并后的 containerd 配置的允许字段、socket 身份、namespace 任务数量以及本地 Docker 的停止/恢复集合；不重新扫描数据库、不查询整套 Kubernetes 工作负载、不输出原始配置。采集缺项明确返回未知，不能据此停止服务或创建新运行时。`imports = []` 不属于外部覆盖；旧版报告仅凭出现 `imports` 键就标为 true，已修正，仍以合并后的配置为准。
 
 `inventory` 用于快速获取清单；`plan --measure` 额外测量目录大小，可能耗时并产生磁盘读取负载。它使用低优先级 `du`，每个目录默认最多 30 秒，存在嵌套挂载的目录不扫描；大小未知会保留为 `null`。省略 `--measure` 可先检查路径和阻塞项，但不能据此确认容量足够。JSON 写入 stdout，阶段提示写入 stderr。
 
@@ -51,6 +65,8 @@ cat "$report"
 
 退出码 `0` 仅表示采集未报告错误；`2` 表示报告已输出但有采集缺项；`1` 表示未能完成报告。报告中的 `execution_supported` 固定为 `false`。容量按 UUID + 文件系统内路径合并 bind 别名和父子目录，默认留出 **100 GiB + 已测数据量的 25% 增长空间**，数据库备份另算；`required_bytes_lower_bound` 与 `lower_bound_fits` 只是已测量部分的下限，不是“可以迁移”的结论。完整性、实际物理盘、未来增长、未发现的外置路径和停写后容量仍需复查。
 
+新版保留 `capacity` 作为与首份报告对照的全路径统计；`migration_scope` 明确排除共享运行时，`kubernetes_data_capacity` 才是此次业务数据及 kubelet 的复制预算草案，尚不含专用运行时、镜像转换或备份预算。包含共享运行时的父目录，以及与 Docker 数据根重叠的路径和 bind 别名，也会排除并标为待核实，不能通过复制上层目录带走 Docker 数据。位于根卷的符号链接也必须核实目标，不能仅因链接自身在根卷就当作数据已经迁移。
+
 ## 迁移范围与保留边界
 
 应以实际 PV/PVC、Pod 和工作负载的卷声明、运行时路径及宿主机挂载交叉核对，涵盖 Launcher、mx-common、Pay、Rig 以及仍有保留卷的旧服务。仓库整合或退役记录不能证明服务器上已没有旧实例。
@@ -58,7 +74,8 @@ cat "$report"
 | 范围 | 处理原则 |
 | --- | --- |
 | 已迁移的 `/var/lib/etcd` | 保持当前根卷活动副本、fstab 与启动保护，不重复迁移。已有 etcd 工具见[上级说明](../README.md)。 |
-| `/var/lib/containerd`、`/var/lib/kubelet` | 核实实际运行时配置、嵌套挂载和全部使用者；运行时迁移属于维护窗口工作。停止 daemon 不等于所有容器和 shim 已退出。 |
+| 现有 `/var/lib/containerd` | 与 Docker 共用，整树保留原位；Kubernetes 运行时迁入根卷须另建隔离实例并验证镜像与部署入口。 |
+| `/var/lib/kubelet` | 核实嵌套挂载及写入者，停写后复制；仅停止 daemon 不等于所有容器和 shim 已退出。 |
 | `/var/lib/mx-launcher` | 包含登录数据库及其他持久数据；保留原 PV/PVC、数据库身份、Secret 和业务路径。 |
 | mx-common、Pay、Rig 及其他本地卷 | 从现场发现真实路径及使用者，逐一确认停写、备份、身份保护和恢复顺序。 |
 | 已在根卷的数据 | 核实后保留，不为统一目录重复搬迁。 |
