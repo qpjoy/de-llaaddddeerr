@@ -1,3 +1,4 @@
+import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
 import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit } from '../core/internal-traffic-policy.mjs'
 import { circuitOpenError, upstreamCapacityError } from './availability-errors.mjs'
@@ -928,8 +929,8 @@ export class TikHubGateway {
         query: normalized.providerQuery,
         ...(queuePolicy ? { scope: queueScope, contractVersion: normalized.contractVersion, metricsContractVersion: 'mx-insight-hub.note-detail-only.v1' } : {}),
       })
-      await this.usageStore.reapStaleReservations()
-      await this.platformStore.reapStaleCalls?.()
+      await requestMaintenance(this.usageStore)
+      await requestMaintenance(this.platformStore, 'reapStaleCalls')
       const reservation = await this.usageStore.reserve({
         requestId,
         idempotencyKey: effectiveKey,
@@ -1677,8 +1678,8 @@ export class TikHubGateway {
         endpoint: TIKHUB_XIAOHONGSHU_SEARCH_ENDPOINT_KEY,
         body: { ...normalized.fingerprintBody, enrichment: enrichmentPolicy },
       })
-      await this.usageStore.reapStaleReservations()
-      await this.platformStore.reapStaleCalls?.()
+      await requestMaintenance(this.usageStore)
+      await requestMaintenance(this.platformStore, 'reapStaleCalls')
       const requestId = randomUUID()
       const reservation = await this.usageStore.reserve({
         requestId,
@@ -2734,8 +2735,8 @@ export class TikHubGateway {
       if (['refresh', 'live_only'].includes(normalized.deliveryMode) && !suppliedKey) {
         throw new AppError(400, 'idempotency_key_required', `Idempotency-Key is required when deliveryMode is ${normalized.deliveryMode}`)
       }
-      await this.usageStore.reapStaleReservations()
-      await this.platformStore.reapStaleCalls?.()
+      await requestMaintenance(this.usageStore)
+      await requestMaintenance(this.platformStore, 'reapStaleCalls')
 
       let validatedRetryId = null
       if (retryOfRequestId != null) {

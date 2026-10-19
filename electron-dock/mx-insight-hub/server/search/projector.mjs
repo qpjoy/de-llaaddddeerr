@@ -1,6 +1,6 @@
 import { hostname } from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
+import { ElasticsearchError, ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
 import { buildContentDocument } from './document.mjs'
 import { describeBulkFailure } from './bulk-errors.mjs'
 import {
@@ -247,6 +247,7 @@ export class SearchProjector {
       eventsByAggregate.set(event.aggregate_id, aggregateEvents)
     }
     const failures = new Map()
+    const rateLimitedEventIds = new Set()
     const projections = []
     let retryableTokenizerError = null
     const retryableTokenizerEventIds = []
@@ -338,10 +339,10 @@ export class SearchProjector {
             descriptors.push({ ...projection, operation: 'index' })
           }
           const response = await this.client.bulk(operations)
-          this.#recordBulkOutcomes(response, descriptors, failures)
+          this.#recordBulkOutcomes(response, descriptors, failures, rateLimitedEventIds)
 
           for (const projection of projections) {
-            if (!projection.aggregateEvents.some((event) => failures.has(event.id))) {
+            if (!projection.aggregateEvents.some((event) => failures.has(event.id) || rateLimitedEventIds.has(event.id))) {
               delivered.push(...projection.aggregateEvents.map((event) => event.id))
             }
           }
@@ -352,7 +353,8 @@ export class SearchProjector {
           'search_alias_ambiguous',
           'search_index_backend_mismatch',
         ].includes(error?.code)
-        if (!(error instanceof ElasticsearchUnavailableError) && !retryableControlError) throw error
+        const rateLimited = error instanceof ElasticsearchError && error.status === 429
+        if (!(error instanceof ElasticsearchUnavailableError) && !retryableControlError && !rateLimited) throw error
         // Give the whole batch back untouched; purge/index are idempotent, and a
         // transport/topology/provenance failure does not belong in any
         // individual event's budget.
@@ -371,14 +373,21 @@ export class SearchProjector {
     const failedCount = await this.#markFailed(failures)
     // Only tokenizer-dependent upserts wait for a shared HanLP outage. Deletes
     // and healthy documents in the same batch are already safe to acknowledge.
-    await this.#releaseClaim(retryableTokenizerEventIds)
+    // Bulk item 429s are capacity rejections, not invalid documents. Keep them
+    // pending without exhausting attempts, including coalesced/delete events;
+    // the loop backs off after all successful/permanent outcomes are settled.
+    await this.#releaseClaim([...retryableTokenizerEventIds, ...rateLimitedEventIds])
+    const rateLimitedError = rateLimitedEventIds.size > 0
+      ? Object.assign(new Error('Elasticsearch bulk indexing is rate limited'), { code: 'projection_rate_limited', status: 429 })
+      : null
     await this.#finishRun(runId, {
       delivered: deliveredCount,
       failed: failedCount,
-      error: retryableTokenizerError?.message || null,
+      error: retryableTokenizerError?.message || rateLimitedError?.message || null,
     })
 
     if (retryableTokenizerError) throw retryableTokenizerError
+    if (rateLimitedError) throw rateLimitedError
 
     return { claimed: events.length, delivered: deliveredCount, failed: failedCount }
   }
@@ -397,12 +406,16 @@ export class SearchProjector {
     return rowCount
   }
 
-  #recordBulkOutcomes(response, descriptors, failures) {
+  #recordBulkOutcomes(response, descriptors, failures, rateLimitedEventIds) {
     const items = response?.items || []
     for (const [index, descriptor] of descriptors.entries()) {
       const item = items[index]
       const action = item?.index || item?.delete
       const status = Number(action?.status ?? 0)
+      if (status === 429) {
+        for (const event of descriptor.aggregateEvents) rateLimitedEventIds.add(event.id)
+        continue
+      }
       const isConflict = status === 409
       const isMissingDelete = descriptor.operation === 'delete' && status === 404
       const succeeded = Boolean(action) && (!action.error || isConflict || isMissingDelete)
@@ -462,11 +475,15 @@ export class SearchProjector {
  */
 export async function runProjectorLoop(projector, {
   idleDelayMs = 2_000,
+  postBatchDelayMs = 0,
   reclaimIntervalMs = idleDelayMs,
   nowFn = Date.now,
   signal,
   logger = console,
 }) {
+  if (!Number.isInteger(postBatchDelayMs) || postBatchDelayMs < 0) {
+    throw new TypeError('postBatchDelayMs must be a non-negative integer')
+  }
   let backoffMs = idleDelayMs
   let nextReclaimAt = nowFn()
   // A continuously non-empty backlog never enters the idle branch, so keep a
@@ -492,6 +509,10 @@ export async function runProjectorLoop(projector, {
         logger?.log?.(
           `[projector] claimed=${result.claimed} delivered=${result.delivered} failed=${result.failed}`,
         )
+        // All acknowledgements/lease releases finish inside projectBatch.
+        // Leave pending events durable and unclaimed during this pause so a
+        // sustained backlog does not become an uninterrupted PG/HanLP/ES loop.
+        if (postBatchDelayMs > 0) await delay(postBatchDelayMs, signal)
       }
     } catch (error) {
       if (error instanceof ElasticsearchUnavailableError) {

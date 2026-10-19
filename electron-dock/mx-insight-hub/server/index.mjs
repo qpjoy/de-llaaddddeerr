@@ -23,6 +23,7 @@ import { EcommerceRoutingStore } from './external-platforms/ecommerce-routing.mj
 import { StrategySearchRoutingStore } from './external-platforms/strategy-search-routing.mjs'
 import { createQueue } from '@qpjoy/mx-common'
 import { createHubPostgresPool } from './core/postgres-pool.mjs'
+import { DataAdmission } from './core/data-admission.mjs'
 import { createSegmenter } from '@qpjoy/mx-common/segmenter'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -675,6 +676,8 @@ export async function createRuntime(config = loadConfig()) {
   const peripherals = createPeripheralRuntime(config)
   const harborPortal = config.listenerMode === 'public' ? null : createHarborPortal({pool,store,profileFile:process.env.MX_INSIGHT_HARBOR_SSO_PROFILE,token:process.env.MX_INSIGHT_HARBOR_GATEWAY_TOKEN,tokenFile:process.env.MX_INSIGHT_HARBOR_GATEWAY_TOKEN_FILE,hubSettings:readSsoProfile(process.env.MX_INSIGHT_SSO_PROFILE)})
   const app = createApp({
+    dataAdmission: new DataAdmission(config.dataAdmission),
+    databasePressure: () => ({ usage: store.pool?.getPressureSnapshot?.() ?? null, data: pool?.getPressureSnapshot?.() ?? null }),
     externalAdmissionPolicies,
     harborPortal,
     platformSearchPolicyStore,

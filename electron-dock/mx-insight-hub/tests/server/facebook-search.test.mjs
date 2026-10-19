@@ -1020,6 +1020,18 @@ test('RapidAPI billing headers are separate from short rate windows', () => {
   assert.equal(v.remaining, 0); assert.equal(v.resetSeconds, 80000); assert.equal(v.retryAfterSeconds, 20)
 })
 
+test('a completed Facebook quota observation is not repeated during response cleanup', async () => {
+  for (const rapidStatus of [200, 429]) {
+    const h = await harness({ rapidStatus })
+    const first = await h.invoke()
+    assert.equal(first.status, 200)
+    assert.equal(h.observations.length, 1)
+    assert.equal(h.observations[0].status, rapidStatus)
+    assert.deepEqual((await h.invoke()).body, first.body)
+    assert.equal(h.observations.length, 1)
+  }
+})
+
 test('a quota-store write failure preserves successful and rejected receipts without a paid retry', async () => {
   for (const rapidStatus of [200, 429]) {
     const h = await harness({ rapidStatus })

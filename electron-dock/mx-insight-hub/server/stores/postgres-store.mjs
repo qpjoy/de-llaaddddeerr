@@ -4187,7 +4187,7 @@ export class PostgresStore {
         unknown.cause = error
         throw unknown
       }
-      await client.query('ROLLBACK').catch(() => {})
+      await client.query('ROLLBACK').catch(error => { releaseError = error })
       throw error
     } finally {
       if (!sessionClient) client.release(releaseError)

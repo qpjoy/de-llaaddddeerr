@@ -1,15 +1,25 @@
 import { AppError } from './errors.mjs'
 
+export const bodyReadTimeoutMs = Symbol('bodyReadTimeoutMs')
+
 export async function readJson(request, limitBytes = 1_048_576) {
   const chunks = []
   let size = 0
-  for await (const chunk of request) {
-    size += chunk.length
-    if (size > limitBytes) {
-      throw new AppError(413, 'payload_too_large', 'Request body is too large')
+  const timeoutMs = request[bodyReadTimeoutMs]
+  // Only data-admitted requests opt in. Destroying an incomplete body cancels
+  // the stream reader itself; no DB write or paid operation has started here.
+  const timer = timeoutMs > 0 ? setTimeout(() => {
+    request.destroy(new AppError(408, 'request_body_timeout', 'Request body timed out'))
+  }, timeoutMs) : null
+  try {
+    for await (const chunk of request) {
+      size += chunk.length
+      if (size > limitBytes) {
+        throw new AppError(413, 'payload_too_large', 'Request body is too large')
+      }
+      chunks.push(chunk)
     }
-    chunks.push(chunk)
-  }
+  } finally { clearTimeout(timer) }
   if (chunks.length === 0) return {}
   try {
     return JSON.parse(Buffer.concat(chunks).toString('utf8'))

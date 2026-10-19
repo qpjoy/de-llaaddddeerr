@@ -1401,6 +1401,22 @@ create_runtime_config() {
     die "MX_INSIGHT_SERVER_FILE_ROOTS must be a valid server-file root JSON object"
   fi
   local external_pull_page_delay_ms="${MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS:-1000}"
+  # Validate Hub-only pressure controls before publishing the shared runtime
+  # configuration. No PG/ES server, Launcher or network settings are changed.
+  if ! node --input-type=module -e '
+    const { dataAdmissionConfig } = await import(process.argv[1])
+    dataAdmissionConfig(process.env)
+    for (const [key, fallback, min, max] of [
+      ["MX_INSIGHT_INGEST_WORKER_CONCURRENCY", 1, 1, 4],
+      ["MX_INSIGHT_INGEST_WORKER_DELAY_MS", 100, 0, 60000],
+      ["MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS", 250, 0, 60000],
+    ]) {
+      const value = Number(process.env[key] || fallback)
+      if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error(key + " is out of range")
+    }
+  ' "${ROOT_DIR}/server/core/data-admission.mjs"; then
+    die "Invalid Hub data pressure configuration"
+  fi
   if ! MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS_VALUE="$external_pull_page_delay_ms" \
     node -e '
       const value = Number(process.env.MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS_VALUE)
@@ -1514,8 +1530,8 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS="${MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS:-900000}" \
     --from-literal=MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS="${MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS:-300000}" \
     --from-literal=MX_INSIGHT_TIKHUB_MAX_CONCURRENCY="${MX_INSIGHT_TIKHUB_MAX_CONCURRENCY:-16}" \
-    --from-literal=MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS="${MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS:-10000}" \
-    --from-literal=MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING="${MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING:-32}" \
+    --from-literal=MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS="${MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS:-30000}" \
+    --from-literal=MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING="${MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING:-256}" \
     --from-literal=MX_INSIGHT_TIKHUB_MAX_CONSUMER_CONCURRENCY="${MX_INSIGHT_TIKHUB_MAX_CONSUMER_CONCURRENCY:-8}" \
     --from-literal=MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE:-50}" \
     --from-literal=MX_INSIGHT_TIKHUB_RATE_LIMIT_BURST="${MX_INSIGHT_TIKHUB_RATE_LIMIT_BURST:-1}" \
@@ -1544,6 +1560,13 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_BACKFILL_PLATFORMS="${MX_INSIGHT_BACKFILL_PLATFORMS:-xiaohongshu,douyin,twitter}" \
     --from-literal=MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS="${MX_INSIGHT_EXTERNAL_PULL_INTERVAL_MS:-60000}" \
     --from-literal=MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE="${MX_INSIGHT_EXTERNAL_PULL_BATCH_SIZE:-1000}" \
+    --from-literal=MX_INSIGHT_DATA_API_READ_CONCURRENCY="${MX_INSIGHT_DATA_API_READ_CONCURRENCY:-4}" \
+    --from-literal=MX_INSIGHT_DATA_API_ACQUISITION_CONCURRENCY="${MX_INSIGHT_DATA_API_ACQUISITION_CONCURRENCY:-0}" \
+    --from-literal=MX_INSIGHT_DATA_API_MAX_PENDING="${MX_INSIGHT_DATA_API_MAX_PENDING:-512}" \
+    --from-literal=MX_INSIGHT_DATA_API_WAIT_MS="${MX_INSIGHT_DATA_API_WAIT_MS:-30000}" \
+    --from-literal=MX_INSIGHT_INGEST_WORKER_CONCURRENCY="${MX_INSIGHT_INGEST_WORKER_CONCURRENCY:-1}" \
+    --from-literal=MX_INSIGHT_INGEST_WORKER_DELAY_MS="${MX_INSIGHT_INGEST_WORKER_DELAY_MS:-100}" \
+    --from-literal=MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS="${MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS:-250}" \
     --from-literal=MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS="$external_pull_page_delay_ms" \
     --from-literal=MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS="$external_pull_worker_delay_ms" \
     --from-literal=MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS="$telegram_monitor_page_delay_ms" \

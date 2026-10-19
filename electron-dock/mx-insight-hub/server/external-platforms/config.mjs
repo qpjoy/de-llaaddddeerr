@@ -626,8 +626,8 @@ export function parseTikHubConfig(environment = process.env, {
   const unknownFingerprintCooldownMs = positiveInteger(environment.MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS,
     15 * 60_000, 'MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS')
   const concurrencyQueue = {
-    maxWaitMs: positiveInteger(environment.MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS, 10000, 'MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS'),
-    maxPending: positiveInteger(environment.MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING, 32, 'MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING'),
+    maxWaitMs: positiveInteger(environment.MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS, 30000, 'MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS'),
+    maxPending: positiveInteger(environment.MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING, 256, 'MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING'),
   }
   if (concurrencyQueue.maxWaitMs > 60000 || concurrencyQueue.maxPending > 256) throw new AppError(500,
     'invalid_configuration', 'TikHub concurrency queue bounds must not exceed 60000 ms / 256 pending requests')
@@ -716,7 +716,7 @@ export function disabledTikHubConfig(environment, error) {
     unknownFingerprintCooldownMs: 15 * 60_000,
     responseQuarantineCooldownMs: 5 * 60_000,
     maxConcurrency: 16,
-    concurrencyQueue: { maxWaitMs: 10000, maxPending: 32 },
+    concurrencyQueue: { maxWaitMs: 30000, maxPending: 256 },
     maxConsumerConcurrency: 8,
     maxRequestsPerMinute: 50,
     rateLimitBurst: 1,

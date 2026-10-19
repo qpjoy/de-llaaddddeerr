@@ -273,6 +273,26 @@ class PureFunctions(unittest.TestCase):
                     self.assertEqual(result['reserve_gib'], reserve_gib)
                     self.assertEqual(result['required_gib'], 3)
 
+    def test_capacity_explains_internal_root_volume_shortfall(self):
+        # Server df -B1 values; du's apparent-size estimate includes directory
+        # metadata, so the real file-only migration budget can be slightly less.
+        info = mock.Mock(f_bavail=102774824960 // 4096,
+                         f_frsize=4096, f_blocks=1098974756864 // 4096)
+        with mock.patch.object(move.os, 'statvfs', return_value=info):
+            with self.assertRaises(move.Refuse) as error:
+                move.capacity(Path('/var/lib'), 3 * 400841731 + move.GIB)
+        message = str(error.exception)
+        for expected in ['/var/lib', '总容量 1023.50 GiB', '可用 95.72 GiB',
+                         '预算 2.12 GiB', '预留 102.35 GiB', '需要 104.47 GiB',
+                         '释放至少 9 GiB']:
+            self.assertIn(expected, message)
+
+    def test_capacity_never_rounds_a_positive_shortfall_to_zero(self):
+        info = mock.Mock(f_bavail=21 * move.GIB - 1, f_frsize=1, f_blocks=100 * move.GIB)
+        with mock.patch.object(move.os, 'statvfs', return_value=info):
+            with self.assertRaisesRegex(move.Refuse, '释放至少 1 GiB'):
+                move.capacity(self.root, move.GIB)
+
 
 class FakeHandle:
     """Real directory fd with portable command paths for the offline runner.

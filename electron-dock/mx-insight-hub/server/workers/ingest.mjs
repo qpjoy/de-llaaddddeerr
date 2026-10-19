@@ -232,7 +232,11 @@ async function main() {
   }
 
   const workers = [
-    startLoop(queue, INGEST_QUEUE, handleIngest, controller.signal),
+    // Acquired results are already durable in this queue. Drain a bounded
+    // number at a time and yield after settlement instead of turning an API
+    // burst into concurrent canonical/raw/outbox write transactions.
+    startLoop(queue, INGEST_QUEUE, handleIngest, controller.signal,
+      config.ingestWorker.concurrency, config.ingestWorker.postBatchDelayMs),
     // Backfill runs at concurrency 1: it is a bulk scan, and running several in
     // parallel would compete with the latency-sensitive ingest queue for the
     // same connection pool.

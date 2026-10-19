@@ -253,7 +253,13 @@ def capacity(path, needed):
     info = os.statvfs(str(path))
     free, size = info.f_bavail * info.f_frsize, info.f_blocks * info.f_frsize
     reserve = max(20 * GIB, size // 10)
-    require(free >= needed + reserve, '目标盘空间不足：副本/备份之外须保留至少 20GiB 或总容量 10%')
+    if free < needed + reserve:
+        deficit_gib = (needed + reserve - free + GIB - 1) // GIB
+        raise Refuse('文件系统空间不足（检查路径：{}）：总容量 {:.2f} GiB，可用 {:.2f} GiB；'
+                     '本轮副本/备份预算 {:.2f} GiB，安全预留 {:.2f} GiB（20 GiB 与总容量 10% 中较大者）；'
+                     '合计至少需要 {:.2f} GiB 可用，还需释放至少 {} GiB（向上取整）。'.format(
+                         path, size / GIB, free / GIB, needed / GIB, reserve / GIB,
+                         (needed + reserve) / GIB, deficit_gib))
     return {'free_gib': round(free / GIB, 1), 'required_gib': round(needed / GIB, 2), 'reserve_gib': round(reserve / GIB, 1)}
 
 
@@ -603,7 +609,7 @@ class Move:
         require(not set(facts['source_disk']['disks']) & set(target_disk['disks']), '源和目标位于同一物理盘，迁移不能隔离 I/O')
         require(target_disk['uuid'] != facts['source_disk']['uuid'], '目标文件系统必须独立')
         if mode == 'migrate':
-            require(target_disk == self.host.disk(Path('/')) == state_disk, '目标和备份状态须位于独立的根盘（预期 1T）；请先确认磁盘布局')
+            require(target_disk == self.host.disk(Path('/')) == state_disk, '目标和备份状态须位于根文件系统，且与源数据的物理盘独立；请先确认磁盘布局')
         else:
             require(target_disk == origin_disk, '原 2T 文件系统身份变化，拒绝回滚到替代盘')
         budget = capacity(existing, facts['size'] * (3 if target_disk == state_disk else 2) + GIB)

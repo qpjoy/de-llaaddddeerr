@@ -1,3 +1,4 @@
+import { requestMaintenance } from './core/request-maintenance.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { validateSearchOrder } from './web-search/contract.mjs'
 import { MAX_CAPABILITY_SCOPES, MAX_PLATFORM_SCOPES } from '../shared/access-limits.mjs'
@@ -1582,12 +1583,12 @@ export class HubService {
   }
 
   async dashboard() {
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     return this.store.dashboard()
   }
 
   async usage(filters) {
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     return this.store.usage(usageFilters(filters))
   }
 
@@ -2007,7 +2008,7 @@ export class HubService {
     const requestId = randomUUID()
     const startedAt = performance.now()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     const reservation = await this.store.reserve({
       requestId,
       idempotencyKey,
@@ -2119,7 +2120,7 @@ export class HubService {
   }
 
   async publicUsage(context, filters) {
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     return this.store.usage(usageFilters({
       ...filters,
       tenantId: context.tenant.id,
@@ -3445,7 +3446,7 @@ export class HubService {
     }
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     const reservation = await this.store.reserve({
       requestId,
       idempotencyKey,
@@ -3709,7 +3710,7 @@ export class HubService {
     }
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     const reservation = await this.store.reserve({
       requestId,
       idempotencyKey,
@@ -3873,7 +3874,7 @@ export class HubService {
       windowSeconds: Math.max(...policies.map(p => p.windowSeconds)), maxPageSize: Math.min(...policies.map(p => p.maxPageSize)) }
     const query = normalizeNewsQuery(body, { ...queryOptions, maxPageSize: policy.maxPageSize })
     const requestId = randomUUID()
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     const reservation = await this.store.reserve({ requestId, idempotencyKey: key,
       fingerprint: requestFingerprint({ method: id ? 'GET' : 'POST', path, body: { id, kind, filters: query.filters, cursor: body.cursor || null, platforms } }),
       tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
@@ -3935,7 +3936,7 @@ export class HubService {
     }
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     const reservation = await this.store.reserve({
       requestId,
       idempotencyKey: key,
@@ -4131,7 +4132,7 @@ export class HubService {
     const requestId = randomUUID()
     const startedAt = performance.now()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     const reservation = await this.store.reserve({
       requestId,
       idempotencyKey: `${capability || platform}-read:${requestId}`,
@@ -4524,7 +4525,7 @@ export class HubService {
       replayWindowMs: null,
     }
 
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     let reservation
     const existing = await this.store.getUsageRequestByIdempotencyKey(
       context.consumer.id,
@@ -4995,7 +4996,7 @@ export class HubService {
     })
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     const reservation = await this.store.reserve({
       requestId,
       idempotencyKey,

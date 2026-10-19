@@ -4,18 +4,22 @@ export function aggregateStream(response) {
   let opened = false, closed = false, timer = null
   const close = () => { closed = true; clearInterval(timer) }
   response.once('close', close)
+  function ready() {
+    if (closed || response.destroyed) return false
+    // Also bound heartbeat writes while all sources are waiting on upstream.
+    if (response.writableLength > 1024 * 1024) { response.destroy(); close(); return false }
+    return true
+  }
   function write(event, data) {
-    if (closed || response.destroyed) return
+    if (!ready()) return
     if (!opened) {
       opened = true
       response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8',
         'cache-control': 'no-store, no-transform', 'x-accel-buffering': 'no' })
       response.flushHeaders()
-      timer = setInterval(() => { if (!closed) response.write(': heartbeat\n\n') }, 10_000)
+      timer = setInterval(() => { if (ready()) response.write(': heartbeat\n\n') }, 10_000)
       timer.unref?.()
     }
-    // A slow/disconnected reader cannot grow server memory without bound.
-    if (response.writableLength > 1024 * 1024) { response.destroy(); close(); return }
     response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
   }
   return { write, get opened() { return opened },

@@ -2425,6 +2425,13 @@ RUNTIME_CONFIG_ORDER="$runtime_config_order" \
 MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS=30000 \
 MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS=0 \
 MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS=0 \
+MX_INSIGHT_DATA_API_READ_CONCURRENCY=2 \
+MX_INSIGHT_DATA_API_ACQUISITION_CONCURRENCY=3 \
+MX_INSIGHT_DATA_API_MAX_PENDING=300 \
+MX_INSIGHT_DATA_API_WAIT_MS=5000 \
+MX_INSIGHT_INGEST_WORKER_CONCURRENCY=2 \
+MX_INSIGHT_INGEST_WORKER_DELAY_MS=0 \
+MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS=500 \
 MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS=60000 \
 MX_INSIGHT_JUSTONE_TOKEN="$runtime_secret_value" \
 MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
@@ -2479,6 +2486,10 @@ grep -Fxq -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS=0' "$runtime
 grep -Fxq -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS=0' "$runtime_secret_argv"
 grep -Fxq -- '--from-literal=MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS=60000' "$runtime_secret_argv"
 printf 'ok - explicit source page delay bounds survive ConfigMap rendering\n'
+for pressure_setting in DATA_API_READ_CONCURRENCY=2 DATA_API_ACQUISITION_CONCURRENCY=3 DATA_API_MAX_PENDING=300 DATA_API_WAIT_MS=5000 INGEST_WORKER_CONCURRENCY=2 INGEST_WORKER_DELAY_MS=0 PROJECTOR_WORKER_DELAY_MS=500; do
+  grep -Fxq -- "--from-literal=MX_INSIGHT_${pressure_setting}" "$runtime_secret_argv"
+done
+printf 'ok - Hub pressure controls survive ConfigMap rendering, including zero batch delay\n'
 if grep -Fq "$runtime_secret_value" "$runtime_secret_argv"; then
   printf 'not ok - runtime Secret value entered kubectl argv\n' >&2
   exit 1
@@ -2713,8 +2724,8 @@ grep -q 'MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS.*300000' "$ROOT_DIR/d
 grep -q 'MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE.*50' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE.*50' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_MAX_CONCURRENCY.*16' "$ROOT_DIR/deploy/compose/docker-compose.yml"
-grep -q 'MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS.*10000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
-grep -q 'MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING.*32' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS.*30000' "$ROOT_DIR/deploy/compose/docker-compose.yml"
+grep -q 'MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING.*256' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED.*0' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED.*0' "$ROOT_DIR/deploy/compose/docker-compose.yml"
 grep -q 'MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS.*:-}' "$ROOT_DIR/deploy/compose/docker-compose.yml"
@@ -2727,8 +2738,8 @@ grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS="${
 grep -q -- '--from-literal=MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_JUSTONE_MAX_REQUESTS_PER_MINUTE:-50}"' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE="${MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE:-50}"' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_MAX_CONCURRENCY="${MX_INSIGHT_TIKHUB_MAX_CONCURRENCY:-16}"' "$ROOT_DIR/scripts/manage.sh"
-grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS="${MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS:-10000}"' "$ROOT_DIR/scripts/manage.sh"
-grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING="${MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING:-32}"' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS="${MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS:-30000}"' "$ROOT_DIR/scripts/manage.sh"
+grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING="${MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING:-256}"' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_CONTRACT_VERIFIED=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_USER_ACTIVITY_CONTRACT_VERIFIED=' "$ROOT_DIR/scripts/manage.sh"
 grep -q -- '--from-literal=MX_INSIGHT_TIKHUB_SEARCH_CANARY_CONSUMER_IDS=' "$ROOT_DIR/scripts/manage.sh"

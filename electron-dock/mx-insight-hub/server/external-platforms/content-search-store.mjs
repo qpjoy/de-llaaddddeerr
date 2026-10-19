@@ -50,7 +50,7 @@ async function transaction(pool, work) {
     return result
   } catch (error) {
     if (committing) releaseError = error
-    else await client.query('ROLLBACK').catch(() => {})
+    else await client.query('ROLLBACK').catch(error => { releaseError = error })
     throw error
   } finally { client.release(releaseError) }
 }

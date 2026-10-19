@@ -27,8 +27,8 @@ function fixture({ providerKey='rapidapi', acquired=true, queryFailure=false, ro
 test('Twitter opt-in cleanup uses transaction-local short limits and nonwaiting advisory admission',async()=>{
   const f=fixture()
   assert.equal(await f.store.releaseProviderCostWorkflow(f.input),true)
-  assert.deepEqual(f.queries.slice(0,4).map(row=>row.sql),['BEGIN',"SET LOCAL lock_timeout = '500ms'",
-    "SET LOCAL statement_timeout = '5s'",'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired'])
+  assert.deepEqual(f.queries.slice(0,4).map(row=>row.sql),['BEGIN',"SET LOCAL lock_timeout = '100ms'",
+    "SET LOCAL statement_timeout = '500ms'",'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired'])
   assert.deepEqual(f.queries[3].params,['external-platform-cost:rapidapi'])
   assert.equal(f.queries.at(-1).sql,'COMMIT');assert.deepEqual(f.releases,[null])
 })
@@ -40,8 +40,8 @@ test('busy cost lock returns false with no reservation write and no blocking adv
   assert.ok(f.queries.every(row=>!row.sql.includes('UPDATE')&&!row.sql.includes('pg_advisory_xact_lock(')))
 })
 
-test('ordinary cleanup and other providers retain strict blocking cost release',async()=>{
-  for(const [providerKey,bestEffortRelease] of [['rapidapi',false],['tikhub',true]]) {
+test('ordinary cleanup retains strict blocking cost release for each provider',async()=>{
+  for(const [providerKey,bestEffortRelease] of [['rapidapi',false],['tikhub',false]]) {
     const f=fixture({providerKey})
     assert.equal(await f.store.releaseProviderCostWorkflow({...f.input,bestEffortRelease}),true)
     assert.equal(f.queries[1].sql,'SELECT pg_advisory_xact_lock(hashtext($1))')

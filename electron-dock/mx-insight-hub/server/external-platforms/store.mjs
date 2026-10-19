@@ -901,7 +901,20 @@ export class MemoryExternalPlatformStore {
     if (current && new Date(current.expiresAt).getTime() > now) {
       if(ownedDeliveryLease && ownedSearchDelivery(this.providerKey, operation)
         && current.ownerRequestId===ownerRequestId && current.expiresAt===iso(expiresAt)) return {kind:'acquired'}
-      return { kind: 'busy', blockedUntil: current.expiresAt }
+      const previous = this.usageStore?.requests?.get(current.ownerRequestId)
+      const replacement = this.usageStore?.requests?.get(ownerRequestId)
+      // Final cleanup may have skipped a busy database. Only an exactly
+      // scoped terminal owner can be replaced before lease expiry; missing or
+      // uncertain evidence must retain the original dispatch protection.
+      const completedOwner = previous && replacement
+        && ['committed', 'released'].includes(previous.status) && replacement.status === 'reserved'
+        && previous.tenantId != null && previous.tenantId === replacement.tenantId
+        && previous.consumerId === consumerId && replacement.consumerId === consumerId
+        && previous.platform && previous.platform === replacement.platform
+        && previous.fingerprint === fingerprint && replacement.fingerprint === fingerprint
+        && ![...this.calls.values()].some(call => call.usageRequestId === current.ownerRequestId
+          && ['pending', 'unknown'].includes(call.outcome))
+      if (!completedOwner) return { kind: 'busy', blockedUntil: current.expiresAt }
     }
     leases.set(key, { ownerRequestId, expiresAt: iso(expiresAt) })
     return { kind: 'acquired' }
@@ -1967,6 +1980,14 @@ export class MemoryExternalPlatformStore {
   }
 }
 
+function canStartBestEffortCleanup(pool) {
+  // Cleanup must not queue behind business reads/writes or open a connection.
+  // pg-pool queues an idle checkout synchronously, so the next cleanup sees
+  // waitingCount before attempting to use that same idle connection.
+  return (typeof pool.idleCount !== 'number' || pool.idleCount > 0)
+    && !(pool.waitingCount > 0)
+}
+
 async function transaction(pool, operation) {
   const client = await pool.connect()
   let commitStarted = false
@@ -2489,13 +2510,23 @@ export class PostgresExternalPlatformStore {
     // beginProviderCall committed and therefore could not see the new call in
     // its original statement snapshot.
     const { rows } = await this.pool.query(
-      `UPDATE external_platform.provider_calls call SET
+      `WITH candidates AS MATERIALIZED (
+         SELECT call.id
+           FROM external_platform.provider_calls call
+           JOIN usage_requests request ON request.id = call.usage_request_id
+          WHERE call.outcome = 'pending' AND request.status = 'unknown'
+          ORDER BY call.id
+          LIMIT 100
+          FOR UPDATE OF call SKIP LOCKED
+       )
+       UPDATE external_platform.provider_calls call SET
          outcome = 'unknown', error_code = 'reservation_lease_expired',
          completed_at = now()
-       FROM usage_requests request
-       WHERE call.usage_request_id = request.id
+       FROM candidates
+       WHERE call.id = candidates.id
          AND call.outcome = 'pending'
-         AND request.status = 'unknown'
+         AND EXISTS (SELECT 1 FROM usage_requests request
+                      WHERE request.id = call.usage_request_id AND request.status = 'unknown')
        RETURNING call.id`,
     )
     return rows.length
@@ -2577,6 +2608,22 @@ export class PostgresExternalPlatformStore {
        WHERE external_platform.dispatch_leases.expires_at <= now()
          OR ($12::boolean AND external_platform.dispatch_leases.owner_request_id=EXCLUDED.owner_request_id
            AND external_platform.dispatch_leases.expires_at=EXCLUDED.expires_at)
+         OR EXISTS (
+           SELECT 1 FROM usage_requests previous
+           JOIN usage_requests replacement ON replacement.id = EXCLUDED.owner_request_id
+            WHERE previous.id = external_platform.dispatch_leases.owner_request_id
+              AND previous.status IN ('committed', 'released') AND replacement.status = 'reserved'
+              AND previous.tenant_id = replacement.tenant_id
+              AND previous.consumer_id = external_platform.dispatch_leases.consumer_id
+              AND replacement.consumer_id = EXCLUDED.consumer_id
+              AND previous.platform = replacement.platform
+              AND previous.fingerprint = external_platform.dispatch_leases.request_fingerprint
+              AND replacement.fingerprint = EXCLUDED.request_fingerprint
+              AND NOT EXISTS (
+                SELECT 1 FROM external_platform.provider_calls unsettled
+                 WHERE unsettled.usage_request_id = previous.id AND unsettled.outcome IN ('pending', 'unknown')
+              )
+         )
        RETURNING owner_request_id, expires_at`,
       [
         consumerId, operation, fingerprint, ownerRequestId, expiresAt,
@@ -2677,7 +2724,27 @@ export class PostgresExternalPlatformStore {
     }
   }
 
-  async releaseDispatchLease({ consumerId, operation, fingerprint, ownerRequestId }) {
+  async releaseDispatchLease({ consumerId, operation, fingerprint, ownerRequestId, bestEffortRelease = false }) {
+    if (bestEffortRelease === true) {
+      if (!canStartBestEffortCleanup(this.pool)) return false
+      return transaction(this.pool, async client => {
+        await client.query("SET LOCAL lock_timeout = '100ms'")
+        await client.query("SET LOCAL statement_timeout = '500ms'")
+        const released = await client.query(
+          `WITH owned AS (
+             SELECT ctid FROM external_platform.dispatch_leases
+              WHERE consumer_id = $1 AND operation = $2 AND request_fingerprint = $3
+                AND owner_request_id = $4
+              FOR UPDATE SKIP LOCKED
+           )
+           DELETE FROM external_platform.dispatch_leases lease USING owned
+            WHERE lease.ctid = owned.ctid
+            RETURNING lease.owner_request_id`,
+          [consumerId, operation, fingerprint, ownerRequestId],
+        )
+        return released.rows.length > 0
+      })
+    }
     await this.pool.query(
       `DELETE FROM external_platform.dispatch_leases
         WHERE consumer_id = $1 AND operation = $2 AND request_fingerprint = $3
@@ -3101,14 +3168,15 @@ export class PostgresExternalPlatformStore {
   }
 
   async releaseProviderCostWorkflow({ reservationId, usageRequestId, bestEffortRelease = false }) {
+    if (bestEffortRelease === true && !canStartBestEffortCleanup(this.pool)) return false
     return transaction(this.pool, async (client) => {
-      // Only the Twitter fill cleanup opts in. Its already-acquired page must
-      // not wait behind a provider-wide budget calculation merely to release
-      // unused procurement headroom. A missed release stays conservatively
-      // active; no customer hold or paid-call cost is changed here.
-      if (bestEffortRelease === true && this.providerKey === 'rapidapi') {
-        await client.query("SET LOCAL lock_timeout = '500ms'")
-        await client.query("SET LOCAL statement_timeout = '5s'")
+      // Final cleanup must not delay an already-durable delivery behind budget
+      // admission. A missed release remains conservative and expires with the
+      // original request lease; customer holds and paid-call costs are intact.
+      // Provider switches and pre-dispatch releases keep the strict path.
+      if (bestEffortRelease === true) {
+        await client.query("SET LOCAL lock_timeout = '100ms'")
+        await client.query("SET LOCAL statement_timeout = '500ms'")
         const { rows } = await client.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired', [
           `external-platform-cost:${this.providerKey}`,
         ])
@@ -4319,7 +4387,7 @@ export class PostgresExternalPlatformStore {
 
   async #insertArchiveObjects(client, { callId, delivery, capturedAt, archiveObjects }) {
     const capturedDate = iso(capturedAt).slice(0, 10)
-    for (const [ordinal, object] of archiveObjects.entries()) {
+    for (const object of archiveObjects) {
       if (object.capturedDate !== capturedDate) {
         throw new AppError(
           500,
@@ -4327,27 +4395,50 @@ export class PostgresExternalPlatformStore {
           'External platform archive date does not match its UTC capture time',
         )
       }
+    }
+    // One acquired page must not require a database round trip per item before
+    // the caller receives it. Keep every object in this same transaction, but
+    // bound each statement by encoded bytes/rows. At 14 parameters per row,
+    // 1000 rows also stay well below PostgreSQL's parameter limit. An individual
+    // large object stays whole in its own batch.
+    const maxBatchBytes = 1024 * 1024
+    const maxBatchRows = 1000
+    let rows = []
+    let batchBytes = 2
+    const flush = async () => {
+      if (!rows.length) return
       await client.query(
         `INSERT INTO external_platform.archive_objects
            (id, provider_key, object_kind, marketplace, operation, endpoint_version,
             captured_date, archive_path, response_pointer, source_key, payload_sha256,
             raw_payload, provider_call_id, item_ordinal)
-         VALUES ($1, $14, $2, $3, $4, $5, $6::date, $7, $8, $9, $10, $11, $12, $13)
+         VALUES ${rows.map((_, index) => `(${Array.from({ length: 14 }, (_, column) =>
+           `$${index * 14 + column + 1}${column === 6 ? '::date' : ''}`).join(', ')})`).join(', ')}
          ON CONFLICT (provider_call_id, item_ordinal) DO NOTHING`,
-        [
-          randomUUID(), object.kind === 'response' ? 'response' : 'item',
-          object.marketplace, delivery.operation, object.endpointVersion,
-          capturedDate, object.archivePath, object.envelopePointer || '$', object.sourceKey,
-          object.payloadSha256,
-          // node-postgres maps JS null to SQL NULL. A response can explicitly
-          // lack a safe JSON projection while its exact bytes remain archived;
-          // encode that absence as JSON null without relaxing item constraints.
-          object.kind === 'response' && object.rawPayload === null ? 'null' : object.rawPayload,
-          callId, ordinal,
-          this.providerKey,
-        ],
+        rows.flat(),
       )
+      rows = []
+      batchBytes = 2
     }
+    for (const [ordinal, object] of archiveObjects.entries()) {
+      const row = [
+        randomUUID(), this.providerKey, object.kind === 'response' ? 'response' : 'item',
+        object.marketplace, delivery.operation, object.endpointVersion,
+        capturedDate, object.archivePath, object.envelopePointer || '$', object.sourceKey,
+        object.payloadSha256,
+        // Keep node-postgres's original value encoding. An absent response
+        // projection is JSON null; an item null must still fail NOT NULL.
+        object.kind === 'response' && object.rawPayload === null ? 'null' : object.rawPayload,
+        callId, ordinal,
+      ]
+      const rowBytes = Buffer.byteLength(JSON.stringify(row), 'utf8')
+      if (rows.length && (rows.length >= maxBatchRows || batchBytes + rowBytes + 1 > maxBatchBytes)) {
+        await flush()
+      }
+      batchBytes += rowBytes + (rows.length ? 1 : 0)
+      rows.push(row)
+    }
+    await flush()
   }
 
   async analytics({ from, bucket = 'hour' }) {

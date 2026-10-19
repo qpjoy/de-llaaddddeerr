@@ -2409,7 +2409,9 @@ test('Postgres stageProviderEvidence reconciles a lost COMMIT without duplicatin
   assert.equal(restrictedInsert.values[4], evidence.restrictedResponseArchive.bodySha256)
   assert.deepEqual(restrictedInsert.values[5], evidence.restrictedResponseArchive.bodyBytes)
   assert.equal(restrictedInsert.values[6], evidence.restrictedResponseArchive.bodyText)
-  assert.equal(statements.filter(({ sql }) => /INSERT INTO external_platform\.archive_objects/u.test(sql)).length, 2)
+  const archiveInserts = statements.filter(({ sql }) => /INSERT INTO external_platform\.archive_objects/u.test(sql))
+  assert.equal(archiveInserts.length, 1)
+  assert.equal(archiveInserts[0].values.length / 14, evidence.archiveObjects.length)
   for (const forbidden of [/usage_requests/u, /gateway_requests/u, /response_snapshots/u, /mxq\.jobs/u]) {
     assert.equal(statements.some(({ sql }) => forbidden.test(sql)), false)
   }

@@ -38,9 +38,10 @@ import { readFile } from 'node:fs/promises'
 import { extname, join, normalize } from 'node:path'
 import { secureEqual } from './core/crypto.mjs'
 import { AppError } from './core/errors.mjs'
+import { DataAdmission, dataAdmissionLane } from './core/data-admission.mjs'
 import { quotedMinor } from './billing/contracts.mjs'
 import { consumptionQuery } from './billing/consumption.mjs'
-import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson } from './core/http.mjs'
+import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson, bodyReadTimeoutMs } from './core/http.mjs'
 import {
   PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT,
   PUBLIC_OPENAPI_DOCUMENT,
@@ -820,6 +821,8 @@ export function createApp({
   tikHubGateway = null,
   acquisitionHistory = null,
   admissionRecovery = null,
+  dataAdmission = new DataAdmission(),
+  databasePressure = () => ({}),
   segmenterConfig = null,
   launcherAudience = 'mx-insight-hub',
   listenerMode = 'combined',
@@ -1416,6 +1419,7 @@ export function createApp({
   return async function app(request, response) {
     const requestId = request.headers['x-request-id'] || randomUUID()
     response.setHeader('x-request-id', requestId)
+    let releaseDataSlot
     try {
       const url = new URL(request.url, 'http://localhost')
       if (url.pathname.startsWith('/internal/v1/portal/')) {
@@ -1521,6 +1525,13 @@ export function createApp({
         })
         response.end()
         return
+      }
+
+      const dataLane = dataAdmissionLane(request.method, pathname)
+      if (dataLane) {
+        releaseDataSlot = await withAdmissionSignal(response, signal => dataAdmission.acquire(dataLane, { signal }))
+        if (response.destroyed) return
+        request[bodyReadTimeoutMs] = 10000
       }
 
       // Unauthenticated by necessity: the console has to know how to sign in
@@ -1873,6 +1884,12 @@ export function createApp({
           data: presentation === 'safe' ? dataCenterVisibleProjection(data) : data,
           requestId,
         })
+        return
+      }
+      if (pathname === '/internal/v1/admin/data-pressure' && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'data pressure')
+        sendJson(response, 200, { data: { admission: dataAdmission.snapshot(), databases: databasePressure() }, requestId })
         return
       }
       if (pathname === '/internal/v1/admin/admission-limits' && ['GET','POST'].includes(request.method)) {
@@ -6727,6 +6744,10 @@ export function createApp({
         },
         requestId: durableRequestId || requestId,
       })
+    } finally {
+      // Disconnecting an active HTTP request does not cancel a paid dispatch or
+      // its settlement. Hold this slot until the original handler really ends.
+      releaseDataSlot?.()
     }
   }
 }
