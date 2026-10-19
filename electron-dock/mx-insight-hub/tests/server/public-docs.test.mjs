@@ -1911,6 +1911,7 @@ test('public OpenAPI document contains only implemented Open API paths', async (
       '/data/telegram/entities/search',
       '/data/telegram/messages',
       '/data/telegram/search',
+      '/data/telegram/semantic-search',
       '/data/topic-reports',
       '/data/topic-reports/{id}',
       '/data/virtual-supermarket/metadata',

@@ -389,7 +389,14 @@ export class EmbeddingPipeline {
             ? JSON.stringify(action.error).slice(0, 500)
             : 'missing index result from Elasticsearch bulk response'
           if (action?.status === 408 || action?.status === 425 || action?.status === 429 || action?.status >= 500) {
-            retryableBulkError ||= new ElasticsearchUnavailableError(new Error(error))
+            // Preserve an all-429 batch for the retrieval resource guard: these
+            // capacity rejections must not exhaust the job's permanent-error
+            // attempts. A mixed batch retains its non-429 failure semantics.
+            if (!retryableBulkError || (retryableBulkError.cause?.status === 429 && action.status !== 429)) {
+              retryableBulkError = new ElasticsearchUnavailableError(
+                Object.assign(new Error(error), { status: action.status }),
+              )
+            }
           } else {
             await this.#markProjectionFailure(projection.row, new Error(error))
             failedCount += 1

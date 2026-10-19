@@ -1,4 +1,6 @@
 import { workspaceRoute } from './portal/workspace.mjs'
+import { TELEGRAM_SEMANTIC_PATH, TELEGRAM_SEMANTIC_INTERNAL_PATH } from './retrieval/telegram-semantic-proxy.mjs'
+import { normalizeTelegramSemanticQuery } from './retrieval/telegram-semantic.mjs'
 import { hubDatabaseFailure } from './core/postgres-pool.mjs'
 import {portalPrincipal, harborRoute} from './portal/harbor.mjs'
 import { DataportStore } from './portal/dataport-store.mjs'
@@ -36,9 +38,10 @@ import { readFile } from 'node:fs/promises'
 import { extname, join, normalize } from 'node:path'
 import { secureEqual } from './core/crypto.mjs'
 import { AppError } from './core/errors.mjs'
+import { DataAdmission, dataAdmissionLane } from './core/data-admission.mjs'
 import { quotedMinor } from './billing/contracts.mjs'
 import { consumptionQuery } from './billing/consumption.mjs'
-import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson } from './core/http.mjs'
+import { bearerToken, publicApiKey, readBuffer, readJson, routeMatch, sendJson, bodyReadTimeoutMs } from './core/http.mjs'
 import {
   PUBLIC_DOCS_LEGACY_ROUTE_SCRIPT,
   PUBLIC_OPENAPI_DOCUMENT,
@@ -789,6 +792,7 @@ export function createApp({
   search = null,
   searchReindex = null,
   advancedSearch = null,
+  telegramSemanticProxy = null,
   retrievalControl = null,
   embedding = null,
   externalPlatformAdmin = null,
@@ -817,6 +821,8 @@ export function createApp({
   tikHubGateway = null,
   acquisitionHistory = null,
   admissionRecovery = null,
+  dataAdmission = new DataAdmission(),
+  databasePressure = () => ({}),
   segmenterConfig = null,
   launcherAudience = 'mx-insight-hub',
   listenerMode = 'combined',
@@ -1413,6 +1419,7 @@ export function createApp({
   return async function app(request, response) {
     const requestId = request.headers['x-request-id'] || randomUUID()
     response.setHeader('x-request-id', requestId)
+    let releaseDataSlot
     try {
       const url = new URL(request.url, 'http://localhost')
       if (url.pathname.startsWith('/internal/v1/portal/')) {
@@ -1476,8 +1483,24 @@ export function createApp({
       // Listener isolation must run before unauthenticated sign-in routes. The
       // public listener previously exposed both sign-in endpoints because their
       // handlers appeared before this guard.
-      if ((listenerMode === 'public' && isAdminPath) || (listenerMode === 'admin' && isPublicPath)) {
+      if ((listenerMode === 'public' && (isAdminPath || pathname === TELEGRAM_SEMANTIC_INTERNAL_PATH)) || (listenerMode === 'admin' && isPublicPath)) {
         throw new AppError(404, 'not_found', 'Route not found')
+      }
+      if (pathname === TELEGRAM_SEMANTIC_INTERNAL_PATH) {
+        if (request.method !== 'POST') throw new AppError(404, 'not_found', 'Route not found')
+        requireNoQuery(searchParams, 'Telegram semantic search')
+        // This is a single customer-authorized operation, not an Admin route.
+        // The executor owns authorization, reservation and durable delivery;
+        // Public forwards only the same customer key/body/idempotency key.
+        const context = await requirePublic(request)
+        const result = await service.telegramSemanticSearch(context, {
+          body: await readJson(request, 16 * 1024), idempotencyKey: request.headers['idempotency-key'],
+        })
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
+          ...(result.retryAfter ? { 'retry-after': result.retryAfter } : {}),
+        })
+        return
       }
       if (await sso?.handle(request, response, url)) return
 
@@ -1502,6 +1525,13 @@ export function createApp({
         })
         response.end()
         return
+      }
+
+      const dataLane = dataAdmissionLane(request.method, pathname)
+      if (dataLane) {
+        releaseDataSlot = await withAdmissionSignal(response, signal => dataAdmission.acquire(dataLane, { signal }))
+        if (response.destroyed) return
+        request[bodyReadTimeoutMs] = 10000
       }
 
       // Unauthenticated by necessity: the console has to know how to sign in
@@ -1848,6 +1878,12 @@ export function createApp({
         })
         return
       }
+      if (pathname === '/internal/v1/admin/data-pressure' && request.method === 'GET') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'data pressure')
+        sendJson(response, 200, { data: { admission: dataAdmission.snapshot(), databases: databasePressure() }, requestId })
+        return
+      }
       if (pathname === '/internal/v1/admin/admission-limits' && ['GET','POST'].includes(request.method)) {
         requireSourceAdmin(principal)
         if (!admissionRecovery) throw new AppError(503, 'admission_recovery_unavailable', '限制与恢复需要 PostgreSQL')
@@ -2150,6 +2186,14 @@ export function createApp({
         sendJson(response, 200, {
           data: await service.adminDataProductTelegramSearch(await readJson(request)),
           requestId,
+        })
+        return
+      }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/data-products/telegram/semantic-search') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'Telegram semantic search')
+        sendJson(response, 200, {
+          data: await service.adminDataProductTelegramSemanticSearch(await readJson(request, 16 * 1024)), requestId,
         })
         return
       }
@@ -6365,6 +6409,28 @@ export function createApp({
         })
         return
       }
+      if (request.method === 'POST' && pathname === TELEGRAM_SEMANTIC_PATH) {
+        requireNoQuery(searchParams, 'Telegram semantic search')
+        const context = await requirePublic(request)
+        const body = await readJson(request, 16 * 1024)
+        const idempotencyKey = request.headers['idempotency-key']
+        normalizeTelegramSemanticQuery(body)
+        if (typeof idempotencyKey !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey)) {
+          throw new AppError(400, idempotencyKey ? 'invalid_idempotency_key' : 'idempotency_key_required', 'A valid Idempotency-Key is required')
+        }
+        let result
+        if (listenerMode === 'public') {
+          if (!telegramSemanticProxy) throw new AppError(503, 'semantic_search_unavailable', 'Internal semantic retrieval is not configured')
+          result = await telegramSemanticProxy({ apiKey: publicApiKey(request), body, idempotencyKey })
+        } else {
+          result = await service.telegramSemanticSearch(context, { body, idempotencyKey })
+        }
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
+          ...(result.retryAfter ? { 'retry-after': result.retryAfter } : {}),
+        })
+        return
+      }
       if (request.method === 'POST' && pathname === '/api/v1/data/telegram/search') {
         const context = await requirePublic(request)
         const result = await service.search(context, {
@@ -6670,6 +6736,10 @@ export function createApp({
         },
         requestId: durableRequestId || requestId,
       })
+    } finally {
+      // Disconnecting an active HTTP request does not cancel a paid dispatch or
+      // its settlement. Hold this slot until the original handler really ends.
+      releaseDataSlot?.()
     }
   }
 }

@@ -1,3 +1,4 @@
+import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
 import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit } from '../core/internal-traffic-policy.mjs'
 import { circuitOpenError, upstreamCapacityError } from './availability-errors.mjs'
@@ -416,8 +417,8 @@ export class TikHubUserInfoGateway {
       ]
       const expectedProviderCalls = endpointKeys.length
 
-      await this.usageStore.reapStaleReservations()
-      await this.platformStore.reapStaleCalls?.()
+      await requestMaintenance(this.usageStore)
+      await requestMaintenance(this.platformStore, 'reapStaleCalls')
       const requestId = randomUUID()
       const reservation = await this.usageStore.reserve({
         requestId,

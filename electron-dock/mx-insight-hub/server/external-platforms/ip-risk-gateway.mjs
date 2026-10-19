@@ -1,3 +1,4 @@
+import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { upstreamCapacityError } from './availability-errors.mjs'
 import { isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -138,8 +139,8 @@ export class IpRiskGateway {
     }
     const fingerprint = createHash('sha256').update(JSON.stringify({ path, ...input, version: this.version })).digest('hex')
     const policy = { maxRequests: 1000, windowSeconds: 3600, ...await this.usageStore.getPolicy(consumer.id, IP_RISK_PLATFORM) }
-    await this.usageStore.reapStaleReservations()
-    await this.platformStore.reapStaleCalls()
+    await requestMaintenance(this.usageStore)
+    await requestMaintenance(this.platformStore, 'reapStaleCalls')
     const reservation = await this.usageStore.reserve({
       requestId: randomUUID(), idempotencyKey, fingerprint, tenantId: tenant.id, consumerId: consumer.id, apiKeyId: apiKey.id,
       platform: IP_RISK_PLATFORM,

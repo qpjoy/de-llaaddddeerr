@@ -1,6 +1,6 @@
 import { AppError } from '../core/errors.mjs'
 
-export const DEFAULT_CONCURRENCY_QUEUE = Object.freeze({ maxWaitMs: 10000, maxPending: 32, reservedForeground: 4 })
+export const DEFAULT_CONCURRENCY_QUEUE = Object.freeze({ maxWaitMs: 30000, maxPending: 256, reservedForeground: 4 })
 
 export function concurrencyBusy(reason, details = {}) {
   const business = { enterprise: '企业数据', ecommerce: '电商数据', xiaohongshu: '小红书数据',

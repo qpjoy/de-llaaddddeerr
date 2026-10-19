@@ -1,3 +1,4 @@
+import { requestMaintenance } from './core/request-maintenance.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { validateSearchOrder } from './web-search/contract.mjs'
 import { MAX_CAPABILITY_SCOPES, MAX_PLATFORM_SCOPES } from '../shared/access-limits.mjs'
@@ -17,6 +18,8 @@ import { normalizeNewsQuery, newsCatalog, NEWS_CONTRACT, NEWS_METER } from './da
 import { compileBillingComponents } from '../shared/billing-composition.mjs'
 import { sealApiKey, openApiKey } from './core/key-vault.mjs'
 import { cursorTimestampOrderKey } from './core/cursor-time.mjs'
+import { normalizeTelegramSemanticQuery } from './retrieval/telegram-semantic.mjs'
+import { TELEGRAM_SEMANTIC_PATH } from './retrieval/telegram-semantic-proxy.mjs'
 import { issueDemoCredential, readDemoCredentialClaims } from './core/demo-credential.mjs'
 import { storedEcommerceQuery } from './contracts/ecommerce-stored.mjs'
 import { randomUUID } from 'node:crypto'
@@ -586,6 +589,8 @@ export class HubService {
     reservationLeaseMs = 120_000,
     ingestQueueName = 'mx-insight-hub:ingest',
     searchQueries = null,
+    telegramSemantic = null,
+    telegramSemanticConfigured = false,
     segmenter = null,
     externalPlatformCapabilities = null,
     externalPostCapabilities = null,
@@ -618,6 +623,8 @@ export class HubService {
     // namespacing.
     this.ingestQueueName = ingestQueueName
     this.searchQueries = searchQueries
+    this.telegramSemantic = telegramSemantic
+    this.telegramSemanticConfigured = telegramSemanticConfigured || Boolean(telegramSemantic)
     this.segmenter = segmenter
     this.externalPlatformCapabilities = externalPlatformCapabilities
     this.externalPostCapabilities = externalPostCapabilities
@@ -1576,12 +1583,12 @@ export class HubService {
   }
 
   async dashboard() {
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     return this.store.dashboard()
   }
 
   async usage(filters) {
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     return this.store.usage(usageFilters(filters))
   }
 
@@ -1688,6 +1695,14 @@ export class HubService {
           ...(contextCapability ? { context: contextCapability } : {}),
           ...(timelineCapability ? { timeline: timelineCapability } : {}),
         })
+      }
+    }
+    if (canonicalGrants.includes('telegram')) {
+      const telegram = payload?.data?.platforms?.find(row => row?.platform === 'telegram')
+      if (telegram) telegram.semanticSearch = {
+        endpoint: TELEGRAM_SEMANTIC_PATH, configured: this.telegramSemanticConfigured && !isTestApiKey(context.apiKey),
+        readiness: 'not_probed', coverage: 'unknown', paginationMode: 'top_k', maxTopK: 50,
+        contractVersion: 'mx-insight-hub.telegram-semantic.v1',
       }
     }
     if (canonicalGrants.includes(PUBLIC_OPINION_PLATFORM) && typeof this.store.listPublicOpinionRecords === 'function') {
@@ -1993,7 +2008,7 @@ export class HubService {
     const requestId = randomUUID()
     const startedAt = performance.now()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     const reservation = await this.store.reserve({
       requestId,
       idempotencyKey,
@@ -2105,7 +2120,7 @@ export class HubService {
   }
 
   async publicUsage(context, filters) {
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     return this.store.usage(usageFilters({
       ...filters,
       tenantId: context.tenant.id,
@@ -3310,6 +3325,71 @@ export class HubService {
     })
   }
 
+  async adminDataProductTelegramSemanticSearch(body) {
+    const query = normalizeTelegramSemanticQuery(body)
+    assert(this.telegramSemantic, 503, 'semantic_search_unavailable', 'Telegram semantic retrieval is not configured')
+    return this.#telegramSemanticResponse(query)
+  }
+
+  async #telegramSemanticResponse(query) {
+    const startedAt = performance.now()
+    const result = await this.telegramSemantic.run(query)
+    return { contractVersion: 'mx-insight-hub.telegram-semantic.v1', platform: 'telegram',
+      query: query.query, status: 'ok', ...result, meta: { durationMs: Math.round(performance.now() - startedAt) } }
+  }
+
+  async telegramSemanticSearch(context, { body, idempotencyKey }) {
+    assert(typeof idempotencyKey === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey),
+      400, idempotencyKey ? 'invalid_idempotency_key' : 'idempotency_key_required', 'A valid Idempotency-Key is required')
+    assert(!isTestApiKey(context.apiKey), 403, 'test_key_not_supported', 'Semantic retrieval requires a live API key')
+    assert((await this.#effectivePlatformGrants(context)).includes('telegram'), 403, 'platform_not_granted', 'Platform is not granted')
+    const policy = await this.#effectivePlatformPolicy(context, 'telegram')
+    const query = normalizeTelegramSemanticQuery(body, policy.maxPageSize)
+    const path = TELEGRAM_SEMANTIC_PATH
+    const reservation = await this.store.reserve({
+      requestId: randomUUID(), idempotencyKey,
+      fingerprint: requestFingerprint({ method: 'POST', path, body: query }),
+      tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
+      platform: 'telegram', requiredAuthorizationScopes: [{ type: 'platform', key: 'telegram' }],
+      acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
+      unitsReserved: 1, leaseExpiresAt: new Date(Date.now() + this.reservationLeaseMs),
+      windowStart: new Date(Date.now() - policy.windowSeconds * 1000), maxRequests: policy.maxRequests,
+      // A query embedding can consume model resources. An old key always
+      // identifies its saved delivery; a new semantic round needs a new key.
+      replayWindowMs: null,
+    })
+    if (reservation.kind === 'conflict') throw new AppError(409, 'idempotency_conflict', 'Idempotency-Key was used with a different request')
+    if (reservation.kind === 'in_progress') throw new AppError(409, 'request_in_progress', 'Request is in progress', { requestId: reservation.request.id })
+    if (reservation.kind === 'unknown') throw new AppError(409, 'request_outcome_unknown', 'Previous request outcome is unknown', { requestId: reservation.request.id })
+    if (reservation.kind === 'replay') return { status: reservation.request.responseStatus,
+      body: reservation.request.responseBody, requestId: reservation.request.id, replay: true }
+    const requestId = reservation.request.id
+    let commitAttempted = false
+    let executionStarted = false
+    try {
+      assert(this.telegramSemantic, 503, 'semantic_search_unavailable', 'Telegram semantic retrieval is not configured')
+      executionStarted = true
+      const data = await this.#telegramSemanticResponse(query)
+      const responseBody = { data, requestId }
+      commitAttempted = true
+      await this.store.commitRequest(requestId, { responseStatus: 200, responseBody,
+        unitsActual: Math.max(1, data.items.length), upstreamLatencyMs: data.meta.durationMs })
+      return { status: 200, body: responseBody, requestId, replay: false }
+    } catch (error) {
+      if (commitAttempted) await this.store.markRequestUnknown(requestId, 'usage_commit_ambiguous').catch(() => {})
+      else if (executionStarted && !['semantic_unavailable', 'retrieval_busy'].includes(error?.code)) {
+        // Model dispatch can already have happened when ES/PG/transport fails.
+        // Keep this identity unresolved rather than silently enabling another
+        // embedding attempt with the same key.
+        await this.store.markRequestUnknown(requestId, 'semantic_execution_unknown').catch(() => {})
+        throw new AppError(503, 'semantic_search_outcome_unknown',
+          'Semantic execution did not complete; check the original request before starting another query', { requestId })
+      }
+      else await this.store.releaseRequest(requestId, 'semantic_search_failed').catch(() => {})
+      throw error
+    }
+  }
+
   async storedSearch(context, { body, idempotencyKey, path }) {
     assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
     assert(
@@ -3366,7 +3446,7 @@ export class HubService {
     }
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     const reservation = await this.store.reserve({
       requestId,
       idempotencyKey,
@@ -3630,7 +3710,7 @@ export class HubService {
     }
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     const reservation = await this.store.reserve({
       requestId,
       idempotencyKey,
@@ -3794,7 +3874,7 @@ export class HubService {
       windowSeconds: Math.max(...policies.map(p => p.windowSeconds)), maxPageSize: Math.min(...policies.map(p => p.maxPageSize)) }
     const query = normalizeNewsQuery(body, { ...queryOptions, maxPageSize: policy.maxPageSize })
     const requestId = randomUUID()
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     const reservation = await this.store.reserve({ requestId, idempotencyKey: key,
       fingerprint: requestFingerprint({ method: id ? 'GET' : 'POST', path, body: { id, kind, filters: query.filters, cursor: body.cursor || null, platforms } }),
       tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
@@ -3856,7 +3936,7 @@ export class HubService {
     }
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     const reservation = await this.store.reserve({
       requestId,
       idempotencyKey: key,
@@ -4052,7 +4132,7 @@ export class HubService {
     const requestId = randomUUID()
     const startedAt = performance.now()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     const reservation = await this.store.reserve({
       requestId,
       idempotencyKey: `${capability || platform}-read:${requestId}`,
@@ -4445,7 +4525,7 @@ export class HubService {
       replayWindowMs: null,
     }
 
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     let reservation
     const existing = await this.store.getUsageRequestByIdempotencyKey(
       context.consumer.id,
@@ -4916,7 +4996,7 @@ export class HubService {
     })
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
-    await this.store.reapStaleReservations()
+    await requestMaintenance(this.store)
     const reservation = await this.store.reserve({
       requestId,
       idempotencyKey,

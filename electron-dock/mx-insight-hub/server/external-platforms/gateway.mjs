@@ -1,3 +1,4 @@
+import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
 import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { circuitOpenError, ecommerceCapacityError, upstreamCapacityError } from './availability-errors.mjs'
@@ -1029,10 +1030,15 @@ export class ExternalPlatformGateway {
     const request = previousRequest || normalizeFacebookSearch(normalized, codec, dataSearch)
     const rapid = this.providerKey === 'rapidapi'
     const providerRequest = request.forProvider(this.providerKey)
-    let admission = null, observationFailed = false
+    let admission = null, observationFailed = false, observationComplete = false
     const observe = async quota => {
-      if (observationFailed) return
-      try { await policyStore.observeRapid(admission, quota) }
+      if (observationFailed || observationComplete) return
+      try {
+        await policyStore.observeRapid(admission, quota)
+        // A completed observation already releases this admission token. Do
+        // not open another transaction from finally for the same receipt.
+        observationComplete = Boolean(admission?.token)
+      }
       catch {
         // The supplier receipt is already authoritative. A quota-store fault
         // must not erase it, retry a paid call, or release an uncertain lease.
@@ -1260,8 +1266,8 @@ export class ExternalPlatformGateway {
         `Idempotency-Key is required when deliveryMode is ${normalized.deliveryMode}`,
       )
     }
-    await this.usageStore.reapStaleReservations()
-    await this.platformStore.reapStaleCalls?.()
+    await requestMaintenance(this.usageStore)
+    await requestMaintenance(this.platformStore, 'reapStaleCalls')
 
     let validatedRetryOfRequestId = null
     if (retryOfRequestId != null) {
@@ -2121,11 +2127,16 @@ export class ExternalPlatformGateway {
       }
       throw error
     } finally {
+      // Upstream execution has ended. Let queued requests use provider
+      // capacity before optional database cleanup; none
+      // of these releases may start another paid dispatch for this request.
+      if (entered) this.#leave(context.consumer.id, entered)
       if (plan.cleanup) await plan.cleanup().catch(() => {})
       if (costReservation) {
         await this.platformStore.releaseProviderCostWorkflow({
           reservationId: costReservation.id,
           usageRequestId: activeRequestId,
+          bestEffortRelease: true,
         }).catch((error) => {
           this.logger?.warn?.(`[external-platform] cost reservation release failed: ${error.message}`)
         })
@@ -2136,11 +2147,11 @@ export class ExternalPlatformGateway {
           operation: plan.operation,
           fingerprint: requestFingerprint,
           ownerRequestId: activeRequestId,
+          bestEffortRelease: true,
         }).catch((error) => {
           this.logger?.warn?.(`[external-platform] dispatch lease release failed: ${error.message}`)
         })
       }
-      if (entered) this.#leave(context.consumer.id, entered)
     }
     } catch (error) {
       if (ownsReservation && durableRequestId) {

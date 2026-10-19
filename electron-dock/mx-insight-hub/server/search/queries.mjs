@@ -204,6 +204,12 @@ function literalSubstring(term) {
   return String(term).replace(/[\\%_]/g, '\\$&')
 }
 
+function assertCompleteElasticsearchSearch(response) {
+  if (response?.timed_out === true || response?._shards?.failed > 0) {
+    throw new ElasticsearchUnavailableError(new Error('Elasticsearch returned an incomplete search response'))
+  }
+}
+
 function boundedQueryAnalysis(metadata, tokens, {
   tokenCount = null,
   truncated = false,
@@ -869,6 +875,7 @@ export class SearchQueries {
           `/${encodeURIComponent(this.indexSet.readAlias)}/_pit?keep_alive=${SEARCH_PIT_KEEP_ALIVE}`,
         )
         pitId = opened?.id
+        assertCompleteElasticsearchSearch(opened)
         if (!pitId) throw new Error('Elasticsearch did not return a point-in-time id')
       }
       const publicationFilter = publicOpinionVisibilityFilter(publicOpinionVisibility)
@@ -925,6 +932,12 @@ export class SearchQueries {
         },
         _source: { excludes: ['titleHanlp', 'bodyHanlp', 'chatUsernameHanlp', 'tokens'] },
       })
+      // HTTP 200 can still contain timed-out or failed-shard results. Never
+      // turn an incomplete response into a successful empty page/continuation.
+      // Remember a renewed PIT before validation so first-page fallback can
+      // release the snapshot instead of abandoning it until its TTL expires.
+      pitId = response.pit_id ?? pitId
+      assertCompleteElasticsearchSearch(response)
       const hits = response.hits?.hits || []
       const total = response.hits?.total?.value ?? 0
       const pageHits = hits.slice(0, limit)
@@ -933,7 +946,7 @@ export class SearchQueries {
       const hasMore = normalizedOffset == null
         ? hits.length > limit
         : normalizedOffset + pageHits.length < total
-      const currentPitId = response.pit_id ?? pitId
+      const currentPitId = pitId
       // Offset pages do not hand the PIT back to the caller, so always close
       // their one-request snapshot instead of leaking it until the TTL.
       if (normalizedOffset != null || oneShot || !hasMore) await this.#closeSearchPit(currentPitId)
@@ -972,6 +985,9 @@ export class SearchQueries {
         }
         throw error
       }
+      // No cursor was issued for a failed first page. Caller-owned cursor PITs
+      // above remain open so a 503 can be retried without changing snapshots.
+      if (pitId) await this.#closeSearchPit(pitId)
       if (error instanceof ElasticsearchUnavailableError) {
         this.logger?.warn?.('[search] Elasticsearch unavailable; falling back to PostgreSQL content search')
         const result = await this.#searchContentPostgres(query, {

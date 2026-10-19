@@ -2742,6 +2742,97 @@ test('a worker that lost its lease cannot report another owner event as delivere
   assert.equal(finishedRun.values[1], 0, 'audit count reflects the fenced transition, not the ES response')
 })
 
+test('projector settles mixed bulk outcomes and releases only rate-limited events without exhausting attempts', async () => {
+  const good = canonicalRow()
+  const invalid = canonicalRow({ id: '22222222-2222-4222-8222-222222222222' })
+  const limited = canonicalRow({ id: '33333333-3333-4333-8333-333333333333', projection_revision: 7 })
+  const deleted = '44444444-4444-4444-8444-444444444444'
+  const events = [
+    { id: 30, aggregate_id: good.id, projection_revision: 3, attempts: 1 },
+    { id: 31, aggregate_id: invalid.id, projection_revision: 3, attempts: 5 },
+    { id: 32, aggregate_id: limited.id, projection_revision: 5, attempts: 5 },
+    { id: 33, aggregate_id: limited.id, projection_revision: 6, attempts: 5 },
+    { id: 34, aggregate_id: deleted, projection_revision: 8, attempts: 5 },
+  ]
+  const mutations = [], bulkBodies = []
+  let claims = 0
+  const pool = fakePool([
+    ["SET status = 'claimed'", () => ({ rows: claims++ === 0 ? events : events.slice(2) })],
+    ['FROM core.canonical_records record', () => ({ rows: claims === 1 ? [good, invalid, limited] : [limited] })],
+    ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: claims }] })],
+    ["SET status = 'delivered'", (values) => {
+      mutations.push(['delivered', ...values])
+      return { rowCount: values[0].length }
+    }],
+    ['SET status = $2', (values) => {
+      mutations.push(['failed', ...values])
+      return { rowCount: 1 }
+    }],
+    ['attempts = GREATEST', (values) => {
+      mutations.push(['released', ...values])
+      return { rowCount: values[0].length }
+    }],
+    ['UPDATE outbox.projection_runs', (values) => {
+      mutations.push(['finished', ...values])
+      return { rowCount: 1 }
+    }],
+  ])
+  const projector = new SearchProjector({
+    pool, segmenter, indexSet: contentIndex(), logger: { log() {}, warn() {}, error() {} },
+    client: { async bulk(operations) {
+      bulkBodies.push(operations)
+      return claims === 1 ? { errors: true, items: [
+        { index: { status: 200 } },
+        { index: { status: 400, error: { type: 'mapper_parsing_exception' } } },
+        { index: { status: 429, error: { type: 'es_rejected_execution_exception' } } },
+        { delete: { status: 429, error: { type: 'es_rejected_execution_exception' } } },
+      ] } : { errors: false, items: [
+        { index: { status: 200 } }, { delete: { status: 404 } },
+      ] }
+    } },
+  })
+
+  await assert.rejects(projector.projectBatch(), { code: 'projection_rate_limited', status: 429 })
+  assert.deepEqual(mutations.map(([kind]) => kind), ['delivered', 'failed', 'released', 'finished'])
+  assert.deepEqual(mutations[0], ['delivered', [30], projector.workerId])
+  assert.equal(mutations[1][1], 31)
+  assert.equal(mutations[1][2], 'dead', 'a real permanent failure retains its retry budget')
+  assert.deepEqual(mutations[2], ['released', [32, 33, 34], projector.workerId])
+  assert.deepEqual(mutations[3].slice(1, 4), [1, 1, 1])
+  const release = pool.queries.find(({ sql }) => sql.includes('attempts = GREATEST'))
+  assert.match(release.sql, /status = 'claimed'/)
+  assert.match(release.sql, /locked_by = \$2/)
+  assert.match(release.sql, /attempts - 1/)
+
+  assert.deepEqual(await projector.projectBatch(), { claimed: 3, delivered: 3, failed: 0 })
+  assert.deepEqual(mutations[4], ['delivered', [32, 33, 34], projector.workerId])
+  assert.equal(bulkBodies[1][0].index.version, 7, 'retry reads current canonical revision')
+  assert.equal(bulkBodies[1][0].index.version_type, 'external')
+  assert.equal(bulkBodies[1][2].delete.version, 8)
+  assert.equal(bulkBodies[1][2].delete.version_type, 'external_gte')
+})
+
+test('projector HTTP 429 returns the whole claim to pending for loop backoff', async () => {
+  const released = []
+  const pool = fakePool([
+    ["SET status = 'claimed'", () => ({
+      rows: [{ id: 35, aggregate_id: canonicalRow().id, projection_revision: 3, attempts: 5 }],
+    })],
+    ['FROM core.canonical_records record', () => ({ rows: [canonicalRow()] })],
+    ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
+    ['attempts = GREATEST', (values) => { released.push(values); return { rowCount: 1 } }],
+  ])
+  const failure = new ElasticsearchError(429, { error: { type: 'es_rejected_execution_exception' } })
+  const projector = new SearchProjector({
+    pool, segmenter, indexSet: contentIndex(), logger: { log() {}, warn() {}, error() {} },
+    client: { async bulk() { throw failure } },
+  })
+  await assert.rejects(projector.projectBatch(), (error) => error === failure)
+  assert.deepEqual(released, [[[35], projector.workerId]])
+  assert.equal(pool.queries.some(({ sql }) => sql.includes('SET status = $2')), false)
+  assert.equal(pool.queries.some(({ sql }) => sql.includes("SET status = 'delivered'")), false)
+})
+
 test('projector returns the whole batch when the cluster is unreachable', async () => {
   const { ElasticsearchUnavailableError } = await import('@qpjoy/mx-common/elasticsearch')
   const released = []

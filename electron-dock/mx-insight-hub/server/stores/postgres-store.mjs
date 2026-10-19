@@ -1,6 +1,7 @@
 import { quotaRecoverySql } from '../core/admission-recovery.mjs'
 import { createInternalTrafficPolicy, isInternalTraffic } from '../core/internal-traffic-policy.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
+import { normalizeRequestFailureDiagnostic, normalizeRequestFailureId } from '../core/request-failure-diagnostic.mjs'
 import { STRATEGY_DATA_CONNECTORS, STRATEGY_DATA_STREAMS } from '../data/strategy-search-data-statistics.mjs'
 import { ensurePostgresAdminExecution } from './admin-execution.mjs'
 import { assertPostgresKeyAccessLimits } from './key-access-limits.mjs'
@@ -3405,6 +3406,32 @@ export class PostgresStore {
     )
   }
 
+  async recordRequestFailure(requestId, diagnostic) {
+    const id = normalizeRequestFailureId(requestId)
+    const evidence = normalizeRequestFailureDiagnostic(diagnostic)
+    const client = await this.pool.connect()
+    let releaseError = null
+    try {
+      await client.query('BEGIN')
+      await client.query("SET LOCAL lock_timeout = '1s'")
+      await client.query("SET LOCAL statement_timeout = '3s'")
+      await client.query("SET LOCAL idle_in_transaction_session_timeout = '5s'")
+      const result = await client.query(
+        `INSERT INTO public.usage_request_failures (request_id, phase, sql_state, call_id, error_class)
+         VALUES ($1, $2, $3, $4, $5) ON CONFLICT (request_id) DO NOTHING RETURNING request_id`,
+        [id, evidence.phase, evidence.sqlState, evidence.callId, evidence.errorClass],
+      )
+      await client.query('COMMIT')
+      return { recorded: result.rows.length > 0 }
+    } catch (error) {
+      releaseError = error
+      await client.query('ROLLBACK').catch(rollbackError => { releaseError = rollbackError })
+      throw error
+    } finally {
+      client.release(releaseError)
+    }
+  }
+
   // Persist an upstream search result as authoritative Hub data.
   //
   // Ordering follows ADR-0006: the ingest run, raw source object, canonical
@@ -4160,7 +4187,7 @@ export class PostgresStore {
         unknown.cause = error
         throw unknown
       }
-      await client.query('ROLLBACK').catch(() => {})
+      await client.query('ROLLBACK').catch(error => { releaseError = error })
       throw error
     } finally {
       if (!sessionClient) client.release(releaseError)

@@ -1,4 +1,5 @@
 import { parseInternalTrafficPolicy } from './core/internal-traffic-policy.mjs'
+import { telegramSemanticInternalUrl } from './retrieval/telegram-semantic-proxy.mjs'
 import { loadCommonConfig } from '@qpjoy/mx-common'
 import { nightAllAConfig } from './external-platforms/night-all-a.mjs'
 import { AppError } from './core/errors.mjs'
@@ -15,6 +16,7 @@ import { parseServerFileRoots } from './ingest/external/server-files.mjs'
 import { parseExternalMediaConfig } from './external-media-config.mjs'
 import { reportingConfig } from './payments/reporting.mjs'
 import { parseNewsQueryTimeoutMs } from './data/news-config.mjs'
+import { dataAdmissionConfig } from './core/data-admission.mjs'
 
 export {
   parseExternalMediaConfig,
@@ -326,6 +328,8 @@ export function loadConfig(environment = process.env) {
   const externalMedia = listenerMode === 'admin'
     ? parseExternalMediaConfig({})
     : parseExternalMediaConfig(environment)
+  const ingestConcurrency = positiveInteger(environment.MX_INSIGHT_INGEST_WORKER_CONCURRENCY, 1, 'MX_INSIGHT_INGEST_WORKER_CONCURRENCY')
+  if (ingestConcurrency > 4) throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_INGEST_WORKER_CONCURRENCY must be between 1 and 4')
 
   return {
     common,
@@ -337,6 +341,7 @@ export function loadConfig(environment = process.env) {
     host: environment.MX_INSIGHT_HOST || '0.0.0.0',
     port: positiveInteger(environment.MX_INSIGHT_PORT, 18_180, 'MX_INSIGHT_PORT'),
     listenerMode,
+    telegramSemanticInternalUrl: telegramSemanticInternalUrl(environment),
     internalTraffic: parseInternalTrafficPolicy(environment),
     ipSearch: {
       enabled: environment.MX_INSIGHT_IPSEARCH_ENABLED === '1',
@@ -355,6 +360,14 @@ export function loadConfig(environment = process.env) {
     newsQueryTimeoutMs: parseNewsQueryTimeoutMs(environment.MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS),
     storeDriver,
     databaseUrl,
+    dataAdmission: dataAdmissionConfig(environment),
+    ingestWorker: {
+      concurrency: ingestConcurrency,
+      postBatchDelayMs: boundedNonNegativeInteger(environment.MX_INSIGHT_INGEST_WORKER_DELAY_MS, 100, 'MX_INSIGHT_INGEST_WORKER_DELAY_MS', 60000),
+    },
+    projectorWorker: {
+      postBatchDelayMs: boundedNonNegativeInteger(environment.MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS, 250, 'MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS', 60000),
+    },
     paymentReporting: listenerMode==='public' ? null : reportingConfig(environment),
     paymentDeliverySources: listenerMode==='public' ? '' : environment.MX_INSIGHT_PAYMENT_DELIVERY_SOURCES || '',
     nightAllA: nightAllAConfig(environment),

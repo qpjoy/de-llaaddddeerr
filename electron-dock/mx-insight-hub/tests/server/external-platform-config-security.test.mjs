@@ -331,7 +331,7 @@ test('JustOne defaults admit current consumer bursts while preserving a bounded 
   assert.equal(config.tikHub.searchMaxEnrichItems, 20)
   assert.equal(config.tikHub.searchEnrichConcurrency, 2)
   assert.equal(config.tikHub.maxConcurrency, 16)
-  assert.deepEqual(config.tikHub.concurrencyQueue, { maxWaitMs: 10000, maxPending: 32 })
+  assert.deepEqual(config.tikHub.concurrencyQueue, { maxWaitMs: 30000, maxPending: 256 })
   assert.deepEqual(config.tikHub.searchCanaryConsumerIds, [])
 })
 
@@ -349,6 +349,7 @@ test('concurrency queue settings are bounded and bad values disable only the opt
     assert.throws(() => preflightTikHubConfig(env), { code: 'invalid_configuration' })
     const config = loadConfig(env)
     assert.equal(config.tikHub.dispatchEnabled, false)
+    assert.deepEqual(config.tikHub.concurrencyQueue, { maxWaitMs: 30000, maxPending: 256 })
     const runtime = await createRuntime(config)
     try { assert.ok(runtime.identity); assert.ok(runtime.service) }
     finally { await closeRuntime(runtime) }

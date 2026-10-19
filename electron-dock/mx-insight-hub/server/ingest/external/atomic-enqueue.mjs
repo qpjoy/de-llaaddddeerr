@@ -49,7 +49,7 @@ export async function enqueueJobsAtomically(queue, jobs, errors = DEFAULT_ERRORS
       releaseError = error
       throw appError(errors.outcomeUnknown)
     }
-    await client.query('ROLLBACK').catch(() => {})
+    await client.query('ROLLBACK').catch(error => { releaseError = error })
     throw appError(errors.failed)
   } finally {
     client.release(releaseError)

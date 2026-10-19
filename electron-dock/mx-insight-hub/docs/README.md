@@ -35,6 +35,7 @@ those paths retire one operation at a time and are not the target architecture.
 
 - [数据产品下游交付入口](integrations/data-products-downstream.md)：产品选型、策略任务状态、公共调用规则与本次 Telegram 发布验收。
 - [Telegram 接口与关键词策略接入指南](integrations/telegram-downstream-guide.md)：可直接交付；来源与 ID、AND/OR/短语边界、游标、重试、上下文和增量消费。
+- [Telegram 空结果与向量覆盖核对](operations/telegram-search-2026-10-19.md)：本次回执、只读诊断、TG 语义搜索发布边界及向量覆盖证据。
 
 - [Hub 新闻与组织网站数据接口接入指南](integrations/organization-web-data-api.md)：下游可交付文档；新闻发现的授权、来源筛选、分页、详情、统计及 cURL 示例，明确 maidanglao 批次筛选和首页快照尚未开放，接口实现与线上验收分开。
 - [Web Search 当前实现与开通指南](integrations/web-search.md)：Hub 直连八家 HTTP 搜索、默认关闭、租户和 Key 范围与排序、逐供应商凭据/代理、迁移 119 与验收边界。

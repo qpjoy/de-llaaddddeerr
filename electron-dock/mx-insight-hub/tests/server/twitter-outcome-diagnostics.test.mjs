@@ -47,7 +47,10 @@ test('Twitter unknown diagnostic reports only supplied request metadata with pre
   const db = fixture(), result = await diagnoseTwitterOutcome(db.pool, requestId)
   assert.equal(result.errorCode, 'social_upstream_outcome_unknown')
   assert.equal(result.savedHttpStatus, 502)
-  assert.equal(result.diagnosticRevision, 'twitter-outcome-diagnostic.v3')
+  assert.equal(result.diagnosticRevision, 'twitter-outcome-diagnostic.v4')
+  assert.equal(result.failureDiagnostic.tablePresent, false)
+  assert.equal(result.failureDiagnostic.present, false)
+  assert.equal(result.failureDiagnostic.record, null)
   assert.deepEqual(result.searchProtocol.tables, { bindings: false, leases: false })
   assert.deepEqual(result.searchProtocol.bindings, [])
   assert.equal(result.legacyConnector.tablePresent, false)
@@ -90,6 +93,41 @@ test('historical missing archives stay unknown, lists are capped, and hostile fi
     codesTruncated: true, deadlineExceeded: null, elapsedMs: null, timeoutMs: null })
   assert.equal(projectTwitterTransportFailure(null), null)
   assert.equal(projectTwitterTransportFailure([]), null)
+})
+
+test('durable failure metadata is UUID scoped, safely projected, and never inferred when absent', async () => {
+  for (const state of ['saved', 'absent', 'hostile']) {
+    const base = fixture(), client = await base.pool.connect(), original = client.query
+    client.query = async (sql, args) => {
+      if (sql.includes('twitter-failure:table')) return { rows: [{ failures: true }] }
+      if (sql.includes('twitter-failure:record')) {
+        assert.deepEqual(args, [requestId])
+        assert.match(sql, /WHERE request_id = \$1::uuid/u)
+        assert.doesNotMatch(sql, /SELECT \*|response_body|raw_payload/u)
+        if (state === 'absent') return { rows: [] }
+        const row = { request_id: requestId, phase: 'commit_delivery', sql_state: '55P03',
+          call_id: null, error_class: 'Error', recorded_at: new Date('2026-10-19T00:00:00Z'), message: secret }
+        if (state === 'hostile') for (const key of Object.keys(row)) row[key] = secret
+        return { rows: [row] }
+      }
+      return original(sql, args)
+    }
+    const report = await diagnoseTwitterOutcome({ connect: async () => client }, requestId)
+    assert.equal(report.failureDiagnostic.tablePresent, true)
+    assert.equal(report.failureDiagnostic.present, state !== 'absent')
+    if (state === 'absent') assert.equal(report.failureDiagnostic.record, null)
+    if (state === 'saved') assert.deepEqual(report.failureDiagnostic.record, {
+      requestId, phase: 'commit_delivery', sqlState: '55P03', callId: null,
+      errorClass: 'Error', recordedAt: '2026-10-19T00:00:00.000Z',
+    })
+    if (state === 'hostile') assert.deepEqual(report.failureDiagnostic.record, {
+      requestId: null, phase: 'other', sqlState: null, callId: null, errorClass: 'other', recordedAt: null,
+    })
+    assert.doesNotMatch(JSON.stringify(report), /private-/u)
+    assert.equal(base.queries.at(-1).sql, 'ROLLBACK')
+  }
+  await assert.rejects(diagnoseTwitterOutcome(fixture({ fail: 'twitter-failure:table' }).pool, requestId),
+    { message: 'diagnostic_read_failed' })
 })
 
 test('wrong request scope and database failures stop safely and discard failed rollback connections', async () => {
@@ -264,6 +302,19 @@ test('legacy SQL finds exact historical Night-All attempts without assuming time
   }
   assert.equal((await db.query('SELECT status FROM usage_requests WHERE id=$1', [requestId])).rows[0].status, 'unknown')
   assert.equal((await db.query('SELECT count(*)::int n FROM serving.connector_calls')).rows[0].n, 2)
+  assert.equal((await read()).failureDiagnostic.tablePresent, false)
+  await db.exec(readFileSync(new URL('../../migrations/161_usage_request_failures.sql', import.meta.url), 'utf8'))
+  assert.equal((await read()).failureDiagnostic.present, false)
+  await db.query(`INSERT INTO public.usage_request_failures(request_id,phase,sql_state,call_id,error_class)
+    VALUES($1,'finish_step','40P01',$2,'Error'),($3,'commit_delivery',NULL,NULL,'TypeError')`, [requestId, callId, other])
+  const savedFailure = (await read()).failureDiagnostic
+  assert.equal(savedFailure.tablePresent, true); assert.equal(savedFailure.present, true)
+  assert.equal(savedFailure.record.requestId, requestId)
+  assert.equal(savedFailure.record.phase, 'finish_step'); assert.equal(savedFailure.record.sqlState, '40P01')
+  assert.equal(savedFailure.record.callId, callId); assert.equal(savedFailure.record.errorClass, 'Error')
+  assert.ok(savedFailure.record.recordedAt)
+  assert.equal((await db.query('SELECT count(*)::int n FROM public.usage_request_failures')).rows[0].n, 2)
+  assert.equal((await db.query('SELECT status FROM usage_requests WHERE id=$1', [requestId])).rows[0].status, 'unknown')
 })
 
 test('protocol diagnostic caps and projects hostile metadata without outputting scope or saved payloads', async () => {

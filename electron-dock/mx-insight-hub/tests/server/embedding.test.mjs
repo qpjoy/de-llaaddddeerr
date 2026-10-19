@@ -8,6 +8,7 @@ import { buildChunkDocument } from '../../server/embedding/document.mjs'
 import { EmbeddingPipeline, runEmbeddingLoop } from '../../server/embedding/pipeline.mjs'
 import { reciprocalRankFusion } from '../../server/search/queries.mjs'
 import { requireSegmenterBackend } from '../../server/search/reindex-integrity.mjs'
+import { RetrievalResourceGuard } from '../../server/retrieval/resource-guard.mjs'
 
 const quiet = { log() {}, warn() {}, error() {} }
 
@@ -476,7 +477,9 @@ test('a mixed transient Elasticsearch bulk acknowledges successes before backing
 
   await assert.rejects(
     () => pipeline.projectPending(),
-    (error) => error instanceof ElasticsearchUnavailableError,
+    (error) => error instanceof ElasticsearchUnavailableError
+      && error.cause?.status === 429
+      && new RetrievalResourceGuard().failed(error) === true,
   )
   assert.deepEqual(marked, [[['c1'], [3]]])
   assert.equal(
@@ -485,6 +488,34 @@ test('a mixed transient Elasticsearch bulk acknowledges successes before backing
     '429 is a shared transient failure and never spends the poison budget',
   )
 })
+
+for (const statuses of [[429, 429], [429, 500], [500, 429], [429, 503], [503, 429]]) {
+  test(`chunk bulk statuses ${statuses.join('/')} preserve rate-limit evidence without weakening mixed-failure retries`, async () => {
+    const pool = fakePool([
+      ['FROM core.record_chunks c', () => ({ rows: statuses.map((status, index) => ({
+        id: `c${index}`, record_id: `r${index}`, chunk_index: 0, content: 'text',
+        chunker_version: CHUNKER_VERSION, source_revision: 3, vector: [1],
+      })) })],
+    ])
+    const pipeline = new EmbeddingPipeline({
+      pool, agent: { embeddings: { available: true } },
+      segmenter: { segment: async (text) => [text] },
+      chunkIndexSet: { readAlias: 'mx-insight-hub-chunks', writeAlias: 'mx-insight-hub-chunk-v1' },
+      client: { async bulk() {
+        return { items: statuses.map((status) => ({ index: { status, error: { type: 'synthetic_rejection' } } })) }
+      } },
+      logger: quiet,
+    })
+    const guard = new RetrievalResourceGuard()
+    await assert.rejects(pipeline.projectPending(), (error) => {
+      assert.ok(error instanceof ElasticsearchUnavailableError)
+      assert.equal(guard.failed(error), statuses.every((status) => status === 429))
+      assert.equal(error.cause.status, statuses.find((status) => status !== 429) ?? 429)
+      return true
+    })
+    assert.equal(pool.client.queries.some(({ sql }) => sql.includes('SET projection_attempts')), false)
+  })
+}
 
 test('chunk projection durably budgets a permanent poison and still indexes healthy rows', async () => {
   let operations = null

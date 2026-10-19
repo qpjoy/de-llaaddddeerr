@@ -118,6 +118,10 @@ export class NightAllAdapter {
         httpStatus: response.status,
         rateLimit: nightAllRateLimitEvidence(response.headers) }
       if (!contentType.toLowerCase().includes('application/json')) {
+        // No parser will consume this body. Release its pooled connection even
+        // if an error page never finishes; cleanup cannot delay or change the
+        // original paid-call outcome.
+        void response.body?.cancel().catch(() => {})
         if (response.ok) {
           throw new UpstreamAmbiguousError(
             'Night-All returned an unusable successful response; outcome is unknown',

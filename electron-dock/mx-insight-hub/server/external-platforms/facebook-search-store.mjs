@@ -228,7 +228,7 @@ export async function commitFacebookFillDelivery(store,input) {
     await client.query('COMMIT')
   } catch(error) {
     if (committing) releaseError=error
-    else await client.query('ROLLBACK').catch(()=>{})
+    else await client.query('ROLLBACK').catch(error=>{releaseError=error})
     throw error
   } finally { client.release(releaseError) }
 }

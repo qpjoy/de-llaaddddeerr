@@ -8,8 +8,15 @@ import { MemoryExternalPlatformControlStore } from '../../server/external-platfo
 import { RapidApiAdapter } from '../../server/adapters/rapidapi.mjs'
 
 const secret='PRIVATE-query-cursor-authorization-sql-detail'
-async function fixture({ method, loggerThrows=false, wrapped=false, malicious=false, pageSize=1, pages=null }={}) {
+async function fixture({ method, loggerThrows=false, diagnosticWriteFails=false, wrapped=false, malicious=false, pageSize=1, pages=null }={}) {
   const usage=new MemoryStore(), pepper='twitter-failure-logging-offline-pepper'
+  let diagnosticWrites=0
+  const recordFailure=usage.recordRequestFailure.bind(usage)
+  usage.recordRequestFailure=async(...args)=>{
+    diagnosticWrites++
+    if(diagnosticWriteFails) throw new Error(secret)
+    return recordFailure(...args)
+  }
   const service=new HubService({store:usage,adapter:{},apiKeyPepper:pepper})
   const tenant=await service.createTenant({name:'Offline logging fixture'})
   const consumer=await service.createConsumer({tenantId:tenant.id,name:'Offline consumer'})
@@ -46,11 +53,11 @@ async function fixture({ method, loggerThrows=false, wrapped=false, malicious=fa
   const invoke=({cursor,idempotencyKey='same-offline-failure-key'}={})=>gateway.searchRaw(context,{
     body:{...body,...(cursor?{cursor}:{})},normalized:{platform:'twitter',query:secret,pageSize,...(cursor?{cursor}:{})},
     idempotencyKey,dataSearch:{resultType:'stable',replayWindowMs:null}})
-  return {usage,store,logs,invoke,calls:()=>calls}
+  return {usage,store,logs,invoke,calls:()=>calls,diagnosticWrites:()=>diagnosticWrites}
 }
 
 for(const [method,phase] of [['stageProviderEvidence','stage_evidence'],['finishProviderStep','finish_step'],['commitTwitterFillDelivery','commit_delivery']]) {
-  test(`Twitter ${phase} failure logs metadata once while preserving unknown, hold and no automatic retry`,async()=>{
+  test(`Twitter ${phase} failure persists and logs metadata once while preserving unknown, hold and no automatic retry`,async()=>{
     const f=await fixture({method,wrapped:method==='stageProviderEvidence'})
     await assert.rejects(f.invoke(),{code:'request_outcome_unknown'})
     const saved=[...f.usage.requests.values()][0]
@@ -62,9 +69,17 @@ for(const [method,phase] of [['stageProviderEvidence','stage_evidence'],['finish
     assert.equal(f.logs[0].record.requestId,saved.id)
     assert.deepEqual(Object.keys(f.logs[0].record).sort(),['callId','errorClass','event','phase','requestId','sqlState'])
     assert.doesNotMatch(JSON.stringify(f.logs),new RegExp(secret,'u'))
+    const diagnostic=f.usage.requestFailures.get(saved.id)
+    assert.equal(diagnostic.requestId,saved.id);assert.equal(diagnostic.phase,phase)
+    assert.equal(diagnostic.sqlState,'55P03');assert.equal(diagnostic.callId,f.logs[0].record.callId)
+    assert.equal(diagnostic.errorClass,f.logs[0].record.errorClass)
+    assert.ok(Number.isFinite(Date.parse(diagnostic.recordedAt)))
+    assert.doesNotMatch(JSON.stringify(diagnostic),new RegExp(secret,'u'))
     const held=structuredClone(f.usage.customerCharges.get(saved.id))
     await assert.rejects(f.invoke(),{code:'request_outcome_unknown'})
     assert.equal(f.calls(),1);assert.equal(f.logs.length,1)
+    assert.equal(f.diagnosticWrites(),1);assert.equal(f.usage.requestFailures.size,1)
+    assert.deepEqual(f.usage.requestFailures.get(saved.id),diagnostic)
     assert.deepEqual(f.usage.customerCharges.get(saved.id),held)
   })
 }
@@ -75,7 +90,24 @@ test('unrecognized exception properties and a throwing logger cannot change the 
   const saved=[...f.usage.requests.values()][0]
   assert.equal(saved.status,'unknown');assert.equal(f.usage.customerCharges.get(saved.id).status,'unknown')
   assert.equal(f.logs[0].record.errorClass,'Error');assert.equal(f.logs[0].record.sqlState,null)
+  const diagnostic=f.usage.requestFailures.get(saved.id)
+  assert.equal(diagnostic.errorClass,'Error');assert.equal(diagnostic.sqlState,null)
+  assert.equal(diagnostic.phase,'finish_step');assert.equal(f.diagnosticWrites(),1)
+  assert.doesNotMatch(JSON.stringify(diagnostic),new RegExp(secret,'u'))
   assert.equal(f.calls(),1);assert.doesNotMatch(JSON.stringify(f.logs),new RegExp(secret,'u'))
+})
+
+test('failed diagnostic persistence preserves the original failure, customer hold and same-key no-dispatch recovery',async()=>{
+  const f=await fixture({method:'commitTwitterFillDelivery',diagnosticWriteFails:true})
+  await assert.rejects(f.invoke(),{code:'request_outcome_unknown'})
+  const saved=[...f.usage.requests.values()][0], charge=structuredClone(f.usage.customerCharges.get(saved.id))
+  assert.equal(saved.status,'unknown');assert.equal(charge.status,'unknown')
+  assert.equal(saved.errorCode,'external_platform_persistence_unknown')
+  assert.equal(f.logs[0].record.phase,'commit_delivery');assert.equal(f.logs[0].record.sqlState,'55P03')
+  assert.equal(f.usage.requestFailures.size,0);assert.equal(f.diagnosticWrites(),1)
+  await assert.rejects(f.invoke(),{code:'request_outcome_unknown'})
+  assert.equal(f.calls(),1);assert.equal(f.diagnosticWrites(),1)
+  assert.deepEqual(f.usage.customerCharges.get(saved.id),charge)
 })
 
 test('successful Twitter delivery emits no new failure log and captures once',async()=>{
@@ -84,6 +116,7 @@ test('successful Twitter delivery emits no new failure log and captures once',as
   assert.equal(f.usage.customerCharges.get(result.requestId).status,'captured')
   const replay=await f.invoke()
   assert.equal(replay.requestId,result.requestId);assert.equal(f.calls(),1);assert.equal(f.logs.length,0)
+  assert.equal(f.diagnosticWrites(),0);assert.equal(f.usage.requestFailures.size,0)
 })
 
 for(const outcome of ['busy','error']) {

@@ -1212,10 +1212,11 @@ test('a duplicate dispatch-lease follower does not consume a provider concurrenc
   assert.equal(state.platformStore.calls.size, 2)
 })
 
-test('fresh cache delivery bypasses a saturated paid-provider concurrency gate', async () => {
+test('fresh and stored cache and exact replay bypass a saturated provider and full waiting queue', async t => {
   let calls = 0
   const state = await fixture({
-    gatewayConfig: config({ maxConcurrency: 1, maxConsumerConcurrency: 1 }),
+    gatewayConfig: config({ maxConcurrency: 1, maxConsumerConcurrency: 1,
+      concurrencyQueue: { maxWaitMs: 1000, maxPending: 1 } }),
     adapter: {
       async searchProducts(body, options) {
         calls += 1
@@ -1225,15 +1226,18 @@ test('fresh cache delivery bypasses a saturated paid-provider concurrency gate',
   })
   const path = '/api/v1/data/ecommerce/products/search'
   const cachedBody = { marketplace: 'jd', query: 'warm-cache' }
-  await state.gateway.search(state.context, {
+  const originalInput = {
     body: cachedBody,
     idempotencyKey: 'warm-cache-live-01',
     path,
-  })
+  }
+  const original = await state.gateway.search(state.context, originalInput)
+  const originalCharge = structuredClone(state.usageStore.customerCharges.get(original.requestId))
 
   let releaseProvider
   let resolveProviderStarted
   const providerGate = new Promise((resolve) => { releaseProvider = resolve })
+  t.after(() => releaseProvider())
   const providerStarted = new Promise((resolve) => { resolveProviderStarted = resolve })
   state.gateway.adapter = {
     async searchProducts(body, options) {
@@ -1249,6 +1253,18 @@ test('fresh cache delivery bypasses a saturated paid-provider concurrency gate',
     path,
   })
   await providerStarted
+  const pending = state.gateway.search(state.context, {
+    body: { marketplace: 'jd', query: 'wait-for-provider-slot', deliveryMode: 'refresh' },
+    idempotencyKey: 'provider-slot-waiter', path,
+  })
+  t.after(async () => { releaseProvider(); await Promise.allSettled([blocker, pending]) })
+  await waitForQueue(state.gateway)
+  await assert.rejects(state.gateway.search(state.context, {
+    body: { marketplace: 'jd', query: 'overflow-provider-slot', deliveryMode: 'refresh' },
+    idempotencyKey: 'provider-slot-overflow', path,
+  }), error => error.details?.reason === 'concurrency_queue_full')
+  const providerCalls = state.platformStore.calls.size
+  const costReservations = state.platformStore.costReservations.size
 
   const cached = await Promise.all(Array.from({ length: 32 }, (_, index) => (
     state.gateway.search(state.context, {
@@ -1260,9 +1276,27 @@ test('fresh cache delivery bypasses a saturated paid-provider concurrency gate',
   assert.equal(cached.every((entry) => entry.status === 200), true)
   assert.equal(cached.every((entry) => entry.sourceMode === 'fresh_cache'), true)
   assert.equal(calls, 2, 'cache egress does not create paid-provider calls')
+  assert.equal(state.platformStore.calls.size, providerCalls)
+  assert.equal(state.platformStore.costReservations.size, costReservations)
+
+  const chargeCount = state.usageStore.customerCharges.size
+  const replay = await state.gateway.search(state.context, originalInput)
+  assert.equal(replay.sourceMode, 'idempotent_replay')
+  assert.deepEqual(replay.body, original.body)
+  assert.equal(state.usageStore.customerCharges.size, chargeCount)
+  assert.deepEqual(state.usageStore.customerCharges.get(original.requestId), originalCharge)
+
+  for (const snapshot of state.platformStore.snapshots.values()) snapshot.freshUntil = new Date(Date.now() - 1000).toISOString()
+  const stored = await state.gateway.search(state.context, {
+    body: { ...cachedBody, deliveryMode: 'cache_only' }, idempotencyKey: 'busy-stored-cache', path,
+  })
+  assert.equal(stored.sourceMode, 'stored_fallback')
+  assert.equal(state.platformStore.calls.size, providerCalls)
+  assert.equal(state.platformStore.costReservations.size, costReservations)
+  assert.equal(state.gateway.concurrencyQueue.entries.length, 1)
 
   releaseProvider()
-  await blocker
+  await Promise.all([blocker, pending])
 })
 
 test('provider token exhaustion rejects before a second JustOne dispatch and preserves stored fallback', async () => {
@@ -2272,6 +2306,114 @@ async function queueFixture(overrides = {}) {
   return { ...state, calls, blocker, release }
 }
 
+test('completed paid delivery releases provider concurrency before best-effort database cleanup', async t => {
+  let enterCleanup, releaseCleanup
+  const enteredCleanup = new Promise(resolve => { enterCleanup = resolve })
+  const cleanupGate = new Promise(resolve => { releaseCleanup = resolve })
+  let upstreamCalls = 0
+  const state = await fixture({ gatewayConfig: config({ maxConcurrency: 1, maxConsumerConcurrency: 1 }),
+    adapter: { async searchProducts(body, options) {
+      upstreamCalls++
+      return successfulResult(body, options)
+    } } })
+  const cleanupInputs = []
+  const releaseCost = state.platformStore.releaseProviderCostWorkflow.bind(state.platformStore)
+  state.platformStore.releaseProviderCostWorkflow = async input => {
+    cleanupInputs.push(input)
+    if (cleanupInputs.length === 1) { enterCleanup(); await cleanupGate }
+    return releaseCost(input)
+  }
+  const first = state.gateway.search(state.context, queuedSearch('completed-before-cleanup'))
+  t.after(async () => { releaseCleanup(); await first })
+  await enteredCleanup
+  assert.equal([...state.usageStore.requests.values()][0].status, 'committed')
+  assert.equal(state.gateway.active, 0)
+  assert.equal(state.gateway.activeByConsumer.size, 0)
+  const second = await state.gateway.search(state.context, queuedSearch('next-during-cleanup'))
+  assert.equal(second.status, 200)
+  assert.equal(upstreamCalls, 2)
+  assert.equal(cleanupInputs.every(input => input.bestEffortRelease === true), true)
+  releaseCleanup()
+  assert.equal((await first).status, 200)
+})
+
+test('post-delivery cleanup faults preserve the committed response and exact idempotent replay', async () => {
+  let upstreamCalls = 0
+  const state = await fixture({ adapter: { async searchProducts(body, options) {
+    upstreamCalls++
+    return successfulResult(body, options)
+  } } })
+  const cleanupInputs = []
+  state.platformStore.releaseProviderCostWorkflow = async input => {
+    cleanupInputs.push(input)
+    throw Object.assign(new Error('synthetic cleanup pressure'), { code: '55P03' })
+  }
+  const releaseLease = state.platformStore.releaseDispatchLease.bind(state.platformStore)
+  state.platformStore.releaseDispatchLease = async input => {
+    // Capacity waits release unowned leases strictly before actual dispatch.
+    if (!input.bestEffortRelease) return releaseLease(input)
+    cleanupInputs.push(input)
+    throw Object.assign(new Error('synthetic cleanup pressure'), { code: '55P03' })
+  }
+  const input = queuedSearch('cleanup-pressure')
+  const live = await state.gateway.search(state.context, input)
+  assert.equal(live.status, 200)
+  const replay = await state.gateway.search(state.context, input)
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, live.body)
+  assert.equal(upstreamCalls, 1)
+  assert.equal(state.gateway.active, 0)
+  assert.equal(cleanupInputs.length, 2)
+  assert.equal(cleanupInputs.every(input => input.bestEffortRelease === true), true)
+  assert.equal([...state.platformStore.calls.values()][0].outcome, 'succeeded')
+  assert.equal([...state.usageStore.requests.values()][0].status, 'committed')
+})
+
+test('skipped post-delivery lease cleanup permits a new live-only intent after the first owner commits', async () => {
+  let upstreamCalls = 0
+  const state = await fixture({ adapter: { async searchProducts(body, options) {
+    upstreamCalls++
+    return successfulResult(body, options)
+  } } })
+  const releaseLease = state.platformStore.releaseDispatchLease.bind(state.platformStore)
+  state.platformStore.releaseDispatchLease = async input => input.bestEffortRelease ? false : releaseLease(input)
+  const input = { body: { marketplace: 'jd', query: 'same completed query', deliveryMode: 'live_only' },
+    path: '/api/v1/data/ecommerce/products/search', idempotencyKey: 'completed-lease-owner-01' }
+  const first = await state.gateway.search(state.context, input)
+  assert.equal(first.status, 200)
+  assert.equal(state.platformStore.leases.size, 1)
+  const second = await state.gateway.search(state.context, { ...input, idempotencyKey: 'completed-lease-owner-02' })
+  assert.equal(second.status, 200)
+  assert.equal(second.sourceMode, 'live')
+  assert.equal(upstreamCalls, 2)
+  assert.deepEqual((await state.gateway.search(state.context, input)).body, first.body)
+  assert.equal(upstreamCalls, 2)
+  assert.equal([...state.platformStore.calls.values()].every(call => call.outcome === 'succeeded'), true)
+})
+
+test('default provider queue retains more than 32 requests and dispatches them after an eleven-second burst', async t => {
+  t.mock.timers.enable({ apis: ['Date'] })
+  const state = await queueFixture({ concurrencyQueue: undefined })
+  const pending = Array.from({ length: 40 }, (_, index) => state.gateway.search(state.context, queuedSearch(`burst-${index}`)))
+  t.after(async () => { state.release(); await Promise.allSettled([state.blocker, ...pending]) })
+  await waitForQueue(state.gateway, 40)
+  assert.equal(state.platformStore.calls.size, 1)
+  assert.equal(state.platformStore.costReservations.size, 1)
+  assert.equal(state.platformStore.leases.size, 1)
+  const leases = new Map([...state.usageStore.requests.values()].map(row => [row.id, row.leaseExpiresAt]))
+
+  t.mock.timers.setTime(Date.now() + 11_000)
+  state.release()
+  const results = await Promise.all([state.blocker, ...pending])
+  assert.equal(results.every(result => result.status === 200), true)
+  assert.equal(state.calls.length, 41)
+  assert.equal(state.platformStore.calls.size, 41)
+  for (const request of state.usageStore.requests.values()) assert.equal(request.leaseExpiresAt, leases.get(request.id))
+  assert.equal(state.gateway.active, 0)
+  assert.equal(state.gateway.activeByConsumer.size, 0)
+  assert.equal(state.gateway.concurrencyQueue.entries.length, 0)
+})
+
 test('generic gateway queues saturation without holding dispatch leases or purchasing provider capacity', async () => {
   const state = await queueFixture()
   const pending = state.gateway.search(state.context, queuedSearch('next-query'))
@@ -2398,7 +2540,7 @@ test('queued request reacquires dispatch protection and preserves original reser
 })
 
 test('queue cannot spend the timeout and settlement time reserved by the original customer lease', async () => {
-  const state = await queueFixture()
+  const state = await queueFixture({ concurrencyQueue: undefined })
   state.gateway.reservationLeaseMs = state.gateway.config.timeoutMs + 1000
   const error = await state.gateway.search(state.context, queuedSearch('short-deadline')).catch(error => error)
   assert.equal(error.code, 'external_platform_busy')

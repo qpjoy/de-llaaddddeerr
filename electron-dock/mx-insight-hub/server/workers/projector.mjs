@@ -110,7 +110,11 @@ async function main() {
 
   logger.log(`[projector] draining outbox into ${search.indexSet.writeAlias}`)
   // Embedding is drained by the independently budgeted retrieval workload.
-  await runProjectorLoop(search.projector, { signal: controller.signal, logger })
+  await runProjectorLoop(search.projector, {
+    signal: controller.signal,
+    logger,
+    postBatchDelayMs: config.projectorWorker.postBatchDelayMs,
+  })
   await pool.end()
   logger.log('[projector] stopped')
 }

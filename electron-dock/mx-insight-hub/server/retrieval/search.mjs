@@ -103,6 +103,13 @@ export function searchFilters(q, { chunks = false } = {}) {
   const filters = []
   for (const key of ['platform', 'datasetId', 'objectType', 'contentType'])
     if (q[key]) filters.push({ term: { [key]: q[key] } })
+  // Internal callers may select a fixed family of datasets and an exact time
+  // window. The Admin SearchIntent remains strict and keeps its day filters.
+  if (q.datasetIds?.length) filters.push({ terms: { datasetId: q.datasetIds } })
+  if (q.fromTime || q.toTime) filters.push({ range: { eventTime: {
+    ...(q.fromTime ? { gte: q.fromTime } : {}),
+    ...(q.toTime ? { lte: q.toTime } : {}),
+  } } })
   if (q.tag) filters.push({ term: { tags: q.tag } })
   if (q.account)
     filters.push(
