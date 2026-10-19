@@ -11,7 +11,7 @@
 
 本地隔离 PostgreSQL 回归验证无 owner code/session 记录时超管可读取授权页面、新会话无须专属码，旧数据保持不变；跨企业、普通员工 owner 操作、停用成员/企业/身份继续拒绝。HTTP 会话保留完整权限，旧 challenge 与 owner-code 写接口返回404。员工登录、首次改密、退出及网关/Origin/CSRF 回归继续执行。自动化结果与生产浏览器验收分开记录；尚未发布复测，不代表全量验收通过。
 
-本地结果：Hub 企业与浏览器 SSO 路由24项通过（隔离 PostgreSQL，无跳过）；DataPort 全套94项通过，另将原先跳过的数据库会话迁移用例单独连接隔离库执行通过，共95项。Hub/DataPort 类型检查及生产构建通过。DataPort 构建资源为 main-D_79CX4G.js，Hub 主资源为 index-C-4dfTbJ.js。
+本地结果：Hub 企业与浏览器 SSO 路由24项通过（隔离 PostgreSQL，无跳过）；DataPort 全套94项通过，另将原先跳过的数据库会话迁移用例单独连接隔离库执行通过，共95项。Hub/DataPort 类型检查及生产构建通过。DataPort 构建资源为 main-D_79CX4G.js，Hub 主资源为 index-C4y2nu9o.js。
 
 ## 发布
 
@@ -20,7 +20,7 @@
 在服务器的 electron-dock/mx-insight-hub 中：
 
 ```bash
-MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 bash scripts/manage.sh ops internal-production deploy
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 bash scripts/manage.sh ops internal-production deploy
 ```
 
 Hub 发布并就绪后，在 electron-dock/mx-dataport 中：
