@@ -1,8 +1,8 @@
 # Internal Kubernetes 数据切换
 
-当前现场已回传 `candidate-ready`：172 个镜像引用、71 个 CRI 镜像、候选工作负载 0，根卷剩余 930,353,958,912 bytes。独立服务为 `mx-k8s-containerd.service`，socket 为 `/run/mx-k8s-containerd/containerd.sock`。**保留现有预备目录和归档，不重新导出或导入。下一步是 `cutover-check`。**
+当前现场已回传 `candidate-ready`：172 个镜像引用、71 个 CRI 镜像、候选工作负载 0，当时根卷剩余 930,353,958,912 bytes。独立服务为 `mx-k8s-containerd.service`，socket 为 `/run/mx-k8s-containerd/containerd.sock`。**保留现有预备目录和归档，不重新导出或导入。预检已通过，迁移尝试在配置备份阶段退出；当前下一步是同步修复并重跑 `prepare-check`。**
 
-本轮代码提供正式停写、复制、挂载与运行时切换事务；尚未在生产执行 `migrate`，也未完成真实用户验收。候选成功只证明镜像和 CRI 准备完成，不表示业务数据已经迁移。
+本轮代码提供正式停写、复制、挂载与运行时切换事务；现场正式事务为 `aborted / may_write=false`，尚未进入业务停写或完成迁移，也未完成真实用户验收。候选成功只证明镜像和 CRI 准备完成，不表示业务数据已经迁移。
 
 ## 维护前同步
 
@@ -74,6 +74,15 @@ bash mx-move/scripts/manage.sh k8s prepare-check
 ```bash
 find -P /etc/kubernetes -xdev ! -type f ! -type d -printf 'type=%y path=%p\n'
 ```
+
+现场仅发现两条链接，均位于已记录的早期认证修复备份：
+
+- `mx-kubelet-auth-repair.CeHaeh/pki.before/kubelet-client-current.pem`
+- `mx-kubelet-auth-repair.CeHaeh/old-clients/kubelet-client-current.pem`
+
+默认 `copytree` 会展开这些历史链接；目前尚未取得其目标是否存在的证据。新版只将这两条已核验路径按符号链接原文备份（即使目标已不存在），不解析或读取目标、不改动原链接，也不跳过历史目录。其余普通配置、证书和历史文件仍完整复制；活动配置或其他未知链接、特殊文件、非本机根卷及已发现的嵌套挂载会拒绝。复制前后复核源目录身份和挂载，并比较源与备份的链接原文；禁止访问 NAS 链接目标。沿用维护期间暂停其他发布/修复操作的要求，避免目录或挂载并发变化。
+
+同步 `k8s/cutover.py` 后先重跑上面的 `prepare-check`，贴回摘要；不要修改证书权限、删除旧修复备份或运行认证恢复脚本来绕过复制失败。此项修复及本地回归不代表服务器准备检查已经通过。
 
 **仅在已安排的维护窗口执行：**
 

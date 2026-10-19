@@ -3,6 +3,7 @@ import base64
 from contextlib import contextmanager, ExitStack
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import stat
@@ -33,6 +34,11 @@ class PrepareTests(unittest.TestCase):
             kubernetes = root / 'kubernetes-source'
             kubernetes.mkdir(mode=0o700)
             (kubernetes / 'admin.conf').write_bytes(b'private-kubeconfig-fixture')
+            links = {relative: 'missing-client.pem' for relative in cutover.KUBERNETES_BACKUP_LINKS}
+            for relative, target in links.items():
+                link = kubernetes / relative
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(target)
             payload = b'x' * 512
             snapshot = payload + hashlib.sha256(payload).digest()
             old_endpoint = b'containerRuntimeEndpoint: unix:///run/containerd/containerd.sock\n'
@@ -58,9 +64,10 @@ class PrepareTests(unittest.TestCase):
                 return True if str(path) in files else original_exists(path)
             def copyfile(source, destination, **kwargs):
                 return original_copyfile(source, destination, **kwargs)
-            def copytree(source, destination, **kwargs):
-                self.assertEqual(source, '/etc/kubernetes')
-                return original_copytree(str(kubernetes), destination, **kwargs)
+            def copytree(source, destination, *args, **kwargs):
+                self.assertTrue(os.fspath(source) == str(kubernetes) or
+                                os.fspath(source).startswith(str(kubernetes) + '/'))
+                return original_copytree(source, destination, *args, **kwargs)
             def ctl(*args):
                 self.assertEqual(args, ('snapshot', 'save', str(run / 'snapshot.db')))
                 (run / 'snapshot.db').write_bytes(snapshot)
@@ -71,10 +78,14 @@ class PrepareTests(unittest.TestCase):
                                         launcher_check=mock.Mock(return_value={'namespace': 'mx-internal-shadow'}))
             host.run = mock.Mock(return_value=b'')
             host.identities = mock.Mock()
+            host.storage = SimpleNamespace(no_children=mock.Mock(), host=SimpleNamespace(
+                mount=mock.Mock(return_value={'target': '/', 'fsroot': '/', 'uuid': cutover.ROOT_UUID})))
             data = {'run': str(run), 'kubelet_launch': {'fixture': True}, 'may_write': False,
                     'storage': {'entries': [{'logical': '/var/lib/kubelet'}, {'logical': '/var/lib/mx-launcher'}]}}
             stack.enter_context(mock.patch.object(Path, 'read_bytes', read))
             stack.enter_context(mock.patch.object(Path, 'exists', exists))
+            stack.enter_context(mock.patch.object(cutover, 'KUBERNETES_CONFIG', kubernetes))
+            stack.enter_context(mock.patch.object(cutover.storage_guard, 'path_info', return_value=kubernetes.lstat()))
             stack.enter_context(mock.patch.object(cutover.sys, 'executable', '/usr/bin/python3'))
             guards = stack.enter_context(mock.patch.object(cutover.candidate_guard, 'safe'))
             endpoint = stack.enter_context(mock.patch.object(cutover.endpoint_config, 'verify'))
@@ -83,7 +94,7 @@ class PrepareTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(cutover.prep, 'progress'))
             yield SimpleNamespace(host=host, data=data, run=run, files=files, snapshot=snapshot,
                                   copies=copies, trees=trees, guards=guards, endpoint=endpoint,
-                                  backend=backend, original_tool=original_tool)
+                                  backend=backend, original_tool=original_tool, kubernetes=kubernetes, links=links)
 
     def test_prepare_keeps_original_files_and_builds_private_backup_and_startup_intents(self):
         with self.fixture() as case:
@@ -94,6 +105,9 @@ class PrepareTests(unittest.TestCase):
             self.assertEqual((case.run / 'etcdctl').read_bytes(), b'fixture-etcdctl')
             self.assertEqual(stat.S_IMODE((case.run / 'etcdctl').stat().st_mode), 0o700)
             self.assertEqual((case.run / 'kubernetes.before/admin.conf').read_bytes(), b'private-kubeconfig-fixture')
+            for relative, target in case.links.items():
+                self.assertEqual(os.readlink(str(case.run / 'kubernetes.before' / relative)), target)
+                self.assertEqual(os.readlink(str(case.kubernetes / relative)), target)
             self.assertEqual(stat.S_IMODE((case.run / 'snapshot.db').stat().st_mode), 0o600)
             self.assertEqual(case.data['snapshot_sha256'], hashlib.sha256(case.snapshot[:-32]).hexdigest())
             self.assertEqual(case.host.etcd.etcdctl, str(case.run / 'etcdctl'))
@@ -152,7 +166,7 @@ class PrepareTests(unittest.TestCase):
 
     def test_partial_kubernetes_tree_failure_reports_no_source_paths_or_contents(self):
         with self.fixture() as case:
-            def fail_copy(source, destination):
+            def fail_copy(source, destination, **kwargs):
                 Path(destination).mkdir(mode=0o700)
                 raise shutil.Error([('/private-source', '/private-target', 'private-copy-error')])
             case.trees.side_effect = fail_copy
@@ -166,6 +180,22 @@ class PrepareTests(unittest.TestCase):
             self.assertFalse((case.run / 'snapshot.db').exists())
             case.host.etcd.ctl.assert_not_called()
             case.host.etcd.launcher_check.assert_not_called()
+
+    def test_unknown_config_link_stops_preparation_before_snapshot_or_service_changes(self):
+        with self.fixture() as case:
+            (case.kubernetes / 'admin.conf').unlink()
+            (case.kubernetes / 'admin.conf').symlink_to('/mnt/nas/private-fixture')
+            with self.assertRaisesRegex(cutover.prep.Refuse, '未核验的符号链接'):
+                case.host.prepare(case.data)
+            self.assertEqual(case.data['preparation_failure']['step'], 'kubernetes-backup')
+            self.assertEqual(case.data['preparation_failure']['reason'], 'guard_rejected')
+            case.trees.assert_not_called()
+            case.host.etcd.ctl.assert_not_called()
+            case.host.etcd.launcher_check.assert_not_called()
+            case.host.run.assert_not_called()
+            self.assertFalse(case.data['may_write'])
+            self.assertNotIn('blocked_record', case.data)
+            self.assertNotIn('snapshot_sha256', case.data)
 
     def test_snapshot_command_failure_keeps_backend_output_and_program_private(self):
         for kind, reason, code in [('exit', 'command_exit', 1), ('exec', 'command_unavailable', None),

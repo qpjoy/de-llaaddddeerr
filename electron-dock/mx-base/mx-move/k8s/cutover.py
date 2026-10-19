@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,12 @@ NODE = 'mx-internal-server'
 CLUSTER_UID = '399f2349-3a34-48f4-8105-d7bae56ca136'
 ROOT_UUID = 'ea7e456d-19db-4f6e-b8b0-02c00f59d066'
 SOURCE_UUID = '45fa3b72-5a59-4d3c-9a57-4f61aee13e5e'
+KUBERNETES_CONFIG = Path('/etc/kubernetes')
+# Confirmed historical repair artifacts, not the active kubelet credentials.
+KUBERNETES_BACKUP_LINKS = frozenset((
+    'mx-kubelet-auth-repair.CeHaeh/pki.before/kubelet-client-current.pem',
+    'mx-kubelet-auth-repair.CeHaeh/old-clients/kubelet-client-current.pem',
+))
 REPO = Path(__file__).resolve().parents[3]
 IDENTITY_HELPER = Path(__file__).with_name('storage-identities.mjs')
 IDENTITY_ACTIONS = ('check', 'prepare', 'update', 'restore', 'patches', 'restore-patches',
@@ -53,6 +60,31 @@ IDENTITY_ACTIONS = ('check', 'prepare', 'update', 'restore', 'patches', 'restore
 PREPARATION_STEPS = ('endpoint-check', 'identity-backup', 'config-backup', 'endpoint-plan',
                      'etcd-tool-backup', 'kubernetes-backup', 'etcd-snapshot-save',
                      'etcd-snapshot-verify', 'launcher-baseline', 'startup-plan', 'flush')
+
+
+def kubernetes_backup_links(root):
+    """Inspect the local tree without resolving historical certificate links."""
+    root = Path(root)
+    device = root.lstat().st_dev
+    links, pending = {}, [root]
+    while pending:
+        directory = pending.pop()
+        info = directory.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_dev == device,
+                'Kubernetes 配置备份目录类型或设备变化，拒绝复制')
+        for child in directory.iterdir():
+            info = child.lstat()
+            require(info.st_dev == device, 'Kubernetes 配置备份禁止跨文件系统')
+            if stat.S_ISLNK(info.st_mode):
+                relative = child.relative_to(root).as_posix()
+                require(relative in KUBERNETES_BACKUP_LINKS,
+                        'Kubernetes 配置含未核验的符号链接，拒绝复制（目标已隐藏）')
+                links[relative] = os.readlink(str(child))
+            elif stat.S_ISDIR(info.st_mode):
+                pending.append(child)
+            else:
+                require(stat.S_ISREG(info.st_mode), 'Kubernetes 配置含特殊文件，拒绝复制')
+    return links
 
 
 def kubernetes_copy_diagnostics(error):
@@ -433,6 +465,26 @@ class Host:
             raise prep.Refuse('迁移准备失败；preparation_diagnostics=' +
                               json.dumps(detail, ensure_ascii=True, separators=(',', ':'))) from None
 
+    def backup_kubernetes(self, destination):
+        def source_identity():
+            # Check mounts before walking: even a same-device bind could expose
+            # unrelated data. Never enter nested mounts or resolve link targets.
+            self.storage.no_children(KUBERNETES_CONFIG)
+            mount = self.storage.host.mount(KUBERNETES_CONFIG)
+            require(mount['target'] == '/' and mount['fsroot'] == '/' and mount['uuid'] == ROOT_UUID,
+                    'Kubernetes 配置备份源必须位于已核验的本机根卷')
+            return storage_guard.identity(storage_guard.path_info(KUBERNETES_CONFIG))
+
+        before = source_identity()
+        links = kubernetes_backup_links(KUBERNETES_CONFIG)
+        # Default copytree dereferences links, breaking historical repair copies
+        # and potentially reading external storage. Preserve only reviewed links.
+        shutil.copytree(str(KUBERNETES_CONFIG), str(destination), symlinks=True)
+        require(source_identity() == before, 'Kubernetes 配置备份源在复制期间改变')
+        require(kubernetes_backup_links(KUBERNETES_CONFIG) == links and
+                kubernetes_backup_links(destination) == links,
+                'Kubernetes 配置备份链接在复制期间改变；拒绝进入停写阶段')
+
     def _prepare(self, journal):
         run = Path(journal['run'])
         journal['preparation_step'] = 'endpoint-check'
@@ -465,7 +517,7 @@ class Host:
         (run / 'etcdctl').chmod(0o700)
         self.etcd.etcdctl = str(run / 'etcdctl')
         journal['preparation_step'] = 'kubernetes-backup'
-        shutil.copytree('/etc/kubernetes', str(run / 'kubernetes.before'))
+        self.backup_kubernetes(run / 'kubernetes.before')
         with prep.progress('保存并校验在线 etcd 快照和原用户配置基线'):
             journal['preparation_step'] = 'etcd-snapshot-save'
             self.etcd.ctl('snapshot', 'save', str(run / 'snapshot.db'))
