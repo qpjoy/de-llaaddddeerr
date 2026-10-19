@@ -96,6 +96,32 @@ def etcd_driver():
         sys.path.pop(0)
 
 
+def verify_product_runtime_entries(repo):
+    """Read product entry points without executing deployment scripts."""
+    for relative in ('mx-launcher/scripts/k8s-production-recovery.sh', 'mx-insight-hub/scripts/manage.sh',
+                     'mx-common/scripts/manage.sh', 'mx-rig/scripts/manage.sh',
+                     'mx-rig/scripts/build-proxy.sh', 'mx-base/mx-pay/scripts/runtime.mjs',
+                     'mx-base/mx-pay/scripts/build-proxy.sh'):
+        try:
+            body = (repo / relative).read_bytes()
+        except OSError:
+            raise prep.Refuse('无法读取产品运行时入口：' + relative) from None
+        supported = b'/etc/mx-k8s-runtime/active.json' in body
+        if relative == 'mx-rig/scripts/manage.sh':
+            # Rig shares the resolver with its sourced build-proxy module.
+            # Check the caller/provider pair instead of requiring a duplicate
+            # resolver path in manage.sh; the provider is checked below.
+            supported = supported and all(re.search(pattern, body, re.M) for pattern in (
+                rb'^[ \t]*source[ \t]+"\$\{ROOT_DIR\}/scripts/build-proxy\.sh"[ \t]*$',
+                rb'^[ \t]*address="\$\(rig_managed_runtime_value[ \t]+address\)"[ \t]+\|\|[ \t]+return[ \t]+1[ \t]*$'))
+            supported = supported and b'ctr --address "$address" -n k8s.io' in body
+        else:
+            supported = supported and b'/usr/local/lib/mx-k8s-runtime/resolve.py' in body
+        if relative == 'mx-rig/scripts/build-proxy.sh':
+            supported = supported and re.search(rb'^rig_managed_runtime_value\(\)[ \t]*\{', body, re.M)
+        require(supported, '产品运行时入口未同步完整适配：' + relative)
+
+
 class Host:
     def __init__(self):
         self.runtime = cutover_runtime.Runtime(self)
@@ -214,13 +240,7 @@ class Host:
         crictl_after = endpoint_config.rewrite_crictl(crictl_before)
         # Require all affected products' normal entry points before publishing
         # active.json. They remain inert while only candidate.json exists.
-        for relative in ('mx-launcher/scripts/k8s-production-recovery.sh', 'mx-insight-hub/scripts/manage.sh',
-                         'mx-common/scripts/manage.sh', 'mx-rig/scripts/manage.sh',
-                         'mx-rig/scripts/build-proxy.sh', 'mx-base/mx-pay/scripts/runtime.mjs',
-                         'mx-base/mx-pay/scripts/build-proxy.sh'):
-            body = (REPO / relative).read_bytes()
-            require(b'/etc/mx-k8s-runtime/active.json' in body and b'/usr/local/lib/mx-k8s-runtime/resolve.py' in body,
-                    '产品运行时入口未同步完整适配：' + relative)
+        verify_product_runtime_entries(REPO)
         require(Path('/usr/local/lib/mx-k8s-runtime/resolve.py').read_bytes() ==
                 Path(__file__).with_name('runtime_resolver.py').read_bytes(), '服务器解析器与本次工具版本不匹配')
         cluster = self.cluster.snapshot()

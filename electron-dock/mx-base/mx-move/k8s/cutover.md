@@ -35,6 +35,8 @@ bash mx-move/scripts/manage.sh k8s cutover-check
 
 若旧版工具在此时报 `systemctl returned an ambiguous kubelet configuration`，先同步 `k8s/endpoint_config.py` 的兼容修复，再重跑同一预检，无需重启服务、执行 `daemon-reload` 或重新导入镜像。[systemd v219](https://raw.githubusercontent.com/systemd/systemd/v219/src/systemctl/systemctl.c) 会将环境文件逐条输出为 `EnvironmentFile=…`，[v239](https://raw.githubusercontent.com/systemd/systemd/v239/src/systemctl/systemctl.c) 和 [v252](https://raw.githubusercontent.com/systemd/systemd/v252/src/systemctl/systemctl-show.c) 使用逐条 `EnvironmentFiles=…`；空数组可能完全省略该字段。解析器现按原顺序统一这些格式，仍拒绝重复路径、重复标量属性、多个启动命令和端点覆盖。
 
+若旧版工具报 `产品运行时入口未同步完整适配：mx-rig/scripts/manage.sh`，可能是预检未识别 Rig 的共用解析器：`manage.sh` 加载 `build-proxy.sh` 并调用其中的 `rig_managed_runtime_value`，解析器路径只定义在后者。先同步 `k8s/cutover.py` 的修复，再重跑同一预检；新版会核对调用入口与共用脚本，仍拒绝缺失或未适配的文件。此修复不需要重新部署 Rig、重启服务或重新导入镜像。
+
 **仅在已安排的维护窗口执行：**
 
 ```bash

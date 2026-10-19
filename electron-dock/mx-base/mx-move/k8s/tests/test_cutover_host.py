@@ -193,8 +193,65 @@ class MainDispatchTests(unittest.TestCase):
         execute.assert_called_once()
 
 
+class ProductRuntimeEntryTests(unittest.TestCase):
+    def test_repository_scripts_support_shared_rig_resolver(self):
+        manage = cutover.REPO / 'mx-rig/scripts/manage.sh'
+        self.assertNotIn(b'/usr/local/lib/mx-k8s-runtime/resolve.py', manage.read_bytes())
+        cutover.verify_product_runtime_entries(cutover.REPO)
+
+    def assert_incomplete(self, relative, old, new):
+        target = cutover.REPO / relative
+        original_read = Path.read_bytes
+        body = original_read(target)
+        self.assertIn(old, body)
+        changed = body.replace(old, new)
+        with mock.patch.object(Path, 'read_bytes',
+                               lambda path: changed if path == target else original_read(path)):
+            with self.assertRaisesRegex(cutover.prep.Refuse, '产品运行时入口未同步完整适配：' + relative):
+                cutover.verify_product_runtime_entries(cutover.REPO)
+
+    def test_rig_caller_requires_loaded_helper_and_explicit_endpoint(self):
+        for old, new in (
+                (b'source "${ROOT_DIR}/scripts/build-proxy.sh"',
+                 b'# source "${ROOT_DIR}/scripts/build-proxy.sh"'),
+                (b'address="$(rig_managed_runtime_value address)" || return 1',
+                 b'# address="$(rig_managed_runtime_value address)" || return 1'),
+                (b'ctr --address "$address" -n k8s.io', b'ctr -n k8s.io')):
+            with self.subTest(removed=old):
+                self.assert_incomplete('mx-rig/scripts/manage.sh', old, new)
+
+    def test_rig_provider_requires_resolver_and_helper_definition(self):
+        for old, new in (
+                (b'/usr/local/lib/mx-k8s-runtime/resolve.py', b'/legacy/resolve.py'),
+                (b'rig_managed_runtime_value() {', b'legacy_runtime_value() {'),
+                (b'/etc/mx-k8s-runtime/active.json', b'/legacy/active.json')):
+            with self.subTest(removed=old):
+                self.assert_incomplete('mx-rig/scripts/build-proxy.sh', old, new)
+
+    def test_missing_rig_provider_is_refused(self):
+        target = cutover.REPO / 'mx-rig/scripts/build-proxy.sh'
+        original_read = Path.read_bytes
+        def read(path):
+            if path == target:
+                raise FileNotFoundError(str(path))
+            return original_read(path)
+        with mock.patch.object(Path, 'read_bytes', read):
+            with self.assertRaisesRegex(cutover.prep.Refuse, '无法读取产品运行时入口：mx-rig/scripts/build-proxy.sh'):
+                cutover.verify_product_runtime_entries(cutover.REPO)
+
+
 class CandidatePreflightTests(unittest.TestCase):
     def fixture(self, stack, candidate_images=None, source_images=None):
+        # Use the actual product scripts: synthetic marker-only strings hid
+        # the Rig entry point's delegation to its sourced build-proxy helper.
+        product_sources = {path: path.read_bytes() for path in (
+            cutover.REPO / 'mx-launcher/scripts/k8s-production-recovery.sh',
+            cutover.REPO / 'mx-insight-hub/scripts/manage.sh',
+            cutover.REPO / 'mx-common/scripts/manage.sh',
+            cutover.REPO / 'mx-rig/scripts/manage.sh',
+            cutover.REPO / 'mx-rig/scripts/build-proxy.sh',
+            cutover.REPO / 'mx-base/mx-pay/scripts/runtime.mjs',
+            cutover.REPO / 'mx-base/mx-pay/scripts/build-proxy.sh')}
         host = host_without_initialization()
         host.cluster = mock.Mock()
         host.cluster.snapshot.return_value = {'objects': {'configmaps': [], 'nodes': [{'metadata': {}}]}}
@@ -221,7 +278,8 @@ class CandidatePreflightTests(unittest.TestCase):
         stack.enter_context(mock.patch.object(cutover.candidate_guard, 'verify', return_value=candidate))
         stack.enter_context(mock.patch.object(cutover.runtime_install, 'Host', return_value=inspector))
         stack.enter_context(mock.patch.object(cutover, 'private_json', side_effect=private))
-        stack.enter_context(mock.patch.object(cutover.Path, 'read_bytes', return_value=b'/etc/mx-k8s-runtime/active.json /usr/local/lib/mx-k8s-runtime/resolve.py'))
+        stack.enter_context(mock.patch.object(cutover.Path, 'read_bytes',
+                                             lambda path: product_sources.get(path, b'verified-installed-resolver')))
         stack.enter_context(mock.patch.object(cutover.prep, 'available', return_value=cutover.prep.RESERVE + 1))
         stack.enter_context(mock.patch.object(cutover.endpoint_config, 'snapshot', return_value={}))
         stack.enter_context(mock.patch.object(cutover.endpoint_config, 'rewrite_crictl', return_value=b'new-crictl'))
