@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -229,6 +229,57 @@ test('rejects identity symlinks and public files/directories', t => {
   assert.throws(() => prepare(f.options), /private and owned/);
   chmodSync(dirname(f.paths.payCheckpoint), 0o700); unlinkSync(f.paths.payCheckpoint); symlinkSync(f.paths.payHost, f.paths.payCheckpoint);
   assert.throws(() => prepare(f.options));
+});
+
+test('retains the existing common 0755 parent through check, migration and restore', t => {
+  const f = fixture(t), directory = dirname(f.paths.common);
+  chmodSync(directory, 0o755);
+  const original = Object.fromEntries(Object.entries(f.paths).map(([name, path]) => [name, readFileSync(path)]));
+  assert.equal(check(f.options).phase, 'identities-checked');
+  assert.equal(prepare(f.options).phase, 'identities-prepared');
+  assert.equal(reconcile({ ...f.options, observation: f.migrated }).phase, 'identities-updated');
+  assert.equal(lstatSync(directory).mode & 0o777, 0o755);
+  assert.equal(lstatSync(f.paths.common).mode & 0o777, 0o600);
+  assert.equal(lstatSync(f.paths.common).nlink, 1);
+  assert.equal(reconcile(f.options, true).phase, 'identities-restored');
+  for (const [name, path] of Object.entries(f.paths)) assert.deepEqual(readFileSync(path), original[name]);
+  assert.equal(lstatSync(directory).mode & 0o777, 0o755);
+});
+
+test('common parent still rejects group or other writers and symbolic links', t => {
+  const f = fixture(t), directory = dirname(f.paths.common);
+  for (const mode of [0o775, 0o757, 0o777]) {
+    chmodSync(directory, mode);
+    assert.throws(() => check(f.options), /mx-common identity directory must be owned/);
+  }
+  chmodSync(directory, 0o755);
+  const moved = `${directory}-original`;
+  renameSync(directory, moved); symlinkSync(moved, directory);
+  assert.throws(() => check(f.options), /mx-common identity directory must be owned/);
+});
+
+test('common receipt stays private, single-linked and non-symbolic under a 0755 parent', t => {
+  const f = fixture(t), file = f.paths.common;
+  chmodSync(dirname(file), 0o755); chmodSync(file, 0o644);
+  assert.throws(() => check(f.options), /private regular file/);
+  chmodSync(file, 0o600);
+  const alias = `${file}.alias`;
+  linkSync(file, alias);
+  assert.throws(() => check(f.options), /private regular file/);
+  unlinkSync(alias);
+  assert.equal(check(f.options).phase, 'identities-checked');
+  renameSync(file, alias); symlinkSync(alias, file);
+  assert.throws(() => check(f.options));
+});
+
+test('0755 allowance never applies to Launcher or Pay identity parents', t => {
+  const f = fixture(t);
+  for (const name of ['launcherHost', 'launcherLatest', 'payHost', 'payCheckpoint']) {
+    const directory = dirname(f.paths[name]);
+    chmodSync(directory, 0o755);
+    assert.throws(() => check(f.options), /private and owned/);
+    chmodSync(directory, 0o700);
+  }
 });
 
 test('patch builder never modifies replicas, commands, database IDs, credentials, PVCs or PVs', t => {

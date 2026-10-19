@@ -234,7 +234,14 @@ function context(options, requireRunDirectory = true) {
 
 function sourceFiles(ctx) {
   return Object.fromEntries(FILES.map(name => scoped('source-file', name, () => {
-    privateDirectory(dirname(ctx.paths[name]), ctx.ownerUid);
+    if (name === 'common') {
+      // mx-common also uses this parent for data directories. Its receipt
+      // writer preserves an existing 0755 parent; the receipt stays private.
+      // Production paths and all ancestors are checked by the CLI below.
+      const directory = lstatSync(dirname(ctx.paths[name]));
+      assert(directory.isDirectory() && !directory.isSymbolicLink() && directory.uid === ctx.ownerUid &&
+        !(directory.mode & 0o022), 'mx-common identity directory must be owned by the required user and not writable by group or others');
+    } else privateDirectory(dirname(ctx.paths[name]), ctx.ownerUid);
     return [name, readPrivate(ctx.paths[name], ctx.ownerUid)];
   })));
 }
