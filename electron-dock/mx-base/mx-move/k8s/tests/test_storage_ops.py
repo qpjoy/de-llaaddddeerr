@@ -115,7 +115,7 @@ class MountInventoryTests(unittest.TestCase):
         mounts = [mount('/var/lib/kubelet', SOURCE_UUID), mount('/run/example', ROOT_UUID)]
         rows = mounts + [dict(m, source='private-source', options='rw,password=private-value') for m in mounts]
         with self.assertRaises(ops.StorageError) as caught:
-            self.inspect(rows)
+            ops.check_mount_stacks(self.inspect(rows), paths=('/run/example',), trees=('/var/lib/kubelet',))
         message = str(caught.exception)
         self.assertTrue(message.startswith('stacked mounts are unsupported; duplicate_targets='))
         self.assertEqual(json.loads(message.split('duplicate_targets=', 1)[1]),
@@ -126,7 +126,7 @@ class MountInventoryTests(unittest.TestCase):
     def test_identical_rows_are_not_silently_deduplicated(self):
         item = mount('/var/lib/kubelet', SOURCE_UUID)
         with self.assertRaisesRegex(ops.StorageError, '"count":3'):
-            self.inspect([item, item, item])
+            ops.check_mount_stacks(self.inspect([item, item, item]), trees=('/var/lib/kubelet',))
 
 
 class FstabTests(unittest.TestCase):

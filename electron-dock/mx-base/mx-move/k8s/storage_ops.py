@@ -37,6 +37,27 @@ def within(path, parent):
     return path == parent or path.startswith(parent.rstrip('/') + '/')
 
 
+def check_mount_stacks(mounts, paths=(), trees=()):
+    """Reject stacks covering checked paths or anywhere in copied trees.
+
+    Protected Docker/NAS/etcd paths need unambiguous backing, not a recursive
+    audit of all their children. Keep unrelated rows intact, never deduplicate.
+    """
+    paths, trees = tuple(str(p) for p in paths), tuple(str(p) for p in trees)
+    require(paths or trees, 'mount stack check requires an explicit scope')
+    for path in paths + trees:
+        guard.canonical(path)
+    counts = {}
+    for mount in mounts:
+        target = mount['target']
+        counts[target] = counts.get(target, 0) + 1
+    duplicates = [{'target': target, 'count': count} for target, count in sorted(counts.items())
+                  if count > 1 and (any(within(path, target) for path in paths + trees) or
+                                    any(within(target, tree) for tree in trees))]
+    require(not duplicates, 'stacked mounts are unsupported; duplicate_targets=' +
+            json.dumps(duplicates, ensure_ascii=True, separators=(',', ':')))
+
+
 def backing(path, mount):
     require(within(path, mount['target']))
     return os.path.normpath(mount['fsroot'].rstrip('/') + '/' + path[len(mount['target']):].lstrip('/'))
@@ -167,14 +188,6 @@ class Host:
         require(isinstance(raw, dict) and isinstance(raw.get('filesystems'), list))
         mounts = raw['filesystems']
         require(all(isinstance(m, dict) and isinstance(m.get('target'), str) for m in mounts))
-        counts = {}
-        for mount in mounts:
-            counts[mount['target']] = counts.get(mount['target'], 0) + 1
-        duplicates = [{'target': path, 'count': count} for path, count in sorted(counts.items()) if count > 1]
-        # Do not collapse identical rows: a repeated mount can hide another
-        # layer. Report only locations/counts, never sources or mount options.
-        require(not duplicates, 'stacked mounts are unsupported; duplicate_targets=' +
-                json.dumps(duplicates, ensure_ascii=True, separators=(',', ':')))
         return mounts
 
     def identity(self, path):
@@ -202,6 +215,11 @@ class Host:
 class Storage:
     def __init__(self, host=None):
         self.host = host or Host()
+
+    def mounts(self, paths=(), trees=()):
+        mounts = self.host.mounts()
+        check_mount_stacks(mounts, paths=paths, trees=trees)
+        return mounts
 
     def verify_mount_units(self, raw):
         """Check persistent definitions, not show.What for an already active bind."""
@@ -246,7 +264,8 @@ class Storage:
             validate_mount_unit(unit_path.read_bytes(), logical, rows[logical][1][0])
 
     def no_children(self, path):
-        require(not any(m['target'] != path and within(m['target'], path) for m in self.host.mounts()),
+        path = str(path)
+        require(not any(m['target'] != path and within(m['target'], path) for m in self.mounts(trees=(path,))),
                 'unexpected nested storage mount')
 
     def snapshot(self, transaction, root_uuid, source_uuid, protected_paths=PROTECTED):
@@ -259,9 +278,12 @@ class Storage:
         raw = FSTAB.read_bytes()
         rows = parse_fstab(raw)
         self.verify_mount_units(raw)
-        mounts = self.host.mounts()
+        protected_paths = set(PROTECTED) | set(protected_paths)
+        trees = list(ROOTS.values()) + [guard.DATA_BASE + '/' + transaction]
+        trees += [fields[0] for number, fields in rows.values()]
+        mounts = self.mounts(paths=protected_paths | {'/', '/data'}, trees=trees)
         protected = []
-        for path in set(PROTECTED) | set(protected_paths):
+        for path in protected_paths:
             guard.canonical(path)
             if os.path.lexists(path):
                 candidates = [m for m in mounts if within(path, m['target'])]
@@ -275,6 +297,7 @@ class Storage:
             source_bind = current['target'] == logical
             require(source_bind == (key in ('kubelet', 'launcher')), 'unexpected original bind layout')
             source_path = '/data' + backing(logical, current)
+            check_mount_stacks(mounts, trees=(source_path,))
             require(source_path != '/data' and self.host.identity(source_path) == self.host.identity(logical))
             if source_bind:
                 require(logical in rows and rows[logical][1][0] == source_path,
@@ -316,25 +339,29 @@ class Storage:
 
     def unmount_kubelet_children(self, snapshot, assert_stopped):
         entry = next(e for e in snapshot['entries'] if e['key'] == 'kubelet')
+        trees = (entry['logical'], entry['source'], entry['target'])
+        check_mount_stacks(entry['kubelet_children'], trees=trees)
         expected = {m['target']: m for m in entry['kubelet_children']}
-        current = [m for m in self.host.mounts() if within(m['target'], entry['logical']) and m['target'] != entry['logical']]
+        current = [m for m in self.mounts(trees=trees) if within(m['target'], entry['logical']) and m['target'] != entry['logical']]
         for item in current:
             self.check_kubelet_child(item)
             require(item['target'] in expected and item == expected[item['target']], 'kubelet submount changed since planning')
         for item in sorted(current, key=lambda m: len(Path(m['target']).parts), reverse=True):
             assert_stopped()
             require(self.host.identity(entry['logical']) == entry['source_identity'])
-            live = [m for m in self.host.mounts() if m['target'] == item['target']]
+            live = [m for m in self.mounts(trees=trees) if m['target'] == item['target']]
             require(live == [item], 'kubelet submount changed before unmount')
             self.host.run(['umount', '--', item['target']])
         self.no_children(entry['logical'])
 
     def validate_source(self, entry):
+        self.mounts(trees=(entry['source'],))
         require(self.host.identity(entry['source']) == entry['source_identity'], 'original data directory changed')
         mount = self.host.mount(entry['source'])
         require(mount['uuid'] == entry['source_mount']['uuid'] and mount['target'] == '/data' and mount['fsroot'] == '/')
 
     def validate_target(self, entry, root_uuid):
+        self.mounts(trees=(entry['target'],))
         require(self.host.identity(entry['target']) == entry['target_identity'], 'target data directory changed')
         mount = self.host.mount(entry['target'])
         require(mount['target'] == '/' and mount['fsroot'] == '/' and mount['uuid'] == root_uuid)
@@ -346,6 +373,7 @@ class Storage:
         self.no_children(entry['source'])
         self.no_children(entry['logical'])
         parent, target = Path(entry['target']).parent, Path(entry['target'])
+        self.no_children(target)
         guard.path_info(parent)
         parent_mount = self.host.mount(parent)
         require(parent_mount['target'] == '/' and parent_mount['fsroot'] == '/' and parent_mount['uuid'] == entry['target_uuid'])
@@ -382,6 +410,7 @@ class Storage:
     def switch(self, entry, assert_stopped, root_uuid):
         assert_stopped()
         require(entry.get('copied') is True)
+        self.mounts(trees=(entry['logical'], entry['source'], entry['target']))
         self.validate_target(entry, root_uuid)
         self.no_children(entry['logical'])
         current = self.host.mount(entry['logical'])
@@ -411,6 +440,7 @@ class Storage:
     def restore(self, entry, assert_stopped, root_uuid):
         """Only before may_write; the orchestrator must forbid rollback afterwards."""
         assert_stopped()
+        self.mounts(trees=(entry['logical'], entry['source'], entry['target']))
         self.no_children(entry['logical'])
         current = self.host.mount(entry['logical'])
         if mount_identity(current) == entry['source_mount'] and self.host.identity(entry['logical']) == entry['source_identity']:
