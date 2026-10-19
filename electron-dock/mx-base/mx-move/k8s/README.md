@@ -1,6 +1,6 @@
 # Kubernetes 数据迁移：盘点、预备与正式切换
 
-这组命令将已盘点 Internal 的 Kubernetes 数据从 `/data` 迁到根逻辑卷，提供盘点、独立 containerd 预备，以及**维护窗口内的停写、冷复制、挂载/运行时切换和中断恢复**。用户已回传候选实例成功；正式业务切换尚未在生产执行。完整执行顺序见[正式切换说明](cutover.md)。
+这组命令将已盘点 Internal 的 Kubernetes 数据从 `/data` 迁到根逻辑卷，提供盘点、独立 containerd 预备，以及**维护窗口内的停写、冷复制、挂载/运行时切换和中断恢复**。用户已回传候选实例和备份准备检查成功；业务数据尚未切换。完整执行顺序见[正式切换说明](cutover.md)。
 
 | 命令 | 当前执行范围 |
 | --- | --- |
@@ -8,9 +8,11 @@
 | `prepare-runtime` | 写入根卷私有隔离配置和 K8s 镜像归档，不启动服务。 |
 | `install-runtime --prepared <目录>` | 复用成功归档，安装并启动独立候选服务，导入 `k8s.io` 镜像并核对 CRI；不切换 kubelet、复制数据库、改挂载、发布 active 描述或设置开机启用。 |
 | `cutover-check` | 正式迁移前核验当前主机、运行时、所有数据与身份，不停止业务。 |
+| `prepare-check` | 独立验证配置备份、在线 etcd 快照和原登录配置基线；不停止业务、不替换正式事务指针。 |
 | `migrate` | 维护窗口内停写、备份、冷复制五个数据根、切换挂载和 kubelet，再恢复原工作负载并验收。 |
 | `status` / `verify` | 分别只读最近事务、只读核验已提交的新副本。 |
 | `resume` | 提交前恢复原副本；提交后只继续恢复新副本。当前不提供 K8s `rollback`。 |
+| `resume --repair-rig-init` | 仅在已确认的停写后恢复故障中，受控补充 Rig 初始化容器权限，再恢复原业务。 |
 
 维护窗口已允许，但现有用户、密码、SSO 密钥和注册、网络配置必须保留。搬迁 Launcher 数据库和运行时会涉及服务中断，不能承诺窗口内登录、DNS 或联网持续可用。具体停启范围和执行命令须依据服务器报告确定，不能只从 `df` 和 `fstab` 推断全部数据位置。
 
@@ -20,13 +22,13 @@ Kubernetes 独占的业务目录和 kubelet 目录可保持逻辑路径，通过
 
 Launcher、Hub、mx-common、Pay、Rig 的镜像导入和相关修复入口已增加中性运行时解析适配；只有正式生效描述存在时才选择受验证的新实例。候选安装不创建该描述，所以普通发布继续使用原运行时。正式切换执行器在提交后发布该描述；不能重置集群或停用存储保护来绕过检查。
 
-用户已回传 `candidate-ready`：172 个镜像引用、71 个 CRI 镜像、工作负载 0，预备目录为 `/var/lib/mx-move/k8s-runtime-prep/mx-k8s-20261019-183524-ef985186`。同步[全部运行时适配文件](cutover.md#维护前同步)，保留原归档和服务器身份配置；下一步以 root 在 **`electron-dock/mx-base` 目录**执行：
+用户已回传 `candidate-ready`：172 个镜像引用、71 个 CRI 镜像、工作负载 0，预备目录为 `/var/lib/mx-move/k8s-runtime-prep/mx-k8s-20261019-183524-ef985186`。准备检查已通过；后续正式事务 `mx-k8s-20261020-045344-8a34e06b` 停写和 ES 快照校验完成，但恢复原业务时 Rig 初始化容器因缺少权限而失败，尚未复制或切换数据。保留原归档和服务器身份配置，按[受控恢复说明](cutover.md#rig-初始化失败时恢复原业务)同步修复；原迁移进程退出后，以 root 在 **`electron-dock/mx-base` 目录**执行：
 
 ```bash
-bash mx-move/scripts/manage.sh k8s cutover-check
+bash mx-move/scripts/manage.sh k8s resume --repair-rig-init
 ```
 
-若已进入 **`electron-dock/mx-base/mx-move` 目录**，只把入口改成 `bash scripts/manage.sh`。检查通过后，在维护窗口执行 `k8s migrate`，具体步骤、恢复和验收见[正式切换说明](cutover.md)。只贴终端摘要，不贴私有配置；不要重新导出/导入现有归档。
+若已进入 **`electron-dock/mx-base/mx-move` 目录**，只把入口改成 `bash scripts/manage.sh`。当前先恢复原业务，回传恢复摘要和最初迁移错误；具体步骤、恢复和验收见[正式切换说明](cutover.md)。只贴终端摘要，不贴私有配置；不要重新导出/导入现有归档。
 
 ## 执行只读检查
 
@@ -128,6 +130,6 @@ mx-common 旧 `migrate-storage` 会删除并重建 PV/PVC，不是本次整体�
 
 **新副本一旦可能写入，就不能直接挂回旧目录。**恢复应继续使用已提交的新副本；如需迁回原盘，应再次停写并把最新数据复制到原盘的新目录后切换。多个数据库可能形成不同时间点的业务状态，不能只因文件复制成功就宣布整体回滚安全。
 
-`install-runtime` 只启动无工作负载的候选运行时；本现场下一步是 `cutover-check`，维护窗口再执行 `migrate`。`resume` 按 `may_write` 决定恢复原副本或向前恢复；`verify` 只读核验新副本。开发机测试和检查通过不能替代生产迁移、整机重启或真实用户登录/联网验收；现有 etcd 的启动保护一直保留，不提供通用灾难恢复。
+`install-runtime` 只启动无工作负载的候选运行时；本现场当前先解除 Rig 初始化故障并恢复原业务，再核对迁移最初异常。`resume` 按 `may_write` 决定恢复原副本或向前恢复；`verify` 只读核验新副本。开发机测试和准备检查通过不能替代生产迁移、整机重启或真实用户登录/联网验收；现有 etcd 的启动保护一直保留，不提供通用灾难恢复。
 
 只读与脱敏回归测试：`python3 -B -m unittest discover -s k8s/tests -p 'test_*.py'`。技术依据：[Kubernetes 卷](https://kubernetes.io/docs/concepts/storage/volumes/)、[节点维护](https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/)、[containerd 容器生命周期](https://github.com/containerd/containerd/blob/main/docs/historical/design/lifecycle.md)。

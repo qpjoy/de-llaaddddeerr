@@ -28,6 +28,7 @@ import candidate_guard
 import cluster_ops
 import cutover_runtime
 import endpoint_config
+import rig_init_repair
 import runtime_install
 import runtime_prepare as prep
 import runtime_resolver
@@ -60,6 +61,66 @@ IDENTITY_ACTIONS = ('check', 'prepare', 'update', 'restore', 'patches', 'restore
 PREPARATION_STEPS = ('endpoint-check', 'identity-backup', 'config-backup', 'endpoint-plan',
                      'etcd-tool-backup', 'kubernetes-backup', 'etcd-snapshot-save',
                      'etcd-snapshot-verify', 'launcher-baseline', 'startup-plan', 'flush')
+FAILURE_PHASES = ('preparing', 'quiescing', 'blocking', 'stopping', 'copying',
+                  'switching', 'committed', 'services-restored', 'aborted', 'unknown')
+FAILURE_REASONS = ('interrupted', 'cluster_guard_rejected', 'guard_rejected',
+                   'command_timeout', 'command_exit', 'filesystem_error',
+                   'invalid_data_or_api', 'unexpected_error')
+FAILURE_MODULES = ('k8s/cutover.py', 'k8s/cluster_ops.py', 'k8s/cutover_runtime.py',
+                   'k8s/storage_ops.py', 'k8s/storage_guard.py', 'k8s/candidate_guard.py',
+                   'k8s/endpoint_config.py', 'k8s/runtime_prepare.py', 'k8s/runtime_install.py',
+                   'k8s/runtime_resolver.py', 'k8s/rig_init_repair.py', 'etcd/move.py')
+RECOVERY_STATUSES = ('restoring-original', 'restored', 'incomplete')
+
+
+def failure_diagnostic(error, phase):
+    """Describe a failure without exception messages, arguments or frame locals."""
+    reason, exit_code, number = 'unexpected_error', None, None
+    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+        reason = 'interrupted'
+    elif isinstance(error, (cluster_ops.ClusterError, rig_init_repair.Error)):
+        reason = 'cluster_guard_rejected'
+    elif isinstance(error, (prep.Refuse, candidate_guard.GuardError, storage_guard.StorageError,
+                            endpoint_config.EndpointError, runtime_resolver.Refuse)):
+        reason = 'guard_rejected'
+    elif isinstance(error, subprocess.TimeoutExpired):
+        reason = 'command_timeout'
+    elif isinstance(error, subprocess.CalledProcessError):
+        reason = 'command_exit'
+        exit_code = error.returncode if type(error.returncode) is int else None
+    elif isinstance(error, OSError):
+        reason = 'filesystem_error'
+        number = error.errno if type(error.errno) is int else None
+    elif isinstance(error, (ValueError, TypeError, KeyError, AttributeError)):
+        reason = 'invalid_data_or_api'
+    base = Path(__file__).resolve().parents[1]
+    sources = {str(base / module): module for module in FAILURE_MODULES}
+    locations, frame = [], error.__traceback__
+    while frame is not None:
+        module = sources.get(os.path.abspath(frame.tb_frame.f_code.co_filename))
+        if module:
+            locations.append({'module': module, 'line': frame.tb_lineno})
+        frame = frame.tb_next
+    return {'schema_version': 1, 'phase': phase if phase in FAILURE_PHASES else 'unknown',
+            'reason': reason, 'exit_code': exit_code, 'errno': number, 'locations': locations[-3:]}
+
+
+def public_failure_diagnostic(value):
+    """Validate the persisted diagnostic before exposing it through status."""
+    if (type(value) is not dict or set(value) !=
+            {'schema_version', 'phase', 'reason', 'exit_code', 'errno', 'locations'} or
+            type(value['schema_version']) is not int or value['schema_version'] != 1 or
+            value['phase'] not in FAILURE_PHASES or value['reason'] not in FAILURE_REASONS or
+            any(value[key] is not None and type(value[key]) is not int for key in ('exit_code', 'errno')) or
+            type(value['locations']) is not list or len(value['locations']) > 3):
+        return None
+    for location in value['locations']:
+        if (type(location) is not dict or set(location) != {'module', 'line'} or
+                location['module'] not in FAILURE_MODULES or
+                type(location['line']) is not int or not 1 <= location['line'] <= 100000):
+            return None
+    return {key: ([dict(item) for item in value[key]] if key == 'locations' else value[key])
+            for key in ('schema_version', 'phase', 'reason', 'exit_code', 'errno', 'locations')}
 
 
 def kubernetes_backup_links(root):
@@ -671,6 +732,25 @@ class Host:
                 self.runtime.tasks(cutover_runtime.OLD, 'moby') == journal['moby_before'], '旧运行时或 Docker task 集合变化')
         require(self.docker_snapshot() == journal['docker_before'], 'Docker 状态或挂载在维护窗口内发生变化')
 
+    def repair_rig_init(self, journal, persist):
+        require(journal['phase'] == 'quiescing' and journal['may_write'] is False,
+                'Rig 初始化修复仅用于停写阶段失败后恢复原副本')
+        state = journal['cluster'].get('state', {})
+        require(state.get('quiesced') is True and (state.get('es_snapshot') or {}).get('phase') == 'verified',
+                'Rig 初始化修复缺少已完成停写和快照的事务记录')
+        require(not os.path.lexists(str(DESCRIPTOR)) and not os.path.lexists(str(STORAGE_RECORD)) and
+                not os.path.lexists(str(DROPIN)), '已有切换配置，拒绝按原副本执行 Rig 初始化修复')
+        entry = next(e for e in journal['storage']['entries'] if e['key'] == 'rig')
+        require(entry['logical'] == storage_ops.ROOTS['rig'] and entry['source'] == entry['logical'] and
+                entry['source_mount']['uuid'] == SOURCE_UUID and not entry.get('copied') and
+                'target_identity' not in entry, 'Rig 数据已偏离本次未复制的原副本')
+        self.storage.validate_source(entry)
+        self.cluster.validate_cluster_baseline(journal['cluster'])
+        self.cluster.assert_workloads(journal['cluster'])
+        prep.stage('核验并修复 Rig 故障初始化容器；随后恢复原服务，不继续迁移')
+        with prep.progress('等待 Rig 故障副本正常退出并核验初始化权限修复'):
+            rig_init_repair.repair(self.cluster, journal['cluster'], lambda plan: persist())
+
     def abort(self, journal):
         require(not journal['may_write'], '新副本可能已写入，仅可向前恢复')
         if journal['phase'] not in ('preparing', 'quiescing'):
@@ -715,6 +795,51 @@ class Move:
         replace_file(self.path, raw, self.previous)
         self.previous = raw
 
+    @staticmethod
+    def recovery_stage(label):
+        # A closed terminal or failed log sink cannot prevent recovery or
+        # replace the original migration error.
+        try:
+            prep.stage(label)
+        except BaseException:
+            pass
+
+    def record_recovery(self, **values):
+        # Diagnostic persistence must never prevent restoration of old writers.
+        # In particular, do not alter phase: Host.abort uses that phase to decide
+        # whether mounts/configuration need restoring as well as the workloads.
+        try:
+            self.persist(**values)
+        except BaseException:
+            self.recovery_stage('恢复状态记录未能保存；继续恢复原服务，保留事务供后续核验')
+
+    def restore_original(self, failure=None):
+        values = {'recovery_status': 'restoring-original'}
+        if failure is not None:
+            values['failure_diagnostics'] = failure
+        self.recovery_stage('正在恢复原 Kubernetes 服务；等待数据库 Ready 后恢复应用')
+        self.record_recovery(**values)
+        try:
+            # Progress reporting is optional, including thread startup and
+            # context cleanup. Neither may skip abort or hide its exception.
+            progress = contextlib.ExitStack()
+            try:
+                progress.enter_context(prep.progress('恢复原 Kubernetes 服务并等待数据库 Ready'))
+            except BaseException:
+                pass
+            try:
+                self.host.abort(self.journal)
+            finally:
+                try:
+                    progress.close()
+                except BaseException:
+                    pass
+            self.persist('aborted', recovery_status='restored')
+        except BaseException as error:
+            self.record_recovery(recovery_status='incomplete',
+                                 recovery_diagnostics=failure_diagnostic(error, self.journal['phase']))
+            raise
+
     def execute(self, journal):
         self.journal = journal
         self.persist()
@@ -748,15 +873,20 @@ class Move:
             self.persist('committed', may_write=True)
             self.host.finish(journal, self.persist)
             self.persist('services-restored')
-        except BaseException:
+        except BaseException as error:
+            detail = failure_diagnostic(error, journal['phase'])
+            self.recovery_stage('迁移步骤失败；failure_diagnostics=' +
+                                json.dumps(detail, ensure_ascii=True, separators=(',', ':')))
             if not journal['may_write']:
                 try:
-                    self.host.abort(journal)
-                    self.persist('aborted')
+                    self.restore_original(detail)
                 except BaseException:
-                    prep.stage('自动恢复未完成；保留全部数据，请使用 k8s resume，不要手动挂回旧目录')
+                    self.recovery_stage('自动恢复未完成；保留全部数据，请使用 k8s resume，不要手动挂回旧目录')
             else:
-                prep.stage('新副本已提交；保留它作为权威数据，请使用 k8s resume，不要挂回旧目录')
+                # Do not persist diagnostics here. A failed commit write/fsync
+                # may have an unknown outcome; only resume may resolve it from
+                # the durable journal before choosing the recovery direction.
+                self.recovery_stage('新副本已提交；保留它作为权威数据，请使用 k8s resume，不要挂回旧目录')
             raise
 
     def resume(self):
@@ -766,8 +896,7 @@ class Move:
             self.host.finish(self.journal, self.persist)
             self.persist('services-restored')
         else:
-            self.host.abort(self.journal)
-            self.persist('aborted')
+            self.restore_original()
 
 
 @contextlib.contextmanager
@@ -802,6 +931,12 @@ def summary(journal):
             'user_login_and_network_validation': 'required', 'historical_data_deleted': False}
     if journal.get('preparation_step') in PREPARATION_STEPS:
         result['preparation_step'] = journal['preparation_step']
+    if journal.get('recovery_status') in RECOVERY_STATUSES:
+        result['recovery_status'] = journal['recovery_status']
+    for key in ('failure_diagnostics', 'recovery_diagnostics'):
+        detail = public_failure_diagnostic(journal.get(key))
+        if detail is not None:
+            result[key] = detail
     return result
 
 
@@ -822,7 +957,11 @@ def load_move(host):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='本机 Kubernetes 业务存储切换；仅维护窗口执行 migrate，Docker 数据不迁移')
     parser.add_argument('action', choices=('cutover-check', 'prepare-check', 'migrate', 'status', 'resume', 'verify'))
+    parser.add_argument('--repair-rig-init', action='store_true',
+                        help='仅用于 resume：受控修复已确认的 Rig 初始化权限故障，再恢复原服务')
     args = parser.parse_args(argv)
+    if args.repair_rig_init and args.action != 'resume':
+        parser.error('--repair-rig-init 只能与 resume 一起使用')
     require(sys.platform.startswith('linux') and os.geteuid() == 0, '请以 root 在 Internal Linux 主机执行')
     os.umask(0o077)
     host = Host()
@@ -837,6 +976,8 @@ def main(argv=None):
                 if args.action == 'verify':
                     host.verify(move.journal)
                 else:
+                    if args.repair_rig_init:
+                        host.repair_rig_init(move.journal, move.persist)
                     move.resume()
         print(json.dumps(summary(move.journal), ensure_ascii=False, indent=2))
         return
@@ -882,6 +1023,7 @@ if __name__ == '__main__':
     except BaseException as error:
         if isinstance(error, SystemExit):
             raise
-        known = (prep.Refuse, candidate_guard.GuardError, storage_guard.StorageError, cluster_ops.ClusterError, endpoint_config.EndpointError)
+        known = (prep.Refuse, candidate_guard.GuardError, storage_guard.StorageError, cluster_ops.ClusterError,
+                 endpoint_config.EndpointError, rig_init_repair.Error)
         prep.stage(str(error) if isinstance(error, known) else '迁移未完成；原始错误已隐藏。请运行 k8s status，按事务使用 k8s resume')
         sys.exit(1)

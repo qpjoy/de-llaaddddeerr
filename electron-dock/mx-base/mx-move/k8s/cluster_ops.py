@@ -10,6 +10,8 @@ import json
 import re
 import time
 
+import rig_init_repair
+
 
 class ClusterError(RuntimeError):
     pass
@@ -235,7 +237,8 @@ class Cluster:
             require(len(old_env) == 1 and workload_spec(original, old_env[0]) == workload_spec(obj, pay_mount_root),
                     'Pay workload changed outside the approved mount guard')
         else:
-            require(workload_spec(original) == workload_spec(obj), 'workload specification changed concurrently')
+            repaired = rig_init_repair.verify_workload(plan, original, obj)
+            require(repaired or workload_spec(original) == workload_spec(obj), 'workload specification changed concurrently')
         require(obj['spec'].get('replicas', 1) in (0, item['replicas']), 'workload replica count changed concurrently')
 
     def _scale(self, plan, item, count, persist, pay_mount_root=None):
@@ -386,6 +389,9 @@ class Cluster:
         self.wait_stopped(plan, plan['replicas'], timeout=0)
 
     def resume(self, plan, persist, pay_mount_root=None):
+        repair = plan.get('state', {}).get('rig_init_repair')
+        require(repair is None or isinstance(repair, dict) and repair.get('phase') == 'applied',
+                'Rig 初始化修复尚未完成，请重试 resume --repair-rig-init')
         self.assert_workloads(plan, pay_mount_root)
         for kind in ('statefulsets', 'deployments'):
             items = [i for i in plan['replicas'] if i['kind'] == kind]

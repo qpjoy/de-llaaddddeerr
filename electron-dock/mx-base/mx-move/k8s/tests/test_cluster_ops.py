@@ -179,6 +179,17 @@ class ClusterTests(unittest.TestCase):
                 else: target['spec']['template']['spec']['containers'][0]['image'] = 'different'
                 with self.assertRaises(ops.ClusterError): self.cluster.resume(plan, self.persist)
 
+    def test_incomplete_rig_repair_cannot_restart_original_init_template(self):
+        plan = self.cluster.snapshot()
+        self.cluster.quiesce(plan, self.persist)
+        self.host.calls.clear()
+        for record in ({'phase': 'intent'}, {}, 'invalid'):
+            with self.subTest(record=record):
+                plan['state']['rig_init_repair'] = record
+                with self.assertRaisesRegex(ops.ClusterError, 'resume --repair-rig-init'):
+                    self.cluster.resume(plan, self.persist)
+                self.assertFalse(self.host.calls)
+
     def test_api_cas_failure_retains_scale_intent(self):
         plan = self.cluster.snapshot(); self.host.patch_race = True
         with self.assertRaises(ops.ClusterError): self.cluster.quiesce(plan, self.persist)

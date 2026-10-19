@@ -1,8 +1,8 @@
 # Internal Kubernetes 数据切换
 
-当前现场已回传 `candidate-ready`：172 个镜像引用、71 个 CRI 镜像、候选工作负载 0，当时根卷剩余 930,353,958,912 bytes。独立服务为 `mx-k8s-containerd.service`，socket 为 `/run/mx-k8s-containerd/containerd.sock`。**保留现有预备目录和归档，不重新导出或导入。预检已通过，迁移尝试在配置备份阶段退出；当前下一步是同步修复并重跑 `prepare-check`。**
+当前现场已回传 `candidate-ready`：172 个镜像引用、71 个 CRI 镜像、候选工作负载 0。独立服务为 `mx-k8s-containerd.service`，socket 为 `/run/mx-k8s-containerd/containerd.sock`。**保留现有预备目录和归档，不重新导出或导入。配置备份检查已通过；随后正式迁移停写成功，但恢复原业务时 Rig PostgreSQL 初始化失败，当前先恢复业务，不重跑 `migrate`。**
 
-本轮代码提供正式停写、复制、挂载与运行时切换事务；现场正式事务为 `aborted / may_write=false`，尚未进入业务停写或完成迁移，也未完成真实用户验收。候选成功只证明镜像和 CRI 准备完成，不表示业务数据已经迁移。
+当前正式事务为 `mx-k8s-20261020-045344-8a34e06b`，最后回传 `phase=quiescing / may_write=false`、`es_snapshot_phase=verified / quiesced=true`；尚未进入冷复制或挂载切换。数据库 Pod 随后重新出现，Rig 卡在初始化，符合自动恢复原服务的路径；触发恢复的最初异常仍须核对原迁移终端。业务恢复和真实用户验收尚未完成。
 
 ## 维护前同步
 
@@ -82,7 +82,27 @@ find -P /etc/kubernetes -xdev ! -type f ! -type d -printf 'type=%y path=%p\n'
 
 默认 `copytree` 会展开这些历史链接；目前尚未取得其目标是否存在的证据。新版只将这两条已核验路径按符号链接原文备份（即使目标已不存在），不解析或读取目标、不改动原链接，也不跳过历史目录。其余普通配置、证书和历史文件仍完整复制；活动配置或其他未知链接、特殊文件、非本机根卷及已发现的嵌套挂载会拒绝。复制前后复核源目录身份和挂载，并比较源与备份的链接原文；禁止访问 NAS 链接目标。沿用维护期间暂停其他发布/修复操作的要求，避免目录或挂载并发变化。
 
-同步 `k8s/cutover.py` 后先重跑上面的 `prepare-check`，贴回摘要；不要修改证书权限、删除旧修复备份或运行认证恢复脚本来绕过复制失败。此项修复及本地回归不代表服务器准备检查已经通过。
+现场随后回传 `mx-k8s-20261020-045146-bf03602a`：`phase=preparation-checked`、`preparation_step=flush`、`execution_started=false`、`service_changes=false`。配置及历史链接备份、在线 etcd 快照校验和原登录配置基线检查已完成；预计复制 139,914,613,190 bytes，根卷可用 931,007,381,504 bytes，要求保留 107,374,182,400 bytes。`automatic_checks_passed=false` 在此阶段是正常值，迁移后的自动验收尚未执行。
+
+这次准备检查没有替换正式事务指针；之前正式事务仍为 `aborted`。下一次 `migrate` 将重新预检、生成新事务及备份，无需对成功的准备检查执行 `resume`，也无需传入它的事务目录。原认证文件、历史修复备份和当前业务保持原状；真实用户登录、联网及 Pay 验收仍须在切换恢复后完成。
+
+### Rig 初始化失败时恢复原业务
+
+后续现场确认 `mx-rig-postgres-0` 的主容器为 `PodInitializing`，`fix-permissions` 为 `CrashLoopBackOff`，报 `chown: /var/lib/postgresql/data/pgdata: Permission denied`。它执行已知递归 chown，但安全上下文只保留 `CHOWN`，缺少仓库清单已补充的 `DAC_OVERRIDE`。自动恢复先等所有数据库 Ready，再恢复应用；旧程序此处静默等待最长 1200 秒，磁盘上的 `phase=quiescing / quiesced=true` 不代表还在生成 ES 快照。
+
+先让原 `migrate` 进程结束并保留其最后错误。同步 `k8s/cutover.py`、`k8s/cluster_ops.py`、新增 `k8s/rig_init_repair.py`（入口帮助同步 `scripts/manage.sh`），再以 root 在 `mx-base` 目录执行：
+
+```bash
+bash mx-move/scripts/manage.sh k8s resume --repair-rig-init
+```
+
+该入口取得既有迁移锁，只允许已停写、快照已校验、尚未复制或切换的 `quiescing / may_write=false` 事务。它重新核验原 Rig 卷、集群身份和工作负载规格，把修复意图保存在独立字段，不修改原 `cluster.objects` 基线；仅接受既有 StatefulSet 的 `fix-permissions` 能力列表由 `[CHOWN]` 变成 `[CHOWN,DAC_OVERRIDE]`，其他字段仍逐项核对。模板已修复时不重复打补丁。不会运行 Rig deploy、数据库迁移或修改 Secret/PVC。
+
+现场另已确认更新策略为 `RollingUpdate / partition=0`，不能套用仓库当前的 `OnDelete` 假设。入口先核对故障 Pod 的归属、初始化失败及主 PostgreSQL 尚未启动，再持久化修复意图、正常缩容 Rig 到 0。确认控制器已观察到零副本、Pod 全部退出之后，才在零副本条件下补权限，然后交给原恢复流程还原副本数。整个过程保留现场 `RollingUpdate` 策略；若初始化期间意外恢复，缩容仍遵循正常终止流程，不强制杀库或删除 PVC。[StatefulSet 更新策略说明](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/)说明了直接修改运行中模板会触发滚动更新，因此这里先排空再修改。
+
+模板更新使用 UID、resourceVersion、原字段值和零副本的比较条件。对于原本为 `OnDelete` 的事务，则只对确认 PostgreSQL 从未启动的旧故障 Pod 发出带 UID/resourceVersion 前置条件的正常删除请求，由控制器重建，不强制删除或清理数据。中途失败保留明确修复记录，同一命令可重新核对结果后继续；未完成权限修复时，普通 `resume` 会提示继续使用 `resume --repair-rig-init`，不会直接启动旧模板。其他未知模板变化仍拒绝。
+
+随后恢复原数据库和应用，成功为 `phase=aborted / may_write=false / recovery_status=restored`，表示本次迁移已退出且原业务已恢复，并不表示数据迁移成功。验证原 MX-H2I 登录和联网、SSO 与 Pay；回传恢复摘要和最初迁移错误后再处理迁移阻断。新版恢复增加心跳及脱敏的 `failure_diagnostics / recovery_diagnostics`，诊断记录失败不会阻止原有恢复，提交后的恢复方向保持原规则。
 
 **仅在已安排的维护窗口执行：**
 
