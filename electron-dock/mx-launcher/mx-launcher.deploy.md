@@ -1,7 +1,8 @@
 # MX Launcher 生产部署与搬迁恢复记录
 
-更新：2026-09-21。适用于本次 `mx-internal-server` 单节点 Linux / kubeadm / containerd
-部署；路径和恢复目录来自此次服务器实测，不是其它机器的通用默认值。
+更新：2026-10-19，补充 etcd 独立盘迁移；业务库恢复记录保留自 2026-09-21。适用于
+`mx-internal-server` 单节点 Linux / kubeadm / containerd 部署；路径和恢复目录来自服务器实测，
+不是其它机器的通用默认值。
 
 **当前已切回最新业务库，原 Ops Token、飞书配置及恢复检查点已恢复，可以恢复正常 deploy
 流程。** 服务端检查已通过；员工原密码登录、飞书完整授权和 MX-H2I 原联网功能仍需要实际
@@ -32,8 +33,18 @@ MX Insight Hub 的数据平台部署另有入口。不要为修复 Launcher 顺�
 
 ## 2. 数据到底在哪：以这张表区分当前目录和旧副本
 
-本次实测 `/data` 位于 `/dev/nvme0n1p1`，文件系统 XFS。设备名在其它机器或硬件调整后可能改变，
-以后以 `findmnt` 的实际来源、UUID、挂载根和恢复检查点为准。
+本次实测 `/data` 位于 `/dev/nvme0n1p1`，文件系统 XFS。2026-10-19 的 `mx-move`
+迁移记录已为 `complete`，etcd 已迁到另一块物理盘 `/dev/nvme1n1` 上的根逻辑卷。
+设备名在其它机器或硬件调整后可能改变，以 `findmnt` 的实际来源、UUID、挂载根和恢复检查点为准。
+后续迁移或回滚时，`mx-base/mx-move` 中 `bash scripts/manage.sh etcd status` 的 `target`
+用于定位事务记录的目标；`status` 不是实时健康检查，仍须与实际挂载和服务检查对照，
+不直接复用本文的历史代次路径。
+
+2026-10-19 用户回传的实时只读验收确认：`/var/lib/etcd` 的挂载源为
+`cl-root[/var/lib/mx-move/etcd-data/mx-etcd-20261019-181949-157ad6a7]`，UUID 为
+`ea7e456d-19db-4f6e-b8b0-02c00f59d066`；启动保护检查通过，API `/readyz` 全部正常。
+Node `Ready=True`，`DiskPressure`、`MemoryPressure`、`PIDPressure`、`NetworkUnavailable`
+均为 `False`。这是当时的运行验收；尚未验证整机重启，也不等同真实用户登录和联网验收。
 
 | 用途 | 服务读取的入口 | 当前物理目录 / 状态 |
 | --- | --- | --- |
@@ -42,7 +53,8 @@ MX Insight Hub 的数据平台部署另有入口。不要为修复 Launcher 顺�
 | Internal SSH 文件 | `/var/lib/mx-launcher/k8s/internal-ssh` | `/data/k8s/mx-runtime/mx-launcher/k8s/internal-ssh` |
 | 发布文件 | `/var/lib/mx-launcher/k8s/release-artifacts` | `/data/k8s/mx-runtime/mx-launcher/k8s/release-artifacts` |
 | 站点配置与文件 | `/var/lib/mx-launcher/k8s/site-slots` | `/data/k8s/mx-runtime/mx-launcher/k8s/site-slots` |
-| **当前控制面 etcd** | `/var/lib/etcd` | **`/data/mx-runtime/etcd`，仍在使用** |
+| **当前控制面 etcd** | `/var/lib/etcd` | **`/var/lib/mx-move/etcd-data/mx-etcd-20261019-181949-157ad6a7`，根盘上的活动副本** |
+| 2026-10-19 迁移前的 etcd | 不再作为活动挂载源 | `/data/mx-runtime/etcd`，仅保留的历史副本，迁移后的写入不在这里 |
 | **当前 containerd** | `/var/lib/containerd` | **`/data/mx-runtime/containerd`，仍在使用** |
 | **当前 kubelet** | `/var/lib/kubelet` | **`/data/mx-runtime/kubelet`，仍在使用** |
 | Docker 镜像、容器、卷 | Docker data-root | `/data/docker`，仍在使用；不是此次 Launcher PGDATA 的存储入口 |
@@ -51,16 +63,16 @@ MX Insight Hub 的数据平台部署另有入口。不要为修复 Launcher 顺�
 | 一次性恢复备份 | 不作为业务服务挂载 | `/data/mx-recovery/confirmed-cutover.2VZC9C` |
 | 日常重启恢复检查点 | deploy 读取 | `/var/lib/mx-launcher-recovery`；含身份及私有凭据，**不等于数据库备份，也不应假定它已经放在 `/data` 上** |
 
-**两个目录前缀现在有意并存：Launcher 使用 `/data/k8s/mx-runtime/...`，当前集群的 etcd、
-containerd、kubelet 仍使用 `/data/mx-runtime/...`。不能删除整个 `/data/mx-runtime`，也不能
-把所有挂载批量替换成 `/data/k8s/mx-runtime`。**
+**存储位置现在有意分开：Launcher 使用 `/data/k8s/mx-runtime/...`，containerd、kubelet
+仍使用 `/data/mx-runtime/...`，etcd 活动副本使用根盘的 `/var/lib/mx-move/etcd-data/...`。
+不能删除整个 `/data/mx-runtime`，也不能把所有挂载批量替换成同一目录前缀。**
 
 当前 `/etc/fstab` 中相关 bind 关系应为下面这些来源和目标；这是核对表，不是让人重复追加条目：
 
 | 来源 | 目标 |
 | --- | --- |
 | `/data/k8s/mx-runtime/mx-launcher` | `/var/lib/mx-launcher` |
-| `/data/mx-runtime/etcd` | `/var/lib/etcd` |
+| `/var/lib/mx-move/etcd-data/mx-etcd-20261019-181949-157ad6a7` | `/var/lib/etcd` |
 | `/data/mx-runtime/containerd` | `/var/lib/containerd` |
 | `/data/mx-runtime/kubelet` | `/var/lib/kubelet` |
 
@@ -132,6 +144,15 @@ bash scripts/manage.sh ops internal-production deploy
 不写入 Internal 业务容器运行环境，不改变 MX-H2I 的 WireGuard、Hysteria、用户路由或飞书回调链路。
 BuildKit 两个参数用于控制构建缓存，不是数据库保留期限。
 
+etcd 迁移后，普通 `deploy` 继续使用 `/var/lib/etcd` 入口，不改回旧 bind/fstab，
+也不调用 `scripts/k8s.migrate.sh`。迁移工具已同步 Launcher 恢复检查点中的 etcd 挂载身份，
+其余挂载和凭据保留。不要手动重跑旧 `k8s.migrate.sh`：它会停止宿主运行时并绑定旧 `/data/mx-runtime/etcd`。
+
+上面的 hostname/IP 应与服务器当前配置一致。若 IP、证书或 kubelet 身份不一致，deploy
+可能进入既有控制面修复流程，重启 kubelet 和 etcd 等静态容器；仅搬迁 etcd 不需要更改这些值。
+迁移采用的 50 GiB 剩余空间门槛与 kubelet 磁盘压力判断独立，发布前仍要求 Node
+`DiskPressure=False`。BuildKit 的 `2GB` 保留参数不是根分区配额，也不能替代该检查。
+
 deploy 会核对当前挂载与检查点、启动未运行的宿主服务、处理已识别的节点/API/CNI/镜像问题，
 在应用前检查 PV/PVC 和凭据，给 PostgreSQL 保留已有数据启动保护，最后检查 API、网关和认证配置。
 当前已有恢复检查点，无需重跑一次性切库或认证恢复脚本来建立它。
@@ -149,6 +170,7 @@ set -euo pipefail
 export KUBECONFIG=/etc/kubernetes/admin.conf
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 
+bash scripts/manage.sh ops internal-production control-plane-preflight
 findmnt -T /data -o TARGET,SOURCE,FSTYPE,UUID,FSROOT
 for mx_path in /var/lib/mx-launcher /var/lib/etcd /var/lib/containerd /var/lib/kubelet; do
   findmnt -T "$mx_path" -o TARGET,SOURCE,FSTYPE,FSROOT
@@ -167,6 +189,8 @@ test "$(stat -Lc '%d:%i' "$mx_live")" = "$(stat -Lc '%d:%i' "$mx_expected")" || 
 stat -c '%a %U %n' /var/lib/mx-launcher-recovery \
   /var/lib/mx-launcher-recovery/host.json /var/lib/mx-launcher-recovery/latest.json
 kubectl --request-timeout=15s get nodes -o wide
+kubectl --request-timeout=15s get node mx-internal-server \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}'
 kubectl --request-timeout=15s -n mx-internal-shadow get pods,pvc -o wide
 kubectl --request-timeout=15s get pv mx-internal-postgres-local-pv
 kubectl --request-timeout=15s -n mx-internal-shadow get secret \

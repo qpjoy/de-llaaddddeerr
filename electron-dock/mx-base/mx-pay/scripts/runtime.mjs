@@ -251,7 +251,7 @@ export function discover() {
   const capabilities=get('configmap','mx-platform-runtime')?.data || {}
   const nodeList=JSON.parse(kube('get','nodes','-o','json')).items
   return {version:1,product:'mx-pay',driver:'k8s',context:process.env.MX_PAY_KUBE_CONTEXT,namespace:process.env.MX_PAY_NAMESPACE,
-    actions:['deploy','migrate','status','doctor','discover','backup','logs','start','stop','restart'],
+    actions:['deploy','migrate','status','doctor','discover','backup','logs','start','stop','restart','postgres-permissions-plan','postgres-permissions-apply'],
     readyWorkers:workers(nodeList).map(n=>n.metadata.name),readyReplicas:deployment?.status?.readyReplicas || 0,
     topology:installation.topologyMode || deployment ? {mode:installation.topologyMode || 'multi-node',node:installation.topologyNode || null} : null,
     serviceURL:installation.serviceURL || null,

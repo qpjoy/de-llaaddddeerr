@@ -131,6 +131,27 @@ SH
 
 仓库防复发修复：已保留的卷根目录不再由 deploy 重置 owner/mode；新生成的 PG 启动命令在挂载、安装标识、PG16、base 目录及 system identifier 校验全部成功后，由原非 root 用户对 `$PGDATA` 执行单目录 `chmod 00700`，失败即停止。保留 fsGroup 以维持 Secret 和卷访问。**已有 StatefulSet 不会被普通 deploy 改写，且使用 OnDelete；同步代码不会自动更新现有数据库 Pod 的命令。** 已有安装仍需单独核对并更新该 StatefulSet 的启动命令，在 Pay 维护窗口仅重建其 PG Pod 后验证；本次现场 chmod 与仓库修复不能当作该更新已上线的证据。
 
+2026-10-19 用户回传的字符串检查中，StatefulSet 和当前 `mx-pay-postgres-0` 均为 `pgdata_mode_guard=False`。这证明两者没有匹配到预期的 `chmod -- 00700` 字符串，不代表当前数据库损坏，也不能排除人工配置的其他权限处理方式。先核对完整命令和数据身份，再做模板修复。
+
+在 `mx-pay` 目录同步完整代码后，可用独立入口处理现有托管 PostgreSQL；这些动作不属于普通 deploy：
+
+```bash
+# 只读计划：核对原集群、数据库身份、OnDelete 和已知启动命令
+KUBECONFIG=/etc/kubernetes/admin.conf bash scripts/manage.sh postgres-permissions-plan
+
+# 计划通过后：持有 Pay 部署锁，备份原模板，仅补齐启动命令
+KUBECONFIG=/etc/kubernetes/admin.conf bash scripts/manage.sh postgres-permissions-apply
+
+# 复查模板与当前 Pod，分别报告修复是否已包含
+KUBECONFIG=/etc/kubernetes/admin.conf bash scripts/manage.sh postgres-permissions-plan
+```
+
+工具只接受能够核对身份的原安装、单副本 `OnDelete` StatefulSet，以及仓库已知的旧/新 PostgreSQL 启动命令。人工改写命令、未知入口、身份漂移或并发变化会停止；不会凭 `False` 泛化替换 shell 命令。修改前保留私有模板备份，使用带 UID/resourceVersion 前置条件的 JSON Patch，只更新 PostgreSQL 的 `command`，不执行 SQL 迁移、不改变镜像/PVC/密码，不修改正在使用的数据目录权限，也不删除或重启 Pod。
+
+预检还比较当前 Pod 与模板中的容器、存储、安全上下文及调度等关键配置。它不代替整份模板变更审查；维护窗口重建前仍应核对所有待生效差异，包括标签、注解和终止等待时间。
+
+**模板已修复不等于当前 Pod 已生效。** [Kubernetes 的 `OnDelete` 策略](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/#update-strategies)不会自动更新现有 Pod。正常预期是 `templateGuard=known-current`、`podGuard=known-legacy`、`podRecreationNeededForGuard=true`；用原字符串检查时即 StatefulSet 为 `True`、Pod 仍为 `False`，这不是补丁失败。同一个 Pod 内的容器重启也不会读取新的 StatefulSet 模板。后续在 Pay 维护窗口备份支付数据库、处理在途业务，再单独重建这个数据库 Pod，验证数据库身份、API/console 与支付业务。此次工具不执行这一步，不能据模板更新宣称重启风险已完全验收。模板备份不是订单数据库备份；需要业务备份时使用已有 `bash scripts/manage.sh backup`。
+
 Launcher 当前已有 local PV/磁盘身份与恢复凭据保护，mx-common 已有 PG system identifier、文件系统 UUID 与保留卷检查，Hub 遇到 mx-common 存储身份错误会停止部署。这些已有机制与 mx-pay 相互独立；本次不修改 H2I 登录、Launcher 身份或 Hub 租户数据。
 
 曾出现“重启后像切到了另一份备份”的情况，应先核对实际挂载、PV/PVC、数据库连接、PG 身份、关键记录最新时间和业务流水，保留所有候选数据，不能用部署命令自动择库。身份检查能阻止误指向与空库初始化，**不能证明同一实例的一份物理历史备份足够新**；正式恢复仍需确定恢复点、核对在途交易/总账/上游流水后才开放写入。当前仅完成代码检查和测试，未连接服务器确认上次事故原因，也未替现有数据做新旧裁决。
