@@ -160,9 +160,28 @@ kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=15s get node m
 | Pay | `KUBECONFIG=/etc/kubernetes/admin.conf bash scripts/manage.sh doctor` | 对集群只读，检查目标及资源状态；本地 `.deploy` 不存在时会创建空目录，不等同在线 PG 数据身份校验 |
 | Device | `bash scripts/manage.sh status` | 只读列出自己的 Compose 服务；Kubernetes 健康不代表 Docker 和 Device 已就绪 |
 
-Pay 另有一个既有重启风险：[2026-10-14 的记录](../mx-pay/README.md#重启持久化与存量系统)说明 PGDATA 权限曾变为 `2770`，仓库已在生成的 PG 启动命令中补充身份核验后的单目录 `chmod -- 00700`。2026-10-19 用户回传模板和当前 Pod 的该字符串检查均为 `False`，尚需核对完整命令以排除其他权限处理方式。普通 deploy 不更新既有 PG StatefulSet，且其策略是 `OnDelete`。Pay 的独立 `postgres-permissions-plan` / `postgres-permissions-apply` 用于核对身份后备份并只更新已知旧模板，不自动重启数据库；当前 Pod 仍需以后在 Pay 维护窗口重建并验收，不能因模板更新就认定该风险已经完全消除。本次 etcd 迁移不要求重建 PG 或修改权限。
+Pay 另有一个既有重启风险：[2026-10-14 的记录](../mx-pay/README.md#重启持久化与存量系统)说明 PGDATA 权限曾变为 `2770`，仓库已在生成的 PG 启动命令中补充身份核验后的单目录 `chmod -- 00700`。2026-10-19 用户最初回传模板和当前 Pod 的该字符串检查均为 `False`；随后运行独立修复入口，回传 `result=template-updated`、`templateGuard=known-current`、`podGuard=known-legacy`、`patchResponseConfirmed=true`、`originalPodStillPresent=true`。据此，模板已更新，原数据库 Pod 保持运行，尚未采用新启动命令。
 
-三个项目仍共享宿主机资源。`TMPDIR=/data/tmp` 只控制各自使用的临时文件，不改变 Docker/containerd 的 data-root 或业务数据库位置；Launcher 的 BuildKit 缓存保留参数不能视为这些项目也会执行的缓存限制。此次额外审查的离线部署测试共 105 项通过（DataPort 25、Pay 58、Device 22），未执行生产发布；各自真实业务可用性仍需线上验收。
+普通 Pay deploy 不更新既有 PG StatefulSet，且其策略是 `OnDelete`。`postgres-permissions-plan` / `postgres-permissions-apply` 用于核对身份后备份并只更新已知旧模板，不自动重启数据库；该备份仅为 StatefulSet 元数据，不是数据库备份。当前 Pod 仍需以后在 Pay 维护窗口备份数据库、核对待生效模板后重建并验收，不能因模板更新就认定该风险已经完全消除。本次 etcd 迁移不要求重建 PG 或修改权限。
+
+### 其他项目是否需要相同的 PostgreSQL 权限修复
+
+2026-10-19 对当前仓库启动链路的审查未发现其他已核对项目需要套用 Pay 的同类补丁，但发现 mx-rig Kubernetes 初始化容器有另一项重建权限风险。Pay 的旧启动命令在身份核验后直接执行 `postgres`，没有经过官方入口的目录权限处理；其他项目情况如下：
+
+| 项目 | PostgreSQL 启动链路 | 本次结论 |
+| --- | --- | --- |
+| Launcher / MX-H2I Internal | [恢复保护脚本](../../mx-launcher/scripts/k8s-postgres-recovery.mjs)先检查既有 PG16 数据，再调用 `docker-entrypoint.sh postgres`；基础清单也保留官方镜像入口 | 未发现同类缺口，不为此修改或重启登录数据库 |
+| mx-common（Hub、DataPort 使用） | [PG 清单](../../mx-common/deploy/k8s/common/10-postgres.yaml)先核验保留数据身份，再调用 `docker-entrypoint.sh postgres`；`pgvector/pgvector:pg16` 继承官方入口 | 未发现同类缺口；正常 Hub deploy 的 `mx-common ensure` 可能因模板差异滚动重启共享 PG，不用 deploy/ensure 代替只读检查 |
+| mx-device | [Compose 清单](../mx-device/compose.yaml)使用 `postgres:17-alpine` 默认入口，没有覆盖 PG 启动命令；部署保留已有 PG 容器 | 未发现同类缺口；该项目不经过 Kubernetes/etcd |
+| mx-rig | [Kubernetes 清单](../../mx-rig/deploy/k8s/internal/15-postgres.yaml)先由 init 容器处理所有者，PG 主容器保留默认入口；[Compose 清单](../../mx-rig/deploy/compose.yaml)也保留默认入口 | 无 Pay 同类缺口；Kubernetes init 对已有私有数据目录的遍历权限需要补足，见下文。Compose 不受该 init 问题影响 |
+
+[官方 PostgreSQL 入口](https://github.com/docker-library/postgres/blob/master/docker-entrypoint.sh)会在启动时执行 PGDATA 目录权限处理，包括已有数据库。因此，不能把业务清单中不含字面字符串 `chmod -- 00700` 当成缺少保护；权限处理在镜像内部。目录所有者不匹配、只读挂载等异常仍可能使权限处理失败。
+
+mx-rig 原 Kubernetes init 容器删除全部 capabilities 后仅保留 `CHOWN`，以 root 执行递归 `chown`。已有 PGDATA 通常为 `999:999`、`0700`，root 在缺少目录读取/搜索绕过能力时仍可能无法遍历它，导致 Pod 重建卡在 init 阶段；普通主容器重启不会重跑 init。[Linux capabilities 手册](https://man7.org/linux/man-pages/man7/capabilities.7.html)区分了修改所有者的 `CHOWN` 和绕过读取/搜索权限的能力。仓库已仅为该 init 增加 `DAC_OVERRIDE`，保留 PG 主容器限制和数据路径。Rig 未使用 Pay 的 `OnDelete` 策略，正常 deploy 会应用 PG 清单，模板变化可能自动滚动重建数据库 Pod；应用修复应在 Rig 数据库备份和维护窗口内进行，不把 deploy 当作只读检查。已退役的 mx-auto-server 清单也有相同 init 配置，若仍有遗留实例需单独核对，不能因已整合进 Rig 就认定实例已不存在。
+
+以上结论来自仓库和镜像入口源码审查，未验证其他项目线上 StatefulSet/Pod 是否与仓库一致，也不覆盖仍在运行的旧 Hub 独立数据库或已被 mx-rig 替代的旧服务实例。若核对线上配置，应只读检查实际镜像、启动命令、securityContext、卷类型及 PGDATA 所有者/权限，不通过重启试验。此次 Launcher 的 73 项恢复相关测试、mx-common 的 25 项存储预检测试、Rig 的 2 项管理流程测试通过；Rig 离线清单构建及结构差异检查通过，工作负载唯一变化为该 init 增加一项 capability。本地 Docker 未运行，未做真实 Linux 容器验证；离线测试不等同线上重启验收。
+
+这些项目仍共享宿主机资源。`TMPDIR=/data/tmp` 只控制各自使用的临时文件，不改变 Docker/containerd 的 data-root 或业务数据库位置；Launcher 的 BuildKit 缓存保留参数不能视为这些项目也会执行的缓存限制。此前部署兼容性审查的离线测试共 105 项通过（DataPort 25、Pay 58、Device 22），未执行生产发布；各自真实业务可用性仍需线上验收。
 
 ## 回滚使用最新数据
 

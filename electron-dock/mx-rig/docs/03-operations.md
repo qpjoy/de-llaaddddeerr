@@ -114,6 +114,10 @@ scripts/manage.sh stop          # 服务缩到 0；数据库、Secret、数据�
 
 `deploy` 已自动调用 `verify`，不需要另开终端或常驻 port-forward。每次部署验证都新建一个临时回环转发，完成或失败后清理，重复执行不会保留上次的转发。正常业务访问使用 NodePort 或 Launcher VIP 网关路由，不依赖这条临时转发；单独执行 `verify` 只是部署后复查。
 
+2026-10-19 PostgreSQL Pod 重建权限修复：已有 `PGDATA` 是 `999:999`、`0700`，旧 `fix-permissions` init 容器只保留 `CHOWN`，重新运行递归 `chown` 时可能无法进入该目录。清单仅为这个 init 容器补充 `DAC_OVERRIDE`；主 PostgreSQL 仍使用非 root 用户和官方入口，数据目录、镜像及凭据均保持原配置。Compose 不需要这项修复。
+
+这里的 StatefulSet 使用默认滚动更新，**已有集群仍用旧模板时，首次发布这份清单会更新数据库 Pod**，应先备份 Rig 数据库、核对待发布配置，在 Rig 维护窗口执行，不能按 Pay 的 `OnDelete` 模板补丁方式理解。此修复已做离线清单与管理流程检查；本地 Docker daemon 未运行，尚未完成 Linux 容器重建实测或线上验收。
+
 网页能打开，但登录提示 **“请求来源不允许”** 时，拒绝发生在密码验证之前。核对浏览器的协议、主机和端口是否匹配当前部署入口：
 
 ```bash
