@@ -228,6 +228,8 @@ async function main() {
       signal: controller.signal,
       logger,
       continuationDelayMs: externalPullPageDelayMs(payload?.sourceKey, config),
+      adaptiveDelayFactor: config.externalPull.adaptiveDelayFactor,
+      adaptiveDelayMaxMs: config.externalPull.adaptiveDelayMaxMs,
     })
   }
 

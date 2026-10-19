@@ -31,7 +31,8 @@ async function fixture() {
       unitCostMinorByEndpoint:{'twitter-aio.search':1}}},{runtime:{config,credentialConfigured:true}})
   const store=new MemoryExternalPlatformStore({usageStore:usage,providerKey:'rapidapi',authorizationPlatform:'twitter',circuitFailureThreshold:100})
   let reply=async()=>{throw new Error('synthetic ambiguous request')},calls=0,fallbackCalls=0
-  const adapter=new RapidApiAdapter({apiKey:'synthetic',timeoutMs:100,fetchImpl:async()=>{calls++;return Response.json(await reply())}})
+  const wires=[]
+  const adapter=new RapidApiAdapter({apiKey:'synthetic',timeoutMs:100,fetchImpl:async url=>{calls++;wires.push(new URL(url));return Response.json(await reply())}})
   const gateway=new ExternalPlatformGateway({usageStore:usage,platformStore:store,adapter,config,providerKey:'rapidapi',apiKeyPepper:pepper,
     operationControlStore:controls,reservationLeaseMs:120000,logger:{warn(){},error(){}}})
   service.twitterRetryStore=store
@@ -40,10 +41,44 @@ async function fixture() {
     apiKeyPepper:pepper,provider:'rapidapi'})
   const invoke=(idempotencyKey, retryOfRequestId, body=BODY, caller=context)=>service.search(caller,
     {path:'/api/v2/data/search',body,idempotencyKey,...(retryOfRequestId?{retryOfRequestId}:{})})
-  const original=async()=>{await assert.rejects(invoke('original-v2-unknown-key'),{code:'request_outcome_unknown'});
+  const original=async(body=BODY)=>{await assert.rejects(invoke('original-v2-unknown-key',undefined,body),{code:'request_outcome_unknown'});
     return [...usage.requests.values()].find(row=>row.idempotencyKey==='original-v2-unknown-key')}
-  return {usage,store,service,gateway,context,key,invoke,original,reply:value=>{reply=value},calls:()=>calls,fallbackCalls:()=>fallbackCalls}
+  return {usage,store,service,gateway,context,key,invoke,original,wires,reply:value=>{reply=value},calls:()=>calls,fallbackCalls:()=>fallbackCalls}
 }
+
+test('actual v2 router and gateway retain new implicit Latest and historical implicit Top on manual retry',async()=>{
+  for(const historical of [false,true]) {
+    const f=await fixture(),old=await f.original()
+    assert.deepEqual(old.acquisitionRequest.twitterSearchParameters,{category:'Latest',includeTimestamp:false})
+    if(historical) delete old.acquisitionRequest.twitterSearchParameters // pre-extension durable snapshot
+    const before=structuredClone(old)
+    f.reply(async()=>timeline([1,2]))
+    const first=await f.invoke(`preserved-sort-${historical}`,old.id)
+    assert.equal(f.wires[1].searchParams.get('category'),historical?'Top':'Latest')
+    assert.deepEqual(f.usage.requests.get(old.id),before)
+    const next=await f.invoke(`preserved-sort-next-${historical}`,undefined,{...BODY,cursor:first.body.data.pageInfo.nextCursor})
+    assert.deepEqual(next.body.data.items.map(row=>row.id),['2'])
+    assert.equal(f.calls(),2,'buffer continuation cannot buy another page')
+    assert.deepEqual((await f.invoke(`preserved-sort-${historical}`)).body,first.body)
+    assert.equal(f.calls(),2)
+  }
+})
+
+test('actual v2 retry keeps every Twitter override in protocol, fingerprint, dispatch and continuation',async()=>{
+  const f=await fixture(),params={category:'Videos',filters:'lang:zh',includeTimestamp:true},body={...BODY,params}
+  const old=await f.original(body),before=structuredClone(old)
+  f.reply(async()=>timeline([1,2]))
+  await assert.rejects(f.invoke('changed-options-retry',old.id,{...body,params:{...params,category:'Top'}}),{code:'uncertain_retry_not_allowed'})
+  assert.equal(f.calls(),1)
+  const first=await f.invoke('same-options-successor',old.id,body)
+  assert.deepEqual(Object.fromEntries(f.wires[1].searchParams),{count:'1',category:'Videos',filters:'lang:zh',includeTimestamp:'true'})
+  assert.deepEqual(f.usage.requests.get(old.id),before)
+  const next=await f.invoke('same-options-next-page',undefined,{...body,cursor:first.body.data.pageInfo.nextCursor})
+  assert.deepEqual(next.body.data.items.map(row=>row.id),['2'])
+  assert.equal(f.calls(),2)
+  assert.deepEqual((await f.invoke('same-options-successor',undefined,body)).body,first.body)
+  assert.equal(f.calls(),2)
+})
 
 test('explicit v2 retry preserves the full window and unknown hold, records one successor and continues its paid cursor',async()=>{
   const f=await fixture()

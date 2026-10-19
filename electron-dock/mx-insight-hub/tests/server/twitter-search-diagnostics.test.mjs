@@ -42,6 +42,20 @@ test('verified empty Twitter timeline is distinguished from missing or unusable 
   noSecrets(invalid)
 })
 
+test('saved effective options distinguish new Latest/overrides from historical implicit Top without printing filters', () => {
+  for (const [patch, category, includeTimestamp] of [
+    [{ twitterSearchParameters: { category: 'Latest', includeTimestamp: false } }, 'Latest', 'false'],
+    [{ body: { ...snapshot.body, params: { filters: 'private-filter' } } }, 'Latest', 'false'],
+    [{ body: { ...snapshot.body, params: { category: 'Videos', filters: 'private-filter', includeTimestamp: true } } }, 'Videos', 'true'],
+  ]) {
+    const result = inspectTwitterArchive(archive(timeline()), { ...snapshot, ...patch })
+    assert.equal(result.state, 'current_projection_accepts')
+    assert.equal(result.mapping.category, category)
+    assert.equal(result.mapping.includeTimestamp, includeTimestamp)
+    noSecrets(result)
+  }
+})
+
 test('standard search previews a whole oversized paid page without losing buffered posts or changing the archive', () => {
   const entries = Array.from({ length: 24 }, (_, index) => ({ content: { itemContent: {
     ...itemContent, tweet_results: { result: { ...tweet, rest_id: String(index + 1) } },

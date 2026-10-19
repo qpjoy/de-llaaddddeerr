@@ -95,6 +95,31 @@ test('v2 explicit retry preserves the exact original window, cursor, type and Ke
   ]) assert.equal(twitterRetryPreparationValid({ ...v2Preparation(), requestEvidence }, oldId), false)
 })
 
+test('v2 retry preserves explicit search parameters and validates them before obtaining a Key', async () => {
+  const withParams = params => {
+    const value = v2Preparation()
+    value.requestEvidence.request.body.params = params
+    return value
+  }
+  for (const params of [{}, { category: 'Top', filters: 'original-filter', includeTimestamp: false }, { category: 'Latest', includeTimestamp: true }]) {
+    const latest = withParams(params), f = setup({ latest, finalIntent: v2Intent('complete') })
+    assert.equal(twitterRetryPreparationValid(latest, oldId), true)
+    await prepareTwitterRetry(f.session, options, f.dependencies)
+    assert.deepEqual(f.calls.map(call => call[0]), ['prepare'])
+    await sendTwitterRetry(f.session, options, f.dependencies)
+    assert.deepEqual(f.calls.find(call => call[0] === 'post'), ['post', 'temporary-private-key', { ...v2Body, params }, idem, oldId, '/api/v2/data/search'])
+    assert.deepEqual(state(f.session).attempt.body.params, params)
+  }
+  for (const params of [null, [], { category: 'People' }, { category: 'latest' }, { count: 20 }, { cursor: 'native' },
+    { filters: 'x'.repeat(2049) }, { filters: '\0' }, { includeTimestamp: 'false' }]) {
+    const latest = withParams(params), f = setup({ latest })
+    assert.equal(twitterRetryPreparationValid(latest, oldId), false)
+    await prepareTwitterRetry(f.session, options, f.dependencies)
+    await sendTwitterRetry(f.session, options, f.dependencies)
+    assert.deepEqual(f.calls.map(call => call[0]), ['prepare'], 'invalid parameter evidence cannot obtain credentials or dispatch')
+  }
+})
+
 test('v2 registered intent survives a lost response and reload before any successor usage exists', async () => {
   const f = setup({ latest: v2Preparation(), postError: new TypeError('lost response'), finalStatus: null })
   await prepareTwitterRetry(f.session, options, f.dependencies)

@@ -83,13 +83,13 @@ test('Twitter search encodes query data into one path segment without changing t
   }
 })
 
-test('new standard fresh and stable searches compile Boolean AND with the same encoding and existing Top parameters', async () => {
+test('new standard fresh and stable searches compile Boolean AND with the same encoding and default Latest parameters', async () => {
   const seen = []
   const adapter = new RapidApiAdapter({ apiKey: 'synthetic-offline-provider-key', fetchImpl: async url => {
     seen.push(url.href)
     assert.equal(url.pathname, STANDARD_PATH)
     assert.equal(url.hash, '')
-    assert.deepEqual(Object.fromEntries(url.searchParams), { count: '20', category: 'Top', includeTimestamp: 'false' })
+    assert.deepEqual(Object.fromEntries(url.searchParams), { count: '20', category: 'Latest', includeTimestamp: 'false' })
     return Response.json({ entries: [] })
   } })
   for (const type of ['fresh', 'stable']) {
@@ -140,7 +140,10 @@ test('frozen mxec2, mxraw1 and mxds1 continuations still bind the original query
   }
   assert.equal(continuedSocial.queryHash, LEGACY.social.queryHash)
   assert.equal(continuedRaw.scopeHash, LEGACY.raw.scope)
-  for (const request of continuedData) assert.equal(request.scopeHash, LEGACY[request.resultType].scope)
+  for (const request of continuedData) {
+    assert.equal(request.scopeHash, LEGACY[request.resultType].scope)
+    assert.equal(request.providerRequest.upstreamQuery.category, 'Top', 'frozen old cursors retain their original Top order')
+  }
   assert.throws(() => social('other-query', { cursor: LEGACY.social.cursor }), { code: 'invalid_cursor' })
   assert.throws(() => raw({ query: 'other-query', cursor: LEGACY.raw.cursor }), { code: 'invalid_cursor' })
   assert.throws(() => normalizeHubDataSearch({ ...BODY, query: 'other-query', cursor: LEGACY.fresh.cursor }, CODECS.data, 'fresh'), { code: 'invalid_cursor' })

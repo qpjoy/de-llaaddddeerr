@@ -6724,7 +6724,19 @@ export function createApp({
             ...(currentDatabaseLane() === 'admission' ? { currentAttemptStarted: false, retryAfterMs: 1000 } : {}),
           })
           : new AppError(500, 'internal_error', 'Internal server error')
-      if (databaseFailure) logger.error?.({ requestId, event: 'hub_database_request_failed', ...databaseFailure })
+      if (error instanceof AppError && error.code === 'usage_admission_unavailable') {
+        // Admission wraps the database cause before a usage row exists. Keep
+        // bounded evidence under this HTTP UUID without changing its response
+        // or treating an older same-key attempt as safe to dispatch again.
+        try {
+          const failure = hubDatabaseFailure(error.cause) || (error.cause?.code === '40P01'
+            ? { reason: 'deadlock', sqlState: '40P01' }
+            : { reason: 'admission_unavailable', sqlState: null })
+          logger.error?.({ requestId, event: 'hub_database_request_failed', errorCode: error.code,
+            stage: ['connection', 'reservation', 'recovery'].includes(error.details?.stage) ? error.details.stage : 'unknown',
+            ...failure })
+        } catch { /* Diagnostics cannot replace the original admission failure. */ }
+      } else if (databaseFailure) logger.error?.({ requestId, event: 'hub_database_request_failed', ...databaseFailure })
       else if (!(error instanceof AppError)) logger.error?.({ requestId, error }, 'request failed')
       if ([429, 503].includes(appError.status) && Number.isFinite(appError.details?.retryAfterMs)) {
         response.setHeader('retry-after', String(Math.max(1, Math.ceil(appError.details.retryAfterMs / 1000))))

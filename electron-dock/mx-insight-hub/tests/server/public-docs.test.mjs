@@ -659,7 +659,7 @@ function assertXiaohongshuSearchContract(document) {
   assert.ok(operation)
   assert.deepEqual(operation['x-mx-error-codes'], {
     ...XIAOHONGSHU_SEARCH_ERROR_CODES,
-    400: [...XIAOHONGSHU_SEARCH_ERROR_CODES[400], 'content_search_option_unsupported', 'content_search_pagination_unsupported', 'work_budget_exceeded', 'invalid_uncertain_retry', 'uncertain_retry_not_supported'],
+    400: [...XIAOHONGSHU_SEARCH_ERROR_CODES[400], 'content_search_option_unsupported', 'content_search_pagination_unsupported', 'work_budget_exceeded', 'invalid_uncertain_retry', 'uncertain_retry_not_supported', 'invalid_twitter_search_parameters', 'twitter_search_parameters_unsupported'],
     409: [...XIAOHONGSHU_SEARCH_ERROR_CODES[409], 'search_page_unavailable', 'search_restart_required', 'uncertain_retry_not_allowed'],
     502: [...XIAOHONGSHU_SEARCH_ERROR_CODES[502], 'social_upstream_response_unusable', 'social_upstream_outcome_unknown', 'social_upstream_rejected'],
     503: [...XIAOHONGSHU_SEARCH_ERROR_CODES[503], 'request_outcome_unknown', 'facebook_search_paused', 'twitter_fill_deadline', 'content_search_unavailable', 'content_search_deadline', 'external_platform_busy', 'facebook_quota_state_unavailable'],
@@ -704,7 +704,7 @@ function assertXiaohongshuSearchContract(document) {
   assert.equal(request.properties.type.default, 'fresh')
   assert.match(request.properties.cursor.description, /same path, platform, query and pageSize/i)
   assert.equal(request.properties.params.additionalProperties, false)
-  assert.deepEqual(Object.keys(request.properties.params.properties), ['startTime', 'endTime', 'startDate', 'endDate', 'order', 'duration', 'pubtime_begin_s', 'pubtime_end_s', 'sort_type', 'publish_time', 'filter_duration', 'content_type', 'show_all_topics', 'search_source', 'sort'])
+  assert.deepEqual(Object.keys(request.properties.params.properties), ['startTime', 'endTime', 'startDate', 'endDate', 'order', 'duration', 'pubtime_begin_s', 'pubtime_end_s', 'sort_type', 'publish_time', 'filter_duration', 'content_type', 'show_all_topics', 'search_source', 'sort', 'category', 'filters', 'includeTimestamp'])
   assert.match(request.properties.params.description, /native offsets, sessions[\s\S]*not public pagination controls/)
   assert.match(operation.description, /Bilibili, Douyin, Kuaishou and Zhihu keyword searches[\s\S]*without historical-service dispatch or fallback/)
   assert.ok(operation['x-mx-error-codes'][400].includes('content_search_option_unsupported'))
@@ -2048,6 +2048,30 @@ test('public OpenAPI documents paid-ready financial bypass and retained technica
   ])
 })
 
+test('Twitter v1 and v2 search schemas expose bounded defaults without granting parameters to other platforms', () => {
+  const v1 = PUBLIC_OPENAPI_DOCUMENT.components.schemas.SearchRequest
+  const v2 = PUBLIC_OPENAPI_DOCUMENT.paths['/api/v2/data/search'].post.requestBody.content['application/json'].schema
+  const params = v2.properties.params
+  assert.equal(params.additionalProperties, false)
+  assert.deepEqual(Object.keys(params.properties), ['category', 'filters', 'includeTimestamp'])
+  assert.deepEqual(params.properties.category.enum, ['Top', 'Latest', 'Photos', 'Videos'])
+  assert.equal(params.properties.category.default, 'Latest')
+  assert.equal(params.properties.includeTimestamp.default, false)
+  assert.equal(params.properties.filters.maxLength, 2048)
+  assert.equal(new RegExp(params.properties.filters.pattern).test('x\0y'), false)
+  assert.match(params.description, /query remains required.*People.*unsupported/)
+  assert.match(params.description, /count.*no longer supported.*Hub pageSize/)
+  assert.match(params.description, /signed Hub nextCursor.*top-level cursor/)
+  assert.deepEqual(v1.allOf[0].if.properties.platform.enum, ['twitter', 'x'])
+  assert.deepEqual(v1.allOf[0].then.properties.params, params)
+  assert.deepEqual(v1.allOf[0].else.properties.params.not.anyOf, ['category', 'filters', 'includeTimestamp'].map(name => ({ required: [name] })))
+  assert.equal(v2.allOf[0].if.properties.platform.const, 'twitter')
+  assert.deepEqual(v2.allOf[0].else.not.required, ['params'])
+  assert.ok(v1.required.includes('query'))
+  assert.ok(v2.required.includes('query'))
+  assert.match(PUBLIC_OPENAPI_DOCUMENT.paths['/api/v2/data/search'].post.description, /window\/params/)
+})
+
 test('static OpenAPI YAML mirrors dynamic Night-All and public data-product contracts', async () => {
   const source = await readFile(
     fileURLToPath(new URL('../../docs/contracts/openapi.yaml', import.meta.url)),
@@ -2065,6 +2089,11 @@ test('static OpenAPI YAML mirrors dynamic Night-All and public data-product cont
   assert.equal(parsed.status, 0, parsed.stderr)
   const document = JSON.parse(parsed.stdout)
   assert.equal(document.openapi, '3.1.0')
+  assert.deepEqual(document.components.schemas.SearchRequest.allOf, PUBLIC_OPENAPI_DOCUMENT.components.schemas.SearchRequest.allOf)
+  const v2Schema = document.paths['/api/v2/data/search'].post.requestBody.content['application/json'].schema
+  const dynamicV2Schema = PUBLIC_OPENAPI_DOCUMENT.paths['/api/v2/data/search'].post.requestBody.content['application/json'].schema
+  assert.deepEqual(v2Schema.properties.params, dynamicV2Schema.properties.params)
+  assert.deepEqual(v2Schema.allOf, dynamicV2Schema.allOf)
   assert.deepEqual(
     document['x-mx-external-platform-admission'],
     PUBLIC_OPENAPI_DOCUMENT['x-mx-external-platform-admission'],

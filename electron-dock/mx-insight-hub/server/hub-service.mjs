@@ -177,6 +177,7 @@ import { acquisitionRequestSnapshot } from './acquisitions/request-snapshot.mjs'
 import { canRouteRawSearch } from './contracts/raw-search.mjs'
 import { canRouteDataSearch } from './contracts/hub-data-search.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
+import { normalizeTwitterSearchParameters } from './contracts/twitter-search-parameters.mjs'
 import { normalizeSearchContent } from './contracts/search-content.mjs'
 import {
   capNightAllCompatibilityTraversal,
@@ -4865,7 +4866,7 @@ export class HubService {
     const requestedPlatform = dedicatedTelegramSearch ? 'telegram' : canonicalPlatform(body.platform)
     const facebookSearch = requestedPlatform === 'facebook'
     const directContentSearch = Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, requestedPlatform)
-    const contentSearchParams = directContentSearch && TIKHUB_CONTENT_SEARCH_RECIPES[requestedPlatform].publicParams !== false
+    const contentSearchParams = requestedPlatform === 'twitter' || directContentSearch && TIKHUB_CONTENT_SEARCH_RECIPES[requestedPlatform].publicParams !== false
     const unsupportedFields = dedicatedTelegramSearch
       ? []
       : Object.keys(body).filter((field) => !PUBLIC_SEARCH_FIELDS.has(field) && !((facebookSearch || contentSearchParams) && field === 'params'))
@@ -4925,7 +4926,8 @@ export class HubService {
       query,
       pageSize,
       ...(cursor ? { cursor } : {}),
-      ...((facebookSearch || contentSearchParams) && body.params !== undefined ? { params: body.params } : {}),
+      ...((facebookSearch || contentSearchParams) && body.params !== undefined
+        ? { params: platform === 'twitter' ? normalizeTwitterSearchParameters(body.params) : body.params } : {}),
     }
     const resultType = resolveResultType(body)
     let fingerprintQuery = telegramQuery ?? upstreamBody

@@ -21,7 +21,9 @@ TikTok 的 `/api/v1/search/raw` 与 `/api/v1/night-all/search/raw` 继续保留�
 
 ## Twitter、Facebook 与已有调用方
 
-Twitter 标准 `/data/search` 已有有界自动补页：先读归档余量，再补齐当前逻辑页并跨页去重，每次 Hub 请求最多 3 次实际调用；未消费的内容留给下一页。Facebook 标准搜索也采用余量优先、去重和每请求最多 3 次实际派发的有界补页（首次 429 保底派发计入上限），取得第一页后供应商固定；raw 保持原单页边界。两者都原样传回 `data.pageInfo.nextCursor`；短页不是判断是否耗尽的依据。Twitter 的新增补页不改变 raw/social/crawl 合同。
+Twitter 标准 `/data/search` 已有有界自动补页：先读归档余量，再补齐当前逻辑页并跨页去重；未消费的内容留给下一页。Facebook 标准搜索同样余量优先、去重，取得第一页后供应商固定；raw 保持原单页边界。两者现已取消每次 Hub 请求默认3次的补页上限，保留整次查询15个上游页/公开页、24小时、截止时间、归档字节及准入边界。两者都原样传回 `data.pageInfo.nextCursor`；短页不是判断是否耗尽的依据。Twitter 的新增补页不改变 raw/social/crawl 合同。
+
+2026-10-20 Twitter 标准 v1/v2 新查询默认 Latest，可用 `params.category`、`params.filters`、`params.includeTimestamp` 覆盖；当前内容类别为 Latest/Top/Photos/Videos，仍要求关键词。旧请求和旧游标保留原搜索语义。每页条数使用 Hub `pageSize`，不接受原生 count/cursor 冒充 Hub 分页；条件在翻页及重放时保持一致。参见 [参数、供应商能力与历史兼容](twitter-standard-provider-routing.md)。
 
 已有标准数组和 raw JSON 字符串格式、客户单价、授权和幂等身份保留。已提交的响应仍精确重放，包括原空结果、失败或旧字段值，不会因为升级解析器而重写。可验证的 Hub 游标保持原查询、Key、路径、页大小、type 和原供应链；策略切换不把旧 token 发到新供应链。已退役的 Twitter `mxnc1`、Instagram 历史或无供应商标签的游标，以及未受 Hub 保护的 Facebook 旧游标，分别按既有 `search_restart_required`／`invalid_cursor` 边界要求调用方明确从第一页开始，不能承诺所有旧分页无缝继续。
 

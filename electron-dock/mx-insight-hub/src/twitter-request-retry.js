@@ -11,7 +11,7 @@ const updateAttempt = (session, values) => update(session, { attempt: { ...state
 const isV2 = value => value?.requestEvidence?.request?.path === V2_PATH
 function v2BodyValid(body) {
   const window = body.timeWindow
-  if (Object.keys(body).some(key => !['platform', 'query', 'pageSize', 'type', 'cursor', 'timeWindow'].includes(key))
+  if (Object.keys(body).some(key => !['platform', 'query', 'pageSize', 'type', 'cursor', 'timeWindow', 'params'].includes(key))
     || body.platform !== 'twitter' || !Number.isInteger(body.pageSize) || body.pageSize < 1 || body.pageSize > 100
     || !['fresh', 'stable'].includes(body.type) || body.query.length > 500 || !object(window)
     || Object.keys(window).some(key => !['from', 'to', 'timezone', 'boundary'].includes(key))
@@ -19,6 +19,13 @@ function v2BodyValid(body) {
     || !Number.isFinite(Date.parse(window.from)) || !Number.isFinite(Date.parse(window.to))
     || Date.parse(window.from) >= Date.parse(window.to)
     || body.cursor != null && (typeof body.cursor !== 'string' || !body.cursor.startsWith('mxds2.') || body.cursor.length > 16384)) return false
+  if (Object.hasOwn(body, 'params')) {
+    const params = body.params
+    if (!object(params) || Object.keys(params).some(key => !['category', 'filters', 'includeTimestamp'].includes(key))
+      || Object.hasOwn(params, 'category') && !['Top', 'Latest', 'Photos', 'Videos'].includes(params.category)
+      || Object.hasOwn(params, 'filters') && (typeof params.filters !== 'string' || params.filters.length > 2048 || params.filters.includes('\0'))
+      || Object.hasOwn(params, 'includeTimestamp') && typeof params.includeTimestamp !== 'boolean') return false
+  }
   try { new Intl.DateTimeFormat('en', { timeZone: window.timezone }).format() } catch { return false }
   return true
 }

@@ -2555,6 +2555,8 @@ export class DatabaseSourcePuller {
           platform: source.platform,
           objectType: source.objectType,
           source: { origin: 'database', sourceKey: source.sourceKey },
+          // The pull watermark itself; see applyMapping.
+          bookkeepingColumns: [cursorName],
         })
         if (rejected) {
           rejections.push({ rowIndex: index + 1, reason: rejected, raw })

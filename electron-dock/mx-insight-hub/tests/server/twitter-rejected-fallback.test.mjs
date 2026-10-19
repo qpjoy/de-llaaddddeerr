@@ -103,8 +103,8 @@ for (const version of [1, 2]) test(`v${version}: first RapidAPI 400 falls back i
   assert.equal(decodeURIComponent(f.wires[0].url.pathname.slice('/search/'.length)), providerQuery)
   assert.equal(f.wires[1].url.searchParams.get('keyword'), providerQuery)
   assert.equal(f.wires[0].url.searchParams.get('count'), '1')
-  assert.equal(f.wires[0].url.searchParams.get('category'), 'Top')
-  assert.equal(f.wires[1].url.searchParams.get('search_type'), 'Top')
+  assert.equal(f.wires[0].url.searchParams.get('category'), 'Latest')
+  assert.equal(f.wires[1].url.searchParams.get('search_type'), 'Latest')
   if (version === 2) {
     assert.equal(first.body.data.meta.effectiveWindow.deliveryFiltering, 'exact')
     assert.equal(first.body.data.meta.effectiveWindow.from, WINDOW.from)

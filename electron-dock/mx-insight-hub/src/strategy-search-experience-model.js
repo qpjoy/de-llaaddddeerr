@@ -86,8 +86,20 @@ export function strategySearchBody(form, platforms, cursor) {
   const pageSize = Number(form.pageSize)
   if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error('每页数量应为 1–100 的整数。')
   if (wechat && pageSize !== 20) throw new Error('微信返回原生一页，每页数量请保留默认值 20。')
+  const twitterParams = form.twitterParams === null ? null : form.twitterParams || { category: 'Latest' }
+  if (form.platform === 'twitter' && twitterParams) {
+    if (twitterParams.category !== undefined && !['Top', 'Latest', 'Photos', 'Videos'].includes(twitterParams.category)) throw new Error('请选择支持的 Twitter 内容类别。')
+    if (twitterParams.filters !== undefined && (typeof twitterParams.filters !== 'string' || twitterParams.filters.length > 2048 || twitterParams.filters.includes('\0'))) throw new Error('Twitter filters 最多 2048 字，不能包含空字符。')
+    if (twitterParams.includeTimestamp !== undefined && typeof twitterParams.includeTimestamp !== 'boolean') throw new Error('请选择有效的时间戳设置。')
+  }
   return { platform: form.platform, query, pageSize, type: 'stable',
-    ...(wechat ? { params: { raw: false } } : {}), ...(cursor ? { cursor } : {}) }
+    ...(wechat ? { params: { raw: false } } : form.platform === 'twitter' && twitterParams ? { params: { ...twitterParams } } : {}), ...(cursor ? { cursor } : {}) }
+}
+
+// Imported results and unresolved attempts must retain their original parameter
+// shape so a default change cannot turn an explicit replay into a new intent.
+export function strategySearchForm(body) {
+  return body?.platform === 'twitter' ? { twitterParams: Object.hasOwn(body, 'params') ? { ...body.params } : null } : {}
 }
 
 export function strategyPageInfo(payload) {

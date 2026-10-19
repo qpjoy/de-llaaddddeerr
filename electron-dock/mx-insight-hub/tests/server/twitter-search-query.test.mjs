@@ -91,7 +91,7 @@ test('unsupported grammars are bounded and never approximated; the existing stan
   assert.throws(() => compileTwitterSearchQuery(`a AND ${'b'.repeat(500)}`), { code: 'invalid_twitter_query' })
 })
 
-test('real adapter builds the compiled standard URL with unchanged Top/count and original request identity', async () => {
+test('real adapter builds the compiled standard URL with default Latest/count and original request identity', async () => {
   const request = standard()
   assert.equal(request.query, INCIDENT_QUERY)
   assert.equal(request.providerRequest.query, INCIDENT_QUERY)
@@ -106,7 +106,7 @@ test('real adapter builds the compiled standard URL with unchanged Top/count and
     assert.equal(decodeURIComponent(url.pathname.slice('/search/'.length)), COMPILED_QUERY)
     assert.equal(url.pathname.split('/').length, 3)
     assert.equal(url.hash, '')
-    assert.deepEqual(Object.fromEntries(url.searchParams), { count: '20', category: 'Top', includeTimestamp: 'false',
+    assert.deepEqual(Object.fromEntries(url.searchParams), { count: '20', category: 'Latest', includeTimestamp: 'false',
       ...(calls === 2 ? { cursor: 'provider-page-2' } : {}) })
     assert.equal(options.method, 'GET')
     return Response.json({ entries: [] })

@@ -1457,6 +1457,8 @@ create_runtime_config() {
       ["MX_INSIGHT_INGEST_WORKER_CONCURRENCY", 1, 1, 4],
       ["MX_INSIGHT_INGEST_WORKER_DELAY_MS", 100, 0, 60000],
       ["MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS", 250, 0, 60000],
+      ["MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR", 1, 0, 10],
+      ["MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_MAX_MS", 60000, 0, 600000],
     ]) {
       const value = Number(process.env[key] || fallback)
       if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error(key + " is out of range")
@@ -1620,6 +1622,8 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT="${MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT:-off}" \
     --from-literal=MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS="$external_pull_page_delay_ms" \
     --from-literal=MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS="$external_pull_worker_delay_ms" \
+    --from-literal=MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR="${MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR:-1}" \
+    --from-literal=MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_MAX_MS="${MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_MAX_MS:-60000}" \
     --from-literal=MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS="$telegram_monitor_page_delay_ms" \
     --from-literal=MX_INSIGHT_TELEGRAM_SQLITE_PAGE_DELAY_MS="$telegram_sqlite_page_delay_ms" \
     --from-literal=MX_INSIGHT_PROVINCE_PAGE_DELAY_MS="$province_page_delay_ms" \

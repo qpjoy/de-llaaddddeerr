@@ -19,18 +19,29 @@ export async function runExternalPullJob({
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
   continuationDelayMs = 0,
+  // A backlog page waits max(continuationDelayMs, factor x this page's own
+  // duration), capped. Duration includes the Hub commit, so disk/WAL stalls
+  // stretch the gap automatically. A finished source is not affected.
+  adaptiveDelayFactor = 0,
+  adaptiveDelayMaxMs = 60_000,
   now = () => new Date(),
+  elapsed = () => performance.now(),
 }) {
   const sourceKey = payload?.sourceKey
   if (!sourceKey) throw new Error('external pull payload is missing sourceKey')
   if (!Number.isInteger(continuationDelayMs) || continuationDelayMs < 0) {
     throw new Error('continuationDelayMs must be a non-negative integer')
   }
+  if (!Number.isFinite(adaptiveDelayFactor) || adaptiveDelayFactor < 0
+    || !Number.isInteger(adaptiveDelayMaxMs) || adaptiveDelayMaxMs < 0) {
+    throw new Error('adaptive delay must be a non-negative factor and integer cap')
+  }
   const heartbeat = () => queue.heartbeat(job.id).catch(() => {})
   await heartbeat()
   const timer = setIntervalFn(heartbeat, heartbeatIntervalMs)
   timer?.unref?.()
   let result
+  const startedAt = elapsed()
   try {
     if ((payload.chunk ?? 0) === 0 && typeof puller.assertReadyForPull === 'function') {
       await puller.assertReadyForPull(sourceKey)
@@ -88,13 +99,18 @@ export async function runExternalPullJob({
 
   if (!result.done) {
     const nextChunk = (payload.chunk ?? 0) + 1
+    const pageMs = Math.max(0, elapsed() - startedAt)
+    const delayMs = Math.max(continuationDelayMs, Math.min(adaptiveDelayMaxMs, Math.round(pageMs * adaptiveDelayFactor)))
+    if (delayMs > continuationDelayMs) {
+      logger.log?.(`[external] ${sourceKey} page took ${Math.round(pageMs)}ms; next page in ${delayMs}ms`)
+    }
     // Persist the hand-off even during graceful shutdown. pullBatch has already
     // marked the durable cursor `running`; omitting the continuation here would
     // leave no job for the next worker while the periodic scheduler correctly
     // refuses to overlap a running source.
     try {
-      const runAt = continuationDelayMs > 0
-        ? new Date(new Date(now()).getTime() + continuationDelayMs)
+      const runAt = delayMs > 0
+        ? new Date(new Date(now()).getTime() + delayMs)
         : null
       await queue.enqueue(
         EXTERNAL_PULL_QUEUE,

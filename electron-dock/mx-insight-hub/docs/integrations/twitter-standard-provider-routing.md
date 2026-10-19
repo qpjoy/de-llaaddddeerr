@@ -31,7 +31,26 @@
 
 ## 数据和分页
 
-TikHub 使用固定 `t.twitter_web_fetch_search_timeline`，传 `keyword`、`search_type=Top` 和下一页的原生 `cursor`。Hub 复用既有等价 Boolean 编译器，保留客户原查询和指纹，不删除条件、不自动缩短检索式。接口未声明 count，Hub 不添加这个参数。
+2026-10-20：新标准查询默认 `Latest`（旧默认 `Top`）。v1/v2 都可显式传以下 Twitter 参数；已保存的原响应仍精确重放，旧游标及旧请求的人工安全重试保留原 Top 语义，新游标绑定本次实际生效的条件。
+
+```json
+{
+  "platform": "twitter",
+  "query": "张婧仪",
+  "pageSize": 20,
+  "type": "stable",
+  "params": {
+    "category": "Latest",
+    "includeTimestamp": false
+  }
+}
+```
+
+`params.category` 可为 `Latest/Top/Photos/Videos`；`params.filters` 为最长 2048 字的字符串（去除首尾空白，空白值省略）；`params.includeTimestamp` 为布尔值，默认 false。这是内容搜索合同，仍要求 `query`，不支持返回账号的 `People`。未知参数明确拒绝。原生 `count` 不再受 Twitter 支持，不能用 `params.count` 控制页数；Hub 的 `pageSize` 负责归档余量和逻辑交付。调用方继续原样传回顶层 `cursor=data.pageInfo.nextCursor`，不能把原生 Bottom cursor 放到 `params.cursor`，也不能在翻页时改变条件、页大小或 type。
+
+TikHub 使用固定 `t.twitter_web_fetch_search_timeline`，传 `keyword`、对应的 `search_type=Latest/Top` 和下一页的原生 `cursor`。Photos/Videos、非空 filters 和 includeTimestamp=true 尚无已验证的 TikHub 等价映射：选择 TikHub 时在采购前明确拒绝；RapidAPI 明确400后的保底也不会丢弃这些条件转交 TikHub。Hub 复用既有等价 Boolean 编译器，保留客户原查询和指纹，不删除条件、不自动缩短检索式。TikHub 接口未声明 count，Hub 不添加这个参数。
+
+[Twitter AIO 官方 Search 文档](https://rapidapi.com/viperscores-viperscores-default/api/twitter-aio/playground/apiendpoint_602d9730-5aec-48f1-ae31-7020727eb762)说明下一页使用 Bottom cursor，并提示长游标可改 POST，但未提供可核实的 POST body 示例。本轮保留现有 GET、原生游标长度上限及有效期，不猜测 POST 格式。参数及本次准入失败的取证说明见 [2026-10-20 排查记录](../operations/twitter-strategy-search-2026-10-20.md)。本段为本地源码变更，不表示已部署。
 
 映射以供应商 `tweet_id` 字符串为真实身份，保留 `text`、发布时间、作者和照片/视频。缺失指标保持 null，真实0保持0；无关新增元数据不导致可用帖文被拒。整页存档及去重后按客户 pageSize 交付，所有超额帖子保存在缓冲，后续页先消费缓冲再采购；同页重试重放原回执。原生短页或空页带有效游标时继续分页；重复游标停止继续采购并返回明确提示。
 

@@ -6,7 +6,7 @@ import { useDemoApiKey, useDemoIdentity, useDemoAccessSnapshot } from './demo-cr
 import { WechatResult } from './wechat-product.jsx'
 import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 import { requestUuid } from './request-id.js'
-import { STRATEGY_SEARCH_PLATFORMS, strategySearchPlatforms, strategySearchBody,
+import { STRATEGY_SEARCH_PLATFORMS, strategySearchPlatforms, strategySearchBody, strategySearchForm,
   strategyPageInfo, uncertainStrategySearch, safeStrategyUrl, isFacebookPhotoPage, createStrategySearchCell, strategyRequestFingerprint, strategyOutcomeMatches, strategyUnresolvedAttempt, strategyFailureRequestId,
   strategyAccountPlatforms, strategyOperationPath, strategyAccountBody, strategyAccountForm, strategyResultMatches, strategyAccountItem } from './strategy-search-experience-model.js'
 
@@ -28,13 +28,21 @@ export function StrategySearchExperience({ initialResult, strategySession, onRes
   const unresolved = strategyUnresolvedAttempt(attempts, form.platform)
   const error = state.error || unresolved?.error
   const change = patch => cell.update({ form: { ...form, ...patch }, error: null, outcomeNote: null })
+  const twitterSearch = !accountOperation && form.platform === 'twitter'
+  const twitterParams = form.twitterParams === null ? null : form.twitterParams || { category: 'Latest' }
+  const changeTwitter = (name, value) => {
+    const params = { ...twitterParams }
+    if (value === undefined) delete params[name]
+    else params[name] = value
+    change({ twitterParams: params })
+  }
   useEffect(() => {
     if (initialResult?.identity === identity && initialResult.input?.path === path) {
       const input = initialResult.input.body
       if (cell.getSnapshot().result === initialResult) return
       cell.update({ result: initialResult, ...(platforms.some(row => row.platform === input?.platform)
         ? { form: { ...cell.getSnapshot().form, platform: input.platform, query: input.query || '', pageSize: input.pageSize || input.count || 20,
-          ...(accountOperation ? strategyAccountForm(input) : {}) } } : {}) })
+          ...(accountOperation ? strategyAccountForm(input) : strategySearchForm(input)) } } : {}) })
     }
   }, [cell, identity, initialResult, path, access])
   let body = null, validation = ''
@@ -92,7 +100,7 @@ export function StrategySearchExperience({ initialResult, strategySession, onRes
               const pending = strategyUnresolvedAttempt(attempts, row.platform), original = pending?.body
               change({ platform: row.platform, ...(row.platform.startsWith('wechat_') ? { pageSize: 20 } : {}),
                 ...(original ? { query: original.query || original.keyword || form.query, pageSize: original.pageSize || original.count || form.pageSize,
-                  ...(accountOperation ? strategyAccountForm(original) : {}) } : {}) })
+                  ...(accountOperation ? strategyAccountForm(original) : strategySearchForm(original)) } : {}) })
             }}>
             <span className={`mih-strategy-platform-mark is-${row.platform}`} aria-hidden="true">{row.mark}</span><span>{row.label}</span>{form.platform === row.platform ? <Check size={15} weight="bold" aria-hidden="true" /> : null}
           </button>)}</div>
@@ -103,6 +111,17 @@ export function StrategySearchExperience({ initialResult, strategySession, onRes
         <div className="mih-strategy-query-row"><label className="qp-field">{accountOperation ? '账号标识' : '关键词'}<input className="qp-input" placeholder={accountOperation ? '输入该平台的用户名或账号 ID' : `在${currentPlatform?.label || '目标平台'}搜索关键词`} maxLength={500} value={accountOperation ? form.account || '' : form.query} disabled={busy || checking || Boolean(unresolved)} onChange={event => change(accountOperation ? { account: event.target.value } : { query: event.target.value })} /></label>
           {operation !== 'user-info' ? <DropdownField label="每页数量" value={String(form.pageSize)} disabled={busy || checking || Boolean(unresolved) || form.platform.startsWith('wechat_')} onChange={value => change({ pageSize: Number(value) })} options={(accountOperation ? [10, 20, 50, 100, 500] : [10, 20, 50, 100]).map(value => ({ value: String(value), label: `${value} 条` }))} /> : null}
           <button className="qp-button qp-button--primary" disabled={!canSend}><MagnifyingGlass size={18} aria-hidden="true" />{busy ? '正在查询…' : attempt ? '重放 / 重试原查询' : accountOperation ? '查询账号' : '搜索'}</button></div>
+        {twitterSearch ? <fieldset disabled={busy || checking || Boolean(unresolved)} className="mih-strategy-twitter-options">
+          <legend>Twitter 搜索条件</legend>
+          <div className="mih-strategy-twitter-fields">
+            <DropdownField label="内容类别" value={twitterParams?.category || ''} disabled={busy || checking || Boolean(unresolved)} onChange={value => changeTwitter('category', value || undefined)}
+              options={[...(!twitterParams?.category ? [{ value: '', label: '接口默认（保留原请求）' }] : []), { value: 'Latest', label: 'Latest · 最新（默认）' }, { value: 'Top', label: 'Top · 热门' }, { value: 'Photos', label: 'Photos · 图片' }, { value: 'Videos', label: 'Videos · 视频' }]} />
+            <DropdownField label="包含时间戳" value={twitterParams?.includeTimestamp === undefined ? '' : String(twitterParams.includeTimestamp)} disabled={busy || checking || Boolean(unresolved)} onChange={value => changeTwitter('includeTimestamp', value === '' ? undefined : value === 'true')}
+              options={[{ value: '', label: '默认 · 否' }, { value: 'true', label: '是' }, { value: 'false', label: '否' }]} />
+            <label className="qp-field mih-strategy-twitter-filters">附加筛选（filters）<input className="qp-input" placeholder="可选，按接口约定填写筛选条件" maxLength={2048} value={twitterParams?.filters || ''} onChange={event => changeTwitter('filters', event.target.value || undefined)} /></label>
+          </div>
+          <p className="mih-strategy-search-note">新查询默认 Latest，可覆盖类别与筛选条件。People 返回账号，不适用于此内容搜索接口。每页数量是 Hub 的交付目标，可能合并多次上游调用；使用返回的游标读取下一页。</p>
+        </fieldset> : null}
         <p className="mih-strategy-search-note">仅点击查询或下一页时调用，按当前账户价格计量。切换业务接口、平台与标签不会查询。{accountOperation ? '批量账号、活动类型与平台参数可在接口调试中提交。' : <>跨平台同时检索请使用<a href="#/data-products/search">聚合搜索 ↗</a>。</>}</p>
         {form.platform.startsWith('wechat_') ? <p className="mih-strategy-search-note">微信返回原生一页，不保证 20 条；使用原生 items、continue_flag 与 cursor，完整业务字段保持不变。</p> : null}
         {(accountOperation ? form.account : form.query) && validation ? <p role="status">{validation}</p> : null}

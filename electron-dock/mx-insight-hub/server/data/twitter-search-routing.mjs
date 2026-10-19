@@ -4,6 +4,7 @@ import { TIKHUB_CONTENT_SEARCH_VERSION } from '../contracts/tikhub-content-searc
 import { createDataSearchCursorCodec } from '../external-platforms/cursor.mjs'
 import { assertTwitterSearchAvailable } from './twitter-search-availability.mjs'
 import { pinTwitterSearchFallback, assertTwitterSearchFallback } from '../external-platforms/twitter-search-fallback.mjs'
+import { effectiveTwitterSearchParameters, twitterParametersSupportTikHub, twitterTikHubParameters } from '../contracts/twitter-search-parameters.mjs'
 
 const TIKHUB_RECIPE = 't.twitter_web_fetch_search_timeline'
 const owned = (row, context) => row && row.tenantId === context.tenant.id
@@ -71,6 +72,21 @@ export function createTwitterSearchRouter({ usageStore, rapidGateway, tikHubGate
     const existing = input.idempotencyKey
       ? await usageStore.getUsageRequestByIdempotencyKey(context.consumer.id, input.idempotencyKey) : null
     const previous = owned(existing, context) ? existing : null
+    const retryId = typeof input.retryOfRequestId === 'string'
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(input.retryOfRequestId.trim())
+      ? input.retryOfRequestId.trim() : null
+    const retrySource = !previous && retryId
+      ? await usageStore.getUsageRequestForRetry(retryId, context.consumer.id) : null
+    const original = previous || (owned(retrySource, context) ? retrySource : null)
+    if (original && !input.normalized.cursor) {
+      // Saved omitted options meant Top before this extension. Trusted route
+      // metadata distinguishes newer implicit Latest requests without changing
+      // either historical body fingerprints or manual-retry identities.
+      input = { ...input, twitterSearchParameters: effectiveTwitterSearchParameters(
+        original.acquisitionRequest?.twitterSearchParameters ?? input.normalized.params,
+        original.acquisitionRequest?.twitterSearchParameters ? 'Latest' : 'Top') }
+    }
+    const searchParameters = effectiveTwitterSearchParameters(input.twitterSearchParameters ?? input.normalized.params)
     const selected = previous ? await savedProvider(previous, { usageStore, rapidGateway, tikHubGateway })
       : input.retryOfRequestId != null ? 'rapidapi' : cursorProvider
         || (provider === 'auto' ? await resolveProvider?.(context) ?? 'rapidapi' : provider)
@@ -81,6 +97,7 @@ export function createTwitterSearchRouter({ usageStore, rapidGateway, tikHubGate
     if (cursorProvider && cursorProvider !== selected) {
       throw new AppError(409, 'idempotency_conflict', 'Idempotency-Key belongs to a different search continuation')
     }
+    if (selected === 'tikhub') twitterTikHubParameters(searchParameters)
     // Historical same-key replies and explicit RapidAPI retry acknowledgements
     // are validated by their original gateway before any new dispatch. For a
     // new intent, check all known standard-query outcomes across suppliers.
@@ -101,7 +118,8 @@ export function createTwitterSearchRouter({ usageStore, rapidGateway, tikHubGate
     const permitsRejectedFallback = policy => policy?.mode === 'priority'
       && policy.primaryProvider === 'rapidapi' && policy.fallbackProvider === 'tikhub'
     const providerStores = [rapidGateway.platformStore, tikHubGateway.platformStore]
-    const rejectedFallback = selected === 'rapidapi' && !cursorProvider && !input.retryOfRequestId && policyStore ? {
+    const rejectedFallback = selected === 'rapidapi' && !cursorProvider && !input.retryOfRequestId
+      && twitterParametersSupportTikHub(searchParameters) && policyStore ? {
       // Capture only when a new acquisition begins. Saved replies must not
       // depend on current strategy availability or acquire another quote.
       begin: async () => { fallbackPolicy = await policyStore.get('search', 'twitter') },

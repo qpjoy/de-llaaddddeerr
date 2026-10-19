@@ -19,14 +19,14 @@
 }
 ```
 
-`Idempotency-Key` 必填。起止时间必须有明确时区，精度最多毫秒且起点早于终点；`timezone` 必须是有效 IANA 时区。Hub 统一为 UTC 瞬时比较，不采用服务器本地时区。供应商坐标、`params` 和隐式日期默认值不属于 v2 输入。只有下述 Twitter 人工安全重试可以使用 `X-MX-Insight-Retry-Of`；其他平台仍拒绝未知结果重购 override。
+`Idempotency-Key` 必填。起止时间必须有明确时区，精度最多毫秒且起点早于终点；`timezone` 必须是有效 IANA 时区。Hub 统一为 UTC 瞬时比较，不采用服务器本地时区。供应商坐标和隐式日期默认值不属于 v2 输入。2026-10-20 起仅 Twitter 可附加 `params.category`（新查询默认 Latest，可选 Top/Photos/Videos）、`params.filters`（最长2048字字符串）和 `params.includeTimestamp`（布尔值，默认false）；其他平台仍拒绝 `params`。详见 [Twitter 参数与供应商兼容](twitter-standard-provider-routing.md)。只有下述 Twitter 人工安全重试可以使用 `X-MX-Insight-Retry-Of`；其他平台仍拒绝未知结果重购 override。
 
 支持 Facebook、Twitter、Instagram、Reddit、Weibo、Bilibili、Douyin、Kuaishou、Zhihu、YouTube、TikTok、Xiaohongshu 标准内容搜索。现有平台及操作权限继续生效，平台可调用仍取决于其原运行开关、凭据和财务准入。微信、账号、支付和其他独立合同不纳入此入口，未支持平台明确返回 422，不退回 v1 或忽略时间。
 
 | 平台 | 上游时间过滤 | Hub 交付过滤 | 可声明的覆盖 |
 | --- | --- | --- | --- |
 | Facebook | 换算为上海日历日期；`endDate` 保守使用 `to` 对应日期 | 按真实发布时间精确 `[from,to)` | 有限遍历；供应商日期上界包含性及全历史覆盖未验证 |
-| Twitter / Instagram / Reddit 及其余已列平台 | 当前统一 v2 合同未提供原生时间过滤 | 按真实发布时间精确 `[from,to)` | `partial`，明确 `upstream_time_filter_unsupported`，不保证能回溯到所需历史 |
+| Twitter / Instagram / Reddit 及其余已列平台 | 不把 timeWindow 自动转换为上游时间过滤；Twitter 的调用方 filters 不构成时间窗完整性承诺 | 按真实发布时间精确 `[from,to)` | `partial`，明确 `upstream_time_filter_unsupported`，不保证能回溯到所需历史 |
 
 完整采购证据、原始结果及原有采集计量仍保存，交付过滤不会改写底层数据或退款。无可靠发布时间的条目不以采集时间替代；不交付这些条目并返回缺失计数。交付页可能少于 `pageSize` 或为空；仍有 `nextCursor` 时必须继续同一遍历。不会为了补齐过滤后的页额外隐藏发起一轮采购。
 
@@ -43,7 +43,7 @@
 
 ## 分页、重试与版本绑定
 
-v2 的 `mxds2` 加密游标绑定原 Key、查询、页大小、结果类型和精确时间窗，并封装底层原游标。v1 拒绝 `mxds2`；v2 拒绝所有旧游标。窗口和版本随任务创建持久化，分页与重试不再按当前时间计算。旧任务不得在恢复时补上新窗、改成 v2 或把旧空页当作新窗采集完毕。
+v2 的 `mxds2` 加密游标绑定原 Key、查询、页大小、结果类型、显式 Twitter params 和精确时间窗，并封装底层原游标。v1 拒绝 `mxds2`；v2 拒绝所有旧游标。窗口和版本随任务创建持久化，分页与重试不再按当前时间计算。旧任务不得在恢复时补上新窗、改成 v2 或把旧空页当作新窗采集完毕。
 
 同页重试保持原请求体及 key；下一页使用新的 key 和返回的原游标。v2 的同一 key **永久重放**原交付，`type=fresh` 不允许过 120 秒后同 key 再次采购；新采集必须是明确的新任务/新 key。v1 的原 fresh/stable 重放策略保持原样。每个底层标准页仍只走原授权、预留、采购、原始存档、入库及一次客户结算。
 
@@ -98,7 +98,7 @@ Delta 更新后由既有 beat 自动接续冷启动/增量的原 CollectionRun�
 
 先在 Hub Internal「数据浏览中心 → 请求诊断」查询原 requestId，选择「准备按原参数重试 Twitter」。准备只读保存的原请求、v2 时间窗/游标、原 Key 和资格，不采集。满足条件后明确点击「确认按当前链路重试（可能再次计费）」，才发起一次新的关联请求。原 unknown 和原账单不改写，新请求独立结算。
 
-公开合同复用 `POST /api/v2/data/search` 和 `X-MX-Insight-Retry-Of: <原 usage UUID>`，使用同一有效 API Key、原规范化 v2 body（包括 `type`、精确时间窗和原游标）及一个新的永久 `Idempotency-Key`。只允许具有完整 v2 归属、原 usage unknown 和当前 RapidAPI Twitter 调用证据的请求；缺参数、身份不符、处理中、游标失效、其他供应商、其他未决请求以及底层 committed 但 v2 投影未知，不得据此重购。
+公开合同复用 `POST /api/v2/data/search` 和 `X-MX-Insight-Retry-Of: <原 usage UUID>`，使用同一有效 API Key、原规范化 v2 body（包括 `type`、精确时间窗、原游标及 Twitter params）及一个新的永久 `Idempotency-Key`。只允许具有完整 v2 归属、原 usage unknown 和当前 RapidAPI Twitter 调用证据的请求；缺参数、身份不符、处理中、游标失效、其他供应商、其他未决请求以及底层 committed 但 v2 投影未知，不得据此重购。
 
 迁移 162 在进入新 usage/采购前就持久绑定原请求和后续幂等键。双击、并行页面、刷新或响应丢失不能换键创建另一笔重试；即使尚无新 usage UUID，也展示已登记的重试意图。断线后保留新键、只读核对，不自动重发采购。后续再次 unknown 时，保留该后续请求，后续人工重试须继续其已验证的单线关联，不能从旧祖先分叉。
 

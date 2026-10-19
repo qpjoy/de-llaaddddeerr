@@ -1299,7 +1299,7 @@ test('Twitter standard keeps original Boolean query, fills 19+8 and buffers ever
   assert.equal(h.calls.length, 2)
   assert.equal(h.calls[0].params.keyword, '("diplomacy" OR "foreign policy") ("statement" OR "update") -"ad" -"marketing"')
   assert.equal(h.calls[1].params.cursor, 'native-opaque+token=')
-  assert.ok(h.calls.every(call => call.params.search_type === 'Top' && !('count' in call.params) && !('page_size' in call.params)))
+  assert.ok(h.calls.every(call => call.params.search_type === 'Latest' && !('count' in call.params) && !('page_size' in call.params)))
   assert.deepEqual([...h.platformStore.calls.values()].map(call => call.itemCount), [19, 8])
   assert.equal(h.platformStore.ingestJobs.length, 2)
   assert.equal(h.store.requests.get(first.requestId).acquisitionRequest.searchProvider, 'tikhub')

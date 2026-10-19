@@ -1,6 +1,7 @@
 import { AppError } from '../core/errors.mjs'
 import { requestFingerprint } from '../core/crypto.mjs'
 import { HUB_SOCIAL_VERSION } from '../contracts/hub-social.mjs'
+import { normalizeTwitterSearchParameters } from '../contracts/twitter-search-parameters.mjs'
 
 const PATH = '/api/v1/data/search', MAX_ANCESTORS = 32
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
@@ -18,7 +19,7 @@ export function normalizedTwitterRetryBody(snapshot) {
   const body = snapshot?.body
   if (snapshot?.method !== 'POST' || snapshot.path !== PATH || Object.hasOwn(snapshot, 'bodyOmitted')
     || !body || typeof body !== 'object' || Array.isArray(body)
-    || Object.keys(body).some(key => !['platform', 'query', 'pageSize', 'cursor', 'type'].includes(key))) throw twitterRetryDenied()
+    || Object.keys(body).some(key => !['platform', 'query', 'pageSize', 'cursor', 'type', 'params'].includes(key))) throw twitterRetryDenied()
   const platform = typeof body.platform === 'string' ? body.platform.trim().toLowerCase() : ''
   const query = typeof body.query === 'string' ? body.query.trim() : ''
   const pageSize = body.pageSize ?? 20, type = body.type ?? 'fresh'
@@ -30,7 +31,10 @@ export function normalizedTwitterRetryBody(snapshot) {
       || !body.cursor.trim().startsWith('mxds1.')) throw twitterRetryDenied()
     cursor = body.cursor.trim()
   }
-  return { platform: 'twitter', query, pageSize, ...(cursor ? { cursor } : {}), type }
+  let params
+  try { if (body.params !== undefined) params = normalizeTwitterSearchParameters(body.params) } catch { throw twitterRetryDenied() }
+  return { platform: 'twitter', query, pageSize, ...(cursor ? { cursor } : {}),
+    ...(params !== undefined ? { params } : {}), type }
 }
 
 function requestRow(row) {

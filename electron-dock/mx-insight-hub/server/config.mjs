@@ -450,6 +450,21 @@ export function loadConfig(environment = process.env) {
         'MX_INSIGHT_PROVINCE_PAGE_DELAY_MS',
         60_000,
       ),
+      // Backlog pages wait at least as long as the previous page took (x
+      // factor, capped), so a slow database slows the catch-up instead of the
+      // catch-up slowing the database. 0 keeps only the fixed page delay.
+      adaptiveDelayFactor: boundedNonNegativeInteger(
+        environment.MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR,
+        1,
+        'MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR',
+        10,
+      ),
+      adaptiveDelayMaxMs: boundedNonNegativeInteger(
+        environment.MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_MAX_MS,
+        60_000,
+        'MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_MAX_MS',
+        600_000,
+      ),
     },
     serverFiles: {
       // A deployment-owned allowlist. API requests may paste an absolute path,
