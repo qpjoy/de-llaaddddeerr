@@ -4,6 +4,7 @@
 
 | 应用 | 职责 | 部署与状态 |
 | --- | --- | --- |
+| [mx-move](mx-move/README.md) | Kubernetes 存储迁移；当前只支持独立根盘上的 etcd 迁移与最新数据回滚 | 独立 `mx-move/scripts/manage.sh` 入口，保留原目录与备份；尚未执行生产迁移 |
 | [mx-pay](mx-pay/README.md) | 统一支付规则与独立交易 API；人工核账、可靠付款事件 | 已实现独立 PostgreSQL + Kubernetes/Compose 一键迁移部署；默认 18230，Hub 存量路径尚未切换 |
 | mx-static | 多媒体持久采集、缓存、文件读取与签名预览 | 独立 Docker Compose，writer + reader，默认 18200 / 18201 |
 | mx-ocr | 图片文字提取、文档精修与 Web 调试 | 独立 Docker，默认 GPU 2，0.0.0.0:8710 |
@@ -92,6 +93,7 @@ bash scripts/manage.sh status
 
 ## 目录边界
 
+- [mx-move/](mx-move/README.md)：Kubernetes 存储迁移专用入口；`etcd/` 负责 etcd 迁移、事务恢复和最新数据回滚，不纳入应用部署/停止命令。
 - `scripts/manage.sh`：应用选择和通用入口；`scripts/apps/jenkins.sh` 保留 Jenkins 原有生命周期实现。
 - `mx-ocr/`、`mx-embedding/`：独立 GPU 应用，各有管理脚本、配置和文档。
 - `scripts/gpu-*.{sh,py}`：统一 GPU 分配与只读启动检查；不改宿主机驱动和全局代理。
