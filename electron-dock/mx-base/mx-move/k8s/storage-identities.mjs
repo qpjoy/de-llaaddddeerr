@@ -21,9 +21,40 @@ const MOUNT_KEYS = ['mountTarget', 'filesystemUUID', 'volumeMountRoot'];
 const same = isDeepStrictEqual;
 const digest = value => createHash('sha256').update(value).digest('hex');
 const encode = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
-const fail = message => { throw new Error(message); };
+const diagnosticDetails = new WeakMap(), guardDetails = new WeakMap();
+class IdentityGuardError extends Error {
+  constructor(message, reason) {
+    super(message);
+    // Only this module's fixed guard messages receive a rule identifier. Never
+    // hash an OS/imported error message, which can contain private file values.
+    guardDetails.set(this, { reason, rule: digest(message).slice(0, 12) });
+  }
+}
+const fail = (message, reason = 'guard_rejected') => { throw new IdentityGuardError(message, reason); };
 const assert = (ok, message) => { if (!ok) fail(message); };
-const parse = bytes => { try { return JSON.parse(bytes.toString('utf8')); } catch { return fail('invalid private identity JSON; values omitted'); } };
+const parse = bytes => { try { return JSON.parse(bytes.toString('utf8')); } catch { return fail('invalid private identity JSON; values omitted', 'invalid_json'); } };
+function scoped(stage, subject, operation, reason) {
+  try { return operation(); }
+  catch (error) {
+    if (error && (typeof error === 'object' || typeof error === 'function') && !diagnosticDetails.has(error)) {
+      diagnosticDetails.set(error, { stage, subject, reason });
+    }
+    throw error;
+  }
+}
+
+export function safeDiagnostic(error) {
+  const guard = guardDetails.get(error), detail = diagnosticDetails.get(error);
+  let code, syntaxError = false;
+  // Imported errors can have accessors/proxies. Diagnostics must not produce a
+  // second exception (and its stack) while handling the original failure.
+  try { code = error?.code; syntaxError = error instanceof SyntaxError; } catch {}
+  const reason = guard?.reason || detail?.reason || (code === 'ENOENT' ? 'missing_path' :
+    ['EACCES', 'EPERM'].includes(code) ? 'permission_denied' : ['ELOOP', 'ENOTDIR'].includes(code) ? 'symlink_or_not_directory' :
+      ['EIO', 'ENOSPC', 'EROFS', 'EMFILE', 'ENFILE', 'EISDIR', 'EEXIST'].includes(code) ? 'io_error' :
+        syntaxError ? 'invalid_json' : 'unexpected_error');
+  return { schema_version: 1, stage: detail?.stage || 'operation', subject: detail?.subject || 'none', reason, rule: guard?.rule || '' };
+}
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const string = value => typeof value === 'string' && value.length > 0;
 const canonical = path => string(path) && path.startsWith('/') && posix.normalize(path) === path && !/[\x00-\x20\x7f\\]/.test(path);
@@ -202,46 +233,54 @@ function context(options, requireRunDirectory = true) {
 }
 
 function sourceFiles(ctx) {
-  return Object.fromEntries(FILES.map(name => {
+  return Object.fromEntries(FILES.map(name => scoped('source-file', name, () => {
     privateDirectory(dirname(ctx.paths[name]), ctx.ownerUid);
     return [name, readPrivate(ctx.paths[name], ctx.ownerUid)];
-  }));
+  })));
 }
 const hashes = files => Object.fromEntries(FILES.map(name => [name, digest(files[name])]));
 
 export function inspectLocal(node, command = run) {
-  const mountFor = path => {
-    const result = parse(Buffer.from(command('findmnt', ['--json', '--target', path, '--output', 'TARGET,UUID,FSROOT,FSTYPE,OPTIONS']))).filesystems;
+  const mountFor = (path, subject) => {
+    const raw = scoped('local-observation', subject, () => command('findmnt', ['--json', '--target', path, '--output', 'TARGET,UUID,FSROOT,FSTYPE,OPTIONS']), 'command_failed');
+    const result = parse(Buffer.from(raw)).filesystems;
     assert(Array.isArray(result) && result.length === 1 && uuid(result[0].uuid) && canonical(result[0].target) &&
       canonical(result[0].fsroot) && ['xfs', 'ext4'].includes(result[0].fstype) && String(result[0].options).split(',').includes('rw'), 'invalid or read-only storage mount');
     return result[0];
   };
   const commonPG = `${ROOTS.common}/postgres/data/pgdata`, payPG = `${ROOTS.pay}/pgdata`;
   const identifier = root => postgresIdentifier(readFileSync(`${root}/global/pg_control`), readFileSync(`${root}/PG_VERSION`, 'utf8'));
-  const common = mountFor(ROOTS.common), pay = mountFor(ROOTS.pay);
-  for (const suffix of ['postgres/data', 'postgres/data/pgdata', 'elasticsearch/data', 'elasticsearch/snapshots']) {
-    const nested = mountFor(`${ROOTS.common}/${suffix}`);
-    assert(same(nested, common), 'mx-common data has a separate nested mount');
-  }
-  assert(same(mountFor(payPG), pay), 'payment PGDATA has a separate mount');
-  return { launcher: localIdentity(node, command), common: { identifier: identifier(commonPG), mountTarget: common.target, filesystemUUID: common.uuid, fsroot: common.fsroot },
-    pay: { systemIdentifier: identifier(payPG), installationID: readFileSync(`${ROOTS.pay}/.installation-id`, 'utf8').trim(),
-      mountTarget: pay.target, filesystemUUID: pay.uuid, volumeMountRoot: posix.join(pay.fsroot, posix.relative(pay.target, ROOTS.pay)), fsroot: pay.fsroot } };
+  const common = scoped('local-observation', 'common', () => mountFor(ROOTS.common, 'common'));
+  const pay = scoped('local-observation', 'pay', () => mountFor(ROOTS.pay, 'pay'));
+  scoped('local-observation', 'common', () => {
+    for (const suffix of ['postgres/data', 'postgres/data/pgdata', 'elasticsearch/data', 'elasticsearch/snapshots']) {
+      const nested = mountFor(`${ROOTS.common}/${suffix}`, 'common');
+      assert(same(nested, common), 'mx-common data has a separate nested mount');
+    }
+  });
+  scoped('local-observation', 'pay', () => assert(same(mountFor(payPG, 'pay'), pay), 'payment PGDATA has a separate mount'));
+  return { launcher: scoped('local-observation', 'launcher', () => localIdentity(node,
+    (...args) => scoped('local-observation', 'launcher', () => command(...args), 'command_failed'))),
+    common: scoped('local-observation', 'common', () => ({ identifier: identifier(commonPG), mountTarget: common.target, filesystemUUID: common.uuid, fsroot: common.fsroot })),
+    pay: scoped('local-observation', 'pay', () => ({ systemIdentifier: identifier(payPG), installationID: readFileSync(`${ROOTS.pay}/.installation-id`, 'utf8').trim(),
+      mountTarget: pay.target, filesystemUUID: pay.uuid, volumeMountRoot: posix.join(pay.fsroot, posix.relative(pay.target, ROOTS.pay)), fsroot: pay.fsroot })) };
 }
 
 function validateOriginal(files, observation, resources, ctx) {
-  const documents = Object.fromEntries(FILES.map(name => [name, parse(files[name])]));
+  const documents = Object.fromEntries(FILES.map(name => [name, scoped('source-file', name, () => parse(files[name]))]));
   const { launcherHost: host, launcherLatest: latest, common, payHost, payCheckpoint: pay } = documents;
-  launcherShape(host);
-  assert(host.node === ctx.node && same(host, observation.launcher), 'Launcher host identity does not match original storage');
-  assert(latest?.version === 1 && latest.namespace === LAUNCHER_NAMESPACE && latest.clusterUid === ctx.clusterUid &&
-    same(latest.identity, host) && latest.checksum === snapshotChecksum(latest), 'Launcher recovery snapshot identity or checksum differs');
-  assert(common?.version === 1 && common.mode === 'local' && common.root === ROOTS.common && common.node === ctx.node &&
+  scoped('validation', 'launcherHost', () => {
+    launcherShape(host);
+    assert(host.node === ctx.node && same(host, observation.launcher), 'Launcher host identity does not match original storage');
+  });
+  scoped('validation', 'launcherLatest', () => assert(latest?.version === 1 && latest.namespace === LAUNCHER_NAMESPACE && latest.clusterUid === ctx.clusterUid &&
+    same(latest.identity, host) && latest.checksum === snapshotChecksum(latest), 'Launcher recovery snapshot identity or checksum differs'));
+  scoped('validation', 'common', () => assert(common?.version === 1 && common.mode === 'local' && common.root === ROOTS.common && common.node === ctx.node &&
     common.identifier === observation.common.identifier && common.mountTarget === observation.common.mountTarget &&
-    common.filesystemUUID === observation.common.filesystemUUID, 'mx-common retained identity differs');
-  validatePayResources(resources, pay, ctx);
-  assert(DISK_KEYS.every(key => payHost?.[key] === pay[key]) && pay.systemIdentifier === observation.pay.systemIdentifier &&
-    pay.installationID === observation.pay.installationID && MOUNT_KEYS.every(key => pay[key] === observation.pay[key]), 'payment disk, installation or PostgreSQL identity differs');
+    common.filesystemUUID === observation.common.filesystemUUID, 'mx-common retained identity differs'));
+  scoped('validation', 'pay', () => validatePayResources(resources, pay, ctx));
+  scoped('validation', 'payHost', () => assert(DISK_KEYS.every(key => payHost?.[key] === pay[key]) && pay.systemIdentifier === observation.pay.systemIdentifier &&
+    pay.installationID === observation.pay.installationID && MOUNT_KEYS.every(key => pay[key] === observation.pay[key]), 'payment disk, installation or PostgreSQL identity differs'));
   return documents;
 }
 
@@ -396,25 +435,29 @@ function protectedAncestors(path, allowMissing = false, allowStickyTemporary = f
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    assert(process.platform === 'linux' && process.getuid() === 0, 'run as root on the Linux Kubernetes host');
-    const [action, requestFile, ...extra] = process.argv.slice(2);
-    assert(['check', 'prepare', 'update', 'restore', 'patches', 'restore-patches', 'verify', 'verify-restored', 'verify-local', 'verify-local-restored'].includes(action) && canonical(requestFile) && !extra.length,
-      'usage: storage-identities.mjs check|prepare|update|restore|patches|restore-patches|verify|verify-restored|verify-local|verify-local-restored PRIVATE_REQUEST.json');
-    const options = parse(readPrivate(requestFile, 0));
-    assert(!['paths', 'observation', 'ownerUid', 'targetBase'].some(k => Object.hasOwn(options, k)), 'production identity request cannot override observation or fixed receipt paths');
-    assert(/^\/var\/lib\/mx-move\/k8s-transactions\/mx-k8s-\d{8}-\d{6}-[a-f0-9]{8}$/.test(options.runDirectory), 'invalid production transaction directory');
-    const checked = context(options, false);
+    const { action, requestFile, options, checked } = scoped('request', 'request', () => {
+      assert(process.platform === 'linux' && process.getuid() === 0, 'run as root on the Linux Kubernetes host');
+      const [action, requestFile, ...extra] = process.argv.slice(2);
+      assert(['check', 'prepare', 'update', 'restore', 'patches', 'restore-patches', 'verify', 'verify-restored', 'verify-local', 'verify-local-restored'].includes(action) && canonical(requestFile) && !extra.length,
+        'usage: storage-identities.mjs check|prepare|update|restore|patches|restore-patches|verify|verify-restored|verify-local|verify-local-restored PRIVATE_REQUEST.json');
+      const options = parse(readPrivate(requestFile, 0));
+      assert(!['paths', 'observation', 'ownerUid', 'targetBase'].some(k => Object.hasOwn(options, k)), 'production identity request cannot override observation or fixed receipt paths');
+      assert(/^\/var\/lib\/mx-move\/k8s-transactions\/mx-k8s-\d{8}-\d{6}-[a-f0-9]{8}$/.test(options.runDirectory), 'invalid production transaction directory');
+      return { action, requestFile, options, checked: context(options, false) };
+    });
     // A preflight request can live in a root-owned 0700 mkdtemp directory under
     // sticky /tmp. No formal transaction directory is needed by `check`.
-    privateDirectory(dirname(requestFile), 0);
-    protectedAncestors(requestFile, false, true);
-    for (const path of Object.values(checked.paths)) protectedAncestors(path);
-    protectedAncestors(checked.runDirectory, action === 'check');
-    const result = action === 'check' ? check(options) : action === 'prepare' ? prepare(options) : ['update', 'restore'].includes(action) ? reconcile(options, action === 'restore') :
-      inspect(options, { restore: ['restore-patches', 'verify-restored', 'verify-local-restored'].includes(action), writePatches: action.endsWith('patches'), requireApplied: action.startsWith('verify'), localOnly: action.startsWith('verify-local') });
+    scoped('protected-path', 'request', () => {
+      privateDirectory(dirname(requestFile), 0);
+      protectedAncestors(requestFile, false, true);
+    });
+    for (const [name, path] of Object.entries(checked.paths)) scoped('protected-path', name, () => protectedAncestors(path));
+    scoped('protected-path', 'transaction', () => protectedAncestors(checked.runDirectory, action === 'check'));
+    const result = scoped('operation', 'none', () => action === 'check' ? check(options) : action === 'prepare' ? prepare(options) : ['update', 'restore'].includes(action) ? reconcile(options, action === 'restore') :
+      inspect(options, { restore: ['restore-patches', 'verify-restored', 'verify-local-restored'].includes(action), writePatches: action.endsWith('patches'), requireApplied: action.startsWith('verify'), localOnly: action.startsWith('verify-local') }));
     console.log(JSON.stringify(result));
   } catch (error) {
-    console.error(`Storage identity update stopped: ${error.code || error instanceof SyntaxError ? 'cannot safely read/write private identity files; values omitted' : error.message}`);
+    console.error(`MX_MOVE_IDENTITY_DIAGNOSTIC=${JSON.stringify(safeDiagnostic(error))}`);
     process.exitCode = 1;
   }
 }

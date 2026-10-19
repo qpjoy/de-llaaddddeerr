@@ -47,6 +47,55 @@ CLUSTER_UID = '399f2349-3a34-48f4-8105-d7bae56ca136'
 ROOT_UUID = 'ea7e456d-19db-4f6e-b8b0-02c00f59d066'
 SOURCE_UUID = '45fa3b72-5a59-4d3c-9a57-4f61aee13e5e'
 REPO = Path(__file__).resolve().parents[3]
+IDENTITY_HELPER = Path(__file__).with_name('storage-identities.mjs')
+IDENTITY_ACTIONS = ('check', 'prepare', 'update', 'restore', 'patches', 'restore-patches',
+                    'verify', 'verify-restored', 'verify-local', 'verify-local-restored')
+
+
+def identity_diagnostic(stderr):
+    """Project only the helper's bounded diagnostic protocol, never raw errors."""
+    prefix = b'MX_MOVE_IDENTITY_DIAGNOSTIC='
+    if isinstance(stderr, bytes) and len(stderr) <= 2048 and stderr.startswith(prefix):
+        try:
+            value = json.loads(stderr[len(prefix):], object_pairs_hook=candidate_guard.unique_object)
+            if (isinstance(value, dict) and set(value) == {'schema_version', 'stage', 'subject', 'reason', 'rule'} and
+                    type(value['schema_version']) is int and value['schema_version'] == 1 and
+                    value['stage'] in ('request', 'protected-path', 'source-file', 'local-observation', 'validation', 'operation') and
+                    value['subject'] in ('none', 'request', 'transaction', 'launcherHost', 'launcherLatest',
+                                         'common', 'payHost', 'payCheckpoint', 'launcher', 'pay') and
+                    value['reason'] in ('guard_rejected', 'invalid_json', 'missing_path', 'permission_denied',
+                                        'symlink_or_not_directory', 'io_error', 'command_failed', 'unexpected_error') and
+                    isinstance(value['rule'], str) and re.fullmatch(r'(?:[a-f0-9]{12})?', value['rule'])):
+                return value
+        except (ValueError, TypeError, RecursionError, candidate_guard.GuardError):
+            pass
+    # Node may fail while parsing/importing, before the helper's catch can run.
+    # Match fixed signatures only; filenames, source lines and stacks stay hidden.
+    raw = stderr if isinstance(stderr, bytes) else b''
+    reason = 'unclassified_failure'
+    if b'ERR_MODULE_NOT_FOUND' in raw or b"code: 'MODULE_NOT_FOUND'" in raw:
+        reason = 'dependency_missing'
+    elif b'does not provide an export named' in raw:
+        reason = 'dependency_export_mismatch'
+    elif b'SyntaxError:' in raw:
+        reason = 'javascript_syntax_error'
+    elif b'structuredClone is not defined' in raw or b'Object.hasOwn is not a function' in raw:
+        reason = 'node_api_unavailable'
+    return {'schema_version': 1, 'stage': 'node-bootstrap-or-legacy-helper', 'subject': 'none',
+            'reason': reason, 'rule': ''}
+
+
+def identity_node_version():
+    """A failed diagnostic probe must not replace the original helper failure."""
+    try:
+        result = subprocess.run(['node', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=5, env=dict(os.environ, LC_ALL='C'))
+        match = re.fullmatch(rb'v([0-9]+)\.([0-9]+)\.([0-9]+)(?:-[A-Za-z0-9.-]+)?\s*', result.stdout)
+        if result.returncode == 0 and match:
+            return 'v' + '.'.join(part.decode('ascii') for part in match.groups())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return 'unknown'
 
 
 def raw_json(value):
@@ -134,6 +183,12 @@ class Host:
         try:
             result = subprocess.run([str(v) for v in args], input=input_data, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, timeout=timeout, env=dict(os.environ, LC_ALL='C'))
+            if (result.returncode != 0 and len(args) == 4 and str(args[0]) == 'node' and
+                    str(args[1]) == str(IDENTITY_HELPER) and args[2] in IDENTITY_ACTIONS):
+                detail = identity_diagnostic(result.stderr)
+                detail.update(action=args[2], exit_code=result.returncode, node_version=identity_node_version())
+                raise prep.Refuse('存储身份子命令失败；identity_diagnostics=' +
+                                  json.dumps(detail, ensure_ascii=True, separators=(',', ':')))
             require(result.returncode == 0, '迁移子命令失败：{}，退出码 {}（原始输出已隐藏）'.format(Path(str(args[0])).name, result.returncode))
             return result.stdout
         except (OSError, subprocess.TimeoutExpired):

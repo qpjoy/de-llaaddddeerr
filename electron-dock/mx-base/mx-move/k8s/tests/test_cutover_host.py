@@ -31,6 +31,73 @@ def journal():
             'storage': {'entries': []}, 'cluster': {}}
 
 
+class IdentityCommandDiagnosticsTests(unittest.TestCase):
+    def report(self, **changes):
+        result = {'schema_version': 1, 'stage': 'source-file', 'subject': 'payCheckpoint',
+                  'reason': 'missing_path', 'rule': ''}
+        result.update(changes)
+        return result
+
+    def failure(self, stderr, args=None, version=None):
+        host = host_without_initialization()
+        command = args or ['node', cutover.IDENTITY_HELPER, 'check', '/private-request.json']
+        failed = SimpleNamespace(returncode=1, stdout=b'private-stdout', stderr=stderr)
+        version = version or SimpleNamespace(returncode=0, stdout=b'v22.21.1\n', stderr=b'')
+        with mock.patch.object(cutover.subprocess, 'run', side_effect=[failed, version]) as run:
+            with self.assertRaises(cutover.prep.Refuse) as caught:
+                host.run(command, 120)
+        text = str(caught.exception)
+        self.assertNotIn('private-', text)
+        return text, run
+
+    def test_helper_failure_exposes_only_validated_report_and_numeric_node_version(self):
+        report = self.report()
+        message, run = self.failure(b'MX_MOVE_IDENTITY_DIAGNOSTIC=' + json.dumps(report).encode() + b'\n')
+        detail = json.loads(message.split('identity_diagnostics=', 1)[1])
+        self.assertEqual(detail, dict(report, action='check', exit_code=1, node_version='v22.21.1'))
+        self.assertEqual(run.call_args_list[1].args[0], ['node', '--version'])
+
+    def test_bootstrap_errors_classified_without_paths_code_or_stack(self):
+        for raw, reason in [(b'Error [ERR_MODULE_NOT_FOUND]: private-module', 'dependency_missing'),
+                            (b'SyntaxError: private-module does not provide an export named private-key', 'dependency_export_mismatch'),
+                            (b'SyntaxError: private-source-line', 'javascript_syntax_error'),
+                            (b'TypeError: Object.hasOwn is not a function private-data', 'node_api_unavailable'),
+                            (b'private-error', 'unclassified_failure')]:
+            with self.subTest(reason=reason):
+                message, _ = self.failure(raw)
+                self.assertEqual(json.loads(message.split('identity_diagnostics=', 1)[1])['reason'], reason)
+
+    def test_malformed_or_expanded_protocol_never_exposes_arbitrary_values(self):
+        for report in [self.report(subject='private-secret'), self.report(reason='private-secret'),
+                       self.report(rule='private-secret'), self.report(stderr='private-secret'),
+                       self.report(schema_version=True), ['private-secret']]:
+            with self.subTest(report=report):
+                message, _ = self.failure(b'MX_MOVE_IDENTITY_DIAGNOSTIC=' + json.dumps(report).encode())
+                self.assertIn('unclassified_failure', message)
+        for raw in [b'MX_MOVE_IDENTITY_DIAGNOSTIC={"stage":"private-first","stage":"private-second"}',
+                    b'MX_MOVE_IDENTITY_DIAGNOSTIC=invalid private-json',
+                    b'MX_MOVE_IDENTITY_DIAGNOSTIC=' + b'[' * 1000 + b'0' + b']' * 1000,
+                    b'MX_MOVE_IDENTITY_DIAGNOSTIC=' + json.dumps(self.report()).encode() + b'\nprivate-stack']:
+            message, _ = self.failure(raw)
+            self.assertIn('unclassified_failure', message)
+
+    def test_other_commands_keep_original_output_hidden(self):
+        for command in [['node', '/another-helper.mjs', 'check', '/private-request.json'], ['kubectl', 'get', 'secret']]:
+            message, run = self.failure(b'private-stderr', command)
+            self.assertIn('原始输出已隐藏', message)
+            self.assertNotIn('identity_diagnostics', message)
+            self.assertEqual(run.call_count, 1)
+
+    def test_version_probe_failure_does_not_mask_original_diagnostic(self):
+        for probe in [cutover.subprocess.TimeoutExpired('node', 5, stderr=b'private-stderr'),
+                      OSError('private-error'), SimpleNamespace(returncode=1, stdout=b'private-output', stderr=b'private-error')]:
+            with self.subTest(probe=type(probe).__name__):
+                message, _ = self.failure(b'MX_MOVE_IDENTITY_DIAGNOSTIC=' + json.dumps(self.report()).encode(), version=probe)
+                detail = json.loads(message.split('identity_diagnostics=', 1)[1])
+                self.assertEqual(detail['reason'], 'missing_path')
+                self.assertEqual(detail['node_version'], 'unknown')
+
+
 class DockerSnapshotTests(unittest.TestCase):
     def fixture(self, first=None, second=None, mounts=None, complete=True):
         report = {'complete': complete, 'info': {'root': '/data/docker'},

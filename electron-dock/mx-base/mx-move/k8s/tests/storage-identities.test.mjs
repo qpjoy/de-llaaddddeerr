@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ROOTS, assertLauncherOnlyChange, assertPayMountOnlyChange, snapshotChecksum, payPatches, check, prepare, reconcile, inspect } from '../storage-identities.mjs';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { ROOTS, assertLauncherOnlyChange, assertPayMountOnlyChange, snapshotChecksum, payPatches, check, prepare, reconcile, inspect, inspectLocal, safeDiagnostic } from '../storage-identities.mjs';
 import { databaseResources } from '../../../mx-pay/scripts/postgres.mjs';
 import { snapshotChecksum as etcdSnapshotChecksum } from '../../etcd/launcher-identity.mjs';
 
@@ -243,4 +246,87 @@ test('unknown init containers and custom startup commands are refused before bac
   delete f.resources.statefulSet.spec.template.spec.initContainers;
   f.resources.statefulSet.spec.template.spec.containers[0].command[2] += '; extra';
   assert.throws(() => prepare(f.options), /command or image changed/);
+});
+
+function diagnosticFor(operation) {
+  let failure;
+  try { operation(); } catch (error) { failure = error; }
+  assert.ok(failure, 'the rejected operation must still throw');
+  return safeDiagnostic(failure);
+}
+
+test('missing retained file has a fixed diagnostic without its filesystem path', t => {
+  const f = fixture(t);
+  unlinkSync(f.paths.payCheckpoint);
+  const detail = diagnosticFor(() => check(f.options));
+  assert.deepEqual(detail, { schema_version: 1, stage: 'source-file', subject: 'payCheckpoint', reason: 'missing_path', rule: '' });
+  assert.ok(!JSON.stringify(detail).includes(f.directory));
+});
+
+test('private file permission guard retains its decision and exposes only its fixed rule', t => {
+  const f = fixture(t);
+  chmodSync(f.paths.payCheckpoint, 0o644);
+  const detail = diagnosticFor(() => check(f.options));
+  assert.deepEqual(detail, { schema_version: 1, stage: 'source-file', subject: 'payCheckpoint', reason: 'guard_rejected',
+    rule: createHash('sha256').update('identity file must be a private regular file').digest('hex').slice(0, 12) });
+  assert.ok(!JSON.stringify(detail).includes(f.directory));
+});
+
+test('malformed private JSON does not expose contents or hash the parser message', t => {
+  const f = fixture(t);
+  writeFileSync(f.paths.launcherLatest, '{"credential":"do-not-print-secret",INVALID', { mode: 0o600 });
+  const detail = diagnosticFor(() => check(f.options));
+  assert.deepEqual(detail, { schema_version: 1, stage: 'source-file', subject: 'launcherLatest', reason: 'invalid_json',
+    rule: createHash('sha256').update('invalid private identity JSON; values omitted').digest('hex').slice(0, 12) });
+  assert.ok(!JSON.stringify(detail).includes('do-not-print'));
+});
+
+test('Launcher mismatch identifies its guard without exposing identity or credentials', t => {
+  const f = fixture(t);
+  f.observation.launcher.ca = 'f'.repeat(64);
+  const detail = diagnosticFor(() => check(f.options));
+  assert.deepEqual(detail, { schema_version: 1, stage: 'validation', subject: 'launcherHost', reason: 'guard_rejected',
+    rule: createHash('sha256').update('Launcher host identity does not match original storage').digest('hex').slice(0, 12) });
+  assert.ok(!JSON.stringify(detail).includes('do-not-print'));
+  assert.ok(!JSON.stringify(detail).includes(f.observation.launcher.ca));
+});
+
+test('unknown errors cannot inject a diagnostic or derive a rule from private text', () => {
+  for (const failure of [new Error('credential=do-not-print'), new TypeError('private=value'), null, 'do-not-print']) {
+    if (failure && typeof failure === 'object') Object.assign(failure, { stage: 'private-stage', subject: 'private-subject', reason: 'private-reason', rule: 'private-rule' });
+    assert.deepEqual(safeDiagnostic(failure), { schema_version: 1, stage: 'operation', subject: 'none', reason: 'unexpected_error', rule: '' });
+  }
+});
+
+test('diagnostics remain safe when an imported exception has hostile accessors', () => {
+  const failure = new Proxy({}, { get() { throw new Error('do-not-print'); }, getPrototypeOf() { throw new Error('do-not-print'); } });
+  assert.deepEqual(safeDiagnostic(failure), { schema_version: 1, stage: 'operation', subject: 'none', reason: 'unexpected_error', rule: '' });
+});
+
+test('OS error codes map to fixed reasons without echoing private file names', () => {
+  for (const [code, reason] of [['ENOENT', 'missing_path'], ['EACCES', 'permission_denied'], ['EPERM', 'permission_denied'],
+    ['ELOOP', 'symlink_or_not_directory'], ['ENOTDIR', 'symlink_or_not_directory'], ['EIO', 'io_error'], ['PRIVATE_SECRET', 'unexpected_error']]) {
+    const detail = safeDiagnostic(Object.assign(new Error('do-not-print'), { code, path: '/private/secret' }));
+    assert.deepEqual(detail, { schema_version: 1, stage: 'operation', subject: 'none', reason, rule: '' });
+  }
+});
+
+test('local inspection command failures report the product and never command output', () => {
+  const detail = diagnosticFor(() => inspectLocal(node, () => { throw new Error('command output credential=do-not-print'); }));
+  assert.deepEqual(detail, { schema_version: 1, stage: 'local-observation', subject: 'common', reason: 'command_failed', rule: '' });
+});
+
+test('CLI failure emits only a single machine diagnostic and no error stack', () => {
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('../storage-identities.mjs', import.meta.url)), 'private-secret-action'], { encoding: 'utf8' });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  const lines = result.stderr.trim().split('\n');
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].startsWith('MX_MOVE_IDENTITY_DIAGNOSTIC='));
+  const detail = JSON.parse(lines[0].slice('MX_MOVE_IDENTITY_DIAGNOSTIC='.length));
+  assert.equal(detail.stage, 'request');
+  assert.equal(detail.subject, 'request');
+  assert.equal(detail.reason, 'guard_rejected');
+  assert.match(detail.rule, /^[a-f0-9]{12}$/);
+  assert.ok(!result.stderr.includes('private-secret'));
 });
