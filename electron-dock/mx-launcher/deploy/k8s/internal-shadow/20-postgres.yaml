@@ -25,6 +25,11 @@ metadata:
 spec:
   serviceName: mx-internal-postgres
   replicas: 1
+  # Template changes never restart the running database. CPU/memory changes are
+  # applied to the live Pod in place by `scripts/manage.sh db apply` (also run
+  # after the unified deploy); anything else waits for a planned Pod deletion.
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
       app.kubernetes.io/name: mx-internal-postgres
@@ -90,13 +95,15 @@ spec:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
           resources:
+            # Every MX-H2I/Hub/Compass login, introspection and audit write goes
+            # through this database; 1 CPU throttled it under load.
             requests:
-              cpu: 100m
-              memory: 256Mi
+              cpu: 250m
+              memory: 512Mi
               ephemeral-storage: 256Mi
             limits:
-              cpu: 1000m
-              memory: 1Gi
+              cpu: "4"
+              memory: 4Gi
               ephemeral-storage: 1Gi
   volumeClaimTemplates:
     - metadata:

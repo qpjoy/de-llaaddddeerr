@@ -14,6 +14,7 @@ Web Search 的八家适配器已在 Hub。若服务器 `.env.internal` 已配置
 
 | 项目 | 当前约定 |
 | --- | --- |
+| Kubernetes 控制面 | 使用当前 kubeconfig 的 API Server（本环境 `192.168.1.2:6443`）；Launcher 和 Hub 部署共用，不是 SSO 服务 |
 | Hub 命名空间 | `mx-insight-hub`：Admin、Public、ingest、projector、classifier、retrieval、迁移 Job |
 | 共享数据命名空间 | `mx-common`：PostgreSQL、Elasticsearch、Redis，按需安装 HanLP |
 | PostgreSQL | PG16 / pgvector；数据库及产品角色均为 `mx_insight_hub`；共享管理角色为 `mx_common` |
@@ -59,16 +60,17 @@ PG、ES 使用 Service DNS，不固定 Kubernetes ClusterIP 或 Pod IP，它们�
 
 ```bash
 MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 \
+  MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 \
   bash scripts/manage.sh ops internal-production deploy
 ```
 
 需要原数据盘已挂载、Kubernetes/containerd 可用，以及 Node.js ≥ 22.18、kubectl、findmnt、flock、Docker、ctr。**不需要提前手动启动 mx-common。** 正常 deploy 的顺序是：
 
-1. 取得部署锁并核对配置/凭据连续性；新部署锁记录主机 boot ID，重启后即使 PID 被复用也可识别旧锁。Linux 进程锁防止两个部署同时清理旧锁。正在运行的部署/恢复仍会被阻止。
+1. 使用 Launcher/Hub 共用的轻量控制面检查，读取当前 kubeconfig 的 API Server，为其设置进程内代理绕过并有限重试 `/readyz`；随后确认单节点、取得部署锁并核对配置/凭据连续性。新部署锁记录主机 boot ID，重启后即使 PID 被复用也可识别旧锁。Linux 进程锁防止两个部署同时清理旧锁。正在运行的部署/恢复仍会被阻止。
 2. `mx-common ensure` 核验原盘/原库，复用既有卷，创建缺失的核心工作负载/Service，将 PG、ES、Redis 恢复到 1；已安装的 HanLP 也恢复到 1。先等依赖可用。
 3. `provision mx-insight-hub` 使用保留的产品凭据。已有凭据但数据库或角色不存在时停止，绝不把“重建空数据库”当成恢复。只有角色、库和凭据均不存在的首次产品安装才允许初始化。
 4. 关闭 projector 的重启全量索引入口，再构建 Hub 镜像并导入 containerd。
-5. 保留运行配置，冻结 Hub Admin 写入，终止并确认前次迁移 Job/Pod 已退出，再执行本版迁移；迁移失败不会无限自动重试。
+5. 构建后再次检查控制面，成功后才进入 Hub 配置应用、Admin 冻结和迁移。保留运行配置，冻结 Hub Admin 写入，终止并确认前次迁移 Job/Pod 已退出，再执行本版迁移；迁移失败不会无限自动重试。
 6. 迁移成功后核对 Hub 查询索引，包括新闻按入库时间与发布时间的两条索引；缺失时并发创建，定义匹配但无效时并发修复。已有有效索引复用；同名定义冲突会停止部署并提示检查。索引校验通过后启动 Public/Admin，再恢复四种后台 worker 到清单副本数；完成依赖、工作负载、API 检查后才报告完整成功。
 
 新闻查询的 PostgreSQL `statement_timeout` 默认 15 秒，可在 `.env.internal` 设置 `MX_INSIGHT_NEWS_QUERY_TIMEOUT_MS=30000` 改为 30 秒（范围 1000–60000 毫秒）。未配置时沿用已部署值；首次部署默认 15000，显式空值恢复默认。deploy 在发布 ConfigMap 前校验该值，应用通过事务内 `set_config(..., true)` 设置，仅作用于新闻 SQL，不改变共享 PostgreSQL 全局配置或 MX-H2I 登录/联网。更新超时需要本版 Hub 镜像和正常 deploy。
@@ -76,6 +78,40 @@ MX_INSIGHT_BUILD_PROXY=http://127.0.0.1:7788 \
 新闻索引由 `scripts/news-discovery-serving-indexes.sql` 在 Hub 库单独执行，位于迁移事务之外。仅新建或修复后执行 `ANALYZE`；重复部署不重建有效索引，也不重复全表统计。首次补索引会增加数据库 I/O；失败时停止 API 发布，可在解决原因后重跑 deploy。
 
 后台队列会按数据库里原有启停、预算、并发和检查点继续处理；正常部署不创建全量索引、向量初始化或重新采集任务。应用版本有新迁移时仍执行正常 schema 升级，这不是逐字节不变的备份恢复。
+
+### `192.168.1.2:6443 connection refused`
+
+这是共享 Kubernetes API Server 的连接失败，不能归因于 Launcher SSO。
+`MX_INSIGHT_SYNC_LAUNCHER=0` 关闭的是 Hub 对 Launcher 配置及工作负载的同步，
+不关闭 Kubernetes 依赖，也不跳过控制面检查。Hub 与 Launcher 需同步本次脚本及
+`../mx-launcher/scripts/k8s-control-plane.sh`；检查直接加载这个函数库，不执行 Launcher deploy。
+
+两个项目均可在各自目录运行以下只读检查，无需 Hub Admin Token：
+
+```bash
+bash scripts/manage.sh ops internal-production control-plane-preflight
+```
+
+预检沿用调用者当前 kubeconfig，不自动切换上下文或修改 kubeconfig。
+默认最多检查 6 次，每次 HTTP 请求超时 5 秒、失败后间隔 2 秒；
+`MX_K8S_APISERVER_PREFLIGHT_ATTEMPTS` / `MX_K8S_APISERVER_PREFLIGHT_TIMEOUT` 可调整检查预算。
+它保留现有代理配置，只给实际 API Server 和集群本地地址补充 `NO_PROXY` / `no_proxy`，
+不会修改 Docker 构建代理或 kubeconfig 中显式设置的 `proxy-url`。
+
+持续失败会停止部署，初始检查失败时不会协调 mx-common、构建镜像或冻结 Admin。
+构建后检查失败时保留此前已完成的步骤，阻止后续 Hub apply/冻结/迁移。
+检查不会启动或重启 kubelet、containerd、etcd、Launcher 或 SSO，也不会重置集群。
+在实际控制面宿主机上进一步核对：
+
+```bash
+kubectl --request-timeout=5s get --raw='/readyz?verbose'
+systemctl is-active kubelet containerd
+sudo ss -lntp '( sport = :6443 or sport = :2379 )'
+```
+
+端口持续拒绝连接需要结合本机服务、静态 Pod 和存储证据处理；增加应用 rollout 等待时间
+不能修复持续离线的 API Server。`/readyz` 成功只确认当前 API 可用，不证明控制器持续协调、
+数据库或应用已经恢复；原有冻结确认、迁移完成和 rollout 验收仍须全部通过。
 
 `MX_INSIGHT_REQUIRE_SEARCH` 默认 `1`。若旧 `.env.internal` 中明确设置 `0`，请删除该覆盖或改为 `1` 才是“全部服务恢复”的验收方式；0 只表示允许降级，仍不能绕过存储/凭据保护。其他值会被拒绝。
 

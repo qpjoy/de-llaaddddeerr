@@ -174,6 +174,16 @@ function boundedNonNegativeInteger(value, fallback, name, maximum) {
   return parsed
 }
 
+// Only for workers whose PG writes are re-derivable bookkeeping. `on` restores
+// the server default (wait for the WAL flush on every COMMIT).
+function synchronousCommitSetting(value, fallback, name) {
+  if (value == null || value === '') return fallback
+  if (!['on', 'off'].includes(value)) {
+    throw new AppError(500, 'invalid_configuration', `${name} must be on or off`)
+  }
+  return value
+}
+
 function required(environment, name) {
   const value = environment[name]?.trim()
   if (!value) throw new AppError(500, 'invalid_configuration', `${name} is required`)
@@ -293,6 +303,8 @@ export function loadConfig(environment = process.env) {
     timeoutMs: positiveInteger(environment.MX_INSIGHT_LAUNCHER_TIMEOUT_MS, 3_000, 'MX_INSIGHT_LAUNCHER_TIMEOUT_MS'),
     // Bounds how long a revoked Launcher token can still be accepted here.
     cacheTtlMs: positiveInteger(environment.MX_INSIGHT_LAUNCHER_CACHE_TTL_MS, 30_000, 'MX_INSIGHT_LAUNCHER_CACHE_TTL_MS'),
+    // Only while Launcher is unavailable; 0 disables the bridge.
+    staleGraceMs: boundedNonNegativeInteger(environment.MX_INSIGHT_LAUNCHER_STALE_GRACE_MS, 120_000, 'MX_INSIGHT_LAUNCHER_STALE_GRACE_MS', 600_000),
     // Launcher scopes that confer Hub platform-admin. Empty by default: nobody
     // becomes a Hub administrator merely by holding a Launcher account, and the
     // list is operator configuration rather than something a token can assert.
@@ -367,6 +379,7 @@ export function loadConfig(environment = process.env) {
     },
     projectorWorker: {
       postBatchDelayMs: boundedNonNegativeInteger(environment.MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS, 250, 'MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS', 60000),
+      synchronousCommit: synchronousCommitSetting(environment.MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT, 'off', 'MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT'),
     },
     paymentReporting: listenerMode==='public' ? null : reportingConfig(environment),
     paymentDeliverySources: listenerMode==='public' ? '' : environment.MX_INSIGHT_PAYMENT_DELIVERY_SOURCES || '',
@@ -436,6 +449,21 @@ export function loadConfig(environment = process.env) {
         2_000,
         'MX_INSIGHT_PROVINCE_PAGE_DELAY_MS',
         60_000,
+      ),
+      // Backlog pages wait at least as long as the previous page took (x
+      // factor, capped), so a slow database slows the catch-up instead of the
+      // catch-up slowing the database. 0 keeps only the fixed page delay.
+      adaptiveDelayFactor: boundedNonNegativeInteger(
+        environment.MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR,
+        1,
+        'MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR',
+        10,
+      ),
+      adaptiveDelayMaxMs: boundedNonNegativeInteger(
+        environment.MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_MAX_MS,
+        60_000,
+        'MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_MAX_MS',
+        600_000,
       ),
     },
     serverFiles: {

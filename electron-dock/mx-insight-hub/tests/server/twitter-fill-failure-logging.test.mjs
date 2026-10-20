@@ -6,9 +6,11 @@ import { ExternalPlatformGateway } from '../../server/external-platforms/gateway
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
 import { RapidApiAdapter } from '../../server/adapters/rapidapi.mjs'
+import { executeDataSearchV2 } from '../../server/data/search-protocol.mjs'
+import { SearchProtocolStore } from '../../server/data/search-protocol-store.mjs'
 
 const secret='PRIVATE-query-cursor-authorization-sql-detail'
-async function fixture({ method, loggerThrows=false, diagnosticWriteFails=false, wrapped=false, malicious=false, pageSize=1, pages=null }={}) {
+async function fixture({ method, loggerThrows=false, diagnosticWriteFails=false, wrapped=false, malicious=false, pageSize=1, pages=null, requestDeadline=false }={}) {
   const usage=new MemoryStore(), pepper='twitter-failure-logging-offline-pepper'
   let diagnosticWrites=0
   const recordFailure=usage.recordRequestFailure.bind(usage)
@@ -34,8 +36,10 @@ async function fixture({ method, loggerThrows=false, diagnosticWriteFails=false,
       unitCostMinorByEndpoint:{'twitter-aio.search':1}}},{runtime:{config,credentialConfigured:true}})
   const store=new MemoryExternalPlatformStore({usageStore:usage,providerKey:'rapidapi',authorizationPlatform:'twitter',circuitFailureThreshold:100})
   let calls=0
-  const adapter=new RapidApiAdapter({apiKey:secret,timeoutMs:100,fetchImpl:async()=>{
+  const adapter=new RapidApiAdapter({apiKey:secret,timeoutMs:100,fetchImpl:async(_url,options)=>{
     calls++
+    if(requestDeadline) return new Promise((_resolve,reject)=>options.signal.addEventListener('abort',
+      ()=>reject(new DOMException('synthetic upstream request deadline','AbortError')),{once:true}))
     const page=pages?.[calls-1] || {ids:['1'],next:null}
     return Response.json({entries:[
       ...page.ids.map(id=>({content:{itemContent:{tweet_results:{result:{rest_id:id,legacy:{full_text:secret}}}}}})),
@@ -50,11 +54,43 @@ async function fixture({ method, loggerThrows=false, diagnosticWriteFails=false,
   if(malicious) failure.name=secret
   if(method) store[method]=async()=>{throw wrapped?Object.assign(new Error(secret),{code:'external_platform_call_persistence_unknown',cause:failure}):failure}
   const body={platform:'twitter',query:secret,pageSize,type:'stable'}
+  let fallbackCalls=0
+  const rejectedFallback=requestDeadline?{begin:async()=>{},allowed:async()=>true,prepare:async()=>{},
+    run:async()=>{fallbackCalls++;throw new Error('an unknown deadline must never switch suppliers')}}:null
   const invoke=({cursor,idempotencyKey='same-offline-failure-key'}={})=>gateway.searchRaw(context,{
     body:{...body,...(cursor?{cursor}:{})},normalized:{platform:'twitter',query:secret,pageSize,...(cursor?{cursor}:{})},
-    idempotencyKey,dataSearch:{resultType:'stable',replayWindowMs:null}})
-  return {usage,store,logs,invoke,calls:()=>calls,diagnosticWrites:()=>diagnosticWrites}
+    idempotencyKey,dataSearch:{resultType:'stable',replayWindowMs:null}},{rejectedFallback})
+  let v2Executions=0
+  const invokeV2=()=>executeDataSearchV2({store:usage,context,pepper,idempotencyKey:'same-offline-failure-key',
+    body:{platform:'twitter',query:secret,pageSize,type:'fresh',timeWindow:{from:'2026-10-18T00:00:00.000Z',
+      to:'2026-10-19T00:00:00.000Z',timezone:'Asia/Shanghai',boundary:'[from,to)'}},
+    execute:async()=>{v2Executions++;return invoke()}})
+  return {usage,store,logs,invoke,invokeV2,context,v2Executions:()=>v2Executions,calls:()=>calls,
+    fallbackCalls:()=>fallbackCalls,diagnosticWrites:()=>diagnosticWrites}
 }
+
+test('a real Twitter request deadline remains an owned v2 unknown without another execution or supplier switch',async()=>{
+  const f=await fixture({requestDeadline:true})
+  let responseError
+  await assert.rejects(f.invokeV2(),error=>{responseError=error;return error.code==='request_outcome_unknown' && error.status===409})
+  const saved=[...f.usage.requests.values()][0], call=[...f.store.calls.values()][0]
+  assert.equal(saved.status,'unknown');assert.equal(saved.errorCode,'social_upstream_timeout_or_size_limit')
+  assert.equal(responseError.details.requestId,saved.id);assert.equal(responseError.details.automaticRetryAllowed,false)
+  assert.equal(call.outcome,'unknown');assert.equal(call.httpStatus,null);assert.equal(call.billed,null)
+  const failure=f.store.responseArchives.get(call.id).rawPayload.response.transportFailure
+  assert.equal(failure.phase,'request');assert.equal(failure.deadlineExceeded,true);assert.equal(failure.timeoutMs,100)
+  assert.equal(f.store.restrictedResponseArchives.size,0)
+  assert.equal(f.usage.customerCharges.get(saved.id).status,'unknown')
+  const beforeUsage=structuredClone(saved),beforeCall=structuredClone(call),beforeCharge=structuredClone(f.usage.customerCharges.get(saved.id))
+  const binding=await new SearchProtocolStore(f.usage).binding(f.context,'same-offline-failure-key')
+  assert.equal(binding.state,'unknown');assert.equal(binding.usageRequestId,saved.id)
+  await assert.rejects(f.invokeV2(),error=>error.code==='request_outcome_unknown' && error.status===409
+    && error.details.requestId===saved.id && error.details.automaticRetryAllowed===false)
+  assert.equal(f.v2Executions(),1);assert.equal(f.calls(),1);assert.equal(f.fallbackCalls(),0)
+  assert.deepEqual(f.usage.requests.get(saved.id),beforeUsage)
+  assert.deepEqual(f.store.calls.get(call.id),beforeCall)
+  assert.deepEqual(f.usage.customerCharges.get(saved.id),beforeCharge)
+})
 
 for(const [method,phase] of [['stageProviderEvidence','stage_evidence'],['finishProviderStep','finish_step'],['commitTwitterFillDelivery','commit_delivery']]) {
   test(`Twitter ${phase} failure persists and logs metadata once while preserving unknown, hold and no automatic retry`,async()=>{

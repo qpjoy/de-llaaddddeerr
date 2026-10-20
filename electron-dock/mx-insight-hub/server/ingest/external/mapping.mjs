@@ -302,7 +302,7 @@ function semanticRawPayload(raw, source) {
  * rather than given a synthetic key: a synthetic key cannot deduplicate, so the
  * same row would be re-inserted on every import.
  */
-export function applyMapping(raw, fieldMap, { platform, objectType = 'record', source = null }) {
+export function applyMapping(raw, fieldMap, { platform, objectType = 'record', source = null, bookkeepingColumns = [] }) {
   const mapped = {}
   const consumed = new Set()
 
@@ -326,12 +326,20 @@ export function applyMapping(raw, fieldMap, { platform, objectType = 'record', s
     return { record: null, rejected: 'externalId is empty or missing in this row' }
   }
 
+  // A source's own sync watermark (e.g. the `updated_at` cursor, which by
+  // contract advances on every touch) is bookkeeping, not content. It stays in
+  // rawItem for lineage but must not make an otherwise unchanged row look like
+  // a new raw revision, nor (when the mapping leaves it unconsumed) a new
+  // canonical revision through `extensions`. A mapping that turns it into
+  // canonical content still revises the canonical record through that field.
+  const bookkeeping = new Set(bookkeepingColumns)
+
   // Everything the mapping did not consume is preserved under `extensions`
   // rather than dropped. This is the layer that makes "promote a field to a
   // real column later" possible without re-importing the source.
   const extensions = {}
   for (const [key, value] of Object.entries(raw)) {
-    if (consumed.has(key)) continue
+    if (consumed.has(key) || bookkeeping.has(key)) continue
     if (value === null || value === undefined || String(value).trim() === '') continue
     extensions[key] = value
   }
@@ -395,7 +403,10 @@ export function applyMapping(raw, fieldMap, { platform, objectType = 'record', s
     // Raw identity is separate from canonical identity. Fields intentionally
     // kept out of canonical/search (for example model evidence) can still
     // change and must create a reproducible source revision for Agent work.
-    rawPayloadSha256: sha256(canonicalJson(semanticRawPayload(raw, source))),
+    rawPayloadSha256: sha256(canonicalJson(semanticRawPayload(
+      bookkeeping.size ? Object.fromEntries(Object.entries(raw).filter(([key]) => !bookkeeping.has(key))) : raw,
+      source,
+    ))),
   }
 
   // Collection time is observation metadata, not content. Metrics remain in

@@ -8,10 +8,11 @@ import { createApp } from '../../server/app.mjs'
 import { PUBLIC_OPENAPI_DOCUMENT, tenantOpenApiDocument } from '../../server/public-docs.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { HubService } from '../../server/hub-service.mjs'
-import { AppError } from '../../server/core/errors.mjs'
+import { AppError, SearchAdmissionNotStartedError } from '../../server/core/errors.mjs'
 import { createDataSearchCursorCodec, createDataSearchV2CursorCodec } from '../../server/external-platforms/cursor.mjs'
 import { SearchProtocolStore } from '../../server/data/search-protocol-store.mjs'
 import { executeDataSearchV2, guardDataSearchV1 } from '../../server/data/search-protocol.mjs'
+import { createTwitterSearchRouter } from '../../server/data/twitter-search-routing.mjs'
 import { normalizeDataSearchV2, prepareDataSearchV2, projectDataSearchV2, DATA_SEARCH_V2_PATH,
   DATA_SEARCH_V1_PATH, DATA_SEARCH_V2_VERSION } from '../../server/contracts/data-search-v2.mjs'
 
@@ -118,6 +119,76 @@ for (const scenario of ['unexpected_exception', 'usage_lookup_failed']) test(`v2
   assert.equal(dispatches, 1)
 })
 
+test('public not-started fields cannot relabel an unproven v2 unknown as safe admission', async () => {
+  const store = new MemoryStore(), ctx = context(), request = normalizeDataSearchV2(body('twitter'))
+  const key = 'untrusted-admission-fields'
+  await assert.rejects(() => executeDataSearchV2({ store, context: ctx, body: request, idempotencyKey: key, pepper,
+    execute: async () => { throw new AppError(409, 'request_outcome_unknown', 'synthetic unknown',
+      { dispatchState: 'not_started', automaticRetryAllowed: true, blockingRequestId: randomUUID() }) } }),
+  error => error.code === 'request_outcome_unknown' && error.details.automaticRetryAllowed === false)
+  assert.equal((await new SearchProtocolStore(store).binding(ctx, key)).state, 'unknown')
+})
+
+for (const status of ['reserved', 'unknown', 'committed']) test(`an owned ${status} usage prevents trusted admission evidence from relaxing v2 uncertainty`, async () => {
+  const store = new MemoryStore(), ctx = context(), request = normalizeDataSearchV2(body('twitter'))
+  const key = `owned-admission-${status}`, id = randomUUID()
+  const original = { id, tenantId: ctx.tenant.id, consumerId: ctx.consumer.id, apiKeyId: ctx.apiKey.id,
+    platform: 'twitter', idempotencyKey: key, status }
+  await assert.rejects(() => executeDataSearchV2({ store, context: ctx, body: request, idempotencyKey: key, pepper,
+    execute: async () => {
+      store.requests.set(id, structuredClone(original)); store.requestsByScope.set(`${ctx.consumer.id}:${key}`, id)
+      throw new SearchAdmissionNotStartedError(409, 'request_outcome_unknown', 'synthetic conflicting evidence', { requestId: randomUUID() })
+    } }), error => error.code === 'request_outcome_unknown' && error.details.requestId === id
+      && error.details.automaticRetryAllowed === false)
+  const binding = await new SearchProtocolStore(store).binding(ctx, key)
+  assert.equal(binding.state, 'unknown'); assert.equal(binding.usageRequestId, id)
+  assert.deepEqual(store.requests.get(id), original)
+})
+
+test('a failed own-usage lookup retains v2 uncertainty despite trusted pre-reserve evidence', async () => {
+  const store = new MemoryStore(), ctx = context(), request = normalizeDataSearchV2(body('twitter'))
+  const key = 'admission-with-lookup-failure', lookup = store.getUsageRequestByIdempotencyKey.bind(store)
+  let lookups = 0
+  store.getUsageRequestByIdempotencyKey = async (...args) => {
+    if (++lookups > 1) throw new Error('synthetic own-usage lookup failure')
+    return lookup(...args)
+  }
+  await assert.rejects(() => executeDataSearchV2({ store, context: ctx, body: request, idempotencyKey: key, pepper,
+    execute: async () => { throw new SearchAdmissionNotStartedError(409, 'request_outcome_unknown', 'synthetic prior blocker', { requestId: randomUUID() }) } }),
+  error => error.code === 'request_outcome_unknown' && error.details.automaticRetryAllowed === false)
+  assert.equal((await new SearchProtocolStore(store).binding(ctx, key)).state, 'unknown')
+})
+
+test('failed pre-reserve protocol cleanup never reports the old blocker as the new page receipt', async t => {
+  const store = new MemoryStore(), ctx = context(), request = normalizeDataSearchV2({ ...body('twitter'), query: 'synthetic protocol fixture' })
+  const key = 'admission-finish-failure', id = randomUUID()
+  const blocker = { id, tenantId: ctx.tenant.id, consumerId: ctx.consumer.id, apiKeyId: ctx.apiKey.id,
+    platform: 'twitter', idempotencyKey: 'old-unknown-blocker', status: 'unknown',
+    acquisitionRequest: { path: DATA_SEARCH_V1_PATH, body: { query: 'synthetic AND protocol AND fixture' } } }
+  store.requests.set(id, structuredClone(blocker))
+  let procurements = 0
+  const route = createTwitterSearchRouter({ usageStore: store, apiKeyPepper: pepper, provider: 'rapidapi',
+    rapidGateway: { platformStore: { calls: new Map() }, searchRaw: async () => { procurements++ } },
+    tikHubGateway: { platformStore: { calls: new Map() }, searchContent: async () => { procurements++ } } })
+  const finish = SearchProtocolStore.prototype.finish
+  t.mock.method(SearchProtocolStore.prototype, 'finish', async function (input, ...args) {
+    if (input.idempotencyKey === key) throw new Error('synthetic protocol cleanup failure')
+    return finish.call(this, input, ...args)
+  })
+  await assert.rejects(() => executeDataSearchV2({ store, context: ctx, body: request, idempotencyKey: key, pepper,
+    execute: upstream => route(ctx, { normalized: upstream, body: upstream, idempotencyKey: key }) }), error => {
+    assert.equal(error.code, 'request_outcome_unknown')
+    assert.equal(error.details.automaticRetryAllowed, false)
+    assert.equal(Object.hasOwn(error.details, 'requestId'), false)
+    return true
+  })
+  assert.equal(procurements, 0)
+  assert.equal(store.requests.size, 1)
+  assert.deepEqual(store.requests.get(id), blocker)
+  const binding = await new SearchProtocolStore(store).binding(ctx, key)
+  assert.equal(binding.state, 'running'); assert.equal(binding.usageRequestId, null)
+})
+
 async function protocolFixture(t, postgres) {
   const ctx = context()
   if (!postgres) {
@@ -170,6 +241,62 @@ const legacyRawConnector = (usage, patch = {}) => ({ id: randomUUID(), requestId
 
 for (const postgres of [false, true]) {
   const options = { skip: postgres && !process.env.MX_INSIGHT_TEST_PGLITE_MODULE }
+  test(`protocol ${postgres ? 'actual PGlite' : 'memory'} compiled-equivalent Twitter pre-reserve blockers keep the new page retryable`, options, async t => {
+    for (const blockerStatus of ['unknown', 'reserved']) await t.test(blockerStatus, async t => {
+      const { ctx, protocol, db, addUsage, setUsageStatus, savedUsage } = await protocolFixture(t, postgres)
+      const usage = protocol.usage
+      if (postgres) usage.getUsageRequestByIdempotencyKey = async (consumerId, key) => {
+        const row = (await db.query(`SELECT request.* FROM usage_idempotency_bindings binding
+          JOIN usage_requests request ON request.id=binding.current_request_id
+          WHERE binding.consumer_id=$1 AND binding.idempotency_key=$2`, [consumerId, key])).rows[0]
+        return row ? { id: row.id, tenantId: row.tenant_id, consumerId: row.consumer_id, apiKeyId: row.api_key_id,
+          platform: row.platform, status: row.status, acquisitionRequest: row.acquisition_request } : null
+      }
+      const request = normalizeDataSearchV2({ ...body('twitter'), query: 'synthetic protocol fixture' })
+      const blocker = legacyRawUsage(ctx, { status: blockerStatus, billingMeterKey: 'twitter',
+        acquisitionRequest: { path: DATA_SEARCH_V1_PATH, body: { query: 'synthetic AND protocol AND fixture' } } })
+      await addUsage(blocker)
+      const before = await savedUsage(blocker.id), key = `compiled-blocker-${blockerStatus}`
+      let procurements = 0
+      const acquire = async () => {
+        procurements++
+        const value = result()
+        value.body.data.platform = 'twitter'; value.body.data.query = request.query
+        await addUsage(legacyRawUsage(ctx, { id: value.requestId, idempotencyKey: key, status: 'committed',
+          acquisitionRequest: { path: DATA_SEARCH_V1_PATH, body: { query: request.query } } }))
+        return value
+      }
+      const route = createTwitterSearchRouter({ usageStore: usage, apiKeyPepper: pepper, provider: 'rapidapi',
+        rapidGateway: { platformStore: { calls: new Map() }, searchRaw: acquire },
+        tikHubGateway: { platformStore: { calls: new Map() }, searchContent: acquire } })
+      const invoke = () => executeDataSearchV2({ store: usage, context: ctx, body: request, idempotencyKey: key, pepper,
+        execute: upstream => route(ctx, { normalized: upstream, body: upstream, idempotencyKey: key }) })
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await assert.rejects(invoke, error => {
+          assert.equal(error.status, 409); assert.equal(error.code, 'search_admission_blocked')
+          assert.deepEqual(error.details, { dispatchState: 'not_started', automaticRetryAllowed: true,
+            retrySameRequest: true, retryAfterSeconds: 300, blockingRequestId: blocker.id })
+          return true
+        })
+        const binding = await protocol.binding(ctx, key)
+        assert.equal(binding.state, 'retryable')
+        assert.equal(binding.usageRequestId, null)
+        assert.equal(await usage.getUsageRequestByIdempotencyKey(ctx.consumer.id, key), null)
+        assert.equal(procurements, 0)
+        assert.deepEqual(await savedUsage(blocker.id), before)
+      }
+      // Synthetic independent resolution of the blocker, never an automatic
+      // change made by retrying the unstarted page.
+      await setUsageStatus(blocker.id, 'released')
+      const delivered = await invoke()
+      assert.equal(delivered.status, 200)
+      assert.equal(procurements, 1)
+      assert.equal((await protocol.binding(ctx, key)).state, 'complete')
+      assert.deepEqual((await invoke()).body, delivered.body)
+      assert.equal(procurements, 1)
+    })
+  })
+
   test(`protocol ${postgres ? 'actual PGlite' : 'memory'} admission rejection owns no page and exact retries execute once after the blocker resolves`, options, async t => {
     const { ctx, protocol, addUsage, setUsageStatus, savedUsage } = await protocolFixture(t, postgres)
     const request = normalizeDataSearchV2(body('twitter')), key = 'unowned-page-retry'

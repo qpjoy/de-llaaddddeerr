@@ -7,6 +7,11 @@ import { workload } from "../deploy/k8s/render.mjs";
 import { readConfig } from "../apps/server/config.mjs";
 import { commandFailure } from "./enroll.mjs";
 import {
+  acquireDeployLock,
+  harborProcesses,
+  markDeployLockReleasable,
+} from "./recover-lock.mjs";
+import {
   operationSettings,
   saveOperationSettings,
   enrollmentInputs,
@@ -155,31 +160,80 @@ const ns = read(["get", "namespace", namespace, "--ignore-not-found"]);
 if (!ns) {
   kube(["create", "namespace", namespace]);
 }
-const lock = (() => {
+let temp,
+  lock,
+  job = "",
+  release = true,
+  completed = false;
+const lockRead = (args) => read([...args, "--request-timeout=15s"]);
+const removeLock = (options) => {
+  const path = join(temp, "unlock.json");
+  writeFileSync(path, JSON.stringify(options), { mode: 0o600 });
+  kube([
+    "delete",
+    "--raw",
+    `/api/v1/namespaces/${namespace}/configmaps/mx-harbor-deploy-lock`,
+    "--request-timeout=15s",
+    "-f",
+    path,
+  ]);
+};
+const acquireLock = () => {
   try {
-    return JSON.parse(kube([
-      "create",
-      "configmap",
-      "mx-harbor-deploy-lock",
-      `--from-literal=action=${action}`,
-      `--from-literal=ownerHost=${hostname()}`,
-      `--from-literal=ownerPid=${process.pid}`,
-      "-o",
-      "json",
-    ]).stdout);
+    return acquireDeployLock({
+      create: () => {
+        const result = kube([
+          "create",
+          "configmap",
+          "mx-harbor-deploy-lock",
+          `--from-literal=action=${action}`,
+          `--from-literal=ownerHost=${hostname()}`,
+          `--from-literal=ownerPid=${process.pid}`,
+          "--from-literal=recoveryVersion=1",
+          "--from-literal=recoveryState=active",
+          "--request-timeout=15s",
+          "-o",
+          "json",
+        ], { optional: true });
+        if (result.error || result.status !== 0) {
+          const failure = commandFailure("kubectl", result);
+          // Only a definite server response permits recovery; a parse error or
+          // a timed-out create might have already acquired a different lock.
+          failure.lockAlreadyExists = !result.error &&
+            /^(?:Error from server \(AlreadyExists\): |error: failed to create configmap: )configmaps "mx-harbor-deploy-lock" already exists$/.test((result.stderr || "").trim());
+          throw failure;
+        }
+        const created = JSON.parse(result.stdout);
+        if (
+          !created?.metadata?.uid || !created.metadata.resourceVersion ||
+          created.data?.action !== "deploy" ||
+          created.data?.ownerHost !== hostname() ||
+          created.data?.ownerPid !== String(process.pid) ||
+          created.data?.recoveryVersion !== "1" ||
+          created.data?.recoveryState !== "active"
+        ) throw Error("部署锁创建响应身份不完整；请先只读核对锁状态。");
+        return created;
+      },
+      get: lockRead,
+      remove: removeLock,
+      processes: () => harborProcesses(run("ps", ["-eo", "pid=,args="]).stdout)
+        .filter((entry) => entry.pid !== process.pid),
+      report: (message) => console.log(`DataPort: ${message}`),
+    });
   } catch (error) {
     const reason = error instanceof SyntaxError
       ? "部署锁响应无法解析；请先只读核对锁状态，不要重复部署。"
       : error.message;
-    throw Error(`获取部署锁 ${namespace}/mx-harbor-deploy-lock 失败。${reason}${reason.includes("AlreadyExists") ? " 请先运行 bash scripts/manage.sh ops internal-production recover-lock（默认只读）。" : ""}`);
+    throw Error(`获取部署锁 ${namespace}/mx-harbor-deploy-lock 失败。${reason} 可运行 bash scripts/manage.sh ops internal-production recover-lock（默认只读）核对锁状态。`);
   }
-})(),
-  temp = mkdtempSync(join(tmpdir(), "mx-harbor-deploy-"));
-let job = "",
-  release = true;
+};
 const apply = (object) =>
   kube(["apply", "-f", "-"], { input: JSON.stringify(object) });
 try {
+  // Prepare cleanup storage before acquiring the lock: a full/missing TMPDIR
+  // must not create a lock which this process cannot release.
+  temp = mkdtempSync(join(tmpdir(), "mx-harbor-deploy-"));
+  lock = acquireLock();
   // Reconcile our namespace label even after an interrupted first deployment.
   kube([
     "label",
@@ -412,6 +466,7 @@ try {
     signal: AbortSignal.timeout(5000),
   });
   if (!health.ok) throw Error("DataPort readiness failed");
+  completed = true;
 } catch (error) {
   if (job) {
     const stopped = kube(
@@ -434,26 +489,26 @@ try {
   throw error;
 } finally {
   try {
-    if (release) {
-      const path = join(temp, "unlock.json");
-      writeFileSync(
-        path,
-        JSON.stringify({
-          apiVersion: "v1",
-          kind: "DeleteOptions",
-          preconditions: { uid: lock.metadata.uid },
-        }),
-      );
-      kube([
-        "delete",
-        "--raw",
-        `/api/v1/namespaces/${namespace}/configmaps/mx-harbor-deploy-lock`,
-        "-f",
-        path,
-      ]);
+    if (lock && release) {
+      // Only a fully completed deploy can leave a proof for automatic recovery.
+      // SIGKILL, failed migrations and unknown API outcomes remain manual.
+      if (completed) markDeployLockReleasable({
+        lock,
+        get: lockRead,
+        patch: (operations) => kube([
+          "patch", "configmap", "mx-harbor-deploy-lock",
+          "--type=json", "-p", JSON.stringify(operations),
+          "--request-timeout=15s",
+        ]),
+      });
+      removeLock({
+        apiVersion: "v1",
+        kind: "DeleteOptions",
+        preconditions: { uid: lock.metadata.uid },
+      });
     }
   } finally {
-    rmSync(temp, { recursive: true, force: true });
+    if (temp) rmSync(temp, { recursive: true, force: true });
   }
 }
 console.log(`DataPort ${action} completed`);

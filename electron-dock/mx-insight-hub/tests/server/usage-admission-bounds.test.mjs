@@ -42,6 +42,8 @@ test('reservation connection acquisition failures never start a transaction', as
     assert.equal(error.status, 503)
     assert.equal(error.code, 'usage_admission_unavailable')
     assert.equal(error.details.stage, 'connection')
+    assert.equal(error.details.currentAttemptStarted, false)
+    assert.equal(error.details.retryAfterMs, 1000)
     assert.equal(Object.hasOwn(error.details, 'upstreamDispatched'), false)
     assert.equal(error.message.includes('private-host'), false)
     return true

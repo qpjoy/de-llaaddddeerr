@@ -9,6 +9,7 @@ import { JUSTONE_INSTAGRAM_SEARCH_KEY } from './instagram-justone-search.mjs'
 import { normalizeSearchContent } from './search-content.mjs'
 import { prepareNightAllCompatibilityTraversal } from '../data/night-all-pagination.mjs'
 import { compileTwitterSearchQuery, TWITTER_QUERY_DIALECT } from './twitter-search-query.mjs'
+import { effectiveTwitterSearchParameters } from './twitter-search-parameters.mjs'
 
 export const RAW_SEARCH_VERSION = 'mx-insight-hub.raw-search.v1'
 export const RAW_SEARCH_PATH = '/api/v1/night-all/search/raw'
@@ -45,7 +46,7 @@ function supportsRawSearch({ platform, upstreamBody: body, pageSize }, instagram
 const justOneCursor = value => typeof value === 'string' && value.trim().length > 0
   && value.length <= 2048 && !value.includes('\u0000')
 
-export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort, twitterBuffer = false, bufferPageSize,
+export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort, twitterParams, twitterSearchParameters, twitterBuffer = false, bufferPageSize,
   twitterQueryCompatibility = false, instagramProvider = 'tikhub', instagramStrategy = false, historicalCodec } = {}) {
   const { platform, upstreamBody: body, pageSize } = normalized
   const justone = platform === 'instagram' && instagramProvider === 'justone'
@@ -71,6 +72,7 @@ export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort
     maxEnrichItems: body.maxEnrichItems ?? 20, ...(cursorScope ? { cursorScope } : {}) })).digest('hex')
   let page = 1, providerCursor = null, buffer = null, fill = null, expiresAt = Date.now() + 24 * 60 * 60_000
   let queryDialect = null
+  let searchParameters = twitterParams !== undefined ? effectiveTwitterSearchParameters(twitterSearchParameters ?? twitterParams) : null
   let cursorProvider = justone ? 'justone' : 'tikhub'
   let taggedProvider = false
   if (body.cursor) {
@@ -103,6 +105,14 @@ export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort
           || Object.keys(state.providerCursor).some(key => !['next_max_id', 'rank_token'].includes(key))
           || (state.providerCursor.rank_token != null && (typeof state.providerCursor.rank_token !== 'string' || state.providerCursor.rank_token.length > 2048))))) throw new Error('cursor')
       ;({ page, providerCursor = null, buffer = null, fill = null, expiresAt } = state)
+      if (Object.hasOwn(state, 'twitterSearchCategory')) {
+        if (!searchParameters) throw new Error('search_parameters')
+        searchParameters = effectiveTwitterSearchParameters({ ...twitterParams, category: state.twitterSearchCategory })
+        if (Object.entries(twitterParams).some(([key, value]) => searchParameters[key] !== value)) throw new Error('search_parameters')
+      } else if (searchParameters) {
+        // Cursors issued before configurable search were always Top.
+        searchParameters = effectiveTwitterSearchParameters(twitterParams, 'Top')
+      }
       queryDialect = state.queryDialect ?? null
       if (queryDialect && compileTwitterSearchQuery(query).dialect !== queryDialect) throw new Error('query_dialect')
       if (platform === 'instagram') {
@@ -131,9 +141,12 @@ export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort
       ? normalizeNativeForwardingRequest(JUSTONE_INSTAGRAM_SEARCH_KEY, { params: { keyword: query,
         ...(providerCursor ? { paginationToken: providerCursor } : {}) } })
       : normalizeNativeForwardingRequest(INSTAGRAM_SEARCH_KEY, { params: { query, enable_metadata: true, ...providerCursor } })
-      : normalizeHubSocialRequest('search', { platform, query, count: pageSize, ...(twitterSort ? { sort: twitterSort } : {}) },
+      : normalizeHubSocialRequest('search', { platform, query, count: pageSize,
+        ...(searchParameters ? { sort: searchParameters.category === 'Top' ? 'top' : 'latest' } : twitterSort ? { sort: twitterSort } : {}) },
         { twitterQueryDialect: queryDialect })
   if (platform === 'twitter') {
+    if (searchParameters) Object.assign(providerRequest.upstreamQuery, searchParameters,
+      { includeTimestamp: String(searchParameters.includeTimestamp) })
     providerRequest.page = page
     providerRequest.expiresAt = expiresAt
     providerRequest.providerCursor = providerCursor
@@ -147,11 +160,13 @@ export function normalizeRawSearch(normalized, codec, { cursorScope, twitterSort
       ...(platform === 'instagram' && (justone || instagramStrategy) ? { provider: instagramProvider } : {}),
       ...(platform === 'twitter' && twitterBuffer ? { provider: 'rapidapi' } : {}),
       ...(queryDialect ? { queryDialect } : {}),
+      ...(searchParameters ? { twitterSearchCategory: searchParameters.category } : {}),
       page: state.page, ...(state.providerCursor ? { providerCursor: state.providerCursor } : {}),
       ...(state.buffer ? { buffer: state.buffer } : {}),
       ...(platform === 'twitter' && twitterBuffer && state.fill ? { fill: state.fill } : {}) })
   }
   return { ...providerRequest, platform, query, page, pageSize, providerCursor, buffer, fill, scopeHash: scope, providerRequest, encodeNext,
+    ...(searchParameters ? { twitterSearchParameters: searchParameters } : {}),
     ...(platform === 'instagram' && (justone || instagramStrategy) ? { provider: instagramProvider } : {}),
     enrichment: { enabled: body.includeDetails === true || body.disableAutoDetails !== true,
       all: body.includeDetails === true, maxItems: body.maxEnrichItems ?? 20 },

@@ -207,9 +207,30 @@ export function nodeCommand(node, local, script, options={}) {
   try { return run('ssh',['-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8',host,script],options) }
   catch { throw new Error(`Node ${node.metadata.name}: trusted SSH/containerd access unavailable. Configure existing SSH access or MX_PAY_IMAGE_REPOSITORY; no host keys or runtimes were changed`) }
 }
-export const ctrCommand='if command -v ctr >/dev/null 2>&1; then if [ "$(id -u)" = 0 ]; then ctr -n k8s.io; else sudo -n ctr -n k8s.io; fi; elif command -v k3s >/dev/null 2>&1; then if [ "$(id -u)" = 0 ]; then k3s ctr -n k8s.io; else sudo -n k3s ctr -n k8s.io; fi; else exit 1; fi'
-// Insert arguments into the fixed command, never interpolate an arbitrary shell value.
-export function ctrScript(args) { return ctrCommand.replaceAll('ctr -n k8s.io;',`ctr -n k8s.io ${args};`) }
+// This program is sent unchanged to each target node: never resolve the
+// deployment host's managed socket for a different SSH node.
+export const ctrCommand=`if [ -e /etc/mx-k8s-runtime/active.json ] || [ -L /etc/mx-k8s-runtime/active.json ]; then
+  if [ "$(id -u)" = 0 ]; then
+    mx_pay_ctr_address="$(python3 /usr/local/lib/mx-k8s-runtime/resolve.py address 2>/dev/null)" || { printf '%s\\n' 'Managed Kubernetes runtime verification failed; refusing the legacy containerd endpoint.' >&2; exit 1; }
+    [ -n "$mx_pay_ctr_address" ] || exit 1
+    ctr --address "$mx_pay_ctr_address" -n k8s.io;
+  else
+    mx_pay_ctr_address="$(sudo -n python3 /usr/local/lib/mx-k8s-runtime/resolve.py address 2>/dev/null)" || { printf '%s\\n' 'Managed Kubernetes runtime verification failed; refusing the legacy containerd endpoint.' >&2; exit 1; }
+    [ -n "$mx_pay_ctr_address" ] || exit 1
+    sudo -n ctr --address "$mx_pay_ctr_address" -n k8s.io;
+  fi
+elif command -v ctr >/dev/null 2>&1; then
+  if [ "$(id -u)" = 0 ]; then ctr -n k8s.io; else sudo -n ctr -n k8s.io; fi
+elif command -v k3s >/dev/null 2>&1; then
+  if [ "$(id -u)" = 0 ]; then k3s ctr -n k8s.io; else sudo -n k3s ctr -n k8s.io; fi
+else exit 1; fi`
+// The existing string interface is a token list, never executable shell text.
+export function ctrScript(args) {
+  assert(typeof args === 'string' && /^[A-Za-z0-9_./:@+= -]+$/.test(args),'Invalid containerd command arguments')
+  const words=args.trim().split(/ +/).join(' ')
+  assert(words,'Missing containerd command arguments')
+  return ctrCommand.replaceAll(' -n k8s.io;',` -n k8s.io ${words};`)
+}
 export function imagePlan(root) {
   const nodes=eligibleNodes(JSON.parse(kube('get','nodes','-o','json')).items,process.env)
   const architectures=new Set(nodes.map(n=>n.status.nodeInfo?.architecture))
@@ -251,7 +272,7 @@ export function discover() {
   const capabilities=get('configmap','mx-platform-runtime')?.data || {}
   const nodeList=JSON.parse(kube('get','nodes','-o','json')).items
   return {version:1,product:'mx-pay',driver:'k8s',context:process.env.MX_PAY_KUBE_CONTEXT,namespace:process.env.MX_PAY_NAMESPACE,
-    actions:['deploy','migrate','status','doctor','discover','backup','logs','start','stop','restart'],
+    actions:['deploy','migrate','status','doctor','discover','backup','logs','start','stop','restart','postgres-permissions-plan','postgres-permissions-apply'],
     readyWorkers:workers(nodeList).map(n=>n.metadata.name),readyReplicas:deployment?.status?.readyReplicas || 0,
     topology:installation.topologyMode || deployment ? {mode:installation.topologyMode || 'multi-node',node:installation.topologyNode || null} : null,
     serviceURL:installation.serviceURL || null,

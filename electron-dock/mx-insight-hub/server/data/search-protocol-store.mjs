@@ -2,6 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { requestFingerprint } from '../core/crypto.mjs'
 import { DATA_SEARCH_V1_PATH, DATA_SEARCH_V2_PATH, dataSearchQueryHash } from '../contracts/data-search-v2.mjs'
+import { assertTwitterProtocolRetryReference, twitterProtocolRetryMetadata, twitterV2BindingEvidence, twitterRetryUsage } from './twitter-v2-retry.mjs'
+import { twitterProtocolRetryIntents, twitterRetryDenied } from '../external-platforms/twitter-manual-retry.mjs'
+import { isDeepStrictEqual } from 'node:util'
 
 const memory = new WeakMap()
 const LEASE_MS = 300000
@@ -26,7 +29,8 @@ const sameScope = (left, right) => ['tenantId', 'consumerId', 'apiKeyId', 'platf
 const rowRecord = row => row && ({ consumerId: row.consumer_id, idempotencyKey: row.idempotency_key, tenantId: row.tenant_id,
   apiKeyId: row.api_key_id, platform: row.platform, queryHash: row.query_hash, fingerprint: row.fingerprint,
   body: row.request_body, state: row.state, ownerId: row.owner_id, leaseExpiresAt: row.lease_expires_at,
-  result: row.result, error: row.error, usageRequestId: row.usage_request_id })
+  result: row.result, error: row.error, usageRequestId: row.usage_request_id,
+  acknowledgedRequestIds: row.acknowledged_request_ids || [] })
 
 function memoryState(store) {
   if (!memory.has(store)) memory.set(store, { bindings: new Map(), leases: new Map(), tail: Promise.resolve() })
@@ -56,13 +60,18 @@ function existingBinding(binding, input) {
 export class SearchProtocolStore {
   constructor(usageStore) { this.usage = usageStore; this.pool = usageStore.pool }
 
-  async begin(context, { version, body, idempotencyKey }) {
+  async begin(context, { version, body, idempotencyKey, retryOfRequestId = null, retryStore = null, apiKeyPepper = null }) {
+    if (retryOfRequestId != null && (version !== 2 || body.platform !== 'twitter'
+      || typeof retryOfRequestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(retryOfRequestId))) {
+      throw new AppError(400, 'invalid_uncertain_retry', 'Explicit v2 retry requires a Twitter request UUID')
+    }
     const input = { version, body, idempotencyKey, ownerId: randomUUID(), tenantId: context.tenant.id,
       consumerId: context.consumer.id, apiKeyId: context.apiKey.id, platform: body.platform,
       queryHash: dataSearchQueryHash(body.query), leaseExpiresAt: new Date(Date.now() + LEASE_MS).toISOString(),
-      fingerprint: requestFingerprint({ method: 'POST', path: DATA_SEARCH_V2_PATH, body }) }
+      fingerprint: requestFingerprint({ method: 'POST', path: DATA_SEARCH_V2_PATH, body }), retryOfRequestId }
     if (!this.pool) return serialized(this.usage, async state => {
       const key = `${input.consumerId}:${idempotencyKey}`, binding = state.bindings.get(key)
+      await assertTwitterProtocolRetryReference({usage:this.usage,input,binding})
       const existing = existingBinding(binding, input)
       if (existing) return existing
       const original = await this.usage.getUsageRequestByIdempotencyKey(input.consumerId, idempotencyKey)
@@ -74,8 +83,11 @@ export class SearchProtocolStore {
       const keyOwned = Boolean(binding || original || this.usage.requestsByScope?.has(key)
         || [...this.usage.requests.values()].some(row => row.consumerId === input.consumerId && row.idempotencyKey === idempotencyKey))
       if (version === 2 && !binding && keyOwned) throw conflict()
+      const retry = version === 2 ? await twitterProtocolRetryMetadata({usage:this.usage,data:state,input,retryStore,apiKeyPepper})
+        : {acknowledgedRequestIds:[],claim:async()=>{}}
+      const excluded = retry.acknowledgedRequestIds
       const unknown = [...state.bindings.values()].find(row => sameScope(row, input) &&
-        (row.state === 'unknown' || row.state === 'running' && Date.parse(row.leaseExpiresAt) <= Date.now()))
+        !excluded.includes(row.usageRequestId) && (row.state === 'unknown' || row.state === 'running' && Date.parse(row.leaseExpiresAt) <= Date.now()))
       if (unknown) throw admissionBlocked(version, keyOwned, 'request_outcome_unknown', unknown.usageRequestId)
       if (version === 2) {
         // A legacy receipt can block this query only when its saved identity
@@ -86,15 +98,17 @@ export class SearchProtocolStore {
           && row.apiKeyId === input.apiKeyId && row.platform === input.platform
           && row.acquisitionRequest?.path === DATA_SEARCH_V1_PATH
           && typeof row.acquisitionRequest?.body?.query === 'string' && row.acquisitionRequest.body.query.trim()
-          && row.acquisitionRequest.body.query.trim() === body.query.trim())
+          && row.acquisitionRequest.body.query.trim() === body.query.trim() && !excluded.includes(row.id))
         const unresolved = usages.find(row => row.status === 'unknown') || usages.find(row => row.status === 'reserved')
         if (unresolved) throw admissionBlocked(version, keyOwned, unresolved.status === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', unresolved.id)
       }
       const other = [...state.leases.values()].find(lease => sameScope(lease, input) && (version === 2 || lease.version === 2))
       if (other) throw admissionBlocked(version, keyOwned, Date.parse(other.leaseExpiresAt) <= Date.now() ? 'request_outcome_unknown' : 'request_in_progress')
+      await retry.claim()
+      input.acknowledgedRequestIds = excluded
       state.leases.set(input.ownerId, input)
       if (version === 2) state.bindings.set(key, { ...input, state: 'running', result: null, error: null, usageRequestId: binding?.usageRequestId || null })
-      return { kind: 'acquired', input }
+      return { kind: 'acquired', input, retryOfRequestId:retry.retryOfRequestId, acknowledgedRequestIds:excluded }
     })
     const client = await this.pool.connect()
     try {
@@ -104,6 +118,7 @@ export class SearchProtocolStore {
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`search-protocol-key:${input.consumerId}:${idempotencyKey}`])
       const binding = rowRecord((await client.query('SELECT * FROM control.data_search_protocol_bindings WHERE consumer_id=$1 AND idempotency_key=$2 FOR UPDATE',
         [input.consumerId, idempotencyKey])).rows[0])
+      await assertTwitterProtocolRetryReference({usage:this.usage,client,input,binding})
       const existing = existingBinding(binding, input)
       if (existing) { await client.query('COMMIT'); return existing }
       const original = (await client.query(`SELECT request.status FROM usage_idempotency_bindings binding
@@ -124,10 +139,14 @@ export class SearchProtocolStore {
         OR EXISTS(SELECT 1 FROM usage_idempotency_bindings WHERE consumer_id=$1 AND idempotency_key=$2) AS owned`,
       [input.consumerId, idempotencyKey])).rows[0]?.owned !== false)
       if (version === 2 && !binding && keyOwned) throw conflict()
+      const retry = version === 2 ? await twitterProtocolRetryMetadata({usage:this.usage,client,input,retryStore,apiKeyPepper})
+        : {acknowledgedRequestIds:[],claim:async()=>{}}
+      const excluded = retry.acknowledgedRequestIds
       const otherRequestBlocked = (code, requestId) => admissionBlocked(version, keyOwned, code, requestId)
       const unknown = (await client.query(`SELECT usage_request_id FROM control.data_search_protocol_bindings
         WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3 AND platform=$4 AND query_hash=$5
-        AND (state='unknown' OR (state='running' AND lease_expires_at<=now())) LIMIT 1`, args)).rows[0]
+        AND NOT (coalesce(usage_request_id,'00000000-0000-0000-0000-000000000000'::uuid)=ANY($6::uuid[]))
+        AND (state='unknown' OR (state='running' AND lease_expires_at<=now())) LIMIT 1`, [...args,excluded])).rows[0]
       if (unknown) throw await otherRequestBlocked('request_outcome_unknown', unknown.usage_request_id)
       if (version === 2) {
         const unresolved = (await client.query(`SELECT request.id,request.status FROM usage_requests request
@@ -136,24 +155,27 @@ export class SearchProtocolStore {
           AND jsonb_typeof(request.acquisition_request->'body'->'query')='string'
           AND btrim(request.acquisition_request->'body'->>'query',$7)<>''
           AND btrim(request.acquisition_request->'body'->>'query',$7)=$6
+          AND NOT (request.id=ANY($8::uuid[]))
           AND request.status IN ('unknown','reserved') ORDER BY CASE WHEN request.status='unknown' THEN 0 ELSE 1 END LIMIT 1`,
-        [...args.slice(0, 4), DATA_SEARCH_V1_PATH, body.query.trim(), QUERY_TRIM_CHARACTERS])).rows[0]
+        [...args.slice(0, 4), DATA_SEARCH_V1_PATH, body.query.trim(), QUERY_TRIM_CHARACTERS,excluded])).rows[0]
         if (unresolved) throw await otherRequestBlocked(unresolved.status === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', unresolved.id)
       }
       const other = (await client.query(`SELECT expires_at FROM control.data_search_protocol_leases WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3
         AND platform=$4 AND query_hash=$5 AND ($6::int=2 OR version=2) LIMIT 1`, [...args, version])).rows[0]
       if (other) throw await otherRequestBlocked(Date.parse(other.expires_at) <= Date.now() ? 'request_outcome_unknown' : 'request_in_progress')
+      await retry.claim()
+      input.acknowledgedRequestIds = excluded
       await client.query(`INSERT INTO control.data_search_protocol_leases(owner_id,tenant_id,consumer_id,api_key_id,platform,query_hash,idempotency_key,version,expires_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [input.ownerId, ...args, idempotencyKey, version, input.leaseExpiresAt])
       if (version === 2) await client.query(`INSERT INTO control.data_search_protocol_bindings
-        (consumer_id,idempotency_key,tenant_id,api_key_id,platform,query_hash,fingerprint,request_body,state,owner_id,lease_expires_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'running',$9,$10)
+        (consumer_id,idempotency_key,tenant_id,api_key_id,platform,query_hash,fingerprint,request_body,state,owner_id,lease_expires_at${excluded.length?',acknowledged_request_ids':''})
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'running',$9,$10${excluded.length?',$11':''})
         ON CONFLICT(consumer_id,idempotency_key) DO UPDATE SET state='running',owner_id=EXCLUDED.owner_id,
-          lease_expires_at=EXCLUDED.lease_expires_at,updated_at=now() WHERE data_search_protocol_bindings.state='retryable'`,
+          lease_expires_at=EXCLUDED.lease_expires_at,updated_at=now()${excluded.length?',acknowledged_request_ids=EXCLUDED.acknowledged_request_ids':''} WHERE data_search_protocol_bindings.state='retryable'`,
       [input.consumerId, idempotencyKey, input.tenantId, input.apiKeyId, input.platform, input.queryHash, input.fingerprint,
-        JSON.stringify(body), input.ownerId, input.leaseExpiresAt])
+        JSON.stringify(body), input.ownerId, input.leaseExpiresAt,...(excluded.length?[excluded]:[])])
       await client.query('COMMIT')
-      return { kind: 'acquired', input }
+      return { kind: 'acquired', input, retryOfRequestId:retry.retryOfRequestId, acknowledgedRequestIds:excluded }
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {})
       // A binary installed before its additive migration cannot serve v2. An
@@ -212,5 +234,75 @@ export class SearchProtocolStore {
       AND (binding.usage_request_id=$2 OR binding.idempotency_key=usage.idempotency_key)`,
     [context.consumer.id, requestId, context.tenant.id, context.apiKey.id])).rows[0]) }
     catch (error) { if (error.code === '42P01') return null; throw error }
+  }
+
+  async twitterRecovery(context, requestId, {apiKeyPepper} = {}) {
+    const read = async client => {
+      const scopedUsage = async id => {
+        const row = this.pool ? (await client.query(`SELECT * FROM usage_requests WHERE id=$1 AND tenant_id=$2
+          AND consumer_id=$3 AND api_key_id=$4 AND platform='twitter'`,
+        [id,context.tenant.id,context.consumer.id,context.apiKey.id])).rows[0] : this.usage.requests.get(id)
+        const usage = twitterRetryUsage(row)
+        return usage && usage.tenantId === context.tenant.id && usage.consumerId === context.consumer.id
+          && usage.apiKeyId === context.apiKey.id && usage.platform === 'twitter' ? usage : null
+      }
+      const bindingByUsage = async id => this.pool ? (await client.query(`SELECT * FROM control.data_search_protocol_bindings
+        WHERE usage_request_id=$1 AND tenant_id=$2 AND consumer_id=$3 AND api_key_id=$4`,
+      [id,context.tenant.id,context.consumer.id,context.apiKey.id])).rows.map(rowRecord)
+        : [...memoryState(this.usage).bindings.values()].filter(row => row.usageRequestId === id
+          && row.tenantId === context.tenant.id && row.consumerId === context.consumer.id && row.apiKeyId === context.apiKey.id)
+      const root = await scopedUsage(requestId)
+      if (!root) throw new AppError(404, 'request_not_found', 'Request was not found')
+      const roots = await bindingByUsage(requestId)
+      if (roots.length !== 1) throw twitterRetryDenied()
+      const original = roots[0]
+      const evidence = twitterV2BindingEvidence(root, original, {apiKeyPepper,requireUnknown:false})
+      const stateOf = binding => binding.state === 'running' && Date.parse(binding.leaseExpiresAt) <= Date.now() ? 'unknown' : binding.state
+      const deliveryOf = (usage, binding) => {
+        if (binding.state !== 'complete') return null
+        const result = binding.result
+        if (usage.status !== 'committed' || result?.status !== 200 || result.requestId !== usage.id
+          || result.body?.requestId && result.body.requestId !== usage.id
+          || result.body?.data?.contractVersion !== 'mx-insight-hub.data-search.v2'
+          || result.body.data.platform !== 'twitter' || result.body.data.query !== evidence.body.query
+          || !Array.isArray(result.body.data.items) || typeof result.body.data.pageInfo?.hasMore !== 'boolean'
+          || !isDeepStrictEqual(result.body.data.meta?.requestedWindow, evidence.body.timeWindow)) throw twitterRetryDenied()
+        return {requestId:usage.id,status:200,body:structuredClone(result.body)}
+      }
+      let current = root, binding = original, successor = null, delivery = deliveryOf(root,original)
+      const visited = new Set([requestId])
+      for (let depth=0; !delivery && depth<32; depth++) {
+        const intent = this.pool ? (await client.query('SELECT * FROM control.data_search_protocol_retries WHERE original_usage_request_id=$1', [current.id])).rows[0]
+          : twitterProtocolRetryIntents(this.usage).get(current.id)
+        if (!intent) break
+        if (intent.tenant_id !== context.tenant.id || intent.consumer_id !== context.consumer.id || intent.api_key_id !== context.apiKey.id
+          || intent.request_fingerprint !== original.fingerprint || current.status !== 'unknown' || binding.state !== 'unknown') throw twitterRetryDenied()
+        binding = this.pool ? rowRecord((await client.query(`SELECT * FROM control.data_search_protocol_bindings
+          WHERE consumer_id=$1 AND idempotency_key=$2`, [context.consumer.id,intent.successor_idempotency_key])).rows[0])
+          : memoryState(this.usage).bindings.get(`${context.consumer.id}:${intent.successor_idempotency_key}`)
+        if (!binding || binding.tenantId !== context.tenant.id || binding.apiKeyId !== context.apiKey.id
+          || binding.fingerprint !== original.fingerprint || !isDeepStrictEqual(binding.body,evidence.body)) throw twitterRetryDenied()
+        successor = {requestId:binding.usageRequestId || null,idempotencyKey:binding.idempotencyKey,state:stateOf(binding)}
+        if (!binding.usageRequestId) break
+        if (visited.has(binding.usageRequestId)) throw twitterRetryDenied()
+        visited.add(binding.usageRequestId)
+        current = await scopedUsage(binding.usageRequestId)
+        twitterV2BindingEvidence(current,binding,{apiKeyPepper,requireUnknown:false})
+        delivery = deliveryOf(current,binding)
+      }
+      return {contractVersion:'mx-insight-hub.data-search-recovery.v1',originalRequestId:requestId,platform:'twitter',
+        request:{method:'POST',path:DATA_SEARCH_V2_PATH,body:evidence.body},state:stateOf(original),successor,delivery}
+    }
+    if (!this.pool) return serialized(this.usage,()=>read(null))
+    const client = await this.pool.connect()
+    let releaseError = null
+    try {
+      await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      await client.query("SET LOCAL statement_timeout = '5s'")
+      const result = await read(client)
+      await client.query('COMMIT')
+      return result
+    } catch (error) { await client.query('ROLLBACK').catch(error=>{releaseError=error});throw error }
+    finally {client.release(releaseError)}
   }
 }

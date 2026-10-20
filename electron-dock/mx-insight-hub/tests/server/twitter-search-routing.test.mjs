@@ -14,7 +14,7 @@ const recipe = 't.twitter_web_fetch_search_timeline'
 const nativeState = { version: TIKHUB_CONTENT_SEARCH_VERSION, provider: 'tikhub', platform: 'twitter', recipe }
 function harness(provider = 'tikhub') {
   const requests = new Map(), calls = []
-  const usageStore = { requests, getUsageRequestByIdempotencyKey: async (_, key) => requests.get(key) }
+  const usageStore = { requests, getUsageRequestForRetry: async id => [...requests.values()].find(row => row.id === id), getUsageRequestByIdempotencyKey: async (_, key) => requests.get(key) }
   const rapidGateway = { platformStore: { calls: new Map() }, searchRaw: async (...args) => { calls.push(['rapidapi', ...args]); return 'rapidapi' } }
   const tikHubGateway = { platformStore: { calls: new Map() }, searchContent: async (...args) => { calls.push(['tikhub', ...args]); return 'tikhub' } }
   return { requests, calls, rapidGateway, tikHubGateway, usageStore,
@@ -136,6 +136,27 @@ test('new standard searches use the selected Hub supplier without mutating any p
     assert.strictEqual(h.calls[0][2], request)
   }
   assert.throws(() => harness('other'), { code: 'invalid_configuration' })
+})
+
+test('unsupported Twitter options cannot reach a selected TikHub gateway or a rejected-response fallback', async () => {
+  for (const params of [{ category: 'Photos' }, { category: 'Videos' }, { filters: 'lang:zh' }, { includeTimestamp: true }]) {
+    const h = harness('tikhub'), request = input({ normalized: { ...input().normalized, params } })
+    await assert.rejects(h.route(context, request), { code: 'twitter_search_parameters_unsupported' })
+    assert.equal(h.calls.length, 0)
+    const rapid = harness('rapidapi')
+    const route = createTwitterSearchRouter({ usageStore: rapid.usageStore, rapidGateway: rapid.rapidGateway,
+      tikHubGateway: rapid.tikHubGateway, apiKeyPepper: pepper, provider: 'rapidapi',
+      policyStore: { get: async () => ({ mode: 'priority', primaryProvider: 'rapidapi', fallbackProvider: 'tikhub', revision: 1 }) } })
+    assert.equal(await route(context, request), 'rapidapi')
+    assert.equal(rapid.calls[0][3].rejectedFallback, null)
+  }
+})
+
+test('malformed retry headers never reach a database UUID lookup before the gateway validates them', async () => {
+  const h = harness('rapidapi')
+  h.usageStore.getUsageRequestForRetry = async () => assert.fail('malformed UUID must not be queried')
+  for (const retryOfRequestId of ['bad', '', ['bad']]) await h.route(context, input({ retryOfRequestId }))
+  assert.equal(h.calls.length, 3)
 })
 
 test('automatic availability selection is only used for a new unpinned request and never retried after dispatch', async () => {

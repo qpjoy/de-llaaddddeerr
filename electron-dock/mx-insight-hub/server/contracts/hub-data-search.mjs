@@ -5,6 +5,7 @@ import { AppError } from '../core/errors.mjs'
 import { prepareNightAllCompatibilityTraversal } from '../data/night-all-pagination.mjs'
 import { HUB_SOCIAL_VERSION } from './hub-social.mjs'
 import { facebookStandardMedia } from './facebook-search.mjs'
+import { normalizeTwitterSearchParameters } from './twitter-search-parameters.mjs'
 
 export const isHubDataCursor = value => typeof value === 'string' && value.startsWith('mxds1.')
 export function canRouteDataSearch({ platform, pageSize, cursor }) {
@@ -12,7 +13,7 @@ export function canRouteDataSearch({ platform, pageSize, cursor }) {
   return platform === 'weibo'
 }
 
-export function normalizeHubDataSearch(body, codec, resultType, historicalCodec, { instagramProvider = 'tikhub', instagramStrategy = false } = {}) {
+export function normalizeHubDataSearch(body, codec, resultType, historicalCodec, { instagramProvider = 'tikhub', instagramStrategy = false, twitterSearchParameters } = {}) {
   const { platform, query, pageSize, cursor } = body
   if ((platform === 'twitter' || platform === 'weibo' || platform === 'instagram' && (instagramProvider === 'justone' || instagramStrategy)) && cursor?.startsWith('mxnc1.')) {
     // Decode only to preserve the old ledger identity. Replay/unknown checks
@@ -28,11 +29,12 @@ export function normalizeHubDataSearch(body, codec, resultType, historicalCodec,
   // pageSize is a result ceiling. The bounded Twitter workflow can combine
   // source pages while each supplier request keeps its own smaller count limit.
   const providerPageSize = platform === 'twitter' ? Math.min(pageSize, 50) : pageSize
+  const params = platform === 'twitter' && body.params !== undefined ? normalizeTwitterSearchParameters(body.params) : undefined
   const normalized = normalizeRawSearch({ platform, pageSize: providerPageSize,
     upstreamBody: { platform, query, count: providerPageSize, ...(cursor ? { cursor } : {}) } }, codec,
-  { cursorScope: platform === 'twitter' ? { type: resultType, pageSize } : resultType,
+  { cursorScope: platform === 'twitter' ? { type: resultType, pageSize, ...(params !== undefined ? { params } : {}) } : resultType,
     instagramProvider, instagramStrategy, historicalCodec,
-    ...(platform === 'twitter' ? { twitterSort: 'top', twitterBuffer: true, bufferPageSize: pageSize,
+    ...(platform === 'twitter' ? { twitterParams: params ?? {}, twitterSearchParameters, twitterBuffer: true, bufferPageSize: pageSize,
       twitterQueryCompatibility: true } : {}) })
   if (platform === 'twitter') {
     normalized.providerRequest.standardSearch = true
@@ -111,7 +113,7 @@ export function projectDataSearch(result, request) {
   const warnings = [...(raw.warnings || [])]
   if (request.platform === 'twitter' && request.pageSize > request.providerRequest.count) warnings.push({
     code: 'provider_page_size_limit',
-    message: 'Twitter requests at most 50 items per provider call; Hub fills pages while continuation and acquisition controls allow, retaining any buffered overflow.',
+    message: 'Twitter no longer guarantees the native count hint; Hub fills the requested pageSize while continuation and acquisition controls allow, retaining buffered overflow.',
   })
   const body = { data: { contractVersion: 'night-all.data-search.v1', platform: request.platform, query: request.query,
     items, pageInfo: { pageIndex: request.page, pageSize: request.pageSize, returnedCount: items.length,

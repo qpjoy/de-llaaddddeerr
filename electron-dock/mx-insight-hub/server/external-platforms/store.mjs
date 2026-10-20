@@ -1988,6 +1988,104 @@ function canStartBestEffortCleanup(pool) {
     && !(pool.waitingCount > 0)
 }
 
+// Folding finished usage requests into provider_cost_month_totals keeps the
+// admission read small. It is opportunistic housekeeping: correctness never
+// depends on it, so it only starts on a real pool with an idle connection, at
+// most every few seconds per provider, and is never awaited by a request.
+const COST_LEDGER_FOLD_INTERVAL_MS = 5_000
+const COST_LEDGER_FOLD_LIMIT = 2_000
+const costLedgerFolds = new WeakMap()
+
+function costLedgerLockKey(providerKey) {
+  return `external-platform-cost-ledger:${providerKey}`
+}
+
+// One statement, one snapshot. A usage request is folded only when nothing can
+// change its contribution any more (see migration 163) and its evidence has no
+// anomaly; the DELETE ... RETURNING set is exactly what is added to the totals.
+const FOLD_PROVIDER_COST_LEDGER_SQL = `
+  WITH candidates AS MATERIALIZED (
+    SELECT open_usage.provider_key, open_usage.month, open_usage.usage_request_id
+      FROM external_platform.provider_cost_open_usages open_usage
+      JOIN usage_requests request ON request.id = open_usage.usage_request_id
+      LEFT JOIN billing.customer_charges charge
+        ON charge.usage_request_id = open_usage.usage_request_id
+     WHERE open_usage.provider_key = $1
+       -- Calls are only inserted for a reserved usage row; it never returns.
+       AND request.status <> 'reserved'
+       -- Coverage is final: charges are only created with the usage row, and
+       -- pricing is immutable once captured or released.
+       AND (charge.id IS NULL OR charge.enforcement_mode <> 'enforced'
+         OR charge.status IN ('captured', 'released'))
+       AND NOT EXISTS (
+         SELECT 1
+           FROM external_platform.provider_calls call
+          WHERE call.usage_request_id = open_usage.usage_request_id
+            AND call.provider_key = open_usage.provider_key
+            AND call.started_at >= open_usage.month::timestamp AT TIME ZONE 'UTC'
+            AND call.started_at < (open_usage.month + interval '1 month') AT TIME ZONE 'UTC'
+            AND (
+              -- Settlement may still rewrite this call's cost evidence.
+              call.outcome = 'pending'
+              -- Anomalies stay open so admission keeps counting them live.
+              OR (call.cost_kind <> 'unknown'
+                AND (call.cost_minor IS NULL OR call.cost_minor <= 0))
+              OR (call.cost_minor IS NOT NULL
+                AND (call.currency IS NULL OR call.currency !~ '^[A-Z]{3}$'))
+            )
+       )
+     ORDER BY open_usage.month, open_usage.usage_request_id
+     LIMIT $2
+     FOR UPDATE OF open_usage SKIP LOCKED
+  ), folded AS (
+    DELETE FROM external_platform.provider_cost_open_usages open_usage
+     USING candidates
+     WHERE open_usage.provider_key = candidates.provider_key
+       AND open_usage.month = candidates.month
+       AND open_usage.usage_request_id = candidates.usage_request_id
+    RETURNING open_usage.provider_key, open_usage.month, open_usage.usage_request_id
+  ), usage_costs AS (
+    SELECT folded.provider_key, folded.month, call.currency, folded.usage_request_id,
+           sum(call.cost_minor)::bigint AS cost_minor
+      FROM folded
+      JOIN external_platform.provider_calls call
+        ON call.usage_request_id = folded.usage_request_id
+       AND call.provider_key = folded.provider_key
+       AND call.started_at >= folded.month::timestamp AT TIME ZONE 'UTC'
+       AND call.started_at < (folded.month + interval '1 month') AT TIME ZONE 'UTC'
+     WHERE call.cost_minor IS NOT NULL
+     GROUP BY folded.provider_key, folded.month, call.currency, folded.usage_request_id
+  ), contributions AS (
+    SELECT usage_cost.provider_key, usage_cost.month, usage_cost.currency,
+           count(*)::bigint AS usages,
+           sum(usage_cost.cost_minor)::bigint AS known_cost_minor,
+           -- Same coverage rule as admission's subsidy exposure.
+           sum(greatest(usage_cost.cost_minor - CASE
+                 WHEN charge.enforcement_mode = 'enforced'
+                  AND charge.status IN ('reserved', 'captured', 'unknown')
+                  AND charge.currency = usage_cost.currency
+                 THEN charge.quoted_minor
+                 ELSE 0
+               END, 0))::bigint AS subsidy_cost_minor
+      FROM usage_costs usage_cost
+      LEFT JOIN billing.customer_charges charge
+        ON charge.usage_request_id = usage_cost.usage_request_id
+     GROUP BY usage_cost.provider_key, usage_cost.month, usage_cost.currency
+  ), totals AS (
+    INSERT INTO external_platform.provider_cost_month_totals AS total
+      (provider_key, month, currency, folded_usages, known_cost_minor, subsidy_cost_minor)
+    SELECT provider_key, month, currency, usages, known_cost_minor, subsidy_cost_minor
+      FROM contributions
+    ON CONFLICT (provider_key, month, currency) DO UPDATE SET
+      folded_usages = total.folded_usages + EXCLUDED.folded_usages,
+      known_cost_minor = total.known_cost_minor + EXCLUDED.known_cost_minor,
+      subsidy_cost_minor = total.subsidy_cost_minor + EXCLUDED.subsidy_cost_minor,
+      updated_at = now()
+    RETURNING 1
+  )
+  SELECT (SELECT count(*) FROM folded)::integer AS folded_usages,
+         (SELECT count(*) FROM totals)::integer AS updated_totals`
+
 async function transaction(pool, operation) {
   const client = await pool.connect()
   let commitStarted = false
@@ -2009,29 +2107,57 @@ async function transaction(pool, operation) {
   }
 }
 
-async function postgresProviderCostState(client, {
+// The month's procurement exposure as admission reads it. Finished usage
+// requests are folded into provider_cost_month_totals (migration 163); only
+// open ones are aggregated from provider_calls, so the read is O(open + active
+// reservations) instead of O(month). Folded requests have no anomalous
+// evidence and are never the current reserved request or an active
+// reservation, so every column equals the full-month aggregate.
+export async function providerCostExposure(client, {
   providerKey,
   usageRequestId,
   currency,
   reservationId = null,
 }) {
-  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-    `external-platform-cost:${providerKey}`,
-  ])
   const exposure = await client.query(
-    `WITH monthly_calls AS MATERIALIZED (
-       SELECT usage_request_id, cost_minor, cost_kind, currency
-         FROM external_platform.provider_calls
-        WHERE provider_key = $1
-          AND (currency = $2 OR usage_request_id = $3
-            OR currency IS NULL OR currency !~ '^[A-Z]{3}$')
-          AND started_at >= (
-            date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
-          )
-          AND started_at < (
-            (date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month')
-              AT TIME ZONE 'UTC'
-          )
+    `WITH month_bounds AS MATERIALIZED (
+       SELECT date_trunc('month', now() AT TIME ZONE 'UTC')::date AS month,
+              date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                AS starts_at,
+              (date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month')
+                AT TIME ZONE 'UTC' AS ends_at
+     ), open_usages AS MATERIALIZED (
+       SELECT open_usage.usage_request_id
+         FROM external_platform.provider_cost_open_usages open_usage
+         JOIN month_bounds ON open_usage.month = month_bounds.month
+        WHERE open_usage.provider_key = $1
+     ), monthly_calls AS MATERIALIZED (
+       SELECT call.usage_request_id, call.cost_minor, call.cost_kind, call.currency
+         FROM open_usages
+         JOIN external_platform.provider_calls call
+           ON call.usage_request_id = open_usages.usage_request_id
+         JOIN month_bounds
+           ON call.started_at >= month_bounds.starts_at
+          AND call.started_at < month_bounds.ends_at
+        WHERE call.provider_key = $1
+          AND (call.currency = $2 OR call.usage_request_id = $3
+            OR call.currency IS NULL OR call.currency !~ '^[A-Z]{3}$')
+     ), current_calls AS MATERIALIZED (
+       -- Read directly so the current request's own evidence never depends
+       -- on whether it is still open.
+       SELECT call.cost_minor, call.cost_kind, call.currency,
+              EXISTS (SELECT 1 FROM open_usages WHERE usage_request_id = $3) AS open
+         FROM external_platform.provider_calls call
+         JOIN month_bounds
+           ON call.started_at >= month_bounds.starts_at
+          AND call.started_at < month_bounds.ends_at
+        WHERE call.usage_request_id = $3 AND call.provider_key = $1
+     ), folded AS MATERIALIZED (
+       SELECT coalesce(sum(total.known_cost_minor), 0)::bigint AS known_cost_minor,
+              coalesce(sum(total.subsidy_cost_minor), 0)::bigint AS subsidy_cost_minor
+         FROM external_platform.provider_cost_month_totals total
+         JOIN month_bounds ON total.month = month_bounds.month
+        WHERE total.provider_key = $1 AND total.currency = $2
      ), usage_costs AS MATERIALIZED (
        SELECT usage_request_id, sum(cost_minor)::bigint AS cost_minor
          FROM monthly_calls
@@ -2085,26 +2211,30 @@ async function postgresProviderCostState(client, {
               SELECT coalesce(sum(cost_minor), 0)::bigint
                 FROM monthly_calls
                WHERE cost_minor IS NOT NULL AND currency = $2
-            ) AS known_cost_minor,
+            ) + (SELECT known_cost_minor FROM folded) AS known_cost_minor,
             (
               SELECT count(*)::integer
                 FROM monthly_calls
                WHERE (cost_kind <> 'unknown' AND (cost_minor IS NULL OR cost_minor <= 0))
                   OR (cost_minor IS NOT NULL AND currency IS DISTINCT FROM $2)
+            ) + (
+              SELECT count(*)::integer
+                FROM current_calls
+               WHERE NOT open
+                 AND ((cost_kind <> 'unknown' AND (cost_minor IS NULL OR cost_minor <= 0))
+                   OR (cost_minor IS NOT NULL AND currency IS DISTINCT FROM $2))
             ) AS unknown_cost_calls,
             (
               SELECT count(*)::integer
-                FROM monthly_calls
-               WHERE usage_request_id = $3
-                 AND (
-                   cost_kind IS NULL
-                   OR cost_kind NOT IN ('estimated', 'provider_reported')
-                   OR cost_minor IS NULL
-                   OR cost_minor <= 0
-                   OR currency IS DISTINCT FROM $2
-                 )
+                FROM current_calls
+               WHERE cost_kind IS NULL
+                  OR cost_kind NOT IN ('estimated', 'provider_reported')
+                  OR cost_minor IS NULL
+                  OR cost_minor <= 0
+                  OR currency IS DISTINCT FROM $2
             ) AS current_unknown_cost_calls,
-            (SELECT cost_minor FROM subsidy_exposure) AS subsidy_cost_minor,
+            (SELECT cost_minor FROM subsidy_exposure)
+              + (SELECT subsidy_cost_minor FROM folded) AS subsidy_cost_minor,
             (
               SELECT coalesce(sum(greatest(
                        reserved_cost_minor
@@ -2146,7 +2276,8 @@ async function postgresProviderCostState(client, {
                  )
             ) AS current_mixed_reservation_count,
             coalesce((
-              SELECT cost_minor FROM usage_costs WHERE usage_request_id = $3
+              SELECT sum(cost_minor) FROM current_calls
+               WHERE cost_minor IS NOT NULL AND currency = $2
             ), 0)::bigint AS usage_cost_minor,
             (
               SELECT quoted_minor FROM billing.customer_charges
@@ -2210,7 +2341,26 @@ async function postgresProviderCostState(client, {
             ) AS reservation_monthly_subsidy_budget_minor`,
     [providerKey, currency, usageRequestId, reservationId],
   )
-  const row = exposure.rows[0] || {}
+  return exposure.rows[0] || {}
+}
+
+// `serialize: false` is only for a call consuming its own reservation, which
+// serializes on that reservation row instead (see beginProviderCall).
+async function postgresProviderCostState(client, {
+  providerKey,
+  usageRequestId,
+  currency,
+  reservationId = null,
+  serialize = true,
+}) {
+  if (serialize) {
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+      `external-platform-cost:${providerKey}`,
+    ])
+  }
+  const row = await providerCostExposure(client, {
+    providerKey, usageRequestId, currency, reservationId,
+  })
   const customerBilled = row.customer_billed === true
   const knownCostMinor = customerBilled ? 0 : Number(row.known_cost_minor)
   const unknownCostCallsRaw = customerBilled
@@ -2835,32 +2985,28 @@ export class PostgresExternalPlatformStore {
     if (duration < 1_000 || duration > 3_600_000) {
       throw new TypeError('windowMs must be between 1000 and 3600000')
     }
-    const { rows } = await this.pool.query(
-      `WITH db_clock AS MATERIALIZED (
-         SELECT clock_timestamp() AS observed_at
-       )
-       INSERT INTO external_platform.provider_rate_buckets AS bucket
-         (provider_key, capacity, window_ms, tokens, last_admitted, refilled_at, updated_at)
-       -- Capacity remains the refill rate. $5 bounds accumulated burst tokens;
-       -- explicit operand types avoid ambiguous INSERT ... SELECT parameters.
-       SELECT $1, $2, $3, ($5::double precision - $4::double precision), true,
-              db_clock.observed_at, db_clock.observed_at
-         FROM db_clock
-       ON CONFLICT (provider_key) DO UPDATE SET
-         capacity = EXCLUDED.capacity,
-         window_ms = EXCLUDED.window_ms,
-         tokens = CASE
-           WHEN least(
-             $5::double precision,
-             bucket.tokens + greatest(
-               0::double precision,
-               extract(epoch FROM (EXCLUDED.refilled_at - bucket.refilled_at))::double precision
-                 * 1000::double precision
-                 * EXCLUDED.capacity::double precision
-                 / EXCLUDED.window_ms::double precision
-             )
-           ) >= $4::double precision
-             THEN least(
+    // Every dispatch of this provider updates this one row. A synchronous
+    // COMMIT would keep the row locked until the WAL flush, so a slow disk
+    // turns the limiter itself into the bottleneck. Losing the last few
+    // admissions in a server crash only returns tokens to the bucket.
+    const { rows } = await transaction(this.pool, async (client) => {
+      await client.query('SET LOCAL synchronous_commit TO off')
+      return client.query(
+        `WITH db_clock AS MATERIALIZED (
+           SELECT clock_timestamp() AS observed_at
+         )
+         INSERT INTO external_platform.provider_rate_buckets AS bucket
+           (provider_key, capacity, window_ms, tokens, last_admitted, refilled_at, updated_at)
+         -- Capacity remains the refill rate. $5 bounds accumulated burst tokens;
+         -- explicit operand types avoid ambiguous INSERT ... SELECT parameters.
+         SELECT $1, $2, $3, ($5::double precision - $4::double precision), true,
+                db_clock.observed_at, db_clock.observed_at
+           FROM db_clock
+         ON CONFLICT (provider_key) DO UPDATE SET
+           capacity = EXCLUDED.capacity,
+           window_ms = EXCLUDED.window_ms,
+           tokens = CASE
+             WHEN least(
                $5::double precision,
                bucket.tokens + greatest(
                  0::double precision,
@@ -2869,8 +3015,29 @@ export class PostgresExternalPlatformStore {
                    * EXCLUDED.capacity::double precision
                    / EXCLUDED.window_ms::double precision
                )
-             ) - $4::double precision
-           ELSE least(
+             ) >= $4::double precision
+               THEN least(
+                 $5::double precision,
+                 bucket.tokens + greatest(
+                   0::double precision,
+                   extract(epoch FROM (EXCLUDED.refilled_at - bucket.refilled_at))::double precision
+                     * 1000::double precision
+                     * EXCLUDED.capacity::double precision
+                     / EXCLUDED.window_ms::double precision
+                 )
+               ) - $4::double precision
+             ELSE least(
+               $5::double precision,
+               bucket.tokens + greatest(
+                 0::double precision,
+                 extract(epoch FROM (EXCLUDED.refilled_at - bucket.refilled_at))::double precision
+                   * 1000::double precision
+                   * EXCLUDED.capacity::double precision
+                   / EXCLUDED.window_ms::double precision
+               )
+             )
+           END,
+           last_admitted = least(
              $5::double precision,
              bucket.tokens + greatest(
                0::double precision,
@@ -2879,29 +3046,19 @@ export class PostgresExternalPlatformStore {
                  * EXCLUDED.capacity::double precision
                  / EXCLUDED.window_ms::double precision
              )
-           )
-         END,
-         last_admitted = least(
-           $5::double precision,
-           bucket.tokens + greatest(
-             0::double precision,
-             extract(epoch FROM (EXCLUDED.refilled_at - bucket.refilled_at))::double precision
-               * 1000::double precision
-               * EXCLUDED.capacity::double precision
-               / EXCLUDED.window_ms::double precision
-           )
-         ) >= $4::double precision,
-         refilled_at = greatest(bucket.refilled_at, EXCLUDED.refilled_at),
-         updated_at = greatest(bucket.updated_at, EXCLUDED.refilled_at)
-       RETURNING last_admitted AS allowed,
-         floor(tokens)::bigint AS remaining,
-         CASE WHEN last_admitted THEN 0::bigint ELSE greatest(
-           1::bigint,
-           ceil(($4::double precision - tokens) * window_ms::double precision
-             / capacity::double precision)::bigint
-         ) END AS retry_after_ms`,
-      [this.providerKey, maximum, duration, requested, burst],
-    )
+           ) >= $4::double precision,
+           refilled_at = greatest(bucket.refilled_at, EXCLUDED.refilled_at),
+           updated_at = greatest(bucket.updated_at, EXCLUDED.refilled_at)
+         RETURNING last_admitted AS allowed,
+           floor(tokens)::bigint AS remaining,
+           CASE WHEN last_admitted THEN 0::bigint ELSE greatest(
+             1::bigint,
+             ceil(($4::double precision - tokens) * window_ms::double precision
+               / capacity::double precision)::bigint
+           ) END AS retry_after_ms`,
+        [this.providerKey, maximum, duration, requested, burst],
+      )
+    })
     if (!rows[0]) throw new Error('Provider rate bucket returned no state')
     return {
       allowed: rows[0].allowed === true,
@@ -2925,18 +3082,31 @@ export class PostgresExternalPlatformStore {
     const budgetMinor = costControl?.monthlyBudgetMinor
     if (!Number.isSafeInteger(budgetMinor) || budgetMinor < 0) return null
     const currency = costControl.currency ?? null
+    // Known cost is folded total + open requests, as in providerCostExposure.
     const { rows } = await this.pool.query(
-      `WITH monthly_calls AS (
-         SELECT cost_minor, currency
-           FROM external_platform.provider_calls
-          WHERE provider_key = $1
-            AND started_at >= (date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')
-            AND started_at < ((date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month') AT TIME ZONE 'UTC')
+      `WITH month_bounds AS MATERIALIZED (
+         SELECT date_trunc('month', now() AT TIME ZONE 'UTC')::date AS month,
+                date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS starts_at,
+                (date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month') AT TIME ZONE 'UTC' AS ends_at
+       ), monthly_calls AS (
+         SELECT call.cost_minor, call.currency
+           FROM external_platform.provider_cost_open_usages open_usage
+           JOIN month_bounds ON open_usage.month = month_bounds.month
+           JOIN external_platform.provider_calls call
+             ON call.usage_request_id = open_usage.usage_request_id
+            AND call.started_at >= month_bounds.starts_at
+            AND call.started_at < month_bounds.ends_at
+          WHERE open_usage.provider_key = $1 AND call.provider_key = $1
        )
        SELECT (
                 SELECT coalesce(sum(cost_minor), 0)::bigint
                   FROM monthly_calls
                  WHERE cost_minor IS NOT NULL AND currency = $2
+              ) + (
+                SELECT coalesce(sum(total.known_cost_minor), 0)::bigint
+                  FROM external_platform.provider_cost_month_totals total
+                  JOIN month_bounds ON total.month = month_bounds.month
+                 WHERE total.provider_key = $1 AND total.currency = $2
               ) AS known_cost_minor,
               (
                 SELECT coalesce(sum(reservation.reserved_cost_minor), 0)::bigint
@@ -2993,12 +3163,21 @@ export class PostgresExternalPlatformStore {
     let expected
     try {
       expected = await transaction(this.pool, async (client) => {
-        // Provider lock order is shared with beginProviderCall: provider first,
-        // then the usage row. This prevents a workflow reservation racing a
-        // standalone call or a usage release on another Hub replica.
+        // Provider lock order is shared with standalone beginProviderCall:
+        // provider first, then the usage row. This prevents a workflow
+        // reservation racing a standalone call or a usage release on another
+        // Hub replica.
         await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
           `external-platform-cost:${this.providerKey}`,
         ])
+        // The provider lock is held until COMMIT returns. A reservation is a
+        // pre-dispatch hold, never call evidence, so it commits without
+        // waiting for the WAL flush: the next admission sees it as soon as it
+        // is visible. Nothing is dispatched until beginProviderCall commits
+        // synchronously after reading this reservation, and that flush covers
+        // this earlier commit record, so a crash can only lose a reservation
+        // nobody has dispatched against (or that only made others stricter).
+        await client.query('SET LOCAL synchronous_commit TO off')
         const owned = await client.query(
           `SELECT request.id
              FROM usage_requests request
@@ -3093,6 +3272,7 @@ export class PostgresExternalPlatformStore {
           releasedAt: null,
         }
       })
+      this.#scheduleCostLedgerFold()
       return expected
     } catch (error) {
       if (error instanceof AppError) throw error
@@ -3186,6 +3366,11 @@ export class PostgresExternalPlatformStore {
           `external-platform-cost:${this.providerKey}`,
         ])
       }
+      // Either way the provider lock is released without waiting for the WAL
+      // flush: losing a release in a crash only restores a conservative hold,
+      // and any admission that relied on it flushes it with its own
+      // synchronous call commit.
+      await client.query('SET LOCAL synchronous_commit TO off')
       const released = await client.query(
         `UPDATE external_platform.provider_cost_reservations
             SET status = 'released', released_at = now()
@@ -3208,6 +3393,83 @@ export class PostgresExternalPlatformStore {
       )
       return Boolean(existing.rows[0])
     })
+  }
+
+  // Moves finished usage requests of this provider from the open set into the
+  // monthly totals. Never takes the provider cost lock: admission reads the
+  // totals and the open set in one snapshot, and a fold changes both in one
+  // transaction. Losing a fold in a crash only leaves those requests open.
+  async foldProviderCostLedger({ limit = COST_LEDGER_FOLD_LIMIT } = {}) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) {
+      throw new TypeError('limit must be an integer between 1 and 10000')
+    }
+    return transaction(this.pool, async (client) => {
+      await client.query('SET LOCAL synchronous_commit TO off')
+      await client.query("SET LOCAL lock_timeout = '1s'")
+      await client.query("SET LOCAL statement_timeout = '10s'")
+      const { rows: [lock] } = await client.query(
+        'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired',
+        [costLedgerLockKey(this.providerKey)],
+      )
+      if (lock?.acquired !== true) return { foldedUsages: 0, skipped: true }
+      const { rows: [result] } = await client.query(
+        FOLD_PROVIDER_COST_LEDGER_SQL,
+        [this.providerKey, limit],
+      )
+      return { foldedUsages: Number(result?.folded_usages ?? 0), skipped: false }
+    })
+  }
+
+  // Reconciliation repair: reopen every usage request with calls in the month
+  // and drop that month's folded totals, in one transaction. Admission stays
+  // exact throughout (it is then O(month) until folds catch up). `month` is
+  // the first day of a UTC month, e.g. '2026-10-01'; default current month.
+  async resetProviderCostLedger({ month = null } = {}) {
+    return transaction(this.pool, async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        costLedgerLockKey(this.providerKey),
+      ])
+      const { rows: [bounds] } = await client.query(
+        `SELECT coalesce($1::date, date_trunc('month', now() AT TIME ZONE 'UTC')::date) AS month`,
+        [month],
+      )
+      const removed = await client.query(
+        `DELETE FROM external_platform.provider_cost_month_totals
+          WHERE provider_key = $1 AND month = $2`,
+        [this.providerKey, bounds.month],
+      )
+      const reopened = await client.query(
+        `INSERT INTO external_platform.provider_cost_open_usages
+           (provider_key, month, usage_request_id)
+         SELECT DISTINCT call.provider_key, $2::date, call.usage_request_id
+           FROM external_platform.provider_calls call
+          WHERE call.provider_key = $1
+            AND call.started_at >= $2::date::timestamp AT TIME ZONE 'UTC'
+            AND call.started_at < ($2::date + interval '1 month') AT TIME ZONE 'UTC'
+         ON CONFLICT DO NOTHING`,
+        [this.providerKey, bounds.month],
+      )
+      return { removedTotals: removed.rowCount, reopenedUsages: reopened.rowCount }
+    })
+  }
+
+  #scheduleCostLedgerFold() {
+    const pool = this.pool
+    if (typeof pool?.totalCount !== 'number' || !canStartBestEffortCleanup(pool)) return
+    let byProvider = costLedgerFolds.get(pool)
+    if (!byProvider) {
+      byProvider = new Map()
+      costLedgerFolds.set(pool, byProvider)
+    }
+    const state = byProvider.get(this.providerKey) ?? { running: false, nextAt: 0 }
+    byProvider.set(this.providerKey, state)
+    const now = Date.now()
+    if (state.running || now < state.nextAt) return
+    state.running = true
+    state.nextAt = now + COST_LEDGER_FOLD_INTERVAL_MS
+    this.foldProviderCostLedger()
+      .catch(() => { /* Housekeeping only; the next admission retries later. */ })
+      .finally(() => { state.running = false })
   }
 
   async beginProviderCall(input) {
@@ -3247,11 +3509,29 @@ export class PostgresExternalPlatformStore {
     try {
       return await transaction(this.pool, async (client) => {
         if (costControl) {
+          const reserved = input.costReservationId != null
+          if (reserved) {
+            // The reservation was admitted under the provider lock, and its
+            // headroom can only be consumed by this usage request: the call's
+            // cost moves from reserved to known exposure, leaving every other
+            // admission's inputs unchanged. So this call serializes on its own
+            // reservation row (against a second call of the same request and
+            // against release) rather than on the provider lock, which would
+            // otherwise stay held through this synchronous COMMIT's flush.
+            await client.query(
+              `SELECT 1
+                 FROM external_platform.provider_cost_reservations
+                WHERE id = $1 AND provider_key = $2 AND usage_request_id = $3
+                FOR UPDATE`,
+              [input.costReservationId, this.providerKey, input.usageRequestId],
+            )
+          }
           const state = await postgresProviderCostState(client, {
             providerKey: this.providerKey,
             usageRequestId: input.usageRequestId,
             currency: costControl.currency,
             reservationId: input.costReservationId ?? null,
+            serialize: !reserved,
           })
           if (input.costReservationId != null) {
             const reservation = state.reservation
@@ -3372,10 +3652,19 @@ export class PostgresExternalPlatformStore {
               : 'Provider call does not match its reserved usage request',
           )
         }
+        // provider_state is one row per provider. Locking it here would hold
+        // every concurrent dispatch for this provider behind each COMMIT flush.
+        // last_call_at is an observation (the call row is the evidence), so
+        // refresh it at most every 5 seconds and never wait for its lock.
         await client.query(
           `UPDATE external_platform.provider_state
               SET last_call_at = $1, updated_at = now()
-            WHERE provider_key = $2`,
+            WHERE provider_key = (
+              SELECT provider_key FROM external_platform.provider_state
+               WHERE provider_key = $2
+                 AND (last_call_at IS NULL OR last_call_at < $1::timestamptz - interval '5 seconds')
+               FOR UPDATE SKIP LOCKED
+            )`,
           [rows[0].started_at, this.providerKey],
         )
         return { id, startedAt: iso(rows[0].started_at) }
@@ -4039,6 +4328,9 @@ export class PostgresExternalPlatformStore {
   async #recordProviderSuccess(client, callId) {
     // Settlement can lag acquisition (notably while search enriches its rows).
     // Only a call started after the latest failure is evidence of recovery.
+    // A healthy provider would only move last_success_at here; writing it on
+    // every settlement serialises all settlements of this provider on one row
+    // until each COMMIT flush. Recovery fields are always applied.
     await client.query(
       `UPDATE external_platform.provider_state SET
          consecutive_failures = CASE WHEN last_failure_at > call.started_at THEN consecutive_failures ELSE 0 END,
@@ -4047,7 +4339,12 @@ export class PostgresExternalPlatformStore {
          last_success_at = now(), updated_at = now()
        FROM external_platform.provider_calls AS call
        WHERE provider_state.provider_key = $1 AND call.id = $2
-         AND call.provider_key = provider_state.provider_key`,
+         AND call.provider_key = provider_state.provider_key
+         AND (provider_state.consecutive_failures <> 0
+           OR provider_state.circuit_open_until IS NOT NULL
+           OR provider_state.last_error_code IS NOT NULL
+           OR provider_state.last_success_at IS NULL
+           OR provider_state.last_success_at < now() - interval '5 seconds')`,
       [this.providerKey, callId],
     )
   }

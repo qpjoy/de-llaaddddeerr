@@ -14,6 +14,7 @@
 
 相关专题：
 
+- [51-internal-server-storage-deploy-incident-2026-10-19.md](./51-internal-server-storage-deploy-incident-2026-10-19.md)：`INTERNAL-STORAGE-DEPLOY-20261019` 服务器排查交接入口；汇总 NVMe 超时、etcd 已迁移、Launcher/Hub 发布、DataPort 锁、Pay/Rig 修复状态、只读复查与待办。故障尚未结案，保留 MX-H2I 登录/联网边界。
 - [50-internal-gateway-port80-ownership.md](./50-internal-gateway-port80-ownership.md)：Nginx/Caddy 启动顺序引发的 Hub 404、明确 80 端口归属及仅更新共享网关的恢复步骤。
 - [48-identity-application-management.md](./48-identity-application-management.md)：Internal 管理 Auth 接入应用、固定回调与自动生成的 CSP 域名；复用主机执行器，区分保存与加载状态，保护现有凭据。
 - [47-shared-sso-and-hub-adapter.md](./47-shared-sso-and-hub-adapter.md)：通用 SSO/BFF 与加密会话 SDK、Hub 业务适配和旧会话兼容、新应用配置与授权接入；不改支付交易实现。

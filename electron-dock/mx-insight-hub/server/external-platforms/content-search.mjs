@@ -7,12 +7,13 @@ import { createDataSearchCursorCodec, createRawSearchCursorCodec, createNightAll
 import { prepareNightAllCompatibilityTraversal } from '../data/night-all-pagination.mjs'
 import { runContentSearch } from './content-search-workflow.mjs'
 import { xiaohongshuSearchOperation } from '../contracts/remaining-content-search.mjs'
+import { effectiveTwitterSearchParameters, normalizeTwitterSearchParameters, twitterTikHubParameters } from '../contracts/twitter-search-parameters.mjs'
 
 const hash = value => requestFingerprint({ method: 'POST', path: '/internal/tikhub-content-search/scope', body: value })
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)
 export const isDirectContentSearchPlatform = platform => Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, platform)
 
-export function normalizeContentSearchDelivery(normalized, { dataSearch, codec, historicalCodec }) {
+export function normalizeContentSearchDelivery(normalized, { dataSearch, codec, historicalCodec, twitterSearchParameters }) {
   const platform = normalized.platform, recipe = TIKHUB_CONTENT_SEARCH_RECIPES[platform]
   if (!recipe) throw new AppError(400, 'invalid_platform', 'Unsupported direct content-search platform')
   if (!dataSearch && recipe.rawCompatibility === false) throw new AppError(400, 'content_search_option_unsupported', 'This platform uses the standard data/search contract; raw compatibility retains its existing route')
@@ -23,7 +24,9 @@ export function normalizeContentSearchDelivery(normalized, { dataSearch, codec, 
   if (!queries.length || queries.length > 50 || queries.some(query => !query || query.length > (dataSearch ? 500 : 2048) || query.includes('\0'))) {
     throw new AppError(400, 'invalid_query', 'A bounded content-search keyword is required')
   }
-  const pageSize = normalized.pageSize, params = { ...(body.params || {}) }
+  const pageSize = normalized.pageSize, params = platform === 'twitter'
+    ? normalizeTwitterSearchParameters(body.params ?? {}) : { ...(body.params || {}) }
+  let searchParameters = platform === 'twitter' ? effectiveTwitterSearchParameters(twitterSearchParameters ?? params) : null
   const paramsCursor = typeof params.cursor === 'string' && /^(?:mxnc1|mxraw1|mxds1)\./u.test(params.cursor) ? params.cursor : null
   const cursor = body.cursor || paramsCursor
   if (paramsCursor) delete params.cursor
@@ -49,17 +52,23 @@ export function normalizeContentSearchDelivery(normalized, { dataSearch, codec, 
         || !Number.isInteger(state.page) || state.page < 2 || state.page > 15
         || !Number.isSafeInteger(state.expiresAt) || state.expiresAt <= Date.now()) throw new Error('cursor')
       ;({ page, expiresAt, previousDeliveryId } = state)
+      if (searchParameters) {
+        searchParameters = effectiveTwitterSearchParameters({ ...params, category: state.twitterSearchCategory ?? params.category ?? 'Top' })
+        if (Object.entries(params).some(([key, value]) => searchParameters[key] !== value)) throw new Error('search_parameters')
+      }
     } catch { throw new AppError(400, 'invalid_cursor', 'The content-search cursor is invalid, expired or belongs to another query/Key; restart explicitly') }
   }
-  // Only fixed recipe defaults are normalized before replay. User options are
-  // checked after replay, when a new acquisition is actually required.
+  // Other platforms retain their historical post-replay option validation.
+  // Twitter's additive public options must be representable before admission.
   const placeholder = normalizeTikHubContentSearchRequest({ platform, query: queries[0], pageSize,
     maxQueryLength: dataSearch ? 500 : 2048 })
-  return { ...placeholder, platform, recipe, queries, params, pageSize, totalLimit: queries.length * pageSize,
+  return { ...placeholder, platform, recipe, queries, params: searchParameters ? twitterTikHubParameters(searchParameters) : params, pageSize, totalLimit: queries.length * pageSize,
+    ...(searchParameters ? { twitterSearchParameters: searchParameters } : {}),
     standard: Boolean(dataSearch),
     resultType: dataSearch?.resultType || 'raw', body, scopeHash, page, expiresAt, previousDeliveryId,
     restartRequired, unsupportedNativeCursor, fingerprintBody, deliveryMode: 'live_only',
     encodeNext: deliveryId => codec.encode({ version: TIKHUB_CONTENT_SEARCH_VERSION, platform, provider: 'tikhub',
+      ...(searchParameters ? { twitterSearchCategory: searchParameters.category } : {}),
       recipe: recipe.key, scope: scopeHash, page: page + 1, expiresAt, previousDeliveryId: deliveryId }) }
 }
 
@@ -106,6 +115,7 @@ export function contentSearchPlan({ gateway, context, input, dependencies }) {
       nativeForwarding: true, dataSearch: Boolean(dataSearch), replayReleasedFailures: true, replayWindowMs: dataSearch?.replayWindowMs,
       normalize: ({ policy }) => {
         request = normalizeContentSearchDelivery(normalized, { dataSearch, codec,
+          twitterSearchParameters: input.twitterSearchParameters,
           historicalCodec: createNightAllCompatibilityCursorCodec(gateway.apiKeyPepper, context.consumer.id) })
         if (request.totalLimit > policy.maxPageSize || request.totalLimit > 1000) throw new AppError(400, 'work_budget_exceeded', 'Content-search work exceeds the Key entitlement')
         return request

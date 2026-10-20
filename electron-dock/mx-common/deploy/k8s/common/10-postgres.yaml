@@ -39,6 +39,11 @@ metadata:
 spec:
   serviceName: mx-common-postgres
   replicas: 1
+  # Template changes never restart the shared database (Hub, DataPort). CPU and
+  # memory changes reach the live Pod in place via electron-dock
+  # `scripts/manage.sh db apply`; argument changes wait for a planned restart.
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
       app.kubernetes.io/name: mx-common-postgres
@@ -139,9 +144,11 @@ spec:
             requests:
               cpu: 500m
               memory: 2Gi
+            # 4 CPUs throttled burst queries while they held locks; the host has
+            # 128 cores. A larger memory limit lets the page cache keep Hub data.
             limits:
-              cpu: "4"
-              memory: 16Gi
+              cpu: "16"
+              memory: 48Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

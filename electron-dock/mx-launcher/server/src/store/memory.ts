@@ -441,6 +441,8 @@ export class MemoryStore implements PlatformStore {
     this.ensureEnabledAppPublisherServiceAccounts();
   }
 
+  ready(): void {}
+
   overview() {
     return {
       environment: this.config.environment,

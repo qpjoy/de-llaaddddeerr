@@ -143,7 +143,16 @@ export function inspectTwitterArchive(archive, snapshot, { httpStatus = 200, cal
   if (!Number.isFinite(date.getTime())) return { state: 'invalid_archive_timestamp', ...integrity, structure }
   let request
   try { request = normalizeHubSocialRequest('search', { platform: 'twitter', query, count: Math.min(pageSize, 50),
-    sort: standard ? 'top' : body.sort ?? 'latest' }) }
+    sort: standard ? 'top' : body.sort ?? 'latest' })
+    if (standard) {
+      const params = snapshot.twitterSearchParameters ?? body.params ?? {}
+      const category = params.category ?? (body.params !== undefined ? 'Latest' : 'Top')
+      if (!['Top', 'Latest', 'Photos', 'Videos'].includes(category)
+        || params.includeTimestamp != null && typeof params.includeTimestamp !== 'boolean') throw new Error('parameters')
+      request.upstreamQuery.category = category
+      request.upstreamQuery.includeTimestamp = String(params.includeTimestamp ?? false)
+    }
+  }
   catch { return { state: 'invalid_saved_search_parameters', ...integrity, structure } }
   if (standard) request.standardSearch = true
   const mapping = { evidence: 'current_mapping_from_saved_input', method: 'GET', endpointPathTemplate: '/search/{encoded-query}',

@@ -413,7 +413,7 @@ EOF
   kubectl -n "$NAMESPACE" scale deployment mx-common-redis --replicas=1 >/dev/null 2>&1 || true
 
   say "  waiting for the shared data plane to come back"
-  kubectl -n "$NAMESPACE" rollout status statefulset/mx-common-postgres --timeout=300s >/dev/null \
+  wait_workload statefulset mx-common-postgres 300 \
     || die "PostgreSQL did not become ready on the new volume; the old data is still at ${HOST_DATA_ROOT_ORIGINAL}"
   kubectl -n "$NAMESPACE" rollout status statefulset/mx-common-elasticsearch --timeout=600s >/dev/null \
     || die "Elasticsearch did not become ready on the new volume; the old data is still at ${HOST_DATA_ROOT_ORIGINAL}"
@@ -667,8 +667,23 @@ render_manifest() {
       "$1"
 }
 
+# See mx-launcher k8s_postgres_switch_to_ondelete: an existing RollingUpdate
+# StatefulSet keeps a defaulted `rollingUpdate` block that makes `kubectl apply`
+# of the OnDelete manifest invalid. Switching the strategy alone restarts nothing.
+switch_postgres_to_ondelete() {
+  local strategy
+  strategy="$(kubectl -n "$NAMESPACE" get statefulset mx-common-postgres --ignore-not-found \
+    -o jsonpath='{.spec.updateStrategy.type}')" || return 1
+  [ -n "$strategy" ] && [ "$strategy" != OnDelete ] || return 0
+  say "switching mx-common-postgres update strategy ${strategy} -> OnDelete (no Pod restart)"
+  kubectl -n "$NAMESPACE" patch statefulset mx-common-postgres --type=json \
+    -p '[{"op":"replace","path":"/spec/updateStrategy","value":{"type":"OnDelete"}}]' >/dev/null
+}
+
 apply_manifests() {
   local file
+  switch_postgres_to_ondelete \
+    || die "could not switch mx-common-postgres to OnDelete; no manifest was applied"
   while IFS= read -r file; do
     render_manifest "$file" | kubectl apply -f - >/dev/null
   done < <(manifest_list)
@@ -779,12 +794,35 @@ pod_progress() {
 # meant up to five minutes of total silence — indistinguishable from a hang.
 # Pulling a 1.3GB image over a slow link is a legitimate reason to wait; being
 # unable to tell that apart from a crash loop is not.
+# OnDelete StatefulSets (the shared database) never roll on a template change,
+# and `rollout status` rejects them; all replicas Ready is their signal.
+workload_ready() {
+  local kind="$1" name="$2" strategy ready replicas
+  if [ "$kind" = statefulset ]; then
+    IFS='|' read -r strategy ready replicas <<<"$(kubectl -n "$NAMESPACE" get statefulset "$name" \
+      -o jsonpath='{.spec.updateStrategy.type}|{.status.readyReplicas}|{.spec.replicas}' 2>/dev/null || true)"
+    if [ "$strategy" = OnDelete ]; then
+      [ "${replicas:-0}" -gt 0 ] && [ "${ready:-0}" = "$replicas" ]
+      return
+    fi
+  fi
+  kubectl -n "$NAMESPACE" rollout status "$kind/$name" --timeout=3s >/dev/null 2>&1
+}
+
+wait_workload() {
+  local kind="$1" name="$2" seconds="$3" started=$SECONDS
+  until workload_ready "$kind" "$name"; do
+    [ $((SECONDS - started)) -lt "$seconds" ] || return 1
+    sleep 5
+  done
+}
+
 wait_ready() {
   local kind="$1" name="$2" required="${3:-required}"
   local waited=0 started=$SECONDS interval=5 reason progress last_progress=""
 
   while [ "$waited" -lt "$WAIT_TIMEOUT" ]; do
-    if kubectl -n "$NAMESPACE" rollout status "$kind/$name" --timeout=3s >/dev/null 2>&1; then
+    if workload_ready "$kind" "$name"; then
       say "${name} is ready (${waited}s)"
       return 0
     fi
@@ -1357,17 +1395,46 @@ images_in_use() {
   printf '%s\n' "$POSTGRES_IMAGE" "$ELASTICSEARCH_IMAGE" "$REDIS_IMAGE"
 }
 
+common_managed_runtime_value() {
+  if [ "$(id -u)" -eq 0 ]; then
+    python3 /usr/local/lib/mx-k8s-runtime/resolve.py "$1" 2>/dev/null || { printf '%s\n' 'Managed Kubernetes runtime verification failed; refusing the legacy containerd endpoint.' >&2; return 1; }
+  else
+    need sudo
+    sudo -n python3 /usr/local/lib/mx-k8s-runtime/resolve.py "$1" 2>/dev/null || { printf '%s\n' 'Managed Kubernetes runtime verification failed; refusing the legacy containerd endpoint.' >&2; return 1; }
+  fi
+}
+
+common_ctr() {
+  local legacy_sudo="$1" address
+  shift
+  if [ -e /etc/mx-k8s-runtime/active.json ] || [ -L /etc/mx-k8s-runtime/active.json ]; then
+    address="$(common_managed_runtime_value address)" || return 1
+    [ -n "$address" ] || return 1
+    if [ "$(id -u)" -eq 0 ]; then ctr --address "$address" -n k8s.io "$@"
+    else sudo -n ctr --address "$address" -n k8s.io "$@"; fi
+  elif [ "$(id -u)" -eq 0 ]; then ctr -n k8s.io "$@"
+  elif [ "$legacy_sudo" = interactive ]; then need sudo; sudo ctr -n k8s.io "$@"
+  else sudo -n ctr -n k8s.io "$@"; fi
+}
+
+common_containerd_root() {
+  local root
+  if [ -e /etc/mx-k8s-runtime/active.json ] || [ -L /etc/mx-k8s-runtime/active.json ]; then
+    root="$(common_managed_runtime_value root)" || return 1
+    [ -n "$root" ] || return 1
+    [ -z "${MX_COMMON_CONTAINERD_ROOT:-}" ] || [ "$MX_COMMON_CONTAINERD_ROOT" = "$root" ] \
+      || die 'MX_COMMON_CONTAINERD_ROOT conflicts with the managed Kubernetes runtime'
+    printf '%s\n' "$root"
+  else printf '%s\n' "${MX_COMMON_CONTAINERD_ROOT:-/var/lib/containerd}"; fi
+}
+
 containerd_has_image() {
   local image="$1"
   local canonical
   canonical="$(canonical_image_ref "$image")"
   # Read the complete list: grep -q can close the pipe after an early match,
   # making ctr fail with SIGPIPE under pipefail and report a cached image missing.
-  if [ "$(id -u)" -eq 0 ]; then
-    ctr -n k8s.io images ls -q 2>/dev/null | grep -Fx -e "$canonical" -e "$image" >/dev/null
-  else
-    sudo -n ctr -n k8s.io images ls -q 2>/dev/null | grep -Fx -e "$canonical" -e "$image" >/dev/null
-  fi
+  common_ctr noninteractive images ls -q 2>/dev/null | grep -Fx -e "$canonical" -e "$image" >/dev/null
 }
 
 canonical_image_ref() {
@@ -1417,6 +1484,9 @@ report_image_readiness() {
 cmd_preload() {
   need docker
   local image failed=0
+  if [ -e /etc/mx-k8s-runtime/active.json ] || [ -L /etc/mx-k8s-runtime/active.json ]; then
+    common_managed_runtime_value address >/dev/null || return 1
+  fi
   while IFS= read -r image; do
     if containerd_has_image "$image"; then
       say "already imported: ${image}"
@@ -1434,15 +1504,8 @@ cmd_preload() {
     fi
     # Stream to containerd: no second large archive on the root filesystem.
     say "streaming ${image} from Docker into containerd; exporting and unpacking layers can take several minutes"
-    if [ "$(id -u)" -eq 0 ]; then
-      if ! docker image save "$image" | ctr -n k8s.io images import -; then
-        failed=1; continue
-      fi
-    else
-      need sudo
-      if ! docker image save "$image" | sudo ctr -n k8s.io images import -; then
-        failed=1; continue
-      fi
+    if ! docker image save "$image" | common_ctr interactive images import -; then
+      failed=1; continue
     fi
     if ! containerd_has_image "$image"; then
       warn "import did not make ${image} available to Kubernetes"
@@ -1621,14 +1684,8 @@ import_hanlp_image() (
   current_image_id="$(docker image inspect --format '{{.Id}}' "$HANLP_IMAGE" 2>/dev/null || true)"
   [ "$current_image_id" = "$MX_COMMON_HANLP_IMAGE_ID" ] \
     || die "${HANLP_IMAGE} changed while its archive was being created; retry the deploy"
-  if [ "$(id -u)" -eq 0 ]; then
-    ctr -n k8s.io images import "$archive" \
-      || die "containerd could not import ${HANLP_IMAGE}"
-  else
-    need sudo
-    sudo -n ctr -n k8s.io images import "$archive" \
-      || die "non-interactive sudo cannot import ${HANLP_IMAGE} into containerd"
-  fi
+  common_ctr noninteractive images import "$archive" \
+    || die "containerd could not import ${HANLP_IMAGE} with the selected Kubernetes runtime"
   containerd_has_image "$HANLP_IMAGE" \
     || die "containerd import completed but ${HANLP_IMAGE} is not present in k8s.io"
   say "imported ${HANLP_IMAGE}"
@@ -1688,17 +1745,18 @@ EOF
 }
 
 require_hanlp_disk_capacity() {
-  local minimum_gib="${MX_COMMON_HANLP_MIN_FREE_GIB:-8}" docker_root path checked_path available_kib
+  local minimum_gib="${MX_COMMON_HANLP_MIN_FREE_GIB:-8}" docker_root containerd_root path checked_path available_kib
   case "$minimum_gib" in
     ''|*[!0-9]*) die "MX_COMMON_HANLP_MIN_FREE_GIB must be a non-negative integer" ;;
   esac
   docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
   [ -n "$docker_root" ] || die "cannot determine DockerRootDir; is the Docker daemon running?"
 
+  containerd_root="$(common_containerd_root)" || return 1
   for path in \
       "$docker_root" \
       "${TMPDIR:-/tmp}" \
-      "${MX_COMMON_CONTAINERD_ROOT:-/var/lib/containerd}" \
+      "$containerd_root" \
       "$HOST_DATA_ROOT"; do
     case "$path" in
       /*) ;;

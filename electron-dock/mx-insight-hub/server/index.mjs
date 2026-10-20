@@ -532,6 +532,7 @@ export async function createRuntime(config = loadConfig()) {
   const service = new HubService({
     store,
     adapter,
+    twitterRetryStore: rapidApiStore,
     apiKeyPepper: config.apiKeyPepper,
     reservationLeaseMs: config.reservationLeaseMs,
     searchQueries: search?.queries ?? null,

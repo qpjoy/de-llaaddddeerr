@@ -1133,6 +1133,7 @@ if HANLP_FAIL_CLOSED_EVENTS="$hanlp_fail_closed_events" bash -c '
   sync_launcher_secret() { printf "launcher-sync\n" >>"$HANLP_FAIL_CLOSED_EVENTS"; }
   refresh_launcher_workload() { printf "launcher-rollout\n" >>"$HANLP_FAIL_CLOSED_EVENTS"; }
   warn_local_postgres_present() { :; }
+  require_control_plane_ready() { :; }
   disable_projector_startup_rebuild_for_deploy() { :; }
   apply_k8s
 ' _ "$ROOT_DIR" >"$hanlp_fail_closed_error" 2>&1; then
@@ -1255,6 +1256,7 @@ MIGRATION_CLEANUP_EVENTS="$migration_cleanup_events" bash -c '
   DEPLOY_MIGRATION_JOB_ACTIVE=1
   DEPLOY_FROZEN_ADMIN=1
   DEPLOY_FROZEN_ADMIN_UID=admin-uid
+  DEPLOY_FROZEN_ADMIN_REPLICAS=1
   kubectl() {
     printf "%s\n" "$*" >>"$MIGRATION_CLEANUP_EVENTS"
     case "$*" in
@@ -1313,7 +1315,7 @@ if ADMIN_STOP_EVENTS="$admin_stop_events" bash -c '
   kubectl() {
     printf "%s\n" "$*" >>"$ADMIN_STOP_EVENTS"
     case "$*" in
-      *"--ignore-not-found"*"jsonpath={.metadata.uid}|{.metadata.resourceVersion}"*) printf "admin-uid|900" ;;
+      *"--ignore-not-found"*"jsonpath={.metadata.uid}|{.metadata.resourceVersion}"*) printf "admin-uid|900|1" ;;
       *"jsonpath={.metadata.uid}|{.spec.replicas}"*) printf "admin-uid|0|1234" ;;
       *"jsonpath={.metadata.uid}|"*) printf "admin-uid|9|8|0|1|1" ;;
       *"get deployment/mx-insight-hub-admin"*"custom-columns="*)
@@ -1328,6 +1330,7 @@ if ADMIN_STOP_EVENTS="$admin_stop_events" bash -c '
   }
   docker() { :; }
   sleep() { SECONDS=$((SECONDS + 120)); }
+  require_control_plane_ready() { :; }
   disable_projector_startup_rebuild_for_deploy() { :; }
   validate_existing_runtime_secret() { :; }
   preserve_existing_justone_runtime_config() { :; }
@@ -2432,6 +2435,7 @@ MX_INSIGHT_DATA_API_WAIT_MS=5000 \
 MX_INSIGHT_INGEST_WORKER_CONCURRENCY=2 \
 MX_INSIGHT_INGEST_WORKER_DELAY_MS=0 \
 MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS=500 \
+MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT=on \
 MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS=60000 \
 MX_INSIGHT_JUSTONE_TOKEN="$runtime_secret_value" \
 MX_INSIGHT_JUSTONE_CONTRACT_VERIFIED=1 \
@@ -2486,7 +2490,7 @@ grep -Fxq -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS=0' "$runtime
 grep -Fxq -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS=0' "$runtime_secret_argv"
 grep -Fxq -- '--from-literal=MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS=60000' "$runtime_secret_argv"
 printf 'ok - explicit source page delay bounds survive ConfigMap rendering\n'
-for pressure_setting in DATA_API_READ_CONCURRENCY=2 DATA_API_ACQUISITION_CONCURRENCY=3 DATA_API_MAX_PENDING=300 DATA_API_WAIT_MS=5000 INGEST_WORKER_CONCURRENCY=2 INGEST_WORKER_DELAY_MS=0 PROJECTOR_WORKER_DELAY_MS=500; do
+for pressure_setting in DATA_API_READ_CONCURRENCY=2 DATA_API_ACQUISITION_CONCURRENCY=3 DATA_API_MAX_PENDING=300 DATA_API_WAIT_MS=5000 INGEST_WORKER_CONCURRENCY=2 INGEST_WORKER_DELAY_MS=0 PROJECTOR_WORKER_DELAY_MS=500 PROJECTOR_SYNCHRONOUS_COMMIT=on; do
   grep -Fxq -- "--from-literal=MX_INSIGHT_${pressure_setting}" "$runtime_secret_argv"
 done
 printf 'ok - Hub pressure controls survive ConfigMap rendering, including zero batch delay\n'
@@ -3115,3 +3119,4 @@ assert_eq \
   "runtime image imports the full server entrypoint before deployment"
 
 bash "$ROOT_DIR/tests/admin-freeze.test.sh"
+bash "$ROOT_DIR/tests/control-plane-preflight.test.sh"

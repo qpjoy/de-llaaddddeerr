@@ -28,14 +28,33 @@ console.log(ref);
 ' "$1"
 }
 
+pay_proxy_namespace_ctr() {
+  local namespace="$1" address
+  shift
+  if [ "$namespace" = k8s.io ] && { [ -e /etc/mx-k8s-runtime/active.json ] || [ -L /etc/mx-k8s-runtime/active.json ]; }; then
+    if [ "$(id -u)" -eq 0 ]; then
+      address="$(python3 /usr/local/lib/mx-k8s-runtime/resolve.py address 2>/dev/null)" || { printf '%s\n' 'Managed Kubernetes runtime verification failed; refusing the legacy containerd endpoint.' >&2; return 1; }
+      [ -n "$address" ] || return 1
+      ctr --address "$address" --namespace "$namespace" "$@"
+    else
+      address="$(sudo -n python3 /usr/local/lib/mx-k8s-runtime/resolve.py address 2>/dev/null)" || { printf '%s\n' 'Managed Kubernetes runtime verification failed; refusing the legacy containerd endpoint.' >&2; return 1; }
+      [ -n "$address" ] || return 1
+      sudo -n --preserve-env=HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,https_proxy,all_proxy,no_proxy \
+        ctr --address "$address" --namespace "$namespace" "$@"
+    fi
+  else
+    ctr --namespace "$namespace" "$@"
+  fi
+}
+
 pay_proxy_ctr_pull() {
   local namespace="$1" platform="$2" ref="$3" help
   need ctr
-  help="$(ctr --namespace "$namespace" images pull --help)"
+  help="$(pay_proxy_namespace_ctr "$namespace" images pull --help)" || return 1
   set -- --platform "$platform" "$ref"
   # containerd 2.x otherwise downloads in the daemon, outside this proxy scope.
   if [[ "$help" == *--local* ]]; then set -- --local "$@"; fi
-  ctr --namespace "$namespace" --timeout 10m images pull "$@"
+  pay_proxy_namespace_ctr "$namespace" --timeout 10m images pull "$@"
 }
 
 pay_proxy_bootstrap_image() (
@@ -95,12 +114,13 @@ pay_buildx() {
 }
 
 pay_proxy_postgres_image() {
-  local ref architecture
+  local ref architecture images
   node "$ROOT/scripts/runtime.mjs" local-single-node "$ROOT"
   ref="$(node "$ROOT/scripts/runtime.mjs" postgres-image "$ROOT")"
   ref="$(pay_image_reference "$ref")"
   need ctr
-  if ctr --namespace k8s.io images list -q | grep -Fxq "$ref"; then return; fi
+  images="$(pay_proxy_namespace_ctr k8s.io images list -q)" || return 1
+  if printf '%s\n' "$images" | grep -Fxq "$ref"; then return; fi
   case "$(uname -m)" in x86_64) architecture=amd64;; aarch64|arm64) architecture=arm64;; *) die 'Unsupported local PostgreSQL image architecture';; esac
   say 'Preloading PostgreSQL through the build proxy on the retained single node'
   pay_proxy_ctr_pull k8s.io "linux/$architecture" "$ref"

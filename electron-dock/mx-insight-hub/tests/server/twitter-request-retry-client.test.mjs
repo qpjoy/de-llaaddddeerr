@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFile } from 'node:fs/promises'
 import { createAcquisitionComparisonSession, acquisitionComparisonSessionFor } from '../../src/acquisition-comparison.js'
-import { prepareTwitterRetry, sendTwitterRetry, checkTwitterRetry, twitterRetryPreparationValid, twitterRetryResponseIdentity } from '../../src/twitter-request-retry.js'
+import { prepareTwitterRetry, sendTwitterRetry, resumeTwitterRetry, checkTwitterRetry, twitterRetryPreparationValid, twitterRetryResponseIdentity,
+  twitterRetryResumeAllowed } from '../../src/twitter-request-retry.js'
 
 const oldId = 'ced3bb03-709d-438b-8d80-4deada7f8476'
 const newId = 'a71c8fe2-fc05-400a-afce-3e5abcc1aed5'
@@ -14,18 +15,26 @@ const preparation = () => ({ requestId: oldId, status: 'unknown', scope: { platf
   owner: { apiKeyId: keyId, apiKeyPrefix: 'mx_original', apiKeyLastFour: '1234' },
   requestEvidence: { idempotencyKey: 'original-idempotency', request: { method: 'POST', path: '/api/v1/data/search', body: structuredClone(body) } },
   eligibility: { allowed: true, reasonCode: 'eligible', message: '可重试' }, successor: null })
+const v2Body = { ...body, timeWindow: { from: '2026-10-01T00:00:00.000Z', to: '2026-10-19T00:00:00.000Z',
+  timezone: 'Asia/Shanghai', boundary: '[from,to)' }, cursor: 'mxds2.original-signed-window-cursor' }
+const v2Preparation = () => ({ ...preparation(), requestEvidence: { ...preparation().requestEvidence,
+  contractVersion: 'mx-insight-hub.data-search.v2', request: { method: 'POST', path: '/api/v2/data/search', body: structuredClone(v2Body) } } })
+const v2Intent = state => ({ idempotencyKey: idem, apiKeyId: keyId, state, requestId: newId })
+const resumablePreparation = () => ({ ...v2Preparation(), eligibility: { allowed: false, message: '已有重试意图，可沿用原键继续。' },
+  retryIntent: { ...v2Intent('retryable'), requestId: null, usageStatus: null, resumeAllowed: true } })
 const successor = status => ({ requestId: newId, status, apiKeyId: keyId, idempotencyKey: idem,
   responseStatus: status === 'committed' ? 200 : status === 'unknown' ? 502 : null })
 const options = { token: 'admin-token', requestId: oldId, newIdempotencyKey: () => idem }
 const state = session => session.getSnapshot().twitterRetry
-function setup({ latest = preparation(), response = null, finalStatus = 'committed', postError = null, credential = null } = {}) {
+function setup({ latest = preparation(), response = null, finalStatus = 'committed', postError = null, credential = null, finalIntent = null } = {}) {
   const session = createAcquisitionComparisonSession(), calls = []
   let posted = false, current = latest
   const dependencies = {
     adminApi: {
       twitterRetryPreparation: async (token, id) => {
         calls.push(['prepare', token, id])
-        return posted && finalStatus ? { ...preparation(), eligibility: { allowed: false, reasonCode: 'already_retried' }, successor: successor(finalStatus) } : structuredClone(current)
+        return posted && finalStatus ? { ...structuredClone(current), eligibility: { allowed: false, reasonCode: 'already_retried' },
+          successor: successor(finalStatus), ...(finalIntent ? { retryIntent: finalIntent } : {}) } : structuredClone(current)
       },
       demoCredential: async (token, id) => { calls.push(['credential', token, id]); return credential || { keyId, secret: 'temporary-private-key' } },
     },
@@ -65,6 +74,157 @@ test('explicit confirmation preserves original body and identity and adds one fr
   assert.doesNotMatch(JSON.stringify(f.session.getSnapshot()), /temporary-private-key|admin-token/u)
   await sendTwitterRetry(f.session, options, f.dependencies)
   assert.equal(f.calls.filter(call => call[0] === 'post').length, 1)
+})
+
+test('v2 explicit retry preserves the exact original window, cursor, type and Key on its own endpoint', async () => {
+  const f = setup({ latest: v2Preparation(), finalIntent: v2Intent('complete') })
+  assert.equal(twitterRetryPreparationValid(v2Preparation(), oldId), true)
+  await prepareTwitterRetry(f.session, options, f.dependencies)
+  await sendTwitterRetry(f.session, options, f.dependencies)
+  assert.deepEqual(f.calls.find(call => call[0] === 'post'), ['post', 'temporary-private-key', v2Body, idem, oldId, '/api/v2/data/search'])
+  assert.equal(state(f.session).attempt.state, 'committed')
+  assert.equal(state(f.session).attempt.protocolState, 'complete')
+  assert.deepEqual(state(f.session).attempt.body, v2Body)
+  await sendTwitterRetry(f.session, { ...options, newIdempotencyKey: () => assert.fail('must retain original retry key') }, f.dependencies)
+  assert.equal(f.calls.filter(call => call[0] === 'post').length, 1)
+  for (const requestEvidence of [
+    { ...v2Preparation().requestEvidence, contractVersion: undefined },
+    { ...v2Preparation().requestEvidence, contractVersion: 'mx-insight-hub.data-search.v3' },
+    { ...v2Preparation().requestEvidence, request: { ...v2Preparation().requestEvidence.request, body: { ...v2Body, timeWindow: null } } },
+    { ...v2Preparation().requestEvidence, request: { ...v2Preparation().requestEvidence.request, body: { ...v2Body, cursor: 'mxds1.wrong-contract' } } },
+  ]) assert.equal(twitterRetryPreparationValid({ ...v2Preparation(), requestEvidence }, oldId), false)
+})
+
+test('v2 retry preserves explicit search parameters and validates them before obtaining a Key', async () => {
+  const withParams = params => {
+    const value = v2Preparation()
+    value.requestEvidence.request.body.params = params
+    return value
+  }
+  for (const params of [{}, { category: 'Top', filters: 'original-filter', includeTimestamp: false }, { category: 'Latest', includeTimestamp: true }]) {
+    const latest = withParams(params), f = setup({ latest, finalIntent: v2Intent('complete') })
+    assert.equal(twitterRetryPreparationValid(latest, oldId), true)
+    await prepareTwitterRetry(f.session, options, f.dependencies)
+    assert.deepEqual(f.calls.map(call => call[0]), ['prepare'])
+    await sendTwitterRetry(f.session, options, f.dependencies)
+    assert.deepEqual(f.calls.find(call => call[0] === 'post'), ['post', 'temporary-private-key', { ...v2Body, params }, idem, oldId, '/api/v2/data/search'])
+    assert.deepEqual(state(f.session).attempt.body.params, params)
+  }
+  for (const params of [null, [], { category: 'People' }, { category: 'latest' }, { count: 20 }, { cursor: 'native' },
+    { filters: 'x'.repeat(2049) }, { filters: '\0' }, { includeTimestamp: 'false' }]) {
+    const latest = withParams(params), f = setup({ latest })
+    assert.equal(twitterRetryPreparationValid(latest, oldId), false)
+    await prepareTwitterRetry(f.session, options, f.dependencies)
+    await sendTwitterRetry(f.session, options, f.dependencies)
+    assert.deepEqual(f.calls.map(call => call[0]), ['prepare'], 'invalid parameter evidence cannot obtain credentials or dispatch')
+  }
+})
+
+test('v2 registered intent survives a lost response and reload before any successor usage exists', async () => {
+  const f = setup({ latest: v2Preparation(), postError: new TypeError('lost response'), finalStatus: null })
+  await prepareTwitterRetry(f.session, options, f.dependencies)
+  await sendTwitterRetry(f.session, options, f.dependencies)
+  const registered = { ...v2Preparation(), eligibility: { allowed: false, message: '已有重试意图' },
+    retryIntent: { ...v2Intent('running'), requestId: null } }
+  f.setLatest(registered)
+  await checkTwitterRetry(f.session, options, f.dependencies)
+  assert.equal(state(f.session).attempt.state, 'uncertain')
+  assert.equal(state(f.session).attempt.protocolState, 'running')
+  assert.equal(state(f.session).attempt.requestId, null)
+  await sendTwitterRetry(f.session, options, f.dependencies)
+  assert.equal(f.calls.filter(call => call[0] === 'post').length, 1)
+  const reloaded = setup({ latest: registered })
+  await prepareTwitterRetry(reloaded.session, options, reloaded.dependencies)
+  await sendTwitterRetry(reloaded.session, { ...options, newIdempotencyKey: () => assert.fail('intent cannot allocate another key') }, reloaded.dependencies)
+  assert.deepEqual(reloaded.calls.map(call => call[0]), ['prepare'])
+  assert.equal(state(reloaded.session).preparation.retryIntent.idempotencyKey, idem)
+})
+
+test('an inner committed usage never proves v2 delivery complete', async () => {
+  for (const intent of [null, v2Intent('unknown'), { ...v2Intent('complete'), idempotencyKey: 'wrong-retry-key' }]) {
+    const f = setup({ latest: v2Preparation(), finalIntent: intent })
+    await prepareTwitterRetry(f.session, options, f.dependencies)
+    await sendTwitterRetry(f.session, options, f.dependencies)
+    assert.equal(state(f.session).attempt.state, 'uncertain')
+    assert.equal(state(f.session).attempt.ledger.status, 'committed')
+    assert.match(state(f.session).attempt.message, /v2 交付尚未确认/u)
+    assert.equal(f.calls.filter(call => call[0] === 'post').length, 1)
+  }
+})
+
+test('an explicit preflight-503 resume reuses the saved v2 intent and makes one actual purchase', async () => {
+  const f = setup({ latest: v2Preparation(), finalStatus: null })
+  let purchases = 0, posts = 0
+  f.dependencies.publicDataApi.twitterRetry = async (...args) => {
+    f.calls.push(['post', ...args]); posts++
+    if (posts === 1) {
+      f.setLatest(resumablePreparation())
+      return { status: 503, payload: { error: { code: 'external_platform_unavailable' } }, evidence: {} }
+    }
+    purchases++
+    f.setLatest({ ...v2Preparation(), eligibility: { allowed: false }, successor: successor('committed'), retryIntent: v2Intent('complete') })
+    return { status: 200, payload: { requestId: newId, data: { items: [] } }, evidence: { requestId: newId, headerRequestId: newId } }
+  }
+  await prepareTwitterRetry(f.session, options, f.dependencies)
+  await sendTwitterRetry(f.session, options, f.dependencies)
+  assert.equal(purchases, 0)
+  assert.equal(twitterRetryResumeAllowed(state(f.session).preparation, oldId, state(f.session).attempt), true)
+  await resumeTwitterRetry(f.session, { ...options, newIdempotencyKey: () => assert.fail('resume cannot allocate a key') }, f.dependencies)
+  assert.equal(purchases, 1)
+  assert.equal(state(f.session).attempt.state, 'committed')
+  const sent = f.calls.filter(call => call[0] === 'post')
+  assert.equal(sent.length, 2)
+  assert.deepEqual(sent[0], sent[1], 'both HTTP submissions retain the one registered page identity')
+  await resumeTwitterRetry(f.session, options, f.dependencies)
+  assert.equal(purchases, 1)
+  assert.equal(f.calls.filter(call => call[0] === 'post').length, 2)
+})
+
+test('refresh can explicitly resume only the registered v2 key and never allocates a replacement', async () => {
+  const f = setup({ latest: resumablePreparation(), finalIntent: v2Intent('complete') })
+  await prepareTwitterRetry(f.session, options, f.dependencies)
+  await resumeTwitterRetry(f.session, { ...options, newIdempotencyKey: () => assert.fail('resume must use registered key') }, f.dependencies)
+  assert.deepEqual(f.calls.find(call => call[0] === 'post'), ['post', 'temporary-private-key', v2Body, idem, oldId, '/api/v2/data/search'])
+  assert.equal(state(f.session).attempt.state, 'committed')
+})
+
+test('same-intent explicit resume stays locked against double-clicks while its credential is loading', async () => {
+  const f = setup({ latest: resumablePreparation(), finalIntent: v2Intent('complete') })
+  await prepareTwitterRetry(f.session, options, f.dependencies)
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  f.dependencies.adminApi.demoCredential = async () => { await gate; return { keyId, secret: 'temporary-private-key' } }
+  const sending = resumeTwitterRetry(f.session, options, f.dependencies)
+  await resumeTwitterRetry(f.session, options, f.dependencies)
+  assert.equal(state(f.session).busy, true)
+  release(); await sending
+  assert.equal(f.calls.filter(call => call[0] === 'post').length, 1)
+  assert.equal(state(f.session).attempt.idempotencyKey, idem)
+})
+
+test('resume flags cannot bypass unknown/running/committed state or changed identity on revalidation', async () => {
+  for (const retryIntent of [
+    ...['unknown', 'running', 'complete', 'failed', 'registered'].map(value => ({ ...resumablePreparation().retryIntent, state: value })),
+    ...['unknown', 'reserved', 'committed'].map(value => ({ ...resumablePreparation().retryIntent, requestId: newId, usageStatus: value })),
+    { ...resumablePreparation().retryIntent, resumeAllowed: false },
+  ]) {
+    const value = { ...resumablePreparation(), retryIntent }
+    assert.equal(twitterRetryResumeAllowed(value, oldId), false)
+    const f = setup({ latest: value })
+    await prepareTwitterRetry(f.session, options, f.dependencies)
+    await resumeTwitterRetry(f.session, options, f.dependencies)
+    assert.equal(f.calls.some(call => call[0] === 'credential' || call[0] === 'post'), false)
+  }
+  for (const changed of [
+    { ...resumablePreparation(), retryIntent: { ...resumablePreparation().retryIntent, state: 'running' } },
+    { ...resumablePreparation(), owner: { apiKeyId: otherId } },
+  ]) {
+    const f = setup({ latest: resumablePreparation() })
+    await prepareTwitterRetry(f.session, options, f.dependencies)
+    f.setLatest(changed)
+    await resumeTwitterRetry(f.session, options, f.dependencies)
+    assert.equal(f.calls.some(call => call[0] === 'credential' || call[0] === 'post'), false)
+  }
 })
 
 test('denied preparation can omit saved body and original Key and never obtain credentials or dispatch', async () => {
@@ -201,6 +361,12 @@ test('browser API uses readonly prepare GET and fixed Twitter POST with original
   assert.equal(calls[1].options.headers['idempotency-key'], idem)
   assert.equal(calls[1].options.headers['x-mx-insight-retry-of'], oldId)
   assert.equal(response.evidence.headerRequestId, otherId, 'retain header independently to detect mismatched IDs')
+  await api.publicDataApi.twitterRetry('original-key-ticket', v2Body, idem, oldId, '/api/v2/data/search')
+  assert.equal(calls[2].url, 'https://public-hub.example/api/v2/data/search')
+  assert.deepEqual(JSON.parse(calls[2].options.body), v2Body)
+  assert.equal(calls[2].options.headers['x-mx-insight-retry-of'], oldId)
+  assert.throws(() => api.publicDataApi.twitterRetry('key', body, idem, oldId, '/api/v1/search/raw'), /Unsupported/u)
+  assert.equal(calls.length, 3)
 })
 
 test('rendered retry panel shows readonly preparation, explicit charge consent and locked uncertain state', async () => {
@@ -209,6 +375,7 @@ test('rendered retry panel shows readonly preparation, explicit charge consent a
   const React = await import('react')
   let source = await readFile(new URL('../../src/twitter-request-retry.jsx', import.meta.url), 'utf8')
   source = source.replace("import { useSyncExternalStore } from 'react'", 'const useSyncExternalStore = (_subscribe, getSnapshot) => getSnapshot()')
+    .replace("from './diagnostics-navigation.js'", `from ${JSON.stringify(new URL('../../src/diagnostics-navigation.js', import.meta.url).href)}`)
     .replace("import { adminApi, publicDataApi } from './api.js'", 'const adminApi = {}, publicDataApi = {}')
     .replace("import { ErrorState } from './components.jsx'", 'const ErrorState = ({error}) => error.message')
     .replace("from './twitter-request-retry.js'", `from ${JSON.stringify(new URL('../../src/twitter-request-retry.js', import.meta.url).href)}`)
@@ -233,4 +400,18 @@ test('rendered retry panel shows readonly preparation, explicit charge consent a
   const deniedHtml = renderToStaticMarkup(React.createElement(TwitterRequestRetry, { token: 'admin-token', run: { requestId: oldId }, session: denied.session }))
   assert.match(deniedHtml, /历史参数不可用，不能重试。/u)
   assert.doesNotMatch(deniedHtml, /确认按当前链路重试|<textarea/u)
+  const v2 = setup({ latest: { ...v2Preparation(), eligibility: { allowed: false, message: '已有重试意图' },
+    retryIntent: { ...v2Intent('running'), requestId: null } } })
+  await prepareTwitterRetry(v2.session, options, v2.dependencies)
+  const v2Html = renderToStaticMarkup(React.createElement(TwitterRequestRetry, { token: 'admin-token', run: { requestId: oldId }, session: v2.session }))
+  assert.match(v2Html, /api\/v2\/data\/search|timeWindow|mxds2\.original-signed-window-cursor/u)
+  assert.match(v2Html, /v2 交付状态|running|已有重试意图/u)
+  assert.match(v2Html, /尚未确认底层采集请求/u)
+  assert.match(v2Html, new RegExp(idem, 'u'))
+  assert.doesNotMatch(v2Html, /确认按当前链路重试/u)
+  const resumable = setup({ latest: resumablePreparation() })
+  await prepareTwitterRetry(resumable.session, options, resumable.dependencies)
+  const resumeHtml = renderToStaticMarkup(React.createElement(TwitterRequestRetry, { token: 'admin-token', run: { requestId: oldId }, session: resumable.session }))
+  assert.match(resumeHtml, /确认继续同一重试（可能再次计费）/u)
+  assert.doesNotMatch(resumeHtml, /确认按当前链路重试/u)
 })

@@ -7,6 +7,18 @@ the September recovery evidence, see [restart and recovery](restart-and-recovery
 Normal deploy now requires search and all Hub workloads ready by default; a
 missing/wrong data mount or retained credential is a hard stop.
 
+Launcher and Hub share the Kubernetes API Server, not an SSO service on port
+6443. Both deploy paths use the sourceable Launcher
+`scripts/k8s-control-plane.sh` library for proxy bypass and bounded `/readyz`
+checks against the caller's current kubeconfig. Hub checks before its initial
+node read and again before applying Hub configuration after image build. Keep
+the sibling Launcher scripts synchronized; this check never invokes Launcher
+deploy or changes `MX_INSIGHT_SYNC_LAUNCHER=0`. Use
+`bash scripts/manage.sh ops internal-production control-plane-preflight` in
+either project for an independent read-only check. See the operational entry
+point above for persistent connection-refused diagnostics and the limits of
+API readiness evidence.
+
 ## Layout
 
 The `mx-insight-hub` namespace contains only Hub workloads and their runtime

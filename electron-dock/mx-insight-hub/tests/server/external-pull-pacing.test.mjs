@@ -123,3 +123,37 @@ test('external-pull worker waits after settling a page even when another source 
   controller.abort()
   await done
 })
+
+test('adaptive pacing defaults to factor 1 capped at 60s and rejects out-of-range settings', () => {
+  const config = loadConfig(base).externalPull
+  assert.equal(config.adaptiveDelayFactor, 1)
+  assert.equal(config.adaptiveDelayMaxMs, 60_000)
+  assert.equal(loadConfig({ ...base, MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR: '0' }).externalPull.adaptiveDelayFactor, 0)
+  for (const [name, value] of [['MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR', '11'],
+    ['MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_MAX_MS', '600001'], ['MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR', '-1']]) {
+    assert.throws(() => loadConfig({ ...base, [name]: value }))
+  }
+})
+
+test('a slow backlog page stretches the next gap to its own duration, within the cap; a finished source is unaffected', async () => {
+  const now = new Date('2026-10-20T00:00:00Z')
+  async function page({ pageMs, done = false, factor = 1, cap = 60_000, fixed = 1_000 }) {
+    const calls = []
+    let clock = 0
+    await runExternalPullJob({
+      puller: { async pullBatch() { clock += pageMs; return { pulled: 1000, ingested: 1000, importRunId: 'run', done } } },
+      queue: { async heartbeat() {}, async enqueue(...args) { calls.push(args) } },
+      payload: { sourceKey: 'telegram-monitor-messages', batchSize: 1000 }, job: { id: 1 }, logger: { log() {} },
+      continuationDelayMs: fixed, adaptiveDelayFactor: factor, adaptiveDelayMaxMs: cap,
+      now: () => now, elapsed: () => clock,
+      setIntervalFn: () => ({ unref() {} }), clearIntervalFn: () => {},
+    })
+    return calls[0]?.[2].runAt ? calls[0][2].runAt.getTime() - now.getTime() : null
+  }
+  assert.equal(await page({ pageMs: 300 }), 1_000, 'a fast page keeps the fixed delay')
+  assert.equal(await page({ pageMs: 7_400 }), 7_400, 'a slow page waits as long as it took')
+  assert.equal(await page({ pageMs: 7_400, factor: 2 }), 14_800)
+  assert.equal(await page({ pageMs: 200_000 }), 60_000, 'the cap bounds the gap')
+  assert.equal(await page({ pageMs: 7_400, factor: 0 }), 1_000, 'factor 0 keeps today\'s fixed delay')
+  assert.equal(await page({ pageMs: 7_400, done: true }), null, 'a caught-up source does not requeue')
+})

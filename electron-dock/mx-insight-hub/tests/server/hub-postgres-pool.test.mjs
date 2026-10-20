@@ -2,7 +2,10 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
 import test from 'node:test'
-import { createHubPostgresPool, hubDatabaseFailure } from '../../server/core/postgres-pool.mjs'
+import {
+  createHubPostgresPool, currentDatabaseLane, enterAdmissionLane, hubDatabaseFailure,
+  promoteAdmittedWork, relaxDerivedCommits, runWithDatabaseLane,
+} from '../../server/core/postgres-pool.mjs'
 import { createApp } from '../../server/app.mjs'
 
 class LocalClient extends EventEmitter {
@@ -195,4 +198,147 @@ test('HTTP database failures remain structured and make no assertion about dispa
     assert.doesNotMatch(JSON.stringify({ logs, body: response.body }), /private SQL|synthetic-key/)
     assert.match(response.body.requestId, /^[a-f0-9-]{36}$/)
   }
+})
+
+// Runs `operation` as one HTTP request would: own lane holder, optional
+// data admission and optional reservation promotion.
+function asRequest(lane, operation) {
+  return runWithDatabaseLane(() => {
+    if (lane !== 'default') enterAdmissionLane()
+    if (lane === 'inflight') promoteAdmittedWork()
+    return operation()
+  })
+}
+
+test('saturated pools serve in-flight and control work before not-yet-reserved data requests', async () => {
+  const pool = createHubPostgresPool({ Client: LocalClient, max: 1 })
+  const held = await pool.connect()
+  try {
+    const pending = [
+      asRequest('admission', () => pool.query('admission-1')),
+      asRequest('default', () => pool.query('control-1')),
+      asRequest('admission', () => pool.query('admission-2')),
+      asRequest('inflight', () => pool.query('settlement-1')),
+    ]
+    assert.deepEqual(pool.getPressureSnapshot().waitingByLane, { inflightOrDefault: 2, admission: 2 })
+    assert.equal(pool.waitingCount, 4)
+    held.release()
+    await Promise.all(pending)
+    assert.deepEqual(held.queries, ['control-1', 'settlement-1', 'admission-1', 'admission-2'])
+    assert.equal(pool.totalCount, 1)
+  } finally { await pool.end() }
+})
+
+test('admission waiters are ordered by request arrival, not by each sequential checkout', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000 })
+  const pool = createHubPostgresPool({ Client: LocalClient, max: 1 })
+  const held = await pool.connect()
+  try {
+    const older = runWithDatabaseLane(async () => {
+      enterAdmissionLane()
+      await pool.query('older-read-1')
+      await pool.query('older-read-2')
+    })
+    t.mock.timers.setTime(2_000)
+    const newer = ['newer-a', 'newer-b', 'newer-c'].map(sql => asRequest('admission', () => pool.query(sql)))
+    held.release()
+    await Promise.all([older, ...newer])
+    // The slot freed between the older request's two reads goes to the next
+    // waiter, but older-read-2 then re-enters ahead of every newer request
+    // (plain FIFO would run it last).
+    assert.deepEqual(held.queries, ['older-read-1', 'newer-a', 'older-read-2', 'newer-b', 'newer-c'])
+  } finally { await pool.end() }
+})
+
+test('in-flight settlement is not shed by the waiting cap and gets the longer checkout budget', async () => {
+  const pool = createHubPostgresPool({ Client: LocalClient, max: 1, maxWaitingClients: 1,
+    connectionTimeoutMillis: 10, inflightCheckoutTimeoutMillis: 200, admissionCheckoutTimeoutMillis: 10 })
+  const held = await pool.connect()
+  try {
+    const admission = asRequest('admission', () => pool.query('admission-times-out'))
+    await assert.rejects(asRequest('default', () => pool.query('control-shed')), { code: 'HUB_PG_QUEUE_FULL' })
+    const settlement = asRequest('inflight', () => pool.query('settlement-survives'))
+    await assert.rejects(admission, /timeout exceeded when trying to connect/)
+    await delay(30)
+    held.release()
+    await settlement
+    assert.deepEqual(held.queries, ['settlement-survives'])
+    assert.equal(pool.getPressureSnapshot().acquireTimeouts, 1)
+    assert.equal(pool.getPressureSnapshot().queueRejected, 1)
+  } finally { await pool.end() }
+})
+
+test('lane holders are per request and only admission work is promoted', async () => {
+  assert.equal(currentDatabaseLane(), 'default')
+  promoteAdmittedWork()
+  enterAdmissionLane()
+  assert.equal(currentDatabaseLane(), 'default', 'no holder outside a request')
+  const seen = await Promise.all([
+    runWithDatabaseLane(async () => { enterAdmissionLane(); await delay(5); return currentDatabaseLane() }),
+    runWithDatabaseLane(async () => { await delay(1); promoteAdmittedWork(); return currentDatabaseLane() }),
+    runWithDatabaseLane(async () => { enterAdmissionLane(); await delay(1); promoteAdmittedWork(); await delay(1); return currentDatabaseLane() }),
+  ])
+  assert.deepEqual(seen, ['admission', 'default', 'inflight'])
+})
+
+test('ending a pool rejects lane waiters instead of leaving them queued', async () => {
+  const pool = createHubPostgresPool({ Client: LocalClient, max: 1 })
+  const held = await pool.connect()
+  const waiting = asRequest('admission', () => pool.query('never-runs'))
+  held.release()
+  const ended = pool.end()
+  await Promise.allSettled([waiting])
+  await ended
+  assert.deepEqual(held.queries, [])
+})
+
+test('connection loss without SQLSTATE is reported as a database failure', () => {
+  assert.equal(hubDatabaseFailure(Error('Connection terminated unexpectedly')).reason, 'connection_unavailable')
+  assert.equal(hubDatabaseFailure(Error('some other failure')), null)
+})
+
+test('derived-work pools disable the per-COMMIT flush on every new session before its first statement', async () => {
+  for (const [mode, expected] of [['off', ['SET synchronous_commit TO off', 'outbox-ack']], ['on', ['outbox-ack']]]) {
+    // Real pg clients return a promise when no callback is given.
+    class PromiseClient extends LocalClient {
+      query(text, values, callback) {
+        if (typeof values === 'function' || callback) return super.query(text, values, callback)
+        return new Promise((resolve, reject) => super.query(text, values, (error, result) => error ? reject(error) : resolve(result)))
+      }
+    }
+    const pool = createHubPostgresPool({ Client: PromiseClient, max: 1 })
+    relaxDerivedCommits(pool, mode)
+    const client = await pool.connect()
+    await new Promise((resolve, reject) => client.query('outbox-ack', [], error => error ? reject(error) : resolve()))
+    assert.deepEqual(client.queries, expected)
+    client.release()
+    await pool.end()
+  }
+})
+
+test('a data request that fails on the database before reserving says its attempt never started', async () => {
+  const error = Error('timeout exceeded when trying to connect')
+  async function call(method, url) {
+    const app = createApp({ store: {}, service: { async authenticate() { throw error } },
+      listenerMode: 'public', logger: { error() {} } })
+    const response = new EventEmitter()
+    const headers = {}
+    response.setHeader = (key, value) => { headers[key.toLowerCase()] = value }
+    response.writeHead = (status, values) => { response.statusCode = status; Object.assign(headers, values) }
+    response.end = value => { response.body = JSON.parse(value); response.writableEnded = true }
+    const request = Object.assign(new EventEmitter(), { method, url,
+      headers: { authorization: 'Bearer synthetic-key', 'idempotency-key': 'synthetic-page-key', 'content-type': 'application/json' } })
+    request[Symbol.asyncIterator] = async function * () { yield Buffer.from('{}') }
+    await app(request, response)
+    return { response, headers }
+  }
+  const data = await call('POST', '/api/v2/data/search')
+  assert.equal(data.response.statusCode, 503)
+  assert.equal(data.response.body.error.code, 'hub_database_unavailable')
+  assert.equal(data.response.body.error.details.currentAttemptStarted, false)
+  assert.equal(data.headers['retry-after'], '1')
+  const control = await call('GET', '/api/v1/requests/by-idempotency-key')
+  assert.equal(control.response.statusCode, 503)
+  assert.equal(control.response.body.error.details.currentAttemptStarted, undefined)
+  assert.equal(control.headers['retry-after'], undefined)
 })

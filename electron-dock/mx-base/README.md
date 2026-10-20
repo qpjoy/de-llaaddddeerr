@@ -4,7 +4,7 @@
 
 | 应用 | 职责 | 部署与状态 |
 | --- | --- | --- |
-| [mx-move](mx-move/README.md) | Kubernetes 存储迁移；当前只支持独立根盘上的 etcd 迁移与最新数据回滚 | 独立 `mx-move/scripts/manage.sh` 入口，保留原目录与备份；尚未执行生产迁移 |
+| [mx-move](mx-move/README.md) | etcd 迁移与最新数据回滚；Kubernetes 存储盘点、容量草案及独立运行时离线预备 | 独立 `mx-move/scripts/manage.sh` 入口；父级转发 `k8s inventory` / `plan` / `runtime-check` / `prepare-runtime`，全量服务切换尚未实现 |
 | [mx-pay](mx-pay/README.md) | 统一支付规则与独立交易 API；人工核账、可靠付款事件 | 已实现独立 PostgreSQL + Kubernetes/Compose 一键迁移部署；默认 18230，Hub 存量路径尚未切换 |
 | mx-static | 多媒体持久采集、缓存、文件读取与签名预览 | 独立 Docker Compose，writer + reader，默认 18200 / 18201 |
 | mx-ocr | 图片文字提取、文档精修与 Web 调试 | 独立 Docker，默认 GPU 2，0.0.0.0:8710 |

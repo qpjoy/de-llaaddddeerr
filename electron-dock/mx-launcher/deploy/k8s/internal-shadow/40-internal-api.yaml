@@ -214,8 +214,9 @@ spec:
             httpGet:
               path: /healthz
               port: http
-            failureThreshold: 30
+            failureThreshold: 150
             periodSeconds: 2
+            timeoutSeconds: 3
           livenessProbe:
             httpGet:
               path: /healthz

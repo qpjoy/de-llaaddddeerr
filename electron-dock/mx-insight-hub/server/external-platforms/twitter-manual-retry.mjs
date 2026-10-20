@@ -1,9 +1,15 @@
 import { AppError } from '../core/errors.mjs'
 import { requestFingerprint } from '../core/crypto.mjs'
 import { HUB_SOCIAL_VERSION } from '../contracts/hub-social.mjs'
+import { normalizeTwitterSearchParameters } from '../contracts/twitter-search-parameters.mjs'
 
 const PATH = '/api/v1/data/search', MAX_ANCESTORS = 32
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+const protocolIntents = new WeakMap()
+export function twitterProtocolRetryIntents(usageStore) {
+  if (!protocolIntents.has(usageStore)) protocolIntents.set(usageStore, new Map())
+  return protocolIntents.get(usageStore)
+}
 export const twitterRetryDenied = () => new AppError(409, 'uncertain_retry_not_allowed',
   'The referenced uncertain Twitter request cannot authorize this retry')
 
@@ -13,7 +19,7 @@ export function normalizedTwitterRetryBody(snapshot) {
   const body = snapshot?.body
   if (snapshot?.method !== 'POST' || snapshot.path !== PATH || Object.hasOwn(snapshot, 'bodyOmitted')
     || !body || typeof body !== 'object' || Array.isArray(body)
-    || Object.keys(body).some(key => !['platform', 'query', 'pageSize', 'cursor', 'type'].includes(key))) throw twitterRetryDenied()
+    || Object.keys(body).some(key => !['platform', 'query', 'pageSize', 'cursor', 'type', 'params'].includes(key))) throw twitterRetryDenied()
   const platform = typeof body.platform === 'string' ? body.platform.trim().toLowerCase() : ''
   const query = typeof body.query === 'string' ? body.query.trim() : ''
   const pageSize = body.pageSize ?? 20, type = body.type ?? 'fresh'
@@ -25,7 +31,10 @@ export function normalizedTwitterRetryBody(snapshot) {
       || !body.cursor.trim().startsWith('mxds1.')) throw twitterRetryDenied()
     cursor = body.cursor.trim()
   }
-  return { platform: 'twitter', query, pageSize, ...(cursor ? { cursor } : {}), type }
+  let params
+  try { if (body.params !== undefined) params = normalizeTwitterSearchParameters(body.params) } catch { throw twitterRetryDenied() }
+  return { platform: 'twitter', query, pageSize, ...(cursor ? { cursor } : {}),
+    ...(params !== undefined ? { params } : {}), type }
 }
 
 function requestRow(row) {
@@ -96,6 +105,19 @@ export async function validateTwitterManualRetry(store, input, queryable = store
   if (store.providerKey !== 'rapidapi' || !input || !UUID.test(input.retryOfRequestId || '')
     || !['tenantId', 'consumerId', 'apiKeyId'].every(key => UUID.test(input[key] || ''))
     || !/^[0-9a-f]{64}$/u.test(input.fingerprint || '')) throw twitterRetryDenied()
+  // A v2 acknowledgement owns its successor key even before the successor
+  // usage row exists. A parallel v1 request must not fork that paid intent.
+  let intent
+  if (store.pool) {
+    const present = (await queryable.query("SELECT to_regclass('control.data_search_protocol_retries') IS NOT NULL AS present")).rows[0]?.present
+    if (present) intent = (await queryable.query('SELECT * FROM control.data_search_protocol_retries WHERE original_usage_request_id=$1', [input.retryOfRequestId])).rows[0]
+  } else intent = twitterProtocolRetryIntents(store.usageStore).get(input.retryOfRequestId)
+  if (intent) {
+    const own = input.usageRequestId ? await request(store, input.usageRequestId, queryable) : null
+    const key = input.idempotencyKey || own?.idempotencyKey
+    if (intent.tenant_id !== input.tenantId || intent.consumer_id !== input.consumerId
+      || intent.api_key_id !== input.apiKeyId || intent.successor_idempotency_key !== key) throw twitterRetryDenied()
+  }
   const ancestorRequestIds = [], seen = new Set()
   let id = input.retryOfRequestId
   while (id) {

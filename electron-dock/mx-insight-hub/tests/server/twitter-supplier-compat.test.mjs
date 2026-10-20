@@ -106,27 +106,23 @@ test('historical Rapid fresh renewal checks a TikHub unknown with the same query
   assert.equal(renewed.status, 'released', 'The new un-dispatched renewal releases only its own reservation')
 })
 
-test('TikHub admission failure records supplier ownership before dispatch and keeps an allowed retry on that supplier', async () => {
+test('Twitter unsupported options fail before either supplier reserves or dispatches an acquisition', async () => {
   const h = await harness()
-  // A malformed native-only option is deliberately rejected after reservation;
-  // it must not acquire from RapidAPI when the same public key is used again.
+  // Public Twitter options now have an explicit provider-independent contract.
+  // Malformed options cannot reserve usage or switch suppliers on retry.
   const input = { body: requestBody, normalized: { ...requestBody, params: { unsupported: 'fixture' } },
     idempotencyKey: 'new-tikhub-admission-key', dataSearch: { resultType: 'stable', replayWindowMs: null } }
-  await assert.rejects(h.tikHubGateway.searchContent(h.ctx, input), error => error.code === 'unsupported_fields')
+  await assert.rejects(h.tikHubGateway.searchContent(h.ctx, input), error => error.code === 'invalid_twitter_search_parameters')
   const saved = await h.usageStore.getUsageRequestByIdempotencyKey(h.ctx.consumer.id, input.idempotencyKey)
-  assert.equal(saved.status, 'released')
-  assert.equal(saved.acquisitionRequest.searchProvider, 'tikhub')
-  assert.equal(saved.acquisitionRequest.searchContractVersion, TIKHUB_CONTENT_SEARCH_VERSION)
+  assert.equal(saved, null)
   assert.equal(h.tikHubGateway.platformStore.calls.size, 0)
   const router = createTwitterSearchRouter({ usageStore: h.usageStore, rapidGateway: h.rapidGateway,
     tikHubGateway: h.tikHubGateway, apiKeyPepper: pepper })
-  await assert.rejects(router(h.ctx, input), error => error.code === 'unsupported_fields')
+  await assert.rejects(router(h.ctx, input), error => error.code === 'invalid_twitter_search_parameters')
   assert.deepEqual(h.calls, { rapid: 0, tikhub: 0 })
   const retried = await h.usageStore.getUsageRequestByIdempotencyKey(h.ctx.consumer.id, input.idempotencyKey)
-  assert.equal(h.usageStore.requests.size, 2)
-  assert.notEqual(retried.id, saved.id)
-  assert.equal(retried.acquisitionRequest.searchProvider, 'tikhub')
-  assert.equal(retried.acquisitionRequest.searchContractVersion, TIKHUB_CONTENT_SEARCH_VERSION)
+  assert.equal(h.usageStore.requests.size, 0)
+  assert.equal(retried, null)
 })
 
 const modulePath = process.env.MX_INSIGHT_TEST_PGLITE_MODULE

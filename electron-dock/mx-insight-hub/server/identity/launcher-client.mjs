@@ -10,20 +10,28 @@ import { AppError } from '../core/errors.mjs'
 //
 // The cost is a network call per request, which is what the short-lived cache
 // below is for. Its TTL is the deliberate bound on how stale a revocation
-// decision may be.
+// decision may be. Only while Launcher itself is unavailable may a token that
+// was confirmed within the stale grace keep working; an explicit rejection
+// always wins. Concurrent requests with the same token share one call.
 
 const DEFAULT_TIMEOUT_MS = 3_000
 const DEFAULT_CACHE_TTL_MS = 30_000
+const DEFAULT_STALE_GRACE_MS = 120_000
 const MAX_CACHE_ENTRIES = 1_000
+const STALE_LOG_INTERVAL_MS = 60_000
 
 export class LauncherIdentityClient {
   #cache = new Map()
+  #inflight = new Map()
+  #generation = 0
+  #nextStaleLogAt = 0
 
   constructor({
     baseUrl,
     audience,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     cacheTtlMs = DEFAULT_CACHE_TTL_MS,
+    staleGraceMs = DEFAULT_STALE_GRACE_MS,
     fetchImpl = globalThis.fetch,
     logger = console,
   }) {
@@ -31,6 +39,7 @@ export class LauncherIdentityClient {
     this.audience = audience
     this.timeoutMs = timeoutMs
     this.cacheTtlMs = cacheTtlMs
+    this.staleGraceMs = Math.max(0, staleGraceMs)
     this.fetchImpl = fetchImpl
     this.logger = logger
   }
@@ -46,20 +55,24 @@ export class LauncherIdentityClient {
     return Buffer.from(digest).toString('base64url')
   }
 
-  #readCache(key) {
+  #readCache(key, { allowStale = false } = {}) {
     const entry = this.#cache.get(key)
     if (!entry) return null
-    if (entry.expiresAt <= Date.now()) {
+    const now = Date.now()
+    if (entry.expiresAt > now) return entry.value
+    if (entry.expiresAt + this.staleGraceMs <= now) {
       this.#cache.delete(key)
       return null
     }
-    return entry.value
+    return allowStale ? entry.value : null
   }
 
   #writeCache(key, value) {
     // Only positive results are cached. Caching a failure would extend a
     // transient Launcher blip into a guaranteed rejection window for a user
-    // whose token is perfectly valid.
+    // whose token is perfectly valid. A zero TTL disables caching entirely,
+    // including the unavailability fallback.
+    if (!(this.cacheTtlMs > 0)) return
     if (this.#cache.size >= MAX_CACHE_ENTRIES) {
       const oldest = this.#cache.keys().next().value
       this.#cache.delete(oldest)
@@ -83,7 +96,36 @@ export class LauncherIdentityClient {
     const key = await this.#cacheKey(token)
     const cached = this.#readCache(key)
     if (cached) return cached
+    const running = this.#inflight.get(key)
+    if (running) return running
+    const pending = this.#refresh(token, key).finally(() => this.#inflight.delete(key))
+    this.#inflight.set(key, pending)
+    return pending
+  }
 
+  async #refresh(token, key) {
+    const generation = this.#generation
+    let result
+    try {
+      result = await this.#fetchIntrospection(token)
+    } catch (error) {
+      const stale = error?.code === 'launcher_unavailable' && this.#readCache(key, { allowStale: true })
+      if (!stale) throw error
+      if (Date.now() >= this.#nextStaleLogAt) {
+        this.#nextStaleLogAt = Date.now() + STALE_LOG_INTERVAL_MS
+        this.logger?.warn?.(`[identity] Launcher unavailable; reusing tokens confirmed within ${this.staleGraceMs} ms`)
+      }
+      return stale
+    }
+    // A result fetched before invalidate() must not repopulate the cache.
+    if (generation === this.#generation) {
+      if (result) this.#writeCache(key, result)
+      else this.#cache.delete(key)
+    }
+    return result
+  }
+
+  async #fetchIntrospection(token) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
     let response
@@ -155,7 +197,6 @@ export class LauncherIdentityClient {
         scopes: introspection.principal.scopes || [],
       },
     }
-    this.#writeCache(key, result)
     return result
   }
 
@@ -234,6 +275,7 @@ export class LauncherIdentityClient {
 
   /** Drop cached introspections; used after a membership change. */
   invalidate() {
+    this.#generation += 1
     this.#cache.clear()
   }
 }

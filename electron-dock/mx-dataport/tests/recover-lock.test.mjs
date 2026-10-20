@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { recoverLock, harborProcesses } from "../scripts/recover-lock.mjs";
+import {
+  recoverLock,
+  harborProcesses,
+  acquireDeployLock,
+  markDeployLockReleasable,
+} from "../scripts/recover-lock.mjs";
 
 function fixture(overrides = {}) {
   let lock = {
@@ -188,4 +193,156 @@ test("process inspection reports only safe identifiers and conservatively retain
   );
   assert.equal(found[2].ownership, "unknown");
   assert.ok(!JSON.stringify(found).includes("DO-NOT-PRINT"));
+});
+
+function releasableLock(data = {}) {
+  return {
+    metadata: {
+      uid: "old-lock",
+      resourceVersion: "42",
+      creationTimestamp: "2020-01-01T00:00:00Z",
+    },
+    data: {
+      action: "deploy",
+      ownerHost: "internal-test",
+      ownerPid: "123",
+      recoveryVersion: "1",
+      recoveryState: "releasable",
+      ...data,
+    },
+  };
+}
+
+const alreadyExists = () => Object.assign(Error("AlreadyExists"), { lockAlreadyExists: true });
+
+test("automatic recovery requires a versioned completed deploy and explicit known ownership, regardless of age", () => {
+  for (const data of [
+    { recoveryVersion: undefined },
+    { recoveryVersion: "2" },
+    { recoveryState: "active" },
+    { recoveryState: undefined },
+    { action: "enroll" },
+    { ownerHost: undefined },
+    { ownerPid: undefined },
+    { ownerHost: "another-host" },
+    { ownerPid: "0" },
+    { ownerPid: "invalid" },
+  ]) {
+    const f = fixture();
+    f.setLock(releasableLock(data));
+    assert.throws(() => recoverLock({ ...f.options, automatic: true, confirmIdle: true }));
+    assert.equal(f.removals.length, 0);
+  }
+  const legacy = fixture();
+  assert.throws(() => recoverLock({ ...legacy.options, automatic: true }), /自动释放凭据/);
+  assert.equal(legacy.removals.length, 0);
+});
+
+test("automatic recovery keeps live or uncertain owners and still checks all local work and migration resources", () => {
+  for (const setup of [
+    f => { f.options.alive = () => true; },
+    f => { f.options.alive = () => { throw Error("Permission denied"); }; },
+    f => { f.options.processes = () => [{ pid: 456, script: "operations.mjs" }]; },
+    f => { f.jobs.items.push({ metadata: { name: "mx-harbor-migrate-pending" }, status: {} }); },
+    f => { f.pods.items.push({ metadata: { ownerReferences: [{ kind: "Job", name: "mx-harbor-migrate-orphan" }] }, status: { phase: "Running" } }); },
+  ]) {
+    const f = fixture();
+    f.setLock(releasableLock());
+    setup(f);
+    assert.throws(() => recoverLock({ ...f.options, automatic: true }));
+    assert.equal(f.removals.length, 0);
+  }
+});
+
+test("acquisition creates once normally, and retries only once after guarded recovery", () => {
+  const f = fixture();
+  f.setLock(releasableLock());
+  let creates = 0;
+  const created = { metadata: { uid: "new-lock" } };
+  const create = () => {
+    creates++;
+    if (creates === 1) throw alreadyExists();
+    return created;
+  };
+  assert.equal(acquireDeployLock({ ...f.options, create }), created);
+  assert.equal(creates, 2);
+  assert.deepEqual(f.removals[0].preconditions, { uid: "old-lock", resourceVersion: "42" });
+  const fresh = fixture();
+  assert.equal(acquireDeployLock({ ...fresh.options, create: () => created }), created);
+  assert.equal(fresh.calls.length, 0);
+});
+
+test("acquisition never recovers an ambiguous create error, steals a replacement, or loops after a race", () => {
+  for (const error of [
+    Error("Timeout"),
+    Error("AlreadyExists text from an ambiguous response"),
+    SyntaxError('Unexpected token in JSON: AlreadyExists'),
+  ]) {
+    const failed = fixture();
+    assert.throws(() => acquireDeployLock({ ...failed.options, create: () => { throw error; } }), actual => actual === error);
+    assert.equal(failed.calls.length, 0);
+  }
+  const replaced = fixture();
+  replaced.setLock(releasableLock());
+  replaced.options.remove = value => {
+    replaced.removals.push(value);
+    replaced.setLock({ metadata: { uid: "competing-owner", resourceVersion: "43" } });
+  };
+  let creates = 0;
+  const collision = () => { creates++; throw alreadyExists(); };
+  assert.throws(() => acquireDeployLock({ ...replaced.options, create: collision }), /其他任务/);
+  assert.equal(creates, 1);
+  assert.equal(replaced.removals.length, 1);
+  const race = fixture();
+  race.setLock(releasableLock());
+  creates = 0;
+  assert.throws(() => acquireDeployLock({ ...race.options, create: collision }), /AlreadyExists/);
+  assert.equal(creates, 2);
+  assert.equal(race.removals.length, 1);
+});
+
+test("automatic deletion conflicts stop acquisition without a retry", () => {
+  const f = fixture({ remove: () => { throw Error("Conflict"); } });
+  f.setLock(releasableLock());
+  let creates = 0;
+  assert.throws(() => acquireDeployLock({ ...f.options, create: () => { creates++; throw alreadyExists(); } }), /Conflict/);
+  assert.equal(creates, 1);
+});
+
+test("completion marking rereads owner and patches with both UID and current resourceVersion guards", () => {
+  const f = fixture();
+  const original = releasableLock({ recoveryState: "active" });
+  const current = structuredClone(original);
+  current.metadata.resourceVersion = "47";
+  f.setLock(current);
+  const patches = [];
+  markDeployLockReleasable({ lock: original, get: f.options.get, patch: p => patches.push(p), host: "internal-test", pid: 123 });
+  assert.deepEqual(patches, [[
+    { op: "test", path: "/metadata/uid", value: "old-lock" },
+    { op: "test", path: "/metadata/resourceVersion", value: "47" },
+    { op: "replace", path: "/data/recoveryState", value: "releasable" },
+  ]]);
+  assert.equal(f.removals.length, 0);
+});
+
+test("completion marking refuses missing, foreign, malformed, or replaced locks and preserves patch conflicts", () => {
+  const original = releasableLock({ recoveryState: "active" });
+  for (const current of [
+    null,
+    { ...original, metadata: { uid: "replacement", resourceVersion: "43" } },
+    { ...original, metadata: { uid: "old-lock" } },
+    ...[
+      { ownerHost: "other-host" }, { ownerPid: "456" }, { action: "enroll" },
+      { recoveryVersion: undefined }, { recoveryState: undefined }, { recoveryState: "unknown" },
+    ].map(data => releasableLock(data)),
+  ]) {
+    const f = fixture();
+    f.setLock(current);
+    let patches = 0;
+    assert.throws(() => markDeployLockReleasable({ lock: original, get: f.options.get, patch: () => { patches++; }, host: "internal-test", pid: 123 }), /身份或状态/);
+    assert.equal(patches, 0);
+  }
+  const f = fixture();
+  f.setLock(original);
+  assert.throws(() => markDeployLockReleasable({ lock: original, get: f.options.get, patch: () => { throw Error("Conflict"); }, host: "internal-test", pid: 123 }), /Conflict/);
 });

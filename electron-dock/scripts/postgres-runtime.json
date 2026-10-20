@@ -1,0 +1,64 @@
+{
+  "_comment": [
+    "Declared runtime state applied by scripts/pg_runtime.py after each unified deploy.",
+    "settings: reload-level PostgreSQL parameters only (ALTER SYSTEM + reload, never a restart).",
+    "A list is an order of preference for enum parameters, e.g. lz4 when the build supports it.",
+    "CPU/memory come from each StatefulSet template; the running Pod is resized in place to match.",
+    "Restart-level parameters (shared_buffers, max_connections, ...) belong in the manifests and",
+    "take effect at the next planned restart; the reconcile only reports them."
+  ],
+  "targets": {
+    "mx-common": {
+      "namespace": "mx-common",
+      "statefulset": "mx-common-postgres",
+      "container": "postgres",
+      "settings": {
+        "max_wal_size": "8GB",
+        "min_wal_size": "2GB",
+        "checkpoint_timeout": "15min",
+        "checkpoint_completion_target": "0.9",
+        "wal_compression": ["lz4", "pglz"],
+        "default_toast_compression": ["lz4", "pglz"],
+        "track_io_timing": "on",
+        "log_lock_waits": "on"
+      }
+    },
+    "mx-launcher": {
+      "namespace": "mx-internal-shadow",
+      "statefulset": "mx-internal-postgres",
+      "container": "postgres",
+      "settings": {
+        "max_wal_size": "2GB",
+        "min_wal_size": "512MB",
+        "checkpoint_timeout": "15min",
+        "checkpoint_completion_target": "0.9",
+        "wal_compression": ["lz4", "pglz"],
+        "default_toast_compression": ["lz4", "pglz"],
+        "track_io_timing": "on",
+        "log_lock_waits": "on"
+      }
+    },
+    "mx-pay": {
+      "namespace": "mx-pay",
+      "statefulset": "mx-pay-postgres",
+      "container": "postgres",
+      "user": "mx_pay_owner",
+      "database": "mx_pay",
+      "settings": {}
+    },
+    "mx-rig": {
+      "namespace": "mx-rig",
+      "statefulset": "mx-rig-postgres",
+      "container": "postgres",
+      "settings": {}
+    }
+  },
+  "projects": {
+    "mx-insight-hub": ["mx-common"],
+    "mx-dataport": ["mx-common"],
+    "mx-common": ["mx-common"],
+    "mx-launcher": ["mx-launcher"],
+    "mx-pay": ["mx-pay"],
+    "mx-rig": ["mx-rig"]
+  }
+}

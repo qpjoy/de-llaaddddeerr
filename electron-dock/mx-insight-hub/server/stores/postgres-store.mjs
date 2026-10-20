@@ -8,6 +8,7 @@ import { assertPostgresKeyAccessLimits } from './key-access-limits.mjs'
 import { readTenantAccess, writeTenantAccess, applyTenantAccess, previewTenantAccess } from './tenant-service-access.mjs'
 import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { promoteAdmittedWork } from '../core/postgres-pool.mjs'
 import { quotaExceededCode } from '../core/quota-codes.mjs'
 import { usageMeterKey } from '../billing/contracts.mjs'
 import { consumptionItem, consumptionPage } from '../billing/consumption.mjs'
@@ -37,9 +38,12 @@ function iso(value) {
 }
 
 function usageAdmissionUnavailable(cause, stage) {
+  // Raised only before COMMIT was sent: this attempt holds no reservation, so
+  // it cannot have dispatched. An older attempt with the same key may still
+  // exist, which is why a retry must keep that key.
   const error = new AppError(503, 'usage_admission_unavailable',
     'Hub request admission is temporarily unavailable; check the same idempotency key before retrying',
-    { stage })
+    { stage, currentAttemptStarted: false, retryAfterMs: 1000 })
   error.cause = cause
   return error
 }
@@ -2465,6 +2469,14 @@ export class PostgresStore {
   }
 
   async reserve(input) {
+    const reservation = await this.#reserveUsage(input)
+    // The request now owns durable work. Its later checkouts (dispatch,
+    // settlement) must not wait behind requests that have reserved nothing.
+    promoteAdmittedWork()
+    return reservation
+  }
+
+  async #reserveUsage(input) {
     if (Boolean(input.platform) === Boolean(input.capability)) {
       throw new AppError(500, 'invalid_usage_scope', 'Usage reservation requires exactly one scope')
     }

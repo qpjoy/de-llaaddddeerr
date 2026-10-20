@@ -11,17 +11,20 @@ source "$ROOT/scripts/build-proxy.sh"
 usage() {
   cat <<'HELP'
 mx-pay: deploy | migrate | status | doctor | discover | backup | logs | start | stop | restart
+        postgres-permissions-plan | postgres-permissions-apply
   bash scripts/manage.sh deploy   # discover, provision dedicated PG, migrate, rollout
   bash scripts/manage.sh discover # read-only JSON capabilities for a future global manage.sh
   bash scripts/manage.sh backup   # verified PG archive + private recovery metadata
   bash scripts/manage.sh status   # read-only, current deployment target
+  bash scripts/manage.sh postgres-permissions-plan  # inspect retained PG startup guard
+  bash scripts/manage.sh postgres-permissions-apply # patch only OnDelete template; no Pod restart
 Configuration is discovered at runtime; .env is optional overrides (see .env.example).
 Default Kubernetes; MX_PAY_DEPLOY_DRIVER=compose is development/transition only.
 deploy does NOT move Hub orders/wallets, enable live collection, or restart other systems.
 No delete-data/down/all command. Noninteractive deployment needs no extra prompt.
 HELP
 }
-case "$ACTION" in help|-h|--help) usage; exit 0;; deploy|migrate|status|doctor|discover|backup|logs|start|stop|restart) ;; *) die "Unsupported action: $ACTION";; esac
+case "$ACTION" in help|-h|--help) usage; exit 0;; deploy|migrate|status|doctor|discover|backup|logs|start|stop|restart|postgres-permissions-plan|postgres-permissions-apply) ;; *) die "Unsupported action: $ACTION";; esac
 [ "$#" -le 1 ] || die 'Unexpected arguments'
 pay_build_proxy_override_set="${MX_PAY_BUILD_PROXY+x}"
 pay_build_proxy_override="${MX_PAY_BUILD_PROXY-}"
@@ -54,7 +57,7 @@ export MX_PAY_SSO_SOURCE="$(absolute "${MX_PAY_SSO_SOURCE:-secrets/console/profi
 export MX_PAY_CONSOLE_ACCESS_SOURCE="$(absolute "${MX_PAY_CONSOLE_ACCESS_SOURCE:-secrets/console/access.json}")"
 export MX_PAY_UID="${MX_PAY_UID:-$(id -u)}" MX_PAY_GID="${MX_PAY_GID:-$(id -g)}"
 TMP='' LOCK_UID='' JOB_RUNNING=0 LOCAL_LOCK=0 PHASE=preflight
-mkdir -p "$ROOT/.deploy"
+[ "$ACTION" = postgres-permissions-plan ] || mkdir -p "$ROOT/.deploy"
 kube() { kubectl --context "$MX_PAY_KUBE_CONTEXT" --request-timeout=15s -n "$MX_PAY_NAMESPACE" "$@"; }
 compose() {
   if [ -f "$MX_PAY_SSO_SOURCE" ]; then
@@ -110,6 +113,7 @@ case "$MX_PAY_DEPLOY_DRIVER" in
         if [ -n "$console_workload" ]; then kube logs deployment/mx-pay-console --all-pods=true --prefix=true --tail=100; fi
         exit;;
       doctor) node "$ROOT/scripts/runtime.mjs" discover "$ROOT"; kube get nodes -o wide; kube get deployment,pods,job,pdb,pvc -l app.kubernetes.io/part-of=mx-pay -o wide; exit;;
+      postgres-permissions-plan) node "$ROOT/scripts/postgres-permissions.mjs" plan "$ROOT"; exit;;
     esac
     ;;
   compose)
@@ -117,7 +121,7 @@ case "$MX_PAY_DEPLOY_DRIVER" in
     say "target=compose context=$(docker context show) (no rolling availability guarantee)"
     if [ -f "$ROOT/.deploy/image" ]; then export MX_PAY_IMAGE="${MX_PAY_IMAGE:-$(cat "$ROOT/.deploy/image")}"; fi
     case "$ACTION" in
-      discover|backup) die "$ACTION currently requires Kubernetes; Compose uses an externally managed database";;
+      discover|backup|postgres-permissions-plan|postgres-permissions-apply) die "$ACTION currently requires Kubernetes; Compose uses an externally managed database";;
       status|doctor) export MX_PAY_IMAGE="${MX_PAY_IMAGE:-mx-pay:not-deployed}"; compose ps --all; exit;;
       logs)
         if [ -f "$MX_PAY_SSO_SOURCE" ]; then compose logs --tail=100 api console; else compose logs --tail=100 api; fi
@@ -143,6 +147,11 @@ if [ "$MX_PAY_DEPLOY_DRIVER" = k8s ]; then
 else
   mkdir "$ROOT/.deploy/lock" 2>/dev/null || die 'Another local mx-pay operation is running; inspect before recovering its lock'
   LOCAL_LOCK=1
+fi
+if [ "$ACTION" = postgres-permissions-apply ]; then
+  PHASE=postgres-permissions
+  MX_PAY_PERMISSIONS_LOCK_UID="$LOCK_UID" node "$ROOT/scripts/postgres-permissions.mjs" apply "$ROOT"
+  exit
 fi
 if [ "$ACTION" = backup ]; then
   PHASE=backup

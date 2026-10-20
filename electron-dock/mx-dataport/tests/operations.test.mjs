@@ -23,6 +23,7 @@ function fixture(t, { fresh = false } = {}) {
     "scripts/manage.sh",
     "scripts/operations.mjs",
     "scripts/enroll.mjs",
+    "scripts/recover-lock.mjs",
     "scripts/bootstrap.mjs",
     "deploy/k8s/render.mjs",
     "apps/server/config.mjs",
@@ -84,7 +85,7 @@ const stdin=fs.readFileSync(0,'utf8');fs.appendFileSync(dir+'/calls',JSON.string
 if(cmd==='kubectl'){
  if(args[0]==='config'&&args[1]==='current-context'){process.stdout.write(process.env.HARBOR_TEST_CONTEXT||'test-context');process.exit(0)}
  if(args.includes('config')&&args.includes('view')){process.stdout.write('test-only-kubeconfig');process.exit(0)}
- const a=args.slice(4),key=a.slice(0,3).join(' '),out=x=>process.stdout.write(JSON.stringify(x));
+ const a=args.slice(4).filter(v=>!v.startsWith('--request-timeout=')),key=a.slice(0,3).join(' '),out=x=>process.stdout.write(JSON.stringify(x));
  if(key==='get namespace kube-system')out({metadata:{uid:process.env.HARBOR_TEST_DRIFT?'wrong':'fixture-cluster'}});
  else if(a[0]==='get'&&a[1]==='nodes'){
   const node={metadata:{name:'configured-node-name',labels:{'kubernetes.io/hostname':process.env.HARBOR_TEST_REMOTE_NODE?'another-host':os.hostname()}},spec:{},status:{conditions:[{type:'Ready',status:'True'}]}};
@@ -96,8 +97,21 @@ if(cmd==='kubectl'){
  else if(key==='create namespace mx-harbor')fs.writeFileSync(dir+'/namespace','created');
  else if(key==='create configmap mx-harbor-deploy-lock'){
   if(process.env.HARBOR_TEST_LOCK_FAILURE){process.stderr.write('Error from server ('+process.env.HARBOR_TEST_LOCK_FAILURE+'): private-sensitive-payload');process.exit(1)}
-  if(fs.existsSync(dir+'/lock')){process.stderr.write('Error from server (AlreadyExists): private-sensitive-payload');process.exit(1)}
-  fs.writeFileSync(dir+'/lock','fixture-lock-uid',{flag:'wx'});out({metadata:{uid:'fixture-lock-uid'}});
+  if(process.env.HARBOR_TEST_EXISTS_ERROR){process.stderr.write(process.env.HARBOR_TEST_EXISTS_ERROR);process.exit(1)}
+  if(fs.existsSync(dir+'/lock')){process.stderr.write(process.env.HARBOR_TEST_EXISTS_STYLE==='api'?'Error from server (AlreadyExists): configmaps "mx-harbor-deploy-lock" already exists':'error: failed to create configmap: configmaps "mx-harbor-deploy-lock" already exists');process.exit(1)}
+  const sequence=fs.existsSync(dir+'/lock-sequence')?Number(fs.readFileSync(dir+'/lock-sequence'))+1:1;
+  fs.writeFileSync(dir+'/lock-sequence',String(sequence));
+  const lock={metadata:{uid:'fixture-lock-uid-'+sequence,resourceVersion:'1'},data:Object.fromEntries(a.filter(v=>v.startsWith('--from-literal=')).map(v=>{const literal=v.slice('--from-literal='.length),i=literal.indexOf('=');return [literal.slice(0,i),literal.slice(i+1)]}))};
+  fs.writeFileSync(dir+'/lock',JSON.stringify(lock),{flag:'wx'});out(process.env.HARBOR_TEST_LOCK_RECEIPT_FAILURE?{metadata:{uid:lock.metadata.uid}}:lock);
+ }
+ else if(key==='get configmap mx-harbor-deploy-lock'){if(fs.existsSync(dir+'/lock'))out(JSON.parse(fs.readFileSync(dir+'/lock')))}
+ else if(a[0]==='get'&&a[1]==='jobs')out({items:process.env.HARBOR_TEST_ACTIVE_JOB?[{metadata:{name:'mx-harbor-migrate-running'},status:{active:1}}]:[]});
+ else if(a[0]==='get'&&a[1]==='pods')out({items:process.env.HARBOR_TEST_ACTIVE_POD?[{metadata:{name:'mx-harbor-migrate-running-pod',labels:{'job-name':'mx-harbor-migrate-running'}},status:{phase:'Running'}}]:[]});
+ else if(key==='patch configmap mx-harbor-deploy-lock'){
+  if(process.env.HARBOR_TEST_MARK_FAILURE){process.stderr.write('Error from server (Conflict): private-sensitive-payload');process.exit(1)}
+  const lock=JSON.parse(fs.readFileSync(dir+'/lock')),patch=JSON.parse(a[a.indexOf('-p')+1]);
+  for(const operation of patch){const parts=operation.path.slice(1).split('/'),object=parts.slice(0,-1).reduce((o,k)=>o[k],lock),key=parts.at(-1);if(operation.op==='test'){if(object[key]!==operation.value)process.exit(1)}else if(operation.op==='replace')object[key]=operation.value;else process.exit(1)}
+  lock.metadata.resourceVersion=String(Number(lock.metadata.resourceVersion)+1);fs.writeFileSync(dir+'/lock',JSON.stringify(lock));out(lock);
  }
  else if(key==='get secret mx-harbor-runtime'){
   if(process.env.HARBOR_TEST_SECRET_DENIED)process.exit(1);
@@ -111,8 +125,9 @@ if(cmd==='kubectl'){
  else if(a[0]==='rollout'&&process.env.HARBOR_TEST_ROLLOUT_FAILURE)process.exit(1);
  else if(a[0]==='wait'&&process.env.HARBOR_TEST_MIGRATION_FAILURE)process.exit(1);
  else if(a[0]==='delete'&&a[1]?.startsWith('job/')&&process.env.HARBOR_TEST_DELETE_FAILURE)process.exit(1);
- else if(a[0]==='delete'&&a.includes('--raw')){if(process.env.HARBOR_TEST_UNLOCK_FAILURE)process.exit(1);const options=JSON.parse(fs.readFileSync(a.at(-1)));if(options.preconditions.uid!==fs.readFileSync(dir+'/lock','utf8'))process.exit(1);fs.unlinkSync(dir+'/lock');}
+ else if(a[0]==='delete'&&a.includes('--raw')){if(process.env.HARBOR_TEST_UNLOCK_FAILURE)process.exit(1);const options=JSON.parse(fs.readFileSync(a[a.indexOf('-f')+1])),lock=JSON.parse(fs.readFileSync(dir+'/lock'));if(options.preconditions.uid!==lock.metadata.uid||(options.preconditions.resourceVersion&&options.preconditions.resourceVersion!==lock.metadata.resourceVersion))process.exit(1);fs.appendFileSync(dir+'/unlocks.jsonl',JSON.stringify(options)+'\\n');fs.unlinkSync(dir+'/lock');}
 }else if(cmd==='bash'){if(args.join(' ')!=='../mx-common/scripts/manage.sh provision mx-harbor')process.exit(1);process.stdout.write('postgres://test:test@pg.internal/mx_harbor');}
+else if(cmd==='ps'){process.stdout.write(process.ppid+' node '+dir+'/scripts/operations.mjs deploy\\n');if(process.env.HARBOR_TEST_BUSY_PROCESS)process.stdout.write('2147483647 node '+dir+'/scripts/enroll.mjs\\n');}
 else if(cmd==='docker'&&args[0]==='buildx'&&args[1]==='inspect'){
  const file=dir+'/builders.json',builders=fs.existsSync(file)?JSON.parse(fs.readFileSync(file)):{};
  const name=args[2];
@@ -138,7 +153,7 @@ else if(cmd==='docker'&&args.includes('-t')){
 }
 else if(cmd==='ctr'&&args.includes('ls'))process.stdout.write('docker.io/library/'+fs.readFileSync(dir+'/image','utf8')+'\\n');
 `;
-  for (const cmd of ["kubectl", "docker", "ctr", "bash"])
+  for (const cmd of ["kubectl", "docker", "ctr", "bash", "ps"])
     writeFileSync(join(dir, "bin", cmd), stub, { mode: 0o755 });
   const run = (action, extra = {}) =>
     spawnSync(
@@ -231,6 +246,17 @@ function assertFullDeploy(calls) {
     position((c) => c.args.includes("rollout")) <
       position((c) => c.cmd === "readiness"),
   );
+  const mark = calls.find((c) => c.args.includes("patch"));
+  assert.ok(mark, "completed deployment records recoverability before release");
+  const patch = JSON.parse(mark.args[mark.args.indexOf("-p") + 1]);
+  assert.ok(
+    position((c) => c.cmd === "readiness") < position((c) => c === mark),
+    "only confirmed completion makes the lock recoverable",
+  );
+  assert.ok(position((c) => c === mark) < position((c) => c.args.includes("delete") && c.args.includes("--raw")));
+  assert.ok(patch.some((op) => op.op === "test" && op.path === "/metadata/uid"));
+  assert.ok(patch.some((op) => op.op === "test" && op.path === "/metadata/resourceVersion"));
+  assert.ok(patch.some((op) => op.op === "replace" && op.path === "/data/recoveryState" && op.value === "releasable"));
   assert.ok(
     !calls.some((c) => c.args.includes("restart")),
     "new immutable image restarts the Pod once without a second rollout",
@@ -340,6 +366,7 @@ test("registry build failure never starts migration or updates the running workl
     result = f.run("deploy", { MX_HARBOR_BUILD_PROXY: "http://127.0.0.1:7788", HARBOR_TEST_BUILD_FAILURE: "1" });
   assert.notEqual(result.status, 0);
   assert.ok(!f.calls().some(c => c.stdin.includes('"kind":"Job"') || c.stdin.includes('"kind":"Deployment"')));
+  assert.ok(!f.calls().some(c => c.args.includes("patch")));
   assert.equal(existsSync(join(f.dir, "lock")), false);
 });
 test("malformed build proxies are rejected without printing their value or configuring a builder", (t) => {
@@ -361,6 +388,7 @@ test("rollout or readiness failure reports failure instead of a successful deplo
       result = f.run("deploy", { [flag]: "1" });
     assert.notEqual(result.status, 0);
     assert.doesNotMatch(result.stdout, /deploy completed/);
+    assert.ok(!f.calls().some(c => c.args.includes("patch")));
     assert.equal(existsSync(join(f.dir, "lock")), false);
     if (flag === "HARBOR_TEST_ROLLOUT_FAILURE")
       assert.ok(!f.calls().some((c) => c.cmd === "readiness"));
@@ -375,6 +403,7 @@ test("failed migration never deploys; unconfirmed termination retains the deploy
       });
     assert.notEqual(result.status, 0);
     const calls = f.calls();
+    assert.ok(!calls.some(c => c.args.includes("patch")));
     assert.ok(
       calls.some((c) => c.args.includes("wait")),
       result.stderr,
@@ -397,13 +426,14 @@ test("failed migration never deploys; unconfirmed termination retains the deploy
 test("lock acquisition reports a safe cause and never removes an existing lock or starts a build", (t) => {
   for (const category of ["AlreadyExists", "Forbidden", "Unauthorized"]) {
     const f = fixture(t);
-    writeFileSync(join(f.dir, "lock"), "another-task-lock");
+    const existing = JSON.stringify({metadata:{uid:"another-task-lock",resourceVersion:"8"},data:{action:"deploy"}});
+    writeFileSync(join(f.dir, "lock"), existing);
     const result = f.run("deploy", {HARBOR_TEST_LOCK_FAILURE:category});
     assert.notEqual(result.status,0);
-    assert.ok(result.stderr.includes(category),result.stderr);
+    if(category!=="AlreadyExists")assert.ok(result.stderr.includes(category),result.stderr);
     assert.match(result.stderr,/获取部署锁 mx-harbor\/mx-harbor-deploy-lock/);
     assert.ok(!result.stderr.includes("private-sensitive-payload"));
-    assert.equal(readFileSync(join(f.dir,"lock"),"utf8"),"another-task-lock");
+    assert.equal(readFileSync(join(f.dir,"lock"),"utf8"),existing);
     assert.ok(!f.calls().some(c=>c.cmd==="docker"||c.args.includes("delete")||c.args.includes("apply")));
     if(category==="AlreadyExists")assert.match(result.stderr,/recover-lock（默认只读）/);
   }
@@ -427,6 +457,110 @@ test("unlock failure still removes temporary private configuration", (t) => {
   assert.ok(unlock, result.stderr);
   assert.ok(!result.stdout.includes("deploy completed"), result.stdout);
   assert.equal(existsSync(dirname(unlock.args.at(-1))), false);
+  assert.equal(JSON.parse(readFileSync(join(f.dir, "lock"))).data.recoveryState, "releasable");
+});
+
+test("a completed deploy with failed cleanup is automatically recovered once before the next deploy", (t) => {
+  for (const style of ["cli", "api"]) {
+    const f = fixture(t), first = f.run("deploy", { HARBOR_TEST_UNLOCK_FAILURE: "1" });
+    assert.notEqual(first.status, 0);
+    const retained = JSON.parse(readFileSync(join(f.dir, "lock"))), count = f.calls().length;
+    assert.equal(retained.data.recoveryState, "releasable");
+    const second = f.run("deploy", {HARBOR_TEST_EXISTS_STYLE:style}), calls = f.calls().slice(count);
+    assert.equal(second.status, 0, second.stderr);
+    const creates = calls.flatMap((c, i) => c.args.includes("create") && c.args.includes("configmap") ? [i] : []),
+      oldDelete = calls.findIndex(c => c.args.includes("--raw"));
+    assert.equal(creates.length, 2, "one rejected acquisition and one reacquisition");
+    assert.ok(creates[0] < oldDelete && oldDelete < creates[1]);
+    assertFullDeploy(calls.slice(creates[1]));
+    assert.equal(calls.filter(c => c.cmd === "ps").length, 1);
+    for (const resource of ["jobs", "pods"])
+      assert.ok(calls.some(c => c.args.includes("get") && c.args.includes(resource)));
+    const deletes = readFileSync(join(f.dir, "unlocks.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+    assert.deepEqual(deletes[0].preconditions, {uid:retained.metadata.uid, resourceVersion:retained.metadata.resourceVersion});
+    assert.notEqual(deletes[1].preconditions.uid, retained.metadata.uid);
+    assert.equal(existsSync(join(f.dir, "lock")), false);
+  }
+});
+
+test("ambiguous or unrelated create errors never authorize automatic recovery", (t) => {
+  for (const error of [
+    'Error from server (AlreadyExists): configmaps "another-lock" already exists',
+    'Error from server (AlreadyExists): configmaps "mx-harbor-deploy-lock" already exists\nrequest timeout: private-sensitive-payload',
+    'error: failed to create configmap: configmaps "mx-harbor-deploy-lock" already exists\nprivate-sensitive-payload',
+  ]) {
+    const f = fixture(t), existing = JSON.stringify({
+      metadata:{uid:"protected-lock", resourceVersion:"7"},
+      data:{action:"deploy", ownerHost:hostname(), ownerPid:"2147483647", recoveryVersion:"1", recoveryState:"releasable"},
+    });
+    writeFileSync(join(f.dir, "lock"), existing);
+    const result = f.run("deploy", {HARBOR_TEST_EXISTS_ERROR:error});
+    assert.notEqual(result.status, 0);
+    assert.equal(readFileSync(join(f.dir, "lock"), "utf8"), existing);
+    assert.ok(!f.calls().some(c => c.cmd === "docker" || c.cmd === "ps" || c.args.includes("delete") || c.args.includes("apply") || c.args.includes("patch")));
+    assert.ok(!f.calls().some(c => c.args.includes("get") && c.args.includes("mx-harbor-deploy-lock")));
+    assert.ok(!result.stderr.includes("private-sensitive-payload"));
+  }
+});
+
+test("automatic recovery never steals active, legacy, live-owner or foreign locks", (t) => {
+  const releasable = {action:"deploy", ownerHost:hostname(), ownerPid:"2147483647", recoveryVersion:"1", recoveryState:"releasable"};
+  for (const data of [
+    {...releasable, recoveryState:"active"},
+    {action:"deploy", ownerHost:hostname(), ownerPid:"2147483647"},
+    {...releasable, ownerPid:String(process.pid)},
+    {...releasable, ownerHost:"another-host"},
+    {...releasable, action:"enroll"},
+  ]) {
+    const f = fixture(t), existing = JSON.stringify({metadata:{uid:"protected-lock", resourceVersion:"7"}, data});
+    writeFileSync(join(f.dir, "lock"), existing);
+    const result = f.run("deploy");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /recover-lock/);
+    assert.equal(readFileSync(join(f.dir, "lock"), "utf8"), existing);
+    assert.equal(f.calls().filter(c => c.args.includes("create") && c.args.includes("configmap")).length, 1);
+    assert.ok(!f.calls().some(c => c.cmd === "docker" || c.args.includes("delete") || c.args.includes("apply") || c.args.includes("patch")));
+  }
+});
+
+test("releasable locks still require no other operations or unfinished migration work", (t) => {
+  for (const flag of ["HARBOR_TEST_BUSY_PROCESS", "HARBOR_TEST_ACTIVE_JOB", "HARBOR_TEST_ACTIVE_POD"]) {
+    const f = fixture(t), existing = JSON.stringify({
+      metadata:{uid:"protected-lock", resourceVersion:"7"},
+      data:{action:"deploy", ownerHost:hostname(), ownerPid:"2147483647", recoveryVersion:"1", recoveryState:"releasable"},
+    });
+    writeFileSync(join(f.dir, "lock"), existing);
+    const result = f.run("deploy", {[flag]:"1"});
+    assert.notEqual(result.status, 0, flag);
+    assert.equal(readFileSync(join(f.dir, "lock"), "utf8"), existing);
+    assert.ok(!f.calls().some(c => c.cmd === "docker" || c.args.includes("delete") || c.args.includes("apply") || c.args.includes("patch")), flag);
+  }
+});
+
+test("a failed completion marker preserves the lock and never claims success", (t) => {
+  const f = fixture(t), result = f.run("deploy", {HARBOR_TEST_MARK_FAILURE:"1"});
+  assert.notEqual(result.status, 0);
+  assert.doesNotMatch(result.stdout, /deploy completed/);
+  assert.equal(JSON.parse(readFileSync(join(f.dir, "lock"))).data.recoveryState, "active");
+  assert.ok(f.calls().some(c => c.cmd === "readiness"));
+  assert.ok(!f.calls().some(c => c.args.includes("delete")));
+  assert.ok(!result.stderr.includes("private-sensitive-payload"));
+});
+
+test("an incomplete lock creation receipt stops without deleting the created lock or deploying", (t) => {
+  const f = fixture(t), result = f.run("deploy", {HARBOR_TEST_LOCK_RECEIPT_FAILURE:"1"});
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /部署锁创建响应身份不完整/);
+  assert.equal(JSON.parse(readFileSync(join(f.dir, "lock"))).data.recoveryState, "active");
+  assert.equal(f.calls().filter(c => c.args.includes("create") && c.args.includes("configmap")).length, 1);
+  assert.ok(!f.calls().some(c => c.cmd === "docker" || c.args.includes("delete") || c.args.includes("apply") || c.args.includes("patch")));
+});
+
+test("unavailable temporary storage cannot leave a newly created deployment lock", (t) => {
+  const f = fixture(t), result = f.run("deploy", {TMPDIR:join(f.dir, "missing-temp-directory")});
+  assert.notEqual(result.status, 0);
+  assert.equal(existsSync(join(f.dir, "lock")), false);
+  assert.ok(!f.calls().some(c => c.args.includes("create") || c.args.includes("delete") || c.args.includes("apply") || c.cmd === "docker"));
 });
 
 function assertReadOnly(calls) {

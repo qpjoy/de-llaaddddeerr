@@ -8,6 +8,10 @@ export class AppError extends Error {
   }
 }
 
+// Internal evidence from a routing check that ran before usage reservation.
+// Public JSON fields cannot establish that this attempt has not dispatched.
+export class SearchAdmissionNotStartedError extends AppError {}
+
 export class UpstreamRejectedError extends Error {
   constructor(status, body, correlation = {}) {
     super(`Night-All rejected the request with HTTP ${status}`)

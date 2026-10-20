@@ -18,6 +18,7 @@ die() { printf '✗ %s\n' "$*" >&2; exit 1; }
 
 source "$SCRIPT_DIR/launcher-build-proxy.sh"
 source "$SCRIPT_DIR/k8s-production-recovery.sh"
+source "$SCRIPT_DIR/k8s-control-plane.sh"
 
 MX_MANAGE_SENSITIVE_TEMP_DIR=""
 manage_cleanup_sensitive_temp_dir() {
@@ -99,7 +100,7 @@ Usage:
   bash scripts/manage.sh ops awx-provider list|upsert [provider-id] [base-url]|check <provider-id>
   bash scripts/manage.sh ops local-platform plan|dry-run|cycle [local-port]|status|down
   bash scripts/manage.sh ops insight-hub plan|deploy|status|smoke|logs|down
-  bash scripts/manage.sh ops internal-production plan|predeploy|deploy|apply|status|gateway-smoke [gateway-url]|reinit-kubeadm|repair-network|repair-cni|down
+  bash scripts/manage.sh ops internal-production plan|predeploy|deploy|apply|status|gateway-smoke [gateway-url]|control-plane-preflight|reinit-kubeadm|repair-network|repair-cni|down
   bash scripts/manage.sh ops internal-production cleanup-smoke-fixtures [--apply]
   bash scripts/manage.sh ops identity on [https://private-ip:18443]
   bash scripts/manage.sh ops identity ingress
@@ -222,11 +223,13 @@ need_kubectl() {
 }
 
 k8s_crictl() {
+  local address
   command -v crictl >/dev/null 2>&1 || return 127
-  if [ -S "${MX_K8S_CONTAINERD_ADDRESS:-/run/containerd/containerd.sock}" ]; then
+  address="$(k8s_containerd_address)" || return 1
+  if k8s_managed_runtime || [ -S "$address" ]; then
     crictl \
-      --runtime-endpoint="unix://${MX_K8S_CONTAINERD_ADDRESS:-/run/containerd/containerd.sock}" \
-      --image-endpoint="unix://${MX_K8S_CONTAINERD_ADDRESS:-/run/containerd/containerd.sock}" \
+      --runtime-endpoint="unix://$address" \
+      --image-endpoint="unix://$address" \
       "$@"
     return
   fi
@@ -250,43 +253,6 @@ k8s_detect_lan_ip() {
   if command -v hostname >/dev/null 2>&1; then
     hostname -I 2>/dev/null | awk '{print $1; exit}'
   fi
-}
-
-k8s_append_no_proxy_entries() {
-  local current="$1"
-  local entries="$2"
-  local result entry
-  local parts=()
-  result="$current"
-  IFS=',' read -r -a parts <<<"$entries"
-  for entry in "${parts[@]}"; do
-    [ -n "$entry" ] || continue
-    case ",$result," in
-      *",$entry,"*) ;;
-      *)
-        if [ -n "$result" ]; then
-          result="$result,$entry"
-        else
-          result="$entry"
-        fi
-        ;;
-    esac
-  done
-  printf '%s\n' "$result"
-}
-
-k8s_configure_proxy_bypass() {
-  [ "${MX_K8S_CONFIGURE_NO_PROXY:-1}" = "1" ] || return 0
-  local current_ip pod_cidr service_cidr entries
-  current_ip="$(k8s_detect_lan_ip | head -n 1)"
-  k8s_is_usable_lan_ip "$current_ip" || return 0
-  pod_cidr="${MX_K8S_POD_CIDR:-${POD_CIDR:-${K8S_POD_CIDR:-}}}"
-  service_cidr="${MX_K8S_SERVICE_CIDR:-${SERVICE_CIDR:-${K8S_SERVICE_CIDR:-}}}"
-  entries="localhost,127.0.0.1,::1,$current_ip,$pod_cidr,$service_cidr,192.168.0.0/16,.svc,.cluster.local,kubernetes.default.svc,kubernetes.default.svc.cluster.local"
-  export NO_PROXY no_proxy
-  NO_PROXY="$(k8s_append_no_proxy_entries "${NO_PROXY:-}" "$entries")"
-  no_proxy="$(k8s_append_no_proxy_entries "${no_proxy:-}" "$entries")"
-  say "NO_PROXY includes kube-apiserver $current_ip and Kubernetes local ranges"
 }
 
 k8s_is_usable_lan_ip() {
@@ -713,6 +679,8 @@ k8s_wait_apiserver_after_endpoint_repair() {
   local current_ip="$1"
   local attempts="${MX_K8S_APISERVER_REPAIR_WAIT_ATTEMPTS:-60}"
   local i
+  # Endpoint repair may have changed kubeconfig after the initial proxy setup.
+  k8s_configure_proxy_bypass
   say "wait kube-apiserver on $current_ip:6443"
   for i in $(seq 1 "$attempts"); do
     if k8s_apiserver_endpoint_healthy; then
@@ -727,7 +695,7 @@ k8s_wait_apiserver_after_endpoint_repair() {
 
 k8s_apiserver_endpoint_healthy() {
   command -v kubectl >/dev/null 2>&1 || return 1
-  kubectl --request-timeout=5s get --raw=/version >/dev/null 2>&1
+  kubectl --request-timeout=5s get --raw=/readyz >/dev/null 2>&1
 }
 
 k8s_static_pod_logs() {
@@ -757,25 +725,6 @@ k8s_apiserver_failure_diagnostics() {
     say "recent kubelet logs"
     journalctl -u kubelet -n 120 --no-pager || true
   fi
-}
-
-k8s_require_apiserver_ready() {
-  local current_ip attempts timeout i
-  need_kubectl
-  current_ip="$(k8s_detect_lan_ip | head -n 1)"
-  attempts="${MX_K8S_APISERVER_PREFLIGHT_ATTEMPTS:-6}"
-  timeout="${MX_K8S_APISERVER_PREFLIGHT_TIMEOUT:-5s}"
-  say "preflight kube-apiserver on $current_ip:6443"
-  for i in $(seq 1 "$attempts"); do
-    if kubectl --request-timeout="$timeout" get --raw=/version >/dev/null 2>&1; then
-      say "kube-apiserver preflight OK"
-      return 0
-    fi
-    [ "$i" = "$attempts" ] || sleep 2
-  done
-  k8s_apiserver_failure_diagnostics
-  kubectl --request-timeout="$timeout" get --raw=/version || true
-  die "kube-apiserver $current_ip:6443 is unreachable after NO_PROXY setup; check kubelet/static-pod status before building or applying MX"
 }
 
 k8s_restart_static_pod_containers() {
@@ -1122,12 +1071,8 @@ k8s_repair_kubeadm_endpoint() {
   fi
   if [ -z "$old_ips" ] && [ "$cert_repair_needed" != "1" ] && [ "$kubelet_identity_repair_needed" != "1" ]; then
     if ! k8s_apiserver_endpoint_healthy; then
-      say "kubeadm endpoint is current, but kube-apiserver is unavailable; recycle control-plane static pods once"
-      if command -v systemctl >/dev/null 2>&1; then
-        systemctl restart kubelet || say "kubelet restart failed; waiting for static pod reconciliation anyway"
-      fi
-      k8s_restart_static_pod_containers etcd kube-apiserver kube-controller-manager kube-scheduler || true
-      k8s_wait_apiserver_after_endpoint_repair "$current_ip"
+      say "kubeadm endpoint is current, but kube-apiserver is not ready; retry read-only checks without restarting the control plane"
+      k8s_require_apiserver_ready
     fi
     return 0
   fi
@@ -2338,56 +2283,116 @@ k8s_local_pvs() {
 k8s_job_diagnostics() {
   local ns="$1"
   local job="$2"
-  local selector pod_selector pods pod uid
+  local selector pod_selector pods pod uid job_summary
   say "$job diagnostics: job"
-  kubectl -n "$ns" get job "$job" -o wide || true
-  kubectl -n "$ns" describe job "$job" || true
-  uid="$(kubectl -n "$ns" get job "$job" -o go-template='{{ index .spec.selector.matchLabels "batch.kubernetes.io/controller-uid" }}' 2>/dev/null || true)"
+  if ! job_summary="$(kubectl --request-timeout=5s -n "$ns" get job "$job" -o wide 2>&1)"; then
+    printf '%s\n' "$job_summary"
+    say "$job status cannot be read; skipping further Kubernetes diagnostics and collecting host evidence"
+    k8s_apiserver_failure_diagnostics
+    return 0
+  fi
+  printf '%s\n' "$job_summary"
+  kubectl --request-timeout=5s -n "$ns" describe job "$job" || true
+  uid="$(kubectl --request-timeout=5s -n "$ns" get job "$job" -o go-template='{{ index .spec.selector.matchLabels "batch.kubernetes.io/controller-uid" }}' 2>/dev/null || true)"
   if [ -n "$uid" ]; then
     pod_selector="batch.kubernetes.io/controller-uid=$uid"
   else
     pod_selector="job-name=$job"
   fi
   say "$job diagnostics: pods"
-  kubectl -n "$ns" get pods -l "$pod_selector" -o wide || true
-  pods="$(kubectl -n "$ns" get pods -l "$pod_selector" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+  kubectl --request-timeout=5s -n "$ns" get pods -l "$pod_selector" -o wide || true
+  pods="$(kubectl --request-timeout=5s -n "$ns" get pods -l "$pod_selector" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+  pods="$(printf '%s\n' "$pods" | awk 'NF && ++n <= 3')"
   for pod in $pods; do
     say "$job diagnostics: pod detail $pod"
-    kubectl -n "$ns" describe pod "$pod" || true
+    kubectl --request-timeout=5s -n "$ns" describe pod "$pod" || true
     say "$job diagnostics: logs $pod"
-    kubectl -n "$ns" logs "$pod" --all-containers --tail=200 || true
+    kubectl --request-timeout=5s -n "$ns" logs "$pod" --all-containers --tail=200 || true
     say "$job diagnostics: previous logs $pod"
-    kubectl -n "$ns" logs "$pod" --all-containers --previous --tail=200 || true
+    kubectl --request-timeout=5s -n "$ns" logs "$pod" --all-containers --previous --tail=200 || true
   done
-  selector="$(kubectl -n "$ns" get job "$job" -o jsonpath='{.spec.selector.matchLabels}' 2>/dev/null || true)"
+  selector="$(kubectl --request-timeout=5s -n "$ns" get job "$job" -o jsonpath='{.spec.selector.matchLabels}' 2>/dev/null || true)"
   [ -n "$pod_selector" ] && say "$job diagnostics: pod selector $pod_selector"
   [ -n "$selector" ] && say "$job diagnostics: selector $selector"
   say "$job diagnostics: postgres service and endpoints"
-  kubectl -n "$ns" get service,endpoints,endpointslices -l app.kubernetes.io/name=mx-internal-postgres -o wide || true
-  kubectl -n "$ns" get service mx-internal-postgres -o wide || true
-  kubectl -n "$ns" get endpoints mx-internal-postgres -o wide || true
-  kubectl -n kube-system get service kube-dns -o wide || true
-  kubectl -n kube-system get pods -l k8s-app=kube-dns -o wide || true
+  kubectl --request-timeout=5s -n "$ns" get service,endpoints,endpointslices -l app.kubernetes.io/name=mx-internal-postgres -o wide || true
+  kubectl --request-timeout=5s -n "$ns" get service mx-internal-postgres -o wide || true
+  kubectl --request-timeout=5s -n "$ns" get endpoints mx-internal-postgres -o wide || true
+  kubectl --request-timeout=5s -n kube-system get service kube-dns -o wide || true
+  kubectl --request-timeout=5s -n kube-system get pods -l k8s-app=kube-dns -o wide || true
   say "$job diagnostics: recent namespace events"
-  kubectl -n "$ns" get events --sort-by=.lastTimestamp || true
+  kubectl --request-timeout=5s -n "$ns" get events --sort-by=.lastTimestamp || true
 }
 
 k8s_wait_job_complete() {
   local ns="$1"
   local job="$2"
   local attempts="${3:-90}"
+  local expected_uid="${4:-}"
   local conditions i
+  K8S_JOB_WAIT_STATE=unobserved
   for i in $(seq 1 "$attempts"); do
-    conditions="$(kubectl -n "$ns" get job "$job" -o jsonpath='{range .status.conditions[*]}{.type}{"="}{.status}{"\n"}{end}' 2>/dev/null || true)"
-    if printf '%s\n' "$conditions" | grep -Fxq 'Complete=True'; then
-      return 0
+    if conditions="$(kubectl --request-timeout=5s -n "$ns" get job "$job" -o jsonpath='{.metadata.uid}{"\n"}{range .status.conditions[*]}{.type}{"="}{.status}{"\n"}{end}' 2>/dev/null)"; then
+      if [ -n "$expected_uid" ] && [ "${conditions%%$'\n'*}" != "$expected_uid" ]; then
+        K8S_JOB_WAIT_STATE=replaced
+        return 2
+      fi
+      K8S_JOB_WAIT_STATE=pending
+      if printf '%s\n' "$conditions" | grep -Fxq 'Complete=True'; then
+        K8S_JOB_WAIT_STATE=complete
+        return 0
+      fi
+      if printf '%s\n' "$conditions" | grep -Fxq 'Failed=True'; then
+        K8S_JOB_WAIT_STATE=failed
+        return 1
+      fi
+    else
+      K8S_JOB_WAIT_STATE=unreadable
     fi
-    if printf '%s\n' "$conditions" | grep -Fxq 'Failed=True'; then
-      return 1
-    fi
-    sleep 2
+    [ "$i" = "$attempts" ] || sleep 2
   done
-  return 1
+  # No terminal condition was observed. An API failure or wait timeout does
+  # not establish whether the migration ran, failed, or committed successfully.
+  return 2
+}
+
+k8s_run_migration() {
+  local ns="$1" manifest="$2" existing uid rv
+  local job=mx-launcher-migrate
+  if ! existing="$(kubectl --request-timeout=5s -n "$ns" get job "$job" --ignore-not-found -o jsonpath='{.metadata.uid}{"\n"}{.metadata.resourceVersion}{"\n"}{range .status.conditions[*]}{.type}{"="}{.status}{"\n"}{end}')"; then
+    die "cannot read existing migration job; no migration was submitted; inspect $ns/$job before retrying"
+  fi
+  if [ -n "$existing" ] && ! printf '%s\n' "$existing" | grep -Eq '^(Complete|Failed)=True$'; then
+    die "existing migration outcome is not confirmed; preserving $ns/$job; inspect its status and logs before retrying"
+  fi
+  if [ -n "$existing" ]; then
+    uid="${existing%%$'\n'*}"
+    rv="$(printf '%s\n' "$existing" | awk 'NR == 2 {print}')"
+    [[ "$uid" =~ ^[a-zA-Z0-9-]+$ ]] && [[ "$rv" =~ ^[0-9]+$ ]] \
+      || die "migration identity is invalid; preserving $ns/$job"
+    # Delete exactly the terminal object observed above. A competing deploy
+    # must not cause us to delete its replacement or overwrite it with apply.
+    if ! printf '{"apiVersion":"v1","kind":"DeleteOptions","propagationPolicy":"Foreground","preconditions":{"uid":"%s","resourceVersion":"%s"}}\n' "$uid" "$rv" \
+      | kubectl --request-timeout=10s delete --raw="/apis/batch/v1/namespaces/$ns/jobs/$job" -f - >/dev/null; then
+      die "migration job deletion is unconfirmed; no replacement was submitted; inspect $ns/$job before retrying"
+    fi
+    if ! kubectl --request-timeout=10s -n "$ns" wait --for=delete "job/$job" --timeout=60s; then
+      die "migration job deletion did not complete; no replacement was submitted; inspect $ns/$job before retrying"
+    fi
+  fi
+  if ! uid="$(kubectl --request-timeout=10s -n "$ns" create --validate=false -f "$manifest" -o jsonpath='{.metadata.uid}')"; then
+    k8s_job_diagnostics "$ns" "$job"
+    die "migration submission outcome is not confirmed; retain $ns/$job and inspect it before retrying"
+  fi
+  [[ "$uid" =~ ^[a-zA-Z0-9-]+$ ]] || die "migration submission identity is unconfirmed; inspect $ns/$job before retrying"
+  if k8s_wait_job_complete "$ns" "$job" "${MX_K8S_MIGRATION_WAIT_ATTEMPTS:-90}" "$uid"; then
+    return 0
+  fi
+  k8s_job_diagnostics "$ns" "$job"
+  if [ "$K8S_JOB_WAIT_STATE" = failed ]; then
+    die "migration job reported Failed=True; inspect $ns/$job logs for the cause"
+  fi
+  die "migration outcome is not confirmed (last observation: $K8S_JOB_WAIT_STATE); retain $ns/$job and inspect it after API recovery; deployment stopped"
 }
 
 k8s_workload_diagnostics() {
@@ -2492,6 +2497,39 @@ k8s_rollout_status() {
     return
   fi
   return 1
+}
+
+# Database StatefulSets use OnDelete so template changes never restart the
+# running database, and `rollout status` rejects that strategy. Wait for the Pod
+# itself instead; other strategies keep the original rollout wait.
+# A StatefulSet created with the default RollingUpdate keeps a defaulted
+# `rollingUpdate` block. `kubectl apply` of an OnDelete manifest merges both and
+# the API rejects the result, so switch the strategy alone first. The pod
+# template is untouched, so no Pod restarts.
+k8s_postgres_switch_to_ondelete() {
+  local ns="$1" name="$2" strategy
+  strategy="$(kubectl --request-timeout=15s -n "$ns" get statefulset "$name" --ignore-not-found \
+    -o jsonpath='{.spec.updateStrategy.type}')" || return 1
+  [ -n "$strategy" ] && [ "$strategy" != OnDelete ] || return 0
+  say "switch $name update strategy $strategy -> OnDelete before applying its template (no Pod restart)"
+  kubectl --request-timeout=15s -n "$ns" patch statefulset "$name" --type=json \
+    -p '[{"op":"replace","path":"/spec/updateStrategy","value":{"type":"OnDelete"}}]' >/dev/null
+}
+
+k8s_postgres_ready() {
+  local ns="$1" name="$2" timeout="${3:-180}" strategy waited=0
+  strategy="$(kubectl --request-timeout=15s -n "$ns" get statefulset "$name" -o jsonpath='{.spec.updateStrategy.type}' 2>/dev/null || true)"
+  if [ "$strategy" != OnDelete ]; then
+    k8s_rollout_status "$ns" statefulset "$name" "${timeout}s"
+    return
+  fi
+  until kubectl --request-timeout=15s -n "$ns" get "pod/${name}-0" >/dev/null 2>&1; do
+    [ "$waited" -lt "$timeout" ] || return 1
+    sleep 2
+    waited=$((waited + 2))
+  done
+  kubectl --request-timeout="$((timeout + 20))s" -n "$ns" wait --for=condition=Ready \
+    "pod/${name}-0" --timeout="$((timeout - waited > 10 ? timeout - waited : 10))s"
 }
 
 k8s_cleanup_retired_internal_dns_edge() {
@@ -2803,6 +2841,8 @@ k8s_apply() {
   say "ensure local persistent volumes; preserve existing sources and bindings"
   k8s_local_pvs ensure "$dir"
   say "apply postgres service/statefulset"
+  k8s_postgres_switch_to_ondelete "$ns" mx-internal-postgres \
+    || die "could not switch the PostgreSQL StatefulSet to OnDelete; nothing was applied"
   if [ "${K8S_PRODUCTION_RECOVERY:-0}" = 1 ]; then
     k8s_production_recovery_state checkpoint
     # Recheck immediately before applying the workload; mounts may have changed
@@ -2816,7 +2856,7 @@ k8s_apply() {
   say "apply host runner rbac"
   kubectl apply --validate=false -f "$dir/27-host-runner-rbac.yaml"
   say "wait postgres rollout"
-  if ! k8s_rollout_status "$ns" statefulset mx-internal-postgres 180s; then
+  if ! k8s_postgres_ready "$ns" mx-internal-postgres 180; then
     k8s_postgres_diagnostics "$ns"
     die "postgres rollout failed"
   fi
@@ -2839,12 +2879,7 @@ k8s_apply() {
   fi
 
   say "run migration job"
-  kubectl -n "$ns" delete job mx-launcher-migrate --ignore-not-found
-  kubectl apply --validate=false -f "$dir/30-migration-job.yaml"
-  if ! k8s_wait_job_complete "$ns" mx-launcher-migrate "${MX_K8S_MIGRATION_WAIT_ATTEMPTS:-90}"; then
-    k8s_job_diagnostics "$ns" mx-launcher-migrate
-    die "migration job failed"
-  fi
+  k8s_run_migration "$ns" "$dir/30-migration-job.yaml"
 
   if [ "$target" = "internal-shadow" ]; then
     say "ensure configured identity service before enabling personal login"
@@ -2867,9 +2902,11 @@ k8s_apply() {
     kubectl -n "$ns" rollout restart deployment/mx-launcher-internal
     K8S_INTERNAL_API_RESTARTED=1
   fi
-  say "wait internal api rollout"
-  if ! k8s_rollout_status "$ns" deployment mx-launcher-internal 180s; then
+  say "wait internal api rollout (timeout ${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s})"
+  if ! k8s_rollout_status "$ns" deployment mx-launcher-internal "${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s}"; then
     k8s_workload_diagnostics "$ns" deployment mx-launcher-internal
+    say "A Ready API Pod alone does not confirm rollout completion; old replicas must also retire."
+    say "Recheck without restarting: kubectl -n $ns rollout status deployment/mx-launcher-internal --timeout=${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s}"
     die "internal api rollout failed"
   fi
   if [ "$target" = "internal-shadow" ]; then
@@ -2924,7 +2961,7 @@ k8s_remote_runner() {
     "SITE_SLOT_RUNNER_REMOTE_EXECUTION_ENABLED=$value" \
     "SITE_SLOT_WORKER_REMOTE_SSH=$value" \
     "SITE_SLOT_CONFIRM_REMOTE_EXECUTION=$value"
-  k8s_rollout_status "$ns" deployment mx-launcher-internal 180s
+  k8s_rollout_status "$ns" deployment mx-launcher-internal "${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s}"
 }
 
 k8s_ssh_bootstrap() {
@@ -2946,7 +2983,7 @@ k8s_ssh_bootstrap() {
   need_kubectl
   say "set SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED=$value on Internal API deployment"
   kubectl -n "$ns" set env deployment/mx-launcher-internal "SITE_SLOT_SSH_PASSWORD_BOOTSTRAP_ENABLED=$value"
-  k8s_rollout_status "$ns" deployment mx-launcher-internal 180s
+  k8s_rollout_status "$ns" deployment mx-launcher-internal "${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s}"
 }
 
 k8s_readonly_probe() {
@@ -2968,7 +3005,7 @@ k8s_readonly_probe() {
   need_kubectl
   say "set SITE_SLOT_SSH_READONLY_PROBE_EXECUTE=$value on Internal API deployment"
   kubectl -n "$ns" set env deployment/mx-launcher-internal "SITE_SLOT_SSH_READONLY_PROBE_EXECUTE=$value"
-  k8s_rollout_status "$ns" deployment mx-launcher-internal 180s
+  k8s_rollout_status "$ns" deployment mx-launcher-internal "${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s}"
 }
 
 k8s_db_summary() {
@@ -3667,7 +3704,7 @@ ops_local_platform_apply_native_host_runner_url() {
   kubectl -n "$namespace" set env deployment/mx-launcher-internal \
     MX_INTERNAL_HOST_RUNNER_URL="$url" \
     MX_INTERNAL_HOST_RUNNER_NATIVE_URL="$url" >/dev/null
-  k8s_rollout_status "$namespace" deployment mx-launcher-internal 180s
+  k8s_rollout_status "$namespace" deployment mx-launcher-internal "${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s}"
 }
 
 ops_local_platform() {
@@ -5585,7 +5622,7 @@ k8s_restart_internal_api() {
   ns="$(k8s_namespace "$target")"
   need_kubectl
   kubectl -n "$ns" rollout restart deployment/mx-launcher-internal
-  k8s_rollout_status "$ns" deployment mx-launcher-internal 180s
+  k8s_rollout_status "$ns" deployment mx-launcher-internal "${MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT:-600s}"
 }
 
 k8s_apply_internal_gateway() {
@@ -5752,6 +5789,7 @@ Gateway:
 
 Commands:
   bash scripts/manage.sh ops internal-production predeploy
+  bash scripts/manage.sh ops internal-production control-plane-preflight
   bash scripts/manage.sh ops internal-production deploy
   bash scripts/manage.sh ops internal-production status
   bash scripts/manage.sh ops internal-production gateway-smoke
@@ -5780,6 +5818,9 @@ Notes:
   - qpjoy/mx-launcher-server:shadow is local-only. Deploy does not push it to
     Docker Hub; it imports and verifies the image in containerd k8s.io after
     Docker build.
+  - Internal API rollout waits up to 600s per attempt, including old replica
+    retirement. Override with MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT=900s on slow
+    hosts. A Ready Pod alone does not mark an incomplete rollout successful.
   - On an existing single-node Linux host, deploy verifies original mounts and
     PostgreSQL identity, starts inactive host services, repairs invalid kubelet
     client credentials against the existing CA, and restores missing Secrets
@@ -5902,7 +5943,7 @@ ops_internal_production_repair_kubeadm_endpoint_if_requested() {
 }
 
 ops_internal_production_reinit_kubeadm() {
-  local current_ip node_name host_name configure_containerd restart_runtime_after_cni
+  local current_ip node_name host_name configure_containerd restart_runtime_after_cni cri_socket
   current_ip="$(k8s_detect_lan_ip | head -n 1)"
   if ! k8s_is_usable_lan_ip "$current_ip"; then
     die "cannot detect usable LAN IP; set MX_K8S_APISERVER_ADVERTISE_ADDRESS=<current-lan-ip>"
@@ -5921,6 +5962,12 @@ ops_internal_production_reinit_kubeadm() {
   [ -n "$node_name" ] || node_name="mx-internal-server"
   configure_containerd="${MX_K8S_CONFIGURE_CONTAINERD:-0}"
   restart_runtime_after_cni="${MX_K8S_RESTART_RUNTIME_AFTER_CNI:-0}"
+  cri_socket="${CRI_SOCKET:-unix:///run/containerd/containerd.sock}"
+  if k8s_managed_runtime; then
+    cri_socket="unix://$(k8s_containerd_address)" || return 1
+    [ -z "${CRI_SOCKET:-}" ] || [ "$CRI_SOCKET" = "$cri_socket" ] \
+      || die "CRI_SOCKET does not match the managed Kubernetes runtime"
+  fi
   say "validate recoverable PostgreSQL credentials before kubeadm reinit"
   k8s_require_db_recovery_env "$(k8s_namespace internal-shadow)"
   if kubectl --request-timeout=5s -n "$(k8s_namespace internal-shadow)" \
@@ -5933,7 +5980,8 @@ ops_internal_production_reinit_kubeadm() {
   fi
   say "reinit kubeadm at $current_ip with node=$node_name"
   say "preserve /var/lib/mx-launcher; K8S_CONFIGURE_CONTAINERD=$configure_containerd K8S_RESTART_RUNTIME_AFTER_CNI=$restart_runtime_after_cni"
-  K8S_APISERVER_ADVERTISE_ADDRESS="$current_ip" \
+  CRI_SOCKET="$cri_socket" \
+    K8S_APISERVER_ADVERTISE_ADDRESS="$current_ip" \
     K8S_NODE_NAME="$node_name" \
     K8S_REINIT=1 \
     K8S_CONFIGURE_CONTAINERD="$configure_containerd" \
@@ -5942,7 +5990,8 @@ ops_internal_production_reinit_kubeadm() {
 }
 
 ops_internal_production_repair_cni() {
-  local timeout crictl_status
+  local timeout crictl_status runtime_service
+  runtime_service="$(k8s_containerd_service --allow-stopped-kubelet)" || return 1
   timeout="${MX_K8S_NODE_READY_RETRY_TIMEOUT:-180s}"
   [ -d /etc/cni/net.d ] || die "missing /etc/cni/net.d; run reinit-kubeadm or repair Flannel first"
   if ! find /etc/cni/net.d -maxdepth 1 -type f \
@@ -5955,13 +6004,13 @@ ops_internal_production_repair_cni() {
   done
   [ -s /run/flannel/subnet.env ] || die "missing /run/flannel/subnet.env; Flannel has not created a subnet lease"
 
-  say "CNI files are present; restart containerd so CRI reloads /etc/cni/net.d"
-  systemctl restart containerd
-  say "restart kubelet after containerd CNI reload"
+  say "CNI files are present; restart $runtime_service so CRI reloads /etc/cni/net.d"
+  systemctl restart "$runtime_service"
+  say "restart kubelet after Kubernetes runtime CNI reload"
   systemctl restart kubelet
 
   if command -v crictl >/dev/null 2>&1; then
-    crictl_status="$(crictl info 2>/dev/null || true)"
+    crictl_status="$(k8s_crictl info 2>/dev/null || true)"
     case "$crictl_status" in
       *'"NetworkReady"'*)
       printf '%s\n' "$crictl_status" \
@@ -5974,7 +6023,7 @@ ops_internal_production_repair_cni() {
   if ! kubectl wait --for=condition=Ready node --all --timeout="$timeout"; then
     kubectl get nodes -o wide || true
     kubectl describe nodes || true
-    command -v crictl >/dev/null 2>&1 && crictl info || true
+    command -v crictl >/dev/null 2>&1 && k8s_crictl info || true
     die "Kubernetes node did not become Ready after CNI repair"
   fi
   kubectl get nodes -o wide
@@ -6017,7 +6066,7 @@ ops_internal_production() {
   local action="$1"
   shift || true
   case "$action" in
-    plan|predeploy) ;;
+    plan|predeploy|deploy|cycle|reinit-kubeadm|reinit) ;;
     *) k8s_configure_proxy_bypass ;;
   esac
   case "$action" in
@@ -6035,6 +6084,7 @@ ops_internal_production() {
       launcher_with_build_proxy internal_production_predeploy_gate
       export MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS="${MX_INTERNAL_REQUIRED_LOGIN_PROVIDERS:-local-password,feishu}"
       k8s_prepare_production_host
+      k8s_configure_proxy_bypass
       k8s_repair_kubeadm_endpoint
       k8s_require_apiserver_ready
       k8s_recover_production_node
@@ -6123,6 +6173,10 @@ ops_internal_production() {
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production repair-cni"
       ops_internal_production_repair_cni
       ;;
+    control-plane-preflight)
+      [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production control-plane-preflight"
+      k8s_require_apiserver_ready
+      ;;
     repair-network)
       [ "$#" -eq 0 ] || die "Usage: bash scripts/manage.sh ops internal-production repair-network"
       k8s_repair_kubeadm_endpoint
@@ -6137,7 +6191,7 @@ ops_internal_production() {
       k8s_down internal-shadow
       ;;
     *)
-      die "Usage: bash scripts/manage.sh ops internal-production plan|predeploy|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|repair-network|repair-cni|down"
+      die "Usage: bash scripts/manage.sh ops internal-production plan|predeploy|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|control-plane-preflight|reinit-kubeadm|repair-network|repair-cni|down"
       ;;
   esac
 }
@@ -6776,7 +6830,7 @@ case "$cmd" in
         fi
         ;;
       internal-production)
-        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|predeploy|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|reinit-kubeadm|repair-cni|down"
+        [ "$#" -ge 1 ] || die "Usage: bash scripts/manage.sh ops internal-production plan|predeploy|deploy [gateway-url]|apply|status|gateway-smoke [gateway-url]|cleanup-smoke-fixtures [--apply]|control-plane-preflight|reinit-kubeadm|repair-cni|down"
         ops_internal_production "$@"
         ;;
       *)

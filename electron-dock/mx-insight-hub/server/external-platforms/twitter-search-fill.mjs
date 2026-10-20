@@ -107,7 +107,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
     const excluded=delivery.twitterManualRetry
       ? (await store.validateTwitterManualRetry(dispatchLease.twitterManualRetry)).ancestorRequestIds : []
     await assertTwitterSearchAvailable({usageStore:gateway.usageStore,context,query:request.query,
-      excludeRequestIds:[delivery.usageRequestId,...excluded]})
+      excludeRequestIds:[delivery.usageRequestId,...excluded,...(delivery.acknowledgedRequestIds || [])]})
     await assertSearchDispatchAllowed?.()
     const shared=await store.providerState('rapidapi')
     const state=isHubRateLimitExempt(context)?internalCircuitState(gateway.usageStore,context,shared):shared

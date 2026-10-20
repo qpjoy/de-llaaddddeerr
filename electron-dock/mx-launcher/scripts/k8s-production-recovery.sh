@@ -1,5 +1,57 @@
 #!/usr/bin/env bash
 # Sourced by manage.sh. Only deploy enables local production recovery.
+# The host contract is installed by the storage migration, not by Launcher.
+# A dangling marker is still managed: never fall back to Docker's runtime.
+k8s_managed_runtime() {
+  [ -e /etc/mx-k8s-runtime/active.json ] || [ -L /etc/mx-k8s-runtime/active.json ]
+}
+
+k8s_managed_runtime_value() {
+  [ -f /usr/local/lib/mx-k8s-runtime/resolve.py ] \
+    || die "managed Kubernetes runtime resolver is missing; refusing the default Docker runtime"
+  command -v python3 >/dev/null 2>&1 || die "python3 is required for the managed Kubernetes runtime"
+  python3 /usr/local/lib/mx-k8s-runtime/resolve.py "$@" 2>/dev/null \
+    || die "cannot verify the managed Kubernetes runtime; no default runtime was selected"
+}
+
+k8s_containerd_address() {
+  local address
+  if k8s_managed_runtime; then
+    address="$(k8s_managed_runtime_value address)" || return 1
+    [ -z "${MX_K8S_CONTAINERD_ADDRESS:-}" ] || [ "$MX_K8S_CONTAINERD_ADDRESS" = "$address" ] \
+      || die "MX_K8S_CONTAINERD_ADDRESS does not match the managed Kubernetes runtime"
+    printf '%s\n' "$address"
+  else
+    printf '%s\n' "${MX_K8S_CONTAINERD_ADDRESS:-/run/containerd/containerd.sock}"
+  fi
+}
+
+k8s_containerd_root() {
+  if k8s_managed_runtime; then
+    # Offline resolution cannot validate an explicit override against a live
+    # socket. Recovery uses only the protected host descriptor.
+    if [ "${1:-}" = --allow-stopped-kubelet ] && [ -n "${MX_K8S_CONTAINERD_ADDRESS:-}" ]; then
+      die "unset MX_K8S_CONTAINERD_ADDRESS before stopped-service recovery; the managed host descriptor selects the runtime"
+    fi
+    if [ -n "${MX_K8S_CONTAINERD_ADDRESS:-}" ]; then k8s_containerd_address >/dev/null || return 1; fi
+    k8s_managed_runtime_value root "$@"
+  else
+    printf '%s\n' /var/lib/containerd
+  fi
+}
+
+k8s_containerd_service() {
+  if k8s_managed_runtime; then
+    if [ "${1:-}" = --allow-stopped-kubelet ] && [ -n "${MX_K8S_CONTAINERD_ADDRESS:-}" ]; then
+      die "unset MX_K8S_CONTAINERD_ADDRESS before stopped-service recovery; the managed host descriptor selects the runtime"
+    fi
+    if [ -n "${MX_K8S_CONTAINERD_ADDRESS:-}" ]; then k8s_containerd_address >/dev/null || return 1; fi
+    k8s_managed_runtime_value service "$@"
+  else
+    printf '%s\n' containerd
+  fi
+}
+
 k8s_production_recovery_state() {
   node "$SCRIPT_DIR/k8s-recovery-state.mjs" "$1" "$(k8s_namespace internal-shadow)" "$K8S_RECOVERY_NODE"
 }
@@ -18,8 +70,9 @@ k8s_prepare_production_host() {
   K8S_RECOVERY_NODE="$(k8s_detect_node_name)"
   [ -n "$K8S_RECOVERY_NODE" ] || die "cannot identify original Kubernetes node"
   k8s_production_recovery_state host
-  local service
-  for service in containerd kubelet docker; do
+  local service runtime_service
+  runtime_service="$(k8s_containerd_service --allow-stopped-kubelet)" || return 1
+  for service in "$runtime_service" kubelet docker; do
     if ! systemctl is-active --quiet "$service"; then
       say "start inactive host service: $service"
       timeout 60s systemctl start "$service" || die "cannot start $service; inspect systemctl status $service"
@@ -31,28 +84,37 @@ k8s_prepare_production_host() {
 
 k8s_resolve_containerd_address() {
   local discovered requested
-  discovered="$(node -e '
-    const fs = require("fs");
-    let endpoint = "";
-    // kubeadm instance configuration describes the CRI endpoint for this node.
-    for (const file of ["/var/lib/kubelet/config.yaml", "/var/lib/kubelet/instance-config.yaml"]) {
-      if (!fs.existsSync(file)) continue;
-      const match = fs.readFileSync(file, "utf8").match(/^\s*containerRuntimeEndpoint:\s*["\x27]?([^\s"\x27#]+)/m);
-      if (match) endpoint = match[1];
-    }
-    // Running command-line flags take precedence over files.
-    const { spawnSync } = require("child_process");
-    const pid = spawnSync("pgrep", ["-xo", "kubelet"], { encoding: "utf8" }).stdout.trim();
-    if (pid && fs.existsSync(`/proc/${pid}/cmdline`)) {
-      const args = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+  if k8s_managed_runtime; then
+    discovered="$(k8s_containerd_address)" || return 1
+  else
+    discovered="$(node -e '
+      const fs = require("fs");
+      const { spawnSync } = require("child_process");
+      let endpoint = "", config = "/var/lib/kubelet/config.yaml";
+      const result = spawnSync("systemctl", ["show", "kubelet", "--property=MainPID", "--value"], { encoding: "utf8" });
+      let pid = result.status === 0 ? (result.stdout || "").trim() : "";
+      if (!/^[1-9][0-9]*$/.test(pid)) pid = (spawnSync("pgrep", ["-xo", "kubelet"], { encoding: "utf8" }).stdout || "").trim();
+      const args = /^[1-9][0-9]*$/.test(pid) && fs.existsSync(`/proc/${pid}/cmdline`)
+        ? fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0") : [];
       for (let i = 0; i < args.length; i++) {
-        if (args[i].startsWith("--container-runtime-endpoint=")) endpoint = args[i].split("=")[1];
+        if (args[i].startsWith("--config=")) config = args[i].slice("--config=".length);
+        else if (args[i] === "--config") config = args[i + 1];
+        if (args[i].startsWith("--container-runtime-endpoint=")) endpoint = args[i].slice("--container-runtime-endpoint=".length);
         else if (args[i] === "--container-runtime-endpoint") endpoint = args[i + 1];
       }
-    }
-    if (!endpoint.startsWith("unix:///")) process.exit(1);
-    process.stdout.write(endpoint.slice("unix://".length));
-  ')" || die "cannot discover kubelet CRI endpoint; inspect kubelet configuration"
+      if (!endpoint) {
+        // The kubelet config is authoritative; kubeadm instance data is only a fallback.
+        for (const file of [config, "/var/lib/kubelet/instance-config.yaml"]) {
+          if (!file || !fs.existsSync(file)) continue;
+          const matches = [...fs.readFileSync(file, "utf8").matchAll(/^containerRuntimeEndpoint:[ \t]*["\x27]?([^\s"\x27#]+)/gm)];
+          if (matches.length > 1) process.exit(1);
+          if (matches.length) { endpoint = matches[0][1]; break; }
+        }
+      }
+      if (!endpoint || !endpoint.startsWith("unix:///")) process.exit(1);
+      process.stdout.write(endpoint.slice("unix://".length));
+    ')" || die "cannot discover kubelet CRI endpoint; inspect kubelet configuration"
+  fi
   requested="${MX_K8S_CONTAINERD_ADDRESS:-$discovered}"
   [ "$requested" = "$discovered" ] || die "MX_K8S_CONTAINERD_ADDRESS does not match kubelet CRI endpoint"
   [ -S "$requested" ] || die "kubelet runtime socket is unavailable: $requested"
@@ -72,11 +134,13 @@ k8s_require_production_node_ready() {
 }
 
 k8s_ctr() {
-  ctr --address "${MX_K8S_CONTAINERD_ADDRESS:-/run/containerd/containerd.sock}" -n k8s.io "$@"
+  local address
+  address="$(k8s_containerd_address)" || return 1
+  ctr --address "$address" -n k8s.io "$@"
 }
 
 k8s_verify_cri_image() {
-  local image="$1" expected observed attempt
+  local image="$1" expected observed attempt runtime_root
   [ "${K8S_PRODUCTION_RECOVERY:-0}" = 1 ] || return 0
   expected="$(docker image inspect "$image" --format '{{.Id}}')"
   for attempt in 1 2 3 4 5 6; do
@@ -91,7 +155,8 @@ k8s_verify_cri_image() {
     fi
     sleep 2
   done
-  df -h "${TMPDIR:-/tmp}" /var/lib/containerd || true
+  runtime_root="$(k8s_containerd_root)" || return 1
+  df -h "${TMPDIR:-/tmp}" "$runtime_root" || true
   die "CRI cannot see the imported Docker image: $image; inspect image GC/disk pressure and runtime endpoint; no images or volumes were deleted"
 }
 
@@ -102,15 +167,16 @@ k8s_apply_production_postgres() {
 }
 
 k8s_production_disk_preflight() {
-  local pressure used threshold
+  local pressure used threshold runtime_root
   pressure="$(kubectl --request-timeout=15s get node "$K8S_RECOVERY_NODE" -o jsonpath='{.status.conditions[?(@.type=="DiskPressure")].status}')"
   [ "$pressure" = False ] || die "node disk condition is $pressure; recover disk capacity before build (no automatic data cleanup)"
-  used="$(df -P /var/lib/containerd | awk 'NR==2 {gsub(/%/,"",$5); print $5}')"
+  runtime_root="$(k8s_containerd_root)" || return 1
+  used="$(df -P "$runtime_root" | awk 'NR==2 {gsub(/%/,"",$5); print $5}')"
   threshold="$(sed -n 's/^[[:space:]]*imageGCHighThresholdPercent:[[:space:]]*\([0-9][0-9]*\).*/\1/p' /var/lib/kubelet/config.yaml | head -n 1)"
   threshold="${threshold:-85}"
   if [ "${used:-100}" -ge "$threshold" ]; then
     say "WARNING: image filesystem ${used}% >= image GC threshold ${threshold}%; imported images may be reclaimed; deploy will verify CRI and retry missing images once"
-    df -h /var/lib/containerd "${TMPDIR:-/tmp}"
+    df -h "$runtime_root" "${TMPDIR:-/tmp}"
   fi
 }
 

@@ -100,6 +100,30 @@ bash scripts/manage.sh ops identity check
 
 若日志已经显示身份服务就绪和 API `successfully rolled out`，最后检查失败并不代表前面的部署被撤销。先运行 `ops identity check`：`configuration` 表示配置或 CA 挂载，`local-session` 表示 API 本机 SSO 状态，`discovery` 表示 API Pod 到 HTTPS 身份入口，`https-session` 表示 HTTPS 入口转发回管理 API，`pod-exec` 表示无法选中/执行就绪 Pod。不要用反复初始化密钥处理网络或检查错误。
 
+### 身份发布长时间等待（2026-10-19）
+
+跨项目现场、etcd 迁移后的实际状态、磁盘/进程证据与下一步排查统一见 [Internal 服务器故障交接记录](51-internal-server-storage-deploy-incident-2026-10-19.md)。该问题尚未结案；本节保留身份发布的具体实现说明。
+
+统一入口的每 15 秒提示是整次 Launcher 部署的累计时间。旧版 `identity-deploy.mjs` 捕获了 `kubectl rollout status` 的输出，导致生成 Internal Nginx 回源配置后看起来没有进展。该配置生成只写本机文件，不 reload Nginx，也不等待外部网关。
+
+目前身份发布会逐项显示资源应用、阶段完成／未确认完成及耗时，并直接显示内网／公网身份 Deployment 的 rollout 进度。Secret 读取／写入及原始 stderr 仍不打印。原顺序保持：应用运行时 Secret、CA、内网和公网身份 Deployment；已配置公网入口时先等公网就绪，再等内网就绪，最后应用管理员 SSO Secret。两个 rollout 各等待 `180s`，失败停止后续 API 发布，不自动重试、回滚或修改身份档案。
+
+超时后 Kubernetes 可能继续完成已提交的更新；随后看到身份 Pod Ready，不代表失败的部署脚本已继续运行或主 API 已更新。先在同一目标集群只读检查：
+
+```bash
+kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=15s -n mx-internal-shadow get deployment mx-identity mx-identity-public mx-launcher-internal -o wide
+kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=15s -n mx-internal-shadow get pods -l 'app in (mx-identity,mx-identity-public)' -o wide
+kubectl --kubeconfig=/etc/kubernetes/admin.conf --request-timeout=15s -n mx-internal-shadow get events --field-selector type=Warning --sort-by=.metadata.creationTimestamp
+```
+
+本次操作者提供的统一入口记录为 `child_failed`／退出码 `1`／耗时 `528.68s`；后续两个身份 Pod 已 Ready、迁移 Job Completed，但主 API Pod 仍是此前实例。具体失败命令尚无原窗口末尾日志确认。同期 PG 的 3 秒探针和主 API readiness 曾超时；随后两个 1 秒磁盘采样中，`nvme0n1` 写等待分别为 `1742.62ms`、`426.77ms`，平均队列 `399.06`、`251.80`，系统盘 `nvme1n1` 写等待仅 `0.57ms`、`0.23ms`。这确认采样时数据盘存在严重延迟，不能单凭它判定设备损坏或某一个进程是根因。`iostat` 首份报告是开机以来的平均值，后续才是区间值；SSD 的 `%util` 不能单独代表性能上限。[iostat 字段说明](https://man7.org/linux/man-pages/man1/iostat.1.html)
+
+后续内核回执确认，在本次部署的主机本地时间 `20:03:46–20:12:35` 内，`nvme0` 于 `20:06:21–20:06:29` 连续报告多个队列的 `I/O timeout, aborting`。这将问题进一步定位到设备 I/O 路径；不是单纯的进度显示或正常发布等待。`20:20` 的短时 `pidstat` 采样主要写入者为 PostgreSQL：PID `1504395` 平均约 `6831 KiB/s`，PID `3477454` 一次达到 `26880 KiB/s`；etcd 平均约 `33 KiB/s`。进程统计与先前设备采样不在同一时刻，不能按数值相加归因；PG 所属项目须通过 cgroup／容器身份核实，不能依据 UID 或进程名停库。设备健康、温度和进程归属继续待核验，尚不能确定 SSD 介质、固件、驱动或链路中的哪一项是底层原因。
+
+后续 cgroup／容器回执已确认：`1504395` 属于 Docker `mx_data-postgres-1`，`3847049`／`3847066` 属于 Docker `delta_59202-postgres-1`，`916024` 属于宿主机 `postgresql-16.service`。上述 Docker ID 与 Launcher／mx-common／Pay／Rig 的 containerd PG ID 不同；`3477454` 已退出，归属未知。历史 [NAS 部署身份记录](../../mx-base/mx-static/nas_docs/evidence/2026-09-22-live-findings.md#真实部署身份) 将前两者对应到两套 po-infra／Delta Compose 安装，媒体迁移不等于数据库迁移；当前 PG 卷的实际设备仍需检查挂载，不根据 Docker 根目录推定。新的 NVMe SMART 回执为 `59°C`、Critical Warning／Media Errors／Error Log Entries 均 `0`、Percentage Used `2%`、历史 Warning Temperature Time `5` 分钟、T1/T2 热管理计数和时间均 `0`。这没有证明当前热降频或介质损坏，也不抵消同一部署窗口的内核 I/O 超时。下一步应定位这些库的上游后台任务及存储挂载，限定减载范围，保留数据库和前台服务；没有执行暂停、停库、迁移或设备参数修改。
+
+迁移 etcd 只隔离其存储，没有搬走仍在数据盘上的 PostgreSQL、容器运行时等负载。进度补丁不修复磁盘延迟，也不要求为了生效立即重新部署；后续执行脚本时生效。先定位写入来源及近期内核设备错误，再决定减载或维护；不要用跳过身份检查、放大超时或重复发布来掩盖问题。
+
 ### OpenSSL 1.1.1 初次 CA 生成失败的恢复
 
 若旧版本首次部署在 `ensure configured identity service` 报“身份 TLS 证书/密钥不匹配”，而诊断显示仅 `caValid: false`，其余四项为 `true`，可能是旧生成命令与主机 `openssl.cnf` 的 `x509_extensions` 叠加，形成重复的 `basicConstraints`。已用原生成代码 + OpenSSL 1.1.1w + Linux 风格默认配置复现这一问题，Node 内置 OpenSSL 3.5.4 会判定该 CA 无效；不是密码或私钥配错。[OpenSSL 1.1.1 的扩展合并实现](https://github.com/openssl/openssl/blob/OpenSSL_1_1_1w/apps/req.c#L715-L729)。

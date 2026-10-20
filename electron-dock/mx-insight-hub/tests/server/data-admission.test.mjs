@@ -214,7 +214,7 @@ test('route classification and configuration bound data work without gating iden
   assert.equal(config.dataAdmission.maxWaitMs, 30000)
   assert.equal(loadConfig({ ...env, MX_INSIGHT_DATA_API_ACQUISITION_CONCURRENCY: '8' }).dataAdmission.acquisitionConcurrency, 8)
   assert.deepEqual(config.ingestWorker, { concurrency: 1, postBatchDelayMs: 100 })
-  assert.deepEqual(config.projectorWorker, { postBatchDelayMs: 250 })
+  assert.deepEqual(config.projectorWorker, { postBatchDelayMs: 250, synchronousCommit: 'off' })
   for (const [name, bad] of [
     ['MX_INSIGHT_DATA_API_READ_CONCURRENCY', '33'], ['MX_INSIGHT_DATA_API_WAIT_MS', '30001'],
     ['MX_INSIGHT_DATA_API_MAX_PENDING', '0'], ['MX_INSIGHT_DATA_API_MAX_PENDING', 'NaN'],

@@ -112,7 +112,7 @@ bash scripts/manage.sh ops internal-production enroll
 
 - `context/kubeconfig`：恢复上次 deploy 使用的 `KUBECONFIG`；不要修改已固定的 context/cluster UID 来绕过检查。
 - `Forbidden/Unauthorized`：检查当前 Kubernetes 身份对报错 namespace/资源的权限或凭据。脚本不会扩大 RBAC。
-- 部署锁 `AlreadyExists`：先检查正在运行的 deploy、迁移 Job、enroll；不自动删除锁。迁移终止未确认时，旧 deploy 也会有意保留此锁。
+- enroll 的部署锁 `AlreadyExists`：先检查正在运行的 deploy、迁移 Job、enroll；enroll 不自动删除锁。迁移终止未确认时，deploy 也会有意保留此锁。普通 deploy 对已完成操作留下的锁支持下述有限自动恢复。
 - 同步 Secret `Conflict`：等待其他修改任务完成后重试，仍复用现有凭据。
 - 同时出现原始错误和“解锁未确认”：两条都保留；先检查锁状态，不能把 Secret 同步成功当作整个 enroll 成功。
 
@@ -131,9 +131,37 @@ bash scripts/manage.sh ops internal-production recover-lock --confirm-idle
 bash scripts/manage.sh ops internal-production enroll
 ```
 
-恢复会重新做检查，并以检查到的 UID **和 resourceVersion** 为删除前提；锁被其他任务修改或重建时拒绝删除，没有强制删除回退。确认参数不能绕过活跃进程/Job/Pod 检查。不会停止迁移、重启应用或改变身份数据。普通 deploy/enroll 遇到已有锁仍停止，不自动夺锁。
+恢复会重新做检查，并以检查到的 UID **和 resourceVersion** 为删除前提；锁被其他任务修改或重建时拒绝删除，没有强制删除回退。确认参数不能绕过活跃进程/Job/Pod 检查。不会停止迁移、重启应用或改变身份数据。enroll 继续使用显式恢复；普通 deploy 仅自动恢复满足下面全部条件的锁。
 
-原 deploy 在解锁前打印 `completed`，容易让解锁失败看起来像完整成功；现在仅在解锁完成后打印成功。意外终止进程、Kubernetes 连接中断等仍可能留下锁，应使用上述检查流程。
+原 deploy 在解锁前打印 `completed`，容易让解锁失败看起来像完整成功；现在仅在解锁完成后打印成功。意外终止进程、Kubernetes 连接中断等仍可能留下锁；未满足自动恢复条件时使用上述检查流程。
+
+### deploy 自动恢复部署锁（2026-10-19）
+
+部署锁是 `mx-harbor/mx-harbor-deploy-lock` ConfigMap，用来串行化 DataPort 的 deploy/migrate/enroll，避免并行迁移、应用发布与接入 Secret 更新。它不是数据库表锁，也不会让已经运行的 DataPort 停止服务。
+
+新 deploy 创建锁时记录 `recoveryVersion=1`、`recoveryState=active`。只有镜像导入、迁移、rollout 和 `/ready` 全部成功后，才以当前 UID/resourceVersion 校验更新为 `releasable`，随后正常删除锁。临时目录在取得锁之前创建，避免 TMPDIR 不可写或空间不足直接留下锁。
+
+下次 deploy 收到明确的 `AlreadyExists` 服务端响应后，自动恢复须同时满足：
+
+- 锁属于 `action=deploy`，且存在上述版本和 `releasable` 完成标记；
+- ownerHost 是当前固定节点，ownerPid 已退出；PID 复用仍视为存活并拒绝；
+- 除当前部署命令自身外，没有 DataPort 操作进程或归属不明的相关进程；
+- 相关迁移 Job 已终止、active 为 0，迁移 Pod 全部 Succeeded/Failed；
+- 按检查到的 UID/resourceVersion 删除成功，确认旧锁消失，再获取锁一次。若竞争者已取得新锁，停止本次部署并保留新锁。
+
+因此，**已完成部署但清理锁失败**可自动恢复；中途强杀、失败或状态未知、缺少完成标记的旧锁、enroll 锁、仍有任务的锁不会自动删除。进程退出并不证明它启动的 Docker/kubectl 子进程或已提交的 API 操作结束，因此不按锁龄、超时或单独的 PID 状态强行解锁。部署失败也不会自动重跑迁移或反复重试。
+
+同步宿主脚本后，原统一命令保持不变，在 `electron-dock` 目录运行：
+
+```bash
+PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-dataport
+```
+
+解锁功能只操作本项目的部署锁；后续正常 deploy 仍会执行 DataPort 迁移和单副本发布。没有新增 Launcher/Auth、Pay、etcd 或用户网络的重启操作。
+
+本次回执中的旧锁创建于 `2026-10-19T05:43:48Z`，持有者和迁移任务已结束，操作者已用显式恢复释放。现有资料不能确定原进程在哪一步退出或为何未清理。主机此前确有 NVMe I/O timeout，可能通过控制面请求失败或进程中断间接导致留锁；不能据此认定它就是这把锁的成因。自动恢复锁不修复磁盘 I/O 异常。
+
+本次本地验证：恢复策略/接入核心及 CLI 29 项、部署集成 25 项，共 54 项通过；覆盖两种明确的 kubectl AlreadyExists 格式、旧锁/活跃任务拒绝、竞争锁保护、失败不写完成标记及临时目录清理。脚本语法与 diff 检查通过。完整前端构建因本地缺少 `xlsx`、`exceljs` 依赖及其派生类型错误未通过；本次未改前端代码或安装依赖。新逻辑尚未在生产运行，未操作真实集群或业务数据。
 
 锁恢复增量回归：恢复策略、CLI、接入核心和部署共 33 项通过；另用真实 kubectl 1.32.2 与本地隔离 HTTP 服务确认 DELETE 请求携带 UID/resourceVersion 前提。未连接生产集群或清理生产锁。
 

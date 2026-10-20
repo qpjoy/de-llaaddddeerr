@@ -242,9 +242,10 @@ async function publicDataImage(apiKey, path, query, { signal } = {}) {
 // credential. The data-product workbench keeps the value in component memory
 // and calls the same stable public contract used by external clients.
 export const publicDataApi = {
-  twitterRetry: (apiKey, body, idempotencyKey, retryOfRequestId) => publicDataRequest(apiKey, '/api/v1/data/search', {
-    method: 'POST', body, idempotencyKey, retryOfRequestId,
-  }),
+  twitterRetry: (apiKey, body, idempotencyKey, retryOfRequestId, path = '/api/v1/data/search') => {
+    if (!['/api/v1/data/search', '/api/v2/data/search'].includes(path)) throw new Error('Unsupported Twitter retry path')
+    return publicDataRequest(apiKey, path, { method: 'POST', body, idempotencyKey, retryOfRequestId })
+  },
   productRequest: (key, input, idempotencyKey) => publicDataRequest(key, input.path, { method: input.method, body: input.body, idempotencyKey }),
   servicePricing: (key, path) => publicDataRequest(key, `/api/v1/data/services/pricing?path=${encodeURIComponent(path)}`),
   newsSources: (key, signal) => publicDataRequest(key, '/api/v1/data/news/sources', { signal }),

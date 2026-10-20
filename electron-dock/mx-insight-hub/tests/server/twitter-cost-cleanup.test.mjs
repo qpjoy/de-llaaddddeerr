@@ -45,7 +45,10 @@ test('ordinary cleanup retains strict blocking cost release for each provider',a
     const f=fixture({providerKey})
     assert.equal(await f.store.releaseProviderCostWorkflow({...f.input,bestEffortRelease}),true)
     assert.equal(f.queries[1].sql,'SELECT pg_advisory_xact_lock(hashtext($1))')
-    assert.ok(f.queries.every(row=>!row.sql.includes('SET LOCAL')&&!row.sql.includes('pg_try_advisory')))
+    // Strict release still waits for the lock with no timeouts; it only stops
+    // holding that lock across the WAL flush (see releaseProviderCostWorkflow).
+    assert.equal(f.queries[2].sql,'SET LOCAL synchronous_commit TO off')
+    assert.ok(f.queries.every(row=>!/SET LOCAL (lock|statement)_timeout/.test(row.sql)&&!row.sql.includes('pg_try_advisory')))
   }
 })
 

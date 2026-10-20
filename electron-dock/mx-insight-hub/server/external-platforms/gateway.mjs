@@ -885,10 +885,12 @@ export class ExternalPlatformGateway {
       replayWindowMs: dataSearch?.replayWindowMs,
       dataSearch: Boolean(dataSearch), nativeForwarding: native, billingUnknown: !native,
       twitterManualRetry: platform === 'twitter' && Boolean(dataSearch),
+      acknowledgedRequestIds: platform === 'twitter' && dataSearch ? input.acknowledgedRequestIds || [] : [],
       reservation,
       normalize: ({ policy }) => {
         const historicalCodec = createNightAllCompatibilityCursorCodec(this.apiKeyPepper, context.consumer.id)
-        const options = { instagramProvider: justOneInstagram ? 'justone' : 'tikhub', instagramStrategy: Boolean(strategy), historicalCodec }
+        const options = { instagramProvider: justOneInstagram ? 'justone' : 'tikhub', instagramStrategy: Boolean(strategy), historicalCodec,
+          twitterSearchParameters: input.twitterSearchParameters }
         request = dataSearch ? normalizeHubDataSearch(normalized, codec, dataSearch.resultType,
           historicalCodec, options) : normalizeRawSearch(normalized, codec, options)
         if (request.pageSize > policy.maxPageSize) throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
@@ -1325,11 +1327,12 @@ export class ExternalPlatformGateway {
       apiKeyId: context.apiKey.id,
       platform: authorizationPlatform,
       meterKey: plan.meterKey || plan.operation,
-      acquisitionRequest: plan.searchProvider ? { ...acquisitionRequestSnapshot({ method: 'POST', path, body }),
+      acquisitionRequest: plan.searchProvider || normalized.twitterSearchParameters ? { ...acquisitionRequestSnapshot({ method: 'POST', path, body }),
+        ...(normalized.twitterSearchParameters ? { twitterSearchParameters: normalized.twitterSearchParameters } : {}),
         // Trusted internal route evidence is recorded with the reservation,
         // before credentials, admission or HTTP. It is not a caller field and
         // does not alter the original fingerprint or historical replay body.
-        searchProvider: plan.searchProvider, searchContractVersion: plan.searchContractVersion,
+        ...(plan.searchProvider ? { searchProvider: plan.searchProvider, searchContractVersion: plan.searchContractVersion } : {}),
       } : acquisitionRequestSnapshot({ method: 'POST', path, body }),
       requiredAuthorizationScopes: [
         { type: 'platform', key: authorizationPlatform },
@@ -1362,6 +1365,7 @@ export class ExternalPlatformGateway {
       usageRequestId: reservation.request.id,
       operation: plan.operation,
       fingerprint: requestFingerprint,
+      ...(plan.acknowledgedRequestIds?.length ? { acknowledgedRequestIds:plan.acknowledgedRequestIds } : {}),
     }
     if (plan.twitterManualRetry && validatedRetryOfRequestId && reservation.kind !== 'reserved') {
       const owner = await this.platformStore.twitterManualRetryOwnerFor(validatedRetryOfRequestId)

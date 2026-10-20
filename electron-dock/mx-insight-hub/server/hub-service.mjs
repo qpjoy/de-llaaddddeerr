@@ -177,6 +177,7 @@ import { acquisitionRequestSnapshot } from './acquisitions/request-snapshot.mjs'
 import { canRouteRawSearch } from './contracts/raw-search.mjs'
 import { canRouteDataSearch } from './contracts/hub-data-search.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
+import { normalizeTwitterSearchParameters } from './contracts/twitter-search-parameters.mjs'
 import { normalizeSearchContent } from './contracts/search-content.mjs'
 import {
   capNightAllCompatibilityTraversal,
@@ -602,6 +603,7 @@ export class HubService {
     externalWechatSearch = null,
     externalRawSearch = null,
     externalDataSearch = null,
+    twitterRetryStore = null,
     externalSocialSearchEnabled = false,
     externalSocialSearchCanaryConsumerIds = [],
     externalSocialUserActivity = null,
@@ -636,6 +638,7 @@ export class HubService {
     this.externalWechatSearch = externalWechatSearch
     this.externalRawSearch = externalRawSearch
     this.externalDataSearch = externalDataSearch
+    this.twitterRetryStore = twitterRetryStore
     this.externalSocialSearchEnabled = typeof externalSocialSearchEnabled === 'function'
       ? externalSocialSearchEnabled : externalSocialSearchEnabled === true
     this.externalSocialSearchCanaryConsumerIds = new Set(
@@ -4810,7 +4813,7 @@ export class HubService {
     if (input.path === DATA_SEARCH_V2_PATH) {
       const body = normalizeDataSearchV2(input.body, canonicalPlatform)
       const idempotencyKey = requiredIdempotencyKey(input.idempotencyKey)
-      assert(input.retryOfRequestId == null, 400, 'uncertain_retry_not_supported', 'v2 does not allow an unknown-result retry override')
+      assert(input.retryOfRequestId == null || body.platform === 'twitter', 400, 'uncertain_retry_not_supported', 'Explicit v2 retry is only supported for Twitter')
       assert(!isTestApiKey(context.apiKey), 403, 'test_key_not_supported', 'v2 acquisition requires a Live API key')
       assert((await this.#effectivePlatformGrants(context)).includes(body.platform), 403, 'platform_not_granted', 'Platform is not granted')
       if (body.platform === 'xiaohongshu') assert((await this.#effectiveCapabilityGrants(context)).includes(XIAOHONGSHU_SEARCH_OPERATION),
@@ -4818,7 +4821,8 @@ export class HubService {
       assert(body.pageSize <= (await this.#effectivePlatformPolicy(context, body.platform)).maxPageSize,
         400, 'page_size_exceeded', 'pageSize exceeds current entitlement')
       return executeDataSearchV2({ store: this.store, context, body, idempotencyKey, pepper: this.apiKeyPepper,
-        execute: upstream => this.#searchLegacy(context, { ...input, body: upstream, idempotencyKey, path: DATA_SEARCH_V1_PATH }) })
+        retryOfRequestId:input.retryOfRequestId,retryStore:this.twitterRetryStore,
+        execute: (upstream, retry) => this.#searchLegacy(context, { ...input, ...retry, body: upstream, idempotencyKey, path: DATA_SEARCH_V1_PATH }) })
     }
     const platform = typeof input.body?.platform === 'string' ? canonicalPlatform(input.body.platform) : null
     if (input.path === DATA_SEARCH_V1_PATH && typeof input.body?.cursor === 'string' && input.body.cursor.startsWith('mxds2.')) {
@@ -4832,7 +4836,13 @@ export class HubService {
     return this.#searchLegacy(context, input)
   }
 
-  async #searchLegacy(context, { body, idempotencyKey, path, liveOnly = false, responseFormat = 'data', signal, retryOfRequestId }) {
+  async twitterSearchRecovery(context, requestId) {
+    assert(typeof requestId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(requestId),
+      400,'invalid_request_id','A request UUID is required')
+    return new SearchProtocolStore(this.store).twitterRecovery(context,requestId,{apiKeyPepper:this.apiKeyPepper})
+  }
+
+  async #searchLegacy(context, { body, idempotencyKey, path, liveOnly = false, responseFormat = 'data', signal, retryOfRequestId, acknowledgedRequestIds = [] }) {
     const dedicatedTelegramSearch = path === '/api/v1/data/telegram/search'
     if (retryOfRequestId != null) {
       assert(path === '/api/v1/data/search' && responseFormat === 'data'
@@ -4856,7 +4866,7 @@ export class HubService {
     const requestedPlatform = dedicatedTelegramSearch ? 'telegram' : canonicalPlatform(body.platform)
     const facebookSearch = requestedPlatform === 'facebook'
     const directContentSearch = Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, requestedPlatform)
-    const contentSearchParams = directContentSearch && TIKHUB_CONTENT_SEARCH_RECIPES[requestedPlatform].publicParams !== false
+    const contentSearchParams = requestedPlatform === 'twitter' || directContentSearch && TIKHUB_CONTENT_SEARCH_RECIPES[requestedPlatform].publicParams !== false
     const unsupportedFields = dedicatedTelegramSearch
       ? []
       : Object.keys(body).filter((field) => !PUBLIC_SEARCH_FIELDS.has(field) && !((facebookSearch || contentSearchParams) && field === 'params'))
@@ -4916,7 +4926,8 @@ export class HubService {
       query,
       pageSize,
       ...(cursor ? { cursor } : {}),
-      ...((facebookSearch || contentSearchParams) && body.params !== undefined ? { params: body.params } : {}),
+      ...((facebookSearch || contentSearchParams) && body.params !== undefined
+        ? { params: platform === 'twitter' ? normalizeTwitterSearchParameters(body.params) : body.params } : {}),
     }
     const resultType = resolveResultType(body)
     let fingerprintQuery = telegramQuery ?? upstreamBody
@@ -4943,7 +4954,7 @@ export class HubService {
     }
     if (path === '/api/v1/data/search' && this.externalDataSearch && canRouteDataSearch(upstreamBody)) {
       return this.externalDataSearch(context, { body, normalized: upstreamBody, idempotencyKey,
-        ...(retryOfRequestId != null ? { retryOfRequestId } : {}),
+        ...(retryOfRequestId != null ? { retryOfRequestId } : {}), acknowledgedRequestIds,
         ...(signal ? { signal } : {}),
         dataSearch: { resultType, replayWindowMs: replayWindowFor(resultType) } })
     }

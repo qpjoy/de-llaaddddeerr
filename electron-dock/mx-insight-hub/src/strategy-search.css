@@ -54,6 +54,9 @@
 .mih-strategy-platform-mark.is-reddit, .mih-strategy-platform-mark.is-kuaishou { background: #d66430; color: #fff; }
 .mih-strategy-query-row { display: grid; grid-template-columns: minmax(0, 1fr) 140px auto; align-items: end; gap: 14px; }
 .mih-strategy-query-row > .qp-button { min-height: 40px; }
+.mih-strategy-twitter-options legend { font-size: 13px; color: var(--qp-text-2); }
+.mih-strategy-twitter-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 12px; }
+.mih-strategy-twitter-filters { grid-column: 1 / -1; }
 .mih-strategy-search-note { font-size: 12px; color: var(--qp-text-3); line-height: 1.7; overflow-wrap: anywhere; }
 .mih-strategy-search-note a { margin-left: 6px; }
 .mih-strategy-repeat { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; font-size: 12px; color: var(--qp-text-2); }
@@ -92,6 +95,7 @@
   .mih-strategy-platform-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mih-strategy-query-row { grid-template-columns: minmax(0, 1fr) 120px; }
   .mih-strategy-query-row > .qp-button { grid-column: 1 / -1; }
+  .mih-strategy-twitter-fields { grid-template-columns: minmax(0, 1fr); }
   .mih-strategy-composer, .mih-strategy-results, .mih-strategy-usage { padding: 18px; }
   .mih-strategy-result-card { flex-direction: column; }
   .mih-strategy-result-card > img { width: 100%; max-height: 220px; }

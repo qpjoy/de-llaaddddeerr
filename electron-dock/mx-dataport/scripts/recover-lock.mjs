@@ -62,12 +62,13 @@ export function harborProcesses(
   return matches;
 }
 
-// Explicit recovery only. An old lock has no owner evidence, so it requires an
-// operator assertion in addition to the independent Job/Pod checks. Never use a TTL.
+// Automatic recovery is limited to a deploy that explicitly finished its work
+// before cleanup. A dead parent alone cannot rule out orphaned work. Never use a TTL.
 export function recoverLock({
   get,
   remove,
   confirmIdle = false,
+  automatic = false,
   alive = processAlive,
   host = hostname(),
   processes,
@@ -79,6 +80,17 @@ export function recoverLock({
   if (!uid || !resourceVersion)
     throw Error("部署锁缺少 UID/resourceVersion，停止恢复。");
   const { ownerHost, ownerPid } = lock.data ?? {};
+  if (
+    automatic &&
+    (lock.data?.action !== "deploy" ||
+      lock.data?.recoveryVersion !== "1" ||
+      lock.data?.recoveryState !== "releasable" ||
+      ownerHost === undefined ||
+      ownerPid === undefined)
+  )
+    throw Error(
+      "部署锁没有已完成操作的自动释放凭据；请先运行 recover-lock 只读检查，不自动删除活动或旧版锁。",
+    );
   report({
     action: lock.data?.action,
     created: lock.metadata.creationTimestamp,
@@ -145,7 +157,7 @@ export function recoverLock({
     )
   )
     throw Error("仍有未结束的 DataPort 迁移 Pod，停止恢复；先确认迁移已终止。");
-  if (!confirmIdle) return "checked";
+  if (!confirmIdle && !automatic) return "checked";
   // A concurrent edit or delete/recreate must fail the server-side preconditions.
   remove({
     apiVersion: "v1",
@@ -156,6 +168,70 @@ export function recoverLock({
   if (remaining?.metadata?.uid === uid)
     throw Error("部署锁仍在删除中，停止重试接入；请检查锁的 finalizers。");
   return remaining ? "replaced" : "released";
+}
+
+// The caller has already checked the pinned cluster/node and excludes only its
+// own process from the process scan. Other concurrent entrants still block.
+export function acquireDeployLock({
+  create,
+  get,
+  remove,
+  processes,
+  report = () => {},
+  alive,
+  host,
+}) {
+  try {
+    return create();
+  } catch (error) {
+    if (error?.lockAlreadyExists !== true) throw error;
+  }
+  report("发现已有部署锁，检查是否是已完成操作留下的可释放锁。");
+  const result = recoverLock({
+    get,
+    remove,
+    processes,
+    alive,
+    host,
+    automatic: true,
+  });
+  if (result === "replaced")
+    throw Error("原锁已释放，但其他任务已取得新锁；停止本次部署。");
+  report("部署锁检查通过；重新获取部署锁一次。");
+  // A competitor can win after the check. Never delete its lock or retry again.
+  return create();
+}
+
+// Call only after confirmed completion. Do not mark interrupted work or an
+// unconfirmed mutating request releasable, even when the owner is about to exit.
+export function markDeployLockReleasable({
+  lock,
+  get,
+  patch,
+  host = hostname(),
+  pid = process.pid,
+}) {
+  const current = get(["get", "configmap", lockName, "--ignore-not-found"]);
+  if (
+    !lock?.metadata?.uid ||
+    current?.metadata?.uid !== lock.metadata.uid ||
+    !current.metadata.resourceVersion ||
+    current.data?.action !== "deploy" ||
+    current.data?.recoveryVersion !== "1" ||
+    current.data?.ownerHost !== host ||
+    current.data?.ownerPid !== String(pid) ||
+    !["active", "releasable"].includes(current.data?.recoveryState)
+  )
+    throw Error("部署锁身份或状态已变化，停止标记自动释放。");
+  return patch([
+    { op: "test", path: "/metadata/uid", value: current.metadata.uid },
+    {
+      op: "test",
+      path: "/metadata/resourceVersion",
+      value: current.metadata.resourceVersion,
+    },
+    { op: "replace", path: "/data/recoveryState", value: "releasable" },
+  ]);
 }
 
 if (
@@ -234,7 +310,7 @@ if (
       result === "absent"
         ? "DataPort: 无部署锁，可以重新运行 enroll/deploy。"
         : result === "checked"
-          ? "DataPort: 只读检查通过，未修改部署锁。确认所有 DataPort deploy/migrate/enroll 已退出后，可运行 recover-lock --confirm-idle；旧锁缺少持有者记录，不能仅凭锁龄判断。"
+          ? "DataPort: 只读检查通过，未修改部署锁。确认所有 DataPort deploy/migrate/enroll 已退出后，可运行 recover-lock --confirm-idle；旧版锁可能缺少持有者记录，不能仅凭锁龄判断。"
           : result === "replaced"
             ? "DataPort: 原部署锁已释放，但其他任务已取得新锁；请等待该任务结束。"
             : "DataPort: 遗留部署锁已释放，可以重新运行 enroll/deploy。",

@@ -175,3 +175,71 @@ test('account composer follows a short page cursor with a new identity and keeps
     assert.notEqual(sent[2].idem, sent[0].idem)
   } finally { environment.access = previousAccess }
 })
+
+test('Twitter parameter edits are explicit intents and next page retains the exact successful parameters', async () => {
+  const { StrategySearchExperience } = await view
+  const previousAccess = environment.access
+  environment.access = { platforms: ['twitter'], capabilities: [] }
+  environment.identity = 'twitter-key'
+  const cell = createStrategySearchCell('twitter'), session = new Map([['twitter-key', cell]]), sent = []
+  cell.update({ form: { ...cell.getSnapshot().form, query: '关键词' } })
+  environment.send = async (_key, input, idem) => {
+    sent.push({ input, idem })
+    return { payload: { data: { platform: 'twitter', items: [], pageInfo: { hasMore: true, nextCursor: 'mxds1.exact-next' } } }, evidence: { requestId: `twitter-${sent.length}` } }
+  }
+  const render = () => StrategySearchExperience({ strategySession: session })
+  const select = (name, value) => nodes(render()).find(node => node.props?.label === name).props.onChange(value)
+  const submit = async () => { nodes(render()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} }); await flush() }
+  try {
+    assert.equal(nodes(render()).find(node => node.props?.label === '内容类别').props.value, 'Latest')
+    assert.match(label(render()), /People 返回账号/)
+    await submit()
+    assert.deepEqual(sent[0].input.body.params, { category: 'Latest' })
+    await submit()
+    assert.equal(sent[1].idem, sent[0].idem, 'same conditions explicitly replay the same intent')
+    select('内容类别', 'Photos')
+    select('包含时间戳', 'false')
+    nodes(render()).find(node => node.type === 'input' && node.props.maxLength === 2048).props.onChange({ target: { value: 'native-filter' } })
+    assert.equal(sent.length, 2, 'editing never starts a new paid request')
+    assert.equal(button(render(), '读取下一页'), undefined, 'new conditions cannot follow the previous result cursor')
+    await submit()
+    assert.deepEqual(sent[2].input.body.params, { category: 'Photos', includeTimestamp: false, filters: 'native-filter' })
+    assert.notEqual(sent[2].idem, sent[0].idem)
+    await button(render(), '读取下一页').props.onClick()
+    assert.deepEqual(sent[3].input.body, { ...sent[2].input.body, cursor: 'mxds1.exact-next' })
+    assert.notEqual(sent[3].idem, sent[2].idem)
+  } finally { environment.access = previousAccess }
+})
+
+test('Twitter admission failure retries the same intent only on click and unknown outcomes lock the new controls', async () => {
+  const { StrategySearchExperience } = await view
+  const previousAccess = environment.access
+  environment.access = { platforms: ['twitter', 'bilibili'], capabilities: [] }
+  environment.identity = 'twitter-key'
+  const cell = createStrategySearchCell('twitter'), session = new Map([['twitter-key', cell]]), sent = []
+  cell.update({ form: { ...cell.getSnapshot().form, query: '关键词' } })
+  environment.send = async (_key, input, idem) => {
+    sent.push({ input, idem })
+    if (sent.length === 1) throw Object.assign(new Error('admission unavailable'), {
+      code: 'usage_admission_unavailable', responseBody: { error: { code: 'usage_admission_unavailable' } },
+    })
+    throw unknown()
+  }
+  const render = () => StrategySearchExperience({ strategySession: session })
+  const submit = async () => { nodes(render()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} }); await flush() }
+  try {
+    await submit()
+    assert.equal(sent.length, 1)
+    assert.equal(searchButton(render()).props.disabled, false)
+    await submit()
+    assert.equal(sent[1].idem, sent[0].idem)
+    assert.equal(nodes(render()).find(node => node.props?.label === '内容类别').props.disabled, true)
+    assert.equal(nodes(render()).find(node => node.props?.label === '包含时间戳').props.disabled, true)
+    button(render(), '哔哩哔哩').props.onClick()
+    button(render(), 'Twitter / X').props.onClick()
+    assert.deepEqual(cell.getSnapshot().form.twitterParams, { category: 'Latest' })
+    assert.equal(searchButton(render()).props.disabled, true)
+    await submit()
+    assert.equal(sent.length, 2, 'unknown remains locked after platform navigation and programmatic submission')
+  } finally { environment.access = previousAccess }
+})

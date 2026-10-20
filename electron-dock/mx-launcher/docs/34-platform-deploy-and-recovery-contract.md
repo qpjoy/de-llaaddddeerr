@@ -1,6 +1,8 @@
 # MX 总部署命令与重启换机恢复设计
 
-日期：2026-10-02。状态：设计规格，未实现总部署入口、未运行部署。配套：[平台架构与统一身份](33-mx-platform-identity-and-sustainable-architecture.md)。
+日期：2026-10-02；2026-10-19 补充当前实现范围。状态：本文的安装清单、多机编排与换机恢复仍为设计规格；已有小范围统一入口，未运行生产部署。配套：[平台架构与统一身份](33-mx-platform-identity-and-sustainable-architecture.md)。
+
+2026-10-19 已实现 `electron-dock/scripts/manage.sh`：逐项目调用 Launcher、Hub、DataPort、Device、Pay、Rig 的原部署入口，统一 `PROXY` 构建代理参数，提供离线命令计划、当前集群只读查询、同机同用户部署锁与退出结果记录。mx-common 仅查询，etcd 仅转交 mx-move status；原项目入口保留。它不加载统一安装清单、不绑定所有产品的保留目标、不执行全量部署或自动恢复。用法和具体边界见 [electron-dock README](../../README.md)。下文 `mx-platform`、安装清单、release lock 和换机恢复接口仍待实现，不能当作当前可执行能力。
 
 目标是让操作者在完成一次安装配置后，通过一个总 `deploy` 命令，将已选择的 MX 子系统恢复或收敛到确定版本。子系统继续处理自己的环境、数据库迁移和就绪检查；总入口负责发现、依赖顺序、目标一致性、状态和故障归因。**重复 deploy 不代表重启全部系统，也不代表自动选择最新版本、自动恢复备份或初始化新的空数据库。**
 
@@ -27,6 +29,20 @@
 现有脚本 `deploy` 有的构建镜像、有的 ensure 依赖、有的迁移时冻结写入口、有的会替换单容器。总部署第一版必须明确这些实际副作用，不能简单循环所有脚本后宣称幂等、零中断或故障隔离。
 
 ## 2. 命令体验
+
+目前可执行的是薄入口，以下命令在服务器的 `electron-dock` 目录运行：
+
+```bash
+bash scripts/manage.sh list
+bash scripts/manage.sh plan mx-launcher
+PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-launcher
+PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-insight-hub
+bash scripts/manage.sh status
+bash scripts/manage.sh doctor
+bash scripts/manage.sh etcd status
+```
+
+`PROXY` 显式值覆盖项目构建代理，未设置则沿用原配置，显式空值清空本次专用代理覆盖；它不改全局或 H2I 运行时代理。Launcher 使用当前 Internal 主机参数作为可覆盖默认值，Hub 保持 `MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0`。`status`／`doctor` 查询当前所选集群、不加载项目 `.env`，并不证明它与每个产品的保留目标一致。锁和退出记录是本地协调，不等同下文的安装身份、分布式锁和恢复契约。
 
 建议未来在 sibling `electron-dock/mx-platform` 放薄编排器；这是基础安装工具，不是又一个业务中心，不依赖 Launcher/Hub/SSO 已启动。该目录和命令本轮尚未创建。日常使用的目标接口：
 

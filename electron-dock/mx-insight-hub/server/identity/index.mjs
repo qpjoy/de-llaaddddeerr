@@ -249,6 +249,7 @@ export function createIdentityService({ store, launcher, logger = console }) {
     audience: launcher.audience,
     timeoutMs: launcher.timeoutMs,
     cacheTtlMs: launcher.cacheTtlMs,
+    staleGraceMs: launcher.staleGraceMs,
     logger,
   })
   return new IdentityService({ store, client, adminScopes: launcher.adminScopes, logger })

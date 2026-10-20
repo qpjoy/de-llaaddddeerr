@@ -14,6 +14,21 @@ migration + smoke。
 完整事故归纳、命令、停止条件与备份要求见
 [Internal 搬迁与重启恢复](./31-internal-reboot-recovery.md)。
 
+Launcher 与 Hub 部署都依赖 kubeconfig 指定的 Kubernetes API Server；本环境的
+`192.168.1.2:6443` 是该控制面地址，不是 Launcher SSO 端口。
+两项目共用 `scripts/k8s-control-plane.sh` 的进程内代理绕过及有限 `/readyz` 检查，
+可以在任一项目目录独立运行：
+
+```bash
+bash scripts/manage.sh ops internal-production control-plane-preflight
+```
+
+该命令使用当前 kubeconfig，不切换集群、不修改应用，也不触发主机服务或静态 Pod 重启。
+Hub 的 `MX_INSIGHT_SYNC_LAUNCHER=0` 仍禁止其同步/重启 Launcher，但不会跳过共享控制面检查。
+Hub 首次读取节点前及构建后均检查；持续失败不会进入后续配置应用、Admin 冻结和迁移。
+同步两个项目的脚本后再执行部署，现场排查步骤见
+[Hub 部署档案](../../mx-insight-hub/mx-insight.deploy.md)。
+
 ## 一句话
 
 Docker Compose 适合把本地服务跑起来；K8s 适合把服务声明成“期望状态”，由集群持续
@@ -22,11 +37,14 @@ Docker Compose 适合把本地服务跑起来；K8s 适合把服务声明成“�
 ## API rollout 超时后已自行就绪
 
 `internal api rollout failed` 表示脚本等待 API 的本次窗口未成功结束，不会撤销已经提交的
-Deployment，也不自动回滚。当前 API 等待为 180 秒；脚本退出后 Kubernetes 仍会继续协调。
+Deployment，也不自动回滚。API 每次等待默认 600 秒，可通过
+`MX_K8S_INTERNAL_API_ROLLOUT_TIMEOUT=900s` 调整（原来固定为 180 秒）；脚本退出后
+Kubernetes 仍会继续协调。新 Pod `Ready=True` 或 Deployment `Available=True` 不等于
+滚动更新完成，还需要旧副本退出；脚本仍以 `kubectl rollout status` 的成功结果为准。
 先用原生只读命令确认现状，不立即重复部署：
 
 ```bash
-kubectl -n mx-internal-shadow rollout status deployment/mx-launcher-internal --timeout=30s
+kubectl -n mx-internal-shadow rollout status deployment/mx-launcher-internal --timeout=600s
 kubectl -n mx-internal-shadow get pods -o wide
 ```
 
@@ -36,6 +54,13 @@ kubectl -n mx-internal-shadow get pods -o wide
 主容器重启。迁移 Job 已完成时其 Pod 不再 Ready 也正常。旧 Pod 的 previous 日志不能用作
 本轮启动错误；PostgreSQL 的历史 `Unknown/255` 需结合终止时间分析，不能直接解释为 OOM
 或数据损坏。本次首次就绪延迟的具体原因尚未确认。
+
+2026-10-19 的诊断也显示新 API 已就绪且没有重启，但仍有旧副本；旧 API 的 `/readyz`
+和 PostgreSQL 探针存在大量超时。该输出未包含最初的 rollout 错误，不能据此认定唯一根因。
+代码排查发现 `/readyz` 原先每次执行完整平台统计的 31 条计数查询，现改为单条 `SELECT 1`，
+失败返回 HTTP 503；平台统计仍由 `/internal/v1/platform/overview` 提供。
+API startupProbe 的启动预算从 60 秒扩大到 300 秒，避免慢节点启动接近原阈值时被重启。
+这些改动需要重新构建并部署 API 镜像；仅修改本地脚本不会更新正在运行的探针实现。
 
 脚本失败点之后的 Identity 检查、网关更新、host runner 配置及最终验收不会自动续跑。
 对已有部署，可先补以下只读验收，按实际失败项处理：
@@ -57,6 +82,99 @@ host runner 的 status 可能吞掉健康检查失败的退出码，应核对输
 严格只读排查优先使用上述原生命令；`gateway-smoke` 包装命令会调用带条件式控制器/镜像恢复
 逻辑的 rollout helper，不能当作无写操作的检查。`internal-production apply` 同样会重新应用
 数据库、迁移和身份配置，不是“接着等待”。
+
+## 认证 introspection 被审计写库拖慢
+
+2026-10-19 现场报告：Compass 无鉴权请求约 1 ms，Launcher
+`/internal/v1/sdk/identity/introspect` 需 2.2–6.2 秒，而 TCP 建连约 0.2 ms；
+数据库同时出现 `WALWrite/WALSync` 等待。代码确认 token 校验完成后仍同步写一条审计；
+principal context 和 SDK access evaluation 还会各追加一次同步写入。
+这说明认证路径受数据库写延迟拖累，不能仅据此认定 SSO 配置或账号密码错误。
+等待事件含义见 [PostgreSQL 监控文档](https://www.postgresql.org/docs/16/monitoring-stats.html)。
+
+Postgres store 现在仅将 `auth.token.introspected`、`identity.context.resolved`、
+`sdk.gateway.access.evaluated` 三类查询观测改为后台批量 INSERT：每批最多 100 条，
+通常间隔 250 ms，单批执行；包含执行中批次在内最多 1000 条、2 MiB 序列化负载，
+单条上限 16 KiB。数据库写入挂起时不会开启第二批。失败批次不自动重试，
+下一批至少等待 5 秒；队列满、超大事件或写入失败会丢弃对应观测，最多每分钟记录一次
+`audit.observation.degraded` 累计计数告警，不记录请求内容、token 或原始数据库错误。
+这些观测不再保证立即可见；进程退出也可能丢失尚未持久化的观测。
+
+每次认证仍读取当前 token、主体、角色及应用准入，校验撤销、过期、audience、禁用状态和
+scope；身份读取失败仍报错。发放/撤销 token、修改密码等原有关键审计不进入此队列。
+本修复不改变 PostgreSQL 的 `fsync` 或提交持久化配置，也不能消除磁盘故障导致的读延迟。
+
+需要重新构建并部署 Launcher API 镜像，拉取源码不会改变运行中的 Pod；本修复无 schema
+变更。上线前核对 18090 网关 upstream：如果使用直接 Pod IP，滚动后必须刷新 upstream。
+`ops internal-production deploy` 会执行完整部署并刷新网关；不要把 `apply/deploy` 当作
+仅重启 API 的命令，也不要在仅更新 API 后遗漏网关核对。
+
+本次现场已确认 `192.168.241.51` 是 `mx-launcher-internal` 的 ClusterIP，
+实际 Pod IP 为 `192.168.224.25`，节点为 `mx-internal-server`。因此这台单节点主机可在
+**仓库根目录**同步 `pro` 后，用下面步骤只构建并滚动 API 镜像。它探测 kubelet 的实际
+containerd socket，验证 CRI 可见的镜像 ID，再同时更新 init container 和 API container；
+不运行完整生产恢复、数据库迁移 Job、SSO 配置更新或网关修改。
+
+```bash
+git pull --ff-only origin pro
+```
+
+```bash
+git merge-base --is-ancestor e367349d HEAD && sudo bash <<'BASH'
+set -Eeuo pipefail
+say() { printf '%s\n' "$*"; }
+die() { printf '%s\n' "$*" >&2; exit 1; }
+source electron-dock/mx-launcher/scripts/k8s-production-recovery.sh
+source electron-dock/mx-launcher/scripts/k8s-control-plane.sh
+k8s_crictl() {
+  crictl --runtime-endpoint="unix://${MX_K8S_CONTAINERD_ADDRESS}" \
+    --image-endpoint="unix://${MX_K8S_CONTAINERD_ADDRESS}" "$@"
+}
+export KUBECONFIG=/etc/kubernetes/admin.conf
+exec 9>/run/mx-launcher-deploy.lock
+flock -n 9 || die "另一个 Launcher 部署正在运行"
+k8s_resolve_containerd_address
+K8S_PRODUCTION_RECOVERY=1
+k8s_require_apiserver_ready
+
+MX_SHADOW_IMAGE_CLEANUP=0 \
+  bash electron-dock/mx-launcher/scripts/manage.sh shadow build
+
+image="docker.io/qpjoy/mx-launcher-server:auth-audit-e367349d-$(date -u +%Y%m%d%H%M%S)"
+docker tag qpjoy/mx-launcher-server:shadow "$image"
+archive="$(mktemp /tmp/mx-launcher-api-image.XXXXXX)"
+trap 'rm -f -- "$archive"' EXIT
+docker save "$image" -o "$archive"
+k8s_ctr images import "$archive"
+k8s_verify_cri_image "$image"
+k8s_require_apiserver_ready
+
+kubectl --request-timeout=30s -n mx-internal-shadow \
+  set image deployment/mx-launcher-internal \
+  internal-api="$image" seed-site-slot-artifacts="$image"
+kubectl -n mx-internal-shadow \
+  rollout status deployment/mx-launcher-internal --timeout=600s
+say "Launcher API 已更新：$image"
+BASH
+```
+
+这里的 `K8S_PRODUCTION_RECOVERY=1` 只用于启用镜像 ID 校验，未调用主机恢复函数。
+API 启动仍执行自身既有的迁移检查与 bootstrap。若镜像更新请求或 rollout 超时，
+先读取 Deployment 当前镜像和 rollout 状态，确认结果；不要立即重复构建或执行整套部署。
+
+上线后可先用无效诊断 token 检查接口延迟和拒绝行为（不要把真实 token 贴入日志或工单）：
+
+```bash
+curl --noproxy '*' --connect-timeout 3 --max-time 10 -sS \
+  -H 'Content-Type: application/json' \
+  --data '{"token":"mx-v1-diagnostic-invalid","audience":"mx-sdk"}' \
+  -w '\nHTTP=%{http_code} connect=%{time_connect}s first_byte=%{time_starttransfer}s total=%{time_total}s\n' \
+  http://127.0.0.1:18090/internal/v1/sdk/identity/introspect
+```
+
+应返回 HTTP 200 且 `introspection.active=false`；这只验证无效 token 路径，还需使用正常
+Compass 会话确认实际业务延迟、503 是否消失，并检查员工密码/飞书及 MX-H2I 原有登录联网。
+若仍慢，继续对照数据库读取等待、连接池和 NVMe I/O 延迟；不要通过关闭鉴权来绕过问题。
 
 ## Compose 到 K8s 的映射
 
@@ -652,7 +770,7 @@ node --test scripts/k8s-kube-proxy-endpoint.test.mjs \
 
 ```bash
 curl --noproxy '*' -kfsS --connect-timeout 3 https://192.168.1.2:6443/livez
-kubectl --request-timeout=5s get --raw=/version
+kubectl --request-timeout=5s get --raw='/readyz?verbose'
 ss -lntp | egrep ':(6443|2379|2380)\b' || true
 crictl --runtime-endpoint=unix:///run/containerd/containerd.sock \
   ps -a --name 'kube-apiserver|etcd' || true
@@ -661,11 +779,33 @@ crictl --runtime-endpoint=unix:///run/containerd/containerd.sock \
 第一条直连成功、第二条仍走代理失败时，检查当前 shell 的 `NO_PROXY/no_proxy`；两条都
 失败且 6443 没有监听时，问题在 kubelet/static Pod 或 etcd，不应继续重试 Flannel。
 
-当 endpoint、证书和 kubelet identity 已经是目标值，但 6443 仍不可达时，后续
-`internal-production deploy` 会自动回收一次 etcd、kube-apiserver、controller-manager 和
-scheduler static pod。这覆盖了上一次 endpoint/certificate repair 已落盘、但控制面容器
-仍加载旧证书或停在 CrashLoop 的恢复场景。若回收后仍失败，命令会直接输出显式
-containerd endpoint 下的 apiserver/etcd 最近日志以及 kubelet journal，不再只显示容器表。
+当 endpoint、证书和 kubelet identity 已经是目标值，但 API 不可达或未就绪时，
+`internal-production deploy` 仅做有限的只读重试，不再因一次超时重启 kubelet 或回收
+etcd、kube-apiserver、controller-manager、scheduler。持续失败会输出本机控制面诊断并停止。
+确有 endpoint/certificate/identity 配置变化时，仍保留原有备份、修复和重启流程。
+直连预检与修复后的等待统一使用 `/readyz`；`/version` 可返回不代表 etcd 已就绪。
+参见 [Kubernetes API health endpoints](https://kubernetes.io/docs/reference/using-api/health-checks/)。
+
+迁移等待每次 API 读取最多 5 秒，仅当前提交 UID 的 `Complete=True` 才允许继续发布。
+`Failed=True` 表示 Job 确认失败；API 读取失败、等待耗尽或同名 Job 被替换都表示结果尚未确认，
+脚本保留任务并停止，不把未知结果报成 SQL 失败。Job 诊断首读失败时转本机诊断，避免连续
+请求不可用的 API。重新部署前会读取已有 Job；非终态或读取失败时不删除、不提交。清理已终态
+Job 使用服务端 UID/resourceVersion 前置条件，等待删除完成后仅 `create` 一次，防止覆盖
+并发创建的任务。提交响应丢失时不会自动重复提交，需待 API 恢复后核实。
+
+2026-10-19 现场证据：`mx-launcher-migrate`（UID `fab3f78e-f932-492b-960c-80249deef3c2`）
+实际已 `Complete=True`，日志 `ok: true`、`migrations: []`；原部署尾部的失败信息来自控制面
+失联。etcd 位于 `/dev/nvme0n1p1[/mx-runtime/etcd]`，同期 WAL `fdatasync` 达 4.677 秒，
+内核报告 nvme0 I/O timeout，kubelet 明确记录 apiserver liveness probe 失败后重启。
+这说明应先处理存储延迟/超时，不能靠延长迁移等待、反复完整 deploy 或重建集群解决。
+一次 `/readyz` 通过不足以确认稳定恢复；修复脚本也不会修复磁盘本身。
+
+以上回归检查不连接生产集群：
+
+```bash
+node --test scripts/manage-control-plane-health.test.mjs scripts/manage-migration-outcome.test.mjs
+```
+
 若 `/etc/kubernetes/pki/apiserver.crt` 或对应 key 缺失、而原 CA 的 cert/key 仍在，deploy
 会使用原 CA 重新签发 apiserver 证书；它不会自动创建或替换 CA。CA 材料也缺失时必须从
 迁移前备份恢复，或者明确执行 `reinit-kubeadm`。

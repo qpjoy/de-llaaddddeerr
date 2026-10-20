@@ -15,9 +15,19 @@ export const NS = 'mx-internal-shadow';
 export const MANAGED = 'mx.qpjoy.com/identity-installation';
 const sha = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export function run(args, input) {
-  const result = spawnSync('kubectl', [`--request-timeout=${args.includes('rollout') ? '190s' : args.includes('exec') ? '40s' : '30s'}`, ...args], { input, encoding: 'utf8', timeout: 210000, maxBuffer: 8 * 1024 * 1024 });
-  if (result.error || result.status) throw new Error('身份部署 kubectl 操作失败；请检查集群与 Pod 状态（不输出凭据）');
-  return result.stdout;
+  // Only these read-only rollout messages are safe to stream. Keep Secret
+  // get/apply/patch output and all raw stderr private, including on failure.
+  const streamRollout = args[0] === '-n' && args[1] === NS && args[2] === 'rollout' && args[3] === 'status'
+    && ['deployment/mx-identity', 'deployment/mx-identity-public'].includes(args[4]);
+  const result = spawnSync('kubectl', [`--request-timeout=${args.includes('rollout') ? '190s' : args.includes('exec') ? '40s' : '30s'}`, ...args], {
+    input, encoding: 'utf8', timeout: 210000, maxBuffer: 8 * 1024 * 1024,
+    stdio: ['pipe', streamRollout ? 'inherit' : 'pipe', 'pipe'],
+  });
+  if (result.error || result.status !== 0) {
+    const reason = result.error?.code === 'ETIMEDOUT' ? '命令超时' : Number.isInteger(result.status) ? `退出码 ${result.status}` : '命令未正常结束';
+    throw new Error(`身份部署 kubectl 操作未确认成功（${reason}）；请检查集群与 Pod 状态（不输出凭据）`);
+  }
+  return result.stdout ?? '';
 }
 export function resources(p, revision) {
   const metadata = name => ({ name, namespace: NS, labels: { [MANAGED]: p.installationId } });
@@ -107,22 +117,46 @@ export function inspectIdentity(p, execute = run, initializing = false) {
   return { deployment, publicDeployment };
 }
 export function deployIdentity({ file = PROFILE, execute = run, revision, log = console.log } = {}) {
+  const step = (label, action) => {
+    const started = performance.now();
+    log(`[identity] 开始：${label}`);
+    try {
+      const result = action();
+      log(`[identity] 完成：${label}；本阶段耗时 ${((performance.now() - started) / 1000).toFixed(1)} 秒`);
+      return result;
+    } catch (error) {
+      log(`[identity] 未确认完成：${label}；本阶段耗时 ${((performance.now() - started) / 1000).toFixed(1)} 秒；未自动重试或回滚`);
+      throw error;
+    }
+  };
   const p = readProfile(file);
-  inspectIdentity(p, execute);
+  step('校验身份档案与现有资源', () => inspectIdentity(p, execute));
   if (!p) {
     log('统一身份未启用；保留原登录。首次可运行 bash scripts/manage.sh ops identity on（自动配置并部署）。'); return;
   }
   const renewed = renewProfile(p, file);
   if (renewed.publicEntry) log(`已同步 Internal Nginx 回源配置：${writeInternalIngress(renewed, file)}（由内网 Nginx 独立加载）`);
   const built = resources(renewed, revision);
-  const apply = value => execute(['apply', '--server-side', '--field-manager=mx-identity-deploy', '-f', '-'], JSON.stringify(value));
+  const apply = value => step(`应用 ${value.kind}/${value.metadata.name}`, () =>
+    execute(['apply', '--server-side', '--field-manager=mx-identity-deploy', '-f', '-'], JSON.stringify(value)));
+  const rollout = name => {
+    try {
+      step(`等待 deployment/${name} 就绪（timeout 180s）`, () =>
+        execute(['-n', NS, 'rollout', 'status', `deployment/${name}`, '--timeout=180s']));
+    } catch (error) {
+      log('[identity] 已提交的更新可能仍在进行；先只读复查，不要重复 deploy 或重新生成身份密钥：');
+      log(`kubectl --request-timeout=15s -n ${NS} get deployment ${name} -o wide`);
+      log(`kubectl --request-timeout=15s -n ${NS} get pods -l app=${name} -o wide`);
+      throw error;
+    }
+  };
   apply(built.runtime); apply(built.ca); apply(built.deployment);
   if (built.publicDeployment) {
     apply(built.publicDeployment);
-    execute(['-n', NS, 'rollout', 'status', 'deployment/mx-identity-public', '--timeout=180s']);
+    rollout('mx-identity-public');
     log(`公网身份回源已就绪：${p.publicEntry.transportOrigin}；外部 DNS/TLS/网关需按部署文档验收。`);
   }
-  execute(['-n', NS, 'rollout', 'status', 'deployment/mx-identity', '--timeout=180s']);
+  rollout('mx-identity');
   // Enable RP only after the durable provider is ready. The normal API apply /
   // restart later in deploy reads this Secret and the trusted CA volume.
   apply(built.admin);

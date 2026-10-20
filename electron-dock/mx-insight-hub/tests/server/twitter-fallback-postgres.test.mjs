@@ -27,7 +27,8 @@ test('PostgreSQL actual supplier stores share one reservation, preserve both rec
   for (const migration of ['001_initial.sql', '004_reservation_lease.sql', '051_external_platform_gateway.sql',
     '053_external_platform_uncertain_retry.sql', '055_external_platform_multi_call_rate_limit.sql',
     '057_external_platform_cost_reservations.sql', '058_external_platform_restricted_raw_responses.sql',
-    '071_contract_circuit_scopes.sql', '094_acquisition_request_snapshot.sql', '138_admission_recovery.sql']) {
+    '071_contract_circuit_scopes.sql', '094_acquisition_request_snapshot.sql', '138_admission_recovery.sql',
+    '163_provider_cost_ledger.sql']) {
     await db.exec(await readFile(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'))
   }
   await db.exec(`ALTER TABLE usage_requests ADD COLUMN delivery_source_mode text, ADD COLUMN response_captured_at timestamptz,

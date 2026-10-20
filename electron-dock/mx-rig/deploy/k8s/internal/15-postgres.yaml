@@ -58,6 +58,10 @@ metadata:
 spec:
   serviceName: mx-rig-postgres
   replicas: 1
+  # Template changes never restart the running database; CPU/memory reach the
+  # live Pod in place via electron-dock `scripts/manage.sh db apply`.
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
       app.kubernetes.io/name: mx-rig-postgres
@@ -86,7 +90,9 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-              add: ["CHOWN"]
+              # Existing PGDATA is owned by 999 with mode 0700. CHOWN alone
+              # cannot traverse it when this init container runs again.
+              add: ["CHOWN", "DAC_OVERRIDE"]
           resources:
             requests:
               cpu: 10m

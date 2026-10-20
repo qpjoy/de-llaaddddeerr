@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { normalizeTwitterSearchParameters } from './twitter-search-parameters.mjs'
 import { requestFingerprint } from '../core/crypto.mjs'
 
 export const DATA_SEARCH_V2_PATH = '/api/v2/data/search'
@@ -7,7 +8,7 @@ export const DATA_SEARCH_V1_PATH = '/api/v1/data/search'
 export const DATA_SEARCH_V2_VERSION = 'mx-insight-hub.data-search.v2'
 export const DATA_SEARCH_V2_PLATFORMS = Object.freeze(['facebook', 'twitter', 'instagram', 'reddit',
   'weibo', 'bilibili', 'douyin', 'kuaishou', 'zhihu', 'youtube', 'tiktok', 'xiaohongshu'])
-const fields = new Set(['platform', 'query', 'pageSize', 'type', 'cursor', 'timeWindow'])
+const fields = new Set(['platform', 'query', 'pageSize', 'type', 'cursor', 'timeWindow', 'params'])
 const plain = value => value && typeof value === 'object' && !Array.isArray(value)
 const invalid = message => { throw new AppError(400, 'invalid_time_window', message) }
 const iso = value => {
@@ -22,6 +23,8 @@ export function normalizeDataSearchV2(body, canonicalPlatform = value => value) 
   if (!plain(body)) throw new AppError(400, 'invalid_request', 'JSON object body is required')
   if (Object.keys(body).some(key => !fields.has(key))) throw new AppError(400, 'unsupported_fields', 'Unsupported v2 search fields')
   const platform = canonicalPlatform(body.platform)
+  if (body.params !== undefined && platform !== 'twitter') throw new AppError(400, 'unsupported_fields', 'v2 params are only supported for Twitter search')
+  const params = body.params !== undefined ? normalizeTwitterSearchParameters(body.params) : undefined
   if (!DATA_SEARCH_V2_PLATFORMS.includes(platform)) throw new AppError(422, 'search_v2_platform_unsupported', 'This platform has no v2 content-search contract')
   if (typeof body.query !== 'string' || !body.query.trim() || body.query.length > 500) throw new AppError(400, 'invalid_query', 'query must contain 1–500 characters')
   const pageSize = body.pageSize ?? 20, type = body.type ?? 'fresh'
@@ -37,7 +40,8 @@ export function normalizeDataSearchV2(body, canonicalPlatform = value => value) 
   if (body.cursor != null && (typeof body.cursor !== 'string' || !body.cursor.startsWith('mxds2.') || body.cursor.length > 16384)) {
     throw new AppError(400, 'invalid_cursor', 'v2 requires its own unchanged mxds2 continuation')
   }
-  return { platform, query: body.query.trim(), pageSize, type, timeWindow, ...(body.cursor ? { cursor: body.cursor } : {}) }
+  return { platform, query: body.query.trim(), pageSize, type, timeWindow,
+    ...(params !== undefined ? { params } : {}), ...(body.cursor ? { cursor: body.cursor } : {}) }
 }
 
 export function dataSearchV2Scope(body) {
@@ -60,6 +64,7 @@ export function prepareDataSearchV2(body, codec, now = Date.now()) {
   // v2 keys permanently identify an attempt. v1 fresh's timed re-acquisition
   // remains available only to unchanged v1 callers.
   const upstream = { platform: body.platform, query: body.query, pageSize: body.pageSize, type: 'stable',
+    ...(body.platform === 'twitter' && body.params !== undefined ? { params: body.params } : {}),
     ...(state.cursor ? { cursor: state.cursor } : {}) }
   if (body.platform === 'facebook') upstream.params = {
     startDate: new Date(Date.parse(body.timeWindow.from) + 28800000).toISOString().slice(0, 10),

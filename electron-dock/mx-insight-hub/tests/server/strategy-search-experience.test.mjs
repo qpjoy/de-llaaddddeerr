@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { strategySearchPlatforms, strategySearchBody, strategyPageInfo, uncertainStrategySearch, safeStrategyUrl } from '../../src/strategy-search-experience-model.js'
+import { strategySearchPlatforms, strategySearchBody, strategySearchForm, strategyPageInfo, uncertainStrategySearch, safeStrategyUrl } from '../../src/strategy-search-experience-model.js'
 import { strategyAccountPlatforms, strategyAccountBody, strategyOperationPath, strategyResultMatches } from '../../src/strategy-search-experience-model.js'
 
 const access = { platforms: ['tiktok', 'social', 'xiaohongshu', 'telegram'], capabilities: ['native.wechat.search.search'] }
@@ -31,6 +31,25 @@ test('WeChat uses documented items mode and native continuation without categori
   assert.equal(strategyPageInfo({ endpoint: 'wechat.search.search', data: { continue_flag: 1, no_more: true, cursor: 'cursor' } }).hasMore, false)
   const pageInfo = { hasMore: true, nextCursor: 'opaque' }
   assert.equal(strategyPageInfo({ data: { pageInfo } }), pageInfo)
+})
+
+test('Twitter defaults to Latest and keeps caller overrides in Hub pagination and exact replay scope', () => {
+  const form = { platform: 'twitter', query: '原始关键词', pageSize: 20 }, platforms = strategySearchPlatforms(null)
+  assert.deepEqual(strategySearchBody(form, platforms), { ...form, type: 'stable', params: { category: 'Latest' } })
+  const params = { category: 'Photos', filters: '  native filters  ', includeTimestamp: false }
+  const body = strategySearchBody({ ...form, twitterParams: params }, platforms, 'mxds1.opaque')
+  assert.deepEqual(body, { ...form, type: 'stable', params, cursor: 'mxds1.opaque' })
+  assert.notEqual(body.params, params, 'submitted parameters cannot be changed through the draft object')
+  assert.deepEqual(strategySearchBody({ ...form, ...strategySearchForm(body) }, platforms, body.cursor), body)
+  const historical = { ...form, type: 'stable' }
+  assert.deepEqual(strategySearchBody({ ...form, ...strategySearchForm(historical) }, platforms), historical,
+    'restoring an omitted params object does not rewrite the original replay body to Latest')
+  assert.deepEqual(strategySearchBody({ ...form, ...strategySearchForm({ ...historical, params: {} }) }, platforms), { ...historical, params: {} })
+  for (const twitterParams of [{ category: 'People' }, { category: 'latest' }, { filters: 'x'.repeat(2049) }, { filters: '\0' }, { includeTimestamp: 'false' }]) {
+    assert.throws(() => strategySearchBody({ ...form, twitterParams }, platforms))
+  }
+  assert.deepEqual(strategySearchBody({ ...form, platform: 'tiktok', twitterParams: params }, platforms), { ...form, platform: 'tiktok', type: 'stable' },
+    'Twitter-only filters never leak to another platform')
 })
 
 test('unknown transport and pending outcomes stay blocked instead of purchasing through retry expiration', () => {
