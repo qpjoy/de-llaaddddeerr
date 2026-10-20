@@ -22,7 +22,6 @@ import {
   Field,
   FieldGroup,
   FieldLabel,
-  FieldDescription,
   FieldError,
 } from "@/components/ui/field";
 import {
@@ -52,7 +51,6 @@ function AccountDialogSession({
 }: AccountDialogProps) {
   const [options, setOptions] = useState<AccountOptions | null>(null),
     [employee, setEmployee] = useState(!new URLSearchParams(location.search).has("account")),
-    [register, setRegister] = useState(false),
     [error, setError] = useState(""),
     [unavailable, setUnavailable] = useState(false),
     [retry, setRetry] = useState(0),
@@ -68,7 +66,6 @@ function AccountDialogSession({
     setUnavailable(false);
     setError("");
     loadAccountForm({
-      register,
       canRestart:
         !new URLSearchParams(location.search).has("account") || retry > 0,
       current: () => active,
@@ -81,7 +78,6 @@ function AccountDialogSession({
           }
           setOptions(value.options);
           setUnavailable(false);
-          if (!retry) setRegister(value.options.view === "register" && value.options.policy?.mode === "invite_code");
         }
       })
       .catch((error) => {
@@ -132,9 +128,8 @@ function AccountDialogSession({
         signal: AbortSignal.timeout(15000),
         headers: { "x-mx-csrf": options!.csrf },
         body: JSON.stringify({
-          action: register ? "register" : "login",
+          action: "login",
           formId: options!.formId,
-          policyVersion: options!.policy?.version,
           ...Object.fromEntries(data),
         }),
       });
@@ -142,7 +137,7 @@ function AccountDialogSession({
     } catch (e) {
       setError(
         (e as Error).name === "TimeoutError"
-          ? "提交结果尚未确认，请先尝试登录；注册请求请勿重复提交。"
+          ? "提交结果尚未确认，请先核对登录状态，勿重复提交。"
           : (e as Error).message,
       );
       if ([409, 410].includes((e as { status?: number }).status ?? 0)) {
@@ -191,19 +186,13 @@ function AccountDialogSession({
             数港 DataPort
           </div>
           <DialogHeader>
-            <DialogTitle>{register ? "受邀加入数港" : "登录数港"}</DialogTitle>
-            <DialogDescription>{employee ? "使用企业超管创建的数港子账号登录。" : "企业超管使用统一 MX 账号，首次开通需 DataPort 专用邀请。"}</DialogDescription>
+            <DialogTitle>登录数港</DialogTitle>
+            <DialogDescription>{employee ? "使用企业超管创建的数港子账号登录。" : "企业超管使用已开通数港的统一 MX 账号登录。"}</DialogDescription>
           </DialogHeader>
           <div className="auth-login-modes" role="group" aria-label="登录方式">
             <Button type="button" variant={employee ? "outline" : "default"} disabled={busy} onClick={() => {setEmployee(false);setError("");}}>企业超管 · MX 登录</Button>
-            <Button type="button" variant={employee ? "default" : "outline"} disabled={busy} onClick={() => {setEmployee(true);setRegister(false);setError("");}}>子账号登录</Button>
+            <Button type="button" variant={employee ? "default" : "outline"} disabled={busy} onClick={() => {setEmployee(true);setError("");}}>子账号登录</Button>
           </div>
-          {!employee && options?.policy?.mode === "invite_code" && (
-            <div className="auth-owner-actions" role="group" aria-label="超管登录或注册">
-              <Button type="button" variant={!register ? "secondary" : "ghost"} disabled={busy || checking} onClick={() => {setRegister(false);setError("");}}>已有 MX 账号登录</Button>
-              <Button type="button" variant={register ? "secondary" : "ghost"} disabled={busy || checking} onClick={() => {setRegister(true);setError("");}}>邀请码注册</Button>
-            </div>
-          )}
           <form onSubmit={submit} aria-busy={busy || checking}>
             <FieldGroup>
               <Field>
@@ -232,11 +221,8 @@ function AccountDialogSession({
                     name="password"
                     type={show ? "text" : "password"}
                     required
-                    minLength={register ? 8 : undefined}
                     maxLength={128}
-                    autoComplete={
-                      register ? "new-password" : "current-password"
-                    }
+                    autoComplete="current-password"
                     placeholder="输入密码"
                     disabled={busy}
                   />
@@ -254,46 +240,6 @@ function AccountDialogSession({
                   </InputGroupAddon>
                 </InputGroup>
               </Field>
-              {register && (
-                <Field>
-                  <FieldLabel htmlFor="auth-confirm">确认密码</FieldLabel>
-                  <InputGroup>
-                    <InputGroupInput
-                      id="auth-confirm"
-                      name="passwordConfirm"
-                      type="password"
-                      required
-                      minLength={8}
-                      maxLength={128}
-                      autoComplete="new-password"
-                      disabled={busy}
-                    />
-                  </InputGroup>
-                </Field>
-              )}
-              {!employee && (
-                <Field>
-                  <FieldLabel htmlFor="auth-invite">{register ? "DataPort 专用邀请码" : "DataPort 专用邀请码（首次开通时填写）"}</FieldLabel>
-                  <InputGroup>
-                    <InputGroupInput id="auth-invite" name="inviteCode" required={register} maxLength={128} autoComplete="off" placeholder="输入 Launcher 提供的 DataPort 专用邀请码" disabled={busy} aria-describedby="auth-invite-help" />
-                  </InputGroup>
-                  <FieldDescription id="auth-invite-help">
-                    {register
-                      ? "注册新 MX 账号必须填写有效的 DataPort 专用邀请码。已有 MX 账号请切换到登录。"
-                      : "已开通数港的 MX 账号可留空。此处用于开通数港，企业超管身份仍需后续校验。"}
-                  </FieldDescription>
-                </Field>
-              )}
-              {register &&
-              options &&
-              options?.policy?.mode !== "invite_code" &&
-              !preview ? (
-                <FieldError>
-                  {options.policy?.mode === "closed"
-                    ? "暂未开放邀请注册，请联系管理员。"
-                    : "邀请注册设置暂不可用，请稍后重新打开登录窗口。"}
-                </FieldError>
-              ) : null}
               {error && <FieldError role="alert">{error}</FieldError>}
               <Button
                 type={unavailable ? "button" : "submit"}
@@ -301,39 +247,22 @@ function AccountDialogSession({
                   unavailable ? () => setRetry((value) => value + 1) : undefined
                 }
                 className="auth-submit"
-                disabled={
-                  busy ||
-                  checking ||
-                  (register &&
-                    !!options &&
-                    !unavailable &&
-                    options.policy?.mode !== "invite_code")
-                }
+                disabled={busy || checking}
               >
                 {busy || checking ? <Spinner /> : null}
                 {checking
                   ? "连接中"
                   : unavailable
                     ? "重试连接"
-                    : register
-                      ? "注册并进入数港"
-                      : "登录"}
+                    : "登录"}
                 <ArrowRight />
               </Button>
             </FieldGroup>
           </form>
-          <p
-            className={register ? "auth-register-hint" : "managed-account-note"}
-          >
-            {register ? (
-              "使用 DataPort 专用邀请码创建 MX 账号并开通数港。已有 MX 账号请在登录页使用邀请码开通。"
-            ) : (
-              <>
-                {employee ? "子账号由企业超管创建" : "专用邀请由 Launcher 用户中心签发"}
-                <br />
-                如需开通或重置密码，请联系管理员
-              </>
-            )}
+          <p className="managed-account-note">
+            {employee ? "子账号由企业超管创建" : "使用已有 MX 账号登录"}
+            <br />
+            如需开通或重置密码，请联系管理员
           </p>
           <nav className="auth-legal-links" aria-label="登录法律信息">
             <a href="/terms">用户协议</a>

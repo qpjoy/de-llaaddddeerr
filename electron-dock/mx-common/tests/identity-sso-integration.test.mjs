@@ -172,6 +172,40 @@ test('two ordinary applications share real Auth, with separate durable sessions 
   }
   assert.equal(step.status,303,step.text);assert.equal(step.location,'/?sso=ready')
   assert.equal(JSON.parse((await request(`${a.origin}/auth/sso/session`)).text).active,true)
+  // DataPort opts into password login only. Cached invite forms cannot register
+  // or redeem a code, while ordinary applications keep their existing behavior.
+  a.navigation={applicationForm:true,loginOnly:true};a.restart()
+  const onlyStart=await request(`${a.origin}/auth/sso/start?view=register`,{method:'POST',headers:{origin:a.origin,'content-type':'application/json'},body:'{}'})
+  assert.equal((await a.store.get('login',jar.get('__Host-mx-example_login'))).view,'login')
+  let onlyStep=await request(JSON.parse(onlyStart.text).redirect)
+  for(let i=0;i<12&&onlyStep.location;i++) {
+    const next=new URL(onlyStep.location,issuer);onlyStep=await request(next)
+    if(next.origin===a.origin&&next.pathname==='/auth/sso/interaction')break
+  }
+  assert.equal(onlyStep.location,'/?account=1#/account')
+  const onlyForm=JSON.parse((await request(`${a.origin}/auth/sso/form`)).text)
+  assert.equal(onlyForm.view,'login')
+  const onlySubmit=body=>request(`${a.origin}/auth/sso/form`,{method:'POST',headers:{origin:a.origin,'x-mx-csrf':onlyForm.csrf,'content-type':'application/json'},body:JSON.stringify({formId:onlyForm.formId,login:'person',password:'test-password',...body})})
+  const authBefore=logins
+  for(const action of ['register','feishu','feishu-link']) {
+    const rejected=await onlySubmit({action,inviteCode:'synthetic-invite-fixture'})
+    assert.equal(rejected.status,403);assert.equal(JSON.parse(rejected.text).code,'account_registration_disabled')
+  }
+  const inviteRejected=await onlySubmit({action:'login',inviteCode:'synthetic-invite-fixture'})
+  assert.equal(inviteRejected.status,400);assert.equal(JSON.parse(inviteRejected.text).code,'account_invitation_disabled')
+  assert.equal(logins,authBefore,'disabled actions never reach Auth authentication or redemption')
+  onlyStep=await onlySubmit({action:'login'})
+  assert.equal(onlyStep.status,200,onlyStep.text)
+  onlyStep=await request(JSON.parse(onlyStep.text).redirect)
+  for(let i=0;i<12&&onlyStep.location;i++) {
+    const next=new URL(onlyStep.location,issuer);onlyStep=await request(next)
+    if(next.pathname==='/auth/sso/callback')break
+  }
+  assert.equal(onlyStep.status,303,onlyStep.text)
+  assert.equal(JSON.parse((await request(`${a.origin}/auth/sso/session`)).text).active,true)
+  b.navigation={applicationForm:true};b.restart()
+  assert.equal((await request(`${b.origin}/auth/sso/start?view=register`,{method:'POST',headers:{origin:b.origin,'content-type':'application/json'},body:'{}'})).status,200)
+  assert.equal((await b.store.get('login',jar.get('__Host-mx-other_login'))).view,'register','other applications retain invitation registration')
   blocked=true
   assert.equal(JSON.parse((await request(`${b.origin}/auth/sso/session`)).text).active,false,'upstream application ban invalidates the session')
   assert.equal((await pool.query("SELECT to_regclass('iam.members') AS members,to_regclass('public.tenants') AS tenants")).rows[0].members,null)

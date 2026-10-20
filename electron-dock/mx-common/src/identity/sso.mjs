@@ -141,7 +141,7 @@ export function createApplicationSso({ settings, store, oidcConfiguration,
             throw new AppError(503, 'sso_application_mismatch', `${applicationName}账号接入配置不一致，请联系管理员。`)
         }
         const old = cookies(request)[TX]; if (old) await store.remove('login', old)
-        const id = random(), transaction = { state: random(), nonce: random(), verifier: random(), formCsrf: random(), view: url.searchParams.get('view') === 'register' ? 'register' : 'login', returnTo: url.searchParams.get('return') === 'account' ? 'account' : null }
+        const id = random(), transaction = { state: random(), nonce: random(), verifier: random(), formCsrf: random(), view: navigation.loginOnly !== true && url.searchParams.get('view') === 'register' ? 'register' : 'login', returnTo: url.searchParams.get('return') === 'account' ? 'account' : null }
         transaction.uiPath = uiPath(url.searchParams.get('ui'))
         if (transaction.returnTo === 'account') transaction.expectedSubject = (await sessionFor(request))?.subject
         const extraParameters = await prepareLogin?.({ request, url, transaction }) ?? {}
@@ -173,16 +173,20 @@ export function createApplicationSso({ settings, store, oidcConfiguration,
         if (!transaction?.flow) throw new AppError(410, 'account_flow_expired', '登录已超时，请重新开始。')
         if (request.method === 'GET') {
           const result = await accountClient()('options', { flow: transaction.flow, clientIp: clientIp(request) })
-          return json({ ...result, csrf: transaction.formCsrf, formId: fingerprint(transaction.flow), view: transaction.view, ...(navigation.formContext?.(transaction) ?? {}) })
+          return json({ ...result, csrf: transaction.formCsrf, formId: fingerprint(transaction.flow), view: transaction.view, ...(navigation.formContext?.(transaction) ?? {}), ...(navigation.loginOnly === true ? {view:'login'} : {}) })
         }
         checkOrigin(request)
         const body = await readJson(request, 8192)
         if (!equal(transaction.formCsrf, request.headers[csrfHeader]) || !equal(fingerprint(transaction.flow), body.formId))
           throw new AppError(409, 'account_form_changed', '另一个页面已切换登录，请刷新后重试。')
         if (!['login', 'register', 'feishu', 'feishu-link'].includes(body.action)) throw new AppError(400, 'account_action_invalid', '操作无效。')
+        if (navigation.loginOnly === true && body.action !== 'login')
+          throw new AppError(403, 'account_registration_disabled', '此入口仅支持已有 MX 账号登录，请联系管理员开通账号。')
+        if (navigation.loginOnly === true && body.inviteCode)
+          throw new AppError(400, 'account_invitation_disabled', '此登录入口不再接受邀请码，请联系管理员开通数港。')
         const result = await accountClient()(body.action, { flow: transaction.flow, clientIp: clientIp(request),
           expectedSubject: transaction.expectedSubject,
-          login: body.login, password: body.password, passwordConfirm: body.passwordConfirm, inviteCode: body.inviteCode, policyVersion: body.policyVersion })
+          login: body.login, password: body.password, ...(navigation.loginOnly === true ? {} : { passwordConfirm: body.passwordConfirm, inviteCode: body.inviteCode, policyVersion: body.policyVersion }) })
         return json(result)
       }
       if (path === '/auth/sso/account' && ['GET', 'POST'].includes(request.method)) {

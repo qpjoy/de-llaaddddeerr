@@ -47,13 +47,12 @@ for (const code of ["account_flow_expired", "account_request_failed"]) {
   test(`reconnect replaces an expired transaction from ${code}`, async () => {
     let starts = 0;
     const result = await loadAccountForm({
-      register: true,
       canRestart: true,
       read: async () => {
         throw failure(410, code);
       },
-      start: async (register) => {
-        assert.equal(register, true);
+      start: async (...args) => {
+        assert.equal(args.length, 0);
         starts++;
         return { redirect: "https://auth.example.test/new-flow" };
       },
