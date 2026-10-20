@@ -101,7 +101,19 @@ flowchart LR
 1. `PROXY=127.0.0.1:7788 bash electron-dock/mx-common/scripts/manage.sh deploy hanlp`。`PROXY` 只作用于镜像构建；节点直连 Docker Hub 不通时，没有它会卡在解析 `docker/dockerfile:1.7`（2026-10-21 实际遇到）。脚本自带 `/health` 和 `/tokenize` 冒烟检查。Recreate 策略下，5 个 worker 加载完成前 Hub 会退回 jieba，和以往每次部署 HanLP 一样。
 2. `kubectl -n mx-common logs deploy/mx-common-hanlp | head -1` 应显示 `5 worker(s) x 3 thread(s), 1 reserved for interactive requests`。如果显示 1 个 worker，检查 Deployment 是否还残留 `MAX_CONCURRENT_INFERENCES`。
 3. `bash scripts/inspect-retrieval-capacity.sh --probe-hanlp`，看 1/8/16 条批量的实际延迟。注意这个探针不带优先头，测的是写入通道。巡检报告的 safeEnv 里不再出现线程变量，池信息请看 `/health` 的 `pool` 字段或启动日志。
-4. **内存要在真实写入负载下看。** 探针只发很小的批次。等 projector 或重建跑起来后，用 `kubectl -n mx-common top pod` 确认容器内存稳定低于 8Gi。每个 worker 1.5 GiB 是估计值，还没有在生产上测过。
+4. **内存要在真实写入负载下看。** 探针只发很小的批次。每个 worker 1.5 GiB 是估计值，还没有在生产上测过。这个集群没有 metrics-server，`kubectl top` 不可用，改用下面两条只读命令，空闲时各跑一次，projector 或重建跑起来后再跑：
+
+   ```bash
+   # kubelet 统计，等同 kubectl top：workingSet 是 OOM/驱逐看的数
+   kubectl get --raw /api/v1/nodes/mx-internal-server/proxy/stats/summary | python3 -c 'import json,sys
+   for p in json.load(sys.stdin)["pods"]:
+       if p["podRef"]["name"].startswith("mx-common-hanlp"):
+           for c in p["containers"]: m=c.get("memory",{}); print(c["name"], "workingSet %.2f GiB" % (m.get("workingSetBytes",0)/2**30), "rss %.2f GiB" % (m.get("rssBytes",0)/2**30))'
+   # 容器内明细：cgroup 当前/峰值、每个 worker 的 RSS 与峰值、池状态
+   kubectl -n mx-common exec -i deploy/mx-common-hanlp -c hanlp -- python - < electron-dock/mx-common/scripts/hanlp-memory.py
+   ```
+
+   负载下 workingSet 稳定在约 6.5 GiB 以下就有余量；逼近 8 GiB 时用回退里的 `MAX_CONCURRENT_INFERENCES` 降到 4，或调高内存上限。
 
 ### 回退
 

@@ -12,6 +12,9 @@ kubectl -n mx-common get service/mx-common-hanlp
 kubectl -n mx-common get endpoints/mx-common-hanlp
 kubectl -n mx-common rollout status deployment/mx-common-hanlp
 
+# 5x3 5 worker(s) x 3 thread(s)
+kubectl -n mx-common set env deployment/mx-common-hanlp MAX_CONCURRENT_INFERENCES-
+
 # hanlp重建后查看稳定性
 kubectl -n mx-common get pods -l app.kubernetes.io/name=mx-common-hanlp
 
