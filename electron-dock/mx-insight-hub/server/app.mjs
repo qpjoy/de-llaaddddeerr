@@ -1888,7 +1888,15 @@ export function createApp({
       if (pathname === '/internal/v1/admin/data-pressure' && request.method === 'GET') {
         requireSourceAdmin(principal)
         requireNoQuery(searchParams, 'data pressure')
-        sendJson(response, 200, { data: { admission: dataAdmission.snapshot(), databases: databasePressure() }, requestId })
+        sendJson(response, 200, {
+          data: {
+            admission: dataAdmission.snapshot(),
+            databases: databasePressure(),
+            // This process's query-time HanLP queue: counters only, no query text.
+            tokenizer: search?.querySegmenter?.stats?.() ?? null,
+          },
+          requestId,
+        })
         return
       }
       if (pathname === '/internal/v1/admin/admission-limits' && ['GET','POST'].includes(request.method)) {

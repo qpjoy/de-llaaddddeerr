@@ -113,6 +113,113 @@ test('Twitter screenshot-shaped nonnumeric ID and page_size=500 follows short pa
   assert.equal(h.platformStore.restrictedResponseArchives.size, 11)
 })
 
+for (const operation of ['crawl', 'user-info']) {
+  test(`Twitter ${operation} preserves a definitive missing-account receipt as 404 without another purchase`, async t => {
+    const wire = '{"data":{},"userExists":false}'
+    const h = await harness(t, { fetchImpl: () => new Response(wire, { headers: { 'content-type': 'application/json' } }) })
+    await h.service.setTenantBillingProfile(h.context.tenant.id, { mode: 'enforced', multiplierPpm: 1000000,
+      defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'offline-admin')
+    await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline account fixture' },
+      { idempotencyKey: `missing-account-credit-${operation}`, actor: 'offline-admin' })
+    const body = { platform: 'twitter', user_id: 'Brain6ur', ...(operation === 'crawl' ? { page_size: 30 } : {}) }
+    const key = `twitter-${operation}-account-not-found`
+    await assert.rejects(h.invoke(body, key, operation), error => {
+      assert.equal(error.status, 404)
+      assert.equal(error.code, 'social_account_not_found')
+      assert.match(error.message, /provider.*not found/i)
+      assert.equal(error.details.outcome, 'rejected')
+      assert.equal(error.details.retryable, false)
+      assert.equal(error.details.platform, 'twitter')
+      assert.equal(error.details.stage, 'account_lookup')
+      return true
+    })
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.calls[0].url.pathname, '/user/by/username/brain6ur')
+    assert.equal(h.historical.length, 0)
+    assert.equal(h.platformStore.calls.size, 1)
+    const call = [...h.platformStore.calls.values()][0]
+    assert.equal(call.endpointKey, 'twitter-aio.user-info')
+    assert.equal(call.operation, 'social.profile.get')
+    assert.equal(call.httpStatus, 200)
+    assert.equal(call.outcome, 'rejected')
+    assert.equal(call.errorCode, 'social_account_not_found')
+    assert.equal(call.billed, null)
+    const usage = h.store.requests.get(call.usageRequestId)
+    assert.equal(usage.status, 'committed')
+    assert.equal(usage.responseStatus, 404)
+    assert.equal(usage.unitsActual, 0)
+    const charge = h.store.customerCharges.get(usage.id)
+    assert.equal(charge.status, 'captured')
+    assert.equal(charge.chargedMinor, 3, 'zero delivery units preserve the existing committed-request charge')
+    assert.equal(h.platformStore.ingestJobs.length, 0)
+    assert.equal(h.platformStore.state.consecutiveFailures, 0)
+    assert.equal(h.platformStore.state.circuitOpenUntil, null)
+    assert.equal(await h.platformStore.contractCircuitState('rapidapi', 'twitter'), null)
+    assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+    const archive = h.platformStore.restrictedResponseArchives.get(call.id)
+    assert.equal(h.platformStore.responseArchives.get(call.id).contractState, 'rejected')
+    assert.equal(archive.bodySize, 30)
+    assert.equal(Buffer.from(archive.bodyBytes).toString(), wire)
+    assert.equal(archive.bodySha256, digest(Buffer.from(wire)))
+    assert.equal(archive.jsonParsed, true)
+    assert.deepEqual(archive.parsedPayload, JSON.parse(wire))
+    const before = structuredClone({ usage, call, archive, charge })
+    await assert.rejects(h.invoke(body, key, operation), error => {
+      assert.equal(error.status, usage.responseStatus)
+      assert.equal(error.code, usage.responseBody.error.code)
+      assert.equal(error.message, usage.responseBody.error.message)
+      assert.deepEqual(error.details, { ...usage.responseBody.error.details, requestId: usage.id })
+      return true
+    })
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.platformStore.calls.size, 1)
+    assert.equal(h.store.customerCharges.size, 1)
+    assert.deepEqual(structuredClone({ usage: h.store.requests.get(usage.id), call: h.platformStore.calls.get(call.id),
+      archive: h.platformStore.restrictedResponseArchives.get(call.id), charge: h.store.customerCharges.get(usage.id) }), before)
+  })
+}
+
+test('Twitter missing-account classification keeps an already committed 502 and its receipt immutable', async t => {
+  const wire = '{"data":{},"userExists":false}'
+  const h = await harness(t, { fetchImpl: () => new Response(wire, { headers: { 'content-type': 'application/json' } }) })
+  await h.service.setTenantBillingProfile(h.context.tenant.id, { mode: 'enforced', multiplierPpm: 1000000,
+    defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'offline-admin')
+  await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline historical account fixture' },
+    { idempotencyKey: 'historical-missing-account-credit', actor: 'offline-admin' })
+  const body = { platform: 'twitter', user_id: 'Brain6ur', page_size: 30 }, key = 'twitter-historical-account-not-found'
+  const execute = h.gateway.adapter.execute.bind(h.gateway.adapter)
+  // The retained strict profile path reproduces the former classification
+  // while creating the historical failure through real settlement and archive code.
+  h.gateway.adapter.execute = (request, options) => execute({ ...request, accountCompatibility: false }, options)
+  await assert.rejects(h.invoke(body, key), { status: 502, code: 'external_platform_response_unusable' })
+  h.gateway.adapter.execute = execute
+  const call = [...h.platformStore.calls.values()][0], usage = h.store.requests.get(call.usageRequestId)
+  const archive = h.platformStore.restrictedResponseArchives.get(call.id)
+  assert.equal(usage.status, 'committed')
+  assert.equal(usage.responseStatus, 502)
+  assert.equal(usage.unitsActual, 0)
+  assert.equal(call.outcome, 'succeeded_unusable')
+  assert.equal(call.billed, null)
+  const charge = h.store.customerCharges.get(usage.id)
+  assert.equal(charge.status, 'captured')
+  assert.equal(charge.chargedMinor, 3)
+  assert.equal(Buffer.from(archive.bodyBytes).toString(), wire)
+  const before = structuredClone({ usage, call, archive, charge })
+  await assert.rejects(h.invoke(body, key), error => {
+    assert.equal(error.status, 502)
+    assert.equal(error.code, usage.responseBody.error.code)
+    assert.equal(error.message, usage.responseBody.error.message)
+    assert.deepEqual(error.details, { ...usage.responseBody.error.details, requestId: usage.id })
+    return true
+  })
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.platformStore.calls.size, 1)
+  assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+  assert.equal(h.store.customerCharges.size, 1)
+  assert.deepEqual(structuredClone({ usage: h.store.requests.get(usage.id), call: h.platformStore.calls.get(call.id),
+    archive: h.platformStore.restrictedResponseArchives.get(call.id), charge: h.store.customerCharges.get(usage.id) }), before)
+})
+
 test('equal concurrent account deliveries reject the second intent without purchasing or releasing the first lease', async t => {
   let releaseProfile, profileStarted
   const profileGate = new Promise(resolve => { releaseProfile = resolve })
@@ -436,6 +543,29 @@ test('public HTTP social routes use the Hub workflow while legacy route aliases 
   assert.equal(compatibility.length, 2)
   assert.ok(compatibility.every(input => input.path === '/api/v1/night-all/search/crawl'))
   assert.equal(h.calls.length, 3)
+})
+
+test('Twitter missing-account HTTP response and replay retain the durable Request ID with 404', async t => {
+  const h = await harness(t, { fetchImpl: () => Response.json({ data: {}, userExists: false }) })
+  const server = createServer(createApp({ service: h.service, store: h.store, adapter: {}, adminToken: null,
+    listenerMode: 'public', logger: { error() {} }, hubSocialGateway: { socialData: (context, input) => h.gateway.socialAccountData(context, input) } }))
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  const send = () => fetch(`http://127.0.0.1:${server.address().port}/api/v1/data/social/crawl`, { method: 'POST',
+    headers: { Authorization: `Bearer ${h.key.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'http-twitter-account-not-found' },
+    body: JSON.stringify({ platform: 'twitter', user_id: 'Brain6ur', page_size: 30 }) })
+  const response = await send(), body = await response.json()
+  const usage = [...h.store.requests.values()][0]
+  assert.equal(response.status, 404)
+  assert.equal(body.error.code, 'social_account_not_found')
+  assert.equal(body.requestId, usage.id)
+  assert.equal(body.error.details.requestId, usage.id)
+  assert.equal(response.headers.get('x-mx-insight-request-id'), usage.id)
+  const replay = await send()
+  assert.equal(replay.status, 404)
+  assert.equal(replay.headers.get('x-mx-insight-request-id'), usage.id)
+  assert.deepEqual(await replay.json(), body)
+  assert.equal(h.calls.length, 1)
 })
 
 test('already-issued Twitter mxec2 cursors and exact historical replay keep the original contract', async t => {

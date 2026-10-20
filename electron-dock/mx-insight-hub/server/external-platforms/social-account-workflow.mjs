@@ -248,16 +248,23 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             }
           } catch (error) {
             if (!(error instanceof TikHubUpstreamError || error instanceof RapidApiUpstreamError || error instanceof JustOneUpstreamError)) throw error
-            const evidence = error.evidence, status = evidence.httpStatus === 429 ? 429 : 502
-            const failureDetails = { ...(evidence.httpStatus === 429 ? upstreamCapacityError(evidence).details : {}), outcome: evidence.outcome, retryable: false }
+            const evidence = error.evidence
+            const accountNotFound = error instanceof RapidApiUpstreamError && provider === 'rapidapi'
+              && step.endpointKey === 'twitter-aio.user-info' && step.operation === 'user-info'
+              && evidence.outcome === 'rejected' && evidence.errorCode === 'social_account_not_found'
+            const status = accountNotFound ? 404 : evidence.httpStatus === 429 ? 429 : 502
+            const failureDetails = { ...(evidence.httpStatus === 429 ? upstreamCapacityError(evidence).details : {}),
+              ...(accountNotFound ? { platform: 'twitter', stage: 'account_lookup' } : {}), outcome: evidence.outcome, retryable: false }
             currentEvidence = { ...evidence, callId: currentCall.id, delivery: callDelivery, costMinor: cost.costMinor,
               costKind: cost.costKind, currency: cost.currency, latencyMs: Math.round(performance.now() - callStart),
               ...persistedEvidence(error), archiveObjects: archiveObjects(error, step, currentCall.id) }
-            const code = evidence.outcome === 'unknown' ? 'upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'external_platform_rejected'
+            const code = accountNotFound ? 'social_account_not_found' : evidence.outcome === 'unknown' ? 'upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'external_platform_rejected'
+            const message = accountNotFound ? 'The upstream provider reported that the Twitter account was not found'
+              : 'Account acquisition failed; inspect its saved outcome'
             await store.finishFailure({ ...currentEvidence, failureResponseStatus: status,
-              failureResponseBody: { error: { code, message: 'Account acquisition failed; inspect its saved outcome', details: failureDetails }, requestId: delivery.usageRequestId } })
+              failureResponseBody: { error: { code, message, details: failureDetails }, requestId: delivery.usageRequestId } })
             currentCall = null; settledFailure = true
-            throw new AppError(status, code, 'Account acquisition failed; inspect its saved outcome', failureDetails)
+            throw new AppError(status, code, message, failureDetails)
           }
           const receipt = result.restrictedResponseArchive
           currentEvidence = { callId: currentCall.id, delivery: callDelivery, outcome: 'succeeded', billed, httpStatus: 200, businessCode,

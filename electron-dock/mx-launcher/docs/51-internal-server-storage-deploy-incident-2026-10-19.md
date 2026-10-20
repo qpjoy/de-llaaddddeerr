@@ -366,8 +366,8 @@ KUBECONFIG=/etc/kubernetes/admin.conf bash mx-dataport/scripts/manage.sh ops int
 
 | 位置 | 行为 | 配置 |
 | --- | --- | --- |
-| Compass `po-backend-java`（当前分支 `feat/yjj/hdo_v2`）`MxLauncherAuthServiceImpl` | 成功的 introspect 按 token 的 SHA-256 缓存 30 秒；同一 token 的并发请求共享一次 Launcher 调用；**仅当** Launcher 不可用（超时/5xx）时，120 秒内确认过的 token 继续可用；Launcher 明确拒绝时立即清除；改密码后清除该 token；最多 10000 条 | `MX_LAUNCHER_INTROSPECTION_CACHE_TTL_MS=30000`（0 关闭）、`MX_LAUNCHER_INTROSPECTION_STALE_GRACE_MS=120000`（0 关闭）、`MX_LAUNCHER_INTROSPECTION_CACHE_MAX_ENTRIES=10000` |
-| Hub `server/identity/launcher-client.mjs` | 原 30 秒缓存增加并发合并，以及同样的“仅 Launcher 不可用时 120 秒兜底”；明确拒绝清除；`invalidate()` 不会被进行中的调用回填 | `MX_INSIGHT_LAUNCHER_STALE_GRACE_MS=120000`（0 关闭，上限 600000）；`CACHE_TTL_MS=0` 时缓存与兜底都关闭 |
+| Compass `po-backend-java`（当前分支 `feat/yjj/hdo_v2`）`MxLauncherAuthServiceImpl` | 成功的 introspect 按 token 的 SHA-256 缓存 30 秒；同一 token 的并发请求共享一次 Launcher 调用；**仅当** Launcher 不可用（超时/5xx）时，120 秒内确认过的 token 继续可用；Launcher 明确拒绝时立即清除；改密码后清除该 token；最多 10000 条 | 默认值写在 `application.yml`，不需要配置；仅在需要关闭时设 `MX_LAUNCHER_INTROSPECTION_CACHE_TTL_MS=0` 或 `MX_LAUNCHER_INTROSPECTION_STALE_GRACE_MS=0` |
+| Hub `server/identity/launcher-client.mjs` | 原 30 秒缓存增加并发合并，以及同样的“仅 Launcher 不可用时 120 秒兜底”；明确拒绝清除；`invalidate()` 不会被进行中的调用回填 | 内置 120 秒，不需要配置 `.env`；只有原有的 `MX_INSIGHT_LAUNCHER_CACHE_TTL_MS=0` 会同时关闭缓存与兜底 |
 | Launcher `server/src/lib/readiness-gate.ts`，用于 API `/readyz` 与 identity `/healthz` | 同时最多一个库检查（探针不再给忙碌连接池加排队）；分别在 1 秒/0.5 秒内回答；首次成功前仍不就绪（启动门槛不变）；之后库慢或失败时 60 秒内保持在服务中（API 响应带 `degraded: true`），超过 60 秒仍下线 | liveness 不变：API `/healthz` 不查库，identity 是 TCP |
 
 撤销语义：Compass 原来每次都问 Launcher，现在最晚 30 秒发现撤销（与 Hub 现有设计相同）；Launcher 不可用期间最晚 150 秒。Compass 的登出原本就不在 Launcher 侧撤销 token，不受影响。登录协议、token 格式、MX-H2I 联网、SSO 配置都没有改。

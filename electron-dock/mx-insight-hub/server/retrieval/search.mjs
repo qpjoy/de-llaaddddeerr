@@ -202,8 +202,11 @@ export class AdvancedSearch {
     this.vectorCache = new Map()
     this.embeddingRouter = null
     this.active = 0
-    this.strict = search?.segmenter?.segmentWithMeta
-      ? requireSegmenterBackend(search.segmenter, { expectedBackend: 'hanlp', maxAttempts: 1, maxBatch: 16 })
+    // Query terms come from the coalesced, time-bounded query segmenter; the
+    // strict wrapper still refuses anything that is not verified HanLP.
+    const querySegmenter = search?.querySegmenter ?? search?.segmenter
+    this.strict = querySegmenter?.segmentWithMeta
+      ? requireSegmenterBackend(querySegmenter, { expectedBackend: 'hanlp', maxAttempts: 1, maxBatch: 16 })
       : null
   }
   async capabilities() {

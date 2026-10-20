@@ -1,6 +1,6 @@
 # Hub 账号内容与资料接入指南
 
-更新：2026-10-18。当前源码与离线验证说明；不表示生产已经发布。
+更新：2026-10-20。当前源码与离线验证说明；不表示生产已经发布。
 
 本轮接管 `/api/v1/data/social/crawl` 和 `/api/v1/data/social/user-info`，保留 `/api/v1/night-all/search/crawl|user-info` 及 `/api/v1/search/crawl|user-info` 原有转发行为。下游逐步切换前不删除旧入口，不改 `/data/search` 的既有供应链，也不扩展 Twitter 专用 `/data/social/search`。
 
@@ -63,11 +63,17 @@ Content-Type: application/json
 | `data.raw_info` | JSON 字符串，账号资料列表；按字符串解析一次 |
 | `data.raw_data` | JSON 字符串，crawl 的本页业务条目列表，关系活动为账号条目；资料查询为 `"[]"` |
 | `data.page/pageInfo` | 同步的 `hasMore/nextCursor/pageSize/returnedCount`；returnedCount 仅描述本页 |
-| `data.status/warnings` | 展示 partial 与边界原因；不能将 429、502、未知结果解释为空数据 |
+| `data.status/warnings` | 展示 partial 与边界原因；不能将 404、429、502、未知结果解释为空数据 |
 
 内容常用字段继续包含 `content_id/content/full_text/platform_name/created_at`、作者、互动和媒体字段；资料常用字段为 `user_id/user_name/nickname/description/avatar_url`、粉丝和关注数等。标准化时不从缺失值制造实测零值，`0` 与 `null` 分开。展示层仅读取别名，不改写完整响应。特别注意：`raw_data` 是序列化数组，不能把整个字符串包进数组当作一条内容。
 
 `followers/following` 活动返回 `objectType: "user"` 的关系账号条目，使用 `user_id`，不生成 `content_id`。此时 `raw_info` 包含目标账号资料和本页实际交付的关系账号资料；上游多取的关系账号留到后续页，不提前出现在当前返回中。
+
+新账号接口在查找 Twitter 账号时，若上游以 HTTP 200 返回 `{"data":{},"userExists":false}` 且没有同时返回错误，Hub 返回 HTTP 404 / `social_account_not_found`。`error.details` 包含 `platform: "twitter"`、`stage: "account_lookup"`、`outcome: "rejected"`、`retryable: false`。消息说明“上游报告未找到该账号”，不据此断定账号永久不存在；账号当前是否实际存在须单独核实。crawl 在此处停止，不再调用该账号的内容时间线，也不将失败伪装为成功空列表。未明确报告未找到的空对象、格式异常或资料解析失败仍按原错误合同处理。
+
+修正仅影响新执行的账号查找。同一 Key、路径、原请求体与原幂等键命中的历史失败仍回放原回执：已经保存为 502 的结果不会改写为 404，也不会因为回放而再次调用上游。`retryable: false` 不授权自动换键、改 URL 或回退到旧接口重跑；如需重新查找，应先核对账号并单独决定是否发起可能再次计费的新请求。
+
+已保存回执及修复验证见 [2026-10-20 Twitter 账号查找故障](../operations/twitter-account-not-found-2026-10-20.md)。
 
 ## 分页与原请求保护
 

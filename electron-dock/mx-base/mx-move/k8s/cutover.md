@@ -1,8 +1,10 @@
 # Internal Kubernetes 数据切换
 
-最新事务 `mx-k8s-20261020-053718-a8d8c128` 已完成冷复制并提交新副本，独立服务为 `mx-k8s-containerd.service`，socket 为 `/run/mx-k8s-containerd/containerd.sock`。**当前为 `committed`，最终验收被一个已完成 Job 的缺失阻断；用户确认新副本上 MX-H2I 原用户登录、联网和 Pay 访问正常。保留新副本，不挂回旧目录、不重跑 `migrate`；同步 TTL 兼容修复后使用 `resume` 完成验收。**
+2026-10-20，最新事务 `mx-k8s-20261020-053718-a8d8c128` 已完成迁移，服务器回传 **`phase=services-restored`、`may_write=true`、`automatic_checks_passed=true`**。五个数据根使用根逻辑卷上的新副本，独立服务为 `mx-k8s-containerd.service`，socket 为 `/run/mx-k8s-containerd/containerd.sock`。用户此前已在新副本上确认 MX-H2I 原用户登录、联网和 Pay 访问正常。Docker 数据未迁移，etcd 未再次迁移，NAS 未纳入操作，历史数据及备份保留；无需继续执行 `migrate` 或 `resume`。
 
-历史事务 `mx-k8s-20261020-045344-8a34e06b` 已为 `aborted / may_write=false / recovery_status=restored`；随后 Docker 查询回传 `equivalent=true / ignored_differences=[mount_order]`。最新迁移的错误为 `phase=committed / workload set changed during migration`，位置 `Host.verify → Cluster.assert_workloads`；此前数据库和应用副本、网络就绪等待已返回。后续操作沿用当前 committed 事务，不能使用旧 aborted 事务 ID。
+历史事务 `mx-k8s-20261020-045344-8a34e06b` 已为 `aborted / may_write=false / recovery_status=restored`；随后 Docker 查询回传 `equivalent=true / ignored_differences=[mount_order]`。成功事务曾在 `committed` 阶段遇到 `workload set changed during migration`，位置 `Host.verify → Cluster.assert_workloads`；TTL 兼容修复后，用户已执行 `resume` 并完成最终验收。下文保留当时的执行及排障过程，不能据此重新发起已完成的迁移。
+
+最终摘要中的 `user_login_and_network_validation=required` 是程序固定输出的人工验收提示，不表示失败，也不记录用户已完成的登录、联网实测。`capacity` 中的复制估算、根卷剩余空间及预留值来自迁移预检，不能作为切换后的实时磁盘容量。`historical_data_deleted=false` 表示原历史副本尚未清理，本次成功验收不包含旧数据删除。
 
 ## 维护前同步
 
@@ -25,11 +27,11 @@
 
 以下命令均以 **root** 在服务器的 **`electron-dock/mx-base` 目录**执行。若已在 `mx-move` 目录，只将入口改为 `bash scripts/manage.sh`。
 
-### 当前已提交事务的工作负载验收
+### 已完成的工作负载验收与 TTL 修复
 
 现场 `workload-check` 已确认只有 `mx-harbor/mx-harbor-migrate-256cfbfe` 缺失，原 UID 为 `7d914a1b-a9cc-4a55-8f3d-88f25de7d4d4`；基线终态为 `Complete`、无活动实例、TTL 为 86400 秒、完成时间为 `2026-10-18T21:54:26Z`。按完成时间计算，到期时刻为北京时间 2026-10-20 05:54:26，落在迁移期间。没有新增或同名替换工作负载；这些证据符合 TTL 清理，但不能单凭摘要确认删除操作者。
 
-在服务器同步本次更新的 `mx-move/k8s/cluster_ops.py` 后运行：
+用户同步更新后的 `mx-move/k8s/cluster_ops.py`，并已执行以下恢复命令完成验收（当前无需重跑）：
 
 ```bash
 bash mx-move/scripts/manage.sh k8s resume
@@ -37,7 +39,7 @@ bash mx-move/scripts/manage.sh k8s resume
 
 新版守卫仅允许缺失的基线 Job 同时满足：唯一 `Complete=True`、无 `Failed=True`、无活动或正在终止的实例、无删除标记、TTL 为有效非负整数、完成时间与完成条件转换时间均有效且 TTL 已到期。Kubernetes 使用完成条件的 `lastTransitionTime` 起算 TTL，工具保守取它与 `completionTime` 的较晚值，依据见 [TTL 控制器实现](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/ttlafterfinished/ttlafterfinished_controller.go)。基线和现场中通过 owner UID 或 controller UID 标签关联的 Pod 都必须已终止，且没有运行或等待中的容器。其余缺失、新增、同名 UID 替换，以及现存对象的配置变化仍拒绝；原基线不修改，也不重建 Job。
 
-提交后的 `resume` 不重复冷复制，也不退回旧副本；已经运行的服务使用 `start` 保持运行，已恢复的副本数不重复修改。成功摘要应为 `phase=services-restored`、`may_write=true`、`automatic_checks_passed=true`，仍需服务器实际回传才能确认本次验收完成。
+提交后的 `resume` 不重复冷复制，也不退回旧副本；已经运行的服务使用 `start` 保持运行，已恢复的副本数不重复修改。服务器已实际回传 `phase=services-restored`、`may_write=true`、`automatic_checks_passed=true`，确认本次自动验收完成。
 
 需要继续只读定位集合差异时可运行：
 

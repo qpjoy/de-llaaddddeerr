@@ -45,6 +45,8 @@ fallback  建 议 都 去 学 吴 恩 达 建议 议都 都去 ...              
 
 每一档都是**运行时降级而非启动失败**：HanLP 不可达退 jieba 的位置、jieba 装不上退 bigram，入库永不中断。这是刻意的——入不了库是账本上的永久空洞，而错误的分词以后 reindex 就能修好。
 
+请求路径上的查询分词用 `interactiveSegmenter(segmenter)` 包一层：并发查询合并成批、只缓存 HanLP 验证过的结果、等待有上限（可降级调用 2 秒后退 jieba，严格调用按 `MX_COMMON_HANLP_TIMEOUT_MS`）。写入端（projector、全量重建）不要用它：它们自带批量，且不能因为慢被丢弃。
+
 两个容易踩且会静默减半质量的点已在代码里处理：`new Jieba()` 的词典是**空的**，会把中文切成单字（看起来在工作，检索效果等同 bigram），必须显式 `Jieba.withDict(dict)`；以及 `hmm: true` 才能切出词典里没有的词，社交文本里这类词很多。
 
 **ILM 没有 delete 阶段。** hot(30d rollover) → warm(30d, forcemerge) → cold(90d, readonly)，数据无限期保留，清理只能通过显式的、有审计的操作。

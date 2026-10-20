@@ -124,15 +124,10 @@ test('external-pull worker waits after settling a page even when another source 
   await done
 })
 
-test('adaptive pacing defaults to factor 1 capped at 60s and rejects out-of-range settings', () => {
+test('adaptive pacing is built in: factor 1 capped at 60s, with no environment setting', () => {
   const config = loadConfig(base).externalPull
   assert.equal(config.adaptiveDelayFactor, 1)
   assert.equal(config.adaptiveDelayMaxMs, 60_000)
-  assert.equal(loadConfig({ ...base, MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR: '0' }).externalPull.adaptiveDelayFactor, 0)
-  for (const [name, value] of [['MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR', '11'],
-    ['MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_MAX_MS', '600001'], ['MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR', '-1']]) {
-    assert.throws(() => loadConfig({ ...base, [name]: value }))
-  }
 })
 
 test('a slow backlog page stretches the next gap to its own duration, within the cap; a finished source is unaffected', async () => {

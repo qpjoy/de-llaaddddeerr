@@ -4,7 +4,7 @@ import {
   describeClusterHealth,
   ElasticsearchError,
 } from '@qpjoy/mx-common/elasticsearch'
-import { batchingSegmenter, createSegmenter } from '@qpjoy/mx-common/segmenter'
+import { batchingSegmenter, createSegmenter, interactiveSegmenter } from '@qpjoy/mx-common/segmenter'
 import { buildChunkDocument } from '../embedding/document.mjs'
 import { contentIndex, chunkIndex } from './index-definitions.mjs'
 import { buildContentDocument } from './document.mjs'
@@ -34,12 +34,17 @@ export {
 export function createSearch({ pool, config, logger = console }) {
   const client = createElasticsearchClient(config.elasticsearch)
   const segmenter = createSegmenter(config.segmenter, { logger })
+  // Query analysis has a person waiting on it. It shares the single HanLP
+  // inference slot with every index writer, so it is coalesced, cached and
+  // time-bounded instead of sending one request per search. Index writers keep
+  // `segmenter`: they batch on their own and must never be dropped for being slow.
+  const querySegmenter = interactiveSegmenter(segmenter)
   const indexSet = contentIndex({ numberOfReplicas: config.elasticsearch.numberOfReplicas })
   const getChunks = () => chunkIndex({
     dimensions: config.embedding?.dimensions,
     numberOfReplicas: config.elasticsearch.numberOfReplicas,
   })
-  const queries = new SearchQueries({ pool, client, segmenter, indexSet, chunkIndexSet: getChunks(), logger })
+  const queries = new SearchQueries({ pool, client, segmenter: querySegmenter, indexSet, chunkIndexSet: getChunks(), logger })
 
   Object.defineProperty(queries, 'chunkIndexSet', { get: getChunks })
 
@@ -47,6 +52,7 @@ export function createSearch({ pool, config, logger = console }) {
     client,
     pool,
     segmenter,
+    querySegmenter,
     indexSet,
     get chunkIndexSet() { return getChunks() },
     async prepareEmbeddingIndex() {
@@ -62,7 +68,7 @@ export function createSearch({ pool, config, logger = console }) {
     // method access or a second query implementation; ordinary search keeps
     // using `queries` and is unchanged.
     postgresQueries: client
-      ? new SearchQueries({ pool, client: null, segmenter, indexSet, chunkIndexSet: getChunks(), logger })
+      ? new SearchQueries({ pool, client: null, segmenter: querySegmenter, indexSet, chunkIndexSet: getChunks(), logger })
       : queries,
     projector: client
       ? new SearchProjector({ pool, client, segmenter, indexSet, logger })

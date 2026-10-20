@@ -8924,6 +8924,8 @@ paths:
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '403':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
+        '404':
+          description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。
         '409':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '429':
@@ -9023,6 +9025,8 @@ paths:
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '403':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
+        '404':
+          description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。
         '409':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '429':

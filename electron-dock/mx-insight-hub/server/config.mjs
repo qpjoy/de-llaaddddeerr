@@ -303,8 +303,10 @@ export function loadConfig(environment = process.env) {
     timeoutMs: positiveInteger(environment.MX_INSIGHT_LAUNCHER_TIMEOUT_MS, 3_000, 'MX_INSIGHT_LAUNCHER_TIMEOUT_MS'),
     // Bounds how long a revoked Launcher token can still be accepted here.
     cacheTtlMs: positiveInteger(environment.MX_INSIGHT_LAUNCHER_CACHE_TTL_MS, 30_000, 'MX_INSIGHT_LAUNCHER_CACHE_TTL_MS'),
-    // Only while Launcher is unavailable; 0 disables the bridge.
-    staleGraceMs: boundedNonNegativeInteger(environment.MX_INSIGHT_LAUNCHER_STALE_GRACE_MS, 120_000, 'MX_INSIGHT_LAUNCHER_STALE_GRACE_MS', 600_000),
+    // Only while Launcher is unavailable (built in, not a deployment setting).
+    // The token was verified within the last TTL + grace and is never served
+    // after Launcher explicitly rejects it.
+    staleGraceMs: 120_000,
     // Launcher scopes that confer Hub platform-admin. Empty by default: nobody
     // becomes a Hub administrator merely by holding a Launcher account, and the
     // list is operator configuration rather than something a token can assert.
@@ -450,21 +452,12 @@ export function loadConfig(environment = process.env) {
         'MX_INSIGHT_PROVINCE_PAGE_DELAY_MS',
         60_000,
       ),
-      // Backlog pages wait at least as long as the previous page took (x
-      // factor, capped), so a slow database slows the catch-up instead of the
-      // catch-up slowing the database. 0 keeps only the fixed page delay.
-      adaptiveDelayFactor: boundedNonNegativeInteger(
-        environment.MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR,
-        1,
-        'MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_FACTOR',
-        10,
-      ),
-      adaptiveDelayMaxMs: boundedNonNegativeInteger(
-        environment.MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_MAX_MS,
-        60_000,
-        'MX_INSIGHT_EXTERNAL_PULL_ADAPTIVE_DELAY_MAX_MS',
-        600_000,
-      ),
+      // Backlog pages wait at least as long as the previous page took (capped),
+      // so a slow database slows the catch-up instead of the catch-up slowing
+      // the database. Built in rather than another deployment setting: it only
+      // ever adds delay when pages are already slow.
+      adaptiveDelayFactor: 1,
+      adaptiveDelayMaxMs: 60_000,
     },
     serverFiles: {
       // A deployment-owned allowlist. API requests may paste an absolute path,

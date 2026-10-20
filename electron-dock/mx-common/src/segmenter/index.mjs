@@ -32,6 +32,8 @@ const CJK = /[㐀-䶿一-鿿豈-﫿぀-ヿ]/
 // the `tokens` keyword facet with a term present in nearly every document that
 // discriminates nothing.
 const LATIN_TOKEN = /[#@]?[A-Za-z0-9_][A-Za-z0-9_'\-.]*/g
+// Read by deploy/hanlp/server.py's admission lanes.
+const SEGMENT_PRIORITY_HEADER = 'x-mx-segment-priority'
 
 // Per-call provenance is returned with the tokens so concurrent requests never
 // have to infer their backend from the shared `available`/`lastError` snapshot.
@@ -109,8 +111,17 @@ export class HanlpSegmenter {
    *
    * Alignment is checked rather than assumed: a short or reordered response
    * would attach one record's tokens to another, which is worse than failing.
+   *
+   * `priority: 'interactive'` asks the service to admit the batch ahead of
+   * bulk work, onto a worker bulk writers may not take. Only a caller with a
+   * person waiting should pass it; leaving it out is what keeps a writer a
+   * writer, because the service treats an unlabelled request as bulk.
    */
-  async segmentBatchWithMeta(texts, { allowFallback = true } = {}) {
+  async segmentBatchWithMeta(texts, {
+    allowFallback = true,
+    timeoutMs = this.batchTimeoutMs,
+    priority = null,
+  } = {}) {
     if (texts.length === 0) return []
     // An older tokenizer has no /tokenize/batch. Falling back to the per-text
     // endpoint keeps full HanLP provenance -- only the request shape changes --
@@ -118,16 +129,20 @@ export class HanlpSegmenter {
     // a strict rebuild, fail the whole run on a version skew that costs nothing
     // but speed.
     if (!this.batchSupported) {
-      return Promise.all(texts.map((text) => this.segmentWithMeta(text)))
+      return Promise.all(texts.map((text) => this.segmentWithMeta(text, { allowFallback })))
     }
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), this.batchTimeoutMs)
+    // Bulk writers keep the long batch timeout. A request-path caller passes
+    // its own, shorter one: it has a person waiting and a fallback to use.
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
       const response = await this.fetchImpl(`${this.url}/tokenize/batch`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
           ...(this.token ? { authorization: `Basic ${this.token}` } : {}),
+          // An older image ignores the header, so sending it is never a skew risk.
+          ...(priority === 'interactive' ? { [SEGMENT_PRIORITY_HEADER]: 'interactive' } : {}),
         },
         body: JSON.stringify({ texts, coarse: true }),
         signal: controller.signal,
@@ -136,7 +151,7 @@ export class HanlpSegmenter {
         this.batchSupported = false
         this.logger?.warn?.('[mx-common] HanLP has no /tokenize/batch; using per-text calls')
         clearTimeout(timer)
-        return Promise.all(texts.map((text) => this.segmentWithMeta(text)))
+        return Promise.all(texts.map((text) => this.segmentWithMeta(text, { allowFallback })))
       }
       if (!response.ok) {
         throw segmenterError('hanlp_http_error', `HanLP responded ${response.status}${await hanlpErrorSuffix(response)}`)
@@ -504,6 +519,216 @@ export function batchingSegmenter(segmenter, { maxBatch = 64 } = {}) {
           queueMicrotask(flush)
         }
       })
+    },
+    async segment(text, options = {}) {
+      return (await this.segmentWithMeta(text, options)).tokens
+    },
+  }
+}
+
+/**
+ * Request-path segmentation: coalesce under load, remember verified answers,
+ * and never keep a caller waiting on the tokenizer past its budget.
+ *
+ * The HanLP service has a few workers, each running one forward pass at a time.
+ * One query per HTTP request pays the per-pass overhead (HTTP, Python dispatch,
+ * model handoff) per query, so the service saturates long before Elasticsearch
+ * does, and every queued search keeps its request slot while it waits. Here a
+ * query that arrives while earlier ones are in flight joins the next batch
+ * instead. Idle traffic still leaves at once as a batch of one; batch size
+ * grows with load, so one pass absorbs a burst instead of the burst forming a
+ * queue at the service. Every batch is labelled interactive, so the service
+ * admits it ahead of bulk work and onto a worker writers cannot occupy.
+ *
+ *  - Only verified HanLP answers are cached. Tokens are a pure function of the
+ *    text for a deployed model; the TTL bounds staleness across a redeploy.
+ *  - Identical concurrent texts share one slot in one batch.
+ *  - A caller waits at most its budget, then gets what HanlpSegmenter gives on
+ *    failure: fail-soft callers a labelled jieba fallback, strict callers
+ *    (`allowFallback: false`) a degraded empty result. Work nobody waits for is
+ *    dropped before it is sent; work already sent completes and warms the cache.
+ *  - The unsent queue is bounded. Past it a caller degrades immediately rather
+ *    than holding its request for a pass that cannot arrive in time.
+ *
+ * Bulk writers do not use this: they already batch, and they must not be
+ * dropped for being slow. A segmenter without a batch API (jieba, bigram, test
+ * doubles) is returned unchanged; it has no per-request overhead to coalesce.
+ */
+export function interactiveSegmenter(segmenter, {
+  maxBatch = 32,
+  maxBatchChars = 16_384,
+  maxInFlight = 2,
+  maxPending = 1_024,
+  waitMs = 2_000,
+  strictWaitMs = segmenter?.timeoutMs ?? 5_000,
+  // The HTTP request outlives any single caller's budget on purpose: an answer
+  // that arrives after its callers gave up still lands in the cache.
+  requestTimeoutMs = Math.max(waitMs, strictWaitMs),
+  cacheEntries = 5_000,
+  cacheTtlMs = 10 * 60_000,
+  maxCachedTextLength = 256,
+  now = Date.now,
+} = {}) {
+  if (typeof segmenter?.segmentBatchWithMeta !== 'function') return segmenter
+  const cache = new Map()
+  const entries = new Map()
+  const queue = []
+  let inFlight = 0
+  let scheduled = false
+  const counters = {
+    requests: 0, cacheHits: 0, joined: 0, batches: 0, batchedTexts: 0,
+    verified: 0, failed: 0, shed: 0, waitExpired: 0, dropped: 0,
+  }
+
+  const copy = (result) => ({ ...result, tokens: [...result.tokens] })
+  const verified = (result) => result?.backendUsed === 'hanlp'
+    && result.degraded === false
+    && Array.isArray(result.tokens)
+
+  const readCache = (text) => {
+    const hit = cache.get(text)
+    if (!hit) return null
+    cache.delete(text)
+    if (hit.expiresAt <= now()) return null
+    // Re-inserted so eviction (oldest key first) approximates least recently used.
+    cache.set(text, hit)
+    return copy(hit.result)
+  }
+  const remember = (text, result) => {
+    if (cacheEntries <= 0 || text.length > maxCachedTextLength) return
+    cache.delete(text)
+    if (cache.size >= cacheEntries) cache.delete(cache.keys().next().value)
+    cache.set(text, { result: copy(result), expiresAt: now() + cacheTtlMs })
+  }
+
+  const degrade = async (text, strict, errorCode, errorDetail) => {
+    if (strict) return segmentResult([], null, true, errorCode, errorDetail)
+    const fallback = segmenter.fallbackSegmenter
+      ? await segmenter.fallbackSegmenter.segmentWithMeta(text)
+      : segmentResult(fallbackSegment(text), 'bigram')
+    return segmentResult(fallback.tokens, fallback.backendUsed, true, errorCode, errorDetail)
+  }
+
+  const send = async (batch) => {
+    inFlight += 1
+    counters.batches += 1
+    counters.batchedTexts += batch.length
+    let results
+    try {
+      results = await segmenter.segmentBatchWithMeta(
+        batch.map((entry) => entry.text),
+        { allowFallback: false, timeoutMs: requestTimeoutMs, priority: 'interactive' },
+      )
+      if (!Array.isArray(results) || results.length !== batch.length) {
+        throw new Error('segmenter returned a misaligned batch')
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      results = batch.map(() => segmentResult([], null, true, 'hanlp_request_error', detail))
+    } finally {
+      inFlight -= 1
+    }
+    batch.forEach((entry, index) => {
+      if (entries.get(entry.text) === entry) entries.delete(entry.text)
+      if (verified(results[index])) {
+        counters.verified += 1
+        remember(entry.text, results[index])
+      } else {
+        counters.failed += 1
+      }
+      entry.settle(results[index])
+    })
+    schedule()
+  }
+
+  const pump = () => {
+    scheduled = false
+    while (inFlight < maxInFlight && queue.length > 0) {
+      const batch = []
+      let chars = 0
+      while (queue.length > 0 && batch.length < maxBatch) {
+        // A batch is one forward pass; bounding its text keeps the pass, and so
+        // the wait of whoever is queued behind it, short.
+        if (batch.length > 0 && chars + queue[0].text.length > maxBatchChars) break
+        const entry = queue.shift()
+        entry.sent = true
+        chars += entry.text.length
+        batch.push(entry)
+      }
+      send(batch)
+    }
+  }
+  // Callers from the same tick leave together even when nothing is in flight.
+  const schedule = () => {
+    if (scheduled || queue.length === 0) return
+    scheduled = true
+    queueMicrotask(pump)
+  }
+
+  const enqueue = (text) => {
+    let settle
+    const promise = new Promise((resolve) => { settle = resolve })
+    const entry = { text, promise, settle, waiters: 0, sent: false }
+    entries.set(text, entry)
+    queue.push(entry)
+    schedule()
+    return entry
+  }
+  const drop = (entry) => {
+    const index = queue.indexOf(entry)
+    if (index >= 0) queue.splice(index, 1)
+    if (entries.get(entry.text) === entry) entries.delete(entry.text)
+    counters.dropped += 1
+  }
+
+  return {
+    fallbackSegmenter: segmenter.fallbackSegmenter,
+    stats: () => ({
+      pending: queue.length,
+      inFlight,
+      cacheSize: cache.size,
+      ...counters,
+    }),
+    async segmentWithMeta(text, options = {}) {
+      if (!text) return segmentResult([], 'hanlp')
+      const strict = options?.allowFallback === false
+      counters.requests += 1
+      const cached = readCache(text)
+      if (cached) {
+        counters.cacheHits += 1
+        return cached
+      }
+      let entry = entries.get(text)
+      if (entry) {
+        counters.joined += 1
+      } else if (queue.length >= maxPending) {
+        counters.shed += 1
+        return degrade(text, strict, 'hanlp_busy', 'tokenizer queue is full')
+      } else {
+        entry = enqueue(text)
+      }
+      entry.waiters += 1
+      const budget = strict ? strictWaitMs : waitMs
+      let timer
+      const expired = Symbol('expired')
+      const outcome = await Promise.race([
+        entry.promise,
+        new Promise((resolve) => { timer = setTimeout(() => resolve(expired), budget) }),
+      ])
+      clearTimeout(timer)
+      entry.waiters -= 1
+      if (outcome === expired) {
+        counters.waitExpired += 1
+        if (entry.waiters === 0 && !entry.sent) drop(entry)
+        return degrade(text, strict, 'hanlp_busy', `tokenizer did not answer within ${budget} ms`)
+      }
+      if (verified(outcome)) return copy(outcome)
+      return degrade(
+        text,
+        strict,
+        outcome?.errorCode || 'hanlp_request_error',
+        outcome?.errorDetail ?? null,
+      )
     },
     async segment(text, options = {}) {
       return (await this.segmentWithMeta(text, options)).tokens
