@@ -68,16 +68,15 @@ export function navigateAfterLogin(
     target.assign(destination.href);
   }
 }
-export const startAccountSession = (register = false) =>
+export const startAccountSession = () =>
   request<{ redirect: string }>(
-    `/auth/sso/start?view=${register ? "register" : "login"}`,
+    "/auth/sso/start?view=login",
     { method: "POST", body: "{}", signal: AbortSignal.timeout(15000) },
   );
 
 // A 410 can come from either the local transaction or the issuer's interaction.
 // They have different error codes but both require a NEW OIDC round trip.
 export async function loadAccountForm({
-  register = false,
   canRestart = false,
   current = (): boolean => true,
   read = () =>
@@ -94,7 +93,7 @@ export async function loadAccountForm({
       canRestart &&
       current()
     )
-      return start(register);
+      return start();
     throw error;
   }
 }
