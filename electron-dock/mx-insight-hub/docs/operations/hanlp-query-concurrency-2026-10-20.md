@@ -98,7 +98,7 @@ flowchart LR
 
 ### 部署与验证（需用户批准后执行）
 
-1. `bash electron-dock/mx-common/scripts/manage.sh deploy hanlp`。脚本自带 `/health` 和 `/tokenize` 冒烟检查。Recreate 策略下，5 个 worker 加载完成前 Hub 会退回 jieba，和以往每次部署 HanLP 一样。
+1. `PROXY=127.0.0.1:7788 bash electron-dock/mx-common/scripts/manage.sh deploy hanlp`。`PROXY` 只作用于镜像构建；节点直连 Docker Hub 不通时，没有它会卡在解析 `docker/dockerfile:1.7`（2026-10-21 实际遇到）。脚本自带 `/health` 和 `/tokenize` 冒烟检查。Recreate 策略下，5 个 worker 加载完成前 Hub 会退回 jieba，和以往每次部署 HanLP 一样。
 2. `kubectl -n mx-common logs deploy/mx-common-hanlp | head -1` 应显示 `5 worker(s) x 3 thread(s), 1 reserved for interactive requests`。如果显示 1 个 worker，检查 Deployment 是否还残留 `MAX_CONCURRENT_INFERENCES`。
 3. `bash scripts/inspect-retrieval-capacity.sh --probe-hanlp`，看 1/8/16 条批量的实际延迟。注意这个探针不带优先头，测的是写入通道。巡检报告的 safeEnv 里不再出现线程变量，池信息请看 `/health` 的 `pool` 字段或启动日志。
 4. **内存要在真实写入负载下看。** 探针只发很小的批次。等 projector 或重建跑起来后，用 `kubectl -n mx-common top pod` 确认容器内存稳定低于 8Gi。每个 worker 1.5 GiB 是估计值，还没有在生产上测过。

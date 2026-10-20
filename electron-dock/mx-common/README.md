@@ -86,14 +86,19 @@ Python 依赖默认经清华 PyPI 镜像下载，Torch 只从官方 CPU wheel �
 并以 `/health` 和 `/tokenize` 作为成功条件。相同 image ID 不会触发无变化的
 Pod rollout；整个命令可安全重复执行。
 
-若节点访问 PyTorch 官方 CPU wheel 源仍然很慢，可只给这次构建传代理；脚本会把
-代理同时交给 builder 和镜像内的 pip/模型下载步骤，不改 Docker daemon 的全局配置：
+节点直连 Docker Hub（`docker/dockerfile` 前端镜像）或 PyTorch 官方 CPU wheel 源
+不稳定时，用 `PROXY` 只给这次镜像构建走代理。写法与 electron-dock 总入口一致：
+`127.0.0.1:7788` 或 `http(s)://host:port`；`*`、`0.0.0.0` 这类监听地址会被拒绝：
 
 ```bash
-HTTP_PROXY=http://127.0.0.1:7788 \
-HTTPS_PROXY=http://127.0.0.1:7788 \
-bash scripts/manage.sh deploy hanlp
+PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy hanlp
 ```
+
+代理会交给 buildkitd（解析前端和基础镜像）、buildx 客户端（取镜像仓库 token）和镜像内的
+pip/模型下载步骤；构建一结束就撤销，后面的 kubectl、containerd 导入和发布都不走代理，
+也不改 Docker daemon 的全局配置。代理变化时脚本会自动重建专用 builder 并保留缓存。
+旧写法 `HTTP_PROXY=… HTTPS_PROXY=… bash scripts/manage.sh deploy hanlp` 仍可用，
+但它对整个脚本生效，kubectl 访问 API Server 也会经过代理。
 
 不要再把 `MX_COMMON_HANLP_ENABLED=1` 当作部署开关；该旧入口会被明确拒绝，
 避免 Docker 与 Kubernetes containerd 的同名镜像内容不一致。

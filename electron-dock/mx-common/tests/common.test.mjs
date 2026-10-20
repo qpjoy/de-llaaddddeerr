@@ -701,6 +701,79 @@ test('containerd image names are canonicalized before idempotency checks', async
   ])
 })
 
+test('PROXY reaches only the HanLP image build, never kubectl or ctr', async () => {
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const { mkdtemp, readFile, rm } = await import('node:fs/promises')
+  const { fileURLToPath } = await import('node:url')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const run = promisify(execFile)
+  const script = fileURLToPath(new URL('../scripts/manage.sh', import.meta.url))
+  const root = await mkdtemp(join(tmpdir(), 'mx-common-hanlp-proxy-'))
+  // A docker stand-in that records every call with the proxy it would have used.
+  const stubDocker = [
+    'docker() {',
+    '  printf \'%s | HTTPS_PROXY=%s NO_PROXY=%s\\n\' "$*" "${HTTPS_PROXY:-}" "${NO_PROXY:-}" >> "$LOG"',
+    '  case "$1 $2" in',
+    '    "buildx inspect")',
+    '      if [ "${3:-}" != --bootstrap ]; then',
+    '        [ -f "$LOG.created" ] || return 1',
+    '        echo "Driver:  docker-container"',
+    '      fi ;;',
+    '    "buildx create") : > "$LOG.created" ;;',
+    '    "ps -aq") echo buildkit-container ;;',
+    '    "inspect --format") case "$3" in *Args*) echo \'["--allow-insecure-entitlement","network.host"]\' ;; esac ;;',
+    '    "image inspect") echo sha256:built ;;',
+    '  esac',
+    '}',
+  ].join('\n')
+  const environment = (proxy, log) => {
+    const env = { ...process.env, LOG: log, PROXY: proxy }
+    for (const name of ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']) delete env[name]
+    return env
+  }
+  const build = (proxy, log) => run('bash', [
+    '-c',
+    `source "$1"; ${stubDocker}
+build_hanlp_image
+echo "after: HTTPS_PROXY=\${HTTPS_PROXY:-unset} https_proxy=\${https_proxy:-unset} NO_PROXY=\${NO_PROXY:-unset}"`,
+    '_',
+    script,
+  ], { env: environment(proxy, log) })
+
+  try {
+    const log = join(root, 'docker.log')
+    const { stdout } = await build('127.0.0.1:7788', log)
+    const calls = (await readFile(log, 'utf8')).trim().split('\n')
+    // buildkitd resolves the Dockerfile frontend and base image itself.
+    const create = calls.find((line) => line.startsWith('buildx create'))
+    assert.match(create, /--driver-opt env\.HTTP_PROXY=http:\/\/127\.0\.0\.1:7788/)
+    assert.match(create, /--driver-opt env\.HTTPS_PROXY=http:\/\/127\.0\.0\.1:7788/)
+    // The buildx client fetches registry tokens; RUN steps get the build args.
+    const image = calls.find((line) => line.startsWith('buildx build'))
+    assert.match(image, /--build-arg HTTPS_PROXY --build-arg NO_PROXY/)
+    assert.match(image, /\| HTTPS_PROXY=http:\/\/127\.0\.0\.1:7788 NO_PROXY=localhost,127\.0\.0\.1,/)
+    assert.match(stdout, /uses PROXY http:\/\/127\.0\.0\.1:7788 \(this build only/)
+    // Gone before the caller goes on to kubectl and ctr.
+    assert.match(stdout, /after: HTTPS_PROXY=unset https_proxy=unset NO_PROXY=unset/)
+
+    const redactedLog = join(root, 'redacted.log')
+    const redacted = await build('https://user:secret@proxy.example:8443', redactedLog)
+    assert.match(redacted.stdout, /uses PROXY https:\/\/<redacted>@proxy\.example:8443/)
+    assert.doesNotMatch(redacted.stdout, /secret/)
+
+    for (const invalid of ['*:7788', '0.0.0.0:7788', 'socks5://127.0.0.1:7788', '127.0.0.1', 'http://127.0.0.1:7788/x']) {
+      const rejectedLog = join(root, 'rejected.log')
+      await assert.rejects(build(invalid, rejectedLog), /PROXY needs a reachable HTTP\(S\) host and port/)
+      // Refused before any builder is touched.
+      await assert.rejects(readFile(rejectedLog, 'utf8'))
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('the rendered HanLP pod template tracks the built image ID and local node', async () => {
   const { execFile } = await import('node:child_process')
   const { promisify } = await import('node:util')

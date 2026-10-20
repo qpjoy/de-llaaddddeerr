@@ -1,6 +1,8 @@
 ```bash
 # 配置 HanLP
 bash scripts/manage.sh deploy hanlp
+# 构建需要代理时（只作用于镜像构建）
+PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy hanlp
 
 # HanLP状态
 kubectl -n mx-common get deployment/mx-common-hanlp
