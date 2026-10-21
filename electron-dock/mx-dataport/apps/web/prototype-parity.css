@@ -1536,6 +1536,8 @@
 .key-row-actions [data-slot="button"][data-variant="ghost"] {
   color: #e5484d;
 }
+.auth-login-modes { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0; }
+.auth-login-modes > button { flex: 1; min-width: 136px; }
 
 /* All business dialogs share a bounded frame; only their body scrolls. */
 .dp-viewport-dialog[data-slot="dialog-content"] {
@@ -1634,6 +1636,19 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+/* Invited MX owner onboarding stays separate from independent employee login. */
+.risk-auth-dialog .auth-owner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-block: 12px;
+}
+.risk-auth-dialog .auth-owner-actions > button {
+  flex: 1 1 140px;
+  height: auto;
+  min-height: 36px;
+  white-space: normal;
+}
 /* Keep every documentation category and audit filter readable on narrow screens. */
 .parity-doc-groups {
   min-width: 0;
@@ -1664,21 +1679,4 @@
     max-width: none;
     width: 100%;
   }
-}
-
-/* Unified login follows the read-only DataPort reference, retaining a scrollable
-   form on short viewports and when the virtual keyboard reduces the height. */
-.risk-auth-dialog.auth-dialog .auth-form-panel {
-  padding: 52px 40px 36px;
-  scrollbar-gutter: auto;
-}
-.risk-auth-dialog.auth-dialog .auth-form-panel [data-slot="dialog-header"] {
-  margin-bottom: 32px;
-}
-.risk-auth-dialog.auth-dialog .auth-form-panel [data-slot="field-group"] {
-  gap: 28px;
-}
-.risk-auth-dialog .auth-check-session { margin-top: 12px; }
-@media (max-width: 680px) {
-  .risk-auth-dialog.auth-dialog .auth-form-panel { padding: 36px 24px 28px; }
 }

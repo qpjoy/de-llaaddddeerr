@@ -1,12 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadAccountForm, navigateAfterLogin, loginFailureUncertain } from "../apps/web/api.ts";
-
-test("uncertain login acknowledgement requires session verification, while definite refusals remain editable", () => {
-  for (const error of [new TypeError('network failed'), Object.assign(Error(),{name:'TimeoutError'}),
-    {status:503}, {code:'invalid_response'}, {code:'local_auth_unconfirmed'}]) assert.equal(loginFailureUncertain(error),true);
-  for (const status of [400,401,403,409,410,429]) assert.equal(loginFailureUncertain({status}),false);
-});
+import { loadAccountForm, navigateAfterLogin } from "../apps/web/api.ts";
 
 test("same-document local login refreshes App immediately without another document request or login replay", () => {
   const events = [];

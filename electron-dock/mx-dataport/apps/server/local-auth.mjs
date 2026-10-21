@@ -30,32 +30,23 @@ export function createLocalAuth(fetcher) {
     if (!value.data || typeof value.data !== 'object') throw new SsoError(503,'local_auth_unavailable','账号服务响应无效。');
     return value.data;
   }
-  async function login(integration, req, res, body, json) {
-    const result = await call(integration, req, 'login', body);
-    if (!/^[A-Za-z0-9_-]{43}$/.test(result.token || '') || typeof result.csrf !== 'string') throw new SsoError(503, 'local_auth_unavailable', '账号服务响应无效。');
-    res.setHeader('set-cookie', [cookie(LOCAL_COOKIE,result.token,30*86400),cookie('__Host-mx-harbor_sso','',0),cookie('__Host-mx-harbor_login','',0)]);
-    json(200, {redirect:'/#/intelligence'});
-    return true;
-  }
   return {
-    login,
-    async resolveLogin(integration, req, account) {
-      const result = await call(integration, req, 'resolve', {account});
-      if (typeof result.exists !== 'boolean') throw new SsoError(503, 'local_auth_unavailable', '账号服务响应无效。');
-      return result.exists;
-    },
     session: (integration,req) => call(integration,req,'session'),
     async handle(req,res,url,integration,json) {
       const token=localToken(req), path=url.pathname;
-      const isLogin=path==='/auth/local/login';
+      const login=path==='/auth/local/login';
       const localAccount=token && ['/auth/sso/session','/auth/sso/account','/auth/sso/logout'].includes(path);
-      if (!isLogin && !localAccount) return false;
+      if (!login && !localAccount) return false;
       if (url.search) throw new SsoError(400,'invalid_query','此账号操作不接受查询参数。');
-      if (isLogin) {
+      if (login) {
         if (req.method !== 'POST') throw new SsoError(405,'method_not_allowed','请使用登录表单。');
         localOrigin(req,integration);
         if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) throw new SsoError(415,'invalid_content_type','请使用 JSON 请求。');
-        return login(integration, req, res, await readSsoJson(req,2048), json);
+        const result=await call(integration,req,'login',await readSsoJson(req,2048));
+        if (!/^[A-Za-z0-9_-]{43}$/.test(result.token || '') || typeof result.csrf!=='string') throw new SsoError(503,'local_auth_unavailable','账号服务响应无效。');
+        res.setHeader('set-cookie',[cookie(LOCAL_COOKIE,result.token,30*86400),cookie('__Host-mx-harbor_sso','',0),cookie('__Host-mx-harbor_login','',0)]);
+        json(200,{redirect:'/#/intelligence'});
+        return true;
       }
       if (path==='/auth/sso/session' && req.method==='GET') {
         try {

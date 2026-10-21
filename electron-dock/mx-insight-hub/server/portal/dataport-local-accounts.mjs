@@ -177,16 +177,6 @@ export class DataportLocalAccounts {
       return { token, csrf, expiresIn: 30 * 86400, mustChangePassword: !!current.initial_cipher };
     });
   }
-  async resolveLogin(body) {
-    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => k !== 'account') || typeof body.account !== 'string' || !body.account.trim() || body.account.length > 255)
-      fail(400, 'invalid_local_login', '请填写账号。');
-    await this.throttle('resolve-global', 600);
-    await this.pool.query('DELETE FROM dataport.login_limits WHERE bucket IN (SELECT bucket FROM dataport.login_limits WHERE expires_at<=now() LIMIT 1000)');
-    await this.throttle(`resolve:${accountName(body.account)}`, 10);
-    const rows = await this.pool.query('SELECT 1 FROM dataport.local_credentials WHERE account=$1', [accountName(body.account)]);
-    // Disabled/expired accounts remain reserved and must never fall through to MX.
-    return { exists: rows.rows.length > 0 };
-  }
   async principal(token, metadata, db = this.pool) {
     if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) fail(401, 'login_required', '请重新登录数港子账号。');
     const row = (await db.query(`SELECT c.member_id,c.tenant_id,c.account,c.initial_cipher IS NOT NULL AS must_change_password,

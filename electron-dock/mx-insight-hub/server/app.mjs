@@ -1446,8 +1446,6 @@ export function createApp({
           let value
           if(portalPath==='/local/login' && request.method==='POST') {
             value=await customerDataport.localAccounts.login(await readJson(request,2048))
-          } else if(portalPath==='/local/resolve' && request.method==='POST') {
-            value=await customerDataport.localAccounts.resolveLogin(await readJson(request,2048))
           } else if (['/local/session','/local/account'].includes(portalPath) && request.method==='GET') {
             value=await customerDataport.localAccounts.account(token,metadata)
           } else if (['/local/logout','/local/account'].includes(portalPath) && request.method==='POST') {
