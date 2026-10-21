@@ -2,7 +2,7 @@
 
 2026-10-21。接 [delivery-path-throughput-2026-10-21.md](delivery-path-throughput-2026-10-21.md)「仍然存在的上限」第 1、2 条。服务器的盘是消费级 NVMe，和 etcd 共用，出现过 fsync 卡顿，所以真正要省的是 WAL 量。
 
-**状态：只出设计和一个只读测量 SQL，没有改任何运行代码。** 确认后再实现。
+**状态：B 已按用户确认实现（见下文 B 节的实测）。A 等用户决定，C 和 D 暂缓。**
 
 ## 结论
 
@@ -128,6 +128,22 @@ raw_payload = CASE WHEN ingest.source_objects.raw_payload IS NOT DISTINCT FROM E
 canonical 的三列同理。UPDATE 时，如果新值就是原来磁盘上的 TOAST 指针，PostgreSQL 会直接复用它，不写新的 TOAST 块。
 
 - **本机实测（PG 17，值约 8 KB，每轮前先 checkpoint）：** 一次未变化的 upsert，WAL 从 **18,009 字节降到 370 字节**。值变了照常替换（500/500）。
+- **已实现：** `server/stores/postgres-store.mjs` 里两条入库路径都已改好：`ingestExternalRecords`（外部平台结果、Night-All 兼容、导入）和 `ingestSearchResult`（`search-result` 任务）。改动覆盖 `source_objects.raw_payload` 和 canonical 的 `body`、`stable_fields`、`extensions`。用真实 ingest 代码走完整个入库事务，每轮前先 checkpoint，「每次看到未变化的记录」所写的 WAL 如下：
+
+  | 正文 | 改前 | 改后 |
+  | --- | --- | --- |
+  | 24k 随机 4 字母（TOAST 大、trigram 少） | 115,278 B | 4,823 B |
+  | 1500 个汉字 | 25,163 B | 4,150 B |
+
+  新增 native 测试 [`ingest-unchanged-toast-postgres.test.mjs`](../../tests/server/ingest-unchanged-toast-postgres.test.mjs)，两条路径各一个用例：
+  - 未变化时 TOAST chunk id（`pg_column_toast_chunk_id`）不变、revision 不变，WAL 少于存储字节的 1/4；
+  - 值变化的那一条照常重写、`current_revision` +1、新增 revision 行，其余记录不受影响。
+
+  拿改前的 SQL 跑这个测试，两个用例都会失败。
+- **回归：** 在同一台机器上，分别用当前 `pro` 原样代码和加了 B 的代码，在全新迁移的库上各跑一遍。
+  - native：基线 110 通过 / 4 失败 / 3 跳过（117 个），加 B 后 112 / 4 / 3，多出的 2 个就是新增测试。
+  - 单元：两边都是 4019 通过 / 43 失败 / 365 跳过。
+  - 两个套件里失败的用例名单完全相同，都是已有失败（commercial-governance、dataport、来源目录、Twitter、小红书路由等）。文档早先记的 116/3/3 基线是更早的 `pro`。
 - 不变的部分：revision 判断（仍按 hash）、`ON CONFLICT` 键、`last_seen_at`、`projection_revision`、两张 revisions 表的写入、ES 投影。
 - 代价：比较时要读出旧值，这是读 I/O，通常在缓存里，不产生 WAL，也不触发 fsync。
 - 覆盖所有 provider，是异步路径，但和同步交付写同一块盘。收益由第 5 段估算：`(observations − revisions) / observations` × 每次重写的字节数。
@@ -169,5 +185,10 @@ canonical 的三列同理。UPDATE 时，如果新值就是原来磁盘上的 TO
 
 ## 后续（不在本轮）
 
+- **canonical 的每次 upsert 都是非 HOT 更新，会把整行重新插进全部 18 个索引。**
+  - 原因：`last_seen_at` 有索引（`canonical_records_last_seen_idx`，`canonical_records_admin_feed_idx` 的 COALESCE 里也用到它），而每次看到记录都要更新它。
+  - 后果：即使内容没变，正文也会重新进 5 个 GIN trigram 索引之一的 `canonical_records_body_trgm_idx`。本机用 18 KB 随机 base64 正文测，一次未变化的入库约 290 KB WAL，几乎全是这个 GIN；B 只省掉 TOAST 那部分。
+  - 实际代价取决于正文有多少个不同的 trigram。中文能不能抽出 trigram 取决于服务器的 locale：本机 macOS 两种 locale 都抽不出，所以测不到中文的这部分开销。可以在服务器上用 `SELECT array_length(show_trgm('中文测试文本内容'), 1)` 确认。
+  - 要减少这部分，得先决定 `last_seen_at` 的更新规则（例如内容未变时限制刷新频率），并核对它的读者（搜索重建进度、数据浏览、admin feed）。这是一项单独的决定。
 - **社交账号搜索的 ingest 任务对不上 worker 的固定契约：** `platform` 是 `social`，`datasetId` 默认成了 `ecommerce.products.v1`，`classifyExternalPlatformIngest` 不认，所以会在 5 次尝试后进 dead。第 6 段的 dead 分布可以确认。
 - C 和 D，等测量结果出来再定。

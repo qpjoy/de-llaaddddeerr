@@ -3474,6 +3474,8 @@ export class PostgresStore {
 
       let changed = 0
       for (const record of records) {
+        // Large columns keep their stored value when it is unchanged; see
+        // ingestExternalRecords for why that saves the WAL of a new TOAST copy.
         await client.query(
           `INSERT INTO ingest.source_objects
              (id, connector_id, stream_id, object_type, source_key,
@@ -3481,7 +3483,8 @@ export class PostgresStore {
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            ON CONFLICT (connector_id, stream_id, object_type, source_key) DO UPDATE SET
              payload_sha256 = EXCLUDED.payload_sha256,
-             raw_payload = EXCLUDED.raw_payload,
+             raw_payload = CASE WHEN ingest.source_objects.raw_payload IS NOT DISTINCT FROM EXCLUDED.raw_payload
+                                THEN ingest.source_objects.raw_payload ELSE EXCLUDED.raw_payload END,
              source_updated_at = EXCLUDED.source_updated_at,
              last_seen_at = now(),
              ingest_run_id = EXCLUDED.ingest_run_id`,
@@ -3505,7 +3508,8 @@ export class PostgresStore {
              content_type = EXCLUDED.content_type,
              url = EXCLUDED.url,
              title = EXCLUDED.title,
-             body = EXCLUDED.body,
+             body = CASE WHEN core.canonical_records.body IS NOT DISTINCT FROM EXCLUDED.body
+                         THEN core.canonical_records.body ELSE EXCLUDED.body END,
              author_external_id = EXCLUDED.author_external_id,
              author_name = EXCLUDED.author_name,
              event_time = EXCLUDED.event_time,
@@ -3515,8 +3519,10 @@ export class PostgresStore {
              country_code = EXCLUDED.country_code,
              admin1_code = EXCLUDED.admin1_code,
              admin2_code = EXCLUDED.admin2_code,
-             stable_fields = EXCLUDED.stable_fields,
-             extensions = EXCLUDED.extensions,
+             stable_fields = CASE WHEN core.canonical_records.stable_fields IS NOT DISTINCT FROM EXCLUDED.stable_fields
+                                  THEN core.canonical_records.stable_fields ELSE EXCLUDED.stable_fields END,
+             extensions = CASE WHEN core.canonical_records.extensions IS NOT DISTINCT FROM EXCLUDED.extensions
+                               THEN core.canonical_records.extensions ELSE EXCLUDED.extensions END,
              last_seen_at = now(),
              current_revision = core.canonical_records.current_revision
                + (core.canonical_records.payload_sha256 IS DISTINCT FROM EXCLUDED.payload_sha256)::int,
@@ -3826,6 +3832,11 @@ export class PostgresStore {
       for (const record of records) {
         if (record.deletedAt != null) deleted += 1
         const rawPayloadSha256 = record.rawPayloadSha256 || record.payloadSha256
+        // Most sightings of an item repeat its stored raw and canonical values.
+        // Assigning EXCLUDED.* would still write a new TOAST copy (and its WAL)
+        // each time. Returning the stored value instead lets PostgreSQL reuse
+        // the existing TOAST pointer; the values are equal, so nothing readable
+        // changes. Revisions are decided by hash exactly as before.
         const sourceObjectResult = await client.query(
           `INSERT INTO ingest.source_objects
              (id, connector_id, stream_id, object_type, source_key,
@@ -3835,7 +3846,8 @@ export class PostgresStore {
            ON CONFLICT (connector_id, stream_id, object_type, source_key) DO UPDATE SET
              payload_sha256 = EXCLUDED.payload_sha256,
              raw_payload_hash_version = 1,
-             raw_payload = EXCLUDED.raw_payload,
+             raw_payload = CASE WHEN ingest.source_objects.raw_payload IS NOT DISTINCT FROM EXCLUDED.raw_payload
+                                THEN ingest.source_objects.raw_payload ELSE EXCLUDED.raw_payload END,
              source_updated_at = EXCLUDED.source_updated_at,
              ${sourceRunColumn} = EXCLUDED.${sourceRunColumn},
              current_revision = ingest.source_objects.current_revision
@@ -3951,7 +3963,8 @@ export class PostgresStore {
              content_type = EXCLUDED.content_type,
              url = EXCLUDED.url,
              title = EXCLUDED.title,
-             body = EXCLUDED.body,
+             body = CASE WHEN core.canonical_records.body IS NOT DISTINCT FROM EXCLUDED.body
+                         THEN core.canonical_records.body ELSE EXCLUDED.body END,
              author_external_id = EXCLUDED.author_external_id,
              author_name = EXCLUDED.author_name,
              event_time = EXCLUDED.event_time,
@@ -3964,8 +3977,10 @@ export class PostgresStore {
              country_code = EXCLUDED.country_code,
              admin1_code = EXCLUDED.admin1_code,
              admin2_code = EXCLUDED.admin2_code,
-             stable_fields = EXCLUDED.stable_fields,
-             extensions = EXCLUDED.extensions,
+             stable_fields = CASE WHEN core.canonical_records.stable_fields IS NOT DISTINCT FROM EXCLUDED.stable_fields
+                                  THEN core.canonical_records.stable_fields ELSE EXCLUDED.stable_fields END,
+             extensions = CASE WHEN core.canonical_records.extensions IS NOT DISTINCT FROM EXCLUDED.extensions
+                               THEN core.canonical_records.extensions ELSE EXCLUDED.extensions END,
              deleted_at = EXCLUDED.deleted_at,
              heat_score = EXCLUDED.heat_score,
              last_seen_at = now(),
