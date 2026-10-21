@@ -272,7 +272,7 @@ PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-dataport
 | `enroll`             | 复用 Launcher 登记正式域名与独立 client，同步 DataPort/Hub 接入 Secret；不发布其他应用 |
 | `recover-lock`       | 默认只读检查部署锁、相关进程及迁移任务；确认空闲后用 `--confirm-idle` 尝试受 UID/resourceVersion 保护的恢复 |
 | `status` / `logs`     | 校验 cluster UID 后只读；缺少本地操作配置时只读发现，不保存文件                                                              |
-| `deploy`              | 持有 DataPort 专用锁，校验保留配置、构建/导入唯一镜像、幂等迁移、更新 Deployment/Service 并自动重启，等待 rollout 和 readiness |
+| `deploy`              | 持有 DataPort 专用锁，校验保留配置、构建/导入唯一镜像、幂等迁移、更新 Deployment/Service 并自动重启，等待 rollout/readiness，再检查已配置的 SSO，符合条件时执行一次受限公网身份恢复 |
 | `migrate` / `restart` | 兼容旧命令，均执行完整 `deploy` 流程，不再只迁移或只重启                                                                     |
 
 首次安装和后续更新使用同一个命令（需要已有 mx-common PostgreSQL 健康）：
@@ -281,7 +281,7 @@ PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-dataport
 MX_HARBOR_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh ops internal-production deploy
 ```
 
-每次新镜像都会更新 Pod 模板，自动替换旧 Pod 一次，不额外调用 `rollout restart` 导致二次重启。重复部署复用现存 Secret 和数据库，只执行尚未应用的迁移，重新校验已有迁移 SHA256，并补齐 DataPort namespace 自有标签。迁移失败保持旧应用；rollout 或 readiness 失败返回非零，不输出部署成功。
+每次新镜像都会更新 DataPort Pod 模板，自动替换旧 Pod 一次，不额外调用 `rollout restart` 导致二次数港重启。重复部署复用现存 Secret 和数据库，只执行尚未应用的迁移，重新校验已有迁移 SHA256，并补齐 DataPort namespace 自有标签。迁移失败保持旧应用；rollout、readiness 或后续 SSO 验证失败返回非零，不输出部署成功。
 
 DataPort 采用一个副本、固定节点、`Recreate`，不是高可用/零停机部署。普通 Pod 的 hostPort 仅绑定 Internal 节点 `127.0.0.1:18220`，供本机 Nginx 访问；共享 PostgreSQL 使用集群 DNS。Pod 禁止自动挂载 service-account token，关闭 service links，以非 root 和只读根文件系统运行。
 
@@ -290,6 +290,27 @@ DataPort 采用一个副本、固定节点、`Recreate`，不是高可用/零停
 `mx-harbor-runtime` Secret 优先于本地文件。丢失本地 identity profile 不自动轮换会话密钥；已经安装但 runtime Secret 丢失时拒绝继续。缺少外部接入文件允许首次初始化；后续普通 deploy 只补充缺失字段，不替换已经登记的 identity/source。
 
 `/health` 表示进程存活；`/ready` 校验 DataPort 数据库及迁移后的会话表，不等待 Auth/Hub。`/status` 仅返回外部接入配置状态：`pending`（尚未提供）、`configured`（本地配置有效）、`invalid`（配置无效），不泄露域名或密钥。该状态不宣称远端服务在线；真实接口仍执行认证、权限检查和网络调用。
+
+### 2026-10-21 部署后 SSO 检查与受限恢复
+
+本轮公网身份 hostPort 定向恢复后，用户已确认真实 DataPort 登录和 MX-H2I 登录、联网正常；具体证据见[故障记录](sso-outage-20261021.md#生产恢复回执)。用户要求将检查与已验证的恢复流程纳入同一幂等 `deploy`，无需另行执行恢复命令。
+
+部署先按原流程完成数港镜像、迁移、rollout 和 `/ready`，再从运行中的 DataPort Pod 执行只读 Auth discovery/capabilities 诊断；使用挂载 profile、相同 CA 与认证客户端，不创建用户登录事务、不提交密码或修改数据。服务自身 `/ready` 的数据库就绪语义保持不变，新增检查属于发布流程的最后阶段。
+
+| 最终配置与诊断 | 部署行为 |
+| --- | --- |
+| 最终运行配置未提供 SSO profile | 明确跳过 SSO 检查，保留首次尚未接入的部署；本地文件缺失但现存 Secret 有 profile 不属于跳过条件。 |
+| 已有有效 profile，discovery/capabilities 都是 200 且字段匹配 | 检查通过，不调用恢复、不重启 Auth。 |
+| 任一诊断为 502/503/504，另一项也为该类上游失败或健康且字段匹配 | 仅在固定 Internal 生产集群、本机节点及生产应用配置匹配时，允许调用原完整恢复 CLI 一次；这只是恢复候选，不能据此直接推定 hostPort 缺失。 |
+| profile 无效/挂载缺失、配置不匹配、401/403/404、DNS/TLS/超时、诊断不可用或其他失败 | 退出非零，保留现状；不借恢复脚本修正凭据、路由或未知故障。 |
+
+恢复范围固定为已登记的 Internal 生产集群与 `mx-internal-server`，应用为 `mx-harbor`，origin 为 `https://dataport.minsight-ai.com`、issuer 为 `https://auth.minsight-ai.com/identity`、audience 为 `mx-harbor`。符合候选条件后只调用 `node scripts/recover-public-auth-hostport.mjs --apply` 的完整 CLI，不直接调用内部恢复函数绕过保护。原集群/节点、迁盘完成状态、运行时、Deployment/ReplicaSet/Pod 归属、镜像与认证配置、Pod 健康、宿主入口拒绝连接和全部运维锁检查继续生效；任何守卫不满足或锁冲突都停止。入口已经健康时 CLI 可返回 `already_healthy`，不重建；只有确认的 hostPort 故障才执行唯一一次带 UID/resourceVersion 条件的公网身份重建。
+
+CLI 成功返回后最多做三次只读 discovery/capabilities 复查，期间不再次执行恢复写入。恢复拒绝、结果不确定或复查未通过时，部署返回非零并明确报告“DataPort 已更新，但 SSO 验证未通过”；不会回滚已更新应用、重跑迁移、重试恢复或打印部署成功。应先根据脱敏诊断核对现状，不能因失败提示假定应用仍是旧版本。
+
+这一步可能短暂影响共享公网 Auth 的新登录，但不重启私网身份、Internal API、MX-H2I 或联网网关，不运行 `mx-move resume`，不改账号、Secret、SSO 注册、网络配置或数据库。它是部署时检查与受限恢复，不是持续监控，也不保证 hostPort 规则不会再次丢失；本轮仍未证明规则最初消失由迁盘导致。
+
+新增 deploy 接入已通过 94 项相关测试（operations、deploy-auth、auth-diagnostics、recover-public-auth-hostport、k8s-runtime、migration-job、recover-lock），最后补充的失败锁清理断言定向复测也通过；类型检查、生产构建、语法及 diff 检查通过。验证范围为本地命令替身和边界回归，生产执行仍待下一次正常 DataPort deploy 验收。既有定向恢复及真实登录通过，不能替代新部署集成的生产验收；不为验证而重复发布。
 
 ## 本批验证证据
 

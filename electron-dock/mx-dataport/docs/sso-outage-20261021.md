@@ -1,6 +1,6 @@
 # 数港登录 410 / 503 排查（2026-10-21）
 
-**最新状态：公网身份 18444 入口与数港 SSO 启动已恢复。** 用户回传 `recovered / applied=true`，数港 Pod 内 discovery/capabilities 均为 200 且全部配置匹配；外部复测 Auth discovery 200、DataPort SSO start 200，并返回预期 Auth 地址。实际账号登录和 MX-H2I 登录/联网的最后人工回执仍待确认。DNAT 最初消失的触发原因尚未查明，不需要继续重建或运行迁盘 resume。下文保留故障与恢复过程，最终证据见文末。
+**最新状态：公网身份 18444 入口与数港登录已恢复，用户已确认真实 DataPort 登录和 MX-H2I 登录、联网均正常。** 用户回传 `recovered / applied=true`，数港 Pod 内 discovery/capabilities 均为 200 且全部配置匹配；外部复测 Auth discovery 200、DataPort SSO start 200，并返回预期 Auth 地址。DNAT 最初消失的触发原因尚未查明，不需要继续重建或运行迁盘 resume。下文保留故障与恢复过程；随后新增的 deploy 检查与受限恢复仍待下一次正常生产发布验收。
 
 ## 已确认的现象
 
@@ -140,9 +140,9 @@ curl --noproxy '*' --connect-timeout 3 --max-time 8 -fsS \
 
 后续迁盘关联分析与恢复工具验证：恢复工具 7 项测试（含 21 类拒绝组合、状态变化、CAS、请求结果不确定、完成后核验及 CLI 锁调用），既有运行时与运维测试 39 项，合计 46 项通过，无跳过；语法及 diff 检查通过。均使用隔离命令替身，未执行生产重建。同期再次公网只读探测仍为 Auth discovery 502、DataPort status 200。
 
-首轮测试受沙箱监听限制，放行本机隔离监听后通过；本机缺少已锁定的 xlsx/exceljs，按现有 package-lock 安装依赖后构建通过，未修改依赖清单或锁文件。没有进行浏览器真实登录验收。
+首轮测试受沙箱监听限制，放行本机隔离监听后通过；本机缺少已锁定的 xlsx/exceljs，按现有 package-lock 安装依赖后构建通过，未修改依赖清单或锁文件。该轮本地测试当时没有进行浏览器真实登录验收，后续生产与用户回执另见下文。
 
-本地工具测试与线上恢复分开记录；生产定向恢复的后续结果见下节，最终真实账号登录验收尚待确认。
+本地工具测试与线上恢复分开记录；生产定向恢复的后续结果见下节，用户随后补充确认真实 DataPort 登录和 MX-H2I 登录、联网均正常。
 
 ## 首次恢复尝试的命令失败
 
@@ -166,4 +166,14 @@ curl --noproxy '*' --connect-timeout 3 --max-time 8 -fsS \
 
 外部独立复测：公网 Auth discovery 从 502 恢复为 200；DataPort `POST /auth/sso/start?view=login` 从 503 恢复为 200，返回的跳转地址属于预期 `https://auth.minsight-ai.com/identity/`。探测仅创建一次短期匿名登录事务，不提交账号/密码，不记录 Cookie 或流程凭据，未完成真实账号认证。
 
-**已确认修复的是公网 Auth 入口和数港 SSO 启动链路。** 当前不需要再次运行恢复脚本、全量发布或 `mx-move resume`。缺失/过期 flow 的匿名表单请求仍可返回 410，旧页面应重新开始登录。真实数港账号认证、回调与会话落地，以及 MX-H2I 原有登录/联网的人工回执仍待记录；不要为验收强制退出正常连接的客户端。CNI 规则最初消失的原因仍未确定。
+**用户随后确认真实 DataPort 登录和 MX-H2I 原有登录、联网均正常，本次恢复的人工回执已补齐。** 这份确认与上面的匿名链路探测分别记录，不扩展为所有子账号、支付或业务功能的全量验收。当前不需要再次运行恢复脚本、全量发布或 `mx-move resume`。缺失/过期 flow 的匿名表单请求仍可返回 410，旧页面应重新开始登录；不要为重复验收强制退出正常连接的客户端。CNI 规则最初消失的原因仍未确定。
+
+## 纳入 DataPort 幂等 deploy
+
+用户确认恢复后，要求将检查与定向恢复接入日常 DataPort `deploy`。新流程在数港 rollout 和 `/ready` 通过后，从运行 Pod 执行只读 discovery/capabilities 诊断。最终运行配置确实没有 SSO profile 时明确跳过，保留首次未接入部署；已有 profile 且健康时不操作 Auth。读取挂载 profile 或诊断失败不能当作未接入而跳过。
+
+只有固定 Internal 生产集群、本机 `mx-internal-server`、`mx-harbor` 应用/audience、生产 origin `https://dataport.minsight-ai.com` 和 issuer `https://auth.minsight-ai.com/identity` 全部匹配，且失败仅为 502/503/504（其余探测必须健康且字段匹配）时，才调用原完整 `recover-public-auth-hostport.mjs --apply` CLI 一次。401/403/404、200 配置不匹配、DNS/TLS/超时或其他失败不会触发自动恢复。
+
+该调用沿用上文全部现场守卫和运维锁，仍须确认身份 Pod 健康、宿主入口明确拒绝连接及原镜像/认证配置一致。上游 5xx 只是调用候选条件，不等于已证明 hostPort 故障；CLI 可拒绝恢复或返回 `already_healthy` 而不重建。成功返回后最多三次只读复查，不重试恢复写入。任何失败或结果不确定都使 deploy 非零退出，明确应用已经更新且 SSO 验证未通过，不回滚、不重跑迁移、不报告部署成功。
+
+新步骤不执行 `mx-move resume`，不重启私网身份、MX-H2I 或联网网关，不改原账号与凭据。它只在部署时检查和按已知条件恢复，不是持续监控，也不保证规则永不丢失。新接入按本地边界回归验证，生产仍待下一次正常 deploy 验收；本次手动恢复及真实登录通过不等于新部署流程已经在生产执行。完整发布合同见[部署后 SSO 检查与受限恢复](implementation-and-operations.md#2026-10-21-部署后-sso-检查与受限恢复)。

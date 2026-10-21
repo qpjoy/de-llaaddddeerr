@@ -3,11 +3,13 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { workload } from "../deploy/k8s/render.mjs";
 import { readConfig } from "../apps/server/config.mjs";
 import { commandFailure } from "./enroll.mjs";
 import { waitForMigration, migrationDiagnostics } from "./migration-job.mjs";
 import { resolveContainerdAddress, verifyCriImage } from "./k8s-runtime.mjs";
+import { verifyDeployedAuth } from "./deploy-auth.mjs";
 import {
   acquireDeployLock,
   harborProcesses,
@@ -24,7 +26,7 @@ const requestedAction = process.argv[2] || "help",
     : requestedAction,
   namespace = "mx-harbor";
 const help =
-  "Usage: bash scripts/manage.sh ops internal-production deploy|enroll|recover-lock|status|diagnose-auth|logs|plan\nrecover-lock is read-only by default; --confirm-idle attempts guarded stale-lock recovery after all operations have exited.\ndiagnose-auth checks discovery and application capabilities from the running DataPort Pod without logging in, exposing credentials or changing configuration.\nUse enroll --migrate-domain for an existing Harbor origin, preserving all keys. Enroll registers https://dataport.minsight-ai.com with existing Launcher/Auth and synchronizes the optional Hub Portal credentials; it does not deploy Launcher/Hub.\nDeploy includes migration, application restart and readiness verification. migrate/restart are compatibility aliases for deploy.\nFirst deploy discovers and saves secrets/operations.json from the current Kubernetes context and local node. Missing SSO/Hub enrollment does not block deployment or migrations; integrations are resolved at runtime. Retained Kubernetes Secret takes precedence.";
+  "Usage: bash scripts/manage.sh ops internal-production deploy|enroll|recover-lock|status|diagnose-auth|logs|plan\nrecover-lock is read-only by default; --confirm-idle attempts guarded stale-lock recovery after all operations have exited.\ndiagnose-auth checks discovery and application capabilities from the running DataPort Pod without logging in, exposing credentials or changing configuration.\nUse enroll --migrate-domain for an existing Harbor origin, preserving all keys. Enroll registers https://dataport.minsight-ai.com with existing Launcher/Auth and synchronizes the optional Hub Portal credentials; it does not deploy Launcher/Hub.\nDeploy includes migration, application restart, readiness and enrolled SSO verification. Known Internal public Auth hostPort failures allow one guarded recovery; other SSO failures stop deploy completion after the application update. migrate/restart are compatibility aliases for deploy.\nFirst deploy discovers and saves secrets/operations.json from the current Kubernetes context and local node. Missing SSO/Hub enrollment does not block deployment or migrations. Retained Kubernetes Secret takes precedence.";
 if (action === "help") {
   console.log(help);
   process.exit(0);
@@ -88,6 +90,7 @@ if (action === "plan") {
           "run isolated migration",
           "update and restart DataPort once",
           "wait for rollout and readiness",
+          "verify enrolled SSO; conditionally recover the known Internal public Auth hostPort once",
         ],
         deployment: workload({
           node: settings.node,
@@ -492,6 +495,44 @@ try {
     signal: AbortSignal.timeout(5000),
   });
   if (!health.ok) throw Error("DataPort readiness failed");
+  await verifyDeployedAuth({
+    settings,
+    profile: data["profile.json"],
+    diagnose: () => {
+      const result = kube(
+        ["exec", "-i", "deployment/mx-harbor", "-c", "web", "--", "node", "--input-type=module"],
+        {
+          input: readFileSync(new URL("./auth-diagnostics.mjs", import.meta.url), "utf8"),
+          optional: true,
+          timeout: 45000,
+        },
+      );
+      // A valid failure report uses exit 1. Never trust a partial response,
+      // shell error or inconsistent exit status as a diagnosis.
+      if (result.error || result.signal || ![0, 1].includes(result.status))
+        throw Error("auth_diagnostic_unavailable");
+      const diagnostic = JSON.parse(result.stdout);
+      if (diagnostic?.ok !== (result.status === 0))
+        throw Error("auth_diagnostic_unconfirmed");
+      return diagnostic;
+    },
+    recover: () => {
+      // Use the complete CLI so its nonblocking locks and live-state guards
+      // remain mandatory. Do not invoke its internal --locked entry point.
+      const result = run(process.execPath, [
+        fileURLToPath(new URL("./recover-public-auth-hostport.mjs", import.meta.url)), "--apply",
+      ], { optional: true, timeout: 620000 });
+      if (!result.error && !result.signal && [0, 1].includes(result.status)) {
+        try {
+          const receipt = JSON.parse(result.stdout);
+          if (receipt?.ok === (result.status === 0)) return receipt;
+        } catch {}
+      }
+      // A lost response can follow a successful patch: stop without retrying.
+      return { ok: false, stage: "wrapper", mutationAttempted: "unknown", restartSubmitted: "unknown" };
+    },
+    report: summary => console.log("DataPort SSO: " + JSON.stringify(summary)),
+  });
   completed = true;
 } catch (error) {
   if (job) {
