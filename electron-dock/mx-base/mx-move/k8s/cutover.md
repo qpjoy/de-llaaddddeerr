@@ -6,15 +6,24 @@
 
 最终摘要中的 `user_login_and_network_validation=required` 是程序固定输出的人工验收提示，不表示失败，也不记录用户已完成的登录、联网实测。`capacity` 中的复制估算、根卷剩余空间及预留值来自迁移预检，不能作为切换后的实时磁盘容量。`historical_data_deleted=false` 表示原历史副本尚未清理，本次成功验收不包含旧数据删除。
 
+## 2026-10-21 后续发布与公网身份故障
+
+DataPort 旧发布脚本未选择独立 containerd，后续回执确认迁移 Pod `ErrImageNeverPull`，容器未启动；已用 `23fb2852` 补齐运行时选择和 CRI 镜像 ID 核验。旧失败镜像是否只存在于原 runtime，仍需新旧实例的实际对比，不能仅凭 Job 等待 Complete 超时推定。
+
+当前另有公网身份 hostPort 故障：`mx-identity-public` 在 `mx-internal-server` 上 Running/Ready，Pod `192.168.224.83` 的 `/healthz` 返回 200；宿主机拥有 `10.88.88.88`，Pod 声明 `hostIP/hostPort: 10.88.88.88:18444`，但该地址拒绝连接，已查 nft `CNI-HOSTPORT-DNAT` 仅有 18220、没有 18444。当前证据指向 hostPort 转发缺失，规则消失原因未确定，不能归并为镜像导入故障或宣称已恢复。
+
+自动验收的控制器 Ready 检查不覆盖 hostPort DNAT 和公网 SSO；详细边界及恢复验证见[运行时消费者记录](runtime-consumers.md#2026-10-21-公网身份-hostport-故障与验收范围)。**不能为缺失 hostPort 再运行这个已完成事务的 `migrate` 或 `resume`。** 保留已提交的新副本、原账号/凭据和 MX-H2I 登录联网配置，转发修复与端到端验收单独处理。
+
 ## 维护前同步
 
-在原服务器仓库内同步本次变更，保留 `electron-dock/` 下各项目相对目录。不能只同步一个 `manage.sh` 或把 `mx-move` 单独放到另一目录。至少包括：
+以下清单保留为运行时适配文件的同步合同，不表示本现场需要重新迁盘。在原服务器仓库同步时保留 `electron-dock/` 下各项目相对目录；不能只同步一个 `manage.sh` 或把 `mx-move` 单独放到另一目录。至少包括：
 
 | 范围 | 必须同步的内容 |
 | --- | --- |
 | mx-move | 整个模块，包括 `k8s/`、`etcd/`、入口与依赖文件。 |
 | Launcher | `scripts/k8s-production-recovery.sh`、`scripts/manage.sh`、`scripts/install-k8s-centos.sh`，以及原有恢复/身份模块。 |
 | Hub、mx-common | 各自 `scripts/manage.sh`，保留 mx-common 的存储预检模块。 |
+| DataPort | `scripts/k8s-runtime.mjs` 和 `scripts/operations.mjs`，保留部署所需模块；预检同时检查解析器、显式地址导入及 CRI 镜像核验，不能只同步 helper。 |
 | Rig | `scripts/manage.sh`、`scripts/build-proxy.sh`。 |
 | Pay | `scripts/runtime.mjs`、`scripts/build-proxy.sh`，保留原 `postgres.mjs` 及其模块依赖。 |
 | mx-base 父入口 | `scripts/manage.sh` 已增加精确转发；下列命令使用模块入口，不依赖旧父入口。 |
