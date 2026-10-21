@@ -183,6 +183,56 @@ DataPort Pod 将 runtime Secret 的 `profile.json` 与 `MX_HARBOR_GATEWAY_TOKEN`
 
 Hub 固定地址由 `MX_HARBOR_HUB_ADMIN_ORIGIN` 指定，默认集群 DNS；请求失败返回 503，下次授权请求重新连接。Auth 使用可信 profile 中的 issuer 执行 OIDC 发现。没有跨 namespace 读取 Secret 的 Pod 权限，没有匿名业务数据或假登录。登录弹窗会显示不可用信息并支持重试。
 
+## 迁移等待超时与失败诊断（2026-10-21）
+
+截图中的 `timed out waiting for the condition on jobs/mx-harbor-migrate-...` 只能确认脚本没有等到 Job 的 `Complete`。原实现只等待成功条件，即使 Job 早已失败，也会继续等到 310 秒；随后删除 Job/Pod，再抛出统一的 `DataPort migration failed`，丢失现场原因。因此约 408 秒的整次部署耗时不能证明数据库执行了 300 秒，更不能据此判定数据库损坏。
+
+DataPort 自身迁移只有 `001_sso.sql`：维护独立 `mx_harbor` 库的迁移记录与 `app_auth.browser_sso_records` 会话表；已应用时校验 checksum 后跳过。Hub 的业务迁移、Launcher 身份库均不在这个 Job 内。
+
+Kubernetes 的 `Complete` 与 `Failed` 是不同终态；较新版本还可能先出现 `FailureTarget` 再等待 Pod 终止，见 [Job 终止条件](https://kubernetes.io/docs/concepts/workloads/controllers/job/#terminal-job-conditions)。诊断使用的数据库错误码对应 [PostgreSQL SQLSTATE](https://www.postgresql.org/docs/current/errcodes-appendix.html)。
+
+本次修复：
+
+- 同时观察 `Complete` 与 `Failed`/`FailureTarget`，明确失败立即结束等待；API 请求失败单独标为 `unavailable`。等待上限继续为 310 秒，Job 的 300 秒期限保持原值。
+- PostgreSQL 连接 10 秒、锁等待 10 秒、语句 30 秒、客户端查询 35 秒上限，仅作用于迁移连接；失败连接销毁，避免网络故障后 `ROLLBACK` 继续排队等待。原迁移 SQL 和已应用 checksum 保留。
+- 清理前打印 `DataPort migration diagnostics`，包含安全的 Job/Pod 状态、Warning 原因，以及迁移 `stage/status/code`。原始日志、错误详情、Secret 和连接串不回显。采集失败显示 `Unavailable` 标记，不能当作数据库检查通过。
+- 只有 Job 明确完成才更新应用；失败后仍以前台级联删除确认迁移终止，终止未确认继续保留原部署锁。没有重跑迁移或自动修改数据库凭据。
+
+新诊断中的典型分支：
+
+| 输出 | 含义与下一步 |
+| --- | --- |
+| `scheduled: False` / `Unschedulable` | Pod 未调度；检查节点资源、taint 和调度事件，尚不能认为已执行数据库迁移 |
+| `ErrImageNeverPull` | 固定节点的容器运行时未找到镜像；检查本次导入位置和节点匹配 |
+| `FailedCreatePodSandBox` / `FailedMount` | 检查对应 Pod 的 CNI、卷或 Secret 引用事件 |
+| `connect` + `ENOTFOUND` / `EAI_AGAIN` | 数据库 DNS 解析失败 |
+| `connect` + `ECONNREFUSED` / `CONNECTION_TIMEOUT` | 检查 mx-common PostgreSQL、Service/端点和 Pod 到数据库的连通性 |
+| `connect` + `28P01` / `3D000` | 分别为数据库认证失败、目标数据库不存在；核对原配置，不重新初始化或轮换 Secret |
+| `lock` + `55P03` | 迁移 advisory lock 等待超时；核对仍在执行的迁移/数据库事务 |
+| `history` / `apply` + `55P03` / `57014` | DDL 锁或语句超时；核对数据库阻塞事务 |
+| `checksum` + `CHECKSUM_MISMATCH` | 已应用文件与当前 SQL 不一致；恢复正确迁移文件，不改写历史校验值 |
+| `unavailable` | Kubernetes API/权限/响应读取失败，不能据此判断数据库状态 |
+
+在服务器的 **`electron-dock/mx-dataport` 目录**先执行以下只读检查。旧脚本已删除失败 Job 时 `logs` 返回 `NotFound` 属于预期，Warning 事件也可能已经过期；无需为获取旧日志重复部署。
+
+```bash
+dataport_context="$(node -p 'JSON.parse(require("node:fs").readFileSync("secrets/operations.json","utf8")).context')"
+kubectl --context "$dataport_context" --request-timeout=15s -n mx-harbor get pods,jobs -o wide
+kubectl --context "$dataport_context" --request-timeout=15s -n mx-harbor logs job/mx-harbor-migrate-cf91aed0 --all-containers=true --tail=100
+kubectl --context "$dataport_context" --request-timeout=15s -n mx-harbor get events --field-selector type=Warning --sort-by=.lastTimestamp
+kubectl --context "$dataport_context" --request-timeout=15s -n mx-common get pods,services -o wide
+```
+
+后续正常发布沿用服务器原参数，仅发布 DataPort 即可让宿主脚本和镜像内迁移 runner 同时生效。在 **`electron-dock` 目录**的统一命令示例：
+
+```bash
+PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-dataport
+```
+
+无需发布 Launcher/Auth、Hub 或 Pay，本次未修改 MX-H2I 登录、网络授权及路由。实际服务器根因与发布结果仍需以上只读回执/新诊断核实；本地替身测试不能替代生产验收。
+
+本地验证：部署/锁恢复/接入/迁移回归 65 项、登录会话 20 项和迁移 Pod 隔离 1 项通过；真实 PostgreSQL 会话保留用例因未配置测试库跳过。新增异步数据库断连测试确认 stage/code 日志仍可输出，原始错误不会绕过日志保护。脚本语法与 diff 检查通过。完整前端构建因本机缺少原有 `xlsx`、`exceljs` 依赖及其派生类型错误未通过；本次未修改前端、依赖或 lockfile。未执行生产部署或数据库写入。
+
 ## K8s 管理合同
 
 运行位置为固定 Internal 节点，需有 Node.js、Docker/Buildx、containerd `ctr`、kubectl 及相应本机权限。配置的 Kubernetes 节点 hostname 必须匹配本机；拒绝 cluster UID 漂移、不可调度节点和异常 taint，不猜测远程主机或修改集群 taint。

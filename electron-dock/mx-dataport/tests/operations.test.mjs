@@ -22,6 +22,7 @@ function fixture(t, { fresh = false } = {}) {
   for (const path of [
     "scripts/manage.sh",
     "scripts/operations.mjs",
+    "scripts/migration-job.mjs",
     "scripts/enroll.mjs",
     "scripts/recover-lock.mjs",
     "scripts/bootstrap.mjs",
@@ -106,7 +107,16 @@ if(cmd==='kubectl'){
  }
  else if(key==='get configmap mx-harbor-deploy-lock'){if(fs.existsSync(dir+'/lock'))out(JSON.parse(fs.readFileSync(dir+'/lock')))}
  else if(a[0]==='get'&&a[1]==='jobs')out({items:process.env.HARBOR_TEST_ACTIVE_JOB?[{metadata:{name:'mx-harbor-migrate-running'},status:{active:1}}]:[]});
- else if(a[0]==='get'&&a[1]==='pods')out({items:process.env.HARBOR_TEST_ACTIVE_POD?[{metadata:{name:'mx-harbor-migrate-running-pod',labels:{'job-name':'mx-harbor-migrate-running'}},status:{phase:'Running'}}]:[]});
+ else if(a[0]==='get'&&a[1]?.startsWith('job/')){
+  if(process.env.HARBOR_TEST_MIGRATION_API_FAILURE){process.stderr.write('Error from server (Forbidden): private-sensitive-payload');process.exit(1)}
+  out({status:{conditions:[process.env.HARBOR_TEST_MIGRATION_FAILURE?{type:'Failed',status:'True',reason:'BackoffLimitExceeded',message:'private-sensitive-payload'}:{type:'Complete',status:'True'}]}});
+ }
+ else if(a[0]==='get'&&a[1]==='pods')out({items:process.env.HARBOR_TEST_ACTIVE_POD?[{metadata:{name:'mx-harbor-migrate-running-pod',labels:{'job-name':'mx-harbor-migrate-running'}},status:{phase:'Running'}}]:a.includes('-l')?[{status:{phase:'Failed',containerStatuses:[{state:{terminated:{reason:'Error',exitCode:1,message:'private-sensitive-payload'}}}]}}]:[]});
+ else if(a[0]==='get'&&a[1]==='events')out({items:[]});
+ else if(a[0]==='logs'){
+  if(process.env.HARBOR_TEST_LOG_FAILURE){process.stderr.write('private-sensitive-payload');process.exit(1)}
+  process.stdout.write(JSON.stringify({event:'dataport_migration',stage:'connect',status:'failed',code:'28P01',message:'private-sensitive-payload'})+'\\nprivate-sensitive-payload');
+ }
  else if(key==='patch configmap mx-harbor-deploy-lock'){
   if(process.env.HARBOR_TEST_MARK_FAILURE){process.stderr.write('Error from server (Conflict): private-sensitive-payload');process.exit(1)}
   const lock=JSON.parse(fs.readFileSync(dir+'/lock')),patch=JSON.parse(a[a.indexOf('-p')+1]);
@@ -123,7 +133,6 @@ if(cmd==='kubectl'){
  else if(key==='get deployment mx-harbor'){if(fs.existsSync(dir+'/deployment.json'))out(JSON.parse(fs.readFileSync(dir+'/deployment.json')))}
  else if(a[0]==='apply'){const doc=JSON.parse(stdin);if(process.env.HARBOR_TEST_SECRET_APPLY_FAILURE&&doc.kind==='Secret'){process.stderr.write('Error from server (Forbidden): '+stdin);process.exit(1)}if(doc.kind==='Secret')fs.writeFileSync(dir+'/runtime.json',JSON.stringify({data:Object.fromEntries(Object.entries(doc.stringData).map(([k,v])=>[k,Buffer.from(v).toString('base64')]))}));if(doc.kind==='Deployment')fs.writeFileSync(dir+'/deployment.json',stdin);}
  else if(a[0]==='rollout'&&process.env.HARBOR_TEST_ROLLOUT_FAILURE)process.exit(1);
- else if(a[0]==='wait'&&process.env.HARBOR_TEST_MIGRATION_FAILURE)process.exit(1);
  else if(a[0]==='delete'&&a[1]?.startsWith('job/')&&process.env.HARBOR_TEST_DELETE_FAILURE)process.exit(1);
  else if(a[0]==='delete'&&a.includes('--raw')){if(process.env.HARBOR_TEST_UNLOCK_FAILURE)process.exit(1);const options=JSON.parse(fs.readFileSync(a[a.indexOf('-f')+1])),lock=JSON.parse(fs.readFileSync(dir+'/lock'));if(options.preconditions.uid!==lock.metadata.uid||(options.preconditions.resourceVersion&&options.preconditions.resourceVersion!==lock.metadata.resourceVersion))process.exit(1);fs.appendFileSync(dir+'/unlocks.jsonl',JSON.stringify(options)+'\\n');fs.unlinkSync(dir+'/lock');}
 }else if(cmd==='bash'){if(args.join(' ')!=='../mx-common/scripts/manage.sh provision mx-harbor')process.exit(1);process.stdout.write('postgres://test:test@pg.internal/mx_harbor');}
@@ -211,7 +220,7 @@ function assertFullDeploy(calls) {
   for (const predicate of [
     (c) => c.args.includes("buildx"),
     (c) => c.stdin.includes('"kind":"Job"'),
-    (c) => c.args.includes("wait"),
+    (c) => c.args.includes("get") && c.args.some(a => a.startsWith("job/")),
     (c) => c.stdin.includes('"kind":"Deployment"'),
     (c) => c.args.includes("rollout"),
     (c) => c.cmd === "readiness",
@@ -235,7 +244,7 @@ function assertFullDeploy(calls) {
       position((c) => c.stdin.includes('"kind":"Job"')),
   );
   assert.ok(
-    position((c) => c.args.includes("wait")) <
+    position((c) => c.args.includes("get") && c.args.some(a => a.startsWith("job/"))) <
       position((c) => c.stdin.includes('"kind":"Deployment"')),
   );
   assert.ok(
@@ -405,7 +414,7 @@ test("failed migration never deploys; unconfirmed termination retains the deploy
     const calls = f.calls();
     assert.ok(!calls.some(c => c.args.includes("patch")));
     assert.ok(
-      calls.some((c) => c.args.includes("wait")),
+      calls.some((c) => c.args.includes("get") && c.args.some(a => a.startsWith("job/"))),
       result.stderr,
     );
     assert.ok(!calls.some((c) => c.stdin.includes('"kind":"Deployment"')));
@@ -414,6 +423,13 @@ test("failed migration never deploys; unconfirmed termination retains the deploy
       !terminationFails,
     );
     assert.ok(calls.some((c) => c.args.includes("--cascade=foreground")));
+    const logs = calls.findIndex(c => c.args.includes("logs"));
+    const stop = calls.findIndex(c => c.args.includes("--cascade=foreground"));
+    assert.ok(logs >= 0 && logs < stop, "capture migration evidence before deleting its Pod");
+    assert.match(result.stderr, /BackoffLimitExceeded/);
+    assert.match(result.stderr, /"stage":"connect","status":"failed","code":"28P01"/);
+    assert.doesNotMatch(result.stderr, /private-sensitive-payload/);
+    assert.ok(calls.filter(c => c.args.includes("--cascade=foreground")).every(c => c.args.includes("--request-timeout=15s")));
     const job = calls
       .map((c) => c.stdin && JSON.parse(c.stdin))
       .find((c) => c?.kind === "Job");
@@ -421,6 +437,20 @@ test("failed migration never deploys; unconfirmed termination retains the deploy
       job.spec.template.spec.nodeSelector["kubernetes.io/hostname"],
       hostname(),
     );
+  }
+});
+test("unavailable migration status or logs never publishes or leaks subprocess output", (t) => {
+  for (const flag of ["HARBOR_TEST_MIGRATION_API_FAILURE", "HARBOR_TEST_LOG_FAILURE"]) {
+    const f = fixture(t), result = f.run("deploy", {
+      HARBOR_TEST_MIGRATION_FAILURE: "1", [flag]: "1",
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /application not updated/);
+    assert.doesNotMatch(result.stderr, /private-sensitive-payload/);
+    assert.ok(!f.calls().some(c => c.stdin.includes('"kind":"Deployment"')));
+    assert.equal(existsSync(join(f.dir, "lock")), false);
+    if (flag === "HARBOR_TEST_MIGRATION_API_FAILURE") assert.match(result.stderr, /unavailable.*Forbidden/);
+    else assert.match(result.stderr, /migrationLogsUnavailable/);
   }
 });
 test("lock acquisition reports a safe cause and never removes an existing lock or starts a build", (t) => {
