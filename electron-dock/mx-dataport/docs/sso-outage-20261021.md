@@ -140,4 +140,14 @@ curl --noproxy '*' --connect-timeout 3 --max-time 8 -fsS \
 
 首轮测试受沙箱监听限制，放行本机隔离监听后通过；本机缺少已锁定的 xlsx/exceljs，按现有 package-lock 安装依赖后构建通过，未修改依赖清单或锁文件。没有进行浏览器真实登录验收。
 
-本地工具测试与线上恢复分开记录；当前已取得 Pod/hostPort 诊断回执，生产定向恢复与最终登录验收仍待执行。
+本地工具测试与线上恢复分开记录；当前已取得 Pod/hostPort 诊断回执，生产定向恢复的后续结果见下节，最终登录验收仍未通过。
+
+## 首次恢复尝试的命令失败
+
+用户执行恢复工具后返回 `{"ok":false,"code":"command_failed","mutationAttempted":true}`。随后的只读回执为 Deployment generation/observedGeneration 都是 29、replicas/updated/ready/available 都为 1；仍是原 Pod `mx-identity-public-57dc86b444-gtmft`，UID `9bcf70c4-0c24-4e18-aba4-bd4366245b83`、创建时间 `2026-10-19T22:01:11Z`，没有删除标记，IP 仍为 `192.168.224.83`。宿主 18444 仍拒绝连接，公网 discovery 仍为 502。现场没有完成 Pod 替换，不能把首次脚本执行当作恢复成功，也不因此运行迁盘 resume。
+
+复查发现上一版 Node 脚本通过 `spawnSync` 的 stdin 向 `kubectl --patch-file=/dev/stdin` 传 JSON。Node 子进程的默认通道并非普通 Unix pipe；按 `/dev/stdin` 路径重新打开，在 Linux 上可能失败。这个兼容缺陷需要修正；首次 kubectl 原始 stderr 未保留，不能仅凭通用错误断定该次返回的具体 errno。机制参见 [Node stdio 文档](https://nodejs.org/api/child_process.html#optionsstdio)与 [libuv socketpair 说明](https://docs.libuv.org/en/latest/guide/processes.html#new-stdio-pipes)。
+
+已改用 `kubectl --type=json -p <JSON>` 的独立 argv 参数，内容只有 UID、resourceVersion 和时间戳，不含密钥，不经过 shell。仍是原来的一次 CAS Patch，未放宽镜像、认证配置、节点、锁或迁盘状态检查。此前替身读取 fd 0，未覆盖 Linux 重新打开描述符的问题；增加真实 `kubectl --local` 验证，避免仅验证替身参数。
+
+失败输出现在提供 `stage=restart|rollout|postcheck`、脱敏 `commandCategory` 和 `attemptedAt`。`restartSubmitted:true` 表示 Patch 命令已成功返回；`unknown` 表示提交结果未确认，不能理解为未执行。外层命令超时同样报告未知，始终不重放写入。修正后恢复工具 11 项测试通过，包含真实子进程错误分类、超时、阶段区分、无重放及本地 kubectl JSON Patch；未以本地测试代替生产恢复验收。

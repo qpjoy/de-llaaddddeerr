@@ -5,12 +5,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { recoverPublicAuth, recoveryLocks } from '../scripts/recover-public-auth-hostport.mjs';
+import { recoverPublicAuth, recoveryLocks, execute, recoveryFailure, wrapperFailure } from '../scripts/recover-public-auth-hostport.mjs';
 
 const NAME = 'mx-identity-public', NODE = 'mx-internal-server', IP = '10.88.88.88';
 const IMAGE = 'sha256:' + 'a'.repeat(64), CONTAINER = 'b'.repeat(64);
 const KEY = 'mx.qpjoy.com/identity-config-digest';
 const sha = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const failedCommand = stderr => execute(process.execPath, ['-e', 'process.stderr.write(process.argv[1]);process.exit(1)', stderr]);
 function fixture(change = () => {}) {
   const data = { 'config.json': Buffer.from('private-client-secret').toString('base64'), 'tls.key': 'private-tls-key' };
   const config = sha(Object.entries(data).sort(([a], [b]) => a.localeCompare(b)));
@@ -50,14 +51,16 @@ function fixture(change = () => {}) {
     assert.ok(args.includes('--kubeconfig=/etc/kubernetes/admin.conf'));
     if (args.includes('patch')) {
       assert.equal(patched, false, 'must never retry a mutation');
-      assert.deepEqual(args.slice(args.indexOf('patch')), ['patch', 'deployment', NAME, '--type=json', '--patch-file=/dev/stdin']);
-      const patch = JSON.parse(options.input);
+      assert.deepEqual(args.slice(args.indexOf('patch'), -1), ['patch', 'deployment', NAME, '--type=json', '-p']);
+      assert.equal(options.input, undefined);
+      const patch = JSON.parse(args.at(-1));
       assert.deepEqual(patch.slice(0, 2), [
         { op: 'test', path: '/metadata/uid', value: state.deployment.metadata.uid },
         { op: 'test', path: '/metadata/resourceVersion', value: state.deployment.metadata.resourceVersion },
       ]);
       assert.equal(patch.length, 3); assert.equal(patch[2].op, 'add');
       assert.equal(patch[2].path, '/spec/template/metadata/annotations/kubectl.kubernetes.io~1restartedAt');
+      if (state.patchCommandError) failedCommand(state.patchCommandError);
       if (state.rejectPatch) throw Error('private-api-message');
       patched = true;
       state.deployment.metadata.resourceVersion = '11'; state.deployment.metadata.generation++;
@@ -67,9 +70,15 @@ function fixture(change = () => {}) {
       state.hostHealth = state.postHealth || { status: 200, category: 'http' };
       return '{}';
     }
-    if (args.includes('rollout')) { if (state.failRollout) throw Error('private-rollout-message'); return ''; }
+    if (args.includes('rollout')) {
+      if (state.rolloutCommandError) failedCommand(state.rolloutCommandError);
+      if (state.failRollout) throw Error('private-rollout-message'); return '';
+    }
     const kind = args[args.indexOf('get') + 1];
-    if (kind === 'namespace') { snapshots++; state.onSnapshot?.(state, snapshots); return JSON.stringify(state.cluster); }
+    if (kind === 'namespace') {
+      if (patched && state.postcheckCommandError) failedCommand(state.postcheckCommandError);
+      snapshots++; state.onSnapshot?.(state, snapshots); return JSON.stringify(state.cluster);
+    }
     return JSON.stringify(state[{ nodes: 'nodes', deployment: 'deployment', replicasets: 'replicasets', pods: 'pods', secret: 'secret' }[kind]]);
   };
   return { state, calls, probes, mutations: () => calls.filter(c => c.args.includes('patch')),
@@ -163,9 +172,76 @@ test('CLI acquires four nonblocking locks in cutover order and sanitizes lock fa
     new URL('../scripts/recover-public-auth-hostport.mjs', import.meta.url).pathname, '--apply'],
   { env: { ...process.env, PATH: `${dir}:${process.env.PATH}` }, encoding: 'utf8', timeout: 10000 });
   assert.equal(child.status, 1); assert.equal(child.stderr, '');
-  assert.deepEqual(JSON.parse(child.stdout), { ok: false, code: 'operation_locked' });
+  assert.deepEqual(JSON.parse(child.stdout), { ok: false, code: 'operation_locked', stage: 'lock', mutationAttempted: false, restartSubmitted: false });
   const args = JSON.parse(readFileSync(recorded, 'utf8'));
   const expected = recoveryLocks.flatMap(lock => ['flock', '-n', '-E', '73', lock]).slice(1);
   assert.deepEqual(args.slice(0, expected.length), expected);
   assert.equal(args.at(-1), '--apply'); assert.equal(args.at(-2), '--locked');
+});
+
+test('real command failures retain only an allowlisted category and no command output', () => {
+  for (const [stderr, category] of [
+    ['Error from server (Conflict): private-credential', 'conflict'],
+    ['testing value /metadata/resourceVersion failed: test failed private-credential', 'conflict'],
+    ['Error from server (Forbidden): private-credential', 'forbidden'],
+    ['Error from server (NotFound): private-credential', 'not_found'],
+    ['error: unknown flag: --private-credential', 'invalid_argument'],
+    ['error: timed out waiting for the condition private-credential', 'timeout'],
+    ['private-credential unrecognized backend failure', 'unknown'],
+  ]) {
+    assert.throws(() => failedCommand(stderr), error => {
+      const result = recoveryFailure(error);
+      assert.equal(result.commandCategory, category); assert.equal(result.stage, 'preflight');
+      assert.equal(result.mutationAttempted, false); assert.equal(result.restartSubmitted, false);
+      assert.ok(!JSON.stringify(result).includes('private-credential')); return true;
+    });
+  }
+  assert.throws(() => execute('/__mx_auth_missing_executable__', []), { commandCategory: 'exec_failure' });
+  assert.throws(() => execute(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { timeout: 50 }), { commandCategory: 'timeout' });
+});
+
+test('real command rejection distinguishes restart, rollout and postcheck without replay or false no-op', async () => {
+  for (const [field, stderr, stage, submitted, category] of [
+    ['patchCommandError', 'Error from server (Conflict): private-credential', 'restart', 'unknown', 'conflict'],
+    ['rolloutCommandError', 'error: timed out waiting for the condition private-credential', 'rollout', true, 'timeout'],
+    ['postcheckCommandError', 'Error from server (Forbidden): private-credential', 'postcheck', true, 'forbidden'],
+  ]) {
+    const f = fixture(state => { state[field] = stderr; });
+    await assert.rejects(f.recover(true), error => {
+      const result = recoveryFailure(error);
+      assert.equal(result.stage, stage); assert.equal(result.restartSubmitted, submitted);
+      assert.equal(result.commandCategory, category); assert.equal(result.mutationAttempted, true);
+      assert.equal(result.attemptedAt, JSON.parse(f.mutations()[0].args.at(-1))[2].value);
+      assert.equal(result.ok, false); assert.ok(!JSON.stringify(result).includes('private-credential')); return true;
+    });
+    assert.equal(f.mutations().length, 1);
+  }
+});
+
+test('an actual outer process timeout leaves apply outcome unknown even if stdout looked successful', () => {
+  const result = spawnSync(process.execPath, ['-e', 'process.stdout.write("private-credential");setInterval(()=>{},1000)'],
+    { encoding: 'utf8', timeout: 100 });
+  assert.equal(result.error.code, 'ETIMEDOUT');
+  assert.deepEqual(wrapperFailure(result, true), { ok: false, code: 'recovery_failed', stage: 'wrapper',
+    commandCategory: 'timeout', mutationAttempted: 'unknown', restartSubmitted: 'unknown' });
+  assert.equal(wrapperFailure(result, false).mutationAttempted, false);
+});
+
+test('real kubectl accepts the credential-free CAS patch in argv without reopening stdin', t => {
+  const available = spawnSync('kubectl', ['version', '--client', '-o', 'json'], { encoding: 'utf8', timeout: 5000 });
+  if (available.error?.code === 'ENOENT') return t.skip('kubectl not installed');
+  assert.equal(available.status, 0);
+  const dir = mkdtempSync(join(tmpdir(), 'auth-recovery-kubectl-local-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'deployment.json');
+  writeFileSync(file, JSON.stringify({ apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: NAME, uid: 'fixture-uid', resourceVersion: '10' },
+    spec: { template: { metadata: { annotations: {} } } } }));
+  const patch = [{ op: 'test', path: '/metadata/uid', value: 'fixture-uid' },
+    { op: 'test', path: '/metadata/resourceVersion', value: '10' },
+    { op: 'add', path: '/spec/template/metadata/annotations/kubectl.kubernetes.io~1restartedAt', value: '2026-10-21T12:00:00.000Z' }];
+  const args = ['--kubeconfig=/dev/null', 'patch', '--local', '-f', file, '--type=json', '-p', JSON.stringify(patch), '-o', 'json'];
+  const result = JSON.parse(execute('kubectl', args));
+  assert.equal(result.metadata.uid, 'fixture-uid');
+  assert.equal(result.spec.template.metadata.annotations['kubectl.kubernetes.io/restartedAt'], patch[2].value);
 });

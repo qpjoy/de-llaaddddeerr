@@ -17,10 +17,36 @@ export const recoveryLocks = ['/run/mx-move-k8s.lock', '/run/mx-move-etcd.lock',
   '/run/mx-launcher-deploy.lock', '/var/lib/mx-move/k8s-runtime-install.lock'];
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const requireState = (ok, code) => { if (!ok) throw Object.assign(Error(code), { recoveryCode: code }); };
-function execute(command, args, options = {}) {
+function commandCategory(result) {
+  const stderr = result.stderr || '';
+  if (result.error?.code === 'ETIMEDOUT' || /timed out|context deadline exceeded|Timeout/i.test(stderr)) return 'timeout';
+  if (result.error || result.signal) return 'exec_failure';
+  if (/Error from server \(Conflict\)|object has been modified|test operation.*failed|test failed|testing value.*failed/i.test(stderr)) return 'conflict';
+  if (/Error from server \(Forbidden\)|\bforbidden\b/i.test(stderr)) return 'forbidden';
+  if (/Error from server \(NotFound\)|\bnot found\b/i.test(stderr)) return 'not_found';
+  if (/Error from server \((Invalid|BadRequest)\)|unknown (flag|shorthand flag|command)|flag needs an argument|invalid argument/i.test(stderr)) return 'invalid_argument';
+  return 'unknown';
+}
+export function execute(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, timeout: 20000, ...options });
-  requireState(!result.error && result.status === 0, 'command_failed');
+  if (result.error || result.status !== 0)
+    throw Object.assign(Error('command_failed'), { recoveryCode: 'command_failed', commandCategory: commandCategory(result) });
   return result.stdout;
+}
+export function recoveryFailure(error) {
+  return { ok: false, code: error.recoveryCode || 'recovery_failed',
+    stage: ['restart', 'rollout', 'postcheck'].includes(error.stage) ? error.stage : 'preflight',
+    ...(error.commandCategory ? { commandCategory: error.commandCategory } : {}),
+    mutationAttempted: error.mutationAttempted === true,
+    restartSubmitted: error.restartSubmitted === true ? true : error.mutationAttempted === true ? 'unknown' : false,
+    ...(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(error.attemptedAt || '') ? { attemptedAt: error.attemptedAt } : {}) };
+}
+export function wrapperFailure(result, apply) {
+  const locked = !result.error && !result.signal && result.status === 73;
+  return { ok: false, code: locked ? 'operation_locked' : 'recovery_failed', stage: locked ? 'lock' : 'wrapper',
+    ...(locked ? {} : { commandCategory: commandCategory(result) }),
+    mutationAttempted: apply && !locked ? 'unknown' : false,
+    restartSubmitted: apply && !locked ? 'unknown' : false };
 }
 function health(url) {
   return new Promise(resolveProbe => {
@@ -113,14 +139,18 @@ export async function recoverPublicAuth({ apply = false, run = execute, probe = 
   const confirmed = snapshot(); requireState(digest(confirmed) === digest(before), 'state_changed');
   if (await condition(confirmed)) return { ok: true, action: 'already_healthy', applied: false };
   const restartedAt = new Date().toISOString();
+  let stage = 'restart', restartSubmitted = 'unknown';
   try {
-    k(['patch', 'deployment', NAME, '--type=json', '--patch-file=/dev/stdin'], { input: JSON.stringify([
+    // Only UID, resourceVersion and a timestamp enter argv; no credentials or shell.
+    k(['patch', 'deployment', NAME, '--type=json', '-p', JSON.stringify([
       { op: 'test', path: '/metadata/uid', value: confirmed.deployment },
       { op: 'test', path: '/metadata/resourceVersion', value: confirmed.resourceVersion },
       { op: 'add', path: '/spec/template/metadata/annotations/kubectl.kubernetes.io~1restartedAt', value: restartedAt },
-    ]) });
+    ])]);
+    restartSubmitted = true; stage = 'rollout';
     run('kubectl', ['--kubeconfig=/etc/kubernetes/admin.conf', '--request-timeout=160s', '-n', NS,
       'rollout', 'status', `deployment/${NAME}`, '--timeout=150s'], { timeout: 165000 });
+    stage = 'postcheck';
     const after = snapshot();
     requireState(after.pod !== before.pod && after.generation === before.generation + 1 && after.restart === restartedAt
       && ['deployment', 'template', 'image', 'config', 'node', 'runtime', 'migration'].every(key => after[key] === before[key]), 'recovery_state_changed');
@@ -128,7 +158,7 @@ export async function recoverPublicAuth({ apply = false, run = execute, probe = 
     return { ok: true, action: 'recovered', applied: true };
   } catch (error) {
     // A lost patch response does not prove it failed. Never retry the mutation.
-    throw Object.assign(error, { mutationAttempted: true });
+    throw Object.assign(error, { mutationAttempted: true, stage, restartSubmitted, attemptedAt: restartedAt });
   }
 }
 
@@ -141,16 +171,15 @@ if (process.argv[1] && resolve(process.argv[1]) === FILE) {
       const command = recoveryLocks.flatMap(lock => ['flock', '-n', '-E', '73', lock]);
       const result = spawnSync(command.shift(), [...command, process.execPath, FILE, '--locked', ...args],
         { encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 600000 });
-      if (result.stdout?.trim()) process.stdout.write(result.stdout);
-      else process.stdout.write(JSON.stringify({ ok: false, code: result.status === 73 ? 'operation_locked' : 'recovery_failed' }) + '\n');
+      if (!result.error && !result.signal && result.stdout?.trim()) process.stdout.write(result.stdout);
+      else process.stdout.write(JSON.stringify(wrapperFailure(result, args.includes('--apply'))) + '\n');
       process.exitCode = result.error || result.status !== 0 ? 1 : 0;
     } else {
       const result = await recoverPublicAuth({ apply: args.includes('--apply') });
       process.stdout.write(JSON.stringify(result) + '\n');
     }
   } catch (error) {
-    process.stdout.write(JSON.stringify({ ok: false, code: error.recoveryCode || 'recovery_failed',
-      mutationAttempted: error.mutationAttempted === true }) + '\n');
+    process.stdout.write(JSON.stringify(recoveryFailure(error)) + '\n');
     process.exitCode = 1;
   }
 }
