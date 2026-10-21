@@ -396,7 +396,7 @@ class MainDispatchTests(unittest.TestCase):
 
 
 class ProductRuntimeEntryTests(unittest.TestCase):
-    def test_repository_scripts_support_shared_rig_resolver(self):
+    def test_repository_scripts_support_shared_rig_and_dataport_resolvers(self):
         manage = cutover.REPO / 'mx-rig/scripts/manage.sh'
         self.assertNotIn(b'/usr/local/lib/mx-k8s-runtime/resolve.py', manage.read_bytes())
         cutover.verify_product_runtime_entries(cutover.REPO)
@@ -441,6 +441,42 @@ class ProductRuntimeEntryTests(unittest.TestCase):
             with self.assertRaisesRegex(cutover.prep.Refuse, '无法读取产品运行时入口：mx-rig/scripts/build-proxy.sh'):
                 cutover.verify_product_runtime_entries(cutover.REPO)
 
+    def test_dataport_caller_requires_resolver_import_and_explicit_cri_image_gate(self):
+        for old, new in (
+                (b'import { resolveContainerdAddress, verifyCriImage } from "./k8s-runtime.mjs";',
+                 b'// import { resolveContainerdAddress, verifyCriImage } from "./k8s-runtime.mjs";'),
+                (b'const runtimeAddress = resolveContainerdAddress({ run });',
+                 b'const runtimeAddress = "/run/containerd/containerd.sock";'),
+                (b'run("ctr", ["--address", runtimeAddress, "-n", "k8s.io", "images", "import", archive]',
+                 b'run("ctr", ["-n", "k8s.io", "images", "import", archive]'),
+                (b'const images = run("ctr", [\n    "--address",\n    runtimeAddress,',
+                 b'const images = run("ctr", ['),
+                (b'await verifyCriImage({ run, address: runtimeAddress, image, expected: imageId });',
+                 b'// await verifyCriImage({ run, address: runtimeAddress, image, expected: imageId });')):
+            with self.subTest(removed=old):
+                self.assert_incomplete('mx-dataport/scripts/operations.mjs', old, new)
+
+    def test_dataport_provider_requires_managed_contract_and_exported_entry_points(self):
+        for old, new in (
+                (b'/etc/mx-k8s-runtime/active.json', b'/legacy/active.json'),
+                (b'/usr/local/lib/mx-k8s-runtime/resolve.py', b'/legacy/resolve.py'),
+                (b'export function resolveContainerdAddress(', b'function resolveContainerdAddress('),
+                (b'export async function verifyCriImage(', b'async function verifyCriImage(')):
+            with self.subTest(removed=old):
+                self.assert_incomplete('mx-dataport/scripts/k8s-runtime.mjs', old, new)
+
+    def test_missing_dataport_provider_or_caller_is_refused(self):
+        original_read = Path.read_bytes
+        for relative in ('mx-dataport/scripts/k8s-runtime.mjs', 'mx-dataport/scripts/operations.mjs'):
+            target = cutover.REPO / relative
+            def read(path):
+                if path == target:
+                    raise FileNotFoundError(str(path))
+                return original_read(path)
+            with self.subTest(missing=relative), mock.patch.object(Path, 'read_bytes', read):
+                with self.assertRaisesRegex(cutover.prep.Refuse, '无法读取产品运行时入口：' + relative):
+                    cutover.verify_product_runtime_entries(cutover.REPO)
+
 
 class CandidatePreflightTests(unittest.TestCase):
     def fixture(self, stack, candidate_images=None, source_images=None):
@@ -453,7 +489,9 @@ class CandidatePreflightTests(unittest.TestCase):
             cutover.REPO / 'mx-rig/scripts/manage.sh',
             cutover.REPO / 'mx-rig/scripts/build-proxy.sh',
             cutover.REPO / 'mx-base/mx-pay/scripts/runtime.mjs',
-            cutover.REPO / 'mx-base/mx-pay/scripts/build-proxy.sh')}
+            cutover.REPO / 'mx-base/mx-pay/scripts/build-proxy.sh',
+            cutover.REPO / 'mx-dataport/scripts/k8s-runtime.mjs',
+            cutover.REPO / 'mx-dataport/scripts/operations.mjs')}
         host = host_without_initialization()
         host.cluster = mock.Mock()
         host.cluster.snapshot.return_value = {'objects': {'configmaps': [], 'nodes': [{'metadata': {}}]}}

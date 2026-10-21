@@ -325,13 +325,23 @@ def verify_product_runtime_entries(repo):
     for relative in ('mx-launcher/scripts/k8s-production-recovery.sh', 'mx-insight-hub/scripts/manage.sh',
                      'mx-common/scripts/manage.sh', 'mx-rig/scripts/manage.sh',
                      'mx-rig/scripts/build-proxy.sh', 'mx-base/mx-pay/scripts/runtime.mjs',
-                     'mx-base/mx-pay/scripts/build-proxy.sh'):
+                     'mx-base/mx-pay/scripts/build-proxy.sh',
+                     'mx-dataport/scripts/k8s-runtime.mjs', 'mx-dataport/scripts/operations.mjs'):
         try:
             body = (repo / relative).read_bytes()
         except OSError:
             raise prep.Refuse('无法读取产品运行时入口：' + relative) from None
         supported = b'/etc/mx-k8s-runtime/active.json' in body
-        if relative == 'mx-rig/scripts/manage.sh':
+        if relative == 'mx-dataport/scripts/operations.mjs':
+            # A resolver file alone cannot protect a caller which still imports
+            # into the default runtime. Check the actual deployment wiring too.
+            supported = all(re.search(pattern, body, re.M) for pattern in (
+                rb'^[ \t]*import\s+\{\s*resolveContainerdAddress\s*,\s*verifyCriImage\s*\}\s+from\s+"\./k8s-runtime\.mjs";',
+                rb'^[ \t]*const runtimeAddress = resolveContainerdAddress\(\{ run \}\);',
+                rb'^[ \t]*run\("ctr",\s*\[\s*"--address",\s*runtimeAddress,\s*"-n",\s*"k8s\.io",\s*"images",\s*"import",',
+                rb'^[ \t]*const images = run\("ctr",\s*\[\s*"--address",\s*runtimeAddress,\s*"-n",\s*"k8s\.io",\s*"images",\s*"ls",',
+                rb'^[ \t]*await verifyCriImage\(\{ run, address: runtimeAddress, image, expected: imageId \}\);'))
+        elif relative == 'mx-rig/scripts/manage.sh':
             # Rig shares the resolver with its sourced build-proxy module.
             # Check the caller/provider pair instead of requiring a duplicate
             # resolver path in manage.sh; the provider is checked below.
@@ -343,6 +353,9 @@ def verify_product_runtime_entries(repo):
             supported = supported and b'/usr/local/lib/mx-k8s-runtime/resolve.py' in body
         if relative == 'mx-rig/scripts/build-proxy.sh':
             supported = supported and re.search(rb'^rig_managed_runtime_value\(\)[ \t]*\{', body, re.M)
+        if relative == 'mx-dataport/scripts/k8s-runtime.mjs':
+            supported = supported and all(re.search(pattern, body, re.M) for pattern in (
+                rb'^export function resolveContainerdAddress\(', rb'^export async function verifyCriImage\('))
         require(supported, '产品运行时入口未同步完整适配：' + relative)
 
 

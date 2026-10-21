@@ -23,6 +23,7 @@ function fixture(t, { fresh = false } = {}) {
     "scripts/manage.sh",
     "scripts/operations.mjs",
     "scripts/migration-job.mjs",
+    "scripts/k8s-runtime.mjs",
     "scripts/enroll.mjs",
     "scripts/recover-lock.mjs",
     "scripts/bootstrap.mjs",
@@ -72,7 +73,12 @@ function fixture(t, { fresh = false } = {}) {
   writeFileSync(
     join(dir, "network.mjs"),
     `
-import {appendFileSync} from 'node:fs';
+import fs, {appendFileSync} from 'node:fs';
+import {syncBuiltinESMExports} from 'node:module';
+const lstat = fs.lstatSync, stat = fs.statSync;
+fs.lstatSync = (path, ...args) => path === '/etc/mx-k8s-runtime/active.json' ? {} : lstat(path, ...args);
+fs.statSync = (path, ...args) => ['/run/mx-k8s/containerd.sock', '/run/changed/containerd.sock'].includes(path) ? {isSocket:()=>true} : stat(path, ...args);
+syncBuiltinESMExports();
 globalThis.fetch = async url => {
   if(url !== 'http://127.0.0.1:18220/ready') throw new Error('Unexpected readiness target');
   appendFileSync(process.env.HARBOR_TEST_DIR+'/calls', JSON.stringify({cmd:'readiness',args:[url],stdin:''})+'\\n');
@@ -160,9 +166,21 @@ else if(cmd==='docker'&&args.includes('-t')){
  if(process.env.HARBOR_TEST_BUILD_FAILURE)process.exit(1);
  fs.writeFileSync(dir+'/image',args[args.indexOf('-t')+1]);
 }
+else if(cmd==='docker'&&args[0]==='image'&&args[1]==='inspect')process.stdout.write('sha256:'+'a'.repeat(64));
+else if(cmd==='python3'){
+ if(process.env.HARBOR_TEST_RUNTIME_RESOLVER_FAILURE){process.stderr.write('private-sensitive-payload');process.exit(1)}
+ process.stdout.write(process.env.HARBOR_TEST_RUNTIME_DRIFT&&fs.existsSync(dir+'/image')?'/run/changed/containerd.sock':'/run/mx-k8s/containerd.sock');
+}
+else if(cmd==='crictl'){
+ if(args.includes('version'))process.stdout.write('RuntimeName: containerd\\nRuntimeApiVersion: v1\\n');
+ else if(args.includes('inspecti')){
+  if(process.env.HARBOR_TEST_CRI_INVISIBLE){process.stderr.write('private-sensitive-payload');process.exit(1)}
+  process.stdout.write(JSON.stringify({status:{id:'sha256:'+(process.env.HARBOR_TEST_CRI_WRONG_IMAGE?'b':'a').repeat(64)}}));
+ }
+}
 else if(cmd==='ctr'&&args.includes('ls'))process.stdout.write('docker.io/library/'+fs.readFileSync(dir+'/image','utf8')+'\\n');
 `;
-  for (const cmd of ["kubectl", "docker", "ctr", "bash", "ps"])
+  for (const cmd of ["kubectl", "docker", "ctr", "crictl", "python3", "bash", "ps"])
     writeFileSync(join(dir, "bin", cmd), stub, { mode: 0o755 });
   const run = (action, extra = {}) =>
     spawnSync(
@@ -182,6 +200,7 @@ else if(cmd==='ctr'&&args.includes('ls'))process.stdout.write('docker.io/library
           MX_HARBOR_KUBE_CONTEXT: "",
           MX_HARBOR_NODE: "",
           MX_HARBOR_HUB_ADMIN_ORIGIN: "",
+          MX_K8S_CONTAINERD_ADDRESS: "",
           ...extra,
         },
       },
@@ -239,6 +258,18 @@ function assertFullDeploy(calls) {
     job.spec.template.spec.containers[0].image,
     app.spec.template.spec.containers[0].image,
   );
+  assert.equal(job.spec.template.spec.containers[0].imagePullPolicy, "Never");
+  for (const call of calls.filter(c => c.cmd === "ctr"))
+    assert.deepEqual(call.args.slice(0, 4), ["--address", "/run/mx-k8s/containerd.sock", "-n", "k8s.io"]);
+  const cri = calls.find(c => c.cmd === "crictl" && c.args.includes("inspecti"));
+  assert.ok(cri, "kubelet CRI must see the built image before migration");
+  assert.deepEqual(cri.args.slice(0, 3), [
+    "--runtime-endpoint=unix:///run/mx-k8s/containerd.sock",
+    "--image-endpoint=unix:///run/mx-k8s/containerd.sock", "--timeout=10s",
+  ]);
+  assert.equal(cri.args.at(-1), job.spec.template.spec.containers[0].image);
+  assert.ok(position(c => c.cmd === "ctr" && c.args.includes("import")) < position(c => c === cri));
+  assert.ok(position(c => c === cri) < position(c => c.stdin.includes('"kind":"Job"')));
   assert.ok(
     position((c) => c.args.includes("buildx")) <
       position((c) => c.stdin.includes('"kind":"Job"')),
@@ -377,6 +408,37 @@ test("registry build failure never starts migration or updates the running workl
   assert.ok(!f.calls().some(c => c.stdin.includes('"kind":"Job"') || c.stdin.includes('"kind":"Deployment"')));
   assert.ok(!f.calls().some(c => c.args.includes("patch")));
   assert.equal(existsSync(join(f.dir, "lock")), false);
+});
+test("invalid managed runtime stops before build or cluster mutation without default fallback", (t) => {
+  const f = fixture(t), result = f.run("deploy", { HARBOR_TEST_RUNTIME_RESOLVER_FAILURE: "1" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /managed runtime verification failed/);
+  assert.doesNotMatch(result.stderr, /private-sensitive-payload/);
+  assert.ok(!f.calls().some(c => ["docker", "ctr", "crictl"].includes(c.cmd) ||
+    c.args.some(a => ["create", "delete", "apply", "patch", "label"].includes(a))));
+  assert.equal(existsSync(join(f.dir, "lock")), false);
+});
+test("runtime drift during build stops before importing or creating a migration Job", (t) => {
+  const f = fixture(t), result = f.run("deploy", { HARBOR_TEST_RUNTIME_DRIFT: "1" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /runtime changed during build/);
+  assert.ok(!f.calls().some(c => c.cmd === "ctr" && c.args.includes("import")));
+  assert.ok(!f.calls().some(c => c.stdin.includes('"kind":"Job"') || c.stdin.includes('"kind":"Deployment"')));
+  assert.equal(existsSync(join(f.dir, "lock")), false);
+});
+test("ctr metadata without the matching CRI image never starts migration or updates the application", (t) => {
+  for (const flag of ["HARBOR_TEST_CRI_INVISIBLE", "HARBOR_TEST_CRI_WRONG_IMAGE"]) {
+    const f = fixture(t), result = f.run("deploy", { [flag]: "1" });
+    assert.notEqual(result.status, 0, flag);
+    assert.match(result.stderr, /CRI cannot see the expected imported image/);
+    assert.doesNotMatch(result.stdout + result.stderr, /private-sensitive-payload/);
+    const calls = f.calls();
+    assert.ok(calls.some(c => c.cmd === "ctr" && c.args.includes("ls")));
+    assert.equal(calls.filter(c => c.cmd === "crictl" && c.args.includes("inspecti")).length, 6);
+    assert.ok(!calls.some(c => c.stdin.includes('"kind":"Job"') || c.stdin.includes('"kind":"Deployment"')));
+    assert.ok(!calls.some(c => c.args.includes("patch")));
+    assert.equal(existsSync(join(f.dir, "lock")), false);
+  }
 });
 test("malformed build proxies are rejected without printing their value or configuring a builder", (t) => {
   for (const proxy of ["socks5://127.0.0.1:7788", "http://127.0.0.1:7788/path", "http://127.0.0.1:7788/?secret=hidden", "http://private-user:private-password@127.0.0.1:7788", "invalid-private-value"]) {

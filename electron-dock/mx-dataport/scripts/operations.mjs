@@ -7,6 +7,7 @@ import { workload } from "../deploy/k8s/render.mjs";
 import { readConfig } from "../apps/server/config.mjs";
 import { commandFailure } from "./enroll.mjs";
 import { waitForMigration, migrationDiagnostics } from "./migration-job.mjs";
+import { resolveContainerdAddress, verifyCriImage } from "./k8s-runtime.mjs";
 import {
   acquireDeployLock,
   harborProcesses,
@@ -81,7 +82,9 @@ if (action === "plan") {
         appPort: 18220,
         operations: [
           "verify retained identity and credentials",
+          "verify local Kubernetes container runtime",
           "build immutable image",
+          "import and verify image identity through Kubernetes CRI",
           "run isolated migration",
           "update and restart DataPort once",
           "wait for rollout and readiness",
@@ -158,6 +161,9 @@ try {
   console.error(`DataPort: ${error.message}`);
   process.exit(1);
 }
+// Resolve the live kubelet runtime before changing cluster resources. A host
+// may also have Docker's containerd or a retired Kubernetes containerd.
+const runtimeAddress = resolveContainerdAddress({ run });
 const ns = read(["get", "namespace", namespace, "--ignore-not-found"]);
 if (!ns) {
   kube(["create", "namespace", namespace]);
@@ -418,12 +424,20 @@ try {
     );
   }
   run("docker", args, { env, inherit: true });
+  const imageId = run("docker", ["image", "inspect", image, "--format", "{{.Id}}"])
+    .stdout.trim();
+  if (!/^sha256:[a-f0-9]{64}$/.test(imageId))
+    throw Error("Built image identity could not be verified; application not updated");
+  if (resolveContainerdAddress({ run }) !== runtimeAddress)
+    throw Error("Kubernetes container runtime changed during build; application not updated");
   const archive = join(temp, "image.tar");
   run("docker", ["image", "save", "-o", archive, image]);
-  run("ctr", ["-n", "k8s.io", "images", "import", archive], {
+  run("ctr", ["--address", runtimeAddress, "-n", "k8s.io", "images", "import", archive], {
     inherit: true,
   });
   const images = run("ctr", [
+    "--address",
+    runtimeAddress,
     "-n",
     "k8s.io",
     "images",
@@ -432,6 +446,10 @@ try {
   ]).stdout.split("\n");
   if (!images.includes(`docker.io/library/${image}`))
     throw Error("Image import could not be verified");
+  // ctr's image metadata alone does not prove the kubelet's CRI plugin can
+  // resolve this tag. Compare its config digest with the exact Docker build.
+  await verifyCriImage({ run, address: runtimeAddress, image, expected: imageId });
+  console.log("DataPort: built image verified in Kubernetes CRI");
   job = `mx-harbor-migrate-${randomUUID().slice(0, 8)}`;
   apply(workload({ namespace, node: nodeHostname, image, job }));
   console.log(`DataPort: waiting for migration job/${job}`);

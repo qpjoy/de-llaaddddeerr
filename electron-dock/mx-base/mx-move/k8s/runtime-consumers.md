@@ -1,6 +1,6 @@
 # 独立 Kubernetes containerd 的调用者适配
 
-更新日期：2026-10-20。**中性解析器、下表产品 wrapper 和正式切换事务已实现，尚未进行业务切换后的生产验收。** `install-runtime` 已回传候选成功，但不发布 active 描述、不切换 kubelet；因此这些适配不会把当前普通发布提前导向候选实例。后续 `migrate` 在持久提交之后才正式激活；执行步骤见[正式切换说明](cutover.md)。
+更新日期：2026-10-21。**中性解析器、下表产品 wrapper 和正式切换事务已实现，尚未进行业务切换后的生产验收。** `install-runtime` 已回传候选成功，但不发布 active 描述、不切换 kubelet；因此这些适配不会把当前普通发布提前导向候选实例。后续 `migrate` 在持久提交之后才正式激活；执行步骤见[正式切换说明](cutover.md)。
 
 目标仍是仅迁 Kubernetes：Docker 数据、卷与原共享 containerd 保留原位。曾经存在的默认 socket 调用会使“镜像导入旧 `k8s.io` 并验证成功，但新 kubelet 看不到镜像”；适配为各入口显式使用经过验证的 K8s endpoint。
 
@@ -15,11 +15,20 @@
 | Launcher CNI 修复 | `mx-launcher/scripts/manage.sh` 的 `ops_internal_production_repair_cni` | 重启所选 K8s runtime 和 kubelet，通过匹配的 CRI 检查；managed 场景不重启旧 containerd/Docker。 |
 | Launcher kubeadm 恢复 | `manage.sh` 的 `ops_internal_production_reinit_kubeadm`；`install-k8s-centos.sh` 的 `configure_runtime_selection`、`configure_containerd`、`restart_runtime_after_cni` | reinit 显式传入受验证的 CRI_SOCKET；无法验证运行实例时停止。安装器在主机改动前拒绝 managed 节点默认重写 Docker containerd；CNI reload 使用所选服务。这不是本次迁移命令，不应通过 reinit 迁移。 |
 | Hub | `mx-insight-hub/scripts/manage.sh` 的 `run_ctr` | 缓存查询、镜像导入统一传入 managed endpoint；无标记时保留旧节点行为。 |
+| DataPort | `mx-dataport/scripts/k8s-runtime.mjs` 的 `resolveContainerdAddress` / `verifyCriImage`；`operations.mjs` 的部署调用 | managed 节点复用受保护解析器，导入及列表检查显式指定同一地址；创建迁移 Job 前通过对应 CRI 比较本次 Docker 镜像 ID。未迁移节点从实际 kubelet 参数/配置发现 endpoint；不猜默认 socket。 |
 | common | `mx-common/scripts/manage.sh` 的 `common_ctr`、`common_containerd_root` | 数据库与 HanLP 镜像查询/导入采用统一地址；容量检查取同一实例 root，拒绝冲突的 `MX_COMMON_CONTAINERD_ROOT`。 |
 | Rig | `mx-rig/scripts/manage.sh` 的 `run_ctr`；`build-proxy.sh` 的 `rig_proxy_namespace_ctr`、`rig_proxy_postgres_image` | 服务器镜像导入及 PostgreSQL 的 `k8s.io` 预取选择 K8s 实例；Docker BuildKit namespace 保持旧实例。 |
 | Pay | `mx-base/mx-pay/scripts/runtime.mjs` 的 `ctrCommand` / `ctrScript`；`build-proxy.sh` 的 `pay_proxy_namespace_ctr`、`pay_proxy_postgres_image` | 本地与 SSH 交付在目标节点解析地址，避免把部署发起机的 socket 传给其他节点；未迁移节点保留 k3s 适配。PostgreSQL 预取和 Docker bootstrap 按用途分开。 |
 
 没有修改登录、SSO、数据库用户或网络配置来实现这些选择。离线回归覆盖 managed/未迁移节点、缺失或无效解析结果、sudo/远端交付和 Docker bootstrap 分流；这些测试不能代替生产 Pod、CNI 和用户功能验收。
+
+### 2026-10-21 DataPort 发布遗漏补齐
+
+服务器回执确认 `mx-harbor-migrate-cf91aed0` 的 Pod 报 `ErrImageNeverPull`，随后 Job `DeadlineExceeded`；旧应用仍 Running，独立只读探测显示数据库可连接且 `001_sso` 已应用。这确认该次迁移容器未启动，不能把报错归为数据库迁移执行失败。
+
+此前 DataPort 的 `ctr -n k8s.io` 导入和镜像列表检查均未选地址，且不在 `cutover.py` 的产品适配预检清单中。正式迁盘后 kubelet 使用独立 runtime 时，旧脚本可能在原实例导入并自检通过，新实例却看不到镜像；这与现场现象一致，两个实例的实际镜像状态仍需服务器只读回执核对。现已补齐 DataPort 入口，并让切换预检同时检查解析器模块、部署调用、显式导入地址及 CRI 镜像核验；仅复制 helper 但未接入部署也会拒绝预检。
+
+上述适配与预检采用本地替身回归验证；没有据此宣称生产发布、迁盘验收或 MX-H2I 用户功能复测完成。已迁盘主机修复 DataPort 发布时无需重新运行迁盘事务，也无需重启共享 containerd 或 kubelet。
 
 ## 中性主机描述协议
 
