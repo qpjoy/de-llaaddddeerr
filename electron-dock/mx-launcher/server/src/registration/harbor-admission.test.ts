@@ -24,6 +24,9 @@ test('dedicated DataPort invitations admit MX owners atomically without changing
     const user = await register('ExistingOwner'), other = await register('OtherOwner'), before = (await identity.account(user.userId))!;
     const credential = () => db.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='iam-user-credential' AND id=$2", [environment, user.userId]);
     const savedCredential = await credential();
+    assert.equal(await identity.hasLogin('ExistingOwner'),true);
+    assert.equal(await identity.hasLogin('existingowner'),false,'MX exact-case routing matches authentication');
+    assert.equal(await identity.hasLogin('not-an-account'),false);
     const invite = (label: string) => repo.createInvitation({ label, days: 1, maxUses: 1, admissionAppId: 'mx-harbor' });
     const uses = async (id: string) => (await repo.invitations()).find(i => i.id === id)!.uses;
     const admit = (userId: string, inviteCode: string) => repo.redeemAdmission({ userId, source: harbor, inviteCode });
@@ -60,6 +63,12 @@ test('dedicated DataPort invitations admit MX owners atomically without changing
     policy = await repo.updatePolicy({ ...policy, applicationModes: { 'mx-harbor': 'closed' } });
     const fresh = await register('ClosedOwner'); await assert.rejects(admit(fresh.userId, unused.code), { code: 'registration_closed' });
     await assert.rejects(register('ClosedSignup', harbor, unused.code), { code: 'registration_closed' }); assert.equal((await repo.policy(hub)).mode, 'open');
+    await db.query("UPDATE mx_platform_records SET data=jsonb_set(data,'{status}','\"suspended\"'::jsonb) WHERE environment=$1 AND kind='iam-user' AND id=$2", [environment,user.userId]);
+    assert.equal(await identity.hasLogin('ExistingOwner'),true,'disabled MX identity remains reserved');
+    assert.equal(await identity.authenticate('ExistingOwner','FixturePassword123!'),undefined);
+    await db.query("UPDATE mx_platform_records SET data=jsonb_set(data,'{account}','\"ExistingOwner\"'::jsonb) WHERE environment=$1 AND kind='iam-user' AND id=$2", [environment,other.userId]);
+    assert.equal(await identity.hasLogin('ExistingOwner'),true,'duplicate MX aliases remain reserved');
+    assert.equal(await identity.authenticate('ExistingOwner','FixturePassword123!'),undefined);
   } finally {
     await repo.close(); await identity.close(); await db.query('DELETE FROM mx_platform_records WHERE environment=$1', [environment]);
     await db.query('DELETE FROM mx_identity_records WHERE scope=$1', [environment]); await db.destroy();

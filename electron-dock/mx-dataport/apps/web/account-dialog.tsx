@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Layers3,
   ShieldCheck,
@@ -30,8 +30,9 @@ import {
   InputGroupAddon,
   InputGroupButton,
 } from "@/components/ui/input-group";
+import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
-import { request, loadAccountForm, navigateAfterLogin, type AccountOptions } from "./api";
+import { request, loadAccountForm, navigateAfterLogin, loginFailureUncertain, type AccountOptions } from "./api";
 type AccountDialogProps = {
   open: boolean;
   onOpenChange: (value: boolean) => void;
@@ -39,8 +40,7 @@ type AccountDialogProps = {
   preview?: boolean;
 };
 export function AccountDialog(props: AccountDialogProps) {
-  // Each opening obtains a fresh form before mounting the dialog. A cold SSO
-  // redirect must not briefly display a form that will immediately disappear.
+  // Each opening starts fresh; no password or invitation survives closing.
   return props.open ? <AccountDialogSession {...props} /> : null;
 }
 function AccountDialogSession({
@@ -49,25 +49,36 @@ function AccountDialogSession({
   onAuthenticated,
   preview = false,
 }: AccountDialogProps) {
+  const active = useRef(true);
+  const formRef = useRef<HTMLFormElement>(null);
+  const focusPassword = useRef(false);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const [options, setOptions] = useState<AccountOptions | null>(null),
-    [employee, setEmployee] = useState(!new URLSearchParams(location.search).has("account")),
+    [login, setLogin] = useState(""),
     [error, setError] = useState(""),
     [unavailable, setUnavailable] = useState(false),
     [retry, setRetry] = useState(0),
-    [checking, setChecking] = useState(!preview),
+    [checking, setChecking] = useState(!preview && new URLSearchParams(location.search).has("account")),
     [busy, setBusy] = useState(false),
+    [preparing, setPreparing] = useState(false),
+    [preparedLogin, setPreparedLogin] = useState(""),
+    [uncertain, setUncertain] = useState(false),
     [show, setShow] = useState(false);
   useEffect(() => {
+    if (!preparing && focusPassword.current) {
+      focusPassword.current = false;
+      formRef.current?.querySelector<HTMLInputElement>('[name="password"]')?.focus();
+    }
+  }, [preparing]);
+  useEffect(() => {
     if (!open || preview) return;
-    if (employee) { setChecking(false); setUnavailable(false); setError(""); return; }
     let active = true;
-    setChecking(true);
+    setChecking(new URLSearchParams(location.search).has("account") || retry > 0);
     setOptions(null);
     setUnavailable(false);
     setError("");
     loadAccountForm({
-      canRestart:
-        !new URLSearchParams(location.search).has("account") || retry > 0,
+      canRestart: retry > 0,
       current: () => active,
     })
       .then((value) => {
@@ -77,11 +88,15 @@ function AccountDialogSession({
             return;
           }
           setOptions(value.options);
+          setLogin((current) => current || value.options.loginHint || "");
           setUnavailable(false);
         }
       })
       .catch((error) => {
         if (!active) return;
+        // A new public dialog has no MX transaction yet. Local accounts can
+        // submit immediately; the server starts OIDC only for an MX identity.
+        if ((error as {status?: number}).status === 410 && !new URLSearchParams(location.search).has("account")) return;
         if (active) {
           setOptions(null);
           setUnavailable(true);
@@ -98,10 +113,36 @@ function AccountDialogSession({
     return () => {
       active = false;
     };
-  }, [open, preview, retry, employee]);
+  }, [open, preview, retry]);
+  async function prepareLogin(form: HTMLFormElement | null) {
+    if (!form || preview || checking || preparing || busy || uncertain || options || !login.trim() || preparedLogin === login.trim()) return;
+    const data = new FormData(form);
+    // Connect MX before entering credentials. Autofilled secrets are never
+    // discarded by a blur-triggered redirect; submission handles that case.
+    if (data.get("password") || data.get("inviteCode")) return;
+    setPreparing(true);
+    setError("");
+    try {
+      const result = await request<{redirect?:string;ready?:boolean}>("/auth/login/prepare", {
+        method:"POST",signal:AbortSignal.timeout(15000),body:JSON.stringify({login:login.trim()}),
+      });
+      if (active.current && result.redirect) location.assign(result.redirect);
+      else if (active.current && result.ready) {
+        setPreparedLogin(login.trim());
+        focusPassword.current = true;
+      }
+    } catch (e) {
+      if (active.current) {
+        focusPassword.current = true;
+        setError((e as Error).name === "TimeoutError" ? "连接超时，请重试。" : (e as Error).message);
+      }
+    } finally {
+      if (active.current) setPreparing(false);
+    }
+  }
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (checking) return;
+    if (checking || preparing || busy || uncertain) return;
     if (unavailable) {
       setRetry((value) => value + 1);
       return;
@@ -110,37 +151,30 @@ function AccountDialogSession({
       setError("组件预览不创建账号或提交登录。");
       return;
     }
-    if (!employee && !options) return;
     const data = new FormData(event.currentTarget);
     setBusy(true);
     setError("");
     try {
-      if (employee) {
-        const result = await request<{redirect:string}>("/auth/local/login", {
-          method:"POST",signal:AbortSignal.timeout(15000),
-          body:JSON.stringify({account:data.get("login"),password:data.get("password")}),
-        });
-        navigateAfterLogin(result.redirect, location, history, onAuthenticated);
-        return;
-      }
-      const result = await request<{ redirect: string }>("/auth/sso/form", {
+      const result = await request<{ redirect: string }>("/auth/login", {
         method: "POST",
         signal: AbortSignal.timeout(15000),
-        headers: { "x-mx-csrf": options!.csrf },
+        ...(options ? {headers: { "x-mx-csrf": options.csrf }} : {}),
         body: JSON.stringify({
-          action: "login",
-          formId: options!.formId,
           ...Object.fromEntries(data),
+          ...(options ? {formId: options.formId} : {}),
         }),
       });
-      navigateAfterLogin(result.redirect);
+      if (typeof result.redirect !== "string") throw Object.assign(new Error("登录响应尚未确认。"), {code:"invalid_response"});
+      navigateAfterLogin(result.redirect, location, history, onAuthenticated);
     } catch (e) {
+      const unconfirmed = loginFailureUncertain(e);
+      if (unconfirmed) setUncertain(true);
       setError(
-        (e as Error).name === "TimeoutError"
+        unconfirmed
           ? "提交结果尚未确认，请先核对登录状态，勿重复提交。"
           : (e as Error).message,
       );
-      if ([409, 410].includes((e as { status?: number }).status ?? 0)) {
+      if (["account_flow_expired", "account_form_changed"].includes((e as {code?: string}).code || "") || (e as {status?: number}).status === 410) {
         setOptions(null);
         setUnavailable(true);
       }
@@ -149,7 +183,7 @@ function AccountDialogSession({
   }
   return (
     <Dialog
-      open={open && (employee || preview || !!options || unavailable || checking)}
+      open={open}
       onOpenChange={(value) => {
         if (!busy) {
           onOpenChange(value);
@@ -187,26 +221,26 @@ function AccountDialogSession({
           </div>
           <DialogHeader>
             <DialogTitle>登录数港</DialogTitle>
-            <DialogDescription>{employee ? "使用企业超管创建的数港子账号登录。" : "企业超管使用已开通数港的统一 MX 账号登录。"}</DialogDescription>
+            <DialogDescription>登录后查询 IP 风险画像</DialogDescription>
           </DialogHeader>
-          <div className="auth-login-modes" role="group" aria-label="登录方式">
-            <Button type="button" variant={employee ? "outline" : "default"} disabled={busy} onClick={() => {setEmployee(false);setError("");}}>企业超管 · MX 登录</Button>
-            <Button type="button" variant={employee ? "default" : "outline"} disabled={busy} onClick={() => {setEmployee(true);setError("");}}>子账号登录</Button>
-          </div>
-          <form onSubmit={submit} aria-busy={busy || checking}>
+          <form ref={formRef} onSubmit={submit} aria-busy={busy || checking || preparing}>
             <FieldGroup>
               <Field>
-                <FieldLabel htmlFor="auth-login">{employee ? "数港子账号" : "MX 账号"}</FieldLabel>
+                <FieldLabel htmlFor="auth-login">账号</FieldLabel>
                 <InputGroup>
                   <InputGroupInput
                     id="auth-login"
                     name="login"
                     required
-                    maxLength={64}
+                    maxLength={255}
                     autoComplete="username"
-                    defaultValue={options?.loginHint || ""}
-                    placeholder={employee ? "输入企业超管分配的子账号" : "输入你的 MX 账号"}
-                    disabled={busy}
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    value={login}
+                    onChange={(event) => setLogin(event.target.value)}
+                    onBlur={(event) => { void prepareLogin(event.currentTarget.form); }}
+                    placeholder="输入管理员提供的账号"
+                    disabled={busy || preparing}
                   />
                   <InputGroupAddon>
                     <Mail />
@@ -224,7 +258,7 @@ function AccountDialogSession({
                     maxLength={128}
                     autoComplete="current-password"
                     placeholder="输入密码"
-                    disabled={busy}
+                    disabled={busy || preparing}
                   />
                   <InputGroupAddon>
                     <LockKeyhole />
@@ -232,6 +266,9 @@ function AccountDialogSession({
                   <InputGroupAddon align="inline-end">
                     <InputGroupButton
                       type="button"
+                      disabled={busy || preparing}
+                      aria-pressed={show}
+                      size="icon-sm"
                       aria-label={show ? "隐藏密码" : "显示密码"}
                       onClick={() => setShow(!show)}
                     >
@@ -240,36 +277,47 @@ function AccountDialogSession({
                   </InputGroupAddon>
                 </InputGroup>
               </Field>
-              {error && <FieldError role="alert">{error}</FieldError>}
+              <Field>
+                <FieldLabel htmlFor="auth-invite-code">邀请码 <span className="auth-optional">（选填）</span></FieldLabel>
+                <Input id="auth-invite-code" name="inviteCode" maxLength={128} autoComplete="off" disabled={busy || preparing}
+                  placeholder="企业超管首次开通时填写" aria-describedby="auth-invite-hint" />
+                <p id="auth-invite-hint" className="auth-invite-hint">企业超管首次开通数港时填写，已开通账号及子账号无需填写。</p>
+              </Field>
+              {error && <FieldError className="auth-error" role="alert">{error}</FieldError>}
               <Button
                 type={unavailable ? "button" : "submit"}
                 onClick={
                   unavailable ? () => setRetry((value) => value + 1) : undefined
                 }
-                className="auth-submit"
-                disabled={busy || checking}
+                className="auth-submit w-full"
+                size="lg"
+                disabled={busy || checking || preparing || uncertain}
               >
-                {busy || checking ? <Spinner /> : null}
-                {checking
+                {busy || checking || preparing ? <Spinner data-icon="inline-start" /> : null}
+                {checking || preparing
                   ? "连接中"
                   : unavailable
                     ? "重试连接"
-                    : "登录"}
-                <ArrowRight />
+                    : busy ? "正在登录…" : "登录"}
+                {!busy && !checking && !preparing && <ArrowRight data-icon="inline-end" />}
               </Button>
             </FieldGroup>
           </form>
+          {uncertain && <Button type="button" variant="outline" className="auth-check-session" onClick={() => {
+            if (onAuthenticated) onAuthenticated();
+            else location.reload();
+          }}>核对登录状态</Button>}
           <p className="managed-account-note">
-            {employee ? "子账号由企业超管创建" : "使用已有 MX 账号登录"}
+            账号由管理员统一开通
             <br />
             如需开通或重置密码，请联系管理员
           </p>
           <nav className="auth-legal-links" aria-label="登录法律信息">
-            <a href="/terms">用户协议</a>
+            <a href="/terms" target="_blank" rel="noopener">用户协议</a>
             <span>·</span>
-            <a href="/privacy">隐私政策</a>
+            <a href="/privacy" target="_blank" rel="noopener">隐私政策</a>
             <span>·</span>
-            <a href="/cookies">Cookie 说明</a>
+            <a href="/cookies" target="_blank" rel="noopener">Cookie 说明</a>
           </nav>
           <DialogClose
             className="auth-close"

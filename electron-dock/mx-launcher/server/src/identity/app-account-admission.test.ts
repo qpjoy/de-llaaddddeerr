@@ -20,6 +20,7 @@ function fixture({ admitted = false, closed = false, appId = 'mx-harbor' } = {})
       remove: async (kind: string, id: string) => { rows.delete(`${kind}:${id}`); },
     },
     account: async (id: string) => id === user.userId ? user : undefined,
+    hasLogin: async (login: string) => login === user.account,
     authenticate: async (login: string, password: string) => login === user.account && password === 'FixturePassword123!' ? user : undefined,
     allowAttempt: async () => true, allowRegistrationAttempt: async () => true,
   };
@@ -49,9 +50,21 @@ function fixture({ admitted = false, closed = false, appId = 'mx-harbor' } = {})
     const res: any = { writeHead(code: number) { status = code; return this; }, end(body: string) { payload = JSON.parse(body); } };
     await handler.handle(req, res); return { status, payload };
   }
-  return { call, calls, rows, flow, user };
+  return { call, calls, rows, flow, user, accounts };
 }
 const login = { login: 'FixtureOwner', password: 'FixturePassword123!' };
+
+test('DataPort routing is client-authenticated, private and does not authenticate or redeem invitations', async () => {
+  const f = fixture();
+  assert.deepEqual((await f.call('resolve-login',{login:login.login})).payload,{exists:true});
+  assert.deepEqual((await f.call('resolve-login',{login:'unknown'})).payload,{exists:false});
+  assert.equal((await f.call('resolve-login',{login:login.login},{origin:'https://dataport.example.test'})).status,403);
+  assert.equal((await f.call('resolve-login',{login:login.login},{authorization:'Basic invalid'})).status,401);
+  assert.equal((await fixture({appId:'mx-insight-hub'}).call('resolve-login',{login:login.login})).status,403);
+  assert.equal(f.calls.length,0); assert.ok(!f.rows.has(`app-result:${f.flow}`));
+  const limited = fixture(); limited.accounts.allowAttempt = async () => false;
+  assert.equal((await limited.call('resolve-login',{login:login.login})).status,429);
+});
 
 test('DataPort advertises invitation admission and keeps Feishu disabled; other app options stay unchanged', async () => {
   const f = fixture(); const options = await f.call('options');

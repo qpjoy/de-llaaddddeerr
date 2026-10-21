@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process'
 import { createServer, request as httpsRequest } from 'node:https'
 import pg from 'pg'
 import { createApplicationSso } from '../src/identity/sso.mjs'
+import { createHarborApp } from '../../mx-dataport/apps/server/app.mjs'
 import { PostgresSsoStore } from '../src/identity/postgres-store.mjs'
 
 const connectionString=process.env.MX_SSO_TEST_DATABASE_URL
@@ -30,9 +31,10 @@ test('two ordinary applications share real Auth, with separate durable sessions 
   await pool.query(schema)
   // Distinct consumer schemas simulate separate application databases in this isolated fixture.
   await pool.query(schema.replaceAll('app_auth','second_auth'))
+  await pool.query(schema.replaceAll('app_auth','third_auth'))
   repository=new IdentityRepository(url.href,'test',name,'test-rate');await repository.initialize()
   await pool.query('CREATE TABLE mx_platform_records(kind text,id text,environment text,data jsonb,PRIMARY KEY(kind,id,environment))')
-  await pool.query("INSERT INTO mx_platform_records VALUES('iam-user','person','test',$1)",[{userId:'person',status:'active',displayName:'Shared person',appAccess:{deniedAppIds:[]}}])
+  await pool.query("INSERT INTO mx_platform_records VALUES('iam-user','person','test',$1)",[{userId:'person',account:'person',status:'active',displayName:'Shared person',appAccess:{deniedAppIds:[]}}])
   execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1','-keyout',join(dir,'key'),'-out',join(dir,'cert')],{stdio:'ignore'})
   const cert=readFileSync(join(dir,'cert')),key=readFileSync(join(dir,'key'))
   async function listen(handler) {
@@ -45,9 +47,10 @@ test('two ordinary applications share real Auth, with separate durable sessions 
     return provider.handle(req,res)
   }),issuer=`${authOrigin}/identity`
   const applications=[]
-  for(const [appId,table] of [['mx-example','app_auth.browser_sso_records'],['mx-other','second_auth.browser_sso_records']]) {
+  for(const [appId,table] of [['mx-example','app_auth.browser_sso_records'],['mx-other','second_auth.browser_sso_records'],['mx-harbor','third_auth.browser_sso_records']]) {
     const app={appId,clientId:`${appId}-web`,clientSecret:randomBytes(32).toString('base64url'),audience:appId,grants:[]}
     app.origin=await listen(async(req,res)=>{
+      if (appId === 'mx-harbor' && req.url.startsWith('/auth/login')) return app.bff(req,res)
       try {
         if(await app.sso.handle(req,res,new URL(req.url,app.origin)))return
         const principal=await app.sso.principal(req)
@@ -58,11 +61,17 @@ test('two ordinary applications share real Auth, with separate durable sessions 
     })
     app.settings={...app,issuer,scope:'openid mx:identity',sessionKey:randomBytes(32).toString('base64url'),caCert:cert.toString()}
     app.store=new PostgresSsoStore(pool,app.settings.sessionKey,{table})
-    app.restart=()=>{app.sso=createApplicationSso({settings:app.settings,store:app.store,navigation:app.navigation,resolvePrincipal:identity=>({issuer:identity.issuer,subject:identity.subject,displayName:identity.displayName,permissions:app.grants})})}
+    app.restart=()=>{
+      app.sso=createApplicationSso({settings:app.settings,store:app.store,navigation:app.navigation,
+        ...(appId === 'mx-harbor' ? {onAuthenticated:()=>({cookies:['__Host-mx_dataport_local=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0']})} : {}),
+        resolvePrincipal:identity=>({issuer:identity.issuer,subject:identity.subject,displayName:identity.displayName,permissions:app.grants})})
+      if (appId === 'mx-harbor') app.bff=createHarborApp({config:{sso:app.settings,upstream:'http://fixture-hub',gatewayToken:'fixture-gateway'},sso:app.sso,
+        fetch:async(url,options)=>{assert.ok(url.endsWith('/local/resolve'));assert.deepEqual(JSON.parse(options.body),{account:app.expectedLogin ?? 'person'});return Response.json({data:{exists:false}})}})
+    }
     app.restart();applications.push(app)
   }
-  const account=()=>({userId:'person',displayName:'Shared person',status:'active',appAccess:{deniedAppIds:blocked?['mx-example','mx-other']:[]}})
-  const accounts={webState:repository.webState,account:async()=>account(),authenticate:async(login,password)=>{
+  const account=()=>({userId:'person',displayName:'Shared person',status:'active',appAccess:{allowedAppIds:['mx-harbor'],deniedAppIds:blocked?['mx-example','mx-other']:[]}})
+  const accounts={webState:repository.webState,hasLogin:repository.hasLogin.bind(repository),account:async()=>account(),authenticate:async(login,password)=>{
     if(login!=='person'||password!=='test-password')return undefined
     logins++;return account()
   },allowAttempt:async()=>true,hubIdentity:async(user,audience)=>({issuer:'mx-user-center:test',subject:`user:${user.userId}`,audience,
@@ -206,6 +215,42 @@ test('two ordinary applications share real Auth, with separate durable sessions 
   b.navigation={applicationForm:true};b.restart()
   assert.equal((await request(`${b.origin}/auth/sso/start?view=register`,{method:'POST',headers:{origin:b.origin,'content-type':'application/json'},body:'{}'})).status,200)
   assert.equal((await b.store.get('login',jar.get('__Host-mx-other_login'))).view,'register','other applications retain invitation registration')
+  // Real BFF routing + real Auth + TLS + durable PG + normal browser OIDC.
+  const c=applications[2]
+  c.navigation={applicationForm:true,loginOnly:true,loginAdmission:true,unifiedLogin:true};c.restart()
+  const unified=(body={},headers={})=>request(`${c.origin}/auth/login`,{method:'POST',headers:{origin:c.origin,'content-type':'application/json',...headers},body:JSON.stringify({login:'person',password:'test-password',...body})})
+  c.expectedLogin='unknown';assert.equal((await unified({login:'unknown'})).status,401);c.expectedLogin='person'
+  jar.set('__Host-mx_dataport_local','stale-local-cookie')
+  const prepared=await request(`${c.origin}/auth/login/prepare`,{method:'POST',headers:{origin:c.origin,'content-type':'application/json'},body:JSON.stringify({login:'person'})})
+  assert.equal(prepared.status,200,prepared.text);assert.ok(JSON.parse(prepared.text).redirect.startsWith(authOrigin))
+  const cold=await unified({inviteCode:'not-persisted'});assert.equal(cold.status,200,cold.text)
+  const unifiedTx=await c.store.get('login',jar.get('__Host-mx-harbor_login'))
+  assert.equal(unifiedTx.loginHint,'person');assert.ok(!JSON.stringify(unifiedTx).includes('test-password'));assert.ok(!JSON.stringify(unifiedTx).includes('not-persisted'))
+  assert.ok(!JSON.parse(cold.text).redirect.includes('test-password'));assert.ok(!JSON.parse(cold.text).redirect.includes('not-persisted'))
+  let cs=await request(JSON.parse(cold.text).redirect)
+  for(let i=0;i<12&&cs.location;i++) {
+    const next=new URL(cs.location,issuer);cs=await request(next)
+    if(next.origin===c.origin&&next.pathname==='/auth/sso/interaction')break
+  }
+  assert.equal(cs.location,'/?account=1#/account',cs.text)
+  const cf=JSON.parse((await request(`${c.origin}/auth/sso/form`)).text);assert.equal(cf.loginHint,'person')
+  const ready=await request(`${c.origin}/auth/login/prepare`,{method:'POST',headers:{origin:c.origin,'content-type':'application/json'},body:JSON.stringify({login:'person'})});assert.deepEqual(JSON.parse(ready.text),{ready:true})
+  assert.equal((await unified({formId:cf.formId})).status,409,'missing browser CSRF cannot authenticate')
+  assert.equal((await unified({formId:cf.formId,password:'incorrect'},{'x-mx-csrf':cf.csrf})).status,401)
+  const noSignup=await request(`${c.origin}/auth/sso/form`,{method:'POST',headers:{origin:c.origin,'content-type':'application/json','x-mx-csrf':cf.csrf},body:JSON.stringify({action:'register',formId:cf.formId})})
+  assert.equal(noSignup.status,403,'admission does not restore registration')
+  cs=await unified({formId:cf.formId,inviteCode:'already-admitted-does-not-redeem'},{'x-mx-csrf':cf.csrf});assert.equal(cs.status,200,cs.text)
+  cs=await request(JSON.parse(cs.text).redirect)
+  let cCallback
+  for(let i=0;i<12&&cs.location;i++) {
+    const next=new URL(cs.location,issuer);cs=await request(next)
+    if(next.pathname==='/auth/sso/callback'){cCallback=next.href;break}
+  }
+  assert.equal(cs.status,303,cs.text);assert.equal(cs.location,'/?sso=ready')
+  assert.equal(jar.get('__Host-mx_dataport_local'),'','MX success clears an old local identity')
+  assert.equal(JSON.parse((await request(`${c.origin}/auth/sso/session`)).text).active,true)
+  assert.equal((await request(cCallback)).status,400,'unified callback remains single use')
+  const staleUnified=await unified({formId:'stale-form'},{'x-mx-csrf':cf.csrf});assert.equal(staleUnified.status,410,'stale submission is not replayed or silently restarted')
   blocked=true
   assert.equal(JSON.parse((await request(`${b.origin}/auth/sso/session`)).text).active,false,'upstream application ban invalidates the session')
   assert.equal((await pool.query("SELECT to_regclass('iam.members') AS members,to_regclass('public.tenants') AS tenants")).rows[0].members,null)

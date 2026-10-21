@@ -52,6 +52,14 @@ export function createAppAccount(provider: Provider, settings: IdentitySettings,
         if (typeof action !== 'string' || !input || typeof input !== 'object') fail(400, '请求无效。');
         // Authenticated BFF preflight: no user data, grants or registration changes.
         if (action === 'capabilities') return json(200, { nativeForm: true, appId: app!.appId, origin: app!.origin, audience: app!.audience });
+        // Private, client-authenticated DataPort routing only; never returns user data or grants.
+        if (action === 'resolve-login') {
+          if (app!.appId !== 'mx-harbor' || !accounts.hasLogin) fail(403, '此应用不支持账号识别。');
+          const login = typeof input.login === 'string' ? input.login.trim() : '';
+          if (!login || login.length > 255) fail(400, '请填写账号。');
+          if (!await accounts.allowAttempt(`resolve:${clientId}:${String(input.clientIp ?? '').slice(0, 100)}`, `resolve:${login}`)) fail(429, '尝试过于频繁，请稍后重试。');
+          return json(200, { exists: await accounts.hasLogin!(login) });
+        }
         if (['account', 'profile', 'password', 'unlink-feishu', 'sessions', 'revoke'].includes(action)) {
           const token = typeof input.accessToken === 'string' ? await provider.AccessToken.find(input.accessToken) : undefined;
           if (!token || token.clientId !== clientId || !token.accountId) fail(401, '登录已过期，请重新登录。');

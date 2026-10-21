@@ -11,6 +11,7 @@ const bootstrap = new Set(['usr_demo_admin', 'usr_demo_user']);
 export interface IdentityAccounts {
   account(id: string): Promise<UserCenterUser | undefined>;
   authenticate(login: string, password: string): Promise<UserCenterUser | undefined>;
+  hasLogin?(login: string): Promise<boolean>;
   allowAttempt(ip: string, login: string): Promise<boolean>;
   allowRegistrationAttempt?(ip: string, login: string): Promise<boolean>;
   hubIdentity?(user: UserCenterUser, audience: string): Promise<Record<string, unknown>>;
@@ -153,6 +154,11 @@ export class IdentityRepository implements IdentityAccounts {
       const verified = verifyUserCenterCredential(password, credential ?? dummy);
       return verified && credential && user?.status === 'active' && !bootstrap.has(user.userId) ? user : undefined;
     });
+  }
+  async hasLogin(login: string) {
+    const rows = await this.db.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='iam-user'", [this.environment]);
+    // Reserve disabled and bootstrap identities too: routing is not authentication.
+    return rows.some((row: { data: UserCenterUser }) => Boolean(resolveUserCenterUserForLogin([row.data], login)));
   }
   async hubIdentity(user: UserCenterUser, audience: string) {
     const rows = await this.db.query("SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='iam-role'", [this.environment]);

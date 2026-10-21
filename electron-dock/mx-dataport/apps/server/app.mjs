@@ -3,8 +3,9 @@ import { resolve, extname, sep } from "node:path";
 import { randomUUID, createHmac } from "node:crypto";
 import { createApplicationSso } from "@qpjoy/mx-common/identity/sso";
 import { PostgresSsoStore } from "@qpjoy/mx-common/identity/postgres";
-import { SsoError, equal, readSsoJson } from "@qpjoy/mx-common/identity/http";
-import { createLocalAuth, localToken, localOrigin } from "./local-auth.mjs";
+import { SsoError, equal, readSsoJson, cookie } from "@qpjoy/mx-common/identity/http";
+import { createLocalAuth, localToken, localOrigin, LOCAL_COOKIE } from "./local-auth.mjs";
+import { unifiedLogin } from "./unified-login.mjs";
 const reads = new Set([
   "/session",
   "/me/usage",
@@ -55,7 +56,8 @@ export function createHarborApp({
         settings: integration.sso,
         store: new PostgresSsoStore(pool, integration.sso.sessionKey),
         applicationName: "数港",
-        navigation: { mounts: ["/"], applicationForm: true, loginOnly: true },
+        navigation: { mounts: ["/"], applicationForm: true, loginOnly: true, loginAdmission: true, unifiedLogin: true },
+        onAuthenticated: () => ({cookies:[cookie(LOCAL_COOKIE, '', 0)]}),
       });
       cachedProfile = profile;
     }
@@ -75,6 +77,11 @@ export function createHarborApp({
     };
     try {
       const url = new URL(req.url, "http://localhost");
+      if (url.pathname === '/auth/login' || url.pathname === '/auth/login/prepare') {
+        if (config.preview) throw new SsoError(503, 'preview_login_disabled', '组件预览不提交登录。');
+        const integration = resolveDependencies();
+        if (await unifiedLogin(req, res, url, integration, localAuth, ssoFor(integration), json)) return;
+      }
       if (!config.preview && await localAuth.handle(req,res,url,resolveDependencies(),json)) return;
       if (
         req.method === "GET" &&

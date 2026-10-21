@@ -1045,6 +1045,7 @@ test('local employee credentials, sessions and first password change never creat
   p=await f.store.enrich(await local.principal(second.token,metadata),digest(second.csrf));
   assert.throws(()=>requireDataportAccess(p,f.tenant,'query.execute'),{status:403});
   await f.store.updateMember(owner,f.tenant,created.memberId,{status:'suspended'});
+  assert.deepEqual(await local.resolveLogin({account:created.account}),{exists:true},'disabled local names stay reserved');
   await assert.rejects(local.principal(second.token,metadata),{status:401});
   await f.store.updateMember(owner,f.tenant,created.memberId,{status:'active'});
   await assert.rejects(local.principal(second.token,metadata),{status:401});
@@ -1084,6 +1085,7 @@ test('legacy managed MX conversion is explicit, tenant-scoped and idempotent; ex
   await assert.rejects(local.initial(await f.principal(f.analyst),f.tenant,f.viewer),{status:403});
   await f.pool.query("UPDATE dataport.local_credentials SET initial_expires_at=now()-interval '1 second' WHERE member_id=$1",[f.viewer]);
   await assert.rejects(local.initial(owner,f.tenant,f.viewer),{status:404});
+  assert.deepEqual(await local.resolveLogin({account:'LegacyEmployee'}),{exists:true},'expired credentials cannot fall through to MX');
 });
 
 test('local account names do not merge identities; commands are atomic and password attempts are limited', {skip:!connectionString}, async t=>{
@@ -1097,6 +1099,8 @@ test('local account names do not merge identities; commands are atomic and passw
   const unknown='missingemployee';
   for(let i=0;i<10;i++)await assert.rejects(local.login({account:unknown,password:'wrong-password'}),{code:'local_login_failed'});
   await assert.rejects(local.login({account:unknown,password:'wrong-password'}),{status:429});
+  for(let i=0;i<10;i++)assert.deepEqual(await local.resolveLogin({account:unknown}),{exists:false});
+  await assert.rejects(local.resolveLogin({account:unknown}),{status:429});
   await assert.rejects(f.store.memberCommand(owner,f.tenant,{...body,commandId:randomUUID(),roleId:'owner'},{},''),{status:403});
   const pending={...body,commandId:randomUUID(),account:'OldPending'};
   await f.pool.query("INSERT INTO dataport.member_commands(id,tenant_id,actor,operation,fingerprint) VALUES($1,$2,$3,'create','old-auth-command')",[pending.commandId,f.tenant,f.owner]);
@@ -1181,11 +1185,17 @@ test('real BFF + Portal + local PG login enforces gateway, origin, CSRF, passwor
   const publicHub=await listen(t,createApp({store,service,adapter:{},listenerMode:'public',harborPortal:portal}));
   assert.equal((await fetch(publicHub+'/internal/v1/portal/local/login',{method:'POST',body:'{}'})).status,404);
   assert.equal((await fetch(hub+'/internal/v1/portal/local/login',{method:'POST',body:'{}'})).status,401);
+  assert.equal((await fetch(publicHub+'/internal/v1/portal/local/resolve',{method:'POST',body:'{}'})).status,404);
+  assert.equal((await fetch(hub+'/internal/v1/portal/local/resolve',{method:'POST',body:'{}'})).status,401);
   let ssoCalls=0;const calls=[];
   const bff=await listen(t,createHarborApp({config:{upstream:hub,gatewayToken:gateway,sso:{origin}},
     sso:{sessionFor(){ssoCalls++;throw Error('Unexpected MX request')},verifySession(){ssoCalls++;throw Error('Unexpected MX request')}},
     fetch:(url,options)=>{calls.push({url,headers:options.headers});return fetch(url,options)}}));
   const post=(path,body,extra={})=>fetch(bff+path,{method:'POST',headers:{origin,'content-type':'application/json',...extra},body:JSON.stringify(body)});
+  const resolve=body=>fetch(hub+'/internal/v1/portal/local/resolve',{method:'POST',headers:{'x-mx-harbor-gateway':gateway,'content-type':'application/json'},body:JSON.stringify(body)});
+  const resolved=await resolve({account:'HttpEmployee'});assert.equal(resolved.status,200);assert.deepEqual((await resolved.json()).data,{exists:true});
+  assert.deepEqual((await (await resolve({account:'unknown'})).json()).data,{exists:false});
+  assert.equal((await resolve({account:child.account,password:'not-accepted'})).status,400);
   assert.equal((await post('/auth/local/login',{account:child.account,password:initial.password},{origin:'https://evil.example'})).status,403);
   const login=await post('/auth/local/login',{account:child.account,password:initial.password});
   assert.equal(login.status,200,JSON.stringify(await login.clone().json()));

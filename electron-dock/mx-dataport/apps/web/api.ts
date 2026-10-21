@@ -45,6 +45,15 @@ export type AccountOptions = {
   loginHint?: string;
 };
 
+// A failed transport/acknowledgement may follow a committed login. Recovery
+// reads the actual session; it never resubmits credentials automatically.
+export function loginFailureUncertain(error: unknown): boolean {
+  const value = error as {name?:string;code?:string;status?:number};
+  return value?.name === "TimeoutError" || value?.name === "TypeError"
+    || value?.code === "invalid_response" || value?.code === "local_auth_unconfirmed"
+    || (value?.status ?? 0) >= 500;
+}
+
 // A fragment-only navigation does not remount App or reload its session. Login
 // has already set the cookie: let App refresh it without waiting for a document
 // navigation, with a full reload as a fallback for standalone consumers.

@@ -19,6 +19,7 @@ export function createApplicationSso({ settings, store, oidcConfiguration,
   if (!settings) return null
   validateApplicationSsoSettings(settings)
   if (!store || ['put','get','remove','update'].some(method => typeof store[method] !== 'function')) throw new Error('SSO session store required')
+  if ((navigation.unifiedLogin === true || navigation.loginAdmission === true) && settings.appId !== 'mx-harbor') throw new Error('DataPort login options require mx-harbor')
   const SID = cookieNames?.session ?? `__Host-${settings.appId}_sso`
   const TX = cookieNames?.login ?? `__Host-${settings.appId}_login`
   if (SID === TX || ![SID,TX].every(name => /^__Host-[A-Za-z0-9._-]+$/.test(name))) throw new Error('Distinct host-only SSO cookies required')
@@ -106,8 +107,89 @@ export function createApplicationSso({ settings, store, oidcConfiguration,
   async function sessionFor(request) {
     return store.get('session', cookies(request)[SID])
   }
+  async function startLogin(request, response, url, nativeStart, loginHint) {
+    const json = value => { response.writeHead(200, {'Content-Type':'application/json'}).end(JSON.stringify(value)); return true }
+    const redirect = location => { response.writeHead(303, {location}); response.end() }
+    if (nativeStart) checkOrigin(request)
+    if (request.headers['sec-fetch-site'] === 'cross-site') throw new AppError(403, 'sso_csrf', `请从${applicationName}发起登录。`)
+    if (navigation.applicationForm === true) {
+      // Check the running Auth client, not merely the locally mounted profile.
+      // Opt-in only: existing consumers retain their original login behavior.
+      let capabilities
+      try { capabilities = await accountClient()('capabilities') } catch {
+        throw new AppError(503, 'sso_application_unavailable', `账号服务尚未完成${applicationName}接入或暂不可用，请联系管理员。`)
+      }
+      if (capabilities.nativeForm !== true || capabilities.appId !== settings.appId || capabilities.origin !== settings.origin || capabilities.audience !== settings.audience)
+        throw new AppError(503, 'sso_application_mismatch', `${applicationName}账号接入配置不一致，请联系管理员。`)
+    }
+    const old = cookies(request)[TX]; if (old) await store.remove('login', old)
+    const id = random(), transaction = { ...(loginHint ? {loginHint} : {}), state: random(), nonce: random(), verifier: random(), formCsrf: random(), view: navigation.loginOnly !== true && url.searchParams.get('view') === 'register' ? 'register' : 'login', returnTo: url.searchParams.get('return') === 'account' ? 'account' : null }
+    transaction.uiPath = uiPath(url.searchParams.get('ui'))
+    if (transaction.returnTo === 'account') transaction.expectedSubject = (await sessionFor(request))?.subject
+    const extraParameters = await prepareLogin?.({ request, url, transaction }) ?? {}
+    const target = oidc.buildAuthorizationUrl(await configuration(), {
+      ...extraParameters,
+      redirect_uri: `${settings.origin}/auth/sso/callback`, response_type: 'code', response_mode: 'query', scope: settings.scope ?? 'openid mx:identity',
+      state: transaction.state, nonce: transaction.nonce, code_challenge: await oidc.calculatePKCECodeChallenge(transaction.verifier), code_challenge_method: 'S256',
+      ...(navigation.applicationForm === true || url.searchParams.get('surface') === 'application' ? { mx_surface: 'application' } : {}),
+      ...(url.searchParams.get('select') === '1' && navigation.applicationForm === true ? { prompt: 'select_account' }
+        : nativeStart || url.searchParams.get('switch') === '1' ? { prompt: 'login', max_age: '0' } : url.searchParams.get('select') === '1' ? { prompt: 'select_account' } : {})
+    })
+    await store.put('login', id, transaction, 300)
+    response.setHeader('Set-Cookie', cookie(TX, id, 300))
+    if (nativeStart) return json({ redirect: target.toString() })
+    redirect(target.toString()); return true
+  }
+  async function submitForm(request, body, transaction) {
+    checkOrigin(request)
+    if (!transaction?.flow) throw new AppError(410, 'account_flow_expired', '登录已超时，请重新开始。')
+    if (!equal(transaction.formCsrf, request.headers[csrfHeader]) || !equal(fingerprint(transaction.flow), body.formId))
+      throw new AppError(409, 'account_form_changed', '另一个页面已切换登录，请刷新后重试。')
+    if (!['login', 'register', 'feishu', 'feishu-link'].includes(body.action)) throw new AppError(400, 'account_action_invalid', '操作无效。')
+    if (navigation.loginOnly === true && body.action !== 'login')
+      throw new AppError(403, 'account_registration_disabled', '此入口仅支持已有 MX 账号登录，请联系管理员开通账号。')
+    if (navigation.loginOnly === true && body.inviteCode && navigation.loginAdmission !== true)
+      throw new AppError(400, 'account_invitation_disabled', '此登录入口不再接受邀请码，请联系管理员开通数港。')
+    return accountClient()(body.action, { flow: transaction.flow, clientIp: clientIp(request), expectedSubject: transaction.expectedSubject,
+      login: body.login, password: body.password,
+      ...(navigation.loginOnly === true ? (navigation.loginAdmission === true ? {inviteCode:body.inviteCode} : {})
+        : {passwordConfirm:body.passwordConfirm, inviteCode:body.inviteCode, policyVersion:body.policyVersion}) })
+  }
   return {
     store,
+    async prepareLogin(request, response, loginHint) {
+      checkOrigin(request)
+      if (navigation.unifiedLogin !== true || settings.appId !== 'mx-harbor') throw new AppError(503, 'account_routing_unavailable', '账号服务需要更新，请联系管理员。')
+      response.setHeader('Cache-Control', 'no-store'); response.setHeader('Referrer-Policy', 'no-referrer')
+      const transaction = await store.get('login', cookies(request)[TX])
+      if (transaction?.flow) {
+        response.writeHead(200, {'Content-Type':'application/json'}).end(JSON.stringify({ready:true}))
+        return true
+      }
+      return startLogin(request, response, new URL('/auth/sso/start?view=login', settings.origin), true, loginHint)
+    },
+    async resolveLogin(request, login) {
+      checkOrigin(request)
+      if (navigation.unifiedLogin !== true || settings.appId !== 'mx-harbor') throw new AppError(503, 'account_routing_unavailable', '账号服务需要更新，请联系管理员。')
+      const result = await accountClient()('resolve-login', {login, clientIp:clientIp(request)})
+      if (typeof result.exists !== 'boolean') throw new AppError(503, 'account_routing_unavailable', '账号服务响应无效。')
+      return result.exists
+    },
+    async login(request, response, body) {
+      checkOrigin(request)
+      if (navigation.unifiedLogin !== true || settings.appId !== 'mx-harbor') throw new AppError(503, 'account_routing_unavailable', '账号服务需要更新，请联系管理员。')
+      response.setHeader('Cache-Control', 'no-store'); response.setHeader('Referrer-Policy', 'no-referrer')
+      const transaction = await store.get('login', cookies(request)[TX])
+      if (!transaction?.flow) {
+        if (body.formId) throw new AppError(410, 'account_flow_expired', '登录已超时，请重新连接后登录。')
+        // Establish the normal browser OIDC round trip. Remember only the name;
+        // passwords and invites are never stored, put in a URL, or replayed.
+        return startLogin(request, response, new URL('/auth/sso/start?view=login', settings.origin), true, body.login)
+      }
+      const result = await submitForm(request, {...body, action:'login'}, transaction)
+      response.writeHead(200, {'Content-Type':'application/json'}).end(JSON.stringify(result))
+      return true
+    },
     sessionFor,
     verifySession: verified,
     checkOrigin,
@@ -128,35 +210,7 @@ export function createApplicationSso({ settings, store, oidcConfiguration,
       const json = value => { response.writeHead(200,{'Content-Type':'application/json'}).end(JSON.stringify(value)); return true }
       const nativeStart = navigation.applicationForm === true && path === '/auth/sso/start' && request.method === 'POST'
       if (nativeStart || (path === '/auth/sso/login' && request.method === 'GET')) {
-        if (nativeStart) checkOrigin(request)
-        if (request.headers['sec-fetch-site'] === 'cross-site') throw new AppError(403, 'sso_csrf', `请从${applicationName}发起登录。`)
-        if (navigation.applicationForm === true) {
-          // Check the running Auth client, not merely the locally mounted profile.
-          // Opt-in only: existing consumers retain their original login behavior.
-          let capabilities
-          try { capabilities = await accountClient()('capabilities') } catch {
-            throw new AppError(503, 'sso_application_unavailable', `账号服务尚未完成${applicationName}接入或暂不可用，请联系管理员。`)
-          }
-          if (capabilities.nativeForm !== true || capabilities.appId !== settings.appId || capabilities.origin !== settings.origin || capabilities.audience !== settings.audience)
-            throw new AppError(503, 'sso_application_mismatch', `${applicationName}账号接入配置不一致，请联系管理员。`)
-        }
-        const old = cookies(request)[TX]; if (old) await store.remove('login', old)
-        const id = random(), transaction = { state: random(), nonce: random(), verifier: random(), formCsrf: random(), view: navigation.loginOnly !== true && url.searchParams.get('view') === 'register' ? 'register' : 'login', returnTo: url.searchParams.get('return') === 'account' ? 'account' : null }
-        transaction.uiPath = uiPath(url.searchParams.get('ui'))
-        if (transaction.returnTo === 'account') transaction.expectedSubject = (await sessionFor(request))?.subject
-        const extraParameters = await prepareLogin?.({ request, url, transaction }) ?? {}
-        const target = oidc.buildAuthorizationUrl(await configuration(), {
-          ...extraParameters,
-          redirect_uri: `${settings.origin}/auth/sso/callback`, response_type: 'code', response_mode: 'query', scope: settings.scope ?? 'openid mx:identity',
-          state: transaction.state, nonce: transaction.nonce, code_challenge: await oidc.calculatePKCECodeChallenge(transaction.verifier), code_challenge_method: 'S256',
-          ...(navigation.applicationForm === true || url.searchParams.get('surface') === 'application' ? { mx_surface: 'application' } : {}),
-          ...(url.searchParams.get('select') === '1' && navigation.applicationForm === true ? { prompt: 'select_account' }
-            : nativeStart || url.searchParams.get('switch') === '1' ? { prompt: 'login', max_age: '0' } : url.searchParams.get('select') === '1' ? { prompt: 'select_account' } : {})
-        })
-        await store.put('login', id, transaction, 300)
-        response.setHeader('Set-Cookie', cookie(TX, id, 300))
-        if (nativeStart) return json({ redirect: target.toString() })
-        redirect(target.toString()); return true
+        return startLogin(request, response, url, nativeStart)
       }
       if (path === '/auth/sso/interaction' && request.method === 'GET') {
         const id = cookies(request)[TX], transaction = await store.get('login', id)
@@ -173,20 +227,11 @@ export function createApplicationSso({ settings, store, oidcConfiguration,
         if (!transaction?.flow) throw new AppError(410, 'account_flow_expired', '登录已超时，请重新开始。')
         if (request.method === 'GET') {
           const result = await accountClient()('options', { flow: transaction.flow, clientIp: clientIp(request) })
-          return json({ ...result, csrf: transaction.formCsrf, formId: fingerprint(transaction.flow), view: transaction.view, ...(navigation.formContext?.(transaction) ?? {}), ...(navigation.loginOnly === true ? {view:'login'} : {}) })
+          return json({ ...result, csrf: transaction.formCsrf, formId: fingerprint(transaction.flow), view: transaction.view, ...(navigation.formContext?.(transaction) ?? {}), ...(transaction.loginHint ? {loginHint:transaction.loginHint} : {}), ...(navigation.loginOnly === true ? {view:'login'} : {}) })
         }
         checkOrigin(request)
         const body = await readJson(request, 8192)
-        if (!equal(transaction.formCsrf, request.headers[csrfHeader]) || !equal(fingerprint(transaction.flow), body.formId))
-          throw new AppError(409, 'account_form_changed', '另一个页面已切换登录，请刷新后重试。')
-        if (!['login', 'register', 'feishu', 'feishu-link'].includes(body.action)) throw new AppError(400, 'account_action_invalid', '操作无效。')
-        if (navigation.loginOnly === true && body.action !== 'login')
-          throw new AppError(403, 'account_registration_disabled', '此入口仅支持已有 MX 账号登录，请联系管理员开通账号。')
-        if (navigation.loginOnly === true && body.inviteCode)
-          throw new AppError(400, 'account_invitation_disabled', '此登录入口不再接受邀请码，请联系管理员开通数港。')
-        const result = await accountClient()(body.action, { flow: transaction.flow, clientIp: clientIp(request),
-          expectedSubject: transaction.expectedSubject,
-          login: body.login, password: body.password, ...(navigation.loginOnly === true ? {} : { passwordConfirm: body.passwordConfirm, inviteCode: body.inviteCode, policyVersion: body.policyVersion }) })
+        const result = await submitForm(request, body, transaction)
         return json(result)
       }
       if (path === '/auth/sso/account' && ['GET', 'POST'].includes(request.method)) {
