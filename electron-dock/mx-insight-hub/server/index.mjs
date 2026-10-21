@@ -24,7 +24,7 @@ import { StrategySearchRoutingStore } from './external-platforms/strategy-search
 import { createQueue } from '@qpjoy/mx-common'
 import { createHubPostgresPool } from './core/postgres-pool.mjs'
 import { DataAdmission } from './core/data-admission.mjs'
-import { createSegmenter } from '@qpjoy/mx-common/segmenter'
+import { createSegmenter, interactiveSegmenter } from '@qpjoy/mx-common/segmenter'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { NightAllAdapter } from './adapters/night-all.mjs'
@@ -183,7 +183,9 @@ export async function createRuntime(config = loadConfig()) {
   const searchReindex = search && config.listenerMode !== 'public'
     ? new AdminSearchReindex({ search, segmenterConfig: config.common.segmenter })
     : null
-  const segmenter = search?.segmenter ?? createSegmenter(config.common.segmenter)
+  // Request-path tokenization (the public tokenize capability) shares the
+  // coalesced, time-bounded query segmenter rather than the index writers' one.
+  const segmenter = search?.querySegmenter ?? interactiveSegmenter(createSegmenter(config.common.segmenter))
   const externalPlatformStore = createExternalPlatformStore({
     pool,
     usageStore: store,

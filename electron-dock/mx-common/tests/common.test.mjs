@@ -613,122 +613,8 @@ test('HanLP image pins the compatible transformers line and infers during prefet
   assert.match(prefetch, /isinstance\(token, str\) and token\.strip\(\)/)
 })
 
-test('HanLP publishes readiness after warm-up and serializes safe inference', async () => {
-  const { execFile } = await import('node:child_process')
-  const { promisify } = await import('node:util')
-  const { fileURLToPath } = await import('node:url')
-  const { dirname, resolve } = await import('node:path')
-  const run = promisify(execFile)
-  const server = resolve(dirname(fileURLToPath(import.meta.url)), '../deploy/hanlp/server.py')
-
-  const probe = String.raw`
-import contextlib
-import importlib.util
-import io
-import json
-import sys
-import types
-
-sys.dont_write_bytecode = True
-spec = importlib.util.spec_from_file_location("mx_common_hanlp_server", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-
-assert module.MAX_CONCURRENT_INFERENCES == 1
-assert module.INFERENCE_QUEUE_TIMEOUT_SECONDS > 0
-
-class GoodTokenizer:
-    def __init__(self):
-        self.calls = []
-
-    def __call__(self, text):
-        self.calls.append(text)
-        return [["吴恩达", "与", "人工智能"]]
-
-good = GoodTokenizer()
-model_ref = object()
-sys.modules["hanlp"] = types.SimpleNamespace(
-    pretrained=types.SimpleNamespace(
-        tok=types.SimpleNamespace(COARSE_ELECTRA_SMALL_ZH=model_ref)
-    ),
-    load=lambda requested: good if requested is model_ref else None,
-)
-module._tokenizer = None
-module._load_error = None
-module._load_model()
-assert module._tokenizer is good
-assert good.calls == [[module.WARMUP_TEXT]]
-
-class EmptyTokenizer:
-    def __call__(self, _text):
-        return [[]]
-
-sys.modules["hanlp"].load = lambda _requested: EmptyTokenizer()
-module._tokenizer = None
-module._load_error = None
-empty_log = io.StringIO()
-with contextlib.redirect_stderr(empty_log):
-    module._load_model()
-assert module._tokenizer is None
-assert module._load_error == "RuntimeError: model warm-up failed"
-
-class BrokenTokenizer:
-    def __call__(self, text):
-        raise RuntimeError(f"inference detail contains {text}")
-
-sys.modules["hanlp"].load = lambda _requested: BrokenTokenizer()
-module._tokenizer = None
-module._load_error = None
-startup_log = io.StringIO()
-with contextlib.redirect_stderr(startup_log):
-    module._load_model()
-assert module._tokenizer is None
-assert module._load_error == "RuntimeError: model warm-up failed"
-assert module.WARMUP_TEXT not in startup_log.getvalue()
-assert "RuntimeError" in startup_log.getvalue()
-
-class Slot:
-    def __init__(self):
-        self.timeout = None
-        self.released = False
-
-    def acquire(self, *, timeout):
-        self.timeout = timeout
-        return True
-
-    def release(self):
-        self.released = True
-
-slot = Slot()
-module._inference_slots = slot
-request_calls = []
-
-class RequestBrokenTokenizer:
-    def __call__(self, text):
-        request_calls.append(text)
-        raise RuntimeError(f"inference detail contains {text}")
-
-module._tokenizer = RequestBrokenTokenizer()
-request_text = "request-content-must-not-enter-logs"
-body = json.dumps({"text": request_text}).encode()
-handler = object.__new__(module.Handler)
-handler.path = "/tokenize"
-handler.headers = {"content-length": str(len(body))}
-handler.rfile = io.BytesIO(body)
-sent = []
-handler._send = lambda status, payload: sent.append((status, payload))
-inference_log = io.StringIO()
-with contextlib.redirect_stderr(inference_log):
-    module.Handler.do_POST(handler)
-assert sent == [(500, {"error": "tokenizer inference failed"})]
-assert request_calls == [[request_text]]
-assert request_text not in inference_log.getvalue()
-assert "RuntimeError" in inference_log.getvalue()
-assert slot.timeout == module.INFERENCE_QUEUE_TIMEOUT_SECONDS
-assert slot.released
-`
-  await run('python3', ['-c', probe, server])
-})
+// The HanLP server's readiness, warm-up, pool and inference behaviour is
+// covered by hanlp_server_test.py, which hanlp-server.test.mjs runs.
 
 // ---------------------------------------------------------------------------
 // Shell: bounded random reads
@@ -813,6 +699,79 @@ test('containerd image names are canonicalized before idempotency checks', async
     'docker.io/qpjoy/hanlp:v1',
     'registry.example/hanlp:v1',
   ])
+})
+
+test('PROXY reaches only the HanLP image build, never kubectl or ctr', async () => {
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const { mkdtemp, readFile, rm } = await import('node:fs/promises')
+  const { fileURLToPath } = await import('node:url')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const run = promisify(execFile)
+  const script = fileURLToPath(new URL('../scripts/manage.sh', import.meta.url))
+  const root = await mkdtemp(join(tmpdir(), 'mx-common-hanlp-proxy-'))
+  // A docker stand-in that records every call with the proxy it would have used.
+  const stubDocker = [
+    'docker() {',
+    '  printf \'%s | HTTPS_PROXY=%s NO_PROXY=%s\\n\' "$*" "${HTTPS_PROXY:-}" "${NO_PROXY:-}" >> "$LOG"',
+    '  case "$1 $2" in',
+    '    "buildx inspect")',
+    '      if [ "${3:-}" != --bootstrap ]; then',
+    '        [ -f "$LOG.created" ] || return 1',
+    '        echo "Driver:  docker-container"',
+    '      fi ;;',
+    '    "buildx create") : > "$LOG.created" ;;',
+    '    "ps -aq") echo buildkit-container ;;',
+    '    "inspect --format") case "$3" in *Args*) echo \'["--allow-insecure-entitlement","network.host"]\' ;; esac ;;',
+    '    "image inspect") echo sha256:built ;;',
+    '  esac',
+    '}',
+  ].join('\n')
+  const environment = (proxy, log) => {
+    const env = { ...process.env, LOG: log, PROXY: proxy }
+    for (const name of ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy']) delete env[name]
+    return env
+  }
+  const build = (proxy, log) => run('bash', [
+    '-c',
+    `source "$1"; ${stubDocker}
+build_hanlp_image
+echo "after: HTTPS_PROXY=\${HTTPS_PROXY:-unset} https_proxy=\${https_proxy:-unset} NO_PROXY=\${NO_PROXY:-unset}"`,
+    '_',
+    script,
+  ], { env: environment(proxy, log) })
+
+  try {
+    const log = join(root, 'docker.log')
+    const { stdout } = await build('127.0.0.1:7788', log)
+    const calls = (await readFile(log, 'utf8')).trim().split('\n')
+    // buildkitd resolves the Dockerfile frontend and base image itself.
+    const create = calls.find((line) => line.startsWith('buildx create'))
+    assert.match(create, /--driver-opt env\.HTTP_PROXY=http:\/\/127\.0\.0\.1:7788/)
+    assert.match(create, /--driver-opt env\.HTTPS_PROXY=http:\/\/127\.0\.0\.1:7788/)
+    // The buildx client fetches registry tokens; RUN steps get the build args.
+    const image = calls.find((line) => line.startsWith('buildx build'))
+    assert.match(image, /--build-arg HTTPS_PROXY --build-arg NO_PROXY/)
+    assert.match(image, /\| HTTPS_PROXY=http:\/\/127\.0\.0\.1:7788 NO_PROXY=localhost,127\.0\.0\.1,/)
+    assert.match(stdout, /uses PROXY http:\/\/127\.0\.0\.1:7788 \(this build only/)
+    // Gone before the caller goes on to kubectl and ctr.
+    assert.match(stdout, /after: HTTPS_PROXY=unset https_proxy=unset NO_PROXY=unset/)
+
+    const redactedLog = join(root, 'redacted.log')
+    const redacted = await build('https://user:secret@proxy.example:8443', redactedLog)
+    assert.match(redacted.stdout, /uses PROXY https:\/\/<redacted>@proxy\.example:8443/)
+    assert.doesNotMatch(redacted.stdout, /secret/)
+
+    for (const invalid of ['*:7788', '0.0.0.0:7788', 'socks5://127.0.0.1:7788', '127.0.0.1', 'http://127.0.0.1:7788/x']) {
+      const rejectedLog = join(root, 'rejected.log')
+      await assert.rejects(build(invalid, rejectedLog), /PROXY needs a reachable HTTP\(S\) host and port/)
+      // Refused before any builder is touched.
+      await assert.rejects(readFile(rejectedLog, 'utf8'))
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('the rendered HanLP pod template tracks the built image ID and local node', async () => {
@@ -1081,7 +1040,8 @@ test('the HanLP image and HTTP service keep reproducibility and load bounds expl
   assert.match(dockerfile, /assert '\+cpu' in torch\.__version__/)
   assert.match(dockerfile, /assert torch\.version\.cuda is None/)
   assert.match(server, /MAX_BODY_BYTES/)
-  assert.match(server, /BoundedSemaphore/)
+  assert.match(server, /INFERENCE_QUEUE_TIMEOUT_SECONDS/)
+  assert.match(server, /WORKER_MEMORY_BYTES/)
   assert.match(manifest, /name: seed-models[\s\S]*?resources:/)
   assert.match(manage, /--driver docker-container/)
   assert.match(manage, /--buildkitd-flags '--allow-insecure-entitlement network\.host'/)
@@ -1382,15 +1342,22 @@ test('the prefetch proves the model reached the seed directory, not merely that 
   assert.match(prefetch, /copytree/)
 })
 
-test('the tokenizer pins its thread pools to the container CPU limit', async () => {
+test('the tokenizer pool and its thread pools are sized from the container limits', async () => {
   const { readFile } = await import('node:fs/promises')
   const manifest = await readFile(new URL('../deploy/k8s/optional/50-hanlp.yaml', import.meta.url), 'utf8')
+  const server = await readFile(new URL('../deploy/hanlp/server.py', import.meta.url), 'utf8')
+  // The limits are the only knob: server.py reads them from the cgroup and
+  // derives both the worker count and each worker's thread share.
+  assert.match(manifest, /limits:\s+cpu: "16"\s+memory: 8Gi/)
+  assert.match(server, /cpu\.max/)
+  assert.match(server, /memory\.max/)
   // PyTorch reads the host CPU count, not the cgroup limit; unpinned it starts
-  // 128 threads inside a 16-CPU container and pays for every stack.
-  assert.match(manifest, /name: OMP_NUM_THREADS\n\s+value: "16"/)
-  assert.match(manifest, /cpu: "16"/)
-  // Parallelism belongs inside one batched pass, so the slot count stays at one.
-  assert.match(manifest, /name: MAX_CONCURRENT_INFERENCES\n\s+value: "1"/)
+  // 128 threads per worker. Each worker pins its own share before it loads.
+  assert.match(server, /THREAD_ENV_NAMES = \("OMP_NUM_THREADS", "MKL_NUM_THREADS", "TORCH_NUM_THREADS"\)/)
+  // Pinning in the manifest would hand every worker the whole quota, and a
+  // fixed slot count would override the derived pool size.
+  assert.doesNotMatch(manifest, /name: (OMP|MKL|TORCH)_NUM_THREADS/)
+  assert.doesNotMatch(manifest, /name: MAX_CONCURRENT_INFERENCES/)
 })
 
 test('deploying HanLP resolves the same host root as the rest of the stack', async () => {

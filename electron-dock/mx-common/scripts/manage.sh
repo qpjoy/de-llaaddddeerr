@@ -113,6 +113,8 @@ Optional components (off by default):
   deploy hanlp                   Preferred HanLP build/import/deploy workflow.
 
 Environment:
+  PROXY                         HTTP(S) proxy for the `deploy hanlp` image build only,
+                                e.g. PROXY=127.0.0.1:7788 (kubectl/ctr are not proxied)
   MX_COMMON_HOST_DATA_ROOT      Host path for local PVs (default /var/lib/mx-common/k8s)
   MX_COMMON_DISK_WARN_PERCENT   Warn above this disk usage during deploy (default 85)
   MX_COMMON_WAIT_TIMEOUT        Seconds to wait for readiness (default 1200)
@@ -1639,8 +1641,45 @@ ensure_hanlp_builder() {
     || die "could not enforce HanLP build CPU/memory limits"
 }
 
+# PROXY=127.0.0.1:7788 or PROXY=http(s)://[user:pass@]host:port, the same form
+# the electron-dock entrypoint accepts. Prints the normalized URL; fails on
+# anything that cannot be a connection target (`*`, 0.0.0.0, ::, a path) and on
+# commas, which buildx would split into separate driver options.
+hanlp_build_proxy_url() {
+  local value="$1" port
+  local pattern='^(https?)://([^@/?#,[:space:]]+@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+):([0-9]{1,5})$'
+  case "$value" in *://*) ;; *) value="http://${value}" ;; esac
+  value="${value%/}"
+  [[ "$value" =~ $pattern ]] || return 1
+  port=$((10#${BASH_REMATCH[4]}))
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+  case "${BASH_REMATCH[3]}" in 0.0.0.0|'[::]'|'[0:0:0:0:0:0:0:0]') return 1 ;; esac
+  printf '%s\n' "$value"
+}
+
 build_hanlp_image() {
   need docker
+  # The image build is the only step that needs the internet, so PROXY is
+  # scoped to it: buildkitd (which resolves the Dockerfile frontend and base
+  # image), the buildx client (which fetches registry tokens) and the RUN steps
+  # (pip and the model download). `local -x` exports it to exactly those and
+  # drops it when this function returns, before kubectl and ctr run -- an
+  # HTTPS_PROXY exported for the whole script would send kubectl's API-server
+  # traffic through the proxy too. Unset or empty, the caller's environment
+  # applies unchanged.
+  if [ -n "${PROXY:-}" ]; then
+    local proxy
+    proxy="$(hanlp_build_proxy_url "$PROXY")" \
+      || die "PROXY needs a reachable HTTP(S) host and port, e.g. PROXY=127.0.0.1:7788; * and listen addresses such as 0.0.0.0 are not connection targets"
+    local -x HTTP_PROXY="$proxy" HTTPS_PROXY="$proxy" http_proxy="$proxy" https_proxy="$proxy"
+    local -x NO_PROXY="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local"
+    local -x no_proxy="$NO_PROXY"
+    local shown="$proxy"
+    if [[ "${proxy#*://}" == *@* ]]; then
+      shown="${proxy%%://*}://<redacted>@${proxy##*@}"
+    fi
+    say "HanLP image build uses PROXY ${shown} (this build only; kubectl and containerd are not proxied)"
+  fi
   ensure_hanlp_builder
   local -a proxy_build_args=()
   local proxy_name
@@ -1662,7 +1701,7 @@ build_hanlp_image() {
       -f "${ROOT_DIR}/deploy/hanlp/Dockerfile" \
       "${ROOT_DIR}/deploy/hanlp"; then
     docker buildx stop "$HANLP_BUILDER" >/dev/null 2>&1 || true
-    die "HanLP image build failed; downloads are cached, so fix the network/proxy and rerun the same command"
+    die "HanLP image build failed; downloads are cached, so fix the network/proxy and rerun (e.g. PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy hanlp)"
   fi
   docker buildx stop "$HANLP_BUILDER" >/dev/null 2>&1 \
     || warn "could not stop the now-idle HanLP buildx builder"

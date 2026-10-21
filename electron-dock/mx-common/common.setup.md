@@ -1,6 +1,8 @@
 ```bash
 # 配置 HanLP
 bash scripts/manage.sh deploy hanlp
+# 构建需要代理时（只作用于镜像构建）
+PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy hanlp
 
 # HanLP状态
 kubectl -n mx-common get deployment/mx-common-hanlp
@@ -9,6 +11,9 @@ kubectl -n mx-common get pods -o wide | grep hanlp
 kubectl -n mx-common get service/mx-common-hanlp
 kubectl -n mx-common get endpoints/mx-common-hanlp
 kubectl -n mx-common rollout status deployment/mx-common-hanlp
+
+# 5x3 5 worker(s) x 3 thread(s)
+kubectl -n mx-common set env deployment/mx-common-hanlp MAX_CONCURRENT_INFERENCES-
 
 # hanlp重建后查看稳定性
 kubectl -n mx-common get pods -l app.kubernetes.io/name=mx-common-hanlp

@@ -45,6 +45,8 @@ fallback  建 议 都 去 学 吴 恩 达 建议 议都 都去 ...              
 
 每一档都是**运行时降级而非启动失败**：HanLP 不可达退 jieba 的位置、jieba 装不上退 bigram，入库永不中断。这是刻意的——入不了库是账本上的永久空洞，而错误的分词以后 reindex 就能修好。
 
+请求路径上的查询分词用 `interactiveSegmenter(segmenter)` 包一层：并发查询合并成批、只缓存 HanLP 验证过的结果、等待有上限（可降级调用 2 秒后退 jieba，严格调用按 `MX_COMMON_HANLP_TIMEOUT_MS`）。写入端（projector、全量重建）不要用它：它们自带批量，且不能因为慢被丢弃。
+
 两个容易踩且会静默减半质量的点已在代码里处理：`new Jieba()` 的词典是**空的**，会把中文切成单字（看起来在工作，检索效果等同 bigram），必须显式 `Jieba.withDict(dict)`；以及 `hmm: true` 才能切出词典里没有的词，社交文本里这类词很多。
 
 **ILM 没有 delete 阶段。** hot(30d rollover) → warm(30d, forcemerge) → cold(90d, readonly)，数据无限期保留，清理只能通过显式的、有审计的操作。
@@ -84,14 +86,19 @@ Python 依赖默认经清华 PyPI 镜像下载，Torch 只从官方 CPU wheel �
 并以 `/health` 和 `/tokenize` 作为成功条件。相同 image ID 不会触发无变化的
 Pod rollout；整个命令可安全重复执行。
 
-若节点访问 PyTorch 官方 CPU wheel 源仍然很慢，可只给这次构建传代理；脚本会把
-代理同时交给 builder 和镜像内的 pip/模型下载步骤，不改 Docker daemon 的全局配置：
+节点直连 Docker Hub（`docker/dockerfile` 前端镜像）或 PyTorch 官方 CPU wheel 源
+不稳定时，用 `PROXY` 只给这次镜像构建走代理。写法与 electron-dock 总入口一致：
+`127.0.0.1:7788` 或 `http(s)://host:port`；`*`、`0.0.0.0` 这类监听地址会被拒绝：
 
 ```bash
-HTTP_PROXY=http://127.0.0.1:7788 \
-HTTPS_PROXY=http://127.0.0.1:7788 \
-bash scripts/manage.sh deploy hanlp
+PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy hanlp
 ```
+
+代理会交给 buildkitd（解析前端和基础镜像）、buildx 客户端（取镜像仓库 token）和镜像内的
+pip/模型下载步骤；构建一结束就撤销，后面的 kubectl、containerd 导入和发布都不走代理，
+也不改 Docker daemon 的全局配置。代理变化时脚本会自动重建专用 builder 并保留缓存。
+旧写法 `HTTP_PROXY=… HTTPS_PROXY=… bash scripts/manage.sh deploy hanlp` 仍可用，
+但它对整个脚本生效，kubectl 访问 API Server 也会经过代理。
 
 不要再把 `MX_COMMON_HANLP_ENABLED=1` 当作部署开关；该旧入口会被明确拒绝，
 避免 Docker 与 Kubernetes containerd 的同名镜像内容不一致。

@@ -94,15 +94,16 @@ spec:
           env:
             - name: HANLP_HOME
               value: /models
-            # Left at the default of one on purpose. A HanLP component is a
-            # single mutable Python object, and server.py says as much: forward
-            # passes stay serialized unless an operator has validated a specific
-            # model as thread-safe. Nobody has. Throughput here comes from
-            # batching -- many texts in one pass -- which needs no extra slot,
-            # so raising this would buy nothing and risk concurrent mutation of
-            # shared model state.
-            - name: MAX_CONCURRENT_INFERENCES
-              value: "1"
+            # No pool size and no OMP/MKL/TORCH thread pins here: server.py
+            # derives both from this container's cgroup limits below. It runs
+            # one worker process per model (a HanLP component is a mutable
+            # object nobody has validated as thread-safe, so models are never
+            # shared across threads) and gives each worker an even share of the
+            # CPU quota, set before PyTorch starts. Pinning threads here would
+            # hand every worker the whole quota. MAX_CONCURRENT_INFERENCES is
+            # still honoured as an optional cap on the worker count; "1"
+            # restores the single-slot service without a rebuild.
+            #
             # A coalesced batch of 64 takes materially longer than one text; the
             # queue must outlast it or callers see 429 for work that succeeded.
             - name: INFERENCE_QUEUE_TIMEOUT_SECONDS
@@ -111,22 +112,9 @@ spec:
               value: "256"
             - name: MAX_BODY_BYTES
               value: "4194304"
-            # PyTorch sizes its thread pools from the *host* CPU count, not the
-            # cgroup limit, so on a 128-thread node it would start 128 threads
-            # inside a 16-CPU container: thrashing plus 128 thread stacks and
-            # per-thread allocator arenas, which is memory this pod was already
-            # being OOM-killed for. Pinned to the limit instead. This is also
-            # what makes one batched forward pass fast -- the parallelism lives
-            # inside the pass, which is why the inference slot stays at one.
-            - name: OMP_NUM_THREADS
-              value: "16"
-            - name: MKL_NUM_THREADS
-              value: "16"
-            - name: TORCH_NUM_THREADS
-              value: "16"
           # Model load can take minutes on a cold volume. The startup probe
           # keeps liveness from restarting it while readiness holds it out of
-          # service until the tokenizer has actually loaded.
+          # service until every worker has loaded and warmed up its model.
           readinessProbe:
             httpGet:
               path: /health
@@ -150,10 +138,13 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 3
           # Sized for bulk rebuilds, which are the only workload that saturates
-          # this service. A batch is one PyTorch forward pass and scales across
-          # intra-op threads, so a 2-core ceiling left a 128-thread host mostly
-          # idle while a rebuild ran for hours. Requests stay small: outside a
-          # rebuild this pod is nearly idle and must not reserve a node.
+          # this service. A 2-core ceiling left a 128-thread host mostly idle
+          # while a rebuild ran for hours. The limits are also the pool size:
+          # one worker per 1.5 GiB above a 512 MiB front reserve, at most one
+          # per CPU, threads split evenly -- 16 CPU / 8Gi gives 5 workers of 3
+          # threads, one of them held for interactive queries. Raising the
+          # memory limit is how to add workers. Requests stay small: outside a
+          # rebuild this pod is nearly idle on CPU and must not reserve a node.
           resources:
             requests:
               cpu: 500m

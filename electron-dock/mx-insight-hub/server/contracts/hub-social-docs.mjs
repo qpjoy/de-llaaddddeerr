@@ -84,10 +84,11 @@ function accountOperation(row) {
     requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', additionalProperties: false, required: ['platform'],
       properties, anyOf: ['username', 'usernames', 'userId', 'userIds', 'user_id', 'uid', 'url', 'urls', 'profileUrl', 'profile_url', 'channelId', 'channel_id', 'channelUrl', 'channel_url', 'params'].map(name => ({ required: [name] })) },
       example: { platform: 'twitter', username: 'example', ...(row.key === 'crawl' ? { pageSize: 20 } : {}) } } } },
-    responses: Object.fromEntries([200, 400, 401, 402, 403, 409, 429, 502, 503].map(status => [String(status), {
+    responses: Object.fromEntries([200, 400, 401, 402, 403, 404, 409, 429, 502, 503].map(status => [String(status), {
       description: status === 200 ? 'contractVersion、data（platform、items、raw_info、raw_data、page、pageInfo、meta、status、warnings）与 requestId。raw_info/raw_data 是 JSON 字符串；items 是数组，posts 等为内容条目，followers/following 和账号资料为账号条目。page/pageInfo 的 hasMore 与 nextCursor 同步。returnedCount 只描述本页，不代表账号总内容数。' : '稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。',
       ...(status === 200 ? { content: { 'application/json': { schema: accountResponseSchema(row.key) } } } : {}),
       ...(status === 400 ? { description: '参数或游标错误。Twitter 用户名格式错误为 invalid_social_request；error.details 包含 platform、field、reason（username_too_long 或 username_invalid_characters）、actualLength、maxLength（15）。不回显整个输入，不自动重试。' } : {}),
+      ...(status === 404 ? { description: 'social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。' } : {}),
     }])),
   }
 }
@@ -140,6 +141,6 @@ export function hubSocialGuide(allowed = () => true, scopes = null) {
   const rows = Object.values(HUB_SOCIAL_ENDPOINTS).filter(row => allowed(row.path.slice('/api/v1'.length)))
   if (!rows.length) return ''
   return `<h2>Hub 社媒与账号接口</h2><table><thead><tr><th>能力</th><th>POST 接口</th><th>已授权平台</th></tr></thead><tbody>${rows.map(row => `<tr><td>${row.label}</td><td><code>${row.path}</code></td><td>${row.key === 'search' ? 'twitter' : hubSocialAccountPlatforms(row.key, scopes).join('、')}</td></tr>`).join('')}</tbody></table>
-    ${rows.some(row => row.key !== 'search') ? '<p>账号内容和资料由 Hub 执行。保留已声明的账号标识别名、raw_info/raw_data JSON 字符串，并提供统一 items、page/pageInfo。账号内容需要目标平台及 social.content.crawl，资料需要目标平台及 social.profile.get；接口可见不等于当前 Key 已开通。详细参数、活动类型及迁移示例见<a href="/docs/strategy-search">策略搜索接入指南</a>。</p><p>从旧转发入口切换需从第一页开始，不混用旧游标。后续页面原样回传 nextCursor，保持账号、平台、过滤条件和页大小，每页使用新 Idempotency-Key。短页不代表结束；只读核对未知请求，不能自动新建请求重试。完整字段仍可在响应 JSON 中查看。</p>' : ''}
+    ${rows.some(row => row.key !== 'search') ? '<p>账号内容和资料由 Hub 执行。保留已声明的账号标识别名、raw_info/raw_data JSON 字符串，并提供统一 items、page/pageInfo。账号内容需要目标平台及 social.content.crawl，资料需要目标平台及 social.profile.get；接口可见不等于当前 Key 已开通。详细参数、活动类型及迁移示例见<a href="/docs/strategy-search">策略搜索接入指南</a>。</p><p>从旧转发入口切换需从第一页开始，不混用旧游标。后续页面原样回传 nextCursor，保持账号、平台、过滤条件和页大小，每页使用新 Idempotency-Key。短页不代表结束；只读核对未知请求，不能自动新建请求重试。完整字段仍可在响应 JSON 中查看。</p><p>Twitter 账号查找明确收到上游“未找到账号”时，新请求返回 <code>404 social_account_not_found</code>（<code>stage=account_lookup</code>、<code>outcome=rejected</code>、<code>retryable=false</code>），不伪装为空列表。此结果不证明账号永久不存在，需单独核实账号。旧失败幂等回放仍保留原 502，不再次调用上游。</p>' : ''}
     ${rows.some(row => row.key === 'search') ? '<p>此处 social/search 保留既有 Twitter 搜索合同；统一关键词检索优先使用 /api/v1/data/search，二者游标不互换。Hub-only 聚合搜索的范围继续以 GET /api/v1/data/aggregate/sources?execution=hub_only 的当前授权结果为准。</p>' : ''}`
 }

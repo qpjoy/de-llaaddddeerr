@@ -139,6 +139,16 @@ export class RapidApiAdapter {
         }, persistence('rejected'))
       }
       if (!parsed || !isPostgresSafeJsonValue(raw)) throw new Error('invalid_response_json')
+      // AIO explicitly reports a negative account lookup with HTTP 200. Keep
+      // this business result separate from malformed profiles, only for the
+      // new account workflow; historical social/search contracts stay intact.
+      if (request.accountCompatibility === true && request.operation === 'user-info'
+        && request.endpointKey === 'twitter-aio.user-info' && raw?.userExists === false
+        && raw.data && typeof raw.data === 'object' && !Array.isArray(raw.data) && Object.keys(raw.data).length === 0
+        && raw.error == null && (raw.errors == null || Array.isArray(raw.errors) && raw.errors.length === 0)) {
+        throw new RapidApiUpstreamError({ outcome: 'rejected', billed: null, httpStatus: response.status,
+          businessCode: null, errorCode: 'social_account_not_found', affectsCircuit: false }, persistence('rejected'))
+      }
       let publicBody
       try { publicBody = facebook ? projectFacebookSearch(safe(raw), request, 'rapidapi', capturedAt,
         { allowOverflow: request.standardSearch === true && request.allowOverflow === true }).publicBody
