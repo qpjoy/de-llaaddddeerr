@@ -28,7 +28,7 @@ async function fixture(t, { service = {}, admission = new DataAdmission(), ...op
   return { base, post, admission }
 }
 
-test('300 simultaneous canonical HTTP requests wait before authentication and all drain under four execution slots', async t => {
+test('300 simultaneous canonical HTTP requests wait before authentication and all drain under the default eight execution slots', async t => {
   const blocked = deferred()
   let authenticated = 0, active = 0, peak = 0, completed = 0
   const f = await fixture(t, { service: {
@@ -52,15 +52,15 @@ test('300 simultaneous canonical HTTP requests wait before authentication and al
   }
   await until(() => {
     if (firstFailure) throw firstFailure.cause || firstFailure
-    return f.admission.snapshot().lanes.read.pending === 296
+    return f.admission.snapshot().lanes.read.pending === 292
   })
-  assert.equal(authenticated, 4)
-  assert.equal(f.admission.snapshot().lanes.read.active, 4)
+  assert.equal(authenticated, 8)
+  assert.equal(f.admission.snapshot().lanes.read.active, 8)
   blocked.resolve()
   const responses = await Promise.all(requests)
   assert.ok(responses.every(r => r.status === 200))
   await Promise.all(responses.map(r => r.json()))
-  assert.equal(completed, 300); assert.equal(peak, 4)
+  assert.equal(completed, 300); assert.equal(peak, 8)
   assert.deepEqual([f.admission.snapshot().lanes.read.active, f.admission.snapshot().lanes.read.pending], [0, 0])
 })
 

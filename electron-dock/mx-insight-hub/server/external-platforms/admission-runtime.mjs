@@ -1,4 +1,5 @@
 import { DEFAULT_CONCURRENCY_QUEUE } from './concurrency-admission.mjs'
+import { apiProcessCount, processShareOf } from '../core/process-share.mjs'
 
 // Provider RPM is shared by the durable provider bucket. Concurrency belongs
 // to each gateway instance; these values must never be operation-specific.
@@ -12,8 +13,28 @@ export function deploymentAdmissionLimits(config) {
   })
 }
 
+const sharedLimits = new WeakMap()
+
+// Concurrency and pending waiters are held in this process. When the pod runs
+// several API processes, each enforces its share so the pod total stays the
+// configured value; the provider RPM bucket and the wait time are unchanged.
+function processLimits(limits) {
+  if (apiProcessCount() === 1) return limits
+  let shared = sharedLimits.get(limits)
+  if (!shared) {
+    shared = Object.freeze({
+      ...limits,
+      maxConcurrency: processShareOf(limits.maxConcurrency),
+      maxConsumerConcurrency: processShareOf(limits.maxConsumerConcurrency),
+      maxPending: processShareOf(limits.maxPending),
+    })
+    sharedLimits.set(limits, shared)
+  }
+  return shared
+}
+
 export function currentAdmissionLimits(gateway) {
-  return gateway.admissionLimits || deploymentAdmissionLimits(gateway.config)
+  return processLimits(gateway.admissionLimits || deploymentAdmissionLimits(gateway.config))
 }
 
 export async function refreshAdmissionLimits(gateway) {
@@ -25,7 +46,7 @@ export async function refreshAdmissionLimits(gateway) {
     gateway.admissionLimits = Object.freeze({ ...next })
     gateway.concurrencyQueue?.drain()
   }
-  return gateway.admissionLimits
+  return currentAdmissionLimits(gateway)
 }
 
 export function admissionQueuePolicy(gateway) {
