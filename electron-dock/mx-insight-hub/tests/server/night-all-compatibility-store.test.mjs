@@ -533,6 +533,7 @@ test('PostgresStore writes compatibility run, canonical revision, observation an
       queries.push({ sql, values })
       if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [], rowCount: 0 }
       if (/INSERT INTO ingest\.ingest_runs/.test(sql)) return { rows: [{ id: runId }], rowCount: 1 }
+      if (/pg_advisory_xact_lock\(hashtextextended\(identity, 0\)\)/.test(sql)) return { rows: [{ count: 1 }], rowCount: 1 }
       if (/INSERT INTO ingest\.source_objects/.test(sql)) {
         return { rows: [{ id: sourceObjectId, current_revision: 1 }], rowCount: 1 }
       }

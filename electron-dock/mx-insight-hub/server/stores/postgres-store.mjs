@@ -3800,21 +3800,26 @@ export class PostgresStore {
 
       const sourceRunColumn = apiLineage ? 'ingest_run_id' : 'external_import_run_id'
       const sourceRunId = apiLineage ? ingestRunId : importRunId
-      if ((externalPlatformCall && platform === 'xiaohongshu')
+      if (apiLineage
         || records.some(record => isSeparatedWeiboBody(datasetId, platform, record))) {
         // Lock overlapping identities in a stable order. Search observations
         // and detail repairs may arrive out of order, including first inserts;
         // neither preview length nor worker arrival order establishes freshness.
+        // Every queued API result takes them too: the ingest worker drains
+        // several jobs at once, overlapping searches return the same posts in
+        // different orders, and row locks taken in result order would deadlock.
+        // One round trip; unnest yields, and so locks, in the sorted order.
         const identityLocks = [...new Set(records.map((record) => JSON.stringify([
           datasetId,
           platform,
           record.objectType,
           record.externalId,
         ])))].sort()
-        for (const identityLock of identityLocks) {
+        if (identityLocks.length > 0) {
           await client.query(
-            'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-            [identityLock],
+            `SELECT count(pg_advisory_xact_lock(hashtextextended(identity, 0)))
+               FROM unnest($1::text[]) AS identity`,
+            [identityLocks],
           )
         }
       }

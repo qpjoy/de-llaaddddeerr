@@ -1,6 +1,7 @@
 import {
   BUILTIN_DEFINITIONS,
   BUILTIN_COMMAND_DEFINITIONS,
+  REAL_DEFINITIONS,
 } from "./workflow-catalog.mjs";
 import {
   BUILTIN_RULE_DEFINITIONS,
@@ -167,7 +168,11 @@ export class MemoryStore {
       // Not part of transaction state in PgStore: append-only side tables.
       outbox: [],
       clientUsage: [],
-      definitions: structuredClone(BUILTIN_DEFINITIONS),
+      // Real templates as seeded by migrations/016.
+      definitions: structuredClone([
+        ...BUILTIN_DEFINITIONS,
+        ...REAL_DEFINITIONS,
+      ]),
       commandDefinitions: structuredClone(BUILTIN_COMMAND_DEFINITIONS),
       ruleDefinitions: structuredClone(BUILTIN_RULE_DEFINITIONS),
       strategyDefinitions: structuredClone(BUILTIN_STRATEGY_DEFINITIONS),
@@ -240,6 +245,10 @@ export class MemoryStore {
         commands: (this.state.commands || []).filter((c) => c.jobId === id),
       })
     );
+  }
+  /** The realm an Agent works for (fixed at registration), or null. */
+  async agentRealm(id) {
+    return this.state.agents.find((a) => a.id === id)?.mode ?? null;
   }
   // ---- Job API v1 reads and the callback outbox (outside transactions) ----
   async client(id) {
@@ -1201,6 +1210,16 @@ export class PgStore {
     } finally {
       client.release();
     }
+  }
+  /** The realm an Agent works for (fixed at registration), or null. Read
+   * outside the transaction; the token is still checked inside it, against
+   * that realm's rows only. */
+  async agentRealm(id) {
+    const { rows } = await this.pool.query(
+      "SELECT mode FROM mx_device.agents WHERE id=$1",
+      [id],
+    );
+    return rows[0]?.mode ?? null;
   }
   // ---- Job API v1 reads and the callback outbox (outside transactions) ----
   async client(id) {

@@ -156,31 +156,50 @@ const findDevice = (s, mode, id) => {
   requireThat(d, "设备不存在", 404);
   return d;
 };
-export function register(s, now, mode, body) {
+/** hosted: set only by adoptDevice for a real phone a host Agent drives
+ * ({ agentId, serial, apps, commands }): adapter "agent", no endpoint (the
+ * center never calls its PoC) and no host worker. Never from a request body. */
+export function register(s, now, mode, body, hosted = null) {
   requireThat(
     s.devices.filter((d) => d.mode === mode).length <
       (mode === "sim" ? 100 : 64),
     mode === "sim" ? "模拟池最多 100 台设备" : "真实模式最多 64 台设备",
   );
-  const adapter = mode === "sim" ? "simulator" : body.adapter || "legacy-poc";
+  const agentHosted = mode === "real" && !!hosted;
+  const adapter =
+    mode === "sim"
+      ? "simulator"
+      : agentHosted
+        ? "agent"
+        : body.adapter || "legacy-poc";
   requireThat(
-    mode === "sim" || ["legacy-poc", "mobile-agent"].includes(adapter),
+    mode === "sim" ||
+      agentHosted ||
+      ["legacy-poc", "mobile-agent"].includes(adapter),
     "未知适配器",
     400,
   );
-  const serial = body.serial ? serialNumber(body.serial) : null;
+  const serial = agentHosted
+    ? serialNumber(hosted.serial)
+    : body.serial
+      ? serialNumber(body.serial)
+      : null;
   if (adapter === "mobile-agent")
     requireThat(serial, "Mobile-Agent 必须指定真实 ADB 序列号", 400);
   const endpoint =
-    mode === "real"
+    mode === "real" && !agentHosted
       ? adapter === "mobile-agent"
         ? mobileOrigin(body.origin)
         : origin(body.origin)
       : null;
-  const workerId =
-    mode === "real" ? str(body.workerId, "执行器") : "simulation";
-  const resourceKey =
-    mode === "real"
+  const workerId = agentHosted
+    ? `agent:${hosted.agentId}`
+    : mode === "real"
+      ? str(body.workerId, "执行器")
+      : "simulation";
+  const resourceKey = agentHosted
+    ? `agent:${hosted.agentId}:${serial}`
+    : mode === "real"
       ? `${workerId}:${endpoint}${adapter === "mobile-agent" ? `:${serial}` : ""}`
       : randomUUID();
   const accountKey =
@@ -193,13 +212,19 @@ export function register(s, now, mode, body) {
     ),
     "该入口或账号资源已登记；不能给同一手机另起别名绕过互斥",
   );
-  if (mode === "real" && body.serial)
+  if (mode === "real" && serial) {
+    // One phone is one real device: Agent-hosted or a legacy PoC/observer
+    // registration, never both.
+    const other = s.devices.find((d) => d.mode === mode && d.serial === serial);
     requireThat(
-      !s.devices.some(
-        (d) => d.mode === mode && d.serial === String(body.serial).trim(),
-      ),
-      "该序列号已登记，不能重复占用同一手机",
+      !other,
+      other?.agentId && !agentHosted
+        ? "该手机已由宿主机 Agent 托管；同一台手机只能二选一（Agent 托管或旧 PoC 直连）"
+        : agentHosted && other && !other.agentId
+          ? "该手机已作为旧 PoC 直连或观察设备登记；同一台手机只能二选一（Agent 托管或旧 PoC 直连）"
+          : "该序列号已登记，不能重复占用同一手机",
     );
+  }
   if (mode === "real")
     requireThat(body.approved === true, "必须批准此本机连接目标", 400);
   const d = {
@@ -215,13 +240,20 @@ export function register(s, now, mode, body) {
     accountKey,
     identity: mode === "real" ? "operator-declared-unverified" : "simulated",
     serial,
+    ...(agentHosted && {
+      agentId: hosted.agentId,
+      leaseToken: 0,
+      agentApps: hosted.apps,
+      agentCommands: hosted.commands,
+    }),
     observer:
       adapter === "mobile-agent"
         ? { origin: endpoint, serial, version: randomUUID() }
         : null,
     enabled: mode === "sim",
     state: "idle",
-    connected: mode === "sim" ? "online" : "unknown",
+    // An Agent-hosted phone is online while its Agent reports it (hello).
+    connected: mode === "sim" || agentHosted ? "online" : "unknown",
     revision: 1,
     epoch: 1,
     cooldownUntil: 0,
@@ -361,6 +393,11 @@ export function addJob(s, now, mode, body) {
     requireThat(
       d.adapter !== "mobile-agent",
       "此适配器目前仅观察，不支持搜索/详情派发",
+      400,
+    );
+    requireThat(
+      !d.agentId,
+      "此手机由宿主机 Agent 托管，只运行版本化任务模板；旧搜索/详情直连不派给它",
       400,
     );
     requireThat(
@@ -646,6 +683,8 @@ export function returnLease(s, now, a, reason, { pause = false } = {}) {
 // instant); pool plans are computed once per round, not once per claim.
 // executorSlots: the claiming executor's simulation slots (capacity-aware plans).
 // executor: "agent" claims only Agent-hosted devices, "local" only the others.
+// Without one, a real claim is local: a real Agent-hosted phone is only ever
+// granted to its Agent, never executed in a center process.
 export function claim(
   s,
   now,
@@ -658,7 +697,10 @@ export function claim(
     executor = null,
   } = {},
 ) {
-  const runs = (d) => !executor || (executor === "agent") === !!d.agentId;
+  const runs = (d) =>
+    executor
+      ? (executor === "agent") === !!d.agentId
+      : mode === "sim" || !d.agentId;
   sweep(s, now, mode);
   // Built after sweep; the decision below only mutates state once it returns.
   const index = reference ? undefined : schedulingIndex(s, now);
@@ -669,7 +711,9 @@ export function claim(
       d.mode === mode &&
       runs(d) &&
       deviceBlockers(s, now, d, index).length === 0 &&
-      (mode === "sim" || d.workerId === workerId),
+      // A legacy real phone belongs to the worker on its host; an
+      // Agent-hosted one to its Agent, whoever issues the grant.
+      (mode === "sim" || d.agentId || d.workerId === workerId),
   );
   devices.sort(
     (a, b) =>
@@ -844,15 +888,30 @@ export function checkpoint(s, now, a, result) {
     keyword: result.keyword || null,
     status: result.status || "步骤完成",
     items: (result.items || [])
-      .map((i) => ({ id: i.id, title: i.title, authorName: i.authorName }))
+      .map((i) => ({
+        id: i.id,
+        title: i.title,
+        authorName: i.authorName,
+        ...(Number.isSafeInteger(i.priceCents) && { priceCents: i.priceCents }),
+      }))
       .slice(0, 50),
     detail: result.detail
       ? {
           id: result.detail.id,
           title: result.detail.title,
           content: result.detail.content,
+          ...(Number.isSafeInteger(result.detail.priceCents) && {
+            priceCents: result.detail.priceCents,
+          }),
         }
       : null,
+    // Bounded display extras for the phone screen (OCR text, a like).
+    ...(Array.isArray(result.blocks) && {
+      blocks: result.blocks
+        .slice(0, 8)
+        .map((b) => String(b?.text ?? "").slice(0, 120)),
+    }),
+    ...(typeof result.liked === "boolean" && { liked: result.liked }),
     isBusy: false,
   };
   bump(d);

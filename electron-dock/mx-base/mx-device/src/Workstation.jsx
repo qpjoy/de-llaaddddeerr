@@ -20,7 +20,10 @@ import {
   Rows,
   FlowArrow,
   Question,
+  Crosshair,
+  Presentation,
 } from "@phosphor-icons/react";
+import Spotlight from "./Spotlight.jsx";
 import { api, appName, jobTitle, time } from "./data.js";
 import { requestId } from "./request-id.mjs";
 import { Modal } from "./Forms.jsx";
@@ -30,6 +33,8 @@ import LaneChart from "./LaneChart.jsx";
 import FlowView from "./FlowView.jsx";
 import ExplainPanel from "./ExplainPanel.jsx";
 import { liveLanes, liveTicks } from "./timeline-model.mjs";
+import PhoneScreen from "./phone/PhoneScreen.jsx";
+import { screenModel } from "./phone/screen-model.mjs";
 import "./workstation.css";
 
 // Render a tile's mini screen only near the viewport (100 devices stay cheap).
@@ -114,6 +119,40 @@ const taskTitle = (job) =>
 const keywordOf = (job) => job.input?.keyword || job.input?.target || "";
 const CLIENT_CLASS = { interactive: "交互", standard: "标准", batch: "批量" };
 const ms = (v) => durationLabel(v);
+// One-click demo: a new rack running every built-in template once, slowed
+// down, then the focus view follows the phones.
+function ShowcaseForm({ busy, onSubmit }) {
+  const [count, setCount] = useState(10);
+  return (
+    <form
+      className="form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void onSubmit(count);
+      }}
+    >
+      <p>
+        新建一个独立的模拟机架，把小红书、微博、闲鱼、拼多多的 15
+        个内置模板各跑一遍：打开、搜索、翻页、详情、OCR、点赞、刷新、滚动、返回和回到桌面都会出现。每条指令约
+        2.6 秒，便于边看边讲。不影响现有机架和真实设备。
+      </p>
+      <label>
+        手机数量
+        <select
+          value={count}
+          onChange={(e) => setCount(Number(e.target.value))}
+        >
+          <option value={10}>10 台（推荐，约 1–2 分钟）</option>
+          <option value={20}>20 台</option>
+        </select>
+      </label>
+      <button className="primary" disabled={busy}>
+        <Presentation size={18} />
+        开始演示
+      </button>
+    </form>
+  );
+}
 // Shadow evaluation: the current queue planned under the current and a candidate strategy.
 function ShadowView({ mode, rack, strategy }) {
   const [result, setResult] = useState(null),
@@ -333,6 +372,42 @@ function MiniScreen({ row, now }) {
     d.cooldownUntil || 0,
     ...row.coolingApps.map((a) => a.cooldownUntil),
   );
+  // Simulated phones show a platform-like synthetic screen (src/phone/).
+  if (d.mode === "sim")
+    return (
+      <div
+        className={`ws-phone ws-phone-sim ps-frame ${command ? "ws-phone-active" : ""}`}
+      >
+        <PhoneScreen
+          tile
+          model={screenModel({
+            device: d,
+            projection: p,
+            command,
+            attempt: row.attempt,
+            job,
+            status,
+            now,
+            cooldownUntil,
+          })}
+        />
+        <i className="ws-notch" />
+        {d.agentId && (
+          <span
+            className={`ws-agent-tag${d.driver === "poc" ? " poc" : ""}`}
+            title={
+              d.driver === "poc"
+                ? `宿主机 Agent 用 PoC 驱动（${d.pocLevel || "L0"}）执行`
+                : "由宿主机 Agent 按租约执行"
+            }
+          >
+            {d.driver === "poc"
+              ? `PoC${d.slot ? ` · ${d.slot}` : ""}`
+              : "Agent"}
+          </span>
+        )}
+      </div>
+    );
   const state =
     status === "quarantined"
       ? {
@@ -926,7 +1001,7 @@ export default function Workstation({
     received.current = { at: Date.now(), now: model.now };
   const [, setTick] = useState(0);
   useEffect(() => {
-    if (!["lanes", "flow"].includes(view)) return;
+    if (!["lanes", "flow", "focus"].includes(view)) return;
     const timer = setInterval(() => setTick((n) => n + 1), 1000);
     return () => clearInterval(timer);
   }, [view]);
@@ -1133,7 +1208,29 @@ export default function Workstation({
             <FlowArrow size={18} />
             流转
           </button>
+          <button
+            className={view === "focus" ? "selected" : ""}
+            aria-pressed={view === "focus"}
+            onClick={() => setView("focus")}
+            title="大屏跟随正在操作的手机，逐步讲解"
+          >
+            <Crosshair size={18} />
+            聚焦
+          </button>
         </div>
+        {mode === "sim" && !readOnly && (
+          <button
+            className="outline ws-showcase"
+            disabled={busy}
+            onClick={() => {
+              setLocalError("");
+              setModal({ type: "showcase" });
+            }}
+          >
+            <Presentation size={18} />
+            一键演示
+          </button>
+        )}
       </section>
       {mode === "sim" && (
         <div className="ws-policy-line">
@@ -1262,6 +1359,16 @@ export default function Workstation({
                   ? "实色是已执行或执行中，虚线框是可变的软计划，细带是冷却与休息。点色块看解释。"
                   : "实色是已执行或执行中，虚线框是可变的软计划（可拖到其他泳道指派），细带是冷却与休息。点色块看解释，点设备名打开手机工作台。"}
               </p>
+            </div>
+          ) : view === "focus" && shown.length ? (
+            <div className="ws-host">
+              <Spotlight
+                state={state}
+                rows={shown}
+                now={liveNow}
+                onOpenDevice={readOnly ? null : onOpenDevice}
+                onExplain={setExplain}
+              />
             </div>
           ) : view === "flow" ? (
             <div className="ws-host">
@@ -1463,6 +1570,7 @@ export default function Workstation({
               submit: "提交模板任务",
               assign: "调整排队任务",
               shadow: "影子评估",
+              showcase: "一键演示：全平台操作",
               auto: "按流量自动切换策略",
             }[modal.type]
           }
@@ -1473,7 +1581,29 @@ export default function Workstation({
               {localError}
             </p>
           )}
-          {modal.type === "shadow" ? (
+          {modal.type === "showcase" ? (
+            <ShowcaseForm
+              busy={busy}
+              onSubmit={async (deviceCount) => {
+                const at = new Date();
+                const name = `全平台演示 ${String(at.getHours()).padStart(2, "0")}${String(at.getMinutes()).padStart(2, "0")}${String(at.getSeconds()).padStart(2, "0")}`;
+                let launched = null;
+                await act(async () => {
+                  launched = await api("workstation-demo", mode, {
+                    key: requestId(),
+                    rack: name,
+                    deviceCount,
+                    scenario: "showcase",
+                  });
+                  return launched;
+                }, "演示机架已就绪：聚焦视图会跟随正在操作的手机");
+                if (launched) {
+                  setRack(launched.rack);
+                  setView("focus");
+                }
+              }}
+            />
+          ) : modal.type === "shadow" ? (
             <ShadowView mode={mode} rack={rack} strategy={strategy} />
           ) : modal.type === "auto" ? (
             <AutoProfileForm

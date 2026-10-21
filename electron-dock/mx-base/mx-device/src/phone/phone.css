@@ -1,0 +1,1087 @@
+/* Simulated phone screens. The parent frame is a size container; every
+   length here is in em, and the base size follows the frame's width, so a
+   wall tile and the large workspace phone share one layout. */
+.ps-frame {
+  container-type: inline-size;
+}
+.ps {
+  --brand: #ff2442;
+  --brand-ink: #fff;
+  --ink: #222831;
+  --soft: #8a919c;
+  --line: #eceef1;
+  --bg: #fff;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: clamp(3.5px, 5.6cqi, 13px);
+  line-height: 1.3;
+  text-align: left;
+  font-weight: 400;
+}
+.ps-xhs {
+  --brand: #ff2442;
+}
+.ps-weibo {
+  --brand: #ff8200;
+  --bg: #f4f5f7;
+}
+.ps-xianyu {
+  --brand: #ffe60f;
+  --brand-ink: #33280a;
+  --bg: #f6f6f6;
+}
+.ps-pdd {
+  --brand: #e02e24;
+  --bg: #f5f5f5;
+}
+.ps svg {
+  width: 1.15em;
+  height: 1.15em;
+  flex: none;
+}
+
+/* Status bar */
+.ps-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 1.9em;
+  padding: 0 1.1em;
+  font-size: 0.82em;
+  font-weight: 650;
+  flex: none;
+  position: relative;
+  z-index: 3;
+}
+.ps-status.light {
+  color: #fff;
+}
+.ps-on-app.ps-pdd .ps-status,
+.ps-on-app.ps-xianyu .ps-status {
+  background: var(--brand);
+}
+.ps-status-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25em;
+}
+.ps-status-icons small {
+  font-size: 0.85em;
+}
+.ps-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ps-body.dim > * {
+  filter: saturate(0.4) brightness(0.92);
+}
+
+/* Lock, home and splash */
+.ps-on-lock,
+.ps-on-home {
+  background: linear-gradient(170deg, #1d3557 0%, #335c81 45%, #7aa5c9 100%);
+}
+.ps-on-lock .ps-status,
+.ps-on-home .ps-status {
+  color: #fff;
+}
+.ps-lock {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  color: #fff;
+  padding-top: 1.6em;
+}
+.ps-lock b {
+  font-size: 3.6em;
+  font-weight: 300;
+  letter-spacing: 0.02em;
+  line-height: 1.05;
+  margin-top: 0.35em;
+}
+.ps-lock small {
+  font-size: 0.95em;
+  opacity: 0.9;
+}
+.ps-lock span {
+  margin-top: auto;
+  margin-bottom: 1.4em;
+  font-size: 0.8em;
+  opacity: 0.75;
+}
+.ps-home {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 0.8em 0.9em 0.7em;
+  color: #fff;
+}
+.ps-widget {
+  display: grid;
+  margin-bottom: 1em;
+}
+.ps-widget b {
+  font-size: 2.6em;
+  font-weight: 300;
+  line-height: 1;
+}
+.ps-widget small {
+  font-size: 0.85em;
+  opacity: 0.85;
+}
+.ps-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.9em 0.4em;
+}
+.ps-appicon {
+  display: grid;
+  justify-items: center;
+  gap: 0.25em;
+}
+.ps-appicon i {
+  display: grid;
+  place-items: center;
+  width: 2.9em;
+  height: 2.9em;
+  border-radius: 0.75em;
+  font-style: normal;
+  font-weight: 800;
+  font-size: 1em;
+  letter-spacing: -0.04em;
+  box-shadow: 0 0.15em 0.4em rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.ps-appicon i.system,
+.ps-dock i {
+  background: rgba(255, 255, 255, 0.92);
+  color: #4a5668;
+}
+.ps-appicon i.system svg {
+  width: 1.5em;
+  height: 1.5em;
+}
+.ps-appicon small {
+  font-size: 0.72em;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+.ps-dock {
+  margin-top: auto;
+  display: flex;
+  justify-content: space-around;
+  padding: 0.55em 0.4em;
+  border-radius: 1.2em;
+  background: rgba(255, 255, 255, 0.25);
+}
+.ps-dock i {
+  display: grid;
+  place-items: center;
+  width: 2.6em;
+  height: 2.6em;
+  border-radius: 0.7em;
+}
+.ps-dock i svg {
+  width: 1.4em;
+  height: 1.4em;
+}
+.ps-splash {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.7em;
+  animation: ps-fade 0.4s ease-out;
+}
+.ps-splash .ps-appicon i {
+  width: 4.4em;
+  height: 4.4em;
+  font-size: 1.25em;
+  border-radius: 1.1em;
+  background: rgba(255, 255, 255, 0.18) !important;
+  color: inherit !important;
+  box-shadow: none;
+  border: 0.12em solid currentColor;
+}
+.ps-splash b {
+  font-size: 1.3em;
+  letter-spacing: 0.1em;
+}
+.ps-on-splash .ps-status {
+  background: transparent;
+}
+.ps-xhs.ps-on-splash,
+.ps-weibo.ps-on-splash,
+.ps-pdd.ps-on-splash {
+  background: var(--brand);
+}
+.ps-xianyu.ps-on-splash {
+  background: var(--brand);
+}
+.ps-dotsload {
+  display: flex;
+  gap: 0.35em;
+}
+.ps-dotsload i {
+  width: 0.45em;
+  height: 0.45em;
+  border-radius: 50%;
+  background: currentColor;
+  animation: ps-blink 1s infinite;
+}
+.ps-dotsload i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.ps-dotsload i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+/* Common app chrome */
+.ps-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.2em 0.9em 0.3em;
+  background: #fff;
+  flex: none;
+}
+.ps-tabs {
+  display: flex;
+  gap: 0.9em;
+  font-size: 0.92em;
+  color: var(--soft);
+  padding: 0.25em 0.9em 0.35em;
+  white-space: nowrap;
+  overflow: hidden;
+  flex: none;
+}
+.ps-header .ps-tabs {
+  padding: 0;
+  flex: 1;
+  justify-content: center;
+}
+.ps-tabs .on {
+  color: var(--ink);
+  font-weight: 700;
+  position: relative;
+}
+.ps-tabs .on::after {
+  content: "";
+  position: absolute;
+  left: 20%;
+  right: 20%;
+  bottom: -0.3em;
+  height: 0.16em;
+  border-radius: 0.1em;
+  background: var(--brand);
+}
+.ps-xianyu .ps-tabs .on::after {
+  background: #33280a;
+}
+.ps-searchrow {
+  display: flex;
+  align-items: center;
+  gap: 0.45em;
+  padding: 0.25em 0.8em 0.4em;
+  background: #fff;
+  flex: none;
+}
+.ps-back {
+  color: var(--ink);
+}
+.ps-search {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.35em;
+  min-width: 0;
+  padding: 0.35em 0.7em;
+  border-radius: 1.2em;
+  background: #f1f2f4;
+  font-size: 0.92em;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ps-search svg {
+  color: var(--soft);
+}
+.ps-placeholder {
+  color: var(--soft);
+}
+.ps-typing::after {
+  content: "";
+  display: inline-block;
+  width: 0.08em;
+  height: 1em;
+  margin-left: 0.1em;
+  vertical-align: -0.15em;
+  background: var(--brand);
+  animation: ps-blink 0.9s steps(1) infinite;
+}
+.ps-search-action {
+  color: var(--brand);
+  font-size: 0.92em;
+}
+.ps-brandhead {
+  background: var(--brand);
+  color: var(--brand-ink);
+  flex: none;
+}
+.ps-brandhead .ps-searchrow {
+  background: transparent;
+}
+.ps-brandhead .ps-search {
+  background: #fff;
+}
+.ps-brandhead .ps-back,
+.ps-brandhead .ps-search-action {
+  color: var(--brand-ink);
+}
+.ps-brandhead .ps-tabs {
+  color: var(--brand-ink);
+  opacity: 0.9;
+}
+.ps-brandhead .ps-tabs .on {
+  color: var(--brand-ink);
+}
+.ps-brandhead .ps-tabs .on::after {
+  background: var(--brand-ink);
+}
+.ps-nav {
+  margin-top: auto;
+  display: flex;
+  justify-content: space-around;
+  align-items: center;
+  height: 2.5em;
+  border-top: 1px solid var(--line);
+  background: #fff;
+  font-size: 0.8em;
+  color: var(--soft);
+  flex: none;
+  position: relative;
+  z-index: 2;
+}
+.ps-nav .on {
+  color: var(--ink);
+  font-weight: 700;
+}
+.ps-nav-plus {
+  display: grid;
+  place-items: center;
+  width: 2.4em;
+  height: 1.7em;
+  border-radius: 0.5em;
+  background: var(--brand);
+  color: var(--brand-ink);
+}
+.ps-tile .ps-nav {
+  display: none;
+}
+.ps-loader {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35em;
+  padding: 0.35em 0;
+  font-size: 0.82em;
+  color: var(--soft);
+  flex: none;
+}
+.ps-spin {
+  animation: ps-spin 0.9s linear infinite;
+}
+.ps-pagechip {
+  position: absolute;
+  right: 0.6em;
+  bottom: 3em;
+  padding: 0.15em 0.55em;
+  border-radius: 1em;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 0.75em;
+}
+.ps-tile .ps-pagechip {
+  bottom: 0.6em;
+}
+
+/* Thumbnails, avatars, prices */
+.ps-thumb {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 0.35em;
+}
+.ps-thumb.tall {
+  aspect-ratio: 3 / 4;
+}
+.ps-thumb svg {
+  width: 42%;
+  height: 42%;
+}
+.ps-thumb.big {
+  aspect-ratio: 4 / 3;
+  border-radius: 0;
+}
+.ps-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 1.35em;
+  height: 1.35em;
+  border-radius: 50%;
+  background: #e8ebf0;
+  color: #5a6578;
+  font-style: normal;
+  font-size: 0.8em;
+  flex: none;
+}
+.ps-price {
+  color: #ff4400;
+  font-size: 0.85em;
+}
+.ps-pdd .ps-price {
+  color: var(--brand);
+}
+.ps-price b {
+  font-size: 1.35em;
+}
+.ps-price small {
+  color: var(--soft);
+  font-size: 0.8em;
+}
+.ps-price.big {
+  padding: 0.4em 0.9em 0;
+  font-size: 1.2em;
+}
+
+/* 小红书 / 闲鱼: two-column waterfall */
+.ps-waterfall {
+  columns: 2;
+  column-gap: 0.4em;
+  padding: 0.4em 0.4em 0;
+  background: #f6f6f6;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.ps-card {
+  break-inside: avoid;
+  display: grid;
+  gap: 0.25em;
+  margin-bottom: 0.4em;
+  padding-bottom: 0.4em;
+  border-radius: 0.45em;
+  background: #fff;
+  overflow: hidden;
+  animation: ps-rise 0.35s ease-out;
+}
+.ps-card .ps-thumb {
+  border-radius: 0;
+}
+.ps-card strong {
+  padding: 0 0.45em;
+  font-size: 0.86em;
+  font-weight: 600;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ps-card .ps-price {
+  padding: 0 0.45em;
+}
+.ps-card footer {
+  display: flex;
+  align-items: center;
+  gap: 0.25em;
+  padding: 0 0.45em;
+  font-size: 0.72em;
+  color: var(--soft);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ps-card footer em {
+  margin-left: auto;
+  font-style: normal;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15em;
+}
+
+/* 微博 feed */
+.ps-feed {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  align-content: start;
+  gap: 0.35em;
+}
+.ps-post {
+  background: #fff;
+  padding: 0.55em 0.75em;
+  display: grid;
+  gap: 0.35em;
+  animation: ps-rise 0.35s ease-out;
+}
+.ps-post header {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+}
+.ps-post header div {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+.ps-post header b {
+  font-size: 0.86em;
+  color: #e86b00;
+}
+.ps-post header small {
+  font-size: 0.7em;
+  color: var(--soft);
+}
+.ps-post .ps-avatar {
+  width: 1.9em;
+  height: 1.9em;
+}
+.ps-post p {
+  margin: 0;
+  font-size: 0.86em;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ps-imgrow {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.2em;
+}
+.ps-imgrow .ps-thumb {
+  aspect-ratio: 1;
+  border-radius: 0.2em;
+}
+.ps-post footer {
+  display: flex;
+  justify-content: space-around;
+  font-size: 0.75em;
+  color: var(--soft);
+  border-top: 1px solid var(--line);
+  padding-top: 0.35em;
+}
+.ps-post footer span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2em;
+}
+.ps-post footer .liked {
+  color: #ff8200;
+  font-weight: 700;
+}
+.ps-post footer .liking svg,
+.ps-post footer .liked svg {
+  animation: ps-pop 0.6s ease-out;
+}
+.ps-post footer .liking svg {
+  animation: ps-pulse 0.8s ease-in-out infinite;
+  color: #ff8200;
+}
+
+/* 拼多多 list */
+.ps-list {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  align-content: start;
+  gap: 0.3em;
+  padding: 0.3em 0.35em 0;
+}
+.ps-list.scrolling > * {
+  animation: ps-scroll 1.2s ease-in-out infinite alternate;
+}
+.ps-banner {
+  padding: 0.6em 0.8em;
+  border-radius: 0.5em;
+  background: linear-gradient(100deg, #ff6034, #e02e24 60%, #ff4b2b);
+  color: #fff;
+  font-weight: 800;
+  font-size: 0.95em;
+  letter-spacing: 0.06em;
+}
+.ps-goods {
+  display: grid;
+  grid-template-columns: 4.4em 1fr auto;
+  gap: 0.45em;
+  align-items: end;
+  padding: 0.4em;
+  border-radius: 0.45em;
+  background: #fff;
+  animation: ps-rise 0.35s ease-out;
+}
+.ps-goods > div {
+  display: grid;
+  gap: 0.2em;
+  min-width: 0;
+  align-self: stretch;
+}
+.ps-goods strong {
+  font-size: 0.85em;
+  font-weight: 600;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ps-tag {
+  justify-self: start;
+  font-style: normal;
+  font-size: 0.66em;
+  padding: 0 0.35em;
+  border: 1px solid var(--brand);
+  border-radius: 0.25em;
+  color: var(--brand);
+}
+.ps-pin {
+  font-size: 0.72em;
+  padding: 0.3em 0.6em;
+  border-radius: 1em;
+  background: var(--brand);
+  color: #fff;
+  white-space: nowrap;
+}
+.ps-tile .ps-pin,
+.ps-tile .ps-tag {
+  display: none;
+}
+
+/* Search page */
+.ps-searchpage {
+  flex: 1;
+  min-height: 0;
+  padding: 0.3em 0.9em;
+  background: #fff;
+  display: grid;
+  align-content: start;
+  gap: 0.35em;
+  overflow: hidden;
+}
+.ps-searchpage h5 {
+  margin: 0.3em 0 0;
+  font-size: 0.85em;
+}
+.ps-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35em;
+}
+.ps-chips span {
+  padding: 0.2em 0.6em;
+  border-radius: 1em;
+  background: #f1f2f4;
+  font-size: 0.78em;
+}
+.ps-hotlist {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.35em;
+  font-size: 0.8em;
+}
+.ps-hotlist li {
+  display: flex;
+  gap: 0.45em;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ps-hotlist b {
+  color: var(--brand);
+  width: 1em;
+}
+.ps-xianyu .ps-hotlist b {
+  color: #ff8000;
+}
+.ps-hotlist em {
+  font-style: normal;
+  font-size: 0.85em;
+  padding: 0 0.3em;
+  border-radius: 0.2em;
+  background: #ff5b30;
+  color: #fff;
+}
+
+/* Detail pages */
+.ps-detail {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35em;
+  animation: ps-slide 0.35s ease-out;
+}
+.ps-author {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.2em 0.8em;
+  font-size: 0.88em;
+}
+.ps-author small {
+  color: #1fa36b;
+  font-size: 0.8em;
+}
+.ps-follow {
+  margin-left: auto;
+  padding: 0.15em 0.75em;
+  border: 1px solid var(--brand);
+  border-radius: 1em;
+  color: var(--brand);
+  font-size: 0.85em;
+}
+.ps-dots {
+  display: flex;
+  justify-content: center;
+  gap: 0.25em;
+}
+.ps-dots i {
+  width: 0.35em;
+  height: 0.35em;
+  border-radius: 50%;
+  background: #d8dbe0;
+}
+.ps-dots i.on {
+  background: var(--brand);
+}
+.ps-detail h4 {
+  margin: 0;
+  padding: 0 0.8em;
+  font-size: 1em;
+  line-height: 1.3;
+}
+.ps-detail p {
+  margin: 0;
+  padding: 0 0.8em;
+  font-size: 0.84em;
+  color: #3d4450;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ps-detail p.ps-tags {
+  color: #2f6fd1;
+  -webkit-line-clamp: 1;
+}
+.ps-pdd .ps-detail p.ps-tags {
+  color: var(--soft);
+}
+.ps-detail-bar,
+.ps-buy {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.45em 0.8em;
+  border-top: 1px solid var(--line);
+  font-size: 0.82em;
+  color: var(--soft);
+}
+.ps-input {
+  flex: 1;
+  padding: 0.25em 0.6em;
+  border-radius: 1em;
+  background: #f1f2f4;
+}
+.ps-buy span {
+  flex: 1;
+  text-align: center;
+  padding: 0.45em;
+  border-radius: 1.5em;
+  background: #f2f2f2;
+  color: var(--ink);
+}
+.ps-buy b {
+  flex: 1.4;
+  text-align: center;
+  padding: 0.45em;
+  border-radius: 1.5em;
+}
+.ps-buy b.red {
+  background: var(--brand);
+  color: #fff;
+}
+.ps-buy b.yellow {
+  background: #ffe60f;
+  color: #33280a;
+}
+.ps-pricebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.45em 0.8em;
+  background: linear-gradient(100deg, #ff5b30, #e02e24);
+  color: #fff;
+  font-size: 0.9em;
+  margin-top: -0.35em;
+}
+.ps-pricebar b {
+  font-size: 1.6em;
+}
+.ps-pricebar small {
+  font-size: 0.8em;
+  opacity: 0.9;
+}
+.ps-skeleton {
+  flex: 1;
+  display: grid;
+  align-content: start;
+  gap: 0.5em;
+  padding: 0.5em 0.8em;
+  background: #fff;
+}
+.ps-skeleton i {
+  height: 0.8em;
+  border-radius: 0.3em;
+  background: linear-gradient(90deg, #eef0f3 25%, #f8f9fa 50%, #eef0f3 75%);
+  background-size: 200% 100%;
+  animation: ps-shimmer 1.2s linear infinite;
+}
+.ps-skeleton i.hero {
+  height: 8em;
+}
+.ps-skeleton i.short {
+  width: 60%;
+}
+
+/* OCR: scan line, then the recognized text */
+.ps-ocr {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.ps-ocr.scanning {
+  background: rgba(32, 160, 255, 0.06);
+}
+.ps-scanline {
+  display: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0.25em;
+  background: linear-gradient(90deg, transparent, #20a0ff, transparent);
+  box-shadow: 0 0 0.8em #20a0ff;
+  animation: ps-scan 1.4s ease-in-out infinite alternate;
+}
+.ps-ocr.scanning .ps-scanline {
+  display: block;
+}
+.ps-ocr-sheet {
+  position: absolute;
+  left: 0.5em;
+  right: 0.5em;
+  bottom: 0.5em;
+  display: grid;
+  gap: 0.25em;
+  padding: 0.55em 0.7em;
+  border-radius: 0.6em;
+  background: rgba(20, 28, 40, 0.86);
+  color: #fff;
+  font-size: 0.78em;
+  animation: ps-rise 0.35s ease-out;
+}
+.ps-ocr-sheet span {
+  padding: 0.1em 0.35em;
+  border-left: 0.2em solid #ffd400;
+  background: rgba(255, 212, 0, 0.12);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* What is happening, toasts, device state */
+.ps-op {
+  position: absolute;
+  left: 50%;
+  bottom: 0.55em;
+  transform: translateX(-50%);
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  max-width: 92%;
+  padding: 0.25em 0.75em;
+  border-radius: 1em;
+  background: rgba(18, 26, 38, 0.82);
+  color: #fff;
+  font-size: 0.78em;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ps-large .ps-op {
+  bottom: 3.3em;
+}
+.ps-op i {
+  width: 0.5em;
+  height: 0.5em;
+  border-radius: 50%;
+  background: #35d07f;
+  animation: ps-blink 1s infinite;
+  flex: none;
+}
+.ps-op.parked {
+  background: rgba(240, 140, 0, 0.88);
+}
+.ps-toast {
+  position: absolute;
+  top: 45%;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  padding: 0.35em 0.8em;
+  border-radius: 0.5em;
+  background: rgba(18, 26, 38, 0.78);
+  color: #fff;
+  font-size: 0.8em;
+  white-space: nowrap;
+  animation: ps-fade 0.4s ease-out;
+}
+.ps-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  background: rgba(240, 243, 247, 0.55);
+  backdrop-filter: blur(1.5px);
+}
+.ps-overlay > span {
+  display: grid;
+  justify-items: center;
+  gap: 0.25em;
+  padding: 0.8em 1em;
+  border-radius: 0.8em;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 0.2em 0.8em rgba(20, 30, 50, 0.16);
+  text-align: center;
+  color: #4a5668;
+  max-width: 86%;
+}
+.ps-overlay svg {
+  width: 2.2em;
+  height: 2.2em;
+}
+.ps-overlay b {
+  font-size: 1em;
+  color: var(--ink);
+}
+.ps-overlay small {
+  font-size: 0.78em;
+}
+.ps-overlay.warn svg {
+  color: #f08c00;
+}
+.ps-overlay.danger {
+  background: rgba(255, 236, 236, 0.6);
+}
+.ps-overlay.danger svg,
+.ps-overlay.danger b {
+  color: #d93036;
+}
+.ps-watermark.poc {
+  background: rgba(106, 79, 216, 0.75);
+}
+.ps-watermark {
+  position: absolute;
+  right: 0.5em;
+  top: 2.1em;
+  z-index: 3;
+  padding: 0 0.35em;
+  border-radius: 0.25em;
+  background: rgba(0, 0, 0, 0.38);
+  color: #fff;
+  font-size: 0.62em;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+}
+
+@keyframes ps-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+@keyframes ps-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes ps-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes ps-rise {
+  from {
+    opacity: 0;
+    transform: translateY(0.6em);
+  }
+}
+@keyframes ps-slide {
+  from {
+    opacity: 0;
+    transform: translateX(1.2em);
+  }
+}
+@keyframes ps-pop {
+  40% {
+    transform: scale(1.6);
+  }
+}
+@keyframes ps-pulse {
+  50% {
+    transform: scale(1.35);
+  }
+}
+@keyframes ps-scroll {
+  to {
+    transform: translateY(-2.2em);
+  }
+}
+@keyframes ps-scan {
+  from {
+    top: 8%;
+  }
+  to {
+    top: 88%;
+  }
+}
+@keyframes ps-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ps *,
+  .ps *::after {
+    animation: none !important;
+  }
+}

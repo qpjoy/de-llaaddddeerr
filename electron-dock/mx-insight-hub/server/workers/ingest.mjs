@@ -238,7 +238,10 @@ async function main() {
     // number at a time and yield after settlement instead of turning an API
     // burst into concurrent canonical/raw/outbox write transactions.
     startLoop(queue, INGEST_QUEUE, handleIngest, controller.signal,
-      config.ingestWorker.concurrency, config.ingestWorker.postBatchDelayMs),
+      config.ingestWorker.concurrency, config.ingestWorker.postBatchDelayMs, {
+        adaptiveDelayFactor: config.ingestWorker.adaptiveDelayFactor,
+        adaptiveDelayMaxMs: config.ingestWorker.adaptiveDelayMaxMs,
+      }),
     // Backfill runs at concurrency 1: it is a bulk scan, and running several in
     // parallel would compete with the latency-sensitive ingest queue for the
     // same connection pool.
@@ -266,8 +269,8 @@ async function main() {
   logger.log('[ingest] stopped')
 }
 
-export function startLoop(queue, name, handler, signal, concurrency = 4, postBatchDelayMs = 0) {
-  return startWorker(queue, { name, handler, concurrency, postBatchDelayMs, signal, logger }).done
+export function startLoop(queue, name, handler, signal, concurrency = 4, postBatchDelayMs = 0, pacing = {}) {
+  return startWorker(queue, { name, handler, concurrency, postBatchDelayMs, ...pacing, signal, logger }).done
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

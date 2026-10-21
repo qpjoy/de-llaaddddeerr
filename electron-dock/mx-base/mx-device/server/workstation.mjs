@@ -1,3 +1,4 @@
+import { demoKeyword } from "./sim-content.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { requireThat, str, uuid, register, publicDevice } from "./model.mjs";
 import { APP_NAMES, supportedApps, ensureApps, appBlockers } from "./apps.mjs";
@@ -253,7 +254,33 @@ export const WORKSTATION_SCENARIOS = [
     name: "API 洪峰与积压",
     description: "集中提交有界混合任务，观察中央队列、各设备等待与完成速度。",
   },
+  {
+    id: "showcase",
+    name: "全平台操作演示",
+    description:
+      "四个平台的全部模板各跑一遍：打开、搜索、翻页、详情、OCR、点赞、刷新、滚动、返回与回桌面；放慢节奏，便于讲解。",
+  },
 ];
+// Every built-in template once, small ones first, so all platforms and
+// operations appear within the first minute; slowed for a live audience.
+const SHOWCASE = [
+  "xhs.list",
+  "weibo.list",
+  "xianyu.refresh",
+  "pdd.refresh",
+  "xhs.detail",
+  "weibo.search",
+  "pdd.search",
+  "weibo.like",
+  "xhs.ocr",
+  "pdd.detail",
+  "pdd.search_detail_ocr",
+  "pdd.browse",
+  "xhs.search10",
+  "pdd.search5",
+  "weibo.search_batch",
+];
+export const SHOWCASE_COMMAND_DELAY_MS = 2600;
 
 // All-or-nothing even for direct callers; Store.atomic provides the durable lock.
 export function launchWorkstationDemo(s, now, mode, body) {
@@ -320,7 +347,11 @@ export function launchWorkstationDemo(s, now, mode, body) {
     429,
   );
   const jobCount = Math.min(
-    body.scenario === "burst" ? deviceCount * 6 : deviceCount * 2,
+    body.scenario === "burst"
+      ? deviceCount * 6
+      : body.scenario === "showcase"
+        ? Math.max(SHOWCASE.length, deviceCount * 2)
+        : deviceCount * 2,
     200,
   );
   requireThat(
@@ -353,6 +384,18 @@ export function launchWorkstationDemo(s, now, mode, body) {
     revision: 0,
     strategyId: strategy.id,
   });
+  if (body.scenario === "showcase") {
+    // Slower commands and short rests: each step stays on screen long
+    // enough to point at. (applyStrategy returns a copy; edit the row.)
+    const loop = work.loopPolicies.find(
+      (p) => p.mode === mode && p.rack === rack,
+    );
+    Object.assign(loop, {
+      commandDelayMs: SHOWCASE_COMMAND_DELAY_MS,
+      cooldownMinMs: 2000,
+      cooldownMaxMs: 4000,
+    });
+  }
   if (body.scenario === "cooldown") {
     for (const d of devices)
       for (const app of ensureApps(work, d)) app.cooldownMs = 3000;
@@ -362,20 +405,22 @@ export function launchWorkstationDemo(s, now, mode, body) {
     first.cooldownUntil = now + 5000;
   }
   const types =
-    body.scenario === "affinity"
-      ? ["xhs.list", "xhs.detail", "xhs.ocr"]
-      : body.scenario === "cooldown"
-        ? ["xhs.list", "weibo.list", "pdd.refresh", "xianyu.refresh"]
-        : [
-            "xhs.search10",
-            "pdd.search5",
-            "weibo.list",
-            "xhs.ocr",
-            "xianyu.refresh",
-            "pdd.search_detail_ocr",
-            "pdd.refresh",
-            "weibo.search",
-          ];
+    body.scenario === "showcase"
+      ? SHOWCASE
+      : body.scenario === "affinity"
+        ? ["xhs.list", "xhs.detail", "xhs.ocr"]
+        : body.scenario === "cooldown"
+          ? ["xhs.list", "weibo.list", "pdd.refresh", "xianyu.refresh"]
+          : [
+              "xhs.search10",
+              "pdd.search5",
+              "weibo.list",
+              "xhs.ocr",
+              "xianyu.refresh",
+              "pdd.search_detail_ocr",
+              "pdd.refresh",
+              "weibo.search",
+            ];
   const jobIds = [];
   for (let index = 0; index < jobCount; index++) {
     const code = types[index % types.length];
@@ -393,7 +438,7 @@ export function launchWorkstationDemo(s, now, mode, body) {
       rack,
       definitionId: def.id,
       priority: index % 4 === 0 ? 3 : 5,
-      keyword: `演示主题 ${index + 1}`,
+      keyword: demoKeyword(def.appId, index),
       target: `demo-item-${index + 1}`,
     });
     if (body.scenario === "affinity" && index >= deviceCount)

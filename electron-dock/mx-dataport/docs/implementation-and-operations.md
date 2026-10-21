@@ -183,9 +183,86 @@ DataPort Pod 将 runtime Secret 的 `profile.json` 与 `MX_HARBOR_GATEWAY_TOKEN`
 
 Hub 固定地址由 `MX_HARBOR_HUB_ADMIN_ORIGIN` 指定，默认集群 DNS；请求失败返回 503，下次授权请求重新连接。Auth 使用可信 profile 中的 issuer 执行 OIDC 发现。没有跨 namespace 读取 Secret 的 Pod 权限，没有匿名业务数据或假登录。登录弹窗会显示不可用信息并支持重试。
 
+## 迁移等待超时与失败诊断（2026-10-21）
+
+截图中的 `timed out waiting for the condition on jobs/mx-harbor-migrate-...` 只能确认脚本没有等到 Job 的 `Complete`。原实现只等待成功条件，即使 Job 早已失败，也会继续等到 310 秒；随后删除 Job/Pod，再抛出统一的 `DataPort migration failed`，丢失现场原因。因此约 408 秒的整次部署耗时不能证明数据库执行了 300 秒，更不能据此判定数据库损坏。
+
+后续服务器回执已经定位这次失败：`mx-harbor-migrate-cf91aed0-lq8hl` 报 `ErrImageNeverPull`，本次镜像 `mx-harbor:build-1792558134044-0fd62e33` 在 kubelet 的运行时中不可用，直到 Job `DeadlineExceeded`。迁移容器未启动，旧 DataPort Pod 仍为 Running；数据库探针返回 `databaseCheck: ok`，`001_sso` 已于 2026-10-10 应用。故本次失败发生在镜像准备阶段，而不是 SQL 执行阶段。
+
+源码与用户补充的迁盘背景相符：`mx-base/mx-move` 把 Kubernetes 切到独立 containerd，保留 Docker/旧 containerd；DataPort 原先两次裸 `ctr -n k8s.io` 会向默认实例导入并在同一实例自检。Launcher、Hub 等已适配迁盘协议，DataPort 被遗漏，迁盘预检清单也未覆盖它。迁移 Pod 已存在，问题是镜像不可见。现场的新旧 socket 差异仍应由下方只读命令核实，不能用本地替身测试代替。
+
+DataPort 自身迁移只有 `001_sso.sql`：维护独立 `mx_harbor` 库的迁移记录与 `app_auth.browser_sso_records` 会话表；已应用时校验 checksum 后跳过。Hub 的业务迁移、Launcher 身份库均不在这个 Job 内。
+
+Kubernetes 的 `Complete` 与 `Failed` 是不同终态；较新版本还可能先出现 `FailureTarget` 再等待 Pod 终止，见 [Job 终止条件](https://kubernetes.io/docs/concepts/workloads/controllers/job/#terminal-job-conditions)。诊断使用的数据库错误码对应 [PostgreSQL SQLSTATE](https://www.postgresql.org/docs/current/errcodes-appendix.html)。
+
+本次修复：
+
+- 在构建及集群资源写入前验证本机运行时。存在 `/etc/mx-k8s-runtime/active.json`（包括悬空链接）时调用 `python3 /usr/local/lib/mx-k8s-runtime/resolve.py address`，复用迁盘工具对主机、磁盘、配置、containerd 与 kubelet 实际地址的检查；异常不回退默认 socket。未迁移节点按运行 kubelet 的 CLI、有效配置及缺省时的 kubeadm 记录发现地址，拒绝未验证的地址及冲突的 `MX_K8S_CONTAINERD_ADDRESS`。
+- 导入、列表检查、CRI 检查均显式使用同一地址；构建后重新验证运行时未漂移。通过 `crictl inspecti` 比对 Docker `.Id`，最多 6 次有界检查，确认 CRI 能看到同一镜像才创建迁移 Job；名称仅出现在 `ctr` 列表中不能通过。`mx-move` 迁盘预检同时纳入 DataPort 调用者和解析模块。
+- 同时观察 `Complete` 与 `Failed`/`FailureTarget`，明确失败立即结束等待；API 请求失败单独标为 `unavailable`。等待上限继续为 310 秒，Job 的 300 秒期限保持原值。
+- PostgreSQL 连接 10 秒、锁等待 10 秒、语句 30 秒、客户端查询 35 秒上限，仅作用于迁移连接；失败连接销毁，避免网络故障后 `ROLLBACK` 继续排队等待。原迁移 SQL 和已应用 checksum 保留。
+- 清理前打印 `DataPort migration diagnostics`，包含安全的 Job/Pod 状态、Warning 原因，以及迁移 `stage/status/code`。原始日志、错误详情、Secret 和连接串不回显。采集失败显示 `Unavailable` 标记，不能当作数据库检查通过。
+- 只有 Job 明确完成才更新应用；失败后仍以前台级联删除确认迁移终止，终止未确认继续保留原部署锁。没有重跑迁移或自动修改数据库凭据。
+
+新诊断中的典型分支：
+
+| 输出 | 含义与下一步 |
+| --- | --- |
+| `scheduled: False` / `Unschedulable` | Pod 未调度；检查节点资源、taint 和调度事件，尚不能认为已执行数据库迁移 |
+| `ErrImageNeverPull` | 固定节点的容器运行时未找到镜像；检查本次导入位置和节点匹配 |
+| `FailedCreatePodSandBox` / `FailedMount` | 检查对应 Pod 的 CNI、卷或 Secret 引用事件 |
+| `connect` + `ENOTFOUND` / `EAI_AGAIN` | 数据库 DNS 解析失败 |
+| `connect` + `ECONNREFUSED` / `CONNECTION_TIMEOUT` | 检查 mx-common PostgreSQL、Service/端点和 Pod 到数据库的连通性 |
+| `connect` + `28P01` / `3D000` | 分别为数据库认证失败、目标数据库不存在；核对原配置，不重新初始化或轮换 Secret |
+| `lock` + `55P03` | 迁移 advisory lock 等待超时；核对仍在执行的迁移/数据库事务 |
+| `history` / `apply` + `55P03` / `57014` | DDL 锁或语句超时；核对数据库阻塞事务 |
+| `checksum` + `CHECKSUM_MISMATCH` | 已应用文件与当前 SQL 不一致；恢复正确迁移文件，不改写历史校验值 |
+| `unavailable` | Kubernetes API/权限/响应读取失败，不能据此判断数据库状态 |
+
+在服务器的 **`electron-dock/mx-dataport` 目录**先执行以下只读检查。旧脚本已删除失败 Job 时 `logs` 返回 `NotFound` 属于预期，Warning 事件也可能已经过期；无需为获取旧日志重复部署。
+
+```bash
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-dataport || exit
+dataport_context="$(node -p 'JSON.parse(require("node:fs").readFileSync("secrets/operations.json","utf8")).context')" || exit
+kubectl --context "$dataport_context" --request-timeout=15s -n mx-harbor get pods,jobs -o wide
+kubectl --context "$dataport_context" --request-timeout=15s -n mx-harbor logs job/mx-harbor-migrate-cf91aed0 --all-containers=true --tail=100
+kubectl --context "$dataport_context" --request-timeout=15s -n mx-harbor get events --field-selector type=Warning --sort-by=.lastTimestamp
+kubectl --context "$dataport_context" --request-timeout=15s -n mx-common get pods,services -o wide
+```
+
+上述路径来自本次服务器报错，其他安装位置应换成实际目录。`ENOENT secrets/operations.json` 表示当前目录没有该文件，与 Pod 的 `ErrImageNeverPull` 是两个问题；先检查执行目录，不要为此重建数据库或接入凭据。旧 Job 被部署脚本清理后 `NotFound` 也是预期。
+
+以下命令不依赖项目当前目录，在已迁盘的 Internal 节点以原部署用户执行，只读核对旧镜像的 Docker ID、默认 containerd 列表及经过验证的 Kubernetes CRI。解析器失败时停止，不手工伪造标记或指定旧 socket 绕过检查。旧构建镜像若已被清理，检查可能返回不存在。
+
+```bash
+(
+  set -euo pipefail
+  dataport_image='mx-harbor:build-1792558134044-0fd62e33'
+  dataport_runtime="$(python3 /usr/local/lib/mx-k8s-runtime/resolve.py address)"
+  printf 'Kubernetes containerd: %s\n' "$dataport_runtime"
+  docker image inspect "$dataport_image" --format '{{.Id}}'
+  ctr -n k8s.io images ls -q | grep -F "$dataport_image" || true
+  ctr --address "$dataport_runtime" -n k8s.io images ls -q | grep -F "$dataport_image" || true
+  crictl --runtime-endpoint="unix://$dataport_runtime" --image-endpoint="unix://$dataport_runtime" --timeout=10s inspecti "$dataport_image" |
+    node -e 'let s=""; process.stdin.on("data",c=>s+=c); process.stdin.on("end",()=>{try {console.log(JSON.stringify({criImageId:JSON.parse(s).status?.id ?? null}));} catch {console.error("CRI response unavailable"); process.exitCode=1;}})'
+)
+```
+
+后续正常发布沿用服务器原参数，仅发布 DataPort 即可让宿主脚本和镜像内迁移 runner 同时生效。在 **`electron-dock` 目录**的统一命令示例：
+
+```bash
+PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-dataport
+```
+
+无需重新执行迁盘或发布 Launcher/Auth、Hub、Pay；本次不修改或重启 kubelet/containerd，不改变 MX-H2I 登录、网络授权及路由。发布后应看到 `built image verified in Kubernetes CRI`、迁移完成及 rollout/readiness 成功；新版本实际部署结果仍待服务器回执，本地替身测试不能替代生产验收。
+
+本地验证：部署/锁恢复/接入/迁移回归 65 项、登录会话 20 项和迁移 Pod 隔离 1 项通过；真实 PostgreSQL 会话保留用例因未配置测试库跳过。新增异步数据库断连测试确认 stage/code 日志仍可输出，原始错误不会绕过日志保护。脚本语法与 diff 检查通过。完整前端构建因本机缺少原有 `xlsx`、`exceljs` 依赖及其派生类型错误未通过；本次未修改前端、依赖或 lockfile。未执行生产部署或数据库写入。
+
+收到 `ErrImageNeverPull` 回执后，镜像适配补丁的部署/运行时回归 37 项及 `mx-move` 切换主机回归 33 项通过。覆盖 managed 标记损坏/解析器缺失不回退、旧节点端点发现优先级、构建期间运行时漂移、`ctr` 有名称而 CRI 不可见或镜像 ID 不同均阻止发布，以及迁盘预检拒绝缺失或未接入的 DataPort 模块。仍为命令替身验证，未连接生产运行时；前端和数据库 SQL 未因本补丁改动。
+
 ## K8s 管理合同
 
-运行位置为固定 Internal 节点，需有 Node.js、Docker/Buildx、containerd `ctr`、kubectl 及相应本机权限。配置的 Kubernetes 节点 hostname 必须匹配本机；拒绝 cluster UID 漂移、不可调度节点和异常 taint，不猜测远程主机或修改集群 taint。
+运行位置为固定 Internal 节点，需有 Node.js、Docker/Buildx、containerd `ctr`、`crictl`（CRI v1）、kubectl 及相应本机权限。迁盘节点还需已有的 Python 3 运行时校验器；脚本不会安装或改写主机运行时。配置的 Kubernetes 节点 hostname 必须匹配本机；拒绝 cluster UID 漂移、不可调度节点和异常 taint，不猜测远程主机或修改集群 taint。
 
 管理脚本不依赖宿主机的 `node_modules`，直接复用相邻 `mx-common/src/identity/profile.mjs` 的标准库校验；应用运行时继续通过已安装的 `@qpjoy/mx-common` 包加载 SSO。Docker 构建负责 `npm ci`，不需要人工先安装宿主依赖。冷启动回归从只复制源码的临时目录执行真实 `manage.sh`，避免已有本机依赖掩盖首次部署故障。
 

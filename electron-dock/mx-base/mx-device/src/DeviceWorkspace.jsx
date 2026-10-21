@@ -1,4 +1,5 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { workstationView } from "./workstation-view.mjs";
 import {
   ArrowRight,
   Code,
@@ -236,6 +237,14 @@ export default function DeviceWorkspace({
   onSubmit,
 }) {
   const [tab, setTab] = useState("execution");
+  // The same live row the wall uses: command in flight, status, cooldowns.
+  const row = useMemo(
+    () =>
+      device.mode === "sim"
+        ? workstationView(state).devices.find((r) => r.device.id === device.id)
+        : null,
+    [state, device.id, device.mode],
+  );
   const availability = state.scheduling?.devices.find(
     (d) => d.deviceId === device.id,
   );
@@ -271,6 +280,15 @@ export default function DeviceWorkspace({
         history={history}
         availability={availability}
         now={now}
+        live={
+          row && {
+            ...row,
+            cooldownUntil: Math.max(
+              device.cooldownUntil || 0,
+              ...row.coolingApps.map((a) => a.cooldownUntil),
+            ),
+          }
+        }
         lease={{
           attempt: state.attempts.find(
             (a) =>
@@ -294,8 +312,12 @@ export default function DeviceWorkspace({
           </span>
           <strong>{device.name}</strong>
           <small>
-            {device.mode === "sim" ? "模拟执行器" : device.adapter} ·
-            一个物理执行槽
+            {device.driver === "poc"
+              ? `PoC 驱动（${device.pocLevel || "L0"}）· 宿主机 Agent${device.slot ? ` · 插槽 ${device.slot}` : ""}`
+              : device.mode === "sim"
+                ? "模拟执行器"
+                : device.adapter}{" "}
+            · 一个物理执行槽
           </small>
         </div>
         <div className="device-workspace-tabs" aria-label="设备工作台视图">

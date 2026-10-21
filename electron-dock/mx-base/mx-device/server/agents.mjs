@@ -9,6 +9,12 @@
 // seq, and its receipt is checked before the next one is issued. A
 // partitioned Agent therefore finishes at most the command in hand and then
 // waits at a safe point; the center always knows whether anything was issued.
+//
+// Real realm (V2-6 P1): an Agent is approved for one host and must drive its
+// phones with the PoC driver. An adopted phone starts paused; it is enabled
+// only through control "enable" with fresh idle evidence (a read-only probe
+// the Agent runs on request) and the exclusive-owner acknowledgement. A phone
+// is either Agent-hosted or a legacy PoC registration, never both.
 import {
   createHash,
   randomBytes,
@@ -47,6 +53,11 @@ export const AGENT_SIGNALS = [
   "app-crash",
 ];
 const SERIAL = /^[A-Za-z0-9._:-]{1,80}$/;
+// What a real-realm Agent may drive (V2-6 P1): the PoC driver, XHS only.
+const REAL_DRIVER = "poc";
+const POC_CODES = new Set(["xhs.search", "xhs.search.next", "xhs.note.detail"]);
+// A probe request older than this is not run any more (ask again).
+const PROBE_FRESH_MS = 30000;
 const hash = (token) => createHash("sha256").update(token).digest("hex");
 const event = (s, mode, now, type, message, more = {}) =>
   s.events.push({ id: randomUUID(), mode, at: now, type, message, ...more });
@@ -89,6 +100,14 @@ export function agentView(s, now, agent) {
     clockOffsetMs: agent.clockOffsetMs ?? null,
     buffered: agent.buffered || 0,
     pending: agent.pending || [],
+    // Reported serials this realm already registers as another device: a
+    // phone cannot be adopted twice (real realm: legacy PoC or another Agent).
+    conflicts:
+      agent.mode === "real"
+        ? (agent.pending || []).filter((serial) =>
+            s.devices.some((d) => d.mode === "real" && d.serial === serial),
+          )
+        : [],
     devices: devices.map((d) => ({
       id: d.id,
       name: d.name,
@@ -96,6 +115,7 @@ export function agentView(s, now, agent) {
       rack: d.rack,
       state: d.state,
       connected: d.connected,
+      enabled: d.enabled,
     })),
     leases: s.attempts.filter(
       (a) => a.agentId === agent.id && a.status === "running",
@@ -106,11 +126,17 @@ export function agentView(s, now, agent) {
 // ---- Administration (session / admin token) ----
 
 export function createAgent(s, now, mode, body) {
-  requireThat(
-    mode === "sim",
-    "宿主机 Agent 目前只接入模拟设备；真实设备在 V2-6 接入",
-    403,
-  );
+  const real = mode === "real";
+  if (real) {
+    // The host this Agent runs on is named and approved explicitly; its
+    // phones still start paused and need their own confirmation.
+    requireThat(
+      body?.approved === true,
+      "必须批准此宿主机 Agent 接入真实设备",
+      400,
+    );
+    str(body.host, "宿主机", 80);
+  }
   s.agents ||= [];
   requireThat(
     s.agents.filter((a) => a.mode === mode).length < 50,
@@ -135,8 +161,15 @@ export function createAgent(s, now, mode, body) {
     serials: [],
     pending: [],
   };
+  if (real) agent.approvedAt = now;
   s.agents.push(agent);
-  event(s, mode, now, "agent", `登记宿主机 Agent「${agent.name}」`);
+  event(
+    s,
+    mode,
+    now,
+    "agent",
+    `登记宿主机 Agent「${agent.name}」${real ? `（真实设备，${agent.host}；只接受 PoC 驱动，登记的手机默认暂停）` : ""}`,
+  );
   // The token is shown once; only its hash is stored.
   return { agent: agentView(s, now, agent), token };
 }
@@ -170,7 +203,9 @@ export function changeAgent(s, now, mode, id, body) {
   );
   return { agent: agentView(s, now, agent), token };
 }
-/** Registers a serial the Agent reported as a new simulated device it hosts. */
+/** Registers a serial the Agent reported as a new device it hosts. A real
+ * phone is registered paused (register), with the account it uses, and
+ * takes work only after control "enable" (fresh probe + exclusive). */
 export function adoptDevice(s, now, mode, id, body) {
   const agent = findAgent(s, mode, id);
   const serial = str(body?.serial, "设备序列号", 80);
@@ -180,20 +215,80 @@ export function adoptDevice(s, now, mode, id, body) {
     "该序列号不在 Agent 的待登记清单中",
     409,
   );
+  // A PoC-driven phone can only do what the PoC can (XHS, three commands):
+  // its Apps and commands come from the driver's report, not the form.
+  const poc = agent.driver === "poc";
+  const reported = agent.reported?.[serial];
+  if (mode === "real") {
+    requireThat(agent.status === "active", "Agent 已停用", 409);
+    requireThat(
+      agent.driver === REAL_DRIVER,
+      "真实设备目前只接入 PoC 驱动（L0）；请先让 Agent 以 driver: poc 连接",
+      409,
+    );
+    const apps = (reported?.apps || []).filter((x) => x === "xhs");
+    const commands = (reported?.commands || []).filter((x) => POC_CODES.has(x));
+    requireThat(
+      apps.length && commands.length,
+      "Agent 没有为这台手机上报可用的小红书 PoC 能力",
+      409,
+    );
+    const d = register(
+      s,
+      now,
+      mode,
+      {
+        name: body.name || serial,
+        rack: body.rack,
+        host: body.host || agent.host,
+        accountKey: body.accountKey,
+        approved: body.approved,
+      },
+      { agentId: agent.id, serial, apps, commands },
+    );
+    Object.assign(d, { driver: "poc", pocLevel: reported?.level || "L0" });
+    return adopted(s, now, mode, agent, d, body, serial, true);
+  }
   const d = register(s, now, mode, {
     name: body.name || serial,
     rack: body.rack,
     host: body.host || agent.host,
-    simApps: body.simApps,
+    simApps: poc ? reported?.apps : body.simApps,
+    ...(poc && reported?.commands?.length
+      ? { simCommandCodes: reported.commands }
+      : {}),
   });
   Object.assign(d, { agentId: agent.id, serial, leaseToken: 0 });
+  if (poc)
+    Object.assign(d, { driver: "poc", pocLevel: reported?.level || "L0" });
+  return adopted(s, now, mode, agent, d, body, serial, poc);
+}
+function adopted(s, now, mode, agent, d, body, serial, poc) {
+  // The rack slot this phone is plugged into (unique per rack).
+  if (body.slot !== undefined && body.slot !== null && body.slot !== "") {
+    const slot = Number(body.slot);
+    requireThat(
+      Number.isInteger(slot) && slot >= 1 && slot <= 200,
+      "插槽号为 1–200",
+      400,
+    );
+    requireThat(
+      !s.devices.some(
+        (x) =>
+          x !== d && x.mode === mode && x.rack === d.rack && x.slot === slot,
+      ),
+      `${d.rack} 的插槽 ${slot} 已有设备`,
+      409,
+    );
+    d.slot = slot;
+  }
   agent.pending = agent.pending.filter((x) => x !== serial);
   event(
     s,
     mode,
     now,
     "agent",
-    `${d.name} 由 Agent「${agent.name}」托管（${serial}）`,
+    `${d.name}${d.slot ? `（插槽 ${d.slot}）` : ""} 由 Agent「${agent.name}」托管（${serial}${poc ? "，PoC 驱动" : ""}）${mode === "real" ? "；默认暂停，启用前须检查连接并确认独占" : ""}`,
     { deviceId: d.id },
   );
   return d;
@@ -243,17 +338,39 @@ export function agentHello(s, now, token, body) {
     400,
   );
   const leases = Array.isArray(body.leases) ? body.leases.slice(0, 200) : [];
+  const driver = str(body.driver || "sim", "驱动", 20);
+  // A real-realm Agent drives phones; only the PoC driver is accepted there.
+  requireThat(
+    agent.mode === "sim" || driver === REAL_DRIVER,
+    "真实设备的 Agent 目前只接受 PoC 驱动（driver: poc）",
+    403,
+  );
   const restarted = agent.instanceId !== instanceId;
   Object.assign(agent, {
     instanceId,
     protocol: Number(body.protocol) || AGENT_PROTOCOL,
     version: str(body.version || "unknown", "版本", 40),
-    driver: str(body.driver || "sim", "驱动", 20),
+    driver,
     capabilities: (Array.isArray(body.capabilities) ? body.capabilities : [])
       .filter((x) => typeof x === "string")
       .slice(0, 50),
     lastSeenAt: now,
     serials: devices.map((d) => d.serial),
+    // What the driver says each phone can do (bounded); used at adoption.
+    reported: Object.fromEntries(
+      devices.map((d) => [
+        d.serial,
+        {
+          apps: (Array.isArray(d.apps) ? d.apps : [])
+            .filter((x) => typeof x === "string")
+            .slice(0, 10),
+          commands: (Array.isArray(d.commands) ? d.commands : [])
+            .filter((x) => typeof x === "string" && x.length <= 80)
+            .slice(0, 100),
+          level: typeof d.level === "string" ? d.level.slice(0, 8) : null,
+        },
+      ]),
+    ),
   });
   const bound = s.devices.filter((d) => d.agentId === agent.id);
   agent.pending = agent.serials.filter(
@@ -292,6 +409,9 @@ export function agentHello(s, now, token, body) {
   );
   return {
     agentId: agent.id,
+    // The realm this Agent works for: a simulation Agent must never drive
+    // a real phone (its driver checks what it is connected to).
+    mode: agent.mode,
     protocol: AGENT_PROTOCOL,
     heartbeatMs: AGENT_HEARTBEAT_MS,
     leaseMs: AGENT_LEASE_MS,
@@ -344,11 +464,29 @@ export function agentHeartbeat(s, now, token, body) {
     });
   return { leases, now };
 }
-/** poll: grants not accepted yet and stop requests, read-only. */
+/** poll: grants not accepted yet, stop requests and probe requests. Only a
+ * probe request is consumed here (handed out once, like the host worker's
+ * claim of a legacy probe: a lost one needs another click). */
 export function agentInbox(s, now, token) {
   const agent = authenticate(s, token);
   const grants = [],
     controls = [];
+  for (const d of s.devices)
+    if (
+      d.agentId === agent.id &&
+      d.mode === "real" &&
+      d.probeRequestedAt > (d.probeTakenAt || 0) &&
+      now - d.probeRequestedAt <= PROBE_FRESH_MS
+    ) {
+      d.probeTakenAt = d.probeRequestedAt;
+      bump(d);
+      controls.push({
+        type: "device.probe",
+        deviceId: d.id,
+        serial: d.serial,
+        requestedAt: d.probeRequestedAt,
+      });
+    }
   for (const a of s.attempts) {
     if (a.agentId !== agent.id || a.status !== "running") continue;
     const d = s.devices.find((d) => d.id === a.deviceId);
@@ -363,6 +501,65 @@ export function agentInbox(s, now, token) {
       });
   }
   return { grants, controls, now };
+}
+/** device.probed: the read-only PoC state the Agent read for a probe
+ * request; idle evidence for control "enable" / "recover". In the real realm a
+ * PoC simulator is never evidence (realms do not mix). */
+export function agentProbed(s, now, token, m) {
+  const agent = authenticate(s, token);
+  const d = s.devices.find(
+    (d) => d.id === m?.deviceId && d.agentId === agent.id,
+  );
+  requireThat(d, "设备不属于此 Agent", 404);
+  requireThat(
+    Number.isSafeInteger(m.requestedAt) &&
+      m.requestedAt === d.probeTakenAt &&
+      d.probe?.requestedAt !== m.requestedAt &&
+      now - m.requestedAt <= PROBE_FRESH_MS,
+    "检查请求已过期或已有结果，请重新检查",
+    409,
+  );
+  const o =
+    m.observation && typeof m.observation === "object" ? m.observation : {};
+  const reachable = o.reachable === true,
+    simulator = o.simulator === true;
+  const crossed = reachable && (d.mode === "real") === simulator;
+  const text = (v, max) => (typeof v === "string" ? v.slice(0, max) : null);
+  const p = o.poc && typeof o.poc === "object" ? o.poc : null;
+  d.probe = {
+    reachable,
+    idle: reachable && o.idle === true && !crossed,
+    simulator,
+    error: crossed
+      ? d.mode === "real"
+        ? "真实设备连接的是 PoC 模拟器，不能作为空闲证据"
+        : "模拟设备连接的不是 PoC 模拟器"
+      : reachable
+        ? null
+        : "PoC 不可达",
+    poc: p && {
+      type: text(p.type, 20),
+      keyword: text(p.keyword, 200),
+      page: Number.isSafeInteger(p.page) ? p.page : null,
+      count: Number.isSafeInteger(p.count) ? p.count : null,
+      isBusy: typeof p.isBusy === "boolean" ? p.isBusy : null,
+      status: text(p.status, 120),
+    },
+    source: "agent",
+    requestedAt: m.requestedAt,
+    at: now,
+  };
+  if (!d.probe.idle) d.enabled = false;
+  bump(d);
+  event(
+    s,
+    d.mode,
+    now,
+    "probe",
+    `${d.name}：Agent 读取 PoC 状态 / ${d.probe.error || (d.probe.idle ? "报告空闲" : "不可判定为可调度")}`,
+    { deviceId: d.id },
+  );
+  return { ok: true, idle: d.probe.idle };
 }
 function grantMessage(s, now, a, d) {
   const j = s.jobs.find((j) => j.id === a.jobId),

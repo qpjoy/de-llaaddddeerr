@@ -467,7 +467,12 @@ test("catalog reads never dispatch queued work or mutate commands, templates, de
     ]);
     assert(results.every((result) => result.status === 200));
     assert.deepEqual(results[3].value, { commands: [], history: [] });
-    assert.deepEqual(results[4].value, { definitions: [], commands: [] });
+    // The real realm lists only the two seeded PoC templates (016).
+    assert.deepEqual(
+      results[4].value.definitions.map((d) => d.id),
+      ["real:xhs.poc.search3:1", "real:xhs.poc.detail:1"],
+    );
+    assert.deepEqual(results[4].value.commands, []);
     assert.deepEqual(store.state, before);
   }
   assert.equal(store.state.jobs[0].status, "queued");

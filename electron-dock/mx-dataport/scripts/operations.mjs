@@ -6,6 +6,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { workload } from "../deploy/k8s/render.mjs";
 import { readConfig } from "../apps/server/config.mjs";
 import { commandFailure } from "./enroll.mjs";
+import { waitForMigration, migrationDiagnostics } from "./migration-job.mjs";
+import { resolveContainerdAddress, verifyCriImage } from "./k8s-runtime.mjs";
 import {
   acquireDeployLock,
   harborProcesses,
@@ -33,13 +35,14 @@ if (requestedAction !== action)
 const run = (
   cmd,
   args,
-  { input, env = process.env, inherit = false, optional = false } = {},
+  { input, env = process.env, inherit = false, optional = false, timeout } = {},
 ) => {
   const result = spawnSync(cmd, args, {
     input,
     env,
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
+    timeout,
     stdio: inherit ? "inherit" : ["pipe", "pipe", "pipe"],
   });
   if ((result.error || result.status !== 0) && !optional) {
@@ -79,7 +82,9 @@ if (action === "plan") {
         appPort: 18220,
         operations: [
           "verify retained identity and credentials",
+          "verify local Kubernetes container runtime",
           "build immutable image",
+          "import and verify image identity through Kubernetes CRI",
           "run isolated migration",
           "update and restart DataPort once",
           "wait for rollout and readiness",
@@ -156,6 +161,9 @@ try {
   console.error(`DataPort: ${error.message}`);
   process.exit(1);
 }
+// Resolve the live kubelet runtime before changing cluster resources. A host
+// may also have Docker's containerd or a retired Kubernetes containerd.
+const runtimeAddress = resolveContainerdAddress({ run });
 const ns = read(["get", "namespace", namespace, "--ignore-not-found"]);
 if (!ns) {
   kube(["create", "namespace", namespace]);
@@ -416,12 +424,20 @@ try {
     );
   }
   run("docker", args, { env, inherit: true });
+  const imageId = run("docker", ["image", "inspect", image, "--format", "{{.Id}}"])
+    .stdout.trim();
+  if (!/^sha256:[a-f0-9]{64}$/.test(imageId))
+    throw Error("Built image identity could not be verified; application not updated");
+  if (resolveContainerdAddress({ run }) !== runtimeAddress)
+    throw Error("Kubernetes container runtime changed during build; application not updated");
   const archive = join(temp, "image.tar");
   run("docker", ["image", "save", "-o", archive, image]);
-  run("ctr", ["-n", "k8s.io", "images", "import", archive], {
+  run("ctr", ["--address", runtimeAddress, "-n", "k8s.io", "images", "import", archive], {
     inherit: true,
   });
   const images = run("ctr", [
+    "--address",
+    runtimeAddress,
     "-n",
     "k8s.io",
     "images",
@@ -430,22 +446,19 @@ try {
   ]).stdout.split("\n");
   if (!images.includes(`docker.io/library/${image}`))
     throw Error("Image import could not be verified");
+  // ctr's image metadata alone does not prove the kubelet's CRI plugin can
+  // resolve this tag. Compare its config digest with the exact Docker build.
+  await verifyCriImage({ run, address: runtimeAddress, image, expected: imageId });
+  console.log("DataPort: built image verified in Kubernetes CRI");
   job = `mx-harbor-migrate-${randomUUID().slice(0, 8)}`;
   apply(workload({ namespace, node: nodeHostname, image, job }));
-  const wait = kube(
-    ["wait", "--for=condition=complete", `job/${job}`, "--timeout=310s"],
-    { optional: true, inherit: true },
-  );
-  if (wait.status !== 0) {
-    kube([
-      "delete",
-      `job/${job}`,
-      "--cascade=foreground",
-      "--wait=true",
-      "--timeout=60s",
-    ]);
-    job = "";
-    throw Error("DataPort migration failed; application not updated");
+  console.log(`DataPort: waiting for migration job/${job}`);
+  const migration = await waitForMigration(kube, job);
+  if (migration.outcome !== "complete") {
+    console.error("DataPort migration diagnostics: " + JSON.stringify(
+      migrationDiagnostics(kube, job, migration.snapshot),
+    ));
+    throw Error(`DataPort migration ${migration.outcome}: ${migration.detail}; job/${job}; application not updated`);
   }
   job = "";
   // The unique immutable image changes the Pod template, replacing the old Pod exactly once.
@@ -476,8 +489,9 @@ try {
         "--cascade=foreground",
         "--wait=true",
         "--timeout=60s",
+        "--request-timeout=15s",
       ],
-      { optional: true },
+      { optional: true, timeout: 65000 },
     );
     if (stopped.status !== 0) {
       release = false;

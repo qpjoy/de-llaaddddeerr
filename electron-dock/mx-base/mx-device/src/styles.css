@@ -579,6 +579,14 @@ tr:last-child td {
     0 0 0 3px #adb7c3;
   overflow: hidden;
 }
+.phone.phone-sim {
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.phone.phone-sim .notch {
+  z-index: 6;
+  height: 14px;
+}
 .notch {
   width: 84px;
   height: 19px;

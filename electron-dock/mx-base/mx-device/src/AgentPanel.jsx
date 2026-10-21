@@ -61,6 +61,7 @@ export default function AgentPanel({ state, busy, run }) {
                     <div className="muted">
                       {a.host}
                       {a.version ? ` · ${a.version}` : ""}
+                      {a.driver === "poc" ? " · PoC 驱动（L0）" : ""}
                     </div>
                   </td>
                   <td>
@@ -236,6 +237,7 @@ export default function AgentPanel({ state, busy, run }) {
                     serial: f.get("serial"),
                     name: f.get("name") || f.get("serial"),
                     rack: f.get("rack"),
+                    slot: f.get("slot") || undefined,
                     simApps: SIM_APPS.filter(
                       (id) => f.get(`app-${id}`) === "on",
                     ),
@@ -270,15 +272,27 @@ export default function AgentPanel({ state, busy, run }) {
                 defaultValue="Agent 机架"
               />
             </label>
-            <fieldset className="agent-apps">
-              <legend>模拟 App</legend>
-              {SIM_APPS.map((id) => (
-                <label className="check" key={id}>
-                  <input type="checkbox" name={`app-${id}`} defaultChecked />
-                  {appName(id)}
-                </label>
-              ))}
-            </fieldset>
+            <label>
+              插槽号（可选，1–200，同一机架内唯一）
+              <input name="slot" type="number" min="1" max="200" />
+            </label>
+            {modal.agent.driver === "poc" ? (
+              <p className="notice">
+                这台 Agent 用 PoC 驱动：手机只能执行 PoC
+                已有的小红书搜索、翻页和详情（L0），App
+                与指令按驱动上报登记，不能在这里勾选。
+              </p>
+            ) : (
+              <fieldset className="agent-apps">
+                <legend>模拟 App</legend>
+                {SIM_APPS.map((id) => (
+                  <label className="check" key={id}>
+                    <input type="checkbox" name={`app-${id}`} defaultChecked />
+                    {appName(id)}
+                  </label>
+                ))}
+              </fieldset>
+            )}
             <button className="primary" disabled={busy}>
               <HardDrives size={18} />
               登记设备

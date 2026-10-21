@@ -1,7 +1,7 @@
 import { hostname } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { ElasticsearchError, ElasticsearchUnavailableError } from '@qpjoy/mx-common/elasticsearch'
-import { buildContentDocument } from './document.mjs'
+import { buildContentDocument, contentSegmentTexts } from './document.mjs'
 import { describeBulkFailure } from './bulk-errors.mjs'
 import {
   purgeStaleCurrentStateCopies,
@@ -20,6 +20,16 @@ import { isRetryableSegmenterIntegrityError } from './reindex-integrity.mjs'
 const WORKER_ID = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`
 const MAX_ATTEMPTS = 5
 const DEFAULT_BATCH_SIZE = 50
+// A backlog doubles the claim up to this many batches' worth, so the fixed
+// per-batch cost (claim, record load, stale-copy purge, bulk, acknowledgement,
+// pause) is paid once per few hundred events instead of once per 50. A
+// short queue returns to the base size at once.
+const MAX_BATCH_MULTIPLIER = 8
+// Short fields (author names, usernames, chat titles) repeat across batches.
+// Remember their verified tokens for a while; long bodies rarely repeat.
+const SEGMENT_CACHE_ENTRIES = 20_000
+const SEGMENT_CACHE_MAX_TEXT_LENGTH = 128
+const SEGMENT_CACHE_TTL_MS = 30 * 60_000
 const DEFAULT_LEASE_SECONDS = 300
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000
 
@@ -30,6 +40,8 @@ export class SearchProjector {
     segmenter,
     indexSet,
     batchSize = DEFAULT_BATCH_SIZE,
+    maxBatchSize = batchSize * MAX_BATCH_MULTIPLIER,
+    segmentConcurrency = 2,
     leaseSeconds = DEFAULT_LEASE_SECONDS,
     heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS,
     setTimeoutFn = setTimeout,
@@ -41,6 +53,10 @@ export class SearchProjector {
     this.segmenter = segmenter
     this.indexSet = indexSet
     this.batchSize = batchSize
+    this.maxBatchSize = Math.max(batchSize, maxBatchSize)
+    this.claimSize = batchSize
+    this.segmentConcurrency = segmentConcurrency
+    this.segmentCache = new Map()
     this.leaseSeconds = leaseSeconds
     this.heartbeatIntervalMs = heartbeatIntervalMs
     this.setTimeoutFn = setTimeoutFn
@@ -88,9 +104,57 @@ export class SearchProjector {
            LIMIT $1
         )
         RETURNING e.id, e.aggregate_id, e.event_type, e.projection_revision, e.attempts`,
-      [this.batchSize, this.leaseSeconds, this.workerId],
+      [this.claimSize, this.leaseSeconds, this.workerId],
     )
     return rows
+  }
+
+  /**
+   * Segment every text of this batch up front, as a few batch requests.
+   *
+   * Documents are still built one field at a time through the strict
+   * segmenter, but almost every field is then answered from this memo instead
+   * of costing its own tokenizer round trip. Whatever the prefetch could not
+   * verify falls through to the strict segmenter and its retry budget, so the
+   * outage and quarantine rules below are unchanged.
+   */
+  async #batchSegmenter(records) {
+    const strict = this.segmenter
+    if (typeof strict?.prefetch !== 'function') return strict
+    const now = Date.now()
+    const memo = new Map()
+    const missing = new Set()
+    for (const record of records.values()) {
+      if (record.deleted_at != null) continue
+      for (const text of contentSegmentTexts(record)) {
+        if (!text || memo.has(text) || missing.has(text)) continue
+        const cached = this.segmentCache.get(text)
+        if (cached && cached.expiresAt > now) memo.set(text, cached.result)
+        else missing.add(text)
+      }
+    }
+    if (missing.size > 0) {
+      const fetched = await strict.prefetch([...missing], { concurrency: this.segmentConcurrency })
+      for (const [text, result] of fetched) {
+        memo.set(text, result)
+        if (text.length > SEGMENT_CACHE_MAX_TEXT_LENGTH) continue
+        this.segmentCache.delete(text)
+        if (this.segmentCache.size >= SEGMENT_CACHE_ENTRIES) {
+          this.segmentCache.delete(this.segmentCache.keys().next().value)
+        }
+        this.segmentCache.set(text, { result, expiresAt: now + SEGMENT_CACHE_TTL_MS })
+      }
+    }
+    return {
+      expectedBackend: strict.expectedBackend,
+      async segmentWithMeta(text, options) {
+        const hit = memo.get(String(text ?? ''))
+        return hit ? { ...hit, tokens: [...hit.tokens] } : strict.segmentWithMeta(text, options)
+      },
+      async segment(text, options) {
+        return (await this.segmentWithMeta(text, options)).tokens
+      },
+    }
   }
 
   // Load the current canonical state for the claimed aggregates. Deliberately
@@ -226,6 +290,9 @@ export class SearchProjector {
    */
   async projectBatch() {
     const events = await this.#claim()
+    this.claimSize = events.length >= this.claimSize
+      ? Math.min(this.maxBatchSize, this.claimSize * 2)
+      : this.batchSize
     if (events.length === 0) return { claimed: 0, delivered: 0, failed: 0 }
     const leaseHeartbeat = this.#monitorClaimLease(events.map((event) => event.id))
 
@@ -249,6 +316,7 @@ export class SearchProjector {
     const failures = new Map()
     const rateLimitedEventIds = new Set()
     const projections = []
+    const segmenter = await this.#batchSegmenter(records)
     let retryableTokenizerError = null
     const retryableTokenizerEventIds = []
 
@@ -273,7 +341,7 @@ export class SearchProjector {
       }
       try {
         if (!projection.deleted) {
-          projection.document = await buildContentDocument(record, { segmenter: this.segmenter })
+          projection.document = await buildContentDocument(record, { segmenter })
         }
         projections.push(projection)
       } catch (error) {

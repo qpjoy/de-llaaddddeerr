@@ -172,6 +172,8 @@ button.ws-metric.selected {
   overflow: hidden;
 }
 .ws-view-toggle button {
+  white-space: nowrap;
+  flex: 0 0 auto;
   min-height: 36px;
   padding: 6px 16px;
   border: 0;
@@ -247,9 +249,13 @@ button.ws-metric.selected {
 }
 .ws-rack-title {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 12px;
+  gap: 2px 12px;
   min-width: 0;
+}
+.ws-rack-title h2 {
+  white-space: nowrap;
 }
 .ws-rack-title span {
   color: var(--ws-soft);
@@ -411,6 +417,27 @@ button.ws-metric.selected {
   padding: 16px 9px 8px;
   display: flex;
   flex-direction: column;
+}
+.ws-phone.ws-phone-sim {
+  height: 172px;
+  padding: 0;
+  border-radius: 16px;
+}
+.ws-phone-sim .ws-notch {
+  z-index: 6;
+  height: 7px;
+  width: 30%;
+}
+.ws-agent-tag.poc {
+  color: #fff;
+  background: #6a4fd8;
+}
+.ws-phone-sim .ws-agent-tag {
+  z-index: 6;
+  top: 14px;
+  right: auto;
+  left: 4px;
+  font-size: 8.5px;
 }
 .ws-notch {
   position: absolute;
@@ -975,4 +1002,21 @@ button.ws-metric.selected {
   height: 44px;
   font-size: 11px;
   margin-bottom: 2px;
+}
+.ws-rack > .ws-section-head {
+  flex-wrap: wrap;
+}
+@media (max-width: 640px) {
+  /* Five views: the toggle scrolls sideways instead of squeezing labels. */
+  .ws-view-toggle {
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .ws-view-toggle button {
+    padding: 6px 12px;
+  }
+  .ws-view-toggle button svg {
+    display: none;
+  }
 }

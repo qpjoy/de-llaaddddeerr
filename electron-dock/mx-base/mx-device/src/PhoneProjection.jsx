@@ -1,11 +1,54 @@
 import { DeviceMobile, House, CheckCircle } from "@phosphor-icons/react";
 import { appName, time } from "./data.js";
+import PhoneScreen from "./phone/PhoneScreen.jsx";
+import { screenModel } from "./phone/screen-model.mjs";
 
+/** live: the device's workbench row (command in flight, job, attempt,
+ * status, cooldownUntil) and server time; history: a recorded projection. */
 export default function PhoneProjection({
   device,
   projection: p = device?.projection,
+  live = null,
+  history = false,
+  now = Date.now(),
 }) {
   const simulated = device?.mode === "sim";
+  if (simulated && device) {
+    const status = history
+      ? "history"
+      : (live?.status ??
+        (device.state === "quarantined"
+          ? "quarantined"
+          : device.state === "running"
+            ? "running"
+            : "idle"));
+    return (
+      <>
+        <div className="phone phone-sim ps-frame" aria-label="模拟手机投影">
+          <div className="notch" />
+          <PhoneScreen
+            tile={false}
+            model={screenModel({
+              device,
+              projection: p,
+              command: history ? null : live?.command,
+              attempt: history ? null : live?.attempt,
+              job: history ? null : live?.job,
+              status,
+              now: history ? (p?.observedAt ?? now) : now,
+              cooldownUntil: history ? 0 : (live?.cooldownUntil ?? 0),
+            })}
+          />
+        </div>
+        <p className="phone-caption">
+          {device.driver === "poc"
+            ? "PoC 接口结果 · 非实时屏幕"
+            : "合成投影 · 非真实截图"}
+          {p?.observedAt ? ` · 最近确认 ${time(p.observedAt)}` : ""}
+        </p>
+      </>
+    );
+  }
   const launcher =
     p?.commandAction === "home" || p?.commandCode === "session.home";
   const opened =

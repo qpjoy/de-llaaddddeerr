@@ -298,6 +298,8 @@ export class Engine {
             (d) =>
               d.mode === "real" &&
               d.adapter !== "mobile-agent" &&
+              // An Agent-hosted phone is probed by its Agent (inbox).
+              !d.agentId &&
               d.pocDisabled !== true &&
               d.workerId === this.workerId &&
               !this.inflight.has(`probe:${d.id}`) &&
@@ -359,8 +361,10 @@ export class Engine {
   async #dispatch(modes, leader) {
     for (const mode of modes) {
       // Simulation placement belongs to the single active scheduler (epoch
-      // fenced). Real devices stay with the worker on their host.
+      // fenced). Real devices stay with the worker on their host, except
+      // Agent-hosted ones (below).
       if (mode === "sim" && !leader) continue;
+      if (mode === "real" && leader) await this.#grantReal();
       const free =
         mode === "sim"
           ? this.maxSimulationInflight - this.simulationInflight.size
@@ -410,6 +414,29 @@ export class Engine {
       }
       if (this.stopped) break;
       for (const work of works) this.#run(work, mode);
+    }
+  }
+  /** Real Agent grants (V2-6 P1). A grant is a database decision (the PoC is
+   * called by the Agent on its host, never here), so like simulation
+   * placement it belongs to the single active scheduler, epoch fenced, in a
+   * transaction of its own: the host workers' legacy claims below are not
+   * leader-gated and stay exactly as they were. */
+  async #grantReal() {
+    try {
+      await this.store.atomic(
+        (s, n) => {
+          const round = {};
+          for (let grants = 0; grants < 64; grants++)
+            if (
+              !claim(s, n, "real", this.workerId, { round, executor: "agent" })
+            )
+              break;
+        },
+        { mode: "real", epoch: this.epoch },
+      );
+    } catch (error) {
+      if (error.code !== "MXLEADER") throw error;
+      this.leadership?.lost();
     }
   }
   #run(work, mode) {

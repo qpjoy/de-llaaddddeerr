@@ -213,6 +213,12 @@ export class PostgresQueue {
  * Backs off to `idleDelayMs` when a queue is empty so an idle worker does not
  * hammer PostgreSQL. Optional post-batch pacing releases completed jobs before
  * yielding the worker; it limits this loop only, not other worker replicas.
+ *
+ * With `adaptiveDelayFactor`, the pause after a batch is also at least that
+ * batch's own duration times the factor (capped at `adaptiveDelayMaxMs`). A
+ * fast database then drains a backlog quickly, while a slow one -- the case the
+ * pause exists for -- automatically gets proportionally longer breaks. The
+ * fixed `postBatchDelayMs` stays a floor. 0 (the default) keeps the fixed pause.
  */
 export function runWorker({
   queue,
@@ -221,12 +227,20 @@ export function runWorker({
   concurrency = 4,
   idleDelayMs = 1_000,
   postBatchDelayMs = 0,
+  adaptiveDelayFactor = 0,
+  adaptiveDelayMaxMs = 60_000,
   reclaimIntervalMs = 30_000,
   logger = console,
   signal,
 }) {
   if (!Number.isInteger(postBatchDelayMs) || postBatchDelayMs < 0) {
     throw new TypeError('postBatchDelayMs must be a non-negative integer')
+  }
+  if (!Number.isFinite(adaptiveDelayFactor) || adaptiveDelayFactor < 0) {
+    throw new TypeError('adaptiveDelayFactor must be a non-negative number')
+  }
+  if (!Number.isInteger(adaptiveDelayMaxMs) || adaptiveDelayMaxMs < 0) {
+    throw new TypeError('adaptiveDelayMaxMs must be a non-negative integer')
   }
   const waiting = new AbortController()
   let stopped = false
@@ -259,6 +273,7 @@ export function runWorker({
         await delay(idleDelayMs, waiting.signal)
         continue
       }
+      const batchStartedAt = Date.now()
       await Promise.all(
         jobs.map(async (job) => {
           try {
@@ -270,7 +285,11 @@ export function runWorker({
           }
         }),
       )
-      if (postBatchDelayMs > 0 && !stopped) await delay(postBatchDelayMs, waiting.signal)
+      const pauseMs = Math.max(
+        postBatchDelayMs,
+        Math.min(adaptiveDelayMaxMs, Math.round((Date.now() - batchStartedAt) * adaptiveDelayFactor)),
+      )
+      if (pauseMs > 0 && !stopped) await delay(pauseMs, waiting.signal)
     }
     clearInterval(reclaimTimer)
     signal?.removeEventListener('abort', stop)

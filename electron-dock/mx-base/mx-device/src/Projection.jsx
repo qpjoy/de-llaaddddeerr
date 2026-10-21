@@ -16,6 +16,7 @@ export default function Projection({
   now,
   onPacing,
   lease,
+  live: row,
   ...controls
 }) {
   const [tab, setTab] = useState("screen");
@@ -58,7 +59,13 @@ export default function Projection({
         />
       ) : (
         <>
-          <PhoneProjection device={device} projection={p} />
+          <PhoneProjection
+            device={device}
+            projection={p}
+            live={row}
+            history={!!history}
+            now={now}
+          />
           <p className="projection-foot">
             连接状态不等于开机状态
             {p?.progressAt && (

@@ -14,7 +14,7 @@
 | POST /api/devices/:id/placement?mode=sim | `{revision,name,rack,host}`；仅暂停空闲且无预留时修改中心归属 |
 | POST /api/devices/:id/pacing?mode=sim | `{revision,deviceIntervalMs,apps:[{appId,cooldownMs}]}`；暂停空闲且无预留时配置间隔 |
 | POST /api/devices/:id/adapter-test?mode=sim | `{key,appId,code,keyword?,target?}`；在指定模拟设备排队试运行白名单指令，返回 202 Job |
-| POST /api/devices/:id/probe?mode=real | `{revision}`；指定 Worker 异步执行一次只读状态查询 |
+| POST /api/devices/:id/probe?mode=real | `{revision}`；指定 Worker 异步执行一次只读状态查询（Agent 托管的手机由其 Agent 执行，见 V2-6 P1） |
 | POST /api/devices/:id/control?mode=sim | `{revision,action}`；乐观版本校验 |
 | POST /api/devices/:id/observer?mode=real | `{revision,origin,serial,approved:true}`；附加只读画面配置，保存不连接手机 |
 | POST /api/devices/:id/capture?mode=real | `{}`；提交或合并一次取帧请求，指定 Worker 执行，返回 202 |
@@ -97,13 +97,13 @@ pacing 接口的整机间隔为模拟 0–86400000、真机 2000–86400000 整�
 
 ## 十槽实验室接口（仅 sim）
 
-- `GET /api/task-definitions?mode=sim`：返回 `{definitions,commands}`，包含任务全部历史和当前活跃指令；real 返回空目录。
+- `GET /api/task-definitions?mode=sim`：返回 `{definitions,commands}`，包含任务全部历史和当前活跃指令；real 只返回迁移 016 的两个真实模板（`commands` 为空）。
 - `POST /api/task-definitions?mode=sim`：`{code,name,appId,loop:"small"|"large",resumable?,expectedVersion,steps:[{code,repeat,commandVersion?,input?}]}`，返回 201。新代码 expectedVersion=0，后续等于现有最高版本；冲突 409。不修改旧版本。
 - `POST /api/jobs?mode=sim`：`{key,definitionId,keyword?,target?,input?,priority?,deviceId?,rack?}`。定义保存时冻结指令快照，提交时再冻结计划，未绑定设备则由中心匹配；不支持 host 条件。相同 key/规范化参数重放，变更参数 409，活动队列 200 条后 429（精确重放仍可返回原任务）。
 - `POST /api/loop-policy?mode=sim`：`{rack,revision,maxInsertions,maxDetourMs,windowMs,smallLimit,largeLimit,cooldownMinMs,cooldownMaxMs,commandDelayMs}`，全部时间为整数毫秒。默认值及边界见 [实验室说明](rack-lab-2026-10-10.md)。
 - `POST /api/scenarios?mode=sim`：`{kind:"rack20",key}`，202。没有活动模拟任务/控制会话且十槽都空闲、未隔离、未排空、冷却到期才能开始；同 key 返回原 runId。保留历史、限额与循环配置。
 
-这些写入在 real 模式拒绝；真实 Job 接口仍先执行原来的 confirmed 检查，未确认时可先返回 400。没有新增任意手机操作/ADB 转发接口。指令完成接口目前只在 worker 内部调用，不暴露无需执行身份的通用 webhook。
+这些写入在 real 模式拒绝（例外：`POST /api/jobs?mode=real` 可以提交两个真实模板，见 V2-6 P1）；真实 Job 接口仍先执行原来的 confirmed 检查，未确认时可先返回 400。没有新增任意手机操作/ADB 转发接口。指令完成接口目前只在 worker 内部调用，不暴露无需执行身份的通用 webhook。
 
 `GET state` 包含 definitions、commandDefinitions（所有历史）、loopPolicies、commands。PG 快照返回所有活动任务指令及另外最近 400 条终态指令，省略 receipt/lateEvidence；`GET jobs/:id` 返回该任务完整 Command/Receipt。`yielded` 父 Attempt 会完整返回，仍占用原设备。waiting 的检查点/次数/预算原因与实际领取使用同一规则。规则中“候选”仍需 worker 在事务中再核验。
 
@@ -139,7 +139,7 @@ pacing 接口的整机间隔为模拟 0–86400000、真机 2000–86400000 整�
 
 ## 宿主机 Agent（2026-10-18，V2-3）
 
-管理接口（登录会话或管理员令牌；测试令牌仅模拟域；目前 Agent 只接入模拟域）：
+管理接口（登录会话或管理员令牌；测试令牌仅模拟域；真实域的 Agent 见下文 V2-6 P1）：
 
 - `GET /api/agents?mode=sim`：Agent 列表（在线、最近心跳、时钟偏差、缓冲条数、托管设备、在途租约、待登记序列号），不含凭证摘要。`/api/state` 也带同样的 `agents` 列表。
 - `POST /api/agents`：`{name, host}`，返回 `{agent, token}`，凭证只返回这一次。
@@ -155,6 +155,37 @@ Agent 接口（`Authorization: Bearer <agentId.secret>`，JSON，请求体最大
 - `POST /agent/v1/report`：`{messages:[…] ≤ 100}`，每条消息独立处理并返回 `{ok, directive}`；`directive.action` 为 run / wait / yield / stop / done / drop。消息可以重复投递。
 
 协议语义与故障行为见 [V2-3 宿主机 Agent](v2-3-host-agent-2026-10-18.md)。
+
+## PoC 驱动与插槽（2026-10-21，V2-6 P0）
+
+- Agent 配置（`npm run agent -- <配置文件>`）：`{center, token, driver: "sim" | "poc", devices: [{serial, pocOrigin?}]}`。PoC 驱动只访问每台手机的 `pocOrigin`（应为宿主机本地地址），中心从不访问 PoC。
+- `POST /agent/v1/hello` 的答复新增 `mode`（Agent 所属的域）。模拟域的 PoC 驱动只接受 `/api/state` 带 `simulator: true` 的 PoC。
+- `POST /api/agents/:id/adopt` 新增可选 `slot`（1–200，机架内唯一）。PoC Agent 的设备按驱动上报登记 App 与指令（`simApps`、`simCommandCodes`），并写入 `driver: "poc"`、`pocLevel`。
+- PoC 手机的回执须为 `source: "poc"`，带 `evidence`（PoC 等级、执行前后状态、时间戳）。
+- 新模板：`sim:xhs.poc.search3:1`（搜索 + 翻页 × 2）、`sim:xhs.poc.detail:1`（`target` 为笔记链接或 ID）。
+- `POST /api/workstation-demo` 新增场景 `showcase`（全平台操作演示，指令间隔 2.6 秒）。
+- 本地 PoC 模拟器：`npm run poc:sim -- --port 18181 --count 2`。
+
+## 真实域的宿主机 Agent（2026-10-21，V2-6 P1）
+
+只开放给管理员令牌或登录会话（测试令牌仍只能用模拟域）。本地实现与测试，**未连接手机、PoC、ADB 或服务器**。
+
+- `POST /api/agents?mode=real`：`{name, host, approved: true}`。宿主机必须填写并批准；返回 `{agent, token}`，凭证只显示一次。Agent 属于哪个域在登记时确定，之后不变。
+- `POST /agent/v1/hello`（真实域 Agent）：`driver` 必须为 `poc`，否则 403，Agent 停止。答复的 `mode` 为 `real`。
+- `GET /api/agents?mode=real`：同模拟域，另有 `conflicts`：Agent 上报、但本域已登记为其他设备（旧 PoC 直连、观察设备或其他 Agent）的序列号，这些手机不能登记。
+- `POST /api/agents/:id/adopt?mode=real`：`{serial, rack, name?, host?, slot?, accountKey, approved: true}`。只取驱动上报的能力（小红书，`xhs.search` / `xhs.search.next` / `xhs.note.detail`）。设备写入 `adapter: "agent"`、`driver: "poc"`、`pocLevel`、`agentApps`、`agentCommands`，`origin` 为空（中心不访问 PoC），`workerId` 为 `agent:<agentId>`。**登记后暂停**（`enabled: false`）。同一序列号或同一 `accountKey` 已有真实设备时返回 409（"同一台手机只能二选一"）。
+- `POST /api/devices/:id/probe?mode=real`：`{revision}`。Agent 托管的手机由其 Agent 读取一次 `/api/state`（只读，不发起任何操作）；Agent 离线或停用时返回 409。请求 30 秒内有效，只交给 Agent 一次，丢失需重新检查。结果写入 `probe`：`{reachable, idle, simulator, error, poc, source: "agent", requestedAt, at}`。真实域里自报为模拟器的 PoC 一律 `idle: false`。
+- `POST /api/devices/:id/control?mode=real`：`enable` 沿用原规则——60 秒内的空闲证据加 `confirmedExclusive: true`；`recover` 同样需要新的空闲证据。
+- `POST /api/jobs?mode=real`：`{key, definitionId, deviceId, keyword?, target?, priority?, confirmed: true}`。
+  - 只接受 `real:xhs.poc.search3:1`、`real:xhs.poc.detail:1`，其他定义返回 403。
+  - 必须指定 `deviceId`，且该设备必须由 Agent 以 PoC 驱动托管，并已启用、未隔离。
+  - 不使用演示默认值：搜索必须填 `keyword`；详情的 `target` 必须是完整的 `https://www.xiaohongshu.com/explore/<id>?xsec_token=…` 链接。
+  - 旧搜索 / 详情任务（`operation`）不能指定 Agent 托管的手机；真实模板也不能派给旧 PoC 直连的手机。
+- Agent 消息（新增）：
+  - `poll` 的 `controls` 可带 `{type: "device.probe", deviceId, serial, requestedAt}`。
+  - `report` 可带 `{type: "device.probed", deviceId, requestedAt, observation: {reachable, idle, simulator, poc}}`。
+- 回执：真实域的 PoC 手机只接受 `source: "poc"`；`evidence.simulator` 为 `true`（执行后 `/api/state` 显示是模拟器）时回执作废，任务记为结果未知并隔离设备，不重试。
+- Agent 配置的 `pocOrigin` 必须是宿主机本地地址（`http://127.0.0.1:<端口>`、`localhost` 或 `[::1]`），不接受路径、查询或凭证。
 
 ## Job API v1 与嵌入（2026-10-18，V2-5）
 

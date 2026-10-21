@@ -127,7 +127,7 @@ test("ten slots / twenty heterogeneous jobs finish with bounded insertion, resto
   assert.deepEqual(s, before);
 });
 
-test("immutable definitions bind versions, whitelist commands and reject all real composite submission", () => {
+test("immutable definitions bind versions, whitelist commands and keep real submission to confirmed PoC templates", () => {
   const s = empty();
   const d = register(s, 1000, "sim", { name: "A" });
   const body = {
@@ -193,7 +193,17 @@ test("immutable definitions bind versions, whitelist commands and reject all rea
   );
   assert.throws(
     () => addJob(s, 1000, "real", { key: "real", definitionId: v1.id }),
-    /仅模拟/,
+    /必须显式确认真实执行/,
+  );
+  // A simulation template never runs in the real realm, confirmed or not.
+  assert.throws(
+    () =>
+      addJob(s, 1000, "real", {
+        key: "real",
+        definitionId: v1.id,
+        confirmed: true,
+      }),
+    { status: 403, message: /只能提交已登记的真实模板/ },
   );
   assert.throws(() => saveDefinition(s, 1000, "real", body), /仅允许模拟/);
 });
