@@ -1,7 +1,8 @@
 /* Latest /dataport visual source; application permissions and APIs stay in apps/web. */
 .harbor-shell .app-main {
   height: 100dvh;
-  overflow: hidden;
+  /* Keep focus and programmatic scrolling inside the visible content area. */
+  overflow: clip;
   min-height: 0;
 }
 .harbor-console.content {

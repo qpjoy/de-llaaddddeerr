@@ -1,5 +1,5 @@
 import { riskAdvice, riskLevelLabel } from "./risk-advice";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Search, Download, Clock3, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
@@ -25,6 +25,7 @@ import {
 import { enterpriseUrl, hasPermission } from "./permissions";
 import { Pagination } from "./pagination";
 import { downloadExcel } from "./download";
+import { resetQueryScroll, revealQueryResult } from "./query-scroll";
 
 function historyStatusLabel(state: string) {
   return (
@@ -65,11 +66,16 @@ export function IpQuery({
   const [search, setSearch] = useState({ ip: initialIp, revision: 0 }),
     live = useRef(true),
     lock = useRef(false),
+    pageRef = useRef<HTMLDivElement>(null),
     resultRef = useRef<HTMLDivElement>(null);
   const canQuery = hasPermission(session, tenant, "query.execute"),
     canRead = hasPermission(session, tenant, "history.read"),
     canExport = hasPermission(session, tenant, "history.export");
   const [quota, setQuota] = useState<any>(null);
+  // New-query navigation remounts this page, but retains the console scroller.
+  useLayoutEffect(() => {
+    resetQueryScroll(pageRef.current);
+  }, []);
   useEffect(() => {
     const c = new AbortController();
     setQuota(null);
@@ -112,13 +118,7 @@ export function IpQuery({
     return () => c.abort();
   }, [tenant, page, q, version, canRead]);
   useEffect(() => {
-    if (result) {
-      resultRef.current?.focus({ preventScroll: true });
-      resultRef.current?.scrollIntoView({
-        block: "start",
-        behavior: "smooth",
-      });
-    }
+    if (result) revealQueryResult(resultRef.current);
   }, [result]);
   async function query(ip: string, fresh = false) {
     if (lock.current || !canQuery) return;
@@ -194,7 +194,7 @@ export function IpQuery({
     }
   }
   return (
-    <div className="intelligence-page" data-result={!!result}>
+    <div ref={pageRef} className="intelligence-page" data-result={!!result}>
       <PublicIpSearch
         key={search.revision}
         initialIp={search.ip}
