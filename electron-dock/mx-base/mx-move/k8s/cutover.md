@@ -10,7 +10,7 @@
 
 DataPort 旧发布脚本未选择独立 containerd，后续回执确认迁移 Pod `ErrImageNeverPull`，容器未启动；已用 `23fb2852` 补齐运行时选择和 CRI 镜像 ID 核验。旧失败镜像是否只存在于原 runtime，仍需新旧实例的实际对比，不能仅凭 Job 等待 Complete 超时推定。
 
-当前另有公网身份 hostPort 故障：`mx-identity-public` 在 `mx-internal-server` 上 Running/Ready，Pod `192.168.224.83` 的 `/healthz` 返回 200；宿主机拥有 `10.88.88.88`，Pod 声明 `hostIP/hostPort: 10.88.88.88:18444`，但该地址拒绝连接，已查 nft `CNI-HOSTPORT-DNAT` 仅有 18220、没有 18444。当前证据指向 hostPort 转发缺失，规则消失原因未确定，不能归并为镜像导入故障或宣称已恢复。
+同日另有公网身份 hostPort 故障：`mx-identity-public` 在 `mx-internal-server` 上 Running/Ready，Pod `192.168.224.83` 的 `/healthz` 返回 200；宿主机拥有 `10.88.88.88`，Pod 声明 `hostIP/hostPort: 10.88.88.88:18444`，但该地址拒绝连接，已查 nft `CNI-HOSTPORT-DNAT` 仅有 18220、没有 18444。故障定位为 hostPort 转发缺失；后续仅重建公网身份，18444、discovery/capabilities 和数港 SSO start 已恢复，真实账号及当前 MX-H2I 功能验收仍待人工回执。规则消失原因未确定，不能归并为镜像导入故障。
 
 自动验收的控制器 Ready 检查不覆盖 hostPort DNAT 和公网 SSO；详细边界及恢复验证见[运行时消费者记录](runtime-consumers.md#2026-10-21-公网身份-hostport-故障与验收范围)。**不能为缺失 hostPort 再运行这个已完成事务的 `migrate` 或 `resume`。** 保留已提交的新副本、原账号/凭据和 MX-H2I 登录联网配置，转发修复与端到端验收单独处理。
 

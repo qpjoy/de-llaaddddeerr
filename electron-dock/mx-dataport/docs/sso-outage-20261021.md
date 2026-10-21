@@ -1,5 +1,7 @@
 # 数港登录 410 / 503 排查（2026-10-21）
 
+**最新状态：公网身份 18444 入口与数港 SSO 启动已恢复。** 用户回传 `recovered / applied=true`，数港 Pod 内 discovery/capabilities 均为 200 且全部配置匹配；外部复测 Auth discovery 200、DataPort SSO start 200，并返回预期 Auth 地址。实际账号登录和 MX-H2I 登录/联网的最后人工回执仍待确认。DNAT 最初消失的触发原因尚未查明，不需要继续重建或运行迁盘 resume。下文保留故障与恢复过程，最终证据见文末。
+
 ## 已确认的现象
 
 本轮从本机直接访问生产域名（`curl --noproxy '*'`，无 Cookie、用户密码或业务操作）：
@@ -17,7 +19,7 @@
 
 代码中 `mx-common/src/identity/sso.mjs` 在启动阶段调用 `capabilities`，失败统一包装成截图中的 503；只有预检成功后才建立登录事务。前端先读取表单，410 时尝试重新启动 SSO，属于既有恢复流程。因此本次不能靠清 Cookie、去掉 410、修改邀请码或重新 enroll 解决。
 
-最近的 `loginOnly` 变更不修改 capabilities 路径。下述 Internal 回执已将本轮故障定位到公网身份的 hostPort 转发；尚无恢复后的验收结果，不能宣称线上已恢复。
+最近的 `loginOnly` 变更不修改 capabilities 路径。下述 Internal 回执将本轮故障定位到公网身份的 hostPort 转发；本节为恢复前的调查证据，后续恢复结果见文末。
 
 ## Internal 回执与迁盘的关系
 
@@ -140,7 +142,7 @@ curl --noproxy '*' --connect-timeout 3 --max-time 8 -fsS \
 
 首轮测试受沙箱监听限制，放行本机隔离监听后通过；本机缺少已锁定的 xlsx/exceljs，按现有 package-lock 安装依赖后构建通过，未修改依赖清单或锁文件。没有进行浏览器真实登录验收。
 
-本地工具测试与线上恢复分开记录；当前已取得 Pod/hostPort 诊断回执，生产定向恢复的后续结果见下节，最终登录验收仍未通过。
+本地工具测试与线上恢复分开记录；生产定向恢复的后续结果见下节，最终真实账号登录验收尚待确认。
 
 ## 首次恢复尝试的命令失败
 
@@ -151,3 +153,17 @@ curl --noproxy '*' --connect-timeout 3 --max-time 8 -fsS \
 已改用 `kubectl --type=json -p <JSON>` 的独立 argv 参数，内容只有 UID、resourceVersion 和时间戳，不含密钥，不经过 shell。仍是原来的一次 CAS Patch，未放宽镜像、认证配置、节点、锁或迁盘状态检查。此前替身读取 fd 0，未覆盖 Linux 重新打开描述符的问题；增加真实 `kubectl --local` 验证，避免仅验证替身参数。
 
 失败输出现在提供 `stage=restart|rollout|postcheck`、脱敏 `commandCategory` 和 `attemptedAt`。`restartSubmitted:true` 表示 Patch 命令已成功返回；`unknown` 表示提交结果未确认，不能理解为未执行。外层命令超时同样报告未知，始终不重放写入。修正后恢复工具 11 项测试通过，包含真实子进程错误分类、超时、阶段区分、无重放及本地 kubectl JSON Patch；未以本地测试代替生产恢复验收。
+
+## 生产恢复回执
+
+用户首先确认服务器脚本仍是旧版（`newErrorFields=false / oldStdinPatch=true`），同步修复后回传 `true / false`。随后执行一次恢复与诊断，得到：
+
+```json
+{"ok":true,"action":"recovered","applied":true}
+```
+
+工具返回该结果之前，已核对新 Pod UID、镜像/认证配置保持一致，以及 `10.88.88.88:18444/healthz` 返回 200。后续 `diagnose-auth` 回执确认 profile 有效，discovery 200/issuer 匹配，capabilities 200/nativeForm=true，appId、origin、audience 全部匹配。
+
+外部独立复测：公网 Auth discovery 从 502 恢复为 200；DataPort `POST /auth/sso/start?view=login` 从 503 恢复为 200，返回的跳转地址属于预期 `https://auth.minsight-ai.com/identity/`。探测仅创建一次短期匿名登录事务，不提交账号/密码，不记录 Cookie 或流程凭据，未完成真实账号认证。
+
+**已确认修复的是公网 Auth 入口和数港 SSO 启动链路。** 当前不需要再次运行恢复脚本、全量发布或 `mx-move resume`。缺失/过期 flow 的匿名表单请求仍可返回 410，旧页面应重新开始登录。真实数港账号认证、回调与会话落地，以及 MX-H2I 原有登录/联网的人工回执仍待记录；不要为验收强制退出正常连接的客户端。CNI 规则最初消失的原因仍未确定。
