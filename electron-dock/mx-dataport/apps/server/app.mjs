@@ -224,6 +224,8 @@ export function createHarborApp({
             payload.error?.code || payload.code || "customer_service_error";
           // Fixed, public-safe diagnostics. Never forward arbitrary 5xx bodies.
           const accountMessages = {
+            payment_checkout_expired:
+              "支付超时，请查询原订单的付款状态。",
             dataport_accounts_not_configured:
               "员工账号服务尚未就绪，请联系管理员完成配置。",
             dataport_accounts_invalid_config:
@@ -234,7 +236,6 @@ export function createHarborApp({
               "员工账号服务暂不可用，请联系管理员检查。",
           };
           const accountMessage =
-            upstream.status >= 500 &&
             typeof code === "string" &&
             Object.hasOwn(accountMessages, code)
               ? accountMessages[code]

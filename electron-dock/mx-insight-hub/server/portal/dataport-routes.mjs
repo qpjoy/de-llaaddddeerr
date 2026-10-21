@@ -8,6 +8,7 @@ import { DataportAccountsClient } from "./dataport-accounts.mjs";
 import { paging, uuid } from "./dataport-store.mjs";
 import { IP_PRODUCT_CAPABILITY } from "../contracts/ip-risk-product.mjs";
 import { commerceOrderView } from "../commerce/service.mjs";
+import { paymentTimedOutSql } from "../commerce/order-state.mjs";
 
 const endpoints = {
   GET: [
@@ -379,7 +380,7 @@ export async function dataportRoute({
         from = searchParams.get("from") || null,
         to = searchParams.get("to") || null;
       if (
-        !["", "paid", "pending", "delivered"].includes(status) ||
+        !["", "paid", "pending", "delivered", "payment_timeout"].includes(status) ||
         [from, to].some(
           (v) =>
             v &&
@@ -391,7 +392,7 @@ export async function dataportRoute({
       // Keep created_at bare so the tenant/time index remains usable.
       const args = [tenantId, q, status, from, to],
         where = `tenant_id=$1 AND ($2='' OR position(lower($2) in lower(id::text||' '||(intent->'product'->>'name')))>0)
-        AND ($3='' OR ($3='paid' AND payment->>'status'='paid') OR ($3='pending' AND delivered_at IS NULL AND coalesce(payment->>'status','pending')<>'paid') OR ($3='delivered' AND delivered_at IS NOT NULL))
+        AND ($3='' OR ($3='paid' AND payment->>'status'='paid') OR ($3='pending' AND delivered_at IS NULL AND coalesce(payment->>'status','pending')<>'paid' AND NOT coalesce(${paymentTimedOutSql},false)) OR ($3='payment_timeout' AND ${paymentTimedOutSql}) OR ($3='delivered' AND delivered_at IS NOT NULL))
         AND ($4::date IS NULL OR created_at >= ($4::date::timestamp AT TIME ZONE 'Asia/Shanghai'))
         AND ($5::date IS NULL OR created_at < (($5::date+1)::timestamp AT TIME ZONE 'Asia/Shanghai'))`;
       const total = (
