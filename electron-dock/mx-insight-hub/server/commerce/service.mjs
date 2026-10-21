@@ -6,6 +6,7 @@ import { withPgTransaction } from '../stores/postgres-store.mjs'
 import { readTenantAccess } from '../stores/tenant-service-access.mjs'
 import { authorizationScopeLockKey } from '../stores/usage-authorization.mjs'
 import { CustomerMessages } from './messages.mjs'
+import { paymentExpiry, paymentTimedOut, paymentTimedOutSql, checkoutExpiredMessage } from './order-state.mjs'
 
 import { IP_PRODUCT_CAPABILITY, IP_PRODUCT_METER } from '../contracts/ip-risk-product.mjs'
 export { IP_PRODUCT_CAPABILITY, IP_PRODUCT_METER }
@@ -14,10 +15,16 @@ export const IP_V2_METER = 'ip.risk.subscription.v2'
 export const INITIAL_PRODUCT = Object.freeze({ sku: 'ip-risk-baidu-annual-100k', name: 'IP 风险画像 · 年度版', description: '识别可疑 IP，了解访问来源，让业务风控更有依据。', product: 'ip_risk', channel: 'product', entitlementScope: 'tenant', status: 'published', amountMinor: 3399900, currency: 'CNY', months: 12, quota: 100000 })
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 const product = row => ({ ...row.document, revision: row.revision })
-const view = row => row && ({ id: row.id, tenantId: row.tenant_id, consumerId: row.consumer_id, environment: row.environment, product: row.intent.product,
-  createdAt: row.created_at, deliveredAt: row.delivered_at, paymentId: row.payment_id, status: row.delivered_at ? (row.environment === 'test' ? 'test_delivered' : 'active') : row.payment?.status === 'paid' ? 'delivering' : 'pending',
+const view = row => {
+  if (!row) return row
+  const timedOut = paymentTimedOut(row), expires = paymentExpiry(row.payment)
+  return ({ id: row.id, tenantId: row.tenant_id, consumerId: row.consumer_id, environment: row.environment, product: row.intent.product,
+  createdAt: row.created_at, deliveredAt: row.delivered_at, paymentId: row.payment_id, status: row.delivered_at ? (row.environment === 'test' ? 'test_delivered' : 'active') : row.payment?.status === 'paid' ? 'delivering' : timedOut ? 'payment_timeout' : 'pending',
+  paymentExpiresAt: expires === null ? null : new Date(expires).toISOString(),
+  checkoutAvailable: !row.delivered_at && row.payment?.status !== 'paid' && !timedOut,
   paymentMethod: row.payment?.provider === 'alipay' ? 'alipay' : null,
   paymentStatus: row.intent.purpose === 'trial' ? 'not_required' : row.payment?.status || 'pending', receipt: row.receipt })
+}
 export { view as commerceOrderView }
 
 export function addCalendarMonths(value, months) {
@@ -120,7 +127,7 @@ export class CommerceService {
       (SELECT count(*)::int FROM hub_commerce.orders WHERE tenant_id=$1) AS "orderCount",
       EXISTS(SELECT 1 FROM hub_commerce.orders WHERE tenant_id=$1 AND intent->>'purpose'='trial') AS "trialClaimed",
       (SELECT coalesce(jsonb_agg(DISTINCT intent->'product'->>'sku'),'[]'::jsonb) FROM hub_commerce.orders
-        WHERE tenant_id=$1 AND delivered_at IS NULL AND coalesce(payment->>'status','pending')<>'paid') AS "pendingSkus",
+        WHERE tenant_id=$1 AND delivered_at IS NULL AND coalesce(payment->>'status','pending')<>'paid' AND NOT coalesce(${paymentTimedOutSql},false)) AS "pendingSkus",
       count(*)::int AS "subscriptionCount",
       count(*) FILTER(WHERE starts_at<=now() AND ends_at>now())::int AS "activeSubscriptionCount",
       count(*) FILTER(WHERE channel='product' AND starts_at<=now() AND ends_at>now())::int AS "currentCount",
@@ -273,7 +280,13 @@ export class CommerceService {
       if (action === 'checkout') {
         requirePayment(!checkoutOptions?.returnUrl || source.identity.features?.includes('checkoutReturnUrl'),
           'commerce_checkout_return_unavailable','支付中心尚未支持数港返回，请先更新支付中心；原订单已保留。',503)
-        const checkout = await source.client.checkout(payment.id,checkoutOptions)
+        requirePayment(!paymentTimedOut({...row,payment}), 'payment_checkout_expired', checkoutExpiredMessage, 409)
+        let checkout
+        try { checkout = await source.client.checkout(payment.id,checkoutOptions) }
+        catch(error) {
+          if(error.code==='payment_checkout_expired')requirePayment(false,'payment_checkout_expired',checkoutExpiredMessage,409)
+          throw error
+        }
         return {...view(await this.row(id,tenantId)),paymentUrl:checkout.payUrl}
       }
       if (action === 'refresh' && payment.provider === 'alipay') {

@@ -1,4 +1,29 @@
 export const PRODUCT_CAPABILITY = "ip.risk.subscription.query";
+export function orderStatusLabel(order: { status?: string }) {
+  return (
+    ({
+      active: "已开通",
+      delivering: "正在开通",
+      pending: "待付款",
+      test_delivered: "测试订单",
+      payment_timeout: "支付超时",
+    }) as Record<string, string>
+  )[order.status || ""] || "待确认";
+}
+export function canCheckoutOrder(order: {
+  deliveredAt?: unknown;
+  paymentStatus?: string;
+  status?: string;
+  checkoutAvailable?: boolean;
+}) {
+  return !order.deliveredAt && order.paymentStatus !== "paid" &&
+    order.status !== "payment_timeout" && order.checkoutAvailable !== false;
+}
+export function commerceErrorMessage(error: { code?: string; message?: string }) {
+  return error.code === "payment_checkout_expired"
+    ? "支付超时，请查询原订单的付款状态。"
+    : error.message || "订单操作暂不可用，请稍后重试。";
+}
 export type Subscription = {
   id: string;
   channel: string;

@@ -84,6 +84,7 @@ async function fixture(t,{space=false,offers=false}={}){
   }
   await runMigrations({connectionString:url.href,migrationsDir:migrationDir})
   await pool.query(await readFile(new URL('../../migrations/149_dataport_enterprise.sql',import.meta.url),'utf8'))
+  await pool.query(await readFile(new URL('../../migrations/159_dataport_local_accounts.sql',import.meta.url),'utf8'))
   await pool.query(await readFile(new URL('../../migrations/154_dataport_support.sql',import.meta.url),'utf8'))
   const tenant=randomUUID(),consumer=randomUUID(),keyId=randomUUID(),sourceId=randomUUID(),payments=new Map()
   await pool.query("INSERT INTO tenants(id,name) VALUES($1,'commerce fixture')",[tenant])

@@ -27,6 +27,7 @@ import { createApp } from "../../server/app.mjs";
 import { HubService } from "../../server/hub-service.mjs";
 import { MemoryStore } from "../../server/stores/memory-store.mjs";
 import { createHarborApp } from "../../../mx-dataport/apps/server/app.mjs";
+import { paymentTimedOutSql } from "../../server/commerce/order-state.mjs";
 
 const connectionString = process.env.MX_DATAPORT_TEST_DATABASE_URL;
 async function fixture(t) {
@@ -1242,4 +1243,46 @@ test("verified MX Portal owner receives usable permissions without a code; retir
   }
   assert.equal((await f.pool.query("SELECT count(*)::int AS n FROM dataport.owner_codes")).rows[0].n,0);
   assert.equal((await f.pool.query("SELECT count(*)::int AS n FROM dataport.owner_sessions")).rows[0].n,0);
+});
+test('payment timeout is a read-only tenant projection shared by billing filters, pagination and exports', {skip:!connectionString}, async t=>{
+  const f=await fixture(t),owner=await f.principal();
+  const past=new Date(Date.now()-45*60000).toISOString(),recent=new Date().toISOString(),expiredIds=[];
+  async function insert(payment,tenant=f.tenant,delivered=null) {
+    const id=randomUUID();
+    await f.pool.query('INSERT INTO hub_commerce.orders(id,tenant_id,intent,payment,created_at,delivered_at) VALUES($1,$2,$3,$4,$5,$6)',[id,tenant,{product:{name:'Timeout fixture',sku:'fixture',amountMinor:399900}},payment,'2026-01-01',delivered]);
+    return id;
+  }
+  for(let i=0;i<24;i++)expiredIds.push(await insert({provider:'alipay',status:'pending',createdAt:past}));
+  const freshId=await insert({provider:'alipay',status:'pending',createdAt:recent});
+  const paidId=await insert({provider:'alipay',status:'paid',createdAt:past});
+  const deliveredId=await insert({provider:'alipay',status:'paid',createdAt:past},f.tenant,recent);
+  const unknownIds=[];
+  for(const payment of [null,{provider:'mock',status:'pending',createdAt:past},{provider:'alipay',status:'pending'},
+    {provider:'alipay',status:'pending',createdAt:'invalid'},{provider:'alipay',status:'pending',createdAt:'2026-02-31T00:00:00.000Z'}])unknownIds.push(await insert(payment));
+  const otherId=await insert({provider:'alipay',status:'pending',createdAt:past},f.other);
+  const before=(await f.pool.query('SELECT id,payment FROM hub_commerce.orders ORDER BY id')).rows;
+  async function read(search='') {
+    let result;
+    await dataportRoute({request:{method:'GET'},response:{},path:`/enterprises/${f.tenant}/billing`,searchParams:new URLSearchParams(search),principal:owner,dataport:f.store,
+      sendJson(_res,_status,payload){result=payload.data}});
+    return result;
+  }
+  const ids=[];
+  for(let page=1;page<=2;page++) {
+    const result=await read(`status=payment_timeout&pageSize=20&page=${page}&export=1`);
+    assert.equal(result.pagination.orders.total,24);
+    assert.ok(result.orders.every(order=>order.status==='payment_timeout'&&order.paymentStatus==='pending'&&order.checkoutAvailable===false));
+    ids.push(...result.orders.map(order=>order.id));
+  }
+  assert.deepEqual(new Set(ids),new Set(expiredIds));assert.equal(ids.includes(otherId),false);
+  const pending=await read('status=pending&pageSize=100');
+  assert.deepEqual(new Set(pending.orders.map(order=>order.id)),new Set([freshId,...unknownIds]));
+  const paid=await read('status=paid&pageSize=100');
+  assert.deepEqual(new Set(paid.orders.map(order=>order.id)),new Set([paidId,deliveredId]));
+  assert.equal((await read('status=delivered')).orders[0].id,deliveredId);
+  const all=await read('pageSize=100'),sql=(await f.pool.query(`SELECT id,coalesce(${paymentTimedOutSql},false) AS timed_out FROM hub_commerce.orders WHERE tenant_id=$1`,[f.tenant])).rows;
+  for(const row of sql)assert.equal(all.orders.find(order=>order.id===row.id).status==='payment_timeout',row.timed_out);
+  assert.deepEqual((await f.pool.query('SELECT id,payment FROM hub_commerce.orders ORDER BY id')).rows,before,'reads do not close or rewrite payment records');
+  await f.pool.query("UPDATE hub_commerce.orders SET payment=jsonb_set(payment,'{status}','\"paid\"') WHERE id=$1",[expiredIds[0]]);
+  assert.equal((await read(`q=${expiredIds[0]}`)).orders[0].status,'delivering','late verified payment takes priority over the checkout timeout');
 });

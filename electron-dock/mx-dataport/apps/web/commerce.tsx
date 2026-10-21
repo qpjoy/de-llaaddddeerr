@@ -27,6 +27,9 @@ import { request } from "./api";
 import { Pagination, type PageInfo } from "./pagination";
 import {
   checkoutLocation,
+  canCheckoutOrder,
+  commerceErrorMessage,
+  orderStatusLabel,
   dateTime,
   money,
   purchaseIntent,
@@ -208,7 +211,7 @@ export function Commerce({
     try {
       await work();
     } catch (e) {
-      setError((e as Error).message);
+      setError(commerceErrorMessage(e as Error));
     } finally {
       lock.current = false;
       setBusy(false);
@@ -242,9 +245,31 @@ export function Commerce({
   }
   async function action(order: any, action: "checkout" | "refresh") {
     await perform(async () => {
-      const result = await post(
-        `/commerce/tenants/${tenant}/orders/${order.id}/${action}`,
-      );
+      let result;
+      try {
+        result = await post(
+          `/commerce/tenants/${tenant}/orders/${order.id}/${action}`,
+        );
+      } catch (e) {
+        if ((e as { code?: string }).code === "payment_checkout_expired") {
+          // A checkout can close between the last read and this click. Retain
+          // the order and remove stale links without asserting payment failure.
+          setPurchases((current) => ({
+            ...current,
+            orders: current.orders.map((value) =>
+              value.id === order.id
+                ? { ...value, status: "payment_timeout", checkoutAvailable: false }
+                : value,
+            ),
+          }));
+          setLinks((current) => {
+            const next = { ...current };
+            delete next[order.id];
+            return next;
+          });
+        }
+        throw e;
+      }
       if (action === "checkout")
         setLinks((value) => ({
           ...value,
@@ -266,15 +291,7 @@ export function Commerce({
   const detailOrder = purchases.orders.find(
     (order) => order.id === orderDetail,
   );
-  const orderStatus = (order: any) =>
-    (
-      ({
-        active: "已开通",
-        delivering: "正在开通",
-        pending: "待付款",
-        test_delivered: "测试订单",
-      }) as Record<string, string>
-    )[order.status] || "待确认";
+  const orderStatus = orderStatusLabel;
   const trialClaimed =
     purchases.summary?.trialClaimed ??
     purchases.orders.some((order) => order.product.kind === "trial");
@@ -282,7 +299,7 @@ export function Commerce({
     <div className="harbor-actions">
       {!order.deliveredAt && canPay && (
         <>
-          {order.paymentStatus !== "paid" &&
+          {canCheckoutOrder(order) &&
             (links[order.id] ? (
               <a
                 className="harbor-payment-link"
@@ -711,6 +728,7 @@ export function Commerce({
                   <TabsList variant="line">
                     <TabsTrigger value="">全部订单</TabsTrigger>
                     <TabsTrigger value="pending">待付款</TabsTrigger>
+                    <TabsTrigger value="payment_timeout">支付超时</TabsTrigger>
                     <TabsTrigger value="paid">已支付</TabsTrigger>
                     <TabsTrigger value="delivered">已开通</TabsTrigger>
                   </TabsList>
@@ -776,7 +794,7 @@ export function Commerce({
                               r.product.name,
                               r.product.amountMinor / 100,
                               dateTime(r.createdAt),
-                              r.paymentStatus,
+                              orderStatus(r),
                             ]),
                           );
                         } catch (e) {
@@ -843,7 +861,9 @@ export function Commerce({
                                 data-state={
                                   order.status === "active"
                                     ? "success"
-                                    : "unknown"
+                                    : order.status === "payment_timeout"
+                                      ? "error"
+                                      : "unknown"
                                 }
                               >
                                 {orderStatus(order)}
@@ -855,9 +875,7 @@ export function Commerce({
                                 size="sm"
                                 onClick={() => setOrderDetail(order.id)}
                               >
-                                {!order.deliveredAt &&
-                                order.paymentStatus !== "paid" &&
-                                canPay
+                                {canCheckoutOrder(order) && canPay
                                   ? "去付款"
                                   : "查看详情"}
                                 <ArrowRight aria-hidden="true" />
@@ -977,7 +995,7 @@ export function Commerce({
                 </p>
               )}
               {paymentActions(detailOrder)}
-              {!detailOrder.deliveredAt && links[detailOrder.id] && (
+              {canCheckoutOrder(detailOrder) && links[detailOrder.id] && (
                 <p>付款后将返回数港，订单状态会自动更新。</p>
               )}
             </>
@@ -1036,8 +1054,7 @@ export function Commerce({
                 purchases.orders.some(
                   (order) =>
                     order.product.sku === selected.sku &&
-                    !order.deliveredAt &&
-                    order.paymentStatus !== "paid",
+                    canCheckoutOrder(order),
                 )) && (
                 <div className="harbor-subscription-notice">
                   <p>
