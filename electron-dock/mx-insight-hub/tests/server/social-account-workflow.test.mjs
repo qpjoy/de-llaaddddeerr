@@ -586,7 +586,7 @@ test('already-issued Twitter mxec2 cursors and exact historical replay keep the 
   assert.equal(h.historical.length, 0)
 })
 
-test('numeric Twitter username resolves by handle while an equal numeric ID remains a separate account', async t => {
+test('explicit numeric Twitter handle stays separate from the same bare numeric account identifier', async t => {
   const h = await harness(t, { fetchImpl: call => {
     if (call.url.pathname === '/user/by/username/12345') return Response.json(profile('12345', '99'))
     if (call.url.pathname === '/user/users/by/ids') return Response.json(profile('other_handle', '12345'))
@@ -594,7 +594,7 @@ test('numeric Twitter username resolves by handle while an equal numeric ID rema
     if (call.url.pathname === '/user/12345/tweets') return Response.json(timeline(['123451'], null, 'other_handle', '12345'))
     throw new Error(`Unexpected fixture path ${call.url.pathname}`)
   } })
-  const body = { platform: 'twitter', username: '12345', count: 1 }
+  const body = { platform: 'twitter', username: '@12345', count: 1 }
   const first = await h.invoke(body, 'numeric-handle-first')
   assert.equal(first.body.data.items[0].author.id, '99')
   assert.deepEqual(h.calls.map(call => call.url.pathname), ['/user/by/username/12345', '/user/99/tweets'])
@@ -602,7 +602,10 @@ test('numeric Twitter username resolves by handle while an equal numeric ID rema
   assert.equal(replay.replay, true)
   assert.deepEqual(replay.body, first.body)
   assert.equal(h.calls.length, 2)
-  const byId = await h.invoke({ platform: 'twitter', userId: '12345', count: 1 }, 'numeric-id-first')
+  const byId = await h.invoke({ platform: 'twitter', username: '12345', count: 1 }, 'numeric-id-first')
+  const idAliasReplay = await h.invoke({ platform: 'twitter', userId: '12345', count: 1 }, 'numeric-id-first')
+  assert.equal(idAliasReplay.replay, true)
+  assert.deepEqual(idAliasReplay.body, byId.body)
   assert.equal(byId.body.data.items[0].author.id, '12345')
   assert.deepEqual(h.calls.slice(2).map(call => call.url.pathname), ['/user/users/by/ids', '/user/12345/tweets'])
   await assert.rejects(h.invoke({ platform: 'twitter', userId: '12345', count: 1 }, 'numeric-handle-first'), { code: 'idempotency_conflict' })
@@ -610,7 +613,55 @@ test('numeric Twitter username resolves by handle while an equal numeric ID rema
   assert.equal(h.calls.length, 4)
 })
 
-test('old numeric-handle receipts replay exactly without resuming their former ID traversal', async t => {
+test('previous bare numeric-handle receipts replay without changing account or continuing as an ID', async t => {
+  const h = await harness(t, { fetchImpl: call => Response.json(call.url.pathname.includes('/tweets')
+    ? timeline(['1', '2'], 'old-next', '12345', '99') : profile('12345', '99')) })
+  const key = 'previous-explicit-numeric-handle', body = { platform: 'twitter', username: '12345', count: 1 }
+  // @ forces today's handle path and has exactly the former bare handle's
+  // normalized fingerprint, so these are complete historical delivery fixtures.
+  const original = await h.invoke({ ...body, username: '@12345' }, key)
+  const saved = [...h.store.requests.values()].find(row => row.idempotencyKey === key)
+  saved.acquisitionRequest.body = body
+  const cursor = original.body.data.page.nextCursor
+  const secondKey = 'previous-explicit-numeric-handle-page-two'
+  const second = await h.invoke({ ...body, username: '@12345', cursor }, secondKey)
+  const savedSecond = [...h.store.requests.values()].find(row => row.idempotencyKey === secondKey)
+  savedSecond.acquisitionRequest.body = { ...body, cursor }
+  const calls = h.calls.length, reservations = h.store.requests.size, before = structuredClone(saved)
+  const reserve = h.store.reserve
+  h.store.reserve = () => { throw new Error('Historical replay must not reserve') }
+  const replay = await h.invoke(body, key)
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, original.body)
+  assert.equal(replay.body.data.items[0].author.id, '99')
+  assert.deepEqual(saved, before)
+  assert.deepEqual((await h.invoke({ ...body, cursor }, secondKey)).body, second.body)
+  await assert.rejects(h.invoke({ ...body, cursor }, 'changed-handle-continuation'), { code: 'invalid_cursor' })
+  for (const [status, expected] of [['reserved', 'request_in_progress'], ['unknown', 'request_outcome_unknown'], ['released', 'search_restart_required']]) {
+    Object.assign(saved, { status, responseBody: null, responseStatus: null, leaseExpiresAt: new Date(Date.now() - 60000).toISOString() })
+    const receipt = structuredClone(saved)
+    await assert.rejects(h.invoke(body, key), { code: expected })
+    assert.deepEqual(saved, receipt, 'even an expired reservation cannot redispatch the previous interpretation')
+  }
+  Object.assign(saved, { status: 'released', responseStatus: 502, responseBody: {
+    error: { code: 'historical_provider_rejected', message: 'Original handle rejection', details: { originalEvidence: 'fixture', requestId: saved.id } }, requestId: saved.id,
+  } })
+  await assert.rejects(h.invoke(body, key), error => error.status === 502 && error.code === 'historical_provider_rejected'
+    && error.details.originalEvidence === 'fixture')
+  h.store.reserve = reserve
+  Object.assign(saved, before)
+  await assert.rejects(h.invoke({ ...body, username: '@12345' }, key), { code: 'idempotency_conflict' })
+  await assert.rejects(h.invoke({ platform: 'twitter', userId: '12345', count: 1 }, key), { code: 'idempotency_conflict' })
+  const otherKey = await h.service.createApiKey({ consumerId: h.context.consumer.id, name: 'Other numeric-handle replay Key', platforms: ['twitter'], capabilities: ['social.content.crawl', 'social.profile.get'] })
+  const otherContext = await h.service.authenticate(otherKey.secret)
+  await assert.rejects(h.invoke(body, key, 'crawl', otherContext), { code: 'idempotency_conflict' })
+  await h.store.setPlatformGrant(h.context.consumer.id, 'twitter', false)
+  await assert.rejects(h.invoke(body, key), { code: 'platform_not_granted' })
+  assert.equal(h.calls.length, calls)
+  assert.equal(h.store.requests.size, reservations)
+})
+
+test('old explicit numeric-handle receipts replay exactly without resuming their former ID traversal', async t => {
   const h = await harness(t, { fetchImpl: call => Response.json(call.url.pathname.includes('/tweets')
     ? timeline(['1', '2'], 'old-next', 'old_account', '12345') : profile('old_account', '12345')) })
   const key = 'old-numeric-handle-receipt'
@@ -618,7 +669,7 @@ test('old numeric-handle receipts replay exactly without resuming their former I
   // handle that the former normalizer would have mapped to that identical ID.
   const original = await h.invoke({ platform: 'twitter', userId: '12345', count: 1 }, key)
   const saved = [...h.store.requests.values()].find(row => row.idempotencyKey === key)
-  const body = { platform: 'twitter', username: '12345', count: 1 }
+  const body = { platform: 'twitter', username: '@12345', count: 1 }
   saved.acquisitionRequest.body = body
   const cursor = original.body.data.page.nextCursor
   assert.match(cursor, /^mxds1\./)
@@ -658,8 +709,8 @@ test('old numeric-handle receipts replay exactly without resuming their former I
 test('old numeric-handle failures and unresolved receipts never reserve, redispatch, or bypass grants', async t => {
   const h = await harness(t, { fetchImpl: call => Response.json(call.url.pathname.includes('/tweets')
     ? timeline(['1'], null, 'old_account', '1234567890123456') : profile('old_account', '1234567890123456')) })
-  const key = 'old-long-numeric-handle', body = { platform: 'twitter', username: '1234567890123456', count: 1 }
-  await h.invoke({ platform: 'twitter', userId: body.username, count: 1 }, key)
+  const key = 'old-long-numeric-handle', body = { platform: 'twitter', username: '@1234567890123456', count: 1 }
+  await h.invoke({ platform: 'twitter', userId: body.username.slice(1), count: 1 }, key)
   const saved = [...h.store.requests.values()].find(row => row.idempotencyKey === key)
   saved.acquisitionRequest.body = body
   const responseBody = structuredClone(saved.responseBody), calls = h.calls.length, reservations = h.store.requests.size
@@ -680,6 +731,55 @@ test('old numeric-handle failures and unresolved receipts never reserve, redispa
   await assert.rejects(h.invoke(body, key), { code: 'platform_not_granted' })
   assert.equal(h.calls.length, calls)
   assert.equal(h.store.requests.size, reservations)
+})
+
+test('previous 20-to-30-digit ID receipts replay without allowing a new oversized ID request', async t => {
+  for (const id of ['12345678901234567890', '123456789012345678901234567890']) await t.test(`${id.length} digits`, async t => {
+    const h = await harness(t, { fetchImpl: call => Response.json(call.url.pathname.includes('/tweets')
+      ? timeline(['1'], null, 'old_account', id) : profile('old_account', id)) })
+    const key = `historical-${id.length}-digit-id`, body = { platform: 'twitter', userId: id, count: 1 }
+    const original = await h.invoke({ platform: 'twitter', username: 'old_account', count: 1 }, key)
+    const saved = [...h.store.requests.values()].find(row => row.idempotencyKey === key)
+    // Seed the previously accepted ID contract around a complete delivery for
+    // the same account, preserving the exact historical fingerprint encoding.
+    const previous = normalizeHubSocialCompatRequest('crawl', body, { twitterIdentityMode: 'explicit' })
+    const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
+      : value && typeof value === 'object' ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`
+        : JSON.stringify(value === undefined ? null : value)
+    saved.fingerprint = digest(canonical({ method: 'POST', path: '/api/v1/data/social/crawl', body: previous.fingerprintBody }))
+    saved.acquisitionRequest.body = body
+    const before = structuredClone(saved), calls = h.calls.length, reservations = h.store.requests.size
+    h.store.reserve = () => { throw new Error('Historical oversized ID must not reserve') }
+    assert.deepEqual((await h.invoke(body, key)).body, original.body)
+    assert.deepEqual(saved, before)
+    await assert.rejects(h.invoke(body, `fresh-${id.length}-digit-id`), { code: 'invalid_social_request' })
+    Object.assign(saved, { status: 'reserved', responseBody: null, responseStatus: null, leaseExpiresAt: new Date(Date.now() - 60000).toISOString() })
+    await assert.rejects(h.invoke(body, key), { code: 'request_in_progress' })
+    assert.equal(h.calls.length, calls)
+    assert.equal(h.store.requests.size, reservations)
+  })
+})
+
+test('19-digit Twitter identifiers in username HTTP fields use ID lookup and preserve exact strings', async t => {
+  const id = '1234567890123456789'
+  const h = await harness(t, { fetchImpl: call => Response.json(call.url.pathname.includes('/tweets')
+    ? timeline(['1'], null, 'actual_account', id) : profile('actual_account', id)) })
+  const server = createServer(createApp({ service: h.service, store: h.store, adapter: {}, adminToken: null,
+    listenerMode: 'public', logger: { error() {} }, hubSocialGateway: { socialData: (context, input) => h.gateway.socialAccountData(context, input) } }))
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  for (const operation of ['crawl', 'user-info']) {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/data/social/${operation}`, { method: 'POST',
+      headers: { Authorization: `Bearer ${h.key.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': `http-numeric-twitter-${operation}` },
+      body: JSON.stringify({ platform: 'twitter', username: id, count: 1 }) })
+    const body = await response.json()
+    assert.equal(response.status, 200, JSON.stringify(body))
+    assert.equal(JSON.parse(body.data.raw_info)[0].user_id, id)
+  }
+  assert.deepEqual(h.calls.map(call => call.url.pathname), ['/user/users/by/ids', `/user/${id}/tweets`, '/user/users/by/ids'])
+  assert.ok(h.calls.filter(call => call.url.pathname === '/user/users/by/ids').every(call => call.params.ids === id))
+  assert.ok(h.calls.every(call => call.params.username === undefined))
+  assert.equal(h.historical.length, 0)
 })
 
 test('invalid Twitter username HTTP errors explain the limit before reserving or dispatching', async t => {

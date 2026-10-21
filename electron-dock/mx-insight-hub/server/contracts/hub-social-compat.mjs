@@ -111,16 +111,24 @@ function list(body, fields) {
     return values.map(value => { const normalized = id(value); if (!normalized) fail('invalid_social_request', `${field} is invalid`); return normalized })
   })
 }
-function normalizeIdentity(platform, kind, value, legacyTwitterIdentity = false) {
+function normalizeIdentity(platform, kind, value, legacyTwitterIdentity = false, twitterIdentityMode = 'auto', fromUrl = false) {
   if (platform === 'twitter' && kind !== 'url') {
     const handlePrefix = value.startsWith('@')
     value = value.replace(/^@+/, '')
-    // Explicit handles (including URL paths) keep their type even when numeric.
-    // Only legacy ID aliases infer a username from a nonnumeric value or @.
+    // Business clients use username and ID aliases interchangeably. Only @ or
+    // a profile URL explicitly disambiguates a numeric handle from a user ID.
+    // Historical modes verify saved receipts; they never select new dispatches.
     if (legacyTwitterIdentity) kind = /^\d+$/.test(value) ? 'id' : 'username'
-    else if (kind === 'id' && (handlePrefix || !/^\d+$/.test(value))) kind = 'username'
+    else if (twitterIdentityMode === 'explicit') {
+      if (kind === 'id' && (handlePrefix || !/^\d+$/.test(value))) kind = 'username'
+    } else kind = !handlePrefix && !fromUrl && /^\d+$/.test(value) ? 'id' : 'username'
     if (kind === 'username') validateTwitterUsername(value)
-    if (kind === 'id' && !/^\d{1,30}$/.test(value)) fail('invalid_social_request', 'Invalid Twitter user ID')
+    if (kind === 'id') {
+      const historical = legacyTwitterIdentity || twitterIdentityMode === 'explicit'
+      if (historical ? !/^\d{1,30}$/.test(value) : !/^\d{1,19}$/.test(value)) {
+        fail('invalid_social_request', historical ? 'Invalid Twitter user ID' : 'Twitter user ID must contain 1 to 19 digits')
+      }
+    }
     if (kind === 'username') value = value.toLowerCase()
   }
   if (kind === 'username') value = value.replace(/^@+/, '')
@@ -142,7 +150,7 @@ function normalizeIdentity(platform, kind, value, legacyTwitterIdentity = false)
     if (token) {
       let decoded
       try { decoded = decodeURIComponent(token) } catch { fail('invalid_social_request', 'Invalid account URL encoding') }
-      return normalizeIdentity(platform, ['twitter', 'instagram', 'reddit', 'tiktok'].includes(platform) ? 'username' : 'id', decoded, legacyTwitterIdentity)
+      return normalizeIdentity(platform, ['twitter', 'instagram', 'reddit', 'tiktok'].includes(platform) ? 'username' : 'id', decoded, legacyTwitterIdentity, twitterIdentityMode, true)
     }
   }
   if (platform === 'youtube' && kind === 'username') return { kind: 'url', value: `https://www.youtube.com/@${value}` }
@@ -150,8 +158,8 @@ function normalizeIdentity(platform, kind, value, legacyTwitterIdentity = false)
   if (['reddit', 'zhihu'].includes(platform) && kind === 'id') kind = 'username'
   return { kind, value }
 }
-// legacyTwitterIdentity is internal replay verification only, never a request field.
-export function normalizeHubSocialCompatRequest(operation, body, { maxPageSize = 500, businessId = null, legacyTwitterIdentity = false } = {}) {
+// Historical identity modes are internal replay verification only, never request fields.
+export function normalizeHubSocialCompatRequest(operation, body, { maxPageSize = 500, businessId = null, legacyTwitterIdentity = false, twitterIdentityMode = 'auto' } = {}) {
   if (!['crawl', 'user-info'].includes(operation)) fail('invalid_social_request', 'Unknown social account operation')
   if (!object(body)) fail('invalid_social_request', 'JSON object body is required')
   const allowed = new Set([...COMMON, ...(operation === 'crawl' ? ['activityTypes'] : [])])
@@ -180,7 +188,7 @@ export function normalizeHubSocialCompatRequest(operation, body, { maxPageSize =
   }
   const identities = new Map()
   for (const source of [body, params]) for (const [kind, aliases] of [['id', ID_ALIASES], ['username', USER_ALIASES], ['url', URL_ALIASES]]) {
-    for (const value of list(source, aliases)) { const identity = normalizeIdentity(platform, kind, value, legacyTwitterIdentity); identities.set(`${identity.kind}:${identity.value}`, identity) }
+    for (const value of list(source, aliases)) { const identity = normalizeIdentity(platform, kind, value, legacyTwitterIdentity, twitterIdentityMode); identities.set(`${identity.kind}:${identity.value}`, identity) }
   }
   if (!identities.size) fail('invalid_social_request', 'An account identifier is required')
   for (const key of [...ID_ALIASES, ...USER_ALIASES, ...URL_ALIASES]) delete params[key]

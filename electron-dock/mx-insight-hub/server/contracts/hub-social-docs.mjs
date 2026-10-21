@@ -58,17 +58,19 @@ function accountOperation(row) {
     platform: { type: 'string', enum: accountPlatforms(row.key), description: '一次请求只选择一个平台；已发布的平台别名继续兼容，响应使用规范平台名。' },
     businessId: { type: 'string', deprecated: true, description: '历史兼容字段；可省略。提交时必须等于当前认证消费者绑定的值，不能改变调用身份。' },
     business_id: { type: 'string', deprecated: true, description: 'businessId 的历史别名；同样受当前认证身份绑定。' },
-    username: { ...identifier, description: '平台用户名；Twitter 去掉 @ 后为 1–15 位英文字母、数字或下划线。纯数字用户名仍按用户名查询，与数字 userId 不同。' },
-    usernames: { ...identifiers, description: '平台用户名列表；Twitter 每个用户名去掉 @ 后为 1–15 位英文字母、数字或下划线，纯数字值仍是用户名。' },
-    userId: { ...identifier, description: '平台账号 ID。Twitter 非数字兼容值按用户名解析；Hub 内部任务 ID 不能保证存在对应平台账号。' },
-    userIds: identifiers, user_id: identifier, uid: identifier,
+    username: { ...identifier, description: '平台账号标识。Twitter 自动识别：无 @ 的纯数字字符串按账号 ID 查询（1–19 位）；其他值按用户名查询，去掉 @ 后为 1–15 位英文字母、数字或下划线。纯数字用户名须加 @，也可通过 url/urls 字段提交主页 URL；ID 必须用字符串传输以保持精度。' },
+    usernames: { ...identifiers, description: '平台账号列表。Twitter 每项按内容自动识别，与 username 相同；裸纯数字字符串为 1–19 位账号 ID，@12345 表示数字用户名；主页 URL 请使用 url/urls 字段。' },
+    userId: { ...identifier, description: '平台账号标识。Twitter 与 username 相同，裸纯数字字符串按 1–19 位 ID 查询，其他值按用户名解析；Hub 内部任务 ID 不能保证存在对应平台账号。' },
+    userIds: { ...identifiers, description: '平台账号列表。Twitter 每项与 username 使用相同的自动识别规则。' },
+    user_id: { ...identifier, description: 'userId 兼容字段；Twitter 使用相同的自动识别规则。' },
+    uid: { ...identifier, description: 'userId 兼容字段；Twitter 使用相同的自动识别规则。' },
     url: { ...identifier, description: '平台主页 URL；Twitter 路径中的账号名按用户名解析，包括纯数字账号名。' }, urls: identifiers, profileUrl: identifier, profile_url: identifier,
     channelId: identifier, channel_id: identifier, channelUrl: identifier, channel_url: identifier,
     count: { type: 'integer', minimum: 1, maximum: 500, default: 20, description: `逻辑页上限，仍受当前 Key 页大小上限约束。兼容优先级 ${row.key === 'crawl' ? 'count > pageSize > page_size > limit' : 'limit > count > pageSize > page_size'}；pageSize 与 page_size 同时出现须相同。不足一页不代表没有后续。` },
     pageSize: { type: 'integer', minimum: 1, maximum: 500 }, page_size: { type: 'integer', minimum: 1, maximum: 500 }, limit: { type: 'integer', minimum: 1, maximum: 500 },
     cursor: { type: 'string', maxLength: 8192, description: '原样回传 data.pageInfo.nextCursor（兼容 data.page.nextCursor）。不解析、不改写，不与旧转发接口或内容搜索游标混用；原平台、账号、过滤条件、页大小及 Key 必须保持一致。' },
     page: { type: 'integer', minimum: 1, maximum: 15, default: 1, description: '首页为 1；后续页由 Hub 游标决定，不能单独递增页码跳页。' },
-    params: { type: 'object', description: '仅接受对应平台、活动类型中已审核的业务参数；未知参数会在派发前拒绝。不得提交 provider、endpoint、凭据或原生分页游标。' },
+    params: { type: 'object', description: '仅接受对应平台、活动类型中已审核的业务参数；Twitter 的 username/usernames/userId/userIds/user_id/uid/screen_name/screenName 兼容账号别名采用相同的自动识别规则。未知参数会在派发前拒绝。不得提交 provider、endpoint、凭据或原生分页游标。' },
     concurrency: { type: 'integer', minimum: 1, maximum: 20, description: '兼容接收的历史提示，不覆盖 Hub 的实际并发、准入或采购保护。' },
     cacheMaxAgeHours: { type: 'number', minimum: 0, maximum: 720, description: '兼容接收的历史提示，不承诺强制缓存命中，也不覆盖 Hub 请求幂等规则。' },
     includeRaw: { type: 'boolean', enum: [false], default: false, description: '保留 false/省略的兼容行为；raw_info/raw_data 始终是业务投影 JSON 字符串，不公开供应凭据或原始审计包。' },
@@ -80,7 +82,7 @@ function accountOperation(row) {
     'x-mx-required-capabilities': [accountCapability(row.key)], 'x-mx-category': '账号数据',
     'x-mx-meter-key': accountCapability(row.key), 'x-mx-doc-path': '/docs/strategy-search',
     description: 'Hub 执行账号解析、字段投影及分页，保留已声明的历史账号参数和 raw_info/raw_data JSON 字符串，新增统一 items、page/pageInfo。旧转发入口继续保留；下游切换新接口须从第一页开始。授权要求同一 Key 同时具备目标平台和本操作 capability，不自动开通权限。逻辑页优先消费已取得余量并去重，再在允许范围内继续获取；最多 15 个公开页，游标保留 24 小时，页大小不是保证返回条数。短页或空页应读取 hasMore/nextCursor，不能按条数判定结束。未提供指标为 null，真实零值为 0。失败或未知不会伪装为成功空列表，也不会自动新建请求重试。',
-    parameters: [{ name: 'Idempotency-Key', in: 'header', required: true, schema: { type: 'string', minLength: 8, maxLength: 128 }, description: '同一页面重试保持原标识与原请求体；下一页使用新标识。未知结果先只读核对，不自动换标识重发。' }],
+    parameters: [{ name: 'Idempotency-Key', in: 'header', required: true, schema: { type: 'string', minLength: 8, maxLength: 128 }, description: '同一页面重试保持原标识与原请求体；下一页使用新标识。身份识别规则更新不改写已保存的精确历史回执，也不触发重新采集。未知结果先只读核对，不自动换标识重发。' }],
     requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', additionalProperties: false, required: ['platform'],
       properties, anyOf: ['username', 'usernames', 'userId', 'userIds', 'user_id', 'uid', 'url', 'urls', 'profileUrl', 'profile_url', 'channelId', 'channel_id', 'channelUrl', 'channel_url', 'params'].map(name => ({ required: [name] })) },
       example: { platform: 'twitter', username: 'example', ...(row.key === 'crawl' ? { pageSize: 20 } : {}) } } } },
@@ -141,6 +143,6 @@ export function hubSocialGuide(allowed = () => true, scopes = null) {
   const rows = Object.values(HUB_SOCIAL_ENDPOINTS).filter(row => allowed(row.path.slice('/api/v1'.length)))
   if (!rows.length) return ''
   return `<h2>Hub 社媒与账号接口</h2><table><thead><tr><th>能力</th><th>POST 接口</th><th>已授权平台</th></tr></thead><tbody>${rows.map(row => `<tr><td>${row.label}</td><td><code>${row.path}</code></td><td>${row.key === 'search' ? 'twitter' : hubSocialAccountPlatforms(row.key, scopes).join('、')}</td></tr>`).join('')}</tbody></table>
-    ${rows.some(row => row.key !== 'search') ? '<p>账号内容和资料由 Hub 执行。保留已声明的账号标识别名、raw_info/raw_data JSON 字符串，并提供统一 items、page/pageInfo。账号内容需要目标平台及 social.content.crawl，资料需要目标平台及 social.profile.get；接口可见不等于当前 Key 已开通。详细参数、活动类型及迁移示例见<a href="/docs/strategy-search">策略搜索接入指南</a>。</p><p>从旧转发入口切换需从第一页开始，不混用旧游标。后续页面原样回传 nextCursor，保持账号、平台、过滤条件和页大小，每页使用新 Idempotency-Key。短页不代表结束；只读核对未知请求，不能自动新建请求重试。完整字段仍可在响应 JSON 中查看。</p><p>Twitter 账号查找明确收到上游“未找到账号”时，新请求返回 <code>404 social_account_not_found</code>（<code>stage=account_lookup</code>、<code>outcome=rejected</code>、<code>retryable=false</code>），不伪装为空列表。此结果不证明账号永久不存在，需单独核实账号。旧失败幂等回放仍保留原 502，不再次调用上游。</p>' : ''}
+    ${rows.some(row => row.key !== 'search') ? '<p>账号内容和资料由 Hub 执行。保留已声明的账号标识别名、raw_info/raw_data JSON 字符串，并提供统一 items、page/pageInfo。账号内容需要目标平台及 social.content.crawl，资料需要目标平台及 social.profile.get；接口可见不等于当前 Key 已开通。详细参数、活动类型及迁移示例见<a href="/docs/strategy-search">策略搜索接入指南</a>。</p><p>从旧转发入口切换需从第一页开始，不混用旧游标。后续页面原样回传 nextCursor，保持账号、平台、过滤条件和页大小，每页使用新 Idempotency-Key。短页不代表结束；只读核对未知请求，不能自动新建请求重试。完整字段仍可在响应 JSON 中查看。</p><p>Twitter 账号字符串自动识别，username/userId 等兼容字段不决定查询类型：裸纯数字字符串按 1–19 位账号 ID 查询；含字母或下划线时按 1–15 位用户名查询。纯数字用户名请加 @，或通过 url/urls 字段提交主页 URL，数字 ID 请始终作为字符串发送。身份规则更新保留已保存的精确历史回执，不自动重新采集。</p><p>Twitter 账号查找明确收到上游“未找到账号”时，新请求返回 <code>404 social_account_not_found</code>（<code>stage=account_lookup</code>、<code>outcome=rejected</code>、<code>retryable=false</code>），不伪装为空列表。此结果不证明账号永久不存在，需单独核实账号。旧失败幂等回放仍保留原 502，不再次调用上游。</p>' : ''}
     ${rows.some(row => row.key === 'search') ? '<p>此处 social/search 保留既有 Twitter 搜索合同；统一关键词检索优先使用 /api/v1/data/search，二者游标不互换。Hub-only 聚合搜索的范围继续以 GET /api/v1/data/aggregate/sources?execution=hub_only 的当前授权结果为准。</p>' : ''}`
 }
