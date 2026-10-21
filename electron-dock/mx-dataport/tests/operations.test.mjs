@@ -22,6 +22,7 @@ function fixture(t, { fresh = false } = {}) {
   for (const path of [
     "scripts/manage.sh",
     "scripts/operations.mjs",
+    "scripts/auth-diagnostics.mjs",
     "scripts/migration-job.mjs",
     "scripts/k8s-runtime.mjs",
     "scripts/enroll.mjs",
@@ -94,6 +95,11 @@ if(cmd==='kubectl'){
  if(args.includes('config')&&args.includes('view')){process.stdout.write('test-only-kubeconfig');process.exit(0)}
  const a=args.slice(4).filter(v=>!v.startsWith('--request-timeout=')),key=a.slice(0,3).join(' '),out=x=>process.stdout.write(JSON.stringify(x));
  if(key==='get namespace kube-system')out({metadata:{uid:process.env.HARBOR_TEST_DRIFT?'wrong':'fixture-cluster'}});
+ else if(a[0]==='exec'){
+  if(process.env.HARBOR_TEST_AUTH_EXEC_FAILURE){process.stderr.write('Error from server (Forbidden): private-sensitive-payload');process.exit(1)}
+  out({ok:!process.env.HARBOR_TEST_AUTH_FAILURE,capabilities:{status:process.env.HARBOR_TEST_AUTH_FAILURE?502:200}});
+  if(process.env.HARBOR_TEST_AUTH_FAILURE)process.exit(1);
+ }
  else if(a[0]==='get'&&a[1]==='nodes'){
   const node={metadata:{name:'configured-node-name',labels:{'kubernetes.io/hostname':process.env.HARBOR_TEST_REMOTE_NODE?'another-host':os.hostname()}},spec:{},status:{conditions:[{type:'Ready',status:'True'}]}};
   out({items:process.env.HARBOR_TEST_AMBIGUOUS_NODE?[node,node]:[node]});
@@ -233,6 +239,31 @@ test("plan is offline and status remains read only; cluster drift prevents mutat
   assert.ok(f.calls().every((c) => c.args.includes("get")));
   assert.notEqual(f.run("restart", { HARBOR_TEST_DRIFT: "1" }).status, 0);
   assert.ok(f.calls().every((c) => c.args.includes("get")));
+});
+test("auth diagnosis runs supplied code in the pinned DataPort Pod without deployment or credential transfer", (t) => {
+  const f = fixture(t);
+  const result = f.run("diagnose-auth");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).capabilities.status, 200);
+  const calls = f.calls();
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].args, ["--context", "test-context", "-n", "mx-harbor", "exec", "-i", "deployment/mx-harbor", "-c", "web", "--", "node", "--input-type=module"]);
+  assert.equal(calls[1].stdin, readFileSync(new URL("../scripts/auth-diagnostics.mjs", import.meta.url), "utf8"));
+  assert.doesNotMatch(calls[1].stdin, new RegExp("s".repeat(43)));
+  assert.equal(existsSync(join(f.dir, "lock")), false);
+});
+test("auth diagnosis retains safe failure details and stops before exec on cluster drift", (t) => {
+  const f = fixture(t);
+  const failed = f.run("diagnose-auth", { HARBOR_TEST_AUTH_FAILURE: "1" });
+  assert.equal(failed.status, 1);
+  assert.equal(JSON.parse(failed.stdout).capabilities.status, 502);
+  const denied = f.run("diagnose-auth", { HARBOR_TEST_AUTH_EXEC_FAILURE: "1" });
+  assert.equal(denied.status, 1);
+  assert.doesNotMatch(denied.stdout + denied.stderr, /private-sensitive-payload/);
+  const count = f.calls().length;
+  assert.notEqual(f.run("diagnose-auth", { HARBOR_TEST_DRIFT: "1" }).status, 0);
+  assert.ok(f.calls().slice(count).every((c) => c.args.includes("get")));
+  assert.ok(f.calls().every((c) => c.args.includes("get") || c.args.includes("exec")));
 });
 function assertFullDeploy(calls) {
   const position = (predicate) => calls.findIndex(predicate);

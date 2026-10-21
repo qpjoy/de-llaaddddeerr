@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -24,12 +24,12 @@ const requestedAction = process.argv[2] || "help",
     : requestedAction,
   namespace = "mx-harbor";
 const help =
-  "Usage: bash scripts/manage.sh ops internal-production deploy|enroll|recover-lock|status|logs|plan\nrecover-lock is read-only by default; --confirm-idle attempts guarded stale-lock recovery after all operations have exited.\nUse enroll --migrate-domain for an existing Harbor origin, preserving all keys. Enroll registers https://dataport.minsight-ai.com with existing Launcher/Auth and synchronizes the optional Hub Portal credentials; it does not deploy Launcher/Hub.\nDeploy includes migration, application restart and readiness verification. migrate/restart are compatibility aliases for deploy.\nFirst deploy discovers and saves secrets/operations.json from the current Kubernetes context and local node. Missing SSO/Hub enrollment does not block deployment or migrations; integrations are resolved at runtime. Retained Kubernetes Secret takes precedence.";
+  "Usage: bash scripts/manage.sh ops internal-production deploy|enroll|recover-lock|status|diagnose-auth|logs|plan\nrecover-lock is read-only by default; --confirm-idle attempts guarded stale-lock recovery after all operations have exited.\ndiagnose-auth checks discovery and application capabilities from the running DataPort Pod without logging in, exposing credentials or changing configuration.\nUse enroll --migrate-domain for an existing Harbor origin, preserving all keys. Enroll registers https://dataport.minsight-ai.com with existing Launcher/Auth and synchronizes the optional Hub Portal credentials; it does not deploy Launcher/Hub.\nDeploy includes migration, application restart and readiness verification. migrate/restart are compatibility aliases for deploy.\nFirst deploy discovers and saves secrets/operations.json from the current Kubernetes context and local node. Missing SSO/Hub enrollment does not block deployment or migrations; integrations are resolved at runtime. Retained Kubernetes Secret takes precedence.";
 if (action === "help") {
   console.log(help);
   process.exit(0);
 }
-if (!["deploy", "status", "logs", "plan"].includes(action)) throw Error(help);
+if (!["deploy", "status", "diagnose-auth", "logs", "plan"].includes(action)) throw Error(help);
 if (requestedAction !== action)
   console.log(`DataPort ${requestedAction} now runs the full deploy workflow`);
 const run = (
@@ -103,6 +103,19 @@ if (action === "plan") {
 const cluster = read(["get", "namespace", "kube-system"]);
 if (cluster.metadata.uid !== settings.clusterUid)
   throw Error("Cluster identity drift; no mutation performed");
+if (action === "diagnose-auth") {
+  const result = kube(
+    ["exec", "-i", "deployment/mx-harbor", "-c", "web", "--", "node", "--input-type=module"],
+    {
+      input: readFileSync(new URL("./auth-diagnostics.mjs", import.meta.url), "utf8"),
+      optional: true,
+      timeout: 45000,
+    },
+  );
+  if (result.stdout?.trim()) process.stdout.write(result.stdout);
+  else console.error(commandFailure("kubectl", result).message);
+  process.exit(result.error || result.status !== 0 ? 1 : 0);
+}
 if (action === "status") {
   kube(["get", "deployment,pod,job,service"], { inherit: true });
   process.exit(0);

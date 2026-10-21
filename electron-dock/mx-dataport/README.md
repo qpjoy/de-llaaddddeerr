@@ -46,6 +46,8 @@ MX_HARBOR_BUILD_PROXY=http://127.0.0.1:7789 bash scripts/manage.sh ops internal-
 
 只查看 K8s 状态可运行 `bash scripts/manage.sh ops internal-production status`。`/ready` 检查 DataPort 数据库和会话表，`/status` 返回外部接入配置状态（`pending` / `configured` / `invalid`），不返回地址或凭据；`configured` 不代表远端服务当前可用。
 
+登录返回 410/503 时，可运行 `bash scripts/manage.sh ops internal-production diagnose-auth`，从现有数港 Pod 内检查 Auth discovery 和 capabilities，输出脱敏状态及匹配结果。无需发布镜像，不创建登录事务或修改配置。现场分层检查见 [SSO 故障排查](docs/sso-outage-20261021.md)。
+
 兼容 `MX_INSIGHT_BUILD_PROXY` 作为构建代理的备用变量。命令只管理 DataPort，不自动发布 Launcher、不运行 Hub 迁移、不重启 Hub/Pay、不 `ensure` 全部 mx-common。
 
 - [实施状态、配置与验证](docs/implementation-and-operations.md)
