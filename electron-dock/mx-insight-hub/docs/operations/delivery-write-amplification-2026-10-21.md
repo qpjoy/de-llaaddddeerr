@@ -2,7 +2,7 @@
 
 2026-10-21。接 [delivery-path-throughput-2026-10-21.md](delivery-path-throughput-2026-10-21.md)「仍然存在的上限」第 1、2 条。服务器的盘是消费级 NVMe，和 etcd 共用，出现过 fsync 卡顿，所以真正要省的是 WAL 量。
 
-**状态：B 已按用户确认实现（见下文 B 节的实测）。A 等用户决定，C 和 D 暂缓。**
+**状态：A 和 B 都已按用户确认实现（见下文 A、B 两节）。C 和 D 暂缓。**
 
 ## 结论
 
@@ -111,6 +111,21 @@ kubectl -n mx-common exec -i statefulset/mx-common-postgres -- psql -X -U mx_com
 - 不加 env，不改 mx-common 的队列 API，不改表结构。
 
 **WAL 代价（本机实测）：** 删除本身也要写 WAL。被删行所在的 heap 页和 TOAST 页，在每个 checkpoint 周期里第一次修改时都要写整页镜像。3000 行、24.7 MB 的 payload，批量删除写了 **1.00 倍 payload 大小**的 WAL，之后 VACUUM 再写 0.04 倍。所以积压清理的 WAL 约等于第 7 段的 `done_14d_payload`。按每小时 1 GiB 的预算，约 0.3 MB/s，积压量除以 1 GiB 就是需要的小时数。稳态下每天删掉的量约等于每天新增的量。
+
+**已实现：**
+
+- 新模块 [`server/ingest/job-retention.mjs`](../../server/ingest/job-retention.mjs)，由 `server/workers/ingest.mjs` 启动，和其他后台循环一起随 worker 停止。
+- 节奏：启动 60 秒后跑第一轮，之后每 10 分钟一轮。每一轮从上一轮停下的 id 接着扫；每 24 小时、以及每次进程重启时，从头完整扫一遍。这样当时还在 pending、之后才完成的任务也能被删掉。
+- 每批的删除语句：
+  - 只删 `status = 'done' AND completed_at < now() - interval '14 days'` 的行，覆盖所有队列；
+  - pending、running、dead 一律不碰；
+  - 窗口里出现保留期内创建的行，这一轮就停。
+- 每批的其余参数：在自己的事务里 `SET LOCAL lock_timeout = '1s'`、`statement_timeout = '15s'`、`synchronous_commit = off`；每批 200 行；批间停顿 = max(2 秒, 4 × 本批耗时, 本批 payload 字节 ÷ 每小时 1 GiB)。
+- 出错（含锁等待超时、语句超时）只结束本轮，下一轮从同一位置继续，不会让 worker 退出。删掉了行时，每轮打一行日志：`[ingest] job retention: deleted N done job(s), X MiB payload, in B batch(es)`。
+- `diagnose-content-search.mjs` 和 `verify-kuaishou-search-49814.mjs` 里的 `ingest_job` 改为「有任务行，或 `ingest.ingest_runs` 里有这次调用」。诊断版本号保持不变。
+- 测试：
+  - native [`job-retention-postgres.test.mjs`](../../tests/server/job-retention-postgres.test.mjs)：只删过期的 done 行（两个队列都删）；pending、running、dead、昨天才完成的老任务和新任务都保留；每批最多 200 行，按主键顺序；按 payload 字节停顿；被其他会话锁住的行 1 秒左右放弃并保留；循环能跑完一轮，在初始等待和轮间等待中都能立即响应停止。另有停顿公式的单元测试。
+  - 两个诊断脚本的 PGlite 测试：加了 `ingest_runs` 表；没有任务行、只有 ingest run 的调用读出 `ingest_job = true`。
 
 **收益：** 表和 TOAST 不再增长，空间可以复用，备份变小。anti-wraparound 冻结扫描只需覆盖 14 天的数据；不清理的话，这些旧页迟早也要冻结一遍，同样要写一次整页镜像。
 
