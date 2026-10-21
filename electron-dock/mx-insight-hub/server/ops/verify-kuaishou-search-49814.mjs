@@ -95,7 +95,9 @@ const sourceQuery = `SELECT request.id AS request_id,request.tenant_id,request.c
   raw.body_bytes,raw.body_size,raw.body_sha256,raw.captured_at,raw.parsed_payload IS NULL AS parsed_payload_is_null,
   (SELECT count(*)::int FROM external_platform.response_archives WHERE provider_call_id=call.id) AS response_archives,
   (SELECT count(*)::int FROM external_platform.archive_objects WHERE provider_call_id=call.id) AS archive_objects,
-  EXISTS(SELECT 1 FROM mxq.jobs WHERE queue='mx-insight-hub:ingest' AND dedupe_key='external-platform:tikhub:'||call.id::text) AS ingest_job
+  (EXISTS(SELECT 1 FROM mxq.jobs WHERE queue='mx-insight-hub:ingest' AND dedupe_key='external-platform:tikhub:'||call.id::text)
+    -- Done jobs are deleted after 14 days; an ingest run for the call proves the job ran.
+    OR EXISTS(SELECT 1 FROM ingest.ingest_runs WHERE external_platform_call_id=call.id)) AS ingest_job
   FROM public.usage_requests request JOIN external_platform.provider_calls call ON call.usage_request_id=request.id
   JOIN control.external_platform_restricted_raw_responses raw ON raw.provider_call_id=call.id
   WHERE request.id=$1 AND call.id=$2 AND raw.body_size=$3 LIMIT 1`

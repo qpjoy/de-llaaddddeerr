@@ -16,6 +16,7 @@ import { ExternalSourcePuller } from '../ingest/external/source-puller.mjs'
 import { SQLiteApiSourcePuller } from '../ingest/external/sqlite-api-source.mjs'
 import { runExternalPullScheduler } from '../ingest/external/scheduler.mjs'
 import { EXTERNAL_PULL_QUEUE, runExternalPullJob } from '../ingest/external/sync-job.mjs'
+import { runJobRetention } from '../ingest/job-retention.mjs'
 import { rehydrateJustOneQueuedRecords } from '../ingest/justone.mjs'
 import {
   rehydrateTikHubXiaohongshuQueuedRecords,
@@ -260,6 +261,9 @@ async function main() {
       signal: controller.signal,
       logger,
     }),
+    // One worker replica owns mxq.jobs housekeeping: done rows past 14 days
+    // are deleted in small batches paced by payload bytes.
+    runJobRetention({ pool, signal: controller.signal, logger }),
   ]
 
   logger.log('[ingest] draining ingest and backfill queues')
