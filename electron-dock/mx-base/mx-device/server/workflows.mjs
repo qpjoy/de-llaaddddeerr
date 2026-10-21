@@ -1,9 +1,19 @@
 import { randomUUID, createHash } from "node:crypto";
 import { recordCommandTiming } from "./command-timing.mjs";
 import {
+  demoKeyword,
+  hash,
+  simDetailText,
+  simPriceCents,
+  simTitle,
+} from "./sim-content.mjs";
+// Results per simulated list page: enough to fill a phone screen.
+const SIM_PAGE_ITEMS = 6;
+import {
   requireThat,
   str,
   uuid,
+  noteLink,
   register,
   owned,
   markDispatch,
@@ -47,6 +57,7 @@ import {
   insertionCost,
   insertionBlockers,
 } from "./scheduling.mjs";
+// Simulation unless more.mode says otherwise (real templates, V2-6 P1).
 const event = (s, now, type, message, more = {}) =>
   s.events.push({
     id: randomUUID(),
@@ -229,10 +240,19 @@ export function archiveDefinition(s, now, mode, id, body) {
   return next;
 }
 export function addWorkflow(s, now, mode, body) {
-  requireThat(mode === "sim", "组合指令仅模拟；真实派发未启用", 403);
+  // Real (V2-6 P1): only the seeded PoC templates, explicitly confirmed like
+  // every real submission, on one named Agent-hosted PoC phone.
+  if (mode === "real")
+    requireThat(body.confirmed === true, "必须显式确认真实执行", 400);
   const def = definitions(s).find(
     (d) => d.mode === mode && d.id === body.definitionId,
   );
+  if (mode === "real")
+    requireThat(
+      def,
+      "真实设备只能提交已登记的真实模板（小红书 · PoC 搜索前 3 页 / PoC 笔记详情）",
+      403,
+    );
   requireThat(def, "任务定义版本不存在", 400);
   return enqueueWorkflow(s, now, mode, body, def);
 }
@@ -246,19 +266,27 @@ function enqueueWorkflow(s, now, mode, body, def) {
     "任务 input 须为有界对象",
     400,
   );
+  const real = mode === "real";
+  const keyword = body.keyword || body.input?.keyword,
+    target = body.target || body.input?.target;
+  // A real phone never runs a demo keyword or a demo note: only what was asked.
   const params = {
     ...(body.input || {}),
-    keyword: str(
-      body.keyword || body.input?.keyword || "演示关键词",
-      "关键词",
-      200,
-    ),
-    target: str(
-      body.target || body.input?.target || "demo-note-1",
-      "目标标识",
-      200,
-    ),
+    ...((!real || keyword) && {
+      keyword: str(keyword || "演示关键词", "关键词", 200),
+    }),
+    ...((!real || target) && {
+      target: str(target || "demo-note-1", "目标标识", 200),
+    }),
   };
+  if (real) {
+    const actions = def.steps.map((step) => step.commandDefinition?.action);
+    if (actions.includes("search"))
+      requireThat(params.keyword, "真实搜索必须填写关键词", 400);
+    // The PoC opens a note from its full link (with xsec_token).
+    if (actions.includes("detail")) noteLink(params.target ?? "", "xhs");
+    requireThat(body.deviceId, "真实任务必须明确指定设备；不自动更换账号", 400);
+  }
   const deviceId = body.deviceId ? uuid(body.deviceId) : null;
   const priority = Number(body.priority ?? 5);
   requireThat(
@@ -302,6 +330,12 @@ function enqueueWorkflow(s, now, mode, body, def) {
   );
   if (deviceId) {
     const d = s.devices.find((d) => d.id === deviceId && d.mode === mode);
+    if (real)
+      requireThat(
+        d?.agentId && d.driver === "poc",
+        "真实模板只能派给由宿主机 Agent 以 PoC 驱动托管的手机",
+        400,
+      );
     requireThat(
       d && d.enabled && d.state !== "quarantined",
       "目标设备尚未启用或待核验",
@@ -356,7 +390,7 @@ function enqueueWorkflow(s, now, mode, body, def) {
     now,
     "queued",
     `${def.name} v${def.version}：${plan.length} 条指令入池`,
-    { jobId: j.id },
+    { jobId: j.id, mode },
   );
   return j;
 }
@@ -433,6 +467,10 @@ function yieldedSession(s, now, d, ignoreCooldown = false) {
     p = w.policySnapshot;
   if (!ignoreCooldown && d.cooldownUntil > now) return null;
   const canInsert =
+    // Nothing is inserted into a real session, and a PoC keeps one global
+    // search context: nothing may run in between.
+    d.mode === "sim" &&
+    d.driver !== "poc" &&
     !loopPolicyFor(s, d)?.scheduler?.enabled &&
     w.safePoint &&
     w.resumable &&
@@ -470,9 +508,14 @@ export function claimContinuation(
   index,
   runs = () => true,
 ) {
-  if (mode !== "sim") return null;
+  // Real sessions exist only on Agent-hosted phones (V2-6 P1): a parked one
+  // continues under a new grant, never with an insertion.
   for (const d of s.devices.filter(
-    (d) => d.mode === mode && d.workflowAttemptId && runs(d),
+    (d) =>
+      d.mode === mode &&
+      d.workflowAttemptId &&
+      runs(d) &&
+      (mode === "sim" || d.agentId),
   )) {
     const session = yieldedSession(s, now, d);
     if (!session) continue;
@@ -563,7 +606,12 @@ export function claimContinuation(
  * over or ended) — the same outcome claimContinuation would reach. */
 export function resumeOwnSession(s, now, attempt, workerId) {
   const d = s.devices.find((x) => x.id === attempt.deviceId);
-  if (!d || d.mode !== "sim" || d.workflowAttemptId !== attempt.id) return null;
+  if (
+    !d ||
+    (d.mode !== "sim" && !d.agentId) ||
+    d.workflowAttemptId !== attempt.id
+  )
+    return null;
   const session = yieldedSession(s, now, d, true);
   if (
     !session ||
@@ -593,7 +641,12 @@ export function beginCommand(s, now, a) {
     );
     return null;
   }
-  requireThat(j.mode === "sim" && w, "真实组合执行未启用", 403);
+  // A real session runs only under an Agent lease (the PoC is called there).
+  requireThat(
+    w && (j.mode === "sim" || current.executor === "agent"),
+    "真实组合执行只经宿主机 Agent",
+    403,
+  );
   requireThat(
     !(s.commands || []).some(
       (c) => c.deviceId === a.deviceId && c.status === "running",
@@ -633,7 +686,7 @@ export function beginCommand(s, now, a) {
       : 0;
   const c = {
     id: randomUUID(),
-    mode: "sim",
+    mode: j.mode,
     jobId: j.id,
     attemptId: a.id,
     deviceId: a.deviceId,
@@ -683,30 +736,43 @@ export function simulateCommand(c) {
   else if (action === "back") result = { backed: true };
   else if (action === "like") result = { target: c.params.target, liked: true };
   else if (["detail", "ocr"].includes(action)) {
+    // Platform-like synthetic text (server/sim-content.mjs); never real data.
     result = {
       target: c.params.target,
-      fullText: "模拟正文：商品内容与 OCR 合成证据，仅用于演练。",
+      fullText: simDetailText(c.appId, c.params.target, c.params.keyword),
       complete: true,
     };
     if (c.appId === "pdd" && action === "detail")
       Object.assign(result, {
         goodsId: c.params.target,
-        title: "模拟商品",
-        priceCents: 1990,
+        title: simTitle("pdd", c.params.keyword, 1, 0),
+        priceCents: simPriceCents("pdd", c.params.target),
       });
-    if (c.appId === "pdd" && action === "ocr")
-      result.blocks = [{ text: "模拟商品 ¥19.90", confidence: 0.98 }];
+    if (c.appId === "pdd" && action === "ocr") {
+      const price = simPriceCents("pdd", c.params.target) / 100;
+      result.blocks = [
+        { text: simTitle("pdd", c.params.keyword, 1, 0), confidence: 0.98 },
+        {
+          text: `¥${price.toFixed(2)} 已拼 ${(hash(c.params.target) % 90) + 10}万件`,
+          confidence: 0.95,
+        },
+        { text: "7 天无理由退货 · 坏了包赔", confidence: 0.92 },
+      ];
+    }
   } else
     result = {
       keyword: c.params.keyword,
       page: c.page,
-      items: [1, 2, 3].map((n) => ({
-        id: `${c.id}-${n}`,
-        title: `${c.params.keyword} · 合成内容 ${n}`,
-        ...(c.appId === "pdd"
-          ? { goodsId: `${c.id}-${n}`, priceCents: 1990 + n * 100 }
-          : {}),
-      })),
+      items: Array.from({ length: SIM_PAGE_ITEMS }, (_, i) => {
+        const id = `${c.id}-${i + 1}`;
+        return {
+          id,
+          title: simTitle(c.appId, c.params.keyword, c.page ?? 1, i + 1),
+          ...(c.appId === "pdd"
+            ? { goodsId: id, priceCents: simPriceCents("pdd", id) }
+            : {}),
+        };
+      }),
     };
   return {
     ...receipt,
@@ -715,10 +781,16 @@ export function simulateCommand(c) {
       : result,
   };
 }
-export function validReceipt(c, r) {
+/** Who may have produced a receipt for device d: the PoC driver of a
+ * PoC-driven phone, the simulator for other simulated devices, nobody for any
+ * other real device (V2-6). */
+export const receiptSource = (d) =>
+  d?.driver === "poc" ? "poc" : d?.mode === "sim" ? "simulator" : null;
+/** source: see receiptSource. */
+export function validReceipt(c, r, source = "simulator") {
   if (
     !r ||
-    r.source !== "simulator" ||
+    r.source !== source ||
     r.stopped !== true ||
     [
       "commandId",
@@ -789,10 +861,17 @@ export function completeCommand(s, now, a, c, r) {
   const j = s.jobs.find((j) => j.id === a.jobId),
     w = j.workflow,
     d = s.devices.find((d) => d.id === a.deviceId);
-  if (!validReceipt(row, r)) {
+  // Realms do not mix: a real phone's receipt never comes from a PoC
+  // simulator (the driver reports what /api/state said after the call).
+  const crossed = d?.mode === "real" && r?.evidence?.simulator === true;
+  if (crossed || !validReceipt(row, r, receiptSource(d))) {
     row.status = "unknown";
     row.completedAt = now;
-    finish(s, now, a, { error: "指令回执身份或完成条件不匹配" });
+    finish(s, now, a, {
+      error: crossed
+        ? "真实设备的回执来自 PoC 模拟器，结果作废；隔离设备"
+        : "指令回执身份或完成条件不匹配",
+    });
     cleanWorkflowFaults(s, now);
     return false;
   }
@@ -821,8 +900,16 @@ export function completeCommand(s, now, a, c, r) {
     commandCode: row.code,
     commandAction: actionOf(row),
     detail: r.result.fullText
-      ? { id: r.result.target, title: "模拟正文", content: r.result.fullText }
+      ? {
+          id: r.result.target,
+          title:
+            typeof r.result.title === "string" ? r.result.title : "模拟正文",
+          content: r.result.fullText,
+          priceCents: r.result.priceCents,
+        }
       : undefined,
+    blocks: Array.isArray(r.result.blocks) ? r.result.blocks : undefined,
+    liked: typeof r.result.liked === "boolean" ? r.result.liked : undefined,
     page: row.page,
     count: r.result.items?.length,
     // Projection is a bounded display summary, not the platform result schema.
@@ -837,6 +924,9 @@ export function completeCommand(s, now, a, c, r) {
               : undefined,
         title: typeof i.title === "string" ? i.title : "结构化记录（详见回执）",
         authorName: typeof i.authorName === "string" ? i.authorName : undefined,
+        priceCents: Number.isSafeInteger(i.priceCents)
+          ? i.priceCents
+          : undefined,
       })),
     keyword: j.input.keyword,
   });
@@ -965,7 +1055,7 @@ export function rackScenario(s, now, key) {
       deviceId: slot ? slots[slot - 1].id : null,
       rack: DEMO_RACK,
       priority,
-      keyword: `演示主题 ${i}`,
+      keyword: demoKeyword(code.split(".")[0], i),
       target: `demo-note-${i}`,
     });
   // Five large sessions occupy five slots, five independent jobs demonstrate other slots.

@@ -3613,3 +3613,130 @@ test('a serving index with no watermark is still replayed in full', async () => 
   assert.equal(scans[0].values[2], null, 'an unknown watermark replays everything')
   assert.ok(logs.some((line) => line.includes('no reconciliation watermark')))
 })
+
+function countingHanlp() {
+  const calls = { batches: [], singles: 0 }
+  return {
+    calls,
+    async segmentWithMeta(text) {
+      calls.singles += 1
+      return { tokens: [`hanlp:${text}`], backendUsed: 'hanlp', degraded: false, errorCode: null }
+    },
+    async segmentBatchWithMeta(texts) {
+      calls.batches.push(texts.length)
+      return texts.map((text) => ({ tokens: [`hanlp:${text}`], backendUsed: 'hanlp', degraded: false, errorCode: null }))
+    },
+  }
+}
+
+test('strict prefetch verifies many texts in bounded batches and stops on a failing tokenizer', async () => {
+  const raw = countingHanlp()
+  const strict = requireSegmenterBackend(raw, { expectedBackend: 'hanlp', maxBatch: 4, sleep: async () => {} })
+  const texts = ['标题一', '标题二', '标题一', '', '……', '作者', 'body-1', 'body-2', 'body-3', 'body-4']
+  const verified = await strict.prefetch(texts, { concurrency: 2 })
+  // Duplicates and texts without letters or digits are never sent.
+  assert.deepEqual(raw.calls.batches, [4, 3])
+  assert.equal(verified.size, 7)
+  assert.deepEqual(verified.get('作者').tokens, ['hanlp:作者'])
+
+  const failing = {
+    sent: 0,
+    async segmentWithMeta() { throw new Error('unused') },
+    async segmentBatchWithMeta(chunk) {
+      this.sent += 1
+      return chunk.map(() => ({ tokens: [], backendUsed: null, degraded: true, errorCode: 'hanlp_timeout' }))
+    },
+  }
+  const strictFailing = requireSegmenterBackend(failing, { expectedBackend: 'hanlp', maxBatch: 2, sleep: async () => {} })
+  assert.equal((await strictFailing.prefetch(['a1', 'b2', 'c3', 'd4', 'e5', 'f6'], { concurrency: 1 })).size, 0)
+  // One failed pass is enough evidence; the strict path owns the retries.
+  assert.equal(failing.sent, 1)
+})
+
+test('projector segments a batch in a few batch requests, then serves repeated names from memory', async () => {
+  const rows = Array.from({ length: 6 }, (_, index) => canonicalRow({
+    id: `11111111-1111-4111-8111-${String(index + 1).padStart(12, '0')}`,
+    external_id: `post-${index}`,
+    title: `标题${index}`,
+    body: `正文${index}`,
+    author_name: `作者${index % 2}`,
+  }))
+  const pool = fakePool([
+    ["SET status = 'claimed'", () => ({
+      rows: rows.map((row, index) => ({
+        id: index + 1, aggregate_id: row.id, event_type: 'upsert', projection_revision: 3, attempts: 1,
+      })),
+    })],
+    ['FROM core.canonical_records record', () => ({ rows })],
+    ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
+    ["SET status = 'delivered'", (values) => ({ rows: [], rowCount: values[0].length })],
+    ['SELECT segmenter_backend', () => ({ rows: [{ segmenter_backend: 'hanlp' }] })],
+  ])
+  const raw = countingHanlp()
+  const strict = requireSegmenterBackend(raw, { expectedBackend: 'hanlp', maxBatch: 16, sleep: async () => {} })
+  const documents = []
+  const projector = new SearchProjector({
+    pool,
+    segmenter: strict,
+    indexSet: contentIndex(),
+    logger: { log() {}, warn() {}, error() {} },
+    client: {
+      async bulk(operations) {
+        documents.push(...operations.filter((_, index) => index % 2 === 1))
+        return { items: rows.map((row) => ({ index: { _id: row.id, status: 201 } })) }
+      },
+    },
+  })
+
+  assert.equal((await projector.projectBatch()).delivered, 6)
+  // 6 titles + 6 bodies + 2 author names, de-duplicated: one request instead of
+  // one round trip per field per record.
+  assert.deepEqual(raw.calls.batches, [14])
+  assert.equal(raw.calls.singles, 0)
+  assert.equal(documents[0].titleHanlp, 'hanlp:标题0')
+  assert.equal(documents[1].authorNameHanlp, 'hanlp:作者1')
+
+  // The same short texts in the next batch never reach the tokenizer again.
+  documents.length = 0
+  assert.equal((await projector.projectBatch()).delivered, 6)
+  assert.deepEqual(raw.calls.batches, [14])
+  assert.equal(documents[5].bodyHanlp, 'hanlp:正文5')
+})
+
+test('projector grows its claim while a backlog fills every batch and shrinks once it does not', async () => {
+  const limits = []
+  let available = 230
+  const pool = fakePool([
+    ["SET status = 'claimed'", (values) => {
+      limits.push(values[0])
+      const count = Math.min(values[0], available)
+      available -= count
+      return {
+        rows: Array.from({ length: count }, (_, index) => ({
+          id: index + 1,
+          aggregate_id: `22222222-2222-4222-8222-${String(index + 1).padStart(12, '0')}`,
+          event_type: 'delete',
+          projection_revision: 1,
+          attempts: 1,
+        })),
+      }
+    }],
+    ['FROM core.canonical_records record', () => ({ rows: [] })],
+    ['INSERT INTO outbox.projection_runs', () => ({ rows: [{ id: 1 }] })],
+    ["SET status = 'delivered'", (values) => ({ rows: [], rowCount: values[0].length })],
+  ])
+  const projector = new SearchProjector({
+    pool,
+    segmenter: null,
+    indexSet: contentIndex(),
+    logger: { log() {}, warn() {}, error() {} },
+    client: {
+      async bulk(operations) {
+        return { items: operations.map((operation) => ({ delete: { _id: operation.delete._id, status: 200 } })) }
+      },
+    },
+  })
+  for (let batch = 0; batch < 5; batch += 1) await projector.projectBatch()
+  // 50 full -> 100 full -> 80 of 200 (backlog drained) -> back to 50.
+  assert.deepEqual(limits, [50, 100, 200, 50, 50])
+})

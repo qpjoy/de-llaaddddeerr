@@ -189,6 +189,18 @@ async function segmentFields(segmenter, values) {
  * Once a field degrades, the remaining fields use that segmenter's local
  * fallback directly instead of paying another remote timeout per field.
  */
+/**
+ * The texts buildContentDocument segments for one record, in field order.
+ * Exported so a bulk writer can segment a whole batch's texts up front.
+ */
+export function contentSegmentTexts(row) {
+  const stableFields = row.stable_fields || {}
+  const authorName = row.author_name ?? stableFields.author?.name ?? null
+  const username = stableFields.attributes?.username ?? stableFields.author?.handle ?? null
+  const chatUsername = stableFields.attributes?.chatUsername ?? null
+  return [row.title || '', row.body || '', authorName || '', username || '', chatUsername || '']
+}
+
 export async function buildContentDocument(row, { segmenter }) {
   const stableFields = row.stable_fields || {}
   const authorName = row.author_name ?? stableFields.author?.name ?? null
@@ -196,7 +208,7 @@ export async function buildContentDocument(row, { segmenter }) {
   const chatUsername = stableFields.attributes?.chatUsername ?? null
   const [titleTokens, bodyTokens, authorNameTokens, usernameTokens, chatUsernameTokens] = await segmentFields(
     segmenter,
-    [row.title || '', row.body || '', authorName || '', username || '', chatUsername || ''],
+    contentSegmentTexts(row),
   )
   const media = mediaOf(stableFields)
   const entities = entitiesOf(stableFields)

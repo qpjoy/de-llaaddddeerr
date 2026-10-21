@@ -15,7 +15,9 @@ const flush = () => new Promise(setImmediate)
 
 test('background worker configuration has conservative defaults and bounded explicit overrides', () => {
   const defaults = loadConfig(base)
-  assert.deepEqual(defaults.ingestWorker, { concurrency: 1, postBatchDelayMs: 100 })
+  assert.deepEqual(defaults.ingestWorker, {
+    concurrency: 2, postBatchDelayMs: 0, adaptiveDelayFactor: 1, adaptiveDelayMaxMs: 60_000,
+  })
   assert.deepEqual(defaults.projectorWorker, { postBatchDelayMs: 250, synchronousCommit: 'off' })
   assert.equal(loadConfig({ ...base, MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT: 'on' }).projectorWorker.synchronousCommit, 'on')
   for (const value of ['ON', 'local', 'true']) {
@@ -42,8 +44,13 @@ test('background worker configuration has conservative defaults and bounded expl
 
 test('300 queued acquisitions drain once each with bounded ingest concurrency and a settlement pause', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  const config = loadConfig(base).ingestWorker
-  assert.deepEqual(config, { concurrency: 1, postBatchDelayMs: 100 })
+  // The previous defaults remain available as explicit settings.
+  const config = loadConfig({
+    ...base, MX_INSIGHT_INGEST_WORKER_CONCURRENCY: '1', MX_INSIGHT_INGEST_WORKER_DELAY_MS: '100',
+  }).ingestWorker
+  assert.deepEqual(config, {
+    concurrency: 1, postBatchDelayMs: 100, adaptiveDelayFactor: 1, adaptiveDelayMaxMs: 60_000,
+  })
   const controller = new AbortController()
   const pending = Array.from({ length: 300 }, (_, id) => ({ id, payload: { requestId: `request-${id}` } }))
   const completed = [], handled = [], leased = new Set()
@@ -67,7 +74,7 @@ test('300 queued acquisitions drain once each with bounded ingest concurrency an
     await flush()
     handled.push(requestId)
     active--
-  }, controller.signal, config.concurrency, config.postBatchDelayMs)
+  }, controller.signal, config.concurrency, config.postBatchDelayMs, config)
   t.after(async () => { controller.abort(); await running })
 
   for (let count = 1; count <= 300; count++) {
@@ -96,7 +103,7 @@ test('stopping ingest during a transaction settles the leased job and leaves the
   const controller = new AbortController()
   let release
   const gate = new Promise((resolve) => { release = resolve })
-  const pending = [{ id: 1, payload: {} }, { id: 2, payload: {} }], completed = []
+  const pending = [{ id: 1, payload: {} }, { id: 2, payload: {} }, { id: 3, payload: {} }], completed = []
   const queue = {
     async reclaimExpired() {},
     async claim(name, concurrency) { return pending.splice(0, concurrency) },
@@ -104,15 +111,58 @@ test('stopping ingest during a transaction settles the leased job and leaves the
     async fail() { assert.fail('shutdown must finish the active transaction') },
   }
   const running = startLoop(queue, 'ingest', () => gate, controller.signal,
-    config.concurrency, config.postBatchDelayMs)
+    config.concurrency, config.postBatchDelayMs, config)
   t.after(async () => { controller.abort(); release(); await running })
   await flush()
   controller.abort()
   assert.deepEqual(completed, [])
   release()
   await running
-  assert.deepEqual(completed, [1])
-  assert.deepEqual(pending.map(({ id }) => id), [2])
+  assert.deepEqual(completed, [1, 2])
+  assert.deepEqual(pending.map(({ id }) => id), [3])
+})
+
+test('ingest pauses at least as long as the batch took, so a slow database slows the drain', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+  const config = loadConfig(base).ingestWorker
+  const controller = new AbortController()
+  const pending = Array.from({ length: 4 }, (_, id) => ({ id, payload: {} }))
+  let claims = 0
+  const queue = {
+    async reclaimExpired() {},
+    async claim(name, concurrency) {
+      claims++
+      return pending.splice(0, concurrency)
+    },
+    async complete() {},
+    async fail() { assert.fail('a successful job must not fail') },
+  }
+  // Each job takes 400 ms of (mocked) database time.
+  const running = startLoop(queue, 'ingest', () => new Promise((resolve) => setTimeout(resolve, 400)),
+    controller.signal, config.concurrency, config.postBatchDelayMs, config)
+  t.after(async () => { controller.abort(); await running })
+
+  await flush()
+  assert.equal(claims, 1)
+  t.mock.timers.tick(400)
+  await flush()
+  await flush()
+  // No fixed pause is configured, yet the 400 ms batch earns a 400 ms pause.
+  t.mock.timers.tick(399)
+  await flush()
+  assert.equal(claims, 1)
+  t.mock.timers.tick(1)
+  await flush()
+  await flush()
+  assert.equal(claims, 2)
+  t.mock.timers.tick(400)
+  await flush()
+  await flush()
+  t.mock.timers.tick(400)
+  await flush()
+  controller.abort()
+  t.mock.timers.tick(1_000)
+  await running
 })
 
 test('projector pauses only after a full batch settles and does not claim the next backlog early', async (t) => {

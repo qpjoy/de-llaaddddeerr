@@ -114,6 +114,11 @@ export function workstationView(state, rack = "") {
         command,
         apps,
         coolingApps,
+        // When the device may work again (whole-device rest or App cooldowns).
+        cooldownUntil: Math.max(
+          device.cooldownUntil || 0,
+          ...coolingApps.map((a) => a.cooldownUntil),
+        ),
         status,
         availability: availability.get(device.id),
         queue: queue.filter((q) => q.deviceId === device.id),

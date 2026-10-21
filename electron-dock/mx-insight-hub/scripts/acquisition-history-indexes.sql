@@ -397,3 +397,57 @@ SELECT bool_and(NOT table_exists OR contract_ready)
   \warn 'acquisition-history indexes did not become ready'
   \quit 1
 \endif
+
+-- Settlement lookup of queued ingest jobs (2026-10-21).
+--
+-- A provider settlement reads back the ingest job it writes, by queue and
+-- dedupe key, before and after writing it. The only dedupe index is partial
+-- (pending/running), so every done job made that read a sequential scan of
+-- mxq.jobs inside the settlement transaction, costing more with every job ever
+-- completed. This index serves the read for every status.
+--
+-- Unlike the indexes above it accelerates and guarantees nothing: when it
+-- cannot be built now (a lock wait, an unexpected table owner) the deploy goes
+-- on and the lookup keeps its previous plan; the next deploy tries again.
+SELECT to_regclass('mxq.jobs') IS NOT NULL AS queue_jobs_exists,
+       coalesce((
+         SELECT pg_has_role(current_user, relation.relowner, 'USAGE')
+           FROM pg_class relation
+          WHERE relation.oid = to_regclass('mxq.jobs')
+       ), false) AS queue_jobs_owned,
+       coalesce((
+         SELECT index_state.indisvalid
+                AND index_state.indisready
+                AND index_state.indislive
+                AND pg_get_indexdef(index_state.indexrelid)
+                  = 'CREATE INDEX jobs_dedupe_lookup_idx ON mxq.jobs USING btree (queue, dedupe_key, created_at) WHERE (dedupe_key IS NOT NULL)'
+           FROM pg_index index_state
+          WHERE index_state.indexrelid = to_regclass('mxq.jobs_dedupe_lookup_idx')
+       ), false) AS queue_lookup_index_ready \gset
+
+\if :queue_jobs_exists
+  \if :queue_lookup_index_ready
+    \echo 'mxq.jobs_dedupe_lookup_idx is already valid'
+  \elif :queue_jobs_owned
+    \set ON_ERROR_STOP off
+    DROP INDEX CONCURRENTLY IF EXISTS mxq.jobs_dedupe_lookup_idx;
+    CREATE INDEX CONCURRENTLY jobs_dedupe_lookup_idx
+      ON mxq.jobs (queue, dedupe_key, created_at)
+      WHERE dedupe_key IS NOT NULL;
+    SELECT coalesce((
+             SELECT index_state.indisvalid AND index_state.indisready
+               FROM pg_index index_state
+              WHERE index_state.indexrelid = to_regclass('mxq.jobs_dedupe_lookup_idx')
+           ), false) AS queue_lookup_index_ready \gset
+    \if :queue_lookup_index_ready
+      \echo 'mxq.jobs_dedupe_lookup_idx is ready'
+    \else
+      -- Do not leave an invalid build behind for every job write to maintain.
+      DROP INDEX CONCURRENTLY IF EXISTS mxq.jobs_dedupe_lookup_idx;
+      \warn 'mxq.jobs_dedupe_lookup_idx could not be built now; settlement keeps the previous lookup plan'
+    \endif
+    \set ON_ERROR_STOP on
+  \else
+    \warn 'mxq.jobs belongs to another role; skipping jobs_dedupe_lookup_idx'
+  \endif
+\endif

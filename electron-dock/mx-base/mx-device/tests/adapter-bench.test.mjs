@@ -71,7 +71,9 @@ test("adapter tests prepare only whitelisted commands; next-page needs search an
     ["app.open", "xhs.search", "xhs.search.next"],
   );
   assert.equal(j.priority, 5);
-  assert.equal(s.definitions.length, BUILTIN_DEFINITIONS.length);
+  // The store also holds the two real PoC templates (migrations/016).
+  const sims = () => s.definitions.filter((x) => x.mode === "sim");
+  assert.equal(sims().length, BUILTIN_DEFINITIONS.length);
   const work = claim(s, 1000, "sim", "worker");
   finishTest(s, 1001, work);
   assert.equal(j.status, "succeeded");
@@ -206,7 +208,8 @@ test("bench API enforces auth/CSRF/real boundary; reads do not dispatch and temp
   assert.deepEqual(store.state, before);
   assert.equal(store.state.commands.length, 0);
   assert.equal(store.state.attempts.length, 0);
-  assert.equal(store.state.definitions.length, BUILTIN_DEFINITIONS.length);
+  const sims = () => store.state.definitions.filter((x) => x.mode === "sim");
+  assert.equal(sims().length, BUILTIN_DEFINITIONS.length);
   const seed = adapterTestDefinition(data.code, data.appId);
   const saved = await request("task-definitions?mode=sim", {
     appId: seed.appId,
@@ -218,7 +221,7 @@ test("bench API enforces auth/CSRF/real boundary; reads do not dispatch and temp
     expectedVersion: 0,
   });
   assert.equal(saved.status, 201);
-  assert.equal(store.state.definitions.length, BUILTIN_DEFINITIONS.length + 1);
+  assert.equal(sims().length, BUILTIN_DEFINITIONS.length + 1);
   const savedSteps = (await saved.json()).steps;
   assert.deepEqual(
     savedSteps.map(({ commandDefinition, ...step }) => step),

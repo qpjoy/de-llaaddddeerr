@@ -113,7 +113,7 @@ test(
       const versions = await store.pool.query(
         "SELECT name FROM mx_device.schema_migrations ORDER BY name",
       );
-      assert.equal(versions.rows.at(-1).name, "014_clients_outbox.sql");
+      assert.equal(versions.rows.at(-1).name, "016_real_poc_templates.sql");
       const now = Number(
         (
           await store.pool.query(

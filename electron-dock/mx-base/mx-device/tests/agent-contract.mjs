@@ -9,6 +9,9 @@ import { DeviceGate } from "../server/agent/gate.mjs";
 
 /** A command as the center issues it (run directive). */
 export function sampleCommand(overrides = {}) {
+  return baseCommand(overrides);
+}
+function baseCommand(overrides = {}) {
   return {
     id: "00000000-0000-4000-8000-000000000001",
     seq: 1,
@@ -28,7 +31,11 @@ export function sampleCommand(overrides = {}) {
   };
 }
 
-export function driverContract(name, makeDriver, device) {
+/** sample: overrides for the command the suite runs (a command the driver
+ * supports). A driver that declares canReset: false must not offer reset. */
+export function driverContract(name, makeDriver, device, { sample = {} } = {}) {
+  const sampleCommand = (overrides = {}) =>
+    baseCommand({ ...sample, ...overrides });
   test(`${name}: declares its capabilities honestly`, () => {
     const caps = makeDriver().capabilities(device);
     for (const key of ["canCancel", "canAbort", "canFence"])
@@ -77,8 +84,11 @@ export function driverContract(name, makeDriver, device) {
       const evidence = await driver.stop({ serial: device.serial });
       assert.equal(evidence.safePoint, true);
     } else assert.equal(driver.stop, undefined);
-    const reset = await driver.reset({ serial: device.serial }, "weibo");
-    assert.equal(reset.home, true);
+    if (caps.canReset === false) assert.equal(driver.reset, undefined);
+    else {
+      const reset = await driver.reset({ serial: device.serial }, "weibo");
+      assert.equal(reset.home, true);
+    }
   });
 }
 

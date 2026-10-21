@@ -71,7 +71,16 @@ export function createSearch({ pool, config, logger = console }) {
       ? new SearchQueries({ pool, client: null, segmenter: querySegmenter, indexSet, chunkIndexSet: getChunks(), logger })
       : queries,
     projector: client
-      ? new SearchProjector({ pool, client, segmenter, indexSet, logger })
+      ? new SearchProjector({
+        pool,
+        client,
+        segmenter,
+        indexSet,
+        logger,
+        // Batch requests in flight while prefetching one batch's texts; the
+        // same budget the bulk rebuild uses.
+        segmentConcurrency: config.segmenter?.concurrency || 1,
+      })
       : null,
   }
 }

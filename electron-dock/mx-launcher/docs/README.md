@@ -11,6 +11,9 @@
    当前 Launcher Network 多产品 Dashboard、MX-H2I/Luopan 归属与过滤、连接抽屉、
    Feishu 用户显示、产品级 ban/unban、匿名准入隔离，以及实时连接、3D 拓扑和
    未来 peer-safe 下线边界。
+4. [52-path-latency-observability-plan.md](./52-path-latency-observability-plan.md)：
+   Launcher Admin 与 Luopan bootstrap/standalone 路径的只读探针、代理耗时、WireGuard
+   证据、应用/数据库分层和 MX-H2I 不回归边界。
 
 相关专题：
 

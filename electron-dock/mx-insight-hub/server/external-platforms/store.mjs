@@ -3819,13 +3819,20 @@ export class PostgresExternalPlatformStore {
     }
     let ingestJob = null
     if (includeIngestJob && input.ingestJob) {
+      // Settlement reads this before and after writing the job. `=` is
+      // indexable where IS NOT DISTINCT FROM is not, so a keyed job is found
+      // through jobs_dedupe_lookup_idx instead of scanning every done job inside
+      // the settlement transaction. Same rows for a non-null key.
+      const dedupeKey = input.ingestJob.dedupeKey ?? null
       const ingestResult = await queryable.query(
         `SELECT queue, payload, dedupe_key, priority
            FROM mxq.jobs
-          WHERE queue = $1 AND dedupe_key IS NOT DISTINCT FROM $2
+          WHERE queue = $1 AND ${dedupeKey === null ? 'dedupe_key IS NULL' : 'dedupe_key = $2'}
           ORDER BY created_at DESC
           LIMIT 1`,
-        [input.ingestJob.queue || this.queueName, input.ingestJob.dedupeKey ?? null],
+        dedupeKey === null
+          ? [input.ingestJob.queue || this.queueName]
+          : [input.ingestJob.queue || this.queueName, dedupeKey],
       )
       ingestJob = ingestResult.rows[0] || null
     }

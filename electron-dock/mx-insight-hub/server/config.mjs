@@ -342,7 +342,9 @@ export function loadConfig(environment = process.env) {
   const externalMedia = listenerMode === 'admin'
     ? parseExternalMediaConfig({})
     : parseExternalMediaConfig(environment)
-  const ingestConcurrency = positiveInteger(environment.MX_INSIGHT_INGEST_WORKER_CONCURRENCY, 1, 'MX_INSIGHT_INGEST_WORKER_CONCURRENCY')
+  // Two queued results at a time: overlapping results take their identity locks
+  // in one sorted order, so parallel jobs serialize instead of deadlocking.
+  const ingestConcurrency = positiveInteger(environment.MX_INSIGHT_INGEST_WORKER_CONCURRENCY, 2, 'MX_INSIGHT_INGEST_WORKER_CONCURRENCY')
   if (ingestConcurrency > 4) throw new AppError(500, 'invalid_configuration', 'MX_INSIGHT_INGEST_WORKER_CONCURRENCY must be between 1 and 4')
 
   return {
@@ -377,7 +379,13 @@ export function loadConfig(environment = process.env) {
     dataAdmission: dataAdmissionConfig(environment),
     ingestWorker: {
       concurrency: ingestConcurrency,
-      postBatchDelayMs: boundedNonNegativeInteger(environment.MX_INSIGHT_INGEST_WORKER_DELAY_MS, 100, 'MX_INSIGHT_INGEST_WORKER_DELAY_MS', 60000),
+      // A fixed floor only. Each pause is also at least as long as the batch
+      // before it took (capped at 60 s, built in like the external-pull pacing),
+      // so a slow database slows the drain instead of the drain slowing the
+      // database, and a healthy one is not held to a fixed 100 ms per job.
+      postBatchDelayMs: boundedNonNegativeInteger(environment.MX_INSIGHT_INGEST_WORKER_DELAY_MS, 0, 'MX_INSIGHT_INGEST_WORKER_DELAY_MS', 60000),
+      adaptiveDelayFactor: 1,
+      adaptiveDelayMaxMs: 60_000,
     },
     projectorWorker: {
       postBatchDelayMs: boundedNonNegativeInteger(environment.MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS, 250, 'MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS', 60000),

@@ -38,6 +38,7 @@ import {
   agentHello,
   agentHeartbeat,
   agentInbox,
+  agentProbed,
   agentReport,
   agentSignal,
   createAgent,
@@ -45,6 +46,7 @@ import {
   adoptDevice,
   requestStop,
 } from "./agents.mjs";
+import { agentOnline } from "./agent-lease.mjs";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve, extname } from "node:path";
@@ -620,21 +622,24 @@ export function createApp({
     return null;
   }
   // Host Agent protocol v1: HTTP long-poll plus batched, idempotent reports.
-  // Agents connect out with their own token; simulation realm only (V2-3).
+  // Agents connect out with their own token (V2-3). Each Agent works for the
+  // realm it was registered in (V2-6 P1); every transaction loads only that
+  // realm's rows, so its token is checked there and nowhere else.
   async function agentRoute(req, res, path) {
     if (req.method !== "POST") throw new Fault("仅支持 POST", 405);
     const token = (req.headers.authorization || "").replace(/^Bearer /, "");
     const agentId = agentIdOf(token);
     if (!agentId) throw new Fault("Agent 凭证无效", 401);
+    const mode = await store.agentRealm(agentId);
+    if (!["sim", "real"].includes(mode)) throw new Fault("Agent 凭证无效", 401);
+    touched(res, mode);
     const b = await body(req, 1 << 20);
-    const scoped = { mode: "sim", scope: "agent", agentId };
+    const scoped = { mode, scope: "agent", agentId };
     if (path === "/agent/v1/hello")
       return json(
         res,
         200,
-        await store.atomic((s, n) => agentHello(s, n, token, b), {
-          mode: "sim",
-        }),
+        await store.atomic((s, n) => agentHello(s, n, token, b), { mode }),
       );
     if (path === "/agent/v1/heartbeat")
       return json(
@@ -674,7 +679,16 @@ export function createApp({
           if (m?.type === "signal")
             results.push(
               await store.atomic((s, n) => agentSignal(s, n, token, m), {
-                mode: "sim",
+                mode,
+              }),
+            );
+          else if (m?.type === "device.probed")
+            results.push(
+              await store.atomic((s, n) => agentProbed(s, n, token, m), {
+                mode,
+                scope: "device",
+                deviceId: uuid(m.deviceId),
+                agentId,
               }),
             );
           else if (!/^[0-9a-f-]{36}$/.test(m?.attemptId || ""))
@@ -686,7 +700,7 @@ export function createApp({
           else
             results.push(
               await store.atomic((s, n) => agentReport(s, n, token, m), {
-                mode: "sim",
+                mode,
                 scope: "attempt",
                 attemptId: m.attemptId,
                 agentId,
@@ -763,10 +777,8 @@ export function createApp({
         );
         return json(res, 200, { ok: true });
       }
-      if (path.startsWith("/agent/v1/")) {
-        touched(res, "sim");
+      if (path.startsWith("/agent/v1/"))
         return await agentRoute(req, res, path);
-      }
       if (path.startsWith("/v1/")) return await v1Route(req, res, url, path);
       // The proxy redirects its bare prefix (/device-center → /device-center/):
       // only it knows the outside path, which relative asset URLs depend on.
@@ -1332,7 +1344,8 @@ export function createApp({
             );
           if (mode !== "real")
             throw new Fault("模拟设备不调用手机状态接口", 400);
-          // Probe is durable work claimed by the HOST worker, not an API-server HTTP request.
+          // Probe is durable work claimed by the HOST worker (or the phone's
+          // Agent), not an API-server HTTP request.
           const d = (await store.snapshot(mode)).devices.find(
             (d) => d.id === id,
           );
@@ -1355,6 +1368,15 @@ export function createApp({
                 if (row.pocDisabled) throw new Fault("旧 PoC 通道已停用", 403);
                 if (row.revision !== b.revision)
                   throw new Fault("设备状态已变化");
+                // An Agent-hosted phone is probed by its Agent (inbox).
+                if (
+                  row.agentId &&
+                  !agentOnline(
+                    s.agents.find((a) => a.id === row.agentId),
+                    n,
+                  )
+                )
+                  throw new Fault("宿主机 Agent 离线或已停用，无法检查", 409);
                 row.probeRequestedAt = n;
                 row.revision++;
                 return publicDevice(row);

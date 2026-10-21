@@ -2432,8 +2432,8 @@ MX_INSIGHT_DATA_API_READ_CONCURRENCY=2 \
 MX_INSIGHT_DATA_API_ACQUISITION_CONCURRENCY=3 \
 MX_INSIGHT_DATA_API_MAX_PENDING=300 \
 MX_INSIGHT_DATA_API_WAIT_MS=5000 \
-MX_INSIGHT_INGEST_WORKER_CONCURRENCY=2 \
-MX_INSIGHT_INGEST_WORKER_DELAY_MS=0 \
+MX_INSIGHT_INGEST_WORKER_CONCURRENCY=3 \
+MX_INSIGHT_INGEST_WORKER_DELAY_MS=25 \
 MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS=500 \
 MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT=on \
 MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS=60000 \
@@ -2490,10 +2490,10 @@ grep -Fxq -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS=0' "$runtime
 grep -Fxq -- '--from-literal=MX_INSIGHT_EXTERNAL_PULL_WORKER_DELAY_MS=0' "$runtime_secret_argv"
 grep -Fxq -- '--from-literal=MX_INSIGHT_TELEGRAM_MONITOR_PAGE_DELAY_MS=60000' "$runtime_secret_argv"
 printf 'ok - explicit source page delay bounds survive ConfigMap rendering\n'
-for pressure_setting in DATA_API_READ_CONCURRENCY=2 DATA_API_ACQUISITION_CONCURRENCY=3 DATA_API_MAX_PENDING=300 DATA_API_WAIT_MS=5000 INGEST_WORKER_CONCURRENCY=2 INGEST_WORKER_DELAY_MS=0 PROJECTOR_WORKER_DELAY_MS=500 PROJECTOR_SYNCHRONOUS_COMMIT=on; do
+for pressure_setting in DATA_API_READ_CONCURRENCY=2 DATA_API_ACQUISITION_CONCURRENCY=3 DATA_API_MAX_PENDING=300 DATA_API_WAIT_MS=5000 INGEST_WORKER_CONCURRENCY=3 INGEST_WORKER_DELAY_MS=25 PROJECTOR_WORKER_DELAY_MS=500 PROJECTOR_SYNCHRONOUS_COMMIT=on; do
   grep -Fxq -- "--from-literal=MX_INSIGHT_${pressure_setting}" "$runtime_secret_argv"
 done
-printf 'ok - Hub pressure controls survive ConfigMap rendering, including zero batch delay\n'
+printf 'ok - explicit Hub pressure controls survive ConfigMap rendering\n'
 if grep -Fq "$runtime_secret_value" "$runtime_secret_argv"; then
   printf 'not ok - runtime Secret value entered kubectl argv\n' >&2
   exit 1

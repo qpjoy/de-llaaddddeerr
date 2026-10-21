@@ -1468,8 +1468,8 @@ create_runtime_config() {
     const { dataAdmissionConfig } = await import(process.argv[1])
     dataAdmissionConfig(process.env)
     for (const [key, fallback, min, max] of [
-      ["MX_INSIGHT_INGEST_WORKER_CONCURRENCY", 1, 1, 4],
-      ["MX_INSIGHT_INGEST_WORKER_DELAY_MS", 100, 0, 60000],
+      ["MX_INSIGHT_INGEST_WORKER_CONCURRENCY", 2, 1, 4],
+      ["MX_INSIGHT_INGEST_WORKER_DELAY_MS", 0, 0, 60000],
       ["MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS", 250, 0, 60000],
     ]) {
       const value = Number(process.env[key] || fallback)
@@ -1628,8 +1628,8 @@ create_runtime_config() {
     --from-literal=MX_INSIGHT_DATA_API_ACQUISITION_CONCURRENCY="${MX_INSIGHT_DATA_API_ACQUISITION_CONCURRENCY:-0}" \
     --from-literal=MX_INSIGHT_DATA_API_MAX_PENDING="${MX_INSIGHT_DATA_API_MAX_PENDING:-512}" \
     --from-literal=MX_INSIGHT_DATA_API_WAIT_MS="${MX_INSIGHT_DATA_API_WAIT_MS:-30000}" \
-    --from-literal=MX_INSIGHT_INGEST_WORKER_CONCURRENCY="${MX_INSIGHT_INGEST_WORKER_CONCURRENCY:-1}" \
-    --from-literal=MX_INSIGHT_INGEST_WORKER_DELAY_MS="${MX_INSIGHT_INGEST_WORKER_DELAY_MS:-100}" \
+    --from-literal=MX_INSIGHT_INGEST_WORKER_CONCURRENCY="${MX_INSIGHT_INGEST_WORKER_CONCURRENCY:-2}" \
+    --from-literal=MX_INSIGHT_INGEST_WORKER_DELAY_MS="${MX_INSIGHT_INGEST_WORKER_DELAY_MS:-0}" \
     --from-literal=MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS="${MX_INSIGHT_PROJECTOR_WORKER_DELAY_MS:-250}" \
     --from-literal=MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT="${MX_INSIGHT_PROJECTOR_SYNCHRONOUS_COMMIT:-off}" \
     --from-literal=MX_INSIGHT_EXTERNAL_PULL_PAGE_DELAY_MS="$external_pull_page_delay_ms" \

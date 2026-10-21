@@ -17,8 +17,11 @@ import { devicePacingBlockers, pacingSummary } from "./ledger.mjs";
 // Pure scheduling rules shared by claims and read-only explanations.
 export const matchesJob = (device, job) =>
   device.mode === job.mode &&
-  // Agent-hosted devices run versioned task templates only (V2-3).
+  // Agent-hosted devices run versioned task templates only (V2-3); in the
+  // real realm templates run only on them, legacy phones keep the old
+  // search/detail path (V2-6 P1).
   (!device.agentId || !!job.workflow) &&
+  (device.mode === "sim" || !job.workflow || !!device.agentId) &&
   (!device.workstationDemo ||
     job.runId === device.workstationDemo.runId ||
     job.deviceId === device.id ||

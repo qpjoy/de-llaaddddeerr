@@ -16,7 +16,9 @@ export const supportedApps = (device) =>
     ? device.simApps || ["xhs", "weibo"]
     : device.adapter === "legacy-poc"
       ? ["xhs"]
-      : [];
+      : device.adapter === "agent"
+        ? (device.agentApps || []).filter((id) => id === "xhs")
+        : [];
 
 export function initialApp(device, appId) {
   return {
@@ -92,13 +94,15 @@ export function appBlockers(state, now, device, job, index) {
         message: `当前适配器不支持${appName(appId)}任务`,
       },
     ];
-  if (
-    device.mode === "sim" &&
-    device.simCommandCodes &&
-    job.workflow?.plan.some(
-      (step) => !device.simCommandCodes.includes(step.code),
-    )
-  )
+  // A real Agent-hosted phone runs only what its driver reported (none
+  // reported: nothing).
+  const codes =
+    device.mode === "sim"
+      ? device.simCommandCodes
+      : device.adapter === "agent"
+        ? device.agentCommands || []
+        : null;
+  if (codes && job.workflow?.plan.some((step) => !codes.includes(step.code)))
     return [
       {
         code: "command-unsupported",

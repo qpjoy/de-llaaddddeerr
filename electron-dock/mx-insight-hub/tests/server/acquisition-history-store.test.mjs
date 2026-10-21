@@ -583,3 +583,30 @@ test('a candidate request is verified against the stored fingerprint without dis
   // Verification is read-only: no items, gateway, provider or connector reads.
   assert.deepEqual([...new Set(pool.queries.map((entry) => entry.kind))].sort(), ['begin', 'commit', 'root'])
 })
+
+test('settlement reads its queued ingest job through an index that never blocks a deploy', async () => {
+  const [store, onlinePreparation] = await Promise.all([
+    readFile(new URL('../../server/external-platforms/store.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('../../scripts/acquisition-history-indexes.sql', import.meta.url), 'utf8'),
+  ])
+  // IS NOT DISTINCT FROM cannot use a btree index; equality on a non-null key can.
+  assert.doesNotMatch(store, /FROM mxq\.jobs[\s\S]{0,80}dedupe_key IS NOT DISTINCT FROM/u)
+  assert.match(store, /dedupe_key = \$2/u)
+
+  const section = onlinePreparation.slice(onlinePreparation.indexOf('-- Settlement lookup of queued ingest jobs'))
+  assert.ok(section.length > 0, 'the lookup index section is present')
+  // It runs after the fail-closed acquisition-history assertion, so that
+  // contract is unchanged, and its own failure only warns.
+  assert.ok(
+    onlinePreparation.indexOf('-- Settlement lookup of queued ingest jobs')
+      > onlinePreparation.indexOf('SELECT bool_and(NOT table_exists OR contract_ready)'),
+  )
+  assert.match(section, /CREATE INDEX CONCURRENTLY jobs_dedupe_lookup_idx\s+ON mxq\.jobs \(queue, dedupe_key, created_at\)\s+WHERE dedupe_key IS NOT NULL;/u)
+  assert.match(section, /DROP INDEX CONCURRENTLY IF EXISTS mxq\.jobs_dedupe_lookup_idx/u)
+  assert.ok(section.indexOf('\\set ON_ERROR_STOP off') < section.indexOf('CREATE INDEX CONCURRENTLY'))
+  assert.ok(section.indexOf('\\set ON_ERROR_STOP on') > section.indexOf('CREATE INDEX CONCURRENTLY'))
+  assert.doesNotMatch(section, /\\quit/u)
+  assert.match(section, /pg_has_role\(current_user, relation\.relowner, 'USAGE'\)/u)
+  // The validity check compares PostgreSQL's own rendering of the definition.
+  assert.match(section, /'CREATE INDEX jobs_dedupe_lookup_idx ON mxq\.jobs USING btree \(queue, dedupe_key, created_at\) WHERE \(dedupe_key IS NOT NULL\)'/u)
+})

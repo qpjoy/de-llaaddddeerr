@@ -10,6 +10,7 @@
 import { createServer, request } from "node:http";
 import { randomUUID } from "node:crypto";
 import { verifySignature } from "../server/outbox.mjs";
+import { demoKeyword } from "../server/sim-content.mjs";
 
 const TEMPLATES = ["xhs.detail", "weibo.list", "xhs.list", "weibo.search"];
 const escape = (text) =>
@@ -76,7 +77,10 @@ export async function startHubSim({
     const r = await v1("/v1/jobs", {
       clientRequestId: `hub-demo-${Date.now()}-${n}`,
       template: TEMPLATES[n % TEMPLATES.length],
-      params: { keyword: `Hub 主题 ${n}`, target: `note-${n}` },
+      params: {
+        keyword: demoKeyword(TEMPLATES[n % TEMPLATES.length].split(".")[0], n),
+        target: `note-${n}`,
+      },
       class: n % 5 === 0 ? "interactive" : n % 4 === 0 ? "batch" : "standard",
       ttlMs: 900000,
       ...(!sync && { callback: { url: `http://127.0.0.1:${port}/callbacks` } }),

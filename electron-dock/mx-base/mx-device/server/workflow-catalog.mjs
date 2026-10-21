@@ -355,6 +355,24 @@ BUILTIN_DEFINITIONS.push(
     { code: "pdd.home", repeat: 1 },
   ]),
 );
+// Templates made only of what the XHS PoC can do (V2-6): no App opening or
+// going home, so they also run on PoC-driven phones. migrations/015.
+BUILTIN_DEFINITIONS.push(
+  def(
+    "xhs.poc.search3",
+    "小红书 · PoC 搜索前 3 页",
+    "xhs",
+    "large",
+    [
+      { code: "xhs.search", repeat: 1 },
+      { code: "xhs.search.next", repeat: 2 },
+    ],
+    true,
+  ),
+  def("xhs.poc.detail", "小红书 · PoC 笔记详情", "xhs", "small", [
+    { code: "xhs.note.detail", repeat: 1 },
+  ]),
+);
 // Pin version-one seeds and data dependencies just like authored task versions.
 for (const definition of BUILTIN_DEFINITIONS) {
   for (const step of definition.steps) {
@@ -370,6 +388,39 @@ for (const definition of BUILTIN_DEFINITIONS) {
     );
   }
 }
+// The real realm (V2-6 P1) gets the two PoC templates and nothing else. They
+// run only on phones a host Agent drives with the PoC driver; the command
+// snapshots are the same contracts, renamed into the real realm.
+// migrations/016.
+export const REAL_COMMAND_CODES = [
+  "xhs.search",
+  "xhs.search.next",
+  "xhs.note.detail",
+];
+const POC_MAPPING = {
+  search: "PoC 驱动 GET /api/search（L0）",
+  next: "PoC 驱动 GET /api/next（L0，全局分页，同一会话内连续执行）",
+  detail: "PoC 驱动 GET /api/note（L0，需要完整笔记链接）",
+};
+export const REAL_DEFINITIONS = BUILTIN_DEFINITIONS.filter((d) =>
+  ["xhs.poc.search3", "xhs.poc.detail"].includes(d.code),
+).map((d) => ({
+  ...structuredClone(d),
+  id: `real:${d.code}:1`,
+  mode: "real",
+  steps: d.steps.map((step) => ({
+    ...structuredClone(step),
+    commandDefinition: {
+      ...structuredClone(step.commandDefinition),
+      id: `real:${step.code}:1`,
+      mode: "real",
+      mapping: POC_MAPPING[step.commandDefinition.action],
+      // The PoC waits up to 25 s itself; the driver allows 35 s per call.
+      timeoutMs: 35000,
+      bindings: [],
+    },
+  })),
+}));
 export const DEMO_RACK = "调度实验机架";
 
 // A preview and its test job share the same bounded preparation sequence.

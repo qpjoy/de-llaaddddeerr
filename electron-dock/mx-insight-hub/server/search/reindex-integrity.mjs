@@ -204,9 +204,64 @@ export function requireSegmenterBackend(segmenter, {
     throw new Error('unreachable tokenizer retry state')
   }
 
+  /**
+   * One pass over many texts as a few batch requests, with no retries.
+   *
+   * Returns only verified results, keyed by text. A bulk writer warms a memo
+   * with it and then builds documents through `segmentWithMeta`, so anything
+   * missing here still gets the full strict retry budget, and a tokenizer
+   * outage is retried once by that path instead of once per prefetched text.
+   */
+  const prefetch = async (texts, { concurrency = 2 } = {}) => {
+    const verified = new Map()
+    if (typeof segmenter.segmentBatchWithMeta !== 'function') return verified
+    const unique = [...new Set(texts.map((text) => String(text ?? '')))]
+      .filter((text) => /[\p{L}\p{N}]/u.test(text))
+    const chunks = []
+    for (let index = 0; index < unique.length; index += maxBatch) {
+      chunks.push(unique.slice(index, index + maxBatch))
+    }
+    let failed = false
+    let next = 0
+    const worker = async () => {
+      while (!failed && next < chunks.length) {
+        const chunk = chunks[next]
+        next += 1
+        try {
+          const results = await segmenter.segmentBatchWithMeta(chunk, { allowFallback: false })
+          if (!Array.isArray(results) || results.length !== chunk.length) {
+            failed = true
+            return
+          }
+          let accepted = 0
+          results.forEach((result, index) => {
+            if (result?.backendUsed === expectedBackend
+              && result.degraded === false
+              && Array.isArray(result.tokens)
+              && result.tokens.length > 0) {
+              verified.set(chunk[index], result)
+              accepted += 1
+            }
+          })
+          // Batch failures come back as degraded items rather than a throw.
+          // Every text here has letters or digits, so nothing verified means
+          // the tokenizer is failing: stop sending more of the same.
+          if (accepted === 0) failed = true
+        } catch {
+          // A failed pass says nothing per text; leave it to the strict path.
+          failed = true
+        }
+      }
+    }
+    const width = Math.max(1, Math.min(Number(concurrency) || 1, chunks.length))
+    await Promise.all(Array.from({ length: width }, worker))
+    return verified
+  }
+
   return {
     expectedBackend,
     segmentWithMeta,
+    prefetch,
     async segment(text) {
       return (await segmentWithMeta(text)).tokens
     },

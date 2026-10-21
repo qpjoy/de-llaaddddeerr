@@ -32,6 +32,10 @@ import { SimDriver } from "../server/agent/sim-driver.mjs";
 import { createClient } from "../server/clients.mjs";
 import { OutboxDeliverer } from "../server/outbox.mjs";
 import { startHubSim } from "./hub-sim.mjs";
+import { PocDriver } from "../server/agent/poc-driver.mjs";
+import { PocSimulator, noteLinkOf } from "../server/agent/poc-sim.mjs";
+import { configureLoops } from "../server/loop-policy.mjs";
+import { demoKeyword } from "../server/sim-content.mjs";
 
 const arg = (name, fallback) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -67,9 +71,12 @@ if (previous?.pid) {
 
 const db = await startTempPostgres();
 const store = new PgStore(db.url);
-let engine, api, vite, hostAgent, deliverer, hubSim;
+let engine, api, vite, hostAgent, pocAgent, deliverer, hubSim;
+const pocServers = [];
 const stop = async () => {
   await hubSim?.close();
+  await pocAgent?.stop();
+  for (const server of pocServers) server.close();
   await vite?.close();
   await deliverer?.stop();
   await hostAgent?.stop();
@@ -183,8 +190,65 @@ try {
           key: `dev-sim-agent-${i}`,
           definitionId: i % 2 ? "sim:xhs.detail:1" : "sim:weibo.list:1",
           rack: "Agent 机架",
-          keyword: `Agent 主题 ${i + 1}`,
+          keyword: demoKeyword(i % 2 ? "xhs" : "weibo", i),
           target: `t${i}`,
+        });
+    },
+    { mode: "sim" },
+  );
+  // A PoC rack: slots whose phones an Agent drives through the PoC driver
+  // (V2-6). The PoCs here are local simulators with the PoC's HTTP contract.
+  const pocSerials = ["poc-sim-01", "poc-sim-02", "poc-sim-03"];
+  const origins = {};
+  for (const serial of pocSerials) {
+    const server = await new PocSimulator({
+      delayMs: 1500,
+      name: serial,
+    }).listen(0);
+    pocServers.push(server);
+    origins[serial] = `http://127.0.0.1:${server.address().port}`;
+  }
+  const poc = await store.atomic(
+    (s, n) =>
+      createAgent(s, n, "sim", {
+        name: "PoC 宿主机 Agent（模拟 PoC）",
+        host: "PoC 宿主机 1",
+      }),
+    { mode: "sim" },
+  );
+  pocAgent = new HostAgent({
+    center: target,
+    token: poc.token,
+    devices: pocSerials.map((serial) => ({ serial })),
+    driver: new PocDriver({ origins }),
+    version: "poc-agent/1",
+  });
+  await pocAgent.start();
+  await store.atomic(
+    (s, n) => {
+      pocSerials.forEach((serial, i) =>
+        adoptDevice(s, n, "sim", poc.agent.id, {
+          serial,
+          name: `PoC 插槽 ${i + 1}`,
+          rack: "PoC 机架",
+          slot: i + 1,
+        }),
+      );
+      configureLoops(s, n, "sim", {
+        rack: "PoC 机架",
+        revision: 0,
+        commandDelayMs: 1500,
+        cooldownMinMs: 3000,
+        cooldownMaxMs: 6000,
+      });
+      for (let i = 0; i < 6; i++)
+        addWorkflow(s, n, "sim", {
+          key: `dev-sim-poc-${i}`,
+          definitionId:
+            i % 3 === 2 ? "sim:xhs.poc.detail:1" : "sim:xhs.poc.search3:1",
+          rack: "PoC 机架",
+          keyword: demoKeyword("xhs", i),
+          target: noteLinkOf(`demo${i}note`),
         });
     },
     { mode: "sim" },
@@ -221,7 +285,7 @@ try {
             key: `dev-sim-load-${i}`,
             definitionId: i % 2 ? "sim:xhs.detail:1" : "sim:weibo.list:1",
             rack: racks[i % racks.length],
-            keyword: `压测 ${i + 1}`,
+            keyword: demoKeyword(i % 2 ? "xhs" : "weibo", i),
             target: `t${i}`,
           });
       },

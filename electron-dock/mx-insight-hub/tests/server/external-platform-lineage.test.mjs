@@ -85,6 +85,7 @@ test('PostgresStore accepts only a succeeded matching provider call and writes c
       queries.push({ sql, values })
       if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [], rowCount: 0 }
       if (/INSERT INTO ingest\.ingest_runs/u.test(sql)) return { rows: [{ id: runId }], rowCount: 1 }
+      if (/pg_advisory_xact_lock\(hashtextextended\(identity, 0\)\)/u.test(sql)) return { rows: [{ count: 1 }], rowCount: 1 }
       if (/INSERT INTO ingest\.source_objects/u.test(sql)) {
         return { rows: [{ id: sourceObjectId, current_revision: 1 }], rowCount: 1 }
       }
@@ -122,6 +123,12 @@ test('PostgresStore accepts only a succeeded matching provider call and writes c
     runId,
   })
   assert.equal(queries.at(-1).sql, 'COMMIT')
+  // Queued API results are drained in parallel: identities are locked in one
+  // sorted order before the first row lock, so overlapping jobs serialize.
+  const lockIndex = queries.findIndex(({ sql }) => /pg_advisory_xact_lock/u.test(sql))
+  assert.ok(lockIndex > 0)
+  assert.ok(lockIndex < queries.findIndex(({ sql }) => /INSERT INTO ingest\.source_objects/u.test(sql)))
+  assert.deepEqual(queries[lockIndex].values, [[JSON.stringify([DATASET_ID, PLATFORM, record.objectType, record.externalId])]])
 
   const runInsert = queries.find(({ sql }) => /INSERT INTO ingest\.ingest_runs/u.test(sql))
   assert.match(runInsert.sql, /external_platform_call_id/u)

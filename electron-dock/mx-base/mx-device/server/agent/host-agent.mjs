@@ -54,6 +54,8 @@ export class HostAgent {
     this.running = false;
     this.connected = false;
     this.aborts = new Set();
+    // Ends the heartbeat wait at once on stop or kill.
+    this.halt = new AbortController();
     this.stats = { commands: 0, rejected: 0, lateReports: 0 };
   }
   async #post(path, body, timeoutMs = 10000) {
@@ -89,12 +91,14 @@ export class HostAgent {
   }
   async start() {
     this.running = true;
+    this.halt = new AbortController();
     await this.#hello();
     this.loops = [this.#heartbeatLoop(), this.#pollLoop()];
   }
   /** Graceful stop: no new leases; leases in hand end at their next report. */
   async stop() {
     this.running = false;
+    this.halt.abort();
     for (const abort of this.aborts) abort.abort();
     for (const lease of this.leases.values()) lease.wake?.();
     await Promise.allSettled([
@@ -106,6 +110,7 @@ export class HostAgent {
   kill() {
     this.running = false;
     this.killed = true;
+    this.halt.abort();
     for (const abort of this.aborts) abort.abort();
     for (const lease of this.leases.values()) lease.wake?.();
   }
@@ -132,6 +137,8 @@ export class HostAgent {
           leaseMs: value.leaseMs,
           graceMs: value.graceMs,
         });
+        // Tell the driver which realm it serves (see PocDriver.preflight).
+        if (value.mode) this.driver.realm = value.mode;
         this.deviceIds = new Map(
           value.devices.map((d) => [d.serial, d.deviceId]),
         );
@@ -148,7 +155,9 @@ export class HostAgent {
   }
   async #heartbeatLoop() {
     while (this.running) {
-      await sleep(this.config.heartbeatMs);
+      await sleep(this.config.heartbeatMs, null, {
+        signal: this.halt.signal,
+      }).catch(() => {});
       if (!this.running) break;
       try {
         const value = await this.#post("heartbeat", {
@@ -198,6 +207,10 @@ export class HostAgent {
       }
       for (const grant of inbox.grants) this.#onGrant(grant);
       for (const control of inbox.controls) {
+        if (control.type === "device.probe") {
+          void this.#probe(control);
+          continue;
+        }
         const lease = this.leases.get(control.attemptId);
         if (lease?.token === control.token) {
           lease.stopRequested = true;
@@ -252,6 +265,25 @@ export class HostAgent {
         if (this.leases.get(lease.attemptId) === lease)
           this.leases.delete(lease.attemptId);
       });
+  }
+  /** A probe request (real realm): read the device state through the driver
+   * (PoC: GET /api/state only) and report it. Never a device operation. */
+  async #probe(control) {
+    const serial = control.serial ?? this.serials.get(control.deviceId);
+    const device = this.devices.find((d) => d.serial === serial);
+    let observation = { reachable: false, idle: false };
+    try {
+      if (device && this.driver.probe)
+        observation = await this.driver.probe(device);
+    } catch {
+      /* unreachable stays the answer */
+    }
+    await this.#deliver({
+      type: "device.probed",
+      deviceId: control.deviceId,
+      requestedAt: control.requestedAt,
+      observation,
+    }).catch(() => {});
   }
   /** Delivers one report; resolves with the center's result. */
   async #deliver(message) {
@@ -321,6 +353,30 @@ export class HostAgent {
       serial: lease.serial,
       token: lease.token,
     });
+    // Driver preflight (PoC L0: the PoC must report idle before anything is
+    // sent). Nothing was issued yet, so a refusal puts the work back.
+    if (this.driver.preflight) {
+      const device = this.devices.find((d) => d.serial === lease.serial);
+      let ready = null;
+      try {
+        ready = await this.driver.preflight(device);
+      } catch {
+        ready = null;
+      }
+      if (!ready?.idle) {
+        this.stats.rejected++;
+        this.log(
+          `${lease.serial} 预检未通过（${ready?.reason || "不可达"}），拒绝租约`,
+        );
+        await this.#deliver({
+          type: "lease.reject",
+          attemptId: lease.attemptId,
+          token: lease.token,
+          reason: ready ? "busy" : "device-fault",
+        }).catch(() => {});
+        return;
+      }
+    }
     let directive = await this.#exchange(lease, { type: "lease.accept" });
     while (directive && this.running) {
       if (directive.generation) lease.generation = directive.generation;
@@ -335,10 +391,13 @@ export class HostAgent {
           hung = false;
         if (gate.ok) {
           const abort = new AbortController();
-          const limit = Math.max(
-            5000,
-            c.definition?.timeoutMs || (c.estimateMs || 3000) * 4,
-          );
+          // A driver may know its own bound (PoC waits up to 25 s itself).
+          const limit =
+            this.driver.timeoutMs?.(c) ??
+            Math.max(
+              5000,
+              c.definition?.timeoutMs || (c.estimateMs || 3000) * 4,
+            );
           const timer = setTimeout(() => {
             hung = true;
             abort.abort();
