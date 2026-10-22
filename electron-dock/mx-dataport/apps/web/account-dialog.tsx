@@ -60,7 +60,7 @@ function AccountDialogSession({
     [show, setShow] = useState(false);
   useEffect(() => {
     if (!open || preview) return;
-    if (employee) { setChecking(false); setUnavailable(false); setError(""); return; }
+    if (employee) { setOptions(null); setChecking(false); setUnavailable(false); setError(""); return; }
     let active = true;
     setChecking(true);
     setOptions(null);
@@ -119,7 +119,7 @@ function AccountDialogSession({
       if (employee) {
         const result = await request<{redirect:string}>("/auth/local/login", {
           method:"POST",signal:AbortSignal.timeout(15000),
-          body:JSON.stringify({account:data.get("login"),password:data.get("password")}),
+          body:JSON.stringify({account:data.get("employeeAccount"),password:data.get("employeePassword")}),
         });
         navigateAfterLogin(result.redirect, location, history, onAuthenticated);
         return;
@@ -191,21 +191,28 @@ function AccountDialogSession({
             <DialogDescription>{employee ? "使用企业超管创建的数港子账号登录。" : "企业超管使用统一 MX 账号，首次开通需填写 DataPort 专用邀请码。"}</DialogDescription>
           </DialogHeader>
           <div className="auth-login-modes" role="group" aria-label="登录方式">
-            <Button type="button" variant={employee ? "outline" : "default"} disabled={busy} onClick={() => {setEmployee(false);setError("");}}>企业超管 · MX 登录</Button>
-            <Button type="button" variant={employee ? "default" : "outline"} disabled={busy} onClick={() => {setEmployee(true);setError("");}}>子账号登录</Button>
+            <Button type="button" variant={employee ? "outline" : "default"} disabled={busy} onClick={() => {setEmployee(false);setError("");setShow(false);}}>企业超管 · MX 登录</Button>
+            <Button type="button" variant={employee ? "default" : "outline"} disabled={busy} onClick={() => {setEmployee(true);setError("");setShow(false);}}>子账号登录</Button>
           </div>
-          <form onSubmit={submit} aria-busy={busy || checking}>
+          {/* Remount on mode changes so MX credentials cannot carry into the
+              employee form. Separate field identities also discourage autofill. */}
+          <form
+            key={employee ? "dataport-employee-login" : "mx-owner-login"}
+            onSubmit={submit}
+            autoComplete={employee ? "off" : "on"}
+            aria-busy={busy || checking}
+          >
             <FieldGroup>
               <Field>
-                <FieldLabel htmlFor="auth-login">{employee ? "数港子账号" : "MX 账号"}</FieldLabel>
+                <FieldLabel htmlFor={employee ? "employee-login" : "auth-login"}>{employee ? "数港子账号" : "MX 账号"}</FieldLabel>
                 <InputGroup>
                   <InputGroupInput
-                    id="auth-login"
-                    name="login"
+                    id={employee ? "employee-login" : "auth-login"}
+                    name={employee ? "employeeAccount" : "login"}
                     required
                     maxLength={64}
-                    autoComplete="username"
-                    defaultValue={options?.loginHint || ""}
+                    autoComplete={employee ? "off" : "username"}
+                    defaultValue={employee ? "" : options?.loginHint || ""}
                     placeholder={employee ? "输入企业超管分配的子账号" : "输入你的 MX 账号"}
                     disabled={busy}
                   />
@@ -215,15 +222,15 @@ function AccountDialogSession({
                 </InputGroup>
               </Field>
               <Field>
-                <FieldLabel htmlFor="auth-password">密码</FieldLabel>
+                <FieldLabel htmlFor={employee ? "employee-password" : "auth-password"}>密码</FieldLabel>
                 <InputGroup>
                   <InputGroupInput
-                    id="auth-password"
-                    name="password"
+                    id={employee ? "employee-password" : "auth-password"}
+                    name={employee ? "employeePassword" : "password"}
                     type={show ? "text" : "password"}
                     required
                     maxLength={128}
-                    autoComplete="current-password"
+                    autoComplete={employee ? "new-password" : "current-password"}
                     placeholder="输入密码"
                     disabled={busy}
                   />
