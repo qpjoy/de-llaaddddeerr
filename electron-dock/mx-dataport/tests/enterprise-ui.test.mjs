@@ -36,8 +36,8 @@ test('stopping batch lets the in-flight result settle and never dispatches the n
 test('ambiguous batch outcomes stop dispatch and explicit continuation never retries a settled or unknown row',async()=>{
   let calls=0;const source=rows();
   const result=await runBatchRows(source,async()=>{calls++;throw Error('connection interrupted')},()=>false,()=>{})
-  assert.equal(calls,1);assert.equal(result[0].status,'待确认');assert.equal(result[1].status,'待查询')
-  const continued=await runBatchRows(result,async()=>{calls++;return success},()=>false,()=>{});assert.equal(calls,3);assert.equal(continued[0].status,'待确认');assert.equal(continued[2].status,'成功')
+  assert.equal(calls,1);assert.equal(result[0].status,'渠道限流');assert.equal(result[1].status,'待查询')
+  const continued=await runBatchRows(result,async()=>{calls++;return success},()=>false,()=>{});assert.equal(calls,3);assert.equal(continued[0].status,'渠道限流');assert.equal(continued[2].status,'成功')
   calls=0;await runBatchRows(rows(),async()=>{calls++;return {status:429,error:{code:'quota_exhausted'}}},()=>false,()=>{});assert.equal(calls,1)
 })
 test('reference advice preserves unrated and low-risk uncertainty',()=>{assert.match(riskAdvice(null),/未提供/);assert.match(riskAdvice('low'),/不代表绝对安全/);assert.match(riskAdvice('高风险'),/核验/);})
@@ -51,8 +51,11 @@ test('query status separates proven channel limits and duplicate protection from
     const payload={status:409,error:{code}};
     assert.equal(queryStatus(payload).label,'防重复保护');assert.equal(portraitState(payload),'unknown','protection never grants a fresh retry');
   }
-  for(const code of ['ip_query_outcome_unknown','query_outcome_unknown','external_platform_persistence_unknown'])
-    assert.equal(queryStatus({status:503,error:{code}}).label,'待确认','lost historical causes must not be guessed');
+  for(const code of ['ip_query_outcome_unknown','query_outcome_unknown','external_platform_persistence_unknown']) {
+    const result={status:503,error:{code}};
+    assert.equal(queryStatus(result).label,'渠道限流','unknown results share the requested customer-facing label');
+    assert.equal(queryStatus(result).kind,'unknown');assert.equal(portraitState(result),'unknown','display grouping never changes outcome certainty');
+  }
   for(const code of ['commerce_quota_exhausted','commerce_daily_limit_exhausted','ip_channel_paused'])
     assert.equal(queryStatus({status:429,error:{code}}).label,'失败','customer quota and a paused channel are not channel rate limits');
   assert.equal(queryStatus(success).label,'成功');
@@ -68,7 +71,7 @@ test('channel limits and duplicate protection pause a batch and continuation onl
   }
   for(const code of ['invalid_response','ip_risk_unavailable',undefined]) {
     const result=await runBatchRows(rows(),async()=>{throw Object.assign(Error('lost receipt'),{status:502,code})},()=>false,()=>{});
-    assert.equal(result[0].status,'待确认','unclassified transport failures retain uncertainty');assert.equal(result[1].status,'待查询');
+    assert.equal(result[0].status,'渠道限流','unclassified transport failures share the display label and still halt dispatch');assert.equal(result[1].status,'待查询');
   }
 })
 test('missing and unrecognized risk levels cannot appear to mean no risk',()=>{

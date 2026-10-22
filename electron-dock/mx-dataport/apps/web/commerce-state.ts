@@ -139,9 +139,10 @@ export function queryStatus(result: any) {
         description: "相同查询正在处理或上次结果尚未确认，本次未再次调用渠道。请先查看原查询记录。" };
   }
   const label = ({ success: "成功", partial: "部分数据", no_data: "暂无数据",
-    unknown: "待确认", error: "失败" } as Record<string, string>)[state];
+    unknown: "渠道限流", error: "失败" } as Record<string, string>)[state];
+  // Customer-facing grouping only: keep unknown certainty and retry guards.
   return { kind: state, label, description: state === "unknown"
-    ? "尚未取得可确认的查询回执，暂时无法判断是否完成。请保留查询记录编号，稍后刷新历史核对，避免重复提交。"
+    ? "暂未取得完整查询回执，请稍后查看历史记录。系统不会自动重试，请避免重复提交。"
     : state === "error" ? "本次未取得可用画像，请查看查询详情。" : "" };
 }
 export function paymentReturnTrade(search: string) {

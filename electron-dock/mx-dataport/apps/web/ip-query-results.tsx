@@ -19,7 +19,7 @@ const states: Record<string, string> = {
   success: "查询成功",
   partial: "部分数据",
   no_data: "暂无数据",
-  unknown: "结果待核对",
+  unknown: "渠道限流",
   error: "查询失败",
 };
 const valueText = (value: unknown) =>
