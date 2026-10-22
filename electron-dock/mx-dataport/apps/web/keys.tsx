@@ -22,6 +22,7 @@ import { request } from "./api";
 import { enterpriseUrl, hasPermission } from "./permissions";
 import { dateTime } from "./commerce-state";
 import { Pagination, useLocalPage } from "./pagination";
+import { keyCreationFailure } from "./key-write-state";
 export function ApiKeys({
   tenant,
   session,
@@ -71,13 +72,11 @@ export function ApiKeys({
         })
       ).data;
     } catch (e) {
-      setError(
-        (e as Error).message +
-          (path === "keys"
-            ? " 请先关闭弹窗并核对 Key 列表，确认上次创建结果。"
-            : ""),
-      );
-      if (path === "keys") setVersion((v) => v + 1);
+      if (path === "keys") {
+        const failure = keyCreationFailure(e);
+        setError(failure.message);
+        if (failure.unconfirmed) setVersion((v) => v + 1);
+      } else setError((e as Error).message);
       throw e;
     } finally {
       setBusy(false);

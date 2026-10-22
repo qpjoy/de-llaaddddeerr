@@ -99,7 +99,9 @@ export function BatchQuery({
       }
     }
   }
-  const done = rows.filter(
+  const validRows = rows.filter((r) => r.status !== "格式错误");
+  const invalidCount = rows.length - validRows.length;
+  const done = validRows.filter(
     (r) => !["待查询", "查询中"].includes(r.status),
   ).length;
   return (
@@ -170,7 +172,7 @@ export function BatchQuery({
           }}
         />
         <p className="harbor-hint">
-          每个 IP 分别查询并消耗企业额度；待确认的记录不会自动重试。
+          每个 IP 分别查询并消耗企业额度；遇到渠道限流或防重复保护时暂停后续查询，不会自动重试。
         </p>
         {error && (
           <p role="alert" className="harbor-error">
@@ -181,10 +183,11 @@ export function BatchQuery({
           <>
             <div className="dp-toolbar">
               <span aria-live="polite">
-                已完成 {done} / {rows.length} 条
+                已完成 {done} / {validRows.length} 条
+                {invalidCount > 0 && ` · 格式错误 ${invalidCount} 条（不参与查询）`}
               </span>
               <progress
-                max={rows.length}
+                max={validRows.length || 1}
                 value={done}
                 aria-label="批量查询进度"
               />

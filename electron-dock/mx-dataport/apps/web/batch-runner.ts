@@ -1,4 +1,4 @@
-import { portraitState } from "./commerce-state.ts";
+import { portraitState, queryStatus } from "./commerce-state.ts";
 export type BatchRow = {
   ip: string;
   intent: string;
@@ -23,30 +23,31 @@ export async function runBatchRows(
     let halt = false;
     try {
       const result = await send(next[n]),
-        state = portraitState(result);
+        state = portraitState(result),
+        presentation = queryStatus(result);
       next[n] = {
         ...next[n],
         result,
-        status: (
-          {
-            success: "成功",
-            partial: "部分数据",
-            no_data: "暂无数据",
-            unknown: "待确认",
-            error: "失败",
-          } as Record<string, string>
-        )[state],
+        status: presentation.label,
+        error: presentation.description || undefined,
       };
       halt =
         result.status === 401 ||
         result.status === 403 ||
         result.status === 429 ||
+        presentation.kind === "rate_limited" ||
+        presentation.kind === "duplicate_protected" ||
         state === "unknown";
     } catch (error) {
+      const issue = error as Error & { code?: string; status?: number };
+      const reason = queryStatus(issue);
+      const presentation = ["rate_limited", "duplicate_protected"].includes(reason.kind)
+        ? reason
+        : queryStatus({ error: { code: "query_outcome_unknown" } });
       next[n] = {
         ...next[n],
-        status: "待确认",
-        error: (error as Error).message,
+        status: presentation.label,
+        error: presentation.description || issue.message,
       };
       halt = true;
     }

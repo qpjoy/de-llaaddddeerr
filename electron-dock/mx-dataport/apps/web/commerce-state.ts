@@ -116,11 +116,34 @@ function storedIntent(
 export function portraitState(result: any) {
   const state = result?.response?.data?.status;
   if (["success", "partial", "no_data"].includes(state)) return state;
-  const code = result?.error?.code || result?.response?.error?.code || "";
+  const code = result?.error?.code || result?.response?.error?.code || result?.code || "";
   return result?.status === 409 ||
     /unknown|pending|in_progress|ip_response_(unusable|too_large)/.test(code)
     ? "unknown"
     : "error";
+}
+// Presentation reasons are separate from outcome certainty. A protected
+// duplicate must never become a retryable failure just because it has a label.
+export function queryStatus(result: any) {
+  const state = portraitState(result);
+  const code = result?.error?.code || result?.response?.error?.code || result?.code;
+  if (!["success", "partial", "no_data"].includes(state)) {
+    if (["ip_channel_busy", "ip_channel_cooling", "ip_channel_daily_limit",
+      "ip_channel_rate_limited", "ip_query_rate_limited"].includes(code))
+      return { kind: "rate_limited", label: "渠道限流",
+        description: code === "ip_channel_daily_limit"
+          ? "查询渠道今日调用次数已达上限，请在渠道额度恢复后再试。"
+          : "查询渠道触发频率限制或正在冷却，请稍后再试。系统不会自动重试。" };
+    if (["ip_query_in_progress_or_unknown", "request_pending", "request_in_progress", "request_unknown"].includes(code))
+      return { kind: "duplicate_protected", label: "防重复保护",
+        description: "相同查询正在处理或上次结果尚未确认，本次未再次调用渠道。请先查看原查询记录。" };
+  }
+  const label = ({ success: "成功", partial: "部分数据", no_data: "暂无数据",
+    unknown: "渠道限流", error: "失败" } as Record<string, string>)[state];
+  // Customer-facing grouping only: keep unknown certainty and retry guards.
+  return { kind: state, label, description: state === "unknown"
+    ? "暂未取得完整查询回执，请稍后查看历史记录。系统不会自动重试，请避免重复提交。"
+    : state === "error" ? "本次未取得可用画像，请查看查询详情。" : "" };
 }
 export function paymentReturnTrade(search: string) {
   const query = new URLSearchParams(search);

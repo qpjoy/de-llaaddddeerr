@@ -22,6 +22,7 @@ import {
   Field,
   FieldGroup,
   FieldLabel,
+  FieldDescription,
   FieldError,
 } from "@/components/ui/field";
 import {
@@ -59,7 +60,7 @@ function AccountDialogSession({
     [show, setShow] = useState(false);
   useEffect(() => {
     if (!open || preview) return;
-    if (employee) { setChecking(false); setUnavailable(false); setError(""); return; }
+    if (employee) { setOptions(null); setChecking(false); setUnavailable(false); setError(""); return; }
     let active = true;
     setChecking(true);
     setOptions(null);
@@ -118,7 +119,7 @@ function AccountDialogSession({
       if (employee) {
         const result = await request<{redirect:string}>("/auth/local/login", {
           method:"POST",signal:AbortSignal.timeout(15000),
-          body:JSON.stringify({account:data.get("login"),password:data.get("password")}),
+          body:JSON.stringify({account:data.get("employeeAccount"),password:data.get("employeePassword")}),
         });
         navigateAfterLogin(result.redirect, location, history, onAuthenticated);
         return;
@@ -187,24 +188,31 @@ function AccountDialogSession({
           </div>
           <DialogHeader>
             <DialogTitle>登录数港</DialogTitle>
-            <DialogDescription>{employee ? "使用企业超管创建的数港子账号登录。" : "企业超管使用已开通数港的统一 MX 账号登录。"}</DialogDescription>
+            <DialogDescription>{employee ? "使用企业超管创建的数港子账号登录。" : "企业超管使用统一 MX 账号，首次开通需填写 DataPort 专用邀请码。"}</DialogDescription>
           </DialogHeader>
           <div className="auth-login-modes" role="group" aria-label="登录方式">
-            <Button type="button" variant={employee ? "outline" : "default"} disabled={busy} onClick={() => {setEmployee(false);setError("");}}>企业超管 · MX 登录</Button>
-            <Button type="button" variant={employee ? "default" : "outline"} disabled={busy} onClick={() => {setEmployee(true);setError("");}}>子账号登录</Button>
+            <Button type="button" variant={employee ? "outline" : "default"} disabled={busy} onClick={() => {setEmployee(false);setError("");setShow(false);}}>企业超管 · MX 登录</Button>
+            <Button type="button" variant={employee ? "default" : "outline"} disabled={busy} onClick={() => {setEmployee(true);setError("");setShow(false);}}>子账号登录</Button>
           </div>
-          <form onSubmit={submit} aria-busy={busy || checking}>
+          {/* Remount on mode changes so MX credentials cannot carry into the
+              employee form. Separate field identities also discourage autofill. */}
+          <form
+            key={employee ? "dataport-employee-login" : "mx-owner-login"}
+            onSubmit={submit}
+            autoComplete={employee ? "off" : "on"}
+            aria-busy={busy || checking}
+          >
             <FieldGroup>
               <Field>
-                <FieldLabel htmlFor="auth-login">{employee ? "数港子账号" : "MX 账号"}</FieldLabel>
+                <FieldLabel htmlFor={employee ? "employee-login" : "auth-login"}>{employee ? "数港子账号" : "MX 账号"}</FieldLabel>
                 <InputGroup>
                   <InputGroupInput
-                    id="auth-login"
-                    name="login"
+                    id={employee ? "employee-login" : "auth-login"}
+                    name={employee ? "employeeAccount" : "login"}
                     required
                     maxLength={64}
-                    autoComplete="username"
-                    defaultValue={options?.loginHint || ""}
+                    autoComplete={employee ? "off" : "username"}
+                    defaultValue={employee ? "" : options?.loginHint || ""}
                     placeholder={employee ? "输入企业超管分配的子账号" : "输入你的 MX 账号"}
                     disabled={busy}
                   />
@@ -214,15 +222,15 @@ function AccountDialogSession({
                 </InputGroup>
               </Field>
               <Field>
-                <FieldLabel htmlFor="auth-password">密码</FieldLabel>
+                <FieldLabel htmlFor={employee ? "employee-password" : "auth-password"}>密码</FieldLabel>
                 <InputGroup>
                   <InputGroupInput
-                    id="auth-password"
-                    name="password"
+                    id={employee ? "employee-password" : "auth-password"}
+                    name={employee ? "employeePassword" : "password"}
                     type={show ? "text" : "password"}
                     required
                     maxLength={128}
-                    autoComplete="current-password"
+                    autoComplete={employee ? "new-password" : "current-password"}
                     placeholder="输入密码"
                     disabled={busy}
                   />
@@ -240,6 +248,25 @@ function AccountDialogSession({
                   </InputGroupAddon>
                 </InputGroup>
               </Field>
+              {!employee && (
+                <Field>
+                  <FieldLabel htmlFor="auth-invite">DataPort 专用邀请码（首次开通时填写）</FieldLabel>
+                  <InputGroup>
+                    <InputGroupInput
+                      id="auth-invite"
+                      name="inviteCode"
+                      maxLength={128}
+                      autoComplete="off"
+                      placeholder="输入 DataPort 专用邀请码"
+                      disabled={busy}
+                      aria-describedby="auth-invite-help"
+                    />
+                  </InputGroup>
+                  <FieldDescription id="auth-invite-help">
+                    已开通数港的 MX 账号可留空。此邀请码仅用于首次开通数港，不能注册新账号。
+                  </FieldDescription>
+                </Field>
+              )}
               {error && <FieldError role="alert">{error}</FieldError>}
               <Button
                 type={unavailable ? "button" : "submit"}
@@ -260,7 +287,7 @@ function AccountDialogSession({
             </FieldGroup>
           </form>
           <p className="managed-account-note">
-            {employee ? "子账号由企业超管创建" : "使用已有 MX 账号登录"}
+            {employee ? "子账号由企业超管创建" : "使用已有 MX 账号登录，专用邀请码由平台管理员提供"}
             <br />
             如需开通或重置密码，请联系管理员
           </p>
