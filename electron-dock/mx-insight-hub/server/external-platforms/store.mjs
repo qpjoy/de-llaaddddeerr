@@ -1815,8 +1815,9 @@ export class MemoryExternalPlatformStore {
         deliverySourceMode: 'stale',
         capturedAt: currentSnapshot.capturedAt,
       })
-    } else if (this.providerKey === 'qixin' && outcome === 'rejected') {
-      // No enterprise result was delivered. Keep the error for exact replay
+    } else if ((this.providerKey === 'qixin' && outcome === 'rejected')
+      || (this.providerKey === 'baidu-ip' && (outcome === 'rejected' || outcome === 'succeeded_unusable'))) {
+      // No customer result was delivered. Keep the error for exact replay
       // while releasing the customer hold; supplier billing remains unknown.
       await this.usageStore.releaseRequest(delivery.usageRequestId, errorCode, {
         responseStatus: failureResponseStatus,
@@ -4473,6 +4474,9 @@ export class PostgresExternalPlatformStore {
         return
       }
 
+      // IP subscriptions accept one committed unit only for a usable delivery.
+      // A definitive failure must release the hold, not commit zero units and
+      // turn a known rejection into a persistence-unknown outcome.
       const usage = outcome === 'rejected' || outcome === 'succeeded_unusable'
         ? await client.query(
             `UPDATE usage_requests SET
@@ -4491,7 +4495,7 @@ export class PostgresExternalPlatformStore {
               latencyMs,
               responseArchive?.capturedAt ?? new Date(),
               errorCode,
-              this.providerKey === 'ipsearch' || (this.providerKey === 'qixin' && outcome === 'rejected'),
+              this.providerKey === 'ipsearch' || this.providerKey === 'baidu-ip' || (this.providerKey === 'qixin' && outcome === 'rejected'),
             ],
           )
         : await client.query(

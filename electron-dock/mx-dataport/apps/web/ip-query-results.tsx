@@ -13,7 +13,7 @@ import {
   TableBody,
   TableCell,
 } from "@/components/ui/table";
-import { dateTime, portraitState } from "./commerce-state";
+import { dateTime, portraitState, queryStatus } from "./commerce-state";
 
 const states: Record<string, string> = {
   success: "查询成功",
@@ -56,6 +56,7 @@ export function QueryResult({
     state = portraitState(result);
   const location = ipLocation(profile);
   const issue = result.error || result.response?.error;
+  const presentation = queryStatus(result);
   const tagDescriptions: Record<string, string> = {
     行为风险: "请求或访问行为相关的风险线索。",
     关联设备风险: "与该 IP 关联的设备异常线索。",
@@ -111,7 +112,7 @@ export function QueryResult({
             data-state={state}
             hidden={state === "success"}
           >
-            {result.historical ? "历史画像" : states[state]}
+            {result.historical && !issue ? "历史画像" : issue ? presentation.label : states[state]}
           </span>
         </div>
         {onReport && (
@@ -124,12 +125,8 @@ export function QueryResult({
         {copyError && <p role="status">{copyError}</p>}
         {issue ? (
           <div className="harbor-result-message" role="status">
-            <h3>{states[state]}</h3>
-            <p>
-              {state === "unknown"
-                ? "尚未取得可确认的查询回执，暂时无法判断是否完成。请保留查询记录编号，稍后刷新最近查询核对，避免重复发起新查询。"
-                : "本次未取得可用画像，请查看查询详情。"}
-            </p>
+            <h3>{presentation.label}</h3>
+            <p>{presentation.description}</p>
           </div>
         ) : profile ? (
           <>

@@ -86,6 +86,29 @@ test('ambiguous transport never retries, including a new equal request identity'
   await assert.rejects(f.gateway.query(f.context, { ...request, idempotencyKey: 'ip-test-0002' }), { status: 409 })
   assert.equal(calls, 1)
 })
+test('Baidu definitive failures release holds and replay their reason, while unknown calls remain protected in memory',async()=>{
+  for(const outcome of ['rejected','succeeded_unusable','unknown']) {
+    const f=await fixture(async()=>{throw Error('must not use ipsearch')});
+    const platformStore=new MemoryExternalPlatformStore({usageStore:f.store,providerKey:'baidu-ip',authorizationPlatform:'ip_risk'});
+    let calls=0;
+    const code=outcome==='rejected'?'ip_channel_busy':outcome==='succeeded_unusable'?'ip_response_unusable':'ip_query_outcome_unknown';
+    const gateway=new IpRiskGateway({usageStore:f.store,platformStore,providerKey:'baidu-ip',enabled:true,
+      adapter:{configured:true,async query(){calls++;return {outcome,errorCode:code,httpStatus:null,latencyMs:1}}}});
+    await enableIpBilling(f);
+    const result=await gateway.query(f.context,request);
+    assert.equal(result.status,502);assert.equal(result.body.error.code,code);
+    const billing=await f.hub.getTenantBilling(f.tenant.id);
+    assert.equal(billing.account.heldMinor,outcome==='unknown'?5:0);
+    if(outcome==='unknown') {
+      await assert.rejects(gateway.query(f.context,request),{code:'request_unknown'});
+      await assert.rejects(gateway.query(f.context,{...request,idempotencyKey:'new-baidu-identity'}),{code:'ip_query_in_progress_or_unknown'});
+    } else {
+      const replay=await gateway.query(f.context,request);
+      assert.equal(replay.replay,true);assert.equal(replay.body.error.code,code);
+    }
+    assert.equal(calls,1);
+  }
+})
 test('disabled provider leaves Hub identity available and dispatches nothing', async () => {
   const f = await fixture(async () => { throw new Error('must not dispatch') })
   f.gateway.enabled = false

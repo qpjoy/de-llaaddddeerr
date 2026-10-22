@@ -150,6 +150,9 @@ export class IpRiskGateway {
       requiredAuthorizationScopes: [{ type: 'platform', key: IP_RISK_PLATFORM }, { type: 'capability', key: this.operation }],
       unitsReserved: 1, leaseExpiresAt: new Date(Math.min(Date.now() + this.reservationLeaseMs, dispatchDeadline ?? Infinity)),
       windowStart: new Date(Date.now() - policy.windowSeconds * 1000), maxRequests: policy.maxRequests, replayWindowMs: null,
+      // Definitive Baidu failures release subscription quota but retain the
+      // saved response under this operation identity; replay must not dispatch.
+      replayReleasedFailures: this.providerKey === 'baidu-ip',
     }).catch(error => {
       if (error.code === 'P0001' && error.message === 'commerce_subscription_required') throw new AppError(403,error.message,'请先购买有效的 IP v2 订阅')
       if (error.code === 'P0001' && error.message === 'commerce_quota_exhausted') throw new AppError(429,error.message,'本期订阅额度已用尽')

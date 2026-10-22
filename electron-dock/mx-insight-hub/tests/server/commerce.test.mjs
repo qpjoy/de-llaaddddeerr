@@ -110,6 +110,57 @@ async function fixture(t,{space=false,offers=false}={}){
     rerunMigrations:()=>runMigrations({connectionString:url.href,migrationsDir:migrationDir})}
 }
 const database={skip:!connectionString}
+for (const space of [false,true]) test(`Baidu ${space?'space product':'v2'} preserves channel rejection reasons, releases quota and retains genuine unknown protection`,database,async t=>{
+  const f=await fixture(t,{space}),order=await f.create(),paid=await f.eventFor(order);
+  await f.service.commit(paid.source,paid.event,paid.payment);
+  let fetches=0,mode='admission';
+  const adapter=new BaiduIpRiskAdapter({pool:f.pool,sleep:async()=>{},fetchImpl:async url=>{
+    fetches++;
+    if(mode==='provider429')return new Response('limited',{status:429});
+    if(mode==='unknown')throw Error('mock transport interruption');
+    return Response.json({ret_data:{code:0,data:mode==='unusable'?{}:url.includes('/base/')?{country:'中国'}:{overall:{risk_score_new:'高'},available:true}}});
+  }});
+  const store=new PostgresStore(f.pool),platformStore=new PostgresExternalPlatformStore({pool:f.pool,providerKey:'baidu-ip',authorizationPlatform:'ip_risk',circuitFailureThreshold:100});
+  const gateway=new IpRiskGateway({usageStore:store,platformStore,adapter,enabled:true,providerKey:'baidu-ip',
+    operation:space?IP_PRODUCT_CAPABILITY:'ip.risk.query.v2',version:space?'mx-insight-hub.ip-risk.subscription.v1':'mx-insight-hub.ip-risk.v2',meterKey:space?IP_PRODUCT_METER:IP_V2_METER});
+  const context={tenant:{id:f.tenant},consumer:{id:f.consumer},apiKey:{id:f.keyId,environment:'live'}};
+  const path=space?'/api/v1/data/ip/risk/service':'/api/v1/data/ip/risk/v2';
+  let index=0;
+  for(const scenario of [
+    {mode:'admission',tokens:0,code:'ip_channel_busy',fetches:0},
+    {mode:'secondSlot',tokens:1,code:'ip_channel_busy',fetches:1},
+    {mode:'provider429',tokens:10,code:'ip_channel_rate_limited',fetches:1},
+  ]) {
+    mode=scenario.mode;
+    await f.pool.query("UPDATE hub_commerce.ip_channel SET enabled=true,tokens=$1,refill_at=now(),cooldown_until=NULL,next_at=NULL",[scenario.tokens]);
+    const input={body:{ip:`192.0.2.${++index}`},path,idempotencyKey:randomUUID()},before=fetches;
+    const result=await gateway.execute(context,input);
+    assert.equal(result.status,502);assert.equal(result.body.error.code,scenario.code);
+    assert.equal(fetches-before,scenario.fetches);
+    const usage=(await f.pool.query('SELECT status,units_actual,response_body FROM usage_requests WHERE id=$1',[result.requestId])).rows[0];
+    assert.equal(usage.status,'released');assert.equal(usage.units_actual,0);assert.equal(usage.response_body.error.code,scenario.code);
+    assert.deepEqual((await f.pool.query('SELECT held,used FROM hub_commerce.subscriptions')).rows[0],{held:0,used:0});
+    const replay=await gateway.execute(context,input);
+    assert.equal(replay.replay,true);assert.equal(replay.body.error.code,scenario.code);assert.equal(fetches-before,scenario.fetches,'same operation replays without another supplier call');
+  }
+  mode='unknown';await f.pool.query('UPDATE hub_commerce.ip_channel SET tokens=10,cooldown_until=NULL,next_at=NULL');
+  const input={body:{ip:'192.0.2.100'},path,idempotencyKey:randomUUID()},before=fetches;
+  const result=await gateway.execute(context,input);
+  assert.equal(result.body.error.code,'ip_query_outcome_unknown');
+  assert.equal((await f.pool.query('SELECT status FROM usage_requests WHERE id=$1',[result.requestId])).rows[0].status,'unknown');
+  assert.deepEqual((await f.pool.query('SELECT held,used FROM hub_commerce.subscriptions')).rows[0],{held:1,used:0});
+  await assert.rejects(gateway.execute(context,input),{code:'request_unknown'});
+  await assert.rejects(gateway.execute(context,{...input,idempotencyKey:randomUUID()}),{code:'ip_query_in_progress_or_unknown'});
+  assert.equal(fetches-before,1,'neither retry dispatches after an uncertain outcome');
+  assert.deepEqual((await f.pool.query('SELECT held,used FROM hub_commerce.subscriptions')).rows[0],{held:1,used:0});
+  // Unusable responses quarantine the endpoint, so exercise this last without
+  // bypassing that independent guard for the transport-unknown case above.
+  mode='unusable';await f.pool.query('UPDATE hub_commerce.ip_channel SET tokens=10,next_at=NULL');
+  const unusable=await gateway.execute(context,{body:{ip:'192.0.2.200'},path,idempotencyKey:randomUUID()});
+  assert.equal(unusable.body.error.code,'ip_response_unusable');
+  assert.equal((await f.pool.query('SELECT status FROM usage_requests WHERE id=$1',[unusable.requestId])).rows[0].status,'released');
+  assert.deepEqual((await f.pool.query('SELECT held,used FROM hub_commerce.subscriptions')).rows[0],{held:1,used:0});
+})
 test('DataPort HTTP delegates to the real product quota boundary without exposing keys and rechecks roles on every request',database,async t=>{
   const f=await fixture(t,{space:true}),order=await f.create(),paid=await f.eventFor(order);await f.service.commit(paid.source,paid.event,paid.payment)
 

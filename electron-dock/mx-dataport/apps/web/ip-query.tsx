@@ -19,6 +19,7 @@ import { request } from "./api";
 import {
   dateTime,
   portraitState,
+  queryStatus,
   queryIntent,
   currentSubscription,
 } from "./commerce-state";
@@ -26,18 +27,6 @@ import { enterpriseUrl, hasPermission } from "./permissions";
 import { Pagination } from "./pagination";
 import { downloadExcel } from "./download";
 import { resetQueryScroll, revealQueryResult } from "./query-scroll";
-
-function historyStatusLabel(state: string) {
-  return (
-    ({
-      success: "成功",
-      partial: "部分数据",
-      no_data: "暂无数据",
-      unknown: "待确认",
-      error: "失败",
-    } as Record<string, string>)[state] || "待确认"
-  );
-}
 
 export function IpQuery({
   tenant,
@@ -152,11 +141,15 @@ export function IpQuery({
         setVersion((v) => v + 1);
       }
     } catch (e) {
-      if (live.current)
+      if (live.current) {
+        const presentation = queryStatus(e);
         setError(
-          (e as Error).message +
+          (presentation.kind !== "error" && presentation.description
+            ? `${presentation.label}：${presentation.description}`
+            : (e as Error).message) +
             " 请先查看历史确认上次结果，重试会沿用原操作编号。",
         );
+      }
     } finally {
       lock.current = false;
       if (live.current) setBusy(false);
@@ -183,7 +176,7 @@ export function IpQuery({
           i.ip,
           riskLevelLabel(i.payload?.response?.data?.data?.risk_level),
           dateTime(i.createdAt),
-          historyStatusLabel(i.payload ? portraitState(i.payload) : "unknown"),
+          queryStatus(i.payload || { error: { code: "query_outcome_unknown" } }).label,
           riskAdvice(i.payload?.response?.data?.data?.risk_level),
         ]),
       );
@@ -344,15 +337,16 @@ export function IpQuery({
                         const state = i.payload
                           ? portraitState(i.payload)
                           : "unknown";
-                        const label = historyStatusLabel(state);
+                        const presentation = queryStatus(i.payload || { error: { code: "query_outcome_unknown" } });
                         return (
                           <TableRow key={i.id}>
                             <TableCell>{i.ip}</TableCell>
                             <TableCell>
                               <span
+                                title={presentation.description || undefined}
                                 className={`status ${state === "success" ? "good" : state === "error" ? "bad" : "pending"}`}
                               >
-                                {label}
+                                {presentation.label}
                               </span>
                             </TableCell>
                             <TableCell>

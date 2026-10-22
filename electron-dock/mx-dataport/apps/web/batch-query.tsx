@@ -170,7 +170,7 @@ export function BatchQuery({
           }}
         />
         <p className="harbor-hint">
-          每个 IP 分别查询并消耗企业额度；待确认的记录不会自动重试。
+          每个 IP 分别查询并消耗企业额度；遇到渠道限流、防重复保护或结果待确认时暂停后续查询，不会自动重试。
         </p>
         {error && (
           <p role="alert" className="harbor-error">
