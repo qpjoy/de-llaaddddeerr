@@ -1,4 +1,5 @@
 import { WECHAT_PRODUCTS, wechatServices } from './wechat.mjs'
+import { WECHAT_SELF_HOSTED } from './wechat-self-hosted.mjs'
 // Public business metadata. Supplier coordinates never belong in this module.
 import { XHS_DISCOVERY_PRODUCTS } from './xiaohongshu-discovery.mjs'
 // Separate customer meters, one existing authorization capability. Do not add
@@ -32,6 +33,9 @@ export const PRODUCT_BUNDLES = Object.freeze([
   ...WECHAT_PRODUCTS.map(product => ({ key: product.key, version: 1, name: product.label, platforms: ['social'],
     capabilities: wechatServices(product).map(row => row.operation), optionalCapabilities: [], featureKey: null,
     pricingMode: 'tenant_contract', href: `/data-products/${product.key}`, catalogKeys: product.catalogKeys })),
+  { key: WECHAT_SELF_HOSTED.key, version: 1, name: WECHAT_SELF_HOSTED.label, platforms: [WECHAT_SELF_HOSTED.platform],
+    capabilities: [WECHAT_SELF_HOSTED.capability], optionalCapabilities: [], featureKey: null, pricingMode: 'tenant_contract',
+    href: WECHAT_SELF_HOSTED.path, catalogKeys: [] },
   ...XHS_DISCOVERY_PRODUCTS.map(product => ({ key: product.key, version: 1, name: product.label, platforms: ['xiaohongshu'],
     capabilities: [product.operation], optionalCapabilities: [], featureKey: null, pricingMode: 'tenant_contract',
     href: `/data-products/${product.key}`, catalogKeys: ['source-catalog-0004'] })),

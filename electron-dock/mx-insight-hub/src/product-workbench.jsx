@@ -1,6 +1,8 @@
 import { WebSearchResult } from './web-search-result.jsx'
 import { searchProviderKeys } from '../shared/web-search.mjs'
 import { WechatResult } from './wechat-product.jsx'
+import { WechatSelfHostedEngineAdmin } from './wechat-self-hosted.jsx'
+import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { productForPath, productEndpoints, productConsoleRequest, resolveProductSchema } from '../shared/product-workbenches.mjs'
 import { adminApi, publicDataApi, publicDocsHref, publicApiOrigin } from './api.js'
@@ -27,10 +29,11 @@ export function ProductWorkbench({ Page, pageProps, enabled }) {
     <header className="mih-page-header"><div><h1>{product.label}</h1><p>从 Hub 接口开始，查看产品展示与接入方式。</p></div><a className="qp-button qp-button--outline" href={publicDocsHref(`/docs/${product.docs}`)}>接口文档 ↗</a></header>
     {product.docs === 'ecommerce-treasure-box' ? <><p>跨平台商品列表优先接入「统一商品搜索」，使用相同的商品、链接和分页字段。平台专用接口用于详情、SKU、评论及快手购物/品牌榜单等独立查询；「已收录商品」只读已有数据。当前统一搜索支持淘宝、天猫、京东、闲鱼、小红书电商和抖音电商。快手当前提供榜单接口。</p>{pageProps.session?.kind === 'admin-token' ? <p><a href="#/data-platforms?domain=ecommerce">Admin · 查看电商平台的上游供应商、适配接口与默认路由 →</a></p> : null}</> : null}
     <ProductViewTabs label={product.label} value={tab} product="demo" session={pageProps.session} onChange={id => { setTab(id); if (id === 'demo') setVisited(true) }} />
+    {tab === 'management' && product.docs === WECHAT_SELF_HOSTED.docs && pageProps.token ? <WechatSelfHostedEngineAdmin token={pageProps.token} onUnauthorized={pageProps.onUnauthorized} notify={pageProps.notify} /> : null}
     {tab === 'management' ? <ProductManagement token={pageProps.token} session={pageProps.session} onUnauthorized={pageProps.onUnauthorized} notify={pageProps.notify} path={product.path} label={product.label} /> : null}
     <div hidden={tab !== 'debug'}><ProductApiConsole product={product} token={pageProps.token} initialEndpoint={pageProps.query?.get('endpoint')} /></div>
     <div hidden={tab !== 'demo'}>{visited ? <Page {...pageProps} /> : null}</div>
-    <section className="qp-panel mih-panel" hidden={tab !== 'guide'}><h2>接入 {product.label}</h2><p>选择已授权的 Hub Key，在接口调试页查看参数、发送请求并复制示例。接口以当前 Key 的有效权限为准；目录展示不等于已开通或服务就绪。</p><p>支持幂等契约的接口，新查询与下一页各用新的 Idempotency-Key；失败重试保留原参数与标识。GET 等读取是否每次计量以各接口说明为准。游标原样传回，不从条数猜测总量，也不自动补页。切换标签页不会自动发起付费查询。</p>{product.docs === 'aggregate-search' ? <p>推荐通过 POST fetch 设置 Accept: text/event-stream。按 source.completed 展示先到结果；search.completed 才是本批最终结果与分页游标。连接中断不代表调用被撤销，使用同一请求标识核对或重试。已收录模式读取最新入库及存量，不触发上游采集。</p> : null}<a href={publicDocsHref(`/docs/${product.docs}`)}>查看完整契约、分页和响应说明 ↗</a></section>
+    <section className="qp-panel mih-panel" hidden={tab !== 'guide'}><h2>接入 {product.label}</h2><p>选择已授权的 Hub Key，在接口调试页查看参数、发送请求并复制示例。接口以当前 Key 的有效权限为准；目录展示不等于已开通或服务就绪。</p><p>支持幂等契约的接口，新查询与下一页各用新的 Idempotency-Key；失败重试保留原参数与标识。GET 等读取是否每次计量以各接口说明为准。游标原样传回，不从条数猜测总量，也不自动补页。切换标签页不会自动发起付费查询。</p>{product.docs === WECHAT_SELF_HOSTED.docs ? <p>自建引擎全局串行：提交返回 202 和 jobId，按 Retry-After 约 5 秒轮询状态，完成后读取 /result。可以一次提交多条，不必等上一条完成；每条使用各自的 Idempotency-Key，超时重发沿用原标识。计费默认关闭（只转发）；开启后实时或 24 小时缓存结果按任务计费，旧结果、失败、取消、排队超时不计费，结果未知待核实。</p> : null}{product.docs === 'aggregate-search' ? <p>推荐通过 POST fetch 设置 Accept: text/event-stream。按 source.completed 展示先到结果；search.completed 才是本批最终结果与分页游标。连接中断不代表调用被撤销，使用同一请求标识核对或重试。已收录模式读取最新入库及存量，不触发上游采集。</p> : null}<a href={publicDocsHref(`/docs/${product.docs}`)}>查看完整契约、分页和响应说明 ↗</a></section>
   </div>
 }
 
@@ -113,7 +116,7 @@ export function ProductApiConsole({ product, token, initialEndpoint, onResult, o
     <div className="mih-api-console-main">{endpoint ? <>
       <header><strong className="mih-api-method">{endpoint.method}</strong> <code>{endpoint.path}</code><a href={publicDocsHref(endpoint['x-mx-doc-path'] || `/docs/${product.docs}`)}>本接口文档 ↗</a></header>
       <h2>{endpoint.summary}</h2><details><summary>契约说明</summary><p>{endpoint.description}</p></details>
-      {(endpoint.path.startsWith('/api/v1/data/native/') || endpoint.path.startsWith('/api/v1/data/wechat/')) || endpoint.path === '/api/v1/data/ecommerce/products/search' || (endpoint.path.startsWith('/api/v1/data/web-search/') && endpoint.method === 'POST') ? <ServicePrice path={endpoint.path} /> : null}
+      {(endpoint.path.startsWith('/api/v1/data/native/') || (endpoint.path.startsWith('/api/v1/data/wechat/') && (!endpoint.path.startsWith(WECHAT_SELF_HOSTED.apiPrefix) || ['/jobs', '/batches'].some(suffix => endpoint.path === WECHAT_SELF_HOSTED.apiPrefix + suffix) && endpoint.method === 'POST'))) || endpoint.path === '/api/v1/data/ecommerce/products/search' || (endpoint.path.startsWith('/api/v1/data/web-search/') && endpoint.method === 'POST') ? <ServicePrice path={endpoint.path} /> : null}
       <p>发送使用当前 Key，服务端复核授权、限额与价格。页面打开和标签切换不会自动调用。</p>
       <form onSubmit={event => { event.preventDefault(); void send() }}>
         {(endpoint.parameters || []).filter(row => ['path', 'query'].includes(row.in)).map(row => <label className="qp-field" key={`${row.in}:${row.name}`}>{row.name}{row.required ? ' *' : ''} · {row.in}<input className="qp-input" disabled={busy} value={values[`${row.in}:${row.name}`] || ''} placeholder={row.description || '留空不传'} onChange={event => change({ values: { ...values, [`${row.in}:${row.name}`]: event.target.value } })} /></label>)}

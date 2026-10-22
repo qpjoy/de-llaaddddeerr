@@ -111,3 +111,41 @@ test('lookup attaches analysis inside the existing read-only boundary with no ex
   assert.equal(queries.at(-1), 'COMMIT')
   assert.equal(queries.filter(sql => /request-diagnostics:/u.test(sql)).length, 6)
 })
+
+test('TikHub rate evidence shows official tiers without assuming the account tier or final failure', () => {
+  for (const call of [
+    { provider: 'tikhub', outcome: 'rejected', httpStatus: 429, errorCode: null },
+    { provider: 'tikhub', outcome: 'rejected', httpStatus: 200, errorCode: 'upstream_rate_limited' },
+  ]) {
+    const analysis = analyzeRequestDiagnostic({ ...base(), status: 'committed', responseStatus: 200,
+      hasResponseBody: true, providerCalls: [call] })
+    const limit = finding(analysis, 'tikhub_rate_limit_recorded')
+    assert.equal(limit.certainty, 'confirmed')
+    assert.match(limit.detail, /10 RPS.*20–100 RPS.*不是本次已测得的账户上限/u)
+    assert.match(limit.detail, /https:\/\/tikhub\.io\/zh\/faq/u)
+    assert.match(limit.detail, /不代表最终交付失败/u)
+    assert.match(analysis.nextSteps.join(' '), /API Settings → RPS Settings.*有效期.*按账户/u)
+    assert.ok(finding(analysis, 'successful_response_saved'))
+  }
+})
+
+test('local 429, other providers and unspecified TikHub rejection do not claim TikHub throttling', () => {
+  for (const providerCalls of [[],
+    [{ provider: 'justone', outcome: 'rejected', httpStatus: 429, errorCode: 'upstream_rate_limited' }],
+    [{ provider: 'tikhub', outcome: 'rejected', httpStatus: 400, errorCode: 'upstream_request_rejected' }],
+  ]) {
+    const analysis = analyzeRequestDiagnostic({ ...base(), status: 'released', responseStatus: 429,
+      errorCode: 'external_platform_busy', providerCalls })
+    assert.equal(finding(analysis, 'tikhub_rate_limit_recorded'), undefined)
+    assert.doesNotMatch(JSON.stringify(analysis), /10 RPS/u)
+  }
+})
+
+test('rate evidence does not resolve an unknown delivery or permit automatic retry', () => {
+  const analysis = analyzeRequestDiagnostic({ ...base(), providerCalls: [
+    { provider: 'tikhub', outcome: 'unknown', httpStatus: 429, errorCode: null },
+  ] })
+  assert.ok(finding(analysis, 'tikhub_rate_limit_recorded'))
+  assert.ok(finding(analysis, 'request_outcome_unknown'))
+  assert.match(analysis.nextSteps.join(' '), /不自动重发/u)
+})

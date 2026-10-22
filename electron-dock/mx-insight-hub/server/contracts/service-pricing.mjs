@@ -4,6 +4,7 @@ import { YOUTUBE_COMMENT_PATHS, YOUTUBE_COMMENTS_CAPABILITY } from './youtube-co
 import { QIXIN_CATALOG } from './enterprise.mjs'
 import { customerRequestPrice } from '../billing/contracts.mjs'
 import { XIAOHONGSHU_ANALYTICS_METERS } from '../../shared/product-catalog.mjs'
+import { WECHAT_SELF_HOSTED } from '../../shared/wechat-self-hosted.mjs'
 const enterprises = new Set(QIXIN_CATALOG.apis.map(api => api.api_id))
 export function servicePriceDefinition(path) {
   if (Object.values(YOUTUBE_COMMENT_PATHS).includes(path)) return { platform: 'youtube', capabilities: [YOUTUBE_COMMENTS_CAPABILITY], meterKey: YOUTUBE_COMMENTS_CAPABILITY }
@@ -17,6 +18,10 @@ export function servicePriceDefinition(path) {
   if (enterprise && enterprises.has(enterprise[1])) return { platform:'enterprise', capabilities:['enterprise.query'], meterKey:`enterprise.api.${enterprise[1]}` }
   if (path === '/api/v1/data/web-search/search' || path === '/api/v1/data/web-search/compatible/baidu') return {platform:'web_search',capabilities:['web.search'],meterKey:'web.search'}
   if (path === '/api/v1/data/ip/risk' || path === '/api/v1/data/ip/risk/batch') return { platform:'ip_risk', capabilities:['ip.risk.query'], meterKey:'ip.risk.query', unit:'ip' }
+  // Submissions carry the price; status, result and cancel reads never bill.
+  if ([`${WECHAT_SELF_HOSTED.apiPrefix}/jobs`, `${WECHAT_SELF_HOSTED.apiPrefix}/batches`].includes(path)) {
+    return { platform: WECHAT_SELF_HOSTED.platform, capabilities: [WECHAT_SELF_HOSTED.capability], meterKey: WECHAT_SELF_HOSTED.meterKey }
+  }
   if (path === '/api/v1/data/ecommerce/products/search') return { platform:'ecommerce', capabilities:['ecommerce.products.search'], meterKey:'ecommerce.products.search' }
   return null
 }

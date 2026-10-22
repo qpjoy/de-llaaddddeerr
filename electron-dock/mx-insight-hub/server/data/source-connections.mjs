@@ -14,6 +14,7 @@ import { JUSTONE_MARKETPLACE_CATALOG } from '../ingest/justone.mjs'
 import { PUBLIC_OPINION_DATASET_ID } from './public-opinion.mjs'
 import { XIAOHONGSHU_CAPABILITIES } from '../../shared/product-catalog.mjs'
 import { CRAWLER_SOURCES, crawlerSourceSpecForKey } from '../ingest/crawler/source-contract.mjs'
+import { WECHAT_SELF_HOSTED } from '../../shared/wechat-self-hosted.mjs'
 
 // Read-only implementation inventory, not a dispatch registry or a grant.
 // Stable catalog keys survive operator renames; hints never create a route.
@@ -76,6 +77,13 @@ export function implementedRoutes(sources = []) {
     operation: `native.${WECHAT_SEARCH_KEY}`, path: '/api/v1/search/raw', keywordSearch: true,
     defaultRule: `转入 ${WECHAT_SEARCH_PATH} 并返回新合同；公众号默认文章分类。与直接调用共用授权、价格和幂等；旧 Night-All 微信搜索已停用。`,
     evidence: 'server/contracts/wechat-search-alias.mjs',
+  }))
+  rows.push(route('wechat-self-hosted-search', {
+    platform: 'wechat_mp', catalogKeys: [catalogKey('wechat_mp')], provider: 'night-all', providerLabel: 'Night-All 搜狗（自建）',
+    product: WECHAT_SELF_HOSTED.label, operation: WECHAT_SELF_HOSTED.capability, path: `${WECHAT_SELF_HOSTED.apiPrefix}/jobs`,
+    keywordSearch: true, procurementOperation: false,
+    defaultRule: '自建搜狗引擎全局串行排队；提交返回 202 + jobId，按任务计费（实时或 24 小时缓存），旧结果不计费；结果未知时暂停引擎待人工核实。',
+    evidence: 'server/self-hosted/wechat-contract.mjs',
   }))
   for (const platform of WECHAT_LEGACY_SEARCH_PLATFORMS) {
     for (const [kind, path] of [['search', '/api/v1/data/search'], ['aggregate', '/api/v1/data/aggregate/search']]) rows.push(route(`wechat-${kind}-${platform}`, {

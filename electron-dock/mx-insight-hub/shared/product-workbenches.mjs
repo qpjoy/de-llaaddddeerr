@@ -1,4 +1,5 @@
 import { WECHAT_PRODUCTS } from './wechat.mjs'
+import { WECHAT_SELF_HOSTED } from './wechat-self-hosted.mjs'
 // Product navigation and API docs share one mapping. It never grants access.
 export const PRODUCT_WORKBENCHES = [
   {path:'/data-products/web-search',label:'Web Search',docs:'web-search',prefixes:['/data/web-search/'],native:true},
@@ -6,6 +7,7 @@ export const PRODUCT_WORKBENCHES = [
     prefixes: ['/data/search', '/data/social/search', '/data/social/crawl', '/data/social/user-info', '/search/raw', '/search/crawl', '/search/user-info', '/night-all/search/'], native: true },
   ...WECHAT_PRODUCTS.map(product => ({ path: `/data-products/${product.key}`, label: product.label, docs: product.key,
     prefixes: [`/data/wechat/${product.group}/`, ...(product.group === 'mp' ? ['/data/wechat/demo/'] : [])] })),
+  { path: WECHAT_SELF_HOSTED.path, label: WECHAT_SELF_HOSTED.label, docs: WECHAT_SELF_HOSTED.docs, prefixes: ['/data/wechat/self-hosted/'] },
   { path: '/source-catalog', label: '数据源目录', docs: 'source-catalog', prefixes: ['/data/source-catalog'] },
   { path: '/data-products/search', label: '聚合搜索', docs: 'aggregate-search', prefixes: ['/data/aggregate/'] },
   { path: '/data-products/telegram', label: 'Telegram 会话', docs: 'telegram', prefixes: ['/data/telegram/', '/data/canonical/items/'] },

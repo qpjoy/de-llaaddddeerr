@@ -2,6 +2,10 @@
 
 Last reviewed: 2026-10-21.
 
+## 自建采集服务架构 Spider-Man（活文档，2026-10-23 建立）
+
+- [Spider-Man：自建采集服务架构](architecture/spider_man/README.md)：Night-All、Night-All-A、Hub 自建引擎（首个为微信 wechat_mp）、事件中心（Hub → Delta → Java）、多节点演进（A 机 hub-edge 保持原地址、`night-all-legacy` Service）、准入全局化（PG 租约）。看这一个目录就能了解自建服务的现状与目标形态；后续改动必须同步更新。均为设计，未实现。
+
 ## 手机外设（2026-10-09）
 
 - [系统设置外设接入与安全调度](operations/peripheral-scheduler.md)：Hub 自有持久设备队列、搜索会话亲和、未知结果隔离、服务器验收与机架扩展；不依赖 mx-rig，未部署/实测线上手机。
@@ -188,6 +192,10 @@ those paths retire one operation at a time and are not the target architecture.
 - [ADR-0014: Hub-owned static media data plane on shared object-storage infrastructure](adr/0014-hub-owned-static-media-data-plane.md)
 
 - [小红书笔记画卷：列表、详情、TikHub 兼容接口与分页](product/xiaohongshu-note-browsing.md)
+
+## 平台性能与 100 QPS
+
+- [MX 平台性能排查与 100 QPS 建议（汇总，含 Delta / Java 内网直连 Hub 的修改步骤）](operations/platform-performance-review-2026-10-22.md)
 
 ## IP 风险画像与后续接入
 

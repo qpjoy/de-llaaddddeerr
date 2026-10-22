@@ -1,3 +1,4 @@
+import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
 import { XHS_DISCOVERY_PRODUCTS } from '../shared/xiaohongshu-discovery.mjs'
 import { readAggregateEvents } from './aggregate-stream.js'
 import {
@@ -248,6 +249,10 @@ export const publicDataApi = {
   },
   productRequest: (key, input, idempotencyKey) => publicDataRequest(key, input.path, { method: input.method, body: input.body, idempotencyKey }),
   servicePricing: (key, path) => publicDataRequest(key, `/api/v1/data/services/pricing?path=${encodeURIComponent(path)}`),
+  wechatSelfHostedSubmit: (key, body, idempotencyKey) => publicDataRequest(key, `${WECHAT_SELF_HOSTED.apiPrefix}/jobs`, { method: 'POST', body, idempotencyKey }),
+  wechatSelfHostedJobs: (key, limit = 20) => publicDataRequest(key, `${WECHAT_SELF_HOSTED.apiPrefix}/jobs?limit=${limit}`),
+  wechatSelfHostedResult: (key, id) => publicDataRequest(key, `${WECHAT_SELF_HOSTED.apiPrefix}/jobs/${encodeURIComponent(id)}/result`),
+  wechatSelfHostedCancel: (key, id) => publicDataRequest(key, `${WECHAT_SELF_HOSTED.apiPrefix}/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   newsSources: (key, signal) => publicDataRequest(key, '/api/v1/data/news/sources', { signal }),
   newsSourceOptions: (key, signal) => publicDataRequest(key, '/api/v1/data/news/source-options', { signal }),
   newsSearch: (key, body, idempotencyKey) => publicDataRequest(key, '/api/v1/data/news/search', { method: 'POST', body, idempotencyKey }),
@@ -541,6 +546,11 @@ export const adminApi = {
   ),
   nightAllADispatchStatus: (token, id) => request(token, `${ADMIN_ROOT}/external-platforms/night-all-a/dispatches/${encodeURIComponent(id)}`),
   nightAllADispatches: token => request(token, `${ADMIN_ROOT}/external-platforms/night-all-a/dispatches`),
+  wechatSelfHosted: token => request(token, `${ADMIN_ROOT}/wechat-self-hosted`),
+  configureWechatSelfHosted: (token, body) => request(token, `${ADMIN_ROOT}/wechat-self-hosted/engine`, { method: 'PUT', body }),
+  recoverWechatSelfHosted: (token, body) => request(token, `${ADMIN_ROOT}/wechat-self-hosted/engine/recover`, { method: 'POST', body }),
+  probeWechatSelfHosted: (token, body) => request(token, `${ADMIN_ROOT}/wechat-self-hosted/engine/probe`, { method: 'POST', body }),
+  wechatSelfHostedJob: (token, id) => request(token, `${ADMIN_ROOT}/wechat-self-hosted/jobs/${encodeURIComponent(id)}`),
   updateExternalPlatformProxy: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/proxy`, { method: 'PUT', body }),
   productManagement: (token, query, options = {}) => request(token, `${ADMIN_ROOT}/data-products/management`, { ...options, query }),
   externalPlatformAdmission: (token, key) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/admission-policy`),

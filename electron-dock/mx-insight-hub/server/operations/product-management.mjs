@@ -1,6 +1,7 @@
 import { AppError } from '../core/errors.mjs'
 import { productForPath } from '../../shared/product-workbenches.mjs'
 import { WECHAT_PRODUCTS } from '../../shared/wechat.mjs'
+import { WECHAT_SELF_HOSTED } from '../../shared/wechat-self-hosted.mjs'
 import { XIAOHONGSHU_ANALYTICS_METERS } from '../../shared/product-catalog.mjs'
 import { PROVISIONING_OPERATIONS, officialPriceDraft, wechatOfficialPriceDraft } from '../commercial/catalog.mjs'
 import { customerRequestPrice } from '../billing/contracts.mjs'
@@ -32,7 +33,8 @@ export function productManagementOperations(path) {
   if (!product) throw new AppError(404, 'data_product_not_found', 'Unknown data product')
   const wechat = WECHAT_PRODUCTS.find(row => path === `/data-products/${row.key}`)
   let predicate = row => row.products.includes(product.label)
-  if (path.endsWith('/enterprise')) predicate = row => row.provider === 'qixin'
+  if (path === WECHAT_SELF_HOSTED.path) predicate = () => false
+  else if (path.endsWith('/enterprise')) predicate = row => row.provider === 'qixin'
   else if (path.endsWith('/ecommerce-treasure-box') || path.endsWith('/virtual-supermarket')) predicate = row => row.platform === 'ecommerce'
   else if (path.endsWith('/web-search')) predicate = row => row.operation === 'web.search'
   else if (wechat) predicate = row => row.operation.startsWith(`native.wechat.${wechat.group}.`) || wechat.group === 'mp' && row.operation.startsWith('native.wechat.demo.')
@@ -64,6 +66,10 @@ function priceMeters(product, operations) {
     for (const row of XIAOHONGSHU_ANALYTICS_METERS) definitions.set(row.key, {
       meterKey: row.key, label: row.label || row.key, paths: [row.path], billingUnit: 'request',
     })
+  }
+  if (product.path === WECHAT_SELF_HOSTED.path) {
+    definitions.set(WECHAT_SELF_HOSTED.meterKey, { meterKey: WECHAT_SELF_HOSTED.meterKey, label: '微信自建引擎 · 按任务（实时或 24 小时缓存计费）',
+      paths: [`${WECHAT_SELF_HOSTED.apiPrefix}/jobs`, `${WECHAT_SELF_HOSTED.apiPrefix}/batches`], billingUnit: 'request' })
   }
   if (product.path.endsWith('/ip-risk')) {
     definitions.set('ip.risk.query', { meterKey: 'ip.risk.query', label: 'IP 风险画像 · 按次',
@@ -136,7 +142,8 @@ export async function readProductManagement({ path, consumerId, store, platformA
   if (keys.includes('rapidapi')) notes.push('Facebook RapidAPI 已购额度和单笔派发记账顺序继续生效；这里调整普通网关并发不改变该账本。')
   if (keys.includes('tikhub')) notes.push('小红书 PGY 有独立的共享派发队列、去重与未知结果保护；普通网关设置不会改写专用队列。')
   if (product.path.endsWith('/ip-risk')) notes.push('IP 外层 Hub 限速与百度渠道的每日额度、最小间隔和冷却分别生效；订阅价格和权益在 IP 商品/订阅管理中查看。')
-  if (!keys.length) notes.push('此产品以已收录或派生数据为主，暂无可配置的供应商采集限速；下方保留现有治理工具入口。')
+  if (product.path === WECHAT_SELF_HOSTED.path) notes.push(`自建引擎不使用供应商限速；排队、单执行槽和计费开关在上方「自建引擎」区块管理。计费默认关闭（只转发，不写使用账本）；开启后按套餐中 ${WECHAT_SELF_HOSTED.meterKey} 条目计价，Hub 建议价 ¥${(WECHAT_SELF_HOSTED.officialUnitPriceMinor / 100).toFixed(2)} / 次。`)
+  else if (!keys.length) notes.push('此产品以已收录或派生数据为主，暂无可配置的供应商采集限速；下方保留现有治理工具入口。')
   return { product: { path: product.path, label: product.label }, observedAt: new Date().toISOString(), consumers,
     customer: selection ? { consumerId, tenantId: selection.consumer.tenantId, name: selection.consumer.name,
       planVersionId: selection.plan?.versionId || null, planStatus: selection.plan?.status || null,

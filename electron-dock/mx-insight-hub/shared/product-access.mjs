@@ -1,4 +1,5 @@
 import { WECHAT_PRODUCTS, wechatServices } from './wechat.mjs'
+import { WECHAT_SELF_HOSTED } from './wechat-self-hosted.mjs'
 // Console visibility follows current consumer grants, independent of key issue/binding dates.
 import nativeServiceCapabilities from './native-service-access.json' with { type: 'json' }
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../server/contracts/night-all-legacy.mjs'
@@ -15,6 +16,7 @@ const strategySearchPlatforms = new Set([...Object.values(NIGHT_ALL_LEGACY_SUPPO
 export const PRODUCT_ACCESS = {
   '/data-products/web-search': {platform:'web_search',any:['web.search'],docs:'web-search'},
   ...Object.fromEntries(WECHAT_PRODUCTS.map(product => [`/data-products/${product.key}`, { platform: 'social', any: wechatServices(product).map(row => row.operation), docs: product.key } ])),
+  [WECHAT_SELF_HOSTED.path]: { platform: WECHAT_SELF_HOSTED.platform, any: [WECHAT_SELF_HOSTED.capability], docs: WECHAT_SELF_HOSTED.docs },
   '/data-products/search': { domain: 'search', docs: 'aggregate-search' },
   '/data-products/strategy-search': { domain: 'strategy-search', docs: 'strategy-search' },
   '/data-products/news': { domain: 'news', docs: 'news-discovery' },

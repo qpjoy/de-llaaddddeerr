@@ -26,6 +26,8 @@ import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSear
 import { hubSocialByPath } from './contracts/hub-social.mjs'
 import { YOUTUBE_COMMENT_PATHS } from './contracts/youtube-comments.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
+import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
+import { retryAfterSeconds } from './self-hosted/wechat-contract.mjs'
 import { aggregateDiagnostics } from './data/aggregate-diagnostics.mjs'
 import { capabilityCatalog, syncCapabilityCatalog } from './data/capability-catalog.mjs'
 import { formatBrowserExport } from './data/browser-export.mjs'
@@ -805,6 +807,7 @@ export function createApp({
   balanceMonitor = null,
   paymentReporting = null,
   peripherals = null,
+  wechatSelfHosted = null,
   recharge = null,
   nightAllA = null,
   externalPlatformGateway = null,
@@ -909,6 +912,22 @@ export function createApp({
 
   async function requirePublic(request) {
     return service.authenticate(publicApiKey(request))
+  }
+
+  function requireWechatSelfHosted() {
+    if (!wechatSelfHosted) throw new AppError(503, 'wechat_self_hosted_unavailable', 'WeChat self-hosted engine is unavailable')
+    return wechatSelfHosted
+  }
+
+  // Retry-After follows each open job's estimated start (5–60 s) so callers
+  // polling a long queue do not hit the API every few seconds.
+  function selfHostedRetry(views) {
+    const seconds = retryAfterSeconds(views)
+    return seconds == null ? {} : { 'retry-after': String(seconds) }
+  }
+
+  function selfHostedHeaders(view, replay) {
+    return { location: view.links.self, 'idempotent-replay': String(Boolean(replay)), ...selfHostedRetry(view.jobs || [view]) }
   }
 
   // Usage for exactly the tenants a principal may see. An unscoped principal
@@ -3040,6 +3059,37 @@ export function createApp({
         if (!data) throw new AppError(404, 'dispatch_not_found', '记录不存在')
         sendJson(response, 200, { data, requestId })
         return
+      }
+      if (pathname.startsWith('/internal/v1/admin/wechat-self-hosted')) {
+        const actor = principal?.memberId || principal?.kind || 'admin-token'
+        if (request.method === 'GET' && pathname === '/internal/v1/admin/wechat-self-hosted') {
+          requireSourceAdmin(principal)
+          requireNoQuery(searchParams, 'WeChat self-hosted state')
+          response.setHeader('Cache-Control', 'no-store')
+          sendJson(response, 200, { data: await requireWechatSelfHosted().adminState(), requestId })
+          return
+        }
+        if (request.method === 'PUT' && pathname === '/internal/v1/admin/wechat-self-hosted/engine') {
+          requireSourceAdmin(principal)
+          sendJson(response, 200, { data: await requireWechatSelfHosted().adminConfigure(await readJson(request, 8 * 1024), actor), requestId })
+          return
+        }
+        if (request.method === 'POST' && pathname === '/internal/v1/admin/wechat-self-hosted/engine/recover') {
+          requireSourceAdmin(principal)
+          sendJson(response, 200, { data: await requireWechatSelfHosted().adminRecover(await readJson(request, 8 * 1024), actor), requestId })
+          return
+        }
+        if (request.method === 'POST' && pathname === '/internal/v1/admin/wechat-self-hosted/engine/probe') {
+          requireSourceAdmin(principal)
+          sendJson(response, 200, { data: await requireWechatSelfHosted().adminProbe(await readJson(request, 8 * 1024)), requestId })
+          return
+        }
+        params = routeMatch(pathname, '/internal/v1/admin/wechat-self-hosted/jobs/:id')
+        if (params && request.method === 'GET') {
+          requireSourceAdmin(principal)
+          sendJson(response, 200, { data: await requireWechatSelfHosted().adminJob(params.id), requestId })
+          return
+        }
       }
       if (request.method === 'GET' && pathname === '/internal/v1/admin/supplier-balances') {
         requireSourceAdmin(principal)
@@ -6204,6 +6254,68 @@ export function createApp({
           requestId,
         })
         return
+      }
+      if (pathname.startsWith(`${WECHAT_SELF_HOSTED.apiPrefix}/`)) {
+        const prefix = WECHAT_SELF_HOSTED.apiPrefix
+        if (pathname === `${prefix}/jobs` && request.method === 'POST') {
+          requireNoQuery(searchParams, 'WeChat self-hosted job')
+          const context = await requirePublic(request)
+          const result = await requireWechatSelfHosted().submitJob(context, await readJson(request, 16 * 1024), request.headers['idempotency-key'])
+          sendJson(response, 202, { data: result.data, requestId }, selfHostedHeaders(result.data, result.replay))
+          return
+        }
+        if (pathname === `${prefix}/jobs` && request.method === 'GET') {
+          const unsupported = [...searchParams.keys()].filter(key => key !== 'limit')
+          if (unsupported.length) throw new AppError(400, 'unsupported_fields', `Unsupported query fields: ${unsupported.join(', ')}`)
+          const context = await requirePublic(request)
+          sendJson(response, 200, { data: await requireWechatSelfHosted().listJobs(context, searchParams.get('limit') ?? undefined), requestId })
+          return
+        }
+        if (pathname === `${prefix}/batches` && request.method === 'POST') {
+          requireNoQuery(searchParams, 'WeChat self-hosted batch')
+          const context = await requirePublic(request)
+          const result = await requireWechatSelfHosted().submitBatch(context, await readJson(request, 64 * 1024), request.headers['idempotency-key'])
+          sendJson(response, 202, { data: result.data, requestId }, selfHostedHeaders(result.data, result.replay))
+          return
+        }
+        params = routeMatch(pathname, `${prefix}/jobs/:id/result`)
+        if (params && request.method === 'GET') {
+          requireNoQuery(searchParams, 'WeChat self-hosted result')
+          const context = await requirePublic(request)
+          sendJson(response, 200, { data: await requireWechatSelfHosted().getResult(context, params.id), requestId })
+          return
+        }
+        params = routeMatch(pathname, `${prefix}/jobs/:id/cancel`)
+        if (params && request.method === 'POST') {
+          requireNoQuery(searchParams, 'WeChat self-hosted cancel')
+          const context = await requirePublic(request)
+          sendJson(response, 200, { data: await requireWechatSelfHosted().cancelJob(context, params.id), requestId })
+          return
+        }
+        params = routeMatch(pathname, `${prefix}/jobs/:id`)
+        if (params && request.method === 'GET') {
+          requireNoQuery(searchParams, 'WeChat self-hosted job')
+          const context = await requirePublic(request)
+          const data = await requireWechatSelfHosted().getJob(context, params.id)
+          sendJson(response, 200, { data, requestId }, selfHostedRetry([data]))
+          return
+        }
+        params = routeMatch(pathname, `${prefix}/batches/:id/result`)
+        if (params && request.method === 'GET') {
+          requireNoQuery(searchParams, 'WeChat self-hosted batch result')
+          const context = await requirePublic(request)
+          const data = await requireWechatSelfHosted().getBatchResult(context, params.id)
+          sendJson(response, 200, { data, requestId }, data.complete ? {} : { 'retry-after': '10' })
+          return
+        }
+        params = routeMatch(pathname, `${prefix}/batches/:id`)
+        if (params && request.method === 'GET') {
+          requireNoQuery(searchParams, 'WeChat self-hosted batch')
+          const context = await requirePublic(request)
+          const data = await requireWechatSelfHosted().getBatch(context, params.id)
+          sendJson(response, 200, { data, requestId }, selfHostedRetry(data.jobs))
+          return
+        }
       }
       if (request.method === 'POST' && pathname === '/api/v1/tools/tokenize') {
         const context = await requirePublic(request)

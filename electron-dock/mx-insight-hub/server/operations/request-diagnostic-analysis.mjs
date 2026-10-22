@@ -65,6 +65,15 @@ export function analyzeRequestDiagnostic(run) {
   }
 
   const rejected = refs(providers, call => call.outcome === 'rejected', 'providerCalls', ['outcome', 'httpStatus', 'businessCode', 'errorCode'])
+  const tikhubRateLimited = refs(providers,
+    call => call.provider === 'tikhub' && (call.httpStatus === 429 || call.errorCode === 'upstream_rate_limited'),
+    'providerCalls', ['provider', 'httpStatus', 'errorCode'])
+  if (tikhubRateLimited.length) {
+    add('tikhub_rate_limit_recorded', 'confirmed', 'TikHub 已返回上游限流信号',
+      '当次 TikHub 调用记录了 HTTP 429 或 upstream_rate_limited。官方 FAQ（2026-10-22 核对）规定账户默认 Level 1 为 10 RPS，可升级至 20–100 RPS，超过 100 RPS 需企业方案；这些是官方档位，不是本次已测得的账户上限。若 Hub 已交付存量回退，不代表最终交付失败。官方文档：https://tikhub.io/zh/faq',
+      tikhubRateLimited)
+    nextSteps.push('在 TikHub 控制台 API Settings → RPS Settings 核对当前账户档位、有效期及是否回落到默认档；按账户汇总各应用的请求速率并调整并发/节流。Hub 的本地配额或 100 QPS 配置不能证明供应商账户也是 100 RPS；本诊断不会自动重发请求。')
+  }
   if (rejected.length) {
     add('provider_rejection_recorded', 'confirmed', '已保存供应商拒绝证据',
       '调用账本记录 rejected；HTTP 与业务码需要一起阅读。若 Hub 交付了存量回退，这些拒绝不等于最终交付失败。具体原因以已核实错误说明及原调用记录为准。', rejected)

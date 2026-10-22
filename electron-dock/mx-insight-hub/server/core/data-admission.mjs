@@ -46,6 +46,9 @@ export function dataAdmissionLane(method, pathname) {
   if (pathname === '/api/v2/data/search') return 'acquisition'
   if (/^\/api\/v1\/(?:search|night-all|xiaohongshu|tikhub|justone)\//.test(pathname)) return 'acquisition'
   if (!pathname.startsWith('/api/v1/data/')) return null
+  // Self-hosted engine jobs only enqueue or read stored state; the engine
+  // itself runs in the Admin executor, outside any request.
+  if (pathname.startsWith('/api/v1/data/wechat/self-hosted/')) return 'read'
   // Media already has independent byte/concurrency budgets; do not occupy a
   // database execution slot for the duration of streaming an image.
   if (['/api/v1/data/posts/media', '/api/v1/data/ecommerce/products/media'].includes(pathname)) return null
