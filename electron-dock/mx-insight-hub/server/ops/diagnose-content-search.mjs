@@ -403,7 +403,9 @@ export async function diagnoseContentSearch(pool, identifiers, { weiboQuery = 'ç
         const { rows: [persistence] } = await client.query(`SELECT
           EXISTS(SELECT 1 FROM external_platform.response_archives WHERE provider_call_id=$1) AS operational_archive,
           (SELECT count(*)::int FROM external_platform.archive_objects WHERE provider_call_id=$1) AS archive_objects,
-          EXISTS(SELECT 1 FROM mxq.jobs WHERE queue='mx-insight-hub:ingest' AND dedupe_key='external-platform:tikhub:' || $1::text) AS ingest_job`, [call.id])
+          (EXISTS(SELECT 1 FROM mxq.jobs WHERE queue='mx-insight-hub:ingest' AND dedupe_key='external-platform:tikhub:' || $1::text)
+            -- Done jobs are deleted after 14 days; an ingest run for the call proves the job ran.
+            OR EXISTS(SELECT 1 FROM ingest.ingest_runs WHERE external_platform_call_id=$1)) AS ingest_job`, [call.id])
         stage='inspect_archive'
         evidence.push({ callId:call.id, requestId:call.usage_request_id, relation:call.usage_request_id===request.id?'own':'quarantine_candidate',
           operation:allowed(call.operation,[operation]), endpointVersion:allowed(call.endpoint_version,[endpointVersion]),

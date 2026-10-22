@@ -29,7 +29,7 @@ test('offline diagnostic resolves supplied ledger or idempotency IDs, keeps foll
     if(statement.includes('FROM external_platform.provider_calls')) return {rows:[{id:callId,usage_request_id:id,operation:endpoint.operation,
       endpoint_key:endpoint.endpointKey,endpoint_version:endpoint.endpointVersion,contract_version:endpoint.endpointContractVersion,
       outcome:'succeeded',http_status:200,business_code:200,item_count:1,started_at:new Date(),completed_at:new Date(),acquisition_request:snapshot,...archive}]}
-    if(statement.includes('AS operational_archive')){assert.match(statement,/mxq\.jobs/);assert.match(statement,/mx-insight-hub:ingest/);return {rows:[{operational_archive:true,archive_objects:1,ingest_job:true}]}}
+    if(statement.includes('AS operational_archive')){assert.match(statement,/mxq\.jobs/);assert.match(statement,/mx-insight-hub:ingest/);assert.match(statement,/ingest\.ingest_runs WHERE external_platform_call_id=\$1/);return {rows:[{operational_archive:true,archive_objects:1,ingest_job:true}]}}
     return {rows:[]}
   }}
   const report=await diagnoseContentSearch({connect:async()=>client},[identifier])
@@ -52,7 +52,8 @@ test('PGlite diagnostic reads real schema and limits screenshot followups to the
     CREATE TABLE control.external_platform_restricted_raw_responses(provider_call_id uuid,body_bytes bytea,body_size int,body_sha256 text,captured_at timestamptz);
     CREATE TABLE external_platform.response_archives(provider_call_id uuid);
     CREATE TABLE external_platform.archive_objects(provider_call_id uuid);
-    CREATE TABLE mxq.jobs(queue text,dedupe_key text);`)
+    CREATE TABLE mxq.jobs(queue text,dedupe_key text);
+    CREATE SCHEMA ingest;CREATE TABLE ingest.ingest_runs(external_platform_call_id uuid);`)
   const requestId=randomUUID(),idem=randomUUID(),tenantId=randomUUID(),consumerId=randomUUID(),keyId=randomUUID(),callId=randomUUID()
   const seed=async(id,key,platform,query)=>db.query(`INSERT INTO usage_requests VALUES($1,$2,$3,$4,$5,$6,'unknown',NULL,NULL,now(),now(),$7)`,
     [id,tenantId,consumerId,key,idem,platform,JSON.stringify({path:'/api/v1/data/search',body:{platform,query,pageSize:20}})])
@@ -72,6 +73,10 @@ test('PGlite diagnostic reads real schema and limits screenshot followups to the
   assert.deepEqual(new Set(report.requests.map(row=>row.requestId)),new Set([requestId,ownWeibo,ownDouyin,ownBilibili,ownZhihu]))
   assert.deepEqual(new Set(report.requests.map(row=>row.platform)),new Set(['kuaishou','zhihu','douyin','weibo','bilibili']))
   assert.equal(report.requests.find(row=>row.requestId===requestId).evidence[0].archive.projection.state,'candidate_accepts')
+  assert.equal(report.requests.find(row=>row.requestId===requestId).evidence[0].persistence.ingest_job,false)
+  await db.query('INSERT INTO ingest.ingest_runs VALUES($1)',[callId])
+  const ingested=await diagnoseContentSearch(pool,[requestId,ownBilibili,ownZhihu])
+  assert.equal(ingested.requests.find(row=>row.requestId===requestId).evidence[0].persistence.ingest_job,true,'a call whose done job was pruned still reads as ingested')
   assert.equal(report.requests.find(row=>row.requestId===ownWeibo).recentSameKeyCandidate,true)
   assert.equal(report.requests.find(row=>row.requestId===ownDouyin).recentSameKeyCandidate,true)
   assert.doesNotMatch(JSON.stringify(report),/private-/)

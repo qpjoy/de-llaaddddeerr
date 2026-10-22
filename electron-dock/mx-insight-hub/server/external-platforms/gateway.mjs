@@ -692,41 +692,54 @@ export class ExternalPlatformGateway {
         let old
         try { old = normalizeHubSocialRequest(input.operation, input.body) } catch { /* New account aliases use the managed contract below. */ }
         if (old && saved.fingerprint === fingerprint({ method: 'POST', path: input.path, body: old.fingerprintBody })) return this.socialData(context, input)
-        let legacy, current
-        try {
-          legacy = normalizeHubSocialCompatRequest(input.operation, input.body, {
-            maxPageSize: 1000, businessId: context.consumer.businessId, legacyTwitterIdentity: true,
-          })
-        } catch { /* Invalid old requests cannot identify a historical delivery. */ }
+        let current
         try { current = normalizeHubSocialCompatRequest(input.operation, input.body, { maxPageSize: 1000, businessId: context.consumer.businessId }) }
-        catch { /* Old numeric usernames could exceed the corrected username limit. */ }
-        const legacyFingerprint = legacy && fingerprint({ method: 'POST', path: input.path, body: legacy.fingerprintBody })
+        catch { /* Historical IDs may exceed the current official limit. */ }
         const currentFingerprint = current && fingerprint({ method: 'POST', path: input.path, body: current.fingerprintBody })
+        // Both previous identity contracts are receipt-only: the original
+        // digits-as-ID interpretation and the later explicit-field handles.
+        let historical
+        for (const options of [{ legacyTwitterIdentity: true }, { twitterIdentityMode: 'explicit' }]) {
+          try {
+            const normalized = normalizeHubSocialCompatRequest(input.operation, input.body, {
+              maxPageSize: 1000, businessId: context.consumer.businessId, ...options,
+            })
+            if (saved.fingerprint === fingerprint({ method: 'POST', path: input.path, body: normalized.fingerprintBody })) {
+              historical = { normalized, options }
+              break
+            }
+          } catch { /* An invalid former request cannot identify this receipt. */ }
+        }
         const sameBody = saved.acquisitionRequest.body && canonicalJson(saved.acquisitionRequest.body) === canonicalJson(input.body)
-        if (saved.fingerprint === legacyFingerprint && !sameBody && saved.acquisitionRequest.body) {
-          let original
-          try { original = normalizeHubSocialCompatRequest(input.operation, saved.acquisitionRequest.body, { maxPageSize: 1000, businessId: context.consumer.businessId }) }
-          catch { /* A changed body cannot replay an old, now-invalid username. */ }
-          if (!original || !current || fingerprint({ method: 'POST', path: input.path, body: original.fingerprintBody }) !== currentFingerprint) {
+        if (historical && !sameBody && saved.acquisitionRequest.body) {
+          let original, originalHistorical
+          try {
+            original = normalizeHubSocialCompatRequest(input.operation, saved.acquisitionRequest.body, { maxPageSize: 1000, businessId: context.consumer.businessId })
+            originalHistorical = normalizeHubSocialCompatRequest(input.operation, saved.acquisitionRequest.body, {
+              maxPageSize: 1000, businessId: context.consumer.businessId, ...historical.options,
+            })
+          } catch { /* A changed body cannot reinterpret an old identity. */ }
+          if (!original || !originalHistorical || !current
+            || fingerprint({ method: 'POST', path: input.path, body: originalHistorical.fingerprintBody }) !== saved.fingerprint
+            || fingerprint({ method: 'POST', path: input.path, body: original.fingerprintBody }) !== currentFingerprint) {
             throw new AppError(409, 'idempotency_conflict', 'Idempotency-Key was used with a different request')
           }
         }
-        if (legacy?.platform === 'twitter' && input.path === `/api/v1/data/social/${input.operation}`
-          && sameBody && saved.fingerprint === legacyFingerprint && saved.fingerprint !== currentFingerprint) {
+        if (historical?.normalized.platform === 'twitter' && input.path === `/api/v1/data/social/${input.operation}`
+          && sameBody && saved.fingerprint !== currentFingerprint) {
           const restart = () => { throw new AppError(409, 'search_restart_required', 'The saved request used the former Twitter identity interpretation; restart explicitly with a new Idempotency-Key and no cursor', { requestId: saved.id }) }
           const kind = saved.responseBody != null && (saved.status === 'committed' || saved.status === 'released' && saved.responseStatus >= 400 && saved.responseStatus <= 599)
             ? 'replay' : saved.status === 'reserved' ? 'in_progress' : saved.status === 'unknown' ? 'unknown' : null
-          // Require the original body as well as its former fingerprint so an
-          // explicit ID cannot become a username under the same receipt key.
-          // Freeze only this proven receipt. Never reserve or dispatch work with
-          // the former username-as-ID interpretation, even for a released row.
+          // Require the original body and its former fingerprint. Freeze only
+          // this proven receipt; never reserve or dispatch a former identity,
+          // even for a released row or an expired reservation.
           return this.#deliver(context, input, {
             operation: input.operation === 'crawl' ? 'social.content.crawl' : 'social.profile.get', authorizationPlatform: 'twitter',
             capabilityMessage: 'This Hub account operation is not granted for this API key',
-            reservation: { kind, request: saved },
+            reservation: { kind, request: saved }, historicalReceiptOnly: true,
             normalize: ({ policy }) => {
               const normalized = normalizeHubSocialCompatRequest(input.operation, input.body, {
-                maxPageSize: policy.maxPageSize, businessId: context.consumer.businessId, legacyTwitterIdentity: true,
+                maxPageSize: policy.maxPageSize, businessId: context.consumer.businessId, ...historical.options,
               })
               const totalLimit = normalized.jobs.length * (input.operation === 'user-info' ? 1 : normalized.pageSize)
               if (totalLimit > policy.maxPageSize || totalLimit > 1000) throw new AppError(400, 'work_budget_exceeded', 'Account work exceeds this Key entitlement')
@@ -1268,8 +1281,10 @@ export class ExternalPlatformGateway {
         `Idempotency-Key is required when deliveryMode is ${normalized.deliveryMode}`,
       )
     }
-    await requestMaintenance(this.usageStore)
-    await requestMaintenance(this.platformStore, 'reapStaleCalls')
+    if (!plan.historicalReceiptOnly) {
+      await requestMaintenance(this.usageStore)
+      await requestMaintenance(this.platformStore, 'reapStaleCalls')
+    }
 
     let validatedRetryOfRequestId = null
     if (retryOfRequestId != null) {

@@ -1,7 +1,9 @@
 import { AppError } from './errors.mjs'
 
 export const DATA_ADMISSION_DEFAULTS = Object.freeze({
-  readConcurrency: 4, acquisitionConcurrency: 0, maxPending: 512, maxWaitMs: 30000,
+  // 8 since 2026-10-22: PG runs with 16 CPUs / 48 GiB, and every read holds
+  // its slot while it waits on ES, so 4 left the database mostly idle.
+  readConcurrency: 8, acquisitionConcurrency: 0, maxPending: 512, maxWaitMs: 30000,
 })
 
 export function dataAdmissionConfig(environment = {}) {

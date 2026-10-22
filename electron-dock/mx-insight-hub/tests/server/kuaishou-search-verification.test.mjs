@@ -102,7 +102,8 @@ test('verification exact SELECT executes in actual PGlite and leaves the paid fa
       CREATE TABLE control.external_platform_restricted_raw_responses(provider_call_id uuid,body_bytes bytea,body_size int,body_sha256 text,captured_at timestamptz,parsed_payload jsonb);
       CREATE TABLE external_platform.response_archives(provider_call_id uuid);
       CREATE TABLE external_platform.archive_objects(provider_call_id uuid);
-      CREATE TABLE mxq.jobs(queue text,dedupe_key text);`)
+      CREATE TABLE mxq.jobs(queue text,dedupe_key text);
+      CREATE SCHEMA ingest; CREATE TABLE ingest.ingest_runs(external_platform_call_id uuid);`)
     const tenant = randomUUID(), consumer = randomUUID(), key = randomUUID()
     await db.query(`INSERT INTO usage_requests VALUES($1,$2,$3,$4,'kuaishou','committed',502,$5)`, [pin.requestId, tenant, consumer, key, JSON.stringify(snapshot)])
     await db.query(`INSERT INTO external_platform.provider_calls VALUES($1,$2,$3,$4,$5,'tikhub',$6,$6,$7,$8,'succeeded_unusable',200,200,true)`,
@@ -111,6 +112,7 @@ test('verification exact SELECT executes in actual PGlite and leaves the paid fa
       [pin.callId, Buffer.alloc(pin.bodySize), pin.bodySize, pin.bodySha256])
     await db.query('INSERT INTO external_platform.response_archives VALUES($1)', [pin.callId])
     await db.query('INSERT INTO external_platform.archive_objects VALUES($1)', [pin.callId])
+    await db.query('INSERT INTO ingest.ingest_runs VALUES($1)', [pin.callId])
     let connections = 0, released = 0
     const pool = { connect: async () => { connections++; return { query: (sql, args) => db.query(sql, args), release() { released++ } } } }
     await assert.rejects(verifySavedKuaishouSearch(pool), error => error.verificationCode === 'archive_integrity_failed')

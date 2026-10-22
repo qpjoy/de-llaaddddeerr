@@ -1,6 +1,6 @@
 # 独立 Kubernetes containerd 的调用者适配
 
-更新日期：2026-10-21。**中性解析器、下表产品 wrapper 和正式切换事务已实现，尚未进行业务切换后的生产验收。** `install-runtime` 已回传候选成功，但不发布 active 描述、不切换 kubelet；因此这些适配不会把当前普通发布提前导向候选实例。后续 `migrate` 在持久提交之后才正式激活；执行步骤见[正式切换说明](cutover.md)。
+更新日期：2026-10-21。**Internal 的正式切换已完成。** 2026-10-20 事务 `mx-k8s-20261020-053718-a8d8c128` 已回传 `services-restored / may_write=true / automatic_checks_passed=true`，用户已确认当时 MX-H2I 原用户登录、联网和 Pay 访问正常；详见[完成记录](cutover.md)。当前普通发布应使用已激活的独立 Kubernetes runtime，后续产品发布与故障恢复仍须另行验收。`install-runtime` 只准备候选、正式迁移提交后才发布 active 描述的协议保持不变；本现场不再需要运行 `migrate` 或 `resume`。
 
 目标仍是仅迁 Kubernetes：Docker 数据、卷与原共享 containerd 保留原位。曾经存在的默认 socket 调用会使“镜像导入旧 `k8s.io` 并验证成功，但新 kubelet 看不到镜像”；适配为各入口显式使用经过验证的 K8s endpoint。
 
@@ -28,7 +28,30 @@
 
 此前 DataPort 的 `ctr -n k8s.io` 导入和镜像列表检查均未选地址，且不在 `cutover.py` 的产品适配预检清单中。正式迁盘后 kubelet 使用独立 runtime 时，旧脚本可能在原实例导入并自检通过，新实例却看不到镜像；这与现场现象一致，两个实例的实际镜像状态仍需服务器只读回执核对。现已补齐 DataPort 入口，并让切换预检同时检查解析器模块、部署调用、显式导入地址及 CRI 镜像核验；仅复制 helper 但未接入部署也会拒绝预检。
 
-上述适配与预检采用本地替身回归验证；没有据此宣称生产发布、迁盘验收或 MX-H2I 用户功能复测完成。已迁盘主机修复 DataPort 发布时无需重新运行迁盘事务，也无需重启共享 containerd 或 kubelet。
+上述 DataPort 适配与预检采用本地替身回归验证；它们不替代新版本发布的生产验收，也不改变 2026-10-20 已完成的迁盘与用户验证记录。已迁盘主机修复 DataPort 发布时无需重新运行迁盘事务，也无需重启共享 containerd 或 kubelet。
+
+### 2026-10-21 公网身份 hostPort 故障与验收范围
+
+**后续恢复结果：** 用户同步修正后的恢复脚本并仅重建公网身份，回传 `recovered / applied=true`；数港 Pod 内 discovery/capabilities 均 200、配置匹配。公网复测 Auth discovery 和数港 SSO start 均为 200。用户随后确认真实 DataPort 登录和 MX-H2I 登录、联网均正常，当前无需再次重建或 resume。详细证据见[生产恢复记录](../../../mx-dataport/docs/sso-outage-20261021.md#生产恢复回执)。
+
+恢复前的服务器回执为 `mx-identity-public` 在 `mx-internal-server` 上 Running/Ready，Pod IP `192.168.224.83`，直接 `/healthz` 返回 200。宿主机持有 `10.88.88.88`，Pod 已声明该 `hostIP` 与 `hostPort: 18444`，但宿主机访问 `10.88.88.88:18444` 被拒绝；已检查的 nft `CNI-HOSTPORT-DNAT` 只有 18220，没有 18444。证据定位到公网身份的 hostPort 转发缺失；规则何时、为何消失尚未确定。
+
+旧 DataPort 的 `ErrImageNeverPull` 是镜像可见性故障；当前身份容器已经运行且健康，是另一层转发故障。`23fb2852` 只补运行时消费者与镜像检查，没有修改 CNI/hostPort 规则。两者都出现在迁盘后的运维阶段，但现有证据不能证明同一根因或迁盘删除了该规则。
+
+`Host.verify` 调用的 `Cluster.wait_ready` / `wait_network_ready` 核对控制器 UID/spec、generation、Ready/Available 数量，并不测试 hostPort DNAT、实际转发或公网 Auth discovery。因此历史 `automatic_checks_passed=true` 与本次端口故障不矛盾，不能用 Pod Ready 代替入口验收。后续恢复仍应分别核对 Pod 健康、原 hostPort 直连、Internal/Domestic 原回源、公网 discovery 和 DataPort capabilities，再由已有账号验证登录；本次 DataPort 与 MX-H2I 登录、联网的用户回执已经补齐，不表示未来故障可省略这些检查。
+
+**不要为缺失 hostPort 重跑已完成事务的 `migrate` 或 `resume`。** 不以迁盘、重新 enroll、修改凭据或重建数据库代替转发层修复；具体故障检查见[数港登录排查](../../../mx-dataport/docs/sso-outage-20261021.md)。
+
+### 消费者回归入口
+
+在 `electron-dock/mx-base/mx-move` 目录运行：
+
+```bash
+python3 -B -m unittest discover -s k8s/tests -p 'test_*.py'
+node --test ../../mx-dataport/tests/k8s-runtime.test.mjs ../../mx-dataport/tests/operations.test.mjs
+```
+
+`test_runtime_consumers.py` 执行 shell/Pay wrapper 替身，`test_cutover_host.py` 检查 DataPort 解析模块和实际部署接线；DataPort 的地址选择、导入及 CRI 镜像门禁由上列 Node 测试覆盖。它们均不验证生产 hostPort 转发，也不替代真实用户验收。
 
 ## 中性主机描述协议
 
@@ -62,12 +85,12 @@ Pay/Rig 仅把 `k8s.io` 调用导向 managed 实例。Docker root、卷和原 na
 
 Launcher `k8s-recovery-state.mjs` 对旧 `/var/lib/containerd` 的身份记录继续保留，因为旧实例确实不动。新 K8s runtime 使用独立记录；不能通过删除旧身份文件或停用保护绕过检查。旧 `mx-launcher/scripts/k8s.migrate.sh` 会整体移动共享 containerd，不适用于本次迁移。
 
-## 切换后的验收仍待完成
+## 已完成切换后的持续验收范围
 
 - 各产品普通发布应在新实例导入镜像，并通过 kubelet 对应 CRI 核对 image ID/引用及实际 Pod 启动；仅查 ctr 名称列表不算通过。
 - 检查容量/镜像 GC 使用新 root，同时旧共享 runtime 的 namespace、Docker 容器和卷保持原身份。
-- 在维护范围内验收 `repair-cni` 的服务选择、节点 Ready、DNS 和联网；离线“不重启旧服务”断言不能替代现场验证。
-- 正式切换事务必须通过各数据库停写、etcd/ES 快照和私有备份、原 `k8s.io` tasks/sandboxes 归零、kubelet 子挂载处理、冷副本校验、Launcher/common/Pay 身份与启动保护同步，以及允许新副本写入前的持久记录。
-- 切换后核对数据库 system ID、PV/PVC UID、Secret 和用户凭据连续性，并实测 MX-H2I 原用户登录、联网、SSO 与 Pay。不得以候选 `candidate-ready` 替代这些结果。
+- 如另有维护操作涉及 `repair-cni`，验收所选服务、节点 Ready、DNS、hostPort 实际转发和联网；离线“不重启旧服务”断言不能替代现场验证，不因当前故障自动执行该命令。
+- 正式切换的停写/备份、冷副本、存储身份与持久提交约束继续保留；本现场已有完成事务，不重新执行这些步骤修复产品发布或端口问题。
+- 后续变更继续核对数据库及用户凭据连续性；登录、联网、SSO 与 Pay 的现场验证应记录时间和范围。2026-10-20 的通过记录不能代替当前故障恢复后的验证。
 
-候选安装已经成功，本现场下一步是[正式切换预检](cutover.md)，维护窗口再执行 `migrate`；业务迁移、真实用户验收、最新数据回迁及灾难恢复并未因候选成功自动完成。
+本现场迁盘已经完成，上述公网身份入口和数港 SSO 启动已恢复，用户已确认真实 DataPort 登录及 MX-H2I 登录、联网正常。整机重启、最新数据回迁及灾难恢复演练未因迁盘或本次恢复完成自动通过。

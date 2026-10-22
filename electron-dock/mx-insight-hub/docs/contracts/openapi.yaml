@@ -8835,7 +8835,7 @@ paths:
           type: string
           minLength: 8
           maxLength: 128
-        description: 相同页重试保持原标识和请求体；下一页使用新标识。未知结果禁止自动新建标识重发。
+        description: 相同页重试保持原标识和请求体；下一页使用新标识。身份识别规则更新不改写已保存的精确历史回执，也不触发重新采集。未知结果禁止自动新建标识重发。
       requestBody:
         required: true
         content:
@@ -8854,19 +8854,20 @@ paths:
                   default: twitter
                 username:
                   type: string
-                  maxLength: 16
-                  description: Twitter 用户名去掉 @ 后为 1–15 位英文字母、数字或下划线；纯数字用户名仍按用户名查询，数字 userId 按 ID 查询。
+                  maxLength: 2048
+                  description: Twitter 自动识别账号字符串，与 userId 字段相同：裸纯数字字符串按 1–19 位账号 ID 查询；其他值按用户名查询，去掉 @ 后须为 1–15 位英文字母、数字或下划线。纯数字用户名请加 @。数字 ID 必须作为字符串发送以保持精度。
                 userId:
                   type: string
-                  pattern: ^[0-9]{1,30}$
+                  maxLength: 2048
+                  description: 与 username 使用相同的自动识别规则；裸纯数字字符串按 1–19 位账号 ID 查询，含字母或下划线按用户名查询，@ 显式表示用户名。
                 user_id:
                   type: string
-                  pattern: ^[0-9]{1,30}$
-                  description: userId 同义字段；同时提交须相同。
+                  maxLength: 2048
+                  description: userId 同义字段；Twitter 使用相同的自动识别规则。
                 uid:
                   type: string
-                  pattern: ^[0-9]{1,30}$
-                  description: userId 同义字段；同时提交须相同。
+                  maxLength: 2048
+                  description: userId 同义字段；Twitter 使用相同的自动识别规则。
                 count:
                   type: integer
                   minimum: 1
@@ -8957,7 +8958,7 @@ paths:
           type: string
           minLength: 8
           maxLength: 128
-        description: 相同页重试保持原标识和请求体；下一页使用新标识。未知结果禁止自动新建标识重发。
+        description: 相同页重试保持原标识和请求体；下一页使用新标识。身份识别规则更新不改写已保存的精确历史回执，也不触发重新采集。未知结果禁止自动新建标识重发。
       requestBody:
         required: true
         content:
@@ -8976,19 +8977,20 @@ paths:
                   default: twitter
                 username:
                   type: string
-                  maxLength: 16
-                  description: Twitter 用户名去掉 @ 后为 1–15 位英文字母、数字或下划线；纯数字用户名仍按用户名查询，数字 userId 按 ID 查询。
+                  maxLength: 2048
+                  description: Twitter 自动识别账号字符串，与 userId 字段相同：裸纯数字字符串按 1–19 位账号 ID 查询；其他值按用户名查询，去掉 @ 后须为 1–15 位英文字母、数字或下划线。纯数字用户名请加 @。数字 ID 必须作为字符串发送以保持精度。
                 userId:
                   type: string
-                  pattern: ^[0-9]{1,30}$
+                  maxLength: 2048
+                  description: 与 username 使用相同的自动识别规则；裸纯数字字符串按 1–19 位账号 ID 查询，含字母或下划线按用户名查询，@ 显式表示用户名。
                 user_id:
                   type: string
-                  pattern: ^[0-9]{1,30}$
-                  description: userId 同义字段；同时提交须相同。
+                  maxLength: 2048
+                  description: userId 同义字段；Twitter 使用相同的自动识别规则。
                 uid:
                   type: string
-                  pattern: ^[0-9]{1,30}$
-                  description: userId 同义字段；同时提交须相同。
+                  maxLength: 2048
+                  description: userId 同义字段；Twitter 使用相同的自动识别规则。
               oneOf:
               - required:
                 - username

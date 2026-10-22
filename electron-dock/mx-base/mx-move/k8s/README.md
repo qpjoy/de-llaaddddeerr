@@ -22,7 +22,7 @@
 
 Kubernetes 独占的业务目录和 kubelet 目录可保持逻辑路径，通过根卷新副本切换。若将 Kubernetes 镜像和容器运行时数据一并迁入根卷，方案是创建独立 containerd 实例，通过镜像 API 导出/导入所需镜像，再切换 kubelet 的实际 CRI endpoint；保留 Docker 的服务、socket、原共享运行时及构建 namespace。不能直接 rsync 某个 `k8s.io` 子目录，namespace 不是完整独立的数据目录。
 
-Launcher、Hub、mx-common、Pay、Rig 的镜像导入和相关修复入口已增加中性运行时解析适配；只有正式生效描述存在时才选择受验证的新实例。候选安装不创建该描述，所以普通发布继续使用原运行时。正式切换执行器在提交后发布该描述；不能重置集群或停用存储保护来绕过检查。
+Launcher、Hub、DataPort、mx-common、Pay、Rig 的镜像导入和相关修复入口已增加中性运行时解析适配；只有正式生效描述存在时才选择受验证的新实例。DataPort 同步范围包括 `scripts/k8s-runtime.mjs` 和 `scripts/operations.mjs`，并在创建迁移 Job 前核验 CRI 镜像 ID；完整入口与测试见[运行时消费者适配](runtime-consumers.md)。候选安装不创建 active 描述；本现场正式切换已提交并发布该描述，普通发布应使用已验证的新实例。不能重置集群或停用存储保护来绕过检查。
 
 当前事务 `mx-k8s-20261020-053718-a8d8c128` 的服务器最终回传为 `phase=services-restored`、`may_write=true`、`automatic_checks_passed=true`。五个数据根已切换至根逻辑卷，Kubernetes 使用独立 containerd；Docker 数据未迁移、etcd 未再次迁移，NAS 未纳入操作，历史数据及备份保留。用户此前已在新副本上确认 MX-H2I 原账号登录、联网及 Pay 访问均正常。**本次迁移完成，无需继续执行 `migrate` 或 `resume`。** 日后需要查看记录时，以 root 在 **`electron-dock/mx-base` 目录**执行只读命令：
 
@@ -132,6 +132,6 @@ mx-common 旧 `migrate-storage` 会删除并重建 PV/PVC，不是本次整体�
 
 **新副本一旦可能写入，就不能直接挂回旧目录。**恢复应继续使用已提交的新副本；如需迁回原盘，应再次停写并把最新数据复制到原盘的新目录后切换。多个数据库可能形成不同时间点的业务状态，不能只因文件复制成功就宣布整体回滚安全。
 
-`install-runtime` 只启动无工作负载的候选运行时；本现场当前先解除 Rig 初始化故障并恢复原业务，再核对迁移最初异常。`resume` 按 `may_write` 决定恢复原副本或向前恢复；`verify` 只读核验新副本。开发机测试和准备检查通过不能替代生产迁移、整机重启或真实用户登录/联网验收；现有 etcd 的启动保护一直保留，不提供通用灾难恢复。
+`install-runtime` 只启动无工作负载的候选运行时。此前 Rig 初始化故障及原业务恢复属于已处理的历史阶段，随后正式事务已完成；过程保留在[正式切换说明](cutover.md)。`resume` 按 `may_write` 决定恢复原副本或向前恢复，但不用于修复本次已完成迁移之后的 hostPort 缺失；`verify` 只读核验新副本，控制器 Ready 不等于端口转发或公网 SSO 通过。开发机测试和准备检查不能替代当前故障恢复后的用户验收；整机重启与隔离恢复演练仍未完成，现有 etcd 的启动保护一直保留，不提供通用灾难恢复。
 
 只读与脱敏回归测试：`python3 -B -m unittest discover -s k8s/tests -p 'test_*.py'`。技术依据：[Kubernetes 卷](https://kubernetes.io/docs/concepts/storage/volumes/)、[节点维护](https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/)、[containerd 容器生命周期](https://github.com/containerd/containerd/blob/main/docs/historical/design/lifecycle.md)。

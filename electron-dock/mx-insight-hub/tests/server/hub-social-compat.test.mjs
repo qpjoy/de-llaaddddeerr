@@ -23,12 +23,58 @@ test('screenshot aliases preserve nonnumeric Twitter user_id as username and lar
   assert.equal(request('rednote').platform, 'xiaohongshu')
 })
 
+test('bare numeric Twitter identifiers use ID lookup across aliases without losing precision', () => {
+  for (const operation of ['crawl', 'user-info']) for (const value of ['42', '12345', '1234567890123456789']) {
+    const expected = normalize(operation, { platform: 'twitter', userId: value })
+    for (const alias of [
+      { username: value }, { usernames: [value] }, { userId: value }, { user_id: value }, { uid: value }, { userIds: [value] },
+      { params: { screen_name: value } }, { params: { screenName: value } }, { params: { unique_id: value } },
+      { params: { rest_id: value } }, { username: ` ${value} ` },
+    ]) {
+      const actual = normalize(operation, { platform: 'twitter', ...alias })
+      assert.deepEqual(actual.fingerprintBody, expected.fingerprintBody, JSON.stringify(alias))
+      assert.deepEqual(actual.jobs[0].identity, { kind: 'id', value })
+      const lookup = dispatch(actual.jobs[0])
+      assert.equal(lookup.endpointPath, '/user/users/by/ids')
+      assert.deepEqual(lookup.upstreamQuery, { ids: value })
+      assert.equal(lookup.username, null)
+      if (operation === 'crawl') {
+        const posts = dispatch(actual.jobs[0], { resolvedIdentity: resolved('id', value), pageSize: 5 })
+        assert.equal(posts.endpointPath, `/user/${value}/tweets`)
+        assert.deepEqual(posts.upstreamQuery, { count: 5 })
+      }
+    }
+  }
+  const combined = normalize('user-info', { platform: 'twitter', username: '1234567890123456789', userIds: ['1234567890123456789'] })
+  assert.equal(combined.jobs.length, 1)
+})
+
+test('mixed Twitter identifiers infer each identity and reject invalid ID inputs before dispatch', () => {
+  const mixed = normalize('crawl', { platform: 'twitter', usernames: ['1234567890123456789', 'Sample_42', '@12345'], userIds: ['sample_42', '1234567890123456789'] })
+  assert.deepEqual(mixed.jobs.map(job => job.identity), [
+    { kind: 'username', value: 'sample_42' }, { kind: 'id', value: '1234567890123456789' }, { kind: 'username', value: '12345' },
+  ])
+  for (const field of ['username', 'userId']) {
+    assert.throws(() => normalize('crawl', { platform: 'twitter', [field]: '1'.repeat(20) }), error => {
+      assert.equal(error.code, 'invalid_social_request')
+      assert.match(error.message, /user ID.*1 to 19 digits/)
+      return true
+    })
+    assert.throws(() => normalize('crawl', { platform: 'twitter', [field]: Number('1234567890123456789') }), { code: 'invalid_social_request' })
+    for (const value of ['123456789012345678a', '1e18', '-123', '123.4', '１２３']) {
+      if (value === '1e18') assert.equal(normalize('crawl', { platform: 'twitter', [field]: value }).jobs[0].identity.kind, 'username')
+      else assert.throws(() => normalize('crawl', { platform: 'twitter', [field]: value }), { code: 'invalid_social_request' })
+    }
+  }
+  assert.deepEqual(normalize('user-info', { platform: 'instagram', username: '12345' }).jobs[0].identity, { kind: 'username', value: '12345' })
+})
+
 test('numeric Twitter handles keep their explicit identity through aliases, URLs and dispatch', () => {
   for (const operation of ['crawl', 'user-info']) {
-    const expected = normalize(operation, { platform: 'twitter', username: '12345' })
+    const expected = normalize(operation, { platform: 'twitter', username: '@12345' })
     for (const alias of [
-      { username: '12345' }, { username: '@12345' }, { usernames: ['12345'] },
-      { params: { screen_name: '12345' } }, { params: { screenName: '@12345' } },
+      { username: '@12345' }, { usernames: ['@12345'] },
+      { params: { screen_name: '@12345' } }, { params: { screenName: '@12345' } },
       { url: 'https://x.com/12345' }, { profileUrl: 'https://twitter.com/%31%32%33%34%35' },
       { user_id: '@12345' },
     ]) {
@@ -41,7 +87,7 @@ test('numeric Twitter handles keep their explicit identity through aliases, URLs
       assert.deepEqual(profile.upstreamQuery, {})
     }
   }
-  const posts = dispatch(normalize('crawl', { platform: 'twitter', username: '12345' }).jobs[0], {
+  const posts = dispatch(normalize('crawl', { platform: 'twitter', username: '@12345' }).jobs[0], {
     resolvedIdentity: resolved('username', '12345'), pageSize: 5,
   })
   assert.equal(posts.endpointPath, '/user/-1/tweets')
@@ -58,7 +104,7 @@ test('numeric Twitter IDs retain ID lookup and never deduplicate with an equal h
     assert.equal(dispatch(job).endpointPath, '/user/users/by/ids')
     assert.deepEqual(dispatch(job).upstreamQuery, { ids: '12345' })
   }
-  const combined = normalize('user-info', { platform: 'twitter', username: '12345', userId: '12345' })
+  const combined = normalize('user-info', { platform: 'twitter', username: '@12345', userId: '12345' })
   assert.deepEqual(combined.jobs.map(job => job.identity), [
     { kind: 'id', value: '12345' }, { kind: 'username', value: '12345' },
   ])
@@ -108,14 +154,22 @@ test('original Twitter contract uses the same actionable handle error without ch
   }
 })
 
-test('legacy numeric-handle normalization is only available to internal receipt verification', () => {
-  const body = { platform: 'twitter', username: '12345' }
+test('historical identity normalization is only available to internal receipt verification', () => {
+  const body = { platform: 'twitter', username: '@12345' }
   const old = normalize('crawl', body, { legacyTwitterIdentity: true })
   const id = normalize('crawl', { platform: 'twitter', userId: '12345' })
   assert.deepEqual(old.fingerprintBody, id.fingerprintBody)
   assert.notDeepEqual(normalize('crawl', body).fingerprintBody, old.fingerprintBody)
   assert.throws(() => normalize('crawl', { ...body, legacyTwitterIdentity: true }), { code: 'unsupported_fields' })
   assert.throws(() => normalize('crawl', { ...body, params: { legacyTwitterIdentity: true } }), { code: 'unsupported_fields' })
+  const bare = { platform: 'twitter', username: '12345' }
+  assert.deepEqual(normalize('crawl', bare, { twitterIdentityMode: 'explicit' }).jobs[0].identity, { kind: 'username', value: '12345' })
+  assert.deepEqual(normalize('crawl', bare).jobs[0].identity, { kind: 'id', value: '12345' })
+  for (const options of [{ twitterIdentityMode: 'explicit' }, { legacyTwitterIdentity: true }]) {
+    assert.equal(normalize('crawl', { platform: 'twitter', userId: '1'.repeat(30) }, options).jobs[0].identity.kind, 'id')
+  }
+  assert.throws(() => normalize('crawl', { ...bare, twitterIdentityMode: 'explicit' }), { code: 'unsupported_fields' })
+  assert.throws(() => normalize('crawl', { ...bare, params: { twitterIdentityMode: 'explicit' } }), { code: 'unsupported_fields' })
 })
 
 test('preserves identity lists and prevents hidden supplier work controls before a dispatch', () => {

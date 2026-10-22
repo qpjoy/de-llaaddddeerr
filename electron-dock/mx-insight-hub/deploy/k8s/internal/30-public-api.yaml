@@ -115,13 +115,16 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 10
+          # Four API processes share the host port (server/core/api-processes.mjs):
+          # each uses up to one core and a 768 MiB heap. The node has ample
+          # capacity; requests stay modest because the processes idle near zero.
           resources:
             requests:
-              cpu: 250m
-              memory: 256Mi
-            limits:
-              cpu: "2"
+              cpu: "1"
               memory: 1Gi
+            limits:
+              cpu: "6"
+              memory: 4Gi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

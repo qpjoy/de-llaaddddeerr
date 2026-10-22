@@ -176,6 +176,45 @@ test('account composer follows a short page cursor with a new identity and keeps
   } finally { environment.access = previousAccess }
 })
 
+test('Twitter account input needs no field selection and preserves identifier strings and replay identity', async () => {
+  const { StrategySearchExperience } = await view
+  const previousAccess = environment.access
+  environment.access = { platforms: ['twitter', 'instagram'], capabilities: ['social.content.crawl', 'social.profile.get'] }
+  environment.identity = 'auto-account-key'
+  const cell = createStrategySearchCell('twitter'), session = new Map([['auto-account-key', cell]]), sent = []
+  environment.send = async (_key, input, idem) => {
+    sent.push({ input, idem })
+    return { payload: { data: { platform: input.body.platform, items: [], pageInfo: { hasMore: false } } }, evidence: { requestId: `auto-account-${sent.length}` } }
+  }
+  const render = () => StrategySearchExperience({ strategySession: session, operation: 'user-info' })
+  const accountInput = () => nodes(render()).find(node => node.type === 'input' && node.props.placeholder?.includes('账号 ID'))
+  const submit = async () => { nodes(render()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} }); await flush() }
+  try {
+    assert.equal(nodes(render()).find(node => node.props?.label === '账号标识字段'), undefined)
+    assert.match(label(render()), /纯数字按账号 ID 查询（1–19 位）/u)
+    assert.match(label(render()), /纯数字用户名请加 @/u)
+    accountInput().props.onChange({ target: { value: '1234567890123456789' } })
+    assert.equal(sent.length, 0, 'typing an account never dispatches')
+    await submit()
+    assert.deepEqual(sent[0].input.body, { platform: 'twitter', username: '1234567890123456789' })
+    await submit()
+    assert.equal(sent[1].idem, sent[0].idem, 'same account keeps the original request identity')
+    accountInput().props.onChange({ target: { value: '@12345' } })
+    assert.equal(sent.length, 2)
+    await submit()
+    assert.deepEqual(sent[2].input.body, { platform: 'twitter', username: '@12345' })
+    assert.notEqual(sent[2].idem, sent[0].idem)
+    button(render(), 'Instagram').props.onClick()
+    assert.ok(nodes(render()).find(node => node.props?.label === '账号标识字段'), 'other platforms keep their original field selector')
+    assert.equal(sent.length, 3, 'platform selection never dispatches')
+    nodes(render()).find(node => node.props?.label === '账号标识字段').props.onChange('user_id')
+    button(render(), 'Twitter / X').props.onClick()
+    assert.equal(nodes(render()).find(node => node.props?.label === '账号标识字段'), undefined)
+    await submit()
+    assert.deepEqual(sent[3].input.body, { platform: 'twitter', user_id: '@12345' }, 'hiding the selector never rewrites an existing alias')
+  } finally { environment.access = previousAccess }
+})
+
 test('Twitter parameter edits are explicit intents and next page retains the exact successful parameters', async () => {
   const { StrategySearchExperience } = await view
   const previousAccess = environment.access

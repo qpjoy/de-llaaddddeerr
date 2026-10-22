@@ -14,7 +14,7 @@ import { tmpdir, hostname } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-function fixture(t, { fresh = false } = {}) {
+function fixture(t, { fresh = false, productionAuth = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "harbor-ops-test-")),
     dir = join(root, "mx-harbor");
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -22,6 +22,8 @@ function fixture(t, { fresh = false } = {}) {
   for (const path of [
     "scripts/manage.sh",
     "scripts/operations.mjs",
+    "scripts/auth-diagnostics.mjs",
+    "scripts/deploy-auth.mjs",
     "scripts/migration-job.mjs",
     "scripts/k8s-runtime.mjs",
     "scripts/enroll.mjs",
@@ -46,15 +48,15 @@ function fixture(t, { fresh = false } = {}) {
     join(dir, "secrets/operations.json"),
     JSON.stringify({
       context: "test-context",
-      clusterUid: "fixture-cluster",
-      node: "configured-node-name",
+      clusterUid: productionAuth ? "399f2349-3a34-48f4-8105-d7bae56ca136" : "fixture-cluster",
+      node: productionAuth ? "mx-internal-server" : "configured-node-name",
       hubAdminOrigin: "http://hub.internal:18151",
     }),
   );
   mkdirSync(join(dir, "secrets/identity"));
   const profile = {
-    origin: "https://harbor.example.test",
-    issuer: "https://auth.example.test/identity",
+    origin: productionAuth ? "https://dataport.minsight-ai.com" : "https://harbor.example.test",
+    issuer: productionAuth ? "https://auth.minsight-ai.com/identity" : "https://auth.example.test/identity",
     appId: "mx-harbor",
     clientId: "harbor",
     clientSecret: "s".repeat(43),
@@ -70,6 +72,18 @@ function fixture(t, { fresh = false } = {}) {
   writeFileSync(join(dir, "secrets/gateway-token"), "g".repeat(43), {
     mode: 0o600,
   });
+  // The actual recovery CLI has separate guard tests; never run host recovery here.
+  writeFileSync(join(dir, "scripts/recover-public-auth-hostport.mjs"), `
+import {appendFileSync,writeFileSync} from 'node:fs';
+const dir=process.env.HARBOR_TEST_DIR,mode=process.env.HARBOR_TEST_RECOVERY_MODE;
+appendFileSync(dir+'/calls',JSON.stringify({cmd:'auth-recovery',args:process.argv.slice(2),stdin:''})+'\\n');
+process.stderr.write('private-sensitive-payload');
+if(mode==='invalid_json'){process.stdout.write('private-sensitive-payload');process.exit(1)}
+if(mode==='failed'){process.stdout.write(JSON.stringify({ok:false,stage:'restart',mutationAttempted:true,restartSubmitted:'unknown',message:'private-sensitive-payload'}));process.exit(1)}
+writeFileSync(dir+'/auth-recovered','true');
+process.stdout.write(JSON.stringify({ok:true,action:'recovered',applied:true,message:'private-sensitive-payload'}));
+if(mode==='exit_mismatch')process.exit(1);
+`);
   writeFileSync(
     join(dir, "network.mjs"),
     `
@@ -93,9 +107,19 @@ if(cmd==='kubectl'){
  if(args[0]==='config'&&args[1]==='current-context'){process.stdout.write(process.env.HARBOR_TEST_CONTEXT||'test-context');process.exit(0)}
  if(args.includes('config')&&args.includes('view')){process.stdout.write('test-only-kubeconfig');process.exit(0)}
  const a=args.slice(4).filter(v=>!v.startsWith('--request-timeout=')),key=a.slice(0,3).join(' '),out=x=>process.stdout.write(JSON.stringify(x));
- if(key==='get namespace kube-system')out({metadata:{uid:process.env.HARBOR_TEST_DRIFT?'wrong':'fixture-cluster'}});
+ if(key==='get namespace kube-system')out({metadata:{uid:process.env.HARBOR_TEST_DRIFT?'wrong':process.env.HARBOR_TEST_PRODUCTION_AUTH?'399f2349-3a34-48f4-8105-d7bae56ca136':'fixture-cluster'}});
+ else if(a[0]==='exec'){
+  if(process.env.HARBOR_TEST_AUTH_EXEC_FAILURE){process.stderr.write('Error from server (Forbidden): private-sensitive-payload');process.exit(1)}
+  const mode=process.env.HARBOR_TEST_AUTH_MODE,result={ok:true,profile:{valid:true,category:'valid'},discovery:{status:200,category:'ok',jsonValid:true,issuerMatches:true},capabilities:{status:200,category:'ok',jsonValid:true,nativeForm:true,appIdMatches:true,originMatches:true,audienceMatches:true}};
+  if(mode==='invalid_json'){process.stdout.write('private-sensitive-payload');process.stderr.write('private-sensitive-payload');process.exit(1)}
+  if(process.env.HARBOR_TEST_AUTH_FAILURE||mode==='always_upstream'||(mode==='recoverable'&&!fs.existsSync(dir+'/auth-recovered')))result.capabilities={status:502,category:'upstream_http_error'};
+  if(mode==='permission')result.capabilities={status:403,category:'http_error'};
+  if(mode==='mismatch')result.capabilities={...result.capabilities,category:'configuration_mismatch',originMatches:false};
+  result.ok=result.capabilities.status===200&&result.capabilities.category==='ok';
+  out(result);if(!result.ok||mode==='exit_mismatch')process.exit(1);
+ }
  else if(a[0]==='get'&&a[1]==='nodes'){
-  const node={metadata:{name:'configured-node-name',labels:{'kubernetes.io/hostname':process.env.HARBOR_TEST_REMOTE_NODE?'another-host':os.hostname()}},spec:{},status:{conditions:[{type:'Ready',status:'True'}]}};
+  const node={metadata:{name:process.env.HARBOR_TEST_PRODUCTION_AUTH?'mx-internal-server':'configured-node-name',labels:{'kubernetes.io/hostname':process.env.HARBOR_TEST_REMOTE_NODE?'another-host':os.hostname()}},spec:{},status:{conditions:[{type:'Ready',status:'True'}]}};
   out({items:process.env.HARBOR_TEST_AMBIGUOUS_NODE?[node,node]:[node]});
  }
  else if(key==='get service mx-insight-hub-admin'){if(!process.env.HARBOR_TEST_NO_HUB)out({spec:{ports:[{port:18151}]}})}
@@ -134,6 +158,7 @@ if(cmd==='kubectl'){
   if(fs.existsSync(dir+'/runtime.json')){out(JSON.parse(fs.readFileSync(dir+'/runtime.json')));process.exit(0)}
   if(process.env.HARBOR_TEST_FRESH)process.exit(0);
   const profile={origin:'https://harbor.example.test',issuer:'https://auth.example.test/identity',appId:'mx-harbor',clientId:'harbor',clientSecret:'s'.repeat(43),audience:'mx-harbor',scope:'openid mx:identity',sessionKey:'k'.repeat(43)};
+  if(process.env.HARBOR_TEST_PRODUCTION_AUTH){profile.origin='https://dataport.minsight-ai.com';profile.issuer='https://auth.minsight-ai.com/identity'}
   const data={'profile.json':JSON.stringify(profile),MX_HARBOR_DATABASE_URL:'postgres://test:test@pg.internal/mx_harbor',MX_HARBOR_GATEWAY_TOKEN:'g'.repeat(43),MX_HARBOR_HUB_ADMIN_ORIGIN:'http://hub.internal:18151',MX_HARBOR_SSO_PROFILE:'/run/harbor/profile.json'};out({data:Object.fromEntries(Object.entries(data).map(([k,v])=>[k,Buffer.from(v).toString('base64')]))});
  }
  else if(key==='get deployment mx-harbor'){if(fs.existsSync(dir+'/deployment.json'))out(JSON.parse(fs.readFileSync(dir+'/deployment.json')))}
@@ -195,6 +220,7 @@ else if(cmd==='ctr'&&args.includes('ls'))process.stdout.write('docker.io/library
           NODE_OPTIONS: `--import=${pathToFileURL(join(dir, "network.mjs")).href}`,
           HARBOR_TEST_DIR: dir,
           HARBOR_TEST_FRESH: fresh ? "1" : "",
+          HARBOR_TEST_PRODUCTION_AUTH: productionAuth ? "1" : "",
           MX_HARBOR_BUILD_PROXY: "",
           MX_INSIGHT_BUILD_PROXY: "",
           MX_HARBOR_KUBE_CONTEXT: "",
@@ -233,6 +259,31 @@ test("plan is offline and status remains read only; cluster drift prevents mutat
   assert.ok(f.calls().every((c) => c.args.includes("get")));
   assert.notEqual(f.run("restart", { HARBOR_TEST_DRIFT: "1" }).status, 0);
   assert.ok(f.calls().every((c) => c.args.includes("get")));
+});
+test("auth diagnosis runs supplied code in the pinned DataPort Pod without deployment or credential transfer", (t) => {
+  const f = fixture(t);
+  const result = f.run("diagnose-auth");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).capabilities.status, 200);
+  const calls = f.calls();
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].args, ["--context", "test-context", "-n", "mx-harbor", "exec", "-i", "deployment/mx-harbor", "-c", "web", "--", "node", "--input-type=module"]);
+  assert.equal(calls[1].stdin, readFileSync(new URL("../scripts/auth-diagnostics.mjs", import.meta.url), "utf8"));
+  assert.doesNotMatch(calls[1].stdin, new RegExp("s".repeat(43)));
+  assert.equal(existsSync(join(f.dir, "lock")), false);
+});
+test("auth diagnosis retains safe failure details and stops before exec on cluster drift", (t) => {
+  const f = fixture(t);
+  const failed = f.run("diagnose-auth", { HARBOR_TEST_AUTH_FAILURE: "1" });
+  assert.equal(failed.status, 1);
+  assert.equal(JSON.parse(failed.stdout).capabilities.status, 502);
+  const denied = f.run("diagnose-auth", { HARBOR_TEST_AUTH_EXEC_FAILURE: "1" });
+  assert.equal(denied.status, 1);
+  assert.doesNotMatch(denied.stdout + denied.stderr, /private-sensitive-payload/);
+  const count = f.calls().length;
+  assert.notEqual(f.run("diagnose-auth", { HARBOR_TEST_DRIFT: "1" }).status, 0);
+  assert.ok(f.calls().slice(count).every((c) => c.args.includes("get")));
+  assert.ok(f.calls().every((c) => c.args.includes("get") || c.args.includes("exec")));
 });
 function assertFullDeploy(calls) {
   const position = (predicate) => calls.findIndex(predicate);
@@ -352,6 +403,93 @@ test("deploy bootstraps once and repeats the full migrate/restart/readiness work
     2,
   );
   assert.equal(existsSync(join(f.dir, "lock")), false);
+});
+const authCalls = calls => calls.filter(c => c.cmd === "kubectl" && c.args.includes("exec"));
+const recoveryCalls = calls => calls.filter(c => c.cmd === "auth-recovery");
+function assertAuthFailure(result, calls, dir) {
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /DataPort 已更新，但 SSO 验证未通过/);
+  assert.doesNotMatch(result.stdout + result.stderr, /private-sensitive-payload|s{43}|g{43}|k{43}/);
+  assert.doesNotMatch(result.stdout, /DataPort deploy completed/);
+  assert.ok(calls.some(c => c.cmd === "readiness"), "application is already updated and ready");
+  assert.ok(!calls.some(c => c.args.includes("patch")), "SSO failure cannot mark deployment lock releasable");
+  assert.ok(calls.some(c => c.args.includes("delete") && c.args.includes("--raw")));
+  const released = JSON.parse(readFileSync(join(dir, "unlocks.jsonl"), "utf8").trim());
+  assert.equal(released.preconditions.uid, "fixture-lock-uid-1", "cleanup only releases this operation's lock");
+  assert.equal(existsSync(join(dir, "lock")), false);
+}
+test("healthy enrolled production deploys verify SSO after readiness and never invoke recovery", (t) => {
+  const f = fixture(t, { productionAuth: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const count = f.calls().length, result = f.run("deploy"), calls = f.calls().slice(count);
+    assert.equal(result.status, 0, result.stderr);
+    assertFullDeploy(calls);
+    assert.equal(authCalls(calls).length, 1);
+    assert.equal(recoveryCalls(calls).length, 0);
+    const diagnostic = calls.indexOf(authCalls(calls)[0]);
+    assert.ok(calls.findIndex(c => c.cmd === "readiness") < diagnostic);
+    assert.ok(diagnostic < calls.findIndex(c => c.args.includes("patch")));
+    assert.match(result.stdout, /"status":"verified"/);
+    assert.match(result.stdout, /DataPort deploy completed/);
+  }
+});
+test("known production upstream failure invokes one CLI --apply then verifies; healthy redeploy does not recover again", (t) => {
+  const f = fixture(t, { productionAuth: true });
+  const first = f.run("deploy", { HARBOR_TEST_AUTH_MODE: "recoverable" }), calls = f.calls();
+  assert.equal(first.status, 0, first.stderr);
+  assertFullDeploy(calls);
+  const diagnostics = authCalls(calls), recoveries = recoveryCalls(calls);
+  assert.equal(diagnostics.length, 2);
+  assert.equal(recoveries.length, 1);
+  assert.deepEqual(recoveries[0].args, ["--apply"]);
+  assert.ok(calls.findIndex(c => c.cmd === "readiness") < calls.indexOf(diagnostics[0]));
+  assert.ok(calls.indexOf(diagnostics[0]) < calls.indexOf(recoveries[0]));
+  assert.ok(calls.indexOf(recoveries[0]) < calls.indexOf(diagnostics[1]));
+  assert.ok(calls.indexOf(diagnostics[1]) < calls.findIndex(c => c.args.includes("patch")));
+  for (const call of diagnostics) assert.equal(call.stdin, readFileSync(new URL("../scripts/auth-diagnostics.mjs", import.meta.url), "utf8"));
+  assert.match(first.stdout, /"status":"recovered"/);
+  assert.doesNotMatch(first.stdout + first.stderr, /private-sensitive-payload/);
+  const second = f.run("deploy", { HARBOR_TEST_AUTH_MODE: "recoverable" }), repeated = f.calls().slice(calls.length);
+  assert.equal(second.status, 0, second.stderr);
+  assertFullDeploy(repeated);
+  assert.equal(authCalls(repeated).length, 1);
+  assert.equal(recoveryCalls(repeated).length, 0);
+  assert.match(second.stdout, /"status":"verified"/);
+});
+test("permission, profile mismatch and uncertain diagnosis stop deploy without recovery or completion", (t) => {
+  for (const extra of [
+    { HARBOR_TEST_AUTH_MODE: "permission" },
+    { HARBOR_TEST_AUTH_MODE: "mismatch" },
+    { HARBOR_TEST_AUTH_EXEC_FAILURE: "1" },
+    { HARBOR_TEST_AUTH_MODE: "invalid_json" },
+    { HARBOR_TEST_AUTH_MODE: "exit_mismatch" },
+  ]) {
+    const f = fixture(t, { productionAuth: true }), result = f.run("deploy", extra), calls = f.calls();
+    assertAuthFailure(result, calls, f.dir);
+    assert.equal(authCalls(calls).length, 1);
+    assert.equal(recoveryCalls(calls).length, 0);
+  }
+});
+test("unknown or failed recovery receipts are sanitized and never retried", (t) => {
+  for (const mode of ["invalid_json", "failed", "exit_mismatch"]) {
+    const f = fixture(t, { productionAuth: true });
+    const result = f.run("deploy", { HARBOR_TEST_AUTH_MODE: "recoverable", HARBOR_TEST_RECOVERY_MODE: mode }), calls = f.calls();
+    assertAuthFailure(result, calls, f.dir);
+    assert.equal(recoveryCalls(calls).length, 1);
+    assert.deepEqual(recoveryCalls(calls)[0].args, ["--apply"]);
+    assert.equal(authCalls(calls).length, 1, "unconfirmed recovery is not treated as successful");
+    assert.match(result.stdout, /"restartSubmitted":"unknown"/);
+    assert.match(result.stdout, mode === "failed" ? /"recoveryStage":"restart"/ : /"recoveryStage":"wrapper"/);
+  }
+});
+test("post-recovery upstream failure has bounded read-only checks and no second mutation", (t) => {
+  const f = fixture(t, { productionAuth: true });
+  const result = f.run("deploy", { HARBOR_TEST_AUTH_MODE: "always_upstream" }), calls = f.calls();
+  assertAuthFailure(result, calls, f.dir);
+  assert.equal(recoveryCalls(calls).length, 1);
+  assert.equal(authCalls(calls).length, 4, "initial diagnosis plus at most three verification reads");
+  assert.equal((result.stdout.match(/"status":"waiting_for_auth"/g) || []).length, 2);
+  assert.match(result.stdout, /"step":"verify"/);
 });
 test("legacy migrate and restart commands both run the complete deploy workflow", (t) => {
   for (const action of ["migrate", "restart"]) {
@@ -731,7 +869,10 @@ test("deploy migrates without enrollment or Hub and later imports missing enroll
   const result = f.run("deploy", { HARBOR_TEST_NO_HUB: "1" });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /外部接入待配置/);
+  assert.match(result.stdout, /"status":"skipped_profile_missing"/);
   assertFullDeploy(f.calls());
+  assert.equal(authCalls(f.calls()).length, 0);
+  assert.equal(recoveryCalls(f.calls()).length, 0);
   assert.ok(!f.calls().some((c) => c.args.includes("mx-insight-hub-admin")));
   const old = JSON.parse(
     readFileSync(join(f.dir, "runtime.json"), "utf8"),

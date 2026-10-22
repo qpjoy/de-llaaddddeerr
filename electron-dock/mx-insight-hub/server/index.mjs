@@ -90,6 +90,9 @@ import { FeishuAlertNotifier } from './notifications-feishu.mjs'
 import { SupplierBalanceMonitor } from './external-platforms/balance-monitor.mjs'
 import { createPaymentReporting } from './payments/reporting.mjs'
 import { createRechargeService } from './payments/recharge.mjs'
+import cluster from 'node:cluster'
+import { apiProcessCount, processShareOf, setApiProcessCount } from './core/process-share.mjs'
+import { superviseApiProcesses } from './core/api-processes.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -109,7 +112,13 @@ function assertDurablePaidProviderRuntime(config) {
 export async function createRuntime(config = loadConfig()) {
   assertDurablePaidProviderRuntime(config)
   const store = config.storeDriver === 'postgres'
-    ? await createPostgresStore({ connectionString: config.databaseUrl, internalTraffic: config.internalTraffic })
+    ? await createPostgresStore({
+      connectionString: config.databaseUrl,
+      internalTraffic: config.internalTraffic,
+      // Same per-process budget as the shared pool below. Unset this was
+      // node-postgres's default of 10, which is also the configured default.
+      max: config.common.postgres.maxConnections ?? 10,
+    })
     : new MemoryStore({ internalTraffic: config.internalTraffic })
   const adapter = new NightAllAdapter(config.nightAll)
   // The queue is only reachable with a real database. Without one the admin
@@ -451,8 +460,8 @@ export async function createRuntime(config = loadConfig()) {
     platform === 'twitter' ? hubSocialGateway : nativeSearchGateway(platform, platform === 'facebook' ? 'justone' : 'tikhub')]))
   const socialDataGateway = { socialData: (context, input) => {
     if (input.operation === 'search') return hubSocialGateway.socialData(context, input)
-    // Twitter owns receipt-aware validation: an old numeric username may need
-    // exact historical replay even when it fails today's username contract.
+    // Twitter owns receipt-aware validation: historical identities may need
+    // exact replay even when their meaning or accepted bounds have changed.
     if (typeof input.body?.platform === 'string' && ['twitter', 'x', 'tw'].includes(input.body.platform.trim().toLowerCase())) return hubSocialGateway.socialAccountData(context, input)
     const normalized = normalizeHubSocialCompatRequest(input.operation, input.body, { businessId: context.consumer?.businessId })
     return socialAccountDataGateways[normalized.platform].socialAccountData(context, input)
@@ -635,16 +644,18 @@ export async function createRuntime(config = loadConfig()) {
     externalSocialUserActivityEnabled: (context, operation) => useTikHubOperation(
       context, operation === 'crawl' ? 'social.users.posts' : 'social.users.resolve',
     ),
+    // Relay limits and the image cache live in this process; with several API
+    // processes each takes its share so the pod keeps the configured totals.
     externalImageLoader: createExternalImageLoader({
-      maxConcurrency: config.externalMedia.maxConcurrency,
-      maxCacheBytes: config.externalMedia.cacheBytes,
-      maxCacheEntries: config.externalMedia.cacheEntries,
+      maxConcurrency: processShareOf(config.externalMedia.maxConcurrency),
+      maxCacheBytes: processShareOf(config.externalMedia.cacheBytes),
+      maxCacheEntries: processShareOf(config.externalMedia.cacheEntries),
       cacheTtlMs: config.externalMedia.cacheTtlMs,
     }),
     externalMediaPolicy: {
-      maxRequests: config.externalMedia.maxRequests,
+      maxRequests: processShareOf(config.externalMedia.maxRequests),
       windowMs: config.externalMedia.windowMs,
-      maxConcurrency: config.externalMedia.maxConsumerConcurrency,
+      maxConcurrency: processShareOf(config.externalMedia.maxConsumerConcurrency),
     },
     topicReports,
     newsDiscovery,
@@ -790,10 +801,45 @@ export async function start(config = loadConfig()) {
   return { ...runtime, server, close }
 }
 
+// The Public API pod binds a fixed host port on the only node (hostNetwork), so
+// it cannot scale out with replicas; it runs this many processes sharing that
+// port instead. Built in rather than a deployment setting. Admin stays one
+// process: its schedulers (notifications, balance monitor, payment reporting)
+// must not run twice. The in-memory store cannot be shared, so it stays one too.
+export const PUBLIC_API_PROCESSES = 4
+
+export function apiProcessesFor(config) {
+  return config.listenerMode === 'public' && config.storeDriver === 'postgres' ? PUBLIC_API_PROCESSES : 1
+}
+
+/**
+ * Prepare a worker's config for its share of the pod. The pod as a whole gets
+ * twice one process's pool, split across the processes (4 processes: 5 + 5
+ * connections each, 40 in total instead of 20).
+ */
+export function configureApiProcess(config, processes) {
+  setApiProcessCount(processes)
+  if (processes > 1) {
+    const perProcess = config.common.postgres.maxConnections ?? 10
+    config.common.postgres.maxConnections = Math.max(2, Math.ceil(perProcess * 2 / processes))
+  }
+  return config
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const config = loadConfig()
+  const processes = apiProcessesFor(config)
+  if (processes > 1 && cluster.isPrimary) {
+    superviseApiProcesses({ cluster, processes })
+  } else {
+    await runApiProcess(configureApiProcess(config, processes))
+  }
+}
+
+async function runApiProcess(config) {
   const runtime = await start(config)
-  console.log(`mx-insight-hub listening on http://${config.host}:${config.port} (${config.listenerMode})`)
+  const label = apiProcessCount() > 1 ? `, process ${process.pid}` : ''
+  console.log(`mx-insight-hub listening on http://${config.host}:${config.port} (${config.listenerMode}${label})`)
   let closing = false
   const shutdown = async () => {
     if (closing) return

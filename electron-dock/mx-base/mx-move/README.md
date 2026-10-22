@@ -2,13 +2,13 @@
 
 `mx-move` 集中放置 Kubernetes 存储迁移工具。`etcd/` 已实现单节点 kubeadm etcd 的迁移、验收及最新数据回迁；`k8s/` 提供全量盘点、独立运行时预备，以及已盘点 Internal 的停写、冷复制、挂载/运行时切换和中断恢复。工具保留原目录、快照和每次复制的数据，不提供删除命令。
 
-**2026-10-20 全量迁移准备：** etcd 已在根卷上，无需重复迁移。扣除共享 containerd 后已测业务数据约 130.99 GiB。**只迁 Kubernetes 数据**；Docker 数据、卷与原共享 containerd 整树保留原位。必须保留全部用户、凭据与联网配置。用户已回传 `candidate-ready`：172 个镜像引用、71 个 CRI 镜像，候选工作负载 0；无需重新导出或导入。同步全部运行时适配文件后，下一步从 `electron-dock/mx-base` 目录运行：
+**2026-10-20 全量迁移已完成：** 事务 `mx-k8s-20261020-053718-a8d8c128` 已回传 `phase=services-restored`、`may_write=true`、`automatic_checks_passed=true`。五个 Kubernetes 数据根使用根逻辑卷的新副本，kubelet 使用独立 `mx-k8s-containerd.service`；用户已确认 MX-H2I 原用户登录、联网和 Pay 访问正常。Docker 数据、卷与原共享 containerd 保留原位，etcd 未再次迁移，NAS 未纳入操作，历史副本和备份保留。**本现场无需再执行 `cutover-check`、`migrate` 或 `resume` 来完成这次迁移。** 事务与历史排障见 [K8s 正式切换说明](k8s/cutover.md)。
 
-```bash
-bash mx-move/scripts/manage.sh k8s cutover-check
-```
+准备阶段曾测得业务数据约 130.99 GiB，候选回执为 172 个镜像引用、71 个 CRI 镜像、工作负载 0；这些是历史准备记录，不是当前容量或运行状态。后续普通发布仍须同步[运行时消费者适配](k8s/runtime-consumers.md)，其中包括 DataPort 的运行时解析模块和部署调用者。
 
-该命令不停止业务。检查通过后，仅在维护窗口执行 `bash mx-move/scripts/manage.sh k8s migrate`；中断用 `k8s status` / `k8s resume`，完成后用只读 `k8s verify`。具体同步范围、五个数据根、提交前恢复原副本/提交后仅向前恢复，以及用户验收见 [K8s 正式切换说明](k8s/cutover.md)。**生产正式切换和现有用户登录/联网验收尚未执行。** 下文停启范围、50 GiB 预留和 `migrate/rollback` 均仅适用于 **etcd**，不要与 `k8s` 子命令混用。
+**2026-10-21 后续故障分开处理：** DataPort 旧发布脚本遗漏独立运行时适配，已补齐显式地址导入和 CRI 镜像核验；旧失败镜像在新旧实例中的实际分布仍缺现场对比证据。同日还发现公网身份 Pod 健康、宿主机 18444 hostPort DNAT 缺失；后续仅重建公网身份后，入口、discovery/capabilities 与数港 SSO start 均已恢复，用户随后确认真实 DataPort 登录和 MX-H2I 登录、联网均正常。规则最初消失原因未确定，不能认定与镜像导入同因，也不需要已完成事务的 `resume`。恢复证据与边界见[故障证据与验收范围](k8s/runtime-consumers.md#2026-10-21-公网身份-hostport-故障与验收范围)。
+
+下文停启范围、50 GiB 预留和 `migrate/rollback` 均仅适用于 **etcd**，不要与 `k8s` 子命令混用。
 
 这次实现针对 Internal 当前的布局：`/var/lib/etcd` 通过 bind mount 使用数据盘上的目录，目标是另一块系统盘上的根文件系统。2026-10-19 的 `lsblk` 确认两块物理盘均约 2TB；此前所称的“1T 盘”实际是系统盘上的 `cl-root` 逻辑卷，同一系统盘另有 `cl-home`。工具读取实际挂载、文件系统 UUID 和物理父盘验证布局，不根据 `nvme0` / `nvme1` 名字或标称容量猜盘。默认目标是根文件系统上的 `/var/lib/mx-move/etcd-data/`；源、目标若位于同一物理盘，检查会拒绝迁移。下文的“1T”均指这个根逻辑卷。
 
@@ -260,12 +260,16 @@ etcd 不存放 Docker 镜像、PostgreSQL 表或 ES 索引，其增长主要来�
 
 ## 本地验证
 
-迁移逻辑和 Launcher 身份更新的隔离测试可在开发机运行：
+在 `electron-dock/mx-base/mx-move` 目录运行迁移逻辑、运行时消费者和 Launcher 身份更新的隔离测试：
 
 ```bash
 python3 -m unittest discover -s etcd/tests -p 'test_*.py'
 node --test etcd/tests/launcher-identity.test.mjs
+python3 -B -m unittest discover -s k8s/tests -p 'test_*.py'
+node --test ../../mx-dataport/tests/k8s-runtime.test.mjs ../../mx-dataport/tests/operations.test.mjs
 ```
+
+Python `test_runtime_consumers.py` 覆盖 shell/Pay 调用者，`test_cutover_host.py` 检查 DataPort 模块和部署接线是否齐全；DataPort 实际命令行为由上列 Node 测试覆盖。仅通过 Python 套件不能替代 DataPort 的运行时与部署回归。
 
 单元测试不会证明真实主机上的挂载、SELinux、kubelet 停止时序或生产登录/联网已经验收。真实迁移结果以目标主机上的检查、切换验收及业务验证为准。
 
