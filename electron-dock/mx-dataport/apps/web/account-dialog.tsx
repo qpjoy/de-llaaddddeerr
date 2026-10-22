@@ -22,6 +22,7 @@ import {
   Field,
   FieldGroup,
   FieldLabel,
+  FieldDescription,
   FieldError,
 } from "@/components/ui/field";
 import {
@@ -187,7 +188,7 @@ function AccountDialogSession({
           </div>
           <DialogHeader>
             <DialogTitle>登录数港</DialogTitle>
-            <DialogDescription>{employee ? "使用企业超管创建的数港子账号登录。" : "企业超管使用已开通数港的统一 MX 账号登录。"}</DialogDescription>
+            <DialogDescription>{employee ? "使用企业超管创建的数港子账号登录。" : "企业超管使用统一 MX 账号，首次开通需填写 DataPort 专用邀请码。"}</DialogDescription>
           </DialogHeader>
           <div className="auth-login-modes" role="group" aria-label="登录方式">
             <Button type="button" variant={employee ? "outline" : "default"} disabled={busy} onClick={() => {setEmployee(false);setError("");}}>企业超管 · MX 登录</Button>
@@ -240,6 +241,25 @@ function AccountDialogSession({
                   </InputGroupAddon>
                 </InputGroup>
               </Field>
+              {!employee && (
+                <Field>
+                  <FieldLabel htmlFor="auth-invite">DataPort 专用邀请码（首次开通时填写）</FieldLabel>
+                  <InputGroup>
+                    <InputGroupInput
+                      id="auth-invite"
+                      name="inviteCode"
+                      maxLength={128}
+                      autoComplete="off"
+                      placeholder="输入 DataPort 专用邀请码"
+                      disabled={busy}
+                      aria-describedby="auth-invite-help"
+                    />
+                  </InputGroup>
+                  <FieldDescription id="auth-invite-help">
+                    已开通数港的 MX 账号可留空。此邀请码仅用于首次开通数港，不能注册新账号。
+                  </FieldDescription>
+                </Field>
+              )}
               {error && <FieldError role="alert">{error}</FieldError>}
               <Button
                 type={unavailable ? "button" : "submit"}
@@ -260,7 +280,7 @@ function AccountDialogSession({
             </FieldGroup>
           </form>
           <p className="managed-account-note">
-            {employee ? "子账号由企业超管创建" : "使用已有 MX 账号登录"}
+            {employee ? "子账号由企业超管创建" : "使用已有 MX 账号登录，专用邀请码由平台管理员提供"}
             <br />
             如需开通或重置密码，请联系管理员
           </p>

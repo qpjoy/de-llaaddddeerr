@@ -9,14 +9,16 @@ import { createServer, request as httpsRequest } from 'node:https'
 import pg from 'pg'
 import { createApplicationSso } from '../src/identity/sso.mjs'
 import { PostgresSsoStore } from '../src/identity/postgres-store.mjs'
+import { createHarborApp } from '../../mx-dataport/apps/server/app.mjs'
 
 const connectionString=process.env.MX_SSO_TEST_DATABASE_URL
 
-test('two ordinary applications share real Auth, with separate durable sessions and local permissions, without Hub schema', {skip:!connectionString,timeout:60000}, async t=>{
+test('ordinary apps and DataPort share real Auth while first-login invitations, registration and durable sessions stay isolated', {skip:!connectionString,timeout:60000}, async t=>{
   const url=new URL(connectionString)
   assert.ok(['127.0.0.1','localhost'].includes(url.hostname) && url.pathname.includes('sso_test'))
   const {createIdentityProvider}=await import('../../mx-launcher/server/src/identity/provider.ts')
   const {IdentityRepository}=await import('../../mx-launcher/server/src/identity/repository.ts')
+  const {RegistrationClientError}=await import('../../mx-launcher/server/src/registration/backchannel.ts')
   const admin=new pg.Pool({connectionString}), name=`common_sso_${randomUUID().replaceAll('-','')}`
   await admin.query(`CREATE DATABASE ${name}`); url.pathname=`/${name}`
   const pool=new pg.Pool({connectionString:url.href}), dir=mkdtempSync(join(tmpdir(),'common-sso-'))
@@ -45,10 +47,11 @@ test('two ordinary applications share real Auth, with separate durable sessions 
     return provider.handle(req,res)
   }),issuer=`${authOrigin}/identity`
   const applications=[]
-  for(const [appId,table] of [['mx-example','app_auth.browser_sso_records'],['mx-other','second_auth.browser_sso_records']]) {
+  for(const [appId,table] of [['mx-example','app_auth.browser_sso_records'],['mx-other','second_auth.browser_sso_records'],['mx-harbor','app_auth.browser_sso_records']]) {
     const app={appId,clientId:`${appId}-web`,clientSecret:randomBytes(32).toString('base64url'),audience:appId,grants:[]}
     app.origin=await listen(async(req,res)=>{
       try {
+        if(app.handler)return await app.handler(req,res)
         if(await app.sso.handle(req,res,new URL(req.url,app.origin)))return
         const principal=await app.sso.principal(req)
         if(!principal)return res.writeHead(401).end()
@@ -58,10 +61,14 @@ test('two ordinary applications share real Auth, with separate durable sessions 
     })
     app.settings={...app,issuer,scope:'openid mx:identity',sessionKey:randomBytes(32).toString('base64url'),caCert:cert.toString()}
     app.store=new PostgresSsoStore(pool,app.settings.sessionKey,{table})
-    app.restart=()=>{app.sso=createApplicationSso({settings:app.settings,store:app.store,navigation:app.navigation,resolvePrincipal:identity=>({issuer:identity.issuer,subject:identity.subject,displayName:identity.displayName,permissions:app.grants})})}
+    app.restart=()=>{
+      if(appId==='mx-harbor'){app.handler=createHarborApp({config:{sso:app.settings},pool});return}
+      app.sso=createApplicationSso({settings:app.settings,store:app.store,navigation:app.navigation,resolvePrincipal:identity=>({issuer:identity.issuer,subject:identity.subject,displayName:identity.displayName,permissions:app.grants})})
+    }
     app.restart();applications.push(app)
   }
-  const account=()=>({userId:'person',displayName:'Shared person',status:'active',appAccess:{deniedAppIds:blocked?['mx-example','mx-other']:[]}})
+  let admitted=false, admissionCalls=0
+  const account=()=>({userId:'person',displayName:'Shared person',status:'active',appAccess:{allowedAppIds:admitted?['mx-harbor']:[],deniedAppIds:blocked?['mx-example','mx-other']:[]}})
   const accounts={webState:repository.webState,account:async()=>account(),authenticate:async(login,password)=>{
     if(login!=='person'||password!=='test-password')return undefined
     logins++;return account()
@@ -70,7 +77,15 @@ test('two ordinary applications share real Auth, with separate durable sessions 
     withBrowserRequest:repository.withBrowserRequest.bind(repository),browserSessions:repository.browserSessions.bind(repository),revokeBrowserSessions:repository.revokeBrowserSessions.bind(repository)}
   const pair=generateKeyPairSync('rsa',{modulusLength:2048})
   provider=createIdentityProvider({origin:authOrigin,issuer,clientId:'launcher',clientSecret:'launcher-fixture',cookieKeys:['fixture-cookie'],
-    jwks:{keys:[{...pair.privateKey.export({format:'jwk'}),kid:'fixture',alg:'RS256',use:'sig'}]},applications},accounts,name=>repository.adapter(name))
+    jwks:{keys:[{...pair.privateKey.export({format:'jwk'}),kid:'fixture',alg:'RS256',use:'sig'}]},applications},accounts,name=>repository.adapter(name),{
+      policy:async()=>({mode:'invite_code',version:1}),
+      redeemAdmission:async input=>{
+        admissionCalls++
+        assert.equal(input.userId,'person');assert.equal(input.source.appId,'mx-harbor')
+        if(input.inviteCode!=='synthetic-dataport-invite')throw new RegistrationClientError(400,'专用邀请码无效。')
+        admitted=true;return {userId:'person'}
+      },
+    })
   const jar=new Map()
   function request(target,{method='GET',body,headers={},cookies=true}={}) {
     return new Promise((resolve,reject)=>{
@@ -206,6 +221,45 @@ test('two ordinary applications share real Auth, with separate durable sessions 
   b.navigation={applicationForm:true};b.restart()
   assert.equal((await request(`${b.origin}/auth/sso/start?view=register`,{method:'POST',headers:{origin:b.origin,'content-type':'application/json'},body:'{}'})).status,200)
   assert.equal((await b.store.get('login',jar.get('__Host-mx-other_login'))).view,'register','other applications retain invitation registration')
+  // Actual DataPort BFF: first login admits an existing MX account, never registers one.
+  const harbor=applications[2]
+  async function harborForm() {
+    const started=await request(`${harbor.origin}/auth/sso/start?view=register`,{method:'POST',headers:{origin:harbor.origin,'content-type':'application/json'},body:'{}'})
+    assert.equal(started.status,200,started.text)
+    assert.equal((await harbor.store.get('login',jar.get('__Host-mx-harbor_login'))).view,'login')
+    let step=await request(JSON.parse(started.text).redirect)
+    for(let i=0;i<12&&step.location;i++) {
+      const next=new URL(step.location,issuer);step=await request(next)
+      if(next.origin===harbor.origin&&next.pathname==='/auth/sso/interaction')break
+    }
+    const form=JSON.parse((await request(`${harbor.origin}/auth/sso/form`)).text)
+    assert.equal(form.view,'login');assert.equal(form.admissionRequired,true)
+    return body=>request(`${harbor.origin}/auth/sso/form`,{method:'POST',headers:{origin:harbor.origin,'x-mx-csrf':form.csrf,'content-type':'application/json'},body:JSON.stringify({formId:form.formId,login:'person',password:'test-password',...body})})
+  }
+  const admit=await harborForm()
+  for(const action of ['register','feishu','feishu-link'])assert.equal((await admit({action,inviteCode:'synthetic-dataport-invite'})).status,403)
+  assert.equal(admissionCalls,0,'disabled actions do not reach admission')
+  assert.equal((await admit({action:'login',password:'wrong',inviteCode:'synthetic-dataport-invite'})).status,401)
+  assert.equal(admissionCalls,0,'an invitation cannot replace MX password authentication')
+  assert.equal((await admit({action:'login'})).status,400);assert.equal(admitted,false)
+  assert.equal((await admit({action:'login',inviteCode:'invalid'})).status,400);assert.equal(admitted,false)
+  const accepted=await admit({action:'login',inviteCode:'synthetic-dataport-invite'})
+  assert.equal(accepted.status,200,accepted.text);assert.equal(admissionCalls,3);assert.equal(admitted,true)
+  async function completeHarbor(result) {
+    let step=await request(JSON.parse(result.text).redirect)
+    for(let i=0;i<12&&step.location;i++) {
+      const next=new URL(step.location,issuer);step=await request(next)
+      if(next.pathname==='/auth/sso/callback')break
+    }
+    assert.equal(step.status,303,step.text)
+    assert.equal(JSON.parse((await request(`${harbor.origin}/auth/sso/session`)).text).active,true)
+  }
+  await completeHarbor(accepted)
+  const again=await harborForm(),admissionBefore=admissionCalls
+  const withoutInvite=await again({action:'login'})
+  assert.equal(withoutInvite.status,200,withoutInvite.text)
+  await completeHarbor(withoutInvite)
+  assert.equal(admissionCalls,admissionBefore,'an admitted account leaves the code blank without another redemption')
   blocked=true
   assert.equal(JSON.parse((await request(`${b.origin}/auth/sso/session`)).text).active,false,'upstream application ban invalidates the session')
   assert.equal((await pool.query("SELECT to_regclass('iam.members') AS members,to_regclass('public.tenants') AS tenants")).rows[0].members,null)
