@@ -12,7 +12,7 @@ run_case() {
     source "$1/scripts/manage.sh"
     sleep() {
       case "$CASE_MODE" in
-        stalled|read_failure|pod_read_failure) SECONDS=$((SECONDS + 120)) ;;
+        stalled|read_failure|pod_read_failure|succeeded|succeeded_deleting|mixed_running|mixed_deleting|retained_*) SECONDS=$((SECONDS + 120)) ;;
         observed_then_read_failure) SECONDS=$((SECONDS + 60)) ;;
         *) SECONDS=$((SECONDS + $1)) ;;
       esac
@@ -33,10 +33,10 @@ run_case() {
             esac ;;
           replaced) printf "other-uid|418|418|0|0|0" ;;
           rescaled) printf "admin-uid|419|419|1|0|0" ;;
-          late_rescale)
+          late_rescale|late_rescale_succeeded)
             if [ "$count" = 1 ]; then printf "admin-uid|418|418|0|0|0"
             else printf "admin-uid|419|419|1|0|0"; fi ;;
-          late_replacement)
+          late_replacement|late_replacement_succeeded)
             if [ "$count" = 1 ]; then printf "admin-uid|418|418|0|0|0"
             else printf "other-uid|418|418|0|0|0"; fi ;;
           malformed) printf "admin-uid|418|invalid|0|0|0" ;;
@@ -57,6 +57,35 @@ run_case() {
         case "$CASE_MODE" in
           deleting) [ "$count" -gt 1 ] || printf "pod/admin-terminating\n" ;;
           pod_read_failure) printf "PRIVATE_API_ERROR" >&2; return 1 ;;
+          succeeded|succeeded_deleting|late_rescale_succeeded|late_replacement_succeeded|mixed_running|mixed_deleting|retained_*)
+            # Model retained API objects: an unfiltered name list includes
+            # completed Pods, even though their writers have already exited.
+            local fixture phase deleting name exclude_succeeded=0 arg
+            for arg in "$@"; do
+              case "$arg" in
+                --field-selector=status.phase!=Succeeded) exclude_succeeded=1 ;;
+                --field-selector*) return 97 ;;
+              esac
+            done
+            case "$CASE_MODE" in
+              succeeded|late_rescale_succeeded|late_replacement_succeeded)
+                fixture="admin-completed|Succeeded|" ;;
+              succeeded_deleting) fixture="admin-completed|Succeeded|2026-10-24T00:00:00Z" ;;
+              mixed_running) fixture="admin-completed|Succeeded|
+admin-running|Running|" ;;
+              mixed_deleting) fixture="admin-completed|Succeeded|
+admin-terminating|Running|2026-10-24T00:00:00Z" ;;
+              retained_failed_node_lost) fixture="admin-node-lost|Failed|" ;;
+              retained_unknown) fixture="admin-unknown|Unknown|" ;;
+              retained_pending) fixture="admin-pending|Pending|" ;;
+              retained_running) fixture="admin-running|Running|" ;;
+              retained_missing_phase) fixture="admin-missing-phase||" ;;
+            esac
+            while IFS="|" read -r name phase deleting; do
+              if [ "$exclude_succeeded" = 1 ] && [ "$phase" = Succeeded ]; then continue; fi
+              printf "pod/%s\n" "$name"
+            done <<<"$fixture"
+            ;;
         esac
       else
         printf "unexpected kubectl command\n" >&2; return 97
@@ -92,6 +121,24 @@ run_case already_gone 0
 run_case missing_status 0
 run_case deleting 0
 grep -q 'phase=pod_termination' "$TEST_DIR/deleting/output"
+run_case succeeded 0
+run_case succeeded_deleting 0
+for mode in succeeded succeeded_deleting; do
+  grep -q 'freeze confirmed' "$TEST_DIR/$mode/output"
+  [ "$(cat "$TEST_DIR/$mode/pod-count")" = 1 ]
+  [ "$(cat "$TEST_DIR/$mode/deployment-count")" = 2 ]
+done
+for mode in mixed_running mixed_deleting retained_failed_node_lost retained_unknown retained_pending retained_running retained_missing_phase; do
+  run_case "$mode" 1
+  grep -q 'phase=pod_termination' "$TEST_DIR/$mode/output"
+  ! grep -q 'freeze confirmed' "$TEST_DIR/$mode/output"
+done
+run_case late_rescale_succeeded 1
+run_case late_replacement_succeeded 1
+for mode in late_rescale_succeeded late_replacement_succeeded; do
+  grep -q 'phase=deployment_changed_during_confirmation' "$TEST_DIR/$mode/output"
+  ! grep -q 'freeze confirmed' "$TEST_DIR/$mode/output"
+done
 run_case replaced 1
 run_case rescaled 1
 run_case late_rescale 1

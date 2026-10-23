@@ -1989,7 +1989,9 @@ k8s_admin_stop_diagnostics() {
 
 # A successful scale request only changes the desired state. Wait for the
 # Deployment controller to observe it as well as for the old writer Pods to
-# disappear. Keep one 120s budget for both phases; do not extend Pod grace or
+# stop. Succeeded Pods cannot restart, but their API objects may remain after
+# exit; other phases (including Failed on a lost node) still block migration.
+# Keep one 120s budget for both phases; do not extend Pod grace or
 # force deletion when the controller has not processed the scale request.
 k8s_wait_for_admin_stop() {
   local expected_uid="$1" deadline=$((SECONDS + 120))
@@ -2034,6 +2036,7 @@ k8s_wait_for_admin_stop() {
         [ "$remaining" -ge "$request_timeout" ] || request_timeout="$remaining"
         if pods="$(kubectl -n mx-insight-hub get pods \
           -l app.kubernetes.io/name=mx-insight-hub-admin --request-timeout="${request_timeout}s" \
+          --field-selector=status.phase!=Succeeded \
           -o name 2>/dev/null)"; then
           if [ -z "$pods" ] && [ "$SECONDS" -lt "$deadline" ]; then
             # Check the intent again after the Pod read, so a concurrent scale
