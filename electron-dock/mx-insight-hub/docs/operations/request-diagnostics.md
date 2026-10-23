@@ -30,6 +30,19 @@ Launcher 用户（包括 Launcher 平台管理员）和 Public listener 均不�
 保留失败与成功回退的区别。`billed=null` 显示未知；`estimated` 不是实际采购扣款；
 `shadow` 客户结算不表示钱包实际扣款。无记录不证明请求没有执行。
 
+## TikHub 限流提醒（2026-10-22）
+
+当次供应商账本明确为 `provider=tikhub`，且记录 HTTP 429 或
+`upstream_rate_limited` 时，“已存证据分析”展示官方速率说明与文档链接。
+[TikHub 官方 FAQ](https://tikhub.io/zh/faq) 规定账户默认 Level 1 为 **10 RPS**，
+可升级至 20–100 RPS，超过 100 RPS 需企业方案。实际账户额度须到
+`API Settings → RPS Settings` 核对档位和有效期；套餐失效会回落默认档。
+应按账户汇总各应用流量，Hub 本地 100 QPS 配置不等于供应商拥有 100 RPS。
+
+提醒仅解释已保存的供应商限流证据：不将 Hub 本地 429、其他供应商限流、
+TikHub 普通 400 或 unknown 推断为 TikHub 超额；不改变回退交付、历史状态、
+客户结算或自动重试规则。无新增查询或上游请求。
+
 ## 受限归档边界
 
 诊断不返回请求参数、响应正文、签名、Headers、凭据、堆栈、URL 或任意供应商文本。

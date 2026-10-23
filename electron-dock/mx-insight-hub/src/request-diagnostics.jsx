@@ -23,6 +23,7 @@ function EvidenceAnalysis({ analysis }) {
     <div className="mih-diagnostic-findings">{analysis.findings.map((finding, index) => <article key={`${finding.code}-${index}`} className={`mih-diagnostic-finding is-${finding.certainty}`}>
       <h5><span>{finding.certainty === 'confirmed' ? '已确认' : '待核对'}</span>{finding.title}</h5>
       <p>{finding.detail}</p>
+      {finding.code === 'tikhub_rate_limit_recorded' ? <p><a href="https://tikhub.io/zh/faq" target="_blank" rel="noopener noreferrer">TikHub 官方 FAQ：速率限制（RPS）</a></p> : null}
       {finding.evidenceRefs?.length ? <details><summary>证据位置</summary><ul>{finding.evidenceRefs.map(ref => <li key={ref}><code>{ref}</code></li>)}</ul></details> : null}
     </article>)}</div>
     {analysis.nextSteps.length ? <><h5>建议下一步（只读核对）</h5><ol>{analysis.nextSteps.map(step => <li key={step}>{step}</li>)}</ol></> : null}

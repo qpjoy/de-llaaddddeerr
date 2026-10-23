@@ -3,6 +3,8 @@ import { DATA_SEARCH_V2_OPENAPI, DATA_SEARCH_RECOVERY_OPENAPI, TWITTER_SEARCH_PA
 import { DATA_SEARCH_V2_PLATFORMS } from './contracts/data-search-v2.mjs'
 import { ipRiskV2Paths, ipRiskV2Guide, ipRiskSubscriptionPaths } from './contracts/ip-risk-v2-docs.mjs'
 import { webSearchPaths, webSearchGuide } from './web-search/docs.mjs'
+import { wechatSelfHostedPaths, wechatSelfHostedGuide } from './self-hosted/docs.mjs'
+import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
 import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-research-docs.mjs'
@@ -1314,6 +1316,7 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     ...hubSocialPaths,
     ...youtubeCommentsPaths,
     ...webSearchPaths,
+    ...wechatSelfHostedPaths,
     '/data/services/pricing': { get: { tags:['Hub 服务定价'], summary:'当前 Key 的 Hub 官方定价与账户执行价',
       parameters:[{in:'query',name:'path',required:true,schema:{type:'string'},description:'完整 Hub 数据接口路径；仅支持已登记的价格合同'}],
       description:'只读当前已发布价格表和账户执行价；按目标接口的 Key 权限检查，不采集、不扣费、不锁价。不包含采购价或供应商信息。未发布标准单价不代表免费。',
@@ -5501,6 +5504,7 @@ Object.assign(PUBLIC_OPENAPI_DOCUMENT.components.schemas, {
 export const PUBLIC_DOCS_ROUTES = Object.freeze([
   {key:'web-search',path:'/docs/web-search',label:'Web Search',section:'数据产品'},
   ...WECHAT_PRODUCTS.map(product => ({ key: product.key, path: `/docs/${product.key}`, label: product.label, section: '微信数据服务' })),
+  { key: WECHAT_SELF_HOSTED.docs, path: `/docs/${WECHAT_SELF_HOSTED.docs}`, label: WECHAT_SELF_HOSTED.label, section: '微信数据服务' },
   { key:'social-content', path:'/docs/social-content', label:'社媒与内容数据', section:'数据服务' },
   { key:'strategy-search', path:'/docs/strategy-search', label:'策略搜索', section:'数据服务' },
   ...NATIVE_DOC_ROUTES,
@@ -6714,6 +6718,7 @@ export function tenantDocumentPathAllowed(path, scopes) {
 }
 const TENANT_PRODUCT_PATHS = {
   'web-search':Object.keys(webSearchPaths),
+  [WECHAT_SELF_HOSTED.docs]: Object.keys(wechatSelfHostedPaths),
   ...Object.fromEntries(WECHAT_PRODUCTS.map(product => [product.key, nativeDocPaths(product.key)])),
   'social-content': [...nativeDocPaths('social-content'), '/data/social/accounts/search', ...Object.keys(hubSocialPaths), ...Object.keys(youtubeCommentsPaths)],
   ...Object.fromEntries(NATIVE_DOC_ROUTES.map(route=>[route.key,nativeDocPaths(route.key)])),
@@ -6792,6 +6797,7 @@ export function tenantOpenApiDocument(scopes) {
 function tenantDocBody(route, scopes) {
   if (route.key === 'strategy-search') return strategySearchGuide(scopes)
   if (route.key === 'web-search') return webSearchGuide
+  if (route.key === WECHAT_SELF_HOSTED.docs) return wechatSelfHostedGuide
   if (route.nativeKey) return nativeEndpointGuide(route.key)
   if (WECHAT_PRODUCTS.some(product => product.key === route.key)) return nativeServiceGuide(route.key, path=>tenantDocumentPathAllowed(path, scopes))
   if (route.key === 'social-content') return hubSocialGuide(path=>tenantDocumentPathAllowed(path,scopes), scopes) + youtubeCommentsGuide(path=>tenantDocumentPathAllowed(path,scopes)) + nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
@@ -6864,6 +6870,7 @@ export function publicDocsHtmlForPath(pathname, { tenant = false, scopes, procur
   if (route.key === 'ip-risk-subscription') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${ipRiskProductGuide}</main>`)
   if (route.key === 'ip-risk-v2') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${ipRiskV2Guide}</main>`)
   if (route.key === 'web-search') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${webSearchGuide}</main>`)
+  if (route.key === WECHAT_SELF_HOSTED.docs) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${wechatSelfHostedGuide}</main>`)
   if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${hubSocialGuide()}${youtubeCommentsGuide()}${nativeServiceGuide(route.key)}</main>`)
   if (route.key === 'strategy-search') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${strategySearchGuide()}</main>`)
   if (route.key === 'ecommerce-treasure-box') html = html.replace('</main>', () => `${nativeServiceGuide(route.key)}</main>`)

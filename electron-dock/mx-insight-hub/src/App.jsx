@@ -3,6 +3,8 @@ import { hubLoginUrl, hubUiPath } from '../shared/account-navigation.mjs'
 import { restorePaymentReturn } from '../shared/payment-return.mjs'
 import { WechatOverview } from './wechat-product.jsx'
 import { WECHAT_PRODUCTS } from '../shared/wechat.mjs'
+import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
+import { WechatSelfHostedPage } from './wechat-self-hosted.jsx'
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
 import { ProvisioningPage } from './pages-provisioning.jsx'
 import { PRODUCT_ACCESS, productAllowed } from '../shared/product-access.mjs'
@@ -406,6 +408,7 @@ const ROUTES = [
   { path: '/data-products/ip-risk', label: 'IP 风险画像', description: 'IPv4 风险查询与接口调试', icon: Globe, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: IpRiskPage, capability: 'apikey.read' },
   { path: '/data-products/enterprise', label: '企业数据', description: '企业查询与接口调试', icon: House, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: EnterprisePage, capability: 'apikey.read' },
   ...WECHAT_PRODUCTS.map(product => ({ path: `/data-products/${product.key}`, label: product.label, navSection: 'wechat', description: product.description, icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: WechatOverview, capability: 'apikey.read' })),
+  { path: WECHAT_SELF_HOSTED.path, label: WECHAT_SELF_HOSTED.label, navLabel: WECHAT_SELF_HOSTED.navLabel, navSection: 'wechat', description: WECHAT_SELF_HOSTED.description, icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: WechatSelfHostedPage, capability: 'apikey.read' },
   { path: '/data-products/social-content', label: '社媒与内容数据', description: '内容、账号、评论与趋势接口', icon: MagnifyingGlass, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: SocialContentOverview, capability: 'apikey.read' },
   { path: '/data-products/xiaohongshu-note', label: '小红书笔记画卷', navLabel: '笔记画卷', navSection: 'xiaohongshu', description: '链接解析、正文与标签', icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuNotePage, capability: 'apikey.read' },
   { path: '/data-products/xiaohongshu-hot-notes', label: '小红书热门笔记', navLabel: '热门笔记', navSection: 'xiaohongshu', description: '热门内容、筛选与指标', icon: Scroll, group: '数据平面', navParent: DATA_PRODUCTS_NAV_KEY, component: XiaohongshuDiscoveryPage, capability: 'apikey.read' },
@@ -976,7 +979,7 @@ export function App() {
   // Falling back to the first permitted route rather than the dashboard: a user
   // scoped out of the dashboard would otherwise land on a permanent 403.
   const route = routes.includes(requested) ? requested : routes[0] || ROUTE_MAP.get('/runtime')
-  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && ![...WECHAT_PRODUCTS.map(product => `/data-products/${product.key}`), '/data-products/search', '/data-products/strategy-search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise', '/data-products/web-search'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
+  const Page = !session?.platformAdmin && PRODUCT_ACCESS[route.path] && ![...WECHAT_PRODUCTS.map(product => `/data-products/${product.key}`), WECHAT_SELF_HOSTED.path, '/data-products/search', '/data-products/strategy-search', '/data-products/news', '/data-products/social-content', '/data-products/xiaohongshu-note', '/data-products/xiaohongshu-hot-notes', '/data-products/xiaohongshu-inspiration', '/data-products/ip-risk', '/data-products/enterprise', '/data-products/web-search'].includes(route.path) ? (route.path === '/source-catalog' ? TenantCatalogPage : TenantProductPage) : route.component
   const pageProps = {
     aggregateSession,
     strategySession,

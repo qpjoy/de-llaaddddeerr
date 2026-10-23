@@ -1,0 +1,20 @@
+.mih-wsh, .mih-wsh-admin { min-width: 0; }
+.mih-wsh .qp-table-wrap, .mih-wsh-admin .qp-table-wrap { max-width: 100%; overflow-x: auto; }
+.mih-wsh-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; align-items: end; margin: 12px 0; }
+.mih-wsh-form .mih-page-actions { grid-column: 1 / -1; }
+.mih-wsh-form .qp-button { white-space: nowrap; }
+.mih-wsh-check { display: flex; gap: 8px; align-items: center; min-height: 38px; }
+.mih-wsh-status { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; white-space: nowrap; background: var(--qp-surface-muted, rgba(127, 127, 127, .12)); }
+.mih-wsh-status--succeeded { background: rgba(34, 160, 107, .16); }
+.mih-wsh-status--running, .mih-wsh-status--queued { background: rgba(59, 130, 246, .16); }
+.mih-wsh-status--failed, .mih-wsh-status--expired, .mih-wsh-status--cancelled { background: rgba(127, 127, 127, .18); }
+.mih-wsh-status--unknown { background: rgba(234, 160, 40, .22); }
+.mih-wsh-detail { margin-top: 16px; }
+.mih-wsh-articles { display: grid; gap: 12px; padding-left: 20px; }
+.mih-wsh-articles h4 { margin: 0 0 4px; }
+.mih-wsh-meta { opacity: .72; font-size: 13px; margin: 0 0 4px; }
+.mih-wsh-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 12px 0; }
+.mih-wsh-cards > div { display: grid; gap: 4px; padding: 12px; border-radius: 10px; background: var(--qp-surface-muted, rgba(127, 127, 127, .08)); }
+.mih-wsh-alert { padding: 12px; border-radius: 10px; margin: 12px 0; background: rgba(234, 160, 40, .14); }
+.mih-wsh-events { display: grid; gap: 4px; padding-left: 18px; font-size: 13px; }
+.mih-wsh-note { opacity: .75; font-size: 13px; }
