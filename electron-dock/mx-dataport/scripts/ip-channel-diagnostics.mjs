@@ -6,12 +6,29 @@ const defaults = [
   ['1c2d79f0-bede-4f6e-ab40-25351da10302', '43f3c15a-6976-441b-8735-644743307ebf'],
 ];
 const uuid = value => /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value);
+function safeMessage(value) {
+  if (typeof value !== 'string') return null;
+  return value.slice(0, 1000)
+    .replace(/https?:\/\/[^\s"<>]+/gi, '[url omitted]')
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/\b(?:token|password|secret|cookie|authorization|api[_-]?key)\b["']?\s*[:=]\s*["']?[^\s,"'}]+/gi, '[credential omitted]')
+    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, '[IP omitted]')
+    .replace(/[A-Za-z0-9_-]{24,}/g, '[opaque value omitted]')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 280) || null;
+}
 export function upstreamMetadata(row) {
   const { diagnostic_body, ...metadata } = row;
   if (diagnostic_body) {
     try {
-      const code = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(diagnostic_body))?.ret_data?.code;
+      const payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(diagnostic_body));
+      const code = payload?.ret_data?.code;
       metadata.businessCode = code != null && /^-?\d{1,12}$/.test(String(code)) ? Number(code) : null;
+      if (row.outcome === 'rejected') {
+        const source = payload?.ret_data;
+        const messages = [source?.msg, source?.message, source?.errmsg, source?.error_msg, payload?.msg, payload?.message]
+          .map(safeMessage).filter(Boolean);
+        metadata.businessMessages = [...new Set(messages)].slice(0, 3);
+      }
     } catch { metadata.bodyNotJson = true; }
   }
   return metadata;
