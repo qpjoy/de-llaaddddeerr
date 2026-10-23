@@ -88,6 +88,12 @@ spec:
                 name: mx-insight-hub-model-keys
                 optional: true
           env:
+            - name: MX_DATAPORT_AI_ENV
+              valueFrom:
+                secretKeyRef:
+                  name: mx-dataport-ai
+                  key: environment
+                  optional: true
             # Optional Harbor enrollment is discovered from projected files at runtime.
             - name: MX_INSIGHT_HARBOR_SSO_PROFILE
               value: /run/harbor-portal/profile.json
@@ -163,6 +169,9 @@ spec:
             capabilities:
               drop: ["ALL"]
           volumeMounts:
+            - name: dataport-ai
+              mountPath: /run/dataport-ai
+              readOnly: true
             - name: harbor-portal
               mountPath: /run/harbor-portal
               readOnly: true
@@ -175,6 +184,14 @@ spec:
               mountPath: /shared_dir
               readOnly: true
       volumes:
+        - name: dataport-ai
+          secret:
+            secretName: mx-dataport-ai
+            optional: true
+            defaultMode: 288
+            items:
+              - key: token
+                path: token
         - name: harbor-portal
           secret:
             secretName: mx-harbor-portal

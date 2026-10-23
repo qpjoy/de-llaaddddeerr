@@ -4,6 +4,7 @@ import { normalizeTelegramSemanticQuery } from './retrieval/telegram-semantic.mj
 import { currentDatabaseLane, enterAdmissionLane, hubDatabaseFailure, runWithDatabaseLane } from './core/postgres-pool.mjs'
 import {portalPrincipal, harborRoute} from './portal/harbor.mjs'
 import { DataportStore } from './portal/dataport-store.mjs'
+import { DataportAi } from './portal/dataport-ai.mjs'
 import { PaymentError } from '@qpjoy/mx-pay'
 import { DataportSupport } from './portal/dataport-support.mjs'
 import { dataportRoute, dataportRouteAllowed, authorizeLegacyPortal } from './portal/dataport-routes.mjs'
@@ -777,6 +778,7 @@ export function createApp({
   identity = null,
   sso = null,
   harborPortal = null,
+  dataportAi = null,
   queue = null,
   backfillPlatforms = [],
   importer = null,
@@ -861,6 +863,7 @@ export function createApp({
 
   const commerce = new CommerceService(store, recharge)
   const dataport = new DataportStore(store.pool, {credentialPepper:service?.apiKeyPepper})
+  dataportAi ??= new DataportAi(store.pool)
   ipRiskProduct ??= ipRiskChannels ? new IpRiskProduct(ipRiskChannels,commerce) : null
   if (recharge) recharge.commerce = commerce
   const payments = new PaymentService(store)
@@ -1466,7 +1469,7 @@ export function createApp({
         }
         if(store.pool)customer=await customerDataport.enrich(customer,request.headers['x-mx-dataport-session'])
         if(dedicated) {
-          try {await dataportRoute({request,response,path:portalPath,searchParams:url.searchParams,principal:customer,dataport:customerDataport,store,commerce,service,product:ipRiskProduct,readJson,sendJson,requestId,audience:customer.portalAudience||launcherAudience})}
+          try {await dataportRoute({request,response,path:portalPath,searchParams:url.searchParams,principal:customer,dataport:customerDataport,assessments:dataportAi,store,commerce,service,product:ipRiskProduct,readJson,sendJson,requestId,audience:customer.portalAudience||launcherAudience})}
           catch(error) {
             const tenant=/^\/enterprises\/([0-9a-f-]{36})\//.exec(portalPath)?.[1]
             if(request.method==='POST'&&tenant&&customer.memberships.some(m=>m.tenantId===tenant))await customerDataport.event(tenant,customer.memberId,'operation.failed',portalPath,error.status||500).catch(()=>{})

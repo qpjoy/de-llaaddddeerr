@@ -14,6 +14,7 @@ const reads = new Set([
 ]);
 export function permittedCustomerRoute(method, path) {
   const enterprise = /^\/enterprises\/[0-9a-f-]{36}\/(.*)$/.exec(path);
+  if (enterprise && method === "GET" && /^assessments\/[0-9a-f-]{36}$/.test(enterprise[1])) return true;
   if (enterprise)
     return method === "GET"
       ? /^(roles|members|tickets|audit|history|keys|subscriptions|billing|query-access|tickets\/[0-9a-f-]{36})$/.test(

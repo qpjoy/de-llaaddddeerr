@@ -15,6 +15,8 @@ import { enterpriseUrl, hasPermission } from "./permissions";
 import { runBatchRows, type BatchRow } from "./batch-runner";
 import { downloadExcel } from "./download";
 import { riskAdvice, riskLevelLabel } from "./risk-advice";
+import { AiAssessment } from "./ai-assessment";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./dialog";
 export function BatchQuery({
   tenant,
   session,
@@ -30,6 +32,7 @@ export function BatchQuery({
     [busy, setBusy] = useState(false),
     [running, setRunning] = useState(false),
     [error, setError] = useState("");
+  const [analysis, setAnalysis] = useState<any>(null);
   const stop = useRef(false),
     alive = useRef(true),
     lock = useRef(false),
@@ -220,6 +223,7 @@ export function BatchQuery({
                     <TableHead>IP 地址</TableHead>
                     <TableHead>状态</TableHead>
                     <TableHead>风险等级</TableHead>
+                    <TableHead>AI 分析</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -239,6 +243,9 @@ export function BatchQuery({
                             )
                           : "—"}
                       </TableCell>
+                      <TableCell>
+                        <Button variant="link" disabled={!r.result?.id} onClick={()=>setAnalysis(r.result)}>查看分析</Button>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -246,6 +253,13 @@ export function BatchQuery({
             </div>
           </>
         )}
+        <Dialog open={!!analysis} onOpenChange={open=>{if(!open)setAnalysis(null);}}>
+          <DialogContent>
+            <DialogHeader><DialogTitle>{analysis?.ip} · AI 风险分析</DialogTitle></DialogHeader>
+            {analysis && <AiAssessment key={analysis.id} tenant={tenant} queryId={analysis.id} initial={analysis.aiAnalysis} />}
+            <small>AI 分析基于本次查询画像生成，仅供业务风控参考。</small>
+          </DialogContent>
+        </Dialog>
       </CardContent>
     </Card>
   );

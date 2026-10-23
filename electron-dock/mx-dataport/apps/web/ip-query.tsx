@@ -249,6 +249,7 @@ export function IpQuery({
             aria-label="IP 风险画像查询结果"
           >
             <QueryResult
+              tenant={tenant}
               result={result}
               busy={busy}
               canQuery={canQuery}
@@ -368,6 +369,7 @@ export function IpQuery({
                                     id: i.id,
                                     createdAt: i.createdAt,
                                     historical: true,
+                                    aiEligible: typeof i.actor === "string",
                                   });
                                   setSearch((s) => ({
                                     ip: i.ip,

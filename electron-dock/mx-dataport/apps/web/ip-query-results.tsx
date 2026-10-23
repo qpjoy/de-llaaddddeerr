@@ -1,4 +1,5 @@
 import { IpLocationMap } from "./ip-location-map";
+import { AiAssessment } from "./ai-assessment";
 import { ipLocation } from "./ip-location";
 import { useState } from "react";
 import { ArrowRight, Clock3, Copy, Check, Sparkles, Info } from "lucide-react";
@@ -43,12 +44,14 @@ export function QueryResult({
   canQuery,
   onQueryAgain,
   onReport,
+  tenant,
 }: {
   result: any;
   busy: boolean;
   canQuery: boolean;
   onQueryAgain: () => void;
   onReport?: () => void;
+  tenant?: string;
 }) {
   const [copied, setCopied] = useState(false),
     [copyError, setCopyError] = useState("");
@@ -274,12 +277,15 @@ export function QueryResult({
                 <span className="ai-advice-symbol">
                   <Sparkles aria-hidden="true" />
                 </span>
-                <h3>风险参考建议</h3>
+                <h3>AI 风险分析</h3>
               </div>
-              <p>{riskAdvice(profile.risk_level)}</p>
+              <AiAssessment key={`${tenant}:${result.id}`} tenant={tenant} queryId={result.aiEligible === false ? undefined : result.id} initial={result.aiAnalysis} />
+              <details>
+                <summary>风险等级参考建议</summary>
+                <p>{riskAdvice(profile.risk_level)}</p>
+              </details>
               <small>
-                当前建议依据风险等级规则生成，AI
-                模型尚未接入。仅供业务风控参考。
+                AI 分析基于本次查询画像生成，仅供业务风控参考。
               </small>
             </section>
           </>

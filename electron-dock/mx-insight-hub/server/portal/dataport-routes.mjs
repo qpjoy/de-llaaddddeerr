@@ -39,6 +39,7 @@ export function dataportRouteAllowed(method, path) {
     return ["GET", "POST"].includes(method);
   const match = /^\/enterprises\/([0-9a-f-]{36})\/(.+)$/.exec(path);
   if (!match || !uuid(match[1])) return false;
+  if (method === "GET" && /^assessments\/[0-9a-f-]{36}$/.test(match[2]) && uuid(match[2].split("/")[1])) return true;
   if (
     method === "GET" &&
     /^tickets\/[0-9a-f-]{36}$/.test(match[2]) &&
@@ -61,6 +62,7 @@ export async function dataportRoute({
   searchParams,
   principal,
   dataport,
+  assessments,
   store,
   commerce,
   service,
@@ -261,10 +263,13 @@ export async function dataportRoute({
   }
   if (resource === "history")
     return reply(await dataport.history(principal, tenantId, searchParams));
+  if (resource.startsWith("assessments/")) {
+    if (searchParams.size) throw new AppError(400,"invalid_query","分析查询不接受额外参数。");
+    return reply(await assessments.read(principal,tenantId,resource.split("/")[1]));
+  }
   if (resource === "query") {
     const body = await readJson(request, 1024);
-    return reply(
-      await dataport.query(
+    const result = await dataport.query(
         principal,
         tenantId,
         body,
@@ -286,8 +291,13 @@ export async function dataportRoute({
             path: "/api/v1/data/ip/risk/service",
           });
         },
-      ),
-    );
+      );
+    // AI has its own receipt. A failed/uncertain Agent submission never changes
+    // a successful query, quota settlement or the saved original IP delivery.
+    const aiAnalysis = assessments
+      ? await assessments.ensure(tenantId,result.id).catch(()=>({status:"unavailable",text:null}))
+      : {status:"not_configured",text:null};
+    return reply({...result,aiAnalysis});
   }
   if (resource === "keys") {
     requireDataportAccess(

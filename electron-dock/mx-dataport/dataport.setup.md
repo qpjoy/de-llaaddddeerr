@@ -1,3 +1,5 @@
+> 2026-10-23 AI 风险分析：新查询成功后异步分析，复用罗盘 Delta Token，通过 `mx-dataport-ai` Secret 仅挂载 Hub Admin。发布顺序为 **配置 Secret → Hub（migration 165）→ DataPort**；无需部署 Delta/Launcher/Auth/Pay，不改已有查询、计量和登录。完整配置命令、缓存/未知结果边界及待完成的线上验收见 [AI 风险分析接入](docs/ai-risk-assessment-20261023.md)。
+
 > 2026-10-18 最新账号方案：企业超管继续统一 MX 登录，员工子账号由数港独立创建、认证和重置。发布顺序改为 **Hub（migration 159）→ DataPort**，不需要为本轮部署 Launcher/Auth 或配置旧专用账号 Secret。保留既有 MX 登录配置和所有旧密钥；旧托管子账号可通过超管重置显式转为独立登录。部署及验收见[数港独立子账号](docs/local-employee-accounts.md)。此方案替代同日早先的 Auth 账号桥接配置步骤。
 
 ## 2026-10-21 迁移 Job 超时与迁盘后镜像不可见
