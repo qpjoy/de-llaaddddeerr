@@ -69,6 +69,8 @@ bash scripts/manage.sh down      # 只缩容，保留 PVC/PV/索引
 
 核心服务默认等待上限改为 1200 秒（`MX_COMMON_WAIT_TIMEOUT`），镜像优先从 Docker 缓存导入 containerd。已安装的 HanLP 会在 `ensure` 中恢复副本数并等待健康；首次安装或被删除的 HanLP Deployment 仍使用下面的独立部署命令。首次接入新版启动保护会滚动 PG/ES，后续配置不变不会额外重启。完整边界和本次恢复证据见[停机恢复复盘](../mx-insight-hub/docs/operations/restart-and-recovery.md)。
 
+若 HanLP 出现 `ErrImageNeverPull`，说明节点无法使用它配置为 `imagePullPolicy: Never` 的本地镜像；普通 `preload` 仅覆盖 PG/ES/Redis。`ensure` 现在会在恢复未就绪的既有 HanLP 前检查镜像：仅在确认本机是部署目标节点，且 Docker 缓存 image ID 与 Deployment 注解完全一致时，将该镜像重新导入当前 Kubernetes containerd。它使用线上 Deployment 的镜像名，不受本次环境变量中的其他镜像名影响，不构建、不拉取、不改 Pod 模板或模型 PVC。导入后的旧错误状态最多等待 60 秒让 kubelet 重试，随后仍要求就绪和 `/health` 成功。缺少缓存、身份注解或镜像版本不一致会停止并提示在节点执行 `deploy hanlp`，成功后重试 Hub 部署；保留 `MX_INSIGHT_REQUIRE_SEARCH=1`。
+
 PostgreSQL / Elasticsearch / Redis 是核心组件，随 `ensure` 一起部署。HanLP 使用独立的幂等部署目标：
 
 ```bash

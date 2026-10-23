@@ -821,6 +821,7 @@ wait_workload() {
 
 wait_ready() {
   local kind="$1" name="$2" required="${3:-required}"
+  local image_retry_grace="${4:-0}"
   local waited=0 started=$SECONDS interval=5 reason progress last_progress=""
 
   while [ "$waited" -lt "$WAIT_TIMEOUT" ]; do
@@ -829,14 +830,26 @@ wait_ready() {
       return 0
     fi
 
-    reason="$(pod_terminal_reason "$name")"
+    reason="$(pod_terminal_reason "$name" || true)"
+    # Importing a local image does not immediately clear the kubelet's last
+    # observation. Give only that stale state time to retry, without deleting
+    # Pods or hiding a new crash/configuration failure.
+    if [ "$reason" = ErrImageNeverPull ] && [ "$waited" -lt "$image_retry_grace" ]; then
+      reason=""
+    fi
     if [ -n "$reason" ]; then
       warn "${name} is stuck in ${reason}; not waiting out the remaining $((WAIT_TIMEOUT - waited))s"
       case "$reason" in
         ImagePullBackOff|ErrImagePull|ErrImageNeverPull|InvalidImageName)
-          warn "  The node cannot pull this workload's image. Options:"
-          warn "    1. Point at a mirror:  MX_COMMON_ELASTICSEARCH_IMAGE=... MX_COMMON_POSTGRES_IMAGE=... MX_COMMON_REDIS_IMAGE=..."
-          warn "    2. Preload from a host that can reach the registry:  bash scripts/manage.sh preload"
+          if [ "$name" = mx-common-hanlp ]; then
+            warn "  HanLP uses a locally built image with imagePullPolicy: Never."
+            warn "  On the Kubernetes node, run: bash ${ROOT_DIR}/scripts/manage.sh deploy hanlp"
+            warn "  The generic preload command only handles PostgreSQL, Elasticsearch and Redis."
+          else
+            warn "  The node cannot pull this workload's image. Options:"
+            warn "    1. Point at a mirror:  MX_COMMON_ELASTICSEARCH_IMAGE=... MX_COMMON_POSTGRES_IMAGE=... MX_COMMON_REDIS_IMAGE=..."
+            warn "    2. Preload from a host that can reach the registry:  bash scripts/manage.sh preload"
+          fi
           warn "  Current images: $(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=${name} -o jsonpath='{.items[*].spec.containers[*].image}' 2>/dev/null)"
           ;;
         CrashLoopBackOff)
@@ -1519,14 +1532,50 @@ cmd_preload() {
   say "all shared data-plane images are present on this node"
 }
 
+# Recover only the exact image of the installed tokenizer. A runtime switch or
+# image cleanup can lose the containerd copy while Docker still has it. Never
+# turn a normal product deploy into a model rebuild or an implicit upgrade.
+restore_existing_hanlp_image() (
+  local metadata image seed_image policy seed_policy expected_id expected_node cached_id
+  metadata="$(kubectl -n "$NAMESPACE" get deployment mx-common-hanlp -o jsonpath='{.spec.template.spec.containers[?(@.name=="hanlp")].image}{"\t"}{.spec.template.spec.initContainers[?(@.name=="seed-models")].image}{"\t"}{.spec.template.spec.containers[?(@.name=="hanlp")].imagePullPolicy}{"\t"}{.spec.template.spec.initContainers[?(@.name=="seed-models")].imagePullPolicy}{"\t"}{.spec.template.metadata.annotations.mx-common\.io/hanlp-image-id}{"\t"}{.spec.template.spec.nodeSelector.kubernetes\.io/hostname}')" || return 1
+  # Use a non-whitespace delimiter so missing fields cannot shift identities.
+  IFS='|' read -r image seed_image policy seed_policy expected_id expected_node <<<"${metadata//$'\t'/|}"
+  [ -n "$image" ] && [ -n "$seed_image" ] || die "cannot read installed HanLP images; refusing automatic image recovery"
+  if [ "$policy" != Never ] && [ "$seed_policy" != Never ]; then return 0; fi
+  local recovery="On the Kubernetes node, run: bash ${ROOT_DIR}/scripts/manage.sh deploy hanlp"
+  [ "$policy" = Never ] && [ "$seed_policy" = Never ] \
+    && [ "$(canonical_image_ref "$image")" = "$(canonical_image_ref "$seed_image")" ] \
+    || die "HanLP main/seed images or pull policies differ; refusing automatic image recovery. ${recovery}"
+  containerd_has_image "$image" && return 0
+
+  local HANLP_IMAGE="$image" MX_COMMON_HANLP_IMAGE_ID="$expected_id" MX_COMMON_HANLP_NODE_NAME
+  require_local_single_k8s_node || return 1
+  [ -n "$expected_node" ] && [ "$expected_node" = "$MX_COMMON_HANLP_NODE_NAME" ] \
+    || die "installed HanLP targets a different or unknown node; refusing automatic image recovery. ${recovery}"
+  [[ "$expected_id" =~ ^sha256:[a-f0-9]{64}$ ]] \
+    || die "installed HanLP has no valid image identity; refusing automatic image recovery. ${recovery}"
+  cached_id="$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)" \
+    || die "HanLP image ${image} is missing from containerd and unavailable in Docker. ${recovery}"
+  [ "$cached_id" = "$expected_id" ] \
+    || die "Docker's ${image} differs from the deployed HanLP image; refusing an implicit upgrade. ${recovery}"
+  require_hanlp_disk_capacity || return 1
+  say "restoring deployed HanLP image ${image} from Docker cache (no rebuild)"
+  import_hanlp_image || return 1
+)
+
 # Restart an already installed tokenizer after `down`; do not rebuild models or
 # introduce HanLP to a deployment that never used it.
 resume_existing_hanlp() {
   local existing
   existing="$(kubectl -n "$NAMESPACE" get deployment mx-common-hanlp --ignore-not-found -o name)" || return 1
   [ -n "$existing" ] || return 0
+  # A zero-replica Deployment also reports a successful rollout. Check image
+  # availability only after restoring its desired replica count.
   kubectl -n "$NAMESPACE" scale "$existing" --replicas=1 >/dev/null || return 1
-  wait_ready deployment mx-common-hanlp || return 1
+  if ! workload_ready deployment mx-common-hanlp; then
+    restore_existing_hanlp_image || return 1
+  fi
+  wait_ready deployment mx-common-hanlp required 60 || return 1
   hanlp_is_healthy || return 1
 }
 
@@ -1714,16 +1763,19 @@ build_hanlp_image() {
 
 import_hanlp_image() (
   need ctr
-  local archive current_image_id
-  archive="$(mktemp -t mx-common-hanlp.XXXXXX).tar"
-  trap 'rm -f -- "$archive"' EXIT HUP INT TERM
+  local current_image_id
+  # Keep this subshell-only variable alive for EXIT even on Bash 3.2, where
+  # function locals have already unwound by the time the trap runs.
+  hanlp_archive="$(mktemp -t mx-common-hanlp.XXXXXX)" || return 1
+  trap 'rm -f -- "$hanlp_archive"' EXIT HUP INT TERM
 
   say "importing ${HANLP_IMAGE} into k8s.io containerd"
-  docker image save -o "$archive" "$HANLP_IMAGE"
+  docker image save -o "$hanlp_archive" "$HANLP_IMAGE" \
+    || die "could not export ${HANLP_IMAGE} from Docker; refusing to import an incomplete archive"
   current_image_id="$(docker image inspect --format '{{.Id}}' "$HANLP_IMAGE" 2>/dev/null || true)"
   [ "$current_image_id" = "$MX_COMMON_HANLP_IMAGE_ID" ] \
     || die "${HANLP_IMAGE} changed while its archive was being created; retry the deploy"
-  common_ctr noninteractive images import "$archive" \
+  common_ctr noninteractive images import "$hanlp_archive" \
     || die "containerd could not import ${HANLP_IMAGE} with the selected Kubernetes runtime"
   containerd_has_image "$HANLP_IMAGE" \
     || die "containerd import completed but ${HANLP_IMAGE} is not present in k8s.io"
@@ -1890,7 +1942,7 @@ cmd_deploy_hanlp() {
     allow_client_namespace "$namespace"
   done
 
-  wait_ready deployment mx-common-hanlp
+  wait_ready deployment mx-common-hanlp required 60
 
   if ! hanlp_is_healthy; then
     diagnose_workload mx-common-hanlp

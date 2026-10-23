@@ -108,12 +108,14 @@ es_is_healthy() { return 0; }; ensure_vm_max_map_count() { :; }; check_storage_h
 report_image_readiness() { :; }; ensure_secret() { :; }; ensure_storage() { :; }; apply_manifests() { :; }
 allow_client_namespace() { :; }; ensure_elasticsearch_disk_policy() { :; }; ensure_snapshot_policy() { :; }; health_json() { echo '{}'; }
 kubectl() { echo "KUBE $*" >&2; if [[ "$*" == *'get deployment mx-common-hanlp'* ]]; then echo deployment.apps/mx-common-hanlp; fi; }
+workload_ready() { return 1; }; restore_existing_hanlp_image() { echo RECOVER_HANLP_IMAGE; }
 wait_ready() { echo "READY $*"; }; hanlp_is_healthy() { :; }
 cmd_ensure`);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stderr, /scale statefulset\/mx-common-postgres statefulset\/mx-common-elasticsearch deployment\/mx-common-redis --replicas=1/);
   assert.match(result.stderr, /scale deployment.apps\/mx-common-hanlp --replicas=1/);
   assert.match(result.stdout, /READY deployment mx-common-hanlp/);
+  assert.ok(result.stdout.indexOf('RECOVER_HANLP_IMAGE') < result.stdout.indexOf('READY deployment mx-common-hanlp'));
 });
 
 for (const uid of [0, 1000]) test(`cached image near the start of a long containerd list skips import (uid ${uid})`, () => {

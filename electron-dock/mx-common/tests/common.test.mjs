@@ -893,7 +893,7 @@ test('HanLP deploy re-imports the built image to self-heal a stale mutable tag',
      render_manifest() { printf 'kind: List\n'; }
      allow_hostnetwork_clients() { :; }
      allow_client_namespace() { :; }
-     wait_ready() { :; }
+     wait_ready() { echo "wait $*"; }
      hanlp_is_healthy() { return 0; }
      hanlp_tokenize_smoke() { return 0; }
      cmd_deploy_hanlp`,
@@ -902,6 +902,7 @@ test('HanLP deploy re-imports the built image to self-heal a stale mutable tag',
   ])
   assert.match(stdout, /build/)
   assert.match(stdout, /^import$/m)
+  assert.match(stdout, /^wait deployment mx-common-hanlp required 60$/m)
 })
 
 test('HanLP local-image deploy refuses a remote Kubernetes node', async () => {
