@@ -87,6 +87,7 @@
     "test:application-updater": "pnpm build && node --test scripts/application-updater.test.mjs",
     "test:updater": "pnpm build && node --test scripts/release-updater.test.mjs scripts/application-updater.test.mjs",
     "test:asar-bootstrap": "pnpm build && node --test scripts/asar-bootstrap.test.mjs",
+    "test:oversea": "pnpm build && node --test scripts/oversea-ensure.test.mjs",
     "prepack": "pnpm build"
   },
   "dependencies": {

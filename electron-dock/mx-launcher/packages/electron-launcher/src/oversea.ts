@@ -20,6 +20,20 @@ export interface ElectronLauncherUserOverseaSubscription {
   yaml: string;
 }
 
+/**
+ * One Oversea site's runtime sync in this ensure call, so a client can say which
+ * site holds the subscription back and why (for example a gate such as a
+ * missing SSH profile). Command, stdout and stderr are never copied.
+ */
+export interface ElectronLauncherUserOverseaSiteSync {
+  siteId: string;
+  status: string;
+  category: string | null;
+  summary: string | null;
+  gateFailures: string[];
+  exitCode: number | null;
+}
+
 export interface ElectronLauncherUserOverseaEnsureResult {
   ready: boolean;
   status: ElectronLauncherOverseaEnsureStatus;
@@ -29,6 +43,7 @@ export interface ElectronLauncherUserOverseaEnsureResult {
   entitlementStatus: string | null;
   siteIds: string[];
   syncStatus: string | null;
+  syncSites: ElectronLauncherUserOverseaSiteSync[];
   subscription: ElectronLauncherUserOverseaSubscription | null;
 }
 
@@ -108,8 +123,24 @@ export async function ensureElectronLauncherUserOverseaSubscription(
     entitlementStatus: textValue(entitlement.status),
     siteIds: uniqueStrings(arrayValue(entitlement.siteIds)),
     syncStatus: textValue(sync.status),
+    syncSites: overseaSiteSyncs(sync.reports),
     subscription
   };
+}
+
+function overseaSiteSyncs(reports: unknown): ElectronLauncherUserOverseaSiteSync[] {
+  return (Array.isArray(reports) ? reports : []).map((value) => {
+    const report = recordValue(value);
+    const diagnosis = recordValue(report.diagnosis);
+    return {
+      siteId: textValue(report.siteId) ?? 'unknown',
+      status: textValue(report.status) ?? 'unknown',
+      category: textValue(diagnosis.category),
+      summary: textValue(diagnosis.summary),
+      gateFailures: arrayValue(diagnosis.gateFailures),
+      exitCode: Number.isInteger(report.exitCode) ? report.exitCode as number : null
+    };
+  });
 }
 
 async function requestJson(url: string, init: RequestInit, timeoutMs: number): Promise<Record<string, unknown>> {

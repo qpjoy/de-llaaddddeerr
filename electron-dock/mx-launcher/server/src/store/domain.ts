@@ -2763,10 +2763,75 @@ export function launcherNetworkLeaseMatchesProfile(
   lease: LauncherNetworkLease
 ): boolean {
   try {
-    return launcherLeaseIpForProduct(product, leaseProfile, lease.sequence) === lease.leaseIp;
+    // A lease that kept its device's address across an identity switch is
+    // checked against the range that address was allocated from.
+    const addressProfile = launcherLeaseAddressProfile(lease.addressProfile) ?? leaseProfile;
+    return launcherLeaseIpForProduct(product, addressProfile, lease.sequence) === lease.leaseIp;
   } catch {
     return false;
   }
+}
+
+// Products whose leases on one install and WireGuard key share a single overlay
+// address when the identity changes (anonymous, user, another user). The
+// client's tunnel configuration then stays the same and needs no privileged
+// re-apply. MX-H2I keeps two active leases during its make-before-break
+// handover and is deliberately not listed.
+const LAUNCHER_DEVICE_ADDRESS_PRODUCT_IDS = new Set(['luopan']);
+
+export function launcherProductKeepsDeviceAddress(productId: string): boolean {
+  return LAUNCHER_DEVICE_ADDRESS_PRODUCT_IDS.has(productId);
+}
+
+export interface LauncherNetworkLeaseAddress {
+  sequence: number;
+  leaseIp: string;
+  /** Set only when the address comes from another profile's range. */
+  addressProfile: LauncherLeaseProfile | null;
+}
+
+/**
+ * The address a lease being enrolled takes over from the device's newest other
+ * lease, or null when it keeps its own allocation. The source must be active,
+ * belong to the same install, device and WireGuard key, be newer than the lease
+ * being renewed, still match its own range, and fall inside the new profile's
+ * CIDR. The caller releases the source in the same write.
+ */
+export function launcherNetworkLeaseAddressCarryOver(
+  product: LauncherProductNetwork,
+  leaseProfile: LauncherLeaseProfile,
+  source: LauncherNetworkLease | null,
+  previous: LauncherNetworkLease | null,
+  device: { installId: string; deviceId: string; publicKey: string | null },
+  now = new Date()
+): LauncherNetworkLeaseAddress | null {
+  if (!source || !launcherProductKeepsDeviceAddress(product.productId)) return null;
+  if (
+    !launcherNetworkLeaseIsActive(source, now)
+    || source.productId !== product.productId
+    || source.installId !== device.installId
+    || source.deviceId !== device.deviceId
+    || !device.publicKey
+    || source.publicKey !== device.publicKey
+    || source.leaseId === previous?.leaseId
+    || source.leaseIp === previous?.leaseIp
+    || (Number(source.generation) || 0) <= (Number(previous?.generation) || 0)
+  ) {
+    return null;
+  }
+  const sourceProfile = launcherNetworkLeaseProfile(source.leaseProfile, source.identityKind);
+  if (!launcherNetworkLeaseMatchesProfile(product, sourceProfile, source)) return null;
+  if (!ipv4InCidr(source.leaseIp, launcherLeaseCidrForProduct(product, leaseProfile))) return null;
+  const addressProfile = launcherLeaseAddressProfile(source.addressProfile) ?? sourceProfile;
+  return {
+    sequence: source.sequence,
+    leaseIp: source.leaseIp,
+    addressProfile: addressProfile === leaseProfile ? null : addressProfile
+  };
+}
+
+function launcherLeaseAddressProfile(value: unknown): LauncherLeaseProfile | null {
+  return value === 'employee' || value === 'feishu' || value === 'anonymous' ? value : null;
 }
 
 export function nextAvailableLauncherNetworkLeaseSequence(
@@ -2839,7 +2904,8 @@ export function buildLauncherNetworkLease(
   product: LauncherProductNetwork,
   sequence: number,
   previous: LauncherNetworkLease | null,
-  now = new Date().toISOString()
+  now = new Date().toISOString(),
+  address: LauncherNetworkLeaseAddress | null = null
 ): LauncherNetworkLease {
   const identityKind = launcherNetworkIdentityKind(input.identityKind, input.userId);
   const leaseProfile = launcherNetworkLeaseProfile(input.leaseProfile, identityKind);
@@ -2851,6 +2917,7 @@ export function buildLauncherNetworkLease(
   const userId = identityKind === 'user' ? input.userId?.trim() || previous?.userId || null : null;
   const nowMs = Date.parse(now);
   const expiresAt = new Date((Number.isFinite(nowMs) ? nowMs : Date.now()) + LAUNCHER_NETWORK_LEASE_TTL_MS).toISOString();
+  const addressProfile = address ? address.addressProfile : previous?.addressProfile ?? null;
   return {
     leaseId: previous?.leaseId ?? launcherNetworkLeaseId(leaseKey),
     leaseKey,
@@ -2860,13 +2927,14 @@ export function buildLauncherNetworkLease(
     launcherMode,
     identityKind,
     leaseProfile,
-    sequence: previous?.sequence ?? Math.max(1, Math.floor(sequence)),
+    sequence: address?.sequence ?? previous?.sequence ?? Math.max(1, Math.floor(sequence)),
     installId,
     deviceId,
     siteId: input.siteId?.trim() || previous?.siteId || product.defaultDomesticSiteId,
     userId,
     cidr: launcherLeaseCidrForProduct(product, leaseProfile),
-    leaseIp: previous?.leaseIp ?? launcherLeaseIpForProduct(product, leaseProfile, sequence),
+    leaseIp: address?.leaseIp ?? previous?.leaseIp ?? launcherLeaseIpForProduct(product, leaseProfile, sequence),
+    ...(addressProfile ? { addressProfile } : {}),
     serviceVip: product.serviceVip,
     internalControlIp: product.internalControlIp,
     domesticGatewayIp: product.domesticGatewayIp,
@@ -4114,6 +4182,16 @@ function ipv4ToNumber(value: string): number | null {
   const octets = value.split('.').map((part) => Number(part));
   if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
   return ((octets[0] << 24) >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3];
+}
+
+function ipv4InCidr(ip: string, cidr: string): boolean {
+  const [base, prefixText] = cidr.split('/');
+  const prefix = Number(prefixText);
+  const ipValue = ipv4ToNumber(ip);
+  const baseValue = ipv4ToNumber(base ?? '');
+  if (ipValue == null || baseValue == null || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return ((ipValue & mask) >>> 0) === ((baseValue & mask) >>> 0);
 }
 
 function numberToIpv4(value: number): string {

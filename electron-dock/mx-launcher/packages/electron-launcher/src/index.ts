@@ -186,6 +186,7 @@ export {
   ensureElectronLauncherUserOverseaSubscription,
   type ElectronLauncherOverseaEnsureStatus,
   type ElectronLauncherUserOverseaEnsureResult,
+  type ElectronLauncherUserOverseaSiteSync,
   type ElectronLauncherUserOverseaSubscription,
   type EnsureElectronLauncherUserOverseaSubscriptionInput
 } from './oversea.js';

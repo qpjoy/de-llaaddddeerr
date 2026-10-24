@@ -48,6 +48,7 @@ import {
   buildLauncherNetworkLease,
   buildLauncherProductUserAccess,
   nextAvailableLauncherNetworkLeaseSequence,
+  launcherNetworkLeaseAddressCarryOver,
   launcherNetworkLeaseIsActive,
   launcherNetworkLeaseKey,
   launcherNetworkLeaseMatchesProfile,
@@ -2801,7 +2802,18 @@ export class MemoryStore implements PlatformStore {
     ) {
       throw new Error('Launcher lease public key rotation requires a separate migration');
     }
-    const sequence = previous?.sequence ?? nextAvailableLauncherNetworkLeaseSequence(
+    const addressSource = normalizedInput.addressSourceLeaseId
+      ? leases.find((lease) => lease.leaseId === normalizedInput.addressSourceLeaseId) ?? null
+      : null;
+    const address = launcherNetworkLeaseAddressCarryOver(
+      product,
+      leaseProfile,
+      addressSource,
+      previous,
+      { installId, deviceId, publicKey: normalizedInput.publicKey?.trim() || null },
+      now
+    );
+    const sequence = address?.sequence ?? previous?.sequence ?? nextAvailableLauncherNetworkLeaseSequence(
       product,
       leaseProfile,
       leases,
@@ -2816,9 +2828,19 @@ export class MemoryStore implements PlatformStore {
       { ...normalizedInput, generation: this.launcherNetworkLeaseGeneration },
       product,
       sequence,
-      previous
+      previous,
+      now.toISOString(),
+      address
     );
     this.launcherNetworkLeases.set(lease.leaseId, lease);
+    // The address now belongs to this identity; one active lease per address.
+    if (address && addressSource) {
+      const released = releaseLauncherNetworkLease(addressSource, {
+        requestedBy: 'launcher-network-address-carry-over',
+        requestId: input.requestId ?? null
+      });
+      this.launcherNetworkLeases.set(released.leaseId, released);
+    }
     this.recordAudit({
       eventType: previous ? 'launcher_network.lease.refreshed' : 'launcher_network.lease.enrolled',
       actorKind: lease.identityKind === 'user' ? 'user' : 'install',
@@ -2844,7 +2866,8 @@ export class MemoryStore implements PlatformStore {
         osVersion: lease.osVersion,
         appVersion: lease.appVersion,
         sourceIp: lease.sourceIp,
-        sdkTestMode
+        sdkTestMode,
+        ...(address && addressSource ? { addressFromLeaseId: addressSource.leaseId } : {})
       }
     });
     return lease;

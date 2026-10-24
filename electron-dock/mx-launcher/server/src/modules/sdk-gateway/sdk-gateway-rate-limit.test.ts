@@ -117,9 +117,11 @@ test('one canonical account is limited even when the source IP rotates', async (
   assert.equal(harness.verifyCalls(), 25);
 });
 
-test('one source IP is limited even when unknown account names rotate', async () => {
+test('a shared egress address is not limited across different accounts', async () => {
+  // Offices and customer sites log in through one NAT address; only the
+  // per-account buckets limit password attempts.
   const harness = controllerHarness();
-  for (let index = 0; index < 60; index += 1) {
+  for (let index = 0; index < 120; index += 1) {
     await assert.rejects(
       harness.controller.token({
         grant_type: 'password',
@@ -132,12 +134,13 @@ test('one source IP is limited even when unknown account names rotate', async ()
   await assert.rejects(
     harness.controller.token({
       grant_type: 'password',
-      username: 'unknown-final',
+      username: 'alice',
       password: 'wrong'
     }, '192.0.2.44'),
-    (error) => statusOf(error) === 429
+    (error) => statusOf(error) === 401,
+    'a known account behind the same address is still verified'
   );
-  assert.equal(harness.verifyCalls(), 0);
+  assert.equal(harness.verifyCalls(), 1);
 });
 
 test('fixed-window limiter resets only after the configured window', () => {
