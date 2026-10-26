@@ -34,6 +34,7 @@
     "test:launcher-anonymous-policy": "node --test --import tsx src/modules/launcher-network/anonymous-enrollment-policy.test.ts src/modules/launcher-network/product-user-access.test.ts src/modules/launcher-network/app-user-deny.test.ts src/modules/launcher-network/product-user-access-backfill.test.ts",
     "test:launcher-lease-activity": "node --test --import tsx src/modules/launcher-network/lease-activity.test.ts",
     "test:launcher-lease-identity": "node --test --import tsx src/modules/launcher-network/lease-user-identity.test.ts",
+    "test:luopan-controls": "node --test --import tsx src/modules/user-center/luopan-controls.test.ts src/modules/release/luopan-user-updates.test.ts src/modules/sdk-gateway/sdk-gateway-app-access.test.ts src/modules/launcher-network/app-user-deny.test.ts",
     "test:launcher-lease-address": "node --test --import tsx src/modules/launcher-network/lease-address-carry-over.test.ts",
     "test:launcher-runtime-observation": "node --test --import tsx src/modules/launcher-network/runtime-observation.test.ts",
     "test:launcher-runtime-traffic": "node --test --import tsx src/modules/launcher-network/runtime-traffic-snapshot.test.ts",

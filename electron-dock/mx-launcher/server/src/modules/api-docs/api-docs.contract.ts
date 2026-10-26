@@ -1106,6 +1106,26 @@ export const mxLauncherApiDocument: ApiDocsDocument = {
         response: { user: userExample }
       })
     },
+    '/internal/v1/user-center/users/{userId}/luopan-controls': {
+      get: operation({
+        tag: 'Internal User Operations',
+        summary: '读取用户的罗盘更新与登录控制',
+        description: '仅 Internal 管理员可读。更新策略独立保存，无记录时 updatesBlocked=false/revision=0。coverage 只表示当前有效租约可唯一关联的安装数量，不证明实际旧客户端、匿名更新源或制品直链已覆盖。',
+        operationId: 'getLuopanUserControls', auth: 'ops-token',
+        pathParams: ['userId'],
+        response: { policy: { appId: 'luopan', userId: 'usr_alice', updatesBlocked: false, reason: null, revision: 0, updatedBy: null, updatedAt: null }, loginBlocked: false, coverage: { status: 'unconfirmed', installCount: 0, note: '尚未确认覆盖' } }
+      }),
+      post: operation({
+        tag: 'Internal User Operations',
+        summary: '设置用户的罗盘更新与可选登录限制',
+        description: 'updatesBlocked 只停止已识别旧客户端的 Luopan 更新投放，不修改账号、密码、令牌或网络。loginBlocked 省略时保留现状，显式提交才增删 deniedAppIds 中的 luopan；这也影响 Luopan 用户网络准入，不影响 MX-H2I。策略、可选登录设置和审计同事务提交。expectedRevision 过期返回409，必须重读；操作者由已验证管理会话确定。',
+        operationId: 'setLuopanUserControls', auth: 'ops-token',
+        pathParams: ['userId'],
+        request: { updatesBlocked: true, expectedRevision: 0, reason: '管理员备注，仅在 Internal 展示' },
+        required: ['updatesBlocked', 'expectedRevision'],
+        response: { policy: { appId: 'luopan', userId: 'usr_alice', updatesBlocked: true, reason: '管理员备注，仅在 Internal 展示', revision: 1 }, loginBlocked: false, coverage: { status: 'identified', installCount: 1, note: '已关联安装；不代表制品直链被阻断' } }
+      })
+    },
     '/internal/v1/user-center/system-subscriptions': {
       get: operation({
         tag: 'Oversea Subscriptions',

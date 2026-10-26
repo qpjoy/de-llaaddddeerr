@@ -4,9 +4,14 @@ import { existsSync } from 'node:fs';
 import { connect as netConnect } from 'node:net';
 import { promisify } from 'node:util';
 
-import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Header, Headers, Inject, NotFoundException, Param, Post, Query, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, Delete, ForbiddenException, Get, Header, Headers, Inject, NotFoundException, Param, Post, Query, UnauthorizedException } from '@nestjs/common';
 
 import { asRecord, nullableString, stringArray } from '../../lib/http.js';
+import { internalAdminContext } from '../../lib/internal-admin-context.js';
+import {
+  defaultUserAppUpdatePolicy, luopanIdentifiedInstallUsers,
+  UserAppUpdatePolicyConflictError, UserAppUpdatePolicyInputError, UserAppUpdatePolicyUserNotFoundError
+} from '../../store/user-app-update-policy.js';
 import {
   assertInternalOpsToken,
   internalOpsTokenMatches,
@@ -93,6 +98,68 @@ export class UserCenterController {
   async users(@Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined) {
     assertInternalOpsToken(opsToken);
     return { users: await this.store.listUserCenterUsers() };
+  }
+
+  @Get('internal/v1/user-center/users/:userId/luopan-controls')
+  @Header('Cache-Control', 'no-store')
+  async luopanControls(
+    @Param('userId') userId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined
+  ) {
+    assertInternalOpsToken(opsToken);
+    const user = await this.store.getUserCenterUserIdentity(userId);
+    if (!user) throw new NotFoundException('User not found');
+    return {
+      policy: await this.store.getUserAppUpdatePolicy('luopan', userId) ?? defaultUserAppUpdatePolicy('luopan', userId),
+      loginBlocked: user.appAccess.deniedAppIds.includes('luopan'),
+      coverage: await this.luopanControlsCoverage(userId)
+    };
+  }
+
+  @Post('internal/v1/user-center/users/:userId/luopan-controls')
+  @Header('Cache-Control', 'no-store')
+  async setLuopanControls(
+    @Param('userId') userId: string,
+    @Headers(INTERNAL_OPS_TOKEN_HEADER) opsToken: string | undefined,
+    @Body() rawBody: unknown
+  ) {
+    assertInternalOpsToken(opsToken);
+    const body = asRecord(rawBody);
+    if (typeof body.updatesBlocked !== 'boolean'
+      || (body.loginBlocked !== undefined && typeof body.loginBlocked !== 'boolean')
+      || typeof body.expectedRevision !== 'number' || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 0
+      || (body.reason != null && (typeof body.reason !== 'string' || body.reason.length > 1000))) {
+      throw new BadRequestException('updatesBlocked and optional loginBlocked must be booleans; expectedRevision must be a non-negative integer; reason must be at most 1000 characters');
+    }
+    const actor = internalAdminContext.getStore();
+    try {
+      const result = await this.store.setLuopanUserControls({
+        userId, updatesBlocked: body.updatesBlocked, expectedRevision: body.expectedRevision,
+        ...(body.loginBlocked !== undefined ? { loginBlocked: body.loginBlocked } : {}),
+        ...(body.reason !== undefined ? { reason: body.reason as string | null } : {}),
+        requestedBy: actor?.userId ?? 'internal-ops', requestId: actor?.requestId ?? nullableString(body.requestId)
+      });
+      return { ...result, coverage: await this.luopanControlsCoverage(userId) };
+    } catch (error) {
+      if (error instanceof UserAppUpdatePolicyConflictError) {
+        throw new ConflictException({ code: error.code, message: error.message, revision: error.revision });
+      }
+      if (error instanceof UserAppUpdatePolicyInputError) throw new BadRequestException(error.message);
+      if (error instanceof UserAppUpdatePolicyUserNotFoundError) throw new NotFoundException(error.message);
+      throw error;
+    }
+  }
+
+  private async luopanControlsCoverage(userId: string) {
+    const identities = luopanIdentifiedInstallUsers(await this.store.listLauncherNetworkLeases('luopan'));
+    const installCount = [...identities.values()].filter(id => id === userId).length;
+    return {
+      status: installCount > 0 ? 'identified' as const : 'unconfirmed' as const,
+      installCount,
+      note: installCount > 0
+        ? '已识别此 MX 用户的有效罗盘安装；覆盖按服务端有效租约判断，不代表制品直链或未识别客户端已被阻断。'
+        : '尚无可唯一归属此 MX 用户的有效罗盘安装；策略已可保存，但不能据此确认现有客户端已受限制。'
+    };
   }
 
   @Get('internal/v1/user-center/system-subscriptions')
@@ -825,6 +892,7 @@ function toCreateUserInput(body: Record<string, unknown>): CreateUserInput {
     externalIds: stringRecordOrNull(body.externalIds),
     appAccess: recordOrNull(body.appAccess),
     replaceAppAccess: body.replaceAppAccess === true,
+    preserveLuopanLoginAccess: body.preserveLuopanLoginAccess === true,
     homeAppId: nullableString(body.homeAppId),
     registeredByAppId: nullableString(body.registeredByAppId) ?? nullableString(body.sourceAppId),
     allowedAppIds: stringList(body.allowedAppIds),

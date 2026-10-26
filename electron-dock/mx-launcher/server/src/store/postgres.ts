@@ -1,6 +1,7 @@
 import type { SystemSubscriptionPublication } from '../types.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { prepareLuopanUserControls, preserveLuopanLoginAccess, userAppUpdatePolicyId } from './user-app-update-policy.js';
 
 import type { DataSource, EntityManager, Repository } from 'typeorm';
 import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity.js';
@@ -170,6 +171,9 @@ import type {
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
+  UserAppUpdatePolicy,
+  SetLuopanUserControlsInput,
+  LuopanUserControls,
   UserCenterUserIdentity,
   UserCenterUserDeleteInput,
   UserCenterUserDeleteResult,
@@ -391,6 +395,7 @@ type RecordKind =
   | 'iam-org'
   | 'iam-role'
   | 'iam-user'
+  | 'user-app-update-policy'
   | 'iam-user-credential'
   | 'iam-user-deletion-tombstone'
   | 'user-h2o-runtime-profile'
@@ -1103,6 +1108,35 @@ export class PostgresStore implements PlatformStore {
     return user ? userCenterUserIdentity(user) : null;
   }
 
+  async getUserAppUpdatePolicy(appId: string, userId: string): Promise<UserAppUpdatePolicy | null> {
+    return this.getRecord<UserAppUpdatePolicy>('user-app-update-policy', userAppUpdatePolicyId(appId, userId));
+  }
+
+  async setLuopanUserControls(input: SetLuopanUserControlsInput): Promise<LuopanUserControls> {
+    const policyId = userAppUpdatePolicyId('luopan', input.userId);
+    return this.dataSource.transaction(async manager => {
+      // Serialize with the existing account writer; optional application denial
+      // and update policy either both commit or both roll back.
+      await accountWriteLock(manager, this.config.environment);
+      const records = manager.getRepository(PlatformRecordEntity);
+      // Account deletion does not take accountWriteLock. Hold its row too, so
+      // an optional app-access save cannot recreate a concurrently deleted user.
+      const userRow = await records.findOne({
+        where: { kind: 'iam-user', id: input.userId, environment: this.config.environment },
+        lock: { mode: 'pessimistic_write' }
+      });
+      const policyRow = await records.findOneBy({ kind: 'user-app-update-policy', id: policyId, environment: this.config.environment });
+      const user = userRow?.data as unknown as UserCenterUser | undefined;
+      const result = prepareLuopanUserControls(input, user, policyRow?.data as unknown as UserAppUpdatePolicy ?? null);
+      await this.saveRecordTo(records, 'user-app-update-policy', policyId, result.policy, this.config.siteId);
+      if (user !== result.updatedUser) {
+        await this.saveRecordTo(records, 'iam-user', input.userId, result.updatedUser, this.config.siteId);
+      }
+      await this.recordAuditTo(records, result.audit);
+      return { policy: result.policy, loginBlocked: result.loginBlocked };
+    });
+  }
+
   async createUserCenterUser(input: CreateUserInput): Promise<UserCenterUser> {
     const user = await this.dataSource.transaction(async manager => {
       await accountWriteLock(manager, this.config.environment);
@@ -1119,7 +1153,8 @@ export class PostgresStore implements PlatformStore {
         ? createUserCenterUserCredential(draft.userId, input.password, input, previousCredential)
         : previousCredential;
       if (credential) await this.saveRecordTo(records, 'iam-user-credential', credential.userId, credential, this.config.siteId);
-      const user = createUserCenterUser(input, previous, userCredentialSummary(credential));
+      const nextUser = createUserCenterUser(input, previous, userCredentialSummary(credential));
+      const user = input.preserveLuopanLoginAccess ? preserveLuopanLoginAccess(nextUser, previous) : nextUser;
       await this.saveRecordTo(records, 'iam-user', user.userId, user, this.config.siteId);
       await this.recordAuditTo(records, {
         eventType: 'iam.user.upserted',
@@ -3286,6 +3321,15 @@ export class PostgresStore implements PlatformStore {
 
   async getLauncherNetworkLease(leaseId: string): Promise<LauncherNetworkLease | null> {
     return this.getRecord<LauncherNetworkLease>('launcher-network-lease', leaseId.trim());
+  }
+
+  async listLauncherNetworkLeasesForInstall(productId: string, installId: string): Promise<LauncherNetworkLease[]> {
+    const rows = await this.dataSource.query(
+      `SELECT data FROM mx_platform_records WHERE environment=$1 AND kind='launcher-network-lease'
+       AND data->>'productId'=$2 AND data->>'installId'=$3`,
+      [this.config.environment, productId, installId]
+    );
+    return rows.map((row: { data: LauncherNetworkLease }) => row.data);
   }
 
   async claimLauncherNetworkRuntimeCollection(

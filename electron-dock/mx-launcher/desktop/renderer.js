@@ -3518,6 +3518,7 @@ function openUserEditorDrawer(mode = 'edit', userId = '') {
   renderUserEditorDrawer();
   if (user?.userId) void loadUserOverseaPublicLinkMeta(user.userId, linkRequestGeneration);
   const openedDrawer = state.userCenter.drawer;
+  if (user?.userId) void loadUserLuopanControls(openedDrawer);
   requestAnimationFrame(() => {
     // Do not steal focus from a field the user has already started editing.
     if (state.userCenter.drawer !== openedDrawer || !userEditorDrawer || userEditorDrawer.hidden || userEditorDrawer.contains(document.activeElement)) return;
@@ -3560,6 +3561,82 @@ function userEditorValue(root, field) {
   return blankToNull(element.value);
 }
 
+function applyUserLuopanControls(drawer, payload) {
+  const policy = payload?.policy;
+  if (policy?.appId !== 'luopan' || policy.userId !== drawer.userId
+    || typeof policy.updatesBlocked !== 'boolean' || !Number.isInteger(policy.revision)
+    || typeof payload.loginBlocked !== 'boolean') {
+    throw new Error('罗盘设置返回无效，请重新加载后再保存。');
+  }
+  drawer.luopanControls = {
+    loaded: true, busy: false, error: null, feedback: null,
+    dirty: false,
+    policy, coverage: payload.coverage,
+    updatesBlocked: policy.updatesBlocked,
+    loginBlocked: payload.loginBlocked,
+    savedLoginBlocked: payload.loginBlocked,
+    reason: policy.reason || ''
+  };
+  syncUserLuopanLoginDraft(drawer, payload.loginBlocked);
+}
+
+function syncUserLuopanLoginDraft(drawer, loginBlocked) {
+  const denied = stringListFromText(drawer.draft.deniedAppIds).filter(id => id !== 'luopan');
+  if (loginBlocked) denied.push('luopan');
+  drawer.draft.deniedAppIds = textFromStringList(denied);
+  const user = userCenterUserById(drawer.userId);
+  if (user) {
+    const savedDenied = asArray(user.appAccess?.deniedAppIds).filter(id => id !== 'luopan');
+    if (loginBlocked) savedDenied.push('luopan');
+    user.appAccess = { ...user.appAccess, deniedAppIds: savedDenied };
+  }
+}
+
+async function loadUserLuopanControls(drawer = state.userCenter.drawer) {
+  if (drawer?.mode !== 'edit' || state.userCenter.drawer !== drawer || drawer.luopanControls?.busy) return;
+  const pending = { loaded: false, busy: true, error: null };
+  drawer.luopanControls = pending;
+  renderUserEditorDrawer();
+  try {
+    const payload = await fetchJson(`/internal/v1/user-center/users/${encodeURIComponent(drawer.userId)}/luopan-controls`);
+    if (state.userCenter.drawer !== drawer || drawer.luopanControls !== pending) return;
+    applyUserLuopanControls(drawer, payload);
+  } catch (error) {
+    if (state.userCenter.drawer !== drawer || drawer.luopanControls !== pending) return;
+    pending.busy = false;
+    pending.error = `未能加载罗盘设置：${error.message}。未修改任何设置。`;
+  }
+  if (state.userCenter.drawer === drawer) renderUserEditorDrawer();
+}
+
+async function saveUserLuopanControls() {
+  const drawer = state.userCenter.drawer;
+  const controls = drawer?.luopanControls;
+  if (drawer?.mode !== 'edit' || !controls?.loaded || controls.busy || controls.error || state.userCenter.busy) return;
+  const body = {
+    updatesBlocked: controls.updatesBlocked,
+    reason: controls.reason.trim(),
+    expectedRevision: controls.policy.revision,
+    ...(controls.loginBlocked !== controls.savedLoginBlocked ? { loginBlocked: controls.loginBlocked } : {})
+  };
+  controls.busy = true;
+  controls.feedback = null;
+  renderUserEditorDrawer();
+  try {
+    const payload = await fetchJson(`/internal/v1/user-center/users/${encodeURIComponent(drawer.userId)}/luopan-controls`, { method: 'POST', body });
+    if (state.userCenter.drawer !== drawer || drawer.luopanControls !== controls) return;
+    applyUserLuopanControls(drawer, payload);
+    drawer.luopanControls.feedback = '罗盘设置已保存。用户资料及其他应用设置未改动。';
+  } catch (error) {
+    if (state.userCenter.drawer !== drawer || drawer.luopanControls !== controls) return;
+    controls.busy = false;
+    controls.error = error.status === 409
+      ? '罗盘设置已被其他管理员修改。请重新加载并确认后保存。'
+      : `保存未确认：${error.message}。请重新加载确认当前设置。`;
+  }
+  if (state.userCenter.drawer === drawer) renderUserEditorDrawer();
+}
+
 function userEditorDraftFromForm(root) {
   const current = state.userCenter.drawer?.draft || {};
   const editing = state.userCenter.drawer?.mode === 'edit';
@@ -3597,7 +3674,8 @@ function parseUserAttributesJson(value) {
 }
 
 async function saveUserCenterUserFromEditor(root) {
-  if (state.userCenter.busy) return;
+  if (state.userCenter.busy || state.userCenter.drawer?.luopanControls?.busy) return;
+  const luopanControls = state.userCenter.drawer?.luopanControls;
   const draft = userEditorDraftFromForm(root);
   const createMode = state.userCenter.drawer?.mode !== 'edit';
   if (!draft.roleIds.length) {
@@ -3661,6 +3739,7 @@ async function saveUserCenterUserFromEditor(root) {
         registeredByAppId: blankToNull(draft.registeredByAppId),
         allowedAppIds: stringListFromText(draft.allowedAppIds),
         deniedAppIds: stringListFromText(draft.deniedAppIds),
+        ...(!createMode ? { preserveLuopanLoginAccess: true } : {}),
         replaceAppAccess: true,
         defaultOverseaSiteIds,
         provisionOversea: defaultOverseaSiteIds.length > 0,
@@ -3673,6 +3752,7 @@ async function saveUserCenterUserFromEditor(root) {
     state.userCenter.drawer = {
       mode: 'edit',
       userId: savedUserId,
+      luopanControls,
       draft: {
         userId: savedUserId,
         account: saved.account || draft.account,
@@ -3694,6 +3774,12 @@ async function saveUserCenterUserFromEditor(root) {
         provisionOversea: false
       }
     };
+    if (luopanControls?.loaded && Array.isArray(saved.appAccess?.deniedAppIds)) {
+      const loginWasEdited = luopanControls.loginBlocked !== luopanControls.savedLoginBlocked;
+      luopanControls.savedLoginBlocked = saved.appAccess.deniedAppIds.includes('luopan');
+      if (!loginWasEdited) luopanControls.loginBlocked = luopanControls.savedLoginBlocked;
+    }
+    if (!luopanControls && savedUserId) void loadUserLuopanControls(state.userCenter.drawer);
     state.userCenter.selectedOverseaUserId = savedUserId || null;
     state.userCenter.feedback = {
       kind: 'success',
@@ -9838,6 +9924,34 @@ function systemAggregateCopyUrl() {
   return url.toString();
 }
 
+function renderUserLuopanControls(drawer) {
+  const controls = drawer.luopanControls;
+  const disabled = !controls?.loaded || controls.busy || Boolean(controls.error) || state.userCenter.busy;
+  const coverage = controls?.coverage;
+  const coverageText = coverage?.status === 'identified' && Number.isInteger(coverage.installCount) && coverage.installCount > 0
+    ? `已关联 ${coverage.installCount} 个安装` : '尚未确认覆盖';
+  return `<section class="app-drawer-section" data-user-luopan-controls aria-labelledby="user-luopan-heading" aria-busy="${controls?.busy === true}">
+    <div class="app-section-title"><span>LP</span><strong id="user-luopan-heading">罗盘更新与登录</strong></div>
+    <p class="muted">单独保存，仅作用于此用户的罗盘。仅停止更新时，仍可登录并使用当前版本；MX-H2I 登录与联网不受影响。</p>
+    ${!controls?.loaded && !controls?.error ? '<p role="status">正在读取罗盘设置…</p>' : ''}
+    <div class="app-editor-grid">
+      <label class="foundation-checkbox-option app-form-wide"><input type="checkbox" data-luopan-updates-blocked ${controls?.updatesBlocked ? 'checked' : ''} ${disabled ? 'disabled' : ''} /><span>停止后续软件更新</span></label>
+      <label class="foundation-checkbox-option app-form-wide"><input type="checkbox" data-luopan-login-blocked ${controls?.loginBlocked ? 'checked' : ''} ${disabled ? 'disabled' : ''} /><span>同时禁止罗盘登录（可选）</span></label>
+      <p class="muted app-form-wide">登录限制默认关闭；开启后也会拒绝此用户后续罗盘网络准入，不停用统一账号，不影响 MX-H2I。</p>
+      <label class="app-form-field app-form-wide"><span>管理备注（可选）</span><textarea data-luopan-reason rows="2" maxlength="500" ${disabled ? 'disabled' : ''} placeholder="记录停用或恢复的原因">${escapeHtml(controls?.reason || '')}</textarea></label>
+    </div>
+    ${controls?.loaded ? `<p data-luopan-coverage><strong>${escapeHtml(coverageText)}</strong><br><small>${escapeHtml(coverage?.note || '覆盖情况以已识别的安装为准，不能据此确认所有旧客户端均受控。')}</small></p>` : ''}
+    ${controls?.error ? `<div class="feedback error" role="alert">${escapeHtml(controls.error)}</div>` : ''}
+    <div data-luopan-feedback class="feedback ${controls?.dirty ? 'info' : 'success'}" role="status" ${controls?.feedback || controls?.dirty ? '' : 'hidden'}>${escapeHtml(controls?.dirty ? '罗盘设置有未保存的更改。' : controls?.feedback || '')}</div>
+    <div class="action-row">
+      <button class="secondary-button" type="button" data-luopan-save ${disabled ? 'disabled' : ''}>${controls?.busy && controls.loaded ? '正在保存…' : '保存罗盘设置'}</button>
+      ${controls?.error ? `<button class="secondary-button" type="button" data-luopan-reload ${state.userCenter.busy ? 'disabled' : ''}>重新加载罗盘设置</button>` : ''}
+    </div>
+    <small>下方 Save User 仅保存用户资料与其他应用设置，不提交此处未保存的更改。</small>
+  </section>`;
+}
+
+
 function renderSystemSubscriptionsDrawer() {
   const catalog = state.userCenter.systemSubscriptions;
   const items = asArray(catalog?.subscriptions);
@@ -9977,12 +10091,13 @@ function renderSystemSubscriptionsDrawer() {
   }
 }
 
-function userAppOptions(value) {
+function userAppOptions(value, lockLuopan = false) {
   const selected = stringListFromText(value || '');
   const catalog = new Map(asArray(state.appCenterApps).map(app => [app.appId, app]));
   for (const id of selected) if (!catalog.has(id)) catalog.set(id, { appId: id, displayName: '历史应用（未在目录中）' });
-  return [...catalog.values()].map(app => `<option value="${escapeHtml(app.appId)}" ${selected.includes(app.appId) ? 'selected' : ''}>${escapeHtml(app.displayName || app.appId)} · ${escapeHtml(app.appId)}${app.enabled === false ? '（已停用）' : ''}</option>`).join('');
+  return [...catalog.values()].map(app => `<option value="${escapeHtml(app.appId)}" ${selected.includes(app.appId) ? 'selected' : ''} ${lockLuopan && app.appId === 'luopan' ? 'disabled' : ''}>${escapeHtml(app.displayName || app.appId)} · ${escapeHtml(app.appId)}${lockLuopan && app.appId === 'luopan' ? '（在罗盘设置中修改）' : app.enabled === false ? '（已停用）' : ''}</option>`).join('');
 }
+
 
 function renderUserEditorDrawer() {
   if (!userEditorBackdrop || !userEditorDrawer) return;
@@ -10098,8 +10213,9 @@ function renderUserEditorDrawer() {
             </div>
             <div class="app-form-field app-form-wide">
               <label for="user-denied-apps">明确禁止的应用 · Denied Apps</label>
-              <select id="user-denied-apps" multiple data-user-editor-field="deniedAppIds" aria-label="明确禁止的应用" data-placeholder="无额外禁止">${userAppOptions(draft.deniedAppIds)}</select>
+              <select id="user-denied-apps" multiple data-user-editor-field="deniedAppIds" aria-label="明确禁止的应用" data-placeholder="无额外禁止">${userAppOptions(draft.deniedAppIds, editing)}</select>
               <small>明确禁止优先于公开应用、额外授权和管理员通行。MX-H2I 登录及产品网络准入会校验禁止名单；其他应用独立入口及内部数据权限由各应用管理。</small>
+              ${editing ? '<small>罗盘登录限制请使用下方「罗盘更新与登录」，避免与独立保存的设置冲突。</small>' : ''}
             </div>
             <label class="app-form-field app-form-wide">
               <span>Attributes JSON</span>
@@ -10107,6 +10223,8 @@ function renderUserEditorDrawer() {
             </label>
           </div>
         </section>
+
+        ${editing ? renderUserLuopanControls(drawer) : ''}
 
         <section class="app-drawer-section">
           <div class="app-section-title">
@@ -10145,7 +10263,7 @@ function renderUserEditorDrawer() {
         <span class="user-drawer-action-spacer"></span>
         ${editing ? `<button class="secondary-button" type="button" data-user-editor-password ${state.userCenter.busy ? 'disabled' : ''}>Update Password</button>` : ''}
         <button class="secondary-button" type="button" data-user-editor-cancel>Cancel</button>
-        <button class="primary-button" type="submit" ${state.userCenter.busy ? 'disabled' : ''}>${state.userCenter.busy ? 'Saving...' : 'Save User'}</button>
+        <button class="primary-button" type="submit" ${state.userCenter.busy || drawer.luopanControls?.busy ? 'disabled' : ''}>${state.userCenter.busy ? 'Saving...' : 'Save User'}</button>
       </footer>
     </form>
   `;
@@ -10167,6 +10285,23 @@ function bindUserEditorDrawerControls() {
   if (updatePassword) updatePassword.addEventListener('click', () => void updateUserCenterPasswordFromEditor(form));
   const deleteUser = userEditorDrawer.querySelector('[data-user-editor-delete]');
   if (deleteUser) deleteUser.addEventListener('click', () => void deleteUserCenterUserFromEditor());
+  userEditorDrawer.querySelector('[data-luopan-save]')?.addEventListener('click', () => void saveUserLuopanControls());
+  userEditorDrawer.querySelector('[data-luopan-reload]')?.addEventListener('click', () => void loadUserLuopanControls());
+  for (const [selector, field] of [['[data-luopan-updates-blocked]', 'updatesBlocked'], ['[data-luopan-login-blocked]', 'loginBlocked'], ['[data-luopan-reason]', 'reason']]) {
+    userEditorDrawer.querySelector(selector)?.addEventListener('input', event => {
+      const controls = state.userCenter.drawer?.luopanControls;
+      if (!controls?.loaded || controls.busy || controls.error) return;
+      controls[field] = field === 'reason' ? event.target.value : event.target.checked;
+      controls.feedback = null;
+      controls.dirty = true;
+      const feedback = userEditorDrawer.querySelector('[data-luopan-feedback]');
+      if (feedback) {
+        feedback.hidden = false;
+        feedback.className = 'feedback info';
+        feedback.textContent = '罗盘设置有未保存的更改。';
+      }
+    });
+  }
   bindUserDropdownControls(userEditorDrawer);
   for (const control of userEditorDrawer.querySelectorAll('[data-user-editor-field]')) {
     control.addEventListener('input', () => {
