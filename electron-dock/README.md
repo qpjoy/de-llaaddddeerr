@@ -91,6 +91,8 @@ journalctl -u mx-boot-verify.service -b
 
 `audit` 只读检查原 runtime、storage/etcd guards、集群身份、控制器、镜像缓存、PG/HanLP、本机健康入口与 enable 状态；发现未 enable 会报告。`install` 先核验当前健康基线，然后仅 enable 已确认存在的原 runtime、kubelet、宿主 PG、host runner、nginx 及可识别代理 unit，安装版本化的只读 `mx-boot-verify.service`。它不 start/restart 任何服务、不覆盖陌生同名 unit；部分 enable 失败会明确保留已完成结果。
 
+2026-10-27 远程验收修正：`systemctl show` 会将多个 `ExecStartPre` 分行输出；旧审计器只保留最后一条，曾把完整的 etcd/storage 启动保护误报为缺失。当前版本保留全部条目，真正缺项会逐条显示服务名、属性和预期依赖。遇到旧版笼统错误时，先同步新版 `scripts/boot.py` 并重跑 `boot audit`；该解析修复不需要修改、重载或重启服务器 unit。若已经安装过验收服务，源码同步后需再次运行 `boot install`，才能更新其固定版本副本。
+
 PG 服务名不同须显式给 `MX_HOST_PG_SERVICE`。代理默认只识别已存在且活跃的 `mx-internal-egress.service`、`mihomo.service`、`mihomo-client.service`；其他名称用 `MX_PROXY_SERVICE` 指定原 unit，不会猜测或新建代理服务。oneshot 开机有界等待 900 秒、结果进入 journal，失败不会阻塞 kubelet 或 MX-H2I，也不会自动重启业务。手动 `verify` 可用 `MX_WAIT_TIMEOUT` 调整等待时间。
 
 零副本、缺失原镜像、未完成的迁移/运维记录、原安装身份或挂载保护不一致都会停止验收，保留现场，不 scale、不清锁、不重放迁移。验收只覆盖本机设施与健康端点；生产启用后仍须安排真实重启演练及 MX-H2I 原账号登录/联网、Hub 查询、DataPort 与 Pay 的业务验收，不能用健康端点代替这些结论。

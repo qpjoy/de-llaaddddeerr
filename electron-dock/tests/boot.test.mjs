@@ -55,12 +55,27 @@ def fake(args,env,timeout=15):
         absent=name in ('mihomo.service','mihomo-client.service','mx-internal-egress.service')
         state={'LoadState':'not-found' if absent else 'loaded','ActiveState':'active',
                'UnitFileState':enabled.get(name,options.get('enabled','enabled')),
-               'FragmentPath':str(root/'original.service'),'ExecStartPre':'','After':'','Requires':'','RequiresMountsFor':''}
-        if name=='kubelet.service': state.update(ExecStartPre=str(b.STORAGE_GUARD)+' '+str(b.ETCD_GUARD),After='mx-k8s-containerd.service',Requires='mx-k8s-containerd.service',RequiresMountsFor='/var/lib/etcd')
-        if name=='mx-k8s-containerd.service': state['ExecStartPre']=str(b.STORAGE_GUARD)
-        if options.get('missingGuard') and name=='kubelet.service': state['ExecStartPre']=''
+               'FragmentPath':str(root/'original.service'),'After':'','Requires':'','RequiresMountsFor':''}
+        commands=[]; missing=options.get('missingPrerequisite')
+        if name=='kubelet.service':
+            state.update(After='mx-k8s-containerd.service',Requires='mx-k8s-containerd.service',RequiresMountsFor='/var/lib/etcd')
+            commands=[str(b.ETCD_GUARD)+' --record '+str(b.ETCD_RECORD),str(b.STORAGE_GUARD)]
+            if options.get('missingGuard'): commands=[]
+            if missing=='kubelet-storage-guard': commands=[command for command in commands if str(b.STORAGE_GUARD) not in command]
+            if missing=='kubelet-etcd-guard': commands=[command for command in commands if str(b.ETCD_GUARD) not in command]
+            if missing=='kubelet-requires-runtime': state['Requires']='network.target'
+            if missing=='kubelet-after-runtime': state['After']='network.target'
+            if missing=='kubelet-etcd-mount': state['RequiresMountsFor']='/var/lib/kubelet'
+        if name=='mx-k8s-containerd.service':
+            commands=[str(root/'candidate_guard.py'),str(b.STORAGE_GUARD)]
+            if missing=='runtime-storage-guard': commands=commands[:1]
+        if options.get('reverseExecStartPre'): commands.reverse()
         if options.get('inactive')==name: state['ActiveState']='inactive'
-        return '\n'.join(key+'='+value for key,value in state.items())
+        # systemctl show emits one property line per ExecStartPre command,
+        # repeating the key instead of combining commands into a single value.
+        lines=[key+'='+value for key,value in state.items()]
+        lines.extend('ExecStartPre={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I '+command+' ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0 }' for command in commands)
+        return '\n'.join(lines)
     if str(b.RESOLVER) in args:
         return 'mx-k8s-containerd.service' if 'service' in args else 'unix:///run/mx-k8s-containerd/containerd.sock'
     if str(b.STORAGE_GUARD) in args or str(b.ETCD_GUARD) in args: return ''
@@ -129,6 +144,36 @@ test('audit verifies the retained target, correct CRI, normalized image cache, d
   assert.equal(result.calls.filter(args => args[0] === 'curl').length, 4)
   assert.equal(result.result.unit, null)
 })
+
+test('audit retains all repeated ExecStartPre properties regardless of command order', t => {
+  for (const reverseExecStartPre of [false, true]) {
+    const result = run(t, { reverseExecStartPre })
+    assert.equal(result.status, 0, result.stdout + result.stderr)
+    readOnly(result)
+    assert.deepEqual(result.calls.filter(args => args[0] === 'dependency').map(args => args[1]), ['postgres', 'hanlp'])
+  }
+})
+
+for (const [prerequisite, service, field, value] of [
+  ['kubelet-storage-guard', 'kubelet.service', 'ExecStartPre', 'STORAGE_GUARD'],
+  ['kubelet-etcd-guard', 'kubelet.service', 'ExecStartPre', 'ETCD_GUARD'],
+  ['kubelet-requires-runtime', 'kubelet.service', 'Requires'],
+  ['kubelet-after-runtime', 'kubelet.service', 'After'],
+  ['kubelet-etcd-mount', 'kubelet.service', 'RequiresMountsFor'],
+  ['runtime-storage-guard', 'mx-k8s-containerd.service', 'ExecStartPre', 'STORAGE_GUARD'],
+]) {
+  test(`audit reports missing ${prerequisite} without weakening startup checks`, t => {
+    const result = run(t, { missingPrerequisite: prerequisite })
+    assert.equal(result.status, 1, result.stdout + result.stderr)
+    const diagnostic = result.stdout.split('\n').filter(line => line.includes('启动检查未通过')).join('\n')
+    assert.ok(diagnostic.includes(service), diagnostic)
+    assert.ok(diagnostic.includes(field), diagnostic)
+    if (value) assert.ok(diagnostic.includes(value), diagnostic)
+    assert.equal(result.calls.some(args => args[0] === 'kubectl'), false)
+    readOnly(result)
+    assert.equal(result.result.unit, null)
+  })
+}
 
 test('unmanaged historical workloads are retained without blocking required startup checks', t => {
   const result = run(t, { unmanagedWorkloads: true })

@@ -83,8 +83,19 @@ def service_name(value):
 
 def unit_state(name, env):
     raw = run(['systemctl', 'show', name, '--no-pager',
-               '--property=LoadState,ActiveState,UnitFileState,FragmentPath,ExecStartPre,Requires,After,RequiresMountsFor'], env)
-    return dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
+               '--property=LoadState,ActiveState,UnitFileState,FragmentPath,ExecStartPre,Requires,After,RequiresMountsFor,NeedDaemonReload'], env)
+    state = {}
+    for line in raw.splitlines():
+        key, separator, value = line.partition('=')
+        if not separator:
+            continue
+        # systemctl prints one ExecStartPre= line per command. Preserve all
+        # entries: kubelet has separate etcd and storage startup guards.
+        if key == 'ExecStartPre' and key in state:
+            state[key] += '\n' + value
+        else:
+            state[key] = value
+    return state
 
 
 def host_audit(env, require_enabled):
@@ -123,12 +134,22 @@ def host_audit(env, require_enabled):
         if require_enabled and state.get('UnitFileState') != 'enabled':
             raise Refuse('原服务尚未持久 enable：' + name)
     kubelet = units['kubelet.service']
-    if (str(STORAGE_GUARD) not in kubelet.get('ExecStartPre', '') or
-            str(ETCD_GUARD) not in kubelet.get('ExecStartPre', '') or
-            runtime not in kubelet.get('Requires', '').split() or runtime not in kubelet.get('After', '').split() or
-            '/var/lib/etcd' not in kubelet.get('RequiresMountsFor', '').split() or
-            str(STORAGE_GUARD) not in units[runtime].get('ExecStartPre', '')):
-        raise Refuse('现有 kubelet/runtime 的有效挂载保护或启动依赖缺失；未覆盖原 unit')
+    checks = (
+        (str(STORAGE_GUARD) in kubelet.get('ExecStartPre', ''), 'kubelet.service ExecStartPre 缺少 ' + str(STORAGE_GUARD)),
+        (str(ETCD_GUARD) in kubelet.get('ExecStartPre', ''), 'kubelet.service ExecStartPre 缺少 ' + str(ETCD_GUARD)),
+        (runtime in kubelet.get('Requires', '').split(), 'kubelet.service Requires 缺少 ' + runtime),
+        (runtime in kubelet.get('After', '').split(), 'kubelet.service After 缺少 ' + runtime),
+        ('/var/lib/etcd' in kubelet.get('RequiresMountsFor', '').split(), 'kubelet.service RequiresMountsFor 缺少 /var/lib/etcd'),
+        (str(STORAGE_GUARD) in units[runtime].get('ExecStartPre', ''), runtime + ' ExecStartPre 缺少 ' + str(STORAGE_GUARD)),
+    )
+    missing = [message for passed, message in checks if not passed]
+    if missing:
+        for message in missing:
+            say('启动检查未通过：' + message)
+        for name in ('kubelet.service', runtime):
+            if units[name].get('NeedDaemonReload') == 'yes':
+                say(name + ' NeedDaemonReload=yes；磁盘配置尚未加载，本次核对的是 systemd 已加载配置')
+        raise Refuse('现有 kubelet/runtime 的有效挂载保护或启动依赖缺失（见上方具体项）；未覆盖原 unit')
     return active, units
 
 
