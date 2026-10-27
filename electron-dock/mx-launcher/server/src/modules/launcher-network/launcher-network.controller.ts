@@ -90,11 +90,16 @@ export class LauncherNetworkController implements OnModuleInit, OnModuleDestroy 
 
   onModuleInit(): void {
     const intervalMs = Math.max(1_000, this.config.launcherNetworkHandoverReconcileMs);
-    this.handoverReconcileTimer = setInterval(() => {
-      void this.reconcileExpiredHandovers();
-    }, intervalMs);
+    const reconcileInBackground = () => {
+      void this.reconcileExpiredHandovers().catch(() => {
+        // A transient store failure must not stop login or network control.
+        // Error details can contain connection credentials or SQL parameters.
+        console.warn(JSON.stringify({ event: 'launcher_network.handover.reconcile_failed', retry: 'next-interval' }));
+      });
+    };
+    this.handoverReconcileTimer = setInterval(reconcileInBackground, intervalMs);
     this.handoverReconcileTimer.unref?.();
-    void this.reconcileExpiredHandovers();
+    reconcileInBackground();
     const runtimeIntervalMs = effectiveRuntimeSnapshotIntervalMs(
       this.config.launcherNetworkRuntimeSnapshotIntervalMs
     );

@@ -894,7 +894,7 @@ test('HanLP deploy re-imports the built image to self-heal a stale mutable tag',
      allow_hostnetwork_clients() { :; }
      allow_client_namespace() { :; }
      wait_ready() { echo "wait $*"; }
-     hanlp_is_healthy() { return 0; }
+     hanlp_verify_worker_pool() { return 0; }
      hanlp_tokenize_smoke() { return 0; }
      cmd_deploy_hanlp`,
     '_',
@@ -1343,22 +1343,33 @@ test('the prefetch proves the model reached the seed directory, not merely that 
   assert.match(prefetch, /copytree/)
 })
 
-test('the tokenizer pool and its thread pools are sized from the container limits', async () => {
+test('the tokenizer keeps five workers while increasing peak memory headroom', async () => {
   const { readFile } = await import('node:fs/promises')
   const manifest = await readFile(new URL('../deploy/k8s/optional/50-hanlp.yaml', import.meta.url), 'utf8')
   const server = await readFile(new URL('../deploy/hanlp/server.py', import.meta.url), 'utf8')
-  // The limits are the only knob: server.py reads them from the cgroup and
-  // derives both the worker count and each worker's thread share.
-  assert.match(manifest, /limits:\s+cpu: "16"\s+memory: 8Gi/)
+  // Stagger model loading without changing the steady-state pool capacity.
+  assert.match(manifest, /requests:\s+cpu: 500m\s+memory: 1Gi/)
+  assert.match(manifest, /limits:\s+cpu: "16"\s+memory: 32Gi/)
   assert.match(server, /cpu\.max/)
   assert.match(server, /memory\.max/)
   // PyTorch reads the host CPU count, not the cgroup limit; unpinned it starts
   // 128 threads per worker. Each worker pins its own share before it loads.
   assert.match(server, /THREAD_ENV_NAMES = \("OMP_NUM_THREADS", "MKL_NUM_THREADS", "TORCH_NUM_THREADS"\)/)
-  // Pinning in the manifest would hand every worker the whole quota, and a
-  // fixed slot count would override the derived pool size.
+  // Growing memory must not silently grow model copies, nor force a permanent
+  // single worker just to avoid concurrent model loading at startup.
   assert.doesNotMatch(manifest, /name: (OMP|MKL|TORCH)_NUM_THREADS/)
-  assert.doesNotMatch(manifest, /name: MAX_CONCURRENT_INFERENCES/)
+  assert.match(manifest, /name: MAX_CONCURRENT_INFERENCES\s+value: "5"/)
+  // Serial loading needs the previous 600s per-model allowance for all five
+  // models, and the controller/operator must not time out before that probe.
+  const startup = manifest.split('startupProbe:')[1].split('livenessProbe:')[0]
+  const probeBudget = Number(startup.match(/periodSeconds: (\d+)/)[1])
+    * Number(startup.match(/failureThreshold: (\d+)/)[1])
+  const progressBudget = Number(manifest.match(/progressDeadlineSeconds: (\d+)/)[1])
+  const manage = await readFile(new URL('../scripts/manage.sh', import.meta.url), 'utf8')
+  const deployBudget = Number(manage.match(/HANLP_WAIT_TIMEOUT="\$\{MX_COMMON_HANLP_WAIT_TIMEOUT:-(\d+)\}/)[1])
+  assert.ok(probeBudget >= 5 * 600)
+  assert.ok(progressBudget >= probeBudget + 60)
+  assert.ok(deployBudget >= progressBudget)
 })
 
 test('deploying HanLP resolves the same host root as the rest of the stack', async () => {

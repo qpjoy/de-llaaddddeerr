@@ -114,7 +114,7 @@ def make_pool(workers, tokenizer=split_tokens, start=True):
 
 
 class PoolSizingTest(unittest.TestCase):
-    def test_the_current_16_cpu_8gi_pod_gets_five_workers_of_three_threads(self):
+    def test_an_uncapped_16_cpu_8gi_pod_gets_five_workers_of_three_threads(self):
         plan = server.plan_pool(16, 8 * GIB)
         self.assertEqual((plan.workers, plan.threads, plan.reserved), (5, 3, 1))
 
@@ -143,6 +143,10 @@ class PoolSizingTest(unittest.TestCase):
         self.assertEqual(server.plan_pool(16, 8 * GIB, cap=1)[:3], (1, 16, 0))
         self.assertEqual(server.plan_pool(16, 8 * GIB, cap=2)[:3], (2, 8, 1))
         self.assertEqual(server.plan_pool(16, 8 * GIB, cap=64).workers, 5)
+
+    def test_a_five_worker_cap_keeps_extra_memory_as_headroom(self):
+        self.assertEqual(server.plan_pool(16, 32 * GIB).workers, 16)
+        self.assertEqual(server.plan_pool(16, 32 * GIB, cap=5)[:3], (5, 3, 1))
 
     def test_the_legacy_setting_is_optional(self):
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -213,20 +217,37 @@ class CgroupLimitTest(unittest.TestCase):
 
 
 class AdmissionTest(unittest.TestCase):
-    def test_the_pool_is_ready_only_once_every_worker_has_warmed_up(self):
+    def test_initial_models_load_one_at_a_time_and_all_warm_before_ready(self):
         gates = [threading.Event() for _ in range(3)]
+        started = [threading.Event() for _ in range(3)]
+
+        def spawn(index):
+            started[index].set()
+            return FakeWorker(index, ready_gate=gates[index])
+
         pool = server.InferencePool(
             server.plan_pool(3, memory_for(3)),
-            lambda index: FakeWorker(index, ready_gate=gates[index]),
+            spawn,
         )
         starter = threading.Thread(target=pool.start)
+        self.addCleanup(starter.join, 5)
+        for gate in gates:
+            self.addCleanup(gate.set)
+        self.addCleanup(pool.close)
         starter.start()
+        self.assertTrue(started[0].wait(1))
+        self.assertFalse(started[1].wait(0.05))
+        self.assertFalse(pool.ready)
         gates[0].set()
-        gates[2].set()
-        time.sleep(0.05)
+        self.assertTrue(started[1].wait(1))
+        self.assertFalse(started[2].wait(0.05))
         self.assertFalse(pool.ready)
         gates[1].set()
+        self.assertTrue(started[2].wait(1))
+        self.assertFalse(pool.ready)
+        gates[2].set()
         starter.join(5)
+        self.assertFalse(starter.is_alive())
         self.assertTrue(pool.ready)
         self.assertEqual(pool.describe()["liveWorkers"], 3)
 
@@ -243,6 +264,52 @@ class AdmissionTest(unittest.TestCase):
         self.assertFalse(pool.ready)
         self.assertEqual(pool.error, "RuntimeError: model warm-up failed")
         self.assertTrue(all(worker.closed for worker in spawned))
+        self.assertEqual([worker.index for worker in spawned], [0, 1])
+
+    def test_close_during_initial_loading_stops_it_without_spawning_more(self):
+        gate = threading.Event()
+        started = threading.Event()
+        spawned = []
+
+        class LoadingWorker(FakeWorker):
+            def close(self):
+                super().close()
+                gate.set()  # terminating a real child also wakes wait_ready
+
+        def spawn(index):
+            spawned.append(LoadingWorker(index, ready_gate=gate))
+            started.set()
+            return spawned[-1]
+
+        pool = server.InferencePool(server.plan_pool(3, memory_for(3)), spawn)
+        starter = threading.Thread(target=pool.start)
+        self.addCleanup(starter.join, 5)
+        self.addCleanup(gate.set)
+        self.addCleanup(pool.close)
+        starter.start()
+        self.assertTrue(started.wait(1))
+        pool.close()
+        starter.join(5)
+        self.assertFalse(starter.is_alive())
+        self.assertEqual(len(spawned), 1)
+        self.assertTrue(spawned[0].closed)
+        self.assertFalse(pool.ready)
+
+    def test_extra_memory_keeps_five_slots_and_the_interactive_reserve(self):
+        pool = server.InferencePool(server.plan_pool(16, 32 * GIB, cap=5), FakeWorker)
+        self.addCleanup(pool.close)
+        pool.start()
+        writers = [pool.acquire(BULK, 0.05) for _ in range(4)]
+        self.assertTrue(all(isinstance(ticket, server._Ticket) for ticket in writers))
+        self.assertIsNone(pool.acquire(BULK, 0.05))
+        query = pool.acquire(INTERACTIVE, 0.05)
+        self.assertIsInstance(query, server._Ticket)
+        tickets = [*writers, query]
+        self.assertEqual(len({ticket.worker.index for ticket in tickets}), 5)
+        self.assertEqual(pool.describe()["threadsPerWorker"], 3)
+        self.assertEqual(pool.describe()["reservedForInteractive"], 1)
+        for ticket in tickets:
+            pool.release(ticket)
 
     def test_interactive_is_admitted_before_bulk_that_queued_first(self):
         pool, _ = make_pool(1)
@@ -362,12 +429,12 @@ class AdmissionTest(unittest.TestCase):
         pool.release(ticket)
 
     def test_a_replacement_that_cannot_load_fails_the_pool(self):
-        attempts = []
+        spawned = []
 
         def spawn(index):
-            attempts.append(index)
-            error = "RuntimeError: model warm-up failed" if len(attempts) > 2 else None
-            return FakeWorker(index, ready_error=error)
+            error = "RuntimeError: model warm-up failed" if len(spawned) >= 2 else None
+            spawned.append(FakeWorker(index, ready_error=error))
+            return spawned[-1]
 
         pool = server.InferencePool(server.plan_pool(2, memory_for(2)), spawn)
         pool.start()
@@ -378,10 +445,89 @@ class AdmissionTest(unittest.TestCase):
             self.assertTrue(wait_until(lambda: pool.error is not None))
         self.assertFalse(pool.ready)
         self.assertEqual(pool.error, "RuntimeError: model warm-up failed")
+        self.assertTrue(spawned[-1].closed)
         # Waiters give up at once rather than sitting out their timeout.
         started = time.monotonic()
         self.assertIsNone(pool.acquire(BULK, 5))
         self.assertLess(time.monotonic() - started, 1)
+
+    def test_replacements_load_serially_while_a_surviving_worker_serves(self):
+        gates = [threading.Event(), threading.Event()]
+        started = [threading.Event(), threading.Event()]
+        spawned = []
+
+        def spawn(index):
+            replacement = len(spawned) - 3
+            gate = gates[replacement] if replacement >= 0 else None
+            worker = FakeWorker(index, ready_gate=gate)
+            spawned.append(worker)
+            if replacement >= 0:
+                started[replacement].set()
+            return worker
+
+        pool = server.InferencePool(server.plan_pool(3, memory_for(3)), spawn)
+        for gate in gates:
+            self.addCleanup(gate.set)
+        self.addCleanup(pool.close)
+        pool.start()
+        tickets = [pool.acquire(INTERACTIVE, 0.05) for _ in range(2)]
+        with contextlib.redirect_stderr(io.StringIO()):
+            for ticket in tickets:
+                ticket.worker.dead = True
+                pool.release(ticket)
+        self.assertTrue(started[0].wait(1))
+        self.assertFalse(started[1].wait(0.05))
+        self.assertTrue(pool.ready)
+        survivor = pool.acquire(INTERACTIVE, 0.1)
+        self.assertIsInstance(survivor, server._Ticket)
+        self.assertEqual(survivor.worker.run(["still serving"]), [["still", "serving"]])
+        pool.release(survivor)
+        self.assertFalse(gates[0].is_set())
+        gates[0].set()
+        self.assertTrue(started[1].wait(1))
+        self.assertTrue(wait_until(lambda: pool.describe()["liveWorkers"] == 2))
+        gates[1].set()
+        self.assertTrue(wait_until(lambda: pool.describe()["replacedWorkers"] == 2))
+        self.assertEqual(pool.describe()["liveWorkers"], 3)
+
+    def test_close_prevents_a_queued_replacement_from_spawning(self):
+        gate = threading.Event()
+        loading = threading.Event()
+        spawned = []
+
+        class LoadingWorker(FakeWorker):
+            def close(self):
+                super().close()
+                gate.set()
+
+        def spawn(index):
+            if len(spawned) >= 3:
+                worker = LoadingWorker(index, ready_gate=gate)
+                loading.set()
+            else:
+                worker = FakeWorker(index)
+            spawned.append(worker)
+            return worker
+
+        pool = server.InferencePool(server.plan_pool(3, memory_for(3)), spawn)
+        pool.start()
+        # Invoke the same replacement entry point in joinable threads so close
+        # can be checked after both the active and queued loader have returned.
+        old = [pool.acquire(INTERACTIVE, 0.05).worker for _ in range(2)]
+        threads = [threading.Thread(target=pool._replace, args=(worker,)) for worker in old]
+        for thread in threads:
+            self.addCleanup(thread.join, 5)
+        self.addCleanup(gate.set)
+        self.addCleanup(pool.close)
+        for thread in threads:
+            thread.start()
+        self.assertTrue(loading.wait(1))
+        pool.close()
+        for thread in threads:
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(len(spawned), 4)
+        self.assertTrue(all(worker.closed for worker in spawned))
 
     def test_closing_stops_every_worker(self):
         pool, spawned = make_pool(3)

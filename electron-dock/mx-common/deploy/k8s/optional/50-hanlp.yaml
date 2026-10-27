@@ -27,7 +27,7 @@ metadata:
   namespace: mx-common
 spec:
   replicas: 1
-  progressDeadlineSeconds: 900
+  progressDeadlineSeconds: 3300
   strategy:
     type: Recreate
   selector:
@@ -94,15 +94,13 @@ spec:
           env:
             - name: HANLP_HOME
               value: /models
-            # No pool size and no OMP/MKL/TORCH thread pins here: server.py
-            # derives both from this container's cgroup limits below. It runs
-            # one worker process per model (a HanLP component is a mutable
-            # object nobody has validated as thread-safe, so models are never
-            # shared across threads) and gives each worker an even share of the
-            # CPU quota, set before PyTorch starts. Pinning threads here would
-            # hand every worker the whole quota. MAX_CONCURRENT_INFERENCES is
-            # still honoured as an optional cap on the worker count; "1"
-            # restores the single-slot service without a rebuild.
+            # Load/warm model processes one at a time, then serve concurrently.
+            # Preserve five runtime workers (3 threads each, one interactive
+            # reserve) while increasing peak memory headroom. Without this cap
+            # the 32Gi / 16 CPU planner would add model copies up to 16 workers.
+            # This is a runtime cap, not the serial model-loading mechanism.
+            - name: MAX_CONCURRENT_INFERENCES
+              value: "5"
             #
             # A coalesced batch of 64 takes materially longer than one text; the
             # queue must outlast it or callers see 429 for work that succeeded.
@@ -129,7 +127,9 @@ spec:
               port: http
             periodSeconds: 10
             timeoutSeconds: 3
-            failureThreshold: 60
+            # Five serial model loads retain the old 600s allowance per model.
+            # This is a failure ceiling, not a delay when warm-up finishes early.
+            failureThreshold: 300
           livenessProbe:
             httpGet:
               path: /health
@@ -137,21 +137,18 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 3
             failureThreshold: 3
-          # Sized for bulk rebuilds, which are the only workload that saturates
-          # this service. A 2-core ceiling left a 128-thread host mostly idle
-          # while a rebuild ran for hours. The limits are also the pool size:
-          # one worker per 1.5 GiB above a 512 MiB front reserve, at most one
-          # per CPU, threads split evenly -- 16 CPU / 8Gi gives 5 workers of 3
-          # threads, one of them held for interactive queries. Raising the
-          # memory limit is how to add workers. Requests stay small: outside a
-          # rebuild this pod is nearly idle on CPU and must not reserve a node.
+          # Memory limit is a ceiling, not preallocated/resident memory.
+          # Five workers exceeded 8Gi; a killed process alone held 5.57Gi RSS.
+          # 32Gi is an initial peak budget, not a proven bound for every batch.
+          # Keep requests unchanged; the node must still have actual headroom
+          # during bursts. Reassess using total cgroup peaks under real load.
           resources:
             requests:
               cpu: 500m
               memory: 1Gi
             limits:
               cpu: "16"
-              memory: 8Gi
+              memory: 32Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

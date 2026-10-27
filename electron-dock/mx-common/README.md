@@ -85,8 +85,41 @@ Python 依赖默认经清华 PyPI 镜像下载，Torch 只从官方 CPU wheel �
 构建完成后会停止 builder 容器并保留 cache；
 随后把本次构建结果重新导入 `k8s.io` containerd（可自愈同名旧镜像）、把镜像
 模型校验后精确同步到持久化 PVC、应用 HanLP Service/Deployment/NetworkPolicy，
-并以 `/health` 和 `/tokenize` 作为成功条件。相同 image ID 不会触发无变化的
-Pod rollout；整个命令可安全重复执行。
+并等待 rollout 完成，验证 `/health` 为 ready、所有计划 worker 均存活且符合
+显式 worker 配置，最后执行 `/tokenize` 冒烟；任一步失败则部署失败。
+相同 image ID **且 Pod 模板不变**时不会额外 rollout；重复执行仍沿用原流程构建
+（使用缓存）和导入镜像，不是跳过构建的命令。
+
+2026-10-27 的线上 OOM 已定位到 HanLP：8Gi 限额下运行 5 个独立模型 worker，
+被杀进程的单个匿名 RSS 达到 3.14–5.57Gi，高于自动规划使用的每 worker 1.5Gi 预算。
+当前部署将内存 **limit 从 8Gi 提到 32Gi**，保留 request=1Gi、CPU limit=16，
+并显式设置 `MAX_CONCURRENT_INFERENCES=5`，维持 **5 worker × 3 threads**。
+批量任务最多占 4 个 worker，交互查询可用全部 5 个；线程是单模型内部计算并行，
+不是额外请求槽。初始启动和故障替换逐个加载/预热模型，已存活 worker 的推理照常并发。
+全部模型预热后才报告初始 Ready；启动探针按 5 × 原单模型 600 秒给出 3000 秒上限，
+Deployment 进度期限与部署默认等待为 3300 秒（`MX_COMMON_HANLP_WAIT_TIMEOUT` 最小同值）。
+这些是失败期限，预热完成即可继续，不会固定等待 55 分钟。
+既有开机只读验收若仍为 900 秒，极慢冷启动可能先报告未就绪；它不会因此重启 HanLP，
+模型就绪后可重新执行验收，不能把验收超时当成服务 OOM。
+worker 数在进程启动时确定，不会随流量自动扩缩。
+
+32Gi 是允许使用的峰值上限，不会启动即预占 32Gi；request 也不等于实际常驻量。
+保留 1Gi request 没有为 32Gi 峰值预留调度容量，负载高时仍需要主机有实际余量。
+模型/分配器缓存可能在请求结束后保留，不能承诺自动回落到某个固定 RSS。
+该初始预算参考已观察的单进程 5.57Gi 用量，尚未证明能覆盖任意五路大批次；
+继续观察总 cgroup 峰值、OOM、worker 替换增量和查询延迟。
+不能只扩大内存而移除 cap：32Gi / 16 CPU 不设 cap 会自动规划成 16 个 worker。
+[Kubernetes requests/limits 说明](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/)
+
+上述配置由 `deploy hanlp` 同一次 manifest apply 收敛，不追加 `rollout restart`。
+此前未上线的 cap=1 默认和“必须单 worker”的验收已撤回；cap=1 仅可作为显式应急降载，
+会长期限制推理并发，不能用作“仅开机降低并发”的配置。
+从 `electron-dock` 目录执行统一入口 `bash scripts/manage.sh deploy hanlp` 同样生效；
+普通 Hub `ensure` 与开机恢复保留已有 HanLP 模板，不借其他服务发布隐式切换 worker 数。
+该 Deployment 为单副本 `Recreate`，首次应用参数会重建 HanLP，
+模型加载期间依赖它的搜索/索引可能失败或等待。证据、容量边界和只读验收见
+[504 排查记录中的 HanLP 缓解](../mx-launcher/docs/60-launcher-504-triage-2026-10-27.md#hanlp-concurrency-mitigation)。
+这项 HanLP 缓解尚未证明能够修复 Launcher 的公网回源 TCP 超时。
 
 节点直连 Docker Hub（`docker/dockerfile` 前端镜像）或 PyTorch 官方 CPU wheel 源
 不稳定时，用 `PROXY` 只给这次镜像构建走代理。写法与 electron-dock 总入口一致：

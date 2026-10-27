@@ -1,6 +1,6 @@
 # MX 总部署命令与重启换机恢复设计
 
-日期：2026-10-02；2026-10-27 更新已有 Internal 实现范围。状态：本文的安装清单、多机编排与换机恢复仍为设计规格；统一入口新增串行全量发布和开机验收，仅完成本地验证，未运行生产部署或真实断电演练。配套：[平台架构与统一身份](33-mx-platform-identity-and-sustainable-architecture.md)。
+日期：2026-10-02；2026-10-27 更新已有 Internal 实现范围与服务器回传记录。状态：本文的安装清单、多机编排与换机恢复仍为设计规格；用户已确认原服务器 `boot audit`、`boot install`、手动 `boot verify` 通过，`mx-boot-verify.service` 已 enable。尚未收到 systemd 实际执行验收、全量发布、新 Hub 启动门禁上线或真实断电演练的结果。配套：[平台架构与统一身份](33-mx-platform-identity-and-sustainable-architecture.md)。
 
 2026-10-19 已实现逐项目统一入口。2026-10-27 增加 `plan all` / `deploy all`，按 Launcher → Pay → HanLP → Hub → DataPort 串行执行，限定原 Internal 的保存目标，显式代理与宿主 5432 PG 就绪后才发布，Hub 前再次检查 PG/HanLP。新增 `boot audit|install|verify`，保留独立 mx-k8s-containerd、kubelet 与 mx-move 挂载保护，由原 Kubernetes 恢复工作负载；systemd 仅 enable 已核实的原服务并增加只读验收，开机不运行 deploy。Hub 六个生产 Pod 有独立 PG/HanLP 启动门禁，需正常发布新 Hub 后生效。原项目入口保留，Luopan/Device/Rig 不纳入 all。用法和限制见 [electron-dock README](../../README.md)。下文 `mx-platform`、统一安装清单、release lock 和换机恢复接口仍待实现。
 

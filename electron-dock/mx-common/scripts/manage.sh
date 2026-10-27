@@ -22,7 +22,7 @@ HOST_DATA_ROOT="${MX_COMMON_HOST_DATA_ROOT:-/var/lib/mx-common/k8s}"
 # still name the directory the operator must reclaim by hand.
 HOST_DATA_ROOT_ORIGINAL="$HOST_DATA_ROOT"
 WAIT_TIMEOUT="${MX_COMMON_WAIT_TIMEOUT:-1200}"
-HANLP_WAIT_TIMEOUT="${MX_COMMON_HANLP_WAIT_TIMEOUT:-900}"
+HANLP_WAIT_TIMEOUT="${MX_COMMON_HANLP_WAIT_TIMEOUT:-3300}"
 
 # Image references, overridable for mirrors or air-gapped nodes. These registries
 # are slow or unreachable from some networks, and a 1.3GB Elasticsearch pull is
@@ -81,7 +81,8 @@ Usage: bash scripts/manage.sh <command>
                   Missing images are preloaded through Docker automatically.
   deploy          Alias for `ensure`.
   deploy hanlp    Build and import the model-preloaded HanLP image, deploy only
-                  the HanLP service and its dependencies, and require it healthy.
+                  the HanLP service and its dependencies, and verify the live
+                  worker pool and tokenization after model warm-up.
   status          Show workloads, PVCs and Elasticsearch cluster health.
   health          Probe only. Exit 0 healthy, 1 degraded/down. Prints JSON.
   plan            Print the manifests that `ensure` would apply.
@@ -126,7 +127,7 @@ Environment:
   MX_COMMON_POSTGRES_IMAGE      Mirror override (default pgvector/pgvector:pg16)
   MX_COMMON_REDIS_IMAGE         Mirror override (default redis:7.4-alpine)
   MX_COMMON_HANLP_IMAGE         HanLP image tag (default mx-common-hanlp:local)
-  MX_COMMON_HANLP_WAIT_TIMEOUT  HanLP init/start wait in seconds (default 900)
+  MX_COMMON_HANLP_WAIT_TIMEOUT  HanLP init/start wait in seconds (default 3300)
   MX_COMMON_HANLP_BUILD_MEMORY  Docker build memory ceiling (default 4g)
   MX_COMMON_HANLP_BUILD_CPU_QUOTA Docker build CPU quota (default 200000 = 2 CPUs)
   MX_COMMON_HANLP_BUILDER        Dedicated constrained buildx builder name
@@ -1875,6 +1876,42 @@ ensure_hanlp_storage() {
   ensure_local_pv mx-common-hanlp-models mx-common-hanlp-models 10Gi hanlp/models 1000:1000 0755
 }
 
+hanlp_verify_worker_pool() {
+  # Verify that every planned model worker is live after rollout. Do not turn
+  # a startup load limit into a permanent single-worker serving policy.
+  # Keep this in explicit HanLP deploy: product ensure/boot recovery must not
+  # silently change its template or roll a model service during another deploy.
+  kubectl -n "$NAMESPACE" --request-timeout=15s exec deployment/mx-common-hanlp -c hanlp -- python -c \
+    'import json, os, sys, urllib.request
+def fail(message):
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+raw_cap = os.environ.get("MAX_CONCURRENT_INFERENCES", "").strip()
+try:
+    cap = int(raw_cap) if raw_cap else None
+    if cap is not None and cap < 1:
+        raise ValueError()
+except ValueError:
+    fail("HanLP worker pool check: invalid explicit worker cap")
+try:
+    with urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3) as response:
+        raw = response.read(65537)
+        if response.status != 200 or len(raw) > 65536:
+            fail("HanLP worker pool check: invalid /health response")
+    health = json.loads(raw)
+except (OSError, ValueError):
+    fail("HanLP worker pool check: /health unavailable or invalid JSON")
+pool = health.get("pool") if isinstance(health, dict) else None
+if not isinstance(pool, dict) or health.get("status") != "ready":
+    fail("HanLP worker pool check: pool is not ready")
+if any(type(pool.get(key)) is not int or pool[key] < 1 for key in ("workers", "liveWorkers")):
+    fail("HanLP worker pool check: invalid worker counts")
+workers, live = pool["workers"], pool["liveWorkers"]
+if workers != live or (cap is not None and workers != cap):
+    fail("HanLP worker pool check: planned/live workers or explicit cap mismatch")
+print(f"HanLP worker pool verified: workers={workers}, liveWorkers={live}")'
+}
+
 hanlp_tokenize_smoke() {
   kubectl -n "$NAMESPACE" exec deployment/mx-common-hanlp -- python -c \
     'import json, sys, urllib.error, urllib.request
@@ -1919,8 +1956,10 @@ cmd_deploy_hanlp() {
   case "$HANLP_WAIT_TIMEOUT" in
     ''|*[!0-9]*) die "MX_COMMON_HANLP_WAIT_TIMEOUT must be an integer" ;;
   esac
-  [ "$HANLP_WAIT_TIMEOUT" -ge 660 ] \
-    || die "MX_COMMON_HANLP_WAIT_TIMEOUT must be at least 660 seconds"
+  # Five serial warm-ups can legitimately outlast the former parallel window.
+  # Include kubelet's 3000s startup allowance plus scheduling/probe headroom.
+  [ "$HANLP_WAIT_TIMEOUT" -ge 3300 ] \
+    || die "MX_COMMON_HANLP_WAIT_TIMEOUT must be at least 3300 seconds"
   WAIT_TIMEOUT="$HANLP_WAIT_TIMEOUT"
 
   report_capacity hanlp
@@ -1933,6 +1972,7 @@ cmd_deploy_hanlp() {
 
   kubectl apply -f "${K8S_DIR}/common/00-namespace.yaml" >/dev/null
   ensure_hanlp_storage
+  # Identical image identity and template do not need an additional restart.
   render_manifest "${K8S_DIR}/optional/50-hanlp.yaml" | kubectl apply -f - >/dev/null
   render_manifest "${K8S_DIR}/common/40-network-policy.yaml" | kubectl apply -f - >/dev/null
   allow_hostnetwork_clients
@@ -1944,9 +1984,9 @@ cmd_deploy_hanlp() {
 
   wait_ready deployment mx-common-hanlp required 60
 
-  if ! hanlp_is_healthy; then
+  if ! hanlp_verify_worker_pool; then
     diagnose_workload mx-common-hanlp
-    die "HanLP deployment is not serving /health"
+    die "HanLP deployment did not reach its planned live worker pool"
   fi
   if ! hanlp_tokenize_smoke; then
     diagnose_workload mx-common-hanlp

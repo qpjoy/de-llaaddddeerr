@@ -58,10 +58,11 @@ WARMUP_TEXT = "吴恩达与人工智能"
 # A HanLP component is one mutable Python object that nobody has validated as
 # thread-safe, so concurrency comes from processes that each own a model, never
 # from threads sharing one. Each worker costs a full model plus PyTorch's
-# runtime, and its activations grow with the batch. The budget is the high end
-# of what one worker needs under a full bulk batch, because an OOM kill takes
-# the whole pod down with it. The front reserve covers the HTTP process, the
-# multiprocessing resource tracker and request bodies in flight.
+# runtime, and its activations grow with the batch. This sizing estimate is not
+# a peak-memory bound: a cgroup OOM may kill a worker without restarting the Pod.
+# Serial model loading reduces overlapping load peaks, not inference memory.
+# The front reserve estimates the HTTP process, resource tracker and request
+# bodies in flight.
 MIB = 1024 * 1024
 WORKER_MEMORY_BYTES = 1536 * MIB
 FRONT_MEMORY_BYTES = 512 * MIB
@@ -337,16 +338,18 @@ class InferencePool:
     """Admit requests to workers: interactive first, bulk never on the reserve.
 
     `spawn(index)` returns a started worker; `start()` waits for every one to
-    warm up before the pool reports ready. A worker that dies is replaced in
-    the background while the rest keep serving. If a replacement cannot load
-    its model the pool reports failed, /health turns 503, and liveness restarts
-    the pod from a clean state.
+    warm up before the pool reports ready. Models load one at a time, including
+    replacements, while already warm workers keep serving concurrently. If a
+    replacement cannot load its model the pool reports failed, /health turns
+    503, and liveness restarts the pod from a clean state.
     """
 
     def __init__(self, plan, spawn):
         self.plan = plan
         self._spawn = spawn
         self._cond = threading.Condition()
+        self._load_lock = threading.Lock()
+        self._loading = None
         self._workers = {}
         self._idle = collections.deque()
         self._queues = {INTERACTIVE: collections.deque(), BULK: collections.deque()}
@@ -378,21 +381,43 @@ class InferencePool:
                 "replacedWorkers": self._replaced,
             }
 
+    def _load_worker(self, index):
+        # Only model loading/warm-up is serialized. Never hold the admission
+        # condition while waiting: surviving workers must keep serving.
+        with self._load_lock:
+            worker = None
+            try:
+                with self._cond:
+                    if self._closed or self._error is not None:
+                        return None
+                    worker = self._spawn(index)
+                    self._loading = worker
+                worker.wait_ready()
+                return worker
+            except Exception as error:  # noqa: BLE001 - surfaced through /health
+                if worker is not None:
+                    worker.close()
+                # Publish failure before another queued loader takes the lock.
+                self._fail(error)
+                raise
+            finally:
+                with self._cond:
+                    self._loading = None
+
     def start(self):
         workers = []
         try:
             for index in range(self.plan.workers):
-                workers.append(self._spawn(index))
-            # The processes load concurrently; waiting in order costs nothing.
-            for worker in workers:
-                worker.wait_ready()
-        except Exception as error:  # noqa: BLE001 - surfaced through /health
-            self._fail(error)
+                worker = self._load_worker(index)
+                if worker is None:
+                    break
+                workers.append(worker)
+        except Exception:  # noqa: BLE001 - _load_worker recorded the failure
             for worker in workers:
                 worker.close()
             return
         with self._cond:
-            if self._closed:
+            if self._closed or self._error is not None:
                 for worker in workers:
                     worker.close()
                 return
@@ -437,6 +462,8 @@ class InferencePool:
         with self._cond:
             self._closed = True
             workers = list(self._workers.values())
+            if self._loading is not None:
+                workers.append(self._loading)
             self._workers.clear()
             self._idle.clear()
             self._cond.notify_all()
@@ -495,13 +522,13 @@ class InferencePool:
     def _replace(self, old):
         old.close()
         try:
-            worker = self._spawn(old.index)
-            worker.wait_ready()
-        except Exception as error:  # noqa: BLE001 - surfaced through /health
-            self._fail(error)
+            worker = self._load_worker(old.index)
+        except Exception:  # noqa: BLE001 - _load_worker recorded the failure
+            return
+        if worker is None:
             return
         with self._cond:
-            if self._closed:
+            if self._closed or self._error is not None:
                 worker.close()
                 return
             self._workers[worker.index] = worker
