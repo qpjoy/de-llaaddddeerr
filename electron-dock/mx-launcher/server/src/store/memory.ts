@@ -1,7 +1,6 @@
 import type { SystemSubscriptionPublication } from '../types.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { prepareLuopanUserControls, preserveLuopanLoginAccess, userAppUpdatePolicyId } from './user-app-update-policy.js';
 
 import {
   advanceLauncherNetworkHandover,
@@ -309,9 +308,6 @@ import type {
   UserCenterTenant,
   UserCenterTokenRecord,
   UserCenterUser,
-  UserAppUpdatePolicy,
-  SetLuopanUserControlsInput,
-  LuopanUserControls,
   UserCenterUserIdentity,
   UserCenterUserDeleteInput,
   UserCenterUserDeleteResult,
@@ -408,7 +404,6 @@ export class MemoryStore implements PlatformStore {
   private readonly orgs = new Map<string, UserCenterOrg>();
   private readonly roles = new Map<string, UserCenterRole>();
   private readonly users = new Map<string, UserCenterUser>();
-  private readonly userAppUpdatePolicies = new Map<string, UserAppUpdatePolicy>();
   private readonly userCredentials = new Map<string, UserCenterUserCredential>();
   private readonly userDeletionTombstones = new Map<string, UserCenterUserDeletionTombstone>();
   private readonly userH2oRuntimeProfiles = new Map<string, UserH2oRuntimeProfile>();
@@ -981,19 +976,6 @@ export class MemoryStore implements PlatformStore {
     return user ? userCenterUserIdentity(user) : null;
   }
 
-  getUserAppUpdatePolicy(appId: string, userId: string): UserAppUpdatePolicy | null {
-    const policy = this.userAppUpdatePolicies.get(userAppUpdatePolicyId(appId, userId));
-    return policy ? { ...policy } : null;
-  }
-
-  setLuopanUserControls(input: SetLuopanUserControlsInput): LuopanUserControls {
-    const result = prepareLuopanUserControls(input, this.users.get(input.userId), this.getUserAppUpdatePolicy('luopan', input.userId));
-    this.recordAudit(result.audit);
-    this.userAppUpdatePolicies.set(userAppUpdatePolicyId('luopan', input.userId), result.policy);
-    if (this.users.get(input.userId) !== result.updatedUser) this.users.set(input.userId, result.updatedUser);
-    return { policy: { ...result.policy }, loginBlocked: result.loginBlocked };
-  }
-
   createUserCenterUser(input: CreateUserInput): UserCenterUser {
     const previous = this.findUserCenterUserForInput(input);
     const draft = createUserCenterUser(input, previous, previous?.credential ?? emptyUserCredentialSummary());
@@ -1002,8 +984,7 @@ export class MemoryStore implements PlatformStore {
       ? createUserCenterUserCredential(draft.userId, input.password, input, previousCredential)
       : previousCredential;
     if (credential) this.userCredentials.set(draft.userId, credential);
-    const nextUser = createUserCenterUser(input, previous, userCredentialSummary(credential));
-    const user = input.preserveLuopanLoginAccess ? preserveLuopanLoginAccess(nextUser, previous) : nextUser;
+    const user = createUserCenterUser(input, previous, userCredentialSummary(credential));
     this.users.set(user.userId, user);
     this.recordAudit({
       eventType: 'iam.user.upserted',
@@ -2586,10 +2567,6 @@ export class MemoryStore implements PlatformStore {
     return [...this.launcherNetworkLeases.values()]
       .filter((lease) => !normalizedProductId || lease.productId === normalizedProductId)
       .sort((a, b) => a.productId.localeCompare(b.productId) || a.identityKind.localeCompare(b.identityKind) || a.sequence - b.sequence);
-  }
-
-  listLauncherNetworkLeasesForInstall(productId: string, installId: string): LauncherNetworkLease[] {
-    return this.listLauncherNetworkLeases(productId).filter(lease => lease.installId === installId);
   }
 
   getLauncherNetworkLease(leaseId: string): LauncherNetworkLease | null {

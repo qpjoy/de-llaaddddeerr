@@ -19,7 +19,6 @@ import { PLATFORM_STORE } from '../../tokens.js';
 import type { AppCenterApp, PlatformPrincipal, ReleaseArtifactKind, ReleaseDeliveryMode, ReleaseManagementE2eResult, ReleaseManagementPlan, ReleaseManagementPlanInput, ReleaseManagementPlanPatchInput, ReleaseReportInput } from '../../types.js';
 import { evaluateReleaseCheck, signReleaseCheckResult } from './release-check.js';
 import type { ReleaseCheckResult } from './release-check.js';
-import { isLuopanReleasePlan, luopanInstallUpdatePolicy } from './luopan-user-updates.js';
 
 @Controller()
 export class ReleaseController {
@@ -125,7 +124,7 @@ export class ReleaseController {
     }
     const plans = await this.store.listReleaseManagementPlans();
     const requestedProductId = nullableString(body.productId);
-    const input = {
+    const result = releaseCheckWithNamedArtifactUrls(evaluateReleaseCheck(plans, {
       installId,
       userId: nullableString(body.userId),
       productId: requestedProductId,
@@ -134,20 +133,7 @@ export class ReleaseController {
       arch: normalizeReleaseArch(nullableString(body.arch)),
       artifactKinds: releaseCheckArtifactKinds(body.artifactKinds),
       components
-    };
-    let decision = evaluateReleaseCheck(plans, input);
-    let updatePolicy: Awaited<ReturnType<typeof luopanInstallUpdatePolicy>> | undefined;
-    const selectedPlan = plans.find((plan) => plan.planId === decision.planId);
-    if (selectedPlan && isLuopanReleasePlan(selectedPlan)) {
-      updatePolicy = await luopanInstallUpdatePolicy(this.store, installId);
-      if (updatePolicy.updatesBlocked) {
-        // Preserve the existing, normally signed "no matching release" wire
-        // response. Old clients need no new error handling and learn no policy
-        // reason. Remove every Luopan candidate, not just the newest version.
-        decision = evaluateReleaseCheck(plans.filter((plan) => !isLuopanReleasePlan(plan)), input);
-      }
-    }
-    const result = releaseCheckWithNamedArtifactUrls(decision, requestedProductId);
+    }), requestedProductId);
     await this.store.recordReleaseReport({
       installId,
       status: 'release-check',
@@ -156,8 +142,7 @@ export class ReleaseController {
         planId: result.planId,
         releaseId: result.releaseId,
         matchedBy: result.rollout.matchedBy,
-        bucket: result.rollout.bucket,
-        ...(updatePolicy ? { luopanUpdatePolicy: updatePolicy } : {})
+        bucket: result.rollout.bucket
       }
     });
     return signReleaseCheckResult(result, releaseDecisionSecret());

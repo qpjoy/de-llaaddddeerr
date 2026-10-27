@@ -140,9 +140,6 @@ import type {
   UserCenterUserDeleteInput,
   UserCenterUserDeleteResult,
   UserCenterUser,
-  UserAppUpdatePolicy,
-  SetLuopanUserControlsInput,
-  LuopanUserControls,
   UserCenterUserIdentity,
   UserPasswordUpdateInput,
   UserPasswordUpdateResult,
@@ -265,8 +262,6 @@ export interface PlatformStore {
   listUserCenterUsers(): MaybePromise<UserCenterUser[]>;
   listUserCenterUserIdentities(): MaybePromise<UserCenterUserIdentity[]>;
   getUserCenterUserIdentity(userId: string): MaybePromise<UserCenterUserIdentity | null>;
-  getUserAppUpdatePolicy(appId: string, userId: string): MaybePromise<UserAppUpdatePolicy | null>;
-  setLuopanUserControls(input: SetLuopanUserControlsInput): MaybePromise<LuopanUserControls>;
   createUserCenterUser(input: CreateUserInput): MaybePromise<UserCenterUser>;
   importUserCenterUsers(input: ImportUserCenterUsersInput): MaybePromise<ImportUserCenterUsersResult>;
   updateUserCenterPassword(input: UserPasswordUpdateInput): MaybePromise<UserPasswordUpdateResult>;
@@ -369,7 +364,6 @@ export interface PlatformStore {
   getLauncherProductUserAccess(productId: string, userId: string): MaybePromise<LauncherProductUserAccess | null>;
   setLauncherProductUserAccess(input: LauncherProductUserAccessInput): MaybePromise<LauncherProductUserAccessResult>;
   listLauncherNetworkLeases(productId?: string | null): MaybePromise<LauncherNetworkLease[]>;
-  listLauncherNetworkLeasesForInstall(productId: string, installId: string): MaybePromise<LauncherNetworkLease[]>;
   getLauncherNetworkLease(leaseId: string): MaybePromise<LauncherNetworkLease | null>;
   enrollLauncherNetworkLease(input: LauncherNetworkLeaseInput): MaybePromise<LauncherNetworkLease>;
   releaseLauncherNetworkLease(leaseId: string, input?: LauncherNetworkLeaseReleaseInput): MaybePromise<LauncherNetworkLease>;

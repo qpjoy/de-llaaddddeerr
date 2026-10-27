@@ -789,33 +789,6 @@ export interface UserCenterAppAccess {
   deniedAppIds: string[];
 }
 
-/** Software delivery policy; it never grants or revokes identity/network access. */
-export interface UserAppUpdatePolicy {
-  appId: string;
-  userId: string;
-  updatesBlocked: boolean;
-  reason: string | null;
-  revision: number;
-  updatedBy: string | null;
-  updatedAt: string | null;
-}
-
-export interface SetLuopanUserControlsInput {
-  userId: string;
-  updatesBlocked: boolean;
-  reason?: string | null;
-  expectedRevision: number;
-  /** Omitted means preserve application access, including existing denials. */
-  loginBlocked?: boolean;
-  requestedBy?: string | null;
-  requestId?: string | null;
-}
-
-export interface LuopanUserControls {
-  policy: UserAppUpdatePolicy;
-  loginBlocked: boolean;
-}
-
 export interface UserCenterUser {
   /** Trusted first signup provenance; absent on historical accounts, never an authorization claim. */
   registration?: {
@@ -980,8 +953,6 @@ export interface CreateUserInput {
   appAccess?: Partial<UserCenterAppAccess> | null;
   /** Explicit admin editor replacement; legacy and SDK writers keep additive merging. */
   replaceAppAccess?: boolean;
-  /** The dedicated Luopan controls own this checkbox in the current admin editor. */
-  preserveLuopanLoginAccess?: boolean;
   homeAppId?: string | null;
   registeredByAppId?: string | null;
   allowedAppIds?: string[] | string | null;

@@ -8,7 +8,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "dev": "pnpm run sync:design && electron .",
-    "build": "pnpm run sync:design && pnpm run typecheck && pnpm run check && pnpm run test:admin-session && pnpm run test:service-operations && pnpm run test:design-assets && pnpm run test:editor-focus && pnpm run test:luopan-controls",
+    "build": "pnpm run sync:design && pnpm run typecheck && pnpm run check && pnpm run test:admin-session && pnpm run test:service-operations && pnpm run test:design-assets && pnpm run test:editor-focus",
     "test:admin-session": "node --test scripts/admin-session.test.mjs",
     "test:service-operations": "node --test scripts/service-operations.test.mjs",
     "test:service-operations:browser": "node --test scripts/service-operations.browser.test.mjs",
@@ -23,8 +23,7 @@
     "verify:signatures": "node scripts/verify-signatures.mjs dist/electron/win-unpacked/mx-launcher.package-manifest.json",
     "sync:design": "node scripts/sync-design-system.mjs",
     "test:design-assets": "node --test scripts/design-assets.test.mjs",
-    "test:editor-focus": "node --test scripts/user-editor-focus.test.mjs",
-    "test:luopan-controls": "node --test scripts/luopan-controls-ui.test.mjs"
+    "test:editor-focus": "node --test scripts/user-editor-focus.test.mjs"
   },
   "dependencies": {
     "three": "^0.179.1"
