@@ -58,13 +58,15 @@ export function upstreamCapacityError(evidence) {
   })
 }
 
-export function circuitOpenError(state, config, message) {
+export function circuitOpenError(state, config, message, { scope = null } = {}) {
   const reasons = new Set(['upstream_rate_limited', 'upstream_auth_or_balance_unavailable',
     'upstream_endpoint_unavailable', 'upstream_http_error'])
+  const contractScoped = scope === 'platform_contract'
   return new AppError(503, 'external_platform_circuit_open', message, {
     upstreamDispatched: false,
-    scope: state?.internalCooldown === true ? 'internal_caller' : 'shared_upstream',
-    reason: reasons.has(state?.lastErrorCode) ? state.lastErrorCode : 'upstream_failure',
+    scope: contractScoped ? 'platform_contract' : state?.internalCooldown === true ? 'internal_caller' : 'shared_upstream',
+    reason: contractScoped ? 'response_contract_unusable'
+      : reasons.has(state?.lastErrorCode) ? state.lastErrorCode : 'upstream_failure',
     ...circuitTiming(state, config),
     // This is an admission deadline, not proof of supplier recovery or
     // permission to replay a previously dispatched paid request.

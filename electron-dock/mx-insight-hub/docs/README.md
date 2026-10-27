@@ -12,6 +12,7 @@ Last reviewed: 2026-10-21.
 
 ## 容量与熔断排查（2026-10-09）
 
+- [Instagram 熔断与 Twitter 429（2026-10-27）](operations/instagram-twitter-availability-2026-10-27.md)：两条请求的证据边界、只读核查命令、Instagram 错误详情与 Twitter 限流头留存。
 - [小红书补全突发、上游 429 与共享熔断](operations/capacity-circuit-2026-10-09.md)：线上证据、令牌桶突发上限、延迟成功结算保护、公开错误信息与发布验收。
 - [小红书告警归类与现场核查（2026-10-14—2026-10-21）](operations/xiaohongshu-alert-review-2026-10-14-2026-10-21.md)：飞书告警的分层归类、TikHub 字段核对、Delta/Hub 状态边界与只读现场核查命令。
 

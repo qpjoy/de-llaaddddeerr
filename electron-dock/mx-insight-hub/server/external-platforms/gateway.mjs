@@ -1615,6 +1615,11 @@ export class ExternalPlatformGateway {
         errorCode,
       })
       if (operationControlError) throw operationControlError
+      if (authorizationPlatform === 'instagram' && circuitOpen) {
+        const contractOpen = contractCircuit?.circuitOpenUntil && new Date(contractCircuit.circuitOpenUntil) > now
+        throw circuitOpenError(contractOpen ? contractCircuit : state, this.config,
+          'Instagram 搜索暂时受保护，请保留请求 ID 核查原因。', { scope: contractOpen ? 'platform_contract' : null })
+      }
       if (this.providerKey === 'justone' && authorizationPlatform === 'ecommerce'
         && state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now) {
         const capacity = ecommerceCapacityError(state.lastErrorCode, {

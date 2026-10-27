@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
-import { diagnoseTwitterOutcome, projectTwitterTransportFailure, twitterOutcomeRuntime } from '../../server/ops/diagnose-twitter-outcome.mjs'
+import { diagnoseTwitterOutcome, projectTwitterTransportFailure, projectTwitterRateLimit, twitterOutcomeRuntime } from '../../server/ops/diagnose-twitter-outcome.mjs'
 
 const requestId = 'ced3bb03-709d-438b-8d80-4deada7f8476'
 const secret = 'private-query-token-proxy-url-body'
@@ -12,6 +12,9 @@ const modulePath = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
 const source = readFileSync(new URL('../../server/ops/diagnose-twitter-outcome.mjs', import.meta.url), 'utf8')
 const transport = { phase: 'request', codes: ['UND_ERR_CONNECT_TIMEOUT', '42P01'], deadlineExceeded: false,
   elapsedMs: 10003, timeoutMs: 30000, message: secret, url: secret, stack: secret }
+const rateLimit = { observedAt: '2026-10-27T00:00:00.000Z', httpStatus: 429, retryAfterSeconds: 17,
+  headers: { 'x-ratelimit-limit': 10, 'x-ratelimit-remaining': 0, 'x-ratelimit-reset': 1793059200,
+    'x-ratelimit-requests-limit': 1000, 'x-ratelimit-requests-remaining': 700, 'x-ratelimit-requests-reset': 86400 } }
 const migrationTable = (migration, name) => {
   const sql = readFileSync(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8')
     .match(new RegExp(`CREATE TABLE IF NOT EXISTS ${name.replaceAll('.', '\\.')} \\([\\s\\S]*?\\n\\);`))?.[0]
@@ -47,7 +50,7 @@ test('Twitter unknown diagnostic reports only supplied request metadata with pre
   const db = fixture(), result = await diagnoseTwitterOutcome(db.pool, requestId)
   assert.equal(result.errorCode, 'social_upstream_outcome_unknown')
   assert.equal(result.savedHttpStatus, 502)
-  assert.equal(result.diagnosticRevision, 'twitter-outcome-diagnostic.v4')
+  assert.equal(result.diagnosticRevision, 'twitter-outcome-diagnostic.v5')
   assert.equal(result.failureDiagnostic.tablePresent, false)
   assert.equal(result.failureDiagnostic.present, false)
   assert.equal(result.failureDiagnostic.record, null)
@@ -63,6 +66,7 @@ test('Twitter unknown diagnostic reports only supplied request metadata with pre
   assert.equal(result.ownCalls[0].restrictedArchive.integrity, 'metadata_only_not_verified')
   assert.deepEqual(result.ownCalls[0].operationalArchive.transportFailure.codes, ['UND_ERR_CONNECT_TIMEOUT', '42P01'])
   assert.equal(result.ownCalls[0].operationalArchive.transportFailure.deadlineExceeded, false)
+  assert.equal(result.ownCalls[0].operationalArchive.rateLimit, null)
   assert.doesNotMatch(JSON.stringify(result), /private-|raw_payload|upstream_request_id/u)
   assert.equal(db.queries[0].sql, 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
   assert.equal(db.queries.at(-1).sql, 'ROLLBACK')
@@ -76,6 +80,30 @@ test('Twitter unknown diagnostic reports only supplied request metadata with pre
     assert.match(query.sql, /(?:usage_request_)?id = \$1::uuid/u)
     assert.doesNotMatch(query.sql, /body_bytes|body_text|parsed_payload|response_body|SELECT \*/u)
   }
+})
+
+test('Twitter rate evidence is fixed numeric metadata with absent historical fields left null', async () => {
+  for (const value of [null, undefined, [], secret]) assert.equal(projectTwitterRateLimit(value), null)
+  assert.deepEqual(projectTwitterRateLimit({ ...rateLimit, token: secret,
+    headers: { ...rateLimit.headers, authorization: secret, 'x-ratelimit-private-limit': secret } }), rateLimit)
+  const hostile = projectTwitterRateLimit({ observedAt: secret, httpStatus: 999, retryAfterSeconds: -1,
+    headers: Object.fromEntries(Object.keys(rateLimit.headers).map(name => [name, secret])) })
+  assert.deepEqual(hostile, { observedAt: null, httpStatus: null, retryAfterSeconds: null,
+    headers: Object.fromEntries(Object.keys(rateLimit.headers).map(name => [name, null])) })
+  const base = fixture(), client = await base.pool.connect(), original = client.query
+  client.query = async (sql, args) => {
+    const result = await original(sql, args)
+    if (sql.includes('twitter-outcome:calls')) {
+      assert.match(sql, /octet_length\(\(a\.raw_payload #> '\{response,rateLimit\}'\)::text\) <= 4096/u)
+      result.rows[0].rate_limit = { ...rateLimit, token: secret }
+      result.rows[0].rate_limit_too_large = false
+    }
+    return result
+  }
+  const report = await diagnoseTwitterOutcome({ connect: async () => client }, requestId)
+  assert.deepEqual(report.ownCalls[0].operationalArchive.rateLimit, rateLimit)
+  assert.equal(report.ownCalls[0].operationalArchive.rateLimitTooLarge, false)
+  assert.doesNotMatch(JSON.stringify(report), /private-/u)
 })
 
 test('historical missing archives stay unknown, lists are capped, and hostile fields do not leave report', async () => {
@@ -459,7 +487,7 @@ test('diagnostic actual SQL reads real archive schemas in a read-only transactio
       'twitter',$6,'unknown','social_upstream_response_unusable',10005,'2026-10-15T09:31:28Z','2026-10-15T09:31:38Z')`,
   [id, tenant, consumer, key, usage, 'a'.repeat(64)])
   await db.query(`INSERT INTO external_platform.response_archives(id,provider_call_id,contract_state,raw_payload,captured_at)
-    VALUES($1,$2,'unknown',$3,now())`, [randomUUID(), call, JSON.stringify({ body: secret, response: { transportFailure: transport, token: secret } })])
+    VALUES($1,$2,'unknown',$3,now())`, [randomUUID(), call, JSON.stringify({ body: secret, response: { transportFailure: transport, rateLimit, token: secret } })])
   const bytes = Buffer.from(secret), sha = createHash('sha256').update(bytes).digest('hex')
   await db.query(`INSERT INTO control.external_platform_restricted_raw_responses
     (id,provider_call_id,body_size,body_sha256,body_bytes,json_parsed,captured_at) VALUES($1,$2,$3,$4,$5,false,now())`,
@@ -486,6 +514,7 @@ test('diagnostic actual SQL reads real archive schemas in a read-only transactio
   assert.equal(report.ownCalls[0].billed, null)
   assert.equal(report.ownCalls[0].operationalArchive.present, true)
   assert.deepEqual(report.ownCalls[0].operationalArchive.transportFailure.codes, transport.codes)
+  assert.deepEqual(report.ownCalls[0].operationalArchive.rateLimit, rateLimit)
   assert.doesNotMatch(JSON.stringify(report), /private-/u)
   assert.equal((await db.query('SELECT count(*)::int AS n FROM usage_requests')).rows[0].n, 2)
   // A retained HTTP response is metadata only: no bytes are fetched or claimed verified.
@@ -494,9 +523,13 @@ test('diagnostic actual SQL reads real archive schemas in a read-only transactio
   assert.equal(otherReport.ownCalls[0].restrictedArchive.bodySize, bytes.length)
   assert.equal(otherReport.ownCalls[0].restrictedArchive.integrity, 'metadata_only_not_verified')
   assert.equal(otherReport.ownCalls[0].operationalArchive.transportFailure, null)
+  assert.equal(otherReport.ownCalls[0].operationalArchive.rateLimit, null)
   await db.query(`UPDATE external_platform.response_archives SET raw_payload=$1 WHERE provider_call_id=$2`,
-    [JSON.stringify({ response: { transportFailure: { ...transport, message: secret.repeat(200) } } }), call])
+    [JSON.stringify({ response: { transportFailure: { ...transport, message: secret.repeat(200) },
+      rateLimit: { ...rateLimit, message: secret.repeat(200) } } }), call])
   const oversized = await diagnoseTwitterOutcome(pool, requestId)
   assert.equal(oversized.ownCalls[0].operationalArchive.transportFailure, null)
   assert.equal(oversized.ownCalls[0].operationalArchive.transportFailureTooLarge, true)
+  assert.equal(oversized.ownCalls[0].operationalArchive.rateLimit, null)
+  assert.equal(oversized.ownCalls[0].operationalArchive.rateLimitTooLarge, true)
 })

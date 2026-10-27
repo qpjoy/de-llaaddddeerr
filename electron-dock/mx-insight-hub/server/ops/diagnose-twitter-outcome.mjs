@@ -57,6 +57,15 @@ export function projectTwitterTransportFailure(value) {
     deadlineExceeded: boolean(value.deadlineExceeded), elapsedMs: integer(value.elapsedMs), timeoutMs: integer(value.timeoutMs) }
 }
 
+export function projectTwitterRateLimit(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return { observedAt: time(value.observedAt), httpStatus: http(value.httpStatus),
+    retryAfterSeconds: integer(value.retryAfterSeconds),
+    headers: Object.fromEntries(['x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset',
+      'x-ratelimit-requests-limit', 'x-ratelimit-requests-remaining', 'x-ratelimit-requests-reset']
+      .map(name => [name, integer(value.headers?.[name])])) }
+}
+
 export function twitterOutcomeRuntime() {
   const root = process.argv[1] === '-' ? pathToFileURL(`${process.cwd()}/`) : new URL('../../', import.meta.url)
   const files = ['server/adapters/rapidapi.mjs', 'server/external-platforms/twitter-search-fill.mjs',
@@ -206,6 +215,9 @@ export async function diagnoseTwitterOutcome(pool, requestId, { compareQuery = n
       CASE WHEN octet_length((a.raw_payload #> '{response,transportFailure}')::text) <= 4096
         THEN a.raw_payload #> '{response,transportFailure}' END AS transport_failure,
       COALESCE(octet_length((a.raw_payload #> '{response,transportFailure}')::text) > 4096, false) AS transport_failure_too_large,
+      CASE WHEN octet_length((a.raw_payload #> '{response,rateLimit}')::text) <= 4096
+        THEN a.raw_payload #> '{response,rateLimit}' END AS rate_limit,
+      COALESCE(octet_length((a.raw_payload #> '{response,rateLimit}')::text) > 4096, false) AS rate_limit_too_large,
       r.id IS NOT NULL AS restricted_archive_present, r.body_size AS restricted_body_size,
       r.body_sha256 AS restricted_sha256, r.captured_at AS restricted_captured_at, r.json_parsed
       FROM external_platform.provider_calls c
@@ -219,7 +231,7 @@ export async function diagnoseTwitterOutcome(pool, requestId, { compareQuery = n
     const searchProtocol = await readSearchProtocol(client, requestId)
     const legacyConnector = await readLegacyConnectorCalls(client, requestId)
     const failureDiagnostic = await readRequestFailure(client, requestId)
-    return { diagnosticRevision: 'twitter-outcome-diagnostic.v4', requestId, platform: 'twitter',
+    return { diagnosticRevision: 'twitter-outcome-diagnostic.v5', requestId, platform: 'twitter',
       status: choice(request.status, ['reserved', 'committed', 'released', 'unknown']),
       errorCode: choice(request.error_code, ERRORS), savedHttpStatus: http(request.response_status),
       billingMeterKey: choice(request.billing_meter_key, METERS), capability: choice(request.capability, METERS),
@@ -245,7 +257,8 @@ export async function diagnoseTwitterOutcome(pool, requestId, { compareQuery = n
           contractState: choice(row.contract_state, ['accepted', 'rejected', 'unknown', 'succeeded_unusable', 'not_dispatched']),
           httpStatus: http(row.archive_http_status), bodySize: integer(row.archive_body_size), sha256: hash(row.archive_sha256),
           capturedAt: time(row.archive_captured_at), transportFailure: projectTwitterTransportFailure(row.transport_failure),
-          transportFailureTooLarge: boolean(row.transport_failure_too_large) },
+          transportFailureTooLarge: boolean(row.transport_failure_too_large),
+          rateLimit: projectTwitterRateLimit(row.rate_limit), rateLimitTooLarge: boolean(row.rate_limit_too_large) },
         restrictedArchive: { present: boolean(row.restricted_archive_present), bodySize: integer(row.restricted_body_size),
           sha256: hash(row.restricted_sha256), capturedAt: time(row.restricted_captured_at), jsonParsed: boolean(row.json_parsed),
           integrity: 'metadata_only_not_verified' } })),

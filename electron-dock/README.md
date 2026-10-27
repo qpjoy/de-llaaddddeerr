@@ -1,8 +1,8 @@
 # MX 项目统一管理入口
 
-`scripts/manage.sh` 在目标服务器上调用各项目已有部署脚本，统一项目选择、构建代理、只读检查、部署互斥和退出结果。当前支持已有 Internal 环境的逐项目发布；各项目继续负责自己的数据库迁移、凭据保留和就绪检查。原来的项目命令保持可用。本轮没有执行生产部署。
+`scripts/manage.sh` 在目标服务器上调用各项目已有部署脚本，统一项目选择、构建代理、只读检查、部署互斥和退出结果。支持已有 Internal 环境的逐项目发布、核心服务串行全量发布和开机验收；各项目继续负责自己的数据库迁移、凭据保留和就绪检查。原来的项目命令保持可用。2026-10-27 的新增能力仅完成本地实现与隔离验证，尚未安装到生产或验证真实断电重启。
 
-需要 Bash、Python 3.6+，以及各项目原来要求的 Docker、kubectl、Node 等工具；生产发布仍在原 Linux 部署主机执行。总入口不会安装或重启 Docker、Kubernetes，也不提供全量 `deploy`、通用 `restart`、备份恢复或自动回滚。Launcher 原部署流程已有的恢复动作仍然保留。
+需要 Bash、Python 3.6+，以及各项目原来要求的 Docker、kubectl、Node 等工具；生产发布仍在原 Linux 部署主机执行。依赖探测还使用 curl、宿主 pg_isready；开机验收使用原 systemd 与 crictl。没有新增后台平台或第三方 Python 包。总入口不提供通用 `restart`、备份恢复或自动回滚。Launcher 原部署流程已有的恢复动作仍然保留。
 
 ## 常用命令
 
@@ -24,6 +24,7 @@ bash scripts/manage.sh etcd status
 
 ```bash
 PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-launcher
+PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy hanlp
 PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-insight-hub
 PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-dataport
 PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-device
@@ -43,7 +44,56 @@ PROXY=127.0.0.1:7789 bash scripts/manage.sh deploy mx-pay
 PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-rig
 ```
 
-短名 `launcher`、`hub`、`dataport`、`device`、`pay`、`rig`、`common` 与完整项目名等价。每次只选择一个发布项目。
+短名 `launcher`、`hub`、`dataport`、`device`、`pay`、`rig`、`common`、`hanlp` 与完整项目名等价。
+
+## 核心服务一键部署
+
+```bash
+bash scripts/manage.sh plan all
+PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy all
+```
+
+顺序固定为 **Launcher → Pay → HanLP → Hub → DataPort**。HanLP 委派给 `mx-common/scripts/manage.sh deploy hanlp`，Hub 原流程继续 ensure mx-common 的 PostgreSQL、Elasticsearch、Redis。Device、Rig、Luopan 不属于 `all`。采用串行是因为各步骤会构建镜像、执行迁移、调用共享设施及占用同一节点资源；目前不提供并行发布。
+
+`all` 要求原 Internal 主机、已激活的独立 `mx-k8s-containerd`、`/etc/kubernetes/admin.conf` 及原 Launcher/Pay/DataPort 安装记录；它不负责首次安装。预检要求保存的集群 UID/context/node 一致，现有 apiserver advertise-address 与节点 IPv4 一致，并拒绝更改 Launcher 主机名或地址；检查 Pay `.env` 与 Hub `.env.internal` 的目标覆盖项，每步前重新核对目标。context 别名即使指向同一集群也须先人工对齐；复杂 shell 配置无法静态确认时停止，不执行配置文件来探测目标。子项目保留自己的最终身份与存储校验。
+
+发布前轮询显式 `PROXY` 到 Docker Hub registry 的 HTTPS 连通性（有效 200/401），再轮询**宿主 `127.0.0.1:5432` PostgreSQL**。后者是源数据依赖，不是 mx-common 的 PostgreSQL；使用 `pg_isready`，不把端口能连接当作 PG 就绪。Hub 步骤前还会再次检查该 PG 与 HanLP 的模型健康。默认每项等待 300 秒，可用 `MX_WAIT_TIMEOUT`、`MX_WAIT_INTERVAL` 调整。代理检查只证明该 registry 可达，不保证所有构建依赖站点或 Docker daemon 代理配置正确。
+
+全批次及部署后的数据库配置子进程持有同一把原部署锁；数据库配置使用已复验集群 UID 的私有 kubeconfig 快照，避免跟随变化的 current-context。快照权限 0600，正常退出时删除，强制终止时可能保留在 0700 状态目录。每步保留原回执，另有 `all-*.json` 记录 succeeded/failed/pending。首次失败停止，已经完成的发布保留；数据库运行配置未完成也会令 **all 返回非零**。中断后先核对原项目状态与未完成迁移，再选择具体项目处理；没有自动续跑、回滚或清锁。`all` 会执行真实发布和迁移，使用当前工作区的源码，不是只启动原有容器，也不是零中断承诺。
+
+## 断电后的自启动
+
+启动能力放在本仓库 `electron-dock/scripts`，沿用当前运行时和存储迁移的责任边界。`de-mingxi/compass/deploy/nginx/conf.d` 继续只负责入口转发；nginx 配置不负责业务恢复，也不接管 7788 代理。
+
+```mermaid
+flowchart LR
+  S[宿主机启动] --> R[原挂载保护 / mx-k8s-containerd / kubelet]
+  R --> K[K8s 恢复原期望工作负载]
+  S --> P[原宿主 PostgreSQL 服务]
+  K --> H[HanLP 模型就绪]
+  P --> G[Hub Pod 启动门禁]
+  H --> G
+  G --> U[Hub 业务容器]
+  S --> N[原 nginx / host runner / 已登记代理服务]
+```
+
+K8s 自身负责恢复已存在的工作负载；开机不执行 `deploy all`，不构建或拉取新版本。**7788 不阻塞已有镜像的 K8s 恢复**；它是显式部署的前置条件。Hub 六个 Internal 生产工作负载新增 initContainer，检查宿主 PG 与 ConfigMap 中的 HanLP `/health`，900 秒未就绪则退出，由 Kubernetes 按原策略重试。该门禁需先正常发布一次新 Hub 镜像及清单才生效；只安装下面的 systemd 验收服务不会更新 Hub。详见 [Hub 启动依赖](mx-insight-hub/docs/operations/internal-startup-dependencies-2026-10-27.md)。
+
+在原服务器以 root 执行，先审计，再安装：
+
+```bash
+bash scripts/manage.sh boot audit
+MX_HOST_PG_SERVICE=postgresql-16.service bash scripts/manage.sh boot install
+bash scripts/manage.sh boot verify
+systemctl status mx-boot-verify.service
+journalctl -u mx-boot-verify.service -b
+```
+
+`audit` 只读检查原 runtime、storage/etcd guards、集群身份、控制器、镜像缓存、PG/HanLP、本机健康入口与 enable 状态；发现未 enable 会报告。`install` 先核验当前健康基线，然后仅 enable 已确认存在的原 runtime、kubelet、宿主 PG、host runner、nginx 及可识别代理 unit，安装版本化的只读 `mx-boot-verify.service`。它不 start/restart 任何服务、不覆盖陌生同名 unit；部分 enable 失败会明确保留已完成结果。
+
+PG 服务名不同须显式给 `MX_HOST_PG_SERVICE`。代理默认只识别已存在且活跃的 `mx-internal-egress.service`、`mihomo.service`、`mihomo-client.service`；其他名称用 `MX_PROXY_SERVICE` 指定原 unit，不会猜测或新建代理服务。oneshot 开机有界等待 900 秒、结果进入 journal，失败不会阻塞 kubelet 或 MX-H2I，也不会自动重启业务。手动 `verify` 可用 `MX_WAIT_TIMEOUT` 调整等待时间。
+
+零副本、缺失原镜像、未完成的迁移/运维记录、原安装身份或挂载保护不一致都会停止验收，保留现场，不 scale、不清锁、不重放迁移。验收只覆盖本机设施与健康端点；生产启用后仍须安排真实重启演练及 MX-H2I 原账号登录/联网、Hub 查询、DataPort 与 Pay 的业务验收，不能用健康端点代替这些结论。
 
 ## 代理与部署参数
 
@@ -57,6 +107,7 @@ PROXY=127.0.0.1:7788 bash scripts/manage.sh deploy mx-rig
 | mx-device | `MX_DEVICE_BUILD_PROXY` | `deploy` |
 | mx-pay | `MX_PAY_BUILD_PROXY` | `deploy` |
 | mx-rig | `MX_RIG_BUILD_PROXY` | `deploy` |
+| mx-hanlp | `PROXY` | mx-common 的 `deploy hanlp` |
 
 - 显式 `PROXY` 优先于原项目代理变量，实际构建仍由各项目的代理实现负责。
 - 未设置 `PROXY` 时，保留原项目环境变量和配置文件规则，不强制选 7788 或 7789。
@@ -77,6 +128,8 @@ Device 和 Pay 同样默认 `TMPDIR=/data/tmp`；其他项目保留原临时目�
 
 Hub 总入口强制 `MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0`；如果调用环境显式给出非 `0` 值，则停止。这样不会通过 Hub 命令联动发布 Launcher 或执行测试数据探测；Hub 原流程对 mx-common 的调用仍保留。
 
+Launcher 总入口同时强制 `MX_INSIGHT_HUB_DEPLOY=0`，拒绝非零值，避免全量顺序中隐式重复发布 Hub。直接调用原 Launcher 入口时原参数规则不变。
+
 ## 范围与检查含义
 
 | 项目 | 当前支持与部署影响 |
@@ -88,13 +141,14 @@ Hub 总入口强制 `MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0`；如果调用�
 | Pay | 原迁移及 API／console 发布流程，保留已有 PostgreSQL；原 checkout 暂停／恢复行为保留 |
 | Rig | Kubernetes 发布；PG 为 OnDelete，模板变化不重建数据库 Pod |
 | mx-common | 仅 `status`／`doctor`；不提供独立 deploy/ensure |
+| HanLP | 使用 `hanlp` 独立委派 mx-common 模型部署；原构建、导入、发布和健康验证保留 |
 | etcd | 仅将 `etcd status` 转交 mx-move；迁移／回滚仍使用专用工具 |
 
 `status` 和 `doctor` 的 Kubernetes 查询使用当前 `KUBECONFIG`／context；若未设置 `KUBECONFIG` 且本机存在 `/etc/kubernetes/admin.conf`，入口使用该文件。它们不读取各项目 `.env` 或保留的目标文件，也不调用 Launcher 可能修复 endpoint 的 status。Pay 在此按 Kubernetes 项目查询；Device 调用原 Compose status。
 
 这些结果只反映**当前选择的集群**，不能证明它就是各产品保留配置中的目标，也不代表业务登录、联网、支付或数据请求验收通过。`doctor` 另外检查 API readyz（包含 etcd 就绪）、节点 Ready／压力条件，并显示 `/`、`/data`、`/var/lib/etcd` 中实际存在路径的空间；它不会做磁盘延迟测试或自动清理。查询失败显示 `UNKNOWN` 并返回非零。
 
-Kubernetes 项目 deploy 前会检查当前集群 API／节点状态，随后子项目仍按自己的目标与身份规则执行；总入口尚未实现统一安装清单和跨项目目标绑定。
+逐项目 Kubernetes deploy 前检查当前集群 API／节点状态，子项目仍按自己的目标与身份规则执行。`all` 额外限定原 Internal 安装并绑定上述保存目标；统一安装清单、多机发现和锁定版本仍未实现。
 
 ## 数据库运行配置（db apply）
 
@@ -109,7 +163,7 @@ bash scripts/manage.sh db status launcher   # 单个项目，只读
 bash scripts/manage.sh db apply launcher    # 应用；无变化时不做任何写入
 ```
 
-`deploy` 的子项目脚本成功后会自动执行一次 `db apply <项目>`，结果写进部署记录的 `postgresRuntime`；它失败不会改变部署退出码，只提示稍后重跑。`MX_DB_RUNTIME=0` 跳过这一步。
+`deploy` 的子项目脚本成功后会自动执行一次 `db apply <项目>`，结果写进部署记录的 `postgresRuntime`；单项目保持原退出码规则，数据库运行配置失败只提示后续处理；`all` 会停止并返回非零，避免全量虚假成功。`MX_DB_RUNTIME=0` 显式跳过这一步。
 
 | 项目 | 数据库 | 声明内容 |
 | --- | --- | --- |

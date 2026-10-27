@@ -12,6 +12,7 @@ const projects = [
   ['mx-device', 'device', 'mx-base/mx-device', 'MX_DEVICE_BUILD_PROXY', ['deploy']],
   ['mx-pay', 'pay', 'mx-base/mx-pay', 'MX_PAY_BUILD_PROXY', ['deploy']],
   ['mx-rig', 'rig', 'mx-rig', 'MX_RIG_BUILD_PROXY', ['deploy']],
+  ['mx-hanlp', 'hanlp', 'mx-common', 'PROXY', ['deploy', 'hanlp']],
 ]
 
 const recorder = `const fs = require('node:fs')
@@ -19,6 +20,7 @@ const path = require('node:path')
 const keys = ['PROXY', 'TMPDIR', 'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
   'MX_K8S_OS_HOSTNAME', 'MX_K8S_APISERVER_ADVERTISE_ADDRESS', 'MX_SHADOW_BUILDKIT_KEEP_STORAGE',
   'MX_SHADOW_BUILDKIT_PRUNE_UNTIL', 'MX_INSIGHT_SYNC_LAUNCHER', 'MX_SMOKE_DATA',
+  'MX_INSIGHT_HUB_DEPLOY',
   'MX_LAUNCHER_BUILD_PROXY', 'MX_INSIGHT_BUILD_PROXY', 'MX_HARBOR_BUILD_PROXY',
   'MX_DEVICE_BUILD_PROXY', 'MX_PAY_BUILD_PROXY', 'MX_RIG_BUILD_PROXY']
 if (process.env.FIXTURE_HANDLE_TERM === '1') {
@@ -46,6 +48,20 @@ if (process.env.FIXTURE_KUBE_FAIL && args.some(arg => arg.includes(process.env.F
 }
 if (args.includes('current-context')) console.log('fixture-context')
 else if (args.some(arg => arg.includes('/readyz'))) console.log('[+]etcd ok\\n[+]etcd-readiness ok\\nreadyz check passed')
+else if (args.includes('get') && args.includes('deployment') && args.includes('mx-common-hanlp')) {
+  if (process.env.FIXTURE_HANLP_MISSING === '1') process.exit(0)
+  console.log(JSON.stringify({ metadata: { generation: 1 },
+    spec: { replicas: Number(process.env.FIXTURE_HANLP_REPLICAS ?? 1) },
+    status: { observedGeneration: 1, readyReplicas: 1 } }))
+} else if (args.includes('get') && args.includes('endpoints') && args.includes('mx-common-hanlp')) {
+  console.log(JSON.stringify({ subsets: [{ addresses: [{ targetRef: {
+    kind: 'Pod', namespace: 'mx-common', name: 'mx-common-hanlp-fixture'
+  } }] }] }))
+} else if (args.includes('exec') && args.includes('pod/mx-common-hanlp-fixture')) {
+  console.log(JSON.stringify({ httpStatus: 200, body: {
+    status: process.env.FIXTURE_HANLP_HEALTH || 'ready', model: 'fixture-model'
+  } }))
+}
 else if (args.includes('get') && (args.includes('nodes') || args.includes('node'))) {
   const conditions = process.env.FIXTURE_NODE_CONDITIONS ? JSON.parse(process.env.FIXTURE_NODE_CONDITIONS) : [
     { type: 'Ready', status: 'True' }, { type: 'DiskPressure', status: 'False' },
@@ -54,6 +70,12 @@ else if (args.includes('get') && (args.includes('nodes') || args.includes('node'
   console.log(JSON.stringify({ items: [{ metadata: { name: 'mx-internal-server' }, status: { conditions } }] }))
 } else if (args.some(arg => arg.includes('kube-system'))) console.log('fixture-cluster-uid')
 else console.log('fixture workload Running')
+`
+
+const pgIsReady = `#!/usr/bin/env node
+const fs = require('node:fs')
+fs.appendFileSync(process.env.FIXTURE_TOOLS, JSON.stringify({ tool: 'pg_isready', args: process.argv.slice(2) }) + '\\n')
+process.exit(Number(process.env.FIXTURE_PG_EXIT || 0))
 `
 
 function fixture(t) {
@@ -77,6 +99,7 @@ function fixture(t) {
     writeFileSync(join(root, directory, 'scripts/manage.sh'), '#!/bin/bash\nexec "$FIXTURE_NODE" "$FIXTURE_RECORDER" "$@"\n')
   }
   writeFileSync(join(root, 'bin/kubectl'), kube, { mode: 0o755 })
+  writeFileSync(join(root, 'bin/pg_isready'), pgIsReady, { mode: 0o755 })
   for (const command of ['docker', 'crictl', 'curl', 'ssh', 'systemctl']) {
     writeFileSync(join(root, 'bin', command), '#!/bin/sh\nprintf "unexpected tool %s\\n" "$0" >> "$FIXTURE_TOOLS"\nexit 97\n', { mode: 0o755 })
   }
@@ -88,6 +111,7 @@ function fixture(t) {
     FIXTURE_RELEASE: join(root, 'release'), FIXTURE_SIGNAL_SEEN: join(root, 'signal-seen'),
     FIXTURE_BLOCK_PID: join(root, 'blocked-child.pid'),
     MX_MANAGE_STATE_DIR: join(root, 'state'),
+    MX_WAIT_TIMEOUT: '2', MX_WAIT_INTERVAL: '0.05',
   })
   const argv = args => [join(root, 'scripts/manage.sh'), ...args]
   const run = (args, overrides = {}) => spawnSync('bash', argv(args), {
@@ -117,6 +141,11 @@ test('list and every deployment plan are offline and do not create management st
     assert.match(listed.stdout, new RegExp(name))
     success(f.run(['plan', alias], { PROXY: '127.0.0.1:7788' }))
   }
+  const all = f.run(['plan', 'all'])
+  success(all)
+  for (const name of ['mx-launcher', 'mx-pay', 'mx-hanlp', 'mx-insight-hub', 'mx-dataport']) {
+    assert.match(all.stdout, new RegExp(name))
+  }
   assert.deepEqual(f.calls(), [])
   assert.equal(f.tools(), '')
   assert.equal(existsSync(f.env.MX_MANAGE_STATE_DIR), false)
@@ -136,6 +165,7 @@ test('each selected project uses its own directory, exact deployment argv and sh
       assert.equal(call.env.MX_INSIGHT_SYNC_LAUNCHER, '0')
       assert.equal(call.env.MX_SMOKE_DATA, '0')
     }
+    if (name === 'mx-launcher') assert.equal(call.env.MX_INSIGHT_HUB_DEPLOY, '0')
   }
   assert.equal(f.calls().length, projects.length)
 })
@@ -144,7 +174,7 @@ test('Launcher defaults preserve the supplied production parameters and accept e
   const f = fixture(t)
   const defaults = { TMPDIR: '/data/tmp', MX_K8S_OS_HOSTNAME: 'mx-internal-server',
     MX_K8S_APISERVER_ADVERTISE_ADDRESS: '192.168.1.2', MX_SHADOW_BUILDKIT_KEEP_STORAGE: '2GB',
-    MX_SHADOW_BUILDKIT_PRUNE_UNTIL: '24h' }
+    MX_SHADOW_BUILDKIT_PRUNE_UNTIL: '24h', MX_INSIGHT_HUB_DEPLOY: '0' }
   success(f.run(['deploy', 'mx-launcher']))
   for (const [key, value] of Object.entries(defaults)) assert.equal(f.calls().at(-1).env[key], value, key)
   const overrides = { TMPDIR: '/custom/tmp', MX_K8S_OS_HOSTNAME: 'another-node',
@@ -152,6 +182,40 @@ test('Launcher defaults preserve the supplied production parameters and accept e
     MX_SHADOW_BUILDKIT_PRUNE_UNTIL: '48h' }
   success(f.run(['deploy', 'launcher'], overrides))
   for (const [key, value] of Object.entries(overrides)) assert.equal(f.calls().at(-1).env[key], value, key)
+})
+
+test('Launcher refuses implicit Hub deployment before touching tools or management state', t => {
+  const f = fixture(t)
+  const result = f.run(['deploy', 'launcher'], { MX_INSIGHT_HUB_DEPLOY: '1' })
+  assert.notEqual(result.status, 0)
+  assert.match(result.stdout + result.stderr, /MX_INSIGHT_HUB_DEPLOY/)
+  assert.deepEqual(f.calls(), [])
+  assert.equal(f.tools(), '')
+  assert.equal(existsSync(f.env.MX_MANAGE_STATE_DIR), false)
+})
+
+test('Hub waits for host PostgreSQL and the existing HanLP model before delegation', t => {
+  const f = fixture(t)
+  success(f.run(['deploy', 'hub']))
+  const tools = f.tools().trim().split('\n').map(JSON.parse)
+  const pg = tools.find(call => call.tool === 'pg_isready')
+  assert.deepEqual(pg.args, ['-h', '127.0.0.1', '-p', '5432', '-t', '5'])
+  const health = tools.find(call => call.args.includes('exec') && call.args.includes('pod/mx-common-hanlp-fixture'))
+  assert.match(health.args.at(-1), /127\.0\.0\.1:8000\/health/)
+  assert.equal(f.calls().length, 1)
+  assert.equal(f.calls()[0].cwd, join(f.root, 'mx-insight-hub'))
+})
+
+test('Hub dependency failures stop before executing its deployment script', t => {
+  const f = fixture(t)
+  for (const failure of [{ FIXTURE_PG_EXIT: '2' }, { FIXTURE_HANLP_MISSING: '1' },
+    { FIXTURE_HANLP_REPLICAS: '0' }, { FIXTURE_HANLP_HEALTH: 'loading' }]) {
+    const result = f.run(['deploy', 'hub'], { ...failure, MX_WAIT_TIMEOUT: '0.8' })
+    assert.notEqual(result.status, 0)
+    assert.equal(result.error, undefined, 'the bounded dependency check must finish before the fixture timeout')
+  }
+  assert.deepEqual(f.calls(), [])
+  assert.doesNotMatch(f.tools(), /"(apply|scale|delete|rollout|run|create)"/)
 })
 
 test('absent PROXY preserves legacy settings while an explicit value or empty value overrides them', t => {
@@ -196,14 +260,26 @@ test('Hub refuses inherited settings that could synchronize Launcher or create s
   assert.equal(f.tools(), '')
 })
 
-test('unsupported commands, extra arguments and all-project deployment never reach child scripts', t => {
+test('unsupported commands and extra arguments never reach child scripts', t => {
   const f = fixture(t)
-  for (const args of [['deploy'], ['deploy', 'all'], ['deploy', 'common'], ['deploy', '../mx-launcher'],
+  for (const args of [['deploy'], ['deploy', 'common'], ['deploy', '../mx-launcher'],
     ['deploy', 'launcher', '--force'], ['plan', 'missing'], ['restart', 'launcher'], ['etcd', 'migrate']]) {
     assert.notEqual(f.run(args).status, 0, args.join(' '))
   }
   assert.deepEqual(f.calls(), [])
   assert.equal(f.tools(), '')
+})
+
+test('all-project deployment requires explicit PROXY before tools, state or child scripts', t => {
+  const f = fixture(t)
+  for (const env of [{}, { PROXY: '' }]) {
+    const result = f.run(['deploy', 'all'], env)
+    assert.notEqual(result.status, 0)
+    assert.match(result.stdout + result.stderr, /PROXY/)
+  }
+  assert.deepEqual(f.calls(), [])
+  assert.equal(f.tools(), '')
+  assert.equal(existsSync(f.env.MX_MANAGE_STATE_DIR), false)
 })
 
 test('failed Kubernetes preflight prevents deployment, and Device does not use Kubernetes', t => {
@@ -330,6 +406,67 @@ test('SIGTERM is forwarded while the deployment lock remains held until the chil
   writeFileSync(f.env.FIXTURE_RELEASE, '')
   assert.equal(await completed, 143, output)
   success(f.run(['deploy', 'device']))
+})
+
+test('SIGTERM reaches the database runtime and retains the deployment lock until it exits', async t => {
+  const f = fixture(t)
+  const dbArgs = join(f.root, 'db-args.json')
+  writeFileSync(join(f.root, 'scripts/pg_runtime.py'), `import json, os, signal, sys, time
+from pathlib import Path
+
+signal.signal(signal.SIGTERM, lambda *_: Path(os.environ['FIXTURE_SIGNAL_SEEN']).write_text('SIGTERM'))
+Path(os.environ['FIXTURE_DB_ARGS']).write_text(json.dumps(sys.argv[1:]))
+Path(os.environ['FIXTURE_BLOCK_PID']).write_text(str(os.getpid()))
+deadline = time.monotonic() + 15
+while not Path(os.environ['FIXTURE_RELEASE']).exists():
+    if time.monotonic() >= deadline:
+        sys.exit(98)
+    time.sleep(0.02)
+Path(sys.argv[sys.argv.index('--summary') + 1]).write_text(json.dumps({'targets': []}))
+`)
+  const child = spawn('bash', f.argv(['deploy', 'launcher']), {
+    env: { ...f.env, FIXTURE_DB_ARGS: dbArgs }, stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let output = ''
+  child.stdout.on('data', chunk => { output += chunk })
+  child.stderr.on('data', chunk => { output += chunk })
+  const completed = new Promise(resolve => child.once('close', status => resolve(status)))
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    await completed
+  })
+  const startedDeadline = Date.now() + 5000
+  while (!existsSync(f.env.FIXTURE_BLOCK_PID) && Date.now() < startedDeadline && child.exitCode === null) {
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.equal(existsSync(f.env.FIXTURE_BLOCK_PID), true, output)
+  assert.deepEqual(f.calls().map(call => call.cwd), [join(f.root, 'mx-launcher')])
+  const args = JSON.parse(readFileSync(dbArgs, 'utf8'))
+  assert.deepEqual(args.slice(0, 3), ['apply', 'mx-launcher', '--summary'])
+  assert.equal(dirname(args[3]), f.env.MX_MANAGE_STATE_DIR)
+  const pid = Number(readFileSync(f.env.FIXTURE_BLOCK_PID, 'utf8'))
+  assert.equal(alive(pid), true, 'the post-deploy database runtime is running')
+  const beforeTerm = f.run(['deploy', 'device'])
+  assert.notEqual(beforeTerm.status, 0)
+  assert.match(beforeTerm.stdout + beforeTerm.stderr, /另一个统一部署正在进行/)
+  child.kill('SIGTERM')
+  const signalDeadline = Date.now() + 5000
+  while (!existsSync(f.env.FIXTURE_SIGNAL_SEEN) && Date.now() < signalDeadline && child.exitCode === null) {
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.equal(existsSync(f.env.FIXTURE_SIGNAL_SEEN), true, output)
+  assert.equal(readFileSync(f.env.FIXTURE_SIGNAL_SEEN, 'utf8'), 'SIGTERM')
+  assert.equal(child.exitCode, null, 'manager waits for the database runtime after forwarding SIGTERM')
+  assert.equal(alive(pid), true)
+  const afterTerm = f.run(['deploy', 'device'])
+  assert.notEqual(afterTerm.status, 0)
+  assert.match(afterTerm.stdout + afterTerm.stderr, /另一个统一部署正在进行/)
+  assert.equal(f.calls().length, 1, 'the database phase prevents overlapping project deployments')
+  writeFileSync(f.env.FIXTURE_RELEASE, '')
+  assert.equal(await completed, 143, output)
+  assert.equal(alive(pid), false, 'the database runtime exited before its dispatcher released the lock')
+  success(f.run(['deploy', 'device']))
+  assert.equal(f.calls().length, 2)
 })
 
 test('a surviving child retains the deployment lock after the dispatcher is killed', async t => {

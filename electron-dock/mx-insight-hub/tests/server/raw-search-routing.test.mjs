@@ -2225,6 +2225,68 @@ test('raw and data-search forward cancellation through Hub routing before generi
   assert.equal(h.calls.length, 0)
 })
 
+test('Instagram shared and contract circuits explain the active blocker without dispatch or state changes', async t => {
+  for (const provider of ['justone', 'tikhub']) for (const route of ['invoke', 'invokeData']) {
+    for (const contractActive of [false, true]) await t.test(`${provider}/${route}/${contractActive ? 'contract' : 'shared'}`, async () => {
+      const h = await harness({ platform: 'instagram', instagramProvider: provider })
+      h.config.circuitFailureThreshold = 3
+      const sharedUntil = new Date(Date.now() + (contractActive ? -60000 : 60000)).toISOString()
+      const contractUntil = new Date(Date.now() + (contractActive ? 30000 : -30000)).toISOString()
+      Object.assign(h.platformStore.state, { consecutiveFailures: 3, circuitOpenUntil: sharedUntil,
+        lastErrorCode: 'upstream_rate_limited' })
+      h.platformStore.contractCircuits.set('instagram', { scope: 'instagram', consecutiveFailures: 3,
+        circuitOpenUntil: contractUntil, lastErrorCode: 'private_contract_failure' })
+      const beforeShared = structuredClone(h.platformStore.state)
+      const beforeContract = structuredClone(h.platformStore.contractCircuits.get('instagram'))
+      await assert.rejects(h[route]({ platform: 'instagram', query: 'circuit fixture', pageSize: 20 }, 'instagram-circuit'), error => {
+        assert.equal(error.status, 503)
+        assert.equal(error.code, 'external_platform_circuit_open')
+        assert.equal(error.message, 'Instagram 搜索暂时受保护，请保留请求 ID 核查原因。')
+        assert.equal(error.details.upstreamDispatched, false)
+        assert.equal(error.details.scope, contractActive ? 'platform_contract' : 'shared_upstream')
+        assert.equal(error.details.reason, contractActive ? 'response_contract_unusable' : 'upstream_rate_limited')
+        assert.equal(error.details.circuitOpenUntil, contractActive ? contractUntil : sharedUntil)
+        assert.ok(error.details.retryAfterMs > 0 && error.details.retryAfterMs <= (contractActive ? 30000 : 60000))
+        assert.equal(error.details.failureThreshold, 3)
+        assert.equal(error.details.retryable, false)
+        assert.ok(h.store.requests.has(error.details.requestId))
+        assert.doesNotMatch(JSON.stringify(error.details), /justone|tikhub|private_contract_failure|fixture-secret/u)
+        return true
+      })
+      assert.equal(h.calls.length, 0)
+      assert.equal(h.historical.length, 0)
+      assert.equal(h.platformStore.calls.size, 0)
+      assert.equal(h.platformStore.requests.at(-1).sourceMode, 'circuit_rejected')
+      assert.deepEqual(h.platformStore.state, beforeShared)
+      assert.deepEqual(h.platformStore.contractCircuits.get('instagram'), beforeContract)
+    })
+  }
+})
+
+test('Instagram circuit diagnostics do not replace an immutable saved upstream rejection', async () => {
+  for (const route of ['invoke', 'invokeData']) {
+    const h = await harness({ platform: 'instagram', instagramProvider: 'justone', justOneCode: 400 })
+    const body = { platform: 'instagram', query: 'saved rejection', pageSize: 20 }
+    await assert.rejects(h[route](body, 'instagram-saved-rejection'))
+    const [call] = [...h.platformStore.calls.values()]
+    const usage = h.store.requests.get(call.usageRequestId)
+    const before = structuredClone(usage)
+    Object.assign(h.platformStore.state, { consecutiveFailures: 3,
+      circuitOpenUntil: new Date(Date.now() + 60000).toISOString(), lastErrorCode: 'upstream_rate_limited' })
+    await assert.rejects(h[route](body, 'instagram-saved-rejection'), error => {
+      assert.equal(error.status, before.responseStatus)
+      assert.equal(error.code, before.responseBody.error.code)
+      assert.equal(error.message, before.responseBody.error.message)
+      assert.deepEqual(error.details, before.responseBody.error.details)
+      return true
+    })
+    assert.deepEqual(h.store.requests.get(call.usageRequestId), before)
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.platformStore.calls.size, 1)
+    assert.equal(h.historical.length, 0)
+  }
+})
+
 test('JustOne Instagram standard/raw routing preserves grants, customer meters and one immutable receipt', async () => {
   for (const route of ['invoke', 'invokeData']) {
     const h = await harness({ platform: 'instagram', instagramProvider: 'justone' })

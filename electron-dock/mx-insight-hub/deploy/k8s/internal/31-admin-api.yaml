@@ -59,6 +59,31 @@ spec:
         supplementalGroups: [10]
         seccompProfile:
           type: RuntimeDefault
+      # Internal restart gate: host PostgreSQL and the saved HanLP service must be ready.
+      initContainers:
+        - name: wait-startup-dependencies
+          image: mx-insight-hub:shadow
+          imagePullPolicy: Never
+          command: ["node", "server/ops/wait-startup-dependencies.mjs"]
+          env:
+            - name: MX_COMMON_HANLP_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: mx-insight-hub-config
+                  key: MX_COMMON_HANLP_URL
+                  optional: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
       containers:
         - name: admin
           image: mx-insight-hub:shadow

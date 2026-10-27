@@ -1,8 +1,8 @@
 # MX 总部署命令与重启换机恢复设计
 
-日期：2026-10-02；2026-10-19 补充当前实现范围。状态：本文的安装清单、多机编排与换机恢复仍为设计规格；已有小范围统一入口，未运行生产部署。配套：[平台架构与统一身份](33-mx-platform-identity-and-sustainable-architecture.md)。
+日期：2026-10-02；2026-10-27 更新已有 Internal 实现范围。状态：本文的安装清单、多机编排与换机恢复仍为设计规格；统一入口新增串行全量发布和开机验收，仅完成本地验证，未运行生产部署或真实断电演练。配套：[平台架构与统一身份](33-mx-platform-identity-and-sustainable-architecture.md)。
 
-2026-10-19 已实现 `electron-dock/scripts/manage.sh`：逐项目调用 Launcher、Hub、DataPort、Device、Pay、Rig 的原部署入口，统一 `PROXY` 构建代理参数，提供离线命令计划、当前集群只读查询、同机同用户部署锁与退出结果记录。mx-common 仅查询，etcd 仅转交 mx-move status；原项目入口保留。它不加载统一安装清单、不绑定所有产品的保留目标、不执行全量部署或自动恢复。用法和具体边界见 [electron-dock README](../../README.md)。下文 `mx-platform`、安装清单、release lock 和换机恢复接口仍待实现，不能当作当前可执行能力。
+2026-10-19 已实现逐项目统一入口。2026-10-27 增加 `plan all` / `deploy all`，按 Launcher → Pay → HanLP → Hub → DataPort 串行执行，限定原 Internal 的保存目标，显式代理与宿主 5432 PG 就绪后才发布，Hub 前再次检查 PG/HanLP。新增 `boot audit|install|verify`，保留独立 mx-k8s-containerd、kubelet 与 mx-move 挂载保护，由原 Kubernetes 恢复工作负载；systemd 仅 enable 已核实的原服务并增加只读验收，开机不运行 deploy。Hub 六个生产 Pod 有独立 PG/HanLP 启动门禁，需正常发布新 Hub 后生效。原项目入口保留，Luopan/Device/Rig 不纳入 all。用法和限制见 [electron-dock README](../../README.md)。下文 `mx-platform`、统一安装清单、release lock 和换机恢复接口仍待实现。
 
 目标是让操作者在完成一次安装配置后，通过一个总 `deploy` 命令，将已选择的 MX 子系统恢复或收敛到确定版本。子系统继续处理自己的环境、数据库迁移和就绪检查；总入口负责发现、依赖顺序、目标一致性、状态和故障归因。**重复 deploy 不代表重启全部系统，也不代表自动选择最新版本、自动恢复备份或初始化新的空数据库。**
 
