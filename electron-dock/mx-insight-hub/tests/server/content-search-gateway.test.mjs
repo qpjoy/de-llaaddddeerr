@@ -383,7 +383,6 @@ test('Douyin related-word schema never hides content markers or unknown nested c
 test('Douyin validates every related-word item, including third and sixth entries after diagnostic samples', async () => {
   for (const index of [2, 5]) for (const malformed of [
     word => { word.related_word = 123 },
-    word => { word.word_record.words_image.url_list.push(123) },
     word => { word.word_record.unrecognized_container = { aweme_id: 'real-post', desc: 'possible real body' } },
   ]) {
     const card = douyinRelatedWordsCard()

@@ -501,7 +501,7 @@ test('Douyin v7 verifies the full recommendation-card candidate while preserving
   assert.deepEqual(card.projection,{state:'candidate_accepts',itemCount:0,nonPostCount:1,postgresSafeItems:true})
   assert.equal(card.compatibility.relatedWordsCard,true)
   assert.deepEqual(card.compatibility.relatedWordsCoverage,{metadataAccepted:true,relatedWordCount:6,
-    inspectedCount:6,invalidIndexes:[],truncated:false})
+    inspectedCount:6,invalidIndexes:[],invalidPaths:[],truncated:false})
   assert.equal(card.compatibility.cardType,'safe_nonnegative_integer')
   assert.deepEqual(card.compatibility.dataValueKinds,{null:3,array:0,object:1,string:0,number:0,boolean:0,other:0})
   assert.deepEqual(card.compatibility.outerOtherValueKinds,{null:9,array:1,object:5,string:4,number:5,boolean:0,other:0})
@@ -514,12 +514,13 @@ test('Douyin v7 verifies the full recommendation-card candidate while preserving
 
 test('Douyin v7 candidate checks the sixth recommendation rather than trusting the two schema samples',()=>{
   const variants=[
-    row=>{row.word_record.aweme_info={aweme_id:'private-hidden-id',desc:'private-hidden-body'}},
-    row=>{row.word_record.words_content={aweme_id:'private-hidden-id',desc:'private-hidden-body'}},
-    row=>{row.extra_info.unknownComposite={aweme_id:'private-hidden-id',desc:'private-hidden-body'}},
-    (row,card)=>{card.related_word_list[5]={aweme_id:'private-hidden-id',desc:'private-hidden-body'}},
+    [row=>{row.word_record.aweme_info={aweme_id:'private-hidden-id',desc:'private-hidden-body'}},'word.word_record.aweme_info:post_field'],
+    [row=>{row.word_record.words_content={aweme_id:'private-hidden-id',desc:'private-hidden-body'}},'word.word_record.words_content:missing'],
+    [row=>{row.extra_info.unknownComposite={aweme_id:'private-hidden-id',desc:'private-hidden-body'}},'word.extra_info.unknownComposite.aweme_id:post_field'],
+    [(row,card)=>{card.related_word_list[5]={aweme_id:'private-hidden-id',desc:'private-hidden-body'}},'word.related_word:missing'],
+    [row=>{row.extra_info.words_type=JSON.stringify({aweme_info:{aweme_id:'private-hidden-id'}})},'word.extra_info.words_type(json).aweme_info:post_field'],
   ]
-  for(const change of variants){
+  for(const [change,path] of variants){
     const card=douyinRecommendationCard()
     change(card.related_word_list[5],card)
     const payload={code:200,data:{data:[card],aweme_list:null,has_more:false}}
@@ -529,7 +530,7 @@ test('Douyin v7 candidate checks the sixth recommendation rather than trusting t
     assert.equal(report.projection.reason,'invalid_content_search_identity')
     assert.equal(report.entryCoverage.entries[0].compatibility.relatedWordsCard,false)
     assert.deepEqual(report.entryCoverage.entries[0].compatibility.relatedWordsCoverage,{metadataAccepted:true,
-      relatedWordCount:6,inspectedCount:6,invalidIndexes:[5],truncated:false})
+      relatedWordCount:6,inspectedCount:6,invalidIndexes:[5],invalidPaths:[{index:5,path}],truncated:false})
     assert.doesNotMatch(JSON.stringify(report),/private-|private\.example/)
     assert.deepEqual(payload,original)
   }
@@ -765,4 +766,29 @@ test('v3 offline fill does not reinterpret a saved native or signed Kuaishou con
   const {calls,snapshot:zhihu}=zhihuFillFixture()
   const invalidTime=inspectContentFillCoverage([{...calls[0],captured_at:'infinity'}],zhihu,'zhihu')
   assert.deepEqual(invalidTime,{available:false,reason:'invalid_content_search_capture_time'})
+})
+
+test('Douyin related-word cards tolerate new harmless suggestion attributes so one word cannot fail a paid page',()=>{
+  const variants=[
+    row=>{row.new_flag=true},
+    row=>{row.related_img=null;row.rand_num='7'},
+    row=>{row.word_record.words_type='private-new-type';row.word_record.extra={label:'private-label',rank:[1,2]}},
+    row=>{row.extra_info.track='{"source":"private-source","pos":3}'},
+    row=>{row.related_word='  '},
+    row=>{row.word_record.words_image.url_list.push(123)},
+  ]
+  for(const change of variants){
+    const card=douyinRecommendationCard()
+    change(card.related_word_list[4],card)
+    const rows=[{type:1,aweme_info:{aweme_id:'7000000000000000001',desc:'private-body'}},card]
+    const payload={code:200,data:{data:rows,aweme_list:null,has_more:false}}
+    const snapshot={path:'/api/v1/data/search',body:{platform:'douyin',query:'private-query',pageSize:20}}
+    const report=inspectContentArchive(archiveFor(payload),snapshot,'douyin')
+    assert.equal(report.projection.state,'candidate_accepts')
+    assert.equal(report.projection.itemCount,1)
+    assert.equal(report.projection.nonPostCount,1)
+    assert.equal(report.entryCoverage.entries[1].compatibility.relatedWordsCard,true)
+    assert.deepEqual(report.entryCoverage.entries[1].compatibility.relatedWordsCoverage.invalidPaths,[])
+    assert.doesNotMatch(JSON.stringify(report),/private-|private\.example/)
+  }
 })

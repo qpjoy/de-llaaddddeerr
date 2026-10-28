@@ -190,17 +190,43 @@ function emptyCardJson(value) {
   if (!cardString(value) || value.length > 65536) return false
   try { return cardShape(JSON.parse(value), {}) } catch { return false }
 }
-const relatedWordImage = value => cardShape(value, {
-  url_list: urls => Array.isArray(urls) && urls.length <= 100 && urls.every(cardString),
-}, ['url_list'])
-const relatedWordRecord = value => cardShape(value, {
-  group_id: cardString, words_position: cardNumber, words_content: cardString, words_source: cardString,
-  words_image: relatedWordImage, force_update_rank: cardBoolean, product_id: cardString,
-}, ['words_content'])
-const relatedWord = value => cardShape(value, {
-  related_word: word => cardString(word) && Boolean(word.trim()), word_record: relatedWordRecord,
-  related_img: cardString, rand_num: cardNumber, extra_info: extra => cardShape(extra, { words_type: cardString }),
-}, ['related_word', 'word_record'])
+// A related-search word is a suggestion, never a post. New suggestion
+// attributes are tolerated so one word cannot fail a paid page, but a post
+// container or post identity anywhere inside the word, including in encoded
+// JSON text, still prevents excluding the card.
+const POST_KEYS = new Set(['aweme_id', 'awemeId', 'aweme_info', 'aweme', 'aweme_detail', 'aweme_list',
+  'video', 'statistics', 'author', 'images', 'music', 'item', 'items'])
+const SAFE_KEY = /^[A-Za-z][A-Za-z0-9_]{0,40}$/u
+// Returns the first offending path, or null when the value is a safe suggestion attribute.
+function suggestionIssue(value, path, depth = 0) {
+  if (value === null || cardBoolean(value) || cardNumber(value)) return null
+  if (cardString(value)) {
+    if (value.length > 65536) return `${path}:too_long`
+    if (!/^\s*[[{]/u.test(value)) return null
+    try { return suggestionIssue(JSON.parse(value), `${path}(json)`, depth + 1) } catch { return null }
+  }
+  if (depth >= 4) return `${path}:too_deep`
+  if (Array.isArray(value)) {
+    if (value.length > 100) return `${path}:too_many`
+    for (const item of value) { const issue = suggestionIssue(item, `${path}[]`, depth + 1); if (issue) return issue }
+    return null
+  }
+  if (!plainCardObject(value)) return `${path}:unsupported`
+  for (const [key, field] of Object.entries(value)) {
+    const name = SAFE_KEY.test(key) ? key : '?'
+    if (POST_KEYS.has(key)) return `${path}.${name}:post_field`
+    const issue = suggestionIssue(field, `${path}.${name}`, depth + 1)
+    if (issue) return issue
+  }
+  return null
+}
+function relatedWordIssue(value) {
+  if (!plainCardObject(value)) return 'word:not_object'
+  if (!cardString(value.related_word)) return 'word.related_word:missing'
+  if (!plainCardObject(value.word_record) || !cardString(value.word_record.words_content)) return 'word.word_record.words_content:missing'
+  return suggestionIssue(value, 'word')
+}
+const relatedWord = value => relatedWordIssue(value) === null
 const relatedWordData = value => cardShape(value, {
   card_tags: cardNull, hotspot_tab_config: cardNull, common_tab_config: cardNull,
   rs_extra_info: extra => cardShape(extra, {
@@ -232,9 +258,10 @@ export function isDouyinRelatedWordsCard(entry) {
 }
 export function douyinRelatedWordsCardCoverage(entry) {
   const words = entry?.related_word_list, bounded = Array.isArray(words) && words.length <= 100
-  const invalidIndexes = bounded ? words.flatMap((word, index) => relatedWord(word) ? [] : [index]) : []
+  const issues = bounded ? words.flatMap((word, index) => { const path = relatedWordIssue(word); return path ? [{ index, path }] : [] }) : []
   return { metadataAccepted: relatedWordsCardMetadata(entry), relatedWordCount: Array.isArray(words) ? words.length : null,
-    inspectedCount: bounded ? words.length : 0, invalidIndexes, truncated: Array.isArray(words) && !bounded }
+    inspectedCount: bounded ? words.length : 0, invalidIndexes: issues.map(issue => issue.index),
+    invalidPaths: issues.slice(0, 10), truncated: Array.isArray(words) && !bounded }
 }
 function shareParam(value, name) {
   const match = string(value).match(new RegExp(`(?:^|[?&])${name}=([^&]+)`))
