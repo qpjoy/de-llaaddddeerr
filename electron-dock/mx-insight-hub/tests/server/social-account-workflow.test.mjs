@@ -368,7 +368,7 @@ test('multiple accounts preserve independent continuation and consume each archi
   assert.equal(JSON.parse(second.body.data.raw_info).length, 2)
 })
 
-test('unknown transport outcome keeps acquired evidence and never retries or falls back automatically', async t => {
+test('unknown transport outcome keeps acquired evidence and never retries or falls back under its own key', async t => {
   const h = await harness(t, { fetchImpl: call => {
     if (!call.url.pathname.includes('/tweets')) return Response.json(profile())
     throw new Error('Synthetic connection lost after dispatch')
@@ -377,14 +377,16 @@ test('unknown transport outcome keeps acquired evidence and never retries or fal
   await assert.rejects(h.invoke(body), error => ['upstream_outcome_unknown', 'request_outcome_unknown'].includes(error.code))
   assert.equal(h.calls.length, 2)
   await assert.rejects(h.invoke(body))
-  await assert.rejects(h.invoke(body, 'social-unknown-new-idem'))
   assert.equal(h.calls.length, 2)
+  // A new key is not held by the ended unknown; it repeats profile and content lookup.
+  await assert.rejects(h.invoke(body, 'social-unknown-new-idem'), { code: 'upstream_outcome_unknown' })
+  assert.equal(h.calls.length, 4)
   assert.equal(h.historical.length, 0)
   assert.ok([...h.platformStore.calls.values()].some(call => call.outcome === 'unknown'))
-  assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+  assert.equal(h.platformStore.restrictedResponseArchives.size, 2, 'each key archives its own profile response')
 })
 
-test('a lost evidence acknowledgement preserves the receipt and prevents automatic reacquisition', async t => {
+test('a lost evidence acknowledgement preserves the receipt and prevents reacquisition under the same key', async t => {
   const h = await harness(t)
   const original = h.platformStore.stageProviderEvidence.bind(h.platformStore)
   h.platformStore.stageProviderEvidence = async input => {
@@ -396,9 +398,11 @@ test('a lost evidence acknowledgement preserves the receipt and prevents automat
   assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
   h.platformStore.stageProviderEvidence = original
   await assert.rejects(h.invoke())
-  await assert.rejects(h.invoke(undefined, 'social-persistence-new-idem'))
   assert.equal(h.calls.length, 1)
   assert.equal(h.historical.length, 0)
+  const next = await h.invoke(undefined, 'social-persistence-new-idem')
+  assert.equal(next.status, 200, 'a new key is not held by the earlier persistence unknown')
+  assert.equal(h.calls.length, 3)
 })
 
 test('rate admission after acquired content returns partial and a continuation, then resumes without repeating profile lookup', async t => {

@@ -90,21 +90,23 @@ test('Twitter retry requires exact saved scope, a new explicit Key and current c
   assert.equal(f.calls(), 1); assert.equal(f.store.twitterManualRetries?.size ?? 0, 0)
 })
 
-test('Twitter latest unknown successor can be explicitly retried while ordinary requests still honor every ancestor', async () => {
+test('Twitter latest unknown successor can be explicitly retried and ordinary requests are not held by unknown ancestors', async () => {
   const f = await fixture(), old = await f.original()
   await assert.rejects(f.invoke(BODY, 'first-manual-unknown', old.id), { code: 'social_upstream_outcome_unknown' })
   const first = [...f.usage.requests.values()].find(row => row.idempotencyKey === 'first-manual-unknown')
   assert.equal(first.status, 'unknown')
   f.reply(async () => timeline([1, 2]))
-  await assert.rejects(f.invoke(BODY, 'ordinary-after-manual'), { code: 'request_outcome_unknown' })
+  assert.equal((await f.invoke(BODY, 'ordinary-after-manual')).status, 200); assert.equal(f.calls(), 3)
   const final = await f.invoke(BODY, 'second-manual-retry', first.id)
-  assert.equal(final.status, 200); assert.equal(f.calls(), 3)
+  assert.equal(final.status, 200); assert.equal(f.calls(), 4)
   assert.equal(f.usage.requests.get(old.id).status, 'unknown'); assert.equal(first.status, 'unknown')
   assert.equal(f.store.twitterManualRetries.size, 2)
-  await assert.rejects(f.invoke(BODY, 'ordinary-after-success'), { code: 'request_outcome_unknown' })
+  assert.equal((await f.invoke(BODY, 'ordinary-after-success')).status, 200); assert.equal(f.calls(), 5)
+  await assert.rejects(f.invoke(BODY, 'first-manual-unknown', old.id), { code: 'request_outcome_unknown' })
+  assert.equal(f.calls(), 5)
 })
 
-test('Twitter retry does not exclude unrelated unknown parents or pending/unusable provider calls', async () => {
+test('Twitter retry is not held by unrelated unknown parents but still honors pending/unusable provider calls', async () => {
   for (const blocker of ['unknown', 'pending', 'succeeded_unusable']) {
     const f = await fixture(), old = await f.original(), originalCall = [...f.store.calls.values()][0]
     f.reply(async () => timeline([1, 2]))
@@ -118,25 +120,32 @@ test('Twitter retry does not exclude unrelated unknown parents or pending/unusab
       f.store.calls.set(id, { ...structuredClone(originalCall), id, usageRequestId: usageId, outcome: blocker,
         completedAt: new Date().toISOString(), errorCode: blocker === 'succeeded_unusable' ? 'invalid_response_json' : null })
     }
-    await assert.rejects(f.invoke(BODY, `blocked-${blocker}-manual`, old.id), error => ['request_outcome_unknown', 'request_in_progress', 'external_platform_response_unusable'].includes(error.code), blocker)
+    if (blocker === 'unknown') {
+      assert.equal((await f.invoke(BODY, `blocked-${blocker}-manual`, old.id)).status, 200)
+      assert.equal(f.calls(), 2); assert.equal(f.store.twitterManualRetries.size, 1)
+      continue
+    }
+    await assert.rejects(f.invoke(BODY, `blocked-${blocker}-manual`, old.id),
+      { code: blocker === 'pending' ? 'request_in_progress' : 'external_platform_response_unusable' })
     assert.equal(f.calls(), 1); assert.equal(f.store.twitterManualRetries?.size ?? 0, 0)
   }
 })
 
-test('Twitter manual retry excludes verified ancestors only, not a same-query TikHub unknown with different page conditions', async () => {
+test('Twitter manual retry excludes verified ancestors only, not a same-query in-flight TikHub search with different page conditions', async () => {
   const f = await fixture(), old = await f.original()
   const body = { ...BODY, pageSize: 40, type: 'fresh' }, id = randomUUID()
-  const blocker = { ...structuredClone(old), id, idempotencyKey: 'unrelated-tikhub-query-unknown',
+  const blocker = { ...structuredClone(old), id, idempotencyKey: 'unrelated-tikhub-query-running', status: 'reserved',
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
     fingerprint: requestFingerprint({ method: 'POST', path: '/api/v1/data/search', body }),
     acquisitionRequest: { method: 'POST', path: '/api/v1/data/search', body, searchProvider: 'tikhub' } }
   f.usage.requests.set(id, blocker)
   f.reply(async () => timeline([1, 2]))
   await assert.rejects(f.invoke(BODY, 'manual-cross-supplier-retry', old.id),
-    error => error.code === 'request_outcome_unknown' && error.details.blockingRequestId === id)
+    error => error.code === 'request_in_progress' && error.details.blockingRequestId === id)
   assert.equal(f.calls(), 1)
   assert.equal(f.store.twitterManualRetries?.size ?? 0, 0)
   assert.equal(f.usage.requests.get(old.id).status, 'unknown')
-  assert.equal(f.usage.requests.get(id).status, 'unknown')
+  assert.equal(f.usage.requests.get(id).status, 'reserved')
 })
 
 test('Twitter preflight refusal consumes no manual retry edge', async () => {

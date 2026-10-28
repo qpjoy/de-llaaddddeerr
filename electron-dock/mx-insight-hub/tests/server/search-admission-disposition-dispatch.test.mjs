@@ -84,32 +84,28 @@ async function fixture(t, { migration = true, provider = 'rapidapi' } = {}) {
     resolve,addKey,addRequest,addCall,delivery,lease,content }
 }
 
-test('PG exact disposed Twitter unknown permits a new equal delivery without rewriting history or using the old key', options, async t => {
+test('PG an ended Twitter unknown never holds a new equal delivery and a disposition still records without rewriting history', options, async t => {
   const f = await fixture(t), lease = f.lease(f.next)
   const before = (await f.db.query('SELECT * FROM usage_requests WHERE id=$1',[f.root.id])).rows[0]
   const callBefore = (await f.db.query('SELECT * FROM external_platform.provider_calls WHERE id=$1',[f.rootCall])).rows[0]
-  assert.equal(await f.store.twitterFillUnknownFor(f.delivery(f.next)),true)
-  assert.equal((await f.store.acquireDispatchLease(lease)).reason,'unknown')
-  await f.resolve()
-  assert.equal(await f.store.twitterFillUnknownFor(f.delivery(f.next)),false)
   assert.equal((await f.store.acquireDispatchLease(lease)).kind,'acquired')
-  assert.equal(await f.store.twitterFillUnknownFor(f.delivery(f.next)),false,'new delivery lease does not revoke the old disposition')
-  assert.equal(await f.store.twitterFillUnknownFor(f.delivery(f.root)),true,'the original usage cannot authorize itself')
   await f.store.releaseDispatchLease(lease)
-  assert.equal((await f.store.acquireDispatchLease(f.lease(f.root))).reason,'unknown','original owner remains blocked')
+  // Manual recovery remains available as an audited record; it is no longer required to proceed.
+  const disposition = await f.resolve()
+  assert.ok(disposition)
+  assert.equal((await f.store.acquireDispatchLease(lease)).kind,'acquired')
+  await f.store.releaseDispatchLease(lease)
   assert.deepEqual((await f.db.query('SELECT * FROM usage_requests WHERE id=$1',[f.root.id])).rows[0],before)
   assert.deepEqual((await f.db.query('SELECT * FROM external_platform.provider_calls WHERE id=$1',[f.rootCall])).rows[0],callBefore)
 })
 
-test('PG additional unknown and pending calls still block after one exact disposition', options, async t => {
+test('PG additional ended unknowns do not hold dispatch while pending calls still do', options, async t => {
   const f = await fixture(t)
-  await f.resolve()
   const other = await f.addRequest(), call = await f.addCall(other)
-  assert.equal(await f.store.twitterFillUnknownFor(f.delivery(f.next)),true)
-  assert.equal((await f.store.acquireDispatchLease(f.lease(f.next))).reason,'unknown')
+  assert.equal((await f.store.acquireDispatchLease(f.lease(f.next))).kind,'acquired')
+  await f.store.releaseDispatchLease(f.lease(f.next))
   await f.db.query("UPDATE usage_requests SET status='reserved' WHERE id=$1",[other.id])
   await f.db.query("UPDATE external_platform.provider_calls SET outcome='pending',completed_at=NULL WHERE id=$1",[call])
-  assert.equal(await f.store.twitterFillUnknownFor(f.delivery(f.next)),false)
   assert.equal((await f.store.acquireDispatchLease(f.lease(f.next))).reason,'pending')
 })
 
@@ -124,65 +120,57 @@ test('PG a current delivery lease and endpoint quarantine remain effective after
   await f.store.releaseDispatchLease(current)
   const rejected = await f.addRequest('released')
   await f.addCall(rejected,'succeeded_unusable')
-  assert.equal((await f.store.acquireDispatchLease(f.lease(f.next))).reason,'succeeded_unusable')
+  const quarantined = await f.store.acquireDispatchLease(f.lease(f.next))
+  assert.equal(quarantined.reason,'succeeded_unusable')
+  assert.ok(Date.parse(quarantined.blockedUntil) - Date.now() <= 300_000)
 })
 
-test('PG disposition cannot cross the new owner API key, operation or standard-search path', options, async t => {
+test('PG ended unknowns do not hold another API key, raw path or operation', options, async t => {
   const f = await fixture(t)
-  await f.resolve()
-  const otherKey = await f.addRequest('reserved',{apiKeyId:await f.addKey()})
-  assert.equal((await f.store.acquireDispatchLease(f.lease(otherKey))).reason,'unknown')
-  const native = await f.addRequest('reserved',{snapshot:{...f.snapshot,path:'/api/v1/night-all/search/raw'}})
-  assert.equal((await f.store.acquireDispatchLease(f.lease(native))).reason,'unknown')
+  for (const request of [await f.addRequest('reserved',{apiKeyId:await f.addKey()}),
+    await f.addRequest('reserved',{snapshot:{...f.snapshot,path:'/api/v1/night-all/search/raw'}})]) {
+    assert.equal((await f.store.acquireDispatchLease(f.lease(request))).kind,'acquired')
+    await f.store.releaseDispatchLease(f.lease(request))
+  }
   await f.db.query("UPDATE external_platform.provider_calls SET operation='social.account.search' WHERE id=$1",[f.rootCall])
-  assert.equal((await f.store.acquireDispatchLease({...f.lease(f.next),operation:'social.account.search'})).reason,'unknown')
+  assert.equal((await f.store.acquireDispatchLease({...f.lease(f.next),operation:'social.account.search'})).kind,'acquired')
 })
 
-test('PG TikHub standard-search delivery honors exact cross-supplier disposal but keeps every other unknown', options, async t => {
-  const f = await fixture(t), state = f.content('twitter'), delivery = f.delivery(f.next)
-  assert.equal(await state.unknownFor(delivery,'/api/v1/data/search'),true)
-  await f.resolve()
-  assert.equal(await state.unknownFor(delivery,'/api/v1/data/search'),false)
-  assert.equal(await state.unknownFor(f.delivery(f.root),'/api/v1/data/search'),true)
-  await f.addRequest()
-  assert.equal(await state.unknownFor(delivery,'/api/v1/data/search'),true)
-})
-
-test('PG TikHub Twitter native child dispatch applies a standard-search disposition only to the original unknown', options, async t => {
+test('PG TikHub Twitter native child dispatch is held only by a pending call', options, async t => {
   const f = await fixture(t,{provider:'tikhub'})
-  assert.equal((await f.store.acquireDispatchLease(f.lease(f.next))).reason,'unknown')
-  await f.resolve()
   assert.equal((await f.store.acquireDispatchLease(f.lease(f.next))).kind,'acquired')
   await f.store.releaseDispatchLease(f.lease(f.next))
   const pending = await f.addRequest('reserved'); await f.addCall(pending,'pending')
   assert.equal((await f.store.acquireDispatchLease(f.lease(f.next))).reason,'pending')
 })
 
-test('PG missing additive schema preserves both existing equal-request guards', options, async t => {
+test('PG without the additive disposition schema an ended unknown still does not hold dispatch', options, async t => {
   const f = await fixture(t,{migration:false})
-  assert.equal(await f.store.twitterFillUnknownFor(f.delivery(f.next)),true)
-  assert.equal(await f.content('twitter').unknownFor(f.delivery(f.next),'/api/v1/data/search'),true)
-  assert.equal((await f.store.acquireDispatchLease(f.lease(f.next))).reason,'unknown')
+  assert.equal((await f.store.acquireDispatchLease(f.lease(f.next))).kind,'acquired')
 })
 
-test('PG non-Twitter and native raw traversal never consult administrative search dispositions', options, async t => {
+test('PG dispatch never consults administrative search dispositions or equal-request unknown checks', options, async t => {
   const f = await fixture(t)
   await f.resolve()
-  const raw = await f.addRequest('unknown',{snapshot:{...f.snapshot,path:'/api/v1/night-all/search/raw'}})
-  const other = await f.addRequest('unknown',{platform:'reddit'})
+  const raw = await f.addRequest('reserved',{snapshot:{...f.snapshot,path:'/api/v1/night-all/search/raw'}})
+  const other = await f.addRequest('reserved',{platform:'reddit'})
   f.statements.length=0
-  assert.equal(await f.content('twitter').unknownFor(f.delivery(raw),'/api/v1/night-all/search/raw'),true)
-  assert.equal(await f.content('reddit').unknownFor(f.delivery(other),'/api/v1/data/search'),true)
+  for (const request of [raw, other]) {
+    assert.equal((await f.store.acquireDispatchLease(f.lease(request))).kind,'acquired')
+    await f.store.releaseDispatchLease(f.lease(request))
+  }
   assert.equal(f.statements.some(sql=>sql.includes('search_admission_dispositions')),false)
+  assert.equal(typeof f.store.twitterFillUnknownFor,'undefined')
+  assert.equal(typeof f.content('twitter').unknownFor,'undefined')
 })
 
-test('Memory mode retains all historical unknown protection', async () => {
+test('Memory mode has no equal-request unknown checks either', async () => {
   const identity = {tenantId:randomUUID(),consumerId:randomUUID(),apiKeyId:randomUUID(),fingerprint:'a'.repeat(64)}
   const root = {id:randomUUID(),...identity,platform:'twitter',status:'unknown',reservedAt:new Date().toISOString(),
     acquisitionRequest:{path:'/api/v1/data/search'}}
   const usageStore = {requests:new Map([[root.id,root]])}
   const store = new MemoryExternalPlatformStore({usageStore,providerKey:'rapidapi'})
-  assert.equal(await store.twitterFillUnknownFor({...identity,usageRequestId:randomUUID()}),true)
+  assert.equal(typeof store.twitterFillUnknownFor,'undefined')
   const content = new ContentSearchStateStore({usageStore,providerKey:'tikhub'}, {platform:'twitter'})
-  assert.equal(await content.unknownFor({...identity,usageRequestId:randomUUID()},'/api/v1/data/search'),true)
+  assert.equal(typeof content.unknownFor,'undefined')
 })

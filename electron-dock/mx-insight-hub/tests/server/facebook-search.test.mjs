@@ -727,7 +727,7 @@ test('Facebook known RapidAPI quota admission returns available rows without cro
   assert.deepEqual(auto.calls.map(row => row.provider), ['justone'])
 })
 
-test('Facebook later unknown acquisition never becomes a partial success or an automatic retry', async () => {
+test('Facebook later unknown acquisition never becomes a partial success or an automatic retry of its own key', async () => {
   for (const mode of ['rapidapi', 'justone']) {
     for (const type of ['fresh', 'stable']) {
       const h = await harness({ mode, respond: ({ provider, ordinal }) => {
@@ -741,13 +741,16 @@ test('Facebook later unknown acquisition never becomes a partial success or an a
       assert.equal(h.stores[mode].restrictedResponseArchives.size, 1)
       assert.equal(h.stores[mode].ingestJobs.length, 1)
       await assert.rejects(invokeStandard(h, body, `fb-unknown-${mode}-${type}`), { code: 'request_outcome_unknown' })
-      await assert.rejects(invokeStandard(h, body, `fb-unknown-new-${mode}-${type}`), { code: 'request_outcome_unknown' })
       assert.equal(h.calls.length, 2)
+      // An ended unknown does not hold a new key; it makes its own acquisition.
+      await assert.rejects(invokeStandard(h, body, `fb-unknown-new-${mode}-${type}`),
+        { code: mode === 'rapidapi' ? 'social_upstream_outcome_unknown' : 'external_platform_outcome_unknown' })
+      assert.equal(h.calls.length, 3)
     }
   }
 })
 
-test('Facebook evidence persistence failures retain a diagnostic code and prevent a second acquisition', async () => {
+test('Facebook evidence persistence failures retain a diagnostic code and prevent a second acquisition under the same key', async () => {
   for (const mode of ['rapidapi', 'justone']) for (const method of ['stageProviderEvidence', 'finishProviderStep']) {
     const h = await harness({ mode })
     h.stores[mode][method] = async () => { throw new Error('synthetic evidence persistence failure') }
@@ -764,8 +767,9 @@ test('Facebook evidence persistence failures retain a diagnostic code and preven
     assert.equal(h.stores[mode].restrictedResponseArchives.size, 1)
     assert.equal(h.stores[mode].ingestJobs.length, 0)
     await assert.rejects(invokeStandard(h, body, key), { code: 'request_outcome_unknown' })
-    await assert.rejects(invokeStandard(h, body, `${key}-new`), { code: 'request_outcome_unknown' })
     assert.equal(h.calls.length, 1)
+    await assert.rejects(invokeStandard(h, body, `${key}-new`), { code: 'request_outcome_unknown' })
+    assert.equal(h.calls.length, 2, 'a new key is not held by the earlier persistence unknown')
   }
 })
 

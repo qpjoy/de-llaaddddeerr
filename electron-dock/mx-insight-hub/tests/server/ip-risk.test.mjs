@@ -77,16 +77,18 @@ test('only granted keys dispatch; successful calls archive exact evidence and re
   await assert.rejects(f.gateway.query(f.context, { ...request, body: { ip: '8.8.8.8' } }), { status: 409 })
   assert.equal(calls, 1)
 })
-test('ambiguous transport never retries, including a new equal request identity', async () => {
+test('ambiguous transport never retries its own key while a new equal request identity may query again', async () => {
   let calls = 0
   const f = await fixture(async () => { calls++; throw new Error('secret-not-public') })
   const result = await f.gateway.query(f.context, request)
   assert.equal(result.status, 502)
   await assert.rejects(f.gateway.query(f.context, request), { status: 409 })
-  await assert.rejects(f.gateway.query(f.context, { ...request, idempotencyKey: 'ip-test-0002' }), { status: 409 })
   assert.equal(calls, 1)
+  const next = await f.gateway.query(f.context, { ...request, idempotencyKey: 'ip-test-0002' })
+  assert.equal(next.status, 502)
+  assert.equal(calls, 2)
 })
-test('Baidu definitive failures release holds and replay their reason, while unknown calls remain protected in memory',async()=>{
+test('Baidu definitive failures release holds and replay their reason, while an unknown call keeps only its own key',async()=>{
   for(const outcome of ['rejected','succeeded_unusable','unknown']) {
     const f=await fixture(async()=>{throw Error('must not use ipsearch')});
     const platformStore=new MemoryExternalPlatformStore({usageStore:f.store,providerKey:'baidu-ip',authorizationPlatform:'ip_risk'});
@@ -101,12 +103,14 @@ test('Baidu definitive failures release holds and replay their reason, while unk
     assert.equal(billing.account.heldMinor,outcome==='unknown'?5:0);
     if(outcome==='unknown') {
       await assert.rejects(gateway.query(f.context,request),{code:'request_unknown'});
-      await assert.rejects(gateway.query(f.context,{...request,idempotencyKey:'new-baidu-identity'}),{code:'ip_query_in_progress_or_unknown'});
+      assert.equal(calls,1);
+      const next=await gateway.query(f.context,{...request,idempotencyKey:'new-baidu-identity'});
+      assert.equal(next.status,502);assert.equal(calls,2);
     } else {
       const replay=await gateway.query(f.context,request);
       assert.equal(replay.replay,true);assert.equal(replay.body.error.code,code);
+      assert.equal(calls,1);
     }
-    assert.equal(calls,1);
   }
 })
 test('disabled provider leaves Hub identity available and dispatches nothing', async () => {
@@ -211,15 +215,15 @@ test('batch preserves order and duplicates, meters each item and replays without
   assert.equal(calls, 3)
 })
 
-test('batch uncertain duplicates do not redispatch and completed failures remain replayable', async () => {
+test('batch duplicates remain distinct calls after an uncertain item and completed failures remain replayable', async () => {
   let calls = 0
   const f = await fixture(async () => { calls++; throw new Error('transport ambiguity') })
   const input = { body: { ips: ['1.1.1.1', '1.1.1.1'] }, idempotencyKey: 'batch-unknown-001', path: '/api/v1/data/ip/risk/batch' }
   const result = await f.gateway.batch.query(f.context, input)
-  assert.deepEqual(result.body.data.map(item => item.status), [502, 409])
-  assert.equal(calls, 1)
+  assert.deepEqual(result.body.data.map(item => item.status), [502, 502])
+  assert.equal(calls, 2)
   assert.equal((await f.gateway.batch.query(f.context, input)).replay, true)
-  assert.equal(calls, 1)
+  assert.equal(calls, 2)
 })
 
 test('saved credential enables only the IP product and rotation is read on every dispatch', async () => {

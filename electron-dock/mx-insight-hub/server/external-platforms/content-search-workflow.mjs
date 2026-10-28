@@ -50,7 +50,6 @@ export async function runContentSearch({ gateway, context, request, delivery, de
   const store = gateway.platformStore, stateStore = new ContentSearchStateStore(store, request)
   const identity = { tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
     path: request.standard ? '/api/v1/data/search' : '/api/v1/night-all/search/raw', scopeHash: request.scopeHash }
-  if (await stateStore.unknownFor(delivery, identity.path)) throw new AppError(409, 'request_outcome_unknown', 'A previous equal search has an unknown outcome')
   if (request.restartRequired) throw new AppError(409, 'search_restart_required', 'This platform now searches directly in Hub; restart from page 1 with a new Idempotency-Key. Historical cursors cannot be converted.')
   if (request.unsupportedNativeCursor) throw new AppError(400, 'content_search_pagination_unsupported', 'Native continuation parameters cannot replace the signed Hub cursor; restart explicitly')
   if (request.platform === 'xiaohongshu' && typeof finalizeResponse !== 'function') throw new AppError(503, 'content_search_unavailable', 'Xiaohongshu search enrichment is unavailable')
@@ -165,7 +164,6 @@ export async function runContentSearch({ gateway, context, request, delivery, de
     if (request.standard && request.platform === 'twitter') await assertTwitterSearchAvailable({
       usageStore: gateway.usageStore, context, query: request.queries[0], excludeRequestIds: [delivery.usageRequestId],
     })
-    if (await stateStore.unknownFor(delivery, identity.path)) throw new AppError(409, 'request_outcome_unknown', 'A previous equal search has an unknown outcome')
     for (const [index, job] of state.jobs.entries()) {
       // Only an already saved incomplete page can be continued explicitly.
       // Incomplete metadata discovered while consuming a buffer must stop this

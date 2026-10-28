@@ -14,7 +14,7 @@ Last reviewed: 2026-10-21.
 
 - [微信综合搜索 HTTP 400（2026-10-28）](operations/wechat-search-rejection-2026-10-28.md)：已验证通用拒绝、综合搜索参数（非公众号路径、与 TikHub V5.3.2 合同一致）、独立费用证据；受控复测中官方示例关键词同样被拒（`10c2337c`），确认供应商侧故障；附 TikHub 英文工单与提交入口。
 - [B 站搜索缺省 result 的零结果页（2026-10-28）](operations/bilibili-empty-search-2026-10-28.md)：已验证空页证据、限定解析兼容、历史账务保留与发布验收。
-- [Twitter 历史未知请求与后续采集恢复（2026-10-28）](operations/twitter-search-admission-disposition-2026-10-28.md)：精确请求的管理员准入处置、历史与账务保留、部署及生产操作步骤；第二个 blocker `17b94611` 的同范围只读诊断与动作表。
+- [Twitter 历史未知请求与后续采集恢复（2026-10-28）](operations/twitter-search-admission-disposition-2026-10-28.md)：精确请求的管理员准入处置、历史与账务保留、部署及生产操作步骤；`17b94611` 实为上游成功、Hub 持久化未知；改为只拦截仍在执行的同查询请求（未知结果不再阻断新 key、删除供应商未知冷却、响应隔离固定 5 分钟），保留同 key 保护与人工恢复，附范围诊断与上线验证。
 - [Instagram 熔断与 Twitter 429（2026-10-27）](operations/instagram-twitter-availability-2026-10-27.md)：两条请求的证据边界、只读核查命令、Instagram 错误详情与 Twitter 限流头留存。
 - [小红书补全突发、上游 429 与共享熔断](operations/capacity-circuit-2026-10-09.md)：线上证据、令牌桶突发上限、延迟成功结算保护、公开错误信息与发布验收。
 - [小红书告警归类与现场核查（2026-10-14—2026-10-21）](operations/xiaohongshu-alert-review-2026-10-14-2026-10-21.md)：飞书告警的分层归类、TikHub 字段核对、Delta/Hub 状态边界与只读现场核查命令。

@@ -253,11 +253,10 @@ for (const postgres of [false, true]) {
     await assert.rejects(f.store.twitterDeliveredIdsFor({...input,previousDeliveryId:previous}),{code:'search_page_unavailable'})
   })
 
-  test(`${name} Twitter final fill binds five own receipts plus carry atomically and guards unknown parent reentry`,options,async t=>{
+  test(`${name} Twitter final fill binds five own receipts plus carry atomically`,options,async t=>{
     const f=await fixture(t,postgres),ownCalls=Array.from({length:5},()=>({...f.call,id:randomUUID(),usageRequestId:f.target.id}))
     const ownCall=ownCalls.at(-1)
-    await f.setUsage(f.target.id,{status:'unknown'})
-    assert.equal(await f.store.twitterFillUnknownFor(f.saved.delivery),true,'buffer-only unknown has no owned provider call')
+    assert.equal(typeof f.store.twitterFillUnknownFor,'undefined','an ended unknown no longer holds an equal delivery')
     await f.setUsage(f.target.id,{status:'reserved',acquisitionRequest:{...f.target.acquisitionRequest,
       body:{...f.target.acquisitionRequest.body,platform:' X '}}})
     for(const call of ownCalls) {
@@ -270,7 +269,6 @@ for (const postgres of [false, true]) {
       responseBody:{data:{platform:'twitter',query:'fixture',pageInfo:{pageSize:20},items:[{id:'1'}]}},
       lineage:{version:'twitter-fill.v1',scopeHash:'c'.repeat(64),upstreamPages:6,previousDeliveryId:f.source.id},
       sources:[source(f.call.id),...ownCalls.map(call=>source(call.id))]}
-    assert.equal(await f.store.twitterFillUnknownFor(f.saved.delivery),false)
     assert.equal(await f.store.twitterPageFor({...f.input,callId:ownCall.id}),null,'reserved source is private to atomic own-delivery commit')
     await assert.rejects(f.store.commitTwitterFillDelivery({...input,sources:[{...source(ownCall.id),bodySha256:'0'.repeat(64)}]}),{code:'search_page_unavailable'})
     await assert.rejects(f.store.commitTwitterFillDelivery({...input,sources:Array.from({length:17},()=>source(randomUUID()))}),{code:'search_page_unavailable'})
@@ -284,10 +282,6 @@ for (const postgres of [false, true]) {
       assert.equal((await f.counts()).captures,0)
       await f.db.exec('ALTER TABLE external_platform.gateway_requests DROP CONSTRAINT force_fill_failure')
     }
-    await f.setUsage(f.target.id,{status:'unknown'})
-    assert.equal(await f.store.twitterFillUnknownFor(f.saved.delivery),true,'succeeded acquisition still guards unknown final delivery')
-    assert.equal(await f.store.twitterFillUnknownFor({...f.saved.delivery,apiKeyId:randomUUID()}),false)
-    await f.setUsage(f.target.id,{status:'reserved'})
     await f.store.commitTwitterFillDelivery(input)
     const delivered=await f.getUsage(f.target.id)
     assert.equal(delivered.status,'committed')

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
-import { quarantineRecoverySql } from '../core/admission-recovery.mjs'
+import { RESPONSE_QUARANTINE_MS, quarantineRecoverySql } from '../core/admission-recovery.mjs'
 import { isInternalTraffic, isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -59,23 +59,22 @@ export class AdmissionRecoveryService {
         errorCode: row.last_error_code, note: '确认解析修复已部署后解除。', failures: row.consecutive_failures }))
     }
     // Runtime values are supplied by the same deployment configuration as admission.
+    // Ended unknown calls no longer hold dispatch, so only in-flight calls and
+    // quarantined unusable responses are listed.
     const providerKeys = Object.keys(this.providers)
-    const cooldowns = providerKeys.map(key => Math.ceil(this.providers[key].cooldownMs / 1000) * 1000)
     const responseCooldowns = providerKeys.map(key => Math.ceil((this.providers[key].responseQuarantineCooldownMs
-      ?? Math.min(this.providers[key].cooldownMs, 300000)) / 1000) * 1000)
-    const callCooldown = `CASE WHEN call.outcome='succeeded_unusable' AND call.error_code IS DISTINCT FROM 'upstream_note_unavailable'
-      THEN cfg.response_ms ELSE cfg.ms END`
+      ?? RESPONSE_QUARANTINE_MS) / 1000) * 1000)
     const calls = (await client.query(`SELECT call.id, call.provider_key, call.operation, call.endpoint_key,
       call.contract_version, call.outcome, call.error_code, call.started_at, call.completed_at,
       call.usage_request_id, call.consumer_id, u.api_key_id, u.platform, u.lease_expires_at,
-      call.completed_at + (${callCooldown}) * interval '1 millisecond' AS until
+      call.completed_at + cfg.response_ms * interval '1 millisecond' AS until
       FROM external_platform.provider_calls call
-      JOIN unnest($1::text[], $2::int[], $3::int[]) cfg(provider,ms,response_ms) ON cfg.provider=call.provider_key
+      JOIN unnest($1::text[], $2::int[]) cfg(provider,response_ms) ON cfg.provider=call.provider_key
       JOIN usage_requests u ON u.id=call.usage_request_id
-      WHERE call.outcome='pending' OR (call.outcome IN ('unknown','succeeded_unusable')
-        AND call.completed_at + (${callCooldown}) * interval '1 millisecond' > now()
+      WHERE call.outcome='pending' OR (call.outcome='succeeded_unusable'
+        AND call.completed_at + cfg.response_ms * interval '1 millisecond' > now()
         ${quarantineRecoverySql('call')})
-      ORDER BY call.started_at DESC LIMIT 201`, [providerKeys, cooldowns, responseCooldowns])).rows
+      ORDER BY call.started_at DESC LIMIT 201`, [providerKeys, responseCooldowns])).rows
     for (const row of calls.slice(0, 200)) {
       const kind = row.outcome === 'succeeded_unusable'
         ? row.error_code === 'upstream_note_unavailable' ? 'unavailable' : 'response_quarantine' : row.outcome

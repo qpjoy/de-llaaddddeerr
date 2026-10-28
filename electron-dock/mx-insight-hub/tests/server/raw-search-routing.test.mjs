@@ -1075,8 +1075,8 @@ test('Twitter standard third request waits for a consumer slot without buying ca
   assert.equal(h.gateway.concurrencyQueue.entries.length, 0)
 })
 
-test('Twitter queued admission rechecks current access, operation, circuit and unknown-delivery protection', async t => {
-  for (const scenario of ['key', 'grant', 'credential', 'operation', 'circuit', 'parent_unknown', 'dispatch_unknown']) await t.test(scenario, async () => {
+test('Twitter queued admission rechecks current access, operation, circuit and dispatch-lease protection', async t => {
+  for (const scenario of ['key', 'grant', 'credential', 'operation', 'circuit', 'dispatch_unknown']) await t.test(scenario, async () => {
     const h = await harness({ platform: 'twitter' })
     h.gateway.active = h.config.maxConcurrency
     h.config.concurrencyQueue = { maxWaitMs: 1000, maxPending: 4 }
@@ -1087,7 +1087,6 @@ test('Twitter queued admission rechecks current access, operation, circuit and u
     if (scenario === 'credential') h.gateway.adapter.resolveCredential = async () => null
     if (scenario === 'operation') h.controls.authorizeDispatch = async () => { throw new AppError(503, 'external_platform_operation_paused', 'paused') }
     if (scenario === 'circuit') h.platformStore.providerState = async () => ({ circuitOpenUntil: new Date(Date.now() + 60000).toISOString() })
-    if (scenario === 'parent_unknown') h.platformStore.twitterFillUnknownFor = async () => true
     if (scenario === 'dispatch_unknown') h.platformStore.acquireDispatchLease = async () => ({ kind: 'blocked', reason: 'unknown' })
     h.gateway.active = 0
     h.gateway.concurrencyQueue.drain()
@@ -1095,7 +1094,7 @@ test('Twitter queued admission rechecks current access, operation, circuit and u
     assert.ok(error instanceof AppError)
     assert.equal(error.code, ({ key: 'capability_not_granted', grant: 'capability_not_granted', credential: 'external_platform_not_configured',
       operation: 'external_platform_operation_paused', circuit: 'external_platform_circuit_open',
-      parent_unknown: 'request_outcome_unknown', dispatch_unknown: 'request_outcome_unknown' })[scenario])
+      dispatch_unknown: 'request_outcome_unknown' })[scenario])
     assert.equal(h.platformStore.calls.size, 0)
     assert.equal(h.calls.length, 0)
     assert.equal(h.gateway.active, 0)
@@ -1216,12 +1215,14 @@ test('Twitter known rate admission may deliver a short page while a later unknow
     assert.equal(h.platformStore.ingestJobs.length, 1)
     assert.deepEqual([...h.platformStore.calls.values()].map(row => row.outcome), ['succeeded', 'unknown'])
     await assert.rejects(h.invokeData({ ...body, type }, 'twitter-fill-unknown-first'), { code: 'request_outcome_unknown' })
-    await assert.rejects(h.invokeData({ ...body, type }, 'twitter-fill-unknown-new-key'), { code: 'request_outcome_unknown' })
     assert.equal(h.calls.length, 2)
+    // A new key is not held by the ended unknown; it acquires again and meets the same synthetic failure.
+    await assert.rejects(h.invokeData({ ...body, type }, 'twitter-fill-unknown-new-key'), { code: 'social_upstream_outcome_unknown' })
+    assert.equal(h.calls.length, 4)
   }
 })
 
-test('Twitter fill final-commit uncertainty keeps the parent unknown even when every supplier step succeeded', async () => {
+test('Twitter fill final-commit uncertainty keeps the parent unknown under its own key even when every supplier step succeeded', async () => {
   const h = await harness({ platform: 'twitter', twitterData: twitterTimeline([twitterPost], null) })
   h.platformStore.commitTwitterFillDelivery = async () => { throw new Error('synthetic parent persistence uncertainty') }
   const body = { platform: 'twitter', query: 'fixture', pageSize: 20, type: 'stable' }
@@ -1231,11 +1232,15 @@ test('Twitter fill final-commit uncertainty keeps the parent unknown even when e
   assert.equal([...h.platformStore.calls.values()][0].outcome, 'succeeded')
   assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
   assert.equal(h.platformStore.ingestJobs.length, 1)
-  await assert.rejects(h.invokeData(body, 'twitter-fill-final-unknown-other'), { code: 'request_outcome_unknown' })
+  await assert.rejects(h.invokeData(body, 'twitter-fill-final-unknown'), { code: 'request_outcome_unknown' })
   assert.equal(h.calls.length, 1)
+  // A new key acquires again; the synthetic commit failure makes it unknown too.
+  await assert.rejects(h.invokeData(body, 'twitter-fill-final-unknown-other'), { code: 'request_outcome_unknown' })
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.platformStore.ingestJobs.length, 2)
 })
 
-test('Twitter cached-only final-commit uncertainty blocks a new idempotency key without another acquisition', async () => {
+test('Twitter cached-only final-commit uncertainty never acquires again for a new idempotency key on buffered content', async () => {
   const posts = Array.from({ length: 21 }, (_, i) => ({ ...twitterZeroPost, rest_id: String(i + 1) }))
   const h = await harness({ platform: 'twitter', twitterData: twitterTimeline(posts, null) })
   const body = { platform: 'twitter', query: 'fixture', pageSize: 20, type: 'stable' }
@@ -2626,7 +2631,7 @@ test('Instagram strategy unknown replay is resolved before reading changed or un
   }
 })
 
-test('Instagram strategy cannot bypass an equal unknown or paid unusable dispatch via a primary-provider circuit', async () => {
+test('Instagram strategy falls back past an equal unknown but cannot bypass paid unusable dispatch via a primary-provider circuit', async () => {
   for (const route of ['invoke', 'invokeData']) {
     for (const justone of [{ searchFails: true }, { instagramData: { unexpected: [] } }]) {
       const h = await instagramStrategyHarness({ justone,
@@ -2636,18 +2641,18 @@ test('Instagram strategy cannot bypass an equal unknown or paid unusable dispatc
       const providerState = await h.platformStore.providerState()
       const contractState = await h.platformStore.contractCircuitState('justone', 'instagram')
       assert.ok(providerState?.circuitOpenUntil || contractState?.circuitOpenUntil)
-      await assert.rejects(h[route](instagramBody, 'strategy-circuit-different-key'), {
-        code: justone.searchFails ? 'request_outcome_unknown' : 'external_platform_response_unusable',
-      })
+      // An ended unknown does not hold a different key, which falls back past the open circuit.
+      // Contract quarantine still blocks paid unusable responses for every key and query.
+      const differentKey = h[route](instagramBody, 'strategy-circuit-different-key')
+      if (justone.searchFails) assert.equal((await differentKey).status, 200)
+      else await assert.rejects(differentKey, { code: 'external_platform_response_unusable' })
       assert.equal(h.providers.justone.calls.length, 1)
-      assert.equal(h.providers.tikhub.calls.length, 0)
+      assert.equal(h.providers.tikhub.calls.length, justone.searchFails ? 1 : 0)
       assert.equal([...h.store.requests.values()][0].status, justone.searchFails ? 'unknown' : 'committed')
-      // Unknown protection is query-specific. Contract quarantine also blocks
-      // different queries until the existing endpoint guard permits dispatch.
       const other = h[route]({ ...instagramBody, query: 'different strategy fixture' }, 'strategy-circuit-other-query')
       if (justone.searchFails) assert.equal((await other).status, 200)
       else await assert.rejects(other, { code: 'external_platform_response_unusable' })
-      assert.equal(h.providers.tikhub.calls.length, justone.searchFails ? 1 : 0)
+      assert.equal(h.providers.tikhub.calls.length, justone.searchFails ? 2 : 0)
       assert.equal(h.platformStore.leases.size, 0)
     }
   }

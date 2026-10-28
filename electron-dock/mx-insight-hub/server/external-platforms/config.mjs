@@ -1,4 +1,5 @@
 import { AppError } from '../core/errors.mjs'
+import { RESPONSE_QUARANTINE_MS } from '../core/admission-recovery.mjs'
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 
@@ -289,8 +290,6 @@ export function parseJustOneConfig(environment = process.env, {
       'MX_INSIGHT_JUSTONE_MAX_CONSUMER_CONCURRENCY must not exceed MX_INSIGHT_JUSTONE_MAX_CONCURRENCY',
     )
   }
-  const unknownFingerprintCooldownMs = positiveInteger(environment.MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS,
-    15 * 60_000, 'MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS')
   return {
     // The provider host and endpoint paths are compiled into the adapter.
     // Keeping them out of env prevents this paid connector from becoming an
@@ -308,9 +307,9 @@ export function parseJustOneConfig(environment = process.env, {
     reservationLeaseMs,
     freshTtlMs,
     staleTtlMs,
-    unknownFingerprintCooldownMs,
-    responseQuarantineCooldownMs: positiveInteger(environment.MX_INSIGHT_JUSTONE_RESPONSE_QUARANTINE_COOLDOWN_MS,
-      Math.min(unknownFingerprintCooldownMs, 5 * 60_000), 'MX_INSIGHT_JUSTONE_RESPONSE_QUARANTINE_COOLDOWN_MS'),
+    // An ended unknown call never holds later dispatches; only unusable paid
+    // responses are quarantined, for a fixed built-in period.
+    responseQuarantineCooldownMs: RESPONSE_QUARANTINE_MS,
     maxConcurrency,
     maxConsumerConcurrency,
     // Observed-safe spacing for these providers is >=1.2s between calls
@@ -357,8 +356,7 @@ export function disabledJustOneConfig(environment, error) {
     connectTimeoutMs: 30_000,
     freshTtlMs: 60_000,
     staleTtlMs: 7 * 86_400_000,
-    unknownFingerprintCooldownMs: 15 * 60_000,
-    responseQuarantineCooldownMs: 5 * 60_000,
+    responseQuarantineCooldownMs: RESPONSE_QUARANTINE_MS,
     maxConcurrency: 32,
     maxConsumerConcurrency: 8,
     maxRequestsPerMinute: 50,
@@ -623,8 +621,6 @@ export function parseTikHubConfig(environment = process.env, {
   }
   if (detailQueue.maxWaitMs > 60000 || detailQueue.maxPending > 100 || detailQueue.intervalMs > 60000
     || detailQueue.staleTtlMs < detailQueue.freshTtlMs) throw new AppError(500, 'invalid_configuration', 'Invalid TikHub detail queue bounds')
-  const unknownFingerprintCooldownMs = positiveInteger(environment.MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS,
-    15 * 60_000, 'MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS')
   const concurrencyQueue = {
     maxWaitMs: positiveInteger(environment.MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS, 30000, 'MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_WAIT_MS'),
     maxPending: positiveInteger(environment.MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING, 256, 'MX_INSIGHT_TIKHUB_CONCURRENCY_QUEUE_MAX_PENDING'),
@@ -652,9 +648,7 @@ export function parseTikHubConfig(environment = process.env, {
     searchStaleTtlMs,
     searchMaxEnrichItems,
     searchEnrichConcurrency,
-    unknownFingerprintCooldownMs,
-    responseQuarantineCooldownMs: positiveInteger(environment.MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS,
-      Math.min(unknownFingerprintCooldownMs, 5 * 60_000), 'MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS'),
+    responseQuarantineCooldownMs: RESPONSE_QUARANTINE_MS,
     maxConcurrency: positiveInteger(
       environment.MX_INSIGHT_TIKHUB_MAX_CONCURRENCY,
       16,
@@ -713,8 +707,7 @@ export function disabledTikHubConfig(environment, error) {
     searchStaleTtlMs: 24 * 60 * 60_000,
     searchMaxEnrichItems: 20,
     searchEnrichConcurrency: 2,
-    unknownFingerprintCooldownMs: 15 * 60_000,
-    responseQuarantineCooldownMs: 5 * 60_000,
+    responseQuarantineCooldownMs: RESPONSE_QUARANTINE_MS,
     maxConcurrency: 16,
     concurrencyQueue: { maxWaitMs: 30000, maxPending: 256 },
     maxConsumerConcurrency: 8,

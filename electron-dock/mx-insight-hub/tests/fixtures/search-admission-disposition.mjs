@@ -38,7 +38,7 @@ export async function searchAdmissionDispositionFixture(t, { v2 = true, withMigr
     const ownerId=randomUUID()
     await db.query(`INSERT INTO control.data_search_protocol_bindings
       (consumer_id,idempotency_key,tenant_id,api_key_id,platform,query_hash,fingerprint,request_body,state,owner_id,lease_expires_at,usage_request_id)
-      VALUES($1,$2,$3,$4,'twitter',$5,$6,$7,$8,$9,now()-interval '1 hour',$10)`,
+      VALUES($1,$2,$3,$4,'twitter',$5,$6,$7,$8,$9,now()-interval '2 minutes',$10)`,
     [consumerId,key,tenantId,apiKeyId,dataSearchQueryHash(body.query),requestFingerprint({method:'POST',path:DATA_SEARCH_V2_PATH,body}),
       JSON.stringify(body),state,ownerId,id])
     return ownerId
@@ -50,7 +50,7 @@ export async function searchAdmissionDispositionFixture(t, { v2 = true, withMigr
       (id,provider_key,tenant_id,consumer_id,api_key_id,usage_request_id,operation,contract_version,endpoint_key,endpoint_version,
         marketplace,request_fingerprint,outcome,started_at,completed_at,call_ordinal)
       VALUES($1,$2,$3,$4,$5,$6,$7,'mx-insight-hub.social-data.v1',$8,'fixture.v1','twitter',$9,$10,
-        now()-interval '1 hour',CASE WHEN $10='pending' THEN NULL ELSE now()-interval '59 minutes' END,$11)`,
+        now()-interval '2 minutes',CASE WHEN $10='pending' THEN NULL ELSE now()-interval '90 seconds' END,$11)`,
     [callId,provider,tenantId,consumerId,apiKeyId,id,provider==='tikhub'?'native.t.twitter_web_fetch_search_timeline':'social.content.search',
       provider==='tikhub'?'t.twitter_web_fetch_search_timeline':'twitter-aio.search',fingerprint,outcome,ordinal])
     return callId
@@ -61,7 +61,7 @@ export async function searchAdmissionDispositionFixture(t, { v2 = true, withMigr
     const fingerprint=requestFingerprint(snapshot)
     await db.query(`INSERT INTO usage_requests
       (id,tenant_id,consumer_id,api_key_id,idempotency_key,fingerprint,platform,status,acquisition_request,lease_expires_at,reserved_at,completed_at)
-      VALUES($1,$2,$3,$4,$5,$6,'twitter',$7,$8,now()-interval '58 minutes',now()-interval '1 hour',now()-interval '59 minutes')`,
+      VALUES($1,$2,$3,$4,$5,$6,'twitter',$7,$8,now()-interval '1 minute',now()-interval '2 minutes',now()-interval '90 seconds')`,
     [id,tenantId,consumerId,apiKeyId,key,fingerprint,status,JSON.stringify(snapshot)])
     await db.query(`INSERT INTO usage_idempotency_bindings
       (tenant_id,consumer_id,idempotency_key,api_key_id,fingerprint,current_request_id)

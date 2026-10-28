@@ -48,7 +48,7 @@ export const DATA_SEARCH_V2_OPENAPI = {
           } } } } } } },
       400: { description: 'Invalid explicit window, fields, key or version-bound cursor; no acquisition. Twitter invalid_twitter_search_parameters rejects unknown options, People, native count/cursor or invalid values. twitter_search_parameters_unsupported means the current route cannot preserve the requested options; no silent option removal.' },
       401: { description: 'API-key authentication required.' }, 403: { description: 'Current platform/operation/Live-key grant required.' },
-      409: { description: 'search_admission_blocked permits delayed retry of the same body/key only when details dispatchState=not_started, automaticRetryAllowed=true and retrySameRequest=true. idempotency_conflict, request_in_progress and request_outcome_unknown retain their original protections; never fall back to v1.' },
+      409: { description: 'search_admission_blocked permits delayed retry of the same body/key only when details dispatchState=not_started, automaticRetryAllowed=true and retrySameRequest=true. Another request holds this one only while it is still in flight; an ended attempt, even with an unknown outcome, never does. retryAfterSeconds (at most 300) is when its lease ends. idempotency_conflict, request_in_progress and request_outcome_unknown retain their original protections; never fall back to v1.' },
       422: { description: 'search_v2_platform_unsupported; no fallback or silent omission of the window.' },
       429: { description: 'Existing quota, provider admission or financial limit.' },
       502: { description: 'Retained source failure; inspect the original request.' },

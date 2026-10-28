@@ -5,11 +5,11 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-export const REVISION = 'search-admission-scope.v1'
+export const REVISION = 'search-admission-scope.v2'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 // Same characters as search-protocol-store.mjs, so this scan matches the gate.
 const QUERY_TRIM_CHARACTERS = ' \t\n\r\v\f                 　﻿'
-// A reservation older than this is not a normal in-flight search.
+// Before the in-flight rule is deployed, a reservation older than this is not a normal in-flight search.
 const STALE_RESERVATION_MINUTES = 30
 const SAFE_CODES = new Set(['invalid_arguments', 'invalid_request_id', 'database_url_required', 'request_not_found', 'query_unavailable'])
 const fail = code => Object.assign(new Error(code), { diagnosticCode: code })
@@ -17,8 +17,9 @@ const source = path => import(new URL(path, pathToFileURL(`${process.cwd()}/`)))
 const iso = value => value ? new Date(value).toISOString() : null
 const text = value => typeof value === 'string' ? value.slice(0, 120) : null
 
-function action({ usageStatus, bindingState, leaseExpired, ageMinutes, disposed, dispositionAvailable }) {
+function action({ usageStatus, bindingState, leaseExpired, ageMinutes, disposed, holding, dispositionAvailable }) {
   if (disposed) return 'none_disposed'
+  if (!holding) return 'none_not_in_flight'
   const running = usageStatus === 'reserved' || (bindingState === 'running' && !leaseExpired)
   if (running) return ageMinutes != null && ageMinutes > STALE_RESERVATION_MINUTES ? 'investigate_stuck_reservation' : 'wait_in_progress'
   return dispositionAvailable ? 'dispose_in_diagnostics_center' : 'deploy_disposition_then_dispose'
@@ -26,8 +27,11 @@ function action({ usageStatus, bindingState, leaseExpired, ageMinutes, disposed,
 
 export async function diagnoseAdmissionScope(pool, blockerId, { now = Date.now() } = {}) {
   if (!UUID.test(blockerId || '')) throw fail('invalid_request_id')
-  const [{ dataSearchQueryHash, DATA_SEARCH_V1_PATH }, dispositions] = await Promise.all([
-    source('server/contracts/data-search-v2.mjs'), source('server/operations/search-admission-disposition.mjs').catch(() => null)])
+  const [{ dataSearchQueryHash, DATA_SEARCH_V1_PATH }, dispositions, inFlight] = await Promise.all([
+    source('server/contracts/data-search-v2.mjs'), source('server/operations/search-admission-disposition.mjs').catch(() => null),
+    source('server/data/in-flight-search.mjs').catch(() => null)])
+  // Before the in-flight rule is deployed every unresolved row holds indefinitely.
+  const leaseLive = value => Boolean(value) && new Date(value).getTime() > now
   const client = await pool.connect()
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
@@ -40,17 +44,17 @@ export async function diagnoseAdmissionScope(pool, blockerId, { now = Date.now()
     if (!query) throw fail('query_unavailable')
     const scope = [blocker.tenant_id, blocker.consumer_id, blocker.api_key_id, blocker.platform], queryHash = dataSearchQueryHash(query)
     // The two unresolved scans and the lease scan below mirror SearchProtocolStore.begin.
-    const bindings = (await client.query(`SELECT /* admission-scope:bindings */ usage_request_id,state,lease_expires_at<=now() AS lease_expired
+    const bindings = (await client.query(`SELECT /* admission-scope:bindings */ usage_request_id,state,lease_expires_at,lease_expires_at<=now() AS lease_expired
       FROM control.data_search_protocol_bindings WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3 AND platform=$4 AND query_hash=$5
       AND state IN ('unknown','running') LIMIT 50`, [...scope, queryHash])).rows
     const usages = (await client.query(`SELECT /* admission-scope:usages */ id FROM usage_requests
       WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3 AND platform=$4 AND acquisition_request->>'path'=$5
       AND jsonb_typeof(acquisition_request->'body'->'query')='string' AND btrim(acquisition_request->'body'->>'query',$7)=$6
       AND status IN ('unknown','reserved') LIMIT 50`, [...scope, DATA_SEARCH_V1_PATH, query.trim(), QUERY_TRIM_CHARACTERS])).rows
-    const leases = (await client.query(`SELECT /* admission-scope:leases */ count(*)::int AS total,count(*) FILTER (WHERE expires_at<=now())::int AS expired
-      FROM control.data_search_protocol_leases WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3 AND platform=$4 AND query_hash=$5`, [...scope, queryHash])).rows[0]
+    const leases = (await client.query(`SELECT /* admission-scope:leases */ expires_at,expires_at<=now() AS expired
+      FROM control.data_search_protocol_leases WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3 AND platform=$4 AND query_hash=$5 LIMIT 50`, [...scope, queryHash])).rows
     const ids = [...new Set([...bindings.map(row => row.usage_request_id), ...usages.map(row => row.id)].filter(Boolean))]
-    const requests = new Map((await client.query(`SELECT /* admission-scope:requests */ id,status,error_code,reserved_at,completed_at
+    const requests = new Map((await client.query(`SELECT /* admission-scope:requests */ id,status,error_code,reserved_at,completed_at,lease_expires_at
       FROM usage_requests WHERE id=ANY($1::uuid[])`, [ids])).rows.map(row => [row.id, row]))
     const calls = (await client.query(`SELECT /* admission-scope:calls */ usage_request_id,provider_key,operation,outcome,http_status,error_code,
       round(EXTRACT(EPOCH FROM (completed_at-started_at))*1000)::int AS duration_ms FROM external_platform.provider_calls
@@ -63,18 +67,27 @@ export async function diagnoseAdmissionScope(pool, blockerId, { now = Date.now()
     const blockers = ids.map(id => {
       const request = requests.get(id), state = binding.get(id)
       const ageMinutes = request?.reserved_at ? Math.round((now - new Date(request.reserved_at).getTime()) / 60000) : null
+      // The deployed gate holds another key only while this request is in flight.
+      const until = inFlight && request?.status === 'reserved'
+        ? inFlight.inFlightUntil({ leaseExpiresAt: request.lease_expires_at, reservedAt: request.reserved_at }) : NaN
+      const running = (Number.isFinite(until) && until > now) || (state?.state === 'running' && leaseLive(state.lease_expires_at))
+      const holding = !inFlight || running
       const row = { requestId: id, usageStatus: text(request?.status), bindingState: text(state?.state), leaseExpired: state ? state.lease_expired === true : null,
         errorCode: text(request?.error_code), reservedAt: iso(request?.reserved_at), completedAt: iso(request?.completed_at), ageMinutes,
         calls: calls.filter(call => call.usage_request_id === id).map(call => ({ provider: text(call.provider_key), operation: text(call.operation),
           outcome: text(call.outcome), httpStatus: call.http_status ?? null, errorCode: text(call.error_code), durationMs: call.duration_ms ?? null })),
-        disposed: disposed.has(id) }
+        disposed: disposed.has(id), holding,
+        inFlightUntil: inFlight && running ? new Date(Number.isFinite(until) && until > now ? until : new Date(state.lease_expires_at).getTime()).toISOString() : null }
       return { ...row, action: action({ ...row, dispositionAvailable }) }
     }).sort((left, right) => String(left.reservedAt).localeCompare(String(right.reservedAt)))
     return { diagnosticRevision: REVISION, blockerId, readOnlyTransaction: true,
       scope: { platform: text(blocker.platform), queryLength: query.trim().length, queryHashPrefix: createHash('sha256').update(query.trim()).digest('hex').slice(0, 12) },
       disposition: { tablePresent, moduleInstalled: Boolean(dispositions), available: dispositionAvailable },
-      blockers, unboundBindings: bindings.filter(row => !row.usage_request_id).length, leases: { total: leases.total, expired: leases.expired },
-      summary: { blocking: blockers.filter(row => !row.disposed).length,
+      inFlightRule: { installed: Boolean(inFlight) },
+      blockers, unboundBindings: inFlight ? 0 : bindings.filter(row => !row.usage_request_id).length,
+      leases: { total: leases.length, expired: leases.filter(row => row.expired === true).length,
+        holding: leases.filter(row => !inFlight || leaseLive(row.expires_at)).length },
+      summary: { blocking: blockers.filter(row => !row.disposed && row.holding).length,
         needDisposition: blockers.filter(row => ['dispose_in_diagnostics_center', 'deploy_disposition_then_dispose'].includes(row.action)).length,
         inProgress: blockers.filter(row => row.action === 'wait_in_progress').length,
         stuck: blockers.filter(row => row.action === 'investigate_stuck_reservation').length,

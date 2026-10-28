@@ -1,4 +1,4 @@
-import { quarantineRecoverySql } from '../core/admission-recovery.mjs'
+import { RESPONSE_QUARANTINE_MS, quarantineRecoverySql } from '../core/admission-recovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { AppError } from '../core/errors.mjs'
@@ -11,7 +11,6 @@ import { canonicalPlatform } from '../hub-service.mjs'
 import * as facebookSearchStore from './facebook-search-store.mjs'
 import * as twitterRetryStore from './twitter-manual-retry.mjs'
 import { twitterDeliveryLeases } from './twitter-delivery-leases.mjs'
-import { getSearchAdmissionDispositionIds } from '../operations/search-admission-disposition.mjs'
 
 const clone = (value) => value == null ? value : structuredClone(value)
 const iso = (value = new Date()) => new Date(value).toISOString()
@@ -26,33 +25,6 @@ const twitterRetryInput = input => ({ ...input,
   bufferCallId: input.twitterManualRetry.bufferCallId })
 const memoryDispatchLeases = (store, operation) => store.usageStore && store.providerKey === 'rapidapi' && operation === 'social.content.search'
   ? twitterDeliveryLeases(store.usageStore) : store.leases
-
-async function disposedTwitterDispatchIds(store, { consumerId, operation, fingerprint, ownerRequestId }) {
-  if (!(store.providerKey === 'rapidapi' && operation === 'social.content.search'
-    || store.providerKey === 'tikhub' && operation === 'native.t.twitter_web_fetch_search_timeline')) return []
-  const candidates = (await store.pool.query(`SELECT DISTINCT usage_request_id FROM external_platform.provider_calls
-    WHERE provider_key=$4 AND operation=$2 AND consumer_id=$1
-      AND (dispatch_fingerprint=$3 OR (dispatch_fingerprint IS NULL AND request_fingerprint=$3))
-      AND outcome='unknown' AND completed_at>now()-make_interval(secs=>$5::double precision)`,
-  [consumerId,operation,fingerprint,store.providerKey,Math.ceil(store.uncertainCooldownMs / 1000)])).rows
-  if (!candidates.length) return []
-  // Only a distinct, reserved standard-search intent can use a historical
-  // disposition. Same-key handling remains owned by the usage/protocol stores.
-  const { rows } = await store.pool.query(`SELECT DISTINCT previous.id, owner.tenant_id, owner.api_key_id
-    FROM usage_requests previous
-    JOIN usage_requests owner ON owner.id=$4 AND owner.consumer_id=$1
-      AND owner.status='reserved' AND owner.platform='twitter' AND owner.fingerprint=$3
-      AND owner.acquisition_request->>'path'='/api/v1/data/search'
-      AND owner.id<>previous.id AND owner.idempotency_key<>previous.idempotency_key
-    WHERE previous.id=ANY($2::uuid[]) AND previous.status='unknown' AND previous.tenant_id=owner.tenant_id
-      AND previous.consumer_id=owner.consumer_id AND previous.api_key_id=owner.api_key_id
-      AND previous.platform='twitter' AND previous.acquisition_request->>'path'='/api/v1/data/search'`,
-  [consumerId,candidates.map(row=>row.usage_request_id),fingerprint,ownerRequestId])
-  if (!rows.length) return []
-  return getSearchAdmissionDispositionIds(store.pool, rows, {
-    tenantId: rows[0].tenant_id, consumerId, apiKeyId: rows[0].api_key_id, platform: 'twitter',
-  })
-}
 
 const instagramOperation = provider => provider === 'tikhub' ? `native.${INSTAGRAM_SEARCH_KEY}`
   : provider === 'justone' ? `native.${JUSTONE_INSTAGRAM_SEARCH_KEY}` : null
@@ -688,8 +660,7 @@ export class MemoryExternalPlatformStore {
     circuitFailureThreshold = 3,
     circuitOpenMs = 60_000,
     rateLimitBurst = null,
-    uncertainCooldownMs = 15 * 60_000,
-    responseQuarantineCooldownMs = Math.min(uncertainCooldownMs, 5 * 60_000),
+    responseQuarantineCooldownMs = RESPONSE_QUARANTINE_MS,
   } = {}) {
     this.usageStore = usageStore
     this.providerKey = providerKey
@@ -697,7 +668,6 @@ export class MemoryExternalPlatformStore {
     this.circuitFailureThreshold = circuitFailureThreshold
     this.circuitOpenMs = circuitOpenMs
     this.rateLimitBurst = rateLimitBurst == null ? null : boundedRateLimit(rateLimitBurst, 'rateLimitBurst')
-    this.uncertainCooldownMs = uncertainCooldownMs
     this.responseQuarantineCooldownMs = responseQuarantineCooldownMs
     this.calls = new Map()
     this.costReservations = new Map()
@@ -744,7 +714,6 @@ export class MemoryExternalPlatformStore {
 
   async facebookPageFor(input) { return facebookSearchStore.facebookPageFor(this, input) }
   async facebookDeliveredIdsFor(input) { return facebookSearchStore.facebookDeliveredIdsFor(this, input) }
-  async facebookFillUnknownFor(input) { return facebookSearchStore.facebookFillUnknownFor(this, input) }
   async acquireFacebookFillDeliveryLease(input) { return facebookSearchStore.acquireFacebookFillDeliveryLease(this, input) }
   async commitFacebookFillDelivery(input) { return facebookSearchStore.commitFacebookFillDelivery(this, input) }
 
@@ -757,16 +726,6 @@ export class MemoryExternalPlatformStore {
     const rootId = input.previousDeliveryId ?? (input.sourceCallId ? this.calls.get(input.sourceCallId)?.usageRequestId : null)
     if (input.sourceCallId && !rootId) throw twitterHistoryError()
     return twitterDeliveredIds(async id => this.usageStore.requests.get(id), input, rootId)
-  }
-
-  async twitterFillUnknownFor(delivery) {
-    const excluded = delivery.twitterManualRetry
-      ? (await this.validateTwitterManualRetry(twitterRetryInput(delivery))).ancestorRequestIds : []
-    return [...this.usageStore.requests.values()].some(row => row.platform === 'twitter' && row.status === 'unknown'
-      && row.tenantId === delivery.tenantId && row.consumerId === delivery.consumerId && row.apiKeyId === delivery.apiKeyId
-      && row.fingerprint === delivery.fingerprint && row.acquisitionRequest?.path === TWITTER_PAGE_PATH
-      && !excluded.includes(row.id)
-      && Date.now()-new Date(row.reservedAt ?? row.createdAt ?? Date.now()).getTime() <= TWITTER_PAGE_MAX_AGE_MS)
   }
 
   async validateTwitterManualRetry(input) { return twitterRetryStore.validateTwitterManualRetry(this, input) }
@@ -871,8 +830,7 @@ export class MemoryExternalPlatformStore {
   }) {
     if (twitterManualRetry && (operation !== 'social.content.search' || twitterManualRetry.usageRequestId !== ownerRequestId
       || twitterManualRetry.consumerId !== consumerId || twitterManualRetry.fingerprint !== fingerprint)) throw twitterRetryStore.twitterRetryDenied()
-    const excluded = twitterManualRetry
-      ? (await this.validateTwitterManualRetry(twitterManualRetry)).ancestorRequestIds : []
+    if (twitterManualRetry) await this.validateTwitterManualRetry(twitterManualRetry)
     const now = Date.now()
     const blocker = [...this.calls.values()]
       .filter((call) => (
@@ -886,13 +844,6 @@ export class MemoryExternalPlatformStore {
           || (
             (
               (
-                call.consumerId === consumerId
-                && call.dispatchFingerprint === fingerprint
-                && call.outcome === 'unknown'
-                && call.usageRequestId !== retryOfRequestId
-                && !excluded.includes(call.usageRequestId)
-              )
-              || (
                 call.endpointKey === endpointKey
                 && call.contractVersion === contractVersion
                 && call.outcome === 'succeeded_unusable'
@@ -905,8 +856,7 @@ export class MemoryExternalPlatformStore {
                 && call.errorCode === 'upstream_note_unavailable'
               )
             )
-            && new Date(call.completedAt).getTime() + (call.outcome === 'succeeded_unusable'
-              && call.errorCode !== 'upstream_note_unavailable' ? this.responseQuarantineCooldownMs : this.uncertainCooldownMs) > now
+            && new Date(call.completedAt).getTime() + this.responseQuarantineCooldownMs > now
           )
         )
       ))
@@ -919,8 +869,7 @@ export class MemoryExternalPlatformStore {
           : blocker.outcome,
         blockedUntil: blocker.outcome === 'pending'
           ? null
-          : iso(new Date(blocker.completedAt).getTime() + (blocker.outcome === 'succeeded_unusable'
-            && blocker.errorCode !== 'upstream_note_unavailable' ? this.responseQuarantineCooldownMs : this.uncertainCooldownMs)),
+          : iso(new Date(blocker.completedAt).getTime() + this.responseQuarantineCooldownMs),
       }
     }
     const key = snapshotKey({ consumerId, operation, fingerprint })
@@ -2489,8 +2438,7 @@ export class PostgresExternalPlatformStore {
     circuitFailureThreshold = 3,
     circuitOpenMs = 60_000,
     rateLimitBurst = null,
-    uncertainCooldownMs = 15 * 60_000,
-    responseQuarantineCooldownMs = Math.min(uncertainCooldownMs, 5 * 60_000),
+    responseQuarantineCooldownMs = RESPONSE_QUARANTINE_MS,
   }) {
     this.pool = pool
     this.providerKey = providerKey
@@ -2499,7 +2447,6 @@ export class PostgresExternalPlatformStore {
     this.circuitFailureThreshold = circuitFailureThreshold
     this.circuitOpenMs = circuitOpenMs
     this.rateLimitBurst = rateLimitBurst == null ? null : boundedRateLimit(rateLimitBurst, 'rateLimitBurst')
-    this.uncertainCooldownMs = uncertainCooldownMs
     this.responseQuarantineCooldownMs = responseQuarantineCooldownMs
   }
 
@@ -2537,7 +2484,6 @@ export class PostgresExternalPlatformStore {
 
   async facebookPageFor(input) { return facebookSearchStore.facebookPageFor(this, input) }
   async facebookDeliveredIdsFor(input) { return facebookSearchStore.facebookDeliveredIdsFor(this, input) }
-  async facebookFillUnknownFor(input) { return facebookSearchStore.facebookFillUnknownFor(this, input) }
   async acquireFacebookFillDeliveryLease(input) { return facebookSearchStore.acquireFacebookFillDeliveryLease(this, input) }
   async commitFacebookFillDelivery(input) { return facebookSearchStore.commitFacebookFillDelivery(this, input) }
 
@@ -2569,27 +2515,6 @@ export class PostgresExternalPlatformStore {
       return row ? { id:row.id,tenantId:row.tenant_id,consumerId:row.consumer_id,apiKeyId:row.api_key_id,
         platform:row.platform,status:row.status,responseStatus:row.response_status,acquisitionRequest:row.acquisition_request,responseBody:row.response_body } : null
     }, input, rootId ?? null)
-  }
-
-  async twitterFillUnknownFor(delivery) {
-    if (!['tenantId','consumerId','apiKeyId'].every(key=>twitterPageIdentity(delivery[key]))
-      || !SHA256_PATTERN.test(delivery.fingerprint || '')) throw twitterHistoryError()
-    // The quota index bounds this read by tenant, consumer, platform and time.
-    // Buffer-only unknown deliveries have no owned provider call to join.
-    const excluded = delivery.twitterManualRetry
-      ? (await this.validateTwitterManualRetry(twitterRetryInput(delivery))).ancestorRequestIds : []
-    const {rows}=await this.pool.query(`SELECT request.id FROM usage_requests request
-      WHERE request.tenant_id=$1 AND request.consumer_id=$2 AND request.api_key_id=$3
-        AND request.platform='twitter' AND request.fingerprint=$4 AND request.status='unknown'
-        AND request.acquisition_request->>'path'='/api/v1/data/search'
-        AND NOT (request.id = ANY($5::uuid[]))
-        AND request.reserved_at >= now()-interval '24 hours'`,
-    [delivery.tenantId,delivery.consumerId,delivery.apiKeyId,delivery.fingerprint,excluded])
-    if (!rows.length) return false
-    const disposed = await getSearchAdmissionDispositionIds(this.pool, rows.filter(row => row.id !== delivery.usageRequestId), {
-      tenantId: delivery.tenantId, consumerId: delivery.consumerId, apiKeyId: delivery.apiKeyId, platform: 'twitter',
-    })
-    return rows.some(row => !disposed.includes(row.id))
   }
 
   async validateTwitterManualRetry(input) { return twitterRetryStore.validateTwitterManualRetry(this, input) }
@@ -2729,9 +2654,9 @@ export class PostgresExternalPlatformStore {
   }) {
     if (twitterManualRetry && (operation !== 'social.content.search' || twitterManualRetry.usageRequestId !== ownerRequestId
       || twitterManualRetry.consumerId !== consumerId || twitterManualRetry.fingerprint !== fingerprint)) throw twitterRetryStore.twitterRetryDenied()
-    const excluded = twitterManualRetry
-      ? (await this.validateTwitterManualRetry(twitterManualRetry)).ancestorRequestIds : []
-    excluded.push(...await disposedTwitterDispatchIds(this, { consumerId, operation, fingerprint, ownerRequestId }))
+    if (twitterManualRetry) await this.validateTwitterManualRetry(twitterManualRetry)
+    // Only an equal call still in flight, or a recent paid response Hub could
+    // not use, holds a dispatch. An ended unknown call never blocks a new one.
     const { rows } = await this.pool.query(
       `INSERT INTO external_platform.dispatch_leases
          (consumer_id, operation, request_fingerprint, owner_request_id, expires_at)
@@ -2739,7 +2664,7 @@ export class PostgresExternalPlatformStore {
         WHERE NOT EXISTS (
           SELECT 1
             FROM external_platform.provider_calls call
-           WHERE call.provider_key = $10
+           WHERE call.provider_key = $8
              AND call.operation = $2
              AND (
                (
@@ -2753,18 +2678,8 @@ export class PostgresExternalPlatformStore {
                OR (
                  (
                    (
-                     call.consumer_id = $1
-                     AND (
-                       call.dispatch_fingerprint = $3
-                       OR (call.dispatch_fingerprint IS NULL AND call.request_fingerprint = $3)
-                     )
-                     AND call.outcome = 'unknown'
-                     AND ($8::uuid IS NULL OR call.usage_request_id <> $8)
-                     AND NOT (call.usage_request_id = ANY($13::uuid[]))
-                   )
-                   OR (
-                     call.endpoint_key = $7
-                     AND call.contract_version = $9
+                     call.endpoint_key = $6
+                     AND call.contract_version = $7
                      AND call.outcome = 'succeeded_unusable'
                      AND call.error_code IS DISTINCT FROM 'upstream_note_unavailable'
                      ${quarantineRecoverySql('call')}
@@ -2779,9 +2694,7 @@ export class PostgresExternalPlatformStore {
                      AND call.error_code = 'upstream_note_unavailable'
                    )
                  )
-                 AND call.completed_at > now() - make_interval(secs => CASE
-                   WHEN call.outcome='succeeded_unusable' AND call.error_code IS DISTINCT FROM 'upstream_note_unavailable'
-                     THEN $11::double precision ELSE $6::double precision END)
+                 AND call.completed_at > now() - make_interval(secs => $9::double precision)
                )
              )
         )
@@ -2790,7 +2703,7 @@ export class PostgresExternalPlatformStore {
          expires_at = EXCLUDED.expires_at,
          created_at = now()
        WHERE external_platform.dispatch_leases.expires_at <= now()
-         OR ($12::boolean AND external_platform.dispatch_leases.owner_request_id=EXCLUDED.owner_request_id
+         OR ($10::boolean AND external_platform.dispatch_leases.owner_request_id=EXCLUDED.owner_request_id
            AND external_platform.dispatch_leases.expires_at=EXCLUDED.expires_at)
          OR EXISTS (
            SELECT 1 FROM usage_requests previous
@@ -2811,14 +2724,11 @@ export class PostgresExternalPlatformStore {
        RETURNING owner_request_id, expires_at`,
       [
         consumerId, operation, fingerprint, ownerRequestId, expiresAt,
-        Math.ceil(this.uncertainCooldownMs / 1_000),
         endpointKey,
-        retryOfRequestId,
         contractVersion,
         this.providerKey,
         Math.ceil(this.responseQuarantineCooldownMs / 1_000),
         ownedDeliveryLease && ownedSearchDelivery(this.providerKey, operation),
-        excluded,
       ],
     )
     if (rows[0]?.owner_request_id === ownerRequestId) return { kind: 'acquired' }
@@ -2827,12 +2737,10 @@ export class PostgresExternalPlatformStore {
       `SELECT outcome, error_code, completed_at,
               CASE
                 WHEN outcome = 'pending' THEN NULL
-                ELSE completed_at + make_interval(secs => CASE
-                  WHEN outcome='succeeded_unusable' AND error_code IS DISTINCT FROM 'upstream_note_unavailable'
-                    THEN $9::double precision ELSE $4::double precision END)
+                ELSE completed_at + make_interval(secs => $6::double precision)
               END AS blocked_until
          FROM external_platform.provider_calls call
-        WHERE provider_key = $8
+        WHERE provider_key = $5
           AND operation = $2
           AND (
             (
@@ -2846,17 +2754,7 @@ export class PostgresExternalPlatformStore {
             OR (
               (
                 (
-                  consumer_id = $1
-                  AND (
-                    dispatch_fingerprint = $3
-                    OR (dispatch_fingerprint IS NULL AND request_fingerprint = $3)
-                  )
-                  AND outcome = 'unknown'
-                  AND ($6::uuid IS NULL OR usage_request_id <> $6)
-                  AND NOT (usage_request_id = ANY($10::uuid[]))
-                )
-                OR (
-                  endpoint_key = $5
+                  endpoint_key = $4
                   AND contract_version = $7
                   AND outcome = 'succeeded_unusable'
                   AND error_code IS DISTINCT FROM 'upstream_note_unavailable'
@@ -2872,20 +2770,16 @@ export class PostgresExternalPlatformStore {
                   AND error_code = 'upstream_note_unavailable'
                 )
               )
-              AND completed_at > now() - make_interval(secs => CASE
-                WHEN outcome='succeeded_unusable' AND error_code IS DISTINCT FROM 'upstream_note_unavailable'
-                  THEN $9::double precision ELSE $4::double precision END)
+              AND completed_at > now() - make_interval(secs => $6::double precision)
             )
           )
         ORDER BY started_at DESC
         LIMIT 1`,
       [
-        consumerId, operation, fingerprint,
-        Math.ceil(this.uncertainCooldownMs / 1_000), endpointKey, retryOfRequestId,
-        contractVersion,
+        consumerId, operation, fingerprint, endpointKey,
         this.providerKey,
         Math.ceil(this.responseQuarantineCooldownMs / 1_000),
-        excluded,
+        contractVersion,
       ],
     )
     if (blocker.rows[0]) {

@@ -125,15 +125,6 @@ export async function facebookDeliveredIdsFor(store, input) {
   }
   return { ids:[...ids],previousDeliveryId:root,deliveries:seen.size }
 }
-export async function facebookFillUnknownFor(store, delivery) {
-  if (!['tenantId','consumerId','apiKeyId'].every(key => UUID.test(delivery[key] || '')) || !SHA.test(delivery.fingerprint || '')) throw fail()
-  if (!store.pool) return [...store.usageStore.requests.values()].some(row => row.platform === 'facebook' && row.status === 'unknown'
-    && ['tenantId','consumerId','apiKeyId','fingerprint'].every(key => row[key] === delivery[key])
-    && row.acquisitionRequest?.path === PATH && Date.now()-Date.parse(row.reservedAt ?? row.createdAt ?? new Date()) <= AGE)
-  return (await store.pool.query(`SELECT 1 FROM usage_requests WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3
-    AND platform='facebook' AND fingerprint=$4 AND status='unknown' AND acquisition_request->>'path'='/api/v1/data/search'
-    AND reserved_at>=now()-interval '24 hours' LIMIT 1`,[delivery.tenantId,delivery.consumerId,delivery.apiKeyId,delivery.fingerprint])).rows.length > 0
-}
 export async function acquireFacebookFillDeliveryLease(store, input) {
   if (store.providerKey !== 'rapidapi' || input.operation !== 'social.facebook.search' || !UUID.test(input.consumerId || '')
     || !UUID.test(input.ownerRequestId || '') || !SHA.test(input.fingerprint || '')

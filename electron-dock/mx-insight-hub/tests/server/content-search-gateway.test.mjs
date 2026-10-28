@@ -598,7 +598,7 @@ test('a filled standard delivery settles one existing customer quote across all 
   assert.equal(charges[0].chargedMinor, 3)
 })
 
-test('transport uncertainty never returns acquired partial results or repurchases equal work', async () => {
+test('transport uncertainty never returns acquired partial results under its own key; a new key searches again', async () => {
   const h = await harness({ fetchImpl: (_call, n) => {
     if (n === 2) throw new Error('synthetic transport lost after dispatch')
     return Response.json({ code: 200, data: biliPage(['a'], 1, 5) })
@@ -607,8 +607,11 @@ test('transport uncertainty never returns acquired partial results or repurchase
   await assert.rejects(h.invokeData(body), error => ['upstream_outcome_unknown', 'request_outcome_unknown'].includes(error.code))
   assert.equal(h.calls.length, 2)
   assert.equal([...h.store.requests.values()][0].status, 'unknown')
-  await assert.rejects(h.invokeData(body, 'content-data-new-idem'), error => error.code === 'request_outcome_unknown')
+  await assert.rejects(h.invokeData(body), error => error.code === 'request_outcome_unknown')
   assert.equal(h.calls.length, 2)
+  const next = await h.invokeData(body, 'content-data-new-idem')
+  assert.equal(next.status, 200)
+  assert.equal(h.calls.length, 4)
 })
 
 test('paid persistence uncertainty logs only fixed phase/class/SQLState and durable IDs without changing safe unknown handling', async () => {
@@ -627,12 +630,13 @@ test('paid persistence uncertainty logs only fixed phase/class/SQLState and dura
     assert.deepEqual(logs, [[{ requestId: usage.id, callId: call.id, phase,
       errorClass: cause.name, sqlState: cause.code || null }, 'content search outcome is unknown']])
     assert.doesNotMatch(JSON.stringify(logs), /private|fixture-secret|城市/)
+    // A new key is not held; it purchases again and meets the same synthetic persistence failure.
     await assert.rejects(h.invokeData(undefined, 'kuaishou-persistence-new-idem'), error => error.code === 'request_outcome_unknown')
-    assert.equal(h.calls.length, 1)
+    assert.equal(h.calls.length, 2)
   }
 })
 
-test('a failed uncertainty logger cannot release the original hold or permit another paid request', async () => {
+test('a failed uncertainty logger cannot release the original hold or retry the same key', async () => {
   const h = await harness({ platform: 'kuaishou' })
   await h.service.setTenantBillingProfile(h.context.tenant.id,
     { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'offline-admin')
@@ -642,12 +646,19 @@ test('a failed uncertainty logger cannot release the original hold or permit ano
   h.platformStore.stageProviderEvidence = async () => { throw new TypeError('private stage failure') }
   await assert.rejects(h.invokeData(), error => error.code === 'request_outcome_unknown')
   assert.equal([...h.store.requests.values()][0].status, 'unknown')
-  await assert.rejects(h.invokeData(undefined, 'kuaishou-logger-new-idem'), error => error.code === 'request_outcome_unknown')
+  await assert.rejects(h.invokeData(), error => error.code === 'request_outcome_unknown')
   assert.equal(h.calls.length, 1)
-  const charges = [...h.store.customerCharges.values()]
+  let charges = [...h.store.customerCharges.values()]
   assert.equal(charges.filter(row => row.status === 'unknown').length, 1)
   assert.equal(h.store.creditAccounts.get(h.context.tenant.id).heldMinor, 3)
   assert.equal(h.store.creditAccounts.get(h.context.tenant.id).availableMinor, 97)
+  // A new key is a separate purchase with its own hold; the first hold stays unchanged.
+  await assert.rejects(h.invokeData(undefined, 'kuaishou-logger-new-idem'), error => error.code === 'request_outcome_unknown')
+  assert.equal(h.calls.length, 2)
+  charges = [...h.store.customerCharges.values()]
+  assert.equal(charges.filter(row => row.status === 'unknown').length, 2)
+  assert.equal(h.store.creditAccounts.get(h.context.tenant.id).heldMinor, 6)
+  assert.equal(h.store.creditAccounts.get(h.context.tenant.id).availableMinor, 94)
 })
 
 test('provider preview is visible partial content and missing modern metrics stay null', async () => {
@@ -735,7 +746,8 @@ test('unknown durable mark failure retains cache-only parent reservation and lea
   pending.leaseExpiresAt = new Date(Date.now() - 1).toISOString()
   await h.store.reapStaleReservations()
   assert.equal(pending.status, 'unknown')
-  await assert.rejects(h.invokeData(next, 'content-buffer-after-reap'), error => error.code === 'request_outcome_unknown')
+  // The reaped request no longer holds other keys; its live parent delivery lease still does.
+  await assert.rejects(h.invokeData(next, 'content-buffer-after-reap'), error => error.code === 'request_in_progress')
   assert.equal(h.calls.length, 1)
 })
 
@@ -971,7 +983,7 @@ for (const platform of ['reddit', 'youtube']) {
     assert.equal(h.historical.length, 0)
   })
 
-  test(`${platform} uncertain second supplier call holds the original work without automatic retry or historical fallback`, async () => {
+  test(`${platform} uncertain second supplier call holds its own key without automatic retry or historical fallback`, async () => {
     const h = await harness({ platform, fetchImpl: (_call, n) => {
       if (n === 2) throw new TypeError('synthetic transport uncertainty')
       return Response.json({ code: 200, data: internationalPage(platform, ['one'], 'next-page-token') })
@@ -979,8 +991,11 @@ for (const platform of ['reddit', 'youtube']) {
     const body = { platform, query: 'uncertain query', pageSize: 20 }
     await assert.rejects(h.invokeData(body), error => ['upstream_outcome_unknown', 'request_outcome_unknown'].includes(error.code))
     assert.equal([...h.store.requests.values()][0].status, 'unknown')
-    await assert.rejects(h.invokeData(body, 'international-uncertain-new-key'), error => error.code === 'request_outcome_unknown')
+    await assert.rejects(h.invokeData(body), error => error.code === 'request_outcome_unknown')
     assert.equal(h.calls.length, 2)
+    const next = await h.invokeData(body, 'international-uncertain-new-key')
+    assert.equal(next.status, 200)
+    assert.equal(h.calls.length, 4)
     assert.equal(h.historical.length, 0)
   })
 }
@@ -1109,7 +1124,7 @@ test('Xiaohongshu non20 pages cannot bypass paused existing search operation or 
   assert.equal(h.historical.length, 0)
 })
 
-for (const platform of ['tiktok', 'weibo', 'xiaohongshu']) test(`${platform} historical unknown precedes retired-cursor restart even with a new idempotency key`, async () => {
+for (const platform of ['tiktok', 'weibo', 'xiaohongshu']) test(`${platform} a historical unknown does not hide the retired-cursor restart for a new idempotency key`, async () => {
   const h = await harness({ platform }), body = { platform, query: '城市', pageSize: 1 }
   const codec = createNightAllCompatibilityCursorCodec(PEPPER, h.context.consumer.id)
   const traversal = prepareNightAllCompatibilityTraversal({ operation: 'data-search', platform, upstreamBody: body, codec })
@@ -1122,7 +1137,7 @@ for (const platform of ['tiktok', 'weibo', 'xiaohongshu']) test(`${platform} his
     acquisitionRequest: { path: '/api/v1/data/search', body }, unitsReserved: 1,
     leaseExpiresAt: new Date(Date.now() + 120000), windowStart: new Date(Date.now() - 60000), maxRequests: 100 })
   await h.store.markRequestUnknown(id, 'offline_unknown')
-  await assert.rejects(h.invokeData({ ...body, cursor: wrapped.data.pageInfo.nextCursor }, 'historical-unknown-new'), error => error.code === 'request_outcome_unknown')
+  await assert.rejects(h.invokeData({ ...body, cursor: wrapped.data.pageInfo.nextCursor }, 'historical-unknown-new'), error => error.code === 'search_restart_required')
   assert.equal(h.calls.length, 0)
   assert.equal(h.historical.length, 0)
 })

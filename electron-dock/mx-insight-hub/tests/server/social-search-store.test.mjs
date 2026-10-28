@@ -241,7 +241,7 @@ for (const postgres of [false, true]) {
     }
   })
 
-  test(`${name} social parent lease serializes buffered delivery and finds unknown parents without supplier calls`, options, async t => {
+  test(`${name} social parent lease serializes buffered delivery without supplier calls`, options, async t => {
     const f = await fixture(t, postgres), lease = { consumerId: f.consumerId, fingerprint, ownerRequestId: f.target.id, expiresAt: ago(-60000) }
     assert.equal(await f.store.acquireDeliveryLease(lease), true)
     assert.equal(await f.store.acquireDeliveryLease({ ...lease, ownerRequestId: randomUUID() }), false)
@@ -249,10 +249,8 @@ for (const postgres of [false, true]) {
     assert.equal(await f.store.acquireDeliveryLease({ ...lease, ownerRequestId: randomUUID() }), false)
     await f.store.releaseDeliveryLease(lease)
     assert.equal(await f.store.acquireDeliveryLease(lease), true)
-    await f.setUsage(f.target.id, { status: 'unknown', responseStatus: null })
-    assert.equal(await f.store.unknownFor(f.saved.delivery, f.path), true)
-    assert.equal(await f.store.unknownFor({ ...f.saved.delivery, apiKeyId: randomUUID() }, f.path), false)
-    assert.equal(await f.store.unknownFor(f.saved.delivery, '/api/v1/data/social/user-info'), false)
+    // An ended unknown parent no longer has an equal-request check; same-key replay owns it.
+    assert.equal(typeof f.store.unknownFor, 'undefined')
   })
 
   test(`${name} user-info sources and profile resolver receipts cannot be reused under crawl or post descriptors`, options, async t => {

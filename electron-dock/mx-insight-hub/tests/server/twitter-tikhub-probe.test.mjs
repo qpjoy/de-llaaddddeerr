@@ -224,28 +224,36 @@ test('native HTTP 200 with a business rejection does not establish successful al
   assert.equal(f.sent.length, 1)
 })
 
-test('unresolved standard-search identities block both original and native spellings before supplier dispatch', async () => {
-  for (const query of [ORIGINAL_QUERY, QUERY]) for (const state of ['running', 'unknown']) {
+// Only an in-flight equal search holds the probe back; an ended unknown does not.
+const inFlightBlocker = (f, id, query = ORIGINAL_QUERY) => f.usage.requests.set(id, { id, tenantId: f.context.tenant.id,
+  consumerId: f.context.consumer.id, apiKeyId: f.context.apiKey.id, platform: 'twitter', status: 'reserved',
+  idempotencyKey: `in-flight-${id}`, reservedAt: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+  acquisitionRequest: { method: 'POST', path: '/api/v1/data/search', body: { platform: 'twitter', query } } })
+
+test('in-flight standard-search identities block both original and native spellings before supplier dispatch', async () => {
+  for (const query of [ORIGINAL_QUERY, QUERY]) for (const state of ['running', 'reserved_usage']) {
     const f = await fixture(), protocol = new SearchProtocolStore(f.usage)
     const blockerId = randomUUID()
-    f.blockerRows.push({ ...structuredClone(f.original), id: blockerId, status: state === 'unknown' ? 'unknown' : 'reserved',
+    f.blockerRows.push({ ...structuredClone(f.original), id: blockerId, status: 'reserved',
       acquisition_request: { method: 'POST', path: '/api/v1/data/search', body: { platform: 'twitter', query } },
       reserved_at: '2026-10-17T00:00:00.000Z', completed_at: '2026-10-17T00:00:01.000Z' })
-    const lease = await protocol.begin(f.context, { version: 2, idempotencyKey: 'existing-v2-search-page', body: {
+    if (state === 'running') await protocol.begin(f.context, { version: 2, idempotencyKey: 'existing-v2-search-page', body: {
       platform: 'twitter', query, pageSize: 20, type: 'stable',
       timeWindow: { from: '2026-10-17T00:00:00.000Z', to: '2026-10-18T00:00:00.000Z', timezone: 'Asia/Shanghai', boundary: '[from,to)' },
     } })
-    if (state === 'unknown') await protocol.finish(lease.input, { state, usageRequestId: blockerId })
+    else inFlightBlocker(f, blockerId, query)
     const result = await f.run({ execute: true })
     assert.equal(result.errorCode, 'search_admission_blocked', JSON.stringify(result))
     assert.equal(result.admissionPolicyRevision, 'offline-admission-policy.v2')
     assert.equal(result.stage, query === ORIGINAL_QUERY ? 'guard_original' : 'guard_native')
     assert.equal(result.requestId, null)
-    assert.equal(result.blockingRequestId, state === 'unknown' ? blockerId : null)
-    assert.deepEqual(result.admission, { dispatchState: 'not_started', retrySameRequest: true, retryAfterSeconds: 300 })
+    assert.equal(result.blockingRequestId, state === 'reserved_usage' ? blockerId : null)
+    assert.equal(result.admission.dispatchState, 'not_started')
+    assert.equal(result.admission.retrySameRequest, true)
+    assert.ok(result.admission.retryAfterSeconds >= 1 && result.admission.retryAfterSeconds <= 300)
     assert.equal(result.automaticRetryAllowed, false)
-    if (state === 'unknown') assert.deepEqual(result.blockingRequest, {
-      state: 'owned_saved_request', requestId: blockerId, status: 'unknown', platform: 'twitter', pathKind: 'standard_v1',
+    if (state === 'reserved_usage') assert.deepEqual(result.blockingRequest, {
+      state: 'owned_saved_request', requestId: blockerId, status: 'reserved', platform: 'twitter', pathKind: 'standard_v1',
       queryPresent: true, queryEqualsOriginal: query === ORIGINAL_QUERY, queryEqualsNative: query === QUERY,
       reservedAt: '2026-10-17T00:00:00.000Z', completedAt: '2026-10-17T00:00:01.000Z',
     })
@@ -254,7 +262,7 @@ test('unresolved standard-search identities block both original and native spell
     assert.equal(await protocol.binding(f.context, PROTOCOL_KEYS.native), null)
     assert.equal(result.adapterCalls, 0)
     assert.equal(f.sent.length, 0)
-    assert.equal(f.usage.requests.size, 0)
+    assert.equal(f.usage.requests.size, state === 'reserved_usage' ? 1 : 0, 'only the in-flight blocker row exists')
   }
 })
 
@@ -278,11 +286,9 @@ test('an owned diagnostic guard reports its blocker separately from a nonexisten
 
 test('blocker metadata lookup is scoped to the original owner and never exposes another caller query or receipt', async () => {
   const f = await fixture(), blockerId = randomUUID()
-  f.blockerRows.push({ ...structuredClone(f.original), id: blockerId, tenant_id: randomUUID(), status: 'unknown',
+  f.blockerRows.push({ ...structuredClone(f.original), id: blockerId, tenant_id: randomUUID(), status: 'reserved',
     acquisition_request: { path: '/private/foreign-owner-path', body: { query: 'foreign-private-query-do-not-print', token: SECRET } } })
-  const binding = await f.protocol.begin(f.context, { version: 2, idempotencyKey: 'another-unknown-page',
-    body: { platform: 'twitter', query: ORIGINAL_QUERY, pageSize: 20, type: 'stable' } })
-  await f.protocol.finish(binding.input, { state: 'unknown', usageRequestId: blockerId })
+  inFlightBlocker(f, blockerId)
   const result = await f.run({ execute: true })
   assert.equal(result.blockingRequestId, blockerId)
   assert.deepEqual(result.blockingRequest, { state: 'not_found_or_unavailable' })
@@ -302,11 +308,9 @@ test('native blocker metadata reads keyword only for the fixed TikHub path and n
       expected: { pathKind: 'other', queryPresent: false, queryEqualsOriginal: null, queryEqualsNative: null } },
   ]) {
     const f = await fixture(), blockerId = randomUUID()
-    f.blockerRows.push({ ...structuredClone(f.original), id: blockerId, status: 'unknown',
+    f.blockerRows.push({ ...structuredClone(f.original), id: blockerId, status: 'reserved',
       platform: path === NATIVE_PATH ? 'social' : 'twitter', acquisition_request: { method: 'POST', path, body } })
-    const binding = await f.protocol.begin(f.context, { version: 2, idempotencyKey: 'native-unknown-blocker',
-      body: { platform: 'twitter', query: ORIGINAL_QUERY, pageSize: 20, type: 'stable' } })
-    await f.protocol.finish(binding.input, { state: 'unknown', usageRequestId: blockerId })
+    inFlightBlocker(f, blockerId)
     const result = await f.run({ execute: true })
     for (const [key, value] of Object.entries(expected)) assert.equal(result.blockingRequest[key], value)
     assert.equal(result.blockingRequest.state, 'owned_saved_request')
@@ -351,7 +355,7 @@ test('saved ownership or receipt corruption cannot count as success or authorize
   }
 })
 
-test('a new TikHub unknown blocks future standard v1 and v2 acquisitions for both equivalent query spellings', async () => {
+test('a new TikHub unknown keeps its diagnostic keys unknown without blocking future standard acquisitions', async () => {
   const f = await fixture({ outcome: 'unknown' }), result = await f.run({ execute: true })
   assert.equal(f.sent.length, 1)
   assert.equal(result.saved.status, 'unknown')
@@ -363,9 +367,10 @@ test('a new TikHub unknown blocks future standard v1 and v2 acquisitions for bot
     assert.equal(binding.result, null)
   }
   for (const query of [ORIGINAL_QUERY, QUERY]) for (const version of [1, 2]) {
-    await assert.rejects(protocol.begin(f.context, { version, idempotencyKey: `future-query-${randomUUID()}`,
-      body: { platform: 'twitter', query, pageSize: 20, type: 'stable' } }),
-    { code: version === 1 ? 'request_outcome_unknown' : 'search_admission_blocked' })
+    const lease = await protocol.begin(f.context, { version, idempotencyKey: `future-query-${randomUUID()}`,
+      body: { platform: 'twitter', query, pageSize: 20, type: 'stable' } })
+    assert.equal(lease.kind, 'acquired')
+    await protocol.finish(lease.input, { state: 'retryable' })
   }
   assert.equal(f.sent.length, 1)
 })

@@ -43,7 +43,6 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
   const started = performance.now(), identity = { tenantId: context.tenant.id, consumerId: context.consumer.id,
     apiKeyId: context.apiKey.id, path: '/api/v1/data/search', query: request.query, pageSize: request.pageSize,
     type: request.resultType, scopeHash: request.scopeHash, startDate: request.startDate, endDate: request.endDate, stores }
-  if (await store.facebookFillUnknownFor(delivery)) throw new AppError(409, 'request_outcome_unknown', 'An equal Facebook delivery has an unknown outcome')
   const history = await store.facebookDeliveredIdsFor({ ...identity, previousDeliveryId: request.fill?.previousDeliveryId })
   const seen = new Set(history.ids), rows = [], sources = [], tokens = new Set()
   let provider = request.provider, pinned = Boolean(request.provider), providerCursor = request.providerCursor ?? null
@@ -99,7 +98,6 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
     const claim = await store.acquireFacebookFillDeliveryLease(parentLease)
     if (claim !== true && claim?.kind !== 'acquired') throw new AppError(409, 'request_in_progress', 'An equal Facebook delivery is in progress')
     ownsLease = true
-    if (await store.facebookFillUnknownFor(delivery)) throw new AppError(409, 'request_outcome_unknown', 'An equal Facebook delivery has an unknown outcome')
     if (request.buffer) {
       const archived = await store.facebookPageFor({ ...identity, callId: request.buffer.callId, sourceProvider: provider })
       if (!archived || archived.bodySize > PAGE_BYTES[provider]) throw unavailable()
@@ -133,7 +131,6 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         const authorizeStep = async () => {
           context = await revalidateIdentity()
           if ((await policyStore.facebook()).mode === 'paused') throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
-          if (await store.facebookFillUnknownFor(delivery)) throw new AppError(409, 'request_outcome_unknown', 'An equal Facebook delivery has an unknown outcome')
           const shared = await target.platformStore.providerState(provider)
           const state = isHubRateLimitExempt(context) ? internalCircuitState(gateway.usageStore, context, shared) : shared
           const contract = await target.platformStore.contractCircuitState?.(provider, 'facebook')

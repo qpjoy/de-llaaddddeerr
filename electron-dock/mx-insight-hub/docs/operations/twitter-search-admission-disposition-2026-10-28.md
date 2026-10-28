@@ -68,15 +68,64 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- no
 
 `summary.blocking=0` 后下一次调度即可正常准入。`leases.expired>0` 或 `unboundBindings>0` 表示存在没有 usage ID 的阻塞，不能用本处置解决，需贴回输出。已结束的 Run `106855` 不会补跑。
 
-### 反复出现的根因与可选方向（未实施）
+### 生产核查结果：上游成功、Hub 自身未知
 
-一天内已出现两条 Twitter 未知结果 blocker。已知的那条来自 RapidAPI `twitter-aio.search` 30 秒超时。只要供应商仍会偶发超时，周期性策略就会每遇到一次超时就停住，直到管理员处置。可选方向（均需用户决定）：
+操作者运行范围诊断（`search-admission-scope.v1`）后确认，该查询（6 字）下只有这一条 blocker：
 
-1. 保持现状：逐条人工处置，用上面的范围诊断一次清完同一查询的所有 blocker。
-2. Delta 侧：收到 `automaticRetryAllowed=true` 时按 `retryAfterSeconds` 延迟一次，用同一请求体和 Idempotency-Key 重试。只能消除“仍在执行”的 blocker，对结果未知无效；Delta 不在本仓库。
-3. Hub 侧：对一个窄类别自动接受风险，例如供应商超时、没有任何 HTTP 响应、且已超过若干小时的 Twitter unknown。这会改变“只允许管理员逐条处置”的既定决定，可能为同一页重复向供应商付费。
+| 项目 | 结果 |
+| --- | --- |
+| 阻塞请求 | `17b94611-6ecf-4680-a01c-f147476c48e7`，usage `unknown`，无协议 binding（由 v1 路径 usage 扫描命中） |
+| 时间 | 2026-10-19 06:05:50–06:07:13 UTC，已阻塞约 9 天 |
+| 错误 | `external_platform_persistence_unknown`：Hub 自己确认入库/结算失败 |
+| 供应商调用 | RapidAPI `social.content.search`，`succeeded / HTTP 200`，6630ms |
+| 处置功能 | 生产无迁移 166 表、无处置模块（`deploy_disposition_then_dispose`） |
+| 租约 | 0 |
+
+供应商当时已经成功返回，阻塞完全来自 Hub 侧的持久化未知；旧规则让它对同一 Key、同一查询的所有后续请求永久生效。这正是“上游能通，却因 Hub 原因卡住”。
+
+### 改动：只拦截仍在执行的同查询请求（取代当天稍早的 15 分钟方案）
+
+用户要求：线上不能卡住；Hub 的拒绝必须是暂时的，不能出现“上游能通、却因 Hub 原因卡住”；保留人工恢复。讨论后确认，“结果未知之后的等待”不能消除任何风险：原请求在 Hub 侧已经结束，等待既不能查明供应商是否计费，也不能挡住之后用新 key 的重新采购，只会让下游以为接口坏了。于是改为：**另一个请求只在同查询请求仍在执行时被拦截**。
+
+| 保护 | 改动后 |
+| --- | --- |
+| 协议准入：其他租约 | 只看未过期租约（执行中） |
+| 协议准入：binding 的 `unknown` / 过期 `running` | 不再阻断其他 key |
+| 协议准入、Twitter 编译等价查询：usage | 只看 `reserved` 且租约未过期；无租约记录时最多按 5 分钟计 |
+| Twitter fill、TikHub content-search、social-search、Facebook fill 的同指纹 unknown 检查 | 删除 |
+| 供应商派发锁里的未知结果冷却（TikHub/JustOne 15 分钟、RapidAPI 60 秒） | 删除；`pending` 调用仍阻断 |
+| 不可解析付费响应隔离、内容不可用冷却 | 保留，统一为内置固定 5 分钟（`RESPONSE_QUARANTINE_MS`） |
+| 熔断、限流、并发、权限、预算、价格 | 不变 |
+| 同一 Idempotency-Key 回放 | 不变；原请求仍返回 `request_outcome_unknown`，绝不用原 key 再采购 |
+| 管理员处置（迁移 166） | 保留并可记录审计，但已不是继续采集的前提 |
+
+实现集中在 `server/data/in-flight-search.mjs`。`search_admission_blocked` 的 `retryAfterSeconds` 为执行中请求租约的剩余秒数，上限仍是 300，按提示重试即可通过。
+
+“限制与恢复”管理页不再列出已结束的未知调用。`*_UNKNOWN_FINGERPRINT_COOLDOWN_MS` 与 `*_RESPONSE_QUARANTINE_COOLDOWN_MS` 部署变量已从 `manage.sh`、compose 和 `.env.example` 删除，设置也会被忽略，不会让部署预检失败。
+
+代价：一次超时或结果未知之后，同查询的新 key 会立即重新采购；若供应商其实已对第一次计费，这一页会重复付费，通常每次约 ¥0.01 或 $0.01。IP 批量查询中的重复 IP 本就是独立付费调用，第一项未知后第二项也会照常查询。
+
+### 上线与验证
+
+1. 把当前代码同步到服务器 Hub 源码目录。迁移 166、处置模块和本次规则一起发布，Hub 独立发布：
+
+   ```bash
+   MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh ops internal-production deploy
+   ```
+
+2. 再次运行范围诊断（命令同上，现为 `search-admission-scope.v2`）。预期 `inFlightRule.installed=true`、`disposition.available=true`，`17b94611` 的 `action=none_not_in_flight`，`summary.blocking=0`。
+3. 等策略下一次调度，确认新 Run 正常采集。已结束的 Run `106855` 不补跑。
+
+Delta（`/Users/qpjoy/workspace/mingxi/po-infra`）收到 409 会结束本次 Run 且不重试。核对其代码后结论是**不需要再加 Delta 重试**：
+
+- Delta 原本有准入等待重试：Run 转回 `pending`、每 5 分钟用同页同 key 重试。2026-10-28 提交 `3a5413e` 主动移除。原因是 Hub 旧规则永久阻塞，等待中的 Run 永远结束不了，还会占住计划的活动任务名额，挡住后续正常调度。
+- 部署 Hub 新规则后，现有行为已能自愈：失败 Run 的窗口不前移，下一次增量 Run 从失败 Run 的起点开始（`freeze_new_search_contract`：只有成功且遍历完整的 Run 才推进起点），因此没有数据缺口。自适应调度跳过失败结果，不会因此拉长间隔。默认间隔 1 小时（`daily_interval_seconds=3600`）；已结束的未知结果不再阻断，只有仍在执行的同查询请求会让这一次失败。
+- Delta 自己的跨 Run unknown 永久拦截（`standard_search_plan_redispatch_blocked` 等）已在 2026-10-22 的 `6f6c36a` 中从调度路径移除。现在的永久阻塞只来自 Hub 旧规则。
+- 加重试只能把该窗口的补采从“下一次调度”提前到“几秒到几分钟内”，并少一条告警，却要重新引入已被移除的等待状态。若以后确实需要，只能做成有次数和总时长上限的 Celery 延时入队，不能让 Run 保持 `pending` 占名额，也不能在 worker 里 sleep。
 
 ## 验证与发布状态
+
+**2026-10-28 晚，只拦截执行中请求：** 跨请求未知阻断与供应商未知冷却已删除，保留执行中去重、同 key 保护、熔断、5 分钟响应隔离和人工处置。约 100 项原本断言“未知阻断新 key”的测试改为新语义：执行中仍阻断，已结束的未知不阻断，同 key 仍受保护。新增 in-flight 规则测试，并改写处置派发/准入测试。用 PGlite 0.2.17 跑完整服务端套件，失败项与未改代码时的 45 项既有失败完全相同；`tests/manage-script.test.sh` 通过，类型检查通过。尚未部署。
 
 新增定向测试 37 项通过、0 失败、0 跳过，覆盖真实 PGlite SQL、只读准备、CAS、幂等确认、审计不可变、旧账务不变、跨身份隔离、其他 blocker、pending/租约、旧 key 保护以及三层准入联动。证据摘要包含派发指纹和调用顺序，变化后处置失效；前端只在明确核实有效时显示解除成功。既有协议/人工重试/诊断/SSO 回归 102 项通过；深层相关联合测试 70 项中 64 通过、6 项既有原生 PostgreSQL 条件测试跳过（与新测试存在重叠，不相加计数）。PGlite 只有单会话，串行模拟不等于原生 PostgreSQL 多会话竞争验证。
 

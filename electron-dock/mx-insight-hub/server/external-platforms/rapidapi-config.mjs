@@ -10,7 +10,7 @@ export function rapidApiConfig(environment = {}) {
     hubSocialVerified: false, contractVerified: false, dispatchEnabled: true,
     timeoutMs: 30000, freshTtlMs: 60000, staleTtlMs: 86400000, maxConcurrency: 6,
     maxConsumerConcurrency: 4, maxRequestsPerMinute: 60, circuitFailureThreshold: 5,
-    circuitOpenMs: 30000, unknownFingerprintCooldownMs: 60000, billing: {},
+    circuitOpenMs: 30000, billing: {},
   }
 }
 export const RAPIDAPI_METADATA = {

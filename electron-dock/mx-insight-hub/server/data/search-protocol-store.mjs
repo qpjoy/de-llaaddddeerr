@@ -5,7 +5,7 @@ import { DATA_SEARCH_V1_PATH, DATA_SEARCH_V2_PATH, dataSearchQueryHash } from '.
 import { assertTwitterProtocolRetryReference, twitterProtocolRetryMetadata, twitterV2BindingEvidence, twitterRetryUsage } from './twitter-v2-retry.mjs'
 import { twitterProtocolRetryIntents, twitterRetryDenied } from '../external-platforms/twitter-manual-retry.mjs'
 import { isDeepStrictEqual } from 'node:util'
-import { getSearchAdmissionDispositionIds } from '../operations/search-admission-disposition.mjs'
+import { IN_FLIGHT_FALLBACK_SQL, inFlightRetryAfterSeconds, inFlightUntil, searchInFlight } from './in-flight-search.mjs'
 
 const memory = new WeakMap()
 const LEASE_MS = 300000
@@ -20,11 +20,12 @@ const blocked = (code, requestId) => new AppError(409, code, code === 'request_o
   : 'A search using the other protocol version is still running', { ...(requestId ? { requestId } : {}), automaticRetryAllowed: false })
 // Only a new, unowned v2 page can be labelled safe to retry at admission.
 // This never settles the blocker or permits changing this page's identity.
-const admissionBlocked = (version, keyOwned, code, requestId) => version !== 2 || keyOwned
+// Another request is held back only while one is in flight; the hint is when its lease ends.
+const admissionBlocked = (version, keyOwned, code, requestId, retryAfterSeconds = 300) => version !== 2 || keyOwned
   ? blocked(code, requestId)
   : new AppError(409, 'search_admission_blocked',
     'This search was not admitted; retry only the same request and Idempotency-Key after the blocking request is resolved',
-    { dispatchState: 'not_started', automaticRetryAllowed: true, retrySameRequest: true, retryAfterSeconds: 300,
+    { dispatchState: 'not_started', automaticRetryAllowed: true, retrySameRequest: true, retryAfterSeconds,
       ...(requestId ? { blockingRequestId: requestId } : {}) })
 const sameScope = (left, right) => ['tenantId', 'consumerId', 'apiKeyId', 'platform', 'queryHash'].every(key => left[key] === right[key])
 const rowRecord = row => row && ({ consumerId: row.consumer_id, idempotencyKey: row.idempotency_key, tenantId: row.tenant_id,
@@ -87,24 +88,20 @@ export class SearchProtocolStore {
       const retry = version === 2 ? await twitterProtocolRetryMetadata({usage:this.usage,data:state,input,retryStore,apiKeyPepper})
         : {acknowledgedRequestIds:[],claim:async()=>{}}
       const excluded = retry.acknowledgedRequestIds
-      const unknown = [...state.bindings.values()].find(row => sameScope(row, input) &&
-        !excluded.includes(row.usageRequestId) && (row.state === 'unknown' || row.state === 'running' && Date.parse(row.leaseExpiresAt) <= Date.now()))
-      if (unknown) throw admissionBlocked(version, keyOwned, 'request_outcome_unknown', unknown.usageRequestId)
+      // Only an equal search still in flight holds this key back. An ended
+      // attempt, even unknown, stays protected under its own key only.
+      const inFlightBlocked = (requestId, until) => admissionBlocked(version, keyOwned, 'request_in_progress', requestId, inFlightRetryAfterSeconds(until))
       if (version === 2) {
-        // A legacy receipt can block this query only when its saved identity
-        // establishes the same standard search. Missing snapshots do not turn
-        // one unresolved request into a platform-wide ban; its own key remains
-        // protected above and no historical outcome is changed here.
-        const usages = [...this.usage.requests.values()].filter(row => row.tenantId === input.tenantId && row.consumerId === input.consumerId
-          && row.apiKeyId === input.apiKeyId && row.platform === input.platform
+        const running = [...this.usage.requests.values()].find(row => row.tenantId === input.tenantId && row.consumerId === input.consumerId
+          && row.apiKeyId === input.apiKeyId && row.platform === input.platform && row.status === 'reserved'
           && row.acquisitionRequest?.path === DATA_SEARCH_V1_PATH
           && typeof row.acquisitionRequest?.body?.query === 'string' && row.acquisitionRequest.body.query.trim()
-          && row.acquisitionRequest.body.query.trim() === body.query.trim() && !excluded.includes(row.id))
-        const unresolved = usages.find(row => row.status === 'unknown') || usages.find(row => row.status === 'reserved')
-        if (unresolved) throw admissionBlocked(version, keyOwned, unresolved.status === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', unresolved.id)
+          && row.acquisitionRequest.body.query.trim() === body.query.trim() && searchInFlight(row))
+        if (running) throw inFlightBlocked(running.id, inFlightUntil(running))
       }
-      const other = [...state.leases.values()].find(lease => sameScope(lease, input) && (version === 2 || lease.version === 2))
-      if (other) throw admissionBlocked(version, keyOwned, Date.parse(other.leaseExpiresAt) <= Date.now() ? 'request_outcome_unknown' : 'request_in_progress')
+      const other = [...state.leases.values()].find(lease => sameScope(lease, input) && (version === 2 || lease.version === 2)
+        && Date.parse(lease.leaseExpiresAt) > Date.now())
+      if (other) throw inFlightBlocked(undefined, other.leaseExpiresAt)
       await retry.claim()
       input.acknowledgedRequestIds = excluded
       state.leases.set(input.ownerId, input)
@@ -143,43 +140,24 @@ export class SearchProtocolStore {
       const retry = version === 2 ? await twitterProtocolRetryMetadata({usage:this.usage,client,input,retryStore,apiKeyPepper})
         : {acknowledgedRequestIds:[],claim:async()=>{}}
       const excluded = retry.acknowledgedRequestIds
-      const otherRequestBlocked = (code, requestId) => admissionBlocked(version, keyOwned, code, requestId)
-      // Administrative dispositions affect only other requests' admission.
-      // Never persist them as retry ancestry or weaken this key's checks above.
-      const admissionExcluded = [...excluded]
-      const firstUnresolved = async lookup => {
-        let candidate = await lookup()
-        while (candidate && candidate.status !== 'reserved' && input.platform === 'twitter') {
-          const disposed = await getSearchAdmissionDispositionIds(client, [candidate], {
-            tenantId: input.tenantId, consumerId: input.consumerId, apiKeyId: input.apiKeyId,
-            platform: input.platform, query: body.query,
-          })
-          if (!disposed.length) break
-          admissionExcluded.push(...disposed)
-          candidate = await lookup()
-        }
-        return candidate
-      }
-      const unknown = await firstUnresolved(async () => (await client.query(`SELECT usage_request_id FROM control.data_search_protocol_bindings
-        WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3 AND platform=$4 AND query_hash=$5
-        AND NOT (coalesce(usage_request_id,'00000000-0000-0000-0000-000000000000'::uuid)=ANY($6::uuid[]))
-        AND (state='unknown' OR (state='running' AND lease_expires_at<=now())) LIMIT 1`, [...args,admissionExcluded])).rows[0])
-      if (unknown) throw await otherRequestBlocked('request_outcome_unknown', unknown.usage_request_id)
+      // Only an equal search still in flight holds this key back. An ended
+      // attempt, even unknown, stays protected under its own key only.
+      const inFlightBlocked = (requestId, until) => admissionBlocked(version, keyOwned, 'request_in_progress', requestId, inFlightRetryAfterSeconds(until))
       if (version === 2) {
-        const unresolved = await firstUnresolved(async () => (await client.query(`SELECT request.id,request.status FROM usage_requests request
+        const running = (await client.query(`SELECT request.id,coalesce(request.lease_expires_at,request.reserved_at+${IN_FLIGHT_FALLBACK_SQL}) AS in_flight_until
+          FROM usage_requests request
           WHERE request.tenant_id=$1 AND request.consumer_id=$2 AND request.api_key_id=$3 AND request.platform=$4
           AND request.acquisition_request->>'path'=$5
           AND jsonb_typeof(request.acquisition_request->'body'->'query')='string'
           AND btrim(request.acquisition_request->'body'->>'query',$7)<>''
           AND btrim(request.acquisition_request->'body'->>'query',$7)=$6
-          AND NOT (request.id=ANY($8::uuid[]))
-          AND request.status IN ('unknown','reserved') ORDER BY CASE WHEN request.status='unknown' THEN 0 ELSE 1 END LIMIT 1`,
-        [...args.slice(0, 4), DATA_SEARCH_V1_PATH, body.query.trim(), QUERY_TRIM_CHARACTERS,admissionExcluded])).rows[0])
-        if (unresolved) throw await otherRequestBlocked(unresolved.status === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', unresolved.id)
+          AND request.status='reserved' AND coalesce(request.lease_expires_at,request.reserved_at+${IN_FLIGHT_FALLBACK_SQL})>now() LIMIT 1`,
+        [...args.slice(0, 4), DATA_SEARCH_V1_PATH, body.query.trim(), QUERY_TRIM_CHARACTERS])).rows[0]
+        if (running) throw inFlightBlocked(running.id, running.in_flight_until)
       }
       const other = (await client.query(`SELECT expires_at FROM control.data_search_protocol_leases WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3
-        AND platform=$4 AND query_hash=$5 AND ($6::int=2 OR version=2) LIMIT 1`, [...args, version])).rows[0]
-      if (other) throw await otherRequestBlocked(Date.parse(other.expires_at) <= Date.now() ? 'request_outcome_unknown' : 'request_in_progress')
+        AND platform=$4 AND query_hash=$5 AND ($6::int=2 OR version=2) AND expires_at>now() LIMIT 1`, [...args, version])).rows[0]
+      if (other) throw inFlightBlocked(undefined, other.expires_at)
       await retry.claim()
       input.acknowledgedRequestIds = excluded
       await client.query(`INSERT INTO control.data_search_protocol_leases(owner_id,tenant_id,consumer_id,api_key_id,platform,query_hash,idempotency_key,version,expires_at)

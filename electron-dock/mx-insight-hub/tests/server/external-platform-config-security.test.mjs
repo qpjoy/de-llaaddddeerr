@@ -607,30 +607,34 @@ test('runtime wires the TikHub burst cap into shared search and user-info admiss
   } finally { await closeRuntime(runtime) }
 })
 
-test('runtime separates configured response quarantine from unknown protection across paid stores', async () => {
+test('runtime applies the fixed five-minute response quarantine and no unknown cooldown across paid stores', async () => {
+  // Retired deployment keys are ignored rather than changing protection.
   const runtime = await runtimeFor({ ...BASE,
     MX_INSIGHT_JUSTONE_RESPONSE_QUARANTINE_COOLDOWN_MS: '120000',
     MX_INSIGHT_TIKHUB_RESPONSE_QUARANTINE_COOLDOWN_MS: '180000',
+    MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS: '900000',
+    MX_INSIGHT_TIKHUB_UNKNOWN_FINGERPRINT_COOLDOWN_MS: '900000',
   })
   try {
-    for (const platform of [runtime.externalPlatformGateway.platformStore, runtime.xiaohongshuHotNotesStore]) {
-      assert.equal(platform.responseQuarantineCooldownMs, 120000)
-      assert.equal(platform.uncertainCooldownMs, 900000)
+    for (const platform of [runtime.externalPlatformGateway.platformStore, runtime.xiaohongshuHotNotesStore,
+      runtime.tikHubPlatformStore, runtime.tikHubUserInfoGateway.platformStore]) {
+      assert.equal(platform.responseQuarantineCooldownMs, 300000)
+      assert.equal(platform.uncertainCooldownMs, undefined)
     }
-    assert.equal(runtime.tikHubPlatformStore.responseQuarantineCooldownMs, 180000)
-    assert.equal(runtime.tikHubUserInfoGateway.platformStore.responseQuarantineCooldownMs, 180000)
-    assert.equal(runtime.tikHubPlatformStore.uncertainCooldownMs, 900000)
   } finally { await closeRuntime(runtime) }
 })
 
-test('invalid quarantine settings fail deploy preflight without taking down identity services', async () => {
+test('retired quarantine and unknown-cooldown settings cannot fail deploy preflight or identity services', async () => {
   for (const [prefix, field, preflight] of [
     ['JUSTONE', 'justOne', preflightJustOneConfig], ['TIKHUB', 'tikHub', preflightTikHubConfig],
   ]) {
-    const environment = { ...BASE, [`MX_INSIGHT_${prefix}_RESPONSE_QUARANTINE_COOLDOWN_MS`]: 'invalid' }
-    assert.throws(() => preflight(environment), error => error.code === 'invalid_configuration')
+    const environment = { ...BASE, [`MX_INSIGHT_${prefix}_RESPONSE_QUARANTINE_COOLDOWN_MS`]: 'invalid',
+      [`MX_INSIGHT_${prefix}_UNKNOWN_FINGERPRINT_COOLDOWN_MS`]: 'invalid' }
+    const baseline = loadConfig(BASE)[field]
+    assert.doesNotThrow(() => preflight(environment))
     const config = loadConfig(environment)
-    assert.equal(config[field].dispatchEnabled, false)
+    assert.equal(config[field].dispatchEnabled, baseline.dispatchEnabled)
+    assert.equal(config[field].responseQuarantineCooldownMs, 300000)
     const runtime = await createRuntime(config)
     try {
       assert.ok(runtime.service)

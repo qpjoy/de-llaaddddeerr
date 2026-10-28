@@ -4,7 +4,6 @@ import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
 import { NATIVE_FORWARDING_VERSION } from '../contracts/native-forwarding.mjs'
 import { TIKHUB_CONTENT_SEARCH_VERSION } from '../contracts/tikhub-content-search.mjs'
 import { twitterDeliveryLeases } from './twitter-delivery-leases.mjs'
-import { getSearchAdmissionDispositionIds } from '../operations/search-admission-disposition.mjs'
 
 const clone = value => structuredClone(value)
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)
@@ -143,23 +142,6 @@ export class ContentSearchStateStore {
     // Other platforms and legacy raw traversal keep their strict full-root gate.
     const page = verifiedArchive(archive, ['kuaishou', 'twitter'].includes(this.platform) && input.path === '/api/v1/data/search')
     return page ? { ...page, sourceUsageRequestId: usage.id } : null
-  }
-
-  async unknownFor(delivery, path) {
-    if (!uuid(delivery.usageRequestId) || !sha(delivery.fingerprint) || !identityValid({ ...delivery, path })) throw fail()
-    if (!this.pool) return [...this.usage.requests.values()].some(row => scopeMatches(row, { ...delivery, path }, this.platform)
-      && row.status === 'unknown' && row.fingerprint === delivery.fingerprint
-      && Date.now() - Date.parse(row.reservedAt ?? row.createdAt ?? new Date().toISOString()) <= 86400000)
-    const dispositionEligible = this.platform === 'twitter' && path === '/api/v1/data/search'
-    const rows = (await this.pool.query(`SELECT id FROM usage_requests WHERE tenant_id=$1 AND consumer_id=$2 AND api_key_id=$3
-      AND platform=$4 AND fingerprint=$5 AND status='unknown' AND acquisition_request->>'path'=$6
-      AND reserved_at>=now()-interval '24 hours' ${dispositionEligible ? '' : 'LIMIT 1'}`,
-    [delivery.tenantId, delivery.consumerId, delivery.apiKeyId, this.platform, delivery.fingerprint, path])).rows
-    if (!dispositionEligible || !rows.length) return rows.length > 0
-    const disposed = await getSearchAdmissionDispositionIds(this.pool, rows.filter(row => row.id !== delivery.usageRequestId), {
-      tenantId: delivery.tenantId, consumerId: delivery.consumerId, apiKeyId: delivery.apiKeyId, platform: 'twitter',
-    })
-    return rows.some(row => !disposed.includes(row.id))
   }
 
   async acquireDeliveryLease(input) {

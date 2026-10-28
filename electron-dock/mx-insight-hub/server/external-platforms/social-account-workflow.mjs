@@ -88,7 +88,6 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
   const stateStore = new SocialSearchStateStore({ [provider]: store }, { platform: request.platform, workflowKind })
   const identity = { tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
     path: traversal ? request.path : `/api/v1/data/social/${request.operation}`, scopeHash: request.scopeHash }
-  if (await stateStore.unknownFor(delivery, identity.path)) throw new AppError(409, 'request_outcome_unknown', 'A previous equal account request has an unknown outcome')
   const history = await stateStore.historyFor({ ...identity, previousDeliveryId: request.previousDeliveryId,
     jobCount: request.jobs.length, totalLimit: request.totalLimit })
   const state = history.state || { jobs: request.jobs.map(job => ({ query: job.id, providerCursor: null,
@@ -167,7 +166,6 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
   try {
     if (!await stateStore.acquireDeliveryLease(parentLease)) throw new AppError(409, 'request_in_progress', 'An equal account delivery is in progress')
     ownsParent = true
-    if (await stateStore.unknownFor(delivery, identity.path)) throw new AppError(409, 'request_outcome_unknown', 'A previous equal account request has an unknown outcome')
     for (const [index, job] of state.jobs.entries()) {
       if (traversal) job.duplicateCount = 0
       job.manualContinuation = false

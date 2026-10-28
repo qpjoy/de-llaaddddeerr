@@ -11,15 +11,18 @@ import { createTwitterSearchRouter } from '../../server/data/twitter-search-rout
 import { assertTwitterSearchAvailable } from '../../server/data/twitter-search-availability.mjs'
 import { requestFingerprint } from '../../server/core/crypto.mjs'
 import { TIKHUB_CONTENT_SEARCH_VERSION } from '../../server/contracts/tikhub-content-search.mjs'
+import { AppError } from '../../server/core/errors.mjs'
 
 const pepper = 'offline-twitter-supplier-compatibility-fixture'
 const path = '/api/v1/data/search'
 const requestBody = { platform: 'twitter', query: 'fixture keyword', pageSize: 20, type: 'stable' }
 const oldDate = new Date(Date.now() - 30 * 86400000).toISOString()
+const recentDate = () => new Date(Date.now() - 60_000).toISOString()
 const context = () => ({ tenant: { id: randomUUID() }, consumer: { id: randomUUID() }, apiKey: { id: randomUUID() } })
 const row = (ctx, patch = {}) => ({ id: randomUUID(), tenantId: ctx.tenant.id, consumerId: ctx.consumer.id,
   apiKeyId: ctx.apiKey.id, platform: 'twitter', idempotencyKey: 'old-twitter-supplier-key', status: 'unknown',
-  fingerprint: requestFingerprint({ method: 'POST', path, body: requestBody }), reservedAt: oldDate,
+  fingerprint: requestFingerprint({ method: 'POST', path, body: requestBody }), reservedAt: recentDate(),
+  leaseExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
   acquisitionRequest: { method: 'POST', path, body: requestBody }, ...patch })
 
 async function harness() {
@@ -74,33 +77,37 @@ for (const status of ['committed', 'released']) test(`same-key historical Rapid 
   assert.deepEqual(h.calls, { rapid: 0, tikhub: 0 })
 })
 
-test('same-key Rapid unknown remains owned, and a different key or v2 cannot bypass it through TikHub', async () => {
+test('same-key Rapid unknown remains owned while a different key or v2 is not held by it', async () => {
   const h = await harness(), saved = h.seed({ status: 'unknown' })
+  // Reaching dispatch authorization proves admission did not hold the new key.
+  for (const gateway of [h.rapidGateway, h.tikHubGateway]) gateway.operationControlStore = {
+    authorizeDispatch: async () => { throw new AppError(503, 'fixture_dispatch_reached', 'Fixture stops before any supplier call') } }
   await assert.rejects(h.invoke(), error => error.code === 'request_outcome_unknown' && error.details.requestId === saved.id)
   await assert.rejects(h.invoke({ ...requestBody, pageSize: 40, type: 'fresh' }, 'changed-key-same-query'),
-    error => error.code === 'request_outcome_unknown' && error.details.requestId === saved.id)
+    error => error.code === 'fixture_dispatch_reached')
   await assert.rejects(h.invoke({ ...requestBody, timeWindow: { from: '2026-10-15T00:00:00Z', to: '2026-10-16T00:00:00Z',
     timezone: 'Asia/Shanghai', boundary: '[from,to)' } }, 'v2-key-same-query', '/api/v2/data/search'),
-  error => error.code === 'search_admission_blocked' && error.details.blockingRequestId === saved.id)
+  error => error.code === 'fixture_dispatch_reached')
   assert.deepEqual(h.calls, { rapid: 0, tikhub: 0 })
   assert.equal(h.usageStore.requests.get(saved.id).status, 'unknown')
+  await assert.rejects(h.invoke(), error => error.code === 'request_outcome_unknown' && error.details.requestId === saved.id)
 })
 
-test('historical Rapid fresh renewal checks a TikHub unknown with the same query and a different page fingerprint', async () => {
+test('historical Rapid fresh renewal checks an in-flight TikHub search with the same query and a different page fingerprint', async () => {
   const h = await harness(), body = { ...requestBody, type: 'fresh' }
   const original = h.seed({ status: 'committed', responseStatus: 200, completedAt: oldDate,
     fingerprint: requestFingerprint({ method: 'POST', path, body }), acquisitionRequest: { method: 'POST', path, body },
     responseBody: { data: { items: [{ id: 'historical-item' }] } } })
   const unknownBody = { ...requestBody, pageSize: 40 }
-  const blocker = h.seed({ idempotencyKey: 'other-tikhub-unknown-key',
+  const blocker = h.seed({ status: 'reserved', idempotencyKey: 'other-tikhub-running-key',
     fingerprint: requestFingerprint({ method: 'POST', path, body: unknownBody }),
     acquisitionRequest: { method: 'POST', path, body: unknownBody, searchProvider: 'tikhub',
       searchContractVersion: TIKHUB_CONTENT_SEARCH_VERSION } })
   assert.notEqual(original.fingerprint, blocker.fingerprint)
-  await assert.rejects(h.invoke(body), error => error.code === 'request_outcome_unknown' && error.details.blockingRequestId === blocker.id)
+  await assert.rejects(h.invoke(body), error => error.code === 'request_in_progress' && error.details.blockingRequestId === blocker.id)
   assert.deepEqual(h.calls, { rapid: 0, tikhub: 0 })
   assert.equal(h.usageStore.requests.get(original.id).status, 'committed')
-  assert.equal(h.usageStore.requests.get(blocker.id).status, 'unknown')
+  assert.equal(h.usageStore.requests.get(blocker.id).status, 'reserved')
   const renewed = await h.usageStore.getUsageRequestByIdempotencyKey(h.ctx.consumer.id, original.idempotencyKey)
   assert.notEqual(renewed.id, original.id)
   assert.equal(renewed.status, 'released', 'The new un-dispatched renewal releases only its own reservation')
@@ -127,7 +134,7 @@ test('Twitter unsupported options fail before either supplier reserves or dispat
 
 const modulePath = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
 for (const postgres of [false, true]) {
-  test(`${postgres ? 'PGlite' : 'Memory'} cross-supplier unknown guard uses exact known query ownership, without an age or platform-wide ban`,
+  test(`${postgres ? 'PGlite' : 'Memory'} cross-supplier in-flight guard uses exact known query ownership and no platform-wide ban`,
     { skip: postgres && !modulePath ? 'Set MX_INSIGHT_TEST_PGLITE_MODULE to the local PGlite module' : false }, async t => {
       const ctx = context(), usageStore = new MemoryStore()
       let db
@@ -135,39 +142,38 @@ for (const postgres of [false, true]) {
         const { PGlite } = await import(pathToFileURL(modulePath).href)
         db = new PGlite(); t.after(() => db.close())
         await db.exec(`CREATE TABLE usage_requests (id uuid PRIMARY KEY,tenant_id uuid,consumer_id uuid,api_key_id uuid,
-          platform text,status text,acquisition_request jsonb,reserved_at timestamptz);`)
+          platform text,status text,acquisition_request jsonb,reserved_at timestamptz,lease_expires_at timestamptz);`)
         usageStore.pool = { query: (sql, args) => db.query(sql, args) }
       }
       const seed = async value => {
         usageStore.requests.clear()
         if (postgres) {
           await db.exec('DELETE FROM usage_requests')
-          await db.query('INSERT INTO usage_requests VALUES($1,$2,$3,$4,$5,$6,$7,$8)', [value.id, value.tenantId,
-            value.consumerId, value.apiKeyId, value.platform, value.status, JSON.stringify(value.acquisitionRequest), value.reservedAt])
+          await db.query('INSERT INTO usage_requests VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', [value.id, value.tenantId,
+            value.consumerId, value.apiKeyId, value.platform, value.status, JSON.stringify(value.acquisitionRequest), value.reservedAt, value.leaseExpiresAt])
         } else usageStore.requests.set(value.id, value)
       }
       const invoke = excludeRequestIds => assertTwitterSearchAvailable({ usageStore, context: ctx, query: requestBody.query, excludeRequestIds })
-      for (const status of ['unknown', 'reserved']) {
-        const saved = row(ctx, { status, acquisitionRequest: { path, body: { ...requestBody, query: '\n\u00a0fixture keyword\ufeff' } } })
-        await seed(saved)
-        await assert.rejects(invoke(), error => error.code === (status === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress')
-          && error.details.requestId === saved.id)
-        await invoke([saved.id])
-      }
+      const saved = row(ctx, { status: 'reserved', acquisitionRequest: { path, body: { ...requestBody, query: '\n\u00a0fixture keyword\ufeff' } } })
+      await seed(saved)
+      await assert.rejects(invoke(), error => error.code === 'request_in_progress' && error.details.requestId === saved.id
+        && error.details.retryAfterSeconds === 300)
+      await invoke([saved.id])
       for (const patch of [
+        { status: 'unknown' }, { leaseExpiresAt: oldDate },
         { tenantId: randomUUID() }, { consumerId: randomUUID() }, { apiKeyId: randomUUID() }, { platform: 'facebook' },
         { status: 'committed' }, { status: 'released' }, { acquisitionRequest: null },
         { acquisitionRequest: { path, body: {} } }, { acquisitionRequest: { path, body: { query: 42 } } },
         { acquisitionRequest: { path, body: { query: ' \n' } } },
         { acquisitionRequest: { path, body: { query: 'other query' } } },
         { acquisitionRequest: { path: '/api/v1/night-all/search/raw', body: requestBody } },
-      ]) { await seed(row(ctx, patch)); await invoke() }
+      ]) { await seed(row(ctx, { status: 'reserved', ...patch })); await invoke() }
       for (const [savedQuery, newQuery] of [['alpha AND beta AND NOT gamma', 'alpha beta -gamma'],
         ['alpha beta -gamma', 'alpha AND beta AND NOT gamma']]) {
-        const saved = row(ctx, { acquisitionRequest: { path, body: { ...requestBody, query: savedQuery } } })
+        const saved = row(ctx, { status: 'reserved', acquisitionRequest: { path, body: { ...requestBody, query: savedQuery } } })
         await seed(saved)
         await assert.rejects(assertTwitterSearchAvailable({ usageStore, context: ctx, query: newQuery }),
-          error => error.code === 'request_outcome_unknown' && error.details.requestId === saved.id)
+          error => error.code === 'request_in_progress' && error.details.requestId === saved.id)
       }
     })
 }

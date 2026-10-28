@@ -227,7 +227,8 @@ test('optional external-platform configuration keeps credentials off the admin p
   assert.equal(disabled.justOne.contractVerified, false)
   assert.equal(disabled.justOne.dispatchEnabled, false)
   assert.equal(disabled.justOne.configurationError, null)
-  assert.equal(disabled.justOne.unknownFingerprintCooldownMs, 900_000)
+  assert.equal(disabled.justOne.unknownFingerprintCooldownMs, undefined)
+  assert.equal(disabled.justOne.responseQuarantineCooldownMs, 300_000)
   assert.equal(disabled.justOne.billing.source, 'unknown')
   assert.equal(disabled.justOne.billing.freeDailyCalls, null)
 
@@ -322,9 +323,10 @@ test('JustOne activation is fail-closed and strict preflight validates TTL and p
     /plus 30000/,
   )
 
+  // The retired unknown cooldown key is ignored; it can no longer isolate dispatch.
+  assert.equal(loadConfig({ ...base, MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS: '0' }).justOne.configurationError, null)
   for (const badEnvironment of [
     { MX_INSIGHT_JUSTONE_BILLING_JSON: '{' },
-    { MX_INSIGHT_JUSTONE_UNKNOWN_FINGERPRINT_COOLDOWN_MS: '0' },
   ]) {
     const isolated = loadConfig({ ...base, ...badEnvironment })
     assert.equal(isolated.justOne.dispatchEnabled, false)
