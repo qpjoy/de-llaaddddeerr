@@ -89,8 +89,24 @@ export function LoadingState({ label = '正在加载数据' }) {
 
 export const TenantPresentation = createContext(false)
 
+const CIRCUIT_CAUSE = { upstream: '上游服务连续失败', hub_response_parsing: 'Hub 无法解析上游响应', hub_internal_cooldown: 'Hub 内部冷却' }
+
+// A circuit refusal names whose condition it protects against and the recorded
+// upstream codes; it never names the supplier, so tenant pages can show it too.
+function circuitExplanation(error) {
+  const details = error?.code === 'external_platform_circuit_open' ? error.details : null
+  if (!details?.cause) return null
+  const upstream = details.upstream || {}
+  const codes = [upstream.errorCode || details.reason, upstream.httpStatus != null ? `HTTP ${upstream.httpStatus}` : null,
+    upstream.businessCode != null ? `业务码 ${upstream.businessCode}` : null].filter(Boolean).join(' · ')
+  const until = Date.parse(details.circuitOpenUntil)
+  return `原因：${CIRCUIT_CAUSE[details.cause] || details.cause}${codes ? `（${codes}）` : ''}`
+    + (Number.isFinite(until) ? `，保护至 ${new Date(until).toLocaleTimeString()}` : '') + '；本次未派发上游请求。'
+}
+
 export function ErrorState({ error, onRetry }) {
   const tenant = useContext(TenantPresentation)
+  const circuit = circuitExplanation(error)
   const message = tenant && /upstream|provider|supplier|tikhub|justone|night-all|上游|供应|采购/i.test(error?.message || '')
     ? '当前服务未能完成请求。请保留请求编号，查询请求状态或联系管理员。'
     : error?.message || '数据请求失败'
@@ -103,6 +119,7 @@ export function ErrorState({ error, onRetry }) {
           {error?.code ? `错误码：${error.code}` : '请检查服务状态后重试'}
           {error?.requestId ? ` · Request ID：${error.requestId}` : ''}
         </p>
+        {circuit ? <p>{circuit}</p> : null}
       </div>
       {onRetry ? (
         <button className="qp-button qp-button--outline" type="button" onClick={onRetry}>

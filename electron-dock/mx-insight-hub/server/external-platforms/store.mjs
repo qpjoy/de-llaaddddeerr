@@ -11,6 +11,7 @@ import { canonicalPlatform } from '../hub-service.mjs'
 import * as facebookSearchStore from './facebook-search-store.mjs'
 import * as twitterRetryStore from './twitter-manual-retry.mjs'
 import { twitterDeliveryLeases } from './twitter-delivery-leases.mjs'
+import { FAILURE_EVIDENCE_WINDOW_MS, failureEvidence } from './availability-errors.mjs'
 
 const clone = (value) => value == null ? value : structuredClone(value)
 const iso = (value = new Date()) => new Date(value).toISOString()
@@ -915,6 +916,16 @@ export class MemoryExternalPlatformStore {
   // marketplace. Counting those provider-wide suspended live dispatch for every
   // other marketplace too, which then degraded healthy traffic to stale
   // snapshots. Upstream faults still use the provider-wide breaker.
+  async latestFailureEvidence({ marketplace = null, unusableOnly = false, before = null } = {}) {
+    const end = before == null ? Date.now() : new Date(before).getTime()
+    const outcomes = unusableOnly ? ['succeeded_unusable'] : ['rejected', 'unknown', 'succeeded_unusable']
+    const call = [...this.calls.values()].filter(row => outcomes.includes(row.outcome)
+      && (marketplace == null || row.marketplace === marketplace)
+      && new Date(row.startedAt).getTime() <= end && new Date(row.startedAt).getTime() > end - FAILURE_EVIDENCE_WINDOW_MS)
+      .sort((left, right) => new Date(right.startedAt) - new Date(left.startedAt))[0]
+    return failureEvidence(call)
+  }
+
   async contractCircuitState(providerKey = this.providerKey, scope = null) {
     if (providerKey !== this.providerKey || !scope) return null
     const bucket = this.contractCircuits.get(scope)
@@ -2835,6 +2846,21 @@ export class PostgresExternalPlatformStore {
   // unparseable response cannot suspend live dispatch for the rest of the
   // provider. Kept in its own table so provider_state keeps meaning exactly
   // what it meant before -- the provider-wide breaker.
+  // Bounded by the provider/start-time index; used only on refusal paths.
+  async latestFailureEvidence({ marketplace = null, unusableOnly = false, before = null } = {}) {
+    const { rows } = await this.pool.query(
+      `SELECT id, outcome, http_status, business_code, error_code, billed, marketplace, started_at, completed_at
+         FROM external_platform.provider_calls
+        WHERE provider_key = $1 AND outcome = ANY($2::text[]) AND ($3::text IS NULL OR marketplace = $3)
+          AND started_at <= coalesce($4::timestamptz, now())
+          AND started_at > coalesce($4::timestamptz, now()) - make_interval(secs => $5::double precision)
+        ORDER BY started_at DESC LIMIT 1`,
+      [this.providerKey, unusableOnly ? ['succeeded_unusable'] : ['rejected', 'unknown', 'succeeded_unusable'],
+        marketplace, before, FAILURE_EVIDENCE_WINDOW_MS / 1000],
+    )
+    return failureEvidence(rows[0])
+  }
+
   async contractCircuitState(providerKey = this.providerKey, scope = null) {
     if (providerKey !== this.providerKey || !scope) return null
     const { rows } = await this.pool.query(

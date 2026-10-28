@@ -459,6 +459,14 @@ export class ExternalPlatformGateway {
     }
   }
 
+  // Best effort: a refusal must not fail because its explanation is unreadable.
+  async #circuitEvidence(contractOpen, marketplace = null) {
+    try {
+      return await this.platformStore.latestFailureEvidence?.(contractOpen
+        ? { marketplace: marketplace ?? null, unusableOnly: true } : {}) ?? null
+    } catch { return null }
+  }
+
   async #resolvedCredential() {
     if (!this.adapter) return { ready: false, credential: null }
     let credentialSnapshot = null
@@ -1615,10 +1623,11 @@ export class ExternalPlatformGateway {
         errorCode,
       })
       if (operationControlError) throw operationControlError
+      const contractOpen = Boolean(contractCircuit?.circuitOpenUntil && new Date(contractCircuit.circuitOpenUntil) > now)
       if (authorizationPlatform === 'instagram' && circuitOpen) {
-        const contractOpen = contractCircuit?.circuitOpenUntil && new Date(contractCircuit.circuitOpenUntil) > now
         throw circuitOpenError(contractOpen ? contractCircuit : state, this.config,
-          'Instagram 搜索暂时受保护，请保留请求 ID 核查原因。', { scope: contractOpen ? 'platform_contract' : null })
+          'Instagram 搜索暂时受保护，请保留请求 ID 核查原因。', { scope: contractOpen ? 'platform_contract' : null,
+            evidence: await this.#circuitEvidence(contractOpen, normalized.marketplace) })
       }
       if (this.providerKey === 'justone' && authorizationPlatform === 'ecommerce'
         && state?.circuitOpenUntil && new Date(state.circuitOpenUntil) > now) {
@@ -1627,9 +1636,13 @@ export class ExternalPlatformGateway {
         })
         if (capacity) throw capacity
       }
-      if (this.providerKey === 'tikhub' && circuitOpen
-        && !(contractCircuit?.circuitOpenUntil && new Date(contractCircuit.circuitOpenUntil) > now)) {
-        throw circuitOpenError(state, this.config, 'External data is temporarily unavailable')
+      if (this.providerKey === 'tikhub' && circuitOpen && !contractOpen) {
+        throw circuitOpenError(state, this.config, 'External data is temporarily unavailable',
+          { evidence: await this.#circuitEvidence(false) })
+      }
+      if (circuitOpen) {
+        throw circuitOpenError(contractOpen ? contractCircuit : state, this.config, 'External product search is unavailable',
+          { scope: contractOpen ? 'platform_contract' : null, evidence: await this.#circuitEvidence(contractOpen, normalized.marketplace) })
       }
       throw new AppError(503, errorCode, 'External product search is unavailable')
     }
@@ -1755,8 +1768,9 @@ export class ExternalPlatformGateway {
             })
             if (capacity) throw capacity
           }
-          throw circuitOpenError(contract?.circuitOpenUntil && Date.parse(contract.circuitOpenUntil) > this.admissionClock() ? contract : latest,
-            this.config, 'External data is temporarily unavailable')
+          const contractOpen = Boolean(contract?.circuitOpenUntil && Date.parse(contract.circuitOpenUntil) > this.admissionClock())
+          throw circuitOpenError(contractOpen ? contract : latest, this.config, 'External data is temporarily unavailable',
+            { scope: contractOpen ? 'platform_contract' : null, evidence: await this.#circuitEvidence(contractOpen, normalized.marketplace) })
         }
         resolvedCredential = await this.#resolvedCredential()
         if (!resolvedCredential.ready) throw new AppError(503, 'external_platform_not_configured', 'External data configuration changed while waiting')

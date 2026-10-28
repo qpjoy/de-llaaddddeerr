@@ -2,6 +2,7 @@ import { refreshAdmissionLimits } from './admission-runtime.mjs'
 import { isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
+import { openCircuitError } from './availability-errors.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
 import { JustOneUpstreamError } from '../adapters/justone.mjs'
 import { FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY, projectFacebookSearch, facebookJustOneArchives } from '../contracts/facebook-search.mjs'
@@ -134,9 +135,9 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
           const shared = await target.platformStore.providerState(provider)
           const state = isHubRateLimitExempt(context) ? internalCircuitState(gateway.usageStore, context, shared) : shared
           const contract = await target.platformStore.contractCircuitState?.(provider, 'facebook')
-          if ([state, contract].some(value => value?.circuitOpenUntil && Date.parse(value.circuitOpenUntil) > clock())) {
-            throw new AppError(503, 'external_platform_circuit_open', 'Facebook supplier is temporarily unavailable')
-          }
+          const blocked = await openCircuitError({ store: target.platformStore, state, contract, now: clock(), config: target.config,
+            message: 'Facebook supplier is temporarily unavailable', marketplace: 'facebook' })
+          if (blocked) throw blocked
           const credential = await resolveCredential(provider)
           if (!credential.ready) throw new AppError(503, 'external_platform_not_configured', 'Facebook supplier is unavailable')
           const control = await target.operationControlStore.authorizeDispatch(provider, operation, {

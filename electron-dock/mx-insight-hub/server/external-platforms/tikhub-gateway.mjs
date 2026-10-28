@@ -1,7 +1,7 @@
 import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
 import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit } from '../core/internal-traffic-policy.mjs'
-import { circuitOpenError, upstreamCapacityError } from './availability-errors.mjs'
+import { circuitOpenError, openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { DispatchQueue, DEFAULT_DETAIL_QUEUE, canRetryDetail } from './dispatch-queue.mjs'
 import { ConcurrencyAdmissionQueue, DEFAULT_CONCURRENCY_QUEUE, concurrencyBusy } from './concurrency-admission.mjs'
 import { XHS_RESEARCH_ENDPOINTS, XHS_RESEARCH_OPERATIONS, projectXhsResearch, xhsResearchRecords } from '../contracts/xiaohongshu-research.mjs'
@@ -1108,7 +1108,9 @@ export class TikHubGateway {
         })
         ownsReservation = false
         if (operationControlError) throw operationControlError
-        if (circuitOpen) throw circuitOpenError(providerState, this.config, 'External Xiaohongshu acquisition is unavailable')
+        if (circuitOpen) throw (await openCircuitError({ store: this.platformStore, state: providerState, now: this.admissionClock?.() ?? Date.now(),
+          config: this.config, message: 'External Xiaohongshu acquisition is unavailable' }))
+          || circuitOpenError(providerState, this.config, 'External Xiaohongshu acquisition is unavailable')
         throw new AppError(503, code, 'External Xiaohongshu acquisition is unavailable')
       }
 

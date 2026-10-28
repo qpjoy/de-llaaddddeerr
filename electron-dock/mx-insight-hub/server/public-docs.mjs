@@ -6231,7 +6231,7 @@ curl -fsS -G "$HUB_URL/api/v1/data/posts/media" \
       <tr><td><code>429 external_platform_capacity_exceeded</code></td><td>上游返回限流；小红书错误详情中 upstreamDispatched=true。limit=null 表示上游阈值未知，不能当作 Hub 的每分钟限额。保留原 requestId 和幂等键核对结果，不自动重复付费调用。</td></tr>
       <tr><td><code>429 external_platform_cost_budget_exhausted / external_platform_subsidy_budget_exhausted</code></td><td>仅可能用于本次请求未形成正价 enforced 按次计费 wallet hold 的 subsidized 流量；已成功预留该 hold 的 paid-ready 请求不会因 Hub 月度采购或补贴上限被拒。</td></tr>
       <tr><td><code>502 response_unusable / outcome_unknown</code></td><td>保留 requestId 和原 key，停止自动重试；相同 key 只重放已提交结论。</td></tr>
-      <tr><td><code>503 external_platform_circuit_open</code></td><td>小红书的新拒绝响应提供共享上游保护范围、原因、failureThreshold、circuitOpenUntil 和 Retry-After；upstreamDispatched=false。期限表示允许重新检查准入的时间，不保证上游已经恢复。历史响应保持原样。</td></tr>
+      <tr><td><code>503 external_platform_circuit_open</code></td><td>熔断拒绝响应提供 <code>cause</code>（<code>upstream</code> 上游连续失败、<code>hub_response_parsing</code> Hub 无法解析上游响应、<code>hub_internal_cooldown</code> 内部冷却）、保护范围、规范化原因 <code>reason</code>（如 <code>upstream_balance_exhausted</code>）、可用时的 <code>upstream</code>（errorCode、上游 HTTP 状态、上游业务码、是否计费、失败时间）、failureThreshold、circuitOpenUntil 和 Retry-After；upstreamDispatched=false。期限表示允许重新检查准入的时间，不保证上游已经恢复。不含供应商名称或原文。历史响应保持原样。</td></tr>
       <tr><td><code>503 not_configured / contract_unverified / capacity_unavailable / cost_control_unavailable / cost_evidence_incomplete</code></td><td>由 operator 检查发布门禁和当前 endpoint/当前请求的成本证据；paid-ready 只绕过月度财务线，不绕过这些完整性检查。无关历史成本异常不会阻断该请求。</td></tr>
     </tbody></table>
     </section>

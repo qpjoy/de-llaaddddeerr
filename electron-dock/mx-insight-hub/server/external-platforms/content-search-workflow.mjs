@@ -1,5 +1,5 @@
 import { refreshAdmissionLimits } from './admission-runtime.mjs'
-import { upstreamCapacityError } from './availability-errors.mjs'
+import { openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
@@ -198,7 +198,9 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           await assertSearchDispatchAllowed?.()
           const states = await Promise.all([store.providerState('tikhub'), store.contractCircuitState?.('tikhub', request.platform)])
           states[0] = internalCircuitState(gateway.usageStore, context, states[0])
-          if (states.some(row => row?.circuitOpenUntil && Date.parse(row.circuitOpenUntil) > clock())) throw new AppError(503, 'external_platform_circuit_open', 'The content-search supplier circuit is open')
+          const blocked = await openCircuitError({ store, state: states[0], contract: states[1], now: clock(), config: gateway.config,
+            message: 'The content-search supplier circuit is open', marketplace: request.platform })
+          if (blocked) throw blocked
           const credential = await resolveCredential()
           if (!credential.ready) throw new AppError(503, 'external_platform_not_configured', 'Content search is unavailable')
           const control = await gateway.operationControlStore.authorizeDispatch('tikhub', nativeRequest.operation,

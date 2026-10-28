@@ -1,5 +1,5 @@
 import { refreshAdmissionLimits } from './admission-runtime.mjs'
-import { upstreamCapacityError } from './availability-errors.mjs'
+import { openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
@@ -198,7 +198,9 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           context = await revalidateIdentity({ totalLimit: request.totalLimit })
           const states = await Promise.all([store.providerState(provider), store.contractCircuitState?.(provider, request.platform)])
           if (provider === 'tikhub' || isHubRateLimitExempt(context)) states[0] = internalCircuitState(gateway.usageStore, context, states[0])
-          if (states.some(row => row?.circuitOpenUntil && Date.parse(row.circuitOpenUntil) > clock())) throw new AppError(503, 'external_platform_circuit_open', 'Account acquisition is temporarily unavailable')
+          const blocked = await openCircuitError({ store, state: states[0], contract: states[1], now: clock(), config: gateway.config,
+            message: 'Account acquisition is temporarily unavailable', marketplace: request.platform })
+          if (blocked) throw blocked
           const credential = await resolveCredential()
           if (!credential.ready) throw new AppError(503, 'external_platform_not_configured', 'Account acquisition is unavailable')
           const control = await gateway.operationControlStore.authorizeDispatch(provider, expected.operation,

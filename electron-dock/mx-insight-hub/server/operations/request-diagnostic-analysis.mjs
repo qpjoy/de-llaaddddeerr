@@ -46,6 +46,24 @@ export function analyzeRequestDiagnostic(run) {
       '请求状态为 released；客户扣费与供应商费用仍应分别查看对应账本。', ['status'])
   }
 
+  const refusal = run.refusal?.kind === 'circuit' ? run.refusal : null
+  if (refusal) {
+    const trigger = refusal.trigger
+    summary = refusal.cause === 'hub_response_parsing' ? 'Hub 无法解析供应商响应，解析保护拒绝了本请求。'
+      : refusal.cause === 'upstream' ? '供应商连续失败，Hub 熔断保护拒绝了本请求。'
+      : 'Hub 熔断保护拒绝了本请求，未找到触发它的近期失败记录。'
+    add('circuit_refusal', 'confirmed', 'Hub 熔断保护拒绝，未调用供应商',
+      '网关账本记录 circuit_rejected 且没有供应商调用 ID：本请求没有派发，也没有供应商费用。', ['refusal.kind', 'refusal.provider', 'refusal.upstreamDispatched'])
+    if (trigger) {
+      add('circuit_trigger_recorded', 'confirmed', '拒绝前该供应商最近一次失败',
+        `${trigger.errorCode || trigger.outcome}；HTTP ${trigger.httpStatus ?? '无'}，业务码 ${trigger.businessCode ?? '无'}，平台 ${trigger.marketplace ?? '未记录'}。这是账本中拒绝前的最近一次失败，用来说明保护为何打开；它不是本请求的调用。`,
+        ['refusal.trigger.errorCode', 'refusal.trigger.httpStatus', 'refusal.trigger.businessCode', 'refusal.trigger.failedAt'])
+      nextSteps.push(refusal.cause === 'hub_response_parsing'
+        ? '按触发调用 ID 查看受限响应，确认供应商返回格式变化后修复 Hub 解析并发布；保护会在修复后自然停止。'
+        : '按原因码处理上游：余额或额度不足需充值，限流需降速或升级档位；也可在策略搜索“管理”中把该平台切到可用的备用供应商。')
+    }
+  }
+
   if (timeouts.length) {
     add('connector_timeout_recorded', 'confirmed', '连接器记录了等待超时',
       'failureKind=timeout 确认 Hub 等待边界发生超时；不能仅凭耗时推断部署超时配置、下游停止、供应商失败或最终费用。', timeouts)
@@ -78,7 +96,7 @@ export function analyzeRequestDiagnostic(run) {
     add('provider_rejection_recorded', 'confirmed', '已保存供应商拒绝证据',
       '调用账本记录 rejected；HTTP 与业务码需要一起阅读。若 Hub 交付了存量回退，这些拒绝不等于最终交付失败。具体原因以已核实错误说明及原调用记录为准。', rejected)
   }
-  if (!providers.length && !connectors.length) {
+  if (!providers.length && !connectors.length && !refusal) {
     add('call_evidence_missing', 'unresolved', '没有可用的当次调用记录',
       '本查询未返回供应商或连接器记录；缺少记录不能单独证明没有外部调用，也不能确认未计费。', ['providerCalls', 'connectorCalls'])
   }

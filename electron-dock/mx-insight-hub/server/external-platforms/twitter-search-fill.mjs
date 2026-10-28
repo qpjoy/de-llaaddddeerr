@@ -1,5 +1,5 @@
 import { currentAdmissionLimits, refreshAdmissionLimits } from './admission-runtime.mjs'
-import { upstreamCapacityError } from './availability-errors.mjs'
+import { openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
@@ -110,9 +110,9 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
     const shared=await store.providerState('rapidapi')
     const state=isHubRateLimitExempt(context)?internalCircuitState(gateway.usageStore,context,shared):shared
     const contract=await store.contractCircuitState?.('rapidapi','twitter')
-    if([state,contract].some(row=>row?.circuitOpenUntil && Date.parse(row.circuitOpenUntil)>clock())) {
-      throw new AppError(503,'external_platform_circuit_open','External data is temporarily unavailable')
-    }
+    const blocked=await openCircuitError({store,state,contract,now:clock(),config:gateway.config,
+      message:'External data is temporarily unavailable',marketplace:'twitter'})
+    if(blocked) throw blocked
     const credential=await resolveCredential()
     if(!credential.ready) throw new AppError(503,'external_platform_not_configured','External data is unavailable')
     const control=await gateway.operationControlStore.authorizeDispatch('rapidapi',delivery.operation,

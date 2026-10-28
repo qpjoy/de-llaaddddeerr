@@ -12,6 +12,7 @@ Last reviewed: 2026-10-21.
 
 ## 容量与熔断排查（2026-10-09）
 
+- [Instagram 熔断：JustOne 余额不足（2026-10-28）](operations/instagram-justone-balance-2026-10-28.md)：上游余额不足（601）而非 Hub 解析；熔断拒绝返回 cause、原因码与上游 HTTP/业务码，诊断中心显示拒绝原因；附恢复步骤。
 - [微信综合搜索 HTTP 400（2026-10-28）](operations/wechat-search-rejection-2026-10-28.md)：已验证通用拒绝、综合搜索参数（非公众号路径、与 TikHub V5.3.2 合同一致）、独立费用证据；受控复测中官方示例关键词同样被拒（`10c2337c`），确认供应商侧故障；附 TikHub 英文工单与提交入口。
 - [B 站搜索缺省 result 的零结果页（2026-10-28）](operations/bilibili-empty-search-2026-10-28.md)：已验证空页证据、限定解析兼容、历史账务保留与发布验收。
 - [Twitter 历史未知请求与后续采集恢复（2026-10-28）](operations/twitter-search-admission-disposition-2026-10-28.md)：精确请求的管理员准入处置、历史与账务保留、部署及生产操作步骤；`17b94611` 实为上游成功、Hub 持久化未知；改为只拦截仍在执行的同查询请求（未知结果不再阻断新 key、删除供应商未知冷却、响应隔离固定 5 分钟），保留同 key 保护与人工恢复，附范围诊断与上线验证。

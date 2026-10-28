@@ -1,7 +1,7 @@
 import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
 import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit } from '../core/internal-traffic-policy.mjs'
-import { circuitOpenError, upstreamCapacityError } from './availability-errors.mjs'
+import { circuitOpenError, openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
@@ -549,7 +549,9 @@ export class TikHubUserInfoGateway {
         })
         ownsReservation = false
         if (operationControlError) throw operationControlError
-        if (circuitOpen) throw circuitOpenError(state, this.config, 'External Xiaohongshu user data is unavailable')
+        if (circuitOpen) throw (await openCircuitError({ store: this.platformStore, state, now: this.admissionClock?.() ?? Date.now(),
+          config: this.config, message: 'External Xiaohongshu user data is unavailable' }))
+          || circuitOpenError(state, this.config, 'External Xiaohongshu user data is unavailable')
         throw new AppError(503, code, 'External Xiaohongshu user data is unavailable')
       }
 
@@ -603,9 +605,9 @@ export class TikHubUserInfoGateway {
               waitedForCapacity = true
               context = await this.#revalidateWaitingIdentity(context, gatewayOperation, pageSize)
               const latest = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
-              if (latest?.circuitOpenUntil && Date.parse(latest.circuitOpenUntil) > this.admissionClock()) {
-                throw circuitOpenError(latest, this.config, 'External Xiaohongshu user data is unavailable')
-              }
+              const blocked = await openCircuitError({ store: this.platformStore, state: latest, now: this.admissionClock(),
+                config: this.config, message: 'External Xiaohongshu user data is unavailable' })
+              if (blocked) throw blocked
               resolvedCredential = await this.#credential()
               if (!resolvedCredential.ready) {
                 throw new AppError(503, 'external_platform_not_configured', 'Upstream configuration changed while waiting')

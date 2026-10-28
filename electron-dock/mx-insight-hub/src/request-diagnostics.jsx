@@ -170,8 +170,22 @@ export default function RequestDiagnostics({ token, onUnauthorized, session, set
             ['记录扣款（最小货币单位）', `${run.customerCharge.chargedMinor} ${run.customerCharge.currency || ''}`],
           ]}/> : <p>没有客户扣款记录；不能据此判断供应商是否计费。</p>}
           {run.customerCharge?.enforcementMode === 'shadow' ? <p className="mih-diagnostic-note">shadow 是影子计费记录，不代表实际钱包扣款。</p> : null}
+          {run.refusal ? <>
+            <h4>拒绝原因（熔断保护）</h4>
+            <Facts entries={[
+              ['问题归属', run.refusal.cause === 'upstream' ? '上游供应商' : run.refusal.cause === 'hub_response_parsing' ? 'Hub 解析' : '未找到触发记录'],
+              ['供应商', run.refusal.provider], ['是否派发', '未派发，未产生供应商费用'], ['拒绝时间', formatDate(run.refusal.refusedAt)],
+              ...(run.refusal.trigger ? [
+                ['上游错误码', run.refusal.trigger.errorCode], ['上游 HTTP', run.refusal.trigger.httpStatus],
+                ['上游业务码', run.refusal.trigger.businessCode], ['触发平台', run.refusal.trigger.marketplace],
+                ['供应商计费', run.refusal.trigger.billed === false ? '未计费' : run.refusal.trigger.billed === true ? '已计费' : '未知'],
+                ['触发调用', run.refusal.trigger.callId], ['失败时间', formatDate(run.refusal.trigger.failedAt)],
+              ] : []),
+            ]}/>
+            <p className="mih-diagnostic-note">触发记录是拒绝前 {run.refusal.windowMinutes} 分钟内该供应商最近一次失败，用来说明保护为何打开，不是本请求的调用。</p>
+          </> : null}
           <h4>当次上游调用</h4>
-          {!run.providerCalls.length && !run.connectorCalls.length ? <p>未找到当次调用记录。缓存交付、调度前拒绝或证据缺失都可能造成此情况。</p> : null}
+          {!run.providerCalls.length && !run.connectorCalls.length ? <p>{run.refusal ? '本请求被熔断保护拒绝，没有派发到供应商。' : '未找到当次调用记录。缓存交付、调度前拒绝或证据缺失都可能造成此情况。'}</p> : null}
           {run.providerCalls.map(call => <Call key={call.id} call={call} provider/>)}
           {run.connectorCalls.map(call => <Call key={call.id} call={call}/>)}
           {run.callsTruncated ? <p>调用记录过多，每类仅显示前 50 条，以上不是完整调用链。</p> : null}

@@ -2238,9 +2238,16 @@ test('Instagram shared and contract circuits explain the active blocker without 
       const sharedUntil = new Date(Date.now() + (contractActive ? -60000 : 60000)).toISOString()
       const contractUntil = new Date(Date.now() + (contractActive ? 30000 : -30000)).toISOString()
       Object.assign(h.platformStore.state, { consecutiveFailures: 3, circuitOpenUntil: sharedUntil,
-        lastErrorCode: 'upstream_rate_limited' })
+        lastErrorCode: 'upstream_balance_exhausted' })
       h.platformStore.contractCircuits.set('instagram', { scope: 'instagram', consecutiveFailures: 3,
         circuitOpenUntil: contractUntil, lastErrorCode: 'private_contract_failure' })
+      // The call ledger's latest failure explains the refusal with upstream codes.
+      const failedAt = new Date(Date.now() - 20000).toISOString()
+      h.platformStore.calls.set('balance-failure', { id: 'balance-failure', outcome: 'rejected', httpStatus: 200, businessCode: 601,
+        errorCode: 'upstream_balance_exhausted', billed: false, marketplace: 'instagram', startedAt: failedAt, completedAt: failedAt })
+      h.platformStore.calls.set('parse-failure', { id: 'parse-failure', outcome: 'succeeded_unusable', httpStatus: 200, businessCode: 0,
+        errorCode: 'invalid_upstream_contract', billed: true, marketplace: 'instagram',
+        startedAt: new Date(Date.now() - 40000).toISOString(), completedAt: new Date(Date.now() - 40000).toISOString() })
       const beforeShared = structuredClone(h.platformStore.state)
       const beforeContract = structuredClone(h.platformStore.contractCircuits.get('instagram'))
       await assert.rejects(h[route]({ platform: 'instagram', query: 'circuit fixture', pageSize: 20 }, 'instagram-circuit'), error => {
@@ -2249,7 +2256,12 @@ test('Instagram shared and contract circuits explain the active blocker without 
         assert.equal(error.message, 'Instagram 搜索暂时受保护，请保留请求 ID 核查原因。')
         assert.equal(error.details.upstreamDispatched, false)
         assert.equal(error.details.scope, contractActive ? 'platform_contract' : 'shared_upstream')
-        assert.equal(error.details.reason, contractActive ? 'response_contract_unusable' : 'upstream_rate_limited')
+        assert.equal(error.details.reason, contractActive ? 'response_contract_unusable' : 'upstream_balance_exhausted')
+        assert.equal(error.details.cause, contractActive ? 'hub_response_parsing' : 'upstream')
+        assert.deepEqual(error.details.upstream, contractActive
+          ? { errorCode: 'invalid_upstream_contract', httpStatus: 200, businessCode: 0, outcome: 'succeeded_unusable', billed: true,
+            failedAt: h.platformStore.calls.get('parse-failure').completedAt }
+          : { errorCode: 'upstream_balance_exhausted', httpStatus: 200, businessCode: 601, outcome: 'rejected', billed: false, failedAt })
         assert.equal(error.details.circuitOpenUntil, contractActive ? contractUntil : sharedUntil)
         assert.ok(error.details.retryAfterMs > 0 && error.details.retryAfterMs <= (contractActive ? 30000 : 60000))
         assert.equal(error.details.failureThreshold, 3)
@@ -2260,7 +2272,7 @@ test('Instagram shared and contract circuits explain the active blocker without 
       })
       assert.equal(h.calls.length, 0)
       assert.equal(h.historical.length, 0)
-      assert.equal(h.platformStore.calls.size, 0)
+      assert.equal(h.platformStore.calls.size, 2, 'only the two seeded historical failures; no new call')
       assert.equal(h.platformStore.requests.at(-1).sourceMode, 'circuit_rejected')
       assert.deepEqual(h.platformStore.state, beforeShared)
       assert.deepEqual(h.platformStore.contractCircuits.get('instagram'), beforeContract)
