@@ -151,7 +151,12 @@ function bilibiliRow(value, capturedAt) {
   const stat = object(value.stat) ? value.stat : {}
   const id = identity(value.id, value.aid, value.bvid)
   const kind = value.type === 'article' ? 'article' : 'video'
-  const url = first(value.arcurl, value.url) || (kind !== 'video' ? '' : identity(value.bvid) ? `https://www.bilibili.com/video/${value.bvid}` : /^\d+$/.test(id || '') ? `https://www.bilibili.com/video/av${id}` : '')
+  // Bilibili search responses can expose the public item under share_url.
+  // Keep the explicit share address attached to the item before falling back
+  // to the older URL aliases.
+  const url = first(value.share_url, value.shareUrl, value.share_link, value.shareLink,
+    value.url, value.arcurl, value.original_url)
+    || (kind !== 'video' ? '' : identity(value.bvid) ? `https://www.bilibili.com/video/${value.bvid}` : /^\d+$/.test(id || '') ? `https://www.bilibili.com/video/av${id}` : '')
   return baseRow('bilibili', id, capturedAt, { kind, title: value.title, text: first(value.description, value.desc, value.text, value.title),
     url, authorId: value.mid ?? value.author_id ?? value.owner?.mid, authorName: first(value.author, value.owner?.name), avatar: first(value.upic, value.uface, value.owner?.face),
     publishedAt: value.pubdate ?? value.published_at, likes: count(value.like_count, value.like, stat.like), comments: count(value.comment_count, value.review, stat.reply),

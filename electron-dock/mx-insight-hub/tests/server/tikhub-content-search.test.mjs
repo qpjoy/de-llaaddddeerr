@@ -94,6 +94,16 @@ test('Bilibili fixed payload maps evidenced native metrics, genuine zero and nul
   assert.equal(project('bilibili', altered).items[0].forward_count, null, 'unverified stat.share/coin/video_review are not invented metrics')
 })
 
+test('Bilibili search keeps the item share URL ahead of stale URL aliases', () => {
+  const payload = structuredClone(fixtures.bilibili)
+  Object.assign(payload.data.result[0], {
+    share_url: 'https://www.bilibili.com/video/BVshare123',
+    arcurl: 'https://www.bilibili.com/video/BVstale456',
+  })
+  assert.equal(contentSearchDataItem(project('bilibili', payload).items[0]).url,
+    'https://www.bilibili.com/video/BVshare123')
+})
+
 test('Bilibili grouped articles retain their type and never acquire a guessed video URL; verified stat aliases remain nullable', () => {
   const projected = project('bilibili', { result: [
     { result_type: 'video', data: [{ id: '1', title: '视频', stat: { like: 17, reply: 4, favorite: 9, view: 123, coin: 88 } }] },
