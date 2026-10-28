@@ -200,3 +200,19 @@ test('Reddit empty dynamic results never use top navigation or request paginatio
   assert.equal(output.providerPage.nextParams, null)
   assert.throws(() => project('reddit', dynamic([{ node: { unknown: { post: post('hidden') } } }], { hasNextPage: false })), /invalid_content_search_entry/)
 })
+
+test('YouTube formatted search keeps a plain-string author and exact view-count text, never abbreviated or relative values', () => {
+  const output = project('youtube', { videos: [
+    video('a', { author: '方脸说', channel_id: 'UC123', view_count: '12,345 views', published_time: '3 years ago' }),
+    video('b', { author: '频道二', view_count: '6789次观看' }),
+    video('c', { author: '频道三', view_count: '1.2M views' }),
+    video('d', { author: '频道四', view_count: '12万次观看' }),
+    video('e', { author: '  ', view_count: 'No views' }),
+  ], has_more: false })
+  const items = output.items.map(contentSearchDataItem)
+  assert.deepEqual(items.map(item => item.author.name), ['方脸说', '频道二', '频道三', '频道四', null])
+  assert.equal(items[0].author.id, 'UC123')
+  assert.deepEqual(items.map(item => item.metrics.views), [12345, 6789, null, null, 0])
+  assert.equal(items[0].publishedAt, null)
+  assert.deepEqual({ ...items[0].metrics, views: null }, noMetrics)
+})

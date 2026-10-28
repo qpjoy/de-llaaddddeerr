@@ -358,6 +358,10 @@ function youtubeText(value) {
   if (!object(value)) return ''
   return first(value.simpleText, array(value.runs).map(run => string(run?.text)).join(''))
 }
+// An exact count with a views unit ("12,345 views", "12,345次观看") is a precise
+// observation. Abbreviated display counts ("1.2M", "12万") are not and stay unset.
+const EXACT_VIEWS = /^(\d{1,3}(?:,\d{3})+|\d+)\s*(?:views?|次观看|次觀看|次播放)$/iu
+const exactViewText = text => /^no views$/iu.test(text.trim()) ? '0' : EXACT_VIEWS.exec(text.trim())?.[1]?.replaceAll(',', '') ?? null
 function youtubeRow(value, capturedAt, videoContainer = false) {
   const id = identity(value.video_id, value.videoId, videoContainer || value.type === 'video' ? value.id : null)
   const author = object(value.channel) ? value.channel : object(value.author) ? value.author : {}
@@ -365,15 +369,15 @@ function youtubeRow(value, capturedAt, videoContainer = false) {
   const title = youtubeText(value.title)
   // Human-readable abbreviated counts and relative publication dates are not
   // precise observations. Only supplied exact counters/timestamps are retained.
-  const viewText = youtubeText(value.viewCountText)
-  const exactViews = /^(\d{1,3}(?:,\d{3})*|\d+) views?$/.exec(viewText)?.[1]?.replaceAll(',', '')
+  // Formatted search results supply view_count as such text and author as a plain string.
+  const exactViews = exactViewText(youtubeText(value.viewCountText)) ?? exactViewText(string(value.view_count))
   return baseRow('youtube', id, capturedAt, { kind: 'video', title,
     text: first(value.text, value.full_text, youtubeText(value.description), youtubeText(value.descriptionSnippet),
       array(value.detailedMetadataSnippets).map(item => youtubeText(item?.snippetText)).filter(Boolean).join('\n'), title),
     url: urls(value.url, value.video_url)[0] || `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`,
     publishedAt: suppliedTimestamp(value.published_at ?? value.publishedAt ?? value.published_time ?? value.created_at),
     authorId: author.channel_id ?? author.channelId ?? author.id ?? value.channel_id ?? value.author_id ?? owner.navigationEndpoint?.browseEndpoint?.browseId,
-    authorName: first(author.name, author.title, author.display_name, value.channel_name, value.channelTitle, value.author_name, owner.text),
+    authorName: first(author.name, author.title, author.display_name, value.channel_name, value.channelTitle, value.author_name, string(value.author), owner.text),
     avatar: first(author.avatar_url, value.author_avatar_url),
     likes: exactCount(value.like_count), comments: exactCount(value.comment_count), shares: exactCount(value.share_count),
     bookmarks: exactCount(value.collect_count, value.bookmark_count), views: exactCount(value.view_count, value.viewCount, exactViews),
