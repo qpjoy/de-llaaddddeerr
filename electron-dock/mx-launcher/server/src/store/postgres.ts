@@ -3709,8 +3709,9 @@ export class PostgresStore implements PlatformStore {
         nowIso,
         address
       );
-      await this.saveRecordTo(records, 'launcher-network-lease', lease.leaseId, lease, lease.siteId);
-      // The address now belongs to this identity; one active lease per address.
+      // The address now belongs to this identity. uq_mx_launcher_active_lease_ip
+      // allows one active lease per address, checked per statement: the source
+      // lease must be released before the new one is written, in this transaction.
       if (address && addressSource) {
         const released = releaseLauncherNetworkLease(addressSource, {
           requestedBy: 'launcher-network-address-carry-over',
@@ -3718,6 +3719,7 @@ export class PostgresStore implements PlatformStore {
         }, nowIso);
         await this.saveRecordTo(records, 'launcher-network-lease', released.leaseId, released, released.siteId);
       }
+      await this.saveRecordTo(records, 'launcher-network-lease', lease.leaseId, lease, lease.siteId);
       return { lease, previous, addressFromLeaseId: address ? addressSource?.leaseId ?? null : null };
     });
     const { lease, previous, addressFromLeaseId } = allocation;

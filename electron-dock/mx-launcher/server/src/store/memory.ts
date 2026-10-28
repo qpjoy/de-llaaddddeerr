@@ -2671,6 +2671,22 @@ export class MemoryStore implements PlatformStore {
     return handover;
   }
 
+  // Mirrors uq_mx_launcher_active_lease_ip (status 'active', expired or not), so a
+  // write order Postgres rejects fails here too.
+  private assertActiveLeaseIpAvailable(lease: LauncherNetworkLease): void {
+    if (lease.status !== 'active' || !lease.productId || !lease.leaseIp) return;
+    for (const other of this.launcherNetworkLeases.values()) {
+      if (
+        other.leaseId !== lease.leaseId
+        && other.status === 'active'
+        && other.productId === lease.productId
+        && other.leaseIp === lease.leaseIp
+      ) {
+        throw new Error('duplicate key value violates unique constraint "uq_mx_launcher_active_lease_ip"');
+      }
+    }
+  }
+
   enrollLauncherNetworkLease(input: LauncherNetworkLeaseInput): LauncherNetworkLease {
     const installId = input.installId?.trim() || `inst_${randomUUID()}`;
     const deviceId = input.deviceId?.trim() || `dev_${randomUUID()}`;
@@ -2832,8 +2848,8 @@ export class MemoryStore implements PlatformStore {
       now.toISOString(),
       address
     );
-    this.launcherNetworkLeases.set(lease.leaseId, lease);
-    // The address now belongs to this identity; one active lease per address.
+    // The address now belongs to this identity; release the source first, as
+    // the Postgres store must (uq_mx_launcher_active_lease_ip).
     if (address && addressSource) {
       const released = releaseLauncherNetworkLease(addressSource, {
         requestedBy: 'launcher-network-address-carry-over',
@@ -2841,6 +2857,8 @@ export class MemoryStore implements PlatformStore {
       });
       this.launcherNetworkLeases.set(released.leaseId, released);
     }
+    this.assertActiveLeaseIpAvailable(lease);
+    this.launcherNetworkLeases.set(lease.leaseId, lease);
     this.recordAudit({
       eventType: previous ? 'launcher_network.lease.refreshed' : 'launcher_network.lease.enrolled',
       actorKind: lease.identityKind === 'user' ? 'user' : 'install',

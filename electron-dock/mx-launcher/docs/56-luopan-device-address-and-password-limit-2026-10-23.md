@@ -1,6 +1,8 @@
 # Luopan 登录保留设备地址，密码认证取消按 IP 限额（2026-10-23）
 
-状态：代码与测试已完成，未提交、未部署。承接 [53](./53-luopan-login-and-domestic-capacity-review-2026-10-22.md)–[55](./55-luopan-client-optimization-with-mx-h2i-2026-10-23.md) 以及罗盘仓库的 `po-frontend/docs/login-startup-reuse-20261023.md`。
+状态：已部署（由下述线上错误推断）。**2026-10-28 线上缺陷（已修复，待部署）**：地址沿用时新租约先写入、旧租约后释放，同一事务内违反 `uq_mx_launcher_active_lease_ip`（同一产品每个地址只能有一条 active 租约，按语句检查），Launcher 返回 500。源租约由服务端按设备最新租约选取，与客户端版本无关：2.0.6 记住过登录后再启动（用户租约→匿名）、新版启动后登录（匿名→用户）都会命中。Internal 日志 24 小时 23 次 `duplicate key value violates unique constraint`（采集时约束名被打码，待确认是该索引）。修复：先释放源租约再写新租约（`postgres.ts`，`memory.ts` 同序）；内存存储按同一唯一约束校验，`lease-address-carry-over.test.ts` 在旧顺序下即复现该错误。只影响罗盘（地址沿用仅限 `luopan`），MX-H2I 不变。部署：Internal 上 Launcher 仓库 `bash scripts/manage.sh ops internal-production deploy`。
+
+承接 [53](./53-luopan-login-and-domestic-capacity-review-2026-10-22.md)–[55](./55-luopan-client-optimization-with-mx-h2i-2026-10-23.md) 以及罗盘仓库的 `po-frontend/docs/login-startup-reuse-20261023.md`。
 
 ## 1. 背景
 
