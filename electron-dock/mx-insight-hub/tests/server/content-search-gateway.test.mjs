@@ -132,6 +132,85 @@ test('all four platforms use fixed TikHub keyword endpoints for standard and bot
   }
 })
 
+for (const standard of [true, false]) {
+  const contract = standard ? 'standard' : 'raw'
+  test(`Bilibili ${contract} accepts a verified empty page without result and replays its one settled purchase`, async () => {
+    const bytes = Buffer.from(JSON.stringify({ code: 200, request_id: 'synthetic-empty-bilibili',
+      data: { code: 0, data: { page: 1, pagesize: 20, numResults: 0, numPages: 0 } } }, null, 2))
+    const h = await harness({ fetchImpl: () => new Response(bytes, { headers: { 'content-type': 'application/json' } }) })
+    await h.service.setTenantBillingProfile(h.context.tenant.id,
+      { mode: 'enforced', multiplierPpm: 1000000, defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'offline-admin')
+    await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline empty-page fixture' },
+      { idempotencyKey: 'bilibili-empty-credit', actor: 'offline-admin' })
+    const body = standard ? { platform: 'bilibili', query: '城市', pageSize: 20 }
+      : { platform: 'bilibili', keyword: '城市', count: 20 }
+    const invoke = path => standard ? h.invokeData(body) : h.invoke(body, 'content-raw-first', path)
+    const first = await invoke()
+    assert.equal(first.status, 200)
+    assert.deepEqual(standard ? first.body.data.items : JSON.parse(first.body.data.raw_data), [])
+    const page = standard ? first.body.data.pageInfo : first.body.data.page
+    assert.equal(page.returnedCount, 0)
+    assert.equal(page.hasMore, false)
+    assert.equal(page.nextCursor, null)
+    assert.equal(first.body.data.status, 'ok')
+    assert.deepEqual(first.body.data.warnings, [])
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.historical.length, 0)
+    const call = [...h.platformStore.calls.values()][0], usage = h.store.requests.get(first.requestId)
+    assert.equal(call.outcome, 'succeeded')
+    assert.equal(call.itemCount, 0)
+    assert.equal(call.billed, true)
+    assert.equal(usage.status, 'committed')
+    assert.equal(usage.responseStatus, 200)
+    const archive = h.platformStore.restrictedResponseArchives.get(call.id)
+    assert.deepEqual(Buffer.from(archive.bodyBytes), bytes)
+    assert.equal(archive.bodySize, bytes.length)
+    assert.equal(archive.bodySha256, createHash('sha256').update(bytes).digest('hex'))
+    assert.equal(Object.hasOwn(JSON.parse(Buffer.from(archive.bodyBytes).toString('utf8')).data.data, 'result'), false)
+    assert.equal(h.platformStore.ingestJobs.length, 1)
+    assert.deepEqual(h.platformStore.ingestJobs[0].payload.records, [])
+    const charges = [...h.store.customerCharges.values()]
+    assert.equal(charges.length, 1)
+    assert.equal(charges[0].status, 'captured')
+    assert.equal(charges[0].chargedMinor, 3)
+    const saved = structuredClone({ usage, call, charges, ledger: h.store.creditLedgerEntries })
+    const replay = await invoke(standard ? undefined : '/api/v1/search/raw')
+    assert.equal(replay.replay, true)
+    assert.deepEqual(replay.body, first.body)
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.historical.length, 0)
+    assert.equal(h.platformStore.ingestJobs.length, 1)
+    assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+    assert.deepEqual(structuredClone({ usage: h.store.requests.get(first.requestId), call: h.platformStore.calls.get(call.id),
+      charges: [...h.store.customerCharges.values()], ledger: h.store.creditLedgerEntries }), saved)
+  })
+
+  test(`Bilibili ${contract} retains a paid 502 when nonzero counts have no result`, async () => {
+    const bytes = Buffer.from(JSON.stringify({ code: 200,
+      data: { code: 0, data: { page: 1, pagesize: 20, numResults: 1, numPages: 1 } } }, null, 2))
+    const h = await harness({ fetchImpl: () => new Response(bytes, { headers: { 'content-type': 'application/json' } }) })
+    const invoke = path => standard ? h.invokeData() : h.invoke(undefined, 'content-raw-first', path)
+    await assert.rejects(invoke(), error => error.code === 'external_platform_response_unusable' && error.status === 502)
+    const call = [...h.platformStore.calls.values()][0], usage = [...h.store.requests.values()][0]
+    assert.equal(call.outcome, 'succeeded_unusable')
+    assert.equal(call.errorCode, 'invalid_content_search_contract')
+    assert.equal(call.billed, true)
+    assert.equal(usage.status, 'committed')
+    assert.equal(usage.responseStatus, 502)
+    assert.equal(h.platformStore.ingestJobs.length, 0)
+    const archive = h.platformStore.restrictedResponseArchives.get(call.id)
+    assert.deepEqual(Buffer.from(archive.bodyBytes), bytes)
+    assert.equal(archive.bodySha256, createHash('sha256').update(bytes).digest('hex'))
+    const saved = structuredClone(usage)
+    await assert.rejects(invoke(standard ? undefined : '/api/v1/search/raw'),
+      error => error.code === 'external_platform_response_unusable' && error.status === 502)
+    assert.deepEqual(h.store.requests.get(usage.id), saved)
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.historical.length, 0)
+    assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
+  })
+}
+
 test('saved admission RPM is reread between standard content-search pages', async () => {
   const { attachAdmissionPolicy } = await import('../fixtures/admission-policy.mjs')
   let save

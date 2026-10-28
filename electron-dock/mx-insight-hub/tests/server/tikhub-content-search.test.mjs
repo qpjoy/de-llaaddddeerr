@@ -7,6 +7,7 @@ import { TIKHUB_CONTENT_SEARCH_RECIPES, normalizeTikHubContentSearchRequest,
 import { nativeForwardingEndpoint } from '../../server/contracts/native-forwarding.mjs'
 import { rawSearchRecords } from '../../server/contracts/raw-search.mjs'
 import { isPostgresSafeJsonValue } from '../../server/core/postgres-json.mjs'
+import { projectContentPage } from '../../server/external-platforms/content-search-workflow.mjs'
 
 const capturedAt = '2026-10-15T04:00:00.000Z'
 const fixtures = { ...originalFixtures,
@@ -105,6 +106,70 @@ test('Bilibili grouped articles retain their type and never acquire a guessed vi
   assert.equal(projected.items[1].content_type, 'article')
   assert.equal(projected.items[1].url, null)
   assert.equal(projected.providerPage.hasMore, false)
+})
+
+// Reconstructed from the verified archive's field types/counts, not its raw body.
+const biliEmptyPage = () => ({ code: 0, data: { page: 1, pagesize: 20, numResults: 0, numPages: 0 } })
+
+test('Bilibili successful zero-count page may omit result and ends pagination without changing evidence', () => {
+  const payload = biliEmptyPage()
+  const original = { publicBody: { data: payload, meta: { capturedAt } }, restrictedResponseArchive: { sha256: 'immutable-archive' } }
+  const before = structuredClone(original)
+  const { projected, records } = projectContentPage(original, request('bilibili', { pageSize: 20 }))
+  assert.deepEqual(projected.items, [])
+  assert.deepEqual(projected.acquiredItems, [])
+  assert.deepEqual(records, [])
+  assert.deepEqual(projected.providerPage, { hasMore: false, nextParams: null, nextPage: null, paginationMode: 'page', sourceCount: 0 })
+  assert.equal(projected.nonPostCount, 0)
+  assert.equal(projected.duplicateCount, 0)
+  assert.deepEqual(original, before)
+  assert.equal(projected.publicBody, original.publicBody)
+  assert.equal(projected.restrictedResponseArchive, original.restrictedResponseArchive)
+  assert.equal(Object.hasOwn(projected.publicBody.data.data, 'result'), false)
+})
+
+test('Bilibili omitted result needs explicit numeric zero counts and matching page metadata', () => {
+  const mutations = [
+    p => { delete p.code }, p => { p.code = '0' }, p => { p.code = 200 },
+    ...['numResults', 'numPages'].flatMap(key => [
+      p => { delete p.data[key] },
+      ...[1, -1, '0', false, null].map(value => p => { p.data[key] = value }),
+    ]),
+    ...['page', 'pagesize'].flatMap(key => [
+      p => { delete p.data[key] },
+      ...[0, -1, '1', false, null, 1.5, Number.MAX_SAFE_INTEGER + 1, 21].map(value => p => { p.data[key] = value }),
+    ]),
+    ...[null, 'bad', {}].map(value => p => { p.data.result = value }),
+    ...['data', 'items', 'results', 'list', 'videos'].map(key => p => { p.data[key] = [{ id: 'unexpected-content' }] }),
+    p => { p.data.num_results = 1 }, p => { p.data.num_pages = 1 }, p => { p.data.page_size = 21 },
+    ...['has_more', 'hasMore'].flatMap(key => [true, 1, 'unknown'].map(value => p => { p.data[key] = value })),
+    p => { p.data.next_page = 2 }, p => { p.data.nextPage = 2 }, p => { p.data.next_cursor = 'next' },
+  ]
+  for (const mutate of mutations) {
+    const payload = biliEmptyPage()
+    mutate(payload)
+    assert.throws(() => project('bilibili', payload, { pageSize: 20 }), /invalid_content_search_shape/, JSON.stringify(payload))
+  }
+  assert.throws(() => project('bilibili', biliEmptyPage(), { page: 2, pageSize: 20 }), /invalid_content_search_shape/)
+  assert.throws(() => project('douyin', biliEmptyPage(), { pageSize: 20 }), /invalid_content_search_shape/)
+})
+
+test('Bilibili business rejection is checked before and after unwrapping the result page', () => {
+  for (const payload of [
+    { code: -412, data: { result: [], page: 1, numPages: 0 } },
+    { ...biliEmptyPage(), code: -412 },
+    { code: 0, data: { ...biliEmptyPage().data, code: -412 } },
+    { code: 0, data: { result: [], code: -412 } },
+  ]) assert.throws(() => project('bilibili', payload, { pageSize: 20 }), /content_search_business_rejected/)
+})
+
+test('Bilibili omitted inner result never overrides an existing outer result list', () => {
+  const payload = { ...biliEmptyPage(), result: [{ id: '1', type: 'video', title: 'Existing outer result' }] }
+  const projected = project('bilibili', payload, { pageSize: 20 })
+  assert.equal(projected.items.length, 1)
+  assert.equal(projected.items[0].content_id, '1')
+  assert.equal(projected.providerPage.hasMore, null)
+  assert.throws(() => project('bilibili', { ...biliEmptyPage(), result: null }, { pageSize: 20 }), /invalid_content_search_shape/)
 })
 
 test('Douyin V1 keeps full body, exact signed media and response session/cursor without reading echo or recommendations', () => {

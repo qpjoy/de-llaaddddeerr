@@ -517,6 +517,23 @@ function selectedArray(data, paths) {
   if (Array.isArray(data) && data.length <= 10000) return data
   throw new Error('invalid_content_search_shape')
 }
+function isBilibiliOmittedEmptyPage(data, request) {
+  const page = data.data, input = request.upstreamQuery
+  // Verified successful zero-result replies omit result; missing data alone is not exhaustion.
+  if (data.code !== 0 || !object(page) || Object.hasOwn(data, 'result') || Object.hasOwn(page, 'result')
+    || page.numResults !== 0 || page.numPages !== 0
+    || !Number.isSafeInteger(page.page) || page.page < 1 || page.page !== Number(input.page)
+    || !Number.isSafeInteger(page.pagesize) || page.pagesize < 1 || page.pagesize !== Number(input.page_size)) return false
+  if (['data', 'items', 'results', 'list', 'videos', 'next_page', 'nextPage', 'next_cursor', 'cursor']
+    .some(key => Object.hasOwn(page, key))) return false
+  for (const [key, expected] of [['num_results', 0], ['num_pages', 0], ['page_size', page.pagesize]]) {
+    if (Object.hasOwn(page, key) && page[key] !== expected) return false
+  }
+  for (const key of ['has_more', 'hasMore']) {
+    if (Object.hasOwn(page, key) && page[key] !== false && page[key] !== 0) return false
+  }
+  return true
+}
 function pagination(data, request, sourceCount) {
   const platform = request.platform, input = request.upstreamQuery
   let hasMore = flag(data.has_more ?? data.hasMore), nextParams = null, nextPage = null
@@ -561,15 +578,17 @@ function pagination(data, request, sourceCount) {
 export function projectTikHubContentSearch(result, request) {
   let data = result.publicBody?.data
   if (!object(data) && !Array.isArray(data)) throw new Error('invalid_content_search_shape')
+  if (request.platform === 'bilibili' && data.code != null && ![0, 200, '0', '200'].includes(data.code)) throw new Error('content_search_business_rejected')
+  const omittedEmptyPage = request.platform === 'bilibili' && isBilibiliOmittedEmptyPage(data, request)
   // Known extra Bilibili / Zhihu payload envelope; never walk content objects.
-  if (object(data.data) && (request.platform === 'bilibili' && data.data.result != null || request.platform === 'zhihu' && Array.isArray(data.data.data))) data = data.data
+  if (object(data.data) && (request.platform === 'bilibili' && (data.data.result != null || omittedEmptyPage) || request.platform === 'zhihu' && Array.isArray(data.data.data))) data = data.data
   if (data.code != null && ![0, 200, '0', '200'].includes(data.code)) throw new Error('content_search_business_rejected')
   const capturedAt = timestamp(result.publicBody?.meta?.capturedAt)
   if (!capturedAt) throw new Error('invalid_content_search_capture_time')
   if (request.platform === 'twitter') return projectTikHubTwitterSearch(result, request)
   if (['tiktok', 'xiaohongshu', 'weibo'].includes(request.platform)) return projectRemainingContentSearch(result, data, request, capturedAt)
   if (request.platform === 'reddit' || request.platform === 'youtube') return standardOnlyProjection(result, data, request, capturedAt)
-  let entries = selectedArray(data, { bilibili: [['result'], ['data', 'result'], ['data']], douyin: [['business_data'], ['aweme_list'], ['data'], ['items']],
+  let entries = omittedEmptyPage ? [] : selectedArray(data, { bilibili: [['result'], ['data', 'result'], ['data']], douyin: [['business_data'], ['aweme_list'], ['data'], ['items']],
     kuaishou: [['mixFeeds'], ['feeds'], ['result', 'items'], ['items'], ['data']], zhihu: [['data'], ['items']] }[request.platform])
   let nonPostCount = 0
   if (request.platform === 'bilibili') entries = entries.flatMap(entry => {
