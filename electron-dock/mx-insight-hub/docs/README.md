@@ -12,6 +12,7 @@ Last reviewed: 2026-10-21.
 
 ## 容量与熔断排查（2026-10-09）
 
+- [微信综合搜索 HTTP 400（2026-10-28）](operations/wechat-search-rejection-2026-10-28.md)：已验证通用拒绝、综合搜索参数（非公众号路径、与 TikHub V5.3.2 合同一致）、独立费用证据；附最多 2 次供应商调用的受控复测命令，待执行。
 - [B 站搜索缺省 result 的零结果页（2026-10-28）](operations/bilibili-empty-search-2026-10-28.md)：已验证空页证据、限定解析兼容、历史账务保留与发布验收。
 - [Twitter 历史未知请求与后续采集恢复（2026-10-28）](operations/twitter-search-admission-disposition-2026-10-28.md)：精确请求的管理员准入处置、历史与账务保留、部署及生产操作步骤。
 - [Instagram 熔断与 Twitter 429（2026-10-27）](operations/instagram-twitter-availability-2026-10-27.md)：两条请求的证据边界、只读核查命令、Instagram 错误详情与 Twitter 限流头留存。
