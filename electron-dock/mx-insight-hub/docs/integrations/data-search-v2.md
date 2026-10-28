@@ -51,6 +51,8 @@ v2 的 `mxds2` 加密游标绑定原 Key、查询、页大小、结果类型、�
 
 跨版本 unresolved 保护限定在能够确认的同 tenant/consumer/Key/platform/query。已有协议 binding 的 unknown、持久化未知或过期未完成租约仍保护两个版本，日期、游标或 key 改变不解除，也不因超过 24 小时自动清除。
 
+管理员可针对完整证据且已停止执行的一条历史 Twitter unknown，明确接受未决风险并保存独立准入处置记录。它只解除该记录对后续独立采集的阻断，不改变旧状态、账务或原 key，不授权其他未知请求、运行中调用或不合法游标。原页补采仍是独立人工重试流程。见 [历史未知请求处置](../operations/twitter-search-admission-disposition-2026-10-28.md)。
+
 自 `SEARCH_ADMISSION_POLICY_REVISION=known-query.v1` 起，v2 检查旧 usage 时必须同时满足：保存路径为 `/api/v1/data/search`，query 为非空字符串，去除两端空白后与本次查询完全相等，且归属一致。这样的旧 `unknown/reserved` 仍阻止新 v2 请求。缺少路径、缺少有效 query 或已知属于其他操作的记录不再阻断整个平台的新查询，也不要求下游逐条核对这些无关历史才能调用。旧 v1 自身的重放与并发语义不变。
 
 这个放宽不修改历史状态、不认定旧请求未收费或已成功；原 key 归属仍然保留，包括缺少当前 binding 的孤立 usage，以及缺少 usage 的悬空幂等 binding，不能通过 v2 复用旧 key。历史 raw 及无快照记录无需再依赖 connector 表证明操作身份。权限、预算、同一查询的协议 binding/lease 检查照常执行。
@@ -75,9 +77,9 @@ v2 的 `mxds2` 加密游标绑定原 Key、查询、页大小、结果类型、�
 }
 ```
 
-下游保留原 body、Idempotency-Key、版本、身份和游标，按建议间隔重试即可。该响应不代表原 blocker 已解决，也不允许更换请求条件。Hub 不为这次拒绝创建采购或页绑定；阻断消除后，原请求可正常执行，再次重试重放原交付。当前 key 已有 usage、binding 或 lease 时不会声明未开始采购，保留原冲突/running/unknown 语义。
+该响应允许下游保留原 body、Idempotency-Key、版本、身份和游标，在阻断解决后按建议间隔重试；是否自动重试由下游策略决定。它不代表原 blocker 已解决，也不允许更换请求条件。Hub 不为这次拒绝创建采购 usage；协议入口拒绝不建 binding，而 Twitter 路由在 reserve 前拒绝时可能保留无 usage 的 retryable binding。已有自有采购、运行中或未知归属仍保留原冲突/running/unknown 语义。
 
-Delta 更新后由既有 beat 自动接续冷启动/增量的原 CollectionRun；无需逐条跑解锁脚本。旧版本误分类的拒绝只做一次同 key 核对，期间继续阻止新 Run 绕路；真实 unknown、超时和投影不确定仍保持保护。日报 Skill 仍按原页身份重试，不自动重跑整份历史报告。`blockingRequestId` 和顶层 HTTP `requestId` 均不等于本页新采购 ID。
+2026-10-28 核对 Delta 当前代码：准入拒绝结束本次 Run 并告警，不再由 beat 自动接续；原请求身份和证据保留。历史版本的自动恢复说明不再作为当前行为。真实 unknown、超时和投影不确定仍保持保护。`blockingRequestId` 属于旧阻塞请求，顶层 HTTP `requestId` 属于本次尝试，均不等于本页新采购 ID。
 
 `GET /api/v1/requests/by-idempotency-key` 与 `GET /api/v1/requests/{requestId}` 增加 `data.searchProtocol`（仅关联 v2 时）：
 

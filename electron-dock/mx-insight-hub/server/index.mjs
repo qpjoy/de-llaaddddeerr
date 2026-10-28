@@ -46,6 +46,7 @@ import { RAPIDAPI_METADATA, rapidApiConfig } from './external-platforms/rapidapi
 import { createApp } from './app.mjs'
 import { createPeripheralRuntime } from './peripherals/runtime.mjs'
 import { AdmissionRecoveryService } from './operations/admission-recovery.mjs'
+import { SearchAdmissionDispositionService } from './operations/search-admission-disposition.mjs'
 import { createSso, readSsoProfile } from './identity/sso.mjs'
 import { loadConfig } from './config.mjs'
 import { AppError } from './core/errors.mjs'
@@ -701,6 +702,7 @@ export async function createRuntime(config = loadConfig()) {
     strategySearchRoutingStore,
     peripherals,
     wechatSelfHosted: wechatSelfHosted.service,
+    searchAdmissionDisposition: pool ? new SearchAdmissionDispositionService({ pool, apiKeyPepper: config.apiKeyPepper }) : null,
     admissionRecovery: pool ? new AdmissionRecoveryService({ pool, usageStore: store,
       providers: Object.fromEntries([externalPlatformStore, tikHubPlatformStore, rapidApiStore, qixinPlatformStore,
         ipRiskGateway.platformStore, ipRiskV2Gateway.platformStore, ...[...webSearch.gateways.values()].map(g => g.platformStore)]

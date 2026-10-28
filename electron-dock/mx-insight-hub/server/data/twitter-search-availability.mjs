@@ -1,5 +1,6 @@
 import { AppError } from '../core/errors.mjs'
 import { compileTwitterSearchQuery } from '../contracts/twitter-search-query.mjs'
+import { getSearchAdmissionDispositionIds } from '../operations/search-admission-disposition.mjs'
 
 // The supplier is an implementation detail of standard search. A known
 // unresolved delivery cannot be bypassed by changing suppliers, page size or
@@ -27,6 +28,14 @@ export async function assertTwitterSearchAvailable({ usageStore, context, query,
         AND status IN ('unknown','reserved') AND NOT (id=ANY($5::uuid[]))`,
     [context.tenant.id, context.consumer.id, context.apiKey.id, TRIM_CHARACTERS, excludeRequestIds])).rows
     matching = rows.filter(row => typeof row.query === 'string' && identity(row.query) === expected)
+    if (matching.some(row => row.status === 'unknown')) {
+      const disposed = await getSearchAdmissionDispositionIds(usageStore.pool,
+        matching.filter(row => row.status === 'unknown'), {
+          tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
+          platform: 'twitter', query,
+        })
+      matching = matching.filter(row => !disposed.includes(row.id))
+    }
   } else {
     matching = [...usageStore.requests.values()].filter(row => row.tenantId === context.tenant.id
       && row.consumerId === context.consumer.id && row.apiKeyId === context.apiKey.id && row.platform === 'twitter'

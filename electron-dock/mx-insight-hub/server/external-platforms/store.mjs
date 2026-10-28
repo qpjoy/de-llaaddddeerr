@@ -11,6 +11,7 @@ import { canonicalPlatform } from '../hub-service.mjs'
 import * as facebookSearchStore from './facebook-search-store.mjs'
 import * as twitterRetryStore from './twitter-manual-retry.mjs'
 import { twitterDeliveryLeases } from './twitter-delivery-leases.mjs'
+import { getSearchAdmissionDispositionIds } from '../operations/search-admission-disposition.mjs'
 
 const clone = (value) => value == null ? value : structuredClone(value)
 const iso = (value = new Date()) => new Date(value).toISOString()
@@ -25,6 +26,33 @@ const twitterRetryInput = input => ({ ...input,
   bufferCallId: input.twitterManualRetry.bufferCallId })
 const memoryDispatchLeases = (store, operation) => store.usageStore && store.providerKey === 'rapidapi' && operation === 'social.content.search'
   ? twitterDeliveryLeases(store.usageStore) : store.leases
+
+async function disposedTwitterDispatchIds(store, { consumerId, operation, fingerprint, ownerRequestId }) {
+  if (!(store.providerKey === 'rapidapi' && operation === 'social.content.search'
+    || store.providerKey === 'tikhub' && operation === 'native.t.twitter_web_fetch_search_timeline')) return []
+  const candidates = (await store.pool.query(`SELECT DISTINCT usage_request_id FROM external_platform.provider_calls
+    WHERE provider_key=$4 AND operation=$2 AND consumer_id=$1
+      AND (dispatch_fingerprint=$3 OR (dispatch_fingerprint IS NULL AND request_fingerprint=$3))
+      AND outcome='unknown' AND completed_at>now()-make_interval(secs=>$5::double precision)`,
+  [consumerId,operation,fingerprint,store.providerKey,Math.ceil(store.uncertainCooldownMs / 1000)])).rows
+  if (!candidates.length) return []
+  // Only a distinct, reserved standard-search intent can use a historical
+  // disposition. Same-key handling remains owned by the usage/protocol stores.
+  const { rows } = await store.pool.query(`SELECT DISTINCT previous.id, owner.tenant_id, owner.api_key_id
+    FROM usage_requests previous
+    JOIN usage_requests owner ON owner.id=$4 AND owner.consumer_id=$1
+      AND owner.status='reserved' AND owner.platform='twitter' AND owner.fingerprint=$3
+      AND owner.acquisition_request->>'path'='/api/v1/data/search'
+      AND owner.id<>previous.id AND owner.idempotency_key<>previous.idempotency_key
+    WHERE previous.id=ANY($2::uuid[]) AND previous.status='unknown' AND previous.tenant_id=owner.tenant_id
+      AND previous.consumer_id=owner.consumer_id AND previous.api_key_id=owner.api_key_id
+      AND previous.platform='twitter' AND previous.acquisition_request->>'path'='/api/v1/data/search'`,
+  [consumerId,candidates.map(row=>row.usage_request_id),fingerprint,ownerRequestId])
+  if (!rows.length) return []
+  return getSearchAdmissionDispositionIds(store.pool, rows, {
+    tenantId: rows[0].tenant_id, consumerId, apiKeyId: rows[0].api_key_id, platform: 'twitter',
+  })
+}
 
 const instagramOperation = provider => provider === 'tikhub' ? `native.${INSTAGRAM_SEARCH_KEY}`
   : provider === 'justone' ? `native.${JUSTONE_INSTAGRAM_SEARCH_KEY}` : null
@@ -2550,14 +2578,18 @@ export class PostgresExternalPlatformStore {
     // Buffer-only unknown deliveries have no owned provider call to join.
     const excluded = delivery.twitterManualRetry
       ? (await this.validateTwitterManualRetry(twitterRetryInput(delivery))).ancestorRequestIds : []
-    const {rows}=await this.pool.query(`SELECT 1 FROM usage_requests request
+    const {rows}=await this.pool.query(`SELECT request.id FROM usage_requests request
       WHERE request.tenant_id=$1 AND request.consumer_id=$2 AND request.api_key_id=$3
         AND request.platform='twitter' AND request.fingerprint=$4 AND request.status='unknown'
         AND request.acquisition_request->>'path'='/api/v1/data/search'
         AND NOT (request.id = ANY($5::uuid[]))
-        AND request.reserved_at >= now()-interval '24 hours' LIMIT 1`,
+        AND request.reserved_at >= now()-interval '24 hours'`,
     [delivery.tenantId,delivery.consumerId,delivery.apiKeyId,delivery.fingerprint,excluded])
-    return rows.length>0
+    if (!rows.length) return false
+    const disposed = await getSearchAdmissionDispositionIds(this.pool, rows.filter(row => row.id !== delivery.usageRequestId), {
+      tenantId: delivery.tenantId, consumerId: delivery.consumerId, apiKeyId: delivery.apiKeyId, platform: 'twitter',
+    })
+    return rows.some(row => !disposed.includes(row.id))
   }
 
   async validateTwitterManualRetry(input) { return twitterRetryStore.validateTwitterManualRetry(this, input) }
@@ -2699,6 +2731,7 @@ export class PostgresExternalPlatformStore {
       || twitterManualRetry.consumerId !== consumerId || twitterManualRetry.fingerprint !== fingerprint)) throw twitterRetryStore.twitterRetryDenied()
     const excluded = twitterManualRetry
       ? (await this.validateTwitterManualRetry(twitterManualRetry)).ancestorRequestIds : []
+    excluded.push(...await disposedTwitterDispatchIds(this, { consumerId, operation, fingerprint, ownerRequestId }))
     const { rows } = await this.pool.query(
       `INSERT INTO external_platform.dispatch_leases
          (consumer_id, operation, request_fingerprint, owner_request_id, expires_at)

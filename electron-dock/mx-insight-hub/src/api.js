@@ -616,6 +616,12 @@ export const adminApi = {
   twitterRetryPreparation: (token, requestId) => request(
     token, `${ADMIN_ROOT}/acquisitions/${encodeURIComponent(requestId)}/twitter-retry`,
   ),
+  searchAdmissionDisposition: (token, requestId) => request(
+    token, `${ADMIN_ROOT}/acquisitions/${encodeURIComponent(requestId)}/search-admission-disposition`,
+  ),
+  dispositionSearchAdmission: (token, requestId, body) => request(
+    token, `${ADMIN_ROOT}/acquisitions/${encodeURIComponent(requestId)}/search-admission-disposition`, { method: 'POST', body },
+  ),
   verifyAcquisitionRequest: (token, requestId, candidate) => request(
     token,
     `${ADMIN_ROOT}/acquisitions/${encodeURIComponent(requestId)}/verify-request`,

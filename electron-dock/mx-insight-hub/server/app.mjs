@@ -826,6 +826,7 @@ export function createApp({
   tikHubGateway = null,
   acquisitionHistory = null,
   admissionRecovery = null,
+  searchAdmissionDisposition = null,
   dataAdmission = new DataAdmission(),
   databasePressure = () => ({}),
   segmenterConfig = null,
@@ -1950,6 +1951,19 @@ export function createApp({
         sendJson(response, 200, {
           data: await acquisitionHistory.getAdminDiagnostics(params.identifier), requestId,
         }, { 'cache-control': 'private, no-store' })
+        return
+      }
+      params = routeMatch(pathname, '/internal/v1/admin/acquisitions/:requestId/search-admission-disposition')
+      if (['GET', 'POST'].includes(request.method) && params) {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'search admission disposition')
+        if (!searchAdmissionDisposition) {
+          throw new AppError(503, 'search_admission_disposition_unavailable', '后续采集恢复需要 PostgreSQL 历史证据')
+        }
+        const data = request.method === 'GET'
+          ? await searchAdmissionDisposition.prepare(params.requestId)
+          : await searchAdmissionDisposition.resolve(params.requestId, await readJson(request, 4096), { actor: principal.kind, requestId })
+        sendJson(response, 200, { data, requestId }, { 'cache-control': 'private, no-store' })
         return
       }
       params = routeMatch(pathname, '/internal/v1/admin/acquisitions/:requestId/twitter-retry')
