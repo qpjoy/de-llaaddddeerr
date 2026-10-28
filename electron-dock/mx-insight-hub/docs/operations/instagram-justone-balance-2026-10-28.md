@@ -55,3 +55,47 @@ MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh ops internal-p
 ```
 
 部署后在诊断中心查询 `26bedabd-531b-41e1-afa7-d56d089e8091`，应显示“上游供应商 / upstream_balance_exhausted / HTTP 200 / 业务码 601 / 未计费”。
+
+## 切到 TikHub 后 0 条：搜索网格换了版块布局（2026-10-28 晚）
+
+Instagram 路由改为 `fixed / tikhub` 后，请求 `d71f27ff-d8c7-4f2d-987e-3bc9fb582a0f`（“钱学森”）返回 0 条，同时提示有下一页。只读诊断 `diagnose-instagram-search.mjs` 的结果：
+
+- TikHub 调用 `5ee93056-c78f-43cf-b05f-50e14aa98327` 为 HTTP/业务码 200、已计费，上游 ID `96b0d67f-f182-4e23-a78e-458185dd5546`。
+- 响应包含 `media_grid`，共 4 个 section，每个都有 `layout_content`，但都**没有** `medias`/`media`。
+- 没有 `items`、`list`、`users`、`hashtags`、`places` 或关键词推荐；`has_more=true`，`next_max_id` 与 `rank_token` 都有。
+
+这是 **Hub 解析问题**，不是没有结果。旧解析器把缺少 `medias`/`media` 的版块当作空版块（`layout.medias ?? layout.media ?? []`），帖子被静默丢弃。TikHub 文档仍只描述 `layout_content.medias`，实际响应已经换成 Instagram 搜索网格的其他版块布局。
+
+修改（`server/contracts/instagram-search.mjs`）：
+
+- 版块内的帖子还会从 `fill_items`、`one_by_two_item.clips.items`、`two_by_two_item.clips.items` 和 `two_by_two_item.channel.media` 读取，同时兼容 camelCase 写法和 `{ media }` 包装。这些容器格式错误时，仍按原规则判为 `invalid_instagram_media_grid`。
+- 版块布局仍不认识时，**不再静默算作 0**：已识别版块的帖子照常交付，本页标为 `partial`，并附 `INSTAGRAM_UNRECOGNIZED_SECTIONS` 警告和版块数量。这样既不触发解析隔离、不阻断请求，问题也能在页面和诊断里看到。
+
+`diagnose-instagram-search.mjs` 为每个版块增加 `layoutType`、`sectionKeys`、`layoutKeys`、`nestedKeys`、`knownContainers`、`knownMediaCount`、`unrecognized`。只输出符合标识符格式的结构键名（有数量上限），不输出值、正文或游标；身份校验也覆盖新增容器。
+
+### 部署前确认真实键名（只读，不付费）
+
+TikHub 原始响应已保存在 Hub 中，用新诊断读取即可，不需要再调用供应商。从更新后的 Hub 源码目录执行：
+
+```bash
+sed \
+  -e "s|from 'pg'|from '/app/node_modules/pg/lib/index.js'|" \
+  -e "s|from '../contracts/|from '/app/server/contracts/|g" \
+  -e "s|import.meta.url === pathToFileURL(process.argv\[1\]).href|process.argv[1] === '-'|" \
+  server/ops/diagnose-instagram-search.mjs |
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - d71f27ff-d8c7-4f2d-987e-3bc9fb582a0f
+```
+
+看 `evidence[0].projection.shape.sectionShapes`：
+
+- `knownMediaCount > 0`、`unrecognized=false`：这次修改能读出帖子，部署即可。
+- 仍有 `unrecognized=true`：把 `layoutType`、`layoutKeys`、`nestedKeys` 贴回来，按真实键名补上。不需要付费请求。
+
+此时的投影回放仍是已部署的旧解析器，`resultCount` 用新容器计算，`returnedCount` 反映旧解析结果。
+
+### 部署后验证
+
+旧请求的保存响应不会改写；“重放 / 重试原查询”只会返回原来保存的 0 条结果。需要用“新建相同查询（再次发送会计量）”发一次新的付费搜索，确认能返回帖子，或页面带 `INSTAGRAM_UNRECOGNIZED_SECTIONS` 提示。
+
+测试：新增版块布局解析、未识别版块标记为 partial、格式错误仍拒绝、诊断输出键名但不泄露值。用 PGlite 0.2.17 跑完整服务端套件，失败项仍是原有 45 项。尚未部署。

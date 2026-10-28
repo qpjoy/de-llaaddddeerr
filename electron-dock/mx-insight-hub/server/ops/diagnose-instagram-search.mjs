@@ -18,6 +18,21 @@ const continuation = value => ({ type: kind(value), length: typeof value === 'st
 const pagination = value => ({ nextMaxId: continuation(value?.next_max_id), rankToken: continuation(value?.rank_token),
   moreAvailable: paginationFlag(value?.more_available), hasMore: paginationFlag(value?.has_more),
   hasNextPage: paginationFlag(value?.has_next_page) })
+// Kept in step with LAYOUT_LISTS/LAYOUT_SINGLES in contracts/instagram-search.mjs.
+// Duplicated so this file still runs over stdin against an older deployed parser.
+const LAYOUT_PATHS = [['medias'], ['media'], ['fill_items'], ['fillItems'],
+  ['one_by_two_item', 'clips', 'items'], ['oneByTwoItem', 'clips', 'items'],
+  ['two_by_two_item', 'clips', 'items'], ['twoByTwoItem', 'clips', 'items'],
+  ['two_by_two_item', 'channel', 'media'], ['twoByTwoItem', 'channel', 'media']]
+const at = (value, path) => path.reduce((current, key) => object(current) ? current[key] : undefined, value)
+// Structural key names only, identifier-shaped and bounded, to diagnose layout
+// drift; values, text and cursors never leave restricted storage.
+const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_]{0,40}$/u
+const keyNames = value => object(value) ? Object.keys(value).filter(key => IDENTIFIER.test(key)).sort().slice(0, 30) : []
+const layoutEntries = layout => LAYOUT_PATHS.flatMap(path => {
+  const value = at(layout, path)
+  return Array.isArray(value) ? value.map(entry => entry?.media ?? entry) : object(value) && path.at(-1) === 'media' && path.length > 1 ? [value] : []
+})
 const listFields = value => Object.fromEntries(['position', 'id', 'pk', 'code', 'shortcode', 'user',
   'username', 'full_name', 'media', 'caption', 'media_type', 'hashtag', 'place'].map(key => [key, kind(value?.[key])]))
 
@@ -38,8 +53,14 @@ export function inspectInstagramArchive(archive, snapshot) {
   const sections = grid?.sections
   const sectionShapes = Array.isArray(sections) ? sections.slice(0, 20).map((section, index) => {
     const layout = section?.layout_content || section?.layoutContent
+    const known = LAYOUT_PATHS.filter(path => at(layout, path) != null).map(path => path.join('.'))
     return { index, section: kind(section), layout: kind(layout), medias: kind(layout?.medias),
-      mediasCount: count(layout?.medias), media: kind(layout?.media), mediaCount: count(layout?.media) }
+      mediasCount: count(layout?.medias), media: kind(layout?.media), mediaCount: count(layout?.media),
+      layoutType: typeof section?.layout_type === 'string' ? (IDENTIFIER.test(section.layout_type) ? section.layout_type : 'other') : kind(section?.layout_type),
+      sectionKeys: keyNames(section), layoutKeys: keyNames(layout),
+      nestedKeys: Object.fromEntries(keyNames(layout).filter(key => object(layout[key])).slice(0, 10).map(key => [key, keyNames(layout[key])])),
+      knownContainers: known, knownMediaCount: layoutEntries(layout).length,
+      unrecognized: object(layout) && !known.length && Object.keys(layout).length > 0 }
   }) : []
   const shape = {
     data: kind(root), nestedData: kind(root?.data), parsedData: kind(data),
@@ -71,11 +92,8 @@ export function inspectInstagramArchive(archive, snapshot) {
   const request = { query: '', page: 1, pageSize, archiveCallId: '00000000-0000-0000-0000-000000000001',
     encodeNext: () => 'offline-not-a-cursor' }
   // Independently inspect identities even if the full page fails another guard.
-  const values = [data?.media_grid, data?.mediaGrid].flatMap(grid => Array.isArray(grid?.sections) ? grid.sections.flatMap(section => {
-    const layout = section?.layout_content || section?.layoutContent
-    const entries = layout?.medias || layout?.media || []
-    return Array.isArray(entries) ? entries.map(entry => entry?.media || entry) : []
-  }) : [])
+  const values = [data?.media_grid, data?.mediaGrid].flatMap(grid => Array.isArray(grid?.sections)
+    ? grid.sections.flatMap(section => layoutEntries(section?.layout_content || section?.layoutContent)) : [])
   if (Array.isArray(data?.items)) values.push(...data.items.map(entry => entry?.media || entry))
   if (Array.isArray(data?.list)) values.push(...data.list.flatMap(entry =>
     object(entry?.media) ? [entry.media] : entry?.code || entry?.shortcode ? [entry] : []))
@@ -103,7 +121,7 @@ export function inspectInstagramArchive(archive, snapshot) {
       hasMore: result.publicBody.data.page.hasMore,
       deliveryStatus: result.publicBody.data.status,
       warningCodes: (result.publicBody.data.warnings || []).map(warning => warning.code)
-        .filter(code => code === 'INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE') }
+        .filter(code => ['INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE', 'INSTAGRAM_UNRECOGNIZED_SECTIONS'].includes(code)) }
   } catch (error) {
     return { state: 'current_projection_rejects', pageSize, shape, ...rows,
       reason: REASONS.has(error.message) ? error.message : 'unexpected_projection_error' }

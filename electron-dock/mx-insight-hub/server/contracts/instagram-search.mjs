@@ -33,9 +33,40 @@ function listMedia(entries) {
   })
 }
 
+// Search grid sections hold media in several layouts: a plain grid, a
+// one-by-two block with a clips column plus fill items, or a two-by-two block.
+// Each list holds media directly or wrapped as { media }.
+const LAYOUT_LISTS = [['medias'], ['media'], ['fill_items'], ['fillItems'],
+  ['one_by_two_item', 'clips', 'items'], ['oneByTwoItem', 'clips', 'items'],
+  ['two_by_two_item', 'clips', 'items'], ['twoByTwoItem', 'clips', 'items']]
+const LAYOUT_SINGLES = [['two_by_two_item', 'channel', 'media'], ['twoByTwoItem', 'channel', 'media']]
+const at = (value, path) => path.reduce((current, key) => object(current) ? current[key] : undefined, value)
+
+// Returns null when no known container is present, so an unread layout is
+// reported instead of silently counting as an empty section.
+function layoutMedia(layout) {
+  const values = []
+  let known = false
+  for (const path of LAYOUT_LISTS) {
+    const list = at(layout, path)
+    if (list == null) continue
+    if (!Array.isArray(list)) throw new Error('invalid_instagram_media_grid')
+    known = true
+    values.push(...list.map(entry => entry?.media ?? entry))
+  }
+  for (const path of LAYOUT_SINGLES) {
+    const media = at(layout, path)
+    if (media == null) continue
+    if (!object(media)) throw new Error('invalid_instagram_media_grid')
+    known = true
+    values.push(media)
+  }
+  return known ? values : null
+}
+
 function searchMedia(data) {
   const values = []
-  let recognized = false, nonPostCount = 0
+  let recognized = false, nonPostCount = 0, unrecognizedSections = 0
   // Independent containers may coexist. Validate and collect all of them;
   // an empty grid must not hide list media, nor suggestions hide a bad grid.
   for (const field of ['media_grid', 'mediaGrid']) {
@@ -46,9 +77,9 @@ function searchMedia(data) {
     for (const section of grid.sections) {
       const layout = section?.layout_content ?? section?.layoutContent
       if (!object(layout)) throw new Error('invalid_instagram_media_grid')
-      const media = layout.medias ?? layout.media ?? []
-      if (!Array.isArray(media)) throw new Error('invalid_instagram_media_grid')
-      values.push(...media.map(entry => entry?.media ?? entry))
+      const media = layoutMedia(layout)
+      if (media) values.push(...media)
+      else if (Object.keys(layout).length) unrecognizedSections += 1
     }
   }
   if (data.items != null) {
@@ -86,7 +117,7 @@ function searchMedia(data) {
     nonPostCount += keywords.length
   }
   if (!recognized) throw new Error('invalid_instagram_search_shape')
-  return { values, nonPostCount }
+  return { values, nonPostCount, unrecognizedSections }
 }
 
 function rendition(values) {
@@ -126,7 +157,7 @@ export function projectInstagramSearch(result, request) {
   const data = object(root?.data) ? root.data : root
   if (!object(data) || (data.status && data.status !== 'ok')) throw new Error('invalid_instagram_search_shape')
   const grid = data.media_grid || data.mediaGrid
-  const { values, nonPostCount } = searchMedia(data)
+  const { values, nonPostCount, unrecognizedSections } = searchMedia(data)
   const capturedAt = result.publicBody.meta.capturedAt
   const rows = [...new Map(values.map(value => {
     const row = instagramRow(value, capturedAt)
@@ -163,6 +194,8 @@ export function projectInstagramSearch(result, request) {
     ...(buffered ? { buffer: { callId, offset: offset + items.length, hash: rowsHash }, providerCursor: request.providerCursor }
       : { providerCursor: { next_max_id: next, ...(rank ? { rank_token: rank } : {}) } }) })
   const warnings = []
+  if (unrecognizedSections) warnings.push({ code: 'INSTAGRAM_UNRECOGNIZED_SECTIONS',
+    message: `${unrecognizedSections} search grid section(s) use a layout Hub does not read; posts in them are not shown.` })
   if (nonPostContinuationMissing) warnings.push({ code: 'INSTAGRAM_NON_POST_CONTINUATION_UNAVAILABLE',
     message: 'This page contains only non-post search results, but no usable continuation was supplied. Search completeness is unknown.' })
   if (request.page === 15 && (buffered || upstreamMore)) warnings.push({ code: 'INSTAGRAM_PAGE_LIMIT_REACHED',
