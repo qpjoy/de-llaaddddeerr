@@ -99,3 +99,9 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 旧请求的保存响应不会改写；“重放 / 重试原查询”只会返回原来保存的 0 条结果。需要用“新建相同查询（再次发送会计量）”发一次新的付费搜索，确认能返回帖子，或页面带 `INSTAGRAM_UNRECOGNIZED_SECTIONS` 提示。
 
 测试：新增版块布局解析、未识别版块标记为 partial、格式错误仍拒绝、诊断输出键名但不泄露值。用 PGlite 0.2.17 跑完整服务端套件，失败项仍是原有 45 项。尚未部署。
+
+### 键名已确认（只读诊断，未付费）
+
+2026-10-28 用新诊断读取 `d71f27ff` 的保存响应：4 个版块依次为 `one_by_two_right`、`one_by_two_left`、`one_by_two_right`、`one_by_two_left`，每个版块的 `layout_content` 都只有 `fill_items` 与 `one_by_two_item`（内含 `clips`）。`knownContainers` 都是 `fill_items` 与 `one_by_two_item.clips.items`，每版块 5 条，`unrecognized=false`。
+
+合计 20 条，其中 18 个不重复帖子（TikHub 文档注明 Instagram 综合搜索可能返回重复数据，Hub 按帖子 ID 去重），全部通过帖子身份校验（`invalidRowCount=0`）。已部署的旧解析器 `returnedCount=0`；部署本修改后，同样的响应会交付 18 条，且不会出现 `INSTAGRAM_UNRECOGNIZED_SECTIONS`。
