@@ -67,7 +67,9 @@ bash scripts/manage.sh down      # 只缩容，保留 PVC/PV/索引
 
 正常 Hub `deploy` 已调用 `ensure`，因此停止的共享服务无需提前手动启动。当前版本先核对本地卷绑定、磁盘 UUID 与 PG16 身份，在 `/var/lib/mx-common/storage-identity.json` 保留无密钥记录；不明存储、缺失旧文件或 Secret 返回 78，调用方不得将其当成搜索降级。需要在 Linux 节点以能读取 PGDATA 的 root 身份执行，并保留该身份记录。普通工作负载缺失可重建；PV/PVC 元数据丢失需要显式恢复，不自动初始化第二个库。
 
-核心服务默认等待上限改为 1200 秒（`MX_COMMON_WAIT_TIMEOUT`），镜像优先从 Docker 缓存导入 containerd。已安装的 HanLP 会在 `ensure` 中恢复副本数并等待健康；首次安装或被删除的 HanLP Deployment 仍使用下面的独立部署命令。首次接入新版启动保护会滚动 PG/ES，后续配置不变不会额外重启。完整边界和本次恢复证据见[停机恢复复盘](../mx-insight-hub/docs/operations/restart-and-recovery.md)。
+核心服务默认等待上限改为 1200 秒（`MX_COMMON_WAIT_TIMEOUT`），镜像优先从 Docker 缓存导入 containerd。已安装的 HanLP 会在 `ensure` 中恢复副本数并等待健康；首次安装或被删除的 HanLP Deployment 仍使用下面的独立部署命令。PostgreSQL 采用 `OnDelete`，应用模板不会自动重启已有 Pod；ES 的启动保护模板变更可能触发滚动更新。完整边界和本次恢复证据见[停机恢复复盘](../mx-insight-hub/docs/operations/restart-and-recovery.md)。
+
+PostgreSQL 的 `/dev/shm` 显式使用 `emptyDir.medium: Memory`、`sizeLimit: 1Gi`，避免容器默认 64 MiB 在统计查询中耗尽。1 GiB 是上限而非预占，实际使用计入容器内存；数据仍使用原 PVC。已有 Pod 需在维护窗口重建才会获得新挂载，普通 `ensure` 成功不代表该挂载已生效。上线前核对实际内存限制及待生效模板差异，上线后用 `df -h /dev/shm` 确认。见 [Hub 临时凭据故障与共享内存处理](../mx-insight-hub/docs/operations/demo-credential-shared-memory-2026-10-30.md)。
 
 若 HanLP 出现 `ErrImageNeverPull`，说明节点无法使用它配置为 `imagePullPolicy: Never` 的本地镜像；普通 `preload` 仅覆盖 PG/ES/Redis。`ensure` 现在会在恢复未就绪的既有 HanLP 前检查镜像：仅在确认本机是部署目标节点，且 Docker 缓存 image ID 与 Deployment 注解完全一致时，将该镜像重新导入当前 Kubernetes containerd。它使用线上 Deployment 的镜像名，不受本次环境变量中的其他镜像名影响，不构建、不拉取、不改 Pod 模板或模型 PVC。导入后的旧错误状态最多等待 60 秒让 kubelet 重试，随后仍要求就绪和 `/health` 成功。缺少缓存、身份注解或镜像版本不一致会停止并提示在节点执行 `deploy hanlp`，成功后重试 Hub 部署；保留 `MX_INSIGHT_REQUIRE_SEARCH=1`。
 
