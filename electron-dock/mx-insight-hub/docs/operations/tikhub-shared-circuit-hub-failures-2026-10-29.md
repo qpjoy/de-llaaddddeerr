@@ -10,7 +10,34 @@ Delta 调用小红书搜索（raw），Hub 返回：
 
 本次没有调用供应商，也没有计费。
 
-## 原因（代码确认；生产数据待只读诊断核实）
+## 生产证据（只读诊断 `provider-circuit-diagnostic.v1`，已核实）
+
+- 03:47:02–03:47:07 共 10 次 TikHub Reddit 搜索（`native.t.reddit_app_fetch_dynamic_search`），全部 HTTP/业务码 200、**已计费**，但全部被 Hub 判为 `succeeded_unusable / invalid_content_search_contract`。
+- 最后一次完成于 `03:47:07.795Z`，熔断恰好开到 `03:48:07.795Z`（开闸 60 秒），之后 `0a92d464` 被拒。
+- 也就是说，触发熔断的是 **Hub 解析不了 Reddit 结果**，不是 TikHub 故障。
+- 更早的 03:44:31–03:44:50 有一批真实的 TikHub 429（小红书、抖音、快手）和一次快手超时，这些属于供应商故障，修改后仍会计入熔断。
+- 当前熔断已关闭（`consecutiveFailures=0`）。
+
+## Reddit 搜索当前全部失败（待确认原因）
+
+10 次 Reddit 搜索全部是“已付费但不可用”，说明 Reddit 动态搜索的返回结构很可能变了：Hub 只认识 `post`、`children`、`community`/`comment`/`author` 几种节点，遇到其他节点就判整页失败，和抖音“相关搜索”卡片是同一类问题。下游的 Reddit 搜索现在都会失败并且付费。
+
+新增只读诊断 `server/ops/diagnose-reddit-search.mjs`（`reddit-search-shape.v1`），按供应商调用 ID 读取已保存的 TikHub 原始响应：
+
+- 报告每个节点属于哪一类，以及节点的 GraphQL 类型名（`__typename`）、键名和下一层结构；
+- 用已部署的解析器重放，给出具体失败原因。
+
+不输出值、正文、链接或游标，也不调用供应商：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - 93494c87-5a7e-4c90-b0b7-51793e9a1fda 0bf7cf68-6662-48aa-a5b0-9eae81301aee \
+  < server/ops/diagnose-reddit-search.mjs
+```
+
+拿到 `unrecognized` 节点的类型名和键名后，按真实结构补上解析，不需要付费请求。
+
+## 原因（代码）
 
 所有 TikHub 平台（小红书、抖音、Instagram、Twitter、微信等）共用一个 TikHub 熔断：连续 3 次失败就暂停整个 TikHub 约 60 秒。
 
