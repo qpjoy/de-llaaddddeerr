@@ -232,6 +232,20 @@ test('Reddit no-results notice is an empty page; any other notice is a Reddit-si
   assert.deepEqual(mixed.providerPage.warnings.map(warning => warning.code), ['reddit_search_notice'])
 })
 
+test('Reddit final page keeps its Relay endCursor with hasNextPage=false and ends pagination', () => {
+  // Production 2026-10-29 (call 0bf7cf68): a no-results notice page carried
+  // endCursor, startCursor and hasPreviousPage alongside hasNextPage=false.
+  const finalInfo = { endCursor: 'last-edge-cursor', startCursor: 'first-edge-cursor', hasNextPage: false, hasPreviousPage: true }
+  for (const edges of [[{ node: notice('No results found') }], [{ node: searchPost('a') }]]) {
+    const output = project('reddit', dynamic(edges, finalInfo))
+    assert.equal(output.providerPage.hasMore, false)
+    assert.equal(output.providerPage.nextParams, null)
+  }
+  const next = project('reddit', dynamic([{ node: searchPost('a') }], { endCursor: 'next-cursor', hasNextPage: true }))
+  assert.deepEqual(next.providerPage.nextParams, { after: 'next-cursor' })
+  assert.throws(() => project('reddit', dynamic([{ node: searchPost('a') }], { hasNextPage: true })), /missing_content_search_continuation/)
+})
+
 test('Reddit unknown widgets that carry a post still fail the page instead of dropping it', () => {
   for (const node of [{ __typename: 'SearchCarousel', items: [{ __typename: 'SubredditPost', id: 'hidden' }] },
     { __typename: 'SearchPromo', target: { id: 't3_hidden' } },

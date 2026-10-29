@@ -46,7 +46,18 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
   < server/ops/diagnose-reddit-search.mjs
 ```
 
-预期：`93494c87` 的 `parser.state=installed_accepts`、`itemCount=6`；`0bf7cf68` 为 `notice` 节点，`noticeClass` 是 `no_results` 时解析器返回空页，是 `error` 时返回 `upstream_search_error_message`。如果它其实是“无结果”提示、只是措辞没被识别，就把措辞补进判定规则。
+**部署前已确认（v2，只读）：** `0bf7cf68` 的提示为 `noticeClass=no_results`，即 Reddit 的“没有结果”提示，新解析器会把它当作正常的空页。两条调用的 `parser` 仍是 `installed_rejects`，因为线上运行的还是旧解析器（尚未部署）。
+
+部署后预期：`93494c87` 的 `parser.state=installed_accepts`、`itemCount=6`；`0bf7cf68` 为 `notice` 节点，`noticeClass` 是 `no_results` 时解析器返回空页，是 `error` 时返回 `upstream_search_error_message`。如果它其实是“无结果”提示、只是措辞没被识别，就把措辞补进判定规则。
+
+### 部署后复查（v2，只读）与末页修复
+
+- `93494c87`：`installed_accepts`，`itemCount=6`、`nonPostCount=1`。调查卡片被排除，6 条帖子已能交付。
+- `0bf7cf68`：提示已被识别，但又报 `contradictory_content_search_continuation`。原因是这一页的 `pageInfo` 同时有 `hasNextPage=false` 和非空的 `endCursor`（另有 `startCursor`、`hasPreviousPage`）。Reddit 按 Relay 分页规范返回 `pageInfo`：`endCursor` 只是本页最后一条的游标，末页也会有；有没有下一页只看 `hasNextPage`。旧规则把“有游标、却说没有下一页”当成矛盾，所以**任何 Reddit 搜索的最后一页都会失败**，不止这一次。
+
+修改：Reddit 的 `pageInfo.hasNextPage` 明确为 false 时直接结束翻页，忽略 `endCursor`。`hasNextPage=true` 时仍必须有游标，否则照旧报错。
+
+重新部署后，同一条诊断命令的预期：两条都是 `installed_accepts`；`0bf7cf68` 的 `itemCount=0`、`nonPostCount=1`。
 
 ## 原因（代码）
 

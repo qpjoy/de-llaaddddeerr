@@ -491,7 +491,10 @@ function redditProjection(data, request, capturedAt) {
     for (const edge of boundedEntries(main.edges)) visit(edge?.node)
     if (searchError && !rows.length) throw new Error('upstream_search_error_message')
     if (searchError) warnings.push({ code: 'reddit_search_notice', message: 'Reddit returned an error notice alongside these results.' })
-    scopes.push(main.pageInfo, main)
+    // Relay pageInfo: endCursor is the last edge's cursor and stays set on the
+    // final page, so an explicit hasNextPage=false alone ends pagination.
+    const pageInfo = object(main.pageInfo) && flag(main.pageInfo.hasNextPage) === false ? { hasNextPage: false } : main.pageInfo
+    scopes.push(pageInfo, main)
   } else {
     const listing = data.kind === 'Listing' ? data.data : data
     if (!object(listing) && !Array.isArray(listing)) throw new Error('invalid_content_search_shape')
