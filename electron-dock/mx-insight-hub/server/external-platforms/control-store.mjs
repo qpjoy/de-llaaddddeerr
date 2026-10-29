@@ -85,7 +85,17 @@ function justoneResourceOperationEntries() {
 
 export const EXTERNAL_PLATFORM_OPERATION_CATALOG = Object.freeze({
   ...Object.fromEntries(WEB_SEARCH_PROVIDERS.map(p=>[p.key,[{operationKey:'web.search',label:'Web Search',legacyGate:'contractVerified',contractVersion:WEB_SEARCH_VERSION,endpointKeys:[p.endpointKey]}]])),
-  rapidapi: Object.freeze([...HUB_SOCIAL_OPERATIONS, FACEBOOK_OPERATION]),
+  rapidapi: Object.freeze([...HUB_SOCIAL_OPERATIONS, FACEBOOK_OPERATION,
+    // Taobao/Tmall through the RapidAPI listing of the JustOne backend. Its own
+    // price and state; routing decides whether it is primary or backup.
+    Object.freeze({
+      operationKey: JUSTONE_OPERATION,
+      label: '电商商品搜索 · 淘宝/天猫（JustOne 后端）',
+      legacyGate: 'contractVerified',
+      contractVersion: ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
+      endpointKeys: Object.freeze([JUSTONE_ENDPOINTS.taobao.endpointKey]),
+    }),
+  ]),
   qixin: Object.freeze(QIXIN_OPERATIONS),
   'baidu-ip': Object.freeze([{ operationKey:'ip.risk.query.v2',label:'IP 风险画像 · 百度 v2',
     contractVersion:'mx-insight-hub.ip-risk.v2',endpointKeys:['base','overall'] }]),

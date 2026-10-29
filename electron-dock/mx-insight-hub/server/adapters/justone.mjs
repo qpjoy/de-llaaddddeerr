@@ -6,6 +6,8 @@ import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-js
 import { HUB_USER_AGENT } from '../core/outbound-identity.mjs'
 import {
   assertBoundedJson,
+  ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
+  RAPIDAPI_TAOBAO_TMALL_HOST,
   classifyJustOneBusinessCode,
   createJustOneCallArchiveObject,
   inspectJustOneEnvelope,
@@ -343,6 +345,30 @@ function rejected(httpStatus, businessCode, errorCode, context) {
   )
 }
 
+// RapidAPI answers some requests itself, before they reach the backend, and
+// marks those responses with `x-rapidapi-proxy-response: true`. These statuses
+// are definite refusals that never ran the paid search. Any other proxy status
+// (notably 5xx) may follow a forwarded request and stays an unknown outcome.
+const RAPIDAPI_REFUSALS = Object.freeze({
+  401: Object.freeze({ errorCode: 'upstream_auth_invalid', circuitCategory: 'authentication' }),
+  402: Object.freeze({ errorCode: 'upstream_balance_exhausted', circuitCategory: 'capacity' }),
+  403: Object.freeze({ errorCode: 'upstream_permission_denied', circuitCategory: 'authentication' }),
+  429: Object.freeze({ errorCode: 'upstream_rate_limited', circuitCategory: 'capacity' }),
+})
+
+// A refusal the supplier's gateway or our egress produced before the paid
+// request ran: definitely not billed, so a priority route may use its backup.
+function refusedBeforeDispatch(httpStatus, errorCode, circuitCategory, context) {
+  const errorEvidence = evidence({
+    outcome: 'rejected', httpStatus, billed: false, errorCode, circuitCategory, affectsCircuit: true,
+  })
+  return new JustOneRejectedError(
+    errorEvidence,
+    archiveObjects({ ...context, ...errorEvidence, contractState: context?.contractState || 'provider_rejected' }),
+    restrictedResponseArchive(context),
+  )
+}
+
 function ambiguous(httpStatus, errorCode, context) {
   const errorEvidence = evidence({
     outcome: 'unknown',
@@ -394,6 +420,10 @@ export class JustOneAdapter {
     // Reports bounded transport evidence and unaccepted response shapes.
     // Optional so every existing construction keeps working unchanged.
     logger = null,
+    // `{ provider: 'rapidapi', host }` reaches the same backend through its
+    // RapidAPI listing: header authentication and only the endpoints that
+    // listing sells. Omitted means JustOne directly with a query token.
+    transport = null,
   } = {}) {
     const fallbackToken = normalizedCredential(token)
     if (credentialResolver != null && typeof credentialResolver !== 'function') {
@@ -403,6 +433,11 @@ export class JustOneAdapter {
       throw new TypeError('token or credentialResolver is required')
     }
     if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be a function')
+    if (transport != null && (transport.provider !== 'rapidapi' || transport.host !== RAPIDAPI_TAOBAO_TMALL_HOST)) {
+      throw new TypeError('transport must name the reviewed RapidAPI listing')
+    }
+    this.transport = transport ? Object.freeze({ provider: 'rapidapi', host: transport.host }) : null
+    this.providerKey = this.transport ? 'rapidapi' : 'justone'
     this.#fallbackToken = fallbackToken
     this.#credentialResolver = credentialResolver
     this.logger = logger
@@ -450,7 +485,9 @@ export class JustOneAdapter {
     credential: suppliedCredential,
   } = {}) {
     const credential = await this.#credentialFor(suppliedCredential)
-    const request = normalizeJustOneProductSearchRequest(body, { decodeCursor, maxPageSize, defaultAdapterId })
+    const request = normalizeJustOneProductSearchRequest(body, {
+      decodeCursor, maxPageSize, defaultAdapterId, providerKey: this.providerKey,
+    })
     return this.#dispatch({
       request,
       credential,
@@ -594,11 +631,19 @@ export class JustOneAdapter {
   }
 
   async #dispatch({ request, credential, capturedAt, normalize }) {
-    const url = new URL(request.endpointPath, JUSTONE_BASE_URL)
-    url.searchParams.set('token', credential)
+    const rapid = this.transport?.provider === 'rapidapi'
+    // The RapidAPI listing sells product search only. Never send another
+    // endpoint (or the query token) to that host.
+    if (rapid && request.contractVersion !== ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION) {
+      throw new TypeError('The RapidAPI listing only serves product search')
+    }
+    const url = new URL(request.endpointPath, rapid ? `https://${this.transport.host}` : JUSTONE_BASE_URL)
+    if (!rapid) url.searchParams.set('token', credential)
     for (const [key, value] of Object.entries(request.upstreamQuery)) {
       url.searchParams.set(key, value)
     }
+    const headers = { accept: 'application/json', 'user-agent': HUB_USER_AGENT,
+      ...(rapid ? { 'x-rapidapi-key': credential, 'x-rapidapi-host': this.transport.host } : {}) }
 
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
@@ -615,13 +660,20 @@ export class JustOneAdapter {
       try {
         response = await this.fetchImpl(url.toString(), {
           method: 'GET',
-          headers: { accept: 'application/json', 'user-agent': HUB_USER_AGENT },
+          headers,
           redirect: 'error',
           cache: 'no-store',
           signal: controller.signal,
           dispatcher: this.#dispatcher,
         })
       } catch (error) {
+        // The System Proxy refuses before the business request when no route
+        // reaches the host; that request never left, so it was not billed.
+        if (rapid && ['proxy_routes_unreachable', 'proxy_route_unavailable'].includes(error?.code)) {
+          throw refusedBeforeDispatch(null, 'upstream_proxy_unreachable', 'transport', {
+            ...baseArchiveContext, contractState: 'transport_unavailable',
+          })
+        }
         throw ambiguous(
           null,
           controller.signal.aborted ? 'upstream_deadline_exceeded' : 'upstream_transport_error',
@@ -685,6 +737,13 @@ export class JustOneAdapter {
         })
       }
       responseContext.bodyText = text
+      const refusal = rapid && !response.ok && response.headers.get('x-rapidapi-proxy-response') === 'true'
+        ? RAPIDAPI_REFUSALS[httpStatus] : null
+      if (refusal) {
+        throw refusedBeforeDispatch(httpStatus, refusal.errorCode, refusal.circuitCategory, {
+          ...responseContext, contractState: 'provider_rejected',
+        })
+      }
 
       let raw
       try {

@@ -218,8 +218,24 @@ export const JUSTONE_ENDPOINTS = Object.freeze({
 })
 
 export const JUSTONE_SUPPORTED_MARKETPLACES = Object.freeze(Object.keys(JUSTONE_ENDPOINTS))
-export const justOneProductAdapterId = marketplace => Object.hasOwn(JUSTONE_ENDPOINTS, marketplace)
-  ? `justone:${JUSTONE_ENDPOINTS[marketplace].endpointKey}` : null
+
+// The same JustOne backend is also sold through RapidAPI for Taobao/Tmall:
+// identical path, parameters and response; only authentication and billing
+// differ (handoff document, 2026-10-01). Every supplier listed here serves the
+// marketplace's one reviewed endpoint contract, so the unified product shape,
+// sorting, filters and pagination are the same whichever one dispatches.
+export const RAPIDAPI_TAOBAO_TMALL_HOST = 'taobao-tmall-all-api1.p.rapidapi.com'
+const PRODUCT_SEARCH_SUPPLIERS = Object.freeze({
+  taobao: Object.freeze(['justone', 'rapidapi']),
+  tmall: Object.freeze(['justone', 'rapidapi']),
+})
+export const productSearchProviders = marketplace => Object.hasOwn(JUSTONE_ENDPOINTS, marketplace)
+  ? PRODUCT_SEARCH_SUPPLIERS[marketplace] ?? Object.freeze(['justone']) : Object.freeze([])
+export const productAdapterId = (provider, marketplace) => productSearchProviders(marketplace).includes(provider)
+  ? `${provider}:${JUSTONE_ENDPOINTS[marketplace].endpointKey}` : null
+export const productAdapterProvider = (adapterId, marketplace) => productSearchProviders(marketplace)
+  .find(provider => productAdapterId(provider, marketplace) === adapterId) ?? null
+export const justOneProductAdapterId = marketplace => productAdapterId('justone', marketplace)
 
 export const JUSTONE_BUSINESS_CODES = Object.freeze({
   100: Object.freeze({ category: 'authentication', errorCode: 'upstream_auth_invalid' }),
@@ -440,6 +456,9 @@ export function normalizeJustOneProductSearchRequest(body, {
   // only while producing a response, never while validating a request.
   encodeCursor: _encodeCursor,
   maxPageSize,
+  // The supplier that will dispatch this request. Routing chooses it; the
+  // public body can never name one.
+  providerKey = 'justone',
 } = {}) {
   if (!plainObject(body)) throw new JustOneContractError('invalid_request', 'request body must be an object')
   const allowed = new Set(['marketplace', 'query', 'page', 'cursor', 'sort', 'price', 'deliveryMode'])
@@ -465,12 +484,17 @@ export function normalizeJustOneProductSearchRequest(body, {
   }
   const scope = cursorScope({ marketplace, query, sort, price })
   const state = decodedCursor(cursor, decodeCursor)
-  // Old cursors stay on their original baseline; defaults only select fresh
-  // traversals. Callers cannot submit an adapter override in the public body.
-  const adapterId = state ? state.adapterId ?? justOneProductAdapterId(marketplace)
-    : defaultAdapterId ?? justOneProductAdapterId(marketplace)
-  if (adapterId !== justOneProductAdapterId(marketplace)) {
-    throw new JustOneContractError(state ? 'invalid_cursor' : 'unsupported_product_adapter', 'Product adapter is not supported for this marketplace')
+  // Old cursors stay on their original endpoint contract; defaults only select
+  // fresh traversals. A cursor binds the contract, not the supplier: every
+  // supplier of a marketplace serves the same endpoint, so a traversal may
+  // continue on whichever one the route selects. Callers cannot submit an
+  // adapter override in the public body.
+  const adapterId = productAdapterId(providerKey, marketplace)
+  if (!adapterId || (!state && defaultAdapterId != null && defaultAdapterId !== adapterId)) {
+    throw new JustOneContractError('unsupported_product_adapter', 'Product adapter is not supported for this marketplace')
+  }
+  if (state && state.adapterId != null && !productAdapterProvider(state.adapterId, marketplace)) {
+    throw new JustOneContractError('invalid_cursor', 'Product adapter is not supported for this marketplace')
   }
   if (state && (state.marketplace !== marketplace || state.scope !== scope)) {
     throw new JustOneContractError('cursor_scope_mismatch', 'cursor does not belong to this search')

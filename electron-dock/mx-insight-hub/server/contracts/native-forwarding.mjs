@@ -55,9 +55,46 @@ const kuaishouCommerce = [
     }))), fixedQuery: Object.freeze({}),
   })
 })
+// TikHub's other commerce reads (2026-10-29 OpenAPI V5.3.2 has no Taobao, JD,
+// Tmall or Xianyu). Same rule as Kuaishou: new ecommerce-scoped keys over the
+// already reviewed read contracts; the social keys, grants and prices stay.
+const TIKHUB_COMMERCE_ALIASES = Object.freeze([
+  ['xiaohongshu_ec', '小红书电商', [
+    ['t.xiaohongshu_ec_search_products', 't.api_6f94aeb043a45013'],
+    ['t.xiaohongshu_ec_product_detail', 't.api_af8592c796087346'],
+    ['t.xiaohongshu_ec_product_review_overview', 't.api_094a374db42d0d6e'],
+    ['t.xiaohongshu_ec_product_reviews', 't.api_2bcbeedf12b6a511'],
+    ['t.xiaohongshu_ec_product_recommendations', 't.api_05c818595f2578af'],
+  ]],
+  ['tiktok_shop', 'TikTok Shop', [
+    ['t.tiktok_shop_search_products', 't.api_d9f21025fdc4aaad'],
+    ['t.tiktok_shop_search_products_v2', 't.api_dc9d749b6b66360b'],
+    ['t.tiktok_shop_search_word_suggestion', 't.api_f70db008db416d87'],
+    ['t.tiktok_shop_product_detail', 't.api_9e361a984b57a2a1'],
+    ['t.tiktok_shop_product_detail_v3', 't.api_8bc9561699d87cec'],
+    ['t.tiktok_shop_product_reviews', 't.api_6c735bdf2e48045a'],
+    ['t.tiktok_shop_seller_products', 't.api_0b679af92c244956'],
+    ['t.tiktok_shop_seller_products_v2', 't.api_8d3145b11e1127a3'],
+    ['t.tiktok_shop_category_list', 't.api_6b8b34bad569c539'],
+    ['t.tiktok_shop_products_by_category', 't.api_2ef92f3592ed7819'],
+    ['t.tiktok_shop_product_id_by_share_link', 't.api_d6392378dc0f5c0e'],
+    ['t.tiktok_shop_shop_id_by_share_link', 't.api_14c36e00ad5bf081'],
+  ]],
+])
+const tikHubCommerce = TIKHUB_COMMERCE_ALIASES.flatMap(([platform, platformLabel, rows]) => rows.map(([key, originalKey]) => {
+  const row = official.endpoints.find(item => item.key === originalKey && item.status === 'fixed_read_contract')
+  if (!row) throw new Error(`Reviewed TikHub contract ${originalKey} is missing`)
+  return Object.freeze({ ...row, key, id: key, platform, platformLabel,
+    authorizationPlatform: 'ecommerce', operation: `native.${key}`, endpointKey: `native.${key}`,
+    hubPath: `/api/v1/data/native/${key}`, schemaVersion: 'hub-tikhub-ecommerce.2026-10-29',
+    parameters: Object.freeze(row.parameters.map(p => Object.freeze({ ...p }))), fixedQuery: Object.freeze({}),
+  })
+}))
+export const TIKHUB_COMMERCE_OPERATIONS = Object.freeze(tikHubCommerce.map(row => row.operation))
 export const NATIVE_FORWARDING_ENDPOINTS = Object.freeze([...legacyEndpoints,
   ...youtubeCommentEndpoints,
   ...kuaishouCommerce,
+  ...tikHubCommerce,
   ...wechat.endpoints.map(row => Object.freeze({ ...row, operation: `native.${row.key}`, endpointKey: `native.${row.key}` })),
   ...official.endpoints.filter(row => row.status === 'fixed_read_contract' && !legacyPaths.has(`${row.provider}:${row.method}:${row.path}`))
     .map(row => Object.freeze({ ...row, id: row.key, operation: `native.${row.key}`, endpointKey: `native.${row.key}`,

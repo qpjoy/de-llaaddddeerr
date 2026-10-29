@@ -79,6 +79,7 @@ test('PostgreSQL default routes are revisioned and audited atomically', { skip: 
   t.after(() => db.close())
   await db.exec('CREATE SCHEMA control')
   await db.exec(await readFile(new URL('../../migrations/148_ecommerce_product_routes.sql', import.meta.url), 'utf8'))
+  await db.exec(await readFile(new URL('../../migrations/167_ecommerce_supplier_routes.sql', import.meta.url), 'utf8'))
   const pool = { query: (sql, values) => db.query(sql, values), connect: async () => ({ query: (sql, values) => db.query(sql, values), release() {} }) }
   const store = new EcommerceRoutingStore(pool)
   assert.equal((await store.list()).length, 6)

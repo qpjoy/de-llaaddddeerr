@@ -662,9 +662,11 @@ export class MemoryExternalPlatformStore {
     circuitOpenMs = 60_000,
     rateLimitBurst = null,
     responseQuarantineCooldownMs = RESPONSE_QUARANTINE_MS,
+    providerCircuit = 'shared',
   } = {}) {
     this.usageStore = usageStore
     this.providerKey = providerKey
+    this.providerCircuit = circuitMode(providerCircuit)
     this.authorizationPlatform = authorizationPlatform
     this.circuitFailureThreshold = circuitFailureThreshold
     this.circuitOpenMs = circuitOpenMs
@@ -905,7 +907,7 @@ export class MemoryExternalPlatformStore {
   }
 
   async providerState(providerKey = this.providerKey) {
-    if (providerKey !== this.providerKey) return null
+    if (providerKey !== this.providerKey || this.providerCircuit === 'marketplace') return null
     return clone(this.state)
   }
 
@@ -1720,6 +1722,11 @@ export class MemoryExternalPlatformStore {
   }
 
   #recordSuccess(call) {
+    if (this.providerCircuit === 'marketplace') {
+      const scoped = this.contractCircuits.get(call.marketplace)
+      if (scoped && new Date(scoped.lastFailureAt) <= new Date(call.startedAt)) this.contractCircuits.delete(call.marketplace)
+      return
+    }
     this.state.lastSuccessAt = call.completedAt
     // A search settles after its enrichment children. Its earlier success
     // cannot prove recovery from a failure observed since that call started.
@@ -1733,7 +1740,8 @@ export class MemoryExternalPlatformStore {
     // response we could not read, so it opens only that marketplace's breaker.
     // Everything else -- authentication, capacity, balance, transport -- really
     // is a provider-wide condition and keeps the provider-wide breaker.
-    if (circuitCategory === 'contract' && scope) {
+    if (this.providerCircuit === 'marketplace' && !scope) return
+    if ((circuitCategory === 'contract' || this.providerCircuit === 'marketplace') && scope) {
       const current = this.contractCircuits.get(scope)
       const failures = (current?.consecutiveFailures ?? 0) + 1
       this.contractCircuits.set(scope, {
@@ -1851,7 +1859,8 @@ export class MemoryExternalPlatformStore {
     if (responseArchive) this.responseArchives.set(callId, clone(responseArchive))
     if (exactArchive) this.restrictedResponseArchives.set(callId, exactArchive)
     if (affectsCircuit) {
-      this.#recordFailure(errorCode, { circuitCategory, scope: delivery?.marketplace ?? null })
+      this.#recordFailure(errorCode, { circuitCategory,
+        scope: delivery?.marketplace ?? (this.providerCircuit === 'marketplace' ? call.marketplace : null) ?? null })
     }
     if (snapshot) {
       this.requests.push(requestEvent({
@@ -2450,9 +2459,11 @@ export class PostgresExternalPlatformStore {
     circuitOpenMs = 60_000,
     rateLimitBurst = null,
     responseQuarantineCooldownMs = RESPONSE_QUARANTINE_MS,
+    providerCircuit = 'shared',
   }) {
     this.pool = pool
     this.providerKey = providerKey
+    this.providerCircuit = circuitMode(providerCircuit)
     this.authorizationPlatform = authorizationPlatform
     this.queueName = queueName
     this.circuitFailureThreshold = circuitFailureThreshold
@@ -2911,7 +2922,7 @@ export class PostgresExternalPlatformStore {
   }
 
   async providerState(providerKey = this.providerKey) {
-    if (providerKey !== this.providerKey) return null
+    if (providerKey !== this.providerKey || this.providerCircuit === 'marketplace') return null
     const { rows } = await this.pool.query(
       `SELECT provider_key, consecutive_failures, circuit_open_until, last_call_at,
               last_success_at, last_failure_at, last_error_code
@@ -4191,6 +4202,7 @@ export class PostgresExternalPlatformStore {
         await this.#advanceFailureState(client, errorCode, {
           circuitCategory,
           scope: delivery?.marketplace ?? null,
+          callId,
         })
       }
       await this.#insertIngestJob(client, ingestJob)
@@ -4287,6 +4299,18 @@ export class PostgresExternalPlatformStore {
   }
 
   async #recordProviderSuccess(client, callId) {
+    if (this.providerCircuit === 'marketplace') {
+      // Recovery is per marketplace too: a call that started after the last
+      // failure clears only its own marketplace's breaker.
+      await client.query(
+        `DELETE FROM external_platform.provider_contract_circuits AS circuit
+          USING external_platform.provider_calls AS call
+          WHERE circuit.provider_key = $1 AND call.id = $2 AND circuit.scope = call.marketplace
+            AND circuit.last_failure_at <= call.started_at`,
+        [this.providerKey, callId],
+      )
+      return
+    }
     // Settlement can lag acquisition (notably while search enriches its rows).
     // Only a call started after the latest failure is evidence of recovery.
     // A healthy provider would only move last_success_at here; writing it on
@@ -4310,10 +4334,14 @@ export class PostgresExternalPlatformStore {
     )
   }
 
-  async #advanceFailureState(client, errorCode, { circuitCategory = null, scope = null } = {}) {
+  async #advanceFailureState(client, errorCode, { circuitCategory = null, scope = null, callId = null } = {}) {
     // Contract failures belong to one marketplace; everything else is a
     // provider-wide condition. Same split as the memory store.
-    if (circuitCategory === 'contract' && scope) {
+    if (this.providerCircuit === 'marketplace' && !scope && callId) {
+      scope = (await client.query('SELECT marketplace FROM external_platform.provider_calls WHERE id = $1', [callId])).rows[0]?.marketplace ?? null
+    }
+    if (this.providerCircuit === 'marketplace' && !scope) return
+    if ((circuitCategory === 'contract' || this.providerCircuit === 'marketplace') && scope) {
       await this.#recordContractFailure(client, scope, errorCode)
       return
     }
@@ -4386,6 +4414,7 @@ export class PostgresExternalPlatformStore {
         await this.#advanceFailureState(client, errorCode, {
           circuitCategory,
           scope: delivery?.marketplace ?? null,
+          callId,
         })
       }
       if (snapshot) {
@@ -4971,6 +5000,15 @@ function analyticsFromRows(requests, calls, state) {
     endpoints: [],
     state: clone(state),
   }
+}
+
+// `shared` keeps one breaker per supplier. `marketplace` is for a channel that
+// shares a supplier account with unrelated products (RapidAPI sells Twitter and
+// Taobao listings on one key): its failures and recoveries stay on its own
+// per-marketplace breaker and never read or move the supplier-wide one.
+function circuitMode(value) {
+  if (value !== 'shared' && value !== 'marketplace') throw new TypeError('providerCircuit must be shared or marketplace')
+  return value
 }
 
 export function createExternalPlatformStore({ pool, usageStore, ...options }) {

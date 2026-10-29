@@ -59,6 +59,8 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 
 重新部署后，同一条诊断命令的预期：两条都是 `installed_accepts`；`0bf7cf68` 的 `itemCount=0`、`nonPostCount=1`。
 
+**已验证（重新部署后，v2 只读诊断）：** `0bf7cf68` 为 `installed_accepts`，`itemCount=0`、`nonPostCount=1`；`93494c87` 为 `installed_accepts`，`itemCount=6`、`nonPostCount=1`。历史调用的 `succeeded_unusable` 记录和计费不会改写；之后的新 Reddit 搜索按新规则交付。
+
 ## 原因（代码）
 
 所有 TikHub 平台（小红书、抖音、Instagram、Twitter、微信等）共用一个 TikHub 熔断：连续 3 次失败就暂停整个 TikHub 约 60 秒。

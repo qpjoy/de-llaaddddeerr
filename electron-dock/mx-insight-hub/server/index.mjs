@@ -35,6 +35,7 @@ import { deploymentAdmissionLimits } from './external-platforms/admission-runtim
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { IpSearchAdminService } from './external-platforms/ipsearch-admin.mjs'
 import { JustOneAdapter } from './adapters/justone.mjs'
+import { RAPIDAPI_TAOBAO_TMALL_HOST } from './contracts/justone.mjs'
 import { TikHubAdapter } from './adapters/tikhub.mjs'
 import { RapidApiAdapter } from './adapters/rapidapi.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
@@ -385,6 +386,29 @@ export async function createRuntime(config = loadConfig()) {
     reservationLeaseMs: config.reservationLeaseMs,
     operationControlStore: externalPlatformControlStore,
     credentialStore: externalPlatformCredentialStore,
+  })
+  // Taobao/Tmall product search through the RapidAPI listing of the same
+  // backend: the Twitter/Facebook RapidAPI key and System Proxy, but its own
+  // per-marketplace breaker so neither side can pause the other. The saved
+  // ecommerce route decides whether it is primary, backup or unused.
+  const ecommerceRapidApiAdapter = rapidApiAdapter ? new JustOneAdapter({
+    credentialResolver: async () => (await rapidApiCredentialStore.readCredentialSnapshot('rapidapi')).source === 'database'
+      ? await rapidApiCredentialStore.readCredential('rapidapi') : rapidConfig.apiKey,
+    fetchImpl: createRapidApiProxyFetch(rapidApiProxyStore),
+    timeoutMs: config.justOne.timeoutMs, connectTimeoutMs: config.justOne.connectTimeoutMs,
+    transport: { provider: 'rapidapi', host: RAPIDAPI_TAOBAO_TMALL_HOST }, logger: console,
+  }) : null
+  const ecommerceRapidApiGateway = new ExternalPlatformGateway({ admissionPolicies: externalAdmissionPolicies,
+    ecommerceRoutingStore, usageStore: store,
+    platformStore: createExternalPlatformStore({ pool, usageStore: store, providerKey: 'rapidapi', authorizationPlatform: 'ecommerce',
+      providerCircuit: 'marketplace', circuitFailureThreshold: rapidConfig.circuitFailureThreshold, circuitOpenMs: rapidConfig.circuitOpenMs }),
+    adapter: ecommerceRapidApiAdapter,
+    config: { ...rapidConfig, timeoutMs: config.justOne.timeoutMs, freshTtlMs: config.justOne.freshTtlMs, staleTtlMs: config.justOne.staleTtlMs },
+    providerKey: 'rapidapi', credentialStore: rapidApiCredentialStore, operationControlStore: externalPlatformControlStore,
+    apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: config.reservationLeaseMs,
+  })
+  externalPlatformGateway.productSearchGateways = ecommerceRapidApiGateway.productSearchGateways = Object.freeze({
+    justone: externalPlatformGateway, rapidapi: ecommerceRapidApiGateway,
   })
   const xiaohongshuHotNotesStore = createExternalPlatformStore({
     pool, usageStore: store, providerKey: 'justone', authorizationPlatform: 'xiaohongshu',
@@ -759,6 +783,7 @@ export async function createRuntime(config = loadConfig()) {
     search, searchReindex, embedding, externalPlatformStore, retrievalPool,
     acquisitionHistory, topicReports,
     externalPlatformCredentialStore, externalPlatformAdmin, externalPlatformGateway, justOneAdapter,
+    ecommerceRapidApiGateway, ecommerceRapidApiAdapter,
     xiaohongshuHotNotesGateway, xiaohongshuHotNotesStore,
     externalPlatformControlStore, externalAdmissionPolicies, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     hubSocialGateway, rapidApiStore, rapidApiCredentialStore, rapidApiProxyStore,
@@ -794,6 +819,7 @@ export async function start(config = loadConfig()) {
     await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()))
     runtime.agent.close()
     await runtime.justOneAdapter?.close()
+    await runtime.ecommerceRapidApiAdapter?.close()
     await runtime.store.close()
     await runtime.retrievalPool?.end()
     await runtime.pool?.end()

@@ -14,6 +14,7 @@ import { requestSnippet } from './request-snippets.js'
 import { copyText } from './open-capabilities.js'
 import { AdminExecutionEvidence } from './admin-execution-evidence.jsx'
 import { ProductViewTabs, ProductManagement } from './product-management.jsx'
+import { EcommerceRoutingPage } from './ecommerce-routing.jsx'
 import { isProductAdmin } from '../shared/product-management.mjs'
 import './product-workbench.css'
 
@@ -27,14 +28,22 @@ export function ProductWorkbench({ Page, pageProps, enabled }) {
   if (!product || product.native) return <Page {...pageProps} />
   return <div className="mih-product-workbench">
     <header className="mih-page-header"><div><h1>{product.label}</h1><p>从 Hub 接口开始，查看产品展示与接入方式。</p></div><a className="qp-button qp-button--outline" href={publicDocsHref(`/docs/${product.docs}`)}>接口文档 ↗</a></header>
-    {product.docs === 'ecommerce-treasure-box' ? <><p>跨平台商品列表优先接入「统一商品搜索」，使用相同的商品、链接和分页字段。平台专用接口用于详情、SKU、评论及快手购物/品牌榜单等独立查询；「已收录商品」只读已有数据。当前统一搜索支持淘宝、天猫、京东、闲鱼、小红书电商和抖音电商。快手当前提供榜单接口。</p>{pageProps.session?.kind === 'admin-token' ? <p><a href="#/data-platforms?domain=ecommerce">Admin · 查看电商平台的上游供应商、适配接口与默认路由 →</a></p> : null}</> : null}
+    {product.docs === 'ecommerce-treasure-box' ? <><p>跨平台商品列表优先接入「统一商品搜索」，使用相同的商品、链接和分页字段。平台专用接口用于详情、SKU、评论及快手购物/品牌榜单等独立查询；「已收录商品」只读已有数据。当前统一搜索支持淘宝、天猫、京东、闲鱼、小红书电商和抖音电商；淘宝、天猫可在「管理」中固定或切换上游供应商，调用方式与返回结构不变。快手提供榜单接口，小红书电商与 TikTok Shop 另有商品搜索、详情、评论等平台专用接口。</p>{pageProps.session?.kind === 'admin-token' ? <p><a href="#/data-platforms?domain=ecommerce">Admin · 查看电商平台的上游供应商、适配接口与默认路由 →</a></p> : null}</> : null}
     <ProductViewTabs label={product.label} value={tab} product="demo" session={pageProps.session} onChange={id => { setTab(id); if (id === 'demo') setVisited(true) }} />
     {tab === 'management' && product.docs === WECHAT_SELF_HOSTED.docs && pageProps.token ? <WechatSelfHostedEngineAdmin token={pageProps.token} onUnauthorized={pageProps.onUnauthorized} notify={pageProps.notify} /> : null}
+    {tab === 'management' && product.docs === 'ecommerce-treasure-box' && pageProps.token ? <EcommerceSupplierManagement token={pageProps.token} onUnauthorized={pageProps.onUnauthorized} /> : null}
     {tab === 'management' ? <ProductManagement token={pageProps.token} session={pageProps.session} onUnauthorized={pageProps.onUnauthorized} notify={pageProps.notify} path={product.path} label={product.label} /> : null}
     <div hidden={tab !== 'debug'}><ProductApiConsole product={product} token={pageProps.token} initialEndpoint={pageProps.query?.get('endpoint')} /></div>
     <div hidden={tab !== 'demo'}>{visited ? <Page {...pageProps} /> : null}</div>
     <section className="qp-panel mih-panel" hidden={tab !== 'guide'}><h2>接入 {product.label}</h2><p>选择已授权的 Hub Key，在接口调试页查看参数、发送请求并复制示例。接口以当前 Key 的有效权限为准；目录展示不等于已开通或服务就绪。</p><p>支持幂等契约的接口，新查询与下一页各用新的 Idempotency-Key；失败重试保留原参数与标识。GET 等读取是否每次计量以各接口说明为准。游标原样传回，不从条数猜测总量，也不自动补页。切换标签页不会自动发起付费查询。</p>{product.docs === WECHAT_SELF_HOSTED.docs ? <p>自建引擎全局串行：提交返回 202 和 jobId，按 Retry-After 约 5 秒轮询状态，完成后读取 /result。可以一次提交多条，不必等上一条完成；每条使用各自的 Idempotency-Key，超时重发沿用原标识。计费默认关闭（只转发）；开启后实时或 24 小时缓存结果按任务计费，旧结果、失败、取消、排队超时不计费，结果未知待核实。</p> : null}{product.docs === 'aggregate-search' ? <p>推荐通过 POST fetch 设置 Accept: text/event-stream。按 source.completed 展示先到结果；search.completed 才是本批最终结果与分页游标。连接中断不代表调用被撤销，使用同一请求标识核对或重试。已收录模式读取最新入库及存量，不触发上游采集。</p> : null}<a href={publicDocsHref(`/docs/${product.docs}`)}>查看完整契约、分页和响应说明 ↗</a></section>
   </div>
+}
+
+// Supplier routes for unified product search, kept in this tab's own state so
+// switching marketplaces does not rewrite the product page URL.
+function EcommerceSupplierManagement({ token, onUnauthorized }) {
+  const [query, setQuery] = useState(() => new URLSearchParams({ marketplace: 'taobao' }))
+  return <EcommerceRoutingPage token={token} onUnauthorized={onUnauthorized} query={query} setQuery={next => setQuery(new URLSearchParams(next))} />
 }
 
 function initialBody(document, endpoint, access) {
@@ -121,6 +130,9 @@ export function ProductApiConsole({ product, token, initialEndpoint, onResult, o
       <form onSubmit={event => { event.preventDefault(); void send() }}>
         {(endpoint.parameters || []).filter(row => ['path', 'query'].includes(row.in)).map(row => <label className="qp-field" key={`${row.in}:${row.name}`}>{row.name}{row.required ? ' *' : ''} · {row.in}<input className="qp-input" disabled={busy} value={values[`${row.in}:${row.name}`] || ''} placeholder={row.description || '留空不传'} onChange={event => change({ values: { ...values, [`${row.in}:${row.name}`]: event.target.value } })} /></label>)}
         {schema.properties?.params && (endpoint.path.startsWith('/api/v1/data/native/') || endpoint.path.startsWith('/api/v1/data/wechat/')) ? <NativeParameterFields schema={schema.properties.params} json={json} disabled={busy} onChange={value=>change({json:value})} /> : null}
+        {Object.keys(endpoint.requestBody?.content?.['application/json']?.examples || {}).length > 1 ? <DropdownField label="请求示例" value="" disabled={busy}
+          onChange={name => { const value = endpoint.requestBody.content['application/json'].examples[name]?.value; if (value) change({ json: JSON.stringify(value, null, 2) }) }}
+          options={[{ value: '', label: '选择示例填入请求体（不会发送）' }, ...Object.entries(endpoint.requestBody.content['application/json'].examples).map(([name, row]) => ({ value: name, label: row.summary || name }))]} /> : null}
         {endpoint.requestBody ? <><details><summary>请求体字段</summary><div className="qp-table-wrap"><table className="qp-table"><thead><tr><th>参数</th><th>类型</th><th>说明</th></tr></thead><tbody>{Object.entries(schema.properties || {}).map(([name, field]) => <tr key={name}><td>{name}{schema.required?.includes(name) ? ' *' : ''}</td><td>{field.type || '见契约'}</td><td>{field.description || field.enum?.join(' / ') || '—'}</td></tr>)}</tbody></table></div></details><label className="qp-field">JSON 请求体<textarea aria-label="JSON 请求体" className="qp-input mih-product-json" rows={10} disabled={busy} value={json} onChange={event => change({ json: event.target.value })} /></label></> : null}
         {validation ? <p role="status">{validation}</p> : null}
         <div className="mih-page-actions"><button className="qp-button qp-button--primary" disabled={blocked || busy || !key || !input}>{busy ? '正在调用…' : usesIdempotency && attempt ? '重放 / 重试原请求' : '发送请求'}</button>{usesIdempotency && attempt ? <button className="qp-button qp-button--outline" type="button" disabled={blocked || busy} onClick={() => { attempts.delete(fingerprint); render(value => value + 1) }}>新建请求（再次发送会计量）</button> : null}</div>

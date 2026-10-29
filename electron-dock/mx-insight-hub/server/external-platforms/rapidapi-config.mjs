@@ -14,9 +14,9 @@ export function rapidApiConfig(environment = {}) {
   }
 }
 export const RAPIDAPI_METADATA = {
-  key: 'rapidapi', displayName: 'RapidAPI', description: 'Hub 直连 Facebook 与 Twitter；Facebook 按平台策略优先使用订阅额度。',
-  capabilities: [...Object.values(HUB_SOCIAL_ENDPOINTS).map(row => row.operation), 'social.facebook.search'],
-  capabilityMatrix: [], marketplaces: [{key:'twitter',label:'Twitter / X'}, {key:'facebook',label:'Facebook'}],
+  key: 'rapidapi', displayName: 'RapidAPI', description: 'Hub 直连 Facebook 与 Twitter；Facebook 按平台策略优先使用订阅额度。淘宝/天猫商品搜索可经同一 Key 订阅的 JustOne 后端（按电商路由作为主用或备用）。',
+  capabilities: [...Object.values(HUB_SOCIAL_ENDPOINTS).map(row => row.operation), 'social.facebook.search', 'ecommerce.products.search'],
+  capabilityMatrix: [], marketplaces: [{key:'twitter',label:'Twitter / X'}, {key:'facebook',label:'Facebook'}, {key:'taobao',label:'淘宝'}, {key:'tmall',label:'天猫'}],
   adapterLabel: 'Facebook / Twitter HTTP Adapter', adapterDescription: '固定 Host，直接 HTTP；不启动 Python，不回退 Night-All，按平台策略处理明确的额度拒绝，不自动补页。',
   billingNote: '逐操作审核采购价和预算；供应商实际扣费未知，不将预算估算当作实际扣费。',
   freshnessNote: '每次显式请求获取一页；相同幂等标识回放原交付。基础资料不补查 about。',

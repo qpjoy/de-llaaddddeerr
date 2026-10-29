@@ -19,6 +19,7 @@ import {
   JUSTONE_OPERATION,
   JustOneContractError,
   normalizeJustOneProductSearchRequest,
+  productAdapterId,
 } from '../contracts/justone.mjs'
 import {
   JUSTONE_RELEASED_RESOURCES,
@@ -253,6 +254,20 @@ function publicFailure(error, { ecommerce = false } = {}) {
     || (error instanceof JustOneUpstreamError && [302, 303].includes(evidence.businessCode))) {
     return upstreamCapacityError(evidence)
   }
+  // The same backend's RapidAPI listing refuses at its own gateway, without a
+  // business code. Publish those exactly like JustOne's equivalents.
+  if (ecommerce && error instanceof JustOneUpstreamError && evidence.businessCode == null
+    && evidence.outcome === 'rejected' && evidence.billed === false) {
+    if (evidence.errorCode === 'upstream_balance_exhausted') {
+      return ecommerceCapacityError(evidence.errorCode, { requestDispatched: true })
+    }
+    if (['upstream_auth_invalid', 'upstream_permission_denied'].includes(evidence.errorCode)) {
+      return new AppError(503, 'external_platform_capacity_unavailable', 'External data capacity is unavailable')
+    }
+    if (evidence.errorCode === 'upstream_proxy_unreachable') {
+      return new AppError(503, 'external_platform_unavailable', 'External product search is unavailable; no request was dispatched')
+    }
+  }
   if (error instanceof JustOneUpstreamError && [100, 600, 601, 602].includes(evidence.businessCode)) {
     return new AppError(503, 'external_platform_capacity_unavailable', 'External data capacity is unavailable')
   }
@@ -327,6 +342,8 @@ export class ExternalPlatformGateway {
     admissionPolicies = null,
     credentialStore = null,
     ecommerceRoutingStore = null,
+    // Product-search supplier -> gateway, shared by every gateway in the map.
+    productSearchGateways = null,
     // Everything in this class is provider-shaped rather than provider-specific:
     // the adapter, config, stores and credential all arrive by injection. The
     // provider key is the last constant, so naming it here lets a second vendor
@@ -347,6 +364,7 @@ export class ExternalPlatformGateway {
     this.admissionPolicies = admissionPolicies
     this.credentialStore = credentialStore
     this.ecommerceRoutingStore = ecommerceRoutingStore
+    this.productSearchGateways = productSearchGateways
     this.defaultPolicy = defaultPolicy
     this.logger = logger
     this.active = 0
@@ -592,21 +610,73 @@ export class ExternalPlatformGateway {
     }
   }
 
-  async search(context, { body, idempotencyKey, retryOfRequestId, path, signal }) {
+  // `productSearchGateways` maps each product supplier to its gateway. With it
+  // the saved route chooses the primary supplier and, under `priority`, hands a
+  // request to the backup once: before dispatch when the primary cannot run, or
+  // after a definite refusal the primary did not bill. A charged, unusable or
+  // unknown result never switches suppliers. Callers never see which one ran.
+  async search(context, { body, idempotencyKey, retryOfRequestId, path, signal }, {
+    gateways = this.productSearchGateways ?? null, reservation = null, selection: routedSelection = null,
+    fallbackUsed = false, attempt = null,
+  } = {}) {
+    const input = { body, idempotencyKey, retryOfRequestId, path, signal }
+    const routing = gateways && this.ecommerceRoutingStore ? this.ecommerceRoutingStore : null
     let defaultAdapterId
+    let selection = routedSelection
+    const forward = (provider, reserved, options) => {
+      if (!gateways?.[provider]) throw new AppError(503, 'ecommerce_route_unavailable', 'The selected product supplier is unavailable')
+      return gateways[provider].search(context, input, { gateways, reservation: reserved, ...options })
+    }
+    const backup = async () => {
+      if (!routing || fallbackUsed || selection?.mode !== 'priority' || selection.primaryProvider !== this.providerKey) return null
+      // The administrator may have changed the route while this request waited.
+      const latest = await routing.selection(selection.marketplace).catch(() => null)
+      return latest?.revision === selection.revision && gateways[latest.fallbackProvider] ? latest : null
+    }
     const normalize = ({ policy, codec }) => normalizeJustOneProductSearchRequest(body, {
-      defaultAdapterId, decodeCursor: codec.decode, encodeCursor: codec.encode, maxPageSize: policy.maxPageSize,
+      providerKey: this.providerKey, defaultAdapterId, decodeCursor: codec.decode, encodeCursor: codec.encode,
+      maxPageSize: policy.maxPageSize,
     })
-    return this.#deliver(context, { body, idempotencyKey, retryOfRequestId, path, signal }, {
+    return this.#deliver(context, input, {
       operation: JUSTONE_OPERATION,
       capabilityMessage: 'E-commerce product search is not granted for this API key',
+      reservation,
+      ...(attempt != null ? { callOrdinal: attempt } : {}),
       normalize,
+      route: routing && !reservation ? async reserved => {
+        // An unreadable route keeps replay and cache delivery working; live
+        // dispatch below still fails closed on it.
+        selection = await routing.selection(String(body.marketplace).trim()).catch(() => null)
+        if (selection && selection.primaryProvider !== this.providerKey) {
+          return { result: await forward(selection.primaryProvider, reserved, { selection }) }
+        }
+        return null
+      } : null,
       resolveLiveRoute: async ({ normalized, policy, codec }) => {
         // Configuration only governs new acquisition. Saved responses, cache
         // reads and existing traversal cursors survive a default-route edit.
-        if (!body.cursor) defaultAdapterId = await this.ecommerceRoutingStore?.select(normalized.marketplace)
+        if (selection) defaultAdapterId = productAdapterId(this.providerKey, normalized.marketplace)
+        else if (!body.cursor) defaultAdapterId = await this.ecommerceRoutingStore?.select(normalized.marketplace)
         return normalize({ policy, codec })
       },
+      unavailable: routing ? async (reserved, availability) => {
+        if (!availability?.safeToFallback) return null
+        const next = await backup()
+        if (!next) return null
+        // Both suppliers share this operation and fingerprint; the backup must
+        // be able to take the dispatch lease this gateway is holding.
+        if (availability.dispatchLeaseHeld) await this.platformStore.releaseDispatchLease(availability.dispatchLease)
+        return { result: await forward(next.fallbackProvider, reserved, { selection: next, fallbackUsed: true }) }
+      } : null,
+      retryRejected: routing ? async ({ error, reserved, settle }) => {
+        const evidence = error.evidence
+        if (evidence?.outcome !== 'rejected' || evidence.billed !== false || evidence.errorCode === 'invalid_request') return null
+        const next = await backup()
+        if (!next) return null
+        // The refusal still counts against the primary's own breaker.
+        await settle({ affectsCircuit: evidence.affectsCircuit !== false, circuitCategory: evidence.circuitCategory ?? null, handOff: true })
+        return { result: await forward(next.fallbackProvider, reserved, { selection: next, fallbackUsed: true, attempt: 1 }) }
+      } : null,
       dispatch: ({ policy, codec, credential }) => this.adapter.searchProducts(body, {
         defaultAdapterId,
         decodeCursor: codec.decode,
@@ -2081,12 +2151,28 @@ export class ExternalPlatformGateway {
         // never saw would make a later idempotent replay contradict the
         // original response.
         if (plan.retryRejected) {
-          const routed = await plan.retryRejected({ error, reserved: reservation, settle: async () => {
+          const routed = await plan.retryRejected({ error, reserved: reservation, settle: async ({
+            affectsCircuit = false, circuitCategory = null, handOff = false,
+          } = {}) => {
             await this.platformStore.finishProviderStep({ callId: call.id, delivery, outcome: 'rejected',
               httpStatus: evidence.httpStatus, businessCode: evidence.businessCode, ...lastDispatchEvidence,
-              errorCode: evidence.errorCode, affectsCircuit: false })
+              errorCode: evidence.errorCode, affectsCircuit, circuitCategory })
             callSettled = true
             ownsReservation = false
+            if (!handOff) return
+            // Another supplier's gateway continues this usage request with the
+            // same operation and fingerprint. Release the lease, procurement
+            // hold and concurrency slot it would otherwise collide with.
+            if (costReservation) {
+              await this.platformStore.releaseProviderCostWorkflow({ reservationId: costReservation.id, usageRequestId: activeRequestId })
+              costReservation = null
+            }
+            if (ownsLease) {
+              await this.platformStore.releaseDispatchLease({ consumerId: context.consumer.id, operation: plan.operation,
+                fingerprint: requestFingerprint, ownerRequestId: activeRequestId })
+              ownsLease = false
+            }
+            if (entered) { this.#leave(context.consumer.id, entered); entered = false }
           } })
           if (routed) return routed.result
         }
