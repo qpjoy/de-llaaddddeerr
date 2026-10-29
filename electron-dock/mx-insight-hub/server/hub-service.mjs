@@ -899,9 +899,11 @@ export class HubService {
       this.#effectivePlatformGrants(context), this.#effectiveCapabilityGrants(context),
       this.store.listGrants(selected.consumerId), this.store.listCapabilityGrants(selected.consumerId),
     ])
-    const overview = await this.getApiKeyOverview(selected.id)
+    // Issuing a signed key reference must not depend on historical usage or
+    // billing aggregates. Actual calls still enforce the original key's limits.
+    const availability = await this.#operationAvailability(selected.consumerId)
     // Only product-level availability, never provider configuration/cost evidence.
-    const operations = Object.fromEntries(Object.entries(overview.operations || {}).map(([key, value]) =>
+    const operations = Object.fromEntries(Object.entries(availability).map(([key, value]) =>
       [key, { ready: value.ready, effectiveState: value.effectiveState }]))
     const adminExecution = !scope && selected.id === await this.store.getAdminExecutionKeyId?.()
     return { choices, keyId: selected.id, consumerId: selected.consumerId, name: selected.name, adminExecution,
@@ -1353,19 +1355,7 @@ export class HubService {
     // Which of this key's granted operations can actually dispatch right now.
     // A key can be perfectly scoped and still fail because the provider
     // operation behind it is blocked, and that is invisible from the key alone.
-    const operations = {}
-    for (const source of [this.externalPlatformCapabilities, this.externalPostCapabilities]) {
-      if (typeof source !== 'function') continue
-      try {
-        const capability = await source({ consumerId: apiKey.consumerId })
-        for (const [operationKey, state] of Object.entries(capability?.operations || {})) {
-          operations[operationKey] = state
-        }
-      } catch {
-        // Provider readiness is diagnostic here. A provider that cannot answer
-        // must not stop the rest of the key overview from rendering.
-      }
-    }
+    const operations = await this.#operationAvailability(apiKey.consumerId)
     const grantedCapabilities = new Set(capabilityEntitlements.map((entry) => entry.capability))
     const blockedOperations = Object.entries(operations)
       .filter(([operationKey, state]) => grantedCapabilities.has(operationKey) && state?.ready === false)
@@ -1384,6 +1374,23 @@ export class HubService {
       operations,
       blockedOperations,
     }
+  }
+
+  async #operationAvailability(consumerId) {
+    const operations = {}
+    for (const source of [this.externalPlatformCapabilities, this.externalPostCapabilities]) {
+      if (typeof source !== 'function') continue
+      try {
+        const capability = await source({ consumerId })
+        for (const [operationKey, state] of Object.entries(capability?.operations || {})) {
+          operations[operationKey] = state
+        }
+      } catch {
+        // Readiness is diagnostic, not authorization. Dispatch rechecks it;
+        // an unavailable provider must not prevent key references being issued.
+      }
+    }
+    return operations
   }
 
   async #effectivePlatformGrants(context) {

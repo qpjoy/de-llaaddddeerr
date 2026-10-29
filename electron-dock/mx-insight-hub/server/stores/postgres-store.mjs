@@ -6583,6 +6583,12 @@ export class PostgresStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      // Historical reporting must not fan out parallel workers and consume
+      // the shared database's dynamic shared memory needed by live requests.
+      // These limits are transaction-local; admission/billing keep their policy.
+      await client.query('SET LOCAL max_parallel_workers_per_gather = 0')
+      await client.query("SET LOCAL statement_timeout = '5s'")
+      await client.query("SET LOCAL lock_timeout = '1s'")
       const aggregateResult = await client.query(
         `SELECT
            request.platform,

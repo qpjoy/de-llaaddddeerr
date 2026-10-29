@@ -10,9 +10,11 @@ const PROVIDERS = new Set(['justone', 'tikhub'])
 const STATUSES = new Set(['reserved', 'committed', 'released', 'unknown'])
 const SOURCES = new Set(['live', 'fresh_cache', 'stored_fallback', 'idempotent_replay', 'duplicate_suppressed', 'circuit_rejected', 'unavailable'])
 const ERRORS = new Set(['external_platform_circuit_open', 'external_platform_pre_dispatch_failed',
+  'external_platform_capacity_unavailable', 'external_platform_capacity_exceeded',
   'external_platform_response_unusable', 'external_platform_rejected', 'external_platform_outcome_unknown',
   'social_upstream_response_unusable', 'social_upstream_rejected', 'social_upstream_outcome_unknown',
   'upstream_rate_limited', 'upstream_auth_or_balance_unavailable', 'upstream_balance_exhausted',
+  'upstream_auth_invalid', 'upstream_permission_denied',
   'upstream_collection_failed', 'upstream_daily_quota_exceeded', 'upstream_token_limit_exceeded',
   'upstream_http_error', 'upstream_endpoint_unavailable', 'upstream_failure', 'upstream_business_error',
   'upstream_transport_error', 'upstream_deadline_exceeded', 'upstream_body_read_failed', 'upstream_response_too_large',
@@ -28,7 +30,7 @@ const ENDPOINT = /^(?=.{3,120}$)[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$/u
 const endpoint = value => typeof value === 'string' && ENDPOINT.test(value) ? value : value == null ? null : 'other'
 const PLATFORMS = new Set(['instagram', 'twitter', 'xiaohongshu', 'douyin', 'bilibili', 'kuaishou',
   'zhihu', 'telegram', 'reddit', 'weibo', 'facebook', 'tiktok', 'youtube', 'wechat', 'wechat_mp',
-  'taobao', 'tmall', 'jd', 'xianyu', 'xiaohongshu_ec', 'douyin_ec', 'kuaishou_ec', 'pinduoduo', 'unknown'])
+  'taobao', 'tmall', 'jd', 'xianyu', 'xiaohongshu_ec', 'douyin_ec', 'kuaishou_ec', 'pinduoduo', 'ecommerce', 'unknown'])
 const FAILURES = new Set(['invalid_arguments', 'invalid_request_id', 'database_url_required', 'request_not_found'])
 const uuid = value => typeof value === 'string' && UUID.test(value) ? value : null
 const allowed = (value, choices) => value == null ? null : choices.has(value) ? value : 'other'
@@ -68,6 +70,13 @@ export async function diagnoseProviderCircuit(pool, requestId) {
       FROM external_platform.gateway_requests WHERE usage_request_id = $1::uuid
         AND source_mode <> 'idempotent_replay'
       ORDER BY created_at, id LIMIT 21`, [requestId])
+    // A capacity refusal can be an actual supplier response after the breaker
+    // expired. Read this request's calls separately from nearby trigger candidates.
+    const { rows: ownCalls } = await client.query(`SELECT /* provider-circuit:own-calls */
+      id, provider_key, marketplace, operation, endpoint_key, outcome, http_status,
+      business_code, error_code, billed, started_at, completed_at
+      FROM external_platform.provider_calls WHERE usage_request_id = $1::uuid
+      ORDER BY started_at, id LIMIT 21`, [requestId])
     // An incomplete ledger must not select a guessed provider from today's route policy.
     const providers = gateways.length > LIMIT ? [] : [...new Set(gateways.map(row => row.provider_key).filter(value => PROVIDERS.has(value)))]
     const { rows: states } = await client.query(`SELECT /* provider-circuit:states */
@@ -92,7 +101,7 @@ export async function diagnoseProviderCircuit(pool, requestId) {
       AND p.outcome IN ('rejected', 'unknown', 'succeeded_unusable')
       AND p.started_at BETWEEN t.reserved_at - INTERVAL '5 minutes' AND t.reserved_at + INTERVAL '5 minutes'
     ORDER BY abs(extract(epoch FROM p.started_at - t.reserved_at)), p.id LIMIT 21`, [requestId, providers])
-    return { diagnosticRevision: 'provider-circuit-diagnostic.v1', requestId, platform: allowed(request.platform, PLATFORMS), readOnly: true,
+    return { diagnosticRevision: 'provider-circuit-diagnostic.v2', requestId, platform: allowed(request.platform, PLATFORMS), readOnly: true,
       historical: { status: allowed(request.status, STATUSES), errorCode: allowed(request.error_code, ERRORS),
         savedHttpStatus: http(request.response_status), reservedAt: time(request.reserved_at), completedAt: time(request.completed_at),
         savedSearchProvider: allowed(request.saved_search_provider, PROVIDERS),
@@ -100,6 +109,12 @@ export async function diagnoseProviderCircuit(pool, requestId) {
         gateways: gateways.slice(0, LIMIT).map(row => ({ provider: allowed(row.provider_key, PROVIDERS),
           sourceMode: allowed(row.source_mode, SOURCES), httpStatus: http(row.response_status),
           errorCode: allowed(row.error_code, ERRORS), providerCallId: uuid(row.provider_call_id), createdAt: time(row.created_at) })),
+        ownCalls: ownCalls.slice(0, LIMIT).map(row => ({ callId: uuid(row.id), provider: allowed(row.provider_key, PROVIDERS),
+          marketplace: allowed(row.marketplace, PLATFORMS), operation: endpoint(row.operation), endpoint: endpoint(row.endpoint_key),
+          outcome: allowed(row.outcome, new Set(['pending', 'succeeded', 'rejected', 'unknown', 'succeeded_unusable'])),
+          httpStatus: http(row.http_status), businessCode: integer(row.business_code), errorCode: allowed(row.error_code, ERRORS),
+          billed: bool(row.billed), startedAt: time(row.started_at), completedAt: time(row.completed_at) })),
+        ownCallsTruncated: ownCalls.length > LIMIT,
         historicalCircuitState: 'not_recorded_here', historicalRoutingPolicy: 'not_recorded_here' },
       current: { observedAt: time(request.observed_at), selectedFrom: 'historical_gateway_provider_only',
         providerCircuits: states.map(stateProjection),
@@ -119,7 +134,7 @@ export async function diagnoseProviderCircuit(pool, requestId) {
         billed: bool(row.billed), startedAt: time(row.started_at), completedAt: time(row.completed_at),
         completedBeforeTarget: bool(row.completed_before_target) })),
       nearbyFailuresTruncated: nearby.length > LIMIT, rowLimit: LIMIT,
-      evidenceLimit: 'Current policy/circuits do not prove historical state. Nearby failures are candidates, not proven circuit triggers; only starts within 5 minutes of the reservation are included.' }
+      evidenceLimit: 'Current policy/circuits do not prove historical state. Nearby failures are candidates, not proven circuit triggers; only starts within 5 minutes of the reservation are included. Empty ownCalls alone does not prove no dispatch. Ecommerce marketplace circuits/routes require diagnose-ecommerce-search.mjs; the authorization platform ecommerce is not a marketplace scope.' }
   } catch (error) { throw failure(error) }
   finally {
     if (client) {
