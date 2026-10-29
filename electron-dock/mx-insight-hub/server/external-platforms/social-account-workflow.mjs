@@ -242,7 +242,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             const payload = receipt?.bodyBytes ? JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(receipt.bodyBytes).replace(/^\uFEFF/u, '')) : null
             try { ({ projected, records } = projectPage(publicPayload(payload, credential.credential), step, request.operation, receipt?.capturedAt, traversal)) }
             catch {
-              const evidence = { outcome: 'succeeded_unusable', billed, httpStatus: 200, businessCode, errorCode: 'invalid_social_contract', affectsCircuit: true }
+              const evidence = { outcome: 'succeeded_unusable', billed, httpStatus: 200, businessCode, errorCode: 'invalid_social_contract', affectsCircuit: false }
               if (provider === 'rapidapi') throw new RapidApiUpstreamError(evidence, result)
               throw new TikHubUpstreamError('Account response could not be normalized', evidence, result)
             }

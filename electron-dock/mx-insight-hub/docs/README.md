@@ -12,6 +12,8 @@ Last reviewed: 2026-10-21.
 
 ## 容量与熔断排查（2026-10-09）
 
+- [小红书搜索 503：TikHub 共享熔断被 Hub 自身失败触发（2026-10-29）](operations/tikhub-shared-circuit-hub-failures-2026-10-29.md)：`0a92d464` 被 TikHub 共享熔断拒绝（`reason=upstream_failure`、无上游证据）。Hub 自身的解析失败、补全内部错误、写库失败此前也计入共享熔断，会连带暂停所有 TikHub 平台；现改为只有供应商故障计入。小红书搜索等 5 处拒绝附带触发调用证据；新增可用于任意平台的只读熔断诊断。
+- [Twitter 搜索 409：同查询仍在执行，Hub 改为先等待（2026-10-29）](operations/twitter-admission-in-flight-wait-2026-10-29.md)：`a19f3831` 被同一 Key、同一查询、仍在执行的 `4954dc7f` 挡住（不是冷却；Delta 所有策略共用一个 Key，同关键词几乎同时调度就会撞上）。v2 新请求现在由 Hub 服务端最多等 40 秒、对方结束后自动放行；超时或调用方断开才返回原 409，其他拒绝不变。
 - [抖音搜索 502：第 3 页相关搜索卡片被误判（2026-10-29）](operations/douyin-related-words-2026-10-29.md)：三页都是上游 200 且已计费；相关搜索卡片的一个词与旧的固定逐词结构不一致，整页按帖子判失败，前两页 14 条也没交付。卡片外层仍严格，单个词放宽但仍拒绝藏有帖子字段的内容；诊断新增 `invalidPaths`；附部署后只读验证。
 - [YouTube 搜索结果缺作者与播放量（2026-10-29）](operations/youtube-search-metrics-2026-10-29.md)：作者为字符串、播放量为精确文本未被读取，已修复；点赞等字段 YouTube 搜索本来不提供；附只读字段诊断。
 - [Instagram 熔断：JustOne 余额不足（2026-10-28）](operations/instagram-justone-balance-2026-10-28.md)：上游余额不足（601）而非 Hub 解析；熔断拒绝返回 cause、原因码与上游 HTTP/业务码，诊断中心显示拒绝原因；附恢复步骤。切到 TikHub 后 0 条为 Hub 未识别新版搜索网格布局（fill_items / one_by_two / two_by_two），已补解析，未知布局改报 partial。

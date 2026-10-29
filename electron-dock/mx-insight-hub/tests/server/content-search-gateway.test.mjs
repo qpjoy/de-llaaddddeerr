@@ -197,6 +197,9 @@ for (const standard of [true, false]) {
     assert.equal(call.billed, true)
     assert.equal(usage.status, 'committed')
     assert.equal(usage.responseStatus, 502)
+    // Hub could not read this page; that is not a TikHub outage for other platforms.
+    assert.equal(h.platformStore.state.consecutiveFailures, 0)
+    assert.equal(h.platformStore.state.circuitOpenUntil ?? null, null)
     assert.equal(h.platformStore.ingestJobs.length, 0)
     const archive = h.platformStore.restrictedResponseArchives.get(call.id)
     assert.deepEqual(Buffer.from(archive.bodyBytes), bytes)

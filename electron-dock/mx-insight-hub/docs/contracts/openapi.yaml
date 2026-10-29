@@ -119,7 +119,7 @@ paths:
         '400': {description: Invalid window, fields, idempotency key or version-bound cursor}
         '401': {description: API key required}
         '403': {description: Existing Live key/platform/operation grants required}
-        '409': {description: 'search_admission_blocked permits delayed same-body/key retry with explicit not_started and retry flags; another request holds it only while that request is still in flight (an ended attempt, even unknown, never does) and retryAfterSeconds (at most 300) is when its lease ends; idempotency_conflict, request_in_progress and request_outcome_unknown retain their protections; never fall back to v1'}
+        '409': {description: 'search_admission_blocked permits delayed same-body/key retry with explicit not_started and retry flags; another request holds it only while that request is still in flight (an ended attempt, even unknown, never does), and Hub first waits up to 40 seconds for it before refusing and retryAfterSeconds (at most 300) is when its lease ends; idempotency_conflict, request_in_progress and request_outcome_unknown retain their protections; never fall back to v1'}
         '422': {description: search_v2_platform_unsupported}
         '429': {description: Existing quota/admission/financial limit}
         '502': {description: Retained source failure}

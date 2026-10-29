@@ -5,7 +5,7 @@ import { MAX_CAPABILITY_SCOPES, MAX_PLATFORM_SCOPES } from '../shared/access-lim
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { serviceCatalogPage } from './data/service-catalog.mjs'
 import { DATA_SEARCH_V1_PATH, DATA_SEARCH_V2_PATH, DATA_SEARCH_V2_PLATFORMS, normalizeDataSearchV2 } from './contracts/data-search-v2.mjs'
-import { executeDataSearchV2, guardDataSearchV1, publicSearchProtocolStatus } from './data/search-protocol.mjs'
+import { SEARCH_ADMISSION_WAIT_MS, executeDataSearchV2, guardDataSearchV1, publicSearchProtocolStatus } from './data/search-protocol.mjs'
 import { SearchProtocolStore } from './data/search-protocol-store.mjs'
 import { servicePriceDefinition, customerServiceQuote } from './contracts/service-pricing.mjs'
 import { aggregateSourceCatalog, normalizeAggregateRequest, aggregateResponse, refreshAggregate, aggregateLivePage, AGGREGATE_EXECUTION } from './data/aggregate-search.mjs'
@@ -606,6 +606,7 @@ export class HubService {
     externalRawSearch = null,
     externalDataSearch = null,
     twitterRetryStore = null,
+    searchAdmissionWaitMs = SEARCH_ADMISSION_WAIT_MS,
     externalSocialSearchEnabled = false,
     externalSocialSearchCanaryConsumerIds = [],
     externalSocialUserActivity = null,
@@ -641,6 +642,7 @@ export class HubService {
     this.externalRawSearch = externalRawSearch
     this.externalDataSearch = externalDataSearch
     this.twitterRetryStore = twitterRetryStore
+    this.searchAdmissionWaitMs = searchAdmissionWaitMs
     this.externalSocialSearchEnabled = typeof externalSocialSearchEnabled === 'function'
       ? externalSocialSearchEnabled : externalSocialSearchEnabled === true
     this.externalSocialSearchCanaryConsumerIds = new Set(
@@ -4830,6 +4832,7 @@ export class HubService {
         400, 'page_size_exceeded', 'pageSize exceeds current entitlement')
       return executeDataSearchV2({ store: this.store, context, body, idempotencyKey, pepper: this.apiKeyPepper,
         retryOfRequestId:input.retryOfRequestId,retryStore:this.twitterRetryStore,
+        admissionWaitMs: this.searchAdmissionWaitMs, signal: input.signal,
         execute: (upstream, retry) => this.#searchLegacy(context, { ...input, ...retry, body: upstream, idempotencyKey, path: DATA_SEARCH_V1_PATH }) })
     }
     const platform = typeof input.body?.platform === 'string' ? canonicalPlatform(input.body.platform) : null

@@ -584,6 +584,14 @@ export class TikHubGateway {
     this.concurrencyQueue = new ConcurrencyAdmissionQueue({ clock: this.admissionClock })
   }
 
+  // A provider-circuit refusal carries the latest recorded supplier failure, so
+  // callers and the Diagnostics Center can see the upstream code behind it.
+  async #circuitRefusal(state, message) {
+    if (state?.internalCooldown === true) return circuitOpenError(state, this.config, message)
+    return (await openCircuitError({ store: this.platformStore, state, now: this.admissionClock(), config: this.config, message }))
+      || circuitOpenError(state, this.config, message)
+  }
+
   #enter(context, enrichment = false) {
     if (isHubRateLimitExempt(context)) return 'exempt'
     const consumerId = context.consumer.id
@@ -1128,7 +1136,7 @@ export class TikHubGateway {
         const latestCredential = await this.#credential()
         if (!latestCredential.ready || latestCredential.value !== resolved.value) throw new AppError(503, 'external_platform_configuration_changed', 'Upstream configuration changed while waiting')
         const latestState = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
-        if (latestState?.circuitOpenUntil && Date.parse(latestState.circuitOpenUntil) > this.admissionClock()) throw circuitOpenError(latestState, this.config, 'Upstream temporarily unavailable')
+        if (latestState?.circuitOpenUntil && Date.parse(latestState.circuitOpenUntil) > this.admissionClock()) throw await this.#circuitRefusal(latestState, 'Upstream temporarily unavailable')
         return context
       }
       try {
@@ -1504,7 +1512,9 @@ export class TikHubGateway {
             errorCode: providerError ? error.evidence.errorCode : (error?.code || 'invalid_upstream_contract'),
             failureResponseStatus: mapped.status,
             failureResponseBody: failureBody(mapped, activeRequestId),
-            affectsCircuit: providerError ? error.evidence.affectsCircuit !== false : true,
+            // Hub could not use a paid response. The endpoint quarantine covers
+            // it; it is not a supplier outage for other TikHub platforms.
+            affectsCircuit: providerError ? error.evidence.affectsCircuit !== false : false,
             snapshot: fallbackBody ? snapshot : null,
             fallbackResponseBody: fallbackBody,
             usageUnitsActual: 1,
@@ -1849,7 +1859,7 @@ export class TikHubGateway {
         })
         ownsReservation = false
         if (operationControlError) throw operationControlError
-        if (circuitOpen) throw circuitOpenError(state, this.config, 'External Xiaohongshu search is unavailable')
+        if (circuitOpen) throw await this.#circuitRefusal(state, 'External Xiaohongshu search is unavailable')
         throw new AppError(503, errorCode, 'External Xiaohongshu search is unavailable')
       }
 
@@ -1906,7 +1916,7 @@ export class TikHubGateway {
             waitedForCapacity = true
             context = await this.#revalidateWaitingIdentity(context, [XIAOHONGSHU_SEARCH_OPERATION])
             const latest = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
-            if (latest?.circuitOpenUntil && Date.parse(latest.circuitOpenUntil) > this.admissionClock()) throw circuitOpenError(latest, this.config, 'Upstream temporarily unavailable')
+            if (latest?.circuitOpenUntil && Date.parse(latest.circuitOpenUntil) > this.admissionClock()) throw await this.#circuitRefusal(latest, 'Upstream temporarily unavailable')
             resolved = await this.#credential()
             if (!resolved.ready) throw new AppError(503, 'external_platform_not_configured', 'Upstream configuration changed while waiting')
             operationControl = await this.#authorizeOperation(context, XIAOHONGSHU_SEARCH_OPERATION, 'searchContractVerified', resolved)
@@ -2373,7 +2383,8 @@ export class TikHubGateway {
           await this.platformStore.finishProviderStep({
             ...settlement,
             outcome: 'unknown',
-            affectsCircuit: true,
+            // Only Hub's own write failed; the supplier answered.
+            affectsCircuit: false,
             snapshot: null,
             ingestJob: null,
           })
@@ -2399,7 +2410,8 @@ export class TikHubGateway {
           await this.platformStore.finishProviderStep({
             ...settlement,
             outcome: 'unknown',
-            affectsCircuit: true,
+            // Only Hub's own write failed; the supplier answered.
+            affectsCircuit: false,
             snapshot: null,
             ingestJob: null,
           })
@@ -2546,7 +2558,9 @@ export class TikHubGateway {
               latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
               itemCount: null,
               errorCode: 'external_platform_enrichment_unknown',
-              affectsCircuit: true,
+              // Not a TikHub response or transport failure: the adapter wraps
+              // those. A Hub-side error must not open the shared circuit.
+              affectsCircuit: false,
             })
             failureCount += 1
             return
@@ -2603,7 +2617,7 @@ export class TikHubGateway {
             outcome: 'unknown',
             ...evidence,
             errorCode: 'external_platform_enrichment_unknown',
-            affectsCircuit: true,
+            affectsCircuit: false,
           })
           failureCount += 1
           return
@@ -2920,7 +2934,7 @@ export class TikHubGateway {
         })
         ownsReservation = false
         if (operationControlError) throw operationControlError
-        if (circuitOpen) throw circuitOpenError(state, this.config, 'External Xiaohongshu acquisition is unavailable')
+        if (circuitOpen) throw await this.#circuitRefusal(state, 'External Xiaohongshu acquisition is unavailable')
         throw new AppError(503, errorCode, 'External Xiaohongshu acquisition is unavailable')
       }
 
@@ -3011,7 +3025,7 @@ export class TikHubGateway {
             waitedForCapacity = true
             context = await this.#revalidateWaitingIdentity(context, [XIAOHONGSHU_POST_OPERATION])
             const latest = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
-            if (latest?.circuitOpenUntil && Date.parse(latest.circuitOpenUntil) > this.admissionClock()) throw circuitOpenError(latest, this.config, 'Upstream temporarily unavailable')
+            if (latest?.circuitOpenUntil && Date.parse(latest.circuitOpenUntil) > this.admissionClock()) throw await this.#circuitRefusal(latest, 'Upstream temporarily unavailable')
             resolved = await this.#credential()
             if (!resolved.ready) throw new AppError(503, 'external_platform_not_configured', 'Upstream configuration changed while waiting')
             operationControl = await this.#authorizeOperation(context, XIAOHONGSHU_POST_OPERATION, 'contractVerified', resolved)

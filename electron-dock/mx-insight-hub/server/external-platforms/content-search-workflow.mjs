@@ -242,7 +242,9 @@ export async function runContentSearch({ gateway, context, request, delivery, de
             try { ({ projected, records } = projectContentPage(result, nativeRequest)) }
             catch { throw new TikHubUpstreamError('Content-search response could not be normalized', {
               outcome: 'succeeded_unusable', billed: true, httpStatus: 200, businessCode: 200,
-              errorCode: 'invalid_content_search_contract', affectsCircuit: true,
+              // Hub could not normalize a paid page; the endpoint quarantine
+              // covers it. Not a supplier outage for other TikHub platforms.
+              errorCode: 'invalid_content_search_contract', affectsCircuit: false,
             }, result) }
           } catch (error) {
             if (!(error instanceof TikHubUpstreamError)) throw error

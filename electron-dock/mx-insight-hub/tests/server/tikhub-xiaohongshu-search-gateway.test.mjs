@@ -579,9 +579,15 @@ test('search circuit errors explain the shared cooldown without dispatch or cred
   state.platformStore.providerState = async () => ({
     circuitOpenUntil: until, lastErrorCode: 'upstream_rate_limited', consecutiveFailures: 4,
   })
+  const failedAt = new Date(Date.now() - 5_000).toISOString()
+  state.platformStore.latestFailureEvidence = async () => ({ callId: 'tikhub-call-before-refusal', outcome: 'rejected',
+    httpStatus: 429, businessCode: null, errorCode: 'upstream_rate_limited', billed: null, failedAt })
   await assert.rejects(() => state.gateway.searchNotes(state.context, request()), error => {
     assert.equal(error.code, 'external_platform_circuit_open')
     assert.equal(error.details.upstreamDispatched, false)
+    assert.equal(error.details.cause, 'upstream')
+    assert.deepEqual(error.details.upstream, { errorCode: 'upstream_rate_limited', httpStatus: 429, businessCode: null,
+      outcome: 'rejected', billed: null, failedAt })
     assert.equal(error.details.reason, 'upstream_rate_limited')
     assert.equal(error.details.scope, 'shared_upstream')
     assert.equal(error.details.failureThreshold, 3)

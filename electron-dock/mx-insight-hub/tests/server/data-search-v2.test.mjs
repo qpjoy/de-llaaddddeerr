@@ -633,6 +633,8 @@ test('v2 public HTTP routes all four Luopan platforms, rejects unauthenticated c
   const ctx = await service.authenticate(key.secret)
   const blocker = legacyRawUsage(ctx, { status: 'reserved', acquisitionRequest: { path: DATA_SEARCH_V1_PATH, body: { query: body().query } }, billingMeterKey: 'twitter' })
   store.requests.set(blocker.id, blocker); store.requestsByScope.set(`${ctx.consumer.id}:${blocker.idempotencyKey}`, blocker.id)
+  // With no wait budget the caller sees the documented refusal itself.
+  service.searchAdmissionWaitMs = 0
   const rejected = await fetch(`${origin}${DATA_SEARCH_V2_PATH}`, { method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${key.secret}`, 'idempotency-key': 'http-admission-blocked-key' },
     body: JSON.stringify(body('twitter')) })
@@ -643,6 +645,15 @@ test('v2 public HTTP routes all four Luopan platforms, rejects unauthenticated c
   assert.notEqual(rejection.requestId, blocker.id, 'the blocker is not this unstarted page request')
   assert.equal(rejected.headers.get('x-mx-insight-request-id'), null, 'no durable acquisition request was allocated')
   assert.equal(acquired.length, 4, 'admission rejection cannot call a supplier')
+  // By default Hub waits for the equal search itself and then admits the page.
+  service.searchAdmissionWaitMs = 10_000
+  const ended = setTimeout(() => { blocker.status = 'committed' }, 300)
+  t.after(() => clearTimeout(ended))
+  const admitted = await fetch(`${origin}${DATA_SEARCH_V2_PATH}`, { method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${key.secret}`, 'idempotency-key': 'http-admission-waits-key' },
+    body: JSON.stringify(body('twitter')) })
+  assert.equal(admitted.status, 200, JSON.stringify(await admitted.clone().json()))
+  assert.equal(acquired.length, 5)
 })
 
 test('v2 machine documentation uses the explicit v2 server path and respects existing platform visibility', () => {
