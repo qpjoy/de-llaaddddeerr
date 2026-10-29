@@ -201,6 +201,46 @@ test('Reddit empty dynamic results never use top navigation or request paginatio
   assert.throws(() => project('reddit', dynamic([{ node: { unknown: { post: post('hidden') } } }], { hasNextPage: false })), /invalid_content_search_entry/)
 })
 
+// Shapes seen in production on 2026-10-29 (calls 93494c87 and 0bf7cf68).
+const searchPost = id => ({ __typename: 'SearchPost', behaviors: {}, telemetry: {}, post: { __typename: 'SubredditPost', ...post(id) } })
+const notice = (message, explanation = '') => ({ __typename: 'SearchErrorMessage', behaviors: { cta: {} },
+  presentation: { __typename: 'SearchErrorMessageDefaultPresentation', message, explanation, ctaButtonText: 'Try again', icon: 'search' },
+  telemetry: { __typename: 'SearchElementTelemetry', events: [], trackingContext: {} } })
+
+test('Reddit search widgets such as in-feed surveys are excluded without failing the page', () => {
+  const output = project('reddit', dynamic([
+    { node: { __typename: 'SearchListComponent', behaviors: {}, presentation: {}, children: [searchPost('a'), searchPost('b')] } },
+    { node: { __typename: 'SearchInFeedSurveyUnit' } }], { hasNextPage: false }))
+  assert.deepEqual(output.items.map(item => item.content_id), ['a', 'b'])
+  assert.equal(output.nonPostCount, 1)
+  assert.equal(output.providerPage.warnings, undefined)
+})
+
+test('Reddit no-results notice is an empty page; any other notice is a Reddit-side error, never an empty page', () => {
+  for (const [message, explanation] of [['Hm... we couldn’t find any results for “x”', 'Double-check your spelling'], ['No results found', ''], ['没有找到相关结果', '']]) {
+    const output = project('reddit', dynamic([{ node: notice(message, explanation) }], { hasNextPage: false }))
+    assert.deepEqual(output.items, [])
+    assert.equal(output.nonPostCount, 1)
+    assert.deepEqual(output.providerPage.warnings.map(warning => warning.code), ['reddit_no_results'])
+    assert.equal(output.providerPage.hasMore, false)
+  }
+  for (const message of ['Something went wrong', 'Server error. Try again later.', '']) {
+    assert.throws(() => project('reddit', dynamic([{ node: notice(message) }], { hasNextPage: false })), /upstream_search_error_message/)
+  }
+  const mixed = project('reddit', dynamic([{ node: searchPost('a') }, { node: notice('Something went wrong') }], { hasNextPage: false }))
+  assert.deepEqual(mixed.items.map(item => item.content_id), ['a'])
+  assert.deepEqual(mixed.providerPage.warnings.map(warning => warning.code), ['reddit_search_notice'])
+})
+
+test('Reddit unknown widgets that carry a post still fail the page instead of dropping it', () => {
+  for (const node of [{ __typename: 'SearchCarousel', items: [{ __typename: 'SubredditPost', id: 'hidden' }] },
+    { __typename: 'SearchPromo', target: { id: 't3_hidden' } },
+    { __typename: 'SearchHighlight', content: { postTitle: '标题' } },
+    { __typename: 'SearchNested', a: { b: { c: { d: { e: { f: { g: {} } } } } } } }]) {
+    assert.throws(() => project('reddit', dynamic([{ node }], { hasNextPage: false })), /invalid_content_search_entry/, node.__typename)
+  }
+})
+
 test('YouTube formatted search keeps a plain-string author and exact view-count text, never abbreviated or relative values', () => {
   const output = project('youtube', { videos: [
     video('a', { author: '方脸说', channel_id: 'UC123', view_count: '12,345 views', published_time: '3 years ago' }),

@@ -894,6 +894,25 @@ for (const field of ['caption', 'image', 'cursor']) {
   })
 }
 
+test('Reddit error notice is recorded as a Reddit-side failure and a no-results notice as an empty page', async () => {
+  const notice = message => ({ search: { dynamic: { components: { main: { edges: [{ node: { __typename: 'SearchErrorMessage',
+    presentation: { __typename: 'SearchErrorMessageDefaultPresentation', message, explanation: '', ctaButtonText: 'Retry', icon: 'x' } } }],
+  pageInfo: { hasNextPage: false, endCursor: null } } } } } })
+  const failed = await harness({ platform: 'reddit', payload: () => notice('Something went wrong') })
+  await assert.rejects(failed.invokeData({ platform: 'reddit', query: 'Zhejiang', pageSize: 20 }),
+    error => error.code === 'external_platform_response_unusable' && error.status === 502)
+  const call = [...failed.platformStore.calls.values()][0]
+  assert.equal(call.outcome, 'succeeded_unusable')
+  assert.equal(call.errorCode, 'upstream_search_error_message')
+  assert.equal(failed.platformStore.state.consecutiveFailures, 0)
+  const empty = await harness({ platform: 'reddit', payload: () => notice('No results found') })
+  const delivered = await empty.invokeData({ platform: 'reddit', query: 'Zhejiang', pageSize: 20 })
+  assert.equal(delivered.status, 200)
+  assert.deepEqual(delivered.body.data.items, [])
+  assert.ok(delivered.body.data.warnings.some(warning => warning.code === 'reddit_no_results'))
+  assert.equal([...empty.platformStore.calls.values()][0].outcome, 'succeeded')
+})
+
 for (const platform of ['reddit', 'youtube']) {
   test(`${platform} standard search fills 19+5, buffers all paid overflow and replays without Night-All`, async () => {
     const firstIds = Array.from({ length: 19 }, (_, i) => `first-${i}`)

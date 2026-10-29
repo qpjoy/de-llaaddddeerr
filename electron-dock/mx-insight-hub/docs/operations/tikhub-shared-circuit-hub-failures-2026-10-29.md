@@ -18,16 +18,27 @@ Delta 调用小红书搜索（raw），Hub 返回：
 - 更早的 03:44:31–03:44:50 有一批真实的 TikHub 429（小红书、抖音、快手）和一次快手超时，这些属于供应商故障，修改后仍会计入熔断。
 - 当前熔断已关闭（`consecutiveFailures=0`）。
 
-## Reddit 搜索当前全部失败（待确认原因）
+## Reddit 搜索失败：两种新的非帖子节点（已核实并修复）
 
-10 次 Reddit 搜索全部是“已付费但不可用”，说明 Reddit 动态搜索的返回结构很可能变了：Hub 只认识 `post`、`children`、`community`/`comment`/`author` 几种节点，遇到其他节点就判整页失败，和抖音“相关搜索”卡片是同一类问题。下游的 Reddit 搜索现在都会失败并且付费。
+Hub 解析 Reddit 动态搜索时，只认识 `post`、`children`、`community`/`comment`/`author` 几种节点，其他节点一律判整页失败。只读诊断 `reddit-search-shape.v1` 读取已保存的响应，确认了两种新节点：
 
-新增只读诊断 `server/ops/diagnose-reddit-search.mjs`（`reddit-search-shape.v1`），按供应商调用 ID 读取已保存的 TikHub 原始响应：
+| 调用 | 内容 | 新节点 |
+| --- | --- | --- |
+| `93494c87` | 1 个 `SearchListComponent`，内含 6 条正常帖子（`SearchPost` → `SubredditPost`，ID 为 `t3_`） | `SearchInFeedSurveyUnit`：信息流里的调查卡片，只有 `__typename` |
+| `0bf7cf68` | 只有 1 个节点 | `SearchErrorMessage`：Reddit 自己的提示，`presentation` 中有 `message`、`explanation`、`ctaButtonText`、`icon` |
 
-- 报告每个节点属于哪一类，以及节点的 GraphQL 类型名（`__typename`）、键名和下一层结构；
-- 用已部署的解析器重放，给出具体失败原因。
+两者都不是帖子，但旧规则让整页失败（已计费），6 条正常帖子也没有交付。
 
-不输出值、正文、链接或游标，也不调用供应商：
+修改（`server/contracts/tikhub-content-search.mjs`）：
+
+- **不认识的节点**：内部没有任何帖子痕迹时，按非帖子排除，整页照常交付。帖子痕迹包括 `post`/`posts`/`postTitle`/`permalink`/`selftext` 字段、以 `Post` 结尾的 `__typename`、`t3_` 开头的字符串，以及超过 6 层的嵌套。只要有帖子痕迹，仍判整页失败，不会悄悄丢帖子。
+- **`SearchErrorMessage` 按提示文字区分**：
+  - 写的是“没有结果”（no results、couldn’t find、没有找到等）：当作正常的空页，附 `reddit_no_results` 提示。
+  - 其他提示：当作 Reddit 自身的错误，不当作空页，以免下游误以为“没有新内容”而跳过这一段时间。这一页失败时记录为 `upstream_search_error_message`，与 Hub 解析失败（`invalid_content_search_contract`）区分开。同页如果已有帖子，帖子照常交付，并附 `reddit_search_notice` 提示。
+  - 两种情况都不计入 TikHub 共享熔断。
+- 诊断升级为 `reddit-search-shape.v2`：对 `SearchErrorMessage` 只输出判定结果 `noticeClass`（`no_results` 或 `error`），不输出提示文字。判定规则与解析器一致，有测试保证。
+
+部署后，可用同一命令确认 `0bf7cf68` 的提示属于哪一类（只读）：
 
 ```bash
 kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
@@ -35,7 +46,7 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
   < server/ops/diagnose-reddit-search.mjs
 ```
 
-拿到 `unrecognized` 节点的类型名和键名后，按真实结构补上解析，不需要付费请求。
+预期：`93494c87` 的 `parser.state=installed_accepts`、`itemCount=6`；`0bf7cf68` 为 `notice` 节点，`noticeClass` 是 `no_results` 时解析器返回空页，是 `error` 时返回 `upstream_search_error_message`。如果它其实是“无结果”提示、只是措辞没被识别，就把措辞补进判定规则。
 
 ## 原因（代码）
 
@@ -86,6 +97,7 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 - 内容搜索解析失败后，TikHub 共享熔断计数保持 0。
 - 小红书搜索的熔断拒绝带有 `cause=upstream` 和完整的 `upstream` 证据。
 - 新诊断：可用于任意平台、能识别 Hub 自身错误码、查询只读，不输出未识别的存储值。
+- Reddit：调查卡片被排除且帖子照常交付；“无结果”提示得到空页，其他提示判为 Reddit 错误，并在调用账本中记为 `upstream_search_error_message`，不计入共享熔断；藏有帖子的未知节点仍判失败；诊断的判定规则与解析器一致。
 - 用 PGlite 0.2.17 跑完整服务端套件，失败项仍是原有 45 项；类型检查通过。
 
 ## 部署

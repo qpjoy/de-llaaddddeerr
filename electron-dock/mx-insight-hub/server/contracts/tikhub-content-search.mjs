@@ -440,10 +440,30 @@ function standardCursorPage({ scopes, tokenNames, flagNames, inputToken, nextNam
   const hasMore = next ? true : states[0] ?? (nullIsEnd && explicitNull ? false : null)
   return { hasMore, nextParams: next ? { [nextName]: next } : null, nextPage: null, paginationMode: 'cursor', sourceCount }
 }
+// Reddit search mixes widgets (surveys, notices, ...) into its result edges.
+// An unknown node is excluded only when nothing inside it looks like a post; a
+// hidden post still fails the page instead of being dropped silently.
+const REDDIT_POST_KEYS = new Set(['post', 'posts', 'postTitle', 'permalink', 'selftext', 'subredditPost', 'profilePost'])
+function redditHidesPost(value, depth = 0) {
+  if (depth > 6) return true
+  if (Array.isArray(value)) return value.length > 200 || value.some(item => redditHidesPost(item, depth + 1))
+  if (!object(value)) return typeof value === 'string' && /^t3_/u.test(value)
+  if (typeof value.__typename === 'string' && /Post$/u.test(value.__typename)) return true
+  return Object.entries(value).some(([key, item]) => REDDIT_POST_KEYS.has(key) || redditHidesPost(item, depth + 1))
+}
+// Reddit answers an empty search with its own notice node. Only a notice that
+// says there are no results is an empty page; any other notice is a Reddit-side
+// error and the page fails as such (never as Hub parsing, never as empty).
+const REDDIT_NO_RESULTS = /\b(?:no results|no posts|nothing found|couldn['’]t find|could not find|didn['’]t find|did not find)\b|没有找到|无结果|找不到|沒有找到/iu
+export function redditSearchMessageClass(node) {
+  const presentation = object(node?.presentation) ? node.presentation : {}
+  const text = [presentation.message, presentation.explanation].filter(value => typeof value === 'string').join('\n')
+  return REDDIT_NO_RESULTS.test(text) ? 'no_results' : 'error'
+}
 function redditProjection(data, request, capturedAt) {
   const main = (data.search?.dynamic || data.search?.Dynamic)?.components?.main
-  const rows = [], scopes = [], nonposts = []
-  let inspectedCount = 0
+  const rows = [], scopes = [], nonposts = [], warnings = []
+  let inspectedCount = 0, searchError = false
   const add = value => {
     if (!object(value)) throw new Error('invalid_content_search_entry')
     if (value.isCommercialCommunication === true || value.promoted === true || value.removedByCategory || value.removed_by_category) { nonposts.push(value); return }
@@ -458,9 +478,19 @@ function redditProjection(data, request, capturedAt) {
       if (Object.hasOwn(node, 'post')) { add(node.post); recognized = true }
       if (Object.hasOwn(node, 'children')) { boundedEntries(node.children).forEach(child => visit(child, depth + 1)); recognized = true }
       if (!recognized && ['community', 'comment', 'author'].some(name => object(node[name]))) { nonposts.push(node); recognized = true }
-      if (!recognized) throw new Error('invalid_content_search_entry')
+      if (!recognized && node.__typename === 'SearchErrorMessage') {
+        if (redditSearchMessageClass(node) === 'error') searchError = true
+        else warnings.push({ code: 'reddit_no_results', message: 'Reddit reported no results for this search page.' })
+        nonposts.push(node); recognized = true
+      }
+      if (!recognized) {
+        if (redditHidesPost(node)) throw new Error('invalid_content_search_entry')
+        nonposts.push(node)
+      }
     }
     for (const edge of boundedEntries(main.edges)) visit(edge?.node)
+    if (searchError && !rows.length) throw new Error('upstream_search_error_message')
+    if (searchError) warnings.push({ code: 'reddit_search_notice', message: 'Reddit returned an error notice alongside these results.' })
     scopes.push(main.pageInfo, main)
   } else {
     const listing = data.kind === 'Listing' ? data.data : data
@@ -476,9 +506,10 @@ function redditProjection(data, request, capturedAt) {
   }
   const sourceCount = rows.length + nonposts.length
   if (sourceCount > 10000) throw new Error('content_search_page_too_large')
-  return { rows, nonPostCount: nonposts.length, providerPage: standardCursorPage({ scopes,
+  const providerPage = standardCursorPage({ scopes,
     tokenNames: ['endCursor', 'after', 'next_cursor'], flagNames: ['hasNextPage', 'has_more', 'hasMore'],
-    inputToken: request.upstreamQuery.after, nextName: 'after', sourceCount, nullIsEnd: true }) }
+    inputToken: request.upstreamQuery.after, nextName: 'after', sourceCount, nullIsEnd: true })
+  return { rows, nonPostCount: nonposts.length, providerPage: warnings.length ? { ...providerPage, warnings } : providerPage }
 }
 function youtubeProjection(data, request, capturedAt) {
   const rows = [], continuations = []

@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import * as contract from '../../server/contracts/tikhub-content-search.mjs'
-import { diagnoseRedditSearch, inspectRedditArchive } from '../../server/ops/diagnose-reddit-search.mjs'
+import { diagnoseRedditSearch, inspectRedditArchive, noticeClass } from '../../server/ops/diagnose-reddit-search.mjs'
 
 const secret = 'private-customer-text'
 const post = id => ({ __typename: 'SubredditPost', id: `t3_${id}`, postTitle: secret, content: { markdown: secret }, permalink: `/r/${secret}/` })
@@ -29,7 +29,8 @@ test('Reddit shape diagnostic names an unrecognized node by type and keys and re
   assert.deepEqual(receipt.nodes[1].nested, { modifier: { typename: 'SpellcheckModifier', keys: ['__typename', 'text'] } })
   assert.deepEqual(receipt.nodes[2].children.map(child => child.branch), ['post', 'non_post:community'])
   assert.deepEqual(receipt.pageInfoKeys, ['endCursor', 'hasNextPage'])
-  assert.deepEqual(receipt.parser, { state: 'invalid_content_search_entry' })
+  // The parser now excludes a widget that carries no post.
+  assert.deepEqual(receipt.parser, { state: 'accepts' })
   assert.doesNotMatch(JSON.stringify(receipt), /private-customer-text/u)
 })
 
@@ -51,4 +52,15 @@ test('Reddit shape diagnostic reads only TikHub Reddit calls inside a read-only 
   assert.equal(queries.at(-1).sql, 'ROLLBACK')
   assert.equal(released, true)
   await assert.rejects(diagnoseRedditSearch(pool, ['not-a-uuid']), { diagnosticCode: 'invalid_call_ids' })
+})
+
+test('Reddit shape diagnostic classifies notices exactly like the parser and never echoes their text', () => {
+  for (const message of ['Hm... we couldn’t find any results', 'No results found', '没有找到相关结果', 'Something went wrong', '']) {
+    const node = { __typename: 'SearchErrorMessage', presentation: { message } }
+    assert.equal(noticeClass(node), contract.redditSearchMessageClass(node), message)
+  }
+  const receipt = inspectRedditArchive(archive([{ node: { __typename: 'SearchErrorMessage', presentation: { message: `Something went wrong ${secret}` } } }]))
+  assert.deepEqual(receipt.branches, { notice: 1 })
+  assert.equal(receipt.nodes[0].noticeClass, 'error')
+  assert.doesNotMatch(JSON.stringify(receipt), /private-customer-text|went wrong/u)
 })

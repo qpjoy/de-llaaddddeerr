@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-export const REVISION = 'reddit-search-shape.v1'
+export const REVISION = 'reddit-search-shape.v2'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const KEY = /^_{0,2}[A-Za-z][A-Za-z0-9_]{0,40}$/u
 const TYPE_NAME = /^[A-Za-z][A-Za-z0-9_]{0,60}$/u
@@ -18,6 +18,15 @@ const keyNames = value => object(value) ? Object.keys(value).filter(key => KEY.t
 const typeName = value => object(value) && typeof value.__typename === 'string' && TYPE_NAME.test(value.__typename) ? value.__typename : null
 const fail = code => Object.assign(new Error(code), { diagnosticCode: code })
 const source = path => import(new URL(path, pathToFileURL(`${process.cwd()}/`)))
+
+// Same classifier as redditSearchMessageClass in tikhub-content-search.mjs
+// (kept here so the diagnostic runs over stdin against any installed build).
+const REDDIT_NO_RESULTS = /\b(?:no results|no posts|nothing found|couldn['’]t find|could not find|didn['’]t find|did not find)\b|没有找到|无结果|找不到|沒有找到/iu
+export function noticeClass(node) {
+  const presentation = object(node?.presentation) ? node.presentation : {}
+  const text = [presentation.message, presentation.explanation].filter(value => typeof value === 'string').join('\n')
+  return REDDIT_NO_RESULTS.test(text) ? 'no_results' : 'error'
+}
 
 // Mirrors the installed parser's node walk: post, children, or a known non-post.
 function classify(node, depth = 0) {
@@ -36,6 +45,8 @@ function classify(node, depth = 0) {
   }
   const nonPost = ['community', 'comment', 'author'].find(name => object(node[name]))
   if (nonPost) return { branch: `non_post:${nonPost}`, ...shape }
+  // Only the class leaves storage, never the notice text.
+  if (shape.typename === 'SearchErrorMessage') return { branch: 'notice', ...shape, noticeClass: noticeClass(node) }
   return { branch: 'unrecognized', ...shape,
     nested: Object.fromEntries(shape.keys.filter(key => object(node[key]) || Array.isArray(node[key])).slice(0, 10)
       .map(key => [key, Array.isArray(node[key]) ? { array: node[key].length, firstKeys: keyNames(node[key][0]), firstTypename: typeName(node[key][0]) }
