@@ -219,6 +219,13 @@ function replayedFailure(request) {
   return new AppError(status, code, message, { ...storedDetails, requestId: request.id })
 }
 
+const JUSTONE_CAPACITY_FAILURES = Object.freeze({
+  100: { reasonCode: 'upstream_auth_invalid', message: 'The data source credential is invalid; contact the administrator' },
+  600: { reasonCode: 'upstream_permission_denied', message: 'The data source permission is denied; contact the administrator' },
+  601: { reasonCode: 'upstream_balance_exhausted', message: 'The data source balance is exhausted; contact the administrator' },
+  602: { reasonCode: 'upstream_token_limit_exceeded', message: 'The data source credential quota is exhausted; contact the administrator' },
+})
+
 function publicFailure(error, { ecommerce = false } = {}) {
   const evidence = error.evidence || {}
   if (error instanceof WebSearchUpstreamError) {
@@ -269,6 +276,13 @@ function publicFailure(error, { ecommerce = false } = {}) {
     }
   }
   if (error instanceof JustOneUpstreamError && [100, 600, 601, 602].includes(evidence.businessCode)) {
+    const reason = JUSTONE_CAPACITY_FAILURES[evidence.businessCode]
+    // Delta treats this top-level code as terminal. Add a reviewed subreason
+    // without exposing supplier messages or changing historical replay.
+    if (!ecommerce && evidence.outcome === 'rejected' && evidence.errorCode === reason.reasonCode) {
+      return new AppError(503, 'external_platform_capacity_unavailable', reason.message,
+        { reasonCode: reason.reasonCode, outcome: 'rejected', retryable: false, action: 'contact_administrator' })
+    }
     return new AppError(503, 'external_platform_capacity_unavailable', 'External data capacity is unavailable')
   }
   if (evidence.outcome === 'succeeded_unusable') {

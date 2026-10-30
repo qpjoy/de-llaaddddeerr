@@ -48,6 +48,7 @@ const projectCall = row => ({ callId: id(row.id), requestId: id(row.usage_reques
   httpStatus: int(row.http_status) >= 100 && int(row.http_status) <= 599 ? row.http_status : null,
   businessCode: int(row.business_code),
   errorCode: choice(row.error_code, ['upstream_collection_failed', 'upstream_rate_limited', 'upstream_balance_exhausted',
+    'upstream_auth_invalid', 'upstream_permission_denied',
     'upstream_daily_quota_exceeded', 'upstream_token_limit_exceeded', 'invalid_facebook_response', 'upstream_http_error']),
   upstreamRequestId: upstreamId(row.upstream_request_id), billed: typeof row.billed === 'boolean' ? row.billed : null,
   startedAt: time(row.started_at), completedAt: time(row.completed_at) })
@@ -103,7 +104,8 @@ export async function diagnoseFacebookFailure(pool, requestId) {
       status: choice(request.status, ['reserved', 'committed', 'released', 'unknown']),
       responseStatus: int(request.response_status),
       errorCode: choice(request.error_code, ['upstream_collection_failed', 'external_platform_pre_dispatch_failed',
-        'facebook_quota_state_unavailable', 'external_platform_busy']),
+        'facebook_quota_state_unavailable', 'external_platform_busy', 'external_platform_capacity_unavailable',
+        'upstream_auth_invalid', 'upstream_permission_denied', 'upstream_balance_exhausted', 'upstream_token_limit_exceeded']),
       reservedAt: time(request.reserved_at), completedAt: time(request.completed_at), databaseNow: time(request.database_now),
       ownCalls, ownCallsTruncated: calls.length > 10,
       lastPolicyAuditBeforeRequest: policy ? { revision: int(policy.revision), createdAt: time(policy.created_at),

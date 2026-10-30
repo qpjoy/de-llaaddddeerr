@@ -368,6 +368,48 @@ test('Facebook 301 preserves the failed receipt and existing customer settlement
   }
 })
 
+test('Facebook capacity failures distinguish account causes and replay the same saved refusal', async () => {
+  const reasons = [[100, 'upstream_auth_invalid', /credential is invalid/u],
+    [600, 'upstream_permission_denied', /permission is denied/u],
+    [601, 'upstream_balance_exhausted', /balance is exhausted/u],
+    [602, 'upstream_token_limit_exceeded', /credential quota is exhausted/u]]
+  for (const route of ['raw', 'standard']) for (const [code, reasonCode, message] of reasons) {
+    const h = await harness({ mode: 'justone', respond: () => Response.json({ code,
+      message: 'private-provider-token-and-balance', data: null, requestId: 'private-provider-id', recordTime: '2026-10-29T15:52:13Z' }) })
+    const invoke = () => route === 'raw' ? h.invoke()
+      : invokeStandard(h, { platform: 'facebook', query: 'Unitree', pageSize: 20 }, 'facebook-capacity-fixture')
+    let first
+    await assert.rejects(invoke(), error => {
+      first = error
+      assert.equal(error.status, 503)
+      assert.equal(error.code, 'external_platform_capacity_unavailable')
+      assert.equal(error.details.reasonCode, reasonCode)
+      assert.equal(error.details.outcome, 'rejected')
+      assert.equal(error.details.retryable, false)
+      assert.equal(error.details.action, 'contact_administrator')
+      assert.match(error.message, message)
+      assert.doesNotMatch(JSON.stringify([error.message, error.details]), /private-|justone|fixture-only-key/u)
+      return true
+    })
+    const call = [...h.stores.justone.calls.values()][0]
+    assert.equal(call.businessCode, code)
+    assert.equal(call.errorCode, reasonCode)
+    assert.equal(call.billed, false)
+    assert.equal(call.outcome, 'rejected')
+    assert.equal(h.stores.justone.restrictedResponseArchives.size, 1)
+    assert.equal(h.stores.justone.ingestJobs.length, 0)
+    h.policy.mode = 'paused'
+    await assert.rejects(invoke(), error => {
+      assert.equal(error.status, first.status)
+      assert.equal(error.code, first.code)
+      assert.equal(error.message, first.message)
+      assert.deepEqual(error.details, first.details)
+      return true
+    })
+    assert.equal(h.calls.length, 1)
+  }
+})
+
 test('ambiguous or malformed paid responses never fall through or retry', async () => {
   for (const options of [{ rapidStatus: 'timeout' }, { rapidStatus: 503 }, { malformed: true }]) {
     const h = await harness(options)

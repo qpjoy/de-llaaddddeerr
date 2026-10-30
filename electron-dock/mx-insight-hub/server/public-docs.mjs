@@ -5333,7 +5333,10 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
             type: 'object',
             required: ['code', 'message'],
             properties: {
-              code: { type: 'string' }, message: { type: 'string' }, details: { type: 'object', additionalProperties: true },
+              code: { type: 'string' }, message: { type: 'string' }, details: {
+                type: 'object', additionalProperties: true,
+                description: 'For verified non-ecommerce source account refusals, HTTP 503 external_platform_capacity_unavailable retains its terminal meaning and includes reasonCode, outcome=rejected, retryable=false and action=contact_administrator. reasonCode distinguishes upstream_auth_invalid (source credential invalid), upstream_permission_denied (source permission denied), upstream_balance_exhausted (source balance exhausted), and upstream_token_limit_exceeded (source credential quota exhausted). These describe the data source account, not the caller’s Hub API key or wallet. Older saved responses and unclassified capacity failures may omit reasonCode; historical replay returns the original response unchanged.',
+              },
             },
           },
           requestId: { type: 'string' },

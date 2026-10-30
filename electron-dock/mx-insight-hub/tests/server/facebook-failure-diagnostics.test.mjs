@@ -105,6 +105,26 @@ test('historical Facebook diagnostic runs read-only SQL and separates overlappin
   await assert.rejects(diagnoseFacebookFailure(guarded, randomUUID()), /request_not_found/u)
 })
 
+test('historical Facebook account refusals retain their precise stored reason in diagnostics', async () => {
+  for (const [businessCode, errorCode] of [[100, 'upstream_auth_invalid'], [600, 'upstream_permission_denied'],
+    [601, 'upstream_balance_exhausted'], [602, 'upstream_token_limit_exceeded']]) {
+    const requestId = randomUUID(), callId = randomUUID()
+    const pool = { async connect() { return { release() {}, async query(sql) {
+      assert.doesNotMatch(sql, /\b(INSERT|UPDATE|DELETE|COMMIT)\b/u)
+      if (sql.includes('FROM public.usage_requests')) return { rows: [{ id: requestId, platform: 'facebook',
+        status: 'committed', response_status: 503, error_code: errorCode }] }
+      if (sql.includes('WHERE usage_request_id=$1')) return { rows: [{ id: callId, usage_request_id: requestId,
+        provider_key: 'justone', outcome: 'rejected', http_status: 200, business_code: businessCode, error_code: errorCode, billed: false }] }
+      return { rows: [] }
+    } } } }
+    const result = await diagnoseFacebookFailure(pool, requestId)
+    assert.equal(result.errorCode, errorCode)
+    assert.equal(result.ownCalls[0].errorCode, errorCode)
+    assert.equal(result.ownCalls[0].businessCode, businessCode)
+    assert.equal(result.ownCalls[0].billed, false)
+  }
+})
+
 test('validation and database failures are sanitized and failed rollback discards its connection', async () => {
   await assert.rejects(diagnoseFacebookFailure({ connect() { throw new Error('must not connect') } }, 'invalid'), /invalid_request_id/u)
   let released
