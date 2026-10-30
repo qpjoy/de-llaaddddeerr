@@ -629,11 +629,8 @@ export async function createRuntime(config = loadConfig()) {
         return [provider, Object.values(readiness).some(Boolean)]
       }))
       const ready = Object.fromEntries(states.filter(row => row.status === 'fulfilled').map(row => row.value))
-      // A due check permits one demand-triggered probe; it does not replenish
-      // the subscription. Use the same shortened billing-window schedule as admission.
-      const checkAt = policy.next_recovery_check_at || policy.blocked_until
-      const blocked = checkAt ? new Date(checkAt).getTime() > Date.now()
-        : policy.used >= policy.monthly_limit || policy.remaining === 0
+      // Same supplier-header/one-shot check decision as actual admission.
+      const blocked = !policy.rapid_available
       return { ready: Boolean((policy.mode !== 'justone' && ready.rapidapi && !blocked) || (policy.mode !== 'rapidapi' && ready.justone)) }
     },
     externalSocialSearch: (context, input) => tikHubGateway.searchNotes(context, input),

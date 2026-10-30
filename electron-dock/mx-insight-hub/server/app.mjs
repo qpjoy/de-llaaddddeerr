@@ -3218,6 +3218,13 @@ export function createApp({
         sendJson(response, 200, { data: { items: await platformSearchPolicyStore?.list() || [] }, requestId })
         return
       }
+      if (request.method === 'POST' && pathname === '/internal/v1/admin/platform-search-policies/facebook/quota-check') {
+        requireSourceAdmin(principal)
+        requireNoQuery(searchParams, 'Facebook quota check')
+        if (!platformSearchPolicyStore) throw new AppError(503, 'platform_search_policy_unavailable', 'Search strategy is unavailable')
+        sendJson(response, 200, { data: await platformSearchPolicyStore.requestRapidCheck(await readJson(request, 4096)), requestId })
+        return
+      }
       params = routeMatch(pathname, '/internal/v1/admin/platform-search-policies/:platform')
       if (params && request.method === 'PUT') {
         requireSourceAdmin(principal)

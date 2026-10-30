@@ -444,12 +444,23 @@ function standardCursorPage({ scopes, tokenNames, flagNames, inputToken, nextNam
 // An unknown node is excluded only when nothing inside it looks like a post; a
 // hidden post still fails the page instead of being dropped silently.
 const REDDIT_POST_KEYS = new Set(['post', 'posts', 'postTitle', 'permalink', 'selftext', 'subredditPost', 'profilePost'])
-function redditHidesPost(value, depth = 0) {
+function redditWidgetTrackingContext(typename, path) {
+  const behaviors = typename === 'SearchSpellCorrectionApplied' ? ['corrected', 'original']
+    : typename === 'SearchBanner' ? ['cta', 'dismiss'] : null
+  if (!behaviors) return false
+  return path.length === 2 && path[0] === 'telemetry' && path[1] === 'trackingContext'
+    || path.length === 4 && path[0] === 'behaviors' && behaviors.includes(path[1])
+      && path[2] === 'telemetry' && path[3] === 'trackingContext'
+}
+function redditHidesPost(value, depth = 0, widgetType = value?.__typename ?? null, path = []) {
   if (depth > 6) return true
-  if (Array.isArray(value)) return value.length > 200 || value.some(item => redditHidesPost(item, depth + 1))
+  // These two known widgets carry post references inside analytics contexts.
+  // Exclude only those exact metadata paths, leaving other fields fail-closed.
+  if (redditWidgetTrackingContext(widgetType, path)) return false
+  if (Array.isArray(value)) return value.length > 200 || value.some((item, index) => redditHidesPost(item, depth + 1, widgetType, [...path, index]))
   if (!object(value)) return typeof value === 'string' && /^t3_/u.test(value)
   if (typeof value.__typename === 'string' && /Post$/u.test(value.__typename)) return true
-  return Object.entries(value).some(([key, item]) => REDDIT_POST_KEYS.has(key) || redditHidesPost(item, depth + 1))
+  return Object.entries(value).some(([key, item]) => REDDIT_POST_KEYS.has(key) || redditHidesPost(item, depth + 1, widgetType, [...path, key]))
 }
 // Reddit answers an empty search with its own notice node. Only a notice that
 // says there are no results is an empty page; any other notice is a Reddit-side

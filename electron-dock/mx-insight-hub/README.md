@@ -1,5 +1,7 @@
 # MX Insight Hub
 
+2026-10-30：[数据源、接口与供应商总目录](docs/data-inventory/README.md)汇总当前源码中的平台支持、上游路由、固定清洗输入及 Night-All 剩余依赖，附逐项接口表、治理目录和可重新生成的 JSON 统计清单；源码注册数量不代表线上启用数量。
+
 2026-10-03：[Hub SSO、原成员复用与飞书 Web 绑定](../mx-launcher/docs/40-hub-sso-and-feishu-web.md)已完成本地实现与隔离验收。确定 Hub HTTPS 入口后集中登记一次，后续 deploy 复用配置；原账号密码与管理令牌入口保留。
 
 2026-10-02：[独立支付中心报表同步](docs/operations/payment-reporting.md)已提供可选的 PostgreSQL 投影、后台续传和管理员查询 API。配置后随 deploy 自动迁移；现有充值、钱包及 Launcher/MX-H2I 登录链路保持原有路径。

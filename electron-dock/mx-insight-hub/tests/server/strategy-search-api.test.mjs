@@ -12,8 +12,11 @@ test('strategy search administration is authenticated, revisioned and never disp
   const adapter = { search() { throw new Error('administration must not search') } }
   const service = new HubService({ store, adapter, apiKeyPepper: 'strategy-search-offline-fixture-secret' })
   const facebook = { platform: 'facebook', mode: 'auto', revision: 9, monthly_limit: 1000, used: 538, remaining: 462 }
+  const checks = []
   const server = createServer(createApp({ store, service, adapter, strategySearchRoutingStore: routing,
-    platformSearchPolicyStore: { list: async () => [facebook] }, adminToken: 'fixture-admin',
+    platformSearchPolicyStore: { list: async () => [facebook], requestRapidCheck: async input => {
+      checks.push(input); return { dispatched: false }
+    } }, adminToken: 'fixture-admin',
     identity: { enabled: true, resolve: async () => ({ kind: 'launcher', platformAdmin: true, tenantIds: null }) },
     listenerMode: 'admin', logger: { error() {} } }))
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -51,5 +54,17 @@ test('strategy search administration is authenticated, revisioned and never disp
   assert.equal((await routing.get('search', 'instagram')).primaryProvider, 'tikhub')
   assert.equal((await routing.get('search', 'twitter')).primaryProvider, 'tikhub')
   assert.equal(routing.events.length, 2)
+  const checkUrl = base.replace('/strategy-search', '/platform-search-policies/facebook/quota-check')
+  const checkBody = { expectedObservedAt: '2026-10-30T00:00:00.000Z', reason: 'One explicit check' }
+  const check = (auth, url = checkUrl) => fetch(url, { method: 'POST', headers: auth, body: JSON.stringify(checkBody) })
+  assert.equal((await check({ 'content-type': 'application/json' })).status, 401)
+  assert.equal((await check({ ...headers, authorization: 'Bearer launcher-admin' })).status, 403)
+  assert.equal((await check({ ...headers, authorization: 'Bearer mih_live_fixture' })).status, 403)
+  assert.equal((await check(headers, `${checkUrl}?force=true`)).status, 400)
+  assert.equal(checks.length, 0)
+  const checked = await check(headers)
+  assert.equal(checked.status, 200)
+  assert.equal((await checked.json()).data.dispatched, false)
+  assert.deepEqual(checks, [checkBody])
   assert.equal(store.requests.size, 0)
 })

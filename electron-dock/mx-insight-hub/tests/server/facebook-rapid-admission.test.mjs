@@ -34,26 +34,26 @@ test('shared FIFO preserves quota until its head acquires it, then the last incl
   assert.equal((await store.facebook()).available_included, 0)
 })
 
-test('ordinary stale headers can only tighten included allowance; one explicit recovery probe may establish a renewed period', pg, async t => {
+test('current serialized headers replace conservative allowance; stale lease callbacks cannot overwrite a new owner', pg, async t => {
   const { db, store, replica } = await fixture(t)
   await db.exec('UPDATE control.facebook_rapid_quota SET used=990,remaining=10')
   const ordinary = await store.admitRapid(ticket())
   await store.observeRapid(ordinary, { ok: true, remaining: 999, limit: 1000 })
   let state = await store.facebook()
-  assert.equal(state.used, 991); assert.equal(state.remaining, 9)
-  await db.exec("UPDATE control.facebook_rapid_quota SET used=1000,remaining=0,reason='quota_exhausted',blocked_until=now()-interval '1 second'")
+  assert.equal(state.used, 991); assert.equal(state.remaining, 999)
+  await db.exec("UPDATE control.facebook_rapid_quota SET used=1000,remaining=0,reason='quota_exhausted',reset_at=now()-interval '1 second'")
   const probe = await store.admitRapid(ticket())
   assert.equal(probe.allowed, true); assert.equal(probe.probe, true)
   const pending = ticket()
   assert.equal((await replica.admitRapid(pending)).reason, 'source_busy')
   await store.observeRapid(probe, { ok: true, remaining: 998, limit: 1000 })
   state = await store.facebook()
-  assert.equal(state.used, 2); assert.equal(state.remaining, 998)
+  assert.equal(state.used, 1001); assert.equal(state.remaining, 998)
   const next = await replica.admitRapid(pending)
   assert.equal(next.allowed, true); assert.equal(next.probe, false)
   // A stale callback for the old probe cannot release/replenish a new owner.
   await store.observeRapid(probe, { ok: true, remaining: 999, limit: 1000 })
-  assert.equal((await store.facebook()).used, 3)
+  assert.equal((await store.facebook()).used, 1002)
   await replica.observeRapid(next)
 })
 

@@ -8,7 +8,7 @@ export async function facebookQuotaFixture(t) {
   await db.exec('CREATE SCHEMA control')
   const baseline = await readFile(new URL('../../migrations/143_facebook_platform_search.sql', import.meta.url), 'utf8')
   await db.exec(baseline.slice(baseline.indexOf('CREATE TABLE'), baseline.indexOf('ALTER TABLE')))
-  for (const name of ['149_facebook_billing_window.sql', '151_facebook_rapid_admission_queue.sql']) {
+  for (const name of ['149_facebook_billing_window.sql', '151_facebook_rapid_admission_queue.sql', '169_facebook_supplier_quota.sql']) {
     await db.exec(await readFile(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'))
   }
   // PGlite has one session. Serialize client lifetimes to exercise the actual

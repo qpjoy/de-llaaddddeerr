@@ -121,6 +121,7 @@
 .mih-strategy-usage-boundary { padding: 12px 14px; background: var(--qp-bg-2); border: 1px solid var(--qp-line); border-radius: 8px; }
 @media (max-width: 700px) { .mih-strategy-scope-fields { grid-template-columns: 1fr; } .mih-strategy-scope { padding: 18px; } }
 .mih-strategy-facebook-form { gap: 18px; }
+.mih-strategy-facebook-form .qp-input { box-sizing: border-box; min-width: 0; max-width: 100%; }
 .mih-strategy-draft-policy { padding: 12px 14px; border-radius: 8px; background: var(--qp-bg-2); }
 .mih-strategy-quota-observation { display: grid; gap: 8px; padding: 16px; border: 1px solid var(--qp-line); border-radius: 10px; }
 .mih-strategy-quota-observation strong { font-size: 12px; }

@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import * as contract from '../../server/contracts/tikhub-content-search.mjs'
-import { diagnoseRedditSearch, inspectRedditArchive, noticeClass } from '../../server/ops/diagnose-reddit-search.mjs'
+import { diagnoseRedditSearch, inspectRedditArchive, noticeClass, unknownNodeGuard } from '../../server/ops/diagnose-reddit-search.mjs'
 
 const secret = 'private-customer-text'
 const post = id => ({ __typename: 'SubredditPost', id: `t3_${id}`, postTitle: secret, content: { markdown: secret }, permalink: `/r/${secret}/` })
@@ -63,4 +63,66 @@ test('Reddit shape diagnostic classifies notices exactly like the parser and nev
   assert.deepEqual(receipt.branches, { notice: 1 })
   assert.equal(receipt.nodes[0].noticeClass, 'error')
   assert.doesNotMatch(JSON.stringify(receipt), /private-customer-text|went wrong/u)
+})
+
+test('unknown widget guard reports each parser rejection without exposing values', () => {
+  let deep = secret
+  for (let i = 0; i < 6; i++) deep = { nested: deep }
+  const cases = [
+    [{ telemetry: deep }, 'depth_limit'],
+    [{ telemetry: Array(201).fill(secret) }, 'array_limit'],
+    [{ telemetry: { id: `t3_${secret}` } }, 'post_id_prefix'],
+    [{ telemetry: { __typename: 'SubredditPost' } }, 'post_typename'],
+    [{ telemetry: { post: { text: secret } } }, 'post_field'],
+  ]
+  for (const [fields, reason] of cases) {
+    const node = { __typename: 'SearchSpellCorrectionApplied', ...fields }
+    const result = unknownNodeGuard(node)
+    assert.equal(result.state, 'guard_rejects')
+    assert.equal(result.reason, reason)
+    const report = inspectRedditArchive(archive([{ node }]), payload => replay(payload))
+    assert.equal(report.parser, 'invalid_content_search_entry')
+    assert.deepEqual(report.nodes[0].guard, result)
+    assert.doesNotMatch(JSON.stringify(report), /private-customer-text/u)
+  }
+  assert.equal(unknownNodeGuard({ telemetry: deep }).depth, 7)
+})
+
+test('shallow correction and banner metadata remain nonposts and retain adjacent posts', () => {
+  for (const typename of ['SearchSpellCorrectionApplied', 'SearchBanner']) {
+    const node = { __typename: typename, presentation: { primaryText: secret }, telemetry: { events: [] } }
+    const report = inspectRedditArchive(archive([{ node }, { node: { post: post('a') } }]), payload => replay(payload))
+    assert.equal(report.nodes[0].guard.state, 'guard_accepts')
+    assert.equal(report.parser, 'accepts')
+  }
+})
+
+test('guard paths hash non-identifier keys, preserve first-match order, and bound traversal', () => {
+  const result = unknownNodeGuard({ [secret]: { id: `t3_${secret}` }, post: {} })
+  assert.equal(result.reason, 'post_id_prefix')
+  assert.match(result.path[0], /^key-sha256:[a-f0-9]{12}$/u)
+  assert.doesNotMatch(JSON.stringify(result), /private-customer-text/u)
+  const wide = Object.fromEntries(Array.from({ length: 20001 }, (_, index) => [`field${index}`, secret]))
+  assert.equal(unknownNodeGuard(wide).state, 'inspection_truncated')
+})
+
+test('guard mirrors narrow widget tracking-context exceptions without exposing analytics values', () => {
+  for (const [typename, behavior] of [['SearchSpellCorrectionApplied', 'corrected'], ['SearchSpellCorrectionApplied', 'original'],
+    ['SearchBanner', 'cta'], ['SearchBanner', 'dismiss']]) {
+    const node = { __typename: typename, behaviors: { [behavior]: { telemetry: { trackingContext: { post: { id: `t3_${secret}` } } } } },
+      telemetry: { trackingContext: { post: null } } }
+    const report = inspectRedditArchive(archive([{ node }, { node: { post: post('a') } }]), payload => replay(payload))
+    assert.equal(report.parser, 'accepts')
+    assert.equal(report.nodes[0].guard.state, 'guard_accepts')
+    assert.deepEqual(report.nodes[0].guard.ignoredTrackingContexts, [
+      ['behaviors', behavior, 'telemetry', 'trackingContext'], ['telemetry', 'trackingContext']])
+    assert.doesNotMatch(JSON.stringify(report), /private-customer-text/u)
+    for (const bad of [{ ...node, __typename: 'UnknownWidget' },
+      { ...node, presentation: { post: post('hidden') } },
+      { ...node, telemetry: { events: [{ post: post('hidden') }] } },
+      { ...node, content: { telemetry: { trackingContext: { post: post('hidden') } } } }]) {
+      assert.equal(unknownNodeGuard(bad).state, 'guard_rejects')
+      assert.equal(inspectRedditArchive(archive([{ node: bad }]), payload => replay(payload)).parser, 'invalid_content_search_entry')
+    }
+  }
 })

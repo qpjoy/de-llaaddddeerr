@@ -653,6 +653,7 @@ export const adminApi = {
   pricingTemplate: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/pricing-template`, body ? { method: 'POST', body } : {}),
   sourceConnections: token => request(token, `${ADMIN_ROOT}/source-connections`),
   platformSearchPolicies: token => request(token, `${ADMIN_ROOT}/platform-search-policies`),
+  requestFacebookQuotaCheck: (token, body) => request(token, `${ADMIN_ROOT}/platform-search-policies/facebook/quota-check`, { method: 'POST', body }),
   strategySearch: token => request(token, `${ADMIN_ROOT}/strategy-search`),
   strategySearchUsage: (token, days = 7) => request(token, `${ADMIN_ROOT}/strategy-search/usage?days=${encodeURIComponent(days)}`),
   strategySearchDataStatistics: (token, days = 7) => request(token, `${ADMIN_ROOT}/strategy-search/data-statistics?days=${encodeURIComponent(days)}`),

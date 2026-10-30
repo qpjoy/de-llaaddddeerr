@@ -207,6 +207,58 @@ const notice = (message, explanation = '') => ({ __typename: 'SearchErrorMessage
   presentation: { __typename: 'SearchErrorMessageDefaultPresentation', message, explanation, ctaButtonText: 'Try again', icon: 'search' },
   telemetry: { __typename: 'SearchElementTelemetry', events: [], trackingContext: {} } })
 
+// Sanitized structure from hash-verified receipts c08af475 and 9787feef
+// (2026-10-30). trackingContext.post is analytics metadata, not a search result.
+const trackedWidget = (typename, behavior) => ({ __typename: typename,
+  behaviors: { [behavior]: { telemetry: { trackingContext: { post: { id: 't3_analytics_only' } } } } } })
+
+test('Reddit correction tracking context does not discard seven adjacent posts or mutate the receipt', () => {
+  const ids = Array.from({ length: 7 }, (_, i) => `result${i}`)
+  const payload = dynamic([{ node: trackedWidget('SearchSpellCorrectionApplied', 'corrected') },
+    { node: { __typename: 'SearchListComponent', children: ids.map(searchPost) } }],
+  { hasNextPage: true, endCursor: 'next-page' })
+  const before = structuredClone(payload), output = project('reddit', payload)
+  assert.deepEqual(output.items.map(item => item.content_id), ids)
+  assert.equal(output.nonPostCount, 1)
+  assert.deepEqual(output.providerPage.nextParams, { after: 'next-page' })
+  assert.deepEqual(payload, before)
+})
+
+test('Reddit correction and banner tracking metadata permit an explicit no-results terminal page', () => {
+  const widgets = [trackedWidget('SearchSpellCorrectionApplied', 'corrected'), trackedWidget('SearchBanner', 'cta')]
+  const output = project('reddit', dynamic([...widgets, notice('No results found')].map(node => ({ node })),
+    { hasNextPage: false, endCursor: 'last-edge' }))
+  assert.deepEqual(output.items, [])
+  assert.equal(output.nonPostCount, 3)
+  assert.equal(output.providerPage.hasMore, false)
+  assert.equal(output.providerPage.nextParams, null)
+  assert.deepEqual(output.providerPage.warnings.map(warning => warning.code), ['reddit_no_results'])
+  assert.throws(() => project('reddit', dynamic([...widgets, notice('Something went wrong')].map(node => ({ node })),
+    { hasNextPage: false })), /upstream_search_error_message/)
+})
+
+test('Reddit widget metadata exception is limited to known telemetry paths and preserves real posts', () => {
+  for (const [typename, behaviors] of [['SearchSpellCorrectionApplied', ['corrected', 'original']], ['SearchBanner', ['cta', 'dismiss']]]) {
+    for (const behavior of behaviors) {
+      const node = trackedWidget(typename, behavior)
+      node.telemetry = { trackingContext: { post: null } }
+      assert.equal(project('reddit', dynamic([{ node }])).nonPostCount, 1)
+      node.post = post('actual')
+      assert.deepEqual(project('reddit', dynamic([{ node }])).items.map(item => item.content_id), ['actual'])
+      delete node.post
+      for (const extra of [{ presentation: { post: post('hidden') } },
+        { telemetry: { events: [{ post: post('hidden') }] } },
+        { content: { telemetry: { trackingContext: { post: post('hidden') } } } }]) {
+        assert.throws(() => project('reddit', dynamic([{ node: { ...node, ...extra } }])), /invalid_content_search_entry/)
+      }
+    }
+  }
+  for (const node of [trackedWidget('SearchUnknownWidget', 'corrected'),
+    trackedWidget('SearchSpellCorrectionApplied', 'unknown'), trackedWidget('SearchBanner', 'corrected')]) {
+    assert.throws(() => project('reddit', dynamic([{ node }])), /invalid_content_search_entry/)
+  }
+})
+
 test('Reddit search widgets such as in-feed surveys are excluded without failing the page', () => {
   const output = project('reddit', dynamic([
     { node: { __typename: 'SearchListComponent', behaviors: {}, presentation: {}, children: [searchPost('a'), searchPost('b')] } },

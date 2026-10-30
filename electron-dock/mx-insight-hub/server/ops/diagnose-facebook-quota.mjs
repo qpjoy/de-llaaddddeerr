@@ -23,7 +23,10 @@ export async function diagnoseFacebookQuota(pool) {
     await client.query("SET LOCAL idle_in_transaction_session_timeout = '10s'")
     const { rows: [state] } = await client.query(`SELECT p.mode,p.monthly_limit,p.probe_interval_hours,
       p.billing_cycle_day,p.billing_probe_interval_hours,s.used,s.remaining,s.reset_at,s.blocked_until,
-      s.reason,s.lease_until,s.updated_at,clock_timestamp() AS database_now,
+      s.reason,s.lease_until,s.updated_at,to_jsonb(s)->>'supplier_remaining' AS supplier_remaining,
+      to_jsonb(s)->>'supplier_limit' AS supplier_limit,to_jsonb(s)->>'supplier_observed_at' AS supplier_observed_at,
+      to_jsonb(s)->>'manual_check_until' AS manual_check_until,
+      to_jsonb(s) ? 'supplier_remaining' AS supplier_quota_supported,clock_timestamp() AS database_now,
       to_jsonb(s)->'waiters' IS NOT NULL AS queue_supported,
       coalesce(jsonb_array_length(to_jsonb(s)->'waiters'),0) AS queue_depth
       FROM control.platform_search_policies p CROSS JOIN control.facebook_rapid_quota s
@@ -37,13 +40,16 @@ export async function diagnoseFacebookQuota(pool) {
     ) SELECT recent.*,a.raw_payload->'response'->'quota' AS quota
       FROM recent LEFT JOIN external_platform.response_archives a ON a.provider_call_id=recent.id
       ORDER BY recent.started_at DESC,recent.id`)
-    return { diagnosticRevision: 'facebook-quota.v1', state: state ? {
+    return { diagnosticRevision: 'facebook-quota.v2', state: state ? {
       mode: choice(state.mode, ['auto', 'rapidapi', 'justone', 'paused']), monthlyLimit: int(state.monthly_limit),
       usedReserved: int(state.used), remaining: int(state.remaining),
-      availableIncluded: int(state.monthly_limit) == null || int(state.used) == null ? null
-        : Math.max(0, Math.min(state.monthly_limit - state.used, int(state.remaining) ?? state.monthly_limit)),
+      availableIncluded: int(state.remaining), supplierQuotaSupported: bool(state.supplier_quota_supported),
+      supplierRemaining: state.supplier_remaining == null ? null : int(Number(state.supplier_remaining)),
+      supplierLimit: state.supplier_limit == null ? null : int(Number(state.supplier_limit)),
+      supplierObservedAt: time(state.supplier_observed_at), manualCheckUntil: time(state.manual_check_until),
+      legacyMonthlySettingsEnforced: state.supplier_quota_supported ? false : null,
       resetAt: time(state.reset_at), blockedUntil: time(state.blocked_until), leaseUntil: time(state.lease_until),
-      reason: choice(state.reason, ['quota_exhausted', 'recovery_probe', 'rate_limited']),
+      reason: choice(state.reason, ['quota_exhausted', 'quota_unknown', 'recovery_probe', 'rate_limited']),
       queueSupported: bool(state.queue_supported), queueDepth: int(state.queue_depth),
       probeIntervalHours: int(state.probe_interval_hours), billingCycleDay: int(state.billing_cycle_day),
       billingProbeIntervalHours: int(state.billing_probe_interval_hours),

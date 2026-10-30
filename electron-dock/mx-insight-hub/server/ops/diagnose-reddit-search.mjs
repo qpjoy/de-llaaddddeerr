@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-export const REVISION = 'reddit-search-shape.v2'
+export const REVISION = 'reddit-search-shape.v3'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const KEY = /^_{0,2}[A-Za-z][A-Za-z0-9_]{0,40}$/u
 const TYPE_NAME = /^[A-Za-z][A-Za-z0-9_]{0,60}$/u
@@ -28,6 +28,45 @@ export function noticeClass(node) {
   return REDDIT_NO_RESULTS.test(text) ? 'no_results' : 'error'
 }
 
+// Mirror redditHidesPost's first matching guard without emitting any values.
+// A depth refusal is a conservative bound, not evidence of an actual post.
+const POST_KEYS = new Set(['post', 'posts', 'postTitle', 'permalink', 'selftext', 'subredditPost', 'profilePost'])
+export function unknownNodeGuard(node) {
+  let visited = 0
+  const ignoredTrackingContexts = []
+  const behaviors = node?.__typename === 'SearchSpellCorrectionApplied' ? ['corrected', 'original']
+    : node?.__typename === 'SearchBanner' ? ['cta', 'dismiss'] : null
+  const field = key => KEY.test(key) ? key : `key-sha256:${createHash('sha256').update(key).digest('hex').slice(0, 12)}`
+  const visit = (value, depth, path) => {
+    if (++visited > 20000) return { state: 'inspection_truncated', reason: 'node_budget', path }
+    const reject = reason => ({ state: 'guard_rejects', reason, path, depth, valueType: kind(value) })
+    if (depth > 6) return reject('depth_limit')
+    if (behaviors && (path.length === 2 && path[0] === 'telemetry' && path[1] === 'trackingContext'
+      || path.length === 4 && path[0] === 'behaviors' && behaviors.includes(path[1])
+        && path[2] === 'telemetry' && path[3] === 'trackingContext')) {
+      ignoredTrackingContexts.push(path)
+      return null
+    }
+    if (Array.isArray(value)) {
+      if (value.length > 200) return reject('array_limit')
+      for (let index = 0; index < value.length; index++) {
+        const result = visit(value[index], depth + 1, [...path, index])
+        if (result) return result
+      }
+      return null
+    }
+    if (!object(value)) return typeof value === 'string' && /^t3_/u.test(value) ? reject('post_id_prefix') : null
+    if (typeof value.__typename === 'string' && /Post$/u.test(value.__typename)) return reject('post_typename')
+    for (const [key, item] of Object.entries(value)) {
+      if (POST_KEYS.has(key)) return { ...reject('post_field'), path: [...path, key] }
+      const result = visit(item, depth + 1, [...path, field(key)])
+      if (result) return result
+    }
+    return null
+  }
+  return { ...(visit(node, 0, []) || { state: 'guard_accepts' }), visited, ignoredTrackingContexts }
+}
+
 // Mirrors the installed parser's node walk: post, children, or a known non-post.
 function classify(node, depth = 0) {
   if (!object(node)) return { branch: 'not_object', kind: kind(node) }
@@ -47,7 +86,7 @@ function classify(node, depth = 0) {
   if (nonPost) return { branch: `non_post:${nonPost}`, ...shape }
   // Only the class leaves storage, never the notice text.
   if (shape.typename === 'SearchErrorMessage') return { branch: 'notice', ...shape, noticeClass: noticeClass(node) }
-  return { branch: 'unrecognized', ...shape,
+  return { branch: 'unrecognized', ...shape, guard: unknownNodeGuard(node),
     nested: Object.fromEntries(shape.keys.filter(key => object(node[key]) || Array.isArray(node[key])).slice(0, 10)
       .map(key => [key, Array.isArray(node[key]) ? { array: node[key].length, firstKeys: keyNames(node[key][0]), firstTypename: typeName(node[key][0]) }
         : { typename: typeName(node[key]), keys: keyNames(node[key]) }])) }

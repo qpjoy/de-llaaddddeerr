@@ -1118,8 +1118,8 @@ test('PostgreSQL quota serializes replicas, recovers from reset/probes and audit
     const sql = await readFile(new URL('../../migrations/143_facebook_platform_search.sql', import.meta.url), 'utf8')
     await pool.query('CREATE SCHEMA IF NOT EXISTS control')
     await pool.query(sql.slice(sql.indexOf('CREATE TABLE'), sql.indexOf('ALTER TABLE')))
-    for (const [column, migration] of [['billing_cycle_day', '149_facebook_billing_window.sql'], ['waiters', '151_facebook_rapid_admission_queue.sql']]) {
-      const table = column === 'waiters' ? 'facebook_rapid_quota' : 'platform_search_policies'
+    for (const [column, migration] of [['billing_cycle_day', '149_facebook_billing_window.sql'], ['waiters', '151_facebook_rapid_admission_queue.sql'], ['supplier_remaining', '169_facebook_supplier_quota.sql']]) {
+      const table = ['waiters', 'supplier_remaining'].includes(column) ? 'facebook_rapid_quota' : 'platform_search_policies'
       const present = await pool.query(`SELECT 1 FROM information_schema.columns WHERE table_schema='control' AND table_name=$1 AND column_name=$2`, [table, column])
       if (!present.rowCount) await pool.query(await readFile(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'))
     }
@@ -1132,15 +1132,15 @@ test('PostgreSQL quota serializes replicas, recovers from reset/probes and audit
     await pool.query("UPDATE control.facebook_rapid_quota SET reset_at=now()-interval '1 second'")
     const reset = await store.admitRapid(); assert.equal(reset.allowed, true); assert.equal(reset.probe, true)
     await store.observeRapid(reset, { ok: true, remaining: 999 })
-    await pool.query("UPDATE control.facebook_rapid_quota SET used=1000, remaining=0, reset_at=NULL, blocked_until=now()-interval '1 second'")
+    await pool.query("UPDATE control.facebook_rapid_quota SET used=1000, remaining=0, reset_at=now()-interval '1 second'")
     const probes = await Promise.all(Array.from({ length: 12 }, () => store.admitRapid()))
     assert.equal(probes.filter(r => r.allowed).length, 1)
     const probe = probes.find(r => r.allowed); assert.equal(probe.probe, true)
     await store.observeRapid(probe, { ok: true })
     assert.equal((await store.admitRapid()).allowed, false, 'HTTP 200 alone can mean a billed overage')
-    await pool.query("UPDATE control.facebook_rapid_quota SET blocked_until=now()-interval '1 second'")
+    await pool.query("UPDATE control.facebook_rapid_quota SET reset_at=now()-interval '1 second'")
     await store.observeRapid(await store.admitRapid(), { ok: true, remaining: 998, resetSeconds: 2500000 })
-    assert.equal((await store.facebook()).used, 2)
+    assert.equal((await store.facebook()).used, 1002)
     const policy = await store.facebook()
     const update = { mode: 'justone', monthlyLimit: 900, probeIntervalHours: 72, expectedRevision: policy.revision, reason: 'Test audited change' }
     await store.update('facebook', update)

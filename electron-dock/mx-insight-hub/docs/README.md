@@ -2,6 +2,13 @@
 
 Last reviewed: 2026-10-21.
 
+## 数据源与接口目录（2026-10-30）
+
+- [总览、供应商、支持平台与 Night-All 剩余依赖](data-inventory/README.md)：按当前源码核对，区分业务能力、底层合同、治理目录与生产状态。
+- [逐项接口明细](data-inventory/interfaces.md)：native、企业、业务入口、电商资源版本、Web Search 与 Night-All-A 允许派发操作。
+- [数据源治理目录与固定清洗输入](data-inventory/source-directory.md)：完整初始化目录；规划项不计为已运行来源。
+- [可统计的 JSON 清单](data-inventory/inventory.json)：通过 `node scripts/generate-data-inventory.mjs` 离线更新，`--check` 校验漂移。
+
 ## 自建采集服务架构 Spider-Man（活文档，2026-10-23 建立）
 
 - [Spider-Man：自建采集服务架构](architecture/spider_man/README.md)：Night-All、Night-All-A、Hub 自建引擎（首个为微信 wechat_mp）、事件中心（Hub → Delta → Java）、多节点演进（A 机 hub-edge 保持原地址、`night-all-legacy` Service）、准入全局化（PG 租约）。看这一个目录就能了解自建服务的现状与目标形态；后续改动必须同步更新。均为设计，未实现。

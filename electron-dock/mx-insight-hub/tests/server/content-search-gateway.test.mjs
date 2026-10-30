@@ -913,6 +913,34 @@ test('Reddit error notice is recorded as a Reddit-side failure and a no-results 
   assert.equal([...empty.platformStore.calls.values()][0].outcome, 'succeeded')
 })
 
+test('Reddit widget analytics permit paid post and no-results delivery without quarantining subsequent searches', async () => {
+  const ids = Array.from({ length: 7 }, (_, index) => `post${index}`)
+  const widget = (typename, behavior) => ({ node: { __typename: typename,
+    behaviors: { [behavior]: { telemetry: { trackingContext: { post: { id: 't3_tracking_only' } } } } } } })
+  const h = await harness({ platform: 'reddit', payload: (_call, number) => {
+    const payload = internationalPage('reddit', number === 1 ? ids : [])
+    const main = payload.search.dynamic.components.main
+    main.edges.unshift(widget('SearchSpellCorrectionApplied', 'corrected'))
+    if (number > 1) main.edges.push(widget('SearchBanner', 'cta'),
+      { node: { __typename: 'SearchErrorMessage', presentation: { message: 'No results found' } } })
+    return payload
+  } })
+  const first = await h.invokeData()
+  assert.equal(first.status, 200)
+  assert.deepEqual(first.body.data.items.map(item => item.externalId), ids)
+  assert.equal(h.platformStore.ingestJobs.length, 1)
+  assert.deepEqual((await h.invokeData()).body, first.body)
+  assert.equal(h.calls.length, 1)
+  const second = await h.invokeData({ platform: 'reddit', query: 'another search', pageSize: 20 }, 'another-reddit-query')
+  assert.equal(second.status, 200)
+  assert.deepEqual(second.body.data.items, [])
+  assert.ok(second.body.data.warnings.some(warning => warning.code === 'reddit_no_results'))
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.platformStore.restrictedResponseArchives.size, 2)
+  assert.deepEqual([...h.platformStore.calls.values()].map(call => [call.outcome, call.billed, call.itemCount]),
+    [['succeeded', true, 7], ['succeeded', true, 0]])
+})
+
 for (const platform of ['reddit', 'youtube']) {
   test(`${platform} standard search fills 19+5, buffers all paid overflow and replays without Night-All`, async () => {
     const firstIds = Array.from({ length: 19 }, (_, i) => `first-${i}`)
