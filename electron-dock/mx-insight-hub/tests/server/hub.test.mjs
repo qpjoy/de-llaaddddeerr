@@ -1186,14 +1186,17 @@ test('known upstream rejection releases reservation so explicit retry is possibl
 test('all legacy HTTP aliases include the Night-All code without exposing nested diagnostics', async () => {
   const tenant = await store.createTenant({ name: 'Rejection tenant' })
   const consumer = await store.createConsumer({ tenantId: tenant.id, name: 'Rejection consumer', businessId: 'rejection-test' })
-  await store.replaceGrants(consumer.id, ['reddit', 'douyin'])
-  const issued = await service.createApiKey({ consumerId: consumer.id, name: 'Rejection key', platforms: ['reddit', 'douyin'] })
+  await store.replaceGrants(consumer.id, ['reddit', 'douyin', 'weibo'])
+  const issued = await service.createApiKey({ consumerId: consumer.id, name: 'Rejection key', platforms: ['reddit', 'douyin', 'weibo'] })
   for (const prefix of ['/api/v1/search', '/api/v1/night-all/search']) {
     for (const operation of ['raw', 'crawl', 'user-info']) {
       const result = await call(`${prefix}/${operation}`, {
         method: 'POST',
         headers: { authorization: `Bearer ${issued.secret}`, 'idempotency-key': `rejection-${prefix.includes('night-all')}-${operation}` },
-        body: { platform: operation === 'user-info' ? 'douyin' : 'reddit', [operation === 'raw' ? 'keyword' : 'username']: 'compat-rejected', count: 1 },
+        // Reddit raw runs in Hub since 2026-10-31. Weibo raw still forwards
+        // here: this service has no Hub raw-search gateway configured.
+        body: { platform: operation === 'user-info' ? 'douyin' : operation === 'raw' ? 'weibo' : 'reddit',
+          [operation === 'raw' ? 'keyword' : 'username']: 'compat-rejected', count: 1 },
       })
       assert.equal(result.response.status, 502)
       assert.equal(result.payload.error.code, 'night_all_rejected')

@@ -9,12 +9,27 @@
 | --- | --- | --- | --- |
 | YouTube 单帖子/视频评论 | `/api/v1/data/youtube/comments` | Hub → 固定视频评论合同 | 由 videoId/postId/contentId 或视频 URL 标识；只取一级评论，不自动展开回复 |
 | `youtube_channel_comments` | `/api/v1/data/youtube/channel-comments` | Hub → 可选频道解析 → 频道视频 → 选中视频评论 | 频道入口不接受视频 URL；maxVideos 默认5、上限20，定义本轮视频窗口 |
-| TikTok 标准搜索 | `/api/v1/data/search`，`platform=tiktok` | Hub → 固定内容搜索合同 | raw 两个兼容入口仍保留原链 |
+| TikTok 标准搜索 | `/api/v1/data/search`，`platform=tiktok` | Hub → 固定内容搜索合同 | raw 两个兼容入口 2026-10-31 起也改由 Hub 执行，见下文 |
 | 微博标准搜索 | 同上，`platform=weibo` | Hub → 固定搜索；小于20条的页使用已取得余量缓冲 | 大页及已签发 Hub 游标保留原链；不再因小页转 Night-All |
 | 小红书标准搜索 | 同上，`platform=xiaohongshu` | Hub → 已有 `social.posts.search` 操作 | 20条及已签发 mxec2 保持既有链；其他页大小使用缓冲；不再按旧 rollout gate 或 Test Key 分流至 Night-All |
 | 微信搜索/公众号 | 同上，`platform=wechat_search/wechat_mp` | Hub → 微信专项新合同 | 返回专项原生响应；需要 `social + native.wechat.search.search`，旧游标不可复用 |
 
 新版标准内容搜索支持的平台已不需要实时经过 Night-All。旧 raw/crawl/user-info、数据回填、源库同步及 Night-All-A 管理仍是独立依赖，不能据此删除整个旧服务。
+### 2026-10-31：TikTok、Reddit、YouTube raw 改为 Hub 直连
+
+Delta 的 TikTok 冷启动走 `POST /api/v1/night-all/search/raw`（`operation=raw`，请求体 `{platform, keyword, page, count}`）。按 10-17 的边界它仍转发 Night-All `POST /api/v1/search/raw`，而 Night-All 对它返回非 JSON 的 HTTP 404（Hub 记为 `night_all_rejected` / `invalid_upstream_content_type`），整条 raw 链路近 7 天 1452 次失败、2 次成功。
+
+现在 TikTok、Reddit、YouTube 配方都是 `rawCompatibility: true`（`server/contracts/tikhub-content-search.mjs`），两个 raw 入口与 B站、抖音、快手、知乎一样由 Hub 调固定 TikHub 端点（TikTok `/api/v1/tiktok/web/fetch_general_search`、Reddit `/api/v1/reddit/app/fetch_dynamic_search`、YouTube `/api/v1/youtube/web_v2/get_general_search_v2`），不回退 Night-All：
+
+- 响应仍是 raw 信封：`contractVersion=mx-insight-hub.raw-search.v1`，`raw_data` / `raw_info` 为 JSON 字符串，`page` 给出 Hub 签发的续页游标。一页不够时在本次请求内继续向 TikHub 取（每请求最多 3 次实际调用）。
+- `params` 只接受各端点声明的字段（如 TikTok 的 `keyword`、`offset`、`search_id`），其余字段在采购前返回 400；详情／评论附采参数同样在采购前拒绝。`publicParams` 仍为 false，标准搜索不开放 params。
+- Night-All 签发的旧 `mxnc1` 游标返回 `409 search_restart_required`，需带新幂等键从第 1 页重开；标准搜索的游标不能续 raw。
+- 计量、授权与 B站等 raw 直连一致；同幂等键在两个 raw 别名之间重放同一交付。
+
+Reddit raw 使用与标准搜索相同的严格解析：响应里出现无法识别、但疑似含帖子的组件时整页判为 `invalid_content_search_contract`，同一查询随后 5 分钟返回 `409 external_platform_response_unusable`。这类失败需要用 `server/ops/diagnose-reddit-search.mjs` 读取结构后补解析规则，与本次路由调整无关。
+
+仍可能转发 Night-All 的 raw 只剩微博、Twitter、小红书的非简单请求（多关键词、附采参数、非 Hub 游标等）。
+
 微信旧 `/api/v1/night-all/search/raw` 仍返回410；迁到 `/api/v1/data/search` 可避开退役入口，但也必须按新参数、授权、响应和游标切换，不能只改 URL。
 
 ## YouTube 请求与响应

@@ -802,20 +802,21 @@ test('decisive idempotency states remain unchanged without capabilities network 
   assert.equal(conflict.calls(), 1)
 
   // Keep this legacy-path assertion on a platform whose keyword route still
-  // uses Night-All; Bilibili keyword search has its own direct gateway now.
-  const unsupportedConflict = await compatibilityFixture({ grants: ['youtube'] })
+  // uses Night-All; Bilibili, Reddit, YouTube and TikTok raw run in Hub now,
+  // and this fixture configures no Hub raw-search gateway for Weibo.
+  const unsupportedConflict = await compatibilityFixture({ grants: ['weibo'] })
   await unsupportedConflict.service.nightAllCompatibilitySearch(unsupportedConflict.context, {
     operation: 'raw',
     path: '/api/v1/night-all/search/raw',
     idempotencyKey: 'compat-operation-conflict',
-    body: { platform: 'youtube', query: 'first', count: 20 },
+    body: { platform: 'weibo', query: 'first', count: 20 },
   })
   await assert.rejects(
     () => unsupportedConflict.service.nightAllCompatibilitySearch(unsupportedConflict.context, {
       operation: 'user-info',
       path: '/api/v1/night-all/search/user-info',
       idempotencyKey: 'compat-operation-conflict',
-      body: { platform: 'youtube', username: 'alice', count: 20 },
+      body: { platform: 'weibo', username: 'alice', count: 20 },
     }),
     (error) => error?.code === 'idempotency_conflict',
   )

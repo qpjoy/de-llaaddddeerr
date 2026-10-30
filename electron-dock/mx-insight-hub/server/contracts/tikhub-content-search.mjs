@@ -20,13 +20,16 @@ export const TIKHUB_CONTENT_SEARCH_RECIPES = Object.freeze(Object.fromEntries([
     { sort_type: 'newest', publish_time: 'all', duration: 'all' }, ['keyword', 'pcursor', 'sort_type', 'publish_time', 'duration']],
   ['zhihu', 'zhihu_web_fetch_article_search_v3', 'GET', '/api/v1/zhihu/web/fetch_article_search_v3', 'offset',
     { offset: '0', show_all_topics: 0, search_source: 'Normal', search_hash_id: '', sort: 'created_time' }, ['keyword', 'offset', 'limit', 'show_all_topics', 'search_source', 'search_hash_id', 'sort']],
+  // Raw compatibility since 2026-10-31 for Reddit, YouTube and TikTok: Night-All
+  // answers their raw aliases with a non-JSON 404, so both raw aliases now run
+  // here like Bilibili/Douyin. Public params stay standard-search only.
   ['reddit', 'reddit_app_fetch_dynamic_search', 'GET', '/api/v1/reddit/app/fetch_dynamic_search', 'cursor',
     { search_type: 'post', sort: 'NEW', time_range: 'all', safe_search: 'unset', allow_nsfw: '0', after: '', need_format: false },
-    ['query', 'search_type', 'sort', 'time_range', 'safe_search', 'allow_nsfw', 'after', 'need_format'], false, false],
+    ['query', 'search_type', 'sort', 'time_range', 'safe_search', 'allow_nsfw', 'after', 'need_format'], true, false],
   ['youtube', 'youtube_web_v2_get_general_search_v2', 'GET', '/api/v1/youtube/web_v2/get_general_search_v2', 'cursor',
-    { sort_by: 'upload_date', continuation_token: '' }, ['keyword', 'continuation_token', 'upload_date', 'type', 'duration', 'features', 'sort_by'], false, false],
+    { sort_by: 'upload_date', continuation_token: '' }, ['keyword', 'continuation_token', 'upload_date', 'type', 'duration', 'features', 'sort_by'], true, false],
   ['tiktok', 'tiktok_web_fetch_general_search', 'GET', '/api/v1/tiktok/web/fetch_general_search', 'compound',
-    { offset: 0, search_id: '' }, ['keyword', 'offset', 'search_id'], false, false],
+    { offset: 0, search_id: '' }, ['keyword', 'offset', 'search_id'], true, false],
   ['weibo', 'weibo_web_v2_fetch_realtime_search', 'GET', '/api/v1/weibo/web_v2/fetch_realtime_search', 'page',
     {}, ['query', 'page'], false, false],
   ['xiaohongshu', 'xiaohongshu_app_v2_search_notes', 'GET', '/api/v1/xiaohongshu/app_v2/search_notes', 'compound',

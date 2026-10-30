@@ -20,7 +20,8 @@ test('new recipes preserve Night-All defaults, stable endpoint keys and standard
   assert.deepEqual(request('reddit').upstreamQuery, { query: '城市', search_type: 'post', sort: 'NEW', time_range: 'all', safe_search: 'unset', allow_nsfw: '0', after: '', need_format: false })
   assert.deepEqual(request('youtube').upstreamQuery, { keyword: '城市', sort_by: 'upload_date', continuation_token: '' })
   for (const platform of ['reddit', 'youtube']) {
-    assert.equal(TIKHUB_CONTENT_SEARCH_RECIPES[platform].rawCompatibility, false)
+    // Raw aliases run here since 2026-10-31; public params stay standard-only.
+    assert.equal(TIKHUB_CONTENT_SEARCH_RECIPES[platform].rawCompatibility, true)
     assert.equal(TIKHUB_CONTENT_SEARCH_RECIPES[platform].publicParams, false)
     assert.equal(Object.hasOwn(request(platform).upstreamQuery, 'page_size'), false)
     assert.equal(Object.hasOwn(request(platform).upstreamQuery, 'pageSize'), false)

@@ -109,7 +109,8 @@ async function harness({ platform = 'bilibili', payload, fetchImpl, leaseMs = 12
 }
 
 test('all four platforms use fixed TikHub keyword endpoints for standard and both raw aliases, with immutable replay', async () => {
-  for (const platform of Object.keys(TIKHUB_CONTENT_SEARCH_RECIPES).filter(key => TIKHUB_CONTENT_SEARCH_RECIPES[key].rawCompatibility !== false)) {
+  // TikTok's raw aliases have their own fixture-backed test in tiktok-unified-search.
+  for (const platform of ['bilibili', 'douyin', 'kuaishou', 'zhihu']) {
     const h = await harness({ platform })
     const first = await h.invokeData()
     assert.equal(first.body.data.contractVersion, 'night-all.data-search.v1')
@@ -992,20 +993,25 @@ for (const platform of ['reddit', 'youtube']) {
     assert.equal(h.historical.length, 0)
   })
 
-  test(`${platform} raw aliases retain their original forwarding and parameter contract`, async () => {
-    const h = await harness({ platform })
-    const payload = { data: { platform, raw_info: '[]', raw_data: '[]', page: { page: 1, hasMore: false },
-      status: 'ok', warnings: [], meta: { original: true } } }
-    h.service.adapter.legacySearch = async input => { h.historical.push(input); return { payload, raw: payload } }
-    const body = { platform, keyword: 'original raw query', count: 20, includeDetails: true, params: { fixture: 'original-filter' } }
-    const first = await h.invoke(body, 'international-original-raw')
-    assert.equal(h.historical.length, 1)
-    assert.equal(h.historical[0].operation, 'raw')
-    assert.equal(h.historical[0].body.includeDetails, true)
-    assert.deepEqual(h.historical[0].body.params, body.params)
-    assert.deepEqual((await h.invoke(body, 'international-original-raw', '/api/v1/search/raw')).body, first.body)
-    assert.equal(h.historical.length, 1)
-    assert.equal(h.calls.length, 0)
+  test(`${platform} raw aliases run the fixed TikHub search in Hub and never forward to Night-All`, async () => {
+    const ids = ['raw-1', 'raw-2']
+    const h = await harness({ platform, payload: () => internationalPage(platform, ids) })
+    const body = { platform, keyword: 'original raw query', count: 20 }
+    const first = await h.invoke(body, 'international-direct-raw')
+    assert.equal(first.status, 200)
+    assert.equal(first.body.contractVersion, RAW_SEARCH_VERSION)
+    assert.deepEqual(JSON.parse(first.body.data.raw_data).map(row => row.content_id), ids)
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.calls[0].url.pathname, h.recipe.path)
+    assert.equal(h.calls[0].params[platform === 'reddit' ? 'query' : 'keyword'], body.keyword)
+    // The other alias replays the same delivery without another purchase.
+    assert.deepEqual((await h.invoke(body, 'international-direct-raw', '/api/v1/search/raw')).body, first.body)
+    assert.equal(h.calls.length, 1)
+    // Only the fixed endpoint's own parameter names are accepted, before purchase.
+    await assert.rejects(h.invoke({ ...body, params: { fixture: 'original-filter' } }, 'international-direct-raw-params'),
+      error => error.status === 400 && error.code === 'unsupported_fields')
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.historical.length, 0)
   })
 
   test(`${platform} public contract rejects supplier options and never falls back when native execution is unavailable`, async () => {
