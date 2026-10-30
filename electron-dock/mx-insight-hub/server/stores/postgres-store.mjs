@@ -782,6 +782,7 @@ function apiKey(row) {
     accessProfile: row.access_profile || 'standard',
     hubRateLimitExempt: row.hub_rate_limit_exempt ?? null,
     hubRateLimitRevision: Number(row.hub_rate_limit_revision ?? 0),
+    hubSupplierAdmission: row.hub_supplier_admission === 'priority' ? 'priority' : 'bypass',
     webSearchOrder: row.web_search_order || [],
     status: row.status,
     effectiveStatus: expired ? 'expired' : row.status,

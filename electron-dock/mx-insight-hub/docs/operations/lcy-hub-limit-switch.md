@@ -152,3 +152,57 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -- \
 ### 2026-10-30 资源保护补充
 
 最大豁免不取消新增加的“产品与 API 资源限速”。所有 Key 默认受它保护，并可单独约束 LCY 的产品/API；它与历史供应商限速开关分开。预算身份判断合并到已有成本证据查询，不为豁免单独增加数据库往返。见 [资源限速与性能边界](product-api-resource-limits-2026-10-30.md)。
+
+## 2026-10-31 供应商优先排队
+
+状态：已实现未部署。需要 migration `172_api_key_supplier_priority.sql`，与 Public API、Admin API 和前端同一版本发布。
+
+### 为什么
+
+原来的豁免会让 LCY 跳过供应商并发和每分钟请求数（`gateway.mjs` 的 `#enter` 直接返回 `exempt`，限速令牌直接放行；TikHub 内部流量也不取令牌）。Delta 的突发请求原样打到供应商，供应商回 429（证据里 `limit: null`），Hub 标为不可重试，Delta 再把整个平台挂起。豁免实际上把“在 Hub 排几秒队”变成了“上游失败加 Delta 冷却”。
+
+### 新增的选择
+
+开关显式开启后，多了一项“供应商并发与每分钟请求数”：
+
+| 保存值 | 行为 |
+| --- | --- |
+| `bypass`（默认，所有已有记录） | 与原来完全一致 |
+| `priority` | 按“管理”页的供应商并发与每分钟请求数发起，名额不足时排在其他 Key 前面等待 |
+
+Hub 次数配额、月度采购/补贴预算、共享自动熔断等待的豁免在两种模式下都保留。关闭豁免后这个值不生效，但会保留，下次开启时沿用。只有原始 LCY 身份能保存 `priority`（数据库约束同 153）。旧版界面只提交 `hubRateLimitExempt` 时保留已存的模式。
+
+### `priority` 的具体规则
+
+- **并发。** LCY 计入网关并发计数，不受单调用者上限限制。有 LCY 请求在执行或等待时，其他 Key 合计最多占总并发的 20%（`LCY_RESERVED_SHARE = 0.8`）；LCY 空闲时其他 Key 可以用满。正在执行的请求不会被打断，所以 LCY 偶尔要等一个普通请求结束。按进程计数：每进程 4 个名额时，LCY 有任务期间普通 Key 拿不到名额。
+- **等待。** 名额不足时 LCY 进入等待队列，排在普通 Key 前面。最长等待取“管理”页的最长等待时间与（请求剩余时间 − 上游超时 − 5 秒）中较小的一个；多步工作流按剩余调用数扣除。等待期间保留调用方已持有的派发租约，不重新抢占。等不到时返回 `429 external_platform_busy`，`details.layer = "hub"`、`upstreamDispatched = false`、`admissionMode = "priority"`、`retryAfterMs = 1000`：尚未调用上游、不计费、可重试。原来允许“满额立即改用已存结果”的入口，LCY 改为在时限内等待实时结果，因为它原来就不受这道门限制。
+- **每分钟请求数。** LCY 也取供应商令牌桶（PG 共享，跨进程准确）。拿不到时在上述截止时间内按 `retryAfterMs` 等待，不再绕过。普通 Key 仍是一次尝试。
+- **上游限流后放慢。** 供应商最近一次失败是 `upstream_rate_limited` 时，LCY 的取令牌速率先降到配置值的一半，60 秒内线性恢复；之后任何一次成功调用会清掉这个状态，立即恢复全速。依据是共享的供应商状态，所有进程一起放慢，不新增状态。只是放慢，不拒绝，也不加冷却。
+- **明确未计费的限流拒绝重试一次。** 只有 `outcome = rejected`、`billed = false`、`errorCode = upstream_rate_limited`（RapidAPI 网关自己返回的 429、JustOne 业务码 302）才会在同一请求内等 1 秒后用同一供应商重试一次，前提是还能放下一个完整的上游超时。这次拒绝照常计入供应商失败，所以重试按减半的速率取令牌。重试只有一次；结果收费或不确定的（TikHub、Twitter 的 429 是 `billed = null`）、余额不足等其他拒绝都不重试。重试记为同一客户请求的第 2 次供应商调用（`callOrdinal = 1`, `callRole = retry`），客户只计一次。
+- **小红书 PGY 详情队列、Facebook 全局额度队列。** LCY 按普通规则排队，不再跳过；PGY 原有的“可重试错误重排一次”随之适用。
+
+### 范围
+
+已接入：通用网关（JustOne、RapidAPI、Web Search、企业等走 `gateway.mjs` 的路径）、TikHub 小红书网关、TikHub 用户资料网关、内容搜索工作流（抖音/快手/B站等，TikHub 429 的主要来源）、账号工作流、Twitter 与 Facebook 补页。
+
+未接入：IP 风险产品（百度渠道的冷却、令牌、日配额仍按原豁免），微博原始搜索的详情补全（自带等待循环，只是不再跳过令牌）。
+
+### 与其他限制的关系
+
+- **171 资源保护。** 等待中的请求占着 HTTP 执行名额（默认每进程单 Key 32）。如果 Delta 同时在途请求超过约 4 × 32，新请求会立即收到 `resource_admission_limited`。开启前用实际在途峰值核对，必要时在“管理 → 产品与 API 资源限速”给 LCY 设规则。
+- **数据产品“管理”页。** 供应商并发与每分钟请求数从此真正约束 LCY。**开启前先把这些值调到不低于 LCY 平时的用量**，否则 LCY 会变慢并收到繁忙错误。
+- **多副本。** 并发计数和等待队列仍在进程内。Public 加副本前必须完成 [Spider-Man 04](../architecture/spider_man/04-admission-and-concurrency.md) 第 4 节的 PG 全局租约。
+
+### 启用与回退
+
+1. 按上文正常发布命令发布（含 migration 172），确认所有 Public/Admin Pod 已更新。
+2. 在“数据产品 → 管理”核对 TikHub、JustOne、RapidAPI 的并发和每分钟请求数。
+3. API Keys → LCY-delta → Hub 限制开关，选“优先排队”，填写原因保存。
+4. 观察：LCY 的 `upstream_rate_limited` 是否下降；`external_platform_busy` 且 `admissionMode = "priority"` 的数量；Delta 的平台挂起是否减少。
+5. 回退：在同一界面改回“绕过”，立即生效，不需要部署。
+
+### 本地验证
+
+- 新增 `tests/server/lcy-supplier-priority.test.mjs` 10 项：身份与模式判断、队列优先、80% 预留、等待/超时/取消/重新校验失败释放名额、放慢与恢复、按截止时间取令牌、开关 CAS 与审计及旧客户端保留模式、JustOne 302 在同一请求重试一次且只计一次费、绕过模式/第二次拒绝/余额不足都不重试。
+- TikHub 小红书网关新增 2 项：保留共享熔断豁免但按减半速率取令牌；满额时排队而不是绕过。
+- 全量 Hub 服务端测试与改动前基线对比，见下方记录。

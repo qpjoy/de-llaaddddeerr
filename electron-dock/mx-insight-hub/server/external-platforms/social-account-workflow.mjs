@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
 import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
-import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
 import { JustOneUpstreamError } from '../adapters/justone.mjs'
@@ -211,7 +211,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           const lease = await store.acquireDispatchLease(pendingLease)
           if (lease !== true && lease?.kind !== 'acquired') throw new AppError(409, lease?.reason === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', 'The acquisition is pending; inspect the original request')
           childLease = pendingLease
-          if (entered === 'exempt' && !isHubRateLimitExempt(context)) {
+          if (entered === 'exempt' && !bypassesSupplierLimits(context)) {
             leaveCapacity(entered); entered = false
           }
           if (!entered) {
@@ -219,8 +219,9 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           }
           const cost = providerCostControl(control?.billing ? { billing: control.billing } : gateway.config, expected.endpointKey)
           costReservation = await store.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
-          const rate = isHubRateLimitExempt(context) || (provider === 'tikhub' && isInternalTraffic(gateway.usageStore, context)) ? { allowed: true }
-            : await store.acquireProviderRateLimit({ limit: (await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90, windowMs: 60000 })
+          const rate = await acquireSupplierRate(context, store, { limit: (await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90,
+            windowMs: 60000, bypass: provider === 'tikhub' && isInternalTraffic(gateway.usageStore, context), signal,
+            providerState: () => store.providerState(provider), deadline: deadlineAt - (gateway.config.timeoutMs || 30000) - 5000 })
           if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Account acquisition rate limit is exhausted')
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           if (!enoughTime()) throw new AppError(503, 'social_search_deadline', 'Account acquisition deadline reached before dispatch')

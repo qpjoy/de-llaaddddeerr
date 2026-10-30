@@ -1,5 +1,5 @@
 import { refreshAdmissionLimits } from './admission-runtime.mjs'
-import { isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { openCircuitError } from './availability-errors.mjs'
@@ -161,10 +161,12 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         }
         let { credential, control, cost } = authorization
         costReservation = cost.costMinor === 0 ? null : await target.platformStore.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
-        const rate = isHubRateLimitExempt(context) ? { allowed: true } : await target.platformStore.acquireProviderRateLimit({ limit: (await refreshAdmissionLimits(target)).maxRequestsPerMinute ?? 90, windowMs: 60000 })
+        const rate = await acquireSupplierRate(context, target.platformStore, { limit: (await refreshAdmissionLimits(target)).maxRequestsPerMinute ?? 90,
+          windowMs: 60000, signal, providerState: () => target.platformStore.providerState(provider),
+          deadline: deadlineAt - (target.config.timeoutMs || 30000) - 5000 })
         if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Facebook supplier rate limit is exhausted')
         if (provider === 'rapidapi') {
-          admission = await waitForFacebookRapidAdmission({ policyStore, rateLimitExempt: () => isHubRateLimitExempt(context), requestId: delivery.usageRequestId,
+          admission = await waitForFacebookRapidAdmission({ policyStore, rateLimitExempt: () => bypassesSupplierLimits(context), requestId: delivery.usageRequestId,
             deadlineAt, timeoutMs: target.config.timeoutMs || 30000, signal, logger: gateway.logger,
             revalidate: async () => {
               const latest = await authorizeStep()

@@ -1,6 +1,6 @@
 import { currentAdmissionLimits, refreshAdmissionLimits } from './admission-runtime.mjs'
 import { openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
-import { isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
@@ -187,7 +187,7 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
             ?'external_platform_response_unusable':'request_in_progress'
           throw new AppError(409,code,'An equal search is pending or has an unresolved result',{upstreamDispatched:false})
         }
-        if(entered==='exempt' && !isHubRateLimitExempt(context)) {
+        if(entered==='exempt' && !bypassesSupplierLimits(context)) {
           leaveCapacity(entered); entered=false
         }
         if(!entered) {
@@ -210,7 +210,8 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         }
         const {credential,control,cost}=acquisition
         currentCost=await store.reserveProviderCostWorkflow({ ...delivery,apiKeyId:context.apiKey.id,costControls:[cost] })
-        const rate=isHubRateLimitExempt(context)?{allowed:true}:await store.acquireProviderRateLimit({ limit:(await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90,windowMs:60000 })
+        const rate=await acquireSupplierRate(context,store,{ limit:(await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90,windowMs:60000,
+          signal,providerState:()=>store.providerState('rapidapi'),deadline:deadlineAt-(gateway.config.timeoutMs || 30000)-5000 })
         if(!rate.allowed) throw new AppError(429,'external_platform_rate_limited','External data rate limit is exhausted')
         if(!enoughTime()) throw new AppError(503,'twitter_fill_deadline','The bounded search deadline has been reached')
         if(signal?.aborted) throw new AppError(499,'request_cancelled','Request cancelled before dispatch')

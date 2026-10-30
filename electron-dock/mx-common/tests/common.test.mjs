@@ -1348,8 +1348,14 @@ test('the tokenizer keeps five workers while increasing peak memory headroom', a
   const manifest = await readFile(new URL('../deploy/k8s/optional/50-hanlp.yaml', import.meta.url), 'utf8')
   const server = await readFile(new URL('../deploy/hanlp/server.py', import.meta.url), 'utf8')
   // Stagger model loading without changing the steady-state pool capacity.
-  assert.match(manifest, /requests:\s+cpu: 500m\s+memory: 1Gi/)
+  // The request covers the five workers' planned budget; at 1Gi a pod holding
+  // ~18Gi was first in line for node-pressure eviction.
+  assert.match(manifest, /requests:\s+cpu: 500m\s+memory: 8Gi/)
   assert.match(manifest, /limits:\s+cpu: "16"\s+memory: 32Gi/)
+  // The limit is headroom, not the bound: idle workers above their share are
+  // recycled and every forward pass is capped, so neither may silently go.
+  assert.match(server, /RECYCLE_MEMORY_FRACTION = 0\.6/)
+  assert.match(server, /MAX_PASS_CHARACTERS = 20_000/)
   assert.match(server, /cpu\.max/)
   assert.match(server, /memory\.max/)
   // PyTorch reads the host CPU count, not the cgroup limit; unpinned it starts

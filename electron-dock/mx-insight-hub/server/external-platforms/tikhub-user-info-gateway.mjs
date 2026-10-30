@@ -1,6 +1,7 @@
 import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
-import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit } from '../core/internal-traffic-policy.mjs'
+import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit, isLcySupplierPriority } from '../core/internal-traffic-policy.mjs'
+import { enterPriority, leavePriority, ordinaryCapacityBlocked, waitForPriorityCapacity } from './priority-admission.mjs'
 import { circuitOpenError, openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 
@@ -168,10 +169,14 @@ export class TikHubUserInfoGateway {
   }
 
   #enter(context) {
-    if (isHubRateLimitExempt(context)) return 'exempt'
+    if (isHubRateLimitExempt(context)) {
+      return isLcySupplierPriority(context)
+        ? enterPriority(this, context.consumer.id, currentAdmissionLimits(this).maxConcurrency) : 'exempt'
+    }
     const consumerId = context.consumer.id
     const consumerActive = this.activeByConsumer.get(consumerId) || 0
-    if (this.active >= currentAdmissionLimits(this).maxConcurrency || (!isInternalTraffic(this.usageStore, context) && consumerActive >= currentAdmissionLimits(this).maxConsumerConcurrency)) {
+    if (ordinaryCapacityBlocked(this, currentAdmissionLimits(this).maxConcurrency)
+      || this.active >= currentAdmissionLimits(this).maxConcurrency || (!isInternalTraffic(this.usageStore, context) && consumerActive >= currentAdmissionLimits(this).maxConsumerConcurrency)) {
       return false
     }
     this.active += 1
@@ -181,6 +186,7 @@ export class TikHubUserInfoGateway {
 
   #leave(consumerId, admission = true) {
     if (admission === 'exempt') return
+    leavePriority(this, admission)
     this.active = Math.max(0, this.active - 1)
     const next = Math.max(0, (this.activeByConsumer.get(consumerId) || 1) - 1)
     if (next === 0) this.activeByConsumer.delete(consumerId)
@@ -217,7 +223,14 @@ export class TikHubUserInfoGateway {
   async #enterOrQueue(context, { lease, expiresAt, expectedProviderCalls, signal, canWait, revalidate }) {
     await refreshAdmissionLimits(this)
     if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
-    if (isHubRateLimitExempt(context)) return 'exempt'
+    if (isHubRateLimitExempt(context)) {
+      if (!isLcySupplierPriority(context)) return 'exempt'
+      // It used to bypass this gate, so it waits even where others fall back.
+      return waitForPriorityCapacity(this, { enter: () => this.#enter(context),
+        leave: admission => this.#leave(context.consumer.id, admission), expiresAt, signal,
+        revalidate: canWait ? revalidate : null, details: { platform: XIAOHONGSHU_PLATFORM },
+        dispatchReserveMs: expectedProviderCalls * (this.config.timeoutMs || 30000) + 5000 })
+    }
     if (!this.concurrencyQueue.entries.length && this.#enter(context)) return true
     if (!canWait) return false
     const policy = admissionQueuePolicy(this)
@@ -694,7 +707,9 @@ export class TikHubUserInfoGateway {
               limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 120,
               tokens: expectedProviderCalls,
               windowMs: 60_000,
-            })
+            }, { signal, providerState: () => this.platformStore.providerState(TIKHUB_PROVIDER_KEY),
+              deadline: new Date(reservation.request.leaseExpiresAt).getTime()
+                - expectedProviderCalls * (this.config.timeoutMs || 30000) - 5000 })
         if (!admission.allowed) {
           if (snapshot) {
             const fallback = fallbackResponse(snapshot, activeRequestId)

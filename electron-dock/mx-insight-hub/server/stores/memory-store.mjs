@@ -783,6 +783,7 @@ export class MemoryStore {
       ...safe,
       hubRateLimitExempt: safe.hubRateLimitExempt ?? null,
       hubRateLimitRevision: safe.hubRateLimitRevision ?? 0,
+      hubSupplierAdmission: safe.hubSupplierAdmission === 'priority' ? 'priority' : 'bypass',
       platforms: (record.scopeMode === 'legacy_dynamic'
         ? this.#dynamicPlatformEntitlements(record)
         : this.apiKeyPlatformEntitlements.get(record.id) || []).map((entry) => entry.platform),

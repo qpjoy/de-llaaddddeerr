@@ -34,8 +34,10 @@ async function memoryFixture() {
 test('legacy is preserved until an explicit audited CAS switch; auth reflects state without changing Key identity or scopes', async () => {
   const store = await memoryFixture()
   const before = await store.findApiKeyById(keyId)
+  // Supplier admission is additive: legacy rows read as the original bypass.
   assert.deepEqual(await readKeyHubLimits(store, keyId), { apiKeyId: keyId, policyVersion: 2, hubRateLimitExempt: null,
-    effectiveExempt: false, inheritedQuotaExempt: true, source: 'legacy', revision: 0, updatedAt: null })
+    effectiveExempt: false, hubSupplierAdmission: 'bypass', effectiveSupplierPriority: false,
+    inheritedQuotaExempt: true, source: 'legacy', revision: 0, updatedAt: null })
   assert.equal(store.keyHubLimitEvents, undefined)
   const saved = await saveKeyHubLimits(store, keyId, body(true), actor())
   assert.equal(saved.effectiveExempt, true)
@@ -130,7 +132,7 @@ async function postgresFixture(t) {
     CREATE TABLE plans(id uuid PRIMARY KEY,plan_key text,status text);
     CREATE TABLE plan_versions(id uuid PRIMARY KEY,plan_id uuid,status text,limits jsonb);
     CREATE TABLE consumer_plan_assignments(consumer_id uuid,plan_version_id uuid,assigned_at timestamptz);`)
-  for (const name of ['083_key_access_limits.sql', '138_admission_recovery.sql', '153_api_key_hub_limits.sql']) {
+  for (const name of ['083_key_access_limits.sql', '138_admission_recovery.sql', '153_api_key_hub_limits.sql', '172_api_key_supplier_priority.sql']) {
     await db.exec(await readFile(new URL(`../../migrations/${name}`, import.meta.url), 'utf8'))
   }
   await db.query("INSERT INTO tenants VALUES($1,'active')", [tenantId])
@@ -167,6 +169,16 @@ test('PostgreSQL migration leaves state unchanged; CAS/audit are atomic, immutab
   assert.deepEqual((await db.query('SELECT id,tenant_id,consumer_id,key_digest,status,environment,access_profile FROM api_keys')).rows, before)
   const sibling = randomUUID()
   await assert.rejects(db.query("INSERT INTO api_keys(id,tenant_id,consumer_id,hub_rate_limit_exempt) VALUES($1,$2,$3,true)", [sibling, tenantId, consumerId]), /api_key_hub_limit_identity/)
+  // 172: the supplier mode defaults to bypass, persists with CAS/audit, and is LCY-only.
+  await db.exec('DROP TRIGGER reject_fixture_audit ON control.api_key_hub_limit_events')
+  assert.equal((await readKeyHubLimits(store, keyId)).hubSupplierAdmission, 'bypass')
+  const priority = await saveKeyHubLimits(store, keyId, { ...body(true, 1), hubSupplierAdmission: 'priority' }, actor())
+  assert.deepEqual([priority.hubSupplierAdmission, priority.effectiveSupplierPriority], ['priority', true])
+  assert.equal((await new PostgresStore(pool).findApiKeyById(keyId)).apiKey.hubSupplierAdmission, 'priority')
+  assert.deepEqual((await db.query(`SELECT previous_supplier_admission AS previous, next_supplier_admission AS next
+    FROM control.api_key_hub_limit_events ORDER BY revision`)).rows, [{ previous: 'bypass', next: 'bypass' }, { previous: 'bypass', next: 'priority' }])
+  await assert.rejects(db.query("INSERT INTO api_keys(id,tenant_id,consumer_id,hub_supplier_admission) VALUES($1,$2,$3,'priority')", [sibling, tenantId, consumerId]), /api_key_hub_supplier_admission_identity/)
+  await assert.rejects(db.query("UPDATE api_keys SET hub_supplier_admission='fast' WHERE id=$1", [keyId]), /check constraint/)
 })
 
 test('PostgreSQL reservations read locked stored override, never input flags; explicit off restores ordinary quotas without resetting history', { skip: !modulePath }, async t => {

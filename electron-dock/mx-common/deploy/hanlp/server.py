@@ -22,6 +22,7 @@ model in memory.
 """
 
 import collections
+import ctypes
 import json
 import multiprocessing
 import os
@@ -66,6 +67,24 @@ WARMUP_TEXT = "吴恩达与人工智能"
 MIB = 1024 * 1024
 WORKER_MEMORY_BYTES = 1536 * MIB
 FRONT_MEMORY_BYTES = 512 * MIB
+# Nothing above bounds what a worker keeps after a pass. In production five
+# workers filled a 32Gi limit and the kernel OOM-killed workers 35 times in under
+# three days, each time failing whatever batch the victim held. So a worker reports its resident
+# memory after each request, and one that has grown past this share of its slice
+# of the limit is replaced while idle instead of being killed mid-pass. Without
+# a memory limit there is no slice and nothing is recycled.
+RECYCLE_MEMORY_FRACTION = 0.6
+# One forward pass holds activations for every text in it, so a batch of long
+# documents peaks far above a batch of posts. Passes are cut at this many
+# characters; the HTTP batch limit and the reply are unchanged. It equals the
+# per-text cut, so the longest admissible text still runs in one pass.
+MAX_PASS_CHARACTERS = 20_000
+# glibc keeps freed memory in per-thread arenas instead of returning it, which is
+# how a worker's RSS ratchets up across batches. Fewer arenas, plus an explicit
+# trim once a worker exceeds its planning budget, give most of it back without
+# paying for a trim after every small request.
+MALLOC_ARENA_MAX = "2"
+TRIM_ABOVE_BYTES = WORKER_MEMORY_BYTES
 # Workers only interactive requests may take, so a projector or rebuild that
 # fills every other worker with long batches never leaves a query waiting for
 # one of them to finish. A pool of one has nothing to spare and falls back to
@@ -95,7 +114,9 @@ def _optional_positive_int(name):
 # service without a rebuild.
 MAX_CONCURRENT_INFERENCES = _optional_positive_int("MAX_CONCURRENT_INFERENCES")
 
-PoolPlan = collections.namedtuple("PoolPlan", "workers threads reserved cpus memory_bytes")
+PoolPlan = collections.namedtuple(
+    "PoolPlan", "workers threads reserved cpus memory_bytes recycle_bytes"
+)
 
 
 def _log_safe_traceback(context, error):
@@ -175,7 +196,12 @@ def plan_pool(cpus, memory_bytes, cap=None):
         workers = max(1, min(workers, cap))
     threads = max(1, cpus // workers) if cpus is not None else None
     reserved = INTERACTIVE_RESERVED_WORKERS if workers > INTERACTIVE_RESERVED_WORKERS else 0
-    return PoolPlan(workers, threads, reserved, cpus, memory_bytes)
+    recycle_bytes = None
+    if memory_bytes is not None:
+        # Never below the planning budget: a worker inside it is healthy.
+        share = max(0, memory_bytes - FRONT_MEMORY_BYTES) // workers
+        recycle_bytes = max(WORKER_MEMORY_BYTES, int(share * RECYCLE_MEMORY_FRACTION))
+    return PoolPlan(workers, threads, reserved, cpus, memory_bytes, recycle_bytes)
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +254,51 @@ def _plain(value):
     return value
 
 
+def _resident_bytes():
+    """This process's resident memory, or None where /proc is unavailable."""
+    try:
+        with open("/proc/self/statm", encoding="ascii") as handle:
+            return int(handle.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _malloc_trim():
+    """glibc's malloc_trim, or None on a libc without it."""
+    try:
+        trim = ctypes.CDLL("libc.so.6").malloc_trim
+    except (OSError, AttributeError):
+        return None
+    trim.argtypes = [ctypes.c_size_t]
+    trim.restype = ctypes.c_int
+    return trim
+
+
+def _passes(inputs, budget=MAX_PASS_CHARACTERS):
+    """Consecutive slices of `inputs`, each within `budget` characters."""
+    current, size = [], 0
+    for text in inputs:
+        if current and size + len(text) > budget:
+            yield current
+            current, size = [], 0
+        current.append(text)
+        size += len(text)
+    if current:
+        yield current
+
+
+def _tokenize(tokenizer, inputs):
+    # HanLP's native tokenizer API is batch-shaped, so each slice is one call
+    # rather than one per text; concatenating keeps replies positional.
+    tokens = []
+    for texts in _passes(inputs):
+        result = _plain(tokenizer(texts))
+        if len(texts) == 1 and result and isinstance(result[0], str):
+            result = [result]
+        tokens.extend(result)
+    return tokens
+
+
 def _worker_main(connection, model_name, threads):
     # A fresh interpreter (spawn): nothing from the front's threads is inherited.
     # Ctrl-C is the front's to handle; it stops the workers itself.
@@ -239,6 +310,7 @@ def _worker_main(connection, model_name, threads):
         _log_safe_traceback("model load or warm-up failed", error)
         connection.send(("failed", f"{type(error).__name__}: model warm-up failed"))
         return
+    trim = _malloc_trim()
     connection.send(("ready", os.getpid()))
     while True:
         try:
@@ -246,13 +318,16 @@ def _worker_main(connection, model_name, threads):
         except (EOFError, OSError):
             return  # the front is gone
         try:
-            # HanLP's native tokenizer API is batch-shaped, so a batch of N is
-            # one forward pass rather than N of them.
-            reply = ("ok", _plain(tokenizer(inputs)))
+            status, tokens = "ok", _tokenize(tokenizer, inputs)
         except Exception as error:  # noqa: BLE001
             _log_safe_traceback("tokenizer inference failed", error)
-            reply = ("error", None)
-        connection.send(reply)
+            status, tokens = "error", None
+        resident = _resident_bytes()
+        if trim is not None and resident is not None and resident > TRIM_ABOVE_BYTES:
+            trim(0)
+            resident = _resident_bytes()
+        # The front decides from this whether the worker goes back to work.
+        connection.send((status, tokens, resident))
 
 
 class WorkerFailed(Exception):
@@ -266,6 +341,8 @@ class ProcessWorker:
         self.index = index
         self.pid = None
         self.broken = False
+        # As of the worker's last reply; None until then or without /proc.
+        self.resident_bytes = None
         self._connection, child = context.Pipe()
         self._process = context.Process(
             target=_worker_main,
@@ -293,7 +370,7 @@ class ProcessWorker:
     def run(self, inputs):
         try:
             self._connection.send(inputs)
-            status, tokens = self._connection.recv()
+            status, tokens, self.resident_bytes = self._connection.recv()
         except (EOFError, OSError):
             # Died mid-pass (segfault, OOM kill). The pool replaces it.
             self.broken = True
@@ -360,6 +437,9 @@ class InferencePool:
         self._closed = False
         self._skipped = 0
         self._replaced = 0
+        self._recycled = 0
+        # Retired workers whose replacement has not finished loading.
+        self._replacing = 0
 
     @property
     def ready(self):
@@ -378,7 +458,16 @@ class InferencePool:
                 "reservedForInteractive": self.plan.reserved,
                 "queued": {lane: len(queue) for lane, queue in self._queues.items()},
                 "skippedDisconnected": self._skipped,
+                # Unplanned: the worker died (OOM kill, crash).
                 "replacedWorkers": self._replaced,
+                # Planned: retired while idle for exceeding recycleAboveBytes.
+                "recycledWorkers": self._recycled,
+                "recycleAboveBytes": self.plan.recycle_bytes,
+                "maxPassCharacters": MAX_PASS_CHARACTERS,
+                "residentBytes": {
+                    str(index): getattr(worker, "resident_bytes", None)
+                    for index, worker in sorted(self._workers.items())
+                },
             }
 
     def _load_worker(self, index):
@@ -452,11 +541,28 @@ class InferencePool:
         with self._cond:
             if ticket.lane == BULK:
                 self._bulk_running -= 1
-            if worker.alive() and not self._closed:
-                self._idle.append(worker)
-            else:
+            if not worker.alive() or self._closed:
                 self._retire(worker)
+            elif self._should_recycle(worker):
+                self._retire(worker, planned=True)
+            else:
+                self._idle.append(worker)
             self._dispatch()
+
+    def _should_recycle(self, worker):
+        # Called with the lock held. One replacement at a time, and never the
+        # last live worker: a planned recycle must not take capacity a crash
+        # already took, nor turn into an outage while the model reloads. A
+        # deferred worker keeps serving and is checked again on its next release.
+        limit = self.plan.recycle_bytes
+        resident = getattr(worker, "resident_bytes", None)
+        return (
+            limit is not None
+            and resident is not None
+            and resident > limit
+            and self._live > 1
+            and self._replacing == 0
+        )
 
     def close(self):
         with self._cond:
@@ -507,35 +613,54 @@ class InferencePool:
                 self._bulk_running += 1
             self._cond.notify_all()
 
-    def _retire(self, worker):
+    def _retire(self, worker, planned=False):
         # Called with the lock held.
         self._live -= 1
         self._workers.pop(worker.index, None)
         if self._closed:
             worker.close()
             return
-        print(f"[hanlp] worker {worker.index} exited; replacing it", file=sys.stderr)
+        if planned:
+            print(
+                f"[hanlp] worker {worker.index} holds {worker.resident_bytes // MIB} MiB, "
+                f"above {self.plan.recycle_bytes // MIB} MiB; recycling it",
+                file=sys.stderr,
+            )
+        else:
+            print(f"[hanlp] worker {worker.index} exited; replacing it", file=sys.stderr)
+        self._replacing += 1
         threading.Thread(
-            target=self._replace, args=(worker,), name=f"hanlp-replace-{worker.index}", daemon=True
+            target=self._replace,
+            args=(worker, planned),
+            name=f"hanlp-replace-{worker.index}",
+            daemon=True,
         ).start()
 
-    def _replace(self, old):
-        old.close()
+    def _replace(self, old, planned=False):
         try:
-            worker = self._load_worker(old.index)
-        except Exception:  # noqa: BLE001 - _load_worker recorded the failure
-            return
-        if worker is None:
-            return
-        with self._cond:
-            if self._closed or self._error is not None:
-                worker.close()
+            # Closing first returns the old worker's memory before the new model loads.
+            old.close()
+            try:
+                worker = self._load_worker(old.index)
+            except Exception:  # noqa: BLE001 - _load_worker recorded the failure
                 return
-            self._workers[worker.index] = worker
-            self._idle.append(worker)
-            self._live += 1
-            self._replaced += 1
-            self._dispatch()
+            if worker is None:
+                return
+            with self._cond:
+                if self._closed or self._error is not None:
+                    worker.close()
+                    return
+                self._workers[worker.index] = worker
+                self._idle.append(worker)
+                self._live += 1
+                if planned:
+                    self._recycled += 1
+                else:
+                    self._replaced += 1
+                self._dispatch()
+        finally:
+            with self._cond:
+                self._replacing -= 1
 
     def _fail(self, error):
         if isinstance(error, WorkerFailed):
@@ -699,14 +824,19 @@ def _stop(_signum, _frame):
 def main():
     global _pool
     plan = plan_pool(cgroup_cpu_limit(), cgroup_memory_limit(), MAX_CONCURRENT_INFERENCES)
+    # Spawned workers inherit this environment, and glibc reads it at their
+    # start-up. An explicit setting still wins.
+    os.environ.setdefault("MALLOC_ARENA_MAX", MALLOC_ARENA_MAX)
     # spawn, not fork: the front runs threads, and forking a threaded process
     # can copy a lock some other thread holds.
     context = multiprocessing.get_context("spawn")
     _pool = InferencePool(plan, lambda index: ProcessWorker(index, plan.threads, context))
+    recycle = f"{plan.recycle_bytes // MIB} MiB" if plan.recycle_bytes else "off"
     print(
         f"[hanlp] {plan.workers} worker(s) x {plan.threads or 'inherited'} thread(s), "
         f"{plan.reserved} reserved for interactive requests "
-        f"(cpu quota: {plan.cpus}, memory limit: {plan.memory_bytes})",
+        f"(cpu quota: {plan.cpus}, memory limit: {plan.memory_bytes}, "
+        f"recycle above: {recycle})",
         file=sys.stderr,
     )
     signal.signal(signal.SIGTERM, _stop)

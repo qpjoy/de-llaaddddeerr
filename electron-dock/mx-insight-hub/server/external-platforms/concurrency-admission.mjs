@@ -16,15 +16,16 @@ export function concurrencyBusy(reason, details = {}) {
 // This queue belongs to the same process as the concurrency counter. It holds
 // only pending HTTP continuations, never paid jobs or database connections.
 // FIFO among eligible callers; a consumer at its own limit cannot block others.
+// Priority entries (the LCY Key in priority mode) are offered a slot first.
 export class ConcurrencyAdmissionQueue {
   constructor({ clock = Date.now } = {}) { this.clock = clock; this.entries = [] }
 
-  enter({ tryEnter, deadline, maxPending, signal, details = {} }) {
+  enter({ tryEnter, deadline, maxPending, signal, details = {}, priority = false }) {
     if (signal?.aborted) return Promise.reject(new AppError(499, 'request_cancelled', 'Request cancelled before dispatch'))
     if (!Number.isFinite(deadline) || deadline <= this.clock()) return Promise.reject(concurrencyBusy('concurrency_queue_timeout', details))
     if (this.entries.length >= maxPending) return Promise.reject(concurrencyBusy('concurrency_queue_full', { ...details, queueDepth: this.entries.length }))
     return new Promise((resolve, reject) => {
-      const item = { tryEnter, deadline, signal, details, settled: false, finish: (error) => {
+      const item = { tryEnter, deadline, signal, details, priority, settled: false, finish: (error) => {
         if (item.settled) return
         item.settled = true
         clearTimeout(item.timer)
@@ -41,8 +42,13 @@ export class ConcurrencyAdmissionQueue {
     })
   }
 
+  priorityWaiting() {
+    return this.entries.reduce((count, item) => count + (item.priority && !item.settled ? 1 : 0), 0)
+  }
+
   drain() {
-    for (const item of [...this.entries]) {
+    const ordered = [...this.entries.filter(item => item.priority), ...this.entries.filter(item => !item.priority)]
+    for (const item of ordered) {
       if (item.settled) continue
       if (item.signal?.aborted) item.finish(new AppError(499, 'request_cancelled', 'Request cancelled before dispatch'))
       else if (this.clock() >= item.deadline) item.finish(concurrencyBusy('concurrency_queue_timeout', item.details))

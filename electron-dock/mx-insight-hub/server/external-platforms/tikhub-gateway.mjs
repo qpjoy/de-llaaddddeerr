@@ -1,6 +1,7 @@
 import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
-import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit } from '../core/internal-traffic-policy.mjs'
+import { bypassesSupplierLimits, isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit, isLcySupplierPriority } from '../core/internal-traffic-policy.mjs'
+import { enterPriority, leavePriority, ordinaryCapacityBlocked, waitForPriorityCapacity } from './priority-admission.mjs'
 import { circuitOpenError, openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { DispatchQueue, DEFAULT_DETAIL_QUEUE, canRetryDetail } from './dispatch-queue.mjs'
 import { ConcurrencyAdmissionQueue, DEFAULT_CONCURRENCY_QUEUE, concurrencyBusy } from './concurrency-admission.mjs'
@@ -592,14 +593,28 @@ export class TikHubGateway {
       || circuitOpenError(state, this.config, message)
   }
 
+  // Lets a priority LCY dispatch wait for RPM tokens within its request.
+  #ratePacing(reservation, signal) {
+    return { signal, providerState: () => this.platformStore.providerState(TIKHUB_PROVIDER_KEY),
+      deadline: new Date(reservation.request.leaseExpiresAt).getTime() - (this.config.timeoutMs || 30000) - 5000 }
+  }
+
   #enter(context, enrichment = false) {
-    if (isHubRateLimitExempt(context)) return 'exempt'
+    const reserved = Math.min(currentAdmissionLimits(this).maxConcurrency - 1, DEFAULT_CONCURRENCY_QUEUE.reservedForeground)
+    if (isHubRateLimitExempt(context)) {
+      if (!isLcySupplierPriority(context)) return 'exempt'
+      // Enrichment never takes the foreground reserve, priority or not.
+      if (enrichment && this.activeEnrichment >= currentAdmissionLimits(this).maxConcurrency - reserved) return false
+      const entered = enterPriority(this, context.consumer.id, currentAdmissionLimits(this).maxConcurrency)
+      if (entered && enrichment) this.activeEnrichment += 1
+      return entered
+    }
     const consumerId = context.consumer.id
     const consumerActive = this.activeByConsumer.get(consumerId) || 0
-    if (this.active >= currentAdmissionLimits(this).maxConcurrency || (!isInternalTraffic(this.usageStore, context) && consumerActive >= currentAdmissionLimits(this).maxConsumerConcurrency)) {
+    if (ordinaryCapacityBlocked(this, currentAdmissionLimits(this).maxConcurrency)
+      || this.active >= currentAdmissionLimits(this).maxConcurrency || (!isInternalTraffic(this.usageStore, context) && consumerActive >= currentAdmissionLimits(this).maxConsumerConcurrency)) {
       return false
     }
-    const reserved = Math.min(currentAdmissionLimits(this).maxConcurrency - 1, DEFAULT_CONCURRENCY_QUEUE.reservedForeground)
     if (enrichment && (this.concurrencyQueue.entries.length || this.activeEnrichment >= currentAdmissionLimits(this).maxConcurrency - reserved)) return false
     this.active += 1
     if (enrichment) this.activeEnrichment += 1
@@ -609,6 +624,7 @@ export class TikHubGateway {
 
   #leave(consumerId, admission = true, enrichment = false) {
     if (admission === 'exempt') return
+    leavePriority(this, admission)
     this.active = Math.max(0, this.active - 1)
     if (enrichment) this.activeEnrichment = Math.max(0, this.activeEnrichment - 1)
     const next = Math.max(0, (this.activeByConsumer.get(consumerId) || 1) - 1)
@@ -635,7 +651,20 @@ export class TikHubGateway {
   async #enterOrQueue(context, { lease, delivery, expiresAt, signal, canWait = true, revalidate }) {
     await refreshAdmissionLimits(this)
     if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
-    if (isHubRateLimitExempt(context)) return 'exempt'
+    if (isHubRateLimitExempt(context)) {
+      if (!isLcySupplierPriority(context)) return 'exempt'
+      // It used to bypass this gate, so it waits even where others fall back.
+      try {
+        return await waitForPriorityCapacity(this, { enter: () => this.#enter(context),
+          leave: admission => this.#leave(context.consumer.id, admission), expiresAt, signal,
+          revalidate: canWait ? revalidate : null,
+          details: { platform: XIAOHONGSHU_PLATFORM, operation: delivery.operation } })
+      } catch (error) {
+        if (canWait) await this.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable',
+          status: error.status || 503, errorCode: error.code || 'external_platform_unavailable' })
+        throw error
+      }
+    }
     if (!this.concurrencyQueue.entries.length && this.#enter(context)) return true
     if (!canWait) return false // An already permitted stored fallback is immediate.
     const policy = admissionQueuePolicy(this)
@@ -1145,7 +1174,8 @@ export class TikHubGateway {
           try {
             queueTicket = await this.detailQueue.enter({ scope: queueScope, id: activeRequestId, fingerprint: dispatchFingerprint,
               policy: queuePolicy, deadline: queueDeadline, leaseMs: detailDispatchLeaseMs, signal,
-              hubRateLimitExempt: isHubRateLimitExempt(context) })
+              // Priority mode joins the paced detail queue like everyone else.
+              hubRateLimitExempt: bypassesSupplierLimits(context) })
           } catch (error) {
             if (allowStoredFallback && snapshot && error.code === 'external_platform_busy') {
               await this.platformStore.commitSnapshotDelivery({ delivery, snapshot, shared: true, sourceMode: 'stored_fallback', usageUnitsActual: 1 })
@@ -1282,7 +1312,7 @@ export class TikHubGateway {
               limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 120,
               tokens: 1,
               windowMs: 60_000,
-            })
+            }, this.#ratePacing(reservation, signal))
         if (!rateLimit.allowed) {
           throw new AppError(429, 'external_platform_rate_limited', 'External Xiaohongshu request rate is exhausted', {
             retryAfterMs: rateLimit.retryAfterMs,
@@ -1362,7 +1392,7 @@ export class TikHubGateway {
                 expiresAt: reservation.request.leaseExpiresAt, signal, revalidate: revalidateQueuedAccess })
               costReservation = await this.platformStore.reserveProviderCostWorkflow({ tenantId: context.tenant.id, consumerId: context.consumer.id,
                 apiKeyId: context.apiKey.id, usageRequestId: activeRequestId, fingerprint: requestFingerprint, costControls: [costControl] })
-              const retryRate = await acquireTikHubRateLimit(this.usageStore, context, this.platformStore, { limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 120, tokens: 1, windowMs: 60000 })
+              const retryRate = await acquireTikHubRateLimit(this.usageStore, context, this.platformStore, { limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 120, tokens: 1, windowMs: 60000 }, this.#ratePacing(reservation, signal))
               if (!retryRate.allowed) throw new AppError(429, 'external_platform_busy', '服务器繁忙，请稍后再试', { retryAfterMs: retryRate.retryAfterMs })
               call = await beginCall(1); callSettled = false; callDispatched = false
             }
@@ -1970,7 +2000,7 @@ export class TikHubGateway {
           const rateLimit = await acquireTikHubRateLimit(this.usageStore, context, this.platformStore, {
                 limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 120,
                 windowMs: 60_000,
-              })
+              }, this.#ratePacing(reservation, signal))
           if (!rateLimit.allowed) {
             const fallbackBody = snapshot ? selectSnapshot(snapshot) : null
             if (fallbackBody) {
@@ -3080,7 +3110,7 @@ export class TikHubGateway {
         const rateLimit = await acquireTikHubRateLimit(this.usageStore, context, this.platformStore, {
               limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 120,
               windowMs: 60_000,
-            })
+            }, this.#ratePacing(reservation, signal))
         if (!rateLimit.allowed) {
           if (allowStoredFallback && snapshot) {
             const responseBody = deliveryBody(snapshot.responseBody, {

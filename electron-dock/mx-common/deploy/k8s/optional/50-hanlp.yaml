@@ -139,13 +139,19 @@ spec:
             failureThreshold: 3
           # Memory limit is a ceiling, not preallocated/resident memory.
           # Five workers exceeded 8Gi; a killed process alone held 5.57Gi RSS.
-          # 32Gi is an initial peak budget, not a proven bound for every batch.
-          # Keep requests unchanged; the node must still have actual headroom
-          # during bursts. Reassess using total cgroup peaks under real load.
+          # At 32Gi the kernel still OOM-killed workers 35 times in under three
+          # days, so a larger limit alone does not bound them. server.py now
+          # recycles an idle worker above 60% of its slice (about 3.8Gi of
+          # ~6.3Gi here) and caps each forward pass at 20,000 characters; the
+          # limit stays as burst headroom. /health reports residentBytes,
+          # recycledWorkers and replacedWorkers (unplanned exits) to confirm it.
+          # The request covers the five workers' planned budget (5 x 1.5Gi plus
+          # the front), so node-pressure eviction no longer sees a pod running
+          # an order of magnitude above a 1Gi request.
           resources:
             requests:
               cpu: 500m
-              memory: 1Gi
+              memory: 8Gi
             limits:
               cpu: "16"
               memory: 32Gi

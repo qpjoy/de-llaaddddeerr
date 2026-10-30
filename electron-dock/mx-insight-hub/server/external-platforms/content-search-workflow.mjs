@@ -6,7 +6,7 @@ import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { normalizeTikHubContentSearchRequest, projectTikHubContentSearch, contentSearchDataItem, TIKHUB_CONTENT_SEARCH_VERSION } from '../contracts/tikhub-content-search.mjs'
 import { rawSearchRecords, RAW_SEARCH_DATASET } from '../contracts/raw-search.mjs'
-import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { acquireSupplierRate, bypassesSupplierLimits, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { ContentSearchStateStore } from './content-search-store.mjs'
 import { assertTwitterSearchAvailable } from '../data/twitter-search-availability.mjs'
 
@@ -210,7 +210,7 @@ export async function runContentSearch({ gateway, context, request, delivery, de
             lease?.reason === 'unknown' ? 'request_outcome_unknown' : lease?.reason === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'request_in_progress',
             'The procurement result is pending or unavailable; verify the original request')
           ownsChild = true
-          if (entered === 'exempt' && !isHubRateLimitExempt(context)) {
+          if (entered === 'exempt' && !bypassesSupplierLimits(context)) {
             leaveCapacity(entered); entered = false
           }
           if (!entered) {
@@ -218,8 +218,9 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           }
           const cost = providerCostControl(control?.billing ? { billing: control.billing } : gateway.config, nativeRequest.endpointKey)
           costReservation = await store.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
-          const rate = isInternalTraffic(gateway.usageStore, context) ? { allowed: true }
-            : await store.acquireProviderRateLimit({ limit: (await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90, windowMs: 60000 })
+          const rate = await acquireSupplierRate(context, store, { limit: (await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90,
+            windowMs: 60000, bypass: isInternalTraffic(gateway.usageStore, context), signal,
+            providerState: () => store.providerState('tikhub'), deadline: deadlineAt - (gateway.config.timeoutMs || 30000) - 5000 })
           if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Content-search rate limit is exhausted')
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           if (!enoughTime()) throw new AppError(503, 'content_search_deadline', 'Content-search deadline reached before dispatch')

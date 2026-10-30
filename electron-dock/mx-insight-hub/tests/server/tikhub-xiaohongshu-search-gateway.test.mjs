@@ -552,6 +552,52 @@ test('original LCY search and enrichment pass a fresh shared 429 while an actual
   }
 })
 
+function asPriorityLcy(state) {
+  Object.assign(state.context.apiKey, { id: 'fd2f8cc9-0ff1-4052-a538-8cc8150bde83', accessProfile: 'managed_full',
+    hubRateLimitExempt: true, hubSupplierAdmission: 'priority' })
+  state.context.tenant.id = '277bf8a4-5ed5-414d-b429-d72fcd7d36b6'
+  state.context.consumer.id = 'be7d07fe-3d98-4db3-b00d-e5cbe5a76190'
+}
+
+test('priority LCY keeps the shared-circuit exemption but takes paced RPM, slowed after a fresh supplier 429', async () => {
+  const adapter = adapterFor({ notes: [note(FIRST_NOTE_ID, '预'.repeat(60))],
+    detailById: new Map([[FIRST_NOTE_ID, detailResult(FIRST_NOTE_ID, '完整正文'.repeat(60))]]) })
+  const state = fixture(adapter)
+  asPriorityLcy(state)
+  const shared = Object.freeze({ lastErrorCode: 'upstream_rate_limited', lastFailureAt: new Date().toISOString(),
+    circuitOpenUntil: new Date(Date.now() + 60_000).toISOString() })
+  state.platformStore.providerState = async () => shared
+  const limits = []
+  state.platformStore.acquireProviderRateLimit = async input => {
+    limits.push(input.limit)
+    return limits.length === 1 ? { allowed: false, retryAfterMs: 5 } : { allowed: true, retryAfterMs: 0 }
+  }
+  const result = await state.gateway.searchNotes(state.context, request())
+  assert.equal(result.status, 200)
+  assert.equal(adapter.calls.search.length, 1, 'the open shared circuit did not stop it')
+  // The first refusal was waited out inside the request instead of returned.
+  assert.ok(limits.length >= 2)
+  const configured = state.gateway.config.maxRequestsPerMinute ?? 120
+  assert.ok(limits.slice(0, 2).every(limit => limit <= Math.ceil(configured / 2) + 1), `paced at about half of ${configured}: ${limits}`)
+  assert.deepEqual([state.gateway.active, state.gateway.priorityActive], [0, 0])
+})
+
+test('priority LCY waits for a full gateway ahead of other callers instead of bypassing it', async () => {
+  const state = fixture(adapterFor({ notes: [] }), { maxConcurrency: 1, concurrencyQueue: { maxWaitMs: 1_000, maxPending: 4 } })
+  asPriorityLcy(state)
+  state.platformStore.acquireProviderRateLimit = async () => ({ allowed: true, retryAfterMs: 0 })
+  state.gateway.active = 1
+  const waiting = state.gateway.searchNotes(state.context, request())
+  for (let i = 0; i < 100 && !state.gateway.concurrencyQueue.priorityWaiting(); i++) await new Promise(resolve => setTimeout(resolve, 2))
+  assert.equal(state.gateway.concurrencyQueue.priorityWaiting(), 1)
+  assert.equal(state.platformStore.providerCalls.length, 0)
+  state.gateway.active = 0
+  state.gateway.concurrencyQueue.drain()
+  assert.equal((await waiting).status, 200)
+  assert.equal(state.platformStore.providerCalls.length, 1)
+  assert.deepEqual([state.gateway.active, state.gateway.priorityActive], [0, 0])
+})
+
 test('internal search still waits during its first 10 seconds and retains global concurrency protection', async () => {
   const state = fixture(adapterFor({ notes: [] }))
   state.usageStore.internalTrafficPolicy = createInternalTrafficPolicy({ keyIds: [state.context.apiKey.id] })

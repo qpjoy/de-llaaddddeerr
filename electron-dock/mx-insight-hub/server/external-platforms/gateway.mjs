@@ -1,6 +1,7 @@
 import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
-import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState } from '../core/internal-traffic-policy.mjs'
+import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, isInternalTraffic, internalCircuitState, isLcySupplierPriority } from '../core/internal-traffic-policy.mjs'
+import { enterPriority, leavePriority, ordinaryCapacityBlocked, waitForPriorityCapacity } from './priority-admission.mjs'
 import { circuitOpenError, ecommerceCapacityError, upstreamCapacityError } from './availability-errors.mjs'
 import { ConcurrencyAdmissionQueue, DEFAULT_CONCURRENCY_QUEUE, concurrencyBusy } from './concurrency-admission.mjs'
 import { WebSearchUpstreamError } from '../adapters/web-search.mjs'
@@ -13,6 +14,7 @@ import { HUB_SOCIAL_ENDPOINTS, normalizeHubSocialRequest } from '../contracts/hu
 import { normalizeHubSocialCompatRequest } from '../contracts/hub-social-compat.mjs'
 import { normalizeXhsDiscoveryRequest, XHS_DISCOVERY_ENDPOINTS } from '../contracts/xiaohongshu-discovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
+import { setTimeout as sleep } from 'node:timers/promises'
 import {
   ECOMMERCE_DELIVERY_MODES,
   ECOMMERCE_PRODUCT_SEARCH_CONTRACT_VERSION,
@@ -55,6 +57,8 @@ const AUTHORIZATION_PLATFORM = 'ecommerce'
 const DEFAULT_POLICY = Object.freeze({ maxRequests: 100_000, windowSeconds: 3_600, maxPageSize: 100 })
 const IDEMPOTENCY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+// Pause before the single priority retry of an unbilled supplier rate refusal.
+const RATE_REFUSAL_RETRY_DELAY_MS = 1_000
 
 function operationReadyForConsumer(operation, consumerId) {
   if (operation?.effectiveState === 'active') return true
@@ -391,11 +395,15 @@ export class ExternalPlatformGateway {
   }
 
   #enter(context) {
-    if (isHubRateLimitExempt(context)) return 'exempt'
+    if (isHubRateLimitExempt(context)) {
+      return isLcySupplierPriority(context)
+        ? enterPriority(this, context.consumer.id, currentAdmissionLimits(this).maxConcurrency) : 'exempt'
+    }
     const consumerId = context.consumer.id
     const consumerActive = this.activeByConsumer.get(consumerId) || 0
     if (
-      this.active >= currentAdmissionLimits(this).maxConcurrency
+      ordinaryCapacityBlocked(this, currentAdmissionLimits(this).maxConcurrency)
+      || this.active >= currentAdmissionLimits(this).maxConcurrency
       || (!(this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context)) && consumerActive >= currentAdmissionLimits(this).maxConsumerConcurrency)
     ) return false
     this.active += 1
@@ -407,11 +415,28 @@ export class ExternalPlatformGateway {
     // Release the captured admission, not the current mutable Key setting.
     // Exempt work neither occupies nor releases an ordinary caller's slot.
     if (admission === 'exempt') return
+    leavePriority(this, admission)
     this.active = Math.max(0, this.active - 1)
     const next = Math.max(0, (this.activeByConsumer.get(consumerId) || 1) - 1)
     if (next === 0) this.activeByConsumer.delete(consumerId)
     else this.activeByConsumer.set(consumerId, next)
     this.concurrencyQueue.drain()
+  }
+
+  // Priority work waits even where an ordinary caller would take an immediate
+  // answer: it used to bypass this gate, so refusing it now would be new.
+  async #enterWithPriority(context, { delivery, expiresAt, signal, platform, canWait, revalidate }) {
+    try {
+      return await waitForPriorityCapacity(this, { enter: () => this.#enter(context),
+        leave: admission => this.#leave(context.consumer.id, admission), expiresAt, signal,
+        revalidate: canWait ? revalidate : null, details: { platform, operation: delivery?.operation } })
+    } catch (error) {
+      if (canWait && delivery) {
+        await this.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable',
+          status: error.status || 503, errorCode: error.code || 'external_platform_unavailable' })
+      }
+      throw error
+    }
   }
 
   async #revalidateWaitingIdentity(context, platform, plan) {
@@ -434,7 +459,10 @@ export class ExternalPlatformGateway {
   async #enterOrQueue(context, { lease, delivery, expiresAt, signal, platform, canWait, revalidate }) {
     await refreshAdmissionLimits(this)
     if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
-    if (isHubRateLimitExempt(context)) return 'exempt'
+    if (isHubRateLimitExempt(context)) {
+      if (!isLcySupplierPriority(context)) return 'exempt'
+      return this.#enterWithPriority(context, { delivery, expiresAt, signal, platform, canWait, revalidate })
+    }
     if (!this.concurrencyQueue.entries.length && this.#enter(context)) return true
     if (!canWait) return false
     const policy = admissionQueuePolicy(this)
@@ -1212,7 +1240,7 @@ export class ExternalPlatformGateway {
         return policy.mode === 'auto' && !request.provider ? { result: await next(reserved) } : null
       } : null,
       admit: rapid ? async (reserved, { revalidate, delivery, deadlineAt }) => {
-        admission = await waitForFacebookRapidAdmission({ policyStore, rateLimitExempt: () => isHubRateLimitExempt(context), requestId: delivery.usageRequestId,
+        admission = await waitForFacebookRapidAdmission({ policyStore, rateLimitExempt: () => bypassesSupplierLimits(context), requestId: delivery.usageRequestId,
           deadlineAt, timeoutMs: this.config.timeoutMs || 30000, signal, revalidate, logger: this.logger })
         if (admission.allowed) return null
         const policy = await policyStore.facebook()
@@ -1939,14 +1967,15 @@ export class ExternalPlatformGateway {
         costControls: [costControl],
       })
 
-      const rateLimit = isHubRateLimitExempt(context) || (this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context))
+      const rateLimit = typeof this.platformStore.acquireProviderRateLimit !== 'function'
         ? { allowed: true, retryAfterMs: 0 }
-        : typeof this.platformStore.acquireProviderRateLimit === 'function'
-        ? await this.platformStore.acquireProviderRateLimit({
+        : await acquireSupplierRate(context, this.platformStore, {
             limit: (await refreshAdmissionLimits(this)).maxRequestsPerMinute ?? 90,
-            windowMs: 60_000,
+            windowMs: 60_000, signal,
+            bypass: this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context),
+            providerState: () => this.platformStore.providerState(this.providerKey),
+            deadline: new Date(reservation.request.leaseExpiresAt).getTime() - (this.config.timeoutMs || 30000) - 5000,
           })
-        : { allowed: true, retryAfterMs: 0 }
       if (!rateLimit.allowed) {
         // Facebook's auto policy may choose its other supplier before any
         // RapidAPI dispatch. The route itself preserves administrator mode and
@@ -2167,31 +2196,50 @@ export class ExternalPlatformGateway {
         // evidence must record the error too. Recording a fallback the caller
         // never saw would make a later idempotent replay contradict the
         // original response.
+        const settleRejected = async ({ affectsCircuit = false, circuitCategory = null, handOff = false } = {}) => {
+          await this.platformStore.finishProviderStep({ callId: call.id, delivery, outcome: 'rejected',
+            httpStatus: evidence.httpStatus, businessCode: evidence.businessCode, ...lastDispatchEvidence,
+            errorCode: evidence.errorCode, affectsCircuit, circuitCategory })
+          callSettled = true
+          ownsReservation = false
+          if (!handOff) return
+          // Another attempt (a backup supplier, or this one again) continues this
+          // usage request with the same operation and fingerprint. Release the
+          // lease, procurement hold and concurrency slot it would collide with.
+          if (costReservation) {
+            await this.platformStore.releaseProviderCostWorkflow({ reservationId: costReservation.id, usageRequestId: activeRequestId })
+            costReservation = null
+          }
+          if (ownsLease) {
+            await this.platformStore.releaseDispatchLease({ consumerId: context.consumer.id, operation: plan.operation,
+              fingerprint: requestFingerprint, ownerRequestId: activeRequestId })
+            ownsLease = false
+          }
+          if (entered) { this.#leave(context.consumer.id, entered); entered = false }
+        }
         if (plan.retryRejected) {
-          const routed = await plan.retryRejected({ error, reserved: reservation, settle: async ({
-            affectsCircuit = false, circuitCategory = null, handOff = false,
-          } = {}) => {
-            await this.platformStore.finishProviderStep({ callId: call.id, delivery, outcome: 'rejected',
-              httpStatus: evidence.httpStatus, businessCode: evidence.businessCode, ...lastDispatchEvidence,
-              errorCode: evidence.errorCode, affectsCircuit, circuitCategory })
-            callSettled = true
-            ownsReservation = false
-            if (!handOff) return
-            // Another supplier's gateway continues this usage request with the
-            // same operation and fingerprint. Release the lease, procurement
-            // hold and concurrency slot it would otherwise collide with.
-            if (costReservation) {
-              await this.platformStore.releaseProviderCostWorkflow({ reservationId: costReservation.id, usageRequestId: activeRequestId })
-              costReservation = null
-            }
-            if (ownsLease) {
-              await this.platformStore.releaseDispatchLease({ consumerId: context.consumer.id, operation: plan.operation,
-                fingerprint: requestFingerprint, ownerRequestId: activeRequestId })
-              ownsLease = false
-            }
-            if (entered) { this.#leave(context.consumer.id, entered); entered = false }
-          } })
+          const routed = await plan.retryRejected({ error, reserved: reservation, settle: settleRejected })
           if (routed) return routed.result
+        }
+        // Priority LCY only: a rate-limit refusal the supplier certainly did not
+        // bill (a RapidAPI gateway 429, a JustOne 302) is retried once in this
+        // request after a short pause, if a whole upstream timeout still fits.
+        // A charged, unknown or other refusal keeps its error, as does any retry.
+        if (plan.callOrdinal == null && isLcySupplierPriority(context) && evidence.outcome === 'rejected'
+          && evidence.billed === false && evidence.errorCode === 'upstream_rate_limited'
+          && this.admissionClock() + RATE_REFUSAL_RETRY_DELAY_MS + (this.config.timeoutMs || 30000) + 5000
+            < new Date(reservation.request.leaseExpiresAt).getTime()) {
+          // The refusal still counts, so the retry's own RPM pacing slows down.
+          await settleRejected({ affectsCircuit: evidence.affectsCircuit !== false,
+            circuitCategory: evidence.circuitCategory ?? null, handOff: true })
+          try {
+            await sleep(RATE_REFUSAL_RETRY_DELAY_MS, undefined, { signal })
+          } catch (cause) {
+            if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
+            throw cause
+          }
+          return await this.#deliver(context, { body, idempotencyKey, retryOfRequestId, path, signal },
+            { ...plan, reservation, callOrdinal: 1, route: null })
         }
         const deliverableSnapshot = allowStoredFallback ? snapshot : null
         const fallbackBody = deliverableSnapshot

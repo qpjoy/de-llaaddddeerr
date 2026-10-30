@@ -73,6 +73,8 @@ class FakeWorker:
         self.dead = False
         self.closed = False
         self.calls = []
+        # What the real worker would have reported with its last reply.
+        self.resident_bytes = None
 
     def wait_ready(self):
         if self.ready_gate is not None:
@@ -147,6 +149,34 @@ class PoolSizingTest(unittest.TestCase):
     def test_a_five_worker_cap_keeps_extra_memory_as_headroom(self):
         self.assertEqual(server.plan_pool(16, 32 * GIB).workers, 16)
         self.assertEqual(server.plan_pool(16, 32 * GIB, cap=5)[:3], (5, 3, 1))
+
+    def test_workers_are_recycled_above_a_share_of_their_memory_slice(self):
+        share = (32 * GIB - server.FRONT_MEMORY_BYTES) // 5
+        self.assertEqual(
+            server.plan_pool(16, 32 * GIB, cap=5).recycle_bytes,
+            int(share * server.RECYCLE_MEMORY_FRACTION),
+        )
+        # A tight limit never recycles a worker that is inside its budget.
+        self.assertEqual(server.plan_pool(16, 8 * GIB).recycle_bytes, server.WORKER_MEMORY_BYTES)
+        # Without a memory limit there is no slice to protect.
+        self.assertIsNone(server.plan_pool(16, None).recycle_bytes)
+        self.assertIsNone(server.plan_pool(None, None).recycle_bytes)
+
+    def test_passes_keep_order_and_stay_within_the_character_budget(self):
+        texts = ["a" * 12_000, "b" * 9_000, "c c", "d" * 20_000, "e"]
+        passes = list(server._passes(texts))
+        self.assertEqual([[len(text) for text in part] for part in passes], [[12_000], [9_000, 3], [20_000], [1]])
+        self.assertEqual([text for part in passes for text in part], texts)
+        # Short texts still share a pass, and nothing is ever an empty pass.
+        self.assertEqual(list(server._passes(["x"] * 300)), [["x"] * 300])
+        self.assertEqual(list(server._passes([])), [])
+
+    def test_a_single_text_answered_flat_stays_one_entry(self):
+        self.assertEqual(server._tokenize(lambda texts: texts[0].split(), ["a b"]), [["a", "b"]])
+        self.assertEqual(
+            server._tokenize(lambda texts: [text.split() for text in texts], ["a b", "c" * 20_000]),
+            [["a", "b"], ["c" * 20_000]],
+        )
 
     def test_the_legacy_setting_is_optional(self):
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -536,6 +566,111 @@ class AdmissionTest(unittest.TestCase):
         self.assertIsNone(pool.acquire(INTERACTIVE, 1))
 
 
+class RecycleTest(unittest.TestCase):
+    def make(self, workers, replacement_gate=None):
+        spawned = []
+
+        def spawn(index):
+            gate = replacement_gate if len(spawned) >= workers else None
+            spawned.append(FakeWorker(index, ready_gate=gate))
+            return spawned[-1]
+
+        pool = server.InferencePool(server.plan_pool(workers, memory_for(workers)), spawn)
+        self.addCleanup(pool.close)
+        pool.start()
+        return pool, spawned
+
+    def test_a_worker_over_its_threshold_is_replaced_once_idle(self):
+        pool, spawned = self.make(2)
+        ticket = pool.acquire(BULK, 1)
+        ticket.worker.resident_bytes = pool.plan.recycle_bytes + 1
+        self.assertEqual(
+            pool.describe()["residentBytes"][str(ticket.worker.index)], pool.plan.recycle_bytes + 1
+        )
+        # Still holding its ticket: the request it serves is never cut short.
+        self.assertFalse(ticket.worker.closed)
+        log = io.StringIO()
+        with contextlib.redirect_stderr(log):
+            pool.release(ticket)
+            self.assertTrue(wait_until(lambda: pool.describe()["recycledWorkers"] == 1))
+        description = pool.describe()
+        self.assertEqual((description["replacedWorkers"], description["liveWorkers"]), (0, 2))
+        self.assertTrue(ticket.worker.closed)
+        self.assertEqual([worker.index for worker in spawned], [0, 1, ticket.worker.index])
+        self.assertIn("recycling it", log.getvalue())
+        self.assertTrue(pool.ready)
+
+    def test_a_worker_at_its_threshold_keeps_serving(self):
+        pool, spawned = self.make(2)
+        ticket = pool.acquire(BULK, 1)
+        ticket.worker.resident_bytes = pool.plan.recycle_bytes
+        pool.release(ticket)
+        self.assertEqual(pool.describe()["recycledWorkers"], 0)
+        self.assertFalse(ticket.worker.closed)
+        self.assertEqual(len(spawned), 2)
+
+    def test_only_one_worker_is_recycled_at_a_time(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        pool, spawned = self.make(3, replacement_gate=gate)
+        first, second = pool.acquire(INTERACTIVE, 1), pool.acquire(INTERACTIVE, 1)
+        for ticket in (first, second):
+            ticket.worker.resident_bytes = pool.plan.recycle_bytes + 1
+        with contextlib.redirect_stderr(io.StringIO()):
+            pool.release(first)
+            self.assertTrue(wait_until(lambda: len(spawned) == 4))
+            # The first replacement is still loading: the second stays in service.
+            pool.release(second)
+            self.assertFalse(second.worker.closed)
+            self.assertEqual(pool.describe()["liveWorkers"], 2)
+            gate.set()
+            self.assertTrue(wait_until(
+                lambda: pool.describe()["recycledWorkers"] == 1 and pool.describe()["liveWorkers"] == 3
+            ))
+            # Its next release, with nothing else loading, recycles it.
+            tickets = [pool.acquire(INTERACTIVE, 1) for _ in range(3)]
+            for ticket in tickets:
+                pool.release(ticket)
+            self.assertTrue(wait_until(lambda: pool.describe()["recycledWorkers"] == 2))
+        self.assertTrue(second.worker.closed)
+        self.assertTrue(wait_until(lambda: pool.describe()["liveWorkers"] == 3))
+
+    def test_a_crash_replacement_also_defers_recycling(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        pool, spawned = self.make(3, replacement_gate=gate)
+        crashed, grown = pool.acquire(INTERACTIVE, 1), pool.acquire(INTERACTIVE, 1)
+        crashed.worker.dead = True
+        grown.worker.resident_bytes = pool.plan.recycle_bytes + 1
+        with contextlib.redirect_stderr(io.StringIO()):
+            pool.release(crashed)
+            self.assertTrue(wait_until(lambda: len(spawned) == 4))
+            pool.release(grown)
+            self.assertFalse(grown.worker.closed)
+            gate.set()
+            self.assertTrue(wait_until(lambda: pool.describe()["replacedWorkers"] == 1))
+        self.assertEqual(pool.describe()["recycledWorkers"], 0)
+
+    def test_the_last_live_worker_is_never_recycled(self):
+        pool, spawned = self.make(1)
+        ticket = pool.acquire(BULK, 1)
+        ticket.worker.resident_bytes = pool.plan.recycle_bytes * 4
+        pool.release(ticket)
+        self.assertEqual(pool.describe()["recycledWorkers"], 0)
+        self.assertFalse(ticket.worker.closed)
+        self.assertEqual(len(spawned), 1)
+
+    def test_without_a_memory_limit_nothing_is_recycled(self):
+        pool = server.InferencePool(server.plan_pool(2, None), FakeWorker)
+        self.addCleanup(pool.close)
+        pool.start()
+        ticket = pool.acquire(BULK, 1)
+        ticket.worker.resident_bytes = 64 * GIB
+        pool.release(ticket)
+        self.assertEqual(pool.describe()["recycledWorkers"], 0)
+        self.assertIsNone(pool.describe()["recycleAboveBytes"])
+
+
 class ClientGoneTest(unittest.TestCase):
     def pair(self):
         ours, theirs = socket.socketpair()
@@ -767,6 +902,22 @@ class WorkerBodyTest(unittest.TestCase):
         patcher = mock.patch.dict(sys.modules)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Successive resident-memory readings; the last one repeats.
+        self.resident = []
+        self.trims = []
+
+        def resident():
+            if len(self.resident) > 1:
+                return self.resident.pop(0)
+            return self.resident[0] if self.resident else None
+
+        for name, value in (
+            ("_resident_bytes", resident),
+            ("_malloc_trim", lambda: self.trims.append),
+        ):
+            patch = mock.patch.object(server, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def install(self, tokenizer, on_load=None):
         model_ref = object()
@@ -800,10 +951,47 @@ class WorkerBodyTest(unittest.TestCase):
             return [("吴恩达", "与", "人工智能")]
 
         self.install(tokenizer)
+        self.resident = [700 * server.MIB]
         sent, _ = self.run_worker(inbox=[["吴恩达与人工智能。"]])
         self.assertEqual(calls, [[server.WARMUP_TEXT], ["吴恩达与人工智能。"]])
         # Tuples become lists, so only builtins cross back to the front.
-        self.assertEqual(sent, [("ready", os.getpid()), ("ok", [["吴恩达", "与", "人工智能"]])])
+        self.assertEqual(
+            sent,
+            [("ready", os.getpid()), ("ok", [["吴恩达", "与", "人工智能"]], 700 * server.MIB)],
+        )
+        # Inside its planning budget a worker pays for no trim.
+        self.assertEqual(self.trims, [])
+
+    def test_long_batches_run_as_bounded_passes_and_reply_in_order(self):
+        calls = []
+
+        def tokenizer(texts):
+            calls.append([len(text) for text in texts])
+            return [[text[:1], str(len(text))] for text in texts]
+
+        self.install(tokenizer)
+        texts = ["a" * 12_000, "b" * 9_000, "c c", "d" * 20_000, "e"]
+        sent, _ = self.run_worker(inbox=[texts])
+        self.assertEqual(calls[1:], [[12_000], [9_000, 3], [20_000], [1]])
+        self.assertEqual(
+            sent[1],
+            ("ok", [["a", "12000"], ["b", "9000"], ["c", "3"], ["d", "20000"], ["e", "1"]], None),
+        )
+
+    def test_a_grown_worker_trims_and_reports_memory_after_trimming(self):
+        self.install(split_tokens)
+        above = server.TRIM_ABOVE_BYTES + 1
+        self.resident = [100 * server.MIB, above, 900 * server.MIB]
+        sent, _ = self.run_worker(inbox=[["one"], ["two"]])
+        self.assertEqual(sent[1:], [("ok", [["one"]], 100 * server.MIB), ("ok", [["two"]], 900 * server.MIB)])
+        self.assertEqual(self.trims, [0])
+
+    def test_without_malloc_trim_memory_is_still_reported(self):
+        self.install(split_tokens)
+        self.resident = [server.TRIM_ABOVE_BYTES + 1]
+        with mock.patch.object(server, "_malloc_trim", lambda: None):
+            sent, _ = self.run_worker(inbox=[["one"]])
+        self.assertEqual(sent[1], ("ok", [["one"]], server.TRIM_ABOVE_BYTES + 1))
 
     def test_an_empty_warm_up_fails_closed(self):
         self.install(lambda _texts: [[]])
@@ -830,8 +1018,13 @@ class WorkerBodyTest(unittest.TestCase):
             return [text.split() for text in texts]
 
         self.install(tokenizer)
+        self.resident = [800 * server.MIB]
         sent, log = self.run_worker(inbox=[[secret], ["still serving"]])
-        self.assertEqual(sent[1:], [("error", None), ("ok", [["still", "serving"]])])
+        # A failed pass reports memory too: it may be why the pass failed.
+        self.assertEqual(
+            sent[1:],
+            [("error", None, 800 * server.MIB), ("ok", [["still", "serving"]], 800 * server.MIB)],
+        )
         self.assertIn("RuntimeError", log)
         self.assertNotIn(secret, log)
 
@@ -872,6 +1065,8 @@ class Tokenizer:
                 out.append(["slept"])
             elif text == "env":
                 out.append([os.environ.get(name, "") for name in THREADS] + [str(os.getpid())])
+            elif text == "arena":
+                out.append([os.environ.get("MALLOC_ARENA_MAX", "")])
             elif text == "crash":
                 os._exit(3)
             elif text.startswith("raise:"):
@@ -924,7 +1119,7 @@ class EndToEndTest(unittest.TestCase):
             name: value
             for name, value in os.environ.items()
             if not name.startswith("PYTHON")
-            and name not in ("MAX_CONCURRENT_INFERENCES", *server.THREAD_ENV_NAMES)
+            and name not in ("MAX_CONCURRENT_INFERENCES", "MALLOC_ARENA_MAX", *server.THREAD_ENV_NAMES)
         }
         env.update(
             PORT=str(self.port),
@@ -1006,6 +1201,11 @@ class EndToEndTest(unittest.TestCase):
             (pool["workers"], pool["liveWorkers"], pool["threadsPerWorker"], pool["reservedForInteractive"]),
             (3, 3, 2, 1),
         )
+        self.assertEqual(
+            (pool["recycledWorkers"], pool["recycleAboveBytes"], pool["maxPassCharacters"]),
+            (0, server.WORKER_MEMORY_BYTES, server.MAX_PASS_CHARACTERS),
+        )
+        self.assertEqual(sorted(pool["residentBytes"]), ["0", "1", "2"])
         status, tokens, headers = self.http("POST", "/tokenize", {"text": "吴恩达 与 人工智能", "coarse": True})
         self.assertEqual((status, tokens), (200, [["吴恩达", "与", "人工智能"]]))
         self.assertEqual(headers["content-type"], "application/json; charset=utf-8")
@@ -1014,6 +1214,9 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(self.http("GET", "/nope")[:2], (404, {"error": "not found"}))
         status, body, _ = self.http("POST", "/tokenize", raw=b"x" * 2048)
         self.assertEqual((status, body), (413, {"error": "request body exceeds 1024 bytes"}))
+
+    def test_workers_start_with_fewer_malloc_arenas(self):
+        self.assertEqual(self.batch(["arena"])[:2], (200, {"batch": [["2"]]}))
 
     def test_each_worker_is_its_own_process_with_an_even_thread_share(self):
         calls = [self.in_background(self.batch, ["sleep:0.4", "env"], True) for _ in range(3)]

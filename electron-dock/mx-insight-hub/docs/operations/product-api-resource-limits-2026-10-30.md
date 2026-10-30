@@ -42,7 +42,7 @@ LCY-delta 的显式最大豁免继续覆盖历史 Hub 配额、供应商普通�
 
 ## 负载证据与调参
 
-目前没有本次线上样本，不能断言卡在 HanLP，也没有自动升高任何线上配置。供应商实时搜索与本地检索是不同链路；HanLP 在本地检索分析/索引中参与，当前 mx-common 源码支持多 worker 和交互保留槽，不能沿用旧“固定单槽”说明推定现网能力。
+已有用户提供的线上样本：2026-10-30 的运行中 HanLP Pod 存在累计 OOM kill，详见下方。尚无 Public API 的同窗排队/延迟证据，不能把全部调用瓶颈归因于 HanLP；没有自动升高任何线上配置。供应商实时搜索与本地检索是不同链路；HanLP 在本地检索分析/索引中参与，当前 mx-common 源码支持多 worker 和交互保留槽，不能沿用旧“固定单槽”说明推定现网能力。
 
 同步此文件所在代码到服务器后，在 Hub 目录执行：
 
@@ -50,7 +50,7 @@ LCY-delta 的显式最大豁免继续覆盖历史 Hub 配额、供应商普通�
 bash scripts/inspect-resource-load.sh
 ```
 
-脚本只读取 Kubernetes CPU/内存以及三次间隔 10 秒的 Admin 数据压力和 HanLP `/health`，不推理、不搜索、不读 Secrets、不打印 Token。Admin 压力只代表被采样的 Admin 进程，**不是 Public 四进程合计**；HanLP health 的 pool 是服务共享状态。缺失指标标为 unavailable，不能当成零负载。
+脚本只读取 Kubernetes CPU/内存、Public/Admin/HanLP 容器各两次间隔 10 秒的 cgroup 计数，以及三次间隔 10 秒的 Admin 数据压力和 HanLP `/health`，不推理、不搜索、不读 Secrets、不打印 Token。Admin 压力只代表被采样的 Admin 进程，**不是 Public 四进程合计**；HanLP health 的 pool 是服务共享状态。缺失指标标为 unavailable，不能当成零负载。
 
 判断顺序：
 
@@ -66,3 +66,20 @@ migration `171_resource_admission.sql` 与 Public/Admin/UI 一起发布。旧进
 已覆盖资源隔离、LCY 与普通 Key、令牌恢复、拒绝不消耗其他范围额度、配置更新时不丢活动名额、超期配置、零逐请求 DB 查询、CAS 与审计不可修改、真实 HTTP 断开后的结算生命周期。浏览器用真实 React 构建与内存合成管理响应验证 LCY 产品规则保存/重新读取以及 API 选择，无线上写入。
 
 验证结果：相关回归 151 项通过、2 项真实 PostgreSQL 环境测试跳过；成本权限 SQL 和 migration 171 另以 PGlite 执行。类型检查及构建通过。合成浏览器截图见 `/tmp/hub-resource-limits-ui.png`。
+
+Metrics API 不可用时，`kubectl top` 标为 unavailable 后继续，不要求安装 Metrics Server。cgroup 读取不依赖 Metrics API：两次 `cpu.stat` 的 `usage_usec` 差除以间隔微秒得到平均使用 CPU 核数；同时看 throttling 增量和 memory.current / memory.max。v1 cpuacct.usage 单位为纳秒。缺少文件/容器/权限只表示该样本不可用；非 namespace cgroup 挂载可能显示祖先 cgroup，不能直接认定是该容器负载。采样约需 50 秒加 API 读取时间。所有探测仍是只读。
+
+## 用户提供的线上证据：HanLP cgroup v1 OOM
+
+2026-10-30 用户逐 Pod 采样：
+
+- `mx-common-hanlp-59c745b6c4-6rzwd`：Running、1/1、容器 restart 0，运行约 2 天 21 小时。
+- `mx-common-hanlp-6db4799d44-cn9mn`：ContainerStatusUnknown、0/1、无 IP；这是历史异常 Pod，不能算作第二个可用实例。尚未修改或清理它。
+- 运行中 Pod：memory.usage_in_bytes=19624402944（18.28 GiB），limit=34359738368（32 GiB），max_usage=34362466304（约 32 GiB）。memory.failcnt=5，memory.oom_control 的 under_oom=0、oom_kill=35。
+- 同一 Pod 的 localhost health：5/5 worker 存活、3 线程/worker、保留 1 个交互 worker、两个等待队列为 0、replacedWorkers=35。
+
+结论：已确认该 cgroup 发生过 OOM kill；替换计数与 OOM kill 数一致，强烈支持 worker 被 OOM 杀死后恢复的解释。不是容器重启，也不是 FutureWarning 导致退出的证据。采样时未处于 OOM，空队列不能证明没有历史故障或 Public 请求时延充足。计数为累计值，不能推出 35 次都发生在当天；failcnt 与 oom_kill 计数口径不同。
+
+当前源码：5 worker、16 CPU、32 GiB；请求最多 256 文本、每文本截取到 20,000 字符，模型推理批次峰值值得检查。此配置是本地源码，不能当作线上全部环境变量已核实。不要仅调低 MAX_BATCH_TEXTS：超出它的现有客户端批量会直接返回 400。后续优先核对节点 MemAvailable 与按进程 RSS，再选择保持外部合同的内部推理分批或适当调整执行并发/内存；暂不增大并发、不自动扩容、不改线上配置。
+
+2026-10-31 后续：采用了“保持外部合同的内部推理分批”，并加了空闲时按常驻内存回收 worker，未增加并发或内存上限。详见 [HanLP 第三轮](hanlp-query-concurrency-2026-10-20.md#第三轮2026-10-31worker-内存回收)。

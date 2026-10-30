@@ -1,5 +1,5 @@
 import { AppError } from '../core/errors.mjs'
-import { isHubRateLimitExempt, isInternalTraffic, isLcyHubLimitIdentity } from '../core/internal-traffic-policy.mjs'
+import { isHubRateLimitExempt, isInternalTraffic, isLcyHubLimitIdentity, isLcySupplierPriority } from '../core/internal-traffic-policy.mjs'
 
 const contextFor = key => ({ apiKey: key, tenant: { id: key.tenantId }, consumer: { id: key.consumerId } })
 const fromRow = row => row && ({
@@ -9,7 +9,9 @@ const fromRow = row => row && ({
   hubRateLimitExempt: row.hub_rate_limit_exempt ?? null,
   hubRateLimitRevision: Number(row.hub_rate_limit_revision ?? 0),
   hubRateLimitUpdatedAt: row.hub_rate_limit_updated_at,
+  hubSupplierAdmission: row.hub_supplier_admission === 'priority' ? 'priority' : 'bypass',
 })
+const SUPPLIER_ADMISSION = ['bypass', 'priority']
 
 function assertSupported(key) {
   if (!key) throw new AppError(404, 'api_key_not_found', 'API key not found')
@@ -35,6 +37,9 @@ function project(store, key) {
     policyVersion: 2,
     hubRateLimitExempt: key.hubRateLimitExempt ?? null,
     effectiveExempt: isHubRateLimitExempt(context),
+    // Saved on its own; it only takes effect while the exemption is on.
+    hubSupplierAdmission: key.hubSupplierAdmission === 'priority' ? 'priority' : 'bypass',
+    effectiveSupplierPriority: isLcySupplierPriority(context),
     inheritedQuotaExempt: inherited && isInternalTraffic(store, context),
     source: inherited ? 'legacy' : 'explicit',
     revision: Number(key.hubRateLimitRevision ?? 0),
@@ -67,21 +72,24 @@ export async function readKeyHubLimits(store, id) {
 export async function saveKeyHubLimits(store, id, input, { actor, requestId } = {}) {
   if (actor !== 'admin-token') throw new AppError(403, 'admin_token_required', 'Only the Hub admin token may change Hub limits')
   if (!input || typeof input !== 'object' || Array.isArray(input)
-    || Object.keys(input).some(field => !['hubRateLimitExempt', 'revision', 'reason'].includes(field))
+    || Object.keys(input).some(field => !['hubRateLimitExempt', 'hubSupplierAdmission', 'revision', 'reason'].includes(field))
     || typeof input.hubRateLimitExempt !== 'boolean'
+    || (input.hubSupplierAdmission !== undefined && !SUPPLIER_ADMISSION.includes(input.hubSupplierAdmission))
     || !Number.isSafeInteger(input.revision) || input.revision < 0 || input.revision >= 2147483647
     || typeof input.reason !== 'string' || !input.reason.trim() || input.reason.trim().length > 500
     || ![id, requestId].every(value => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value || ''))) {
-    throw new AppError(400, 'invalid_key_hub_limits', 'A boolean switch, current revision and a reason of 1–500 characters are required')
+    throw new AppError(400, 'invalid_key_hub_limits', 'A boolean switch, an optional supplier admission of bypass or priority, current revision and a reason of 1–500 characters are required')
   }
   const reason = input.reason.trim()
+  // Older clients send only the exemption; they keep the stored supplier mode.
+  const supplierAdmission = key => input.hubSupplierAdmission ?? (key.hubSupplierAdmission === 'priority' ? 'priority' : 'bypass')
   const apply = key => {
     assertSupported(key)
     assertAvailable(key)
     if (Number(key.hubRateLimitRevision ?? 0) !== input.revision) {
       throw new AppError(409, 'api_key_hub_limits_changed', 'Hub limits changed; reload before saving')
     }
-    return { ...key, hubRateLimitExempt: input.hubRateLimitExempt,
+    return { ...key, hubRateLimitExempt: input.hubRateLimitExempt, hubSupplierAdmission: supplierAdmission(key),
       hubRateLimitRevision: input.revision + 1, hubRateLimitUpdatedAt: new Date().toISOString() }
   }
   if (!store.pool) {
@@ -90,11 +98,12 @@ export async function saveKeyHubLimits(store, id, input, { actor, requestId } = 
     const key = stored && { ...stored, tenantStatus: store.tenants.get(stored.tenantId)?.status,
       consumerStatus: store.consumers.get(stored.consumerId)?.status }
     const next = apply(key)
-    Object.assign(stored, { hubRateLimitExempt: next.hubRateLimitExempt,
+    Object.assign(stored, { hubRateLimitExempt: next.hubRateLimitExempt, hubSupplierAdmission: next.hubSupplierAdmission,
       hubRateLimitRevision: next.hubRateLimitRevision, hubRateLimitUpdatedAt: next.hubRateLimitUpdatedAt })
     store.keyHubLimitEvents ||= []
     store.keyHubLimitEvents.push({ apiKeyId: id, previousExempt: key.hubRateLimitExempt ?? null,
-      nextExempt: next.hubRateLimitExempt, revision: next.hubRateLimitRevision, reason, actor, requestId })
+      nextExempt: next.hubRateLimitExempt, previousSupplierAdmission: key.hubSupplierAdmission ?? 'bypass',
+      nextSupplierAdmission: next.hubSupplierAdmission, revision: next.hubRateLimitRevision, reason, actor, requestId })
     return project(store, next)
   }
   const client = await store.pool.connect()
@@ -106,12 +115,14 @@ export async function saveKeyHubLimits(store, id, input, { actor, requestId } = 
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${current.tenantId}:${current.consumerId}:plan-month`])
     const key = await readKey(store, id, client, true)
     const next = apply(key)
-    const { rows } = await client.query(`UPDATE api_keys SET hub_rate_limit_exempt=$2,
+    const { rows } = await client.query(`UPDATE api_keys SET hub_rate_limit_exempt=$2, hub_supplier_admission=$4,
       hub_rate_limit_revision=$3, hub_rate_limit_updated_at=clock_timestamp() WHERE id=$1 RETURNING *`,
-    [id, next.hubRateLimitExempt, next.hubRateLimitRevision])
+    [id, next.hubRateLimitExempt, next.hubRateLimitRevision, next.hubSupplierAdmission])
     await client.query(`INSERT INTO control.api_key_hub_limit_events
-      (api_key_id,previous_exempt,next_exempt,revision,reason,actor,request_id) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-    [id, key.hubRateLimitExempt, next.hubRateLimitExempt, next.hubRateLimitRevision, reason, actor, requestId])
+      (api_key_id,previous_exempt,next_exempt,previous_supplier_admission,next_supplier_admission,revision,reason,actor,request_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [id, key.hubRateLimitExempt, next.hubRateLimitExempt, key.hubSupplierAdmission, next.hubSupplierAdmission,
+      next.hubRateLimitRevision, reason, actor, requestId])
     await client.query('COMMIT')
     return project(store, fromRow(rows[0]))
   } catch (error) {
