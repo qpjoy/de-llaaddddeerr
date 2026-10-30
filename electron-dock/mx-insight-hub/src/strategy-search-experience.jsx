@@ -107,12 +107,22 @@ export function StrategySearchExperience({ initialResult, strategySession, onRes
           </button>)}</div>
           {!platforms.length ? <p>当前 Key 没有可调用的{accountOperation ? '账号接口' : '内容搜索'}平台。请检查 Key 与业务授权。</p> : null}
         </fieldset>
+        {twitterAccount ? <DropdownField label="账号查询方式" value={form.twitterAccountField || 'auto'} disabled={busy || checking || Boolean(unresolved)} onChange={twitterAccountField => change({ twitterAccountField })}
+          options={[
+            { value: 'auto', label: '自动识别 · ID / 用户名（默认）' },
+            { value: 'username', label: 'username · 指定用户名' },
+            { value: 'userId', label: 'userId · 指定账号 ID' },
+            { value: 'user_id', label: 'user_id · 账号 ID 兼容字段' },
+            { value: 'uid', label: 'uid · 账号 ID 兼容字段' },
+            { value: 'url', label: 'url · 账号主页链接' },
+            ...(form.twitterAccountField === 'original' ? [{ value: 'original', label: `原请求参数 · ${form.accountField || 'username'}（保留重放）` }] : []),
+          ]} /> : null}
         {accountOperation && !twitterAccount ? <DropdownField label="账号标识字段" value={form.accountField || 'username'} disabled={busy || checking || Boolean(unresolved)} onChange={accountField => change({ accountField })}
           options={[{ value: 'username', label: 'username · 用户名' }, { value: 'userId', label: 'userId · 平台账号 ID' }, { value: 'user_id', label: 'user_id · 兼容字段' }, { value: 'uid', label: 'uid · 兼容字段' }]} /> : null}
         <div className="mih-strategy-query-row"><label className="qp-field">{accountOperation ? '账号标识' : '关键词'}<input className="qp-input" placeholder={twitterAccount ? '输入 Twitter / X 用户名或账号 ID' : accountOperation ? '输入该平台的用户名或账号 ID' : `在${currentPlatform?.label || '目标平台'}搜索关键词`} maxLength={500} value={accountOperation ? form.account || '' : form.query} disabled={busy || checking || Boolean(unresolved)} onChange={event => change(accountOperation ? { account: event.target.value } : { query: event.target.value })} /></label>
           {operation !== 'user-info' ? <DropdownField label="每页数量" value={String(form.pageSize)} disabled={busy || checking || Boolean(unresolved) || form.platform.startsWith('wechat_')} onChange={value => change({ pageSize: Number(value) })} options={(accountOperation ? [10, 20, 50, 100, 500] : [10, 20, 50, 100]).map(value => ({ value: String(value), label: `${value} 条` }))} /> : null}
           <button className="qp-button qp-button--primary" disabled={!canSend}><MagnifyingGlass size={18} aria-hidden="true" />{busy ? '正在查询…' : attempt ? '重放 / 重试原查询' : accountOperation ? '查询账号' : '搜索'}</button></div>
-        {twitterAccount ? <p className="mih-strategy-search-note">自动识别账号：纯数字按账号 ID 查询（1–19 位）；用户名为 1–15 位英文字母、数字或下划线。纯数字用户名请加 @。</p> : null}
+        {twitterAccount ? <p className="mih-strategy-search-note">默认自动识别：纯数字按账号 ID 查询（1–19 位），其他文本按用户名查询。可手动指定用户名、ID 或主页链接；用户名为 1–15 位英文字母、数字或下划线，不是显示昵称。纯数字用户名请加 @ 或选择 username。</p> : null}
         {twitterSearch ? <fieldset disabled={busy || checking || Boolean(unresolved)} className="mih-strategy-twitter-options">
           <legend>Twitter 搜索条件</legend>
           <div className="mih-strategy-twitter-fields">

@@ -24,7 +24,7 @@ test('screenshot aliases preserve nonnumeric Twitter user_id as username and lar
 })
 
 test('bare numeric Twitter identifiers use ID lookup across aliases without losing precision', () => {
-  for (const operation of ['crawl', 'user-info']) for (const value of ['42', '12345', '1234567890123456789']) {
+  for (const operation of ['crawl', 'user-info']) for (const value of ['42', '12345', '1234567890123456789', '1952056883877212160']) {
     const expected = normalize(operation, { platform: 'twitter', userId: value })
     for (const alias of [
       { username: value }, { usernames: [value] }, { userId: value }, { user_id: value }, { uid: value }, { userIds: [value] },

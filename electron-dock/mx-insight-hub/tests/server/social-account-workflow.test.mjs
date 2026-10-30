@@ -798,8 +798,8 @@ test('previous 20-to-30-digit ID receipts replay without allowing a new oversize
   })
 })
 
-test('19-digit Twitter identifiers in username HTTP fields use ID lookup and preserve exact strings', async t => {
-  const id = '1234567890123456789'
+test('reported 19-digit Twitter identifier uses ID lookup and returns profile and posts over HTTP', async t => {
+  const id = '1952056883877212160'
   const h = await harness(t, { fetchImpl: call => Response.json(call.url.pathname.includes('/tweets')
     ? timeline(['1'], null, 'actual_account', id) : profile('actual_account', id)) })
   const server = createServer(createApp({ service: h.service, store: h.store, adapter: {}, adminToken: null,
@@ -813,6 +813,11 @@ test('19-digit Twitter identifiers in username HTTP fields use ID lookup and pre
     const body = await response.json()
     assert.equal(response.status, 200, JSON.stringify(body))
     assert.equal(JSON.parse(body.data.raw_info)[0].user_id, id)
+    if (operation === 'crawl') {
+      assert.equal(body.data.items.length, 1, 'known supplier post is delivered, not an empty result')
+      assert.equal(body.data.items[0].id, 'twitter:1')
+      assert.equal(body.data.items[0].author.id, id)
+    }
   }
   assert.deepEqual(h.calls.map(call => call.url.pathname), ['/user/users/by/ids', `/user/${id}/tweets`, '/user/users/by/ids'])
   assert.ok(h.calls.filter(call => call.url.pathname === '/user/users/by/ids').every(call => call.params.ids === id))

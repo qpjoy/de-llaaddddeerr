@@ -152,7 +152,7 @@ test('account composer follows a short page cursor with a new identity and keeps
   environment.identity = 'account-key'
   const cell = createStrategySearchCell('twitter'), session = new Map([['account-key', cell]]), sent = []
   let operation = 'crawl'
-  cell.update({ form: { ...cell.getSnapshot().form, accountField: 'user_id', account: 'ui_batch_019', pageSize: 500 } })
+  cell.update({ form: { ...cell.getSnapshot().form, accountField: 'user_id', twitterAccountField: 'original', account: 'ui_batch_019', pageSize: 500 } })
   environment.send = async (_key, input, idem) => {
     sent.push({ input, idem })
     return { payload: { data: { platform: 'twitter', items: [], pageInfo: { hasMore: !input.body.cursor, nextCursor: input.body.cursor ? null : 'opaque-short-page' } } }, evidence: { requestId: `fixture-${sent.length}` } }
@@ -193,10 +193,10 @@ test('Twitter account input needs no field selection and preserves identifier st
     assert.equal(nodes(render()).find(node => node.props?.label === '账号标识字段'), undefined)
     assert.match(label(render()), /纯数字按账号 ID 查询（1–19 位）/u)
     assert.match(label(render()), /纯数字用户名请加 @/u)
-    accountInput().props.onChange({ target: { value: '1234567890123456789' } })
+    accountInput().props.onChange({ target: { value: '1952056883877212160' } })
     assert.equal(sent.length, 0, 'typing an account never dispatches')
     await submit()
-    assert.deepEqual(sent[0].input.body, { platform: 'twitter', username: '1234567890123456789' })
+    assert.deepEqual(sent[0].input.body, { platform: 'twitter', userId: '1952056883877212160' })
     await submit()
     assert.equal(sent[1].idem, sent[0].idem, 'same account keeps the original request identity')
     accountInput().props.onChange({ target: { value: '@12345' } })
@@ -211,7 +211,47 @@ test('Twitter account input needs no field selection and preserves identifier st
     button(render(), 'Twitter / X').props.onClick()
     assert.equal(nodes(render()).find(node => node.props?.label === '账号标识字段'), undefined)
     await submit()
-    assert.deepEqual(sent[3].input.body, { platform: 'twitter', user_id: '@12345' }, 'hiding the selector never rewrites an existing alias')
+    assert.deepEqual(sent[3].input.body, { platform: 'twitter', username: '@12345' }, 'another platform field does not override Twitter auto detection')
+  } finally { environment.access = previousAccess }
+})
+
+test('manual Twitter account controls route explicitly and stay locked on an uncertain request', async () => {
+  const { StrategySearchExperience } = await view
+  const previousAccess = environment.access
+  environment.access = { platforms: ['twitter'], capabilities: ['social.content.crawl', 'social.profile.get'] }
+  environment.identity = 'manual-account-key'
+  const cell = createStrategySearchCell('twitter'), session = new Map([['manual-account-key', cell]]), sent = []
+  environment.send = async (_key, input, idem) => {
+    sent.push({ input, idem })
+    return { payload: { data: { platform: 'twitter', items: [], pageInfo: { hasMore: false } } }, evidence: { requestId: 'manual-account' } }
+  }
+  const render = () => StrategySearchExperience({ strategySession: session, operation: 'crawl' })
+  const mode = () => nodes(render()).find(node => node.props?.label === '账号查询方式')
+  const account = value => nodes(render()).find(node => node.type === 'input' && node.props.placeholder?.includes('账号 ID')).props.onChange({ target: { value } })
+  const submit = async () => { nodes(render()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} }); await flush() }
+  try {
+    assert.equal(mode().props.value, 'auto')
+    account('12345'); mode().props.onChange('username')
+    assert.equal(sent.length, 0)
+    await submit()
+    assert.deepEqual(sent[0].input.body, { platform: 'twitter', username: '@12345', pageSize: 20 })
+    await submit()
+    assert.equal(sent[1].idem, sent[0].idem)
+    mode().props.onChange('user_id')
+    assert.equal(sent.length, 2)
+    await submit()
+    assert.deepEqual(sent[2].input.body, { platform: 'twitter', user_id: '12345', pageSize: 20 })
+    assert.notEqual(sent[2].idem, sent[0].idem)
+    account('1952056883877212160'); mode().props.onChange('username')
+    assert.equal(searchButton(render()).props.disabled, true)
+    await submit()
+    assert.equal(sent.length, 3, 'invalid manual handle cannot dispatch')
+    mode().props.onChange('auto')
+    assert.equal(searchButton(render()).props.disabled, false)
+    environment.send = async () => { throw unknown() }
+    await submit()
+    assert.equal(mode().props.disabled, true)
+    assert.equal(searchButton(render()).props.disabled, true)
   } finally { environment.access = previousAccess }
 })
 

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { strategySearchPlatforms, strategySearchBody, strategySearchForm, strategyPageInfo, uncertainStrategySearch, safeStrategyUrl } from '../../src/strategy-search-experience-model.js'
-import { strategyAccountPlatforms, strategyAccountBody, strategyOperationPath, strategyResultMatches } from '../../src/strategy-search-experience-model.js'
+import { strategyAccountPlatforms, strategyAccountBody, strategyAccountForm, strategyOperationPath, strategyResultMatches } from '../../src/strategy-search-experience-model.js'
 
 const access = { platforms: ['tiktok', 'social', 'xiaohongshu', 'telegram'], capabilities: ['native.wechat.search.search'] }
 const platforms = strategySearchPlatforms(access)
@@ -133,7 +133,7 @@ test('account composer uses explicit operation grants, legacy identity aliases a
   const platforms = strategyAccountPlatforms(access, 'crawl')
   assert.deepEqual(platforms.map(row => row.platform), ['twitter', 'linkedin'])
   assert.equal(strategyAccountPlatforms(access, 'user-info').length, 0)
-  const body = strategyAccountBody('crawl', { platform: 'twitter', accountField: 'user_id', account: ' ui_batch_019 ', pageSize: 500 }, platforms, 'opaque-cursor')
+  const body = strategyAccountBody('crawl', { platform: 'twitter', accountField: 'user_id', twitterAccountField: 'original', account: ' ui_batch_019 ', pageSize: 500 }, platforms, 'opaque-cursor')
   assert.deepEqual(body, { platform: 'twitter', user_id: 'ui_batch_019', pageSize: 500, cursor: 'opaque-cursor' })
   assert.equal(strategyOperationPath('crawl'), '/api/v1/data/social/crawl')
   assert.equal(strategyOperationPath('user-info'), '/api/v1/data/social/user-info')
@@ -152,4 +152,28 @@ test('account continuation belongs to its exact endpoint and account, not merely
   assert.equal(strategyResultMatches(result, 'different-key', input), false)
   const page = { hasMore: true, nextCursor: 'continue-even-when-empty' }
   assert.equal(strategyPageInfo({ data: { items: [], page } }), page)
+})
+
+test('Twitter auto and manual fields resolve long IDs and numeric handles without changing imported requests', () => {
+  const platforms = [{ platform: 'twitter' }], id = '1952056883877212160'
+  const build = (account, twitterAccountField = 'auto', operation = 'user-info') => strategyAccountBody(operation,
+    { platform: 'twitter', account, twitterAccountField, pageSize: 20 }, platforms)
+  for (const mode of ['auto', 'userId', 'user_id', 'uid']) {
+    const field = mode === 'auto' ? 'userId' : mode
+    assert.deepEqual(build(id, mode), { platform: 'twitter', [field]: id })
+    assert.deepEqual(build(id, mode, 'crawl'), { platform: 'twitter', [field]: id, pageSize: 20 })
+  }
+  assert.deepEqual(build('Some_User'), { platform: 'twitter', username: 'Some_User' })
+  assert.deepEqual(build('12345', 'username'), { platform: 'twitter', username: '@12345' })
+  assert.deepEqual(build('@12345'), { platform: 'twitter', username: '@12345' })
+  assert.deepEqual(build('https://x.com/12345', 'url'), { platform: 'twitter', url: 'https://x.com/12345' })
+  for (const [account, mode] of [[id, 'username'], ['name', 'userId'], ['1'.repeat(20), 'auto'],
+    ['a'.repeat(16), 'auto'], ['显示昵称', 'auto'], ['https://evil.example/user', 'url'], ['https://x.com/user/status/1', 'url']]) {
+    assert.throws(() => build(account, mode))
+  }
+  for (const original of [{ username: id }, { user_id: 'Some_User' }, { username: '12345' }, { profileUrl: 'https://x.com/12345' }]) {
+    const body = { platform: 'twitter', ...original }
+    assert.deepEqual(strategyAccountBody('user-info', { platform: 'twitter', ...strategyAccountForm(body) }, platforms), body,
+      'restoring a receipt must not rewrite its field or numeric handle and cause a new purchase')
+  }
 })
