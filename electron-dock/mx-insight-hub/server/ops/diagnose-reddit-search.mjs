@@ -3,9 +3,10 @@
 // GraphQL type names and counts) and replays the installed parser. No values,
 // text, URLs or cursors leave restricted storage; no supplier call.
 import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-export const REVISION = 'reddit-search-shape.v3'
+export const REVISION = 'reddit-search-shape.v4'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const KEY = /^_{0,2}[A-Za-z][A-Za-z0-9_]{0,40}$/u
 const TYPE_NAME = /^[A-Za-z][A-Za-z0-9_]{0,60}$/u
@@ -31,9 +32,10 @@ export function noticeClass(node) {
 // Mirror redditHidesPost's first matching guard without emitting any values.
 // A depth refusal is a conservative bound, not evidence of an actual post.
 const POST_KEYS = new Set(['post', 'posts', 'postTitle', 'permalink', 'selftext', 'subredditPost', 'profilePost'])
-export function unknownNodeGuard(node) {
+export function unknownNodeGuard(node, { trackingContextOnly = false } = {}) {
   let visited = 0
   const ignoredTrackingContexts = []
+  const ignoredTelemetry = []
   const behaviors = node?.__typename === 'SearchSpellCorrectionApplied' ? ['corrected', 'original']
     : node?.__typename === 'SearchBanner' ? ['cta', 'dismiss'] : null
   const field = key => KEY.test(key) ? key : `key-sha256:${createHash('sha256').update(key).digest('hex').slice(0, 12)}`
@@ -41,6 +43,12 @@ export function unknownNodeGuard(node) {
     if (++visited > 20000) return { state: 'inspection_truncated', reason: 'node_budget', path }
     const reject = reason => ({ state: 'guard_rejects', reason, path, depth, valueType: kind(value) })
     if (depth > 6) return reject('depth_limit')
+    if (!trackingContextOnly && node?.__typename === 'SearchSpellCorrectionApplied'
+      && (path.length === 1 && path[0] === 'telemetry'
+        || path.length === 3 && path[0] === 'behaviors' && behaviors.includes(path[1]) && path[2] === 'telemetry')) {
+      ignoredTelemetry.push(path)
+      return null
+    }
     if (behaviors && (path.length === 2 && path[0] === 'telemetry' && path[1] === 'trackingContext'
       || path.length === 4 && path[0] === 'behaviors' && behaviors.includes(path[1])
         && path[2] === 'telemetry' && path[3] === 'trackingContext')) {
@@ -64,7 +72,7 @@ export function unknownNodeGuard(node) {
     }
     return null
   }
-  return { ...(visit(node, 0, []) || { state: 'guard_accepts' }), visited, ignoredTrackingContexts }
+  return { ...(visit(node, 0, []) || { state: 'guard_accepts' }), visited, ignoredTrackingContexts, ignoredTelemetry }
 }
 
 // Mirrors the installed parser's node walk: post, children, or a known non-post.
@@ -87,6 +95,8 @@ function classify(node, depth = 0) {
   // Only the class leaves storage, never the notice text.
   if (shape.typename === 'SearchErrorMessage') return { branch: 'notice', ...shape, noticeClass: noticeClass(node) }
   return { branch: 'unrecognized', ...shape, guard: unknownNodeGuard(node),
+    ...(shape.typename === 'SearchSpellCorrectionApplied'
+      ? { previousTrackingContextGuard: unknownNodeGuard(node, { trackingContextOnly: true }) } : {}),
     nested: Object.fromEntries(shape.keys.filter(key => object(node[key]) || Array.isArray(node[key])).slice(0, 10)
       .map(key => [key, Array.isArray(node[key]) ? { array: node[key].length, firstKeys: keyNames(node[key][0]), firstTypename: typeName(node[key][0]) }
         : { typename: typeName(node[key]), keys: keyNames(node[key]) }])) }
@@ -106,7 +116,8 @@ export function inspectRedditArchive(archive, parse = null) {
   const nodes = edges.slice(0, MAX_EDGES).map(edge => classify(edge?.node))
   const branches = {}
   for (const node of nodes) branches[node.branch] = (branches[node.branch] || 0) + 1
-  return { state: 'archive_verified', bodySize: bytes.length, envelopeCode: Number.isSafeInteger(payload?.code) ? payload.code : null,
+  return { state: 'archive_verified', bodySize: bytes.length, bodySha256: archive.body_sha256,
+    envelopeCode: Number.isSafeInteger(payload?.code) ? payload.code : null,
     dataPath: data === root ? 'data' : 'data.data', dataKeys: keyNames(data), mainKind: kind(main), mainKeys: keyNames(main),
     pageInfoKeys: keyNames(main?.pageInfo), edgeCount: Array.isArray(main?.edges) ? edges.length : kind(main?.edges),
     edgesTruncated: edges.length > MAX_EDGES, branches, nodes, parser: parse ? parse(payload, archive.captured_at) : null }
@@ -118,7 +129,9 @@ function parser(contract) {
     try {
       const result = contract.projectTikHubContentSearch({ publicBody: { data: payload?.data,
         meta: { capturedAt: new Date(capturedAt || Date.now()).toISOString() } } }, request)
-      return { state: 'installed_accepts', itemCount: result.items.length, nonPostCount: result.nonPostCount ?? 0 }
+      return { state: 'installed_accepts', itemCount: result.items.length, nonPostCount: result.nonPostCount ?? 0,
+        hasMore: result.providerPage.hasMore,
+        warningCodes: (result.providerPage.warnings || []).map(warning => warning.code).filter(code => REASON.test(code || '')) }
     } catch (error) {
       return { state: 'installed_rejects', reason: REASON.test(error?.message || '') ? error.message : 'other' }
     }
@@ -154,8 +167,10 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     if (typeof env.DATABASE_URL !== 'string' || !env.DATABASE_URL.trim()) throw fail('database_url_required')
     const { Pool } = await import('pg')
     const contract = await source('server/contracts/tikhub-content-search.mjs').catch(() => null)
+    const parserModuleSha256 = contract ? await readFile(new URL('server/contracts/tikhub-content-search.mjs', pathToFileURL(`${process.cwd()}/`)))
+      .then(bytes => createHash('sha256').update(bytes).digest('hex')).catch(() => null) : null
     pool = new Pool({ connectionString: env.DATABASE_URL, max: 1, application_name: REVISION, connectionTimeoutMillis: 5000 })
-    process.stdout.write(`${JSON.stringify(await diagnoseRedditSearch(pool, args, { contract }), null, 2)}\n`)
+    process.stdout.write(`${JSON.stringify({ ...await diagnoseRedditSearch(pool, args, { contract }), parserModuleSha256 }, null, 2)}\n`)
   } catch (error) {
     const known = new Set(['invalid_call_ids', 'database_url_required', 'calls_not_found'])
     process.stdout.write(`${JSON.stringify({ diagnosticRevision: REVISION, errorCode: known.has(error?.diagnosticCode) ? error.diagnosticCode : 'diagnostic_unavailable' })}\n`)

@@ -444,19 +444,22 @@ function standardCursorPage({ scopes, tokenNames, flagNames, inputToken, nextNam
 // An unknown node is excluded only when nothing inside it looks like a post; a
 // hidden post still fails the page instead of being dropped silently.
 const REDDIT_POST_KEYS = new Set(['post', 'posts', 'postTitle', 'permalink', 'selftext', 'subredditPost', 'profilePost'])
-function redditWidgetTrackingContext(typename, path) {
-  const behaviors = typename === 'SearchSpellCorrectionApplied' ? ['corrected', 'original']
-    : typename === 'SearchBanner' ? ['cta', 'dismiss'] : null
-  if (!behaviors) return false
+function redditWidgetTelemetry(typename, path) {
+  if (typename === 'SearchSpellCorrectionApplied') {
+    return path.length === 1 && path[0] === 'telemetry'
+      || path.length === 3 && path[0] === 'behaviors' && ['corrected', 'original'].includes(path[1]) && path[2] === 'telemetry'
+  }
+  if (typename !== 'SearchBanner') return false
   return path.length === 2 && path[0] === 'telemetry' && path[1] === 'trackingContext'
-    || path.length === 4 && path[0] === 'behaviors' && behaviors.includes(path[1])
+    || path.length === 4 && path[0] === 'behaviors' && ['cta', 'dismiss'].includes(path[1])
       && path[2] === 'telemetry' && path[3] === 'trackingContext'
 }
 function redditHidesPost(value, depth = 0, widgetType = value?.__typename ?? null, path = []) {
   if (depth > 6) return true
-  // These two known widgets carry post references inside analytics contexts.
-  // Exclude only those exact metadata paths, leaving other fields fail-closed.
-  if (redditWidgetTrackingContext(widgetType, path)) return false
+  // Spelling widgets also carry deep search metadata outside trackingContext.
+  // Skip only their three telemetry subtrees without modifying the receipt;
+  // banners retain the narrower trackingContext exception.
+  if (redditWidgetTelemetry(widgetType, path)) return false
   if (Array.isArray(value)) return value.length > 200 || value.some((item, index) => redditHidesPost(item, depth + 1, widgetType, [...path, index]))
   if (!object(value)) return typeof value === 'string' && /^t3_/u.test(value)
   if (typeof value.__typename === 'string' && /Post$/u.test(value.__typename)) return true
@@ -496,6 +499,8 @@ function redditProjection(data, request, capturedAt) {
       }
       if (!recognized) {
         if (redditHidesPost(node)) throw new Error('invalid_content_search_entry')
+        if (node.__typename === 'SearchSpellCorrectionApplied') warnings.push({ code: 'reddit_spell_correction',
+          message: 'Reddit applied a spelling correction; these results may reflect a corrected search query.' })
         nonposts.push(node)
       }
     }

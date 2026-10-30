@@ -22,6 +22,7 @@ test('Reddit shape diagnostic names an unrecognized node by type and keys and re
     { node: { __typename: 'SearchModifier', modifier: { __typename: 'SpellcheckModifier', text: secret } } },
     { node: { children: [{ post: post('b') }, { community: { name: secret } }] } }]), (payload) => ({ state: replay(payload) }))
   assert.equal(receipt.state, 'archive_verified')
+  assert.match(receipt.bodySha256, /^[a-f0-9]{64}$/u)
   assert.equal(receipt.edgeCount, 3)
   assert.deepEqual(receipt.branches, { post: 1, unrecognized: 1, children: 1 })
   assert.equal(receipt.nodes[0].identity, 't3_')
@@ -41,12 +42,17 @@ test('Reddit shape diagnostic reads only TikHub Reddit calls inside a read-only 
     queries.push({ sql, params })
     assert.doesNotMatch(sql, /\b(INSERT|UPDATE|DELETE|TRUNCATE|COMMIT)\b/u)
     if (sql.includes('reddit-shape:calls')) return { rows: [{ id: '93494c87-5a7e-4c90-b0b7-51793e9a1fda', outcome: 'succeeded_unusable',
-      http_status: 200, business_code: 200, error_code: 'invalid_content_search_contract', ...archive([{ node: { post: post('a') } }]) }] }
+      http_status: 200, business_code: 200, error_code: 'invalid_content_search_contract', ...archive([
+        { node: { __typename: 'SearchSpellCorrectionApplied', telemetry: {
+          trackingContext: { post: null }, search: { scope: { a: { b: { c: { d: { e: secret } } } } } } } } },
+        { node: { children: Array.from({ length: 7 }, (_, i) => ({ post: post(`p${i}`) })) } },
+      ]) }] }
     return { rows: [] }
   }, release() { released = true } } } }
   const result = await diagnoseRedditSearch(pool, ['93494c87-5a7e-4c90-b0b7-51793e9a1fda'], { contract })
   assert.equal(result.calls[0].errorCode, 'invalid_content_search_contract')
-  assert.deepEqual(result.calls[0].receipt.parser, { state: 'installed_accepts', itemCount: 1, nonPostCount: 0 })
+  assert.deepEqual(result.calls[0].receipt.parser, { state: 'installed_accepts', itemCount: 7, nonPostCount: 1,
+    hasMore: true, warningCodes: ['reddit_spell_correction'] })
   assert.equal(queries[0].sql, 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
   assert.match(queries.find(query => query.sql.includes('reddit-shape:calls')).sql, /provider_key = 'tikhub' AND c\.endpoint_key LIKE '%reddit%'/u)
   assert.equal(queries.at(-1).sql, 'ROLLBACK')
@@ -76,7 +82,7 @@ test('unknown widget guard reports each parser rejection without exposing values
     [{ telemetry: { post: { text: secret } } }, 'post_field'],
   ]
   for (const [fields, reason] of cases) {
-    const node = { __typename: 'SearchSpellCorrectionApplied', ...fields }
+    const node = { __typename: 'UnknownWidget', ...fields }
     const result = unknownNodeGuard(node)
     assert.equal(result.state, 'guard_rejects')
     assert.equal(result.reason, reason)
@@ -114,15 +120,40 @@ test('guard mirrors narrow widget tracking-context exceptions without exposing a
     const report = inspectRedditArchive(archive([{ node }, { node: { post: post('a') } }]), payload => replay(payload))
     assert.equal(report.parser, 'accepts')
     assert.equal(report.nodes[0].guard.state, 'guard_accepts')
-    assert.deepEqual(report.nodes[0].guard.ignoredTrackingContexts, [
+    if (typename === 'SearchSpellCorrectionApplied') {
+      assert.deepEqual(report.nodes[0].guard.ignoredTelemetry, [['behaviors', behavior, 'telemetry'], ['telemetry']])
+      assert.equal(report.nodes[0].previousTrackingContextGuard.state, 'guard_accepts')
+    } else assert.deepEqual(report.nodes[0].guard.ignoredTrackingContexts, [
       ['behaviors', behavior, 'telemetry', 'trackingContext'], ['telemetry', 'trackingContext']])
     assert.doesNotMatch(JSON.stringify(report), /private-customer-text/u)
     for (const bad of [{ ...node, __typename: 'UnknownWidget' },
       { ...node, presentation: { post: post('hidden') } },
-      { ...node, telemetry: { events: [{ post: post('hidden') }] } },
       { ...node, content: { telemetry: { trackingContext: { post: post('hidden') } } } }]) {
       assert.equal(unknownNodeGuard(bad).state, 'guard_rejects')
       assert.equal(inspectRedditArchive(archive([{ node: bad }]), payload => replay(payload)).parser, 'invalid_content_search_entry')
+    }
+  }
+})
+
+test('diagnostic distinguishes deep metadata inside versus outside the previous trackingContext exception', () => {
+  const deep = { search: { scope: { a: { b: { c: { d: { e: secret } } } } } } }
+  for (const location of ['root', 'corrected', 'original']) {
+    for (const insideContext of [true, false]) {
+      const telemetry = insideContext ? { trackingContext: { post: null, ...deep } }
+        : { trackingContext: { post: null }, ...deep }
+      const node = { __typename: 'SearchSpellCorrectionApplied', ...(location === 'root' ? { telemetry }
+        : { behaviors: { [location]: { telemetry } } }) }
+      const report = inspectRedditArchive(archive([{ node }]), payload => replay(payload))
+      assert.equal(report.parser, 'accepts')
+      assert.equal(report.nodes[0].guard.state, 'guard_accepts')
+      const previous = report.nodes[0].previousTrackingContextGuard
+      assert.equal(previous.state, insideContext ? 'guard_accepts' : 'guard_rejects')
+      if (!insideContext) {
+        assert.equal(previous.reason, 'depth_limit')
+        assert.ok(previous.path.includes('search'))
+        assert.ok(previous.path.includes('scope'))
+      }
+      assert.doesNotMatch(JSON.stringify(report), /private-customer-text/u)
     }
   }
 })

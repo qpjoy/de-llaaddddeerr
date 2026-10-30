@@ -221,7 +221,37 @@ test('Reddit correction tracking context does not discard seven adjacent posts o
   assert.deepEqual(output.items.map(item => item.content_id), ids)
   assert.equal(output.nonPostCount, 1)
   assert.deepEqual(output.providerPage.nextParams, { after: 'next-page' })
+  assert.deepEqual(output.providerPage.warnings.map(warning => warning.code), ['reddit_spell_correction'])
   assert.deepEqual(payload, before)
+})
+
+test('Reddit spelling telemetry excludes deep search metadata only at the three known locations', () => {
+  const deep = { search: { scope: { a: { b: { c: { d: { e: 'analytics' } } } } } } }
+  const telemetry = { trackingContext: { post: { id: 't3_tracking' }, ...deep }, ...deep }
+  const correction = { __typename: 'SearchSpellCorrectionApplied', telemetry,
+    behaviors: { corrected: { telemetry }, original: { telemetry } } }
+  const payload = dynamic([{ node: correction }, { node: { children: Array.from({ length: 7 }, (_, i) => searchPost(`p${i}`)) } }],
+    { hasNextPage: true, endCursor: 'next' })
+  const before = structuredClone(payload)
+  const freeze = value => { if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value) } }
+  freeze(payload)
+  const output = project('reddit', payload)
+  assert.deepEqual(output.items.map(item => item.content_id), Array.from({ length: 7 }, (_, i) => `p${i}`))
+  assert.equal(output.nonPostCount, 1)
+  assert.equal(output.providerPage.hasMore, true)
+  assert.deepEqual(output.providerPage.nextParams, { after: 'next' })
+  assert.deepEqual(output.providerPage.warnings.map(warning => warning.code), ['reddit_spell_correction'])
+  assert.deepEqual(payload, before)
+  for (const node of [{ ...correction, presentation: deep },
+    { ...correction, behaviors: { corrected: { telemetry, content: { post: post('hidden') } } } },
+    { ...correction, behaviors: { other: { telemetry } } },
+    { ...correction, __typename: 'UnknownWidget' },
+    { __typename: 'SearchBanner', telemetry: deep }]) {
+    assert.throws(() => project('reddit', dynamic([{ node }])), /invalid_content_search_entry/)
+  }
+  const banner = { __typename: 'SearchBanner', telemetry: { trackingContext: deep },
+    behaviors: { cta: { telemetry: { trackingContext: deep } }, dismiss: { telemetry: { trackingContext: deep } } } }
+  assert.equal(project('reddit', dynamic([{ node: banner }])).nonPostCount, 1)
 })
 
 test('Reddit correction and banner tracking metadata permit an explicit no-results terminal page', () => {
@@ -232,7 +262,7 @@ test('Reddit correction and banner tracking metadata permit an explicit no-resul
   assert.equal(output.nonPostCount, 3)
   assert.equal(output.providerPage.hasMore, false)
   assert.equal(output.providerPage.nextParams, null)
-  assert.deepEqual(output.providerPage.warnings.map(warning => warning.code), ['reddit_no_results'])
+  assert.deepEqual(output.providerPage.warnings.map(warning => warning.code), ['reddit_spell_correction', 'reddit_no_results'])
   assert.throws(() => project('reddit', dynamic([...widgets, notice('Something went wrong')].map(node => ({ node })),
     { hasNextPage: false })), /upstream_search_error_message/)
 })
@@ -247,12 +277,13 @@ test('Reddit widget metadata exception is limited to known telemetry paths and p
       assert.deepEqual(project('reddit', dynamic([{ node }])).items.map(item => item.content_id), ['actual'])
       delete node.post
       for (const extra of [{ presentation: { post: post('hidden') } },
-        { telemetry: { events: [{ post: post('hidden') }] } },
         { content: { telemetry: { trackingContext: { post: post('hidden') } } } }]) {
         assert.throws(() => project('reddit', dynamic([{ node: { ...node, ...extra } }])), /invalid_content_search_entry/)
       }
     }
   }
+  assert.throws(() => project('reddit', dynamic([{ node: { __typename: 'SearchBanner',
+    telemetry: { events: [{ post: post('hidden') }] } } }])), /invalid_content_search_entry/)
   for (const node of [trackedWidget('SearchUnknownWidget', 'corrected'),
     trackedWidget('SearchSpellCorrectionApplied', 'unknown'), trackedWidget('SearchBanner', 'corrected')]) {
     assert.throws(() => project('reddit', dynamic([{ node }])), /invalid_content_search_entry/)

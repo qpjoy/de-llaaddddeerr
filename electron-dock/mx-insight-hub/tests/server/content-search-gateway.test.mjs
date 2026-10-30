@@ -915,8 +915,11 @@ test('Reddit error notice is recorded as a Reddit-side failure and a no-results 
 
 test('Reddit widget analytics permit paid post and no-results delivery without quarantining subsequent searches', async () => {
   const ids = Array.from({ length: 7 }, (_, index) => `post${index}`)
-  const widget = (typename, behavior) => ({ node: { __typename: typename,
-    behaviors: { [behavior]: { telemetry: { trackingContext: { post: { id: 't3_tracking_only' } } } } } } })
+  const widget = (typename, behavior) => {
+    const telemetry = { trackingContext: { post: { id: 't3_tracking_only' } } }
+    if (typename === 'SearchSpellCorrectionApplied') telemetry.search = { scope: { a: { b: { c: { d: { e: 'analytics' } } } } } }
+    return { node: { __typename: typename, telemetry, behaviors: { [behavior]: { telemetry } } } }
+  }
   const h = await harness({ platform: 'reddit', payload: (_call, number) => {
     const payload = internationalPage('reddit', number === 1 ? ids : [])
     const main = payload.search.dynamic.components.main
@@ -928,6 +931,8 @@ test('Reddit widget analytics permit paid post and no-results delivery without q
   const first = await h.invokeData()
   assert.equal(first.status, 200)
   assert.deepEqual(first.body.data.items.map(item => item.externalId), ids)
+  assert.deepEqual(first.body.data.warnings.filter(warning => warning.code === 'reddit_spell_correction').map(warning => warning.code),
+    ['reddit_spell_correction'])
   assert.equal(h.platformStore.ingestJobs.length, 1)
   assert.deepEqual((await h.invokeData()).body, first.body)
   assert.equal(h.calls.length, 1)
@@ -935,6 +940,7 @@ test('Reddit widget analytics permit paid post and no-results delivery without q
   assert.equal(second.status, 200)
   assert.deepEqual(second.body.data.items, [])
   assert.ok(second.body.data.warnings.some(warning => warning.code === 'reddit_no_results'))
+  assert.ok(second.body.data.warnings.some(warning => warning.code === 'reddit_spell_correction'))
   assert.equal(h.calls.length, 2)
   assert.equal(h.platformStore.restrictedResponseArchives.size, 2)
   assert.deepEqual([...h.platformStore.calls.values()].map(call => [call.outcome, call.billed, call.itemCount]),
