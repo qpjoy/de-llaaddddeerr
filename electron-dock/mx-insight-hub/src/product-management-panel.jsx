@@ -3,6 +3,7 @@ import { adminApi } from './api.js'
 import { DropdownField, ErrorState, LoadingState } from './components.jsx'
 import { PagedItems } from './paged-items.jsx'
 import { ProviderAdmission } from './provider-admission.jsx'
+import { ResourceAdmissionPanel } from './resource-admission.jsx'
 
 const OperationControls = lazy(() => import('./pages-external-platforms.jsx').then(module => ({
   default: ({ operations, ...props }) => <module.ExternalPlatformOperationControlPanel operations={module.normalizeOperations({ operations })} {...props} />,
@@ -50,6 +51,7 @@ export function ProductManagementPanel({ token, path, label, onUnauthorized, not
       <button className="qp-button qp-button--outline" type="button" disabled={loading} onClick={refresh}>{loading ? '读取中…' : '刷新管理配置'}</button></header>
     {current && state.error ? <ErrorState error={state.error} onRetry={refresh} /> : null}
     {loading ? <LoadingState label="正在读取接口、价格与限速配置" /> : null}
+    <ResourceAdmissionPanel key={`${token}:${path}`} {...{ token, path, onUnauthorized }} />
     {data ? <>
       <section className="qp-panel mih-panel" aria-label="下游套餐执行价">
         <div className="mih-product-management-heading"><div><h3>下游当前套餐价格</h3><p>按所选调用者查看当前执行价；同一调用者的 Key 共用套餐。以实际发送时的有效价格为准。</p></div>

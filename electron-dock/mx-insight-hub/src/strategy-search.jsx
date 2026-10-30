@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { productForPath } from '../shared/product-workbenches.mjs'
 import { ProductApiConsole } from './product-workbench.jsx'
 import { ProductViewTabs, ProductIntegrationGuide, ProductManagement } from './product-management.jsx'
@@ -133,6 +133,41 @@ export function TwitterSearchPolicyForm({ token, row, notify, onSaved }) {
   </form>
 }
 
+function FacebookAccountPolicyForm({ token, interfaceId, label, row, onSaved, notify }) {
+  const [mode, setMode] = useState(row.policy.mode)
+  const [reason, setReason] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const [reloadRequired, setReloadRequired] = useState(false)
+  useEffect(() => { setMode(row.policy.mode); setReason(''); setError(null); setReloadRequired(false) }, [row.policy])
+  async function save(event) {
+    event.preventDefault()
+    if (busy || reloadRequired || !reason.trim()) return
+    setBusy(true); setError(null)
+    try {
+      await adminApi.updateFacebookAccountStrategy(token, interfaceId, {
+        mode, primaryProvider: 'justone', fallbackProvider: null,
+        expectedRevision: row.policy.revision, reason: reason.trim(),
+      })
+      setReloadRequired(true); onSaved(); notify?.(`Facebook ${label}状态已保存`)
+    } catch (e) {
+      setError(e); setReloadRequired(true)
+    } finally { setBusy(false) }
+  }
+  return <form onSubmit={save} className="mih-page">
+    <DropdownField label="业务状态" value={mode} disabled={busy || reloadRequired} onChange={setMode}
+      options={[{ value: 'fixed', label: '启用' }, { value: 'paused', label: '暂停新采购' }]} />
+    <p>只影响 Facebook {label}。供应商保持 JustOne；其他业务状态独立保存。</p>
+    <Field label="修改原因"><input className="qp-input" required maxLength={1000} value={reason}
+      disabled={busy || reloadRequired} onChange={event => setReason(event.target.value)} placeholder="记录此次业务启停的原因" /></Field>
+    {error ? <p role="alert">{error.message}</p> : null}
+    {reloadRequired ? <p>请刷新策略确认当前状态，再进行下一次修改。<button type="button" className="qp-button" onClick={onSaved}>刷新策略</button></p> : null}
+    <button className="qp-button qp-button--primary" disabled={busy || reloadRequired || !reason.trim()}>
+      {busy ? '保存中…' : `保存 Facebook ${label}状态`}
+    </button>
+  </form>
+}
+
 function StrategySearchManagement({ token, session, query, setQuery, onUnauthorized, notify }) {
   const load = useCallback(() => adminApi.strategySearch(token), [token])
   const remote = useRemoteData(load, onUnauthorized)
@@ -168,8 +203,9 @@ function StrategySearchManagement({ token, session, query, setQuery, onUnauthori
           <dl><div><dt>策略方式</dt><dd>{summary.mode}</dd></div><div><dt>{summary.editor ? '可选供应商' : '登记供应商'}</dt><dd>{summary.providers.length ? summary.providers.map(supplier).join(' / ') : '不适用'}</dd></div>{summary.revision ? <div><dt>当前修订</dt><dd>#{summary.revision}</dd></div> : null}</dl>
         </div>
         {summary.editor ? <div className="mih-strategy-editor">
-          <header><h3>修改 {row.label || row.platform} 搜索策略</h3><p>以下为待保存配置；填写修改原因并保存后生效。可用方式：{summary.modes.join('；')}。</p></header>
-          {summary.editor === 'instagram' ? <InstagramSearchPolicyForm key={`${selected.id}:${row.platform}:${row.policy.revision}`} {...{ token, row, notify }} onSaved={remote.refresh} />
+          <header><h3>修改 {row.label || row.platform} {selected.label}策略</h3><p>以下为待保存配置；填写修改原因并保存后生效。可用方式：{summary.modes.join('；')}。</p></header>
+          {summary.editor === 'facebook-account' ? <FacebookAccountPolicyForm key={`${selected.id}:${row.platform}:${row.policy.revision}`} {...{ token, row, notify }} interfaceId={selected.id} label={selected.label} onSaved={remote.refresh} />
+            : summary.editor === 'instagram' ? <InstagramSearchPolicyForm key={`${selected.id}:${row.platform}:${row.policy.revision}`} {...{ token, row, notify }} onSaved={remote.refresh} />
             : summary.editor === 'twitter' ? <TwitterSearchPolicyForm key={`${selected.id}:${row.platform}:${row.policy.revision}`} {...{ token, row, notify }} onSaved={remote.refresh} />
             : <FacebookSearchPolicyForm key={`${row.platform}:${row.policy.revision}`} {...{ token, notify }} row={row.policy} allowedModes={row.allowedModes} onSaved={remote.refresh} />}
         </div> : <div className="mih-strategy-readonly"><strong>{row.editable ? '策略尚未就绪' : '当前未开放供应商切换'}</strong><p>{row.readOnlyReason || summary.description}</p><p>供应商目录、凭据或某个平台的其他接口已接入，并不代表当前业务接口具有可切换的兼容适配器。</p></div>}

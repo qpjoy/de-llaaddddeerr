@@ -119,14 +119,16 @@ export class AdmissionRecoveryService {
               ? '当前 Key 已开启 Hub 限流豁免，跳过本地供应商速率；共享限制仍影响普通调用者，上游实际限流仍会返回。'
               : '当前 Key 豁免 TikHub 本地速率；此共享限制仍影响普通调用者。'
           }
-          if (row.kind === 'provider_circuit' && row.errorCode === 'upstream_rate_limited') {
+          if (row.kind === 'provider_circuit' && (fullExemption || row.errorCode === 'upstream_rate_limited')) {
             const selected = internalCircuitState(this.usageStore, keyContext(key), {
               lastErrorCode: row.errorCode, lastFailureAt: row.startedAt, circuitOpenUntil: row.until,
             })
             row.selectedKeyUntil = selected.circuitOpenUntil
-            if (selected.rateCircuitExempt) {
+            if (selected.hubCircuitExempt || selected.rateCircuitExempt) {
               row.selectedKeyExempt = true
-              row.selectedKeyEffect = '当前 LCY-delta Key 豁免 Hub 侧共享 429 熔断；上游实际限流仍如实返回，共享保护继续影响其他调用者。'
+              row.selectedKeyEffect = selected.hubCircuitExempt
+                ? '当前 LCY-delta Key 豁免 Hub 自动供应商熔断等待；新请求直接接受上游结果。共享状态、未知结果和合同隔离保护不变。'
+                : '当前 LCY-delta Key 豁免 Hub 侧共享 429 熔断；上游实际限流仍如实返回，共享保护继续影响其他调用者。'
               continue
             }
             const deadline = Date.parse(selected.circuitOpenUntil)

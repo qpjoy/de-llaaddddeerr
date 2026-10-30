@@ -71,6 +71,12 @@ export const FACEBOOK_STRATEGY_MODE_LABELS = {
 }
 
 export function strategyPolicyEditor(interfaceId, row) {
+  if (['crawl', 'user-info'].includes(interfaceId) && row?.platform === 'facebook'
+    && row.editable === true && ['fixed', 'paused'].includes(row.policy?.mode)
+    && row.policy.primaryProvider === 'justone' && row.policy.fallbackProvider === null
+    && Number.isSafeInteger(row.policy.revision) && row.policy.revision > 0
+    && row.providers?.includes('justone')
+    && ['fixed', 'paused'].every(mode => row.allowedModes?.includes(mode))) return 'facebook-account'
   if (interfaceId !== 'search') return null
   const instagram = instagramStrategyOptions(row)
   if (instagram.providers.length && instagram.modes.length) return 'instagram'
@@ -87,11 +93,18 @@ export function strategyPolicyEditor(interfaceId, row) {
 }
 
 // A registered route and a configurable strategy are different facts. Only the
-// reviewed search policy editors can expose writes; inventory is read-only.
+// reviewed policy editors can expose writes; other inventory stays read-only.
 export function strategyPolicySummary(interfaceId, row) {
   const editor = strategyPolicyEditor(interfaceId, row)
   const providerLabel = provider => STRATEGY_PROVIDER_LABELS[provider] || provider || '未提供'
   if (!row) return { title: '尚未选择目标平台', mode: '未提供', description: '选择业务接口和平台后查看策略。', providers: [], modes: [], editor: null }
+  if (editor === 'facebook-account') {
+    const label = interfaceId === 'crawl' ? '账号内容' : '账号资料'
+    return { editor, title: `${row.policy.mode === 'paused' ? '已暂停' : '已启用'} Facebook ${label}`,
+      mode: row.policy.mode === 'paused' ? '暂停新采购' : '启用', providers: ['justone'],
+      modes: ['启用', '暂停新采购'], revision: row.policy.revision,
+      description: `仅控制 Facebook ${label}业务的新采购，包括需要再次采集的分页及旧兼容入口；保留历史响应重放和已购缓冲。账号内容的前置资料解析只受账号内容开关控制。上游接口单独暂停仍会阻止其调用。` }
+  }
   if (editor === 'instagram') {
     const policy = row.policy, { providers, modes } = instagramStrategyOptions(row)
     const primary = providerLabel(policy.primaryProvider), fallback = providerLabel(policy.fallbackProvider)

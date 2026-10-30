@@ -32,6 +32,7 @@ function project(store, key) {
   const inherited = key.hubRateLimitExempt == null
   return {
     apiKeyId: key.id,
+    policyVersion: 2,
     hubRateLimitExempt: key.hubRateLimitExempt ?? null,
     effectiveExempt: isHubRateLimitExempt(context),
     inheritedQuotaExempt: inherited && isInternalTraffic(store, context),

@@ -99,6 +99,8 @@ Content-Type: application/json
 
 运行时 HTML 文档：`/docs/strategy-search`；下载 OpenAPI：`/docs/openapi.json`。两者按当前调用身份的有效 scope 过滤平台及操作。产品入口为《策略搜索》的接口调试、产品展示、接入指南及 Admin 管理页。
 
+Facebook 在策略搜索管理中按“内容搜索 / 账号内容 / 账号资料”分别启停。账号内容和资料保持 JustOne 固定路由，各自可暂停新采购；账号内容的前置资料解析跟随账号内容状态，不受独立账号资料开关影响。新 `/data/social/*` 与旧 `/search/*`、`/night-all/search/*` 账号入口都检查对应业务状态；已保存响应重放和已采购缓冲保留。共享上游操作的暂停仍会阻止所有依赖该操作的业务。部署与验证见 [Facebook 业务暂停说明](../operations/facebook-business-pause-2026-10-30.md)。
+
 ### 2026-10-30：明确的 Twitter 账号不可用
 
 账号查找响应的唯一候选若为 `UserUnavailable`，新版 Hub 返回 HTTP 422 / `social_account_unavailable`，详情为 `platform=twitter`、`stage=account_lookup`、`outcome=rejected`、`retryable=false`。`reason` 只归一化明确枚举：`suspended`、`deactivated`、`deleted`、`protected`、`not_found`；未识别的原因统一为 `unavailable`，不解析自由文本或推断账号永久状态。原 `userExists:false` 的 404 合同保留。

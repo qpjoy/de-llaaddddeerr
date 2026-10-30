@@ -135,7 +135,8 @@ test('explicit LCY toggle wins over managed/environment exceptions and never tra
   const baidu = { ...state, lastErrorCode: 'ip_channel_rate_limited' }
   assert.equal(internalCircuitState(store, context, baidu).circuitOpenUntil, null)
   const ambiguousIp = { ...state, lastErrorCode: 'ip_query_rejected' }
-  assert.equal(internalCircuitState(store, context, ambiguousIp), ambiguousIp)
+  assert.equal(internalCircuitState(store, context, ambiguousIp).circuitOpenUntil, null)
+  assert.equal(internalCircuitState(store, context, ambiguousIp).rateCircuitExempt, false)
   context.apiKey.hubRateLimitExempt = false
   assert.equal(internalCircuitState(store, context, baidu), baidu)
   assert.equal(isInternalTraffic(store, context), false)

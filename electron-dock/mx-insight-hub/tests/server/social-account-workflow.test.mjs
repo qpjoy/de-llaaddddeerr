@@ -947,3 +947,74 @@ for (const platform of ['twitter', 'facebook', 'weibo']) test(`LCY ${platform} a
     ['external_platform_busy', 'external_platform_circuit_open'].includes(error.code))
   assert.equal(f.calls.length, before)
 })
+
+const facebookPause = (h, operation, mode = 'paused', expectedRevision = 1) => h.gateway.strategySearchRoutingStore.update(operation, 'facebook', {
+  mode, primaryProvider: 'justone', fallbackProvider: null, expectedRevision, reason: 'Independent business pause regression',
+})
+
+test('Facebook profile pause preserves replay and content resolution; content pause leaves profiles available', async t => {
+  const h = await harness(t, { platform: 'facebook' })
+  const body = { platform: 'facebook', userId: '42' }
+  const first = await h.invoke(body, 'facebook-profile-before', 'user-info')
+  await facebookPause(h, 'user-info')
+  assert.deepEqual((await h.invoke(body, 'facebook-profile-before', 'user-info')).body, first.body)
+  assert.equal(h.calls.length, 1)
+  await assert.rejects(h.invoke({ ...body, userId: '43' }, 'facebook-profile-paused', 'user-info'), { code: 'facebook_account_paused' })
+  assert.equal(h.calls.length, 1)
+  const content = await h.invoke(body, 'facebook-content-active')
+  assert.equal(content.body.data.items.length, 1)
+  assert.equal(h.calls.length, 3, 'content still resolves a profile while profile business is paused')
+  await facebookPause(h, 'crawl')
+  await assert.rejects(h.invoke({ ...body, userId: '43' }, 'facebook-content-paused'), { code: 'facebook_account_paused' })
+  await facebookPause(h, 'user-info', 'fixed', 2)
+  await h.invoke(body, 'facebook-profile-resumed', 'user-info')
+  assert.equal(h.calls.length, 4)
+})
+
+test('Facebook business pause between resolution and posts prevents another paid dispatch', async t => {
+  let h
+  h = await harness(t, { platform: 'facebook', fetchImpl: async () => {
+    await facebookPause(h, 'crawl')
+    return Response.json({ code: 0, message: 'success', recordTime: '2026-10-15T00:00:00Z', data: { profile_id: '42', name: 'Fixture' } })
+  } })
+  const result = await h.invoke({ platform: 'facebook', userId: '42' }, 'facebook-pause-mid-flight')
+  assert.equal(h.calls.length, 1)
+  assert.equal(result.body.data.status, 'partial')
+  assert(result.body.data.warnings.some(row => row.code === 'social_page_fill_stopped' && row.message.includes('facebook_account_paused')))
+  assert(result.body.data.page.nextCursor)
+})
+
+test('Facebook paused content still delivers purchased overflow without supplier calls', async t => {
+  const h = await harness(t, { platform: 'facebook', fetchImpl: call => Response.json({ code: 0, message: 'success', recordTime: '2026-10-15T00:00:00Z', data: call.url.pathname.includes('profile-id')
+    ? { profile_id: '42', name: 'Fixture' }
+    : { posts: ['1','2'].map(id => ({ id, text: 'Purchased content', user: { id: '42' } })), has_more: false } }) })
+  const body = { platform: 'facebook', userId: '42', count: 1 }
+  const first = await h.invoke(body, 'facebook-buffer-first')
+  assert(first.body.data.page.nextCursor)
+  await facebookPause(h, 'crawl')
+  const second = await h.invoke({ ...body, cursor: first.body.data.page.nextCursor }, 'facebook-buffer-second')
+  assert.equal(second.body.data.items.length, 1)
+  assert.equal(second.body.data.meta.providerCalls, 0)
+  assert.equal(h.calls.length, 2)
+})
+
+test('LCY Facebook new acquisition bypasses zero budgets and recovered supplier circuit but preserves business pause', async t => {
+  const { LcyHubLimitStore } = await import('../fixtures/lcy-hub-limit-store.mjs')
+  const h = await harness(t, { platform: 'facebook', store: new LcyHubLimitStore() })
+  const rows = await h.controls.describeProvider(h.provider, { config: h.config, credentialConfigured: true })
+  for (const row of rows.filter(row => row.operationKey.includes('facebook_get_profile'))) {
+    await h.controls.updatePolicy(h.provider, row.operationKey, { expectedRevision: row.revision,
+      desiredState: 'active', reason: 'LCY zero-budget regression', priceBook: { unitCostMinorByEndpoint: Object.fromEntries(row.release.endpointKeys.map(key => [key, 2])),
+        currency: 'CNY', pricingAsOf: '2026-10-15T00:00:00Z', monthlyBudgetMinor: 0, monthlySubsidyBudgetMinor: 0,
+      } }, { runtime: { config: h.config, credentialConfigured: true } })
+  }
+  Object.assign(h.platformStore.state, { lastErrorCode: 'upstream_balance_exhausted', circuitOpenUntil: new Date(Date.now()+60000).toISOString() })
+  const result = await h.invoke({platform:'facebook',userId:'42'}, 'lcy-zero-budget-facebook')
+  assert.equal(result.status,200)
+  assert.equal(h.calls.length,2)
+  assert.equal(h.platformStore.calls.size,2)
+  assert([...h.platformStore.calls.values()].every(call => call.costMinor > 0))
+  await facebookPause(h, 'crawl')
+  await assert.rejects(h.invoke({platform:'facebook',userId:'42'}, 'lcy-facebook-explicit-pause'),{code:'facebook_account_paused'})
+  assert.equal(h.calls.length,2)
+})

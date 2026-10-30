@@ -72,23 +72,25 @@ function searchPlatform(platform, { instagramPolicy, facebookPolicy, twitterPoli
   return row
 }
 
-function accountPlatform(platform, operation) {
+function accountPlatform(platform, operation, accountPolicy = null) {
   const row = historicalPlatform(platform, operation)
   const legacy = NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS[operation].includes(platform)
   return {
     ...row, migrationStatus: 'hub_native',
+    ...(platform === 'facebook' ? { editable: true, allowedModes: ['fixed', 'paused'],
+      policy: accountPolicy == null ? null : structuredClone(accountPolicy) } : {}),
     readOnlyReason: 'Hub 账号接口按已审核的平台及活动合同执行固定路由，当前未提供可互换的供应商策略。关键词搜索的供应商配置不会改变账号内容或资料路由；操作状态、凭据和准入仍独立检查。',
     routeSummary: `POST /api/v1/data/social/${operation} 由 Hub 执行账号解析、字段适配及托管分页，不转交 Night-All。保留已声明的账号参数别名及 raw_info/raw_data 字符串，并提供 items、page/pageInfo；使用新接口返回的游标。${legacy
       ? platform === 'xiaohongshu' ? '旧 /search 与 /night-all/search 入口继续保持原先按请求形状直连或转发的规则。'
         : '旧 /search 与 /night-all/search 入口仍经 Night-All，供下游逐步切换。'
-      : '旧兼容入口未声明此平台与业务组合，不能据此认为旧入口也新增支持。'}目录表示已实现合同，不代表当前线上已部署或供应商已验证可用。`,
+      : '旧兼容入口未声明此平台与业务组合，不能据此认为旧入口也新增支持。'}${platform === 'facebook' ? '本业务启停同时控制新接口与旧兼容入口的新采购；其他业务独立，账号内容所需的解析跟随账号内容状态。已保存结果与已采购余量仍可交付。' : ''}目录表示已实现合同，不代表当前线上已部署或供应商已验证可用。`,
   }
 }
 
 // This is an Admin product/routing inventory, not a readiness declaration.
 // The compatibility sets deliberately exclude unsupported operation/platform
 // pairs; provider credential state and paid dispatch remain in their gateways.
-export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy = null, twitterPolicy = null } = {}) {
+export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy = null, twitterPolicy = null, facebookCrawlPolicy = null, facebookProfilePolicy = null } = {}) {
   return {
     interfaces: [
       {
@@ -104,13 +106,13 @@ export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy =
         id: 'crawl', label: '账号内容',
         paths: ['/api/v1/search/crawl', '/api/v1/night-all/search/crawl', '/api/v1/data/social/crawl'],
         description: '按已知账号获取内容。data/social/crawl 由 Hub 执行，要求平台及 social.content.crawl 授权；单页上限 500，仍受 Key 上限约束。旧兼容入口保持原路由和原平台范围，迁移从第一页开始。',
-        platforms: HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS.map(platform => accountPlatform(platform, 'crawl')),
+        platforms: HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS.map(platform => accountPlatform(platform, 'crawl', facebookCrawlPolicy)),
       },
       {
         id: 'user-info', label: '账号资料',
         paths: ['/api/v1/search/user-info', '/api/v1/night-all/search/user-info', '/api/v1/data/social/user-info'],
         description: '按已知账号获取资料，不是关键词搜账号。data/social/user-info 由 Hub 执行，要求平台及 social.profile.get 授权；旧兼容入口保持原路由和原平台范围。接口可见不会自动增加调用权限。',
-        platforms: HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS.map(platform => accountPlatform(platform, 'user-info')),
+        platforms: HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS.map(platform => accountPlatform(platform, 'user-info', facebookProfilePolicy)),
       },
     ],
   }

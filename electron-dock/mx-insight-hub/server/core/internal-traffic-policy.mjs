@@ -54,13 +54,14 @@ export function isLcyRateCircuitExempt(context) {
     && (context.apiKey.hubRateLimitExempt === true || context.apiKey.accessProfile === 'managed_full')
 }
 
-// Retain the stored shared circuit and all non-rate failures. LCY bypasses its
-// rate deadline; other internal callers retain the ten-second rate cooldown.
+// An explicitly exempt LCY Key may send a new request after upstream recovery
+// without waiting for Hub's shared automatic circuit. Never reset shared state
+// or bypass per-request unknown/duplicate evidence or contract quarantine here.
 export function internalCircuitState(store, context, state) {
-  // Baidu's retained business-601 classification is also an explicit supplier
-  // rate failure. Older generic IP rejection codes are deliberately not guessed.
-  if (state?.lastErrorCode === 'ip_channel_rate_limited' && isHubRateLimitExempt(context)) {
-    return { ...state, rateCircuitExempt: true, circuitOpenUntil: null }
+  if (state && isHubRateLimitExempt(context)) {
+    return { ...state, hubCircuitExempt: true,
+      rateCircuitExempt: ['upstream_rate_limited', 'ip_channel_rate_limited'].includes(state.lastErrorCode),
+      circuitOpenUntil: null }
   }
   if (state?.lastErrorCode !== 'upstream_rate_limited') return state
   if (isLcyRateCircuitExempt(context)) return { ...state, rateCircuitExempt: true, circuitOpenUntil: null }

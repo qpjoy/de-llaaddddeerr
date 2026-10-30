@@ -551,6 +551,24 @@ async function compatibilityFixture({
   }
 }
 
+test('Facebook legacy business pause preserves replay and does not pause the other account interface', async () => {
+  const f = await compatibilityFixture({ grants: ['facebook'] })
+  const invoke = (operation, key) => f.service.nightAllCompatibilitySearch(f.context, {
+    operation, path: `/api/v1/night-all/search/${operation}`, idempotencyKey: key,
+    body: { platform: 'facebook', username: 'alice', ...(operation === 'crawl' ? { count: 20 } : {}) },
+  })
+  const first = await invoke('user-info', 'facebook-legacy-profile')
+  await f.service.strategySearchRoutingStore.update('user-info', 'facebook', {
+    mode: 'paused', primaryProvider: 'justone', fallbackProvider: null, expectedRevision: 1, reason: 'Pause profiles only',
+  })
+  assert.deepEqual((await invoke('user-info', 'facebook-legacy-profile')).body, first.body)
+  await assert.rejects(invoke('user-info', 'facebook-legacy-paused'), { code: 'facebook_account_paused' })
+  assert.equal(f.calls(), 1)
+  await invoke('crawl', 'facebook-legacy-crawl')
+  assert.equal(f.calls(), 2)
+  assert.equal(f.store.connectorCalls.size, 2)
+})
+
 test('Xiaohongshu compatibility operations require their own grant before reservation or dispatch', async () => {
   const cases = [
     {

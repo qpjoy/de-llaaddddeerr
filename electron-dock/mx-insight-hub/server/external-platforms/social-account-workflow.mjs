@@ -1,3 +1,4 @@
+import { assertFacebookAccountEnabled } from './strategy-search-routing.mjs'
 import { refreshAdmissionLimits } from './admission-runtime.mjs'
 import { openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { createHash } from 'node:crypto'
@@ -24,7 +25,7 @@ const uncertain = () => {
 const knownAdmission = error => error instanceof AppError && error.status !== 403 && (
   /^external_platform_(?:operation_|cost_)/u.test(error.code)
   || ['external_admission_policy_unavailable', 'external_platform_not_configured', 'external_platform_circuit_open', 'external_platform_rate_limited',
-    'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'social_search_deadline'].includes(error.code))
+    'external_platform_subsidy_budget_exhausted', 'external_platform_busy', 'social_search_deadline', 'facebook_account_paused', 'strategy_search_route_unavailable'].includes(error.code))
 const descriptor = request => ({ provider: request.provider, operation: request.operationKey || request.procurementOperation || request.operation,
   endpointKey: request.endpointKey, endpointVersion: request.endpointVersion, contractVersion: request.endpointContractVersion })
 const sourceRows = (projected, operation) => operation === 'user-info' ? projected.profiles : projected.acquiredItems
@@ -196,6 +197,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
         try {
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           context = await revalidateIdentity({ totalLimit: request.totalLimit })
+          await assertFacebookAccountEnabled(gateway.strategySearchRoutingStore, request.operation, request.platform)
           const states = await Promise.all([store.providerState(provider), store.contractCircuitState?.(provider, request.platform)])
           if (provider === 'tikhub' || isHubRateLimitExempt(context)) states[0] = internalCircuitState(gateway.usageStore, context, states[0])
           const blocked = await openCircuitError({ store, state: states[0], contract: states[1], now: clock(), config: gateway.config,
@@ -222,6 +224,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Account acquisition rate limit is exhausted')
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           if (!enoughTime()) throw new AppError(503, 'social_search_deadline', 'Account acquisition deadline reached before dispatch')
+          await assertFacebookAccountEnabled(gateway.strategySearchRoutingStore, request.operation, request.platform)
           currentEvidence = null
           currentCall = await store.beginProviderCall({ ...delivery, operation: expected.operation,
             contractVersion: expected.contractVersion, endpointKey: expected.endpointKey, endpointVersion: expected.endpointVersion,

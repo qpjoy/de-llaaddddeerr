@@ -477,6 +477,7 @@ export async function createRuntime(config = loadConfig()) {
     resolveProvider: async context => (await resolveTwitterSearchRoute({ consumerId: context.consumer.id })).provider })
   const socialAccountDataGateways = Object.fromEntries(HUB_SOCIAL_COMPAT_PLATFORMS.map(platform => [platform,
     platform === 'twitter' ? hubSocialGateway : nativeSearchGateway(platform, platform === 'facebook' ? 'justone' : 'tikhub')]))
+  socialAccountDataGateways.facebook.strategySearchRoutingStore = strategySearchRoutingStore
   const socialDataGateway = { socialData: (context, input) => {
     if (input.operation === 'search') return hubSocialGateway.socialData(context, input)
     // Twitter owns receipt-aware validation: historical identities may need
@@ -560,6 +561,7 @@ export async function createRuntime(config = loadConfig()) {
       && operation.canaryConsumerIds.includes(String(context.consumer.id).toLowerCase())
   }
   const service = new HubService({
+    strategySearchRoutingStore,
     store,
     adapter,
     twitterRetryStore: rapidApiStore,

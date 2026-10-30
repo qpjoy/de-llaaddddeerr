@@ -1,3 +1,4 @@
+import { memoryBudgetExempt, budgetExemptionProjection } from './budget-exemption.mjs'
 import { RESPONSE_QUARANTINE_MS, quarantineRecoverySql } from '../core/admission-recovery.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
@@ -979,7 +980,7 @@ export class MemoryExternalPlatformStore {
     }
   }
 
-  #costState(costControl, { customerBilled = false, usageRequestId = null } = {}) {
+  #costState(costControl, { budgetExempt = false, usageRequestId = null } = {}) {
     const month = utcMonthBounds()
     const monthlyCalls = [...this.calls.values()].filter((call) => {
       const startedAt = new Date(call.startedAt).getTime()
@@ -994,18 +995,18 @@ export class MemoryExternalPlatformStore {
         && startedAt >= month.start
         && startedAt < month.end
     })
-    // A positive enforced per-request hold makes aggregate financial caps
+    // A positive enforced hold or the original Key's explicit exemption makes aggregate caps
     // observe-only for this request. Scope the integrity check to this request
     // as well, so unrelated historical bookkeeping cannot turn paid traffic
     // into an apparent provider outage. The current request's own cost evidence
     // remains mandatory and is still persisted for every real dispatch.
-    const calls = customerBilled
+    const calls = budgetExempt
       ? monthlyCalls.filter((call) => call.usageRequestId === usageRequestId)
       : monthlyCalls
     const knownCalls = calls.filter((call) => (
       Number.isSafeInteger(call.costMinor) && call.costMinor >= 0
     ))
-    const incompleteControlledCost = calls.some((call) => customerBilled
+    const incompleteControlledCost = calls.some((call) => budgetExempt
       ? !Number.isSafeInteger(call.costMinor)
         || call.costMinor <= 0
         || !['estimated', 'provider_reported'].includes(call.costKind)
@@ -1024,7 +1025,7 @@ export class MemoryExternalPlatformStore {
       return reservation.providerKey === this.providerKey
         && (reservation.currency === costControl.currency || reservation.usageRequestId === usageRequestId
           || !/^[A-Z]{3}$/u.test(reservation.currency || ''))
-        && (!customerBilled || reservation.usageRequestId === usageRequestId)
+        && (!budgetExempt || reservation.usageRequestId === usageRequestId)
         && reservation.status === 'active'
         && usage?.status === 'reserved'
         && (leaseExpiresAt == null || (Number.isFinite(leaseExpiresAt) && leaseExpiresAt > Date.now()))
@@ -1040,7 +1041,7 @@ export class MemoryExternalPlatformStore {
       || reservation.reservedCostMinor <= 0
       || !Number.isSafeInteger(reservation.reservedSubsidyMinor)
       || reservation.reservedSubsidyMinor < 0
-      || (customerBilled && (
+      || (budgetExempt && (
         !Number.isSafeInteger(reservation.monthlyBudgetMinor)
         || reservation.monthlyBudgetMinor < 0
         || !Number.isSafeInteger(reservation.monthlySubsidyBudgetMinor)
@@ -1148,7 +1149,7 @@ export class MemoryExternalPlatformStore {
     let knownCostMinor = null
     let reservedCostMinor = null
     try {
-      const state = this.#costState(costControl, { customerBilled: false })
+      const state = this.#costState(costControl, { budgetExempt: false })
       knownCostMinor = state.knownCostMinor
       reservedCostMinor = state.reservedCostMinor
     } catch {
@@ -1211,9 +1212,9 @@ export class MemoryExternalPlatformStore {
     if (!Number.isSafeInteger(costMinor)) {
       throw new TypeError('workflow cost exceeds the safe-integer range')
     }
-    const customerBilled = this.#isCustomerBilledRequest(input.usageRequestId)
+    const budgetExempt = this.#isCustomerBilledRequest(input.usageRequestId) || memoryBudgetExempt(this.usageStore, usage)
     const state = this.#costState(policy, {
-      customerBilled,
+      budgetExempt,
       usageRequestId: input.usageRequestId,
     })
     if (state.activeReservations.some(
@@ -1225,7 +1226,7 @@ export class MemoryExternalPlatformStore {
         'Usage request already has an active provider cost reservation',
       )
     }
-    if (!customerBilled
+    if (!budgetExempt
       && state.knownCostMinor + state.reservedCostMinor + costMinor > policy.monthlyBudgetMinor) {
       throw new AppError(
         429,
@@ -1237,7 +1238,7 @@ export class MemoryExternalPlatformStore {
     const coverageMinor = state.coveredMinor(input.usageRequestId)
     const subsidyMinor = Math.max(0, baseCostMinor + costMinor - coverageMinor)
       - Math.max(0, baseCostMinor - coverageMinor)
-    if (!customerBilled
+    if (!budgetExempt
       && state.subsidyCostMinor + state.reservedSubsidyMinor + subsidyMinor
       > policy.monthlySubsidyBudgetMinor) {
       throw new AppError(
@@ -1331,9 +1332,9 @@ export class MemoryExternalPlatformStore {
       operation: input.operation,
     })
     if (costControl) {
-      const customerBilled = this.#isCustomerBilledRequest(input.usageRequestId)
+      const budgetExempt = this.#isCustomerBilledRequest(input.usageRequestId) || memoryBudgetExempt(this.usageStore, usage)
       const state = this.#costState(costControl, {
-        customerBilled,
+        budgetExempt,
         usageRequestId: input.usageRequestId,
       })
       const existingUsageCostMinor = state.costsByUsage.get(input.usageRequestId) || 0
@@ -1376,7 +1377,7 @@ export class MemoryExternalPlatformStore {
           )
         }
       } else {
-        if (!customerBilled
+        if (!budgetExempt
           && state.knownCostMinor + state.reservedCostMinor + costControl.costMinor
           > costControl.monthlyBudgetMinor) {
           throw new AppError(
@@ -1389,7 +1390,7 @@ export class MemoryExternalPlatformStore {
           0,
           existingUsageCostMinor + costControl.costMinor - customerCoverageMinor,
         ) - Math.max(0, existingUsageCostMinor - customerCoverageMinor)
-        if (!customerBilled
+        if (!budgetExempt
           && state.subsidyCostMinor + state.reservedSubsidyMinor + incrementalSubsidyMinor
           > costControl.monthlySubsidyBudgetMinor) {
           throw new AppError(
@@ -2116,6 +2117,7 @@ export async function providerCostExposure(client, {
   usageRequestId,
   currency,
   reservationId = null,
+  identity = null,
 }) {
   const exposure = await client.query(
     `WITH month_bounds AS MATERIALIZED (
@@ -2336,7 +2338,7 @@ export async function providerCostExposure(client, {
             ) AS reservation_monthly_budget_minor,
             (
               SELECT monthly_subsidy_budget_minor FROM active_reservations WHERE id = $4
-            ) AS reservation_monthly_subsidy_budget_minor`,
+            ) AS reservation_monthly_subsidy_budget_minor${budgetExemptionProjection(identity)}`,
     [providerKey, currency, usageRequestId, reservationId],
   )
   return exposure.rows[0] || {}
@@ -2350,6 +2352,7 @@ async function postgresProviderCostState(client, {
   currency,
   reservationId = null,
   serialize = true,
+  identity = null,
 }) {
   if (serialize) {
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
@@ -2357,14 +2360,14 @@ async function postgresProviderCostState(client, {
     ])
   }
   const row = await providerCostExposure(client, {
-    providerKey, usageRequestId, currency, reservationId,
+    providerKey, usageRequestId, currency, reservationId, identity,
   })
-  const customerBilled = row.customer_billed === true
-  const knownCostMinor = customerBilled ? 0 : Number(row.known_cost_minor)
-  const unknownCostCallsRaw = customerBilled
+  const budgetExempt = row.customer_billed === true || row.budget_exempt === true
+  const knownCostMinor = budgetExempt ? 0 : Number(row.known_cost_minor)
+  const unknownCostCallsRaw = budgetExempt
     ? row.current_unknown_cost_calls
     : row.unknown_cost_calls
-  const mixedReservationCountRaw = customerBilled
+  const mixedReservationCountRaw = budgetExempt
     ? row.current_mixed_reservation_count
     : row.mixed_reservation_count
   const unknownCostCalls = unknownCostCallsRaw == null ? Number.NaN : Number(unknownCostCallsRaw)
@@ -2383,9 +2386,9 @@ async function postgresProviderCostState(client, {
       'External data cost evidence is incomplete; paid dispatch is disabled',
     )
   }
-  const subsidyCostMinor = customerBilled ? 0 : Number(row.subsidy_cost_minor)
-  const reservedCostMinor = customerBilled ? 0 : Number(row.reserved_cost_minor)
-  const reservedSubsidyMinor = customerBilled ? 0 : Number(row.reserved_subsidy_minor)
+  const subsidyCostMinor = budgetExempt ? 0 : Number(row.subsidy_cost_minor)
+  const reservedCostMinor = budgetExempt ? 0 : Number(row.reserved_cost_minor)
+  const reservedSubsidyMinor = budgetExempt ? 0 : Number(row.reserved_subsidy_minor)
   const usageCostMinor = Number(row.usage_cost_minor)
   const customerCoverageMinor = row.customer_coverage_minor == null
     ? 0
@@ -2428,7 +2431,7 @@ async function postgresProviderCostState(client, {
     reservedSubsidyMinor,
     usageCostMinor,
     customerCoverageMinor,
-    customerBilled,
+    budgetExempt,
     reservation,
   }
 }
@@ -3172,11 +3175,12 @@ export class PostgresExternalPlatformStore {
           )
         }
         const state = await postgresProviderCostState(client, {
+          identity: input,
           providerKey: this.providerKey,
           usageRequestId: input.usageRequestId,
           currency: policy.currency,
         })
-        if (!state.customerBilled
+        if (!state.budgetExempt
           && state.knownCostMinor + state.reservedCostMinor + reservedCostMinor
           > policy.monthlyBudgetMinor) {
           throw new AppError(
@@ -3189,7 +3193,7 @@ export class PostgresExternalPlatformStore {
           0,
           state.usageCostMinor + reservedCostMinor - state.customerCoverageMinor,
         ) - Math.max(0, state.usageCostMinor - state.customerCoverageMinor)
-        if (!state.customerBilled
+        if (!state.budgetExempt
           && state.subsidyCostMinor + state.reservedSubsidyMinor + reservedSubsidyMinor
           > policy.monthlySubsidyBudgetMinor) {
           throw new AppError(
@@ -3492,6 +3496,7 @@ export class PostgresExternalPlatformStore {
             )
           }
           const state = await postgresProviderCostState(client, {
+            identity: input,
             providerKey: this.providerKey,
             usageRequestId: input.usageRequestId,
             currency: costControl.currency,
@@ -3531,7 +3536,7 @@ export class PostgresExternalPlatformStore {
               )
             }
           } else {
-            if (!state.customerBilled
+            if (!state.budgetExempt
               && state.knownCostMinor + state.reservedCostMinor + costControl.costMinor
               > costControl.monthlyBudgetMinor) {
               throw new AppError(
@@ -3544,7 +3549,7 @@ export class PostgresExternalPlatformStore {
               0,
               state.usageCostMinor + costControl.costMinor - state.customerCoverageMinor,
             ) - Math.max(0, state.usageCostMinor - state.customerCoverageMinor)
-            if (!state.customerBilled
+            if (!state.budgetExempt
               && state.subsidyCostMinor + state.reservedSubsidyMinor
               + incrementalSubsidyMinor > costControl.monthlySubsidyBudgetMinor) {
               throw new AppError(

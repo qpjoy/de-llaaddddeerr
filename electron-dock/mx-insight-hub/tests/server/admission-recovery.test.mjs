@@ -223,7 +223,7 @@ test('LCY limit toggle diagnostics apply across providers and explicit off overr
   }
   await f.db.query('UPDATE api_keys SET hub_rate_limit_exempt=true WHERE id=$1', [key])
   await f.db.exec("UPDATE external_platform.provider_state SET last_error_code='upstream_auth_or_balance_unavailable' WHERE provider_key='qixin'")
-  assert.equal((await snapshot()).items.find(row => row.provider === 'qixin' && row.kind === 'provider_circuit').selectedKeyExempt, undefined)
+  assert.equal((await snapshot()).items.find(row => row.provider === 'qixin' && row.kind === 'provider_circuit').selectedKeyExempt, true)
   await f.db.exec("UPDATE external_platform.provider_state SET last_error_code='upstream_rate_limited' WHERE provider_key='qixin'")
   assert.deepEqual((await f.db.query('SELECT * FROM external_platform.provider_state ORDER BY provider_key')).rows, stateBefore)
   assert.deepEqual((await f.db.query('SELECT * FROM external_platform.provider_rate_buckets ORDER BY provider_key')).rows, rateBefore)

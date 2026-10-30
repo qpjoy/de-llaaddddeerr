@@ -162,3 +162,48 @@ test('Twitter migration seeds once, preserves reviewed strategies and enforces p
   ]) await assert.rejects(db.query(sql))
   assert.deepEqual(await store.get('search', 'twitter'), twitter)
 })
+
+test('Facebook account policies are independent, fixed to JustOne and revisioned', async () => {
+  const store = new StrategySearchRoutingStore()
+  const pause = change({ mode: 'paused', primaryProvider: 'justone' })
+  await store.update('user-info', 'facebook', pause)
+  assert.equal((await store.get('crawl', 'facebook')).mode, 'fixed')
+  assert.equal((await store.get('search', 'instagram')).revision, 1)
+  assert.equal(await store.get('search', 'facebook'), null)
+  await assert.rejects(store.update('user-info', 'facebook', pause), { code: 'strategy_search_route_revision_conflict' })
+  for (const invalid of [change(), change({ primaryProvider: 'rapidapi' }),
+    change({ primaryProvider: 'justone', mode: 'priority', fallbackProvider: 'tikhub' })]) {
+    await assert.rejects(store.update('crawl', 'facebook', invalid), { code: 'invalid_strategy_search_route' })
+  }
+  assert.equal(store.events[0].interface, 'user-info')
+  await store.update('crawl', 'facebook', pause)
+  await store.update('user-info', 'facebook', change({ primaryProvider: 'justone', expectedRevision: 2 }))
+  assert.equal((await store.get('crawl', 'facebook')).mode, 'paused')
+})
+
+test('Facebook migration preserves other routes, enforces business scope and audits once', { skip: !process.env.MX_INSIGHT_TEST_PGLITE_MODULE }, async t => {
+  const { PGlite } = await import(pathToFileURL(process.env.MX_INSIGHT_TEST_PGLITE_MODULE).href)
+  const db = new PGlite(); t.after(() => db.close())
+  await db.exec('CREATE SCHEMA control')
+  for (const file of ['150_strategy_search_routes.sql', '160_twitter_strategy_search.sql', '170_facebook_account_business_pause.sql']) {
+    await db.exec(await readFile(new URL(`../../migrations/${file}`, import.meta.url), 'utf8'))
+  }
+  const pool = { query: (sql, values) => db.query(sql, values), connect: async () => ({ query: (sql, values) => db.query(sql, values), release() {} }) }
+  const store = new StrategySearchRoutingStore(pool)
+  await store.update('crawl', 'facebook', change({ mode: 'paused', primaryProvider: 'justone' }))
+  assert.equal((await store.get('user-info', 'facebook')).mode, 'fixed')
+  assert.equal((await store.get('search', 'twitter')).mode, 'priority')
+  assert.equal((await store.list()).length, 4)
+  await db.exec(await readFile(new URL('../../migrations/170_facebook_account_business_pause.sql', import.meta.url), 'utf8'))
+  assert.equal((await store.get('crawl', 'facebook')).mode, 'paused')
+  assert.equal((await store.get('crawl', 'facebook')).revision, 2)
+  for (const sql of ["UPDATE control.strategy_search_routes SET interface_key='search' WHERE platform='facebook'",
+    "UPDATE control.strategy_search_routes SET primary_provider='tikhub' WHERE platform='facebook'",
+    "UPDATE control.strategy_search_routes SET mode='priority',fallback_provider='tikhub' WHERE platform='facebook'"]) {
+    await assert.rejects(db.query(sql))
+  }
+  const audit = await db.query("SELECT policy FROM control.strategy_search_route_events WHERE platform='facebook' ORDER BY id")
+  assert.equal(audit.rows.length, 3)
+  assert.equal(audit.rows[2].policy.interface, 'crawl')
+  assert.equal(audit.rows[2].policy.mode, 'paused')
+})

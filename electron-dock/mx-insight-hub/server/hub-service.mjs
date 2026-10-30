@@ -1,3 +1,4 @@
+import { StrategySearchRoutingStore, assertFacebookAccountEnabled } from './external-platforms/strategy-search-routing.mjs'
 import { requestMaintenance } from './core/request-maintenance.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
 import { validateSearchOrder } from './web-search/contract.mjs'
@@ -598,6 +599,7 @@ export class HubService {
     externalPlatformCapabilities = null,
     externalPostCapabilities = null,
     externalFacebookCapabilities = null,
+    strategySearchRoutingStore = new StrategySearchRoutingStore(store.pool),
     externalTwitterCapabilities = null,
     externalContentSearchCapabilities = null,
     externalNativeCapabilities = null,
@@ -634,6 +636,7 @@ export class HubService {
     this.externalPlatformCapabilities = externalPlatformCapabilities
     this.externalPostCapabilities = externalPostCapabilities
     this.externalFacebookCapabilities = externalFacebookCapabilities
+    this.strategySearchRoutingStore = strategySearchRoutingStore
     this.externalTwitterCapabilities = externalTwitterCapabilities
     this.externalContentSearchCapabilities = externalContentSearchCapabilities
     this.externalNativeCapabilities = externalNativeCapabilities
@@ -4599,6 +4602,7 @@ export class HubService {
     const activeRequestId = reservation.request.id
     let call
     try {
+      await assertFacebookAccountEnabled(this.strategySearchRoutingStore, operation, normalized.platform)
       call = await this.store.beginConnectorCall({
         consumerId: context.consumer.id,
         requestId: activeRequestId,
@@ -4608,7 +4612,7 @@ export class HubService {
         sourceMode: 'live',
       })
     } catch (error) {
-      await this.store.releaseRequest(activeRequestId, 'connector_call_evidence_failed').catch(() => {})
+      await this.store.releaseRequest(activeRequestId, error.code || 'connector_call_evidence_failed').catch(() => {})
       throw error
     }
 

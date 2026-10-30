@@ -552,6 +552,8 @@ export const adminApi = {
   probeWechatSelfHosted: (token, body) => request(token, `${ADMIN_ROOT}/wechat-self-hosted/engine/probe`, { method: 'POST', body }),
   wechatSelfHostedJob: (token, id) => request(token, `${ADMIN_ROOT}/wechat-self-hosted/jobs/${encodeURIComponent(id)}`),
   updateExternalPlatformProxy: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/proxy`, { method: 'PUT', body }),
+  resourceLimits: (token, options = {}) => request(token, `${ADMIN_ROOT}/data-products/resource-limits`, options),
+  saveResourceLimits: (token, body) => request(token, `${ADMIN_ROOT}/data-products/resource-limits`, { method: 'PUT', body }),
   productManagement: (token, query, options = {}) => request(token, `${ADMIN_ROOT}/data-products/management`, { ...options, query }),
   externalPlatformAdmission: (token, key) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/admission-policy`),
   saveExternalPlatformAdmission: (token, key, body) => request(token, `${ADMIN_ROOT}/external-platforms/${encodeURIComponent(key)}/admission-policy`, { method: 'PUT', body }),
@@ -658,6 +660,10 @@ export const adminApi = {
   strategySearchUsage: (token, days = 7) => request(token, `${ADMIN_ROOT}/strategy-search/usage?days=${encodeURIComponent(days)}`),
   strategySearchDataStatistics: (token, days = 7) => request(token, `${ADMIN_ROOT}/strategy-search/data-statistics?days=${encodeURIComponent(days)}`),
   updateInstagramSearchStrategy: (token, body) => request(token, `${ADMIN_ROOT}/strategy-search/search/instagram`, { method: 'PUT', body }),
+  updateFacebookAccountStrategy: (token, interfaceId, body) => {
+    if (!['crawl', 'user-info'].includes(interfaceId)) throw new Error('Unsupported Facebook account interface')
+    return request(token, `${ADMIN_ROOT}/strategy-search/${interfaceId}/facebook`, { method: 'PUT', body })
+  },
   updateTwitterSearchStrategy: (token, body) => request(token, `${ADMIN_ROOT}/strategy-search/search/twitter`, { method: 'PUT', body }),
   ecommerceRouting: token => request(token, `${ADMIN_ROOT}/ecommerce-routing`),
   updateEcommerceRoute: (token, marketplace, body) => request(token, `${ADMIN_ROOT}/ecommerce-routing/${encodeURIComponent(marketplace)}`, { method: 'PUT', body }),

@@ -46,6 +46,7 @@ import { runTwitterSearchFill } from './twitter-search-fill.mjs'
 import { contentSearchPlan } from './content-search.mjs'
 import { socialAccountPlan } from './social-account-delivery.mjs'
 import { youtubeCommentsPlan } from './youtube-comments-workflow.mjs'
+import { StrategySearchRoutingStore } from './strategy-search-routing.mjs'
 import { runFacebookSearchFill } from './facebook-search-fill.mjs'
 import { waitForFacebookRapidAdmission } from './facebook-rapid-admission.mjs'
 import { normalizeFacebookSearch, projectFacebookSearch, facebookJustOneArchives, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY } from '../contracts/facebook-search.mjs'
@@ -356,6 +357,7 @@ export class ExternalPlatformGateway {
     admissionPolicies = null,
     credentialStore = null,
     ecommerceRoutingStore = null,
+    strategySearchRoutingStore = new StrategySearchRoutingStore(usageStore.pool),
     // Product-search supplier -> gateway, shared by every gateway in the map.
     productSearchGateways = null,
     // Everything in this class is provider-shaped rather than provider-specific:
@@ -369,6 +371,7 @@ export class ExternalPlatformGateway {
   }) {
     this.providerKey = providerKey
     this.usageStore = usageStore
+    this.strategySearchRoutingStore = strategySearchRoutingStore
     this.platformStore = platformStore
     this.adapter = adapter
     this.config = config

@@ -34,7 +34,7 @@ async function memoryFixture() {
 test('legacy is preserved until an explicit audited CAS switch; auth reflects state without changing Key identity or scopes', async () => {
   const store = await memoryFixture()
   const before = await store.findApiKeyById(keyId)
-  assert.deepEqual(await readKeyHubLimits(store, keyId), { apiKeyId: keyId, hubRateLimitExempt: null,
+  assert.deepEqual(await readKeyHubLimits(store, keyId), { apiKeyId: keyId, policyVersion: 2, hubRateLimitExempt: null,
     effectiveExempt: false, inheritedQuotaExempt: true, source: 'legacy', revision: 0, updatedAt: null })
   assert.equal(store.keyHubLimitEvents, undefined)
   const saved = await saveKeyHubLimits(store, keyId, body(true), actor())
