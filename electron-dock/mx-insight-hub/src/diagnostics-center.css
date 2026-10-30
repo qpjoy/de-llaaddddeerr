@@ -1,6 +1,16 @@
 .mih-diagnostics-center { display: grid; gap: 20px; min-width: 0; }
-.mih-diagnostics-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--qp-line); }
+.mih-diagnostics-tabs { display: flex; flex-wrap: wrap; gap: 12px 24px; border-bottom: 1px solid var(--qp-line); }
 .mih-diagnostics-tabs button { padding: 12px 4px; border: 0; border-bottom: 3px solid transparent; background: transparent; color: var(--qp-text-3); font: inherit; cursor: pointer; }
 .mih-diagnostics-tabs button[aria-pressed="true"] { border-color: var(--qp-primary); color: var(--qp-primary); font-weight: 600; }
 .mih-diagnostics-tabs button:focus-visible { outline: 2px solid var(--qp-primary); outline-offset: 3px; }
 @media (max-width: 700px) { .mih-diagnostics-center { gap: 14px; } }
+.mih-platform-diagnostics { display: grid; gap: 18px; min-width: 0; overflow-wrap: anywhere; }
+.mih-platform-selector { display: grid; gap: 8px; max-width: 420px; }
+.mih-platform-links { display: flex; flex-wrap: wrap; gap: 12px 24px; }
+.mih-platform-issues { display: grid; gap: 12px; }
+.mih-platform-issues details { border: 1px solid var(--qp-line); border-radius: 12px; padding: 16px; }
+.mih-platform-issues summary { cursor: pointer; font-weight: 600; }
+.mih-platform-issues summary:focus-visible { outline: 2px solid var(--qp-primary); outline-offset: 4px; }
+.mih-platform-issues dl { display: grid; gap: 8px; margin: 16px 0 0; }
+.mih-platform-issues dt { font-weight: 600; }
+.mih-platform-issues dd { margin: 0 0 8px; line-height: 1.7; color: var(--qp-text-2); }

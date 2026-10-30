@@ -8,6 +8,15 @@ const receipt = value => {
   const body_bytes = Buffer.from(JSON.stringify(value))
   return { body_bytes, body_size: body_bytes.length, body_sha256: createHash('sha256').update(body_bytes).digest('hex') }
 }
+test('unavailable reason is reported from a fixed allowlist without disclosing message or unknown reason', () => {
+  for (const [reason, expected] of [['Suspended', 'suspended'], ['private-secret', 'other']]) {
+    const result = inspectTwitterAccountArchive(receipt({ data: { users: [{
+      __typename: 'UserUnavailable', reason, message: 'private-secret',
+    }] } }))
+    assert.equal(result.profileCandidates[0].unavailableReason, expected)
+    assert.doesNotMatch(JSON.stringify(result), /private-secret/)
+  }
+})
 test('archive checks bytes and distinguishes an explicit not-found response from a malformed profile', () => {
   const raw = receipt({ data: {}, userExists: false })
   assert.equal(inspectTwitterAccountArchive(raw).explicitNotFoundEnvelope, true)

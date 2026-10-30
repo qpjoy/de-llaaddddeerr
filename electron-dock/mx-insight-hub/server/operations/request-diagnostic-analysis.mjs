@@ -1,5 +1,7 @@
 // Interpret only the already projected, read-only request diagnostic DTO.
 // No request/response bodies, arbitrary log text, I/O, or model invocation.
+import { platformDiagnosticAnalysis } from './platform-diagnostic-analysis.mjs'
+
 export function analyzeRequestDiagnostic(run) {
   const providers = Array.isArray(run.providerCalls) ? run.providerCalls : []
   const connectors = Array.isArray(run.connectorCalls) ? run.connectorCalls : []
@@ -82,6 +84,17 @@ export function analyzeRequestDiagnostic(run) {
     nextSteps.push('保留原请求及任务身份，先核对最终结果与结算；不自动重发、换幂等键、解除 unknown 或释放冻结。')
   }
 
+  const unavailableAccount = refs(providers, call => call.provider === 'rapidapi'
+    && call.operation === 'social.profile.get' && call.outcome === 'rejected'
+    && ['social_account_not_found', 'social_account_unavailable'].includes(call.errorCode), 'providerCalls', ['outcome', 'errorCode'])
+  if (unavailableAccount.length) {
+    if (run.status === 'committed' && [404, 422].includes(run.responseStatus)) {
+      summary = '供应商明确报告 Twitter 账号未找到或不可用，账号采集已停止。'
+    }
+    add('twitter_account_unavailable', 'confirmed', '账号查找返回业务否定结果',
+      '这不是额度耗尽或通用解析失败；供应商报告的账号状态不证明账号永久不存在。历史响应和费用保持原记录。', unavailableAccount)
+    nextSteps.push('查看保存响应中的账号原因，核实账号标识与当前状态；不自动重试或切换供应商重新采购。')
+  }
   const rejected = refs(providers, call => call.outcome === 'rejected', 'providerCalls', ['outcome', 'httpStatus', 'businessCode', 'errorCode'])
   const tikhubRateLimited = refs(providers,
     call => call.provider === 'tikhub' && (call.httpStatus === 429 || call.errorCode === 'upstream_rate_limited'),
@@ -130,5 +143,6 @@ export function analyzeRequestDiagnostic(run) {
     version: 1, mode: 'recorded_evidence', readOnly: true, modelInvoked: false,
     summary, findings: findings.slice(0, 12), nextSteps: nextSteps.slice(0, 6),
     semanticRelevance: 'not_assessed',
+    platformAnalysis: platformDiagnosticAnalysis(run),
   }
 }

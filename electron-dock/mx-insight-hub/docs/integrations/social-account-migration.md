@@ -96,3 +96,9 @@ Content-Type: application/json
 本轮保留平台与供应商的独立运行状态；没有执行线上付费探测或部署，也不根据离线 fixture 宣称所有平台实时可用。下游接入时应核对其原 Key 新能力授权、已启用操作及真实客户端解析；旧入口的删除需要等待迁移流量和请求证据验证。
 
 运行时 HTML 文档：`/docs/strategy-search`；下载 OpenAPI：`/docs/openapi.json`。两者按当前调用身份的有效 scope 过滤平台及操作。产品入口为《策略搜索》的接口调试、产品展示、接入指南及 Admin 管理页。
+
+### 2026-10-30：明确的 Twitter 账号不可用
+
+账号查找响应的唯一候选若为 `UserUnavailable`，新版 Hub 返回 HTTP 422 / `social_account_unavailable`，详情为 `platform=twitter`、`stage=account_lookup`、`outcome=rejected`、`retryable=false`。`reason` 只归一化明确枚举：`suspended`、`deactivated`、`deleted`、`protected`、`not_found`；未识别的原因统一为 `unavailable`，不解析自由文本或推断账号永久状态。原 `userExists:false` 的 404 合同保留。
+
+Delta 对这两类明确账号状态停止自动重试及 Night-All 回退，保留失败检查点、请求 ID、原始错误体，输出中文原因；不会伪装为成功空列表。普通格式异常、上游 HTTP 错误、授权与限流仍遵循各自原规则。供应商回执、幂等结果和客户计费规则不变；旧 502 不改写，不从旧错误码反推账号状态。

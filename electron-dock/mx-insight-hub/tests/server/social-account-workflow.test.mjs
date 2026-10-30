@@ -114,6 +114,34 @@ test('Twitter screenshot-shaped nonnumeric ID and page_size=500 follows short pa
 })
 
 for (const operation of ['crawl', 'user-info']) {
+  test(`Twitter ${operation} returns a typed unavailable account without crawling, quarantining or repurchasing`, async t => {
+    const wire = JSON.stringify({ data: { users: [{ __typename: 'UserUnavailable', reason: 'Suspended', message: 'private supplier text' }] } })
+    const h = await harness(t, { fetchImpl: () => new Response(wire) })
+    const body = { platform: 'twitter', userId: '42', ...(operation === 'crawl' ? { count: 10 } : {}) }
+    const check = error => {
+      assert.equal(error.status, 422)
+      assert.equal(error.code, 'social_account_unavailable')
+      assert.equal(error.details.reason, 'suspended')
+      assert.equal(error.details.stage, 'account_lookup')
+      assert.equal(error.details.retryable, false)
+      assert.equal(error.details.outcome, 'rejected')
+      assert.doesNotMatch(JSON.stringify(error.details), /private/)
+      return true
+    }
+    await assert.rejects(h.invoke(body, 'unavailable-account', operation), check)
+    const call = [...h.platformStore.calls.values()][0]
+    const usage = structuredClone(h.store.requests.get(call.usageRequestId))
+    assert.equal(call.outcome, 'rejected')
+    assert.equal(call.errorCode, 'social_account_unavailable')
+    assert.equal(call.billed, null)
+    assert.equal(h.platformStore.state.consecutiveFailures, 0)
+    assert.equal(await h.platformStore.contractCircuitState('rapidapi', 'twitter'), null)
+    assert.equal(Buffer.from(h.platformStore.restrictedResponseArchives.get(call.id).bodyBytes).toString(), wire)
+    await assert.rejects(h.invoke(body, 'unavailable-account', operation), check)
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.historical.length, 0)
+    assert.deepEqual(h.store.requests.get(call.usageRequestId), usage)
+  })
   test(`Twitter ${operation} preserves a definitive missing-account receipt as 404 without another purchase`, async t => {
     const wire = '{"data":{},"userExists":false}'
     const h = await harness(t, { fetchImpl: () => new Response(wire, { headers: { 'content-type': 'application/json' } }) })
@@ -549,8 +577,12 @@ test('public HTTP social routes use the Hub workflow while legacy route aliases 
   assert.equal(h.calls.length, 3)
 })
 
-test('Twitter missing-account HTTP response and replay retain the durable Request ID with 404', async t => {
-  const h = await harness(t, { fetchImpl: () => Response.json({ data: {}, userExists: false }) })
+for (const [status, code, payload] of [
+  [404, 'social_account_not_found', { data: {}, userExists: false }],
+  [422, 'social_account_unavailable', { data: { users: [{ __typename: 'UserUnavailable' }] } }],
+]) {
+test(`Twitter ${code} HTTP response and replay retain the durable Request ID with ${status}`, async t => {
+  const h = await harness(t, { fetchImpl: () => Response.json(payload) })
   const server = createServer(createApp({ service: h.service, store: h.store, adapter: {}, adminToken: null,
     listenerMode: 'public', logger: { error() {} }, hubSocialGateway: { socialData: (context, input) => h.gateway.socialAccountData(context, input) } }))
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
@@ -560,17 +592,19 @@ test('Twitter missing-account HTTP response and replay retain the durable Reques
     body: JSON.stringify({ platform: 'twitter', user_id: 'Brain6ur', page_size: 30 }) })
   const response = await send(), body = await response.json()
   const usage = [...h.store.requests.values()][0]
-  assert.equal(response.status, 404)
-  assert.equal(body.error.code, 'social_account_not_found')
+  assert.equal(response.status, status)
+  assert.equal(body.error.code, code)
+  if (status === 422) assert.equal(body.error.details.reason, 'unavailable')
   assert.equal(body.requestId, usage.id)
   assert.equal(body.error.details.requestId, usage.id)
   assert.equal(response.headers.get('x-mx-insight-request-id'), usage.id)
   const replay = await send()
-  assert.equal(replay.status, 404)
+  assert.equal(replay.status, status)
   assert.equal(replay.headers.get('x-mx-insight-request-id'), usage.id)
   assert.deepEqual(await replay.json(), body)
   assert.equal(h.calls.length, 1)
 })
+}
 
 test('already-issued Twitter mxec2 cursors and exact historical replay keep the original contract', async t => {
   const h = await harness(t, { fetchImpl: call => Response.json(timeline(call.params.cursor ? ['2'] : ['1'], call.params.cursor ? null : 'old-next')) })

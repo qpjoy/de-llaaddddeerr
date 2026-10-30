@@ -7,6 +7,7 @@ import { AcquisitionComparison } from './acquisition-comparison.jsx'
 import { acquisitionComparisonSessionFor } from './acquisition-comparison.js'
 import { TwitterRequestRetry } from './twitter-request-retry.jsx'
 import { SearchAdmissionDisposition } from './search-admission-disposition.jsx'
+import { PlatformDiagnosticGuidance } from './platform-diagnostics.jsx'
 import './request-diagnostics.css'
 
 const shown = value => value == null || value === '' ? '未记录' : String(value)
@@ -162,6 +163,7 @@ export default function RequestDiagnostics({ token, onUnauthorized, session, set
             ['请求时间', formatDate(run.reservedAt)], ['完成时间', formatDate(run.completedAt)],
           ]}/>
           <p className="mih-diagnostic-guidance">{run.guidance}</p>
+          <PlatformDiagnosticGuidance analysis={run.analysis?.platformAnalysis} requestId={run.requestId}/>
           <EvidenceAnalysis analysis={run.analysis}/>
           <RequestValidation token={token} run={run} onUnauthorized={onUnauthorized} session={acquisitionComparisonSessionFor(comparisonSessions || localComparisonSessions, token, run.requestId)}/>
           <h4>客户结算</h4>

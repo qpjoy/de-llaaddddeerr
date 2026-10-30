@@ -1,6 +1,7 @@
-export function diagnosticHref(requestId = '', view = 'requests') {
-  const query = new URLSearchParams({ view: view === 'limits' ? 'limits' : 'requests' })
+export function diagnosticHref(requestId = '', view = 'requests', platform = '') {
+  const query = new URLSearchParams({ view: ['limits', 'platforms'].includes(view) ? view : 'requests' })
   if (requestId) query.set('requestId', requestId)
+  if (view === 'platforms' && platform) query.set('platform', platform)
   return `#/diagnostics?${query}`
 }
 
@@ -11,7 +12,7 @@ export function legacyDiagnosticRedirect(path, query) {
 }
 
 export function diagnosticTabRequestId(view, requestId, session, token) {
-  if (view === 'limits') return requestId || ''
+  if (view === 'limits' || view === 'platforms') return requestId || ''
   // Limits need one resolved Hub request, not the upstream ID used for lookup.
   // A new deep link must not reuse the previous lookup's still-visible result.
   if (session?.token !== token || session.routeIdentifier !== requestId

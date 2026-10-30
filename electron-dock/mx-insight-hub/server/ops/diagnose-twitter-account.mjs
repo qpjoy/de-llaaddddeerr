@@ -7,7 +7,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const MAX_BYTES = 8 * 1024 * 1024
 const choice = (value, choices) => value == null ? null : choices.includes(value) ? value : 'other'
 const ERRORS = ['social_upstream_response_unusable', 'social_upstream_timeout_or_size_limit',
-  'invalid_social_contract', 'social_account_not_found', 'social_upstream_rejected',
+  'invalid_social_contract', 'social_account_not_found', 'social_account_unavailable', 'social_upstream_rejected',
   'external_platform_response_unusable', 'external_platform_pre_dispatch_failed']
 const kind = value => value === undefined ? 'missing' : value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
 const FIELDS = ['data', 'userExists', 'errors', 'error', 'users', 'user', 'result', 'user_result_by_screen_name',
@@ -39,7 +39,10 @@ export function inspectTwitterAccountArchive(row) {
     profileCandidates: Array.isArray(candidates) ? candidates.slice(0, 3).map(candidate => {
       const user = candidate?.result || candidate
       return { shape: shape(user), legacy: shape(user?.legacy), core: shape(user?.core),
-        unavailable: user?.__typename === 'UserUnavailable' }
+        unavailable: user?.__typename === 'UserUnavailable',
+        unavailableReason: user?.__typename === 'UserUnavailable'
+          ? choice(typeof user.reason === 'string' ? user.reason.toLowerCase() : null,
+            ['suspended', 'deactivated', 'deleted', 'protected', 'notfound', 'not_found', 'unavailable']) : null }
     }) : { kind: kind(candidates) },
     parserReplayed: false }
 }
@@ -55,7 +58,7 @@ export async function diagnoseTwitterAccount(pool, requestId) {
     const { rows: [request] } = await client.query(`SELECT id, platform, status, response_status, error_code,
       reserved_at, completed_at, acquisition_request->>'path' AS path
       FROM public.usage_requests WHERE id=$1::uuid`, [requestId])
-    const base = { revision: 'twitter-account-diagnostic.v1', requestId, found: Boolean(request) }
+    const base = { revision: 'twitter-account-diagnostic.v2', requestId, found: Boolean(request) }
     if (!request) return base
     if (request.platform !== 'twitter') throw new Error('request_not_twitter')
     const { rows: calls } = await client.query(`SELECT c.id, c.provider_key, c.operation, c.endpoint_key,
@@ -68,7 +71,7 @@ export async function diagnoseTwitterAccount(pool, requestId) {
     const ownCalls = []
     for (const call of calls.slice(0, 50)) {
       let archive = { state: call.archive_present ? 'not_inspected' : 'missing' }
-      if (call.outcome === 'succeeded_unusable' && call.archive_present && inspected < 3) {
+      if ((call.outcome === 'succeeded_unusable' || ['social_account_not_found', 'social_account_unavailable'].includes(call.error_code)) && call.archive_present && inspected < 3) {
         inspected++
         const { rows: [raw] } = await client.query(`SELECT body_size, body_sha256,
           CASE WHEN body_size <= $2 THEN body_bytes END AS body_bytes

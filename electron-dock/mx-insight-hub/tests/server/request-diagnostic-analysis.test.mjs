@@ -11,6 +11,15 @@ const base = () => ({
 })
 const finding = (analysis, code) => analysis.findings.find(item => item.code === code)
 
+test('typed Twitter account rejection is distinguished from quota and parsing failures', () => {
+  const analysis = analyzeRequestDiagnostic({ ...base(), status: 'committed', responseStatus: 422,
+    providerCalls: [{ provider: 'rapidapi', operation: 'social.profile.get', outcome: 'rejected',
+      httpStatus: 200, errorCode: 'social_account_unavailable' }] })
+  assert.match(analysis.summary, /账号未找到或不可用/)
+  assert.ok(finding(analysis, 'twitter_account_unavailable'))
+  assert.match(analysis.nextSteps.join(' '), /不自动重试/)
+})
+
 test('recorded timeout is confirmed without inventing upstream success, deployment config, or free retries', () => {
   const run = { ...base(), connectorCalls: [{
     id: 'd976bba6-b1f3-4ea2-ba17-ed7d9bd657ab', operation: 'crawl', outcome: 'unknown',
