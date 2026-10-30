@@ -196,7 +196,14 @@ Hub 次数配额、月度采购/补贴预算、共享自动熔断等待的豁免
 ### 启用与回退
 
 1. 按上文正常发布命令发布（含 migration 172），确认所有 Public/Admin Pod 已更新。
-2. 在“数据产品 → 管理”核对 TikHub、JustOne、RapidAPI 的并发和每分钟请求数。
+2. 在“数据产品 → 管理”核对 TikHub、JustOne、RapidAPI 的并发和每分钟请求数。先在服务器 Hub 目录跑只读脚本取 LCY 近 7 天的实际负载：
+
+   ```bash
+   kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
+     psql -X -U mx_common -d mx_insight_hub < scripts/inspect-lcy-supplier-load.sql
+   ```
+
+   第 0 段确认 172 已执行；第 2 段的 `p99_per_min` 是每分钟请求数的下限参考，`needed_concurrency` 是并发的下限参考；第 3 段是实际同时在途峰值；第 4 段对比 429 所在分钟和平时的调用量：明显更高说明是突发导致，排队能消掉；差不多说明是供应商自身限制，排队消不掉；第 5 段的 HTTP 在途峰值应明显低于 128（每进程 32 × 4）。每分钟请求数不能高于供应商实际允许的值。
 3. API Keys → LCY-delta → Hub 限制开关，选“优先排队”，填写原因保存。
 4. 观察：LCY 的 `upstream_rate_limited` 是否下降；`external_platform_busy` 且 `admissionMode = "priority"` 的数量；Delta 的平台挂起是否减少。
 5. 回退：在同一界面改回“绕过”，立即生效，不需要部署。
