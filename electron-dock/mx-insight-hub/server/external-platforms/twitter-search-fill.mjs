@@ -211,7 +211,8 @@ export async function runTwitterSearchFill({ gateway,context,delivery,request,de
         const {credential,control,cost}=acquisition
         currentCost=await store.reserveProviderCostWorkflow({ ...delivery,apiKeyId:context.apiKey.id,costControls:[cost] })
         const rate=await acquireSupplierRate(context,store,{ limit:(await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90,windowMs:60000,
-          signal,providerState:()=>store.providerState('rapidapi'),deadline:deadlineAt-(gateway.config.timeoutMs || 30000)-5000 })
+          signal,providerState:()=>store.providerState('rapidapi'),deadline:deadlineAt-(gateway.config.timeoutMs || 30000)-5000,
+          maxWaitMs:currentAdmissionLimits(gateway).maxWaitMs })
         if(!rate.allowed) throw new AppError(429,'external_platform_rate_limited','External data rate limit is exhausted')
         if(!enoughTime()) throw new AppError(503,'twitter_fill_deadline','The bounded search deadline has been reached')
         if(signal?.aborted) throw new AppError(499,'request_cancelled','Request cancelled before dispatch')

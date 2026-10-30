@@ -1,4 +1,4 @@
-import { refreshAdmissionLimits } from './admission-runtime.mjs'
+import { currentAdmissionLimits, refreshAdmissionLimits } from './admission-runtime.mjs'
 import { openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
@@ -220,7 +220,8 @@ export async function runContentSearch({ gateway, context, request, delivery, de
           costReservation = await store.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
           const rate = await acquireSupplierRate(context, store, { limit: (await refreshAdmissionLimits(gateway)).maxRequestsPerMinute ?? 90,
             windowMs: 60000, bypass: isInternalTraffic(gateway.usageStore, context), signal,
-            providerState: () => store.providerState('tikhub'), deadline: deadlineAt - (gateway.config.timeoutMs || 30000) - 5000 })
+            providerState: () => store.providerState('tikhub'), deadline: deadlineAt - (gateway.config.timeoutMs || 30000) - 5000,
+            maxWaitMs: currentAdmissionLimits(gateway).maxWaitMs })
           if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Content-search rate limit is exhausted')
           if (signal?.aborted) throw new AppError(499, 'request_cancelled', 'Request cancelled before dispatch')
           if (!enoughTime()) throw new AppError(503, 'content_search_deadline', 'Content-search deadline reached before dispatch')

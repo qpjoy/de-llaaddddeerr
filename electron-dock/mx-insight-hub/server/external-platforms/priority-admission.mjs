@@ -99,27 +99,31 @@ export function adaptiveRateLimit(limit, providerState, now) {
 }
 
 /**
- * Take provider RPM tokens, waiting for them until `deadline`. `providerState`
- * may be the state or a function returning it.
+ * Take provider RPM tokens, waiting for them until `deadline` and for at most
+ * `maxWaitMs` (the gateway's managed wait), whichever ends first. The request
+ * lease alone can outlast the caller's own HTTP timeout. `providerState` may be
+ * the state or a function returning it.
  *
- * Without a deadline this is a single attempt, for callers that run their own
+ * With neither bound this is a single attempt, for callers that run their own
  * wait loop. The answer is the store's own: allowed, or the last refusal with
- * its retryAfterMs once waiting longer would pass the deadline.
+ * its retryAfterMs once waiting longer would pass the bound.
  */
 export async function acquirePacedProviderRate(platformStore, {
-  limit, tokens = 1, windowMs = 60_000, deadline, signal, providerState,
+  limit, tokens = 1, windowMs = 60_000, deadline, maxWaitMs, signal, providerState,
 }, { clock = Date.now, wait = sleep } = {}) {
+  const end = Math.min(Number.isFinite(deadline) ? deadline : Infinity,
+    Number.isFinite(maxWaitMs) ? clock() + maxWaitMs : Infinity)
   // A function is read only here, so ordinary callers never pay for the state.
   const state = typeof providerState === 'function' ? await providerState() : providerState
   const paced = Math.max(Math.min(tokens, limit), adaptiveRateLimit(limit, state, clock()))
   while (true) {
     if (signal?.aborted) throw cancelled()
     const rate = await platformStore.acquireProviderRateLimit({ limit: paced, tokens, windowMs })
-    if (rate.allowed || !Number.isFinite(deadline) || !Number.isFinite(rate.retryAfterMs)) {
+    if (rate.allowed || !Number.isFinite(end) || !Number.isFinite(rate.retryAfterMs)) {
       return { ...rate, pacedLimit: paced }
     }
     const delay = Math.max(1, rate.retryAfterMs)
-    if (clock() + delay >= deadline) return { ...rate, pacedLimit: paced }
+    if (clock() + delay >= end) return { ...rate, pacedLimit: paced }
     try {
       await wait(delay, undefined, { signal })
     } catch (error) {

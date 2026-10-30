@@ -89,15 +89,15 @@ export function internalCircuitState(store, context, state) {
 // a caller's own internal-traffic exemption) skips it; priority waits for
 // tokens until `deadline`; every other Key gets the single attempt it had.
 export async function acquireSupplierRate(context, platformStore, {
-  limit, windowMs = 60_000, tokens, deadline, signal, providerState, bypass = false,
+  limit, windowMs = 60_000, tokens, deadline, maxWaitMs, signal, providerState, bypass = false,
 }) {
   const priority = isLcySupplierPriority(context)
   if (!priority && (bypass || isHubRateLimitExempt(context))) return { allowed: true, retryAfterMs: 0 }
-  if (priority) return acquirePacedProviderRate(platformStore, { limit, windowMs, tokens, deadline, signal, providerState })
+  if (priority) return acquirePacedProviderRate(platformStore, { limit, windowMs, tokens, deadline, maxWaitMs, signal, providerState })
   return platformStore.acquireProviderRateLimit({ limit, windowMs, ...(tokens === undefined ? {} : { tokens }) })
 }
 
-// `pacing` ({ deadline, signal, providerState }) lets a priority LCY caller wait
+// `pacing` ({ deadline, maxWaitMs, signal, providerState }) lets a priority LCY caller wait
 // for tokens within its own deadline; callers with their own wait loop omit it.
 export async function acquireTikHubRateLimit(store, context, platformStore, options, pacing = {}) {
   const priority = isLcySupplierPriority(context)

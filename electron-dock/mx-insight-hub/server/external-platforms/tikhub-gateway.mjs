@@ -596,7 +596,8 @@ export class TikHubGateway {
   // Lets a priority LCY dispatch wait for RPM tokens within its request.
   #ratePacing(reservation, signal) {
     return { signal, providerState: () => this.platformStore.providerState(TIKHUB_PROVIDER_KEY),
-      deadline: new Date(reservation.request.leaseExpiresAt).getTime() - (this.config.timeoutMs || 30000) - 5000 }
+      deadline: new Date(reservation.request.leaseExpiresAt).getTime() - (this.config.timeoutMs || 30000) - 5000,
+      maxWaitMs: currentAdmissionLimits(this).maxWaitMs }
   }
 
   #enter(context, enrichment = false) {

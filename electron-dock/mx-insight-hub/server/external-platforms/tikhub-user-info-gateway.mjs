@@ -709,7 +709,8 @@ export class TikHubUserInfoGateway {
               windowMs: 60_000,
             }, { signal, providerState: () => this.platformStore.providerState(TIKHUB_PROVIDER_KEY),
               deadline: new Date(reservation.request.leaseExpiresAt).getTime()
-                - expectedProviderCalls * (this.config.timeoutMs || 30000) - 5000 })
+                - expectedProviderCalls * (this.config.timeoutMs || 30000) - 5000,
+              maxWaitMs: currentAdmissionLimits(this).maxWaitMs })
         if (!admission.allowed) {
           if (snapshot) {
             const fallback = fallbackResponse(snapshot, activeRequestId)

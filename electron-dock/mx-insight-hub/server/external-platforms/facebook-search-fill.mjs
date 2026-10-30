@@ -1,4 +1,4 @@
-import { refreshAdmissionLimits } from './admission-runtime.mjs'
+import { currentAdmissionLimits, refreshAdmissionLimits } from './admission-runtime.mjs'
 import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, internalCircuitState } from '../core/internal-traffic-policy.mjs'
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
@@ -163,7 +163,7 @@ export async function runFacebookSearchFill({ gateway, gateways, context, delive
         costReservation = cost.costMinor === 0 ? null : await target.platformStore.reserveProviderCostWorkflow({ ...delivery, costControls: [cost] })
         const rate = await acquireSupplierRate(context, target.platformStore, { limit: (await refreshAdmissionLimits(target)).maxRequestsPerMinute ?? 90,
           windowMs: 60000, signal, providerState: () => target.platformStore.providerState(provider),
-          deadline: deadlineAt - (target.config.timeoutMs || 30000) - 5000 })
+          deadline: deadlineAt - (target.config.timeoutMs || 30000) - 5000, maxWaitMs: currentAdmissionLimits(target).maxWaitMs })
         if (!rate.allowed) throw new AppError(429, 'external_platform_rate_limited', 'Facebook supplier rate limit is exhausted')
         if (provider === 'rapidapi') {
           admission = await waitForFacebookRapidAdmission({ policyStore, rateLimitExempt: () => bypassesSupplierLimits(context), requestId: delivery.usageRequestId,

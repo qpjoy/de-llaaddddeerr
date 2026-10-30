@@ -1975,6 +1975,7 @@ export class ExternalPlatformGateway {
             bypass: this.providerKey === 'tikhub' && isInternalTraffic(this.usageStore, context),
             providerState: () => this.platformStore.providerState(this.providerKey),
             deadline: new Date(reservation.request.leaseExpiresAt).getTime() - (this.config.timeoutMs || 30000) - 5000,
+            maxWaitMs: currentAdmissionLimits(this).maxWaitMs,
           })
       if (!rateLimit.allowed) {
         // Facebook's auto policy may choose its other supplier before any

@@ -75,8 +75,9 @@ SELECT provider_key, max(in_flight) AS peak_in_flight,
 \echo '== 4. Supplier rate refusals: do they come in busy minutes (pacing helps) or quiet ones (supplier side)?'
 WITH per_minute AS (
   SELECT provider_key, date_trunc('minute', started_at) AS minute, count(*) AS calls,
-         count(*) FILTER (WHERE error_code = 'upstream_rate_limited') AS limited,
-         count(*) FILTER (WHERE error_code = 'upstream_rate_limited' AND billed IS FALSE) AS limited_unbilled
+         -- RapidAPI social refusals keep their own code; their HTTP 429 is the signal.
+         count(*) FILTER (WHERE error_code = 'upstream_rate_limited' OR http_status = 429) AS limited,
+         count(*) FILTER (WHERE (error_code = 'upstream_rate_limited' OR http_status = 429) AND billed IS FALSE) AS limited_unbilled
     FROM external_platform.provider_calls
    WHERE api_key_id = 'fd2f8cc9-0ff1-4052-a538-8cc8150bde83'
      AND started_at >= now() - interval '7 days'
@@ -119,5 +120,50 @@ SELECT platform, response_status,
  GROUP BY 1, 2, 3, 4, 5
  ORDER BY requests DESC
  LIMIT 40;
+
+\echo '== 7. LCY failures in equal windows before and after the last switch save (up to 24 h each)'
+WITH switch AS (
+  SELECT hub_rate_limit_updated_at AS at, least(now() - hub_rate_limit_updated_at, interval '24 hours') AS span
+    FROM api_keys WHERE id = 'fd2f8cc9-0ff1-4052-a538-8cc8150bde83'
+), scoped AS (
+  SELECT CASE WHEN u.created_at >= w.at THEN 'after' ELSE 'before' END AS period, u.*
+    FROM usage_requests u, switch w
+   WHERE u.api_key_id = 'fd2f8cc9-0ff1-4052-a538-8cc8150bde83'
+     AND u.created_at >= w.at - w.span AND u.created_at < w.at + w.span
+)
+SELECT period, min(created_at) AS from_at, max(created_at) AS to_at, count(*) AS requests,
+       count(*) FILTER (WHERE response_status >= 400 OR status = 'unknown') AS failed,
+       count(*) FILTER (WHERE response_body #>> '{error,details,reason}' = 'upstream_rate_limited') AS upstream_rate_limited,
+       count(*) FILTER (WHERE response_body #>> '{error,details,admissionMode}' = 'priority'
+                          OR coalesce(error_code, response_body #>> '{error,code}') = 'external_platform_rate_limited') AS hub_priority_wait_refused
+  FROM scoped GROUP BY 1 ORDER BY 1 DESC;
+
+\echo '== 8. Rate-refusal shape: what each supplier accepted per minute and per second, last 7 days'
+\echo '   accepted_per_min_when_429 ~ the supplier minute limit; ok_per_sec ~ bursts it took without refusing'
+WITH calls AS (
+  SELECT provider_key, started_at,
+         (error_code IS NOT DISTINCT FROM 'upstream_rate_limited' OR http_status IS NOT DISTINCT FROM 429) AS limited
+    FROM external_platform.provider_calls
+   WHERE api_key_id = 'fd2f8cc9-0ff1-4052-a538-8cc8150bde83'
+     AND started_at >= now() - interval '7 days'
+), minutes AS (
+  SELECT provider_key, count(*) - count(*) FILTER (WHERE limited) AS accepted, count(*) FILTER (WHERE limited) AS limited
+    FROM calls GROUP BY provider_key, date_trunc('minute', started_at)
+), seconds AS (
+  SELECT provider_key, count(*) AS calls, bool_or(limited) AS limited
+    FROM calls GROUP BY provider_key, date_trunc('second', started_at)
+), by_minute AS (
+  SELECT provider_key,
+         percentile_disc(0.5) WITHIN GROUP (ORDER BY accepted) FILTER (WHERE limited > 0) AS p50_accepted_per_min_when_429,
+         percentile_disc(0.9) WITHIN GROUP (ORDER BY accepted) FILTER (WHERE limited > 0) AS p90_accepted_per_min_when_429
+    FROM minutes GROUP BY 1 HAVING sum(limited) > 0
+), by_second AS (
+  SELECT provider_key,
+         percentile_disc(0.5) WITHIN GROUP (ORDER BY calls) FILTER (WHERE limited) AS p50_calls_per_sec_when_429,
+         percentile_disc(0.99) WITHIN GROUP (ORDER BY calls) FILTER (WHERE NOT limited) AS p99_ok_per_sec,
+         max(calls) FILTER (WHERE NOT limited) AS max_ok_per_sec
+    FROM seconds GROUP BY 1
+)
+SELECT * FROM by_minute JOIN by_second USING (provider_key) ORDER BY provider_key;
 
 ROLLBACK;

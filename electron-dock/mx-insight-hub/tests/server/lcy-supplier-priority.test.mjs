@@ -156,6 +156,15 @@ test('paced RPM waits for tokens until its deadline and reads provider state onl
   asked.length = 0
   assert.equal((await acquirePacedProviderRate(store, { limit: 50 }, { clock: () => clock, wait })).allowed, false)
   assert.equal(asked.length, 1, 'without a deadline it is a single attempt')
+  // The managed wait caps pacing even when the request lease would allow more:
+  // a 180 s lease must not outlast the caller's own 90 s HTTP timeout.
+  asked.length = 0; clock = 0
+  const capped = await acquirePacedProviderRate(store, { limit: 50, deadline: 145_000, maxWaitMs: 500 },
+    { clock: () => clock, wait })
+  assert.deepEqual([capped.allowed, asked.length, clock], [false, 2, 400])
+  asked.length = 0; clock = 0
+  assert.equal((await acquirePacedProviderRate(store, { limit: 50, maxWaitMs: 1_000 }, { clock: () => clock, wait })).allowed, true,
+    'the managed wait alone is enough to pace')
   // An atomic multi-call workflow is never paced below its own token count.
   asked.length = 0
   await acquirePacedProviderRate({ acquireProviderRateLimit: async input => { asked.push(input); return { allowed: true } } },
