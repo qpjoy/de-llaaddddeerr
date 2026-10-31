@@ -1,6 +1,7 @@
 -- Read-only: why one /api/v1/data/social/crawl delivery stopped short — Hub's
 -- own bounds (deadline, page/call limits, admission) or the supplier page
--- (no continuation cursor, a cursor Hub's parser does not read, timeline end).
+-- (no continuation cursor, a cursor Hub's parser does not read, timeline end) —
+-- or why its Twitter account lookup failed (sections 7-8).
 --
 -- Run on the operator host, from electron-dock/mx-insight-hub:
 --   kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
@@ -31,7 +32,7 @@ SELECT u.platform, u.acquisition_request->>'path' AS path, u.status, u.response_
 \echo '== 2. Request parameters (body keys; identity and paging values only)'
 SELECT (SELECT string_agg(key, ',' ORDER BY key) FROM jsonb_object_keys(u.acquisition_request->'body') key) AS body_keys,
        (SELECT jsonb_object_agg(key, value) FROM jsonb_each(u.acquisition_request->'body')
-         WHERE key ~* '^(platform|action|activity_?type|user_?id|uid|username|user_name|url|page_?size|count|limit|target_?count|page)$') AS paging_and_identity,
+         WHERE key ~* '^(platform|action|activity_?types?|user_?ids?|uids?|usernames?|user_names?|urls?|page_?size|count|limit|target_?count|page)$') AS paging_and_identity,
        u.acquisition_request #> '{body,cursor}' IS NOT NULL OR u.acquisition_request #> '{body,params,cursor}' IS NOT NULL AS continued_from_cursor
   FROM usage_requests u WHERE u.id = :'request_id';
 
@@ -76,5 +77,36 @@ SELECT call_ordinal, endpoint_key, body_size, json_parsed,
        left(md5(jsonb_path_query_first(p, 'strict $.** ? (@.cursorType == "Bottom" && @.value.type() == "string").value') #>> '{}'), 8) AS bottom_cursor_md5,
        jsonb_path_exists(p, 'strict $.** ? (@.type == "TimelineTerminateTimeline")') AS terminate
   FROM pages ORDER BY call_ordinal;
+
+
+\echo '== 7. Account lookup response (userExists = false with empty data: the supplier says no such handle)'
+SELECT c.call_ordinal, c.outcome, c.error_code, r.body_size,
+       (SELECT string_agg(key, ',' ORDER BY key) FROM jsonb_object_keys(CASE WHEN jsonb_typeof(r.parsed_payload) = 'object' THEN r.parsed_payload END) key) AS top_keys,
+       r.parsed_payload -> 'userExists' AS user_exists,
+       (SELECT count(*) FROM jsonb_object_keys(CASE WHEN jsonb_typeof(r.parsed_payload -> 'data') = 'object' THEN r.parsed_payload -> 'data' END)) AS data_keys,
+       (SELECT string_agg(DISTINCT v #>> '{}', ',') FROM jsonb_path_query(r.parsed_payload, 'strict $.** ? (@.__typename like_regex "^User").__typename') v) AS user_typenames,
+       (SELECT string_agg(DISTINCT v #>> '{}', ',') FROM jsonb_path_query(r.parsed_payload, 'strict $.** ? (@.__typename == "UserUnavailable" && @.reason.type() == "string").reason') v) AS unavailable_reason
+  FROM external_platform.provider_calls c
+  LEFT JOIN control.external_platform_restricted_raw_responses r ON r.provider_call_id = c.id
+ WHERE c.usage_request_id = :'request_id' AND c.endpoint_key = 'twitter-aio.user-info'
+ ORDER BY c.call_ordinal;
+
+\echo '== 8. The same account requested by this Key in the last 14 days (did the lookup ever succeed?)'
+WITH target AS (
+  SELECT api_key_id, platform,
+         lower(coalesce(acquisition_request #> '{body,usernames}', acquisition_request #> '{body,userIds}',
+                        acquisition_request #> '{body,urls}')::text) AS identity
+    FROM usage_requests WHERE id = :'request_id'
+)
+SELECT u.id, u.reserved_at, u.acquisition_request->>'path' AS path, u.response_status,
+       coalesce(u.error_code, u.response_body #>> '{error,code}') AS code,
+       jsonb_array_length(coalesce(u.response_body #> '{data,items}', '[]')) AS items
+  FROM usage_requests u, target t
+ WHERE u.api_key_id = t.api_key_id AND u.platform = t.platform
+   AND u.created_at >= now() - interval '14 days'
+   AND u.acquisition_request->>'path' IN ('/api/v1/data/social/crawl', '/api/v1/data/social/user-info')
+   AND lower(coalesce(u.acquisition_request #> '{body,usernames}', u.acquisition_request #> '{body,userIds}',
+                      u.acquisition_request #> '{body,urls}')::text) = t.identity
+ ORDER BY u.reserved_at DESC LIMIT 20;
 
 ROLLBACK;

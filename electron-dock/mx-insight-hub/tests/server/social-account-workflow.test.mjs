@@ -522,6 +522,21 @@ test('an empty advancing provider page continues, while a repeated token stops w
   assert.ok(result.body.data.warnings.some(warning => warning.code === 'upstream_pagination_stopped'))
 })
 
+test('an empty page repeating its own continuation ends the timeline normally', async t => {
+  let page = 0
+  const h = await harness(t, { fetchImpl: call => {
+    if (!call.url.pathname.includes('/tweets')) return Response.json(profile())
+    page++
+    return Response.json(page === 1 ? timeline(['1', '2'], 'end') : timeline([], 'end'))
+  } })
+  const result = await h.invoke({ platform: 'twitter', username: 'ui_batch_019', count: 10 })
+  assert.deepEqual(result.body.data.items.map(row => row.content_id), ['1', '2'])
+  assert.equal(h.calls.length, 3)
+  assert.equal(result.body.data.page.hasMore, false)
+  assert.deepEqual(result.body.data.warnings, [])
+  assert.equal(result.body.data.status, 'ok')
+})
+
 test('provider credential echoes never enter public deliveries, canonical records or replayed overflow', async t => {
   const h = await harness(t, { fetchImpl: call => {
     if (!call.url.pathname.includes('/tweets')) return Response.json(profile())

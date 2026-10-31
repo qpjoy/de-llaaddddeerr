@@ -145,8 +145,11 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
     else {
       job.buffer = null
       const next = projected.providerPage
+      // An empty page that repeats its own continuation is how Twitter ends a
+      // timeline: nothing is left, and a restart would only buy the same rows.
+      const ended = next.stopReason === 'repeated_cursor' && !rows.length
       if (next.stopReason === 'continuation_unproven' && traversal) warn('pagination_completeness_unknown', 'The upstream response did not prove comment continuation; acquired rows were retained.')
-      else if (next.stopReason) warn('upstream_pagination_stopped', 'The upstream continuation did not advance; acquired rows were retained. Restart explicitly to traverse again.')
+      else if (next.stopReason && !ended) warn('upstream_pagination_stopped', 'The upstream continuation did not advance; acquired rows were retained. Restart explicitly to traverse again.')
       job.done = request.operation === 'user-info' || next.hasMore === false || !next.nextParams || job.upstreamPages >= 15
       job.providerCursor = structuredClone(next.nextParams ?? null)
       job.providerPage = next.nextPage || job.providerPage + 1

@@ -19,6 +19,7 @@ Last reviewed: 2026-10-21.
 
 ## 容量与熔断排查（2026-10-09）
 
+- [Twitter 账号内容只有 32 条：时间线到底按正常结束返回（2026-10-31）](operations/twitter-account-timeline-end-2026-10-31.md)：`8c042908` 第 3 页为空且游标未变，是 Twitter 时间线结束而不是 Hub 漏页；空页重复自身游标不再附 `upstream_pagination_stopped`，状态为 `ok`。按 Request ID 复查用 `scripts/inspect-social-account-request.sql`。
 - [电商数据：上游供应商可切换、淘宝/天猫备用通道、TikHub 电商接口（2026-10-29）](operations/ecommerce-supplier-routing-2026-10-29.md)：JustOne 余额不足（601）导致电商搜索整体被拒。统一商品搜索新增按平台的「固定 / 主用 + 备用」供应商路由：主用不能执行或明确拒绝且未计费时，同一请求改由备用执行一次；已计费或结果未知时不切换。淘宝/天猫新增同一 JustOne 后端的 RapidAPI 通道，熔断按平台隔离，不影响 Twitter。TikHub 没有淘宝、京东、天猫、闲鱼接口；其小红书电商与 TikTok Shop 的 17 个接口作为电商专用接口接入。附只读诊断与启用顺序。
 - [小红书搜索 503：TikHub 共享熔断被 Hub 自身失败触发（2026-10-29）](operations/tikhub-shared-circuit-hub-failures-2026-10-29.md)：`0a92d464` 被 TikHub 共享熔断拒绝（`reason=upstream_failure`、无上游证据）。Hub 自身的解析失败、补全内部错误、写库失败此前也计入共享熔断，会连带暂停所有 TikHub 平台；现改为只有供应商故障计入。已核实本次由 10 次 Reddit 搜索解析失败（已计费）触发。原因是 Reddit 出现了新的非帖子节点（`SearchInFeedSurveyUnit` 调查卡片、`SearchErrorMessage` 提示）：现在不含帖子的节点直接排除，“无结果”提示返回空页，其他提示记为 Reddit 错误。小红书搜索等 5 处拒绝附带触发调用证据；新增可用于任意平台的只读熔断诊断。
 - [Twitter 搜索 409：同查询仍在执行，Hub 改为先等待（2026-10-29）](operations/twitter-admission-in-flight-wait-2026-10-29.md)：`a19f3831` 被同一 Key、同一查询、仍在执行的 `4954dc7f` 挡住（不是冷却；Delta 所有策略共用一个 Key，同关键词几乎同时调度就会撞上）。v2 新请求现在由 Hub 服务端最多等 40 秒、对方结束后自动放行；超时或调用方断开才返回原 409，其他拒绝不变。
