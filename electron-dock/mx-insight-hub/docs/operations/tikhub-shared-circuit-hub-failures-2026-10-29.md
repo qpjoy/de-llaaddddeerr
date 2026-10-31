@@ -120,3 +120,13 @@ MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh ops internal-p
 ```
 
 同时也会部署尚未上线的抖音“相关搜索”解析修复和 Twitter 准入等待。
+
+## 2026-10-31 复查：拼写纠正组件（只读）
+
+Delta 报 Reddit `409 external_platform_response_unusable`（如 `f7adc84e-f5f1-4ddb-a26d-f21e3c60e757`）。这是同一查询前一次解析失败后的 5 分钟响应隔离，本身没有供应商调用。
+
+- 近 24 小时 Reddit 调用：`succeeded` 2001、`rejected / upstream_rate_limited` 89、`succeeded_unusable / invalid_content_search_contract` 30、`unknown / upstream_rate_limited` 4。
+- 30 次解析失败全部在 2026-10-30 06:05–11:05 UTC（14:05–19:05 北京时间）之间，此后没有新的解析失败。
+- 对其中三次（`84ab4773`、`f1285a1f`、`b2e21322`）运行 `reddit-search-shape.v4` 诊断：失败页都含 `SearchSpellCorrectionApplied`（`b2e21322` 另有 `SearchBanner` 和“无结果”提示）。用线上已安装的解析器重放，三次都是 `installed_accepts`：itemCount 分别为 6、7、0，并带 `reddit_spell_correction` 提示。
+
+结论：这批失败由拼写纠正组件触发，2929aa81（只跳过该组件的三处 telemetry 子树）部署后已不再出现，不需要新的解析规则。剩余的 Reddit 失败主要是 TikHub 429（约 4.4%），由 LCY 供应商优先排队与限速处理。

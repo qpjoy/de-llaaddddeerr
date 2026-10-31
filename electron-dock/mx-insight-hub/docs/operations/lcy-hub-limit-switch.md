@@ -205,7 +205,15 @@ Hub 次数配额、月度采购/补贴预算、共享自动熔断等待的豁免
 
    第 0 段确认 172 已执行；第 2 段的 `p99_per_min` 是每分钟请求数的下限参考，`needed_concurrency` 是并发的下限参考；第 3 段是实际同时在途峰值；第 4 段对比 429 所在分钟和平时的调用量：明显更高说明是突发导致，排队能消掉；差不多说明是供应商自身限制，排队消不掉；第 5 段的 HTTP 在途峰值应明显低于 128（每进程 32 × 4）。每分钟请求数不能高于供应商实际允许的值。
 3. API Keys → LCY-delta → Hub 限制开关，选“优先排队”，填写原因保存。
-4. 观察：LCY 的 `upstream_rate_limited` 是否下降；`external_platform_busy` 且 `admissionMode = "priority"` 的数量；Delta 的平台挂起是否减少。
+4. 观察：LCY 的 `upstream_rate_limited` 是否下降；`external_platform_busy` 且 `admissionMode = "priority"` 的数量；Delta 的平台挂起是否减少。开启后仍有某条请求被 TikHub 429，用它的 Request ID 跑只读脚本，看当时 Hub 每秒发了多少、谁发的、开关前后 429 比例是否变化：
+
+   ```bash
+   kubectl -n mx-common exec -i statefulset/mx-common-postgres -- \
+     psql -X -U mx_common -d mx_insight_hub -v request_id=<Request ID> \
+     < scripts/inspect-tikhub-429-request.sql
+   ```
+
+   第 1 段 `switch_saved_before = false` 表示请求发生在保存优先排队之前；第 3 段某一秒的 `managed_full` / `other` 很多，说明是不走令牌桶的调用或小红书多令牌补全造成的突发；第 6 段被拒和放行的调用前 10 秒/60 秒发出量与在途数差不多，说明 TikHub 在 Hub 自己也放行的负载下拒绝，原因在 Hub 视野之外（同一 TikHub 凭据的其他使用者、端点自身限制），Hub 排队消不掉。
 5. 回退：在同一界面改回“绕过”，立即生效，不需要部署。
 
 ### 本地验证
