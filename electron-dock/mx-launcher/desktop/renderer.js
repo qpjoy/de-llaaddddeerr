@@ -7010,8 +7010,8 @@ function renderOverseaWorkbench(pipelines) {
       </article>
       <article>
         <span>H Delivery</span>
-        <strong>Domestic gated</strong>
-        <small>${escapeHtml(mihomo.domesticGatewayIp || '10.88.0.1')} / DNS + H2I required</small>
+        <strong>按站点验证</strong>
+        <small>安装、用户同步与终端连通分别验收</small>
       </article>
     </section>
     ${feedback}
@@ -7197,6 +7197,12 @@ function renderOverseaWorkbench(pipelines) {
   }
 }
 
+function isOverseaDeliveryUnverified(reachability) {
+  // Compatibility with servers returning the static Internal-only plan.
+  return reachability?.verdict === 'h-endpoint-blocked'
+    && reachability.currentBoundary === 'internal-only';
+}
+
 function renderOverseaSiteDetail(site) {
   const status = site.status || 'planned';
   const installed = status === 'installed';
@@ -7213,7 +7219,10 @@ function renderOverseaSiteDetail(site) {
           : installed
             ? 'Sync Remote'
             : 'Install / Sync';
-  const services = asArray(site.services);
+  const deliveryUnverified = isOverseaDeliveryUnverified(site.reachability);
+  const services = asArray(site.services).map((service) => service.name === 'H Delivery' && deliveryUnverified
+    ? { ...service, status: 'pending-evidence', detail: 'WG / H2I / DNS 待验证' }
+    : service);
   const subscriptions = asArray(site.subscriptions);
   const failure = site.runtime?.failure || null;
   const hostPeer = sameHostPeerProfile(site);
@@ -7238,11 +7247,23 @@ function renderOverseaSiteDetail(site) {
       ${services.map((service) => `
         <article data-status="${escapeHtml(normalizeStageStatus(service.status))}">
           <span>${escapeHtml(service.name)}</span>
-          <strong>${escapeHtml(service.status || 'unknown')}</strong>
+          <strong>${escapeHtml(service.name === 'H Delivery' && service.status === 'pending-evidence' ? '待验证' : service.status || 'unknown')}</strong>
           <small>${escapeHtml(service.detail || '-')}</small>
         </article>
       `).join('')}
     </div>
+    ${deliveryUnverified ? `
+      <section class="oversea-boundary-note" aria-label="H Delivery 验证条件">
+        <strong>H Delivery：终端链路待验证</strong>
+        <p>internal-only 是订阅发布边界；当前计划未接入终端实测结果，不能据此判断网络故障，也不阻止 Oversea 安装或用户同步。</p>
+        <ul>
+          <li>Domestic WG：需验证终端握手和到 Internal 的内部路由。</li>
+          <li>H2I：需验证经 Domestic 访问 Internal 的代理链路。</li>
+          <li>Internal DNS：需验证经中继解析内部域名。</li>
+        </ul>
+        <p>最终需由终端成功拉取订阅并连接此 Oversea。已有 MX-H2I 正常联网时，不要为此提示重建或重启 WG。</p>
+      </section>
+    ` : ''}
     <dl class="oversea-runtime-meta">
       <div><dt>SSH profile</dt><dd>${escapeHtml(site.sshProfile?.profileId || 'not linked')}</dd></div>
       <div><dt>HY2 UDP</dt><dd>${escapeHtml(site.runtime?.serverPorts || site.sshProfile?.serverPorts || site.mihomoSite?.serverPorts || '51288')}</dd></div>
@@ -7280,9 +7301,9 @@ function renderOverseaSiteDetail(site) {
         </div>
       ` : '<div class="empty-state">No subscriptions issued yet. Install / Sync will issue Internal and Domestic bootstrap accounts plus Internal01-09.</div>'}
     </section>
-    <div class="oversea-boundary-note">
-      ${escapeHtml(site.reachability?.verdict || 'internal-output-pending')} / ${escapeHtml(site.reachability?.currentBoundary || 'internal-only')} / H endpoints still need Domestic WG + H2I DNS before fetching Internal mihomo.
-    </div>
+    ${deliveryUnverified ? '' : `<div class="oversea-boundary-note">
+      ${escapeHtml(site.reachability?.verdict || 'internal-output-pending')} / ${escapeHtml(site.reachability?.currentBoundary || 'unknown')} / 终端订阅交付状态与 Oversea 安装状态分别验收。
+    </div>`}
   `;
 }
 
@@ -17733,6 +17754,12 @@ function renderMihomoReachabilityStrip(summary) {
   }
   const domesticRelay = asArray(reachability.stages).find((stage) => stage.stageId === 'domestic-wg-relay');
   const h2iDns = asArray(reachability.stages).find((stage) => stage.stageId === 'h2i-internal-dns');
+  if (isOverseaDeliveryUnverified(reachability)) {
+    return `<span class="reachability-strip" data-status="planned">
+      <strong>终端链路待验证</strong>
+      <span>Domestic WG / H2I / Internal DNS 尚无终端实测结果</span>
+    </span>`;
+  }
   const status = reachability.verdict === 'h-endpoint-ready' ? 'passed' : reachability.verdict === 'blocked' ? 'blocked' : 'ready';
   return `
     <span class="reachability-strip" data-status="${escapeHtml(status)}">

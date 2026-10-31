@@ -229,6 +229,7 @@ function sameHostPeerProfile() { return null; }
 function workerInternalBaseUrlForSite() { return 'http://127.0.0.1:18090'; }
 function renderSameHostNote() { return ''; }
 function renderOverseaTerminal() { return ''; }
+${functionSource(rendererSource, 'isOverseaDeliveryUnverified')}
 ${functionSource(rendererSource, 'renderOverseaSiteDetail')}
 return renderOverseaSiteDetail;
 `
@@ -262,6 +263,35 @@ assert.doesNotMatch(
 const installedOverseaHtml = renderOverseaSiteDetail(overseaSite('installed'));
 assert.match(installedOverseaHtml, /Sync Remote/, 'an installed site exposes Sync Remote independently of pipeline action hints');
 assert.doesNotMatch(overseaEnsureTag(installedOverseaHtml), /\bdisabled\b/, 'an installed active site remains syncable');
+
+const legacyDeliverySite = {
+  ...overseaSite('installed'),
+  reachability: { verdict: 'h-endpoint-blocked', currentBoundary: 'internal-only' },
+  services: [{ name: 'H Delivery', status: 'blocked', detail: 'internal-only' }]
+};
+const legacyDeliveryHtml = renderOverseaSiteDetail(legacyDeliverySite);
+assert.match(legacyDeliveryHtml, /<strong>待验证<\/strong>/, 'the static plan is not a failed connectivity probe');
+assert.doesNotMatch(legacyDeliveryHtml, /data-status="blocked"/, 'legacy pending delivery must not display as a runtime failure');
+for (const gate of ['Domestic WG', 'H2I', 'Internal DNS']) {
+  assert.ok(legacyDeliveryHtml.includes(`<li>${gate}：`), `show the ${gate} requirement without hiding it in a truncated card`);
+}
+assert.doesNotMatch(overseaEnsureTag(legacyDeliveryHtml), /\bdisabled\b/, 'delivery evidence does not gate remote synchronization');
+assert.equal(legacyDeliverySite.services[0].status, 'blocked', 'display compatibility must not mutate server data');
+
+const failedDeliveryHtml = renderOverseaSiteDetail({
+  ...legacyDeliverySite,
+  reachability: { verdict: 'blocked', currentBoundary: 'internal-only' }
+});
+assert.match(failedDeliveryHtml, /<strong>blocked<\/strong>/, 'real missing prerequisites must stay blocked');
+assert.doesNotMatch(failedDeliveryHtml, /H Delivery 验证条件/);
+
+const readyDeliveryHtml = renderOverseaSiteDetail({
+  ...legacyDeliverySite,
+  reachability: { verdict: 'h-endpoint-ready', currentBoundary: 'h-endpoint' },
+  services: [{ name: 'H Delivery', status: 'ready', detail: 'h-endpoint' }]
+});
+assert.match(readyDeliveryHtml, /<strong>ready<\/strong>/);
+assert.doesNotMatch(readyDeliveryHtml, /<strong>待验证<\/strong>/);
 
 const archivedOverseaHtml = renderOverseaSiteDetail(overseaSite('archived', true));
 assert.match(archivedOverseaHtml, /Unarchive First/, 'an archived site requires explicit restoration before sync');

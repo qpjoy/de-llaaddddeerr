@@ -553,11 +553,20 @@ PersistentKeepalive = 25
 EOF
 	chmod 0600 "$profile" "$QP_WG_SERVER_CONFIG"
 	if wg show "$QP_WG_SERVER_DEV" >/dev/null 2>&1; then
-		tmp_psk=$(mktemp "$QP_WG_SERVER_HOME/.psk.XXXXXX")
-		chmod 0600 "$tmp_psk"
-		printf '%s\n' "$psk" > "$tmp_psk"
-		wg set "$QP_WG_SERVER_DEV" peer "$public_key" preshared-key "$tmp_psk" allowed-ips "$client_ip/32"
-		rm -f "$tmp_psk"
+		# The standard wg AppArmor profile permits keys below /etc/wireguard,
+		# not our /etc/qp-wireguard metadata directory (even when run as root).
+		# Scope cleanup to this subshell; retain the saved peer/profile on failure
+		# so recovery can reuse its keys without restarting the interface.
+		if ! (
+			umask 077
+			tmp_psk=$(mktemp "${QP_WG_SERVER_CONFIG%/*}/.$QP_WG_SERVER_DEV.psk.XXXXXX") || exit 1
+			trap 'rm -f -- "$tmp_psk"' EXIT
+			chmod 0600 "$tmp_psk" || exit 1
+			printf '%s\n' "$psk" > "$tmp_psk" || exit 1
+			wg set "$QP_WG_SERVER_DEV" peer "$public_key" preshared-key "$tmp_psk" allowed-ips "$client_ip/32"
+		); then
+			qp_wg_die "Live peer update failed for $name on $QP_WG_SERVER_DEV. Saved profile: $profile. Keep its keys and recover this peer; do not recreate it or restart other tunnels. Check wg file-access policy for ${QP_WG_SERVER_CONFIG%/*}."
+		fi
 	fi
 	[[ -n "$output" ]] || output="$PWD/$name.conf"
 	cp "$profile" "$output"

@@ -1272,6 +1272,9 @@ export class AdminController {
     const accounts = await this.store.listSiteSlotAccessAccounts(siteId);
     const mihomoSite = await this.store.getLauncherNetworkMihomoSite(siteId);
     const reachability = await this.store.getLauncherNetworkMihomoReachability(siteId);
+    // The legacy reachability plan is static, not a failed runtime probe.
+    const deliveryUnverified = reachability?.verdict === 'h-endpoint-blocked'
+      && reachability.currentBoundary === 'internal-only';
     // 归档状态压过部署进度：一台退役机器不该继续显示 installed / ready-to-install。
     const archived = mihomoSite?.status === 'archived';
     const status = archived
@@ -1350,7 +1353,7 @@ export class AdminController {
         overseaServiceCard('SSH Key', profile && sshProfileBlockingReasons(profile).length === 0 ? 'ready' : 'blocked', profile?.identityFile ?? 'Internal-managed key file'),
         overseaServiceCard('Oversea Runtime', status === 'installed' ? 'ready' : status === 'ready-to-install' ? 'pending' : status, latestReportFailure?.message ?? latestReport?.reportId ?? 'Docker/hysteria2/site-agent worker evidence'),
         overseaServiceCard('Internal mihomo', mihomoSite ? 'ready' : 'pending', mihomoSite?.subscriptionBaseUrl ?? 'subscription authority not issued'),
-        overseaServiceCard('H Delivery', reachability?.verdict === 'h-endpoint-ready' ? 'ready' : 'blocked', reachability?.currentBoundary ?? 'Domestic WG/H2I required')
+        overseaServiceCard('H Delivery', reachability?.verdict === 'h-endpoint-ready' ? 'ready' : deliveryUnverified || !reachability ? 'pending-evidence' : 'blocked', deliveryUnverified ? 'WG / H2I / DNS evidence pending' : reachability?.currentBoundary ?? 'Delivery evidence unavailable')
       ],
       nextActions: overseaNextActions(status, profile, mihomoSite, reachability, latestReport)
     };

@@ -380,3 +380,70 @@ kubectl -n mx-internal-shadow set env deployment/mx-launcher-internal \
 kubectl -n mx-internal-shadow rollout status \
   deployment/mx-launcher-internal --timeout=180s
 ```
+
+```bash
+# 推送安装 oversea
+NS=mx-internal-shadow
+
+kubectl -n "$NS" exec -i deployment/mx-launcher-internal \
+  -c internal-api -- node --input-type=commonjs <<'NODE'
+const http = require('node:http');
+
+const siteId = 'mx-oversea-us01';
+const token = process.env.MX_INTERNAL_OPS_TOKEN;
+if (!token) throw new Error('Pod 未配置 MX_INTERNAL_OPS_TOKEN');
+
+const body = JSON.stringify({
+  executeRemote: true,
+  confirmInstall: true,
+  force: true,
+  workerInternalBaseUrl: 'http://127.0.0.1:18090',
+  requestedBy: 'server-ops',
+  requestId: `server-oversea-ensure-${Date.now()}`
+});
+
+console.log(`正在安装 ${siteId}，远程执行可能需要约 15 分钟…`);
+
+const req = http.request({
+  hostname: '127.0.0.1',
+  port: 18090,
+  path: `/internal/v1/admin/oversea/${siteId}/ensure`,
+  method: 'POST',
+  headers: {
+    'content-type': 'application/json',
+    'content-length': Buffer.byteLength(body),
+    'x-mx-ops-token': token
+  }
+}, res => {
+  let text = '';
+  res.setEncoding('utf8');
+  res.on('data', chunk => text += chunk);
+  res.on('end', () => {
+    console.log('HTTP:', res.statusCode);
+    console.log('Content-Type:', res.headers['content-type']);
+    try {
+      const result = JSON.parse(text);
+      const e = result.ensure;
+      console.log(JSON.stringify(e ? {
+        status: e.status,
+        planId: e.planId,
+        jobId: e.jobId,
+        reportId: e.reportId,
+        blockedReasons: e.blockedReasons,
+        steps: e.steps,
+        nextActions: e.nextActions
+      } : { message: result.message }, null, 2));
+    } catch {
+      console.error('Pod 内接口仍返回非 JSON，请检查 Internal API 日志。');
+      process.exitCode = 1;
+    }
+  });
+});
+req.setTimeout(20 * 60 * 1000, () => req.destroy(new Error('等待响应超时')));
+req.on('error', err => {
+  console.error(err.message);
+  process.exitCode = 1;
+});
+req.end(body);
+NODE
+```
