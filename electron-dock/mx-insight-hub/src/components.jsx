@@ -104,9 +104,24 @@ function circuitExplanation(error) {
     + (Number.isFinite(until) ? `，保护至 ${new Date(until).toLocaleTimeString()}` : '') + '；本次未派发上游请求。'
 }
 
+const TWITTER_ACCOUNT_REASON = { suspended: '账号已被 Twitter 封禁', deactivated: '账号已停用', protected: '账号受保护，资料不公开',
+  deleted: '账号已删除', not_found: 'Twitter 上没有该账号', unavailable: 'Twitter 报告账号不可用，未说明原因' }
+
+// A definite Twitter account answer is the account's state on the platform,
+// not a Hub fault. It names only the platform, so tenant pages can show it too.
+function accountExplanation(error) {
+  const details = error?.details
+  if (details?.platform !== 'twitter' || details.stage !== 'account_lookup') return null
+  const reason = error.code === 'social_account_not_found' ? 'not_found'
+    : error.code !== 'social_account_unavailable' ? null
+      : typeof details.reason === 'string' && Object.hasOwn(TWITTER_ACCOUNT_REASON, details.reason) ? details.reason : 'unavailable'
+  return reason && `原因：${TWITTER_ACCOUNT_REASON[reason]}（${reason}）。这是平台上的账号状态，不是 Hub 故障，不会自动重试。`
+}
+
 export function ErrorState({ error, onRetry }) {
   const tenant = useContext(TenantPresentation)
   const circuit = circuitExplanation(error)
+  const account = accountExplanation(error)
   const message = tenant && /upstream|provider|supplier|tikhub|justone|night-all|上游|供应|采购/i.test(error?.message || '')
     ? '当前服务未能完成请求。请保留请求编号，查询请求状态或联系管理员。'
     : error?.message || '数据请求失败'
@@ -120,6 +135,7 @@ export function ErrorState({ error, onRetry }) {
           {error?.requestId ? ` · Request ID：${error.requestId}` : ''}
         </p>
         {circuit ? <p>{circuit}</p> : null}
+        {account ? <p>{account}</p> : null}
       </div>
       {onRetry ? (
         <button className="qp-button qp-button--outline" type="button" onClick={onRetry}>

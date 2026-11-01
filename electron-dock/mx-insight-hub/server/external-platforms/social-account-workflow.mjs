@@ -9,7 +9,7 @@ import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, isIn
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
 import { JustOneUpstreamError } from '../adapters/justone.mjs'
-import { twitterLookupFoundNoAccount } from '../contracts/twitter-account-failure.mjs'
+import { twitterAccountFailureMessage, twitterLookupFoundNoAccount } from '../contracts/twitter-account-failure.mjs'
 import { buildHubSocialCompatDispatch, projectHubSocialCompatResponse } from '../contracts/hub-social-compat.mjs'
 import { normalizeNightAllLegacyPayload } from '../ingest/legacy-night-all.mjs'
 import { SocialSearchStateStore } from './social-search-store.mjs'
@@ -288,9 +288,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
               costKind: cost.costKind, currency: cost.currency, latencyMs: Math.round(performance.now() - callStart),
               ...persistedEvidence(error), archiveObjects: archiveObjects(error, step, currentCall.id) }
             const code = accountFailure ? evidence.errorCode : evidence.outcome === 'unknown' ? 'upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'external_platform_rejected'
-            const message = accountNotFound ? 'The upstream provider reported that the Twitter account was not found'
-              : accountFailure ? 'The upstream provider reported that the Twitter account is unavailable'
-              : 'Account acquisition failed; inspect its saved outcome'
+            const message = accountFailure ? twitterAccountFailureMessage(evidence) : 'Account acquisition failed; inspect its saved outcome'
             const failureBody = { error: { code, message, details: failureDetails }, requestId: delivery.usageRequestId }
             // Callers send bare digits for both IDs and handles. When the ID
             // lookup definitely finds no account, settle that call and try the

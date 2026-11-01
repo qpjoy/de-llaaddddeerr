@@ -27,6 +27,16 @@ export function twitterAccountFailure(payload) {
   return { code: 'social_account_unavailable', reason: reason || 'unavailable' }
 }
 
+// The public message names the account state the supplier reported; a missing
+// or unrecognized reason keeps the generic wording. Saved bodies keep theirs.
+const ACCOUNT_STATES = { suspended: 'is suspended', deactivated: 'is deactivated', protected: 'is protected',
+  deleted: 'was deleted', not_found: 'was not found' }
+export function twitterAccountFailureMessage({ errorCode, accountReason }) {
+  const state = errorCode === 'social_account_not_found' ? 'was not found'
+    : typeof accountReason === 'string' && Object.hasOwn(ACCOUNT_STATES, accountReason) ? ACCOUNT_STATES[accountReason] : 'is unavailable'
+  return `The upstream provider reported that the Twitter account ${state}`
+}
+
 // A refused ID lookup proves no account holds that ID only when the supplier
 // says so outright. A suspended, protected, deactivated or unexplained account
 // still exists, and an unknown, unusable or timed-out lookup proves nothing.
