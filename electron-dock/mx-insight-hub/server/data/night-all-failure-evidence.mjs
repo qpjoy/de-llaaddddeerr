@@ -16,7 +16,7 @@ export function projectNightAllRateLimit(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const result = {}
   if (value.layer === 'night_all_ingress') result.layer = value.layer
-  if (['data-search', 'public', 'search', 'raw', 'crawl', 'user-info'].includes(value.scope)) result.scope = value.scope
+  if (['data-search', 'public', 'search', 'raw', 'crawl', 'user-info', 'post-detail'].includes(value.scope)) result.scope = value.scope
   if (value.keyType === 'ip') result.keyType = value.keyType
   for (const [key, maximum] of [['limit', 1_000_000_000], ['remaining', 1_000_000_000], ['windowMs', 86400000], ['retryAfterSeconds', MAX_RETRY_SECONDS]]) {
     if (integer(value[key], maximum) !== null) result[key] = value[key]

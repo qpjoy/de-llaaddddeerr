@@ -1,12 +1,13 @@
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
 import { WECHAT_LEGACY_SEARCH_PLATFORMS } from '../contracts/wechat-search-alias.mjs'
 import { HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS, HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS } from '../../shared/social-account-contract.mjs'
+import { NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-detail.mjs'
 
 const LABELS = {
   bilibili: '哔哩哔哩', douyin: '抖音', facebook: 'Facebook', instagram: 'Instagram',
   kuaishou: '快手', linkedin: 'LinkedIn', reddit: 'Reddit', telegram: 'Telegram',
   tiktok: 'TikTok', twitter: 'Twitter / X', weibo: '微博', xiaohongshu: '小红书',
-  youtube: 'YouTube', zhihu: '知乎', wechat_search: '微信搜索', wechat_mp: '微信公众号',
+  youtube: 'YouTube', zhihu: '知乎', xianyu: '闲鱼', wechat_search: '微信搜索', wechat_mp: '微信公众号',
 }
 const READ_ONLY_REASON = '此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。'
 
@@ -113,6 +114,17 @@ export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy =
         paths: ['/api/v1/search/user-info', '/api/v1/night-all/search/user-info', '/api/v1/data/social/user-info'],
         description: '按已知账号获取资料，不是关键词搜账号。data/social/user-info 由 Hub 执行，要求平台及 social.profile.get 授权；旧兼容入口保持原路由和原平台范围。接口可见不会自动增加调用权限。',
         platforms: HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS.map(platform => accountPlatform(platform, 'user-info', facebookProfilePolicy)),
+      },
+      {
+        id: 'post-detail', label: '帖子详情',
+        paths: ['/api/v1/search/post-detail', '/api/v1/night-all/search/post-detail'],
+        description: '按帖子 ID、contentId 或 URL 获取单篇完整正文、发布时间、作者和媒体。小红书已由 /api/v1/data/post 提供 Hub-native 合同；此兼容入口服务其他平台的历史请求，供应商与凭据由 Hub/Night-All 管理。',
+        platforms: NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS.map(platform => ({
+          ...historicalPlatform(platform, 'post-detail'),
+          routeSummary: platform === 'xiaohongshu'
+            ? '小红书详情使用 Hub /api/v1/data/post；此旧入口保留历史兼容，不改变现有登录、联网或已签发结果。'
+            : 'Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。',
+        })),
       },
     ],
   }

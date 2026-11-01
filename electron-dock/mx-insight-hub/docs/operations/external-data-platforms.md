@@ -39,8 +39,11 @@ procurement cost, separately from scheduled cleaning jobs. Public callers use on
   user-info is one supported user identifier on page 1 with no continuation/custom params/concurrency.
   Xiaohongshu requires `social.users.posts` for crawl and `social.users.resolve` for user-info before either
   direct or historical dispatch. The
-  `/api/v1/search/raw|crawl|user-info` spellings remain exact aliases of their `/night-all/search/*`
-  counterparts and use the same paid-operation fingerprint.
+  `/api/v1/search/raw|crawl|user-info|post-detail` spellings remain exact aliases of their
+  `/night-all/search/*` counterparts and use the same paid-operation fingerprint. `post-detail`
+  accepts one explicit platform plus a post identifier or URL, preserves the legacy raw envelope,
+  and is the compatibility bridge while platform-specific detail adapters are reviewed for Hub-native
+  publication. Xiaohongshu continues to use `/api/v1/data/post` as its native detail contract.
 
 The current topology has one provider per released operation: JustOne for ecommerce search and TikHub for
 Xiaohongshu note detail. TikHub-backed Xiaohongshu search/raw and user activity are implemented behind separate

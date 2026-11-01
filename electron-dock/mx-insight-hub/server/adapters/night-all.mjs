@@ -7,6 +7,7 @@ import {
   isNightAllLegacyEnvelope,
   NIGHT_ALL_LEGACY_OPERATIONS,
 } from '../contracts/night-all-legacy.mjs'
+import { NIGHT_ALL_POST_DETAIL_OPERATION } from '../contracts/night-all-post-detail.mjs'
 
 const BLOCKED_KEYS = new Set([
   'provider',
@@ -77,9 +78,10 @@ export class NightAllAdapter {
   }
 
   // `keepRaw` returns the pre-serving-projection payload alongside the public
-  // one. Most adapter methods remove private provider metadata; the three
-  // explicitly namespaced compatibility routes opt into an identity projection
-  // so their legacy response body remains field-for-field compatible.
+  // one. Most adapter methods remove private provider metadata; the
+  // explicitly namespaced compatibility routes opt into an identity
+  // projection so their legacy response body remains field-for-field
+  // compatible.
   async #request(method, path, body, validate, {
     keepRaw = false,
     token,
@@ -261,7 +263,7 @@ export class NightAllAdapter {
 
   legacySearch({ operation, body, businessId, requestId }) {
     assertWechatSearchNotRetired(operation, body)
-    if (!NIGHT_ALL_LEGACY_OPERATIONS.has(operation)) {
+    if (!NIGHT_ALL_LEGACY_OPERATIONS.has(operation) && operation !== NIGHT_ALL_POST_DETAIL_OPERATION) {
       throw new TypeError(`Unsupported Night-All legacy operation: ${operation}`)
     }
     return this.#request(

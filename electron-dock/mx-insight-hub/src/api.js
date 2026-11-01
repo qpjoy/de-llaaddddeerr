@@ -321,6 +321,10 @@ export const publicDataApi = {
     { method: 'POST', body, idempotencyKey, retryOfRequestId },
   ),
   xiaohongshuPost: (apiKey, body, { idempotencyKey } = {}) => publicDataRequest(apiKey, '/api/v1/data/post', { method: 'POST', body, idempotencyKey }),
+  postDetail: (apiKey, body, { idempotencyKey, path = '/api/v1/search/post-detail', signal } = {}) => {
+    if (!['/api/v1/search/post-detail', '/api/v1/night-all/search/post-detail'].includes(path)) throw new Error('Unsupported post-detail path')
+    return publicDataRequest(apiKey, path, { method: 'POST', body, idempotencyKey, signal })
+  },
   xiaohongshuDiscovery: (apiKey, endpoint, body, { idempotencyKey, signal } = {}) => {
     const product = XHS_DISCOVERY_PRODUCTS.find(item => item.id === endpoint)
     if (!product) throw new Error('Unknown Xiaohongshu discovery endpoint')

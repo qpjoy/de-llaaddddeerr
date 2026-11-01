@@ -4,7 +4,7 @@ info:
   version: 1.0.0-alpha
   description: >-
     Stable consumer contract. Night-All and provider details are normally
-    private implementation concerns; the three explicitly namespaced
+    private implementation concerns; the explicitly namespaced
     /night-all/search compatibility routes are the documented exception and
     preserve the legacy envelope. Eligible Xiaohongshu raw calls may use a
     Hub-native projection with the same raw_info/raw_data field types;
@@ -6273,7 +6273,7 @@ paths:
   /night-all/search/{operation}:
     post: &nightAllCompatibilityPost
       operationId: searchNightAllCompatibility
-      summary: Call one of the three Night-All legacy search operations.
+      summary: Call a Night-All legacy search or post-detail operation.
       x-mx-required-capabilities-by-platform-operation:
         xiaohongshu:
           raw: social.posts.search
@@ -6349,7 +6349,7 @@ paths:
         - name: operation
           in: path
           required: true
-          schema: { type: string, enum: [raw, crawl, user-info] }
+          schema: { type: string, enum: [raw, crawl, user-info, post-detail] }
         - name: Idempotency-Key
           in: header
           required: true

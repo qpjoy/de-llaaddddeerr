@@ -32,6 +32,10 @@ import {
 } from './contracts/night-all-legacy.mjs'
 import { XIAOHONGSHU_POST_OPERATION } from './contracts/tikhub-xiaohongshu.mjs'
 import {
+  NIGHT_ALL_POST_DETAIL_OPERATION,
+  NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS,
+} from './contracts/night-all-post-detail.mjs'
+import {
   normalizeBillingProfile,
   normalizeCreditAdjustment,
   normalizeCreditDebit,
@@ -4395,7 +4399,8 @@ export class HubService {
 
   async #nightAllCompatibilitySearch(context, { operation, body, idempotencyKey, path, signal }) {
     assertWechatSearchNotRetired(operation, body)
-    assert(NIGHT_ALL_LEGACY_OPERATIONS.has(operation), 404, 'not_found', 'Route not found')
+    assert(NIGHT_ALL_LEGACY_OPERATIONS.has(operation) || operation === NIGHT_ALL_POST_DETAIL_OPERATION,
+      404, 'not_found', 'Route not found')
     assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
     assert(
       typeof idempotencyKey === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey),
@@ -4410,7 +4415,7 @@ export class HubService {
     const grants = await this.#effectivePlatformGrants(context)
     const matchingGrant = grants.find((grant) => canonicalPlatform(grant) === requestedPlatform)
     assert(matchingGrant, 403, 'platform_not_granted', 'Platform is not granted')
-    if (requestedPlatform === 'xiaohongshu') {
+    if (requestedPlatform === 'xiaohongshu' && NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation]) {
       const requiredCapability = NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation]
       const capabilityGrants = await this.#effectiveCapabilityGrants(context)
       assert(
@@ -4515,6 +4520,9 @@ export class HubService {
       path,
       body: { contractVersion: 'mx-insight-hub.night-all-compat.v1', ...traversal.upstreamBody },
     })
+    const xiaohongshuCapability = normalized.platform === 'xiaohongshu'
+      ? NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation]
+      : null
     const requestId = randomUUID()
     const windowStart = new Date(Date.now() - policy.windowSeconds * 1_000)
     const reservationInput = {
@@ -4525,16 +4533,18 @@ export class HubService {
       consumerId: context.consumer.id,
       apiKeyId: context.apiKey.id,
       platform: normalized.platform,
-      meterKey: normalized.platform === 'xiaohongshu'
-        ? NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation]
-        : operation,
+      // The three migrated Xiaohongshu operations keep their existing
+      // capability meters. Post-detail is a historical compatibility route,
+      // so it deliberately uses the operation meter and platform scope; the
+      // Hub-native /data/post contract owns social.posts.resolve separately.
+      meterKey: xiaohongshuCapability || operation,
       acquisitionRequest: acquisitionRequestSnapshot({ method: 'POST', path, body }),
-      ...(normalized.platform === 'xiaohongshu' ? {
+      ...(xiaohongshuCapability ? {
         requiredAuthorizationScopes: [
           { type: 'platform', key: normalized.platform },
           {
             type: 'capability',
-            key: NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation],
+            key: xiaohongshuCapability,
           },
         ],
       } : {}),
@@ -4557,9 +4567,10 @@ export class HubService {
     if (compatibilityIdempotencyStateIsDecisive(existing, fingerprint)) {
       reservation = await this.store.reserve(reservationInput)
     } else {
-      const pinnedCapability = buildNightAllLegacySearchCapabilities([normalized.platform])
-        .operations[operation]
-      if (!pinnedCapability.supportedPlatforms.includes(normalized.platform)) {
+      const pinnedCapability = operation === NIGHT_ALL_POST_DETAIL_OPERATION
+        ? { supportedPlatforms: NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS }
+        : buildNightAllLegacySearchCapabilities([normalized.platform]).operations[operation]
+      if (!pinnedCapability?.supportedPlatforms.includes(normalized.platform)) {
         throw new AppError(
           400,
           'platform_operation_unsupported',
