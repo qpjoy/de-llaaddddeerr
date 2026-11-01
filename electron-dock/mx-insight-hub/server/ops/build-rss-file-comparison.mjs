@@ -30,7 +30,7 @@ export async function buildRssFileManifest(root) {
   const news = await load(root, 'news-results.json', false)
   if (!rss.value?.feeds || typeof rss.value.feeds !== 'object' || Array.isArray(rss.value.feeds)
     || !Array.isArray(config.value?.feeds)) throw new Error('rss_file_shape_invalid')
-  const manifest = { version: 'rss-file-manifest.v1', files: { rss: rss.evidence, config: config.evidence, news: news.evidence },
+  const manifest = { version: 'rss-file-manifest.v2', files: { rss: rss.evidence, config: config.evidence, news: news.evidence },
     items: [], feeds: [], configFeeds: [] }
   for (const [key, feed] of Object.entries(rss.value.feeds)) {
     if (!Array.isArray(feed?.items)) throw new Error('rss_file_shape_invalid')

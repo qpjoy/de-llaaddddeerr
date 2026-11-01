@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { buildRssFileManifest, buildRssComparisonProgram } from '../../server/ops/build-rss-file-comparison.mjs'
-import { digest, rssFileIdentity, compareRssFiles } from '../../server/ops/rss-file-coverage.mjs'
+import { digest, rssFileIdentity, compareRssFiles, validateFileManifest } from '../../server/ops/rss-file-coverage.mjs'
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'rss-coverage-'))
@@ -25,6 +25,9 @@ test('manifest uses writer identity, preserves dates/URL literally and only tran
   const root = await fixture(t)
   const manifest = await buildRssFileManifest(root)
   assert.equal(manifest.items.length, 1)
+  assert.equal(manifest.items[0].fieldHashes.length, 5)
+  assert.throws(() => validateFileManifest({ ...manifest, version: 'rss-file-manifest.v1' }), /rss_manifest_invalid/)
+  assert.throws(() => validateFileManifest({ ...manifest, items: [{ ...manifest.items[0], fieldHashes: [] }] }), /rss_manifest_invalid/)
   assert.equal(manifest.files.news.state, 'absent')
   assert.doesNotMatch(JSON.stringify(manifest), /private|secret|https:/)
   const a = rssFileIdentity('feed', { title: 't', link: 'https://a/#x', isoDate: '2020' })
@@ -77,7 +80,7 @@ test('actual SQL compares current import evidence, not just row counts or matchi
       await db.query('INSERT INTO rss_canonical_items VALUES ($1,$2,$3,$4,$5)', [n, n === 6 ? null : n, n === 4 ? 'changed-canonical-hash' : fingerprint.itemHash, 'feed', canonical])
     }
   }
-  const manifest = { version: 'rss-file-manifest.v1', files: {}, items: entries,
+  const manifest = { version: 'rss-file-manifest.v2', files: {}, items: entries,
     feeds: [digest('feed'), digest('missing')], configFeeds: [
       { keyHash: digest('feed'), urlHash: digest('https://feed.invalid') },
       { keyHash: digest('changed'), urlHash: digest('https://old.invalid') },
@@ -92,9 +95,13 @@ test('actual SQL compares current import evidence, not just row counts or matchi
   } } } }
   const result = await compareRssFiles(pool, manifest)
   assert.equal(readOnly, true)
-  assert.equal(result.version, 'rss-file-coverage.v2')
+  assert.equal(result.version, 'rss-file-coverage.v3')
   assert.equal(result.status, 'incomplete')
   assert.deepEqual(result.items, { total: 9, exactCanonical: 2, exactLegacyOnly: 1, contentDiffers: 2, identityMismatch: 1, missing: 1, payloadTooLarge: 2 })
+  assert.equal(result.identityDifferences.items, 1)
+  assert.equal(result.identityDifferences.fields.guid, 1)
+  assert.equal(result.identityDifferences.rawPayloadDifferent, 1)
+  assert.equal(result.identityDifferences.fileFeedMissing, 0)
   assert.deepEqual(result.feeds, { total: 2, matchedKey: 1, missingKey: 1 })
   assert.equal(result.configFeeds.sameKeyAndUrl, 1)
   assert.equal(result.configFeeds.keyWithDifferentUrl, 1)
@@ -106,7 +113,43 @@ test('actual SQL compares current import evidence, not just row counts or matchi
   const exact = await compareRssFiles(pool, { ...manifest, items: [entries[0], entries[1], entries[5]] })
   assert.equal(exact.articlePayloadsCovered, true)
   assert.equal(exact.status, 'observed')
+  assert.equal(exact.identityDifferences.items, 0)
   assert.equal(exact.fullFileCoverage, false, 'article equality does not prove full config parity')
+
+  // Reproduce the production ambiguity: rows exist under their historical
+  // item_hash, but the selected canonical feed key no longer matches the file.
+  const cases = [
+    { n: 10, fileKey: 'missing-feed-a', dbKey: 'renamed', change: false },
+    { n: 11, fileKey: 'missing-feed-a', dbKey: 'renamed', change: true },
+    { n: 12, fileKey: 'missing-feed-b', dbKey: null, change: false },
+    { n: 13, fileKey: 'feed', dbKey: 'feed', invalid: true },
+  ]
+  const differing = []
+  for (const row of cases) {
+    const raw = item(row.n), identity = rssFileIdentity(row.fileKey, raw)
+    differing.push(identity)
+    if (row.change) Object.assign(raw, { guid: 'new-guid', link: 'https://new.invalid', title: 'new-title', pubDate: '2026-11-02' })
+    await db.query('INSERT INTO rss_canonical_items VALUES ($1,NULL,$2,$3,$4)', [row.n, identity.itemHash, row.dbKey,
+      row.invalid ? null : { ...raw, feed: {}, feedResult: {} }])
+  }
+  const changed = await compareRssFiles(pool, { ...manifest, items: differing })
+  assert.equal(changed.items.identityMismatch, 4)
+  assert.equal(changed.items.missing, 0)
+  assert.equal(changed.articlePayloadsCovered, false, 'even equal raw with changed feed identity is not auto-approved')
+  assert.equal(changed.identityDifferences.items, 4)
+  assert.equal(changed.identityDifferences.invalidRaw, 1)
+  assert.equal(changed.identityDifferences.rawPayloadEqual, 2)
+  assert.equal(changed.identityDifferences.rawPayloadDifferent, 1)
+  assert.equal(changed.identityDifferences.feedKeyOnlyChanged, 2)
+  assert.equal(changed.identityDifferences.fileFeedMissing, 3)
+  assert.equal(changed.identityDifferences.distinctFileFeeds, 3)
+  assert.deepEqual(changed.identityDifferences.fields, { feedKey: 3, guid: 1, link: 1, title: 1, identityDate: 1 })
+  const groups = changed.identityDifferences.byFileFeed
+  assert.deepEqual(groups.map(group => group.items).sort(), [1, 1, 2])
+  assert.equal(groups.filter(group => !group.fileFeedRegistered).length, 2)
+  assert.equal(groups.reduce((sum, group) => sum + group.items, 0), 4)
+  assert.doesNotMatch(JSON.stringify(changed), /missing-feed|renamed|new-guid|new-title|https:/)
+  for (const entry of differing) for (const hash of entry.fieldHashes) assert.ok(!JSON.stringify(changed).includes(hash))
 })
 
 // A driver double exercises retained JS memory with the production item count;
@@ -132,7 +175,7 @@ test('14,836 comparisons complete under a 96 MiB Node heap', () => {
         raw: raw(indexes.get(item_hash))
       })))) };
     } } } };
-    const report = await compareRssFiles(pool, { version: 'rss-file-manifest.v1', files: {}, items, feeds: [], configFeeds: [] });
+    const report = await compareRssFiles(pool, { version: 'rss-file-manifest.v2', files: {}, items, feeds: [], configFeeds: [] });
     assert.equal(report.items.exactCanonical, 14836);
     assert.equal(report.articlePayloadsCovered, true);
     assert.equal(report.status, 'observed');

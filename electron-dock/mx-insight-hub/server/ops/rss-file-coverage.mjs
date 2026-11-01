@@ -16,15 +16,17 @@ export function rssFileIdentity(feedKey, item) {
   const parts = [feedKey, item.guid || '', item.link || '', item.title || '',
     item.parsedDate || item.pubDate || item.discoveredAt || ''].map(value => value == null ? '' : String(value))
   return { itemHash: createHash('sha1').update(parts.join('\n')).digest('hex'),
-    identityHash: digest(stableJson(parts)), rawHash: digest(stableJson(item)) }
+    identityHash: digest(stableJson(parts)), rawHash: digest(stableJson(item)),
+    fieldHashes: parts.map(digest) }
 }
 
 export function validateFileManifest(manifest) {
   const sha = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
-  if (manifest?.version !== 'rss-file-manifest.v1' || !Array.isArray(manifest.items)
+  if (manifest?.version !== 'rss-file-manifest.v2' || !Array.isArray(manifest.items)
     || manifest.items.length > 500000 || !Array.isArray(manifest.feeds) || manifest.feeds.length > 100000
     || !Array.isArray(manifest.configFeeds) || manifest.configFeeds.length > 100000
     || manifest.items.some(row => !/^[a-f0-9]{40}$/.test(row.itemHash || '') || !sha(row.identityHash) || !sha(row.rawHash))
+    || manifest.items.some(row => !Array.isArray(row.fieldHashes) || row.fieldHashes.length !== 5 || row.fieldHashes.some(value => !sha(value)))
     || manifest.feeds.some(value => !sha(value))
     || manifest.configFeeds.some(row => !sha(row.keyHash) || !sha(row.urlHash))) throw new Error('rss_manifest_invalid')
 }
@@ -32,7 +34,7 @@ export function validateFileManifest(manifest) {
 export async function compareRssFiles(pool, manifest) {
   validateFileManifest(manifest)
   const batchSize = 16, maxRowBytes = 256 * 1024
-  const report = { version: 'rss-file-coverage.v2', status: 'observed',
+  const report = { version: 'rss-file-coverage.v3', status: 'observed',
     limits: { batchSize, maxRowBytes },
     files: manifest.files, items: { total: manifest.items.length, exactCanonical: 0, exactLegacyOnly: 0,
       contentDiffers: 0, identityMismatch: 0, missing: 0, payloadTooLarge: 0 },
@@ -40,6 +42,11 @@ export async function compareRssFiles(pool, manifest) {
     configFeeds: { total: manifest.configFeeds.length, sameKeyAndUrl: 0, keyWithDifferentUrl: 0,
       urlWithDifferentKey: 0, missing: 0, comparison: 'identity_only_not_full_configuration' },
     databaseSnapshot: null, fullFileCoverage: false }
+  const fields = ['feedKey', 'guid', 'link', 'title', 'identityDate']
+  const emptyDifferences = () => ({ items: 0, invalidRaw: 0, rawPayloadEqual: 0, rawPayloadDifferent: 0,
+    feedKeyOnlyChanged: 0, fields: Object.fromEntries(fields.map(field => [field, 0])) })
+  report.identityDifferences = { ...emptyDifferences(), fileFeedMissing: 0, distinctFileFeeds: 0, byFileFeed: [] }
+  const differencesByFeed = new Map()
   const client = await pool.connect()
   try {
     await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
@@ -54,6 +61,23 @@ export async function compareRssFiles(pool, manifest) {
     for (const feed of manifest.configFeeds) {
       report.configFeeds[feedKeys.get(feed.keyHash) === feed.urlHash ? 'sameKeyAndUrl'
         : feedKeys.has(feed.keyHash) ? 'keyWithDifferentUrl' : feedUrls.has(feed.urlHash) ? 'urlWithDifferentKey' : 'missing']++
+    }
+    const recordDifference = (entry, identity) => {
+      const keyHash = entry.fieldHashes[0]
+      let group = differencesByFeed.get(keyHash)
+      if (!group) {
+        group = { ...emptyDifferences(), fileFeedRegistered: feedKeys.has(keyHash) }
+        differencesByFeed.set(keyHash, group)
+      }
+      const changedFields = identity ? fields.filter((_, i) => entry.fieldHashes[i] !== identity.fieldHashes[i]) : []
+      for (const stats of [report.identityDifferences, group]) {
+        stats.items++
+        if (!identity) { stats.invalidRaw++; continue }
+        stats[identity.rawHash === entry.rawHash ? 'rawPayloadEqual' : 'rawPayloadDifferent']++
+        for (const field of changedFields) stats.fields[field]++
+        if (changedFields.length === 1 && changedFields[0] === 'feedKey') stats.feedKeyOnlyChanged++
+      }
+      if (!group.fileFeedRegistered) report.identityDifferences.fileFeedMissing++
     }
     for (let index = 0; index < manifest.items.length; index += batchSize) {
       const batch = manifest.items.slice(index, index + batchSize)
@@ -88,13 +112,23 @@ export async function compareRssFiles(pool, manifest) {
         if (!row) { report.items.missing++; continue }
         if (Number(row.payload_bytes) > maxRowBytes) { report.items.payloadTooLarge++; continue }
         const raw = row.raw
-        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { report.items.identityMismatch++; continue }
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          report.items.identityMismatch++; recordDifference(entry, null); continue
+        }
         const identity = rssFileIdentity(row.feed_key, raw)
-        if (identity.itemHash !== entry.itemHash || identity.identityHash !== entry.identityHash) report.items.identityMismatch++
+        if (identity.itemHash !== entry.itemHash || identity.identityHash !== entry.identityHash) {
+          report.items.identityMismatch++
+          recordDifference(entry, identity)
+        }
         else if (identity.rawHash !== entry.rawHash) report.items.contentDiffers++
         else report.items[row.is_canonical ? 'exactCanonical' : 'exactLegacyOnly']++
       }
     }
+    // Deterministic anonymous groups correlate differences with missing feed
+    // keys, without printing feed IDs, URLs, article text, or even their hashes.
+    report.identityDifferences.byFileFeed = [...differencesByFeed.entries()]
+      .sort(([a], [b]) => a.localeCompare(b)).map(([, stats], index) => ({ group: index + 1, ...stats }))
+    report.identityDifferences.distinctFileFeeds = differencesByFeed.size
     if (report.items.payloadTooLarge) report.status = 'incomplete'
     // Article equality does not prove config parity or retirement of NewsNow.
     report.articlePayloadsCovered = report.items.exactCanonical + report.items.exactLegacyOnly === report.items.total
@@ -124,7 +158,7 @@ export async function runRssFileComparison(manifest, sourceOptions) {
   } catch (error) {
     const code = /^(rss_[a-z_]+|source_[a-z_]+|hub_database_unconfigured)$/.test(error.message)
       ? error.message : /^[A-Z0-9]{5}$/.test(error.code || '') ? error.code : 'rss_file_comparison_failed'
-    process.stdout.write(JSON.stringify({ version: 'rss-file-coverage.v2', status: 'incomplete', code }) + '\n')
+    process.stdout.write(JSON.stringify({ version: 'rss-file-coverage.v3', status: 'incomplete', code }) + '\n')
     process.exitCode = 2
   } finally { await source?.end(); await hub?.end() }
 }

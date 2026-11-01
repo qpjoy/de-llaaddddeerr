@@ -247,3 +247,36 @@ node server/ops/build-rss-file-comparison.mjs /home/fzj/Night-All |
 重跑前将 `server/ops/build-rss-file-comparison.mjs` 和 `server/ops/rss-file-coverage.mjs` 两份更新同步到服务器，
 执行上面的同一条管道命令即可；无需调高Pod内存、发布镜像或重启服务。
 本轮仅修改诊断脚本、测试及说明，没有导入数据或修改MX-H2I登录/联网逻辑。
+
+
+### v2 生产比对回传与身份差异细分（v3）
+
+操作员回传的只读源库快照时间为 `2026-11-01T13:39:13.708Z`：
+
+- 14,836条文件文章：exactCanonical=14,706，identityMismatch=130；exactLegacyOnly/contentDiffers/missing/payloadTooLarge均为0。
+- 240个结果订阅键：238个存在，2个缺失；8个配置的订阅键与URL全部匹配。
+- rss/config文件大小及SHA-256与前一次清单一致，news文件仍不存在。
+- status=observed证明诊断完整执行；不是“迁移完成”。articlePayloadsCovered/fullFileCoverage仍为false，尚未执行生产导入。
+
+130条全部命中旧item_hash，但按当前选用记录重算的身份不同；不能据此说文章丢失，
+也不能推断130条一定来自那2个缺失订阅键。现有contentDiffers=0只涉及身份一致的条目，
+不说明这130条的raw也一致。需要在当前证据上区分身份字段差异。
+
+`rss-file-coverage.v3`（配套哈希清单 `rss-file-manifest.v2`）为文件身份的5个分量分别生成SHA-256：
+feedKey、guid、link、title、identityDate（仍取parsedDate/pubDate/discoveredAt的原表达式）。
+仍只向Pod传哈希，不传原文/URL/订阅键，不修改数据库查询、16条批量或256KiB单条上限。
+
+新输出 `identityDifferences` 只细分identityMismatch：
+
+- items/invalidRaw：差异条数/无法解析为文章对象的条数。
+- fields：各身份字段不同的条数；一条可以同时改变多个字段，因此不可把这些数相加当文章数。
+- rawPayloadEqual/rawPayloadDifferent：身份不同的条目，其完整文章raw是否相同；invalidRaw不计入两者。
+- feedKeyOnlyChanged：身份仅订阅键不同；不保证其他非身份raw字段一致，需要同时看rawPayloadEqual。
+- fileFeedMissing：这些差异文章中，文件的原订阅键在rss_feeds里缺失的条数。
+- distinctFileFeeds/byFileFeed：涉及的原文件订阅数与匿名分组计数，附fileFeedRegistered。
+  分组编号仅用于本轮阅读，输出不含订阅键、URL、正文或字段哈希；不是可供迁移合并使用的稳定ID。
+
+v3不会把“仅订阅键变了”自动认定为同一条迁移身份，也不自动修复源库或覆盖Hub数据。
+同步两份comparison脚本后执行同一条只读管道，回传version= rss-file-coverage.v3的最终JSON。
+本地4项测试通过，新增实际SQL夹具覆盖缺失/重命名/空订阅键、多个身份字段变化、raw相同/不同/无效、
+匿名分组及不泄漏字段哈希；14,836条模拟记录仍在96MiB堆限制下通过。生产v3分类待回传。
