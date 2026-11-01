@@ -274,7 +274,8 @@ test('RSS aggregate requires its own grant, preserves query/time filters and rep
   const { service, context, calls, store } = await setup({ platforms: ['rss'], searchQueries: { searchContent: async (query, options) => {
     searches.push({ query, options })
     return { mode: 'postgres', items: [{ id, datasetId: 'rss.articles.v1', platform: 'rss', objectType: 'article',
-      externalId: 'item:fixture', title: '实际问题', body: '文章全文', extensions: { feed: { privateToken: 'never-return' } } }], hasMore: false }
+      externalId: 'item:fixture', title: '实际问题', body: '文章全文', extensions: { feed: { privateToken: 'never-return' },
+        file_feed_evidence: [{ feedKey: 'private-original-feed', snapshotId: 'private-file-snapshot' }] } }], hasMore: false }
   } } })
   const input = { path: '/api/v1/data/aggregate/search', idempotencyKey: 'rss-intent', body: {
     mode: 'stored', query: '实际问题', platforms: ['rss'], objectTypes: ['article'], pageSize: 20,
@@ -283,7 +284,7 @@ test('RSS aggregate requires its own grant, preserves query/time filters and rep
   const result = await service.aggregateSearch(context, input)
   assert.equal(result.status, 200)
   assert.equal(result.body.data.items[0].text, '文章全文')
-  assert.doesNotMatch(JSON.stringify(result.body), /never-return|privateToken/)
+  assert.doesNotMatch(JSON.stringify(result.body), /never-return|privateToken|private-original-feed|private-file-snapshot|file_feed_evidence/)
   assert.equal(searches[0].query, '实际问题')
   assert.deepEqual(searches[0].options.platforms, ['rss'])
   assert.equal(searches[0].options.toTime, '2026-11-01T15:59:59.999Z')

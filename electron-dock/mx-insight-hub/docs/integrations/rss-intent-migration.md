@@ -2,7 +2,7 @@
 
 2026-11-01 用户决定：保留旧 RSS 订阅库覆盖并迁入 Hub，不以当前 Hub 新闻发现库存替代。
 本轮状态：已收到生产数据库只读证据，完成 RSS 快照对账工具、Hub stored aggregate RSS 来源、Delta intent 适配器及离线回归。
-尚未执行生产导入/授权或发布 Delta；已收到文件存量证据，文件与数据库逐项重合关系仍待核对，不能宣称已完整迁移。
+尚未执行生产导入/授权或发布 Delta；v4已证明文件文章原文全部存在于源库，80条仅原订阅键缺失；已实现文件元数据/原文证据与归属保留，仍待生产迁移，不能宣称已完整迁移。
 未部署、未调用供应商或模型、未变更 MX-H2I 登录/联网。
 
 ## 已确认的代码问题
@@ -79,7 +79,7 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 `telegram-monitor-messages` 连接，但只读取三张 RSS 表，源端事务固定为 REPEATABLE READ READ ONLY。
 连接来源的 host/port/database 指纹固定到新源，密码轮换不改变指纹；换库必须重新核对，工具拒绝静默换源。
 
-- 每轮完整扫描 UUID 主键，每批100条；不使用未经证明的 updated_at 增量水位，不修改 Night-All 数据或索引。
+- 每轮完整扫描 UUID 主键，每批最多100条，并按完整行JSON累计8MiB限制返回量；单条超限明确失败，不截断证据或跳过记录；不使用未经证明的 updated_at 增量水位，不修改 Night-All 数据或索引。
 - 规范记录优先，旧表仅读取 NOT EXISTS 对应 rss_item_id 的行；`item:<rss_item_id>` 在规范化前后身份不变。
   没有旧 ID 的规范记录使用 `canonical:<id>`。首次观察后若同一规范 UUID 的 rss_item_id 改变（含从空值补关联），
   返回 rss_article_identity_changed，要求核对身份；不会悄悄新增第二份文章。不同订阅的不同文章 ID 保留，不猜测按 URL 合并。
@@ -98,7 +98,7 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 
 ## 发布顺序与服务器命令
 
-1. 发布含上述工具的 Hub 镜像并通过常规 migration Job 应用174；不要先发布 Delta 切换。
+1. 发布含上述工具的 Hub 镜像并通过常规 migration Job 应用174和175；不要先发布 Delta 切换。先执行本文末尾的文件溯源dry-run/apply，再执行数据库文章导入，让原订阅归属在首轮入库时进入私有证据。
 2. 在 Hub 新镜像上先运行只读 dry-run，核对数量（源库继续采集时可以高于本次85,214）：
 
 ```bash
@@ -309,3 +309,76 @@ source_ref.table必须为rss_items，且source_ref.id必须等于当前c.rss_ite
 4项本地测试通过，新增实际SQL历史包装、错误source_ref、额外顶层字段、原文内同名字段、
 缺失feed_key、真正内容变化及超大内层文章用例；96MiB压力测试仍通过。
 完整配置/文件快照保留与是否需要文章补迁仍待正确比对证据；不要根据v3直接补入130份重复文章。
+
+
+### v4最终文件证据与迁移执行（2026-11-01）
+
+生产只读快照 `2026-11-01T13:55:24.590Z` 已确认：
+
+- 14,836条文件文章原文全部在源库：14,756条身份和原文完全一致；80条原文及guid/link/title/日期一致，仅feed_key不同。
+- 80条属于两个源库缺失的文件订阅键（30+50）。不需要重复创建80篇文章，更不能覆盖源库现有feed_key。
+- 130条历史回填包装均通过来源关联校验；实时格式14,706条；无未知包装、缺失文章、正文差异或超大条目。
+- 8个配置键/URL一致；完整配置与240个文件结果订阅的元数据仍需保留。news文件不存在不代表NewsNow已迁移。
+- v4的articlePayloadsCovered仍为false，因为其原定义要求身份也完全一致；这里对“原文全部存在”的结论来自exactCanonical及80条rawPayloadEqual，未修改旧布尔含义。
+
+新增175迁移创建两张Admin私有表：`catalog.rss_file_snapshots` 保存文件哈希/大小、完整解析后配置JSON、RSS顶层/逐订阅元数据及源库核对时点；
+`catalog.rss_file_article_lineage` 保存每条文章的原文件feed_key、身份/原文哈希、**已核验原文raw_payload**和选中的数据库external_id/canonical_id。
+原文件空白/键顺序等字节格式不单独存档，原文件SHA-256保留；文章原文对象、完整配置及元数据被保留。
+私有证据原文从已核验一致的数据库行取得，不仅保存一个可能在源库更新后失去内容的哈希。
+同一文件快照/源库指纹生成稳定snapshotId；整个快照和绑定一次事务提交，失败全部回滚。
+重跑不重复插入，绑定到不同数据库文章时拒绝静默改绑。
+
+`build-rss-file-lineage.mjs` 在Night-All宿主机读取文件，仅向Pod传文章哈希、原订阅元数据和完整配置，**包含私有订阅URL/配置，请直接使用管道，不把中间内容贴到聊天或日志**。
+`reconcile-rss-file-lineage.mjs` 在Pod默认dry-run，再次完整只读比对源库：只接受完全一致，或仅feed_key不同且完整原文相同的条目。
+任何新真实差异、超大条目或新增news文件均停止，不写部分绑定。该工具不修改可检索文章、不开启抓取、不改源库/授权/配置启停。
+输入上限32MiB、累计待保存原文上限32MiB，写库每批最多100条/约2MiB；超限明确失败，不放大Pod内存。
+
+数据库文章迁移仍用原`item:<rss_item_id>`或`canonical:<id>`，按同一源库指纹附加`extensions.file_feed_evidence`（snapshotId/feedKey/rawHash）。
+旧订阅归属保留为历史证据，不替换当前订阅信息。完整配置与原文证据可从私有快照表追溯；public aggregate白名单不返回这些字段。
+数据库读分页保留完整raw，累计返回最多8MiB；单行超过上限返回rss_source_row_too_large，需要单独处理，不能把失败当作迁移完成。
+持续对账可以更新当前文章；私有快照保留旧文件版本，不受后续源库更新影响。
+
+#### 下一步：新镜像和174/175迁移完成后先预检
+
+这一步需要Pod镜像包含新模块，不能仅同步宿主机脚本。沿用Hub常规发布/migration流程，保持既有
+`MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0`，不发布Launcher/Auth/Pay或调整MX-H2I网络。
+宿主机在mx-insight-hub目录运行（源文件目录仍为/home/fzj/Night-All）：
+
+```bash
+set -o pipefail
+node server/ops/build-rss-file-lineage.mjs /home/fzj/Night-All |
+  kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node server/ops/reconcile-rss-file-lineage.mjs --dry-run
+
+kubectl -n mx-insight-hub exec deployment/mx-insight-hub-admin -c admin -- \
+  node server/ops/reconcile-rss-intent.mjs --dry-run
+```
+
+第一项应status=validated，若文件/源库未变则articles=14,836、feedAttributionsPreserved=80、feeds=240、configFeeds=8；
+bindings为按身份+原文哈希去重后的条数，canonicalArticleWrites始终为0。第二项应status=validated，核对feeds/canonical/legacy。
+只回传工具最终JSON，不回传中间bundle；预检不写Hub数据。
+
+#### 预检通过后的实际写入顺序
+
+下面命令写Hub，Night-All仍只读。先保留文件证据，再导入数据库文章：
+
+```bash
+set -o pipefail
+node server/ops/build-rss-file-lineage.mjs /home/fzj/Night-All |
+  kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node server/ops/reconcile-rss-file-lineage.mjs --apply
+```
+
+必须确认上一项status=succeeded并保存snapshotId后，再单独执行：
+
+```bash
+kubectl -n mx-insight-hub exec deployment/mx-insight-hub-admin -c admin -- \
+  node server/ops/reconcile-rss-intent.mjs --apply
+```
+
+必须确认status=succeeded并保存importRunId。数据库导入中断仍按既有规则重跑；文件快照已提交且不被覆盖。
+之后按上文核对projector、明确RSS授权并验证实际query/todayOnly，再发布Delta。NewsNow/混合新闻来源仍不在本次RSS覆盖证明内。
+
+本地验证：8项RSS测试通过，覆盖真实SQL回滚、重跑、文章身份不变、源库更新后旧原文仍保留、订阅归属入canonical私有扩展、
+不同源库隔离、字节分页和超大行失败；另1项RSS aggregate测试验证授权/query/日期/重放及私有溯源不泄漏；typecheck通过。
+生产镜像/迁移/预检/apply及最终检索验收仍待执行。未修改MX-H2I登录/联网或共享支付/SSO逻辑。

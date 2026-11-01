@@ -22,12 +22,16 @@ async function load(root, name, required) {
   } finally { await handle?.close() }
 }
 
-export async function buildRssFileManifest(root) {
+export async function loadRssRuntimeFiles(root) {
   await stat(resolve(root, 'lib/domains/rss/rss-fetcher.js'))
   await stat(resolve(root, 'lib/domains/data-feed/services/data-feed-service.js'))
   const rss = await load(root, 'rss-results.json', true)
   const config = await load(root, 'rss-config.json', true)
   const news = await load(root, 'news-results.json', false)
+  return { rss, config, news }
+}
+
+export function manifestFromRssFiles({ rss, config, news }) {
   if (!rss.value?.feeds || typeof rss.value.feeds !== 'object' || Array.isArray(rss.value.feeds)
     || !Array.isArray(config.value?.feeds)) throw new Error('rss_file_shape_invalid')
   const manifest = { version: 'rss-file-manifest.v2', files: { rss: rss.evidence, config: config.evidence, news: news.evidence },
@@ -46,6 +50,10 @@ export async function buildRssFileManifest(root) {
   }
   validateFileManifest(manifest)
   return manifest
+}
+
+export async function buildRssFileManifest(root) {
+  return manifestFromRssFiles(await loadRssRuntimeFiles(root))
 }
 
 export async function buildRssComparisonProgram(root) {

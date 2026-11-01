@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { applyMapping } from './mapping.mjs'
 import { canonicalJson } from '../normalizers.mjs'
 
@@ -10,6 +11,14 @@ export const RSS_FIELD_MAP = {
   authorName: { from: 'author' }, language: { from: 'language' },
   eventTime: { from: 'effective_time', type: 'timestamp' },
   collectedAt: { from: 'collected_at', type: 'timestamp' },
+}
+
+export function rssOriginFingerprint(options) {
+  const dsn = options.connectionString ? new URL(options.connectionString) : null
+  return createHash('sha256').update(JSON.stringify([
+    dsn?.hostname || options.host, dsn?.port || String(options.port || 5432),
+    dsn ? decodeURIComponent(dsn.pathname.slice(1)) : options.database,
+  ])).digest('hex')
 }
 
 // Fixed identifiers only. Both phases run in ONE repeatable-read snapshot.
@@ -36,6 +45,41 @@ export const RSS_PAGES = {
     ORDER BY r.id LIMIT $2`,
   feeds: `SELECT id AS scan_id, to_jsonb(f) AS payload FROM public.rss_feeds f
     WHERE ($1::uuid IS NULL OR id > $1::uuid) ORDER BY id LIMIT $2`,
+}
+
+// Bound the JSON sent to Node while retaining complete source rows. A single
+// oversized row fails visibly; never trim evidence or advance past that row.
+export async function readRssPage(reader, phase, last, batchSize, maxBytes = 8 * 1024 * 1024) {
+  const { rows } = await reader.query(`WITH page AS MATERIALIZED (${RSS_PAGES[phase]}),
+    sized AS MATERIALIZED (SELECT scan_id,to_jsonb(page) AS payload,
+      octet_length(to_jsonb(page)::text) AS payload_bytes FROM page),
+    budgeted AS (SELECT *,sum(payload_bytes) OVER (ORDER BY scan_id) AS total_bytes,
+      row_number() OVER (ORDER BY scan_id) AS ordinal FROM sized)
+    SELECT scan_id,payload_bytes,CASE WHEN payload_bytes <= $3 THEN payload END AS payload
+    FROM budgeted WHERE total_bytes <= $3 OR ordinal=1 ORDER BY scan_id`, [last, batchSize, maxBytes])
+  if (rows.some(row => Number(row.payload_bytes) > maxBytes)) throw new Error('rss_source_row_too_large')
+  return rows.map(row => row.payload)
+}
+
+export async function attachRssFileEvidence(hub, rows, phase, originFingerprint) {
+  const { rows: evidence } = await hub.query(`SELECT l.external_id,l.canonical_id,l.feed_key,l.raw_hash,l.snapshot_id
+    FROM catalog.rss_file_article_lineage l JOIN catalog.rss_file_snapshots s ON s.id=l.snapshot_id
+    WHERE l.external_id=ANY($1::text[]) AND s.origin_fingerprint=$2
+    ORDER BY l.snapshot_id,l.feed_key,l.raw_hash`, [rows.map(row => row.identity), originFingerprint])
+  const byId = new Map()
+  for (const item of evidence) {
+    const list = byId.get(item.external_id) || []
+    list.push(item)
+    byId.set(item.external_id, list)
+  }
+  for (const row of rows) {
+    const items = byId.get(row.identity)
+    if (!items) continue
+    if (phase === 'canonical' && items.some(item => item.canonical_id && item.canonical_id !== row.scan_id)) {
+      throw new Error('rss_lineage_binding_changed')
+    }
+    row.file_feed_evidence = items.map(item => ({ snapshotId: item.snapshot_id, feedKey: item.feed_key, rawHash: item.raw_hash }))
+  }
 }
 
 export function mapRssRow(row, phase) {
@@ -100,6 +144,8 @@ export async function reconcileRssSnapshot({ sourcePool, hubPool, store, apply =
     await reader.query("SET LOCAL idle_in_transaction_session_timeout = '5min'")
     // Fail before Hub registration if the observed source schema is absent.
     for (const sql of Object.values(RSS_PAGES)) await reader.query(sql, [null, 0])
+    // Check the destination evidence schema before registering/writing a source.
+    await hubPool.query('SELECT s.metadata,l.raw_payload FROM catalog.rss_file_snapshots s JOIN catalog.rss_file_article_lineage l ON l.snapshot_id=s.id LIMIT 0')
     if (apply) {
       ({ source, mapping } = await register(store, originFingerprint))
       await lock.query(`UPDATE ingest.import_runs SET status='failed',finished_at=now(),
@@ -115,7 +161,7 @@ export async function reconcileRssSnapshot({ sourcePool, hubPool, store, apply =
         if (Date.now() - started > maxDurationMs) throw new Error('rss_snapshot_deadline')
         // A lost session lock must stop writes, never continue unfenced.
         if (lock) await lock.query('SELECT 1')
-        const { rows } = await reader.query(RSS_PAGES[phase], [last, batchSize])
+        const rows = await readRssPage(reader, phase, last, batchSize)
         if (!rows.length) break
         if (phase === 'feeds') {
           if (apply) await lock.query(`INSERT INTO catalog.rss_subscription_snapshots (feed_id,payload,import_run_id)
@@ -123,6 +169,7 @@ export async function reconcileRssSnapshot({ sourcePool, hubPool, store, apply =
             ON CONFLICT (feed_id) DO UPDATE SET payload=EXCLUDED.payload,
               import_run_id=EXCLUDED.import_run_id,observed_at=now()`, [JSON.stringify(rows), run.id])
         } else {
+          await attachRssFileEvidence(hubPool, rows, phase, originFingerprint)
           const records = rows.map(row => mapRssRow(row, phase))
           if (apply) {
             if (phase === 'canonical') {

@@ -31,7 +31,7 @@ export function validateFileManifest(manifest) {
     || manifest.configFeeds.some(row => !sha(row.keyHash) || !sha(row.urlHash))) throw new Error('rss_manifest_invalid')
 }
 
-export async function compareRssFiles(pool, manifest) {
+export async function compareRssFiles(pool, manifest, { onEvidence } = {}) {
   validateFileManifest(manifest)
   const batchSize = 16, maxRowBytes = 256 * 1024
   // Historical backfill-rss-canonical-items.js wraps the original item in
@@ -98,7 +98,7 @@ export async function compareRssFiles(pool, manifest) {
       // writer's feedResult envelope (it repeats an entire feed per article).
       // Guard the projected JSON size in SQL BEFORE pg parses any payload.
       const { rows } = await client.query(`WITH evidence AS MATERIALIZED (
-        SELECT r.item_hash,
+        SELECT r.item_hash,c.id::text AS canonical_id,'item:' || r.id::text AS external_id,
           CASE WHEN c.id IS NOT NULL THEN c.feed_key ELSE f.feed_key END AS feed_key,
           c.id IS NOT NULL AS is_canonical, ${isBackfill} AS is_backfill,
           COALESCE(${backfillShape},false) AND NOT ${isBackfill} AS unverified_backfill,
@@ -107,15 +107,17 @@ export async function compareRssFiles(pool, manifest) {
         LEFT JOIN public.rss_canonical_items c ON c.rss_item_id=r.id
         WHERE r.item_hash=ANY($1::text[])
         UNION ALL
-        SELECT c.item_hash,c.feed_key,true,${isBackfill},
+        SELECT c.item_hash,c.id::text,
+          CASE WHEN c.rss_item_id IS NULL THEN 'canonical:' || c.id::text ELSE 'item:' || c.rss_item_id::text END,
+          c.feed_key,true,${isBackfill},
           COALESCE(${backfillShape},false) AND NOT ${isBackfill},${canonicalRaw}
         FROM public.rss_canonical_items c WHERE c.item_hash=ANY($1::text[])
           AND NOT EXISTS (SELECT 1 FROM public.rss_items r WHERE r.item_hash=c.item_hash)
       ), sized AS MATERIALIZED (
-        SELECT item_hash,is_canonical,is_backfill,unverified_backfill,feed_key,raw,
+        SELECT item_hash,canonical_id,external_id,is_canonical,is_backfill,unverified_backfill,feed_key,raw,
           COALESCE(octet_length(raw::text),0) + COALESCE(octet_length(feed_key),0) AS payload_bytes
         FROM evidence
-      ) SELECT item_hash,is_canonical,is_backfill,unverified_backfill,payload_bytes,
+      ) SELECT item_hash,canonical_id,external_id,is_canonical,is_backfill,unverified_backfill,payload_bytes,
         CASE WHEN payload_bytes <= $2 THEN feed_key END AS feed_key,
         CASE WHEN payload_bytes <= $2 THEN raw END AS raw
         FROM sized`, [hashes, maxRowBytes])
@@ -137,6 +139,15 @@ export async function compareRssFiles(pool, manifest) {
         }
         else if (identity.rawHash !== entry.rawHash) report.items.contentDiffers++
         else report.items[row.is_canonical ? 'exactCanonical' : 'exactLegacyOnly']++
+        // Private migration consumer may preserve the file's original feed key
+        // alongside the existing DB identity; never invent a new article ID.
+        const exactIdentity = identity.itemHash === entry.itemHash && identity.identityHash === entry.identityHash
+        const feedOnly = identity.fieldHashes[0] !== entry.fieldHashes[0]
+          && identity.fieldHashes.slice(1).every((hash, i) => hash === entry.fieldHashes[i + 1])
+        if (onEvidence && identity.rawHash === entry.rawHash && (exactIdentity || feedOnly)) {
+          await onEvidence({ entry, raw, externalId: row.external_id, canonicalId: row.canonical_id,
+            feedKeyMatches: exactIdentity })
+        }
       }
     }
     // Deterministic anonymous groups correlate differences with missing feed

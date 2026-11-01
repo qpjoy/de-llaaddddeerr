@@ -1,9 +1,8 @@
 import pg from 'pg'
-import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import { PostgresStore } from '../stores/postgres-store.mjs'
 import { rssSourceOptions } from './diagnose-rss-intent-migration.mjs'
-import { reconcileRssSnapshot } from '../ingest/external/rss-snapshot.mjs'
+import { reconcileRssSnapshot, rssOriginFingerprint } from '../ingest/external/rss-snapshot.mjs'
 
 async function main() {
   let hub, source
@@ -17,13 +16,7 @@ async function main() {
       FROM catalog.external_sources s LEFT JOIN catalog.database_connections p ON p.id=s.database_connection_id
       WHERE s.source_key='telegram-monitor-messages'`)
     const options = rssSourceOptions(rows[0])
-    const dsn = options.connectionString ? new URL(options.connectionString) : null
-    // Pin the physical origin without storing credentials; credential rotation
-    // at the same endpoint remains allowed. A different origin needs review.
-    const originFingerprint = createHash('sha256').update(JSON.stringify([
-      dsn?.hostname || options.host, dsn?.port || String(options.port || 5432),
-      dsn ? decodeURIComponent(dsn.pathname.slice(1)) : options.database,
-    ])).digest('hex')
+    const originFingerprint = rssOriginFingerprint(options)
     source = new pg.Pool(options)
     let last = 0
     const report = await reconcileRssSnapshot({ sourcePool: source, hubPool: hub, store: new PostgresStore(hub),

@@ -57,6 +57,15 @@ test('real SQL: full snapshot, legacy promotion, update, replay, outbox and fail
   const dry = await reconcileRssSnapshot(input)
   assert.deepEqual([dry.feeds, dry.canonical, dry.legacy, dry.status], [1, 1, 1, 'validated'])
   assert.equal(await count('catalog.rss_subscription_snapshots'), 0)
+  // File metadata is a separate private snapshot, attached to the existing
+  // canonical article without changing its identity or DB feed settings.
+  await hub.query(`INSERT INTO catalog.rss_file_snapshots
+    (id,origin_fingerprint,files,metadata,database_snapshot,article_count)
+    VALUES($1,$1,'{}','{}',now(),1)`, ['a'.repeat(64)])
+  await hub.query(`INSERT INTO catalog.rss_file_article_lineage
+    (snapshot_id,item_hash,identity_hash,raw_hash,raw_payload,feed_key,external_id,canonical_id,feed_key_matches)
+    VALUES($1,$2,$1,$1,'{}','original-missing-feed',$3,$4,false)`,
+    ['a'.repeat(64), 'b'.repeat(40), 'item:' + id(10), id(110)])
   const a = await reconcileRssSnapshot({ ...input, apply: true })
   assert.equal(a.changed, 2)
   assert.equal(await count('catalog.rss_subscription_snapshots'), 1)
@@ -65,6 +74,8 @@ test('real SQL: full snapshot, legacy promotion, update, replay, outbox and fail
   assert.equal(rows[0].body, '完整正文')
   assert.equal(rows[0].event_time.toISOString(), '2026-10-31T18:00:00.000Z')
   assert.equal(rows[0].extensions.feed.enabled, false)
+  assert.equal(rows[0].extensions.file_feed_evidence[0].feedKey, 'original-missing-feed')
+  assert.equal(rows[0].extensions.file_feed_evidence[0].snapshotId, 'a'.repeat(64))
   const outbox = await count('outbox.projection_events')
   assert.equal((await reconcileRssSnapshot({ ...input, apply: true })).changed, 0)
   assert.equal(await count('outbox.projection_events'), outbox)
