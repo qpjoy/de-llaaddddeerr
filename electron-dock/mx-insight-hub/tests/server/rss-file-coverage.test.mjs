@@ -58,6 +58,7 @@ test('actual SQL compares current import evidence, not just row counts or matchi
   await db.exec(`CREATE TABLE rss_feeds (id integer PRIMARY KEY,feed_key text,feed_url text);
     CREATE TABLE rss_items(id integer PRIMARY KEY,feed_id integer,item_hash text UNIQUE,raw jsonb);
     CREATE TABLE rss_canonical_items(id integer PRIMARY KEY,rss_item_id integer UNIQUE,item_hash text UNIQUE,feed_key text,raw jsonb);
+    ALTER TABLE rss_canonical_items ADD COLUMN source_ref jsonb NOT NULL DEFAULT '{}';
     INSERT INTO rss_feeds VALUES (1,'feed','https://feed.invalid'),(2,'changed','https://new.invalid');`)
   const entries = []
   const item = n => ({ guid: String(n), link: 'https://article.invalid/' + n, title: '文章', pubDate: '2026-11-01', content: 'body' })
@@ -77,7 +78,7 @@ test('actual SQL compares current import evidence, not just row counts or matchi
         raw.feed = 'intrinsic item field'
         entries[entries.length - 1] = rssFileIdentity('feed', raw)
       }
-      await db.query('INSERT INTO rss_canonical_items VALUES ($1,$2,$3,$4,$5)', [n, n === 6 ? null : n, n === 4 ? 'changed-canonical-hash' : fingerprint.itemHash, 'feed', canonical])
+      await db.query('INSERT INTO rss_canonical_items(id,rss_item_id,item_hash,feed_key,raw) VALUES ($1,$2,$3,$4,$5)', [n, n === 6 ? null : n, n === 4 ? 'changed-canonical-hash' : fingerprint.itemHash, 'feed', canonical])
     }
   }
   const manifest = { version: 'rss-file-manifest.v2', files: {}, items: entries,
@@ -95,7 +96,7 @@ test('actual SQL compares current import evidence, not just row counts or matchi
   } } } }
   const result = await compareRssFiles(pool, manifest)
   assert.equal(readOnly, true)
-  assert.equal(result.version, 'rss-file-coverage.v3')
+  assert.equal(result.version, 'rss-file-coverage.v4')
   assert.equal(result.status, 'incomplete')
   assert.deepEqual(result.items, { total: 9, exactCanonical: 2, exactLegacyOnly: 1, contentDiffers: 2, identityMismatch: 1, missing: 1, payloadTooLarge: 2 })
   assert.equal(result.identityDifferences.items, 1)
@@ -129,7 +130,7 @@ test('actual SQL compares current import evidence, not just row counts or matchi
     const raw = item(row.n), identity = rssFileIdentity(row.fileKey, raw)
     differing.push(identity)
     if (row.change) Object.assign(raw, { guid: 'new-guid', link: 'https://new.invalid', title: 'new-title', pubDate: '2026-11-02' })
-    await db.query('INSERT INTO rss_canonical_items VALUES ($1,NULL,$2,$3,$4)', [row.n, identity.itemHash, row.dbKey,
+    await db.query('INSERT INTO rss_canonical_items(id,rss_item_id,item_hash,feed_key,raw) VALUES ($1,NULL,$2,$3,$4)', [row.n, identity.itemHash, row.dbKey,
       row.invalid ? null : { ...raw, feed: {}, feedResult: {} }])
   }
   const changed = await compareRssFiles(pool, { ...manifest, items: differing })
@@ -150,6 +151,33 @@ test('actual SQL compares current import evidence, not just row counts or matchi
   assert.equal(groups.reduce((sum, group) => sum + group.items, 0), 4)
   assert.doesNotMatch(JSON.stringify(changed), /missing-feed|renamed|new-guid|new-title|https:/)
   for (const entry of differing) for (const hash of entry.fieldHashes) assert.ok(!JSON.stringify(changed).includes(hash))
+
+  // Match the real historical backfill envelope and provenance, including an
+  // intrinsic item.feed/rssItem which must survive unwrapping unchanged.
+  const wrappedEntries = []
+  for (let n = 20; n <= 25; n++) {
+    const raw = { ...item(n), feed: { original: true }, rssItem: { intrinsic: true } }
+    const identity = rssFileIdentity('feed', raw)
+    wrappedEntries.push(identity)
+    let envelope = { rssItem: raw, feed: {} }
+    const ref = { table: 'rss_items', id: String(n) }
+    if (n === 22) ref.id = 'wrong-linked-id'
+    if (n === 23) envelope = { ...envelope, title: 'actual top-level article' }
+    if (n === 24) envelope.rssItem = { ...raw, content: 'different backfill content' }
+    if (n === 25) envelope.rssItem = { ...raw, content: 'x'.repeat(300 * 1024) }
+    if (n === 20) await db.query('INSERT INTO rss_items VALUES ($1,1,$2,$3)', [n, identity.itemHash, raw])
+    await db.query(`INSERT INTO rss_canonical_items(id,rss_item_id,item_hash,feed_key,raw,source_ref)
+      VALUES ($1,$1,$2,$3,$4,$5)`, [n, identity.itemHash, n === 21 ? null : 'feed', envelope, ref])
+  }
+  const wrapped = await compareRssFiles(pool, { ...manifest, items: wrappedEntries })
+  assert.equal(wrapped.items.exactCanonical, 1)
+  assert.equal(wrapped.items.identityMismatch, 3)
+  assert.equal(wrapped.items.contentDiffers, 1)
+  assert.equal(wrapped.items.payloadTooLarge, 1)
+  assert.deepEqual(wrapped.rawLayouts, { canonicalBackfill: 4, canonicalInline: 2, legacy: 0, unverifiedBackfillShape: 1 })
+  assert.equal(wrapped.identityDifferences.feedKeyOnlyChanged, 1)
+  assert.equal(wrapped.identityDifferences.rawPayloadEqual, 1)
+  assert.equal(wrapped.articlePayloadsCovered, false)
 })
 
 // A driver double exercises retained JS memory with the production item count;

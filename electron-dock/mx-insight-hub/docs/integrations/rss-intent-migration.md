@@ -280,3 +280,32 @@ v3不会把“仅订阅键变了”自动认定为同一条迁移身份，也不
 同步两份comparison脚本后执行同一条只读管道，回传version= rss-file-coverage.v3的最终JSON。
 本地4项测试通过，新增实际SQL夹具覆盖缺失/重命名/空订阅键、多个身份字段变化、raw相同/不同/无效、
 匿名分组及不泄漏字段哈希；14,836条模拟记录仍在96MiB堆限制下通过。生产v3分类待回传。
+
+
+### v3回传：历史回填包装导致的诊断歧义（v4修正）
+
+生产源库快照 `2026-11-01T13:44:54.383Z` 的v3结果仍为14,706条精确/130条身份不一致。
+130条原文哈希不同，guid/link/title/identityDate均不同；其中80条feedKey不同且原订阅键缺失。
+匿名分组分别为30条（缺订阅）、50条（订阅存在）、50条（缺订阅）。文件哈希与此前一致。
+**这不是130条真实原文已经损坏/丢失的证明。v3存在历史raw布局识别缺口，以上差异须按v4重新判定。**
+
+本地代码证据：Night-All `scripts/backfill-rss-canonical-items.js` 的SELECT构造：
+`jsonb_build_object('rssItem', raw, 'feed', coalesce(feed_metadata, '{}'::jsonb))`；
+同时source_ref.table=rss_items、source_ref.id=旧文章id。它与实时写入器将item字段平铺到raw的格式不同。
+v1–v3仅剥离feed/feedResult，未展开rssItem，因而会把包装对象当文章比较，产生所有身份字段为空和raw不同的假差异。
+目前只证明存在这种旧写入格式，不能断言生产130条全部来自它，或直接宣称原文一致。
+
+`rss-file-coverage.v4` 在SQL返回前识别历史包装：raw.rssItem必须是对象，顶层必须恰为rssItem/feed，
+source_ref.table必须为rss_items，且source_ref.id必须等于当前c.rss_item_id。
+符合时比较内层完整原文（内层原有feed/rssItem同名字段完整保留），否则保持原比较规则，不猜测解包。
+源库feed_key仍原样参与身份校验，缺失/变化不会用文件值偷偷补齐，因此文章原文相同也可能继续报告feedKey差异。
+
+新增rawLayouts统计canonicalBackfill/canonicalInline/legacy；unverifiedBackfillShape是匹配包装但来源关联未通过的子计数，
+不能与前三项相加。identityDifferences现在基于识别后的文章原文。
+16条批量、256KiB字节上限、只读快照及匿名输出保持；没有源库写入、身份合并、Hub补迁或授权变更。
+
+更新 `server/ops/rss-file-coverage.mjs` 一个文件后重跑同一条管道（现有构建器的manifest.v2兼容），
+应返回 `rss-file-coverage.v4`。这是修复诊断误判后的核对，不是重复要求相同证据。
+4项本地测试通过，新增实际SQL历史包装、错误source_ref、额外顶层字段、原文内同名字段、
+缺失feed_key、真正内容变化及超大内层文章用例；96MiB压力测试仍通过。
+完整配置/文件快照保留与是否需要文章补迁仍待正确比对证据；不要根据v3直接补入130份重复文章。

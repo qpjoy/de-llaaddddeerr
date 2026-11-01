@@ -34,13 +34,24 @@ export function validateFileManifest(manifest) {
 export async function compareRssFiles(pool, manifest) {
   validateFileManifest(manifest)
   const batchSize = 16, maxRowBytes = 256 * 1024
-  const report = { version: 'rss-file-coverage.v3', status: 'observed',
+  // Historical backfill-rss-canonical-items.js wraps the original item in
+  // rssItem. Require its exact envelope AND source_ref linkage; an arbitrary
+  // item with a field named rssItem must not be silently unwrapped.
+  const backfillShape = `(jsonb_typeof(c.raw->'rssItem')='object'
+    AND c.raw ? 'feed' AND (c.raw - 'rssItem' - 'feed')='{}'::jsonb)`
+  const isBackfill = `COALESCE(${backfillShape}
+    AND c.source_ref->>'table'='rss_items'
+    AND c.source_ref->>'id'=c.rss_item_id::text,false)`
+  const canonicalRaw = `CASE WHEN ${isBackfill} THEN c.raw->'rssItem'
+    ELSE c.raw - 'feed' - 'feedResult' END`
+  const report = { version: 'rss-file-coverage.v4', status: 'observed',
     limits: { batchSize, maxRowBytes },
     files: manifest.files, items: { total: manifest.items.length, exactCanonical: 0, exactLegacyOnly: 0,
       contentDiffers: 0, identityMismatch: 0, missing: 0, payloadTooLarge: 0 },
     feeds: { total: manifest.feeds.length, matchedKey: 0, missingKey: 0 },
     configFeeds: { total: manifest.configFeeds.length, sameKeyAndUrl: 0, keyWithDifferentUrl: 0,
       urlWithDifferentKey: 0, missing: 0, comparison: 'identity_only_not_full_configuration' },
+    rawLayouts: { canonicalInline: 0, canonicalBackfill: 0, legacy: 0, unverifiedBackfillShape: 0 },
     databaseSnapshot: null, fullFileCoverage: false }
   const fields = ['feedKey', 'guid', 'link', 'title', 'identityDate']
   const emptyDifferences = () => ({ items: 0, invalidRaw: 0, rawPayloadEqual: 0, rawPayloadDifferent: 0,
@@ -89,20 +100,22 @@ export async function compareRssFiles(pool, manifest) {
       const { rows } = await client.query(`WITH evidence AS MATERIALIZED (
         SELECT r.item_hash,
           CASE WHEN c.id IS NOT NULL THEN c.feed_key ELSE f.feed_key END AS feed_key,
-          c.id IS NOT NULL AS is_canonical,
-          CASE WHEN c.id IS NOT NULL THEN c.raw - 'feed' - 'feedResult' ELSE r.raw END AS raw
+          c.id IS NOT NULL AS is_canonical, ${isBackfill} AS is_backfill,
+          COALESCE(${backfillShape},false) AND NOT ${isBackfill} AS unverified_backfill,
+          CASE WHEN c.id IS NOT NULL THEN ${canonicalRaw} ELSE r.raw END AS raw
         FROM public.rss_items r LEFT JOIN public.rss_feeds f ON f.id=r.feed_id
         LEFT JOIN public.rss_canonical_items c ON c.rss_item_id=r.id
         WHERE r.item_hash=ANY($1::text[])
         UNION ALL
-        SELECT c.item_hash,c.feed_key,true,c.raw - 'feed' - 'feedResult'
+        SELECT c.item_hash,c.feed_key,true,${isBackfill},
+          COALESCE(${backfillShape},false) AND NOT ${isBackfill},${canonicalRaw}
         FROM public.rss_canonical_items c WHERE c.item_hash=ANY($1::text[])
           AND NOT EXISTS (SELECT 1 FROM public.rss_items r WHERE r.item_hash=c.item_hash)
       ), sized AS MATERIALIZED (
-        SELECT item_hash,is_canonical,feed_key,raw,
+        SELECT item_hash,is_canonical,is_backfill,unverified_backfill,feed_key,raw,
           COALESCE(octet_length(raw::text),0) + COALESCE(octet_length(feed_key),0) AS payload_bytes
         FROM evidence
-      ) SELECT item_hash,is_canonical,payload_bytes,
+      ) SELECT item_hash,is_canonical,is_backfill,unverified_backfill,payload_bytes,
         CASE WHEN payload_bytes <= $2 THEN feed_key END AS feed_key,
         CASE WHEN payload_bytes <= $2 THEN raw END AS raw
         FROM sized`, [hashes, maxRowBytes])
@@ -110,6 +123,8 @@ export async function compareRssFiles(pool, manifest) {
       for (const entry of batch) {
         const row = byHash.get(entry.itemHash)
         if (!row) { report.items.missing++; continue }
+        report.rawLayouts[row.is_backfill ? 'canonicalBackfill' : row.is_canonical ? 'canonicalInline' : 'legacy']++
+        if (row.unverified_backfill) report.rawLayouts.unverifiedBackfillShape++
         if (Number(row.payload_bytes) > maxRowBytes) { report.items.payloadTooLarge++; continue }
         const raw = row.raw
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -158,7 +173,7 @@ export async function runRssFileComparison(manifest, sourceOptions) {
   } catch (error) {
     const code = /^(rss_[a-z_]+|source_[a-z_]+|hub_database_unconfigured)$/.test(error.message)
       ? error.message : /^[A-Z0-9]{5}$/.test(error.code || '') ? error.code : 'rss_file_comparison_failed'
-    process.stdout.write(JSON.stringify({ version: 'rss-file-coverage.v3', status: 'incomplete', code }) + '\n')
+    process.stdout.write(JSON.stringify({ version: 'rss-file-coverage.v4', status: 'incomplete', code }) + '\n')
     process.exitCode = 2
   } finally { await source?.end(); await hub?.end() }
 }
