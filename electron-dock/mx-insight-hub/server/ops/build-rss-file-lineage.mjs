@@ -16,6 +16,14 @@ export async function buildRssLineageBundle(root) {
     metadata: { config: files.config.value, rss: { ...rssMetadata, feeds: feedMetadata } } }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  // The receiving Pod can fail before reading stdin (e.g. an old image lacks
+  // its entrypoint). Report the broken pipe without leaking a Node stack or
+  // mistaking it for a successful bundle transfer.
+  process.stdout.on('error', error => {
+    process.stderr.write(JSON.stringify({ status: 'failed', code:
+      error.code === 'EPIPE' ? 'rss_lineage_receiver_closed' : 'rss_lineage_output_failed' }) + '\n')
+    process.exitCode = 1
+  })
   try {
     if (process.argv.length !== 3) throw new Error('rss_runtime_root_required')
     const data = JSON.stringify(await buildRssLineageBundle(resolve(process.argv[2])))

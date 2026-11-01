@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { pathToFileURL } from 'node:url'
 import { buildRssLineageBundle } from '../../server/ops/build-rss-file-lineage.mjs'
 import { reconcileRssFileLineage } from '../../server/ingest/external/rss-file-lineage.mjs'
@@ -40,6 +42,20 @@ test('bundle preserves full configuration/metadata, sends hashes instead of arti
   assert.doesNotMatch(JSON.stringify(bundle), /original-body|article-title|https:\/\/article.invalid/)
   await writeFile(join(root, 'data/news-results.json'), '{}')
   await assert.rejects(buildRssLineageBundle(root), /rss_news_file_requires_migration/)
+})
+
+test('CLI reports a closed receiver as failure without an unhandled EPIPE stack', async t => {
+  const { root } = await fixture(t)
+  const child = spawn(process.execPath, [new URL('../../server/ops/build-rss-file-lineage.mjs', import.meta.url).pathname, root],
+    { stdio: ['ignore', 'pipe', 'pipe'] })
+  let stderr = ''
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', chunk => { stderr += chunk })
+  child.stdout.destroy() // Reproduce kubectl exiting before Node writes its bundle.
+  const [code] = await once(child, 'close')
+  assert.equal(code, 1)
+  assert.deepEqual(JSON.parse(stderr), { status: 'failed', code: 'rss_lineage_receiver_closed' })
+  assert.doesNotMatch(stderr, /Unhandled|private.invalid|secret|original-body/)
 })
 
 const modulePath = process.env.MX_INSIGHT_TEST_PGLITE_MODULE

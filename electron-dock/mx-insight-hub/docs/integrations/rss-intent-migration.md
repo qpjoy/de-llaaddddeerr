@@ -382,3 +382,32 @@ kubectl -n mx-insight-hub exec deployment/mx-insight-hub-admin -c admin -- \
 本地验证：8项RSS测试通过，覆盖真实SQL回滚、重跑、文章身份不变、源库更新后旧原文仍保留、订阅归属入canonical私有扩展、
 不同源库隔离、字节分页和超大行失败；另1项RSS aggregate测试验证授权/query/日期/重放及私有溯源不泄漏；typecheck通过。
 生产镜像/迁移/预检/apply及最终检索验收仍待执行。未修改MX-H2I登录/联网或共享支付/SSO逻辑。
+
+
+### Pod缺少迁移入口：先发布实际包含工具的镜像
+
+操作员运行两项预检均返回 `MODULE_NOT_FOUND`，路径分别为
+`/app/server/ops/reconcile-rss-file-lineage.mjs` 和 `/app/server/ops/reconcile-rss-intent.mjs`。
+这说明选中的运行时没有迁移入口，尚未开始比对或导入；宿主机后续EPIPE只是接收端退出导致管道断开。
+仓库Dockerfile已COPY整个server/migrations，.dockerignore没有排除ops；具体哪个发布环节尚未完成不能只靠这份错误判定。
+本轮增加镜像构建时的必需文件检查；宿主机生产器遇到断管输出rss_lineage_receiver_closed并非零退出，无未处理异常堆栈。
+
+在服务器同步完整Hub改动后，进入mx-insight-hub目录执行实际发布入口（会重建镜像、导入节点运行时、执行migration Job并滚动更新Hub）：
+
+```bash
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh deploy
+```
+
+该流程也沿用项目现有mx-common健康/数据库准备步骤；不手动改数据库凭据或拷贝脚本进运行中Pod。
+必须等待发布成功。仅宿主机有新脚本、只apply已有镜像或只重启旧Pod，均不能保证新入口可用。
+发布成功后先做只读文件检查：
+
+```bash
+kubectl -n mx-insight-hub exec deployment/mx-insight-hub-admin -c admin -- \
+  node -e "for (const f of ['server/ops/reconcile-rss-file-lineage.mjs','server/ops/reconcile-rss-intent.mjs']) require('node:fs').accessSync(f); console.log('rss-tools-present')"
+```
+
+看到rss-tools-present后，再执行上一节两项dry-run。文件存在检查不等于数据库迁移已完成；dry-run还会校验175所需表/字段。
+若发布步骤失败，先回传失败日志，不继续把元数据送入缺少接收程序的管道。
+断管回归测试通过：模拟接收端在生产器写入前关闭，输出只有结构化失败码，退出1，无配置/正文泄漏。
+本轮未执行生产发布或导入；MX-H2I登录/联网代码未改。
