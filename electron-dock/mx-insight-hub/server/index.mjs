@@ -38,6 +38,8 @@ import { JustOneAdapter } from './adapters/justone.mjs'
 import { RAPIDAPI_TAOBAO_TMALL_HOST } from './contracts/justone.mjs'
 import { TikHubAdapter } from './adapters/tikhub.mjs'
 import { RapidApiAdapter } from './adapters/rapidapi.mjs'
+import { NightAllAFacebookAdapter, NIGHT_ALL_A_FACEBOOK_BUDGET_MS } from './adapters/night-all-a-facebook.mjs'
+import { FACEBOOK_SELFHOSTED_ENDPOINT, FACEBOOK_SELFHOSTED_PROVIDER } from './contracts/facebook-search.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
 import { createTwitterSearchRouter, resolveTwitterSearchProvider } from './data/twitter-search-routing.mjs'
@@ -300,8 +302,27 @@ export async function createRuntime(config = loadConfig()) {
     adapter, config: providerConfig, providerKey, credentialStore, operationControlStore: externalPlatformControlStore,
     apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: Math.max(120000, config.reservationLeaseMs),
   })]))
+  // Self-hosted Night-All-A over the VPN. The cluster-wide in-flight cap and
+  // start spacing live in the Facebook search policy; these per-process
+  // values only stay out of their way. It has no procurement cost.
+  const facebookSelfhostedConfig = { timeoutMs: NIGHT_ALL_A_FACEBOOK_BUDGET_MS, freshTtlMs: rapidConfig.freshTtlMs,
+    staleTtlMs: rapidConfig.staleTtlMs, maxConcurrency: 32, maxConsumerConcurrency: 32, maxRequestsPerMinute: 600,
+    circuitFailureThreshold: 3, circuitOpenMs: 120000, billing: { currency: 'CNY', monthlyBudgetMinor: 0,
+      monthlySubsidyBudgetMinor: 0, unitCostMinorByEndpoint: { [FACEBOOK_SELFHOSTED_ENDPOINT]: 0 } } }
+  const facebookSelfhostedGateway = new ExternalPlatformGateway({ usageStore: store,
+    platformStore: createExternalPlatformStore({ pool, usageStore: store, providerKey: FACEBOOK_SELFHOSTED_PROVIDER,
+      authorizationPlatform: 'facebook', circuitFailureThreshold: facebookSelfhostedConfig.circuitFailureThreshold,
+      circuitOpenMs: facebookSelfhostedConfig.circuitOpenMs }),
+    adapter: config.storeDriver === 'postgres' && config.listenerMode !== 'admin' ? new NightAllAFacebookAdapter({
+      baseUrl: config.nightAllA.baseUrl, headers: config.nightAllA.sessionCookie
+        ? { cookie: `dq_admin_session=${config.nightAllA.sessionCookie}`, ...(config.nightAllA.csrfToken ? { 'x-csrf-token': config.nightAllA.csrfToken } : {}) } : {},
+    }) : null,
+    config: facebookSelfhostedConfig, providerKey: FACEBOOK_SELFHOSTED_PROVIDER,
+    operationControlStore: { authorizeDispatch: async () => null, describeProvider: async () => [] },
+    apiKeyPepper: config.apiKeyPepper, reservationLeaseMs: Math.max(120000, config.reservationLeaseMs),
+  })
   const facebookSearch = (context, input) => facebookGateways.rapidapi.searchFacebook(context, input, {
-    policyStore: platformSearchPolicyStore, fallbackGateway: facebookGateways.justone,
+    policyStore: platformSearchPolicyStore, fallbackGateway: facebookGateways.justone, selfhostedGateway: facebookSelfhostedGateway,
   })
   const tikHubAdapter = config.storeDriver === 'postgres'
     && !config.tikHub.configurationError
@@ -624,6 +645,7 @@ export async function createRuntime(config = loadConfig()) {
     externalFacebookCapabilities: async options => {
       const policy = await platformSearchPolicyStore.facebook()
       if (policy.mode === 'paused') return { ready: false }
+      if (policy.mode === 'selfhosted') return { ready: Boolean(await facebookSelfhostedGateway.adapter?.resolveCredential()) }
       const operationKeys = ['social.facebook.search', 'native.j.facebook_post_search_v1']
       const states = await Promise.allSettled(Object.entries(facebookGateways).map(async ([provider, gateway]) => {
         const credential = await (provider === 'rapidapi' ? rapidApiCredentialStore : externalPlatformCredentialStore).describeCredential(provider)

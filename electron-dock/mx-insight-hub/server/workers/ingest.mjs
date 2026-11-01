@@ -64,7 +64,7 @@ export function classifyExternalPlatformIngest(payload) {
       .includes(payload.datasetId)
     && payload.platform === 'xiaohongshu'
   const hubRaw = (payload?.providerKey === 'tikhub' && payload.platform === 'youtube' && payload.datasetId === 'social.comments.v1')
-    || (['justone', 'rapidapi'].includes(payload?.providerKey)
+    || (['justone', 'rapidapi', 'night-all-a'].includes(payload?.providerKey)
       && payload.platform === 'facebook' && payload.datasetId === 'night-all.search.v1')
     || (payload?.providerKey === 'tikhub'
       && ['bilibili', 'douyin', 'kuaishou', 'zhihu', 'reddit', 'youtube', 'tiktok'].includes(payload.platform)

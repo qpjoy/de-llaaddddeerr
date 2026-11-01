@@ -16,13 +16,13 @@
 
 Twitter 的 `x/tw` 归一为 `twitter`。业务调用方不必区分 `username` 与 `userId`：顶层 `username/usernames/userId/userIds/user_id/uid`，以及对应 `params` 账号别名（包括 `screen_name/screenName`），都根据账号字符串内容自动识别。非数字值按用户名解释，例如 `ui_batch_019`；但它可能只是下游任务编号，不能由参数形状推断该平台账号存在。没有可确认账号时应返回明确失败，不把资料对象算成一条内容或把解析失败伪装成分页耗尽。
 
-产品展示的 Twitter 单输入框默认自动识别，并提供「账号查询方式」：自动、`username`、`userId`、`user_id`、`uid`、`url`。自动模式把纯数字作为字符串写入 `userId`，例如 `1952056883877212160`，不会套用用户名的 15 字符限制；其他文本写入 `username`。手动 ID 字段仅接受 1–19 位数字；手动 username 仅接受 1–15 位英文字母、数字或下划线，纯数字用户名自动加 `@` 以固定用户名语义；这里的用户名是 handle，不是显示昵称。主页链接通过 `url` 提交。批量与其他受支持参数继续在接口调试中填写。切换方式不自动查询；从调试结果或未完成请求恢复时展示「原请求参数」，保留原字段、值和幂等身份，用户明确选择新方式才重新解释输入。本功能只依赖 Hub，不需要 Delta 配合升级。
+产品展示的 Twitter 单输入框默认自动识别，并提供「账号查询方式」：自动、`username`、`userId`、`user_id`、`uid`、`url`。自动模式把 1–19 位纯数字作为字符串写入 `userId`，例如 `1952056883877212160`；更长的数字串和其他文本写入 `username`。手动 ID 字段仅接受 1–19 位数字；手动 username 接受英文字母、数字或下划线，不限长度，纯数字用户名自动加 `@` 以固定用户名语义；这里的用户名是 handle，不是显示昵称。主页链接通过 `url` 提交。批量与其他受支持参数继续在接口调试中填写。切换方式不自动查询；从调试结果或未完成请求恢复时展示「原请求参数」，保留原字段、值和幂等身份，用户明确选择新方式才重新解释输入。本功能只依赖 Hub，不需要 Delta 配合升级。
 
-无 `@` 的纯 ASCII 数字字符串按用户 ID 查询，须符合 [X 官方 ID 查询 API](https://docs.x.com/x-api/users/get-user-by-id) 的 `[0-9]{1,19}`。例如 `username: "1234567890123456789"` 和 `userId: "1234567890123456789"` 均调用 ID 查询，不再受用户名 15 字符限制。数字 ID 使用字符串传输，避免 JavaScript 数值精度丢失；不能使用科学计数法或格式化后的数值代替原始 ID。
+无 `@` 的 1–19 位纯 ASCII 数字字符串（[X 官方 ID 查询 API](https://docs.x.com/x-api/users/get-user-by-id) 的 `[0-9]{1,19}`）先按用户 ID 查询。例如 `username: "1234567890123456789"` 和 `userId: "1234567890123456789"` 均先调用 ID 查询。只有供应商明确报告该 ID 没有账号（`userExists:false` 空资料，或 `UserUnavailable` 且原因为 not_found/deleted）时，Hub 才在同一请求内按同名用户名再查一次，并返回该次结果；账号被封禁、受保护、停用或原因不明，以及超时、未知或无法解析的结果，都不会触发第二次采购。第二次查找在派发前被准入拒绝时，返回已保存的 ID 查找结果。两次查找是同一个 Hub 请求，按原规则只计一次客户请求，供应商调用各自留档。超过 19 位的数字串不可能是 ID，直接按用户名查询。数字 ID 使用字符串传输，避免 JavaScript 数值精度丢失；不能使用科学计数法或格式化后的数值代替原始 ID。
 
-账号值显式带 `@`，或通过 `url/urls/profileUrl/profile_url` 字段提交 Twitter / X 主页 URL，表示用户名，即使账号名全部由数字组成。例如 `username: "@12345"` 或 `url: "https://x.com/12345"` 查询用户名 `12345`；裸字符串 `"12345"` 则查询用户 ID。产品展示中 Twitter 使用一个用户名 / ID 输入框自动识别，不要求选择字段，数字用户名请加 `@`；主页 URL 可通过接口调试的 URL 字段提交；其他平台保留原账号字段选择。
+账号值显式带 `@`，或通过 `url/urls/profileUrl/profile_url` 字段提交 Twitter / X 主页 URL，表示用户名，即使账号名全部由数字组成。例如 `username: "@12345"` 或 `url: "https://x.com/12345"` 查询用户名 `12345`；裸字符串 `"12345"` 则先查询用户 ID，该 ID 没有账号时再查询用户名 `12345`。产品展示中 Twitter 使用一个用户名 / ID 输入框自动识别，不要求选择字段，数字用户名请加 `@`；主页 URL 可通过接口调试的 URL 字段提交；其他平台保留原账号字段选择。
 
-用户名去掉 `@` 后仍须满足 `[A-Za-z0-9_]{1,15}`，与 [X 官方账号查询 API](https://docs.x.com/x-api/users/get-user-by-username) 一致；此规则不套用到显示名称或数字用户 ID。格式错误保留 HTTP 400 / `invalid_social_request`，消息说明长度或字符问题，`error.details` 返回 `platform: "twitter"`、`field: "username"`、`reason`、`actualLength`、`maxLength: 15`。其中 `reason` 为 `username_too_long` 或 `username_invalid_characters`，不会回显整个输入。以 22 字符账号为例，消息是 `Twitter username exceeds the 15-character limit (received 22 characters, excluding @)`。这是请求参数错误，不能按空数据或瞬时供应商故障处理。
+用户名去掉 `@` 后须由英文字母、数字或下划线组成；此规则不套用到显示名称或数字用户 ID。X 官方限制用户名为 15 字符（[账号查询 API](https://docs.x.com/x-api/users/get-user-by-username)），但 2026-11-01 起 Hub 不再按长度拒绝，更长的标识照常交给供应商查找，由供应商回答是否存在。含其他字符时保留 HTTP 400 / `invalid_social_request`，`error.details` 返回 `platform: "twitter"`、`field: "username"`、`reason: "username_invalid_characters"`、`actualLength`，不会回显整个输入；`username_too_long` 与 `maxLength` 不再出现。这是请求参数错误，不能按空数据或瞬时供应商故障处理。
 
 历史请求只能在原 Key、路径、原始请求体及旧指纹均匹配时回放已保存的回执；自动识别规则更新不会重写历史响应，也不会按旧规则重新调用供应商。旧 `mxds1` 游标不能用于身份解释发生变化的新请求；调用方应先核对目标账号，再显式决定是否使用新幂等键从第一页重新查询，不能自动换键重跑。未发生身份变化的已有游标仍须满足原绑定和分页规则。
 

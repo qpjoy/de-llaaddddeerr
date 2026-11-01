@@ -118,3 +118,7 @@ CREATE INDEX ON external_platform.admission_leases (provider_key, expires_at);
 ## 2026-10-31：LCY 供应商优先排队（已实现未部署）
 
 LCY-delta 开关新增 `priority` 模式：不再跳过供应商并发和每分钟请求数，而是在请求时限内排在其他 Key 前面等待，并在有任务时保留 80% 并发；上游限流后按共享供应商状态放慢；明确未计费的限流拒绝在同一请求内重试一次。并发与等待队列仍是**每进程**的（本章第 2 节的口径不变），每分钟请求数用 PG 令牌桶，全局准确。第 4 节的 PG 租约信号量实现时，优先级与预留比例应移到租约表里。详见 [LCY 开关说明](../../operations/lcy-hub-limit-switch.md#2026-10-31-供应商优先排队)。
+
+## 2026-10-31：Facebook 自建（Night-All-A）的全局名额（已实现未部署）
+
+第一个**全集群**生效的并发限制，但范围只有 Night-All-A 的 Facebook 搜索，不是第 4 节的通用供应商信号量。做法：`control.facebook_selfhosted_admission` 单行保存租约和等待者（jsonb），每次领取一个短事务 `FOR UPDATE`；先进先出，只有队首可领；在途数 < 上限（默认 2）且距上次启动 ≥ 60 秒 / 每分钟次数（默认 12）才放行。租约在单次预算 + 60 秒后自然过期；结果未知时不提前释放。所有 Key 一律受限（包括 LCY-delta）。普通同步提交即可：流量只有每分钟十几次。详见 [03](03-self-hosted-engines.md) 第 11 节。以后实现第 4 节的通用租约表时，可以把它并进去。

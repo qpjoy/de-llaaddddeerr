@@ -51,7 +51,10 @@ import { youtubeCommentsPlan } from './youtube-comments-workflow.mjs'
 import { StrategySearchRoutingStore } from './strategy-search-routing.mjs'
 import { runFacebookSearchFill } from './facebook-search-fill.mjs'
 import { waitForFacebookRapidAdmission } from './facebook-rapid-admission.mjs'
-import { normalizeFacebookSearch, projectFacebookSearch, facebookJustOneArchives, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY } from '../contracts/facebook-search.mjs'
+import { waitForFacebookSelfhostedAdmission } from './facebook-selfhosted-admission.mjs'
+import { NightAllAUpstreamError } from '../adapters/night-all-a-facebook.mjs'
+import { normalizeFacebookSearch, projectFacebookSearch, facebookJustOneArchives, FACEBOOK_OPERATION, FACEBOOK_JUSTONE_KEY,
+  FACEBOOK_SELFHOSTED_OPERATION, FACEBOOK_SELFHOSTED_PROVIDER } from '../contracts/facebook-search.mjs'
 
 const AUTHORIZATION_PLATFORM = 'ecommerce'
 const DEFAULT_POLICY = Object.freeze({ maxRequests: 100_000, windowSeconds: 3_600, maxPageSize: 100 })
@@ -240,6 +243,20 @@ function publicFailure(error, { ecommerce = false } = {}) {
       code, 'Search request failed; reuse the same request identifier to verify its outcome', {
         ...(evidence.httpStatus === 429 ? upstreamCapacityError(evidence).details : {}),
         outcome: evidence.outcome, retryable: false })
+  }
+  if (error instanceof NightAllAUpstreamError) {
+    const base = { reasonCode: evidence.errorCode, outcome: evidence.outcome, retryable: false }
+    if (evidence.outcome === 'unknown') return new AppError(502, 'facebook_selfhosted_outcome_unknown',
+      'The self-hosted Facebook collection outcome is unknown; reuse the same request identifier to verify it', base)
+    if (evidence.outcome === 'succeeded_unusable') return new AppError(502, 'external_platform_response_unusable',
+      'The self-hosted Facebook result could not be normalized; do not retry automatically', { ...base, upstreamAccepted: true })
+    if (evidence.errorCode === 'facebook_selfhosted_invalid_input') return new AppError(400, 'invalid_facebook_search',
+      'The self-hosted Facebook collector accepts a query and continuation of at most 500 characters', base)
+    if (evidence.errorCode === 'facebook_selfhosted_rate_limited') return new AppError(429, 'facebook_selfhosted_rate_limited',
+      'The self-hosted Facebook account is cooling down; retry later', { ...base, retryAfterMs: evidence.retryAfterMs ?? 300_000 })
+    return new AppError(503, 'facebook_selfhosted_unavailable', ['facebook_selfhosted_session_invalid', 'facebook_selfhosted_misconfigured'].includes(evidence.errorCode)
+      ? 'The self-hosted Facebook collector needs administrator attention' : 'The self-hosted Facebook collector could not complete this search',
+    { ...base, ...(['facebook_selfhosted_session_invalid', 'facebook_selfhosted_misconfigured'].includes(evidence.errorCode) ? { action: 'contact_administrator' } : {}) })
   }
   if (error instanceof RapidApiUpstreamError) {
     if (evidence.errorCode === 'social_egress_unavailable') return new AppError(503, 'social_egress_unavailable', 'Social data egress is unavailable; no business request was dispatched', { outcome: 'rejected', retryable: false })
@@ -1162,13 +1179,13 @@ export class ExternalPlatformGateway {
     })
   }
 
-  async searchFacebook(context, input, { policyStore, fallbackGateway, reservation = null, request: previousRequest = null, attempt = 0, providerCalls = 0 } = {}) {
+  async searchFacebook(context, input, { policyStore, fallbackGateway, selfhostedGateway = null, reservation = null, request: previousRequest = null, attempt = 0, providerCalls = 0 } = {}) {
     const { normalized, body, idempotencyKey, dataSearch = null, signal } = input
     const codec = (dataSearch ? createDataSearchCursorCodec : createRawSearchCursorCodec)(this.apiKeyPepper, `${context.consumer.id}:${context.apiKey.id}`)
     const request = previousRequest || normalizeFacebookSearch(normalized, codec, dataSearch)
-    const rapid = this.providerKey === 'rapidapi'
+    const rapid = this.providerKey === 'rapidapi', selfhosted = this.providerKey === FACEBOOK_SELFHOSTED_PROVIDER
     const providerRequest = request.forProvider(this.providerKey)
-    let admission = null, observationFailed = false, observationComplete = false
+    let admission = null, observationFailed = false, observationComplete = false, selfhostedAdmission = null
     const observe = async quota => {
       if (observationFailed || observationComplete) return
       try {
@@ -1190,18 +1207,19 @@ export class ExternalPlatformGateway {
       return fallbackGateway.searchFacebook(context, input, { policyStore, reservation: reserved, request, attempt: attempt + 1, providerCalls: previousCalls })
     }
     return this.#deliver(context, { body, idempotencyKey, signal, path: dataSearch ? '/api/v1/data/search' : RAW_SEARCH_PATH }, {
-      operation: dataSearch || rapid ? FACEBOOK_OPERATION.operationKey : `native.${FACEBOOK_JUSTONE_KEY}`,
+      operation: selfhosted ? FACEBOOK_SELFHOSTED_OPERATION : dataSearch || rapid ? FACEBOOK_OPERATION.operationKey : `native.${FACEBOOK_JUSTONE_KEY}`,
       authorizationPlatform: 'facebook', platformSearch: true, meterKey: dataSearch ? 'facebook' : 'raw',
       datasetId: dataSearch ? 'night-all.search.v1' : RAW_SEARCH_DATASET, replayReleasedFailures: true,
-      replayWindowMs: dataSearch?.replayWindowMs, dataSearch: Boolean(dataSearch), billingUnknown: rapid, allowZeroCost: rapid,
-      reservation, callOrdinal: attempt,
+      replayWindowMs: dataSearch?.replayWindowMs, dataSearch: Boolean(dataSearch), billingUnknown: rapid, billingFree: selfhosted,
+      allowZeroCost: rapid || selfhosted, reservation, callOrdinal: attempt,
       normalize: ({ policy }) => {
         if (request.pageSize > policy.maxPageSize) throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
         return { ...providerRequest, ...request }
       },
       assemble: dataSearch ? ({ delivery, deadlineAt, signal }) => {
         if (!rapid) throw new AppError(503, 'facebook_search_unavailable', 'The Facebook standard search coordinator is unavailable')
-        const gateways = { rapidapi: this, ...(fallbackGateway ? { justone: fallbackGateway } : {}) }
+        const gateways = { rapidapi: this, ...(fallbackGateway ? { justone: fallbackGateway } : {}),
+          ...(selfhostedGateway ? { [FACEBOOK_SELFHOSTED_PROVIDER]: selfhostedGateway } : {}) }
         return runFacebookSearchFill({ gateway: this, gateways, context, delivery, request, policyStore, deadlineAt, signal,
           resolveCredential: provider => gateways[provider].#resolvedCredential(),
           enterCapacity: (provider, options) => gateways[provider].#enterOrQueue(context,
@@ -1225,6 +1243,10 @@ export class ExternalPlatformGateway {
       route: async reserved => {
         const policy = await policyStore.facebook()
         if (policy.mode === 'paused') throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
+        if (rapid && (request.provider === FACEBOOK_SELFHOSTED_PROVIDER || (!request.provider && policy.mode === 'selfhosted'))) {
+          if (!selfhostedGateway) throw new AppError(503, 'facebook_search_unavailable', 'The self-hosted Facebook collector is unavailable')
+          return { result: await selfhostedGateway.searchFacebook(context, input, { policyStore, reservation: reserved, request, attempt }) }
+        }
         if (rapid && (request.provider === 'justone' || (!request.provider && policy.mode === 'justone'))) {
           return { result: await fallbackGateway.searchFacebook(context, input, { policyStore, reservation: reserved, request, attempt }) }
         }
@@ -1247,8 +1269,24 @@ export class ExternalPlatformGateway {
         if (policy.mode === 'paused') throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
         if (policy.mode === 'auto') return { result: await next(reserved) }
         throw new AppError(503, 'facebook_search_capacity_unavailable', 'Search capacity is temporarily unavailable')
+      } : selfhosted ? async (reserved, { delivery, deadlineAt }) => {
+        // The dispatch lease stays held while queueing; recheck only the
+        // strategy and the caller's access before a slot is used.
+        selfhostedAdmission = await waitForFacebookSelfhostedAdmission({ policyStore, requestId: delivery.usageRequestId,
+          deadlineAt, budgetMs: this.config.timeoutMs, signal, logger: this.logger, revalidate: async () => {
+            if ((await policyStore.facebook()).mode === 'paused') throw new AppError(503, 'facebook_search_paused', 'Facebook search is paused')
+            context = await this.#revalidateWaitingIdentity(context, 'facebook', { platformSearch: true, operation: FACEBOOK_SELFHOSTED_OPERATION })
+          } })
+        return null
       } : null,
       dispatch: async ({ credential }) => {
+        if (selfhosted) {
+          try { return await this.adapter.execute({ ...request, ...providerRequest }, { signal }) }
+          catch (error) {
+            if (!(error instanceof NightAllAUpstreamError) || error.evidence.outcome === 'unknown') selfhostedAdmission.retain = true
+            throw error
+          }
+        }
         try {
           let result = rapid ? await this.adapter.execute({ ...request, ...providerRequest }, credential)
             : await this.adapter.forwardNative(FACEBOOK_JUSTONE_KEY, { params: providerRequest.upstreamQuery }, credential)
@@ -1276,7 +1314,11 @@ export class ExternalPlatformGateway {
         await settle()
         return { result: await next(reserved, 1) }
       } : null,
-      cleanup: rapid ? () => observe() : null,
+      // A self-hosted lease is freed once the run is terminal or confirmed
+      // cancelled; an unknown run keeps its slot until the lease expires.
+      cleanup: rapid ? () => observe() : selfhosted ? async () => {
+        if (selfhostedAdmission && !selfhostedAdmission.retain) await policyStore.releaseSelfhosted(selfhostedAdmission)
+      } : null,
       costUnknown: () => admission?.probe === true,
       finalize: ({ result }) => {
         result.publicBody.data.meta.upstreamCallCount = providerCalls + 1
@@ -2039,7 +2081,7 @@ export class ExternalPlatformGateway {
             deadlineAt: new Date(reservation.request.leaseExpiresAt).getTime() })
           if (routed) { ownsReservation = false; return routed.result }
         } catch (error) {
-          if (error.details?.stage === 'facebook_quota_admission') {
+          if (['facebook_quota_admission', 'facebook_selfhosted_admission'].includes(error.details?.stage)) {
             await this.platformStore.rejectWithoutDispatch({ delivery, sourceMode: 'unavailable',
               status: error.status || 503, errorCode: error.code || 'facebook_quota_state_unavailable' })
             ownsReservation = false
@@ -2174,7 +2216,7 @@ export class ExternalPlatformGateway {
         })
       } catch (error) {
         if (!(error instanceof JustOneUpstreamError)
-          && !(error instanceof RapidApiUpstreamError || error instanceof WebSearchUpstreamError)
+          && !(error instanceof RapidApiUpstreamError || error instanceof WebSearchUpstreamError || error instanceof NightAllAUpstreamError)
           && !(plan.nativeForwarding && error instanceof TikHubUpstreamError)) throw error
         const evidence = error.evidence
         const persistedEvidence = persistedCallEvidence(error)

@@ -26,3 +26,12 @@ export function twitterAccountFailure(payload) {
   const reason = Object.hasOwn(reasons, key) ? reasons[key] : null
   return { code: 'social_account_unavailable', reason: reason || 'unavailable' }
 }
+
+// A refused ID lookup proves no account holds that ID only when the supplier
+// says so outright. A suspended, protected, deactivated or unexplained account
+// still exists, and an unknown, unusable or timed-out lookup proves nothing.
+const NO_ACCOUNT_REASONS = new Set(['not_found', 'deleted'])
+export function twitterLookupFoundNoAccount(evidence) {
+  return evidence?.outcome === 'rejected' && (evidence.errorCode === 'social_account_not_found'
+    || evidence.errorCode === 'social_account_unavailable' && NO_ACCOUNT_REASONS.has(evidence.accountReason))
+}

@@ -9,6 +9,7 @@ import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, isIn
 import { TikHubUpstreamError } from '../adapters/tikhub.mjs'
 import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
 import { JustOneUpstreamError } from '../adapters/justone.mjs'
+import { twitterLookupFoundNoAccount } from '../contracts/twitter-account-failure.mjs'
 import { buildHubSocialCompatDispatch, projectHubSocialCompatResponse } from '../contracts/hub-social-compat.mjs'
 import { normalizeNightAllLegacyPayload } from '../ingest/legacy-night-all.mjs'
 import { SocialSearchStateStore } from './social-search-store.mjs'
@@ -99,6 +100,10 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
     ownerRequestId: delivery.usageRequestId, expiresAt: new Date(deadlineAt).toISOString() }
   let calls = 0, bytes = 0, capturedAt = null, ownsParent = false, entered = false
   let currentCall = null, currentEvidence = null, costReservation = null, childLease = null, settledFailure = false, retainLease = false, stopped = false
+  // A Twitter ID lookup that found no account while the same digits wait to be
+  // looked up as a username. It is this request's answer unless that second
+  // lookup is actually dispatched.
+  let idLookupFailure = null
   const enoughTime = () => Number.isFinite(deadlineAt) && clock() + (gateway.config.timeoutMs || 30000) + 5000 < deadlineAt
   const warn = (code, message) => { if (!warnings.some(row => row.code === code)) warnings.push({ code, message }) }
   const stop = reason => { stopped = true; warn('social_page_fill_stopped', `Account acquisition paused before another dispatch (${reason}); continue with nextCursor when present.`) }
@@ -108,6 +113,18 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
       try { if (['unknown', 'committed'].includes((await gateway.usageStore.getRequest(delivery.usageRequestId, delivery.consumerId))?.status)) return } catch { /* Preserve the existing hold and lease. */ }
       retainLease = true
     }
+  }
+  // The username lookup was not dispatched, so save the ID lookup's refusal
+  // once, as finishFailure would have; a same-key retry replays it.
+  const answerIdLookup = async () => {
+    const { status, body, latencyMs, capturedAt } = idLookupFailure
+    idLookupFailure = null
+    try {
+      await gateway.usageStore.commitRequest(delivery.usageRequestId, { responseStatus: status, responseBody: body,
+        unitsActual: 0, upstreamLatencyMs: latencyMs, deliverySourceMode: 'live', capturedAt })
+    } catch { await markUnknown(); throw uncertain() }
+    settledFailure = true
+    throw new AppError(status, body.error.code, body.error.message, body.error.details)
   }
   const buildStep = (index, job, buffer = null) => traversal ? traversal.buildStep(request, job, buffer) : buildHubSocialCompatDispatch(request.jobs[index], {
     page: buffer?.providerPage ?? job.providerPage, nextParams: buffer ? buffer.providerCursor : job.providerCursor,
@@ -236,6 +253,8 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             marketplace: request.platform, callOrdinal: calls, callRole: calls ? 'enrichment' : 'primary',
             dispatchFingerprint: delivery.fingerprint, costControl: cost.costMinor === 0 ? null : cost,
             costReservationId: costReservation.id, operationControl: control })
+          // The username lookup now owns the outcome.
+          idLookupFailure = null
           calls++; job.started = true; tokens.add(token); job.dispatchedTokens.push(token)
           if (traversal ? traversal.countsAsPage(step) : step.socialCompat.stage !== 'resolve') job.upstreamPages++
           const callStart = performance.now()
@@ -272,8 +291,19 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             const message = accountNotFound ? 'The upstream provider reported that the Twitter account was not found'
               : accountFailure ? 'The upstream provider reported that the Twitter account is unavailable'
               : 'Account acquisition failed; inspect its saved outcome'
-            await store.finishFailure({ ...currentEvidence, failureResponseStatus: status,
-              failureResponseBody: { error: { code, message, details: failureDetails }, requestId: delivery.usageRequestId } })
+            const failureBody = { error: { code, message, details: failureDetails }, requestId: delivery.usageRequestId }
+            // Callers send bare digits for both IDs and handles. When the ID
+            // lookup definitely finds no account, settle that call and try the
+            // same digits once as a username; nothing else buys a second lookup.
+            if (accountFailure && step.userId && !job.resolvedIdentity && twitterLookupFoundNoAccount(evidence)) {
+              await store.finishProviderStep({ ...currentEvidence, affectsCircuit: false })
+              currentCall = null
+              idLookupFailure = { status, body: failureBody, latencyMs: currentEvidence.latencyMs,
+                capturedAt: currentEvidence.responseArchive?.capturedAt ?? new Date().toISOString() }
+              job.resolvedIdentity = { kind: 'username', value: step.userId, username: step.userId, lookupComplete: true, profileReady: false }
+              continue
+            }
+            await store.finishFailure({ ...currentEvidence, failureResponseStatus: status, failureResponseBody: failureBody })
             currentCall = null; settledFailure = true
             throw new AppError(status, code, message, failureDetails)
           }
@@ -300,6 +330,9 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             if (currentCall) await store.markPersistenceUnknown({ callId: currentCall.id, delivery, ...(currentEvidence || {}) }).catch(() => {})
             await markUnknown(); throw uncertain()
           }
+          // Whatever kept the username lookup from being dispatched, the ID
+          // lookup's definite refusal is still the answer.
+          if (idLookupFailure) await answerIdLookup()
           if (knownAdmission(error) && sources.length) { stop(error.code); break }
           throw error
         } finally {
@@ -309,6 +342,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           childLease = null
         }
       }
+      if (idLookupFailure) await answerIdLookup()
       if (stopped) break
     }
     if (!sources.length) throw new AppError(503, 'social_data_unavailable', 'No account page could be acquired within this request')

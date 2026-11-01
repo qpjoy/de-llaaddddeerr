@@ -786,7 +786,7 @@ test('old numeric-handle failures and unresolved receipts never reserve, redispa
   assert.equal(h.store.requests.size, reservations)
 })
 
-test('previous 20-to-30-digit ID receipts replay without allowing a new oversized ID request', async t => {
+test('previous 20-to-30-digit ID receipts replay exactly; a new oversized digit string is only a handle', async t => {
   for (const id of ['12345678901234567890', '123456789012345678901234567890']) await t.test(`${id.length} digits`, async t => {
     const h = await harness(t, { fetchImpl: call => Response.json(call.url.pathname.includes('/tweets')
       ? timeline(['1'], null, 'old_account', id) : profile('old_account', id)) })
@@ -805,7 +805,9 @@ test('previous 20-to-30-digit ID receipts replay without allowing a new oversize
     h.store.reserve = () => { throw new Error('Historical oversized ID must not reserve') }
     assert.deepEqual((await h.invoke(body, key)).body, original.body)
     assert.deepEqual(saved, before)
-    await assert.rejects(h.invoke(body, `fresh-${id.length}-digit-id`), { code: 'invalid_social_request' })
+    // Too long for an ID, so a new request names a handle; it never reuses the receipt.
+    assert.deepEqual(normalizeHubSocialCompatRequest('crawl', body).jobs[0].identity, { kind: 'username', value: id })
+    await assert.rejects(h.invoke(body, `fresh-${id.length}-digit-id`), /Historical oversized ID must not reserve/)
     Object.assign(saved, { status: 'reserved', responseBody: null, responseStatus: null, leaseExpiresAt: new Date(Date.now() - 60000).toISOString() })
     await assert.rejects(h.invoke(body, key), { code: 'request_in_progress' })
     assert.equal(h.calls.length, calls)
@@ -840,22 +842,26 @@ test('reported 19-digit Twitter identifier uses ID lookup and returns profile an
   assert.equal(h.historical.length, 0)
 })
 
-test('invalid Twitter username HTTP errors explain the limit before reserving or dispatching', async t => {
-  const h = await harness(t)
+test('Twitter handles over 15 characters reach the supplier; invalid characters fail before reserving or dispatching', async t => {
+  const h = await harness(t, { fetchImpl: () => Response.json({ data: {}, userExists: false }) })
   const server = createServer(createApp({ service: h.service, store: h.store, adapter: {}, adminToken: null,
     listenerMode: 'public', logger: { error() {} }, hubSocialGateway: { socialData: (context, input) => h.gateway.socialAccountData(context, input) } }))
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
   t.after(() => new Promise(resolve => server.close(resolve)))
-  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/data/social/crawl`, { method: 'POST',
-    headers: { Authorization: `Bearer ${h.key.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'http-invalid-twitter-handle' },
-    body: JSON.stringify({ platform: 'twitter', username: 'mx_health_probe_202607', count: 5 }) })
-  const body = await response.json()
-  assert.equal(response.status, 400)
-  assert.equal(body.error.code, 'invalid_social_request')
-  assert.match(body.error.message, /15-character limit.*22 characters/)
-  assert.deepEqual(body.error.details, { platform: 'twitter', field: 'username', reason: 'username_too_long', actualLength: 22, maxLength: 15 })
+  const send = (username, key) => fetch(`http://127.0.0.1:${server.address().port}/api/v1/data/social/crawl`, { method: 'POST',
+    headers: { Authorization: `Bearer ${h.key.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
+    body: JSON.stringify({ platform: 'twitter', username, count: 5 }) })
+  const invalid = await send('mx health probe', 'http-invalid-twitter-handle'), invalidBody = await invalid.json()
+  assert.equal(invalid.status, 400)
+  assert.equal(invalidBody.error.code, 'invalid_social_request')
+  assert.match(invalidBody.error.message, /letters.*digits.*underscores/)
+  assert.deepEqual(invalidBody.error.details, { platform: 'twitter', field: 'username', reason: 'username_invalid_characters', actualLength: 15 })
   assert.equal(h.calls.length, 0)
   assert.equal(h.store.requests.size, 0)
+  const long = await send('mx_health_probe_202607', 'http-long-twitter-handle'), longBody = await long.json()
+  assert.equal(long.status, 404, 'the supplier, not Hub, decides the long handle')
+  assert.equal(longBody.error.code, 'social_account_not_found')
+  assert.deepEqual(h.calls.map(call => call.url.pathname), ['/user/by/username/mx_health_probe_202607'])
 })
 
 async function reviewStep(h, step) {

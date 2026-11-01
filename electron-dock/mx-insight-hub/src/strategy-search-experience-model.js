@@ -27,12 +27,14 @@ export function strategyAccountBody(operation, form, platforms, cursor) {
   if (!['username', 'userId', 'user_id', 'uid', 'url', 'profileUrl', 'profile_url'].includes(field) || !account || account.length > 500 || account.includes('\0')) throw new Error('请输入 1–500 字的有效账号标识。')
   if (form.platform === 'twitter' && form.twitterAccountField !== 'original') {
     const mode = form.twitterAccountField || 'auto'
-    field = mode === 'auto' ? (/^[0-9]+$/.test(account) ? 'userId' : 'username') : mode
+    // Hub tries bare digits as an ID and then as a username; digits too long
+    // for an ID are only a username. Handle length is the supplier's call.
+    field = mode === 'auto' ? (/^[0-9]{1,19}$/.test(account) ? 'userId' : 'username') : mode
     if (['userId', 'user_id', 'uid'].includes(field)) {
       if (!/^[0-9]{1,19}$/.test(account)) throw new Error('Twitter 账号 ID 应为 1–19 位纯数字；用户名请选择自动识别或 username。')
     } else if (field === 'username') {
       const username = account.replace(/^@+/, '')
-      if (!/^[A-Za-z0-9_]{1,15}$/.test(username)) throw new Error('Twitter 用户名应为 1–15 位英文字母、数字或下划线（不是显示昵称）；长数字 ID 请选择自动识别或 userId。')
+      if (!/^[A-Za-z0-9_]+$/.test(username)) throw new Error('Twitter 用户名只能包含英文字母、数字或下划线（不是显示昵称）。')
       // An explicit numeric handle must not be inferred as an ID by the API.
       if (mode === 'username' && /^[0-9]+$/.test(account)) account = `@${account}`
     } else if (field === 'url') {
@@ -40,7 +42,7 @@ export function strategyAccountBody(operation, form, platforms, cursor) {
       try { url = new URL(account) } catch { /* reported below */ }
       if (!url || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port
         || !['x.com', 'twitter.com', 'www.x.com', 'www.twitter.com'].includes(url.hostname)
-        || !/^\/[A-Za-z0-9_]{1,15}\/?$/.test(url.pathname)) throw new Error('请输入有效的 Twitter / X 账号主页 URL，例如 https://x.com/username。')
+        || !/^\/[A-Za-z0-9_]+\/?$/.test(url.pathname)) throw new Error('请输入有效的 Twitter / X 账号主页 URL，例如 https://x.com/username。')
     } else throw new Error('请选择支持的 Twitter 账号查询方式。')
   }
   const pageSize = Number(form.pageSize)

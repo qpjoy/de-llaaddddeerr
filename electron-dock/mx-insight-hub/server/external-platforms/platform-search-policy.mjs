@@ -28,15 +28,22 @@ export class PlatformSearchPolicyStore {
   async list() {
     if (!this.pool) return []
     const { rows } = await this.pool.query(`SELECT p.*, s.used, s.remaining, s.reset_at, s.blocked_until, s.reason AS availability_reason,
-      s.lease_until, s.supplier_remaining, s.supplier_limit, s.supplier_observed_at, s.manual_check_until, jsonb_array_length(s.waiters) AS queue_depth, s.updated_at AS observed_at, now() AS checked_at FROM control.platform_search_policies p
-      LEFT JOIN control.facebook_rapid_quota s ON p.platform='facebook' ORDER BY p.platform`)
-    return rows.map(({ checked_at: checkedAt, ...row }) => {
-      if (row.platform !== 'facebook') return row
+      s.lease_until, s.supplier_remaining, s.supplier_limit, s.supplier_observed_at, s.manual_check_until, jsonb_array_length(s.waiters) AS queue_depth, s.updated_at AS observed_at,
+      a.leases AS selfhosted_leases, a.waiters AS selfhosted_waiters, a.last_dispatch_at AS selfhosted_last_dispatch_at, now() AS checked_at FROM control.platform_search_policies p
+      LEFT JOIN control.facebook_rapid_quota s ON p.platform='facebook'
+      LEFT JOIN control.facebook_selfhosted_admission a ON p.platform='facebook' ORDER BY p.platform`)
+    return rows.map(({ checked_at: checkedAt, selfhosted_leases: leases, selfhosted_waiters: waiters, ...row }) => {
+      if (row.platform !== 'facebook') {
+        for (const key of ['selfhosted_last_dispatch_at', 'selfhosted_max_concurrency', 'selfhosted_requests_per_minute']) delete row[key]
+        return row
+      }
       const now = new Date(checkedAt).getTime()
       const checkAt = facebookRecoveryCheckAt({ ...row, reason: row.availability_reason }, now)
       return { ...row, available_included: row.remaining,
         rapid_available: facebookRapidAvailable(row, now),
-        next_recovery_check_at: checkAt == null ? null : new Date(checkAt) }
+        next_recovery_check_at: checkAt == null ? null : new Date(checkAt),
+        selfhosted_in_flight: (leases || []).filter(lease => lease.expiresAt > now).length,
+        selfhosted_queue_depth: (waiters || []).filter(waiter => waiter.deadline > now).length }
     })
   }
   async facebook() {
@@ -46,8 +53,11 @@ export class PlatformSearchPolicyStore {
   }
   async update(platform, input) {
     if (platform !== 'facebook') throw new AppError(400, 'platform_search_policy_read_only', 'This platform retains its existing route')
-    if (!input || Object.keys(input).some(k => !['mode', 'monthlyLimit', 'probeIntervalHours', 'billingCycleDay', 'billingProbeIntervalHours', 'expectedRevision', 'reason'].includes(k))
-      || !['auto', 'rapidapi', 'justone', 'paused'].includes(input.mode)
+    if (!input || Object.keys(input).some(k => !['mode', 'monthlyLimit', 'probeIntervalHours', 'billingCycleDay', 'billingProbeIntervalHours',
+      'selfhostedMaxConcurrency', 'selfhostedRequestsPerMinute', 'expectedRevision', 'reason'].includes(k))
+      || !['auto', 'rapidapi', 'justone', 'paused', 'selfhosted'].includes(input.mode)
+      || (input.selfhostedMaxConcurrency !== undefined && (!Number.isInteger(input.selfhostedMaxConcurrency) || input.selfhostedMaxConcurrency < 1 || input.selfhostedMaxConcurrency > 8))
+      || (input.selfhostedRequestsPerMinute !== undefined && (!Number.isInteger(input.selfhostedRequestsPerMinute) || input.selfhostedRequestsPerMinute < 1 || input.selfhostedRequestsPerMinute > 120))
       || (input.monthlyLimit !== undefined && (!Number.isInteger(input.monthlyLimit) || input.monthlyLimit < 1 || input.monthlyLimit > 1000000))
       || (input.probeIntervalHours !== undefined && (!Number.isInteger(input.probeIntervalHours) || input.probeIntervalHours < 24 || input.probeIntervalHours > 744))
       || (input.billingCycleDay !== undefined && (!Number.isInteger(input.billingCycleDay) || input.billingCycleDay < 1 || input.billingCycleDay > 31))
@@ -60,9 +70,11 @@ export class PlatformSearchPolicyStore {
       await client.query('BEGIN')
       const changed = await client.query(`UPDATE control.platform_search_policies SET mode=$1, monthly_limit=coalesce($2,monthly_limit),
         probe_interval_hours=coalesce($3,probe_interval_hours), revision=revision+1, reason=$4, updated_at=now(),
-        billing_cycle_day=coalesce($7,billing_cycle_day), billing_probe_interval_hours=coalesce($8,billing_probe_interval_hours)
+        billing_cycle_day=coalesce($7,billing_cycle_day), billing_probe_interval_hours=coalesce($8,billing_probe_interval_hours),
+        selfhosted_max_concurrency=coalesce($9,selfhosted_max_concurrency), selfhosted_requests_per_minute=coalesce($10,selfhosted_requests_per_minute)
         WHERE platform=$5 AND revision=$6 RETURNING *`, [input.mode, input.monthlyLimit ?? null, input.probeIntervalHours ?? null, input.reason.trim(), platform, input.expectedRevision,
-        input.billingCycleDay ?? null, input.billingProbeIntervalHours ?? null])
+        input.billingCycleDay ?? null, input.billingProbeIntervalHours ?? null,
+        input.selfhostedMaxConcurrency ?? null, input.selfhostedRequestsPerMinute ?? null])
       if (!changed.rows.length) throw new AppError(409, 'platform_search_revision_conflict', 'Strategy changed; refresh before saving')
       await client.query(`INSERT INTO control.platform_search_policy_events(platform,revision,actor,policy)
         VALUES($1,$2,'admin-token',$3::jsonb)`, [platform, changed.rows[0].revision, JSON.stringify(changed.rows[0])])
@@ -171,6 +183,74 @@ export class PlatformSearchPolicyStore {
   async cancelRapidWait(ticket) {
     if (!UUID.test(ticket?.id || '') || !UUID.test(ticket?.requestId || '')) return
     await this.pool.query(`UPDATE control.facebook_rapid_quota SET waiters=coalesce((
+      SELECT jsonb_agg(entry.value ORDER BY entry.ordinality)
+      FROM jsonb_array_elements(waiters) WITH ORDINALITY AS entry(value, ordinality)
+      WHERE NOT (entry.value->>'id'=$1 AND entry.value->>'requestId'=$2)
+    ),'[]'::jsonb) WHERE singleton`, [ticket.id, ticket.requestId])
+  }
+  // Night-All-A runs a real browserless crawler on shared Facebook accounts.
+  // Every Hub process and replica takes the same FIFO, the same in-flight cap
+  // and the same start spacing here; no Key or internal traffic is exempt.
+  async admitSelfhosted(ticket, { leaseMs }) {
+    if (!UUID.test(ticket?.id || '') || !UUID.test(ticket?.requestId || '') || !Number.isSafeInteger(ticket?.deadline)
+      || !Number.isSafeInteger(leaseMs) || leaseMs < 1000) throw new AppError(400, 'invalid_facebook_admission', 'Invalid admission identity')
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query("SET LOCAL lock_timeout = '1s'")
+      await client.query("SET LOCAL statement_timeout = '3s'")
+      const { rows: [s] } = await client.query(`SELECT a.*, p.mode, p.selfhosted_max_concurrency, p.selfhosted_requests_per_minute,
+        now() AS checked_at FROM control.facebook_selfhosted_admission a CROSS JOIN control.platform_search_policies p
+        WHERE a.singleton AND p.platform='facebook' FOR UPDATE OF a FOR SHARE OF p`)
+      if (!s) throw new AppError(503, 'platform_search_policy_unavailable', 'Search strategy is unavailable')
+      const now = new Date(s.checked_at).getTime()
+      const leases = (s.leases || []).filter(row => row.expiresAt > now)
+      let waiters = (s.waiters || []).filter(row => row.deadline > now)
+      let changed = leases.length !== (s.leases || []).length || waiters.length !== (s.waiters || []).length
+      const finish = async (reason, retryAfterMs = null) => {
+        if (changed) await client.query('UPDATE control.facebook_selfhosted_admission SET leases=$1::jsonb,waiters=$2::jsonb,updated_at=clock_timestamp() WHERE singleton',
+          [JSON.stringify(leases), JSON.stringify(waiters)])
+        await client.query('COMMIT')
+        return { allowed: false, reason, retryAfterMs, inFlight: leases.length, queueDepth: waiters.length }
+      }
+      const leave = () => { const before = waiters.length; waiters = waiters.filter(row => row.id !== ticket.id); changed ||= before !== waiters.length }
+      if (s.mode !== 'selfhosted') { leave(); return await finish('strategy_changed') }
+      if (ticket.deadline <= now) { leave(); return await finish('queue_timeout') }
+      const existing = waiters.find(row => row.id === ticket.id)
+      if (existing && (existing.requestId !== ticket.requestId || existing.deadline !== ticket.deadline)) {
+        throw new AppError(409, 'facebook_admission_conflict', 'Admission identity changed')
+      }
+      if (!existing) {
+        if (waiters.length >= 32) return await finish('queue_full')
+        waiters.push({ id: ticket.id, requestId: ticket.requestId, deadline: ticket.deadline })
+        changed = true
+      }
+      if (waiters[0].id !== ticket.id) return await finish('queued', 500)
+      if (leases.length >= s.selfhosted_max_concurrency) return await finish('concurrency', 500)
+      const nextAt = s.last_dispatch_at == null ? now
+        : new Date(s.last_dispatch_at).getTime() + Math.ceil(60000 / s.selfhosted_requests_per_minute)
+      if (nextAt > now) return await finish('paced', nextAt - now)
+      leave()
+      const token = randomUUID()
+      leases.push({ token, requestId: ticket.requestId, expiresAt: now + leaseMs })
+      await client.query(`UPDATE control.facebook_selfhosted_admission SET leases=$1::jsonb,waiters=$2::jsonb,
+        last_dispatch_at=$3,updated_at=clock_timestamp() WHERE singleton`, [JSON.stringify(leases), JSON.stringify(waiters), new Date(now)])
+      await client.query('COMMIT')
+      return { allowed: true, token, inFlight: leases.length, queueDepth: waiters.length }
+    } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error }
+    finally { client.release() }
+  }
+  async releaseSelfhosted(admission) {
+    if (!UUID.test(admission?.token || '')) return
+    await this.pool.query(`UPDATE control.facebook_selfhosted_admission SET leases=coalesce((
+      SELECT jsonb_agg(entry.value ORDER BY entry.ordinality)
+      FROM jsonb_array_elements(leases) WITH ORDINALITY AS entry(value, ordinality)
+      WHERE entry.value->>'token'<>$1
+    ),'[]'::jsonb),updated_at=clock_timestamp() WHERE singleton`, [admission.token])
+  }
+  async cancelSelfhostedWait(ticket) {
+    if (!UUID.test(ticket?.id || '') || !UUID.test(ticket?.requestId || '')) return
+    await this.pool.query(`UPDATE control.facebook_selfhosted_admission SET waiters=coalesce((
       SELECT jsonb_agg(entry.value ORDER BY entry.ordinality)
       FROM jsonb_array_elements(waiters) WITH ORDINALITY AS entry(value, ordinality)
       WHERE NOT (entry.value->>'id'=$1 AND entry.value->>'requestId'=$2)

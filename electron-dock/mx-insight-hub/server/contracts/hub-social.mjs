@@ -17,14 +17,13 @@ export const HUB_SOCIAL_OPERATIONS = Object.values(HUB_SOCIAL_ENDPOINTS).map(row
   contractVersion: HUB_SOCIAL_VERSION, endpointKeys: [row.endpointKey],
 }))
 const fail = message => { throw new AppError(400, 'invalid_social_request', message) }
+// X itself caps handles at 15 characters, but callers send whatever identifier
+// they hold; only the supplier can say whether a longer one names an account.
 export function validateTwitterUsername(value) {
-  if (/^[A-Za-z0-9_]{1,15}$/.test(value)) return
-  const tooLong = value.length > 15
-  throw new AppError(400, 'invalid_social_request', tooLong
-    ? `Twitter username exceeds the 15-character limit (received ${value.length} characters, excluding @)`
-    : 'Twitter username must contain 1 to 15 letters (A-Z), digits (0-9), or underscores, excluding @', {
-    platform: 'twitter', field: 'username', reason: tooLong ? 'username_too_long' : 'username_invalid_characters',
-    actualLength: value.length, maxLength: 15,
+  if (/^[A-Za-z0-9_]+$/.test(value)) return
+  throw new AppError(400, 'invalid_social_request',
+    'Twitter username must contain only letters (A-Z), digits (0-9), or underscores, excluding @', {
+    platform: 'twitter', field: 'username', reason: 'username_invalid_characters', actualLength: value.length,
   })
 }
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')

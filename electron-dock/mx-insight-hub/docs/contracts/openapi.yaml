@@ -8855,11 +8855,11 @@ paths:
                 username:
                   type: string
                   maxLength: 2048
-                  description: Twitter 自动识别账号字符串，与 userId 字段相同：裸纯数字字符串按 1–19 位账号 ID 查询；其他值按用户名查询，去掉 @ 后须为 1–15 位英文字母、数字或下划线。纯数字用户名请加 @。数字 ID 必须作为字符串发送以保持精度。
+                  description: Twitter 自动识别账号字符串，与 userId 字段相同：1–19 位裸纯数字字符串先按账号 ID 查询，该 ID 明确没有对应账号时再按同名用户名查询一次；更长的数字串和其他值按用户名查询，去掉 @ 后由英文字母、数字或下划线组成，Hub 不按长度拒绝。只查数字用户名请加 @。数字 ID 必须作为字符串发送以保持精度。
                 userId:
                   type: string
                   maxLength: 2048
-                  description: 与 username 使用相同的自动识别规则；裸纯数字字符串按 1–19 位账号 ID 查询，含字母或下划线按用户名查询，@ 显式表示用户名。
+                  description: 与 username 使用相同的自动识别规则；1–19 位裸纯数字字符串先按账号 ID、该 ID 没有账号时再按用户名查询，其他值按用户名查询，@ 显式表示用户名。
                 user_id:
                   type: string
                   maxLength: 2048
@@ -8918,7 +8918,7 @@ paths:
           description: contractVersion、data（items、raw_info、raw_data、page、pageInfo、meta、status）、requestId。status=partial
             表示丢弃了不能解析的内容；页内计数不是总数。data.meta.profileCompleteness=base_profile_without_about 表示仅基础资料。
         '400':
-          description: 参数或游标错误。Twitter 用户名格式错误为 invalid_social_request；error.details 包含 platform、field、reason（username_too_long 或 username_invalid_characters）、actualLength、maxLength（15）。不回显整个输入，不自动重试。
+          description: 参数或游标错误。Twitter 用户名含英文字母、数字、下划线以外的字符时为 invalid_social_request；error.details 包含 platform、field、reason（username_invalid_characters）、actualLength。Hub 不按用户名长度拒绝。不回显整个输入，不自动重试。
         '401':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '402':
@@ -8926,9 +8926,9 @@ paths:
         '403':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '404':
-          description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。
+          description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。1–19 位裸纯数字的 ID 查找明确未找到账号时，Hub 在同一请求内按同名用户名再查一次并返回该次结果；用户名查找未能派发时返回 ID 查找的结果。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。
         '422':
-          description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；只表示供应商的报告，未知原因不推断，不自动重试或回退采购。
+          description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。
         '409':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '429':
@@ -8980,11 +8980,11 @@ paths:
                 username:
                   type: string
                   maxLength: 2048
-                  description: Twitter 自动识别账号字符串，与 userId 字段相同：裸纯数字字符串按 1–19 位账号 ID 查询；其他值按用户名查询，去掉 @ 后须为 1–15 位英文字母、数字或下划线。纯数字用户名请加 @。数字 ID 必须作为字符串发送以保持精度。
+                  description: Twitter 自动识别账号字符串，与 userId 字段相同：1–19 位裸纯数字字符串先按账号 ID 查询，该 ID 明确没有对应账号时再按同名用户名查询一次；更长的数字串和其他值按用户名查询，去掉 @ 后由英文字母、数字或下划线组成，Hub 不按长度拒绝。只查数字用户名请加 @。数字 ID 必须作为字符串发送以保持精度。
                 userId:
                   type: string
                   maxLength: 2048
-                  description: 与 username 使用相同的自动识别规则；裸纯数字字符串按 1–19 位账号 ID 查询，含字母或下划线按用户名查询，@ 显式表示用户名。
+                  description: 与 username 使用相同的自动识别规则；1–19 位裸纯数字字符串先按账号 ID、该 ID 没有账号时再按用户名查询，其他值按用户名查询，@ 显式表示用户名。
                 user_id:
                   type: string
                   maxLength: 2048
@@ -9022,7 +9022,7 @@ paths:
           description: contractVersion、data（items、raw_info、raw_data、page、pageInfo、meta、status）、requestId。status=partial
             表示丢弃了不能解析的内容；页内计数不是总数。data.meta.profileCompleteness=base_profile_without_about 表示仅基础资料。
         '400':
-          description: 参数或游标错误。Twitter 用户名格式错误为 invalid_social_request；error.details 包含 platform、field、reason（username_too_long 或 username_invalid_characters）、actualLength、maxLength（15）。不回显整个输入，不自动重试。
+          description: 参数或游标错误。Twitter 用户名含英文字母、数字、下划线以外的字符时为 invalid_social_request；error.details 包含 platform、field、reason（username_invalid_characters）、actualLength。Hub 不按用户名长度拒绝。不回显整个输入，不自动重试。
         '401':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '402':
@@ -9030,9 +9030,9 @@ paths:
         '403':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '404':
-          description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。
+          description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。1–19 位裸纯数字的 ID 查找明确未找到账号时，Hub 在同一请求内按同名用户名再查一次并返回该次结果；用户名查找未能派发时返回 ID 查找的结果。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。
         '422':
-          description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；只表示供应商的报告，未知原因不推断，不自动重试或回退采购。
+          description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。
         '409':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '429':

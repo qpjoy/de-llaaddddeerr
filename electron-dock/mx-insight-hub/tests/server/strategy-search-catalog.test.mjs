@@ -40,7 +40,8 @@ test('policy rows preserve provider-specific saved shape without mutating it or 
   const facebook = platformById(catalog, 'search', 'facebook')
   assert.deepEqual(instagram.providers, ['justone', 'tikhub'])
   assert.deepEqual(instagram.allowedModes, ['fixed', 'priority', 'paused'])
-  assert.deepEqual(facebook.allowedModes, ['auto', 'rapidapi', 'justone', 'paused'])
+  assert.deepEqual(facebook.allowedModes, ['auto', 'rapidapi', 'justone', 'selfhosted', 'paused'])
+  assert.deepEqual(facebook.providers, ['rapidapi', 'justone', 'night-all-a'])
   assert.deepEqual(instagram.policy, instagramPolicy)
   assert.deepEqual(facebook.policy, facebookPolicy)
   facebook.policy.monthly_limit = 1

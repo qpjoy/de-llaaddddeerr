@@ -17,7 +17,7 @@ export const STRATEGY_SEARCH_INTERFACES = [
     boundary: 'Hub 接口需要当前平台及 social.profile.get 授权。资料查询与内容采集独立管理，旧转发入口继续保留。' },
 ]
 
-export const STRATEGY_PROVIDER_LABELS = { justone: 'JustOne', tikhub: 'TikHub', rapidapi: 'RapidAPI', 'night-all': 'Night-All' }
+export const STRATEGY_PROVIDER_LABELS = { justone: 'JustOne', tikhub: 'TikHub', rapidapi: 'RapidAPI', 'night-all': 'Night-All', 'night-all-a': 'Night-All-A 自建' }
 export const INSTAGRAM_STRATEGY_MODE_LABELS = { fixed: '固定供应商', priority: '优先与保底', paused: '暂停新搜索' }
 export const TWITTER_STRATEGY_MODE_LABELS = { fixed: '固定供应商', priority: '优先与保底', paused: '暂停新采购' }
 export const STRATEGY_MIGRATION_LABELS = { hub_native: 'Hub 直连', conditional: '部分已迁移', night_all: '仍经 Night-All', local: '本地数据' }
@@ -67,8 +67,10 @@ export function twitterStrategyUpdate(row, draft) {
 }
 
 export const FACEBOOK_STRATEGY_MODE_LABELS = {
-  auto: '额度优先：RapidAPI → JustOne', rapidapi: '固定：仅 RapidAPI', justone: '固定：仅 JustOne', paused: '暂停新搜索',
+  auto: '额度优先：RapidAPI → JustOne', rapidapi: '固定：仅 RapidAPI', justone: '固定：仅 JustOne',
+  selfhosted: '自建：仅 Night-All-A', paused: '暂停新搜索',
 }
+export const FACEBOOK_SELFHOSTED_LIMITS = { concurrency: [1, 8], requestsPerMinute: [1, 120] }
 
 export function strategyPolicyEditor(interfaceId, row) {
   if (['crawl', 'user-info'].includes(interfaceId) && row?.platform === 'facebook'
@@ -121,8 +123,10 @@ export function strategyPolicySummary(interfaceId, row) {
       ? { title: 'RapidAPI 额度优先 → JustOne 保底', mode: '额度优先', description: '优先使用 RapidAPI 套餐额度；额度不可用时按现有规则转 JustOne。已派发的请求仅确认 429 时可按既有规则使用保底，400、超时和未知结果不会触发自动重试。' }
       : policy.mode === 'paused'
         ? { title: '暂停新的 Facebook 搜索', mode: '暂停', description: '停止新的搜索采集，保留原额度记录与已保存请求。' }
-        : { title: `固定 ${providerLabel(policy.mode)}`, mode: '固定供应商', description: `新搜索仅使用 ${providerLabel(policy.mode)}；此模式不启用另一供应商作为保底。` }
-    return { ...current, editor, providers: ['rapidapi', 'justone'],
+        : policy.mode === 'selfhosted'
+          ? { title: '自建 Night-All-A', mode: '自建采集', description: `新搜索只派发到自建 Night-All-A，不转付费供应商。全集群同时最多 ${policy.selfhosted_max_concurrency ?? 2} 个请求在途，每分钟最多启动 ${policy.selfhosted_requests_per_minute ?? 12} 次；名额已满时在请求时限内排队，超时返回忙碌。` }
+          : { title: `固定 ${providerLabel(policy.mode)}`, mode: '固定供应商', description: `新搜索仅使用 ${providerLabel(policy.mode)}；此模式不启用另一供应商作为保底。` }
+    return { ...current, editor, providers: ['rapidapi', 'justone', ...(row.providers.includes('night-all-a') ? ['night-all-a'] : [])],
       modes: row.allowedModes.filter(mode => Object.hasOwn(FACEBOOK_STRATEGY_MODE_LABELS, mode)).map(mode => FACEBOOK_STRATEGY_MODE_LABELS[mode]), revision: policy.revision }
   }
   if (editor === 'twitter') {

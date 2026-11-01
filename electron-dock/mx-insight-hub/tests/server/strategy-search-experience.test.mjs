@@ -167,8 +167,13 @@ test('Twitter auto and manual fields resolve long IDs and numeric handles withou
   assert.deepEqual(build('12345', 'username'), { platform: 'twitter', username: '@12345' })
   assert.deepEqual(build('@12345'), { platform: 'twitter', username: '@12345' })
   assert.deepEqual(build('https://x.com/12345', 'url'), { platform: 'twitter', url: 'https://x.com/12345' })
-  for (const [account, mode] of [[id, 'username'], ['name', 'userId'], ['1'.repeat(20), 'auto'],
-    ['a'.repeat(16), 'auto'], ['显示昵称', 'auto'], ['https://evil.example/user', 'url'], ['https://x.com/user/status/1', 'url']]) {
+  // Handle length is left to the supplier; digits too long for an ID are a handle.
+  assert.deepEqual(build(id, 'username'), { platform: 'twitter', username: `@${id}` })
+  assert.deepEqual(build('1'.repeat(20)), { platform: 'twitter', username: '1'.repeat(20) })
+  assert.deepEqual(build('a'.repeat(16)), { platform: 'twitter', username: 'a'.repeat(16) })
+  assert.deepEqual(build('https://x.com/mx_health_probe_202607', 'url'), { platform: 'twitter', url: 'https://x.com/mx_health_probe_202607' })
+  for (const [account, mode] of [['name', 'userId'], ['1'.repeat(20), 'userId'], ['显示昵称', 'auto'], ['name-with-dash', 'username'],
+    ['https://evil.example/user', 'url'], ['https://x.com/user/status/1', 'url']]) {
     assert.throws(() => build(account, mode))
   }
   for (const original of [{ username: id }, { user_id: 'Some_User' }, { username: '12345' }, { profileUrl: 'https://x.com/12345' }]) {

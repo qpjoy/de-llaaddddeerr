@@ -58,9 +58,9 @@ function accountOperation(row) {
     platform: { type: 'string', enum: accountPlatforms(row.key), description: '一次请求只选择一个平台；已发布的平台别名继续兼容，响应使用规范平台名。' },
     businessId: { type: 'string', deprecated: true, description: '历史兼容字段；可省略。提交时必须等于当前认证消费者绑定的值，不能改变调用身份。' },
     business_id: { type: 'string', deprecated: true, description: 'businessId 的历史别名；同样受当前认证身份绑定。' },
-    username: { ...identifier, description: '平台账号标识。Twitter 自动识别：无 @ 的纯数字字符串按账号 ID 查询（1–19 位）；其他值按用户名查询，去掉 @ 后为 1–15 位英文字母、数字或下划线。纯数字用户名须加 @，也可通过 url/urls 字段提交主页 URL；ID 必须用字符串传输以保持精度。' },
-    usernames: { ...identifiers, description: '平台账号列表。Twitter 每项按内容自动识别，与 username 相同；裸纯数字字符串为 1–19 位账号 ID，@12345 表示数字用户名；主页 URL 请使用 url/urls 字段。' },
-    userId: { ...identifier, description: '平台账号标识。Twitter 与 username 相同，裸纯数字字符串按 1–19 位 ID 查询，其他值按用户名解析；Hub 内部任务 ID 不能保证存在对应平台账号。' },
+    username: { ...identifier, description: '平台账号标识。Twitter 自动识别：无 @ 的 1–19 位纯数字字符串先按账号 ID 查询，该 ID 明确没有对应账号时再按同名用户名查询一次；更长的数字串和其他值按用户名查询，去掉 @ 后由英文字母、数字或下划线组成，Hub 不按长度拒绝。只查数字用户名请加 @，也可通过 url/urls 字段提交主页 URL；ID 必须用字符串传输以保持精度。' },
+    usernames: { ...identifiers, description: '平台账号列表。Twitter 每项按内容自动识别，与 username 相同；1–19 位裸纯数字字符串先按账号 ID、再按用户名查询，@12345 只表示数字用户名；主页 URL 请使用 url/urls 字段。' },
+    userId: { ...identifier, description: '平台账号标识。Twitter 与 username 相同，1–19 位裸纯数字字符串先按 ID、该 ID 没有账号时再按用户名查询，其他值按用户名解析；Hub 内部任务 ID 不能保证存在对应平台账号。' },
     userIds: { ...identifiers, description: '平台账号列表。Twitter 每项与 username 使用相同的自动识别规则。' },
     user_id: { ...identifier, description: 'userId 兼容字段；Twitter 使用相同的自动识别规则。' },
     uid: { ...identifier, description: 'userId 兼容字段；Twitter 使用相同的自动识别规则。' },
@@ -89,9 +89,9 @@ function accountOperation(row) {
     responses: Object.fromEntries([200, 400, 401, 402, 403, 404, 409, 422, 429, 502, 503].map(status => [String(status), {
       description: status === 200 ? 'contractVersion、data（platform、items、raw_info、raw_data、page、pageInfo、meta、status、warnings）与 requestId。raw_info/raw_data 是 JSON 字符串；items 是数组，posts 等为内容条目，followers/following 和账号资料为账号条目。page/pageInfo 的 hasMore 与 nextCursor 同步。returnedCount 只描述本页，不代表账号总内容数。' : '稳定错误码与 requestId；请求未知时先查询原请求状态。400 为参数或游标错误，403 为授权，429 为准入限制；不通过自动重试绕开限制。',
       ...(status === 200 ? { content: { 'application/json': { schema: accountResponseSchema(row.key) } } } : {}),
-      ...(status === 400 ? { description: '参数或游标错误。Twitter 用户名格式错误为 invalid_social_request；error.details 包含 platform、field、reason（username_too_long 或 username_invalid_characters）、actualLength、maxLength（15）。不回显整个输入，不自动重试。' } : {}),
-      ...(status === 404 ? { description: 'social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。' } : {}),
-      ...(status === 422 ? { description: 'social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；只表示供应商的报告，未知原因不推断，不自动重试或回退采购。' } : {}),
+      ...(status === 400 ? { description: '参数或游标错误。Twitter 用户名含英文字母、数字、下划线以外的字符时为 invalid_social_request；error.details 包含 platform、field、reason（username_invalid_characters）、actualLength。Hub 不按用户名长度拒绝。不回显整个输入，不自动重试。' } : {}),
+      ...(status === 404 ? { description: 'social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。1–19 位裸纯数字的 ID 查找明确未找到账号时，Hub 在同一请求内按同名用户名再查一次并返回该次结果；用户名查找未能派发时返回 ID 查找的结果。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。' } : {}),
+      ...(status === 422 ? { description: 'social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。' } : {}),
     }])),
   }
 }

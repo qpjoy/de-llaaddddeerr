@@ -87,7 +87,12 @@ export function analyzeRequestDiagnostic(run) {
   const unavailableAccount = refs(providers, call => call.provider === 'rapidapi'
     && call.operation === 'social.profile.get' && call.outcome === 'rejected'
     && ['social_account_not_found', 'social_account_unavailable'].includes(call.errorCode), 'providerCalls', ['outcome', 'errorCode'])
-  if (unavailableAccount.length) {
+  // A definite account refusal ends the request unless it was the ID half of a
+  // bare-digit lookup that the same request then answered by username.
+  if (unavailableAccount.length && successfulDelivery) {
+    add('twitter_id_lookup_fell_back', 'confirmed', '账号 ID 下无账号，已按同名用户名查找',
+      '裸纯数字先按账号 ID 查找；供应商明确报告该 ID 没有账号后，同一请求按同名用户名再查一次。两次供应商调用各自留档，客户请求只计一次。', unavailableAccount)
+  } else if (unavailableAccount.length) {
     if (run.status === 'committed' && [404, 422].includes(run.responseStatus)) {
       summary = '供应商明确报告 Twitter 账号未找到或不可用，账号采集已停止。'
     }

@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react'
 import { adminApi } from './api.js'
 import { DropdownField, ErrorState, Field, PageHeading, formatDate, useRemoteData } from './components.jsx'
 import { EcommerceRoutingPage } from './ecommerce-routing.jsx'
-import { strategySearchLink, FACEBOOK_STRATEGY_MODE_LABELS } from './strategy-search-model.js'
+import { strategySearchLink, FACEBOOK_SELFHOSTED_LIMITS, FACEBOOK_STRATEGY_MODE_LABELS } from './strategy-search-model.js'
 
 const REASONS = { quota_exhausted: '可用套餐额度已用尽', quota_unknown: '额度待核实', rate_limited: '短时限流', recovery_probe: '等待本次检查结果' }
 const PLATFORM_LABELS = { facebook: 'Facebook', xiaohongshu: '小红书', weibo: '微博', douyin: '抖音', kuaishou: '快手',
@@ -11,16 +11,24 @@ const PLATFORM_LABELS = { facebook: 'Facebook', xiaohongshu: '小红书', weibo:
 
 export function FacebookSearchPolicyForm({ token, row, onSaved, notify, allowedModes }) {
   const [mode, setMode] = useState(row.mode)
+  const [concurrency, setConcurrency] = useState(String(row.selfhosted_max_concurrency ?? 2))
+  const [perMinute, setPerMinute] = useState(String(row.selfhosted_requests_per_minute ?? 12))
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const modes = Object.keys(FACEBOOK_STRATEGY_MODE_LABELS).filter(mode => !allowedModes || allowedModes.includes(mode))
+  // Older schemas have no self-hosted limits; never send fields they reject.
+  const selfhostedLimits = row.selfhosted_max_concurrency != null
+  const within = (value, [min, max]) => /^\d+$/.test(value) && Number(value) >= min && Number(value) <= max
+  const limitsValid = !selfhostedLimits || (within(concurrency, FACEBOOK_SELFHOSTED_LIMITS.concurrency)
+    && within(perMinute, FACEBOOK_SELFHOSTED_LIMITS.requestsPerMinute))
   async function save(event) {
     event.preventDefault()
-    if (busy || !modes.includes(mode)) return
+    if (busy || !modes.includes(mode) || !limitsValid) return
     setBusy(true); setError(null)
     try {
-      await adminApi.updatePlatformSearchPolicy(token, 'facebook', { mode, expectedRevision: row.revision, reason })
+      await adminApi.updatePlatformSearchPolicy(token, 'facebook', { mode, expectedRevision: row.revision, reason,
+        ...(selfhostedLimits ? { selfhostedMaxConcurrency: Number(concurrency), selfhostedRequestsPerMinute: Number(perMinute) } : {}) })
       onSaved(); notify?.('Facebook 搜索策略已保存')
     } catch (e) { setError(e) } finally { setBusy(false) }
   }
@@ -38,7 +46,21 @@ export function FacebookSearchPolicyForm({ token, row, onSaved, notify, allowedM
     <p className="mih-strategy-draft-policy">{mode === 'auto'
       ? '待保存策略：新搜索优先使用 RapidAPI 套餐额度，额度不可用时按现有规则转 JustOne。仅已确认 429 可在派发后进入保底；400、超时与结果未知不会自动重试。'
       : mode === 'paused' ? '待保存策略：暂停新的 Facebook 搜索，保留额度与历史请求记录。'
+        : mode === 'selfhosted' ? `待保存策略：新搜索只派发到自建 Night-All-A，全集群同时最多 ${concurrency || '?'} 个在途、每分钟最多启动 ${perMinute || '?'} 次；不转 RapidAPI 或 JustOne。`
         : `待保存策略：仅使用 ${mode === 'rapidapi' ? 'RapidAPI' : 'JustOne'}，另一供应商不作为保底。`}</p>
+    {mode === 'selfhosted' || row.mode === 'selfhosted' ? <div className="mih-strategy-quota-observation">
+      <strong>Night-All-A 自建采集</strong>
+      <p>当前在途 {row.selfhosted_in_flight ?? '未知'} / 上限 {row.selfhosted_max_concurrency ?? '未知'}；排队 {row.selfhosted_queue_depth ?? '未知'}；最近一次启动：{row.selfhosted_last_dispatch_at ? formatDate(row.selfhosted_last_dispatch_at) : '尚无'}。</p>
+      {selfhostedLimits ? <>
+        <Field label={`同时在途上限（${FACEBOOK_SELFHOSTED_LIMITS.concurrency.join('–')}）`}><input className="qp-input" type="number" required
+          min={FACEBOOK_SELFHOSTED_LIMITS.concurrency[0]} max={FACEBOOK_SELFHOSTED_LIMITS.concurrency[1]} step={1}
+          value={concurrency} disabled={busy} onChange={e => setConcurrency(e.target.value)} /></Field>
+        <Field label={`每分钟最多启动（${FACEBOOK_SELFHOSTED_LIMITS.requestsPerMinute.join('–')} 次）`}><input className="qp-input" type="number" required
+          min={FACEBOOK_SELFHOSTED_LIMITS.requestsPerMinute[0]} max={FACEBOOK_SELFHOSTED_LIMITS.requestsPerMinute[1]} step={1}
+          value={perMinute} disabled={busy} onChange={e => setPerMinute(e.target.value)} /></Field>
+      </> : <p>当前数据库尚未安装自建限额迁移，保存前请先完成部署。</p>}
+      <p>每次派发是 Night-All-A 的一个 search.posts 任务（最长约 60 秒）。在途上限和启动间隔对所有 Hub 进程、所有 Key（含内部托管 Key）统一生效；名额已满时最多排队 25 秒，超时返回忙碌，不会转付费供应商。</p>
+    </div> : null}
     <div className="mih-strategy-quota-observation">
       <strong>RapidAPI 供应商额度</strong>
       <p>最近响应头：剩余 {row.supplier_remaining ?? '未知'} / 套餐 {row.supplier_limit ?? '未知'} 次。观测时间：{row.supplier_observed_at ? formatDate(row.supplier_observed_at) : '尚无新版本观测'}。</p>
@@ -58,7 +80,7 @@ export function FacebookSearchPolicyForm({ token, row, onSaved, notify, allowedM
     </details>
     <Field label="修改原因"><input className="qp-input" required maxLength={1000} value={reason} disabled={busy} onChange={e => setReason(e.target.value)} placeholder="记录此次策略调整的原因" /></Field>
     {error ? <ErrorState error={error} /> : null}
-    <div><button className="qp-button qp-button--primary" disabled={busy || !modes.includes(mode) || !reason.trim()}>{busy ? '保存中…' : '保存 Facebook 搜索策略'}</button><span className="qp-muted"> 当前修订 #{row.revision}</span></div>
+    <div><button className="qp-button qp-button--primary" disabled={busy || !modes.includes(mode) || !limitsValid || !reason.trim()}>{busy ? '保存中…' : '保存 Facebook 搜索策略'}</button><span className="qp-muted"> 当前修订 #{row.revision}</span></div>
   </form>
 }
 

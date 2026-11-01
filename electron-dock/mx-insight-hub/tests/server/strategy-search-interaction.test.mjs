@@ -191,8 +191,8 @@ test('Twitter account input needs no field selection and preserves identifier st
   const submit = async () => { nodes(render()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} }); await flush() }
   try {
     assert.equal(nodes(render()).find(node => node.props?.label === '账号标识字段'), undefined)
-    assert.match(label(render()), /纯数字按账号 ID 查询（1–19 位）/u)
-    assert.match(label(render()), /纯数字用户名请加 @/u)
+    assert.match(label(render()), /纯数字先按账号 ID 查询（1–19 位）.*再按同名用户名查询/u)
+    assert.match(label(render()), /只查数字用户名请加 @/u)
     accountInput().props.onChange({ target: { value: '1952056883877212160' } })
     assert.equal(sent.length, 0, 'typing an account never dispatches')
     await submit()
@@ -243,10 +243,12 @@ test('manual Twitter account controls route explicitly and stay locked on an unc
     assert.deepEqual(sent[2].input.body, { platform: 'twitter', user_id: '12345', pageSize: 20 })
     assert.notEqual(sent[2].idem, sent[0].idem)
     account('1952056883877212160'); mode().props.onChange('username')
+    assert.equal(searchButton(render()).props.disabled, false, 'handle length is left to the supplier')
+    account('name-with-dash')
     assert.equal(searchButton(render()).props.disabled, true)
     await submit()
     assert.equal(sent.length, 3, 'invalid manual handle cannot dispatch')
-    mode().props.onChange('auto')
+    account('1952056883877212160'); mode().props.onChange('auto')
     assert.equal(searchButton(render()).props.disabled, false)
     environment.send = async () => { throw unknown() }
     await submit()

@@ -116,19 +116,16 @@ function normalizeIdentity(platform, kind, value, legacyTwitterIdentity = false,
     const handlePrefix = value.startsWith('@')
     value = value.replace(/^@+/, '')
     // Business clients use username and ID aliases interchangeably. Only @ or
-    // a profile URL explicitly disambiguates a numeric handle from a user ID.
+    // a profile URL explicitly disambiguates a numeric handle from a user ID;
+    // bare digits are an ID first and a username if no account has that ID.
+    // Digits too long for an ID can only be a handle.
     // Historical modes verify saved receipts; they never select new dispatches.
     if (legacyTwitterIdentity) kind = /^\d+$/.test(value) ? 'id' : 'username'
     else if (twitterIdentityMode === 'explicit') {
       if (kind === 'id' && (handlePrefix || !/^\d+$/.test(value))) kind = 'username'
-    } else kind = !handlePrefix && !fromUrl && /^\d+$/.test(value) ? 'id' : 'username'
+    } else kind = !handlePrefix && !fromUrl && /^\d{1,19}$/.test(value) ? 'id' : 'username'
     if (kind === 'username') validateTwitterUsername(value)
-    if (kind === 'id') {
-      const historical = legacyTwitterIdentity || twitterIdentityMode === 'explicit'
-      if (historical ? !/^\d{1,30}$/.test(value) : !/^\d{1,19}$/.test(value)) {
-        fail('invalid_social_request', historical ? 'Invalid Twitter user ID' : 'Twitter user ID must contain 1 to 19 digits')
-      }
-    }
+    if (kind === 'id' && !/^\d{1,30}$/.test(value)) fail('invalid_social_request', 'Invalid Twitter user ID')
     if (kind === 'username') value = value.toLowerCase()
   }
   if (kind === 'username') value = value.replace(/^@+/, '')

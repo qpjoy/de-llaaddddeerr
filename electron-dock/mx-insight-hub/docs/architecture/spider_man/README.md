@@ -2,7 +2,7 @@
 
 **这是活文档。** 凡是新增或改动自建采集服务（Night-All、Night-All-A、Hub 自建引擎、事件交付），或改动它们的部署拓扑，都要同步更新本目录，并在文末「变更记录」追加一行。只看本目录，就应该能知道当前状态和目标形态。
 
-最后更新：2026-10-27。本目录记录的是设计与现状核对；标注「设计中」的部分**尚未实现、未部署**。
+最后更新：2026-10-31。本目录记录的是设计与现状核对；标注「设计中」的部分**尚未实现、未部署**。
 
 ## 1. 范围
 
@@ -11,7 +11,7 @@
 | 组件 | 位置 | 角色 | 状态 |
 |---|---|---|---|
 | Night-All | Internal 宿主机 `:13141`，不在 k8s 内 | 历史自建平台：本地爬虫（如搜狗微信 `wechat_mp`）、旧供应商编排、BullMQ 异步任务 | 运行中。供应商类接口按 operation 逐个迁到 Hub；自建爬虫能力保留 |
-| Night-All-A | VPN 固定地址 `100.127.0.1:8100` | HTTP 异步采集 + 独立清洗库 | Hub 已有可选适配器（环境开关默认关闭）；线上是否启用未核实 |
+| Night-All-A | VPN 固定地址 `100.127.0.1:8100`（Internal 侧为 `100.127.0.6`） | HTTP 异步采集 + 独立清洗库；含 Facebook 协议爬虫 `facebook-protocol` | Facebook 内容搜索的「自建」模式已实现未部署（[03](03-self-hosted-engines.md) 第 11 节）；旧 Admin 控制台转发仍由环境开关控制（默认关闭），线上是否启用未核实 |
 | Hub 自建引擎 | Hub（k8s）内的引擎配置、任务表、执行者 | 把一个自建爬虫包装成可排队、可计量、可查询的数据产品。第一个是「微信 → 自建引擎」 | 已实现未部署 |
 | Hub 事件中心 | Hub Public 的事件接口 + PG 事件日志 | 把任务终态和数据变化可靠地交付给 Delta、Java | 设计中 |
 | 下游 | Delta（po-infra）、罗盘 Java，都是 Internal 宿主机上的 Docker | 提交任务、消费事件 | 目前同步调 Hub；直连改造见[性能汇总第 5 节](../../operations/platform-performance-review-2026-10-22.md) |
@@ -81,6 +81,7 @@ flowchart LR
 | 多节点 | 规划中，新服务器尚未采购 | S0 约定现在就执行，S1 等新机器到位 |
 | 全局准入信号量 | 设计中 | Public 多副本之前必须完成 |
 | LCY 供应商优先排队 | 已实现未部署：每进程优先队列 + 80% 预留 + PG 令牌桶等待，见 [04](04-admission-and-concurrency.md) | 发布 migration 172，先调好“管理”页供应商限额，再在开关里选“优先排队” |
+| Facebook 自建搜索（Night-All-A） | 已实现未部署：策略模式 `selfhosted`，全集群 PG 名额（默认同时 2 个、每分钟 12 次启动），见 [03](03-self-hosted-engines.md) 第 11 节 | 发布 migration 173 → Internal 上确认 Night-All-A 可达且 facebook-protocol 有有效登录会话 → 策略搜索管理里选「自建」 |
 
 ## 6. 维护约定
 
@@ -93,6 +94,7 @@ flowchart LR
 
 | 日期 | 变更 |
 |---|---|
+| 2026-10-31 | Facebook 内容搜索新增「自建：仅 Night-All-A」模式（已实现未部署，migration 173）：沿用现有搜索接口，Hub 提交 Night-All-A `search.posts` 任务并轮询；全集群 PG 先进先出名额，默认同时 2 个在途、每分钟 12 次均匀启动，管理页可调，不豁免任何 Key；结果未知时名额保留到过期。见 [03](03-self-hosted-engines.md) 第 11 节、[04](04-admission-and-concurrency.md)。 |
 | 2026-10-31 | LCY-delta 开关新增供应商“优先排队”模式（已实现未部署，migration 172）：排队代替绕过、80% 并发预留、上游限流后放慢、明确未计费的限流拒绝重试一次；默认仍为原来的绕过。见 [04](04-admission-and-concurrency.md)。 |
 | 2026-10-27 | 新增 Internal Hub PG/HanLP initContainer 启动门禁（已实现未部署），有界等待并由 k8s 重试；不修改 Launcher/MX-H2I/kubelet，新增多节点回环地址限制。见 [操作说明](../../operations/internal-startup-dependencies-2026-10-27.md)。 |
 | 2026-10-23 | 以性能为主改为只转发：引擎计费开关默认关闭（不写使用账本、不与调用方其他付费请求争用预留锁）；执行者空闲时无锁；状态快照缓存；`Retry-After` 5–60 秒自适应；新增 `scripts/verify-wechat-self-hosted.sh`。价格不随部署自动迁移的原因见 [03](03-self-hosted-engines.md) 10.6 节（D14–D16）。 |

@@ -29,9 +29,9 @@ function searchPlatform(platform, { instagramPolicy, facebookPolicy, twitterPoli
   }
   if (platform === 'facebook') return {
     platform, label: LABELS[platform], editable: true, migrationStatus: 'hub_native',
-    providers: ['rapidapi', 'justone'], allowedModes: ['auto', 'rapidapi', 'justone', 'paused'],
+    providers: ['rapidapi', 'justone', 'night-all-a'], allowedModes: ['auto', 'rapidapi', 'justone', 'selfhosted', 'paused'],
     policy: facebookPolicy == null ? null : structuredClone(facebookPolicy),
-    routeSummary: '内容搜索的 data/search 与 raw 入口由 Hub 执行。auto 使用 RapidAPI 月度额度，额度不可用时按既有规则转 JustOne；标准搜索先消费已采购余量，再有界补齐当前页，raw 保持既有分页。游标绑定供应商，未知结果不触发切换。',
+    routeSummary: '内容搜索的 data/search 与 raw 入口由 Hub 执行。auto 使用 RapidAPI 月度额度，额度不可用时按既有规则转 JustOne；自建模式只派发到 Night-All-A（100.127.0.1:8100），全集群同时在途与每分钟启动次数按管理页设置限制，不转付费供应商。标准搜索先消费已采购余量，再有界补齐当前页，raw 保持既有分页。游标绑定供应商，未知结果不触发切换。',
   }
   if (['bilibili', 'douyin', 'kuaishou', 'zhihu'].includes(platform)) return {
     ...row, migrationStatus: 'hub_native',

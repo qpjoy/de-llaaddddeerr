@@ -9,6 +9,7 @@ const DATE_FIELDS = ['start_date', 'startDate', 'start', 'startTime', 'end_date'
 const CONTRACTS = {
   rapidapi: { operation: 'social.facebook.search', endpoint: 'facebook-scraper3.search', version: 'v1', contract: 'mx-insight-hub.facebook-search.v1', maxBytes: 4194304 },
   justone: { operation: 'native.j.facebook_post_search_v1', endpoint: 'native.j.facebook_post_search_v1', version: 'night-all-source-snapshot.2026-09-26', contract: 'mx-insight-hub.native-forwarding.v1', maxBytes: 8388608 },
+  'night-all-a': { operation: 'selfhosted.facebook.search', endpoint: 'night-all-a.facebook.search.posts', version: 'v1', contract: 'mx-insight-hub.facebook-selfhosted.v1', maxBytes: 8388608 },
 }
 const fail = () => new AppError(409, 'search_page_unavailable', 'The saved Facebook search does not match this request')
 const iso = value => new Date(value).toISOString()
