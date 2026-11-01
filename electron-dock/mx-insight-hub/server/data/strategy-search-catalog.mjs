@@ -2,6 +2,7 @@ import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-leg
 import { WECHAT_LEGACY_SEARCH_PLATFORMS } from '../contracts/wechat-search-alias.mjs'
 import { HUB_SOCIAL_COMPAT_CRAWL_PLATFORMS, HUB_SOCIAL_COMPAT_PROFILE_PLATFORMS } from '../../shared/social-account-contract.mjs'
 import { NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-detail.mjs'
+import { NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-comments.mjs'
 
 const LABELS = {
   bilibili: '哔哩哔哩', douyin: '抖音', facebook: 'Facebook', instagram: 'Instagram',
@@ -124,6 +125,15 @@ export function strategySearchCatalog({ instagramPolicy = null, facebookPolicy =
           routeSummary: platform === 'xiaohongshu'
             ? '小红书详情使用 Hub /api/v1/data/post；此旧入口保留历史兼容，不改变现有登录、联网或已签发结果。'
             : 'Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。',
+        })),
+      },
+      {
+        id: 'post-comments', label: '帖子评论',
+        paths: ['/api/v1/search/post-comments', '/api/v1/night-all/search/post-comments'],
+        description: '按帖子 ID、contentId 或 URL 获取单篇帖子的评论列表；支持 cursor/params 续页，单页最多 100 条。商品评论、搜索附带评论和频道评论接口不属于此合同。',
+        platforms: NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS.map(platform => ({
+          ...historicalPlatform(platform, 'post-comments'),
+          routeSummary: 'Hub 接收旧帖子评论请求并按原合同转交 Night-All；返回评论 ID、正文 ID、评论正文、作者、发布时间、互动量及明确分页状态。',
         })),
       },
     ],

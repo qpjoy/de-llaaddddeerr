@@ -4,6 +4,7 @@ import {
   NIGHT_ALL_LEGACY_OPERATIONS,
 } from '../contracts/night-all-legacy.mjs'
 import { NIGHT_ALL_POST_DETAIL_OPERATION } from '../contracts/night-all-post-detail.mjs'
+import { NIGHT_ALL_POST_COMMENTS_OPERATION } from '../contracts/night-all-post-comments.mjs'
 import { normalizeNightAllCompatibilityRequest } from '../data/night-all-compat.mjs'
 import { prepareNightAllCompatibilityTraversal } from '../data/night-all-pagination.mjs'
 
@@ -20,7 +21,8 @@ const ROUTE_PATTERN = /^\/api\/v1\/(?:night-all\/)?search\/([a-z-]+)$/u
 export function nightAllCompatibilityRoute(path) {
   const match = ROUTE_PATTERN.exec(String(path || ''))
   const operation = match?.[1]
-  return operation && (NIGHT_ALL_LEGACY_OPERATIONS.has(operation) || operation === NIGHT_ALL_POST_DETAIL_OPERATION)
+  return operation && (NIGHT_ALL_LEGACY_OPERATIONS.has(operation)
+    || [NIGHT_ALL_POST_DETAIL_OPERATION, NIGHT_ALL_POST_COMMENTS_OPERATION].includes(operation))
     ? { operation, canonicalPath: `/api/v1/night-all/search/${operation}` }
     : null
 }

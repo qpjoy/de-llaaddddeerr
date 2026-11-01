@@ -26,7 +26,7 @@ export function resourceCatalog(document) {
   const exact = new Map(), dynamic = []
   const apis = [], seen = new Set()
   const paths = Object.entries(document.paths).flatMap(([path, methods]) => path.includes('{operation}')
-    ? ['raw', 'crawl', 'user-info', 'post-detail'].map(operation => [path.replace('{operation}', operation), methods]) : [[path, methods]])
+    ? ['raw', 'crawl', 'user-info', 'post-detail', 'post-comments'].map(operation => [path.replace('{operation}', operation), methods]) : [[path, methods]])
   for (const [path, methods] of paths) {
     const endpoint = normalize(full(path))
     for (const method of ['GET', 'POST']) {

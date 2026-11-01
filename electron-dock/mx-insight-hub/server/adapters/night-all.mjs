@@ -8,6 +8,7 @@ import {
   NIGHT_ALL_LEGACY_OPERATIONS,
 } from '../contracts/night-all-legacy.mjs'
 import { NIGHT_ALL_POST_DETAIL_OPERATION } from '../contracts/night-all-post-detail.mjs'
+import { NIGHT_ALL_POST_COMMENTS_OPERATION } from '../contracts/night-all-post-comments.mjs'
 
 const BLOCKED_KEYS = new Set([
   'provider',
@@ -263,7 +264,8 @@ export class NightAllAdapter {
 
   legacySearch({ operation, body, businessId, requestId }) {
     assertWechatSearchNotRetired(operation, body)
-    if (!NIGHT_ALL_LEGACY_OPERATIONS.has(operation) && operation !== NIGHT_ALL_POST_DETAIL_OPERATION) {
+    if (!NIGHT_ALL_LEGACY_OPERATIONS.has(operation)
+      && ![NIGHT_ALL_POST_DETAIL_OPERATION, NIGHT_ALL_POST_COMMENTS_OPERATION].includes(operation)) {
       throw new TypeError(`Unsupported Night-All legacy operation: ${operation}`)
     }
     return this.#request(

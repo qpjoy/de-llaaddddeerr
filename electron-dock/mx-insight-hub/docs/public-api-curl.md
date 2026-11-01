@@ -1263,9 +1263,10 @@ POST /api/v1/night-all/search/raw
 POST /api/v1/night-all/search/crawl
 POST /api/v1/night-all/search/user-info
 POST /api/v1/night-all/search/post-detail
+POST /api/v1/night-all/search/post-comments
 ```
 
-除下述微信 raw 分支外，旧客户端可继续调用对应的 `/api/v1/search/raw|crawl|user-info`。每个旧路径与
+除下述微信 raw 分支外，旧客户端可继续调用对应的 `/api/v1/search/raw|crawl|user-info|post-detail|post-comments`。每个旧路径与
 `/api/v1/night-all/search/*` 对应路径进入同一个服务和 paid fingerprint；仅切换路径不会
 获得第二次外部派发，也不应生成新的 `Idempotency-Key`。
 
@@ -1278,6 +1279,22 @@ curl -sS -X POST "$HUB_URL/api/v1/search/post-detail" \
   -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
   -H 'Content-Type: application/json' \
   --data '{"businessId":"agent:<Agent标识>:data_query:search_post_detail:twitter","platform":"twitter","postId":"<平台帖子ID>","url":"<帖子链接>","count":1,"includeRaw":false}'
+```
+
+`post-comments` 用于智能策略、用户刷新和 Agent 获取单个帖子的评论列表。请求至少提供
+`postId`、`contentId`、平台专用帖子/视频 ID 或 `url` 之一；`count/pageSize/limit` 默认 20、最大 100。
+`cursor` 或 `params` 中的续页状态只应沿用上一页返回的 `page.nextCursor`/`page.nextParams`，每一页使用新的
+`Idempotency-Key`。`includeRaw=true`、provider、凭据、endpoint 和扩大评论工作量的控制字段会被 Hub 拒绝。
+返回的 `raw_data` 应保留评论 ID、正文 ID、评论正文、作者、发布时间、互动量以及 `page.nextCursor/hasMore`
+等分页状态；商品评论、搜索附带评论和 YouTube 频道评论不能替代此接口。
+
+```bash
+IDEMPOTENCY_KEY="$(new_idempotency_key)"
+curl -sS -X POST "$HUB_URL/api/v1/search/post-comments" \
+  -H "Authorization: Bearer $HUB_KEY" \
+  -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"businessId":"data-hub:<策略标识>:weibo:评论","platform":"weibo","postId":"<平台正文ID>","contentId":"<同一个平台正文ID>","url":"<原文链接>","count":100,"page":1,"includeRaw":false}'
 ```
 
 2026-09-30 起，`/api/v1/search/raw` 的 `wechat_search`（含 `wechat/weixin` 别名）和

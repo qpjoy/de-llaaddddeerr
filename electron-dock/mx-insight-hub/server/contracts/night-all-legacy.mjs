@@ -52,7 +52,7 @@ export function parseNightAllLegacyArray(value) {
 }
 
 /**
- * The three compatibility routes share Night-All's documented standard raw
+ * The compatibility routes share Night-All's documented standard raw
  * envelope. Keep this validator deliberately structural: platform-specific
  * item fields are allowed to evolve, while the two JSON-string collections
  * and the pagination/metadata containers remain stable.

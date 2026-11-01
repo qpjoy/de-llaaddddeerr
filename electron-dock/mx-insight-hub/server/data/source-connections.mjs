@@ -1,6 +1,7 @@
 import { WEB_SEARCH_PROVIDERS, WEB_SEARCH_PATH } from '../../shared/web-search.mjs'
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
 import { NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-detail.mjs'
+import { NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-comments.mjs'
 import { HUB_SOCIAL_ENDPOINTS } from '../contracts/hub-social.mjs'
 import { YOUTUBE_COMMENT_PATHS, YOUTUBE_COMMENTS_CAPABILITY } from '../contracts/youtube-comments.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from '../contracts/tikhub-content-search.mjs'
@@ -114,6 +115,13 @@ export function implementedRoutes(sources = []) {
       ? '小红书详情优先使用 Hub /api/v1/data/post；此历史入口仅保留兼容调用。'
       : '现行历史帖子详情兼容入口；平台支持取自 Hub 固定合同，实时可用性待请求验证。',
     evidence: 'server/contracts/night-all-post-detail.mjs',
+  }))
+  for (const platform of NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS) rows.push(route(`legacy-${platform}-post-comments`, {
+    platform, catalogKeys: [catalogKey(platform)].filter(Boolean), provider: 'night-all',
+    product: '社交内容与账号', operation: 'post-comments', mode: 'compatibility',
+    path: '/api/v1/search/post-comments', keywordSearch: false,
+    defaultRule: '现行历史帖子评论兼容入口；只采集单个帖子的评论列表，分页由返回的 Hub cursor 控制。商品评论、搜索附带评论和频道评论走各自合同。',
+    evidence: 'server/contracts/night-all-post-comments.mjs',
   }))
   for (const provider of ['rapidapi', 'justone']) for (const [kind, path] of [
     ['raw', '/api/v1/night-all/search/raw'], ['data', '/api/v1/data/search'],

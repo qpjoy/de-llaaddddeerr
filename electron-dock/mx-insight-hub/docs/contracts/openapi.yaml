@@ -6273,7 +6273,7 @@ paths:
   /night-all/search/{operation}:
     post: &nightAllCompatibilityPost
       operationId: searchNightAllCompatibility
-      summary: Call a Night-All legacy search or post-detail operation.
+      summary: Call a Night-All legacy search, post-detail, or post-comments operation.
       x-mx-required-capabilities-by-platform-operation:
         xiaohongshu:
           raw: social.posts.search
@@ -6349,7 +6349,7 @@ paths:
         - name: operation
           in: path
           required: true
-          schema: { type: string, enum: [raw, crawl, user-info, post-detail] }
+          schema: { type: string, enum: [raw, crawl, user-info, post-detail, post-comments] }
         - name: Idempotency-Key
           in: header
           required: true

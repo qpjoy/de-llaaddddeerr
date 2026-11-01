@@ -932,7 +932,7 @@ function nightAllCompatibilityOperation({ historicalAlias = false } = {}) {
       : 'searchNightAllCompatibility',
     summary: historicalAlias
       ? 'Call a legacy search operation through its historical route alias'
-      : 'Call a Night-All legacy search or post-detail operation',
+      : 'Call a Night-All legacy search, post-detail, or post-comments operation',
     'x-mx-required-capabilities-by-platform-operation': {
       xiaohongshu: {
         raw: 'social.posts.search',
@@ -959,7 +959,7 @@ function nightAllCompatibilityOperation({ historicalAlias = false } = {}) {
     parameters: [
       {
         name: 'operation', in: 'path', required: true,
-        schema: { type: 'string', enum: ['raw', 'crawl', 'user-info', 'post-detail'] },
+        schema: { type: 'string', enum: ['raw', 'crawl', 'user-info', 'post-detail', 'post-comments'] },
       },
       nightAllCompatibilityIdempotencyParameter,
     ],
@@ -6521,13 +6521,13 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
     </section>
 
     <section class="doc-page" data-doc-page="night-all">
-    <div class="notice">客户计费：历史 raw、crawl、user-info、post-detail 分别使用同名计费键，按成功交付的请求结算，由调用身份所分配的 Hub 套餐决定单价（可为 0）。相同幂等请求重放不重复收费；成功交付旧快照沿用请求价格。小红书直连分支使用 social.posts.search / social.users.resolve / social.users.posts 等已发布业务计费键。免费不免除授权、配额或采集工作预算；上游服务采购价与客户价格相互独立。</div>
+    <div class="notice">客户计费：历史 raw、crawl、user-info、post-detail、post-comments 分别使用同名计费键，按成功交付的请求结算，由调用身份所分配的 Hub 套餐决定单价（可为 0）。相同幂等请求重放不重复收费；成功交付旧快照沿用请求价格。小红书直连分支使用 social.posts.search / social.users.resolve / social.users.posts 等已发布业务计费键。免费不免除授权、配额或采集工作预算；上游服务采购价与客户价格相互独立。</div>
     <h2 id="night-all">Night-All 兼容层</h2>
     <p>Instagram 的 Hub 直连接口不把采集页大小当成固定 20 条：超量记录保留在同一次采集的完整归档里，每次最多交付请求的 <code>count/pageSize</code> 条，先读完剩余记录才推进上游游标。只读剩余记录的标准响应为 <code>meta.providerCalls=0</code>，raw 响应为 <code>meta.upstreamCallCount=0</code>；每次新分页请求仍按当前账户费率结算，幂等重放不重复收费。游标绑定原 Key/查询/页大小/type/接口，有效期 24 小时，最多 15 页；达到上限但仍有数据时返回 partial 和 <code>INSTAGRAM_PAGE_LIMIT_REACHED</code>。归档不可用或不匹配返回 <code>409 search_page_unavailable</code>，不会自动重新采集。旧失败请求的幂等结果保持不变。</p>
     <div class="notice"><strong>Telegram 警告：</strong><code>data.platforms[]</code> 中出现 <code>telegram</code> 只代表 Hub stored/monitor 数据面已授权，不代表 Night-All legacy search。Telegram 不支持下面这些 compatibility route；请使用本页 Telegram 专用 Hub API。</div>
     <p>每次调用前读取 <code>GET /api/v1/data/capabilities</code>。小红书平台项包含 <code>search_posts</code> 且 <code>search.ready=true</code> 表示独立的首屏 rollout gate 已开启；此时单 scalar query、有效页大小 20 的 page 1 raw 请求由 Hub-native connector 处理，已签发的 <code>mxec2</code> direct traversal cursor 继续走同一路径。独立 user-activity gate 开启后，单个 <code>username|userId|uid|profileUrl</code> 的 user-info，以及 posts-only、页大小 20、concurrency 1 的 crawl 也由 Hub-native connector 处理；crawl 只接受并返回 Hub 不透明 cursor，最多 15 页。<code>data.legacySearch</code> 仍保留小红书，因为 multi-identifier、channel、非 posts、非 20 页和自定义 params 等尚未迁移形态继续走历史路径。矩阵不会在请求时从 Night-All 的 capability 接口实时发现。</p>
     <p><code>data.legacySearch.contractVersion</code> 固定为 <code>night-all.legacy-search-capabilities.v1</code>。这是 Hub-pinned 的 operation dispatch 策略：目标平台必须同时出现在对应 operation 的 <code>supportedPlatforms</code> 与 <code>readyPlatforms</code>；它不证明 Night-All 当前 handler、endpoint、provider、credential 或上游健康。</p>
-    <p>除微信 raw 搜索外，<code>/api/v1/search/raw|crawl|user-info</code> 是对应 <code>/api/v1/night-all/search/*</code> 路径的精确别名；两种写法进入同一服务与 paid fingerprint，切换路径不会产生第二次外部派发，也不应更换 <code>Idempotency-Key</code>。</p>
+    <p>除微信 raw 搜索外，<code>/api/v1/search/raw|crawl|user-info|post-detail|post-comments</code> 是对应 <code>/api/v1/night-all/search/*</code> 路径的精确别名；两种写法进入同一服务与 paid fingerprint，切换路径不会产生第二次外部派发，也不应更换 <code>Idempotency-Key</code>。</p>
     <p>微博、Instagram 和 Twitter 的单关键词 raw 搜索已由 Hub 按请求形状路由，无需调用方换 URL。单个 <code>keyword</code> 或 <code>query</code> 最多 500 字符；微博/Instagram 页大小至少 20，Twitter 最多 50，均受 Key 原有限额约束。不带非空 params、评论补取、缓存时长或并发参数；Instagram/Twitter 不要求详情补取。复杂形状和旧游标继续走历史处理。新分页返回 <code>mxraw1</code> 游标，下一页保持条件并传顶层 cursor，每页新幂等键，最多 15 页。微博默认尝试补取截断长文；未补齐时保留摘要并返回 <code>WEIBO_FULL_TEXT_INCOMPLETE</code>。微博/Instagram/Twitter/Facebook 新 raw 普通内容标题为空字符串，账号名称保持不变；旧请求仍精确重放原响应。平台授权和 raw 计费身份不变。</p>
     <div class="notice">微信已迁移：<code>/api/v1/search/raw</code> 的 <code>wechat_search/wechat/weixin/wechat_mp</code> 请求转入 <code>/api/v1/data/wechat/search/search</code>，返回新响应，并要求 <code>social + native.wechat.search.search</code> 权限和当前客户价格/余额。公众号默认文章检索；单关键词，旧页大小提示只接受默认 20，旧 <code>mxnc1</code> 游标不可复用。<code>/api/v1/data/search</code> 同样转入新合同；聚合微信实时子请求使用新接口、独立计费并映射明确的 items 与游标。只有 <code>/api/v1/night-all/search/raw</code> 的微信分支返回 410；不会转发或回退。历史请求可按 requestId 查阅，不会被重写。详见<a href="/docs/wechat-search/native/wechat.search.search">微信搜索新合同</a>。</div>
     <p>当 <code>platform=xiaohongshu</code> 时，Key 与 consumer 必须同时拥有平台 grant 和 operation grant：<code>raw → social.posts.search</code>、<code>crawl → social.users.posts</code>、<code>user-info → social.users.resolve</code>。该映射对 Hub-native direct 子集、历史兼容分支以及两组路径别名完全相同。</p>
@@ -6561,6 +6561,12 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
   -H "Content-Type: application/json" \\
   -H "Idempotency-Key: post-detail-$(uuidgen)" \\
   -d '{"businessId":"agent:&lt;Agent标识&gt;:data_query:search_post_detail:twitter","platform":"twitter","postId":"&lt;平台帖子ID&gt;","url":"&lt;帖子链接&gt;","count":1,"includeRaw":false}'</code></pre>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/night-all/search/post-comments</code></div><p>按一个明确平台的帖子 ID、<code>contentId</code>、平台专用标识或 <code>url</code> 获取单帖评论。<code>count/pageSize/limit</code> 默认 20、最大 100；可继续使用返回的 <code>page.nextCursor</code>，也兼容 <code>params</code> 中的上游续页状态。<code>includeRaw</code> 只接受 <code>false</code>；供应商、凭据、endpoint 和扩大调用量控制由 Hub 管理。<code>raw_data</code> 应包含评论 ID、正文 ID、评论正文、作者、发布时间和互动量，并保留明确的分页状态。商品评论、搜索附带评论和 YouTube 频道评论不属于此合同。</p></div>
+    <pre><code>curl -i -sS -X POST "$HUB_URL/api/v1/search/post-comments" \\
+  -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -H "Idempotency-Key: post-comments-$(uuidgen)" \\
+  -d '{"businessId":"data-hub:&lt;策略标识&gt;:weibo:评论","platform":"weibo","postId":"&lt;平台正文ID&gt;","contentId":"&lt;同一个平台正文ID&gt;","url":"&lt;原文链接&gt;","count":100,"page":1,"includeRaw":false}'</code></pre>
     <div class="notice"><strong>crawl 采集工作预算与费用独立。</strong>单页有效条数（count → pageSize → limit，默认 20）仍受平台/Key 策略及上游最多 100 条限制。总工作量 = 身份数 × 每身份条数 × activityTypes 数（省略时为 1），由管理员在“开放能力 → 调用身份 → 平台配置”的 <code>maxCrawlWork</code> 中设置，范围 1–5000，默认 100；旧平台策略保留其不超过 100 的原限制。同类身份别名中完全相同的值只计一次，不推断 username 与 userId 是否为同一人。最多 50 个身份的独立限制仍生效。此预算是单请求处理量，不是累计配额、采购价或客户单价。</div>
     <p>例如两个账号各取 100 条、一个活动类型，工作量为 200：预算 100 时返回 <code>400 work_budget_exceeded</code>，管理员调至 200 或拆成两次单账号请求即可通过该预检（仍需满足其他授权与配额）。单账号、一个活动类型、count=100 本来就不超过 100；仅凭 target_count=100 不能判定完整请求工作量。免费价格不能跳过预检，公开请求也不能自报 maxCrawlWork。</p>
     <pre><code>{"error":{"code":"work_budget_exceeded","message":"Crawl work must not exceed 100","details":{"stage":"admission","upstreamDispatched":false,"retryable":false,"identityCount":2,"pageSize":100,"activityTypeCount":1,"requestedWork":200,"allowedWork":100}}}</code></pre>

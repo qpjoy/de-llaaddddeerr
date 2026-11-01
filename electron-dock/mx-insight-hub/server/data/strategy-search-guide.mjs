@@ -1,18 +1,24 @@
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
 import { NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-detail.mjs'
+import { NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-comments.mjs'
 import { WECHAT_SEARCH_OPERATION, WECHAT_SEARCH_PATH } from '../contracts/wechat-search-alias.mjs'
 import { hubSocialAccountPlatforms } from '../contracts/hub-social-docs.mjs'
 import { HUB_SOCIAL_COMPAT_ACTIVITIES } from '../contracts/hub-social-compat.mjs'
 
 const escape = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]))
-const XIAOHONGSHU_CAPABILITIES = { raw: 'social.posts.search', crawl: 'social.users.posts', 'user-info': 'social.users.resolve' }
+const XIAOHONGSHU_CAPABILITIES = {
+  raw: 'social.posts.search', crawl: 'social.users.posts', 'user-info': 'social.users.resolve',
+  'post-detail': 'social.posts.resolve', 'post-comments': 'social.comments.list',
+}
 
 export function strategySearchGuide(scopes = null) {
   // Document existing effective scopes only. Platform and operation capability
   // must belong to the same scope; this view never grants or merges Key rights.
   const platforms = operation => (operation === 'post-detail'
     ? NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS
-    : NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS[operation]).filter(platform =>
+    : operation === 'post-comments'
+      ? NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS
+      : NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS[operation]).filter(platform =>
     scopes == null || scopes.some(scope => scope.platforms?.includes(platform)
       && (platform !== 'xiaohongshu' || scope.capabilities?.includes(XIAOHONGSHU_CAPABILITIES[operation]))))
   const rows = [
@@ -20,12 +26,14 @@ export function strategySearchGuide(scopes = null) {
     ['账号内容', 'crawl', 'platform + username / userId / uid', 'raw_info + raw_data：账号与内容'],
     ['账号资料', 'user-info', 'platform + username / userId / uid', 'raw_info：账号资料'],
     ['帖子详情', 'post-detail', 'platform + postId / contentId / 专用帖子 ID / url', 'raw_data：完整正文、作者、时间与媒体'],
+    ['帖子评论', 'post-comments', 'platform + postId / contentId / url；可带 cursor 或 params', 'raw_data：评论 ID、正文 ID、正文、作者、时间与互动量'],
   ].filter(([, operation]) => platforms(operation).length).map(([label, operation, params, output]) =>
     `<tr><td>${label}</td><td><code>POST /api/v1/night-all/search/${operation}</code><br><code>POST /api/v1/search/${operation}</code></td><td>${params}</td><td>${output}</td><td>${platforms(operation).map(escape).join('、')}</td></tr>`).join('')
   const standard = platforms('raw')
   const examplePlatform = standard.includes('instagram') ? 'instagram' : standard[0]
   const twitter = standard.includes('twitter')
   const facebook = standard.includes('facebook')
+  const commentsPlatforms = platforms('post-comments')
   const newlyDirectStandard = standard.filter(platform => ['reddit', 'youtube'].includes(platform))
   const noTitle = standard.filter(platform => ['twitter', 'facebook', 'weibo', 'instagram'].includes(platform))
   const wechat = scopes == null || scopes.some(scope => scope.platforms?.includes('social')
@@ -34,7 +42,7 @@ export function strategySearchGuide(scopes = null) {
   return `<section class="doc-page" data-doc-page="strategy-search"><h1>策略搜索</h1>
     <p>面向监测策略的关键词搜索、账号内容与账号资料。调用方使用已授权的业务接口，不传 provider 或路由控制参数。产品可见不等于已开通全部接口，查看本文或保存管理配置不会新增权限；实际授权、额度、费用与可用性以当前 Key 为准。</p>
     ${rows ? `<h2>业务接口</h2><p>以下平台按当前授权范围列出。每类接口支持的平台不同；账号资料是查询已知账号，不是按关键词搜索账号。</p>
-    <table><thead><tr><th>用途</th><th>接口</th><th>核心参数</th><th>返回重点</th><th>平台</th></tr></thead><tbody>${rows}</tbody></table>${platforms('post-detail').includes('xiaohongshu') ? '<p>小红书详情使用 Hub-native <code>POST /api/v1/data/post</code>；表中的旧详情路径只保留历史兼容，不改变现有登录、联网或原生授权。</p>' : ''}` : ''}
+    <table><thead><tr><th>用途</th><th>接口</th><th>核心参数</th><th>返回重点</th><th>平台</th></tr></thead><tbody>${rows}</tbody></table>${platforms('post-detail').includes('xiaohongshu') ? '<p>小红书详情使用 Hub-native <code>POST /api/v1/data/post</code>；表中的旧详情路径只保留历史兼容，不改变现有登录、联网或原生授权。</p>' : ''}${commentsPlatforms.length ? `<p>帖子评论接口是单帖评论采集合同；商品评论、搜索附带评论${commentsPlatforms.includes('youtube') ? '和 YouTube 频道评论' : ''}不能替代它。下一页只在返回的 <code>page.nextCursor</code> 有效时继续。</p>` : ''}` : ''}
     ${examplePlatform ? `<h2>标准内容搜索</h2><p><code>POST /api/v1/data/search</code> 返回 <code>data.items</code> 与 <code>data.pageInfo</code>。普通内容搜索使用 <code>platform、query、pageSize</code>，与兼容接口的 <code>raw_data</code> JSON 字符串格式不同，调用方需按实际接口解析。</p>
     <pre>${escape(JSON.stringify({ platform: examplePlatform, query: '示例关键词', pageSize: 20 }, null, 2))}</pre>
     <p>标准内容平台：${standard.map(escape).join('、')}。不要只替换 URL 而保留另一接口的请求体或解析逻辑。响应中的 <code>metrics</code> 按合同区分已取得的 0 与未提供的 null，历史或上游默认 0 本身不能证明实测零值；<code>media.coverUrl/images/videos</code> 分别表示封面、图片和视频引用。${noTitle.length ? `${noTitle.map(escape).join('、')} 普通帖子不从正文生成标题，标准 title 为 null；` : ''}其他内容的原生视频或文章标题按对应平台合同保留。</p>` : ''}

@@ -325,6 +325,10 @@ export const publicDataApi = {
     if (!['/api/v1/search/post-detail', '/api/v1/night-all/search/post-detail'].includes(path)) throw new Error('Unsupported post-detail path')
     return publicDataRequest(apiKey, path, { method: 'POST', body, idempotencyKey, signal })
   },
+  postComments: (apiKey, body, { idempotencyKey, path = '/api/v1/search/post-comments', signal } = {}) => {
+    if (!['/api/v1/search/post-comments', '/api/v1/night-all/search/post-comments'].includes(path)) throw new Error('Unsupported post-comments path')
+    return publicDataRequest(apiKey, path, { method: 'POST', body, idempotencyKey, signal })
+  },
   xiaohongshuDiscovery: (apiKey, endpoint, body, { idempotencyKey, signal } = {}) => {
     const product = XHS_DISCOVERY_PRODUCTS.find(item => item.id === endpoint)
     if (!product) throw new Error('Unknown Xiaohongshu discovery endpoint')

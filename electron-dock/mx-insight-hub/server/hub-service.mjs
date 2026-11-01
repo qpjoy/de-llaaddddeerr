@@ -36,6 +36,10 @@ import {
   NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS,
 } from './contracts/night-all-post-detail.mjs'
 import {
+  NIGHT_ALL_POST_COMMENTS_OPERATION,
+  NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS,
+} from './contracts/night-all-post-comments.mjs'
+import {
   normalizeBillingProfile,
   normalizeCreditAdjustment,
   normalizeCreditDebit,
@@ -4399,7 +4403,8 @@ export class HubService {
 
   async #nightAllCompatibilitySearch(context, { operation, body, idempotencyKey, path, signal }) {
     assertWechatSearchNotRetired(operation, body)
-    assert(NIGHT_ALL_LEGACY_OPERATIONS.has(operation) || operation === NIGHT_ALL_POST_DETAIL_OPERATION,
+    assert(NIGHT_ALL_LEGACY_OPERATIONS.has(operation)
+      || [NIGHT_ALL_POST_DETAIL_OPERATION, NIGHT_ALL_POST_COMMENTS_OPERATION].includes(operation),
       404, 'not_found', 'Route not found')
     assert(idempotencyKey, 400, 'idempotency_key_required', 'Idempotency-Key header is required')
     assert(
@@ -4569,7 +4574,9 @@ export class HubService {
     } else {
       const pinnedCapability = operation === NIGHT_ALL_POST_DETAIL_OPERATION
         ? { supportedPlatforms: NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS }
-        : buildNightAllLegacySearchCapabilities([normalized.platform]).operations[operation]
+        : operation === NIGHT_ALL_POST_COMMENTS_OPERATION
+          ? { supportedPlatforms: NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS }
+          : buildNightAllLegacySearchCapabilities([normalized.platform]).operations[operation]
       if (!pinnedCapability?.supportedPlatforms.includes(normalized.platform)) {
         throw new AppError(
           400,
