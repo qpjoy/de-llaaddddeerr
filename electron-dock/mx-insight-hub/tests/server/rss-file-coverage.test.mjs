@@ -58,22 +58,23 @@ test('actual SQL compares current import evidence, not just row counts or matchi
     INSERT INTO rss_feeds VALUES (1,'feed','https://feed.invalid'),(2,'changed','https://new.invalid');`)
   const entries = []
   const item = n => ({ guid: String(n), link: 'https://article.invalid/' + n, title: '文章', pubDate: '2026-11-01', content: 'body' })
-  for (let n = 1; n <= 7; n++) {
+  for (let n = 1; n <= 9; n++) {
     const raw = item(n), fingerprint = rssFileIdentity('feed', raw)
     entries.push(fingerprint)
+    if (n === 8 || n === 9) raw.content = 'x'.repeat(300 * 1024)
     if (n !== 5 && n !== 6) await db.query('INSERT INTO rss_items VALUES ($1,1,$2,$3)', [n, fingerprint.itemHash, raw])
     // 1 exact canonical, 2 exact legacy, 3 canonical content differs from
     // file despite an exact legacy raw, 4 canonical identity differs,
     // 5 absent, 6 canonical-only exact, 7 canonical overwrote an item field.
-    if ([1, 3, 4, 6, 7].includes(n)) {
-      const canonical = { ...raw, feed: { id: 'feed' }, feedResult: {} }
+    if ([1, 3, 4, 6, 7, 9].includes(n)) {
+      const canonical = { ...raw, feed: { id: 'feed' }, feedResult: { items: ['x'.repeat(2 * 1024 * 1024)] } }
       if (n === 3) canonical.content = 'changed body'
       if (n === 4) canonical.guid = 'changed identity'
       if (n === 7) {
         raw.feed = 'intrinsic item field'
         entries[entries.length - 1] = rssFileIdentity('feed', raw)
       }
-      await db.query('INSERT INTO rss_canonical_items VALUES ($1,$2,$3,$4,$5)', [n, n === 6 ? null : n, fingerprint.itemHash, 'feed', canonical])
+      await db.query('INSERT INTO rss_canonical_items VALUES ($1,$2,$3,$4,$5)', [n, n === 6 ? null : n, n === 4 ? 'changed-canonical-hash' : fingerprint.itemHash, 'feed', canonical])
     }
   }
   const manifest = { version: 'rss-file-manifest.v1', files: {}, items: entries,
@@ -91,7 +92,9 @@ test('actual SQL compares current import evidence, not just row counts or matchi
   } } } }
   const result = await compareRssFiles(pool, manifest)
   assert.equal(readOnly, true)
-  assert.deepEqual(result.items, { total: 7, exactCanonical: 2, exactLegacyOnly: 1, contentDiffers: 2, identityMismatch: 1, missing: 1 })
+  assert.equal(result.version, 'rss-file-coverage.v2')
+  assert.equal(result.status, 'incomplete')
+  assert.deepEqual(result.items, { total: 9, exactCanonical: 2, exactLegacyOnly: 1, contentDiffers: 2, identityMismatch: 1, missing: 1, payloadTooLarge: 2 })
   assert.deepEqual(result.feeds, { total: 2, matchedKey: 1, missingKey: 1 })
   assert.equal(result.configFeeds.sameKeyAndUrl, 1)
   assert.equal(result.configFeeds.keyWithDifferentUrl, 1)
@@ -102,5 +105,43 @@ test('actual SQL compares current import evidence, not just row counts or matchi
   assert.doesNotMatch(JSON.stringify(result), /body|https:\/\/|changed identity|intrinsic item/)
   const exact = await compareRssFiles(pool, { ...manifest, items: [entries[0], entries[1], entries[5]] })
   assert.equal(exact.articlePayloadsCovered, true)
+  assert.equal(exact.status, 'observed')
   assert.equal(exact.fullFileCoverage, false, 'article equality does not prove full config parity')
+})
+
+// A driver double exercises retained JS memory with the production item count;
+// the PGlite test above independently verifies SQL envelope/size filtering.
+test('14,836 comparisons complete under a 96 MiB Node heap', () => {
+  const source = new URL('../../server/ops/rss-file-coverage.mjs', import.meta.url).href
+  const program = `
+    import assert from 'node:assert/strict';
+    import { compareRssFiles, rssFileIdentity } from ${JSON.stringify(source)};
+    const raw = n => ({ guid: String(n), title: 'article', content: 'x'.repeat(64 * 1024) });
+    const items = Array.from({ length: 14836 }, (_, n) => rssFileIdentity('feed', raw(n)));
+    const indexes = new Map(items.map((item, n) => [item.itemHash, n]));
+    let batches = 0;
+    const pool = { async connect() { return { release() {}, async query(sql, args) {
+      if (sql.includes('transaction_timestamp')) return { rows: [{ observed_at: 'test' }] };
+      if (sql.includes('SELECT feed_key,feed_url')) return { rows: [] };
+      if (!args) return { rows: [] };
+      assert.ok(args[0].length <= 16);
+      batches++;
+      // Simulate pg deserializing fresh result objects on every batch.
+      return { rows: JSON.parse(JSON.stringify(args[0].map(item_hash => ({
+        item_hash, feed_key: 'feed', is_canonical: true, payload_bytes: 66000,
+        raw: raw(indexes.get(item_hash))
+      })))) };
+    } } } };
+    const report = await compareRssFiles(pool, { version: 'rss-file-manifest.v1', files: {}, items, feeds: [], configFeeds: [] });
+    assert.equal(report.items.exactCanonical, 14836);
+    assert.equal(report.articlePayloadsCovered, true);
+    assert.equal(report.status, 'observed');
+    assert.equal(batches, 928);
+    console.log(JSON.stringify({ total: report.items.total, batches }));
+  `
+  const result = spawnSync(process.execPath, ['--max-old-space-size=96', '--input-type=module', '-'], {
+    input: program, encoding: 'utf8', timeout: 120000,
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout), { total: 14836, batches: 928 })
 })

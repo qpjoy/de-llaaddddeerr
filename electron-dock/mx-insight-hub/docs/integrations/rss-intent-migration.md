@@ -2,7 +2,7 @@
 
 2026-11-01 用户决定：保留旧 RSS 订阅库覆盖并迁入 Hub，不以当前 Hub 新闻发现库存替代。
 本轮状态：已收到生产数据库只读证据，完成 RSS 快照对账工具、Hub stored aggregate RSS 来源、Delta intent 适配器及离线回归。
-尚未执行生产导入/授权或发布 Delta；文件回退源仍待核对，不能宣称已完整迁移。
+尚未执行生产导入/授权或发布 Delta；已收到文件存量证据，文件与数据库逐项重合关系仍待核对，不能宣称已完整迁移。
 未部署、未调用供应商或模型、未变更 MX-H2I 登录/联网。
 
 ## 已确认的代码问题
@@ -173,3 +173,77 @@ businessId/intent 业务用途仅保留在调用方输入审计，永远不充�
 - 聚合 + public-docs 31项通过；RSS 数据/诊断6项、文件诊断1项、Delta8项通过；typecheck通过。
   另一个既有 content-search-aggregate 测试仍期望 Weibo hub_only.refresh=false，但 HEAD 已为true；本次不改该无关预期。
 - 未在生产运行导入、调整授权或发起模型/供应商调用；文件覆盖、实际导入耗时/计数及线上检索仍待操作员回传。
+
+
+## 2026-11-01 文件运行时回传与逐项比对
+
+操作者已从监听13141的 node 进程确认：PID=136442，cwd=/home/fzj/Night-All，exe=/usr/bin/node。
+这是一份当时的进程定位证据，不是固定 PID 配置。宿主机目录检查返回：
+
+| 文件 | 状态 | 大小 | 订阅数 | 条目数 | SHA-256 |
+| --- | --- | ---: | ---: | ---: | --- |
+| data/rss-results.json | read | 25,214,415 | 240 | 14,836 | 354df4ee21fb0434428044254c6c6b11fed434f7cea42bf841f7f8fce620af4e |
+| data/news-results.json | absent | — | — | — | — |
+| data/rss-config.json | read | 11,128 | 8 | 8 | 1b4fab42aedbd9b1c6ad2cc504d22bb425a5354b68899cb876180f3a3d6cc345 |
+
+RSS条目及配置条目均没有缺失 link/url/guid。这个统计不证明链接有效，也不证明数据库完整保留了文件内容。
+`news-results.json` 不存在只排除了该主机目录当时的这一个文件；NewsNow 等动态新闻来源仍不在本阶段的覆盖证明中。
+
+新增 `build-rss-file-comparison.mjs` 在宿主机读取这三份固定文件，生成仅含哈希的独立比对程序。
+程序复用 `rssSourceOptions` 的注册连接解析，在现有 Admin Pod 里只读检索 Night-All RSS 表，
+无需镜像更新、不需要复制正文进 Pod，不创建表、临时表、索引或写入 Hub。
+在服务器 mx-insight-hub 目录运行：
+
+```bash
+set -o pipefail
+node server/ops/build-rss-file-comparison.mjs /home/fzj/Night-All |
+  kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- node --input-type=module -
+```
+
+同步两份新脚本 `server/ops/build-rss-file-comparison.mjs`、`server/ops/rss-file-coverage.mjs`，
+并保留此前已同步的 `server/ops/diagnose-rss-intent-migration.mjs` 即可。请回传最终 JSON，不需要粘贴中间程序或源文件。
+宿主机只读取固定文件；文件缺失/损坏、读期间被原地改写、目录不正确时停止，不把错误当空文件。
+不同时间的文件内容可能改变，新结果中的 files.*.sha256 是本轮精确对比的快照。
+
+身份使用旧 `saveRssFetchRun` 的精确表达式：
+`SHA1([feed.id, guid||'', link||'', title||'', parsedDate||pubDate||discoveredAt||''].join('\n'))`。
+此表达式本身不含 isoDate，不能擅自换成另一种日期优先级。另用身份字段数组的 SHA-256 防止换行拼接歧义，
+用递归排序 JSON 的 SHA-256 比较完整原始文章内容（对象键顺序无关，数组顺序和字段值保留）。
+对有规范记录的旧文章，比对的是 Hub 实际将保留的规范 raw，剥离写入器添加的 feed/feedResult；
+不能因为旧表 raw 相同就忽略规范 raw 的差异。剥离导致原文章同名字段丢失时会报告 contentDiffers，不认定覆盖。
+
+输出含义与补迁决策：
+
+- items.exactCanonical / exactLegacyOnly：相同身份与完整 raw 已被当前数据库导入路径覆盖；文章无需另造一份。
+- items.contentDiffers：身份相同，但文件保留的内容版本不同；需保留文件版本证据，不能用较旧文件覆盖最新数据库内容。
+- items.identityMismatch：哈希匹配却不能证明同一身份（如旧写入算法/订阅键变化、关联变化或拼接歧义）；保留待核对，不能按 URL 猜测合并。
+- items.missing：按旧写入器精确身份未在源库命中；需作为文件补迁候选，不能丢弃。相同 URL 的其他文章不是重复证明。
+- feeds.matchedKey/missingKey：240个结果订阅键的覆盖。configFeeds 按完整订阅键和 URL 比较，区分相同、URL变化、同URL异键及缺失。
+  这只核对8个配置的身份，不证明 enabled、抓取计划、标签或其他配置全部一致；完整配置仍需保留快照，不能覆盖生产订阅开关。
+- articlePayloadsCovered=true 只表示本轮所有文件文章 raw 均已覆盖；fullFileCoverage 固定false，明确尚未证明完整配置迁移和动态新闻覆盖。
+
+本轮新增2项测试通过：真实 PGlite SQL覆盖精确/差异/独有/身份冲突/订阅键与URL差异，以及实际生成程序的 stdin 执行和无正文泄露。
+旧文件诊断测试仍通过。生产逐项比对待回传；此时不开放新授权、不执行补迁，也不发布 Delta 切换。
+
+
+### 只读比对 OOM 修复（v2）
+
+首次生产比对在约256MiB Node堆上限处退出134，没有得到有效覆盖结果。
+旧查询每批250条，传回 canonical.raw 中逐篇重复的整个 feedResult，且同时保留旧表/规范表的重复 raw。
+新版 `rss-file-coverage.v2` 在 SQL 中先剥离写入器的 feed/feedResult，只选择迁移实际采用的一个版本，
+每批16条；SQL在返回前检查文章JSON文本及feed_key合计字节数，超过256KiB则不传回正文。
+使用已有 item_hash、rss_item_id、feed id 唯一索引查找；保留 repeatable-read/read-only、语句/锁/空闲事务超时。
+宿主机构建器以 JSON.parse 字符串嵌入哈希清单，减少大对象字面量编译开销。
+
+新增 `items.payloadTooLarge` 表示超大条目尚未比对，不计入 missing、contentDiffers 或已覆盖数；
+有此类条目时返回完整计数、status=incomplete、退出码2，articlePayloadsCovered=false，需后续单独核对。
+结果含 limits.batchSize=16、limits.maxRowBytes=262144，可确认运行的是新版。
+这是单次查询返回文章文本量的边界，不是整个进程RSS内存或数据库执行内存的承诺。
+
+本地4项测试通过：实际PGlite查询（含2MiB重复feedResult、旧表/规范表超大条目和关联规范哈希变化）、
+生成程序的stdin执行、文件诊断，以及独立Node子进程在96MiB堆限制下处理14,836条64KiB模拟文章（928批）。
+压力测试使用驱动替身，实际SQL语义由PGlite测试验证；尚未取得生产v2比对结果。
+
+重跑前将 `server/ops/build-rss-file-comparison.mjs` 和 `server/ops/rss-file-coverage.mjs` 两份更新同步到服务器，
+执行上面的同一条管道命令即可；无需调高Pod内存、发布镜像或重启服务。
+本轮仅修改诊断脚本、测试及说明，没有导入数据或修改MX-H2I登录/联网逻辑。

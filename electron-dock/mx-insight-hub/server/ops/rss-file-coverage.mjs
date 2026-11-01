@@ -31,9 +31,11 @@ export function validateFileManifest(manifest) {
 
 export async function compareRssFiles(pool, manifest) {
   validateFileManifest(manifest)
-  const report = { version: 'rss-file-coverage.v1', status: 'observed',
+  const batchSize = 16, maxRowBytes = 256 * 1024
+  const report = { version: 'rss-file-coverage.v2', status: 'observed',
+    limits: { batchSize, maxRowBytes },
     files: manifest.files, items: { total: manifest.items.length, exactCanonical: 0, exactLegacyOnly: 0,
-      contentDiffers: 0, identityMismatch: 0, missing: 0 },
+      contentDiffers: 0, identityMismatch: 0, missing: 0, payloadTooLarge: 0 },
     feeds: { total: manifest.feeds.length, matchedKey: 0, missingKey: 0 },
     configFeeds: { total: manifest.configFeeds.length, sameKeyAndUrl: 0, keyWithDifferentUrl: 0,
       urlWithDifferentKey: 0, missing: 0, comparison: 'identity_only_not_full_configuration' },
@@ -53,35 +55,47 @@ export async function compareRssFiles(pool, manifest) {
       report.configFeeds[feedKeys.get(feed.keyHash) === feed.urlHash ? 'sameKeyAndUrl'
         : feedKeys.has(feed.keyHash) ? 'keyWithDifferentUrl' : feedUrls.has(feed.urlHash) ? 'urlWithDifferentKey' : 'missing']++
     }
-    for (let index = 0; index < manifest.items.length; index += 250) {
-      const batch = manifest.items.slice(index, index + 250)
+    for (let index = 0; index < manifest.items.length; index += batchSize) {
+      const batch = manifest.items.slice(index, index + batchSize)
       const hashes = [...new Set(batch.map(row => row.itemHash))]
-      // Select exactly the evidence that the current Hub importer would keep:
-      // a linked canonical row takes priority even when its hash has changed.
-      const { rows: legacy } = await client.query(`SELECT r.item_hash,f.feed_key,r.raw,
-        c.id AS canonical_id,c.feed_key AS canonical_feed_key,c.raw AS canonical_raw
+      // Choose the same evidence as the importer, including linked canonical
+      // records whose own hash changed. Never return both raw versions or the
+      // writer's feedResult envelope (it repeats an entire feed per article).
+      // Guard the projected JSON size in SQL BEFORE pg parses any payload.
+      const { rows } = await client.query(`WITH evidence AS MATERIALIZED (
+        SELECT r.item_hash,
+          CASE WHEN c.id IS NOT NULL THEN c.feed_key ELSE f.feed_key END AS feed_key,
+          c.id IS NOT NULL AS is_canonical,
+          CASE WHEN c.id IS NOT NULL THEN c.raw - 'feed' - 'feedResult' ELSE r.raw END AS raw
         FROM public.rss_items r LEFT JOIN public.rss_feeds f ON f.id=r.feed_id
         LEFT JOIN public.rss_canonical_items c ON c.rss_item_id=r.id
-        WHERE r.item_hash=ANY($1::text[])`, [hashes])
-      const { rows: canonical } = await client.query(`SELECT item_hash,feed_key,raw
-        FROM public.rss_canonical_items WHERE item_hash=ANY($1::text[])`, [hashes])
-      const oldByHash = new Map(legacy.map(row => [row.item_hash, row]))
-      const canonicalByHash = new Map(canonical.map(row => [row.item_hash, row]))
+        WHERE r.item_hash=ANY($1::text[])
+        UNION ALL
+        SELECT c.item_hash,c.feed_key,true,c.raw - 'feed' - 'feedResult'
+        FROM public.rss_canonical_items c WHERE c.item_hash=ANY($1::text[])
+          AND NOT EXISTS (SELECT 1 FROM public.rss_items r WHERE r.item_hash=c.item_hash)
+      ), sized AS MATERIALIZED (
+        SELECT item_hash,is_canonical,feed_key,raw,
+          COALESCE(octet_length(raw::text),0) + COALESCE(octet_length(feed_key),0) AS payload_bytes
+        FROM evidence
+      ) SELECT item_hash,is_canonical,payload_bytes,
+        CASE WHEN payload_bytes <= $2 THEN feed_key END AS feed_key,
+        CASE WHEN payload_bytes <= $2 THEN raw END AS raw
+        FROM sized`, [hashes, maxRowBytes])
+      const byHash = new Map(rows.map(row => [row.item_hash, row]))
       for (const entry of batch) {
-        const old = oldByHash.get(entry.itemHash), canonicalRow = canonicalByHash.get(entry.itemHash)
-        const isCanonical = Boolean(old?.canonical_id || !old && canonicalRow)
-        const raw = old?.canonical_id ? old.canonical_raw : old ? old.raw : canonicalRow?.raw
-        if (!old && !canonicalRow) { report.items.missing++; continue }
+        const row = byHash.get(entry.itemHash)
+        if (!row) { report.items.missing++; continue }
+        if (Number(row.payload_bytes) > maxRowBytes) { report.items.payloadTooLarge++; continue }
+        const raw = row.raw
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { report.items.identityMismatch++; continue }
-        const item = { ...raw }
-        if (isCanonical) { delete item.feed; delete item.feedResult }
-        const key = old?.canonical_id ? old.canonical_feed_key : old ? old.feed_key : canonicalRow.feed_key
-        const identity = rssFileIdentity(key, item)
+        const identity = rssFileIdentity(row.feed_key, raw)
         if (identity.itemHash !== entry.itemHash || identity.identityHash !== entry.identityHash) report.items.identityMismatch++
         else if (identity.rawHash !== entry.rawHash) report.items.contentDiffers++
-        else report.items[isCanonical ? 'exactCanonical' : 'exactLegacyOnly']++
+        else report.items[row.is_canonical ? 'exactCanonical' : 'exactLegacyOnly']++
       }
     }
+    if (report.items.payloadTooLarge) report.status = 'incomplete'
     // Article equality does not prove config parity or retirement of NewsNow.
     report.articlePayloadsCovered = report.items.exactCanonical + report.items.exactLegacyOnly === report.items.total
     await client.query('ROLLBACK')
@@ -104,11 +118,13 @@ export async function runRssFileComparison(manifest, sourceOptions) {
       FROM catalog.external_sources s LEFT JOIN catalog.database_connections p ON p.id=s.database_connection_id
       WHERE s.source_key='telegram-monitor-messages'`)
     source = new pg.Pool(sourceOptions(rows[0]))
-    process.stdout.write(JSON.stringify(await compareRssFiles(source, manifest), null, 2) + '\n')
+    const report = await compareRssFiles(source, manifest)
+    process.stdout.write(JSON.stringify(report, null, 2) + '\n')
+    if (report.status === 'incomplete') process.exitCode = 2
   } catch (error) {
     const code = /^(rss_[a-z_]+|source_[a-z_]+|hub_database_unconfigured)$/.test(error.message)
       ? error.message : /^[A-Z0-9]{5}$/.test(error.code || '') ? error.code : 'rss_file_comparison_failed'
-    process.stdout.write(JSON.stringify({ version: 'rss-file-coverage.v1', status: 'incomplete', code }) + '\n')
+    process.stdout.write(JSON.stringify({ version: 'rss-file-coverage.v2', status: 'incomplete', code }) + '\n')
     process.exitCode = 2
   } finally { await source?.end(); await hub?.end() }
 }

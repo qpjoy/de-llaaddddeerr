@@ -51,7 +51,8 @@ export async function buildRssFileManifest(root) {
 export async function buildRssComparisonProgram(root) {
   const manifest = await buildRssFileManifest(root)
   const program = await readFile(new URL('./rss-file-coverage.mjs', import.meta.url), 'utf8')
-  return `${program}\nconst rssSourceOptions = ${rssSourceOptions.toString()};\nawait runRssFileComparison(${JSON.stringify(manifest)}, rssSourceOptions);\n`
+  // Keep the large manifest out of the module's object-literal AST.
+  return `${program}\nconst rssSourceOptions = ${rssSourceOptions.toString()};\nawait runRssFileComparison(JSON.parse(${JSON.stringify(JSON.stringify(manifest))}), rssSourceOptions);\n`
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
