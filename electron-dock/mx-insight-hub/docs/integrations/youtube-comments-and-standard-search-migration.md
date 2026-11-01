@@ -51,9 +51,10 @@ curl "$HUB_URL/api/v1/data/youtube/channel-comments" \
 - Key 需要 `youtube` 平台和 `social.comments.list` 能力。不要求给客户额外开通内部采购 native 权限；独立 native 调用另遵循自己的权限。
 - `maxComments` 默认50、上限100，并受 Key 页大小限制。它是**本响应所有视频合计**的评论上限，不是每视频上限。旧 Night-All schema 会丢弃下游传入的 maxComments；新接口会真正执行限制。
 - `count/pageSize/limit/max_comments` 是 maxComments 同义字段，同时提交必须相同。不要原样携带旧 persona 中冲突的 `maxComments=50,count=20,limit=20`。
+- `channelId` 与 `@handle`、`/c/`、`/user/` 频道 URL 可同时传入，此时以稳定 ID 为准，不另购 URL 解析来验证二者对应关系；如果 URL 本身是 `/channel/ID` 且两个 ID 不同，仍返回400。只传 URL 时沿用频道解析步骤。
 - `sortBy` 支持 `top/newest`；`languageCode` 默认 `zh-CN`，`countryCode` 默认 `US`，也接受对应 snake_case。`params` 仅包含这三类选项；禁止 provider、路径、凭据、原生 continuation_token 和工作量覆盖。
 - 顶层是 `contractVersion=mx-insight-hub.youtube-comments.v1`、`data`、`requestId`。`data.items` 是评论数组；`raw_data` 是相同数组的 JSON 字符串。单视频另有 comments；频道另有 channel/videos/videoIds/results，results 中的 comments 只描述本响应页，不表示该视频全部评论。
-- `videoId` 关联所属视频；规范化记录为 `objectType=comment`，dataset 为 `social.comments.v1`。供应商已取得的完整页归档并入队，频道视频发现记录也按 post 入库。缺失指标为 null，明确的零保留0；相对发布时间保留原文。
+- `videoId` 关联所属视频；频道聚合的 `items`、`raw_data`、`results[].comments` 中每条评论以及 `videos`、`results[].video` 都携带所属频道的 `channelId/channelUrl`，URL 为规范 `/channel/ID` 地址。`author.channelId` 仍是评论作者，不能用来判断视频所属频道；单视频接口不会凭评论作者猜测频道。规范化记录为 `objectType=comment`，dataset 为 `social.comments.v1`。供应商已取得的完整页归档并入队，频道视频发现记录也按 post 入库。缺失指标为 null，明确的零保留0；相对发布时间保留原文。
 - 读取 `data.pageInfo.hasMore/nextCursor`。下一页保持原参数、原 Key，传回游标并使用新的 Idempotency-Key；同页重试保持原标识与请求体。旧 Night-All/provider 游标不可导入。
 - 每轮最多15个公开响应页、15个数据采购页（视频发现也占用），另允许最多一次频道解析；视频发现最多5页。游标有效期24小时。`partial/warnings` 表示限额、未证实分页等不完整情况，不能把短页或 `hasMore=false` 一概理解为完整耗尽。
 - 不自动重试、不回退 Night-All。unknown 必须先通过 Hub 请求记录只读核对。每个成功响应按 `social.comments.list` 结算一次，内部实际采购调用独立记账；仅消费缓冲或幂等重放不会重复采购已取得的评论页。
@@ -83,6 +84,36 @@ curl "$HUB_URL/api/v1/data/youtube/channel-comments" \
 po-infra 的17项离线适配测试已运行，真实网络运输被禁止；本机无 Django 环境，未运行 Django 全栈测试。目标环境可执行 `python manage.py test llm.tests_youtube_hub_migration --verbosity 2`。
 
 MX-H2I 登录、联网、Launcher SSO、支付实现及已有历史交付均不在本次代码改动范围。
+
+## 2026-11-01 频道聚合参数与关联修复
+
+本地代码核对发现：Delta 已接管旧 `youtube_channel_comments` 动作并转到 Hub，
+但会同时保留已知 `channelId` 和 `channelUrl`。Hub 原先把非 `/channel/ID` URL
+解析出的空 ID 当作冲突，导致有效的 ID + handle 请求在采购前返回
+`400 invalid_youtube_comments_request`。现以显式 ID 为准，只拒绝可确定的两个 ID 冲突。
+
+Agent 可继续使用原参数：
+
+```json
+{"businessId":"agent:<Agent标识>:data_query:youtube_channel_comments:youtube","platform":"youtube","channelUrl":"https://www.youtube.com/@example","channelId":"UCaaaaaaaaaaaaaaaaaaaaaa","maxVideos":5,"maxComments":50,"limit":20,"includeRaw":false}
+```
+
+Delta 的 `llm/data_query.py::normalize_hub_youtube_comments` 已优先取 `maxComments`，
+去掉旧 `limit/count` 和 Agent `businessId` 后发送至
+`POST /api/v1/data/youtube/channel-comments`。Hub 的 `businessId` 是消费者绑定校验字段，
+不能把 Agent 业务归因值直接当作 Hub 消费者身份；直连 Hub 时应发送上述归一化后的请求。
+默认5个视频、每响应合计50条评论；调用参数可覆盖，仍受既有上限约束。
+
+原响应虽可通过顶层 channel 和 videoId 关联，但单独使用评论数组时缺少直接的频道上下文。
+现于最终响应组装阶段补齐每条评论和视频的频道 ID 与规范 URL；不修改采购投影、入库记录、
+缓冲哈希或旧游标。已保存交付依然原样重放，因此历史响应不会补写新增字段。
+没有新增迁移，也不变更客户授权、价格、采购开关或 MX-H2I 登录/联网。
+
+本轮验证使用本地合成供应商响应。实际 Delta 归一化函数已离线提取执行，确认原参数、
+数量覆盖和游标可传给 Hub；这不等于 Django 全栈或线上部署验证。
+评论合同、实际 HTTP runtime、费用域、迁移和公开文档共41项测试通过，0失败、0跳过，
+包含真实 PGlite；`npm run typecheck` 通过。
+生产版本、操作启用状态及首次真实业务成功回执尚待核对，不据此声称已上线。
 
 ## 2026-10-17 评论入口授权域修复
 

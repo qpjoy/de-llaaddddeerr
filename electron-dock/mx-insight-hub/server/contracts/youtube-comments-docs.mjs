@@ -13,7 +13,7 @@ const page = { type: 'object', required: ['hasMore', 'nextCursor', 'returnedCoun
   nextCursor: { type: ['string', 'null'] }, providerCursor: { type: ['string', 'null'], description: 'nextCursor 的兼容别名，仍是 Hub 游标。' },
 }, additionalProperties: true }
 const comments = { type: 'array', items: { type: 'object', additionalProperties: true,
-  description: '评论业务投影；videoId 关联所属视频。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。' } }
+  description: '评论业务投影；videoId 关联所属视频。频道聚合的每条评论另含所属视频频道的 channelId/channelUrl；author.channelId 是评论作者，不是视频频道。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。' } }
 
 export const youtubeCommentsPaths = Object.fromEntries(Object.entries(YOUTUBE_COMMENT_PATHS).map(([kind, path]) => {
   const ids = kind === 'video' ? ['videoId', 'video_id', 'postId', 'post_id', 'contentId', 'content_id', 'url']
@@ -39,7 +39,7 @@ export const youtubeCommentsPaths = Object.fromEntries(Object.entries(YOUTUBE_CO
         includeRaw: { type: 'boolean', default: false, description: '只影响已声明的业务字段；不暴露原始供应商审计包或凭据。' },
         cursor: { ...text, description: '原样使用 data.pageInfo.nextCursor；保持身份、参数、上限和 Key 不变。' },
         page: { type: 'integer', minimum: 1, maximum: 15, default: 1 },
-      }, description: '多个同义字段同时出现必须等价；频道接口不接受视频 URL。params 仅支持排序、语言、地区，不能提交原生 continuation_token、provider 或上游路径。' },
+      }, description: '多个同义字段同时出现必须等价；频道接口不接受视频 URL。channelId 与 handle/c/user URL 同传时以 ID 为准，不额外解析或验证 URL 对应关系；/channel/ID URL 与 channelId 冲突则拒绝。params 仅支持排序、语言、地区，不能提交原生 continuation_token、provider 或上游路径。' },
       example: kind === 'video' ? { videoId: 'dQw4w9WgXcQ', maxComments: 50 }
         : { channelUrl: 'https://www.youtube.com/@example', maxVideos: 5, maxComments: 50 },
     } } },
@@ -64,7 +64,7 @@ export function youtubeCommentsGuide(allowed = () => true) {
   const rows = Object.entries(youtubeCommentsPaths).filter(([path]) => allowed(path))
   if (!rows.length) return ''
   return `<h2>YouTube 评论</h2><table><thead><tr><th>用途</th><th>POST 接口</th></tr></thead><tbody>${rows.map(([path, value]) => `<tr><td>${value.post.summary}</td><td><code>/api/v1${path}</code></td></tr>`).join('')}</tbody></table>
-  <p>按帖子取评论使用 videoId、postId 或视频 URL；频道入口接受 channelId/channelUrl，先选择最多 maxVideos 个视频。maxComments 限制整个响应的评论总数（默认 50、最大 100，并受 Key 限制），不是每视频上限。旧 Night-All 频道接口会忽略 maxComments，新接口实际执行此限制。</p>
-  <p>两者需要 youtube 平台及 social.comments.list 能力，按成功交付请求结算。data.items 为评论数组，data.raw_data 为同一数组的 JSON 字符串；频道 results 按视频分组。使用 data.pageInfo.nextCursor 继续，保持参数不变并为下一页使用新 Idempotency-Key；原请求重试保持原标识。保留 partial/warnings，不按返回条数判断结束。旧游标不能导入，不自动展开评论回复，不回退 Night-All。</p>
+  <p>按帖子取评论使用 videoId、postId 或视频 URL；频道入口接受 channelId/channelUrl，先选择最多 maxVideos 个视频。ID 与 handle/c/user URL 同传时以 ID 为准，不额外解析验证；两个明确 ID 冲突则拒绝。maxComments 限制整个响应的评论总数（默认 50、最大 100，并受 Key 限制），不是每视频上限。旧 Night-All 频道接口会忽略 maxComments，新接口实际执行此限制。</p>
+  <p>两者需要 youtube 平台及 social.comments.list 能力，按成功交付请求结算。data.items 为评论数组，data.raw_data 为同一数组的 JSON 字符串；频道 results 按视频分组。频道评论与 videos 都包含所属频道 channelId/channelUrl，每条评论由 videoId 关联视频；author.channelId 仅标识评论作者。使用 data.pageInfo.nextCursor 继续，保持参数不变并为下一页使用新 Idempotency-Key；原请求重试保持原标识。保留 partial/warnings，不按返回条数判断结束。旧游标不能导入，不自动展开评论回复，不回退 Night-All。</p>
   <p>单视频示例：<code>{"videoId":"dQw4w9WgXcQ","maxComments":50}</code>。频道示例：<code>{"channelUrl":"https://www.youtube.com/@example","maxVideos":5,"maxComments":50}</code>。生产开放还需凭据、相关采购操作与审核价格；接口文档可见不代表已启用。</p>`
 }

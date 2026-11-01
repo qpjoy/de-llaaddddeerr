@@ -70,10 +70,10 @@ async function harness(t) {
         unitCostMinorByEndpoint: { [endpoint.endpointKey]: 2 } } }, { runtime: { config, credentialConfigured: true } })
   }
   const base = await serve(t, runtime.app)
-  const post = async (kind, { secret = key.secret, origin = base, idempotencyKey = `youtube-runtime-${kind}` } = {}) => {
+  const post = async (kind, { secret = key.secret, origin = base, idempotencyKey = `youtube-runtime-${kind}`, body = BODY[kind] } = {}) => {
     const response = await fetch(origin + YOUTUBE_COMMENT_PATHS[kind], { method: 'POST',
       headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json', 'idempotency-key': idempotencyKey },
-      body: JSON.stringify(BODY[kind]) })
+      body: JSON.stringify(body) })
     return { response, body: await response.json() }
   }
   return { runtime, calls, gateways, key, deniedKey, post }
@@ -113,6 +113,23 @@ for (const kind of ['video', 'channel']) test(`runtime ${kind} comments preserve
   assert.equal(replay.response.headers.get('idempotent-replay'), 'true')
   assert.deepEqual(replay.body, first.body)
   assert.equal(h.calls.length, expectedCalls)
+})
+
+test('runtime channel aggregate accepts both known identifiers and returns explicit owner links', async t => {
+  const h = await harness(t)
+  const body = { platform: 'youtube', channelId: CHANNEL, channelUrl: 'https://www.youtube.com/@fixture',
+    maxVideos: 5, maxComments: 50, includeRaw: false }
+  const result = await h.post('channel', { body })
+  assert.equal(result.response.status, 200, JSON.stringify(result.body))
+  assert.deepEqual(h.calls.map(call => call.path), [PROVIDER_PATHS[1], PROVIDER_PATHS[2]])
+  const { data } = result.body
+  assert.equal(data.items[0].videoId, VIDEO)
+  assert.equal(data.items[0].channelId, CHANNEL)
+  assert.equal(data.items[0].channelUrl, `https://www.youtube.com/channel/${CHANNEL}`)
+  assert.deepEqual(data.results[0].comments, data.items)
+  assert.deepEqual(data.results[0].video, data.videos[0])
+  assert.deepEqual((await h.post('channel', { body })).body, result.body)
+  assert.equal(h.calls.length, 2)
 })
 
 test('runtime comments deny a Key without the capability before provider dispatch', async t => {

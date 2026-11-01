@@ -84,7 +84,9 @@ export function normalizeYoutubeCommentsRequest(kind, body, { maxPageSize = 100,
     channelId = aliases(body, ['channelId', 'channel_id'], value => typeof value === 'string' && CHANNEL.test(value.trim()) ? value.trim() : null)
     url = aliases(body, ['channelUrl', 'channel_url', 'url'], channelUrl)
     const urlId = url?.startsWith('https://www.youtube.com/channel/') ? url.split('/').at(-1) : null
-    if (channelId && url && channelId !== urlId) invalid('channelId and channelUrl must identify the same channel')
+    // A handle/custom URL does not encode an ID. Prefer the supplied stable ID
+    // without buying a redundant lookup; reject only provably conflicting IDs.
+    if (channelId && urlId && channelId !== urlId) invalid('channelId and channelUrl must identify the same channel')
     channelId ||= urlId
     if (!channelId && !url) invalid('A YouTube channelId or channelUrl is required')
     if (channelId) url = `https://www.youtube.com/channel/${channelId}`

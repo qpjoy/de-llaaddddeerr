@@ -29,21 +29,26 @@ export function normalizeYoutubeCommentsDelivery(kind, body, { context, maxPageS
 }
 
 export function youtubeCommentsDeliveryBody(request, { rowsByJob, state, calls, warnings, deliveryId }) {
-  const job = state.jobs[0], items = rowsByJob[0], resolved = job.resolvedIdentity
+  const job = state.jobs[0], resolved = job.resolvedIdentity
+  const channelId = resolved?.channelId || request.channelId
+  const channel = request.kind === 'channel' ? { channelId, channelUrl: `https://www.youtube.com/channel/${channelId}` } : null
+  // Add delivery-only relationships after consuming the stored projection.
+  // Existing cursor buffer hashes and archived acquisition rows stay valid.
+  const items = rowsByJob[0].map(row => channel ? { ...row, ...channel } : row)
   const remaining = Boolean(job.buffer || !job.done && job.upstreamPages < 15)
   const hasMore = remaining && request.page < 15
   const nextCursor = hasMore ? request.encodeNext(deliveryId) : null
   if (remaining && request.page === 15) warnings.push({ code: 'page_limit_reached', message: 'The comments traversal reached its response-page limit; restart explicitly.' })
   if (resolved?.discoveryPartial) warnings.push({ code: 'channel_video_discovery_partial', message: 'The bounded video discovery did not prove that all requested videos were found.' })
-  const videos = request.kind === 'video' ? [{ videoId: request.videoId, url: `https://www.youtube.com/watch?v=${request.videoId}` }] : resolved?.videos || []
+  const videos = request.kind === 'video' ? [{ videoId: request.videoId, url: `https://www.youtube.com/watch?v=${request.videoId}` }]
+    : (resolved?.videos || []).map(video => ({ ...video, ...channel }))
   const results = videos.map(video => ({ videoId: video.videoId, video: structuredClone(video), commentsScope: 'current_response_page',
     comments: structuredClone(items.filter(row => row.videoId === video.videoId)) }))
   const duplicateCount = job.duplicateCount || 0
   const page = { page: request.page, pageSize: request.maxComments, returnedCount: items.length, duplicateCount, hasMore,
     nextCursor, providerCursor: nextCursor, nextPage: null, nextParams: nextCursor ? { cursor: nextCursor } : null, paginationMode: 'cursor' }
   return { contractVersion: YOUTUBE_COMMENTS_VERSION, data: { platform: 'youtube',
-    ...(request.kind === 'channel' ? { channel: { channelId: resolved?.channelId || request.channelId,
-      channelUrl: request.channelUrl || `https://www.youtube.com/channel/${resolved?.channelId || request.channelId}` }, videos,
+    ...(request.kind === 'channel' ? { channel: { ...channel, channelUrl: request.channelUrl || channel.channelUrl }, videos,
     videoIds: videos.map(row => row.videoId), results } : { videoId: request.videoId, comments: structuredClone(items) }),
     items, raw_info: '[]', raw_data: JSON.stringify(items), page, pageInfo: { ...structuredClone(page), pageIndex: request.page, cursorType: hasMore ? 'opaque' : 'none' },
     status: warnings.length || hasMore ? 'partial' : 'ok', warnings,

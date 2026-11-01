@@ -105,4 +105,6 @@ Facebook 在策略搜索管理中按“内容搜索 / 账号内容 / 账号资�
 
 账号查找响应的唯一候选若为 `UserUnavailable`，新版 Hub 返回 HTTP 422 / `social_account_unavailable`，详情为 `platform=twitter`、`stage=account_lookup`、`outcome=rejected`、`retryable=false`。`reason` 只归一化明确枚举：`suspended`、`deactivated`、`deleted`、`protected`、`not_found`；未识别的原因统一为 `unavailable`，不解析自由文本或推断账号永久状态。原 `userExists:false` 的 404 合同保留。
 
+2026-11-01 起新失败的 `error.message` 写明已知原因，例如 `The upstream provider reported that the Twitter account is suspended`（另有 is deactivated、is protected、was deleted、was not found）；原因为 `unavailable` 或未识别时保留 `...is unavailable`。HTTP、`error.code` 与 `details` 不变，调用方应继续按 `details.reason` 判断，不解析 message；已保存的旧失败按原字节回放。管理台错误面板按 `details.reason` 显示中文原因，如「账号已被 Twitter 封禁（suspended）」。
+
 Delta 对这两类明确账号状态停止自动重试及 Night-All 回退，保留失败检查点、请求 ID、原始错误体，输出中文原因；不会伪装为成功空列表。普通格式异常、上游 HTTP 错误、授权与限流仍遵循各自原规则。供应商回执、幂等结果和客户计费规则不变；旧 502 不改写，不从旧错误码反推账号状态。

@@ -121,6 +121,7 @@ for (const operation of ['crawl', 'user-info']) {
     const check = error => {
       assert.equal(error.status, 422)
       assert.equal(error.code, 'social_account_unavailable')
+      assert.equal(error.message, 'The upstream provider reported that the Twitter account is suspended')
       assert.equal(error.details.reason, 'suspended')
       assert.equal(error.details.stage, 'account_lookup')
       assert.equal(error.details.retryable, false)
@@ -141,6 +142,25 @@ for (const operation of ['crawl', 'user-info']) {
     assert.equal(h.calls.length, 1)
     assert.equal(h.historical.length, 0)
     assert.deepEqual(h.store.requests.get(call.usageRequestId), usage)
+  })
+  test(`Twitter ${operation} replays a saved unavailable-account body with its original wording`, async t => {
+    const wire = JSON.stringify({ data: { users: [{ result: { __typename: 'UserUnavailable', reason: 'Suspended' } }] } })
+    const h = await harness(t, { fetchImpl: () => new Response(wire) })
+    const body = { platform: 'twitter', userId: '42', ...(operation === 'crawl' ? { count: 10 } : {}) }
+    await assert.rejects(h.invoke(body, 'historical-unavailable', operation), { message: /account is suspended$/ })
+    // A receipt saved before account states were named keeps its message byte-for-byte.
+    const usage = h.store.requests.get([...h.platformStore.calls.values()][0].usageRequestId)
+    usage.responseBody = { ...usage.responseBody, error: { ...usage.responseBody.error,
+      message: 'The upstream provider reported that the Twitter account is unavailable' } }
+    const saved = JSON.stringify(usage.responseBody)
+    await assert.rejects(h.invoke(body, 'historical-unavailable', operation), error => {
+      assert.equal(error.status, 422)
+      assert.equal(error.message, 'The upstream provider reported that the Twitter account is unavailable')
+      assert.deepEqual(error.details, { ...usage.responseBody.error.details, requestId: usage.id })
+      return true
+    })
+    assert.equal(JSON.stringify(usage.responseBody), saved)
+    assert.equal(h.calls.length, 1)
   })
   test(`Twitter ${operation} preserves a definitive missing-account receipt as 404 without another purchase`, async t => {
     const wire = '{"data":{},"userExists":false}'

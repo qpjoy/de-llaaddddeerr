@@ -8928,7 +8928,7 @@ paths:
         '404':
           description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。1–19 位裸纯数字的 ID 查找明确未找到账号时，Hub 在同一请求内按同名用户名再查一次并返回该次结果；用户名查找未能派发时返回 ID 查找的结果。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。
         '422':
-          description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。
+          description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；新失败的 message 写明已知原因（如 account is suspended），判断请用 details.reason；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。
         '409':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '429':
@@ -9032,7 +9032,7 @@ paths:
         '404':
           description: social_account_not_found：上游在账号查找阶段明确报告未找到该 Twitter 账号，不代表账号永久不存在。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false；保留 requestId，不伪装为空列表，不自动重试。1–19 位裸纯数字的 ID 查找明确未找到账号时，Hub 在同一请求内按同名用户名再查一次并返回该次结果；用户名查找未能派发时返回 ID 查找的结果。已保存的旧 502 仍按原幂等请求回放，不改写历史或再次调用上游。
         '422':
-          description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。
+          description: social_account_unavailable：供应商明确返回账号不可用。error.details 包含 platform=twitter、stage=account_lookup、outcome=rejected、retryable=false，reason 为 suspended、deactivated、deleted、protected、not_found 或 unavailable；新失败的 message 写明已知原因（如 account is suspended），判断请用 details.reason；只表示供应商的报告，未知原因不推断。裸纯数字的 ID 查找仅在 reason 为 not_found 或 deleted 时按同名用户名再查一次；其他原因及未知、超时结果不自动重试或改查用户名。
         '409':
           description: 失败或未知结果，保留 requestId。502 的 error.details 包含 upstreamStatus、upstreamCode（若存在）、outcome；不自动重发。
         '429':
@@ -9349,7 +9349,7 @@ paths:
                   minimum: 1
                   maximum: 15
                   default: 1
-              description: 多个同义字段同时出现必须等价；频道接口不接受视频 URL。params 仅支持排序、语言、地区，不能提交原生 continuation_token、provider 或上游路径。
+              description: 多个同义字段同时出现必须等价；频道接口不接受视频 URL。channelId 与 handle/c/user URL 同传时以 ID 为准，不额外解析或验证 URL 对应关系；/channel/ID URL 与 channelId 冲突则拒绝。params 仅支持排序、语言、地区，不能提交原生 continuation_token、provider 或上游路径。
             example:
               videoId: dQw4w9WgXcQ
               maxComments: 50
@@ -9388,13 +9388,13 @@ paths:
                         items:
                           type: object
                           additionalProperties: true
-                          description: 评论业务投影；videoId 关联所属视频。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
+                          description: 评论业务投影；videoId 关联所属视频。频道聚合的每条评论另含所属视频频道的 channelId/channelUrl；author.channelId 是评论作者，不是视频频道。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
                       comments:
                         type: array
                         items:
                           type: object
                           additionalProperties: true
-                          description: 评论业务投影；videoId 关联所属视频。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
+                          description: 评论业务投影；videoId 关联所属视频。频道聚合的每条评论另含所属视频频道的 channelId/channelUrl；author.channelId 是评论作者，不是视频频道。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
                       raw_data:
                         type: string
                         description: 本页 items 的 JSON 字符串，兼容下游记录计数。
@@ -9657,7 +9657,7 @@ paths:
                   minimum: 1
                   maximum: 15
                   default: 1
-              description: 多个同义字段同时出现必须等价；频道接口不接受视频 URL。params 仅支持排序、语言、地区，不能提交原生 continuation_token、provider 或上游路径。
+              description: 多个同义字段同时出现必须等价；频道接口不接受视频 URL。channelId 与 handle/c/user URL 同传时以 ID 为准，不额外解析或验证 URL 对应关系；/channel/ID URL 与 channelId 冲突则拒绝。params 仅支持排序、语言、地区，不能提交原生 continuation_token、provider 或上游路径。
             example:
               channelUrl: https://www.youtube.com/@example
               maxVideos: 5
@@ -9697,13 +9697,13 @@ paths:
                         items:
                           type: object
                           additionalProperties: true
-                          description: 评论业务投影；videoId 关联所属视频。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
+                          description: 评论业务投影；videoId 关联所属视频。频道聚合的每条评论另含所属视频频道的 channelId/channelUrl；author.channelId 是评论作者，不是视频频道。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
                       comments:
                         type: array
                         items:
                           type: object
                           additionalProperties: true
-                          description: 评论业务投影；videoId 关联所属视频。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
+                          description: 评论业务投影；videoId 关联所属视频。频道聚合的每条评论另含所属视频频道的 channelId/channelUrl；author.channelId 是评论作者，不是视频频道。供应商未返回的指标为 null，明确取得的零为 0；publishedTime 保留原文，不把相对时间伪造为确定时间。
                       raw_data:
                         type: string
                         description: 本页 items 的 JSON 字符串，兼容下游记录计数。

@@ -61,9 +61,58 @@ test('YouTube input normalizes safe video aliases and rejects conflicts, arbitra
     assert.throws(() => normalizeYoutubeCommentsRequest('video', body), { code: 'invalid_youtube_comments_request' })
   }
   assert.throws(() => normalizeYoutubeCommentsRequest('channel', { channelUrl: `https://www.youtube.com/watch?v=${VIDEO}` }), { code: 'invalid_youtube_comments_request' })
-  assert.throws(() => normalizeYoutubeCommentsRequest('channel', { channelId: CHANNEL, channelUrl: 'https://www.youtube.com/@different' }), { code: 'invalid_youtube_comments_request' })
+  assert.throws(() => normalizeYoutubeCommentsRequest('channel', { channelId: CHANNEL, channelUrl: 'https://www.youtube.com/channel/UC' + 'b'.repeat(22) }), { code: 'invalid_youtube_comments_request' })
   assert.deepEqual(normalizeYoutubeCommentsRequest('channel', { channelId: CHANNEL }).fingerprintBody,
     normalizeYoutubeCommentsRequest('channel', { channelUrl: `https://www.youtube.com/channel/${CHANNEL}` }).fingerprintBody)
+})
+
+test('channel IDs take precedence over handle/custom URLs without changing existing request fingerprints', () => {
+  const original = normalizeYoutubeCommentsRequest('channel', { channelId: CHANNEL })
+  assert.equal(original.maxVideos, 5); assert.equal(original.maxComments, 50)
+  for (const path of ['@fixture', 'c/fixture', 'user/fixture', `channel/${CHANNEL}`]) {
+    const request = normalizeYoutubeCommentsRequest('channel', { channelId: CHANNEL, channelUrl: `https://www.youtube.com/${path}` })
+    assert.deepEqual(request.fingerprintBody, original.fingerprintBody)
+    assert.equal(buildYoutubeCommentsDispatch(request, {}).youtube.stage, 'videos')
+  }
+  for (const body of [
+    { channelId: CHANNEL, channelUrl: 'https://evil.test/@fixture' },
+    { channelId: CHANNEL, channelUrl: `https://www.youtube.com/watch?v=${VIDEO}` },
+    { channelId: CHANNEL, channel_id: 'UC' + 'b'.repeat(22) },
+    { channelId: CHANNEL, maxComments: 50, limit: 20 },
+    { channelId: CHANNEL, businessId: 'agent:fixture:data_query:youtube_channel_comments:youtube' },
+  ]) assert.throws(() => normalizeYoutubeCommentsRequest('channel', body), { code: 'invalid_youtube_comments_request' })
+})
+
+test('channel comments retain owner and video links across flattened, grouped and buffered responses', async () => {
+  const owner = 'UC' + 'b'.repeat(22), channelUrl = `https://www.youtube.com/channel/${owner}`
+  const h = await harness({ fetchImpl: call => Response.json(call.path.endsWith('get_channel_videos')
+    ? videos([VIDEO, VIDEO2]) : comments(call.params.video_id === VIDEO ? ['a', 'b', 'c'] : ['d'])) })
+  const body = { platform: 'youtube', channelId: owner, channelUrl: 'https://www.youtube.com/@fixture',
+    maxVideos: 2, maxComments: 2, includeRaw: false }
+  const first = await h.invoke(body, 'channel-links-first', 'channel')
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.calls[0].params.channel_id, owner)
+  assert.deepEqual((await h.invoke(body, 'channel-links-first', 'channel')).body, first.body)
+  assert.equal(h.calls.length, 2)
+  const second = await h.invoke({ ...body, cursor: first.body.data.page.nextCursor }, 'channel-links-second', 'channel')
+  assert.equal(h.calls.length, 3, 'Buffered video one comments must not be repurchased')
+  assert.deepEqual(second.body.data.items.map(row => [row.commentId, row.videoId]), [['c', VIDEO], ['d', VIDEO2]])
+  assert.equal(second.body.data.page.hasMore, false)
+  for (const result of [first, second]) {
+    const data = result.body.data
+    assert.deepEqual(data.channel, { channelId: owner, channelUrl })
+    assert.deepEqual(JSON.parse(data.raw_data), data.items)
+    assert.deepEqual(data.results.flatMap(row => row.comments), data.items)
+    for (const video of data.videos) {
+      assert.equal(video.channelId, owner); assert.equal(video.channelUrl, channelUrl)
+    }
+    for (const row of data.items) {
+      assert.equal(row.channelId, owner); assert.equal(row.channelUrl, channelUrl)
+      assert.equal(row.author.channelId, CHANNEL, 'Comment author is not the video channel owner')
+      assert.equal(row.raw, undefined)
+      assert.ok(data.videos.some(video => video.videoId === row.videoId))
+    }
+  }
 })
 
 test('single-video comments use one reviewed TikHub request, complete evidence, true comment records and immutable replay', async () => {
@@ -71,6 +120,7 @@ test('single-video comments use one reviewed TikHub request, complete evidence, 
   const first = await h.invoke({ postId: VIDEO, maxComments: 5 })
   assert.equal(first.status, 200); assert.equal(first.body.data.items[0].content, '完整评论 1')
   assert.equal(first.body.data.items[0].likeCount, 0); assert.equal(first.body.data.items[0].publishedAt, null)
+  assert.equal(first.body.data.items[0].channelId, undefined, 'Do not invent an owner from the commenter on single-video requests')
   assert.equal(h.calls[0].path, '/api/v1/youtube/web_v2/get_video_comments')
   assert.equal(h.calls[0].params.video_id, VIDEO); assert.equal(h.calls[0].params.need_format, 'true')
   assert.equal(h.calls.length, 1); assert.equal(h.platformStore.restrictedResponseArchives.size, 1)
@@ -121,6 +171,8 @@ test('channel screenshot shape resolves once, archives full video page and enfor
   assert.equal(JSON.parse(first.body.data.raw_data).length, 3)
   assert.equal(h.calls.length, 4)
   assert.equal(first.body.data.meta.channelHasMoreVideos, true)
+  assert.deepEqual(first.body.data.channel, { channelId: CHANNEL, channelUrl: body.channelUrl })
+  assert.ok(first.body.data.items.every(row => row.channelId === CHANNEL))
   assert.equal(h.platformStore.ingestJobs[1].payload.records.length, 3)
   const second = await h.invoke({ ...body, cursor: first.body.data.page.nextCursor }, 'youtube-channel-two', 'channel')
   assert.deepEqual(second.body.data.items.map(row => row.commentId), ['d'])
