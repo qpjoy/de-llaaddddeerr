@@ -269,6 +269,32 @@ test('stored aggregate applies all facets before paging, omits expensive totals,
   assert.equal(calls.length, 0)
 })
 
+test('RSS aggregate requires its own grant, preserves query/time filters and replays without upstream calls', async () => {
+  const searches = []
+  const { service, context, calls, store } = await setup({ platforms: ['rss'], searchQueries: { searchContent: async (query, options) => {
+    searches.push({ query, options })
+    return { mode: 'postgres', items: [{ id, datasetId: 'rss.articles.v1', platform: 'rss', objectType: 'article',
+      externalId: 'item:fixture', title: '实际问题', body: '文章全文', extensions: { feed: { privateToken: 'never-return' } } }], hasMore: false }
+  } } })
+  const input = { path: '/api/v1/data/aggregate/search', idempotencyKey: 'rss-intent', body: {
+    mode: 'stored', query: '实际问题', platforms: ['rss'], objectTypes: ['article'], pageSize: 20,
+    filters: { from: '2026-11-01T00:00:00.000+08:00', to: '2026-11-01T23:59:59.999+08:00' },
+  } }
+  const result = await service.aggregateSearch(context, input)
+  assert.equal(result.status, 200)
+  assert.equal(result.body.data.items[0].text, '文章全文')
+  assert.doesNotMatch(JSON.stringify(result.body), /never-return|privateToken/)
+  assert.equal(searches[0].query, '实际问题')
+  assert.deepEqual(searches[0].options.platforms, ['rss'])
+  assert.equal(searches[0].options.toTime, '2026-11-01T15:59:59.999Z')
+  assert.deepEqual((await service.aggregateSearch(context, input)).body, result.body)
+  assert.equal(searches.length, 1)
+  assert.equal(calls.length, 0)
+  assert.equal(store.requests.size, 1)
+  const denied = await setup({ platforms: ['telegram'] })
+  await assert.rejects(denied.service.aggregateSearch(denied.context, input), { code: 'platform_not_granted' })
+})
+
 test('marketplace selection maps to ecommerce authorization and exact stored facets', async () => {
   const searches = []
   const { service, context } = await setup({ platforms: ['ecommerce'], capabilities: ['ecommerce.products.search'], searchQueries: { searchContent: async (q, options) => {

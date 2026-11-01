@@ -36,10 +36,12 @@ function time(value, name) {
 export function aggregateSourceCatalog(grants, capabilities, crawlerSpecs = [], execution) {
   if (execution !== undefined && execution !== 'hub_only') fail('execution must be hub_only when specified')
   const crawlers = new Map(crawlerSpecs.map(spec => [spec.platform, spec]))
-  const supported = new Set([...NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS.raw, ...WECHAT_LEGACY_SEARCH_PLATFORMS, 'telegram', 'public_opinion', 'ecommerce', 'social', 'mobile_commerce', ...crawlers.keys()])
+  const supported = new Set([...NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS.raw, ...WECHAT_LEGACY_SEARCH_PLATFORMS, 'rss', 'telegram', 'public_opinion', 'ecommerce', 'social', 'mobile_commerce', ...crawlers.keys()])
   const wechatGranted = grants.includes('social') && capabilities.includes(WECHAT_SEARCH_OPERATION)
   const discovered = [...new Set([...grants, ...(wechatGranted ? WECHAT_LEGACY_SEARCH_PLATFORMS : [])])]
   return discovered.filter(platform => supported.has(platform)).sort().flatMap(platform => {
+    if (platform === 'rss') return { platform, label: 'RSS 订阅文章', stored: true, refresh: false,
+      objectTypes: ['article'], routes: [] }
     if (WECHAT_LEGACY_SEARCH_PLATFORMS.includes(platform)) {
       const objectType = platform === 'wechat_mp' ? 'article' : 'post'
       return { platform, label: labels[platform], stored: grants.includes(platform), refresh: wechatGranted,

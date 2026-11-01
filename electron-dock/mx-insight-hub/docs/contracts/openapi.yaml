@@ -6942,8 +6942,7 @@ paths:
         the aggregate cursor. Old WeChat aggregate cursors must restart explicitly. WeChat results are archived but
         not automatically ingested into canonical search. mode=stored performs one filtered canonical search, returns
         an opaque nextCursor and omits exact totals. objectTypes and platform selections are OR within a group; tags
-        require every exact tag. Date bounds are inclusive publication times, must include a timezone, and exclude
-        undated records. Current live routes reject non-empty tags/date filters before any acquisition. Reuse the
+        require every exact tag. Date bounds are inclusive eventTime values, must include a timezone, and exclude undated records. RSS requires the explicit rss platform grant and mode=stored; objectTypes=[article] selects migrated subscription articles. RSS eventTime preserves its effective time (normalizedAt, publishedAt, collectedAt, createdAt in that order; legacy rows use publishedAt, discoveredAt, createdAt). RSS does not fetch feeds during search, and excludes unmigrated local-file news. Existing canonical-search quota and pricing apply. Business identifiers are caller-side attribution, never search keywords. Current live routes reject non-empty tags/date filters before any acquisition. Reuse the
         same Idempotency-Key and body for retries. Each next page uses a new key; omit cursor with a new key to start
         a fresh acquisition round. Parent replay never expires or redispatches children; repeating a continuation
         with a different parent key still reuses the same round/page children. Partial and unknown outcomes are explicit
