@@ -1347,7 +1347,7 @@ test('memory provider-call audit records an unknown retry target only once and i
   )
 })
 
-test('endpoint contract quarantine is global while unknown fingerprints remain consumer-local', async () => {
+test('an unusable response does not quarantine another consumer on the same endpoint', async () => {
   const store = new MemoryExternalPlatformStore({
     usageStore: { requests: new Map() },
     uncertainCooldownMs: 60_000,
@@ -1373,8 +1373,7 @@ test('endpoint contract quarantine is global while unknown fingerprints remain c
     ownerRequestId: randomUUID(),
     expiresAt: new Date(Date.now() + 30_000),
   })
-  assert.equal(quarantined.kind, 'blocked')
-  assert.equal(quarantined.reason, 'succeeded_unusable')
+  assert.deepEqual(quarantined, { kind: 'acquired' })
 
   store.calls.clear()
   store.calls.set('unknown', {
@@ -1400,7 +1399,7 @@ test('endpoint contract quarantine is global while unknown fingerprints remain c
   assert.deepEqual(independentConsumer, { kind: 'acquired' })
 })
 
-test('endpoint upgrade releases Taobao V1 quarantine while unchanged JD V1 stays blocked', async () => {
+test('ended unusable Taobao and JD calls allow both upgraded and unchanged contracts', async () => {
   const store = new MemoryExternalPlatformStore({
     usageStore: { requests: new Map() },
     uncertainCooldownMs: 60_000,
@@ -1450,11 +1449,10 @@ test('endpoint upgrade releases Taobao V1 quarantine while unchanged JD V1 stays
     expiresAt: new Date(Date.now() + 30_000),
   })
 
-  assert.equal(unchanged.kind, 'blocked')
-  assert.equal(unchanged.reason, 'succeeded_unusable')
+  assert.deepEqual(unchanged, { kind: 'acquired' })
 })
 
-test('memory dispatch lease ignores ended unknown calls but still holds pending and unusable ones', async () => {
+test('memory dispatch lease ignores ended unknown and unusable calls but still holds pending ones', async () => {
   const consumerId = randomUUID()
   const retryOfRequestId = randomUUID()
   const completedAt = new Date().toISOString()
@@ -1507,12 +1505,14 @@ test('memory dispatch lease ignores ended unknown calls but still holds pending 
     fingerprint: OTHER_FINGERPRINT,
     outcome: 'succeeded_unusable',
   }))
-  assert.equal(unusableBlocked.kind, 'blocked')
-  assert.equal(unusableBlocked.reason, 'succeeded_unusable')
-  assert.equal(Date.parse(unusableBlocked.blockedUntil) - Date.parse(completedAt), 300_000)
+  assert.deepEqual(unusableBlocked, { kind: 'acquired' })
+  assert.deepEqual(await acquire(storeWith({ ...exactUnknown, id: 'future-unusable',
+    outcome: 'succeeded_unusable', completedAt: new Date(Date.now() + 3600000).toISOString() })), { kind: 'acquired' })
+  assert.deepEqual(await acquire(storeWith({ ...exactUnknown, id: 'unavailable-note',
+    outcome: 'succeeded_unusable', errorCode: 'upstream_note_unavailable' })), { kind: 'acquired' })
 })
 
-test('Postgres dispatch lease checks only pending calls and quarantined responses', async () => {
+test('Postgres dispatch lease retains pending checks with response cooldown disabled', async () => {
   const queries = []
   const completedAt = new Date('2026-09-03T00:00:00.000Z')
   const store = new PostgresExternalPlatformStore({
@@ -1555,7 +1555,8 @@ test('Postgres dispatch lease checks only pending calls and quarantined response
   assert.equal(queries[0].values[5], ENDPOINT_KEY)
   assert.equal(queries[0].values[6], CONTRACT_V1)
   assert.equal(queries[0].values[7], 'justone')
-  assert.equal(queries[0].values[8], 300)
+  assert.equal(queries[0].values[8], 0)
+  assert.match(queries[0].sql, /\$9::double precision > 0/u)
   assert.match(queries[0].sql, /call\.provider_key = \$8/u)
   assert.match(
     queries[0].sql,
@@ -1567,7 +1568,8 @@ test('Postgres dispatch lease checks only pending calls and quarantined response
     /call\.endpoint_key = \$6[\s\S]*?call\.contract_version = \$7[\s\S]*?call\.outcome = 'succeeded_unusable'/u,
   )
   assert.match(queries[0].sql, /call\.error_code IS DISTINCT FROM 'upstream_note_unavailable'/u)
-  assert.deepEqual(queries[1].values.slice(3), [ENDPOINT_KEY, 'justone', 300, CONTRACT_V1])
+  assert.deepEqual(queries[1].values.slice(3), [ENDPOINT_KEY, 'justone', 0, CONTRACT_V1])
+  assert.match(queries[1].sql, /\$6::double precision > 0/u)
   assert.match(queries[1].sql, /WHERE provider_key = \$5/u)
   assert.match(
     queries[1].sql,

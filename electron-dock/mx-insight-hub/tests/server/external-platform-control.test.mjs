@@ -126,13 +126,13 @@ test('missing env price evidence does not crash runtime provider construction', 
   assert.equal(tikHub.costControlError?.code, 'cost_control_incomplete')
 })
 
-test('provider response quarantine is a fixed five minutes and there is no unknown-call cooldown', () => {
+test('provider response quarantine and unknown-call cooldown are disabled', () => {
   for (const [prefix, parse] of [['JUSTONE', parseJustOneConfig], ['TIKHUB', parseTikHubConfig]]) {
     for (const environment of [{}, { [`MX_INSIGHT_${prefix}_RESPONSE_QUARANTINE_COOLDOWN_MS`]: '120000' },
       { [`MX_INSIGHT_${prefix}_UNKNOWN_FINGERPRINT_COOLDOWN_MS`]: '60000' },
       { [`MX_INSIGHT_${prefix}_RESPONSE_QUARANTINE_COOLDOWN_MS`]: 'invalid' }]) {
       const parsed = parse(environment)
-      assert.equal(parsed.responseQuarantineCooldownMs, 300_000)
+      assert.equal(parsed.responseQuarantineCooldownMs, 0)
       assert.equal(parsed.unknownFingerprintCooldownMs, undefined)
     }
   }

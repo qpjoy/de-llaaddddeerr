@@ -860,6 +860,7 @@ export class MemoryExternalPlatformStore {
                 && call.errorCode === 'upstream_note_unavailable'
               )
             )
+            && this.responseQuarantineCooldownMs > 0
             && new Date(call.completedAt).getTime() + this.responseQuarantineCooldownMs > now
           )
         )
@@ -2680,8 +2681,8 @@ export class PostgresExternalPlatformStore {
     if (twitterManualRetry && (operation !== 'social.content.search' || twitterManualRetry.usageRequestId !== ownerRequestId
       || twitterManualRetry.consumerId !== consumerId || twitterManualRetry.fingerprint !== fingerprint)) throw twitterRetryStore.twitterRetryDenied()
     if (twitterManualRetry) await this.validateTwitterManualRetry(twitterManualRetry)
-    // Only an equal call still in flight, or a recent paid response Hub could
-    // not use, holds a dispatch. An ended unknown call never blocks a new one.
+    // An equal call still in flight holds dispatch. Response quarantine is
+    // disabled by runtime configuration; retain explicit historical fixtures.
     const { rows } = await this.pool.query(
       `INSERT INTO external_platform.dispatch_leases
          (consumer_id, operation, request_fingerprint, owner_request_id, expires_at)
@@ -2719,6 +2720,7 @@ export class PostgresExternalPlatformStore {
                      AND call.error_code = 'upstream_note_unavailable'
                    )
                  )
+                 AND $9::double precision > 0
                  AND call.completed_at > now() - make_interval(secs => $9::double precision)
                )
              )
@@ -2795,6 +2797,7 @@ export class PostgresExternalPlatformStore {
                   AND error_code = 'upstream_note_unavailable'
                 )
               )
+              AND $6::double precision > 0
               AND completed_at > now() - make_interval(secs => $6::double precision)
             )
           )

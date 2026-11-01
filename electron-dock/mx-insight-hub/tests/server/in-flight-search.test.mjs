@@ -24,6 +24,6 @@ test('the retry hint is the remaining lease, at least one second and at most the
   assert.equal(inFlightRetryAfterSeconds(undefined, now), 300)
 })
 
-test('the response quarantine is a fixed five minutes', () => {
-  assert.equal(RESPONSE_QUARANTINE_MS, 300_000)
+test('response quarantine is disabled independently of the in-flight lease', () => {
+  assert.equal(RESPONSE_QUARANTINE_MS, 0)
 })

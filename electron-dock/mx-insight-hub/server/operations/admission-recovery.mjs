@@ -71,7 +71,7 @@ export class AdmissionRecoveryService {
       FROM external_platform.provider_calls call
       JOIN unnest($1::text[], $2::int[]) cfg(provider,response_ms) ON cfg.provider=call.provider_key
       JOIN usage_requests u ON u.id=call.usage_request_id
-      WHERE call.outcome='pending' OR (call.outcome='succeeded_unusable'
+      WHERE call.outcome='pending' OR (cfg.response_ms > 0 AND call.outcome='succeeded_unusable'
         AND call.completed_at + cfg.response_ms * interval '1 millisecond' > now()
         ${quarantineRecoverySql('call')})
       ORDER BY call.started_at DESC LIMIT 201`, [providerKeys, responseCooldowns])).rows

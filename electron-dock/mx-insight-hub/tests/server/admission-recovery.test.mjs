@@ -27,14 +27,14 @@ test('read-only limit query failures report actionable safe errors and release t
   }
 })
 
-async function fixture(t) {
+async function fixture(t, { responseQuarantineCooldownMs = 0 } = {}) {
   const { PGlite } = await import(pathToFileURL(modulePath).href)
   const db = new PGlite(); t.after(() => db.close())
   await db.exec(`CREATE SCHEMA control; CREATE SCHEMA external_platform;
     CREATE TABLE consumers(id uuid PRIMARY KEY,name text);
     CREATE TABLE api_keys(id uuid PRIMARY KEY,tenant_id uuid,consumer_id uuid,name text,status text,created_at timestamptz DEFAULT now(),scope_mode text DEFAULT 'snapshot',expires_at timestamptz DEFAULT now()+interval '1 day');
     CREATE TABLE usage_requests(id uuid PRIMARY KEY,api_key_id uuid,consumer_id uuid,tenant_id uuid,platform text,capability text,status text,
-      reserved_at timestamptz DEFAULT now(),lease_expires_at timestamptz DEFAULT now()+interval '2 minutes');
+      reserved_at timestamptz DEFAULT now(),lease_expires_at timestamptz DEFAULT now()+interval '2 minutes',fingerprint text);
     CREATE TABLE usage_request_authorization_scopes(usage_request_id uuid,scope_type text,scope_key text);
     CREATE TABLE external_platform.provider_calls(id uuid PRIMARY KEY,provider_key text,consumer_id uuid,operation text,endpoint_key text,
       contract_version text,request_fingerprint text,dispatch_fingerprint text,outcome text,error_code text,started_at timestamptz,
@@ -65,8 +65,8 @@ async function fixture(t) {
   await db.query("INSERT INTO api_keys(id,tenant_id,consumer_id,name,status) VALUES($1,$2,$3,'Fixture key','active')", [key,tenant,consumer])
   await db.query("INSERT INTO usage_requests(id,api_key_id,consumer_id,tenant_id,platform,status,reserved_at) VALUES($1,$2,$3,$4,'instagram','committed',now()-interval '10 seconds')", [request,key,consumer,tenant])
   const store = new PostgresStore(pool)
-  const service = new AdmissionRecoveryService({ pool, usageStore: store, providers: { tikhub: { cooldownMs:900000,burst:1 } } })
-  const platform = new PostgresExternalPlatformStore({ pool,providerKey:'tikhub',uncertainCooldownMs:900000,rateLimitBurst:1 })
+  const service = new AdmissionRecoveryService({ pool, usageStore: store, providers: { tikhub: { responseQuarantineCooldownMs,burst:1 } } })
+  const platform = new PostgresExternalPlatformStore({ pool,providerKey:'tikhub',responseQuarantineCooldownMs,rateLimitBurst:1 })
   const recover = row => service.recover(Object.fromEntries(Object.entries({ kind:row.kind,target:row.target,scopeType:row.scopeType,
     scopeKey:row.scopeKey,revision:row.revision,apiKeyId:key,reason:'Operator reviewed the parser fix' }).filter(([,v]) => v !== undefined)), { requestId:randomUUID() })
   const addCall = async (outcome='succeeded_unusable') => {
@@ -80,8 +80,8 @@ async function fixture(t) {
   return {db,pool,store,service,platform,tenant,consumer,key,request,recover,addCall,lease}
 }
 
-test('quarantine recovery changes dispatch admission but preserves the paid receipt and does not waive newer or unknown calls', {skip:!modulePath}, async t => {
-  const f=await fixture(t), callId=await f.addCall()
+test('explicit historical quarantine recovery preserves receipts and does not waive newer unusable calls', {skip:!modulePath}, async t => {
+  const f=await fixture(t, { responseQuarantineCooldownMs: 300000 }), callId=await f.addCall()
   assert.equal((await f.platform.acquireDispatchLease(f.lease)).kind,'blocked')
   const before=(await f.db.query('SELECT * FROM external_platform.provider_calls')).rows
   const row=(await f.service.snapshot({requestId:f.request})).items.find(row=>row.target===callId)
@@ -94,17 +94,31 @@ test('quarantine recovery changes dispatch admission but preserves the paid rece
   assert.deepEqual((await f.db.query('SELECT * FROM external_platform.provider_calls')).rows,before)
   await f.addCall('unknown')
   const unknown=(await f.service.snapshot()).items.find(row=>row.kind==='unknown')
-  assert.equal(unknown.recoverable,false)
-  await assert.rejects(f.recover(unknown), {status:400})
-  assert.equal((await f.platform.acquireDispatchLease(f.lease)).reason,'unknown')
+  assert.equal(unknown,undefined)
+  assert.equal((await f.platform.acquireDispatchLease(f.lease)).kind,'acquired')
+  await f.platform.releaseDispatchLease(f.lease)
   await f.addCall()
   assert.ok((await f.service.snapshot()).items.some(row=>row.kind==='response_quarantine'))
   assert.equal((await f.db.query('SELECT count(*)::int n FROM control.admission_recoveries')).rows[0].n,1)
 })
 
+test('disabled cooldown shows no quarantine or recovery action, retains receipts and still blocks pending dispatch', {skip:!modulePath}, async t => {
+  const f=await fixture(t), callId=await f.addCall()
+  await f.db.query("UPDATE external_platform.provider_calls SET completed_at=now()+interval '1 hour' WHERE id=$1", [callId])
+  const before=(await f.db.query('SELECT * FROM external_platform.provider_calls')).rows
+  assert.equal((await f.service.snapshot()).items.some(row=>row.kind==='response_quarantine'),false)
+  assert.equal((await f.platform.acquireDispatchLease(f.lease)).kind,'acquired')
+  await f.platform.releaseDispatchLease(f.lease)
+  assert.deepEqual((await f.db.query('SELECT * FROM external_platform.provider_calls')).rows,before)
+  assert.equal((await f.db.query('SELECT count(*)::int n FROM control.admission_recoveries')).rows[0].n,0)
+  await f.addCall('pending')
+  assert.equal((await f.platform.acquireDispatchLease(f.lease)).reason,'pending')
+  assert.ok((await f.service.snapshot()).items.some(row=>row.kind==='pending' && row.recoverable===false))
+})
+
 test('ordinary admission counts new reservations after a reset and still rejects the next over-limit request', {skip:!modulePath}, async t => {
   const f=await fixture(t)
-  await f.db.exec(`ALTER TABLE usage_requests ADD idempotency_key text, ADD fingerprint text, ADD billing_meter_key text,
+  await f.db.exec(`ALTER TABLE usage_requests ADD idempotency_key text, ADD billing_meter_key text,
     ADD authorization_scopes jsonb, ADD units_reserved int, ADD acquisition_request jsonb;
     CREATE TABLE usage_idempotency_bindings(tenant_id uuid,consumer_id uuid,idempotency_key text,api_key_id uuid,fingerprint text,current_request_id uuid,updated_at timestamptz);`)
   await f.db.query("INSERT INTO platform_grants VALUES($1,'instagram')",[f.consumer])
@@ -127,16 +141,16 @@ test('ordinary admission counts new reservations after a reset and still rejects
   assert.equal((await f.db.query('SELECT count(*)::int n FROM usage_requests')).rows[0].n,2)
 })
 
-test('memory, PostgreSQL admission and Admin countdown agree on five-minute parsing versus fifteen-minute unknown protection', {skip:!modulePath}, async t => {
+test('memory, PostgreSQL admission and Admin view agree that only pending calls hold dispatch', {skip:!modulePath}, async t => {
   const f=await fixture(t), callId=await f.addCall()
   const memory=new MemoryExternalPlatformStore({providerKey:'tikhub'})
-  for(const [outcome,code,age,blocked,seconds] of [
-    ['succeeded_unusable','invalid_instagram_search_shape',4,true,300],
-    ['succeeded_unusable','invalid_instagram_search_shape',6,false,300],
-    ['unknown','upstream_transport_error',6,true,900],
-    ['succeeded_unusable','upstream_note_unavailable',6,true,900],
-    ['unknown','upstream_transport_error',16,false,900],
-    ['pending',null,16,true,null],
+  for(const [outcome,code,age,blocked] of [
+    ['succeeded_unusable','invalid_instagram_search_shape',0,false],
+    ['succeeded_unusable','invalid_instagram_search_shape',6,false],
+    ['unknown','upstream_transport_error',6,false],
+    ['succeeded_unusable','upstream_note_unavailable',0,false],
+    ['unknown','upstream_transport_error',16,false],
+    ['pending',null,16,true],
   ]) {
     const row=(await f.db.query(`UPDATE external_platform.provider_calls SET outcome=$2,error_code=$3,
       completed_at=now()-$4*interval '1 minute' WHERE id=$1 RETURNING completed_at`,[callId,outcome,code,age])).rows[0]
@@ -148,10 +162,7 @@ test('memory, PostgreSQL admission and Admin countdown agree on five-minute pars
     assert.deepEqual(local,actual)
     const item=(await f.service.snapshot()).items.find(r=>r.target===callId)
     assert.equal(Boolean(item),blocked)
-    if(blocked&&seconds) {
-      assert.equal(Date.parse(actual.blockedUntil)-new Date(row.completed_at).getTime(),seconds*1000)
-      assert.equal(item.until,actual.blockedUntil)
-    }
+    if(blocked) assert.equal(actual.blockedUntil,null)
     await f.platform.releaseDispatchLease(f.lease)
     await memory.releaseDispatchLease(f.lease)
   }

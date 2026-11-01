@@ -607,7 +607,7 @@ test('runtime wires the TikHub burst cap into shared search and user-info admiss
   } finally { await closeRuntime(runtime) }
 })
 
-test('runtime applies the fixed five-minute response quarantine and no unknown cooldown across paid stores', async () => {
+test('runtime disables response quarantine and unknown cooldown across paid stores', async () => {
   // Retired deployment keys are ignored rather than changing protection.
   const runtime = await runtimeFor({ ...BASE,
     MX_INSIGHT_JUSTONE_RESPONSE_QUARANTINE_COOLDOWN_MS: '120000',
@@ -617,8 +617,9 @@ test('runtime applies the fixed five-minute response quarantine and no unknown c
   })
   try {
     for (const platform of [runtime.externalPlatformGateway.platformStore, runtime.xiaohongshuHotNotesStore,
-      runtime.tikHubPlatformStore, runtime.tikHubUserInfoGateway.platformStore]) {
-      assert.equal(platform.responseQuarantineCooldownMs, 300000)
+      runtime.tikHubPlatformStore, runtime.tikHubUserInfoGateway.platformStore, runtime.rapidApiStore,
+      ...Object.values(runtime.nativeSearchGateways).map(gateway => gateway.platformStore)]) {
+      assert.equal(platform.responseQuarantineCooldownMs, 0)
       assert.equal(platform.uncertainCooldownMs, undefined)
     }
   } finally { await closeRuntime(runtime) }
@@ -634,7 +635,7 @@ test('retired quarantine and unknown-cooldown settings cannot fail deploy prefli
     assert.doesNotThrow(() => preflight(environment))
     const config = loadConfig(environment)
     assert.equal(config[field].dispatchEnabled, baseline.dispatchEnabled)
-    assert.equal(config[field].responseQuarantineCooldownMs, 300000)
+    assert.equal(config[field].responseQuarantineCooldownMs, 0)
     const runtime = await createRuntime(config)
     try {
       assert.ok(runtime.service)

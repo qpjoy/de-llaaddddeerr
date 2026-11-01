@@ -7,9 +7,10 @@ export function quotaRecoverySql(kind, target, scopeType = "''", scopeKey = "''"
       AND recovery.scope_key = ${scopeKey}), '-infinity'::timestamptz)`
 }
 
-// A paid response Hub could not use (or a confirmed unavailable item) holds
-// equal dispatches briefly so callers are not charged repeatedly for it.
-export const RESPONSE_QUARANTINE_MS = 5 * 60_000
+// Ended unusable responses do not hold later requests. Keep the duration
+// interface for historical diagnostics; idempotency and in-flight leases
+// continue to prevent duplicate execution of an existing request.
+export const RESPONSE_QUARANTINE_MS = 0
 
 export function quarantineRecoverySql(alias = 'call') {
   return `AND NOT EXISTS (SELECT 1 FROM control.admission_recoveries recovery

@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { HubService } from '../../server/hub-service.mjs'
 import { createApp } from '../../server/app.mjs'
@@ -27,7 +28,7 @@ const MISSING = '{"data":{},"userExists":false}'
 const NOT_FOUND_BY_ID = JSON.stringify({ data: { users: [{ result: { __typename: 'UserUnavailable', reason: 'NotFound', message: 'User not found' } }] } })
 const fixedResponse = body => new Response(body, { headers: { 'content-type': 'application/json' } })
 
-async function harness(t, fetchImpl) {
+async function harness(t, fetchImpl, platformOptions = {}) {
   const calls = [], store = new MemoryStore()
   const service = new HubService({ store, apiKeyPepper: PEPPER, adapter: {
     async legacySearch() { throw new Error('Unexpected Night-All dispatch') },
@@ -62,7 +63,7 @@ async function harness(t, fetchImpl) {
     return fetchImpl(parsed, options)
   } })
   const platformStore = new MemoryExternalPlatformStore({ usageStore: store, providerKey: 'rapidapi',
-    authorizationPlatform: 'twitter', uncertainCooldownMs: 900000 })
+    authorizationPlatform: 'twitter', uncertainCooldownMs: 900000, ...platformOptions })
   const gateway = new ExternalPlatformGateway({ usageStore: store, platformStore, adapter, config, providerKey: 'rapidapi',
     apiKeyPepper: PEPPER, reservationLeaseMs: 150000, operationControlStore: controls, logger: { warn() {} } })
   const invoke = (operation, body, idempotencyKey) => gateway.socialAccountData(context,
@@ -70,6 +71,85 @@ async function harness(t, fetchImpl) {
   const providerCalls = () => [...platformStore.calls.values()].sort((a, b) => a.callOrdinal - b.callOrdinal)
   return { store, service, platformStore, gateway, key, calls, invoke, providerCalls }
 }
+
+test('an explicit historical quarantine fixture is not reported as an in-flight request', async t => {
+  const wire = '{"data":{"users":[{}]}}'
+  assert.equal(Buffer.byteLength(wire), 23)
+  assert.equal(createHash('sha256').update(wire).digest('hex'),
+    '5fa2d36df254afe1af3d16f5752a63928faf7d2264429d6060197295587715e4')
+  const h = await harness(t, () => fixedResponse(wire), { responseQuarantineCooldownMs: 300000 })
+  const body = { usernames: ['11'], count: 50, activityTypes: ['posts'] }
+  await assert.rejects(h.invoke('crawl', body, 'empty-user-original'), {
+    status: 502, code: 'external_platform_response_unusable',
+  })
+  const [call] = h.providerCalls()
+  assert.equal(call.outcome, 'succeeded_unusable')
+  assert.equal(call.billed, null)
+  assert.equal(h.calls[0].url.pathname, '/user/users/by/ids')
+  assert.equal(h.calls[0].params.ids, '11')
+  assert.equal(Buffer.from(h.platformStore.restrictedResponseArchives.get(call.id).bodyBytes).toString(), wire)
+  assert.equal(h.platformStore.leases.size, 0)
+  const original = structuredClone(h.store.requests.get(call.usageRequestId))
+  for (const key of ['empty-user-blocked', 'empty-user-blocked']) {
+    await assert.rejects(h.invoke('crawl', body, key), error => {
+      assert.equal(error.status, 409)
+      assert.equal(error.code, 'external_platform_response_unusable')
+      assert.equal(error.details.upstreamDispatched, false)
+      assert.equal(error.details.blockedUntil, new Date(Date.parse(call.completedAt) + 300000).toISOString())
+      assert.doesNotMatch(error.message, /in progress|pending/iu)
+      return true
+    })
+  }
+  await assert.rejects(h.invoke('crawl', body, 'empty-user-original'), {
+    status: 502, code: 'external_platform_response_unusable',
+  })
+  assert.equal(h.calls.length, 1) // No username fallback, tweets or retry purchase.
+  assert.equal(h.platformStore.calls.size, 1)
+  assert.equal(h.platformStore.leases.size, 0)
+  assert.deepEqual(h.store.requests.get(call.usageRequestId), original)
+  for (const usage of h.store.requests.values()) {
+    if (usage.idempotencyKey !== 'empty-user-blocked') continue
+    assert.equal(usage.status, 'released')
+    assert.equal(h.store.customerCharges.get(usage.id).status, 'released')
+  }
+})
+
+test('empty Twitter profile does not cool down a new request; original failure and new success remain idempotent', async t => {
+  const wire = '{"data":{"users":[{}]}}'
+  let attempts = 0
+  const h = await harness(t, url => ++attempts === 1 ? fixedResponse(wire)
+    : url.pathname === '/user/users/by/ids' ? Response.json(profile('fixture11', '11'))
+      : Response.json(timeline(['111'], 'fixture11', '11')))
+  const body = { usernames: ['11'], count: 50, activityTypes: ['posts'] }
+  assert.equal(h.platformStore.responseQuarantineCooldownMs, 0)
+  await assert.rejects(h.invoke('crawl', body, 'empty-user-first'), {
+    status: 502, code: 'external_platform_response_unusable',
+  })
+  const [firstCall] = h.providerCalls()
+  const firstUsage = h.store.requests.get(firstCall.usageRequestId)
+  const before = structuredClone({ call: firstCall, usage: firstUsage,
+    archive: h.platformStore.restrictedResponseArchives.get(firstCall.id),
+    charge: h.store.customerCharges.get(firstUsage.id) })
+  await assert.rejects(h.invoke('crawl', body, 'empty-user-first'), {
+    status: 502, code: 'external_platform_response_unusable',
+  })
+  assert.equal(h.calls.length, 1)
+  const result = await h.invoke('crawl', body, 'empty-user-new-intent')
+  assert.equal(result.status, 200)
+  assert.deepEqual(result.body.data.items.map(item => item.id), ['twitter:111'])
+  assert.deepEqual(h.calls.map(call => call.url.pathname),
+    ['/user/users/by/ids', '/user/users/by/ids', '/user/11/tweets'])
+  assert.deepEqual((await h.invoke('crawl', body, 'empty-user-new-intent')).body, result.body)
+  await assert.rejects(h.invoke('crawl', body, 'empty-user-first'), {
+    status: 502, code: 'external_platform_response_unusable',
+  })
+  assert.equal(h.calls.length, 3)
+  assert.equal(h.store.customerCharges.size, 2)
+  assert.equal(h.platformStore.leases.size, 0)
+  assert.deepEqual(structuredClone({ call: h.platformStore.calls.get(firstCall.id), usage: h.store.requests.get(firstUsage.id),
+    archive: h.platformStore.restrictedResponseArchives.get(firstCall.id),
+    charge: h.store.customerCharges.get(firstUsage.id) }), before)
+})
 
 test('only an explicit no-account answer to an ID lookup permits a username lookup', () => {
   assert.deepEqual(twitterAccountFailure(JSON.parse(NOT_FOUND_BY_ID)), { code: 'social_account_unavailable', reason: 'not_found' })

@@ -307,8 +307,7 @@ export function parseJustOneConfig(environment = process.env, {
     reservationLeaseMs,
     freshTtlMs,
     staleTtlMs,
-    // An ended unknown call never holds later dispatches; only unusable paid
-    // responses are quarantined, for a fixed built-in period.
+    // Ended unknown or unusable calls do not impose a dispatch cooldown.
     responseQuarantineCooldownMs: RESPONSE_QUARANTINE_MS,
     maxConcurrency,
     maxConsumerConcurrency,

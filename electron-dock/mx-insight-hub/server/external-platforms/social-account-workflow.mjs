@@ -229,7 +229,13 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             { consumerId: context.consumer.id, config: gateway.config, credentialConfigured: true, credentialRevision: credential.revision })
           const pendingLease = { ...parentLease, operation: expected.operation, endpointKey: expected.endpointKey, contractVersion: expected.contractVersion }
           const lease = await store.acquireDispatchLease(pendingLease)
-          if (lease !== true && lease?.kind !== 'acquired') throw new AppError(409, lease?.reason === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress', 'The acquisition is pending; inspect the original request')
+          if (lease !== true && lease?.kind !== 'acquired') {
+            if (lease?.reason === 'succeeded_unusable') throw new AppError(409, 'external_platform_response_unusable',
+              'A recent response could not be normalized; do not retry automatically',
+              { upstreamDispatched: false, blockedUntil: lease.blockedUntil || null })
+            throw new AppError(409, lease?.reason === 'unknown' ? 'request_outcome_unknown' : 'request_in_progress',
+              'The acquisition is pending; inspect the original request')
+          }
           childLease = pendingLease
           if (entered === 'exempt' && !bypassesSupplierLimits(context)) {
             leaveCapacity(entered); entered = false

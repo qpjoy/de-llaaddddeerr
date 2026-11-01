@@ -109,7 +109,7 @@ test('PG additional ended unknowns do not hold dispatch while pending calls stil
   assert.equal((await f.store.acquireDispatchLease(f.lease(f.next))).reason,'pending')
 })
 
-test('PG a current delivery lease and endpoint quarantine remain effective after disposition', options, async t => {
+test('PG a current delivery lease remains effective but ended unusable responses do not quarantine', options, async t => {
   const f = await fixture(t)
   await f.resolve()
   const owner = await f.addRequest('reserved'), current = f.lease(owner)
@@ -120,9 +120,13 @@ test('PG a current delivery lease and endpoint quarantine remain effective after
   await f.store.releaseDispatchLease(current)
   const rejected = await f.addRequest('released')
   await f.addCall(rejected,'succeeded_unusable')
-  const quarantined = await f.store.acquireDispatchLease(f.lease(f.next))
-  assert.equal(quarantined.reason,'succeeded_unusable')
-  assert.ok(Date.parse(quarantined.blockedUntil) - Date.now() <= 300_000)
+  const before = (await f.db.query('SELECT * FROM external_platform.provider_calls ORDER BY id')).rows
+  // A future recorded timestamp cannot turn a disabled cooldown into a hold.
+  await f.db.query("UPDATE external_platform.provider_calls SET completed_at=now()+interval '1 hour' WHERE outcome='succeeded_unusable'")
+  assert.equal((await f.store.acquireDispatchLease(f.lease(f.next))).kind, 'acquired')
+  await f.store.releaseDispatchLease(f.lease(f.next))
+  assert.deepEqual((await f.db.query('SELECT id,outcome FROM external_platform.provider_calls ORDER BY id')).rows,
+    before.map(({ id, outcome }) => ({ id, outcome })))
 })
 
 test('PG ended unknowns do not hold another API key, raw path or operation', options, async t => {

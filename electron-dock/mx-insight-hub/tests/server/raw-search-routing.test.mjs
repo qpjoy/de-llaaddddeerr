@@ -524,7 +524,7 @@ test('both search contracts deliver independently verified edited full text as o
   }
 })
 
-test('Weibo contract failures preserve a bounded cause and still suppress a second paid dispatch', async () => {
+test('Weibo contract failures preserve a bounded cause and allow a new request without endpoint quarantine', async () => {
   for (const [options, code] of [
     [{ malformed: true }, 'invalid_weibo_search_shape'],
     ...[undefined, null, [], { has_next_page: 'false' }, { unexpected: true }].map(pagination =>
@@ -543,8 +543,8 @@ test('Weibo contract failures preserve a bounded cause and still suppress a seco
     })
     assert.equal([...h.platformStore.calls.values()][0].errorCode, code)
     await assert.rejects(h.invokeData({ platform: 'weibo', query: '另一关键词', pageSize: 20 }, 'another-query-idempotency'),
-      { status: 409, code: 'external_platform_response_unusable' })
-    assert.equal(h.calls.length, 1)
+      { status: 502, code: 'external_platform_response_unusable' })
+    assert.equal(h.calls.length, 2)
     assert.equal(h.historical.length, 0)
   }
 })
@@ -2643,7 +2643,7 @@ test('Instagram strategy unknown replay is resolved before reading changed or un
   }
 })
 
-test('Instagram strategy falls back past an equal unknown but cannot bypass paid unusable dispatch via a primary-provider circuit', async () => {
+test('Instagram strategy retains the primary circuit and permits configured fallback without response quarantine', async () => {
   for (const route of ['invoke', 'invokeData']) {
     for (const justone of [{ searchFails: true }, { instagramData: { unexpected: [] } }]) {
       const h = await instagramStrategyHarness({ justone,
@@ -2653,18 +2653,17 @@ test('Instagram strategy falls back past an equal unknown but cannot bypass paid
       const providerState = await h.platformStore.providerState()
       const contractState = await h.platformStore.contractCircuitState('justone', 'instagram')
       assert.ok(providerState?.circuitOpenUntil || contractState?.circuitOpenUntil)
-      // An ended unknown does not hold a different key, which falls back past the open circuit.
-      // Contract quarantine still blocks paid unusable responses for every key and query.
+      // The primary stays circuit-open; a new request can use the already
+      // configured fallback without a separate ended-response quarantine.
       const differentKey = h[route](instagramBody, 'strategy-circuit-different-key')
-      if (justone.searchFails) assert.equal((await differentKey).status, 200)
-      else await assert.rejects(differentKey, { code: 'external_platform_response_unusable' })
+      assert.equal((await differentKey).status, 200)
       assert.equal(h.providers.justone.calls.length, 1)
-      assert.equal(h.providers.tikhub.calls.length, justone.searchFails ? 1 : 0)
+      assert.equal(h.providers.tikhub.calls.length, 1)
       assert.equal([...h.store.requests.values()][0].status, justone.searchFails ? 'unknown' : 'committed')
       const other = h[route]({ ...instagramBody, query: 'different strategy fixture' }, 'strategy-circuit-other-query')
-      if (justone.searchFails) assert.equal((await other).status, 200)
-      else await assert.rejects(other, { code: 'external_platform_response_unusable' })
-      assert.equal(h.providers.tikhub.calls.length, justone.searchFails ? 2 : 0)
+      assert.equal((await other).status, 200)
+      assert.equal(h.providers.justone.calls.length, 1)
+      assert.equal(h.providers.tikhub.calls.length, 2)
       assert.equal(h.platformStore.leases.size, 0)
     }
   }

@@ -86,6 +86,13 @@ Content-Type: application/json
 短页、空页或 `partial` 不代表耗尽；检查 `hasMore/nextCursor/warnings`。没有可用游标时停止自动续页；若同时出现 `pagination_completeness_unknown`，即使 `hasMore=false`、`nextCursor=null` 也只表示当前无法继续，不能确认数据耗尽。遇到服务限流或未知请求，保存原请求标识并先只读核对，不自动新建请求绕过保护。已有旧 Twitter `mxec2` 游标与精确旧幂等请求由原合同继续处理；新账号游标不与旧 Night-All、`data/search` 或其他操作互换。切换旧转发调用方时从第一页明确开始。
 
 `409 request_in_progress` 表示并发保护拒绝，不能解释为空结果或自动换键重试。
+2026-11-01 起取消不可用响应冷却：已结束的坏响应不再阻止后续新请求，同一幂等键的原失败仍精确回放。
+旧版本的 `409 external_platform_response_unusable` 表示近期不可用响应触发派发保护，并不表示原请求仍在执行；
+历史诊断分支返回 `details.upstreamDispatched=false` 和 `details.blockedUntil`。新版本默认不再进入此冷却分支。
+Twitter 返回 `{"data":{"users":[{}]}}` 仍是不可用资料，不能当作账号不存在或成功空结果，
+也不触发数字 ID 到用户名的自动回退。裸数字先查 ID；明确的数字用户名使用 `@11` 或 `https://x.com/11`。
+已执行请求改账号身份属于新查询，不能作为恢复旧 unknown 的手段。新请求仍执行幂等、在途去重、授权、速率、熔断和账务检查。
+具体证据和本地修复边界见 [Twitter 空资料与后续 409](../operations/twitter-empty-profile-409-2026-11-01.md)。
 `An equal request is already in progress` 来自同幂等键预留检查；
 `An equal account delivery is in progress` 来自同消费者、平台和请求指纹的账号交付锁，
 不同幂等键的相同账号/同页请求也会命中。后者错误里的 `requestId` 是被拒绝请求的账本ID，

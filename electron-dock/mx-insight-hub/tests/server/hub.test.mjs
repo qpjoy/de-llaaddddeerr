@@ -228,7 +228,7 @@ test('optional external-platform configuration keeps credentials off the admin p
   assert.equal(disabled.justOne.dispatchEnabled, false)
   assert.equal(disabled.justOne.configurationError, null)
   assert.equal(disabled.justOne.unknownFingerprintCooldownMs, undefined)
-  assert.equal(disabled.justOne.responseQuarantineCooldownMs, 300_000)
+  assert.equal(disabled.justOne.responseQuarantineCooldownMs, 0)
   assert.equal(disabled.justOne.billing.source, 'unknown')
   assert.equal(disabled.justOne.billing.freeDailyCalls, null)
 
