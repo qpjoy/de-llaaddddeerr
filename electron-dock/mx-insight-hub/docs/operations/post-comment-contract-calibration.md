@@ -1,6 +1,6 @@
 # 单帖评论：限定次数的服务器字段校验
 
-日期：2026-11-02。用户已确认 JustOne 余额为零，本页现使用 TikHub 采样（probe v2）；不要执行旧 JustOne 版本命令。配套脚本只用于核对评论响应字段，不能把成功的 HTTP、官方例子或搜索结果附带评论当成完整迁移验收。
+日期：2026-11-02。Twitter 原生校准与旧 URL 生产首屏验收均已完成，见本文末尾结果；保留所有标记，不再执行下方历史 Twitter 探测/验收命令。用户已确认 JustOne 余额为零，剩余平台使用 TikHub 候选校准（probe v2），不执行旧 JustOne 版本命令。原生 HTTP 成功、官方例子或搜索附带评论不能替代统一入口验收。
 
 `inspect-post-comment-contract.mjs` 只读 Hub 保存的供应商原始响应，不发 HTTP。`probe-post-comment-contract.mjs` 使用 Hub 已有原生转发入口，各平台只申请一次首屏，不直连供应商。当前固定 TikHub 的 Twitter、Reddit、快手三个平台，供本次已经授权的少量付费验证使用。Instagram 已有历史响应可先复用，不追加付费探测。
 
@@ -20,7 +20,7 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 
 ## 缺少归档时，每个平台只申请一次首屏
 
-在 Hub 所在宿主机运行，目标固定为 `http://127.0.0.1:18150`。脚本需要 Node 22，不需要把供应商密钥交给操作人。`MX_HUB_PROBE_API_KEY` 使用具有限定授权的正常生产 Hub Key，不能使用 `mih_test_` 或 environment=test 的 Key（原生付费端点会在预留前返回 test_key_not_supported）；应已有 `social` 平台和下面三个原生能力授权，以及可用的现有采购控制。脚本不创建授权、不启用采购、不修改余额或自动切换供应商。
+在 Hub 所在宿主机运行，目标固定为 `http://127.0.0.1:18150`。脚本需要 Node 22，不需要把供应商密钥交给操作人。`MX_HUB_PROBE_API_KEY` 使用具有限定授权的正常生产 Hub Key，不能使用 `mih_test_` 或 environment=test 的 Key（原生付费端点会在预留前返回 test_key_not_supported）；应已有 `social` 平台与本次目标对应的原生能力授权，以及可用的现有采购控制。脚本不创建授权、不启用采购、不修改余额或自动切换供应商。
 
 | 平台 | 固定原生能力 | 首屏供应商参数 |
 | --- | --- | --- |
@@ -28,38 +28,32 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 | Reddit | `native.t.api_c7f50cf300d63960` | `post_id`（`t3_` 前缀）、`need_format=false` |
 | 快手 | `native.t.api_3cb972ba91c8fe44` | `photo_id` |
 
-以上是待校准的 TikHub 替代端点，当前统一评论实现这三个平台仍固定为 JustOne，尚未切换。不能直接用 JustOne 的字段解析器处理 TikHub 响应；须先取得本页样本并核对正文、作者、时间及分页，再修改统一路由。只同步本页两个独立脚本即可采样，不需要为采样先部署统一评论改造。请在 Hub 管理台确认 TikHub 现有凭据可用，以及上表三个原生操作的审核价格和启用状态；不修改余额或扩大预算。若拒绝，贴回结果，不自动换渠道补买。
+Twitter 已切换 TikHub 并完成统一首屏验收；Reddit、快手的统一路由仍是 JustOne，上表对应 TikHub 端点尚待实际样本校准。不能直接用 JustOne 的字段解析器处理 TikHub 响应；先核对正文、作者、时间及分页，再修改对应统一路由。采样无需部署服务，需确认 TikHub 现有凭据、目标原生操作的审核价格和启用状态；不修改余额或扩大预算。若拒绝，贴回结果，不自动换渠道补买。
 
 从下游现有采样目录读取 `twitter-*.request.json`、`reddit-*.request.json`、`kuaishou-*.request.json`。只接受首屏、明确的平台和一致的帖子标识；正文中 `postId`、`contentId` 或可解析的原文 URL 均可。样本中的 `method`、目标 URL、headers、cursor、params、count 和幂等键都不会作为执行指令使用。若同平台存在不同帖子首屏，报 `ambiguous_sample`，应先选择一个样本目录。
 
-先预览，下面三条命令均不发 HTTP。将样本目录改为服务器上的实际位置：
+本轮已确认的防重记录根目录固定为 `/root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub`。此前的 `outputs/hub_comment_samples_20261102/minimal-contentId` 不是已确认的回执目录，不能因为输入文件在别处就改动防重目录。
 
-```bash
-node server/ops/probe-post-comment-contract.mjs --sample-dir outputs/hub_comment_samples_20261102/minimal-contentId --platform twitter
-node server/ops/probe-post-comment-contract.mjs --sample-dir outputs/hub_comment_samples_20261102/minimal-contentId --platform reddit
-node server/ops/probe-post-comment-contract.mjs --sample-dir outputs/hub_comment_samples_20261102/minimal-contentId --platform kuaishou
+Reddit、快手先确定真实首屏样本的绝对路径，检查原根目录中的 `reddit.json`、`kuaishou.json` 标记是否存在。若输入目录不同，通过导出 API 分别指定输入与记录目录；下面仅示意零 HTTP 预览，不是新的付费执行命令：
+
+```javascript
+const plan = await loadPostCommentProbeSample(actualInputDirectory, platform);
+const preview = await runPostCommentProbe({
+  plan,
+  sampleDirectory: '/root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub',
+  apply: false
+});
 ```
 
-预览结果必须显示 `revision=post-comment-contract-probe.v2`、`provider=tikhub` 和表内的 `t.*` 路径；否则仍是旧脚本，停止执行。
+预览结果必须显示 `revision=post-comment-contract-probe.v2`、`provider=tikhub` 和表内对应路径。之后用原 Hub Live Key 免费 GET capabilities，核对目标原生 capability 条目及 ready=true；原生授权平台为 social，不能仅凭过滤后的 platforms 列表判断授权。准备完成后每个平台最多发一个 Hub 首屏 POST，再读取同一归档；先 Reddit 后快手，不批量自动采购。遇到未知结果先查原回执，不能改幂等键再买。当前尚未取得这两个平台的真实目标，不能使用测试夹具里的占位 ID。
 
-在 Bash 中读入已有 Hub Key，先执行 Twitter；返回成功后再逐条执行需要的 Reddit、快手请求；每条最多 1 个 Hub HTTP 请求，三个平台总计最多 3 个。遇到未知结果时先查该请求，不能改幂等键再买：
+脚本在请求前以独占创建方式写入传入 sampleDirectory 下 `.hub-comment-contract-probes-v1/<平台>.json`，权限 `0600`，保存随机幂等键和请求状态，不保存 Key 或帖子标识。供应商改为 TikHub 后仍复用 v1 记录目录，避免更换脚本重置本轮额度。若已经执行过旧 JustOne 版本并返回 already_attempted，请先贴回旧标记摘要，核对确定结果后再安排测试，不删除标记。相同目录重复执行、并发执行、超时后执行都会因已有标记停止；不要删除标记或换目录绕过本次次数限制。返回结果只包含状态、白名单错误码、Hub requestId 和幂等键，不打印评论响应。该标记是本轮操作预算，不是跨服务器或跨目录的全局配额。
 
-```bash
-read -r -s -p 'Hub API Key: ' MX_HUB_PROBE_API_KEY
-export MX_HUB_PROBE_API_KEY
-node server/ops/probe-post-comment-contract.mjs --sample-dir outputs/hub_comment_samples_20261102/minimal-contentId --platform twitter --apply
-node server/ops/probe-post-comment-contract.mjs --sample-dir outputs/hub_comment_samples_20261102/minimal-contentId --platform reddit --apply
-node server/ops/probe-post-comment-contract.mjs --sample-dir outputs/hub_comment_samples_20261102/minimal-contentId --platform kuaishou --apply
-unset MX_HUB_PROBE_API_KEY
-```
-
-脚本在请求前以独占创建方式写入样本目录下 `.hub-comment-contract-probes-v1/<平台>.json`，权限 `0600`，保存随机幂等键和请求状态，不保存 Key 或帖子标识。供应商改为 TikHub 后仍复用 v1 记录目录，避免更换脚本重置本轮额度。若已经执行过旧 JustOne 版本并返回 already_attempted，请先贴回旧标记摘要，核对确定结果后再安排测试，不删除标记。相同目录重复执行、并发执行、超时后执行都会因已有标记停止；不要删除标记或换目录绕过本次次数限制。返回结果只包含状态、白名单错误码、Hub requestId 和幂等键，不打印评论响应。该标记是本轮操作预算，不是跨服务器或跨目录的全局配额。
-
-脚本不自动重试、不续页、不跟随重定向；55 秒超时按 `outcome_unknown` 处理，不推定未扣费。Hub 原有 LCY 优先机制可能对**明确未计费**的限流拒绝重试一次，本工具不更改该机制，因此“最多 3 个 Hub 请求”不等于“底层一定只有 3 次 HTTP”。它不会因该机制增加已计费的样本数。
+脚本不自动重试、不续页、不跟随重定向；55 秒超时按 `outcome_unknown` 处理，不推定未扣费。Hub 原有 LCY 优先机制可能对**明确未计费**的限流拒绝重试一次，本工具不更改该机制，因此“每个平台最多 1 个 Hub 请求”不等于“底层一定只有 1 次 HTTP”。它不会因该机制增加已计费的样本数。
 
 拿到每个平台的 `requestId` 后，逐个运行上面的只读检查，把 probe 简要结果和 inspection JSON 贴回即可。新脚本的 requestId 只取持久 usage 响应头或错误 details；顶层临时 HTTP UUID 单独保存为 httpRequestId，不能拿它查询用量归档。如果 `requestId:null`，保留本地标记中的幂等键进行后台查询，不能因此认定请求未发生。
 
-这轮样本核对不部署 Hub，不修改历史失败响应，不操作 MX-H2I 登录或联网配置。当前只是在已有原生转发入口校准 TikHub 格式，统一评论尚未改为 TikHub。字段映射与分页实现通过测试后才发布 Hub，并通过新的幂等键做首次业务验收；旧失败请求的不可变回放保持原结果。
+剩余平台的样本核对不部署 Hub、不修改历史失败响应、不操作 MX-H2I 登录或联网配置。Reddit、快手需先在原生转发入口校准 TikHub 格式，再完成字段/分页实现与回归、发布和统一入口验收；旧失败请求的不可变回放保持原结果。Twitter 已完成上述首屏流程，不重复执行。
 
 
 ## request_not_found 时先读原始采样结果
@@ -377,4 +371,44 @@ BASH
 
 预检失败会返回缺少的授权/就绪布尔状态，本次业务 POST 为 0。不要为预检便利而给业务 Key 自动增加原生授权。成功应同时看到响应 `verified=true` 和供应商证据 `verified=true`；允许实时评论数变化，不要求精确 20 或 36 条，不把未知分页当作结束。空页可为 contractValid=true、commentsObserved=false、verified=false，不把未观察到评论字段当成完整验收。供应商证据严格要求一条调用；如果既有 LCY 机制做了明确未计费的重试而产生多条记录，需人工核对，不直接判成业务失败。HTTP 200 但结构未通过、空页、超时、来源检查失败均保留现场，先查看回执再决定下一步。此脚本不修改授权、价格、开关、历史回执或 MX-H2I 配置。
 
-本地新增 11 项模拟验证及既有 probe/inspector 共 49 项测试通过，包括同一个运行时投影生成的响应、未知分页、空页证据边界、重复/并发防重、未授权零 POST、响应限长和脱敏。测试没有真实供应商请求；尚待用户执行此业务验收并回传结果。
+本地新增 11 项模拟验证及既有 probe/inspector 共 49 项测试通过，包括同一个运行时投影生成的响应、未知分页、空页证据边界、重复/并发防重、未授权零 POST、响应限长和脱敏。测试没有真实供应商请求；随后用户执行的生产业务验收结果见下一节。
+
+
+### Twitter 统一入口首屏验收已通过
+
+用户回传 usage `d167ad9e-48b4-4668-bcd3-8b1d6ef2aeb0`，验收幂等键 `twitter-comments-acceptance-v1-039b7bf5-3115-48bd-9a13-a84bcba53d7f`，bodySha256 `12f977e4bfd098049d1018cdec50333021c5ac9e9f55a3f9099382e8b3ae8387`。`/api/v1/search/post-comments` HTTP 200，verified/contractValid/commentsObserved 均为 true；contract/items/identities/fields/acquisition/pagination 检查全部通过，returnedCount=20。免费预检的 twitterGranted/commentsGranted/twitterNativeReady 均为 true，业务 POST 恰好一次。
+
+同一 usage 的只读证据 verified=true、status=committed、HTTP 200；恰好一条 provider=tikhub、platform=twitter、endpoint=native.t.api_3cd88a6621a01120、outcome=succeeded、billed=true 的供应商调用，archiveVerified=true。第二份摘要的 supplierHttpCallsMade=0、databaseWritesMade=0 只指账本检查本身；前面的业务采集已正常计费一次。
+
+pagination 为 hasMore=true、continuationAvailable=true、paginationStatus=continuable。结合已部署的单供应商页工作流，这表示已有已购缓存余量；本次新归档总条数未输出，不能照搬此前原生样本的 36 条，也不能推断下一供应商页必有数据。此次线上范围是首屏，后续交付/续页/回放仍依据已有本地回归，没有额外线上请求。
+
+Twitter 首屏修复至此闭环，下游继续使用原 URL，带 twitter + social.comments.list 授权；正常新采集使用独立幂等键，同一请求重试保持原键与请求体，旧 404 回执不改写。保留 twitter.unified-acceptance.json 及原有三个原生采样标记，不再执行上述 Twitter 探测或验收命令。剩余九个 JustOne 平台未因此恢复；下一步先取得 Reddit、快手真实样本路径或帖子标识，再预览、免费预检和限定首屏采样。
+
+### Reddit、快手：先从服务器查找真实目标
+
+用户已授权继续：可从服务器已有记录查找，找不到时可新采集一个目标。当前没有可用的 Internal SSH 配置，本机 kubectl 指向 Docker Desktop；不要把本机集群查询误当作服务器结果。沿用操作员在服务器执行命令的方式。
+
+同步新增 `server/ops/find-post-comment-samples.mjs` 即可，无需部署、Key 或供应商请求：
+
+```bash
+bash <<'BASH'
+set -e
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - < server/ops/find-post-comment-samples.mjs
+BASH
+```
+
+默认输出版本 post-comment-sample-discovery.v1，每个平台只报告 found / not_found_in_bounded_scan / discovery_incomplete、来源类型与 Hub 源记录 UUID，以及各阶段查询状态。不会输出平台帖子 ID、URL、正文、作者或凭据。supplierHttpCallsMade=0、databaseWritesMade=0。
+
+查找顺序：
+
+1. 旧故障 af456ad4-2523-4f73-a1fc-c95104b329a4 时间前后各一小时，最多取 5000 条 usage ID；再查最近 5000 条。先通过 created_at 索引取得有界切片，之后筛选两个平台和三个已知评论路径，最多各 50 条匹配请求。仅接受明确首屏，保留字段冲突/不安全数字拒绝；params={} 可以使用。
+2. 没找到的平台，查询 night-all.search.v1 / night-all.compat.v1 下 object_type=post、未删除的规范记录，按现有 dataset+platform+event_time 索引各取至多 50 条，在内存优先选已保存评论数大于零的候选。评论数可能过时，不保证实时非空。
+3. Reddit 优先使用规范 external_id（剥离 t3_）；其 URL 可能指向站外文章。快手仅从已保存的 kuaishou.com 作品 URL 解析 photoId，不能把内部 numeric cid 当作 TikHub photo_id，也不拼接冲突的 ID 与 URL。
+
+整个事务 READ ONLY，单查询 4 秒、锁等待 1 秒；某一来源超时/缺表时回滚到 savepoint，继续独立来源并标注 incomplete。没有结果只说明有界范围内未找到，不能据此声称全库不存在。没有 DDL、写入或回执变更。
+
+found 后使用 `--prepare reddit` 或 `--prepare kuaishou` 在后续包装脚本内私下取得最小样本；此模式会含帖子 ID，不直接贴到聊天。样本只决定固定评论端点的帖子参数，不采纳保存请求中的 URL 目的地、headers、count、cursor、params 或业务标签。采购标记始终使用已确认 Hub 根目录，先免费检查目标 native capability/readiness，再每个平台至多一页；旧 Twitter 全部记录继续保留。
+
+若查不到合适目标，按既有授权准备新目标采集：优先已实现投影的 Reddit 帖子检索（按评论排序）与快手综合搜索，最多各一页，再从返回的真实原帖标识校准评论，不自动续页。候选检索仍经过现有凭据、授权、预算及防重复控制，不把检索附带评论作为单帖评论能力。此处尚未执行服务器查找或任何新付费请求，也未切换 Reddit/快手统一路由。
