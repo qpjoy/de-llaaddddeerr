@@ -1,0 +1,246 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { projectPostCommentPage, POST_COMMENT_PROJECTION_PLATFORMS } from '../../server/contracts/post-comment-projection.mjs'
+import { canonicalJson } from '../../server/ingest/normalizers.mjs'
+import { normalizePostCommentsRequest, buildPostCommentsDispatch } from '../../server/contracts/post-comments.mjs'
+
+const capturedAt = '2026-11-02T00:00:00.000Z'
+const note = '675d277d000000000600e655'
+const step = (platform, postId, options = {}) => ({ provider: 'tikhub', postComments: {
+  request: { platform, postId, includeRaw: false, ...options.request }, continuation: options.continuation } })
+const project = (data, dispatch) => projectPostCommentPage({ code: 200, data }, dispatch, { capturedAt })
+const instagram = { pk: '18000000000000001', media_id: '3440000000000000001',
+  text: '  完整评论😀\n第二行  ', created_at: 1791777600, comment_like_count: 0, child_comment_count: 1,
+  user: { pk: 1234567890, id: '1234567890', username: 'fixture_commenter' },
+  preview_child_comments: [{ pk: 'child1', text: 'not a top-level comment' }],
+  has_more_head_child_comments: true, has_more_tail_child_comments: false }
+
+test('Instagram observed terminal shape preserves full comment and canonical parent identity', () => {
+  const data = { status: 'ok', comments: [instagram], has_more_comments: false, comment_count: 2,
+    caption: { pk: 'caption', text: 'original post, not a comment' } }
+  const result = project(data, step('instagram', 'fixtureCode'))
+  const row = result.projected.acquiredItems[0], record = result.records[0]
+  assert.equal(result.projected.acquiredItems.length, 1)
+  assert.equal(row.commentId, instagram.pk)
+  assert.equal(row.content_id, instagram.pk)
+  assert.equal(row.postId, 'fixtureCode')
+  assert.equal(row.contentId, 'fixtureCode')
+  assert.equal(row.full_text, instagram.text)
+  assert.equal(row.like_count, 0)
+  assert.equal(row.reply_count, 1)
+  assert.equal(row.author.id, '1234567890')
+  assert.equal(row.repliesIncluded, false)
+  assert.equal(Object.hasOwn(row, 'raw'), false)
+  assert.equal(record.body, instagram.text)
+  assert.equal(record.objectType, 'comment')
+  assert.equal(record.contentType, 'comment')
+  assert.equal(record.stableFields.attributes.parentExternalId, 'fixtureCode')
+  assert.deepEqual(record.rawItem, instagram)
+  assert.equal(record.rawPayloadSha256, createHash('sha256').update(canonicalJson(instagram)).digest('hex'))
+  assert.deepEqual(result.projected.providerPage, { hasMore: false, nextParams: null, nextPage: null })
+})
+
+test('Instagram JSON cursor remains opaque and repeated or absent continuation is explicitly unknown', () => {
+  const cursor = '{"cached_comments_cursor":"next+/==&page=2","bifilter_token":"opaque\\token"}'
+  const data = { status: 'ok', comments: [instagram], has_more_comments: true, next_min_id: cursor }
+  assert.deepEqual(project(data, step('instagram', 'fixtureCode')).projected.providerPage.nextParams, { min_id: cursor })
+  for (const [payload, dispatch] of [[data, step('instagram', 'fixtureCode', { continuation: { min_id: cursor } })],
+    [{ ...data, next_min_id: null }, step('instagram', 'fixtureCode')]]) {
+    const page = project(payload, dispatch).projected.providerPage
+    assert.equal(page.hasMore, false)
+    assert.equal(page.stopReason, 'continuation_unproven')
+  }
+  assert.equal(project({ ...data, has_more_comments: false }, step('instagram', 'fixtureCode')).projected.providerPage.nextParams, null)
+})
+
+test('Instagram invalid success envelopes and unsafe IDs fail instead of returning false empty success', () => {
+  for (const data of [{ status: 'fail', comments: [] }, { status: 'ok', comments: 'comments' },
+    { status: 'ok', comments: [{ ...instagram, pk: 9007199254740992 }] },
+    { status: 'ok', comments: [{ ...instagram, user: { pk: 9007199254740992 } }] }]) {
+    assert.throws(() => project(data, step('instagram', 'fixtureCode')), { code: 'invalid_upstream_contract' })
+  }
+})
+
+test('XHS uses released full fields and compound pagination while archiving embedded replies', () => {
+  const raw = { id: 'comment1', note_id: note, content: '长正文'.repeat(1000), create_time: 1791777600,
+    like_count: '12', sub_comment_count: 1, user_info: { user_id: 'author', nickname: '作者' },
+    pictures: [{ url: 'https://example.invalid/photo.jpg?signature=retained' }],
+    sub_comments: [{ id: 'reply1', content: 'nested', note_id: note }] }
+  const result = project({ code: 0, success: true, data: { comments: [raw], has_more: true,
+    cursor: 'next-token', index: 2, pageArea: 'ALL' } }, step('xiaohongshu', note))
+  const row = result.projected.acquiredItems[0]
+  assert.equal(result.records.length, 1, 'only top-level acquired comments enter this operation')
+  assert.equal(row.content.length, 3000)
+  assert.equal(row.media[0].url, raw.pictures[0].url)
+  assert.equal(row.author.id, 'author')
+  assert.equal(row.like_count, 12)
+  assert.deepEqual(result.records[0].rawItem.sub_comments, raw.sub_comments)
+  assert.deepEqual(result.projected.providerPage.nextParams, { cursor: 'next-token', index: '2', pageArea: 'ALL' })
+  assert.equal(result.records[0].stableFields.attributes.rootExternalId, note)
+})
+
+test('XHS missing continuation remains unknown and unrelated note identity fails', () => {
+  const data = { code: 0, data: { comments: [{ id: 'comment', content: 'body' }], has_more: true, cursor: 'next' } }
+  assert.equal(project(data, step('xiaohongshu', note)).projected.providerPage.stopReason, 'continuation_unproven')
+  data.data.comments[0].note_id = '675d277d000000000600e656'
+  assert.throws(() => project(data, step('xiaohongshu', note)), { code: 'invalid_upstream_contract' })
+})
+
+test('YouTube preserves relative publication evidence without inventing a timestamp', () => {
+  const raw = { comment_id: 'comment1', content: 'body', published_time: '2 days ago', like_count: '0',
+    reply_count: 3, author: { channel_id: 'UC' + 'a'.repeat(22), display_name: '作者' } }
+  const result = project({ comments: [raw], continuation_token: 'opaque+/==' }, step('youtube', 'dQw4w9WgXcQ', { request: { includeRaw: true } }))
+  const row = result.projected.acquiredItems[0]
+  assert.equal(row.publishedAt, null)
+  assert.equal(row.publishedTime, '2 days ago')
+  assert.equal(row.postId, 'dQw4w9WgXcQ')
+  assert.equal(row.videoId, 'dQw4w9WgXcQ')
+  assert.deepEqual(row.raw, raw)
+  assert.deepEqual(result.projected.providerPage.nextParams, { continuation_token: 'opaque+/==' })
+  assert.equal(result.records[0].objectType, 'comment')
+  assert.equal(project({ comments: [], continuation_token: null }, step('youtube', 'dQw4w9WgXcQ')).projected.providerPage.hasMore, false)
+  assert.equal(project({ comments: [] }, step('youtube', 'dQw4w9WgXcQ')).projected.providerPage.stopReason, 'continuation_unproven')
+})
+
+test('complete paid page remains available for buffering instead of truncating to client count', () => {
+  const rows = Array.from({ length: 25 }, (_, index) => ({ ...instagram, pk: String(index) }))
+  const result = project({ status: 'ok', comments: rows, has_more_comments: false },
+    step('instagram', 'fixtureCode', { request: { count: 20 } }))
+  assert.equal(result.projected.acquiredItems.length, 25)
+  assert.equal(result.records.length, 25)
+})
+
+test('unknown platform and cross-provider success shapes fail closed', () => {
+  assert.equal(POST_COMMENT_PROJECTION_PLATFORMS.length, 13)
+  assert.throws(() => project({ comments: [] }, step('unknown', 'post')), { code: 'external_platform_contract_unverified' })
+  assert.throws(() => project({ timeline: [] }, step('twitter', 'post')), { code: 'invalid_upstream_contract' })
+})
+
+// Anonymous shapes from the 2026-11-02 official JustOne documentation examples,
+// GET https://api.justoneapi.com/status/api-example/detail?api=<endpoint path>.
+// These represent observed field layout, not a paid Hub production verification.
+const justoneShapes = {
+  twitter: { status: 'ok', timeline: [{ type: 'tweet', tweet_id: '1234567890123456789', text: '完整评论',
+    created_at: 'Thu Jan 16 13:49:31 +0000 2025', favorites: 3, replies: 1, conversation_id: '123',
+    in_reply_to_status_id_str: 'other-comment', user_info: { rest_id: 'author1', name: '作者', screen_name: 'fixture' } }], next_cursor: 'next' },
+  reddit: { postInfoById: { id: 't3_123', commentForest: { pageInfo: { hasNextPage: true }, trees: [
+    { depth: 0, parentId: null, childCount: 1, more: null, node: { __typename: 'Comment', id: 't1_456',
+      content: { markdown: '完整评论', preview: '短预览' }, authorInfo: { id: 't2_author', name: '作者' },
+      createdAt: '2026-01-10T15:21:49.595000+0000', score: 1, permalink: '/r/test/comments/123/title/456/' } },
+    { node: null, more: { cursor: 'next' }, depth: 0, parentId: null, childCount: 2 },
+  ] } } },
+  kuaishou: { result: 1, rootComments: [{ comment_id: 456, content: '完整评论', timestamp: 1775303332905,
+    author_id: 1234, user_id: 5678, author_name: '作者', likedCount: 2, subCommentCount: 1,
+    photo_id: 5232620009155772228 }], pcursor: 'next', subCommentsMap: { 456: { subComments: [{ content: '预览回复' }] } } },
+  weibo: { ok: 1, data: [{ idstr: '456', text_raw: '完整评论', text: '<p>完整评论</p>',
+    created_at: 'Wed Mar 18 09:53:26 +0800 2026', user: { idstr: 'author', screen_name: '作者' },
+    like_counts: 0, total_number: 3, comments: [{ text: '预览回复' }] }], max_id: 5277493566112993 },
+  douyin: { status_code: 0, comments: [{ cid: '456', aweme_id: '123', text: '完整评论', create_time: 1791777600,
+    digg_count: 1, reply_comment_total: 4, user: { uid: 'author', nickname: '作者' } }], cursor: 20, has_more: 1 },
+  tiktok: { status_code: 0, comments: [{ cid: '456', aweme_id: '123', text: '完整评论', create_time: 1791777600,
+    digg_count: 1, reply_comment_total: 4, user: { uid: 'author', nickname: '作者' } }], cursor: 20, has_more: 1 },
+  zhihu: { data: [{ id: '456', content: '<p>完整评论</p>', created_time: 1791777600,
+    author: { id: 'author', name: '作者' }, like_count: 1, child_comment_count: 3, dislike_count: 2 }],
+    paging: { is_end: false, next: 'https://www.zhihu.com/api/v4/comment_v5/answers/123/root_comment?offset=opaque-next' } },
+  linkedin: { data: [{ text: '完整评论', created_at: 1732655923782, replies: [], thread_urn: null,
+    commenter: { urn: 'author', name: '作者' },
+    permalink: 'https://www.linkedin.com/feed/update/urn:li:activity:123?commentUrn=urn%3Ali%3Acomment%3A%28activity%3A123%2C456%29' }],
+    pagination_token: 'next', total: 1 },
+  bilibili: { code: 0, data: { replies: [{ rpid_str: '456', oid_str: '123', content: { message: '完整评论' },
+    member: { mid: 'author', uname: '作者' }, ctime: 1791777600, like: 1, rcount: 2 }],
+    cursor: { is_end: false, pagination_reply: { next_offset: 'next' } } } },
+  facebook: { results: [{ type: 'comment', comment_id: 'encoded-comment', legacy_comment_id: '456',
+    depth: 0, parent_comment_id: null, message: '完整评论', created_time: 1791777600,
+    author: { id: 'author', name: '作者' }, reactions_count: '0', replies_count: 1 }], cursor: 'next' },
+}
+const expectedNext = { twitter: { cursor: 'next' }, reddit: { cursor: 'next' }, kuaishou: { pcursor: 'next' },
+  weibo: { maxId: '5277493566112993' }, douyin: { page: 2 }, tiktok: { cursor: '20' }, zhihu: { offset: 'opaque-next' },
+  linkedin: { page: 2, paginationToken: 'next' }, bilibili: { cursor: 'next' }, facebook: { cursor: 'next' } }
+function justoneProject(platform, data = justoneShapes[platform], options = {}) {
+  const dispatch = step(platform, '123', options)
+  dispatch.provider = 'justone'
+  return projectPostCommentPage({ code: 0, data }, dispatch, { capturedAt })
+}
+for (const platform of Object.keys(justoneShapes)) {
+  test(`${platform} official sample shape produces stable comment fields and provider-specific continuation`, () => {
+    const result = justoneProject(platform), row = result.projected.acquiredItems[0], record = result.records[0]
+    assert.equal(result.projected.acquiredItems.length, 1)
+    assert.equal(row.postId, '123')
+    assert.equal(row.contentId, '123')
+    assert.ok(row.commentId)
+    assert.equal(row.content_id, row.commentId)
+    assert.equal(row.author.name, '作者')
+    assert.equal(row.full_text.includes('完整评论'), true)
+    assert.ok(row.publishedAt)
+    assert.equal(record.objectType, 'comment')
+    assert.equal(record.stableFields.connectorId, 'external-platform:justone')
+    assert.equal(record.stableFields.attributes.rootExternalId, '123')
+    assert.deepEqual(result.projected.providerPage.nextParams, expectedNext[platform])
+  })
+}
+
+test('supplier-returned descendant keeps its real parent while contentId remains root post', () => {
+  const result = justoneProject('twitter')
+  assert.equal(result.projected.acquiredItems[0].parentCommentId, 'other-comment')
+  assert.equal(result.records[0].stableFields.attributes.parentExternalId, 'other-comment')
+  assert.equal(result.projected.acquiredItems[0].contentId, '123')
+  assert.equal(result.projected.acquiredItems[0].repliesIncluded, true)
+  const twitter = structuredClone(justoneShapes.twitter)
+  twitter.timeline.unshift({ ...twitter.timeline[0], tweet_id: '123', in_reply_to_status_id_str: null })
+  assert.equal(justoneProject('twitter', twitter).projected.acquiredItems.length, 1, 'original post is context, not a comment')
+  const reddit = structuredClone(justoneShapes.reddit)
+  reddit.postInfoById.commentForest.trees[0].parentId = 't3_123'
+  assert.equal(justoneProject('reddit', reddit).projected.acquiredItems[0].parentCommentId, null)
+})
+
+test('known terminal fields override residual tokens while missing and repeated tokens remain unknown', () => {
+  assert.equal(justoneProject('kuaishou', { ...justoneShapes.kuaishou, pcursor: 'no_more' }).projected.providerPage.hasMore, false)
+  assert.equal(justoneProject('tiktok', { ...justoneShapes.tiktok, has_more: 0 }).projected.providerPage.hasMore, false)
+  assert.equal(justoneProject('weibo', { ...justoneShapes.weibo, max_id: 0 }).projected.providerPage.hasMore, false)
+  assert.equal(justoneProject('twitter', justoneShapes.twitter, { continuation: { cursor: 'next' } }).projected.providerPage.stopReason, 'continuation_unproven')
+  const missing = structuredClone(justoneShapes.reddit)
+  delete missing.postInfoById.commentForest.pageInfo
+  missing.postInfoById.commentForest.trees.pop()
+  assert.equal(justoneProject('reddit', missing).projected.providerPage.stopReason, 'continuation_unproven')
+})
+
+test('post mismatches and unsafe comment identifiers fail, but unrelated unsafe photo metadata is not used as identity', () => {
+  assert.equal(justoneProject('kuaishou').projected.acquiredItems[0].postId, '123')
+  const data = structuredClone(justoneShapes.kuaishou)
+  data.rootComments[0].comment_id = 9007199254740992
+  assert.throws(() => justoneProject('kuaishou', data), { code: 'invalid_upstream_contract' })
+  const twitter = structuredClone(justoneShapes.twitter)
+  twitter.timeline[0].conversation_id = 'wrong-post'
+  assert.throws(() => justoneProject('twitter', twitter), { code: 'invalid_upstream_contract' })
+  const zhihu = structuredClone(justoneShapes.zhihu)
+  zhihu.paging.next = 'https://attacker.invalid/api?offset=next'
+  assert.throws(() => justoneProject('zhihu', zhihu), { code: 'invalid_upstream_contract' })
+})
+
+test('Facebook sticker-only comment has an explicit null body and retained media', () => {
+  const data = structuredClone(justoneShapes.facebook)
+  Object.assign(data.results[0], { message: null, is_sticker: true,
+    sticker: { image: { uri: 'https://example.invalid/sticker.webp?signed=preserved', width: 160, height: 160 } } })
+  const result = justoneProject('facebook', data)
+  assert.equal(result.projected.acquiredItems[0].content, null)
+  assert.equal(result.projected.acquiredItems[0].media[0].url, data.results[0].sticker.image.uri)
+  assert.equal(result.records[0].body, null)
+  assert.equal(result.projected.acquiredItems[0].like_count, null)
+  assert.equal(result.projected.acquiredItems[0].metrics.reactions, 0, 'all reactions are not relabeled as likes')
+  const reddit = structuredClone(justoneShapes.reddit)
+  reddit.postInfoById.commentForest.trees[0].node.score = -3
+  assert.equal(justoneProject('reddit', reddit).projected.acquiredItems[0].metrics.score, -3)
+})
+
+for (const platform of Object.keys(justoneShapes)) {
+  test(`${platform} projected continuation rebuilds the fixed native request`, () => {
+    const request = normalizePostCommentsRequest({ platform, postId: '123' })
+    const first = buildPostCommentsDispatch(request)
+    const result = projectPostCommentPage({ code: 0, data: justoneShapes[platform] }, first, { capturedAt })
+    const next = buildPostCommentsDispatch(request, { providerCursor: result.projected.providerPage.nextParams })
+    assert.equal(next.provider, 'justone')
+    assert.equal(next.endpointPath, first.endpointPath)
+    for (const [field, value] of Object.entries(expectedNext[platform])) assert.equal(String(next.upstreamQuery[field]), String(value))
+  })
+}

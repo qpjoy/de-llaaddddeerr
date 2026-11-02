@@ -405,3 +405,8 @@ Internal（`100.127.0.6`）经 VPN 访问 Night-All-A。Public 是 hostNetwork�
 2. 在 Internal 上确认可达且账号可用（只读，不触发采集）：`curl -s http://100.127.0.1:8100/api/health`；`curl -s 'http://100.127.0.1:8100/api/runs?connector_id=facebook-protocol&limit=5'`。`search.posts` **需要登录**：Night-All-A 必须为 facebook-protocol 配好有效 Cookie 会话和网络出口（见 Night-All-A `collectors/protocol/facebook/README.md`）；2026-10-12 文档记载登录能力尚未实测。
 3. 「策略搜索 → 管理 → 内容搜索 / Facebook」选「自建：仅 Night-All-A」，按需调整「同时在途上限」「每分钟最多启动」，填写原因并保存。
 4. 用一次真实搜索验收；页面上的在途数、排队数、最近启动时间应随之变化。
+
+
+## 12. 单帖评论的执行归属（2026-11-02）
+
+`/api/v1/data/social/post-comments` 与两个旧 search/post-comments 入口的新采集由 Hub 固定供应商合同执行，覆盖 13 平台。复用现有供应商准入、PG 受限归档、交付清单、计费与规范化评论入库，不新增引擎、消息组件或存储。Night-All 旧评论回执只读重放，未知请求不迁移重买。此项不改变 Night-All/Night-All-A 自建引擎职责和 MX-H2I 登录联网。代码已实现，生产未部署/验收；详细平台、价格授权与分页边界见 [帖子评论迁移](../../integrations/post-comments-migration.md)。

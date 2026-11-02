@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { isPostgresSafeJsonValue } from '../core/postgres-json.mjs'
 import { YOUTUBE_COMMENTS_VERSION, YOUTUBE_COMMENT_PATHS } from '../contracts/youtube-comments.mjs'
+import { POST_COMMENTS_VERSION, POST_COMMENTS_PATH } from '../contracts/post-comments.mjs'
 
 export const SOCIAL_SEARCH_STATE_VERSION = 'mx-insight-hub.social-compat.v1'
 
@@ -70,9 +71,11 @@ async function transaction(pool, work) {
 // procurement identity, while this manifest owns one public search delivery.
 export class SocialSearchStateStore {
   constructor(platformStores, { platform, workflowKind = 'social-account' }) {
-    if (!['social-account', 'youtube-comments'].includes(workflowKind) || workflowKind === 'youtube-comments' && platform !== 'youtube') throw new TypeError('Unknown traversal kind')
-    this.paths = workflowKind === 'youtube-comments' ? new Set(Object.values(YOUTUBE_COMMENT_PATHS)) : paths
-    this.version = workflowKind === 'youtube-comments' ? YOUTUBE_COMMENTS_VERSION : SOCIAL_SEARCH_STATE_VERSION
+    if (!['social-account', 'youtube-comments', 'post-comments'].includes(workflowKind) || workflowKind === 'youtube-comments' && platform !== 'youtube') throw new TypeError('Unknown traversal kind')
+    this.paths = workflowKind === 'youtube-comments' ? new Set(Object.values(YOUTUBE_COMMENT_PATHS))
+      : workflowKind === 'post-comments' ? new Set([POST_COMMENTS_PATH]) : paths
+    this.version = workflowKind === 'youtube-comments' ? YOUTUBE_COMMENTS_VERSION
+      : workflowKind === 'post-comments' ? POST_COMMENTS_VERSION : SOCIAL_SEARCH_STATE_VERSION
     this.stores = platformStores instanceof Map ? Object.fromEntries(platformStores) : { ...platformStores }
     const entries = Object.entries(this.stores)
     if (!entries.length || !id(platform) || entries.some(([provider, store]) =>

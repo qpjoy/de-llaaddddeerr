@@ -7,6 +7,7 @@ import { PROVISIONING_OPERATIONS, officialPriceDraft, wechatOfficialPriceDraft }
 import { customerRequestPrice } from '../billing/contracts.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from '../contracts/tikhub-content-search.mjs'
 import { YOUTUBE_COMMENT_PATHS, YOUTUBE_COMMENTS_CAPABILITY } from '../contracts/youtube-comments.mjs'
+import { POST_COMMENTS_PATH } from '../contracts/post-comments.mjs'
 
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
 const social = row => row.operation.startsWith('social.') || row.platform === 'social'
@@ -21,7 +22,7 @@ for (const source of [officialPriceDraft('qixin'), officialPriceDraft('tikhub'),
   })
 }
 const accountMeters = [
-  { meterKey: YOUTUBE_COMMENTS_CAPABILITY, label: 'Hub YouTube 评论', paths: Object.values(YOUTUBE_COMMENT_PATHS) },
+  { meterKey: YOUTUBE_COMMENTS_CAPABILITY, label: 'Hub 帖子评论', paths: [...Object.values(YOUTUBE_COMMENT_PATHS), POST_COMMENTS_PATH, '/api/v1/search/post-comments', '/api/v1/night-all/search/post-comments'] },
   { meterKey: 'social.content.crawl', label: 'Hub 账号内容', paths: ['/api/v1/data/social/crawl'] },
   { meterKey: 'social.profile.get', label: 'Hub 账号资料', paths: ['/api/v1/data/social/user-info'] },
 ]

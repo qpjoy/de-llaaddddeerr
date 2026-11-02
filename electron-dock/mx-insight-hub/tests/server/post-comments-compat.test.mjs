@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { HubService } from '../../server/hub-service.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
-import { NightAllAdapter } from '../../server/adapters/night-all.mjs'
 import { normalizeNightAllPostCommentsRequest } from '../../server/contracts/night-all-post-comments.mjs'
 import { nightAllCompatibilityRequestFingerprint } from '../../server/acquisitions/request-verification.mjs'
 
@@ -41,7 +40,7 @@ test('post-comments aliases share one canonical acquisition identity', () => {
   assert.equal(first.fingerprint, alias.fingerprint)
 })
 
-async function fixture({ adapter } = {}) {
+async function fixture({ adapter, externalPostComments } = {}) {
   const store = new MemoryStore()
   const tenant = await store.createTenant({ name: 'Post comments tenant' })
   const consumer = await store.createConsumer({
@@ -49,64 +48,64 @@ async function fixture({ adapter } = {}) {
   })
   await store.replaceGrants(consumer.id, ['weibo'])
   await store.putPolicy({ tenantId: tenant.id, consumerId: consumer.id, platform: 'weibo', maxRequests: 10, windowSeconds: 3600, maxPageSize: 100 })
-  const service = new HubService({ store, apiKeyPepper: 'post-comments-test', adapter })
+  const service = new HubService({ store, apiKeyPepper: 'post-comments-test', adapter, externalPostComments })
   const issued = await service.createApiKey({ consumerId: consumer.id, name: 'Post comments key', platforms: ['weibo'], capabilities: [] })
-  return { service, context: await service.authenticate(issued.secret) }
+  return { service, store, context: await service.authenticate(issued.secret) }
 }
 
-test('post-comments uses the Hub reservation and returns complete comment payload plus pagination', async () => {
+test('new comment aliases are dispatched through the Hub callback without Night-All', async () => {
   const calls = []
-  const payload = {
-    data: {
-      raw_info: JSON.stringify([{ comment_id: 'c1', content_id: 'p1', user: { id: 'u1', name: '评论者' } }]),
-      raw_data: JSON.stringify([{ comment_id: 'c1', content_id: 'p1', text: '评论正文', published_at: '2026-01-01T00:00:00Z', author: { id: 'u1' }, metrics: { likes: 3 } }]),
-      page: { page: 1, pageSize: 20, returnedCount: 1, hasMore: true, nextCursor: 'provider-next' },
-      meta: { resultCount: 1 },
-    },
+  const h = await fixture({ adapter: { async legacySearch() { throw new Error('Night-All must not be called') } },
+    externalPostComments: async (context, input) => { calls.push(input); return { status: 200, body: { data: { items: [] } } } } })
+  const body = { platform: 'weibo', postId: 'p1', count: 20 }
+  for (const path of ['/api/v1/search/post-comments', '/api/v1/night-all/search/post-comments']) {
+    assert.equal((await h.service.nightAllCompatibilitySearch(h.context, {
+      operation: 'post-comments', path, idempotencyKey: 'post-comments-new', body,
+    })).status, 200)
   }
-  const h = await fixture({ adapter: { async legacySearch(input) { calls.push(input); return { payload: structuredClone(payload), raw: structuredClone(payload) } } } })
-  const result = await h.service.nightAllCompatibilitySearch(h.context, {
-    operation: 'post-comments', path: '/api/v1/search/post-comments', idempotencyKey: 'post-comments-first',
-    body: { platform: 'weibo', postId: 'p1', contentId: 'p1', url: 'https://weibo.com/p/1', count: 100, page: 1, includeRaw: false },
-  })
-  assert.equal(result.status, 200)
-  assert.equal(calls[0].operation, 'post-comments')
-  assert.equal(JSON.parse(result.body.data.raw_data)[0].comment_id, 'c1')
-  assert.equal(result.body.data.page.hasMore, true)
-  assert.match(result.body.data.page.nextCursor, /^mxnc1\./u)
-})
-
-test('post-comments continuation forwards the wrapped cursor to Night-All', async () => {
-  const calls = []
-  const payload = page => ({ data: {
-    raw_info: '[]', raw_data: JSON.stringify([{ comment_id: `c${page}`, content_id: 'p1', text: `评论${page}` }]),
-    page: { page, pageSize: 20, returnedCount: 1, hasMore: page === 1, nextCursor: page === 1 ? 'provider-next' : null },
-    meta: { resultCount: 1 },
-  } })
-  const h = await fixture({ adapter: { async legacySearch(input) { calls.push(input); return { payload: payload(calls.length), raw: payload(calls.length) } } } })
-  const first = await h.service.nightAllCompatibilitySearch(h.context, {
-    operation: 'post-comments', path: '/api/v1/search/post-comments', idempotencyKey: 'post-comments-page-1',
-    body: { platform: 'weibo', postId: 'p1', count: 20 },
-  })
-  await h.service.nightAllCompatibilitySearch(h.context, {
-    operation: 'post-comments', path: '/api/v1/search/post-comments', idempotencyKey: 'post-comments-page-2',
-    body: { platform: 'weibo', postId: 'p1', count: 20, cursor: first.body.data.page.nextCursor },
-  })
   assert.equal(calls.length, 2)
-  assert.equal(calls[1].body.cursor, 'provider-next')
+  assert.deepEqual(calls[0].body, body)
 })
 
-test('Night-All adapter sends post-comments to the historical endpoint', async () => {
-  let pathname
-  const adapter = new NightAllAdapter({
-    baseUrl: 'http://night-all.invalid',
-    fetchImpl: async url => {
-      pathname = new URL(url).pathname
-      return new Response(JSON.stringify({ data: { raw_info: '[]', raw_data: '[]', page: {}, meta: {} } }), {
-        status: 200, headers: { 'content-type': 'application/json' },
-      })
-    },
-  })
-  await adapter.legacySearch({ operation: 'post-comments', body: { platform: 'weibo', postId: 'p1' }, businessId: 'agent' })
-  assert.equal(pathname, '/api/v1/search/post-comments')
+test('missing Hub comments executor fails closed instead of falling back to Night-All', async () => {
+  let calls = 0
+  const h = await fixture({ adapter: { async legacySearch() { calls++; throw new Error('must not dispatch') } } })
+  await assert.rejects(h.service.postComments(h.context, { body: { platform: 'weibo', postId: 'p1' },
+    idempotencyKey: 'comments-unavailable' }), { code: 'post_comments_unavailable' })
+  assert.equal(calls, 0)
+})
+
+test('legacy comment receipts replay immutable results and preserve unknown/reserved states without new dispatch', async () => {
+  let nativeCalls = 0
+  const h = await fixture({ adapter: { async legacySearch() { throw new Error('Night-All must not be called') } },
+    externalPostComments: async () => { nativeCalls++; throw new Error('native must not be called') } })
+  const path = '/api/v1/night-all/search/post-comments', body = { platform: 'weibo', postId: 'p1', count: 20 }
+  const { fingerprint } = nightAllCompatibilityRequestFingerprint({ path, body,
+    businessId: h.context.consumer.businessId, canonicalizePlatform: canonicalize })
+  const reserved = await h.store.reserve({ requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    idempotencyKey: 'legacy-comment-receipt', fingerprint, tenantId: h.context.tenant.id,
+    consumerId: h.context.consumer.id, apiKeyId: h.context.apiKey.id, platform: 'weibo', meterKey: 'post-comments',
+    acquisitionRequest: { method: 'POST', path, body }, unitsReserved: 1,
+    leaseExpiresAt: new Date(Date.now() + 60000), windowStart: new Date(Date.now() - 3600000), maxRequests: 10 })
+  const saved = h.store.requests.get(reserved.request.id)
+  const input = { path: '/api/v1/data/social/post-comments', body, idempotencyKey: 'legacy-comment-receipt' }
+  saved.status = 'unknown'
+  await assert.rejects(h.service.postComments(h.context, input), { code: 'request_outcome_unknown' })
+  saved.status = 'reserved'
+  await assert.rejects(h.service.postComments(h.context, input), { code: 'request_in_progress' })
+  saved.status = 'released'; saved.responseStatus = 404
+  saved.responseBody = { error: { code: 'night_all_rejected' }, requestId: saved.id }
+  const snapshot = structuredClone(saved)
+  const replay = await h.service.postComments(h.context, input)
+  assert.equal(replay.replay, true); assert.equal(replay.status, 404)
+  assert.deepEqual(replay.body, snapshot.responseBody)
+  assert.deepEqual(saved, snapshot)
+  const otherKey = await h.service.createApiKey({ consumerId: h.context.consumer.id, name: 'Another legacy key', platforms: ['weibo'], capabilities: [] })
+  const otherContext = await h.service.authenticate(otherKey.secret)
+  await assert.rejects(h.service.postComments(otherContext, input), { code: 'idempotency_conflict' })
+  assert.deepEqual(saved, snapshot)
+  await assert.rejects(h.service.postComments(h.context, { ...input, body: { ...body, postId: 'different' } }), { code: 'idempotency_conflict' })
+  saved.responseBody = null
+  await assert.rejects(h.service.postComments(h.context, input), { code: 'comments_restart_required' })
+  assert.equal(nativeCalls, 0)
 })

@@ -614,6 +614,7 @@ export class HubService {
     externalSocialSearch = null,
     externalWechatSearch = null,
     externalRawSearch = null,
+    externalPostComments = null,
     externalDataSearch = null,
     twitterRetryStore = null,
     searchAdmissionWaitMs = SEARCH_ADMISSION_WAIT_MS,
@@ -651,6 +652,7 @@ export class HubService {
     this.externalSocialSearch = externalSocialSearch
     this.externalWechatSearch = externalWechatSearch
     this.externalRawSearch = externalRawSearch
+    this.externalPostComments = externalPostComments
     this.externalDataSearch = externalDataSearch
     this.twitterRetryStore = twitterRetryStore
     this.searchAdmissionWaitMs = searchAdmissionWaitMs
@@ -3573,7 +3575,8 @@ export class HubService {
     const definition = servicePriceDefinition(path)
     assert(definition, 404, 'service_price_not_found', 'No pricing contract for this Hub endpoint')
     const [platforms, capabilities] = await Promise.all([this.#effectivePlatformGrants(context), this.#effectiveCapabilityGrants(context)])
-    assert(platforms.includes(definition.platform) && definition.capabilities.every(value => capabilities.includes(value)), 403, 'service_not_authorized', 'The selected Key is not authorized for this service')
+    assert((definition.platforms || [definition.platform]).some(value => platforms.includes(value))
+      && definition.capabilities.every(value => capabilities.includes(value)), 403, 'service_not_authorized', 'The selected Key is not authorized for this service')
     const [plan, billing] = await Promise.all([this.store.getConsumerPlan(context.consumer.id), this.store.getTenantBilling(context.tenant.id, { ledgerLimit:1 })])
     return customerServiceQuote(path, definition, plan, billing.profile)
   }
@@ -4398,10 +4401,21 @@ export class HubService {
     // raw contract/charge/continuation identity inside its own format branch;
     // calling the public data endpoint over HTTP would reserve and bill twice.
     if (input.operation === 'raw') return this.search(context, { ...input, responseFormat: 'raw' })
+    if (input.operation === NIGHT_ALL_POST_COMMENTS_OPERATION) return this.postComments(context, input)
     return this.#nightAllCompatibilitySearch(context, input)
   }
 
-  async #nightAllCompatibilitySearch(context, { operation, body, idempotencyKey, path, signal }) {
+  async postComments(context, input) {
+    const saved = input.idempotencyKey && await this.store.getUsageRequestByIdempotencyKey(context.consumer.id, input.idempotencyKey)
+    if (saved?.acquisitionRequest?.path === '/api/v1/night-all/search/post-comments') {
+      return this.#nightAllCompatibilitySearch(context, { ...input, operation: NIGHT_ALL_POST_COMMENTS_OPERATION,
+        path: '/api/v1/night-all/search/post-comments', historicalReceiptOnly: true })
+    }
+    assert(this.externalPostComments, 503, 'post_comments_unavailable', 'Hub post comments are unavailable')
+    return this.externalPostComments(context, input)
+  }
+
+  async #nightAllCompatibilitySearch(context, { operation, body, idempotencyKey, path, signal, historicalReceiptOnly = false }) {
     assertWechatSearchNotRetired(operation, body)
     assert(NIGHT_ALL_LEGACY_OPERATIONS.has(operation)
       || [NIGHT_ALL_POST_DETAIL_OPERATION, NIGHT_ALL_POST_COMMENTS_OPERATION].includes(operation),
@@ -4525,6 +4539,20 @@ export class HubService {
       path,
       body: { contractVersion: 'mx-insight-hub.night-all-compat.v1', ...traversal.upstreamBody },
     })
+    if (historicalReceiptOnly) {
+      const saved = await this.store.getUsageRequestByIdempotencyKey(context.consumer.id, idempotencyKey)
+      assert(saved && saved.apiKeyId === context.apiKey.id && saved.fingerprint === fingerprint,
+        409, 'idempotency_conflict', 'Idempotency-Key was used with a different request')
+      const details = { requestId: saved.id }
+      if (saved.status === 'unknown') throw new AppError(409, 'request_outcome_unknown', 'Previous request outcome is unknown', details)
+      if (saved.status === 'reserved') throw new AppError(409, 'request_in_progress', 'The historical request remains reserved', details)
+      if (saved.responseBody != null && Number.isInteger(saved.responseStatus)
+        && (saved.status === 'committed' || saved.status === 'released' && saved.responseStatus >= 400)) {
+        return { status: saved.responseStatus, body: structuredClone(saved.responseBody), requestId: saved.id,
+          replay: true, sourceMode: saved.deliverySourceMode || 'live', capturedAt: saved.capturedAt || null }
+      }
+      throw new AppError(409, 'comments_restart_required', 'This historical request has no replayable response; restart explicitly with a new Idempotency-Key', details)
+    }
     const xiaohongshuCapability = normalized.platform === 'xiaohongshu'
       ? NIGHT_ALL_XIAOHONGSHU_OPERATION_CAPABILITIES[operation]
       : null

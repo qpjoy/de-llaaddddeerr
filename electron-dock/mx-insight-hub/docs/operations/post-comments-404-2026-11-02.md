@@ -35,3 +35,8 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 修复后再用已确认存在且可访问的帖子做首屏、下一页、终页验收；核对评论 ID 与原帖 ID 的字段语义、作者、时间和互动量，而非只看 HTTP 200。历史失败回执不重写。先核对原 requestId 状态：committed/unknown 不可盲目换键；released 是否可重试以服务状态为准，恢复后的新采集应由调用方明确发起。
 
 本次仅增加只读诊断与运行手册，没有执行生产发布、付费采集或修改 MX-H2I 登录/联网配置。实际运行目标、版本及供应商可用性仍待现场证据。
+
+
+## 原生迁移修复（本地，未部署）
+
+诊断回传确认该 Twitter 请求释放预留且关联 Night-All 调用 HTTP 404。本次用 Hub 原生单帖评论执行替换新请求的 Night-All 分支，保留历史回执。13 平台字段与分页合同、固定供应商和就绪条件见 [迁移说明](../integrations/post-comments-migration.md)。尚未执行生产付费请求，不能据离线样例或测试宣称线上恢复。

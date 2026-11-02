@@ -1,6 +1,6 @@
 import { NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS } from '../contracts/night-all-legacy.mjs'
 import { NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-detail.mjs'
-import { NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS } from '../contracts/night-all-post-comments.mjs'
+import { POST_COMMENTS_RECIPES } from '../contracts/post-comments.mjs'
 import { WECHAT_SEARCH_OPERATION, WECHAT_SEARCH_PATH } from '../contracts/wechat-search-alias.mjs'
 import { hubSocialAccountPlatforms } from '../contracts/hub-social-docs.mjs'
 import { HUB_SOCIAL_COMPAT_ACTIVITIES } from '../contracts/hub-social-compat.mjs'
@@ -17,10 +17,10 @@ export function strategySearchGuide(scopes = null) {
   const platforms = operation => (operation === 'post-detail'
     ? NIGHT_ALL_POST_DETAIL_SUPPORTED_PLATFORMS
     : operation === 'post-comments'
-      ? NIGHT_ALL_POST_COMMENTS_SUPPORTED_PLATFORMS
+      ? Object.keys(POST_COMMENTS_RECIPES)
       : NIGHT_ALL_LEGACY_SUPPORTED_PLATFORMS[operation]).filter(platform =>
     scopes == null || scopes.some(scope => scope.platforms?.includes(platform)
-      && (platform !== 'xiaohongshu' || scope.capabilities?.includes(XIAOHONGSHU_CAPABILITIES[operation]))))
+      && (operation === 'post-comments' ? scope.capabilities?.includes('social.comments.list') : platform !== 'xiaohongshu' || scope.capabilities?.includes(XIAOHONGSHU_CAPABILITIES[operation]))))
   const rows = [
     ['关键词搜索', 'raw', 'platform + keyword / query', 'raw_data：内容列表'],
     ['账号内容', 'crawl', 'platform + username / userId / uid', 'raw_info + raw_data：账号与内容'],

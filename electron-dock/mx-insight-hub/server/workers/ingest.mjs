@@ -4,6 +4,7 @@ import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 import { createPool, createQueue, runCommonMigrations, startWorker } from '@qpjoy/mx-common'
 import { NightAllAdapter } from '../adapters/night-all.mjs'
+import { POST_COMMENTS_RECIPES } from '../contracts/post-comments.mjs'
 import { loadConfig } from '../config.mjs'
 import { NightAllBackfill } from '../ingest/backfill.mjs'
 import {
@@ -63,7 +64,8 @@ export function classifyExternalPlatformIngest(payload) {
     && [TIKHUB_XIAOHONGSHU_DATASET_ID, NIGHT_ALL_COMPAT_DATASET_ID, 'social.comments.v1']
       .includes(payload.datasetId)
     && payload.platform === 'xiaohongshu'
-  const hubRaw = (payload?.providerKey === 'tikhub' && payload.platform === 'youtube' && payload.datasetId === 'social.comments.v1')
+  const hubRaw = (payload?.datasetId === 'social.comments.v1'
+      && POST_COMMENTS_RECIPES[payload.platform]?.provider === payload.providerKey)
     || (['justone', 'rapidapi', 'night-all-a'].includes(payload?.providerKey)
       && payload.platform === 'facebook' && payload.datasetId === 'night-all.search.v1')
     || (payload?.providerKey === 'tikhub'

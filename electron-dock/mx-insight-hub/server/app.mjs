@@ -26,6 +26,7 @@ import { strategySearchDataStatisticsResponse } from './data/strategy-search-dat
 import { wechatSearchPlatform, assertWechatSearchNotRetired, normalizeWechatSearchAlias } from './contracts/wechat-search-alias.mjs'
 import { hubSocialByPath } from './contracts/hub-social.mjs'
 import { YOUTUBE_COMMENT_PATHS } from './contracts/youtube-comments.mjs'
+import { POST_COMMENTS_PATH } from './contracts/post-comments.mjs'
 import { aggregateStream } from './data/aggregate-stream.mjs'
 import { WECHAT_SELF_HOSTED } from '../shared/wechat-self-hosted.mjs'
 import { retryAfterSeconds } from './self-hosted/wechat-contract.mjs'
@@ -6174,6 +6175,19 @@ export function createApp({
         if (request.method === 'GET') { sendJson(response,200,{data:await webSearchService.capabilities(context)},{'cache-control':'private, no-store'}); return }
         const result = await withAdmissionSignal(response, async signal => webSearchService.search(context,{signal,body:await readJson(request,64*1024),idempotencyKey:request.headers['idempotency-key'],baiduCompatible:pathname.endsWith('/compatible/baidu')}))
         sendJson(response,result.status,result.body,{'idempotent-replay':String(result.replay),'x-mx-insight-request-id':result.requestId,'x-mx-insight-source-mode':result.sourceMode})
+        return
+      }
+      if (request.method === 'POST' && pathname === POST_COMMENTS_PATH) {
+        const context = await requirePublic(request)
+        requireNoQuery(searchParams, 'Post comments')
+        const result = await withAdmissionSignal(response, async signal => service.postComments(context, {
+          signal, body: await readJson(request, 64 * 1024), path: POST_COMMENTS_PATH,
+          idempotencyKey: request.headers['idempotency-key'],
+        }))
+        sendJson(response, result.status, result.body, {
+          'idempotent-replay': String(result.replay), 'x-mx-insight-request-id': result.requestId,
+          'x-mx-insight-source-mode': result.sourceMode,
+        })
         return
       }
       const youtubeCommentsKind = request.method === 'POST'

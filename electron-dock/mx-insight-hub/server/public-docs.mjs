@@ -11,6 +11,7 @@ import { xhsResearchPaths, xhsResearchGuide } from './contracts/xiaohongshu-rese
 import { nativeForwardingPaths, nativeForwardingGuide, NATIVE_DOC_ROUTES, nativeDocPaths, nativeEndpointGuide, nativeServiceGuide } from './contracts/native-forwarding-docs.mjs'
 import { hubSocialPaths, hubSocialGuide, hubSocialAccountPlatforms } from './contracts/hub-social-docs.mjs'
 import { youtubeCommentsPaths, youtubeCommentsGuide } from './contracts/youtube-comments-docs.mjs'
+import { postCommentsPaths, postCommentsAliasPaths, postCommentsGuide, postCommentsPlatforms } from './contracts/post-comments-docs.mjs'
 import { productForDocs } from '../shared/product-workbenches.mjs'
 import { productCategory, productNavigationOrder } from '../shared/product-navigation.mjs'
 import { newsOpenApiPaths, newsGuide } from './contracts/news-discovery-docs.mjs'
@@ -1319,6 +1320,8 @@ export const PUBLIC_OPENAPI_DOCUMENT = {
     ...nativeForwardingPaths,
     ...hubSocialPaths,
     ...youtubeCommentsPaths,
+    ...postCommentsPaths,
+    ...postCommentsAliasPaths,
     ...webSearchPaths,
     ...wechatSelfHostedPaths,
     '/data/services/pricing': { get: { tags:['Hub 服务定价'], summary:'当前 Key 的 Hub 官方定价与账户执行价',
@@ -6521,7 +6524,7 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
     </section>
 
     <section class="doc-page" data-doc-page="night-all">
-    <div class="notice">客户计费：历史 raw、crawl、user-info、post-detail、post-comments 分别使用同名计费键，按成功交付的请求结算，由调用身份所分配的 Hub 套餐决定单价（可为 0）。相同幂等请求重放不重复收费；成功交付旧快照沿用请求价格。小红书直连分支使用 social.posts.search / social.users.resolve / social.users.posts 等已发布业务计费键。免费不免除授权、配额或采集工作预算；上游服务采购价与客户价格相互独立。</div>
+    <div class="notice">客户计费：历史 raw、crawl、user-info、post-detail 分别使用同名计费键；新单帖评论使用 social.comments.list 计费键，按成功交付的请求结算，由调用身份所分配的 Hub 套餐决定单价（可为 0）。相同幂等请求重放不重复收费；成功交付旧快照沿用请求价格。小红书直连分支使用 social.posts.search / social.users.resolve / social.users.posts 等已发布业务计费键。免费不免除授权、配额或采集工作预算；上游服务采购价与客户价格相互独立。</div>
     <h2 id="night-all">Night-All 兼容层</h2>
     <p>Instagram 的 Hub 直连接口不把采集页大小当成固定 20 条：超量记录保留在同一次采集的完整归档里，每次最多交付请求的 <code>count/pageSize</code> 条，先读完剩余记录才推进上游游标。只读剩余记录的标准响应为 <code>meta.providerCalls=0</code>，raw 响应为 <code>meta.upstreamCallCount=0</code>；每次新分页请求仍按当前账户费率结算，幂等重放不重复收费。游标绑定原 Key/查询/页大小/type/接口，有效期 24 小时，最多 15 页；达到上限但仍有数据时返回 partial 和 <code>INSTAGRAM_PAGE_LIMIT_REACHED</code>。归档不可用或不匹配返回 <code>409 search_page_unavailable</code>，不会自动重新采集。旧失败请求的幂等结果保持不变。</p>
     <div class="notice"><strong>Telegram 警告：</strong><code>data.platforms[]</code> 中出现 <code>telegram</code> 只代表 Hub stored/monitor 数据面已授权，不代表 Night-All legacy search。Telegram 不支持下面这些 compatibility route；请使用本页 Telegram 专用 Hub API。</div>
@@ -6561,7 +6564,7 @@ curl -sS "$HUB_URL/api/v1/data/canonical/items/$ANCHOR_ID/context?before=10&amp;
   -H "Content-Type: application/json" \\
   -H "Idempotency-Key: post-detail-$(uuidgen)" \\
   -d '{"businessId":"agent:&lt;Agent标识&gt;:data_query:search_post_detail:twitter","platform":"twitter","postId":"&lt;平台帖子ID&gt;","url":"&lt;帖子链接&gt;","count":1,"includeRaw":false}'</code></pre>
-    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/night-all/search/post-comments</code></div><p>按一个明确平台的帖子 ID、<code>contentId</code>、平台专用标识或 <code>url</code> 获取单帖评论。<code>count/pageSize/limit</code> 默认 20、最大 100；可继续使用返回的 <code>page.nextCursor</code>，也兼容 <code>params</code> 中的上游续页状态。<code>includeRaw</code> 只接受 <code>false</code>；供应商、凭据、endpoint 和扩大调用量控制由 Hub 管理。<code>raw_data</code> 应包含评论 ID、正文 ID、评论正文、作者、发布时间和互动量，并保留明确的分页状态。商品评论、搜索附带评论和 YouTube 频道评论不属于此合同。</p></div>
+    <div class="endpoint"><div class="endpoint-head"><span class="method post">POST</span><code class="path">/api/v1/night-all/search/post-comments</code></div><p>按一个明确平台的帖子 ID、<code>contentId</code>、平台专用标识或 <code>url</code> 获取单帖评论。<code>count/pageSize/limit</code> 默认 20、最大 100；可继续使用返回的 <code>page.nextCursor</code>，也兼容 <code>params</code> 中的上游续页状态。<code>includeRaw</code> 默认 <code>false</code>。新请求由 Hub 单帖评论合同执行，不调用 Night-All；需要目标平台与 social.comments.list 授权。供应商、凭据、endpoint 和扩大调用量控制由 Hub 管理。<code>raw_data</code> 应包含评论 ID、正文 ID、评论正文、作者、发布时间和互动量，并保留明确的分页状态。商品评论、搜索附带评论和 YouTube 频道评论不属于此合同。</p></div>
     <pre><code>curl -i -sS -X POST "$HUB_URL/api/v1/search/post-comments" \\
   -H "Authorization: Bearer $MX_INSIGHT_API_KEY" \\
   -H "Content-Type: application/json" \\
@@ -6724,13 +6727,14 @@ const TENANT_HIDDEN_DOCS = new Set(['search', 'night-all', 'tools', 'discovery']
 export function tenantDocumentPathAllowed(path, scopes) {
   if (scopes == null) return true
   if (path === '/api/v2/data/search') return scopes.some(scope => scope.platforms.some(platform => DATA_SEARCH_V2_PLATFORMS.includes(platform)))
+  if (path === '/data/social/post-comments') return postCommentsPlatforms(scopes).length > 0
   if (path === '/requests/{requestId}/search-recovery') return scopes.some(scope => scope.platforms.includes('twitter'))
   if (['/data/social/crawl', '/data/social/user-info'].includes(path)) return hubSocialAccountPlatforms(path.split('/').at(-1), scopes).length > 0
   if (path === '/data/ip/risk/subscription') return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query.v2') || s.capabilities.includes('ip.risk.subscription.query')))
   if (path.startsWith('/data/ip/risk/history')) return scopes.some(s=>s.platforms.includes('ip_risk') && (s.capabilities.includes('ip.risk.query') || s.capabilities.includes('ip.risk.query.v2') || s.capabilities.includes('ip.risk.subscription.query')))
   if (path.startsWith('/data/web-search/')) return scopes.some(s=>s.platforms.includes('web_search') && s.capabilities.includes('web.search') && (path.endsWith('/baidu') ? s.capabilities.includes('web.search.provider.baidu') : WEB_SEARCH_PROVIDERS.some(p=>s.capabilities.includes(p.capability))))
   if (path === '/data/search') return scopes.some(scope => scope.platforms.includes('social') && scope.capabilities.includes('native.wechat.search.search'))
-  if (path === '/data/services/pricing') return scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk','twitter','youtube','web_search','xiaohongshu'].includes(value)))
+  if (path === '/data/services/pricing') return postCommentsPlatforms(scopes).length > 0 || scopes.some(scope=>scope.platforms.some(value=>['social','ecommerce','enterprise','ip_risk','twitter','youtube','web_search','xiaohongshu'].includes(value)))
   if (['/usage', '/requests/{requestId}', '/requests/by-idempotency-key', '/acquisitions/{requestId}'].includes(path)) return scopes.length > 0
   const operation = PUBLIC_OPENAPI_DOCUMENT.paths[path]?.get || PUBLIC_OPENAPI_DOCUMENT.paths[path]?.post
   let platform = operation?.['x-mx-required-platform']
@@ -6755,7 +6759,7 @@ const TENANT_PRODUCT_PATHS = {
   'web-search':Object.keys(webSearchPaths),
   [WECHAT_SELF_HOSTED.docs]: Object.keys(wechatSelfHostedPaths),
   ...Object.fromEntries(WECHAT_PRODUCTS.map(product => [product.key, nativeDocPaths(product.key)])),
-  'social-content': [...nativeDocPaths('social-content'), '/data/social/accounts/search', ...Object.keys(hubSocialPaths), ...Object.keys(youtubeCommentsPaths)],
+  'social-content': [...nativeDocPaths('social-content'), '/data/social/accounts/search', ...Object.keys(hubSocialPaths), ...Object.keys(youtubeCommentsPaths), ...Object.keys(postCommentsPaths)],
   ...Object.fromEntries(NATIVE_DOC_ROUTES.map(route=>[route.key,nativeDocPaths(route.key)])),
   'native-data': Object.keys(nativeForwardingPaths),
   ...Object.fromEntries(XHS_DISCOVERY_PRODUCTS.map(product => [product.key, [product.path.slice('/api/v1'.length)]])),
@@ -6807,6 +6811,13 @@ export function tenantOpenApiDocument(scopes) {
     entry.requestBody.content['application/json'].schema.properties.platform.enum = platforms
     entry.requestBody.content['application/json'].example.platform = platforms[0]
   }
+  const commentEntry = document.paths['/data/social/post-comments']?.post
+  if (commentEntry) {
+    const platforms = postCommentsPlatforms(scopes)
+    commentEntry['x-mx-platform-options'] = platforms
+    commentEntry.requestBody.content['application/json'].schema.properties.platform.enum = platforms
+    commentEntry.requestBody.content['application/json'].example.platform = platforms[0]
+  }
   const refs = new Set()
   const visit = value => {
     if (!value || typeof value !== 'object') return
@@ -6835,7 +6846,7 @@ function tenantDocBody(route, scopes) {
   if (route.key === WECHAT_SELF_HOSTED.docs) return wechatSelfHostedGuide
   if (route.nativeKey) return nativeEndpointGuide(route.key)
   if (WECHAT_PRODUCTS.some(product => product.key === route.key)) return nativeServiceGuide(route.key, path=>tenantDocumentPathAllowed(path, scopes))
-  if (route.key === 'social-content') return hubSocialGuide(path=>tenantDocumentPathAllowed(path,scopes), scopes) + youtubeCommentsGuide(path=>tenantDocumentPathAllowed(path,scopes)) + nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
+  if (route.key === 'social-content') return hubSocialGuide(path=>tenantDocumentPathAllowed(path,scopes), scopes) + youtubeCommentsGuide(path=>tenantDocumentPathAllowed(path,scopes)) + postCommentsGuide(scopes) + nativeServiceGuide(route.key,path=>tenantDocumentPathAllowed(path,scopes))
   if (route.key === 'news-discovery') return newsGuide()
   if (route.key.startsWith('enterprise')) return enterpriseDocumentationHtml(route.key, { tenant: true })
   if (route.key === 'ip-risk-subscription') return ipRiskProductGuide
@@ -6906,7 +6917,7 @@ export function publicDocsHtmlForPath(pathname, { tenant = false, scopes, procur
   if (route.key === 'ip-risk-v2') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${ipRiskV2Guide}</main>`)
   if (route.key === 'web-search') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${webSearchGuide}</main>`)
   if (route.key === WECHAT_SELF_HOSTED.docs) html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${wechatSelfHostedGuide}</main>`)
-  if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${hubSocialGuide()}${youtubeCommentsGuide()}${nativeServiceGuide(route.key)}</main>`)
+  if (route.key === 'social-content') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${hubSocialGuide()}${youtubeCommentsGuide()}${postCommentsGuide()}${nativeServiceGuide(route.key)}</main>`)
   if (route.key === 'strategy-search') html = html.replace(/<main>[\s\S]*?<\/main>/, () => `<main>${strategySearchGuide()}</main>`)
   if (route.key === 'ecommerce-treasure-box') html = html.replace('</main>', () => `${nativeServiceGuide(route.key)}</main>`)
   if (tenant) {

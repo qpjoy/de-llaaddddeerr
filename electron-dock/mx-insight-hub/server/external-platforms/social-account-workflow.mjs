@@ -14,6 +14,7 @@ import { buildHubSocialCompatDispatch, projectHubSocialCompatResponse } from '..
 import { normalizeNightAllLegacyPayload } from '../ingest/legacy-night-all.mjs'
 import { SocialSearchStateStore } from './social-search-store.mjs'
 import { YOUTUBE_COMMENTS_TRAVERSAL } from '../contracts/youtube-comments.mjs'
+import { POST_COMMENTS_TRAVERSAL } from '../contracts/post-comments.mjs'
 
 const VERSION = 'mx-insight-hub.social-compat.v1'
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -84,15 +85,16 @@ function projectPage(payload, step, operation, capturedAt, traversal = null) {
 export async function runSocialAccountWorkflow({ gateway, context, request, delivery, deadlineAt, signal,
   resolveCredential, revalidateIdentity, enterCapacity, leaveCapacity, providerCostControl, buildResponse,
   workflowKind = 'social-account' }, { clock = Date.now } = {}) {
-  if (!['social-account', 'youtube-comments'].includes(workflowKind)) throw new TypeError('Unknown traversal kind')
-  const traversal = workflowKind === 'youtube-comments' ? YOUTUBE_COMMENTS_TRAVERSAL : null
+  if (!['social-account', 'youtube-comments', 'post-comments'].includes(workflowKind)) throw new TypeError('Unknown traversal kind')
+  const traversal = workflowKind === 'youtube-comments' ? YOUTUBE_COMMENTS_TRAVERSAL
+    : workflowKind === 'post-comments' ? POST_COMMENTS_TRAVERSAL : null
   const store = gateway.platformStore, provider = gateway.providerKey
   const stateStore = new SocialSearchStateStore({ [provider]: store }, { platform: request.platform, workflowKind })
   const identity = { tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
     path: traversal ? request.path : `/api/v1/data/social/${request.operation}`, scopeHash: request.scopeHash }
   const history = await stateStore.historyFor({ ...identity, previousDeliveryId: request.previousDeliveryId,
     jobCount: request.jobs.length, totalLimit: request.totalLimit })
-  const state = history.state || { jobs: request.jobs.map(job => ({ query: job.id, providerCursor: null,
+  const state = history.state || { jobs: request.jobs.map(job => ({ query: job.id, providerCursor: structuredClone(request.initialParams ?? null),
     providerPage: 1, upstreamPages: 0, started: false, done: false, buffer: null, resolvedIdentity: null, profiles: [], dispatchedTokens: [] })) }
   if (state.jobs.some((job, index) => job.query !== request.jobs[index].id)) throw unavailable()
   const rowsByJob = request.jobs.map(() => []), seen = history.seenIds, sources = [], warnings = [], started = performance.now()

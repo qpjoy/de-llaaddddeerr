@@ -44,6 +44,7 @@ import { HUB_SOCIAL_ENDPOINTS } from './contracts/hub-social.mjs'
 import { TIKHUB_CONTENT_SEARCH_RECIPES } from './contracts/tikhub-content-search.mjs'
 import { createTwitterSearchRouter, resolveTwitterSearchProvider } from './data/twitter-search-routing.mjs'
 import { normalizeHubSocialCompatRequest } from './contracts/hub-social-compat.mjs'
+import { normalizePostCommentsRequest, POST_COMMENTS_RECIPES, POST_COMMENTS_PATH } from './contracts/post-comments.mjs'
 import { HUB_SOCIAL_COMPAT_PLATFORMS } from '../shared/social-account-contract.mjs'
 import { RAPIDAPI_METADATA, rapidApiConfig } from './external-platforms/rapidapi-config.mjs'
 import { createApp } from './app.mjs'
@@ -499,6 +500,14 @@ export async function createRuntime(config = loadConfig()) {
   const socialAccountDataGateways = Object.fromEntries(HUB_SOCIAL_COMPAT_PLATFORMS.map(platform => [platform,
     platform === 'twitter' ? hubSocialGateway : nativeSearchGateway(platform, platform === 'facebook' ? 'justone' : 'tikhub')]))
   socialAccountDataGateways.facebook.strategySearchRoutingStore = strategySearchRoutingStore
+  const postCommentsGateways = Object.fromEntries(Object.entries(POST_COMMENTS_RECIPES)
+    .map(([platform, recipe]) => [platform, nativeSearchGateway(platform, recipe.provider)]))
+  const postComments = (context, input) => {
+    const normalized = normalizePostCommentsRequest(input.body, { businessId: context.consumer.businessId })
+    return postCommentsGateways[normalized.platform].postComments(context, {
+      ...input, platform: normalized.platform, path: POST_COMMENTS_PATH,
+    })
+  }
   const socialDataGateway = { socialData: (context, input) => {
     if (input.operation === 'search') return hubSocialGateway.socialData(context, input)
     // Twitter owns receipt-aware validation: historical identities may need
@@ -659,6 +668,7 @@ export async function createRuntime(config = loadConfig()) {
     },
     externalSocialSearch: (context, input) => tikHubGateway.searchNotes(context, input),
     externalWechatSearch: (context, input) => socialAccountTikHubGateway.forwardNative(context, input),
+    externalPostComments: postComments,
     externalRawSearch: (context, input) => input.normalized.platform === 'facebook' ? facebookSearch(context, input)
       : input.normalized.platform === 'instagram' ? instagramSearch(context, input)
       : input.normalized.platform === 'twitter' ? hubSocialGateway.searchRaw(context, input)
@@ -809,7 +819,7 @@ export async function createRuntime(config = loadConfig()) {
     externalPlatformControlStore, externalAdmissionPolicies, ipRiskGateway, enterpriseGateway, qixinCredentialStore,
     hubSocialGateway, rapidApiStore, rapidApiCredentialStore, rapidApiProxyStore,
     tikHubPlatformStore, tikHubCredentialStore, tikHubGateway, tikHubUserInfoGateway, tikHubAdapter,
-    nativeSearchGateways, socialAccountDataGateways, socialDataGateway, strategySearchRoutingStore,
+    nativeSearchGateways, socialAccountDataGateways, postCommentsGateways, socialDataGateway, strategySearchRoutingStore,
   }
 }
 
