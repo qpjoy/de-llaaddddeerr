@@ -639,3 +639,79 @@ BASH
 私有帖子 ID 只在进程内传递；回传运行检查、App 请求摘要以及同 usage 的只读结构检查即可。无论 HTTP 成功还是拒绝，只要有持久 requestId 都先读取归档，不在失败时跳过证据。若归档读取失败也保留 App marker，不再次采样；根据已打印 requestId 单独重做只读检查。尚未确认 App 返回字段，不能提前将快手统一路由改成它。
 
 本地验证：148 项相关合同、投影、历史回放、真实 gateway/runtime（模拟 HTTP）、入库、诊断及采样防重测试通过，typecheck 通过。运行检查命令已用本地模块离线校验；代理未部署服务器、未查询生产数据库、未新增供应商付费请求。下一步等待操作者回传。
+
+### Reddit 单次业务验收与快手 App 完整归档验证
+
+操作者已回传 `reddit_comments_runtime_updated`：运行容器的 Reddit 固定 TikHub `t.api_c7f50cf300d63960`、manualProviderPagination=true。该检查没有供应商请求，只证明运行路由更新，统一旧 URL 的真实交付尚待本节单次验收。Twitter 已完成，无需追加探测。
+
+快手 App 本次已经成功：usage `16eb4f8e-7d1d-40e2-8593-02570ee3fd37`，幂等键 `kuaishou-app-comment-calibration-v1-729b12bf-c4df-4a06-83d7-0e3ca227e16e`，请求摘要 SHA256 `88473e1e26c6ceba5e5cdb8b066b68580e3ecc961fc9de85dcfb5f4e8360e428`。预检通过、恰好 1 次 Hub POST；同 usage committed，唯一 TikHub `native.t.api_bc64c9d98dbf724c` 调用 succeeded、HTTP/business 200、billed=true，13227 字节归档 SHA 验证通过。rootComments 长度 11，但结构摘要只抽样前 3 条；subCommentsMap 有回复预览，不能混为完整的根评论列表。保留 `kuaishou.json` 与 `kuaishou.app.json`，不要重跑 App 采购。
+
+新增 `server/contracts/kuaishou-comment-page.mjs` 仍是候选，不接入快手运行路由。它保留完整根评论正文/作者/时间/点赞/实际 subCommentCount；数值 comment_id/author_id 必须为安全整数，或原本就是十进制字符串。内部 photo_id 可能大于安全整数且与公开 eID 不同，不用于身份。回复预览仅统计且保存在原始响应，不猜测完整回复或总数。候选强制比较保存请求目标与响应 `params.photo_id`；结构摘要的匿名 unknown11 尚不能单独证明这个实际键名。
+
+同步候选解析器和更新后的 `server/ops/inspect-post-comment-contract.mjs`，不需部署镜像、不需要 Key，读取刚才已支付归档：
+
+```bash
+bash <<'BASH'
+set -euo pipefail
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+cat server/contracts/kuaishou-comment-page.mjs server/ops/inspect-post-comment-contract.mjs |
+  kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - \
+  --request-id '16eb4f8e-7d1d-40e2-8593-02570ee3fd37' \
+  --verify-kuaishou-projection
+BASH
+```
+
+输出仅包含全量条目/字段计数、数值安全类型、目标是否一致和分页状态；不会输出帖子/作者 ID、正文或游标值。调用/请求/归档严格绑定，同源只读事务，32 KiB 请求快照及 4 MiB 归档上限，零 HTTP/数据库写入。若发现不安全评论 ID、目标回显不匹配或其他合同差异，保留输出继续修解析；不重新采样。`pcursor` 缺失、重复及尚未证实的 `no_more` 哨兵先保持 unknown；普通推进 token 表示可显式续页，不保证下一页有评论。看到 no_more 的分类本身不自动修改生产分页行为。
+
+Reddit 的新增 `server/ops/verify-reddit-comments-runtime.mjs` 是宿主机单次验收工具，也不需要部署。它只读准备已验证的原生 source usage `7eb265f4-5c2c-4d15-91d5-7dc7fed83b61` 的私有目标，验证固定原 `reddit.json`、平台及评论授权、已有原生授权的 TikHub 就绪状态，然后以 contentId/count20 请求旧 `/api/v1/search/post-comments`。独立 `reddit.unified-acceptance.json` 在发请求前排他持久保存，最多 1 次 Hub POST，不自动重试/续页，不修改原始原生样本。验收不假定新响应仍是 3 条，允许真实结束、未知状态或已购余量；空响应只能证明结构，不能通过正样本字段验收。评论 ready 当前不是 Reddit 专用判定，预检只用评论授权存在及 Reddit 原生就绪；普通业务 Key 不因此被要求增加原生授权。
+
+```bash
+bash <<'BASH'
+set -e
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+read -r -s -p 'Hub Live API Key: ' MX_HUB_PROBE_API_KEY </dev/tty
+printf '\n'
+export MX_HUB_PROBE_API_KEY
+node --input-type=module <<'NODE'
+import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { runRedditCommentsRuntimeVerification } from './server/ops/verify-reddit-comments-runtime.mjs';
+function admin(file, args) {
+  return JSON.parse(execFileSync('kubectl', [
+    '-n', 'mx-insight-hub', 'exec', '-i', 'deployment/mx-insight-hub-admin', '-c', 'admin', '--',
+    'node', '--input-type=module', '-', ...args
+  ], { input: readFileSync(file, 'utf8'), encoding: 'utf8', timeout: 30000,
+    maxBuffer: 2 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }));
+}
+try {
+  const sample = admin('server/ops/verify-reddit-comments-runtime.mjs', ['--prepare']);
+  const result = await runRedditCommentsRuntimeVerification({ sample, sampleDirectory: process.cwd(),
+    apiKey: process.env.MX_HUB_PROBE_API_KEY, apply: true });
+  console.log(JSON.stringify(result, null, 2));
+  if (result.requestId) {
+    const evidence = admin('server/ops/inspect-post-comment-contract.mjs', ['--request-id', result.requestId]);
+    const calls = evidence.calls.map(call => ({ provider: call.provider, platform: call.platform,
+      endpoint: call.endpoint, outcome: call.outcome, httpStatus: call.httpStatus, businessCode: call.businessCode,
+      billed: call.billed, errorCode: call.errorCode, archiveVerified: call.archive?.hashVerified === true }));
+    const verified = evidence.usage?.platform === 'reddit' && evidence.usage.status === 'committed'
+      && evidence.usage.httpStatus === 200 && !evidence.callsTruncated && calls.length === 1
+      && calls.every(c => c.provider === 'tikhub' && c.platform === 'reddit'
+        && c.endpoint === 'native.t.api_c7f50cf300d63960' && c.outcome === 'succeeded'
+        && c.httpStatus === 200 && c.businessCode === 200 && c.billed === true && c.archiveVerified);
+    console.log(JSON.stringify({ revision: 'reddit-unified-provider-evidence.v1', requestId: result.requestId,
+      verified, usage: evidence.usage, calls, supplierHttpCallsMade: 0, databaseWritesMade: 0 }, null, 2));
+    if (!verified) process.exitCode = 1;
+  }
+  if (result.verified !== true) process.exitCode = 1;
+} catch {
+  console.error(JSON.stringify({ error: 'reddit_acceptance_stopped', action: 'preserve_all_markers_and_report_output' }));
+  process.exitCode = 1;
+}
+NODE
+BASH
+```
+
+无论成功或失败，有持久 requestId 就先核对同 usage 保存调用；若核对失败，保留验收 marker，仅按已打印 requestId 重做只读核对。回传快手全量解析摘要、Reddit 业务验收摘要与同 usage 的采购证据，不需要提供 Key、正文或平台 ID。任何新验收都会按既有门禁及计价结算；不因 diagnostic 里的 supplierHttpCallsMade=0 而认为前面的实际请求免费。
+
+本轮本地验证共 60 项通过：原 Twitter/Reddit 归档检查 25 项、快手候选解析 9 项、快手全量归档检查 12 项、Reddit 单次统一验收 14 项。新的生产解析器尚未用于快手运行路由；本轮代理未查询生产数据库、未发布服务、未新增付费请求。仅同步上述三个脚本/解析器文件即可执行两段命令，等待实际服务器输出。

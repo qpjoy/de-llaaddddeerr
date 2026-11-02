@@ -14,6 +14,11 @@ const PLATFORMS = ['twitter', 'reddit', 'xiaohongshu', 'instagram', 'weibo', 'ku
 const TWITTER_ID = /^[0-9]{1,30}$/u
 const REDDIT_POST_ID = /^(?:t3_)?[a-z0-9]{1,17}$/u
 const REDDIT_NATIVE_PATH = '/api/v1/data/native/t.api_c7f50cf300d63960'
+const KUAISHOU_POST_ID = /^[A-Za-z0-9_-]{1,128}$/u
+const KUAISHOU_NATIVE_PATH = '/api/v1/data/native/t.api_bc64c9d98dbf724c'
+const KUAISHOU_PROJECTION_REASONS = ['invalid_envelope', 'root_id_mismatch', 'root_comments_shape',
+  'comment_identity', 'comment_text', 'author_identity', 'comment_time', 'comment_metrics', 'author_avatar',
+  'pagination_shape', 'continuation_shape', 'preview_shape', 'structure_limit']
 const MAX_REQUEST_BYTES = 32 * 1024
 const REDDIT_PROJECTION_REASONS = ['invalid_envelope', 'root_id_mismatch', 'forest_shape', 'pagination_shape', 'continuation_shape',
   'structure_limit', 'tree_shape', 'comment_node', 'comment_type', 'comment_identity', 'comment_text', 'author_identity',
@@ -199,6 +204,36 @@ function savedRedditPostId(snapshot) {
 
 const redditBarePostId = value => typeof value === 'string' && REDDIT_POST_ID.test(value) ? value.replace(/^t3_/u, '') : null
 
+function savedKuaishouPostId(snapshot) {
+  const postId = snapshot?.body?.params?.photo_id
+  return object(snapshot) && snapshot.method === 'POST' && snapshot.path === KUAISHOU_NATIVE_PATH
+    && object(snapshot.body) && object(snapshot.body.params)
+    && typeof postId === 'string' && KUAISHOU_POST_ID.test(postId) ? postId : null
+}
+
+function kuaishouIdentityFields(payload) {
+  // Count every root row, not just the structural sampler's first three.
+  // Internal numeric photo IDs are diagnostics, never public post identity.
+  const fields = { commentId: 'comment_id', authorId: 'author_id', photoId: 'photo_id' }
+  const rows = Array.isArray(payload?.data?.rootComments) ? payload.data.rootComments.slice(0, 1000) : []
+  return Object.fromEntries(Object.entries(fields).map(([name, field]) => {
+    const counts = { safe_integer: 0, unsafe_number: 0, string: 0, missing: 0, other: 0 }
+    for (const row of rows) {
+      const value = row?.[field]
+      const type = value == null ? 'missing' : typeof value === 'string' ? 'string'
+        : typeof value === 'number' ? Number.isSafeInteger(value) ? 'safe_integer' : 'unsafe_number' : 'other'
+      counts[type]++
+    }
+    return [name, counts]
+  }))
+}
+
+function kuaishouCursorState(payload, continuation) {
+  const cursor = payload?.data?.pcursor
+  return cursor == null ? 'missing' : typeof cursor !== 'string' ? 'invalid' : cursor === '' ? 'empty'
+    : cursor === 'no_more' ? 'no_more' : cursor === continuation?.pcursor ? 'repeated' : 'opaque'
+}
+
 export function inspectPostCommentArchive(row, options = {}) {
   if (!row || row.body_size == null) return { state: 'archive_missing' }
   if (row.body_size > MAX_BYTES || row.actual_body_size > MAX_BYTES) return { state: 'archive_too_large', maxBytes: MAX_BYTES }
@@ -208,6 +243,35 @@ export function inspectPostCommentArchive(row, options = {}) {
   let payload
   try { payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
   catch { return { state: 'archive_not_json', hashVerified: true, byteLength: bytes.length } }
+  if (options.kuaishouProjectionValidator) {
+    const evidence = { state: 'archive_verified', hashVerified: true, byteLength: bytes.length }
+    const target = options.kuaishouPostId
+    if (typeof target !== 'string' || !KUAISHOU_POST_ID.test(target)) return { ...evidence,
+      projection: { state: 'request_snapshot_unavailable', verified: false, targetSource: 'saved_request_snapshot' } }
+    const targetEvidence = { targetSource: 'saved_request_snapshot',
+      requestedPostMatched: payload?.params?.photo_id === target, identityFields: kuaishouIdentityFields(payload) }
+    let parsed
+    try { parsed = options.kuaishouProjectionValidator(payload, target, options.kuaishouContinuation) }
+    catch (error) { return { ...evidence, projection: { state: 'contract_rejected', verified: false, ...targetEvidence,
+      reason: choice(error?.reason, KUAISHOU_PROJECTION_REASONS) } } }
+    const rows = parsed.comments.map(comment => comment.values)
+    return { ...evidence, projection: {
+      state: 'parser_verified', verified: true, ...targetEvidence,
+      inputRootCount: payload.data.rootComments.length,
+      projectedCount: rows.length, distinctCommentCount: new Set(rows.map(row => row.commentId)).size,
+      textCount: rows.filter(row => typeof row.text === 'string').length,
+      authorIdCount: rows.filter(row => typeof row.author?.id === 'string').length,
+      publishedAtCount: rows.filter(row => typeof row.publishedAt === 'string').length,
+      likeCount: rows.filter(row => Number.isSafeInteger(row.likes)).length,
+      replyCount: rows.filter(row => Number.isSafeInteger(row.replies)).length,
+      parentPostCount: rows.filter(row => row.parentRelationship === 'post' && row.parentExternalId === target).length,
+      previewCommentCount: parsed.diagnostics?.previewCommentCount ?? 0,
+      pagination: { hasMore: parsed.providerPage.hasMore, continuationAvailable: Boolean(parsed.providerPage.nextParams),
+        stopReason: parsed.providerPage.stopReason === 'continuation_unproven' ? 'continuation_unproven' : null,
+        cursorState: kuaishouCursorState(payload, options.kuaishouContinuation) },
+      boundary: 'All root comments validated by the candidate pure parser against the saved native request target and response echo. Numeric precision is summarized without values. Reply previews are not projected as root comments. This does not activate runtime routing. No HTTP, canonical writes or billing mutations.'
+    } }
+  }
   if (options.redditProjectionValidator) {
     const evidence = { state: 'archive_verified', hashVerified: true, byteLength: bytes.length }
     const target = redditBarePostId(options.redditPostId)
@@ -264,13 +328,16 @@ export function inspectPostCommentArchive(row, options = {}) {
 }
 
 export async function inspectPostCommentContract(pool, requestId, { twitterPostId = null, prepareTwitterConversation = false,
-  twitterProjectionValidator = null, redditProjectionValidator = null } = {}) {
+  twitterProjectionValidator = null, redditProjectionValidator = null, kuaishouProjectionValidator = null } = {}) {
   if (!UUID.test(requestId || '')) throw new Error('invalid_request_id')
   if (twitterPostId !== null && (typeof twitterPostId !== 'string' || !TWITTER_ID.test(twitterPostId))) throw new Error('invalid_twitter_post_id')
   if (prepareTwitterConversation && twitterPostId === null) throw new Error('invalid_twitter_post_id')
   if (twitterProjectionValidator !== null && (typeof twitterProjectionValidator !== 'function' || prepareTwitterConversation)) throw new Error('invalid_arguments')
   if (redditProjectionValidator !== null && (typeof redditProjectionValidator !== 'function'
     || twitterProjectionValidator !== null || prepareTwitterConversation || twitterPostId !== null)) throw new Error('invalid_arguments')
+  if (kuaishouProjectionValidator !== null && (typeof kuaishouProjectionValidator !== 'function'
+    || twitterProjectionValidator !== null || redditProjectionValidator !== null
+    || prepareTwitterConversation || twitterPostId !== null)) throw new Error('invalid_arguments')
   const client = await pool.connect()
   try {
     await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
@@ -281,10 +348,10 @@ export async function inspectPostCommentContract(pool, requestId, { twitterPostI
       platform,status,response_status FROM public.usage_requests WHERE id=$1::uuid`, [requestId])
     if (usages.length !== 1) throw new Error('request_not_found')
     const { rows } = await client.query(`SELECT /* post-comment-contract:calls */
-      id,provider_key,marketplace,endpoint_key,outcome,http_status,business_code,billed,error_code
+      id,provider_key,marketplace,operation,endpoint_key,contract_version,outcome,http_status,business_code,billed,error_code
       FROM external_platform.provider_calls WHERE usage_request_id=$1::uuid
       ORDER BY started_at,id LIMIT 4`, [requestId])
-    let redditPostId = null
+    let redditPostId = null, kuaishouPostId = null, kuaishouContinuation = null
     if (redditProjectionValidator) {
       const call = rows[0]
       if (usages[0].status !== 'committed' || usages[0].response_status !== 200 || rows.length !== 1
@@ -297,6 +364,25 @@ export async function inspectPostCommentContract(pool, requestId, { twitterPostI
           THEN acquisition_request ELSE NULL END AS acquisition_request
         FROM public.usage_requests WHERE id=$1::uuid`, [requestId, MAX_REQUEST_BYTES])
       redditPostId = snapshots.length === 1 ? savedRedditPostId(snapshots[0].acquisition_request) : null
+    }
+    if (kuaishouProjectionValidator) {
+      const call = rows[0]
+      if (!['social', 'kuaishou'].includes(usages[0].platform) || usages[0].status !== 'committed'
+        || usages[0].response_status !== 200 || rows.length !== 1
+        || call?.provider_key !== 'tikhub' || call.marketplace !== 'kuaishou' || call.endpoint_key !== 'native.t.api_bc64c9d98dbf724c'
+        || call.operation !== 'native.t.api_bc64c9d98dbf724c' || call.contract_version !== 'mx-insight-hub.native-forwarding.v1'
+        || call.outcome !== 'succeeded' || call.http_status !== 200 || call.business_code !== 200 || call.billed !== true) {
+        throw new Error('kuaishou_projection_source_unavailable')
+      }
+      const { rows: snapshots } = await client.query(`SELECT /* post-comment-contract:kuaishou-request */
+        CASE WHEN octet_length(acquisition_request::text) <= $2::integer
+          THEN acquisition_request ELSE NULL END AS acquisition_request
+        FROM public.usage_requests WHERE id=$1::uuid`, [requestId, MAX_REQUEST_BYTES])
+      const snapshot = snapshots.length === 1 ? snapshots[0].acquisition_request : null
+      kuaishouPostId = savedKuaishouPostId(snapshot)
+      if (kuaishouPostId && Object.hasOwn(snapshot.body.params, 'pcursor')) {
+        kuaishouContinuation = { pcursor: snapshot.body.params.pcursor }
+      }
     }
     const calls = []
     for (const [ordinal, row] of rows.slice(0, MAX_CALLS).entries()) {
@@ -314,7 +400,9 @@ export async function inspectPostCommentContract(pool, requestId, { twitterPostI
         archive = inspectPostCommentArchive(archives[0], row.provider_key === 'tikhub'
           && row.endpoint_key === 'native.t.api_3cd88a6621a01120' ? { twitterPostId, prepareTwitterConversation, twitterProjectionValidator }
           : row.provider_key === 'tikhub' && row.endpoint_key === 'native.t.api_c7f50cf300d63960'
-            ? { redditProjectionValidator, redditPostId } : undefined)
+            ? { redditProjectionValidator, redditPostId }
+            : row.provider_key === 'tikhub' && row.endpoint_key === 'native.t.api_bc64c9d98dbf724c'
+              ? { kuaishouProjectionValidator, kuaishouPostId, kuaishouContinuation } : undefined)
       }
       calls.push({ ordinal: ordinal + 1, provider: choice(row.provider_key, ['tikhub', 'justone', 'rapidapi']),
         platform: choice(row.marketplace, PLATFORMS), endpoint: recognized ? row.endpoint_key : 'other',
@@ -347,6 +435,9 @@ export async function inspectPostCommentContract(pool, requestId, { twitterPostI
     if (redditProjectionValidator) return { revision: 'reddit-comment-projection-verification.v1', requestId,
       verified: calls[0].archive.projection?.verified === true, archive: calls[0].archive,
       supplierHttpCallsMade: 0, databaseWritesMade: 0 }
+    if (kuaishouProjectionValidator) return { revision: 'kuaishou-comment-projection-verification.v1', requestId,
+      verified: calls[0].archive.projection?.verified === true, archive: calls[0].archive,
+      supplierHttpCallsMade: 0, databaseWritesMade: 0 }
     return { revision: 'post-comment-contract-inspection.v2', requestId,
       usage: { platform: choice(usages[0].platform, [...PLATFORMS, 'social', 'ecommerce']), status: choice(usages[0].status, ['reserved', 'committed', 'released', 'unknown']), httpStatus: status(usages[0].response_status) },
       calls, callsTruncated: rows.length > MAX_CALLS, callLimit: MAX_CALLS, nativeCallEvidencePresent: rows.length > 0,
@@ -366,7 +457,8 @@ if (process.argv[1] === '-' || (process.argv[1] && import.meta.url === pathToFil
     const [flag, requestId, shapeFlag, twitterPostId, prepareFlag, extra] = process.argv.slice(2)
     const verifyTwitterProjection = shapeFlag === '--verify-twitter-projection'
     const verifyRedditProjection = shapeFlag === '--verify-reddit-projection'
-    const verifyProjection = verifyTwitterProjection || verifyRedditProjection
+    const verifyKuaishouProjection = shapeFlag === '--verify-kuaishou-projection'
+    const verifyProjection = verifyTwitterProjection || verifyRedditProjection || verifyKuaishouProjection
     if (flag !== '--request-id' || extra || !UUID.test(requestId || '')
       || (prepareFlag !== undefined && prepareFlag !== '--prepare-twitter-conversation')
       || (verifyProjection ? twitterPostId !== undefined || prepareFlag !== undefined
@@ -375,21 +467,24 @@ if (process.argv[1] === '-' || (process.argv[1] && import.meta.url === pathToFil
     // This avoids loading any Hub service or requiring an image deployment.
     const validator = verifyTwitterProjection && typeof parseTikHubTwitterCommentPage === 'function' ? parseTikHubTwitterCommentPage : null
     const redditValidator = verifyRedditProjection && typeof parseTikHubRedditCommentPage === 'function' ? parseTikHubRedditCommentPage : null
+    const kuaishouValidator = verifyKuaishouProjection && typeof parseTikHubKuaishouCommentPage === 'function' ? parseTikHubKuaishouCommentPage : null
     if (verifyTwitterProjection && !validator) throw new Error('twitter_projection_parser_required')
     if (verifyRedditProjection && !redditValidator) throw new Error('reddit_projection_parser_required')
+    if (verifyKuaishouProjection && !kuaishouValidator) throw new Error('kuaishou_projection_parser_required')
     if (!process.env.DATABASE_URL) throw new Error('database_url_required')
     const { default: pg } = await import('pg')
     pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000, query_timeout: 6000,
       options: '-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000' })
     const result = await inspectPostCommentContract(pool, requestId, { twitterPostId: twitterPostId ?? null,
       prepareTwitterConversation: prepareFlag === '--prepare-twitter-conversation', twitterProjectionValidator: validator,
-      redditProjectionValidator: redditValidator })
+      redditProjectionValidator: redditValidator, kuaishouProjectionValidator: kuaishouValidator })
     console.log(JSON.stringify(result, null, 2))
     if (verifyProjection && !result.verified) process.exitCode = 2
   } catch (error) {
     const safe = ['invalid_arguments', 'database_url_required', 'request_not_found', 'invalid_request_id', 'invalid_twitter_post_id',
       'twitter_conversation_sample_unavailable', 'twitter_projection_source_unavailable', 'twitter_projection_parser_required',
-      'reddit_projection_source_unavailable', 'reddit_projection_parser_required'].includes(error?.message)
+      'reddit_projection_source_unavailable', 'reddit_projection_parser_required',
+      'kuaishou_projection_source_unavailable', 'kuaishou_projection_parser_required'].includes(error?.message)
       ? error.message : 'post_comment_contract_inspection_failed'
     console.error(JSON.stringify({ error: safe })); process.exitCode = 1
   } finally { await pool?.end() }
