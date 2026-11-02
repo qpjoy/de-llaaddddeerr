@@ -112,12 +112,14 @@ v1 的 usage.platform=other 是诊断白名单输出，不能据此判断 Twitte
 
 下一个样本选择这份已验证归档中的所属会话 ID，重新申请该会话帖子评论的首屏。它是不同目标的一次额外付费采样，不是原请求重试，不是按旧 cursor 续页，也不改变下游实际请求的帖子 ID。所属会话更可能包含当前回复，但不能保证本次一定非空。统一 Twitter 路由仍不切换，等非空条目和分页证据。
 
-同步 `server/ops/inspect-post-comment-contract.mjs` 和 `server/ops/probe-post-comment-contract.mjs`，无需发布镜像。在服务器 Hub 项目目录用 Bash 执行下面的命令；sampleDirectory 必须是原 `twitter.json` / `twitter.auth-retry.json` 所在标记目录的上一级，不能新建目录绕过记录。命令中的默认值沿用此前目录。
+同步 `server/ops/inspect-post-comment-contract.mjs` 和 `server/ops/probe-post-comment-contract.mjs`，无需发布镜像。下面命令显式启动 Bash 并进入已确认的服务器 Hub 项目目录，也可以从 zsh 粘贴执行。sampleDirectory 使用用户只读诊断已确认的原回执目录：`/root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub`，其原始及 auth-retry 回执可读且匹配，conversation 标记尚不存在。之前写成 outputs 下 minimal-contentId 的示例目录有误，不迁移或重建回执。
 
 ```bash
-(
+bash <<'BASH'
   set -e
-  read -r -s -p 'Hub Live API Key: ' MX_HUB_PROBE_API_KEY
+  cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+  read -r -s -p 'Hub Live API Key: ' MX_HUB_PROBE_API_KEY </dev/tty
+  printf '\n'
   export MX_HUB_PROBE_API_KEY
   node --input-type=module <<'NODE'
 import { readFileSync } from 'node:fs';
@@ -137,7 +139,7 @@ try {
   ]);
   const result = await runPostCommentProbe({
     plan: planTwitterConversationCommentProbe(sample), conversationSampleFrom: sample,
-    sampleDirectory: 'outputs/hub_comment_samples_20261102/minimal-contentId',
+    sampleDirectory: '/root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub',
     apiKey: process.env.MX_HUB_PROBE_API_KEY, apply: true
   });
   console.log(JSON.stringify(result, null, 2));
@@ -152,7 +154,7 @@ try {
   process.exitCode = 1;
 }
 NODE
-)
+BASH
 ```
 
 读取旧归档和事后字段检查均无 HTTP；中间最多新增 1 个 Hub POST。准备阶段要求唯一的成功计费调用、committed usage、完整 SHA 归档、原帖 ID 精确匹配、thread 空且 replies 为 0，以及不同的字符串会话 ID；否则拒绝。目标 ID 仅在内存传递，不打印。该额外采样必须引用原目录匹配的 usage_header 成功回执，新增固定的 `twitter.conversation.json`，并保留两份旧记录。新目标使用新的幂等键；重复、并发、换目标和未知结果都不能再次使用该槽位。没有自动鉴权恢复、换供应商或续页。
@@ -160,3 +162,110 @@ NODE
 若 `conversation_sample_not_allowed`，先核对原目录及保存的成功回执，不删除或重建标记；若已经打印成功 probe 而后续检查失败，保留该 probe 的 requestId，只重做只读检查。也支持将准备结果重定向到私有文件后，用 `--sample-dir <原目录> --twitter-conversation-sample <文件>` 零请求预览，明确追加 `--apply` 才采样。
 
 本地检查器 14 项、采样器 19 项测试通过。未向供应商发实际请求，未部署或修改统一路由、MX-H2I 登录及联网配置。
+
+若旧命令出现 `read: -p: no coprocess`，是 zsh 将 `read -p` 解释为读取协进程，尚未运行后面的 Node（按原完整块执行时，`set -e` 在此退出）。使用上面的显式 Bash 包装；`</dev/tty` 保证密钥从终端读取，不会误把 heredoc 中的脚本行当作密钥。此修正不重置任何采样标记或次数。
+
+### conversation_sample_not_allowed：定位原成功回执目录
+
+用户随后回传此错误。已核对之前贴出的成功回执，其字段全部符合门禁；服务器上实际读到哪个文件仍待确认。该错误发生在本次 fetch 和新 `twitter.conversation.json` 标记创建之前，本次没有发起付费请求；当前代码可能已创建指定目录下的空标记目录。不要因此复制、重建或删除回执。
+
+优先检查示例中固定的 `outputs/hub_comment_samples_20261102/minimal-contentId` 是否就是当时的实际采样目录。以下命令不需要 Key，只检查当前目录及该日期采样目录下至多四层、100 个目录；不遍历其他项目、不输出回执原始内容、不发 HTTP。输出 `readyForOneSample=true` 的原目录才满足本轮本地回执前提；仍须原有服务器归档校验及独占标记门禁。若找不到，说明这些查找范围内尚未定位到原成功记录，不证明记录不存在。
+
+```bash
+node --input-type=module <<'NODE'
+import { readdir, readFile, stat } from 'node:fs/promises';
+import { resolve, join } from 'node:path';
+const configured = resolve('outputs/hub_comment_samples_20261102/minimal-contentId');
+const root = resolve('outputs/hub_comment_samples_20261102');
+const dirs = new Set([process.cwd(), configured]);
+const queue = [{ dir: root, depth: 0 }];
+let visited = 0, truncated = false;
+while (queue.length && visited++ < 100) {
+  const { dir, depth } = queue.shift();
+  dirs.add(dir);
+  let entries;
+  try { entries = await readdir(dir, { withFileTypes: true }); } catch { continue; }
+  if (entries.length > 500) truncated = true;
+  for (const entry of entries.slice(0, 500)) {
+    if (!entry.isDirectory() || entry.name === '.hub-comment-contract-probes-v1') continue;
+    if (depth < 4) queue.push({ dir: join(dir, entry.name), depth: depth + 1 });
+    else truncated = true;
+  }
+}
+truncated ||= queue.length > 0;
+async function read(dir, name) {
+  try {
+    const file = join(dir, '.hub-comment-contract-probes-v1', name);
+    if ((await stat(file)).size > 16384) return { state: 'too_large' };
+    const bytes = await readFile(file);
+    if (bytes.length > 16384) return { state: 'too_large' };
+    const value = JSON.parse(bytes.toString('utf8'));
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? { state: 'read', value } : { state: 'invalid_json_object' };
+  } catch (error) {
+    return { state: error.code === 'ENOENT' ? 'missing' : error instanceof SyntaxError ? 'invalid_json' : 'unreadable' };
+  }
+}
+const expected = {
+  revision: 'post-comment-contract-probe.v2', provider: 'tikhub', platform: 'twitter',
+  path: '/api/v1/data/native/t.api_3cd88a6621a01120', state: 'http_response', httpStatus: 200,
+  requestId: 'f33e6d06-97f0-46c2-a049-c69ccfabf41d', requestIdSource: 'usage_header', hubRequestsMade: 1
+};
+const candidates = [];
+for (const dir of dirs) {
+  const original = await read(dir, 'twitter.json');
+  const auth = await read(dir, 'twitter.auth-retry.json');
+  const extra = await read(dir, 'twitter.conversation.json');
+  if (dir !== configured && [original, auth, extra].every(row => row.state === 'missing')) continue;
+  const selected = auth.state === 'missing' ? original : auth;
+  const value = selected.value || {};
+  const failedChecks = selected.state === 'read'
+    ? Object.entries(expected).filter(([key, expectedValue]) => value[key] !== expectedValue).map(([key]) => key)
+    : ['source_' + selected.state];
+  if (selected.state === 'read') {
+    if (value.errorCode != null) failedChecks.push('errorCode');
+    if (value.samplePurpose != null) failedChecks.push('samplePurpose');
+    if (!/^comment-calibration-v1-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value.idempotencyKey || '')) failedChecks.push('idempotencyKey');
+  }
+  candidates.push({ sampleDirectory: dir, configured: dir === configured,
+    original: original.state, authRetry: auth.state, conversation: extra.state,
+    selectedReceipt: auth.state === 'missing' ? 'twitter.json' : 'twitter.auth-retry.json',
+    failedChecks, readyForOneSample: failedChecks.length === 0 && extra.state === 'missing' });
+}
+console.log(JSON.stringify({ cwd: process.cwd(), candidates, truncated, httpRequestsMade: 0 }, null, 2));
+NODE
+```
+
+若唯一匹配目录的 readyForOneSample 为 true，下一次只把采样命令的 sampleDirectory 改成该原目录，其他身份与次数限制不变。若 conversation 不是 missing，先读已有额外采样回执，不能删除后重跑。若无匹配或输出截断，先贴回诊断结果，不能换目录补建标记。
+
+已收到定位结果：cwd 与正确 sampleDirectory 均为 `/root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub`，原始/auth-retry 都可读，选中的 auth-retry failedChecks=[]、readyForOneSample=true、conversation=missing。此前示例 outputs/minimal-contentId 两份源回执都缺失，故被门禁拒绝；这次定位 httpRequestsMade=0。上面的执行命令已改用确认的绝对路径，保留所有身份与单次限制。下一步仅执行原已安排的一次所属会话采样，尚未得到其新付费回执。
+
+### 所属会话样本已返回：完整解析已有 36 条，不再采购
+
+用户回传新 usage `7e7cd2d0-aa97-4aa5-a113-5a92f8b3143b`，幂等键 `comment-calibration-v1-f295c520-f0eb-4eaa-ac11-c4ccdd3358fd`，samplePurpose=conversation_comments，HTTP/businessCode=200，usage=committed、billed=true。54697 字节原始归档完整，data.id/conversation_id 均与请求一致，thread 长度 36；抽看的前 3 条包含独立 id、同会话 ID、正文、作者、时间和互动量。cursor 非空。原始/auth-retry/conversation 三个标记全部保留；本轮采样已完成，不再执行上面的付费采样命令。
+
+Twitter 统一路由的本地实现已改为 TikHub `t.api_3cd88a6621a01120`，以 thread 为评论来源、保留未知直接父级，并按一份供应商页停止自动补页；36 条按 count=20 测试可先交付 20 条，再从已购余量返回 16 条。旧 JustOne 回执和入库任务保持原供应商身份，新采集拒绝旧签名游标。此处仍不是线上统一接口验收。
+
+结构摘要仅取了 3 条，发布前应让**运行时使用的同一个纯解析器**逐条验证完整归档。同步以下两个文件即可，无需发布镜像或输入 Key：
+
+- `server/contracts/twitter-comment-page.mjs`（新增；无依赖的运行时解析器）
+- `server/ops/inspect-post-comment-contract.mjs`（新增完整解析验证模式）
+
+```bash
+bash <<'BASH'
+set -euo pipefail
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+cat server/contracts/twitter-comment-page.mjs \
+    server/ops/inspect-post-comment-contract.mjs |
+  kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+    node --input-type=module - \
+    --request-id 7e7cd2d0-aa97-4aa5-a113-5a92f8b3143b \
+    --verify-twitter-projection
+BASH
+```
+
+两个文件通过 stdin 拼接执行，避免容器旧代码或缺少相对路径依赖影响验证；运行时直接 import 的也是该纯解析器。输出版本 `twitter-comment-projection-verification.v1`，只含 inputThreadCount、projectedCount、distinctCommentCount、字段完整数和分页状态等，不返回正文、作者信息、ID 或游标值。核验原始长度/SHA 后才解析，所有 thread 条目都验证；第 36 条若不符合合同也会拒绝。targetSource=saved_response_root，使用该归档根 ID；其与请求 ID 的关系已经由先前检查证明，不把此模式说成独立重验了原始请求参数。
+
+verified=true 表示这些保存条目通过当前纯解析器；不产生 HTTP、数据库写入、入库或费用。canonical 入库、计费、别名和分页由本地集成回归验证，本命令不调用这些写路径。缺少或损坏归档、源调用状态不符合、解析拒绝会显式失败，不能以重采替代检查。
+
+本地 121 项相关测试与类型检查通过；共享社媒/YouTube 分页回归 53 通过、1 跳过。包含真实 HTTP 别名路由（本地模拟供应商）、36 条余量交付、未知分页、历史游标回放、旧入库任务、归档末行拒绝及 stdin 独立执行检查。尚未收到服务器完整解析验证结果，尚未发布 Hub。

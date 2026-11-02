@@ -65,7 +65,10 @@ export function classifyExternalPlatformIngest(payload) {
       .includes(payload.datasetId)
     && payload.platform === 'xiaohongshu'
   const hubRaw = (payload?.datasetId === 'social.comments.v1'
-      && POST_COMMENTS_RECIPES[payload.platform]?.provider === payload.providerKey)
+      && (POST_COMMENTS_RECIPES[payload.platform]?.provider === payload.providerKey
+        // Already queued comments retain their original procurement lineage
+        // when new Twitter acquisitions move from JustOne to TikHub.
+        || payload.platform === 'twitter' && payload.providerKey === 'justone'))
     || (['justone', 'rapidapi', 'night-all-a'].includes(payload?.providerKey)
       && payload.platform === 'facebook' && payload.datasetId === 'night-all.search.v1')
     || (payload?.providerKey === 'tikhub'

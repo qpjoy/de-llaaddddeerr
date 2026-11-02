@@ -8,7 +8,7 @@ export const POST_COMMENTS_VERSION = 'mx-insight-hub.post-comments.v1'
 export const POST_COMMENTS_CAPABILITY = 'social.comments.list'
 export const POST_COMMENTS_PATH = '/api/v1/data/social/post-comments'
 const definitions = [
-  ['twitter', 'justone', '/api/twitter/get-post-comments/v1', 'tweetId', ['cursor'], []],
+  ['twitter', 'tikhub', '/api/v1/twitter/web/fetch_post_comments', 'tweet_id', ['cursor'], []],
   ['reddit', 'justone', '/api/reddit/get-post-comments/v1', 'postId', ['cursor'], []],
   ['kuaishou', 'justone', '/api/kuaishou/get-video-comment/v1', 'videoId', ['pcursor'], []],
   ['instagram', 'tikhub', '/api/v1/instagram/v3/get_post_comments', 'code', ['min_id'], ['sort_order']],

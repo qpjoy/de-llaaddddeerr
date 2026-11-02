@@ -10,15 +10,25 @@ import { JustOneAdapter } from '../../server/adapters/justone.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
 import { MemoryExternalPlatformControlStore } from '../../server/external-platforms/control-store.mjs'
+import { createDataSearchCursorCodec } from '../../server/external-platforms/cursor.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS } from '../../server/contracts/native-forwarding.mjs'
-import { POST_COMMENTS_PATH, POST_COMMENTS_RECIPES, normalizePostCommentsRequest } from '../../server/contracts/post-comments.mjs'
+import { POST_COMMENTS_PATH, POST_COMMENTS_RECIPES, POST_COMMENTS_VERSION, normalizePostCommentsRequest } from '../../server/contracts/post-comments.mjs'
 import { classifyExternalPlatformIngest } from '../../server/workers/ingest.mjs'
+import { canonicalJson } from '../../server/ingest/normalizers.mjs'
 
 const VIDEO = 'dQw4w9WgXcQ', OTHER = '9bZkp7q19f0'
 const PEPPER = 'post-comments-offline-long-pepper', SECRET = 'synthetic-comments-provider-key'
 const comments = (ids, continuation_token = null) => ({ code: 200, data: {
   comments: ids.map(id => ({ comment_id: id, content: `完整评论 ${id}`, published_time: '2 days ago',
     like_count: '0', reply_count: '3', author: { channel_id: 'UC' + 'a'.repeat(22), display_name: '作者' } })), continuation_token,
+} })
+const TWITTER_POST = '2117082385997250767'
+const twitterComment = (id, conversationId = TWITTER_POST) => ({ id, conversation_id: conversationId,
+  text: `完整评论 ${id}\n第二行`, display_text: '展示文本', created_at: 'Thu Jan 16 13:49:31 +0000 2025',
+  likes: 3, replies: 1, retweets: 2, bookmarks: 0, quotes: 0, views: '17',
+  author: { rest_id: '1027932752308563968', name: 'Comment author', screen_name: 'commenter' } })
+const twitterComments = (rows, cursor = null, conversationId = TWITTER_POST) => ({ code: 200, data: {
+  ...twitterComment(TWITTER_POST, conversationId), text: '原帖正文', replies: rows.length, thread: rows, cursor,
 } })
 
 async function harness({ payload = () => comments(['c1']), granted = true, controlsEnabled = true, platform = 'youtube' } = {}) {
@@ -150,24 +160,141 @@ test('comments capability and reviewed procurement policy are enforced before HT
   assert.equal(paused.calls.length, 0)
 })
 
-test('Twitter comments use the pinned JustOne recipe and archive typed comments without Night-All', async t => {
-  const postId = '2117082385997250767'
-  const h = await harness({ platform: 'twitter', payload: () => ({ code: 0, message: 'success', recordTime: '2026-11-02T00:00:00Z', data: { status: 'ok',
-    timeline: [{ type: 'tweet', tweet_id: '2117082385997250768', text: '完整评论',
-      created_at: 'Thu Jan 16 13:49:31 +0000 2025', favorites: 3, replies: 1,
-      conversation_id: postId, in_reply_to_status_id_str: postId,
-      user_info: { rest_id: '1027932752308563968', name: 'Comment author', screen_name: 'commenter' } }],
-    next_cursor: null } }) })
-  t.after(() => h.gateway.adapter.close())
-  const result = await h.invoke({ platform: 'twitter', postId, count: 20 })
+test('Twitter comments use the pinned TikHub recipe and exclude original-post context from canonical comments', async () => {
+  const comment = twitterComment('2117082385997250768')
+  const payload = twitterComments([twitterComment(TWITTER_POST), comment])
+  const h = await harness({ platform: 'twitter', payload: () => payload })
+  const result = await h.invoke({ platform: 'twitter', postId: TWITTER_POST, count: 20 })
   assert.equal(result.status, 200)
   assert.equal(h.calls.length, 1)
-  assert.equal(h.calls[0].path, '/api/twitter/get-post-comments/v1')
-  assert.equal(h.calls[0].params.tweetId, postId)
+  assert.equal(h.calls[0].path, '/api/v1/twitter/web/fetch_post_comments')
+  assert.equal(h.calls[0].params.tweet_id, TWITTER_POST)
+  assert.equal(h.calls[0].params.tweetId, undefined)
+  assert.equal(result.body.data.items.length, 1)
   assert.equal(result.body.data.items[0].commentId, '2117082385997250768')
-  assert.equal(result.body.data.items[0].postId, postId)
-  assert.equal(h.platformStore.ingestJobs[0].payload.records[0].objectType, 'comment')
-  assert.equal(classifyExternalPlatformIngest(h.platformStore.ingestJobs[0].payload).hubRaw, true)
+  assert.equal(result.body.data.items[0].postId, TWITTER_POST)
+  assert.equal(result.body.data.items[0].text, comment.text)
+  assert.equal(result.body.data.items[0].parentExternalId, null)
+  assert.equal(result.body.data.items[0].parentRelationship, 'unknown')
+  assert.equal(result.body.data.page.hasMore, null)
+  assert.equal(result.body.data.page.paginationStatus, 'unknown')
+  const job = h.platformStore.ingestJobs[0]
+  assert.equal(job.payload.records.length, 1)
+  assert.equal(job.payload.records[0].objectType, 'comment')
+  assert.equal(job.payload.records[0].stableFields.connectorId, 'external-platform:tikhub')
+  assert.equal(job.payload.records[0].stableFields.attributes.parentExternalId, null)
+  assert.deepEqual(job.payload.records[0].rawItem, comment)
+  assert.equal(classifyExternalPlatformIngest(job.payload).hubRaw, true)
+  const archived = [...h.platformStore.restrictedResponseArchives.values()][0]
+  assert.deepEqual(JSON.parse(archived.bodyBytes.toString('utf8')), payload)
+  for (const body of [{ platform: 'twitter', contentId: TWITTER_POST, count: 20 },
+    { platform: 'twitter', url: `https://x.com/account/status/${TWITTER_POST}`, count: 20 }]) {
+    const replay = await h.invoke(body)
+    assert.equal(replay.replay, true)
+    assert.deepEqual(replay.body, result.body)
+  }
+  assert.equal(h.calls.length, 1)
+})
+
+test('Twitter keeps all 36 paid comments and drains overflow without automatic supplier continuation', async () => {
+  const ids = Array.from({ length: 36 }, (_, index) => String(BigInt(TWITTER_POST) + BigInt(index + 1)))
+  const h = await harness({ platform: 'twitter', payload: (_call, ordinal) => ordinal === 1
+    ? twitterComments(ids.map(id => twitterComment(id)), 'provider-page-two')
+    : twitterComments([twitterComment('2117082385997250999')], 'provider-page-three') })
+  const body = { platform: 'twitter', contentId: TWITTER_POST, count: 20 }
+  const first = await h.invoke(body, 'twitter-overflow-first')
+  assert.equal(first.body.data.items.length, 20)
+  assert.equal(first.body.data.page.hasMore, true)
+  assert.equal(first.body.data.page.paginationStatus, 'continuable')
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.platformStore.ingestJobs[0].payload.records.length, 36)
+  const second = await h.invoke({ ...body, params: { cursor: first.body.data.page.nextCursor } }, 'twitter-overflow-second')
+  assert.equal(second.body.data.items.length, 16)
+  assert.equal(second.body.data.meta.providerCalls, 0)
+  assert.equal(second.body.data.page.hasMore, null)
+  assert.equal(second.body.data.page.paginationStatus, 'unknown')
+  assert.equal(second.body.data.page.continuationAvailable, true)
+  assert.match(second.body.data.page.nextCursor, /^mxds1\./u)
+  assert.equal(h.calls.length, 1)
+  assert.deepEqual([first, second].flatMap(result => result.body.data.items.map(row => row.commentId)), ids)
+  const third = await h.invoke({ ...body, cursor: second.body.data.page.nextCursor }, 'twitter-overflow-third')
+  assert.equal(third.body.data.items.length, 1)
+  assert.equal(third.body.data.page.hasMore, null)
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.calls[1].params.cursor, 'provider-page-two')
+  const replay = await h.invoke({ ...body, cursor: second.body.data.page.nextCursor }, 'twitter-overflow-third')
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, third.body)
+  assert.equal(h.calls.length, 2)
+})
+
+test('Twitter empty thread with a cursor remains unknown and never automatically buys another page', async () => {
+  const h = await harness({ platform: 'twitter', payload: () => twitterComments([], 'empty-provider-cursor', '2117082385997250001') })
+  const result = await h.invoke({ platform: 'twitter', postId: TWITTER_POST, count: 100 }, 'twitter-empty-thread')
+  assert.deepEqual(result.body.data.items, [])
+  assert.equal(result.body.data.page.hasMore, null)
+  assert.equal(result.body.data.page.paginationStatus, 'unknown')
+  assert.equal(result.body.data.page.continuationAvailable, true)
+  assert.match(result.body.data.page.nextCursor, /^mxds1\./u)
+  assert.equal(h.calls.length, 1)
+  assert.equal(result.body.data.meta.providerCalls, 1)
+})
+
+test('historical signed JustOne Twitter cursors replay exact receipts but cannot start a TikHub purchase', async () => {
+  const h = await harness({ platform: 'twitter', payload: () => { throw new Error('historical cursor must not dispatch') } })
+  const request = normalizePostCommentsRequest({ platform: 'twitter', postId: TWITTER_POST, count: 20 })
+  const { initialParams, cursor: _cursor, page: _page, ...identity } = request.fingerprintBody
+  const legacyScopeHash = createHash('sha256').update(JSON.stringify({ version: POST_COMMENTS_VERSION, ...identity })).digest('hex')
+  const codec = createDataSearchCursorCodec(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}:post-comments`)
+  const cursor = codec.encode({ version: POST_COMMENTS_VERSION, scopeHash: legacyScopeHash,
+    previousDeliveryId: '906701b6-8201-4e2a-a622-403c78d11047', page: 2, expiresAt: Date.now() + 60000 })
+  const body = { platform: 'twitter', postId: TWITTER_POST, count: 20, cursor }
+  const fingerprint = createHash('sha256').update(canonicalJson({ method: 'POST', path: POST_COMMENTS_PATH,
+    body: { ...identity, initialParams: initialParams ?? null, cursor } })).digest('hex')
+  const historicalId = '2047a446-f277-4fda-b5c6-0b5886951d50', key = 'historical-justone-twitter-cursor'
+  const reserved = await h.store.reserve({ requestId: historicalId, idempotencyKey: key, fingerprint,
+    tenantId: h.context.tenant.id, consumerId: h.context.consumer.id, apiKeyId: h.context.apiKey.id,
+    platform: 'twitter', meterKey: 'social.comments.list', unitsReserved: 1,
+    acquisitionRequest: { method: 'POST', path: POST_COMMENTS_PATH, body },
+    leaseExpiresAt: new Date(Date.now() + 60000), windowStart: new Date(Date.now() - 3600000), maxRequests: 10000 })
+  assert.equal(reserved.kind, 'reserved')
+  const historicalBody = { contractVersion: POST_COMMENTS_VERSION, requestId: historicalId,
+    data: { platform: 'twitter', postId: TWITTER_POST, items: [{ commentId: '2117082385997250700', text: '已交付的历史正文' }],
+      page: { page: 2, hasMore: true, nextCursor: cursor }, meta: { implementation: 'hub', providerCalls: 1 } } }
+  await h.store.commitRequest(historicalId, { responseStatus: 200, responseBody: historicalBody,
+    unitsActual: 1, upstreamLatencyMs: 3, deliverySourceMode: 'live' })
+  const saved = structuredClone(h.store.requests.get(historicalId))
+  const historicalCharge = structuredClone(h.store.customerCharges.get(historicalId))
+
+  const replay = await h.invoke(body, key)
+  assert.equal(replay.status, 200)
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, historicalBody)
+  assert.deepEqual(h.store.requests.get(historicalId), saved)
+  assert.deepEqual(h.store.customerCharges.get(historicalId), historicalCharge)
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.platformStore.calls.size, 0)
+
+  const newKey = 'historical-cursor-new-request'
+  await assert.rejects(h.invoke(body, newKey), { code: 'invalid_cursor' })
+  const rejected = await h.store.getUsageRequestByIdempotencyKey(h.context.consumer.id, newKey)
+  assert.equal(rejected.status, 'released')
+  assert.equal(rejected.errorCode, 'external_platform_pre_dispatch_failed')
+  const rejectedCharge = h.store.customerCharges.get(rejected.id)
+  assert.ok(!rejectedCharge || rejectedCharge.status === 'released')
+  assert.equal(rejectedCharge?.chargedMinor ?? 0, 0)
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.platformStore.calls.size, 0)
+  assert.equal(h.platformStore.ingestJobs.length, 0)
+
+  const otherKey = await h.service.createApiKey({ consumerId: h.context.consumer.id, name: 'Other historical-cursor caller',
+    platforms: ['twitter'], capabilities: ['social.comments.list'] })
+  const otherContext = await h.service.authenticate(otherKey.secret)
+  await assert.rejects(h.service.postComments(otherContext, { body, idempotencyKey: key, path: POST_COMMENTS_PATH }),
+    { code: 'invalid_cursor' }, 'a cursor signed for another API Key is rejected before reservation')
+  assert.deepEqual(h.store.requests.get(historicalId), saved)
+  assert.deepEqual(h.store.customerCharges.get(historicalId), historicalCharge)
+  assert.equal(h.calls.length, 0)
 })
 
 test('legacy continuation imports only validated parameters and returned continuation is Hub-scoped', async () => {

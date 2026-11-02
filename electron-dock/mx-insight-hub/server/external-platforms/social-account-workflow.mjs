@@ -88,6 +88,7 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
   if (!['social-account', 'youtube-comments', 'post-comments'].includes(workflowKind)) throw new TypeError('Unknown traversal kind')
   const traversal = workflowKind === 'youtube-comments' ? YOUTUBE_COMMENTS_TRAVERSAL
     : workflowKind === 'post-comments' ? POST_COMMENTS_TRAVERSAL : null
+  const manualProviderPagination = workflowKind === 'post-comments' && request.manualProviderPagination === true
   const store = gateway.platformStore, provider = gateway.providerKey
   const stateStore = new SocialSearchStateStore({ [provider]: store }, { platform: request.platform, workflowKind })
   const identity = { tenantId: context.tenant.id, consumerId: context.consumer.id, apiKeyId: context.apiKey.id,
@@ -178,12 +179,18 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
         job.providerCursor = null
         warn('repeated_cursor', 'The upstream repeated an earlier continuation; acquired rows were retained. Restart explicitly to traverse again.')
       }
-      if (job.upstreamPages >= 15 && next.hasMore && next.nextParams) warn('upstream_page_limit_reached', 'The account traversal reached its upstream page limit; restart explicitly.')
+      if (job.upstreamPages >= 15 && next.nextParams && (next.hasMore || manualProviderPagination && next.hasMore == null)) {
+        warn('upstream_page_limit_reached', 'The account traversal reached its upstream page limit; restart explicitly.')
+      }
       if (next.hasMore == null) {
         warn('pagination_completeness_unknown', 'The upstream response did not prove continuation; no additional page was purchased automatically.')
         job.manualContinuation = true
       }
     }
+    // TikHub Twitter comments expose a cursor without an authoritative more
+    // flag. One request consumes one saved or newly acquired page; callers
+    // explicitly choose any next purchase, even if this page is short/empty.
+    if (manualProviderPagination) job.manualContinuation = true
     return added
   }
   try {

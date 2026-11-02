@@ -21,6 +21,19 @@ test('all thirteen platform recipes dispatch a minimal request with server-owned
   }
 })
 
+test('Twitter dispatch pins the calibrated TikHub endpoint and preserves opaque continuation', () => {
+  const request = normalizePostCommentsRequest({ platform: 'twitter', contentId: fixtures.twitter,
+    count: 100, params: { cursor: 'opaque+/=&next' } })
+  const dispatch = buildPostCommentsDispatch(request)
+  assert.equal(dispatch.provider, 'tikhub')
+  assert.equal(dispatch.endpointPath, '/api/v1/twitter/web/fetch_post_comments')
+  assert.equal(POST_COMMENTS_RECIPES.twitter.key, 't.api_3cd88a6621a01120')
+  assert.equal(dispatch.upstreamQuery.tweet_id, fixtures.twitter)
+  assert.equal(dispatch.upstreamQuery.cursor, 'opaque+/=&next')
+  assert.equal(dispatch.upstreamQuery.tweetId, undefined)
+  assert.equal(dispatch.upstreamQuery.count, undefined)
+})
+
 test('postId, contentId and canonical URL resolve the same target and reject disagreements', () => {
   const postId = fixtures.twitter
   const expected = normalizePostCommentsRequest({ platform: 'twitter', postId }).fingerprintBody

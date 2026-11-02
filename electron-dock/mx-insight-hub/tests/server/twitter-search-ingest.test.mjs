@@ -50,7 +50,10 @@ test('Twitter standard ingestion keeps every previously allowed provider/platfor
   for (const [payload, classification] of expected) {
     const result = classifyExternalPlatformIngest(payload)
     assert.equal(result[classification], true, JSON.stringify(payload))
-    assert.equal(Object.values(result).filter(Boolean).length, 1)
+    // Unified XHS comments retain their XHS lineage while using the canonical
+    // Hub-record branch, so those classification flags intentionally overlap.
+    const canonicalXhsComments = payload.platform === 'xiaohongshu' && payload.datasetId === 'social.comments.v1'
+    assert.equal(Object.values(result).filter(Boolean).length, canonicalXhsComments ? 2 : 1)
     assert.throws(() => classifyExternalPlatformIngest({ ...payload, records: {} }), /pinned contract/)
   }
 })
@@ -84,4 +87,15 @@ test('ingest worker direct entry still refuses the memory driver without startin
   assert.equal(result.error, undefined)
   assert.equal(result.status, 2, result.stderr)
   assert.match(result.stderr, /requires MX_INSIGHT_STORE=postgres; refusing to start/)
+})
+
+test('Twitter comment ingestion accepts TikHub and preserves previously queued JustOne records', () => {
+  for (const providerKey of ['tikhub', 'justone']) {
+    const payload = job(providerKey, 'twitter', 'social.comments.v1')
+    assert.equal(classifyExternalPlatformIngest(payload).hubRaw, true)
+    assert.equal(payload.providerKey, providerKey)
+  }
+  for (const providerKey of ['rapidapi', 'night-all', '']) {
+    assert.throws(() => classifyExternalPlatformIngest(job(providerKey, 'twitter', 'social.comments.v1')), /pinned contract/)
+  }
 })

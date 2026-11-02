@@ -190,14 +190,38 @@ export function inspectPostCommentArchive(row, options = {}) {
   let payload
   try { payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
   catch { return { state: 'archive_not_json', hashVerified: true, byteLength: bytes.length } }
+  if (options.twitterProjectionValidator) {
+    const evidence = { state: 'archive_verified', hashVerified: true, byteLength: bytes.length }
+    let parsed
+    try { parsed = options.twitterProjectionValidator(payload, payload?.data?.id) }
+    catch { return { ...evidence, projection: { state: 'contract_rejected', verified: false } } }
+    const rows = parsed.comments.map(comment => comment.values)
+    return { ...evidence, projection: {
+      state: 'parser_verified', verified: true, targetSource: 'saved_response_root',
+      inputThreadCount: payload.data.thread.length, projectedCount: rows.length,
+      distinctCommentCount: new Set(rows.map(row => row.commentId)).size,
+      excludedContextCount: payload.data.thread.length - rows.length,
+      rootIncluded: rows.some(row => row.commentId === payload.data.id),
+      textCount: rows.filter(row => typeof row.text === 'string').length,
+      authorIdCount: rows.filter(row => typeof row.author?.id === 'string').length,
+      publishedAtCount: rows.filter(row => typeof row.publishedAt === 'string').length,
+      unknownParentCount: rows.filter(row => row.parentRelationship === 'unknown' && row.parentExternalId === null).length,
+      pagination: { hasMore: parsed.providerPage.hasMore,
+        continuationAvailable: Boolean(parsed.providerPage.nextParams),
+        stopReason: parsed.providerPage.stopReason === 'continuation_unproven' ? 'continuation_unproven' : null },
+      boundary: 'All saved thread entries validated by the same pure parser used by the runtime projector. Root ID comes from this saved response; prior inspection established its match to the requested post. No values, HTTP, canonical writes or billing mutations.'
+    } }
+  }
   return { state: 'archive_verified', hashVerified: true, byteLength: bytes.length, ...summarizePostCommentPayload(payload, options),
     ...(options.prepareTwitterConversation ? { conversationSample: prepareTwitterConversationCommentSample(payload, options.twitterPostId) } : {}) }
 }
 
-export async function inspectPostCommentContract(pool, requestId, { twitterPostId = null, prepareTwitterConversation = false } = {}) {
+export async function inspectPostCommentContract(pool, requestId, { twitterPostId = null, prepareTwitterConversation = false,
+  twitterProjectionValidator = null } = {}) {
   if (!UUID.test(requestId || '')) throw new Error('invalid_request_id')
   if (twitterPostId !== null && (typeof twitterPostId !== 'string' || !TWITTER_ID.test(twitterPostId))) throw new Error('invalid_twitter_post_id')
   if (prepareTwitterConversation && twitterPostId === null) throw new Error('invalid_twitter_post_id')
+  if (twitterProjectionValidator !== null && (typeof twitterProjectionValidator !== 'function' || prepareTwitterConversation)) throw new Error('invalid_arguments')
   const client = await pool.connect()
   try {
     await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
@@ -225,7 +249,7 @@ export async function inspectPostCommentContract(pool, requestId, { twitterPostI
           LEFT JOIN control.external_platform_restricted_raw_responses r ON r.provider_call_id=c.id
           WHERE c.usage_request_id=$1::uuid AND c.id=$2::uuid`, [requestId, row.id, MAX_BYTES])
         archive = inspectPostCommentArchive(archives[0], row.provider_key === 'tikhub'
-          && row.endpoint_key === 'native.t.api_3cd88a6621a01120' ? { twitterPostId, prepareTwitterConversation } : undefined)
+          && row.endpoint_key === 'native.t.api_3cd88a6621a01120' ? { twitterPostId, prepareTwitterConversation, twitterProjectionValidator } : undefined)
       }
       calls.push({ ordinal: ordinal + 1, provider: choice(row.provider_key, ['tikhub', 'justone', 'rapidapi']),
         platform: choice(row.marketplace, PLATFORMS), endpoint: recognized ? row.endpoint_key : 'other',
@@ -244,6 +268,17 @@ export async function inspectPostCommentContract(pool, requestId, { twitterPostI
       return { revision: 'twitter-conversation-comment-sample.v1', sourceRequestId: requestId,
         sourcePostId: twitterPostId, ...call.archive.conversationSample }
     }
+    if (twitterProjectionValidator) {
+      const call = calls[0]
+      if (usages[0].status !== 'committed' || usages[0].response_status !== 200 || rows.length !== 1
+        || call?.provider !== 'tikhub' || call.platform !== 'twitter' || call.endpoint !== 'native.t.api_3cd88a6621a01120'
+        || call.outcome !== 'succeeded' || call.httpStatus !== 200 || call.businessCode !== 200 || call.billed !== true) {
+        throw new Error('twitter_projection_source_unavailable')
+      }
+      return { revision: 'twitter-comment-projection-verification.v1', requestId,
+        verified: call.archive.projection?.verified === true, archive: call.archive,
+        supplierHttpCallsMade: 0, databaseWritesMade: 0 }
+    }
     return { revision: 'post-comment-contract-inspection.v2', requestId,
       usage: { platform: choice(usages[0].platform, [...PLATFORMS, 'social', 'ecommerce']), status: choice(usages[0].status, ['reserved', 'committed', 'released', 'unknown']), httpStatus: status(usages[0].response_status) },
       calls, callsTruncated: rows.length > MAX_CALLS, callLimit: MAX_CALLS, nativeCallEvidencePresent: rows.length > 0,
@@ -261,18 +296,26 @@ if (process.argv[1] === '-' || (process.argv[1] && import.meta.url === pathToFil
   let pool
   try {
     const [flag, requestId, shapeFlag, twitterPostId, prepareFlag, extra] = process.argv.slice(2)
+    const verifyProjection = shapeFlag === '--verify-twitter-projection'
     if (flag !== '--request-id' || extra || !UUID.test(requestId || '')
       || (prepareFlag !== undefined && prepareFlag !== '--prepare-twitter-conversation')
-      || (shapeFlag !== undefined && (shapeFlag !== '--twitter-post-id' || !TWITTER_ID.test(twitterPostId || '')))) throw new Error('invalid_arguments')
+      || (verifyProjection ? twitterPostId !== undefined || prepareFlag !== undefined
+        : shapeFlag !== undefined && (shapeFlag !== '--twitter-post-id' || !TWITTER_ID.test(twitterPostId || '')))) throw new Error('invalid_arguments')
+    // For stdin execution, prepend the zero-import runtime parser module.
+    // This avoids loading any Hub service or requiring an image deployment.
+    const validator = verifyProjection && typeof parseTikHubTwitterCommentPage === 'function' ? parseTikHubTwitterCommentPage : null
+    if (verifyProjection && !validator) throw new Error('twitter_projection_parser_required')
     if (!process.env.DATABASE_URL) throw new Error('database_url_required')
     const { default: pg } = await import('pg')
     pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000, query_timeout: 6000,
       options: '-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000' })
-    console.log(JSON.stringify(await inspectPostCommentContract(pool, requestId, { twitterPostId: twitterPostId ?? null,
-      prepareTwitterConversation: prepareFlag === '--prepare-twitter-conversation' }), null, 2))
+    const result = await inspectPostCommentContract(pool, requestId, { twitterPostId: twitterPostId ?? null,
+      prepareTwitterConversation: prepareFlag === '--prepare-twitter-conversation', twitterProjectionValidator: validator })
+    console.log(JSON.stringify(result, null, 2))
+    if (verifyProjection && !result.verified) process.exitCode = 2
   } catch (error) {
     const safe = ['invalid_arguments', 'database_url_required', 'request_not_found', 'invalid_request_id', 'invalid_twitter_post_id',
-      'twitter_conversation_sample_unavailable'].includes(error?.message)
+      'twitter_conversation_sample_unavailable', 'twitter_projection_source_unavailable', 'twitter_projection_parser_required'].includes(error?.message)
       ? error.message : 'post_comment_contract_inspection_failed'
     console.error(JSON.stringify({ error: safe })); process.exitCode = 1
   } finally { await pool?.end() }

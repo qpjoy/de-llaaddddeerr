@@ -1,7 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
 import { inspectPostCommentArchive, inspectPostCommentContract, prepareTwitterConversationCommentSample, summarizePostCommentPayload } from '../../server/ops/inspect-post-comment-contract.mjs'
+import { parseTikHubTwitterCommentPage } from '../../server/contracts/twitter-comment-page.mjs'
 
 const requestId = 'af456ad4-2523-4f73-a1fc-c95104b329a4'
 const callId = 'bf456ad4-2523-4f73-a1fc-c95104b329a4'
@@ -311,4 +314,132 @@ test('conversation preparation rejects missing or contradictory billing lineage 
   }
   await assert.rejects(inspectPostCommentContract({ connect() { throw new Error('must not connect') } }, requestId,
     { prepareTwitterConversation: true }), /invalid_twitter_post_id/)
+})
+
+const twitterThreadPayload = () => ({ code: 200, data: twitterTweet({
+  conversation_id: twitterPostId, cursor: 'private-continuation-token', replies: 36,
+  thread: Array.from({ length: 36 }, (_, index) => ({
+    id: String(BigInt(twitterPostId) + BigInt(index + 1)), conversation_id: twitterPostId,
+    text: `private-comment-body-${index}`, created_at: 'Mon Nov 02 03:08:00 +0000 2026',
+    likes: 17, replies: 0, retweets: 2, bookmarks: 1, quotes: 0, views: '12345',
+    author: { rest_id: '1222333444555666777', name: 'private-comment-author', screen_name: 'private-author-handle' },
+  })),
+}) })
+
+test('Twitter projection verification runs the runtime parser against all 36 archived thread rows and returns compact counts only', async () => {
+  const payload = twitterThreadPayload()
+  const h = conversationInspectionHarness({ raw: archive(payload) })
+  let parserCalls = 0
+  const result = await inspectPostCommentContract(h.pool, requestId, { twitterProjectionValidator: (saved, target) => {
+    parserCalls++
+    assert.equal(saved.data.thread.length, 36)
+    assert.equal(target, twitterPostId)
+    return parseTikHubTwitterCommentPage(saved, target)
+  } })
+  assert.equal(parserCalls, 1)
+  assert.equal(result.revision, 'twitter-comment-projection-verification.v1')
+  assert.equal(result.verified, true)
+  assert.equal(result.supplierHttpCallsMade, 0)
+  assert.equal(result.databaseWritesMade, 0)
+  assert.equal(result.archive.hashVerified, true)
+  const { boundary, ...projection } = result.archive.projection
+  assert.deepEqual(projection, { state: 'parser_verified', verified: true, targetSource: 'saved_response_root',
+    inputThreadCount: 36, projectedCount: 36, distinctCommentCount: 36, excludedContextCount: 0, rootIncluded: false,
+    textCount: 36, authorIdCount: 36, publishedAtCount: 36, unknownParentCount: 36,
+    pagination: { hasMore: null, continuationAvailable: true, stopReason: null } })
+  assert.match(boundary, /All saved thread entries/)
+  assert.equal(result.archive.fields, undefined)
+  const output = JSON.stringify(result)
+  assert.ok(output.length < 2000)
+  for (const scalar of [twitterPostId, payload.data.thread[35].id, '1222333444555666777', 'private-', '12345',
+    'Mon Nov 02', '2026-11-02T03:08:00.000Z', 'https://x.com/']) assert.equal(output.includes(scalar), false)
+  assert.equal(h.queries.every(row => /^(?:BEGIN|SET|SELECT|ROLLBACK)\b/u.test(row.sql)), true)
+  assert.match(h.queries[0].sql, /READ ONLY/)
+  assert.equal(h.queries.at(-1).sql, 'ROLLBACK')
+  assert.equal(h.releases, 1)
+})
+
+test('Twitter projection verification rejects a malformed last row beyond the structural sampler limit without leaking parser errors', async () => {
+  const payload = twitterThreadPayload()
+  payload.data.thread[35].author.rest_id = 'private-invalid-author'
+  const h = conversationInspectionHarness({ raw: archive(payload) })
+  const result = await inspectPostCommentContract(h.pool, requestId, { twitterProjectionValidator: parseTikHubTwitterCommentPage })
+  assert.equal(result.verified, false)
+  assert.deepEqual(result.archive.projection, { state: 'contract_rejected', verified: false })
+  assert.equal(JSON.stringify(result).includes('private'), false)
+  assert.equal(h.queries.at(-1).sql, 'ROLLBACK')
+  const rejected = inspectPostCommentArchive(archive(twitterThreadPayload()), {
+    twitterProjectionValidator() { throw new Error('private-parser-error-with-credentials') },
+  })
+  assert.deepEqual(rejected.projection, { state: 'contract_rejected', verified: false })
+  assert.equal(JSON.stringify(rejected).includes('private'), false)
+})
+
+test('Twitter projection verification never invokes the parser before archive integrity succeeds', async () => {
+  const valid = archive(twitterThreadPayload())
+  for (const changed of [null, { ...valid, body_sha256: '0'.repeat(64) },
+    { ...valid, actual_body_size: valid.body_size + 1 }, { ...valid, body_size: 4194305 }]) {
+    let parserCalls = 0
+    const h = conversationInspectionHarness({ raw: changed })
+    const result = await inspectPostCommentContract(h.pool, requestId, {
+      twitterProjectionValidator() { parserCalls++; throw new Error('must not parse') },
+    })
+    assert.equal(parserCalls, 0)
+    assert.equal(result.verified, false)
+    assert.equal(result.archive.projection, undefined)
+    assert.equal(result.supplierHttpCallsMade, 0)
+    assert.equal(result.databaseWritesMade, 0)
+    assert.equal(h.queries.at(-1).sql, 'ROLLBACK')
+  }
+})
+
+test('Twitter projection verification requires one successful committed billed native Twitter source and rejects incompatible options', async () => {
+  const raw = archive(twitterThreadPayload())
+  for (const changes of [
+    { usage: { status: 'released' } }, { usage: { status: 'reserved' } }, { usage: { response_status: 404 } },
+    { call: { billed: false } }, { call: { billed: null } }, { call: { outcome: 'unknown' } },
+    { call: { http_status: 404 } }, { call: { business_code: 400 } },
+    { call: { endpoint_key: 'native.t.api_e85913faa8a9029b' } },
+    { call: { provider_key: 'justone', endpoint_key: 'native.j.api_bcedccd1a73cc8f2' } },
+    { call: { marketplace: 'reddit' } }, { count: 0 }, { count: 2 }, { count: 4 },
+  ]) {
+    const h = conversationInspectionHarness({ raw, ...changes })
+    await assert.rejects(inspectPostCommentContract(h.pool, requestId, { twitterProjectionValidator: parseTikHubTwitterCommentPage }),
+      /twitter_projection_source_unavailable/)
+    assert.equal(h.queries.at(-1).sql, 'ROLLBACK')
+    assert.equal(h.releases, 1)
+    assert.equal(h.queries.every(row => /^(?:BEGIN|SET|SELECT|ROLLBACK)\b/u.test(row.sql)), true)
+  }
+  for (const options of [{ twitterProjectionValidator: true },
+    { twitterPostId, prepareTwitterConversation: true, twitterProjectionValidator: parseTikHubTwitterCommentPage }]) {
+    await assert.rejects(inspectPostCommentContract({ connect() { throw new Error('must not connect') } }, requestId, options), /invalid_arguments/)
+  }
+})
+
+test('standalone stdin verification requires the prepended pure parser and retains existing inspection argument forms without connecting', async () => {
+  const inspector = await readFile(new URL('../../server/ops/inspect-post-comment-contract.mjs', import.meta.url), 'utf8')
+  const parser = await readFile(new URL('../../server/contracts/twitter-comment-page.mjs', import.meta.url), 'utf8')
+  const env = { ...process.env }
+  delete env.DATABASE_URL
+  const invoke = (source, args) => {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-', '--request-id', requestId, ...args], {
+      input: source, env, encoding: 'utf8', timeout: 5000, maxBuffer: 65536,
+    })
+    assert.equal(result.error, undefined)
+    assert.equal(result.status, 1)
+    assert.equal(result.stdout, '')
+    return JSON.parse(result.stderr)
+  }
+  assert.deepEqual(invoke(inspector, ['--verify-twitter-projection']), { error: 'twitter_projection_parser_required' })
+  const combined = `${parser}\n${inspector}`
+  assert.deepEqual(invoke(combined, ['--verify-twitter-projection']), { error: 'database_url_required' })
+  for (const args of [[], ['--twitter-post-id', twitterPostId],
+    ['--twitter-post-id', twitterPostId, '--prepare-twitter-conversation']]) {
+    assert.deepEqual(invoke(inspector, args), { error: 'database_url_required' })
+  }
+  for (const args of [['--verify-twitter-projection', twitterPostId],
+    ['--verify-twitter-projection', '--prepare-twitter-conversation'], ['--verify-twitter-projection', '--extra'],
+    ['--twitter-post-id', twitterPostId, '--verify-twitter-projection']]) {
+    assert.deepEqual(invoke(combined, args), { error: 'invalid_arguments' })
+  }
 })
