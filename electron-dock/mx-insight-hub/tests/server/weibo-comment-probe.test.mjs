@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto'
 import { normalizeNativeForwardingRequest } from '../../server/contracts/native-forwarding.mjs'
 import { WEIBO_SEARCH_NATIVE_KEY, WEIBO_COMMENT_NATIVE_KEY, WEIBO_SEARCH_BODY,
   selectWeiboCommentTarget, prepareWeiboCommentSample, runWeiboSearchProbe, runWeiboCommentProbe,
-  inspectWeiboCommentSearch, summarizeWeiboSearchCandidates }
+  inspectWeiboCommentSearch, summarizeWeiboSearchCandidates, prepareWeiboZeroCountCommentSample }
   from '../../server/ops/probe-weibo-comments.mjs'
 
 const sourceId = 'cb500094-3a50-4945-9a0e-cc753f48a210'
@@ -38,6 +38,8 @@ const originalReceipt = () => ({ revision: 'weibo-comment-search-probe.v1', prov
 const sample = () => ({ revision: 'weibo-comment-target-sample.v1', platform: 'weibo', provider: 'tikhub',
   sourceRequestId: sourceId, sourceIdempotencyKey: sourceKey, sourceBodySha256: searchBodySha,
   postId, commentCount: 12, searchItemCount: 1, candidateCount: 1 })
+const zeroSample = () => ({ ...sample(), revision: 'weibo-comment-target-sample.v2', commentCount: 0,
+  selectionBasis: 'verified_zero_count_search' })
 
 async function fixture(t, { withSearch = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'weibo-comment-probe-'))
@@ -296,6 +298,134 @@ test('a verified but empty search archive stops preparation rather than manufact
   const db = database({ payload: searchPayload([{ weibo_id: postId, comments_count: 0 }]) })
   await assert.rejects(prepareWeiboCommentSample(db.pool, originalReceipt()), /no_positive_comment_target/u)
   assert.equal(db.statements.at(-1).sql, 'ROLLBACK')
+})
+
+test('explicit zero-count preparation preserves the first verified search identity and all saved zero metrics', async t => {
+  const fetched = t.mock.method(globalThis, 'fetch', noHttp)
+  const rows = [postId, '999', '101', '998', '102', '997', '103', '996']
+    .map(weibo_id => ({ weibo_id, interaction: { comment_count: 0 }, content: 'private source text' }))
+  const db = database({ payload: searchPayload(rows) })
+  const result = await prepareWeiboZeroCountCommentSample(db.pool, originalReceipt())
+  assert.deepEqual(result, { ...zeroSample(), searchItemCount: 8, candidateCount: 8 })
+  assert.equal(result.postId, rows[0].weibo_id)
+  assert.equal(result.commentCount, 0)
+  assert.equal(fetched.mock.callCount(), 0)
+  assert.match(db.statements[0].sql, /READ ONLY/u)
+  assert.ok(db.statements.every(({ sql }) => /^(?:BEGIN|SET|SELECT|ROLLBACK)\b/u.test(sql)))
+  assert.equal(db.statements.at(-1).sql, 'ROLLBACK')
+  assert.equal(db.releases, 1)
+})
+
+test('zero-count preparation requires every saved row to have a valid selected identity and an actual selected zero', async () => {
+  const valid = { weibo_id: postId, interaction: { comment_count: 0 } }
+  const cases = [[], [valid, null], [valid, {}], [valid, { weibo_id: 'base62X', comments_count: 0 }],
+    [valid, { weibo_id: 10000000000000000, idstr: postId, comments_count: 0 }],
+    [valid, { weibo_id: '101' }], [valid, { weibo_id: '101', comments_count: '评论' }],
+    [valid, { weibo_id: '101', comments_count: -1 }], [valid, { weibo_id: '101', comments_count: 1 }],
+    Array(1001).fill(valid)]
+  for (const rows of cases) {
+    const db = database({ payload: searchPayload(rows) })
+    await assert.rejects(prepareWeiboZeroCountCommentSample(db.pool, originalReceipt()))
+    assert.equal(db.statements.at(-1).sql, 'ROLLBACK')
+  }
+  const failed = searchPayload([valid])
+  failed.data.parsed_data.parse_success = false
+  await assert.rejects(prepareWeiboZeroCountCommentSample(database({ payload: failed }).pool, originalReceipt()))
+})
+
+test('explicit zero-count selection retains the exact successful-call and full archive evidence gates', async () => {
+  const payload = searchPayload([{ weibo_id: postId, interaction: { comment_count: 0 } }])
+  const base = database({ payload })
+  await assert.rejects(prepareWeiboZeroCountCommentSample(base.pool, { ...originalReceipt(), bodySha256: '0'.repeat(64) }))
+  assert.equal(base.statements.length, 0)
+  for (const patch of [
+    { usages: [{ ...base.usage, idempotency_key: 'different' }] },
+    { calls: [{ ...base.call, billed: null }] },
+    { calls: [base.call, base.call] },
+    { archives: [{ ...base.archive, body_sha256: '0'.repeat(64) }] },
+    { archives: [{ ...base.archive, actual_body_size: base.archive.body_size + 1 }] },
+    { failAt: 'weibo-comment-sample:archive' }, { rollbackFail: true },
+  ]) {
+    const db = database({ payload, ...patch })
+    await assert.rejects(prepareWeiboZeroCountCommentSample(db.pool, originalReceipt()))
+    assert.equal(db.statements.at(-1).sql, 'ROLLBACK')
+    assert.equal(db.releases, 1)
+  }
+})
+
+test('the existing positive-count preparation and v1 probe cannot silently opt into the zero-count mode', async t => {
+  const db = database({ payload: searchPayload([{ weibo_id: postId, interaction: { comment_count: 0 } }]) })
+  await assert.rejects(prepareWeiboCommentSample(db.pool, originalReceipt()), /no_positive_comment_target/u)
+  const f = await fixture(t, { withSearch: true })
+  for (const value of [{ ...sample(), commentCount: 0 },
+    { ...zeroSample(), revision: 'weibo-comment-target-sample.v1' },
+    { ...sample(), selectionBasis: 'verified_zero_count_search' }]) {
+    await assert.rejects(runWeiboCommentProbe({ ...f.commentInput, sample: value }, { fetchImpl: noHttp }))
+  }
+  await assert.rejects(lstat(f.commentMarker), { code: 'ENOENT' })
+})
+
+test('v2 zero-count samples reject altered basis, count, identities, cardinality and receipt lineage before HTTP', async t => {
+  const f = await fixture(t, { withSearch: true })
+  for (const patch of [{ selectionBasis: undefined }, { selectionBasis: 'identity_only' },
+    { commentCount: 1 }, { commentCount: null }, { commentCount: '0' }, { postId: 123 },
+    { searchItemCount: 0 }, { searchItemCount: 1001 }, { searchItemCount: 2, candidateCount: 1 },
+    { candidateCount: 0 }, { sourceRequestId: commentId }, { sourceIdempotencyKey: 'different' },
+    { sourceBodySha256: '0'.repeat(64) }, { cursor: 'private-cursor' }]) {
+    await assert.rejects(runWeiboCommentProbe({ ...f.commentInput, sample: { ...zeroSample(), ...patch } }, { fetchImpl: noHttp }))
+  }
+  await assert.rejects(lstat(f.commentMarker), { code: 'ENOENT' })
+})
+
+test('zero-count comments use the same remaining one-page slot without resending search or supplier metric fields', async t => {
+  const f = await fixture(t, { withSearch: true }), originalBytes = await readFile(f.searchMarker)
+  const input = { ...f.commentInput, sample: zeroSample() }
+  const preview = await runWeiboCommentProbe({ ...input, apiKey: null, apply: false }, { fetchImpl: noHttp })
+  assert.equal(preview.state, 'preview')
+  assert.equal(preview.selectionBasis, 'verified_zero_count_search')
+  let gets = 0, posts = 0
+  const result = await runWeiboCommentProbe(input, { fetchImpl: async (url, options) => {
+    if (options.method === 'GET') { gets++; return response(capabilities()) }
+    posts++
+    assert.equal(url, `${origin}${commentPath}`)
+    assert.deepEqual(JSON.parse(options.body), { params: { id: postId, count: 20 }, deliveryMode: 'live_only' })
+    const marker = JSON.parse(await readFile(f.commentMarker, 'utf8'))
+    assert.equal(marker.state, 'dispatch_started')
+    assert.equal(marker.sourceRequestId, sourceId)
+    assert.equal(marker.selectionBasis, 'verified_zero_count_search')
+    return response({ code: 200, data: { comments: [] } }, { requestId: commentId })
+  } })
+  assert.equal(gets, 1); assert.equal(posts, 1)
+  assert.equal(result.selectionBasis, 'verified_zero_count_search')
+  assert.equal(result.hubRequestsMade, 1)
+  assert.equal(result.requestId, commentId)
+  assert.deepEqual(await readFile(f.searchMarker), originalBytes)
+  for (const old of f.originals) assert.equal(await readFile(join(f.receipts, old), 'utf8'), `immutable-${old}`)
+  for (const output of [JSON.stringify(result), await readFile(f.commentMarker, 'utf8')]) {
+    for (const value of [postId, apiKey, 'private source text']) assert.equal(output.includes(value), false)
+  }
+  for (const next of [input, f.commentInput]) {
+    assert.equal((await runWeiboCommentProbe(next, { fetchImpl: noHttp })).state, 'already_attempted')
+  }
+  assert.equal((await runWeiboSearchProbe(f.searchInput, { fetchImpl: noHttp })).state, 'already_attempted')
+})
+
+test('concurrent v1 and zero-count v2 probes share the same exclusive comment marker', async t => {
+  const f = await fixture(t, { withSearch: true })
+  let posts = 0
+  const fetchImpl = async (url, options) => {
+    if (options.method === 'GET') return response(capabilities())
+    assert.equal(url, `${origin}${commentPath}`)
+    posts++
+    return response({}, { requestId: commentId })
+  }
+  const results = await Promise.all([
+    runWeiboCommentProbe(f.commentInput, { fetchImpl }),
+    runWeiboCommentProbe({ ...f.commentInput, sample: zeroSample() }, { fetchImpl }),
+  ])
+  assert.equal(posts, 1)
+  assert.equal(results.filter(row => row.state === 'http_response').length, 1)
+  assert.equal(results.filter(row => row.state === 'already_attempted').length, 1)
 })
 
 test('verified archive bytes still require valid UTF-8, JSON, successful parsing and a bounded response', async () => {

@@ -25,7 +25,8 @@ const uuid = value => typeof value === 'string' && UUID.test(value)
 const sha = value => createHash('sha256').update(value).digest('hex')
 const SEARCH_SHA = sha(JSON.stringify(WEIBO_SEARCH_BODY))
 const SAFE_ERRORS = new Set(['invalid_arguments', 'api_key_required', 'invalid_api_key', 'database_url_required',
-  'invalid_sample', 'source_receipt_unverified', 'source_read_failed', 'invalid_search_response', 'no_positive_comment_target'])
+  'invalid_sample', 'source_receipt_unverified', 'source_read_failed', 'invalid_search_response', 'no_positive_comment_target',
+  'zero_count_sample_not_allowed'])
 const RESPONSE_ERRORS = new Set(['invalid_api_key', 'test_key_not_supported', 'platform_not_granted', 'capability_not_granted',
   'request_outcome_unknown', 'request_in_progress', 'idempotency_conflict', 'insufficient_balance', 'plan_assignment_unavailable',
   'external_platform_operation_disabled', 'external_platform_operation_paused', 'external_platform_contract_unverified',
@@ -40,7 +41,8 @@ const metric = value => Number.isSafeInteger(value) && value >= 0 ? value
 
 // Candidate structure shared with the existing Weibo realtime-search projector.
 // Advanced-search documentation does not prove a concrete response schema; a
-// different shape or an empty/zero-comment page stops this batch without buying more.
+// different shape or an empty page stops this batch without buying more. The
+// explicit zero-count mode below can reuse a verified all-zero search page.
 function searchRows(payload) {
   const rows = payload?.data?.parsed_data?.results
   if (payload?.code !== 200 || payload?.data?.parsed_data?.parse_success === false
@@ -178,6 +180,21 @@ export const prepareWeiboCommentSample = (pool, receipt) => withVerifiedSearchAr
     sourceRequestId: receipt.requestId, sourceIdempotencyKey: receipt.idempotencyKey, sourceBodySha256: SEARCH_SHA,
     ...selectWeiboCommentTarget(payload) }))
 
+// Search counters do not prove live comment availability. After an operator has
+// inspected an all-zero page, reuse its first valid target for the same remaining
+// comment slot; do not manufacture a positive count or buy another search page.
+export const prepareWeiboZeroCountCommentSample = (pool, receipt) => withVerifiedSearchArchive(pool, receipt,
+  payload => {
+    const rows = searchRows(payload)
+    if (!rows.length || !rows.every(row => object(row) && selectedIdentity(row) && selectedMetric(row) === 0)) {
+      throw new Error('zero_count_sample_not_allowed')
+    }
+    return { revision: 'weibo-comment-target-sample.v2', platform: 'weibo', provider: 'tikhub',
+      sourceRequestId: receipt.requestId, sourceIdempotencyKey: receipt.idempotencyKey, sourceBodySha256: SEARCH_SHA,
+      postId: selectedIdentity(rows[0]), commentCount: 0, searchItemCount: rows.length, candidateCount: rows.length,
+      selectionBasis: 'verified_zero_count_search' }
+  })
+
 export const inspectWeiboCommentSearch = (pool, receipt) => withVerifiedSearchArchive(pool, receipt,
   (payload, byteLength) => ({ revision: 'weibo-comment-search-inspection.v1', requestId: receipt.requestId, verified: true,
     archive: { state: 'archive_verified', hashVerified: true, byteLength }, selection: summarizeWeiboSearchCandidates(payload),
@@ -196,13 +213,16 @@ async function readReceipt(path) {
 }
 
 function validateSample(sample) {
+  const zeroCount = sample?.revision === 'weibo-comment-target-sample.v2'
   const fields = ['revision', 'platform', 'provider', 'sourceRequestId', 'sourceIdempotencyKey', 'sourceBodySha256',
-    'postId', 'commentCount', 'searchItemCount', 'candidateCount']
+    'postId', 'commentCount', 'searchItemCount', 'candidateCount', ...(zeroCount ? ['selectionBasis'] : [])]
   if (!object(sample) || Object.keys(sample).length !== fields.length || Object.keys(sample).some(key => !fields.includes(key))
-    || sample.revision !== 'weibo-comment-target-sample.v1' || sample.platform !== 'weibo' || sample.provider !== 'tikhub'
+    || (!zeroCount && sample.revision !== 'weibo-comment-target-sample.v1') || sample.platform !== 'weibo' || sample.provider !== 'tikhub'
     || !uuid(sample.sourceRequestId) || sample.sourceBodySha256 !== SEARCH_SHA
     || typeof sample.postId !== 'string' || !ID.test(sample.postId) || metric(sample.commentCount) !== sample.commentCount
-    || sample.commentCount < 1 || !Number.isSafeInteger(sample.searchItemCount) || sample.searchItemCount > 1000
+    || (zeroCount ? sample.commentCount !== 0 || sample.selectionBasis !== 'verified_zero_count_search'
+      || sample.candidateCount !== sample.searchItemCount : sample.commentCount < 1)
+    || !Number.isSafeInteger(sample.searchItemCount) || sample.searchItemCount > 1000
     || !Number.isSafeInteger(sample.candidateCount) || sample.candidateCount < 1 || sample.candidateCount > sample.searchItemCount) {
     throw new Error('invalid_sample')
   }
@@ -258,6 +278,7 @@ async function runProbe(stage, { sample, sampleDirectory, apiKey, apply = false 
     if (receipt.requestId !== sample.sourceRequestId || receipt.idempotencyKey !== sample.sourceIdempotencyKey
       || receipt.bodySha256 !== sample.sourceBodySha256) throw new Error('source_receipt_unverified')
     preview.sourceRequestId = sample.sourceRequestId
+    if (sample.selectionBasis) preview.selectionBasis = sample.selectionBasis
   }
   if (!apply) return { ...preview, state: 'preview', hubRequestsMade: 0, preflightRequestsMade: 0 }
   if (!apiKey) throw new Error('api_key_required')
@@ -322,16 +343,17 @@ if (stdinMain || process.argv[1] && import.meta.url === pathToFileURL(process.ar
   let pool
   try {
     const args = process.argv.slice(2)
-    if (args.length !== 3 || !['--prepare', '--inspect-search'].includes(args[0]) || !uuid(args[1])) throw new Error('invalid_arguments')
+    if (args.length !== 3 || !['--prepare', '--prepare-zero-count', '--inspect-search'].includes(args[0]) || !uuid(args[1])) throw new Error('invalid_arguments')
     if (!process.env.DATABASE_URL) throw new Error('database_url_required')
     const { default: pg } = await import('pg')
     pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000,
       query_timeout: 6000, options: '-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000' })
-    // --prepare stdout is private; --inspect-search returns only safe aggregates.
+    // Both prepare modes have private stdout; inspect returns only safe aggregates.
     const receipt = { revision: 'weibo-comment-search-probe.v1', provider: 'tikhub', platform: 'weibo', path: SEARCH_PATH,
       state: 'http_response', httpStatus: 200, hubRequestsMade: 1, requestIdSource: 'usage_header',
       requestId: args[1], idempotencyKey: args[2], bodySha256: SEARCH_SHA }
-    const execute = args[0] === '--inspect-search' ? inspectWeiboCommentSearch : prepareWeiboCommentSample
+    const execute = args[0] === '--inspect-search' ? inspectWeiboCommentSearch
+      : args[0] === '--prepare-zero-count' ? prepareWeiboZeroCountCommentSample : prepareWeiboCommentSample
     console.log(JSON.stringify(await execute(pool, receipt), null, 2))
   } catch (error) {
     console.error(JSON.stringify({ error: SAFE_ERRORS.has(error?.message) ? error.message : 'weibo_comment_probe_failed' }))

@@ -1281,3 +1281,74 @@ BASH
 ```
 
 `--prepare` 仍为私有 stdout，不能单独打印贴回；不要重跑上一节的付费封装，也不要删除 `weibo.search.json`。本地 26 项 probe/诊断测试通过，包括原采购次数、标记和归档边界回归；无真实 HTTP/生产查询。等待上面诊断回传，当前未放宽运行选择器、未切换微博统一路由。
+
+
+## 微博八条搜索结果均为零计数，复用首条采样一次评论
+
+2026-11-02 操作者回传 `weibo-comment-search-inspection.v1`：usage `15fc7955-8bcb-4b01-9618-d23c56ff64b6` 的 8130 字节归档完整验证通过，8 条结果都是对象，8 个 `weibo_id` 均为有效字符串，8 个 `interaction.comment_count` 均为安全整数 0，没有缺失或不识别的所选计数。不是 Hub 漏掉正数字段的证据，也不证明帖子现在没有评论。
+
+本轮继续用户已授权且尚未消耗的那一次评论请求。新增私有 `--prepare-zero-count` 模式，复用同一精确 usage/call/完整 SHA 校验，要求整页非空、每个所选 ID 有效、每个所选计数为零，然后固定使用保存顺序的第一条。输出 sample v2，`selectionBasis=verified_zero_count_search`、`commentCount=0`，不伪造正数；原 v1 的正数选样条件不变。仅采一页 `count=20`，空页/拒绝/未知也停止，不换目标、不续页、不重试或重新搜索。
+
+同步更新后的 `server/ops/probe-weibo-comments.mjs`，保留上一轮已同步的 `inspect-post-comment-contract.mjs`，无需重新部署。下面命令仍使用相同目录的 `weibo.comments.json`，先检查已有标记，再只读准备私有目标，免费能力预检通过后最多一个评论 POST，最后读取同一次调用归档。保留全部旧 marker；私有目标只在进程内传递，不在终端输出。
+
+```bash
+bash <<'BASH'
+set -euo pipefail
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+if [ -e .hub-comment-contract-probes-v1/weibo.comments.json ] ||
+   [ -L .hub-comment-contract-probes-v1/weibo.comments.json ]; then
+  printf '%s\n' '{"state":"already_attempted","hubRequestsMade":0,"action":"preserve_all_markers_and_report_output"}'
+  exit 0
+fi
+read -r -s -p 'Hub Live API Key: ' MX_HUB_PROBE_API_KEY </dev/tty
+printf '\n'
+export MX_HUB_PROBE_API_KEY
+node --input-type=module <<'NODE'
+import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { runWeiboCommentProbe } from './server/ops/probe-weibo-comments.mjs';
+const reasons = new Set(['invalid_arguments', 'api_key_required', 'invalid_api_key',
+  'database_url_required', 'invalid_sample', 'source_receipt_unverified', 'source_read_failed',
+  'invalid_search_response', 'zero_count_sample_not_allowed', 'comments_not_completed']);
+function admin(file, args) {
+  try {
+    return JSON.parse(execFileSync('kubectl', [
+      '-n', 'mx-insight-hub', 'exec', '-i', 'deployment/mx-insight-hub-admin', '-c', 'admin', '--',
+      'node', '--input-type=module', '-', ...args
+    ], { input: readFileSync(file, 'utf8'), encoding: 'utf8', timeout: 30000,
+      maxBuffer: 2 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }));
+  } catch (error) {
+    let reason = 'source_read_failed';
+    for (const line of String(error.stderr ?? '').split('\n')) {
+      try { const code = JSON.parse(line).error; if (reasons.has(code)) reason = code; } catch {}
+    }
+    throw new Error(reason);
+  }
+}
+try {
+  const sample = admin('server/ops/probe-weibo-comments.mjs', [
+    '--prepare-zero-count', '15fc7955-8bcb-4b01-9618-d23c56ff64b6',
+    'weibo-comment-search-v1-26c05d64-a345-4cfa-acb5-fd03e057d252'
+  ]);
+  console.log(JSON.stringify({ revision: 'weibo-comment-zero-count-selection.v1',
+    sourceRequestId: sample.sourceRequestId, archiveVerified: true,
+    searchItemCount: sample.searchItemCount, selectionBasis: sample.selectionBasis,
+    supplierHttpCallsMade: 0, databaseWritesMade: 0 }, null, 2));
+  const comments = await runWeiboCommentProbe({
+    sampleDirectory: process.cwd(), apiKey: process.env.MX_HUB_PROBE_API_KEY, apply: true, sample
+  });
+  console.log(JSON.stringify(comments, null, 2));
+  if (comments.requestId) console.log(JSON.stringify(admin('server/ops/inspect-post-comment-contract.mjs',
+    ['--request-id', comments.requestId]), null, 2));
+  if (comments.state !== 'http_response' || comments.httpStatus !== 200
+    || comments.requestIdSource !== 'usage_header') throw new Error('comments_not_completed');
+} catch (error) {
+  console.error(JSON.stringify({ error: reasons.has(error.message) ? error.message : 'weibo_calibration_stopped',
+    action: 'preserve_all_markers_and_report_output' }));
+  process.exitCode = 1;
+}
+NODE
+BASH
+```
+
+本地验证：整份采样/诊断测试 33 项通过，无跳过，含零计数全页门禁、旧 v1 拒绝零、完整归档验证、v2 类型检查、单次请求与跨版本共用标记并发；Bash/Node 语法及独立审查通过。均为模拟 HTTP/数据库，生产评论尚待执行；未切换微博统一路由，没有运行接口、存储、授权或 MX-H2I 登录/联网变更。

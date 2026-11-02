@@ -13,7 +13,7 @@
 | Night-All | Internal 宿主机 `:13141`，不在 k8s 内 | 历史自建平台：本地爬虫（如搜狗微信 `wechat_mp`）、旧供应商编排、BullMQ 异步任务 | 运行中。供应商类接口按 operation 逐个迁到 Hub；自建爬虫能力保留 |
 | Night-All-A | VPN 固定地址 `100.127.0.1:8100`（Internal 侧为 `100.127.0.6`） | HTTP 异步采集 + 独立清洗库；含 Facebook 协议爬虫 `facebook-protocol` | Facebook 内容搜索的「自建」模式已实现未部署（[03](03-self-hosted-engines.md) 第 11 节）；旧 Admin 控制台转发仍由环境开关控制（默认关闭），线上是否启用未核实 |
 | Hub 自建引擎 | Hub（k8s）内的引擎配置、任务表、执行者 | 把一个自建爬虫包装成可排队、可计量、可查询的数据产品。第一个是「微信 → 自建引擎」 | 已实现未部署 |
-| Hub 单帖评论 | Hub Public 原生接口与旧兼容别名 | 13 平台固定供应商评论，现有 PG 归档/计费/分页/入库；不转 Night-All | Twitter、Reddit、快手统一入口首屏均验收通过；快手分页 unknown/不可继续。其余七个 JustOne 平台受余额阻塞；微博新搜索已成功，但未选出正评论量目标，评论尚未采样；待同次归档字段只读诊断；见 [迁移合同](../../integrations/post-comments-migration.md) |
+| Hub 单帖评论 | Hub Public 原生接口与旧兼容别名 | 13 平台固定供应商评论，现有 PG 归档/计费/分页/入库；不转 Night-All | Twitter、Reddit、快手统一入口首屏均验收通过；快手分页 unknown/不可继续。其余七个 JustOne 平台受余额阻塞；微博新搜索已核验 8 条有效 ID/零计数，准备复用首条执行剩余一次评论采样；见 [迁移合同](../../integrations/post-comments-migration.md) |
 | Hub 事件中心 | Hub Public 的事件接口 + PG 事件日志 | 把任务终态和数据变化可靠地交付给 Delta、Java | 设计中 |
 | 下游 | Delta（po-infra）、罗盘 Java，都是 Internal 宿主机上的 Docker | 提交任务、消费事件 | 目前同步调 Hub；直连改造见[性能汇总第 5 节](../../operations/platform-performance-review-2026-10-22.md) |
 | 旁路采集 | Delta 自带的 spiders、直接调 Night-All 的控制台等 | 不经过 Hub 的采集入口 | 待盘点 |
@@ -128,3 +128,5 @@ flowchart LR
 - 2026-11-02 微博重新采样准备：固定候选版本及当前来源 ID 一致、同 run，comment_count 是安全整数 0；不再追查历史。用户再次授权少量付费请求，准备最多一次 Web 热门搜索和一次主评论请求的独立批次，先免费预检，再核对唯一成功计费调用、完整归档 SHA 与正评论量目标；任一步失败停止。57 项模拟 HTTP/数据库及归档检查通过，服务器命令语法通过；尚未生产执行，微博统一路由仍为 JustOne，无存储、权限或 MX-H2I 变更。
 
 - 2026-11-02 微博采样进展：高级搜索 usage15fc7955-8bcb-4b01-9618-d23c56ff64b6 HTTP200，准备流程通过计费与完整归档门禁后返回 no_positive_comment_target；主评论未请求。新增同次归档只读字段/选择状态检查，26 项测试通过。不能把该错误解释成所有微博无评论；已有 realtime 搜索计数全零的历史证据，只作排查参考。保留 marker，不重复采购搜索；微博路由、存储和 MX-H2I 无变化。
+
+- 2026-11-02 微博零计数选样：操作者回传同次 8130B 完整归档验证，8 条有效字符串 ID、评论计数均为数值 0。准备显式零计数模式从同次保存结果固定取首条，最多执行剩余一次主评论采样，沿用原 marker；不重搜、换目标、重试或续页。33 项测试与封装审查通过，尚未执行生产评论请求；微博统一路由、存储和 MX-H2I 不变。

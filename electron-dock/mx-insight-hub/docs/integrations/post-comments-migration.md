@@ -12,7 +12,7 @@ Twitter 首屏统一入口现已完成实际验收，下游继续使用原 URL �
 
 快手统一入口验收 usage `2274fe73-43e4-4914-9f21-a3629b188d09` 已通过：HTTP200、返回 11 条、六项检查均 true；同 usage committed、唯一 TikHub bc64 调用成功且 billed=true，归档校验通过。分页 hasMore=null、continuationAvailable=false、paginationStatus=unknown，表示当前没有可证实的续页，不表示全帖评论已取完。保留 `kuaishou.unified-acceptance.json` 及原 Web/App 标记，不重复购买或验收。见 [快手验收记录](../operations/post-comment-contract-calibration.md#快手统一入口首屏验收已通过)。
 
-微博替代接入进行中：旧 canonical `ffe325bc-1e9a-4cab-8693-4d866252c88a` 保存来源评论数确认为 0。用户授权重新采样后，TikHub 高级搜索 usage `15fc7955-8bcb-4b01-9618-d23c56ff64b6` 已 HTTP200；精确调用/已计费/完整归档验证通过，但选择器返回 no_positive_comment_target，评论请求未发出。这不等于搜索为空或所有帖子无评论。新增只读 `--inspect-search` 检查同次保存结果的 ID 与计数格式，26 项测试通过；保留 search marker，不重新搜索。正评论量是本脚本筛选条件，用户授权仍覆盖剩余一次评论采样，后续依据保存字段继续。微博统一路由仍为 JustOne，见 [搜索结果诊断命令](../operations/post-comment-contract-calibration.md#微博搜索已成功但未选出目标只读检查本次归档)。
+微博替代接入进行中：旧 canonical 保存评论数为 0；新 TikHub 高级搜索 usage `15fc7955-8bcb-4b01-9618-d23c56ff64b6` 已成功计费，后续只读检查确认 8130 字节完整归档、8 个有效字符串 weibo_id、interaction.comment_count 全为安全整数 0。这不证明真实评论为空。新增显式零计数选样模式，复用同次归档固定取第一条，准备执行已授权的剩余一次主评论请求（count20）；不重新搜索、不换目标、不自动重试或续页。33 项本地测试通过，评论采样待执行；微博统一路由仍为 JustOne。见 [单次评论采样命令](../operations/post-comment-contract-calibration.md#微博八条搜索结果均为零计数复用首条采样一次评论)。
 
 ## 入口与交付
 
