@@ -1352,3 +1352,27 @@ BASH
 ```
 
 本地验证：整份采样/诊断测试 33 项通过，无跳过，含零计数全页门禁、旧 v1 拒绝零、完整归档验证、v2 类型检查、单次请求与跨版本共用标记并发；Bash/Node 语法及独立审查通过。均为模拟 HTTP/数据库，生产评论尚待执行；未切换微博统一路由，没有运行接口、存储、授权或 MX-H2I 登录/联网变更。
+
+
+## 微博 22 条主评论归档的全量只读投影验收
+
+本次评论采样已成功：usage `fedbc7e0-e9fa-4fe3-a3e3-5107fcb13849` 的 TikHub `native.t.api_631f7f6fd007cba9` 调用 committed、HTTP/business 200、唯一调用 `billed=true`，完整归档 137665 字节。结构检查显示 `data.data` 有 22 条根评论，嵌套 `comments` 是回复预览；此前只检查了前三条，尚不能把结构抽样当成 22 条全量合同。
+
+新增 `server/contracts/weibo-comment-page.mjs`，使用保存请求的目标 ID 做纯解析：每条根评论要求可保真的 `idstr`、一致的 `mid`/`rootidstr`、作者 `user.idstr`、正文、可解析发布时间和安全互动计数；不安全数字 ID 只作影子字段，不能替代字符串；嵌套预览不投影为根评论。顶层 `max_id` 只有明确空字符串按无更多处理；数值 0、字符串 0、缺失、null、不安全数字或重复值均保守为 unknown/不可继续。官方主评论文档说明首屏 `max_id` 为空、后续使用返回值，但没有证明数值 0 是终态，见 [TikHub 主评论文档](https://docs.tikhub.io/381269409e0)。
+
+同步以下两个文件到服务器，无需部署镜像：
+
+- `server/contracts/weibo-comment-page.mjs`
+- `server/ops/inspect-post-comment-contract.mjs`
+
+执行只读全量验收：
+
+```bash
+bash <<'BASH'
+set -euo pipefail
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+cat server/contracts/weibo-comment-page.mjs server/ops/inspect-post-comment-contract.mjs |   kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin --   node --input-type=module - --request-id   'fedbc7e0-e9fa-4fe3-a3e3-5107fcb13849' --verify-weibo-projection
+BASH
+```
+
+命令只读取精确 usage、请求快照、唯一成功计费调用和完整归档，输出脱敏的数量、字段覆盖、身份类型和分页状态；不会访问供应商、修改数据库或 marker。把完整输出贴回。若某一行失败，保留当前回执，先修纯解析器再重读同一归档，不重复购买。
