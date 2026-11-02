@@ -269,3 +269,42 @@ BASH
 verified=true 表示这些保存条目通过当前纯解析器；不产生 HTTP、数据库写入、入库或费用。canonical 入库、计费、别名和分页由本地集成回归验证，本命令不调用这些写路径。缺少或损坏归档、源调用状态不符合、解析拒绝会显式失败，不能以重采替代检查。
 
 本地 121 项相关测试与类型检查通过；共享社媒/YouTube 分页回归 53 通过、1 跳过。包含真实 HTTP 别名路由（本地模拟供应商）、36 条余量交付、未知分页、历史游标回放、旧入库任务、归档末行拒绝及 stdin 独立执行检查。尚未收到服务器完整解析验证结果，尚未发布 Hub。
+
+### 全部 36 条服务器校验已通过：发布 Hub
+
+用户回传 `twitter-comment-projection-verification.v1`：verified=true、archive/hashVerified=true、54697 字节；inputThreadCount/projectedCount/distinctCommentCount 均为 36，rootIncluded=false，textCount/authorIdCount/publishedAtCount 均为 36。unknownParentCount=36 如实保留，hasMore=null、continuationAvailable=true。supplierHttpCallsMade=0、databaseWritesMade=0。此次验证已完成，不再重复或重新采购样本；尚未收到 Hub 发布或统一接口验收结果。
+
+先把本轮 Hub 完整代码同步到服务器，包括合同、投影、工作流、入库 worker、OpenAPI/文档及新增纯解析器，不能仅同步两个校验文件。使用标准发布：
+
+```bash
+bash <<'BASH'
+set -e
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh deploy
+
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - <<'NODE'
+import { POST_COMMENTS_RECIPES } from '/app/server/contracts/post-comments.mjs';
+import { normalizePostCommentsDelivery } from '/app/server/external-platforms/post-comments-workflow.mjs';
+const route = POST_COMMENTS_RECIPES.twitter;
+const request = normalizePostCommentsDelivery(
+  { platform: 'twitter', postId: '2117082385997250767', count: 20 },
+  { context: { consumer: { businessId: 'runtime-contract-check' } }, maxPageSize: 100, codec: {} }
+);
+if (route?.provider !== 'tikhub' || route.key !== 't.api_3cd88a6621a01120'
+    || route.path !== '/api/v1/twitter/web/fetch_post_comments' || route.idField !== 'tweet_id'
+    || route.available !== true || request.manualProviderPagination !== true) throw new Error('twitter_comments_route_not_updated');
+console.log(JSON.stringify({
+  state: 'twitter_comments_runtime_updated',
+  provider: route.provider, nativeKey: route.key, upstreamPath: route.path,
+  manualProviderPagination: request.manualProviderPagination,
+  supplierHttpCallsMade: 0
+}, null, 2));
+NODE
+BASH
+```
+
+manage.sh 会构建导入镜像、执行既有迁移/索引维护、等待 Hub Public/Admin 和 worker rollout，并运行基础 smoke；不额外重复 rollout 等待。Public 容器名为 api，Admin 为 admin。最后只读导入运行容器内的静态合同，不初始化 Hub runtime、不发供应商请求，只证明新固定路由代码已在容器内，不能替代统一接口真实验收。
+
+部署成功后再核对下游 Key 的 twitter 平台与 social.comments.list 授权、现有 TikHub 采购控制。随后安排统一入口的业务验收；新验收使用自己的新幂等键，原历史 404/旧样本不改写、不换键自动重试。其余九个 JustOne 平台的余额阻塞仍未解决。

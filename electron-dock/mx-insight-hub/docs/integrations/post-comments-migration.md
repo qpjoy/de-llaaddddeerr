@@ -6,7 +6,7 @@
 
 用户已确认 JustOne 当前无余额。下表是现有代码的固定路由事实；其中九个平台不能按可用功能上线，上一版“13 平台已接入”只代表实现与离线格式覆盖。Twitter 本次改为 TikHub，小红书、Instagram、YouTube 原已走 TikHub。剩余八个平台在目录中有 TikHub 单帖评论候选；Facebook 暂无已登记的非 JustOne 替代，不将 Facebook 搜索爬虫冒充评论能力。
 
-Twitter 本轮已取样完成，不再采样或自动续页；先用同一解析器只读校验已归档的全部 36 条，再发布。Reddit、快手可按原限定次数流程分别校准，见 [TikHub 校验脚本](../operations/post-comment-contract-calibration.md)。其他平台核对实际字段和游标后再替换对应投影与采购路由，保留幂等历史和既有成本门禁。RapidAPI 的旧 Twitter 评论代码在 Night-All，Hub 当前 RapidAPI 适配器只实现 search/crawl/user-info，不能靠改配置直接调用评论。
+Twitter 本轮已取样完成，服务器使用同一解析器只读校验了全部 36 条，verified=true；不再采样或自动续页，进入发布阶段。Reddit、快手可按原限定次数流程分别校准，见 [TikHub 校验脚本](../operations/post-comment-contract-calibration.md)。其他平台核对实际字段和游标后再替换对应投影与采购路由，保留幂等历史和既有成本门禁。RapidAPI 的旧 Twitter 评论代码在 Night-All，Hub 当前 RapidAPI 适配器只实现 search/crawl/user-info，不能靠改配置直接调用评论。
 
 ## 入口与交付
 
@@ -46,7 +46,7 @@ postId、contentId、平台专用 ID、规范 URL 至少一项；多项能解析
 
 JustOne 字段来自官方文档使用的免费示例接口 `https://api.justoneapi.com/status/api-example/detail?api=<供应商路径>`，读取于 2026-11-02。十份完整例子离线投影通过，仓库回归使用匿名构造字段；这不是付费采集，也不证明生产可用。Instagram 复用已归档评论样本；小红书和 YouTube 复用已发布解析。没有把 TikHub 通用 ResponseModel 猜成 JustOne 响应。
 
-Twitter 当前使用已验证字节归档 `f33e6d06-97f0-46c2-a049-c69ccfabf41d`（2516 字节、空 thread）与 `7e7cd2d0-aa97-4aa5-a113-5a92f8b3143b`（54697 字节、thread 36 条）。取 `data.thread`，排除请求帖子和会话根帖；映射 id、text、created_at、author.rest_id/name/screen_name、likes/replies/retweets/bookmarks/quotes/views。实际直接父评论字段未取得，parentExternalId/parentCommentId=null、parentRelationship=unknown，不把 conversation_id 当作直接父帖；conversationId 保留实际会话归属。未校准的头像和媒体字段完整保留在受限原始数据，暂不猜测统一映射。生产结构摘要仅抽样前 3 条；完整 36 条解析须用只读校验命令确认，离线构造样本不能替代它。
+Twitter 当前使用已验证字节归档 `f33e6d06-97f0-46c2-a049-c69ccfabf41d`（2516 字节、空 thread）与 `7e7cd2d0-aa97-4aa5-a113-5a92f8b3143b`（54697 字节、thread 36 条）。取 `data.thread`，排除请求帖子和会话根帖；映射 id、text、created_at、author.rest_id/name/screen_name、likes/replies/retweets/bookmarks/quotes/views。实际直接父评论字段未取得，parentExternalId/parentCommentId=null、parentRelationship=unknown，不把 conversation_id 当作直接父帖；conversationId 保留实际会话归属。未校准的头像和媒体字段完整保留在受限原始数据，暂不猜测统一映射。生产结构摘要最初仅抽样前 3 条；后续服务器完整校验确认 36 条均通过、36 个唯一 ID、正文/作者 ID/发布时间各 36 条、rootIncluded=false，验证过程无 HTTP 或数据库写入。
 
 JustOne 曾有余额不足记录；保留现有控制，不隐式充值、改价、启用或换渠道。小红书新统一入口采购操作为 native.t.api_327bbf0cae41de55，与旧 research 的采购身份不同，旧价格/开关不自动覆盖；客户计费仍统一为 social.comments.list。
 
@@ -66,6 +66,6 @@ Twitter 每次仅消费一份已保存或新取得的供应商页，不为了填
 
 ## 发布与验收
 
-Twitter 字段映射、单页采购和分页缓存已本地验证；先对已购归档做完整只读解析，再沿用既有发布流程，保持 MX_INSIGHT_SYNC_LAUNCHER=0、MX_SMOKE_DATA=0。本次无需数据库迁移，不操作 Launcher、SSO 或 MX-H2I 网络。
+Twitter 字段映射、单页采购和分页缓存已本地验证，服务器完整归档解析也已通过。现在同步本轮 Hub 完整代码后沿用既有发布流程，保持 MX_INSIGHT_SYNC_LAUNCHER=0、MX_SMOKE_DATA=0；不能只同步此前两个校验文件。本次改动没有新增 DDL，标准发布仍会运行其既有迁移/索引维护。两个显式开关会覆盖 .env.internal，分别跳过 Launcher Secret/配置同步与重启，以及真实数据 POST smoke；不操作 MX-H2I 登录和联网配置。
 
 确认 Key 的平台+评论能力、TikHub 原生操作审核价格/开关、供应商凭据与余额。表内九个 JustOne 路由当前仍不可用；文档可见不代表已就绪。Twitter 两次样本已经成功，不重购；剩余平台按 [限定次数校验](../operations/post-comment-contract-calibration.md) 执行，不自动重试/续页。发布后才以新业务幂等键验收统一入口。原生端点采样成功和离线测试不能作为统一入口线上已恢复的证据。
