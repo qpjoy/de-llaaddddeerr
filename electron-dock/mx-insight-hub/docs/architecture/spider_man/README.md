@@ -13,7 +13,7 @@
 | Night-All | Internal 宿主机 `:13141`，不在 k8s 内 | 历史自建平台：本地爬虫（如搜狗微信 `wechat_mp`）、旧供应商编排、BullMQ 异步任务 | 运行中。供应商类接口按 operation 逐个迁到 Hub；自建爬虫能力保留 |
 | Night-All-A | VPN 固定地址 `100.127.0.1:8100`（Internal 侧为 `100.127.0.6`） | HTTP 异步采集 + 独立清洗库；含 Facebook 协议爬虫 `facebook-protocol` | Facebook 内容搜索的「自建」模式已实现未部署（[03](03-self-hosted-engines.md) 第 11 节）；旧 Admin 控制台转发仍由环境开关控制（默认关闭），线上是否启用未核实 |
 | Hub 自建引擎 | Hub（k8s）内的引擎配置、任务表、执行者 | 把一个自建爬虫包装成可排队、可计量、可查询的数据产品。第一个是「微信 → 自建引擎」 | 已实现未部署 |
-| Hub 单帖评论 | Hub Public 原生接口与旧兼容别名 | 13 平台固定供应商评论，现有 PG 归档/计费/分页/入库；不转 Night-All | Twitter 旧 URL 生产首屏验收通过：20 条、一次成功计费 TikHub 调用、归档已核验；Twitter、Reddit 统一入口均验收通过；快手完整 11 条解析通过，本地改 TikHub App，待部署验收。其余七个 JustOne 平台受余额阻塞；快手 Web 原 400/计费未知回执保留；见 [迁移合同](../../integrations/post-comments-migration.md) |
+| Hub 单帖评论 | Hub Public 原生接口与旧兼容别名 | 13 平台固定供应商评论，现有 PG 归档/计费/分页/入库；不转 Night-All | Twitter、Reddit 统一入口均验收通过；快手完整 11 条解析通过，本地改 TikHub App，但服务器路由断言仍读到 JustOne，正核对源码与容器版本，统一入口尚未验收。其余七个 JustOne 平台受余额阻塞；快手 Web 原 400/计费未知回执保留；见 [迁移合同](../../integrations/post-comments-migration.md) |
 | Hub 事件中心 | Hub Public 的事件接口 + PG 事件日志 | 把任务终态和数据变化可靠地交付给 Delta、Java | 设计中 |
 | 下游 | Delta（po-infra）、罗盘 Java，都是 Internal 宿主机上的 Docker | 提交任务、消费事件 | 目前同步调 Hub；直连改造见[性能汇总第 5 节](../../operations/platform-performance-review-2026-10-22.md) |
 | 旁路采集 | Delta 自带的 spiders、直接调 Night-All 的控制台等 | 不经过 Hub 的采集入口 | 待盘点 |
@@ -114,3 +114,5 @@ flowchart LR
 - 2026-11-02 评论验收进展：Reddit 运行容器路由已确认 TikHub/manualProviderPagination；准备旧 URL 至多一次业务验收，保留原生样本。快手独立 App 样本 16eb4f8e-7d1d-40e2-8593-02570ee3fd37 成功且计费，13227 字节归档/rootComments11；候选纯解析器与只读全量校验已准备，特别检查数值 ID 精度与回复预览隔离，尚未切换统一快手路由，无新供应商调用。
 
 - 2026-11-02 评论运行接入：Reddit 统一旧 URL 验收 usage 6fbf167b-9d1c-44f6-8ac0-5cd90fd3100b 返回 3 条并 exhausted，同 usage 唯一成功计费 TikHub 调用；闭环保留回执。快手 App 全 11 条保存归档验证通过，评论/作者数值 ID 安全，内部 photo_id 不作身份，2 条回复预览隔离；本地统一配方/投影/manual pagination/旧 JustOne 入库兼容已接入。快手旧非空原生 pcursor 仅历史重放，避免跨供应商复用同名 token；no_more 保守 unknown。待 Hub-only 发布和一次统一验收，无新增存储或 H2I 变化。
+
+- 2026-11-02 快手发布检查：操作者 Public 静态断言实际为 JustOne；只证明该容器仍是旧配方，原因尚未确定。完整 set-e 命令在付费验收前退出。新增可直接粘贴的源码/逐 Pod hash 与节点镜像只读核对，区分未同步源码和运行版本不一致；保留全部 marker，无重采、服务变更或 H2I 影响。见评论校准操作文档末节。

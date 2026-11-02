@@ -34,7 +34,7 @@ postId、contentId、平台专用 ID、规范 URL 至少一项；多项能解析
 | --- | --- |
 | Twitter | TikHub `t.api_3cd88a6621a01120` |
 | Reddit | TikHub `t.api_c7f50cf300d63960`（统一入口验收通过） |
-| 快手 | TikHub `t.api_bc64c9d98dbf724c`（完整归档已验证，待部署验收） |
+| 快手 | 本地 TikHub `t.api_bc64c9d98dbf724c`；完整归档已验证，服务器检查仍为 JustOne，待核对发布版本及验收 |
 | 微博 | JustOne `j.api_19390f4ea0fef847` |
 | 抖音 | JustOne `j.api_cfe7c89d64177567` |
 | TikTok | JustOne `j.api_9302e45524da8400` |

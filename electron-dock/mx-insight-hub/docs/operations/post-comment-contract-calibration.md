@@ -797,3 +797,83 @@ BASH
 验收只使用已经验证的 App 来源和同目录 kuaishou.app.json，目标及原 bodySha256 匹配后才允许调用；新增 kuaishou.unified-acceptance.json 在发请求前排他持久化，任何已有对象均阻止再次采购。不自动重试/续页、不改原 Web/App marker。验收不假定当前仍返回 11 条；空页不能算正样本通过，失败/未知也消费一次验收机会。若同 usage 只读核对失败，按已打印 requestId 单独核对，不能通过删 marker 重新购买。
 
 本轮本地 121 项相关回归通过，包括 33 项 gateway/runtime/入库、42 项合同/游标/API 文档、32 项投影、14 项一次性验收；typecheck 通过。命令静态语法及本地模块路由检查通过，代理未部署服务器或新增供应商调用。等待以上三份服务器摘要；其余七个 JustOne 评论路由仍受余额阻塞。
+
+
+### 快手发布检查仍返回 JustOne：只读核对源码与运行容器
+
+操作者在 Public 容器静态检查中得到 `actual: justone / expected: tikhub`。这证明被检查容器仍含旧快手配方；不能单凭此断定缓存、服务器未拉代码或镜像导入失败。若按上一节完整 `set -e` 命令执行，已在检查处退出，后面的 Key 输入与统一入口付费验收未执行。保留所有样本及验收 marker，不重复原生采样。
+
+本地配方已是 TikHub App；部署脚本从脚本所在 Hub 目录构建并复制完整 server，向本机 containerd 导入，使用当前 kubectl context，随后显式 rollout restart/status。镜像引用存在不证明内容正确，本机 runtime 也不自动证明与所选集群一致。成功清理可能移除 Docker 标签，不能用其缺失推断构建失败。
+
+以下命令不依赖新 ops 文件，可直接粘贴到服务器。只读取当前检出版本、固定六个源文件的 SHA256、配方声明，以及 Public/Admin 各 Pod 的版本和节点信息；不读取密钥/业务数据、不请求供应商、不修改服务。配方是源码声明摘要，不替代下一步完整运行路由断言。文件 hash 为 null 表示读取失败，Pod source 为 null 表示容器检查未完成，均不能当作已一致。
+
+```bash
+bash <<'BASH'
+set -euo pipefail
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+node --input-type=module <<'NODE'
+import { execFileSync } from 'node:child_process';
+import { hostname } from 'node:os';
+const run = (cmd, args, input) => execFileSync(cmd, args, {
+  input, encoding: 'utf8', timeout: 15000, maxBuffer: 2 * 1024 * 1024,
+  stdio: ['pipe', 'pipe', 'pipe']
+}).trim();
+const snapshot = String.raw`
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
+const root = process.argv[2];
+const paths = ['contracts/post-comments.mjs', 'contracts/kuaishou-comment-page.mjs',
+  'contracts/post-comment-projection.mjs', 'external-platforms/post-comments-workflow.mjs',
+  'index.mjs', 'workers/ingest.mjs'];
+const files = Object.fromEntries(paths.map(path => {
+  try { return [path, createHash('sha256').update(readFileSync(resolve(root, 'server', path))).digest('hex')]; }
+  catch { return [path, null]; }
+}));
+let declaredRecipe = null;
+try {
+  const source = readFileSync(resolve(root, 'server/contracts/post-comments.mjs'), 'utf8');
+  const match = source.match(/^\s*\['kuaishou',\s*'([^']+)',\s*'([^']+)'/m);
+  if (match) declaredRecipe = { provider: match[1], path: match[2] };
+} catch {}
+console.log(JSON.stringify({ declaredRecipe, files }));
+`;
+try {
+  let gitHead = null;
+  try { gitHead = run('git', ['rev-parse', 'HEAD']); } catch {}
+  console.log(JSON.stringify({ section: 'server', hostname: hostname(), cwd: process.cwd(),
+    gitHead,
+    context: run('kubectl', ['config', 'current-context']),
+    source: JSON.parse(run(process.execPath, ['--input-type=module', '-', process.cwd()], snapshot)) }, null, 2));
+  const nodes = JSON.parse(run('kubectl', ['get', 'nodes', '-o', 'json']));
+  console.log(JSON.stringify({ section: 'nodes', nodes: nodes.items.map(n => ({
+    name: n.metadata.name, runtime: n.status?.nodeInfo?.containerRuntimeVersion,
+    addresses: n.status?.addresses
+  })) }, null, 2));
+  const pods = JSON.parse(run('kubectl', ['-n', 'mx-insight-hub', 'get', 'pods',
+    '-l', 'app.kubernetes.io/name in (mx-insight-hub-public,mx-insight-hub-admin)', '-o', 'json']));
+  if (!pods.items.length || pods.items.length > 6) throw new Error('pod_inventory_unexpected');
+  for (const p of pods.items) {
+    const container = p.metadata.labels['app.kubernetes.io/name'] === 'mx-insight-hub-public' ? 'api' : 'admin';
+    const status = p.status?.containerStatuses?.find(c => c.name === container);
+    let source = null;
+    try { source = JSON.parse(run('kubectl', ['-n', 'mx-insight-hub', 'exec', '-i', p.metadata.name,
+      '-c', container, '--', 'node', '--input-type=module', '-', '/app'], snapshot)); } catch {}
+    if (!source) process.exitCode = 1;
+    console.log(JSON.stringify({ section: 'pod', name: p.metadata.name, node: p.spec.nodeName,
+      createdAt: p.metadata.creationTimestamp, deleting: Boolean(p.metadata.deletionTimestamp),
+      image: p.spec.containers.find(c => c.name === container)?.image,
+      imageID: status?.imageID, ready: status?.ready,
+      sourceState: source ? 'read' : 'unavailable', source }, null, 2));
+  }
+} catch {
+  console.error(JSON.stringify({ error: 'runtime_diagnosis_incomplete' }));
+  process.exitCode = 1;
+}
+NODE
+BASH
+```
+
+判断顺序：服务器 source.declaredRecipe.provider 仍为 justone，先同步完整 Hub 改动；服务器已 tikhub 而某 Pod 仍为 justone 或 hash 不一致，继续核对构建/导入/集群与 rollout 结果，暂不执行付费验收。所有当前容器与源码一致后再执行上一节完整运行路由检查，检查通过才继续保留防重标记的单次验收。不要为通过断言而仅改配置值、删除 marker、强制删 Pod 或重启 Launcher。
+
+本轮仅更新诊断文档与状态，未改运行代码；Bash/Node 语法及本地源码摘要已检查，未执行生产命令或供应商调用。等待服务器输出确认实际版本差异。
