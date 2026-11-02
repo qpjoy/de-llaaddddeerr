@@ -308,3 +308,73 @@ BASH
 manage.sh 会构建导入镜像、执行既有迁移/索引维护、等待 Hub Public/Admin 和 worker rollout，并运行基础 smoke；不额外重复 rollout 等待。Public 容器名为 api，Admin 为 admin。最后只读导入运行容器内的静态合同，不初始化 Hub runtime、不发供应商请求，只证明新固定路由代码已在容器内，不能替代统一接口真实验收。
 
 部署成功后再核对下游 Key 的 twitter 平台与 social.comments.list 授权、现有 TikHub 采购控制。随后安排统一入口的业务验收；新验收使用自己的新幂等键，原历史 404/旧样本不改写、不换键自动重试。其余九个 JustOne 平台的余额阻塞仍未解决。
+
+### 运行路由已更新：单次统一入口验收
+
+用户已回传 `twitter_comments_runtime_updated`、provider=tikhub、nativeKey=t.api_3cd88a6621a01120、manualProviderPagination=true、supplierHttpCallsMade=0。这证明容器代码已更新，尚未证明统一入口业务成功。本轮只需同步新增 `server/ops/verify-twitter-comments-runtime.mjs` 及其已有依赖 `probe-post-comment-contract.mjs`、`inspect-post-comment-contract.mjs` 到宿主机，无需重建或重启服务。
+
+使用前次原生请求成功的同一 Hub Live Key。免费 GET capabilities 检查 twitter 平台、social.comments.list 授权及本轮已有原生权限的 native.t.api_3cd88a6621a01120.ready；不以 social.comments.list.ready 判断 Twitter，该字段仍关联小红书旧操作。业务 Key 本身无需新增原生权限；这里是利用原校准 Key 预检 TikHub 配置。capabilities 不保证余额、预算、实时限流全部可用。
+
+脚本在确认的原目录检查原始/auth-retry/conversation 成功回执链；从旧归档私下重新取得同一会话帖子 ID。预检通过才独占创建 `.hub-comment-contract-probes-v1/twitter.unified-acceptance.json`，持久化新幂等键、源 usage 与请求摘要，再向旧 URL 发送一次 `{platform:'twitter',contentId:会话帖子ID,count:20,includeRaw:false}`。这是统一入口的一次新业务验收，可能正常计费，不是再次执行原生样本探测。不自动补页或重试，已有标记时不再发送；任何异常都不能删标记或换目录重买。
+
+下面命令只打印结构检查和供应商账本摘要；目标 ID、正文、作者值及游标不打印、不存到本地标记。成功后只读核验同一 usage 的 TikHub 调用与已保存归档，不产生额外供应商请求。
+
+```bash
+bash <<'BASH'
+set -e
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+read -r -s -p 'Hub Live API Key: ' MX_HUB_PROBE_API_KEY </dev/tty
+printf '\n'
+export MX_HUB_PROBE_API_KEY
+node --input-type=module <<'NODE'
+import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { runTwitterCommentsRuntimeVerification } from './server/ops/verify-twitter-comments-runtime.mjs';
+const script = readFileSync('server/ops/inspect-post-comment-contract.mjs', 'utf8');
+function inspect(args) {
+  return JSON.parse(execFileSync('kubectl', [
+    '-n', 'mx-insight-hub', 'exec', '-i', 'deployment/mx-insight-hub-admin', '-c', 'admin', '--',
+    'node', '--input-type=module', '-', ...args
+  ], { input: script, encoding: 'utf8', timeout: 30000, maxBuffer: 2 * 1024 * 1024 }));
+}
+try {
+  const conversationSample = inspect([
+    '--request-id', 'f33e6d06-97f0-46c2-a049-c69ccfabf41d',
+    '--twitter-post-id', '2117082385997250767', '--prepare-twitter-conversation'
+  ]);
+  const result = await runTwitterCommentsRuntimeVerification({
+    conversationSample, sourceRequestId: '7e7cd2d0-aa97-4aa5-a113-5a92f8b3143b',
+    sampleDirectory: process.cwd(), apiKey: process.env.MX_HUB_PROBE_API_KEY, apply: true
+  });
+  console.log(JSON.stringify(result, null, 2));
+  if (result.httpStatus === 200 && result.requestId) {
+    const saved = inspect(['--request-id', result.requestId]);
+    const calls = saved.calls.map(c => ({
+      provider: c.provider, platform: c.platform, endpoint: c.endpoint,
+      outcome: c.outcome, httpStatus: c.httpStatus, billed: c.billed,
+      archiveVerified: c.archive.state === 'archive_verified' && c.archive.hashVerified === true
+    }));
+    const verified = saved.usage.status === 'committed' && saved.usage.httpStatus === 200
+      && !saved.callsTruncated && calls.length === 1 && calls.every(c =>
+        c.provider === 'tikhub' && c.platform === 'twitter'
+        && c.endpoint === 'native.t.api_3cd88a6621a01120' && c.outcome === 'succeeded'
+        && c.httpStatus === 200 && c.billed === true && c.archiveVerified);
+    console.log(JSON.stringify({ revision: 'twitter-unified-provider-evidence.v1',
+      requestId: result.requestId, verified, usage: saved.usage, calls,
+      supplierHttpCallsMade: 0, databaseWritesMade: 0 }, null, 2));
+    if (!verified) process.exitCode = 1;
+  }
+  if (result.verified !== true) process.exitCode = 1;
+} catch (error) {
+  const safe = ['invalid_arguments', 'invalid_sample', 'source_receipt_unverified', 'api_key_required', 'invalid_api_key'];
+  console.error(JSON.stringify({ error: safe.includes(error.message) ? error.message : 'twitter_unified_acceptance_or_inspection_failed',
+    action: 'inspect_existing_receipt_before_any_retry' }));
+  process.exitCode = 1;
+}
+NODE
+BASH
+```
+
+预检失败会返回缺少的授权/就绪布尔状态，本次业务 POST 为 0。不要为预检便利而给业务 Key 自动增加原生授权。成功应同时看到响应 `verified=true` 和供应商证据 `verified=true`；允许实时评论数变化，不要求精确 20 或 36 条，不把未知分页当作结束。空页可为 contractValid=true、commentsObserved=false、verified=false，不把未观察到评论字段当成完整验收。供应商证据严格要求一条调用；如果既有 LCY 机制做了明确未计费的重试而产生多条记录，需人工核对，不直接判成业务失败。HTTP 200 但结构未通过、空页、超时、来源检查失败均保留现场，先查看回执再决定下一步。此脚本不修改授权、价格、开关、历史回执或 MX-H2I 配置。
+
+本地新增 11 项模拟验证及既有 probe/inspector 共 49 项测试通过，包括同一个运行时投影生成的响应、未知分页、空页证据边界、重复/并发防重、未授权零 POST、响应限长和脱敏。测试没有真实供应商请求；尚待用户执行此业务验收并回传结果。

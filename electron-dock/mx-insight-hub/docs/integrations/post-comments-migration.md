@@ -1,12 +1,12 @@
 # 帖子评论迁移到 Hub
 
-2026-11-02：统一接口本地实现完成，尚未部署或完成统一入口生产验收。Twitter 已通过现有 TikHub 原生入口取得两份实际付费样本，空 thread 与 36 条 thread 的归档均完整。此前的兼容桥仍转发 Night-All，不能视为原生迁移完成。事件 af456ad4-2523-4f73-a1fc-c95104b329a4 的保存证据是 Hub 预留 released、Night-All connector HTTP 404；不能据此推断供应商收到请求或评论为空。
+2026-11-02：用户已回传运行容器检查 `twitter_comments_runtime_updated`，确认 Twitter 固定路由为 TikHub、manualProviderPagination=true；统一入口生产验收尚未完成。Twitter 已通过现有 TikHub 原生入口取得两份实际付费样本，空 thread 与 36 条 thread 的归档均完整。此前的兼容桥仍转发 Night-All。事件 af456ad4-2523-4f73-a1fc-c95104b329a4 的保存证据是 Hub 预留 released、Night-All connector HTTP 404；不能据此推断供应商收到请求或评论为空。
 
 ## 当前发布阻塞：JustOne 余额为零
 
 用户已确认 JustOne 当前无余额。下表是现有代码的固定路由事实；其中九个平台不能按可用功能上线，上一版“13 平台已接入”只代表实现与离线格式覆盖。Twitter 本次改为 TikHub，小红书、Instagram、YouTube 原已走 TikHub。剩余八个平台在目录中有 TikHub 单帖评论候选；Facebook 暂无已登记的非 JustOne 替代，不将 Facebook 搜索爬虫冒充评论能力。
 
-Twitter 本轮已取样完成，服务器使用同一解析器只读校验了全部 36 条，verified=true；不再采样或自动续页，进入发布阶段。Reddit、快手可按原限定次数流程分别校准，见 [TikHub 校验脚本](../operations/post-comment-contract-calibration.md)。其他平台核对实际字段和游标后再替换对应投影与采购路由，保留幂等历史和既有成本门禁。RapidAPI 的旧 Twitter 评论代码在 Night-All，Hub 当前 RapidAPI 适配器只实现 search/crawl/user-info，不能靠改配置直接调用评论。
+Twitter 本轮已取样完成，服务器使用同一解析器只读校验了全部 36 条，verified=true；运行路由检查也已通过，接下来通过下游原 URL 做单次业务验收。Reddit、快手可按原限定次数流程分别校准，见 [TikHub 校验脚本](../operations/post-comment-contract-calibration.md)。其他平台核对实际字段和游标后再替换对应投影与采购路由，保留幂等历史和既有成本门禁。RapidAPI 的旧 Twitter 评论代码在 Night-All，Hub 当前 RapidAPI 适配器只实现 search/crawl/user-info，不能靠改配置直接调用评论。
 
 ## 入口与交付
 
@@ -66,6 +66,8 @@ Twitter 每次仅消费一份已保存或新取得的供应商页，不为了填
 
 ## 发布与验收
 
-Twitter 字段映射、单页采购和分页缓存已本地验证，服务器完整归档解析也已通过。现在同步本轮 Hub 完整代码后沿用既有发布流程，保持 MX_INSIGHT_SYNC_LAUNCHER=0、MX_SMOKE_DATA=0；不能只同步此前两个校验文件。本次改动没有新增 DDL，标准发布仍会运行其既有迁移/索引维护。两个显式开关会覆盖 .env.internal，分别跳过 Launcher Secret/配置同步与重启，以及真实数据 POST smoke；不操作 MX-H2I 登录和联网配置。
+Twitter 字段映射、单页采购和分页缓存已本地验证，服务器完整归档解析及运行容器路由检查也已通过。此次 Hub 发布使用 MX_INSIGHT_SYNC_LAUNCHER=0、MX_SMOKE_DATA=0；本轮只增加宿主机验收脚本时不需要再次部署。本次改动没有新增 DDL，标准发布仍会运行其既有迁移/索引维护。两个显式开关会覆盖 .env.internal，分别跳过 Launcher Secret/配置同步与重启，以及真实数据 POST smoke；不操作 MX-H2I 登录和联网配置。
 
-确认 Key 的平台+评论能力、TikHub 原生操作审核价格/开关、供应商凭据与余额。表内九个 JustOne 路由当前仍不可用；文档可见不代表已就绪。Twitter 两次样本已经成功，不重购；剩余平台按 [限定次数校验](../operations/post-comment-contract-calibration.md) 执行，不自动重试/续页。发布后才以新业务幂等键验收统一入口。原生端点采样成功和离线测试不能作为统一入口线上已恢复的证据。
+确认 Key 的平台+评论能力、TikHub 原生操作审核价格/开关、供应商凭据与余额。表内九个 JustOne 路由当前仍不可用；文档可见不代表已就绪。Twitter 两次原生样本已经成功，不重复原生采样；统一入口以独立幂等键最多验收一页，不自动重试/续页，见 [服务器操作命令](../operations/post-comment-contract-calibration.md#运行路由已更新单次统一入口验收)。原生端点采样成功和离线测试不能作为统一入口线上已恢复的证据。
+
+当前 capabilities 的 social.comments.list.ready 仍基于小红书旧操作，Twitter 顶层 ready 及 search.ready 也不代表评论就绪。验收脚本只用 social.comments.list 条目的存在判断授权，再用本轮已有原生授权的 Key 查询 native.t.api_3cd88a6621a01120.ready；这是采样预检便利条件，不是要求所有业务 Key 增加原生权限。业务调用本身仍仅需 twitter + social.comments.list，采购控制由网关独立校验。预检不保证实时余额、限流或预算充足。
