@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url'
 const PLATFORM_KEYS = Object.freeze({ twitter: 't.api_3cd88a6621a01120', reddit: 't.api_c7f50cf300d63960', kuaishou: 't.api_3cb972ba91c8fe44' })
 export const POST_COMMENT_AUTH_RETRY_VERSION = 1
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
-const SAFE_ERRORS = new Set(['invalid_arguments', 'invalid_sample', 'ambiguous_sample', 'sample_not_found', 'sample_directory_too_large', 'api_key_required', 'invalid_api_key'])
+const SAFE_ERRORS = new Set(['invalid_arguments', 'invalid_sample', 'ambiguous_sample', 'sample_not_found', 'sample_directory_too_large', 'api_key_required', 'invalid_api_key', 'conversation_sample_not_allowed'])
 const RESPONSE_CODES = new Set(['invalid_api_key', 'api_key_required', 'test_key_not_supported', 'platform_not_granted', 'capability_not_granted', 'request_outcome_unknown',
   'external_platform_operation_disabled', 'external_platform_operation_paused', 'external_platform_contract_unverified', 'external_platform_not_configured',
   'external_platform_cost_control_unavailable', 'external_platform_circuit_open', 'upstream_balance_exhausted', 'upstream_rate_limited',
@@ -45,6 +45,27 @@ export function planPostCommentProbe(platform, sample) {
   return { platform, path: `/api/v1/data/native/${PLATFORM_KEYS[platform]}`,
     body: { params: platform === 'twitter' ? { tweet_id: id }
       : platform === 'reddit' ? { post_id: `t3_${id}`, need_format: false } : { photo_id: id }, deliveryMode: 'live_only' } }
+}
+
+export function planTwitterConversationCommentProbe(sample) {
+  if (!object(sample) || Object.keys(sample).length !== 5
+    || sample.revision !== 'twitter-conversation-comment-sample.v1' || sample.platform !== 'twitter'
+    || typeof sample.sourceRequestId !== 'string' || !UUID.test(sample.sourceRequestId)
+    || typeof sample.sourcePostId !== 'string' || !/^\d{1,30}$/u.test(sample.sourcePostId)
+    || typeof sample.postId !== 'string' || !/^\d{1,30}$/u.test(sample.postId)
+    || BigInt(sample.sourcePostId) === BigInt(sample.postId)) throw new Error('invalid_sample')
+  return planPostCommentProbe('twitter', { platform: 'twitter', postId: sample.postId })
+}
+
+export async function loadTwitterConversationCommentProbeSample(file) {
+  try {
+    if ((await stat(file)).size > 8192) throw new Error('too large')
+    const bytes = await readFile(file)
+    if (bytes.length > 8192) throw new Error('too large')
+    const sample = JSON.parse(bytes.toString('utf8'))
+    planTwitterConversationCommentProbe(sample)
+    return sample
+  } catch { throw new Error('invalid_sample') }
 }
 
 export async function loadPostCommentProbeSample(sampleDirectory, platform) {
@@ -90,13 +111,18 @@ async function errorSummary(response) {
   finally { await reader.cancel().catch(() => {}); reader.releaseLock() }
 }
 
-export async function runPostCommentProbe({ plan, sampleDirectory, apiKey, apply = false, retryAuthenticationFor = null }, { fetchImpl = fetch } = {}) {
+export async function runPostCommentProbe({ plan, sampleDirectory, apiKey, apply = false, retryAuthenticationFor = null,
+  conversationSampleFrom = null }, { fetchImpl = fetch } = {}) {
   // Validate the supplied plan again so callers cannot construct another route.
   const expected = planPostCommentProbe(plan?.platform, { platform: plan?.platform,
     postId: plan?.body?.params?.tweet_id ?? plan?.body?.params?.post_id ?? plan?.body?.params?.photo_id })
   if (JSON.stringify(expected) !== JSON.stringify(plan)) throw new Error('invalid_sample')
+  if (conversationSampleFrom !== null && (retryAuthenticationFor !== null
+    || JSON.stringify(planTwitterConversationCommentProbe(conversationSampleFrom)) !== JSON.stringify(plan))) throw new Error('invalid_sample')
   const preview = { revision: 'post-comment-contract-probe.v2', provider: 'tikhub', platform: plan.platform, path: plan.path,
-    hubRequestLimit: 1, maxPlatformsPerReceiptDirectory: 3, automaticContinuation: false, automaticRetry: false }
+    hubRequestLimit: 1, maxPlatformsPerReceiptDirectory: 3, automaticContinuation: false, automaticRetry: false,
+    ...(conversationSampleFrom ? { samplePurpose: 'conversation_comments', sourceRequestId: conversationSampleFrom.sourceRequestId,
+      additionalTwitterSampleLimit: 1 } : {}) }
   if (!apply) return { ...preview, state: 'preview', hubRequestsMade: 0 }
   if (!apiKey) throw new Error('api_key_required')
   if (typeof apiKey !== 'string' || apiKey.length > 4096 || /[\r\n\u0000]/u.test(apiKey)) throw new Error('invalid_api_key')
@@ -106,6 +132,34 @@ export async function runPostCommentProbe({ plan, sampleDirectory, apiKey, apply
   await mkdir(receiptDirectory, { recursive: true, mode: 0o700 })
   let receiptPath = join(receiptDirectory, `${plan.platform}.json`)
   let idempotencyKey = `comment-calibration-v1-${randomUUID()}`
+  if (conversationSampleFrom !== null) {
+    // This is a separate first-page sample for a different tweet, not a retry
+    // or a cursor continuation. Require the original successful receipt in
+    // the same directory, and allocate exactly one additional marker slot.
+    let previous
+    try {
+      let sourcePath = join(receiptDirectory, 'twitter.auth-retry.json')
+      let sourceStat
+      try { sourceStat = await stat(sourcePath) }
+      catch (error) {
+        if (error.code !== 'ENOENT') throw error
+        sourcePath = join(receiptDirectory, 'twitter.json')
+        sourceStat = await stat(sourcePath)
+      }
+      if (sourceStat.size > 16384) throw new Error('receipt too large')
+      const bytes = await readFile(sourcePath)
+      if (bytes.length > 16384) throw new Error('receipt too large')
+      previous = JSON.parse(bytes.toString('utf8'))
+    } catch { throw new Error('conversation_sample_not_allowed') }
+    if (previous.revision !== 'post-comment-contract-probe.v2' || previous.provider !== 'tikhub'
+      || previous.platform !== 'twitter' || previous.path !== plan.path
+      || previous.state !== 'http_response' || previous.httpStatus !== 200 || previous.errorCode != null
+      || previous.hubRequestsMade !== 1 || previous.requestIdSource !== 'usage_header'
+      || previous.requestId !== conversationSampleFrom.sourceRequestId || previous.samplePurpose != null
+      || typeof previous.idempotencyKey !== 'string' || !previous.idempotencyKey.startsWith('comment-calibration-v1-')
+      || !UUID.test(previous.idempotencyKey.slice('comment-calibration-v1-'.length))) throw new Error('conversation_sample_not_allowed')
+    receiptPath = join(receiptDirectory, 'twitter.conversation.json')
+  }
   if (retryAuthenticationFor !== null) {
     // Explicit recovery of an observed Hub authentication refusal only. Keep
     // its evidence intact and reuse its logical request key; never reopen a
@@ -168,10 +222,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     const args = process.argv.slice(2), apply = args.at(-1) === '--apply'
     if (apply) args.pop()
-    if (args.length !== 4 || args[0] !== '--sample-dir' || args[2] !== '--platform' || !Object.hasOwn(PLATFORM_KEYS, args[3])) throw new Error('invalid_arguments')
-    const plan = await loadPostCommentProbeSample(args[1], args[3])
+    if (args.length !== 4 || args[0] !== '--sample-dir'
+      || !['--platform', '--twitter-conversation-sample'].includes(args[2])
+      || args[2] === '--platform' && !Object.hasOwn(PLATFORM_KEYS, args[3])) throw new Error('invalid_arguments')
+    const conversationSampleFrom = args[2] === '--twitter-conversation-sample'
+      ? await loadTwitterConversationCommentProbeSample(args[3]) : null
+    const plan = conversationSampleFrom ? planTwitterConversationCommentProbe(conversationSampleFrom)
+      : await loadPostCommentProbeSample(args[1], args[3])
     console.log(JSON.stringify(await runPostCommentProbe({ plan, sampleDirectory: args[1], apply,
-      apiKey: process.env.MX_HUB_PROBE_API_KEY }), null, 2))
+      apiKey: process.env.MX_HUB_PROBE_API_KEY, conversationSampleFrom }), null, 2))
   } catch (error) {
     console.error(JSON.stringify({ error: SAFE_ERRORS.has(error?.message) ? error.message : 'post_comment_contract_probe_failed' }))
     process.exitCode = 1

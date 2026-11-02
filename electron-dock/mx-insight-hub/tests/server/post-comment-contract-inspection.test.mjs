@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { inspectPostCommentArchive, inspectPostCommentContract, summarizePostCommentPayload } from '../../server/ops/inspect-post-comment-contract.mjs'
+import { inspectPostCommentArchive, inspectPostCommentContract, prepareTwitterConversationCommentSample, summarizePostCommentPayload } from '../../server/ops/inspect-post-comment-contract.mjs'
 
 const requestId = 'af456ad4-2523-4f73-a1fc-c95104b329a4'
 const callId = 'bf456ad4-2523-4f73-a1fc-c95104b329a4'
@@ -218,4 +218,97 @@ test('Twitter shape mode is restricted to the exact native endpoint while usage 
   for (const call of result.calls.slice(1)) assert.equal(JSON.stringify(call.archive).includes('replyThreads'), false)
   await assert.rejects(inspectPostCommentContract({ connect() { throw new Error('must not connect') } }, requestId,
     { twitterPostId: Number(twitterPostId) }), /invalid_twitter_post_id/)
+})
+
+const conversationId = '2117000000000000123'
+const emptyTwitterPayload = (overrides = {}) => ({ code: 200, data: twitterTweet({
+  replies: 0, thread: [], conversation_id: conversationId, cursor: 'private-unused-cursor', ...overrides,
+}) })
+
+test('conversation preparation selects a different exact string ID only from the verified empty-tweet shape', () => {
+  assert.deepEqual(prepareTwitterConversationCommentSample(emptyTwitterPayload(), twitterPostId),
+    { platform: 'twitter', postId: conversationId })
+  for (const overrides of [
+    { id: '2117082385997250768' }, { id: Number(twitterPostId) },
+    { conversation_id: twitterPostId }, { conversation_id: Number(conversationId) },
+    { conversation_id: '' }, { conversation_id: '1e20' }, { conversation_id: '1'.repeat(31) },
+    { thread: [{ id: '2117082385997250768' }] }, { thread: null }, { replies: 1 }, { replies: '0' },
+    { text: null }, { author: [] },
+  ]) {
+    assert.throws(() => prepareTwitterConversationCommentSample(emptyTwitterPayload(overrides), twitterPostId),
+      /twitter_conversation_sample_unavailable/)
+  }
+  for (const source of [Number(twitterPostId), null, '', 'not-a-post-id']) {
+    assert.throws(() => prepareTwitterConversationCommentSample(emptyTwitterPayload(), source), /twitter_conversation_sample_unavailable/)
+  }
+  assert.throws(() => prepareTwitterConversationCommentSample({ ...emptyTwitterPayload(), code: 400 }, twitterPostId),
+    /twitter_conversation_sample_unavailable/)
+})
+
+function conversationInspectionHarness({ usage = {}, call = {}, raw = archive(emptyTwitterPayload()), count = 1 } = {}) {
+  const queries = []
+  let releases = 0
+  const client = { async query(sql, values) {
+    queries.push({ sql, values })
+    if (sql.includes(':usage')) return { rows: [{ platform: 'social', status: 'committed', response_status: 200, ...usage }] }
+    if (sql.includes(':calls')) return { rows: Array.from({ length: count }, () => ({ id: callId,
+      provider_key: 'tikhub', marketplace: 'twitter', endpoint_key: 'native.t.api_3cd88a6621a01120',
+      outcome: 'succeeded', http_status: 200, business_code: 200, billed: true, ...call })) }
+    if (sql.includes(':archive')) return { rows: raw ? [raw] : [] }
+    return { rows: [] }
+  }, release() { releases++ } }
+  return { pool: { connect: async () => client }, queries, get releases() { return releases } }
+}
+
+test('ordinary archive and request inspection never expose the private conversation sample target', async () => {
+  for (const options of [{}, { twitterPostId }]) {
+    const direct = inspectPostCommentArchive(archive(emptyTwitterPayload()), options)
+    assert.equal(direct.conversationSample, undefined)
+    const h = conversationInspectionHarness()
+    const saved = await inspectPostCommentContract(h.pool, requestId, options)
+    for (const value of [twitterPostId, conversationId, 'private-unused-cursor', 'private-root-body', 'private-author']) {
+      assert.equal(JSON.stringify(direct).includes(value), false)
+      assert.equal(JSON.stringify(saved).includes(value), false)
+    }
+    assert.equal(saved.calls[0].archive.conversationSample, undefined)
+    assert.equal(saved.supplierHttpCallsMade, 0)
+  }
+})
+
+test('explicit conversation preparation returns only a private plan from one committed billed call in a read-only transaction', async () => {
+  const h = conversationInspectionHarness()
+  const result = await inspectPostCommentContract(h.pool, requestId, { twitterPostId, prepareTwitterConversation: true })
+  assert.deepEqual(result, { revision: 'twitter-conversation-comment-sample.v1', sourceRequestId: requestId,
+    sourcePostId: twitterPostId, platform: 'twitter', postId: conversationId })
+  assert.equal(JSON.stringify(result).includes('private'), false)
+  assert.match(h.queries[0].sql, /ISOLATION LEVEL REPEATABLE READ READ ONLY/)
+  assert.equal(h.queries.every(row => /^(?:BEGIN|SET|SELECT|ROLLBACK)\b/u.test(row.sql)), true)
+  assert.deepEqual(h.queries.find(row => row.sql.includes(':archive')).values, [requestId, callId, 4194304])
+  assert.equal(h.queries.at(-1).sql, 'ROLLBACK')
+  assert.equal(h.releases, 1)
+})
+
+test('conversation preparation rejects missing or contradictory billing lineage and corrupt archives, always rolling back', async () => {
+  const validRaw = archive(emptyTwitterPayload())
+  for (const changes of [
+    { usage: { status: 'reserved' } }, { usage: { status: 'released' } }, { usage: { response_status: 404 } },
+    { call: { billed: false } }, { call: { billed: null } }, { call: { outcome: 'unknown' } },
+    { call: { http_status: 404 } }, { call: { business_code: 400 } },
+    { call: { endpoint_key: 'native.t.api_e85913faa8a9029b' } },
+    { call: { provider_key: 'justone', endpoint_key: 'native.j.api_bcedccd1a73cc8f2' } },
+    { call: { marketplace: 'reddit' } }, { count: 0 }, { count: 2 }, { count: 4 },
+    { raw: null }, { raw: { ...validRaw, body_sha256: '0'.repeat(64) } },
+    { raw: { ...validRaw, actual_body_size: validRaw.body_size + 1 } },
+    { raw: archive(emptyTwitterPayload({ id: '2117082385997250768' })) },
+    { raw: archive(emptyTwitterPayload({ thread: [{ id: '2117082385997250768' }] })) },
+  ]) {
+    const h = conversationInspectionHarness(changes)
+    await assert.rejects(inspectPostCommentContract(h.pool, requestId, { twitterPostId, prepareTwitterConversation: true }),
+      /twitter_conversation_sample_unavailable/)
+    assert.equal(h.queries.at(-1).sql, 'ROLLBACK')
+    assert.equal(h.releases, 1)
+    assert.equal(h.queries.every(row => /^(?:BEGIN|SET|SELECT|ROLLBACK)\b/u.test(row.sql)), true)
+  }
+  await assert.rejects(inspectPostCommentContract({ connect() { throw new Error('must not connect') } }, requestId,
+    { prepareTwitterConversation: true }), /invalid_twitter_post_id/)
 })

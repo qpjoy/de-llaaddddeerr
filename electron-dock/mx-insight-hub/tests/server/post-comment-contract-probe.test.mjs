@@ -3,7 +3,10 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { planPostCommentProbe, loadPostCommentProbeSample, runPostCommentProbe } from '../../server/ops/probe-post-comment-contract.mjs'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { planPostCommentProbe, loadPostCommentProbeSample, runPostCommentProbe,
+  planTwitterConversationCommentProbe, loadTwitterConversationCommentProbeSample } from '../../server/ops/probe-post-comment-contract.mjs'
 import { nativeForwardingEndpoint, normalizeNativeForwardingRequest } from '../../server/contracts/native-forwarding.mjs'
 
 async function directory(t) {
@@ -212,5 +215,136 @@ test('a timed-out authentication recovery remains locked and cannot renew its bu
   const fetchImpl = async () => { calls++; throw new Error('timeout') }
   assert.equal((await runPostCommentProbe(input, { fetchImpl })).state, 'outcome_unknown')
   assert.equal((await runPostCommentProbe(input, { fetchImpl })).state, 'already_attempted')
+  assert.equal(calls, 1)
+})
+
+const conversationSample = Object.freeze({ revision: 'twitter-conversation-comment-sample.v1',
+  sourceRequestId: 'f33e6d06-97f0-46c2-a049-c69ccfabf41d', sourcePostId: '2117082385997250767',
+  platform: 'twitter', postId: '2117082385997250123' })
+
+async function successfulTwitterSample(t, changes = {}, authenticationRetry = false) {
+  const path = await directory(t), plan = planTwitterConversationCommentProbe(conversationSample)
+  const receiptDirectory = join(path, '.hub-comment-contract-probes-v1')
+  await mkdir(receiptDirectory)
+  const source = JSON.stringify({ revision: 'post-comment-contract-probe.v2', provider: 'tikhub', platform: 'twitter',
+    path: plan.path, state: 'http_response', httpStatus: 200, idempotencyKey: authRetryKey, hubRequestsMade: 1,
+    requestId: conversationSample.sourceRequestId, requestIdSource: 'usage_header', ...changes })
+  const original = authenticationRetry ? JSON.stringify({ state: 'http_response', httpStatus: 401, errorCode: 'invalid_api_key' }) : source
+  await writeFile(join(receiptDirectory, 'twitter.json'), original)
+  if (authenticationRetry) await writeFile(join(receiptDirectory, 'twitter.auth-retry.json'), source)
+  return { path, plan, source, original, receiptDirectory, input: { plan, sampleDirectory: path,
+    apiKey: 'mih_live_private', apply: true, conversationSampleFrom: conversationSample } }
+}
+
+test('conversation sample plans require the exact prepared identity and remain first-page Twitter only', async t => {
+  const plan = planTwitterConversationCommentProbe(conversationSample)
+  assert.deepEqual(plan.body, { params: { tweet_id: conversationSample.postId }, deliveryMode: 'live_only' })
+  assert.equal(plan.path, '/api/v1/data/native/t.api_3cd88a6621a01120')
+  for (const changes of [{ revision: 'other' }, { sourceRequestId: 'not-a-uuid' }, { sourceRequestId: 1 },
+    { platform: 'reddit' }, { postId: conversationSample.sourcePostId }, { sourcePostId: Number(conversationSample.sourcePostId) },
+    { postId: Number(conversationSample.postId) }, { sourcePostId: '' }, { postId: '1e18' }, { sourcePostId: '1'.repeat(31) },
+    { cursor: 'private-cursor' }]) {
+    assert.throws(() => planTwitterConversationCommentProbe({ ...conversationSample, ...changes }), /invalid_sample/)
+  }
+  assert.throws(() => planTwitterConversationCommentProbe({ ...conversationSample, sourcePostId: '00123', postId: '123' }), /invalid_sample/)
+  const path = await directory(t), file = join(path, 'conversation.json')
+  await writeFile(file, JSON.stringify(conversationSample))
+  assert.deepEqual(await loadTwitterConversationCommentProbeSample(file), conversationSample)
+  await writeFile(file, ' '.repeat(8193))
+  await assert.rejects(loadTwitterConversationCommentProbeSample(file), /invalid_sample/)
+  await writeFile(file, 'invalid json')
+  await assert.rejects(loadTwitterConversationCommentProbeSample(file), /invalid_sample/)
+})
+
+test('conversation preview has no HTTP and rejects a plan changed from its prepared target', async t => {
+  const path = await directory(t), plan = planTwitterConversationCommentProbe(conversationSample)
+  let calls = 0
+  const fetchImpl = async () => { calls++; throw new Error('unexpected HTTP') }
+  const input = { plan, sampleDirectory: path, conversationSampleFrom: conversationSample }
+  const preview = await runPostCommentProbe(input, { fetchImpl })
+  assert.equal(preview.state, 'preview'); assert.equal(preview.hubRequestsMade, 0)
+  assert.equal(preview.samplePurpose, 'conversation_comments')
+  assert.equal(preview.additionalTwitterSampleLimit, 1)
+  assert.equal(preview.sourceRequestId, conversationSample.sourceRequestId)
+  assert.equal(preview.automaticContinuation, false); assert.equal(preview.automaticRetry, false)
+  for (const value of [conversationSample.sourcePostId, conversationSample.postId]) assert.equal(JSON.stringify(preview).includes(value), false)
+  await assert.rejects(runPostCommentProbe({ ...input, plan: planPostCommentProbe('twitter', { platform: 'twitter', postId: '999' }) }, { fetchImpl }), /invalid_sample/)
+  await assert.rejects(runPostCommentProbe({ ...input, retryAuthenticationFor: authRetryKey }, { fetchImpl }), /invalid_sample/)
+  assert.equal(calls, 0)
+})
+
+test('conversation CLI accepts the private prepared file and defaults to a redacted preview', async t => {
+  const path = await directory(t), file = join(path, 'conversation.json')
+  await writeFile(file, JSON.stringify(conversationSample))
+  const script = fileURLToPath(new URL('../../server/ops/probe-post-comment-contract.mjs', import.meta.url))
+  const child = spawnSync(process.execPath, [script, '--sample-dir', path, '--twitter-conversation-sample', file],
+    { encoding: 'utf8', env: { PATH: process.env.PATH, MX_HUB_PROBE_API_KEY: 'private-key' } })
+  assert.equal(child.status, 0, child.stderr)
+  const result = JSON.parse(child.stdout)
+  assert.equal(result.state, 'preview'); assert.equal(result.hubRequestsMade, 0)
+  assert.equal(result.samplePurpose, 'conversation_comments')
+  for (const value of [conversationSample.postId, conversationSample.sourcePostId, 'private-key']) assert.equal(child.stdout.includes(value), false)
+})
+
+test('conversation apply requires the exact successful durable source receipt', async t => {
+  for (const changes of [{ revision: 'post-comment-contract-probe.v1' }, { state: 'outcome_unknown' }, { state: 'dispatch_started' },
+    { state: 'released' }, { httpStatus: 401 }, { httpStatus: 502 }, { errorCode: 'external_platform_rejected' },
+    { provider: 'justone' }, { path: '/api/v1/data/native/other' }, { platform: 'reddit' }, { idempotencyKey: 'other' },
+    { requestId: 'af456ad4-2523-4f73-a1fc-c95104b329a4' }, { requestIdSource: null }, { requestIdSource: 'error_details' },
+    { hubRequestsMade: 0 }, { samplePurpose: 'conversation_comments' }]) {
+    const { input } = await successfulTwitterSample(t, changes)
+    let calls = 0
+    await assert.rejects(runPostCommentProbe(input, { fetchImpl: async () => { calls++ } }), /conversation_sample_not_allowed/)
+    assert.equal(calls, 0)
+  }
+  const path = await directory(t)
+  let calls = 0
+  await assert.rejects(runPostCommentProbe({ plan: planTwitterConversationCommentProbe(conversationSample), sampleDirectory: path,
+    apiKey: 'mih_live_private', apply: true, conversationSampleFrom: conversationSample },
+  { fetchImpl: async () => { calls++ } }), /conversation_sample_not_allowed/)
+  assert.equal(calls, 0)
+})
+
+test('one additional conversation purchase preserves original and auth receipts and locks concurrent or changed-target attempts', async t => {
+  const { input, receiptDirectory, source, original } = await successfulTwitterSample(t, {}, true)
+  const calls = [], requestId = 'af456ad4-2523-4f73-a1fc-c95104b329a4'
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options })
+    const marker = JSON.parse(await readFile(join(receiptDirectory, 'twitter.conversation.json'), 'utf8'))
+    assert.equal(marker.state, 'dispatch_started')
+    assert.equal(marker.sourceRequestId, conversationSample.sourceRequestId)
+    assert.equal(marker.idempotencyKey, options.headers['idempotency-key'])
+    assert.notEqual(marker.idempotencyKey, authRetryKey)
+    return new Response('{}', { status: 200, headers: { 'x-mx-insight-request-id': requestId } })
+  }
+  const results = await Promise.all([runPostCommentProbe(input, { fetchImpl }), runPostCommentProbe(input, { fetchImpl })])
+  assert.equal(calls.length, 1)
+  assert.deepEqual(results.map(row => row.state).sort(), ['already_attempted', 'http_response'])
+  assert.equal(calls[0].url, 'http://127.0.0.1:18150/api/v1/data/native/t.api_3cd88a6621a01120')
+  assert.deepEqual(JSON.parse(calls[0].options.body), { params: { tweet_id: conversationSample.postId }, deliveryMode: 'live_only' })
+  assert.equal(calls[0].options.redirect, 'error')
+  assert.equal(results.find(row => row.requestId)?.requestId, requestId)
+  assert.equal(await readFile(join(receiptDirectory, 'twitter.json'), 'utf8'), original)
+  assert.equal(await readFile(join(receiptDirectory, 'twitter.auth-retry.json'), 'utf8'), source)
+  const receipt = await readFile(join(receiptDirectory, 'twitter.conversation.json'), 'utf8')
+  for (const value of [conversationSample.sourcePostId, conversationSample.postId, 'mih_live_private']) assert.equal(receipt.includes(value), false)
+  const changedSample = { ...conversationSample, postId: '987654321' }
+  assert.equal((await runPostCommentProbe({ ...input, plan: planTwitterConversationCommentProbe(changedSample),
+    conversationSampleFrom: changedSample }, { fetchImpl })).state, 'already_attempted')
+  assert.equal(calls.length, 1)
+})
+
+test('an unknown conversation attempt remains locked and an unknown auth source never falls back to an older success', async t => {
+  const { input } = await successfulTwitterSample(t)
+  let calls = 0
+  const fetchImpl = async () => { calls++; throw new Error('private timeout details') }
+  const result = await runPostCommentProbe(input, { fetchImpl })
+  assert.equal(result.state, 'outcome_unknown')
+  assert.equal(JSON.stringify(result).includes('private'), false)
+  assert.equal((await runPostCommentProbe(input, { fetchImpl })).state, 'already_attempted')
+  assert.equal(calls, 1)
+  const other = await successfulTwitterSample(t)
+  await writeFile(join(other.receiptDirectory, 'twitter.auth-retry.json'), JSON.stringify({ state: 'outcome_unknown' }))
+  await assert.rejects(runPostCommentProbe(other.input, { fetchImpl }), /conversation_sample_not_allowed/)
   assert.equal(calls, 1)
 })

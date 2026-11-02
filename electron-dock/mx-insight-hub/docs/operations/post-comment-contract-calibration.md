@@ -105,3 +105,58 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 v1 的 usage.platform=other 是诊断白名单输出，不能据此判断 Twitter 被错路由；v2 单独允许 usage 的 social/ecommerce 作用域，同时保留 calls 中实际供应商平台证据。等待本次结构结果后再确定 TikHub 解析和统一路由切换，不改历史回执、登录或联网流程。
 
 本地检查器 10 项测试通过，覆盖归档完整性、只读查询、未知子树、数组及遍历边界、64 位 ID、显式字段名范围和固定端点隔离；未发真实供应商请求。
+
+### 空评论样本已确认：限定一次所属会话采样
+
+用户回传 v2：同一归档 `data.id` 等于请求帖子 ID、`thread=[]`、`replies=0`、`conversation_id` 不同、cursor 非空，结构未截断。这次响应是请求帖子加空 thread，不是一个可以作为评论返回的根对象；它只能校准空结果，不能校准非空评论的字段。不同 conversation_id 与该帖子本身属于另一个会话的情况一致，不能将 conversation_id 与请求 ID 相等设为所有评论的通用条件。非空 cursor 也不足以证明还有评论，现有自动补页工作流不能直接按它继续采购。
+
+下一个样本选择这份已验证归档中的所属会话 ID，重新申请该会话帖子评论的首屏。它是不同目标的一次额外付费采样，不是原请求重试，不是按旧 cursor 续页，也不改变下游实际请求的帖子 ID。所属会话更可能包含当前回复，但不能保证本次一定非空。统一 Twitter 路由仍不切换，等非空条目和分页证据。
+
+同步 `server/ops/inspect-post-comment-contract.mjs` 和 `server/ops/probe-post-comment-contract.mjs`，无需发布镜像。在服务器 Hub 项目目录用 Bash 执行下面的命令；sampleDirectory 必须是原 `twitter.json` / `twitter.auth-retry.json` 所在标记目录的上一级，不能新建目录绕过记录。命令中的默认值沿用此前目录。
+
+```bash
+(
+  set -e
+  read -r -s -p 'Hub Live API Key: ' MX_HUB_PROBE_API_KEY
+  export MX_HUB_PROBE_API_KEY
+  node --input-type=module <<'NODE'
+import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { planTwitterConversationCommentProbe, runPostCommentProbe } from './server/ops/probe-post-comment-contract.mjs';
+const script = readFileSync('server/ops/inspect-post-comment-contract.mjs', 'utf8');
+function inspect(args) {
+  return JSON.parse(execFileSync('kubectl', [
+    '-n', 'mx-insight-hub', 'exec', '-i', 'deployment/mx-insight-hub-admin', '-c', 'admin', '--',
+    'node', '--input-type=module', '-', ...args
+  ], { input: script, encoding: 'utf8', timeout: 30000, maxBuffer: 2 * 1024 * 1024 }));
+}
+try {
+  const sample = inspect([
+    '--request-id', 'f33e6d06-97f0-46c2-a049-c69ccfabf41d',
+    '--twitter-post-id', '2117082385997250767', '--prepare-twitter-conversation'
+  ]);
+  const result = await runPostCommentProbe({
+    plan: planTwitterConversationCommentProbe(sample), conversationSampleFrom: sample,
+    sampleDirectory: 'outputs/hub_comment_samples_20261102/minimal-contentId',
+    apiKey: process.env.MX_HUB_PROBE_API_KEY, apply: true
+  });
+  console.log(JSON.stringify(result, null, 2));
+  if (result.httpStatus === 200 && result.requestId) {
+    console.log(JSON.stringify(inspect([
+      '--request-id', result.requestId, '--twitter-post-id', sample.postId
+    ]), null, 2));
+  }
+} catch (error) {
+  const safe = ['invalid_sample', 'conversation_sample_not_allowed', 'api_key_required', 'invalid_api_key'];
+  console.error(JSON.stringify({ error: safe.includes(error.message) ? error.message : 'sample_or_inspection_failed' }));
+  process.exitCode = 1;
+}
+NODE
+)
+```
+
+读取旧归档和事后字段检查均无 HTTP；中间最多新增 1 个 Hub POST。准备阶段要求唯一的成功计费调用、committed usage、完整 SHA 归档、原帖 ID 精确匹配、thread 空且 replies 为 0，以及不同的字符串会话 ID；否则拒绝。目标 ID 仅在内存传递，不打印。该额外采样必须引用原目录匹配的 usage_header 成功回执，新增固定的 `twitter.conversation.json`，并保留两份旧记录。新目标使用新的幂等键；重复、并发、换目标和未知结果都不能再次使用该槽位。没有自动鉴权恢复、换供应商或续页。
+
+若 `conversation_sample_not_allowed`，先核对原目录及保存的成功回执，不删除或重建标记；若已经打印成功 probe 而后续检查失败，保留该 probe 的 requestId，只重做只读检查。也支持将准备结果重定向到私有文件后，用 `--sample-dir <原目录> --twitter-conversation-sample <文件>` 零请求预览，明确追加 `--apply` 才采样。
+
+本地检查器 14 项、采样器 19 项测试通过。未向供应商发实际请求，未部署或修改统一路由、MX-H2I 登录及联网配置。

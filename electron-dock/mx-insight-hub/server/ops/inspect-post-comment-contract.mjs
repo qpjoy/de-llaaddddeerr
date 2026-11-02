@@ -168,7 +168,20 @@ export function summarizePostCommentPayload(payload, { twitterPostId = null } = 
     truncated, boundary: 'Bounded structural samples, with anonymous paths for unknown keys. Explicit Twitter shape mode lists schema-like keys only on a recognized data tweet object and compares IDs to the operator-supplied post ID. No scalar payload string or numeric values are returned. Missing fields do not establish the complete response contract.' }
 }
 
-export function inspectPostCommentArchive(row, options) {
+export function prepareTwitterConversationCommentSample(payload, twitterPostId) {
+  const data = payload?.data
+  if (typeof twitterPostId !== 'string' || !TWITTER_ID.test(twitterPostId)
+    || payload?.code !== 200 || !object(data) || data.id !== twitterPostId
+    || typeof data.text !== 'string' || !object(data.author)
+    || data.replies !== 0 || !Array.isArray(data.thread) || data.thread.length !== 0
+    || typeof data.conversation_id !== 'string' || !TWITTER_ID.test(data.conversation_id)
+    || data.conversation_id === twitterPostId) throw new Error('twitter_conversation_sample_unavailable')
+  // This private plan selects a different post for an explicitly requested
+  // first-page sample. It is not a continuation, retry or public diagnosis.
+  return { platform: 'twitter', postId: data.conversation_id }
+}
+
+export function inspectPostCommentArchive(row, options = {}) {
   if (!row || row.body_size == null) return { state: 'archive_missing' }
   if (row.body_size > MAX_BYTES || row.actual_body_size > MAX_BYTES) return { state: 'archive_too_large', maxBytes: MAX_BYTES }
   const bytes = row.body_bytes instanceof Uint8Array ? Buffer.from(row.body_bytes) : null
@@ -177,12 +190,14 @@ export function inspectPostCommentArchive(row, options) {
   let payload
   try { payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
   catch { return { state: 'archive_not_json', hashVerified: true, byteLength: bytes.length } }
-  return { state: 'archive_verified', hashVerified: true, byteLength: bytes.length, ...summarizePostCommentPayload(payload, options) }
+  return { state: 'archive_verified', hashVerified: true, byteLength: bytes.length, ...summarizePostCommentPayload(payload, options),
+    ...(options.prepareTwitterConversation ? { conversationSample: prepareTwitterConversationCommentSample(payload, options.twitterPostId) } : {}) }
 }
 
-export async function inspectPostCommentContract(pool, requestId, { twitterPostId = null } = {}) {
+export async function inspectPostCommentContract(pool, requestId, { twitterPostId = null, prepareTwitterConversation = false } = {}) {
   if (!UUID.test(requestId || '')) throw new Error('invalid_request_id')
   if (twitterPostId !== null && (typeof twitterPostId !== 'string' || !TWITTER_ID.test(twitterPostId))) throw new Error('invalid_twitter_post_id')
+  if (prepareTwitterConversation && twitterPostId === null) throw new Error('invalid_twitter_post_id')
   const client = await pool.connect()
   try {
     await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
@@ -210,7 +225,7 @@ export async function inspectPostCommentContract(pool, requestId, { twitterPostI
           LEFT JOIN control.external_platform_restricted_raw_responses r ON r.provider_call_id=c.id
           WHERE c.usage_request_id=$1::uuid AND c.id=$2::uuid`, [requestId, row.id, MAX_BYTES])
         archive = inspectPostCommentArchive(archives[0], row.provider_key === 'tikhub'
-          && row.endpoint_key === 'native.t.api_3cd88a6621a01120' ? { twitterPostId } : undefined)
+          && row.endpoint_key === 'native.t.api_3cd88a6621a01120' ? { twitterPostId, prepareTwitterConversation } : undefined)
       }
       calls.push({ ordinal: ordinal + 1, provider: choice(row.provider_key, ['tikhub', 'justone', 'rapidapi']),
         platform: choice(row.marketplace, PLATFORMS), endpoint: recognized ? row.endpoint_key : 'other',
@@ -219,6 +234,15 @@ export async function inspectPostCommentContract(pool, requestId, { twitterPostI
         billed: typeof row.billed === 'boolean' ? row.billed : null,
         errorCode: choice(row.error_code, ['upstream_balance_exhausted', 'upstream_rate_limited', 'invalid_upstream_contract', 'upstream_rejected',
           'upstream_timeout', 'invalid_upstream_content_type', 'external_platform_response_unusable']), archive })
+    }
+    if (prepareTwitterConversation) {
+      const call = calls[0]
+      if (usages[0].status !== 'committed' || usages[0].response_status !== 200 || calls.length !== 1 || rows.length !== 1
+        || call.provider !== 'tikhub' || call.platform !== 'twitter' || call.endpoint !== 'native.t.api_3cd88a6621a01120'
+        || call.outcome !== 'succeeded' || call.httpStatus !== 200 || call.businessCode !== 200 || call.billed !== true
+        || call.archive.state !== 'archive_verified' || !call.archive.conversationSample) throw new Error('twitter_conversation_sample_unavailable')
+      return { revision: 'twitter-conversation-comment-sample.v1', sourceRequestId: requestId,
+        sourcePostId: twitterPostId, ...call.archive.conversationSample }
     }
     return { revision: 'post-comment-contract-inspection.v2', requestId,
       usage: { platform: choice(usages[0].platform, [...PLATFORMS, 'social', 'ecommerce']), status: choice(usages[0].status, ['reserved', 'committed', 'released', 'unknown']), httpStatus: status(usages[0].response_status) },
@@ -236,16 +260,19 @@ export async function inspectPostCommentContract(pool, requestId, { twitterPostI
 if (process.argv[1] === '-' || (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)) {
   let pool
   try {
-    const [flag, requestId, shapeFlag, twitterPostId, extra] = process.argv.slice(2)
+    const [flag, requestId, shapeFlag, twitterPostId, prepareFlag, extra] = process.argv.slice(2)
     if (flag !== '--request-id' || extra || !UUID.test(requestId || '')
+      || (prepareFlag !== undefined && prepareFlag !== '--prepare-twitter-conversation')
       || (shapeFlag !== undefined && (shapeFlag !== '--twitter-post-id' || !TWITTER_ID.test(twitterPostId || '')))) throw new Error('invalid_arguments')
     if (!process.env.DATABASE_URL) throw new Error('database_url_required')
     const { default: pg } = await import('pg')
     pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000, query_timeout: 6000,
       options: '-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000' })
-    console.log(JSON.stringify(await inspectPostCommentContract(pool, requestId, { twitterPostId: twitterPostId ?? null }), null, 2))
+    console.log(JSON.stringify(await inspectPostCommentContract(pool, requestId, { twitterPostId: twitterPostId ?? null,
+      prepareTwitterConversation: prepareFlag === '--prepare-twitter-conversation' }), null, 2))
   } catch (error) {
-    const safe = ['invalid_arguments', 'database_url_required', 'request_not_found', 'invalid_request_id'].includes(error?.message)
+    const safe = ['invalid_arguments', 'database_url_required', 'request_not_found', 'invalid_request_id', 'invalid_twitter_post_id',
+      'twitter_conversation_sample_unavailable'].includes(error?.message)
       ? error.message : 'post_comment_contract_inspection_failed'
     console.error(JSON.stringify({ error: safe })); process.exitCode = 1
   } finally { await pool?.end() }
