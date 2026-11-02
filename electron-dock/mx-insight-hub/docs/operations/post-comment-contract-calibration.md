@@ -20,7 +20,7 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 
 ## 缺少归档时，每个平台只申请一次首屏
 
-在 Hub 所在宿主机运行，目标固定为 `http://127.0.0.1:18150`。脚本需要 Node 22，不需要把供应商密钥交给操作人。`MX_HUB_PROBE_API_KEY` 是 Hub 的测试 Key；应已有 `social` 平台和下面三个原生能力授权，以及可用的现有采购控制。脚本不创建授权、不启用采购、不修改余额或自动切换供应商。
+在 Hub 所在宿主机运行，目标固定为 `http://127.0.0.1:18150`。脚本需要 Node 22，不需要把供应商密钥交给操作人。`MX_HUB_PROBE_API_KEY` 使用具有限定授权的正常生产 Hub Key，不能使用 `mih_test_` 或 environment=test 的 Key（原生付费端点会在预留前返回 test_key_not_supported）；应已有 `social` 平台和下面三个原生能力授权，以及可用的现有采购控制。脚本不创建授权、不启用采购、不修改余额或自动切换供应商。
 
 | 平台 | 固定原生能力 | 首屏供应商参数 |
 | --- | --- | --- |
@@ -57,6 +57,29 @@ unset MX_HUB_PROBE_API_KEY
 
 脚本不自动重试、不续页、不跟随重定向；55 秒超时按 `outcome_unknown` 处理，不推定未扣费。Hub 原有 LCY 优先机制可能对**明确未计费**的限流拒绝重试一次，本工具不更改该机制，因此“最多 3 个 Hub 请求”不等于“底层一定只有 3 次 HTTP”。它不会因该机制增加已计费的样本数。
 
-拿到每个平台的 `requestId` 后，逐个运行上面的只读检查，把 probe 简要结果和 inspection JSON 贴回即可。如果 `requestId:null`，保留本地标记中的幂等键进行后台查询，不能因此认定请求未发生。
+拿到每个平台的 `requestId` 后，逐个运行上面的只读检查，把 probe 简要结果和 inspection JSON 贴回即可。新脚本的 requestId 只取持久 usage 响应头或错误 details；顶层临时 HTTP UUID 单独保存为 httpRequestId，不能拿它查询用量归档。如果 `requestId:null`，保留本地标记中的幂等键进行后台查询，不能因此认定请求未发生。
 
 这轮样本核对不部署 Hub，不修改历史失败响应，不操作 MX-H2I 登录或联网配置。当前只是在已有原生转发入口校准 TikHub 格式，统一评论尚未改为 TikHub。字段映射与分页实现通过测试后才发布 Hub，并通过新的幂等键做首次业务验收；旧失败请求的不可变回放保持原结果。
+
+
+## request_not_found 时先读原始采样结果
+
+不要重新采样或删除尝试标记。在原执行目录读取 `.hub-comment-contract-probes-v1/twitter.json`，其中只有安全摘要，没有 API Key。旧脚本可能把预留前拒绝的 HTTP 关联 UUID 误标为 requestId，导致 Admin usage 查询无记录。此现象本身不能证明供应商未调用或没有扣费。
+
+必要时用原 Hub Key 和标记内的 Idempotency-Key，对同一 18150 服务发只读 `GET /api/v1/requests/by-idempotency-key`，Idempotency-Key 放请求头。其 `data.id` 才是持久 usage ID，顶层 requestId 是本次查询的 HTTP ID。若该 GET 能查到记录而 Admin 数据库查不到，再核对 Public/Admin 实际连接的运行环境；不要输出数据库连接串或密钥。
+
+历史返回不会改写。此前“测试 Key”措辞已修正：原生端点不支持 test 环境 Key。原脚本会将 test_key_not_supported 归为 other，修复后的脚本保留该固定错误码；需要查看原结果状态和实际 Key 类型后才能判断是否是本次原因。
+
+
+### Twitter 首次操作结果：401 invalid_api_key
+
+用户回传 v2 采样记录：HTTP 401、invalid_api_key、幂等键 comment-calibration-v1-22dabde8-689e-44da-8d91-3b9fbfb574df，临时 HTTP UUID 571b478a-4d88-42e5-b15c-bc2b4ab134dc。这一次是 Hub 鉴权阶段拒绝，未进入原生 gateway 采购，不是 TikHub 错误，无法通过该 UUID 找 usage 记录。保留原 marker；不据此删除其他未知请求记录。
+
+改用此 Hub 实例签发的完整有效 Live API Key（mih_live_，不是供应商 Key、管理员 Token、Key ID 或界面掩码）。先仅 GET /api/v1/data/capabilities，读取 data.capabilities 中 native.t.api_3cd88a6621a01120 的存在性和 ready；此 GET 不采购、不创建 usage。ready=true 才表示当前检查时该能力可用，不是供应商现场响应验证。data.platforms 过滤了非历史平台，不能用它缺少 social 判定无权限。鉴权与就绪结果待回传后，再用保留的原幂等身份安排一次采样；不自动重发。
+
+
+### 鉴权已恢复后的单次采样
+
+用户回传只读检查 HTTP200、twitterNativeGranted=true、twitterNativeReady=true。允许继续原已授权 Twitter 一页采样，不再要求确认。先同步新版 probe 脚本（导出 POST_COMMENT_AUTH_RETRY_VERSION=1），无需重启 Hub。调用 runPostCommentProbe 时显式传 retryAuthenticationFor 为原键 comment-calibration-v1-22dabde8-689e-44da-8d91-3b9fbfb574df，postId 仍为 2117082385997250767，sampleDirectory 仍用原执行目录。
+
+此恢复只接受保存的明确 401/invalid_api_key、单次 HTTP、匹配的平台/路径/版本/幂等键且没有持久 usage 来源。原 twitter.json 完全保留，新的 twitter.auth-retry.json 在发送前独占创建，复用原幂等键；重复、并发和超时后执行都不再采购。不得用它恢复 unknown、供应商拒绝或其他 HTTP 状态。新采样返回 requestId 才用于只读归档检查，原临时 UUID 不再用于 usage 查询。18 项操作测试通过；本地未发真实采集请求，等待服务器本次采样结果。

@@ -6,9 +6,10 @@ import { pathToFileURL } from 'node:url'
 // JustOne balance is exhausted. Calibrate the reviewed TikHub request contracts
 // before changing the unified comment projector or its production routing.
 const PLATFORM_KEYS = Object.freeze({ twitter: 't.api_3cd88a6621a01120', reddit: 't.api_c7f50cf300d63960', kuaishou: 't.api_3cb972ba91c8fe44' })
+export const POST_COMMENT_AUTH_RETRY_VERSION = 1
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const SAFE_ERRORS = new Set(['invalid_arguments', 'invalid_sample', 'ambiguous_sample', 'sample_not_found', 'sample_directory_too_large', 'api_key_required', 'invalid_api_key'])
-const RESPONSE_CODES = new Set(['invalid_api_key', 'api_key_required', 'platform_not_granted', 'capability_not_granted', 'request_outcome_unknown',
+const RESPONSE_CODES = new Set(['invalid_api_key', 'api_key_required', 'test_key_not_supported', 'platform_not_granted', 'capability_not_granted', 'request_outcome_unknown',
   'external_platform_operation_disabled', 'external_platform_operation_paused', 'external_platform_contract_unverified', 'external_platform_not_configured',
   'external_platform_cost_control_unavailable', 'external_platform_circuit_open', 'upstream_balance_exhausted', 'upstream_rate_limited',
   'external_platform_rate_limited', 'external_platform_busy', 'external_platform_rejected', 'native_endpoint_not_found', 'invalid_parameter', 'missing_parameter'])
@@ -80,14 +81,16 @@ async function errorSummary(response) {
       chunks.push(value)
     }
     const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-    const requestId = payload?.error?.details?.requestId ?? payload?.requestId
+    const requestId = payload?.error?.details?.requestId
+    const httpRequestId = payload?.requestId
     return { errorCode: RESPONSE_CODES.has(payload?.error?.code) ? payload.error.code : 'other',
-      requestId: UUID.test(requestId || '') ? requestId : null }
+      requestId: UUID.test(requestId || '') ? requestId : null,
+      httpRequestId: UUID.test(httpRequestId || '') ? httpRequestId : null }
   } catch { return null }
   finally { await reader.cancel().catch(() => {}); reader.releaseLock() }
 }
 
-export async function runPostCommentProbe({ plan, sampleDirectory, apiKey, apply = false }, { fetchImpl = fetch } = {}) {
+export async function runPostCommentProbe({ plan, sampleDirectory, apiKey, apply = false, retryAuthenticationFor = null }, { fetchImpl = fetch } = {}) {
   // Validate the supplied plan again so callers cannot construct another route.
   const expected = planPostCommentProbe(plan?.platform, { platform: plan?.platform,
     postId: plan?.body?.params?.tweet_id ?? plan?.body?.params?.post_id ?? plan?.body?.params?.photo_id })
@@ -101,9 +104,29 @@ export async function runPostCommentProbe({ plan, sampleDirectory, apiKey, apply
   // script must not erase a previous attempt or silently renew its call budget.
   const receiptDirectory = join(resolve(sampleDirectory), '.hub-comment-contract-probes-v1')
   await mkdir(receiptDirectory, { recursive: true, mode: 0o700 })
-  const receiptPath = join(receiptDirectory, `${plan.platform}.json`)
-  const idempotencyKey = `comment-calibration-v1-${randomUUID()}`
-  const beforeDispatch = { ...preview, state: 'dispatch_started', idempotencyKey, requestId: null, httpStatus: null }
+  let receiptPath = join(receiptDirectory, `${plan.platform}.json`)
+  let idempotencyKey = `comment-calibration-v1-${randomUUID()}`
+  if (retryAuthenticationFor !== null) {
+    // Explicit recovery of an observed Hub authentication refusal only. Keep
+    // its evidence intact and reuse its logical request key; never reopen a
+    // supplier failure, unknown outcome or attempt interrupted after dispatch.
+    if (typeof retryAuthenticationFor !== 'string' || !retryAuthenticationFor.startsWith('comment-calibration-v1-')
+      || !UUID.test(retryAuthenticationFor.slice('comment-calibration-v1-'.length))) throw new Error('authentication_retry_not_allowed')
+    let previous
+    try {
+      if ((await stat(receiptPath)).size > 16384) throw new Error('receipt too large')
+      previous = JSON.parse(await readFile(receiptPath, 'utf8'))
+    } catch { throw new Error('authentication_retry_not_allowed') }
+    if (previous.revision !== 'post-comment-contract-probe.v2' || previous.provider !== 'tikhub'
+      || previous.platform !== plan.platform || previous.path !== plan.path
+      || previous.state !== 'http_response' || previous.httpStatus !== 401 || previous.errorCode !== 'invalid_api_key'
+      || previous.hubRequestsMade !== 1 || previous.requestIdSource != null
+      || previous.idempotencyKey !== retryAuthenticationFor) throw new Error('authentication_retry_not_allowed')
+    idempotencyKey = previous.idempotencyKey
+    receiptPath = join(receiptDirectory, `${plan.platform}.auth-retry.json`)
+  }
+  const beforeDispatch = { ...preview, state: 'dispatch_started', idempotencyKey, requestId: null, httpStatus: null,
+    ...(retryAuthenticationFor ? { authenticationRetry: true } : {}) }
   let handle
   try { handle = await open(receiptPath, 'wx', 0o600) }
   catch (error) {
@@ -121,8 +144,14 @@ export async function runPostCommentProbe({ plan, sampleDirectory, apiKey, apply
       body: JSON.stringify(plan.body),
     })
     const requestId = response.headers.get('x-mx-insight-request-id'), error = await errorSummary(response)
+    // Error-envelope requestId can be only the HTTP correlation UUID when
+    // authentication/validation fails before a usage row exists. Never tell
+    // the operator to look up that UUID as a durable acquisition receipt.
+    const headerRequestId = UUID.test(requestId || '') ? requestId : null
     result = { ...beforeDispatch, state: 'http_response', httpStatus: response.status,
-      requestId: UUID.test(requestId || '') ? requestId : error?.requestId ?? null, hubRequestsMade: 1,
+      requestId: headerRequestId ?? error?.requestId ?? null,
+      requestIdSource: headerRequestId ? 'usage_header' : error?.requestId ? 'error_details' : null,
+      httpRequestId: error?.httpRequestId ?? null, hubRequestsMade: 1,
       ...(error ? { errorCode: error.errorCode } : {}) }
     // Raw response bodies stay in Hub's existing restricted archive. Do not
     // echo or copy private comments into an operator's terminal or this receipt.
