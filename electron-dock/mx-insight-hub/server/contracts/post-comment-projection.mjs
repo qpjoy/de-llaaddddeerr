@@ -5,13 +5,14 @@ import { canonicalJson } from '../ingest/normalizers.mjs'
 import { projectXhsResearch, XHS_RESEARCH_ENDPOINTS } from './xiaohongshu-research.mjs'
 import { projectYoutubeCommentsPage } from './youtube-comments.mjs'
 import { parseTikHubTwitterCommentPage } from './twitter-comment-page.mjs'
+import { parseTikHubRedditCommentPage } from './reddit-comment-page.mjs'
 
 // Instagram: anonymous observed shape in instagram-native.test.mjs, request
 // d24f7dcf-7508-427e-b273-ac18ab161ca6. XHS/YouTube reuse their released parsers.
 // A documented request endpoint alone does not verify a response projection.
 export const POST_COMMENT_PROJECTION_PLATFORMS = Object.freeze(['xiaohongshu', 'instagram', 'youtube',
   'twitter', 'reddit', 'kuaishou', 'weibo', 'douyin', 'tiktok', 'zhihu', 'linkedin', 'bilibili', 'facebook'])
-const TIKHUB_PLATFORMS = new Set(['xiaohongshu', 'instagram', 'youtube', 'twitter'])
+const TIKHUB_PLATFORMS = new Set(['xiaohongshu', 'instagram', 'youtube', 'twitter', 'reddit'])
 const VERSION = 'mx-insight-hub.post-comments.v1'
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const unusable = () => { throw new AppError(502, 'invalid_upstream_contract', 'Comment response does not match the released contract') }
@@ -44,6 +45,12 @@ function canonical(row, raw, capturedAt, provider) {
   // Mapping normalizes scalar whitespace; comment bodies retain their complete
   // original text in both the public projection and canonical observation.
   record.body = row.content
+  // Reddit score is signed and may be hidden. It is not a count or a like.
+  // Keep it in the existing JSON metrics, including the explicit unknown value.
+  if (row.platform === 'reddit') {
+    record.metrics.score = row.metrics.score
+    record.stableFields.metrics.score = row.metrics.score
+  }
   record.parserVersion = VERSION
   record.collectedAt = new Date(capturedAt)
   record.stableFields.connectorId = `external-platform:${provider}`
@@ -95,6 +102,15 @@ function twitterTikHub(payload, step, capturedAt) {
   return { projected: { acquiredItems: rows, profiles: [], providerPage: parsed.providerPage },
     records: rows.map((row, index) => canonical(row, parsed.comments[index].raw, capturedAt, 'tikhub')) }
 }
+function redditTikHub(payload, step, capturedAt) {
+  const { request, continuation = null } = step.postComments
+  let parsed
+  try { parsed = parseTikHubRedditCommentPage(payload, request.postId, continuation) }
+  catch { unusable() }
+  const rows = parsed.comments.map(({ raw, values }) => item(request, values, raw, capturedAt))
+  return { projected: { acquiredItems: rows, profiles: [], providerPage: parsed.providerPage },
+    records: rows.map((row, index) => canonical(row, parsed.comments[index].raw, capturedAt, 'tikhub')) }
+}
 function linkedCommentId(permalink) {
   try {
     const parsed = new URL(permalink)
@@ -113,25 +129,6 @@ function justOne(payload, step, capturedAt) {
   const append = (raw, values) => { rows.push(item(request, values, raw, capturedAt)); raws.push(raw) }
   let providerPage
   switch (request.platform) {
-    case 'reddit': {
-      const post = data.postInfoById, forest = post?.commentForest
-      if (!object(post) || !object(forest) || scalar(post.id)?.replace(/^t3_/u, '') !== request.postId.replace(/^t3_/u, '')) unusable()
-      const trees = list(forest.trees)
-      for (const tree of trees) {
-        if (!object(tree)) unusable()
-        if (tree.node === null && object(tree.more)) continue
-        const raw = tree.node, user = raw?.authorInfo || {}
-        if (!object(raw) || raw.__typename !== 'Comment') unusable()
-        append(tree, { commentId: raw.id, text: raw.content?.markdown, publishedAt: timestamp(raw.createdAt),
-          author: author(user.id, user.name, user.iconSmall?.url), likes: null, replies: tree.childCount,
-          metrics: { score: Number.isSafeInteger(raw.score) ? raw.score : null },
-          parentCommentId: scalar(tree.parentId)?.replace(/^t3_/u, '') === request.postId.replace(/^t3_/u, '') ? null : scalar(tree.parentId),
-          url: typeof raw.permalink === 'string' ? `https://www.reddit.com${raw.permalink}` : null })
-      }
-      providerPage = cursorPage({ cursor: trees.at(-1)?.more?.cursor }, 'cursor', 'cursor', continuation,
-        flag(forest.pageInfo?.hasNextPage))
-      break
-    }
     case 'kuaishou':
       if (data.result !== 1) unusable()
       for (const raw of list(data.rootComments)) append(raw, { commentId: raw.comment_id, text: raw.content,
@@ -228,6 +225,7 @@ export function projectPostCommentPage(payload, step, { capturedAt }) {
   if (provider === 'justone') return justOne(payload, step, capturedAt)
   if (payload.code !== 200) unusable()
   if (request.platform === 'twitter') return twitterTikHub(payload, step, capturedAt)
+  if (request.platform === 'reddit') return redditTikHub(payload, step, capturedAt)
   const rows = [], rawRows = []
   let providerPage
   if (request.platform === 'instagram') {

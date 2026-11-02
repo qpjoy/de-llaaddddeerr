@@ -2,7 +2,7 @@
 
 **这是活文档。** 凡是新增或改动自建采集服务（Night-All、Night-All-A、Hub 自建引擎、事件交付），或改动它们的部署拓扑，都要同步更新本目录，并在文末「变更记录」追加一行。只看本目录，就应该能知道当前状态和目标形态。
 
-最后更新：2026-10-31。本目录记录的是设计与现状核对；标注「设计中」的部分**尚未实现、未部署**。
+最后更新：2026-11-02。本目录记录的是设计与现状核对；标注「设计中」的部分**尚未实现、未部署**。
 
 ## 1. 范围
 
@@ -13,7 +13,7 @@
 | Night-All | Internal 宿主机 `:13141`，不在 k8s 内 | 历史自建平台：本地爬虫（如搜狗微信 `wechat_mp`）、旧供应商编排、BullMQ 异步任务 | 运行中。供应商类接口按 operation 逐个迁到 Hub；自建爬虫能力保留 |
 | Night-All-A | VPN 固定地址 `100.127.0.1:8100`（Internal 侧为 `100.127.0.6`） | HTTP 异步采集 + 独立清洗库；含 Facebook 协议爬虫 `facebook-protocol` | Facebook 内容搜索的「自建」模式已实现未部署（[03](03-self-hosted-engines.md) 第 11 节）；旧 Admin 控制台转发仍由环境开关控制（默认关闭），线上是否启用未核实 |
 | Hub 自建引擎 | Hub（k8s）内的引擎配置、任务表、执行者 | 把一个自建爬虫包装成可排队、可计量、可查询的数据产品。第一个是「微信 → 自建引擎」 | 已实现未部署 |
-| Hub 单帖评论 | Hub Public 原生接口与旧兼容别名 | 13 平台固定供应商评论，现有 PG 归档/计费/分页/入库；不转 Night-All | Twitter 旧 URL 生产首屏验收通过：20 条、一次成功计费 TikHub 调用、归档已核验；剩余九个平台仍受 JustOne 余额阻塞，Reddit TikHub 样本成功、候选解析待完整校验；快手 502 待只读诊断，两个统一路由均未切换；见 [迁移合同](../../integrations/post-comments-migration.md) |
+| Hub 单帖评论 | Hub Public 原生接口与旧兼容别名 | 13 平台固定供应商评论，现有 PG 归档/计费/分页/入库；不转 Night-All | Twitter 旧 URL 生产首屏验收通过：20 条、一次成功计费 TikHub 调用、归档已核验；Reddit 完整 3 条已验证，本地统一路由改 TikHub、待部署验收；其余八个 JustOne 平台受余额阻塞。快手 Web 已证实上游 400、计费未知，待一次独立 App 样本；见 [迁移合同](../../integrations/post-comments-migration.md) |
 | Hub 事件中心 | Hub Public 的事件接口 + PG 事件日志 | 把任务终态和数据变化可靠地交付给 Delta、Java | 设计中 |
 | 下游 | Delta（po-infra）、罗盘 Java，都是 Internal 宿主机上的 Docker | 提交任务、消费事件 | 目前同步调 Hub；直连改造见[性能汇总第 5 节](../../operations/platform-performance-review-2026-10-22.md) |
 | 旁路采集 | Delta 自带的 spiders、直接调 Night-All 的控制台等 | 不经过 Hub 的采集入口 | 待盘点 |
@@ -108,3 +108,5 @@ flowchart LR
 | 2026-10-23 | 微信自建引擎第一阶段实现完成（未部署、未提交）：迁移 165、`server/self-hosted/*`、对外 202 + 轮询接口、派发时计费、Admin 引擎配置/探测/恢复、产品页。单元、原生 PG、浏览器验证见 [03](03-self-hosted-engines.md) 第 10 节。 |
 | 2026-10-23 | 自建引擎直接对 Delta 开放：能力项 `wechat.selfhosted.search`、按任务计费、¥0.10 / 次、实时和缓存收费、旧结果不收费、派发时预留账本、适中档排队上限（[03](03-self-hosted-engines.md) 5.3–5.4 节，[05](05-roadmap-and-decisions.md) D9–D13）。开始实现第一阶段。 |
 | 2026-10-23 | 建立本目录。整合事件中心、微信自建引擎、限速分析三部分设计；新增多节点演进方案（A 机 hub-edge 入口、`night-all-legacy` Service、全局准入信号量）。均为设计，未实现。 |
+
+- 2026-11-02 Reddit 运行接入：保存请求绑定的完整 3 条解析验证通过，本地固定 TikHub 配方、手动单页采购、signed score 规范化保留已接入；旧签名/原生游标仅精确历史重放，旧排队 JustOne 入库归属不变。待 Hub-only 部署与统一入口验收。快手 Web 拒绝为上游 400，billed=null 不按未收费处理；保留原 marker，准备一次独立 App 端点样本。无 DDL、Launcher/SSO/VPN 变动。

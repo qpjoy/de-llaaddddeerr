@@ -9,7 +9,7 @@ export const POST_COMMENTS_CAPABILITY = 'social.comments.list'
 export const POST_COMMENTS_PATH = '/api/v1/data/social/post-comments'
 const definitions = [
   ['twitter', 'tikhub', '/api/v1/twitter/web/fetch_post_comments', 'tweet_id', ['cursor'], []],
-  ['reddit', 'justone', '/api/reddit/get-post-comments/v1', 'postId', ['cursor'], []],
+  ['reddit', 'tikhub', '/api/v1/reddit/app/fetch_post_comments', 'post_id', ['after'], []],
   ['kuaishou', 'justone', '/api/kuaishou/get-video-comment/v1', 'videoId', ['pcursor'], []],
   ['instagram', 'tikhub', '/api/v1/instagram/v3/get_post_comments', 'code', ['min_id'], ['sort_order']],
   ['weibo', 'justone', '/api/weibo/get-post-comments/v1', 'mid', ['maxId'], ['sort']],
@@ -28,6 +28,12 @@ export const POST_COMMENTS_RECIPES = Object.freeze(Object.fromEntries(definition
   return [platform, Object.freeze({ provider, path, key: endpoint.key, idField, continuationFields, optionFields,
     available: POST_COMMENT_PROJECTION_PLATFORMS.includes(platform) })]
 })))
+// Retained only to reproduce historical JustOne request fingerprints. This
+// recipe is never available to dispatch or resume a traversal through TikHub.
+const legacyRedditEndpoint = NATIVE_FORWARDING_ENDPOINTS.find(row => row.provider === 'justone' && row.path === '/api/reddit/get-post-comments/v1')
+if (!legacyRedditEndpoint) throw new Error('Missing historical Reddit comment request contract')
+const legacyRedditRecipe = Object.freeze({ provider: 'justone', key: legacyRedditEndpoint.key,
+  idField: 'postId', continuationFields: ['cursor'], optionFields: [] })
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const invalid = message => { throw new AppError(400, 'invalid_post_comments_request', message) }
 const scalar = value => typeof value === 'string' && value.length <= 8192 && !value.includes('\0') ? value
@@ -129,7 +135,7 @@ function paramsFor(recipe, params, rawCursor) {
   if (recipe.idField === 'note_id' && initialParams.cursor && (initialParams.index == null || initialParams.pageArea == null)) invalid('Xiaohongshu continuation needs cursor, index and pageArea')
   return { options, initialParams }
 }
-export function normalizePostCommentsRequest(body, { businessId, maxPageSize = 100 } = {}) {
+export function normalizePostCommentsRequest(body, { businessId, maxPageSize = 100, allowHistoricalRedditCursor = false } = {}) {
   if (!object(body) || Object.keys(body).some(key => !fields.has(key))) invalid('Unsupported post comments request fields')
   for (const field of ['businessId', 'business_id']) if (body[field] != null && body[field] !== businessId) invalid('businessId must match the authenticated consumer')
   const platform = postCommentsPlatform(body.platform), recipe = POST_COMMENTS_RECIPES[platform]
@@ -150,16 +156,22 @@ export function normalizePostCommentsRequest(body, { businessId, maxPageSize = 1
   const signedCursor = cursor?.startsWith('mxds1.')
   if (cursor && /^mx[a-z0-9]*\./u.test(cursor) && !signedCursor) throw new AppError(400, 'invalid_cursor', 'Restart comments explicitly; old or foreign Hub cursors cannot be imported')
   const suppliedParams = paramCursor ? Object.fromEntries(Object.entries(body.params).filter(([key]) => key !== 'cursor')) : body.params
-  const { options, initialParams } = paramsFor(recipe, suppliedParams, signedCursor ? null : cursor)
+  const legacyRedditCursor = platform === 'reddit' && ((!signedCursor && cursor != null)
+    || object(suppliedParams) && Object.hasOwn(suppliedParams, 'cursor'))
+  if (legacyRedditCursor && !allowHistoricalRedditCursor) {
+    throw new AppError(400, 'invalid_cursor', 'Restart Reddit comments explicitly; legacy supplier cursors cannot resume through TikHub')
+  }
+  const validationRecipe = legacyRedditCursor ? legacyRedditRecipe : recipe
+  const { options, initialParams } = paramsFor(validationRecipe, suppliedParams, signedCursor ? null : cursor)
   if (signedCursor && Object.keys(initialParams).length) invalid('Do not combine a Hub cursor with provider continuation parameters')
   const identity = { platform, postId: ids[0], count, includeRaw: body.includeRaw === true, options }
   const request = { ...identity, cursor, page, initialParams, operation: 'comments', path: POST_COMMENTS_PATH,
     pageSize: count, totalLimit: count, jobs: [{ id: createHash('sha256').update(JSON.stringify(identity)).digest('hex'), provider: recipe.provider }],
-    fingerprintBody: { ...identity, initialParams } }
+    fingerprintBody: { ...identity, initialParams }, ...(legacyRedditCursor ? { legacyRedditCursor: true } : {}) }
   // Validate the fixed provider parameter types before any reservation. Runtime
   // availability is checked separately after exact historical replay.
-  const normalized = normalizeNativeForwardingRequest(recipe.key, { params: providerQuery(request, recipe, initialParams) })
-  request.options = Object.fromEntries(recipe.optionFields.filter(key => normalized.upstreamQuery[key] != null).map(key => [key, normalized.upstreamQuery[key]]))
+  const normalized = normalizeNativeForwardingRequest(validationRecipe.key, { params: providerQuery(request, validationRecipe, initialParams) })
+  request.options = Object.fromEntries(validationRecipe.optionFields.filter(key => normalized.upstreamQuery[key] != null).map(key => [key, normalized.upstreamQuery[key]]))
   request.initialParams = Object.fromEntries(Object.keys(initialParams).map(key => [key, normalized.upstreamQuery[key]]))
   request.fingerprintBody = { ...identity, options: request.options, initialParams: request.initialParams }
   return request
@@ -168,9 +180,11 @@ function providerQuery(request, recipe, continuation) {
   return { [recipe.idField]: request.postId,
     ...(request.platform === 'linkedin' ? { sortOrder: 'RELEVANCE' } : {}),
     ...request.options, ...continuation,
-    ...(request.platform === 'youtube' ? { need_format: true } : {}) }
+    ...(request.platform === 'youtube' ? { need_format: true } : {}),
+    ...(request.platform === 'reddit' && recipe.provider === 'tikhub' ? { need_format: false } : {}) }
 }
 export function buildPostCommentsDispatch(request, job = {}, buffer = null) {
+  if (request.legacyRedditCursor || request.legacyProviderCursor) throw new AppError(400, 'invalid_cursor', 'Historical comment cursors are replay-only')
   const recipe = POST_COMMENTS_RECIPES[request.platform]
   if (!recipe?.available) throw new AppError(503, 'external_platform_contract_unverified', 'This platform requires comment response calibration before acquisition', { platform: request.platform })
   const continuation = buffer ? buffer.providerCursor : job.providerCursor ?? request.initialParams

@@ -99,3 +99,17 @@ test('Twitter comment ingestion accepts TikHub and preserves previously queued J
     assert.throws(() => classifyExternalPlatformIngest(job(providerKey, 'twitter', 'social.comments.v1')), /pinned contract/)
   }
 })
+
+test('Reddit comment ingestion accepts TikHub while retaining queued JustOne comments and provider isolation', () => {
+  for (const providerKey of ['tikhub', 'justone']) {
+    const payload = job(providerKey, 'reddit', 'social.comments.v1')
+    assert.deepEqual(classifyExternalPlatformIngest(payload), {
+      enterprise: false, justOne: false, tikHubXiaohongshu: false, hubRaw: true,
+    })
+    assert.equal(payload.providerKey, providerKey)
+    assert.throws(() => classifyExternalPlatformIngest({ ...payload, records: {} }), /pinned contract/)
+  }
+  for (const providerKey of ['rapidapi', 'night-all', '']) {
+    assert.throws(() => classifyExternalPlatformIngest(job(providerKey, 'reddit', 'social.comments.v1')), /pinned contract/)
+  }
+})

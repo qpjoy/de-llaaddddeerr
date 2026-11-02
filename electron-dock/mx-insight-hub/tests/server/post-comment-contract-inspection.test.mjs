@@ -477,7 +477,7 @@ function redditInspectionHarness({ usage = {}, call = {}, raw = archive(redditTh
   return { pool: { connect: async () => client }, queries, get releases() { return releases } }
 }
 
-test('Reddit candidate verification validates every saved tree against the bounded saved request snapshot and returns no payload values', async t => {
+test('Reddit verification validates every saved tree against the bounded saved request snapshot and returns no payload values', async t => {
   const fetch = t.mock.method(globalThis, 'fetch', () => { throw new Error('no supplier HTTP') })
   const h = redditInspectionHarness()
   let parserCalls = 0
@@ -500,7 +500,7 @@ test('Reddit candidate verification validates every saved tree against the bound
     rootIncluded: false, rootExcluded: true, textCount: 7, authorIdCount: 7, publishedAtCount: 7,
     scoreCount: 7, unknownParentCount: 7,
     pagination: { hasMore: false, continuationAvailable: false, stopReason: null } })
-  assert.match(boundary, /candidate pure parser/u)
+  assert.match(boundary, /same pure parser used by the runtime projector/u)
   assert.match(boundary, /does not activate runtime routing/u)
   const output = JSON.stringify(result)
   assert.ok(output.length < 2000)

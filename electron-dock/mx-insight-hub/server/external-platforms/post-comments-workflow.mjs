@@ -10,24 +10,26 @@ const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-
 const invalidCursor = () => new AppError(400, 'invalid_cursor', 'The comments cursor is invalid, expired or belongs to another request/Key; restart explicitly')
 
 export function normalizePostCommentsDelivery(body, { context, maxPageSize, codec, allowHistoricalProviderCursor = false }) {
-  const request = normalizePostCommentsRequest(body, { maxPageSize, businessId: context.consumer.businessId })
+  const request = normalizePostCommentsRequest(body, { maxPageSize, businessId: context.consumer.businessId,
+    allowHistoricalRedditCursor: allowHistoricalProviderCursor })
   const { initialParams: _initialParams, cursor: _cursor, page: _page, ...identity } = request.fingerprintBody
   const recipe = POST_COMMENTS_RECIPES[request.platform]
-  // Twitter changed supplier contracts. Old signed cursors must not resume a
+  // Twitter and Reddit changed suppliers. Old signed cursors must not resume a
   // JustOne traversal through TikHub; historical receipt fingerprints stay put.
+  const migratedProvider = ['twitter', 'reddit'].includes(request.platform)
   const scopeHash = hash({ version: POST_COMMENTS_VERSION, ...identity,
-    ...(request.platform === 'twitter' ? { recipe: { provider: recipe.provider, key: recipe.key } } : {}) })
-  const legacyTwitterScopeHash = request.platform === 'twitter' ? hash({ version: POST_COMMENTS_VERSION, ...identity }) : null
-  let page = 1, expiresAt = Date.now() + 86400000, previousDeliveryId = null, legacyProviderCursor = false
+    ...(migratedProvider ? { recipe: { provider: recipe.provider, key: recipe.key } } : {}) })
+  const legacyScopeHash = migratedProvider ? hash({ version: POST_COMMENTS_VERSION, ...identity }) : null
+  let page = 1, expiresAt = Date.now() + 86400000, previousDeliveryId = null, legacyProviderCursor = request.legacyRedditCursor === true
   const importedContinuation = Boolean(request.initialParams && Object.keys(request.initialParams).length)
   if (request.cursor?.startsWith('mxds1.')) {
     if (importedContinuation) throw invalidCursor()
     try {
       const state = codec.decode(request.cursor)
-      legacyProviderCursor = allowHistoricalProviderCursor && legacyTwitterScopeHash !== null && state.scopeHash === legacyTwitterScopeHash
+      legacyProviderCursor = allowHistoricalProviderCursor && legacyScopeHash !== null && state.scopeHash === legacyScopeHash
       if (state.version !== POST_COMMENTS_VERSION || state.scopeHash !== scopeHash && !legacyProviderCursor
         || !uuid(state.previousDeliveryId) || !Number.isInteger(state.page) || state.page < 2 || state.page > 15
-        || !Number.isSafeInteger(state.expiresAt) || state.expiresAt <= Date.now()
+        || !Number.isSafeInteger(state.expiresAt) || state.expiresAt <= Date.now() && !(request.platform === 'reddit' && legacyProviderCursor)
         || body.page != null && Number(body.page) !== state.page) throw new Error('cursor')
       ;({ page, expiresAt, previousDeliveryId } = state)
     } catch { throw invalidCursor() }
@@ -35,7 +37,7 @@ export function normalizePostCommentsDelivery(body, { context, maxPageSize, code
     || request.cursor && !importedContinuation || request.page !== 1 && !importedContinuation) throw invalidCursor()
   return { ...request, jobs: request.jobs.map(job => ({ ...job, id: scopeHash })), scopeHash, page, expiresAt,
     previousDeliveryId, importedContinuation, legacyProviderCursor, deliveryMode: 'live_only',
-    manualProviderPagination: request.platform === 'twitter' && recipe.provider === 'tikhub',
+    manualProviderPagination: migratedProvider && recipe.provider === 'tikhub',
     fingerprintBody: { ...identity, initialParams: request.initialParams ?? null, cursor: request.cursor ?? null },
     encodeNext: deliveryId => codec.encode({ version: POST_COMMENTS_VERSION, scopeHash,
       page: page + 1, expiresAt, previousDeliveryId: deliveryId }) }

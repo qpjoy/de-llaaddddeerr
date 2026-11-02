@@ -553,3 +553,89 @@ BASH
 三项均为独立只读事务，某一检查未通过也继续读取其余证据，最后以非零状态表示有未通过项。首份预期版本 reddit-comment-projection-verification.v1、targetSource=saved_request_snapshot、requestedPostMatched=true、verified=true，并输出全部条目的数量；若解析拒绝，仅输出固定 reason。快手后两份分别用于确认 usage/供应商计费与原始结构，以及具体上游 HTTP/business code/错误分类。不发 HTTP、不重放、不写 canonical、不改变账单。
 
 候选解析器、归档校验和拒绝诊断共 52 项测试通过；Twitter 既有校验回归包含在内。当前只准备以上只读核验，尚未获得服务器输出，未部署或切换任何平台。待 Reddit 完整校验通过后，接入其 TikHub recipe、投影、受控分页、旧 JustOne 回执/游标和入库兼容；不能把原生采样成功说成统一入口已迁移。
+
+### Reddit 运行接入与快手 App 单次采样
+
+本轮回传已确认：
+
+- Reddit `7eb265f4-5c2c-4d15-91d5-7dc7fed83b61` 的 9844 字节归档通过完整纯解析；请求目标一致，3 个唯一评论，正文/作者 ID/时间各 3 条，score 2 条；根帖已排除、3 条父关系未知、当前样本明确结束。无需再购原生 Reddit 样本。
+- 快手 Web `ce942beb-a379-4e18-b62f-ee69cc24b3d3` 保存为 committed/Hub 502；唯一 TikHub 调用为 HTTP/business 400、`upstream_request_rejected`、`billed:null`。835 字节错误归档校验通过。原 `photo_id` 为 15 位字符串，首屏未传 `pcursor`。供应商“未扣费”文案不能替代账本证据，不释放/重置原 usage。
+- 快手 Web 上游 request UUID：`c5eb3eb1-b044-43ff-b2d3-8fc8892fb7b5`。保留原 `kuaishou.json`、幂等键及错误回执。
+
+Reddit 统一路由本地已改为 TikHub `t.api_c7f50cf300d63960`，固定 `post_id`、`need_format=false`，沿用现有 `social.comments.v1` 与 PG 原始响应/规范记录/分页存储，不需要新表。完整正文、作者、时间和 signed score 入库；隐藏 score 为 null、likes 仍未知。每次最多一个供应商页；有余量先交付，未证实 next token 时返回 unknown，不把回复游标猜为 `after`。旧 Reddit 签名游标及 body.cursor/params.cursor 保持原请求指纹，仅原幂等键回放；不能跨供应商续采。旧已排队 JustOne 入库任务保持原归属。
+
+先同步本轮完整 Hub 改动到服务器（合同、解析器、投影、工作流、index 路由、worker、文档与 ops），然后执行以下命令。它只发布 Hub；基础 smoke 不发真实数据采集，Launcher 同步/重启关闭。标准发布仍运行既有迁移/索引维护；本轮没有新增 DDL。
+
+```bash
+bash <<'BASH'
+set -e
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh deploy
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - <<'NODE'
+import assert from 'node:assert/strict';
+import { POST_COMMENTS_RECIPES, buildPostCommentsDispatch } from '/app/server/contracts/post-comments.mjs';
+import { normalizePostCommentsDelivery } from '/app/server/external-platforms/post-comments-workflow.mjs';
+const recipe = POST_COMMENTS_RECIPES.reddit;
+const request = normalizePostCommentsDelivery({ platform: 'reddit', contentId: 't3_abc123', count: 20 },
+  { context: { consumer: { businessId: 'runtime-contract-check' } }, maxPageSize: 100, codec: {} });
+const dispatch = buildPostCommentsDispatch(request);
+assert.equal(recipe.provider, 'tikhub');
+assert.equal(recipe.key, 't.api_c7f50cf300d63960');
+assert.equal(dispatch.endpointPath, '/api/v1/reddit/app/fetch_post_comments');
+assert.equal(dispatch.upstreamQuery.post_id, 't3_abc123');
+assert.equal(dispatch.upstreamQuery.need_format, false);
+assert.equal(request.manualProviderPagination, true);
+assert.equal(POST_COMMENTS_RECIPES.twitter.key, 't.api_3cd88a6621a01120');
+console.log(JSON.stringify({ state: 'reddit_comments_runtime_updated', provider: recipe.provider,
+  nativeKey: recipe.key, manualProviderPagination: request.manualProviderPagination,
+  supplierHttpCallsMade: 0 }, null, 2));
+NODE
+BASH
+```
+
+运行检查使用合成 ID，只导入容器代码，不连接供应商或数据库，不验证真实业务调用。回传 `reddit_comments_runtime_updated` 后，再安排旧统一 URL 的至多一次业务验收；不能把原生样本成功写成统一入口已验收。Twitter 已完成，保持原验收回执，不重复采购。
+
+快手有独立的 [TikHub App 评论端点](https://docs.tikhub.io/467698474e0)，官方支持数字 ID 与短字符串 eID。首屏 `pcursor` 可省略，见 [官方 SDK](https://github.com/TikHub/TikHub-API-Python-SDK/blob/main/src/tikhub/resources/kuaishou_app.py)；不能仅因原 Web 请求未传 pcursor 就判断参数错误。本轮最多一次独立 App 首屏：`t.api_bc64c9d98dbf724c` → `/api/v1/kuaishou/app/fetch_video_comment`，复用原 Web 请求保存的真实 photo_id。App 结果取得前，快手统一路由仍不切换。若再次失败，停止本轮采购，使用上述上游 UUID 向 TikHub 核对请求和账单；不自动发工单。
+
+单次 App 采样命令如下；只需宿主机同步新增 `server/ops/probe-kuaishou-app-comments.mjs` 和已有 inspector，不依赖新镜像。脚本按固定原 Web usage 读取有界保存请求，核对唯一 rejected/400 调用；数据库错误码是 `upstream_request_rejected`，公开原回执码是 `external_platform_rejected`，两层不能混淆。先免费查 App 原生授权/就绪，再最多发一笔 App 请求。独立 `kuaishou.app.json` 在调用前排他落盘；任何已存在的标记（含未知结果）都会阻止重新采购，原 `kuaishou.json` 完全保留。不要删除、换目录或重建标记。
+
+```bash
+bash <<'BASH'
+set -e
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+read -r -s -p 'Hub Live API Key: ' MX_HUB_PROBE_API_KEY </dev/tty
+printf '\n'
+export MX_HUB_PROBE_API_KEY
+node --input-type=module <<'NODE'
+import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { runKuaishouAppCommentProbe } from './server/ops/probe-kuaishou-app-comments.mjs';
+function admin(file, args) {
+  return JSON.parse(execFileSync('kubectl', [
+    '-n', 'mx-insight-hub', 'exec', '-i', 'deployment/mx-insight-hub-admin', '-c', 'admin', '--',
+    'node', '--input-type=module', '-', ...args
+  ], { input: readFileSync(file, 'utf8'), encoding: 'utf8', timeout: 30000,
+    maxBuffer: 2 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }));
+}
+try {
+  const sample = admin('server/ops/probe-kuaishou-app-comments.mjs', ['--prepare-private']);
+  const result = await runKuaishouAppCommentProbe({ sample, sampleDirectory: process.cwd(),
+    apiKey: process.env.MX_HUB_PROBE_API_KEY, apply: true });
+  console.log(JSON.stringify(result, null, 2));
+  if (result.requestId) console.log(JSON.stringify(admin(
+    'server/ops/inspect-post-comment-contract.mjs', ['--request-id', result.requestId]
+  ), null, 2));
+  if (result.state !== 'http_response' || result.httpStatus !== 200) process.exitCode = 1;
+} catch {
+  console.error(JSON.stringify({ error: 'kuaishou_app_probe_stopped',
+    action: 'preserve_all_markers_and_report_output' }));
+  process.exitCode = 1;
+}
+NODE
+BASH
+```
+
+私有帖子 ID 只在进程内传递；回传运行检查、App 请求摘要以及同 usage 的只读结构检查即可。无论 HTTP 成功还是拒绝，只要有持久 requestId 都先读取归档，不在失败时跳过证据。若归档读取失败也保留 App marker，不再次采样；根据已打印 requestId 单独重做只读检查。尚未确认 App 返回字段，不能提前将快手统一路由改成它。
+
+本地验证：148 项相关合同、投影、历史回放、真实 gateway/runtime（模拟 HTTP）、入库、诊断及采样防重测试通过，typecheck 通过。运行检查命令已用本地模块离线校验；代理未部署服务器、未查询生产数据库、未新增供应商付费请求。下一步等待操作者回传。

@@ -121,12 +121,6 @@ test('unknown platform and cross-provider success shapes fail closed', () => {
 // GET https://api.justoneapi.com/status/api-example/detail?api=<endpoint path>.
 // These represent observed field layout, not a paid Hub production verification.
 const justoneShapes = {
-  reddit: { postInfoById: { id: 't3_123', commentForest: { pageInfo: { hasNextPage: true }, trees: [
-    { depth: 0, parentId: null, childCount: 1, more: null, node: { __typename: 'Comment', id: 't1_456',
-      content: { markdown: '完整评论', preview: '短预览' }, authorInfo: { id: 't2_author', name: '作者' },
-      createdAt: '2026-01-10T15:21:49.595000+0000', score: 1, permalink: '/r/test/comments/123/title/456/' } },
-    { node: null, more: { cursor: 'next' }, depth: 0, parentId: null, childCount: 2 },
-  ] } } },
   kuaishou: { result: 1, rootComments: [{ comment_id: 456, content: '完整评论', timestamp: 1775303332905,
     author_id: 1234, user_id: 5678, author_name: '作者', likedCount: 2, subCommentCount: 1,
     photo_id: 5232620009155772228 }], pcursor: 'next', subCommentsMap: { 456: { subComments: [{ content: '预览回复' }] } } },
@@ -151,7 +145,7 @@ const justoneShapes = {
     depth: 0, parent_comment_id: null, message: '完整评论', created_time: 1791777600,
     author: { id: 'author', name: '作者' }, reactions_count: '0', replies_count: 1 }], cursor: 'next' },
 }
-const expectedNext = { reddit: { cursor: 'next' }, kuaishou: { pcursor: 'next' },
+const expectedNext = { kuaishou: { pcursor: 'next' },
   weibo: { maxId: '5277493566112993' }, douyin: { page: 2 }, tiktok: { cursor: '20' }, zhihu: { offset: 'opaque-next' },
   linkedin: { page: 2, paginationToken: 'next' }, bilibili: { cursor: 'next' }, facebook: { cursor: 'next' } }
 function justoneProject(platform, data = justoneShapes[platform], options = {}) {
@@ -177,19 +171,28 @@ for (const platform of Object.keys(justoneShapes)) {
   })
 }
 
+// Anonymous Reddit forest layout validated against saved TikHub evidence.
+const redditShape = { postInfoById: { id: 't3_123', commentForest: { pageInfo: { hasNextPage: true }, trees: [
+    { depth: 0, parentId: null, childCount: 1, more: null, node: { __typename: 'Comment', id: 't1_456',
+      content: { markdown: '完整评论', preview: '短预览' }, authorInfo: { id: 't2_author', name: '作者' },
+      createdAt: '2026-01-10T15:21:49.595000+0000', score: 1, permalink: '/r/test/comments/123/title/456/' } },
+    { node: null, more: { cursor: 'next' }, depth: 0, parentId: null, childCount: 2 },
+  ] } } }
+
 test('supplier-returned descendant keeps its real parent while contentId remains root post', () => {
-  const reddit = structuredClone(justoneShapes.reddit)
-  reddit.postInfoById.commentForest.trees[0].parentId = 't1_other-comment'
-  const result = justoneProject('reddit', reddit)
-  assert.equal(result.projected.acquiredItems[0].parentCommentId, 't1_other-comment')
-  assert.equal(result.records[0].stableFields.attributes.parentExternalId, 't1_other-comment')
-  assert.equal(result.projected.acquiredItems[0].contentId, '123')
+  const reddit = structuredClone(redditShape)
+  reddit.postInfoById.commentForest.trees[0].parentId = 't1_other'
+  const result = project(reddit, step('reddit', 't3_123'))
+  assert.equal(result.projected.acquiredItems[0].parentCommentId, 't1_other')
+  assert.equal(result.records[0].stableFields.attributes.parentExternalId, 't1_other')
+  assert.equal(result.projected.acquiredItems[0].contentId, 't3_123')
   assert.equal(result.projected.acquiredItems[0].repliesIncluded, true)
   reddit.postInfoById.commentForest.trees[0].parentId = 't3_123'
-  assert.equal(justoneProject('reddit', reddit).projected.acquiredItems[0].parentCommentId, null)
+  assert.equal(project(reddit, step('reddit', 't3_123')).projected.acquiredItems[0].parentCommentId, null)
 })
 
-test('Twitter rejects an old JustOne projection after switching to the fixed TikHub recipe', () => {
+test('Twitter and Reddit reject old JustOne projections after switching to fixed TikHub recipes', () => {
+  assert.throws(() => justoneProject('reddit', redditShape), { code: 'invalid_upstream_contract' })
   assert.throws(() => justoneProject('twitter', { status: 'ok', timeline: [], next_cursor: null }),
     { code: 'invalid_upstream_contract' })
 })
@@ -199,10 +202,10 @@ test('known terminal fields override residual tokens while missing and repeated 
   assert.equal(justoneProject('tiktok', { ...justoneShapes.tiktok, has_more: 0 }).projected.providerPage.hasMore, false)
   assert.equal(justoneProject('weibo', { ...justoneShapes.weibo, max_id: 0 }).projected.providerPage.hasMore, false)
   assert.equal(justoneProject('kuaishou', justoneShapes.kuaishou, { continuation: { pcursor: 'next' } }).projected.providerPage.stopReason, 'continuation_unproven')
-  const missing = structuredClone(justoneShapes.reddit)
+  const missing = structuredClone(redditShape)
   delete missing.postInfoById.commentForest.pageInfo
   missing.postInfoById.commentForest.trees.pop()
-  assert.equal(justoneProject('reddit', missing).projected.providerPage.stopReason, 'continuation_unproven')
+  assert.equal(project(missing, step('reddit', 't3_123')).projected.providerPage.stopReason, 'continuation_unproven')
 })
 
 test('post mismatches and unsafe comment identifiers fail, but unrelated unsafe photo metadata is not used as identity', () => {
@@ -210,9 +213,9 @@ test('post mismatches and unsafe comment identifiers fail, but unrelated unsafe 
   const data = structuredClone(justoneShapes.kuaishou)
   data.rootComments[0].comment_id = 9007199254740992
   assert.throws(() => justoneProject('kuaishou', data), { code: 'invalid_upstream_contract' })
-  const reddit = structuredClone(justoneShapes.reddit)
+  const reddit = structuredClone(redditShape)
   reddit.postInfoById.id = 't3_wrong-post'
-  assert.throws(() => justoneProject('reddit', reddit), { code: 'invalid_upstream_contract' })
+  assert.throws(() => project(reddit, step('reddit', 't3_123')), { code: 'invalid_upstream_contract' })
   const zhihu = structuredClone(justoneShapes.zhihu)
   zhihu.paging.next = 'https://attacker.invalid/api?offset=next'
   assert.throws(() => justoneProject('zhihu', zhihu), { code: 'invalid_upstream_contract' })
@@ -228,9 +231,7 @@ test('Facebook sticker-only comment has an explicit null body and retained media
   assert.equal(result.records[0].body, null)
   assert.equal(result.projected.acquiredItems[0].like_count, null)
   assert.equal(result.projected.acquiredItems[0].metrics.reactions, 0, 'all reactions are not relabeled as likes')
-  const reddit = structuredClone(justoneShapes.reddit)
-  reddit.postInfoById.commentForest.trees[0].node.score = -3
-  assert.equal(justoneProject('reddit', reddit).projected.acquiredItems[0].metrics.score, -3)
+
 })
 
 for (const platform of Object.keys(justoneShapes)) {
@@ -244,3 +245,26 @@ for (const platform of Object.keys(justoneShapes)) {
     for (const [field, value] of Object.entries(expectedNext[platform])) assert.equal(String(next.upstreamQuery[field]), String(value))
   })
 }
+
+test('Reddit signed score survives canonical projection without becoming likes', () => {
+  const data = structuredClone(redditShape)
+  const forest = data.postInfoById.commentForest
+  forest.pageInfo.hasNextPage = false
+  forest.trees = [forest.trees[0]]
+  forest.trees[0].childCount = 0
+  forest.trees[0].node.score = -3
+  const result = project(data, step('reddit', 't3_123'))
+  const row = result.projected.acquiredItems[0], record = result.records[0]
+  assert.equal(row.metrics.score, -3)
+  assert.equal(row.like_count, null)
+  assert.equal(row.parentExternalId, null)
+  assert.equal(row.parentRelationship, 'unknown')
+  assert.equal(record.metrics.score, -3)
+  assert.equal(record.stableFields.metrics.score, -3)
+  assert.equal(record.stableFields.connectorId, 'external-platform:tikhub')
+  assert.equal(result.projected.providerPage.hasMore, false)
+  forest.trees[0].node.isScoreHidden = true
+  const hidden = project(data, step('reddit', 't3_123'))
+  assert.equal(hidden.records[0].metrics.score, null)
+  assert.notEqual(hidden.records[0].payloadSha256, record.payloadSha256)
+})

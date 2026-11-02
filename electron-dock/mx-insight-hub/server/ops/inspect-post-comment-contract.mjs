@@ -234,7 +234,7 @@ export function inspectPostCommentArchive(row, options = {}) {
       pagination: { hasMore: parsed.providerPage.hasMore,
         continuationAvailable: Boolean(parsed.providerPage.nextParams),
         stopReason: parsed.providerPage.stopReason === 'continuation_unproven' ? 'continuation_unproven' : null },
-      boundary: 'All saved trees validated by the candidate pure parser against the saved native request target. This does not activate runtime routing. Only counts and relationship checks are returned; no payload values, HTTP, canonical writes or billing mutations.'
+      boundary: 'All saved trees validated by the same pure parser used by the runtime projector against the saved native request target. This does not activate runtime routing. Only counts and relationship checks are returned; no payload values, HTTP, canonical writes or billing mutations.'
     } }
   }
   if (options.twitterProjectionValidator) {

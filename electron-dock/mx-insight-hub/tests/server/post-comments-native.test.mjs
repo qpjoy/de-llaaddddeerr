@@ -30,6 +30,14 @@ const twitterComment = (id, conversationId = TWITTER_POST) => ({ id, conversatio
 const twitterComments = (rows, cursor = null, conversationId = TWITTER_POST) => ({ code: 200, data: {
   ...twitterComment(TWITTER_POST, conversationId), text: '原帖正文', replies: rows.length, thread: rows, cursor,
 } })
+const REDDIT_POST = 't3_post123'
+const redditTree = (id, nodeOverrides = {}, treeOverrides = {}) => ({ childCount: 0, depth: 0, more: null, parentId: null,
+  node: { __typename: 'Comment', id: `t1_${id}`, content: { markdown: `完整 Reddit 评论 ${id}\n第二行 **保留 Markdown**` },
+    createdAt: '2026-11-02T00:00:00.000Z', score: -2, isScoreHidden: false, isRemoved: false,
+    authorInfo: { id: `t2_author${id}`, name: `作者 ${id}`, iconSmall: { url: 'https://example.invalid/avatar' } },
+    permalink: `/r/test/comments/post123/title/${id}/`, ...nodeOverrides }, ...treeOverrides })
+const redditComments = (trees, pageInfo = { commentCount: trees.length, hasNextPage: false }) => ({ code: 200,
+  data: { postInfoById: { id: REDDIT_POST, title: '原帖，不作为评论', commentForest: { pageInfo, trees } } } })
 
 async function harness({ payload = () => comments(['c1']), granted = true, controlsEnabled = true, platform = 'youtube' } = {}) {
   const calls = [], store = new MemoryStore(), provider = POST_COMMENTS_RECIPES[platform].provider
@@ -366,4 +374,221 @@ for (const platform of ['instagram', 'xiaohongshu']) test(`${platform} native co
     assert.equal(record.objectType, 'comment')
     assert.equal(record.stableFields.attributes.parentExternalId, postId)
   }
+})
+
+test('Reddit contentId requests use TikHub once, preserve full comment lineage and do not relabel scores as likes', async () => {
+  const trees = [redditTree('a'), redditTree('b', { score: 98, isScoreHidden: true }), redditTree('c', { score: 0 })]
+  const payload = redditComments(trees)
+  const h = await harness({ platform: 'reddit', payload: () => payload })
+  const body = { platform: 'reddit', contentId: 'post123', count: 100 }
+  const first = await h.invoke(body, 'reddit-tikhub-terminal')
+  assert.equal(first.status, 200)
+  assert.equal(first.body.data.postId, REDDIT_POST)
+  assert.equal(first.body.data.items.length, 3)
+  assert.equal(first.body.data.page.hasMore, false)
+  assert.equal(first.body.data.page.paginationStatus, 'exhausted')
+  assert.equal(first.body.data.page.nextCursor, null)
+  assert.equal(first.body.data.meta.providerCalls, 1)
+  assert.equal(h.calls.length, 1, 'count=100 must not buy another page after the verified terminal response')
+  assert.equal(h.calls[0].path, '/api/v1/reddit/app/fetch_post_comments')
+  assert.equal(h.calls[0].params.post_id, REDDIT_POST)
+  assert.equal(h.calls[0].params.need_format, 'false')
+  assert.equal(h.calls[0].params.postId, undefined)
+  assert.deepEqual(first.body.data.items.map(row => row.metrics.score), [-2, null, 0])
+  for (const [index, row] of first.body.data.items.entries()) {
+    assert.equal(row.commentId, trees[index].node.id)
+    assert.equal(row.content, trees[index].node.content.markdown)
+    assert.equal(row.author_id, trees[index].node.authorInfo.id)
+    assert.equal(row.publishedAt, '2026-11-02T00:00:00.000Z')
+    assert.equal(row.like_count, null)
+    assert.equal(row.metrics.likes, null)
+    assert.equal(row.parentExternalId, null)
+    assert.equal(row.parentRelationship, 'unknown')
+    assert.equal(row.raw, undefined)
+  }
+  const archive = [...h.platformStore.restrictedResponseArchives.values()][0]
+  assert.deepEqual(JSON.parse(archive.bodyBytes.toString('utf8')), payload)
+  assert.equal(archive.bodySha256, createHash('sha256').update(archive.bodyBytes).digest('hex'))
+  const job = h.platformStore.ingestJobs[0]
+  assert.equal(job.payload.providerKey, 'tikhub')
+  assert.equal(job.payload.platform, 'reddit')
+  assert.equal(job.payload.datasetId, 'social.comments.v1')
+  assert.equal(classifyExternalPlatformIngest(job.payload).hubRaw, true)
+  assert.equal(job.payload.records.length, 3)
+  for (const [index, record] of job.payload.records.entries()) {
+    assert.equal(record.objectType, 'comment')
+    assert.equal(record.stableFields.connectorId, 'external-platform:tikhub')
+    assert.equal(record.stableFields.attributes.rootExternalId, REDDIT_POST)
+    assert.equal(record.stableFields.attributes.parentExternalId, null)
+    assert.equal(record.stableFields.attributes.parentRelationship, 'unknown')
+    assert.equal(record.body, trees[index].node.content.markdown)
+    assert.deepEqual(record.rawItem, trees[index])
+    assert.equal(record.rawPayloadSha256, createHash('sha256').update(canonicalJson(trees[index])).digest('hex'))
+    assert.equal(record.metrics.score ?? null, [-2, null, 0][index])
+    assert.equal(record.stableFields.metrics.score ?? null, [-2, null, 0][index])
+    assert.equal(record.metrics.likes ?? null, null)
+  }
+  const saved = structuredClone(h.store.requests.get(first.requestId))
+  const charge = structuredClone(h.store.customerCharges.get(first.requestId))
+  const replay = await h.invoke({ platform: 'reddit', postId: REDDIT_POST, count: 100 }, 'reddit-tikhub-terminal')
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, first.body)
+  assert.deepEqual(h.store.requests.get(first.requestId), saved)
+  assert.deepEqual(h.store.customerCharges.get(first.requestId), charge)
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.platformStore.ingestJobs.length, 1)
+})
+
+test('Reddit keeps all 25 paid comments and serves the five-row overflow without another provider request', async () => {
+  const trees = Array.from({ length: 25 }, (_, index) => redditTree(`c${index}`))
+  const h = await harness({ platform: 'reddit', payload: () => redditComments(trees) })
+  const body = { platform: 'reddit', contentId: 'post123', count: 20 }
+  const first = await h.invoke(body, 'reddit-overflow-first')
+  assert.equal(first.body.data.items.length, 20)
+  assert.equal(first.body.data.page.hasMore, true)
+  assert.equal(first.body.data.page.paginationStatus, 'continuable')
+  assert.match(first.body.data.page.nextCursor, /^mxds1\./u)
+  assert.equal(h.platformStore.ingestJobs[0].payload.records.length, 25)
+  const second = await h.invoke({ ...body, params: { cursor: first.body.data.page.nextCursor } }, 'reddit-overflow-second')
+  assert.equal(second.body.data.items.length, 5)
+  assert.equal(second.body.data.meta.providerCalls, 0)
+  assert.equal(second.body.data.page.hasMore, false)
+  assert.equal(second.body.data.page.paginationStatus, 'exhausted')
+  assert.equal(second.body.data.page.nextCursor, null)
+  assert.equal(h.calls.length, 1)
+  assert.deepEqual([first, second].flatMap(row => row.body.data.items.map(item => item.commentId)), trees.map(tree => tree.node.id))
+  const replay = await h.invoke({ ...body, cursor: first.body.data.page.nextCursor }, 'reddit-overflow-second')
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, second.body)
+  assert.equal(h.calls.length, 1)
+})
+
+test('Reddit unknown page state and reply placeholders never become invented post cursors or automatic purchases', async () => {
+  for (const payload of [
+    redditComments([redditTree('a')], { commentCount: 1 }),
+    redditComments([redditTree('a')], { commentCount: 1, hasNextPage: true, endCursor: 'unverified-page-token' }),
+    redditComments([redditTree('a'), { childCount: 0, depth: 0, node: null, parentId: null, more: { cursor: 'reply-endpoint-token' } }]),
+  ]) {
+    const h = await harness({ platform: 'reddit', payload: () => payload })
+    const result = await h.invoke({ platform: 'reddit', postId: REDDIT_POST, count: 100 }, 'reddit-unknown-pagination')
+    assert.equal(result.body.data.items.length, 1)
+    assert.equal(result.body.data.page.hasMore, null)
+    assert.equal(result.body.data.page.paginationStatus, 'unknown')
+    assert.equal(result.body.data.page.nextCursor, null)
+    assert.equal(result.body.data.meta.providerCalls, 1)
+    assert.equal(h.calls.length, 1)
+    assert.equal(h.calls[0].params.after, '')
+    assert.equal(JSON.stringify(result.body).includes('unverified-page-token'), false)
+    assert.equal(JSON.stringify(result.body).includes('reply-endpoint-token'), false)
+  }
+})
+
+async function saveHistoricalRedditReceipt(h, { body, cursor = null, initialParams = {}, key, requestId }) {
+  const identity = { platform: 'reddit', postId: REDDIT_POST, count: 20, includeRaw: false, options: {} }
+  const fingerprint = createHash('sha256').update(canonicalJson({ method: 'POST', path: POST_COMMENTS_PATH,
+    body: { ...identity, initialParams, cursor } })).digest('hex')
+  const reserved = await h.store.reserve({ requestId, idempotencyKey: key, fingerprint,
+    tenantId: h.context.tenant.id, consumerId: h.context.consumer.id, apiKeyId: h.context.apiKey.id,
+    platform: 'reddit', meterKey: 'social.comments.list', unitsReserved: 1,
+    acquisitionRequest: { method: 'POST', path: POST_COMMENTS_PATH, body },
+    leaseExpiresAt: new Date(Date.now() + 60000), windowStart: new Date(Date.now() - 3600000), maxRequests: 10000 })
+  assert.equal(reserved.kind, 'reserved')
+  const responseBody = { contractVersion: POST_COMMENTS_VERSION, requestId,
+    data: { platform: 'reddit', postId: REDDIT_POST, items: [{ commentId: 't1_old', text: '原 JustOne 已交付正文' }],
+      page: { page: 2, hasMore: true, nextCursor: cursor }, meta: { implementation: 'hub', providerCalls: 1 } } }
+  await h.store.commitRequest(requestId, { responseStatus: 200, responseBody,
+    unitsActual: 1, upstreamLatencyMs: 3, deliverySourceMode: 'live' })
+  return { responseBody, saved: structuredClone(h.store.requests.get(requestId)), charge: structuredClone(h.store.customerCharges.get(requestId)) }
+}
+
+test('historical JustOne Reddit signed cursors replay their exact receipt but cannot buy TikHub data under a new key', async () => {
+  const h = await harness({ platform: 'reddit', payload: () => { throw new Error('old JustOne cursor must not dispatch') } })
+  const identity = { platform: 'reddit', postId: REDDIT_POST, count: 20, includeRaw: false, options: {} }
+  const legacyScopeHash = createHash('sha256').update(JSON.stringify({ version: POST_COMMENTS_VERSION, ...identity })).digest('hex')
+  const codec = createDataSearchCursorCodec(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}:post-comments`)
+  const cursor = codec.encode({ version: POST_COMMENTS_VERSION, scopeHash: legacyScopeHash,
+    previousDeliveryId: '906701b6-8201-4e2a-a622-403c78d11047', page: 2, expiresAt: Date.now() - 60000 })
+  const body = { platform: 'reddit', postId: REDDIT_POST, count: 20, cursor }
+  const key = 'historical-justone-reddit-signed', requestId = '2047a446-f277-4fda-b5c6-0b5886951d51'
+  const historical = await saveHistoricalRedditReceipt(h, { body, cursor, key, requestId })
+  const replay = await h.invoke(body, key)
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, historical.responseBody)
+  assert.deepEqual(h.store.requests.get(requestId), historical.saved)
+  assert.deepEqual(h.store.customerCharges.get(requestId), historical.charge)
+  await assert.rejects(h.invoke(body, 'historical-reddit-signed-new-key'), { code: 'invalid_cursor' })
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.platformStore.calls.size, 0)
+  assert.equal(h.platformStore.ingestJobs.length, 0)
+  const rejected = await h.store.getUsageRequestByIdempotencyKey(h.context.consumer.id, 'historical-reddit-signed-new-key')
+  assert.equal(rejected.status, 'released')
+  assert.equal(h.store.customerCharges.get(rejected.id)?.chargedMinor ?? 0, 0)
+})
+
+test('historical JustOne Reddit raw cursor forms retain their original fingerprints only for receipt replay', async () => {
+  for (const form of ['body', 'params']) {
+    const h = await harness({ platform: 'reddit', payload: () => { throw new Error('legacy provider cursor must not dispatch') } })
+    const token = 'old-justone-private-cursor'
+    const body = { platform: 'reddit', postId: REDDIT_POST, count: 20,
+      ...(form === 'body' ? { cursor: token } : { params: { cursor: token } }) }
+    const key = `historical-reddit-raw-${form}`, requestId = '2047a446-f277-4fda-b5c6-0b5886951d52'
+    const historical = await saveHistoricalRedditReceipt(h, { body, cursor: form === 'body' ? token : null,
+      initialParams: { cursor: token }, key, requestId })
+    const replay = await h.invoke(body, key)
+    assert.equal(replay.replay, true)
+    assert.deepEqual(replay.body, historical.responseBody)
+    assert.deepEqual(h.store.requests.get(requestId), historical.saved)
+    assert.deepEqual(h.store.customerCharges.get(requestId), historical.charge)
+    await assert.rejects(h.invoke(body, `historical-reddit-raw-${form}-new`), { code: 'invalid_cursor' })
+    assert.equal(h.calls.length, 0)
+    assert.equal(h.platformStore.calls.size, 0)
+    assert.equal(h.platformStore.ingestJobs.length, 0)
+  }
+})
+
+test('real runtime entry preserves a saved JustOne Reddit raw-cursor receipt through its routing normalizer', async t => {
+  const { createRuntime } = await import('../../server/index.mjs')
+  const { loadConfig } = await import('../../server/config.mjs')
+  const runtime = await createRuntime(loadConfig({ MX_INSIGHT_STORE: 'memory', MX_INSIGHT_LISTENER_MODE: 'public',
+    MX_INSIGHT_API_KEY_PEPPER: PEPPER, MX_INSIGHT_TIKHUB_API_KEY: SECRET,
+    MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE: '1000', MX_INSIGHT_TIKHUB_RATE_LIMIT_BURST: '10' }))
+  t.after(async () => { runtime.agent.close(); await runtime.store.close() })
+  const { service, store } = runtime
+  const tenant = await service.createTenant({ name: 'Runtime Reddit replay test' })
+  const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Runtime Reddit replay caller' })
+  await store.setPlatformGrant(consumer.id, 'reddit', true)
+  await service.putCapabilityConfiguration('social.comments.list', { tenantId: tenant.id, consumerId: consumer.id, enabled: true })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Runtime Reddit replay key',
+    platforms: ['reddit'], capabilities: ['social.comments.list'] })
+  const context = await service.authenticate(key.secret)
+  const gateway = runtime.postCommentsGateways.reddit
+  assert.equal(gateway.providerKey, 'tikhub')
+  assert.equal(gateway.platformStore.authorizationPlatform, 'reddit')
+  const endpoint = NATIVE_FORWARDING_ENDPOINTS.find(row => row.provider === 'tikhub' && row.path === POST_COMMENTS_RECIPES.reddit.path)
+  await runtime.externalPlatformControlStore.updatePolicy('tikhub', endpoint.operation, { expectedRevision: 1,
+    desiredState: 'active', reason: 'Synthetic runtime Reddit replay regression', priceBook: { currency: 'USD',
+      pricingAsOf: '2026-11-02T00:00:00Z', monthlyBudgetMinor: 100000, monthlySubsidyBudgetMinor: 100000,
+      unitCostMinorByEndpoint: { [endpoint.endpointKey]: 2 } } }, { runtime: { config: gateway.config, credentialConfigured: true } })
+  let calls = 0
+  gateway.adapter = new TikHubAdapter({ apiKey: SECRET, fetchImpl: async () => { calls++; throw new Error('historical replay must not purchase') } })
+  runtime.adapter.legacySearch = async () => { throw new Error('historical replay must not call Night-All') }
+  const token = 'private-old-justone-cursor'
+  const body = { platform: 'reddit', contentId: 'post123', count: 20, params: { cursor: token } }
+  const requestId = '2047a446-f277-4fda-b5c6-0b5886951d53', idempotencyKey = 'runtime-reddit-old-cursor'
+  const historical = await saveHistoricalRedditReceipt({ store, context }, { body, cursor: null,
+    initialParams: { cursor: token }, key: idempotencyKey, requestId })
+  const replay = await service.postComments(context, { body, idempotencyKey, path: POST_COMMENTS_PATH })
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, historical.responseBody)
+  const legacyAlias = await service.nightAllCompatibilitySearch(context, { operation: 'post-comments', body,
+    idempotencyKey, path: '/api/v1/search/post-comments' })
+  assert.equal(legacyAlias.replay, true)
+  assert.deepEqual(legacyAlias.body, historical.responseBody)
+  await assert.rejects(service.postComments(context, { body, idempotencyKey: 'runtime-reddit-old-cursor-new', path: POST_COMMENTS_PATH }),
+    { code: 'invalid_cursor' })
+  assert.deepEqual(store.requests.get(requestId), historical.saved)
+  assert.deepEqual(store.customerCharges.get(requestId), historical.charge)
+  assert.equal(calls, 0)
+  assert.equal(gateway.platformStore.calls.size, 0)
+  assert.equal(gateway.platformStore.ingestJobs.length, 0)
 })

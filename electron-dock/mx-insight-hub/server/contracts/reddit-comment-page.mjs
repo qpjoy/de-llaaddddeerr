@@ -1,7 +1,7 @@
 // Import-free so the same parser can verify a saved, hash-checked Admin archive.
-// Candidate contract from usage 7eb265f4-5c2c-4d15-91d5-7dc7fed83b61:
-// data.postInfoById.commentForest, three terminal Comment trees. The complete
-// saved payload must pass this parser before enabling the production route.
+// Verified contract from usage 7eb265f4-5c2c-4d15-91d5-7dc7fed83b61:
+// all three saved terminal Comment trees passed this same parser against the
+// saved request target before integration into the runtime projector.
 export function parseTikHubRedditCommentPage(payload, postId, continuation = null) {
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
   const text = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && !value.includes('\0') ? value : null
