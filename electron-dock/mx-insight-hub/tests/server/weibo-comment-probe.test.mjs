@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { normalizeNativeForwardingRequest } from '../../server/contracts/native-forwarding.mjs'
 import { WEIBO_SEARCH_NATIVE_KEY, WEIBO_COMMENT_NATIVE_KEY, WEIBO_SEARCH_BODY,
-  selectWeiboCommentTarget, prepareWeiboCommentSample, runWeiboSearchProbe, runWeiboCommentProbe }
+  selectWeiboCommentTarget, prepareWeiboCommentSample, runWeiboSearchProbe, runWeiboCommentProbe,
+  inspectWeiboCommentSearch, summarizeWeiboSearchCandidates }
   from '../../server/ops/probe-weibo-comments.mjs'
 
 const sourceId = 'cb500094-3a50-4945-9a0e-cc753f48a210'
@@ -124,6 +125,123 @@ test('an explicitly failed search parse cannot contribute residual positive targ
     { weibo_id: '101', comment_count: '0', interaction: { comment_count: 500 } },
     { weibo_id: 10000000000000000, idstr: postId, comments_count: 100 },
   ])), /no_positive_comment_target/u)
+})
+
+test('search diagnostics distinguish an empty page from zero, missing and unrecognized comment counts', () => {
+  const empty = summarizeWeiboSearchCandidates(searchPayload([]))
+  assert.equal(empty.inputRowCount, 0)
+  assert.equal(empty.eligibleCandidateCount, 0)
+  assert.deepEqual(empty.selectedMetricStates, { positive: 0, zero: 0, missing: 0, unrecognized: 0 })
+  const result = summarizeWeiboSearchCandidates(searchPayload([
+    { weibo_id: postId, comments_count: 0 },
+    { weibo_id: '101' },
+    { weibo_id: '102', comments_count: '1.2万' },
+    { weibo_id: '103', comments_count: '1,200' },
+    { weibo_id: '104', comments_count: '评论' },
+    null,
+  ]))
+  assert.equal(result.inputRowCount, 6)
+  assert.equal(result.objectRowCount, 5)
+  assert.equal(result.validIdentityCount, 5)
+  assert.equal(result.eligibleCandidateCount, 0)
+  assert.deepEqual(result.selectedMetricStates, { positive: 0, zero: 1, missing: 1, unrecognized: 3 })
+  assert.deepEqual(result.fields.find(row => row.path === 'comments_count').states,
+    { zero: 1, missing: 1, compact_numeric_text: 1, grouped_integer_text: 1, count_label: 1 })
+})
+
+test('diagnostics preserve selector identity and zero precedence rather than promoting alternate fields', () => {
+  const rows = [
+    { weibo_id: 10000000000000000, idstr: postId, comments_count: 37 },
+    { weibo_id: 'base62X', comments_count: 12 },
+    { weibo_id: '101', comments_count: 0, comment_count: 37 },
+    { weibo_id: '102', comment_count: '0', interaction: { comments: 37 } },
+    { weibo_id: postId, interaction: { comment_count: '5' } },
+  ]
+  const result = summarizeWeiboSearchCandidates(searchPayload(rows))
+  assert.equal(result.validIdentityCount, 3)
+  assert.equal(result.positiveMetricInvalidIdentityCount, 2)
+  assert.equal(result.eligibleCandidateCount, 1)
+  assert.deepEqual(result.selectedMetricStates, { positive: 3, zero: 2, missing: 0, unrecognized: 0 })
+  assert.equal(result.eligibleCandidateCount, selectWeiboCommentTarget(searchPayload(rows)).candidateCount)
+})
+
+test('search diagnostic fields expose only allowlisted types and fixed classifications', () => {
+  const privateText = 'PRIVATE_SEARCH_TEXT_27501'
+  const privateKey = 'PRIVATE_SEARCH_KEY_27502'
+  const result = summarizeWeiboSearchCandidates(searchPayload([
+    { weibo_id: postId, comments_count: '1.2万', content: privateText,
+      url: 'https://weibo.com/private-account/private-post', [privateKey]: apiKey,
+      user: { name: 'PRIVATE_AUTHOR_27503' }, interaction: { comments: 0 } },
+    { id: 10000000000000000, comments_count: 0, comments: [{ text: privateText }] },
+  ]))
+  const field = path => result.fields.find(row => row.path === path)
+  assert.equal(field('weibo_id').types.string, 1)
+  assert.equal(field('id').types.unsafe_number, 1)
+  assert.equal(field('comments_count').types.string, 1)
+  assert.equal(field('comments_count').types.safe_integer, 1)
+  assert.deepEqual(field('comments_count').states, { compact_numeric_text: 1, zero: 1 })
+  assert.equal(field('interaction.comments').types.safe_integer, 1)
+  const output = JSON.stringify(result)
+  for (const value of [postId, privateText, privateKey, apiKey, 'PRIVATE_AUTHOR_27503',
+    'private-account', 'private-post', '10000000000000000', '1.2万']) assert.equal(output.includes(value), false)
+})
+
+test('search diagnostics reject failed, oversized and non-array result envelopes', () => {
+  const failed = searchPayload([{ weibo_id: postId, comments_count: 12 }])
+  failed.data.parsed_data.parse_success = false
+  for (const payload of [null, failed, { code: 500, data: { parsed_data: { results: [] } } },
+    { code: 200, data: { results: [] } }, searchPayload({}), searchPayload(Array(1001).fill({}))]) {
+    assert.throws(() => summarizeWeiboSearchCandidates(payload), /invalid_search_response/u)
+  }
+})
+
+test('saved search inspection verifies the paid archive even when no positive target exists and never calls HTTP', async t => {
+  const fetched = t.mock.method(globalThis, 'fetch', noHttp)
+  const db = database({ payload: searchPayload([{ weibo_id: postId, comments_count: 0 }]) })
+  const result = await inspectWeiboCommentSearch(db.pool, originalReceipt())
+  assert.equal(result.revision, 'weibo-comment-search-inspection.v1')
+  assert.equal(result.requestId, sourceId)
+  assert.equal(result.verified, true)
+  assert.deepEqual(result.archive, { state: 'archive_verified', hashVerified: true, byteLength: db.archive.body_size })
+  assert.equal(result.selection.eligibleCandidateCount, 0)
+  assert.equal(result.selection.selectedMetricStates.zero, 1)
+  assert.equal(result.supplierHttpCallsMade, 0)
+  assert.equal(result.databaseWritesMade, 0)
+  assert.equal(fetched.mock.callCount(), 0)
+  assert.match(db.statements[0].sql, /READ ONLY/u)
+  assert.ok(db.statements.every(({ sql }) => /^(?:BEGIN|SET|SELECT|ROLLBACK)\b/u.test(sql)))
+  assert.equal(db.statements.at(-1).sql, 'ROLLBACK')
+  assert.equal(db.releases, 1)
+  assert.equal(JSON.stringify(result).includes(postId), false)
+})
+
+test('saved search inspection cannot bypass exact receipt, successful-call or archive integrity gates', async () => {
+  const base = database()
+  await assert.rejects(inspectWeiboCommentSearch(database().pool,
+    { ...originalReceipt(), idempotencyKey: 'weibo-comment-search-v1-00000000-0000-4000-8000-000000000000' }))
+  for (const patch of [
+    { usages: [{ ...base.usage, acquisition_request: { method: 'POST', path: commentPath, body: WEIBO_SEARCH_BODY } }] },
+    { calls: [{ ...base.call, billed: null }] },
+    { calls: [base.call, base.call] },
+    { archives: [{ ...base.archive, body_sha256: '0'.repeat(64) }] },
+    { archives: [{ ...base.archive, body_size: base.archive.body_size + 1 }] },
+    { failAt: 'weibo-comment-sample:archive' },
+    { rollbackFail: true },
+  ]) {
+    const db = database(patch)
+    await assert.rejects(inspectWeiboCommentSearch(db.pool, originalReceipt()))
+    assert.equal(db.statements.at(-1).sql, 'ROLLBACK')
+    assert.equal(db.releases, 1)
+  }
+})
+
+test('read-only search inspection leaves successful and previous platform receipts intact', async t => {
+  const f = await fixture(t, { withSearch: true })
+  const before = await readFile(f.searchMarker)
+  await inspectWeiboCommentSearch(database().pool, JSON.parse(before.toString('utf8')))
+  assert.deepEqual(await readFile(f.searchMarker), before)
+  await assert.rejects(lstat(f.commentMarker), { code: 'ENOENT' })
+  for (const name of f.originals) assert.equal(await readFile(join(f.receipts, name), 'utf8'), `immutable-${name}`)
 })
 
 test('source preparation binds the successful paid search request, call and full verified archive without HTTP or writes', async t => {

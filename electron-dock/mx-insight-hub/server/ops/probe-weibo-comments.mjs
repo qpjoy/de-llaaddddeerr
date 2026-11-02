@@ -41,22 +41,75 @@ const metric = value => Number.isSafeInteger(value) && value >= 0 ? value
 // Candidate structure shared with the existing Weibo realtime-search projector.
 // Advanced-search documentation does not prove a concrete response schema; a
 // different shape or an empty/zero-comment page stops this batch without buying more.
-export function selectWeiboCommentTarget(payload) {
+function searchRows(payload) {
   const rows = payload?.data?.parsed_data?.results
   if (payload?.code !== 200 || payload?.data?.parsed_data?.parse_success === false
     || !Array.isArray(rows) || rows.length > 1000) throw new Error('invalid_search_response')
+  return rows
+}
+const metricPaths = ['comments_count', 'comment_count', 'commentCount', 'interaction.comment_count', 'interaction.comments']
+const atPath = (row, path) => path.split('.').reduce((value, key) => object(value) ? value[key] : undefined, row)
+const selectedMetric = row => metricPaths.map(path => metric(atPath(row, path))).find(value => value !== null)
+const selectedIdentity = row => postId(row.weibo_id ?? row.idstr ?? row.id)
+
+export function selectWeiboCommentTarget(payload) {
+  const rows = searchRows(payload)
   const candidates = []
   for (const row of rows) {
     if (!object(row)) continue
-    const id = postId(row.weibo_id ?? row.idstr ?? row.id)
-    const values = [row.comments_count, row.comment_count, row.commentCount,
-      row.interaction?.comment_count, row.interaction?.comments]
-    const comments = values.map(metric).find(value => value !== null)
+    const id = selectedIdentity(row), comments = selectedMetric(row)
     if (id && comments > 0) candidates.push({ postId: id, commentCount: comments })
   }
   candidates.sort((a, b) => b.commentCount - a.commentCount)
   if (!candidates.length) throw new Error('no_positive_comment_target')
   return { ...candidates[0], searchItemCount: rows.length, candidateCount: candidates.length }
+}
+
+// Diagnostics never relax selection or expose source values/unknown key names.
+export function summarizeWeiboSearchCandidates(payload) {
+  const rows = searchRows(payload), objects = rows.filter(object)
+  const identities = ['weibo_id', 'idstr', 'id', 'mid', 'mblogid', 'bid']
+  const metrics = [...metricPaths, 'comments', 'comment', 'metrics.comments', 'statistics.comment_count', 'stats.comments']
+  const paths = [...identities, ...metrics, 'interaction', 'interactions', 'metrics', 'statistics', 'mblog']
+  const type = value => value === undefined ? 'missing' : value === null ? 'null' : Array.isArray(value) ? 'array'
+    : typeof value === 'number' ? Number.isSafeInteger(value) ? 'safe_integer'
+      : Number.isInteger(value) ? 'unsafe_number' : 'number' : typeof value
+  const metricState = value => {
+    const count = metric(value)
+    if (count !== null) return count > 0 ? 'positive' : 'zero'
+    if (value == null) return value === undefined ? 'missing' : 'null'
+    if (typeof value === 'string' && value.length <= 128) {
+      if (/^\s+[0-9]+\s*$|^[0-9]+\s+$/u.test(value)) return 'integer_text_with_whitespace'
+      if (/^[0-9]{1,3}(?:,[0-9]{3})+$/u.test(value)) return 'grouped_integer_text'
+      if (/^[0-9]+(?:\.[0-9]+)?[万亿kKmM]$/u.test(value)) return 'compact_numeric_text'
+      if (/^[0-9]+$/u.test(value)) return 'out_of_range_integer_text'
+      if (value === '评论' || value === '评论数') return 'count_label'
+    }
+    return 'unrecognized'
+  }
+  const result = { inputRowCount: rows.length, objectRowCount: objects.length, validIdentityCount: 0,
+    selectedMetricStates: { positive: 0, zero: 0, missing: 0, unrecognized: 0 },
+    eligibleCandidateCount: 0, positiveMetricInvalidIdentityCount: 0, fields: [] }
+  for (const row of objects) {
+    const id = selectedIdentity(row), count = selectedMetric(row)
+    const state = count !== undefined ? count > 0 ? 'positive' : 'zero'
+      : metricPaths.every(path => atPath(row, path) == null) ? 'missing' : 'unrecognized'
+    result.selectedMetricStates[state]++
+    if (id) result.validIdentityCount++
+    if (count > 0) { if (id) result.eligibleCandidateCount++; else result.positiveMetricInvalidIdentityCount++ }
+  }
+  for (const path of paths) {
+    const field = { path, types: {}, states: {} }
+    for (const row of objects) {
+      const value = atPath(row, path), kind = type(value)
+      field.types[kind] = (field.types[kind] || 0) + 1
+      const state = identities.includes(path) ? postId(value) ? 'valid' : value == null ? kind
+        : kind === 'unsafe_number' ? kind : 'unrecognized' : metrics.includes(path) ? metricState(value) : kind
+      field.states[state] = (field.states[state] || 0) + 1
+    }
+    if (objects.length > (field.types.missing || 0)) result.fields.push(field)
+  }
+  return result
 }
 
 function validateSearchReceipt(receipt) {
@@ -70,7 +123,7 @@ function validateSearchReceipt(receipt) {
   }
 }
 
-export async function prepareWeiboCommentSample(pool, receipt) {
+async function withVerifiedSearchArchive(pool, receipt, project) {
   validateSearchReceipt(receipt)
   const client = await pool.connect()
   try {
@@ -109,9 +162,7 @@ export async function prepareWeiboCommentSample(pool, receipt) {
     let payload
     try { payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
     catch { throw new Error('invalid_search_response') }
-    return { revision: 'weibo-comment-target-sample.v1', platform: 'weibo', provider: 'tikhub',
-      sourceRequestId: receipt.requestId, sourceIdempotencyKey: receipt.idempotencyKey, sourceBodySha256: SEARCH_SHA,
-      ...selectWeiboCommentTarget(payload) }
+    return project(payload, bytes.length)
   } catch (error) {
     throw new Error(SAFE_ERRORS.has(error?.message) ? error.message : 'source_read_failed')
   } finally {
@@ -121,6 +172,17 @@ export async function prepareWeiboCommentSample(pool, receipt) {
     if (rollbackError) throw new Error('source_read_failed')
   }
 }
+
+export const prepareWeiboCommentSample = (pool, receipt) => withVerifiedSearchArchive(pool, receipt,
+  payload => ({ revision: 'weibo-comment-target-sample.v1', platform: 'weibo', provider: 'tikhub',
+    sourceRequestId: receipt.requestId, sourceIdempotencyKey: receipt.idempotencyKey, sourceBodySha256: SEARCH_SHA,
+    ...selectWeiboCommentTarget(payload) }))
+
+export const inspectWeiboCommentSearch = (pool, receipt) => withVerifiedSearchArchive(pool, receipt,
+  (payload, byteLength) => ({ revision: 'weibo-comment-search-inspection.v1', requestId: receipt.requestId, verified: true,
+    archive: { state: 'archive_verified', hashVerified: true, byteLength }, selection: summarizeWeiboSearchCandidates(payload),
+    supplierHttpCallsMade: 0, databaseWritesMade: 0,
+    boundary: 'Exact saved search request/call/archive only. Fixed field types and selection counts; no source values or unknown keys. No HTTP, marker changes, selection override or runtime routing changes.' }))
 
 async function readReceipt(path) {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
@@ -260,16 +322,17 @@ if (stdinMain || process.argv[1] && import.meta.url === pathToFileURL(process.ar
   let pool
   try {
     const args = process.argv.slice(2)
-    if (args.length !== 3 || args[0] !== '--prepare' || !uuid(args[1])) throw new Error('invalid_arguments')
+    if (args.length !== 3 || !['--prepare', '--inspect-search'].includes(args[0]) || !uuid(args[1])) throw new Error('invalid_arguments')
     if (!process.env.DATABASE_URL) throw new Error('database_url_required')
     const { default: pg } = await import('pg')
     pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000,
       query_timeout: 6000, options: '-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000' })
-    // Private stdout: the host wrapper captures this object and never prints it.
+    // --prepare stdout is private; --inspect-search returns only safe aggregates.
     const receipt = { revision: 'weibo-comment-search-probe.v1', provider: 'tikhub', platform: 'weibo', path: SEARCH_PATH,
       state: 'http_response', httpStatus: 200, hubRequestsMade: 1, requestIdSource: 'usage_header',
       requestId: args[1], idempotencyKey: args[2], bodySha256: SEARCH_SHA }
-    console.log(JSON.stringify(await prepareWeiboCommentSample(pool, receipt)))
+    const execute = args[0] === '--inspect-search' ? inspectWeiboCommentSearch : prepareWeiboCommentSample
+    console.log(JSON.stringify(await execute(pool, receipt), null, 2))
   } catch (error) {
     console.error(JSON.stringify({ error: SAFE_ERRORS.has(error?.message) ? error.message : 'weibo_comment_probe_failed' }))
     process.exitCode = 1

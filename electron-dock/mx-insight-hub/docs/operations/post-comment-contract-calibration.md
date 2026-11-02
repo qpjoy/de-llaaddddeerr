@@ -1257,3 +1257,27 @@ BASH
 ```
 
 本地验证：新批次测试 19 项、通用归档检查 26 项、快手归档回归 12 项，共 57 项通过；均为模拟 HTTP/数据库与临时文件，无真实采购。Bash 封装、内嵌 Node 与新模块语法通过。当前未执行上述生产命令；后续仍需真实微博评论字段验证、运行投影接入、发布及统一入口验收，不能把原生采样准备当作迁移完成。微博统一配方仍是 JustOne；没有变更数据库模式、权限、计费设置或 MX-H2I 登录/联网。
+
+
+## 微博搜索已成功但未选出目标，只读检查本次归档
+
+2026-11-02 操作者回传搜索 usage `15fc7955-8bcb-4b01-9618-d23c56ff64b6`、幂等键 `weibo-comment-search-v1-26c05d64-a345-4cfa-acb5-fd03e057d252`、body SHA `4f10441915479b94dfd12e55def722e60151e72334d602e8eaf2a97a21fcb927`，HTTP200，随后 `no_positive_comment_target`。依据当时封装和代码，此错误发生在精确 usage、请求快照、唯一成功且已计费搜索 call、完整归档长度/SHA/UTF8/JSON 和 results 数组检查之后；尚未调用评论 POST。结果可能为空、ID 不满足保真要求、计数缺失/全零/格式不支持，不能仅由这个错误区分。
+
+[此前实时搜索已验证全零互动量](kuaishou-weibo-followup-2026-10-15.md) 是相关先例，不能直接推定这次高级搜索也相同。正评论量是我们为选样设置的条件，并非用户授权要求；若本次存在有效 ID 而计数全零或缺失，后续可复用同次搜索的目标，使用已经授权且尚未执行的那一次评论采样，不重复购买搜索。
+
+先同步更新后的 `server/ops/probe-weibo-comments.mjs`（无需部署），执行下面命令。不需要 API Key、不发 HTTP、不改标记或账本；`--inspect-search` 与 `--prepare` 共用完整证据门禁，但允许返回零合格目标的诊断。只输出固定字段的类型/格式分布、选择状态计数，不输出 ID、正文、指标原值或任意字段名。
+
+```bash
+bash <<'BASH'
+set -euo pipefail
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - --inspect-search \
+  '15fc7955-8bcb-4b01-9618-d23c56ff64b6' \
+  'weibo-comment-search-v1-26c05d64-a345-4cfa-acb5-fd03e057d252' \
+  < server/ops/probe-weibo-comments.mjs
+BASH
+
+```
+
+`--prepare` 仍为私有 stdout，不能单独打印贴回；不要重跑上一节的付费封装，也不要删除 `weibo.search.json`。本地 26 项 probe/诊断测试通过，包括原采购次数、标记和归档边界回归；无真实 HTTP/生产查询。等待上面诊断回传，当前未放宽运行选择器、未切换微博统一路由。
