@@ -89,3 +89,133 @@ test('legacy requests with no supplier rows are not mistaken for an empty commen
   assert.match(result.boundary, /Missing rows do not prove absence/)
   await assert.rejects(inspectPostCommentContract({ connect() { throw new Error('must not connect') } }, 'not-a-uuid'), /invalid_request_id/)
 })
+
+test('unknown containers expose comment structure through anonymous aliases without values or original names', () => {
+  const result = summarizePostCommentPayload({ data: {
+    privateContainer: { comments: [{ id: 'private-comment-id', text: 'private-comment-body',
+      privateMap: { author: { name: 'private-author-name' } } }] },
+    '[unknown1]': { comments: [] },
+  } })
+  const output = JSON.stringify(result)
+  for (const value of ['privateContainer', 'privateMap', 'private-comment', 'private-author']) {
+    assert.equal(output.includes(value), false)
+  }
+  const hiddenLists = result.fields.filter(row => /^\$\.data\[unknown\d+\]\.comments$/u.test(row.path))
+  assert.equal(hiddenLists.length, 2)
+  assert.notEqual(hiddenLists[0].path, hiddenLists[1].path)
+  assert.deepEqual(hiddenLists.map(row => row.arrayLength), [{ min: 1, max: 1 }, { min: 0, max: 0 }])
+  assert.deepEqual(result.fields.find(row => /\.comments\[\]\.id$/u.test(row.path)).types, { string: 1 })
+  assert.ok(result.fields.some(row => /\.comments\[\]\[unknown\d+\]\.author\.name$/u.test(row.path)))
+  assert.equal(result.observedArrays, 2)
+  assert.equal(result.sampledArrays, 0)
+  assert.equal(result.truncated, false)
+})
+
+test('unknown subtree sampling reports arrays and respects traversal depth and node bounds', () => {
+  const sampled = summarizePostCommentPayload({ hiddenContainer: {
+    hiddenList: Array.from({ length: 20 }, () => ({ comments: [] })),
+  } })
+  assert.equal(sampled.observedArrays, 4)
+  assert.equal(sampled.sampledArrays, 1)
+  assert.equal(sampled.fields.find(row => row.path === '$[unknown1][unknown2]').arrayLength.max, 20)
+  assert.equal(sampled.fields.find(row => row.path === '$[unknown1][unknown2][].comments').observations, 3)
+  const deep = {}; let current = deep
+  for (let index = 0; index < 30; index++) current = current.hiddenContainer = {}
+  current.comments = [{ text: 'unvisited-private-text' }]
+  const deepResult = summarizePostCommentPayload(deep)
+  assert.equal(deepResult.truncated, true)
+  assert.equal(deepResult.fields.some(row => row.path.endsWith('.comments')), false)
+  const wide = summarizePostCommentPayload({ hiddenContainer: Object.fromEntries(
+    Array.from({ length: 3000 }, (_, index) => [`private-field-${index}`, { comments: [] }])) })
+  assert.equal(wide.truncated, true)
+  assert.ok(wide.fields.length <= 2048)
+  assert.equal(JSON.stringify(wide).includes('private-field'), false)
+})
+
+const twitterPostId = '2117082385997250767'
+const twitterTweet = (overrides = {}) => ({ id: twitterPostId, text: 'private-root-body',
+  author: { rest_id: 'private-author-id', name: 'private-author-name' }, ...overrides })
+
+test('Twitter ID comparisons preserve 64-bit strings and do not mistake rounded numbers for matches', () => {
+  const result = inspectPostCommentArchive(archive({ data: twitterTweet({
+    conversation_id: twitterPostId, replies: 1,
+    comments: [
+      { id: '2117082385997250768', in_reply_to_status_id_str: twitterPostId },
+      { id: Number(twitterPostId), in_reply_to_status_id_str: null },
+      { id: {}, in_reply_to_status_id_str: 'another-private-id' },
+    ],
+  }) }), { twitterPostId })
+  assert.equal(result.twitterShape.rootIdRelation, 'same')
+  assert.equal(result.twitterShape.conversationIdRelation, 'same')
+  assert.equal(result.twitterShape.repliesCountState, 'positive')
+  assert.deepEqual(result.fields.find(row => row.path === '$.data.comments[].id').requestedPostRelation,
+    { different: 1, unsafe_number: 1, not_an_id: 1 })
+  assert.deepEqual(result.fields.find(row => row.path === '$.data.comments[].in_reply_to_status_id_str').requestedPostRelation,
+    { same: 1, null: 1, different: 1 })
+  const output = JSON.stringify(result)
+  for (const value of [twitterPostId, '2117082385997250768', String(Number(twitterPostId)), 'private-root-body', 'private-author']) {
+    assert.equal(output.includes(value), false)
+  }
+  const roundedRoot = summarizePostCommentPayload({ data: twitterTweet({ id: Number(twitterPostId), replies: 0 }) }, { twitterPostId })
+  assert.equal(roundedRoot.twitterShape.rootIdRelation, 'unsafe_number')
+  assert.equal(roundedRoot.twitterShape.conversationIdRelation, 'missing')
+  assert.equal(roundedRoot.twitterShape.repliesCountState, 'zero')
+  assert.equal(summarizePostCommentPayload({ data: twitterTweet({ id: 123 }) }, { twitterPostId: '123' }).twitterShape.rootIdRelation, 'same')
+  for (const invalid of [Number(twitterPostId), '', '1e20', '-1', '1'.repeat(31)]) {
+    assert.throws(() => summarizePostCommentPayload({ data: twitterTweet() }, { twitterPostId: invalid }), /invalid_twitter_post_id/)
+  }
+})
+
+test('explicit Twitter schema names are limited to recognized direct data fields and identifier-shaped names', () => {
+  const payload = { privateEnvelopeName: 'private-envelope-value', data: twitterTweet({
+    replyThreads: [{ nestedPrivateMap: { comments: [{ id: 'private-reply-id', text: 'private-reply-text' }] } }],
+    'not-an-identifier': { text: 'private-invalid-name-value' },
+    'https://private.example/id': 'private-url-value',
+    ['a'.repeat(65)]: null,
+  }) }
+  const ordinary = summarizePostCommentPayload(payload)
+  assert.equal(ordinary.twitterShape, undefined)
+  assert.equal(JSON.stringify(ordinary).includes('replyThreads'), false)
+  const explicit = summarizePostCommentPayload(payload, { twitterPostId })
+  assert.equal(explicit.twitterShape.envelopeState, 'tweet_object')
+  assert.deepEqual(explicit.twitterShape.unlistedEnvelopeKeys.map(row => row.name), ['replyThreads', '[redacted]', '[redacted]', '[redacted]'])
+  const listPath = explicit.twitterShape.unlistedEnvelopeKeys[0].path
+  assert.deepEqual(explicit.fields.find(row => row.path === listPath).arrayLength, { min: 1, max: 1 })
+  const output = JSON.stringify(explicit)
+  for (const value of ['privateEnvelopeName', 'nestedPrivateMap', 'not-an-identifier', 'https://private.example', 'a'.repeat(65), 'private-reply']) {
+    assert.equal(output.includes(value), false)
+  }
+  for (const unrecognized of [{ replyThreads: [] }, { id: twitterPostId, text: 'private-text', author: [] }]) {
+    const result = summarizePostCommentPayload({ data: unrecognized }, { twitterPostId })
+    assert.equal(result.twitterShape.envelopeState, 'unrecognized')
+    assert.deepEqual(result.twitterShape.unlistedEnvelopeKeys, [])
+  }
+  const wide = summarizePostCommentPayload({ data: twitterTweet(Object.fromEntries(
+    Array.from({ length: 3000 }, (_, index) => [`extraField${index}`, null]))) }, { twitterPostId })
+  assert.equal(wide.truncated, true)
+  assert.ok(wide.twitterShape.unlistedEnvelopeKeys.length < 2048)
+})
+
+test('Twitter shape mode is restricted to the exact native endpoint while usage preserves the social scope', async () => {
+  const definitions = [
+    { provider_key: 'tikhub', endpoint_key: 'native.t.api_3cd88a6621a01120' },
+    { provider_key: 'tikhub', endpoint_key: 'native.t.api_e85913faa8a9029b' },
+    { provider_key: 'justone', endpoint_key: 'native.j.api_bcedccd1a73cc8f2' },
+  ]
+  const client = { async query(sql) {
+    if (sql.includes(':usage')) return { rows: [{ platform: 'social', status: 'committed', response_status: 200 }] }
+    if (sql.includes(':calls')) return { rows: definitions.map(row => ({ id: callId, marketplace: 'twitter', ...row })) }
+    if (sql.includes(':archive')) return { rows: [archive({ data: twitterTweet({ replyThreads: [] }) })] }
+    return { rows: [] }
+  }, release() {} }
+  const result = await inspectPostCommentContract({ connect: async () => client }, requestId, { twitterPostId })
+  assert.equal(result.revision, 'post-comment-contract-inspection.v2')
+  assert.equal(result.usage.platform, 'social')
+  assert.equal(result.calls.every(row => row.platform === 'twitter'), true)
+  assert.equal(result.calls[0].archive.twitterShape.rootIdRelation, 'same')
+  assert.equal(result.calls[1].archive.twitterShape, undefined)
+  assert.equal(result.calls[2].archive.twitterShape, undefined)
+  for (const call of result.calls.slice(1)) assert.equal(JSON.stringify(call.archive).includes('replyThreads'), false)
+  await assert.rejects(inspectPostCommentContract({ connect() { throw new Error('must not connect') } }, requestId,
+    { twitterPostId: Number(twitterPostId) }), /invalid_twitter_post_id/)
+})

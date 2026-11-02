@@ -16,7 +16,7 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 
 旧事件若只有 Night-All connector call，没有原生供应商 call，会返回 `nativeCallEvidencePresent:false`。这表示本脚本没有可检查的 Hub 原生归档，不能证明 Night-All 没发过请求，也不能证明评论为空。
 
-输出限定为：固定端点、调用状态、HTTP 状态、计费状态，以及白名单 JSON 字段的路径、类型、数组长度、分页布尔信号和游标是否为空。评论正文、作者、平台帖子/评论 ID、游标值、URL、密钥、未知属性名及错误文本均不输出。每次最多检查 3 个调用，每份原始响应 SQL 侧限制 4 MiB，先核验原始字节长度与 SHA-256，再解析 JSON；每个数组仅取前 3 个元素，深度与节点数有上限。`unknownKeys`、`sampledArrays`、`truncated` 明确说明检查边界。
+输出限定为：固定端点、调用状态、HTTP 状态、计费状态，以及 JSON 字段的路径、类型、数组长度、分页布尔信号和游标是否为空。v2 会继续遍历未知字段的子树，用 `[unknownN]` 匿名路径代替未知名称，避免漏掉整层评论列表。默认不输出任何未知属性名；显式 Twitter 结构模式的例外见下文。评论正文、作者资料、平台帖子/评论 ID、游标值、URL、密钥及错误文本均不输出。每次最多检查 3 个调用，每份原始响应 SQL 侧限制 4 MiB，先核验原始字节长度与 SHA-256，再解析 JSON；每个数组仅取前 3 个元素，深度与节点数有上限。`observedArrays` 是遇到的数组数，`sampledArrays` 是超过 3 项而被抽样的数组数；`sampledArrays:0` 不表示没有数组。`unknownKeys` 和 `truncated` 明确说明检查边界。
 
 ## 缺少归档时，每个平台只申请一次首屏
 
@@ -83,3 +83,25 @@ unset MX_HUB_PROBE_API_KEY
 用户回传只读检查 HTTP200、twitterNativeGranted=true、twitterNativeReady=true。允许继续原已授权 Twitter 一页采样，不再要求确认。先同步新版 probe 脚本（导出 POST_COMMENT_AUTH_RETRY_VERSION=1），无需重启 Hub。调用 runPostCommentProbe 时显式传 retryAuthenticationFor 为原键 comment-calibration-v1-22dabde8-689e-44da-8d91-3b9fbfb574df，postId 仍为 2117082385997250767，sampleDirectory 仍用原执行目录。
 
 此恢复只接受保存的明确 401/invalid_api_key、单次 HTTP、匹配的平台/路径/版本/幂等键且没有持久 usage 来源。原 twitter.json 完全保留，新的 twitter.auth-retry.json 在发送前独占创建，复用原幂等键；重复、并发和超时后执行都不再采购。不得用它恢复 unknown、供应商拒绝或其他 HTTP 状态。新采样返回 requestId 才用于只读归档检查，原临时 UUID 不再用于 usage 查询。18 项操作测试通过；本地未发真实采集请求，等待服务器本次采样结果。
+
+### Twitter 已成功计费：继续读同一归档
+
+用户回传的持久 usage ID 为 `f33e6d06-97f0-46c2-a049-c69ccfabf41d`，原幂等键未变。TikHub 原生端点 `native.t.api_3cd88a6621a01120` 的 HTTP/businessCode 均为 200、outcome=succeeded、billed=true、usage=committed；2516 字节原始响应已通过 SHA-256 校验。这确认本次 TikHub 调用成功，尚未完成统一评论接口的字段验收。保留 `twitter.json` 和 `twitter.auth-retry.json`，本轮不重采、不续页。
+
+v1 摘要显示 `data.id/text/author/conversation_id/replies/cursor`，其中 replies 是数字，cursor 非空，还有 26 个未展开字段。不能把 data 直接当评论，也不能据此认定没有评论。同步新版检查脚本后，在 Hub 项目目录执行：
+
+```bash
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - \
+  --request-id f33e6d06-97f0-46c2-a049-c69ccfabf41d \
+  --twitter-post-id 2117082385997250767 \
+  < server/ops/inspect-post-comment-contract.mjs
+```
+
+这条命令只读同一归档，无 HTTP、无付费、无重启或镜像发布。应返回 `revision=post-comment-contract-inspection.v2`、`supplierHttpCallsMade=0`。`--twitter-post-id` 仅用于该固定 TikHub Twitter 端点：所有已知 ID 字段输出与操作人提供的帖子 ID 的相同/不同关系，不返回 ID 值、不将长 ID 转成 Number；不安全的数字单独标记。比较目标来自命令参数，不代表脚本重新核验了历史请求参数。
+
+该显式模式在 `data` 同时具备 id、text、author 的帖子对象结构时，还输出其直接未知字段的受限名称（字母开头、仅字母数字下划线、最长 64 字符）及匿名路径对应关系，方便一次核对列表映射。嵌套动态对象的未知键名、其他格式的未知键名及原始字符串/数值继续隐藏。`rootIdRelation` 和 `conversationIdRelation` 分开检查；相同/不同本身不代表评论语义已验证。非空游标也不保证下一页一定有评论。
+
+v1 的 usage.platform=other 是诊断白名单输出，不能据此判断 Twitter 被错路由；v2 单独允许 usage 的 social/ecommerce 作用域，同时保留 calls 中实际供应商平台证据。等待本次结构结果后再确定 TikHub 解析和统一路由切换，不改历史回执、登录或联网流程。
+
+本地检查器 10 项测试通过，覆盖归档完整性、只读查询、未知子树、数组及遍历边界、64 位 ID、显式字段名范围和固定端点隔离；未发真实供应商请求。

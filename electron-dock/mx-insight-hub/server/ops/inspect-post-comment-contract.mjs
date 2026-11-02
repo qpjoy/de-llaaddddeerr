@@ -11,6 +11,7 @@ const MAX_NODES = 2048
 const MAX_DEPTH = 18
 const ARRAY_SAMPLE = 3
 const PLATFORMS = ['twitter', 'reddit', 'xiaohongshu', 'instagram', 'weibo', 'kuaishou', 'douyin', 'tiktok', 'zhihu', 'linkedin', 'bilibili', 'facebook', 'youtube']
+const TWITTER_ID = /^[0-9]{1,30}$/u
 const ENDPOINTS = new Map([
   ['t.api_3cd88a6621a01120', 'twitter'], ['t.api_e85913faa8a9029b', 'twitter'],
   ['t.api_c7f50cf300d63960', 'reddit'], ['t.api_e0a2654e9c191a80', 'reddit'],
@@ -42,9 +43,10 @@ const ENDPOINTS = new Map([
 ].map(([key, platform]) => [`native.${key}`, { provider: key.startsWith('t.') ? 'tikhub' : 'justone', platform }]))
 ENDPOINTS.set('xiaohongshu.app-v2.note-comments.v1', { provider: 'tikhub', platform: 'xiaohongshu' })
 
-// Keys are data too: never reflect arbitrary response property names. Unknown
-// keys are counted, but not traversed or printed. Scalar strings and numbers
-// (including IDs, text, URLs and cursors) are never returned.
+// Unknown keys use anonymous aliases, including when traversing their children.
+// Explicit Twitter shape inspection additionally lists schema-like keys directly
+// on a recognized $.data tweet object. It never lists dynamic nested map keys.
+// Scalar strings/numbers (IDs, text, URLs, cursors) are never returned.
 const KEYS = new Set(`code status status_code success message msg data result results response business_data
   comments comment comment_list commentList list items rows edges node nodes children replies reply sub_comments subComments
   sub_comment_list sub_comment_count subCommentCount comment_count commentCount reply_count replyCount total total_count count
@@ -81,7 +83,10 @@ const KEYS = new Set(`code status status_code success message msg data result re
   pagination_token pagination_reply next_offset prev_cursor prevCursor subCommentsMap thread_urn thread_id
   rpid_str oid_str root_str parent_str mid_str idstr rootid rootidstr like dislike_count child_comments
   child_comment_next_offset reply_comment_id reply_root_comment_id url_list face sign icon images image_list pictures
-  authorVerified isRemoved isInitiallyCollapsed isArchived isLocked isScoreHidden`.split(/\s+/u).filter(Boolean))
+  authorVerified isRemoved isInitiallyCollapsed isArchived isLocked isScoreHidden
+  thread threads tweets reply_tweets reply_to reply_to_status_id reply_to_tweet_id replying_to
+  in_reply_to_status_id in_reply_to_tweet_id in_reply_to_user_id inReplyToStatusId conversation
+  quoted_tweet retweeted_tweet media entities extended_entities attachments urls photos videos`.split(/\s+/u).filter(Boolean))
 const CONTINUATIONS = new Set(`cursor next_cursor nextCursor max_id since_id next_max_id pcursor continuation_token continuationToken
   continuation next next_page nextPage next_url nextUrl next_offset end_cursor endCursor after before token nextPageToken pageToken
   pagination_token pagination_reply prev_cursor prevCursor child_comment_next_offset`.split(/\s+/u))
@@ -90,10 +95,22 @@ const choice = (value, choices) => value == null ? null : choices.includes(value
 const status = value => Number.isInteger(value) && value >= 100 && value <= 599 ? value : null
 const hash = value => createHash('sha256').update(value).digest('hex')
 const kind = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
+const POST_IDS = new Set(`id id_str rest_id tweet_id tweetId post_id postId content_id contentId
+  conversation_id conversation_id_str in_reply_to_status_id in_reply_to_status_id_str in_reply_to_tweet_id
+  inReplyToStatusId reply_to_status_id reply_to_tweet_id parent_id parentId root_id rootId`.split(/\s+/u))
+const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const idRelation = (value, target) => value == null ? 'null' : typeof value === 'number' && !Number.isSafeInteger(value)
+  ? 'unsafe_number' : typeof value !== 'string' && typeof value !== 'number' ? 'not_an_id'
+    : String(value) === target ? 'same' : 'different'
 
-export function summarizePostCommentPayload(payload) {
+export function summarizePostCommentPayload(payload, { twitterPostId = null } = {}) {
+  if (twitterPostId !== null && (typeof twitterPostId !== 'string' || !TWITTER_ID.test(twitterPostId))) throw new Error('invalid_twitter_post_id')
   const fields = new Map()
-  let nodes = 0, unknownKeys = 0, truncated = false, sampledArrays = 0
+  const unknownNames = new Map(), envelopeKeys = []
+  const twitterEnvelope = twitterPostId !== null && object(payload?.data)
+    && (typeof payload.data.id === 'string' || typeof payload.data.id === 'number')
+    && typeof payload.data.text === 'string' && object(payload.data.author)
+  let nodes = 0, unknownKeys = 0, truncated = false, sampledArrays = 0, observedArrays = 0
   function visit(value, path, key, depth) {
     if (++nodes > MAX_NODES || depth > MAX_DEPTH) { truncated = true; return }
     const type = kind(value)
@@ -101,6 +118,10 @@ export function summarizePostCommentPayload(payload) {
     const entry = fields.get(path)
     entry.types[type] = (entry.types[type] || 0) + 1
     entry.observations++
+    if (twitterPostId !== null && POST_IDS.has(key)) {
+      const relation = idRelation(value, twitterPostId)
+      entry.requestedPostRelation = { ...entry.requestedPostRelation, [relation]: (entry.requestedPostRelation?.[relation] || 0) + 1 }
+    }
     if (CONTINUATIONS.has(key)) {
       const state = value == null ? 'null' : value === '' ? 'empty_string' : type === 'string' ? 'nonempty_string'
         : type === 'number' ? 'number' : type
@@ -111,25 +132,43 @@ export function summarizePostCommentPayload(payload) {
       entry.signals = { ...entry.signals, [state]: (entry.signals?.[state] || 0) + 1 }
     }
     if (Array.isArray(value)) {
+      observedArrays++
       entry.arrayLength = { min: Math.min(entry.arrayLength?.min ?? value.length, value.length), max: Math.max(entry.arrayLength?.max ?? value.length, value.length) }
       if (value.length > ARRAY_SAMPLE) sampledArrays++
       for (const nested of value.slice(0, ARRAY_SAMPLE)) visit(nested, `${path}[]`, '', depth + 1)
     } else if (value && typeof value === 'object') {
-      // JSON input cannot contain getters or cycles. Bound every traversal,
-      // including wide objects, without retaining arbitrary field names.
+      // JSON input cannot contain getters or cycles. Unknown containers must be
+      // traversed too: skipping one could hide the entire comment list.
       for (const name of Object.keys(value)) {
         if (nodes >= MAX_NODES) { truncated = true; break }
         if (KEYS.has(name)) visit(value[name], `${path}.${name}`, name, depth + 1)
-        else { unknownKeys++; nodes++ }
+        else {
+          unknownKeys++
+          if (!unknownNames.has(name)) unknownNames.set(name, `[unknown${unknownNames.size + 1}]`)
+          const anonymousPath = `${path}${unknownNames.get(name)}`
+          if (twitterEnvelope && path === '$.data') envelopeKeys.push({ path: anonymousPath,
+            name: /^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(name) ? name : '[redacted]' })
+          visit(value[name], anonymousPath, '', depth + 1)
+        }
       }
     }
   }
   visit(payload, '$', '', 0)
-  return { fields: [...fields.values()], unknownKeys, sampledArrays, arraySampleLimit: ARRAY_SAMPLE,
-    truncated, boundary: 'Allowlisted structural samples only; absent fields in a sample do not establish the complete response contract. No scalar string or numeric values are returned.' }
+  return { fields: [...fields.values()], unknownKeys, observedArrays, sampledArrays, arraySampleLimit: ARRAY_SAMPLE,
+    ...(twitterPostId === null ? {} : { twitterShape: {
+      comparisonTarget: 'operator_supplied_post_id',
+      envelopeState: twitterEnvelope ? 'tweet_object' : 'unrecognized',
+      unlistedEnvelopeKeys: envelopeKeys,
+      rootIdRelation: twitterEnvelope ? idRelation(payload.data.id, twitterPostId) : 'missing',
+      conversationIdRelation: twitterEnvelope && Object.hasOwn(payload.data, 'conversation_id')
+        ? idRelation(payload.data.conversation_id, twitterPostId) : 'missing',
+      repliesCountState: !twitterEnvelope || !Number.isSafeInteger(payload.data.replies) ? 'unknown'
+        : payload.data.replies === 0 ? 'zero' : payload.data.replies > 0 ? 'positive' : 'negative',
+    } }),
+    truncated, boundary: 'Bounded structural samples, with anonymous paths for unknown keys. Explicit Twitter shape mode lists schema-like keys only on a recognized data tweet object and compares IDs to the operator-supplied post ID. No scalar payload string or numeric values are returned. Missing fields do not establish the complete response contract.' }
 }
 
-export function inspectPostCommentArchive(row) {
+export function inspectPostCommentArchive(row, options) {
   if (!row || row.body_size == null) return { state: 'archive_missing' }
   if (row.body_size > MAX_BYTES || row.actual_body_size > MAX_BYTES) return { state: 'archive_too_large', maxBytes: MAX_BYTES }
   const bytes = row.body_bytes instanceof Uint8Array ? Buffer.from(row.body_bytes) : null
@@ -138,11 +177,12 @@ export function inspectPostCommentArchive(row) {
   let payload
   try { payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
   catch { return { state: 'archive_not_json', hashVerified: true, byteLength: bytes.length } }
-  return { state: 'archive_verified', hashVerified: true, byteLength: bytes.length, ...summarizePostCommentPayload(payload) }
+  return { state: 'archive_verified', hashVerified: true, byteLength: bytes.length, ...summarizePostCommentPayload(payload, options) }
 }
 
-export async function inspectPostCommentContract(pool, requestId) {
+export async function inspectPostCommentContract(pool, requestId, { twitterPostId = null } = {}) {
   if (!UUID.test(requestId || '')) throw new Error('invalid_request_id')
+  if (twitterPostId !== null && (typeof twitterPostId !== 'string' || !TWITTER_ID.test(twitterPostId))) throw new Error('invalid_twitter_post_id')
   const client = await pool.connect()
   try {
     await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
@@ -169,7 +209,8 @@ export async function inspectPostCommentContract(pool, requestId) {
           FROM external_platform.provider_calls c
           LEFT JOIN control.external_platform_restricted_raw_responses r ON r.provider_call_id=c.id
           WHERE c.usage_request_id=$1::uuid AND c.id=$2::uuid`, [requestId, row.id, MAX_BYTES])
-        archive = inspectPostCommentArchive(archives[0])
+        archive = inspectPostCommentArchive(archives[0], row.provider_key === 'tikhub'
+          && row.endpoint_key === 'native.t.api_3cd88a6621a01120' ? { twitterPostId } : undefined)
       }
       calls.push({ ordinal: ordinal + 1, provider: choice(row.provider_key, ['tikhub', 'justone', 'rapidapi']),
         platform: choice(row.marketplace, PLATFORMS), endpoint: recognized ? row.endpoint_key : 'other',
@@ -179,8 +220,8 @@ export async function inspectPostCommentContract(pool, requestId) {
         errorCode: choice(row.error_code, ['upstream_balance_exhausted', 'upstream_rate_limited', 'invalid_upstream_contract', 'upstream_rejected',
           'upstream_timeout', 'invalid_upstream_content_type', 'external_platform_response_unusable']), archive })
     }
-    return { revision: 'post-comment-contract-inspection.v1', requestId,
-      usage: { platform: choice(usages[0].platform, PLATFORMS), status: choice(usages[0].status, ['reserved', 'committed', 'released', 'unknown']), httpStatus: status(usages[0].response_status) },
+    return { revision: 'post-comment-contract-inspection.v2', requestId,
+      usage: { platform: choice(usages[0].platform, [...PLATFORMS, 'social', 'ecommerce']), status: choice(usages[0].status, ['reserved', 'committed', 'released', 'unknown']), httpStatus: status(usages[0].response_status) },
       calls, callsTruncated: rows.length > MAX_CALLS, callLimit: MAX_CALLS, nativeCallEvidencePresent: rows.length > 0,
       supplierHttpCallsMade: 0,
       boundary: 'Read-only saved Hub supplier evidence. No HTTP, retries, grants, settings, billing or historical receipts are changed. Missing rows do not prove absence of an upstream dispatch through Night-All.' }
@@ -195,13 +236,14 @@ export async function inspectPostCommentContract(pool, requestId) {
 if (process.argv[1] === '-' || (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)) {
   let pool
   try {
-    const [flag, requestId, extra] = process.argv.slice(2)
-    if (flag !== '--request-id' || extra || !UUID.test(requestId || '')) throw new Error('invalid_arguments')
+    const [flag, requestId, shapeFlag, twitterPostId, extra] = process.argv.slice(2)
+    if (flag !== '--request-id' || extra || !UUID.test(requestId || '')
+      || (shapeFlag !== undefined && (shapeFlag !== '--twitter-post-id' || !TWITTER_ID.test(twitterPostId || '')))) throw new Error('invalid_arguments')
     if (!process.env.DATABASE_URL) throw new Error('database_url_required')
     const { default: pg } = await import('pg')
     pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000, query_timeout: 6000,
       options: '-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000' })
-    console.log(JSON.stringify(await inspectPostCommentContract(pool, requestId), null, 2))
+    console.log(JSON.stringify(await inspectPostCommentContract(pool, requestId, { twitterPostId: twitterPostId ?? null }), null, 2))
   } catch (error) {
     const safe = ['invalid_arguments', 'database_url_required', 'request_not_found', 'invalid_request_id'].includes(error?.message)
       ? error.message : 'post_comment_contract_inspection_failed'
