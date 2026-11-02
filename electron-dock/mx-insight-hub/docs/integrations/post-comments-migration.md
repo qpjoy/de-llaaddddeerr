@@ -2,6 +2,12 @@
 
 2026-11-02：本地实现完成，尚未部署或执行生产付费验收。此前的兼容桥仍转发 Night-All，不能视为原生迁移完成。事件 af456ad4-2523-4f73-a1fc-c95104b329a4 的保存证据是 Hub 预留 released、Night-All connector HTTP 404；不能据此推断供应商收到请求或评论为空。
 
+## 当前发布阻塞：JustOne 余额为零
+
+用户已确认 JustOne 当前无余额。下表仍是现有代码的固定路由事实；其中十个平台不能按可用功能上线，上一版“13 平台已接入”只代表实现与离线格式覆盖。小红书、Instagram、YouTube 已走 TikHub。其余九个平台在目录中有 TikHub 单帖评论候选；Facebook 暂无已登记的非 JustOne 替代，不将 Facebook 搜索爬虫冒充评论能力。
+
+下一步先通过 Hub 已有原生入口对 Twitter、Reddit、快手各最多采样一页，使用更新后的 [TikHub 校验脚本](../operations/post-comment-contract-calibration.md)。核对实际字段和游标后再替换统一评论对应投影与采购路由，保留幂等历史和既有成本门禁；不盲切供应商或要求先给 JustOne 充值。RapidAPI 的旧 Twitter 评论代码在 Night-All，Hub 当前 RapidAPI 适配器只实现 search/crawl/user-info，不能靠改配置直接调用评论。
+
 ## 入口与交付
 
 三个 POST 入口共用新 Hub 原生执行、计费与幂等身份：
@@ -56,6 +62,6 @@ page.paginationStatus 区分 continuable、exhausted、unknown、limit_reached�
 
 ## 发布与验收
 
-部署完整 Hub 变更，沿用既有发布流程，保持 MX_INSIGHT_SYNC_LAUNCHER=0、MX_SMOKE_DATA=0。本次无需数据库迁移，不操作 Launcher、SSO 或 MX-H2I 网络。
+当前先用已有原生入口校准 TikHub 替代通道，统一评论改造等待对应字段映射和分页通过验证后发布。届时沿用既有发布流程，保持 MX_INSIGHT_SYNC_LAUNCHER=0、MX_SMOKE_DATA=0。本次无需数据库迁移，不操作 Launcher、SSO 或 MX-H2I 网络。
 
-确认 Key 的平台+评论能力、表内采购操作的审核价格/开关、供应商凭据与余额。文档可见不代表已就绪。按 [限定次数校验](../operations/post-comment-contract-calibration.md) 使用已有样本做 Twitter、Reddit、快手各最多一次原生调用，再只读输出归档结构；不自动重试/续页。核对精简结果后，以新业务幂等键验收统一入口。离线测试不能作为线上已恢复的证据。
+确认 Key 的平台+评论能力、用于采样的 TikHub 原生操作审核价格/开关、供应商凭据与余额。表内十个 JustOne 路由当前仍不可用；文档可见不代表已就绪。按 [限定次数校验](../operations/post-comment-contract-calibration.md) 使用已有样本做 Twitter、Reddit、快手各最多一次原生调用，再只读输出归档结构；不自动重试/续页。核对精简结果后，以新业务幂等键验收统一入口。离线测试不能作为线上已恢复的证据。

@@ -3,7 +3,9 @@ import { mkdir, open, readdir, readFile, stat, writeFile } from 'node:fs/promise
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const PLATFORM_KEYS = Object.freeze({ twitter: 'j.api_bcedccd1a73cc8f2', reddit: 'j.api_9f1806a48fde0794', kuaishou: 'j.api_e0c0bbd6b8e0784c' })
+// JustOne balance is exhausted. Calibrate the reviewed TikHub request contracts
+// before changing the unified comment projector or its production routing.
+const PLATFORM_KEYS = Object.freeze({ twitter: 't.api_3cd88a6621a01120', reddit: 't.api_c7f50cf300d63960', kuaishou: 't.api_3cb972ba91c8fe44' })
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const SAFE_ERRORS = new Set(['invalid_arguments', 'invalid_sample', 'ambiguous_sample', 'sample_not_found', 'sample_directory_too_large', 'api_key_required', 'invalid_api_key'])
 const RESPONSE_CODES = new Set(['invalid_api_key', 'api_key_required', 'platform_not_granted', 'capability_not_granted', 'request_outcome_unknown',
@@ -40,8 +42,8 @@ export function planPostCommentProbe(platform, sample) {
     || platform === 'reddit' && !/^[a-z0-9]{1,17}$/u.test(id)
     || platform === 'kuaishou' && !/^[A-Za-z0-9_-]{1,128}$/u.test(id)) throw new Error('invalid_sample')
   return { platform, path: `/api/v1/data/native/${PLATFORM_KEYS[platform]}`,
-    body: { params: platform === 'twitter' ? { tweetId: id }
-      : platform === 'reddit' ? { postId: `t3_${id}` } : { videoId: id }, deliveryMode: 'live_only' } }
+    body: { params: platform === 'twitter' ? { tweet_id: id }
+      : platform === 'reddit' ? { post_id: `t3_${id}`, need_format: false } : { photo_id: id }, deliveryMode: 'live_only' } }
 }
 
 export async function loadPostCommentProbeSample(sampleDirectory, platform) {
@@ -88,13 +90,15 @@ async function errorSummary(response) {
 export async function runPostCommentProbe({ plan, sampleDirectory, apiKey, apply = false }, { fetchImpl = fetch } = {}) {
   // Validate the supplied plan again so callers cannot construct another route.
   const expected = planPostCommentProbe(plan?.platform, { platform: plan?.platform,
-    postId: plan?.body?.params?.tweetId ?? plan?.body?.params?.postId ?? plan?.body?.params?.videoId })
+    postId: plan?.body?.params?.tweet_id ?? plan?.body?.params?.post_id ?? plan?.body?.params?.photo_id })
   if (JSON.stringify(expected) !== JSON.stringify(plan)) throw new Error('invalid_sample')
-  const preview = { revision: 'post-comment-contract-probe.v1', platform: plan.platform, path: plan.path,
+  const preview = { revision: 'post-comment-contract-probe.v2', provider: 'tikhub', platform: plan.platform, path: plan.path,
     hubRequestLimit: 1, maxPlatformsPerReceiptDirectory: 3, automaticContinuation: false, automaticRetry: false }
   if (!apply) return { ...preview, state: 'preview', hubRequestsMade: 0 }
   if (!apiKey) throw new Error('api_key_required')
   if (typeof apiKey !== 'string' || apiKey.length > 4096 || /[\r\n\u0000]/u.test(apiKey)) throw new Error('invalid_api_key')
+  // Keep the same attempt directory across supplier changes: upgrading this
+  // script must not erase a previous attempt or silently renew its call budget.
   const receiptDirectory = join(resolve(sampleDirectory), '.hub-comment-contract-probes-v1')
   await mkdir(receiptDirectory, { recursive: true, mode: 0o700 })
   const receiptPath = join(receiptDirectory, `${plan.platform}.json`)
