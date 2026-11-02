@@ -6,7 +6,7 @@
 
 用户已确认 JustOne 当前无余额。下表是现有代码的固定路由事实；其中九个平台不能按可用功能上线，上一版“13 平台已接入”只代表实现与离线格式覆盖。Twitter 本次改为 TikHub，小红书、Instagram、YouTube 原已走 TikHub。剩余八个平台在目录中有 TikHub 单帖评论候选；Facebook 暂无已登记的非 JustOne 替代，不将 Facebook 搜索爬虫冒充评论能力。
 
-Twitter 首屏统一入口现已完成实际验收，下游可继续使用原 URL 和平台+评论能力授权，无需改成供应商原生入口。Reddit、快手接下来按原限定次数流程分别校准，见 [TikHub 校验脚本](../operations/post-comment-contract-calibration.md)；用户已授权优先从服务器找真实目标，找不到再新采集。服务器已找到真实目标：Reddit usage ee8dd99d-9146-4cb9-9ddc-eeeca3174c49、快手 canonical 120ec88d-84f3-4369-b5d9-92b877f75bd7；无需额外采集帖子。finder 现支持按源 UUID 精确私下读取，避免重复范围扫描；接下来免费检查两个原生能力后各采一页评论，尚未取得这两份付费回执。其他平台核对实际字段和游标后再替换对应投影与采购路由，保留幂等历史和既有成本门禁。RapidAPI 的旧 Twitter 评论代码在 Night-All，Hub 当前 RapidAPI 适配器只实现 search/crawl/user-info，不能靠改配置直接调用评论。
+Twitter 首屏统一入口现已完成实际验收，下游可继续使用原 URL 和平台+评论能力授权，无需改成供应商原生入口。Reddit、快手接下来按原限定次数流程分别校准，见 [TikHub 校验脚本](../operations/post-comment-contract-calibration.md)；用户已授权优先从服务器找真实目标，找不到再新采集。服务器已找到真实目标：Reddit usage ee8dd99d-9146-4cb9-9ddc-eeeca3174c49、快手 canonical 120ec88d-84f3-4369-b5d9-92b877f75bd7；无需额外采集帖子。finder 现支持按源 UUID 精确私下读取，避免重复范围扫描；两项预检已通过：Reddit usage 7eb265f4-5c2c-4d15-91d5-7dc7fed83b61 成功计费，9844 字节归档含 3 条评论树；快手 usage ce942beb-a379-4e18-b62f-ee69cc24b3d3 返回 Hub 502/external_platform_rejected，具体上游错误和计费待只读核对。Reddit 候选纯解析器已准备，先绑定保存请求验证全部条目；当前两个统一路由均未切换，不追加采购。其他平台核对实际字段和游标后再替换对应投影与采购路由，保留幂等历史和既有成本门禁。RapidAPI 的旧 Twitter 评论代码在 Night-All，Hub 当前 RapidAPI 适配器只实现 search/crawl/user-info，不能靠改配置直接调用评论。
 
 ## 入口与交付
 
@@ -73,3 +73,5 @@ Twitter 字段映射、单页采购和分页缓存已本地验证，服务器完
 本次首屏返回 hasMore=true、continuationAvailable=true、paginationStatus=continuable；按当前 Twitter 手动分页实现，这表示已取得的供应商页还有缓存余量。不能据此把本次新归档也写成 36 条，或保证后续供应商页非空。线上只验收了首屏；余量交付、续页和精确回放仍以已有本地回归为证据，未追加线上验收调用。第二份诊断中的 supplierHttpCallsMade=0、databaseWritesMade=0 仅指只读核对过程，前面的真实业务请求已正常计费一次。
 
 当前 capabilities 的 social.comments.list.ready 仍基于小红书旧操作，Twitter 顶层 ready 及 search.ready 也不代表评论就绪。验收脚本只用 social.comments.list 条目的存在判断授权，再用本轮已有原生授权的 Key 查询 native.t.api_3cd88a6621a01120.ready；这是采样预检便利条件，不是要求所有业务 Key 增加原生权限。业务调用本身仍仅需 twitter + social.comments.list，采购控制由网关独立校验。预检不保证实时余额、限流或预算充足。
+
+Reddit 候选映射按真实结构处理 commentForest.trees，完整 Markdown/作者/时间与 signed score 保留；parentId=null 表示关系未知，不制造父评论。样本未证明帖子下一页 token 的位置，先明确报告未证实的续页，不把回复端点的 more.cursor 当作 after。候选未启用，详见 [本轮只读核验](../operations/post-comment-contract-calibration.md#reddit-已取得评论快手被拒绝只读核验现有回执)。

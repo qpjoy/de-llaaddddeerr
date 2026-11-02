@@ -6,16 +6,18 @@ import { pathToFileURL } from 'node:url'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const MAX_BYTES = 8 * 1024 * 1024
 const INSTAGRAM_OPERATION = 'native.t.instagram_v3_general_search'
+const KUAISHOU_COMMENTS_OPERATION = 'native.t.api_3cb972ba91c8fe44'
+const KUAISHOU_COMMENTS_PATH = '/api/v1/data/native/t.api_3cb972ba91c8fe44'
 const NATIVE_CONTRACT = 'mx-insight-hub.native-forwarding.v1'
 const PATHS = new Set(['/api/v1/data/search', '/api/v1/search/raw', '/api/v1/night-all/search/raw',
-  '/api/v1/xiaohongshu/app_v2/search_notes', '/api/v1/data/native/t.instagram_v3_general_search'])
+  '/api/v1/xiaohongshu/app_v2/search_notes', '/api/v1/data/native/t.instagram_v3_general_search', KUAISHOU_COMMENTS_PATH])
 const ERRORS = new Set(['upstream_request_rejected', 'upstream_rate_limited', 'upstream_auth_or_balance_unavailable',
   'upstream_endpoint_unavailable', 'upstream_http_error', 'external_platform_rejected'])
 const OUTCOMES = new Set(['pending', 'succeeded', 'succeeded_unusable', 'rejected', 'unknown'])
 const STATUSES = new Set(['reserved', 'committed', 'released', 'unknown'])
-const PLATFORMS = new Set(['xiaohongshu', 'instagram'])
-const OPERATIONS = new Set(['social.posts.search', INSTAGRAM_OPERATION])
-const ENDPOINTS = new Set(['xiaohongshu.app-v2.search-notes.v1', INSTAGRAM_OPERATION])
+const PLATFORMS = new Set(['xiaohongshu', 'instagram', 'kuaishou', 'social'])
+const OPERATIONS = new Set(['social.posts.search', INSTAGRAM_OPERATION, KUAISHOU_COMMENTS_OPERATION])
+const ENDPOINTS = new Set(['xiaohongshu.app-v2.search-notes.v1', INSTAGRAM_OPERATION, KUAISHOU_COMMENTS_OPERATION])
 const CONTRACTS = new Set(['night-all.data-search.v1', NATIVE_CONTRACT])
 const MESSAGES = new Map([['Bad Request', 'bad_request'], ['Unauthorized', 'unauthorized'],
   ['Forbidden', 'forbidden'], ['Not Found', 'not_found'], ['Too Many Requests', 'too_many_requests'],
@@ -39,6 +41,11 @@ const instagramParameterShape = params => ({ type: kind(params),
     const value = object(params) ? params[name] : undefined
     return [name, { ...textShape(value), empty: typeof value === 'string' ? value.length === 0 : null }]
   })) })
+const kuaishouCommentParameterShape = params => ({ type: kind(params),
+  fields: Object.fromEntries(['photo_id', 'pcursor'].map(name => {
+    const value = object(params) ? params[name] : undefined
+    return [name, { present: present(value), ...textShape(value) }]
+  })) })
 
 export function summarizeRejectionRequest(snapshot) {
   const body = object(snapshot?.body) ? snapshot.body : {}
@@ -49,7 +56,7 @@ export function summarizeRejectionRequest(snapshot) {
 
 // Emit only fixed keys, integers, UUIDs and text types/lengths. Never emit an
 // arbitrary message, field name, URL, keyword, cursor, credential or raw body.
-export function inspectTikHubRejectionArchive(archive, { instagramSearch = false } = {}) {
+export function inspectTikHubRejectionArchive(archive, { instagramSearch = false, kuaishouComments = false } = {}) {
   if (!archive) return { state: 'archive_missing' }
   if (archive.body_size > MAX_BYTES) return { state: 'archive_too_large' }
   const bytes = archive.body_bytes instanceof Uint8Array ? Buffer.from(archive.body_bytes) : null
@@ -67,7 +74,8 @@ export function inspectTikHubRejectionArchive(archive, { instagramSearch = false
       // The reviewed supplier error envelope can echo params under detail.
       // Report only that location's shape; do not search other nesting, decode
       // strings or infer parameter validity from its values or from HTTP 400.
-      ...(instagramSearch ? { params: instagramParameterShape(object(detail) ? detail.params : undefined) } : {}) } }
+      ...(instagramSearch ? { params: instagramParameterShape(object(detail) ? detail.params : undefined) }
+        : kuaishouComments ? { params: kuaishouCommentParameterShape(object(detail) ? detail.params : undefined) } : {}) } }
 }
 
 export async function diagnoseTikHubRejection(pool, requestId) {
@@ -97,7 +105,10 @@ export async function diagnoseTikHubRejection(pool, requestId) {
         businessCode: integer(call.business_code), errorCode: allowed(call.error_code, ERRORS),
         upstreamRequestId: uuid(call.upstream_request_id), billed: typeof call.billed === 'boolean' ? call.billed : null,
         archive: inspectTikHubRejectionArchive(archive, { instagramSearch: call.operation === INSTAGRAM_OPERATION
-          && call.endpoint_key === INSTAGRAM_OPERATION && call.contract_version === NATIVE_CONTRACT }) })
+          && call.endpoint_key === INSTAGRAM_OPERATION && call.contract_version === NATIVE_CONTRACT,
+        kuaishouComments: request.acquisition_request?.path === KUAISHOU_COMMENTS_PATH
+          && call.operation === KUAISHOU_COMMENTS_OPERATION && call.endpoint_key === KUAISHOU_COMMENTS_OPERATION
+          && call.contract_version === NATIVE_CONTRACT }) })
     }
     return { requestId, platform: allowed(request.platform, PLATFORMS),
       status: allowed(request.status, STATUSES), httpStatus: integer(request.response_status),

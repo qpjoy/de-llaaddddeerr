@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { inspectPostCommentArchive, inspectPostCommentContract, prepareTwitterConversationCommentSample, summarizePostCommentPayload } from '../../server/ops/inspect-post-comment-contract.mjs'
 import { parseTikHubTwitterCommentPage } from '../../server/contracts/twitter-comment-page.mjs'
+import { parseTikHubRedditCommentPage } from '../../server/contracts/reddit-comment-page.mjs'
 
 const requestId = 'af456ad4-2523-4f73-a1fc-c95104b329a4'
 const callId = 'bf456ad4-2523-4f73-a1fc-c95104b329a4'
@@ -440,6 +441,190 @@ test('standalone stdin verification requires the prepended pure parser and retai
   for (const args of [['--verify-twitter-projection', twitterPostId],
     ['--verify-twitter-projection', '--prepare-twitter-conversation'], ['--verify-twitter-projection', '--extra'],
     ['--twitter-post-id', twitterPostId, '--verify-twitter-projection']]) {
+    assert.deepEqual(invoke(combined, args), { error: 'invalid_arguments' })
+  }
+})
+
+const redditRequestId = '7eb265f4-5c2c-4d15-91d5-7dc7fed83b61'
+const redditPostId = 't3_post123'
+const redditNativePath = '/api/v1/data/native/t.api_c7f50cf300d63960'
+const redditSnapshot = (overrides = {}) => ({ method: 'POST', path: redditNativePath,
+  body: { params: { post_id: redditPostId, need_format: false }, deliveryMode: 'live_only' }, ...overrides })
+const redditThreadPayload = () => ({ code: 200, data: { postInfoById: { id: redditPostId,
+  commentForest: { pageInfo: { commentCount: 7, hasNextPage: false }, trees: Array.from({ length: 7 }, (_, index) => ({
+    childCount: 0, depth: 0, more: null, parentId: null,
+    node: { __typename: 'Comment', id: `t1_reply${index}`, content: { markdown: `private-reddit-body-${index}` },
+      createdAt: '2026-11-02T00:00:00.000Z', score: -23, isScoreHidden: false, isRemoved: false,
+      authorInfo: { id: 't2_privateuser', name: 'private-reddit-author', iconSmall: { url: 'https://private.example/avatar' } },
+      permalink: `/r/test/comments/post123/private-title/reply${index}/` },
+  })) },
+} } })
+
+function redditInspectionHarness({ usage = {}, call = {}, raw = archive(redditThreadPayload()), count = 1,
+  snapshots = [{ acquisition_request: redditSnapshot() }] } = {}) {
+  const queries = []
+  let releases = 0
+  const client = { async query(sql, values) {
+    queries.push({ sql, values })
+    if (sql.includes(':usage')) return { rows: [{ platform: 'social', status: 'committed', response_status: 200, ...usage }] }
+    if (sql.includes(':calls')) return { rows: Array.from({ length: count }, () => ({ id: callId,
+      provider_key: 'tikhub', marketplace: 'reddit', endpoint_key: 'native.t.api_c7f50cf300d63960',
+      outcome: 'succeeded', http_status: 200, business_code: 200, billed: true, ...call })) }
+    if (sql.includes(':reddit-request')) return { rows: snapshots }
+    if (sql.includes(':archive')) return { rows: raw ? [raw] : [] }
+    return { rows: [] }
+  }, release() { releases++ } }
+  return { pool: { connect: async () => client }, queries, get releases() { return releases } }
+}
+
+test('Reddit candidate verification validates every saved tree against the bounded saved request snapshot and returns no payload values', async t => {
+  const fetch = t.mock.method(globalThis, 'fetch', () => { throw new Error('no supplier HTTP') })
+  const h = redditInspectionHarness()
+  let parserCalls = 0
+  const result = await inspectPostCommentContract(h.pool, redditRequestId, { redditProjectionValidator: (payload, target) => {
+    parserCalls++
+    assert.equal(target, redditPostId)
+    assert.equal(payload.data.postInfoById.commentForest.trees.length, 7)
+    return parseTikHubRedditCommentPage(payload, target)
+  } })
+  assert.equal(parserCalls, 1)
+  assert.equal(fetch.mock.callCount(), 0)
+  assert.equal(result.revision, 'reddit-comment-projection-verification.v1')
+  assert.equal(result.verified, true)
+  assert.equal(result.supplierHttpCallsMade, 0)
+  assert.equal(result.databaseWritesMade, 0)
+  assert.equal(result.archive.hashVerified, true)
+  const { boundary, ...projection } = result.archive.projection
+  assert.deepEqual(projection, { state: 'parser_verified', verified: true, targetSource: 'saved_request_snapshot',
+    requestedPostMatched: true, inputTreeCount: 7, projectedCount: 7, distinctCommentCount: 7,
+    rootIncluded: false, rootExcluded: true, textCount: 7, authorIdCount: 7, publishedAtCount: 7,
+    scoreCount: 7, unknownParentCount: 7,
+    pagination: { hasMore: false, continuationAvailable: false, stopReason: null } })
+  assert.match(boundary, /candidate pure parser/u)
+  assert.match(boundary, /does not activate runtime routing/u)
+  const output = JSON.stringify(result)
+  assert.ok(output.length < 2000)
+  for (const value of [redditPostId, 'reply6', 'private', '-23', '2026-11-02T00:00:00.000Z', 'need_format']) {
+    assert.equal(output.includes(value), false)
+  }
+  const snapshotQuery = h.queries.find(row => row.sql.includes(':reddit-request'))
+  assert.deepEqual(snapshotQuery.values, [redditRequestId, 32768])
+  assert.match(snapshotQuery.sql, /CASE WHEN octet_length\(acquisition_request::text\) <= \$2::integer/u)
+  assert.match(snapshotQuery.sql, /WHERE id=\$1::uuid/u)
+  assert.match(h.queries[0].sql, /READ ONLY/u)
+  assert.equal(h.queries.every(row => /^(?:BEGIN|SET|SELECT|ROLLBACK)\b/u.test(row.sql)), true)
+  assert.equal(h.queries.at(-1).sql, 'ROLLBACK')
+  assert.equal(h.releases, 1)
+})
+
+test('Reddit verification rejects an invalid final tree after the structural sample limit and hides parser errors', async () => {
+  const payload = redditThreadPayload()
+  payload.data.postInfoById.commentForest.trees[6].node.content.markdown = null
+  const h = redditInspectionHarness({ raw: archive(payload) })
+  const result = await inspectPostCommentContract(h.pool, redditRequestId, { redditProjectionValidator: parseTikHubRedditCommentPage })
+  assert.equal(result.verified, false)
+  assert.deepEqual(result.archive.projection, { state: 'contract_rejected', verified: false,
+    targetSource: 'saved_request_snapshot', requestedPostMatched: true, reason: 'comment_text' })
+  const rejected = inspectPostCommentArchive(archive(redditThreadPayload()), { redditPostId,
+    redditProjectionValidator() { throw Object.assign(new Error('private-parser-error'), { reason: 'private-parser-reason' }) } })
+  assert.equal(rejected.projection.state, 'contract_rejected')
+  assert.equal(rejected.projection.reason, 'other')
+  assert.equal(JSON.stringify(rejected).includes('private'), false)
+})
+
+test('Reddit verification uses the request target rather than accepting a self-consistent different response post', async () => {
+  const h = redditInspectionHarness({ snapshots: [{ acquisition_request: redditSnapshot({
+    body: { params: { post_id: 't3_otherpost', need_format: false } },
+  }) }] })
+  let parserTarget
+  const result = await inspectPostCommentContract(h.pool, redditRequestId, { redditProjectionValidator: (payload, target) => {
+    parserTarget = target
+    return parseTikHubRedditCommentPage(payload, target)
+  } })
+  assert.equal(parserTarget, 't3_otherpost')
+  assert.equal(result.verified, false)
+  assert.deepEqual(result.archive.projection, { state: 'contract_rejected', verified: false,
+    targetSource: 'saved_request_snapshot', requestedPostMatched: false, reason: 'root_id_mismatch' })
+  assert.equal(JSON.stringify(result).includes('otherpost'), false)
+})
+
+test('missing or incompatible Reddit request snapshots explicitly remain unavailable with no response-root fallback', async () => {
+  for (const snapshots of [[], [{ acquisition_request: null }], [{ acquisition_request: redditSnapshot({ bodyOmitted: 'oversize', body: undefined }) }],
+    [{ acquisition_request: redditSnapshot({ method: 'GET' }) }],
+    [{ acquisition_request: redditSnapshot({ path: '/api/v1/data/native/t.api_e0a2654e9c191a80' }) }],
+    [{ acquisition_request: redditSnapshot({ body: { params: { post_id: 12345 } } }) }],
+    [{ acquisition_request: redditSnapshot({ body: { params: { post_id: 't1_comment' } } }) }],
+    [{ acquisition_request: redditSnapshot({ body: { postId: redditPostId } }) }],
+    [{ acquisition_request: redditSnapshot() }, { acquisition_request: redditSnapshot() }],
+  ]) {
+    let parserCalls = 0
+    const h = redditInspectionHarness({ snapshots })
+    const result = await inspectPostCommentContract(h.pool, redditRequestId, { redditProjectionValidator() { parserCalls++; throw new Error('must not parse') } })
+    assert.equal(parserCalls, 0)
+    assert.equal(result.verified, false)
+    assert.equal(result.archive.hashVerified, true)
+    assert.deepEqual(result.archive.projection, { state: 'request_snapshot_unavailable', verified: false, targetSource: 'saved_request_snapshot' })
+    assert.equal(h.queries.at(-1).sql, 'ROLLBACK')
+    assert.equal(h.releases, 1)
+  }
+})
+
+test('Reddit projection verification requires archive integrity and the exact committed billed native source', async () => {
+  const valid = archive(redditThreadPayload())
+  for (const raw of [null, { ...valid, body_sha256: '0'.repeat(64) },
+    { ...valid, actual_body_size: valid.body_size + 1 }, { ...valid, body_size: 4194305 }]) {
+    let parserCalls = 0
+    const h = redditInspectionHarness({ raw })
+    const result = await inspectPostCommentContract(h.pool, redditRequestId, { redditProjectionValidator() { parserCalls++; throw new Error('must not parse') } })
+    assert.equal(parserCalls, 0)
+    assert.equal(result.verified, false)
+    assert.equal(result.archive.projection, undefined)
+    assert.equal(h.queries.at(-1).sql, 'ROLLBACK')
+  }
+  for (const changes of [
+    { usage: { status: 'released' } }, { usage: { response_status: 404 } }, { count: 0 }, { count: 2 },
+    { call: { billed: false } }, { call: { outcome: 'unknown' } }, { call: { http_status: 404 } }, { call: { business_code: 400 } },
+    { call: { endpoint_key: 'native.t.api_e0a2654e9c191a80' } }, { call: { marketplace: 'twitter' } },
+    { call: { provider_key: 'justone', endpoint_key: 'native.j.api_9f1806a48fde0794' } },
+  ]) {
+    const h = redditInspectionHarness(changes)
+    await assert.rejects(inspectPostCommentContract(h.pool, redditRequestId, { redditProjectionValidator: parseTikHubRedditCommentPage }),
+      /reddit_projection_source_unavailable/u)
+    assert.equal(h.queries.some(row => row.sql.includes(':reddit-request') || row.sql.includes(':archive')), false)
+    assert.equal(h.queries.at(-1).sql, 'ROLLBACK')
+    assert.equal(h.releases, 1)
+  }
+  for (const options of [{ redditProjectionValidator: true },
+    { redditProjectionValidator: parseTikHubRedditCommentPage, twitterProjectionValidator: parseTikHubTwitterCommentPage },
+    { redditProjectionValidator: parseTikHubRedditCommentPage, twitterPostId },
+    { redditProjectionValidator: parseTikHubRedditCommentPage, twitterPostId, prepareTwitterConversation: true }]) {
+    await assert.rejects(inspectPostCommentContract({ connect() { throw new Error('must not connect') } }, redditRequestId, options), /invalid_arguments/u)
+  }
+})
+
+test('standalone Reddit verification requires its own prepended parser and validates mode arguments before connecting', async () => {
+  const inspector = await readFile(new URL('../../server/ops/inspect-post-comment-contract.mjs', import.meta.url), 'utf8')
+  const parser = await readFile(new URL('../../server/contracts/reddit-comment-page.mjs', import.meta.url), 'utf8')
+  const twitterParser = await readFile(new URL('../../server/contracts/twitter-comment-page.mjs', import.meta.url), 'utf8')
+  const env = { ...process.env }
+  delete env.DATABASE_URL
+  const invoke = (source, args) => {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-', '--request-id', redditRequestId, ...args], {
+      input: source, env, encoding: 'utf8', timeout: 5000, maxBuffer: 65536,
+    })
+    assert.equal(result.error, undefined)
+    assert.equal(result.status, 1)
+    assert.equal(result.stdout, '')
+    return JSON.parse(result.stderr)
+  }
+  assert.deepEqual(invoke(inspector, ['--verify-reddit-projection']), { error: 'reddit_projection_parser_required' })
+  assert.deepEqual(invoke(`${twitterParser}\n${inspector}`, ['--verify-reddit-projection']), { error: 'reddit_projection_parser_required' })
+  const combined = `${parser}\n${inspector}`
+  assert.deepEqual(invoke(combined, ['--verify-reddit-projection']), { error: 'database_url_required' })
+  assert.deepEqual(invoke(`${twitterParser}\n${combined}`, ['--verify-twitter-projection']), { error: 'database_url_required' })
+  for (const args of [['--verify-reddit-projection', redditPostId],
+    ['--verify-reddit-projection', '--verify-twitter-projection'],
+    ['--twitter-post-id', twitterPostId, '--verify-reddit-projection']]) {
     assert.deepEqual(invoke(combined, args), { error: 'invalid_arguments' })
   }
 })

@@ -507,3 +507,49 @@ BASH
 capabilities 只核对目标 native 条目（原生 social 平台授权已参与该条目 ready 的计算），不要求过滤后的 platforms 列表显示 social。未就绪时两个业务 POST 均为 0，标记不新增。独占标记仍是原 Hub 根目录中的 reddit.json/kuaishou.json；重复执行不会重买已尝试平台。检查恰好一条成功计费调用是严格校准门槛，若既有 LCY 明确未计费重试留下额外调用则停止人工核对，不直接断言业务失败。
 
 首次运行产生的预检、probe 和 inspection JSON 全部贴回。即使某条评论列表为空，也先读取已保存结构，不自动换帖补买。剩余工作是据真实归档实现对应投影、分页和统一入口回归；本轮尚无 Reddit/快手付费回执，不能视为已迁移。
+
+### Reddit 已取得评论，快手被拒绝：只读核验现有回执
+
+用户回传两平台免费预检 granted/ready=true。Reddit 原生请求 usage `7eb265f4-5c2c-4d15-91d5-7dc7fed83b61`、幂等键 `comment-calibration-v1-34a1dc86-2fc6-4de7-9818-56c987cd3c8b`，HTTP/businessCode=200、committed、billed=true，TikHub endpoint native.t.api_c7f50cf300d63960。9844 字节归档已通过长度/SHA 校验。data.postInfoById.commentForest.trees 长度为 3，均有 node.id/content.markdown/authorInfo/createdAt/score，parentId=null，pageInfo.hasNextPage=false，more=null。结构摘要不披露 ID、时间、类型枚举等值，仍需逐条解析并与保存的请求目标核对。
+
+快手 usage `ce942beb-a379-4e18-b62f-ee69cc24b3d3`、幂等键 `comment-calibration-v1-0513a892-81fb-47b7-9cc2-363d45db9e6d`，Hub HTTP 502/external_platform_rejected。包装脚本正确停止，未执行后面的快手归档检查。此结果不能确定供应商具体错误或是否计费；保留 kuaishou.json，不自动重试、改参数、换帖或换渠道。Reddit 的 reddit.json 和所有 Twitter 标记也保留。
+
+新增无依赖候选解析器 reddit-comment-page.mjs：验证根帖和全部树、保留 Markdown/作者/时间/原始树、score 不映射成 likes；未知父级不推定为直接回复。未取得下一页 token 的实际响应位置，因此不把 more.cursor 或请求 echo.after 猜成帖子分页；仅在 hasNextPage=false 且没有更多占位/未返回子评论证据时标记终止。该解析器尚未接到运行路由，Reddit 统一入口仍是 JustOne。先用原生请求保存的 body.params.post_id 校验这份归档；缺失快照时拒绝，不以响应自己的根 ID 代替请求校验。
+
+快手诊断脚本补上固定 native 端点白名单和经过身份/归档检查的 photo_id、pcursor 类型/长度摘要。原生账本作用域 social 会如实保留，供应商平台由具体端点确认。错误文案只输出既有白名单分类，供应商“不收费”声明不能覆盖 billed 账本。
+
+同步以下三个文件即可，无需发布镜像、Key 或再次采购：
+
+- server/contracts/reddit-comment-page.mjs（新增候选解析器）
+- server/ops/inspect-post-comment-contract.mjs（增加 --verify-reddit-projection）
+- server/ops/diagnose-tikhub-rejection.mjs（增加快手端点诊断）
+
+```bash
+bash <<'BASH'
+set -euo pipefail
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+MX_COMMENT_READ_FAILED=0
+
+cat server/contracts/reddit-comment-page.mjs \
+    server/ops/inspect-post-comment-contract.mjs |
+  kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+    node --input-type=module - \
+    --request-id 7eb265f4-5c2c-4d15-91d5-7dc7fed83b61 \
+    --verify-reddit-projection || MX_COMMENT_READ_FAILED=1
+
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - \
+  --request-id ce942beb-a379-4e18-b62f-ee69cc24b3d3 \
+  < server/ops/inspect-post-comment-contract.mjs || MX_COMMENT_READ_FAILED=1
+
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - ce942beb-a379-4e18-b62f-ee69cc24b3d3 \
+  < server/ops/diagnose-tikhub-rejection.mjs || MX_COMMENT_READ_FAILED=1
+
+exit "$MX_COMMENT_READ_FAILED"
+BASH
+```
+
+三项均为独立只读事务，某一检查未通过也继续读取其余证据，最后以非零状态表示有未通过项。首份预期版本 reddit-comment-projection-verification.v1、targetSource=saved_request_snapshot、requestedPostMatched=true、verified=true，并输出全部条目的数量；若解析拒绝，仅输出固定 reason。快手后两份分别用于确认 usage/供应商计费与原始结构，以及具体上游 HTTP/business code/错误分类。不发 HTTP、不重放、不写 canonical、不改变账单。
+
+候选解析器、归档校验和拒绝诊断共 52 项测试通过；Twitter 既有校验回归包含在内。当前只准备以上只读核验，尚未获得服务器输出，未部署或切换任何平台。待 Reddit 完整校验通过后，接入其 TikHub recipe、投影、受控分页、旧 JustOne 回执/游标和入库兼容；不能把原生采样成功说成统一入口已迁移。

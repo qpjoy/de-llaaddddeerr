@@ -10,6 +10,8 @@ const requestId = '10000000-0000-4000-8000-000000000001'
 const callId = '10000000-0000-4000-8000-000000000002'
 const upstreamId = '10000000-0000-4000-8000-000000000003'
 const instagramOperation = 'native.t.instagram_v3_general_search'
+const kuaishouCommentsOperation = 'native.t.api_3cb972ba91c8fe44'
+const kuaishouCommentsPath = '/api/v1/data/native/t.api_3cb972ba91c8fe44'
 const nativeContract = 'mx-insight-hub.native-forwarding.v1'
 const secret = 'private-credential-keyword-cursor-body'
 const noChargeClaim = "Request failed. Please retry. Check the docs below to verify your parameters, test with the default demo parameters, and send the response JSON to support. You won't be charged for this request."
@@ -143,6 +145,30 @@ test('request snapshot emits only known paths, numeric page fields and value-fre
   assert.equal(unknown.cursorPresent, false)
 })
 
+test('Kuaishou echoed comment params expose only fixed presence and shape from the verified detail envelope', () => {
+  const saved = archive({ detail: { params: { photo_id: secret, pcursor: '', authorization: secret,
+    [secret]: { password: secret } } }, params: { photo_id: 'wrong-root-location' } })
+  const bytes = Buffer.from(saved.body_bytes)
+  const report = inspectTikHubRejectionArchive(saved, { kuaishouComments: true })
+  assert.equal(report.hashVerified, true)
+  assert.deepEqual(report.detail.params, { type: 'object', fields: {
+    photo_id: { present: true, type: 'string', length: secret.length },
+    pcursor: { present: true, type: 'string', length: 0 },
+  } })
+  assert.doesNotMatch(JSON.stringify(report), /private-|authorization|password|wrong-root-location/)
+  assert.deepEqual(saved.body_bytes, bytes)
+  assert.equal(inspectTikHubRejectionArchive(saved).detail.params, undefined)
+  assert.deepEqual(inspectTikHubRejectionArchive({ ...saved, body_sha256: '0'.repeat(64) }, { kuaishouComments: true }),
+    { state: 'archive_integrity_failed' })
+  for (const payload of [{ params: { photo_id: secret } }, { detail: { request: { params: { photo_id: secret } } } },
+    { detail: JSON.stringify({ params: { photo_id: secret } }) }]) {
+    const result = inspectTikHubRejectionArchive(archive(payload), { kuaishouComments: true })
+    assert.equal(result.detail.params.type, 'missing')
+    assert.ok(Object.values(result.detail.params.fields).every(field => field.present === false && field.type === 'missing'))
+    assert.doesNotMatch(JSON.stringify(result), /private-/)
+  }
+})
+
 function mockPool({ calls = 1, failQuery = false, missingRequest = false, message = secret, billed = null,
   requestOverrides = {}, callOverrides = {}, archivePayload = null } = {}) {
   const statements = []
@@ -237,6 +263,51 @@ test('supplier no-charge claim does not override any saved billing state or issu
     assert.equal(db.statements.at(-1).sql, 'ROLLBACK')
     assert.equal(db.released, true)
     assert.doesNotMatch(JSON.stringify(report), /Request failed|Please retry|charged for this request|private-/)
+  }
+})
+
+test('Kuaishou comment diagnosis preserves fixed provenance and billing without exposing params for a mismatched route', async () => {
+  const options = { requestOverrides: { platform: 'social', status: 'released', error_code: 'external_platform_rejected',
+    acquisition_request: { path: kuaishouCommentsPath, body: { params: { photo_id: secret, pcursor: secret } } } },
+  callOverrides: { operation: kuaishouCommentsOperation, endpoint_key: kuaishouCommentsOperation,
+    contract_version: nativeContract, http_status: 400, business_code: 400, error_code: 'upstream_request_rejected',
+    upstream_request_id: upstreamId, billed: false },
+  archivePayload: { detail: { code: 400, request_id: upstreamId, message: noChargeClaim,
+    params: { photo_id: secret, pcursor: secret, token: secret } } } }
+  const db = mockPool(options)
+  const report = await diagnoseTikHubRejection(db.pool, requestId)
+  assert.equal(report.platform, 'social', 'native usage retains its saved authorization platform')
+  assert.equal(report.status, 'released')
+  assert.equal(report.httpStatus, 502)
+  assert.equal(report.errorCode, 'external_platform_rejected')
+  assert.equal(report.request.path, kuaishouCommentsPath)
+  const call = report.evidence[0]
+  assert.equal(call.operation, kuaishouCommentsOperation)
+  assert.equal(call.endpoint, kuaishouCommentsOperation)
+  assert.equal(call.contract, nativeContract)
+  assert.equal(call.httpStatus, 400)
+  assert.equal(call.businessCode, 400)
+  assert.equal(call.upstreamRequestId, upstreamId)
+  assert.equal(call.billed, false)
+  assert.equal(call.archive.detail.message.classification, 'request_failed_no_charge_claim')
+  assert.equal(call.archive.detail.params.fields.photo_id.present, true)
+  assert.equal(call.archive.detail.params.fields.pcursor.length, secret.length)
+  assert.doesNotMatch(JSON.stringify(report), /private-|token|Request failed/)
+  assert.equal(db.statements.at(-1).sql, 'ROLLBACK')
+  assert.ok(db.statements.every(({ sql }) => /^(BEGIN|SET LOCAL|SELECT|ROLLBACK)\b/.test(sql)))
+  const platformReport = await diagnoseTikHubRejection(mockPool({ ...options,
+    requestOverrides: { ...options.requestOverrides, platform: 'kuaishou' } }).pool, requestId)
+  assert.equal(platformReport.platform, 'kuaishou')
+  const mismatches = [
+    ...['operation', 'endpoint_key', 'contract_version'].map(field => ({ ...options,
+      callOverrides: { ...options.callOverrides, [field]: secret } })),
+    { ...options, requestOverrides: { ...options.requestOverrides,
+      acquisition_request: { ...options.requestOverrides.acquisition_request, path: `/${secret}` } } },
+  ]
+  for (const mismatch of mismatches) {
+    const result = await diagnoseTikHubRejection(mockPool(mismatch).pool, requestId)
+    assert.equal(result.evidence[0].archive.detail.params, undefined)
+    assert.doesNotMatch(JSON.stringify(result), /private-/)
   }
 })
 
