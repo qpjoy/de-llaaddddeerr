@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
 import { discoverPostCommentSamples, normalizeCommentSampleTarget } from '../../server/ops/find-post-comment-samples.mjs'
 
 const redditSourceId = 'af456ad4-2523-4f73-a1fc-c95104b329a4'
@@ -15,7 +17,8 @@ const canonical = (platform, target, overrides = {}) => ({
   id: canonicalSourceId, platform, object_type: 'post', external_id: target, url: null, ...overrides,
 })
 
-function harness({ incident = [], usages = [], canonicals = [], errorTag = null, errorCode = null, errorOnce = false } = {}) {
+function harness({ incident = [], usages = [], canonicals = [], sourceUsages = [], sourceCanonicals = [],
+  errorTag = null, errorCode = null, errorOnce = false } = {}) {
   const queries = []
   let releases = 0, failed = false, aborted = false
   const client = { async query(sql, values) {
@@ -30,6 +33,8 @@ function harness({ incident = [], usages = [], canonicals = [], errorTag = null,
     if (sql.includes('comment-samples:incident')) return { rows: incident }
     if (sql.includes('comment-samples:usages')) return { rows: usages }
     if (sql.includes('comment-samples:canonical')) return { rows: canonicals }
+    if (sql.includes('comment-samples:source-usage')) return { rows: sourceUsages }
+    if (sql.includes('comment-samples:source-canonical')) return { rows: sourceCanonicals }
     return { rows: [] }
   }, release() { releases++ } }
   return { pool: { connect: async () => client }, queries, get releases() { return releases } }
@@ -223,4 +228,120 @@ test('discovery validates prepare platforms before connecting and releases after
   await assert.rejects(discoverPostCommentSamples(h.pool), /private-database-error/)
   assert.equal(h.queries.at(-1).sql, 'ROLLBACK')
   assert.equal(h.releases, 1)
+})
+
+const pinnedRedditSourceId = 'ee8dd99d-9146-4cb9-9ddc-eeeca3174c49'
+const pinnedKuaishouSourceId = '120ec88d-84f3-4369-b5d9-92b877f75bd7'
+const pinnedUsage = (overrides = {}) => usage('reddit', { postId: redditTarget }, { id: pinnedRedditSourceId, ...overrides })
+const pinnedCanonical = (overrides = {}) => canonical('kuaishou', '9876543210000000001', {
+  id: pinnedKuaishouSourceId, dataset_id: 'night-all.compat.v1', deleted_at: null,
+  url: `https://www.kuaishou.com/short-video/${kuaishouTarget}`, ...overrides,
+})
+const usagePin = { preparePlatform: 'reddit', sourceKind: 'usage', sourceId: pinnedRedditSourceId }
+const canonicalPin = { preparePlatform: 'kuaishou', sourceKind: 'canonical', sourceId: pinnedKuaishouSourceId }
+
+function assertExactSourceRead(h, sourceKind, sourceId, platform) {
+  const reads = h.queries.filter(row => row.sql.includes('comment-samples:'))
+  assert.equal(reads.length, 1)
+  assert.ok(reads[0].sql.includes(`comment-samples:source-${sourceKind}`))
+  assert.ok(reads[0].values.includes(sourceId))
+  assert.ok(reads[0].values.includes(platform))
+  assert.equal(reads[0].sql.includes(sourceId), false)
+  assert.match(reads[0].sql, /\bid\s*=\s*\$\d+(?:::uuid)?/iu)
+  assert.match(h.queries[0].sql, /READ ONLY/)
+  assert.equal(h.queries.at(-1).sql, 'ROLLBACK')
+  assert.equal(h.releases, 1)
+  assert.equal(h.queries.every(row => /^(?:BEGIN|SET|SELECT|WITH|SAVEPOINT|RELEASE|ROLLBACK)\b/u.test(row.sql.trim())), true)
+}
+
+test('exact-source preparation uses the pinned historical request without rescanning newer usage or canonical history', async t => {
+  const fetch = t.mock.method(globalThis, 'fetch', () => { throw new Error('supplier HTTP is forbidden') })
+  const h = harness({ sourceUsages: [pinnedUsage()], usages: [usage('reddit', { postId: 'newer' })],
+    canonicals: [canonical('reddit', 'other')] })
+  const result = await discoverPostCommentSamples(h.pool, usagePin)
+  assert.deepEqual(result, { revision: 'post-comment-target-sample.v1', platform: 'reddit', postId: redditTarget,
+    sourceKind: 'usage', sourceId: pinnedRedditSourceId })
+  assertExactSourceRead(h, 'usage', pinnedRedditSourceId, 'reddit')
+  assert.equal(fetch.mock.callCount(), 0)
+})
+
+test('exact-source preparation reads the pinned Kuaishou compat record and derives its photo ID from its URL', async () => {
+  const h = harness({ sourceCanonicals: [pinnedCanonical()], errorTag: 'comment-samples:canonical', errorCode: '57014' })
+  const result = await discoverPostCommentSamples(h.pool, canonicalPin)
+  assert.deepEqual(result, { revision: 'post-comment-target-sample.v1', platform: 'kuaishou', postId: kuaishouTarget,
+    sourceKind: 'canonical', sourceId: pinnedKuaishouSourceId })
+  assert.equal(JSON.stringify(result).includes('9876543210000000001'), false)
+  assertExactSourceRead(h, 'canonical', pinnedKuaishouSourceId, 'kuaishou')
+})
+
+test('exact source identity and request semantics must still match, and failures never fall through to another target', async () => {
+  for (const rows of [[], [pinnedUsage(), pinnedUsage()],
+    [pinnedUsage({ id: redditSourceId })], [pinnedUsage({ platform: 'kuaishou' })],
+    [pinnedUsage({ method: 'GET' })], [pinnedUsage({ path: '/api/v1/search' })],
+    [pinnedUsage({ body: { platform: 'reddit', postId: redditTarget, contentId: 'other' } })],
+    [pinnedUsage({ body: { platform: 'reddit', postId: redditTarget, cursor: 'private-next' } })],
+  ]) {
+    const h = harness({ sourceUsages: rows, usages: [usage('reddit', { postId: 'fallback' })] })
+    await assert.rejects(discoverPostCommentSamples(h.pool, usagePin), /sample_source_unavailable/)
+    assertExactSourceRead(h, 'usage', pinnedRedditSourceId, 'reddit')
+  }
+})
+
+test('pinned canonical preparation rejects changed source scope, deleted records, comments and unverified Kuaishou photo IDs', async () => {
+  for (const rows of [[], [pinnedCanonical(), pinnedCanonical()],
+    [pinnedCanonical({ id: canonicalSourceId })], [pinnedCanonical({ platform: 'reddit' })],
+    [pinnedCanonical({ dataset_id: 'private-unapproved-dataset' })], [pinnedCanonical({ dataset_id: null })],
+    [pinnedCanonical({ deleted_at: '2026-11-02T00:00:00.000Z' })], [pinnedCanonical({ object_type: 'comment' })],
+    [pinnedCanonical({ url: null })], [pinnedCanonical({ url: `https://kuaishou.com.evil.example/short-video/${kuaishouTarget}` })],
+  ]) {
+    const h = harness({ sourceCanonicals: rows, canonicals: [pinnedCanonical()] })
+    await assert.rejects(discoverPostCommentSamples(h.pool, canonicalPin), /sample_source_unavailable/)
+    assertExactSourceRead(h, 'canonical', pinnedKuaishouSourceId, 'kuaishou')
+  }
+})
+
+test('exact-source options are validated together before connecting', async () => {
+  for (const options of [
+    { sourceKind: 'usage', sourceId: pinnedRedditSourceId },
+    { preparePlatform: 'reddit', sourceKind: 'usage' }, { preparePlatform: 'reddit', sourceId: pinnedRedditSourceId },
+    { ...usagePin, sourceKind: 'unknown' }, { ...usagePin, sourceId: 'not-a-uuid' },
+    { ...usagePin, sourceId: "' OR true --" }, { ...usagePin, preparePlatform: 'twitter' },
+  ]) {
+    await assert.rejects(discoverPostCommentSamples({ connect() { throw new Error('must not connect') } }, options), /invalid_arguments/)
+  }
+})
+
+test('a pinned source read failure rolls back without rescanning or substituting another target', async () => {
+  const h = harness({ errorTag: 'comment-samples:source-canonical', errorCode: '57014',
+    canonicals: [pinnedCanonical()] })
+  await assert.rejects(discoverPostCommentSamples(h.pool, canonicalPin), /private-database-error/)
+  assertExactSourceRead(h, 'canonical', pinnedKuaishouSourceId, 'kuaishou')
+})
+
+test('standalone exact-source CLI validates complete arguments before any database connection', async () => {
+  const source = await readFile(new URL('../../server/ops/find-post-comment-samples.mjs', import.meta.url), 'utf8')
+  const env = { ...process.env }
+  delete env.DATABASE_URL
+  const invoke = args => {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-', ...args], {
+      input: source, env, encoding: 'utf8', timeout: 5000, maxBuffer: 65536,
+    })
+    assert.equal(result.error, undefined)
+    assert.equal(result.status, 1)
+    assert.equal(result.stdout, '')
+    return JSON.parse(result.stderr)
+  }
+  for (const args of [[], ['--prepare', 'reddit'],
+    ['--prepare', 'reddit', '--source-kind', 'usage', '--source-id', pinnedRedditSourceId],
+    ['--prepare', 'kuaishou', '--source-kind', 'canonical', '--source-id', pinnedKuaishouSourceId]]) {
+    assert.equal(invoke(args).error, 'database_url_required')
+  }
+  for (const args of [
+    ['--prepare', 'reddit', '--source-kind', 'usage'],
+    ['--prepare', 'reddit', '--source-kind', 'usage', '--source-id', 'not-a-uuid'],
+    ['--prepare', 'reddit', '--source-kind', 'wrong', '--source-id', pinnedRedditSourceId],
+    ['--source-kind', 'usage', '--source-id', pinnedRedditSourceId],
+    ['--prepare', 'twitter', '--source-kind', 'usage', '--source-id', pinnedRedditSourceId],
+    ['--prepare', 'reddit', '--source-kind', 'usage', '--source-id', pinnedRedditSourceId, '--apply'],
+  ]) assert.equal(invoke(args).error, 'invalid_arguments')
 })

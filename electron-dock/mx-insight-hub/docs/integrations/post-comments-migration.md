@@ -6,7 +6,7 @@
 
 用户已确认 JustOne 当前无余额。下表是现有代码的固定路由事实；其中九个平台不能按可用功能上线，上一版“13 平台已接入”只代表实现与离线格式覆盖。Twitter 本次改为 TikHub，小红书、Instagram、YouTube 原已走 TikHub。剩余八个平台在目录中有 TikHub 单帖评论候选；Facebook 暂无已登记的非 JustOne 替代，不将 Facebook 搜索爬虫冒充评论能力。
 
-Twitter 首屏统一入口现已完成实际验收，下游可继续使用原 URL 和平台+评论能力授权，无需改成供应商原生入口。Reddit、快手接下来按原限定次数流程分别校准，见 [TikHub 校验脚本](../operations/post-comment-contract-calibration.md)；用户已授权优先从服务器找真实目标，找不到再新采集。新增只读 find-post-comment-samples.mjs 查询原故障时间附近/最近的评论请求与已有原帖，默认不输出帖子 ID 或正文；尚待服务器结果，不使用测试夹具占位 ID。其他平台核对实际字段和游标后再替换对应投影与采购路由，保留幂等历史和既有成本门禁。RapidAPI 的旧 Twitter 评论代码在 Night-All，Hub 当前 RapidAPI 适配器只实现 search/crawl/user-info，不能靠改配置直接调用评论。
+Twitter 首屏统一入口现已完成实际验收，下游可继续使用原 URL 和平台+评论能力授权，无需改成供应商原生入口。Reddit、快手接下来按原限定次数流程分别校准，见 [TikHub 校验脚本](../operations/post-comment-contract-calibration.md)；用户已授权优先从服务器找真实目标，找不到再新采集。服务器已找到真实目标：Reddit usage ee8dd99d-9146-4cb9-9ddc-eeeca3174c49、快手 canonical 120ec88d-84f3-4369-b5d9-92b877f75bd7；无需额外采集帖子。finder 现支持按源 UUID 精确私下读取，避免重复范围扫描；接下来免费检查两个原生能力后各采一页评论，尚未取得这两份付费回执。其他平台核对实际字段和游标后再替换对应投影与采购路由，保留幂等历史和既有成本门禁。RapidAPI 的旧 Twitter 评论代码在 Night-All，Hub 当前 RapidAPI 适配器只实现 search/crawl/user-info，不能靠改配置直接调用评论。
 
 ## 入口与交付
 

@@ -13,7 +13,7 @@
 | Night-All | Internal 宿主机 `:13141`，不在 k8s 内 | 历史自建平台：本地爬虫（如搜狗微信 `wechat_mp`）、旧供应商编排、BullMQ 异步任务 | 运行中。供应商类接口按 operation 逐个迁到 Hub；自建爬虫能力保留 |
 | Night-All-A | VPN 固定地址 `100.127.0.1:8100`（Internal 侧为 `100.127.0.6`） | HTTP 异步采集 + 独立清洗库；含 Facebook 协议爬虫 `facebook-protocol` | Facebook 内容搜索的「自建」模式已实现未部署（[03](03-self-hosted-engines.md) 第 11 节）；旧 Admin 控制台转发仍由环境开关控制（默认关闭），线上是否启用未核实 |
 | Hub 自建引擎 | Hub（k8s）内的引擎配置、任务表、执行者 | 把一个自建爬虫包装成可排队、可计量、可查询的数据产品。第一个是「微信 → 自建引擎」 | 已实现未部署 |
-| Hub 单帖评论 | Hub Public 原生接口与旧兼容别名 | 13 平台固定供应商评论，现有 PG 归档/计费/分页/入库；不转 Night-All | Twitter 旧 URL 生产首屏验收通过：20 条、一次成功计费 TikHub 调用、归档已核验；剩余九个平台仍受 JustOne 余额阻塞，Reddit/快手已准备服务器只读目标查找、待样本校准；见 [迁移合同](../../integrations/post-comments-migration.md) |
+| Hub 单帖评论 | Hub Public 原生接口与旧兼容别名 | 13 平台固定供应商评论，现有 PG 归档/计费/分页/入库；不转 Night-All | Twitter 旧 URL 生产首屏验收通过：20 条、一次成功计费 TikHub 调用、归档已核验；剩余九个平台仍受 JustOne 余额阻塞，Reddit/快手已找到服务器保存目标、待 TikHub 评论样本校准；见 [迁移合同](../../integrations/post-comments-migration.md) |
 | Hub 事件中心 | Hub Public 的事件接口 + PG 事件日志 | 把任务终态和数据变化可靠地交付给 Delta、Java | 设计中 |
 | 下游 | Delta（po-infra）、罗盘 Java，都是 Internal 宿主机上的 Docker | 提交任务、消费事件 | 目前同步调 Hub；直连改造见[性能汇总第 5 节](../../operations/platform-performance-review-2026-10-22.md) |
 | 旁路采集 | Delta 自带的 spiders、直接调 Night-All 的控制台等 | 不经过 Hub 的采集入口 | 待盘点 |
@@ -94,7 +94,7 @@ flowchart LR
 ## 7. 变更记录
 
 - 2026-11-02 后续：Twitter 的样本校准、完整 36 条归档解析、发布后路由检查和旧 URL 首屏验收均通过。usage d167ad9e-48b4-4668-bcd3-8b1d6ef2aeb0 返回 20 条，committed、一次成功计费 TikHub 调用、归档完整；hasMore=true 表示已购余量，不推定新归档也是 36 条。不重复探测、不自动续页。capabilities 的评论 ready 当前基于小红书，不能据此判断 Twitter；本次使用已有原生授权 Key 做 TikHub 预检。其余九个 JustOne 平台仍受余额阻塞；Reddit/快手待真实目标样本，Facebook 替代尚未登记。
-- 2026-11-02 目标查找：用户授权 Reddit/快手优先复用服务器记录、缺少时新采集。新增 Admin stdin 只读有界查找脚本，区分历史评论请求与原帖规范记录，正确区分快手 cid/photoId；13 项测试通过，等待服务器结果，未新增供应商调用。
+- 2026-11-02 目标查找：用户授权 Reddit/快手优先复用服务器记录、缺少时新采集。新增 Admin stdin 只读有界查找脚本，区分历史评论请求与原帖规范记录，正确区分快手 cid/photoId；服务器已找到 Reddit 历史请求与快手原帖，改用精确源 UUID 查询；20 项测试通过，待各一页评论采样，未新增供应商调用。
 
 - 2026-11-02：单帖评论 13 平台迁移到 Hub 原生执行；沿用既有 PG 和准入，不改自建引擎拓扑或 MX-H2I。官方例子离线验证，生产部署与限定次数验收待执行。
 

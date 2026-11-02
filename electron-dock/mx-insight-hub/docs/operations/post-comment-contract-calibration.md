@@ -412,3 +412,98 @@ BASH
 found 后使用 `--prepare reddit` 或 `--prepare kuaishou` 在后续包装脚本内私下取得最小样本；此模式会含帖子 ID，不直接贴到聊天。样本只决定固定评论端点的帖子参数，不采纳保存请求中的 URL 目的地、headers、count、cursor、params 或业务标签。采购标记始终使用已确认 Hub 根目录，先免费检查目标 native capability/readiness，再每个平台至多一页；旧 Twitter 全部记录继续保留。
 
 若查不到合适目标，按既有授权准备新目标采集：优先已实现投影的 Reddit 帖子检索（按评论排序）与快手综合搜索，最多各一页，再从返回的真实原帖标识校准评论，不自动续页。候选检索仍经过现有凭据、授权、预算及防重复控制，不把检索附带评论作为单帖评论能力。此处尚未执行服务器查找或任何新付费请求，也未切换 Reddit/快手统一路由。
+
+### Reddit、快手目标已找到：固定来源后各采一页评论
+
+用户回传 discovery.v1：Reddit 来自 usage `ee8dd99d-9146-4cb9-9ddc-eeeca3174c49`；快手来自 canonical `120ec88d-84f3-4369-b5d9-92b877f75bd7`。原故障窗口匹配 3 条，快手 night-all.search.v1 查询超时，但 night-all.compat.v1 的有界 50 条记录中找到了有效原帖。此次 HTTP/数据库写入均为 0；不需要额外搜索或新采帖子，也不重复超时扫描。
+
+finder 新增精确模式：`--prepare <platform> --source-kind <usage|canonical> --source-id <UUID>`，只按主键读取这一个来源，并再次验证平台、评论路径/首屏身份，或原帖 dataset/object_type/deleted_at 与公开作品 URL。记录缺失、变成无效来源或查询失败都拒绝，不替换帖子、不回落到扫描。20 项 discovery 测试通过。
+
+先同步本次更新的 `server/ops/find-post-comment-samples.mjs`；保留已有 probe v2、inspector v2 与全部标记，无需部署。以下命令先私下准备两份固定样本，再做一个免费 capabilities GET；两项原生授权与 ready 全通过才继续。随后 Reddit、快手依次各最多一页，合计最多 2 个新的 Hub 业务 POST；单次可能正常计费。每次成功后只读检查同一归档，任一已有标记、失败/未知、缺少持久 usage、归档异常就停止，不自动换目标、重试、鉴权恢复或续页。操作不会修改统一路由；两个平台的统一入口仍待实际字段映射。
+
+```bash
+bash <<'BASH'
+set -e
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+read -r -s -p 'Hub Live API Key: ' MX_HUB_PROBE_API_KEY </dev/tty
+printf '\n'
+export MX_HUB_PROBE_API_KEY
+node --input-type=module <<'NODE'
+import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { planPostCommentProbe, runPostCommentProbe } from './server/ops/probe-post-comment-contract.mjs';
+function admin(file, args) {
+  return JSON.parse(execFileSync('kubectl', [
+    '-n', 'mx-insight-hub', 'exec', '-i', 'deployment/mx-insight-hub-admin', '-c', 'admin', '--',
+    'node', '--input-type=module', '-', ...args
+  ], { input: readFileSync(file, 'utf8'), encoding: 'utf8', timeout: 30000, maxBuffer: 2 * 1024 * 1024 }));
+}
+async function boundedJson(response) {
+  const reader = response.body.getReader(), chunks = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > 2 * 1024 * 1024) throw new Error('preflight_response_too_large');
+      chunks.push(value);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+}
+try {
+  const apiKey = process.env.MX_HUB_PROBE_API_KEY;
+  if (!/^mih_live_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$/.test(apiKey || '')) throw new Error('invalid_api_key');
+  const sources = [
+    ['reddit', 'usage', 'ee8dd99d-9146-4cb9-9ddc-eeeca3174c49'],
+    ['kuaishou', 'canonical', '120ec88d-84f3-4369-b5d9-92b877f75bd7']
+  ];
+  const plans = sources.map(([platform, sourceKind, sourceId]) => {
+    const sample = admin('server/ops/find-post-comment-samples.mjs', [
+      '--prepare', platform, '--source-kind', sourceKind, '--source-id', sourceId
+    ]);
+    if (sample.revision !== 'post-comment-target-sample.v1' || sample.platform !== platform
+        || sample.sourceKind !== sourceKind || sample.sourceId !== sourceId) throw new Error('source_mismatch');
+    return { platform, sourceKind, sourceId, plan: planPostCommentProbe(platform, sample) };
+  });
+  const response = await fetch('http://127.0.0.1:18150/api/v1/data/capabilities', {
+    headers: { authorization: 'Bearer ' + apiKey }, redirect: 'error', signal: AbortSignal.timeout(15000)
+  });
+  const capabilities = (await boundedJson(response))?.data?.capabilities;
+  const checks = plans.map(({ platform, plan }) => {
+    const capability = 'native.' + plan.path.split('/').at(-1);
+    const row = Array.isArray(capabilities) ? capabilities.find(c => c.capability === capability) : null;
+    return { platform, capability, granted: Boolean(row), ready: row?.ready === true };
+  });
+  console.log(JSON.stringify({ revision: 'comment-native-preflight.v1', httpStatus: response.status,
+    checks, hubRequestLimit: 2, hubRequestsMade: 0 }, null, 2));
+  if (response.status !== 200 || checks.some(c => !c.granted || !c.ready)) throw new Error('preflight_not_ready');
+  for (const { platform, sourceKind, sourceId, plan } of plans) {
+    const result = await runPostCommentProbe({ plan, sampleDirectory: process.cwd(), apiKey, apply: true });
+    console.log(JSON.stringify({ ...result, sourceKind, sourceId }, null, 2));
+    if (result.state !== 'http_response' || result.httpStatus !== 200
+        || !result.requestId || result.requestIdSource !== 'usage_header') throw new Error('probe_stopped');
+    const saved = admin('server/ops/inspect-post-comment-contract.mjs', ['--request-id', result.requestId]);
+    console.log(JSON.stringify(saved, null, 2));
+    const call = saved.calls?.[0];
+    if (saved.usage?.status !== 'committed' || saved.usage.httpStatus !== 200 || saved.callsTruncated
+        || saved.calls?.length !== 1 || call.provider !== 'tikhub' || call.platform !== platform
+        || call.endpoint !== 'native.' + plan.path.split('/').at(-1)
+        || call.outcome !== 'succeeded' || call.httpStatus !== 200 || call.billed !== true
+        || call.archive?.state !== 'archive_verified' || call.archive.hashVerified !== true) throw new Error('inspection_stopped');
+  }
+} catch (error) {
+  const safe = ['invalid_api_key', 'source_mismatch', 'preflight_not_ready', 'preflight_response_too_large',
+    'probe_stopped', 'inspection_stopped', 'invalid_sample'];
+  console.error(JSON.stringify({ error: safe.includes(error.message) ? error.message : 'comment_calibration_stopped',
+    action: 'preserve_markers_and_report_output' }));
+  process.exitCode = 1;
+}
+NODE
+BASH
+```
+
+capabilities 只核对目标 native 条目（原生 social 平台授权已参与该条目 ready 的计算），不要求过滤后的 platforms 列表显示 social。未就绪时两个业务 POST 均为 0，标记不新增。独占标记仍是原 Hub 根目录中的 reddit.json/kuaishou.json；重复执行不会重买已尝试平台。检查恰好一条成功计费调用是严格校准门槛，若既有 LCY 明确未计费重试留下额外调用则停止人工核对，不直接断言业务失败。
+
+首次运行产生的预检、probe 和 inspection JSON 全部贴回。即使某条评论列表为空，也先读取已保存结构，不自动换帖补买。剩余工作是据真实归档实现对应投影、分页和统一入口回归；本轮尚无 Reddit/快手付费回执，不能视为已迁移。

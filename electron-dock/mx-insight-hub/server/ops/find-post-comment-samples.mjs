@@ -93,14 +93,40 @@ function usagesQuery(incidentWindow) {
     FROM matches ORDER BY created_at DESC`
 }
 
-export async function discoverPostCommentSamples(pool, { preparePlatform = null } = {}) {
+export async function discoverPostCommentSamples(pool, { preparePlatform = null, sourceKind = null, sourceId = null } = {}) {
   if (preparePlatform !== null && !PLATFORMS.includes(preparePlatform)) throw new Error('invalid_arguments')
+  const pinned = sourceKind !== null || sourceId !== null
+  if (pinned && (preparePlatform === null || !['usage', 'canonical'].includes(sourceKind)
+    || typeof sourceId !== 'string' || !UUID.test(sourceId))) throw new Error('invalid_arguments')
   const client = await pool.connect()
   try {
     await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
     await client.query("SET LOCAL statement_timeout = '4s'")
     await client.query("SET LOCAL lock_timeout = '1s'")
     await client.query("SET LOCAL idle_in_transaction_session_timeout = '10s'")
+    // Once discovery returned a source UUID, read that exact record via its
+    // primary key. Do not rescan a hot dataset or silently select another post.
+    if (pinned) {
+      const { rows } = sourceKind === 'usage'
+        ? await client.query(`SELECT /* comment-samples:source-usage */ id,platform,
+          acquisition_request->>'method' AS method,acquisition_request->>'path' AS path,
+          CASE WHEN octet_length(acquisition_request::text)<=16384 THEN acquisition_request->'body' END AS body
+          FROM public.usage_requests WHERE id=$1::uuid AND platform=$2`, [sourceId, preparePlatform])
+        : await client.query(`SELECT /* comment-samples:source-canonical */ id,dataset_id,platform,object_type,deleted_at,
+          CASE WHEN length(external_id)<=256 THEN external_id END AS external_id,
+          CASE WHEN length(url)<=2048 THEN url END AS url
+          FROM core.canonical_records WHERE id=$1::uuid AND platform=$2
+            AND dataset_id=ANY($3::text[]) AND object_type='post' AND deleted_at IS NULL`,
+        [sourceId, preparePlatform, DATASETS])
+      const row = rows.length === 1 ? rows[0] : null
+      if (!row || row.id !== sourceId || row.platform !== preparePlatform
+        || sourceKind === 'canonical' && (!DATASETS.includes(row.dataset_id) || row.deleted_at !== null)) {
+        throw new Error('sample_source_unavailable')
+      }
+      const sample = sourceKind === 'usage' ? usageSample(row) : canonicalSample(row, preparePlatform)
+      if (!sample) throw new Error('sample_source_unavailable')
+      return sample
+    }
     const scans = [], selected = new Map()
     const incident = await optionalRead(client, `SELECT /* comment-samples:incident */ created_at
       FROM public.usage_requests WHERE id=$1::uuid`, [INCIDENT])
@@ -158,14 +184,17 @@ if (process.argv[1] === '-' || process.argv[1] && import.meta.url === pathToFile
   let pool
   try {
     const args = process.argv.slice(2)
-    if (args.length && (args.length !== 2 || args[0] !== '--prepare' || !PLATFORMS.includes(args[1]))) throw new Error('invalid_arguments')
+    if (args.length && (![2, 6].includes(args.length) || args[0] !== '--prepare' || !PLATFORMS.includes(args[1])
+      || args.length === 6 && (args[2] !== '--source-kind' || !['usage', 'canonical'].includes(args[3])
+        || args[4] !== '--source-id' || !UUID.test(args[5])))) throw new Error('invalid_arguments')
     if (!process.env.DATABASE_URL) throw new Error('database_url_required')
     const { default: pg } = await import('pg')
     pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000,
       query_timeout: 5000, options: '-c default_transaction_read_only=on -c statement_timeout=4000 -c lock_timeout=1000' })
-    console.log(JSON.stringify(await discoverPostCommentSamples(pool, { preparePlatform: args[1] ?? null }), null, 2))
+    console.log(JSON.stringify(await discoverPostCommentSamples(pool, { preparePlatform: args[1] ?? null,
+      sourceKind: args[3] ?? null, sourceId: args[5] ?? null }), null, 2))
   } catch (error) {
-    const safe = ['invalid_arguments', 'database_url_required', 'sample_not_found', 'sample_discovery_incomplete']
+    const safe = ['invalid_arguments', 'database_url_required', 'sample_not_found', 'sample_discovery_incomplete', 'sample_source_unavailable']
     console.error(JSON.stringify({ error: safe.includes(error.message) ? error.message : 'comment_sample_discovery_failed',
       supplierHttpCallsMade: 0, databaseWritesMade: 0 }))
     process.exitCode = 1
