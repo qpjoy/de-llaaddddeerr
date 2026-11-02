@@ -13,7 +13,7 @@
 | Night-All | Internal 宿主机 `:13141`，不在 k8s 内 | 历史自建平台：本地爬虫（如搜狗微信 `wechat_mp`）、旧供应商编排、BullMQ 异步任务 | 运行中。供应商类接口按 operation 逐个迁到 Hub；自建爬虫能力保留 |
 | Night-All-A | VPN 固定地址 `100.127.0.1:8100`（Internal 侧为 `100.127.0.6`） | HTTP 异步采集 + 独立清洗库；含 Facebook 协议爬虫 `facebook-protocol` | Facebook 内容搜索的「自建」模式已实现未部署（[03](03-self-hosted-engines.md) 第 11 节）；旧 Admin 控制台转发仍由环境开关控制（默认关闭），线上是否启用未核实 |
 | Hub 自建引擎 | Hub（k8s）内的引擎配置、任务表、执行者 | 把一个自建爬虫包装成可排队、可计量、可查询的数据产品。第一个是「微信 → 自建引擎」 | 已实现未部署 |
-| Hub 单帖评论 | Hub Public 原生接口与旧兼容别名 | 13 平台固定供应商评论，现有 PG 归档/计费/分页/入库；不转 Night-All | Twitter、Reddit 统一入口均验收通过；快手完整 11 条解析通过，本地改 TikHub App，但服务器路由断言仍读到 JustOne，正核对源码与容器版本，统一入口尚未验收。其余七个 JustOne 平台受余额阻塞；快手 Web 原 400/计费未知回执保留；见 [迁移合同](../../integrations/post-comments-migration.md) |
+| Hub 单帖评论 | Hub Public 原生接口与旧兼容别名 | 13 平台固定供应商评论，现有 PG 归档/计费/分页/入库；不转 Night-All | Twitter、Reddit、快手统一入口首屏均验收通过；快手分页 unknown/不可继续。其余七个 JustOne 平台受余额阻塞；微博旧目标保存评论数确认为 0，已准备用户授权的至多两次 TikHub 新采样，待执行；见 [迁移合同](../../integrations/post-comments-migration.md) |
 | Hub 事件中心 | Hub Public 的事件接口 + PG 事件日志 | 把任务终态和数据变化可靠地交付给 Delta、Java | 设计中 |
 | 下游 | Delta（po-infra）、罗盘 Java，都是 Internal 宿主机上的 Docker | 提交任务、消费事件 | 目前同步调 Hub；直连改造见[性能汇总第 5 节](../../operations/platform-performance-review-2026-10-22.md) |
 | 旁路采集 | Delta 自带的 spiders、直接调 Night-All 的控制台等 | 不经过 Hub 的采集入口 | 待盘点 |
@@ -116,3 +116,13 @@ flowchart LR
 - 2026-11-02 评论运行接入：Reddit 统一旧 URL 验收 usage 6fbf167b-9d1c-44f6-8ac0-5cd90fd3100b 返回 3 条并 exhausted，同 usage 唯一成功计费 TikHub 调用；闭环保留回执。快手 App 全 11 条保存归档验证通过，评论/作者数值 ID 安全，内部 photo_id 不作身份，2 条回复预览隔离；本地统一配方/投影/manual pagination/旧 JustOne 入库兼容已接入。快手旧非空原生 pcursor 仅历史重放，避免跨供应商复用同名 token；no_more 保守 unknown。待 Hub-only 发布和一次统一验收，无新增存储或 H2I 变化。
 
 - 2026-11-02 快手发布检查：操作者 Public 静态断言实际为 JustOne；只证明该容器仍是旧配方，原因尚未确定。完整 set-e 命令在付费验收前退出。新增可直接粘贴的源码/逐 Pod hash 与节点镜像只读核对，区分未同步源码和运行版本不一致；保留全部 marker，无重采、服务变更或 H2I 影响。见评论校准操作文档末节。
+
+- 2026-11-02 快手版本对齐：第一次回传证明宿主机 af1f0701 源码仍旧且两个容器与其一致；第二次 1089e532 的宿主机/Public/Admin 六文件 SHA 全部对齐本地 TikHub App，两个新 Pod Ready、同镜像 c001eb6c。部署差异已解决，直接继续保留防重标记的单次统一验收，不重部署或重购原生样本。实际业务交付/计费证据仍待回传，无 H2I 变动。
+
+- 2026-11-02 快手统一验收完成：usage2274fe73-43e4-4914-9f21-a3629b188d09 HTTP200/11条/六项检查全通过，同 usage committed、唯一 TikHub bc64 succeeded+billed、归档 verified。分页 null/不可继续/unknown，不推定全帖已穷尽。Twitter/Reddit/快手本轮首屏均闭环，保留所有 marker、不再采购；剩余七个 JustOne 路由继续受余额阻塞。仅更新证据文档，无运行、存储或 H2I 变化。
+
+- 2026-11-02 微博迁移发现：最近 5000 次 TikHub 调用未命中两个主评论端点，仅证明该切片无记录。准备按准确端点索引查成功历史、无归档时按每数据集最新 50 条找已存原帖候选；候选 UUID 后续需核验原始 ID 精度。只读、零供应商请求，微博仍为 JustOne，未改权限/存储/H2I。
+
+- 2026-11-02 微博候选定位：两条精确 native 评论端点成功历史均未命中；search 数据集最新切片中找到 canonical ffe325bc-1e9a-4cab-8693-4d866252c88a，正评论量证据未确认。下一步按固定 UUID 分别核验 canonical revision 与当前 source 输入的 ID/计数类型和 run 归属，避免旧计数字符串遗漏或 ID 转换误判。无重扫、付费采购、微博路由或 H2I 改动。
+
+- 2026-11-02 微博重新采样准备：固定候选版本及当前来源 ID 一致、同 run，comment_count 是安全整数 0；不再追查历史。用户再次授权少量付费请求，准备最多一次 Web 热门搜索和一次主评论请求的独立批次，先免费预检，再核对唯一成功计费调用、完整归档 SHA 与正评论量目标；任一步失败停止。57 项模拟 HTTP/数据库及归档检查通过，服务器命令语法通过；尚未生产执行，微博统一路由仍为 JustOne，无存储、权限或 MX-H2I 变更。

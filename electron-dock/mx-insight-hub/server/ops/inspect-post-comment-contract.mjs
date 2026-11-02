@@ -61,7 +61,7 @@ ENDPOINTS.set('xiaohongshu.app-v2.note-comments.v1', { provider: 'tikhub', platf
 const KEYS = new Set(`code status status_code success message msg data result results response business_data
   comments comment comment_list commentList list items rows edges node nodes children replies reply sub_comments subComments
   sub_comment_list sub_comment_count subCommentCount comment_count commentCount reply_count replyCount total total_count count
-  id id_str cid comment_id commentId content_id contentId post_id postId tweet_id tweetId aweme_id item_id note_id video_id
+  id idstr id_str cid comment_id commentId content_id contentId post_id postId tweet_id tweetId aweme_id item_id note_id video_id
   root_id rootId parent_id parentId reply_id replyId parent_comment_id parentCommentId reply_to_comment_id rpid oid bvid aid
   text full_text content body desc message title description text_raw rich_text contentText comment_text commentText
   user user_info userInfo author author_info authorInfo owner member profile user_results user_result core legacy rest_id
@@ -69,7 +69,7 @@ const KEYS = new Set(`code status status_code success message msg data result re
   mid uname avatar avatar_url avatarUrl avatar_thumb profile_image_url_https profile_url url link permalink
   create_time createTime created_at createdAt created_time created_time_utc published_at publishedAt published_time publishedTime
   time timestamp ctime created_utc date duration datePublished date_created
-  like_count likeCount likes digg_count diggCount reply_count replyCount replies_count repliesCount child_comment_count
+  like_count like_counts likeCount likes digg_count diggCount reply_count replyCount replies_count repliesCount child_comment_count total_number
   sub_comment_count subCommentCount favorite_count retweet_count quote_count reply_count bookmark_count score ups downs reactions reaction_count
   stats statistics metrics vote_count votes upvote_count upvotes like_num likes_count likedCount
   has_more hasMore has_next hasNext more hasNextPage hasPreviousPage is_end isEnd is_last isLast

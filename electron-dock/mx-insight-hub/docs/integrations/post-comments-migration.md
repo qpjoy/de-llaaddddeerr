@@ -4,11 +4,15 @@
 
 ## 当前发布阻塞：JustOne 余额为零
 
-用户已确认 JustOne 当前无余额。下表是现有代码的固定路由事实；其中七个 JustOne 平台不能按可用功能上线，快手本轮本地切换待部署验收，上一版“13 平台已接入”只代表实现与离线格式覆盖。Twitter、Reddit 已完成 TikHub 统一入口验收；快手本轮本地代码改为 TikHub，小红书、Instagram、YouTube 原已走 TikHub。剩余六个平台在目录中有 TikHub 单帖评论候选；Facebook 暂无已登记的非 JustOne 替代，不将 Facebook 搜索爬虫冒充评论能力。
+用户已确认 JustOne 当前无余额。下表是现有代码的固定路由事实；其中七个 JustOne 平台不能按可用功能上线，快手统一入口验收已通过，上一版“13 平台已接入”只代表实现与离线格式覆盖。Twitter、Reddit、快手已完成 TikHub 统一入口首屏验收，小红书、Instagram、YouTube 原已走 TikHub。剩余六个平台在目录中有 TikHub 单帖评论候选；Facebook 暂无已登记的非 JustOne 替代，不将 Facebook 搜索爬虫冒充评论能力。
 
 Twitter 首屏统一入口现已完成实际验收，下游继续使用原 URL 和平台+评论能力授权。Reddit usage `7eb265f4-5c2c-4d15-91d5-7dc7fed83b61` 的 9844 字节原生归档、保存请求目标及完整 3 条评论均已验证，正文、作者 ID、发布时间各 3 条，score 2 条，直接父关系均未知。该纯解析器已接入 Hub，运行容器路由和旧统一 URL 的真实业务验收均已通过。验收 usage `6fbf167b-9d1c-44f6-8ac0-5cd90fd3100b` 返回 3 条，全部合同检查通过、当前页 exhausted；同 usage committed，恰好一次 TikHub c7 成功计费调用，归档已核验。保留原生及 reddit.unified-acceptance.json 回执，不再追加 Reddit 探测。复用现有 PG 存储，无新的架构或存储决策。
 
-快手 usage `ce942beb-a379-4e18-b62f-ee69cc24b3d3` 已确认是 TikHub Web 评论上游 HTTP 400，Hub 保存 committed 502，835 字节错误归档 SHA 校验通过。`billed:null` 表示供应商计费未知；上游错误声称未扣费，不据此改写账本。`photo_id` 为 15 位字符串，首屏缺少 `pcursor` 本身不构成参数错误。保留原 Web 回执。独立 App 样本 `16eb4f8e-7d1d-40e2-8593-02570ee3fd37` 已成功：唯一 TikHub `native.t.api_bc64c9d98dbf724c` 调用，committed、HTTP/business 200、billed=true，13227 字节归档已校验，rootComments 共 11 条。后续服务器全量验证已通过：11 个唯一评论，正文/作者/发布时间/点赞/回复数各 11 条；评论与作者数值 ID 均安全，内部 photo_id 均超出安全整数范围，未用于身份；2 条回复预览不混入根评论。顶层 pcursor 实际为 no_more，按当前保守合同返回 unknown/不可继续。本轮接入同一纯解析器和固定 App 配方，待部署及统一入口验收，不再购原生样本。见 [本轮操作](../operations/post-comment-contract-calibration.md#reddit-已验收快手发布与单次统一入口验收)；快手本地统一路由已切换，运行容器尚待本轮发布。其他平台取得实际字段和游标证据后逐项迁移，不隐式重试或改写历史。RapidAPI 的旧 Twitter 评论代码在 Night-All，Hub 当前适配器只实现 search/crawl/user-info，不能靠改配置直接调用评论。
+快手 usage `ce942beb-a379-4e18-b62f-ee69cc24b3d3` 已确认是 TikHub Web 评论上游 HTTP 400，Hub 保存 committed 502，835 字节错误归档 SHA 校验通过。`billed:null` 表示供应商计费未知；上游错误声称未扣费，不据此改写账本。`photo_id` 为 15 位字符串，首屏缺少 `pcursor` 本身不构成参数错误。保留原 Web 回执。独立 App 样本 `16eb4f8e-7d1d-40e2-8593-02570ee3fd37` 已成功：唯一 TikHub `native.t.api_bc64c9d98dbf724c` 调用，committed、HTTP/business 200、billed=true，13227 字节归档已校验，rootComments 共 11 条。后续服务器全量验证已通过：11 个唯一评论，正文/作者/发布时间/点赞/回复数各 11 条；评论与作者数值 ID 均安全，内部 photo_id 均超出安全整数范围，未用于身份；2 条回复预览不混入根评论。顶层 pcursor 实际为 no_more，按当前保守合同返回 unknown/不可继续。本轮接入同一纯解析器和固定 App 配方，部署与统一入口验收均通过，不再购原生样本。见 [本轮操作](../operations/post-comment-contract-calibration.md#reddit-已验收快手发布与单次统一入口验收)；快手宿主机/Public/Admin 六文件 SHA 已对齐 TikHub App，发布版本差异已解决。其他平台取得实际字段和游标证据后逐项迁移，不隐式重试或改写历史。RapidAPI 的旧 Twitter 评论代码在 Night-All，Hub 当前适配器只实现 search/crawl/user-info，不能靠改配置直接调用评论。
+
+快手统一入口验收 usage `2274fe73-43e4-4914-9f21-a3629b188d09` 已通过：HTTP200、返回 11 条、六项检查均 true；同 usage committed、唯一 TikHub bc64 调用成功且 billed=true，归档校验通过。分页 hasMore=null、continuationAvailable=false、paginationStatus=unknown，表示当前没有可证实的续页，不表示全帖评论已取完。保留 `kuaishou.unified-acceptance.json` 及原 Web/App 标记，不重复购买或验收。见 [快手验收记录](../operations/post-comment-contract-calibration.md#快手统一入口首屏验收已通过)。
+
+微博替代接入进行中：两个精确 TikHub 主评论 native 端点的成功历史查询未命中；canonical `ffe325bc-1e9a-4cab-8693-4d866252c88a` 的版本及当前来源 ID 已核验一致，保存的 comment_count 是安全整数 0，并非字符串指标遗漏。停止历史排查。用户已再次授权少量付费请求，新增独立微博批次：最多一次 TikHub Web 热门搜索，再从同一次调用的完整 SHA 校验归档选正评论量目标，最多采购一页主评论；无合格目标或证据不完整则停止。脚本和 57 项相关测试通过，生产尚未执行；统一微博路由仍为 JustOne。见 [两次以内采样命令](../operations/post-comment-contract-calibration.md#微博旧候选确认为零评论授权重新采样最多两次)。
 
 ## 入口与交付
 
@@ -34,7 +38,7 @@ postId、contentId、平台专用 ID、规范 URL 至少一项；多项能解析
 | --- | --- |
 | Twitter | TikHub `t.api_3cd88a6621a01120` |
 | Reddit | TikHub `t.api_c7f50cf300d63960`（统一入口验收通过） |
-| 快手 | 本地 TikHub `t.api_bc64c9d98dbf724c`；完整归档已验证，服务器检查仍为 JustOne，待核对发布版本及验收 |
+| 快手 | TikHub `t.api_bc64c9d98dbf724c`（统一入口验收通过） |
 | 微博 | JustOne `j.api_19390f4ea0fef847` |
 | 抖音 | JustOne `j.api_cfe7c89d64177567` |
 | TikTok | JustOne `j.api_9302e45524da8400` |
@@ -72,7 +76,7 @@ Reddit 同样每个请求最多消费一个供应商页，不为了补足 count 
 
 Twitter 字段映射、单页采购和分页缓存已本地验证，服务器完整归档解析、运行容器路由检查及旧 URL 的真实首屏业务验收均已通过。此次 Hub 发布使用 MX_INSIGHT_SYNC_LAUNCHER=0、MX_SMOKE_DATA=0；验收完成后无需重新部署或重复采购。本次改动没有新增 DDL，标准发布仍会运行其既有迁移/索引维护。两个显式开关会覆盖 .env.internal，分别跳过 Launcher Secret/配置同步与重启，以及真实数据 POST smoke；不操作 MX-H2I 登录和联网配置。
 
-本轮验收 Key 的 twitter、social.comments.list 授权与 TikHub 就绪预检均通过；其他业务 Key 仍须具有平台+评论能力，并满足现有价格/开关、预算和余额门禁。表内七个 JustOne 路由仍受余额阻塞，快手待本轮部署及统一业务验收，Reddit 已闭环；文档可见不代表已就绪。Twitter 的 [单次验收记录](../operations/post-comment-contract-calibration.md#twitter-统一入口首屏验收已通过) 已闭环，保留原验收标记和幂等键。
+本轮验收 Key 的 twitter、social.comments.list 授权与 TikHub 就绪预检均通过；其他业务 Key 仍须具有平台+评论能力，并满足现有价格/开关、预算和余额门禁。表内七个 JustOne 路由仍受余额阻塞，Twitter、Reddit、快手已完成统一入口首屏验收；文档可见不代表已就绪。Twitter 的 [单次验收记录](../operations/post-comment-contract-calibration.md#twitter-统一入口首屏验收已通过) 已闭环，保留原验收标记和幂等键。
 
 本次首屏返回 hasMore=true、continuationAvailable=true、paginationStatus=continuable；按当前 Twitter 手动分页实现，这表示已取得的供应商页还有缓存余量。不能据此把本次新归档也写成 36 条，或保证后续供应商页非空。线上只验收了首屏；余量交付、续页和精确回放仍以已有本地回归为证据，未追加线上验收调用。第二份诊断中的 supplierHttpCallsMade=0、databaseWritesMade=0 仅指只读核对过程，前面的真实业务请求已正常计费一次。
 

@@ -29,6 +29,17 @@ test('comment contract inspection returns field structure without scalars or arb
   assert.deepEqual(result.fields.find(row => row.path === '$.data.has_more').signals, { true: 1 })
 })
 
+test('Weibo identity and interaction field names remain visible without their values', () => {
+  const result = inspectPostCommentArchive(archive({ data: { data: [{ idstr: '9876543210123456',
+    user: { idstr: 'private-author' }, like_counts: 7654321, total_number: 7654322 }] } }))
+  assert.deepEqual(result.fields.find(row => row.path === '$.data.data[].idstr').types, { string: 1 })
+  assert.deepEqual(result.fields.find(row => row.path === '$.data.data[].user.idstr').types, { string: 1 })
+  assert.deepEqual(result.fields.find(row => row.path === '$.data.data[].like_counts').types, { number: 1 })
+  assert.deepEqual(result.fields.find(row => row.path === '$.data.data[].total_number').types, { number: 1 })
+  const output = JSON.stringify(result)
+  for (const value of ['9876543210123456', 'private-author', '7654321', '7654322']) assert.equal(output.includes(value), false)
+})
+
 test('all raw byte parsing requires matching size and SHA and remains bounded', () => {
   const row = archive({ data: { comments: [] } })
   for (const changed of [{ body_size: row.body_size + 1 }, { actual_body_size: row.body_size + 1 }, { body_sha256: '0'.repeat(64) }]) {

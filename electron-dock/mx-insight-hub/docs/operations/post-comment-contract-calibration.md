@@ -1,6 +1,6 @@
 # 单帖评论：限定次数的服务器字段校验
 
-日期：2026-11-02。Twitter 原生校准与旧 URL 生产首屏验收均已完成，见本文末尾结果；保留所有标记，不再执行下方历史 Twitter 探测/验收命令。用户已确认 JustOne 余额为零，剩余平台使用 TikHub 候选校准（probe v2），不执行旧 JustOne 版本命令。原生 HTTP 成功、官方例子或搜索附带评论不能替代统一入口验收。
+日期：2026-11-02。Twitter、Reddit、快手原生校准与旧 URL 生产首屏验收均已完成，见本文各阶段及末尾结果；保留所有标记，不再执行下方这三个平台的历史探测/验收命令。用户已确认 JustOne 余额为零，剩余七个平台仍须逐项核对替代能力，不执行旧 JustOne 版本命令，也不换目录绕过现有三平台采样边界。原生 HTTP 成功、官方例子或搜索附带评论不能替代统一入口验收。
 
 `inspect-post-comment-contract.mjs` 只读 Hub 保存的供应商原始响应，不发 HTTP。`probe-post-comment-contract.mjs` 使用 Hub 已有原生转发入口，各平台只申请一次首屏，不直连供应商。当前固定 TikHub 的 Twitter、Reddit、快手三个平台，供本次已经授权的少量付费验证使用。Instagram 已有历史响应可先复用，不追加付费探测。
 
@@ -28,7 +28,7 @@ kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
 | Reddit | `native.t.api_c7f50cf300d63960` | `post_id`（`t3_` 前缀）、`need_format=false` |
 | 快手 | `native.t.api_3cb972ba91c8fe44` | `photo_id` |
 
-Twitter 已切换 TikHub 并完成统一首屏验收；Reddit、快手的统一路由仍是 JustOne，上表对应 TikHub 端点尚待实际样本校准。不能直接用 JustOne 的字段解析器处理 TikHub 响应；先核对正文、作者、时间及分页，再修改对应统一路由。采样无需部署服务，需确认 TikHub 现有凭据、目标原生操作的审核价格和启用状态；不修改余额或扩大预算。若拒绝，贴回结果，不自动换渠道补买。
+历史阶段说明：本节编写时 Twitter 已完成统一首屏验收，Reddit、快手仍是 JustOne，等待上表 TikHub 端点样本校准。当前三个平台均已完成迁移与首屏验收，以下原生采样命令不再执行。不能直接用 JustOne 的字段解析器处理 TikHub 响应；先核对正文、作者、时间及分页，再修改对应统一路由。采样无需部署服务，需确认 TikHub 现有凭据、目标原生操作的审核价格和启用状态；不修改余额或扩大预算。若拒绝，贴回结果，不自动换渠道补买。
 
 从下游现有采样目录读取 `twitter-*.request.json`、`reddit-*.request.json`、`kuaishou-*.request.json`。只接受首屏、明确的平台和一致的帖子标识；正文中 `postId`、`contentId` 或可解析的原文 URL 均可。样本中的 `method`、目标 URL、headers、cursor、params、count 和幂等键都不会作为执行指令使用。若同平台存在不同帖子首屏，报 `ambiguous_sample`，应先选择一个样本目录。
 
@@ -53,7 +53,7 @@ const preview = await runPostCommentProbe({
 
 拿到每个平台的 `requestId` 后，逐个运行上面的只读检查，把 probe 简要结果和 inspection JSON 贴回即可。新脚本的 requestId 只取持久 usage 响应头或错误 details；顶层临时 HTTP UUID 单独保存为 httpRequestId，不能拿它查询用量归档。如果 `requestId:null`，保留本地标记中的幂等键进行后台查询，不能因此认定请求未发生。
 
-剩余平台的样本核对不部署 Hub、不修改历史失败响应、不操作 MX-H2I 登录或联网配置。Reddit、快手需先在原生转发入口校准 TikHub 格式，再完成字段/分页实现与回归、发布和统一入口验收；旧失败请求的不可变回放保持原结果。Twitter 已完成上述首屏流程，不重复执行。
+样本核对本身不部署 Hub、不修改历史失败响应、不操作 MX-H2I 登录或联网配置。Reddit、快手已完成原生校准、字段/分页实现与回归、发布和统一入口首屏验收；旧失败请求的不可变回放保持原结果。Twitter 同样已完成，本节三个平台均不重复执行。
 
 
 ## request_not_found 时先读原始采样结果
@@ -877,3 +877,383 @@ BASH
 判断顺序：服务器 source.declaredRecipe.provider 仍为 justone，先同步完整 Hub 改动；服务器已 tikhub 而某 Pod 仍为 justone 或 hash 不一致，继续核对构建/导入/集群与 rollout 结果，暂不执行付费验收。所有当前容器与源码一致后再执行上一节完整运行路由检查，检查通过才继续保留防重标记的单次验收。不要为通过断言而仅改配置值、删除 marker、强制删 Pod 或重启 Launcher。
 
 本轮仅更新诊断文档与状态，未改运行代码；Bash/Node 语法及本地源码摘要已检查，未执行生产命令或供应商调用。等待服务器输出确认实际版本差异。
+
+### 快手发布版本已对齐：继续统一入口单次验收
+
+两次服务器回传已定位并解决版本差异。第一次服务器 HEAD `af1f07010cad8db22666eab1347e535bc875f58c` 的源码配方仍是 JustOne，Public/Admin 的六个文件 SHA256 均与宿主机一致，同节点、同镜像；直接原因是未同步包含快手切换的源码。后续服务器 HEAD `1089e532a51a530eb9eaf0bd29db4ff7f716bd51`，宿主机/Public/Admin 六个文件均与本地 TikHub App 版本一致，配方为 `/api/v1/kuaishou/app/fetch_video_comment`。Public `mx-insight-hub-public-68656bc769-xd8kc` 与 Admin `mx-insight-hub-admin-5c58b86489-rlml5` 均 Ready、未删除，同节点 `mx-internal-server`、同镜像 `sha256:c001eb6cf3cc5842422b59006a8563a2934d92edf091a047e1c99ee39d586a04`。发布版本已对齐，不再重复 Git 同步、部署或镜像诊断；这仍不是统一入口的业务验收结果。
+
+下一步使用“Reddit 已验收，快手发布与单次统一入口验收”一节现有命令，去掉 `MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh deploy` 一行，保留 Public 纯运行路由断言、Key 输入和 ACCEPT 块。命令固定在服务器 Hub 根目录，复用已成功的 App 来源 `16eb4f8e-7d1d-40e2-8593-02570ee3fd37`，免费预检后最多请求一次旧统一 URL，再只读核对同一 usage 的供应商证据。已有 `kuaishou.unified-acceptance.json` 则停止，不换目录、不删 marker；失败有持久 requestId 时只重做其归档检查，不重新采购。原 Twitter、Reddit 及快手 Web/App 回执全部保留。
+
+预期收到运行配方摘要、`kuaishou-comments-runtime-verification.v1` 和 `kuaishou-unified-provider-evidence.v1`；后两者均 verified=true 才能闭环。新响应不必仍为 11 条；`no_more` 仍按已验证保守合同返回 unknown，不能强制改为 exhausted。本轮只更新证据状态，截去部署后的 Bash/Node 语法及本地相同模块的完整路由断言通过，没有代理生产调用、运行代码、数据库、Launcher 或 H2I 变更。
+
+### 快手统一入口首屏验收已通过
+
+操作者回传运行断言通过：TikHub `t.api_bc64c9d98dbf724c`、manualProviderPagination=true。统一旧 URL `/api/v1/search/post-comments` 的 usage `2274fe73-43e4-4914-9f21-a3629b188d09`，幂等键 `kuaishou-comments-acceptance-v1-6c90d52e-cefd-44d2-953f-b28cd8ac6c66`，请求摘要 SHA256 `7ebd241348c94e08fe32792c6188bce0d87dc7abc41fcf327d4d93644f1553e3`。免费预检 HTTP200，kuaishou、social.comments.list 授权及 TikHub App 原生就绪均通过；随后恰好一次 Hub POST，HTTP200、verified=true、contractValid=true，合同/条目/身份/字段/采购/分页六项均通过，返回 11 条评论。
+
+同 usage 的独立只读证据 verified=true：platform=kuaishou、committed、HTTP200；恰好一次 TikHub `native.t.api_bc64c9d98dbf724c` 调用 succeeded、HTTP/business200、billed=true、errorCode=null，archiveVerified=true。第二份证据里的 supplierHttpCallsMade=0/databaseWritesMade=0 仅说明读取证据未追加采购或写入，前面的业务请求确实计费一次。
+
+交付分页为 hasMore=null、continuationAvailable=false、paginationStatus=unknown，符合保守合同：本页可交付，没有已证实的续页入口，不宣称所有评论已取完。原 App 保存样本的 no_more 已校准；本次摘要没有公开供应商游标值，不据此推断新归档必然出现同一哨兵。不要自动把 page 加一或换键重买以尝试补页。
+
+至此 Twitter、Reddit、快手的统一入口首屏均验收完成，无需重部署、原生重采或再次验收。固定服务器 Hub 根目录 `.hub-comment-contract-probes-v1` 内的原始/认证恢复/会话/App/统一验收标记全部保留，特别是 `kuaishou.json`、`kuaishou.app.json`、`kuaishou.unified-acceptance.json`；旧 Web 400、billed=null 的证据仍保持未知，不改写历史账本。其余七个 JustOne 平台仍受余额阻塞，小红书/Instagram/YouTube 原已是 TikHub 但本轮未新增统一入口生产验收；不能宣称全部平台闭环。优先核对原需求中的微博候选及已有归档，暂无新增付费动作或架构/存储变更。本轮仅记录服务器验收证据及更新当前状态，无运行代码、DDL、Launcher 或 MX-H2I 登录/联网变更。
+
+
+### 下一步微博：先查已保存的主评论归档
+
+原需求优先使用微博评论。当前仍是 JustOne 的七个平台为微博、抖音、TikTok、知乎、LinkedIn、Bilibili、Facebook。微博有两条已登记 TikHub 主评论候选：Web `t.api_631f7f6fd007cba9`（id/count/max_id），App `t.api_ac75edddcf5bb304`（status_id/max_id/sort_type）。子评论 `t.api_11c128f19504d074` 不替代主评论。现有 inspector 已识别两条主评论端点，但统一投影尚未校准，不能只改 provider 后上线。
+
+下方 Admin stdin 命令只读最近 5000 条 TikHub 调用的固定元数据，利用现有 `(provider_key, started_at DESC)` 索引；在有界切片内筛两个微博主评论端点，最多显示三个 usage UUID、状态和受限归档存在性，不取正文/请求目标/凭据、不发供应商 HTTP、不写数据库。只读事务、4s 语句/1s 锁/6s 客户端超时；第四条仅判断返回结果是否截断。不存在于切片不等于历史全无；archivePresent=true 不等于内容已通过 SHA/字段验证。该发现没有改变现有三平台付费 probe 限制，没有新采样授权或绕过目录标记。
+
+```bash
+bash <<'BASH'
+set -euo pipefail
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - <<'NODE'
+import pg from 'pg';
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL,
+  max: 1, connectionTimeoutMillis: 5000, query_timeout: 6000,
+  options: '-c default_transaction_read_only=on -c statement_timeout=4000 -c lock_timeout=1000 -c idle_in_transaction_session_timeout=10000' });
+let client;
+try {
+  if (!process.env.DATABASE_URL) throw new Error('database_url_required');
+  client = await pool.connect();
+  await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+  const { rows } = await client.query(`
+    WITH recent AS MATERIALIZED (
+      SELECT id, usage_request_id, marketplace, endpoint_key, outcome,
+        http_status, business_code, billed, started_at
+      FROM external_platform.provider_calls
+      WHERE provider_key = 'tikhub'
+      ORDER BY started_at DESC LIMIT 5000
+    )
+    SELECT c.usage_request_id AS "requestId", c.endpoint_key AS endpoint,
+      c.outcome, c.http_status AS "httpStatus", c.business_code AS "businessCode", c.billed,
+      EXISTS (SELECT 1 FROM control.external_platform_restricted_raw_responses r
+        WHERE r.provider_call_id = c.id) AS "archivePresent"
+    FROM recent c WHERE c.marketplace = 'weibo'
+      AND c.endpoint_key IN ('native.t.api_631f7f6fd007cba9', 'native.t.api_ac75edddcf5bb304')
+    ORDER BY c.started_at DESC, c.id DESC LIMIT 4
+  `);
+  console.log(JSON.stringify({ revision: 'weibo-comment-archive-discovery.v1',
+    state: rows.length ? 'found' : 'not_found_in_recent_slice',
+    scanLimit: 5000, results: rows.slice(0, 3), truncated: rows.length > 3,
+    supplierHttpCallsMade: 0, databaseWritesMade: 0,
+    boundary: 'Saved call metadata only. Archive presence does not verify its content; no match does not establish global absence.'
+  }, null, 2));
+} catch (error) {
+  console.error(JSON.stringify({ error: error.code === '57014' ? 'discovery_timed_out' : 'discovery_incomplete',
+    supplierHttpCallsMade: 0, databaseWritesMade: 0 }));
+  process.exitCode = 1;
+} finally {
+  if (client) { await client.query('ROLLBACK').catch(() => {}); client.release(); }
+  await pool.end();
+}
+NODE
+BASH
+```
+
+找到后按返回 requestId 使用现有 `inspect-post-comment-contract.mjs` 只读核对账本、精确字节归档及结构，再准备微博纯解析；没有找到则另行选择有界历史范围或保存的帖子目标，当前命令不会自动采集。Bash/Node 语法及实际表/索引定义已核对；尚未执行生产查询。
+
+
+### 微博最近 5000 次调用未命中：按端点查历史并找原帖候选
+
+操作者回传 `weibo-comment-archive-discovery.v1`：not_found_in_recent_slice、scanLimit=5000、results=[]、truncated=false，零供应商 HTTP/数据库写入。这仅排除了最近切片中的两个微博主评论端点，不证明全部历史没有归档。下一步不重复该切片，不发付费请求。
+
+本地迁移定义保留 `(provider_key, operation, endpoint_key, outcome, completed_at DESC)` 索引。下列查询针对两个准确的 native operation/endpoint、succeeded 分别取最近四条（只返回前三条，第四条用于截断标记），不再受最近 5000 次跨端点调用覆盖；存在归档仍待 SHA/请求目标/字段核验。若无满足微博/200/成功计费/归档存在的候选，则在 night-all.search.v1 与 night-all.compat.v1 各先按 dataset/platform/event_time/id 取最新 50 条，再筛未删除原帖并选数字 external_id 候选，优先已有评论数为正的观测。查询失败由 savepoint 隔离并报告 timed_out/read_failed；4s 语句、1s 锁、6s 客户端超时。索引定义已本地核对，未声称生产执行计划或索引在线状态已验证。
+
+输出只有 usage UUID、canonical UUID、固定端点/数据集、状态及计数/布尔值，不输出平台 ID、URL、正文、作者或凭据。canonical 数字字符串只是候选：历史通用映射可能把已舍入 Number 转成字符串，后续必须按固定 UUID 核验原始来源再准备采样；微博 URL 末段可能为 base62 bid/mblogid，不直接当数字 MID，也不自动转换。positiveSavedCommentCount 不保证实时仍有评论。
+
+```bash
+bash <<'BASH'
+set -euo pipefail
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - <<'NODE'
+import pg from 'pg';
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1,
+  connectionTimeoutMillis: 5000, query_timeout: 6000,
+  options: '-c default_transaction_read_only=on -c statement_timeout=4000 -c lock_timeout=1000 -c idle_in_transaction_session_timeout=10000' });
+let client;
+try {
+  if (!process.env.DATABASE_URL) throw new Error('database_url_required');
+  client = await pool.connect();
+  await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+  async function read(sql, values) {
+    await client.query('SAVEPOINT evidence_read');
+    try {
+      const result = await client.query(sql, values);
+      await client.query('RELEASE SAVEPOINT evidence_read');
+      return { state: 'read', rows: result.rows };
+    } catch (error) {
+      await client.query('ROLLBACK TO SAVEPOINT evidence_read');
+      await client.query('RELEASE SAVEPOINT evidence_read');
+      return { state: error.code === '57014' ? 'timed_out' : 'read_failed', rows: [] };
+    }
+  }
+  const scans = [], calls = [], targets = [];
+  for (const endpoint of ['native.t.api_631f7f6fd007cba9', 'native.t.api_ac75edddcf5bb304']) {
+    const result = await read(`
+      WITH recent AS MATERIALIZED (
+        SELECT id, usage_request_id, marketplace, http_status, business_code, billed, completed_at
+        FROM external_platform.provider_calls
+        WHERE provider_key='tikhub' AND operation=$1 AND endpoint_key=$1 AND outcome='succeeded'
+        ORDER BY completed_at DESC LIMIT 4
+      )
+      SELECT c.usage_request_id AS "requestId", c.marketplace AS platform,
+        c.http_status AS "httpStatus", c.business_code AS "businessCode", c.billed,
+        EXISTS (SELECT 1 FROM control.external_platform_restricted_raw_responses r
+          WHERE r.provider_call_id=c.id) AS "archivePresent"
+      FROM recent c ORDER BY c.completed_at DESC, c.id DESC
+    `, [endpoint]);
+    scans.push({ source: 'endpoint_history', endpoint, state: result.state,
+      matchedRows: result.rows.length, truncated: result.rows.length > 3 });
+    calls.push(...result.rows.slice(0, 3).map(row => ({ endpoint, ...row })));
+  }
+  const archiveCandidates = calls.filter(c => c.platform === 'weibo' && c.httpStatus === 200
+    && c.businessCode === 200 && c.billed === true && c.archivePresent);
+  if (!archiveCandidates.length) {
+    for (const dataset of ['night-all.search.v1', 'night-all.compat.v1']) {
+      const result = await read(`
+        WITH recent AS MATERIALIZED (
+          SELECT id, event_time FROM core.canonical_records
+          WHERE dataset_id=$1 AND platform='weibo'
+          ORDER BY event_time DESC, id DESC LIMIT 50
+        )
+        SELECT c.id,
+          CASE WHEN length(c.external_id)<=30 THEN c.external_id END AS external_id,
+          CASE WHEN length(c.stable_fields #>> '{metrics,comments}')<=20
+            THEN c.stable_fields #>> '{metrics,comments}' END AS comment_count
+        FROM recent r JOIN core.canonical_records c ON c.id=r.id
+        WHERE c.object_type='post' AND c.deleted_at IS NULL
+        ORDER BY r.event_time DESC, r.id DESC
+      `, [dataset]);
+      scans.push({ source: 'canonical', dataset, state: result.state,
+        postRows: result.rows.length, sliceLimit: 50 });
+      const candidates = result.rows.filter(r => typeof r.external_id === 'string'
+        && /^[1-9][0-9]{0,29}$/.test(r.external_id)).map(r => ({
+          sourceKind: 'canonical', sourceId: r.id, dataset,
+          positiveSavedCommentCount: /^[0-9]{1,20}$/.test(r.comment_count ?? '')
+            && BigInt(r.comment_count) > 0n,
+          requiresSourceVerification: true
+        }));
+      candidates.sort((a, b) => Number(b.positiveSavedCommentCount) - Number(a.positiveSavedCommentCount));
+      if (candidates.length) targets.push(candidates[0]);
+    }
+  }
+  console.log(JSON.stringify({ revision: 'weibo-comment-evidence-discovery.v2',
+    state: archiveCandidates.length ? 'archive_candidate_found' : targets.length ? 'target_candidate_found'
+      : scans.some(s => s.state !== 'read') ? 'discovery_incomplete' : 'not_found_in_bounded_scan',
+    archiveCandidates, calls, targets, scans,
+    supplierHttpCallsMade: 0, databaseWritesMade: 0,
+    boundary: 'Saved metadata only. Archives require integrity and contract checks; target candidates require original ID verification. No automatic acquisition.'
+  }, null, 2));
+} catch {
+  console.error(JSON.stringify({ error: 'weibo_discovery_incomplete',
+    supplierHttpCallsMade: 0, databaseWritesMade: 0 }));
+  process.exitCode = 1;
+} finally {
+  if (client) { await client.query('ROLLBACK').catch(() => {}); client.release(); }
+  await pool.end();
+}
+NODE
+BASH
+```
+
+本轮未改变运行路由、付费 probe 三平台限制、标记目录、权限、计价或数据库结构；无需部署。Bash/Node 语法和固定 SQL 所用字段/索引已核对；这是待操作者执行的只读命令，本地没有生产查询或供应商调用。根据返回归档或目标 UUID 再进行精确核验，不重复全范围查找。
+
+
+### 微博原帖候选已定位：按固定 UUID 核验入库来源
+
+操作者回传 v2：两个准确的 TikHub 主评论 native operation/endpoint 成功历史查询均 read、matchedRows=0；night-all.search.v1 的有界切片返回 50 条原帖，从中选出 canonical `ffe325bc-1e9a-4cab-8693-4d866252c88a`，positiveSavedCommentCount=false、requiresSourceVerification=true；compat 切片无原帖。已有明确候选，下一步只读该 UUID，不重扫、不新增付费请求。
+
+false 不是零评论结论：标准搜索 normalizer 只接收数值 metrics.comments，原字符串计数可能未进入 canonical。下面在同一只读快照中按 canonical PK→当前 record_revision PK→revision ingest_run，再按确切 connector/stream/object_type/source_key UNIQUE 找当前 source_objects。只支持代码已确认的普通搜索来源 night-all/weibo.search_posts.v1 或 external-platform:tikhub/weibo.external-platform.v1；手工修复/未知来源不猜 source_key。原始来源和 revision 可能属于不同 run，分别展示，不把 current source 当成原 revision。Night-All 旧链不持续维护 source_object_revisions，故不拿其回填记录当最新原文，也不对 hashVersion=0 声称完整原始 hash 校验。
+
+每份 payload 最多读 128 KiB，只输出固定字段的类型、与 canonical ID 的匹配布尔值、评论量 positive/zero/unknown/unrecognized，以及内部 run/request/call UUID。`saved_source_identity_matched` 仅证明保存入库输入中实际采用的字符串 ID 与 canonical 一致；不证明上游从未预处理、不替代供应商精确字节归档校验，也不保证实时存在评论。返回的 providerCallId/connectorCallId 可用于后续精确读取，无需通过 requestId 猜某次调用。无值输出、无自动采集、无数据库写入。
+
+```bash
+bash <<'BASH'
+set -euo pipefail
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-admin -c admin -- \
+  node --input-type=module - <<'NODE'
+import pg from 'pg';
+const sourceId = 'ffe325bc-1e9a-4cab-8693-4d866252c88a';
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1,
+  connectionTimeoutMillis: 5000, query_timeout: 6000,
+  options: '-c default_transaction_read_only=on -c statement_timeout=4000 -c lock_timeout=1000 -c idle_in_transaction_session_timeout=10000' });
+const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+const type = v => v === undefined ? 'missing' : v === null ? 'null'
+  : typeof v === 'number' ? Number.isSafeInteger(v) ? 'safe_integer' : 'unsafe_or_noninteger_number'
+  : typeof v === 'string' ? 'string' : 'other';
+const identity = v => typeof v === 'string' && /^[1-9][0-9]{0,29}$/.test(v.trim()) ? v.trim()
+  : Number.isSafeInteger(v) && v > 0 ? String(v) : null;
+const metric = v => ({ type: type(v), state: v == null ? 'unknown'
+  : (typeof v === 'string' && /^[0-9]{1,20}$/.test(v) || Number.isSafeInteger(v) && v >= 0)
+    ? BigInt(v) > 0n ? 'positive' : 'zero' : 'unrecognized' });
+function fields(raw, expected) {
+  if (!object(raw)) return null;
+  const identities = ['externalId', 'id', 'content_id', 'weibo_id', 'idstr', 'post_id', 'status_id', 'mid']
+    .filter(key => Object.hasOwn(raw, key)).map(key => ({
+      field: key, type: type(raw[key]), matchesCanonical: identity(raw[key]) === expected
+    }));
+  const comments = [
+    ['metrics.comments', raw.metrics?.comments], ['comment_count', raw.comment_count],
+    ['comments_count', raw.comments_count], ['commentCount', raw.commentCount],
+    ['interaction.comment_count', raw.interaction?.comment_count]
+  ].map(([field, value]) => ({ field, ...metric(value) }));
+  return { identities, comments };
+}
+let client;
+try {
+  if (!process.env.DATABASE_URL) throw new Error();
+  client = await pool.connect();
+  await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+  const { rows } = await client.query(`
+    SELECT c.external_id, c.current_revision,
+      c.stable_fields #> '{metrics,comments}' AS canonical_comments,
+      v.parser_version, v.ingest_run_id AS revision_run_id,
+      octet_length(v.normalized_payload::text) AS revision_payload_bytes,
+      CASE WHEN octet_length(v.normalized_payload::text)<=131072
+        THEN v.normalized_payload END AS revision_payload,
+      r.connector_id, r.stream_id, r.request_id AS revision_request_id,
+      r.connector_call_id AS revision_connector_call_id,
+      r.external_platform_call_id AS revision_provider_call_id,
+      s.id AS source_object_id, s.ingest_run_id AS source_run_id,
+      s.last_seen_at, s.raw_payload_hash_version,
+      octet_length(s.raw_payload::text) AS source_payload_bytes,
+      CASE WHEN octet_length(s.raw_payload::text)<=131072
+        THEN s.raw_payload END AS source_payload,
+      sr.request_id AS source_request_id,
+      sr.connector_call_id AS source_connector_call_id,
+      sr.external_platform_call_id AS source_provider_call_id
+    FROM core.canonical_records c
+    LEFT JOIN core.record_revisions v
+      ON v.record_id=c.id AND v.revision=c.current_revision
+    LEFT JOIN ingest.ingest_runs r ON r.id=v.ingest_run_id
+    LEFT JOIN ingest.source_objects s
+      ON s.connector_id=r.connector_id AND s.stream_id=r.stream_id
+      AND s.object_type=c.object_type AND s.source_key=c.external_id
+      AND ((r.connector_id='night-all' AND r.stream_id='weibo.search_posts.v1')
+        OR (r.connector_id='external-platform:tikhub' AND r.stream_id='weibo.external-platform.v1'))
+    LEFT JOIN ingest.ingest_runs sr ON sr.id=s.ingest_run_id
+    WHERE c.id=$1::uuid AND c.dataset_id='night-all.search.v1'
+      AND c.platform='weibo' AND c.object_type='post' AND c.deleted_at IS NULL
+  `, [sourceId]);
+  if (rows.length !== 1 || identity(rows[0].external_id) !== rows[0].external_id) throw new Error();
+  const r = rows[0], raw = r.source_payload;
+  const selected = r.connector_id === 'night-all'
+    ? typeof raw?.externalId === 'string' && raw.externalId.trim() ? raw.externalId : raw?.id
+    : raw?.content_id;
+  const sourceIdentityMatched = object(raw) && typeof selected === 'string'
+    && identity(selected) === r.external_id;
+  console.log(JSON.stringify({ revision: 'weibo-comment-target-inspection.v1', sourceId,
+    state: sourceIdentityMatched ? 'saved_source_identity_matched' : 'source_identity_unverified',
+    canonical: { revision: r.current_revision, comments: metric(r.canonical_comments) },
+    revisionLineage: { parserVersion: r.parser_version, connector: r.connector_id,
+      stream: r.stream_id, runId: r.revision_run_id,
+      requestId: r.revision_request_id, connectorCallId: r.revision_connector_call_id,
+      providerCallId: r.revision_provider_call_id, payloadBytes: r.revision_payload_bytes },
+    revisionFields: fields(r.revision_payload, r.external_id),
+    currentSource: { present: Boolean(r.source_object_id), sourceObjectId: r.source_object_id,
+      payloadRead: object(raw), hashVersion: r.raw_payload_hash_version,
+      payloadBytes: r.source_payload_bytes,
+      runId: r.source_run_id, requestId: r.source_request_id,
+      connectorCallId: r.source_connector_call_id,
+      providerCallId: r.source_provider_call_id, lastSeenAt: r.last_seen_at,
+      sameRunAsCanonicalRevision: r.source_run_id != null && r.source_run_id === r.revision_run_id,
+      identityMatched: sourceIdentityMatched, fields: fields(raw, r.external_id) },
+    supplierHttpCallsMade: 0, databaseWritesMade: 0,
+    boundary: 'Only saved canonical and ingest input evidence. Current source may be newer than the canonical revision. No exact supplier-byte verification or live-comment guarantee; no automatic acquisition.'
+  }, null, 2));
+} catch {
+  console.error(JSON.stringify({ error: 'weibo_target_inspection_incomplete',
+    supplierHttpCallsMade: 0, databaseWritesMade: 0 }));
+  process.exitCode = 1;
+} finally {
+  if (client) { await client.query('ROLLBACK').catch(() => {}); client.release(); }
+  await pool.end();
+}
+NODE
+BASH
+```
+
+本轮仅准备上述服务器只读核验；实际候选字段还未回传，微博统一配方仍是 JustOne。Bash/Node 语法与 ID 安全整数/字符串、计数正数/零/缺失、输出不含 ID/正文的本地辅助检查通过，固定 SQL 字段/唯一键/来源规则已核对。无运行代码、存储、权限、付费 probe 或 MX-H2I 登录/联网变更。
+
+
+## 微博旧候选确认为零评论，授权重新采样最多两次
+
+2026-11-02 操作者回传固定候选 `ffe325bc-1e9a-4cab-8693-4d866252c88a` 的来源核验：canonical revision 1、版本输入和当前来源的原帖 ID 一致，评论数均为安全整数 0。版本和来源同属 run `d7ceda59-d98d-4736-bbe0-793d7b1cf985`、request `216d5c81-4074-4d2c-ad1a-86d55ef088e1`；来源 payload 6454 字节，hashVersion 1。此次只读结果不等于供应商原始字节或当前在线评论数证明；已足以结束对这一旧候选的排查。
+
+用户再次明确授权缺少历史记录时发起几次付费请求。本批次限定最多两个新 Hub POST：
+
+1. TikHub Web 高级搜索 `t.api_7b07a36b82baa693`，固定 `q=科技/search_type=hot/include_type=all/page=1`。
+2. 仅当第一步对应的唯一成功且已计费调用及完整归档 SHA 验证通过，并找到可保真原帖 ID 和正评论量时，TikHub Web 主评论 `t.api_631f7f6fd007cba9` 一页，`count=20`。无合格目标就停止，最多只采购搜索。
+
+参数核对依据：[官方高级搜索](https://docs.tikhub.io/381269425e0)、[官方实时搜索](https://docs.tikhub.io/381269427e0)、[官方主评论接口](https://docs.tikhub.io/381269409e0)。实时搜索文档说明其响应结构与高级搜索相同；本地已有实时搜索投影使用 `data.parsed_data.results`，新选择器据此做受检查的候选解析。高级搜索文档没有完整真实响应例子，因此**仍待本次完整保存归档验证字段**；`parse_success=false` 或结构不符时停止，不追加搜索或猜测别的结构。
+
+新增 `server/ops/probe-weibo-comments.mjs` 并更新 `server/ops/inspect-post-comment-contract.mjs` 的微博结构字段白名单。只需同步这两份文件到服务器，无需部署镜像。使用之前同一个 Hub 根目录下的 `.hub-comment-contract-probes-v1`；独立标记为 `weibo.search.json` 和 `weibo.comments.json`。现存标记（包括失败、未知、未完成、软链接）阻止重购，文件与父目录均在派发前 fsync；不删除、不换目录重跑，也不修改旧通用 probe 的平台数限制。免费 capabilities GET 验证两个 native 授权及 ready；无隐式授权、重试、续页或详情请求。
+
+下面命令捕获私有目标，终端只打印回执与脱敏结构。`--prepare` 是只读内部模式，其 stdout 含原帖 ID，不能脱离封装单独执行后贴回。完整命令可从 zsh 或 bash 粘贴执行；输入 Key 不回显。任何错误都保留全部标记并贴回输出，不自行重采。
+
+```bash
+bash <<'BASH'
+set -euo pipefail
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+test -f server/ops/probe-weibo-comments.mjs || {
+  printf '%s\n' '请先同步 server/ops/probe-weibo-comments.mjs 和更新后的 inspect-post-comment-contract.mjs，无需部署。'
+  exit 1
+}
+read -r -s -p 'Hub Live API Key: ' MX_HUB_PROBE_API_KEY </dev/tty
+printf '\n'
+export MX_HUB_PROBE_API_KEY
+node --input-type=module <<'NODE'
+import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { runWeiboSearchProbe, runWeiboCommentProbe } from './server/ops/probe-weibo-comments.mjs';
+const reasons = new Set(['invalid_arguments', 'api_key_required', 'invalid_api_key',
+  'database_url_required', 'invalid_sample', 'source_receipt_unverified', 'source_read_failed',
+  'invalid_search_response', 'no_positive_comment_target', 'search_not_completed', 'comments_not_completed']);
+function admin(file, args) {
+  try {
+    return JSON.parse(execFileSync('kubectl', [
+      '-n', 'mx-insight-hub', 'exec', '-i', 'deployment/mx-insight-hub-admin', '-c', 'admin', '--',
+      'node', '--input-type=module', '-', ...args
+    ], { input: readFileSync(file, 'utf8'), encoding: 'utf8', timeout: 30000,
+      maxBuffer: 2 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }));
+  } catch (error) {
+    let reason = 'source_read_failed';
+    for (const line of String(error.stderr ?? '').split('\n')) {
+      try { const code = JSON.parse(line).error; if (reasons.has(code)) reason = code; } catch {}
+    }
+    throw new Error(reason);
+  }
+}
+const input = { sampleDirectory: process.cwd(), apiKey: process.env.MX_HUB_PROBE_API_KEY, apply: true };
+try {
+  const search = await runWeiboSearchProbe(input);
+  console.log(JSON.stringify(search, null, 2));
+  if (search.state !== 'http_response' || search.httpStatus !== 200
+    || search.requestIdSource !== 'usage_header') {
+    if (search.requestId) console.log(JSON.stringify(admin('server/ops/inspect-post-comment-contract.mjs',
+      ['--request-id', search.requestId]), null, 2));
+    throw new Error('search_not_completed');
+  }
+  const sample = admin('server/ops/probe-weibo-comments.mjs',
+    ['--prepare', search.requestId, search.idempotencyKey]);
+  console.log(JSON.stringify({ revision: 'weibo-comment-search-selection.v1',
+    sourceRequestId: sample.sourceRequestId, archiveVerified: true,
+    searchItemCount: sample.searchItemCount, positiveCandidateCount: sample.candidateCount,
+    positiveCommentTargetSelected: true, supplierHttpCallsMade: 0, databaseWritesMade: 0 }, null, 2));
+  const comments = await runWeiboCommentProbe({ ...input, sample });
+  console.log(JSON.stringify(comments, null, 2));
+  if (comments.requestId) console.log(JSON.stringify(admin('server/ops/inspect-post-comment-contract.mjs',
+    ['--request-id', comments.requestId]), null, 2));
+  if (comments.state !== 'http_response' || comments.httpStatus !== 200
+    || comments.requestIdSource !== 'usage_header') throw new Error('comments_not_completed');
+} catch (error) {
+  console.error(JSON.stringify({ error: reasons.has(error.message) ? error.message : 'weibo_calibration_stopped',
+    action: 'preserve_all_markers_and_report_output' }));
+  process.exitCode = 1;
+}
+NODE
+BASH
+```
+
+本地验证：新批次测试 19 项、通用归档检查 26 项、快手归档回归 12 项，共 57 项通过；均为模拟 HTTP/数据库与临时文件，无真实采购。Bash 封装、内嵌 Node 与新模块语法通过。当前未执行上述生产命令；后续仍需真实微博评论字段验证、运行投影接入、发布及统一入口验收，不能把原生采样准备当作迁移完成。微博统一配方仍是 JustOne；没有变更数据库模式、权限、计费设置或 MX-H2I 登录/联网。
