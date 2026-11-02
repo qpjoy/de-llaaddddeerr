@@ -269,7 +269,7 @@ export function inspectPostCommentArchive(row, options = {}) {
       pagination: { hasMore: parsed.providerPage.hasMore, continuationAvailable: Boolean(parsed.providerPage.nextParams),
         stopReason: parsed.providerPage.stopReason === 'continuation_unproven' ? 'continuation_unproven' : null,
         cursorState: kuaishouCursorState(payload, options.kuaishouContinuation) },
-      boundary: 'All root comments validated by the candidate pure parser against the saved native request target and response echo. Numeric precision is summarized without values. Reply previews are not projected as root comments. This does not activate runtime routing. No HTTP, canonical writes or billing mutations.'
+      boundary: 'All root comments validated by the same pure parser used by the runtime projector against the saved native request target and response echo. Numeric precision is summarized without values. Reply previews are not projected as root comments. This does not activate runtime routing. No HTTP, canonical writes or billing mutations.'
     } }
   }
   if (options.redditProjectionValidator) {

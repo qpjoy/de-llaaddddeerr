@@ -10,7 +10,7 @@ export const POST_COMMENTS_PATH = '/api/v1/data/social/post-comments'
 const definitions = [
   ['twitter', 'tikhub', '/api/v1/twitter/web/fetch_post_comments', 'tweet_id', ['cursor'], []],
   ['reddit', 'tikhub', '/api/v1/reddit/app/fetch_post_comments', 'post_id', ['after'], []],
-  ['kuaishou', 'justone', '/api/kuaishou/get-video-comment/v1', 'videoId', ['pcursor'], []],
+  ['kuaishou', 'tikhub', '/api/v1/kuaishou/app/fetch_video_comment', 'photo_id', ['pcursor'], []],
   ['instagram', 'tikhub', '/api/v1/instagram/v3/get_post_comments', 'code', ['min_id'], ['sort_order']],
   ['weibo', 'justone', '/api/weibo/get-post-comments/v1', 'mid', ['maxId'], ['sort']],
   ['douyin', 'justone', '/api/douyin/get-video-comment/v1', 'awemeId', ['page'], []],
@@ -34,6 +34,10 @@ const legacyRedditEndpoint = NATIVE_FORWARDING_ENDPOINTS.find(row => row.provide
 if (!legacyRedditEndpoint) throw new Error('Missing historical Reddit comment request contract')
 const legacyRedditRecipe = Object.freeze({ provider: 'justone', key: legacyRedditEndpoint.key,
   idField: 'postId', continuationFields: ['cursor'], optionFields: [] })
+const legacyKuaishouEndpoint = NATIVE_FORWARDING_ENDPOINTS.find(row => row.provider === 'justone' && row.path === '/api/kuaishou/get-video-comment/v1')
+if (!legacyKuaishouEndpoint) throw new Error('Missing historical Kuaishou comment request contract')
+const legacyKuaishouRecipe = Object.freeze({ provider: 'justone', key: legacyKuaishouEndpoint.key,
+  idField: 'videoId', continuationFields: ['pcursor'], optionFields: [] })
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const invalid = message => { throw new AppError(400, 'invalid_post_comments_request', message) }
 const scalar = value => typeof value === 'string' && value.length <= 8192 && !value.includes('\0') ? value
@@ -135,7 +139,8 @@ function paramsFor(recipe, params, rawCursor) {
   if (recipe.idField === 'note_id' && initialParams.cursor && (initialParams.index == null || initialParams.pageArea == null)) invalid('Xiaohongshu continuation needs cursor, index and pageArea')
   return { options, initialParams }
 }
-export function normalizePostCommentsRequest(body, { businessId, maxPageSize = 100, allowHistoricalRedditCursor = false } = {}) {
+export function normalizePostCommentsRequest(body, { businessId, maxPageSize = 100,
+  allowHistoricalRedditCursor = false, allowHistoricalKuaishouCursor = false } = {}) {
   if (!object(body) || Object.keys(body).some(key => !fields.has(key))) invalid('Unsupported post comments request fields')
   for (const field of ['businessId', 'business_id']) if (body[field] != null && body[field] !== businessId) invalid('businessId must match the authenticated consumer')
   const platform = postCommentsPlatform(body.platform), recipe = POST_COMMENTS_RECIPES[platform]
@@ -161,13 +166,22 @@ export function normalizePostCommentsRequest(body, { businessId, maxPageSize = 1
   if (legacyRedditCursor && !allowHistoricalRedditCursor) {
     throw new AppError(400, 'invalid_cursor', 'Restart Reddit comments explicitly; legacy supplier cursors cannot resume through TikHub')
   }
-  const validationRecipe = legacyRedditCursor ? legacyRedditRecipe : recipe
+  // Both suppliers name this field pcursor. A raw token cannot establish its
+  // supplier, so only a scoped Hub cursor may resume a new TikHub traversal.
+  // An explicitly empty pcursor remains a first-page input with its old hash.
+  const legacyKuaishouCursor = platform === 'kuaishou' && ((!signedCursor && cursor != null)
+    || object(suppliedParams) && Object.hasOwn(suppliedParams, 'pcursor') && suppliedParams.pcursor !== '')
+  if (legacyKuaishouCursor && !allowHistoricalKuaishouCursor) {
+    throw new AppError(400, 'invalid_cursor', 'Restart Kuaishou comments explicitly; raw supplier cursors cannot resume through TikHub')
+  }
+  const validationRecipe = legacyRedditCursor ? legacyRedditRecipe : legacyKuaishouCursor ? legacyKuaishouRecipe : recipe
   const { options, initialParams } = paramsFor(validationRecipe, suppliedParams, signedCursor ? null : cursor)
   if (signedCursor && Object.keys(initialParams).length) invalid('Do not combine a Hub cursor with provider continuation parameters')
   const identity = { platform, postId: ids[0], count, includeRaw: body.includeRaw === true, options }
   const request = { ...identity, cursor, page, initialParams, operation: 'comments', path: POST_COMMENTS_PATH,
     pageSize: count, totalLimit: count, jobs: [{ id: createHash('sha256').update(JSON.stringify(identity)).digest('hex'), provider: recipe.provider }],
-    fingerprintBody: { ...identity, initialParams }, ...(legacyRedditCursor ? { legacyRedditCursor: true } : {}) }
+    fingerprintBody: { ...identity, initialParams }, ...(legacyRedditCursor ? { legacyRedditCursor: true } : {}),
+    ...(legacyKuaishouCursor ? { legacyKuaishouCursor: true } : {}) }
   // Validate the fixed provider parameter types before any reservation. Runtime
   // availability is checked separately after exact historical replay.
   const normalized = normalizeNativeForwardingRequest(validationRecipe.key, { params: providerQuery(request, validationRecipe, initialParams) })
@@ -184,7 +198,7 @@ function providerQuery(request, recipe, continuation) {
     ...(request.platform === 'reddit' && recipe.provider === 'tikhub' ? { need_format: false } : {}) }
 }
 export function buildPostCommentsDispatch(request, job = {}, buffer = null) {
-  if (request.legacyRedditCursor || request.legacyProviderCursor) throw new AppError(400, 'invalid_cursor', 'Historical comment cursors are replay-only')
+  if (request.legacyRedditCursor || request.legacyKuaishouCursor || request.legacyProviderCursor) throw new AppError(400, 'invalid_cursor', 'Historical comment cursors are replay-only')
   const recipe = POST_COMMENTS_RECIPES[request.platform]
   if (!recipe?.available) throw new AppError(503, 'external_platform_contract_unverified', 'This platform requires comment response calibration before acquisition', { platform: request.platform })
   const continuation = buffer ? buffer.providerCursor : job.providerCursor ?? request.initialParams

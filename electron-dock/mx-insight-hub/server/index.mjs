@@ -503,10 +503,11 @@ export async function createRuntime(config = loadConfig()) {
   const postCommentsGateways = Object.fromEntries(Object.entries(POST_COMMENTS_RECIPES)
     .map(([platform, recipe]) => [platform, nativeSearchGateway(platform, recipe.provider)]))
   const postComments = (context, input) => {
-    // Route legacy Reddit cursor identities to the gateway's immutable-replay
+    // Route legacy supplier cursor identities to the gateway's immutable-replay
     // check. The workflow forbids using them for a new provider dispatch.
     const normalized = normalizePostCommentsRequest(input.body, {
       businessId: context.consumer.businessId, allowHistoricalRedditCursor: true,
+      allowHistoricalKuaishouCursor: true,
     })
     return postCommentsGateways[normalized.platform].postComments(context, {
       ...input, platform: normalized.platform, path: POST_COMMENTS_PATH,

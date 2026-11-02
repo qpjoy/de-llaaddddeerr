@@ -715,3 +715,85 @@ BASH
 无论成功或失败，有持久 requestId 就先核对同 usage 保存调用；若核对失败，保留验收 marker，仅按已打印 requestId 重做只读核对。回传快手全量解析摘要、Reddit 业务验收摘要与同 usage 的采购证据，不需要提供 Key、正文或平台 ID。任何新验收都会按既有门禁及计价结算；不因 diagnostic 里的 supplierHttpCallsMade=0 而认为前面的实际请求免费。
 
 本轮本地验证共 60 项通过：原 Twitter/Reddit 归档检查 25 项、快手候选解析 9 项、快手全量归档检查 12 项、Reddit 单次统一验收 14 项。新的生产解析器尚未用于快手运行路由；本轮代理未查询生产数据库、未发布服务、未新增付费请求。仅同步上述三个脚本/解析器文件即可执行两段命令，等待实际服务器输出。
+
+### Reddit 已验收，快手发布与单次统一入口验收
+
+Reddit 已闭环：旧 `/api/v1/search/post-comments` 的 usage `6fbf167b-9d1c-44f6-8ac0-5cd90fd3100b`，幂等键 `reddit-comments-acceptance-v1-e4df3667-de00-49e7-bb46-1b1d90e6955f`，HTTP 200，6 项合同检查均通过，返回 3 条、当前遍历 exhausted。同一 usage committed，唯一 TikHub c7 调用成功/计费/归档通过。保留原生及统一验收 marker，不再采购 Reddit 样本；这不是所有帖子、所有分页均已线上验证。
+
+快手保存 App usage `16eb4f8e-7d1d-40e2-8593-02570ee3fd37` 全量校验通过：11 条根评论全部投影且唯一，正文、作者 ID、发布时间、点赞、回复数各 11 条；评论/作者数字 ID 均安全。内部 photo_id 全部是不安全数字，明确不用于请求/根帖身份；公开 eID 来自保存请求并与响应 params.photo_id 一致。2 条回复预览仅归档，不当作根评论。顶层 pcursor 为 no_more；当前保守合同保持 hasMore=null、continuationAvailable=false、stopReason=continuation_unproven，未自动认定 exhausted。
+
+本地已将快手统一配方改为 TikHub App `t.api_bc64c9d98dbf724c`、`photo_id`，接入同一已验证纯解析器及每请求单页采购。旧首请求与回执指纹不变；旧非空原生 pcursor 因供应商来源无法区分仅历史原键重放，当前 Hub 签名游标可继续；原已排队 JustOne 入库保持其供应商归属。沿用现有 PG 原始归档、采购账本、social.comments.v1 和分页余量，无新 DDL。
+
+先同步本轮完整 Hub 代码（不只是 ops 文件），包括配方、workflow、index、projection、parser、ingest、API 文档和新增 `server/ops/verify-kuaishou-comments-runtime.mjs`。以下一次完成 Hub 发布、静态路由检查、免费授权预检、最多一次统一入口验收及同 usage 的只读采购证据核对。发布开关保持 Launcher 不同步/不重启，数据 smoke 不采集。标准部署仍执行已有迁移/索引维护。
+
+```bash
+bash <<'BASH'
+set -e
+cd /root/mx/workspace/de-llaaddddeerr/electron-dock/mx-insight-hub
+MX_INSIGHT_SYNC_LAUNCHER=0 MX_SMOKE_DATA=0 bash scripts/manage.sh deploy
+
+kubectl -n mx-insight-hub exec -i deployment/mx-insight-hub-public -c api -- \
+  node --input-type=module - <<'CHECK'
+import assert from 'node:assert/strict';
+import { POST_COMMENTS_RECIPES, buildPostCommentsDispatch } from '/app/server/contracts/post-comments.mjs';
+import { normalizePostCommentsDelivery } from '/app/server/external-platforms/post-comments-workflow.mjs';
+const recipe = POST_COMMENTS_RECIPES.kuaishou;
+const request = normalizePostCommentsDelivery({ platform: 'kuaishou', contentId: 'fixturePhoto123', count: 20 },
+  { context: { consumer: { businessId: 'runtime-contract-check' } }, maxPageSize: 100, codec: {} });
+const dispatch = buildPostCommentsDispatch(request);
+assert.equal(recipe.provider, 'tikhub');
+assert.equal(recipe.key, 't.api_bc64c9d98dbf724c');
+assert.equal(dispatch.endpointPath, '/api/v1/kuaishou/app/fetch_video_comment');
+assert.equal(dispatch.upstreamQuery.photo_id, 'fixturePhoto123');
+assert.equal(request.manualProviderPagination, true);
+assert.equal(POST_COMMENTS_RECIPES.twitter.key, 't.api_3cd88a6621a01120');
+assert.equal(POST_COMMENTS_RECIPES.reddit.key, 't.api_c7f50cf300d63960');
+console.log(JSON.stringify({ state: 'kuaishou_comments_runtime_updated', provider: recipe.provider,
+  nativeKey: recipe.key, manualProviderPagination: request.manualProviderPagination, supplierHttpCallsMade: 0 }, null, 2));
+CHECK
+
+read -r -s -p 'Hub Live API Key: ' MX_HUB_PROBE_API_KEY </dev/tty
+printf '\n'
+export MX_HUB_PROBE_API_KEY
+node --input-type=module <<'ACCEPT'
+import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { runKuaishouCommentsRuntimeVerification } from './server/ops/verify-kuaishou-comments-runtime.mjs';
+function admin(file, args) {
+  return JSON.parse(execFileSync('kubectl', [
+    '-n', 'mx-insight-hub', 'exec', '-i', 'deployment/mx-insight-hub-admin', '-c', 'admin', '--',
+    'node', '--input-type=module', '-', ...args
+  ], { input: readFileSync(file, 'utf8'), encoding: 'utf8', timeout: 30000,
+    maxBuffer: 2 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }));
+}
+try {
+  const sample = admin('server/ops/verify-kuaishou-comments-runtime.mjs', ['--prepare']);
+  const result = await runKuaishouCommentsRuntimeVerification({ sample, sampleDirectory: process.cwd(),
+    apiKey: process.env.MX_HUB_PROBE_API_KEY, apply: true });
+  console.log(JSON.stringify(result, null, 2));
+  if (result.requestId) {
+    const evidence = admin('server/ops/inspect-post-comment-contract.mjs', ['--request-id', result.requestId]);
+    const calls = evidence.calls.map(c => ({ provider: c.provider, platform: c.platform, endpoint: c.endpoint,
+      outcome: c.outcome, httpStatus: c.httpStatus, businessCode: c.businessCode, billed: c.billed,
+      errorCode: c.errorCode, archiveVerified: c.archive?.hashVerified === true }));
+    const verified = evidence.usage?.platform === 'kuaishou' && evidence.usage.status === 'committed'
+      && evidence.usage.httpStatus === 200 && !evidence.callsTruncated && calls.length === 1
+      && calls.every(c => c.provider === 'tikhub' && c.platform === 'kuaishou'
+        && c.endpoint === 'native.t.api_bc64c9d98dbf724c' && c.outcome === 'succeeded'
+        && c.httpStatus === 200 && c.businessCode === 200 && c.billed === true && c.archiveVerified);
+    console.log(JSON.stringify({ revision: 'kuaishou-unified-provider-evidence.v1', requestId: result.requestId,
+      verified, usage: evidence.usage, calls, supplierHttpCallsMade: 0, databaseWritesMade: 0 }, null, 2));
+    if (!verified) process.exitCode = 1;
+  }
+  if (result.verified !== true) process.exitCode = 1;
+} catch {
+  console.error(JSON.stringify({ error: 'kuaishou_acceptance_stopped', action: 'preserve_all_markers_and_report_output' }));
+  process.exitCode = 1;
+}
+ACCEPT
+BASH
+```
+
+验收只使用已经验证的 App 来源和同目录 kuaishou.app.json，目标及原 bodySha256 匹配后才允许调用；新增 kuaishou.unified-acceptance.json 在发请求前排他持久化，任何已有对象均阻止再次采购。不自动重试/续页、不改原 Web/App marker。验收不假定当前仍返回 11 条；空页不能算正样本通过，失败/未知也消费一次验收机会。若同 usage 只读核对失败，按已打印 requestId 单独核对，不能通过删 marker 重新购买。
+
+本轮本地 121 项相关回归通过，包括 33 项 gateway/runtime/入库、42 项合同/游标/API 文档、32 项投影、14 项一次性验收；typecheck 通过。命令静态语法及本地模块路由检查通过，代理未部署服务器或新增供应商调用。等待以上三份服务器摘要；其余七个 JustOne 评论路由仍受余额阻塞。

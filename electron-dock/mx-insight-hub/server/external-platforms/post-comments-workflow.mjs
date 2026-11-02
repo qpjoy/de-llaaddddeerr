@@ -11,16 +11,17 @@ const invalidCursor = () => new AppError(400, 'invalid_cursor', 'The comments cu
 
 export function normalizePostCommentsDelivery(body, { context, maxPageSize, codec, allowHistoricalProviderCursor = false }) {
   const request = normalizePostCommentsRequest(body, { maxPageSize, businessId: context.consumer.businessId,
-    allowHistoricalRedditCursor: allowHistoricalProviderCursor })
+    allowHistoricalRedditCursor: allowHistoricalProviderCursor, allowHistoricalKuaishouCursor: allowHistoricalProviderCursor })
   const { initialParams: _initialParams, cursor: _cursor, page: _page, ...identity } = request.fingerprintBody
   const recipe = POST_COMMENTS_RECIPES[request.platform]
-  // Twitter and Reddit changed suppliers. Old signed cursors must not resume a
+  // These platforms changed suppliers. Old signed cursors must not resume a
   // JustOne traversal through TikHub; historical receipt fingerprints stay put.
-  const migratedProvider = ['twitter', 'reddit'].includes(request.platform)
+  const migratedProvider = ['twitter', 'reddit', 'kuaishou'].includes(request.platform)
   const scopeHash = hash({ version: POST_COMMENTS_VERSION, ...identity,
     ...(migratedProvider ? { recipe: { provider: recipe.provider, key: recipe.key } } : {}) })
   const legacyScopeHash = migratedProvider ? hash({ version: POST_COMMENTS_VERSION, ...identity }) : null
-  let page = 1, expiresAt = Date.now() + 86400000, previousDeliveryId = null, legacyProviderCursor = request.legacyRedditCursor === true
+  let page = 1, expiresAt = Date.now() + 86400000, previousDeliveryId = null,
+    legacyProviderCursor = request.legacyRedditCursor === true || request.legacyKuaishouCursor === true
   const importedContinuation = Boolean(request.initialParams && Object.keys(request.initialParams).length)
   if (request.cursor?.startsWith('mxds1.')) {
     if (importedContinuation) throw invalidCursor()
@@ -29,7 +30,7 @@ export function normalizePostCommentsDelivery(body, { context, maxPageSize, code
       legacyProviderCursor = allowHistoricalProviderCursor && legacyScopeHash !== null && state.scopeHash === legacyScopeHash
       if (state.version !== POST_COMMENTS_VERSION || state.scopeHash !== scopeHash && !legacyProviderCursor
         || !uuid(state.previousDeliveryId) || !Number.isInteger(state.page) || state.page < 2 || state.page > 15
-        || !Number.isSafeInteger(state.expiresAt) || state.expiresAt <= Date.now() && !(request.platform === 'reddit' && legacyProviderCursor)
+        || !Number.isSafeInteger(state.expiresAt) || state.expiresAt <= Date.now() && !(['reddit', 'kuaishou'].includes(request.platform) && legacyProviderCursor)
         || body.page != null && Number(body.page) !== state.page) throw new Error('cursor')
       ;({ page, expiresAt, previousDeliveryId } = state)
     } catch { throw invalidCursor() }

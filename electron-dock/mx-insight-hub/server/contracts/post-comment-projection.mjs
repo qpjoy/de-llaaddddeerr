@@ -6,13 +6,14 @@ import { projectXhsResearch, XHS_RESEARCH_ENDPOINTS } from './xiaohongshu-resear
 import { projectYoutubeCommentsPage } from './youtube-comments.mjs'
 import { parseTikHubTwitterCommentPage } from './twitter-comment-page.mjs'
 import { parseTikHubRedditCommentPage } from './reddit-comment-page.mjs'
+import { parseTikHubKuaishouCommentPage } from './kuaishou-comment-page.mjs'
 
 // Instagram: anonymous observed shape in instagram-native.test.mjs, request
 // d24f7dcf-7508-427e-b273-ac18ab161ca6. XHS/YouTube reuse their released parsers.
 // A documented request endpoint alone does not verify a response projection.
 export const POST_COMMENT_PROJECTION_PLATFORMS = Object.freeze(['xiaohongshu', 'instagram', 'youtube',
   'twitter', 'reddit', 'kuaishou', 'weibo', 'douyin', 'tiktok', 'zhihu', 'linkedin', 'bilibili', 'facebook'])
-const TIKHUB_PLATFORMS = new Set(['xiaohongshu', 'instagram', 'youtube', 'twitter', 'reddit'])
+const TIKHUB_PLATFORMS = new Set(['xiaohongshu', 'instagram', 'youtube', 'twitter', 'reddit', 'kuaishou'])
 const VERSION = 'mx-insight-hub.post-comments.v1'
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const unusable = () => { throw new AppError(502, 'invalid_upstream_contract', 'Comment response does not match the released contract') }
@@ -111,6 +112,15 @@ function redditTikHub(payload, step, capturedAt) {
   return { projected: { acquiredItems: rows, profiles: [], providerPage: parsed.providerPage },
     records: rows.map((row, index) => canonical(row, parsed.comments[index].raw, capturedAt, 'tikhub')) }
 }
+function kuaishouTikHub(payload, step, capturedAt) {
+  const { request, continuation = null } = step.postComments
+  let parsed
+  try { parsed = parseTikHubKuaishouCommentPage(payload, request.postId, continuation) }
+  catch { unusable() }
+  const rows = parsed.comments.map(({ raw, values }) => item(request, values, raw, capturedAt))
+  return { projected: { acquiredItems: rows, profiles: [], providerPage: parsed.providerPage },
+    records: rows.map((row, index) => canonical(row, parsed.comments[index].raw, capturedAt, 'tikhub')) }
+}
 function linkedCommentId(permalink) {
   try {
     const parsed = new URL(permalink)
@@ -129,13 +139,6 @@ function justOne(payload, step, capturedAt) {
   const append = (raw, values) => { rows.push(item(request, values, raw, capturedAt)); raws.push(raw) }
   let providerPage
   switch (request.platform) {
-    case 'kuaishou':
-      if (data.result !== 1) unusable()
-      for (const raw of list(data.rootComments)) append(raw, { commentId: raw.comment_id, text: raw.content,
-        publishedAt: timestamp(raw.timestamp), author: author(raw.author_id, raw.author_name, raw.headurl),
-        likes: raw.likedCount, replies: raw.subCommentCount, url: request.url || null })
-      providerPage = data.pcursor === 'no_more' ? page(null, true) : cursorPage(data, 'pcursor', 'pcursor', continuation)
-      break
     case 'weibo':
       if (data.ok !== 1) unusable()
       for (const raw of list(data.data)) append(raw, { commentId: raw.idstr ?? raw.id, text: raw.text_raw ?? raw.text,
@@ -226,6 +229,7 @@ export function projectPostCommentPage(payload, step, { capturedAt }) {
   if (payload.code !== 200) unusable()
   if (request.platform === 'twitter') return twitterTikHub(payload, step, capturedAt)
   if (request.platform === 'reddit') return redditTikHub(payload, step, capturedAt)
+  if (request.platform === 'kuaishou') return kuaishouTikHub(payload, step, capturedAt)
   const rows = [], rawRows = []
   let providerPage
   if (request.platform === 'instagram') {

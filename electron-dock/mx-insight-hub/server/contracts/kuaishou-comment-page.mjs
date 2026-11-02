@@ -1,4 +1,5 @@
-// Candidate only until the full saved App archive passes this same parser.
+// All 11 roots in saved App usage 16eb4f8e-7d1d-40e2-8593-02570ee3fd37
+// passed this same parser against the saved request and response echo.
 // Keep import-free for concatenation into the read-only Admin inspector.
 export function parseTikHubKuaishouCommentPage(payload, postId, continuation = null) {
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)

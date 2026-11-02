@@ -121,9 +121,6 @@ test('unknown platform and cross-provider success shapes fail closed', () => {
 // GET https://api.justoneapi.com/status/api-example/detail?api=<endpoint path>.
 // These represent observed field layout, not a paid Hub production verification.
 const justoneShapes = {
-  kuaishou: { result: 1, rootComments: [{ comment_id: 456, content: '完整评论', timestamp: 1775303332905,
-    author_id: 1234, user_id: 5678, author_name: '作者', likedCount: 2, subCommentCount: 1,
-    photo_id: 5232620009155772228 }], pcursor: 'next', subCommentsMap: { 456: { subComments: [{ content: '预览回复' }] } } },
   weibo: { ok: 1, data: [{ idstr: '456', text_raw: '完整评论', text: '<p>完整评论</p>',
     created_at: 'Wed Mar 18 09:53:26 +0800 2026', user: { idstr: 'author', screen_name: '作者' },
     like_counts: 0, total_number: 3, comments: [{ text: '预览回复' }] }], max_id: 5277493566112993 },
@@ -145,8 +142,7 @@ const justoneShapes = {
     depth: 0, parent_comment_id: null, message: '完整评论', created_time: 1791777600,
     author: { id: 'author', name: '作者' }, reactions_count: '0', replies_count: 1 }], cursor: 'next' },
 }
-const expectedNext = { kuaishou: { pcursor: 'next' },
-  weibo: { maxId: '5277493566112993' }, douyin: { page: 2 }, tiktok: { cursor: '20' }, zhihu: { offset: 'opaque-next' },
+const expectedNext = { weibo: { maxId: '5277493566112993' }, douyin: { page: 2 }, tiktok: { cursor: '20' }, zhihu: { offset: 'opaque-next' },
   linkedin: { page: 2, paginationToken: 'next' }, bilibili: { cursor: 'next' }, facebook: { cursor: 'next' } }
 function justoneProject(platform, data = justoneShapes[platform], options = {}) {
   const dispatch = step(platform, '123', options)
@@ -171,6 +167,21 @@ for (const platform of Object.keys(justoneShapes)) {
   })
 }
 
+// Anonymous App layout verified against all eleven saved TikHub root comments.
+const kuaishouPostId = 'fixturePhoto123'
+const kuaishouShape = { result: 1, rootComments: Array.from({ length: 11 }, (_, index) => ({
+  comment_id: 123400 + index, content: `  完整评论${index}😀\n第二行  `, timestamp: 1793577600000,
+  author_id: 456700 + index, user_id: 987600 + index, author_name: `作者${index}`,
+  likedCount: index, subCommentCount: index < 2 ? 3 : 0,
+  headurl: 'https://example.invalid/avatar.jpg?signature=retained',
+  photo_id: 9007199254740992, reply_to: 112233,
+})), pcursor: 'next-root+/==&page=2', subCommentsMap: {
+  123400: { subComments: [{ comment_id: 880011, content: '预览回复一' }], pcursor: 'preview-cursor-one' },
+  123401: { subComments: [{ comment_id: 880022, content: '预览回复二' }], pcursor: 'preview-cursor-two' },
+} }
+const kuaishouProject = (data = kuaishouShape, options = {}) => projectPostCommentPage(
+  { code: 200, params: { photo_id: kuaishouPostId }, data }, step('kuaishou', kuaishouPostId, options), { capturedAt })
+
 // Anonymous Reddit forest layout validated against saved TikHub evidence.
 const redditShape = { postInfoById: { id: 't3_123', commentForest: { pageInfo: { hasNextPage: true }, trees: [
     { depth: 0, parentId: null, childCount: 1, more: null, node: { __typename: 'Comment', id: 't1_456',
@@ -191,28 +202,23 @@ test('supplier-returned descendant keeps its real parent while contentId remains
   assert.equal(project(reddit, step('reddit', 't3_123')).projected.acquiredItems[0].parentCommentId, null)
 })
 
-test('Twitter and Reddit reject old JustOne projections after switching to fixed TikHub recipes', () => {
+test('Twitter, Reddit and Kuaishou reject old JustOne projections after switching to fixed TikHub recipes', () => {
+  assert.throws(() => justoneProject('kuaishou', kuaishouShape), { code: 'invalid_upstream_contract' })
   assert.throws(() => justoneProject('reddit', redditShape), { code: 'invalid_upstream_contract' })
   assert.throws(() => justoneProject('twitter', { status: 'ok', timeline: [], next_cursor: null }),
     { code: 'invalid_upstream_contract' })
 })
 
 test('known terminal fields override residual tokens while missing and repeated tokens remain unknown', () => {
-  assert.equal(justoneProject('kuaishou', { ...justoneShapes.kuaishou, pcursor: 'no_more' }).projected.providerPage.hasMore, false)
   assert.equal(justoneProject('tiktok', { ...justoneShapes.tiktok, has_more: 0 }).projected.providerPage.hasMore, false)
   assert.equal(justoneProject('weibo', { ...justoneShapes.weibo, max_id: 0 }).projected.providerPage.hasMore, false)
-  assert.equal(justoneProject('kuaishou', justoneShapes.kuaishou, { continuation: { pcursor: 'next' } }).projected.providerPage.stopReason, 'continuation_unproven')
   const missing = structuredClone(redditShape)
   delete missing.postInfoById.commentForest.pageInfo
   missing.postInfoById.commentForest.trees.pop()
   assert.equal(project(missing, step('reddit', 't3_123')).projected.providerPage.stopReason, 'continuation_unproven')
 })
 
-test('post mismatches and unsafe comment identifiers fail, but unrelated unsafe photo metadata is not used as identity', () => {
-  assert.equal(justoneProject('kuaishou').projected.acquiredItems[0].postId, '123')
-  const data = structuredClone(justoneShapes.kuaishou)
-  data.rootComments[0].comment_id = 9007199254740992
-  assert.throws(() => justoneProject('kuaishou', data), { code: 'invalid_upstream_contract' })
+test('post mismatches and foreign continuation destinations fail', () => {
   const reddit = structuredClone(redditShape)
   reddit.postInfoById.id = 't3_wrong-post'
   assert.throws(() => project(reddit, step('reddit', 't3_123')), { code: 'invalid_upstream_contract' })
@@ -267,4 +273,87 @@ test('Reddit signed score survives canonical projection without becoming likes',
   const hidden = project(data, step('reddit', 't3_123'))
   assert.equal(hidden.records[0].metrics.score, null)
   assert.notEqual(hidden.records[0].payloadSha256, record.payloadSha256)
+})
+
+test('Kuaishou App projects every full root comment with the public eID and canonical TikHub lineage', () => {
+  const original = structuredClone(kuaishouShape)
+  const result = kuaishouProject(kuaishouShape, { request: { includeRaw: true, count: 3 } })
+  assert.equal(result.projected.acquiredItems.length, 11, 'retain the complete paid page for the delivery buffer')
+  assert.equal(result.records.length, 11)
+  for (const [index, row] of result.projected.acquiredItems.entries()) {
+    const raw = kuaishouShape.rootComments[index], record = result.records[index]
+    assert.equal(row.commentId, String(raw.comment_id))
+    assert.equal(row.content_id, row.commentId)
+    assert.equal(row.postId, kuaishouPostId)
+    assert.equal(row.contentId, kuaishouPostId)
+    assert.equal(row.rootExternalId, kuaishouPostId)
+    assert.equal(row.parentExternalId, kuaishouPostId)
+    assert.equal(row.parentRelationship, 'post')
+    assert.equal(row.parentCommentId, null, 'reply_to metadata is not a parent comment ID')
+    assert.equal(row.repliesIncluded, false)
+    assert.equal(row.text, raw.content)
+    assert.equal(row.content, raw.content)
+    assert.equal(row.full_text, raw.content)
+    assert.equal(row.author.id, String(raw.author_id))
+    assert.notEqual(row.author.id, String(raw.user_id))
+    assert.equal(row.author.name, raw.author_name)
+    assert.equal(row.author.avatarUrl, raw.headurl)
+    assert.equal(row.publishedAt, new Date(raw.timestamp).toISOString())
+    assert.equal(row.like_count, raw.likedCount)
+    assert.equal(row.reply_count, raw.subCommentCount)
+    assert.equal(record.body, raw.content)
+    assert.equal(record.externalId, String(raw.comment_id))
+    assert.equal(record.objectType, 'comment')
+    assert.equal(record.stableFields.connectorId, 'external-platform:tikhub')
+    assert.equal(record.stableFields.attributes.rootExternalId, kuaishouPostId)
+    assert.equal(record.stableFields.attributes.parentExternalId, kuaishouPostId)
+    assert.equal(record.stableFields.attributes.parentCommentId, null)
+    assert.equal(record.metrics.likes, raw.likedCount)
+    assert.equal(record.metrics.comments, raw.subCommentCount)
+    assert.equal(record.stableFields.metrics.likes, raw.likedCount)
+    assert.equal(record.stableFields.metrics.comments, raw.subCommentCount)
+    assert.deepEqual(row.raw, raw)
+    assert.deepEqual(record.rawItem, raw)
+    assert.equal(record.rawPayloadSha256, createHash('sha256').update(canonicalJson(raw)).digest('hex'))
+  }
+  assert.equal(result.projected.acquiredItems.some(row => ['880011', '880022'].includes(row.commentId)), false)
+  assert.equal(result.projected.acquiredItems[0].reply_count, 3, 'preview length is not the reply count')
+  assert.equal(result.records[0].rawItem.photo_id, 9007199254740992, 'unprojected internal metadata remains raw')
+  assert.deepEqual(kuaishouShape, original, 'projection leaves the archived response and previews unchanged')
+  assert.equal(Object.hasOwn(kuaishouProject().projected.acquiredItems[0], 'raw'), false)
+  assert.deepEqual(result.projected.providerPage, { hasMore: null,
+    nextParams: { pcursor: kuaishouShape.pcursor }, nextPage: null })
+})
+
+test('Kuaishou App missing, repeated and no_more cursors remain unknown without substituting preview cursors', () => {
+  for (const pcursor of [undefined, null, '', 'no_more']) {
+    const data = { ...kuaishouShape, pcursor }
+    assert.deepEqual(kuaishouProject(data).projected.providerPage, {
+      hasMore: null, nextParams: null, nextPage: null, stopReason: 'continuation_unproven',
+    })
+  }
+  assert.deepEqual(kuaishouProject(kuaishouShape, { continuation: { pcursor: kuaishouShape.pcursor } }).projected.providerPage, {
+    hasMore: null, nextParams: null, nextPage: null, stopReason: 'continuation_unproven',
+  })
+})
+
+test('Kuaishou App rejects unsafe primary identities and mismatched request echoes', () => {
+  for (const field of ['comment_id', 'author_id']) {
+    const data = structuredClone(kuaishouShape)
+    data.rootComments[10][field] = 9007199254740992
+    assert.throws(() => kuaishouProject(data), { code: 'invalid_upstream_contract' })
+  }
+  assert.throws(() => projectPostCommentPage({ code: 200, params: { photo_id: 'otherPhoto' }, data: kuaishouShape },
+    step('kuaishou', kuaishouPostId), { capturedAt }), { code: 'invalid_upstream_contract' })
+})
+
+test('Kuaishou App projected continuation rebuilds its fixed TikHub native request', () => {
+  const request = normalizePostCommentsRequest({ platform: 'kuaishou', contentId: kuaishouPostId })
+  const first = buildPostCommentsDispatch(request)
+  const result = projectPostCommentPage({ code: 200, params: { photo_id: kuaishouPostId }, data: kuaishouShape }, first, { capturedAt })
+  const next = buildPostCommentsDispatch(request, { providerCursor: result.projected.providerPage.nextParams })
+  assert.equal(next.provider, 'tikhub')
+  assert.equal(next.endpointPath, '/api/v1/kuaishou/app/fetch_video_comment')
+  assert.equal(next.upstreamQuery.photo_id, kuaishouPostId)
+  assert.equal(next.upstreamQuery.pcursor, kuaishouShape.pcursor)
 })

@@ -8,7 +8,7 @@ const page = { type: 'object', properties: {
   hasMore: { type: ['boolean', 'null'] }, nextCursor: { type: ['string', 'null'] },
   returnedCount: { type: 'integer', minimum: 0 },
   paginationStatus: { enum: ['continuable', 'exhausted', 'unknown', 'limit_reached'] },
-  continuationAvailable: { type: 'boolean', description: 'Twitter/Reddit：有已购余量或已校准游标时可显式请求下一页；不保证供应商下一页有评论。hasMore=null 时不要自动补页。' },
+  continuationAvailable: { type: 'boolean', description: 'Twitter/Reddit/快手：有已购余量或已校准游标时可显式请求下一页；不保证供应商下一页有评论。hasMore=null 时不要自动补页。' },
 }, required: ['hasMore', 'nextCursor', 'returnedCount', 'paginationStatus'], additionalProperties: true }
 export const postCommentsPaths = { [POST_COMMENTS_PATH.slice('/api/v1'.length)]: { post: {
   tags: ['社媒与内容数据'], operationId: 'social_post_comments', summary: '按帖子获取评论',
@@ -26,7 +26,7 @@ export const postCommentsPaths = { [POST_COMMENTS_PATH.slice('/api/v1'.length)]:
       count: { ...count, default: 20 }, limit: count, pageSize: count,
       cursor: { ...text, description: '原样使用 data.page.nextCursor。params.cursor 是同义字段。' },
       page: { type: 'integer', minimum: 1, maximum: 1000, default: 1 },
-      params: { type: 'object', description: '仅允许当前平台的固定排序与续页字段；不接受 provider、凭据或请求地址。旧原生续页状态视为新遍历的起点，之后只返回 Hub 游标。' },
+      params: { type: 'object', description: '仅允许当前平台的固定排序与续页字段；不接受 provider、凭据或请求地址。支持导入的平台将原生续页状态视为新遍历起点，之后只返回 Hub 游标。快手非空原生 pcursor 仅允许原键历史重放，新续页须使用本接口返回的 Hub 游标。' },
       businessId: { type: 'string', description: '可省略；提交时必须等于当前消费者的绑定值。' }, business_id: { type: 'string' },
       includeRaw: { type: 'boolean', default: false }, cacheMaxAgeHours: { type: 'number', minimum: 0, maximum: 720, description: '兼容字段；新采集不使用旧快照替代刷新。' },
     },
@@ -50,5 +50,5 @@ export function postCommentsGuide(scopes = null) {
   if (!platforms.length) return ''
   return `<h2>单帖评论</h2><p><code>POST ${POST_COMMENTS_PATH}</code>。平台：${platforms.join('、')}。旧两个 search/post-comments 入口仍可使用；新请求和重放共用同一逻辑身份。需要目标平台与 <code>social.comments.list</code> 授权，按成功交付请求计费。</p>
   <p>传 platform 和 postId、contentId 或规范帖子 URL，多个标识必须一致。count 默认 20、最大 100。Instagram 使用数字媒体 ID、shortcode 或帖子 URL；Bilibili 使用数字 AID 或 av URL；知乎使用回答 ID。短链接需要先取得平台 ID。评论 ID 是 commentId/content_id，原帖 ID 是 postId/contentId；缺失指标和确定时间为 null，publishedTime 保留已取得的相对时间。</p>
-  <p>继续时原样传 <code>data.page.nextCursor</code>，保持 Key、标识、count、排序不变，使用下一页自己的 Idempotency-Key。原请求重试保持原键。分页状态区分 continuable、exhausted、unknown、limit_reached，只有明确 exhausted 才表示该遍历结束。Twitter、Reddit 每次最多取得一个供应商数据页；已购余量先交付，不自动补页。Twitter 没有缓存余量时，游标只表示可显式查询下一页，hasMore=null、paginationStatus=unknown，不保证还有评论。Reddit 暂未校准供应商下一页 token；有 more、未取得回复或未明确结束时返回 unknown，余量交付完后 nextCursor=null，不猜测续页。旧 JustOne Reddit 原生游标只支持原键回执重放，新的原生续页起点须显式使用 params.after。显式查询仍可能计费。单次遍历最多 15 个上游页和 15 个交付页，游标 24 小时有效；已取得余量优先交付。不会自动展开回复，商品评价和搜索附带评论不属于此接口。</p>`
+  <p>继续时原样传 <code>data.page.nextCursor</code>，保持 Key、标识、count、排序不变，使用下一页自己的 Idempotency-Key。原请求重试保持原键。分页状态区分 continuable、exhausted、unknown、limit_reached，只有明确 exhausted 才表示该遍历结束。Twitter、Reddit、快手每次最多取得一个供应商数据页；已购余量先交付，不自动补页。Twitter 没有缓存余量时，游标只表示可显式查询下一页，hasMore=null、paginationStatus=unknown，不保证还有评论。Reddit 暂未校准供应商下一页 token；有 more、未取得回复或未明确结束时返回 unknown，余量交付完后 nextCursor=null，不猜测续页。旧 JustOne Reddit 原生游标只支持原键回执重放，新的原生续页起点须显式使用 params.after。快手的原生 pcursor 来源无法由字段名判断，非空原生游标只支持原键历史重放，新续页使用本接口返回的 Hub 游标。快手 no_more、缺失或重复游标暂保持 unknown 并停止续页，不把回复预览游标当主列表游标。显式查询仍可能计费。单次遍历最多 15 个上游页和 15 个交付页，游标 24 小时有效；已取得余量优先交付。不会自动展开回复，商品评价和搜索附带评论不属于此接口。</p>`
 }

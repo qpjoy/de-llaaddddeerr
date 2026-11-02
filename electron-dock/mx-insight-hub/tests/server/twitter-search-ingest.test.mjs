@@ -113,3 +113,20 @@ test('Reddit comment ingestion accepts TikHub while retaining queued JustOne com
     assert.throws(() => classifyExternalPlatformIngest(job(providerKey, 'reddit', 'social.comments.v1')), /pinned contract/)
   }
 })
+
+test('Kuaishou comment ingestion accepts TikHub App results and retains queued JustOne jobs without broadening other datasets', () => {
+  for (const providerKey of ['tikhub', 'justone']) {
+    const payload = job(providerKey, 'kuaishou', 'social.comments.v1')
+    assert.deepEqual(classifyExternalPlatformIngest(payload), {
+      enterprise: false, justOne: false, tikHubXiaohongshu: false, hubRaw: true,
+    })
+    assert.equal(payload.providerKey, providerKey)
+    assert.throws(() => classifyExternalPlatformIngest({ ...payload, records: {} }), /pinned contract/)
+    for (const datasetId of ['social.data.v1', 'ecommerce.products.v1', 'social.comments.v2']) {
+      assert.throws(() => classifyExternalPlatformIngest({ ...payload, datasetId }), /pinned contract/)
+    }
+  }
+  for (const providerKey of ['rapidapi', 'night-all', '']) {
+    assert.throws(() => classifyExternalPlatformIngest(job(providerKey, 'kuaishou', 'social.comments.v1')), /pinned contract/)
+  }
+})

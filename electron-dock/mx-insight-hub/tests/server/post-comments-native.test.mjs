@@ -38,6 +38,18 @@ const redditTree = (id, nodeOverrides = {}, treeOverrides = {}) => ({ childCount
     permalink: `/r/test/comments/post123/title/${id}/`, ...nodeOverrides }, ...treeOverrides })
 const redditComments = (trees, pageInfo = { commentCount: trees.length, hasNextPage: false }) => ({ code: 200,
   data: { postInfoById: { id: REDDIT_POST, title: '原帖，不作为评论', commentForest: { pageInfo, trees } } } })
+const KUAISHOU_POST = 'fixturePhoto123'
+const kuaishouComment = (index, overrides = {}) => ({ comment_id: 112233445566 + index,
+  author_id: 22334455 + index, author_name: `快手作者 ${index}`, headurl: 'https://example.invalid/avatar.png',
+  content: `  完整快手评论 ${index}😀\n保留空白  `, timestamp: 1793602800000, time: '刚刚',
+  likedCount: index, subCommentCount: 8, photo_id: 9007199254740992,
+  user_id: 9007199254740992, reply_to: 9007199254740992, ...overrides })
+const kuaishouComments = (rootComments, pcursor = 'no_more') => ({ code: 200, params: { photo_id: KUAISHOU_POST },
+  data: { result: 1, rootComments, pcursor, subCommentsMap: {
+    '112233445566': { pcursor: 'private-reply-preview-cursor', subComments: [
+      kuaishouComment(900, { content: '回复预览一' }), kuaishouComment(901, { content: '回复预览二' }),
+    ] },
+  } } })
 
 async function harness({ payload = () => comments(['c1']), granted = true, controlsEnabled = true, platform = 'youtube' } = {}) {
   const calls = [], store = new MemoryStore(), provider = POST_COMMENTS_RECIPES[platform].provider
@@ -586,6 +598,256 @@ test('real runtime entry preserves a saved JustOne Reddit raw-cursor receipt thr
   assert.deepEqual(legacyAlias.body, historical.responseBody)
   await assert.rejects(service.postComments(context, { body, idempotencyKey: 'runtime-reddit-old-cursor-new', path: POST_COMMENTS_PATH }),
     { code: 'invalid_cursor' })
+  assert.deepEqual(store.requests.get(requestId), historical.saved)
+  assert.deepEqual(store.customerCharges.get(requestId), historical.charge)
+  assert.equal(calls, 0)
+  assert.equal(gateway.platformStore.calls.size, 0)
+  assert.equal(gateway.platformStore.ingestJobs.length, 0)
+})
+
+test('Kuaishou contentId comments use the verified TikHub App page and retain root identity, full raw lineage and previews', async () => {
+  const roots = Array.from({ length: 11 }, (_, index) => kuaishouComment(index))
+  roots[10] = kuaishouComment(10, { comment_id: '9007199254740993', author_id: '9007199254740995' })
+  const payload = kuaishouComments(roots)
+  const h = await harness({ platform: 'kuaishou', payload: () => payload })
+  const body = { platform: 'kuaishou', contentId: KUAISHOU_POST, count: 100, includeRaw: false }
+  const first = await h.invoke(body, 'kuaishou-tikhub-root-page')
+  assert.equal(first.status, 200)
+  assert.equal(h.gateway.providerKey, 'tikhub')
+  assert.equal(h.calls.length, 1, 'count=100 must not automatically purchase a second App page')
+  assert.deepEqual(h.calls[0], { path: '/api/v1/kuaishou/app/fetch_video_comment', params: { photo_id: KUAISHOU_POST } })
+  assert.equal(first.body.data.items.length, 11, 'the two reply previews are not root comments')
+  assert.equal(first.body.data.page.hasMore, null, 'no_more is not yet proven terminal for this App endpoint')
+  assert.equal(first.body.data.page.paginationStatus, 'unknown')
+  assert.equal(first.body.data.page.nextCursor, null)
+  assert.equal(first.body.data.page.continuationAvailable, false)
+  assert.equal(first.body.data.meta.providerCalls, 1)
+  assert.equal(first.body.data.meta.repliesIncluded, false)
+  assert.equal(first.body.data.meta.repliesFetched, false)
+  for (const [index, row] of first.body.data.items.entries()) {
+    assert.equal(row.commentId, String(roots[index].comment_id))
+    assert.equal(row.postId, KUAISHOU_POST)
+    assert.equal(row.contentId, KUAISHOU_POST)
+    assert.equal(row.rootExternalId, KUAISHOU_POST)
+    assert.equal(row.content, roots[index].content)
+    assert.equal(row.author_id, String(roots[index].author_id))
+    assert.equal(row.author_name, roots[index].author_name)
+    assert.equal(row.publishedAt, '2026-11-02T07:00:00.000Z')
+    assert.equal(row.like_count, index)
+    assert.equal(row.reply_count, 8, 'preview length does not replace the supplied reply count')
+    assert.equal(row.parentExternalId, KUAISHOU_POST)
+    assert.equal(row.parentCommentId, null)
+    assert.equal(row.parentRelationship, 'post')
+    assert.equal(row.repliesIncluded, false)
+    assert.equal(row.raw, undefined)
+    assert.equal(Object.hasOwn(row, 'photo_id'), false)
+  }
+  const archive = [...h.platformStore.restrictedResponseArchives.values()][0]
+  assert.deepEqual(JSON.parse(archive.bodyBytes.toString('utf8')), payload)
+  assert.equal(archive.bodySha256, createHash('sha256').update(archive.bodyBytes).digest('hex'))
+  const supplier = [...h.platformStore.calls.values()][0]
+  assert.equal(h.platformStore.calls.size, 1)
+  assert.equal(supplier.providerKey, 'tikhub')
+  assert.equal(supplier.endpointKey, 'native.t.api_bc64c9d98dbf724c')
+  assert.equal(supplier.billed, true)
+  const job = h.platformStore.ingestJobs[0]
+  assert.equal(job.payload.providerKey, 'tikhub')
+  assert.equal(job.payload.platform, 'kuaishou')
+  assert.equal(job.payload.datasetId, 'social.comments.v1')
+  assert.equal(classifyExternalPlatformIngest(job.payload).hubRaw, true)
+  assert.equal(job.payload.records.length, 11)
+  for (const [index, record] of job.payload.records.entries()) {
+    assert.equal(record.objectType, 'comment')
+    assert.equal(record.stableFields.connectorId, 'external-platform:tikhub')
+    assert.equal(record.stableFields.attributes.rootExternalId, KUAISHOU_POST)
+    assert.equal(record.stableFields.attributes.parentExternalId, KUAISHOU_POST)
+    assert.equal(record.stableFields.attributes.parentRelationship, 'post')
+    assert.equal(record.body, roots[index].content)
+    assert.deepEqual(record.rawItem, roots[index])
+    assert.equal(record.rawItem.photo_id, 9007199254740992, 'unsafe internal photo metadata stays only in the retained raw record')
+    assert.equal(record.rawPayloadSha256, createHash('sha256').update(canonicalJson(roots[index])).digest('hex'))
+  }
+  const saved = structuredClone(h.store.requests.get(first.requestId))
+  const charge = structuredClone(h.store.customerCharges.get(first.requestId))
+  const replay = await h.invoke({ platform: 'kuaishou', url: `https://www.kuaishou.com/short-video/${KUAISHOU_POST}`, count: 100 }, 'kuaishou-tikhub-root-page')
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, first.body)
+  assert.deepEqual(h.store.requests.get(first.requestId), saved)
+  assert.deepEqual(h.store.customerCharges.get(first.requestId), charge)
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.platformStore.ingestJobs.length, 1)
+})
+
+test('Kuaishou preserves all 25 paid roots and drains five buffered comments without another provider purchase', async () => {
+  const roots = Array.from({ length: 25 }, (_, index) => kuaishouComment(index))
+  const h = await harness({ platform: 'kuaishou', payload: () => kuaishouComments(roots) })
+  const body = { platform: 'kuaishou', contentId: KUAISHOU_POST, count: 20 }
+  const first = await h.invoke(body, 'kuaishou-buffer-first')
+  assert.equal(first.body.data.items.length, 20)
+  assert.equal(first.body.data.page.hasMore, true)
+  assert.equal(first.body.data.page.paginationStatus, 'continuable')
+  assert.match(first.body.data.page.nextCursor, /^mxds1\./u)
+  assert.equal(h.platformStore.ingestJobs[0].payload.records.length, 25)
+  const second = await h.invoke({ ...body, params: { cursor: first.body.data.page.nextCursor } }, 'kuaishou-buffer-second')
+  assert.equal(second.body.data.items.length, 5)
+  assert.equal(second.body.data.meta.providerCalls, 0)
+  assert.equal(second.body.data.page.hasMore, null)
+  assert.equal(second.body.data.page.paginationStatus, 'unknown')
+  assert.equal(second.body.data.page.nextCursor, null)
+  assert.equal(second.body.data.page.continuationAvailable, false)
+  assert.equal(h.calls.length, 1)
+  assert.deepEqual([first, second].flatMap(result => result.body.data.items.map(row => row.commentId)), roots.map(row => String(row.comment_id)))
+  const replay = await h.invoke({ ...body, cursor: first.body.data.page.nextCursor }, 'kuaishou-buffer-second')
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, second.body)
+  assert.equal(h.calls.length, 1)
+})
+
+test('Kuaishou advancing App pcursor requires an explicit Hub-signed next request and keeps completeness unknown', async () => {
+  const token = 'private-app-root-page-two'
+  const h = await harness({ platform: 'kuaishou', payload: (_call, ordinal) => ordinal === 1
+    ? kuaishouComments([kuaishouComment(0)], token) : kuaishouComments([kuaishouComment(1)], token) })
+  const body = { platform: 'kuaishou', postId: KUAISHOU_POST, count: 100 }
+  const first = await h.invoke(body, 'kuaishou-manual-first')
+  assert.equal(first.body.data.items.length, 1)
+  assert.equal(first.body.data.page.hasMore, null)
+  assert.equal(first.body.data.page.paginationStatus, 'unknown')
+  assert.equal(first.body.data.page.continuationAvailable, true)
+  assert.match(first.body.data.page.nextCursor, /^mxds1\./u)
+  assert.equal(JSON.stringify(first.body).includes(token), false)
+  assert.equal(JSON.stringify(first.body).includes('private-reply-preview-cursor'), false)
+  assert.equal(h.calls.length, 1, 'an advancing App cursor does not fill count=100 automatically')
+  const second = await h.invoke({ ...body, params: { cursor: first.body.data.page.nextCursor } }, 'kuaishou-manual-second')
+  assert.equal(h.calls.length, 2)
+  assert.equal(h.calls[1].params.photo_id, KUAISHOU_POST)
+  assert.equal(h.calls[1].params.pcursor, token)
+  assert.equal(second.body.data.items[0].commentId, String(kuaishouComment(1).comment_id))
+  assert.equal(second.body.data.page.hasMore, null)
+  assert.equal(second.body.data.page.paginationStatus, 'unknown')
+  assert.equal(second.body.data.page.nextCursor, null, 'a repeated provider token cannot create a third purchase')
+  assert.equal(second.body.data.meta.providerCalls, 1)
+  const replay = await h.invoke({ ...body, cursor: first.body.data.page.nextCursor }, 'kuaishou-manual-second')
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, second.body)
+  assert.equal(h.calls.length, 2)
+})
+
+test('Kuaishou absent, empty and no_more App cursors remain unknown without automatic continuation', async () => {
+  for (const pcursor of [undefined, null, '', 'no_more']) {
+    const payload = kuaishouComments([kuaishouComment(0)]); payload.data.pcursor = pcursor
+    const h = await harness({ platform: 'kuaishou', payload: () => payload })
+    const result = await h.invoke({ platform: 'kuaishou', postId: KUAISHOU_POST, count: 100 }, 'kuaishou-no-next')
+    assert.equal(result.body.data.items.length, 1)
+    assert.equal(result.body.data.page.hasMore, null)
+    assert.equal(result.body.data.page.paginationStatus, 'unknown')
+    assert.equal(result.body.data.page.nextCursor, null)
+    assert.equal(result.body.data.page.continuationAvailable, false)
+    assert.equal(h.calls.length, 1)
+  }
+})
+
+async function saveHistoricalKuaishouReceipt(h, { body, cursor = null, initialParams = {}, key, requestId, page = 2 }) {
+  // Explicit pre-migration vectors, independent of today's normalizer.
+  const identity = { platform: 'kuaishou', postId: KUAISHOU_POST, count: 20, includeRaw: false, options: {} }
+  const fingerprint = createHash('sha256').update(canonicalJson({ method: 'POST', path: POST_COMMENTS_PATH,
+    body: { ...identity, initialParams, cursor } })).digest('hex')
+  const reserved = await h.store.reserve({ requestId, idempotencyKey: key, fingerprint,
+    tenantId: h.context.tenant.id, consumerId: h.context.consumer.id, apiKeyId: h.context.apiKey.id,
+    platform: 'kuaishou', meterKey: 'social.comments.list', unitsReserved: 1,
+    acquisitionRequest: { method: 'POST', path: POST_COMMENTS_PATH, body },
+    leaseExpiresAt: new Date(Date.now() + 60000), windowStart: new Date(Date.now() - 3600000), maxRequests: 10000 })
+  assert.equal(reserved.kind, 'reserved')
+  const responseBody = { contractVersion: POST_COMMENTS_VERSION, requestId,
+    data: { platform: 'kuaishou', postId: KUAISHOU_POST, items: [{ commentId: '112233445500', text: '原 JustOne 快手已交付正文' }],
+      page: { page, hasMore: true, nextCursor: cursor }, meta: { implementation: 'hub', providerCalls: 1 } } }
+  await h.store.commitRequest(requestId, { responseStatus: 200, responseBody,
+    unitsActual: 1, upstreamLatencyMs: 3, deliverySourceMode: 'live' })
+  return { responseBody, saved: structuredClone(h.store.requests.get(requestId)), charge: structuredClone(h.store.customerCharges.get(requestId)) }
+}
+
+test('pre-migration Kuaishou first-page receipts remain immutable after TikHub takes over', async () => {
+  const h = await harness({ platform: 'kuaishou', payload: () => { throw new Error('receipt replay must not purchase') } })
+  const body = { platform: 'kuaishou', contentId: KUAISHOU_POST, count: 20 }
+  const key = 'historical-kuaishou-first', requestId = '2047a446-f277-4fda-b5c6-0b5886951d60'
+  const historical = await saveHistoricalKuaishouReceipt(h, { body, key, requestId, page: 1 })
+  const replay = await h.invoke({ platform: 'kuaishou', postId: KUAISHOU_POST, count: 20 }, key)
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, historical.responseBody)
+  assert.deepEqual(h.store.requests.get(requestId), historical.saved)
+  assert.deepEqual(h.store.customerCharges.get(requestId), historical.charge)
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.platformStore.calls.size, 0)
+  assert.equal(h.platformStore.ingestJobs.length, 0)
+})
+
+test('old expired Kuaishou signed cursors and ambiguous raw pcursors only replay exact historical receipts', async () => {
+  for (const form of ['signed', 'body', 'params']) {
+    const h = await harness({ platform: 'kuaishou', payload: () => { throw new Error('old cursor must not purchase TikHub data') } })
+    const identity = { platform: 'kuaishou', postId: KUAISHOU_POST, count: 20, includeRaw: false, options: {} }
+    const legacyScopeHash = createHash('sha256').update(JSON.stringify({ version: POST_COMMENTS_VERSION, ...identity })).digest('hex')
+    const codec = createDataSearchCursorCodec(PEPPER, `${h.context.consumer.id}:${h.context.apiKey.id}:post-comments`)
+    const token = form === 'signed' ? codec.encode({ version: POST_COMMENTS_VERSION, scopeHash: legacyScopeHash,
+      previousDeliveryId: '906701b6-8201-4e2a-a622-403c78d11047', page: 2, expiresAt: Date.now() - 60000 }) : 'ambiguous-justone-or-tikhub-pcursor'
+    const body = { platform: 'kuaishou', postId: KUAISHOU_POST, count: 20,
+      ...(form === 'params' ? { params: { pcursor: token } } : { cursor: token }) }
+    const key = `historical-kuaishou-${form}`, requestId = '2047a446-f277-4fda-b5c6-0b5886951d61'
+    const historical = await saveHistoricalKuaishouReceipt(h, { body, cursor: form === 'params' ? null : token,
+      initialParams: form === 'signed' ? {} : { pcursor: token }, key, requestId })
+    const replay = await h.invoke(body, key)
+    assert.equal(replay.replay, true)
+    assert.deepEqual(replay.body, historical.responseBody)
+    assert.deepEqual(h.store.requests.get(requestId), historical.saved)
+    assert.deepEqual(h.store.customerCharges.get(requestId), historical.charge)
+    await assert.rejects(h.invoke(body, `${key}-new`), { code: 'invalid_cursor' })
+    assert.equal(h.calls.length, 0)
+    assert.equal(h.platformStore.calls.size, 0)
+    assert.equal(h.platformStore.ingestJobs.length, 0)
+    const rejected = await h.store.getUsageRequestByIdempotencyKey(h.context.consumer.id, `${key}-new`)
+    assert.equal(rejected.status, 'released')
+    assert.equal(h.store.customerCharges.get(rejected.id)?.chargedMinor ?? 0, 0)
+  }
+})
+
+test('real runtime routes and aliases replay old Kuaishou raw pcursors without importing them into TikHub', async t => {
+  const { createRuntime } = await import('../../server/index.mjs')
+  const { loadConfig } = await import('../../server/config.mjs')
+  const runtime = await createRuntime(loadConfig({ MX_INSIGHT_STORE: 'memory', MX_INSIGHT_LISTENER_MODE: 'public',
+    MX_INSIGHT_API_KEY_PEPPER: PEPPER, MX_INSIGHT_TIKHUB_API_KEY: SECRET,
+    MX_INSIGHT_TIKHUB_MAX_REQUESTS_PER_MINUTE: '1000', MX_INSIGHT_TIKHUB_RATE_LIMIT_BURST: '10' }))
+  t.after(async () => { runtime.agent.close(); await runtime.store.close() })
+  const { service, store } = runtime
+  const tenant = await service.createTenant({ name: 'Runtime Kuaishou replay test' })
+  const consumer = await service.createConsumer({ tenantId: tenant.id, name: 'Runtime Kuaishou replay caller' })
+  await store.setPlatformGrant(consumer.id, 'kuaishou', true)
+  await service.putCapabilityConfiguration('social.comments.list', { tenantId: tenant.id, consumerId: consumer.id, enabled: true })
+  const key = await service.createApiKey({ consumerId: consumer.id, name: 'Runtime Kuaishou replay key',
+    platforms: ['kuaishou'], capabilities: ['social.comments.list'] })
+  const context = await service.authenticate(key.secret)
+  const gateway = runtime.postCommentsGateways.kuaishou
+  assert.equal(gateway.providerKey, 'tikhub')
+  assert.equal(gateway.platformStore.authorizationPlatform, 'kuaishou')
+  const endpoint = NATIVE_FORWARDING_ENDPOINTS.find(row => row.key === 't.api_bc64c9d98dbf724c')
+  await runtime.externalPlatformControlStore.updatePolicy('tikhub', endpoint.operation, { expectedRevision: 1,
+    desiredState: 'active', reason: 'Synthetic runtime Kuaishou replay regression', priceBook: { currency: 'USD',
+      pricingAsOf: '2026-11-02T00:00:00Z', monthlyBudgetMinor: 100000, monthlySubsidyBudgetMinor: 100000,
+      unitCostMinorByEndpoint: { [endpoint.endpointKey]: 2 } } }, { runtime: { config: gateway.config, credentialConfigured: true } })
+  let calls = 0
+  gateway.adapter = new TikHubAdapter({ apiKey: SECRET, fetchImpl: async () => { calls++; throw new Error('historical replay must not purchase') } })
+  runtime.adapter.legacySearch = async () => { throw new Error('historical replay must not call Night-All') }
+  const token = 'private-old-kuaishou-pcursor'
+  const body = { platform: 'kuaishou', contentId: KUAISHOU_POST, count: 20, params: { pcursor: token } }
+  const requestId = '2047a446-f277-4fda-b5c6-0b5886951d62', idempotencyKey = 'runtime-kuaishou-old-pcursor'
+  const historical = await saveHistoricalKuaishouReceipt({ store, context }, { body,
+    initialParams: { pcursor: token }, key: idempotencyKey, requestId })
+  const replay = await service.postComments(context, { body, idempotencyKey, path: POST_COMMENTS_PATH })
+  assert.equal(replay.replay, true)
+  assert.deepEqual(replay.body, historical.responseBody)
+  for (const path of ['/api/v1/search/post-comments', '/api/v1/night-all/search/post-comments']) {
+    const alias = await service.nightAllCompatibilitySearch(context, { operation: 'post-comments', body, idempotencyKey, path })
+    assert.equal(alias.replay, true)
+    assert.deepEqual(alias.body, historical.responseBody)
+  }
+  await assert.rejects(service.postComments(context, { body, idempotencyKey: `${idempotencyKey}-new`, path: POST_COMMENTS_PATH }), { code: 'invalid_cursor' })
   assert.deepEqual(store.requests.get(requestId), historical.saved)
   assert.deepEqual(store.customerCharges.get(requestId), historical.charge)
   assert.equal(calls, 0)
