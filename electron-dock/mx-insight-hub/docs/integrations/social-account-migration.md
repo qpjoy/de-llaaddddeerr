@@ -34,7 +34,8 @@ Twitter 的 `x/tw` 归一为 `twitter`。业务调用方不必区分 `username` 
 
 | 平台 | activityTypes |
 | --- | --- |
-| Twitter、Facebook、哔哩哔哩、快手、YouTube | `posts` |
+| Twitter | `posts`、`replies` |
+| Facebook、哔哩哔哩、快手、YouTube | `posts` |
 | Instagram | `posts`、`reels`、`stories`、`tagged_posts`、`highlights`、`followers`、`following` |
 | 抖音、小红书 | `posts`、`likes` |
 | 微博 | `posts`、`original_posts` |
@@ -44,6 +45,8 @@ Twitter 的 `x/tw` 归一为 `twitter`。业务调用方不必区分 `username` 
 | Reddit | `posts`、`comments` |
 
 接口调试可提交完整请求；产品展示提供单账号 `posts` 和单账号资料，按当前 Key 对平台及操作授权过滤。
+
+Twitter `replies`（2026-11-03 起）对应账号主页的「回复」，但只返回该账号自己发出的回复：同一时间线里该账号的普通发帖，以及被回复的他人帖子都不计入，普通发帖请用 `posts`。回复自己串推的条目也算回复，`isSelfReply` 为 `true`。每条在原有内容字段之外增加 `replyTo`（被回复帖子的 `id`，以及其账号的 `userId`、`username`）、`parentExternalId`（同 `replyTo.id`）、`conversationId`、`isSelfReply`，兼容字段为 `reply_to_content_id`、`reply_to_user_id`、`reply_to_user_name`、`conversation_id`。同一账号的一页时间线里回复通常不到一半，Hub 会续取多页凑够 `count`，因此短页或 `partial` 更常见，按 `hasMore/nextCursor/warnings` 续页。`replies` 与 `posts` 共用 `social.content.crawl` 授权；服务端尚未开通时返回 HTTP 503 / `external_platform_cost_control_unavailable`，此时不会查询账号，也不计费。同时请求 `["posts","replies"]` 时，replies 未开通只影响 replies，posts 照常返回并带 `social_page_fill_stopped` 提示。
 
 ## 请求与返回
 

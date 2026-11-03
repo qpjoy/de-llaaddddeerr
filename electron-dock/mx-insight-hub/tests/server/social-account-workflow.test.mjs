@@ -1059,3 +1059,65 @@ test('LCY Facebook new acquisition bypasses zero budgets and recovered supplier 
   await assert.rejects(h.invoke({platform:'facebook',userId:'42'}, 'lcy-facebook-explicit-pause'),{code:'facebook_account_paused'})
   assert.equal(h.calls.length,2)
 })
+
+// Structure of a real AIO tweetsAndReplies page, anonymized; the account is
+// 42/ui_batch_019 and the page holds 14 of its replies among 30 tweets.
+const repliesPage = JSON.parse((await import('node:fs')).readFileSync(new URL('../fixtures/twitter-aio-user-replies.json', import.meta.url), 'utf8'))
+async function priceReplies(h, replies = 3) {
+  const row = (await h.controls.describeProvider(h.provider, { config: h.config, credentialConfigured: true }))
+    .find(row => row.operationKey === 'social.content.crawl')
+  await h.controls.updatePolicy(h.provider, 'social.content.crawl', {
+    expectedRevision: row.revision, desiredState: 'active', reason: 'Synthetic Twitter replies regression', priceBook: {
+      currency: 'USD', pricingAsOf: '2026-11-03T00:00:00Z', monthlyBudgetMinor: 100000, monthlySubsidyBudgetMinor: 100000,
+      unitCostMinorByEndpoint: { 'twitter-aio.crawl': 2, ...(replies ? { 'twitter-aio.user-replies': replies } : {}) },
+    },
+  }, { runtime: { config: h.config, credentialConfigured: true } })
+}
+const repliesFetch = call => call.url.pathname.endsWith('/tweetsAndReplies')
+  ? Response.json(call.params.cursor ? timeline([], null) : repliesPage)
+  : call.url.pathname.endsWith('/tweets') ? Response.json(timeline(['1'])) : Response.json(profile())
+
+test('Twitter replies use the replies timeline and price after one profile lookup, then drain the archived rest', async t => {
+  const h = await harness(t, { fetchImpl: repliesFetch })
+  await priceReplies(h)
+  const body = { platform: 'twitter', userId: 'ui_batch_019', count: 10, activityTypes: ['replies'] }
+  const first = await h.invoke(body, 'twitter-replies-first')
+  assert.equal(first.status, 200)
+  const items = first.body.data.items
+  assert.equal(items.length, 10)
+  assert.ok(items.every(row => row.activityType === 'replies' && row.author_id === '42' && row.replyTo?.id && row.parentExternalId === row.replyTo.id))
+  assert.deepEqual(h.calls.map(call => call.url.pathname), ['/user/by/username/ui_batch_019', '/user/42/tweetsAndReplies'])
+  assert.equal(h.calls[1].params.count, '10')
+  const ledger = [...h.platformStore.calls.values()]
+  assert.deepEqual(ledger.map(call => [call.operation, call.endpointKey, call.costMinor]),
+    [['social.profile.get', 'twitter-aio.user-info', 2], ['social.content.crawl', 'twitter-aio.user-replies', 3]])
+  assert.equal(first.body.data.page.hasMore, true)
+  const second = await h.invoke({ ...body, cursor: first.body.data.page.nextCursor }, 'twitter-replies-second')
+  assert.equal(second.body.data.items.length, 4)
+  assert.equal(new Set([...items, ...second.body.data.items].map(row => row.content_id)).size, 14)
+  // The archived four are free; only the timeline's next page is bought.
+  assert.deepEqual(h.calls.slice(2).map(call => [call.url.pathname, call.params.cursor]), [['/user/42/tweetsAndReplies', 'synthetic-bottom-cursor']])
+  assert.equal(second.body.data.page.hasMore, false)
+})
+
+test('Twitter replies without a reviewed replies price fail before the profile lookup; posts are unaffected', async t => {
+  const h = await harness(t, { fetchImpl: repliesFetch })
+  await assert.rejects(h.invoke({ platform: 'twitter', userId: 'ui_batch_019', count: 10, activityTypes: ['replies'] }, 'twitter-replies-unpriced'),
+    { status: 503, code: 'external_platform_cost_control_unavailable' })
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.platformStore.calls.size, 0)
+  // The customer hold is released, not charged.
+  assert.deepEqual([...h.store.requests.values()].map(row => [row.status, row.unitsActual ?? 0]), [['released', 0]])
+  const posts = await h.invoke({ platform: 'twitter', userId: 'ui_batch_019', count: 10 }, 'twitter-posts-still-priced')
+  assert.deepEqual(posts.body.data.items.map(row => row.content_id), ['1'])
+  assert.deepEqual(h.calls.map(call => call.url.pathname), ['/user/by/username/ui_batch_019', '/user/42/tweets'])
+})
+
+test('posts and replies together deliver the posts when replies cannot be priced', async t => {
+  const h = await harness(t, { fetchImpl: repliesFetch })
+  const result = await h.invoke({ platform: 'twitter', userId: 'ui_batch_019', count: 10, activityTypes: ['posts', 'replies'] }, 'twitter-posts-and-unpriced-replies')
+  assert.deepEqual(result.body.data.items.map(row => [row.content_id, row.activityType]), [['1', 'posts']])
+  assert.equal(result.body.data.status, 'partial')
+  assert.ok(result.body.data.warnings.some(warning => warning.code === 'social_page_fill_stopped' && /cost_control_unavailable/.test(warning.message)))
+  assert.ok(h.calls.every(call => !call.url.pathname.endsWith('/tweetsAndReplies')))
+})

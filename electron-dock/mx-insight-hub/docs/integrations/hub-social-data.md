@@ -13,6 +13,8 @@
 
 旧 `/api/v1/search/crawl|user-info` 与 `/api/v1/night-all/search/crawl|user-info` 不在本轮删除或重定向；其原字段、平台范围和转发规则继续保留。新账号操作须显式授权，内部供应商操作的合同、状态、凭据及费用准入继续独立检查。打开文档、上线代码不会自动扩权、启用供应商操作或发起真实查询。
 
+**2026-11-03：Twitter 账号回复（本地实现，未部署）。** `/api/v1/data/social/crawl` 的 Twitter 新增 `activityTypes: ["replies"]`，走 AIO `GET /user/{id}/tweetsAndReplies`（参数同 `/tweets`：`count`、`cursor`），供应商端点键 `twitter-aio.user-replies`，挂在 `social.content.crawl` 下作为可选端点（与 JustOne `douyin_ec` 同一机制）：posts 不受影响；replies 须在管理台为该操作的价目表加一行 `twitter-aio.user-replies` 单价后才派发，否则在购买账号资料查找前返回 503 `external_platform_cost_control_unavailable`，客户冻结额度释放、不计费。无迁移、无新环境变量。时间线混有该账号普通发帖和被回复的他人帖子，Hub 只保留作者为该账号且带 `in_reply_to_status_id_str` 的条目。实测（用户批准的一次付费调用，@thsottiaux，count=20）：一页 30 条 = 自己发帖 6、回复他人 9、回复自己 5、他人上下文 10；响应根下无账号资料；占用普通 500k 月配额，`X-RateLimit-AIO-Requests` 桶未动。源站 Cloudflare 拒绝 `Python-urllib` UA（403 `error code: 1010`，仍计 RapidAPI 配额），Hub 的 `HUB_USER_AGENT` 可过。旧 `/api/v1/night-all/search/crawl` 的 Twitter 仍转发 Night-All，replies 仍只给警告。测试夹具 `tests/fixtures/twitter-aio-user-replies.json` 保留该页结构，ID、账号名、正文与游标均已替换。
+
 下面保留首批设计与当时验证记录，仅用于历史追溯。其中“仅 Twitter”“最多 50”“单账号/单次调用”“不补页”“不入 canonical”等账号说明已被本页当前合同及新指南替代，不能作为当前账号接口的接入或上线指令。旧 Twitter 精确幂等交付和已发布游标仍由原合同处理，不重写历史响应。
 
 <details>

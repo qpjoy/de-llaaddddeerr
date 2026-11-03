@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { NATIVE_FORWARDING_ENDPOINTS, normalizeNativeForwardingRequest } from './native-forwarding.mjs'
-import { normalizeTwitterResponse, validateTwitterUsername, HUB_SOCIAL_VERSION } from './hub-social.mjs'
+import { normalizeTwitterResponse, validateTwitterUsername, HUB_SOCIAL_VERSION, TWITTER_REPLIES_ENDPOINT_KEY } from './hub-social.mjs'
 import { facebookRow } from './facebook-search.mjs'
 import { normalizeNightAllSocialItem } from './night-all-social-fields.mjs'
 import { HUB_SOCIAL_COMPAT_PLATFORMS } from '../../shared/social-account-contract.mjs'
@@ -23,7 +23,7 @@ const nativePath = path => {
 const recipe = (path, identity, cursor = null, pagination = 'cursor', extra = {}) => ({ endpoint: nativePath(path), identity, cursor, pagination, ...extra })
 // Fixed reviewed read routes only. No user-selected URL, supplier or fallback.
 const RECIPES = {
-  twitter: { profile: 'rapidapi', posts: 'rapidapi' },
+  twitter: { profile: 'rapidapi', posts: 'rapidapi', replies: 'rapidapi' },
   facebook: {
     profile: recipe('/api/facebook/get-profile-id/v1', 'url', null, 'none'),
     posts: recipe('/api/facebook/get-profile-posts/v1', 'profileId', 'cursor'),
@@ -232,16 +232,16 @@ export function buildHubSocialCompatDispatch(job, { page = 1, nextParams = null,
     : kind === 'profile' && job.platform === 'linkedin' && identity.kind === 'url' && new URL(identity.value).pathname.startsWith('/company/')
       ? recipe('/api/v1/linkedin/web_v2/get_company_profile', 'url', null, 'none') : config[kind]
   if (job.platform === 'twitter') {
-    const profile = kind === 'profile'
+    const profile = kind === 'profile', replies = kind === 'replies'
     const userId = identity.kind === 'id' ? identity.value : null, username = identity.kind === 'username' ? identity.value : null
     if (!userId && !username) fail('invalid_social_request', 'Twitter account identity is invalid')
     return { provider: 'rapidapi', operation: profile ? 'user-info' : 'crawl', platform: 'twitter', marketplace: 'twitter',
-      operationKey: profile ? 'social.profile.get' : 'social.content.crawl', endpointKey: `twitter-aio.${profile ? 'user-info' : 'crawl'}`, endpointVersion: 'twitter-aio.hub.v1', endpointContractVersion: HUB_SOCIAL_VERSION, contractVersion: HUB_SOCIAL_VERSION,
-      endpointPath: profile ? userId ? '/user/users/by/ids' : `/user/by/username/${encodeURIComponent(username)}` : `/user/${userId || '-1'}/tweets`,
+      operationKey: profile ? 'social.profile.get' : 'social.content.crawl', endpointKey: replies ? TWITTER_REPLIES_ENDPOINT_KEY : `twitter-aio.${profile ? 'user-info' : 'crawl'}`, endpointVersion: 'twitter-aio.hub.v1', endpointContractVersion: HUB_SOCIAL_VERSION, contractVersion: HUB_SOCIAL_VERSION,
+      endpointPath: profile ? userId ? '/user/users/by/ids' : `/user/by/username/${encodeURIComponent(username)}` : `/user/${userId || '-1'}/${replies ? 'tweetsAndReplies' : 'tweets'}`,
       upstreamQuery: profile ? userId ? { ids: userId } : {} : { count: Math.min(50, pageSize), ...(username ? { username } : {}), ...(nextParams || {}) },
       username, userId, count: Math.min(50, pageSize), page, expiresAt: Date.now() + 86400000, queryHash: job.id,
       providerCursor: nextParams?.cursor || null, accountCompatibility: true, allowOverflow: true, deliveryMode: 'live_only',
-      socialCompat: { job, stage, kind, page, pageSize, resolvedIdentity },
+      socialCompat: { job, stage, kind, page, pageSize, resolvedIdentity }, ...(replies ? { timeline: 'replies' } : {}),
     }
   }
   if (!object(row)) fail('unsupported_activity_type', 'Unsupported account operation')
@@ -471,16 +471,27 @@ export function projectHubSocialCompatResponse(payload, request, { capturedAt = 
   if (job.platform === 'twitter') {
     const response = normalizeTwitterResponse(payload, request, { encodeCursor: () => null, capturedAt, allowOverflow: true })
     const profiles = JSON.parse(response.data.raw_info).map(row => modernProfile({ ...row, platform: 'twitter', name: row.nickname, username: row.user_name, following_count: row.friends_count, original_url: row.url, collected_at: capturedAt }))
-    const acquiredItems = JSON.parse(response.data.raw_data).map(row => {
-      const item = response.data.items.find(item => item.id === row.content_id)
+    // The replies timeline also carries the account's posts and the other
+    // accounts' tweets its replies answer; only the account's replies count.
+    const replies = request.timeline === 'replies'
+    const ownReply = item => !!item.replyTo && (request.userId ? item.author?.userId === request.userId
+      : !!request.username && item.author?.username?.toLowerCase() === request.username)
+    const items = new Map(response.data.items.filter(item => !replies || ownReply(item)).map(item => [item.id, item]))
+    const rows = JSON.parse(response.data.raw_data)
+    const acquiredItems = rows.filter(row => items.has(row.content_id)).map(row => {
+      const item = items.get(row.content_id)
       return modernContent({ ...row, text: row.content, published_at: row.created_at, collected_at: capturedAt,
-        author_name: item?.author?.name || item?.author?.username || '', user_name: item?.author?.username || '',
-        bookmark_count: item?.metrics.bookmarks ?? null, media: { images: (item?.imageUrls || []).map(url => ({ url, type: 'image' })), videos: (item?.videoUrls || []).map(url => ({ url, playUrl: url })) },
+        author_name: item.author?.name || item.author?.username || '', user_name: item.author?.username || '',
+        bookmark_count: item.metrics.bookmarks ?? null, media: { images: (item.imageUrls || []).map(url => ({ url, type: 'image' })), videos: (item.videoUrls || []).map(url => ({ url, playUrl: url })) },
+        ...(replies ? { parentExternalId: item.replyTo.id, conversationId: item.conversationId, replyTo: item.replyTo,
+          isSelfReply: item.replyTo.userId === item.author.userId, reply_to_content_id: item.replyTo.id, reply_to_user_id: item.replyTo.userId,
+          reply_to_user_name: item.replyTo.username, conversation_id: item.conversationId } : {}),
       }, 'twitter', job.activityType)
     })
     const next = response.providerPage?.nextProviderCursor
     const account = profiles[0]
-    return { acquiredItems, profiles, providerPage: { hasMore: next ? true : response.providerPage?.stopReason ? false : acquiredItems.length ? null : false, nextParams: next ? { cursor: next } : null, nextPage: page + 1, ...(response.providerPage?.stopReason ? { stopReason: response.providerPage.stopReason } : {}) },
+    // Filtered-out rows still show that the page was not empty.
+    return { acquiredItems, profiles, providerPage: { hasMore: next ? true : response.providerPage?.stopReason ? false : rows.length ? null : false, nextParams: next ? { cursor: next } : null, nextPage: page + 1, ...(response.providerPage?.stopReason ? { stopReason: response.providerPage.stopReason } : {}) },
       ...(stage === 'resolve' ? { resolvedIdentity: { kind: 'id', value: account?.user_id || request.userId, username: account?.user_name || request.username, lookupComplete: true, profileReady: true } } : {}) }
   }
   if (kind === 'lookup' || kind === 'profile') {

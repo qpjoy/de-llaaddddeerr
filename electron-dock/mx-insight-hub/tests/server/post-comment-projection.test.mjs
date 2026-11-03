@@ -122,7 +122,7 @@ test('unknown platform and cross-provider success shapes fail closed', () => {
 // These represent observed field layout, not a paid Hub production verification.
 const justoneShapes = {
   weibo: { ok: 1, data: [{ idstr: '456', text_raw: '完整评论', text: '<p>完整评论</p>',
-    created_at: 'Wed Mar 18 09:53:26 +0800 2026', user: { idstr: 'author', screen_name: '作者' },
+    created_at: 'Wed Mar 18 09:53:26 +0800 2026', user: { idstr: '123456', screen_name: '作者' },
     like_counts: 0, total_number: 3, comments: [{ text: '预览回复' }] }], max_id: 5277493566112993 },
   douyin: { status_code: 0, comments: [{ cid: '456', aweme_id: '123', text: '完整评论', create_time: 1791777600,
     digg_count: 1, reply_comment_total: 4, user: { uid: 'author', nickname: '作者' } }], cursor: 20, has_more: 1 },
@@ -142,12 +142,16 @@ const justoneShapes = {
     depth: 0, parent_comment_id: null, message: '完整评论', created_time: 1791777600,
     author: { id: 'author', name: '作者' }, reactions_count: '0', replies_count: 1 }], cursor: 'next' },
 }
-const expectedNext = { weibo: { maxId: '5277493566112993' }, douyin: { page: 2 }, tiktok: { cursor: '20' }, zhihu: { offset: 'opaque-next' },
+const expectedNext = { weibo: { max_id: '5277493566112993' }, douyin: { page: 2 }, tiktok: { cursor: '20' }, zhihu: { offset: 'opaque-next' },
   linkedin: { page: 2, paginationToken: 'next' }, bilibili: { cursor: 'next' }, facebook: { cursor: 'next' } }
 function justoneProject(platform, data = justoneShapes[platform], options = {}) {
   const dispatch = step(platform, '123', options)
-  dispatch.provider = 'justone'
-  return projectPostCommentPage({ code: 0, data }, dispatch, { capturedAt })
+  dispatch.provider = platform === 'weibo' ? 'tikhub' : 'justone'
+  const payload = platform === 'weibo'
+    ? { code: 200, params: { id: '123' }, data: { ok: 1,
+      data: data.data.map(row => ({ ...row, rootidstr: row.rootidstr ?? '123', rootid: row.rootid ?? 123 })), max_id: data.max_id } }
+    : { code: 0, data }
+  return projectPostCommentPage(payload, dispatch, { capturedAt })
 }
 for (const platform of Object.keys(justoneShapes)) {
   test(`${platform} official sample shape produces stable comment fields and provider-specific continuation`, () => {
@@ -161,7 +165,7 @@ for (const platform of Object.keys(justoneShapes)) {
     assert.equal(row.full_text.includes('完整评论'), true)
     assert.ok(row.publishedAt)
     assert.equal(record.objectType, 'comment')
-    assert.equal(record.stableFields.connectorId, 'external-platform:justone')
+    assert.equal(record.stableFields.connectorId, `external-platform:${platform === 'weibo' ? 'tikhub' : 'justone'}`)
     assert.equal(record.stableFields.attributes.rootExternalId, '123')
     assert.deepEqual(result.projected.providerPage.nextParams, expectedNext[platform])
   })
@@ -211,7 +215,7 @@ test('Twitter, Reddit and Kuaishou reject old JustOne projections after switchin
 
 test('known terminal fields override residual tokens while missing and repeated tokens remain unknown', () => {
   assert.equal(justoneProject('tiktok', { ...justoneShapes.tiktok, has_more: 0 }).projected.providerPage.hasMore, false)
-  assert.equal(justoneProject('weibo', { ...justoneShapes.weibo, max_id: 0 }).projected.providerPage.hasMore, false)
+  assert.equal(justoneProject('weibo', { ...justoneShapes.weibo, max_id: 0 }).projected.providerPage.hasMore, null)
   const missing = structuredClone(redditShape)
   delete missing.postInfoById.commentForest.pageInfo
   missing.postInfoById.commentForest.trees.pop()
@@ -244,9 +248,13 @@ for (const platform of Object.keys(justoneShapes)) {
   test(`${platform} projected continuation rebuilds the fixed native request`, () => {
     const request = normalizePostCommentsRequest({ platform, postId: '123' })
     const first = buildPostCommentsDispatch(request)
-    const result = projectPostCommentPage({ code: 0, data: justoneShapes[platform] }, first, { capturedAt })
+    const result = platform === 'weibo'
+      ? projectPostCommentPage({ code: 200, params: { id: '123' }, data: { ok: 1,
+        data: justoneShapes.weibo.data.map(row => ({ ...row, rootidstr: row.rootidstr ?? '123', rootid: row.rootid ?? 123 })),
+        max_id: justoneShapes.weibo.max_id } }, first, { capturedAt })
+      : projectPostCommentPage({ code: 0, data: justoneShapes[platform] }, first, { capturedAt })
     const next = buildPostCommentsDispatch(request, { providerCursor: result.projected.providerPage.nextParams })
-    assert.equal(next.provider, 'justone')
+    assert.equal(next.provider, platform === 'weibo' ? 'tikhub' : 'justone')
     assert.equal(next.endpointPath, first.endpointPath)
     for (const [field, value] of Object.entries(expectedNext[platform])) assert.equal(String(next.upstreamQuery[field]), String(value))
   })

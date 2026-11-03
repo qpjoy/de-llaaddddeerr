@@ -12,7 +12,7 @@ const definitions = [
   ['reddit', 'tikhub', '/api/v1/reddit/app/fetch_post_comments', 'post_id', ['after'], []],
   ['kuaishou', 'tikhub', '/api/v1/kuaishou/app/fetch_video_comment', 'photo_id', ['pcursor'], []],
   ['instagram', 'tikhub', '/api/v1/instagram/v3/get_post_comments', 'code', ['min_id'], ['sort_order']],
-  ['weibo', 'justone', '/api/weibo/get-post-comments/v1', 'mid', ['maxId'], ['sort']],
+  ['weibo', 'tikhub', '/api/v1/weibo/web_v2/fetch_post_comments', 'id', ['max_id'], []],
   ['douyin', 'justone', '/api/douyin/get-video-comment/v1', 'awemeId', ['page'], []],
   ['tiktok', 'justone', '/api/tiktok/get-post-comment/v1', 'awemeId', ['cursor'], []],
   ['zhihu', 'justone', '/api/zhihu/get-answer-comments/v1', 'answerId', ['offset'], ['orderBy']],

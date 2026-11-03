@@ -80,7 +80,7 @@ export async function diagnoseTwitterAccount(pool, requestId) {
       }
       ownCalls.push({ callId: call.id, provider: choice(call.provider_key, ['rapidapi', 'tikhub', 'justone']),
         operation: choice(call.operation, ['social.profile.get', 'social.content.crawl']),
-        endpoint: choice(call.endpoint_key, ['twitter-aio.user-info', 'twitter-aio.crawl']),
+        endpoint: choice(call.endpoint_key, ['twitter-aio.user-info', 'twitter-aio.crawl', 'twitter-aio.user-replies']),
         outcome: choice(call.outcome, ['pending', 'succeeded', 'succeeded_unusable', 'rejected', 'unknown']),
         httpStatus: call.http_status, businessCode: Number.isSafeInteger(call.business_code) ? call.business_code : null,
         billed: call.billed, errorCode: choice(call.error_code, ERRORS), itemCount: call.item_count,

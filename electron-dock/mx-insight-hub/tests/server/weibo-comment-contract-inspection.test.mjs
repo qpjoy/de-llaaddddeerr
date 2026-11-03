@@ -25,7 +25,7 @@ const snapshot = (overrides = {}) => ({ method: 'POST', path: nativePath,
 const payload = () => ({ code: 200, params: { id: postId, count: '20', max_id: '' }, data: {
   ok: 1, data: Array.from({ length: 22 }, (_, index) => {
     const idstr = String(987654321012340000n + BigInt(index))
-    return { idstr, mid: idstr, id: Number(idstr), rootidstr: idstr, rootid: Number(idstr),
+    return { idstr, mid: idstr, id: Number(idstr), rootidstr: postId, rootid: Number(postId),
       text_raw: `private-comment-${index}`, text: `<span>private-html-${index}</span>`, created_at: timestamp,
       user: { idstr: String(43123000 + index), id: 43123000 + index, screen_name: `private-author-${index}`,
         profile_url: 'https://weibo.com/private-profile', avatar_hd: 'https://private.example/avatar.jpg' },

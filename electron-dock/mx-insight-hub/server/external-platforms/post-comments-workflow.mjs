@@ -16,7 +16,7 @@ export function normalizePostCommentsDelivery(body, { context, maxPageSize, code
   const recipe = POST_COMMENTS_RECIPES[request.platform]
   // These platforms changed suppliers. Old signed cursors must not resume a
   // JustOne traversal through TikHub; historical receipt fingerprints stay put.
-  const migratedProvider = ['twitter', 'reddit', 'kuaishou'].includes(request.platform)
+  const migratedProvider = ['twitter', 'reddit', 'kuaishou', 'weibo'].includes(request.platform)
   const scopeHash = hash({ version: POST_COMMENTS_VERSION, ...identity,
     ...(migratedProvider ? { recipe: { provider: recipe.provider, key: recipe.key } } : {}) })
   const legacyScopeHash = migratedProvider ? hash({ version: POST_COMMENTS_VERSION, ...identity }) : null

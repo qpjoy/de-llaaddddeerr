@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { HUB_SOCIAL_ENDPOINTS, normalizeTwitterResponse } from '../contracts/hub-social.mjs'
+import { HUB_SOCIAL_ENDPOINTS, TWITTER_REPLIES_ENDPOINT_KEY, normalizeTwitterResponse } from '../contracts/hub-social.mjs'
 import { createCredentialEchoRedactor } from '../core/credential-redaction.mjs'
 import { isPostgresSafeJsonValue, isPostgresSafeText } from '../core/postgres-json.mjs'
 import { HUB_USER_AGENT } from '../core/outbound-identity.mjs'
@@ -9,7 +9,7 @@ import { rapidQuotaObservation } from '../external-platforms/platform-search-pol
 import { twitterAccountFailure } from '../contracts/twitter-account-failure.mjs'
 
 export const TWITTER_AIO_HOST = 'twitter-aio.p.rapidapi.com'
-const TWITTER_ENDPOINTS = new Set(Object.values(HUB_SOCIAL_ENDPOINTS).map(endpoint => endpoint.endpointKey))
+const TWITTER_ENDPOINTS = new Set([...Object.values(HUB_SOCIAL_ENDPOINTS).map(endpoint => endpoint.endpointKey), TWITTER_REPLIES_ENDPOINT_KEY])
 const MAX_BYTES = 4 * 1024 * 1024
 const RATE_LIMIT_HEADERS = ['x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset',
   'x-ratelimit-requests-limit', 'x-ratelimit-requests-remaining', 'x-ratelimit-requests-reset']

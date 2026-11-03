@@ -74,7 +74,7 @@ function accountOperation(row) {
     concurrency: { type: 'integer', minimum: 1, maximum: 20, description: '兼容接收的历史提示，不覆盖 Hub 的实际并发、准入或采购保护。' },
     cacheMaxAgeHours: { type: 'number', minimum: 0, maximum: 720, description: '兼容接收的历史提示，不承诺强制缓存命中，也不覆盖 Hub 请求幂等规则。' },
     includeRaw: { type: 'boolean', enum: [false], default: false, description: '保留 false/省略的兼容行为；raw_info/raw_data 始终是业务投影 JSON 字符串，不公开供应凭据或原始审计包。' },
-    ...(row.key === 'crawl' ? { activityTypes: { type: 'array', items: { type: 'string' }, default: ['posts'], description: '默认账号发布内容 posts。其他活动必须为该平台已声明的类型，不能把一个平台的活动复制到另一个平台。' } } : {}),
+    ...(row.key === 'crawl' ? { activityTypes: { type: 'array', items: { type: 'string' }, default: ['posts'], description: '默认账号发布内容 posts。其他活动必须为该平台已声明的类型，不能把一个平台的活动复制到另一个平台。Twitter replies 只返回该账号自己发出的回复（含回复自己的串推），每条带 replyTo（被回复帖子 id、账号 userId/username）、parentExternalId、conversationId 与 isSelfReply；该账号的普通发帖请用 posts。' } } : {}),
   }
   return {
     tags: ['社媒与内容数据'], operationId: `hubSocial_${row.key.replace('-', '_')}`,

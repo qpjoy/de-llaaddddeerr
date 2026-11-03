@@ -1,54 +1,81 @@
-// Pure parser for TikHub's Weibo first-level post-comments response.
-// Keep this import-free so the Admin inspector can concatenate it into stdin.
+// Import-free TikHub Weibo Web-V2 first-level comment parser.
+// The endpoint documents `max_id` continuation and an empty max_id terminal;
+// every other cursor shape is treated as unknown until verified.
 export function parseTikHubWeiboCommentPage(payload, postId, continuation = null) {
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
-  const fail = reason => { const error = new Error('invalid_upstream_contract'); error.code = error.message; error.reason = reason; throw error }
-  const identity = value => typeof value === 'string' && /^[1-9][0-9]{0,29}$/u.test(value)
-    ? value : Number.isSafeInteger(value) && value > 0 ? String(value) : null
-  const count = value => Number.isSafeInteger(value) && value >= 0
-  const date = value => { if (typeof value !== 'string' || !value.trim()) fail('comment_time'); const parsed = new Date(value); if (!Number.isFinite(parsed.getTime())) fail('comment_time'); return parsed.toISOString() }
-  if (!object(payload) || payload.code !== 200 || !object(payload.params) || payload.params.id !== postId
-    || !object(payload.data) || payload.data.ok !== 1 || !Array.isArray(payload.data.data) || payload.data.data.length > 1000
-    || typeof postId !== 'string' || !/^[1-9][0-9]{0,29}$/u.test(postId)) fail('invalid_envelope')
-  if (continuation !== null && (!object(continuation) || Object.keys(continuation).some(key => key !== 'max_id')
-    || continuation.max_id != null && (typeof continuation.max_id !== 'string' || !/^[0-9]{1,30}$/u.test(continuation.max_id)))) fail('continuation_shape')
-  let previewCommentCount = 0
-  if (payload.data.rootComment != null) {
-    if (!Array.isArray(payload.data.rootComment) || payload.data.rootComment.length > 1000) fail('preview_shape')
+  const invalid = reason => { const error = new Error('invalid_upstream_contract'); error.code = 'invalid_upstream_contract'; error.reason = reason; throw error }
+  const idString = value => typeof value === 'string' && /^[1-9][0-9]{0,29}$/u.test(value) ? value : null
+  const idNumber = value => Number.isSafeInteger(value) && value > 0 ? String(value) : null
+  const metric = value => {
+    if (value == null) return null
+    const number = typeof value === 'string' && /^[0-9]{1,16}$/u.test(value) ? Number(value) : value
+    if (!Number.isSafeInteger(number) || number < 0) invalid('comment_metrics')
+    return number
   }
-  const contextRootCount = Array.isArray(payload.data.rootComment) ? payload.data.rootComment.length : 0
-  const comments = payload.data.data.map(raw => {
-    if (!object(raw) || !identity(raw.idstr) || raw.mid !== raw.idstr || raw.rootidstr !== raw.idstr
-      || raw.id != null && !Number.isSafeInteger(raw.id) && typeof raw.id !== 'number'
-      || raw.rootid != null && !Number.isSafeInteger(raw.rootid) && typeof raw.rootid !== 'number') fail('comment_identity')
-    if (raw.id != null && Number.isSafeInteger(raw.id) && raw.id > 0 && String(raw.id) !== raw.idstr) fail('comment_identity_conflict')
-    if (raw.rootid != null && Number.isSafeInteger(raw.rootid) && raw.rootid > 0 && String(raw.rootid) !== raw.rootidstr) fail('comment_identity_conflict')
-    if (typeof raw.text_raw !== 'string' && typeof raw.text !== 'string') fail('comment_text')
-    const user = raw.user
-    if (!object(user) || !identity(user.idstr) || typeof user.screen_name !== 'string') fail('author_identity')
-    if (user.id != null && Number.isSafeInteger(user.id) && user.id > 0 && String(user.id) !== user.idstr) fail('author_identity_conflict')
-    const publishedAt = date(raw.created_at)
-    if (!count(raw.like_counts) || !count(raw.total_number)) fail('comment_metrics')
-    if (raw.comments != null) {
-      if (!Array.isArray(raw.comments) || raw.comments.length > 1000) fail('preview_shape')
-      previewCommentCount += raw.comments.length
+  const identity = (row, fields, reason) => {
+    const strings = fields.map(field => idString(row?.[field])).filter(Boolean)
+    if (new Set(strings).size > 1) invalid(reason)
+    const numbers = fields.map(field => idNumber(row?.[field])).filter(Boolean)
+    if (new Set(numbers).size > 1) invalid(reason)
+    if (strings.length) {
+      // A safe numeric alias is an independent identity claim. Unsafe numeric
+      // values are deliberately ignored because JSON has already rounded them.
+      if (numbers.length && numbers.some(value => value !== strings[0])) invalid(reason)
+      return strings[0]
     }
-    return { raw, values: { commentId: raw.idstr, text: typeof raw.text_raw === 'string' ? raw.text_raw : raw.text,
-      publishedAt, publishedTime: raw.created_at, author: { id: user.idstr, name: user.screen_name,
-        avatarUrl: typeof user.profile_url === 'string' ? user.profile_url : null }, likes: raw.like_counts,
-      replies: raw.total_number, parentExternalId: null, parentCommentId: null, parentRelationship: 'unknown', url: null } }
+    return numbers[0] || null
+  }
+  const timestamp = value => {
+    // Weibo commonly emits RFC-like strings such as
+    // "Mon Nov 03 09:44:56 +0800 2025", where the offset precedes the year.
+    if (typeof value !== 'string' || !value.trim()
+      || !/(?:^|\s)(?:Z|[+-][0-9]{4}|[+-][0-9]{2}:?[0-9]{2})(?:\s|$)/u.test(value)) return null
+    const date = new Date(value)
+    return Number.isFinite(date.getTime()) ? date.toISOString() : null
+  }
+  const validCursorInput = value => value == null || typeof value === 'string' && value.length <= 8192 && !value.includes('\0')
+  if (!object(payload) || payload.code !== 200 || typeof postId !== 'string' || !/^\d{1,30}$/u.test(postId)) invalid('invalid_envelope')
+  if (!object(payload.params) || String(payload.params.id) !== postId) invalid('root_id_mismatch')
+  if (!object(payload.data) || !Array.isArray(payload.data.data) || payload.data.data.length > 1000) invalid('comment_rows_shape')
+  if (continuation != null && (!object(continuation) || Object.keys(continuation).some(key => key !== 'max_id') || !validCursorInput(continuation.max_id))) invalid('continuation_shape')
+  const rows = payload.data.data
+  let previewCommentCount = 0
+  for (const context of rows) {
+    if (!object(context)) invalid('comment_row_shape')
+    if (Array.isArray(context.comments)) previewCommentCount += context.comments.length
+  }
+  const comments = rows.map(raw => {
+    const commentId = identity(raw, ['idstr', 'mid', 'id'], 'comment_identity_conflict')
+    if (!commentId) invalid('comment_identity')
+    const rootId = identity(raw, ['rootidstr', 'rootid'], 'root_id_conflict')
+    if (rootId && rootId !== postId) invalid('root_id_mismatch')
+    if (!object(raw.user)) invalid('author_identity')
+    const authorId = identity(raw.user, ['idstr', 'id'], 'author_identity_conflict')
+    if (!authorId) invalid('author_identity')
+    const authorName = typeof raw.user.screen_name === 'string' ? raw.user.screen_name : typeof raw.user.name === 'string' ? raw.user.name : null
+    if (!authorName) invalid('author_identity')
+    const publishedAt = timestamp(raw.created_at)
+    if (!publishedAt) invalid('comment_time')
+    const text = typeof raw.text_raw === 'string' ? raw.text_raw : typeof raw.text === 'string' ? raw.text : null
+    if (text == null) invalid('comment_text')
+    return { raw, values: { commentId, text, publishedAt, publishedTime: raw.created_at,
+      author: { id: authorId, name: authorName, avatarUrl: null,
+        handle: authorName, profileUrl: typeof raw.user.profile_url === 'string' ? raw.user.profile_url : null },
+      authorHandle: authorName, likes: metric(raw.like_counts), replies: metric(raw.total_number),
+      parentExternalId: null, parentCommentId: null, parentRelationship: 'unknown', url: null,
+    } }
   })
   const cursor = payload.data.max_id
   let cursorState = 'missing', nextParams = null, hasMore = null, stopReason = 'continuation_unproven'
   if (cursor === '') { cursorState = 'empty'; hasMore = false; stopReason = null }
-  else if (cursor === null) cursorState = 'null'
-  else if (cursor === undefined) cursorState = 'missing'
-  else if (typeof cursor === 'number') cursorState = Number.isSafeInteger(cursor) ? cursor === 0 ? 'zero' : 'invalid' : 'unsafe_number'
-  else if (typeof cursor === 'string' && /^[0-9]{1,30}$/u.test(cursor)) {
-    cursorState = cursor === '0' ? 'zero' : continuation?.max_id === cursor ? 'repeated' : 'advancing'
-    if (cursorState === 'advancing') nextParams = { max_id: cursor }
-  } else cursorState = 'invalid'
+  else if (typeof cursor === 'string' && /^[1-9][0-9]{0,29}$/u.test(cursor)) {
+    cursorState = cursor === String(continuation?.max_id ?? '') ? 'repeated' : 'advancing'
+    if (cursorState === 'advancing') { hasMore = true; nextParams = { max_id: cursor }; stopReason = null } else stopReason = 'continuation_unproven'
+  } else if (Number.isSafeInteger(cursor) && cursor > 0) {
+    const token = String(cursor); cursorState = token === String(continuation?.max_id ?? '') ? 'repeated' : 'advancing'
+    if (cursorState === 'advancing') { hasMore = true; nextParams = { max_id: token }; stopReason = null } else stopReason = 'continuation_unproven'
+  } else if (cursor == null || cursor === 0 || cursor === '0' || typeof cursor === 'number') cursorState = cursor == null ? 'missing' : 'unproven'
+  else if (typeof cursor === 'string') cursorState = 'unproven'
   return { comments, providerPage: { hasMore, nextParams, nextPage: null, ...(stopReason ? { stopReason } : {}) },
-    diagnostics: { previewRootCount: comments.filter(comment => Array.isArray(comment.raw.comments) && comment.raw.comments.length > 0).length,
-      previewCommentCount, contextRootCount, cursorState } }
+    diagnostics: { contextRootCount: rows.length, previewCommentCount, cursorState } }
 }

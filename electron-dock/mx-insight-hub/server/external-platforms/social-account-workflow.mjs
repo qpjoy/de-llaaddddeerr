@@ -11,6 +11,7 @@ import { RapidApiUpstreamError } from '../adapters/rapidapi.mjs'
 import { JustOneUpstreamError } from '../adapters/justone.mjs'
 import { twitterAccountFailureMessage, twitterLookupFoundNoAccount } from '../contracts/twitter-account-failure.mjs'
 import { buildHubSocialCompatDispatch, projectHubSocialCompatResponse } from '../contracts/hub-social-compat.mjs'
+import { TWITTER_REPLIES_ENDPOINT_KEY } from '../contracts/hub-social.mjs'
 import { normalizeNightAllLegacyPayload } from '../ingest/legacy-night-all.mjs'
 import { SocialSearchStateStore } from './social-search-store.mjs'
 import { YOUTUBE_COMMENTS_TRAVERSAL } from '../contracts/youtube-comments.mjs'
@@ -236,6 +237,13 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
           if (!credential.ready) throw new AppError(503, 'external_platform_not_configured', 'Account acquisition is unavailable')
           const control = await gateway.operationControlStore.authorizeDispatch(provider, expected.operation,
             { consumerId: context.consumer.id, config: gateway.config, credentialConfigured: true, credentialRevision: credential.revision })
+          // Replies have an optional price of their own. Without it, do not
+          // buy the profile lookup that only serves the replies timeline.
+          if (!traversal && step.socialCompat.stage === 'resolve' && step.platform === 'twitter' && step.socialCompat.job?.activityType === 'replies') {
+            const crawl = await gateway.operationControlStore.authorizeDispatch(provider, 'social.content.crawl',
+              { consumerId: context.consumer.id, config: gateway.config, credentialConfigured: true, credentialRevision: credential.revision })
+            providerCostControl(crawl?.billing ? { billing: crawl.billing } : gateway.config, TWITTER_REPLIES_ENDPOINT_KEY)
+          }
           const pendingLease = { ...parentLease, operation: expected.operation, endpointKey: expected.endpointKey, contractVersion: expected.contractVersion }
           const lease = await store.acquireDispatchLease(pendingLease)
           if (lease !== true && lease?.kind !== 'acquired') {
