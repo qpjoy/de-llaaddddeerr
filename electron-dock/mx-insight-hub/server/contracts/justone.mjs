@@ -712,13 +712,34 @@ function firstUrl(object, keys, secret = null) {
   return null
 }
 
-function imageUrls(item, secret = null) {
+// JD search V1 returns its main picture as a CDN-relative path, `imageUrl:
+// "jfs/t1/<...>/<name>.jpg"`, beside an empty `images` array -- 48 of 48 items
+// in the provider's published getApiJdSearchItemListV1 sample -- so every JD
+// product used to arrive with `images: []` (2026-11-02 investigation). The JD
+// image CDN serves such a path under a size segment, and `n0` is the stored
+// original (800x800 in a 2026-11-03 probe, where `n1` gave 350x350). Only this
+// exact path shape on this one marketplace is completed: a relative string of
+// any other shape, or from any other marketplace, still yields no image rather
+// than a guessed address.
+const RELATIVE_IMAGE_URLS = Object.freeze({
+  jd: Object.freeze({
+    pattern: /^jfs\/t\d{1,8}\/(?:[A-Za-z0-9_-]{1,128}\/){1,16}[A-Za-z0-9_-]{1,128}\.(?:jpe?g|png|webp)$/u,
+    base: 'https://img10.360buyimg.com/n0/',
+  }),
+})
+
+function marketplaceImageUrl(value, marketplace) {
+  const relative = RELATIVE_IMAGE_URLS[marketplace]
+  return relative && typeof value === 'string' && relative.pattern.test(value) ? `${relative.base}${value}` : value
+}
+
+function imageUrls(item, marketplace, secret = null) {
   const result = []
   const seen = new Set()
   const add = (value) => {
     const candidate = plainObject(value)
       ? firstUrl(value, ['url', 'imageUrl', 'image_url', 'src'], secret)
-      : safeUrl(value, secret)
+      : safeUrl(marketplaceImageUrl(value, marketplace), secret)
     if (!candidate || seen.has(candidate)) return
     seen.add(candidate)
     result.push(candidate)
@@ -821,7 +842,7 @@ export function normalizeJustOneProductItem(rawItem, marketplace, { secret = nul
       currency: firstScalar(item, ['currency', 'currencyCode'], 16) || 'CNY',
     }),
     shop: Object.freeze({ id: shopId, name: shopName }),
-    images: Object.freeze(imageUrls(item, secret)),
+    images: Object.freeze(imageUrls(item, marketplace, secret)),
     signals: Object.freeze({
       sales: firstScalar(item, ['orderPayUV', 'sales', 'saleCount', 'soldCount', 'volume'], 128),
       reviewCount: firstScalar(item, ['commentCount', 'comment_count', 'reviewCount'], 128),

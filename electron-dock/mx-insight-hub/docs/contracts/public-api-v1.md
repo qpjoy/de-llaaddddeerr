@@ -469,6 +469,10 @@ The response is provider-neutral:
 }
 ```
 
+For `jd`, the source gives the main picture as a path on JD's image CDN; Hub
+delivers it in `images` as an absolute HTTPS URL on that CDN. Results captured
+before this was supported, and their replays, keep `images: []`.
+
 For `douyin_ec`, the reviewed search response provides product IDs, titles,
 links and images. Shop fields and prices remain null when the source does not
 provide a verified value. The public source evidence is the item's

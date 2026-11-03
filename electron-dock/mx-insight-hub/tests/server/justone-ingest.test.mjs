@@ -77,6 +77,17 @@ test('an item without a source product ID is skipped instead of receiving a posi
   assert.doesNotMatch(normalized.records[0].externalId, /page|index/iu)
 })
 
+test('a JD relative image path reaches the canonical record as the completed URL, raw evidence unchanged', () => {
+  const jfs = 'jfs/t1/504599/21/13618/50445/6a9535b8Ffb0c609e/0083320320a7a413.jpg'
+  const request = normalizeJustOneProductSearchRequest({ marketplace: 'jd', query: '耳机' })
+  const [record] = normalizeJustOneProductSearchPayload(envelope([
+    { id: '100311907651', title: '示例耳机', imageUrl: jfs, images: [] },
+  ]), request, { capturedAt: '2026-11-03T00:00:00Z' }).records
+  assert.deepEqual(record.stableFields.media.images, [`https://img10.360buyimg.com/n0/${jfs}`])
+  assert.equal(record.rawItem.imageUrl, jfs)
+  assert.equal(record.parserVersion, 'mxih-justone-product-search.v5')
+})
+
 test('records use the ecommerce canonical shape with catalog mapping and lineage', () => {
   for (const marketplace of Object.keys(JUSTONE_MARKETPLACE_CATALOG)) {
     const request = normalizeJustOneProductSearchRequest({ marketplace, query: 'test' })

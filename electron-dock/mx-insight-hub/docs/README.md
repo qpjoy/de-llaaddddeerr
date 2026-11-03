@@ -19,6 +19,7 @@ Last reviewed: 2026-10-21.
 
 ## 容量与熔断排查（2026-10-09）
 
+- [京东商品图片全空：相对图片路径被投影丢弃（2026-11-03）](operations/ecommerce-jd-images-2026-11-03.md)：京东搜索 V1 只在 `imageUrl` 给 `jfs/t1/...` 相对路径、`images` 为空，原投影只收完整地址，导致 `images: []`。现仅对京东、仅对该路径形状补成 `https://img10.360buyimg.com/n0/` 原图地址；官方样例 48/48 有图且可访问。需重新部署；旧回执、快照与下游已存空数组不变；附部署后只读归档诊断命令。
 - [Twitter 账号内容只有 32 条：时间线到底按正常结束返回（2026-10-31）](operations/twitter-account-timeline-end-2026-10-31.md)：`8c042908` 第 3 页为空且游标未变，是 Twitter 时间线结束而不是 Hub 漏页；空页重复自身游标不再附 `upstream_pagination_stopped`，状态为 `ok`。按 Request ID 复查用 `scripts/inspect-social-account-request.sql`。
 - [电商数据：上游供应商可切换、淘宝/天猫备用通道、TikHub 电商接口（2026-10-29）](operations/ecommerce-supplier-routing-2026-10-29.md)：JustOne 余额不足（601）导致电商搜索整体被拒。统一商品搜索新增按平台的「固定 / 主用 + 备用」供应商路由：主用不能执行或明确拒绝且未计费时，同一请求改由备用执行一次；已计费或结果未知时不切换。淘宝/天猫新增同一 JustOne 后端的 RapidAPI 通道，熔断按平台隔离，不影响 Twitter。TikHub 没有淘宝、京东、天猫、闲鱼接口；其小红书电商与 TikTok Shop 的 17 个接口作为电商专用接口接入。附只读诊断与启用顺序。
 - [小红书搜索 503：TikHub 共享熔断被 Hub 自身失败触发（2026-10-29）](operations/tikhub-shared-circuit-hub-failures-2026-10-29.md)：`0a92d464` 被 TikHub 共享熔断拒绝（`reason=upstream_failure`、无上游证据）。Hub 自身的解析失败、补全内部错误、写库失败此前也计入共享熔断，会连带暂停所有 TikHub 平台；现改为只有供应商故障计入。已核实本次由 10 次 Reddit 搜索解析失败（已计费）触发。原因是 Reddit 出现了新的非帖子节点（`SearchInFeedSurveyUnit` 调查卡片、`SearchErrorMessage` 提示）：现在不含帖子的节点直接排除，“无结果”提示返回空页，其他提示记为 Reddit 错误。小红书搜索等 5 处拒绝附带触发调用证据；新增可用于任意平台的只读熔断诊断。

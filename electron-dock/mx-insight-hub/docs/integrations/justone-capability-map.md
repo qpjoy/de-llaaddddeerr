@@ -103,6 +103,12 @@ image URL to `img src`. For a visible live item it may call the authenticated Hu
 consumer's committed search `requestId`, normalized `itemId` and bounded `imageIndex`; missing or rejected media
 uses the neutral local icon.
 
+JD search V1 returns its main picture only as a CDN-relative `imageUrl` (`jfs/t1/...jpg`) beside an empty
+`images`. Since 2026-11-03 the projection completes exactly that path shape, on `jd` only, to
+`https://img10.360buyimg.com/n0/<path>` (the original-size rendition); other relative strings and other marketplaces
+still yield no image, and raw evidence keeps the provider's path. Earlier JD deliveries, snapshots and replays keep
+`images: []`. See [JD image investigation](../operations/ecommerce-jd-images-2026-11-03.md).
+
 `images[]` in the Public product result remains normalized data, not permission to build an arbitrary proxy.
 `GET /api/v1/data/ecommerce/products/media` accepts no URL, reads only a retained image belonging to a committed
 HTTP-200 ecommerce response for the authenticated consumer, permits bounded public HTTPS JPEG/PNG/WebP content

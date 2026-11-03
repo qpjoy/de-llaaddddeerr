@@ -37,7 +37,9 @@ export function inspectEcommerceProductLinks(archive, marketplace) {
     urlCount: products.filter(item => item.url !== null).length,
     upstreamUrlCount: products.filter(item => item.urlSource === 'upstream').length,
     derivedUrlCount: products.filter(item => item.urlSource === 'derived_from_id').length,
-    missingUrlCount: products.filter(item => item.url === null).length }
+    missingUrlCount: products.filter(item => item.url === null).length,
+    imageProductCount: products.filter(item => item.images.length > 0).length,
+    missingImageCount: products.filter(item => item.images.length === 0).length }
 }
 
 export async function diagnoseEcommerceProductLinks(client, requestIds) {

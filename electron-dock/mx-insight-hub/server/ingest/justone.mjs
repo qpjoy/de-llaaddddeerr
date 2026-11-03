@@ -9,7 +9,7 @@ import { canonicalJson, sha256 } from './normalizers.mjs'
 
 export const JUSTONE_DATASET_ID = 'ecommerce.products.v1'
 export const JUSTONE_CONNECTOR_ID = 'external-platform:justone'
-export const JUSTONE_PARSER_VERSION = 'mxih-justone-product-search.v4'
+export const JUSTONE_PARSER_VERSION = 'mxih-justone-product-search.v5'
 
 const QUEUED_RECORD_TIME_FIELDS = Object.freeze([
   'eventTime',

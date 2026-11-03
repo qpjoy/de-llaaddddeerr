@@ -6,7 +6,8 @@
       {
         "id": "jd-product-1",
         "title": "脱敏示例商品",
-        "imageUrl": "jfs/example/product.jpg",
+        "imageUrl": "jfs/t1/100001/1/10001/10001/0a1b2c3dF4e5f6a7b/0123456789abcdef.jpg",
+        "images": [],
         "price": "199.00",
         "shopId": "jd-shop-1",
         "shopName": "脱敏示例店铺"
