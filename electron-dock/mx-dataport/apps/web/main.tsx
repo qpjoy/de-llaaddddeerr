@@ -274,6 +274,7 @@ function RemotePanel({
   if (page === "team")
     return (
       <EnterpriseMembers
+        key={tenant}
         tenant={tenant}
         session={session}
         csrf={csrf}

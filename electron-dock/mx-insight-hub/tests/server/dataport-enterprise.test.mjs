@@ -30,7 +30,7 @@ import { createHarborApp } from "../../../mx-dataport/apps/server/app.mjs";
 import { paymentTimedOutSql } from "../../server/commerce/order-state.mjs";
 
 const connectionString = process.env.MX_DATAPORT_TEST_DATABASE_URL;
-async function fixture(t) {
+async function fixture(t, { legacyEmployeeSchema = false } = {}) {
   const url = new URL(connectionString);
   assert.ok(
     ["localhost", "127.0.0.1"].includes(url.hostname) &&
@@ -48,7 +48,7 @@ async function fixture(t) {
   });
   const dir = new URL("../../migrations/", import.meta.url),
     files = await readdir(dir);
-  for (const prefix of ["001_", "007_", "149_", "159_"])
+  for (const prefix of ["001_", "007_", "149_", "159_", ...(legacyEmployeeSchema ? [] : ["166_"])])
     await pool.query(
       await readFile(
         new URL(
@@ -476,6 +476,9 @@ test(
       operation: "create",
       commandId: randomUUID(),
       account: "Employee01",
+      email: "employee01@example.test",
+      password: "Fixture-create-password-123",
+      confirmPassword: "Fixture-create-password-123",
       displayName: "Employee",
       roleId: "analyst",
     };
@@ -512,7 +515,7 @@ test(
       ),
       { status: 409 },
     );
-    assert.match(
+    assert.equal(
       (
         await f.store.initialPassword(
           owner,
@@ -521,7 +524,7 @@ test(
           accounts,
         )
       ).password,
-      /^[A-Za-z0-9_-]{24}$/,
+      body.password,
     );
     assert.equal(commands,0,"new child creation and password reads never call MX Auth");
     await assert.rejects(
@@ -537,7 +540,7 @@ test(
       owner,
       f.tenant,
       {
-        ...body,
+        roleId: body.roleId,
         operation: "invite",
         commandId: randomUUID(),
         account: "Existing",
@@ -598,8 +601,21 @@ test(
       owner = await f.principal(),
       p = await f.principal(f.analyst),
       v = await f.principal(f.viewer);
-    await f.store.createTicket(p, f.tenant, { content: "Technical issue" });
-    await f.store.createTicket(v, f.tenant, { content: "Account issue" });
+    const valid={content:"Technical issue",contact:"QA@example.test",category:"technical",priority:"normal"};
+    for(const field of ["content","contact","category","priority"]) {
+      const missing={...valid};delete missing[field];
+      for(const body of [missing,{...valid,[field]:""},{...valid,[field]:"   "}]) {
+        await assert.rejects(f.store.createTicket(p,f.tenant,body),{code:"invalid_ticket",status:400});
+      }
+    }
+    for(const body of [null,[],{...valid,contact:123},{...valid,contact:"x".repeat(201)},{...valid,content:"x".repeat(5001)}]) {
+      await assert.rejects(f.store.createTicket(p,f.tenant,body),{code:"invalid_ticket",status:400});
+    }
+    assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM dataport.tickets')).rows[0].n,0,'invalid forms never create a ticket');
+    await f.store.createTicket(p, f.tenant, valid);
+    const created=await f.store.createTicket(v, f.tenant, {...valid,content:"Account issue",contact:"  13800000000  ",category:"account",priority:"urgent"});
+    const stored=(await f.pool.query('SELECT contact,category,priority FROM dataport.tickets WHERE id=$1',[created.id])).rows[0];
+    assert.deepEqual(stored,{contact:"13800000000",category:"account",priority:"urgent"});
     assert.equal(
       (await f.store.tickets(p, f.tenant, new URLSearchParams())).total,
       1,
@@ -965,7 +981,7 @@ test(
 
 test("DataPort support closes the processing loop with tenant/self isolation, CAS, replay and private receipts", {skip:!connectionString},async t=>{
  const f=await fixture(t),owner=await f.principal(),analyst=await f.principal(f.analyst),viewer=await f.principal(f.viewer),support=new DataportSupport(f.store),messages=new CustomerMessages(f.pool);
- const ticket=await f.store.createTicket(analyst,f.tenant,{content:"Fixture request",category:"technical",priority:"normal"});
+ const ticket=await f.store.createTicket(analyst,f.tenant,{content:"Fixture request",contact:"support@example.test",category:"technical",priority:"normal"});
  assert.equal((await support.detail(analyst,f.tenant,ticket.id)).status,"saved");
  await assert.rejects(support.detail(viewer,f.tenant,ticket.id),{status:404});
  await assert.rejects(support.detail(analyst,f.other,ticket.id),{status:403});
@@ -1019,7 +1035,7 @@ test('replacement Key keeps its exact existing scopes and environment, with no a
 
 test('local employee credentials, sessions and first password change never create MX bindings', {skip:!connectionString}, async t => {
   const f=await fixture(t), owner=await f.principal(), local=f.store.localAccounts;
-  const body={operation:'create',commandId:randomUUID(),account:'LocalEmployee',displayName:'Local employee',roleId:'analyst'};
+  const body={operation:'create',commandId:randomUUID(),account:'LocalEmployee',email:'localemployee@example.test',password:'Fixture-create-password-123',confirmPassword:'Fixture-create-password-123',displayName:'Local employee',roleId:'analyst'};
   const created=await f.store.memberCommand(owner,f.tenant,body,{execute(){throw Error('MX must not be called')}},'mx-insight-hub');
   const initial=await local.initial(owner,f.tenant,created.memberId);
   const metadata={portalOrigin:'https://dataport.example.test',portalAudience:'mx-insight-hub'};
@@ -1036,7 +1052,7 @@ test('local employee credentials, sessions and first password change never creat
   const change=await local.account(first.token,metadata,{action:'password',currentPassword:initial.password,password:'Fixture-new-password-123'});
   assert.equal(change.signedOut,true);
   await assert.rejects(local.principal(first.token,metadata),{status:401});
-  await assert.rejects(local.initial(owner,f.tenant,created.memberId),{status:404});
+  assert.equal((await local.initial(owner,f.tenant,created.memberId)).password,'Fixture-new-password-123');
   await assert.rejects(local.login({account:created.account,password:initial.password}),{status:401});
   const second=await local.login({account:created.account,password:'Fixture-new-password-123'});
   p=await f.store.enrich(await local.principal(second.token,metadata),digest(second.csrf));
@@ -1084,16 +1100,16 @@ test('legacy managed MX conversion is explicit, tenant-scoped and idempotent; ex
   await assert.rejects(f.store.resetPassword(owner,f.tenant,f.analyst,{commandId:randomUUID()},{}),{code:'managed_account_required'});
   await assert.rejects(local.initial(await f.principal(f.analyst),f.tenant,f.viewer),{status:403});
   await f.pool.query("UPDATE dataport.local_credentials SET initial_expires_at=now()-interval '1 second' WHERE member_id=$1",[f.viewer]);
-  await assert.rejects(local.initial(owner,f.tenant,f.viewer),{status:404});
+  assert.ok((await local.initial(owner,f.tenant,f.viewer)).password,'owner can view retained credentials after initial expiry');
 });
 
 test('local account names do not merge identities; commands are atomic and password attempts are limited', {skip:!connectionString}, async t=>{
   const f=await fixture(t),owner=await f.principal(),local=f.store.localAccounts;
-  const body={operation:'create',commandId:randomUUID(),account:'AtomicEmployee',displayName:'Atomic',roleId:'analyst'};
+  const body={operation:'create',commandId:randomUUID(),account:'AtomicEmployee',email:'atomicemployee@example.test',password:'Fixture-create-password-123',confirmPassword:'Fixture-create-password-123',displayName:'Atomic',roleId:'analyst'};
   f.pool.options.max=2; // A queued command must not need another pooled connection to recheck authority.
   const pair=await Promise.all([f.store.memberCommand(owner,f.tenant,body,{},''),f.store.memberCommand(owner,f.tenant,body,{},'')]);
   assert.equal(pair[0].memberId,pair[1].memberId);
-  await assert.rejects(f.store.memberCommand(owner,f.tenant,{...body,commandId:randomUUID(),account:'ATOMICEMPLOYEE'},{},''),{code:'local_account_exists'});
+  await assert.rejects(f.store.memberCommand(owner,f.tenant,{...body,commandId:randomUUID(),account:'ATOMICEMPLOYEE',email:'different-atomic@example.test'},{},''),{code:'local_account_exists'});
   assert.equal((await f.pool.query("SELECT 1 FROM iam.members WHERE display_name='Atomic'")).rowCount,1);
   const unknown='missingemployee';
   for(let i=0;i<10;i++)await assert.rejects(local.login({account:unknown,password:'wrong-password'}),{code:'local_login_failed'});
@@ -1102,6 +1118,97 @@ test('local account names do not merge identities; commands are atomic and passw
   const pending={...body,commandId:randomUUID(),account:'OldPending'};
   await f.pool.query("INSERT INTO dataport.member_commands(id,tenant_id,actor,operation,fingerprint) VALUES($1,$2,$3,'create','old-auth-command')",[pending.commandId,f.tenant,f.owner]);
   await assert.rejects(f.store.memberCommand(owner,f.tenant,pending,{},''),{code:'member_command_conflict'});
+});
+
+test('employee email/password validation is atomic, email ownership is global and create replay never exposes credentials', {skip:!connectionString}, async t => {
+  const f=await fixture(t),owner=await f.principal();
+  const body={operation:'create',commandId:randomUUID(),account:'EmployeeDetails',displayName:'员工资料',email:' Staff@Example.test ',password:'Fixture-created-123',confirmPassword:'Fixture-created-123',roleId:'analyst'};
+  for(const patch of [{email:''},{email:'invalid'},{email:'a@b'},{displayName:'长'.repeat(41)},{password:'short',confirmPassword:'short'},{confirmPassword:'different'}, {password:undefined}]) {
+    await assert.rejects(f.store.memberCommand(owner,f.tenant,{...body,...patch},{},''),{status:400});
+  }
+  assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM dataport.managed_accounts')).rows[0].n,0);
+  const created=await f.store.memberCommand(owner,f.tenant,body,{},'');
+  assert.equal(created.email,'staff@example.test');assert.equal(created.displayName,'员工资料');
+  assert.ok(!JSON.stringify(created).includes(body.password));
+  assert.deepEqual(await f.store.memberCommand(owner,f.tenant,body,{},''),created);
+  await assert.rejects(f.store.memberCommand(owner,f.tenant,{...body,password:'Changed-password-123',confirmPassword:'Changed-password-123'},{},''),{code:'member_command_conflict'});
+  // A real owner of B, not a forged principal, attempts to reuse A's email.
+  await f.pool.query("INSERT INTO iam.tenant_memberships(id,tenant_id,member_id,role) VALUES($1,$2,$3,'owner')",[randomUUID(),f.other,f.owner]);
+  await assert.rejects(f.store.memberCommand(await f.principal(),f.other,{...body,account:'DifferentEmployee',commandId:randomUUID(),email:'STAFF@example.test'},{},''),{code:'employee_email_exists'});
+  assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM dataport.managed_accounts')).rows[0].n,1);
+  assert.equal((await f.pool.query("SELECT count(*)::int AS n FROM iam.members WHERE display_name='员工资料'")).rows[0].n,1,'duplicate email rolls back the identity too');
+  const listed=await f.store.members(owner,f.tenant,new URLSearchParams('q=STAFF@'));
+  assert.equal(listed.total,1);assert.equal(listed.items[0].email,'staff@example.test');
+  for(const table of ['managed_accounts','member_commands','events','local_credentials']) {
+    assert.ok(!JSON.stringify((await f.pool.query(`SELECT * FROM dataport.${table}`)).rows).includes(body.password),table);
+  }
+  for(let i=0;i<10;i++) await assert.rejects(f.store.localAccounts.login({account:i%2 ? created.account : created.email,password:'Wrong-fixture-password'}),{status:401});
+  for(const account of [created.account,created.email]) await assert.rejects(f.store.localAccounts.login({account,password:body.password}),{status:429},'email and username share the attempt limit');
+});
+
+test('only the current enterprise owner reveals current passwords, including changed/expired/disabled accounts; reset sets confirmed password without enabling', {skip:!connectionString}, async t => {
+  const f=await fixture(t),owner=await f.principal(),local=f.store.localAccounts;
+  const password='Fixture-first-password-123',created=await f.store.memberCommand(owner,f.tenant,{operation:'create',commandId:randomUUID(),account:'CredentialEmployee',displayName:'Credential employee',email:'credential@example.test',password,confirmPassword:password,roleId:'analyst'},{},'');
+  const reveal=()=>f.store.initialPassword(owner,f.tenant,created.memberId,{});
+  assert.equal((await reveal()).password,password);
+  for(const actor of [f.analyst,f.adminMember,f.viewer,created.memberId]) {
+    await assert.rejects(f.store.initialPassword(await f.principal(actor),f.tenant,created.memberId,{}),{status:403});
+  }
+  await f.pool.query("INSERT INTO iam.tenant_memberships(id,tenant_id,member_id,role) VALUES($1,$2,$3,'owner')",[randomUUID(),f.other,f.viewer]);
+  const otherOwner=await f.principal(f.viewer);
+  await assert.rejects(f.store.initialPassword(otherOwner,f.tenant,created.memberId,{}),{status:403});
+  await assert.rejects(f.store.initialPassword(otherOwner,f.other,created.memberId,{}),{status:404});
+  await assert.rejects(f.store.resetPassword(otherOwner,f.other,created.memberId,{commandId:randomUUID(),password:'Other-new-password-123',confirmPassword:'Other-new-password-123'},{}),{status:403});
+  const first=await local.login({account:'CREDENTIAL@EXAMPLE.TEST',password});
+  const changed='Fixture-employee-changed-123';
+  await local.account(first.token,{}, {action:'password',currentPassword:password,password:changed});
+  assert.equal((await reveal()).password,changed);assert.equal((await reveal()).mustChangePassword,false);
+  await assert.rejects(local.login({account:created.account,password}),{status:401});
+  const second=await local.login({account:created.account,password:changed});
+  for(const patch of [{password:'short',confirmPassword:'short'},{password:'Fixture-reset-password-123',confirmPassword:'mismatch'},{password:'Fixture-reset-password-123'},{password:changed,confirmPassword:changed}]) {
+    await assert.rejects(f.store.resetPassword(owner,f.tenant,created.memberId,{commandId:randomUUID(),...patch},{}),{status:400});
+  }
+  assert.equal((await local.principal(second.token,{})).memberId,created.memberId);
+  await f.store.updateMember(owner,f.tenant,created.memberId,{status:'suspended'});
+  const body={commandId:randomUUID(),password:'Fixture-reset-password-123',confirmPassword:'Fixture-reset-password-123'};
+  const reset=await f.store.resetPassword(owner,f.tenant,created.memberId,body,{});
+  assert.ok(!JSON.stringify(reset).includes(body.password));
+  assert.deepEqual(await f.store.resetPassword(owner,f.tenant,created.memberId,body,{}),reset);
+  assert.equal((await f.pool.query('SELECT revision FROM dataport.local_credentials WHERE member_id=$1',[created.memberId])).rows[0].revision,3);
+  await assert.rejects(f.store.resetPassword(owner,f.tenant,created.memberId,{...body,password:'Another-reset-password-123',confirmPassword:'Another-reset-password-123'},{}),{code:'member_command_conflict'});
+  const info=await reveal();assert.equal(info.password,body.password);assert.equal(info.status,'suspended');
+  await assert.rejects(local.principal(second.token,{}),{status:401});
+  await assert.rejects(local.login({account:created.account,password:body.password}),{status:401});
+  await f.store.updateMember(owner,f.tenant,created.memberId,{status:'active'});
+  await assert.rejects(local.login({account:created.account,password:changed}),{status:401});
+  const third=await local.login({account:created.account,password:body.password});
+  assert.equal(third.mustChangePassword,true);
+  await f.pool.query("UPDATE dataport.local_credentials SET initial_expires_at=now()-interval '1 second' WHERE member_id=$1",[created.memberId]);
+  assert.equal((await reveal()).password,body.password,'viewing has no 48-hour cutoff');
+  await assert.rejects(local.principal(third.token,{}),{status:401});
+  await assert.rejects(local.login({account:created.account,password:body.password}),{status:401},'expired initial login still needs reset');
+  const audit=(await f.pool.query("SELECT * FROM dataport.events WHERE action='member.credentials.viewed'")).rows;
+  assert.ok(audit.length>0);
+  assert.ok(!JSON.stringify(audit).includes(body.password));assert.ok(!JSON.stringify(audit).includes(changed));
+  // A stale owner principal loses reveal rights immediately after revocation.
+  await f.pool.query("UPDATE iam.tenant_memberships SET status='suspended' WHERE tenant_id=$1 AND member_id=$2",[f.tenant,f.owner]);
+  await assert.rejects(reveal(),{status:403});
+});
+
+test('employee migration preserves recoverable ciphertext and cannot invent a password removed by old releases', {skip:!connectionString}, async t => {
+  const f=await fixture(t,{legacyEmployeeSchema:true}),owner=await f.principal(),local=f.store.localAccounts;
+  const password='Fixture-retained-legacy-123',cipher=local.seal(password,f.analyst,f.tenant);
+  for(const [id,account,sealed] of [[f.analyst,'legacyretained',cipher],[f.viewer,'legacylost',null]]) {
+    await f.pool.query("INSERT INTO dataport.managed_accounts(tenant_id,member_id,user_id,account,managed,auth_mode) VALUES($1,$2,$3,$4,true,'local')",[f.tenant,id,`dataport:${id}`,account]);
+    await f.pool.query("INSERT INTO dataport.local_credentials(member_id,tenant_id,account,password_hash,initial_cipher,initial_expires_at) VALUES($1,$2,$3,'old-hash-not-used-for-login',$4,now()-interval '1 day')",[id,f.tenant,account,sealed]);
+  }
+  await f.pool.query(await readFile(new URL('../../migrations/166_dataport_employee_details.sql',import.meta.url),'utf8'));
+  assert.equal((await local.initial(owner,f.tenant,f.analyst)).password,password);
+  await assert.rejects(local.initial(owner,f.tenant,f.viewer),{code:'initial_password_unavailable'});
+  await f.store.resetPassword(owner,f.tenant,f.viewer,{commandId:randomUUID(),password:'Fixture-restored-password-123',confirmPassword:'Fixture-restored-password-123'},{});
+  assert.equal((await local.initial(owner,f.tenant,f.viewer)).password,'Fixture-restored-password-123');
+  await f.pool.query('UPDATE dataport.local_credentials SET password_cipher=$2 WHERE member_id=$1',[f.viewer,cipher]);
+  await assert.rejects(local.initial(owner,f.tenant,f.viewer),{code:'dataport_accounts_invalid_config'},'AAD prevents moving another employee cipher into this account');
 });
 
 async function listen(t,app) {
@@ -1169,7 +1276,7 @@ test('history projects the exact original batch completion over a stale uncertai
 });
 test('real BFF + Portal + local PG login enforces gateway, origin, CSRF, password gate and public-listener isolation without Auth', {skip:!connectionString}, async t=>{
   const f=await fixture(t),owner=await f.principal(),pepper='local-fixture-retained-pepper-32-characters';
-  const child=await f.store.memberCommand(owner,f.tenant,{operation:'create',commandId:randomUUID(),account:'HttpEmployee',displayName:'HTTP',roleId:'analyst'},{},'');
+  const child=await f.store.memberCommand(owner,f.tenant,{operation:'create',commandId:randomUUID(),account:'HttpEmployee',email:'httpemployee@example.test',password:'Fixture-create-password-123',confirmPassword:'Fixture-create-password-123',displayName:'HTTP',roleId:'analyst'},{},'');
   const initial=await f.store.initialPassword(owner,f.tenant,child.memberId,{});
   const root=await mkdtemp(join(tmpdir(),'dataport-local-http-'));t.after(()=>rm(root,{recursive:true,force:true}));
   const profileFile=join(root,'profile.json'),gateway='fixture-dedicated-gateway-32-characters';
@@ -1233,6 +1340,22 @@ test("verified MX Portal owner receives usable permissions without a code; retir
   for (const resource of ["members","roles","history"]) {
     assert.equal((await fetch(hub+`/internal/v1/portal/enterprises/${f.tenant}/${resource}`, {headers})).status,200);
   }
+  const memberPath=hub+`/internal/v1/portal/enterprises/${f.tenant}/members`;
+  const post=(path,body)=>fetch(path,{method:'POST',headers:{...headers,'content-type':'application/json'},body:JSON.stringify(body)});
+  const password='Fixture-http-create-123',command={operation:'create',commandId:randomUUID(),account:'OwnerHttpEmployee',displayName:'HTTP created employee',email:'owner-http@example.test',password,confirmPassword:password,roleId:'analyst'};
+  const createdResponse=await post(memberPath,command);
+  assert.equal(createdResponse.status,200);
+  const createdBody=await createdResponse.json();assert.ok(!JSON.stringify(createdBody).includes(password));
+  const memberId=createdBody.data.memberId;
+  assert.equal((await (await post(memberPath,command)).json()).data.memberId,memberId);
+  const detail=await post(`${memberPath}/${memberId}/initial-password`,{});
+  assert.equal(detail.status,200);assert.equal(detail.headers.get('cache-control'),'private, no-store');
+  const credentials=(await detail.json()).data;assert.equal(credentials.password,password);assert.equal(credentials.email,command.email);
+  assert.equal((await fetch(`${memberPath}/${memberId}/initial-password`,{headers})).status,404,'credential reveal is POST-only');
+  const newPassword='密'.repeat(128); // Exercise the complete confirmed-password HTTP body, not just the store.
+  assert.equal((await post(`${memberPath}/${memberId}/reset-password`,{commandId:randomUUID(),password:newPassword,confirmPassword:newPassword})).status,200);
+  assert.equal((await (await post(`${memberPath}/${memberId}/initial-password`,{})).json()).data.password,newPassword);
+  assert.ok(!JSON.stringify(await (await fetch(memberPath,{headers})).json()).includes(newPassword));
   assert.equal((await fetch(hub+`/internal/v1/portal/enterprises/${f.other}/members`, {headers})).status,403);
   for (const [path, auth] of [
     [`/internal/v1/portal/enterprises/${f.tenant}/challenge`, headers],

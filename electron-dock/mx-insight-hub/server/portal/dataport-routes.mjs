@@ -228,7 +228,7 @@ export async function dataportRoute({
             principal,
             tenantId,
             memberId,
-            await readJson(request, 1024),
+            await readJson(request, 2048),
             accounts,
           )
         : action

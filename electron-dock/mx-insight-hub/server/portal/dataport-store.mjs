@@ -216,7 +216,7 @@ export class DataportStore {
       )
     ).rows[0];
     const filter =
-      " AND ($2='' OR position(lower($2) in lower(coalesce(mp.display_name,m.display_name)||' '||coalesce(ma.account,'')))>0)";
+      " AND ($2='' OR position(lower($2) in lower(coalesce(mp.display_name,m.display_name)||' '||coalesce(ma.account,'')||' '||coalesce(ma.email,'')))>0)";
     const total = (
       await this.pool.query(
         `SELECT count(*)::int AS total FROM iam.tenant_memberships tm JOIN iam.members m ON m.id=tm.member_id LEFT JOIN dataport.member_profiles mp ON mp.tenant_id=tm.tenant_id AND mp.member_id=tm.member_id LEFT JOIN dataport.managed_accounts ma ON ma.tenant_id=tm.tenant_id AND ma.member_id=tm.member_id WHERE tm.tenant_id=$1 ${filter}`,
@@ -239,7 +239,7 @@ export class DataportStore {
       items: (
         await this.pool.query(
           `SELECT m.id,coalesce(mp.display_name,m.display_name) AS "displayName",tm.role,tm.status,
-      a.role_id AS "roleId",a.revision,ma.account,ma.auth_mode AS "authMode",coalesce(ma.managed,false) AS managed FROM iam.tenant_memberships tm JOIN iam.members m ON m.id=tm.member_id
+      a.role_id AS "roleId",a.revision,ma.account,ma.email,ma.auth_mode AS "authMode",coalesce(ma.managed,false) AS managed FROM iam.tenant_memberships tm JOIN iam.members m ON m.id=tm.member_id
       LEFT JOIN dataport.member_roles a ON a.tenant_id=tm.tenant_id AND a.member_id=tm.member_id
       LEFT JOIN dataport.managed_accounts ma ON ma.tenant_id=tm.tenant_id AND ma.member_id=tm.member_id
       LEFT JOIN dataport.member_profiles mp ON mp.tenant_id=tm.tenant_id AND mp.member_id=tm.member_id
@@ -425,29 +425,29 @@ export class DataportStore {
   async createTicket(principal, tenantId, body) {
     requireDataportAccess(principal, tenantId, "support.create");
     if (
+      !body || typeof body !== "object" || Array.isArray(body) ||
       Object.keys(body).some(
         (k) => !["content", "contact", "category", "priority"].includes(k),
       ) ||
       typeof body.content !== "string" ||
       body.content.trim().length > 5000 ||
-      (body.contact !== undefined &&
-        (typeof body.contact !== "string" || body.contact.length > 200))
+      typeof body.contact !== "string" || body.contact.length > 200
     )
       problem(
         400,
         "invalid_ticket",
-        "问题描述最多 5000 字，联系方式最多 200 字。",
+        "请填写问题描述和联系方式；描述最多 5000 字，联系方式最多 200 字。",
       );
     const content = text(body.content, 5000),
       contact = text(body.contact, 200),
-      category = body.category || "technical",
-      priority = body.priority || "normal";
+      category = body.category,
+      priority = body.priority;
     if (
-      !content ||
+      !content || !contact ||
       !["purchase", "technical", "account", "other"].includes(category) ||
       !["normal", "urgent"].includes(priority)
     )
-      problem(400, "invalid_ticket", "请填写问题内容并选择分类。");
+      problem(400, "invalid_ticket", "请填写问题分类、优先级、详细描述和联系方式。");
     return withPgTransaction(this.pool, async (db) => {
       const id = randomUUID();
       await db.query(
@@ -524,6 +524,8 @@ export class DataportStore {
   }
   async memberCommand(principal, tenantId, body, accounts, audience) {
     requireDataportAccess(principal, tenantId, "members.create");
+    if (!body || typeof body !== "object" || Array.isArray(body))
+      problem(400, "invalid_member_command", "账号操作参数无效。");
     const { operation, account, displayName, roleId, commandId } = body;
     if (
       Object.keys(body).some(
@@ -534,6 +536,7 @@ export class DataportStore {
             "displayName",
             "roleId",
             "commandId",
+            ...(operation === "create" ? ["email", "password", "confirmPassword"] : []),
           ].includes(k),
       )
     )
@@ -810,14 +813,17 @@ export class DataportStore {
   async resetPassword(principal, tenantId, memberId, body, accounts) {
     requireOwner(principal, tenantId);
     if (
+      !body || typeof body !== "object" || Array.isArray(body) ||
       !uuid(memberId) ||
       !uuid(body.commandId) ||
-      Object.keys(body).length !== 1
+      Object.keys(body).some(k => !["commandId", "password", "confirmPassword"].includes(k))
     )
       problem(400, "invalid_password_reset", "密码重置操作编号无效。");
-    return this.localAccounts.reset(principal, tenantId, memberId, body.commandId);
+    return this.localAccounts.reset(principal, tenantId, memberId, body);
   }
   async initialPassword(principal, tenantId, memberId, accounts) {
+    requireOwner(principal, tenantId);
+    if (!uuid(memberId)) problem(400, "invalid_member", "请选择成员。");
     return this.localAccounts.initial(principal, tenantId, memberId);
   }
   async query(principal, tenantId, body, intent, execute) {

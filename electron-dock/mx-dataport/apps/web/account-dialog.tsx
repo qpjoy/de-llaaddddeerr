@@ -204,16 +204,16 @@ function AccountDialogSession({
           >
             <FieldGroup>
               <Field>
-                <FieldLabel htmlFor={employee ? "employee-login" : "auth-login"}>{employee ? "数港子账号" : "MX 账号"}</FieldLabel>
+                <FieldLabel htmlFor={employee ? "employee-login" : "auth-login"}>{employee ? "数港子账号 / 员工邮箱" : "MX 账号"}</FieldLabel>
                 <InputGroup>
                   <InputGroupInput
                     id={employee ? "employee-login" : "auth-login"}
                     name={employee ? "employeeAccount" : "login"}
                     required
-                    maxLength={64}
+                    maxLength={employee ? 254 : 64}
                     autoComplete={employee ? "off" : "username"}
                     defaultValue={employee ? "" : options?.loginHint || ""}
-                    placeholder={employee ? "输入企业超管分配的子账号" : "输入你的 MX 账号"}
+                    placeholder={employee ? "输入数港子账号或员工邮箱" : "输入你的 MX 账号"}
                     disabled={busy}
                   />
                   <InputGroupAddon>
