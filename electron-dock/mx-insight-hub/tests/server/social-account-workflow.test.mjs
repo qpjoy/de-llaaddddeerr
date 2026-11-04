@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { HubService } from '../../server/hub-service.mjs'
 import { createApp } from '../../server/app.mjs'
+import { LcyHubLimitStore } from '../fixtures/lcy-hub-limit-store.mjs'
 import { MemoryStore } from '../../server/stores/memory-store.mjs'
 import { RapidApiAdapter } from '../../server/adapters/rapidapi.mjs'
 import { TikHubAdapter } from '../../server/adapters/tikhub.mjs'
@@ -88,6 +89,20 @@ async function harness(t, { platform = 'twitter', fetchImpl, maxPageSize = 500, 
     { operation, body, idempotencyKey, path: `/api/v1/data/social/${operation}` })
   return { store, service, platformStore, gateway, context, key, controls, calls, historical, invoke, provider, config }
 }
+
+test('Twitter crawl reports the normalized per-page work before reserving or acquiring', async t => {
+  const h = await harness(t, { maxPageSize: 100 })
+  const body = { platform: 'twitter', usernames: ['example', '@EXAMPLE'], activityTypes: ['posts', 'replies'], count: 100 }
+  await assert.rejects(h.invoke(body, 'portrait-work-budget'), error => {
+    assert.equal(error.status, 400)
+    assert.equal(error.code, 'work_budget_exceeded')
+    assert.deepEqual(error.details, { stage: 'admission', upstreamDispatched: false, retryable: false,
+      jobCount: 2, pageSize: 100, requestedWork: 200, allowedWork: 100 })
+    return true
+  })
+  assert.equal(h.calls.length, 0)
+  assert.ok(!await h.store.getUsageRequestByIdempotencyKey(h.context.consumer.id, 'portrait-work-budget'))
+})
 
 test('Twitter screenshot-shaped nonnumeric ID and page_size=500 follows short pages and retains one immutable delivery', async t => {
   let page = 0
@@ -472,6 +487,83 @@ test('rate admission after acquired content returns partial and a continuation, 
   assert.equal(h.calls[2].params.cursor, 'page-two')
   assert.equal(h.calls.filter(call => !call.url.pathname.includes('/tweets')).length, 1)
 })
+
+function weiboPageFixture(validPosts) {
+  return call => {
+    if (call.url.pathname.endsWith('/fetch_user_info')) {
+      return Response.json({ code: 200, data: { user: { id: call.params.uid || '42', screen_name: call.params.custom || 'offline_user' } } })
+    }
+    assert.ok(call.url.pathname.endsWith('/fetch_user_posts'))
+    return Response.json({ code: 200, data: validPosts(call) })
+  }
+}
+
+test('Weibo keeps verified posts when its continuation cannot be projected, with exact failure evidence and no repurchase', async t => {
+  const badPage = { unexpected_rows: [{ id: 'private-provider-value' }] }
+  const h = await harness(t, { platform: 'weibo', fetchImpl: weiboPageFixture(call => {
+    if (call.params.page === '1') return { list: [{ id: 'abc', text: 'Verified' }], since_id: 'next', has_more: true }
+    assert.deepEqual([call.params.page, call.params.since_id], ['2', 'next'])
+    return badPage
+  }) })
+  await h.service.setTenantBillingProfile(h.context.tenant.id, { mode: 'enforced', defaultUnitPriceMinor: 3, defaultCurrency: 'CNY' }, 'test')
+  await h.service.addTenantCredit(h.context.tenant.id, { amountMinor: 100, currency: 'CNY', reason: 'Offline fixture' },
+    { idempotencyKey: 'weibo-partial-credit', actor: 'test' })
+  const body = { platform: 'weibo', usernames: ['offline_user'], activityTypes: ['posts'], count: 50 }
+  const key = 'weibo-later-page-unusable'
+  const result = await h.invoke(body, key)
+  assert.equal(result.status, 200)
+  const { data } = result.body
+  assert.deepEqual(data.items.map(row => row.content_id), ['abc'])
+  assert.equal(data.status, 'partial')
+  assert.ok(data.warnings.some(warning => warning.code === 'weibo_posts_page_unusable'))
+  assert.deepEqual([data.page.hasMore, data.page.nextCursor], [false, null])
+  assert.doesNotMatch(JSON.stringify(result.body), /private-provider-value/)
+  const ledger = [...h.platformStore.calls.values()]
+  assert.deepEqual(ledger.map(call => [call.outcome, call.billed, call.costMinor]),
+    [['succeeded', true, 2], ['succeeded', true, 2], ['succeeded_unusable', true, 2]])
+  const failed = ledger[2]
+  assert.equal(failed.errorCode, 'invalid_social_contract')
+  assert.equal(Buffer.from(h.platformStore.restrictedResponseArchives.get(failed.id).bodyBytes).toString(),
+    JSON.stringify({ code: 200, data: badPage }))
+  assert.equal(h.platformStore.ingestJobs.length, 2)
+  const usage = h.store.requests.get(failed.usageRequestId)
+  assert.deepEqual([usage.status, usage.responseStatus, usage.unitsActual], ['committed', 200, 1])
+  assert.deepEqual(usage.acquisitionRequest.socialSearch.sources.map(source => source.callId), ledger.slice(0, 2).map(call => call.id))
+  assert.deepEqual((await h.invoke(body, key)).body, result.body)
+  assert.equal(h.store.customerCharges.get(usage.id).chargedMinor, 3)
+  assert.equal(h.calls.length, 3)
+})
+
+test('Weibo batch cursor can resume the next account without repurchasing the unusable posts page', async t => {
+  const h = await harness(t, { platform: 'weibo', fetchImpl: weiboPageFixture(call => {
+    if (call.params.uid === '43') return { list: [{ id: 'second' }], has_more: false }
+    if (call.params.page === '1') return { list: [{ id: 'first' }], since_id: 'next', has_more: true }
+    return { unexpected_rows: [] }
+  }) })
+  const body = { platform: 'weibo', userIds: ['42', '43'], count: 50 }
+  const first = await h.invoke(body, 'weibo-multiple-partial')
+  assert.deepEqual(first.body.data.items.map(row => row.content_id), ['first'])
+  assert.ok(first.body.data.page.nextCursor)
+  const firstCalls = h.calls.length
+  const remaining = await h.invoke({ ...body, cursor: first.body.data.page.nextCursor }, 'weibo-multiple-remaining')
+  assert.deepEqual(remaining.body.data.items.map(row => row.content_id), ['second'])
+  assert.equal(remaining.body.data.page.nextCursor, null)
+  assert.deepEqual(h.calls.slice(firstCalls).map(call => call.params.uid), ['43', '43'])
+})
+
+for (const otherAccount of [false, true]) {
+  test(`Weibo still fails on an unusable first posts page (other account has rows: ${otherAccount})`, async t => {
+    const h = await harness(t, { platform: 'weibo', fetchImpl: weiboPageFixture(call =>
+      call.params.uid === '43' ? { list: [{ id: 'first', text: 'Verified other account' }], has_more: false } : { unexpected_rows: [] }) })
+    const body = { platform: 'weibo', userIds: otherAccount ? ['43', '42'] : ['42'], count: 50 }
+    const key = 'weibo-first-page-unusable'
+    await assert.rejects(h.invoke(body, key), { status: 502, code: 'external_platform_response_unusable' })
+    const ledger = [...h.platformStore.calls.values()]
+    assert.equal(ledger.at(-1).outcome, 'succeeded_unusable')
+    assert.equal(ledger.filter(call => call.outcome === 'succeeded' && call.itemCount > 0 && call.endpointKey === ledger.at(-1).endpointKey).length, otherAccount ? 1 : 0)
+    assert.equal(h.calls.length, otherAccount ? 4 : 2)
+  })
+}
 
 for (const platform of ['weibo', 'facebook']) {
   test(`${platform} real adapter keeps profile and posts receipts, bills once and never invokes Night-All`, async t => {
@@ -1076,6 +1168,46 @@ async function priceReplies(h, replies = 3) {
 const repliesFetch = call => call.url.pathname.endsWith('/tweetsAndReplies')
   ? Response.json(call.params.cursor ? timeline([], null) : repliesPage)
   : call.url.pathname.endsWith('/tweets') ? Response.json(timeline(['1'])) : Response.json(profile())
+
+test('original paced LCY Key can acquire posts and replies at count 100 while a sibling still has its 100-work limit', async t => {
+  const h = await harness(t, { maxPageSize: 100, store: new LcyHubLimitStore(), fetchImpl: repliesFetch })
+  const key = h.store.apiKeys.get(h.key.id)
+  key.hubSupplierAdmission = 'priority'
+  const current = await h.service.authenticate(h.key.secret)
+  await priceReplies(h)
+  const body = { platform: 'twitter', usernames: ['ui_batch_019'], activityTypes: ['posts', 'replies'], count: 100 }
+  const sibling = await h.service.createApiKey({ consumerId: current.consumer.id, name: 'LCY-delta', platforms: ['twitter'],
+    capabilities: ['social.content.crawl', 'social.profile.get'] })
+  await assert.rejects(h.invoke(body, 'portrait-sibling-budget', 'crawl', await h.service.authenticate(sibling.secret)),
+    error => error.code === 'work_budget_exceeded' && error.details.requestedWork === 200 && error.details.allowedWork === 100)
+  assert.equal(h.calls.length, 0)
+  let rateChecks = 0
+  const acquire = h.platformStore.acquireProviderRateLimit.bind(h.platformStore)
+  h.platformStore.acquireProviderRateLimit = options => { rateChecks++; return acquire(options) }
+  const result = await h.invoke(body, 'portrait-paced-budget', 'crawl', current)
+  assert.equal(result.status, 200)
+  for (const path of ['/user/42/tweets', '/user/42/tweetsAndReplies']) assert.ok(h.calls.some(call => call.url.pathname === path))
+  assert.ok(rateChecks > 0)
+  assert.equal((await h.store.getUsageRequestByIdempotencyKey(current.consumer.id, 'portrait-paced-budget')).status, 'committed')
+  // A previously authenticated request must re-read a revoked exemption before another upstream call.
+  const calls = h.calls.length
+  key.hubRateLimitExempt = false
+  await assert.rejects(h.invoke({ ...body, usernames: ['another_account'] }, 'portrait-paced-revoked', 'crawl', current),
+    error => ['page_size_exceeded', 'work_budget_exceeded'].includes(error.code))
+  assert.equal(h.calls.length, calls)
+})
+
+test('paced LCY still hits a configured plan burst but not the plan month or window allowance', async t => {
+  const h = await harness(t, { store: new LcyHubLimitStore() })
+  h.store.apiKeys.get(h.key.id).hubSupplierAdmission = 'priority'
+  const current = await h.service.authenticate(h.key.secret)
+  Object.assign(h.store.plans[0].limits, { monthlyRequests: 1, maxRequests: 1, windowSeconds: 3600, burstRps: 1 })
+  const request = id => h.invoke({ platform:'twitter', username:'ui_batch_019', count:10 },id,'crawl',current)
+  assert.equal((await request('paced-burst-first')).status,200)
+  await assert.rejects(request('paced-burst-second'), {code:'plan_burst_exceeded'})
+  for (const row of h.store.requests.values()) row.reservedAt = new Date(Date.now()-5000).toISOString()
+  assert.equal((await request('paced-burst-after-window')).status,200)
+})
 
 test('Twitter replies use the replies timeline and price after one profile lookup, then drain the archived rest', async t => {
   const h = await harness(t, { fetchImpl: repliesFetch })

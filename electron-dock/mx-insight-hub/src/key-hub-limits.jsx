@@ -78,6 +78,8 @@ export function KeyHubLimitsModal({ token, apiKey, onClose, onUnauthorized }) {
         <section className="qp-card" aria-label="已保存的 Hub 限制状态">
           <p><strong>当前状态：</strong>{data.source === 'legacy' ? '沿用历史策略 · 尚未显式设置' : data.effectiveExempt ? (data.effectiveSupplierPriority ? '豁免已开启 · 供应商优先排队' : '豁免已开启') : '豁免已关闭 · 普通 Hub 限制'}</p>
           {data.source === 'legacy' ? <p>{data.inheritedQuotaExempt ? '原有内部 Key 额度豁免继续生效；尚未显式开启本开关的次数、频率、并发与预算豁免。' : '尚未显式开启本开关的次数、频率、并发与预算豁免。'}</p> : null}
+          {data.businessWorkQuotaExempt === true ? <p>此 Key 不受套餐、调用者和 Key 的业务分页与采集工作量配额限制。接口自身的分页范围、并发和速率保护仍生效。</p> : null}
+          {data.walletOverdraftAllowed === true ? <p>余额不足时继续按合同价预占和结算。已结算欠款在租户钱包显示，后续充值优先抵欠。</p> : null}
           <small>版本 {data.revision}{data.updatedAt ? ` · 更新于 ${formatDate(data.updatedAt)}` : ''}</small>
         </section>
         <Field label="豁免 Hub 次数、频率、并发与预算限制" hint="产品/API 资源限速始终适用，包括此 Key。开启后跳过 Hub 业务查询的请求次数配额、限频、普通执行并发门禁、月度采购/补贴预算及自动供应商熔断等待；关闭后恢复普通限制，并覆盖这把 Key 的历史额度豁免。">
@@ -92,8 +94,8 @@ export function KeyHubLimitsModal({ token, apiKey, onClose, onUnauthorized }) {
             <option value="priority">优先排队</option>
           </select>
         </Field> : null}
-        <p>上游实际限流仍会返回错误。认证、授权、管理员主动暂停、余额与计费、合同隔离、结果待核对和幂等保护继续生效。上游充值后，新请求不必等待 Hub 的自动供应商熔断到期。设置只影响后续准入，不清零用量、不改历史结果，也不重发请求。</p>
-        <p>商品媒体传输限制、IP 订阅权益额度和供应商账本保护仍适用。</p>
+        <p>上游实际限流仍会返回错误。认证、授权、管理员主动暂停、合同价格与结算、合同隔离、结果待核对和幂等保护继续生效。上游充值后，新请求不必等待 Hub 的自动供应商熔断到期。设置只影响后续准入，不清零用量、不改历史结果，也不重发请求。</p>
+        <p>商品媒体传输限制和供应商账本保护仍适用。{data.walletOverdraftAllowed ? '有效 IP 订阅包内不另计费，超过日额度或总额度后按合同计费。' : 'IP 订阅仍受已购权益限制。'}</p>
         <Field label="变更原因" hint="将随本次设置写入管理审计记录。">
           <textarea className="qp-input" rows={3} minLength={3} maxLength={500} required value={reason} disabled={saving} onChange={event => setReason(event.target.value)} placeholder="例如：允许 LCY-delta 直接承接上游限流反馈" />
         </Field>

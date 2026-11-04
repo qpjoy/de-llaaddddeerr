@@ -28,6 +28,8 @@ Twitter 的 `x/tw` 归一为 `twitter`。业务调用方不必区分 `username` 
 
 `count/pageSize/page_size/limit` 支持 1–500，仍受 Key entitlement 和批量总工作量限制。crawl 优先 `count > pageSize > page_size > limit`；user-info 优先 `limit > count > pageSize > page_size`。`pageSize` 与 `page_size` 同时提交须一致。`pageSize` 是每个工作项逻辑页上限，批量请求的总条数还受当前 Key 允许的工作量约束，不能用多账号绕开上限。
 
+账号 crawl 按去重后的账号与活动组合计数。每页工作量为 `jobCount × pageSize`，上限为消费者与 Key 的有效 `maxPageSize` 和 1000 中的最小值。新请求在该预算检查被拒绝时返回 HTTP 400 `work_budget_exceeded`，`error.details` 给出 `jobCount`、`pageSize`、`requestedWork`、`allowedWork` 以及 `stage=admission`、`upstreamDispatched=false`、`retryable=false`。例如预算为 100、两个工作项各取 100 条时，本页请求工作量为 200。新采集可将每项页长设为 50，按 Hub 游标继续直到达到总目标或数据耗尽。每个新页使用独立幂等键，后续页沿用第一页的页长。预算拒绝应在 Hub 内处理，不能改用 Night-All 凭据绕过。
+
 `includeRaw` 仅允许 `false` 或省略；现有业务 `raw_info/raw_data` 字符串仍保留。`concurrency`（1–20）及 `cacheMaxAgeHours`（0–720）作为历史提示接收，不覆盖 Hub 并发、幂等和准入规则，也不承诺强制缓存命中。不得提交任意供应商、端点、请求凭据、原生游标或扩大采购的控制参数。
 
 账号内容默认 `activityTypes: ["posts"]`。固定合同当前声明：
@@ -83,6 +85,10 @@ Content-Type: application/json
 已保存回执及修复验证见 [2026-10-20 Twitter 账号查找故障](../operations/twitter-account-not-found-2026-10-20.md)。
 
 ## 分页与原请求保护
+
+微博 `crawl` 在同一账号、同一活动已经取得有效帖子后，如果后续帖子页由 TikHub 返回 HTTP 200、业务码 200，但无法按数据合同解析，Hub 返回 HTTP 200、`data.status=partial` 及 `weibo_posts_page_unusable`。结果包含此前验证过的帖子。这个账号的本次遍历到此停止；批量请求如有 `nextCursor`，可继续其他待采集任务。消费方应标注样本不完整。首个帖子页就不可用时仍返回 502。既有失败回执按原结果回放。
+
+要核对历史失败的具体字段，在 Internal 使用 Hub 的[微博账号归档诊断脚本](../../server/ops/diagnose-weibo-account.mjs)及对应 Hub request ID。脚本从数据库只读提取该请求自己的归档，在本地校验长度与 SHA-256，并用 Hub 解析器回放；输出结构计数和失败类别。可以按脚本首部的命令在当前 Pod 中运行，无需发布或重新采集。
 
 首页省略 `cursor`，`page` 为 1。后续原样传回 `data.pageInfo.nextCursor` 或相同的 `data.page.nextCursor`，保持账号、平台、活动、过滤条件和页大小，并使用新的 `Idempotency-Key`。Hub 游标将完整采购页余量、已交付身份和后续工作关联到同一遍历；最多 15 个公开页，有效 24 小时，仍受上游页数、期限、归档大小和准入限制。资料批量遇到中断也可通过返回的游标继续。
 

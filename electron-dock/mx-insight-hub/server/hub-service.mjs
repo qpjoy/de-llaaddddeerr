@@ -1,3 +1,4 @@
+import { effectiveBusinessPageLimit, isLcySupplierPriority } from './core/internal-traffic-policy.mjs'
 import { StrategySearchRoutingStore, assertFacebookAccountEnabled } from './external-platforms/strategy-search-routing.mjs'
 import { requestMaintenance } from './core/request-maintenance.mjs'
 import { WEB_SEARCH_PROVIDERS } from '../shared/web-search.mjs'
@@ -1444,13 +1445,8 @@ export class HubService {
       : null
     return {
       ...consumerPolicy,
-      maxPageSize: entitlement
-        ? Math.min(
-            consumerPolicy.maxPageSize,
-            entitlement.maxPageSize,
-            plan?.limits?.maxPageSize || Number.POSITIVE_INFINITY,
-          )
-        : Math.min(consumerPolicy.maxPageSize, plan?.limits?.maxPageSize || Number.POSITIVE_INFINITY),
+      maxPageSize: effectiveBusinessPageLimit(context, consumerPolicy.maxPageSize,
+        entitlement?.maxPageSize ?? consumerPolicy.maxPageSize, plan?.limits?.maxPageSize || Number.POSITIVE_INFINITY),
     }
   }
 
@@ -3679,9 +3675,8 @@ export class HubService {
       const consumerPolicy = { ...this.defaultPolicy, ...(policiesByPlatform.get(platform) || {}) }
       const entitlement = entitlementsByPlatform.get(platform)
       const planPageSize = plan?.limits?.maxPageSize || Number.POSITIVE_INFINITY
-      return { ...consumerPolicy, maxPageSize: entitlement
-        ? Math.min(consumerPolicy.maxPageSize, entitlement.maxPageSize, planPageSize)
-        : Math.min(consumerPolicy.maxPageSize, planPageSize) }
+      return { ...consumerPolicy, maxPageSize: effectiveBusinessPageLimit(context, consumerPolicy.maxPageSize,
+        entitlement?.maxPageSize ?? consumerPolicy.maxPageSize, planPageSize) }
     })
     const keyEntitlements = readsKeyEntitlements ? grants.map(platform => entitlementsByPlatform.get(platform)) : policies
     // A unified read needs one stable, conservative quota policy. Its separate
@@ -4454,7 +4449,7 @@ export class HubService {
     const policy = {
       ...this.defaultPolicy,
       ...(storedPolicy || {}),
-      maxPageSize: Math.min(
+      maxPageSize: effectiveBusinessPageLimit(context,
         storedPolicy?.maxPageSize || this.defaultPolicy.maxPageSize,
         keyEntitlement?.maxPageSize || Number.POSITIVE_INFINITY,
       ),
@@ -4463,7 +4458,7 @@ export class HubService {
       businessId: context.consumer.businessId,
       canonicalizePlatform: canonicalPlatform,
       maxPageSize: policy.maxPageSize,
-      maxCrawlWork: storedPolicy?.maxCrawlWork ?? Math.min(policy.maxPageSize, 100),
+      maxCrawlWork: isLcySupplierPriority(context) ? MAX_CRAWL_WORK : (storedPolicy?.maxCrawlWork ?? Math.min(policy.maxPageSize, 100)),
     })
     if (operation === 'raw' && Object.hasOwn(TIKHUB_CONTENT_SEARCH_RECIPES, normalized.platform)
       && TIKHUB_CONTENT_SEARCH_RECIPES[normalized.platform].rawCompatibility !== false) {

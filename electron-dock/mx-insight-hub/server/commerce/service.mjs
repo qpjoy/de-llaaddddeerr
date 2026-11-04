@@ -1,3 +1,4 @@
+import { isLcySupplierPriority } from '../core/internal-traffic-policy.mjs'
 import { randomUUID } from 'node:crypto'
 import { AppError } from '../core/errors.mjs'
 import { fingerprint, requestKey, fields, requirePayment } from '@qpjoy/mx-pay'
@@ -186,7 +187,9 @@ export class CommerceService {
       JOIN hub_commerce.subscriptions s ON s.id=c.id
       ORDER BY CASE WHEN s.channel='product' THEN 0 ELSE 1 END,c.available DESC,c.preferred DESC,s.ends_at,s.starts_at,s.id LIMIT 1`,
       [context.tenant.id,context.consumer.id,capabilities.includes(IP_PRODUCT_CAPABILITY),capabilities.includes(IP_V2_CAPABILITY)])).rows[0]
-    return {subscription:row||null}
+    return {subscription: row && isLcySupplierPriority(context)
+      ? { ...row, available: true, includedQuotaAvailable: row.available, overageAllowed: true }
+      : row || null}
   }
   async create(tenantId, body, key, actor, { acceptance = false, harbor = false, purchaseActorOnly = false } = {}) {
     fields(body, ['sku','revision','consumerId','environment','upgradeFrom']); requestKey(key)

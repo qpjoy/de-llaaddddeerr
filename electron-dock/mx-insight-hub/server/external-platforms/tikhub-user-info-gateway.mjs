@@ -1,6 +1,6 @@
 import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
-import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit, isLcySupplierPriority } from '../core/internal-traffic-policy.mjs'
+import { isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit, isLcySupplierPriority, effectiveBusinessPageLimit } from '../core/internal-traffic-policy.mjs'
 import { enterPriority, leavePriority, ordinaryCapacityBlocked, waitForPriorityCapacity } from './priority-admission.mjs'
 import { circuitOpenError, openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -214,7 +214,7 @@ export class TikHubUserInfoGateway {
       throw new AppError(503, 'plan_assignment_unavailable', 'An active published plan assignment is required')
     }
     const maxPageSize = consumerPolicy?.maxPageSize ?? this.defaultPolicy.maxPageSize
-    if (pageSize > Math.min(maxPageSize, entitlement?.maxPageSize ?? maxPageSize)) {
+    if (pageSize > effectiveBusinessPageLimit(current, maxPageSize, entitlement?.maxPageSize ?? maxPageSize)) {
       throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the current policy after waiting')
     }
     return { ...context, ...current }
@@ -369,9 +369,7 @@ export class TikHubUserInfoGateway {
         : null
       const policy = {
         ...consumerPolicy,
-        maxPageSize: entitlement
-          ? Math.min(consumerPolicy.maxPageSize, entitlement.maxPageSize)
-          : consumerPolicy.maxPageSize,
+        maxPageSize: effectiveBusinessPageLimit(context, consumerPolicy.maxPageSize, entitlement?.maxPageSize ?? consumerPolicy.maxPageSize),
       }
       const contractVersion = isCrawl
         ? XIAOHONGSHU_CRAWL_CONTRACT_VERSION

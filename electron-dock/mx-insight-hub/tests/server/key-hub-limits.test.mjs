@@ -36,7 +36,7 @@ test('legacy is preserved until an explicit audited CAS switch; auth reflects st
   const before = await store.findApiKeyById(keyId)
   // Supplier admission is additive: legacy rows read as the original bypass.
   assert.deepEqual(await readKeyHubLimits(store, keyId), { apiKeyId: keyId, policyVersion: 2, hubRateLimitExempt: null,
-    effectiveExempt: false, hubSupplierAdmission: 'bypass', effectiveSupplierPriority: false,
+    effectiveExempt: false, hubSupplierAdmission: 'bypass', effectiveSupplierPriority: false, businessWorkQuotaExempt: false, walletOverdraftAllowed: false,
     inheritedQuotaExempt: true, source: 'legacy', revision: 0, updatedAt: null })
   assert.equal(store.keyHubLimitEvents, undefined)
   const saved = await saveKeyHubLimits(store, keyId, body(true), actor())

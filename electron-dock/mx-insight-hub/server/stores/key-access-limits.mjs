@@ -43,24 +43,25 @@ function enforce(limit,total,recent) {
  if (limit.totalLimit != null && total >= limit.totalLimit) throw new AppError(429,'api_key_total_limit_exceeded','This Key has reached its operation usage limit',{scope:limit.scopeKey,limit:limit.totalLimit,used:total})
  if (limit.rateLimit != null && recent >= limit.rateLimit) throw new AppError(429,'api_key_rate_limit_exceeded','Too many requests for this Key; try later',{scope:limit.scopeKey,limit:limit.rateLimit,windowSeconds:limit.windowSeconds})
 }
-export function assertMemoryKeyAccessLimits(store,apiKeyId,scopes) {
+export function assertMemoryKeyAccessLimits(store,apiKeyId,scopes,{rateOnly=false}={}) {
  for (const scope of scopes) {
   const limit=store.keyAccessLimits?.get(identity(apiKeyId,scope.type,scope.key))
-  if (!limit) continue
+  if (!limit || (rateOnly && limit.rateLimit == null)) continue
   const records=[...store.requests.values()].filter(row=>row.apiKeyId===apiKeyId && (store.usageAuthorizationScopes.get(row.id)||[{type:row.platform?'platform':'capability',key:row.platform||row.capability}]).some(value=>value.type===scope.type && value.key===scope.key))
-  enforce(limit,records.filter(row=>['reserved','committed','unknown'].includes(row.status)).length,records.filter(row=>new Date(row.reservedAt).getTime()>=Date.now()-limit.windowSeconds*1000).length)
+  enforce(rateOnly ? {...limit,totalLimit:null} : limit,records.filter(row=>['reserved','committed','unknown'].includes(row.status)).length,records.filter(row=>new Date(row.reservedAt).getTime()>=Date.now()-limit.windowSeconds*1000).length)
  }
 }
-export async function assertPostgresKeyAccessLimits(client,apiKeyId,scopes) {
+export async function assertPostgresKeyAccessLimits(client,apiKeyId,scopes,{rateOnly=false}={}) {
  const limits=(await client.query('SELECT * FROM control.api_key_access_limits WHERE api_key_id=$1',[apiKeyId])).rows.map(dto)
  for (const limit of limits) {
-  if (!scopes.some(scope=>scope.type===limit.scopeType && scope.key===limit.scopeKey) || (limit.totalLimit==null && limit.rateLimit==null)) continue
+  if (!scopes.some(scope=>scope.type===limit.scopeType && scope.key===limit.scopeKey) || ((rateOnly || limit.totalLimit==null) && limit.rateLimit==null)) continue
   const {rows}=await client.query(`SELECT count(*) FILTER (WHERE status IN ('reserved','committed','unknown'))::bigint AS total,
    count(*) FILTER (WHERE reserved_at >= now()-$4*interval '1 second' ${quotaRecoverySql('key_rate', '$1', '$2', '$3')})::bigint AS recent
-   FROM usage_requests request WHERE api_key_id=$1 AND (
+   FROM usage_requests request WHERE api_key_id=$1
+   ${rateOnly ? "AND reserved_at >= now()-$4*interval '1 second'" : ''} AND (
     EXISTS (SELECT 1 FROM usage_request_authorization_scopes scope WHERE scope.usage_request_id=request.id AND scope.scope_type=$2 AND scope.scope_key=$3)
     OR (NOT EXISTS (SELECT 1 FROM usage_request_authorization_scopes scope WHERE scope.usage_request_id=request.id)
       AND CASE WHEN $2='platform' THEN request.platform ELSE request.capability END=$3))`,[apiKeyId,limit.scopeType,limit.scopeKey,limit.windowSeconds])
-  enforce(limit,Number(rows[0].total),Number(rows[0].recent))
+  enforce(rateOnly ? {...limit,totalLimit:null} : limit,Number(rows[0].total),Number(rows[0].recent))
  }
 }

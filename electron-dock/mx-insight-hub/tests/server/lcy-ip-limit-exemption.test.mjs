@@ -70,6 +70,19 @@ test('IP requests preserve public HTTP compatibility while exposing upstream 429
   assert.equal(unknown.platformStore.calls.size, 1)
 })
 
+test('paced LCY IP requests are gated by supplier concurrency and RPM', async () => {
+  let calls = 0
+  const f = await fixture(async () => { calls++; return Response.json(success) })
+  f.store.apiKeys.get(f.key.id).hubSupplierAdmission = 'priority'
+  const current = await f.hub.authenticate(f.key.secret)
+  f.gateway.active = 3
+  await assert.rejects(f.gateway.query(current,input(4)), {code:'external_platform_busy'})
+  f.gateway.active = 0
+  f.platformStore.acquireProviderRateLimit = async () => ({allowed:false})
+  await assert.rejects(f.gateway.query(current,input(5)), {code:'ip_query_rate_limited'})
+  assert.equal(calls,0)
+})
+
 const modulePath = process.env.MX_INSIGHT_TEST_PGLITE_MODULE
 test('Baidu exempt dispatch preserves actual call evidence and ordinary channel limits, while pause stays authoritative', { skip: !modulePath }, async t => {
   const { PGlite } = await import(pathToFileURL(modulePath).href)

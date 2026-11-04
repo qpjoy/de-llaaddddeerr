@@ -1,5 +1,5 @@
 import { quotaRecoverySql } from '../core/admission-recovery.mjs'
-import { createInternalTrafficPolicy, isInternalTraffic } from '../core/internal-traffic-policy.mjs'
+import { createInternalTrafficPolicy, isInternalTraffic, isLcySupplierPriority } from '../core/internal-traffic-policy.mjs'
 import { projectNightAllFailureEvidence } from '../data/night-all-failure-evidence.mjs'
 import { normalizeRequestFailureDiagnostic, normalizeRequestFailureId } from '../core/request-failure-diagnostic.mjs'
 import { STRATEGY_DATA_CONNECTORS, STRATEGY_DATA_STREAMS } from '../data/strategy-search-data-statistics.mjs'
@@ -877,6 +877,7 @@ function creditAccountRecord(row) {
     availableMinor: Number(row.available_minor),
     heldMinor: Number(row.held_minor),
     balanceMinor: Number(row.available_minor) + Number(row.held_minor),
+    outstandingMinor: Math.max(0, -(Number(row.available_minor) + Number(row.held_minor))),
     status: row.status,
     revision: Number(row.revision),
     createdAt: iso(row.created_at),
@@ -2521,12 +2522,15 @@ export class PostgresStore {
         })
         scopeEntitlements.set(authorizationScopeKey(scope), entitlement)
       }
+      const ownerContext = {
+        apiKey: { id: input.apiKeyId, accessProfile: owner.access_profile, hubRateLimitExempt: owner.hub_rate_limit_exempt,
+          hubSupplierAdmission: owner.hub_supplier_admission },
+        tenant: { id: input.tenantId }, consumer: { id: input.consumerId },
+      }
       const quotaInput = {
         ...input,
-        managedQuotaExempt: isInternalTraffic(this, {
-          apiKey: { id: input.apiKeyId, accessProfile: owner.access_profile, hubRateLimitExempt: owner.hub_rate_limit_exempt },
-          tenant: { id: input.tenantId }, consumer: { id: input.consumerId },
-        }),
+        managedQuotaExempt: isInternalTraffic(this, ownerContext),
+        retainBusinessRate: isLcySupplierPriority(ownerContext),
         authorizationScopes,
         scopeEntitlements,
         legacySingleScope,
@@ -2823,7 +2827,7 @@ export class PostgresStore {
   async #assertQuota(client, input) {
     // reserve() sets this only from the current locked owner row, never caller input.
     const internal = input.managedQuotaExempt === true
-    if (!internal) await assertPostgresKeyAccessLimits(client, input.apiKeyId, input.authorizationScopes)
+    if (!internal || input.retainBusinessRate) await assertPostgresKeyAccessLimits(client, input.apiKeyId, input.authorizationScopes, { rateOnly: internal })
     for (const scope of internal ? [] : input.authorizationScopes) {
       const keyEntitlement = input.scopeEntitlements.get(authorizationScopeKey(scope))
       const consumerMaxRequests = input.legacySingleScope
@@ -2912,10 +2916,10 @@ export class PostgresStore {
         'An active published plan assignment is required before usage can be reserved',
       )
     }
-    if (internal) return
+    if (internal && !input.retainBusinessRate) return
     const planMaxRequests = planResult.rows[0]?.limits?.maxRequests
     const planWindowSeconds = planResult.rows[0]?.limits?.windowSeconds
-    if (Number.isInteger(planMaxRequests) && planMaxRequests > 0
+    if (!internal && Number.isInteger(planMaxRequests) && planMaxRequests > 0
       && Number.isInteger(planWindowSeconds) && planWindowSeconds > 0) {
       const planWindowUsage = await client.query(
         `SELECT count(*)::integer AS count
@@ -2939,7 +2943,7 @@ export class PostgresStore {
       }
     }
     const monthlyRequests = planResult.rows[0]?.limits?.monthlyRequests
-    if (Number.isInteger(monthlyRequests) && monthlyRequests > 0) {
+    if (!internal && Number.isInteger(monthlyRequests) && monthlyRequests > 0) {
       const monthlyUsage = await client.query(
         `SELECT count(*)::integer AS count
            FROM usage_requests request
@@ -2982,7 +2986,8 @@ export class PostgresStore {
   async #assertApiKeyOwner(client, input) {
     const result = await client.query(
       `SELECT id, to_jsonb(api_keys)->>'access_profile' AS access_profile,
-              (to_jsonb(api_keys)->>'hub_rate_limit_exempt')::boolean AS hub_rate_limit_exempt
+              (to_jsonb(api_keys)->>'hub_rate_limit_exempt')::boolean AS hub_rate_limit_exempt,
+              to_jsonb(api_keys)->>'hub_supplier_admission' AS hub_supplier_admission
          FROM api_keys
         WHERE id = $1
           AND consumer_id = $2

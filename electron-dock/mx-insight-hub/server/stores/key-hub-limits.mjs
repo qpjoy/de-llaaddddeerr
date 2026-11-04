@@ -40,6 +40,8 @@ function project(store, key) {
     // Saved on its own; it only takes effect while the exemption is on.
     hubSupplierAdmission: key.hubSupplierAdmission === 'priority' ? 'priority' : 'bypass',
     effectiveSupplierPriority: isLcySupplierPriority(context),
+    businessWorkQuotaExempt: isLcySupplierPriority(context),
+    walletOverdraftAllowed: isLcySupplierPriority(context),
     inheritedQuotaExempt: inherited && isInternalTraffic(store, context),
     source: inherited ? 'legacy' : 'explicit',
     revision: Number(key.hubRateLimitRevision ?? 0),

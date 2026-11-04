@@ -1,6 +1,6 @@
 import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
-import { bypassesSupplierLimits, isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit, isLcySupplierPriority } from '../core/internal-traffic-policy.mjs'
+import { bypassesSupplierLimits, isHubRateLimitExempt, isInternalTraffic, internalCircuitState, acquireTikHubRateLimit, isLcySupplierPriority, effectiveBusinessPageLimit } from '../core/internal-traffic-policy.mjs'
 import { enterPriority, leavePriority, ordinaryCapacityBlocked, waitForPriorityCapacity } from './priority-admission.mjs'
 import { circuitOpenError, openCircuitError, upstreamCapacityError } from './availability-errors.mjs'
 import { DispatchQueue, DEFAULT_DETAIL_QUEUE, canRetryDetail } from './dispatch-queue.mjs'
@@ -1652,19 +1652,17 @@ export class TikHubGateway {
       if (!capabilityGrants.includes(XIAOHONGSHU_SEARCH_OPERATION)) {
         throw new AppError(403, 'capability_not_granted', `${XIAOHONGSHU_SEARCH_OPERATION} is not granted`)
       }
-      const consumerPolicy = {
-        ...this.defaultPolicy,
-        ...((await this.usageStore.getPolicy(context.consumer.id, XIAOHONGSHU_PLATFORM)) || {}),
+      const searchPolicy = async identity => {
+        const [configured, entitlement] = await Promise.all([
+          this.usageStore.getPolicy(identity.consumer.id, XIAOHONGSHU_PLATFORM),
+          this.usageStore.getApiKeyPlatformEntitlement?.(identity.apiKey.id, XIAOHONGSHU_PLATFORM),
+        ])
+        const consumer = { ...this.defaultPolicy, ...configured }
+        // The XHS search contract itself only accepts page sizes through 100.
+        return { ...consumer, maxPageSize: Math.min(100, effectiveBusinessPageLimit(identity,
+          consumer.maxPageSize, entitlement?.maxPageSize ?? consumer.maxPageSize)) }
       }
-      const keyEntitlement = typeof this.usageStore.getApiKeyPlatformEntitlement === 'function'
-        ? await this.usageStore.getApiKeyPlatformEntitlement(context.apiKey.id, XIAOHONGSHU_PLATFORM)
-        : null
-      const policy = {
-        ...consumerPolicy,
-        maxPageSize: keyEntitlement
-          ? Math.min(consumerPolicy.maxPageSize, keyEntitlement.maxPageSize)
-          : consumerPolicy.maxPageSize,
-      }
+      let policy = await searchPolicy(context)
       if (typeof this.apiKeyPepper !== 'string' || !this.apiKeyPepper) {
         throw new AppError(503, 'external_platform_unavailable', 'External search cursor signing is unavailable')
       }
@@ -1946,6 +1944,8 @@ export class TikHubGateway {
           revalidate: async () => {
             waitedForCapacity = true
             context = await this.#revalidateWaitingIdentity(context, [XIAOHONGSHU_SEARCH_OPERATION])
+            policy = await searchPolicy(context)
+            if (normalized.pageSize > policy.maxPageSize) throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the current Key entitlement')
             const latest = internalCircuitState(this.usageStore, context, await this.platformStore.providerState(TIKHUB_PROVIDER_KEY))
             if (latest?.circuitOpenUntil && Date.parse(latest.circuitOpenUntil) > this.admissionClock()) throw await this.#circuitRefusal(latest, 'Upstream temporarily unavailable')
             resolved = await this.#credential()
@@ -2762,9 +2762,7 @@ export class TikHubGateway {
         : null
       const policy = {
         ...platformPolicy,
-        maxPageSize: keyPlatformEntitlement
-          ? Math.min(platformPolicy.maxPageSize, keyPlatformEntitlement.maxPageSize)
-          : platformPolicy.maxPageSize,
+        maxPageSize: effectiveBusinessPageLimit(context, platformPolicy.maxPageSize, keyPlatformEntitlement?.maxPageSize ?? platformPolicy.maxPageSize),
       }
       let normalized
       try { normalized = normalizeXiaohongshuPostRequest(body) } catch (error) {

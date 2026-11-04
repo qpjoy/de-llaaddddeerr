@@ -2009,7 +2009,7 @@ function TenantBillingSummary({ data, billing, rates, currentPlan, usage, state,
       <FilterSelect label="业务" value={data.consumerId} onChange={consumerId => setQuery({ tenantId: data.tenantId, consumerId })} options={data.consumers.map(item => ({ value: item.id, label: item.name }))} emptyLabel="暂无已开通业务" />
     </section>
     <section className="mih-metric-grid mih-metric-grid--compact">
-      <MetricCard icon={Coins} label="可用余额" value={account ? formatMoneyMinor(account.availableMinor, currency) : '待开通'} hint="账户内各业务共用余额" />
+      <MetricCard icon={Coins} label="可用余额" value={account ? formatMoneyMinor(account.availableMinor, currency) : '待开通'} hint={account?.outstandingMinor > 0 ? `已结算欠款 ${formatMoneyMinor(account.outstandingMinor, currency)}` : '账户内各业务共用余额'} />
       <MetricCard icon={Pulse} label="本月调用" value={formatNumber(usage.requests || 0)} />
       <MetricCard icon={ChartLine} label="本月消费" value={billed.mixedCurrencies ? '请按币种查看明细' : formatMoneyMinor(billed.chargedMinor || 0, billed.currency || currency)} hint="当前业务实际扣款" />
       <MetricCard icon={Timer} label="待结算金额" value={account ? formatMoneyMinor(account.heldMinor, currency) : '—'} hint="结算完成后更新余额" />
@@ -2021,7 +2021,7 @@ function TenantBillingSummary({ data, billing, rates, currentPlan, usage, state,
         <tbody>{visible.map(({entry: rate}) => <tr key={rate.meterKey}>
           <td>{billingMeterLabel(rate.meterKey)}</td>
           <td>{formatMoneyMinor(rate.unitPriceMinor, rate.currency || currency)} / 次</td>
-          <td>{account && rate.unitPriceMinor > 0 && (rate.currency || currency) === account.currency ? `约 ${formatNumber(Math.floor(account.availableMinor / rate.unitPriceMinor))} 次` : '—'}</td>
+          <td>{account && rate.unitPriceMinor > 0 && (rate.currency || currency) === account.currency ? `约 ${formatNumber(Math.max(0, Math.floor(account.availableMinor / rate.unitPriceMinor)))} 次` : '—'}</td>
         </tr>)}</tbody>
       </Table>}</PagedItems> : <EmptyState icon={Coins} title="使用账户默认单价" description="暂无单独的接口价格；已授权的业务调用使用上述默认单价，仍受调用额度和速率限制。" />}
       {rates.length ? <p>预计次数仅按当前余额和单项服务价格计算；其他业务消费及调用限额会影响实际可用次数。</p> : null}
@@ -2466,7 +2466,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
       </Panel> : null}
       {session?.platformAdmin && data.consumerId ? <ProductSetup key={data.consumerId} token={token} data={data} currentPlan={currentPlan} rates={effectiveRates} billing={billing} onRefresh={state.refresh} onAssign={assignPlan} onPrice={openFeaturePlan} assigning={Boolean(assigningPlanVersionId)} /> : null}
       <section className="mih-metric-grid mih-metric-grid--compact" aria-label="当前套餐与配额基线">
-        <MetricCard icon={Coins} label="可用余额" value={account ? formatMoneyMinor(account.availableMinor, account.currency) : '未开户'} hint={account ? `冻结 ${formatMoneyMinor(account.heldMinor, account.currency)}` : '由平台管理员首次入账时开户'} tone="success" />
+        <MetricCard icon={Coins} label="可用余额" value={account ? formatMoneyMinor(account.availableMinor, account.currency) : '未开户'} hint={account ? `冻结 ${formatMoneyMinor(account.heldMinor, account.currency)}${account.outstandingMinor > 0 ? ` · 已结算欠款 ${formatMoneyMinor(account.outstandingMinor, account.currency)}` : ''}` : '由平台管理员首次入账时开户'} tone="success" />
         <MetricCard icon={ShieldCheck} label="计费状态" value={({ disabled: '未启用', shadow: '影子计价', enforced: '自动按次扣费' })[billing.profile?.mode] || '未启用'} hint={session?.platformAdmin && billing.profile?.multiplierPpm != null ? `租户倍率 ${(Number(billing.profile.multiplierPpm) / 1_000_000).toFixed(4)}×` : '租户只看到最终成交价'} tone={billing.profile?.mode === 'enforced' ? 'warning' : 'info'} />
         <MetricCard icon={ChartLine} label="本月已扣" value={formatMoneyMinor(customerBilling.chargedMinor || 0, customerBilling.currency || billingCurrency)} hint={`报价 ${formatMoneyMinor(customerBilling.quotedMinor || 0, customerBilling.currency || billingCurrency)}`} tone="warning" />
         <MetricCard icon={Timer} label="请求冻结" value={formatMoneyMinor(customerBilling.heldMinor || 0, customerBilling.currency || billingCurrency)} hint="结果未知时继续冻结，待对账后结算" tone="archetype" />
@@ -2512,7 +2512,7 @@ export function PlansQuotasPage({ token, session, query, setQuery, onUnauthorize
                 <td><code>{entry.meterKey}</code></td>
                 <td>{entry.billingUnit === 'request' ? '每个 Hub 逻辑请求（成功交付扣费）' : entry.billingUnit}</td>
                 <td><strong>{formatMoneyMinor(entry.unitPriceMinor, entry.currency || billingCurrency)}</strong></td>
-                <td>{account && entry.unitPriceMinor > 0 && (entry.currency || billingCurrency) === account.currency ? `约 ${formatNumber(Math.floor(account.availableMinor / entry.unitPriceMinor))} 次` : '—'}<small>仅按此接口估算，仍受配额与其他业务消费影响</small></td>
+                <td>{account && entry.unitPriceMinor > 0 && (entry.currency || billingCurrency) === account.currency ? `约 ${formatNumber(Math.max(0, Math.floor(account.availableMinor / entry.unitPriceMinor)))} 次` : '—'}<small>仅按此接口估算，仍受配额与其他业务消费影响</small></td>
               </tr>
             ))}</tbody>
           </Table>}</PagedItems>

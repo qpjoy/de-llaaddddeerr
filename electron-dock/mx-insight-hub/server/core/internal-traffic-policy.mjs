@@ -50,6 +50,13 @@ export function isHubRateLimitExempt(context) {
   return isLcyHubLimitIdentity(context) && context.apiKey.hubRateLimitExempt === true
 }
 
+// The original LCY Key in paced mode keeps the public request envelope, but
+// consumer, plan and Key page/work allowances do not gate business requests.
+// Call with the current authenticated identity again after waiting for capacity.
+export function effectiveBusinessPageLimit(context, ...limits) {
+  return isLcySupplierPriority(context) ? 1000 : Math.min(...limits)
+}
+
 // 'priority' keeps every Hub quota, budget and shared-circuit exemption above,
 // but the Key meets supplier concurrency and RPM: it queues ahead of other Keys
 // instead of reaching the supplier unpaced. Saved with the exemption switch.

@@ -67,7 +67,7 @@ function persistedEvidence(source) {
   } : null) }
 }
 
-function projectPage(payload, step, operation, capturedAt, traversal = null) {
+export function projectPage(payload, step, operation, capturedAt, traversal = null) {
   const custom = traversal?.projectPage(payload, step, { capturedAt })
   const projected = custom?.projected ?? projectHubSocialCompatResponse(payload, step, { capturedAt })
   if (!isPostgresSafeJsonValue(projected) || !Array.isArray(projected.acquiredItems) || !Array.isArray(projected.profiles)
@@ -310,6 +310,20 @@ export async function runSocialAccountWorkflow({ gateway, context, request, deli
             currentEvidence = { ...evidence, callId: currentCall.id, delivery: callDelivery, costMinor: cost.costMinor,
               costKind: cost.costKind, currency: cost.currency, latencyMs: Math.round(performance.now() - callStart),
               ...persistedEvidence(error), archiveObjects: archiveObjects(error, step, currentCall.id) }
+            if (workflowKind === 'social-account' && request.platform === 'weibo' && request.operation === 'crawl'
+              && step.socialCompat.stage === 'data' && step.socialCompat.job.activityType === 'posts' && rowsByJob[index].length > 0
+              && evidence.outcome === 'succeeded_unusable' && evidence.errorCode === 'invalid_social_contract'
+              && evidence.httpStatus === 200 && evidence.businessCode === 200 && currentEvidence.restrictedResponseArchive?.jsonParsed === true) {
+              // Settle the failed purchase separately. Only earlier verified
+              // pages back this delivery, and this job cannot buy the bad page again.
+              await store.finishProviderStep(currentEvidence)
+              currentCall = null
+              job.done = true
+              job.providerCursor = null
+              warn('weibo_posts_page_unusable', 'A later Weibo posts page could not be read. Earlier posts were retained; this account traversal stopped.')
+              stopped = true
+              break
+            }
             const code = accountFailure ? evidence.errorCode : evidence.outcome === 'unknown' ? 'upstream_outcome_unknown' : evidence.outcome === 'succeeded_unusable' ? 'external_platform_response_unusable' : 'external_platform_rejected'
             const message = accountFailure ? twitterAccountFailureMessage(evidence) : 'Account acquisition failed; inspect its saved outcome'
             const failureBody = { error: { code, message, details: failureDetails }, requestId: delivery.usageRequestId }

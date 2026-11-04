@@ -1,6 +1,6 @@
 import { requestMaintenance } from '../core/request-maintenance.mjs'
 import { currentAdmissionLimits, refreshAdmissionLimits, admissionQueuePolicy } from './admission-runtime.mjs'
-import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, isInternalTraffic, internalCircuitState, isLcySupplierPriority } from '../core/internal-traffic-policy.mjs'
+import { acquireSupplierRate, bypassesSupplierLimits, isHubRateLimitExempt, isInternalTraffic, internalCircuitState, isLcySupplierPriority, effectiveBusinessPageLimit } from '../core/internal-traffic-policy.mjs'
 import { enterPriority, leavePriority, ordinaryCapacityBlocked, waitForPriorityCapacity } from './priority-admission.mjs'
 import { circuitOpenError, ecommerceCapacityError, upstreamCapacityError } from './availability-errors.mjs'
 import { ConcurrencyAdmissionQueue, DEFAULT_CONCURRENCY_QUEUE, concurrencyBusy } from './concurrency-admission.mjs'
@@ -900,7 +900,7 @@ export class ExternalPlatformGateway {
         const current = await this.#revalidateWaitingIdentity(context, platform, { operation: capability })
         const policy = await this.usageStore.getPolicy(current.consumer.id, platform)
         const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, platform)
-        if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+        if (totalLimit > effectiveBusinessPageLimit(current, policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
           entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Account work exceeds the current Key entitlement')
         context = current
         return current
@@ -918,7 +918,7 @@ export class ExternalPlatformGateway {
         const current = await this.#revalidateWaitingIdentity(context, input.platform, { operation: 'social.comments.list' })
         const policy = await this.usageStore.getPolicy(current.consumer.id, input.platform)
         const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, input.platform)
-        if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+        if (totalLimit > effectiveBusinessPageLimit(current, policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
           entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Comment count exceeds the current Key entitlement')
         context = current
         return current
@@ -936,7 +936,7 @@ export class ExternalPlatformGateway {
         const current = await this.#revalidateWaitingIdentity(context, 'youtube', { operation: 'social.comments.list' })
         const policy = await this.usageStore.getPolicy(current.consumer.id, 'youtube')
         const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, 'youtube')
-        if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+        if (totalLimit > effectiveBusinessPageLimit(current, policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
           entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Comment count exceeds the current Key entitlement')
         context = current
         return current
@@ -970,7 +970,7 @@ export class ExternalPlatformGateway {
         ...(platform === 'xiaohongshu' ? { requiredCapabilities: ['social.posts.search'] } : {}) })
       const policy = await this.usageStore.getPolicy(current.consumer.id, platform)
       const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(current.apiKey.id, platform)
-      if (totalLimit > Math.min(policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+      if (totalLimit > effectiveBusinessPageLimit(current, policy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
         entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) throw new AppError(400, 'page_size_exceeded', 'Content-search work exceeds the current Key entitlement')
       context = current
       return current
@@ -1128,7 +1128,7 @@ export class ExternalPlatformGateway {
               platformSearch: true, operation: 'social.content.search' })
             const currentPolicy = await this.usageStore.getPolicy(context.consumer.id, 'twitter')
             const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(context.apiKey.id, 'twitter')
-            const maxPageSize = Math.min(currentPolicy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+            const maxPageSize = effectiveBusinessPageLimit(current, currentPolicy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
               entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)
             if (request.pageSize > maxPageSize) throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
             context = current
@@ -1249,7 +1249,7 @@ export class ExternalPlatformGateway {
               platformSearch: true, operation: FACEBOOK_OPERATION.operationKey })
             const currentPolicy = await this.usageStore.getPolicy(context.consumer.id, 'facebook')
             const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(context.apiKey.id, 'facebook')
-            if (request.pageSize > Math.min(currentPolicy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
+            if (request.pageSize > effectiveBusinessPageLimit(current, currentPolicy?.maxPageSize ?? this.defaultPolicy.maxPageSize,
               entitlement?.maxPageSize ?? this.defaultPolicy.maxPageSize)) {
               throw new AppError(400, 'page_size_exceeded', 'Page size exceeds the Key entitlement')
             }
@@ -1431,9 +1431,7 @@ export class ExternalPlatformGateway {
       : null
     let policy = {
       ...consumerPolicy,
-      maxPageSize: keyEntitlement
-        ? Math.min(consumerPolicy.maxPageSize, keyEntitlement.maxPageSize)
-        : consumerPolicy.maxPageSize,
+      maxPageSize: effectiveBusinessPageLimit(context, consumerPolicy.maxPageSize, keyEntitlement?.maxPageSize ?? consumerPolicy.maxPageSize),
     }
     const codec = createExternalPlatformCursorCodec(this.apiKeyPepper, context.consumer.id)
     let normalized
@@ -1926,8 +1924,7 @@ export class ExternalPlatformGateway {
         context = await this.#revalidateWaitingIdentity(context, authorizationPlatform, plan)
         const currentPolicy = { ...this.defaultPolicy, ...await this.usageStore.getPolicy(context.consumer.id, authorizationPlatform) }
         const entitlement = await this.usageStore.getApiKeyPlatformEntitlement?.(context.apiKey.id, authorizationPlatform)
-        policy = { ...currentPolicy, maxPageSize: entitlement
-          ? Math.min(currentPolicy.maxPageSize, entitlement.maxPageSize) : currentPolicy.maxPageSize }
+        policy = { ...currentPolicy, maxPageSize: effectiveBusinessPageLimit(context, currentPolicy.maxPageSize, entitlement?.maxPageSize ?? currentPolicy.maxPageSize) }
         try { plan.normalize({ body, policy, codec }) }
         catch (error) {
           if (error instanceof JustOneContractError || error instanceof SocialAccountContractError) throw new AppError(400, error.code, error.message)

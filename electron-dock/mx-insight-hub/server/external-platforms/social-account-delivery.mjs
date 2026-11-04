@@ -14,7 +14,13 @@ export function normalizeSocialAccountDelivery(operation, body, { context, maxPa
   }
   const normalized = normalizeHubSocialCompatRequest(operation, body, { maxPageSize, businessId: context.consumer.businessId })
   const totalLimit = normalized.jobs.length * (operation === 'user-info' ? 1 : normalized.pageSize)
-  if (totalLimit > maxPageSize || totalLimit > 1000) throw new AppError(400, 'work_budget_exceeded', 'Account work exceeds this Key entitlement')
+  const allowedWork = Math.min(maxPageSize, 1000)
+  if (totalLimit > allowedWork) {
+    throw new AppError(400, 'work_budget_exceeded', 'Account work exceeds this Key entitlement', {
+      stage: 'admission', upstreamDispatched: false, retryable: false, jobCount: normalized.jobs.length,
+      pageSize: normalized.pageSize, requestedWork: totalLimit, allowedWork,
+    })
+  }
   const scopeHash = hash({ version: SOCIAL_COMPAT_VERSION, operation, platform: normalized.platform,
     jobs: normalized.jobs, pageSize: normalized.pageSize, includeRaw: normalized.includeRaw })
   let page = 1, expiresAt = Date.now() + 86400000, previousDeliveryId = null
