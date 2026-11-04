@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { usageTrend } from '../apps/web/usage-trend.ts'
 import assert from 'node:assert/strict'
 import { ipLocation } from '../apps/web/ip-location.ts'
 import { curlExample, documentOperations, exampleValue, resolveSchema } from '../apps/web/documentation-model.ts'
@@ -23,4 +24,12 @@ test('documentation follows filtered OpenAPI, resolves local refs and builds saf
   assert.match(example,/https:\/\/harbor.test\/api\/v1\/data\/ip\/risk\/service/)
   assert.match(example,/\$HARBOR_API_KEY/);assert.match(example,/YOUR_UNIQUE_REQUEST_ID/);assert.match(example,/203\.0\.113\.1/)
   assert.equal(documentOperations({paths:{}}).length,0)
+})
+test('rolling usage trend retains both UTC dates and fills empty days in calendar ranges', () => {
+  const rows=[{day:'2026-11-03',requests:2,committed:1},{day:'2026-11-04',requests:3,committed:2}]
+  assert.deepEqual(usageTrend({from:'2026-11-03T08:30:00Z',to:'2026-11-04T08:30:00Z',daily:rows}),rows)
+  const week=usageTrend({from:'2026-10-29T00:00:00Z',to:'2026-11-04T08:30:00Z',daily:rows})
+  assert.equal(week.length,7);assert.deepEqual(week[0],{day:'2026-10-29',requests:0,committed:0})
+  assert.equal(week.reduce((n,row)=>n+row.requests,0),5)
+  assert.deepEqual(usageTrend(null),[])
 })

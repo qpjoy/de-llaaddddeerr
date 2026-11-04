@@ -28,6 +28,7 @@ import { HubService } from "../../server/hub-service.mjs";
 import { MemoryStore } from "../../server/stores/memory-store.mjs";
 import { createHarborApp } from "../../../mx-dataport/apps/server/app.mjs";
 import { paymentTimedOutSql } from "../../server/commerce/order-state.mjs";
+import { commerceRoute } from "../../server/commerce/routes.mjs";
 
 const connectionString = process.env.MX_DATAPORT_TEST_DATABASE_URL;
 async function fixture(t, { legacyEmployeeSchema = false } = {}) {
@@ -65,6 +66,7 @@ async function fixture(t, { legacyEmployeeSchema = false } = {}) {
     CREATE FUNCTION hub_commerce.immutable() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'immutable'; END$$;`);
   await pool.query(await readFile(new URL("../../migrations/144_customer_subscription_messages.sql",import.meta.url),"utf8"));
   await pool.query(await readFile(new URL("../../migrations/154_dataport_support.sql",import.meta.url),"utf8"));
+  await pool.query(await readFile(new URL("../../migrations/177_dataport_notifications.sql",import.meta.url),"utf8"));
   const tenant = randomUUID(),
     other = randomUUID(),
     owner = randomUUID(),
@@ -997,6 +999,8 @@ test("DataPort support closes the processing loop with tenant/self isolation, CA
  let detail=await support.detail(analyst,f.tenant,ticket.id);assert.equal(detail.revision,2);assert.equal(detail.replies.length,1);
  assert.equal((await support.detail(owner,f.tenant,ticket.id)).replies[0].reply,command.reply);
  const inbox=await messages.list(f.tenant,f.analyst);assert.equal(inbox.items[0].kind,"ticket_updated");assert.equal(inbox.unread,1);
+ const ownerInbox=await messages.list(f.tenant,f.owner);assert.equal(ownerInbox.unread,1);assert.equal(ownerInbox.items[0].kind,'ticket_updated_owner');
+ assert.ok(!JSON.stringify(ownerInbox).includes(command.reply),'notification does not broadcast ticket content');
  assert.equal((await messages.list(f.tenant,f.viewer)).items.length,0);
  await assert.rejects(messages.read(f.tenant,f.viewer,inbox.items[0].id),{status:404});
  assert.equal((await messages.readAll(f.tenant,f.analyst)).read,1);assert.equal((await messages.list(f.tenant,f.analyst)).unread,0);
@@ -1005,6 +1009,68 @@ test("DataPort support closes the processing loop with tenant/self isolation, CA
  detail=await support.detail(owner,f.tenant,ticket.id);assert.equal(detail.status,"closed");assert.equal(detail.replies.length,2);
  assert.equal((await support.list(admin,new URLSearchParams({tenantId:f.other}))).total,0);
  assert.equal((await support.list(admin,new URLSearchParams({status:"closed"}))).total,1);
+});
+
+test('employee operations notify only active owners once per transition; read receipts and owner revocation stay isolated', {skip:!connectionString}, async t => {
+  const f=await fixture(t),owner=await f.principal(),messages=new CustomerMessages(f.pool);
+  await f.pool.query("UPDATE iam.tenant_memberships SET role='owner' WHERE tenant_id=$1 AND member_id=$2",[f.tenant,f.adminMember]);
+  await f.pool.query("INSERT INTO iam.tenant_memberships(id,tenant_id,member_id,role) VALUES($1,$2,$3,'owner')",[randomUUID(),f.other,f.viewer]);
+  const password='Synthetic-employee-password-123',body={operation:'create',commandId:randomUUID(),account:'NoticeEmployee',displayName:'Notice employee',email:'notice@example.test',password,confirmPassword:password,roleId:'analyst'};
+  const created=await f.store.memberCommand(owner,f.tenant,body,{},'');
+  await f.store.memberCommand(owner,f.tenant,body,{},'');
+  for(const status of ['suspended','suspended','active','active']) await f.store.updateMember(owner,f.tenant,created.memberId,{status});
+  const inbox=await messages.list(f.tenant,f.owner),second=await messages.list(f.tenant,f.adminMember);
+  assert.equal(inbox.unread,3);assert.equal(second.unread,3);
+  assert.deepEqual(inbox.items.map(m=>m.kind),['member_enabled','member_disabled','member_created']);
+  assert.ok(inbox.items.every(m=>m.document.memberId===created.memberId));assert.ok(!JSON.stringify(inbox).includes(password));
+  assert.equal((await messages.list(f.tenant,created.memberId)).unread,0);
+  assert.equal((await messages.list(f.tenant,f.viewer)).unread,0);
+  for(const [tenant,actor] of [[f.tenant,created.memberId],[f.tenant,f.viewer],[f.other,f.viewer]]) {
+    await assert.rejects(messages.read(tenant,actor,inbox.items[0].id),{status:404});
+    assert.equal((await messages.readAll(tenant,actor)).read,0);
+  }
+  const receipt=await messages.read(f.tenant,f.owner,inbox.items[0].id);
+  assert.deepEqual(await messages.read(f.tenant,f.owner,inbox.items[0].id),receipt);
+  assert.equal((await messages.list(f.tenant,f.owner)).unread,2);
+  assert.equal((await messages.readAll(f.tenant,f.owner)).read,2);
+  assert.equal((await messages.list(f.tenant,f.adminMember)).unread,3,'another owner keeps independent reads');
+  await f.pool.query("UPDATE iam.tenant_memberships SET role='viewer' WHERE tenant_id=$1 AND member_id=$2",[f.tenant,f.adminMember]);
+  assert.equal((await messages.list(f.tenant,f.adminMember)).unread,0);
+  await assert.rejects(messages.read(f.tenant,f.adminMember,second.items[0].id),{status:404});
+  assert.equal((await messages.readAll(f.tenant,f.adminMember)).read,0);
+  await f.pool.query(`CREATE FUNCTION dataport.reject_owner_notification() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'synthetic notification failure'; END$$;
+    CREATE TRIGGER fail_owner_notification BEFORE INSERT ON hub_commerce.messages FOR EACH ROW WHEN (NEW.kind='member_created') EXECUTE FUNCTION dataport.reject_owner_notification()`);
+  const failed={...body,commandId:randomUUID(),account:'NoticeFailure',displayName:'No partial employee',email:'failure@example.test'};
+  await assert.rejects(f.store.memberCommand(owner,f.tenant,failed,{},''),{code:'P0001'});
+  assert.equal((await f.pool.query("SELECT 1 FROM iam.members WHERE display_name='No partial employee'")).rowCount,0,'notification and employee creation roll back together');
+  assert.equal((await f.pool.query('SELECT 1 FROM dataport.member_commands WHERE id=$1',[failed.commandId])).rowCount,0);
+});
+
+test('DataPort message routes keep subscription receipts behind subscription/billing grants and owner ticket replies do not duplicate the submitter', {skip:!connectionString}, async t => {
+  const f=await fixture(t),owner=await f.principal(),analyst=await f.principal(f.analyst),messages=new CustomerMessages(f.pool),support=new DataportSupport(f.store);
+  const subscription=randomUUID();await f.pool.query('INSERT INTO hub_commerce.subscriptions(id) VALUES($1)',[subscription]);
+  const subscriptionId=(await f.pool.query("INSERT INTO hub_commerce.messages(tenant_id,subscription_id,kind,document) VALUES($1,$2,'active',$3) RETURNING id",[f.tenant,subscription,{productName:'Private billing receipt'}])).rows[0].id;
+  const ticket=await f.store.createTicket(analyst,f.tenant,{content:'Synthetic support issue',contact:'qa@example.test',category:'technical',priority:'normal'});
+  await support.update({kind:'admin-token'},f.tenant,ticket.id,{commandId:randomUUID(),revision:1,status:'processing',reply:'Private support reply'});
+  async function invoke(actor,method='GET',suffix='',tenant=f.tenant) {
+    const path=`/commerce/tenants/${tenant}/messages${suffix}`,principal=authorizeLegacyPortal(await f.principal(actor),method,path,new URLSearchParams());
+    let data;await commerceRoute({commerce:{messages},request:{method},response:{},pathname:'/internal/v1/admin'+path,searchParams:new URLSearchParams(),principal,
+      readJson:async()=>({}),sendJson(_r,_s,body){data=body.data}});return data;
+  }
+  const employee=await invoke(f.analyst);assert.equal(employee.unread,1);assert.equal(employee.items[0].kind,'ticket_updated');
+  await assert.rejects(invoke(f.analyst,'POST',`/${subscriptionId}/read`),{status:404});
+  assert.equal((await invoke(f.analyst,'POST','/read-all')).read,1);
+  const management=await invoke(f.owner);assert.equal(management.unread,2);assert.ok(management.items.some(m=>m.kind==='ticket_updated_owner'));
+  await assert.rejects(invoke(f.viewer,'POST',`/${management.items.find(m=>m.kind==='ticket_updated_owner').id}/read`),{status:404});
+  await assert.rejects(invoke(f.owner,'GET','',f.other),{status:403});
+  const ownTicket=await f.store.createTicket(owner,f.tenant,{content:'Owner support request',contact:'owner@example.test',category:'account',priority:'normal'});
+  const command={commandId:randomUUID(),revision:1,status:'closed',reply:'Owner ticket resolved'};
+  await support.update({kind:'admin-token'},f.tenant,ownTicket.id,command);
+  await support.update({kind:'admin-token'},f.tenant,ownTicket.id,command);
+  const ownMessages=(await messages.list(f.tenant,f.owner)).items.filter(m=>m.document.ticketId===ownTicket.id);
+  assert.equal(ownMessages.length,1);assert.equal(ownMessages[0].kind,'ticket_updated');
+  await f.store.updateMember(owner,f.tenant,f.analyst,{roleId:'billing'});
+  assert.ok((await invoke(f.analyst)).items.some(m=>m.id===subscriptionId),'explicit finance role retains legitimate receipts');
 });
 test("DataPort rename, member pagination, audit IP search and managed reset keep enterprise boundaries",{skip:!connectionString},async t=>{
  const f=await fixture(t),owner=await f.principal(),analyst=await f.principal(f.analyst);

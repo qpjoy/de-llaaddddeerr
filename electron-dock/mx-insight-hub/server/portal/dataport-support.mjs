@@ -160,7 +160,7 @@ export class DataportSupport {
         "UPDATE dataport.tickets SET status=$3,revision=revision+1,updated_at=now() WHERE tenant_id=$1 AND id=$2",
         [tenantId, id, body.status],
       );
-      // Only the submitting member receives this receipt. Never broadcast ticket content to the enterprise.
+      // The submitter receives their private receipt; owners receive a separate, role-gated receipt without ticket content.
       await db.query(
         "INSERT INTO hub_commerce.messages(tenant_id,kind,recipient_id,document) VALUES($1,'ticket_updated',$2,$3)",
         [
@@ -169,6 +169,8 @@ export class DataportSupport {
           { ticketId: id, status: body.status, hasReply: !!reply },
         ],
       );
+      await this.store.notifyOwners(tenantId, 'ticket_updated_owner',
+        { eventId: body.commandId, ticketId: id, status: body.status, hasReply: !!reply }, db, t.actor);
       await this.store.event(
         tenantId,
         null,

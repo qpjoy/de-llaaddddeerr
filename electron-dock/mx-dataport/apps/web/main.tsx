@@ -279,6 +279,7 @@ function RemotePanel({
         session={session}
         csrf={csrf}
         reloadSession={reloadSession}
+        onMembersChanged={messages.reload}
       />
     );
   if (page === "audit")
@@ -295,6 +296,7 @@ function RemotePanel({
   if (page === "messages")
     return (
       <Messages
+        key={messages.scope}
         tenant={tenant}
         csrf={csrf}
         enabled={true}
@@ -357,6 +359,7 @@ function App() {
   const messages = useMessageInbox(
     tenant,
     signedIn === true && !!tenant && canOpenPage(session, tenant, "messages"),
+    JSON.stringify([session?.memberId, session?.memberships?.find((m: any) => m.tenantId === tenant)]),
   );
   const go = (p: string) => {
     location.hash = `/${p}`;
@@ -588,7 +591,10 @@ function App() {
             go(destination);
           }}
           name={session?.displayName || "已登录"}
-          onNotifications={() => setNotificationsOpen(true)}
+          onNotifications={() => {
+            setNotificationsOpen(true);
+            void messages.reload();
+          }}
           unread={messages.inbox?.unread}
           onLogout={async () => {
             try {
@@ -707,11 +713,11 @@ function App() {
           <DialogHeader>
             <DialogTitle>消息通知</DialogTitle>
             <DialogDescription className="sr-only">
-              企业订阅动态、到期提醒与工单更新
+              企业账号操作、订阅动态与工单更新
             </DialogDescription>
           </DialogHeader>
           <Messages
-            key={tenant}
+            key={messages.scope}
             compact
             tenant={tenant}
             csrf={csrf}

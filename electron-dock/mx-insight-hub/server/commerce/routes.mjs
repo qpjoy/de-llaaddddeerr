@@ -11,13 +11,15 @@ export async function commerceRoute({ commerce, service, productGateway, request
     if (message) {
       requireTenantCapability(principal,message[1],'billing.read')
       requirePayment((principal.kind==='launcher-user' || (principal.kind==='dataport-user' && principal.portalOrigin)) && principal.memberId,'customer_identity_required','消息需要个人登录身份',403)
+      const membership=principal.memberships?.find(m=>m.tenantId===message[1]);
+      const visibility={allowSubscriptions:!membership?.dataport || membership.dataport.permissions?.some(p=>['billing.read','subscriptions.read'].includes(p))===true};
       if (request.method==='GET' && !message[2] && !message[3]) {
         if ([...searchParams.keys()].some(key=>searchParams.getAll(key).length!==1)) throw new AppError(400,'invalid_message_filter','消息筛选条件不正确')
-        return reply(await commerce.messages.list(message[1],principal.memberId,Object.fromEntries(searchParams)))
+        return reply(await commerce.messages.list(message[1],principal.memberId,Object.fromEntries(searchParams),visibility))
       }
       if (request.method==='POST' && (message[2] || message[3]) && !searchParams.size) {
         fields(await readJson(request,1024),[])
-        return reply(await (message[3] ? commerce.messages.readAll(message[1],principal.memberId) : commerce.messages.read(message[1],principal.memberId,message[2])))
+        return reply(await (message[3] ? commerce.messages.readAll(message[1],principal.memberId,visibility) : commerce.messages.read(message[1],principal.memberId,message[2],visibility)))
       }
       throw new AppError(400,'invalid_message_request','消息请求不正确')
     }

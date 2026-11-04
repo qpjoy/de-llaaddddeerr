@@ -45,6 +45,27 @@ test('usage has complete daily aggregates, strict date ranges and selected-tenan
   f.setRole('billing');assert.equal((await f.get(`/me/usage?tenantId=${f.a.id}`)).status,403)
 })
 
+test('last 24 hours is a rolling half-open window with both UTC dates and tenant isolation', async t => {
+  t.mock.timers.enable({apis:['Date'],now:new Date('2026-11-04T08:30:00.000Z')})
+  const f=await fixture(t),from='2026-11-03T08:30:00.000Z',to='2026-11-04T08:30:00.000Z'
+  for(const [createdAt,status,tenantId] of [
+    ['2026-11-03T08:29:59.999Z','committed',f.a.id],
+    [from,'unknown',f.a.id],['2026-11-03T23:59:59.999Z','committed',f.a.id],
+    ['2026-11-04T00:00:00.000Z','released',f.a.id],['2026-11-04T08:29:59.999Z','reserved',f.a.id],
+    [to,'committed',f.a.id],[from,'committed',f.other.id],
+  ]) {const id=randomUUID();f.store.requests.set(id,{id,createdAt,status,tenantId,consumerId:f.ca.id,platform:'ip_risk',capability:'ip.risk.subscription.query',unitsActual:1})}
+  const response=await f.get(`/me/usage?tenantId=${f.a.id}&days=1`)
+  assert.equal(response.status,200)
+  const {data}=await response.json()
+  assert.equal(data.from,from);assert.equal(data.to,to);assert.equal(data.days,1);assert.equal(data.timezone,'UTC')
+  assert.equal(data.requests,4);assert.equal(data.committed,1);assert.equal(data.released,1);assert.equal(data.unknown,1);assert.equal(data.pending,1)
+  assert.deepEqual(data.daily,[{day:'2026-11-03',requests:2,committed:1},{day:'2026-11-04',requests:2,committed:0}])
+  for(const days of [7,30]) {
+    const result=await (await f.get(`/me/usage?tenantId=${f.a.id}&days=${days}`)).json()
+    assert.equal(result.data.from,days===7?'2026-10-29T00:00:00.000Z':'2026-10-06T00:00:00.000Z')
+  }
+})
+
 test('Harbor OpenAPI requires an explicit accessible space; different spaces never union their products', async t => {
   const f=await fixture(t),docs=tenant=>f.get(`/documentation?path=/docs/openapi.json&tenantId=${tenant}`)
   assert.equal((await f.get('/documentation?path=/docs/openapi.json')).status,404)

@@ -102,6 +102,7 @@ export class DataportLocalAccounts {
         const result = { memberId, account, email, displayName, roleId: role.id, status: 'active', authMode: 'local' };
         await this.complete(db, principal, tenantId, body.commandId, 'create-local', fingerprint, result);
         await this.dataport.event(tenantId, principal.memberId, 'member.created', memberId, 201, { roleId: role.id, authMode: 'local' }, db);
+        await this.dataport.notifyOwners(tenantId, 'member_created', { eventId: memberId, memberId, memberName: displayName, account }, db);
         return result;
       });
     } catch (error) {

@@ -13,16 +13,23 @@ type Message = {
     | "expiring_7d"
     | "expiring_1d"
     | "expired"
-    | "ticket_updated";
+    | "ticket_updated"
+    | "ticket_updated_owner"
+    | "member_created"
+    | "member_enabled"
+    | "member_disabled";
   document: {
     ticketId?: string;
     status?: string;
     hasReply?: boolean;
-    productName: string;
-    startsAt: string;
-    endsAt: string;
-    quota: number;
-    scope: "tenant" | "consumer";
+    memberId?: string;
+    memberName?: string;
+    account?: string;
+    productName?: string;
+    startsAt?: string;
+    endsAt?: string;
+    quota?: number;
+    scope?: "tenant" | "consumer";
   };
   createdAt: string;
   readAt: string | null;
@@ -30,16 +37,21 @@ type Message = {
 type Inbox = { items: Message[]; unread: number; nextBefore: string | null };
 const titles = {
   ticket_updated: "工单处理有更新",
+  ticket_updated_owner: "企业工单处理有更新",
+  member_created: "员工子账号已创建",
+  member_enabled: "员工子账号已启用",
+  member_disabled: "员工子账号已停用",
   scheduled: "续订已开通，等待生效",
   active: "订阅已生效",
   expiring_7d: "订阅将在 7 天内到期",
   expiring_1d: "订阅将在 24 小时内到期",
   expired: "订阅已到期",
 };
-export function useMessageInbox(tenant: string, enabled: boolean) {
+export function useMessageInbox(tenant: string, enabled: boolean, accessScope = "") {
+  const cacheScope = JSON.stringify([tenant, accessScope]);
   const [inbox, setInbox] = useState<Inbox | null>(null);
   const [error, setError] = useState("");
-  const [scope, setScope] = useState(tenant);
+  const [scope, setScope] = useState(cacheScope);
   const generation = useRef(0);
   const requestSequence = useRef(0);
   const reload = useCallback(async () => {
@@ -64,10 +76,10 @@ export function useMessageInbox(tenant: string, enabled: boolean) {
       )
         setError((e as Error).message);
     }
-  }, [tenant, enabled]);
+  }, [tenant, enabled, cacheScope]);
   useEffect(() => {
     generation.current++;
-    setScope(tenant);
+    setScope(cacheScope);
     setInbox(null);
     setError("");
     void reload();
@@ -80,8 +92,9 @@ export function useMessageInbox(tenant: string, enabled: boolean) {
     };
   }, [reload]);
   return {
-    inbox: enabled && scope === tenant ? inbox : null,
-    error: scope === tenant ? error : "",
+    scope: cacheScope,
+    inbox: enabled && scope === cacheScope ? inbox : null,
+    error: scope === cacheScope ? error : "",
     reload,
   };
 }
@@ -144,7 +157,7 @@ export function Messages({
           <div>
             <h1>消息通知</h1>
             <p>
-              订阅动态、到期提醒与工单更新
+              企业账号操作、订阅动态与工单更新
               {inbox ? ` · ${inbox.unread} 条未读` : ""}
             </p>
           </div>
@@ -208,7 +221,7 @@ export function Messages({
             <Card className="harbor-empty">
               <Bell aria-hidden="true" />
               <h2>暂无消息</h2>
-              <p>订阅提醒与本人工单更新会显示在这里。</p>
+              <p>当前账号有权查看的账号操作、订阅提醒与工单更新会显示在这里。</p>
             </Card>
           )}
           {items.map((message) => (
@@ -225,12 +238,12 @@ export function Messages({
                   <h2>{titles[message.kind]}</h2>
                   <span>{message.readAt ? "已读" : "未读"}</span>
                 </div>
-                {message.kind === "ticket_updated" ? (
+                {["ticket_updated", "ticket_updated_owner"].includes(message.kind) ? (
                   <>
                     <p>
                       {message.document.hasReply
-                        ? "平台客服已回复你的工单。"
-                        : "你的工单处理状态已更新。"}
+                        ? message.kind === "ticket_updated_owner" ? "平台客服已回复企业工单。" : "平台客服已回复你的工单。"
+                        : message.kind === "ticket_updated_owner" ? "企业工单处理状态已更新。" : "你的工单处理状态已更新。"}
                     </p>
                     <p>
                       工单编号：{message.document.ticketId} ·{" "}
@@ -243,6 +256,12 @@ export function Messages({
                       )[message.document.status || ""] || "已更新"}
                     </p>
                   </>
+                ) : message.kind.startsWith("member_") ? (
+                  <>
+                    <p>{message.document.memberName || message.document.account || "企业员工"}</p>
+                    <p>登录账号：{message.document.account || "已有 MX 账号"}</p>
+                    <p>企业超管专属通知</p>
+                  </>
                 ) : (
                   <>
                     <p>{message.document.productName}</p>
@@ -251,7 +270,7 @@ export function Messages({
                       {dateTime(message.document.endsAt)}
                     </p>
                     <p>
-                      {message.document.quota.toLocaleString()} 次调用 ·{" "}
+                      {message.document.quota?.toLocaleString() || "—"} 次调用 ·{" "}
                       {message.document.scope === "tenant"
                         ? "空间共享"
                         : "指定调用者"}
@@ -274,7 +293,7 @@ export function Messages({
                     variant="link"
                     onClick={() => {
                       if (
-                        message.kind === "ticket_updated" &&
+                        ["ticket_updated", "ticket_updated_owner"].includes(message.kind) &&
                         message.document.ticketId
                       ) {
                         sessionStorage.setItem(
@@ -284,15 +303,13 @@ export function Messages({
                         window.dispatchEvent(new Event("dataport:open-ticket"));
                       }
                       go(
-                        message.kind === "ticket_updated"
-                          ? "support"
-                          : "services",
+                        ["ticket_updated", "ticket_updated_owner"].includes(message.kind)
+                          ? "support" : message.kind.startsWith("member_") ? "team" : "services",
                       );
                     }}
                   >
-                    {message.kind === "ticket_updated"
-                      ? "查看工单"
-                      : "查看订阅"}{" "}
+                    {["ticket_updated", "ticket_updated_owner"].includes(message.kind)
+                      ? "查看工单" : message.kind.startsWith("member_") ? "查看企业账号" : "查看订阅"}{" "}
                     <ArrowRight />
                   </Button>
                   {!message.readAt && (

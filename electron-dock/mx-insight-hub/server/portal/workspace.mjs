@@ -14,9 +14,10 @@ export async function workspaceRoute({ request, response, pathname, searchParams
   let data
   if (usage) {
     const days = searchParams.get('days') || '7'
-    if (!['7', '30'].includes(days)) throw new AppError(400, 'invalid_query', '请选择近 7 天或近 30 天')
+    if (!['1', '7', '30'].includes(days)) throw new AppError(400, 'invalid_query', '请选择近 24 小时、近 7 天或近 30 天')
     const now = new Date(), from = new Date(now)
-    from.setUTCHours(0, 0, 0, 0); from.setUTCDate(from.getUTCDate() - Number(days) + 1)
+    if (days === '1') from.setTime(now.getTime() - 24 * 60 * 60 * 1000)
+    else { from.setUTCHours(0, 0, 0, 0); from.setUTCDate(from.getUTCDate() - Number(days) + 1) }
     const filters = { tenantId, from: from.toISOString(), to: now.toISOString() }
     const [summary, daily] = await Promise.all([store.usage(filters), store.usageDaily(filters)])
     data = {

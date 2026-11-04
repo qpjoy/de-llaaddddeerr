@@ -245,3 +245,15 @@ Hub 已从可信 Portal 的 `portalOrigin` 生成固定 `/payment/return`。完�
 - 完成 `enroll --migrate-domain` 后，若 Launcher 在恢复预检报 `public identity application credentials differ; recovery stopped`，先确认已同步本次 Launcher 修复：恢复检查与身份发布共用精确迁移规则，仅凭原客户端哈希证明允许 Harbor → DataPort 的域名和显示名变化。更新 `scripts/identity-app-profile.mjs`、`scripts/identity-deploy.mjs`、`scripts/k8s-recovery-state.mjs` 后，在 Launcher 目录沿用原环境参数重跑 `bash scripts/manage.sh ops internal-production deploy`，无需重复迁移。不要删除恢复快照、身份档案或 Secret，也不要重新初始化身份服务。若新版仍报错，说明差异不符合上述规则，应停止并核对原档案；不要绕过检查或输出密钥。
 
 本地验证和截图记录：[2026-10-12 验证](docs/dataport-verification.md)。
+
+## 2026-11-04 企业通知与近24小时用量
+
+本次发布需先完成 Hub 正常部署（包含 `177_dataport_notifications.sql` 及全部相关实例），再更新数港前端。发布窗口暂停员工变更和工单处理，待两端更新并刷新浏览器后再恢复；旧前端不认识新增通知类型。无 Launcher/Auth/Pay 部署、无新 Secret，不轮换已有密钥。
+
+- 员工新建、停用和启用通知当前有效企业超管，状态不变不重复通知；通知和成员操作同事务。
+- 工单处理通知企业超管和提交人，身份重合只通知一次；超管通知不包含工单全文、联系方式或密码。
+- 列表、未读数、单条和全部已读均按收件人/企业/当前角色过滤；员工不能读取或标记超管专属通知。订阅通知继续按订阅或账单权限显示；财务等显式授权不受影响。
+- 角色或企业改变时清空前端消息缓存，迟到请求不会恢复旧消息。
+- 用量增加“近24小时”：当前时刻向前24小时，[from,to)半开区间；近7/30天保留UTC自然日范围，趋势补齐所有覆盖日期。
+
+按 `docs/system-functional-test-flow.md` 的 MSG-01/03/05/06、USAGE-01 进行页面和功能复验。自动化验证使用隔离数据库和合成数据，不代表线上页面验收；历史操作不补造通知。

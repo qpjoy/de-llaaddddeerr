@@ -2,6 +2,14 @@ import { AppError } from '../core/errors.mjs'
 import { withPgTransaction } from '../stores/postgres-store.mjs'
 
 const validId = value => typeof value === 'string' && /^[1-9]\d{0,17}$/.test(value)
+const ownerKinds = "'member_created','member_enabled','member_disabled','ticket_updated_owner'";
+const subscriptionKinds = "'scheduled','active','expiring_7d','expiring_1d','expired'";
+const visible = allowSubscriptions => `(
+  (m.kind IN (${subscriptionKinds}) AND m.recipient_id IS NULL AND ${allowSubscriptions}::boolean)
+  OR (m.kind='ticket_updated' AND m.recipient_id=$2)
+  OR (m.kind IN (${ownerKinds}) AND m.recipient_id=$2 AND EXISTS (
+    SELECT 1 FROM iam.tenant_memberships tm JOIN iam.members member ON member.id=tm.member_id JOIN tenants t ON t.id=tm.tenant_id
+    WHERE tm.tenant_id=m.tenant_id AND tm.member_id=$2 AND tm.role='owner' AND tm.status='active' AND member.status='active' AND t.status='active')))`;
 export class CustomerMessages {
   constructor(pool, { logger = console } = {}) {
     this.pool = pool
@@ -55,41 +63,41 @@ export class CustomerMessages {
   requireStorage() {
     if (!this.pool) throw new AppError(503,'customer_messages_unavailable','消息服务暂不可用')
   }
-  async list(tenantId, memberId, query = {}) {
+  async list(tenantId, memberId, query = {}, { allowSubscriptions = true } = {}) {
     if (Object.keys(query).some(key => !['before','status'].includes(key)) ||
       (query.before !== undefined && !validId(query.before)) ||
       (query.status !== undefined && !['all','unread'].includes(query.status))) {
       throw new AppError(400,'invalid_message_filter','消息筛选条件不正确')
     }
     this.requireStorage()
-    const values = [tenantId,memberId,query.before || null,query.status || 'all']
+    const values = [tenantId,memberId,query.before || null,query.status || 'all',allowSubscriptions]
     const [rows, count] = await Promise.all([
       this.pool.query(`SELECT m.id,m.kind,m.document,m.created_at AS "createdAt",r.read_at AS "readAt"
         FROM hub_commerce.messages m LEFT JOIN hub_commerce.message_reads r ON r.message_id=m.id AND r.member_id=$2
-        WHERE m.tenant_id=$1 AND (m.recipient_id IS NULL OR m.recipient_id=$2) AND ($3::bigint IS NULL OR m.id<$3) AND ($4='all' OR r.message_id IS NULL)
+        WHERE m.tenant_id=$1 AND ${visible('$5')} AND ($3::bigint IS NULL OR m.id<$3) AND ($4='all' OR r.message_id IS NULL)
         ORDER BY m.id DESC LIMIT 21`,values),
       this.pool.query(`SELECT count(*)::integer AS unread FROM hub_commerce.messages m
-        WHERE m.tenant_id=$1 AND (m.recipient_id IS NULL OR m.recipient_id=$2) AND NOT EXISTS (
-          SELECT 1 FROM hub_commerce.message_reads r WHERE r.message_id=m.id AND r.member_id=$2)`,values.slice(0,2)),
+        WHERE m.tenant_id=$1 AND ${visible('$3')} AND NOT EXISTS (
+          SELECT 1 FROM hub_commerce.message_reads r WHERE r.message_id=m.id AND r.member_id=$2)`,[tenantId,memberId,allowSubscriptions]),
     ])
     const items = rows.rows.slice(0,20)
     return { items, unread: count.rows[0].unread, nextBefore: rows.rows.length>20 ? items.at(-1).id : null }
   }
-  async readAll(tenantId,memberId) {
+  async readAll(tenantId,memberId,{ allowSubscriptions = true } = {}) {
     this.requireStorage();
     const result=await this.pool.query(`INSERT INTO hub_commerce.message_reads(message_id,member_id)
-      SELECT id,$2 FROM hub_commerce.messages WHERE tenant_id=$1 AND (recipient_id IS NULL OR recipient_id=$2)
-      ON CONFLICT(message_id,member_id) DO NOTHING`,[tenantId,memberId]);
+      SELECT m.id,$2 FROM hub_commerce.messages m WHERE m.tenant_id=$1 AND ${visible('$3')}
+      ON CONFLICT(message_id,member_id) DO NOTHING`,[tenantId,memberId,allowSubscriptions]);
     return {read:result.rowCount};
   }
-  async read(tenantId, memberId, id) {
+  async read(tenantId, memberId, id, { allowSubscriptions = true } = {}) {
     if (!validId(id)) throw new AppError(400,'invalid_message_id','消息编号不正确')
     this.requireStorage()
     // Even a guessed message ID cannot create a read receipt in another space.
     const result = await this.pool.query(`INSERT INTO hub_commerce.message_reads(message_id,member_id)
-      SELECT id,$2 FROM hub_commerce.messages WHERE tenant_id=$1 AND id=$3 AND (recipient_id IS NULL OR recipient_id=$2)
+      SELECT m.id,$2 FROM hub_commerce.messages m WHERE m.tenant_id=$1 AND m.id=$3 AND ${visible('$4')}
       ON CONFLICT(message_id,member_id) DO UPDATE SET read_at=hub_commerce.message_reads.read_at
-      RETURNING read_at AS "readAt"`,[tenantId,memberId,id])
+      RETURNING read_at AS "readAt"`,[tenantId,memberId,id,allowSubscriptions])
     if (!result.rowCount) throw new AppError(404,'message_not_found','消息不存在')
     return {id,...result.rows[0]}
   }

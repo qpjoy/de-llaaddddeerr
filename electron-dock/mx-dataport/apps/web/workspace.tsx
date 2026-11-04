@@ -1,3 +1,4 @@
+import { usageTrend } from "./usage-trend";
 import { hasPermission, enterpriseUrl } from "./permissions";
 import { useEffect, useState } from "react";
 import {
@@ -146,19 +147,7 @@ export function UsageOverview({
       active = false;
     };
   }, [tenant, canRead, canBill, days, version]);
-  const daily = data
-    ? Array.from({ length: data.days }, (_, i) => {
-        const day = new Date(data.from);
-        day.setUTCDate(day.getUTCDate() + i);
-        const stamp = day.toISOString().slice(0, 10);
-        return {
-          day: stamp,
-          requests: 0,
-          committed: 0,
-          ...data.daily.find((item: any) => item.day === stamp),
-        };
-      })
-    : [];
+  const daily = usageTrend(data);
   const max = Math.max(1, ...daily.map((day) => day.requests));
   const current = subscriptions?.filter(
     (s) =>
@@ -174,6 +163,7 @@ export function UsageOverview({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value="1">近 24 小时</SelectItem>
               <SelectItem value="7">近 7 天</SelectItem>
               <SelectItem value="30">近 30 天</SelectItem>
             </SelectContent>

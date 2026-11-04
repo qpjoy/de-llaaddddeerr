@@ -78,6 +78,14 @@ export class DataportStore {
       )
     ).rows[0];
   }
+  async notifyOwners(tenantId, kind, document, db = this.pool, excludeMember = null) {
+    await db.query(`INSERT INTO hub_commerce.messages(tenant_id,kind,recipient_id,document)
+      SELECT tm.tenant_id,$2,tm.member_id,$3 FROM iam.tenant_memberships tm
+      JOIN iam.members m ON m.id=tm.member_id JOIN tenants t ON t.id=tm.tenant_id
+      WHERE tm.tenant_id=$1 AND tm.role='owner' AND tm.status='active' AND m.status='active' AND t.status='active'
+      AND ($4::uuid IS NULL OR tm.member_id<>$4) ON CONFLICT DO NOTHING`,
+    [tenantId, kind, document, excludeMember]);
+  }
   async enrich(principal, sessionDigest) {
     this.available();
     const memberships = [];
@@ -346,6 +354,13 @@ export class DataportStore {
           "UPDATE iam.tenant_memberships SET status=$3,updated_at=now() WHERE tenant_id=$1 AND member_id=$2",
           [tenantId, memberId, body.status],
         );
+        if (target.status !== body.status) {
+          const employee = (await db.query(`SELECT coalesce(mp.display_name,m.display_name) AS "memberName",ma.account
+            FROM iam.members m LEFT JOIN dataport.member_profiles mp ON mp.member_id=m.id AND mp.tenant_id=$1
+            LEFT JOIN dataport.managed_accounts ma ON ma.member_id=m.id AND ma.tenant_id=$1 WHERE m.id=$2`, [tenantId,memberId])).rows[0];
+          await this.notifyOwners(tenantId, body.status === 'active' ? 'member_enabled' : 'member_disabled',
+            { eventId: randomUUID(), memberId, ...employee }, db);
+        }
         if (body.status === "suspended")
           await db.query(`DELETE FROM dataport.local_sessions s USING dataport.local_credentials c
             WHERE s.member_id=c.member_id AND c.tenant_id=$1 AND s.member_id=$2`, [tenantId, memberId]);

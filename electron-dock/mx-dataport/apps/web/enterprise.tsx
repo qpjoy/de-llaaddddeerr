@@ -50,6 +50,7 @@ type Props = {
   session: any;
   csrf: string;
   reloadSession?: () => void;
+  onMembersChanged?: () => void;
 };
 function useEnterprise(tenant: string, path: string | null) {
   const [data, setData] = useState<any>(null),
@@ -463,6 +464,7 @@ export function EnterpriseMembers(props: Props) {
                 });
                 view.reload();
                 if (operation === "create") {
+                  props.onMembersChanged?.();
                   setCreatedMember(result);
                   if (owner) {
                     const info = await write.run(`members/${result.memberId}/initial-password`, {});
@@ -848,6 +850,7 @@ export function EnterpriseMembers(props: Props) {
                   .then(() => {
                     setStatusMember(null);
                     view.reload();
+                    props.onMembersChanged?.();
                   })
                   .catch(() => {});
               }}
