@@ -608,14 +608,17 @@ test(
         await assert.rejects(f.store.createTicket(p,f.tenant,body),{code:"invalid_ticket",status:400});
       }
     }
-    for(const body of [null,[],{...valid,contact:123},{...valid,contact:"x".repeat(201)},{...valid,content:"x".repeat(5001)}]) {
+    for(const body of [null,[],{...valid,contact:123},{...valid,contact:"x".repeat(201)},
+      ...["1","13800000000","qa","qa@domain","qa@@example.test","qa@ example.test"].map(contact=>({...valid,contact})),
+      ...["字".repeat(9),"字".repeat(2001),"  123456789  "].map(content=>({...valid,content}))]) {
       await assert.rejects(f.store.createTicket(p,f.tenant,body),{code:"invalid_ticket",status:400});
     }
     assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM dataport.tickets')).rows[0].n,0,'invalid forms never create a ticket');
-    await f.store.createTicket(p, f.tenant, valid);
-    const created=await f.store.createTicket(v, f.tenant, {...valid,content:"Account issue",contact:"  13800000000  ",category:"account",priority:"urgent"});
-    const stored=(await f.pool.query('SELECT contact,category,priority FROM dataport.tickets WHERE id=$1',[created.id])).rows[0];
-    assert.deepEqual(stored,{contact:"13800000000",category:"account",priority:"urgent"});
+    const minimum=await f.store.createTicket(p, f.tenant, {...valid,content:"  "+"字".repeat(10)+"  "});
+    assert.equal((await f.pool.query('SELECT content FROM dataport.tickets WHERE id=$1',[minimum.id])).rows[0].content,"字".repeat(10));
+    const created=await f.store.createTicket(v, f.tenant, {...valid,content:"字".repeat(2000),contact:"  123@example.test  ",category:"account",priority:"urgent"});
+    const stored=(await f.pool.query('SELECT contact,category,priority,length(content) AS size FROM dataport.tickets WHERE id=$1',[created.id])).rows[0];
+    assert.deepEqual(stored,{contact:"123@example.test",category:"account",priority:"urgent",size:2000});
     assert.equal(
       (await f.store.tickets(p, f.tenant, new URLSearchParams())).total,
       1,
@@ -1316,6 +1319,11 @@ test('real BFF + Portal + local PG login enforces gateway, origin, CSRF, passwor
   const token=nextCookie.split('=')[1];
   assert.notEqual((await fetch(hub+'/internal/v1/admin/session',{headers:{authorization:`Bearer ${token}`}})).status,200);
   const identity2=await (await fetch(bff+'/auth/sso/session',{headers:{cookie:nextCookie}})).json();
+  const ticketPath=`/bff/v1/enterprises/${f.tenant}/tickets`,ticketBody={content:'Fixture ticket description',contact:'qa@example.test',category:'technical',priority:'normal'};
+  for(const patch of [{contact:'1'},{contact:'qa@domain'},{content:'x'.repeat(9)},{content:'x'.repeat(2001)}]) {
+    assert.equal((await post(ticketPath,{...ticketBody,...patch},{cookie:nextCookie,'x-mx-csrf':identity2.csrf})).status,400,'BFF/Portal cannot bypass ticket validation');
+  }
+  assert.equal((await post(ticketPath,ticketBody,{cookie:nextCookie,'x-mx-csrf':identity2.csrf})).status,200);
   assert.equal((await post('/auth/sso/logout',{}, {cookie:nextCookie,'x-mx-csrf':identity2.csrf})).status,200);
   assert.equal((await fetch(bff+history,{headers:{cookie:nextCookie}})).status,401);
   assert.equal(ssoCalls,0);assert.ok(calls.every(c=>c.url.startsWith(hub)));assert.ok(calls.every(c=>!c.headers.authorization));

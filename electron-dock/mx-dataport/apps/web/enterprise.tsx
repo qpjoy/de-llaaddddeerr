@@ -1288,13 +1288,23 @@ export function Support(props: Props) {
               if (["category", "priority", "content", "contact"].some(
                 field => !String(values[field] || "").trim(),
               )) {
-                write.setError("请填写问题分类、优先级、详细描述和联系方式。");
+                write.setError("请填写问题分类、优先级、详细描述和联系邮箱。");
+                return;
+              }
+              const content = String(values.content).trim();
+              const contact = String(values.contact).trim();
+              if (content.length < 10 || content.length > 2000) {
+                write.setError("详细描述需为 10～2000 字，请勿仅填写空格。");
+                return;
+              }
+              if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact)) {
+                write.setError("请填写有效的联系邮箱。");
                 return;
               }
               try {
                 await write.run(
                   "tickets",
-                  values,
+                  { ...values, content, contact },
                 );
                 sessionStorage.removeItem("dataport:report-error");
                 setOpen(false);
@@ -1343,18 +1353,21 @@ export function Support(props: Props) {
               <textarea
                 name="content"
                 required
-                maxLength={5000}
+                minLength={10}
+                maxLength={2000}
+                aria-describedby="dataport-ticket-content-hint"
                 rows={5}
                 defaultValue={
                   sessionStorage.getItem("dataport:report-error") || ""
                 }
               />
+              <small id="dataport-ticket-content-hint">请填写 10～2000 字的问题描述。</small>
             </label>
             <label>
               <span className="field-label-text">
-                联系方式<span className="required-mark" aria-hidden="true">*</span>
+                联系邮箱<span className="required-mark" aria-hidden="true">*</span>
               </span>
-              <Input name="contact" required maxLength={200} />
+              <Input name="contact" type="email" required maxLength={200} autoComplete="email" placeholder="请输入联系邮箱" />
             </label>
             {write.error && <p role="alert">{write.error}</p>}
             <Button disabled={write.busy}>新建工单</Button>

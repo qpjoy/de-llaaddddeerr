@@ -430,24 +430,27 @@ export class DataportStore {
         (k) => !["content", "contact", "category", "priority"].includes(k),
       ) ||
       typeof body.content !== "string" ||
-      body.content.trim().length > 5000 ||
       typeof body.contact !== "string" || body.contact.length > 200
     )
       problem(
         400,
         "invalid_ticket",
-        "请填写问题描述和联系方式；描述最多 5000 字，联系方式最多 200 字。",
+        "请填写 10～2000 字的问题描述和有效联系邮箱；邮箱最多 200 字。",
       );
-    const content = text(body.content, 5000),
-      contact = text(body.contact, 200),
+    const content = body.content.trim(),
+      contact = body.contact.trim(),
       category = body.category,
       priority = body.priority;
+    if (content.length < 10 || content.length > 2000)
+      problem(400, "invalid_ticket", "详细描述需为 10～2000 字，请勿仅填写空格。");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact))
+      problem(400, "invalid_ticket", "请填写有效的联系邮箱。");
     if (
       !content || !contact ||
       !["purchase", "technical", "account", "other"].includes(category) ||
       !["normal", "urgent"].includes(priority)
     )
-      problem(400, "invalid_ticket", "请填写问题分类、优先级、详细描述和联系方式。");
+      problem(400, "invalid_ticket", "请填写问题分类、优先级、详细描述和联系邮箱。");
     return withPgTransaction(this.pool, async (db) => {
       const id = randomUUID();
       await db.query(
