@@ -601,8 +601,21 @@ test(
       owner = await f.principal(),
       p = await f.principal(f.analyst),
       v = await f.principal(f.viewer);
-    await f.store.createTicket(p, f.tenant, { content: "Technical issue" });
-    await f.store.createTicket(v, f.tenant, { content: "Account issue" });
+    const valid={content:"Technical issue",contact:"QA@example.test",category:"technical",priority:"normal"};
+    for(const field of ["content","contact","category","priority"]) {
+      const missing={...valid};delete missing[field];
+      for(const body of [missing,{...valid,[field]:""},{...valid,[field]:"   "}]) {
+        await assert.rejects(f.store.createTicket(p,f.tenant,body),{code:"invalid_ticket",status:400});
+      }
+    }
+    for(const body of [null,[],{...valid,contact:123},{...valid,contact:"x".repeat(201)},{...valid,content:"x".repeat(5001)}]) {
+      await assert.rejects(f.store.createTicket(p,f.tenant,body),{code:"invalid_ticket",status:400});
+    }
+    assert.equal((await f.pool.query('SELECT count(*)::int AS n FROM dataport.tickets')).rows[0].n,0,'invalid forms never create a ticket');
+    await f.store.createTicket(p, f.tenant, valid);
+    const created=await f.store.createTicket(v, f.tenant, {...valid,content:"Account issue",contact:"  13800000000  ",category:"account",priority:"urgent"});
+    const stored=(await f.pool.query('SELECT contact,category,priority FROM dataport.tickets WHERE id=$1',[created.id])).rows[0];
+    assert.deepEqual(stored,{contact:"13800000000",category:"account",priority:"urgent"});
     assert.equal(
       (await f.store.tickets(p, f.tenant, new URLSearchParams())).total,
       1,
@@ -968,7 +981,7 @@ test(
 
 test("DataPort support closes the processing loop with tenant/self isolation, CAS, replay and private receipts", {skip:!connectionString},async t=>{
  const f=await fixture(t),owner=await f.principal(),analyst=await f.principal(f.analyst),viewer=await f.principal(f.viewer),support=new DataportSupport(f.store),messages=new CustomerMessages(f.pool);
- const ticket=await f.store.createTicket(analyst,f.tenant,{content:"Fixture request",category:"technical",priority:"normal"});
+ const ticket=await f.store.createTicket(analyst,f.tenant,{content:"Fixture request",contact:"support@example.test",category:"technical",priority:"normal"});
  assert.equal((await support.detail(analyst,f.tenant,ticket.id)).status,"saved");
  await assert.rejects(support.detail(viewer,f.tenant,ticket.id),{status:404});
  await assert.rejects(support.detail(analyst,f.other,ticket.id),{status:403});

@@ -150,6 +150,7 @@ export function EnterpriseMembers(props: Props) {
     [password, setPassword] = useState<EmployeeCredentials | null>(null),
     [createdMember, setCreatedMember] = useState<any>(null),
     [createdCredentials, setCreatedCredentials] = useState<EmployeeCredentials | null>(null),
+    [emailError, setEmailError] = useState(""),
     [roleEditor, setRoleEditor] = useState(false),
     [editingMember, setEditingMember] = useState<any>(null),
     [memberUpdateUnconfirmed, setMemberUpdateUnconfirmed] = useState(false),
@@ -165,6 +166,8 @@ export function EnterpriseMembers(props: Props) {
   const roles = view.data?.roles || [],
     members = view.data?.items || [];
   const membership = membershipFor(session, tenant);
+  const memberDialogOpen = open || !!invite || password !== null ||
+    !!editingMember || !!statusMember || !!resetMember || rename || roleEditor;
   const memberRoleName = (member: any) =>
     member.role === "owner"
       ? "企业超管"
@@ -174,6 +177,7 @@ export function EnterpriseMembers(props: Props) {
   function closeMemberEditor() {
     if (write.busy) return;
     setEditingMember(null);
+    write.setError("");
     if (memberUpdateUnconfirmed) {
       setMemberUpdateUnconfirmed(false);
       write.setError("");
@@ -253,7 +257,7 @@ export function EnterpriseMembers(props: Props) {
           {notice}
         </p>
       )}
-      {(view.error || write.error) && (
+      {!memberDialogOpen && (view.error || write.error) && (
         <p className="harbor-error" role="alert">
           {view.error || write.error}
         </p>
@@ -268,6 +272,7 @@ export function EnterpriseMembers(props: Props) {
                 onClick={() => {
                   setCreatedMember(null);
                   setCreatedCredentials(null);
+                  setEmailError("");
                   write.setError("");
                   setOperation("invite");
                   setCommandId(crypto.randomUUID());
@@ -280,6 +285,7 @@ export function EnterpriseMembers(props: Props) {
                 onClick={() => {
                   setCreatedMember(null);
                   setCreatedCredentials(null);
+                  setEmailError("");
                   write.setError("");
                   setOperation("create");
                   setCommandId(crypto.randomUUID());
@@ -441,6 +447,12 @@ export function EnterpriseMembers(props: Props) {
               e.preventDefault();
               if (write.busy) return;
               const values = Object.fromEntries(new FormData(e.currentTarget));
+              setEmailError("");
+              write.setError("");
+              if (operation === "create" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(values.email || "").trim())) {
+                setEmailError("请填写有效的员工邮箱。");
+                return;
+              }
               if (operation === "create" && values.password !== values.confirmPassword) { write.setError("两次输入的密码不一致。"); return; }
               try {
                 const result = await write.run("members", {
@@ -460,7 +472,11 @@ export function EnterpriseMembers(props: Props) {
                   setOpen(false);
                   setInvite(result);
                 }
-              } catch {}
+              } catch (error) {
+                if (["invalid_employee_email", "employee_email_exists"].includes((error as { code?: string }).code || "")) {
+                  setEmailError((error as Error).message);
+                }
+              }
             }}
           >
             {operation === "create" && (
@@ -499,7 +515,10 @@ export function EnterpriseMembers(props: Props) {
             </label>
             {operation === "create" && <>
               <label><span className="field-label-text">员工邮箱 <span className="required-mark">*</span></span>
-                <input name="email" type="email" required disabled={write.busy} maxLength={254} placeholder="填写员工邮箱" onChange={() => setCommandId(crypto.randomUUID())} />
+                <input name="email" type="email" required disabled={write.busy} maxLength={254} placeholder="填写员工邮箱"
+                  aria-invalid={!!emailError} aria-describedby={emailError ? "dataport-member-email-error" : undefined}
+                  onChange={() => { setCommandId(crypto.randomUUID()); setEmailError(""); write.setError(""); }} />
+                {emailError && <span id="dataport-member-email-error" className="dp-field-error" role="alert">{emailError}</span>}
               </label>
               <label><span className="field-label-text">初始密码 <span className="required-mark">*</span></span>
                 <input name="password" type="password" required disabled={write.busy} minLength={12} maxLength={128} autoComplete="new-password" placeholder="设置 12–128 位密码" onChange={() => setCommandId(crypto.randomUUID())} />
@@ -535,7 +554,7 @@ export function EnterpriseMembers(props: Props) {
                 ? "设置的初始密码 48 小时有效，首次登录须修改；企业超管可查看、复制员工当前数港登录信息。"
                 : "邀请链接 24 小时有效，员工登录统一 MX 账号并确认后加入企业。"}
             </small>
-            {write.error && <p role="alert">{write.error}</p>}
+            {write.error && !emailError && <p role="alert">{write.error}</p>}
             <Button disabled={write.busy}>
               {write.busy
                 ? "正在提交…"
@@ -1261,13 +1280,21 @@ export function Support(props: Props) {
             <DialogDescription>选择问题方向，填写具体问题。</DialogDescription>
           </DialogHeader>
           <form
-            className="dp-form ticket-form"
+            className="dp-form ticket-form dp-support-ticket-form"
             onSubmit={async (e) => {
               e.preventDefault();
+              if (write.busy) return;
+              const values = Object.fromEntries(new FormData(e.currentTarget));
+              if (["category", "priority", "content", "contact"].some(
+                field => !String(values[field] || "").trim(),
+              )) {
+                write.setError("请填写问题分类、优先级、详细描述和联系方式。");
+                return;
+              }
               try {
                 await write.run(
                   "tickets",
-                  Object.fromEntries(new FormData(e.currentTarget)),
+                  values,
                 );
                 sessionStorage.removeItem("dataport:report-error");
                 setOpen(false);
@@ -1279,7 +1306,7 @@ export function Support(props: Props) {
             <div className="ticket-form-pair">
               <label>
                 <span className="field-label-text">
-                  问题分类 <span className="required-mark">*</span>
+                  问题分类<span className="required-mark" aria-hidden="true">*</span>
                 </span>
                 <Select name="category" required>
                   <SelectTrigger aria-label="问题分类">
@@ -1296,7 +1323,7 @@ export function Support(props: Props) {
               </label>
               <label>
                 <span className="field-label-text">
-                  优先级 <span className="required-mark">*</span>
+                  优先级<span className="required-mark" aria-hidden="true">*</span>
                 </span>
                 <Select name="priority" required>
                   <SelectTrigger aria-label="优先级">
@@ -1311,7 +1338,7 @@ export function Support(props: Props) {
             </div>
             <label>
               <span className="field-label-text">
-                详细描述 <span className="required-mark">*</span>
+                详细描述<span className="required-mark" aria-hidden="true">*</span>
               </span>
               <textarea
                 name="content"
@@ -1324,8 +1351,10 @@ export function Support(props: Props) {
               />
             </label>
             <label>
-              联系方式（选填）
-              <Input name="contact" maxLength={200} />
+              <span className="field-label-text">
+                联系方式<span className="required-mark" aria-hidden="true">*</span>
+              </span>
+              <Input name="contact" required maxLength={200} />
             </label>
             {write.error && <p role="alert">{write.error}</p>}
             <Button disabled={write.busy}>新建工单</Button>

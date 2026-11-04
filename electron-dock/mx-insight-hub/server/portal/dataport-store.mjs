@@ -425,29 +425,29 @@ export class DataportStore {
   async createTicket(principal, tenantId, body) {
     requireDataportAccess(principal, tenantId, "support.create");
     if (
+      !body || typeof body !== "object" || Array.isArray(body) ||
       Object.keys(body).some(
         (k) => !["content", "contact", "category", "priority"].includes(k),
       ) ||
       typeof body.content !== "string" ||
       body.content.trim().length > 5000 ||
-      (body.contact !== undefined &&
-        (typeof body.contact !== "string" || body.contact.length > 200))
+      typeof body.contact !== "string" || body.contact.length > 200
     )
       problem(
         400,
         "invalid_ticket",
-        "问题描述最多 5000 字，联系方式最多 200 字。",
+        "请填写问题描述和联系方式；描述最多 5000 字，联系方式最多 200 字。",
       );
     const content = text(body.content, 5000),
       contact = text(body.contact, 200),
-      category = body.category || "technical",
-      priority = body.priority || "normal";
+      category = body.category,
+      priority = body.priority;
     if (
-      !content ||
+      !content || !contact ||
       !["purchase", "technical", "account", "other"].includes(category) ||
       !["normal", "urgent"].includes(priority)
     )
-      problem(400, "invalid_ticket", "请填写问题内容并选择分类。");
+      problem(400, "invalid_ticket", "请填写问题分类、优先级、详细描述和联系方式。");
     return withPgTransaction(this.pool, async (db) => {
       const id = randomUUID();
       await db.query(

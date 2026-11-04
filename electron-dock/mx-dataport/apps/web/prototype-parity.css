@@ -1200,6 +1200,20 @@
 .ticket-form-pair select {
   width: 100%;
 }
+.dp-support-ticket-form .field-label-text {
+  width: fit-content;
+  max-width: 100%;
+  justify-content: flex-start;
+  gap: 0;
+}
+.dp-support-ticket-form .required-mark {
+  margin: 0;
+}
+.dp-field-error {
+  color: #c0362c;
+  font-size: 13px;
+  line-height: 1.5;
+}
 .ticket-replies {
   display: grid;
   gap: 16px;
