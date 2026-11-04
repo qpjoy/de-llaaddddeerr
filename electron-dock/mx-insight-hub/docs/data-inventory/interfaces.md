@@ -4,7 +4,7 @@
 
 [总览与统计口径](README.md) · [机器可读明细](inventory.json)
 
-## 业务与配套公开入口（110 个方法/路径条目）
+## 业务与配套公开入口（113 个方法/路径条目）
 
 旧 operation 模板已展开、同方法同路径已去重；IP 两条 batch 别名由 HTTP 分发代码补充。别名、GET/POST 变体分别计数，不能当作独立业务能力。Native 和企业接口在后文单列。
 
@@ -56,6 +56,7 @@
 | GET | /api/v1/data/services/pricing | 当前 Key 的 Hub 官方定价与账户执行价 |
 | POST | /api/v1/data/social/accounts/search | 按关键词搜索社交平台账号 |
 | POST | /api/v1/data/social/crawl | 账号内容（Hub 账号接口） |
+| POST | /api/v1/data/social/post-comments | 按帖子获取评论 |
 | POST | /api/v1/data/social/search | Twitter · 内容搜索（Hub 独立接口） |
 | POST | /api/v1/data/social/user-info | 账号资料（Hub 账号接口） |
 | GET | /api/v1/data/source-catalog | List active governed source-catalog entries |
@@ -95,12 +96,14 @@
 | POST | /api/v1/data/youtube/channel-comments | YouTube 频道视频的评论 |
 | POST | /api/v1/data/youtube/comments | YouTube 按视频取评论 |
 | POST | /api/v1/night-all/search/crawl | 旧搜索兼容入口；平台/形状分流及微信退役边界见总览 |
+| POST | /api/v1/night-all/search/post-comments | 按帖子获取评论 |
 | POST | /api/v1/night-all/search/raw | 旧搜索兼容入口；平台/形状分流及微信退役边界见总览 |
 | POST | /api/v1/night-all/search/user-info | 旧搜索兼容入口；平台/形状分流及微信退役边界见总览 |
 | GET | /api/v1/requests/{requestId} | Read the outcome of a request owned by this consumer |
 | GET | /api/v1/requests/{requestId}/search-recovery | Read a saved Twitter v2 delivery or its linked manual retry |
 | GET | /api/v1/requests/by-idempotency-key | Find this consumer's request by its original idempotency key |
 | POST | /api/v1/search/crawl | 旧搜索兼容入口；平台/形状分流及微信退役边界见总览 |
+| POST | /api/v1/search/post-comments | 按帖子获取评论 |
 | POST | /api/v1/search/raw | 旧搜索兼容入口；平台/形状分流及微信退役边界见总览 |
 | POST | /api/v1/search/user-info | 旧搜索兼容入口；平台/形状分流及微信退役边界见总览 |
 | POST | /api/v1/tools/tokenize | Tokenize bounded Chinese or mixed-language text |
@@ -1560,6 +1563,7 @@
 | tmall | justone | /api/v1/data/ecommerce/products/search | /api/taobao/search-item-list/v1 |
 | tmall | rapidapi | /api/v1/data/ecommerce/products/search | /api/taobao/search-item-list/v1 |
 | jd | justone | /api/v1/data/ecommerce/products/search | /api/jd/search-item-list/v1 |
+| jd | rapidapi | /api/v1/data/ecommerce/products/search | /api/jd/search-item-list/v1 |
 | xiaohongshu_ec | justone | /api/v1/data/ecommerce/products/search | /api/xiaohongshu-ec/search-products/v1 |
 | douyin_ec | justone | /api/v1/data/ecommerce/products/search | /api/douyin-ec/search-item-list/v1 |
 | xianyu | justone | /api/v1/data/ecommerce/products/search | /api/xianyu/search-item-list/v1 |

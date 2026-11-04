@@ -4,8 +4,9 @@ import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 import { JustOneAdapter, JustOneRejectedError } from '../../server/adapters/justone.mjs'
 import {
-  JUSTONE_OPERATION, RAPIDAPI_TAOBAO_TMALL_HOST, normalizeJustOneProductSearchRequest, productAdapterId, productSearchProviders,
+  JUSTONE_OPERATION, RAPIDAPI_JD_HOST, RAPIDAPI_TAOBAO_TMALL_HOST, normalizeJustOneProductSearchRequest, productAdapterId, productSearchProviders,
 } from '../../server/contracts/justone.mjs'
+import { currentRouteStrategy, routeStrategies, routeStrategyLabel } from '../../src/ecommerce-route-strategies.js'
 import { EcommerceRoutingStore, ecommerceRoutingCatalog } from '../../server/external-platforms/ecommerce-routing.mjs'
 import { ExternalPlatformGateway } from '../../server/external-platforms/gateway.mjs'
 import { MemoryExternalPlatformStore } from '../../server/external-platforms/store.mjs'
@@ -18,7 +19,11 @@ import { MemoryStore } from '../../server/stores/memory-store.mjs'
 const PEPPER = 'ecommerce-supplier-routing-pepper-entropy'
 const PATH = '/api/v1/data/ecommerce/products/search'
 const fixture = JSON.parse(await readFile(new URL('../fixtures/justone/taobao-product-search-v1.success.json', import.meta.url), 'utf8'))
+const jdFixture = JSON.parse(await readFile(new URL('../fixtures/justone/jd-product-search-v1.success.json', import.meta.url), 'utf8'))
 const TAOBAO = { justone: productAdapterId('justone', 'taobao'), rapidapi: productAdapterId('rapidapi', 'taobao') }
+const JD = { justone: productAdapterId('justone', 'jd'), rapidapi: productAdapterId('rapidapi', 'jd') }
+const quotaRefusal = () => json({ message: 'You have exceeded the MONTHLY quota for Requests on your current plan, BASIC.' },
+  { status: 429, headers: { 'x-rapidapi-proxy-response': 'true' } })
 const json = (body, init = {}) => new Response(JSON.stringify(body), { ...init, headers: { 'content-type': 'application/json', ...init.headers } })
 const business = code => json({ code, message: 'private-provider-message', data: null, recordTime: '2026-10-29T08:00:00Z' })
 
@@ -34,7 +39,7 @@ function config(overrides = {}) {
 
 // Two supplier gateways over one usage store, like production. The memory
 // stores share one lease map because PostgreSQL has a single lease table.
-async function routed({ justone, rapidapi, route = null, justoneConfig = config() }) {
+async function routed({ justone, rapidapi, route = null, marketplace = 'taobao', justoneConfig = config(), rapidConfig = config() }) {
   const usageStore = new MemoryStore()
   const hub = new HubService({ store: usageStore, adapter: {}, apiKeyPepper: PEPPER })
   const tenant = await hub.createTenant({ name: 'Tenant' })
@@ -45,7 +50,7 @@ async function routed({ justone, rapidapi, route = null, justoneConfig = config(
   await usageStore.putPolicy({ tenantId: tenant.id, consumerId: consumer.id, platform: 'ecommerce', maxRequests: 1_000, windowSeconds: 3_600, maxPageSize: 100 })
   const context = await hub.authenticate(key.secret)
   const routes = new EcommerceRoutingStore()
-  if (route) await routes.update('taobao', { ...route, expectedRevision: 1, reason: 'fixture route' })
+  if (route) await routes.update(marketplace, { ...route, expectedRevision: 1, reason: 'fixture route' })
   const stores = {
     justone: new MemoryExternalPlatformStore({ usageStore, circuitFailureThreshold: justoneConfig.circuitFailureThreshold }),
     rapidapi: new MemoryExternalPlatformStore({ usageStore, providerKey: 'rapidapi', providerCircuit: 'marketplace' }),
@@ -54,7 +59,7 @@ async function routed({ justone, rapidapi, route = null, justoneConfig = config(
   const gateway = (providerKey, adapter, gatewayConfig) => new ExternalPlatformGateway({ usageStore, platformStore: stores[providerKey],
     adapter, config: gatewayConfig, providerKey, apiKeyPepper: PEPPER, reservationLeaseMs: 150_000, ecommerceRoutingStore: routes,
     logger: { warn() {}, error() {} } })
-  const gateways = { justone: gateway('justone', justone, justoneConfig), rapidapi: gateway('rapidapi', rapidapi, config()) }
+  const gateways = { justone: gateway('justone', justone, justoneConfig), rapidapi: gateway('rapidapi', rapidapi, rapidConfig) }
   gateways.justone.productSearchGateways = gateways.rapidapi.productSearchGateways = gateways
   return { usageStore, context, routes, stores, gateways }
 }
@@ -64,15 +69,19 @@ function counted(responses, seen = []) {
 }
 const justOneAdapter = (responses, seen) => new JustOneAdapter({ token: 'justone-secret-token', ...counted(responses, seen) })
 const rapidAdapter = (responses, seen) => new JustOneAdapter({ credentialResolver: async () => 'rapid-secret-key',
-  transport: { provider: 'rapidapi', host: RAPIDAPI_TAOBAO_TMALL_HOST }, ...counted(responses, seen) })
+  transport: { provider: 'rapidapi' }, ...counted(responses, seen) })
 const search = (gateway, context, idempotencyKey, body = { marketplace: 'taobao', query: '始祖鸟', deliveryMode: 'live_only' }) =>
   gateway.search(context, { body, idempotencyKey, path: PATH })
 
-test('only Taobao and Tmall have a second compatible supplier, and cursors bind the contract rather than the supplier', () => {
+test('only Taobao, Tmall and JD have a second compatible supplier, and cursors bind the contract rather than the supplier', () => {
   assert.deepEqual(productSearchProviders('taobao'), ['justone', 'rapidapi'])
-  assert.deepEqual(productSearchProviders('jd'), ['justone'])
-  assert.equal(productAdapterId('rapidapi', 'jd'), null)
-  assert.throws(() => normalizeJustOneProductSearchRequest({ marketplace: 'jd', query: 'x' }, { providerKey: 'rapidapi' }), { code: 'unsupported_product_adapter' })
+  assert.deepEqual(productSearchProviders('jd'), ['justone', 'rapidapi'])
+  assert.equal(JD.rapidapi, 'rapidapi:jd.product-search.v1')
+  for (const marketplace of ['xianyu', 'xiaohongshu_ec', 'douyin_ec']) {
+    assert.deepEqual(productSearchProviders(marketplace), ['justone'])
+    assert.equal(productAdapterId('rapidapi', marketplace), null)
+  }
+  assert.throws(() => normalizeJustOneProductSearchRequest({ marketplace: 'xianyu', query: 'x' }, { providerKey: 'rapidapi' }), { code: 'unsupported_product_adapter' })
   const first = normalizeJustOneProductSearchRequest({ marketplace: 'taobao', query: 'x' })
   const state = { version: 1, adapterId: TAOBAO.justone, marketplace: 'taobao', page: 2, scope: first.cursorScope, continuation: null }
   const next = normalizeJustOneProductSearchRequest({ marketplace: 'taobao', query: 'x', cursor: 'c' }, { providerKey: 'rapidapi', decodeCursor: () => state })
@@ -87,7 +96,8 @@ test('routes are fixed or priority with a distinct compatible backup, revisioned
   const routes = new EcommerceRoutingStore()
   const catalog = (await routes.catalog()).items
   assert.equal(catalog.find(row => row.marketplace === 'taobao').switchable, true)
-  assert.equal(catalog.find(row => row.marketplace === 'jd').switchable, false)
+  assert.equal(catalog.find(row => row.marketplace === 'jd').switchable, true)
+  assert.equal(catalog.find(row => row.marketplace === 'xianyu').switchable, false)
   assert.equal(catalog.find(row => row.marketplace === 'taobao').mode, 'fixed')
   const bad = [
     { adapterId: TAOBAO.justone, mode: 'priority', fallbackAdapterId: TAOBAO.justone },
@@ -125,8 +135,9 @@ test('the RapidAPI listing uses header authentication on its own host and treats
       ['rejected', false, 403, 'upstream_permission_denied'])
     return true
   })
-  await assert.rejects(adapter.searchProducts({ marketplace: 'jd', query: 'x' }), { code: 'unsupported_product_adapter' })
-  await assert.rejects(adapter.forwardNative('j.xianyu_search_v1', { params: { keyword: 'x' } }), /only serves product search/u)
+  await assert.rejects(adapter.searchProducts({ marketplace: 'xianyu', query: 'x' }), { code: 'unsupported_product_adapter' })
+  await assert.rejects(adapter.forwardNative('j.xianyu_search_v1', { params: { keyword: 'x' } }), /only serve product search/u)
+  assert.throws(() => new JustOneAdapter({ token: 't', transport: { provider: 'rapidapi', host: 'evil.example' } }), /reviewed RapidAPI listings/u)
 })
 
 test('priority hands a JustOne balance refusal to the RapidAPI backup inside the same request', async () => {
@@ -179,9 +190,106 @@ test('a RapidAPI primary serves the request and its failures stay on its own Tao
   assert.equal(state.stores.rapidapi.state.consecutiveFailures, 0, 'the supplier-wide RapidAPI breaker (Twitter) is untouched')
 })
 
+const jdBody = { marketplace: 'jd', query: '手机', deliveryMode: 'live_only' }
+
+test('JD on RapidAPI uses its own listing host with the JustOne path and query, and yields the same unified products', async () => {
+  const seen = [], directSeen = []
+  const options = { encodeCursor: () => 'next', decodeCursor: () => null }
+  const viaRapid = await rapidAdapter([() => json(jdFixture)], seen).searchProducts({ marketplace: 'jd', query: '手机' }, options)
+  const viaJustOne = await justOneAdapter([() => json(jdFixture)], directSeen).searchProducts({ marketplace: 'jd', query: '手机' }, options)
+  assert.equal(seen[0].url.origin, `https://${RAPIDAPI_JD_HOST}`)
+  assert.equal(seen[0].url.pathname, '/api/jd/search-item-list/v1')
+  assert.equal(seen[0].url.pathname, directSeen[0].url.pathname)
+  assert.deepEqual(Object.fromEntries(seen[0].url.searchParams), { keyword: '手机', page: '1' })
+  assert.deepEqual([seen[0].headers['x-rapidapi-host'], seen[0].headers['x-rapidapi-key']], [RAPIDAPI_JD_HOST, 'rapid-secret-key'])
+  assert.ok(viaRapid.items.length > 0)
+  const comparable = result => JSON.parse(JSON.stringify(result.publicBody.data, (key, value) => /capturedAt|cursor/iu.test(key) ? undefined : value))
+  assert.deepEqual(comparable(viaRapid), comparable(viaJustOne))
+  // Taobao keeps its own listing host on the same adapter.
+  const taobaoSeen = []
+  await rapidAdapter([() => json(fixture)], taobaoSeen).searchProducts({ marketplace: 'tmall', query: '始祖鸟' }, options)
+  assert.equal(taobaoSeen[0].url.origin, `https://${RAPIDAPI_TAOBAO_TMALL_HOST}`)
+})
+
+test('JD priority RapidAPI then JustOne: a RapidAPI quota refusal is handed to JustOne inside the same request', async () => {
+  const justSeen = [], rapidSeen = []
+  const state = await routed({ marketplace: 'jd', justone: justOneAdapter([() => json(jdFixture)], justSeen),
+    rapidapi: rapidAdapter([quotaRefusal], rapidSeen), route: { adapterId: JD.rapidapi, mode: 'priority', fallbackAdapterId: JD.justone } })
+  const result = await search(state.gateways.justone, state.context, 'jd-rapid-first-0001', jdBody)
+  assert.equal(result.status, 200)
+  assert.ok(result.body.data.items.length > 0)
+  assert.doesNotMatch(JSON.stringify(result.body), /rapidapi|justone/iu)
+  const [primary] = state.stores.rapidapi.calls.values(), [backup] = state.stores.justone.calls.values()
+  assert.deepEqual([primary.outcome, primary.billed, primary.errorCode, primary.callOrdinal], ['rejected', false, 'upstream_rate_limited', 0])
+  assert.deepEqual([backup.outcome, backup.callOrdinal, backup.usageRequestId], ['succeeded', 1, primary.usageRequestId])
+  assert.equal(rapidSeen[0].url.origin, `https://${RAPIDAPI_JD_HOST}`)
+  assert.equal((await state.stores.rapidapi.contractCircuitState('rapidapi', 'jd')).consecutiveFailures, 1)
+  assert.equal(await state.stores.rapidapi.contractCircuitState('rapidapi', 'taobao'), null, 'the JD listing never trips the Taobao listing')
+  assert.equal(state.stores.rapidapi.state.consecutiveFailures, 0, 'the supplier-wide RapidAPI breaker (Twitter) is untouched')
+  assert.equal(state.stores.justone.leases.size, 0)
+  assert.deepEqual([justSeen.length, rapidSeen.length], [1, 1])
+})
+
+test('JD priority JustOne then RapidAPI: a JustOne balance refusal is handed to the JD listing', async () => {
+  const rapidSeen = []
+  const state = await routed({ marketplace: 'jd', justone: justOneAdapter([() => business(601)]),
+    rapidapi: rapidAdapter([() => json(jdFixture)], rapidSeen), route: { adapterId: JD.justone, mode: 'priority', fallbackAdapterId: JD.rapidapi } })
+  const result = await search(state.gateways.justone, state.context, 'jd-justone-first-0001', jdBody)
+  assert.equal(result.status, 200)
+  const [primary] = state.stores.justone.calls.values(), [backup] = state.stores.rapidapi.calls.values()
+  assert.deepEqual([primary.outcome, primary.billed, primary.businessCode, primary.callOrdinal], ['rejected', false, 601, 0])
+  assert.deepEqual([backup.outcome, backup.callOrdinal], ['succeeded', 1])
+  assert.equal(rapidSeen[0].url.origin, `https://${RAPIDAPI_JD_HOST}`)
+})
+
+test('an unpriced JD listing hands a RapidAPI-first route to JustOne before dispatch; a fixed RapidAPI route refuses without a call', async () => {
+  const unpriced = config({ billing: { ...config().billing, unitCostMinorByEndpoint: { 'taobao-tmall.product-search.v1': 15 } } })
+  const rapidSeen = []
+  const state = await routed({ marketplace: 'jd', justone: justOneAdapter([() => json(jdFixture)]), rapidapi: rapidAdapter([], rapidSeen),
+    rapidConfig: unpriced, route: { adapterId: JD.rapidapi, mode: 'priority', fallbackAdapterId: JD.justone } })
+  assert.equal((await search(state.gateways.justone, state.context, 'jd-unpriced-0001', jdBody)).status, 200)
+  assert.deepEqual([rapidSeen.length, state.stores.rapidapi.calls.size], [0, 0])
+  assert.equal([...state.stores.justone.calls.values()][0].outcome, 'succeeded')
+  assert.equal(state.stores.justone.leases.size, 0)
+  assert.equal(state.gateways.rapidapi.active, 0, 'the RapidAPI concurrency slot was returned before the hand-off')
+
+  const fixed = await routed({ marketplace: 'jd', justone: justOneAdapter([]), rapidapi: rapidAdapter([]), rapidConfig: unpriced,
+    route: { adapterId: JD.rapidapi, mode: 'fixed' } })
+  await assert.rejects(search(fixed.gateways.justone, fixed.context, 'jd-unpriced-fixed-0001', jdBody),
+    { status: 503, code: 'external_platform_cost_control_unavailable' })
+  assert.deepEqual([fixed.stores.justone.calls.size, fixed.stores.rapidapi.calls.size], [0, 0])
+})
+
+test('JD offers four route strategies, both priority orders save, and the catalog names the JD listing', async () => {
+  const routes = new EcommerceRoutingStore()
+  const items = (await routes.catalog()).items
+  const jd = items.find(row => row.marketplace === 'jd')
+  assert.deepEqual(jd.candidates.map(row => [row.provider, row.channel]),
+    [['justone', 'JustOne 直连 · api.justoneapi.com'], ['rapidapi', `RapidAPI · ${RAPIDAPI_JD_HOST}`]])
+  assert.equal(items.find(row => row.marketplace === 'tmall').candidates[1].channel, `RapidAPI · ${RAPIDAPI_TAOBAO_TMALL_HOST}`)
+  const strategies = routeStrategies(jd.candidates)
+  assert.deepEqual(strategies.map(row => row.label),
+    ['固定 JustOne', '固定 RapidAPI', '优先 JustOne，失败切 RapidAPI', '优先 RapidAPI，失败切 JustOne'])
+  assert.equal(currentRouteStrategy(jd).value, `fixed:${JD.justone}`)
+  let revision = jd.revision
+  for (const strategy of strategies.slice(1)) {
+    revision = (await routes.update('jd', { mode: strategy.mode, adapterId: strategy.adapterId,
+      fallbackAdapterId: strategy.fallbackAdapterId, expectedRevision: revision, reason: strategy.label })).revision
+    const row = ecommerceRoutingCatalog(await routes.list()).items.find(item => item.marketplace === 'jd')
+    assert.equal(currentRouteStrategy(row).value, strategy.value)
+    assert.equal(routeStrategyLabel(row), strategy.label)
+  }
+  assert.deepEqual(await routes.selection('jd'), { marketplace: 'jd', mode: 'priority', revision: 4,
+    primaryAdapterId: JD.rapidapi, primaryProvider: 'rapidapi', fallbackAdapterId: JD.justone, fallbackProvider: 'justone' })
+  assert.deepEqual(routeStrategies(items.find(row => row.marketplace === 'xianyu').candidates).map(row => row.label), ['固定 JustOne'])
+  assert.equal(currentRouteStrategy({ ...jd, configurationValid: false }), null)
+})
+
 test('ecommerce supplier operations and TikHub commerce aliases are registered without changing social keys', () => {
-  assert.ok(EXTERNAL_PLATFORM_OPERATION_CATALOG.rapidapi.some(row => row.operationKey === JUSTONE_OPERATION
-    && row.endpointKeys.includes('taobao-tmall.product-search.v1')))
+  const rapidOperation = EXTERNAL_PLATFORM_OPERATION_CATALOG.rapidapi.find(row => row.operationKey === JUSTONE_OPERATION)
+  assert.deepEqual(rapidOperation.endpointKeys, ['taobao-tmall.product-search.v1'])
+  // JD is priced separately, so an installed Taobao-only price book stays valid.
+  assert.deepEqual(rapidOperation.optionalEndpointKeys, ['jd.product-search.v1'])
   assert.equal(TIKHUB_COMMERCE_OPERATIONS.length, 17)
   for (const operation of TIKHUB_COMMERCE_OPERATIONS) {
     const row = NATIVE_FORWARDING_ENDPOINTS.find(item => item.operation === operation)

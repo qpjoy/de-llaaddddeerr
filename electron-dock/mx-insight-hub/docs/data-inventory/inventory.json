@@ -5,11 +5,11 @@
   "evidence": [
     {
       "path": "server/app.mjs",
-      "sha256": "c23f8787bf01e8947a1361c2516f54d2ff0c7f40eebcf084066bbeb2b9ca7300"
+      "sha256": "9c603a5c5f88c5bad8e8da1af72141ac9e02f148edcb10af35467a2b9af4c1de"
     },
     {
       "path": "server/public-docs.mjs",
-      "sha256": "fb0cb603fea9b890a0caf58b7911d9ecd935c5c20fba52875f6835cd35d31f54"
+      "sha256": "97db32316b9fd3e9e432134d3a9cda0e14ed7e02f663ec9b87c7aeccc7e957b7"
     },
     {
       "path": "server/contracts/native-forwarding.mjs",
@@ -41,7 +41,7 @@
     },
     {
       "path": "server/contracts/justone.mjs",
-      "sha256": "278cec769c40b51f9b7f34796124ecd035bab1aea3ca76cfc9046ee759b89341"
+      "sha256": "ddbbd1ddd1041390f09be83f0da51a6e45b5b9fbd20910d31abc16edc8ed0bde"
     },
     {
       "path": "server/contracts/justone-resources.mjs",
@@ -49,7 +49,7 @@
     },
     {
       "path": "server/data/strategy-search-catalog.mjs",
-      "sha256": "3f19b1d76b745533d49d70c5d77b3c0d6650b8ca11dad050e835557ff1830d27"
+      "sha256": "be3d60893a49d7e7c4da1515bc1557a63c9e1930af198128588055289388e7df"
     },
     {
       "path": "server/data/source-catalog-seed.mjs",
@@ -183,16 +183,16 @@
       "集团信息": 4
     },
     "ecommerceSearchMarketplaces": 6,
-    "ecommerceSearchSupplierMappings": 8,
+    "ecommerceSearchSupplierMappings": 9,
     "ecommerceResourcePaths": 4,
     "ecommerceResourceVersions": 11,
     "webSearchProviders": 8,
     "crawlerSeedLeaves": 13,
     "fixedIngestionInputs": 19,
     "nightAllAOperations": 18,
-    "publicMethodPathEntries": 1467,
+    "publicMethodPathEntries": 1470,
     "publicEntriesByFamily": {
-      "business": 110,
+      "business": 113,
       "enterprise": 274,
       "native": 1083
     }
@@ -20226,6 +20226,13 @@
       "upstreamPath": "/api/jd/search-item-list/v1"
     },
     {
+      "marketplace": "jd",
+      "provider": "rapidapi",
+      "hubPath": "/api/v1/data/ecommerce/products/search",
+      "upstreamMethod": "GET",
+      "upstreamPath": "/api/jd/search-item-list/v1"
+    },
+    {
       "marketplace": "xiaohongshu_ec",
       "provider": "justone",
       "hubPath": "/api/v1/data/ecommerce/products/search",
@@ -20842,16 +20849,18 @@
             "migrationStatus": "hub_native",
             "providers": [
               "rapidapi",
-              "justone"
+              "justone",
+              "night-all-a"
             ],
             "allowedModes": [
               "auto",
               "rapidapi",
               "justone",
+              "selfhosted",
               "paused"
             ],
             "policy": null,
-            "routeSummary": "内容搜索的 data/search 与 raw 入口由 Hub 执行。auto 使用 RapidAPI 月度额度，额度不可用时按既有规则转 JustOne；标准搜索先消费已采购余量，再有界补齐当前页，raw 保持既有分页。游标绑定供应商，未知结果不触发切换。"
+            "routeSummary": "内容搜索的 data/search 与 raw 入口由 Hub 执行。auto 使用 RapidAPI 月度额度，额度不可用时按既有规则转 JustOne；自建模式只派发到 Night-All-A（100.127.0.1:8100），全集群同时在途与每分钟启动次数按管理页设置限制，不转付费供应商。标准搜索先消费已采购余量，再有界补齐当前页，raw 保持既有分页。游标绑定供应商，未知结果不触发切换。"
           },
           {
             "platform": "instagram",
@@ -21021,13 +21030,18 @@
           {
             "platform": "facebook",
             "label": "Facebook",
-            "editable": false,
+            "editable": true,
             "migrationStatus": "hub_native",
             "providers": [
               "justone"
             ],
             "readOnlyReason": "Hub 账号接口按已审核的平台及活动合同执行固定路由，当前未提供可互换的供应商策略。关键词搜索的供应商配置不会改变账号内容或资料路由；操作状态、凭据和准入仍独立检查。",
-            "routeSummary": "POST /api/v1/data/social/crawl 由 Hub 执行账号解析、字段适配及托管分页，不转交 Night-All。保留已声明的账号参数别名及 raw_info/raw_data 字符串，并提供 items、page/pageInfo；使用新接口返回的游标。旧 /search 与 /night-all/search 入口仍经 Night-All，供下游逐步切换。目录表示已实现合同，不代表当前线上已部署或供应商已验证可用。"
+            "routeSummary": "POST /api/v1/data/social/crawl 由 Hub 执行账号解析、字段适配及托管分页，不转交 Night-All。保留已声明的账号参数别名及 raw_info/raw_data 字符串，并提供 items、page/pageInfo；使用新接口返回的游标。旧 /search 与 /night-all/search 入口仍经 Night-All，供下游逐步切换。本业务启停同时控制新接口与旧兼容入口的新采购；其他业务独立，账号内容所需的解析跟随账号内容状态。已保存结果与已采购余量仍可交付。目录表示已实现合同，不代表当前线上已部署或供应商已验证可用。",
+            "allowedModes": [
+              "fixed",
+              "paused"
+            ],
+            "policy": null
           },
           {
             "platform": "instagram",
@@ -21176,13 +21190,18 @@
           {
             "platform": "facebook",
             "label": "Facebook",
-            "editable": false,
+            "editable": true,
             "migrationStatus": "hub_native",
             "providers": [
               "justone"
             ],
             "readOnlyReason": "Hub 账号接口按已审核的平台及活动合同执行固定路由，当前未提供可互换的供应商策略。关键词搜索的供应商配置不会改变账号内容或资料路由；操作状态、凭据和准入仍独立检查。",
-            "routeSummary": "POST /api/v1/data/social/user-info 由 Hub 执行账号解析、字段适配及托管分页，不转交 Night-All。保留已声明的账号参数别名及 raw_info/raw_data 字符串，并提供 items、page/pageInfo；使用新接口返回的游标。旧 /search 与 /night-all/search 入口仍经 Night-All，供下游逐步切换。目录表示已实现合同，不代表当前线上已部署或供应商已验证可用。"
+            "routeSummary": "POST /api/v1/data/social/user-info 由 Hub 执行账号解析、字段适配及托管分页，不转交 Night-All。保留已声明的账号参数别名及 raw_info/raw_data 字符串，并提供 items、page/pageInfo；使用新接口返回的游标。旧 /search 与 /night-all/search 入口仍经 Night-All，供下游逐步切换。本业务启停同时控制新接口与旧兼容入口的新采购；其他业务独立，账号内容所需的解析跟随账号内容状态。已保存结果与已采购余量仍可交付。目录表示已实现合同，不代表当前线上已部署或供应商已验证可用。",
+            "allowedModes": [
+              "fixed",
+              "paused"
+            ],
+            "policy": null
           },
           {
             "platform": "instagram",
@@ -21304,6 +21323,270 @@
             ],
             "readOnlyReason": "Hub 账号接口按已审核的平台及活动合同执行固定路由，当前未提供可互换的供应商策略。关键词搜索的供应商配置不会改变账号内容或资料路由；操作状态、凭据和准入仍独立检查。",
             "routeSummary": "POST /api/v1/data/social/user-info 由 Hub 执行账号解析、字段适配及托管分页，不转交 Night-All。保留已声明的账号参数别名及 raw_info/raw_data 字符串，并提供 items、page/pageInfo；使用新接口返回的游标。旧兼容入口未声明此平台与业务组合，不能据此认为旧入口也新增支持。目录表示已实现合同，不代表当前线上已部署或供应商已验证可用。"
+          }
+        ]
+      },
+      {
+        "id": "post-detail",
+        "label": "帖子详情",
+        "paths": [
+          "/api/v1/search/post-detail",
+          "/api/v1/night-all/search/post-detail"
+        ],
+        "description": "按帖子 ID、contentId 或 URL 获取单篇完整正文、发布时间、作者和媒体。小红书已由 /api/v1/data/post 提供 Hub-native 合同；此兼容入口服务其他平台的历史请求，供应商与凭据由 Hub/Night-All 管理。",
+        "platforms": [
+          {
+            "platform": "douyin",
+            "label": "抖音",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。"
+          },
+          {
+            "platform": "weibo",
+            "label": "微博",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。"
+          },
+          {
+            "platform": "zhihu",
+            "label": "知乎",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。"
+          },
+          {
+            "platform": "xiaohongshu",
+            "label": "小红书",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "小红书详情使用 Hub /api/v1/data/post；此旧入口保留历史兼容，不改变现有登录、联网或已签发结果。"
+          },
+          {
+            "platform": "twitter",
+            "label": "Twitter / X",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "rapidapi"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。"
+          },
+          {
+            "platform": "reddit",
+            "label": "Reddit",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。"
+          },
+          {
+            "platform": "tiktok",
+            "label": "TikTok",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。"
+          },
+          {
+            "platform": "instagram",
+            "label": "Instagram",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。"
+          },
+          {
+            "platform": "facebook",
+            "label": "Facebook",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "justone"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。"
+          },
+          {
+            "platform": "linkedin",
+            "label": "LinkedIn",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。"
+          },
+          {
+            "platform": "youtube",
+            "label": "YouTube",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。"
+          },
+          {
+            "platform": "xianyu",
+            "label": "闲鱼",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子详情请求并按原合同转交 Night-All；返回保持完整正文、发布时间、作者、图片、视频及封面等 raw_data 字段。"
+          }
+        ]
+      },
+      {
+        "id": "post-comments",
+        "label": "帖子评论",
+        "paths": [
+          "/api/v1/search/post-comments",
+          "/api/v1/night-all/search/post-comments"
+        ],
+        "description": "按帖子 ID、contentId 或 URL 获取单篇帖子的评论列表；支持 cursor/params 续页，单页最多 100 条。商品评论、搜索附带评论和频道评论接口不属于此合同。",
+        "platforms": [
+          {
+            "platform": "douyin",
+            "label": "抖音",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子评论请求并按原合同转交 Night-All；返回评论 ID、正文 ID、评论正文、作者、发布时间、互动量及明确分页状态。"
+          },
+          {
+            "platform": "weibo",
+            "label": "微博",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子评论请求并按原合同转交 Night-All；返回评论 ID、正文 ID、评论正文、作者、发布时间、互动量及明确分页状态。"
+          },
+          {
+            "platform": "zhihu",
+            "label": "知乎",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子评论请求并按原合同转交 Night-All；返回评论 ID、正文 ID、评论正文、作者、发布时间、互动量及明确分页状态。"
+          },
+          {
+            "platform": "xiaohongshu",
+            "label": "小红书",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子评论请求并按原合同转交 Night-All；返回评论 ID、正文 ID、评论正文、作者、发布时间、互动量及明确分页状态。"
+          },
+          {
+            "platform": "twitter",
+            "label": "Twitter / X",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "rapidapi"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子评论请求并按原合同转交 Night-All；返回评论 ID、正文 ID、评论正文、作者、发布时间、互动量及明确分页状态。"
+          },
+          {
+            "platform": "reddit",
+            "label": "Reddit",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子评论请求并按原合同转交 Night-All；返回评论 ID、正文 ID、评论正文、作者、发布时间、互动量及明确分页状态。"
+          },
+          {
+            "platform": "tiktok",
+            "label": "TikTok",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子评论请求并按原合同转交 Night-All；返回评论 ID、正文 ID、评论正文、作者、发布时间、互动量及明确分页状态。"
+          },
+          {
+            "platform": "instagram",
+            "label": "Instagram",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子评论请求并按原合同转交 Night-All；返回评论 ID、正文 ID、评论正文、作者、发布时间、互动量及明确分页状态。"
+          },
+          {
+            "platform": "linkedin",
+            "label": "LinkedIn",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子评论请求并按原合同转交 Night-All；返回评论 ID、正文 ID、评论正文、作者、发布时间、互动量及明确分页状态。"
+          },
+          {
+            "platform": "youtube",
+            "label": "YouTube",
+            "editable": false,
+            "migrationStatus": "night_all",
+            "providers": [
+              "tikhub"
+            ],
+            "readOnlyReason": "此业务接口的兼容请求仍由 Night-All 选路；Hub 尚未接管该组合的供应商切换。供应商目录中的其他接口不能直接替换现有请求、响应或分页合同。",
+            "routeSummary": "Hub 接收旧帖子评论请求并按原合同转交 Night-All；返回评论 ID、正文 ID、评论正文、作者、发布时间、互动量及明确分页状态。"
           }
         ]
       }
@@ -33183,6 +33466,13 @@
     },
     {
       "hubMethod": "POST",
+      "hubPath": "/api/v1/data/social/post-comments",
+      "name": "按帖子获取评论",
+      "family": "business",
+      "evidence": "server/public-docs.mjs (PUBLIC_OPENAPI_DOCUMENT)"
+    },
+    {
+      "hubMethod": "POST",
       "hubPath": "/api/v1/data/social/search",
       "name": "Twitter · 内容搜索（Hub 独立接口）",
       "family": "business",
@@ -33638,6 +33928,13 @@
     },
     {
       "hubMethod": "POST",
+      "hubPath": "/api/v1/night-all/search/post-comments",
+      "name": "按帖子获取评论",
+      "family": "business",
+      "evidence": "server/public-docs.mjs (PUBLIC_OPENAPI_DOCUMENT)"
+    },
+    {
+      "hubMethod": "POST",
       "hubPath": "/api/v1/night-all/search/raw",
       "name": "旧搜索兼容入口；平台/形状分流及微信退役边界见总览",
       "family": "business",
@@ -33675,6 +33972,13 @@
       "hubMethod": "POST",
       "hubPath": "/api/v1/search/crawl",
       "name": "旧搜索兼容入口；平台/形状分流及微信退役边界见总览",
+      "family": "business",
+      "evidence": "server/public-docs.mjs (PUBLIC_OPENAPI_DOCUMENT)"
+    },
+    {
+      "hubMethod": "POST",
+      "hubPath": "/api/v1/search/post-comments",
+      "name": "按帖子获取评论",
       "family": "business",
       "evidence": "server/public-docs.mjs (PUBLIC_OPENAPI_DOCUMENT)"
     },

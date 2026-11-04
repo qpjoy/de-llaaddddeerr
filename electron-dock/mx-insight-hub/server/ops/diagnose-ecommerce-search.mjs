@@ -83,7 +83,7 @@ export async function diagnoseEcommerceSearch(pool, hours = 24) {
         outcome: allowed(row.outcome, OUTCOMES), httpStatus: http(row.http_status), businessCode: integer(row.business_code),
         errorCode: code(row.error_code), billed: bool(row.billed), calls: integer(row.calls), lastStartedAt: time(row.last_started_at) })),
       recentCallsTruncated: calls.length >= 60,
-      howToRead: 'businessCode 601 / errorCode upstream_balance_exhausted on justone means the JustOne account has no balance; 100/600 credential or permission; 302/303 rate or daily quota. rapidapi 401/403 means the RapidAPI key is invalid or not subscribed to the Taobao/Tmall listing; 429 its plan limit.' }
+      howToRead: 'businessCode 601 / errorCode upstream_balance_exhausted on justone means the JustOne account has no balance; 100/600 credential or permission; 302/303 rate or daily quota. rapidapi 401/403 means the RapidAPI key is invalid or not subscribed to the listing of that marketplace (taobao/tmall: taobao-tmall-all-api1, jd: jd-com-api); 429 its plan limit (both listings use hard monthly request limits).' }
   } catch (error) { throw failure(error) }
   finally {
     if (client) {
